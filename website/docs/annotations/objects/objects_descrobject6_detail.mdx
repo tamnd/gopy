@@ -1,0 +1,98 @@
+---
+title: Objects/descrobject.c (part 6)
+description: "Objects/descrobject.c part 6: classmethod_descriptor, staticmethod_descriptor, member_descriptor, getset_descriptor."
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/descrobject.c" />
+
+This annotation covers built-in descriptor types. See `objects_descrobject5_detail` for `wrapper_descriptor`, `method_wrapper`, `slot_wrapper`, and `getset_descriptor` basics.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `classmethod_descriptor` | `classmethod` built-in: binds to the class, not instance |
+| 81-180 | `staticmethod_descriptor` | `staticmethod` built-in: no binding |
+| 181-300 | `member_descriptor` | Access C-level struct members (e.g., `int.numerator`) |
+| 301-420 | `getset_descriptor` | C `PyGetSetDef`: getter/setter pair |
+| 421-500 | `__doc__` on descriptors | Per-descriptor docstring storage |
+
+## Reading
+
+### `classmethod_descriptor`
+
+```c
+// CPython: Objects/descrobject.c:1380 classmethod_get
+static PyObject *
+classmethod_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    classmethodobject *cm = (classmethodobject *)self;
+    if (type == NULL) type = (PyObject *)Py_TYPE(obj);
+    /* Return a bound method with the class as first arg */
+    return PyMethod_New(cm->cm_callable, type);
+}
+```
+
+`@classmethod` stores the original function in `cm_callable`. When accessed via `__get__`, it returns a `method` bound to the class (not the instance). `MyClass.my_classmethod` and `obj.my_classmethod` both bind to `MyClass`.
+
+### `staticmethod_descriptor`
+
+```c
+// CPython: Objects/descrobject.c:1460 staticmethod_get
+static PyObject *
+staticmethod_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    /* Return the original callable unchanged — no binding. */
+    staticmethodobject *sm = (staticmethodobject *)self;
+    return Py_NewRef(sm->sm_callable);
+}
+```
+
+`@staticmethod` is a no-op wrapper: `__get__` returns the original function directly. The descriptor protocol is called for attribute lookup, but no `self` or `cls` is prepended.
+
+### `member_descriptor`
+
+```c
+// CPython: Objects/descrobject.c:1580 member_get
+static PyObject *
+member_get(PyMemberDescrObject *descr, PyObject *obj, PyObject *type)
+{
+    /* Read a C struct member at a fixed offset from the object pointer */
+    char *addr = (char *)obj + descr->d_member->offset;
+    switch (descr->d_member->type) {
+    case T_INT:    return PyLong_FromLong(*(int *)addr);
+    case T_DOUBLE: return PyFloat_FromDouble(*(double *)addr);
+    case T_OBJECT: return Py_NewRef(*(PyObject **)addr);
+    ...
+    }
+}
+```
+
+`(1.5).real` and `(1.5).imag` are `member_descriptor` attributes reading the `ob_fval` (or the real/imag parts of `PyComplexObject.cval`) at a fixed C struct offset. This avoids any hash lookup.
+
+### `getset_descriptor`
+
+```c
+// CPython: Objects/descrobject.c:1680 getset_get
+static PyObject *
+getset_get(PyGetSetDescrObject *descr, PyObject *obj, PyObject *type)
+{
+    if (descr->d_getset->get == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "unreadable attribute");
+        return NULL;
+    }
+    return descr->d_getset->get(obj, descr->d_getset->closure);
+}
+```
+
+`getset_descriptor` wraps a `PyGetSetDef` (a C struct with `get` and `set` function pointers). Used for computed attributes: `list.__len__`, `function.__code__`, `type.__mro__`. The `closure` pointer lets the getter be parameterized.
+
+## gopy notes
+
+`classmethod` is `objects.ClassMethod` in `objects/method.go`. `staticmethod` is `objects.StaticMethod`. `member_descriptor` reads Go struct fields via `unsafe.Pointer` at a fixed offset. `getset_descriptor` wraps a Go function pair `(getter, setter func(obj) Object)`.

@@ -1,0 +1,105 @@
+---
+title: Objects/typeobject.c (part 5)
+description: "Objects/typeobject.c part 5: type.__subclasshook__, type.__instancecheck__, type.__subclasscheck__, ABCMeta integration."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+This annotation covers `isinstance` and `issubclass` internals. See `objects_typeobject4_detail` for `__init_subclass__`, `__set_name__`, and `__slots__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `type.__instancecheck__` | `isinstance(obj, cls)` default implementation |
+| 81-180 | `type.__subclasscheck__` | `issubclass(sub, cls)` default implementation |
+| 181-300 | Abstract class protocol | Check `__abstractmethods__` before instantiation |
+| 301-420 | `PyObject_IsInstance` | C API that respects `__instancecheck__` |
+| 421-500 | MRO-based subclass check | Scan `type(obj).__mro__` for `cls` |
+
+## Reading
+
+### `type.__instancecheck__`
+
+```c
+// CPython: Objects/typeobject.c:3880 type___instancecheck___impl
+static PyObject *
+type___instancecheck___impl(PyTypeObject *self, PyObject *instance)
+{
+    return PyBool_FromLong(_PyObject_RealIsInstance(instance, (PyObject *)self));
+}
+
+static int
+_PyObject_RealIsInstance(PyObject *inst, PyObject *cls)
+{
+    /* Fast path: exact type match */
+    if (Py_IS_TYPE(inst, (PyTypeObject *)cls)) return 1;
+    /* Walk the MRO */
+    PyObject *mro = ((PyTypeObject *)Py_TYPE(inst))->tp_mro;
+    for (int i = 0; i < PyTuple_GET_SIZE(mro); i++) {
+        if (PyTuple_GET_ITEM(mro, i) == cls) return 1;
+    }
+    return 0;
+}
+```
+
+The default `__instancecheck__` does an MRO walk. `isinstance(True, int)` returns `True` because `bool.__mro__ = [bool, int, object]`. ABCMeta overrides `__instancecheck__` to also check the virtual subclass registry.
+
+### Abstract class protocol
+
+```c
+// CPython: Objects/typeobject.c:4020 object_new
+static PyObject *
+object_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    /* Refuse to instantiate abstract classes. */
+    if (type->tp_flags & Py_TPFLAGS_IS_ABSTRACT) {
+        PyObject *abstract_methods = type->tp_dict; /* __abstractmethods__ */
+        ...
+        if (PySet_GET_SIZE(abstract_methods) > 0) {
+            PyErr_Format(PyExc_TypeError,
+                "Can't instantiate abstract class %s "
+                "with abstract method%s %U",
+                type->tp_name,
+                PySet_GET_SIZE(abstract_methods) > 1 ? "s" : "",
+                joined);
+            return NULL;
+        }
+    }
+    ...
+}
+```
+
+`class Foo(ABC): @abstractmethod def bar(self): pass` sets `Foo.__abstractmethods__ = frozenset({'bar'})`. Attempting `Foo()` raises `TypeError`. Once all abstract methods are overridden in a subclass, `__abstractmethods__` becomes empty.
+
+### `PyObject_IsInstance`
+
+```c
+// CPython: Objects/typeobject.c:4200 PyObject_IsInstance
+int
+PyObject_IsInstance(PyObject *inst, PyObject *cls)
+{
+    /* Check for __instancecheck__ override first. */
+    PyObject *checker = _PyObject_LookupSpecial(cls, &_Py_ID(__instancecheck__));
+    if (checker != NULL) {
+        PyObject *res = PyObject_CallOneArg(checker, inst);
+        int ok = PyObject_IsTrue(res);
+        Py_DECREF(res);
+        return ok;
+    }
+    /* Fall back to MRO walk */
+    return _PyObject_RealIsInstance(inst, cls);
+}
+```
+
+`isinstance` first checks for `__instancecheck__` on the class (or metaclass). This allows ABCMeta, `Union`, and custom metaclasses to override the behavior.
+
+## gopy notes
+
+`type.__instancecheck__` is `objects.TypeInstanceCheck` in `objects/type.go`. `PyObject_IsInstance` is `objects.IsInstance`, which checks for `__instancecheck__` via `objects.LookupSpecial` then falls back to MRO scan. Abstract class enforcement is in `objects.ObjectNew`.

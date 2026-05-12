@@ -1,0 +1,96 @@
+---
+title: Lib/pathlib/ (part 3)
+description: "Lib/pathlib/ part 3: Path.glob, Path.rglob, Path.walk, Path.stat, Path.chmod, Path.symlink_to."
+cpython_path: Lib/pathlib/_local.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pathlib/_local.py" />
+
+This annotation covers filesystem traversal and metadata. See `lib_pathlib2_detail` for `Path.open`, `Path.read_text`, `Path.write_bytes`, `Path.mkdir`, and `Path.unlink`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Path.glob` | Match files using a shell glob pattern |
+| 101-220 | `Path.rglob` | Recursive glob: `**` prefix |
+| 221-360 | `Path.walk` | `os.walk`-style bottom-up/top-down traversal |
+| 361-480 | `Path.stat` / `Path.lstat` | Get file metadata |
+| 481-600 | `Path.chmod` / `Path.symlink_to` | Permissions and symlink creation |
+
+## Reading
+
+### `Path.glob`
+
+```python
+# CPython: Lib/pathlib/_local.py:680 Path.glob
+def glob(self, pattern, *, case_sensitive=None, recurse_symlinks=False):
+    """Yield all matching paths."""
+    if not pattern:
+        raise ValueError("Unacceptable pattern: {!r}".format(pattern))
+    drv, root, pattern_parts = self._flavour.parse_parts((pattern,))
+    if not pattern_parts:
+        raise ValueError("Unacceptable pattern: {!r}".format(pattern))
+    raw = pattern_parts[-1]
+    if raw == '**':
+        raise ValueError("Invalid pattern: '**' can only be a path component")
+    selector = _make_selector(tuple(pattern_parts), self._flavour, case_sensitive)
+    for p in selector.select_from(self):
+        yield p
+```
+
+`path.glob('*.py')` uses a `_WildcardSelector` that calls `os.scandir`. The `**` pattern uses `_RecursiveWildcardSelector`. `case_sensitive` controls whether the comparison is case-folded.
+
+### `Path.walk`
+
+```python
+# CPython: Lib/pathlib/_local.py:820 Path.walk
+def walk(self, top_down=True, on_error=None, follow_symlinks=False):
+    """Walk directory tree. Yields (dirpath, dirnames, filenames)."""
+    paths = [self]
+    while paths:
+        path = paths.pop()
+        if isinstance(path, tuple):
+            yield path
+            continue
+        try:
+            with os.scandir(path) as scandir_it:
+                dirnames = []
+                filenames = []
+                for entry in scandir_it:
+                    if entry.is_dir(follow_symlinks=follow_symlinks):
+                        dirnames.append(entry.name)
+                    else:
+                        filenames.append(entry.name)
+        except OSError as e:
+            if on_error is not None: on_error(e)
+            continue
+        if top_down:
+            yield path, dirnames, filenames
+            paths += [path / d for d in reversed(dirnames)]
+        else:
+            paths += [(path, dirnames, filenames)]
+            paths += [path / d for d in reversed(dirnames)]
+```
+
+`Path.walk` uses an explicit stack instead of recursion to avoid `RecursionError` for deeply nested directories. The `top_down=False` mode defers the yield until after children are processed.
+
+### `Path.stat`
+
+```python
+# CPython: Lib/pathlib/_local.py:420 Path.stat
+def stat(self, *, follow_symlinks=True):
+    """Return os.stat_result for this path."""
+    return os.stat(self, follow_symlinks=follow_symlinks)
+```
+
+`p.stat().st_size` returns the file size. `p.lstat()` calls `os.stat(follow_symlinks=False)` to inspect the symlink itself. The returned `os.stat_result` has `.st_mode`, `.st_size`, `.st_mtime`, etc.
+
+## gopy notes
+
+`Path.glob` is `module/pathlib.Path.Glob` in `module/pathlib/module.go`. Pattern matching uses Go's `path/filepath.Match`. `Path.rglob` uses `filepath.WalkDir`. `Path.walk` uses an explicit stack with `os.ReadDir`. `Path.stat` calls `os.Stat` or `os.Lstat`.

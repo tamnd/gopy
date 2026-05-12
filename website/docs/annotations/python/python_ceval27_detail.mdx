@@ -1,0 +1,89 @@
+---
+title: Python/ceval.c (part 27)
+description: "Python/ceval.c part 27: IMPORT_NAME, IMPORT_FROM, IMPORT_STAR, __import__ protocol, importlib bootstrap."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers import opcodes. See `python_ceval26_detail` for function construction opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `IMPORT_NAME` | Execute `import foo.bar` via `__import__` |
+| 81-180 | `IMPORT_FROM` | `from foo import bar` — attribute access on module |
+| 181-280 | `IMPORT_STAR` | `from foo import *` — copy to local namespace |
+| 281-420 | `__import__` protocol | Entry point for the import machinery |
+| 421-500 | `LOAD_BUILD_CLASS` | `class` statement: load `__build_class__` |
+
+## Reading
+
+### `IMPORT_NAME`
+
+```c
+// CPython: Python/ceval.c:5380 IMPORT_NAME
+inst(IMPORT_NAME, (fromlist, level -- res)) {
+    PyObject *name = GETITEM(names, oparg);
+    PyObject *import_func = _PyDict_GetItemWithError(f->f_builtins, &_Py_ID(__import__));
+    /* __import__(name, globals, locals, fromlist, level) */
+    res = PyObject_CallFunctionObjArgs(import_func,
+                                       name, f->f_globals, f->f_locals,
+                                       fromlist, level, NULL);
+}
+```
+
+`import os` compiles to `LOAD_CONST 0` (level) + `LOAD_CONST None` (fromlist) + `IMPORT_NAME 'os'`. The `__import__` function looks up `sys.modules` first (fast path), then calls `importlib._bootstrap._find_and_load`.
+
+### `IMPORT_FROM`
+
+```c
+// CPython: Python/ceval.c:5460 IMPORT_FROM
+inst(IMPORT_FROM, (from -- from, res)) {
+    PyObject *name = GETITEM(names, oparg);
+    /* Try module's __dict__ first */
+    res = PyObject_GetAttr(from, name);
+    if (res == NULL && PyErr_ExceptionMatches(PyExc_ImportError)) {
+        /* Provide better error message */
+        PyErr_Format(PyExc_ImportError,
+            "cannot import name %R from %R (%R)",
+            name, from->ma_dict ? PyDict_GetItem(from->ma_dict, &_Py_ID(__name__)) : Py_None,
+            ...);
+    }
+}
+```
+
+`from os import path` compiles to `IMPORT_NAME 'os'` + `IMPORT_FROM 'path'`. The `IMPORT_FROM` opcode calls `getattr(os_module, 'path')`. The error message includes the module name and file path for diagnostics.
+
+### `IMPORT_STAR`
+
+```c
+// CPython: Python/ceval.c:5520 IMPORT_STAR
+inst(IMPORT_STAR, (from --)) {
+    PyObject *all = PyObject_GetAttr(from, &_Py_ID(__all__));
+    if (all == NULL) {
+        /* No __all__: import all names not starting with _ */
+        PyObject *dict = PyObject_GetAttr(from, &_Py_ID(__dict__));
+        for each name in dict.keys():
+            if name[0] != '_':
+                PyDict_SetItem(LOCALS(), name, dict[name]);
+    } else {
+        for each name in all:
+            PyDict_SetItem(LOCALS(), name, getattr(from, name));
+    }
+    Py_XDECREF(all);
+    Py_DECREF(from);
+}
+```
+
+`from foo import *` copies names from `foo.__all__` (or all non-underscore names) into the current namespace. This is why `import *` is discouraged: it silently overrides existing names and pollutes the namespace.
+
+## gopy notes
+
+`IMPORT_NAME` is `vm.ImportName` in `vm/eval_import.go`. It calls `module/builtins.Import`. `IMPORT_FROM` calls `objects.GetAttr`. `IMPORT_STAR` checks `__all__` via `objects.GetAttr` and uses `objects.DictSetItem` for each name. `LOAD_BUILD_CLASS` pushes `builtins.__build_class__`.

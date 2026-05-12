@@ -1,0 +1,104 @@
+---
+title: Lib/contextlib.py (part 3)
+description: "Lib/contextlib.py part 3: asynccontextmanager, AsyncExitStack, AbstractAsyncContextManager, aclosing."
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/contextlib.py" />
+
+This annotation covers async context manager utilities. See `lib_contextlib2_detail` for `contextmanager`, `ExitStack`, `suppress`, and `redirect_stdout`. See `lib_contextlib_detail` for `_GeneratorContextManager` and `AbstractContextManager`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `asynccontextmanager` | Decorator turning an async generator into a context manager |
+| 101-220 | `AsyncExitStack` | Async version of `ExitStack` for `async with` stacking |
+| 221-360 | `AbstractAsyncContextManager` | ABC with default `__aenter__`/`__aexit__` implementations |
+| 361-500 | `aclosing` | Ensure `async_generator.aclose()` is called on exit |
+
+## Reading
+
+### `asynccontextmanager`
+
+```python
+# CPython: Lib/contextlib.py:240 asynccontextmanager
+def asynccontextmanager(func):
+    """@asynccontextmanager: turn an async generator into an async CM."""
+    @wraps(func)
+    def helper(*args, **kwds):
+        return _AsyncGeneratorContextManager(func, args, kwds)
+    return helper
+
+class _AsyncGeneratorContextManager(AbstractAsyncContextManager):
+    async def __aenter__(self):
+        try:
+            return await self.gen.__anext__()
+        except StopAsyncIteration:
+            raise RuntimeError("generator didn't yield")
+
+    async def __aexit__(self, typ, value, traceback):
+        if typ is None:
+            try:
+                await self.gen.__anext__()
+            except StopAsyncIteration:
+                return False
+            raise RuntimeError("generator didn't stop")
+        else:
+            ...
+            await self.gen.athrow(typ, value, traceback)
+```
+
+`@asynccontextmanager` mirrors `@contextmanager` but works with `async def` generators. The generator yields exactly once; the value before `yield` is the context variable, and the code after `yield` is the cleanup.
+
+### `AsyncExitStack`
+
+```python
+# CPython: Lib/contextlib.py:560 AsyncExitStack.enter_async_context
+class AsyncExitStack:
+    async def enter_async_context(self, cm):
+        """Calls __aenter__ and registers __aexit__ for cleanup."""
+        _cm_type = type(cm)
+        _exit = _cm_type.__aexit__
+        result = await _cm_type.__aenter__(cm)
+        self._push_async_cm_exit(cm, _exit)
+        return result
+
+    async def __aexit__(self, *exc_details):
+        """Unwind the stack, calling each __aexit__ in reverse."""
+        ...
+        while self._exit_callbacks:
+            is_sync, cb = self._exit_callbacks.pop()
+            if is_sync:
+                cb_suppress = cb(*exc_details)
+            else:
+                cb_suppress = await cb(*exc_details)
+            ...
+```
+
+`AsyncExitStack` handles a mix of sync and async context managers in one `async with` block. Async callbacks are awaited; sync ones are called directly. The exception suppression logic mirrors `ExitStack`.
+
+### `aclosing`
+
+```python
+# CPython: Lib/contextlib.py:680 aclosing
+class aclosing(AbstractAsyncContextManager):
+    """Ensure aclose() is called on exit."""
+    def __init__(self, thing):
+        self.thing = thing
+    async def __aenter__(self):
+        return self.thing
+    async def __aexit__(self, *exc_info):
+        await self.thing.aclose()
+```
+
+`async with aclosing(agen) as g:` ensures `agen.aclose()` is called even if the loop body raises. This is the async equivalent of `closing(file_obj)`.
+
+## gopy notes
+
+`asynccontextmanager` is `module/contextlib.AsyncContextManager` in `module/contextlib/module.go`. `_AsyncGeneratorContextManager` wraps an async generator. `AsyncExitStack` manages a slice of `(is_async, callback)` pairs. `aclosing` calls `objects.AsyncGeneratorClose` in `__aexit__`.
