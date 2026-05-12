@@ -1,0 +1,77 @@
+---
+title: Lib/getpass.py
+description: "Lib/getpass.py: getpass.getpass — read a password without echoing; getuser — get the current username."
+cpython_path: Lib/getpass.py
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/getpass.py" />
+
+`getpass.getpass(prompt)` reads a password without terminal echo. It uses `/dev/tty` directly when available so that stdin can be redirected without exposing the password.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `getpass` | Main entry: try `/dev/tty`, fall back to `input()` |
+| 41-100 | `unix_getpass` | Open `/dev/tty`, disable echo via termios, read, restore |
+| 101-140 | `win_getpass` | Windows: use `msvcrt.getwch` loop |
+| 141-180 | `getuser` | Return login name from env or `pwd` |
+
+## Reading
+
+### `unix_getpass`
+
+```python
+# CPython: Lib/getpass.py:58 unix_getpass
+def unix_getpass(prompt='Password: ', stream=None):
+    """Prompt for a password, with echo disabled."""
+    fd = None
+    tty = None
+    try:
+        # Prefer /dev/tty so we can still prompt even if stdin is redirected
+        try:
+            fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
+            tty = io.open(fd, mode='r+', closefd=False)
+        except OSError:
+            tty = stream or sys.stderr
+
+        old = termios.tcgetattr(fd)
+        new = old[:]
+        new[3] &= ~termios.ECHO           # turn off echo
+        new[3] |= termios.ECHONL          # but keep newline echo
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, new)
+            passwd = tty.readline()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)  # always restore
+    finally:
+        if tty is not None and tty is not stream:
+            tty.close()
+        if fd is not None:
+            os.close(fd)
+    return passwd.rstrip('\n')
+```
+
+### `getuser`
+
+```python
+# CPython: Lib/getpass.py:165 getuser
+def getuser():
+    """Return the login name of the current user."""
+    for name in ('LOGNAME', 'USER', 'LNAME', 'USERNAME'):
+        user = os.environ.get(name)
+        if user:
+            return user
+    # Last resort: look up in pwd database
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_name
+```
+
+## gopy notes
+
+`getpass` is pure Python. `unix_getpass` uses `termios.tcgetattr`/`tcsetattr` (gopy `module/termios`) and `os.open`/`os.close` (gopy `module/os`). `getuser` uses `pwd.getpwuid` (gopy `module/pwd`).

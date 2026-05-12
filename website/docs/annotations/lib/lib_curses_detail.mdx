@@ -1,0 +1,87 @@
+---
+title: Lib/curses/__init__.py
+description: "Lib/curses/__init__.py: curses.wrapper, initscr, cbreak, noecho, curses.textpad, curses.panel — terminal UI framework."
+cpython_path: Lib/curses/__init__.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/curses/__init__.py" />
+
+`curses` provides a terminal-independent screen-painting API. The Python module is a thin wrapper around `_curses` (backed by ncurses or PDCurses).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | Module re-exports | Re-export constants from `_curses` |
+| 51-120 | `wrapper` | Initialize curses, call func, restore terminal on exit |
+| 121-200 | `initscr` override | Raise `error` instead of crashing on terminal failure |
+
+## Reading
+
+### `wrapper`
+
+```python
+# CPython: Lib/curses/__init__.py:82 wrapper
+def wrapper(func, /, *args, **kwds):
+    """Initialize curses and call func(stdscr, *args, **kwds).
+    Restore terminal state on normal exit and on exception."""
+    stdscr = initscr()
+    try:
+        noecho()       # don't echo keypresses
+        cbreak()       # no line buffering
+        stdscr.keypad(True)  # enable function keys
+        func(stdscr, *args, **kwds)
+    finally:
+        stdscr.keypad(False)
+        echo()
+        nocbreak()
+        endwin()
+```
+
+`wrapper` is the canonical entry point for curses applications. It ensures `endwin()` is always called even if the application raises an exception.
+
+### `initscr` and error handling
+
+```python
+# CPython: Lib/curses/__init__.py:45 initscr
+def initscr():
+    """Initialize the curses library.
+    Raises curses.error on $TERM not supported instead of aborting."""
+    import _curses
+    # _curses.initscr() calls C initscr() which may call exit() on failure.
+    # The Python wrapper catches the C error and converts to an exception.
+    try:
+        return _curses.initscr()
+    except _curses.error:
+        raise
+```
+
+### `textpad`
+
+```python
+# CPython: Lib/curses/textpad.py:8 Textbox
+class Textbox:
+    """Single-line or multi-line text editing widget inside a curses window."""
+    def __init__(self, win, insert_mode=False):
+        self.win = win
+        self.insert_mode = insert_mode
+
+    def edit(self, validate=None):
+        """Read characters until Ctrl-G or Enter.
+        Returns the text contents."""
+        while True:
+            ch = self.win.getch()
+            if validate: ch = validate(ch)
+            if not ch: continue
+            if not self.do_command(ch): break
+        return self.gather()
+```
+
+## gopy notes
+
+`curses` is not in gopy's default stdlib. It requires ncurses shared library, which is loaded via cgo in `module/curses/module.go`. `curses.wrapper` is pure Python and calls `_curses.initscr()` which is the cgo-backed C function.

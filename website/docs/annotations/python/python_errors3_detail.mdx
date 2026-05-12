@@ -1,0 +1,113 @@
+---
+title: Python/errors.c (part 3)
+description: "Python/errors.c part 3: PyErr_FormatUnraisable, _PyErr_WriteUnraisableMsg, exception chaining __cause__/__context__, sys.excepthook."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers unraisable exceptions and exception chaining machinery. See `python_errors_detail` and `python_errors2_detail` for `PyErr_SetString`, `PyErr_Fetch`, and `PyErr_NormalizeException`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyErr_WriteUnraisableMsg` | Print an unraisable exception to `sys.stderr` |
+| 81-180 | `PyErr_FormatUnraisable` | Raise an unraisable exception with context |
+| 181-300 | Exception chaining | `__cause__`, `__context__`, `__suppress_context__` |
+| 301-450 | `sys.excepthook` / `sys.unraisablehook` | Per-interpreter hooks for unhandled exceptions |
+| 451-600 | `_PyErr_Display` | Format and print a full traceback to stderr |
+
+## Reading
+
+### `_PyErr_WriteUnraisableMsg`
+
+```c
+// CPython: Python/errors.c:82 _PyErr_WriteUnraisableMsg
+void
+_PyErr_WriteUnraisableMsg(const char *err_msg, PyObject *obj)
+{
+    /* Called when an exception occurs in a destructor, __del__,
+       weakref callback, or finalizer — contexts where it cannot propagate. */
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *exc = _PyErr_GetTopmostException(tstate)->exc_value;
+    if (!PyErr_GivenExceptionMatches(exc, PyExc_Exception)) {
+        /* Only Exception subclasses are printed */
+        _PyErr_Clear(tstate);
+        return;
+    }
+    /* Call sys.unraisablehook(UnraisableHookArgs) */
+    ...
+}
+```
+
+### `PyErr_FormatUnraisable`
+
+```c
+// CPython: Python/errors.c:130 PyErr_FormatUnraisable
+void
+PyErr_FormatUnraisable(const char *format, ...)
+{
+    /* 1. Build the context message from format string. */
+    /* 2. Call _PyErr_WriteUnraisableMsg with the current exception. */
+    /* After the call, the exception is cleared. */
+}
+```
+
+Used in `__del__` finalizers, weak reference callbacks, and thread cleanup.
+
+### Exception chaining
+
+```c
+// CPython: Python/errors.c:220 _PyException_ChainExceptions
+void
+_PyException_ChainExceptions(PyObject *typ, PyObject *val, PyObject *tb)
+{
+    /* Implicit chaining (__context__):
+       when an exception is raised inside an except block,
+       the original exception becomes __context__. */
+    PyObject *current_exc = tstate->exc_info->exc_value;
+    if (current_exc != NULL && current_exc != Py_None) {
+        /* val.__context__ = current exception */
+        PyException_SetContext(val, Py_NewRef(current_exc));
+    }
+}
+```
+
+`raise X from Y` sets `X.__cause__ = Y` and `X.__suppress_context__ = True` (explicit chaining). `raise X` inside `except E` sets `X.__context__ = E` implicitly.
+
+### `sys.excepthook`
+
+```c
+// CPython: Python/errors.c:380 _PyErr_Display
+void
+_PyErr_Display(PyObject *file, PyObject *exc)
+{
+    /* Walk exc.__context__ / exc.__cause__ chain.
+       Print traceback for each, with "During handling..." or "The above...".
+       Then print the final exception. */
+    PyObject *hook = _PySys_GetAttr(tstate, &_Py_ID(excepthook));
+    if (hook != NULL)
+        PyObject_CallOneArg(hook, exc);
+}
+```
+
+`sys.excepthook` is called with the uncaught exception. Replacing it redirects all uncaught exception output (used by IDEs and crash reporters).
+
+### `sys.unraisablehook`
+
+```c
+// CPython: Python/errors.c:420 sys.unraisablehook
+/* sys.unraisablehook(unraisablehook_args) is called by
+   _PyErr_WriteUnraisableMsg.  Default handler prints to sys.stderr.
+   Custom hooks can log to a file or suppress output entirely. */
+```
+
+## gopy notes
+
+`_PyErr_WriteUnraisableMsg` is `vm.WriteUnraisable` in `vm/exceptions.go`. Exception chaining is set in `vm/eval_unwind.go` when entering `PUSH_EXC_INFO`. `sys.excepthook` and `sys.unraisablehook` are stored in `interp.SysDict` and called from `vm.HandleUncaughtException`.

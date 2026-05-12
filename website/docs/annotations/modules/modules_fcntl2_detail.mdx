@@ -1,0 +1,91 @@
+---
+title: Modules/fcntlmodule.c (part 2)
+description: "fcntlmodule.c part 2: fcntl.flock, fcntl.lockf, LOCK_SH/LOCK_EX/LOCK_NB/LOCK_UN, ioctl with buffer, struct.pack for ioctl args."
+cpython_path: Modules/fcntlmodule.c
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/fcntlmodule.c" />
+
+This annotation covers file locking (`flock`, `lockf`) and `ioctl` with buffer arguments. See `modules_fcntl_detail` for `fcntl.fcntl`, constants, and basic `ioctl`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `fcntl_flock_impl` | `fcntl.flock(fd, operation)` — BSD-style file locking |
+| 81-180 | `fcntl_lockf_impl` | `fcntl.lockf(fd, cmd, length, start, whence)` — POSIX record locking |
+| 181-280 | `fcntl_ioctl_impl` | `ioctl` with mutable buffer (bytearray in/out) |
+| 281-350 | Locking constants | `LOCK_SH`, `LOCK_EX`, `LOCK_NB`, `LOCK_UN` |
+
+## Reading
+
+### `fcntl.flock`
+
+```c
+// CPython: Modules/fcntlmodule.c:82 fcntl_flock_impl
+static PyObject *
+fcntl_flock_impl(PyObject *module, int fd, int code)
+{
+    /* BSD advisory lock; operates on the whole file.
+       LOCK_SH: shared (read) lock
+       LOCK_EX: exclusive (write) lock
+       LOCK_NB: non-blocking (raises BlockingIOError if contended)
+       LOCK_UN: unlock */
+    int ret;
+    Py_BEGIN_ALLOW_THREADS
+    ret = flock(fd, code);
+    Py_END_ALLOW_THREADS
+    if (ret < 0)
+        return PyErr_SetFromErrno(PyExc_OSError);
+    Py_RETURN_NONE;
+}
+```
+
+`flock` locks are per open file description, not per process. Child processes inherit `flock` locks across `fork`.
+
+### `fcntl.lockf`
+
+```c
+// CPython: Modules/fcntlmodule.c:140 fcntl_lockf_impl
+static PyObject *
+fcntl_lockf_impl(PyObject *module, int fd, int code,
+                 PyObject *lenobj, PyObject *startobj, int whence)
+{
+    /* POSIX record locking via F_SETLKW / F_SETLK.
+       Locks a byte range [start, start+length) within the file.
+       whence: SEEK_SET (0), SEEK_CUR (1), SEEK_END (2) */
+    struct flock l;
+    l.l_type   = (code & LOCK_UN) ? F_UNLCK :
+                 (code & LOCK_SH) ? F_RDLCK : F_WRLCK;
+    l.l_start  = (off_t)start;
+    l.l_len    = (off_t)len;
+    l.l_whence = (short)whence;
+    int cmd = (code & LOCK_NB) ? F_SETLK : F_SETLKW;
+    Py_BEGIN_ALLOW_THREADS
+    int ret = fcntl(fd, cmd, &l);
+    Py_END_ALLOW_THREADS
+    ...
+}
+```
+
+`lockf` uses the POSIX `fcntl(F_SETLKW)` mechanism, which supports byte-range locking and is per-process (not inherited across `fork`).
+
+### `ioctl` with buffer
+
+```c
+// CPython: Modules/fcntlmodule.c:230 fcntl_ioctl_impl
+/* ioctl(fd, request, arg=0, mutate_flag=True)
+   If arg is a bytearray and mutate_flag is True:
+     - Pass arg's buffer to ioctl
+     - The kernel may modify it in-place (e.g. TIOCGWINSZ fills struct winsize)
+   Returns bytes containing the (possibly modified) buffer. */
+```
+
+## gopy notes
+
+`fcntl.flock` is in `module/fcntl/module.go` using `syscall.Flock`. `fcntl.lockf` uses `syscall.FcntlFlock` with `syscall.F_SETLK`/`F_SETLKW`. `ioctl` with buffer uses `unix.IoctlGetWinsize` and related helpers from `golang.org/x/sys/unix`.

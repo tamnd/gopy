@@ -1,0 +1,107 @@
+---
+title: Tools/clinic/clinic.py
+description: "Tools/clinic/clinic.py: Argument Clinic — DSL for generating C argument-parsing boilerplate for CPython built-in functions."
+cpython_path: Tools/clinic/clinic.py
+cpython_version: "3.14"
+lines: 4000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Tools/clinic/clinic.py" />
+
+Argument Clinic is a code-generation tool. Its DSL is embedded in comments in C source files (`.c`). The tool generates `PyArg_ParseStack`, type conversion, and docstring code from a high-level description.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Clinic DSL format | `/*[clinic input].../*[clinic start generated code]*/` |
+| 101-400 | `CConverter` base class | Maps a Python type name to a C type and format char |
+| 401-700 | Built-in converters | `int_converter`, `str_converter`, `PyBytesObject_converter`, etc. |
+| 701-1000 | `Function` / `Parameter` | AST nodes for the DSL |
+| 1001-1400 | `BlockParser` | Extract clinic blocks from a C file |
+| 1401-2000 | `CLanguage.output_templates` | Emit the actual C code |
+| 2001-4000 | Overrides and module support | METH_FASTCALL, METH_KEYWORDS, module-level functions |
+
+## Reading
+
+### DSL format
+
+```c
+// CPython: Modules/posixmodule.c (clinic input block)
+/*[clinic input]
+os.open -> int
+    path: path_t
+    flags: int
+    mode: int = 0o777
+    *
+    dir_fd: dir_fd(requires='openat') = None
+
+Open a file for low level IO.
+[clinic start generated code]*/
+```
+
+Clinic processes this block and generates the `os_open` wrapper with `_PyArg_ParseStackAndKeywords`.
+
+### `CConverter`
+
+```python
+# CPython: Tools/clinic/clinic.py:880 CConverter
+class CConverter:
+    """Maps a Clinic parameter type to C type, format unit, and conversion."""
+    type = None         # C type name (e.g. 'int', 'const char *')
+    format_unit = None  # PyArg_Parse format char (e.g. 'i', 's', 'O')
+
+    def converter_init(self): pass
+    def converter_fn(self): return 'PyArg_ParseStack'
+
+class int_converter(CConverter):
+    type = 'int'
+    format_unit = 'i'
+    c_ignored_default = '0'
+```
+
+### Generated METH_FASTCALL wrapper
+
+```c
+// Example of generated code for os.open:
+static PyObject *
+os_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs,
+        PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    static const char * const _keywords[] = {"path", "flags", "mode",
+                                              "dir_fd", NULL};
+    static _PyArg_Parser _parser = {NULL, _keywords, "open", 0};
+    PyObject *argsbuf[4];
+    path_t path = PATH_T_INITIALIZE("open", "path", 0, 0);
+    int flags;
+    int mode = 511;  /* 0o777 */
+    int dir_fd = DEFAULT_DIR_FD;
+
+    args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames,
+                                 &_parser, 1, 3, 0, argsbuf);
+    if (!args) goto exit;
+    if (!path_converter(args[0], &path)) goto exit;
+    if (!_PyLong_FileDescriptor_Converter(args[1], &flags)) goto exit;
+    ...
+    return_value = os_open_impl(module, &path, flags, mode, dir_fd);
+exit:
+    path_cleanup(&path);
+    return return_value;
+}
+```
+
+### Why Clinic matters
+
+```
+Before Clinic: every built-in function hand-wrote its argument parsing.
+After Clinic:  a 4-line DSL generates ~40 lines of correct, consistent C code,
+               including docstrings, error messages, and keyword argument names.
+```
+
+## gopy notes
+
+gopy does not use Argument Clinic. Built-in module functions are written directly in Go using `vm.ParseArgs` / `vm.ParseArgsKwargs`. The type converters (`path_t`, `int`, `str`) map to Go types in `vm/converters.go`. Docstrings are `const string` fields in the Go method table.

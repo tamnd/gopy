@@ -1,0 +1,117 @@
+---
+title: Objects/frameobject.c (part 2)
+description: "Objects/frameobject.c part 2: PyFrameObject lazy creation, frame_getlocals, frame_setlineno, frame_clear, _PyFrame_FastToLocals."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/frameobject.c" />
+
+This annotation covers the Python-visible `frame` object. See `objects_frameobject_detail` for the C-level `_PyInterpreterFrame` layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyFrame_New` | Create a `PyFrameObject` (Python-visible wrapper) |
+| 81-200 | `frame_getlocals` | `frame.f_locals` — materialize from fast locals array |
+| 201-300 | `frame_setlineno` | `frame.f_lineno = N` — for debugger line stepping |
+| 301-450 | `_PyFrame_FastToLocals` | Copy fast locals array → `f_locals` dict |
+| 451-600 | `_PyFrame_LocalsToFast` | Copy `f_locals` dict → fast locals array (after debugger modification) |
+| 601-700 | `frame_clear` | Decref all fast locals; called at frame deallocation |
+
+## Reading
+
+### Lazy `PyFrameObject` creation
+
+```c
+// CPython: Objects/frameobject.c:20 comment
+/* PyFrameObject is the Python-level frame object (accessible via
+   sys._getframe(), traceback.tb_frame, etc.).
+   In 3.11+, the hot path uses _PyInterpreterFrame (C stack or generator).
+   PyFrameObject is created lazily when Python code accesses f_* attributes. */
+```
+
+### `frame_getlocals`
+
+```c
+// CPython: Objects/frameobject.c:120 frame_getlocals
+static PyObject *
+frame_getlocals(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    /* Build or update f_locals dict from fast locals array */
+    if (PyFrame_FastToLocalsWithError((PyFrameObject *)f) < 0)
+        return NULL;
+    return Py_NewRef(f->f_frame->f_locals);
+}
+```
+
+`f.f_locals` returns a snapshot. Modifying it does not affect the actual local variables unless `_PyFrame_LocalsToFast` is called (which debuggers do).
+
+### `frame_setlineno`
+
+```c
+// CPython: Objects/frameobject.c:230 frame_setlineno
+static int
+frame_setlineno(PyFrameObject *f, PyObject *p_new_lineno, void *Py_UNUSED(ignored))
+{
+    /* Used by debuggers (pdb, coverage.py) to jump to a different line.
+       Validates that the target line is within the code object. */
+    int new_lineno = PyLong_AsInt(p_new_lineno);
+    ...
+    /* Rewind prev_instr to the first instruction on new_lineno */
+    f->f_frame->prev_instr = target_instr;
+    return 0;
+}
+```
+
+### `_PyFrame_FastToLocals`
+
+```c
+// CPython: Objects/frameobject.c:340 _PyFrame_FastToLocals
+int
+_PyFrame_FastToLocalsWithError(PyFrameObject *f)
+{
+    PyObject **fast = f->f_frame->localsplus;
+    PyCodeObject *co = (PyCodeObject *)f->f_frame->f_executable;
+    Py_ssize_t j = co->co_nlocalsplus;
+    PyObject *locals = f->f_frame->f_locals;
+    if (locals == NULL) {
+        locals = f->f_frame->f_locals = PyDict_New();
+    }
+    for (Py_ssize_t i = 0; i < j; i++) {
+        PyObject *v = fast[i];
+        if (v != NULL)
+            PyDict_SetItem(locals, name_of_slot(co, i), v);
+        else
+            PyDict_DelItem(locals, name_of_slot(co, i));
+    }
+    return 0;
+}
+```
+
+### `frame_clear`
+
+```c
+// CPython: Objects/frameobject.c:640 frame_clear
+static void
+frame_tp_clear(PyFrameObject *f)
+{
+    /* Called when the frame object is collected.
+       Decref all objects in fast locals array. */
+    PyObject **fast = f->f_frame->localsplus;
+    Py_ssize_t n = f->f_frame->f_executable ?
+        ((PyCodeObject *)f->f_frame->f_executable)->co_nlocalsplus : 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        Py_CLEAR(fast[i]);
+    }
+}
+```
+
+## gopy notes
+
+`PyFrameObject` is `objects.PyFrameObject` in `objects/frameobject.go`. `frame_getlocals` calls `vm.FastToLocals` in `vm/frame.go`. `frame_setlineno` is implemented but restricted to lines within the code object's range. `_PyFrame_LocalsToFast` is `vm.LocalsToFast`.

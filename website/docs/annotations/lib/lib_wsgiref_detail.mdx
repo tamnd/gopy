@@ -1,0 +1,115 @@
+---
+title: Lib/wsgiref/handlers.py
+description: "Lib/wsgiref/handlers.py: BaseHandler, SimpleHandler, WSGIRequestHandler — WSGI server-side glue: run(), start_response, write(), finish_response."
+cpython_path: Lib/wsgiref/handlers.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/wsgiref/handlers.py" />
+
+`wsgiref.handlers` implements the WSGI gateway (PEP 3333). `BaseHandler.run(app)` calls the WSGI application and sends the response headers and body to the transport.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BaseHandler` | Abstract base: `run`, `start_response`, `write`, `finish_response` |
+| 81-200 | `SimpleHandler` | Concrete handler with `stdin`, `stdout`, `stderr` streams |
+| 201-350 | `BaseCGIHandler` | CGI: write response to `sys.stdout` |
+| 351-450 | `WSGIRequestHandler` | Subclass for `http.server.BaseHTTPRequestHandler` |
+| 451-500 | `make_server` | Create a `WSGIServer` bound to an address |
+
+## Reading
+
+### `BaseHandler.run`
+
+```python
+# CPython: Lib/wsgiref/handlers.py:98 BaseHandler.run
+def run(self, application):
+    """Invoke the WSGI application and send the response."""
+    try:
+        self.setup_environ()
+        self.result = application(self.environ, self.start_response)
+        self.finish_response()
+    except:
+        try:
+            self.handle_error()
+        except:
+            self.close()
+            raise
+```
+
+### `start_response`
+
+```python
+# CPython: Lib/wsgiref/handlers.py:140 BaseHandler.start_response
+def start_response(self, status, headers, exc_info=None):
+    """WSGI start_response callable: record status and headers."""
+    if exc_info:
+        try:
+            if self.headers_sent:
+                reraise(*exc_info)
+        finally:
+            exc_info = None
+    elif self.headers is not None:
+        raise AssertionError("Headers already set!")
+    self.status = status
+    self.headers = self.headers_class(headers)
+    return self.write
+```
+
+`start_response` is called once by the WSGI application before any body is written. It returns the `write` callable for legacy apps.
+
+### `write`
+
+```python
+# CPython: Lib/wsgiref/handlers.py:175 BaseHandler.write
+def write(self, data):
+    """Write data to the response.  Called by legacy WSGI apps."""
+    assert isinstance(data, bytes), "write() argument must be a bytes instance"
+    if not self.status:
+        raise AssertionError("write() before start_response()")
+    elif not self.headers_sent:
+        self.send_headers()
+    self._write(data)    # delegates to transport
+    self._flush()
+```
+
+### `finish_response`
+
+```python
+# CPython: Lib/wsgiref/handlers.py:200 BaseHandler.finish_response
+def finish_response(self):
+    """Send the response body from the WSGI result iterable."""
+    try:
+        for data in self.result:
+            self.write(data)
+        self.finish_content()
+    except:
+        self.close()
+        raise
+    else:
+        self.close()
+```
+
+WSGI `result` must be an iterable of `bytes` objects.
+
+### `make_server`
+
+```python
+# CPython: Lib/wsgiref/simple_server.py:120 make_server
+def make_server(host, port, app, server_class=WSGIServer,
+                handler_class=WSGIRequestHandler):
+    """Create a WSGI server for testing purposes."""
+    server = server_class((host, port), handler_class)
+    server.set_app(app)
+    return server
+```
+
+## gopy notes
+
+`wsgiref` is pure Python and works with gopy's `http.server` and `socket` modules. `BaseHandler.run` calls the WSGI application callable which is any Python callable. `self._write` calls `sys.stdout.buffer.write()` in `BaseCGIHandler`, using gopy's file object.

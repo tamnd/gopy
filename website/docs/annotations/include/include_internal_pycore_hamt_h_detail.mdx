@@ -1,0 +1,91 @@
+---
+title: Include/internal/pycore_hamt.h
+description: "Include/internal/pycore_hamt.h: _PyHamt — immutable hash-array-mapped trie used by contextvars; PyHamtNode, _PyHamt_Assoc, _PyHamt_Find."
+cpython_path: Include/internal/pycore_hamt.h
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_hamt.h" />
+
+`_PyHamt` is an immutable Hash-Array-Mapped Trie (HAMT) used as the backing store for `contextvars.Context`. It provides persistent (copy-on-write) key-value operations in O(log32 n) time.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `_PyHamt` | Root node: `ht_count` and `ht_root` (a bitmap node) |
+| 61-100 | `PyHamtNode` | Polymorphic node: BitmapNode, ArrayNode, or CollisionNode |
+| 101-140 | `_PyHamt_Assoc` | Return a new HAMT with one key-value pair set (functional update) |
+| 141-160 | `_PyHamt_Find` | Lookup a key in the trie |
+| 161-180 | `_PyHamt_Without` | Return a new HAMT with one key removed |
+
+## Reading
+
+### `_PyHamt` structure
+
+```c
+// CPython: Include/internal/pycore_hamt.h:28 _PyHamt
+typedef struct {
+    PyObject_HEAD
+    PyHamtNode *ht_root;    /* root BitmapNode or ArrayNode */
+    Py_ssize_t  ht_count;   /* total number of key-value pairs */
+} PyHamtObject;
+```
+
+`ht_root` is `NULL` for an empty HAMT. Each node is immutable; `_PyHamt_Assoc` builds a new path of nodes from root to the modified leaf.
+
+### `PyHamtNode` types
+
+```c
+// CPython: Include/internal/pycore_hamt.h:50 PyHamtNode
+/* BitmapNode (up to 16 children):
+   - bitmap: 32-bit bitmask of occupied slots
+   - array: alternating key/value or sub-node entries */
+
+/* ArrayNode (32 children — promoted from BitmapNode when full):
+   - 32-element array of child nodes or NULL */
+
+/* CollisionNode (hash collision):
+   - array of key/value pairs all with the same hash */
+```
+
+The HAMT uses 5 bits of the hash at each level (branching factor 32). At 6 levels, it handles 32^6 = ~1 billion keys.
+
+### `_PyHamt_Assoc`
+
+```c
+// CPython: Include/internal/pycore_hamt.h:110 _PyHamt_Assoc
+/* Return a new PyHamtObject with (key, val) inserted or updated.
+   The original HAMT is not modified.
+   Time: O(log32 n). Space: O(log32 n) new nodes per call. */
+PyHamtObject *_PyHamt_Assoc(PyHamtObject *o, PyObject *key, PyObject *val);
+```
+
+### `_PyHamt_Find`
+
+```c
+// CPython: Include/internal/pycore_hamt.h:125 _PyHamt_Find
+/* Look up key in the HAMT.
+   Returns:
+     1 and sets *val on success
+     0 if key not found
+    -1 on error (hash computation failed) */
+int _PyHamt_Find(PyHamtObject *o, PyObject *key, PyObject **val);
+```
+
+### How `contextvars.Context` uses HAMT
+
+```c
+// CPython: Python/context.c:230
+/* Context.run(func, *args) creates a shallow copy of the current context.
+   The copy is a new PyHamtObject with ht_root shared with the original.
+   Modifications inside run() build new path nodes without affecting the parent. */
+```
+
+## gopy notes
+
+gopy's HAMT is in `objects/hamt.go`. `_PyHamt_Assoc` is `objects.HamtAssoc`. `_PyHamt_Find` is `objects.HamtFind`. `contextvars.Context` stores its mapping in a `*PyHamtObject` field. The BitmapNode/ArrayNode/CollisionNode types are Go structs with a shared `hamtNode` interface.

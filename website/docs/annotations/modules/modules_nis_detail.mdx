@@ -1,0 +1,91 @@
+---
+title: Modules/nismodule.c
+description: "Modules/nismodule.c: nis — NIS/YP (Yellow Pages) network information service; nis.match, nis.maps, nis.cat."
+cpython_path: Modules/nismodule.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/nismodule.c" />
+
+`nis` wraps the NIS (Network Information Service, formerly Yellow Pages) client library. NIS is a legacy network directory service used for distributing `/etc/passwd`, `/etc/group`, and hosts tables in Unix environments. Deprecated in Python 3.11 and removed in 3.13.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `nis_match_impl` | Look up a key in a NIS map |
+| 81-160 | `nis_cat_impl` | Return all key-value pairs from a NIS map |
+| 161-220 | `nis_maps_impl` | List all available NIS maps on the server |
+| 221-300 | `nis_get_default_domain_impl` | Return the NIS domain name |
+
+## Reading
+
+### `nis.match`
+
+```c
+// CPython: Modules/nismodule.c:82 nis_match_impl
+static PyObject *
+nis_match_impl(PyObject *module, const char *key, const char *map,
+               const char *domain)
+{
+    char *val;
+    int vallen, err;
+    Py_BEGIN_ALLOW_THREADS
+    err = yp_match(domain, map, key, strlen(key), &val, &vallen);
+    Py_END_ALLOW_THREADS
+    if (err != 0)
+        return nis_error(err);
+    PyObject *res = PyBytes_FromStringAndSize(val, vallen);
+    free(val);
+    return res;
+}
+```
+
+`nis.match('root', 'passwd.byname')` returns the `/etc/passwd` entry for `root` from the NIS server.
+
+### `nis.cat`
+
+```c
+// CPython: Modules/nismodule.c:140 nis_cat_impl
+static PyObject *
+nis_cat_impl(PyObject *module, const char *map, const char *domain)
+{
+    /* Returns a dict mapping all keys to values in the NIS map */
+    PyObject *dict = PyDict_New();
+    struct ypall_callback cb;
+    cb.foreach = (int (*)(int, char *, int, char *, int, char *))
+                  nis_foreach;
+    cb.data = (char *)dict;
+    Py_BEGIN_ALLOW_THREADS
+    int err = yp_all((char *)domain, (char *)map, &cb);
+    Py_END_ALLOW_THREADS
+    ...
+    return dict;
+}
+```
+
+### `nis.get_default_domain`
+
+```c
+// CPython: Modules/nismodule.c:240 nis_get_default_domain_impl
+static PyObject *
+nis_get_default_domain_impl(PyObject *module)
+{
+    char *domain;
+    int err;
+    Py_BEGIN_ALLOW_THREADS
+    err = yp_get_default_domain(&domain);
+    Py_END_ALLOW_THREADS
+    if (err != 0)
+        return nis_error(err);
+    return PyUnicode_FromString(domain);
+}
+```
+
+## gopy notes
+
+`nis` was removed in Python 3.13 and is not in gopy's stdlib. NIS is effectively obsolete; modern replacements are LDAP and SSSD. The annotation is for completeness.

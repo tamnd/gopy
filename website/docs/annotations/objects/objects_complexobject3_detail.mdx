@@ -1,0 +1,110 @@
+---
+title: Objects/complexobject.c (part 3)
+description: "Objects/complexobject.c part 3: complex.__new__, complex.conjugate, complex.polar/phase/rect, PyComplex_AsCComplex, complex arithmetic edge cases."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers the Python-level `complex` constructor and methods. See `objects_complexobject_detail` and `objects_complexobject2_detail` for `Py_complex` C struct and arithmetic.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `complex_new_impl` | `complex(real, imag)` constructor |
+| 101-200 | `complex_conjugate` | `(a+bj).conjugate()` returns `(a-bj)` |
+| 201-300 | `complex.__abs__` | `abs(a+bj)` returns `hypot(a, b)` |
+| 301-400 | `PyComplex_AsCComplex` | Convert Python object to C `Py_complex` |
+| 401-550 | `complex.__pow__` | `(a+bj) ** n` using `c_pow` |
+| 551-700 | `complex.__repr__` / `__str__` | Formatting: `(1+2j)`, `(-0-1j)`, `1j` |
+
+## Reading
+
+### `complex_new_impl`
+
+```c
+// CPython: Objects/complexobject.c:980 complex_new_impl
+static PyObject *
+complex_new_impl(PyTypeObject *type, PyObject *r, PyObject *i)
+{
+    Py_complex cr = {0.0, 0.0}, ci = {0.0, 0.0};
+    /* r and i can be complex, float, or int */
+    if (r != Py_None) {
+        if (PyUnicode_Check(r)) {
+            /* complex("1+2j") — parse a string */
+            return complex_from_string_inner(r, type);
+        }
+        cr = PyComplex_AsCComplex(r);
+        if (cr.real == -1.0 && PyErr_Occurred()) return NULL;
+    }
+    if (i != Py_None) {
+        ci = PyComplex_AsCComplex(i);
+        if (ci.real == -1.0 && PyErr_Occurred()) return NULL;
+    }
+    /* complex(r, i): result = (cr.real - ci.imag) + (cr.imag + ci.real) * j */
+    return PyComplex_FromCComplex((Py_complex){
+        cr.real - ci.imag,
+        cr.imag + ci.real
+    });
+}
+```
+
+The formula handles `complex(1+2j, 3+4j)` correctly: `complex(a+bj, c+dj) = (a-d) + (b+c)j`.
+
+### `complex.conjugate`
+
+```c
+// CPython: Objects/complexobject.c:1060 complex_conjugate
+static PyObject *
+complex_conjugate(PyComplexObject *self, PyObject *Py_UNUSED(ignored))
+{
+    Py_complex c = self->cval;
+    c.imag = -c.imag;
+    return PyComplex_FromCComplex(c);
+}
+```
+
+### `PyComplex_AsCComplex`
+
+```c
+// CPython: Objects/complexobject.c:320 PyComplex_AsCComplex
+Py_complex
+PyComplex_AsCComplex(PyObject *op)
+{
+    /* 1. Try __complex__ */
+    PyObject *newop = _PyObject_LookupSpecial(op, &_Py_ID(__complex__));
+    if (newop) {
+        PyObject *r = PyObject_CallNoArgs(newop);
+        Py_complex cv = ((PyComplexObject *)r)->cval;
+        Py_DECREF(r);
+        return cv;
+    }
+    /* 2. Try __float__ */
+    double f = PyFloat_AsDouble(op);
+    return (Py_complex){f, 0.0};
+}
+```
+
+### `complex.__repr__`
+
+```c
+// CPython: Objects/complexobject.c:590 complex_repr
+/* Rules:
+   1+2j       (positive imag: no parens)
+   (1-2j)     (negative imag: parens only in __repr__)
+   1j         (zero real: omit real part)
+   (-0-0j)    (negative zero: show sign)
+*/
+```
+
+The repr format is designed to be `eval`-safe: `eval(repr(z)) == z`.
+
+## gopy notes
+
+`complex` is `objects.PyComplexObject` in `objects/complexobject.go`. `complex_new_impl` is `objects.ComplexNew`. `PyComplex_AsCComplex` is `objects.ComplexAsCComplex` which checks `__complex__` then `__float__`. Complex arithmetic uses Go's `complex128` type for correctness on NaN/Inf edge cases.

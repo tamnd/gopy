@@ -1,0 +1,127 @@
+---
+title: Python/marshal.c (part 2)
+description: "Python/marshal.c part 2: w_complex_object, r_object — marshal code object, long, float, frozenset; .pyc file format."
+cpython_path: Python/marshal.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/marshal.c" />
+
+This annotation covers the core marshal reader/writer for code objects and the `.pyc` file format. See `python_marshal_detail` for the public API (`marshal.dumps`, `marshal.loads`) and simple types.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `.pyc` header | Magic number, flags, timestamp/hash, source size |
+| 81-200 | `w_complex_object` | Write code object fields in order |
+| 201-350 | `r_object` dispatch | Read type byte; call type-specific reader |
+| 351-500 | `r_codeobject` | Read a code object from bytes |
+| 501-650 | `r_long` / `w_long` | Variable-length integer encoding |
+| 651-900 | Object references | Flag `FLAG_REF`: share repeated objects via index |
+
+## Reading
+
+### `.pyc` header format
+
+```c
+// CPython: Python/marshal.c:25 pyc header
+/* .pyc file layout:
+   4 bytes: magic number (Python version-specific)
+   4 bytes: flags (0x1 = hash-based, 0x2 = checked)
+   4 bytes: timestamp or hash of source
+   4 bytes: source file size
+   N bytes: marshal stream of the code object
+*/
+```
+
+The magic number changes with each CPython release that changes the bytecode format. `importlib` checks it when loading `.pyc` files.
+
+### `w_complex_object` (code object writer)
+
+```c
+// CPython: Python/marshal.c:480 w_complex_object
+static void
+w_complex_object(PyObject *v, char flag, WFILE *p)
+{
+    if (PyCode_Check(v)) {
+        PyCodeObject *co = (PyCodeObject *)v;
+        w_byte(TYPE_CODE | flag, p);
+        w_long(co->co_argcount, p);
+        w_long(co->co_posonlyargcount, p);
+        w_long(co->co_kwonlyargcount, p);
+        w_long(co->co_stacksize, p);
+        w_long(co->co_flags, p);
+        w_object(co->co_code, p);          /* bytecode */
+        w_object(co->co_consts, p);        /* constants tuple */
+        w_object(co->co_names, p);         /* name tuple */
+        w_object(co->co_localsplusnames, p);
+        w_object(co->co_localspluskinds, p);
+        w_object(co->co_filename, p);
+        w_object(co->co_name, p);
+        w_object(co->co_qualname, p);
+        w_long(co->co_firstlineno, p);
+        w_object(co->co_linetable, p);     /* location table */
+        w_object(co->co_exceptiontable, p);
+    }
+}
+```
+
+### Object references (`FLAG_REF`)
+
+```c
+// CPython: Python/marshal.c:300 FLAG_REF
+/* When an object has FLAG_REF set, it is added to a reference table.
+   Subsequent occurrences are encoded as TYPE_REF + index.
+   This avoids duplicating shared constants (e.g. the string 'None'
+   appears in many code objects). */
+#define FLAG_REF 0x80
+
+static PyObject *
+r_object(RFILE *p)
+{
+    int type = r_byte(p);
+    int flag = type & FLAG_REF;
+    type &= ~FLAG_REF;
+    Py_ssize_t idx = -1;
+    if (flag) {
+        idx = PyList_GET_SIZE(p->refs);
+        PyList_Append(p->refs, Py_None);  /* placeholder */
+    }
+    PyObject *v = NULL;
+    switch (type) {
+    case TYPE_CODE:   v = r_codeobject(p, flag); break;
+    case TYPE_TUPLE:  v = r_tuple(p, flag);      break;
+    ...
+    case TYPE_REF:    return r_ref(p);            /* back-reference */
+    }
+    if (flag) PyList_SET_ITEM(p->refs, idx, v);  /* fill placeholder */
+    return v;
+}
+```
+
+### `r_long` variable-length encoding
+
+```c
+// CPython: Python/marshal.c:160 r_long
+/* Short longs (< 2^15): 2 bytes little-endian.
+   Long longs: 4 bytes count + n*15-bit digits (like Python's digit encoding).
+   This is independent of Python's ob_digit representation. */
+static long
+r_long(RFILE *p)
+{
+    long x = (long)r_byte(p);
+    x |= (long)r_byte(p) << 8;
+    x |= (long)r_byte(p) << 16;
+    x |= (long)r_byte(p) << 24;
+    return x;
+}
+```
+
+## gopy notes
+
+gopy's marshal reader/writer is in `python/marshal.go`. The `.pyc` header check is in `vm/eval_import.go:checkPycHeader`. The magic number is `compile.MagicNumber` in `compile/magic.go`. `FLAG_REF` back-references use a `[]PyObject` slice. `r_codeobject` maps to `marshal.ReadCodeObject`.

@@ -1,0 +1,88 @@
+---
+title: Modules/spwdmodule.c
+description: "Modules/spwdmodule.c: spwd — shadow password database access; getspnam, getspall, struct_spwd."
+cpython_path: Modules/spwdmodule.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/spwdmodule.c" />
+
+`spwd` wraps `getspnam(3)` and `getspent(3)` to access the shadow password database (`/etc/shadow`). Requires root or `shadow` group membership. Deprecated in Python 3.11 and removed in 3.13.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `struct_spwd` | `structseq` with sp_namp, sp_pwdp, sp_lstchg, etc. |
+| 61-140 | `spwd_getspnam_impl` | Look up by username: `getspnam(name)` |
+| 141-200 | `spwd_getspall_impl` | Return all shadow entries as a list |
+| 201-250 | `mkspent` | Convert `struct spwd *` to Python `struct_spwd` |
+
+## Reading
+
+### `struct_spwd` fields
+
+```c
+// CPython: Modules/spwdmodule.c:42 struct_spwd_fields
+/* sp_namp    — login name */
+/* sp_pwdp    — encrypted password (hash + salt) */
+/* sp_lstchg  — days since Jan 1 1970 of last change */
+/* sp_min     — minimum days before change allowed */
+/* sp_max     — maximum days before change required */
+/* sp_warn    — days before expiry to warn user */
+/* sp_inact   — days after expiry until account disabled */
+/* sp_expire  — days since epoch when account expires */
+/* sp_flag    — reserved */
+```
+
+### `spwd_getspnam_impl`
+
+```c
+// CPython: Modules/spwdmodule.c:98 spwd_getspnam_impl
+static PyObject *
+spwd_getspnam_impl(PyObject *module, PyObject *arg)
+{
+    const char *name = PyUnicode_AsUTF8(arg);
+    struct spwd *p;
+    if ((p = getspnam(name)) == NULL) {
+        if (errno != 0)
+            return PyErr_SetFromErrno(PyExc_OSError);
+        PyErr_SetString(PyExc_KeyError, "getspnam(): name not found");
+        return NULL;
+    }
+    return mkspent(p);
+}
+```
+
+### `spwd_getspall_impl`
+
+```c
+// CPython: Modules/spwdmodule.c:150 spwd_getspall_impl
+static PyObject *
+spwd_getspall_impl(PyObject *module)
+{
+    PyObject *d = PyList_New(0);
+    setspent();
+    struct spwd *p;
+    while ((p = getspent()) != NULL) {
+        PyObject *v = mkspent(p);
+        if (v == NULL || PyList_Append(d, v) != 0) {
+            Py_XDECREF(v);
+            Py_DECREF(d);
+            endspent();
+            return NULL;
+        }
+        Py_DECREF(v);
+    }
+    endspent();
+    return d;
+}
+```
+
+## gopy notes
+
+`spwd` was removed in Python 3.13 and is not in gopy's stdlib. The annotation documents the module for completeness. Shadow password access in modern Python is typically done via PAM (`python-pam`) or by reading `/etc/shadow` directly with elevated privileges.
