@@ -1,0 +1,122 @@
+---
+title: Modules/unicodedata.c
+description: "Modules/unicodedata.c: unicodedata — Unicode property lookups, normalize (NFC/NFD/NFKC/NFKD), name/lookup, unidata_version."
+cpython_path: Modules/unicodedata.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/unicodedata.c" />
+
+`unicodedata` provides access to the Unicode Character Database (UCD). The data tables are generated from UCD files and compiled into the interpreter.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Data tables | `_PyUnicode_Database`, decomp table, combining class |
+| 81-200 | `unicodedata_normalize_impl` | NFC/NFD/NFKC/NFKD normalization |
+| 201-350 | `unicodedata_name_impl` | Return Unicode name for a code point |
+| 351-500 | `unicodedata_lookup_impl` | Look up a code point by name |
+| 501-650 | Property accessors | `category`, `bidirectional`, `combining`, `east_asian_width` |
+| 651-800 | `unicodedata_is*` | `is_normalized`, `is_decimal`, `is_digit`, `is_numeric` |
+| 801-1200 | `UCD` class | Version-specific UCD object for 3.2/4.0/5.0 etc. |
+
+## Reading
+
+### Normalization
+
+```c
+// CPython: Modules/unicodedata.c:120 unicodedata_normalize_impl
+static PyObject *
+unicodedata_normalize_impl(PyObject *self, const char *form, PyObject *input)
+{
+    /* form: "NFC", "NFD", "NFKC", "NFKD" */
+    if (PyUnicode_GET_LENGTH(input) == 0)
+        return Py_NewRef(input);  /* empty string is already normalized */
+
+    if (strcmp(form, "NFC") == 0)  return nfc_nfkc(self, input, 0);
+    if (strcmp(form, "NFKC") == 0) return nfc_nfkc(self, input, 1);
+    if (strcmp(form, "NFD") == 0)  return nfd_nfkd(self, input, 0);
+    if (strcmp(form, "NFKD") == 0) return nfd_nfkd(self, input, 1);
+    PyErr_SetString(PyExc_ValueError, "invalid normalization form");
+    return NULL;
+}
+```
+
+NFD decomposes characters (e.g. `é` → `e` + combining acute accent). NFC re-composes canonical equivalents. NFKC/NFKD additionally apply compatibility decompositions.
+
+### `nfd_nfkd` core
+
+```c
+// CPython: Modules/unicodedata.c:200 nfd_nfkd
+static PyObject *
+nfd_nfkd(PyObject *self, PyObject *input, int k)
+{
+    /* Step 1: Canonical/compatibility decompose each code point */
+    /* Step 2: Sort combining characters by Canonical_Combining_Class */
+    /* The CCC determines visual stacking order; same-class chars stay ordered */
+    ...
+}
+```
+
+### `unicodedata_name_impl`
+
+```c
+// CPython: Modules/unicodedata.c:310 unicodedata_name_impl
+static PyObject *
+unicodedata_name_impl(PyObject *self, int chr, PyObject *default_value)
+{
+    char name[NAME_MAXLEN + 1];
+    if (!_PyUnicode_GetName(chr, name, sizeof(name))) {
+        if (default_value != NULL)
+            return Py_NewRef(default_value);
+        PyErr_SetString(PyExc_ValueError,
+            "no such name");
+        return NULL;
+    }
+    return PyUnicode_FromString(name);
+}
+```
+
+`unicodedata.name('\N{SNOWMAN}')` returns `'SNOWMAN'`. The name table is a compressed trie compiled from `UnicodeData.txt`.
+
+### `unicodedata_lookup_impl`
+
+```c
+// CPython: Modules/unicodedata.c:390 unicodedata_lookup_impl
+static PyObject *
+unicodedata_lookup_impl(PyObject *self, const char *name, Py_ssize_t name_length)
+{
+    Py_UCS4 code;
+    if (!_PyUnicode_LookupName(name, name_length, &code)) {
+        PyErr_Format(PyExc_KeyError, "undefined character name '%s'", name);
+        return NULL;
+    }
+    return PyUnicode_FromOrdinal(code);
+}
+```
+
+`'\N{SNOWMAN}'` in string literals uses this lookup at compile time.
+
+### Category
+
+```c
+// CPython: Modules/unicodedata.c:530 unicodedata_category_impl
+/* Returns two-letter Unicode category: Lu, Ll, Lt, Lm, Lo, Mn, Mc, Me,
+   Nd, Nl, No, Pc, Pd, Ps, Pe, Pi, Pf, Po, Sm, Sc, Sk, So, Zs, Zl, Zp,
+   Cc, Cf, Cs, Co, Cn */
+static PyObject *
+unicodedata_category_impl(PyObject *self, int chr)
+{
+    int index = (int) _PyUnicode_ToCategory(chr);
+    return PyUnicode_FromString(_Py_CategoryNames[index]);
+}
+```
+
+## gopy notes
+
+`unicodedata` is in `module/unicodedata/module.go`. The UCD tables are compiled from Unicode 15 data files in `module/unicodedata/tables.go` (auto-generated). `normalize` uses Go's `golang.org/x/text/unicode/norm` package for NFC/NFD/NFKC/NFKD. `name`/`lookup` use a Go port of the CPython trie.

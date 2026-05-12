@@ -332,6 +332,8 @@ const sidebars = {
         'annotations/python/python_thread2_detail',
         'annotations/python/python_pyarena_detail',
         'annotations/python/python_gc2_detail',
+        'annotations/python/python_bootstrap_hash_detail',
+        'annotations/python/python_thread3_detail',
       ],
     },
     {
@@ -529,6 +531,7 @@ const sidebars = {
         'annotations/objects/objects_unicodeobject4_detail',
         'annotations/objects/objects_tupleobject3_detail',
         'annotations/objects/objects_setobject2_detail',
+        'annotations/objects/objects_dictobject3_detail',
       ],
     },
     {
@@ -769,6 +772,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_runtime_h_detail',
         'annotations/include/include_internal_pycore_warnings_h_detail',
         'annotations/include/include_internal_pycore_frame_h_detail2',
+        'annotations/include/include_internal_pycore_atexit_h_detail',
       ],
     },
     {
@@ -1008,6 +1012,8 @@ const sidebars = {
         'annotations/modules/modules_audioop_detail',
         'annotations/modules/modules_signal_detail',
         'annotations/modules/modules_resource_detail',
+        'annotations/modules/modules_unicodedata_detail',
+        'annotations/modules/modules_posixpath_detail',
       ],
     },
     {
@@ -1530,6 +1536,10 @@ const sidebars = {
         'annotations/lib/lib_imaplib_detail',
         'annotations/lib/lib_xmlrpc_detail',
         'annotations/lib/lib_logging2_detail',
+        'annotations/lib/lib_dataclasses2_detail',
+        'annotations/lib/lib_enum2_detail',
+        'annotations/lib/lib_contextlib2_detail',
+        'annotations/lib/lib_unittest2_detail',
       ],
     },
   ],

@@ -1,0 +1,126 @@
+---
+title: Python/thread.c (part 3)
+description: "Python/thread.c part 3: PyThread_allocate_lock, PyThread_acquire_lock, PyThread_release_lock, PyThread_free_lock, timeout support."
+cpython_path: Python/thread.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/thread.c" />
+
+This annotation covers the `PyThread_type_lock` API — the portable locking primitive used throughout CPython for the GIL, the import lock, and per-object locks. See `python_thread_detail` for thread creation and `python_thread2_detail` for thread-local storage.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyThread_allocate_lock` | Create a new lock (backed by `pthread_mutex` or Win32 event) |
+| 81-180 | `PyThread_acquire_lock_timed` | Try to acquire with optional timeout |
+| 181-280 | `PyThread_acquire_lock` | Blocking acquire (no timeout) |
+| 281-360 | `PyThread_release_lock` | Release; error if not held by this thread |
+| 361-440 | `PyThread_free_lock` | Destroy and free the lock |
+| 441-600 | `_PyThread_cond_*` | Condition variable helpers used by the GIL |
+
+## Reading
+
+### `PyThread_allocate_lock`
+
+```c
+// CPython: Python/thread_pthread.h:380 PyThread_allocate_lock
+PyThread_type_lock
+PyThread_allocate_lock(void)
+{
+    /* sem_t on platforms that have it; pthread_mutex_t otherwise */
+#ifdef USE_SEMAPHORES
+    sem_t *lock = (sem_t *)PyMem_RawMalloc(sizeof(sem_t));
+    if (lock) {
+        if (sem_init(lock, 0, 1) < 0) {
+            PyMem_RawFree(lock);
+            lock = NULL;
+        }
+    }
+#else
+    pthread_lock *lock = (pthread_lock *)PyMem_RawMalloc(sizeof(pthread_lock));
+    if (lock) {
+        lock->locked = 0;
+        pthread_mutex_init(&lock->mut, NULL);
+        pthread_cond_init(&lock->lock_released, NULL);
+    }
+#endif
+    return (PyThread_type_lock)lock;
+}
+```
+
+### `PyThread_acquire_lock_timed`
+
+```c
+// CPython: Python/thread_pthread.h:440 PyThread_acquire_lock_timed
+PyLockStatus
+PyThread_acquire_lock_timed(PyThread_type_lock lock,
+                             PY_TIMEOUT_T microseconds, int intr_flag)
+{
+    /* microseconds == 0  → try without blocking
+       microseconds == -1 → block indefinitely */
+#ifdef USE_SEMAPHORES
+    sem_t *thelock = (sem_t *)lock;
+    int success;
+    if (microseconds == 0) {
+        success = sem_trywait(thelock) == 0;
+    } else if (microseconds < 0) {
+        do { success = sem_wait(thelock) == 0; }
+        while (!success && errno == EINTR && !intr_flag);
+    } else {
+        struct timespec ts = _PyDeadline_AsTimespec(microseconds);
+        do { success = sem_timedwait(thelock, &ts) == 0; }
+        while (!success && errno == EINTR && !intr_flag);
+    }
+    return success ? PY_LOCK_ACQUIRED : PY_LOCK_FAILURE;
+#else
+    /* pthread_mutex + condition variable path */
+    ...
+#endif
+}
+```
+
+`intr_flag=1` allows the acquire to fail on `EINTR` (used when holding the GIL so signals can be handled).
+
+### `PyThread_release_lock`
+
+```c
+// CPython: Python/thread_pthread.h:520 PyThread_release_lock
+void
+PyThread_release_lock(PyThread_type_lock lock)
+{
+#ifdef USE_SEMAPHORES
+    sem_post((sem_t *)lock);
+#else
+    pthread_lock *thelock = (pthread_lock *)lock;
+    pthread_mutex_lock(&thelock->mut);
+    thelock->locked = 0;
+    pthread_mutex_unlock(&thelock->mut);
+    pthread_cond_signal(&thelock->lock_released);
+#endif
+}
+```
+
+### Condition variables for the GIL
+
+```c
+// CPython: Python/thread_pthread.h:560 _PyThread_cond_init
+/* The GIL uses a condition variable to avoid busy-waiting.
+   A thread waiting for the GIL calls pthread_cond_timedwait;
+   the GIL holder calls pthread_cond_signal when releasing it. */
+typedef struct {
+    pthread_cond_t  cond;
+    pthread_mutex_t mutex;
+} _PyThread_cond_t;
+```
+
+The GIL is not implemented as a `PyThread_type_lock`; it uses these lower-level condition variables directly for better latency.
+
+## gopy notes
+
+gopy does not have a GIL. `PyThread_type_lock` maps to `vm.PyLock` (a `sync.Mutex` wrapper) in `vm/thread_lock.go`. `PyThread_acquire_lock_timed` maps to `vm.PyLock.AcquireTimed(timeout time.Duration)`. The condition variable helpers have no equivalent since goroutine scheduling is handled by the Go runtime.

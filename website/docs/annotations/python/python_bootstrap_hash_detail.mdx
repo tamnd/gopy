@@ -1,0 +1,105 @@
+---
+title: Python/bootstrap_hash.c
+description: "Python/bootstrap_hash.c: _Py_HashSecret initialization, SipHash-1-3 reference, os.urandom fallback for hash randomization."
+cpython_path: Python/bootstrap_hash.c
+cpython_version: "3.14"
+lines: 450
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/bootstrap_hash.c" />
+
+`bootstrap_hash.c` initializes the per-process hash secret used by `str.__hash__`, `bytes.__hash__`, and `datetime.__hash__`. It runs before the interpreter is fully initialized, so it cannot allocate Python objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_Py_HashSecret_t` | Union: two 64-bit halves or a `fnv` pair |
+| 81-200 | `_Py_InitializeHashRandomization` | Read entropy from OS, set `_Py_HashSecret` |
+| 201-300 | `lcg_urandom` | Fallback PRNG when OS entropy is unavailable |
+| 301-400 | `py_getrandom` | Wrapper for `getrandom(2)` / `/dev/urandom` |
+| 401-450 | `PYTHONHASHSEED` | Env var to set a fixed seed (for reproducibility) |
+
+## Reading
+
+### `_Py_HashSecret_t`
+
+```c
+// CPython: Python/bootstrap_hash.c:48 _Py_HashSecret_t
+typedef union {
+    /* secret for Sip-Hash: two 64-bit words */
+    struct {
+        uint64_t k0;
+        uint64_t k1;
+    } siphash;
+    /* secret for FNV (fallback): two size_t words */
+    struct {
+        Py_hash_t prefix;
+        Py_hash_t suffix;
+    } fnv;
+    unsigned char bytes[16];
+} _Py_HashSecret_t;
+
+extern _Py_HashSecret_t _Py_HashSecret;
+```
+
+`_Py_HashSecret` is a global initialized once at startup. Its value changes each process run unless `PYTHONHASHSEED` is set.
+
+### `_Py_InitializeHashRandomization`
+
+```c
+// CPython: Python/bootstrap_hash.c:130 _Py_InitializeHashRandomization
+void
+_Py_InitializeHashRandomization(void)
+{
+    const char *seed_str = Py_GETENV("PYTHONHASHSEED");
+    if (seed_str && strcmp(seed_str, "random") != 0) {
+        /* Fixed seed: PYTHONHASHSEED=0 disables hash randomization */
+        unsigned long seed = strtoul(seed_str, NULL, 10);
+        lcg_urandom(seed, _Py_HashSecret.bytes, sizeof(_Py_HashSecret));
+        return;
+    }
+    /* Random seed: fill from OS entropy */
+    if (py_getrandom(_Py_HashSecret.bytes, sizeof(_Py_HashSecret), 1) < 0) {
+        /* Fallback: use lcg seeded from clock */
+        lcg_urandom((uint32_t)time(NULL), _Py_HashSecret.bytes,
+                    sizeof(_Py_HashSecret));
+    }
+}
+```
+
+### `py_getrandom`
+
+```c
+// CPython: Python/bootstrap_hash.c:260 py_getrandom
+static int
+py_getrandom(void *buffer, Py_ssize_t size, int blocking)
+{
+#if defined(HAVE_GETRANDOM_SYSCALL)
+    long n = syscall(SYS_getrandom, buffer, size,
+                     blocking ? 0 : GRND_NONBLOCK);
+    if (n == size) return 1;
+    if (n < 0 && errno == ENOSYS) { /* kernel too old */ }
+#endif
+#ifdef MS_WINDOWS
+    if (BCryptGenRandom(NULL, buffer, size, BCRYPT_USE_SYSTEM_PREFERRED_RNG))
+        return -1;
+    return 1;
+#else
+    /* /dev/urandom fallback */
+    int fd = _Py_open_noraise("/dev/urandom", O_RDONLY);
+    ...
+#endif
+}
+```
+
+### `PYTHONHASHSEED`
+
+`PYTHONHASHSEED=0` sets the hash secret to all zeros, disabling randomization. This produces deterministic hashes across runs, useful for debugging. Setting it to any integer uses `lcg_urandom` seeded from that integer.
+
+## gopy notes
+
+gopy initializes `_Py_HashSecret` in `vm/hash_secret.go` using `crypto/rand.Read`. `PYTHONHASHSEED` is checked in `vm.InitHashRandomization()`. The SipHash-1-3 implementation is in `vm/siphash.go`, matching CPython's `Python/pyhash.c`. When `PYTHONHASHSEED=0` is set, the secret bytes are all-zero and hash results match CPython.

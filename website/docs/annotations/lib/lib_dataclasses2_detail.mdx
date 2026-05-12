@@ -1,0 +1,125 @@
+---
+title: Lib/dataclasses.py (part 2)
+description: "Lib/dataclasses.py part 2: __post_init__, field() descriptor, InitVar, KW_ONLY sentinel, __slots__ generation, __match_args__."
+cpython_path: Lib/dataclasses.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/dataclasses.py" />
+
+This annotation covers advanced dataclass features added in 3.10-3.14. See `lib_dataclasses_detail` for `@dataclass`, `__init__` generation, and `field()` basics.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `KW_ONLY` sentinel | Fields after `KW_ONLY` become keyword-only in `__init__` |
+| 81-200 | `InitVar` | Field type that appears in `__init__` but not stored as attribute |
+| 201-350 | `__post_init__` | Hook called at end of generated `__init__` |
+| 351-500 | `__slots__` generation | `@dataclass(slots=True)` rebuilds class with `__slots__` |
+| 501-650 | `__match_args__` | PEP 634 positional pattern matching support |
+| 651-900 | `field()` advanced | `default_factory`, `compare`, `hash`, `metadata` |
+| 901-1100 | `replace()` | Create modified copy (like `namedtuple._replace`) |
+| 1101-1400 | `make_dataclass()` | Programmatic dataclass creation from field spec |
+
+## Reading
+
+### `KW_ONLY`
+
+```python
+# CPython: Lib/dataclasses.py:218 KW_ONLY
+KW_ONLY = KW_ONLY()  # singleton sentinel
+
+# Usage:
+@dataclass
+class Point:
+    x: float
+    y: float
+    _: KW_ONLY
+    label: str = ''   # keyword-only from here on
+```
+
+The `_process_class` function marks all fields after `KW_ONLY` with `kw_only=True`.
+
+### `InitVar`
+
+```python
+# CPython: Lib/dataclasses.py:290 InitVar
+class InitVar:
+    """Marks a field that appears in __init__ but is not stored."""
+    def __init__(self, type): self.type = type
+    def __class_getitem__(cls, type): return cls(type)
+
+# Usage:
+@dataclass
+class C:
+    init_val: InitVar[int]
+    value: int = field(init=False)
+    def __post_init__(self, init_val):
+        self.value = init_val * 2
+```
+
+`InitVar` fields are passed to `__post_init__` but not assigned as instance attributes.
+
+### `__post_init__`
+
+```python
+# CPython: Lib/dataclasses.py:380 _init_fn (generates __init__)
+def _init_fn(fields, frozen, has_post_init, self_name, globals, slots):
+    # ...generate __init__ body...
+    if has_post_init:
+        # Append: self.__dataclass_post_init__(initvar1, initvar2, ...)
+        body_lines.append(f'  {self_name}.{POST_INIT_NAME}('
+                          + ','.join(f.name for f in fields
+                                     if isinstance(f.type, InitVar))
+                          + ')')
+```
+
+### `slots=True`
+
+```python
+# CPython: Lib/dataclasses.py:510 _add_slots
+def _add_slots(cls, is_frozen, has_weakref_slot):
+    # Collect field names for __slots__
+    cls_fields = [f.name for f in fields(cls)]
+    # Rebuild the class with __slots__ set
+    # (cannot add __slots__ to an existing class)
+    new_cls = type(cls)(cls.__name__, cls.__bases__,
+                        {**{k: v for k, v in cls.__dict__.items()
+                            if k not in cls_fields},
+                         '__slots__': tuple(cls_fields)})
+    new_cls.__qualname__ = cls.__qualname__
+    return new_cls
+```
+
+`slots=True` creates a brand-new class object, so any existing references to the original class will not see the slotted version.
+
+### `replace()`
+
+```python
+# CPython: Lib/dataclasses.py:1200 replace
+def replace(obj, /, **changes):
+    """Return a new dataclass instance with fields replaced."""
+    if not _is_dataclass_instance(obj):
+        raise TypeError("replace() should be called on dataclass instances")
+    # Build init kwargs from current values + overrides
+    init_fields = {f.name: f for f in fields(obj) if f.init}
+    kwargs = {}
+    for f in fields(obj):
+        if not f.init: continue
+        if f.name in changes:
+            kwargs[f.name] = changes.pop(f.name)
+        else:
+            kwargs[f.name] = getattr(obj, f.name)
+    if changes:
+        raise TypeError(f'replace() got unexpected keyword arguments: {list(changes)}')
+    return obj.__class__(**kwargs)
+```
+
+## gopy notes
+
+`dataclasses` is pure Python. `__slots__` generation works via `type()` which calls `tp_new` in gopy's `objects/type_call.go`. `InitVar` annotation handling uses `get_type_hints()` which requires `typing` module support.

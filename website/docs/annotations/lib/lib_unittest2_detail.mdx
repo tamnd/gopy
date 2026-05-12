@@ -1,0 +1,139 @@
+---
+title: Lib/unittest/case.py (part 2)
+description: "Lib/unittest/case.py part 2: assertRaises, assertWarns, subTest, addCleanup, skipIf/skipUnless, expectedFailure."
+cpython_path: Lib/unittest/case.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/unittest/case.py" />
+
+This annotation covers context-manager assertions, test lifecycle hooks, and skipping/expected-failure markers. See `lib_unittest_detail` for `TestCase.run`, `assertEqual` family, and the assertion infrastructure.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_AssertRaisesContext` | Context manager returned by `assertRaises` |
+| 81-200 | `assertRaises` / `assertRaisesRegex` | Verify an exception is raised |
+| 201-350 | `assertWarns` / `assertWarnsRegex` | Verify a warning is issued |
+| 351-500 | `subTest` | Mark a sub-case within a test; failures don't stop the test |
+| 501-650 | `addCleanup` / `doCleanups` | Register teardown callbacks |
+| 651-800 | `skipIf` / `skipUnless` | Conditional skip decorators |
+| 801-900 | `expectedFailure` | Mark a test expected to fail |
+| 901-1400 | Numeric/sequence assertions | `assertAlmostEqual`, `assertSequenceEqual`, `assertDictEqual` |
+
+## Reading
+
+### `assertRaises` as context manager
+
+```python
+# CPython: Lib/unittest/case.py:195 assertRaises
+def assertRaises(self, expected_exception, *args, **kwargs):
+    context = _AssertRaisesContext(expected_exception, self)
+    try:
+        return context.handle('assertRaises', args, kwargs)
+    except Exception:
+        raise
+
+class _AssertRaisesContext:
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc_value, tb):
+        if exc_type is None:
+            raise self.failureException(
+                f'{self.expected.__name__} not raised')
+        if not issubclass(exc_type, self.expected):
+            return False  # re-raise unexpected exception
+        self.exception = exc_value.with_traceback(None)
+        return True  # suppress the expected exception
+```
+
+### `subTest`
+
+```python
+# CPython: Lib/unittest/case.py:370 subTest
+@contextmanager
+def subTest(self, msg=_subtest_msg_sentinel, **params):
+    """Context manager for a sub-case that can fail without stopping the test."""
+    parent = self._subtest
+    if parent is None:
+        params_map = _OrderedChainMap(params)
+    else:
+        params_map = parent.params.new_child(params)
+    self._subtest = _SubTest(self, msg, params_map)
+    try:
+        with self._outcome.testPartExecutor(self._subtest):
+            yield
+    finally:
+        self._subtest = parent
+```
+
+Failed subtests are collected; the parent test is marked as failed after all subtests run.
+
+### `addCleanup`
+
+```python
+# CPython: Lib/unittest/case.py:520 addCleanup
+def addCleanup(self, function, /, *args, **kwargs):
+    """Register a function to be called after tearDown (LIFO order)."""
+    self._cleanups.append((function, args, kwargs))
+
+def doCleanups(self):
+    """Called by TestCase.run() after tearDown."""
+    outcome = self._outcome
+    while self._cleanups:
+        function, args, kwargs = self._cleanups.pop()
+        with outcome.testPartExecutor(self):
+            function(*args, **kwargs)
+    return outcome.success
+```
+
+### `skipIf` / `expectedFailure`
+
+```python
+# CPython: Lib/unittest/case.py:672 skipIf
+def skipIf(condition, reason):
+    """Skip the test if condition is true."""
+    if condition:
+        return skip(reason)
+    return lambda x: x
+
+# CPython: Lib/unittest/case.py:820 expectedFailure
+def expectedFailure(test_item):
+    """Mark a test as expected to fail.
+    If it passes, it is counted as an unexpected success."""
+    test_item.__unittest_expecting_failure__ = True
+    return test_item
+```
+
+`expectedFailure` wraps the test in `_ExpectedFailure`; if the test passes, the runner reports it as `u` (unexpected success).
+
+### `assertAlmostEqual`
+
+```python
+# CPython: Lib/unittest/case.py:920 assertAlmostEqual
+def assertAlmostEqual(self, first, second, places=7,
+                       msg=None, delta=None):
+    if first == second:
+        return
+    if delta is not None and places is not None:
+        raise TypeError("specify delta or places, not both")
+    diff = abs(second - first)
+    if delta is not None:
+        if diff <= delta: return
+        msg = self._formatMessage(msg,
+            f'{first!r} != {second!r} within {delta!r} delta ({diff!r})')
+    else:
+        if round(diff, places) == 0: return
+        msg = self._formatMessage(msg,
+            f'{first!r} != {second!r} within {places!r} places ({diff!r})')
+    raise self.failureException(msg)
+```
+
+## gopy notes
+
+`unittest` is pure Python. `subTest` uses `@contextmanager` (gopy's `lib_contextlib_detail`). `assertRaises` as a context manager uses `__exit__` to inspect the exception. `addCleanup` is implemented in `TestCase` with a `_cleanups` list; gopy's `list` append/pop handles this correctly.

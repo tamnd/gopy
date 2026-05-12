@@ -1,0 +1,142 @@
+---
+title: Objects/dictobject.c (part 3)
+description: "Objects/dictobject.c part 3: dict views (keys/values/items), dict merge, dict union operator, shared keys (split-table optimization)."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers dict views, the merge API, and the split-table optimization for instance `__dict__`. See `objects_dictobject_detail` and `objects_dictobject2_detail` for the hash table and basic operations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `dict_keys` / `dict_values` / `dict_items` | View objects returned by `.keys()`, `.values()`, `.items()` |
+| 101-250 | `dictview_iter` | Iteration over a view; detects dict mutation mid-iter |
+| 251-400 | `PyDict_Merge` | Merge `b` into `a`; used by `dict.update()` |
+| 401-550 | `dict_or` / `dict_ior` | `{} | {}` and `{} |= {}` (PEP 584, 3.9+) |
+| 551-750 | Split-table `dk_kind` | Shared key array for all instances of the same class |
+| 751-1000 | `_PyDict_NewPresized` | Pre-size a dict for known number of entries |
+| 1001-1200 | `PyDict_SetDefault` | `dict.setdefault()` — insert if absent, return existing |
+
+## Reading
+
+### Dict views
+
+```c
+// CPython: Objects/dictobject.c:4580 dictkeys_new
+/* dict.keys() returns a dictkeysview wrapping the dict */
+/* Iteration calls dictiter_iternextkey */
+/* Membership uses dict.__contains__ */
+
+static PyObject *
+dictkeys_new(PyObject *dict, PyObject *Py_UNUSED(ignored))
+{
+    return _PyDictView_New(dict, &PyDictKeys_Type);
+}
+```
+
+Dict views hold a reference to the dict and reflect current state. Mutating the dict during iteration raises `RuntimeError`.
+
+### Mutation detection
+
+```c
+// CPython: Objects/dictobject.c:4620 dictiter_iternextkey
+static PyObject *
+dictiter_iternextkey(dictiterobject *di)
+{
+    PyDictObject *mp = di->di_dict;
+    if (di->di_used != mp->ma_used) {
+        /* Dict changed size during iteration */
+        PyErr_SetString(PyExc_RuntimeError,
+            "dictionary changed size during iteration");
+        di->di_used = -1;
+        return NULL;
+    }
+    ...
+}
+```
+
+### `PyDict_Merge`
+
+```c
+// CPython: Objects/dictobject.c:2980 PyDict_Merge
+int
+PyDict_Merge(PyObject *a, PyObject *b, int override)
+{
+    /* override: 2 = raise on key conflict; 1 = overwrite; 0 = skip */
+    if (PyDict_CheckExact(b)) {
+        /* Fast path: direct table copy */
+        return dict_merge(a, b, override);
+    }
+    /* Slow path: iterate b using keys() */
+    ...
+}
+```
+
+`dict.update(other)` calls `PyDict_Merge` with `override=1`. The `|=` operator uses `override=1`; the `|` operator uses a fresh dict.
+
+### Dict union (`|`)
+
+```c
+// CPython: Objects/dictobject.c:3280 dict_or
+static PyObject *
+dict_or(PyObject *self, PyObject *other)
+{
+    if (!PyDict_Check(self) || !PyDict_Check(other))
+        return Py_NewRef(Py_NotImplemented);
+    PyObject *new = PyDict_Copy(self);
+    if (new == NULL) return NULL;
+    if (dict_update_common(new, other, "dict.__or__") < 0) {
+        Py_DECREF(new);
+        return NULL;
+    }
+    return new;
+}
+```
+
+### Split-table optimization
+
+```c
+// CPython: Objects/dictobject.c:620 _PyDict_NewWithFreeListSize
+/* When many instances of the same class are created, they share
+   a single PyDictKeysObject (the key array and hash table).
+   Each instance only stores a compact values array.
+   This cuts per-instance memory from ~232 bytes to ~56 bytes
+   for a class with 4 attributes. */
+```
+
+The shared key object `dk_kind == DICT_KEYS_SPLIT` is attached to the class's `tp_dict`. When a new attribute is added to one instance, the split table is "unsplit" for that instance.
+
+### `PyDict_SetDefault`
+
+```c
+// CPython: Objects/dictobject.c:3480 PyDict_SetDefault
+PyObject *
+PyDict_SetDefault(PyObject *d, PyObject *key, PyObject *defaultobj)
+{
+    /* Return existing value if key is present; insert defaultobj otherwise */
+    PyDictObject *mp = (PyDictObject *)d;
+    Py_hash_t hash;
+    if (!PyUnicode_CheckExact(key) ||
+        (hash = unicode_get_hash(key)) == -1) {
+        hash = PyObject_Hash(key);
+        if (hash == -1) return NULL;
+    }
+    PyObject *val = NULL;
+    /* Lookup and insert in one operation to avoid double hash */
+    if (insertdict(mp, key, hash, defaultobj) < 0) return NULL;
+    ...
+    return val;
+}
+```
+
+## gopy notes
+
+Dict views are `objects.DictKeysView`, `objects.DictValuesView`, `objects.DictItemsView` in `objects/dict_iter.go`. `PyDict_Merge` is `DictMerge` in `objects/dict_mutate.go`. The split-table optimization is in gopy with `DictKindSplit` in `objects/dict.go`, sharing a `*DictKeys` among instances of the same type.

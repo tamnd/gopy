@@ -1,0 +1,75 @@
+---
+title: Include/internal/pycore_atexit.h
+description: "Include/internal/pycore_atexit.h: _PyAtExit_State — per-interpreter atexit callback list, _Py_AtExit, atexit.register internals."
+cpython_path: Include/internal/pycore_atexit.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_atexit.h" />
+
+`pycore_atexit.h` declares the per-interpreter atexit callback state. `atexit.register` appends to this list; `Py_FinalizeEx` drains it in LIFO order.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `atexit_callback` | A single registered callback: callable + args + kwargs |
+| 31-50 | `_PyAtExit_State` | List of callbacks embedded in `PyInterpreterState` |
+| 51-60 | `_Py_AtExit` | C-level registration (used by `Py_AtExit`) |
+
+## Reading
+
+### `atexit_callback`
+
+```c
+// CPython: Include/internal/pycore_atexit.h:14 atexit_callback
+typedef struct {
+    PyObject *func;
+    PyObject *args;
+    PyObject *kwargs;
+} atexit_callback;
+```
+
+### `_PyAtExit_State`
+
+```c
+// CPython: Include/internal/pycore_atexit.h:22 _PyAtExit_State
+struct _PyAtExit_State {
+    atexit_callback **callbacks;  /* dynamically grown array */
+    int ncallbacks;               /* number of registered callbacks */
+    int callback_len;             /* allocated capacity */
+};
+```
+
+### How `atexit.register` uses this
+
+```python
+# CPython: Lib/atexit.py (backed by Modules/atexitmodule.c)
+# atexit.register(func, *args, **kwargs) appends to callbacks[]
+# Py_FinalizeEx calls _PyAtExit_Call() which iterates in reverse:
+# for i in range(ncallbacks-1, -1, -1):
+#     callbacks[i].func(*callbacks[i].args, **callbacks[i].kwargs)
+```
+
+Callbacks are called in LIFO (last-in, first-out) order. Exceptions in callbacks are printed to `sys.stderr` but do not stop the remaining callbacks.
+
+### `_Py_AtExit` (C-level)
+
+```c
+// CPython: Include/internal/pycore_atexit.h:52 _Py_AtExit
+/* Register a C function to be called at interpreter shutdown.
+   Used internally (e.g. by readline cleanup). */
+int _Py_AtExit(PyInterpreterState *interp,
+               atexit_datacallbackfunc func,
+               void *data);
+```
+
+This C-level API registers a `(func, data)` pair and is separate from the Python `atexit` module's callback list.
+
+## gopy notes
+
+gopy stores atexit state in `vm/atexit.go` as a `[]atexitEntry` on the interpreter. `atexit.register` appends via `module/atexit/module.go`. `vm.RunAtExit()` is called from `Py_FinalizeEx` in LIFO order. C-level `_Py_AtExit` is not exposed since gopy has no C extension ABI.

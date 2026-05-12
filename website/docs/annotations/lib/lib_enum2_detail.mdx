@@ -1,0 +1,141 @@
+---
+title: Lib/enum.py (part 2)
+description: "Lib/enum.py part 2: Flag, IntFlag, _decompose, _missing_, auto(), StrEnum, member/nonmember, verify decorators."
+cpython_path: Lib/enum.py
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/enum.py" />
+
+This annotation covers `Flag`, `IntFlag`, and 3.11+ additions. See `lib_enum_detail` for `Enum`, `EnumMeta.__new__`, member lookup, and `IntEnum`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Flag` | Bitwise-composable enum; `&`, `|`, `^`, `~` operators |
+| 101-250 | `_decompose` | Split a composite flag into canonical members |
+| 251-400 | `IntFlag` | `Flag` + `int` mixin — arbitrary ints are valid |
+| 401-550 | `_missing_` | Hook called when lookup fails; default raises `ValueError` |
+| 551-700 | `auto()` | Automatic value generation; default `_generate_next_value_` |
+| 701-850 | `StrEnum` | `str` + `Enum`; values are lowercase names by default |
+| 851-1000 | `member` / `nonmember` | Mark a descriptor as an enum member or exclude it |
+| 1001-1200 | `verify()` | Post-definition checks: UNIQUE, CONTINUOUS, NAMED_FLAGS |
+
+## Reading
+
+### `Flag` bitwise operations
+
+```python
+# CPython: Lib/enum.py:880 Flag.__or__
+class Flag(Enum):
+    def __or__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self.__class__(self._value_ | other._value_)
+
+    def __and__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self.__class__(self._value_ & other._value_)
+
+    def __xor__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self.__class__(self._value_ ^ other._value_)
+
+    def __invert__(self):
+        # Invert within the set of defined bits
+        result = self.__class__(self._flag_mask_ ^ self._value_)
+        return result
+```
+
+### `_decompose`
+
+```python
+# CPython: Lib/enum.py:980 _decompose
+def _decompose(flag, value):
+    """Return list of canonical Flag members for a composite value."""
+    not_covered = value
+    negative = value < 0
+    members = []
+    for member in flag:
+        member_value = member._value_
+        if member_value and member_value & value == member_value:
+            members.append(member)
+            not_covered &= ~member_value
+    if not negative and not_covered:
+        # Pseudo-member for leftover bits
+        members.append(flag._create_pseudo_member_(not_covered))
+    members.sort(key=lambda m: m._value_, reverse=True)
+    return members, not_covered
+```
+
+`repr(Permission.READ | Permission.WRITE)` uses `_decompose` to list the constituent members.
+
+### `_missing_`
+
+```python
+# CPython: Lib/enum.py:540 EnumType.__call__ (uses _missing_)
+# When MyEnum(value) fails lookup, _missing_ is called:
+@classmethod
+def _missing_(cls, value):
+    # Default: raise ValueError
+    raise ValueError(f'{value!r} is not a valid {cls.__name__}')
+
+# Override for auto-creation:
+class Color(Enum):
+    @classmethod
+    def _missing_(cls, value):
+        obj = object.__new__(cls)
+        obj._value_ = value
+        obj._name_ = str(value)
+        return obj
+```
+
+### `auto()`
+
+```python
+# CPython: Lib/enum.py:620 auto
+class auto(int):
+    """Placeholder: value assigned by _generate_next_value_."""
+    _value_ = 0
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        """Default: increment from 1."""
+        for last_value in reversed(last_values):
+            try:
+                return last_value + 1
+            except TypeError:
+                pass
+        return start
+```
+
+### `verify(UNIQUE)`
+
+```python
+# CPython: Lib/enum.py:1100 verify
+def verify(*checks):
+    """Decorator that validates the enum after definition."""
+    def decorator(enumeration):
+        for check in checks:
+            if check is UNIQUE:
+                # Ensure no two names map to the same value
+                aliases = [n for n, v in enumeration.__members__.items()
+                           if v.name != n]
+                if aliases:
+                    raise ValueError(f'aliases found in {enumeration!r}: '
+                                     + ', '.join(aliases))
+        return enumeration
+    return decorator
+```
+
+`@verify(UNIQUE)` raises `ValueError` if any aliases (duplicate values) are found.
+
+## gopy notes
+
+`enum` is pure Python. `Flag.__or__` calls `self.__class__(value)` which invokes `EnumType.__call__`, handled by gopy's type call dispatch in `objects/type_call.go`. `auto()` subclasses `int`, so gopy treats it as a Python `int` with an extra attribute.

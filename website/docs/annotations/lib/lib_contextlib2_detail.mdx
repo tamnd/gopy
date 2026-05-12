@@ -1,0 +1,137 @@
+---
+title: Lib/contextlib.py (part 2)
+description: "Lib/contextlib.py part 2: AsyncContextManager, asynccontextmanager, AsyncExitStack, aclosing, nullcontext, chained suppress."
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/contextlib.py" />
+
+This annotation covers async context managers and advanced `ExitStack` usage added in Python 3.7+. See `lib_contextlib_detail` for `contextmanager`, `ExitStack`, `suppress`, and `redirect_stdout`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `AbstractAsyncContextManager` | Base class: `__aenter__`/`__aexit__` |
+| 81-200 | `asynccontextmanager` | Decorator wrapping an async generator as a context manager |
+| 201-350 | `AsyncExitStack` | Async version of `ExitStack` |
+| 351-450 | `aclosing` | Ensure `aclose()` is called on async generators |
+| 451-550 | `nullcontext` | No-op context manager (useful in conditional `with` chains) |
+| 551-700 | `chained_cm` | `contextmanager` composed via `@contextlib.contextmanager` |
+| 701-900 | `ExitStack._push_cm_exit` | Core callback registration for `with` stack |
+
+## Reading
+
+### `asynccontextmanager`
+
+```python
+# CPython: Lib/contextlib.py:220 asynccontextmanager
+def asynccontextmanager(func):
+    """Like @contextmanager but for async generator functions."""
+    @wraps(func)
+    def helper(*args, **kwds):
+        return _AsyncGeneratorContextManager(func, args, kwds)
+    return helper
+
+class _AsyncGeneratorContextManager(
+        _GeneratorContextManagerBase,
+        AbstractAsyncContextManager):
+    async def __aenter__(self):
+        try:
+            return await anext(self.gen)
+        except StopAsyncIteration:
+            raise RuntimeError("generator didn't yield") from None
+
+    async def __aexit__(self, typ, value, traceback):
+        if typ is None:
+            try:
+                await anext(self.gen)
+            except StopAsyncIteration:
+                return False
+            raise RuntimeError("generator didn't stop")
+        else:
+            # Throw exception into generator
+            try:
+                await self.gen.athrow(value)
+            except StopAsyncIteration as exc:
+                return exc is not value
+            except RuntimeError as exc:
+                ...
+```
+
+### `AsyncExitStack`
+
+```python
+# CPython: Lib/contextlib.py:490 AsyncExitStack
+class AsyncExitStack(_BaseExitStack, AbstractAsyncContextManager):
+    async def enter_async_context(self, cm):
+        """Enter a context manager and register its __aexit__."""
+        _cm_type = type(cm)
+        _exit = _cm_type.__aexit__
+        result = await _cm_type.__aenter__(cm)
+        self._push_async_cm_exit(cm, _exit)
+        return result
+
+    async def __aexit__(self, *exc_details):
+        received_exc = exc_details[1] is not None
+        pending_raise = False
+        while self._exit_callbacks:
+            is_sync, cb = self._exit_callbacks.pop()
+            try:
+                if is_sync:
+                    cb_suppress = cb(*exc_details)
+                else:
+                    cb_suppress = await cb(*exc_details)
+                if cb_suppress:
+                    exc_details = (None, None, None)
+                    pending_raise = False
+            except Exception:
+                exc_details = sys.exc_info()
+                pending_raise = True
+        if pending_raise:
+            raise exc_details[1]
+        return received_exc and not exc_details[1]
+```
+
+### `aclosing`
+
+```python
+# CPython: Lib/contextlib.py:610 aclosing
+class aclosing(AbstractAsyncContextManager):
+    """Ensure aclose() is called on an async generator when done."""
+    def __init__(self, thing):
+        self.thing = thing
+    async def __aenter__(self):
+        return self.thing
+    async def __aexit__(self, *exc_info):
+        await self.thing.aclose()
+```
+
+Without `aclosing`, an abandoned async generator's `aclose()` is only called by the GC, which may be non-deterministic.
+
+### `nullcontext`
+
+```python
+# CPython: Lib/contextlib.py:700 nullcontext
+class nullcontext(AbstractContextManager, AbstractAsyncContextManager):
+    """Context manager that does nothing — useful as a placeholder."""
+    def __init__(self, enter_result=None):
+        self.enter_result = enter_result
+    def __enter__(self):
+        return self.enter_result
+    def __exit__(self, *excinfo):
+        pass
+    async def __aenter__(self):
+        return self.enter_result
+    async def __aexit__(self, *excinfo):
+        pass
+```
+
+## gopy notes
+
+`asynccontextmanager` uses async generators via `__aiter__`/`__anext__`, which are in `objects/async_gen.go` in gopy. `AsyncExitStack` uses `await` which desugars to coroutine protocol (`send`/`throw`). `aclosing` calls `aclose()` which is implemented in `objects/async_gen.go:AsyncGenAclose`.

@@ -1,0 +1,142 @@
+---
+title: Lib/posixpath.py
+description: "Lib/posixpath.py: os.path on POSIX — join, split, dirname, basename, abspath, realpath, commonpath, expanduser, expandvars."
+cpython_path: Lib/posixpath.py
+cpython_version: "3.14"
+lines: 550
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/posixpath.py" />
+
+`posixpath` implements `os.path` on POSIX systems. It is pure Python and does string manipulation on path strings; actual filesystem access (like `realpath`) uses `os.getcwd()` and `os.readlink()`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `join` | Join path components, handling absolute segments |
+| 51-100 | `split` | `(head, tail)` — dirname and basename |
+| 101-150 | `abspath` | Prepend cwd if path is relative |
+| 151-250 | `realpath` | Resolve symlinks iteratively |
+| 251-350 | `expanduser` | Replace `~` with home directory |
+| 351-430 | `expandvars` | Replace `$VAR` and `${VAR}` with env values |
+| 431-550 | `commonpath` / `commonprefix` | Longest common subpath or prefix |
+
+## Reading
+
+### `join`
+
+```python
+# CPython: Lib/posixpath.py:71 join
+def join(a, *p):
+    """Join path components; an absolute component resets the result."""
+    sep = '/'
+    path = a
+    for b in p:
+        if b.startswith(sep):
+            path = b       # absolute component discards everything before it
+        elif not path or path.endswith(sep):
+            path += b
+        else:
+            path += sep + b
+    return path
+```
+
+### `split`
+
+```python
+# CPython: Lib/posixpath.py:100 split
+def split(p):
+    """Split into (head, tail) where tail has no slashes."""
+    sep = '/'
+    i = p.rfind(sep) + 1
+    head, tail = p[:i], p[i:]
+    if head and head != sep * len(head):
+        head = head.rstrip(sep)
+    return head, tail
+```
+
+`os.path.split('/a/b/c')` returns `('/a/b', 'c')`.
+
+### `realpath`
+
+```python
+# CPython: Lib/posixpath.py:200 realpath
+def realpath(filename, *, strict=False):
+    """Resolve symlinks, returning the canonical absolute path."""
+    filename = os.fspath(filename)
+    if not isabs(filename):
+        cwd = os.getcwd()
+        filename = join(cwd, filename)
+    bits = filename.split('/')
+    resolved = '/'
+    for bit in bits[1:]:
+        if not bit or bit == '.':
+            continue
+        if bit == '..':
+            resolved = dirname(resolved)
+            continue
+        path = join(resolved, bit)
+        try:
+            st = os.lstat(path)
+            if stat.S_ISLNK(st.st_mode):
+                target = os.readlink(path)
+                # Recurse (up to MAXSYMLINKS times) to resolve the link target
+                path = realpath(join(dirname(path), target), strict=strict)
+        except OSError:
+            if strict: raise
+        resolved = path
+    return resolved
+```
+
+### `expanduser`
+
+```python
+# CPython: Lib/posixpath.py:270 expanduser
+def expanduser(path):
+    """Replace ~ and ~user with home directory."""
+    if not path.startswith('~'):
+        return path
+    i = path.find('/', 1)
+    if i < 0:
+        i = len(path)
+    if i == 1:
+        # ~ alone: use HOME env var or pwd entry
+        userhome = os.environ.get('HOME') or \
+                   pwd.getpwuid(os.getuid()).pw_dir
+    else:
+        # ~user: look up in password database
+        name = path[1:i]
+        try:
+            userhome = pwd.getpwnam(name).pw_dir
+        except KeyError:
+            return path
+    return userhome + path[i:]
+```
+
+### `commonpath`
+
+```python
+# CPython: Lib/posixpath.py:480 commonpath
+def commonpath(paths):
+    """Return the longest common sub-path of each pathname in paths."""
+    paths = list(map(os.fspath, paths))
+    split_paths = [path.split('/') for path in paths]
+    # Normalise empty components
+    split_paths = [[c for c in s if c] for s in split_paths]
+    s1, s2 = min(split_paths), max(split_paths)
+    for i, c in enumerate(s1):
+        if c != s2[i]:
+            common = s1[:i]
+            break
+    else:
+        common = s1
+    return '/' + '/'.join(common) if paths[0].startswith('/') else '/'.join(common)
+```
+
+## gopy notes
+
+`os.path` on POSIX is `posixpath` in gopy, shipped as `module/os/path_posix.go` wrapping the pure-Python module. `expanduser` calls `pwd.getpwuid` via gopy's `module/pwd`. `realpath` calls `os.readlink` which uses `syscall.Readlink`.
