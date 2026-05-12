@@ -1,0 +1,99 @@
+---
+title: Lib/dataclasses.py (part 3)
+description: "dataclasses part 3: __post_init__, InitVar, KW_ONLY sentinel, __slots__ dataclasses, frozen + inheritance, field() metadata."
+cpython_path: Lib/dataclasses.py
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/dataclasses.py" />
+
+This annotation covers advanced `dataclasses` features. See `lib_dataclasses_detail2` for the basic `@dataclass`, `field()`, and `asdict`/`astuple`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `InitVar` | Marker: init-only field, not stored |
+| 101-250 | `KW_ONLY` | Sentinel: all following fields become keyword-only |
+| 251-500 | `__post_init__` call | Hook after `__init__` |
+| 501-750 | Frozen dataclass | `__setattr__`/`__delattr__` raising `FrozenInstanceError` |
+| 751-1000 | Slots dataclass (`slots=True`) | Dynamic `__slots__` via class re-creation |
+| 1001-1500 | Inheritance rules | Field ordering, frozen + non-frozen mixing |
+
+## Reading
+
+### `InitVar`
+
+```python
+# CPython: Lib/dataclasses.py:306 InitVar
+class InitVar:
+    __slots__ = ('type', )
+    def __init__(self, type):
+        self.type = type
+    def __class_getitem__(cls, type):
+        return cls(type)
+```
+
+`InitVar[T]` fields appear in `__init__` but are not stored as instance attributes. They are passed to `__post_init__` as positional arguments.
+
+```python
+# CPython: Lib/dataclasses.py usage
+@dataclass
+class C:
+    x: int
+    y: InitVar[int]   # passed to __post_init__, not stored
+
+    def __post_init__(self, y):
+        self.x += y
+```
+
+### `KW_ONLY`
+
+```python
+# CPython: Lib/dataclasses.py:350 KW_ONLY
+KW_ONLY = KW_ONLY()   # sentinel
+
+@dataclass
+class C:
+    x: int
+    _: KW_ONLY
+    y: int   # keyword-only from here
+```
+
+After `KW_ONLY`, all fields are keyword-only in `__init__`. This was added in Python 3.10.
+
+### Frozen dataclass
+
+```python
+# CPython: Lib/dataclasses.py:820 _frozen_setattr
+def _frozen_setattr(self, name, value):
+    if type(self).__dataclass_fields__ and name in type(self).__dataclass_fields__:
+        raise FrozenInstanceError('cannot assign to field {!r}'.format(name))
+    object.__setattr__(self, name, value)
+```
+
+`@dataclass(frozen=True)` generates `__setattr__` and `__delattr__` that raise `FrozenInstanceError` for dataclass fields but allow setting non-field attributes.
+
+### `slots=True` (3.10+)
+
+```python
+# CPython: Lib/dataclasses.py:1020 _process_class (slots path)
+if slots:
+    # Re-create the class with __slots__
+    cls_dict = {k: v for k, v in cls.__dict__.items() if k not in field_names}
+    cls_dict['__slots__'] = tuple(field_names)
+    new_cls = type(cls)(cls.__name__, cls.__bases__, cls_dict)
+    # Copy attributes
+    ...
+    return new_cls
+```
+
+Because `__slots__` must be declared at class creation time, `@dataclass(slots=True)` creates a brand-new class, copying over methods and non-field attributes.
+
+## gopy notes
+
+`InitVar`, `KW_ONLY`, and `__post_init__` are pure Python. The `frozen` feature requires `__setattr__` and `__delattr__` to be settable on instances (gopy supports this via the `__setattr__` slot on `objects.Type`). `slots=True` requires `type()` to accept a `__slots__` dict, which in gopy maps to pre-allocating fixed attribute slots rather than using a `__dict__`.

@@ -1,0 +1,90 @@
+---
+title: Lib/pathlib/ (part 4)
+description: "pathlib part 4: Path.open, read_text/write_text, read_bytes/write_bytes, iterdir, glob, rglob, stat, chmod, mkdir, rename, unlink, symlink_to."
+cpython_path: Lib/pathlib/_local.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pathlib/_local.py" />
+
+This annotation covers `Path`'s I/O and filesystem operations. See `lib_pathlib_detail3` for the path construction and decomposition methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Path.open` | `open()` wrapper returning a file object |
+| 101-200 | `read_text`, `write_text`, `read_bytes`, `write_bytes` | Convenience I/O |
+| 201-350 | `iterdir`, `glob`, `rglob` | Directory listing and pattern matching |
+| 351-500 | `stat`, `lstat`, `exists`, `is_file`, `is_dir`, `is_symlink` | Stat-based predicates |
+| 501-700 | `mkdir`, `rmdir`, `unlink`, `rename`, `replace` | Mutation operations |
+| 701-900 | `symlink_to`, `hardlink_to`, `readlink` | Symlink operations |
+| 901-1200 | `chmod`, `touch`, `owner`, `group` | Permission and metadata |
+
+## Reading
+
+### `Path.open`
+
+```python
+# CPython: Lib/pathlib/_local.py:840 Path.open
+def open(self, mode='r', buffering=-1, encoding=None,
+         errors=None, newline=None):
+    if 'b' not in mode:
+        encoding = io.text_encoding(encoding)
+    return self._accessor.open(self, flags, mode, ...)
+    # resolves to: io.open(str(self), mode, buffering, encoding, ...)
+```
+
+`Path.open` delegates to `io.open` with the string path. The `_accessor` layer was removed in 3.12; now it calls `io.open` directly.
+
+### `read_text`
+
+```python
+# CPython: Lib/pathlib/_local.py:870 Path.read_text
+def read_text(self, encoding=None, errors=None, newline=None):
+    encoding = io.text_encoding(encoding)
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+        return f.read()
+```
+
+### `glob`
+
+```python
+# CPython: Lib/pathlib/_local.py:980 Path.glob
+def glob(self, pattern, *, case_sensitive=None, recurse_symlinks=False):
+    sys_str = pattern if isinstance(pattern, str) else os.fsdecode(pattern)
+    drv, root, pattern_parts = self._flavour.parse_parts((sys_str,))
+    ...
+    selector = _make_selector(pattern_parts, self._flavour)
+    for p in selector.select_from(self):
+        yield p
+```
+
+`glob` uses `_Selector` objects (`_PreciseSelector`, `_WildcardSelector`, `_RecursiveWildcardSelector`) that traverse the directory tree lazily. `**` triggers `_RecursiveWildcardSelector`.
+
+### `mkdir`
+
+```python
+# CPython: Lib/pathlib/_local.py:1080 Path.mkdir
+def mkdir(self, mode=0o777, parents=False, exist_ok=False):
+    try:
+        self._accessor.mkdir(self, mode)
+    except FileNotFoundError:
+        if not parents or self.parent == self:
+            raise
+        self.parent.mkdir(parents=True, exist_ok=True)
+        self.mkdir(mode, parents=False, exist_ok=exist_ok)
+    except OSError:
+        if not exist_ok or not self.is_dir():
+            raise
+```
+
+`parents=True` calls `mkdir` recursively on the parent, equivalent to `os.makedirs`.
+
+## gopy notes
+
+`pathlib.Path` wraps `os` module functions. In gopy `Path.open` calls `os.open` (which wraps Go's `os.Open`). `glob` uses `os.scandir` and `fnmatch`. `stat`, `mkdir`, `unlink`, and `rename` call into the `posix` module which wraps Go's `os` package. The `_accessor` abstraction was removed in CPython 3.12, simplifying the implementation.

@@ -1,0 +1,101 @@
+---
+title: Lib/sys (Python/sysmodule.c)
+description: "sys module: argv, path, modules, stdout/stdin/stderr, exc_info, getframe, settrace, setprofile, intern, getrefcount, version_info."
+cpython_path: Python/sysmodule.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/sysmodule.c" />
+
+The `sys` module exposes interpreter internals. It is implemented in C (`Python/sysmodule.c`) as a built-in module. Most attributes are simple wrappers around interpreter state fields.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `sys.argv`, `sys.path`, `sys.modules` | Process and import state |
+| 301-600 | `sys.stdout`, `sys.stdin`, `sys.stderr` | Standard streams |
+| 601-900 | `sys.exc_info`, `sys.last_exc` | Current exception access |
+| 901-1200 | `sys._getframe`, `sys._getframemodulename` | Frame introspection |
+| 1201-1500 | `sys.settrace`, `sys.setprofile` | Trace/profile hooks |
+| 1501-1800 | `sys.intern`, `sys.getrefcount`, `sys.getsizeof` | Object utilities |
+| 1801-2200 | `sys.version`, `sys.version_info`, `sys.platform` | Version and platform |
+| 2201-3500 | `sys.exit`, `sys.getrecursionlimit`, `sys.setrecursionlimit` | Runtime control |
+
+## Reading
+
+### `sys.exc_info`
+
+```c
+// CPython: Python/sysmodule.c:720 sys_exc_info_impl
+static PyObject *
+sys_exc_info_impl(PyObject *module)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    return _PyErr_StackItem_To_Tuple(tstate->exc_info);
+}
+```
+
+Returns `(type, value, traceback)` for the exception currently being handled. Returns `(None, None, None)` outside an `except` block.
+
+### `sys._getframe`
+
+```c
+// CPython: Python/sysmodule.c:1045 sys__getframe_impl
+static PyObject *
+sys__getframe_impl(PyObject *module, int depth)
+{
+    PyFrameObject *f = PyEval_GetFrame();
+    while (depth > 0 && f != NULL) {
+        f = f->f_back;
+        depth--;
+    }
+    if (f == NULL) {
+        PyErr_SetString(PyExc_ValueError, "call stack is not deep enough");
+        return NULL;
+    }
+    return (PyObject *)f;
+}
+```
+
+`sys._getframe(0)` returns the current frame, `sys._getframe(1)` the caller's frame, etc.
+
+### `sys.settrace`
+
+```c
+// CPython: Python/sysmodule.c:1180 sys_settrace_impl
+static PyObject *
+sys_settrace_impl(PyObject *module, PyObject *o)
+{
+    if (o == Py_None) {
+        PyEval_SetTrace(NULL, NULL);
+    } else {
+        PyEval_SetTrace(trace_trampoline, o);
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`PyEval_SetTrace` sets `c_tracefunc` and `c_traceobj` on the thread state. The trace function is called for `call`, `line`, `return`, and `exception` events.
+
+### `sys.intern`
+
+```c
+// CPython: Python/sysmodule.c:1540 sys_intern_impl
+static PyObject *
+sys_intern_impl(PyObject *module, PyObject *s)
+{
+    PyUnicode_InternInPlace(&s);
+    return s;
+}
+```
+
+`sys.intern(s)` adds `s` to the global string intern table, ensuring that all future occurrences of the same string use the same object. Useful for memory-intensive dict-key workloads.
+
+## gopy notes
+
+`sys` is in `module/sys/`. `sys.modules` is the interpreter's module dict. `sys.path` controls import search. `sys._getframe` requires the frame chain to be traversable from `vm.Interpreter`. `sys.settrace` requires a trace hook interface on `vm.Frame`. `sys.exc_info` reads the exception stack from the current frame.
