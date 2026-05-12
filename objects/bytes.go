@@ -32,9 +32,82 @@ func init() {
 	BytesType.RichCmp = bytesRichCmp
 	BytesType.Sequence = &SequenceMethods{
 		Length:   bytesLen,
+		Concat:   bytesConcat,
+		Repeat:   bytesRepeat,
 		GetItem:  bytesGetItem,
 		Contains: bytesContains,
 	}
+	BytesType.Iter = bytesIter
+}
+
+// bytesIterator yields the byte values of a bytes object as ints.
+//
+// CPython: Objects/bytesobject.c:3196 PyBytesIter_Type
+type bytesIterator struct {
+	Header
+	src *Bytes
+	pos int
+}
+
+var bytesIterType = NewType("bytes_iterator", []*Type{objectType})
+
+func init() {
+	bytesIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	bytesIterType.IterNext = bytesIterNext
+}
+
+func bytesIter(o Object) (Object, error) {
+	b := o.(*Bytes)
+	it := &bytesIterator{src: b, pos: 0}
+	it.init(bytesIterType)
+	return it, nil
+}
+
+func bytesIterNext(o Object) (Object, error) {
+	it := o.(*bytesIterator)
+	if it.pos >= len(it.src.v) {
+		return nil, ErrStopIteration
+	}
+	v := it.src.v[it.pos]
+	it.pos++
+	return NewInt(int64(v)), nil
+}
+
+// bytesConcat ports bytes_concat.
+//
+// CPython: Objects/bytesobject.c:1147 bytes_concat
+func bytesConcat(a, b Object) (Object, error) {
+	ba, ok := a.(*Bytes)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: can't concat %s to bytes", a.Type().Name)
+	}
+	bb, ok := b.(*Bytes)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: can't concat %s to bytes", b.Type().Name)
+	}
+	out := make([]byte, 0, len(ba.v)+len(bb.v))
+	out = append(out, ba.v...)
+	out = append(out, bb.v...)
+	return NewBytes(out), nil
+}
+
+// bytesRepeat ports bytes_repeat. b * n returns the concatenation of n
+// copies; non-positive n returns the empty-bytes singleton.
+//
+// CPython: Objects/bytesobject.c:1184 bytes_repeat
+func bytesRepeat(o Object, n int) (Object, error) {
+	b := o.(*Bytes)
+	if n <= 0 || len(b.v) == 0 {
+		return emptyBytes, nil
+	}
+	if n == 1 {
+		return b, nil
+	}
+	out := make([]byte, 0, len(b.v)*n)
+	for i := 0; i < n; i++ {
+		out = append(out, b.v...)
+	}
+	return NewBytes(out), nil
 }
 
 // emptyBytes is the singleton returned by bytes() and any other path
