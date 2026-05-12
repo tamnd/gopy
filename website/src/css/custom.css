@@ -386,21 +386,27 @@ h4:hover .hash-link {
 .button--secondary {
   background: transparent;
   border: 1px solid rgba(144, 122, 169, 0.45);
+  --ifm-button-color: var(--gopy-text-primary);
   color: var(--gopy-text-primary);
 }
 
 .button--secondary:hover {
   background: var(--gopy-primary-softer);
   border-color: var(--gopy-primary);
+  --ifm-button-color: var(--gopy-text-primary);
   color: var(--gopy-text-primary);
 }
 
 [data-theme='dark'] .button--secondary {
-  border-color: rgba(196, 167, 231, 0.40);
+  border-color: rgba(196, 167, 231, 0.55);
+  --ifm-button-color: #ffffff;
+  color: #ffffff;
 }
 
 [data-theme='dark'] .button--secondary:hover {
   background: var(--gopy-primary-soft);
+  --ifm-button-color: #ffffff;
+  color: #ffffff;
 }
 
 /* =========================================================================
