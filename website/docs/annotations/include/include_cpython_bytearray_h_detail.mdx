@@ -1,0 +1,81 @@
+---
+title: "Include/cpython/bytearray.h"
+description: "Include/cpython/bytearray.h: PyByteArray C API — PyByteArray_Type, PyByteArray_Check, AS_STRING, GET_SIZE, Resize, Concat."
+cpython_path: Include/cpython/bytearray.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/cpython/bytearray.h" />
+
+`Include/cpython/bytearray.h` is the CPython-internal API for `bytearray`. The stable ABI surface is in `Include/bytearray.h`; this header adds the fast-path macros.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-15 | `PyByteArray_Type` | Type object declaration |
+| 16-25 | `PyByteArray_Check`, `PyByteArray_CheckExact` | Type checks |
+| 26-40 | `PyByteArray_AS_STRING` | Zero-overhead buffer pointer access |
+| 41-50 | `PyByteArray_GET_SIZE` | Zero-overhead length access |
+| 51-60 | `PyByteArray_Resize`, `PyByteArray_Concat` | Mutation and concatenation |
+
+## Reading
+
+### Type check macros
+
+```c
+// CPython: Include/cpython/bytearray.h:18 PyByteArray_Check
+#define PyByteArray_Check(op) PyObject_TypeCheck((op), &PyByteArray_Type)
+#define PyByteArray_CheckExact(op) Py_IS_TYPE((op), &PyByteArray_Type)
+```
+
+`CheckExact` returns false for subclasses; `Check` returns true for any `bytearray` subclass.
+
+### Fast buffer access
+
+```c
+// CPython: Include/cpython/bytearray.h:28 PyByteArray_AS_STRING
+#define PyByteArray_AS_STRING(self) \
+    (assert(PyByteArray_Check(self)), \
+     (((PyByteArrayObject *)(self))->ob_start))
+
+#define PyByteArray_GET_SIZE(self) \
+    (assert(PyByteArray_Check(self)), \
+     (((PyByteArrayObject *)(self))->ob_bytes))
+```
+
+These macros bypass the function call overhead of `PyByteArray_AsString()` and `PyByteArray_Size()`. Only safe when `self` is known to be a `bytearray`.
+
+### `PyByteArrayObject` layout
+
+```c
+// CPython: Include/cpython/bytearray.h:8 PyByteArrayObject
+typedef struct {
+    PyObject_VAR_HEAD
+    Py_ssize_t ob_alloc;  /* allocated capacity */
+    char *ob_val;         /* pointer into ob_start */
+    char *ob_start;       /* start of allocated buffer */
+    Py_ssize_t ob_bytes;  /* logical length (not counting null terminator) */
+    Py_ssize_t ob_exports;  /* number of active buffer exports */
+} PyByteArrayObject;
+```
+
+`ob_val` may point past `ob_start` if bytes have been `pop(0)`-ed repeatedly (shifting the logical start without reallocating). `ob_exports` tracks active buffer views; a `bytearray` cannot be resized while exports are active.
+
+### `Resize` and `Concat`
+
+```c
+// CPython: Include/cpython/bytearray.h:55 declarations
+PyAPI_FUNC(int)  PyByteArray_Resize(PyObject *, Py_ssize_t);
+PyAPI_FUNC(PyObject *) PyByteArray_Concat(PyObject *, PyObject *);
+```
+
+`PyByteArray_Resize` may reallocate. `PyByteArray_Concat` returns a new `bytearray` (does not modify either argument in place).
+
+## gopy notes
+
+`PyByteArrayObject` maps to `objects.ByteArray` in Go with fields `data []byte`, `alloc int`, `exports int`. `AS_STRING` and `GET_SIZE` translate to direct field access. Resize uses `append` with explicit capacity management. Export tracking prevents concurrent mutation during buffer-protocol use.

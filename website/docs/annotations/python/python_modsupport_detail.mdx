@@ -1,0 +1,124 @@
+---
+title: Python/modsupport.c
+description: "Python/modsupport.c: module creation helpers — PyModule_New, PyModule_AddObject, PyModule_AddIntConstant, Py_BuildValue, PyArg_ParseTuple."
+cpython_path: Python/modsupport.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/modsupport.c" />
+
+`modsupport.c` provides the C extension author's toolkit: functions for creating modules, adding attributes, and marshalling between Python objects and C values.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyModule_New`, `PyModule_NewObject` | Create a module with a given name |
+| 101-300 | `PyModule_AddObject`, `PyModule_AddIntConstant` | Add attributes to a module |
+| 301-600 | `Py_BuildValue` | Build a Python object from a C format string |
+| 601-900 | `PyArg_ParseTuple`, `PyArg_ParseTupleAndKeywords` | Parse Python args into C variables |
+| 901-1200 | `vgetargs1` | Internal va_list parser used by the above |
+
+## Reading
+
+### `PyModule_New`
+
+```c
+// CPython: Python/modsupport.c:42 PyModule_NewObject
+PyObject *
+PyModule_NewObject(PyObject *name)
+{
+    PyModuleObject *m = (PyModuleObject *)PyModule_Type.tp_alloc(&PyModule_Type, 0);
+    m->md_dict = PyDict_New();
+    if (PyDict_SetItemString(m->md_dict, "__name__", name) < 0) ...
+    if (PyDict_SetItemString(m->md_dict, "__doc__", Py_None) < 0) ...
+    if (PyDict_SetItemString(m->md_dict, "__package__", Py_None) < 0) ...
+    if (PyDict_SetItemString(m->md_dict, "__loader__", Py_None) < 0) ...
+    if (PyDict_SetItemString(m->md_dict, "__spec__", Py_None) < 0) ...
+    return (PyObject *)m;
+}
+```
+
+### `PyModule_AddObject`
+
+```c
+// CPython: Python/modsupport.c:165 PyModule_AddObjectRef
+int
+PyModule_AddObjectRef(PyObject *m, const char *name, PyObject *value)
+{
+    PyObject *dict = PyModule_GetDict(m);
+    return PyDict_SetItemString(dict, name, value);
+}
+```
+
+The `AddObjectRef` variant (3.10+) does not steal a reference; the older `AddObject` does. Extension authors should prefer `AddObjectRef`.
+
+### `Py_BuildValue` format codes
+
+```c
+// CPython: Python/modsupport.c:320 Py_BuildValue
+PyObject *
+Py_BuildValue(const char *format, ...)
+{
+    /* Format codes:
+     * 'i' / 'l'  → PyLong_FromLong
+     * 'd'        → PyFloat_FromDouble
+     * 's'        → PyUnicode_FromString (NULL → None)
+     * 'y'        → PyBytes_FromString
+     * 'O'        → Py_NewRef (an existing PyObject *)
+     * 'N'        → as 'O' but steals reference
+     * '()', '[]' → build tuple / list from sub-format
+     */
+    return vbuildvalue(format, vargs);
+}
+```
+
+`Py_BuildValue("(ii)", 1, 2)` returns `(1, 2)`. `"()"` with no enclosed codes returns an empty tuple.
+
+### `PyArg_ParseTuple`
+
+```c
+// CPython: Python/modsupport.c:640 PyArg_ParseTuple
+int
+PyArg_ParseTuple(PyObject *args, const char *format, ...)
+{
+    va_list vargs;
+    va_start(vargs, format);
+    retval = vgetargs1(args, format, &vargs, 0 /* flags */);
+    va_end(vargs);
+    return retval;
+}
+```
+
+Format codes for parsing:
+- `i` — `int *`
+- `l` — `long *`
+- `d` — `double *`
+- `s` — `const char **` (points into Python string; do not free)
+- `y*` — `Py_buffer *` (bytes-like object)
+- `O` — `PyObject **` (any object)
+- `O!` — `PyObject **` with type check
+- `|` — remaining args are optional
+- `$` — remaining args are keyword-only
+
+### `PyArg_ParseTupleAndKeywords`
+
+```c
+// CPython: Python/modsupport.c:720 PyArg_ParseTupleAndKeywords
+int
+PyArg_ParseTupleAndKeywords(PyObject *args, PyObject *kw,
+                             const char *format, char **kwlist, ...)
+{
+    return vgetargs1_impl(args, kw, format, kwlist, &vargs, FLAG_SIZE_T);
+}
+```
+
+`kwlist` is a NULL-terminated array of keyword names. The compiler's `clinic` tool generates both `kwlist` and the format string from a function signature.
+
+## gopy notes
+
+`PyModule_New` is `objects.NewModule`. `AddObjectRef` calls `module.Dict().Set(name, value)`. `Py_BuildValue` and `PyArg_ParseTuple` are used only in the C extension shim layer; gopy's native Go modules use typed Go function signatures directly without format strings.

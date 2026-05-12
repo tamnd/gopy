@@ -319,6 +319,8 @@ const sidebars = {
         'annotations/python/python_ceval6_detail',
         'annotations/python/python_bltinmodule2_detail',
         'annotations/python/python_frozen_detail',
+        'annotations/python/python_ceval7_detail',
+        'annotations/python/python_modsupport_detail',
       ],
     },
     {
@@ -503,6 +505,7 @@ const sidebars = {
         'annotations/objects/objects_longobject4_detail',
         'annotations/objects/objects_floatobject2_detail',
         'annotations/objects/objects_bytearrayobject_detail',
+        'annotations/objects/objects_complexobject2_detail',
       ],
     },
     {
@@ -730,6 +733,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_tstate_h_detail',
         'annotations/include/include_internal_pycore_opcode_h_detail',
         'annotations/include/include_internal_pycore_uops_h_detail',
+        'annotations/include/include_cpython_bytearray_h_detail',
       ],
     },
     {
@@ -949,6 +953,8 @@ const sidebars = {
         'annotations/modules/modules_datetime_detail',
         'annotations/modules/modules_random_detail',
         'annotations/modules/modules_zlib_detail',
+        'annotations/modules/modules_itertools_detail',
+        'annotations/modules/modules_socket_detail2',
       ],
     },
     {

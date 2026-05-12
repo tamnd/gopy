@@ -1,0 +1,141 @@
+---
+title: Objects/complexobject.c (part 2)
+description: "complexobject.c part 2: complex arithmetic (add, sub, mul, div, pow), abs, repr/str, hash, __complex__, from string parsing."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers complex number arithmetic, display, and hash. See `objects_complexobject_detail` for the `Py_complex` C struct and basic construction.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `c_sum`, `c_diff`, `c_prod`, `c_quot` | C-level arithmetic on `Py_complex` |
+| 201-400 | `complex_add`, `complex_sub`, `complex_mul`, `complex_div` | Python number protocol wrappers |
+| 401-600 | `complex_pow` | `**` with integer and complex exponents |
+| 601-700 | `complex_abs` | `abs(z)` = sqrt(real^2 + imag^2) |
+| 701-900 | `complex_repr`, `complex_str` | `repr(1+2j)` → `'(1+2j)'` |
+| 901-1000 | `complex_hash` | Hash combining real and imag hashes |
+| 1001-1200 | `complex_new` | Construction from string `'1+2j'`, from `__complex__` |
+
+## Reading
+
+### C-level arithmetic
+
+```c
+// CPython: Objects/complexobject.c:48 c_prod
+Py_complex
+c_prod(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    r.real = a.real*b.real - a.imag*b.imag;
+    r.imag = a.real*b.imag + a.imag*b.real;
+    return r;
+}
+
+// CPython: Objects/complexobject.c:80 c_quot
+Py_complex
+c_quot(Py_complex a, Py_complex b)
+{
+    double abs_breal = b.real < 0 ? -b.real : b.real;
+    double abs_bimag = b.imag < 0 ? -b.imag : b.imag;
+    if (abs_breal >= abs_bimag) {
+        /* Avoid catastrophic cancellation: divide through by b.real */
+        double ratio = b.imag / b.real;
+        double denom = b.real + b.imag * ratio;
+        r.real = (a.real + a.imag * ratio) / denom;
+        r.imag = (a.imag - a.real * ratio) / denom;
+    } else {
+        double ratio = b.real / b.imag;
+        double denom = b.real * ratio + b.imag;
+        r.real = (a.real * ratio + a.imag) / denom;
+        r.imag = (a.imag * ratio - a.real) / denom;
+    }
+    return r;
+}
+```
+
+The division uses the Smith algorithm to minimize floating-point cancellation.
+
+### `complex_pow`
+
+```c
+// CPython: Objects/complexobject.c:460 complex_pow
+static PyObject *
+complex_pow(PyObject *v, PyObject *w, PyObject *z)
+{
+    /* z**n for integer n: repeated squaring */
+    if (PyLong_Check(w)) {
+        long n = PyLong_AsLong(w);
+        Py_complex r = {1.0, 0.0};
+        Py_complex base = ((PyComplexObject *)v)->cval;
+        ...
+        return PyComplex_FromCComplex(r);
+    }
+    /* General case: exp(w * log(v)) */
+    Py_complex exponent = PyComplex_AsCComplex(w);
+    Py_complex base     = PyComplex_AsCComplex(v);
+    Py_complex r = c_pow(base, exponent);
+    return PyComplex_FromCComplex(r);
+}
+```
+
+### `abs`
+
+```c
+// CPython: Objects/complexobject.c:620 complex_abs
+static PyObject *
+complex_abs(PyComplexObject *v)
+{
+    double result = _Py_c_abs(v->cval);  /* hypot(real, imag) */
+    return PyFloat_FromDouble(result);
+}
+```
+
+`abs(3+4j)` returns `5.0` (via `hypot(3, 4)`).
+
+### `repr`
+
+```c
+// CPython: Objects/complexobject.c:740 complex_repr
+static PyObject *
+complex_repr(PyComplexObject *v)
+{
+    /* Format: "(real+imagj)" or "(real-imagj)" or "(realj)" or "imagj" */
+    if (v->cval.real == 0.0 && copysign(1, v->cval.real) == 1.0)
+        /* Pure imaginary: skip "()" wrapper */
+        PyOS_snprintf(buf, sizeof(buf), "%sj", ...);
+    else
+        PyOS_snprintf(buf, sizeof(buf), "(%s%sj)", real_str, imag_str);
+}
+```
+
+`repr(1j)` is `'1j'`; `repr(1+1j)` is `'(1+1j)'`.
+
+### Hash
+
+```c
+// CPython: Objects/complexobject.c:920 complex_hash
+static Py_hash_t
+complex_hash(PyComplexObject *v)
+{
+    Py_uhash_t hashreal = _Py_HashDouble((PyObject *)v, v->cval.real);
+    Py_uhash_t hashimag = _Py_HashDouble((PyObject *)v, v->cval.imag);
+    /* Combine: real_hash XOR imag_hash rotated */
+    Py_uhash_t combined = hashreal + _PyHASH_IMAG * hashimag;
+    return combined == (Py_uhash_t)-1 ? -2 : (Py_hash_t)combined;
+}
+```
+
+`_PyHASH_IMAG` is a constant that mixes the imaginary part distinctly from the real part.
+
+## gopy notes
+
+`complex` is in `objects/complex.go`. Arithmetic uses Go's `complex128`. Division uses the Smith algorithm ported from the C. `abs()` calls `cmplx.Abs`. `repr` follows the same `(real+imagj)` / `imagj` / `(realj)` rules. Hash combines the float hashes of real and imag parts using the same `_PyHASH_IMAG` multiplier.

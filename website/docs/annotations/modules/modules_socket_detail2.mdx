@@ -1,0 +1,148 @@
+---
+title: Modules/socketmodule.c (part 2)
+description: "socketmodule.c part 2: connect, accept, recv/send with timeout, getaddrinfo, getnameinfo, socket options, non-blocking mode."
+cpython_path: Modules/socketmodule.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/socketmodule.c" />
+
+This annotation covers the network I/O operations. See `modules_socket_detail` for socket creation, binding, and address families.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `sock_connect` | TCP connect with optional timeout |
+| 201-400 | `sock_accept` | Accept incoming connection |
+| 401-700 | `sock_recv`, `sock_recvfrom` | Receive bytes, optionally with address |
+| 701-1000 | `sock_send`, `sock_sendto`, `sock_sendall` | Send bytes |
+| 1001-1200 | `sock_makefile` | Wrap socket in a file-like object |
+| 1201-1400 | `sock_setsockopt`, `sock_getsockopt` | Socket options |
+| 1401-1600 | `sock_setblocking`, `sock_settimeout` | Blocking mode and timeout |
+| 1601-2000 | `socket_getaddrinfo` | DNS + address resolution |
+| 2001-2200 | `socket_getnameinfo` | Reverse lookup |
+| 2201-2400 | `socket_gethostname`, `socket_gethostbyname` | Host name utilities |
+
+## Reading
+
+### `connect` with timeout
+
+```c
+// CPython: Modules/socketmodule.c:145 sock_connect
+static PyObject *
+sock_connect(PySocketSockObject *s, PyObject *addro)
+{
+    sock_addr_t addrbuf;
+    int addrlen;
+    if (!getsockaddrarg(s, addro, &addrbuf, &addrlen, "connect")) return NULL;
+    Py_BEGIN_ALLOW_THREADS
+    do {
+        res = connect(s->sock_fd, (struct sockaddr *)&addrbuf, addrlen);
+    } while (res < 0 && errno == EINTR && !(s->sock_timeout > 0.0));
+    Py_END_ALLOW_THREADS
+    if (res < 0 && errno == EINPROGRESS && s->sock_timeout > 0.0) {
+        /* Non-blocking connect: wait for writability */
+        res = internal_select(s, 1 /* write */, s->sock_timeout);
+        ...
+    }
+    ...
+}
+```
+
+`Py_BEGIN_ALLOW_THREADS` releases the GIL during the blocking `connect()` call. EINTR is retried unless a timeout is set.
+
+### `recv` with buffer size
+
+```c
+// CPython: Modules/socketmodule.c:445 sock_recv_impl
+static PyObject *
+sock_recv_impl(PySocketSockObject *s, Py_ssize_t recvlen, int flags)
+{
+    PyObject *buf = PyBytes_FromStringAndSize(NULL, recvlen);
+    Py_BEGIN_ALLOW_THREADS
+    outlen = recv(s->sock_fd, PyBytes_AS_STRING(buf), recvlen, flags);
+    Py_END_ALLOW_THREADS
+    if (outlen < recvlen)
+        _PyBytes_Resize(&buf, outlen);  /* shrink to actual bytes received */
+    return buf;
+}
+```
+
+### `sendall`
+
+```c
+// CPython: Modules/socketmodule.c:820 sock_sendall
+static PyObject *
+sock_sendall(PySocketSockObject *s, PyObject *args)
+{
+    const char *buf = PyBytes_AS_STRING(data);
+    Py_ssize_t len = PyBytes_GET_SIZE(data);
+    while (len > 0) {
+        Py_BEGIN_ALLOW_THREADS
+        n = send(s->sock_fd, buf, len, flags);
+        Py_END_ALLOW_THREADS
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            ...
+            return NULL;
+        }
+        buf += n;
+        len -= n;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`sendall` loops until all bytes are delivered, handling short sends.
+
+### `getaddrinfo`
+
+```c
+// CPython: Modules/socketmodule.c:1680 socket_getaddrinfo
+static PyObject *
+socket_getaddrinfo(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    struct addrinfo hints, *res0, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = family;
+    hints.ai_socktype = socktype;
+    hints.ai_protocol = proto;
+    hints.ai_flags    = flags;
+    Py_BEGIN_ALLOW_THREADS
+    error = getaddrinfo(hptr, pptr, &hints, &res0);
+    Py_END_ALLOW_THREADS
+    /* Build list of (family, type, proto, canonname, sockaddr) tuples */
+    ...
+}
+```
+
+`socket.getaddrinfo('python.org', 443)` returns a list of `(AF_INET, SOCK_STREAM, 6, '', ('151.101.x.x', 443))` tuples.
+
+### Timeout handling
+
+```c
+// CPython: Modules/socketmodule.c:1440 sock_settimeout
+static PyObject *
+sock_settimeout(PySocketSockObject *s, PyObject *arg)
+{
+    if (arg == Py_None) {
+        s->sock_timeout = -1.0;  /* blocking */
+        internal_setblocking(s, 1);
+    } else {
+        s->sock_timeout = PyFloat_AsDouble(arg);
+        internal_setblocking(s, 0);  /* non-blocking for select-based timeout */
+    }
+    Py_RETURN_NONE;
+}
+```
+
+A socket with a timeout is set to non-blocking mode at the OS level; Python implements the timeout via `select`/`poll`.
+
+## gopy notes
+
+`socket` is in `module/socket/`. `connect`, `recv`, `send`, `accept` use Go's `net` package. The GIL release (`Py_BEGIN_ALLOW_THREADS`) maps to releasing Go's per-goroutine Python lock. Timeouts use `net.Conn.SetDeadline`. `getaddrinfo` uses `net.LookupHost` + `net.LookupPort`. Socket options use `syscall.SetsockoptInt`.

@@ -1,0 +1,175 @@
+---
+title: Python/ceval.c (part 7)
+description: "ceval.c part 7: MAKE_FUNCTION, BUILD_SLICE, FORMAT_VALUE, MATCH_* opcodes, COPY_FREE_VARS, RESUME, SEND, YIELD_VALUE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers closure creation, string formatting, structural pattern matching, and async/generator opcodes. See parts 1-6 for the core dispatch loop, attribute access, calls, and container operations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `MAKE_FUNCTION` | Create a function object from code object + defaults |
+| 201-400 | `BUILD_SLICE` | `a:b:c` slice literal |
+| 401-600 | `FORMAT_VALUE` | f-string slot formatting with conversion (`!r`, `!s`, `!a`) |
+| 601-900 | `COPY_FREE_VARS` | Copy enclosing scope cells into new frame |
+| 901-1200 | `RESUME` | Frame entry check (tracing, signals) |
+| 1201-1500 | `SEND` | Send a value into a generator or coroutine |
+| 1501-1800 | `YIELD_VALUE` | Suspend generator, return value to caller |
+| 1801-2200 | `MATCH_*` opcodes | Structural pattern matching (3.10+) |
+| 2201-2600 | `BEFORE_ASYNC_WITH` | `async with` entry |
+| 2601-3000 | `GET_AITER`, `GET_ANEXT` | `async for` protocol |
+
+## Reading
+
+### `MAKE_FUNCTION`
+
+```c
+// CPython: Python/ceval.c:2840 MAKE_FUNCTION
+inst(MAKE_FUNCTION, (qualname, codeobj -- func)) {
+    PyObject *func = PyFunction_New(codeobj, GLOBALS());
+    PyFunction_SetQualname(func, qualname);
+    /* flags indicate which optional components follow on stack */
+    if (oparg & 0x08) {  /* closure */
+        PyObject *closure = POP();
+        PyFunction_SetClosure(func, closure);
+    }
+    if (oparg & 0x04) {  /* annotations */
+        PyObject *annotations = POP();
+        PyFunction_SetAnnotations(func, annotations);
+    }
+    if (oparg & 0x02) {  /* kwdefaults */
+        PyObject *kwdefaults = POP();
+        PyFunction_SetKwDefaults(func, kwdefaults);
+    }
+    if (oparg & 0x01) {  /* defaults */
+        PyObject *defaults = POP();
+        PyFunction_SetDefaults(func, defaults);
+    }
+    PUSH(func);
+}
+```
+
+`MAKE_FUNCTION` pops the code object and qualified name, then pops optional components based on `oparg` flags.
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:940 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (--)) {
+    /* Copy free variables from enclosing frame into this frame's fast locals */
+    PyCodeObject *co = frame->f_code;
+    PyObject *closure = frame->f_func->func_closure;
+    int offset = co->co_nlocalsplus - co->co_nfreevars;
+    for (int i = 0; i < co->co_nfreevars; i++) {
+        PyObject *o = PyTuple_GET_ITEM(closure, i);
+        frame->localsplus[offset + i] = Py_NewRef(o);
+    }
+}
+```
+
+Closures store free variable cell objects in `func_closure`. `COPY_FREE_VARS` copies those cells into the new frame's `localsplus` array.
+
+### `RESUME`
+
+```c
+// CPython: Python/ceval.c:1180 RESUME
+inst(RESUME, (--)) {
+    /* Check for pending signals, async exceptions, tracing */
+    if (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) & _PY_EVAL_EVENTS_MASK) {
+        if (_Py_HandlePending(tstate) != 0) goto error;
+    }
+    /* Also used as generator/coroutine re-entry point */
+}
+```
+
+`RESUME` is emitted at function entry and at every `yield`/`await` resume point. It handles the "eval breaker" — signals, GIL drops, tracing hooks.
+
+### `YIELD_VALUE`
+
+```c
+// CPython: Python/ceval.c:1560 YIELD_VALUE
+inst(YIELD_VALUE, (retval --)) {
+    assert(oparg == _PyFrame_IsIncomplete(frame));
+    frame->instr_ptr = next_instr;  /* save resume point */
+    tstate->exc_info = frame->previous_exc_info;
+    _PyFrame_SetStackPointer(frame, stack_pointer);
+    PyGenObject *gen = _PyFrame_GetGenerator(frame);
+    gen->gi_frame_state = FRAME_SUSPENDED;
+    _Py_LeaveRecursiveCallPy(tstate);
+    return retval;  /* return to caller's eval loop */
+}
+```
+
+The frame is left intact (suspended). `next(gen)` resumes by calling `_PyEval_EvalFrameDefault` with the same frame.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:1320 SEND
+inst(SEND, (receiver, v -- receiver, retval)) {
+    /* Send v into receiver (generator, coroutine, or async generator) */
+    PyObject *retval;
+    if (PyGen_CheckExact(receiver) || PyCoro_CheckExact(receiver)) {
+        retval = _PyGen_Send((PyGenObject *)receiver, v);
+    } else {
+        /* General: call receiver.send(v) */
+        retval = PyObject_CallMethodOneArg(receiver, &_Py_ID(send), v);
+    }
+    if (retval == NULL) {
+        /* StopIteration or StopAsyncIteration: extract value */
+        ...
+        JUMPBY(oparg);  /* jump past the YIELD_VALUE / RESUME pair */
+    }
+}
+```
+
+### `FORMAT_VALUE` (f-string)
+
+```c
+// CPython: Python/ceval.c:380 FORMAT_VALUE
+inst(FORMAT_VALUE, (value[1], fmt_spec[oparg & FVS_MASK] -- result)) {
+    /* Apply conversion: !r, !s, or !a */
+    int which_conversion = oparg & FVC_MASK;
+    if (which_conversion == FVC_REPR)
+        value = PyObject_Repr(value);
+    else if (which_conversion == FVC_STR)
+        value = PyObject_Str(value);
+    else if (which_conversion == FVC_ASCII)
+        value = PyObject_ASCII(value);
+    /* Apply format spec */
+    result = (fmt_spec == NULL)
+        ? PyObject_Format(value, _empty_string)
+        : PyObject_Format(value, fmt_spec);
+}
+```
+
+### `MATCH_MAPPING` / `MATCH_SEQUENCE`
+
+```c
+// CPython: Python/ceval.c:2000 MATCH_MAPPING
+inst(MATCH_MAPPING, (subject -- subject, res)) {
+    int match = PyType_HasFeature(Py_TYPE(subject), Py_TPFLAGS_MAPPING);
+    res = match ? Py_True : Py_False;
+    Py_INCREF(res);
+}
+
+// CPython: Python/ceval.c:2050 MATCH_SEQUENCE
+inst(MATCH_SEQUENCE, (subject -- subject, res)) {
+    int match = PyType_HasFeature(Py_TYPE(subject), Py_TPFLAGS_SEQUENCE);
+    res = match ? Py_True : Py_False;
+    Py_INCREF(res);
+}
+```
+
+## gopy notes
+
+`MAKE_FUNCTION` is in `vm/eval_gen.go`, calling `objects.NewFunction` and setting closure/defaults. `COPY_FREE_VARS` copies cell objects into the frame's locals slice. `RESUME` checks `vm.evalBreaker`. `YIELD_VALUE` suspends the generator frame. `FORMAT_VALUE` calls `objects.Repr`/`Str`/`ASCII` then `objects.Format`. Pattern matching opcodes use `objects.Type` flags.
