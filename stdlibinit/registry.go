@@ -121,6 +121,18 @@ import (
 	// CPython: Modules/_randommodule.c:1 (module init)
 	_ "github.com/tamnd/gopy/module/_random"
 
+	// Built-in module: _struct. Registers itself via
+	// module/_struct/module.go init(). Provides pack/unpack of binary
+	// data per a format string; backs the Lib/struct.py wrapper.
+	// CPython: Modules/config.c.in:52 {"_struct", PyInit__struct}
+	_ "github.com/tamnd/gopy/module/_struct"
+
+	// Built-in module: _json. Registers itself via
+	// module/_json/module.go init(). Accelerates json.py with
+	// scanstring and encode_basestring helpers.
+	// CPython: Modules/config.c.in:53 {"_json", PyInit__json}
+	_ "github.com/tamnd/gopy/module/_json"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
