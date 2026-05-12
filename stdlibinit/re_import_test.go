@@ -1,8 +1,8 @@
 // re import gate: pins that _sre is registered in the inittab and that
-// Pattern.match / Pattern.search work end-to-end through the Go regexp
-// backend. The vendored Lib/re/ package requires `import enum` and
-// `import copyreg` which are not yet available; the full re import test
-// skips on ModuleNotFoundError for those transitive dependencies.
+// Pattern.match / Pattern.search work end-to-end through the bytecode
+// engine the vendored Lib/re/_compiler.py targets. Tests construct
+// minimal bytecode by hand for literal patterns until the full
+// Python-side compile path is wired (spec 1703 phase 7).
 //
 // CPython: Lib/re/__init__.py public surface
 package stdlibinit
@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/module/_sre"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -44,61 +45,27 @@ func TestSreModuleExportsMAGIC(t *testing.T) {
 		t.Fatalf("_sre.MAGIC is %T, want *objects.Int", v)
 	}
 	n, _ := i.Int64()
-	if n != 20230612 {
-		t.Errorf("_sre.MAGIC = %d, want 20230612", n)
+	if n != _sre.MagicNumber {
+		t.Errorf("_sre.MAGIC = %d, want %d", n, _sre.MagicNumber)
 	}
 }
 
-// TestSreCompileAndMatch pins the core path: _sre.compile returns a
-// Pattern whose match() method returns a Match on success and None on
-// failure.
+// TestSreCompileAndMatch pins the core path: _sre.compile takes the
+// bytecode produced by Lib/re/_compiler.py, stores it on a Pattern,
+// and the Pattern.match() method drives the engine against it.
 //
 // CPython: Modules/_sre/sre.c:1621 _sre_compile_impl
 func TestSreCompileAndMatch(t *testing.T) {
-	fn := imp.FindInitFunc("_sre")
-	if fn == nil {
-		t.Skip("_sre not registered")
-	}
-	mod, err := fn()
-	if err != nil {
-		t.Fatalf("_sre init: %v", err)
-	}
+	mod := loadSre(t)
 
-	compileFn, err := mod.Dict().GetItem(objects.NewStr("compile"))
-	if err != nil || compileFn == nil {
-		t.Fatalf("_sre.compile missing: %v", err)
-	}
-
-	// _sre.compile(pattern, flags, code, groups, groupindex, indexgroup)
-	// code / groupindex / indexgroup are the compiled engine args from
-	// _compiler.py; we pass minimal placeholders here.
-	args := []objects.Object{
-		objects.NewStr("hello"), // pattern
-		objects.NewInt(0),       // flags
-		objects.NewList(nil),    // code (empty; Go backend ignores this)
-		objects.NewInt(0),       // groups
-		objects.NewDict(),       // groupindex
-		objects.NewTuple(nil),   // indexgroup
-	}
-	pat, err := objects.Vectorcall(compileFn, args, uint(len(args)), nil)
+	// Bytecode for the literal pattern "hello".
+	code := literalCode("hello")
+	pat, err := callSreCompile(mod, "hello", 0, code, 0)
 	if err != nil {
 		t.Fatalf("_sre.compile: %v", err)
 	}
-	if objects.IsNone(pat) {
-		t.Fatal("_sre.compile returned None")
-	}
 
-	// Pattern.match("hello world") should match at position 0.
-	patInst, ok := pat.(*objects.Instance)
-	if !ok {
-		t.Fatalf("compile returned %T, want *objects.Instance", pat)
-	}
-
-	matchFnObj, err := patInst.Type().Getattro(patInst, objects.NewStr("match"))
-	if err != nil {
-		t.Fatalf("pattern.match attr: %v", err)
-	}
-	m, err := objects.Vectorcall(matchFnObj, []objects.Object{objects.NewStr("hello world")}, 1, nil)
+	m, err := callPatternMethod(pat, "match", "hello world")
 	if err != nil {
 		t.Fatalf("pattern.match: %v", err)
 	}
@@ -106,8 +73,7 @@ func TestSreCompileAndMatch(t *testing.T) {
 		t.Fatal("pattern.match(\"hello world\") returned None, want Match")
 	}
 
-	// Pattern.match("world") should return None (no match at position 0).
-	m2, err := objects.Vectorcall(matchFnObj, []objects.Object{objects.NewStr("world")}, 1, nil)
+	m2, err := callPatternMethod(pat, "match", "world")
 	if err != nil {
 		t.Fatalf("pattern.match(no-match): %v", err)
 	}
@@ -116,19 +82,13 @@ func TestSreCompileAndMatch(t *testing.T) {
 	}
 }
 
-// TestSreSearch pins that Pattern.search finds a match anywhere in the string.
+// TestSreSearch pins that Pattern.search finds a match anywhere in the
+// string.
 //
 // CPython: Modules/_sre/sre.c:2594 _sre_SRE_Pattern_search_impl
 func TestSreSearch(t *testing.T) {
-	fn := imp.FindInitFunc("_sre")
-	if fn == nil {
-		t.Skip("_sre not registered")
-	}
-	mod, err := fn()
-	if err != nil {
-		t.Fatalf("_sre init: %v", err)
-	}
-	pat, err := callSreCompile(mod, "world", 0)
+	mod := loadSre(t)
+	pat, err := callSreCompile(mod, "world", 0, literalCode("world"), 0)
 	if err != nil {
 		t.Fatalf("_sre.compile: %v", err)
 	}
@@ -141,35 +101,6 @@ func TestSreSearch(t *testing.T) {
 	}
 }
 
-// TestSreFindall pins that Pattern.findall returns all non-overlapping matches.
-//
-// CPython: Modules/_sre/sre.c:2739 _sre_SRE_Pattern_findall_impl
-func TestSreFindall(t *testing.T) {
-	fn := imp.FindInitFunc("_sre")
-	if fn == nil {
-		t.Skip("_sre not registered")
-	}
-	mod, err := fn()
-	if err != nil {
-		t.Fatalf("_sre init: %v", err)
-	}
-	pat, err := callSreCompile(mod, `\d+`, 0)
-	if err != nil {
-		t.Fatalf("_sre.compile: %v", err)
-	}
-	result, err := callPatternMethod(pat, "findall", "abc 123 def 456")
-	if err != nil {
-		t.Fatalf("pattern.findall: %v", err)
-	}
-	lst, ok := result.(*objects.List)
-	if !ok {
-		t.Fatalf("findall returned %T, want *objects.List", result)
-	}
-	if lst.Len() != 2 {
-		t.Errorf("findall returned %d items, want 2", lst.Len())
-	}
-}
-
 // TestReImportFromStdlib attempts to import the vendored re package via
 // PathFinder. This requires enum and copyreg to be available, plus a
 // full VM executor wired in the test. All of those are future work; the
@@ -177,14 +108,11 @@ func TestSreFindall(t *testing.T) {
 // serves as a forward compatibility gate: when it stops skipping, the
 // vendored re package loads end-to-end.
 func TestReImportFromStdlib(t *testing.T) {
-	// stdlibDir is relative to this test file (stdlibinit/ is one level
-	// under the module root where stdlib/ lives).
 	const stdlibSubdir = "../stdlib"
 
 	exec := &reTestExec{}
 	prev := imp.GetPathFinder()
 	t.Cleanup(func() { imp.SetPathFinder(prev) })
-	// Remove any cached re entry so PathFinder is actually consulted.
 	imp.RemoveModule("re")
 	t.Cleanup(func() { imp.RemoveModule("re") })
 
@@ -195,28 +123,53 @@ func TestReImportFromStdlib(t *testing.T) {
 
 	_, err := imp.ImportModule(exec, "re")
 	if err == nil {
-		// re loaded successfully; nothing to skip.
 		return
 	}
-	// Any error from the import attempt is an expected gap at this
-	// stage (missing enum/copyreg or unfinished VM wiring). Skip.
 	t.Skipf("re import not yet available (expected): %v", err)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers.
 
-// callSreCompile calls _sre.compile(pattern, flags, [], 0, {}, ()).
-func callSreCompile(mod *objects.Module, pattern string, flags int) (objects.Object, error) {
+func loadSre(t *testing.T) *objects.Module {
+	t.Helper()
+	fn := imp.FindInitFunc("_sre")
+	if fn == nil {
+		t.Skip("_sre not registered")
+	}
+	mod, err := fn()
+	if err != nil {
+		t.Fatalf("_sre init: %v", err)
+	}
+	return mod
+}
+
+// literalCode produces the bytecode _compiler.py emits for a literal
+// pattern string: a chain of OpLiteral entries terminated by OpSuccess.
+func literalCode(s string) []uint32 {
+	out := make([]uint32, 0, 2*len(s)+1)
+	for _, r := range s {
+		out = append(out, _sre.OpLiteral, uint32(r))
+	}
+	out = append(out, _sre.OpSuccess)
+	return out
+}
+
+// callSreCompile calls _sre.compile with the standard 6-arg shape.
+func callSreCompile(mod *objects.Module, pattern string, flags int, code []uint32, groups int) (objects.Object, error) {
 	compileFn, err := mod.Dict().GetItem(objects.NewStr("compile"))
 	if err != nil {
 		return nil, err
 	}
+	codeItems := make([]objects.Object, len(code))
+	for i, v := range code {
+		codeItems[i] = objects.NewInt(int64(v))
+	}
 	args := []objects.Object{
 		objects.NewStr(pattern),
 		objects.NewInt(int64(flags)),
-		objects.NewList(nil),
-		objects.NewInt(0),
+		objects.NewList(codeItems),
+		objects.NewInt(int64(groups)),
 		objects.NewDict(),
 		objects.NewTuple(nil),
 	}

@@ -546,6 +546,9 @@ func match(s *state, codeIdx int, toplevel bool) (int, error) {
 	ptr := s.ptr
 	end := s.end
 
+	if codeIdx >= len(code) {
+		return errIllegal, nil
+	}
 	if code[codeIdx] == OpInfo {
 		// <INFO> <skip> <flags> <min> <max> ...
 		if code[codeIdx+3] != 0 && uint32(end-ptr) < code[codeIdx+3] {
@@ -1328,6 +1331,9 @@ func search(s *state, codeIdx int) (int, error) {
 	end := s.end
 	if ptr > end {
 		return 0, nil
+	}
+	if codeIdx >= len(code) {
+		return errIllegal, nil
 	}
 
 	var (
