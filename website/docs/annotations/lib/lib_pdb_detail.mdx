@@ -1,0 +1,74 @@
+---
+title: Lib/pdb.py
+description: "pdb debugger: Pdb class extending cmd.Cmd, set_trace() entry point, break/continue/next/step/return commands, breakpoint condition evaluation, and post_mortem() for exception autopsies."
+cpython_path: Lib/pdb.py
+cpython_version: "3.14"
+lines: 2100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pdb.py`
+
+<CpyLink path="Lib/pdb.py" />
+
+`Lib/pdb.py` implements Python's interactive debugger. It uses `sys.settrace` to receive
+line, call, and return events from the interpreter, and `cmd.Cmd` for the command-line
+REPL.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `Breakpoint` class | Breakpoint registry with conditions and hit counts |
+| 201-600 | `Pdb.__init__`, `set_trace`, `reset` | Debugger setup and trace hook installation |
+| 601-1100 | `dispatch_*` methods | Routing trace events to command handlers |
+| 1101-1800 | `do_*` commands | `break`, `continue`, `next`, `step`, `return`, `print`, `where` |
+| 1801-2100 | `post_mortem`, `run`, `pm` | Entry points for exception and program debugging |
+
+## Reading
+
+### `set_trace`
+
+`pdb.set_trace()` installs `Pdb.trace_dispatch` as the current trace function via
+`sys.settrace`. The trace function is called on every call, line, return, and exception
+event. On `breakpoint()` (Python 3.7+), `sys.breakpointhook` calls `pdb.set_trace()` by
+default.
+
+```python
+# CPython: Lib/pdb.py:355 Pdb.set_trace
+def set_trace(self, frame=None):
+    if frame is None:
+        frame = sys._getframe().f_back
+    self.reset()
+    while frame:
+        frame.f_trace = self.trace_dispatch
+        self.botframe = frame
+        frame = frame.f_back
+    self.set_step()
+    sys.settrace(self.trace_dispatch)
+```
+
+### `dispatch_line`
+
+`dispatch_line` is called at each new line. If there is a breakpoint at the current
+location and its condition evaluates to true (via `eval(condition, frame.f_globals,
+frame.f_locals)`), the debugger enters interactive mode.
+
+### `do_next` vs `do_step`
+
+`do_next` ("n") sets a `next_event` that runs until the next line in the SAME frame.
+`do_step` ("s") steps into function calls. The difference is implemented via
+`set_next`/`set_step` which adjust which events the trace function stops on.
+
+### `post_mortem`
+
+`post_mortem(tb)` enters the debugger at the traceback frame where an exception occurred.
+`pm()` is shorthand for `post_mortem(sys.last_traceback)`.
+
+## gopy notes
+
+Not yet ported. `pdb` requires `sys.settrace` and full frame introspection. The `pdb`
+debugger is primarily a developer tool; it will be available once the tracing infrastructure
+is in place. Planned path: `module/pdb/`.

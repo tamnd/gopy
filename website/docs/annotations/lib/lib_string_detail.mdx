@@ -1,0 +1,65 @@
+---
+title: Lib/string.py
+description: "string module: Formatter with {field_name!conv:format_spec} parsing, Template with $substitution and safe_substitute, capwords, and the printable/whitespace/punctuation constants."
+cpython_path: Lib/string.py
+cpython_version: "3.14"
+lines: 320
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/string.py`
+
+<CpyLink path="Lib/string.py" />
+
+`Lib/string.py` provides the `Formatter` class (the implementation behind `str.format()`),
+`Template` string substitution, `capwords`, and the character-set constants.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-40 | Character constants | `ascii_letters`, `digits`, `punctuation`, `whitespace`, `printable` |
+| 41-80 | `capwords` | Split + capitalize + join |
+| 81-220 | `Formatter` | `format()`, `vformat()`, `parse()`, `get_field()`, `format_field()` |
+| 221-320 | `Template` | `$identifier` / `${identifier}` substitution with `safe_substitute` |
+
+## Reading
+
+### `Formatter.vformat`
+
+`vformat` calls `_vformat` which iterates the format string, extracting literal text and
+field placeholders via `parse()`. For each `{field_name!conversion:format_spec}` it calls
+`get_field(field_name, args, kwargs)` to resolve the value, applies the conversion
+(`!r` / `!s` / `!a`), and calls `format_field(value, format_spec)`.
+
+```python
+# CPython: Lib/string.py:162 _vformat
+def _vformat(self, format_string, args, kwargs, used_args, recursion_depth, ...):
+    ...
+    for literal_text, field_name, format_spec, conversion in self.parse(format_string):
+        ...
+        obj, arg_used = self.get_field(field_name, args, kwargs)
+        obj = self.convert_field(obj, conversion)
+        ...
+        result.append(self.format_field(obj, format_spec))
+    return ''.join(result)
+```
+
+### `Template` substitution
+
+`Template` uses a compiled regex to find `$identifier` and `${identifier}` patterns.
+`substitute` raises `KeyError` for missing keys; `safe_substitute` leaves unmatched
+patterns unchanged.
+
+### `Formatter.parse`
+
+`parse(format_string)` yields `(literal_text, field_name, format_spec, conversion)` tuples
+by walking the format string character by character, handling nested `{}` for format specs.
+
+## gopy notes
+
+`str.format()` calls the `Formatter` protocol internally through the C str object. A pure-
+Python `Formatter` in `module/string/` will be available for user subclassing. `Template`
+requires only string operations and `re`.

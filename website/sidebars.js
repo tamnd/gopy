@@ -297,6 +297,8 @@ const sidebars = {
         'annotations/python/python_builtins_detail',
         'annotations/python/python_compile2_detail',
         'annotations/python/python_symtable2_detail',
+        'annotations/python/python_ast2_detail',
+        'annotations/python/python_abstractobject_detail',
       ],
     },
     {
@@ -458,6 +460,7 @@ const sidebars = {
         'annotations/objects/objects_boolobject_detail',
         'annotations/objects/objects_longobject2_detail',
         'annotations/objects/objects_typeobject2_detail',
+        'annotations/objects/objects_descrobject2_detail',
       ],
     },
     {
@@ -864,6 +867,7 @@ const sidebars = {
         'annotations/modules/module_io2_detail',
         'annotations/modules/module_socket2_detail',
         'annotations/modules/module_ctypes2_detail',
+        'annotations/modules/module_functools2_detail',
       ],
     },
     {
@@ -1299,6 +1303,9 @@ const sidebars = {
         'annotations/lib/lib_inspect_detail',
         'annotations/lib/lib_ast_detail',
         'annotations/lib/lib_importlib_detail',
+        'annotations/lib/lib_textwrap2_detail',
+        'annotations/lib/lib_string_detail',
+        'annotations/lib/lib_pdb_detail',
       ],
     },
   ],

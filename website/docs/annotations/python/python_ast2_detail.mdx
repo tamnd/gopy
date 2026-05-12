@@ -1,0 +1,71 @@
+---
+title: Python/ast.c
+description: "AST construction and validation: _PyAST_Validate checks structural invariants, PyAST_obj2mod converts a Python ast.Module to a C mod_ty, and asdl_seq allocation helpers."
+cpython_path: Python/ast.c
+cpython_version: "3.14"
+lines: 960
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/ast.c`
+
+<CpyLink path="Python/ast.c" />
+
+`Python/ast.c` bridges the pegen parser output and the compiler. It validates the AST
+(`_PyAST_Validate`), converts a Python-level `ast` object back to a C `mod_ty`
+(`PyAST_obj2mod`), and provides the `asdl_seq` memory allocation helpers used throughout
+the AST construction code.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `_PyAST_Validate` | Structural AST validation: check for invalid node combinations |
+| 201-500 | `PyAST_obj2mod` | Convert Python ast.Module object to C `mod_ty` |
+| 501-700 | `asdl_seq_new`, `asdl_int_seq_new` | Sequence allocation from `PyArena` |
+| 701-960 | `ast_for_*` helpers | Convert Python AST node children to C AST nodes |
+
+## Reading
+
+### `_PyAST_Validate`
+
+`_PyAST_Validate` is called after parsing to catch structural errors that the grammar
+alone cannot detect. It walks the AST and raises `ValueError` for forbidden patterns such
+as a `starred` expression in an assignment target where it is not allowed, or a
+`return` statement outside a function.
+
+```c
+// CPython: Python/ast.c:142 validate_expr
+static int
+validate_expr(struct validator *state, expr_ty exp, expr_context_ty ctx)
+{
+    switch (exp->kind) {
+    case BoolOp_kind:
+        if (asdl_seq_LEN(exp->v.BoolOp.values) < 2) {
+            PyErr_SetString(PyExc_ValueError, "BoolOp with less than 2 values");
+            return 0;
+        }
+        ...
+    }
+}
+```
+
+### `PyAST_obj2mod`
+
+`PyAST_obj2mod(ast_obj, arena, mode)` takes a Python `ast.Module`, `ast.Expression`, or
+`ast.Interactive` node and converts its children to C AST nodes using `PyArena` allocation.
+This is the entry point for `compile(ast.parse(src), ...)`.
+
+### `PyArena` allocation
+
+All AST nodes are allocated from a `PyArena` slab. When the compilation unit is done, the
+arena is freed as a single block. Individual node deallocation is never needed.
+
+## gopy notes
+
+`parser/pegen/` produces C-equivalent AST nodes directly without a round-trip through
+Python objects. `_PyAST_Validate` checks are replicated in the pegen action helpers in
+`parser/pegen/action_helpers_gen.go`. `PyAST_obj2mod` is not needed in gopy since the
+compiler consumes the pegen AST directly.

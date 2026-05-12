@@ -1,0 +1,91 @@
+---
+title: Modules/_functoolsmodule.c (part 2)
+description: "_functools part 2: lru_cache with LRU doubly-linked dict, cache_info/cache_clear, cmp_to_key comparison wrapper, reduce() left fold, and the partial.__new__ argument flattening."
+cpython_path: Modules/_functoolsmodule.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_functoolsmodule.c` (part 2)
+
+<CpyLink path="Modules/_functoolsmodule.c" />
+
+This annotation covers `lru_cache`, `reduce`, and `cmp_to_key` in `_functoolsmodule.c`.
+For `partial` and the basic module structure see the `module_functools` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-400 | `lru_cache_object`, `lru_cache_call` | Bounded LRU cache with typed/untyped keys |
+| 401-700 | `lru_list_elem` | Doubly-linked list node for LRU eviction order |
+| 701-900 | `cache_info`, `cache_clear` | Hit/miss statistics and cache reset |
+| 901-1200 | `functools_reduce_impl` | Left fold over an iterable |
+| 1201-1600 | `cmp_to_key`, `KeyWrapper` | Convert old-style comparison function to key function |
+
+## Reading
+
+### `lru_cache` doubly-linked dict
+
+The cache is a `dict` from cache key to `lru_list_elem` node. Nodes form a doubly-linked
+list in LRU order. On cache hit, the node is moved to the front. On cache miss (if the
+cache is full), the least-recently-used node (tail) is evicted from both the dict and the
+list.
+
+```c
+// CPython: Modules/_functoolsmodule.c:848 lru_cache_call
+static PyObject *
+lru_cache_call(lru_cache_object *self, PyObject *args, PyObject *kwds)
+{
+    ...
+    link = (lru_list_elem *)PyDict_GetItemWithError(self->cache, key);
+    if (link != NULL) {
+        /* cache hit: move to front */
+        lru_cache_unlink_result(link);
+        lru_cache_prepend_link(self, link);
+        self->hits++;
+        return Py_NewRef(link->result);
+    }
+    ...
+}
+```
+
+### `typed` cache keys
+
+When `lru_cache(typed=True)`, the cache key includes the argument types. `1` and `1.0`
+hash equally but have different types, so they get separate cache entries.
+
+### `reduce`
+
+`functools.reduce(function, iterable[, initializer])` applies `function` cumulatively.
+If `initializer` is absent, the first element of the iterable is used as the initial value.
+
+```c
+// CPython: Modules/_functoolsmodule.c:1050 functools_reduce_impl
+static PyObject *
+functools_reduce_impl(PyObject *module, PyObject *func, PyObject *seq,
+                      PyObject *result)
+{
+    ...
+    while ((op = PyIter_Next(it)) != NULL) {
+        newresult = PyObject_CallFunctionObjArgs(func, result, op, NULL);
+        ...
+        result = newresult;
+    }
+    ...
+}
+```
+
+### `cmp_to_key`
+
+`cmp_to_key(mycmp)` returns a class `K` whose `__lt__`, `__gt__`, etc. call `mycmp(a, b)`
+and compare the result to 0. This adapts old-style comparison functions for use with
+`sorted(key=...)`.
+
+## gopy notes
+
+`module/functools/` is partially ported. `lru_cache` is not yet implemented; it requires
+an LRU dict structure. `reduce` and `cmp_to_key` are simpler and are on the roadmap.

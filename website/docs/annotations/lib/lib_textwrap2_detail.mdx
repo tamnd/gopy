@@ -1,0 +1,74 @@
+---
+title: Lib/textwrap.py (part 2)
+description: "textwrap.dedent: common leading whitespace stripping algorithm; shorten(): truncate to max_width with placeholder; indent(): add prefix to each line with optional predicate."
+cpython_path: Lib/textwrap.py
+cpython_version: "3.14"
+lines: 430
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/textwrap.py` (part 2)
+
+<CpyLink path="Lib/textwrap.py" />
+
+This annotation covers `dedent`, `shorten`, and `indent` from `Lib/textwrap.py`. For the
+`TextWrapper` class, `fill`, and `wrap` see the `lib_textwrap` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | `dedent` | Strip common leading whitespace |
+| 81-160 | `indent` | Add prefix to lines matching a predicate |
+| 161-260 | `shorten` | Word-wrap then truncate with placeholder |
+
+## Reading
+
+### `dedent`
+
+`dedent(text)` removes the longest common leading whitespace prefix from all non-empty
+lines. It handles mixed tabs and spaces by treating tabs as 8-space tab stops for prefix
+comparison purposes.
+
+```python
+# CPython: Lib/textwrap.py:408 dedent
+def dedent(text):
+    ...
+    _whitespace_only_re = re.compile('^[ \t]+$', re.MULTILINE)
+    _leading_whitespace_re = re.compile('(^[ \t]*)(?:[^ \t\n])', re.MULTILINE)
+    text = _whitespace_only_re.sub('', text)
+    indents = _leading_whitespace_re.findall(text)
+    margin = None
+    for indent in indents:
+        if margin is None:
+            margin = indent
+        elif indent.startswith(margin):
+            pass
+        elif margin.startswith(indent):
+            margin = indent
+        else:
+            margin = ''
+            break
+    ...
+    return re.sub(r'(?m)^' + margin, '', text) if margin else text
+```
+
+### `indent`
+
+`indent(text, prefix, predicate=None)` prepends `prefix` to each line for which
+`predicate(line)` is true. The default predicate is "non-empty after stripping whitespace",
+which skips blank lines.
+
+### `shorten`
+
+`shorten(text, width, **kwargs)` word-wraps text to `width` columns, then takes the first
+line and appends `placeholder` (default `' [...]'`) if the text was truncated. This is
+useful for generating one-line summaries.
+
+## gopy notes
+
+`dedent` is used by docstring processing tools and has no gopy analogue yet. It will be
+part of `module/textwrap/`. The regex-based common prefix algorithm is straightforward to
+port to Go's `regexp` package.
