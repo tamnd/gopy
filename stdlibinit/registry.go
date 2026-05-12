@@ -221,4 +221,16 @@ import (
 	// date, time, datetime, timedelta, timezone types.
 	// CPython: Modules/_datetimemodule.c:7078 datetime_exec
 	_ "github.com/tamnd/gopy/module/_datetime"
+
+	// Built-in module: zlib. Registers itself via module/zlib/module.go
+	// init(). Exposes compress/decompress, crc32/adler32, and streaming
+	// compressobj/decompressobj backed by Go's compress/zlib, compress/flate,
+	// compress/gzip, and hash/crc32.
+	// CPython: Modules/zlibmodule.c:77 zlib_compress_impl
+	_ "github.com/tamnd/gopy/module/zlib"
+
+	// Built-in module: _socket. Registers itself via module/_socket/module.go
+	// init(). Backs Lib/socket.py with the low-level socket API.
+	// CPython: Modules/socketmodule.c:4040 socket_getaddrinfo
+	_ "github.com/tamnd/gopy/module/_socket"
 )
