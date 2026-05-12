@@ -1,0 +1,103 @@
+---
+title: Lib/email/message.py (part 2)
+description: "Lib/email/message.py part 2: EmailMessage, MIMEPart, get_content, make_alternative, make_mixed, as_string, as_bytes, policy."
+cpython_path: Lib/email/message.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/message.py" />
+
+This annotation covers the 3.6+ `EmailMessage` API (policy-aware) and multipart construction. See `lib_email_detail` for `Message`, headers, payload, and MIME basics.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `MIMEPart` | Base for policy-aware message parts |
+| 81-200 | `get_body` / `get_content` | Retrieve decoded body (text, html, attachments) |
+| 201-350 | `make_alternative` | Construct `multipart/alternative` container |
+| 351-500 | `make_mixed` | Construct `multipart/mixed` container |
+| 501-650 | `EmailMessage` | Top-level message with convenience methods |
+| 651-800 | `as_string` / `as_bytes` | Serialize to text/bytes using a `Generator` |
+| 801-1000 | `policy` | `EmailPolicy`, `SMTP`, `SMTPUTF8`, `HTTP` policy objects |
+
+## Reading
+
+### `get_body`
+
+```python
+# CPython: Lib/email/message.py:430 MIMEPart.get_body
+def get_body(self, preferencelist=('related', 'html', 'plain')):
+    """Find the best text body part according to preference."""
+    # Walks the MIME tree, preferring related > html > plain
+    for pref in preferencelist:
+        for part in self.walk():
+            if part.get_content_maintype() == 'multipart':
+                continue
+            if part.get_content_subtype() == pref:
+                return part
+    return None
+```
+
+### `get_content`
+
+```python
+# CPython: Lib/email/message.py:480 MIMEPart.get_content
+def get_content(self, *args, content_manager=None, **kw):
+    """Return decoded content of this part."""
+    if content_manager is None:
+        content_manager = self.policy.content_manager
+    return content_manager.get_content(self, *args, **kw)
+```
+
+The content manager handles charset decoding and base64/quoted-printable decoding transparently.
+
+### `make_alternative`
+
+```python
+# CPython: Lib/email/message.py:530 MIMEPart.make_alternative
+def make_alternative(self, _subtype='alternative', policy=None):
+    """Convert this message into a multipart/alternative container."""
+    keep_headers, payload = self._make_multipart(
+        _subtype, [self], policy)
+    del self._payload
+    del self._headers[:]
+    self._headers[:] = keep_headers
+    self.attach(payload)
+```
+
+`msg.make_alternative()` is used when adding an HTML version to an existing plain-text message.
+
+### `as_string`
+
+```python
+# CPython: Lib/email/message.py:680 Message.as_string
+def as_string(self, unixfrom=False, maxheaderlen=None, policy=None):
+    """Return the entire message as a string."""
+    from email.generator import Generator
+    policy = self.policy if policy is None else self.policy.clone(policy)
+    fp = StringIO()
+    g = Generator(fp, mangle_from_=False, maxheaderlen=maxheaderlen,
+                  policy=policy)
+    g.flatten(self, unixfrom=unixfrom)
+    return fp.getvalue()
+```
+
+### Policy
+
+```python
+# CPython: Lib/email/_header_value_parser.py (policy anatomy)
+# email.policy.default — modern API, utf-8 aware
+# email.policy.SMTP    — CRLF line endings, max 998 chars/line
+# email.policy.compat32 — legacy compat32 (old Message API default)
+```
+
+`EmailMessage` uses `policy=email.policy.default` by default.
+
+## gopy notes
+
+`email` is pure Python. `get_content` calls `ContentManager.get_content` which uses `policy.content_manager`. `as_bytes` uses `BytesGenerator`, which calls `write()` on a `BytesIO`. All these are pure Python and work with gopy's `io.StringIO` / `io.BytesIO`.

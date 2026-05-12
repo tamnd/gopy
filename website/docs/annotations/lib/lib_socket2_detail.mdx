@@ -1,0 +1,122 @@
+---
+title: Lib/socket.py (part 2)
+description: "Lib/socket.py part 2: socket.create_connection, socket.create_server, socket.getaddrinfo, socketpair, socket.makefile, SocketIO."
+cpython_path: Lib/socket.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/socket.py" />
+
+This annotation covers the higher-level Python socket helpers. See `modules_socket_detail2` for the C extension (`_socket`), address families, and `socket.recv`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `create_connection` | Blocking connect with optional timeout and source address |
+| 81-200 | `create_server` | Bind-listen-backlog in one call |
+| 201-350 | `getaddrinfo` / `getnameinfo` | DNS/service resolution wrapping `_socket` |
+| 351-500 | `socketpair` | Create a connected pair (Unix domain or AF_INET fallback) |
+| 501-650 | `socket.makefile` | Wrap socket in a `SocketIO` file-like object |
+| 651-900 | `SocketIO` | `RawIOBase` backed by a socket; used by `makefile('rb')` |
+
+## Reading
+
+### `create_connection`
+
+```python
+# CPython: Lib/socket.py:810 create_connection
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
+                      source_address=None, *, all_errors=False):
+    """Connect to (host, port) and return the socket."""
+    host, port = address
+    errors = []
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        sock = None
+        try:
+            sock = socket(af, socktype, proto)
+            if timeout is not _GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            errors.clear()
+            return sock
+        except OSError as exc:
+            errors.append(exc)
+            if sock is not None:
+                sock.close()
+    if len(errors) == 1:
+        raise errors[0]
+    raise ExceptionGroup('create_connection failed', errors) if all_errors else errors[-1]
+```
+
+`create_connection` tries each `getaddrinfo` result in turn, which handles dual-stack hosts transparently.
+
+### `create_server`
+
+```python
+# CPython: Lib/socket.py:880 create_server
+def create_server(address, *, family=AF_INET, backlog=None,
+                  reuse_port=False, dualstack_ipv6=False):
+    """Create a TCP server socket bound to address."""
+    sock = socket(family, SOCK_STREAM)
+    if reuse_port:
+        sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
+    if dualstack_ipv6:
+        sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
+    sock.bind(address)
+    sock.listen(backlog if backlog is not None else 128)
+    return sock
+```
+
+### `socket.makefile`
+
+```python
+# CPython: Lib/socket.py:500 socket.makefile
+def makefile(self, mode='r', buffering=None, *, encoding=None,
+             errors=None, newline=None):
+    """Return a file-like object backed by this socket."""
+    raw = SocketIO(self, mode)
+    if buffering is None:
+        buffering = -1
+    if buffering < 0:
+        buffering = io.DEFAULT_BUFFER_SIZE
+    if 'b' in mode:
+        if buffering == 0:
+            return raw
+        return io.BufferedRWPair(raw, raw)
+    else:
+        return io.TextIOWrapper(io.BufferedRWPair(raw, raw), encoding, errors, newline)
+```
+
+### `SocketIO`
+
+```python
+# CPython: Lib/socket.py:600 SocketIO
+class SocketIO(io.RawIOBase):
+    def readinto(self, b):
+        """Read into bytearray b; return number of bytes read."""
+        self._checkClosed()
+        self._checkReadable()
+        try:
+            return self._sock.recv_into(b)
+        except BlockingIOError:
+            return None
+
+    def write(self, b):
+        self._checkClosed()
+        self._checkWritable()
+        return self._sock.send(b)
+```
+
+`SocketIO` implements the `RawIOBase` interface so that `io.BufferedReader` and `io.TextIOWrapper` can wrap a socket.
+
+## gopy notes
+
+`socket.create_connection` and `create_server` are pure Python. `SocketIO` uses `socket.recv_into` which is the C `_socket.socket.recv_into` method. `makefile` wraps with `io.BufferedRWPair` using gopy's `io` module implementation.

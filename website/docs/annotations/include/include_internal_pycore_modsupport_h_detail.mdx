@@ -1,0 +1,94 @@
+---
+title: Include/internal/pycore_modsupport.h
+description: "Include/internal/pycore_modsupport.h: _PyArg_ParseStack, _PyArg_NoKeywords, _Py_VaBuildValue — fast argument parsing for C extension methods."
+cpython_path: Include/internal/pycore_modsupport.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_modsupport.h" />
+
+`pycore_modsupport.h` declares internal variants of the argument-parsing and value-building APIs used by the CPython clinic-generated code.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `_PyArg_ParseStack` | Parse args from a C array without building a tuple |
+| 41-70 | `_PyArg_NoKeywords` | Raise `TypeError` if kwargs dict is non-empty |
+| 71-90 | `_PyArg_NoPositional` | Raise `TypeError` if positional args are present |
+| 91-120 | `_Py_VaBuildValue` | Internal `Py_BuildValue` using a `va_list` |
+
+## Reading
+
+### `_PyArg_ParseStack`
+
+```c
+// CPython: Include/internal/pycore_modsupport.h:18 _PyArg_ParseStack
+/* Like PyArg_ParseTuple but takes the raw C argument array instead of a tuple.
+   Used by METH_FASTCALL methods to avoid constructing a PyTupleObject. */
+int _PyArg_ParseStack(PyObject *const *args, Py_ssize_t nargs,
+                      const char *format, ...);
+```
+
+`METH_FASTCALL` passes arguments as `PyObject **args, Py_ssize_t nargs` rather than a `PyTupleObject`. `_PyArg_ParseStack` parses this array directly, avoiding the `PyTuple_New` overhead.
+
+### `_PyArg_NoKeywords`
+
+```c
+// CPython: Include/internal/pycore_modsupport.h:44 _PyArg_NoKeywords
+/* Raise TypeError("funcname() takes no keyword arguments") if kwargs != NULL.
+   Called by METH_FASTCALL|METH_KEYWORDS methods that don't accept kwargs. */
+int _PyArg_NoKeywords(const char *funcname, PyObject *kwargs);
+```
+
+### `_PyArg_CheckPositional`
+
+```c
+// CPython: Include/internal/pycore_modsupport.h:60 _PyArg_CheckPositional
+/* Validate that nargs is within [min, max].
+   If not, raise TypeError with a helpful message. */
+int _PyArg_CheckPositional(const char *name,
+                            Py_ssize_t nargs,
+                            Py_ssize_t min, Py_ssize_t max);
+```
+
+### `_Py_VaBuildValue`
+
+```c
+// CPython: Include/internal/pycore_modsupport.h:100 _Py_VaBuildValue
+/* Internal variant of Py_BuildValue that takes a va_list.
+   Used by clinic-generated code and by PyObject_CallFunction. */
+PyObject * _Py_VaBuildValue(const char *format, va_list va);
+```
+
+`Py_BuildValue("(ii)", x, y)` calls `_Py_VaBuildValue` internally to construct `(x, y)` as a Python tuple.
+
+### Clinic-generated usage pattern
+
+```c
+/* Argparse clinic generates code like:
+   static PyObject *
+   os_open_impl(PyObject *module, path_t *path, int flags, int mode, ...)
+   {
+       ...
+   }
+
+   static PyObject *
+   os_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+   {
+       ...
+       if (!_PyArg_ParseStackAndKeywords(args, nargs, kwnames,
+           &_parser, &path, &flags, &mode, ...))
+           return NULL;
+       return os_open_impl(module, &path, flags, mode, ...);
+   }
+*/
+```
+
+## gopy notes
+
+gopy's argument parsing uses `vm.ParseArgs` / `vm.ParseArgsKwargs` in `vm/argparse.go`. `_PyArg_NoKeywords` maps to `vm.NoKeywords`. `_Py_VaBuildValue` has no direct equivalent; gopy constructs tuples using `objects.NewTuple(items...)`. Clinic-generated METH_FASTCALL methods pass `[]*PyObject` slices directly.

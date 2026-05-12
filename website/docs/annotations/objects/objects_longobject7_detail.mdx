@@ -1,0 +1,122 @@
+---
+title: Objects/longobject.c (part 7)
+description: "Objects/longobject.c part 7: compact int layout (3.12+), _PyLong_IsCompact, digit array allocation, int free list, ob_digit encoding."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers the PEP 659 / 3.12 compact int representation. See previous `objects_longobject*` annotations for arithmetic, conversion, and comparison.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyLongObject` layout | `ob_digit[n]` array; `ob_tag` encodes sign+size (3.12+) |
+| 81-180 | Compact ints | Ints from -5 to 256: preallocated singletons + `_PyLong_IsCompact` |
+| 181-300 | `_PyLong_IsNonNegativeCompact` | Fast path for small non-negative ints |
+| 301-450 | `_PyLong_FromSTwoDigits` | Create from a signed two-digit value |
+| 451-600 | Free list | Reuse 1- and 2-digit `PyLongObject` shells |
+| 601-800 | `_PyLong_Copy` | Efficient in-place copy for immutable ints |
+
+## Reading
+
+### `ob_tag` encoding (3.12+)
+
+```c
+// CPython: Objects/longobject.c:28 PyLongObject
+/* In Python 3.12, the sign and ndigits are packed into ob_tag:
+   bits 0-1: sign (0=zero, 1=positive, 2=negative)
+   bits 2+:  ndigits (number of significant ob_digit[] entries)
+   Compact: ndigits == 1 and the value fits in one digit. */
+typedef struct _PyLongObject {
+    PyObject_VAR_HEAD     /* ob_size was repurposed as ob_tag in 3.12 */
+    digit ob_digit[1];    /* variable-length */
+} PyLongObject;
+
+#define _PyLong_IsCompact(op)     (((op)->long_value.ob_tag & ~SIGN_MASK) <= (1 << NON_SIZE_BITS))
+#define _PyLong_CompactValue(op)  ((op)->long_value.ob_digit[0] * _PyLong_SignFromTag((op)->long_value.ob_tag))
+```
+
+### Small int cache
+
+```c
+// CPython: Objects/longobject.c:112 small_ints
+/* Preallocated ints for -5 to 256 */
+static PyLongObject small_ints[NSMALLNEGINTS + NSMALLPOSINTS];
+
+static inline PyObject *
+get_small_int(sdigit ival)
+{
+    assert(-NSMALLNEGINTS <= ival && ival < NSMALLPOSINTS);
+    PyObject *v = (PyObject *)&small_ints[ival + NSMALLNEGINTS];
+    Py_INCREF(v);
+    return v;
+}
+```
+
+`NSMALLNEGINTS = 5`, `NSMALLPOSINTS = 257`. The singleton range is `-5` through `256` inclusive.
+
+### `_PyLong_IsNonNegativeCompact`
+
+```c
+// CPython: Objects/longobject.c:210 _PyLong_IsNonNegativeCompact
+static inline int
+_PyLong_IsNonNegativeCompact(const PyLongObject *op)
+{
+    /* True if the int is 0 or positive and fits in a single digit */
+    return (op->long_value.ob_tag & (SIGN_MASK | COMPACT_MASK)) ==
+           _PyLong_SIGN_ZERO || /* zero */
+           (op->long_value.ob_tag & COMPACT_MASK) != 0;  /* one positive digit */
+}
+```
+
+Used as a fast check before calling `ob_digit[0]` directly (e.g., in `PyList_SET_ITEM` index checks).
+
+### Free list
+
+```c
+// CPython: Objects/longobject.c:480 _PyLong_FromMedium
+/* 1- and 2-digit int objects are recycled in a per-interpreter free list */
+static PyLongObject *
+_PyLong_Alloc(Py_ssize_t ndigits)
+{
+    if (ndigits == 1 || ndigits == 2) {
+        /* Try free list first */
+        PyLongObject *v = interp->long_state.free_list[ndigits - 1];
+        if (v) {
+            interp->long_state.free_list[ndigits - 1] = (PyLongObject *)v->ob_digit[0];
+            _Py_NewReference((PyObject *)v);
+            return v;
+        }
+    }
+    return (PyLongObject *)PyObject_Malloc(sizeof(PyLongObject) +
+                                           ndigits * sizeof(digit));
+}
+```
+
+### `_PyLong_Copy`
+
+```c
+// CPython: Objects/longobject.c:640 _PyLong_Copy
+int
+_PyLong_Copy(PyLongObject *dst, PyLongObject *src)
+{
+    Py_ssize_t i = _PyLong_DigitCount(src);
+    dst->long_value.ob_tag = src->long_value.ob_tag;
+    while (--i >= 0)
+        dst->long_value.ob_digit[i] = src->long_value.ob_digit[i];
+    return 0;
+}
+```
+
+Used by arithmetic results that reuse an already-sized destination buffer.
+
+## gopy notes
+
+gopy uses Go's `math/big.Int` for arbitrary-precision integers. The compact int optimisation (single digit, no heap) is implemented via a special-cased `PyLongObject` that stores the value directly in `ob_digit[0]` without a `big.Int`. The small int cache is `objects.smallInts[261]` pre-allocated in `objects/longobject.go`.

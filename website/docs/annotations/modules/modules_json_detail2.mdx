@@ -1,0 +1,119 @@
+---
+title: Modules/_json.c (part 2)
+description: "_json.c part 2: JSON scanner (C accelerator) — py_encode_basestring, encode_float, JSONEncoder.iterencode, circular reference detection."
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_json.c" />
+
+This annotation covers the C encoder. See `modules_json_detail` for the scanner (decoder), `JSONDecoder`, and `loads`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `py_encode_basestring` | Escape a Python str for JSON encoding |
+| 81-200 | `py_encode_basestring_ascii` | ASCII-safe variant (non-ASCII → `\uXXXX`) |
+| 201-350 | `encoder_encode_float` | Handle `nan` / `inf` and format floats |
+| 351-500 | `encoder_encode_string` | Top-level string encoding with cache |
+| 501-700 | `encoder_listencode_obj` | Recursively encode a Python object |
+| 701-850 | `encoder_listencode_list` | Encode a list/tuple to `[...]` |
+| 851-1000 | `encoder_listencode_dict` | Encode a dict to `{...}`, check key types |
+
+## Reading
+
+### `py_encode_basestring_ascii`
+
+```c
+// CPython: Modules/_json.c:120 py_encode_basestring_ascii
+static PyObject *
+py_encode_basestring_ascii(PyObject *pystr)
+{
+    /* Escape control characters, backslash, double-quote.
+       Encode non-ASCII as \uXXXX (or \uXXXX\uXXXX surrogates for BMP). */
+    Py_UCS4 c;
+    while (input_chars--) {
+        c = *input++;
+        if (c == '"')  { *output++ = '\\'; *output++ = '"';  continue; }
+        if (c == '\\') { *output++ = '\\'; *output++ = '\\'; continue; }
+        if (c < 0x20)  { /* \b \f \n \r \t or \uXXXX */ ... continue; }
+        if (c > 0x7F)  { /* \uXXXX or surrogate pair */ ... continue; }
+        *output++ = (char)c;
+    }
+}
+```
+
+### `encoder_encode_float`
+
+```c
+// CPython: Modules/_json.c:260 encoder_encode_float
+static PyObject *
+encoder_encode_float(PyEncoderObject *s, PyObject *obj)
+{
+    double d = PyFloat_AS_DOUBLE(obj);
+    if (Py_IS_NAN(d)) {
+        if (!s->allow_nan) {
+            PyErr_SetString(PyExc_ValueError,
+                "Out of range float values are not JSON compliant");
+            return NULL;
+        }
+        return PyUnicode_FromString("NaN");
+    }
+    if (Py_IS_INFINITY(d))
+        return PyUnicode_FromString(d > 0 ? "Infinity" : "-Infinity");
+    return PyFloat_Type.tp_repr(obj);
+}
+```
+
+JSON does not have `NaN` or `Infinity` literals. `allow_nan=True` (the default in Python's `json`) encodes them as bare `NaN`/`Infinity` which is technically non-compliant.
+
+### `encoder_listencode_obj`
+
+```c
+// CPython: Modules/_json.c:520 encoder_listencode_obj
+static int
+encoder_listencode_obj(PyEncoderObject *s, _PyUnicodeWriter *writer,
+                       PyObject *obj, Py_ssize_t indent_level)
+{
+    /* Dispatch by type */
+    if (obj == Py_None)           return encoder_encode_null(s, writer);
+    if (obj == Py_True)           return encoder_encode_true(s, writer);
+    if (obj == Py_False)          return encoder_encode_false(s, writer);
+    if (PyUnicode_Check(obj))     return encoder_encode_string(s, writer, obj);
+    if (PyLong_Check(obj))        return encoder_encode_long(s, writer, obj);
+    if (PyFloat_Check(obj))       return encoder_encode_float(s, writer, obj);
+    if (PyList_Check(obj) || PyTuple_Check(obj))
+                                  return encoder_listencode_list(s, writer, obj, indent_level);
+    if (PyDict_Check(obj))        return encoder_listencode_dict(s, writer, obj, indent_level);
+    /* default: call s->default(obj) */
+    newobj = PyObject_CallOneArg(s->defaultfn, obj);
+    ...
+}
+```
+
+### Circular reference detection
+
+```c
+// CPython: Modules/_json.c:580 encoder_listencode_dict
+/* Before encoding a container, add its id to check_circular set.
+   If id is already in the set, raise ValueError("Circular reference"). */
+if (s->check_circular) {
+    ident = PyLong_FromVoidPtr(dct);
+    if (PySet_Contains(markers, ident)) {
+        PyErr_SetString(PyExc_ValueError, "Circular reference detected");
+        goto bail;
+    }
+    PySet_Add(markers, ident);
+}
+/* ... encode dict ... */
+PySet_Discard(markers, ident);
+```
+
+## gopy notes
+
+`_json` C accelerator is in `module/json/encoder.go` as a pure Go implementation. `py_encode_basestring_ascii` is `json.EncodeASCII`. Circular reference detection uses a `map[uintptr]bool` (Go id set). The `default` hook calls a Python callable via `vm.CallOne`.

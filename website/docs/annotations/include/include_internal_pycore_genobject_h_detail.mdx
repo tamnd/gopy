@@ -1,0 +1,102 @@
+---
+title: Include/internal/pycore_genobject.h
+description: "Include/internal/pycore_genobject.h: PyGenObject, PyCoroObject, PyAsyncGenObject layout, _PyGen_yf, gi_frame_state, FRAME_SUSPENDED."
+cpython_path: Include/internal/pycore_genobject.h
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_genobject.h" />
+
+`pycore_genobject.h` declares the internal layout of generator, coroutine, and async generator objects, including the frame state machine used to implement `yield` and `await`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `_PyGenObject_HEAD` | Shared header: `gi_frame_state`, `gi_weakreflist`, `gi_name` |
+| 61-100 | `PyGenObject` | Generator (`def f(): yield`) |
+| 101-130 | `PyCoroObject` | Coroutine (`async def`) |
+| 131-160 | `PyAsyncGenObject` | Async generator (`async def` + `yield`) |
+| 161-180 | `gi_frame_state` enum | `FRAME_CREATED`, `FRAME_SUSPENDED`, `FRAME_COMPLETED` |
+
+## Reading
+
+### `_PyGenObject_HEAD`
+
+```c
+// CPython: Include/internal/pycore_genobject.h:18 _PyGenObject_HEAD
+#define _PyGenObject_HEAD(prefix)                    \
+    PyObject_HEAD                                    \
+    /* Weak references */                            \
+    PyObject *prefix##_weakreflist;                  \
+    /* Qualified name: func.__qualname__ at creation */ \
+    PyObject *prefix##_qualname;                     \
+    PyObject *prefix##_name;                         \
+    /* Frame state */                                \
+    int8_t prefix##_frame_state;                     \
+    /* True if this is a running generator (throws RuntimeError on re-entry) */ \
+    char prefix##_running_async;
+```
+
+### `PyGenObject`
+
+```c
+// CPython: Include/internal/pycore_genobject.h:62 PyGenObject
+typedef struct {
+    _PyGenObject_HEAD(gi)
+    PyObject *gi_origin_or_finalizer; /* origin or __del__ finalizer */
+    char gi_hooks_inited;
+    /* Embedded frame follows (variable size) */
+} PyGenObject;
+```
+
+The suspended frame is embedded directly in the generator object to avoid an extra allocation. When a generator is created, `_PyFrame_PushUnchecked` places the frame at `(PyGenObject *gen + 1)`.
+
+### `PyCoroObject`
+
+```c
+// CPython: Include/internal/pycore_genobject.h:102 PyCoroObject
+typedef struct {
+    _PyGenObject_HEAD(cr)
+    PyObject *cr_origin_or_finalizer;
+    char cr_hooks_inited;
+    /* cr_await: the object being awaited (set by SEND/YIELD_FROM) */
+    PyObject *cr_await;
+    /* Used by sys.set_coroutine_origin_tracking_depth */
+    PyObject *cr_origin;
+} PyCoroObject;
+```
+
+### `gi_frame_state` enum
+
+```c
+// CPython: Include/internal/pycore_genobject.h:162 gi_frame_state
+#define FRAME_CREATED    -2  /* not yet entered */
+#define FRAME_SUSPENDED  -1  /* yielded, frame alive */
+#define FRAME_SUSPENDED_YIELD_FROM 0  /* in yield-from/await */
+#define FRAME_EXECUTING   1  /* currently running */
+#define FRAME_COMPLETED   2  /* return/raise or close() called */
+#define FRAME_CLEARED     3  /* frame locals cleared */
+```
+
+`FRAME_SUSPENDED` means `next(gen)` was called and the generator executed to a `yield` statement. The frame is preserved in the generator object with `prev_instr` pointing just before the next instruction.
+
+### Re-entry guard
+
+```c
+// CPython: Objects/genobject.c:82 gen_send_ex2
+if (gen->gi_frame_state == FRAME_EXECUTING) {
+    /* Generator is already running — raise ValueError */
+    PyErr_SetString(PyExc_ValueError,
+        "generator already executing");
+    return NULL;
+}
+```
+
+## gopy notes
+
+gopy's generator is `objects.PyGenObject` in `objects/genobject.go`. The suspended frame is stored as `gen.frame *vm.Frame`. `gi_frame_state` maps to `gen.frameState int8`. `FRAME_SUSPENDED` maps to `FrameSuspended`. The embedded-frame optimization is not used; gopy allocates `vm.Frame` on the Go heap separately.

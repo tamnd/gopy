@@ -1,0 +1,114 @@
+---
+title: Python/ceval.c (part 9)
+description: "Python/ceval.c part 9: BINARY_SUBSCR specialization, STORE_SUBSCR, DELETE_SUBSCR, BINARY_OP specializations (int add, float add, str concat)."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers subscript and binary operator specializations in the adaptive interpreter. See `python_ceval_detail` through `python_ceval8_detail` for the main eval loop and earlier specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `BINARY_SUBSCR_LIST_INT` | `list[int]` — direct index without bounds check wrapper |
+| 101-200 | `BINARY_SUBSCR_TUPLE_INT` | `tuple[int]` — direct index |
+| 201-300 | `BINARY_SUBSCR_DICT` | `dict[key]` — direct hash lookup |
+| 301-450 | `STORE_SUBSCR_LIST_INT` | `list[int] = value` — in-place |
+| 451-600 | `BINARY_OP_ADD_INT` | `int + int` — compact int fast path |
+| 601-750 | `BINARY_OP_ADD_FLOAT` | `float + float` — unboxed double add |
+| 751-900 | `BINARY_OP_ADD_UNICODE` | `str + str` — fast unicode concatenation |
+
+## Reading
+
+### `BINARY_SUBSCR_LIST_INT`
+
+```c
+// CPython: Python/ceval.c:3280 BINARY_SUBSCR_LIST_INT
+inst(BINARY_SUBSCR_LIST_INT, (unused/1, list, sub -- res)) {
+    DEOPT_IF(!PyList_CheckExact(list), BINARY_SUBSCR);
+    DEOPT_IF(!_PyLong_IsNonNegativeCompact(sub), BINARY_SUBSCR);
+    Py_ssize_t index = _PyLong_CompactValue((PyLongObject *)sub);
+    DEOPT_IF(index >= PyList_GET_SIZE(list), BINARY_SUBSCR);
+    res = PyList_GET_ITEM(list, index);
+    Py_INCREF(res);
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+}
+```
+
+No bounds-check wrapper, no `tp_as_sequence->sq_item` call. This is 3-5x faster than the generic path.
+
+### `BINARY_SUBSCR_DICT`
+
+```c
+// CPython: Python/ceval.c:3360 BINARY_SUBSCR_DICT
+inst(BINARY_SUBSCR_DICT, (unused/1, dict, sub -- res)) {
+    DEOPT_IF(!PyDict_CheckExact(dict), BINARY_SUBSCR);
+    res = PyDict_GetItemWithError(dict, sub);
+    if (res == NULL) {
+        if (!_PyErr_Occurred(tstate))
+            _PyErr_SetKeyError(sub);
+        ERROR_NO_POP();
+    }
+    Py_INCREF(res);
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+}
+```
+
+### `BINARY_OP_ADD_INT`
+
+```c
+// CPython: Python/ceval.c:3540 BINARY_OP_ADD_INT
+inst(BINARY_OP_ADD_INT, (unused/1, left, right -- res)) {
+    DEOPT_IF(!_PyLong_IsCompact(left),  BINARY_OP);
+    DEOPT_IF(!_PyLong_IsCompact(right), BINARY_OP);
+    assert(_PyLong_BothAreCompact(left, right));
+    /* Compact ints: direct sdigit add without Python int allocation */
+    sdigit lv = _PyLong_CompactValue(left);
+    sdigit rv = _PyLong_CompactValue(right);
+    /* If result fits in a compact int, avoid heap allocation */
+    res = _PyLong_FromSTwoDigits(lv + rv);
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+}
+```
+
+Both operands must be compact (single-digit). The result may still require `ob_digit` allocation if it overflows one digit.
+
+### `BINARY_OP_ADD_FLOAT`
+
+```c
+// CPython: Python/ceval.c:3610 BINARY_OP_ADD_FLOAT
+inst(BINARY_OP_ADD_FLOAT, (unused/1, left, right -- res)) {
+    DEOPT_IF(!PyFloat_CheckExact(left),  BINARY_OP);
+    DEOPT_IF(!PyFloat_CheckExact(right), BINARY_OP);
+    double dv = PyFloat_AS_DOUBLE(left) + PyFloat_AS_DOUBLE(right);
+    DECREF_INPUTS_AND_REUSE_FLOAT(left, right, dv, res);
+}
+```
+
+`DECREF_INPUTS_AND_REUSE_FLOAT` checks if either input's reference count is 1; if so, it overwrites it in-place rather than allocating a new float object.
+
+### `BINARY_OP_ADD_UNICODE`
+
+```c
+// CPython: Python/ceval.c:3680 BINARY_OP_ADD_UNICODE
+inst(BINARY_OP_ADD_UNICODE, (unused/1, left, right -- res)) {
+    DEOPT_IF(!PyUnicode_CheckExact(left),  BINARY_OP);
+    DEOPT_IF(!PyUnicode_CheckExact(right), BINARY_OP);
+    res = PyUnicode_Concat(left, right);
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+    if (res == NULL) ERROR_NO_POP();
+}
+```
+
+`PyUnicode_Concat` checks if `left` has refcount 1 and appends in-place (avoiding a copy) when possible.
+
+## gopy notes
+
+gopy's specialized opcodes are in `vm/eval_specialize.go`. `BINARY_SUBSCR_LIST_INT` uses `objects.ListGetItem` with a pre-validated compact-int index. `BINARY_OP_ADD_INT` uses `objects.LongAdd` with the compact-int fast path in `objects/longobject_compact.go`. `BINARY_OP_ADD_FLOAT` reuses the float object via `objects.FloatReuse`.

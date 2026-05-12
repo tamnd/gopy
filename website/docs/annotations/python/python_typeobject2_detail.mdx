@@ -1,0 +1,115 @@
+---
+title: Python/typeobject.c (part 2)
+description: "Python/typeobject.c part 2: type.__new__, type.__init__, mro_internal, type_ready, tp_dict population, slot inheritance."
+cpython_path: Python/typeobject.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/typeobject.c" />
+
+This annotation covers type creation and readying. See `python_typeobject_detail` for `type.__call__`, `tp_new`, `tp_init`, and the descriptor protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `type_new_impl` | `type(name, bases, ns)` — create a new type |
+| 101-250 | `_Py_CalculateMetaclass` | Determine the winning metaclass from bases |
+| 251-400 | `mro_internal` | Compute the MRO using C3 linearization |
+| 401-600 | `type_ready` | Finalize a type: inherit slots, build tp_dict, compute mro |
+| 601-800 | Slot inheritance | Copy `tp_*` slots from base types |
+| 801-1000 | `update_one_slot` | Update a single slot in a type after modification |
+| 1001-1500 | `type_set_doc` / `type_set_abstractmethods` | `__doc__` and `__abstractmethods__` setters |
+
+## Reading
+
+### `type_new_impl`
+
+```c
+// CPython: Python/typeobject.c:2980 type_new_impl
+static PyObject *
+type_new_impl(PyTypeObject *metatype, PyObject *args, PyObject *kwds)
+{
+    PyObject *name, *bases, *orig_dict;
+    /* Parse name, bases, dict */
+    /* 1. Determine the winning metaclass */
+    PyTypeObject *winner = _Py_CalculateMetaclass(metatype, bases);
+    if (winner != metatype) {
+        /* Redirect to winning metaclass */
+        return winner->tp_new(winner, args, kwds);
+    }
+    /* 2. Allocate the type object */
+    type = (PyHeapTypeObject *)metatype->tp_alloc(metatype, nslot);
+    /* 3. Fill in slots from the class dict */
+    /* 4. Set bases and compute MRO */
+    type->tp_bases = bases;
+    type->tp_mro   = mro_internal(type, NULL);
+    /* 5. type_ready */
+    type_ready(type);
+}
+```
+
+### `_Py_CalculateMetaclass`
+
+```c
+// CPython: Python/typeobject.c:2850 _Py_CalculateMetaclass
+/* Find the most-derived metaclass among metatype and the metatypes of all bases.
+   Raises TypeError if two unrelated metaclasses are found. */
+PyTypeObject *
+_Py_CalculateMetaclass(PyTypeObject *metatype, PyObject *bases)
+{
+    PyTypeObject *winner = metatype;
+    Py_ssize_t nbases = PyTuple_GET_SIZE(bases);
+    for (Py_ssize_t i = 0; i < nbases; i++) {
+        PyTypeObject *tmp = Py_TYPE(PyTuple_GET_ITEM(bases, i));
+        if (PyType_IsSubtype(winner, tmp)) continue;
+        if (PyType_IsSubtype(tmp, winner)) { winner = tmp; continue; }
+        PyErr_SetString(PyExc_TypeError,
+            "metaclass conflict: the metaclass of a derived class must be a "
+            "(non-strict) subclass of the metaclasses of all its bases");
+        return NULL;
+    }
+    return winner;
+}
+```
+
+### C3 MRO (`mro_internal`)
+
+```c
+// CPython: Python/typeobject.c:1820 mro_internal
+/* C3 linearization:
+   L[C(B1, B2, ...)] = C + merge(L[B1], L[B2], ..., B1 B2 ...)
+   merge: take the head of the first list if it does not appear
+   in the tail of any other list; otherwise try the next list. */
+static PyObject *
+mro_internal(PyTypeObject *type, PyObject **p_old_mro)
+```
+
+`type.__mro__` is computed once at class creation time and cached. Changing `__bases__` recomputes it.
+
+### `type_ready` key steps
+
+```c
+// CPython: Python/typeobject.c:6280 type_ready
+static int
+type_ready(PyTypeObject *type)
+{
+    /* 1. Inherit tp_base from bases[0] if not set */
+    /* 2. Initialize tp_dict from __dict__ */
+    /* 3. Inherit slots from base (tp_new, tp_hash, tp_repr, ...) */
+    /* 4. Special-case: add __doc__ descriptor if type has tp_doc */
+    /* 5. Add tp_getattro/setattro wrappers (slots → Python methods) */
+    /* 6. Fixup tp_richcompare to match __eq__/__lt__ etc. */
+    /* 7. Set type->tp_flags |= Py_TPFLAGS_READY */
+}
+```
+
+`type_ready` is called on every C-defined type at interpreter startup and on every new heap type created by `type.__new__`.
+
+## gopy notes
+
+`type.__new__` is in `objects/type_call.go:TypeNew`. `_Py_CalculateMetaclass` is `objects.CalculateMetaclass`. C3 MRO is `objects.ComputeMRO` in `objects/mro.go`. `type_ready` equivalent is `objects.TypeReady` which populates the slot table and inherits from bases.

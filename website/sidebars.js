@@ -335,6 +335,8 @@ const sidebars = {
         'annotations/python/python_bootstrap_hash_detail',
         'annotations/python/python_thread3_detail',
         'annotations/python/python_frozen2_detail',
+        'annotations/python/python_ceval9_detail',
+        'annotations/python/python_typeobject2_detail',
       ],
     },
     {
@@ -537,6 +539,8 @@ const sidebars = {
         'annotations/objects/objects_moduleobject2_detail',
         'annotations/objects/objects_bytesobject3_detail',
         'annotations/objects/objects_unicodeobject5_detail',
+        'annotations/objects/objects_longobject7_detail',
+        'annotations/objects/objects_listobject4_detail',
       ],
     },
     {
@@ -782,6 +786,8 @@ const sidebars = {
         'annotations/include/include_internal_pycore_crossinterp_h_detail',
         'annotations/include/include_internal_pycore_symtable_h_detail',
         'annotations/include/include_internal_pycore_pystate_h_detail',
+        'annotations/include/include_internal_pycore_genobject_h_detail',
+        'annotations/include/include_internal_pycore_modsupport_h_detail',
       ],
     },
     {
@@ -1026,6 +1032,8 @@ const sidebars = {
         'annotations/modules/modules_readline_detail',
         'annotations/modules/modules_termios2_detail',
         'annotations/modules/modules_gdbm_detail',
+        'annotations/modules/modules_posix_detail2',
+        'annotations/modules/modules_json_detail2',
       ],
     },
     {
@@ -1557,6 +1565,8 @@ const sidebars = {
         'annotations/lib/lib_configparser2_detail',
         'annotations/lib/lib_pickle2_detail',
         'annotations/lib/lib_tarfile2_detail',
+        'annotations/lib/lib_email2_detail',
+        'annotations/lib/lib_socket2_detail',
       ],
     },
   ],

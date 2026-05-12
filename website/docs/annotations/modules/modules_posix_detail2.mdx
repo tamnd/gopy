@@ -1,0 +1,120 @@
+---
+title: Modules/posixmodule.c (part 2)
+description: "posixmodule.c part 2: os.scandir, os.stat, DirEntry, os.walk, os.sendfile, os.copy_file_range, os.splice."
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/posixmodule.c" />
+
+This annotation covers directory scanning and efficient file copying. See `modules_posix_detail` for `os.open`, `os.read`, `os.write`, `os.fork`, `os.exec*`, and process management.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `os.scandir` | Iterator of `DirEntry` objects; avoids stat on entry |
+| 101-250 | `DirEntry` | `name`, `path`, `is_file()`, `is_dir()`, `stat()` |
+| 251-400 | `os.walk` | Yield `(dirpath, dirnames, filenames)` recursively |
+| 401-550 | `os.stat` / `os.lstat` | File metadata via `stat(2)` / `lstat(2)` |
+| 551-700 | `os_stat_result` | `structseq` with `st_mode`, `st_size`, `st_mtime`, etc. |
+| 701-900 | `os.sendfile` | Zero-copy file-to-socket transfer (Linux/macOS) |
+| 901-1100 | `os.copy_file_range` | Kernel-side copy between two file descriptors (Linux 4.5+) |
+| 1101-1500 | `os.splice` | Move data between two file descriptors via a pipe |
+
+## Reading
+
+### `os.scandir`
+
+```c
+// CPython: Modules/posixmodule.c:11820 os_scandir_impl
+static PyObject *
+os_scandir_impl(PyObject *module, path_t *path)
+{
+    /* Returns a ScandirIterator that calls opendir(3) / FindFirstFile */
+    ScandirIterator *iterator = PyObject_GC_New(ScandirIterator, &ScandirIteratorType);
+    iterator->dirp = opendir(path->narrow);
+    return (PyObject *)iterator;
+}
+```
+
+Each call to `__next__` on the iterator calls `readdir(3)` and creates a `DirEntry`. `DirEntry.stat()` is lazy — it calls `stat(2)` only when accessed.
+
+### `DirEntry`
+
+```c
+// CPython: Modules/posixmodule.c:11650 DirEntry
+/* DirEntry caches d_type from readdir for is_file/is_dir on Linux.
+   DT_REG: regular file, DT_DIR: directory, DT_LNK: symlink, DT_UNKNOWN: must stat */
+static PyObject *
+DirEntry_is_file(DirEntry *self, PyObject *follow_symlinks_arg)
+{
+    if (self->d_type != DT_UNKNOWN) {
+        /* Fast path: use d_type without stat */
+        if (follow_symlinks && self->d_type == DT_LNK)
+            goto do_stat;
+        return PyBool_FromLong(self->d_type == DT_REG);
+    }
+do_stat:
+    /* Slow path: must call stat(2) */
+    return DirEntry_py_stat(self, follow_symlinks);
+}
+```
+
+### `os.stat` result
+
+```c
+// CPython: Modules/posixmodule.c:2350 os_stat_impl
+/* os.stat_result is a structseq with fields:
+   st_mode, st_ino, st_dev, st_nlink, st_uid, st_gid, st_size,
+   st_atime, st_mtime, st_ctime
+   Plus platform-specific nanosecond fields (st_atime_ns, etc.) */
+```
+
+### `os.sendfile`
+
+```c
+// CPython: Modules/posixmodule.c:9820 os_sendfile_impl
+static PyObject *
+os_sendfile_impl(PyObject *module, int out_fd, int in_fd,
+                 PyObject *offobj, Py_ssize_t count)
+{
+    Py_BEGIN_ALLOW_THREADS
+#ifdef __APPLE__
+    off_t sbytes = count;
+    ret = sendfile(in_fd, out_fd, offset, &sbytes, NULL, 0);
+#else
+    ret = sendfile(out_fd, in_fd, &offset, count);
+#endif
+    Py_END_ALLOW_THREADS
+    ...
+}
+```
+
+`sendfile` avoids user-space copying by moving data from a file to a socket entirely within the kernel.
+
+### `os.copy_file_range`
+
+```c
+// CPython: Modules/posixmodule.c:9950 os_copy_file_range_impl
+/* Linux 4.5+ syscall: copy bytes from src_fd to dst_fd in kernel.
+   More efficient than read+write for same-filesystem copies. */
+static PyObject *
+os_copy_file_range_impl(PyObject *module, int src, int dst,
+                        Py_ssize_t count, PyObject *offset_src,
+                        PyObject *offset_dst)
+{
+    Py_BEGIN_ALLOW_THREADS
+    ret = copy_file_range(src, p_offset_src, dst, p_offset_dst, count, 0);
+    Py_END_ALLOW_THREADS
+    return PyLong_FromSsize_t(ret);
+}
+```
+
+## gopy notes
+
+`os.scandir` is in `module/os/scandir.go` using `os.ReadDir` + `os.Lstat`. `DirEntry.d_type` optimization uses `syscall.DT_*` constants from `dirent`. `os.sendfile` uses `syscall.Sendfile`. `os.copy_file_range` uses `golang.org/x/sys/unix.CopyFileRange` when available, falling back to `io.Copy`.

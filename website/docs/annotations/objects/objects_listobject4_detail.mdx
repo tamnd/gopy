@@ -1,0 +1,120 @@
+---
+title: Objects/listobject.c (part 4)
+description: "Objects/listobject.c part 4: list.sort — Timsort implementation, run detection, galloping merge, merge_lo/merge_hi."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+This annotation covers the Timsort implementation for `list.sort()`. See `objects_listobject_detail` through `objects_listobject3_detail` for basic operations, iteration, and `list.copy`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `listsort` | Entry point: call `list_sort_impl`, handle key function |
+| 101-250 | `count_run` | Detect a natural run; reverse descending runs |
+| 251-400 | `binarysort` | Insertion sort for small runs (< MIN_MERGE) |
+| 401-600 | `merge_collapse` | Enforce the run stack invariant |
+| 601-800 | `merge_at` | Merge two adjacent runs; choose lo or hi variant |
+| 801-1000 | `merge_lo` / `merge_hi` | Galloping merge (left-to-right / right-to-left) |
+| 1001-1200 | `gallop_left` / `gallop_right` | Binary search with galloping for merge boundaries |
+
+## Reading
+
+### `count_run`
+
+```c
+// CPython: Objects/listobject.c:1180 count_run
+static Py_ssize_t
+count_run(MergeState *ms, PyObject **lo, PyObject **hi, int *descending)
+{
+    assert(lo < hi);
+    *descending = 0;
+    ++lo;
+    if (lo == hi) return 1;
+    /* Check for descending run */
+    if (ISLT(*lo, *(lo-1), compare)) {
+        *descending = 1;
+        do ++lo; while (lo < hi && ISLT(*lo, *(lo-1), compare));
+    } else {
+        do ++lo; while (lo < hi && !ISLT(*lo, *(lo-1), compare));
+    }
+    return lo - (hi - (hi - lo));
+}
+```
+
+Timsort exploits existing order. A descending run is reversed in-place before merging.
+
+### `binarysort` (for short runs)
+
+```c
+// CPython: Objects/listobject.c:1260 binarysort
+static int
+binarysort(MergeState *ms, PyObject **lo, PyObject **hi, PyObject **start)
+{
+    /* Insertion sort using binary search to find the insertion point */
+    for (PyObject **l = start; l < hi; ++l) {
+        PyObject *pivot = *l;
+        PyObject **left = lo, **right = l;
+        while (left < right) {
+            PyObject **mid = left + ((right - left) >> 1);
+            if (ISLT(pivot, *mid, compare))
+                right = mid;
+            else
+                left = mid + 1;
+        }
+        memmove(left + 1, left, (l - left) * sizeof(PyObject *));
+        *left = pivot;
+    }
+    return 0;
+}
+```
+
+### `merge_collapse` (run stack invariant)
+
+```c
+// CPython: Objects/listobject.c:1580 merge_collapse
+/* Maintain invariants:
+   A > B + C
+   B > C
+   where A, B, C are the sizes of the top three runs on the stack.
+   These invariants ensure O(n log n) total work. */
+static int
+merge_collapse(MergeState *ms)
+{
+    struct s_slice *p = ms->pending;
+    while (ms->n > 1) {
+        Py_ssize_t n = ms->n - 2;
+        if (n > 0 && p[n-1].len <= p[n].len + p[n+1].len) {
+            if (p[n-1].len < p[n+1].len) --n;
+            if (merge_at(ms, n) < 0) return -1;
+        } else if (p[n].len <= p[n+1].len) {
+            if (merge_at(ms, n) < 0) return -1;
+        } else break;
+    }
+    return 0;
+}
+```
+
+### Galloping
+
+```c
+// CPython: Objects/listobject.c:1700 gallop_left
+/* Find the leftmost position to insert key in sorted array [a, a+n).
+   Galloping: start with step 1, double until overshoot, then binary search.
+   Faster than binary search when the insertion point is near the start. */
+static Py_ssize_t
+gallop_left(MergeState *ms, PyObject *key, PyObject **a, Py_ssize_t n, Py_ssize_t hint)
+```
+
+Galloping is activated when one run is "winning" repeatedly during a merge. It skips large blocks with a doubling probe.
+
+## gopy notes
+
+gopy uses the same Timsort implementation via Go's `sort.Stable` (which is Timsort in Go 1.19+). `list.sort()` with a `key` function is in `objects/listobject_sort.go` and calls `sort.Slice` with a comparator. The `key` function is applied once per element and cached in a `[]PyObject` slice (the decorated pattern).
