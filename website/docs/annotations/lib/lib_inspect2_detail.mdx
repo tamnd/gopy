@@ -1,0 +1,141 @@
+---
+title: Lib/inspect.py (part 2)
+description: "Lib/inspect.py part 2: getmembers, getmodule, getsource/getsourcelines, getsourcefile, signature, Parameter, BoundArguments."
+cpython_path: Lib/inspect.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/inspect.py" />
+
+This annotation covers member introspection and source retrieval. See `lib_inspect_detail` for `isfunction`, `isclass`, `ismodule`, frame and stack helpers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `getmembers` | Return `(name, value)` pairs for all attributes of an object |
+| 81-200 | `getmodule` | Deduce the module an object was defined in |
+| 201-350 | `getsourcefile` / `getfile` | Return the `.py` or `.pyc` source path |
+| 351-550 | `getsourcelines` / `getsource` | Read and return source lines plus starting line number |
+| 551-800 | `signature` / `Signature` | Build a `Signature` object from a callable |
+| 801-1100 | `Parameter` | Represent one parameter (name, kind, default, annotation) |
+| 1101-1400 | `BoundArguments` | Result of `Signature.bind()` — maps args to parameters |
+
+## Reading
+
+### `getmembers`
+
+```python
+# CPython: Lib/inspect.py:480 getmembers
+def getmembers(object, predicate=None):
+    """Return all members of an object as (name, value) pairs sorted by name.
+    Optionally, only return members for which predicate(value) is true."""
+    mro = ()
+    names = dir(object)
+    # :dd any DynamicClassAttribute from the class MRO
+    for base in getattr(type(object), '__mro__', ()):
+        for k, v in base.__dict__.items():
+            if isinstance(v, types.DynamicClassAttribute):
+                names.append(k)
+    results = []
+    processed = set()
+    for key in names:
+        try:
+            value = getattr(object, key)
+        except AttributeError:
+            for base in mro:
+                if key in base.__dict__:
+                    value = base.__dict__[key]
+                    break
+            else:
+                continue
+        if not predicate or predicate(value):
+            results.append((key, value))
+        processed.add(key)
+    results.sort(key=lambda pair: pair[0])
+    return results
+```
+
+`getmembers` is used by `help()` and IDEs to enumerate callable attributes. It tolerates descriptors that raise `AttributeError` on access.
+
+### `getsource`
+
+```python
+# CPython: Lib/inspect.py:1080 getsource
+def getsource(object):
+    """Return the source code for an object as a string."""
+    lines, lnum = getsourcelines(object)
+    return ''.join(lines)
+
+def getsourcelines(object):
+    object = unwrap(object)
+    lines, lnum = findsource(object)
+    return getblock(lines[lnum:]), lnum + 1
+```
+
+`getsource` opens the `.py` file via `getsourcefile`, reads all lines, finds the definition using `findsource`, then extracts the indented block.
+
+### `signature`
+
+```python
+# CPython: Lib/inspect.py:1580 signature
+def signature(obj, *, follow_wrapped=True, globals=None, locals=None,
+              eval_str=False):
+    """Get a `Signature` object for the given callable."""
+    return Signature.from_callable(obj, follow_wrapped=follow_wrapped,
+                                   globals=globals, locals=locals,
+                                   eval_str=eval_str)
+```
+
+`Signature.from_callable` dispatches on the type: built-in functions use `__text_signature__`, Python functions use `co_varnames`/`co_flags` from the code object, `functools.partial` unwraps the partial, and `__wrapped__` is followed when `follow_wrapped=True`.
+
+### `Parameter`
+
+```python
+# CPython: Lib/inspect.py:2180 Parameter
+class Parameter:
+    POSITIONAL_ONLY        = _ParameterKind.POSITIONAL_ONLY
+    POSITIONAL_OR_KEYWORD  = _ParameterKind.POSITIONAL_OR_KEYWORD
+    VAR_POSITIONAL         = _ParameterKind.VAR_POSITIONAL
+    KEYWORD_ONLY           = _ParameterKind.KEYWORD_ONLY
+    VAR_KEYWORD            = _ParameterKind.VAR_KEYWORD
+    empty = _empty
+
+    def __init__(self, name, kind, *, default=_empty, annotation=_empty):
+        ...
+```
+
+`kind` determines how the parameter can be passed. `POSITIONAL_ONLY` (before `/` in the signature), `POSITIONAL_OR_KEYWORD` (normal), `VAR_POSITIONAL` (`*args`), `KEYWORD_ONLY` (after `*`), `VAR_KEYWORD` (`**kwargs`).
+
+### `BoundArguments`
+
+```python
+# CPython: Lib/inspect.py:2580 BoundArguments
+class BoundArguments:
+    """Result of Signature.bind() or Signature.bind_partial()."""
+    __slots__ = ('arguments', '_signature')
+
+    @property
+    def args(self):
+        """Tuple of positional arguments values."""
+        ...
+
+    @property
+    def kwargs(self):
+        """Dict of keyword arguments values."""
+        ...
+
+    def apply_defaults(self):
+        """Set default values for missing arguments."""
+        ...
+```
+
+`apply_defaults` fills in `Parameter.default` for any parameter not supplied by the caller. Useful before calling the function with `func(*ba.args, **ba.kwargs)`.
+
+## gopy notes
+
+`getmembers` uses `objects.Dir` then `objects.GetAttr` in a loop. `getsource` opens the file with `os.Open` and reads lines. `signature` dispatches through `objects.GetAttr(obj, "__text_signature__")` for builtins and code object inspection via `compile.Code` for Python functions. `BoundArguments` is a plain Go struct mirroring the CPython class.

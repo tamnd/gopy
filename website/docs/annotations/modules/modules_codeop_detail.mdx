@@ -1,0 +1,94 @@
+---
+title: Lib/codeop.py
+description: "Lib/codeop.py: compile_command, CommandCompiler — incremental compilation to detect complete vs incomplete Python input."
+cpython_path: Lib/codeop.py
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/codeop.py" />
+
+`codeop` provides `compile_command` and `CommandCompiler`, used by `code.InteractiveConsole` and `IDLE` to determine when a user has typed a complete statement.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `_compile` helper | Wrap `compile()` to canonicalize `SyntaxError` vs `None` |
+| 41-100 | `compile_command` | Try to compile source; return code / None (incomplete) / raise SyntaxError |
+| 101-180 | `CommandCompiler` | Stateful compiler accumulating multi-line input |
+
+## Reading
+
+### `compile_command`
+
+```python
+# CPython: Lib/codeop.py:72 compile_command
+def compile_command(source, filename="<input>", symbol="single"):
+    """Compile a command and determine whether it is complete.
+
+    Returns:
+      - a code object     if the command is complete and valid
+      - None              if the command is incomplete
+      - raises SyntaxError if the command is invalid
+    """
+    return _compile(source, filename, symbol)
+```
+
+The heuristic: compile `source` as `"single"` (interactive statement) in two passes. If the first pass raises `SyntaxError` with "unexpected EOF" the source is incomplete; any other `SyntaxError` means the input is genuinely bad. Returns `None` for incomplete input so the REPL can prompt for more.
+
+```python
+# CPython: Lib/codeop.py:20 _compile
+def _compile(source, filename, symbol):
+    # First, check that the source ends with a newline
+    # to ensure we are not in the middle of a statement.
+    err = err1 = err2 = None
+    code = code1 = code2 = None
+    try:
+        code = compile(source,         filename, symbol)
+    except SyntaxError as err:
+        pass
+    try:
+        code1 = compile(source + "\n", filename, symbol)
+    except SyntaxError as err1:
+        pass
+    try:
+        code2 = compile(source + "\n\n", filename, symbol)
+    except SyntaxError as err2:
+        pass
+
+    if code:
+        return code
+    if not code1 and repr(err1) == repr(err2):
+        raise SyntaxError from err1   # genuine syntax error
+    return None   # incomplete
+```
+
+The triple-compile trick: if adding one or two newlines makes the error disappear, the input was incomplete (open block). If the same error persists with both added newlines, it is a real syntax error.
+
+### `CommandCompiler`
+
+```python
+# CPython: Lib/codeop.py:130 CommandCompiler
+class CommandCompiler:
+    """Callable for incremental compilation.
+
+    Calling an instance with source accumulates the input.
+    Returns a code object when the statement is complete,
+    None when more input is needed, raises SyntaxError on bad input.
+    """
+    def __init__(self,):
+        self.compiler = Compile()
+
+    def __call__(self, source, filename="<input>", symbol="single"):
+        return _compile(source, filename, symbol, self.compiler)
+```
+
+`CommandCompiler` holds a `Compile` object that remembers `__future__` imports across interactive statements. When a `from __future__ import division` is entered at the REPL, subsequent compilations in the same session use the updated flags.
+
+## gopy notes
+
+`codeop` is pure Python. `compile_command` calls `compile.Compile` in `compile/compiler.go` which returns a `*objects.Code`. The `CommandCompiler` is `module/codeop.CommandCompiler` in `module/codeop/module.go`. The triple-compile heuristic is replicated verbatim.

@@ -1,0 +1,132 @@
+---
+title: Python/errors.c (part 4)
+description: "Python/errors.c part 4: PyErr_Format, PyErr_FormatV, _PyErr_FormatFromCause, exception chaining (__cause__, __context__, __suppress_context__)."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers exception formatting and chaining. See `python_errors_detail` for `PyErr_SetString`/`Restore`/`Fetch`, `python_errors2_detail` for `PyErr_CheckSignals`, and `python_errors3_detail` for `PyErr_WriteUnraisable`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyErr_Format` | Set a formatted exception message (`printf`-style) |
+| 101-200 | `PyErr_FormatV` | va_list variant of `PyErr_Format` |
+| 201-350 | `_PyErr_FormatFromCause` | Set exception with implicit `__context__` from current exception |
+| 351-550 | `_PyException_SetCause` | Set `__cause__` and `__suppress_context__ = True` |
+| 551-700 | `_PyException_SetContext` | Set `__context__` (implicit chaining) |
+| 701-800 | `_PyErr_StackItem` | Per-frame exception state in thread state |
+
+## Reading
+
+### `PyErr_Format`
+
+```c
+// CPython: Python/errors.c:1110 PyErr_Format
+PyObject *
+PyErr_Format(PyObject *exception, const char *format, ...)
+{
+    va_list vargs;
+    va_start(vargs, format);
+    PyObject *res = PyErr_FormatV(exception, format, vargs);
+    va_end(vargs);
+    return res;
+}
+
+PyObject *
+PyErr_FormatV(PyObject *exception, const char *format, va_list vargs)
+{
+    PyObject *string = PyUnicode_FromFormatV(format, vargs);
+    _PyErr_SetObject(tstate, exception, string);
+    Py_XDECREF(string);
+    return NULL;
+}
+```
+
+`PyErr_Format` builds the message string via `PyUnicode_FromFormatV` (which handles `%s`, `%d`, `%R` for repr, `%S` for str, etc.) and calls `_PyErr_SetObject`. It always returns `NULL` so callers can `return PyErr_Format(...)`.
+
+### `_PyErr_FormatFromCause`
+
+```c
+// CPython: Python/errors.c:1280 _PyErr_FormatFromCause
+PyObject *
+_PyErr_FormatFromCause(PyObject *exception, const char *format, ...)
+{
+    /* Like PyErr_Format but chains the current exception as __context__.
+       Used for "raise NewExc from None" equivalents inside C code. */
+    PyObject *exc = tstate->current_exception;
+    if (exc != NULL) {
+        Py_INCREF(exc);
+        /* Clear current exception so it doesn't become __context__ twice */
+        _PyErr_Clear(tstate);
+    }
+    va_list vargs;
+    va_start(vargs, format);
+    _PyErr_FormatV(tstate, exception, format, vargs);
+    va_end(vargs);
+    if (exc != NULL) {
+        PyObject *new_exc = tstate->current_exception;
+        Py_XDECREF(PyException_GetContext(new_exc));
+        PyException_SetContext(new_exc, exc);
+    }
+    return NULL;
+}
+```
+
+Used inside the interpreter when a secondary error occurs while handling a primary one (e.g., an error inside `__del__`). The original exception becomes `__context__`.
+
+### Exception chaining
+
+```c
+// CPython: Python/errors.c:1420 _PyException_SetCause
+void
+_PyException_SetCause(PyObject *exception, PyObject *cause)
+{
+    /* raise exc from cause  ->  exc.__cause__ = cause,
+                                 exc.__suppress_context__ = True */
+    PyBaseExceptionObject *exc_obj = (PyBaseExceptionObject *)exception;
+    Py_XINCREF(cause);
+    Py_XDECREF(exc_obj->cause);
+    exc_obj->cause = cause;
+    exc_obj->suppress_context = (cause != Py_None);
+}
+
+void
+_PyException_SetContext(PyObject *exception, PyObject *context)
+{
+    /* Implicit chaining from current exception:
+       exc.__context__ = context */
+    PyBaseExceptionObject *exc_obj = (PyBaseExceptionObject *)exception;
+    Py_XINCREF(context);
+    Py_XDECREF(exc_obj->context);
+    exc_obj->context = context;
+}
+```
+
+`raise exc from cause` compiles to `RAISE_VARARGS` with an explicit cause argument. The VM calls `_PyException_SetCause` which sets both `__cause__` and `__suppress_context__`. Implicit chaining (exception raised while handling another) calls `_PyException_SetContext` without touching `__suppress_context__`.
+
+### `_PyErr_StackItem`
+
+```c
+// CPython: Python/errors.c:1580 _PyErr_StackItem
+/* Per-frame exception state (stored in PyFrameObject.f_exc_*).
+   Allows nested exception handlers to have independent exception state.
+   Saved/restored by SETUP_CLEANUP and the 'finally' block epilogue. */
+typedef struct _PyErr_StackItem {
+    PyObject *exc_value;          /* current exception value */
+    struct _PyErr_StackItem *previous_item;
+} _PyErr_StackItem;
+```
+
+Each frame that contains an active `except` clause has its own `_PyErr_StackItem`. The thread state's `exc_info` pointer walks this chain. `PUSH_EXC_INFO` saves the previous exception, `POP_EXC_INFO` restores it.
+
+## gopy notes
+
+`PyErr_Format` is `errors.Format` in `vm/errors.go`. `_PyErr_FormatFromCause` is `errors.FormatFromCause`. Exception chaining (`__cause__`, `__context__`, `__suppress_context__`) is stored on `objects.BaseException` struct fields. `_PyErr_StackItem` maps to the `ExcInfo` field on `vm.Frame`.

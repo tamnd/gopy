@@ -1,0 +1,128 @@
+---
+title: Lib/difflib.py (part 2)
+description: "Lib/difflib.py part 2: unified_diff, context_diff, HtmlDiff, restore, get_close_matches."
+cpython_path: Lib/difflib.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/difflib.py" />
+
+This annotation covers output formatters and helper utilities. See `lib_difflib_detail` for `SequenceMatcher`, `Differ`, and `ndiff`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `unified_diff` | Produce unified format diff (`--- a`, `+++ b`, `@@ ... @@`) |
+| 101-250 | `context_diff` | Produce context format diff (`*** a`, `--- b`, `***...`) |
+| 251-500 | `HtmlDiff` | Generate side-by-side HTML table of differences |
+| 501-650 | `restore` | Reconstruct original sequences from a `Differ` delta |
+| 651-800 | `get_close_matches` | Return best fuzzy matches from a list of possibilities |
+| 801-1100 | `diff_bytes` | Byte-string wrapper for text-oriented diff functions |
+
+## Reading
+
+### `unified_diff`
+
+```python
+# CPython: Lib/difflib.py:1142 unified_diff
+def unified_diff(a, b, fromfile='', tofile='', fromfiledate='',
+                 tofiledate='', n=3, lineterm='\n'):
+    """Compare a and b (lists of strings); generate unified format diff lines.
+
+    Yields header lines and then groups of hunks. Each hunk begins with
+    a @@ line and is followed by context/added/removed lines.
+    """
+    started = False
+    for group in SequenceMatcher(None, a, b).get_grouped_opcodes(n):
+        if not started:
+            yield '--- {}{}{}'.format(fromfile, fromfiledate, lineterm)
+            yield '+++ {}{}{}'.format(tofile, tofiledate, lineterm)
+            started = True
+        i1, i2, j1, j2 = group[0][1], group[-1][2], group[0][3], group[-1][4]
+        yield '@@ -{},{} +{},{} @@{}'.format(i1+1, i2-i1, j1+1, j2-j1, lineterm)
+        for tag, i1, i2, j1, j2 in group:
+            if tag == 'equal':
+                for line in a[i1:i2]: yield ' ' + line
+            if tag in {'replace', 'delete'}:
+                for line in a[i1:i2]: yield '-' + line
+            if tag in {'replace', 'insert'}:
+                for line in b[j1:j2]: yield '+' + line
+```
+
+`unified_diff` is a generator. `get_grouped_opcodes(n)` clusters nearby changes into hunks separated by `n` lines of context (default 3).
+
+### `get_close_matches`
+
+```python
+# CPython: Lib/difflib.py:748 get_close_matches
+def get_close_matches(word, possibilities, n=3, cutoff=0.6):
+    """Return a list of the best 'good enough' matches of word in possibilities.
+
+    word      -- a string
+    possibilities -- a list of strings
+    n         -- maximum number of results (default 3)
+    cutoff    -- SequenceMatcher.ratio() must exceed this (default 0.6)
+    """
+    if not n > 0:
+        raise ValueError("n must be > 0: %r" % (n,))
+    if not 0.0 <= cutoff <= 1.0:
+        raise ValueError("cutoff must be in [0.0, 1.0]: %r" % (cutoff,))
+    result = []
+    s = SequenceMatcher()
+    s.set_seq2(word)
+    for x in possibilities:
+        s.set_seq1(x)
+        if s.real_quick_ratio() >= cutoff and \
+           s.quick_ratio() >= cutoff and \
+           s.ratio() >= cutoff:
+            result.append((s.ratio(), x))
+    result = _nlargest(n, result)
+    return [x for score, x in result]
+```
+
+Used by Python's `did you mean?` suggestions in `AttributeError` and `NameError`. `real_quick_ratio` and `quick_ratio` are cheap upper bounds that prune most candidates before computing the full `ratio`.
+
+### `restore`
+
+```python
+# CPython: Lib/difflib.py:800 restore
+def restore(delta, which):
+    """Return one of the two sequences that generated a delta.
+
+    which=1 returns the 'a' sequence (lines prefixed with ' ' or '-').
+    which=2 returns the 'b' sequence (lines prefixed with ' ' or '+').
+    """
+    tag = {1: "- ", 2: "+ "}[int(which)]
+    prefixes = ("  ", tag)
+    for line in delta:
+        if line[:2] in prefixes:
+            yield line[2:]
+```
+
+`restore` reconstructs the original text from `Differ` output. Each `Differ` line is prefixed with `'  '` (common), `'- '` (only in a), `'+ '` (only in b), or `'? '` (hints).
+
+### `diff_bytes`
+
+```python
+# CPython: Lib/difflib.py:1250 diff_bytes
+def diff_bytes(dfunc, a, b, fromfile=b'', tofile=b'',
+               fromfiledate=b'', tofiledate=b'', n=3, lineterm=b'\n'):
+    """Wrapper around a text-mode diff function for byte-string inputs."""
+    def decode(s):
+        try:
+            return s.decode('ascii')
+        except UnicodeDecodeError:
+            return s.decode('latin-1')
+    ...
+```
+
+`diff_bytes` decodes byte sequences with a lossy Latin-1 fallback, calls the wrapped text diff, then re-encodes lines. Used for binary-safe file comparison.
+
+## gopy notes
+
+`unified_diff` and `context_diff` are pure Python generators backed by `SequenceMatcher` which is implemented in `module/difflib/module.go`. `get_close_matches` uses the same `SequenceMatcher` ratio. `HtmlDiff` uses `html.escape` from `module/html/module.go`.

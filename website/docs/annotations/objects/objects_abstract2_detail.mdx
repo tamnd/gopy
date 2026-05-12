@@ -1,0 +1,135 @@
+---
+title: Objects/abstract.c (part 2)
+description: "Objects/abstract.c part 2: PySequence_*, PyMapping_*, PyObject_GetItem/SetItem/DelItem, PyObject_IsInstance, PyObject_IsSubclass."
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/abstract.c" />
+
+This annotation covers sequence and mapping abstract APIs plus item access and `isinstance`/`issubclass`. See `objects_abstract_detail` for `PyNumber_*`, `PyObject_Call`, and `PyObject_RichCompare`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `PyObject_GetItem` / `SetItem` / `DelItem` | `obj[key]`, `obj[key]=v`, `del obj[key]` |
+| 121-300 | `PySequence_Check` / `Size` / `GetItem` | Sequence protocol checks and element access |
+| 301-500 | `PySequence_Contains` | `x in seq` — calls `__contains__` or iterates |
+| 501-700 | `PySequence_List` / `Tuple` | Convert arbitrary iterable to list or tuple |
+| 701-900 | `PyMapping_Check` / `Keys` / `Values` / `Items` | Mapping protocol |
+| 901-1100 | `PyMapping_GetItemString` | `obj["key"]` with a C string key |
+| 1101-1400 | `PyObject_IsInstance` | `isinstance(obj, cls)` — checks MRO and `__instancecheck__` |
+| 1401-1600 | `PyObject_IsSubclass` | `issubclass(sub, sup)` — checks `__subclasscheck__` |
+
+## Reading
+
+### `PyObject_GetItem`
+
+```c
+// CPython: Objects/abstract.c:180 PyObject_GetItem
+PyObject *
+PyObject_GetItem(PyObject *o, PyObject *key)
+{
+    if (o == NULL || key == NULL) {
+        return null_error();
+    }
+    PyMappingMethods *m = Py_TYPE(o)->tp_as_mapping;
+    if (m != NULL && m->mp_subscript != NULL) {
+        return m->mp_subscript(o, key);
+    }
+    PySequenceMethods *ms = Py_TYPE(o)->tp_as_sequence;
+    if (ms != NULL && ms->sq_item != NULL) {
+        /* sequence: convert key to index */
+        Py_ssize_t i = PyNumber_AsSsize_t(key, PyExc_IndexError);
+        if (i == -1 && PyErr_Occurred()) return NULL;
+        return ms->sq_item(o, i);
+    }
+    /* fall back to __class_getitem__ for type objects */
+    ...
+}
+```
+
+`PyObject_GetItem` tries `mp_subscript` first (dict, custom mapping), then `sq_item` (list, tuple). Raises `TypeError` if neither is present.
+
+### `PySequence_Contains`
+
+```c
+// CPython: Objects/abstract.c:1480 PySequence_Contains
+int
+PySequence_Contains(PyObject *seq, PyObject *ob)
+{
+    /* Try __contains__ first */
+    PySequenceMethods *sqm = Py_TYPE(seq)->tp_as_sequence;
+    if (sqm != NULL && sqm->sq_contains != NULL)
+        return sqm->sq_contains(seq, ob);
+    /* Fallback: linear scan */
+    return _PySequence_IterSearch(seq, ob, PY_ITERSEARCH_CONTAINS);
+}
+```
+
+`x in seq` desugars to `PySequence_Contains`. Lists and sets use a direct `sq_contains`; general iterables fall back to `_PySequence_IterSearch` which calls `PyObject_RichCompareBool(item, ob, Py_EQ)` for each element.
+
+### `PySequence_List`
+
+```c
+// CPython: Objects/abstract.c:1620 PySequence_List
+PyObject *
+PySequence_List(PyObject *v)
+{
+    /* Build a new list from any iterable. */
+    if (PyList_CheckExact(v))
+        return PyList_GetSlice(v, 0, PY_SSIZE_T_MAX);
+    return _PyList_FromIterable(v);
+}
+```
+
+`list(iterable)` calls `PySequence_List`. For exact lists it slices; for others it calls `__iter__` and appends in batches.
+
+### `PyObject_IsInstance`
+
+```c
+// CPython: Objects/abstract.c:2280 PyObject_IsInstance
+int
+PyObject_IsInstance(PyObject *inst, PyObject *cls)
+{
+    /* isinstance(inst, cls) */
+    /* Check for __instancecheck__ on the metaclass */
+    PyObject *checker = _PyObject_LookupSpecial(cls, &_Py_ID(__instancecheck__));
+    if (checker != NULL) {
+        PyObject *res = PyObject_CallOneArg(checker, inst);
+        ...
+    }
+    /* Fast path: check tp_mro directly */
+    return recursive_isinstance(inst, cls);
+}
+```
+
+`isinstance` first looks for `__instancecheck__` on the type's metaclass (enabling ABCs). For plain classes it traverses the `tp_mro` array.
+
+### `PyObject_IsSubclass`
+
+```c
+// CPython: Objects/abstract.c:2400 PyObject_IsSubclass
+int
+PyObject_IsSubclass(PyObject *derived, PyObject *cls)
+{
+    /* issubclass(derived, cls) */
+    PyObject *checker = _PyObject_LookupSpecial(cls, &_Py_ID(__subclasscheck__));
+    if (checker != NULL) {
+        PyObject *res = PyObject_CallOneArg(checker, derived);
+        ...
+    }
+    return recursive_issubclass(derived, cls);
+}
+```
+
+ABCs override `__subclasscheck__` to register virtual subclasses via `abc.register()`.
+
+## gopy notes
+
+`PyObject_GetItem` is `objects.GetItem` in `objects/abstract.go`. `PySequence_Contains` is `objects.SequenceContains`. `PySequence_List` is `objects.SequenceList`. `PyObject_IsInstance` is `objects.IsInstance` which checks the MRO slice on `objects.Type`. `PyObject_IsSubclass` is `objects.IsSubclass` with ABC support via `__subclasscheck__`.

@@ -1,0 +1,148 @@
+---
+title: Objects/listobject.c (part 5)
+description: "Objects/listobject.c part 5: list.sort — Timsort merge algorithm, run detection, galloping, merge_lo/merge_hi."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+This annotation covers the Timsort implementation. See `objects_listobject4_detail` for `list.append`, `extend`, `insert`, `remove`, `pop`, and `reverse`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `listsort` | Entry point: build run stack, merge runs |
+| 121-300 | `count_run` | Detect a natural ascending or descending run |
+| 301-450 | `binarysort` | Insertion sort for short runs (len <= MIN_MERGE=32) |
+| 451-700 | `gallop_left` / `gallop_right` | Exponential search for merge boundary |
+| 701-1100 | `merge_lo` / `merge_hi` | In-place merge of two adjacent runs |
+| 1101-1400 | `merge_collapse` | Maintain the run stack invariant |
+| 1401-1800 | `merge_force_collapse` | Final drain to merge remaining runs |
+
+## Reading
+
+### `listsort` entry point
+
+```c
+// CPython: Objects/listobject.c:2260 listsort
+static PyObject *
+listsort(PyListObject *self, PyObject *const *args, Py_ssize_t nargs,
+         PyObject *kwnames)
+{
+    MergeState ms;
+    Py_ssize_t nremaining = Py_SIZE(self);
+    ...
+    merge_init(&ms, nremaining, keys != NULL, &lo);
+
+    /* Push runs onto the stack */
+    do {
+        Py_ssize_t n = count_run(&ms, lo.keys, lo.keys + nremaining, &descending);
+        if (descending)
+            reverse_slice(lo.keys, lo.keys + n);
+        if (n < minrun) {
+            /* Extend short run to minrun with binary insertion sort */
+            Py_ssize_t force = nremaining < minrun ? nremaining : minrun;
+            binarysort(&ms, lo, lo.keys + n, lo.keys + force);
+        }
+        /* Push run onto pending stack */
+        ms.pending[ms.n].base = lo;
+        ms.pending[ms.n].len = n;
+        ms.n++;
+        merge_collapse(&ms);
+        /* advance */
+        lo.keys += n; lo.values += n; nremaining -= n;
+    } while (nremaining);
+
+    merge_force_collapse(&ms);
+    ...
+}
+```
+
+Timsort runs are detected by `count_run`. Descending runs are reversed in place. Runs shorter than `minrun` (between 32 and 64, computed from list length) are padded with binary insertion sort.
+
+### `count_run`
+
+```c
+// CPython: Objects/listobject.c:1480 count_run
+static Py_ssize_t
+count_run(MergeState *ms, PyObject **lo, PyObject **hi, int *descending)
+{
+    *descending = 0;
+    Py_ssize_t n = 1;
+    if (lo == hi) return 1;
+    /* check direction of first pair */
+    int k = ISLT(*lo, *(lo+1), compare);
+    if (k < 0) return -1;  /* error */
+    if (k) {
+        /* descending: extend while lo[i] > lo[i+1] */
+        *descending = 1;
+        for (lo += 2; lo < hi; lo++, n++) {
+            k = ISLT(*lo, *(lo-1), compare);
+            if (!k) break;
+        }
+    } else {
+        /* ascending: extend while lo[i] <= lo[i+1] */
+        for (lo += 2; lo < hi; lo++, n++) {
+            k = ISLT(*lo, *(lo-1), compare);
+            if (k) break;
+        }
+    }
+    return n;
+}
+```
+
+Natural runs may be ascending (non-decreasing) or strictly descending. Detecting and reversing descending runs is O(n) rather than O(n log n).
+
+### `gallop_left`
+
+```c
+// CPython: Objects/listobject.c:1620 gallop_left
+static Py_ssize_t
+gallop_left(MergeState *ms, PyObject *key, PyObject **a, Py_ssize_t n,
+            Py_ssize_t hint)
+{
+    /* Find leftmost position to insert key in sorted array a[0..n-1].
+       hint is an index at which to begin the search. */
+    Py_ssize_t ofs = 1, maxofs = n - hint;
+    /* Gallop right */
+    while (ofs < maxofs && ISLT(a[hint + ofs], key, compare) > 0) {
+        ofs <<= 1;  /* double the stride */
+        ofs |= 1;
+    }
+    /* Binary search within [hint + (ofs>>1), hint + min(ofs, maxofs)] */
+    ...
+}
+```
+
+Galloping is the key performance trick: when one run dominates, exponential search finds the boundary in O(log k) rather than O(k) comparisons. The merge routines switch to galloping mode after 7 consecutive wins (MIN_GALLOP).
+
+### `merge_lo`
+
+```c
+// CPython: Objects/listobject.c:1780 merge_lo
+static Py_ssize_t
+merge_lo(MergeState *ms, sortslice base1, Py_ssize_t len1,
+         sortslice base2, Py_ssize_t len2)
+{
+    /* Merge the two runs at base1..base1+len1 and base2..base2+len2.
+       base1[len1-1] must be > base2[0] (else no merge needed).
+       Uses a temp buffer of size len1 (the smaller run). */
+    sortslice dest = base1;
+    /* copy base1 to temp */
+    ...
+    /* merge from temp and base2 into dest */
+    ...
+}
+```
+
+`merge_lo` copies the left (shorter) run to a temporary buffer and merges back. `merge_hi` mirrors it for the case where the right run is shorter.
+
+## gopy notes
+
+Timsort is implemented in Go in `objects/list_sort.go`, porting CPython's `listobject.c` Timsort verbatim. The comparison callback is `objects.RichCompare` with `Py_LT`. `gallop_left`/`gallop_right` and `merge_lo`/`merge_hi` are direct ports including the galloping threshold `MIN_GALLOP = 7`.

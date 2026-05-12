@@ -343,6 +343,7 @@ const sidebars = {
         'annotations/python/python_ceval10_detail',
         'annotations/python/python_import3_detail',
         'annotations/python/python_ceval11_detail',
+        'annotations/python/python_errors4_detail',
       ],
     },
     {
@@ -552,6 +553,8 @@ const sidebars = {
         'annotations/objects/objects_descrobject4_detail',
         'annotations/objects/objects_dictobject4_detail',
         'annotations/objects/objects_unicodeobject6_detail',
+        'annotations/objects/objects_abstract2_detail',
+        'annotations/objects/objects_listobject5_detail',
       ],
     },
     {
@@ -1054,6 +1057,7 @@ const sidebars = {
         'annotations/modules/modules_ossaudiodev_detail',
         'annotations/modules/modules_winapi_detail',
         'annotations/modules/modules_posixpath2_detail',
+        'annotations/modules/modules_codeop_detail',
       ],
     },
     {
@@ -1595,6 +1599,8 @@ const sidebars = {
         'annotations/lib/lib_readline_detail',
         'annotations/lib/lib_ipaddress2_detail',
         'annotations/lib/lib_struct2_detail',
+        'annotations/lib/lib_inspect2_detail',
+        'annotations/lib/lib_difflib2_detail',
       ],
     },
   ],
