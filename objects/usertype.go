@@ -25,8 +25,6 @@ import "fmt"
 // list explicitly includes "__dict__".
 //
 // CPython: Objects/typeobject.c:4153 type_new
-//
-//nolint:gocognit // mirrors CPython's type_new body
 func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
@@ -98,43 +96,7 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 			// has no error channel yet, so panic with the same text.
 			panic(err)
 		}
-		for _, k := range ns.Keys() {
-			s, ok := k.(*Unicode)
-			if !ok {
-				continue
-			}
-			if s.v == "__slots__" {
-				continue
-			}
-			v, err := ns.GetItem(k)
-			if err != nil {
-				continue
-			}
-			// __init_subclass__ and __class_getitem__ defined in the
-			// class body are implicitly classmethods. CPython does this
-			// during type_new_set_attrs so user code can write a plain
-			// def and still receive the class as the first argument.
-			//
-			// CPython: Objects/typeobject.c:4419 type_new_set_attrs
-			if s.v == "__init_subclass__" || s.v == "__class_getitem__" || s.v == "__prepare__" {
-				if _, isCM := v.(*ClassMethod); !isCM {
-					v = NewClassMethod(v)
-				}
-			}
-			// type_new copies tp_dict["__module__"] into the slot
-			// type_module reads from. gopy stores it both as a
-			// descriptor (so __module__ is visible to introspection)
-			// and on t.Module (so type_repr can render qualified
-			// names without a dict lookup).
-			//
-			// CPython: Objects/typeobject.c:4419 type_new_set_attrs
-			if s.v == "__module__" {
-				if u, ok := v.(*Unicode); ok {
-					t.Module = u.v
-				}
-			}
-			SetTypeDescr(t, s.v, v)
-		}
+		copyNamespaceToType(t, ns)
 	}
 	fixupSlotDispatchers(t)
 	// PEP 487: after the class is built, walk the namespace and call
@@ -150,6 +112,37 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 		panic(err)
 	}
 	return t
+}
+
+// copyNamespaceToType walks ns and installs each entry as a type
+// descriptor on t, with the same special-casing CPython performs in
+// type_new_set_attrs: __init_subclass__, __class_getitem__, and
+// __prepare__ become classmethods, and __module__ propagates onto
+// t.Module so type_repr can render qualified names.
+//
+// CPython: Objects/typeobject.c:4419 type_new_set_attrs
+func copyNamespaceToType(t *Type, ns *Dict) {
+	for _, k := range ns.Keys() {
+		s, ok := k.(*Unicode)
+		if !ok || s.v == "__slots__" {
+			continue
+		}
+		v, err := ns.GetItem(k)
+		if err != nil {
+			continue
+		}
+		switch s.v {
+		case "__init_subclass__", "__class_getitem__", "__prepare__":
+			if _, isCM := v.(*ClassMethod); !isCM {
+				v = NewClassMethod(v)
+			}
+		case "__module__":
+			if u, ok := v.(*Unicode); ok {
+				t.Module = u.v
+			}
+		}
+		SetTypeDescr(t, s.v, v)
+	}
 }
 
 // typeSetNames invokes __set_name__(cls, name) on every namespace

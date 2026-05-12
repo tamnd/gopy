@@ -57,13 +57,13 @@ func init() {
 	SetType.TpTraverse = setTraverse
 	SetType.Getattro = GenericGetAttr
 	SetType.Number = &NumberMethods{
-		And:         setAnd,
-		Or:          setOr,
-		Subtract:    setSubtract,
-		Xor:         setXor,
-		InPlaceAnd:  setIAnd,
-		InPlaceOr:   setIOr,
-		InPlaceXor:  setIXor,
+		And:        setAnd,
+		Or:         setOr,
+		Subtract:   setSubtract,
+		Xor:        setXor,
+		InPlaceAnd: setIAnd,
+		InPlaceOr:  setIOr,
+		InPlaceXor: setIXor,
 	}
 	SetTypeDescr(SetType, "__contains__", NewMethodDescr(SetType, "__contains__", setContainsMethod))
 	SetTypeDescr(SetType, "add", NewMethodDescr(SetType, "add", setAddMethod))

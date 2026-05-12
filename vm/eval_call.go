@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"sync"
 
+	sys "github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 	"github.com/tamnd/gopy/state"
-	sys "github.com/tamnd/gopy/module/sys"
 )
 
 // activeThreads maps a goroutine ID to the *state.Thread Eval is

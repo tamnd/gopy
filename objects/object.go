@@ -126,7 +126,7 @@ func objectNew(cls *Type, args []Object, kwargs map[string]Object) (Object, erro
 		if fnPtr(cls.TpNew) != fnPtr(objectNew) {
 			return nil, fmt.Errorf("TypeError: object.__new__() takes exactly one argument (the type to instantiate)")
 		}
-		if inherited, _ := initInheritedFromObject(cls); inherited {
+		if initInheritedFromObject(cls) {
 			return nil, fmt.Errorf("TypeError: %s() takes no arguments", cls.Name)
 		}
 	}
@@ -144,7 +144,7 @@ func objectInit(self Object, args []Object, kwargs map[string]Object) error {
 	if excessArgs(args, kwargs) {
 		cls := self.Type()
 		newInherited := fnPtr(cls.TpNew) == fnPtr(objectNew)
-		initInherited, _ := initInheritedFromObject(cls)
+		initInherited := initInheritedFromObject(cls)
 		if !initInherited {
 			return fmt.Errorf("TypeError: object.__init__() takes exactly one argument (the instance to initialize)")
 		}
@@ -158,16 +158,16 @@ func objectInit(self Object, args []Object, kwargs map[string]Object) error {
 // initInheritedFromObject reports whether cls inherits __init__
 // straight from object (i.e. has not overridden it). The MRO walk
 // stops at the first __init__ descriptor.
-func initInheritedFromObject(cls *Type) (bool, error) {
+func initInheritedFromObject(cls *Type) bool {
 	descr, _ := LookupDescriptor(cls, "__init__")
 	if descr == nil {
-		return true, nil
+		return true
 	}
 	// The default object.__init__ is the very descriptor we install
 	// in init() and store under typeDescrTable[objectType]. Compare
 	// identity: any override produces a different MethodDescr instance.
 	stored, _ := LookupDescriptor(objectType, "__init__")
-	return descr == stored, nil
+	return descr == stored
 }
 
 // objectRepr formats an instance as "<module.qualname object at 0xADDR>".
