@@ -940,6 +940,7 @@ const sidebars = {
         'annotations/modules/modules_posixmodule_detail',
         'annotations/modules/modules_codecs_detail',
         'annotations/modules/modules_signal_detail2',
+        'annotations/modules/modules_functools_detail',
       ],
     },
     {
@@ -1446,6 +1447,8 @@ const sidebars = {
         'annotations/lib/lib_sys_detail',
         'annotations/lib/lib_argparse_detail2',
         'annotations/lib/lib_io_detail3',
+        'annotations/lib/lib_builtins_detail',
+        'annotations/lib/lib_typing_extensions_detail2',
       ],
     },
   ],

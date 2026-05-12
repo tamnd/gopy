@@ -1,0 +1,79 @@
+---
+title: Lib/typing_extensions.py (part 2)
+description: "typing_extensions part 2: TypeAlias, TypeGuard, Self, LiteralString, Never, Unpack, TypeVarTuple, ParamSpec, override, dataclass_transform."
+cpython_path: Lib/typing_extensions.py
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/typing_extensions.py" />
+
+`typing_extensions` backports newer `typing` features to older Python versions. In gopy (targeting 3.14), most of these are already in `typing`, but `typing_extensions` is imported by many popular packages and must be importable.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `TypeAlias` | Explicit type alias annotation (3.10+, `X: TypeAlias = int`) |
+| 201-400 | `TypeGuard` | Narrowing predicate return type |
+| 401-600 | `Self` | Reference to the current class |
+| 601-800 | `LiteralString`, `Never` | String literals, bottom type |
+| 801-1100 | `ParamSpec`, `Concatenate` | Callable parameter typing |
+| 1101-1400 | `TypeVarTuple`, `Unpack` | Variadic generics |
+| 1401-1700 | `override` | Decorator marking method overrides |
+| 1701-2000 | `dataclass_transform` | PEP 681: decorator metadata for type checkers |
+| 2001-3000 | Backports of stdlib typing features | Various re-exports with version guards |
+
+## Reading
+
+### `TypeAlias`
+
+```python
+# CPython: Lib/typing_extensions.py:180 TypeAlias
+# In Python 3.14 TypeAlias is a SpecialForm.
+# In Python 3.10 it's just a sentinel object:
+class _TypeAliasMeta(type):
+    def __instancecheck__(cls, obj):
+        return False
+TypeAlias = _TypeAliasForm('TypeAlias', doc="...")
+```
+
+`x: TypeAlias = int` is treated as a type alias by type checkers; at runtime `TypeAlias` is just an annotation marker.
+
+### `override`
+
+```python
+# CPython: Lib/typing_extensions.py:1480 override
+def override(method):
+    """Indicate that a method is intended to override a base class method."""
+    method.__override__ = True
+    return method
+```
+
+`@override` is a no-op at runtime (just sets `__override__ = True`). Type checkers verify the base class has the method.
+
+### `dataclass_transform`
+
+```python
+# CPython: Lib/typing_extensions.py:1720 dataclass_transform
+def dataclass_transform(
+    *, eq_default=True, order_default=False, frozen_default=False,
+    field_specifiers=(), **kwargs
+):
+    def decorator(cls_or_fn):
+        cls_or_fn.__dataclass_transform__ = {
+            "eq_default": eq_default,
+            ...
+        }
+        return cls_or_fn
+    return decorator
+```
+
+`@dataclass_transform` marks a class or function as a `dataclass`-like decorator. Type checkers use `__dataclass_transform__` metadata to understand the generated `__init__` signature.
+
+## gopy notes
+
+`typing_extensions` is importable in gopy when the basic `typing` module is available. The module consists almost entirely of pure Python with `sys.version_info` guards. No C extension is required. The key requirement is that `typing.TypeVar`, `typing.ParamSpec`, `typing.Protocol`, and `typing.get_type_hints` all work so that the version guards resolve correctly.

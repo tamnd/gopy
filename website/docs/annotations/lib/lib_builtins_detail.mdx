@@ -1,0 +1,119 @@
+---
+title: Python/bltinmodule.c
+description: "Python/bltinmodule.c: built-in functions — print, input, len, range, map, filter, zip, enumerate, sorted, reversed, open, eval, exec, compile, isinstance, issubclass, hasattr, getattr, setattr, delattr."
+cpython_path: Python/bltinmodule.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/bltinmodule.c" />
+
+`bltinmodule.c` implements the `builtins` module. Every Python program has implicit access to these functions. Performance matters here: `len`, `range`, `map`, `filter`, `enumerate`, and `sorted` are called millions of times in typical code.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `print`, `input` | Terminal I/O |
+| 201-500 | `len`, `hash`, `id`, `callable`, `repr`, `str`, `bytes`, `int`, `float`, `bool`, `complex` | Type coercion and info |
+| 501-800 | `range`, `map`, `filter`, `zip`, `enumerate` | Lazy iteration |
+| 801-1100 | `sorted`, `reversed`, `iter`, `next`, `sum`, `min`, `max`, `any`, `all` | Aggregation |
+| 1101-1400 | `open` | File I/O entry point |
+| 1401-1700 | `eval`, `exec`, `compile`, `globals`, `locals`, `vars` | Code execution |
+| 1701-2000 | `isinstance`, `issubclass`, `type` | Type checking |
+| 2001-2500 | `getattr`, `setattr`, `delattr`, `hasattr`, `dir` | Attribute access |
+| 2501-3500 | `staticmethod`, `classmethod`, `property`, `super` | Descriptors |
+
+## Reading
+
+### `len`
+
+```c
+// CPython: Python/bltinmodule.c:1520 builtin_len
+static PyObject *
+builtin_len(PyObject *module, PyObject *v)
+{
+    Py_ssize_t res = PyObject_Size(v);
+    if (res < 0 && PyErr_Occurred())
+        return NULL;
+    return PyLong_FromSsize_t(res);
+}
+```
+
+`PyObject_Size` calls `tp_as_sequence->sq_length` or `tp_as_mapping->mp_length`.
+
+### `sorted`
+
+```c
+// CPython: Python/bltinmodule.c:2140 builtin_sorted
+static PyObject *
+builtin_sorted(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+               PyObject *kwnames)
+{
+    PyObject *newlist = PySequence_List(iterable);
+    if (PyList_Sort(newlist) < 0) {
+        Py_DECREF(newlist);
+        return NULL;
+    }
+    return newlist;
+}
+```
+
+`sorted` converts the iterable to a list, then sorts in-place. The `key` and `reverse` keyword arguments are passed through to `list.sort`.
+
+### `eval`
+
+```c
+// CPython: Python/bltinmodule.c:1020 builtin_eval_impl
+static PyObject *
+builtin_eval_impl(PyObject *module, PyObject *source, PyObject *globals,
+                  PyObject *locals)
+{
+    if (PyUnicode_Check(source)) {
+        PyObject *code = Py_CompileStringExFlags(source_str, "<string>",
+                                                  Py_eval_input, ...);
+        return PyEval_EvalCode(code, globals, locals);
+    }
+    /* If source is already a code object, evaluate directly */
+    return PyEval_EvalCode(source, globals, locals);
+}
+```
+
+`eval(expr)` compiles `expr` to a code object in `Py_eval_input` mode (single expression) and evaluates it.
+
+### `isinstance` with multiple types
+
+```c
+// CPython: Python/bltinmodule.c:2350 abstract_issubclass
+static int
+abstract_issubclass(PyObject *derived, PyObject *cls)
+{
+    /* Handle tuple of types: isinstance(x, (int, str)) */
+    if (PyTuple_Check(cls)) {
+        Py_ssize_t i, n = PyTuple_GET_SIZE(cls);
+        for (i = 0; i < n; i++) {
+            if (abstract_issubclass(derived, PyTuple_GET_ITEM(cls, i)))
+                return 1;
+        }
+        return 0;
+    }
+    return PyType_IsSubtype((PyTypeObject *)derived, (PyTypeObject *)cls);
+}
+```
+
+### `getattr` with default
+
+```c
+// CPython: Python/bltinmodule.c:1390 builtin_getattr
+/*
+ * getattr(obj, name) -> obj.name, raises AttributeError if missing
+ * getattr(obj, name, default) -> default if AttributeError
+ */
+```
+
+## gopy notes
+
+All built-in functions are in `module/builtins/`. `len`, `isinstance`, `getattr`, `setattr`, and `hasattr` are performance-critical and are called from within the eval loop itself. `eval` and `exec` require the compiler to be accessible at runtime (`compile/` package). `sorted` and `min`/`max` with `key=` require calling back into Python for each comparison.

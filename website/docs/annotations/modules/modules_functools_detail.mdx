@@ -1,0 +1,111 @@
+---
+title: Modules/_functoolsmodule.c
+description: "_functools C extension: partial, reduce, lru_cache — C implementations of the most performance-critical functools operations."
+cpython_path: Modules/_functoolsmodule.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_functoolsmodule.c" />
+
+`_functools` provides C-accelerated versions of `partial`, `reduce`, and `lru_cache`. The pure-Python fallbacks are in `Lib/functools.py`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `partial` type | Pre-apply positional/keyword args to a callable |
+| 301-600 | `partial_call`, `partial_repr` | Calling and display |
+| 601-800 | `reduce` | Left-fold over an iterable |
+| 801-1200 | `lru_cache`, `_lru_cache_wrapper` | Memoizing decorator with LRU eviction |
+
+## Reading
+
+### `partial`
+
+```c
+// CPython: Modules/_functoolsmodule.c:48 partial_new
+static PyObject *
+partial_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+{
+    partialobject *pto = (partialobject *)type->tp_alloc(type, 0);
+    pto->fn = Py_NewRef(func);
+    pto->args = Py_NewRef(pargs);    /* pre-applied positional args */
+    pto->kw = Py_NewRef(pkw);        /* pre-applied keyword args */
+    return (PyObject *)pto;
+}
+```
+
+### `partial_call`
+
+```c
+// CPython: Modules/_functoolsmodule.c:195 partial_call
+static PyObject *
+partial_call(partialobject *pto, PyObject *args, PyObject *kw)
+{
+    /* Merge: pto->args + args, pto->kw + kw (kw overrides) */
+    PyObject *new_args = PySequence_Concat(pto->args, args);
+    PyObject *new_kw = PyDict_Copy(pto->kw);
+    if (kw)
+        PyDict_Update(new_kw, kw);
+    return PyObject_Call(pto->fn, new_args, new_kw);
+}
+```
+
+### `reduce`
+
+```c
+// CPython: Modules/_functoolsmodule.c:680 functools_reduce
+static PyObject *
+functools_reduce(PyObject *self, PyObject *args)
+{
+    PyObject *it = PyObject_GetIter(seq);
+    PyObject *result = initial;   /* or first item if no initial */
+    while ((op2 = PyIter_Next(it)) != NULL) {
+        PyObject *newresult = PyObject_CallFunctionObjArgs(func, result, op2, NULL);
+        Py_DECREF(result);
+        result = newresult;
+    }
+    return result;
+}
+```
+
+### `lru_cache`
+
+```c
+// CPython: Modules/_functoolsmodule.c:900 _lru_cache_wrapper_call
+static PyObject *
+_lru_cache_wrapper_call(lru_cache_object *self, PyObject *args, PyObject *kwds)
+{
+    /* Build a hashable key from args + kwds */
+    PyObject *key = make_key(args, kwds, self->typed);
+    /* Look up in the OrderedDict-based cache */
+    lru_list_elem *link = (lru_list_elem *)PyDict_GetItemWithError(self->cache, key);
+    if (link != NULL) {
+        /* Cache hit: move to front of LRU list */
+        lru_list_elem *root = &self->root;
+        ...
+        self->hits++;
+        return Py_NewRef(link->result);
+    }
+    /* Cache miss: call the wrapped function */
+    PyObject *result = PyObject_Call(self->func, args, kwds);
+    /* Insert into cache, evict LRU if full */
+    if (PyDict_Size(self->cache) >= self->maxsize) {
+        /* Evict the oldest entry (root->next) */
+        ...
+    }
+    ...
+    self->misses++;
+    return result;
+}
+```
+
+The LRU cache uses a doubly-linked list of `lru_list_elem` objects threaded through the same `dict`. This gives O(1) lookup, insertion, and eviction.
+
+## gopy notes
+
+`partial` is in `module/functools/` and wraps `objects.Callable`. `reduce` iterates using `vm.IterNext`. `lru_cache` uses a Go `map` plus a doubly-linked list for LRU ordering. The `typed=True` option includes argument types in the cache key (requires `type(arg).__name__` in the key computation).
