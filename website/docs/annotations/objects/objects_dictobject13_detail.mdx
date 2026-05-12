@@ -1,0 +1,111 @@
+---
+title: Objects/dictobject.c (part 13)
+description: "Objects/dictobject.c part 13: dict.fromkeys, dict.__reversed__, dict views (keys, values, items)."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers dict creation helpers and views. See `objects_dictobject12_detail` for dict merge, update, and `__or__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dict.fromkeys` | Class method: create dict from keys iterable |
+| 81-160 | `dict.__reversed__` | Reverse insertion-order iterator |
+| 161-280 | `dict.keys` / `dict.values` / `dict.items` | View objects |
+| 281-400 | `dictview.__and__` / `__or__` | Set-like operations on dict views |
+| 401-500 | `dictiterobject` | Shared iterator implementation |
+
+## Reading
+
+### `dict.fromkeys`
+
+```c
+// CPython: Objects/dictobject.c:2280 dict_fromkeys
+static PyObject *
+dict_fromkeys(PyObject *type, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *iterable = args[0];
+    PyObject *value = nargs >= 2 ? args[1] : Py_None;
+    PyObject *d = PyObject_CallOneArg(type, NULL);
+    PyObject *it = PyObject_GetIter(iterable);
+    PyObject *key;
+    while ((key = PyIter_Next(it)) != NULL) {
+        if (PyDict_SetItem(d, key, value) < 0) { ... }
+        Py_DECREF(key);
+    }
+    return d;
+}
+```
+
+`dict.fromkeys(['a', 'b', 'c'], 0)` creates `{'a': 0, 'b': 0, 'c': 0}`. All values are the same object (not copies), which is a common gotcha with mutable defaults: `dict.fromkeys(keys, [])` creates a dict where all values share the same list.
+
+### `dict.__reversed__`
+
+```c
+// CPython: Objects/dictobject.c:2640 dict_reversed
+static PyObject *
+dict_reversed(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return dictiter_new((PyDictObject *)self, &PyDictRevIterKey_Type);
+}
+
+static PyObject *
+dictreviter_iternext(dictiterobject *di)
+{
+    Py_ssize_t i = di->di_pos;
+    /* Walk backwards through the compact array */
+    while (i >= 0) {
+        PyDictKeysObject *k = di->di_dict->ma_keys;
+        PyObject *key = DK_ENTRIES(k)[i].me_key;
+        i--;
+        if (key == NULL || key == dummy) continue;
+        di->di_pos = i;
+        return Py_NewRef(key);
+    }
+    ...
+}
+```
+
+`reversed(d)` yields keys in reverse insertion order. The reverse iterator walks the compact entry array backward, skipping deleted slots. `dict.__reversed__` was added in Python 3.8 (`dict` is ordered since 3.7).
+
+### Dict views
+
+```c
+// CPython: Objects/dictobject.c:2720 dictkeys_new
+static PyObject *
+dictkeys_new(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return _PyDictView_New(self, &PyDictKeys_Type);
+}
+```
+
+`d.keys()`, `d.values()`, `d.items()` return view objects that reflect the live state of the dict. They support `len`, `iter`, `in`, and (for `keys` and `items`) set operations. Views hold a reference to the dict but do not copy it.
+
+### `dictview.__and__`
+
+```c
+// CPython: Objects/dictobject.c:2860 dictviews_and
+static PyObject *
+dictviews_and(PyObject *self, PyObject *other)
+{
+    /* keys & other_set: intersection */
+    PyObject *result = PySet_New(self);
+    PyObject *tmp = PyObject_CallMethodOneArg(result, &_Py_ID(intersection_update), other);
+    Py_DECREF(tmp);
+    return result;
+}
+```
+
+`d1.keys() & d2.keys()` returns a `set` of keys common to both dicts. `d1.items() - d2.items()` returns items in `d1` but not `d2`. These operations work because `keys` and `items` views implement the `Set` abstract base class protocol.
+
+## gopy notes
+
+`dict.fromkeys` is `objects.DictFromKeys` in `objects/dictobject.go`. `dict.__reversed__` is `objects.DictReversed` returning an `objects.DictRevIter`. Dict views are `objects.DictKeysView`, `objects.DictValuesView`, `objects.DictItemsView`. Set operations on views call `objects.SetNew` and `objects.SetIntersectionUpdate`.

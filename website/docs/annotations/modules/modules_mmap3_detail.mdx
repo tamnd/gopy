@@ -1,0 +1,100 @@
+---
+title: Modules/mmapmodule.c (part 3)
+description: "mmapmodule.c part 3: mmap.read, mmap.write, mmap.seek, mmap.find, mmap.resize."
+cpython_path: Modules/mmapmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mmapmodule.c" />
+
+This annotation covers I/O and search operations on memory-mapped files. See `modules_mmap2_detail` for `mmap.__new__`, `ACCESS_READ/WRITE/COPY`, and the buffer protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `mmap.read` | Read bytes advancing the file position |
+| 81-160 | `mmap.write` | Write bytes at the current position |
+| 161-240 | `mmap.seek` | Move the file position |
+| 241-340 | `mmap.find` / `mmap.rfind` | Search for a byte sequence |
+| 341-500 | `mmap.resize` | Resize the underlying file and mapping |
+
+## Reading
+
+### `mmap.read`
+
+```c
+// CPython: Modules/mmapmodule.c:480 mmap_read_method
+static PyObject *
+mmap_read_method(mmap_object *self, PyObject *args)
+{
+    Py_ssize_t num_bytes = PY_SSIZE_T_MAX;
+    if (!PyArg_ParseTuple(args, "|n:read", &num_bytes)) return NULL;
+    CHECK_VALID(NULL);
+    Py_ssize_t available = self->size - self->pos;
+    if (num_bytes > available) num_bytes = available;
+    if (num_bytes == 0) return PyBytes_FromStringAndSize(NULL, 0);
+    PyObject *result = PyBytes_FromStringAndSize(self->data + self->pos, num_bytes);
+    self->pos += num_bytes;
+    return result;
+}
+```
+
+`mmap.read(n)` copies `n` bytes from the mapped memory starting at `self->pos` into a `bytes` object. No syscall is needed — reading from mmap triggers a page fault on first access but subsequent reads are pure memory copies.
+
+### `mmap.find`
+
+```c
+// CPython: Modules/mmapmodule.c:580 mmap_find_method
+static PyObject *
+mmap_find_method(mmap_object *self, PyObject *args, int reverse)
+{
+    Py_ssize_t start = self->pos, end = self->size;
+    Py_buffer view;
+    if (!PyArg_ParseTuple(args, "y*|nn:find", &view, &start, &end)) return NULL;
+    const char *p;
+    if (!reverse)
+        p = memmem(self->data + start, end - start, view.buf, view.len);
+    else
+        p = memrmem(self->data, end, view.buf, view.len, start);
+    PyBuffer_Release(&view);
+    return PyLong_FromSsize_t(p ? p - self->data : -1);
+}
+```
+
+`mm.find(b'pattern')` uses `memmem` (GNU extension; portable fallback otherwise) to search the mapped region. Returns the byte offset from the start of the mapping, or `-1` if not found. Works on binary data — not newline-aware like `io.IOBase.readline`.
+
+### `mmap.resize`
+
+```c
+// CPython: Modules/mmapmodule.c:680 mmap_resize_method
+static PyObject *
+mmap_resize_method(mmap_object *self, PyObject *args)
+{
+    Py_ssize_t new_size;
+    if (!PyArg_ParseTuple(args, "n:resize", &new_size)) return NULL;
+    CHECK_VALID(NULL);
+    /* Unmap the current region */
+    munmap(self->data, self->size);
+    /* Resize the underlying file */
+    ftruncate(self->fd, new_size);
+    /* Re-map */
+    self->data = mmap(NULL, new_size, self->prot, self->flags, self->fd, 0);
+    if (self->data == MAP_FAILED) {
+        self->data = NULL;
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    self->size = new_size;
+    Py_RETURN_NONE;
+}
+```
+
+`mm.resize(new_size)` extends or truncates the mapping. On POSIX, this requires unmapping and remapping because `mremap` is not universally available. All existing references (e.g., `memoryview` objects) pointing into the old mapping become dangerously invalid after `resize`.
+
+## gopy notes
+
+`mmap.read` is `module/mmap.Read` in `module/mmap/module.go`; copies from `[]byte` slice using Go's `copy`. `mmap.find` uses `bytes.Index` and `bytes.LastIndex`. `mmap.resize` calls `syscall.Ftruncate` and `syscall.Mmap`/`syscall.Munmap`. The mmap region is a Go `[]byte` backed by the OS mapping.

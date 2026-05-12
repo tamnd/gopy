@@ -1,0 +1,114 @@
+---
+title: Python/exceptions.c (part 10)
+description: "Python/exceptions.c part 10: BaseExceptionGroup, ExceptionGroup, exception notes, __notes__ attribute."
+cpython_path: Python/exceptions.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/exceptions.c" />
+
+This annotation covers exception groups (PEP 654) and exception notes (PEP 678). See `python_exceptions9_detail` for `StopIteration`, `GeneratorExit`, and `ExceptionContext`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BaseExceptionGroup.__new__` | Validate message and exceptions |
+| 81-180 | `BaseExceptionGroup.split` | Split by predicate |
+| 181-280 | `BaseExceptionGroup.subgroup` | Filter without raising |
+| 281-380 | `BaseException.add_note` | Attach a string note (PEP 678) |
+| 381-500 | `BaseExceptionGroup.__str__` | Display all sub-exceptions |
+
+## Reading
+
+### `BaseExceptionGroup.__new__`
+
+```c
+// CPython: Python/exceptions.c:3280 BaseExceptionGroup_new
+static PyObject *
+BaseExceptionGroup_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *message, *excs;
+    if (!PyArg_ParseTuple(args, "UO:BaseExceptionGroup", &message, &excs))
+        return NULL;
+    /* excs must be a non-empty sequence of BaseException instances */
+    PyObject *seq = PySequence_Tuple(excs);
+    if (PyTuple_GET_SIZE(seq) == 0) {
+        PyErr_SetString(PyExc_TypeError, "second argument (exceptions) must be a non-empty sequence");
+        return NULL;
+    }
+    for (int i = 0; i < PyTuple_GET_SIZE(seq); i++) {
+        if (!PyExceptionInstance_Check(PyTuple_GET_ITEM(seq, i))) {
+            PyErr_SetString(PyExc_TypeError, "Item %d of second argument is not an exception");
+            return NULL;
+        }
+    }
+    /* ExceptionGroup: all sub-exceptions must be Exception (not BaseException) */
+    return eg_new_with_type(type, message, seq);
+}
+```
+
+`ExceptionGroup("msg", [ValueError(), TypeError()])` creates a group. The constructor validates that `excs` is non-empty and that each element is a `BaseException` instance. `ExceptionGroup` (not `Base`) additionally requires all sub-exceptions to be `Exception` subclasses (not `BaseException`).
+
+### `BaseExceptionGroup.split`
+
+```c
+// CPython: Python/exceptions.c:3380 BaseExceptionGroup_split
+static PyObject *
+BaseExceptionGroup_split(PyObject *self, PyObject *matcher_value)
+{
+    /* Returns (match, rest) where match contains exceptions matching
+       the type/predicate and rest contains those that don't */
+    PyObject *excs = ((PyBaseExceptionGroupObject *)self)->excs;
+    PyObject *match_list = PyList_New(0);
+    PyObject *rest_list = PyList_New(0);
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(excs); i++) {
+        PyObject *exc = PyTuple_GET_ITEM(excs, i);
+        int m = exc_matches(exc, matcher_value);
+        if (m) PyList_Append(match_list, exc);
+        else PyList_Append(rest_list, exc);
+    }
+    PyObject *match = PyList_GET_SIZE(match_list) > 0
+        ? eg_new_same_type(self, message, match_list) : Py_None;
+    PyObject *rest = PyList_GET_SIZE(rest_list) > 0
+        ? eg_new_same_type(self, message, rest_list) : Py_None;
+    return PyTuple_Pack(2, match, rest);
+}
+```
+
+`eg.split(ValueError)` returns `(match_group, rest_group)`. Used in `except*` clauses: the runtime calls `split` for each `except*` clause to partition the group. Nested groups are recursively split.
+
+### `BaseException.add_note`
+
+```c
+// CPython: Python/exceptions.c:380 BaseException_add_note
+static PyObject *
+BaseException_add_note(PyObject *self, PyObject *note)
+{
+    if (!PyUnicode_Check(note)) {
+        PyErr_Format(PyExc_TypeError,
+                     "note must be a str, not '%s'",
+                     Py_TYPE(note)->tp_name);
+        return NULL;
+    }
+    PyObject *notes = PyObject_GetAttr(self, &_Py_ID(__notes__));
+    if (notes == NULL) {
+        PyErr_Clear();
+        notes = PyList_New(0);
+        PyObject_SetAttr(self, &_Py_ID(__notes__), notes);
+    }
+    PyList_Append(notes, note);
+    Py_DECREF(notes);
+    Py_RETURN_NONE;
+}
+```
+
+`err.add_note("hint: check the input file")` appends a string to `err.__notes__`. Notes appear in the traceback after the exception message. `traceback.print_exception` renders each note on its own line prefixed with `  note: `.
+
+## gopy notes
+
+`BaseExceptionGroup` is `objects.BaseExceptionGroup` in `objects/exceptions.go`. `split` uses `objects.ExcMatches` which checks `isinstance` for type matchers. `add_note` is `objects.ExceptionAddNote`; appends to `__notes__` on the exception instance. Exception notes are rendered in `vm.PrintException` by checking for `__notes__`.
