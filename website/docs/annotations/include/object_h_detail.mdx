@@ -1,0 +1,89 @@
+---
+title: "Include/object.h: Core Object Layout"
+description: "PyObject struct, reference counting macros, immortal singletons, and the 3.14 tagged-pointer representation"
+cpython_path: Include/object.h
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: objects/object.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/object.h` is the foundation of every CPython runtime value. It defines the two base structs, the reference-counting macros, and the canonical singletons. In CPython 3.14 it also introduces a tagged-pointer immortality scheme that changes how `ob_refcnt` is interpreted on 64-bit builds.
+
+## Map
+
+| Lines | Symbol | Kind | gopy location |
+|-------|--------|------|---------------|
+| 1-60 | `PyObject`, `PyVarObject` | struct | `objects/object.go` |
+| 61-110 | `PyTypeObject` (forward decl) | struct fwd | `objects/type.go` |
+| 111-180 | `Py_INCREF`, `Py_DECREF`, `Py_XINCREF`, `Py_XDECREF` | macro | `objects/object.go` |
+| 181-240 | `Py_REFCNT`, `Py_TYPE`, `Py_SIZE` | accessor macro | `objects/object.go` |
+| 241-310 | `_Py_Dealloc` | internal fn | `objects/object.go` |
+| 311-380 | `Py_None`, `Py_True`, `Py_False` immortal singletons | object decl | `objects/object.go` |
+| 381-500 | Tagged-pointer immortality (`_Py_IsImmortal`, `_Py_IMMORTAL_REFCNT`) | macro/enum | `objects/object.go` |
+
+## Reading
+
+### PyObject and PyVarObject structs
+
+Every Python object in CPython begins with `PyObject_HEAD`, which expands to a single `PyObject` field named `ob_base`, or is `PyObject` itself:
+
+```c
+// Include/object.h:105
+typedef struct _object {
+    Py_ssize_t ob_refcnt;
+    PyTypeObject *ob_type;
+} PyObject;
+
+// Include/object.h:120
+typedef struct {
+    PyObject ob_base;
+    Py_ssize_t ob_size;
+} PyVarObject;
+```
+
+`ob_size` is the number of items (for lists, tuples, strings). It is signed so that internal code can use negative values as sentinels without a cast.
+
+### Py_INCREF and Py_DECREF
+
+The reference-counting macros are the hot path for memory management:
+
+```c
+// Include/object.h:197
+static inline void Py_INCREF(PyObject *op) {
+    if (_Py_IsImmortal(op)) { return; }
+    op->ob_refcnt++;
+}
+
+// Include/object.h:211
+static inline void Py_DECREF(PyObject *op) {
+    if (_Py_IsImmortal(op)) { return; }
+    if (--op->ob_refcnt == 0) { _Py_Dealloc(op); }
+}
+```
+
+The immortality guard short-circuits both paths for `None`, `True`, `False`, small integers, and interned strings.
+
+### Tagged-pointer immortality (3.14)
+
+CPython 3.14 sets the high bit of `ob_refcnt` to mark an object as immortal, avoiding the branch on a separate flag:
+
+```c
+// Include/object.h:420
+#define _Py_IMMORTAL_REFCNT (Py_ssize_t)(UINT_MAX >> 1)
+
+static inline int _Py_IsImmortal(PyObject *op) {
+    return (op->ob_refcnt & _Py_IMMORTAL_REFCNT) != 0;
+}
+```
+
+On 32-bit builds a separate `ob_immortal` flag is used instead because the pointer width does not leave a spare high bit.
+
+## gopy notes
+
+- gopy uses Go's garbage collector, so `ob_refcnt` is not replicated as a live counter. The field exists on `objects.Object` as a zero value for compatibility with C-extension-style assertions in tests.
+- Immortal singletons (`None`, `True`, `False`) are package-level `var` values in `objects/object.go`, allocated once at init time and never collected.
+- `PyTypeObject` forward declarations map to the `*Type` pointer on every `Object` embedding; the concrete struct lives in `objects/type.go`.
+- The tagged-pointer scheme has no direct Go equivalent. gopy tracks immortality with a boolean field on the base object rather than bit-tagging the refcount.

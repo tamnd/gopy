@@ -1,0 +1,140 @@
+---
+title: "Objects/setobject.c: Set and Frozenset Internals"
+description: "Hash table layout, open-addressing probing, set_merge, frozenset hash caching, and tp_iter for sets"
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+ported_to: objects/set.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/setobject.c` is one of CPython's larger object files. It implements both `set`
+and `frozenset` on top of a compact open-addressing hash table whose entries are stored
+in a `setentry` array embedded directly in `PySetObject`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | `setentry` struct | Each slot holds `key` pointer plus `hash` (avoids re-hash on resize) |
+| 61–150 | `PySetObject` struct | Inline `smalltable[8]` avoids heap for tiny sets; `table` points to it or heap |
+| 151–280 | `set_add_entry` | Core insert: double-hash probing, collision handling, resize trigger |
+| 281–420 | `set_contains_entry` | Lookup path; compares hash first, then `==` |
+| 421–560 | `set_discard_entry` | Remove without raising; marks slot as `dummy` sentinel |
+| 561–700 | `set_table_resize` | Rehash to new power-of-two; copies live entries |
+| 701–900 | `set_merge` | Bulk insert from another set or dict; used by `union` and `update` |
+| 901–1050 | `set_intersection` | Iterates smaller operand, checks against larger |
+| 1051–1250 | `set_difference` | Iterates self, skips items found in other |
+| 1251–1450 | `frozenset_hash` | Commutative hash of all member hashes; cached in `hash` field |
+| 1451–1650 | `setiter` / `setiterobject` | Iterator state: `si_set`, `si_pos`, `si_used` staleness guard |
+| 1651–2200 | `PySet_Type` / `PyFrozenSet_Type` | `tp_*` tables; `tp_iter` points to `set_iter` |
+
+## Reading
+
+### Hash table layout and probing
+
+`PySetObject` contains an inline `smalltable` of 8 `setentry` slots. When the set stays
+small, `table` points into this inline array and no heap allocation is needed. Growth
+beyond the inline capacity allocates a heap array sized to the next power of two above
+`4 * used`.
+
+```c
+// Objects/setobject.c:91  PySetObject
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t fill;     /* slots used, including dummies */
+    Py_ssize_t used;     /* live entries */
+    Py_ssize_t mask;     /* table length - 1 */
+    setentry *table;
+    Py_hash_t hash;      /* frozenset only; -1 means not cached */
+    Py_ssize_t finger;   /* next position for pop() */
+    setentry smalltable[PySet_MINSIZE];
+    PyObject *weakreflist;
+} PySetObject;
+```
+
+`set_add_entry` probes with a linear then pseudo-random step derived from the hash.
+It keeps a pointer to the first `dummy` slot seen so that inserts reuse tombstones.
+
+```c
+// Objects/setobject.c:165  set_add_entry (simplified)
+static int
+set_add_entry(PySetObject *so, PyObject *key, Py_hash_t hash)
+{
+    setentry *table = so->table;
+    setentry *freeslot = NULL;
+    size_t perturb = (size_t)hash;
+    size_t mask = (size_t)so->mask;
+    size_t i = (size_t)hash & mask;
+    ...
+    for (;;) {
+        entry = &table[i];
+        if (entry->key == NULL)          /* empty slot */
+            break;
+        if (entry->key == dummy)
+            freeslot = entry;
+        else if (entry->hash == hash && ...) /* compare keys */
+            return 0; /* already present */
+        i = (i * 5 + perturb + 1) & mask;
+        perturb >>= PERTURB_SHIFT;
+    }
+    ...
+}
+```
+
+### set_merge and frozenset_hash
+
+`set_merge` is used by `set.update` and `set | other`. It takes a fast path when the
+source is also a `PySetObject`: it iterates the source's `table` directly and calls
+`set_add_entry` for each live entry, avoiding Python-level iteration overhead.
+
+`frozenset_hash` computes a commutative hash by XOR-ing a shuffled version of each
+member's hash so that insertion order does not affect the result. The value is stored
+in `PySetObject.hash` and returned immediately on subsequent calls.
+
+```c
+// Objects/setobject.c:1285  frozenset_hash
+static Py_hash_t
+frozenset_hash(PyObject *self)
+{
+    PySetObject *v = (PySetObject *)self;
+    if (v->hash != -1)
+        return v->hash;
+    /* iterate all entries, mix hashes commutatively */
+    ...
+    v->hash = hash;
+    return hash;
+}
+```
+
+### tp_iter and staleness guard
+
+`set.__iter__` returns a `setiterobject`. The iterator stores `si_used` at creation
+time; if `so->used` differs when `__next__` is called, a `RuntimeError` is raised
+(mutation during iteration).
+
+```c
+// Objects/setobject.c:1470  setiter_iternext
+static PyObject *
+setiter_iternext(setiterobject *si)
+{
+    if (si->si_used != so->used) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "Set changed size during iteration");
+        ...
+    }
+    ...
+}
+```
+
+## gopy notes
+
+- `objects/set.go` uses a Go `map[uint64]Object` as the backing store. The inline
+  `smalltable` optimization is not yet replicated; all sets allocate a map.
+- `set_merge` fast path (set-to-set copy without Python iteration) is ported.
+- `frozenset_hash` is ported with the same commutative XOR-mix algorithm and cached
+  in an `int64` field initialized to `-1`.
+- The staleness guard in `setiter_iternext` is ported; the iterator captures `used`
+  at construction and compares on each `Next` call.

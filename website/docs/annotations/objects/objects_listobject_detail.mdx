@@ -1,0 +1,81 @@
+---
+title: Objects/listobject.c
+description: "list implementation: dynamic array with amortized growth, timsort, free list for small empty lists, and the sequence/mapping protocol."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+`Objects/listobject.c` implements the `list` type. Lists are dynamic arrays of `PyObject*` pointers with amortized O(1) append. The file provides `list_append`, `list_insert`, `list_sort` (timsort), `list_reverse`, and the full sequence protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | free list | Per-interpreter free list for empty list objects |
+| 101-250 | `PyList_New`, `list_dealloc` | Allocator and deallocator |
+| 251-450 | `list_resize`, `list_append`, `list_insert` | Dynamic growth and mutation |
+| 451-700 | `list_sort` | Timsort entry point; `merge_*` helpers |
+| 701-1200 | Timsort merge logic | `merge_lo`, `merge_hi`, galloping |
+| 1201-1700 | `list_reverse`, `list_extend`, `list_pop` | Other mutation methods |
+| 1701-2500 | Sequence protocol, type wiring | `sq_item`, `sq_slice`, `PyList_Type` |
+
+## Reading
+
+### Dynamic growth
+
+`list_resize(self, newsize)` reallocates `ob_item` when the size changes. The growth formula over-allocates: `new_allocated = newsize + newsize // 8 + (3 if newsize < 9 else 6)`. This amortizes reallocation to O(1) per append.
+
+```c
+// Objects/listobject.c:251 list_resize
+static int
+list_resize(PyListObject *self, Py_ssize_t newsize)
+{
+    Py_ssize_t new_allocated;
+    if (newsize <= self->allocated && newsize >= self->allocated / 2) {
+        Py_SET_SIZE(self, newsize);
+        return 0;
+    }
+    new_allocated = ((size_t)newsize + (newsize >> 3) + (newsize < 9 ? 3 : 6));
+    ...
+    self->ob_item = (PyObject **)PyMem_Realloc(self->ob_item,
+                                                new_allocated * sizeof(PyObject *));
+    self->allocated = new_allocated;
+    return 0;
+}
+```
+
+### Timsort
+
+`list.sort()` uses timsort, an adaptive merge sort that exploits existing runs of sorted data. The key steps: `count_run` finds the length of each natural ascending or descending run; `binarysort` sorts short runs; `merge_collapse` merges adjacent runs on the pending-run stack; `galloping` mode accelerates merges when one run consistently has smaller elements.
+
+```c
+// Objects/listobject.c:451 list_sort_impl
+static PyObject *
+list_sort_impl(PyListObject *self, PyObject *keyfunc, int reverse)
+{
+    MergeState ms;
+    merge_init(&ms, nelem, has_keyfunc, &lo);
+    while (remaining > 1) {
+        n = count_run(&ms, lo.keys, lo.keys + remaining, &descending);
+        push_next_run(&ms, n, ...);
+        merge_collapse(&ms);
+        lo.keys += n; remaining -= n;
+    }
+    merge_force_collapse(&ms);
+    ...
+}
+```
+
+### Free list
+
+Empty `list` objects (ob_alloc == 0) are cached on a per-interpreter free list of up to `PyList_MAXFREELIST` (80) items. `list_dealloc` pushes to the free list; `PyList_New(0)` pops from it.
+
+## gopy notes
+
+The gopy list is implemented using Go's `[]py.Object` slice with the same amortized growth factor. timsort is available via Go's `sort.Slice` (which uses pdqsort in recent versions); a faithful timsort port lives in `vm/` or `objects/`.

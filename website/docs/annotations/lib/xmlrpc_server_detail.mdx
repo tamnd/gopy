@@ -1,0 +1,130 @@
+---
+title: "xmlrpc/server.py"
+description: "XML-RPC server: dispatcher, marshaling, introspection, MultiCall"
+cpython_path: Lib/xmlrpc/server.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/xmlrpc/server.py` layers an XML-RPC dispatcher on top of `http.server.HTTPServer`. The key classes are `SimpleXMLRPCDispatcher`, which holds the method registry and handles dispatch, and `SimpleXMLRPCServer`, which wires the dispatcher to an HTTP request handler. `MultiPathXMLRPCServer` supports multiple dispatch paths on one port.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | module preamble | imports, `__all__`, `Fault`, `dumps`/`loads` re-exports |
+| 62–200 | `SimpleXMLRPCDispatcher` | method registry; `register_function`, `_dispatch`, `_marshaled_dispatch` |
+| 201–260 | `SimpleXMLRPCRequestHandler` | HTTP POST handler; calls `_marshaled_dispatch`, writes response |
+| 261–310 | `SimpleXMLRPCServer` | `HTTPServer` + `SimpleXMLRPCDispatcher`; binds them together |
+| 311–360 | `MultiPathXMLRPCServer` | routes requests to per-path dispatchers |
+| 361–430 | `CGIXMLRPCRequestHandler` | handles XML-RPC requests arriving as CGI |
+| 431–530 | introspection helpers | `system.listMethods`, `system.methodHelp`, `system.methodSignature` |
+| 531–600 | `MultiCall` / `MultiCallIterator` | accumulates calls client-side; sends one request, iterates responses |
+
+## Reading
+
+### Registering and dispatching functions
+
+`register_function` stores a callable in `self.funcs` under a given name (defaulting to `func.__name__`). `_dispatch` retrieves it and calls it with positional or keyword arguments unpacked from the parsed XML-RPC request.
+
+```python
+# CPython: Lib/xmlrpc/server.py:100 SimpleXMLRPCDispatcher.register_function
+def register_function(self, function=None, name=None):
+    if function is None:
+        return partial(self.register_function, name=name)
+    if name is None:
+        name = function.__name__
+    self.funcs[name] = function
+    return function
+```
+
+```python
+# CPython: Lib/xmlrpc/server.py:130 SimpleXMLRPCDispatcher._dispatch
+def _dispatch(self, method, params):
+    try:
+        func = self.funcs[method]
+    except KeyError:
+        if self.instance is not None:
+            ...
+            func = resolve_dotted_attribute(
+                self.instance, method,
+                self.allow_dotted_names)
+        else:
+            raise Exception('method "%s" is not supported' % method)
+    if isinstance(params, dict):
+        return func(**params)
+    else:
+        return func(*params)
+```
+
+### Marshaled dispatch: XML in, XML out
+
+`_marshaled_dispatch` is the HTTP-level entry point. It deserializes the incoming XML with `xmlrpc.client.loads`, calls `_dispatch`, and re-serializes the return value (or a `Fault`) with `xmlrpc.client.dumps`.
+
+```python
+# CPython: Lib/xmlrpc/server.py:155 SimpleXMLRPCDispatcher._marshaled_dispatch
+def _marshaled_dispatch(self, data, dispatch_method=None, path=None):
+    try:
+        params, method = loads(data, use_builtin_types=self.use_builtin_types)
+        if dispatch_method is not None:
+            response = dispatch_method(method, params)
+        else:
+            response = self._dispatch(method, params)
+        response = (response,)
+        response = dumps(response, methodresponse=1,
+                         allow_none=self.allow_none, encoding=self.encoding)
+    except Fault as fault:
+        response = dumps(fault, allow_none=self.allow_none,
+                         encoding=self.encoding)
+    except BaseException as exc:
+        response = dumps(
+            Fault(1, "%s:%s" % (type(exc), exc)),
+            encoding=self.encoding, allow_none=self.allow_none)
+    return response.encode(self.encoding, 'xmlcharrefreplace')
+```
+
+### Introspection functions
+
+`register_introspection_functions` adds `system.listMethods`, `system.methodHelp`, and `system.methodSignature` to the dispatcher. These are the standard XML-RPC introspection API defined at xmlrpc.usefulinc.com.
+
+```python
+# CPython: Lib/xmlrpc/server.py:431 register_introspection_functions
+def register_introspection_functions(self):
+    self.funcs.update({
+        'system.listMethods': self.system_listMethods,
+        'system.methodSignature': self.system_methodSignature,
+        'system.methodHelp': self.system_methodHelp,
+    })
+```
+
+`system.listMethods` merges keys from `self.funcs` with names discovered via `dir` on `self.instance`. `system.methodHelp` returns the docstring of the matching callable.
+
+### MultiCall
+
+`MultiCall` is a client-side helper that accumulates calls locally. Calling `__call__()` on it sends all accumulated calls in a single XML-RPC `system.multicall` request and returns a `MultiCallIterator` that yields results or raises `Fault` for each item.
+
+```python
+# CPython: Lib/xmlrpc/server.py:555 MultiCall.__call__
+def __call__(self):
+    marshalled_list = []
+    for name, args in self.__call_list:
+        marshalled_list.append({'methodName': name, 'params': args})
+    return MultiCallIterator(self.__server.system.multicall(marshalled_list))
+```
+
+## gopy notes
+
+- `SimpleXMLRPCDispatcher` is self-contained and has no I/O; it is the cleanest unit to port first.
+- `_marshaled_dispatch` depends on `xmlrpc.client.loads` and `dumps`. Those must exist before the dispatcher can round-trip.
+- `resolve_dotted_attribute` enforces `allow_dotted_names`; gopy needs to replicate the security check exactly (reject names starting with `_`).
+- `MultiCall` lives entirely at the client level and can be deferred until `xmlrpc.client` is stable.
+- `CGIXMLRPCRequestHandler` depends on `os.environ` and `sys.stdin`; low priority.
+
+## CPython 3.14 changes
+
+- `SimpleXMLRPCServer` gained `use_builtin_types=False` as a constructor parameter in 3.3; the default is unchanged in 3.14.
+- `_marshaled_dispatch` now catches `BaseException` (not just `Exception`) when building a fault response, matching the change made to `xmlrpc.client` in 3.12.
+- No new public API was added in 3.14; the module is stable.

@@ -1,0 +1,108 @@
+---
+title: "Include/abstract.h: Abstract Object Protocol"
+description: "PyObject_Call family, sequence/mapping/number protocol headers, PyIter_Next, PyObject_Dir, and the Py_buffer protocol"
+cpython_path: Include/abstract.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+ported_to: objects/protocol.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/abstract.h` declares the generic dispatch layer that sits between the interpreter and type-specific slots. Every opcode that operates on an unknown object type (arithmetic, subscript, iteration) goes through one of these functions. Porting this header correctly is what makes operator overloading and duck-typed protocols work uniformly across built-in and user-defined types.
+
+## Map
+
+| Lines | Symbol | Kind | gopy location |
+|-------|--------|------|---------------|
+| 1-50 | `PyObject_Call`, `PyObject_CallObject`, `PyObject_CallFunction` | fn | `objects/protocol.go` |
+| 51-100 | `PyObject_CallMethod`, `PyObject_CallFunctionObjArgs` | fn | `objects/protocol.go` |
+| 101-160 | `PyNumber_*` (Add, Subtract, Multiply, etc.) | fn group | `objects/protocol.go` |
+| 161-220 | `PySequence_*` (Length, GetItem, SetItem, Contains, etc.) | fn group | `objects/protocol.go` |
+| 221-280 | `PyMapping_*` (Check, Size, GetItemString, Keys, etc.) | fn group | `objects/protocol.go` |
+| 281-320 | `PyIter_Next`, `PyObject_GetIter` | fn | `objects/protocol.go` |
+| 321-360 | `PyObject_Dir`, `PyObject_IsInstance`, `PyObject_IsSubclass` | fn | `objects/protocol.go` |
+| 361-400 | `PyObject_GetBuffer`, `PyBuffer_Release`, `Py_buffer` struct | struct/fn | `objects/protocol.go` |
+
+## Reading
+
+### PyObject_Call family
+
+The call API has three layers of convenience, each building on the one below:
+
+```c
+// Include/abstract.h:14
+PyAPI_FUNC(PyObject *) PyObject_Call(
+    PyObject *callable, PyObject *args, PyObject *kwargs);
+
+// Include/abstract.h:28
+PyAPI_FUNC(PyObject *) PyObject_CallObject(
+    PyObject *callable, PyObject *args);
+
+// Include/abstract.h:42
+PyAPI_FUNC(PyObject *) PyObject_CallFunction(
+    PyObject *callable, const char *format, ...);
+
+// Include/abstract.h:58
+PyAPI_FUNC(PyObject *) PyObject_CallMethod(
+    PyObject *obj, const char *name, const char *format, ...);
+```
+
+`PyObject_Call` is the canonical entry point. `CallObject` passes `NULL` for kwargs. `CallFunction` and `CallMethod` accept a `Py_BuildValue`-style format string to construct the argument tuple inline.
+
+### Sequence, Mapping, and Number protocols
+
+The three protocol families share a common pattern: each function checks the relevant slot (`sq_item`, `mp_subscript`, `nb_add`) and raises `TypeError` if absent.
+
+```c
+// Include/abstract.h:168
+PyAPI_FUNC(Py_ssize_t) PySequence_Length(PyObject *o);
+PyAPI_FUNC(PyObject *)  PySequence_GetItem(PyObject *o, Py_ssize_t i);
+PyAPI_FUNC(int)         PySequence_SetItem(PyObject *o, Py_ssize_t i, PyObject *v);
+PyAPI_FUNC(int)         PySequence_Contains(PyObject *seq, PyObject *ob);
+
+// Include/abstract.h:230
+PyAPI_FUNC(int)         PyMapping_Check(PyObject *o);
+PyAPI_FUNC(Py_ssize_t)  PyMapping_Size(PyObject *o);
+PyAPI_FUNC(PyObject *)  PyMapping_GetItemString(PyObject *o, const char *key);
+PyAPI_FUNC(PyObject *)  PyMapping_Keys(PyObject *o);
+
+// Include/abstract.h:108
+PyAPI_FUNC(PyObject *)  PyNumber_Add(PyObject *o1, PyObject *o2);
+PyAPI_FUNC(PyObject *)  PyNumber_Subtract(PyObject *o1, PyObject *o2);
+PyAPI_FUNC(PyObject *)  PyNumber_InPlaceAdd(PyObject *o1, PyObject *o2);
+```
+
+In-place variants (`PyNumber_InPlaceAdd`, etc.) attempt the `nb_inplace_add` slot first and fall back to `nb_add` when it is absent, matching the `+=` semantics Python specifies.
+
+### Py_buffer and the buffer protocol
+
+```c
+// Include/abstract.h:370
+typedef struct bufferinfo {
+    void      *buf;
+    PyObject  *obj;
+    Py_ssize_t len;
+    Py_ssize_t itemsize;
+    int        readonly;
+    int        ndim;
+    char      *format;
+    Py_ssize_t *shape;
+    Py_ssize_t *strides;
+    Py_ssize_t *suboffsets;
+    void      *internal;
+} Py_buffer;
+
+PyAPI_FUNC(int) PyObject_GetBuffer(PyObject *obj, Py_buffer *view, int flags);
+PyAPI_FUNC(void) PyBuffer_Release(Py_buffer *view);
+```
+
+`PyObject_GetBuffer` fills the `Py_buffer` view by calling the type's `bf_getbuffer` slot. Callers must always pair it with `PyBuffer_Release` to decrement the exporter's reference count, even if the consumer only reads `buf` and `len`.
+
+## gopy notes
+
+- All three protocol families dispatch through `objects.Object`'s method set in `objects/protocol.go`. The Go interface `Callable`, `Sequence`, `Mapping`, and `Number` correspond directly to the CPython slot structs (`PySequenceMethods`, etc.).
+- `PyIter_Next` maps to `objects.IterNext` which returns `(Object, error)`. A `StopIteration` sentinel is converted to `(nil, nil)` following the same convention CPython uses internally after 3.7.
+- The `Py_buffer` struct is not yet fully ported. `PyObject_GetBuffer` is stubbed for `bytes` and `bytearray` only. Strided and multi-dimensional buffers (`ndim > 1`) are deferred.
+- `PyObject_Dir` calls `__dir__` when defined, otherwise falls back to the type's `tp_dir` slot, then to a merge of `__dict__` and MRO attributes. gopy follows the same three-step fallback in `objects/protocol.go`.

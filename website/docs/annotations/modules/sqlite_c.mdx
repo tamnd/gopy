@@ -50,7 +50,7 @@ state->programming_error = PyErr_NewException(
 ```
 
 The chain goes: `Exception -> Error -> DatabaseError ->
-{OperationalError, IntegrityError, DataError, ...}`. The hierarchy matches
+OperationalError, IntegrityError, DataError, and others`. The hierarchy matches
 the DB-API 2.0 spec (PEP 249).
 
 ### Type registration in `module_exec`

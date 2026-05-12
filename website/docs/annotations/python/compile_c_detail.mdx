@@ -1,0 +1,230 @@
+---
+title: Python/compile.c
+description: "AST-to-bytecode compiler: struct compiler, basic-block assembly, comprehension scoping, and the public entry point"
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 8000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+This page annotates <CpyLink path="Python/compile.c" />, the file that translates a
+Python AST into a `PyCodeObject`. The compiler is a single-pass recursive descent
+over the AST. It writes instructions into a basic-block flow graph, then the
+`assemble()` function linearises the blocks, resolves jump targets, and calls the
+assembler to produce bytecode. The file is about 8 000 lines; this page covers the
+highest-value entry points and data structures.
+
+## Map
+
+| Lines (approx) | Symbol | Kind | Notes |
+|----------------|--------|------|-------|
+| 1-120 | includes, forward decls | preprocessor | pulls in `pycore_compile.h`, symtable |
+| 122-280 | `struct compiler_unit` | struct | per-scope state (stack depth, lineno tracking) |
+| 282-340 | `struct compiler` | struct | top-level compiler handle |
+| 342-500 | compiler lifecycle helpers | functions | `compiler_new`, `compiler_enter_scope`, `compiler_exit_scope` |
+| 502-620 | `PyAST_CompileObject` | function | public entry point |
+| 622-780 | `compiler_mod` | function | dispatches on module/interactive/expression |
+| 782-1100 | `compiler_function` | function | def/async def, decorators, defaults, annotations |
+| 1102-1350 | `compiler_comprehension` | function | listcomp/setcomp/dictcomp/genexpr with nested scope |
+| 1352-1600 | statement emitters | functions | if/for/while/try/with/match |
+| 1602-2400 | expression emitters | functions | calls, subscripts, attributes, literals |
+| 2402-2900 | `assemble` | function | block linearisation, jump fixup, `PyCodeObject` construction |
+| 2902-8000 | remaining emitters, helpers | functions | augassign, starred, walrus, pattern matching |
+
+## Reading
+
+### `struct compiler` and `struct compiler_unit`
+
+The outermost handle is `struct compiler`. It owns the symbol table, the current
+`compiler_unit` stack, and options such as the optimization level.
+
+```c
+// CPython: Python/compile.c:282 struct compiler
+struct compiler {
+    PyObject *c_filename;
+    struct symtable *c_st;          /* symbol table for the whole module */
+    PyFutureFeatures *c_future;     /* __future__ flags */
+    PyCompilerFlags *c_flags;
+
+    int c_optimize;                 /* -O level */
+    int c_interactive;
+    int c_nestlevel;                /* scope nesting depth */
+
+    struct compiler_unit *u;        /* current scope */
+    PyObject *c_stack;             /* list of outer compiler_units */
+    PyArena *c_arena;
+};
+```
+
+Each function, class body, or comprehension gets its own `compiler_unit`. The unit
+holds the instruction buffer, the jump-target label table, the current line-number
+cursor, and the computed stack depth high-water mark.
+
+```c
+// CPython: Python/compile.c:122 struct compiler_unit
+struct compiler_unit {
+    PySTEntryObject *u_ste;         /* symtable entry for this scope */
+    PyObject *u_name;
+    PyObject *u_qualname;
+
+    struct instr_sequence u_instr;  /* instruction buffer (basic blocks) */
+    int u_nfblocks;
+    struct fblockinfo u_fblock[CO_MAXBLOCKS];
+
+    int u_lineno;
+    int u_col_offset;
+    /* ... more fields for end_lineno, exception handling, etc. ... */
+};
+```
+
+### `PyAST_CompileObject` and `compiler_mod`
+
+`PyAST_CompileObject` is the single public entry point. It allocates the compiler,
+runs the symtable pass, dispatches to `compiler_mod`, and calls `assemble`.
+
+```c
+// CPython: Python/compile.c:502 PyAST_CompileObject
+PyCodeObject *
+PyAST_CompileObject(mod_ty mod, PyObject *filename,
+                    PyCompilerFlags *flags, int optimize,
+                    PyArena *arena)
+{
+    struct compiler c;
+    PyCodeObject *co = NULL;
+
+    if (compiler_init(&c) < 0)
+        return NULL;
+    /* ... set filename, flags, optimize ... */
+    if (!_PySymtable_Build(mod, filename, c.c_future))
+        goto finally;
+    co = compiler_mod(&c, mod);
+finally:
+    compiler_free(&c);
+    return co;
+}
+```
+
+`compiler_mod` switches on the module kind. For `Module_kind` it iterates the
+statement list and calls `compiler_visit_stmt` on each node. For `Expression_kind`
+it calls `compiler_visit_expr` and emits `RETURN_VALUE`.
+
+### `compiler_function`: decorators, defaults, annotations, code gen
+
+Functions are compiled inside-out: first the default values and annotations are
+emitted into the enclosing scope, then a new `compiler_unit` is pushed for the
+function body itself.
+
+```c
+// CPython: Python/compile.c:782 compiler_function
+static int
+compiler_function(struct compiler *c, stmt_ty s, int is_async)
+{
+    PyObject *qualname;
+    arguments_ty args = ...;
+    asdl_expr_seq *decos = ...;
+
+    /* 1. emit decorator expressions in the outer scope */
+    if (!compiler_decorators(c, decos))
+        return ERROR;
+
+    /* 2. emit default values and annotations in the outer scope */
+    if (!compiler_default_arguments(c, args))
+        return ERROR;
+    ndefaults  = asdl_seq_LEN(args->defaults);
+    nkwdefaults = ...;
+
+    /* 3. open a new scope for the body */
+    if (!compiler_enter_scope(c, name, COMPILER_SCOPE_FUNCTION,
+                               (void *)s, s->lineno, qualname, ...))
+        return ERROR;
+
+    /* 4. emit RESUME, then the body statements */
+    ADDOP_I(c, loc, RESUME, RESUME_AT_FUNC_START);
+    if (!compiler_visit_stmts(c, s->v.FunctionDef.body))
+        return ERROR;
+
+    /* 5. exit scope, emits MAKE_FUNCTION in the outer scope */
+    co = compiler_exit_scope(c, name, ...);
+    /* ... emit MAKE_FUNCTION + apply decorators ... */
+}
+```
+
+The key invariant is that `MAKE_FUNCTION` is emitted in the outer scope after the
+inner code object has been assembled, so the default values and the code object are
+both on the stack when `MAKE_FUNCTION` executes.
+
+### `compiler_comprehension`: nested scope and `MAKE_CELL`
+
+List/set/dict comprehensions and generator expressions each run in their own nested
+scope so that the iteration variable does not leak. The outermost iterable is
+evaluated in the enclosing scope; the inner function receives it as an argument
+named `.0`.
+
+```c
+// CPython: Python/compile.c:1102 compiler_comprehension
+static int
+compiler_comprehension(struct compiler *c, expr_ty e,
+                       int type, PyObject *name,
+                       asdl_comprehension_seq *generators,
+                       expr_ty elt, expr_ty val)
+{
+    /* evaluate the outermost iterable in the enclosing scope */
+    comprehension_ty outermost = asdl_seq_GET(generators, 0);
+    if (!compiler_visit_expr(c, outermost->iter))
+        return ERROR;
+
+    /* push a new function scope for the comprehension body */
+    if (!compiler_enter_scope(c, name, COMPILER_SCOPE_COMPREHENSION,
+                               (void *)e, e->lineno, qualname, ...))
+        return ERROR;
+
+    /* .0 is the implicit first argument (the outermost iterator) */
+    /* emit MAKE_CELL for any variables captured by inner lambdas */
+    if (!compiler_make_cell_for_varname(c, &_Py_ID(__class__)))
+        return ERROR;
+    /* ... for-loop body, filters, element expression ... */
+}
+```
+
+`MAKE_CELL` is emitted at function entry for every variable that is referenced as a
+free variable by an inner scope. Without it the cell object would not exist when the
+inner function tries to load from it via `LOAD_DEREF`.
+
+### `assemble`: basic-block layout and jump fixup
+
+After all instructions have been emitted into the basic-block graph, `assemble`
+performs four passes.
+
+```c
+// CPython: Python/compile.c:2402 assemble
+static PyCodeObject *
+assemble(struct compiler *c, int addNone)
+{
+    /* pass 1: add implicit RETURN_CONST None if needed */
+    /* pass 2: compute each block's final offset (jump fixup requires this) */
+    /* pass 3: fix up jump target offsets now that block offsets are known */
+    /* pass 4: flatten the block list into a linear instruction array
+               and call _PyAssemble_MakeCodeObject */
+}
+```
+
+Jump fixup in pass 3 is iterative: forward jumps whose offset crosses a block
+boundary may change size when the target block moves, so the pass loops until no
+offsets change. In practice one or two iterations suffice for typical Python code.
+The final linearised instruction array is handed to `_PyAssemble_MakeCodeObject`
+(in `Python/assemble.c`) which packs the `PyCodeObject` fields.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `compile/`. The `struct compiler` maps to `compile.Compiler`,
+`struct compiler_unit` to `compile.Unit`. The symbol-table pass is a separate
+package (`compile/symtable/`) mirroring CPython's `Python/symtable.c`. The
+basic-block graph is already partially present in `compile/flowgraph.go` in the
+gopy repo; `assemble()` corresponds to `compile.Assemble` which calls
+`flowgraph.Linearise` followed by jump fixup in `flowgraph_jumps.go`. Comprehension
+nested scopes map to recursive `Compiler.enterScope` / `exitScope` calls that push
+and pop `Unit` values, matching the CPython pattern exactly.

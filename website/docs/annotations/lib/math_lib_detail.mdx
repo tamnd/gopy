@@ -1,0 +1,137 @@
+---
+title: math (mathmodule.c + Lib/math.py)
+description: "CPython: C math module and its Python shim"
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 50
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/math.py` is a thin re-export shim similar to `Lib/io.py`: it contains
+almost no logic of its own and simply re-exports everything from the C
+extension `_math` (compiled from `Modules/mathmodule.c`). The real
+implementation is in C and delegates to the platform libm for most functions.
+This page focuses on the three functions that have notable Python-level
+behavior worth understanding before porting.
+
+## Map
+
+The shim (`Lib/math.py`, ~50 lines) contains only imports and `__all__`.
+The table below maps the interesting sections of `Modules/mathmodule.c`
+(~3 000 lines) instead.
+
+| Lines (mathmodule.c) | Symbol | Role |
+|----------------------|--------|------|
+| 1–80 | module init, includes | system headers, `Py_LIMITED_API` guards |
+| 81–300 | `math_floor`, `math_ceil`, `math_trunc` | delegation to `__floor__` etc. |
+| 301–500 | `math_fsum` | exact floating-point summation (Shewchuk algorithm) |
+| 501–650 | `math_isclose` | relative and absolute tolerance comparison |
+| 651–800 | `math_prod` | product with `start` parameter |
+| 801–950 | `math_log`, `math_log2`, `math_log10` | logarithm with optional base |
+| 951–1400 | `math_gcd`, `math_lcm`, `math_comb`, `math_perm` | exact integer combinatorics |
+| 1401–2000 | `math_dist`, `math_hypot` | multi-dimensional Euclidean distance |
+| 2001–3000 | remaining functions, `PyMethodDef` table | sin/cos/exp/etc., module registration |
+
+The Python shim:
+
+| Lines (Lib/math.py) | Symbol | Role |
+|---------------------|--------|------|
+| 1–10 | `from _math import *` | bulk re-export of C symbols |
+| 11–50 | `__all__`, docstring patches | documentation only |
+
+## Reading
+
+### `math.isclose()` — relative and absolute tolerance
+
+`isclose` returns `True` when two values are within either a relative or an
+absolute tolerance. Both tolerances must be satisfied simultaneously only if
+the caller sets both; by default only relative tolerance is applied.
+
+```python
+# CPython: Modules/mathmodule.c:580 math_isclose_impl
+# Python equivalent shown for clarity
+def isclose(a, b, *, rel_tol=1e-09, abs_tol=0.0):
+    if rel_tol < 0 or abs_tol < 0:
+        raise ValueError('tolerances must be non-negative')
+    if a == b:
+        return True
+    if isinf(a) or isinf(b):
+        return False
+    diff = fabs(b - a)
+    return (diff <= fabs(rel_tol * b) or
+            diff <= fabs(rel_tol * a) or
+            diff <= abs_tol)
+```
+
+The `a == b` short-circuit handles the `inf == inf` case correctly before the
+`isinf` guard rejects mixed-infinity pairs.
+
+### `math.prod()` — product with a start value
+
+`prod()` multiplies an iterable with an optional `start` (default `1`). For
+integer inputs the accumulator stays an arbitrary-precision Python `int` and
+never overflows.
+
+```python
+# CPython: Modules/mathmodule.c:720 math_prod_impl
+# Python equivalent shown for clarity
+def prod(iterable, /, *, start=1):
+    result = start
+    for item in iterable:
+        result *= item
+    return result
+```
+
+The C implementation detects whether the running product is still a plain C
+`long` and switches to `PyObject` multiplication only when overflow is
+detected, keeping the common case fast.
+
+### `math.log()` — optional base argument
+
+With one argument `log(x)` computes the natural logarithm. With two arguments
+`log(x, base)` computes the change-of-base result as `log(x) / log(base)`,
+but the implementation applies a special case when `base` is `2` or `10` to
+delegate to `log2` or `log10` for better accuracy.
+
+```python
+# CPython: Modules/mathmodule.c:862 math_log
+# Python equivalent shown for clarity
+def log(x, base=_E):
+    if base is _E:
+        return _log(x)         # libm log()
+    if base == 2.0:
+        return log2(x)
+    if base == 10.0:
+        return log10(x)
+    return _log(x) / _log(base)
+```
+
+Calling `log(1000, 10)` via the naive division path gives
+`2.9999999999999996` on some platforms; the `log10` fast path returns exactly
+`3.0`.
+
+## gopy notes
+
+- `Lib/math.py` itself needs no porting effort; gopy's `math` module is
+  already a Go package that exposes the same names.
+- `math.isclose()` is already ported. Verify the `a == b` short-circuit
+  preserves `isclose(float('inf'), float('inf'))` returning `True`.
+- `math.prod()` must use `objects.Int.Mul` so that large-integer inputs do not
+  silently overflow Go `int64`.
+- `math.fsum` (Shewchuk algorithm) is the most complex function in the file.
+  It requires a variable-length partial-sum array; port it as a Go slice
+  rather than a fixed array.
+- `math.dist()` and `math.hypot()` with multiple arguments were added in 3.8;
+  both rely on `_PyLong_IsNonNegativeCompact` for an integer fast path.
+
+## CPython 3.14 changes
+
+- `math.fma(x, y, z)` was added in 3.13 (fused multiply-add delegating to
+  C99 `fma()`); 3.14 carries it forward.
+- `math.sumprod()` was added in 3.12 for dot-product with exact integer
+  arithmetic; no changes in 3.14.
+- `math.log()` gained an explicit check that raises `ValueError` for
+  `base <= 0` rather than returning `nan`, aligning it with the documented
+  contract.

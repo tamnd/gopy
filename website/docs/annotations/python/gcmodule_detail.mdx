@@ -1,0 +1,133 @@
+---
+title: "Python/gc.c: Cyclic Garbage Collector"
+description: "Three-generation cyclic GC, incremental collection, and finalizer handling in CPython 3.14"
+cpython_path: Python/gc.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+ported_to: objects/gc.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's cyclic garbage collector lives entirely in `Python/gc.c`. It supplements
+reference counting by detecting reference cycles that would otherwise leak. The
+collector divides objects into three generations (0, 1, 2) and promotes survivors
+across thresholds. CPython 3.14 adds an incremental mode that spreads generation-2
+work across multiple minor collections.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-120 | file header, `GEN_HEAD` | Generation list heads and `gc_generation` struct |
+| 121-280 | `gc_list_*` helpers | Doubly-linked list manipulation for tracked objects |
+| 281-430 | `update_refs` | Snapshot reference counts into `gc_refs` field |
+| 431-590 | `subtract_refs` | Walk each object's referents and decrement `gc_refs` |
+| 591-720 | `move_unreachable` | Objects with `gc_refs == 0` are moved to unreachable list |
+| 721-860 | `move_legacy_finalizers` | Pull objects with `__del__` out of the unreachable set |
+| 861-980 | `handle_weakrefs` | Nullify and optionally call weakref callbacks before sweep |
+| 981-1120 | `finalize_garbage` | Call `tp_finalize` on unreachable objects |
+| 1121-1300 | `collect` | Core three-generation sweep: update, subtract, move, finalize, sweep |
+| 1301-1500 | `gc_collect_main` | Threshold checks, generation merging, stats update |
+| 1501-1650 | incremental helpers | `gc_collect_increment`, budget accounting (3.14) |
+| 1651-1800 | `PyGC_Collect`, `_PyGC_CollectNoFail` | Public C API entry points |
+| 1801-2000 | module init, `gc` module methods | `gc.collect()`, `gc.get_count()`, `gc.disable()` etc. |
+
+## Reading
+
+### update_refs and subtract_refs (mark phase)
+
+The mark phase works in two passes. First `update_refs` copies each object's true
+`ob_refcnt` into a scratch field (`_gc_prev` repurposed). Then `subtract_refs`
+walks every tracked object's referents and decrements those scratch counts. After
+both passes, any object whose scratch count is still positive is reachable from
+outside the candidate set.
+
+```c
+/* Python/gc.c:281 update_refs */
+static void
+update_refs(PyGC_Head *containers)
+{
+    PyGC_Head *gc = GC_NEXT(containers);
+    for (; gc != containers; gc = GC_NEXT(gc)) {
+        gc_reset_refs(gc, Py_REFCNT(FROM_GC(gc)));
+    }
+}
+
+/* Python/gc.c:431 subtract_refs */
+static void
+subtract_refs(PyGC_Head *containers)
+{
+    traverseproc traverse;
+    PyGC_Head *gc = GC_NEXT(containers);
+    for (; gc != containers; gc = GC_NEXT(gc)) {
+        PyObject *op = FROM_GC(gc);
+        traverse = Py_TYPE(op)->tp_traverse;
+        (void) traverse(op, visit_decref, NULL);
+    }
+}
+```
+
+### move_unreachable (isolation)
+
+After the mark phase, `move_unreachable` scans the candidate list. Objects whose
+scratch ref count is zero are tentatively unreachable and moved to a separate list.
+The function must re-examine objects that are reachable from a "tentatively
+unreachable" object, restoring their counts and re-linking them into the reachable
+set.
+
+```c
+/* Python/gc.c:591 move_unreachable */
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    PyGC_Head *prev = young;
+    PyGC_Head *gc = GC_NEXT(young);
+    while (gc != young) {
+        if (gc_get_refs(gc) != 0) {
+            /* reachable: traverse to restore counts of referents */
+            PyObject *op = FROM_GC(gc);
+            Py_TYPE(op)->tp_traverse(op, visit_reachable, young);
+            prev = gc;
+            gc = GC_NEXT(gc);
+        } else {
+            gc_list_move(gc, unreachable);
+            gc->_gc_prev |= PREV_MASK_COLLECTING;
+            gc = GC_NEXT(prev);
+        }
+    }
+}
+```
+
+### gc_collect_main and incremental mode (3.14)
+
+`gc_collect_main` decides which generations to merge, calls `collect`, and updates
+collection counts and thresholds. CPython 3.14 introduces `gc_collect_increment`
+which processes a bounded number of objects per call (controlled by a byte budget)
+so that generation-2 pauses are amortized over many minor collections.
+
+```c
+/* Python/gc.c:1501 gc_collect_increment (3.14) */
+static Py_ssize_t
+gc_collect_increment(PyThreadState *tstate, struct gc_stats *stats)
+{
+    GCState *gcstate = &tstate->interp->gc;
+    Py_ssize_t limit = gcstate->work_to_do;
+    /* collect up to `limit` objects from the young generations */
+    ...
+    gcstate->work_to_do -= collected;
+    return collected;
+}
+```
+
+## gopy notes
+
+- gopy does not yet implement a cyclic GC. All objects are reference-counted via Go
+  interfaces; cycles that survive Go's own GC are currently a known gap.
+- `move_legacy_finalizers` maps loosely to the ordering problem in
+  `objects/type.go` where `__del__` must fire before the object is freed.
+- The incremental GC work budget concept is worth adopting when a tracing pass is
+  added, to avoid stop-the-world pauses in long-running programs.
+- Weakref nullification in `handle_weakrefs` corresponds to the callback logic
+  sketched in `objects/weakref.go` (not yet complete).

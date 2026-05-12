@@ -1,0 +1,58 @@
+---
+title: Include/cpython/listobject.h
+description: "CPython-private list API: PyListObject layout with ob_item pointer and allocated field, and the PyList_GET_ITEM/SET_ITEM fast macros that bypass bounds checking."
+cpython_path: Include/cpython/listobject.h
+cpython_version: "3.14"
+lines: 50
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/cpython/listobject.h" />
+
+`Include/cpython/listobject.h` exposes the internal `PyListObject` struct and the fast-access macros for list items. Extension modules that need to iterate list items at C speed use `PyList_GET_ITEM` and `PyList_GET_SIZE` from this header rather than the checked `PyList_GetItem` from the stable ABI.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-20 | `PyListObject` struct | Object layout; `ob_item`, `allocated` |
+| 21-50 | `PyList_GET_ITEM`, `PyList_SET_ITEM`, `PyList_GET_SIZE` | Unchecked fast access macros |
+
+## Reading
+
+### PyListObject layout
+
+`PyListObject` inherits `PyObject_VAR_HEAD` which provides `ob_size` (the current number of items). It adds `ob_item` (pointer to the `PyObject*` array) and `allocated` (the number of slots allocated, always >= `ob_size`).
+
+```c
+// Include/cpython/listobject.h:1 PyListObject
+struct PyListObject {
+    PyObject_VAR_HEAD       /* ob_size = number of items */
+    PyObject **ob_item;     /* pointer to item array */
+    Py_ssize_t allocated;   /* allocated slots */
+};
+```
+
+### Fast access macros
+
+`PyList_GET_ITEM(op, i)` reads `((PyListObject *)(op))->ob_item[i]` directly without bounds checking or NULL verification. `PyList_SET_ITEM(op, i, v)` assigns the item without reference count management. These macros are appropriate inside the CPython core where bounds have already been verified; extension code should prefer the checked API.
+
+```c
+// Include/cpython/listobject.h:21 PyList_GET_ITEM
+#define PyList_GET_ITEM(op, i) \
+    (((PyListObject *)(op))->ob_item[i])
+#define PyList_SET_ITEM(op, i, v) \
+    (((PyListObject *)(op))->ob_item[i] = (v))
+#define PyList_GET_SIZE(op) \
+    (assert(PyList_Check(op)), Py_SIZE(op))
+```
+
+### allocated vs ob_size
+
+`allocated` tracks the capacity of the `ob_item` array. When `ob_size == allocated`, the next `append` triggers `list_resize` to grow the array. `ob_size <= allocated` is always true; `ob_item[ob_size]` through `ob_item[allocated-1]` are unused slots (may contain garbage pointers).
+
+## gopy notes
+
+The gopy list uses a Go `[]py.Object` slice. The `len(slice)` corresponds to `ob_size`; `cap(slice)` corresponds to `allocated`. `PyList_GET_ITEM` maps to direct slice indexing `list.items[i]` without bounds checking in hot paths.

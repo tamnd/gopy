@@ -83,6 +83,13 @@ import (
 	// CPython: Modules/config.c.in:43 {"time", PyInit_time}
 	_ "github.com/tamnd/gopy/module/_time"
 
+	// Built-in module: itertools. Registers itself via
+	// module/_itertools/module.go init(). The Go directory carries the
+	// underscore prefix; the registered Python module name is the bare
+	// `itertools`. 1:1 port of Modules/itertoolsmodule.c.
+	// CPython: Modules/config.c.in:46 {"itertools", PyInit_itertools}
+	_ "github.com/tamnd/gopy/module/_itertools"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy

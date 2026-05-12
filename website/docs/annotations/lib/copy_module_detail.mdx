@@ -1,0 +1,120 @@
+---
+title: copy.py
+description: "Lib/copy.py: shallow and deep copy of Python objects"
+cpython_path: Lib/copy.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Implements `copy()` for shallow copies and `deepcopy()` for full recursive
+copies. The module is self-contained: no C extension backing it. All dispatch
+is done through dunder methods and internal lookup tables.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | module header, `_copy_dispatch` | Atomic-type fast path table |
+| 41–90 | `copy()` | Shallow copy entry point |
+| 91–200 | `deepcopy()` | Recursive copy with memo |
+| 201–240 | `_deepcopy_dispatch` | Type-keyed deep-copy handlers |
+| 241–270 | `_reconstruct()` | Rebuild via `__reduce_ex__` |
+| 271–300 | `Error`, helpers | Exception and registration API |
+
+## Reading
+
+### `_copy_dispatch` and the shallow path
+
+`copy()` first checks `cls.__copy__`. Failing that it looks up the type in
+`_copy_dispatch`, a plain dict that maps atomic types to the identity function.
+
+```python
+# CPython: Lib/copy.py:44 copy
+def copy(x):
+    cls = type(x)
+    copier = _copy_dispatch.get(cls)
+    if copier:
+        return copier(x)
+    copier = getattr(cls, "__copy__", None)
+    if copier is not None:
+        return copier()
+    ...
+```
+
+`int`, `float`, `str`, `bytes`, `bool`, and `type` all map to the identity
+function because they are immutable. No allocation needed.
+
+### `deepcopy()` and the memo dict
+
+`deepcopy()` accepts an optional `memo` dict. The dict maps `id(original)` to
+the already-copied object. Checking the memo before doing any work breaks
+circular references and also deduplicates shared subobjects.
+
+```python
+# CPython: Lib/copy.py:128 deepcopy
+def deepcopy(x, memo=None, _nil=[]):
+    if memo is None:
+        memo = {}
+    d = id(x)
+    y = memo.get(d, _nil)
+    if y is not _nil:
+        return y
+    cls = type(x)
+    copier = _deepcopy_dispatch.get(cls)
+    if copier is not None:
+        y = copier(x, memo)
+    ...
+    memo[d] = y
+    return y
+```
+
+The sentinel `_nil` is a module-level list, chosen because no user object can
+equal it.
+
+### `__deepcopy__` protocol
+
+If the type defines `__deepcopy__`, `deepcopy()` calls it with the memo dict
+and short-circuits all other dispatch. This lets containers like `numpy.ndarray`
+implement their own deep-copy semantics.
+
+```python
+# CPython: Lib/copy.py:148 deepcopy
+    copier = getattr(cls, "__deepcopy__", None)
+    if copier is not None:
+        y = copier(memo)
+```
+
+### `_reconstruct()` fallback
+
+When no dedicated handler exists, `deepcopy()` calls `__reduce_ex__(4)` and
+passes the result to `_reconstruct()`. This reuses the same protocol used by
+`pickle`, so any picklable object is also deep-copyable.
+
+```python
+# CPython: Lib/copy.py:241 _reconstruct
+def _reconstruct(x, memo, func, args, state=None, listiter=None, dictiter=None, *, deepcopy=deepcopy):
+    y = func(*args)
+    memo[id(x)] = y
+    if state is not None:
+        ...
+        y.__setstate__(deepstate)
+```
+
+## gopy notes
+
+- `_copy_dispatch` is a plain `map[reflect.Type]func(Object) Object` in gopy.
+- The memo dict becomes `map[uintptr]Object` keyed by pointer identity.
+- `__copy__` / `__deepcopy__` are looked up via the normal `objects.LookupAttr`
+  path; no special casing required.
+- `_reconstruct` depends on `__reduce_ex__`, which requires the pickle protocol
+  stubs tracked under task #481.
+
+## CPython 3.14 changes
+
+- 3.13 added an optimised fast path for dataclasses using `__replace__`; 3.14
+  keeps it and extends it to subclasses of dataclasses.
+- The `_deepcopy_atomic` helper was inlined for several built-in types to cut
+  one function-call level from the hot path.

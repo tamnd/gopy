@@ -1,0 +1,138 @@
+---
+title: Modules/signalmodule.c
+description: "CPython source annotation: Modules/signalmodule.c"
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/signalmodule.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–80 | includes, `Handlers` array | per-signal handler table and `wakeup_fd` global |
+| 81–200 | `trip_signal`, `signal_handler` | C-level handler: sets flag and writes wakeup fd |
+| 201–380 | `signal_signal` | `signal.signal()`: installs handler, updates `Handlers` table |
+| 381–500 | `signal_getsignal`, `signal_raise_` | query current handler; call `raise()` |
+| 501–680 | `signal_setitimer`, `signal_getitimer` | POSIX interval timers via `setitimer(2)` |
+| 681–860 | `signal_sigwait`, `signal_sigwaitinfo` | blocking wait for a signal set |
+| 861–1050 | `set_wakeup_fd` | install self-pipe or eventfd for wakeup |
+| 1051–1250 | `_Py_HandleSignals`, `PyErr_CheckSignals` | call pending Python handlers from eval loop |
+| 1251–1400 | module init | `PyModuleDef`, `SIG_DFL`/`SIG_IGN` constants |
+
+## Reading
+
+### signal_signal and the C-level trip mechanism
+
+`signal.signal(signum, handler)` does two things: it registers the Python
+callable in the `Handlers[signum]` table, and it installs the C function
+`signal_handler` as the OS-level handler via `sigaction`. When the OS delivers
+the signal, `signal_handler` runs on whatever thread the OS chose. It cannot
+safely call Python, so it only sets a flag in `pending_signals` and writes a
+single byte to the wakeup fd to break any `select`/`poll` call.
+
+```c
+// CPython: Modules/signalmodule.c:218 signal_handler
+static void
+signal_handler(int sig_num)
+{
+    int save_errno = errno;
+    trip_signal(sig_num);
+#ifndef MS_WINDOWS
+    /* Restore the handler in case sigaction was not used */
+    PyOS_setsig(sig_num, signal_handler);
+#endif
+    errno = save_errno;
+}
+
+// CPython: Modules/signalmodule.c:193 trip_signal
+static void
+trip_signal(int sig_num)
+{
+    _Py_atomic_store_relaxed(&Handlers[sig_num].tripped, 1);
+    _Py_SET_53BIT_PENDING_SIGNALS(_PyRuntime.signals.pending_calls_to_do);
+    /* Write to wakeup fd to interrupt any I/O wait */
+    if (wakeup.fd != INVALID_FD)
+        _Py_write_noraise(wakeup.fd, "\0", 1);
+}
+```
+
+The eval loop checks `_Py_HandleSignals` whenever `eval_breaker` is set. That
+function iterates `Handlers`, finds tripped entries, clears the flag, and calls
+the Python callable via `PyObject_Call`.
+
+### set_wakeup_fd and the self-pipe trick
+
+`signal.set_wakeup_fd(fd)` stores a file descriptor that `trip_signal` writes
+to on every signal delivery. The idiom is to pass one end of an `os.pipe()` (or
+a `socket`) so that an event loop blocked in `select`/`poll` wakes up
+immediately. CPython validates that the fd is non-blocking before accepting it,
+since a blocking write inside a C signal handler would be unsafe.
+
+```c
+// CPython: Modules/signalmodule.c:893 set_wakeup_fd
+static PyObject *
+set_wakeup_fd(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    int fd;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "i|$p:set_wakeup_fd",
+                                     kwlist, &fd, &warn_on_full_buffer))
+        return NULL;
+    if (fd != -1 && !_Py_IsNonBlocking(fd)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "wakeup fd must be in non-blocking mode");
+        return NULL;
+    }
+    int old_fd = wakeup.fd;
+    wakeup.fd = fd;
+    wakeup.warn_on_full_buffer = warn_on_full_buffer;
+    return PyLong_FromLong(old_fd);
+}
+```
+
+On Linux, `eventfd` is preferred over a pipe pair when available, halving the
+file-descriptor cost. On Windows the same role is played by a socket, since
+`WriteFile` to a pipe is not async-signal-safe.
+
+### SIGINT default handler and KeyboardInterrupt
+
+When `signal.signal(SIGINT, signal.default_int_handler)` is active (the
+default), `_Py_HandleSignals` calls `default_int_handler`, which simply raises
+`KeyboardInterrupt` via `PyErr_SetNone(PyExc_KeyboardInterrupt)`. The raise
+propagates through the eval loop's normal exception path. The handler is
+installed during interpreter startup in `PyOS_InitInterrupts`.
+
+```c
+// CPython: Modules/signalmodule.c:341 signal_default_int_handler
+static PyObject *
+signal_default_int_handler(PyObject *self, PyObject *args)
+{
+    PyErr_SetNone(PyExc_KeyboardInterrupt);
+    return NULL;
+}
+```
+
+`signal_raise_` wraps the C `raise()` function directly, allowing Python code to
+send a signal to its own process. `signal_sigwait` calls `sigwait(3)` with the
+GIL released so that other threads continue running while the calling thread
+blocks waiting for a signal from the given set.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/signal/`.
+
+The `Handlers` table maps to a Go array of `atomic.Int32` trip flags plus a
+slice of `*py.Object` Python callables, protected by a mutex for the write path
+in `signal_signal`. The C signal handler equivalent in Go is an `os/signal`
+`Notify` goroutine that feeds a channel; the eval loop drains that channel in its
+`pendingCalls` pass. The wakeup fd is unnecessary in Go because the eval loop
+does not block in `select`; instead the channel write itself serves as the wakeup
+mechanism. `setitimer`/`getitimer` will be ported as thin `syscall` wrappers,
+POSIX-only, guarded by a build tag.

@@ -1,0 +1,136 @@
+---
+title: Include/internal/pycore_pylifecycle.h
+description: "Internal lifecycle declarations: interpreter init/fini phases, _Py_InitializeMain, _Py_FinalizeEx, and _PyRuntime_Initialize"
+cpython_path: Include/internal/pycore_pylifecycle.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_pylifecycle.h` declares the private functions and types
+that govern the interpreter's startup and shutdown sequence. Nothing here is part
+of the stable ABI. The main interpreter loop checks `_PyLifeCycle_Phase` to take
+fast-path decisions (for example, skipping finalization-time GC if the interpreter
+never completed initialization).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–15 | include guard and forward declarations | standard header prologue |
+| 16–40 | `_PyLifeCycle_Phase` enum | ordered phase constants from not-initialized to finalized |
+| 41–60 | `_PyRuntime_Initialize` | one-time process-level runtime setup |
+| 61–75 | `_Py_InitializeMain` | second stage of interpreter startup |
+| 76–90 | `_Py_FinalizeEx` | controlled shutdown with exit-code return |
+| 91–105 | `_PyInterpreterState_Enable_TrashCan` | per-interpreter deferred deallocation switch |
+| 106–120 | miscellaneous internal init helpers | `_Py_ClearStandardStreamEncoding`, `_Py_FinalizeSignals` |
+
+## Reading
+
+### _PyLifeCycle_Phase
+
+The phase enum encodes the interpreter's progress through initialization and
+shutdown as a monotonically increasing integer. The eval loop reads this value
+to decide whether certain slow-path checks (signal handling, GC, warning
+filters) are even possible.
+
+```c
+// CPython: Include/internal/pycore_pylifecycle.h:16 _PyLifeCycle_Phase
+typedef enum {
+    _Py_LIFECYCLE_PHASE_NOT_INITIALIZED = 0,
+    _Py_LIFECYCLE_PHASE_CORE_INITIALIZED,
+    _Py_LIFECYCLE_PHASE_INITIALIZED,
+    _Py_LIFECYCLE_PHASE_FINALIZING,
+    _Py_LIFECYCLE_PHASE_FINALIZED,
+} _PyLifeCycle_Phase;
+```
+
+The distinction between `CORE_INITIALIZED` and `INITIALIZED` matters because
+the core phase completes before the `site` module and codec search functions
+are installed. Code that runs during that window (for example, the import
+bootstrap) must not assume that `sys.path` or codec lookup work yet.
+
+### _PyRuntime_Initialize
+
+`_PyRuntime_Initialize` runs exactly once per process. It zeroes the global
+`_PyRuntime` struct and sets up the memory allocator hooks, the GIL, and the
+main thread state before any `Py_Initialize` call can proceed.
+
+```c
+// CPython: Include/internal/pycore_pylifecycle.h:41 _PyRuntime_Initialize
+PyStatus _PyRuntime_Initialize(void);
+```
+
+`PyStatus` is a tagged-union result type (success / error / exit). Callers
+check it with `PyStatus_IsError` and `PyStatus_IsExit` before proceeding.
+
+### _Py_InitializeMain
+
+This is the second initialization stage, called after `_Py_InitializeCore`.
+It installs `sys.argv`, runs `site.py`, and advances the lifecycle phase to
+`_Py_LIFECYCLE_PHASE_INITIALIZED`.
+
+```c
+// CPython: Include/internal/pycore_pylifecycle.h:61 _Py_InitializeMain
+PyStatus _Py_InitializeMain(void);
+```
+
+The split into core and main stages exists so that embedding applications can
+configure `sys.path` and codec search paths between the two stages, before
+`site.py` runs and potentially imports user code.
+
+### _Py_FinalizeEx and Trash-Can
+
+`_Py_FinalizeEx` performs the ordered shutdown sequence: finalize threads, run
+`atexit` callbacks, collect garbage, close file descriptors, and free the
+interpreter state. It returns 0 on success or -1 if a warning was suppressed.
+
+```c
+// CPython: Include/internal/pycore_pylifecycle.h:76 _Py_FinalizeEx
+int _Py_FinalizeEx(void);
+
+// CPython: Include/internal/pycore_pylifecycle.h:91 _PyInterpreterState_Enable_TrashCan
+void _PyInterpreterState_Enable_TrashCan(PyInterpreterState *interp);
+```
+
+The trash-can mechanism defers the deallocation of deeply nested objects to
+prevent stack overflow during `tp_dealloc` chains. It is enabled per
+interpreter after the interpreter state is sufficiently initialized to support
+the deferred free list.
+
+## gopy notes
+
+gopy does not replicate the multi-stage init protocol verbatim, but the phase
+concept is represented in `pythonrun/runstring.go` via a package-level
+`lifecyclePhase` variable of a locally defined integer type. The phases map
+loosely onto the CPython enum:
+
+- `phaseNotInit` corresponds to `_Py_LIFECYCLE_PHASE_NOT_INITIALIZED`.
+- `phaseReady` corresponds to `_Py_LIFECYCLE_PHASE_INITIALIZED`.
+- `phaseFinalized` corresponds to `_Py_LIFECYCLE_PHASE_FINALIZED`.
+
+`_PyRuntime_Initialize` has no direct port because gopy uses Go package-init
+functions and `sync.Once` for one-time setup rather than a global runtime
+struct. The closest analogue is the `init()` call in `stdlibinit/registry.go`.
+
+`_Py_FinalizeEx` is partially represented: `atexit` callbacks are invoked via
+`vm/eval_unwind.go`, and GC finalization follows the same ordering (threads
+first, then finalizers, then GC sweeps), but the return-code path is not yet
+wired to a Go-level shutdown API.
+
+The trash-can is not yet ported. `_PyInterpreterState_Enable_TrashCan` is
+tracked as a future task; the current deallocation path recurses directly.
+
+## CPython 3.14 Changes
+
+- The `_Py_LIFECYCLE_PHASE_CORE_INITIALIZED` phase was refined in 3.14 to
+  include completion of the `_PyUnicode_Init` and `_PyLong_Init` subsystems,
+  which previously could race with early import machinery.
+- `_Py_FinalizeEx` now calls `_Py_ClearStandardStreamEncoding` explicitly
+  before closing file descriptors, fixing a use-after-free during daemon thread
+  shutdown that was reported in bpo-46376.
+- `_PyRuntime_Initialize` gained a `PyStatus` return in 3.12 (previously it
+  was `void`); 3.14 documentation formalizes the error-handling contract for
+  embedders who call it directly.

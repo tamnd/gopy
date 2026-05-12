@@ -1,0 +1,131 @@
+---
+title: Lib/tarfile.py
+description: "Annotation: CPython Lib/tarfile.py"
+cpython_path: Lib/tarfile.py
+cpython_version: "3.14"
+lines: 3900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/tarfile.py" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | module header, constants | `ENCODING`, `BLOCKSIZE`, `RECORDSIZE`, `GNU_MAGIC`, `POSIX_MAGIC`, `REGTYPE`/`DIRTYPE`/`SYMTYPE`/etc. |
+| 121–300 | `_Stream` | transparent gzip/bzip2/xz wrapper around a raw file object |
+| 301–480 | `ExFileObject` | read-only file-like view of a single tar entry, with sparse-map support |
+| 481–900 | `TarInfo` | header packing/unpacking (ustar POSIX format, GNU extensions) |
+| 901–1100 | `TarInfo.frombuf`, `TarInfo.tobuf` | decode/encode 512-byte header block |
+| 1101–1400 | `TarFile.__init__`, `TarFile.open` | mode dispatch, compression detection, `_Stream` setup |
+| 1401–1700 | `TarFile.getmember`, `TarFile.getmembers`, `TarFile._load` | index building, lazy-load |
+| 1701–2100 | `TarFile.extractall`, `TarFile.extract`, `TarFile._extract_member` | extraction loop, filter parameter, path safety |
+| 2101–2500 | `TarFile.add`, `TarFile.addfile`, `TarFile.gettarinfo` | archive creation |
+| 2501–3200 | `TarFile._proc_*` methods | GNU/POSIX pax extension block processing |
+| 3201–3900 | `TarFile.close`, utilities, `open` shortcut | finalisation, padding, `tarfile.open` alias |
+
+## Reading
+
+### TarFile.open() mode dispatch
+
+`TarFile.open()` is a class method that inspects the `mode` string and routes
+to the right subclass or compression wrapper. The first character selects the
+access mode (read, write, exclusive-create, append). An optional suffix after
+the colon names the compression format.
+
+```python
+# CPython: Lib/tarfile.py:1101 TarFile.open
+@classmethod
+def open(cls, name=None, mode="r", fileobj=None, bufsize=RECORDSIZE, **kwargs):
+    ...
+    if ":" in mode:
+        filemode, comptype = mode.split(":", 1)
+    else:
+        filemode, comptype = mode, ""
+    ...
+    if comptype == "gz":
+        fileobj = _Stream(name, filemode, comptype, fileobj, bufsize)
+    elif comptype == "bz2":
+        fileobj = _Stream(name, filemode, comptype, fileobj, bufsize)
+    elif comptype == "xz":
+        fileobj = _Stream(name, filemode, comptype, fileobj, bufsize)
+    ...
+    return cls.taropen(name, filemode, fileobj, **kwargs)
+```
+
+When `mode` is `"r"` (without a suffix), `open()` tries each registered
+compression format in order and falls back to uncompressed. This auto-detect
+path reads the first few bytes, checks magic bytes, then rewinds.
+
+### TarInfo: POSIX ustar header packing
+
+Each file entry in a tar archive is preceded by a 512-byte header block in
+POSIX ustar format. `TarInfo.frombuf()` decodes one such block into Python
+attributes; `TarInfo.tobuf()` encodes them back.
+
+Field values are stored as fixed-width octal ASCII strings in the block.
+`TarInfo` reads them with `nti()` (null-terminated integer from octal) and
+writes them with `itn()` (integer to null-terminated octal). Fields that
+overflow the fixed width trigger GNU or PAX extension headers.
+
+```python
+# CPython: Lib/tarfile.py:901 TarInfo.frombuf
+@classmethod
+def frombuf(cls, buf, encoding, errors):
+    ...
+    tarinfo.name   = nts(buf[0:100],   encoding, errors)
+    tarinfo.mode   = nti(buf[100:108])
+    tarinfo.uid    = nti(buf[108:116])
+    tarinfo.gid    = nti(buf[116:124])
+    tarinfo.size   = nti(buf[124:136])
+    tarinfo.mtime  = nti(buf[136:148])
+    ...
+    tarinfo.type   = buf[156:157]
+    tarinfo.linkname = nts(buf[157:257], encoding, errors)
+    ...
+```
+
+### extractall() filter parameter
+
+CPython 3.12 introduced the `filter` parameter on `extractall()` and
+`extract()` to address path-traversal and permission-escalation
+vulnerabilities. Three named policies are provided: `"data"` (safest),
+`"tar"`, and `"fully_trusted"`.
+
+```python
+# CPython: Lib/tarfile.py:1701 TarFile.extractall
+def extractall(self, path=".", members=None, *, numeric_owner=False,
+               filter=None):
+    ...
+    for tarinfo in members:
+        ...
+        tarinfo = self._check_filter(tarinfo, path, filter)
+        if tarinfo is None:
+            continue
+        self._extract_member(tarinfo, os.path.join(path, tarinfo.name),
+                             numeric_owner=numeric_owner)
+```
+
+The `"data"` filter rejects absolute paths, `..` segments, special files, and
+high-permission bits. It is the recommended default for archives from
+untrusted sources. `"fully_trusted"` skips all checks and matches pre-3.12
+behaviour.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/tarfile/`.
+
+The port will need `TarInfo`, `TarFile`, `ExFileObject`, and `_Stream`. Go
+already provides `archive/tar` for basic read/write, but the CPython
+implementation adds GNU and PAX extensions, sparse-file support, and the
+three-tier extraction filter that has no direct equivalent in the standard
+library. The filter logic is security-critical and must be ported function by
+function with citations rather than delegated to `archive/tar` hooks. The
+`_Stream` gzip/bzip2/xz wrapper maps to chained `io.Reader`/`io.Writer`
+decorators using `compress/gzip`, `compress/bzip2`, and
+`github.com/ulikunitz/xz`.

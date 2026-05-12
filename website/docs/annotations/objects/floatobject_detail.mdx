@@ -1,0 +1,57 @@
+---
+title: "Objects/floatobject.c"
+description: CPython implementation of the Python float type backed by a single IEEE-754 double
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 1900
+status: annotated
+ported_to: objects/float.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+|-------|--------|------|------|
+| 1–30 | `PyFloatObject` | Struct: single `double ob_fval` field | `objects.Float` |
+| 132–171 | `PyFloat_FromDouble` | Allocate a float from a C double; uses free-list | `objects.NewFloat` |
+| 172–280 | `PyFloat_FromString` | Parse a Python literal via `_Py_dg_strtod`, PEP 515 underscores | `objects.FloatFromString` |
+| 255–270 | `PyFloat_AsDouble` | Unwrap to C double, raise `TypeError` on non-float | `(*Float).Float64` |
+| 600–700 | `float_hash` | Consistent with int hash modulo Mersenne prime 2^61-1 | `objects.floatHash` |
+| 730–820 | `float_richcompare` | Full IEEE comparison including NaN short-circuit | `objects.floatRichCmp` |
+| 900–1000 | `float_as_integer_ratio` | Returns exact `(numerator, denominator)` tuple | not yet ported |
+| 1265–1400 | `PyOS_double_to_string` | Shortest-roundtrip repr via `_Py_dg_dtoa` | `objects.formatFloatShort` |
+| 1800–1870 | `float_freelist_push/pop` | Free-list cache up to 256 float objects | not ported (GC handled by Go) |
+| 2068 | `PyFloat_Type` | Type singleton wiring all slots | `objects.FloatType` |
+
+## Reading
+
+### Object layout
+
+<Cpy src="Objects/floatobject.c" sym="PyFloatObject" /> holds exactly one field: `double ob_fval`. There are no variant representations. The gopy mirror `objects.Float` wraps a Go `float64` named `v` inside a struct that also embeds `Header` for the type pointer and reference bookkeeping.
+
+The free-list (`float_freelist_push` / `float_freelist_pop`) recycles up to 256 dead float cells. gopy omits this because Go's garbage collector handles allocation churn without a manual slab.
+
+### Construction and parsing
+
+<Cpy src="Objects/floatobject.c" sym="PyFloat_FromDouble" /> is the primitive constructor. <Cpy src="Objects/floatobject.c" sym="PyFloat_FromString" /> builds on top of it: it strips whitespace, handles an optional sign, dispatches `inf`/`infinity`/`nan` tokens case-insensitively via <Cpy src="Python/pystrtod.c" sym="_Py_parse_inf_or_nan" />, removes PEP 515 underscores, then calls `_Py_dg_strtod` for the digit-to-double conversion. gopy replaces `_Py_dg_strtod` with Go's `strconv.ParseFloat`, which uses the same shortest-roundtrip (Ryu / Grisu) algorithm internally.
+
+### Hash consistency
+
+Python enforces `hash(x) == hash(int(x))` for any float `x` that is an exact integer. <Cpy src="Python/pyhash.c" sym="_Py_HashDouble" /> achieves this by computing the hash modulo the Mersenne prime 2^61-1, the same modulus used for `int`. When the float is non-integral the hash is derived directly from the IEEE bit pattern, then adjusted so the value -1 is never returned (CPython reserves -1 as the error sentinel). `objects.floatHash` mirrors this logic and delegates to `intHash` for the integral fast path.
+
+### Repr and richcompare
+
+<Cpy src="Python/pystrtod.c" sym="PyOS_double_to_string" /> with flags `'r'` and `Py_DTSF_ADD_DOT_0` produces the shortest decimal string that round-trips back to the same double, then chooses between fixed (`ddd.ddd`) and exponential (`d.ddde+NN`) layout: exponent form is used when the decimal-point position is `<= -4` or `> 16`. `objects.formatFloatShort` replicates the layout decision by going through `strconv.FormatFloat('e')` first to extract the mantissa digits and exponent, then re-formatting.
+
+`float_richcompare` handles the NaN case by returning `NotImplemented` for ordered comparisons (`<`, `<=`, `>`, `>=`) when either operand is NaN, so `nan != nan` is `True` and all other comparisons are `False`. `objects.floatRichCmp` delegates to Go's native float comparison operators which already have correct IEEE-754 NaN semantics.
+
+## gopy mirror
+
+The port lives across two files:
+
+- `/objects/float.go` covers `PyFloat_FromDouble`, `PyFloat_AsDouble`, all arithmetic slots, `float_hash`, and `float_richcompare`.
+- `/objects/float_parse.go` covers `PyFloat_FromString`, `_Py_parse_inf_or_nan`, and the underscore-stripping helper.
+
+`float_as_integer_ratio` and `PyFloat_GetInfo` are not yet ported. The free-list is intentionally omitted; Go's allocator makes it unnecessary.

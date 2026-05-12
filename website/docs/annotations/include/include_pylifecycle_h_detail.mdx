@@ -1,0 +1,61 @@
+---
+title: Include/pylifecycle.h
+description: "Interpreter lifecycle API: Py_Initialize, Py_InitializeFromConfig, Py_Finalize, Py_IsInitialized, Py_AtExit, Py_NewInterpreter, Py_EndInterpreter, and the pre-init config."
+cpython_path: Include/pylifecycle.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/pylifecycle.h`
+
+<CpyLink path="Include/pylifecycle.h" />
+
+`Include/pylifecycle.h` declares the public interpreter startup and shutdown API. These
+are the entry points an embedding application calls to initialize and tear down the Python
+runtime.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-40 | `Py_Initialize`, `Py_InitializeFromConfig` | Start the interpreter |
+| 41-70 | `Py_Finalize`, `Py_FinalizeEx` | Shut down the interpreter |
+| 71-90 | `Py_IsInitialized`, `Py_AtExit` | Query and register atexit handlers |
+| 91-120 | `Py_NewInterpreter`, `Py_EndInterpreter` | Sub-interpreter management |
+
+## Reading
+
+### `Py_Initialize` vs `Py_InitializeFromConfig`
+
+`Py_Initialize()` calls `Py_InitializeFromConfig` with default settings. For embedding
+applications that need to control `sys.path`, `sys.argv`, environment variable handling,
+or isolation, `Py_InitializeFromConfig(PyConfig*)` is the recommended entry point.
+
+### `Py_FinalizeEx`
+
+`Py_FinalizeEx()` runs atexit handlers, calls `tp_finalize` on all objects still alive,
+runs the GC, shuts down threads, and frees interpreter memory. It returns -1 if any
+finalizer raised an exception that was swallowed. `Py_Finalize()` ignores this return
+value.
+
+### Sub-interpreters
+
+`Py_NewInterpreter()` creates an isolated interpreter state with its own `sys.modules`,
+`builtins`, and GIL. Sub-interpreters were the predecessor to Python 3.12's
+`interpreters` module. They are used by mod_wsgi and similar embedding frameworks.
+
+### `Py_AtExit`
+
+`Py_AtExit(func)` registers a C function to call during `Py_Finalize`. Up to 32 functions
+can be registered. These fire after Python-level `atexit` handlers and after
+`__del__`/`tp_finalize` sweeps.
+
+## gopy notes
+
+The gopy runtime initializes lazily when the first Python expression is evaluated.
+`Py_Initialize` / `Py_Finalize` have no direct equivalents; Go programs call
+`pythonrun.RunString` which handles initialization internally. Sub-interpreters are not
+yet planned.

@@ -1,0 +1,108 @@
+---
+title: Include/cpython/namespaceobject.h
+description: CPython-internal namespace object API - the _PyNamespaceObject struct and helpers used by types.SimpleNamespace.
+cpython_path: Include/cpython/namespaceobject.h
+cpython_version: "3.14"
+lines: ~30
+status: annotated
+ported_to: objects/namespace.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/namespaceobject.h`
+
+`Include/cpython/namespaceobject.h` is the internal header for Python's namespace object, which backs `types.SimpleNamespace` and namespace packages. The public header (`Include/namespaceobject.h`) exposes only `PyNamespace_Type` and `PyNamespace_New`. The internal header adds the struct layout and two helpers that embedding code and the import system use directly.
+
+## Map
+
+| CPython symbol | Kind | Purpose |
+|---|---|---|
+| `_PyNamespaceObject` | Struct | Holds `ns_dict` (a `PyDictObject *`) |
+| `PyNamespace_New` | Function | Create a `SimpleNamespace` from a dict or `NULL` |
+| `_PyNamespace_New` | Function | Internal alias used by the import system |
+| `_PyNamespace_GetDict` | Function | Return the underlying `ns_dict` without incref |
+
+### Header layout
+
+```c
+// Include/cpython/namespaceobject.h (abridged)
+typedef struct {
+    PyObject_HEAD
+    PyObject *ns_dict;   /* the attribute dictionary */
+} _PyNamespaceObject;
+
+PyAPI_FUNC(PyObject *)  PyNamespace_New(PyObject *kwds);
+PyAPI_FUNC(PyObject *)  _PyNamespace_GetDict(PyObject *ns);
+```
+
+`ns_dict` is a plain `dict`. All attribute reads and writes go through it; `__getattr__` / `__setattr__` are not customizable on `SimpleNamespace` instances.
+
+## Reading
+
+### Construction
+
+`namespace_new` (CPython: `Objects/namespaceobject.c:27`) accepts only keyword arguments. Each keyword is stored directly into `ns_dict` with `PyDict_SetItem`. Positional arguments raise `TypeError` immediately.
+
+```c
+// Objects/namespaceobject.c:27  namespace_new (abridged)
+static PyObject *
+namespace_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    if (PyTuple_GET_SIZE(args) != 0) {
+        PyErr_SetString(PyExc_TypeError, "no positional arguments");
+        return NULL;
+    }
+    ns->ns_dict = PyDict_New();
+    if (kwds != NULL)
+        PyDict_Update(ns->ns_dict, kwds);
+    return (PyObject *)ns;
+}
+```
+
+gopy's `namespaceNew` in `objects/namespace.go:44` mirrors this: it rejects non-empty `args`, creates a fresh `Dict`, and copies each entry from `kwargs`.
+
+### Repr
+
+`namespace_repr` (CPython: `Objects/namespaceobject.c:93`) iterates `ns_dict`, sorts the keys alphabetically, then formats each as `key=repr(value)`, joining with `", "` inside `namespace(...)`. The sort is a deliberate divergence from dict's insertion-order repr; `SimpleNamespace` chose alphabetical order for stability.
+
+```c
+// Objects/namespaceobject.c:93  namespace_repr (key-sort excerpt)
+keys = PyMapping_Keys(ns->ns_dict);
+PyList_Sort(keys);        /* alphabetical, not insertion order */
+```
+
+gopy's `namespaceRepr` at `objects/namespace.go:70` reproduces the same sort via `sort.Strings`.
+
+### Equality
+
+`namespace_richcompare` (CPython: `Objects/namespaceobject.c:201`) compares two `SimpleNamespace` objects only for `==` and `!=`; ordering operators return `NotImplemented`. Equality is delegated to `PyObject_RichCompareBool` on the underlying dicts, so two namespaces are equal iff their attribute dicts are equal.
+
+```python
+# Python behaviour
+>>> import types
+>>> a = types.SimpleNamespace(x=1, y=2)
+>>> b = types.SimpleNamespace(y=2, x=1)
+>>> a == b
+True          # dict equality; key order does not matter
+>>> a < b
+TypeError: '<' not supported between instances of 'types.SimpleNamespace'
+```
+
+gopy's `namespaceCompare` in `objects/namespace.go:116` early-returns `NotImplemented` for `<`, `<=`, `>`, `>=` and calls `dictsEqual` for `==` / `!=`.
+
+## gopy mirror
+
+**File:** `objects/namespace.go` (154 lines)
+
+The `Namespace` struct holds a `*Dict` directly (the Go equivalent of `ns_dict`). `NamespaceType` is the type singleton for `types.SimpleNamespace`, registered in `init()` with the four slots `Repr`, `Getattro`, `Setattro`, and `RichCmp`.
+
+`namespaceGetattr` reads from the dict and returns `AttributeError` if the key is missing. `namespaceSetattr` dispatches to `Dict.SetItem` (set) or `Dict.DelItem` (when value is nil, matching CPython's `tp_setattro` convention).
+
+The `Dict()` accessor (line 67) mirrors `_PyNamespace_GetDict`: it returns the raw dict without copying, letting the import system and `types.py` inspect namespace attributes efficiently.
+
+## CPython 3.14 changes
+
+- `_PyNamespaceObject` layout and `_PyNamespace_GetDict` are stable since the type was introduced in 3.3.
+- The internal header was split out of `Objects/namespaceobject.c` and placed under `Include/cpython/` as part of the include-reorganisation work in 3.9.
+- No changes to this header are noted in the 3.14 What's New.

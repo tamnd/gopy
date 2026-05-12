@@ -1,0 +1,76 @@
+---
+title: Python/pythonrun.c
+description: "PyRun_SimpleString, PyRun_FileExFlags, PyRun_InteractiveLoopFlags: source-to-execution pipeline, ast.parse integration, sys.stdin read loop for the REPL, and run_eval_code_obj."
+cpython_path: Python/pythonrun.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/pythonrun.c`
+
+<CpyLink path="Python/pythonrun.c" />
+
+`Python/pythonrun.c` implements the high-level "compile and run" entry points declared in
+`Include/pythonrun.h`. It bridges the compile pipeline (`Python/compile.c`) and the eval
+loop (`Python/ceval.c`) and handles the interactive REPL loop.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `run_eval_code_obj` | Execute a code object in a namespace |
+| 201-450 | `PyRun_SimpleStringFlags` | Compile + run a string in `__main__` |
+| 451-700 | `PyRun_FileExFlags` | Read + compile + run a file |
+| 701-950 | `run_mod` | Compile AST to code object and run |
+| 951-1200 | `PyRun_InteractiveLoopFlags` | REPL: read one statement, compile, run, repeat |
+| 1201-1400 | `parse_syntax_error` | Extract SyntaxError fields for display |
+
+## Reading
+
+### `run_eval_code_obj`
+
+The lowest-level helper: takes an already-compiled code object and runs it.
+
+```c
+// CPython: Python/pythonrun.c:85 run_eval_code_obj
+static PyObject *
+run_eval_code_obj(PyThreadState *tstate, PyCodeObject *co,
+                  PyObject *globals, PyObject *locals)
+{
+    ...
+    return PyEval_EvalCode((PyObject *)co, globals, locals);
+}
+```
+
+### `run_mod` compile + run
+
+`run_mod` takes a parsed AST node, compiles it with `PyAST_CompileObject`, and calls
+`run_eval_code_obj`. The `optimize` flag from `PyConfig` controls constant folding in the
+compiler.
+
+```c
+// CPython: Python/pythonrun.c:900 run_mod
+static PyObject *
+run_mod(mod_ty mod, PyObject *filename, PyObject *globals, PyObject *locals,
+        PyCompilerFlags *flags, PyArena *arena, PyObject *interactive_src,
+        int optimize)
+{
+    PyCodeObject *co = PyAST_CompileObject(mod, filename, flags, optimize, arena);
+    if (co == NULL) return NULL;
+    return run_eval_code_obj(tstate, co, globals, locals);
+}
+```
+
+### Interactive loop
+
+`PyRun_InteractiveLoopFlags` reads one logical statement at a time from `sys.stdin` using
+`PyOS_Readline`. Each statement is compiled with `Py_single_input` start token, which
+causes the result of an expression statement to be printed via `sys.displayhook`.
+
+## gopy notes
+
+`pythonrun/runstring.go` mirrors `PyRun_SimpleStringFlags`. The compile+eval pipeline
+calls `compile.Compile` then `vm.Eval`. The interactive loop is not yet implemented.

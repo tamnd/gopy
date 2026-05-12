@@ -1,0 +1,172 @@
+---
+title: Include/internal/pycore_runtime.h
+description: "Global runtime singleton: _PyRuntimeState declaration, init/fini API, and finalizing-thread accessors"
+cpython_path: Include/internal/pycore_runtime.h
+cpython_version: "3.14"
+lines: 63
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_runtime.h" />
+
+`pycore_runtime.h` is a thin API wrapper around `pycore_runtime_structs.h`. Its job is to
+export the single global `_PyRuntime` variable, declare the init/fini functions, and provide
+the small inline accessors for the finalizing-thread fields. The heavy struct definition
+lives next door in `pycore_runtime_structs.h`, which in turn pulls in `pycore_interpframe_structs.h`
+and a dozen other subsystem headers.
+
+## Map
+
+| Symbol | Kind | What it does |
+|---|---|---|
+| `_PyRuntime` | `PyAPI_DATA` global | The one process-wide `_PyRuntimeState` instance |
+| `_PyRuntimeState_Init` | function | Zeros and bootstraps `_PyRuntime` at interpreter startup |
+| `_PyRuntimeState_Fini` | function | Tears down `_PyRuntime` at shutdown |
+| `_PyRuntimeState_ReInitThreads` | function | Post-`fork()` thread-state reset (POSIX only) |
+| `_PyRuntime_Initialize` | function | Top-level entry called by `Py_Initialize`; returns `PyStatus` |
+| `_PyRuntime_Finalize` | function | Top-level entry called by `Py_Finalize` |
+| `_PyRuntimeState_GetFinalizing` | inline | Atomically reads `_finalizing` (which thread is shutting down) |
+| `_PyRuntimeState_GetFinalizingID` | inline | Atomically reads `_finalizing_id` (OS thread ID) |
+| `_PyRuntimeState_SetFinalizing` | inline | Atomically sets both `_finalizing` and `_finalizing_id` |
+
+### `_PyRuntime` and `_PyRuntimeState`
+
+`_PyRuntime` is the singular global instance of `struct pyruntimestate` (typedef'd as
+`_PyRuntimeState`). Every piece of per-process interpreter state hangs off this struct.
+The most important subfields are:
+
+- `interpreters.head` / `interpreters.main`: linked list of all live `PyInterpreterState`
+  objects; `main` always points to the one created during `Py_Initialize`.
+- `ceval`: the eval-breaker word and GIL machinery (`struct _ceval_runtime_state`).
+- `gilstate.autoInterpreterState`: the interpreter used by `PyGILState_Ensure` and friends.
+- `preconfig`: a `PyPreConfig` copy frozen at pre-initialization time.
+- `unicode_state.interned`: the runtime-wide interned string hash table.
+- `_finalizing` / `_finalizing_id`: set to the `PyThreadState` running `Py_FinalizeEx`
+  so that other threads know to stop.
+- `_main_interpreter`: the `PyInterpreterState` struct for the main interpreter is embedded
+  directly at the end of `_PyRuntimeState` rather than heap-allocated, avoiding a separate
+  allocation on the critical path.
+
+```c
+// CPython: Include/internal/pycore_runtime.h:19 _PyRuntime
+PyAPI_DATA(_PyRuntimeState) _PyRuntime;
+```
+
+The `PyAPI_DATA` annotation causes MSVC/GCC to emit the correct dllimport/dllexport
+decoration so that extension modules compiled as shared libraries can reach `_PyRuntime`
+directly. Inlined accessors like `_Py_IsMainThread()` and `_Py_ID()` rely on this
+to avoid an extra function-call overhead per use.
+
+### Init and fini lifecycle
+
+`_PyRuntime_Initialize` is called once by `Py_Initialize`. It in turn calls
+`_PyRuntimeState_Init`, which zeroes the struct and then initialises each
+subsystem in a fixed order (mutex init, allocator setup, interned-string table,
+`preconfig` copy, etc.). The return type is `PyStatus` rather than `int` so that
+pre-GIL-hold error paths can propagate a human-readable message up to the embedder.
+
+```c
+// CPython: Include/internal/pycore_runtime.h:21 _PyRuntimeState_Init
+extern PyStatus _PyRuntimeState_Init(_PyRuntimeState *runtime);
+
+// CPython: Include/internal/pycore_runtime.h:30 _PyRuntime_Initialize
+extern PyStatus _PyRuntime_Initialize(void);
+```
+
+`_PyRuntimeState_ReInitThreads` exists only in POSIX builds (`#ifdef HAVE_FORK`). After
+`fork()`, the child inherits the full memory image of the parent but only the calling
+thread survives, leaving every other `PyThreadState` dangling. This function resets the
+thread-state linked list to contain only the current thread's state, re-initialises
+mutexes (they are in an undefined state after `fork`), and marks the runtime as no longer
+finalizing.
+
+### Finalizing-thread accessors
+
+The `_finalizing` field is a plain pointer but is accessed only through `_Py_atomic_*`
+wrappers so that threads polling `_PyRuntimeState_GetFinalizing()` see a consistent value
+without acquiring any lock. The paired `_finalizing_id` stores the OS thread ID as a
+`unsigned long` so that debuggers and signal handlers can identify the shutting-down thread
+without dereferencing a possibly-freed `PyThreadState`.
+
+```c
+// CPython: Include/internal/pycore_runtime.h:36 _PyRuntimeState_GetFinalizing
+static inline PyThreadState*
+_PyRuntimeState_GetFinalizing(_PyRuntimeState *runtime) {
+    return (PyThreadState*)_Py_atomic_load_ptr_relaxed(&runtime->_finalizing);
+}
+
+// CPython: Include/internal/pycore_runtime.h:45 _PyRuntimeState_SetFinalizing
+static inline void
+_PyRuntimeState_SetFinalizing(_PyRuntimeState *runtime, PyThreadState *tstate) {
+    _Py_atomic_store_ptr_relaxed(&runtime->_finalizing, tstate);
+    if (tstate == NULL) {
+        _Py_atomic_store_ulong_relaxed(&runtime->_finalizing_id, 0);
+    }
+    else {
+        _Py_atomic_store_ulong_relaxed(&runtime->_finalizing_id,
+                                       tstate->thread_id);
+    }
+}
+```
+
+## Reading
+
+### Following the interpreters linked list
+
+To walk every live interpreter from C extension code, start from
+`_PyRuntime.interpreters.head` and follow `->next` until NULL. Locking
+`_PyRuntime.interpreters.mutex` (a `PyMutex`) before walking is required if
+the walk can race with `Py_NewInterpreter` or `Py_EndInterpreter`. The
+`HEAD_LOCK` / `HEAD_UNLOCK` macros in `pycore_pystate.h` do this.
+
+```c
+// CPython: Include/internal/pycore_runtime_structs.h:188 pyinterpreters
+struct pyinterpreters {
+    PyMutex mutex;
+    PyInterpreterState *head;
+    PyInterpreterState *main;
+    int64_t next_id;
+} interpreters;
+```
+
+### Reaching the main interpreter
+
+`_PyRuntime.interpreters.main` always points to the first interpreter created by
+`Py_Initialize`. It is identical to `&_PyRuntime._main_interpreter` because the main
+interpreter's storage is embedded at the tail of the runtime struct.
+
+```c
+// CPython: Include/internal/pycore_runtime_structs.h:311 _main_interpreter
+PyInterpreterState _main_interpreter;
+```
+
+### Checking whether the process is finalizing
+
+Any code that needs to bail out during shutdown can do so without holding the GIL:
+
+```c
+// CPython: Include/internal/pycore_runtime.h:36 _PyRuntimeState_GetFinalizing
+if (_PyRuntimeState_GetFinalizing(&_PyRuntime) != NULL) {
+    /* interpreter is shutting down, do not allocate */
+}
+```
+
+## gopy notes
+
+gopy does not maintain a heap-allocated `_PyRuntimeState` equivalent. Instead, gopy
+distributes the analogous state across package-level Go variables:
+
+- `_PyRuntime.interpreters` corresponds to the interpreter registry in `state/`.
+- `_PyRuntime.ceval` (eval breaker, GIL) maps to the GIL and interrupt machinery in `gil/`.
+- `_PyRuntime.unicode_state.interned` maps to the interned-string table in `objects/str.go`.
+- `_PyRuntime.gilstate` maps to the `PyGILState_*` wrappers under `lifecycle/`.
+
+There is no single Go struct that unifies all of this. When porting code that reads
+`&_PyRuntime`, find which subfield is actually needed and route to the corresponding
+Go package.
+
+The `_PyRuntimeState_GetFinalizing` / `_PyRuntimeState_SetFinalizing` pattern does not
+yet have a direct equivalent in gopy; shutdown sequencing is handled implicitly by
+Go's goroutine lifecycle rather than an explicit finalizing flag.

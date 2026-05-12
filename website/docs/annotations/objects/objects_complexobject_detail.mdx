@@ -1,0 +1,95 @@
+---
+title: Objects/complexobject.c
+description: "PyComplex implementation: Karatsuba-free c_sum/c_diff/c_prod/c_quot, Lehmer's c_pow, repr using shortest-round-trip float formatting, and hash that matches int/float hashes."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 820
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/complexobject.c`
+
+<CpyLink path="Objects/complexobject.c" />
+
+`Objects/complexobject.c` defines `PyComplex`, Python's built-in complex number type. The
+arithmetic helpers (`c_sum`, `c_prod`, etc.) operate on C structs, not Python objects, to
+avoid allocation overhead. The Python-level type wraps those structs and handles conversion
+from int and float.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-120 | `Py_complex` arithmetic | `c_sum`, `c_diff`, `c_prod`, `c_quot`, `c_neg`, `c_abs` |
+| 121-260 | `c_pow` | Complex exponentiation using polar form |
+| 261-400 | `PyComplex_FromDoubles`, `PyComplex_RealAsDouble` | Construction and extraction |
+| 401-600 | Number protocol | `complex_add`, `complex_mul`, `complex_pow`, `complex_neg` |
+| 601-720 | `complex_repr`, `complex_hash` | String representation and hash |
+| 721-820 | Type definition | `PyComplex_Type` slots |
+
+## Reading
+
+### `c_prod`: real multiplication without FPU surprises
+
+The naive formula `(a+bi)(c+di) = ac-bd + (ad+bc)i` is used directly. CPython does not use
+Karatsuba here because the two-multiplication saving is not worth the branching on modern
+hardware and because `nan` propagation must be preserved exactly.
+
+```c
+// CPython: Objects/complexobject.c:62 c_prod
+Py_complex
+c_prod(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    r.real = a.real*b.real - a.imag*b.imag;
+    r.imag = a.real*b.imag + a.imag*b.real;
+    return r;
+}
+```
+
+### `c_quot`: division with overflow guard
+
+Division uses the `|c| >= |d|` branch selection to avoid cancellation and intermediate
+overflow.
+
+```c
+// CPython: Objects/complexobject.c:80 c_quot
+Py_complex
+c_quot(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    double abs_breal = b.real < 0 ? -b.real : b.real;
+    double abs_bimag = b.imag < 0 ? -b.imag : b.imag;
+    if (abs_breal >= abs_bimag) {
+        double ratio = b.imag / b.real;
+        double denom = b.real + b.imag * ratio;
+        r.real = (a.real + a.imag * ratio) / denom;
+        r.imag = (a.imag - a.real * ratio) / denom;
+    } else {
+        double ratio = b.real / b.imag;
+        double denom = b.real * ratio + b.imag;
+        r.real = (a.real * ratio + a.imag) / denom;
+        r.imag = (a.imag * ratio - a.real) / denom;
+    }
+    return r;
+}
+```
+
+### `complex_repr`
+
+The repr formats each component using `_PyFloat_FormatAdvancedWriter` (shortest round-trip)
+and wraps the result in parentheses only when the real part is non-zero.
+
+### Hash consistency
+
+`complex.__hash__` returns `hash(real)` when the imaginary part is zero, ensuring
+`hash(complex(x, 0)) == hash(x) == hash(int(x))` when the values are equal, as required
+by the language data model.
+
+## gopy notes
+
+Not yet ported. The arithmetic helpers can be ported as Go functions on a `Complex128`
+struct wrapping two `float64` values. The hash-consistency constraint must be implemented
+carefully to match the CPython hash formula for `float` and `int`.

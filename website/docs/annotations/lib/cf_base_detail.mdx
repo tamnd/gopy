@@ -1,0 +1,84 @@
+---
+title: Lib/concurrent/futures/_base.py
+description: "Future, Executor, and wait/as_completed: the public API contract for concurrent.futures. Defines the state machine, callback dispatch, and blocking wait helpers."
+cpython_path: Lib/concurrent/futures/_base.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/concurrent/futures/_base.py" />
+
+`_base.py` is the foundation of `concurrent.futures`. It defines `Future`, the abstract `Executor` class, and the two public wait utilities `wait()` and `as_completed()`. The thread and process executor subclasses in `thread.py` and `process.py` inherit from `Executor` and produce `Future` objects managed by this module.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | constants, `LOGGER` | State strings, logging setup |
+| 61-200 | `Future` | State machine: PENDING -> RUNNING -> FINISHED/CANCELLED |
+| 201-310 | `Executor` | Abstract base; `submit`, `map`, `shutdown` protocol |
+| 311-430 | `wait` | Block until futures reach a given condition |
+| 431-600 | `as_completed` | Yield futures as they finish |
+
+## Reading
+
+### Future state machine
+
+Each `Future` moves through states in one direction. The valid transitions are PENDING to RUNNING, RUNNING to FINISHED or CANCELLED_AND_NOTIFIED. Mutation is protected by a `threading.Lock` stored on the instance.
+
+```python
+# CPython: Lib/concurrent/futures/_base.py:61 Future
+class Future:
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._state = PENDING
+        self._result = None
+        self._exception = None
+        self._done_callbacks = []
+```
+
+`result()` blocks on `self._condition` until the state is FINISHED, then either returns `_result` or re-raises `_exception`.
+
+```python
+# CPython: Lib/concurrent/futures/_base.py:195 Future.result
+def result(self, timeout=None):
+    with self._condition:
+        if self._state in [CANCELLED, CANCELLED_AND_NOTIFIED]:
+            raise CancelledError()
+        elif self._state == FINISHED:
+            return self.__get_result()
+        self._condition.wait(timeout)
+        ...
+```
+
+### Callback dispatch
+
+`add_done_callback` registers a callable that fires when the future completes. Callbacks run in the thread that sets the result, so they must be short and non-blocking.
+
+```python
+# CPython: Lib/concurrent/futures/_base.py:177 Future.add_done_callback
+def add_done_callback(self, fn):
+    with self._condition:
+        if self._state not in [CANCELLED, CANCELLED_AND_NOTIFIED, FINISHED]:
+            self._done_callbacks.append(fn)
+            return
+    try:
+        fn(self)
+    except Exception:
+        LOGGER.exception('exception calling callback for %r', self)
+```
+
+If the future is already done by the time `add_done_callback` is called, the callback fires immediately in the calling thread.
+
+### `wait()` and `as_completed()`
+
+`wait()` collects futures into done and not-done sets, blocking on an internal `threading.Event` that executors signal when each future completes.
+
+`as_completed()` uses the same event mechanism but yields each future as soon as it transitions to done, which is useful for processing results incrementally without waiting for the slowest task.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/concurrent/futures/`. The Go equivalent is `sync.WaitGroup` plus channels, but a faithful port would expose the `Future` state machine and the `Executor` protocol so that Python code using `concurrent.futures` can run against the Go runtime.

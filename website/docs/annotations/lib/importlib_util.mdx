@@ -1,0 +1,143 @@
+---
+title: "Lib/importlib/util.py"
+description: Public utility helpers for constructing module specs, performing lazy imports, and resolving relative module names without triggering an actual import.
+cpython_path: Lib/importlib/util.py
+cpython_version: "3.14"
+lines: 279
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/importlib/util.py
+
+<CpyLink path="Lib/importlib/util.py" />
+
+`importlib.util` gathers the tools that third-party importers and import-hook
+authors reach for most often. Most functions are thin wrappers around private
+bootstrap symbols that cannot be imported directly by user code.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/importlib/util.py" lines="1-16">1-16</Cpy> | module header | Re-exports from `_bootstrap` and `_bootstrap_external`: `module_from_spec`, `spec_from_loader`, `spec_from_file_location`, `decode_source`, `MAGIC_NUMBER`, etc. |
+| <Cpy path="Lib/importlib/util.py" lines="18-20">18-20</Cpy> | `source_hash` | Returns the hash embedded in hash-based `.pyc` files via `_imp.source_hash` |
+| <Cpy path="Lib/importlib/util.py" lines="23-35">23-35</Cpy> | `resolve_name` | Converts a relative module name (leading dots) to an absolute name using `_resolve_name` from `_bootstrap` |
+| <Cpy path="Lib/importlib/util.py" lines="38-66">38-66</Cpy> | `_find_spec_from_path` | Internal helper: returns a spec for a name given an explicit path, consulting `sys.modules` first |
+| <Cpy path="Lib/importlib/util.py" lines="69-111">69-111</Cpy> | `find_spec` | Public spec lookup; imports parent packages as needed, then delegates to `_find_spec` |
+| <Cpy path="Lib/importlib/util.py" lines="118-164">118-164</Cpy> | `_incompatible_extension_module_restrictions` | Context manager to skip the multi-interpreter extension compatibility check during development |
+| <Cpy path="Lib/importlib/util.py" lines="167-231">167-231</Cpy> | `_LazyModule` | `types.ModuleType` subclass whose `__getattribute__` triggers `exec_module` on first access, using a threading lock to guard re-entrant loads |
+| <Cpy path="Lib/importlib/util.py" lines="234-273">234-273</Cpy> | `LazyLoader` | Public `Loader` wrapper that installs `_LazyModule` as the module class so that `exec_module` is deferred until first attribute access |
+
+## Reading
+
+### resolve_name and _resolve_name
+
+`resolve_name` counts leading dots to derive the `level` argument and then
+delegates to `_resolve_name` in the frozen bootstrap, which does the actual
+package-prefix arithmetic.
+
+```python
+# CPython: Lib/importlib/util.py:23 resolve_name
+def resolve_name(name, package):
+    """Resolve a relative module name to an absolute one."""
+    if not name.startswith('.'):
+        return name
+    elif not package:
+        raise ImportError(f'no package specified for {repr(name)} '
+                          '(required for relative module names)')
+    level = 0
+    for character in name:
+        if character != '.':
+            break
+        level += 1
+    return _resolve_name(name[level:], package, level)
+```
+
+The matching bootstrap implementation (in `_bootstrap.py:1234`) does a single
+`rsplit('.', level - 1)` on the package name and prepends the result to `name`.
+
+### find_spec: importing parent packages
+
+`find_spec` differs from the internal `_find_spec_from_path` in one important
+way: it ensures the parent package is imported before searching, so that
+`__path__` is populated for the parent.
+
+```python
+# CPython: Lib/importlib/util.py:69 find_spec
+def find_spec(name, package=None):
+    fullname = resolve_name(name, package) if name.startswith('.') else name
+    if fullname not in sys.modules:
+        parent_name = fullname.rpartition('.')[0]
+        if parent_name:
+            parent = __import__(parent_name, fromlist=['__path__'])
+            try:
+                parent_path = parent.__path__
+            except AttributeError as e:
+                raise ModuleNotFoundError(...) from e
+        else:
+            parent_path = None
+        return _find_spec(fullname, parent_path)
+    ...
+```
+
+### decode_source: encoding detection
+
+`decode_source` is re-exported from `_bootstrap_external`. It uses
+`tokenize.detect_encoding` (which reads the `# -*- coding:` cookie or BOM) and
+then applies universal newline decoding so the returned string always uses `\n`.
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:543 decode_source
+def decode_source(source_bytes):
+    import tokenize
+    source_bytes_readline = _io.BytesIO(source_bytes).readline
+    encoding = tokenize.detect_encoding(source_bytes_readline)
+    newline_decoder = _io.IncrementalNewlineDecoder(None, True)
+    return newline_decoder.decode(source_bytes.decode(encoding[0]))
+```
+
+### LazyLoader and _LazyModule
+
+`LazyLoader.exec_module` replaces the module's class with `_LazyModule` and
+snapshots the current `__dict__`. On first attribute access `_LazyModule.__getattribute__`
+acquires an `RLock`, calls the real `exec_module`, then restores any attributes
+that were mutated between the snapshot and the load.
+
+```python
+# CPython: Lib/importlib/util.py:256 LazyLoader.exec_module
+def exec_module(self, module):
+    """Make the module load lazily."""
+    import threading
+    module.__spec__.loader = self.loader
+    module.__loader__ = self.loader
+    loader_state = {}
+    loader_state['__dict__'] = module.__dict__.copy()
+    loader_state['__class__'] = module.__class__
+    loader_state['lock'] = threading.RLock()
+    loader_state['is_loading'] = False
+    module.__spec__.loader_state = loader_state
+    module.__class__ = _LazyModule
+```
+
+The re-entrancy guard (`loader_state['is_loading']`) prevents a deadlock when
+`exec_module` itself imports the same module (for example, through a circular
+import chain).
+
+## gopy notes
+
+- `find_spec` is the primary entry point gopy should expose for spec lookup.
+  The internal `_find_spec` iterates `sys.meta_path`, which gopy already models.
+- `spec_from_file_location` and `spec_from_loader` live in the bootstrap layer
+  (`_bootstrap_external.py:560` and `_bootstrap.py:665`). gopy should port
+  those functions before wiring `importlib.util`.
+- `LazyLoader` depends on `threading.RLock` and class-swap semantics. Both are
+  tractable in gopy but require the `__class__` assignment protocol to be in
+  place first.
+- `decode_source` requires `tokenize.detect_encoding`, which reads the first two
+  lines looking for a coding cookie. The gopy `tokenize` module must ship that
+  function before `importlib.util` can be enabled.
+- `_incompatible_extension_module_restrictions` wraps `_imp._override_multi_interp_extensions_check`,
+  a CPython-internal hook with no gopy equivalent. It can be stubbed out safely
+  for now.

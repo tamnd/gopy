@@ -1,0 +1,113 @@
+---
+title: Include/cpython/complexobject.h
+description: CPython-internal complex number API - the Py_complex struct and the _Py_c_* arithmetic family.
+cpython_path: Include/cpython/complexobject.h
+cpython_version: "3.14"
+lines: ~50
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/complexobject.h`
+
+`Include/cpython/complexobject.h` is the CPython-internal extension of the public `Include/complexobject.h`. The public header exposes `PyComplex_Type`, `PyComplex_Check`, `PyComplex_FromDoubles`, and `PyComplex_RealAsDouble` / `PyComplex_ImagAsDouble`. This internal header adds the `Py_complex` C struct and the `_Py_c_*` low-level arithmetic family that `Objects/complexobject.c` uses for all complex math.
+
+## Map
+
+| CPython symbol | Kind | Purpose |
+|---|---|---|
+| `Py_complex` | Struct | Holds `double real` and `double imag` |
+| `_Py_c_sum` | Function | `a + b` on two `Py_complex` values |
+| `_Py_c_diff` | Function | `a - b` |
+| `_Py_c_neg` | Function | Unary `-a` |
+| `_Py_c_prod` | Function | `a * b` |
+| `_Py_c_quot` | Function | `a / b` (raises `ZeroDivisionError` via errno) |
+| `_Py_c_pow` | Function | `a ** b` |
+| `_Py_c_abs` | Function | `abs(a)` returning `double` (the modulus) |
+| `PyComplex_RealAsDouble` | Function | Extract `.real` from a Python complex object |
+| `PyComplex_ImagAsDouble` | Function | Extract `.imag` from a Python complex object |
+| `PyComplex_AsCComplex` | Function | Convert a Python object to `Py_complex`, calling `__complex__` if needed |
+
+### Header layout
+
+```c
+// Include/cpython/complexobject.h (abridged)
+typedef struct {
+    double real;
+    double imag;
+} Py_complex;
+
+PyAPI_FUNC(Py_complex) _Py_c_sum(Py_complex, Py_complex);
+PyAPI_FUNC(Py_complex) _Py_c_diff(Py_complex, Py_complex);
+PyAPI_FUNC(Py_complex) _Py_c_neg(Py_complex);
+PyAPI_FUNC(Py_complex) _Py_c_prod(Py_complex, Py_complex);
+PyAPI_FUNC(Py_complex) _Py_c_quot(Py_complex, Py_complex);
+PyAPI_FUNC(Py_complex) _Py_c_pow(Py_complex, Py_complex);
+PyAPI_FUNC(double)     _Py_c_abs(Py_complex);
+```
+
+## Reading
+
+### The Py_complex struct and the _Py_c_* family
+
+The `_Py_c_*` functions operate entirely on C values. They are not Python slots; the `complex` type's `nb_add`, `nb_multiply`, etc. slots call them internally after extracting `real` and `imag` from the Python object.
+
+```c
+// Objects/complexobject.c  _Py_c_prod
+Py_complex
+_Py_c_prod(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    r.real = a.real*b.real - a.imag*b.imag;
+    r.imag = a.real*b.imag + a.imag*b.real;
+    return r;
+}
+```
+
+Division and power use `errno` to signal overflow or zero-division; the Python slot wrappers translate `errno != 0` into a raised `ZeroDivisionError` or `OverflowError` before the `Py_complex` result reaches the interpreter.
+
+```c
+// Objects/complexobject.c  _Py_c_quot
+Py_complex
+_Py_c_quot(Py_complex a, Py_complex b)
+{
+    double d = b.real*b.real + b.imag*b.imag;
+    if (d == 0.0)
+        errno = EDOM;
+    ...
+}
+```
+
+### PyComplex_AsCComplex and __complex__ protocol
+
+`PyComplex_AsCComplex` is the coercion entry point. If the argument is already a `complex` object it reads `real` and `imag` directly. Otherwise it calls `__complex__` on the object. This is the same protocol path the `complex()` builtin takes.
+
+```c
+// Objects/complexobject.c  PyComplex_AsCComplex
+int
+PyComplex_AsCComplex(PyObject *op, Py_complex *cv)
+{
+    if (PyComplex_Check(op)) {
+        cv->real = ((PyComplexObject *)op)->cval.real;
+        cv->imag = ((PyComplexObject *)op)->cval.imag;
+        return 0;
+    }
+    newop = _PyObject_LookupSpecial(op, &_Py_ID(__complex__));
+    ...
+}
+```
+
+## gopy mirror
+
+Complex numbers are not yet ported to gopy. The `objects` package has no `Complex` type. When complex literal support is added the natural mapping would be:
+
+- `Py_complex` maps to a Go struct `Complex { Real, Imag float64 }`.
+- `_Py_c_sum` / `_Py_c_prod` etc. map to plain Go functions operating on that struct.
+- The Python slot wrappers map to the `Nb*` fields on the `Type` singleton.
+
+## CPython 3.14 changes
+
+- The `Py_complex` struct and `_Py_c_*` signatures are stable across 3.x.
+- `PyComplex_AsCComplex` gained a second return-value path for `__complex__` in 3.11; the function pointer is unchanged in 3.14.
+- No deprecations affecting this header are scheduled for 3.14.

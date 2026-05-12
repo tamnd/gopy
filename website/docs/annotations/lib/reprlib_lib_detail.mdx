@@ -1,0 +1,112 @@
+---
+title: Lib/reprlib.py
+description: "Annotated reading of CPython Lib/reprlib.py"
+cpython_path: Lib/reprlib.py
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/reprlib.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-20 | module header | imports, `__all__` |
+| 21-55 | `recursive_repr()` | decorator that returns a fill string on re-entry |
+| 56-90 | `Repr.__init__()` | limit attributes: maxlevel, maxdict, maxlist, maxlong, etc. |
+| 91-110 | `Repr.repr()`, `Repr.repr1()` | public entry point and level-decrementing dispatcher |
+| 111-130 | `Repr.repr_str()`, `Repr.repr_bytes()` | truncation helpers for scalar types |
+| 131-155 | `Repr.repr_list()`, `Repr.repr_tuple()`, `Repr.repr_set()`, `Repr.repr_frozenset()` | sequence/set formatting with maxlevel guard |
+| 156-170 | `Repr.repr_dict()` | sorted key iteration, pair formatting |
+| 171-175 | `Repr.repr_instance()` | fallback for arbitrary instances |
+| 176-180 | module-level `aRepr`, `repr` | singleton and public alias |
+
+## Reading
+
+### Repr class initialisation and limit attributes
+
+`Repr.__init__` sets a set of integer limit attributes that cap how many items are shown and how many characters are kept for scalar types. Each collection type has its own limit (`maxdict`, `maxlist`, `maxset`, `maxtuple`, `maxarray`, `maxlong`, `maxstring`), and `maxlevel` caps the recursion depth across all types.
+
+```python
+# CPython: Lib/reprlib.py:56 Repr.__init__
+def __init__(self):
+    self.maxlevel = 6
+    self.maxdict = 4
+    self.maxlist = 6
+    self.maxtuple = 6
+    self.maxset = 6
+    self.maxfrozenset = 6
+    self.maxdeque = 6
+    self.maxarray = 6
+    self.maxlong = 40
+    self.maxstring = 30
+    self.maxother = 30
+    self.fillvalue = '...'
+    self.indent = None
+```
+
+All attributes are plain integers on the instance so callers can override any limit by direct assignment after construction.
+
+### repr1 dispatch and maxlevel guard
+
+`repr1` is the recursive core. It decrements `level` on each call and returns `self.fillvalue` when it reaches zero, preventing unbounded recursion. The actual dispatch looks up `repr_TYPE` on `self` by building the method name from `type(x).__name__`.
+
+```python
+# CPython: Lib/reprlib.py:99 Repr.repr1
+def repr1(self, x, level):
+    typename = type(x).__name__
+    if ' ' in typename:
+        parts = typename.split()
+        typename = '_'.join(parts)
+    if level <= 0:
+        return self.fillvalue
+    methname = 'repr_' + typename
+    try:
+        meth = getattr(self, methname)
+    except AttributeError:
+        return self.repr_instance(x, level)
+    return meth(x, level)
+```
+
+Falling back to `repr_instance` when no typed handler exists means unknown types degrade gracefully rather than raising. Subclasses add support for new types simply by defining `repr_mytypename` methods.
+
+### recursive_repr decorator and cycle protection
+
+`recursive_repr` wraps an instance method so that if the same object id is seen again while the method is already executing on that object, a fill string is returned immediately. It uses a per-invocation set stored on the wrapper closure.
+
+```python
+# CPython: Lib/reprlib.py:21 recursive_repr
+def recursive_repr(fillvalue='...'):
+    def decorating_function(user_function):
+        wrapper = _recursive_repr_wrapper(user_function, fillvalue)
+        return wrapper
+    return decorating_function
+
+# CPython: Lib/reprlib.py:32 _recursive_repr_wrapper
+def _recursive_repr_wrapper(user_function, fillvalue):
+    repr_running = set()
+    @functools.wraps(user_function)
+    def wrapper(self, *args, **kwargs):
+        key = id(self), get_ident()
+        if key in repr_running:
+            return fillvalue
+        repr_running.add(key)
+        try:
+            result = user_function(self, *args, **kwargs)
+        finally:
+            repr_running.discard(key)
+        return result
+    return wrapper
+```
+
+The key combines `id(self)` with the current thread id so that two threads can safely repr the same object concurrently without falsely triggering the cycle guard.
+
+## gopy notes
+
+Status: not yet ported.
+
+A port would live at `module/reprlib/` in the gopy tree. The `recursive_repr` decorator requires working thread-local state (or a goroutine-id equivalent) and the `functools.wraps` machinery. The `Repr` class itself maps straightforwardly to a Go struct with integer fields and a method set. The module-level `aRepr` singleton and `repr` alias are a one-liner once the struct is in place. This port depends on `module/functools/` being available for `functools.wraps`.

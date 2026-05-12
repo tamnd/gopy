@@ -1,0 +1,132 @@
+---
+title: random.py
+description: "CPython standard library: pseudo-random number generation"
+cpython_path: Lib/random.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/random.py` provides the `Random` class and a module-level instance that
+backs the top-level convenience functions. The Mersenne Twister core lives in
+the C extension `_random`, so this file is primarily algorithm glue, bias
+elimination, and distribution transforms built on top of the raw `random()`
+method.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | imports, `__all__`, `BPF`, `LOG4` | constants; `BPF = 53` (bits per float) |
+| 61–130 | `Random.__init__()`, `seed()` | seeding from int/float/str/bytes/bytearray |
+| 131–200 | `Random.random()`, `getrandbits()` | delegates to `_random.Random` C core |
+| 201–280 | `Random.randbelow()`, `randrange()`, `randint()` | integer sampling with rejection |
+| 281–360 | `Random.choice()`, `choices()` | single and weighted selection |
+| 361–460 | `Random.shuffle()`, `sample()` | in-place and without-replacement sampling |
+| 461–560 | `Random.gauss()`, `normalvariate()` | normal distribution transforms |
+| 561–660 | `Random.expovariate()`, `gammavariate()`, `betavariate()` | exponential and gamma family |
+| 661–740 | `Random.lognormvariate()`, `vonmisesvariate()`, `paretovariate()`, `weibullvariate()` | remaining distributions |
+| 741–820 | `SystemRandom` | `os.urandom()`-backed subclass |
+| 821–1000 | module-level aliases, `_inst`, `seed`, `random`, etc. | convenience API |
+
+## Reading
+
+### Rejection sampling in `randbelow()`
+
+To pick a uniform integer in `[0, n)` without bias, the module cannot simply
+use `int(random() * n)` because floating-point rounding skews the distribution
+for large `n`. Instead it uses rejection sampling on raw bits.
+
+```python
+# CPython: Lib/random.py:238 Random._randbelow_with_getrandbits
+def _randbelow_with_getrandbits(self, n):
+    "Return a random int in the range [0,n).  Returns 0 if n==0."
+    if not n:
+        return 0
+    getrandbits = self.getrandbits
+    k = n.bit_length()
+    r = getrandbits(k)
+    while r >= n:
+        r = getrandbits(k)
+    return r
+```
+
+The loop runs on average fewer than two iterations for any `n`, because the
+rejection region is at most half the sampled range.
+
+### Weighted `choices()` with cumulative weights
+
+`choices()` builds a cumulative weight table once, then uses `bisect` to find
+the bucket for each draw. The construction is deferred to the first call when
+only relative weights are provided.
+
+```python
+# CPython: Lib/random.py:316 Random.choices
+def choices(self, population, weights=None, *, cum_weights=None, k=1):
+    ...
+    if cum_weights is None:
+        cum_weights = list(accumulate(weights))
+    elif weights is not None:
+        raise TypeError('Cannot specify both weights and cumulative weights')
+    ...
+    return [population[bisect(cum_weights, random() * total, 0, n)]
+            for i in _repeat(None, k)]
+```
+
+### Gauss vs `normalvariate()`
+
+The module ships two normal-distribution generators. `gauss()` uses the
+Box-Muller transform and caches one of the two outputs in an instance
+variable; it is not thread-safe. `normalvariate()` uses the Kinderman-Monahan
+ratio method and is stateless between calls.
+
+```python
+# CPython: Lib/random.py:486 Random.gauss
+def gauss(self, mu=0.0, sigma=1.0):
+    z = self.gauss_next
+    self.gauss_next = None
+    if z is None:
+        x2pi = random() * TWOPI
+        g2rad = _sqrt(-2.0 * _log(1.0 - random()))
+        z = _cos(x2pi) * g2rad
+        self.gauss_next = _sin(x2pi) * g2rad
+    return mu + z * sigma
+```
+
+### `SystemRandom` and `os.urandom()`
+
+`SystemRandom` overrides `random()` and `getrandbits()` to draw from the OS
+entropy source. It does not support `seed()` or `getstate()`/`setstate()`.
+
+```python
+# CPython: Lib/random.py:756 SystemRandom.random
+def random(self):
+    "Get the next random number in the range [0.0, 1.0)."
+    return (int.from_bytes(_urandom(7)) >> 3) * RECIP_BPF
+```
+
+The seven-byte read yields 56 bits; the right-shift discards three to leave
+exactly 53 significant bits matching IEEE 754 double precision.
+
+## gopy notes
+
+- `Random` inherits from `_random.Random` (a C type). gopy must implement the
+  Mersenne Twister state in Go and expose it as a Python-visible type with
+  `random()` and `getrandbits()` before this file can run.
+- `gauss_next` is instance state; gopy's `Random` object layout must include
+  this slot.
+- `SystemRandom.random()` calls `os.urandom(7)` via `_urandom`; gopy maps this
+  to `crypto/rand.Read`.
+- `choices()` uses `itertools.accumulate`; that module must be ported or the
+  fallback pure-Python path used.
+
+## CPython 3.14 changes
+
+- `seed()` now accepts `None` explicitly to reseed from the OS source, matching
+  the documented behavior that was previously implicit.
+- `sample()` gained a `counts` parameter in 3.9; no further changes in 3.14.
+- `Random.randbytes()` (added 3.9) delegates to `getrandbits`; no changes.
+- The module-level `gauss_next` attribute was removed in 3.12 in favor of
+  per-instance state; 3.14 carries this forward unchanged.

@@ -1,0 +1,85 @@
+---
+title: Lib/enum.py
+description: "enum module: EnumType metaclass, Enum/IntEnum/Flag/IntFlag base classes, _generate_next_value_ hook, member lookup by name and value, and the Flag bitwise composition rules."
+cpython_path: Lib/enum.py
+cpython_version: "3.14"
+lines: 2900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/enum.py`
+
+<CpyLink path="Lib/enum.py" />
+
+`Lib/enum.py` implements Python's enumeration types. The public surface is `Enum`,
+`IntEnum`, `Flag`, `IntFlag`, and the `@unique` decorator. The implementation centres on
+`EnumType`, the metaclass that transforms a plain class body into a sealed set of named
+members.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `_EnumDict`, `EnumType.__prepare__` | Namespace that intercepts member assignments |
+| 201-600 | `EnumType.__new__` | Metaclass; seals members, builds value-to-member map |
+| 601-900 | `Enum.__new__`, `Enum.__init__` | Per-member construction |
+| 901-1200 | Lookup: `_missing_`, `__getitem__`, `__call__` | Member retrieval by name and value |
+| 1201-1600 | `Flag`, `_decompose`, bitwise ops | Flag composition and decomposition |
+| 1601-2900 | `IntEnum`, `StrEnum`, `IntFlag`, `auto`, `unique` | Concrete types and helpers |
+
+## Reading
+
+### `_EnumDict` and member interception
+
+`EnumType.__prepare__` returns an `_EnumDict` subclass of `dict`. Assigning a non-dunder
+name into this dict records the name as a member candidate and stores its value. Duplicate
+names raise `TypeError` immediately.
+
+```python
+# CPython: Lib/enum.py:142 _EnumDict.__setitem__
+def __setitem__(self, key, value):
+    if _is_sunder(key):
+        ...
+    elif _is_dunder(key):
+        ...
+    elif _is_descriptor(value):
+        self._member_names[key] = value
+    else:
+        # regular member
+        if key in self._member_names:
+            raise TypeError(f'Attempted to reuse key: {key!r}')
+        self._member_names[key] = value
+```
+
+### `EnumType.__new__` sealing
+
+After the class body executes, `EnumType.__new__` iterates `_member_names`, calls
+`_generate_next_value_` for any members that used `auto()`, creates the member objects,
+and stores them in a `_value2member_map_` for O(1) lookup by value.
+
+### `Flag` bitwise composition
+
+`Flag` members compose with `|`. The result is either a named single-bit member or an
+unnamed composite. `_decompose` returns the list of single-bit members whose OR equals
+the composite value.
+
+```python
+# CPython: Lib/enum.py:1380 Flag.__or__
+def __or__(self, other):
+    if isinstance(other, self.__class__):
+        return self.__class__(self._value_ | other._value_)
+    return NotImplemented
+```
+
+### `_missing_` hook
+
+When a value lookup fails in `__call__`, `EnumType` calls the class-level `_missing_`
+method. The default raises `ValueError`; subclasses can override it to create members on
+demand or return a sentinel.
+
+## gopy notes
+
+Not yet ported. `enum.Enum` is heavily metaclass-driven. The port requires `EnumType`
+metaclass support in `objects/type.go`. Planned path: `module/enum/`.

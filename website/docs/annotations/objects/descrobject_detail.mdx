@@ -1,0 +1,136 @@
+---
+title: descrobject.c
+description: "C descriptor types: method, member, getset, slot, and classmethod wrappers"
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/descrobject.c` implements the five built-in descriptor types that
+back Python's method resolution, slot access, and `property`-like get/set
+on C-defined types. All five share the descriptor protocol: a `__get__` slot
+that returns a bound object when accessed through an instance.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | `PyMethodDescrObject` / `method_get` | Wraps a `PyCFunction`; `__get__` returns a bound method |
+| 121–280 | `PyClassMethodDescrObject` / `classmethod_get` | Like method but binds to the type, not the instance |
+| 281–480 | `PyMemberDescrObject` / `member_get` / `member_set` | Reads and writes C struct fields via `PyMemberDef` |
+| 481–700 | `PyGetSetDescrObject` / `getset_get` / `getset_set` | Calls C getter/setter functions from `PyGetSetDef` |
+| 701–900 | `PyWrapperDescrObject` / `wrapperdescr_get` | Wraps a type slot function (e.g. `tp_richcompare`) |
+| 901–1050 | `slot_tp_descr_get` | Default `__get__` for types that have none; produces `method-wrapper` |
+| 1051–1200 | `PyDescr_NewMethod` etc. | Factory functions used by `type_ready` to populate `tp_dict` |
+
+## Reading
+
+### `method_get` and bound method creation
+
+When Python evaluates `obj.method`, the attribute lookup finds a
+`PyMethodDescrObject` in the type's `tp_dict` and calls its `tp_descr_get`
+slot. If `obj` is not `NULL` (instance access rather than class access), it
+allocates a `PyCFunctionObject` that captures both the C function pointer and
+`obj` as `self`.
+
+```c
+// CPython: Objects/descrobject.c:90 method_get
+static PyObject *
+method_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    PyMethodDescrObject *descr = (PyMethodDescrObject *)self;
+    if (obj == Py_None || obj == NULL)
+        return Py_NewRef(self);
+    if (!descr_check((PyDescrObject *)descr, obj))
+        return NULL;
+    return PyCFunction_NewEx(descr->d_method, obj, NULL);
+}
+```
+
+### `member_get` and struct field access
+
+`PyMemberDescrObject` stores a `PyMemberDef` that records the byte offset
+and type code of a C struct field. `member_get` calls `PyMember_GetOne`,
+which adds the offset to the object pointer and casts according to type code
+(`T_INT`, `T_DOUBLE`, `T_OBJECT_EX`, etc.).
+
+```c
+// CPython: Objects/descrobject.c:350 member_get
+static PyObject *
+member_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    PyMemberDescrObject *descr = (PyMemberDescrObject *)self;
+    if (descr_check((PyDescrObject *)descr, obj) < 0)
+        return NULL;
+    if (descr->d_member->flags & READ_RESTRICTED)
+        if (PySys_Audit("object.__getattr__", "Os",
+                        obj, descr->d_member->name) < 0)
+            return NULL;
+    return PyMember_GetOne((char *)obj, descr->d_member);
+}
+```
+
+### `getset_get` and C-level property
+
+`PyGetSetDescrObject` holds a `PyGetSetDef` with a `get` function pointer and
+an optional `set` function pointer plus a `closure` void pointer passed to
+both. This is the mechanism used by `property` on C extension types.
+
+```c
+// CPython: Objects/descrobject.c:550 getset_get
+static PyObject *
+getset_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    PyGetSetDescrObject *descr = (PyGetSetDescrObject *)self;
+    if (obj == NULL || obj == Py_None)
+        return Py_NewRef(self);
+    if (descr->d_getset->get == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "unreadable attribute");
+        return NULL;
+    }
+    return descr->d_getset->get(obj, descr->d_getset->closure);
+}
+```
+
+### `slot_tp_descr_get` as fallback binding
+
+Types that do not define a custom `tp_descr_get` inherit this function from
+`PyBaseObject_Type`. It produces a `method-wrapper` object that binds the
+slot function to the instance, enabling Python-level calls like
+`obj.__add__(other)` to work even for C slot functions.
+
+```c
+// CPython: Objects/descrobject.c:970 slot_tp_descr_get
+static PyObject *
+slot_tp_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    if (obj == NULL || obj == Py_None)
+        return Py_NewRef(self);
+    return PyWrapper_New(self, obj);
+}
+```
+
+## gopy notes
+
+- `method_get` maps to `objects/method.go` `BoundMethod`; the Go port stores
+  `fn` and `self` and implements `__call__` by forwarding to the underlying
+  `objects/function.go` callable.
+- `member_get` / `member_set` are not needed for pure-Python types; they
+  become relevant when exposing Go struct fields to Python via `PyGetSetDef`
+  equivalents in `objects/descr.go`.
+- `getset_get` is the backing model for `objects/property.go`; the `closure`
+  pointer maps to a Go `any` carried on the `GetSetDescriptor` struct.
+- `wrapperdescr_get` (slot wrappers) currently surfaces as
+  `objects/protocol.go` helper stubs; full binding is tracked separately.
+
+## CPython 3.14 changes
+
+- The audit event `object.__getattr__` on restricted members was added in
+  3.10 and is unchanged in 3.14.
+- `PyDescr_NewGetSet` and `PyDescr_NewMember` gained `Py_TPFLAGS_IMMUTABLETYPE`
+  guards in 3.12 to prevent mutation of descriptors on immutable types.
+- No structural changes to the five descriptor types between 3.13 and 3.14;
+  the file received only minor const-correctness and annotation patches.

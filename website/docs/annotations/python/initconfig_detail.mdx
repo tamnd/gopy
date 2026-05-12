@@ -1,0 +1,93 @@
+---
+title: "Python/initconfig.c: Interpreter Configuration"
+description: "PyConfig struct fields, _PyConfig_Read priority chain, and Py_InitializeFromConfig entry point"
+cpython_path: Python/initconfig.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: pythonrun/runstring.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/initconfig.c` owns the full lifecycle of interpreter startup configuration. It defines the `PyConfig` struct, reads configuration from the environment and command line, and hands a validated config object to `Py_InitializeFromConfig`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `PyConfig` struct layout | All public config fields: `home`, `pythonpath_env`, `program_name`, `argv`, `sys_path_0`, etc. |
+| 121-400 | `PyConfig_InitPythonConfig` / `PyConfig_InitIsolatedConfig` | Zero-initialize then fill safe defaults |
+| 401-900 | `_PyConfig_Read` | Priority chain: cmdline overrides env, env overrides defaults |
+| 901-1400 | `config_read_env_vars` | Reads `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONUTF8`, etc. |
+| 1401-1900 | `config_init_argv` / `config_compute_sys_path` | Derives `sys.argv` and `sys.path[0]` from `program_name` and `argv` |
+| 1901-2400 | `_PyConfig_Write` | Pushes finalized config into the interpreter state |
+| 2401-2700 | `Py_InitializeFromConfig` | Top-level entry: calls `_PyConfig_Read`, then `_Py_InitializeMain` |
+| 2701-3000 | WASM/WASI guards | Platform-specific overrides added in 3.13-3.14 for emscripten and wasi targets |
+
+## Reading
+
+### PyConfig field priority
+
+`_PyConfig_Read` applies three passes in fixed order: command-line flags first, then environment variables, then compiled-in defaults. Later passes never overwrite a field that was already set by an earlier pass.
+
+```c
+/* Python/initconfig.c ~450 */
+static PyStatus
+config_read(PyConfig *config, int compute_path_config)
+{
+    PyStatus status;
+    const PyPreConfig *preconfig = &_PyRuntime.preconfig;
+
+    if (config->use_environment) {
+        status = config_read_env_vars(config);
+        if (_PyStatus_EXCEPTION(status)) return status;
+    }
+    status = config_read_cmdline(config);
+    if (_PyStatus_EXCEPTION(status)) return status;
+
+    status = config_init_defaults(config);
+    ...
+}
+```
+
+The key invariant: each setter checks `if (config->field == NULL)` (for strings) or a sentinel integer before writing, so the first writer wins.
+
+### `program_name` and `home` resolution
+
+`program_name` is resolved through `Py_GetProgramFullPath` logic: the runtime searches `PATH` entries and falls back to the raw argv[0] string. `home` (equivalent to `PYTHONHOME`) short-circuits the entire path search and pins both `prefix` and `exec_prefix`.
+
+```c
+/* Python/initconfig.c ~1050 */
+static PyStatus
+config_init_home(PyConfig *config)
+{
+    wchar_t *home = NULL;
+    PyStatus status = CONFIG_GET_ENV_DUP(config, &home,
+                                         L"PYTHONHOME", "PYTHONHOME");
+    if (_PyStatus_EXCEPTION(status)) return status;
+    return PyConfig_SetString(config, &config->home, home);
+}
+```
+
+### 3.14 WASM/WASI additions
+
+CPython 3.13 introduced `Py_PORTING_WASM` guards; 3.14 extends them with WASI reactor-mode support. When `__wasi__` is defined and the process has no real `argv`, `config_compute_sys_path` skips the usual file-system probing and returns an empty `sys.path`.
+
+```c
+/* Python/initconfig.c ~2730 */
+#ifdef __wasi__
+    /* WASI reactor mode: no argv[0], no cwd-relative path */
+    if (config->argv.length == 0) {
+        return _PyWstrList_Append(&config->sys_path_0_calculated,
+                                  L"");
+    }
+#endif
+```
+
+## gopy notes
+
+- `pythonrun/runstring.go` contains a minimal inline config that hardcodes `isolated=true` and empty `argv`. A full port of `_PyConfig_Read` is not yet done; the priority chain is approximated by direct struct assignment.
+- The `home` field is unused in gopy today. `PYTHONHOME` is never read.
+- WASM/WASI guards are out of scope for the current port target (native Go binaries only).
+- Task #474 tracks completing `Py_InitializeFromConfig` parity so that user-supplied `PyConfig` values propagate correctly into the interpreter state.

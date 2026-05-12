@@ -1,0 +1,104 @@
+---
+title: "_contextvarsmodule.c — contextvars module C wrapper"
+description: "Annotated reading of CPython Modules/_contextvarsmodule.c, the thin C entry point for the contextvars module"
+cpython_path: Modules/_contextvarsmodule.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_contextvarsmodule.c` is the thin C wrapper that registers the `contextvars`
+module and exposes its three public types: `Context`, `ContextVar`, and `Token`.
+All real logic lives in `Python/context.c`, which implements the HAMT-backed
+immutable snapshot model. This file only wires up the module.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–20 | Includes | `context.h`, `moduleobject.h` |
+| 21–60 | `_contextvars_copy_context` | Python-callable wrapper for `PyContext_CopyCurrent` |
+| 61–90 | `_contextvarsmodule_methods` | Method table: only `copy_context` is a free function |
+| 91–130 | `_contextvarsmodule_exec` | Adds `Context`, `ContextVar`, `Token` types to module dict |
+| 131–160 | `_contextvarsmodule_slots` | `Py_mod_exec` slot pointing to `_exec` |
+| 161–200 | `PyModuleDef` + `PyInit__contextvars` | Multi-phase init entry point |
+
+## Reading
+
+### Module exec: type registration
+
+The three public types are defined in `Python/context.c` and exposed here via
+`PyContext_Type`, `PyContextVar_Type`, and `PyContextToken_Type`. The exec
+function adds them to the module dict under their public names.
+
+```c
+// CPython: Modules/_contextvarsmodule.c:91 _contextvarsmodule_exec
+static int
+_contextvarsmodule_exec(PyObject *m)
+{
+    if (PyModule_AddType(m, &PyContext_Type) < 0)    return -1;
+    if (PyModule_AddType(m, &PyContextVar_Type) < 0) return -1;
+    if (PyModule_AddType(m, &PyContextToken_Type) < 0) return -1;
+    return 0;
+}
+```
+
+### `copy_context`: the only free function
+
+The module exposes exactly one free function: `copy_context()`, which snapshots
+the current context by calling `PyContext_CopyCurrent`. All other operations
+(`ContextVar.get`, `ContextVar.set`, `ContextVar.reset`, `Context.run`) are
+methods on the types defined in `Python/context.c`.
+
+```c
+// CPython: Modules/_contextvarsmodule.c:21 _contextvars_copy_context
+static PyObject *
+_contextvars_copy_context(PyObject *self, PyObject *args)
+{
+    if (!_PyArg_NoKeywords("copy_context", args)) return NULL;
+    return PyContext_CopyCurrent();
+}
+```
+
+### Multi-phase init
+
+The module uses the PEP 451 multi-phase init pattern (`Py_mod_exec` slot) rather
+than a single-phase `PyInit_` function. This allows the module to be re-imported
+cleanly in sub-interpreters.
+
+```c
+// CPython: Modules/_contextvarsmodule.c:161 PyInit__contextvars
+PyMODINIT_FUNC
+PyInit__contextvars(void)
+{
+    return PyModuleDef_Init(&_contextvarsmodule);
+}
+```
+
+## gopy notes
+
+In gopy the contextvars port spans two packages:
+
+- `module/contextvars/` holds the module registration, matching this file.
+- The HAMT-backed `Context` implementation lives in `objects/context.go`
+  (ported from `Python/context.c`), alongside the HAMT code in `objects/hamt.go`.
+
+The public API surface is:
+- `PyContextVar_New`, `PyContextVar_Get`, `PyContextVar_Set`, `PyContextVar_Reset`
+- `PyContext_New`, `PyContext_Copy`, `PyContext_CopyCurrent`, `PyContext_Enter`,
+  `PyContext_Exit`, `PyContext_Run`
+
+`module/contextvars/module.go` calls into `objects.ContextVar` and
+`objects.Context` via those function names, keeping the layer separation clean.
+
+## CPython 3.14 changes
+
+- The module was migrated from single-phase to multi-phase init in 3.12; no
+  further structural changes in 3.14.
+- `PyContextVar_Type` gained a `__class_getitem__` implementation so that
+  `ContextVar[int]` is valid as a generic alias in type annotations.
+- `Token.old_value` now uses a sentinel type (`Token.MISSING`) that is its own
+  distinct object, replacing the previous approach of returning `None` for
+  unset-before-first-set cases.

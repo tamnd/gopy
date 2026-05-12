@@ -1,0 +1,119 @@
+---
+title: pycore_object.h
+description: "Internal object layout helpers: refcount init, GC tracking, size macros"
+cpython_path: Include/internal/pycore_object.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_object.h` exposes the low-level plumbing underneath every Python
+object: debug-build allocation lists, GC tracking guards, and the size
+macros used by `tp_basicsize` / `tp_itemsize` arithmetic.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–20 | includes | `pycore_interp.h`, `pycore_gc.h`, `object.h` |
+| 21–40 | `_PyObject_HEAD_EXTRA` | debug-only doubly-linked list pointers inserted before `ob_refcnt` |
+| 41–70 | `_Py_NewReference` | initializes `ob_refcnt`, links object into the debug alloc list |
+| 71–90 | `_Py_ForgetReference` | unlinks a deallocating object from the debug alloc list |
+| 91–120 | `_PyObject_IS_GC` | checks `Py_TPFLAGS_HAVE_GC` on `ob_type` |
+| 121–145 | `_PyObject_GC_IS_TRACKED` | tests whether the GC head bits show the object is tracked |
+| 146–165 | `_PyObject_ASSERT` macros | fatal-error helpers used inside object internals |
+| 166–185 | `_PyObject_SIZE` | returns `tp_basicsize` cast to `Py_ssize_t` |
+| 186–200 | `_PyObject_VAR_SIZE` | computes `tp_basicsize + n * tp_itemsize` with alignment |
+
+## Reading
+
+### Debug allocation list
+
+In a debug build every live object is threaded into a global doubly-linked
+list so that `sys.getobjects()` can iterate all live objects and leaks are
+detected at shutdown.
+
+```c
+// CPython: Include/internal/pycore_object.h:25 _PyObject_HEAD_EXTRA
+#ifdef Py_TRACE_REFS
+#  define _PyObject_HEAD_EXTRA  \
+    PyObject *_ob_next;         \
+    PyObject *_ob_prev;
+#else
+#  define _PyObject_HEAD_EXTRA
+#endif
+```
+
+The macros expand to nothing in release builds, so the struct layout is
+identical to what the stable ABI exposes.
+
+### Reference initialization
+
+`_Py_NewReference` is called by every allocator (`PyObject_New`,
+`PyObject_GC_New`, etc.) immediately after memory is obtained.
+
+```c
+// CPython: Include/internal/pycore_object.h:55 _Py_NewReference
+static inline void _Py_NewReference(PyObject *op) {
+    if (_Py_tracemalloc_config.tracing) {
+        _PyTraceMalloc_NewReference(op);
+    }
+#ifdef Py_TRACE_REFS
+    _Py_AddToAllObjects(op);
+#endif
+    Py_SET_REFCNT(op, 1);
+}
+```
+
+### GC tracking guard
+
+The GC only visits objects whose type carries `Py_TPFLAGS_HAVE_GC` and
+that have been explicitly registered via `PyObject_GC_Track`. The
+two-step check avoids scanning non-container objects.
+
+```c
+// CPython: Include/internal/pycore_object.h:125 _PyObject_GC_IS_TRACKED
+static inline int _PyObject_GC_IS_TRACKED(PyObject *op) {
+    PyGC_Head *gc = _Py_AS_GC(op);
+    return (gc->_gc_next != 0);
+}
+```
+
+### Variable-size object layout
+
+`_PyObject_VAR_SIZE` is the canonical way to compute how many bytes a
+`PyVarObject` needs, respecting the platform alignment requirement.
+
+```c
+// CPython: Include/internal/pycore_object.h:192 _PyObject_VAR_SIZE
+static inline size_t
+_PyObject_VAR_SIZE(PyTypeObject *tp, Py_ssize_t nitems) {
+    return _Py_SIZE_ROUND_UP(
+        (size_t)tp->tp_basicsize + (size_t)nitems * (size_t)tp->tp_itemsize,
+        ALIGNOF_MAX_ALIGN_T);
+}
+```
+
+## gopy notes
+
+gopy does not replicate the `_PyObject_HEAD_EXTRA` debug list; Go's runtime
+already provides heap profiling and the escape-analysis story is different.
+
+The relevant gopy analog to `_Py_NewReference` is the `newObject` helper in
+`objects/object.go`. `_PyObject_GC_IS_TRACKED` maps loosely to the GC
+registration booleans kept alongside each `PyObject` wrapper in
+`objects/instance.go`.
+
+`_PyObject_VAR_SIZE` has no direct port because gopy represents variable-size
+objects (tuples, strings, bytes) as Go slices rather than C trailing arrays.
+
+## CPython 3.14 changes
+
+- `_Py_NewReference` gained a `_PyTraceMalloc_NewReference` call in 3.12;
+  the signature is unchanged in 3.14.
+- The `Py_TRACE_REFS` path was refactored in 3.12 to use
+  `_Py_AddToAllObjects` instead of open-coded pointer surgery. 3.14 keeps
+  this factoring.
+- `_PyObject_GC_IS_TRACKED` became a static inline in 3.9; no change in 3.14.

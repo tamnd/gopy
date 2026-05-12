@@ -1,0 +1,137 @@
+---
+title: "Objects/floatobject.c (formatting and conversion)"
+description: "Float formatting, string parsing, rich comparison with NaN, hash alignment with integers, and the __float__/__index__ fallback chain"
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/floatobject.c" />
+
+## Map
+
+| Symbol | Approx. lines | Role |
+|---|---|---|
+| `float_repr` | ~460 | Calls `_Py_dg_dtoa` to produce shortest decimal representation |
+| `PyFloat_AsDouble` | ~270 | Extracts `double` with `__float__` / `__index__` fallbacks |
+| `float_richcompare` | ~560 | Ordered comparisons including NaN and integer cross-type cases |
+| `float_hash` | ~640 | Produces integer-matching hash for exact integer values |
+| `float_from_string` | ~180 | Parses a string or bytes object into a float |
+
+## Reading
+
+### Shortest-decimal formatting (`float_repr`)
+
+`float_repr` delegates to `_Py_dg_dtoa`, a vendored adaptation of David Gay's `dtoa.c`. The routine produces the shortest decimal string that round-trips back to the same IEEE 754 double. CPython then post-processes the raw digit buffer to insert the decimal point and exponent marker.
+
+```c
+// CPython: Objects/floatobject.c:460 float_repr
+static PyObject *
+float_repr(PyFloatObject *v)
+{
+    PyObject *result;
+    char *buf;
+    buf = _PyFloat_FormatAdvancedWriter(NULL, (PyObject *)v,
+                                        NULL, 0, 0);
+    ...
+}
+```
+
+The result always contains a decimal point or exponent so it is unambiguously a float literal. `1.0` formats as `"1.0"`, not `"1"`. The backing buffer is freed by `_Py_dg_freedtoa`.
+
+### Conversion with fallbacks (`PyFloat_AsDouble`)
+
+`PyFloat_AsDouble` is the canonical entry point for extracting a C `double` from any Python object. It first checks for a `PyFloatObject` to return the stored value directly. For other types it walks two fallback slots.
+
+```c
+// CPython: Objects/floatobject.c:272 PyFloat_AsDouble
+double
+PyFloat_AsDouble(PyObject *op)
+{
+    PyNumberMethods *nb;
+    PyObject *res;
+    double val;
+
+    if (op == NULL) { ... }
+    if (PyFloat_Check(op))
+        return PyFloat_AS_DOUBLE(op);
+    nb = Py_TYPE(op)->tp_as_number;
+    if (nb == NULL || nb->nb_float == NULL) {
+        /* try __index__ */
+        ...
+    }
+    res = (*nb->nb_float)(op);
+    ...
+}
+```
+
+The `__float__` slot is tried first. If absent, `__index__` is called and the resulting integer is converted with `PyLong_AsDouble`. An `OverflowError` from that conversion bubbles up unchanged.
+
+### NaN-aware rich comparison (`float_richcompare`)
+
+IEEE 754 requires that any comparison involving NaN returns false (even `NaN == NaN`). `float_richcompare` handles this explicitly before entering the ordering logic. The trickier case is comparing a float against an integer: the integer may be too large to represent exactly as a double, so CPython checks the integer's magnitude first.
+
+```c
+// CPython: Objects/floatobject.c:590 float_richcompare
+static PyObject *
+float_richcompare(PyObject *v, PyObject *w, int op)
+{
+    double i, j;
+    int r = 0;
+
+    ...
+    /* If either is a NaN, all comparisons return False except != */
+    if (Py_IS_NAN(i) || Py_IS_NAN(j)) {
+        if (op == Py_NE) Py_RETURN_TRUE;
+        Py_RETURN_FALSE;
+    }
+    ...
+}
+```
+
+For float-vs-int comparisons where the float is an infinity, the result is decided purely on sign. For finite floats, the integer is examined for its sign and bit length before any conversion to double.
+
+### Integer-matching hash (`float_hash`)
+
+Python enforces the invariant `hash(x) == hash(int(x))` whenever `x == int(x)`. `float_hash` achieves this by decomposing the double into its sign, exponent, and mantissa and then computing the same modular hash that `long_hash` would produce for the exact integer value.
+
+```c
+// CPython: Objects/floatobject.c:640 float_hash
+static Py_hash_t
+float_hash(PyFloatObject *v)
+{
+    return _Py_HashDouble((PyObject *)v, v->ob_fval);
+}
+```
+
+`_Py_HashDouble` (in `Python/pyhash.c`) extracts the IEEE 754 mantissa bits, applies the `_PyHASH_MODULUS` (2^61 - 1 on 64-bit), and adjusts for the exponent. The result is identical to what `hash(int(x))` returns for any float whose value is an exact integer.
+
+### String parsing (`float_from_string`)
+
+`float_from_string` accepts `str`, `bytes`, and `bytearray` objects. After extracting a NUL-terminated byte buffer, it calls `_PyFloat_ParseDouble`, which in turn calls the platform `strtod` wrapped with locale-independent decimal-point handling. Leading and trailing whitespace is stripped; anything else remaining after parsing raises `ValueError`.
+
+```c
+// CPython: Objects/floatobject.c:192 float_from_string
+static PyObject *
+float_from_string(PyObject *v, int ignored)
+{
+    const char *s;
+    ...
+    s = _PyUnicode_AsUTF8AndSize(v, &len);
+    ...
+    return PyFloat_FromDouble(_PyFloat_ParseDouble(s, &end, &error));
+}
+```
+
+`float("inf")` and `float("nan")` are recognised explicitly as special cases before the call to `strtod`.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (alongside `objects/float.go`).
+
+Go's `strconv.FormatFloat` with format `'g'` and bit-size 64 covers the shortest-decimal requirement but does not match CPython's exact formatting rules (for example, `1.0` vs `1`). A faithful port will need to replicate the post-processing step that `float_repr` applies to the `dtoa` buffer. `PyFloat_AsDouble` maps naturally to a Go interface dispatch. The NaN handling in `float_richcompare` must be explicit: Go's `==` on `float64` already returns false for NaN comparisons, but the `!=` true-for-NaN special case requires a manual `math.IsNaN` check.

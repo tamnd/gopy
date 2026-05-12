@@ -1,0 +1,255 @@
+---
+title: Lib/asyncio/locks.py
+description: Asyncio synchronization primitives; Lock, Event, Condition, Semaphore, and BoundedSemaphore using Future-based waiters instead of OS primitives.
+cpython_path: Lib/asyncio/locks.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/asyncio/locks.py`
+
+<CpyLink path="Lib/asyncio/locks.py" />
+
+`locks.py` provides the asyncio equivalents of `threading`'s
+synchronization primitives. The key design difference is that `acquire()`
+on each primitive is an `async def` coroutine: when it cannot proceed
+immediately it creates an `asyncio.Future`, appends it to an internal
+`_waiters` deque, and suspends. The event loop then resumes other tasks
+until the primitive is released, at which point the oldest waiter's
+`Future` is resolved and that coroutine is scheduled to run.
+
+No OS mutex or condition variable is involved. All coordination happens
+through the event loop's `Future` machinery, which means these primitives
+are single-threaded and must only be used from the loop thread (or from a
+single thread if a thread-safe wrapper is needed).
+
+In CPython 3.14, the `loop` parameter was removed from every class
+constructor (deprecated since 3.8). The `Lock`, `Event`, `Condition`,
+`Semaphore`, and `BoundedSemaphore` classes are all `__slots__`-free;
+they rely on instance `__dict__` for any dynamic attributes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/asyncio/locks.py" lines="1-30">1-30</Cpy> | Module prologue, `_ContextManagerMixin` | Mixin that makes any lock usable as an async context manager via `__aenter__`/`__aexit__`. | |
+| <Cpy path="Lib/asyncio/locks.py" lines="31-130">31-130</Cpy> | `Lock` | Non-reentrant mutex; `_locked` bool and `_waiters` deque of `Future` objects; `acquire` loops until `_locked` is `False`. | |
+| <Cpy path="Lib/asyncio/locks.py" lines="131-210">131-210</Cpy> | `Event` | Level-triggered flag; `set` resolves all waiters, `clear` resets the flag, `wait` suspends until `set` is called. | |
+| <Cpy path="Lib/asyncio/locks.py" lines="211-340">211-340</Cpy> | `Condition` | Monitor built on a `Lock`; `wait` releases the lock and suspends, `notify`/`notify_all` wake waiting coroutines. | |
+| <Cpy path="Lib/asyncio/locks.py" lines="341-450">341-450</Cpy> | `Semaphore` | Counter-based primitive; `acquire` decrements or waits, `release` increments and wakes one waiter. | |
+| <Cpy path="Lib/asyncio/locks.py" lines="451-500">451-500</Cpy> | `BoundedSemaphore` | Subclass of `Semaphore`; `release` raises `ValueError` if the counter would exceed the initial value. | |
+
+## Reading
+
+### `Lock.acquire` and `Lock.release` (lines 31 to 130)
+
+<CpyLink path="Lib/asyncio/locks.py" lines="31-130" />
+
+```python
+class Lock(_ContextManagerMixin):
+    def __init__(self):
+        self._waiters = None
+        self._locked = False
+
+    async def acquire(self):
+        """Acquire a lock."""
+        if (not self._locked and (self._waiters is None or
+                all(w.cancelled() for w in self._waiters))):
+            self._locked = True
+            return True
+
+        if self._waiters is None:
+            self._waiters = collections.deque()
+        fut = self._get_loop().create_future()
+        self._waiters.append(fut)
+
+        # Finally block so that Future.cancel() support works correctly.
+        try:
+            try:
+                await fut
+            finally:
+                self._waiters.remove(fut)
+        except exceptions.CancelledError:
+            if not self._locked:
+                self._wake_up_first()
+            raise
+
+        self._locked = True
+        return True
+
+    def release(self):
+        if self._locked:
+            self._locked = False
+            self._wake_up_first()
+        else:
+            raise RuntimeError('Lock is not acquired.')
+
+    def _wake_up_first(self):
+        if not self._waiters:
+            return
+        try:
+            fut = next(iter(self._waiters))
+        except StopIteration:
+            return
+        if not fut.done():
+            fut.set_result(True)
+```
+
+`acquire` has a fast path: if the lock is free and there are no
+non-cancelled waiters, it sets `_locked = True` and returns without
+creating a `Future`. This avoids heap allocation on the common
+uncontended case.
+
+On the slow path a `Future` is created and appended to `_waiters`. The
+`try/finally` block is important for cancellation: if the coroutine is
+cancelled while waiting, the `Future` is removed from `_waiters` and the
+`CancelledError` is re-raised. But before re-raising, the code checks
+whether `_locked` is still `False` (another release may have woken this
+waiter just as the cancellation arrived). If so, `_wake_up_first` is
+called to pass the wake-up signal to the next waiter so the lock is not
+stranded.
+
+`release` calls `_wake_up_first`, which resolves the oldest non-done
+`Future` in `_waiters`. The resolved coroutine resumes, sets `_locked =
+True`, and returns from `acquire`. Only one waiter is woken per
+`release`, matching the non-reentrant single-owner contract.
+
+### `Event.set`, `Event.clear`, and `Event.wait` (lines 131 to 210)
+
+<CpyLink path="Lib/asyncio/locks.py" lines="131-210" />
+
+```python
+class Event:
+    def __init__(self):
+        self._waiters = collections.deque()
+        self._value = False
+
+    def set(self):
+        if not self._value:
+            self._value = True
+            for fut in self._waiters:
+                if not fut.done():
+                    fut.set_result(True)
+
+    def clear(self):
+        self._value = False
+
+    def is_set(self):
+        return self._value
+
+    async def wait(self):
+        if self._value:
+            return True
+        fut = self._loop.create_future()
+        self._waiters.append(fut)
+        try:
+            await fut
+            return True
+        finally:
+            self._waiters.remove(fut)
+```
+
+`Event` is level-triggered: once `set()` is called, `wait()` returns
+immediately for any subsequent caller until `clear()` is called. `set`
+iterates over all waiters and resolves each non-done `Future`. Because
+the event stays set after `set()` returns, the waiters deque is not
+cleared; any `Future` that was already done (e.g., resolved in a previous
+`set` call or cancelled) is skipped via `if not fut.done()`.
+
+`wait` uses the same `try/finally` pattern as `Lock.acquire` so that a
+cancelled `wait` cleans up its `Future` from `_waiters`. Unlike `Lock`,
+there is no ownership handoff to perform on cancellation; the event value
+is unaffected.
+
+### `Condition.wait` and `Condition.notify` (lines 211 to 340)
+
+<CpyLink path="Lib/asyncio/locks.py" lines="211-340" />
+
+```python
+class Condition(_ContextManagerMixin):
+    def __init__(self, lock=None):
+        if lock is None:
+            lock = Lock()
+        self._lock = lock
+        self._waiters = collections.deque()
+
+    async def wait(self):
+        if not self.locked():
+            raise RuntimeError('cannot wait on un-acquired lock')
+        self.release()
+        cancelled = False
+        try:
+            fut = self._get_loop().create_future()
+            self._waiters.append(fut)
+            try:
+                await fut
+                return True
+            finally:
+                self._waiters.remove(fut)
+        except exceptions.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            cancelled_exc = None
+            try:
+                # re-acquire lock even if this task was cancelled
+                await self.acquire()
+            except exceptions.CancelledError as exc:
+                cancelled_exc = exc
+            if cancelled_exc is not None:
+                raise cancelled_exc
+            if cancelled:
+                raise exceptions.CancelledError()
+
+    def notify(self, n=1):
+        if not self.locked():
+            raise RuntimeError('cannot notify on un-acquired lock')
+        idx = 0
+        for fut in self._waiters:
+            if idx >= n:
+                break
+            if not fut.done():
+                idx += 1
+                fut.set_result(False)
+
+    def notify_all(self):
+        self.notify(len(self._waiters))
+```
+
+`Condition.wait` follows the classic monitor pattern: release the
+underlying lock, suspend on a `Future`, and re-acquire the lock before
+returning. The `finally` block re-acquires unconditionally, even if the
+coroutine was cancelled, to preserve the invariant that a caller of
+`wait` holds the lock when `wait` returns (or raises). This matches the
+behaviour of `threading.Condition.wait`.
+
+`notify` resolves up to `n` non-done waiters. The woken coroutines do not
+run immediately; they are scheduled to resume after the caller releases
+the lock (typically by exiting the `async with` block). This prevents a
+notified coroutine from re-acquiring the lock while the notifier still
+holds it.
+
+## gopy mirror
+
+`module/asyncio/` is pending. Each primitive maps to a Go struct with a
+`_waiters` field of type `[]*Future`. `Lock` adds a `_locked bool`.
+`Event` adds a `_value bool`. `Semaphore` adds a `_value int`. The
+`acquire` coroutines map to Go functions that return a `*Future` when
+they need to suspend, matching gopy's coroutine protocol. The
+`_ContextManagerMixin` async context manager protocol maps to the
+`__aenter__`/`__aexit__` methods already supported by gopy's type system.
+
+## CPython 3.14 changes
+
+- The `loop` parameter removed from all five class constructors
+  (hard-removed; deprecated since 3.8, emitted `DeprecationWarning` in
+  3.10).
+- `Lock`, `Event`, `Condition`, `Semaphore`, and `BoundedSemaphore` all
+  gained `__class_getitem__` via `types.GenericAlias` support, allowing
+  `Lock[int]` style annotations without raising `TypeError`.
+- Cancellation handling in `Condition.wait` was tightened to avoid
+  swallowing `CancelledError` when re-acquiring the lock also raises
+  `CancelledError` (fixed in 3.12, stable in 3.14).

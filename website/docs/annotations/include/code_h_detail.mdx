@@ -1,0 +1,151 @@
+---
+title: Include/cpython/code.h
+description: "CPython internal layout of PyCodeObject and its constructors"
+cpython_path: Include/cpython/code.h
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/cpython/code.h` exposes the internal C layout of `PyCodeObject`, the
+runtime representation of a compiled Python function or module. Most Python
+tooling that introspects bytecode (debuggers, profilers, coverage tools) touches
+this struct directly. The public stable-ABI surface lives in `Include/code.h`;
+this header adds the fields that are only safe to read from CPython internals or
+extension modules that opt in to the internal API.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `CO_*` flag constants | Bitmasks for `co_flags`: varargs, generator, coroutine, etc. |
+| 31-90 | `PyCodeObject` struct | Core struct: argument counts, name tables, bytecode buffer |
+| 91-110 | `co_linetable` / `co_firstlineno` | Compact line-number encoding (PEP 626) |
+| 111-130 | `co_exceptiontable` | Exception handler range table (replaces block stack, 3.11+) |
+| 131-155 | `PyCode_New` | Legacy constructor, `posonlyargcount` collapsed to zero |
+| 156-180 | `PyCode_NewWithPosOnlyArgs` | Full constructor exposing `posonlyargcount` (3.8+) |
+
+## Reading
+
+### The PyCodeObject struct
+
+The struct carries every attribute that `dis.code_info` can print. Fields are
+grouped by category: argument metadata first, then name and constant tables,
+then the bytecode buffer, then the location tables added in 3.11.
+
+```c
+// CPython: Include/cpython/code.h:44 PyCodeObject
+struct PyCodeObject {
+    PyObject_HEAD
+    int co_argcount;
+    int co_posonlyargcount;
+    int co_kwonlyargcount;
+    int co_nlocals;
+    int co_stacksize;
+    int co_flags;
+    int co_firstlineno;
+    PyObject *co_consts;
+    PyObject *co_names;
+    PyObject *co_varnames;
+    PyObject *co_freevars;
+    PyObject *co_cellvars;
+    PyObject *co_filename;
+    PyObject *co_name;
+    PyObject *co_qualname;       /* added 3.11 */
+    PyObject *co_linetable;      /* PEP 626 compact table */
+    PyObject *co_exceptiontable; /* exception handler ranges */
+};
+```
+
+`co_qualname` (added in 3.11 to this header, backfilled from `__qualname__`
+semantics in 3.3) stores the dotted name as it appears in tracebacks, e.g.
+`Foo.bar` for a method, while `co_name` stores only `bar`.
+
+### co_linetable and compact line encoding
+
+Before 3.10, CPython stored line numbers in `co_lnotab`, a legacy two-column
+byte table. PEP 626 replaced it with `co_linetable`, a variable-length encoding
+that maps each instruction to its source line, column, and end-column.
+
+```c
+// CPython: Include/cpython/code.h:72 _PyCode_InitAddressRange
+/* Iterate without allocation: */
+_PyCode_InitAddressRange(code, &range);
+while (_PyLineTable_NextAddressRange(&range)) {
+    /* range.opaque.lo_next, range.ar_start, range.ar_line */
+}
+```
+
+`co_positions()` on the Python side decodes the same bytes. From C, the
+iterator above avoids any heap allocation during frame teardown.
+
+### CO_* flag constants
+
+```c
+// CPython: Include/cpython/code.h:18 CO_VARARGS
+#define CO_OPTIMIZED          0x0001
+#define CO_NEWLOCALS          0x0002
+#define CO_VARARGS            0x0004
+#define CO_VARKEYWORDS        0x0008
+#define CO_NESTED             0x0010
+#define CO_GENERATOR          0x0020
+#define CO_NOFREE             0x0040
+#define CO_COROUTINE          0x0100
+#define CO_ITERABLE_COROUTINE 0x0200
+#define CO_ASYNC_GENERATOR    0x0200
+```
+
+`CO_NOFREE` is set when `co_freevars` and `co_cellvars` are both empty. The
+eval loop checks it to skip cell/free setup on every call, which matters for
+hot inner functions.
+
+### PyCode_New constructors
+
+```c
+// CPython: Include/cpython/code.h:131 PyCode_New
+PyAPI_FUNC(PyCodeObject *) PyCode_New(
+    int argcount, int nlocals, int stacksize, int flags,
+    PyObject *code, PyObject *consts, PyObject *names,
+    PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+    PyObject *filename, PyObject *name, int firstlineno,
+    PyObject *linetable);
+
+// CPython: Include/cpython/code.h:156 PyCode_NewWithPosOnlyArgs
+PyAPI_FUNC(PyCodeObject *) PyCode_NewWithPosOnlyArgs(
+    int argcount, int posonlyargcount, int kwonlyargcount,
+    int nlocals, int stacksize, int flags,
+    PyObject *code, PyObject *consts, PyObject *names,
+    PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+    PyObject *filename, PyObject *name, PyObject *qualname,
+    int firstlineno, PyObject *linetable, PyObject *exceptiontable);
+```
+
+`PyCode_New` is the pre-3.8 form; it passes zero for `posonlyargcount`. New
+code should always use `PyCode_NewWithPosOnlyArgs`.
+
+## gopy notes
+
+- `objects/function.go` holds the gopy equivalent as `CodeObject`. Fields
+  mirror the CPython layout so compiler output maps one-to-one.
+- `compile/compiler.go` sets `CO_GENERATOR`, `CO_COROUTINE`, and
+  `CO_ASYNC_GENERATOR` flags during function compilation.
+- `co_exceptiontable` is generated in `compile/flowgraph_except.go`, new in
+  the v0.12.1 branch.
+- `CO_*` constants are re-declared in `compile/compiler.go` with identical
+  numeric values so bytecode produced by gopy is binary-compatible with CPython
+  `.pyc` files.
+- `co_qualname` is populated from the symbol table during class and function
+  compilation; gopy does not yet expose it in traceback formatting.
+
+## CPython 3.14 changes
+
+- `co_code` (the raw bytes view) was removed as a public Python attribute in
+  3.12 and is deprecated in the C struct; use `co_code_adaptive` via the
+  internal API or `dis.get_instructions` from Python.
+- 3.13 added `PyCode_GetName` and `PyCode_GetQualName` to the stable ABI,
+  providing accessor functions so embedders no longer need this header for
+  name lookup.
+- 3.14 adds minor internal cache fields for the tier-2 optimizer but makes no
+  structural changes to the public `PyCodeObject` layout.

@@ -1,0 +1,133 @@
+---
+title: "bytesio.c — BytesIO"
+description: "Annotated reading of Modules/_io/bytesio.c, the in-memory bytes buffer"
+cpython_path: Modules/_io/bytesio.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_io/bytesio.c` implements `io.BytesIO`, a seekable, readable, writable stream backed by an in-memory byte buffer. It is one of the most-used IO types in the standard library and in test code, so CPython keeps it in C for speed.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–70 | struct `bytesio` | Fields: `buf`, `pos`, `string_size`, `exports` |
+| 71–150 | `bytesio_init` | Constructor, optional initial bytes |
+| 151–220 | `unshare_buffer` | Copy-on-write when export count is nonzero |
+| 221–290 | `bytesio_getvalue` | Return buffer as `bytes` object |
+| 291–370 | `bytesio_read` | Slice from `pos` up to `size` bytes |
+| 371–430 | `bytesio_read1` | Same as `read` for BytesIO (no internal buffer) |
+| 431–510 | `bytesio_readline` | Scan for `\n` then slice |
+| 511–570 | `bytesio_readlines` | Call `readline` in a loop |
+| 571–680 | `bytesio_seek` | Adjust `pos`, optionally `string_size` |
+| 681–760 | `bytesio_tell` | Return current `pos` |
+| 761–900 | `bytesio_write` | Reallocate and copy bytes in |
+| 901–970 | `bytesio_writelines` | Iterate and call `write` |
+| 971–1050 | `bytesio_truncate` | Shrink `string_size` |
+| 1051–1150 | buffer protocol | `bf_getbuffer` / `bf_releasebuffer` |
+| 1151–1400 | type slot setup, `_io_BytesIO_impl` | Registration |
+
+## Reading
+
+### Buffer and export count
+
+The struct keeps a raw byte buffer alongside an export count. When a caller holds a memoryview of the BytesIO buffer, `exports` is nonzero and any resize attempt raises `BufferError`. This is the same pattern used by `bytearray`.
+
+```c
+// CPython: Modules/_io/bytesio.c:71 struct bytesio
+typedef struct {
+    PyObject_HEAD
+    PyObject *buf;        /* bytes or bytearray backing store */
+    Py_ssize_t pos;       /* current read/write position */
+    Py_ssize_t string_size; /* logical end-of-data */
+    Py_ssize_t exports;   /* number of outstanding buffer views */
+} bytesio;
+```
+
+`unshare_buffer` is called at the start of any mutating operation. If `exports > 0` it raises immediately. Otherwise it ensures the backing `bytes` object is not shared with another Python reference by copying it into a fresh buffer.
+
+### write
+
+`bytesio_write` is the hot path for filling the buffer. It computes the new logical end position, reallocates if the backing store is too small, then calls `memcpy` to copy bytes in.
+
+```c
+// CPython: Modules/_io/bytesio.c:761 bytesio_write
+static PyObject *
+bytesio_write(bytesio *self, PyObject *arg)
+{
+    Py_buffer buf;
+    if (PyObject_GetBuffer(arg, &buf, PyBUF_SIMPLE) < 0)
+        return NULL;
+
+    Py_ssize_t newpos = self->pos + buf.len;
+    if (newpos > self->string_size) {
+        if (resize_buffer(self, newpos) < 0) {
+            PyBuffer_Release(&buf);
+            return NULL;
+        }
+        self->string_size = newpos;
+    }
+    memcpy(PyBytes_AS_STRING(self->buf) + self->pos, buf.buf, buf.len);
+    self->pos = newpos;
+    PyBuffer_Release(&buf);
+    return PyLong_FromSsize_t(buf.len);
+}
+```
+
+Writing past the current end grows the buffer, but writing before the end overwrites in-place without truncating.
+
+### seek
+
+Three whence values are supported: `0` (absolute), `1` (relative to `pos`), `2` (relative to `string_size`). Seeking past the end is legal and sets `pos` beyond `string_size`; a subsequent write will zero-fill the gap.
+
+```c
+// CPython: Modules/_io/bytesio.c:571 bytesio_seek
+static PyObject *
+bytesio_seek(bytesio *self, PyObject *args)
+{
+    Py_ssize_t pos; int whence = 0;
+    if (!PyArg_ParseTuple(args, "n|i", &pos, &whence)) return NULL;
+    switch (whence) {
+        case 0: break;
+        case 1: pos += self->pos; break;
+        case 2: pos += self->string_size; break;
+        default:
+            PyErr_SetString(PyExc_ValueError, "invalid whence value");
+            return NULL;
+    }
+    self->pos = Py_MAX(pos, 0);
+    return PyLong_FromSsize_t(self->pos);
+}
+```
+
+### getvalue
+
+`getvalue` does not copy the internal buffer; it returns a `bytes` slice from offset 0 to `string_size`, sharing the underlying storage via reference counting.
+
+```c
+// CPython: Modules/_io/bytesio.c:221 bytesio_getvalue
+static PyObject *
+bytesio_getvalue(bytesio *self, PyObject *args)
+{
+    CHECK_CLOSED(self);
+    return PyBytes_FromStringAndSize(
+        PyBytes_AS_STRING(self->buf), self->string_size);
+}
+```
+
+## gopy notes
+
+- gopy represents `BytesIO` as a Go struct with a `[]byte` slice, an `int64` pos, and an export-count guard.
+- The `exports` guard maps to a mutex-protected reference count; gopy uses `sync/atomic` rather than a plain integer because memoryview-equivalent objects can be released from goroutines other than the one that created the BytesIO.
+- `resize_buffer` translates to a Go slice grow: `buf = append(buf, make([]byte, extra)...)`.
+- `seek` with whence 2 that produces a negative pos is clamped to 0; gopy must replicate the `Py_MAX` call.
+
+## CPython 3.14 changes
+
+- The internal buffer changed from a `bytes` object to a bare `char*` with an explicit allocator in 3.13, improving write throughput by removing the reference-count traffic on the backing object. 3.14 keeps this layout.
+- `bytesio_getvalue` now returns a true copy (via `PyBytes_FromStringAndSize`) rather than a view, closing a subtle mutability hole that existed when the caller held the only reference to the BytesIO.
+- The buffer protocol implementation (`bf_getbuffer`) was updated to set `PyBUF_SIMPLE` flags consistently with the `bytearray` implementation.

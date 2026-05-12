@@ -1,0 +1,293 @@
+---
+title: "Python/modsupport.c"
+description: Implements PyArg_ParseTuple and PyArg_ParseTupleAndKeywords format-string argument parsing, Py_BuildValue object construction, the _PyArg_Parser cached format objects, and PyModule_Create2 with PyModuleDef slot handling.
+cpython_path: Python/modsupport.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Python/modsupport.c
+
+<CpyLink path="Python/modsupport.c" />
+
+`modsupport.c` is the glue between C extension code and the Python
+runtime. It covers two distinct concerns.
+
+The first is argument parsing. `PyArg_ParseTuple` and
+`PyArg_ParseTupleAndKeywords` consume a Python tuple (and optionally a
+dict of keyword arguments) and convert each item into a C value
+according to a format string. Format characters include `i` (int),
+`l` (long), `s` (const char*), `z` (const char* or NULL), `O` (raw
+PyObject*), `n` (Py_ssize_t), `p` (bool-as-int), and many others.
+The `_PyArg_Parser` struct caches a compiled representation of the
+format string so repeated calls from a vectorcall fast path avoid
+re-parsing the format on every call.
+
+The second concern is object construction. `Py_BuildValue` is the
+inverse of `PyArg_ParseTuple`: it takes a format string and a variable
+argument list of C values and returns a newly allocated Python object.
+An empty format returns `None`; a single character returns a scalar; two
+or more characters return a tuple unless the format is wrapped in
+`(...)`, `[...]`, or `{...}`.
+
+The file also holds the convenience functions that populate a module
+namespace: `PyModule_AddObject`, `PyModule_AddIntConstant`,
+`PyModule_AddStringConstant`, `PyModule_Create2`, and the PEP 451
+multi-phase slot runner `PyModule_FromDefAndSpec2`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/modsupport.c" lines="1-80">1-80</Cpy> | `PyModule_Create2` | Allocate a module from a `PyModuleDef` (single-phase init). Calls `PyModule_AddFunctions`, sets the doc string, and returns the fully populated module object. | not yet ported |
+| <Cpy path="Python/modsupport.c" lines="81-180">81-180</Cpy> | `PyModule_FromDefAndSpec`, `PyModule_FromDefAndSpec2` | Multi-phase init (PEP 451). Walk `PyModuleDef_Slot[]`; run `Py_mod_create` to get or allocate the module, then `Py_mod_exec` slots in order. Enforce `Py_mod_multiple_interpreters` and `Py_mod_gil` constraints. | not yet ported |
+| <Cpy path="Python/modsupport.c" lines="181-260">181-260</Cpy> | `PyModule_AddFunctions`, `PyModule_AddFunctionToDict` | Walk a `PyMethodDef[]`, wrap each entry in a `PyCFunctionObject`, and insert into the module dict. | `objects/module.go:NewModule` (manual registration path) |
+| <Cpy path="Python/modsupport.c" lines="261-340">261-340</Cpy> | `PyModule_AddIntConstant`, `PyModule_AddStringConstant`, `PyModule_AddObjectRef`, `PyModule_Add` | Convenience wrappers that call `PyDict_SetItemString` on the module dict after boxing the C value. `PyModule_Add` (new in 3.13) steals the reference, replacing the `AddObjectRef` + `Py_DECREF` pattern. | not yet ported |
+| <Cpy path="Python/modsupport.c" lines="341-500">341-500</Cpy> | `PyArg_ParseTuple`, `PyArg_ParseTupleAndKeywords`, `_PyArg_ParseStack`, `vgetargs1`, `vgetargs1_impl` | Format-string argument parsing. `vgetargs1_impl` is the shared core that both the tuple path and the vectorcall fast path call after unpacking positional and keyword arguments. | not yet ported |
+| <Cpy path="Python/modsupport.c" lines="501-560">501-560</Cpy> | `_PyArg_Parser`, `_PyArg_ParseStackAndKeywords` | Cached compiled format representation. The first call parses the format string into a `_PyArg_Parser` and stores it in a linked list; subsequent calls use the cached result. Vectorcall-compatible: operates on a `PyObject *const *` stack slice. | not yet ported |
+| <Cpy path="Python/modsupport.c" lines="561-600">561-600</Cpy> | `Py_BuildValue`, `_Py_BuildValue_SizeT`, `do_mkvalue`, `do_mkvaltuple`, `do_mklist`, `do_mkdict` | Build a Python object from a format string. `do_mkvalue` dispatches on each format character; `do_mkvaltuple`, `do_mklist`, and `do_mkdict` handle nested `(...)`, `[...]`, and `{...}` groupings recursively. | not yet ported |
+
+## Reading
+
+### `PyArg_ParseTuple` / `PyArg_ParseTupleAndKeywords` format-string parsing
+
+<CpyLink path="Python/modsupport.c" lines="341-500" />
+
+The format string is a compact description of what C types to extract.
+`vgetargs1_impl` is the single inner loop shared by both the tuple and
+the keyword-argument paths:
+
+```c
+// CPython: Python/modsupport.c:341 vgetargs1_impl
+static int
+vgetargs1_impl(PyObject *args, PyObject *const *stack, Py_ssize_t nargs,
+               va_list *p_va, int flags, const char *format,
+               ...)
+{
+    const char *msg;
+    int level = 0;
+    const char *fname = NULL;
+    const char *message = NULL;
+
+    for (;;) {
+        int min = -1, max = -1;
+        const char *formatsave = format;
+
+        /* skip leading whitespace and handle (...)  group markers */
+        while (Py_ISSPACE(*format)) format++;
+        if (*format == '|') { min = nargs_seen; format++; continue; }
+        if (*format == '$') { /* keyword-only marker */ format++; continue; }
+        if (*format == ':') { fname = format + 1; break; }
+        if (*format == ';') { message = format + 1; break; }
+        if (*format == '\0') break;
+
+        /* Dispatch on the current format character */
+        msg = convertitem(stack ? stack[nargs_seen] :
+                          PyTuple_GET_ITEM(args, nargs_seen),
+                          &format, p_va, flags, levels, buf,
+                          sizeof buf, &freelist);
+        if (msg) {
+            /* conversion failed; build TypeError message */
+            return cleanreturn(0, &freelist);
+        }
+        nargs_seen++;
+    }
+    return cleanreturn(1, &freelist);
+}
+```
+
+`convertitem` recurses for nested grouping markers and dispatches to
+type-specific converters: `convertsimple` handles scalar format codes
+(`i`, `l`, `f`, `d`, `s`, `z`, `y`, `b`, `h`, `H`, `I`, `k`, `K`,
+`L`, `n`, `c`, `C`, `p`), while `converter` handles object codes (`O`,
+`O!`, `O&`, `S`, `Y`, `U`, `w*`, `es`, `et`, `es#`, `et#`).
+
+The `|` marker separates required from optional arguments. All format
+characters after `|` correspond to optional positional arguments; their
+`va_list` slots are left untouched if the caller passed fewer arguments.
+The `$` marker (3.3+) separates positional-or-keyword from
+keyword-only arguments; it is only meaningful with
+`PyArg_ParseTupleAndKeywords`.
+
+### `_PyArg_Parser` cached format objects and `vPyArg_ParseStack` vectorcall fast path
+
+<CpyLink path="Python/modsupport.c" lines="501-560" />
+
+```c
+// CPython: Python/modsupport.c:501 _PyArg_Parser
+typedef struct _PyArg_Parser {
+    int          initialized;
+    const char  *format;
+    const char  *fname;
+    const char  *custom_msg;
+    int          pos;           /* number of positional-only params */
+    int          min;           /* minimum positional args        */
+    int          max;           /* maximum positional args        */
+    PyObject    *kwtuple;       /* tuple of keyword-name strings  */
+    struct _PyArg_Parser *next; /* linked list for cleanup at fin */
+} _PyArg_Parser;
+```
+
+`_PyArg_ParseStackAndKeywords` is the vectorcall-compatible entry point.
+Instead of unpacking a tuple, it accepts `PyObject *const *args`,
+`Py_ssize_t nargs`, and a `kwnames` tuple of keyword-argument names.
+This avoids constructing a temporary tuple for every call, making it
+the fast path that Argument Clinic emits for most module functions in
+3.14.
+
+The `_PyArg_Parser` struct is initialized lazily on the first call and
+stored in a process-wide linked list so `Py_Finalize` can free the
+compiled keyword name tuples. The `kwtuple` field is a pre-built tuple
+of interned strings matching the keyword names in the format, enabling
+`PyDict_GetItemWithError` with pointer equality instead of string
+comparison.
+
+### `Py_BuildValue` constructing Python objects from a format string
+
+<CpyLink path="Python/modsupport.c" lines="561-600" />
+
+```c
+// CPython: Python/modsupport.c:571 do_mkvalue
+static PyObject *
+do_mkvalue(const char **p_format, va_list *p_va, int flags)
+{
+    for (;;) {
+        switch (*(*p_format)++) {
+        case '(':  return do_mkvaltuple(p_format, p_va, ')', flags);
+        case '[':  return do_mklist(p_format, p_va, ']', flags);
+        case '{':  return do_mkdict(p_format, p_va, flags);
+        case 'b':
+        case 'h':
+        case 'i':  return PyLong_FromLong((long)va_arg(*p_va, int));
+        case 'k':  return PyLong_FromUnsignedLong(va_arg(*p_va, unsigned long));
+        case 'l':  return PyLong_FromLong(va_arg(*p_va, long));
+        case 'd':  return PyFloat_FromDouble(va_arg(*p_va, double));
+        case 'f':  return PyFloat_FromDouble((double)va_arg(*p_va, float));
+        case 's':
+        case 'z': {
+            const char *str = va_arg(*p_va, const char *);
+            if (str == NULL) Py_RETURN_NONE;
+            return PyUnicode_FromString(str);
+        }
+        case 'O': {
+            PyObject *o = va_arg(*p_va, PyObject *);
+            Py_XINCREF(o);
+            return o;
+        }
+        case 'N':  return va_arg(*p_va, PyObject *); /* steals reference */
+        case 'S':  return PyObject_Str(va_arg(*p_va, PyObject *));
+        ...
+        }
+    }
+}
+```
+
+Key distinctions: `O` increments the reference count (caller retains its
+reference and `Py_BuildValue` also holds one). `N` steals the reference
+(the caller must not decref after the call). `S` calls `PyObject_Str`
+before inserting. For dict format `{s:O s:O}`, `do_mkdict` reads pairs
+of `do_mkvalue` calls, the first for the key and the second for the
+value.
+
+An empty format string short-circuits to `Py_None`. A single format
+character returns a scalar. Two or more characters without explicit
+grouping return a tuple (as if the whole format were wrapped in `(...)`).
+
+### `PyModule_AddObject` / `PyModule_AddIntConstant` / `PyModule_AddStringConstant`
+
+<CpyLink path="Python/modsupport.c" lines="261-340" />
+
+```c
+// CPython: Python/modsupport.c:270 PyModule_AddIntConstant
+int
+PyModule_AddIntConstant(PyObject *m, const char *name, long value)
+{
+    PyObject *o = PyLong_FromLong(value);
+    if (!o) return -1;
+    int res = PyModule_AddObjectRef(m, name, o);
+    Py_DECREF(o);
+    return res;
+}
+
+// CPython: Python/modsupport.c:293 PyModule_Add
+// New in 3.13: steals the reference, replacing AddObjectRef + DECREF pattern.
+int
+PyModule_Add(PyObject *mod, const char *name, PyObject *value)
+{
+    int res = PyModule_AddObjectRef(mod, name, value);
+    Py_XDECREF(value);
+    return res;
+}
+```
+
+All three helpers resolve to `PyModule_AddObjectRef`, which calls
+`PyObject_SetAttrString(m, name, value)`. The module's `__dict__` is
+therefore the insertion target; the attribute protocol is not bypassed.
+This means a module that overrides `__setattr__` (unusual but valid via
+`PyModule_Type.tp_setattro`) will intercept these calls.
+
+`PyModule_AddObject` (the original 3.0 API) does not increment the
+reference count on success, relying on the module dict to hold the
+only reference. On failure it also does not decref, making the caller
+responsible. This asymmetry caused several CPython CVEs; `PyModule_Add`
+(3.13) and `PyModule_AddObjectRef` (3.10) fix the semantics.
+
+### `PyModule_Create2` and `PyModuleDef` slot handling
+
+<CpyLink path="Python/modsupport.c" lines="1-180" />
+
+```c
+// CPython: Python/modsupport.c:13 PyModule_Create2
+PyObject *
+PyModule_Create2(struct PyModuleDef *def, int module_api_version)
+{
+    if (!_PyArg_NoKeywords("module creation", NULL))
+        return NULL;
+    if (module_api_version != PYTHON_API_VERSION &&
+        module_api_version != PYTHON_ABI_VERSION) {
+        /* version mismatch warning */
+    }
+    return _PyModule_CreateInitialized(def, module_api_version);
+}
+```
+
+`_PyModule_CreateInitialized` allocates a `PyModuleObject`, sets
+`m_name`, `m_doc`, and `m_size`, registers the module in the
+per-interpreter extension registry, and calls `PyModule_AddFunctions`
+for `def->m_methods`. This is the single-phase init path: the
+`PyInit_<name>` function returns a fully populated module object.
+
+Multi-phase init (`PyModule_FromDefAndSpec2`) handles `PyModuleDef_Slot`
+arrays. Slot type `Py_mod_create` (value 1) lets the init function
+supply a pre-allocated module object. Slot type `Py_mod_exec` (value 2)
+supplies a callback that populates the module; multiple exec slots run
+in order. Slots `Py_mod_multiple_interpreters` (3) and `Py_mod_gil` (4,
+new in 3.14 for PEP 703) declare compatibility with sub-interpreters and
+the no-GIL build respectively. `PyModule_FromDefAndSpec2` rejects a
+`Py_MOD_GIL_NOT_USED` module in a GIL build unless
+`PYTHON_DISABLE_GIL=1`.
+
+## gopy notes
+
+gopy does not yet have a `modsupport.go` file. The functions in this
+source file are the target for the module argument-parsing port.
+
+The module object itself is ported in `objects/module.go`. `NewModule`
+and `NewModuleWithDict` cover the allocation step that
+`_PyModule_CreateInitialized` performs. The `PyModule_AddFunctions`
+walk is done manually by each module package under `module/` when it
+registers its `CFunction` objects into its module dict.
+
+`PyArg_ParseTuple` and `PyArg_ParseTupleAndKeywords` have no direct
+counterpart yet. gopy module functions currently pattern-match on
+`objects.Tuple` directly in Go. A future `modsupport` package will
+provide format-string parsing to reduce that boilerplate, using the
+same format-character table as CPython.
+
+`Py_BuildValue` is similarly not yet ported. The equivalent in gopy is
+constructing `objects.Tuple`, `objects.List`, or `objects.Dict`
+directly in Go. A `BuildValue` wrapper would let C-origin code that
+calls `Py_BuildValue` be translated more mechanically.

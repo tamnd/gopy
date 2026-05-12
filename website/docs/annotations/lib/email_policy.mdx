@@ -1,0 +1,100 @@
+---
+title: Lib/email/policy.py
+description: Policy base class and the Compat32 / EmailPolicy families. Controls header folding, encoding, line length, and whether headers come back as raw strings or typed objects.
+cpython_path: Lib/email/policy.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/email/policy.py`
+
+<CpyLink path="Lib/email/policy.py" />
+
+`Lib/email/policy.py` defines the `Policy` base class and the two concrete families:
+`Compat32` (the legacy default that predates Python 3.3) and `EmailPolicy` (the modern API
+that underpins `email.message.EmailMessage`). Every call that reads or writes a header goes
+through a policy object, so the policy layer controls folding, encoding, line length, and
+whether headers come back as raw strings or typed objects.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-120 | `Policy` | Abstract base; `clone()`, `handle_defect`, and hook protocol |
+| 121-240 | `Compat32` | Legacy policy; near-identity header transforms |
+| 241-380 | `EmailPolicy` | Modern policy; delegates to header_factory for typed header objects |
+| 381-400 | `SMTP`, `SMTPUTF8`, `HTTP`, `default` | Ready-made policy instances |
+
+## Reading
+
+### Policy attributes and immutability
+
+`Policy` instances are meant to be immutable after construction. The `clone()` method
+returns a new instance with selected attributes overridden, rather than mutating in place.
+
+```python
+# CPython: Lib/email/policy.py:44 Policy (class body)
+class Policy:
+    max_line_length = 998    # RFC 5322 hard limit
+    linesep = '\n'
+    cte_type = '8bit'
+    raise_on_defect = False
+    mangle_from_ = False
+    utf8 = False
+```
+
+`clone()` builds a new instance by passing the existing `__dict__` merged with the caller's
+overrides into the constructor.
+
+### `header_store_parse` and `header_fetch_parse`
+
+The two parse hooks are where `EmailPolicy` diverges from `Compat32`.
+
+```python
+# CPython: Lib/email/policy.py:300 EmailPolicy.header_store_parse
+def header_store_parse(self, name, value):
+    if hasattr(value, 'name') and value.name.lower() == name.lower():
+        return (name, value)
+    if isinstance(value, str) and len(value.splitlines()) > 1:
+        raise ValueError("Header values may not contain linefeed "
+                         "or carriage return characters")
+    return (name, self.header_factory(name, ''.join(value.splitlines())))
+
+# CPython: Lib/email/policy.py:315 EmailPolicy.header_fetch_parse
+def header_fetch_parse(self, name, value):
+    if hasattr(value, 'name'):
+        return value
+    return self.header_factory(name, value.strip())
+```
+
+Under `Compat32`, both hooks are essentially no-ops that return the raw string unchanged,
+preserving the old behaviour where `msg['Subject']` is always a plain `str`.
+
+### Preset policies
+
+The module exposes four ready-made `EmailPolicy` instances created at module level.
+
+```python
+# CPython: Lib/email/policy.py:381 module-level presets
+SMTP = EmailPolicy(linesep='\r\n')
+SMTPUTF8 = EmailPolicy(linesep='\r\n', utf8=True)
+HTTP = EmailPolicy(linesep='\r\n', max_line_length=None, cte_type='8bit')
+default = EmailPolicy()
+```
+
+`SMTPUTF8` sets `utf8=True`, allowing UTF-8 in headers without RFC 2047 encoding. `HTTP`
+sets `max_line_length=None`, disabling line folding since HTTP headers must not be folded.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/email/policy`. The Go side will
+represent `Policy` attributes as a struct with value-copy semantics for `clone()`.
+
+## CPython 3.14 changes
+
+Python 3.14 deprecated the `Compat32` policy. New code is expected to use one of the
+`EmailPolicy`-based presets. The deprecation only raises a `DeprecationWarning` when a
+`Message` object is constructed without an explicit policy argument.

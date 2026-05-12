@@ -1,0 +1,85 @@
+---
+title: Lib/abc.py
+description: Annotated reading of the Python abstract base class machinery that wraps the _abc C extension.
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-20 | module header / imports | imports `_abc`, `functools`, sets up `__all__` |
+| 21-40 | `abstractmethod` | decorator that sets `__isabstractmethod__ = True` |
+| 41-55 | `abstractclassmethod` | deprecated; wraps `classmethod` + sets flag |
+| 56-70 | `abstractstaticmethod` | deprecated; wraps `staticmethod` + sets flag |
+| 71-90 | `abstractproperty` | deprecated; subclass of `property` + sets flag |
+| 91-150 | `ABCMeta.__new__` | collects abstract methods, calls `_abc_init` |
+| 151-170 | `ABCMeta.register` | adds class to `_abc_registry`, bumps cache token |
+| 171-185 | `ABCMeta.__instancecheck__` | delegates to `_abc_instancecheck` |
+| 186-195 | `ABCMeta.__subclasscheck__` | delegates to `_abc_subclasscheck` |
+| 196-200 | `ABC` convenience class | `class ABC(metaclass=ABCMeta): ...` |
+
+## Reading
+
+### abstractmethod decorator
+
+The decorator itself is only a few lines. The real work happens later when `ABCMeta.__new__` scans the class namespace.
+
+```python
+def abstractmethod(funcobj):
+    funcobj.__isabstractmethod__ = True
+    return funcobj
+```
+
+Any callable with `__isabstractmethod__ = True` in a class body causes `ABCMeta.__new__` to treat that class as abstract. That includes properties, classmethods, and staticmethods, which is why the deprecated wrappers below exist.
+
+### ABCMeta.__new__ and _abc_init
+
+`ABCMeta.__new__` collects every name in the namespace whose value carries `__isabstractmethod__ = True`, merges the sets from all bases, and stores the result in `__abstractmethods__`. The interpreter then prevents direct instantiation of any class whose `__abstractmethods__` is non-empty.
+
+```python
+class ABCMeta(type):
+    def __new__(mcls, name, bases, namespace, /, **kwargs):
+        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        _abc_init(cls)          # initialises _abc_data C struct on cls
+        return cls
+```
+
+`_abc_init` (in `Modules/_abc.c`) allocates the `_abc_data` struct that holds the registry weak-ref set, the cache, the negative cache, and the cache token snapshot.
+
+### register() and cache invalidation
+
+```python
+def register(cls, subclass):
+    # _abc_register is the C-level implementation
+    return _abc_register(cls, subclass)
+```
+
+Internally `_abc_register` adds `subclass` to the `_abc_registry` weak-ref set and calls `_get_dump(abc_data)->cache_version = abc_invalidation_counter`, so every subsequent `issubclass` call re-walks the MRO instead of returning a cached answer. `get_cache_token()` exposes the global `abc_invalidation_counter` so callers can detect when any ABC's registry has changed.
+
+### __instancecheck__ and __subclasscheck__
+
+Both methods delegate entirely to C helpers.
+
+```python
+def __instancecheck__(cls, instance):
+    return _abc_instancecheck(cls, instance)
+
+def __subclasscheck__(cls, subclass):
+    return _abc_subclasscheck(cls, subclass)
+```
+
+`_abc_subclasscheck` checks four places in order: the positive cache, the negative cache, direct subclassing (via the normal MRO), and finally the registered virtual subclasses in `_abc_registry`. A hit in the positive cache is a single pointer comparison, which is why ABC-backed type checks stay fast after the first call.
+
+## gopy notes
+
+- `objects/type.go` is the natural home for the `__abstractmethods__` enforcement: before `type_call` allocates an instance it checks that the set is absent or empty.
+- `_abc_init` needs a per-type side-table. In gopy the equivalent is a field on `*TypeObject` (or a `sync.Map` keyed by type pointer) holding registry, cache, and negative-cache sets.
+- `register()` must invalidate any cached subclass answers; a global monotonic counter mirroring `abc_invalidation_counter` is the simplest approach.
+- The deprecated wrappers (`abstractclassmethod`, `abstractstaticmethod`, `abstractproperty`) do not need a C counterpart; pure-Go struct embedding of the existing classmethod/staticmethod/property objects works.
+- `get_cache_token()` is a one-liner once the global counter exists.

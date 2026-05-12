@@ -1,0 +1,97 @@
+---
+title: complexobject.c
+description: "CPython implementation of the complex number type and Py_complex arithmetic helpers"
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 913
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/complexobject.c` implements Python's built-in `complex` type. It owns two distinct layers: a set of pure-C arithmetic helpers that operate on `Py_complex` structs, and the Python-facing type object with its slots, `__new__`, `__format__`, and rich-compare support.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 31 | `_Py_c_sum` | Add two `Py_complex` values |
+| 47 | `_Py_c_diff` | Subtract two `Py_complex` values |
+| 67 | `_Py_c_prod` | Multiply two `Py_complex` values |
+| 130 | `_Py_c_quot` | Divide using Smith/CACM-116 algorithm to avoid spurious overflow |
+| 241 | `_Py_c_pow` | Raise a complex to a complex power via `exp`/`log` |
+| 275 | `_Py_c_abs` | Compute the modulus via `hypot` |
+| 357 | `PyComplex_FromDoubles` | Public C API: build a `complex` object from two `double` values |
+| 370 | `PyComplex_RealAsDouble` | Extract the real part, calling `__complex__` if needed |
+| 390 | `PyComplex_ImagAsDouble` | Extract the imaginary part |
+| 460 | `complex_repr` | Format as `(real+imagj)` or plain `realj` |
+| 507 | `complex_hash` | Hash using the same invariant as `float` and `int` |
+| 571 | `complex_richcompare` | Only `==` and `!=` are supported; others return `NotImplemented` |
+| 789 | `complex_subtype_from_string` | Parse a complex literal string for `complex("1+2j")` |
+| 857 | `complex___format___` | Implement `__format__` with the complex-specific format mini-language |
+| 902 | `complex_new_impl` | `__new__`: accept real/imag args or a single string, call `__complex__` |
+
+## Reading
+
+### C-level arithmetic helpers
+
+The helpers work on bare `Py_complex` structs and are callable from C without holding the GIL. Division uses the Smith algorithm to pivot on the larger of the two denominator components, avoiding catastrophic cancellation.
+
+```c
+// CPython: Objects/complexobject.c:31 _Py_c_sum
+Py_complex
+_Py_c_sum(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    r.real = a.real + b.real;
+    r.imag = a.imag + b.imag;
+    return r;
+}
+```
+
+### Division: Smith/CACM-116
+
+`_Py_c_quot` pivots on `abs_breal` vs `abs_bimag` before dividing, keeping intermediate values in a range where IEEE 754 double has headroom. `errno` is set to `EDOM` on a zero denominator, not an exception.
+
+```c
+// CPython: Objects/complexobject.c:130 _Py_c_quot
+Py_complex
+_Py_c_quot(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    const double abs_breal = b.real < 0 ? -b.real : b.real;
+    const double abs_bimag = b.imag < 0 ? -b.imag : b.imag;
+```
+
+### Constructor: `complex_new_impl`
+
+`complex_new_impl` (line 902) handles four input shapes: no args, a single numeric, a single string, and separate real/imag args. It calls `try_complex_special_method` to honor `__complex__` on arbitrary objects, then falls back to `__float__` or `__index__`. The string path delegates to `complex_subtype_from_string` (line 789).
+
+```c
+// CPython: Objects/complexobject.c:902 complex_new_impl
+static PyObject *
+complex_new_impl(PyTypeObject *type, PyObject *r, PyObject *i)
+{
+    PyObject *tmp;
+    int own_r = 0;
+    int cr_is_complex = 0;
+    int ci_is_complex = 0;
+
+    if (r == NULL) {
+        r = _PyLong_GetZero();
+    }
+    tmp = try_complex_special_method(r);
+```
+
+### Format spec
+
+`complex___format___` (line 857) parses the format spec independently for the real and imaginary parts, then reassembles the bracketed result. It raises `ValueError` if a fill character of `n` is mixed with a complex format.
+
+## gopy notes
+
+The six `_Py_c_*` helpers map cleanly to plain Go functions on a `Complex128` struct. gopy should expose them in `objects/complex.go` and keep `errno`-based error signalling for division and power, matching CPython's contract. The `__complex__` dunder lookup in `try_complex_special_method` is the same protocol path as `__float__`; both should go through the standard `LookupSpecial` helper.
+
+## CPython 3.14 changes
+
+- The call to `try_complex_special_method` for the real part is **deprecated** in 3.14 (visible in the comment at line 917). Passing an object that only defines `__complex__` as the `real` argument will raise a `DeprecationWarning`; the behavior will be removed in a future release.
+- `_Py_cr_sum` and `_Py_rc_sum` (mixed real/complex helpers) were added to support optimized paths in the bytecode compiler.

@@ -1,0 +1,98 @@
+---
+title: Lib/csv.py
+description: "Pure-Python wrapper around the C-accelerated _csv module: dialects, DictReader, DictWriter, and the Sniffer heuristic."
+cpython_path: Lib/csv.py
+cpython_version: "3.14"
+lines: 513
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/csv.py`
+
+<CpyLink path="Lib/csv.py" />
+
+`Lib/csv.py` is the public face of CPython's CSV subsystem. The heavy lifting (field quoting, escape handling, line termination) lives in the C extension `_csv`, which this module re-exports together with all named constants. The Python layer adds three things that the C extension does not provide: `Dialect` (a pure-Python base class for dialect objects), the dict-oriented wrappers `DictReader` and `DictWriter`, and `Sniffer`, a heuristic that infers delimiter and quoting style from a sample of raw text.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 67-72 | import block | Re-exports `Error`, `reader`, `writer`, dialect helpers, and all `QUOTE_*` constants from `_csv` |
+| 87-116 | `Dialect` | Pure-Python base class; delegates validation to `_csv.Dialect` |
+| 118-141 | `excel`, `excel_tab`, `unix_dialect` | Built-in dialect definitions, registered at module load |
+| 144-195 | `DictReader` | Iterator that maps CSV rows to dicts using a header row or supplied field names |
+| 198-230 | `DictWriter` | Writes dicts as CSV rows, enforcing the declared fieldnames |
+| 233-513 | `Sniffer` | Analyses a text sample to guess delimiter, quotechar, and whether a header row is present |
+
+## Reading
+
+### Dialect validation pattern
+
+Every `Dialect` subclass passes `self` to the C-level `_csv.Dialect` constructor purely to validate attribute types and combinations. The Python class carries placeholder `None` values for each attribute so that subclasses only need to override the ones they care about. If validation fails, the C constructor raises `TypeError`, and the Python wrapper re-raises it as a `csv.Error` to keep user tracebacks clean.
+
+```python
+# CPython: Lib/csv.py:111 Dialect._validate
+def _validate(self):
+    try:
+        _Dialect(self)
+    except TypeError as e:
+        raise Error(str(e)) from None
+```
+
+### DictReader lazy header loading
+
+`DictReader` defers reading the header row until it is actually needed. The `fieldnames` property calls `next(self.reader)` on the first access, which means opening a file and constructing a `DictReader` costs nothing if no rows are ever consumed. The property also keeps `line_num` in sync with the underlying reader after every access.
+
+```python
+# CPython: Lib/csv.py:159 DictReader.fieldnames
+@property
+def fieldnames(self):
+    if self._fieldnames is None:
+        try:
+            self._fieldnames = next(self.reader)
+        except StopIteration:
+            pass
+    self.line_num = self.reader.line_num
+    return self._fieldnames
+```
+
+### Sniffer two-pass delimiter detection
+
+`Sniffer.sniff` tries two independent strategies in order. The first, `_guess_quote_and_delimiter`, looks for quoted fields surrounded by a consistent character and uses the surrounding character as the delimiter. Only if that approach yields nothing does it fall back to `_guess_delimiter`, which builds a character-frequency table across lines and picks the character whose occurrence count is most consistent across rows. The fallback consumes data in 10-line chunks to bound memory use on large samples.
+
+```python
+# CPython: Lib/csv.py:243 Sniffer.sniff
+def sniff(self, sample, delimiters=None):
+    quotechar, doublequote, delimiter, skipinitialspace = \
+               self._guess_quote_and_delimiter(sample, delimiters)
+    if not delimiter:
+        delimiter, skipinitialspace = self._guess_delimiter(sample, delimiters)
+    if not delimiter:
+        raise Error("Could not determine delimiter")
+```
+
+### has_header voting algorithm
+
+`Sniffer.has_header` does not return a simple boolean from a single heuristic. It accumulates a signed integer vote across all detected columns: if a column's data rows are consistently a non-string type (integer, float, complex) but the header cell cannot be interpreted as that type, it adds one vote for "is a header". If the column is a uniform string length and the header length matches, it subtracts one vote. The final sign of the accumulated score is the answer.
+
+```python
+# CPython: Lib/csv.py:452 Sniffer.has_header
+def has_header(self, sample):
+    rdr = reader(StringIO(sample), self.sniff(sample))
+    header = next(rdr)
+    columns = len(header)
+    columnTypes = {}
+    for i in range(columns): columnTypes[i] = None
+    ...
+    return hasHeader > 0
+```
+
+## gopy notes
+
+The `_csv` C extension has not been ported to gopy. The planned package path is `module/csv/`. Because the C extension carries the performance-critical reader and writer state machines, the port should implement those as Go structs before tackling the pure-Python wrappers above. `DictReader`, `DictWriter`, `Sniffer`, and the `Dialect` hierarchy can then be ported as thin Go wrappers or left as pure interpreted Python once the underlying reader/writer ops are available.
+
+## CPython 3.14 changes
+
+CPython 3.14 added `QUOTE_STRINGS` and `QUOTE_NOTNULL` quoting modes (both now re-exported from `_csv` at lines 70-71). `DictReader.__init__` and `DictWriter.__init__` grew a guard that materialises any one-shot iterator passed as `fieldnames` into a list immediately, preventing the common bug where a generator is exhausted after the first row. The `unix_dialect` now defaults to `QUOTE_ALL` quoting to match the behaviour of Unix tools that always quote fields.

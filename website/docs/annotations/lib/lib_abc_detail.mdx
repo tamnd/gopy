@@ -1,0 +1,83 @@
+---
+title: Lib/abc.py
+description: "Abstract base class helpers: ABCMeta metaclass, ABC convenience base, abstractmethod, abstractclassmethod, abstractstaticmethod, and the register/subclasshook protocol."
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 184
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/abc.py`
+
+<CpyLink path="Lib/abc.py" />
+
+`Lib/abc.py` is the public surface of Python's abstract-base-class machinery. The real
+implementation lives in `_abc` (a C extension), while this file provides the Python-level
+decorators, metaclass, and the convenience `ABC` base class that most user code sees.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-25 | imports, `ABCMeta.__new__` | Delegates to `_abc_init` |
+| 26-80 | `ABCMeta` | Metaclass with `register`, `__subclasscheck__`, `__instancecheck__` |
+| 81-110 | `ABC` | Convenience base that sets `metaclass=ABCMeta` |
+| 111-160 | `abstractmethod` | Decorator that sets `__isabstractmethod__ = True` |
+| 161-184 | `abstractclassmethod`, `abstractstaticmethod`, `abstractproperty` | Deprecated combined decorators |
+
+## Reading
+
+### `ABCMeta` and the `_abc` C backend
+
+`ABCMeta.__new__` calls `_abc_init(cls)` immediately after the class is created by the
+normal `type.__new__` machinery. `_abc_init` sets up the per-class registry and cache that
+`__subclasscheck__` consults.
+
+```python
+# CPython: Lib/abc.py:27 ABCMeta.__new__
+class ABCMeta(type):
+    def __new__(mcls, name, bases, namespace, /, **kwargs):
+        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        _abc_init(cls)
+        return cls
+```
+
+### `register` and virtual subclasses
+
+`ABCMeta.register` records a class as a virtual subclass without modifying the class
+hierarchy. The bookkeeping lives entirely in the `_abc` C module; this wrapper just calls
+through and clears the negative cache.
+
+```python
+# CPython: Lib/abc.py:40 ABCMeta.register
+def register(cls, subclass):
+    return _abc_register(cls, subclass)
+```
+
+### `abstractmethod`
+
+Setting `__isabstractmethod__ = True` on a function is the only mechanism. `type.__new__`
+scans the namespace for functions with that attribute set to determine whether a class is
+abstract.
+
+```python
+# CPython: Lib/abc.py:116 abstractmethod
+def abstractmethod(funcobj):
+    funcobj.__isabstractmethod__ = True
+    return funcobj
+```
+
+### `__subclasshook__`
+
+If a class defines `__subclasshook__`, `ABCMeta.__subclasscheck__` calls it first. If it
+returns `NotImplemented`, the check falls through to the ordinary MRO walk and virtual
+subclass registry.
+
+## gopy notes
+
+Not yet ported. The `ABCMeta` metaclass requires the type system to support custom
+`__instancecheck__` and `__subclasscheck__` dispatch, which gopy's type layer handles
+through `objects/type.go`. A thin `module/abc/` wrapper can expose `ABC` and
+`abstractmethod` once that dispatch is stable.

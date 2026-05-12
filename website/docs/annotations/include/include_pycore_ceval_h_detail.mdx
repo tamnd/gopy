@@ -1,0 +1,120 @@
+---
+title: Include/internal/pycore_ceval.h
+description: "Internal header: eval-frame entry point, per-interpreter eval state, and pending-call machinery"
+cpython_path: Include/internal/pycore_ceval.h
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+This page annotates <CpyLink path="Include/internal/pycore_ceval.h" />, the internal
+header that wires together the eval-frame entry point, the per-interpreter eval-state
+struct, pending-call scheduling, and the eval-call statistics counters. Nothing in
+this file is part of the stable ABI. All identifiers carry the `_Py` or `_PyEval`
+prefix and are consumed exclusively by `Python/ceval.c` and the specializing
+adaptive interpreter.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-20 | guard macros, includes | preprocessor | pulls in `pycore_interp.h` |
+| 22-35 | `EVAL_CALL_STAT_INC` family | macros | conditional on `Py_STATS` |
+| 37-60 | `struct _ceval_state` | struct | per-interpreter eval state |
+| 62-75 | `struct _ceval_runtime_state` | struct | process-wide eval state |
+| 77-95 | `_PyEval_EvalFrameDefault` | function decl | the main dispatch loop |
+| 97-115 | `_Py_HandlePending` | function decl | signal/GIL-drop handling |
+| 117-140 | `_PyEval_AddPendingCall` | function decl | schedule work on the eval thread |
+| 142-160 | `_PyEval_InitState` / `_PyEval_FiniState` | function decls | lifecycle |
+| 162-180 | `EVAL_CALL_STAT_*` counter enum | enum | perf instrumentation |
+
+## Reading
+
+### `_ceval_state`: the per-interpreter eval knobs
+
+Every `PyInterpreterState` embeds one `_ceval_state`. The field that matters most
+for throughput is `eval_breaker`, an atomic integer checked at the top of every
+bytecode dispatch iteration. When it is non-zero the interpreter exits the fast path
+and calls `_Py_HandlePending`.
+
+```c
+// CPython: Include/internal/pycore_ceval.h:37 struct _ceval_state
+struct _ceval_state {
+    /* Requests the eval loop to stop after the current opcode. */
+    _Py_atomic_int eval_breaker;
+
+    /* Number of pending calls waiting to run on this interpreter. */
+    _Py_atomic_int pending_calls_to_do;
+
+    /* Set when another OS thread wants the GIL. */
+    _Py_atomic_int gil_drop_request;
+
+    /* Set when a Unix signal has arrived and needs dispatch. */
+    _Py_atomic_int signals_pending;
+
+    struct _pending_calls pending;
+    /* ... gil, instrumentation fields elided ... */
+};
+```
+
+`eval_breaker` is a logical OR of the other atomic flags. CPython sets it with a
+single atomic store so that the check inside the dispatch loop compiles to a single
+load-and-branch on every major architecture.
+
+### `_PyEval_EvalFrameDefault`: the dispatch loop entry point
+
+The function is declared here but defined in `Python/ceval.c` (and on
+`--enable-experimental-jit` builds, partially in `Tools/jit/`). The signature has
+not changed since 3.11.
+
+```c
+// CPython: Include/internal/pycore_ceval.h:77 _PyEval_EvalFrameDefault
+PyObject *
+_PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag);
+```
+
+`throwflag` is non-zero only when the frame is being resumed after a `throw()` on a
+generator. The frame pointer is not the C stack frame; it is a `_PyInterpreterFrame`
+allocated inside the frame's code object shadow stack or on the heap for generators.
+
+### `_PyEval_AddPendingCall` and `_Py_HandlePending`
+
+These two functions form the mechanism that lets C extensions and signal handlers
+schedule work to run on the main thread without holding the GIL.
+
+```c
+// CPython: Include/internal/pycore_ceval.h:117 _PyEval_AddPendingCall
+int _PyEval_AddPendingCall(
+    PyInterpreterState *interp,
+    _Py_pending_call_func func,
+    void *arg,
+    int mainthreadonly);
+```
+
+`mainthreadonly` gates whether the call must run on the main OS thread (required for
+signal handlers) or may run on any thread that currently holds the GIL. Internally
+the call is appended to a fixed-size ring buffer inside `_ceval_state.pending`. When
+the buffer is full the function returns `-1` without blocking.
+
+```c
+// CPython: Include/internal/pycore_ceval.h:97 _Py_HandlePending
+int _Py_HandlePending(PyThreadState *tstate);
+```
+
+`_Py_HandlePending` is called from the dispatch loop whenever `eval_breaker` is set.
+It drains the pending-call ring buffer, dispatches signals via `PyErr_CheckSignals`,
+and drops the GIL if `gil_drop_request` is set. The return value is `-1` if a
+pending call raised an exception, `0` otherwise.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `vm/` (eval-loop state fields will live on `vm.Interpreter`)
+and `runtime/` (process-wide pending-call queue). The `eval_breaker` pattern maps
+naturally to a Go `atomic.Int32` field on the interpreter struct. Pending calls will
+use a fixed-capacity ring backed by a `[32]pendingCall` array to match CPython's
+bound. `_PyEval_EvalFrameDefault` itself corresponds to `vm.EvalFrame` in the gopy
+eval loop.

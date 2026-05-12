@@ -1,0 +1,131 @@
+---
+title: Include/internal/pycore_typeobject.h
+description: "Annotated reading of CPython internal type-object machinery: version tags, MRO cache, heap type fields, and slot indices."
+cpython_path: Include/internal/pycore_typeobject.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_typeobject.h` is the private header that glues the public
+`PyTypeObject` struct to CPython's runtime optimisation machinery. It declares the
+fields and helpers that the type system uses internally but does not expose through the
+stable C API. The three main concerns are: the version-tag cache that accelerates
+`_PyType_Lookup`, the bootstrap sequence for built-in types, and the extra fields
+carried by heap-allocated type objects.
+
+<CpyLink path="Include/internal/pycore_typeobject.h" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~15   | `_Py_TPFLAGS_*` internal flag constants | Extend the public `Py_TPFLAGS_*` set for runtime bookkeeping |
+| ~30   | `PyHeapTypeObject` | `PyTypeObject` extension with `ht_name`, `ht_qualname`, `ht_module`, `ht_slots` |
+| ~70   | `_PyType_GetSlotId` | Map a slot pointer to a compact integer index |
+| ~90   | slot index constants (`Py_tp_new`, `Py_tp_init`, …) | Used by `_PyType_GetSlotId` and the limited API |
+| ~110  | `_PyType_Lookup` fast path declaration | MRO walk with `tp_version_tag` cache shortcut |
+| ~140  | `_PyTypes_InitTypes` | Bootstrap call that initialises all static built-in types |
+| ~160  | `_PyType_InvalidateMethCache` | Invalidates `tp_version_tag` on method-dict mutation |
+| ~180  | `_PyType_GetVersionForCurrentState` | Returns or assigns a fresh version tag |
+
+## Reading
+
+### `PyHeapTypeObject`: heap type internal fields
+
+Every type created with `type(name, bases, ns)` at runtime is a heap type. CPython
+allocates a `PyHeapTypeObject` rather than a bare `PyTypeObject` so that the runtime can
+store the type's name, qualified name, and originating module as first-class `PyObject *`
+references that participate in reference counting and garbage collection.
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:30 PyHeapTypeObject
+typedef struct _heaptypeobject {
+    PyTypeObject ht_type;        /* must be first */
+    PyAsyncMethods as_async;
+    PyNumberMethods as_number;
+    PyMappingMethods as_mapping;
+    PySequenceMethods as_sequence;
+    PyBufferProcs as_buffer;
+    PyObject *ht_name;           /* __name__, a str */
+    PyObject *ht_qualname;       /* __qualname__, a str */
+    PyObject *ht_module;         /* __module__, may be NULL */
+    PyObject *ht_slots;          /* tuple of slot name strings */
+    /* ... further runtime fields ... */
+} PyHeapTypeObject;
+```
+
+`ht_name` and `ht_qualname` are separate because a nested class has a dotted
+`__qualname__` (`Outer.Inner`) but a simple `__name__` (`Inner`). `ht_module` is set
+when the type is defined inside a module that records its `__spec__`. For extension
+types created via `PyType_FromModuleAndSpec`, `ht_module` points to the C extension
+module object so that `__module__` returns the right string without scanning
+`sys.modules`.
+
+### `_PyType_Lookup` and the `tp_version_tag` cache (fast path)
+
+`_PyType_Lookup` is the hot path for attribute lookup on a type. It walks the MRO and
+checks each base's `tp_dict`. Without caching, a method call on a deeply inherited class
+would do a fresh linear MRO scan on every call. The version-tag mechanism avoids this.
+
+Every `PyTypeObject` carries a 32-bit `tp_version_tag`. The interpreter caches the
+result of a previous `_PyType_Lookup` together with the version tag it was valid for. On
+the next lookup the fast path checks whether the tag still matches; if so, it returns the
+cached result immediately without touching the MRO.
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:110 _PyType_Lookup
+PyObject *_PyType_Lookup(PyTypeObject *type, PyObject *name);
+PyObject *_PyType_LookupId(PyTypeObject *type, _Py_Identifier *name);
+```
+
+The tag is a global monotonic counter. Any write to a type's `__dict__` (adding,
+replacing, or deleting a method) calls `_PyType_InvalidateMethCache`, which increments
+the counter and stamps the new value into `tp_version_tag` for that type and all its
+subclasses. This eager invalidation keeps the fast path correct at the cost of a linear
+subclass walk on every method mutation, which is acceptable because mutations are rare
+compared to lookups.
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:160 _PyType_InvalidateMethCache
+void _PyType_InvalidateMethCache(PyTypeObject *type);
+```
+
+### `_PyTypes_InitTypes`: bootstrap sequence
+
+The runtime cannot use the normal `type()` mechanism to create built-in types because
+`type` itself is a built-in type. `_PyTypes_InitTypes` breaks this circularity by
+directly filling in the static `PyTypeObject` structs that are compiled into the
+interpreter binary and then calling `PyType_Ready` on each one in dependency order.
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:140 _PyTypes_InitTypes
+PyStatus _PyTypes_InitTypes(PyInterpreterState *interp);
+```
+
+`PyType_Ready` fills in inherited slots, computes the MRO, sets `tp_version_tag` to an
+initial value, and inserts the type into the `type.__subclasses__` list of each base.
+Because the MRO computation itself calls `_PyType_Lookup`, the bootstrapping order must
+ensure that `type`, `object`, and `BaseException` are ready before any type that inherits
+from them.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (the `PyHeapTypeObject` fields map onto the `UserType`
+and `Type` structs; the version-tag cache is a planned optimisation tracked in the v0.13
+milestone).
+
+Key mapping targets:
+
+- `PyHeapTypeObject.ht_name` / `ht_qualname` / `ht_module` correspond to fields already
+  present on `objects.UserType`.
+- `_PyType_Lookup` with version-tag caching is not yet implemented; gopy currently does a
+  plain MRO walk on every lookup in `objects/type.go`.
+- `_PyTypes_InitTypes` maps to the `init()` chain in `objects/` that registers built-in
+  types at program startup.
+- `_PyType_InvalidateMethCache` has no direct counterpart yet; type mutation correctness
+  relies on the absence of a cache rather than explicit invalidation.

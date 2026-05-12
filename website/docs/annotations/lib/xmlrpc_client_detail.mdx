@@ -1,0 +1,120 @@
+---
+title: "xmlrpc/client.py: ServerProxy, marshalling, and MultiCall"
+description: "Detailed annotations for ServerProxy request dispatch, Marshaller dispatch table, Unmarshaller expat handler, MultiCall batching, and DateTime/Binary wrappers"
+cpython_path: Lib/xmlrpc/client.py
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: module/xmlrpc/client
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`xmlrpc/client.py` implements an XML-RPC client that is purely Python and has no mandatory third-party dependencies. The expat parser (from `pyexpat`) is the only C extension it touches. The module covers marshalling, unmarshalling, HTTP transport, and two high-level entry points: `ServerProxy` and `MultiCall`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | module constants, `Fault`, `ProtocolError` | Wire format constants, exception types |
+| 121–280 | `DateTime`, `Binary` | Typed wrappers; `DateTime` round-trips ISO 8601 |
+| 281–500 | `Marshaller` | Python-to-XML conversion via `dispatch` table |
+| 501–680 | `Unmarshaller` | SAX-like state machine driven by expat callbacks |
+| 681–780 | `loads`, `dumps` | Top-level codec entry points |
+| 781–900 | `Transport`, `SafeTransport` | HTTP/HTTPS request plumbing |
+| 901–1050 | `Transport.request`, `parse_response` | Response decode pipeline |
+| 1051–1200 | `ServerProxy.__init__`, `__request` | Proxy object, per-call marshalling |
+| 1201–1350 | `_Method`, `__getattr__` | Dotted method name chaining |
+| 1351–1500 | `MultiCall`, `MultiCallIterator` | Batched call accumulation and result unpack |
+
+## Reading
+
+### `ServerProxy.__request` and marshalling
+
+`ServerProxy.__request` is the single path all remote calls follow. It serialises arguments with `dumps`, posts the payload over `Transport.request`, then deserialises the reply with `loads`. Faults come back as `Fault` exceptions.
+
+```python
+# CPython Lib/xmlrpc/client.py (simplified)
+def __request(self, methodname, params):
+    request = dumps(params, methodname, encoding=self.__encoding,
+                    allow_none=self.__allow_none)
+    response = self.__transport.request(
+        self.__host,
+        self.__handler,
+        request,
+        verbose=self.__verbose,
+    )
+    if len(response) == 1:
+        response = response[0]
+    return response
+```
+
+The `Marshaller.dispatch` table maps Python types to serialiser functions. Subclasses can extend it by adding entries directly. The dispatch lookup uses `type(value)` as the key, so subclasses of `int` that are not registered will fall through to the `int` handler only if `Marshaller.dispatch` is searched by MRO, which it is not. A port must replicate the exact `type(v)` keying.
+
+```python
+# CPython Lib/xmlrpc/client.py (simplified)
+class Marshaller:
+    dispatch = {}
+
+    def dump_int(self, value, write):
+        write('<value><int>')
+        write(str(int(value)))
+        write('</int></value>\n')
+    dispatch[int] = dump_int
+
+    def dump_bool(self, value, write):
+        write('<value><boolean>')
+        write('1' if value else '0')
+        write('</boolean></value>\n')
+    dispatch[bool] = dump_bool  # must come after int
+```
+
+Note that `bool` must be registered after `int` in the `dispatch` dict so that the bool entry wins when `type(True)` is looked up.
+
+### `Unmarshaller` expat handler
+
+`Unmarshaller` creates a `pyexpat` parser and registers `start`, `end`, and `data` handlers. State is kept in a stack (`_stack`) and a type accumulator (`_type`). The `end` handler pops the stack and coerces the accumulated string to the declared type.
+
+```python
+# CPython Lib/xmlrpc/client.py (simplified)
+def end_int(self, data):
+    self.append(int(data))
+    self._value = 0
+
+def end_string(self, data):
+    if self._encoding:
+        data = data.decode(self._encoding)
+    self.append(data)
+    self._value = 0
+```
+
+The parser is created lazily on the first call to `feed`. A port that wants to reuse an `Unmarshaller` across multiple responses must call `close` and recreate the parser, matching CPython's behaviour.
+
+### `MultiCall` batching
+
+`MultiCall` accumulates calls in a list and sends them as a single `system.multicall` request. The server returns a list of result dicts. `MultiCallIterator` unpacks them, raising `Fault` for any entry that carries a fault code.
+
+```python
+# CPython Lib/xmlrpc/client.py (simplified)
+class MultiCall:
+    def __init__(self, server):
+        self.__server = server
+        self.__call_list = []
+
+    def __getattr__(self, name):
+        return _MultiCallMethod(self.__call_list, name)
+
+    def __call__(self):
+        marshalled = [{'methodName': m, 'params': p}
+                      for m, p in self.__call_list]
+        return MultiCallIterator(self.__server.system.multicall(marshalled))
+```
+
+`_MultiCallMethod.__call__` appends `(methodname, params)` to the list instead of sending immediately. The actual HTTP round-trip happens only when the `MultiCall` instance itself is called.
+
+## gopy notes
+
+- The `dispatch` table on `Marshaller` is a class-level dict. Mutations by one instance affect all instances. A port should replicate this class-level sharing.
+- `DateTime` uses `time.strptime` for parsing, which is not thread-safe in CPython before the GIL is released for `_strptime` import. A Go port can use `time.Parse` without this concern.
+- `Binary.encode` and `decode` are instance methods that wrap `base64.encodebytes` and `base64.decodebytes`. The trailing newline that `encodebytes` adds is stripped during decode by the unmarshaller, not by `Binary` itself.
+- `Transport` keeps a persistent `http.client.HTTPConnection` per host. Connection reuse logic lives in `Transport._connection`; a port must handle the `(host, connection)` tuple carefully.

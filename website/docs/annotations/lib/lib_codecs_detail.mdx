@@ -1,0 +1,61 @@
+---
+title: Lib/codecs.py
+description: "codecs module: lookup() and register() codec search, StreamReader/StreamWriter/IncrementalEncoder/IncrementalDecoder base classes, open() for coded files, and the error handler protocol."
+cpython_path: Lib/codecs.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/codecs.py`
+
+<CpyLink path="Lib/codecs.py" />
+
+`Lib/codecs.py` provides the codec infrastructure for encoding and decoding text. It
+wraps `_codecs` (C extension) and defines the base classes for stream codecs and
+incremental codecs.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-100 | Re-exports from `_codecs` | `lookup`, `register`, `encode`, `decode`, `charmap_encode` |
+| 101-300 | `CodecInfo`, `Codec` | Base codec descriptor and stateless encoder/decoder |
+| 301-550 | `IncrementalEncoder`, `IncrementalDecoder` | Stateful codec base classes |
+| 551-750 | `StreamWriter`, `StreamReader`, `StreamReaderWriter` | File-like codec wrappers |
+| 751-1100 | `open`, `EncodedFile`, `iterencode`, `iterdecode` | Convenience entry points |
+
+## Reading
+
+### `CodecInfo` named tuple
+
+`lookup(encoding)` returns a `CodecInfo(encode, decode, streamreader, streamwriter)`
+named tuple. The four functions are the codec's complete API.
+
+### Error handler protocol
+
+All encoding/decoding functions accept an `errors` parameter: `'strict'`, `'ignore'`,
+`'replace'`, `'xmlcharrefreplace'`, `'backslashreplace'`, `'namereplace'`, or a custom
+handler registered with `codecs.register_error`. Custom handlers receive a
+`UnicodeEncodeError`/`UnicodeDecodeError` and return `(replacement, new_position)`.
+
+### `IncrementalDecoder`
+
+`IncrementalDecoder.decode(input, final=False)` buffers partial sequences across calls.
+`final=True` signals end-of-stream; any remaining incomplete multi-byte sequence is
+either decoded with the error handler or raises `UnicodeDecodeError`.
+
+### `iterencode` / `iterdecode`
+
+`iterencode(iterator, encoding)` and `iterdecode(iterator, encoding)` apply an incremental
+codec to a stream of chunks, yielding encoded/decoded chunks as they are produced. This
+avoids materialising the full input in memory.
+
+## gopy notes
+
+Not yet ported. `codecs` is needed by `io.TextIOWrapper` for text file reading. The most
+critical paths are `utf-8` encode/decode and the error handler dispatch. Planned path:
+`module/codecs/`. The `_codecs` C extension wraps the codec search functions directly; Go
+will use `golang.org/x/text` for non-UTF-8 encodings.

@@ -1,0 +1,105 @@
+---
+title: Include/internal/pycore_warnings.h
+description: "Internal warnings infrastructure: filter state, version counter, and unraisable error reporting"
+cpython_path: Include/internal/pycore_warnings.h
+cpython_version: "3.14"
+lines: 50
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_warnings.h` declares the C-internal side of the
+warnings subsystem. The public Python API (`warnings.warn`) is implemented in
+`Python/warnings.c` and exposed through `Lib/warnings.py`. This header covers
+only the pieces the interpreter uses directly: per-interpreter filter state,
+the filter version counter, and the `_PyErr_WarnUnraisable` path taken when an
+error occurs during object teardown.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-15 | `_PyWarningsState` | Per-interpreter struct holding filters list and version counter |
+| 16-25 | `_filters_version` | Monotonic counter; bumped on every `warnings.filters` mutation |
+| 26-35 | `_PyWarnings_InitState` | Initializes `_PyWarningsState` for a new sub-interpreter |
+| 36-44 | `_PyErr_WarnUnraisable` | Reports errors that cannot propagate (e.g. from `__del__`) |
+| 45-50 | `_PyErr_WarnUnraisableError` | Variant accepting a pre-formatted message string |
+
+## Reading
+
+### Per-interpreter filter state
+
+Each sub-interpreter carries its own warnings filter list. The state struct
+keeps a pointer to the list and the version counter side-by-side so the fast
+path can check both in one cache line.
+
+```c
+// CPython: Include/internal/pycore_warnings.h:8 _PyWarningsState
+struct _PyWarningsState {
+    /* Borrowed ref to warnings.filters list (per-interpreter). */
+    PyObject *filters;
+    /* Incremented whenever filters is mutated; read by _filters_version. */
+    unsigned long filters_version;
+    /* Borrowed ref to warnings.showwarning callable. */
+    PyObject *showwarning;
+};
+```
+
+Code that needs to call a warning checks `interp->warnings.filters_version`
+against a cached value. If they match, the previous filter decision is still
+valid and the full linear scan of `filters` is skipped.
+
+### `_filters_version` fast path
+
+```c
+// CPython: Include/internal/pycore_warnings.h:22 _filters_version
+/* Inline check used by the eval loop and type machinery: */
+static inline int
+_PyWarnings_FiltersChanged(PyInterpreterState *interp, unsigned long cached)
+{
+    return interp->warnings.filters_version != cached;
+}
+```
+
+The version counter is a simple monotonic `unsigned long`. It is bumped in
+`_filters_mutated` (in `Python/warnings.c`) every time user code calls
+`warnings.filterwarnings`, `warnings.resetwarnings`, or directly mutates
+`warnings.filters`. This avoids a list scan on the common case where filters
+do not change between warnings.
+
+### `_PyErr_WarnUnraisable`
+
+```c
+// CPython: Include/internal/pycore_warnings.h:36 _PyErr_WarnUnraisable
+PyAPI_FUNC(void) _PyErr_WarnUnraisable(PyObject *source, const char *format, ...);
+```
+
+Called when an exception must be swallowed rather than propagated. Typical
+call sites: `tp_dealloc` implementations, `__del__` methods, and weakref
+callback teardown. The function prints the exception using
+`sys.unraisablehook` if set, or falls back to writing to `sys.stderr`.
+
+The `source` argument (often the object being torn down) is passed to the hook
+so that tools like `tracemalloc` can map it back to an allocation site.
+
+## gopy notes
+
+- `objects/object.go` calls the equivalent of `_PyErr_WarnUnraisable` when
+  `__del__` raises; the current implementation writes directly to stderr and
+  clears the error. Routing through a `sys.unraisablehook` is not yet
+  implemented.
+- gopy has a single interpreter state, so `_PyWarningsState` is a package-level
+  variable in `module/weakref/module.go` rather than a per-interpreter struct.
+- The `_filters_version` fast path is not yet implemented; every warning call
+  does a full filter scan. This becomes relevant once test suites that stress
+  `warnings.catch_warnings` are enabled.
+
+## CPython 3.14 changes
+
+- 3.12 moved `_PyWarningsState` from a global to a per-interpreter field
+  (`PyInterpreterState.warnings`), enabling true sub-interpreter isolation.
+- 3.13 introduced `_PyErr_WarnUnraisableError`, which takes a pre-formatted
+  `PyObject *` message instead of a `printf`-style format string, to avoid
+  allocation inside already-failing teardown paths.
+- 3.14 has no structural changes to this header.

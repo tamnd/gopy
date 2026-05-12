@@ -1,0 +1,150 @@
+---
+title: Lib/logging/__init__.py
+description: "Core logging machinery: loggers, handlers, records, and basicConfig"
+cpython_path: Lib/logging/__init__.py
+cpython_version: "3.14"
+lines: 2300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/logging/__init__.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–100 | module header, `BASIC_FORMAT` | Level constants, `_nameToLevel`, `_levelToName` |
+| 101–200 | `getLevelName`, `getLevelNamesMapping`, `addLevelName` | Level name registry |
+| 201–350 | `LogRecord`, `makeLogRecord` | Record creation and attribute population |
+| 351–500 | `Formatter`, `BufferingFormatter` | `format`, `formatTime`, `formatException`, `formatStack` |
+| 501–600 | `Filter`, `Filterer` | `filter` protocol and `addFilter`/`removeFilter` |
+| 601–850 | `Handler`, `StreamHandler`, `FileHandler` | `emit`, `handle`, `acquire`/`release` |
+| 851–1050 | `PlaceHolder`, `Manager` | Logger hierarchy storage and `fixupParentage` |
+| 1051–1350 | `Logger` | `getEffectiveLevel`, `isEnabledFor`, `callHandlers`, `_log` |
+| 1351–1500 | `RootLogger`, `root` singleton | Root logger and default null handler |
+| 1501–1650 | `basicConfig` | One-shot root-logger configuration under lock |
+| 1651–1800 | `getLogger`, `getLoggerClass`, `setLoggerClass` | Public factory and class registry |
+| 1801–2300 | `LoggerAdapter`, `disable`, `captureWarnings`, misc | Adapter, global disable level, warnings bridge |
+
+## Reading
+
+### Logger hierarchy: Manager and PlaceHolder
+
+`Manager` owns the flat `loggerDict` that backs `logging.getLogger`. Keys are dotted names; values are either `Logger` instances or `PlaceHolder` instances. A `PlaceHolder` stands in for a namespace that has been referenced as a parent but not yet created as a real logger.
+
+When a new `Logger` is created, `Manager.fixupParentage` walks up the dotted name, skipping `PlaceHolder` nodes, until it finds the nearest real ancestor and sets `logger.parent` accordingly.
+
+```python
+# CPython: Lib/logging/__init__.py:1144 Manager.fixupParentage
+def fixupParentage(self, alogger):
+    name = alogger.name
+    i = name.rfind(".")
+    rv = None
+    while (i > 0) and not rv:
+        substr = name[:i]
+        if substr not in self.loggerDict:
+            self.loggerDict[substr] = PlaceHolder(alogger)
+        else:
+            obj = self.loggerDict[substr]
+            if isinstance(obj, Logger):
+                rv = obj
+            else:
+                assert isinstance(obj, PlaceHolder)
+                obj.append(alogger)
+        i = name.rfind(".", 0, i - 1)
+    if not rv:
+        rv = self.root
+    alogger.parent = rv
+```
+
+`PlaceHolder` only stores a weak set of child loggers. It never receives log calls directly. The walk terminates at `root` when no named ancestor exists.
+
+### LogRecord creation and callHandlers
+
+Every `Logger._log` call produces a `LogRecord` via `self.makeRecord`. The record stores the message template, positional args, exception info, stack info, and source location (`pathname`, `lineno`, `funcName`). The `getMessage` method performs `str(self.msg) % self.args` lazily, so format overhead is paid only when the record reaches a handler.
+
+```python
+# CPython: Lib/logging/__init__.py:299 LogRecord.__init__
+def __init__(self, name, level, pathname, lineno,
+             msg, args, exc_info, func=None, sinfo=None):
+    ct = time.time()
+    self.name = name
+    self.msg = msg
+    self.args = args
+    self.levelname = getLevelName(level)
+    self.levelno = level
+    self.pathname = pathname
+    self.lineno = lineno
+    self.funcName = func
+    self.created = ct
+    self.msecs = int((ct - int(ct)) * 1000) + 0.0
+    self.relativeCreated = (self.created - _startTime) * 1000
+    self.exc_info = exc_info
+    self.exc_text = None
+    self.stack_info = sinfo
+```
+
+`Logger.callHandlers` walks the `parent` chain, calling each handler whose level passes the filter, and stops when it reaches a logger with `propagate = False` or exhausts the chain at `root`.
+
+```python
+# CPython: Lib/logging/__init__.py:1641 Logger.callHandlers
+def callHandlers(self, record):
+    c = self
+    found = 0
+    while c:
+        for hdlr in c.handlers:
+            found = found + 1
+            if record.levelno >= hdlr.level:
+                hdlr.handle(record)
+        if not c.propagate:
+            c = None
+        else:
+            c = c.parent
+    if (found == 0):
+        if lastResort:
+            if record.levelno >= lastResort.level:
+                lastResort.handle(record)
+        elif raiseExceptions and not self.manager.emittedNoHandlerWarning:
+            sys.stderr.write("No handlers could be found for logger"
+                             " \"%s\"\n" % self.name)
+            self.manager.emittedNoHandlerWarning = True
+```
+
+### basicConfig and getLevelNamesMapping
+
+`basicConfig` is the one-shot convenience entry point. It acquires `_acquireLock` before touching the root logger so concurrent early calls are safe. It accepts `handlers=`, `stream=`, `filename=`, `encoding=`, `errors=`, `filemode=`, `format=`, `datefmt=`, `style=`, and `level=`. Passing `handlers=` alongside `stream=` or `filename=` raises `ValueError`.
+
+```python
+# CPython: Lib/logging/__init__.py:1524 basicConfig
+def basicConfig(**kwargs):
+    _acquireLock()
+    try:
+        force = kwargs.pop('force', False)
+        encoding = kwargs.pop('encoding', None)
+        errors = kwargs.pop('errors', 'backslashreplace')
+        if force:
+            for h in root.handlers[:]:
+                root.removeHandler(h)
+                h.close()
+        if len(root.handlers) == 0:
+            handlers = kwargs.pop('handlers', None)
+            if handlers is None:
+                if 'stream' in kwargs and 'filename' in kwargs:
+                    raise ValueError("'stream' and 'filename' should not be "
+                                     "specified together")
+            ...
+    finally:
+        _releaseLock()
+```
+
+`getLevelNamesMapping` (added in 3.11) returns a copy of `_nameToLevel` so callers cannot mutate the registry. `addLevelName` updates both dicts under the module lock.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/logging/` (public CPython name is `logging`, no "py" prefix to drop).
+
+The port will need to reproduce the `Manager`/`PlaceHolder` hierarchy, the full `LogRecord` attribute set, the `callHandlers` propagation walk, and the `basicConfig` lock discipline. The `captureWarnings` bridge depends on the `warnings` module port. Level names map to Go `sync.RWMutex`-protected maps from string to int. `Handler.emit` is an abstract method in CPython; the Go port will use an interface with `Emit(*LogRecord) error`.

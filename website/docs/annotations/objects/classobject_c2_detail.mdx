@@ -1,0 +1,139 @@
+---
+title: "Objects/classobject.c"
+description: "Bound method object implementation (MethodType)"
+cpython_path: Objects/classobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`classobject.c` implements `MethodType`, the type of bound methods. A bound method wraps a function and an instance together; calling it prepends the instance to the positional arguments and delegates to the underlying function. The file also retains `instancemethod` for completeness, though old-style unbound methods were removed in Python 3.0.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50 | `PyMethodObject` layout | `im_func`, `im_self`, `im_weakreflist` fields |
+| 51–100 | `PyMethod_New` | Allocates and initialises a bound method object |
+| 101–150 | `PyMethod_Function` / `PyMethod_Self` | Accessors used throughout the interpreter |
+| 151–230 | `method_call` | Prepends `self` to args and calls `im_func` |
+| 231–300 | `method_vectorcall` | Fast path: avoids tuple allocation via vectorcall protocol |
+| 301–370 | `method_richcompare` | Equality based on `func` and `self` identity |
+| 371–430 | `method_get_doc` | Proxies `__doc__` from the underlying function |
+| 431–520 | `method_descr_get` | `__get__` — returns `self` if already bound, else new method |
+| 521–650 | `method_getattro` | Attribute lookup forwards to `im_func` for most names |
+| 651–800 | `instancemethod_*` | Legacy unbound method stubs kept for C-extension compat |
+
+## Reading
+
+### PyMethod_New: binding a function to an instance
+
+`PyMethod_New` is the sole constructor. It caches a free-list of recently freed `PyMethodObject` structs to avoid `malloc` on every attribute access in tight loops.
+
+```c
+// CPython: Objects/classobject.c:51 PyMethod_New
+PyObject *
+PyMethod_New(PyObject *func, PyObject *self)
+{
+    PyMethodObject *im;
+    if (self == NULL) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    im = free_list;
+    if (im != NULL) {
+        free_list = (PyMethodObject *)im->im_self;
+        numfree--;
+        _Py_NewReference((PyObject *)im);
+    } else {
+        im = PyObject_GC_New(PyMethodObject, &PyMethod_Type);
+        if (im == NULL) return NULL;
+    }
+    im->im_func = Py_NewRef(func);
+    im->im_self = Py_NewRef(self);
+    im->im_weakreflist = NULL;
+    _PyObject_GC_TRACK(im);
+    return (PyObject *)im;
+}
+```
+
+The free-list is capped at 256 entries (`PyMethod_MAXFREELIST`). When the interpreter shuts down, `PyMethod_Fini` drains and frees it.
+
+### method_vectorcall: the fast-call path
+
+When the underlying function supports the vectorcall protocol, `method_vectorcall` avoids building a new argument tuple. It temporarily writes `self` into the slot just before the argument array (the "vectorcall backspace trick") so no allocation is needed.
+
+```c
+// CPython: Objects/classobject.c:231 method_vectorcall
+static PyObject *
+method_vectorcall(PyObject *method, PyObject *const *args,
+                  size_t nargsf, PyObject *kwnames)
+{
+    PyObject *self = PyMethod_GET_SELF(method);
+    PyObject *func = PyMethod_GET_FUNCTION(method);
+    PyObject *const *newargs;
+    /* write self one slot before args, then call with nargs+1 */
+    newargs = args - 1;
+    newargs[0] = self;  /* safe: caller reserved this slot */
+    return func->ob_type->tp_vectorcall(func, newargs,
+                                        (nargs + 1) | PY_VECTORCALL_ARGUMENTS_OFFSET,
+                                        kwnames);
+}
+```
+
+The `PY_VECTORCALL_ARGUMENTS_OFFSET` flag signals that the slot before `args` is writable, allowing this zero-copy approach.
+
+### method_richcompare: equality semantics
+
+Two bound methods compare equal when both their underlying functions and their `self` objects are equal. This matches the Python-level rule that `obj.method == obj.method` is `True` even though each attribute access creates a fresh method object.
+
+```c
+// CPython: Objects/classobject.c:301 method_richcompare
+static PyObject *
+method_richcompare(PyObject *self, PyObject *other, int op)
+{
+    if (!PyMethod_Check(self) || !PyMethod_Check(other) ||
+        (op != Py_EQ && op != Py_NE)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    int eq = (PyMethod_GET_FUNCTION(self) == PyMethod_GET_FUNCTION(other)) &&
+             PyObject_RichCompareBool(
+                 PyMethod_GET_SELF(self), PyMethod_GET_SELF(other), Py_EQ);
+    return PyBool_FromLong((op == Py_EQ) ? eq : !eq);
+}
+```
+
+### method_descr_get: descriptor protocol
+
+`PyMethod_Type.tp_descr_get` makes method objects themselves descriptors. If the method is already bound (`im_self != NULL`) and the lookup object matches, the same method is returned. Otherwise a new binding is created.
+
+```c
+// CPython: Objects/classobject.c:431 method_descr_get
+static PyObject *
+method_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    /* bound methods re-bound to the same instance return self */
+    if (obj == PyMethod_GET_SELF(self)) {
+        return Py_NewRef(self);
+    }
+    if (obj == NULL || obj == Py_None) {
+        return Py_NewRef(self);
+    }
+    return PyMethod_New(PyMethod_GET_FUNCTION(self), obj);
+}
+```
+
+## gopy notes
+
+- `PyMethod_New` maps to `objects.NewMethod` in `objects/method.go`. The free-list is replaced by Go's allocator; no equivalent cache is needed.
+- `method_vectorcall` and the backspace trick have no direct Go equivalent. The gopy call convention passes a slice, so prepending `self` means a single-element slice prepend or use of the existing `vm.callMethod` helper.
+- `method_richcompare` is implemented in `objects/method.go` under `MethodRichCompare`; it must use `objects.RichCompareBool` rather than pointer comparison for `im_self`.
+- `instancemethod` stubs are intentionally omitted from gopy; no C-extension compatibility layer is required.
+
+## CPython 3.14 changes
+
+- The vectorcall fast-path (`method_vectorcall`) was introduced in 3.8 and has been refined each release. In 3.14 the slot is unconditionally set on `PyMethod_Type.tp_vectorcall`, removing a branch that previously checked whether `im_func` supports vectorcall.
+- `PyMethod_New` gained a `Py_TPFLAGS_MANAGED_WEAKREF` flag on `PyMethod_Type`, replacing the explicit `im_weakreflist` handling with the managed-weakref machinery added in 3.12.
+- Hash computation (`method_hash`) now delegates entirely to `Py_HashPointer(im_self) ^ PyObject_Hash(im_func)` after the old XOR-rotate formula was shown to produce too many collisions with small integer self values.

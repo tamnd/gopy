@@ -1,0 +1,104 @@
+---
+title: "_io module internals (_iomodule.c)"
+description: "Module init, open() builtin, ABC registration, buffered I/O dispatch, and DEFAULT_BUFFER_SIZE in CPython's _io C extension"
+cpython_path: Modules/_io/_iomodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: module/io
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_iomodule.c` is the entry point for CPython's `_io` extension. It registers
+the `open()` builtin, sets `DEFAULT_BUFFER_SIZE`, and wires the abstract base
+classes (`RawIOBase`, `BufferedIOBase`, `TextIOBase`) into the module before
+any Python-level import of `io` or `_pyio` runs.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | file header, includes | `clinic` glue, object type forwards |
+| 61-90 | `DEFAULT_BUFFER_SIZE` | 8 192-byte constant exposed to Python |
+| 91-210 | `_io_open_impl` | C implementation of `open()` builtin |
+| 211-280 | `_io_open_code_impl` | `open_code()` for audited file access |
+| 281-340 | ABC forward declarations | `_PyIO_RawIOBase`, `_PyIO_BufferedIOBase`, `_PyIO_TextIOBase` |
+| 341-420 | `iomodule_exec` | module `exec` slot, type registration, ABC setup |
+| 421-500 | `PyInit__io` / module spec | multi-phase init wiring |
+
+## Reading
+
+### `_io_open_impl`: the `open()` dispatch
+
+`open()` is not a pure Python wrapper. The C implementation selects concrete
+types based on the `mode` and `buffering` arguments, then calls the chosen
+type directly, avoiding the overhead of going through `builtins.open`.
+
+```c
+// Modules/_io/_iomodule.c  ~line 150
+if (buffering == 0) {
+    if (!raw) {
+        _PyArg_BadArgument("open", "argument 'buffering'", ...) ;
+        goto error;
+    }
+    res = raw;
+    Py_INCREF(res);
+}
+else if (buffering == 1 || (buffering < 0 && isatty)) {
+    res = PyObject_CallOneArg((PyObject *)&PyTextIOWrapper_Type, raw);
+}
+else {
+    res = PyObject_CallFunction(
+        (updating ? (PyObject *)&PyBufferedRandom_Type
+                  : (writing ? (PyObject *)&PyBufferedWriter_Type
+                             : (PyObject *)&PyBufferedReader_Type)),
+        "Ni", raw, buffering);
+}
+```
+
+The ternary on `updating`/`writing` is the entire dispatch table for buffered
+I/O. `BufferedRandom` is selected for `r+`/`w+`/`a+` modes, `BufferedWriter`
+for write-only, and `BufferedReader` for everything else.
+
+### ABC registration in `iomodule_exec`
+
+The three abstract base classes are C types (`PyTypeObject`), not Python
+classes. `iomodule_exec` adds them to the module dict and then calls
+`PyObject_CallMethodOneArg` with `"register"` to register concrete types
+against the ABCs, mirroring what `io.py` does at the Python level.
+
+```c
+// Modules/_io/_iomodule.c  ~line 370
+#define ADD_TYPE(module, type, spec)                       \
+    do {                                                    \
+        type = (PyTypeObject *)PyType_FromModuleAndSpec(   \
+            module, spec, NULL);                           \
+        if (!type) return -1;                              \
+        if (PyModule_AddType(module, type) < 0) return -1;\
+    } while (0)
+
+ADD_TYPE(module, state->PyRawIOBase_Type,      &rawiobase_spec);
+ADD_TYPE(module, state->PyBufferedIOBase_Type, &bufferediobase_spec);
+ADD_TYPE(module, state->PyTextIOBase_Type,     &textiobase_spec);
+```
+
+### 3.14 changes
+
+CPython 3.14 migrated `_iomodule.c` to per-module state (the `_PyIO_State`
+struct) instead of global statics. Every type pointer that was previously a
+file-level `PyTypeObject *` is now accessed via `_PyIO_get_module_state(op)`.
+The `open()` clinic-generated wrapper was also regenerated to use the new
+argument clinic `defining_class` parameter so the function can reach module
+state without a global lookup.
+
+## gopy notes
+
+- `DEFAULT_BUFFER_SIZE` is exported from `module/io` as the Go constant
+  `DefaultBufferSize = 8192`.
+- The `open()` dispatch logic lives in `module/io/open.go` and mirrors the
+  `updating`/`writing` ternary above.
+- The ABC types are registered as `objects.Type` values in `module/io/abc.go`
+  via `objects.RegisterABC`, not via `PyObject_CallMethodOneArg`.
+- Per-module state is not yet needed in gopy (no sub-interpreters), so the
+  state struct is omitted and type pointers remain package-level variables.

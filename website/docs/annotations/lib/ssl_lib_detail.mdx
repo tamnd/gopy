@@ -1,0 +1,121 @@
+---
+title: Lib/ssl.py
+description: "CPython source annotation: Lib/ssl.py"
+cpython_path: Lib/ssl.py
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/ssl.py" />
+
+`Lib/ssl.py` is the pure-Python wrapper around the `_ssl` C extension, which itself wraps OpenSSL. The module exposes `SSLContext` for configuration, `SSLSocket` for stream connections, `SSLObject` for memory-BIO mode, and several convenience factory functions. The file is large because it contains certificate validation helpers, protocol constant aliases, and backward-compatibility shims accumulated over many CPython releases.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-120 | module header, imports, constant aliases | Pull in `_ssl`, define `Purpose`, `AlertDescription`, `SSLErrorNumber` enums |
+| ~120-200 | `SSLError` hierarchy | `SSLZeroReturnError`, `SSLWantReadError`, `SSLWantWriteError`, `SSLCertVerificationError` |
+| ~200-400 | `SSLContext` | Wraps `_ssl.SSLContext`; `load_cert_chain`, `load_verify_locations`, `wrap_socket`, `wrap_bio` |
+| ~400-480 | `create_default_context()` / `_create_default_https_context()` | Factory with secure defaults; hostname verification, cert verification, TLS 1.2+ |
+| ~480-700 | `SSLSocket` | Subclass of `socket.socket`; `do_handshake`, `_real_connect`, `read`, `write`, `unwrap` |
+| ~700-850 | `SSLObject` | Memory-BIO interface; no fd, driven by caller read/write into BIO buffers |
+| ~850-1000 | `match_hostname()` | RFC 2818 wildcard and SAN matching (deprecated in 3.12 but retained) |
+| ~1000-1500 | `PROTOCOL_*` aliases, `OP_*` constants, `enum` wrappers, platform guards | Compatibility surface |
+
+## Reading
+
+### SSLContext creation and wrap_socket
+
+`SSLContext` is the central configuration object. Callers set certificates, CA bundles, protocol versions, and cipher suites on the context before calling `wrap_socket()` to produce an `SSLSocket`. Most of `SSLContext`'s heavy lifting is delegated to the `_ssl.SSLContext` C type; the Python subclass mainly validates arguments and provides the `wrap_socket` convenience method.
+
+```python
+# CPython: Lib/ssl.py:201 SSLContext.__new__
+class SSLContext(_ssl.SSLContext):
+    """An SSLContext holds various SSL-related configuration options and
+    data, such as certificates and possibly a private key."""
+
+    _windows_cert_stores = ("CA", "ROOT")
+
+    def __new__(cls, protocol=None, *args, **kwargs):
+        ...
+        self = _ssl.SSLContext.__new__(cls, protocol)
+        return self
+```
+
+`wrap_socket()` creates an `SSLSocket` by calling the class directly; it passes `server_side`, `server_hostname`, and `do_handshake_on_connect` through. When `do_handshake_on_connect` is true (the default for blocking sockets), the handshake runs immediately inside the constructor.
+
+### SSLSocket._real_connect and the handshake retry loop
+
+Connecting a non-blocking `SSLSocket` requires a retry loop because both the TCP connect and the TLS handshake can return `WANT_READ` or `WANT_WRITE` before they complete. `_real_connect` handles the connect phase; `do_handshake` handles the TLS phase. Each raises `SSLWantReadError` or `SSLWantWriteError` to signal that the caller should wait on the fd and retry.
+
+```python
+# CPython: Lib/ssl.py:1116 SSLSocket._real_connect
+    def _real_connect(self, addr, connect_ex):
+        if self.server_side:
+            raise ValueError("can't connect in server-side mode")
+        self._connected = False
+        if connect_ex:
+            rc = socket.connect_ex(self, addr)
+        else:
+            rc = None
+            socket.connect(self, addr)
+        if not rc:
+            self._connected = True
+            if self.do_handshake_on_connect:
+                self.do_handshake()
+        return rc
+```
+
+The `do_handshake()` method calls down into `_ssl.SSLObject.do_handshake()`. On a non-blocking socket the caller is expected to catch `SSLWantReadError` / `SSLWantWriteError` and retry after the fd becomes ready, for example via `selectors.DefaultSelector`.
+
+### SSLObject (memory-BIO mode)
+
+`SSLObject` provides TLS without a file descriptor. Instead of reading and writing from the OS network stack directly, the caller feeds ciphertext into an in-memory BIO and pulls plaintext out. This is the correct interface for event-loop frameworks (asyncio, Trio) that manage their own buffers.
+
+```python
+# CPython: Lib/ssl.py:784 SSLObject
+class SSLObject:
+    """This class implements an interface on top of a low-level SSL object as
+    implemented by OpenSSL. This object captures the state of an SSL connection
+    but does not provide any network I/O itself. I/O needs to be performed
+    through separate "BIO" objects which are OpenSSL's I/O abstraction layer.
+    """
+    def __init__(self, *args, **kwargs):
+        raise TypeError(
+            f"{self.__class__.__name__} does not have a public constructor. "
+            f"Instances are returned by SSLContext.wrap_bio()."
+        )
+```
+
+`SSLContext.wrap_bio()` is the factory. It accepts two `MemoryBIO` objects (one for incoming, one for outgoing ciphertext) and returns an `SSLObject`. The event loop feeds received network bytes into the incoming BIO and drains outgoing bytes to the network after each operation.
+
+### create_default_context() and security defaults
+
+`create_default_context()` is the recommended entry point for HTTPS clients. It sets `PROTOCOL_TLS_CLIENT`, enables hostname verification (`check_hostname = True`), enables certificate verification (`verify_mode = CERT_REQUIRED`), and loads the system CA bundle. These defaults enforce a security posture that the lower-level `SSLContext(PROTOCOL_TLS)` constructor does not.
+
+```python
+# CPython: Lib/ssl.py:402 create_default_context
+def create_default_context(purpose=Purpose.SERVER_AUTH, *, cafile=None,
+                            capath=None, cadata=None):
+    context = SSLContext(PROTOCOL_TLS_CLIENT)
+    if cafile or capath or cadata:
+        context.load_verify_locations(cafile, capath, cadata)
+    elif context.verify_mode != CERT_NONE:
+        context.set_default_verify_paths()
+    ...
+    return context
+```
+
+`PROTOCOL_TLS_CLIENT` requires that the remote certificate be verified and that `server_hostname` be set; forgetting either raises `ValueError`. `PROTOCOL_TLS_SERVER` is the symmetric constant for server contexts and does not enforce client certificate validation by default.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/ssl/`.
+
+The `_ssl` C extension would need a Go equivalent backed by the standard `crypto/tls` package. The `SSLContext` configuration surface (cipher suites, CA bundles, client certificates) maps onto `tls.Config`. The handshake retry loop in `SSLSocket._real_connect` would become a goroutine-safe wrapper around `tls.Conn.Handshake()`. `SSLObject` / memory-BIO mode maps directly onto `tls.Server` or `tls.Client` constructed from a `net.Conn` implemented over `bytes.Buffer`, which is the approach asyncio-style frameworks take in Go as well. Certificate validation via `match_hostname` is superseded in Go by `tls.Config.VerifyPeerCertificate` and `tls.Config.ServerName`.

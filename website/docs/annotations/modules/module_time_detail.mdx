@@ -1,0 +1,71 @@
+---
+title: Modules/timemodule.c
+description: "time module: time(), time_ns(), monotonic()/monotonic_ns(), perf_counter(), process_time(), sleep() with signal-safe retry, gmtime/localtime/mktime, strftime, and struct_time."
+cpython_path: Modules/timemodule.c
+cpython_version: "3.14"
+lines: 1900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/timemodule.c`
+
+<CpyLink path="Modules/timemodule.c" />
+
+`Modules/timemodule.c` implements the `time` module. It wraps POSIX `clock_gettime` (or
+Windows `QueryPerformanceCounter`) to expose wall-clock, monotonic, and CPU-time clocks.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | `_PyTime_t` typedef, `_PyTime_GetSystemClock` | Internal nanosecond clock type |
+| 301-600 | `time_time`, `time_time_ns`, `time_monotonic` | Wall-clock and monotonic clocks |
+| 601-800 | `time_perf_counter`, `time_process_time` | Performance and CPU clocks |
+| 801-1100 | `time_sleep` | Sleep with EINTR retry |
+| 1101-1500 | `time_gmtime`, `time_localtime`, `time_mktime` | Calendar conversion |
+| 1501-1900 | `time_strftime`, `struct_time` | Formatting and the named-tuple time type |
+
+## Reading
+
+### `_PyTime_t` nanosecond integer
+
+All internal time values are stored as `_PyTime_t` (a 64-bit nanosecond count). The
+`time.time_ns()` function returns this value directly as a Python `int`. `time.time()`
+divides by 1e9 to get a float, which loses sub-microsecond precision.
+
+### `time_sleep` EINTR retry
+
+`time.sleep(secs)` translates to `nanosleep` on POSIX. If `nanosleep` is interrupted by a
+signal (`EINTR`), the C code checks the remaining time and retries without exposing the
+interruption to Python. A `KeyboardInterrupt` is handled by the normal pending-signals
+check after the sleep returns.
+
+```c
+// CPython: Modules/timemodule.c:890 time_sleep
+static int
+pysleep(_PyTime_t timeout)
+{
+    do {
+        err = _PyTime_AsTimeval(timeout, &timeout_abs, _PyTime_ROUND_CEILING);
+        ...
+        ret = select(0, NULL, NULL, NULL, &timeout_val);
+        ...
+    } while (ret != 0 && errno == EINTR && !Py_MakePendingCalls());
+    return 0;
+}
+```
+
+### `struct_time`
+
+`struct_time` is a named-tuple subclass with 11 fields: `tm_year`, `tm_mon`, `tm_mday`,
+`tm_hour`, `tm_min`, `tm_sec`, `tm_wday`, `tm_yday`, `tm_isdst`, and (since 3.3)
+`tm_gmtoff`, `tm_zone`.
+
+## gopy notes
+
+`module/sys/module.go` partially overlaps with `time`. A dedicated `module/time/` port is
+planned. The Go equivalent of `_PyTime_t` is `time.Time` (nanosecond resolution).
+`time.sleep` maps to `time.Sleep`. `struct_time` is a named-tuple that requires
+named-tuple support in the gopy objects layer.

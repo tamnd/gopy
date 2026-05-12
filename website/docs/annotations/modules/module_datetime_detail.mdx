@@ -1,0 +1,85 @@
+---
+title: "_datetimemodule.c: datetime allocation and fast paths"
+description: "date_new/datetime_new allocation, delta normalization, isoformat/fromisoformat fast paths, fixed-offset timezone, and fold support for ambiguous times"
+cpython_path: Modules/_datetimemodule.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_datetimemodule.c` is one of the largest single-file modules in CPython.
+It implements `datetime.date`, `datetime.time`, `datetime.datetime`,
+`datetime.timedelta`, and `datetime.timezone` entirely in C, with a
+fast-path `fromisoformat` added in 3.11 and refined through 3.14.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-200 | Macros and accessors | `GET_YEAR`, `GET_MONTH`, `GET_DAY`, byte-packing helpers |
+| 201-600 | `date_new` / `date_alloc` | Argument validation, ordinal pre-check, PyObject allocation |
+| 601-1000 | `delta_new` / `delta_normalize` | timedelta construction, microsecond/second/day normalization loop |
+| 1001-1600 | `time_new` / `datetime_new` | fold flag storage, tzinfo linkage, combined date+time byte layout |
+| 1601-2400 | Arithmetic methods | `date_add`, `datetime_subtract`, `delta_multiply`, richcompare |
+| 2401-3200 | `datetime_isoformat` | Format-string builder, optional timespec argument |
+| 3201-3800 | `datetime_fromisoformat` | Hand-written ISO 8601 parser, no regex, handles `+HH:MM:SS.ffffff` |
+| 3801-4400 | `timezone_new` / `timezone_utcoffset` | Fixed-offset zone, singleton `UTC`, `__repr__` |
+| 4401-5000 | `datetime_astimezone` | Conversion chain: `utcoffset()` call, fold resolution |
+| 5001-5500 | `date_fromtimestamp` / `datetime_fromtimestamp` | POSIX timestamp input, `localtime_r` wrapper |
+| 5501-6000 | Module init, type objects | `PyType_Ready` for all five types, module-level constants |
+
+## Reading
+
+### `date_new` and object layout
+
+<Cpy path="Modules/_datetimemodule.c" lines="201-400" />
+
+Every `date` object packs its fields into a fixed-length byte array stored
+inline in the `PyObject` allocation. The macro `_PyDateTime_DATE_DATASIZE`
+is 4 bytes: 2 for the year (big-endian), 1 for month, 1 for day.
+`datetime` extends this to 10 bytes by appending hour, minute, second, and
+3 bytes of microseconds. The `fold` bit occupies the high bit of the hour
+byte, clamped to 0 or 1 at construction time.
+
+`date_new` validates ranges with a single compound check before allocating,
+so invalid arguments never reach `tp_alloc`.
+
+### `delta_normalize` and the normalization invariant
+
+<Cpy path="Modules/_datetimemodule.c" lines="601-750" />
+
+`timedelta` enforces the invariant that `microseconds` is in `[0, 999999]`
+and `seconds` is in `[0, 86399]`, with `days` absorbing any overflow.
+`delta_normalize` runs a two-step carry loop: first normalizes microseconds
+into seconds, then seconds into days. Negative deltas are fully supported;
+a `timedelta` of `-1 microsecond` is stored as `days=-1, seconds=86399,
+microseconds=999999`.
+
+### `fromisoformat` fast path
+
+<Cpy path="Modules/_datetimemodule.c" lines="3201-3600" />
+
+The hand-written ISO 8601 parser avoids any call to `strptime` or regex.
+It reads fields positionally, using `parse_isoformat_date`,
+`parse_isoformat_time`, and `parse_hh_mm_ss_ff` helpers. The separator
+between date and time may be `T` or a space (3.11+). UTC offset parsing
+handles the full `+HH:MM:SS.ffffff` form introduced in Python 3.7.
+
+In 3.14 the parser also accepts the `Z` suffix as equivalent to `+00:00`,
+matching the ECMA-262 profile of ISO 8601.
+
+## gopy notes
+
+- The inline byte-array layout for `date`/`datetime` fields is the key
+  performance decision. A Go port can use a `[10]byte` field inside the
+  object struct and the same big-endian accessors.
+- `delta_normalize` is a pure arithmetic function with no Python API calls
+  and translates directly to Go.
+- `fold` is a single boolean; store it as the low bit of a `flags uint8`
+  field alongside `fold` and `hastzinfo` flags.
+- `fromisoformat` should be ported as a standalone Go function operating
+  on a `string` input, matching CPython's positional parsing approach.
+- Fixed-offset `timezone` objects can be interned by offset value to avoid
+  repeated allocation for common zones like `UTC` and `+05:30`.

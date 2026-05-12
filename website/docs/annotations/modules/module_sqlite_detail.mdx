@@ -1,0 +1,102 @@
+---
+title: "_sqlite/connection.c"
+description: "C implementation of sqlite3.Connection: open, cursor, execute, and transaction management"
+cpython_path: Modules/_sqlite/connection.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_sqlite/connection.c` implements the `sqlite3.Connection` type in C. It owns the lifetime of the underlying `sqlite3*` handle and drives all transaction semantics exposed to Python callers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | includes, `pysqlite_state` | module state and forward decls |
+| 81–260 | `pysqlite_connection_init` | `Connection.__init__`: opens DB, sets pragmas |
+| 261–340 | `pysqlite_connection_close` | closes `sqlite3*` handle, invalidates cursors |
+| 341–430 | `pysqlite_connection_cursor` | creates and optionally calls `row_factory` |
+| 431–490 | `pysqlite_connection_execute` | one-shot query shortcut |
+| 491–620 | `_pysqlite_query_execute` | core execute path shared by Cursor |
+| 621–780 | `pysqlite_connection_commit` / `_rollback` | explicit transaction control |
+| 781–950 | `pysqlite_connection_set_isolation_level` | legacy auto-transaction via `isolation_level` |
+| 951–1100 | `pysqlite_connection_set_autocommit` | PEP 249 v3 autocommit (3.12+) |
+| 1101–1400 | `create_function`, `create_aggregate`, `create_window_function` | UDF registration |
+| 1401–1700 | `set_authorizer`, `set_progress_handler`, `set_trace_callback` | callback hooks |
+| 1701–2000 | `backup`, `iterdump` | cross-connection backup API |
+| 2001–2500 | getset table, method table, `PyTypeObject` | type plumbing |
+
+## Reading
+
+### Opening the database
+
+`pysqlite_connection_init` calls `sqlite3_open_v2` with flags derived from the `check_same_thread` and `uri` arguments, then immediately applies `sqlite3_busy_timeout` if the caller passed a nonzero `timeout`.
+
+```c
+// CPython: Modules/_sqlite/connection.c:161 pysqlite_connection_init
+rc = sqlite3_open_v2(database_name, &self->db,
+                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | flags,
+                     NULL);
+if (rc != SQLITE_OK) {
+    (void)sqlite3_close(self->db);
+    self->db = NULL;
+    ...
+}
+sqlite3_busy_timeout(self->db, (int)(timeout * 1000));
+```
+
+### Creating cursors
+
+`pysqlite_connection_cursor` instantiates a `Cursor` object and, if `self->row_factory` is not `None`, calls it with `(connection, cursor)` so the application can substitute a custom row type.
+
+```c
+// CPython: Modules/_sqlite/connection.c:363 pysqlite_connection_cursor
+cursor = PyObject_CallOneArg((PyObject *)state->CursorType, (PyObject *)self);
+if (self->row_factory != Py_None) {
+    Py_XSETREF(((pysqlite_Cursor *)cursor)->row_factory,
+               Py_NewRef(self->row_factory));
+}
+```
+
+### Transaction management
+
+When `autocommit` is off (the legacy default), every DML statement that arrives outside an open transaction causes the C layer to synthesise a `BEGIN` statement whose keyword is chosen from `isolation_level` (`""` -> `BEGIN`, `"DEFERRED"`, `"IMMEDIATE"`, `"EXCLUSIVE"`).
+
+```c
+// CPython: Modules/_sqlite/connection.c:810 _pysqlite_seterror
+if (self->begin_statement) {
+    if (sqlite3_exec(self->db, self->begin_statement,
+                     NULL, NULL, NULL) != SQLITE_OK) {
+        /* ignore — rollback will follow */
+    }
+}
+```
+
+### `detect_types` and type converters
+
+When `detect_types` includes `PARSE_COLNAMES`, the column name is scanned for a `[typename]` annotation and the matching converter callable is looked up in the module-level `converters` dict, then called on the raw bytes value before it reaches Python.
+
+```c
+// CPython: Modules/_sqlite/connection.c:552 _pysqlite_fetch_one_row
+if (self->detect_types & DETECT_COLNAMES) {
+    colname = sqlite3_column_name(self->statement->st, i);
+    /* scan for [...] */
+}
+```
+
+## gopy notes
+
+- `pysqlite_connection_init` is the authoritative place to understand which `sqlite3_open_v2` flags map to which Python keyword arguments.
+- The synthesised `BEGIN` string is stored on `self->begin_statement`; porting this requires preserving that field across any GC-safe equivalent.
+- `autocommit` (3.12+) bypasses `begin_statement` entirely. Port both paths or the legacy `isolation_level` tests will diverge.
+- UDF registration (`create_function`) uses `sqlite3_create_function_v2` with a destructor; the Go port must tie UDF lifetime to the connection object.
+
+## CPython 3.14 changes
+
+- Python 3.12 added `autocommit` as an explicit parameter, making `isolation_level=None` a legacy alias rather than the sole opt-out.
+- `create_window_function` was added in 3.11 and relies on `sqlite3_create_window_function`, available only in libsqlite3 >= 3.25.
+- The `serialize` / `deserialize` methods (3.11) wrap `sqlite3_serialize` and `sqlite3_deserialize` for in-memory database snapshots.
+- 3.14 tightened the `check_same_thread` enforcement; the check now fires on `close()` as well as on query execution.

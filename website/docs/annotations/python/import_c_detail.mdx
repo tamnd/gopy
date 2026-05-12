@@ -1,0 +1,242 @@
+---
+title: Python/import.c
+description: "Annotated reading of Python/import.c"
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 2600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+`import.c` is the C backbone of the Python import system. It owns the import lock, the `sys.modules` cache, frozen module lookup, and the bridge from the C API (`PyImport_ImportModuleLevelObject`) down into the Python-implemented machinery in `importlib._bootstrap`. Dynamic extension loading for `.so`/`.pyd` files also lives here, in `_PyImport_LoadDynamicModuleWithSpec`.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–80 | includes, statics | Headers, `_PyRuntimeState.imports` accessor shims |
+| 82–200 | Import lock | `_PyImport_AcquireLock` / `_PyImport_ReleaseLock`, recursive-lock counter |
+| 202–350 | `sys.modules` helpers | `PyImport_GetModule`, `PyImport_AddModule`, `import_get_module`, `import_add_module` |
+| 352–500 | Frozen module table | `PyImport_FindFrozenModule`, `import_find_frozen`, `exec_frozen_module` |
+| 502–900 | `import_find_and_load` | Core loop: `sys.modules` check, `_find_spec`, `loader.exec_module` |
+| 902–1100 | `PyImport_ImportModuleLevelObject` | Public entry point, package resolution, relative imports |
+| 1102–1400 | `_PyImport_LoadDynamicModuleWithSpec` | `dlopen`/`LoadLibrary`, `PyInit_*` call, multi-phase init |
+| 1402–1800 | `PyImport_ExecCodeModuleWithPathnames` | Execute a code object as a module |
+| 1802–2200 | `import_*` built-in helpers | `__import__`, `_imp` module methods |
+| 2202–2600 | Module and method tables | `_imp` method list, `PyImport_Cleanup` |
+
+## Reading
+
+### The import lock
+
+The import lock is a single per-interpreter recursive mutex. It prevents two threads from importing the same module concurrently, which would otherwise leave `sys.modules` in an inconsistent half-initialized state.
+
+```c
+// CPython: Python/import.c:100 _PyImport_AcquireLock
+int
+_PyImport_AcquireLock(PyInterpreterState *interp)
+{
+    _PyImport_State *state = &interp->imports;
+    unsigned long me = PyThread_get_thread_ident();
+
+    if (state->lock == NULL) {
+        state->lock = PyThread_allocate_lock();
+        if (state->lock == NULL)
+            Py_FatalError("unable to allocate import lock");
+    }
+
+    if (state->lock_thread == me) {
+        /* recursive acquisition */
+        state->lock_count++;
+        return 1;
+    }
+
+    if (PyThread_acquire_lock(state->lock, WAIT_LOCK) != PY_LOCK_ACQUIRED)
+        return 0;
+
+    state->lock_thread = me;
+    state->lock_count = 1;
+    return 1;
+}
+```
+
+The lock is recursive: a thread that already holds it increments `lock_count` rather than blocking on itself. This matters because `exec_module` callbacks can trigger further imports. `_PyImport_ReleaseLock` decrements the count and releases the underlying OS lock only when it reaches zero.
+
+```c
+// CPython: Python/import.c:140 _PyImport_ReleaseLock
+int
+_PyImport_ReleaseLock(PyInterpreterState *interp)
+{
+    _PyImport_State *state = &interp->imports;
+    unsigned long me = PyThread_get_thread_ident();
+
+    if (state->lock_thread != me)
+        return -1;   /* not the owner */
+    if (--state->lock_count > 0)
+        return 1;    /* still held */
+    state->lock_thread = 0;
+    PyThread_release_lock(state->lock);
+    return 1;
+}
+```
+
+### import_find_and_load: the core import loop
+
+`import_find_and_load` is called after the public entry point has resolved the absolute module name. It is not public API, but it is the true heart of the import system.
+
+```c
+// CPython: Python/import.c:560 import_find_and_load
+static PyObject *
+import_find_and_load(PyThreadState *tstate, PyObject *abs_name)
+{
+    PyObject *mod = NULL;
+    PyInterpreterState *interp = tstate->interp;
+
+    /* 1. Fast path: already in sys.modules */
+    mod = import_get_module(tstate, abs_name);
+    if (mod != NULL && mod != Py_None) {
+        ...
+        return mod;
+    }
+    ...
+
+    /* 2. Acquire the import lock before calling into importlib */
+    _PyImport_AcquireLock(interp);
+
+    /* 3. Re-check sys.modules under the lock (another thread may have
+          imported between the fast-path check and lock acquisition) */
+    mod = import_get_module(tstate, abs_name);
+    if (mod != NULL && mod != Py_None) {
+        _PyImport_ReleaseLock(interp);
+        return mod;
+    }
+
+    /* 4. Delegate to importlib._bootstrap._find_and_load */
+    mod = _PyObject_CallMethodIdObjArgs(
+              interp->importlib,
+              &PyId__find_and_load,
+              abs_name,
+              interp->import_func,
+              NULL);
+
+    _PyImport_ReleaseLock(interp);
+    return mod;
+}
+```
+
+The double-checked locking pattern (check without lock, acquire lock, check again) avoids serializing the common already-cached case through the mutex. Step 4 calls `importlib._bootstrap._find_and_load`, which in turn calls `_find_spec` to walk `sys.meta_path` and then calls the finder's `loader.exec_module(module)`. The entire Python-level import machinery runs inside that single `_PyObject_CallMethodIdObjArgs` call.
+
+### sys.modules helpers: PyImport_GetModule and PyImport_AddModule
+
+```c
+// CPython: Python/import.c:210 PyImport_GetModule
+PyObject *
+PyImport_GetModule(PyObject *name)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *mod;
+
+    mod = import_get_module(tstate, name);
+    if (mod != NULL && mod == Py_None) {
+        PyErr_Format(PyExc_ModuleNotFoundError,
+                     "import of %R halted; "
+                     "use of %R during init",
+                     name, name);
+        Py_CLEAR(mod);
+    }
+    return mod;
+}
+```
+
+A `Py_None` sentinel in `sys.modules` marks a module that is currently being initialized on another thread. `PyImport_GetModule` converts this sentinel into a `ModuleNotFoundError`, making the sentinel invisible to ordinary callers.
+
+```c
+// CPython: Python/import.c:260 PyImport_AddModule
+PyObject *
+PyImport_AddModule(const char *name)
+{
+    PyObject *nameobj = PyUnicode_FromString(name);
+    if (nameobj == NULL)
+        return NULL;
+    PyObject *mod = import_add_module(_PyThreadState_GET(), nameobj);
+    Py_DECREF(nameobj);
+    return mod;   /* borrowed reference into sys.modules */
+}
+```
+
+`PyImport_AddModule` is the C API for extension modules and embedding code to insert or retrieve a module by name. It returns a borrowed reference. If the name is already in `sys.modules`, it returns the existing object; otherwise it creates a bare `types.ModuleType` instance and inserts it.
+
+### _PyImport_LoadDynamicModuleWithSpec
+
+Dynamic extension loading is the most platform-specific path in the file. The relevant portion on POSIX:
+
+```c
+// CPython: Python/import.c:1120 _PyImport_LoadDynamicModuleWithSpec
+PyObject *
+_PyImport_LoadDynamicModuleWithSpec(PyObject *spec, FILE *fp)
+{
+    ...
+    /* Build the PyInit_<name> symbol name */
+    PyObject *name_unicode = PyObject_GetAttrString(spec, "name");
+    ...
+    const char *shortname = ...;   /* leaf name after last '.' */
+    char init_name[256];
+    PyOS_snprintf(init_name, sizeof(init_name), "PyInit_%s", shortname);
+
+    /* Open the shared library */
+    void *handle = _PyImport_FindSharedFuncptr(
+                        handle_flags, path_bytes, init_name, fp);
+    if (handle == NULL) {
+        /* dlopen / LoadLibrary failed */
+        ...
+    }
+
+    /* Call PyInit_<name>() */
+    PyModInitFunction p0 = (PyModInitFunction)handle;
+    PyObject *m = (*p0)();
+
+    /* Single-phase init: m is the module object directly */
+    /* Multi-phase init: m is a PyModuleDef; finish via _PyModule_FromDefAndSpec */
+    ...
+}
+```
+
+The function resolves the `PyInit_<shortname>` symbol using `dlsym` (POSIX) or `GetProcAddress` (Windows). Calling that symbol either returns a ready `PyObject *` (single-phase init, the traditional model) or a `PyModuleDef *` (multi-phase init, introduced in PEP 451). In the multi-phase case, `_PyModule_FromDefAndSpec` applies the `Py_mod_exec` slots to finish initialization.
+
+### Frozen module lookup
+
+```c
+// CPython: Python/import.c:380 PyImport_FindFrozenModule
+int
+PyImport_FindFrozenModule(const char *name, struct _frozen **p_frozen)
+{
+    const struct _frozen *p = _PyImport_FrozenBootstrap;
+    for (; p->name != NULL; p++) {
+        if (strcmp(p->name, name) == 0) {
+            *p_frozen = (struct _frozen *)p;
+            return 1;   /* found */
+        }
+    }
+    /* also search FrozenStdlib and FrozenTest tables */
+    ...
+    return 0;
+}
+```
+
+The interpreter embeds three frozen module arrays, all generated at build time: `_PyImport_FrozenBootstrap` (the import machinery itself), `_PyImport_FrozenStdlib` (selected stdlib modules), and `_PyImport_FrozenTest` (test helpers). Lookup is a linear scan over null-terminated arrays. When a frozen module is found, `exec_frozen_module` unmarshals the stored bytecode with `PyMarshal_ReadObjectFromString` and executes it in a fresh module namespace.
+
+## gopy notes
+
+Status: not yet ported.
+
+The import system is one of the larger remaining subsystems. Planned layout:
+
+- `vm/import.go`: `PyImport_ImportModuleLevelObject`, `import_find_and_load`, `PyImport_GetModule`, `PyImport_AddModule`
+- `vm/import_lock.go`: the recursive import lock, mapped to a `sync.Mutex` plus a goroutine-ID owner and count field
+- `vm/import_frozen.go`: frozen module tables and `exec_frozen_module`
+- `vm/import_dynamic.go`: `_PyImport_LoadDynamicModuleWithSpec` using Go's `plugin` package or `cgo`/`dlopen` shims
+
+The `importlib._bootstrap` dependency means a portion of the import machinery will remain in Python (vendored from CPython `Lib/importlib/`), with the C-level entry points in `vm/import.go` calling into it via the eval loop rather than replacing it.

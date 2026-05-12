@@ -1,0 +1,133 @@
+---
+title: "threading.py"
+description: "Thread synchronization primitives and thread lifecycle management"
+cpython_path: Lib/threading.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/threading.py` is the pure-Python layer over the `_thread` C extension. It
+provides the `Thread` class, five synchronization primitives, thread-local
+storage, and a handful of introspection helpers. Almost every blocking call
+eventually bottoms out in a `_thread.lock` acquire or release.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | module setup, `_start_new_thread` import | Bootstrap and C binding aliases |
+| 101-280 | `Lock`, `RLock` | Thin wrappers around `_thread.lock` / `_thread.RLock` |
+| 281-430 | `Condition` | Monitor built on top of a `Lock` and a waiter list |
+| 431-500 | `Semaphore`, `BoundedSemaphore` | Counter-based gate |
+| 501-560 | `Event` | Boolean flag backed by `Condition` |
+| 561-640 | `Barrier` | Phase-counting rendezvous |
+| 641-900 | `Thread` | Thread object: `start`, `run`, `join`, daemon flag |
+| 901-960 | `local` | Thread-local storage via `_threading_local` |
+| 961-1000 | `main_thread`, `current_thread` | Registry and introspection |
+| 1001-1200 | `excepthook`, `_shutdown` | Cleanup and unhandled-exception hook |
+
+## Reading
+
+### Thread.start and Thread.run
+
+`start()` delegates immediately to `_start_new_thread`, which is
+`_thread.start_new_thread` from the C extension. The OS thread calls
+`_bootstrap`, which eventually calls `run()`.
+
+```python
+# CPython: Lib/threading.py:930 Thread.start
+def start(self):
+    with _active_limbo_lock:
+        _limbo[self] = self
+    try:
+        _start_new_thread(self._bootstrap, ())
+    except Exception:
+        with _active_limbo_lock:
+            del _limbo[self]
+        raise
+    self._started.wait()
+```
+
+`run()` is intentionally simple: call the target with the stored args and
+kwargs, then discard them so the thread does not hold references longer than
+needed.
+
+```python
+# CPython: Lib/threading.py:870 Thread.run
+def run(self):
+    try:
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+    finally:
+        del self._target, self._args, self._kwargs
+```
+
+### Condition.wait
+
+`Condition.wait()` atomically releases the underlying lock, parks on a
+per-waiter lock, then re-acquires. The waiter lock is a plain `_thread.lock`
+acquired before appending to the waiter list so the notifier can find it.
+
+```python
+# CPython: Lib/threading.py:335 Condition.wait
+def wait(self, timeout=None):
+    if not self._is_owned():
+        raise RuntimeError("cannot wait on un-acquired lock")
+    waiter = _allocate_lock()
+    waiter.acquire()
+    self._waiters.append(waiter)
+    saved_state = self._release_save()
+    gotit = False
+    try:
+        if timeout is None:
+            waiter.acquire()
+            gotit = True
+        else:
+            gotit = waiter.acquire(True, timeout)
+        return gotit
+    finally:
+        self._acquire_restore(saved_state)
+        if not gotit:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+```
+
+### Event.wait
+
+`Event` is a thin facade over a `Condition`. `wait()` loops on the condition
+until the internal flag becomes `True` or the timeout expires.
+
+```python
+# CPython: Lib/threading.py:570 Event.wait
+def wait(self, timeout=None):
+    with self._cond:
+        signaled = self._flag
+        if not signaled:
+            signaled = self._cond.wait(timeout)
+        return signaled
+```
+
+## gopy notes
+
+- `_thread.lock` maps to Go's `sync.Mutex`; `RLock` maps to `sync.RWMutex`.
+- `Condition._waiters` is a channel slice in the gopy port; each waiter owns a
+  buffered channel of size 1 rather than a secondary lock.
+- `local()` is implemented with `goroutine`-keyed maps rather than
+  `_threading_local` because Go lacks `pthread_key`.
+- `_start_new_thread` becomes `go bootstrap(t)` in gopy.
+- `Barrier` uses an `int` phase counter plus a `Condition`; gopy ports this
+  directly with no changes to the algorithm.
+
+## CPython 3.14 changes
+
+- `threading.settrace_all_threads()` and `threading.setprofile_all_threads()`
+  were added in 3.12 and are present unchanged in 3.14.
+- The `excepthook` mechanism (PEP 675 follow-up) is stable; 3.14 made no
+  structural changes to `threading.py`.
+- `_shutdown()` gained a `_HAVE_THREAD_NATIVE_ID` guard path in 3.8; 3.14
+  leaves it intact.

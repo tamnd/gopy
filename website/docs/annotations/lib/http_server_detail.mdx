@@ -1,0 +1,133 @@
+---
+title: "http/server.py"
+description: "Simple HTTP server: request parsing, response building, file serving, CGI"
+cpython_path: Lib/http/server.py
+cpython_version: "3.14"
+lines: 1300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/http/server.py` implements a minimal HTTP/1.x server built on `socketserver.TCPServer`. It is not production-grade but is the reference implementation for the stdlib HTTP layer and a useful port target for gopy's `module/http/` work.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 130–160 | `HTTPServer` | subclasses `TCPServer`; sets `allow_reuse_address = True`, stores `server_name`/`server_port` |
+| 162–200 | `ThreadingHTTPServer` | mixes in `ThreadingMixIn`; `daemon_threads = True` |
+| 202–380 | `BaseHTTPRequestHandler` | core request/response machinery |
+| 381–420 | `handle_one_request` | reads request line, dispatches to `do_METHOD` |
+| 421–490 | `parse_request` | validates method, path, HTTP version |
+| 491–560 | `send_response` / `send_header` / `end_headers` | write status line and headers |
+| 600–900 | `SimpleHTTPRequestHandler` | serves filesystem files; `do_GET` and `do_HEAD` |
+| 750–820 | `list_directory` | HTML directory listing |
+| 900–1100 | `CGIHTTPRequestHandler` | runs scripts via `subprocess` |
+| 1100–1300 | `test` / `__main__` | CLI entry point |
+
+## Reading
+
+### HTTPServer and socket reuse
+
+`HTTPServer` is a thin subclass whose only job is to flip `allow_reuse_address` so the listening socket can be reclaimed immediately after a restart.
+
+```python
+# CPython: Lib/http/server.py:130 HTTPServer
+class HTTPServer(socketserver.TCPServer):
+    allow_reuse_address = 1
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = socket.getfqdn(host)
+        self.server_port = port
+```
+
+### handle\_one\_request and parse\_request
+
+`handle_one_request` reads exactly one request line, calls `parse_request` to split it into method/path/version, then looks up `do_METHOD` on `self`.
+
+```python
+# CPython: Lib/http/server.py:381 handle_one_request
+def handle_one_request(self):
+    try:
+        self.raw_requestline = self.rfile.readline(65537)
+        if len(self.raw_requestline) > 65536:
+            self.requestline = ''
+            self.request_version = ''
+            self.command = ''
+            self.send_error(HTTPStatus.REQUEST_URI_TOO_LONG)
+            return
+        if not self.raw_requestline:
+            self.close_connection = True
+            return
+        if not self.parse_request():
+            return
+        mname = 'do_' + self.command
+        if not hasattr(self, mname):
+            self.send_error(
+                HTTPStatus.NOT_IMPLEMENTED,
+                "Unsupported method (%r)" % self.command)
+            return
+        method = getattr(self, mname)
+        method()
+        self.wfile.flush()
+    except TimeoutError as e:
+        self.log_error("Request timed out: %r", e)
+        self.close_connection = True
+        return
+```
+
+### Response building
+
+The trio `send_response` / `send_header` / `end_headers` writes the status line and MIME headers. `send_response` appends `Server:` and `Date:` automatically. Nothing touches the socket until `end_headers` flushes `_headers_buffer`.
+
+```python
+# CPython: Lib/http/server.py:510 send_response
+def send_response(self, code, message=None):
+    if self.request_version != 'HTTP/0.9':
+        if message is None:
+            if code in self.responses:
+                message = self.responses[code][0]
+            else:
+                message = ''
+        if not hasattr(self, '_headers_buffer'):
+            self._headers_buffer = []
+        self._headers_buffer.append(
+            ("%s %d %s\r\n" % (self.protocol_version, code, message))
+            .encode("latin-1", "strict"))
+    self.send_header('Server', self.version_string())
+    self.send_header('Date', self.date_time_string())
+```
+
+### SimpleHTTPRequestHandler.do\_GET
+
+`do_GET` resolves a URL path to a filesystem path, then either streams the file or generates a directory listing. Range requests are not handled; that is left to subclasses.
+
+```python
+# CPython: Lib/http/server.py:670 do_GET
+def do_GET(self):
+    """Serve a GET request."""
+    f = self.send_head()
+    if f:
+        try:
+            self.copyfile(f, self.wfile)
+        finally:
+            f.close()
+```
+
+## gopy notes
+
+- `HTTPServer` and `BaseHTTPRequestHandler` are the primary port targets. `CGIHTTPRequestHandler` can be deferred until `subprocess` is available.
+- `parse_request` validates the HTTP version string by splitting on `/` and `.`. The validation must produce the same error responses as CPython to pass conformance tests.
+- The `_headers_buffer` accumulation pattern (list of `bytes`, flushed in `end_headers`) must be preserved to avoid partial writes on slow connections.
+- `send_error` writes an HTML body; gopy should reproduce the exact byte layout.
+- `list_directory` depends on `os.listdir` and `urllib.parse.quote`; both subsystems must be in place before this handler is live.
+
+## CPython 3.14 changes
+
+- `ThreadingHTTPServer` carries `daemon_threads = True` by default (established in 3.13, unchanged in 3.14).
+- `BaseHTTPRequestHandler.protocol_version` remains `"HTTP/1.0"` by default; `SimpleHTTPRequestHandler` overrides to `"HTTP/1.1"` to enable persistent connections.
+- The `directory` parameter on `SimpleHTTPRequestHandler` (added in 3.7) is unchanged.
+- No new handler classes were added in 3.14; the file is structurally stable.

@@ -1,0 +1,204 @@
+---
+title: "Objects/genericaliasobject.c: GenericAlias, __class_getitem__, and Typing Integration"
+description: "Ga_origin/Ga_args fields, __class_getitem__ entry, ga_subscript nesting, ga_instancecheck via __mro_entries__, and __typing_unpacked_tuple_args__ in 3.14"
+cpython_path: Objects/genericaliasobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: objects/generic_alias.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/genericaliasobject.c` implements `types.GenericAlias`, the runtime
+object produced by expressions like `list[int]` or `dict[str, int]`. An alias
+wraps an origin class and a parameter tuple without creating a new class. Most
+attribute access is proxied back to the origin, so `list[int].append` still
+resolves. The file also provides the `__class_getitem__` descriptor that built-in
+types use to enter the alias machinery, and the `__mro_entries__` hook that lets
+`class Foo(list[int])` resolve `list` as the real base.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Objects/genericaliasobject.c" lines="1-44">1-44</Cpy> | `gaobject` struct | `origin`, `args`, `parameters`, `starred` fields; `parameters` is lazily built |
+| <Cpy path="Objects/genericaliasobject.c" lines="45-90">45-90</Cpy> | `ga_traverse` | GC visitor; visits `origin`, `args`, `parameters` |
+| <Cpy path="Objects/genericaliasobject.c" lines="91-200">91-200</Cpy> | `ga_repr`, `ga_repr_items_list` | Formats `list[int]` and `*tuple[int]`; handles ParamSpec list args |
+| <Cpy path="Objects/genericaliasobject.c" lines="201-403">201-403</Cpy> | `_Py_make_parameters`, `_Py_subs_parameters` | Collect TypeVar/ParamSpec/TypeVarTuple from args; substitute them |
+| <Cpy path="Objects/genericaliasobject.c" lines="404-605">404-605</Cpy> | `ga_getitem` (`__getitem__`) | Subscript an alias to substitute parameters; returns a new alias |
+| <Cpy path="Objects/genericaliasobject.c" lines="606-700">606-700</Cpy> | `ga_hash`, `ga_call`, `ga_richcompare` | Hash = `hash(origin) ^ hash(args)`; call forwards to `origin`; eq compares starred + origin + args |
+| <Cpy path="Objects/genericaliasobject.c" lines="653-695">653-695</Cpy> | `attr_exceptions`, `attr_blocked`, `ga_getattro` | Own-attribute set, blocked-attribute set, and the three-way proxy dispatch |
+| <Cpy path="Objects/genericaliasobject.c" lines="742-820">742-820</Cpy> | `ga_mro_entries`, `ga_instancecheck`, `ga_subclasscheck` | PEP 560 and PEP 585 hooks; `isinstance(x, list[int])` always raises `TypeError` |
+| <Cpy path="Objects/genericaliasobject.c" lines="821-895">821-895</Cpy> | `ga_methods`, `ga_members`, `ga_properties` | Descriptor tables wired into `Py_GenericAliasType` |
+| <Cpy path="Objects/genericaliasobject.c" lines="896-960">896-960</Cpy> | `ga_new`, `setup_ga` | `tp_new` for `types.GenericAlias(origin, args)`; `setup_ga` normalizes args to a tuple |
+| <Cpy path="Objects/genericaliasobject.c" lines="961-1014">961-1014</Cpy> | `ga_iter`, `gaiterobject` | One-shot iterator that yields a `starred=True` copy for `*tuple[int]` unpacking |
+| <Cpy path="Objects/genericaliasobject.c" lines="1014-1060">1014-1060</Cpy> | `Py_GenericAlias`, `Py_GenericAliasType` | Public entry point used by built-in `tp_class_getitem` slots |
+
+## Reading
+
+### gaobject struct and the starred flag
+
+The `starred` bit marks aliases created by the `*` unpack syntax in a
+subscription context (`*tuple[int, ...]`). A starred alias carries a
+`__unpacked__` attribute of `True` and exposes
+`__typing_unpacked_tuple_args__` when the origin is `tuple`. The bit threads
+through `ga_iter` so iterating a starred alias yields the alias itself
+(enabling `[*tuple[int]]` in `TypeAlias` expressions).
+
+```c
+// CPython: Objects/genericaliasobject.c:15 gaobject
+typedef struct {
+    PyObject_HEAD
+    PyObject *origin;      /* the parameterized class, e.g. list          */
+    PyObject *args;        /* parameter tuple, e.g. (int,)                 */
+    PyObject *parameters;  /* TypeVar tuple, lazily built from args        */
+    bool      starred;     /* True when created by *alias for unpacking    */
+} gaobject;
+```
+
+`setup_ga` is called from both `Py_GenericAlias` (the C entry point for
+`list[int]`) and `ga_new` (the Python-level `types.GenericAlias(list, int)`
+constructor). It normalizes a non-tuple `args` value into a one-item tuple so
+all downstream code can assume `args` is always a `tuple`.
+
+### ga_getattro: own / blocked / proxy dispatch
+
+Attribute lookup on an alias follows a three-way rule. Attributes in
+`attr_exceptions` are handled by the alias's own type (via `GenericGetAttr`).
+Attributes in `attr_blocked` are also handled by the alias itself so they
+don't leak through to the origin class, which would return class-level
+answers that should not apply to the alias. Everything else proxies to the
+origin.
+
+```c
+// CPython: Objects/genericaliasobject.c:674 ga_getattro
+static PyObject *
+ga_getattro(PyObject *self, PyObject *name)
+{
+    gaobject *alias = (gaobject *)self;
+    if (PyUnicode_Check(name) &&
+        is_in_set(name, attr_blocked))      /* __bases__, __copy__, etc. */
+        return PyObject_GenericGetAttr(self, name);
+    if (PyUnicode_Check(name) &&
+        is_in_set(name, attr_exceptions))   /* __origin__, __args__, ... */
+        return PyObject_GenericGetAttr(self, name);
+    return PyObject_GetAttr(alias->origin, name);  /* proxy */
+}
+```
+
+The `attr_blocked` set matters for pickling and copy: if `__copy__` were
+proxied to `list`, `copy.copy(list[int])` would shallow-copy the origin class
+rather than the alias.
+
+### ga_subscript: nested parameterization
+
+Subscribing an already-parameterized alias (`list[T][int]`) triggers
+`ga_getitem`, which collects the TypeVar parameters from `args`, then calls
+`_Py_subs_parameters` to substitute the supplied item values for each
+TypeVar in order. The result is a fresh `GenericAlias` with the same `origin`
+but substituted args.
+
+```c
+// CPython: Objects/genericaliasobject.c:572 ga_getitem
+static PyObject *
+ga_getitem(PyObject *self, PyObject *item)
+{
+    gaobject *alias = (gaobject *)self;
+
+    /* Lazily build the parameters tuple from TypeVars in args. */
+    if (alias->parameters == NULL) {
+        alias->parameters = _Py_make_parameters(alias->args);
+        if (alias->parameters == NULL)
+            return NULL;
+    }
+
+    PyObject *new_args = _Py_subs_parameters(self, alias->args,
+                                              alias->parameters, item);
+    if (new_args == NULL)
+        return NULL;
+
+    PyObject *res = Py_GenericAlias(alias->origin, new_args);
+    ((gaobject *)res)->starred = alias->starred;
+    Py_DECREF(new_args);
+    return res;
+}
+```
+
+When `parameters` is empty the alias has no free TypeVars left; CPython raises
+`TypeError: list[int] is not a generic class`. gopy reproduces this in
+`subsParameters`.
+
+### ga_instancecheck and __mro_entries__
+
+`isinstance(x, list[int])` is deliberately a `TypeError` because runtime
+type-checking against a parameterized generic is not safe (the type parameters
+are erased). The error message was improved in 3.12 to hint at `isinstance(x, list)`.
+
+`__mro_entries__` is the PEP 560 hook used when an alias appears as a base
+class. `class Foo(list[int])` calls `list[int].__mro_entries__((list[int],))`
+which returns `(list,)`. The MRO machinery then replaces the alias with `list`
+in the bases tuple before creating the new type.
+
+```c
+// CPython: Objects/genericaliasobject.c:742 ga_mro_entries
+static PyObject *
+ga_mro_entries(PyObject *self, PyObject *args)
+{
+    gaobject *alias = (gaobject *)self;
+    return PyTuple_Pack(1, alias->origin);
+}
+
+// CPython: Objects/genericaliasobject.c:756 ga_instancecheck
+static PyObject *
+ga_instancecheck(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(arg))
+{
+    PyErr_SetString(PyExc_TypeError,
+        "isinstance() argument 2 cannot be a parameterized generic");
+    return NULL;
+}
+```
+
+### __typing_unpacked_tuple_args__ in 3.14
+
+3.14 formalized `__typing_unpacked_tuple_args__` as a stable attribute on
+`GenericAlias`. It returns `args` when `starred=True` and `origin is tuple`,
+otherwise `None`. This allows `typing.get_args(*tuple[int, str])` to work
+without reaching into private internals.
+
+```c
+// CPython: Objects/genericaliasobject.c:836 ga_typing_unpacked_tuple_args (3.14)
+static PyObject *
+ga_typing_unpacked_tuple_args(gaobject *alias, void *Py_UNUSED(ignored))
+{
+    if (alias->starred && alias->origin == (PyObject *)&PyTuple_Type) {
+        return Py_NewRef(alias->args);
+    }
+    Py_RETURN_NONE;
+}
+```
+
+In gopy this is the `__typing_unpacked_tuple_args__` getset registered in the
+second `init()` block of `objects/generic_alias.go`.
+
+## gopy notes
+
+`GenericAlias` in `objects/generic_alias.go` mirrors `gaobject` field-for-field.
+The `starred` bool maps directly. `parameters` starts `nil` and is populated
+lazily by `makeParameters(ga.args)`, matching CPython's lazy allocation.
+
+`gaGetattro` implements the three-way dispatch with two Go maps
+(`gaAttrOwn` and `gaAttrBlocked`), matching `attr_exceptions` and
+`attr_blocked` from CPython.
+
+`ga_iter` collapses to `gaIter`, which wraps a single-element list containing
+a starred copy of the alias. A dedicated `gaiterobject` is not ported; the
+existing `seqiter` path is sufficient for the one-shot case.
+
+`__mro_entries__` is registered as a `MethodDescr` and returns
+`NewTuple([]Object{ga.origin})`, matching `ga_mro_entries` exactly.
+
+`_Py_make_parameters` and `_Py_subs_parameters` are stubbed in
+`makeParameters` and `subsParameters` pending a full TypeVar port. The stubs
+raise the same `TypeError` messages as CPython so test code that catches
+those errors does not need adjustment when the real implementation lands.

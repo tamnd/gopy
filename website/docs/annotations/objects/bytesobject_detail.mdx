@@ -1,0 +1,132 @@
+---
+title: "Objects/bytesobject.c: Bytes Internals"
+description: "Interning, concatenation, find helpers, PyBytes_FromFormat, the AS_STRING macro, and 3.14 changes"
+cpython_path: Objects/bytesobject.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: objects/bytes.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/bytesobject.c` is CPython's largest object file. It implements `bytes`:
+an immutable sequence of octets backed by a C `char[]` appended to the object header.
+Key concerns are a single-byte intern table, efficient concatenation, a shared
+substring-search helper, `printf`-style construction, and the unsafe `PyBytes_AS_STRING`
+macro.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | `PyBytesObject` struct | Header plus `ob_sval[]` flexible array; `ob_shash` caches hash |
+| 81–200 | `PyBytes_FromStringAndSize` | Main constructor; interns single-byte values via `characters[]` |
+| 201–400 | `PyBytes_FromFormat` | `printf`-style bytes builder; walks format string, handles `%s %d %i %u %ld` etc. |
+| 401–550 | `PyBytes_AS_STRING` (macro) | Unchecked `ob_sval` pointer; versus `PyBytes_AsString` with type check |
+| 551–700 | `bytes_concat` | `+` operator; allocates new object, `memcpy`s both sides |
+| 701–900 | `bytes_repeat` | `*` operator; single allocation then repeated `memcpy` |
+| 901–1100 | `bytes_find_internal` | Shared helper for `find`, `index`, `rfind`, `rindex`, `count` |
+| 1101–1400 | `bytes_subscript` | `__getitem__`; handles int and slice; slice returns new `bytes` |
+| 1401–1700 | `bytes_methods` | `split`, `join`, `strip`, `replace`, `startswith`, `endswith`, etc. |
+| 1701–2100 | `bytes_decode` | Codec dispatch via `PyUnicode_Decode`; default codec is UTF-8 |
+| 2101–2500 | `bytes_richcompare` | Lexicographic comparison using `memcmp`; handles mixed lengths |
+| 2501–2800 | `byteshash` | `_Py_HashBytes` over `ob_sval`; result cached in `ob_shash` |
+| 2801–3000 | `PyBytesType` | `tp_*` slot table; 3.14 adds `tp_vectorcall` for `bytes()` |
+
+## Reading
+
+### Single-byte interning
+
+CPython keeps a static array `characters[256]` of pre-allocated `PyBytesObject`
+instances, one per byte value. `PyBytes_FromStringAndSize` returns the interned
+object when the requested length is exactly 1, avoiding any allocation.
+
+```c
+// Objects/bytesobject.c:106  PyBytes_FromStringAndSize
+PyObject *
+PyBytes_FromStringAndSize(const char *str, Py_ssize_t size)
+{
+    ...
+    if (size == 1 && str != NULL) {
+        op = characters[(unsigned char)str[0]];
+        if (op != NULL) {
+            Py_INCREF(op);
+            return (PyObject *)op;
+        }
+    }
+    op = (PyBytesObject *)PyObject_Malloc(
+             PyBytesObject_SIZE + size);
+    ...
+    memcpy(op->ob_sval, str, size);
+    op->ob_sval[size] = '\0';
+    op->ob_shash = -1;
+    ...
+}
+```
+
+### `bytes_concat` and `PyBytes_AS_STRING`
+
+Concatenation allocates a fresh object sized to the sum of both operands, then
+`memcpy`s each side in sequence. The `PyBytes_AS_STRING` macro casts directly to
+`char*` without any type check; the safe `PyBytes_AsString` function adds a
+`PyBytes_Check` guard and sets `TypeError` on failure.
+
+```c
+// Objects/bytesobject.c:568  bytes_concat
+static PyObject *
+bytes_concat(PyObject *a, PyObject *b)
+{
+    ...
+    size = Py_SIZE(a) + Py_SIZE(b);
+    result = PyBytes_FromStringAndSize(NULL, size);
+    if (result == NULL)
+        return NULL;
+    memcpy(PyBytes_AS_STRING(result),
+           PyBytes_AS_STRING(a), Py_SIZE(a));
+    memcpy(PyBytes_AS_STRING(result) + Py_SIZE(a),
+           PyBytes_AS_STRING(b), Py_SIZE(b));
+    return result;
+}
+```
+
+### `bytes_find_internal` and `PyBytes_FromFormat`
+
+`bytes_find_internal` is a shared C function called by `find`, `index`, `rfind`,
+`rindex`, and `count`. It normalizes the `start`/`end` slice arguments, then
+dispatches to `stringlib_find` (a templated Boyer-Moore-Horspool variant from
+`Modules/_io/stringlib`).
+
+`PyBytes_FromFormat` walks a `printf`-style format string and builds the result
+incrementally into a `_PyBytesWriter` buffer. In 3.14 the writer uses a small inline
+buffer to avoid a heap allocation for short results.
+
+```c
+// Objects/bytesobject.c:230  PyBytes_FromFormat (entry)
+PyObject *
+PyBytes_FromFormat(const char *format, ...)
+{
+    va_list vargs;
+    va_start(vargs, format);
+    PyObject *result = PyBytes_FromFormatV(format, vargs);
+    va_end(vargs);
+    return result;
+}
+
+// Objects/bytesobject.c:250  PyBytes_FromFormatV (inner loop sketch)
+// walks format; for each %s copies strlen bytes,
+// for %d/%i calls _PyLong_FormatBytesWriter, etc.
+```
+
+## gopy notes
+
+- `objects/bytes.go` stores content as a Go `[]byte`. The flexible C array layout
+  has no direct equivalent; the slice is allocated separately from the struct.
+- The 256-entry single-byte intern table is ported as a `[256]*Bytes` package-level
+  array initialized at startup.
+- `bytes_find_internal` is ported as a Go helper that normalizes slice bounds and then
+  calls `bytes.Index` / `bytes.LastIndex` from the standard library rather than
+  reimplementing Boyer-Moore-Horspool.
+- `PyBytes_FromFormat` is partially ported; the `%s`, `%d`, `%i`, `%u`, `%ld` verbs
+  are handled. The `%V` (optional with fallback) verb is not yet ported.
+- The 3.14 `tp_vectorcall` slot is not yet present in the Go port; `tp_call` is used.

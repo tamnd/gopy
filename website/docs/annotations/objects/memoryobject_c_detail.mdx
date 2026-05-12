@@ -1,0 +1,84 @@
+---
+title: Objects/memoryobject.c
+description: "memoryview implementation: buffer protocol acquisition, shape/strides/format metadata, slicing, and the zero-copy cast between compatible buffer shapes."
+cpython_path: Objects/memoryobject.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/memoryobject.c" />
+
+`Objects/memoryobject.c` implements the `memoryview` type. A `memoryview` is a window into another object's buffer without copying the data. The file covers buffer acquisition and release, the `Py_buffer` struct, shape and strides arithmetic for multi-dimensional views, slicing, the `cast()` method for reinterpreting bytes as a different format, and comparison.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `Py_buffer` helpers | `PyBUF_*` flag checking, buffer acquire/release wrappers |
+| 201-600 | `PyMemoryViewObject` internals | `mbuf` master buffer, view lifetime tracking |
+| 601-1200 | Index and slice | `memory_subscript`, `memory_ass_subscript` |
+| 1201-1800 | `memory_cast` | Reinterpret bytes as new format/shape |
+| 1801-2400 | Comparison | `memory_richcompare`, element-by-element compare |
+| 2401-3000 | Type slot wiring | `PyMemoryView_Type`, `Py_buffer` protocol export |
+
+## Reading
+
+### Buffer acquisition
+
+`PyMemoryView_FromObject` calls `PyObject_GetBuffer` on the source object, which invokes `tp_as_buffer->bf_getbuffer`. The resulting `Py_buffer` struct describes the memory region: pointer, length, item size, format string (struct-style), and optional shape/strides arrays.
+
+```c
+// Objects/memoryobject.c:201 PyMemoryView_FromObject
+PyObject *
+PyMemoryView_FromObject(PyObject *v)
+{
+    PyMemoryViewObject *mv;
+    Py_buffer *base;
+    if (PyMemoryView_Check(v)) {
+        mv = (PyMemoryViewObject *)v;
+        base = &mv->view;
+        return PyMemoryView_FromMemory(base->buf, base->len, PyBUF_WRITE);
+    }
+    return PyMemoryView_FromBuffer(/* ... */);
+}
+```
+
+Each `memoryview` holds a `mbuf` reference to a master buffer object that tracks the original exporter, preventing the underlying memory from being freed while any view is alive.
+
+### Slicing and strides
+
+For contiguous 1-D buffers, slicing adjusts the `buf` pointer and `len` field directly. For multi-dimensional views, slicing adjusts the `shape` and `strides` arrays, enabling zero-copy row/column access into NumPy-style arrays.
+
+```c
+// Objects/memoryobject.c:601 memory_subscript (simplified)
+static PyObject *
+memory_subscript(PyMemoryViewObject *self, PyObject *key)
+{
+    Py_buffer *view = &self->view;
+    if (view->ndim == 1) {
+        // fast path: single integer or slice
+    } else {
+        // multi-dimensional: update shape/strides
+    }
+}
+```
+
+### `cast()`
+
+`memory_cast` reinterprets the bytes using a new format string and optional shape. The total byte count must be identical. The cast is zero-copy and returns a new `memoryview` backed by the same `mbuf`.
+
+```c
+// Objects/memoryobject.c:1201 memory_cast
+static PyObject *
+memory_cast(PyMemoryViewObject *self, PyObject *args, PyObject *kwds)
+{
+    /* validate new format/shape, share mbuf */
+}
+```
+
+## gopy notes
+
+Not yet ported. The planned package path is `objects/memoryview.go`. gopy would represent `Py_buffer` as a Go struct with a `[]byte` slice plus shape/strides slices, and implement `GetBuffer`/`ReleaseBuffer` as methods on exporters. The zero-copy guarantee maps to passing a slice header rather than copying bytes.

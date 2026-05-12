@@ -1,0 +1,157 @@
+---
+title: Modules/_contextvarsmodule.c
+description: "Thin C module wrapper exposing ContextVar, Context, and Token from Python/context.c, plus contextvars_run_impl and module-level copy_context()"
+cpython_path: Modules/_contextvarsmodule.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_contextvarsmodule.c` is a thin C wrapper. It contains no data
+structures and no algorithmic logic of its own. Its sole job is to register the
+`contextvars` module and expose three public types (`Context`, `ContextVar`,
+`Token`) plus two free functions (`copy_context` and `run`). All real
+implementation lives in `Python/context.c`, which maintains the HAMT-backed
+immutable snapshot model and defines `PyContext_Type`, `PyContextVar_Type`, and
+`PyContextToken_Type`.
+
+This split is intentional: `Python/context.c` is part of the core interpreter
+and is always linked in, while `Modules/_contextvarsmodule.c` is the thin
+`import contextvars` entry point that wires those internal types into the public
+module namespace.
+
+<CpyLink path="Modules/_contextvarsmodule.c" />
+
+## Map
+
+| Lines (approx) | Symbol | Role |
+|---|---|---|
+| 1-25 | Includes | `context.h`, `moduleobject.h`, `pycore_context.h` |
+| 26-70 | `contextvars_copy_context` | Wraps `PyContext_CopyCurrent`; the only free function besides `run` |
+| 71-120 | `contextvars_run_impl` | Enters a context snapshot, runs a callable, restores the previous context |
+| 121-170 | `_contextvarsmodule_methods` | Method table: `copy_context` and `run` |
+| 171-230 | `_contextvarsmodule_exec` | Adds `Context`, `ContextVar`, `Token` to the module dict via `PyModule_AddType` |
+| 231-265 | `_contextvarsmodule_slots` | `Py_mod_exec` slot array for multi-phase init |
+| 266-300 | `PyModuleDef` + `PyInit__contextvars` | Module definition and multi-phase `PyModuleDef_Init` entry point |
+
+## Reading
+
+### contextvars_run_impl: running a callable in a context snapshot
+
+The `contextvars.run` function is slightly more complex than `copy_context`
+because it must enter the context, run the callable, and restore the previous
+context even if the callable raises. The C implementation delegates to
+`PyContext_Enter` and `PyContext_Exit` from `Python/context.c`.
+
+```c
+// CPython: Modules/_contextvarsmodule.c:71 contextvars_run_impl
+static PyObject *
+contextvars_run_impl(PyObject *self, PyObject *ctx, PyObject *func,
+                     PyObject *args, PyObject *kwargs)
+{
+    if (PyContext_Enter(ctx) == -1)
+        return NULL;
+
+    PyObject *result = PyObject_Call(func, args, kwargs);
+
+    if (PyContext_Exit(ctx) == -1) {
+        Py_XDECREF(result);
+        return NULL;
+    }
+    return result;
+}
+```
+
+The `PyContext_Enter` / `PyContext_Exit` pair in `Python/context.c` swaps the
+per-thread `ts->context` pointer atomically under the GIL, so the running
+callable and everything it calls see the snapshot's variable bindings.
+
+### copy_context: the module-level free function
+
+`copy_context()` is the only free function in the module method table that does
+not take a context argument. It snapshots the current thread's context by
+calling `PyContext_CopyCurrent`, which performs a shallow copy of the HAMT
+trie rooted at `ts->context`.
+
+```c
+// CPython: Modules/_contextvarsmodule.c:26 contextvars_copy_context
+static PyObject *
+contextvars_copy_context(PyObject *self, PyObject *args)
+{
+    if (!_PyArg_NoKeywords("copy_context", args))
+        return NULL;
+    return PyContext_CopyCurrent();
+}
+```
+
+The returned `Context` object is independent of the running context. Mutations
+via `ContextVar.set` inside the new context do not affect the original, because
+each `set` produces a new HAMT root rather than mutating the existing trie.
+
+### Relationship to the _PyContext_* internal API
+
+`_contextvarsmodule.c` only calls the public `PyContext_*` functions. The
+internal `_PyContext_*` API (in `Include/internal/pycore_context.h`) is used
+exclusively by `Python/context.c` itself and by the interpreter's frame
+machinery that propagates context across generator and coroutine resume points.
+
+The public API surface that this module relies on:
+
+- `PyContext_CopyCurrent` (used by `copy_context`)
+- `PyContext_Enter`, `PyContext_Exit` (used by `contextvars_run_impl`)
+- `PyContext_Type`, `PyContextVar_Type`, `PyContextToken_Type` (registered in
+  `_contextvarsmodule_exec`)
+
+### Module exec: type registration and multi-phase init
+
+The module uses the PEP 451 multi-phase init pattern. `PyModuleDef_Init`
+returns a module spec rather than a fully initialised module object, and the
+`Py_mod_exec` slot calls `_contextvarsmodule_exec` to populate the dict.
+
+```c
+// CPython: Modules/_contextvarsmodule.c:171 _contextvarsmodule_exec
+static int
+_contextvarsmodule_exec(PyObject *m)
+{
+    if (PyModule_AddType(m, &PyContext_Type) < 0)
+        return -1;
+    if (PyModule_AddType(m, &PyContextVar_Type) < 0)
+        return -1;
+    if (PyModule_AddType(m, &PyContextToken_Type) < 0)
+        return -1;
+    return 0;
+}
+
+// CPython: Modules/_contextvarsmodule.c:266 PyInit__contextvars
+PyMODINIT_FUNC
+PyInit__contextvars(void)
+{
+    return PyModuleDef_Init(&_contextvarsmodule);
+}
+```
+
+Multi-phase init means the module can be safely imported into sub-interpreters
+that have independent type registries, because `_contextvarsmodule_exec` runs
+once per interpreter rather than once per process.
+
+## gopy notes
+
+Status: not yet ported. Planned package path: `module/contextvars/`.
+
+The gopy port of this module is deliberately thin, mirroring CPython's
+structure:
+
+- `module/contextvars/module.go` registers the module and wires up `copy_context`
+  and `run` as Go functions that call into the context implementation.
+- The `Context`, `ContextVar`, and `Token` types are implemented in
+  `objects/context.go` (porting `Python/context.c`) alongside the HAMT
+  implementation in `objects/hamt.go`.
+- `contextvars_run_impl` maps to a Go function that calls
+  `objects.ContextEnter`, defers `objects.ContextExit`, then invokes the
+  callable. The defer ensures cleanup even if the callable panics.
+- `copy_context` maps to a call to `objects.ContextCopyCurrent`, which returns
+  a new `*objects.Context` backed by a shallow-copied HAMT root.
+- The `_PyContext_*` internal API has no Go equivalent; all context operations
+  go through the public function set in `objects/context.go`.

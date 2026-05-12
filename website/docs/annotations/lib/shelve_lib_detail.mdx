@@ -1,0 +1,85 @@
+---
+title: Lib/shelve.py
+description: "Annotated reading: CPython shelve persistent dictionary"
+cpython_path: Lib/shelve.py
+cpython_version: "3.14"
+lines: 240
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/shelve.py" />
+
+The `shelve` module provides a persistent dictionary-like object backed by any `dbm`-compatible key-value store. Keys must be strings; values are arbitrary Python objects serialized and deserialized via `pickle`. The module is small (240 lines) but demonstrates several important Python patterns: MutableMapping delegation, a writeback cache, and context manager integration.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | module header, imports | `pickle`, `io`, `collections.abc` |
+| 31–120 | `Shelf` | core class, `MutableMapping` subclass |
+| 121–155 | `BsdDbShelf` | subclass for Berkeley DB (supports `first`/`next` cursor) |
+| 156–185 | `DbfilenameShelf` | opens a named file via `dbm.open` |
+| 186–210 | `open` | public factory function |
+| 211–240 | module footer | `__all__` |
+
+## Reading
+
+### Shelf as a dbm wrapper and MutableMapping
+
+`Shelf` inherits from `collections.abc.MutableMapping` and holds a reference to an open dbm mapping in `self.dict`. Every key access encodes the string key to bytes, fetches the raw bytes value from `self.dict`, then unpickles the result through a `BytesIO` buffer.
+
+```python
+# CPython: Lib/shelve.py:75 Shelf.__getitem__
+    def __getitem__(self, key):
+        try:
+            value = self.cache[key]
+        except KeyError:
+            f = BytesIO(self.dict[key.encode(self.keyencoding)])
+            value = Unpickler(f).load()
+            if self.writeback:
+                self.cache[key] = value
+        return value
+```
+
+`__setitem__` goes the other direction: pickle the value into a `BytesIO`, store the bytes under the encoded key. When writeback is disabled this is the only point of persistence; the application must reassign mutable values explicitly to trigger a write.
+
+### Writeback mode: in-memory cache and flush on close
+
+When `writeback=True`, every value fetched via `__getitem__` is also stored in `self.cache` (a plain `dict`). On `close` (and `sync`), every cached entry is re-pickled and written back to the underlying dbm, covering any in-place mutations (list appends, dict updates, etc.) that would otherwise be invisible.
+
+```python
+# CPython: Lib/shelve.py:107 Shelf.sync
+    def sync(self):
+        if self.writeback and self.cache:
+            self.writeback = False
+            for key, entry in self.cache.items():
+                self[key] = entry
+            self.writeback = True
+            self.cache = {}
+        if hasattr(self.dict, 'sync'):
+            self.dict.sync()
+```
+
+The tradeoff is memory: every accessed object stays alive in `self.cache` until `sync` or `close`. For large shelves with selective access patterns this can be significant.
+
+### Context manager protocol and open() factory
+
+`Shelf` implements `__enter__` / `__exit__` so callers can use it with `with`. `__exit__` calls `self.close()`, which calls `sync()` first and then closes the underlying dbm. The `open()` factory is a one-liner delegating to `DbfilenameShelf`, which itself calls `dbm.open(filename, flag, mode)`.
+
+```python
+# CPython: Lib/shelve.py:186 open
+def open(filename, flag='c', mode=0o666, writeback=False):
+    return DbfilenameShelf(filename, flag, mode, writeback)
+```
+
+`BsdDbShelf` extends `Shelf` to expose `first()`, `next()`, `previous()`, `last()`, and `set_location()` cursor methods that the underlying Berkeley DB exposes but the generic `dbm` interface does not.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/shelve/`.
+
+The port depends on `module/pickle/` being available first, since `Shelf.__getitem__` and `__setitem__` call `pickle.Unpickler` and `pickle.Pickler` directly. A Go-native dbm backend (backed by `bbolt` or a similar embedded store) would substitute for CPython's `dbm` dependency. The `writeback` cache and context manager protocol translate naturally to Go struct fields and `defer shelf.Close()`. `BsdDbShelf` can be deferred; only `DbfilenameShelf` and `open` are needed for the initial port.

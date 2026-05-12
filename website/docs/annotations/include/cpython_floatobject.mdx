@@ -1,0 +1,89 @@
+---
+title: Include/cpython/floatobject.h
+description: CPython-internal float API declaring PyFloatObject layout, fast-access macros, and IEEE 754 pack/unpack helpers.
+cpython_path: Include/cpython/floatobject.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+ported_to: objects/float.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/floatobject.h`
+
+<CpyLink path="Include/cpython/floatobject.h" />
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `PyFloatObject` | struct | Internal float object: single `fval` C `double` field |
+| `PyFloat_AS_DOUBLE` | macro | Zero-check-free `fval` read; callers must guarantee type |
+| `_PyFloat_IsInfinity` | function | True when the value is positive or negative infinity |
+| `_PyFloat_IsNan` | function | True when the value is a NaN |
+| `_PyFloat_FormatAdvancedWriter` | function | Format a float into a `_PyUnicodeWriter` with format spec |
+| `_PyFloat_Pack2` | function | Encode a double as IEEE 754 binary16 into a byte buffer |
+| `_PyFloat_Pack4` | function | Encode a double as IEEE 754 binary32 into a byte buffer |
+| `_PyFloat_Pack8` | function | Encode a double as IEEE 754 binary64 into a byte buffer |
+| `_PyFloat_Unpack2` | function | Decode IEEE 754 binary16 bytes to a C double |
+| `_PyFloat_Unpack4` | function | Decode IEEE 754 binary32 bytes to a C double |
+| `_PyFloat_Unpack8` | function | Decode IEEE 754 binary64 bytes to a C double |
+
+## Reading
+
+### `PyFloatObject` layout and `PyFloat_AS_DOUBLE`
+
+The struct is deliberately minimal: one `PyObject_HEAD` and one `double`. The macro `PyFloat_AS_DOUBLE` exposes this field without a type check, matching the convention used by `PyTuple_GET_ITEM` and friends.
+
+```c
+/* Include/cpython/floatobject.h */
+typedef struct {
+    PyObject_HEAD
+    double fval;
+} PyFloatObject;
+
+#define PyFloat_AS_DOUBLE(op) (((PyFloatObject *)(op))->fval)
+```
+
+In gopy the equivalent is the `F` field on `objects.Float`. The public `AsDouble()` accessor corresponds to the safe `PyFloat_AsDouble()` in the stable API; the field read directly matches `PyFloat_AS_DOUBLE`.
+
+### IEEE 754 pack and unpack helpers
+
+The six `_PyFloat_Pack*` / `_PyFloat_Unpack*` functions implement Python's `struct` module binary encoding. Each function accepts a little-endian flag so the same code handles both byte orders.
+
+```c
+int _PyFloat_Pack2(double x, char *p, int le);
+int _PyFloat_Pack4(double x, char *p, int le);
+int _PyFloat_Pack8(double x, char *p, int le);
+
+double _PyFloat_Unpack2(const char *p, int le);
+double _PyFloat_Unpack4(const char *p, int le);
+double _PyFloat_Unpack8(const char *p, int le);
+```
+
+The `Pack` functions return 0 on success and -1 (with an exception set) on overflow. The `Unpack` functions return the decoded value or `-1.0` with an exception on malformed input. In gopy these map to functions in the `struct` module port, not directly to `objects/float.go`, because they operate on raw byte slices rather than on `Float` objects.
+
+### Special-value predicates
+
+```c
+static inline int
+_PyFloat_IsInfinity(double x) {
+    return isinf(x);
+}
+
+static inline int
+_PyFloat_IsNan(double x) {
+    return isnan(x);
+}
+```
+
+Go's `math.IsInf` and `math.IsNaN` provide direct equivalents. `objects/float.go` delegates to those rather than reimplementing the bit patterns.
+
+## gopy mirror
+
+`objects/float.go` defines `type Float struct` with a single `F float64` field, mirroring `PyFloatObject.fval`. The `PyFloat_AS_DOUBLE` macro has no Go equivalent because field access is already safe and inlineable. The `_PyFloat_FormatAdvancedWriter` logic is handled by the string-formatting path in the compiler and is not part of the core `Float` object.
+
+## CPython 3.14 changes
+
+3.14 does not change the `PyFloatObject` struct or the `PyFloat_AS_DOUBLE` macro. The only visible update in this header is that `_PyFloat_FormatAdvancedWriter` is annotated with `_Py_NO_SANITIZE_MEMORY` to silence memory-sanitizer false positives from the `double`-to-bytes reinterpretation in the pack functions.

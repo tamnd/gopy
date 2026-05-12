@@ -1,0 +1,145 @@
+---
+title: "Objects/bytearrayobject.c"
+description: "Mutable byte array: buffer management, resize guard, and sequence operations"
+cpython_path: Objects/bytearrayobject.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`bytearray` is the mutable sibling of `bytes`. The key difference is that it
+owns a heap-allocated buffer and tracks active buffer-protocol exports so it
+can refuse to resize while a view is alive.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | `PyByteArrayObject` layout | `ob_val`, `ob_alloc`, `ob_exports` fields |
+| 81–160 | `bytearray_resize` | Reallocate buffer; blocked when `ob_exports > 0` |
+| 161–310 | `bytearray_setslice` | Core mutation used by `__setitem__` and `__delitem__` |
+| 311–420 | `bytearray_getbuffer` / `bytearray_releasebuffer` | Buffer protocol; increments/decrements `ob_exports` |
+| 421–700 | Sequence methods | `append`, `extend`, `insert`, `pop`, `remove`, `reverse` |
+| 701–900 | `bytearray_new` / `bytearray_init` | Constructor; accepts int, iterable, or bytes-like |
+| 901–1200 | `bytearray_repr` / `bytearray_str` | Formatting helpers |
+| 1201–2500 | Remaining methods | `decode`, `find`, `join`, `split`, `strip`, `translate`, … |
+
+## Reading
+
+### The export guard in `bytearray_resize`
+
+Every resize must check `ob_exports` first. Any caller holding a `memoryview`
+or other buffer-protocol consumer increments this counter via `getbuffer`, so
+an attempt to grow or shrink the buffer while it is exported raises
+`BufferError` instead of silently invalidating live pointers.
+
+```c
+// CPython: Objects/bytearrayobject.c:103 bytearray_resize
+int
+PyByteArray_Resize(PyObject *self, Py_ssize_t size)
+{
+    PyByteArrayObject *obj = (PyByteArrayObject *)self;
+    if (obj->ob_exports > 0 && size != Py_SIZE(obj)) {
+        PyErr_SetString(PyExc_BufferError,
+            "Existing exports of data: object cannot be re-sized");
+        return -1;
+    }
+    ...
+}
+```
+
+### `bytearray_setslice` — the mutation core
+
+Slice assignment handles shrink, grow, and same-size replacement in one
+function. It calls `bytearray_resize` internally and then uses `memmove` to
+open or close the gap before copying new bytes in.
+
+```c
+// CPython: Objects/bytearrayobject.c:210 bytearray_setslice_linear
+static int
+bytearray_setslice_linear(PyByteArrayObject *self,
+                          Py_ssize_t lo, Py_ssize_t hi,
+                          char *bytes, Py_ssize_t bytes_len)
+{
+    Py_ssize_t avail = hi - lo;
+    ...
+    if (avail != bytes_len) {
+        if (PyByteArray_Resize((PyObject *)self,
+                Py_SIZE(self) + bytes_len - avail) < 0)
+            return -1;
+        memmove(self->ob_val + lo + bytes_len,
+                self->ob_val + hi,
+                Py_SIZE(self) - lo - bytes_len);
+    }
+    memcpy(self->ob_val + lo, bytes, bytes_len);
+    return 0;
+}
+```
+
+### Buffer protocol: `getbuffer` and `releasebuffer`
+
+`getbuffer` fills a `Py_buffer` struct and bumps `ob_exports`.
+`releasebuffer` decrements it. The counter reaching zero means the object is
+safe to resize again.
+
+```c
+// CPython: Objects/bytearrayobject.c:372 bytearray_getbuffer
+static int
+bytearray_getbuffer(PyByteArrayObject *obj, Py_buffer *view, int flags)
+{
+    if (PyBuffer_FillInfo(view, (PyObject *)obj,
+                          obj->ob_val, Py_SIZE(obj),
+                          0,  /* writable */
+                          flags) < 0)
+        return -1;
+    obj->ob_exports++;
+    return 0;
+}
+```
+
+### `append` and `extend`
+
+`bytearray_append` calls `bytearray_resize` to grow by one, then writes the
+byte directly. `bytearray_extend` accepts any iterable of ints-in-range and
+accumulates them with repeated appends (or a fast path for bytes-like objects
+via `getbuffer`).
+
+```c
+// CPython: Objects/bytearrayobject.c:502 bytearray_append
+static PyObject *
+bytearray_append(PyByteArrayObject *self, PyObject *arg)
+{
+    int value;
+    if (!_getbytevalue(arg, &value))
+        return NULL;
+    if (PyByteArray_Resize((PyObject *)self, Py_SIZE(self) + 1) < 0)
+        return NULL;
+    self->ob_val[Py_SIZE(self) - 1] = value;
+    Py_RETURN_NONE;
+}
+```
+
+## gopy notes
+
+- `ob_exports` maps to a field on the Go struct; any Go code that exposes a
+  slice window into the buffer must hold an export reference.
+- `bytearray_resize` is the single choke-point for buffer growth; port it
+  before porting any mutating method.
+- The fast-path in `bytearray_extend` for bytes-like objects relies on
+  `PyObject_GetBuffer`; gopy needs a compatible `GetBuffer` protocol entry
+  before that path is reachable.
+- `bytearray_setslice` is the most complex function in the file; port it with
+  all three sub-cases (shrink / same-size / grow) and test each independently.
+
+## CPython 3.14 changes
+
+- The internal `ob_alloc` tracking was tightened so over-allocation follows
+  the same growth factor as `list` (roughly 1.125x with a minimum headroom),
+  replacing the older ad-hoc formula.
+- `bytearray.__buffer__` is now formally exposed as part of the buffer
+  protocol PEP 688 implementation; `ob_exports` semantics are unchanged but
+  the C API gained `PyByteArray_GetExports` for inspection.
+- Several methods (`removeprefix`, `removesuffix`) added in 3.9 now have
+  optimised C implementations instead of delegating to the bytes equivalents.

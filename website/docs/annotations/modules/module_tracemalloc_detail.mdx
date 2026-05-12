@@ -1,0 +1,145 @@
+---
+title: "_tracemalloc.c — memory allocation tracer"
+description: "Annotated reading of Modules/_tracemalloc.c from CPython 3.14"
+cpython_path: Modules/_tracemalloc.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_tracemalloc.c` is the C backend for the `tracemalloc` standard-library
+module. It hooks into every allocator domain (`PYMEM_DOMAIN_RAW`,
+`PYMEM_DOMAIN_MEM`, `PYMEM_DOMAIN_OBJ`) and records `(traceback, size)` pairs
+in a hash table keyed by pointer.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–100 | includes / state struct | `_Py_tracemalloc_config`, global `traces` table |
+| 101–280 | traceback machinery | frame capture, interning into `tracebacks` hash table |
+| 281–480 | `tracemalloc_add_trace()` | insert or update a trace on allocation |
+| 481–600 | `tracemalloc_remove_trace()` | delete a trace on free |
+| 601–780 | allocator hooks | `malloc`/`calloc`/`realloc`/`free` wrappers per domain |
+| 781–920 | `tracemalloc_start()` / `tracemalloc_stop()` | install and remove hooks |
+| 921–1100 | `_PyTraceMalloc_GetTraceback()` | public C API for other subsystems |
+| 1101–1300 | `tracemalloc_filter_domain()` | filter traces by allocator domain |
+| 1301–1400 | method table / `PyInit__tracemalloc` | module init |
+
+## Reading
+
+### Installing the hooks
+
+`tracemalloc_start()` replaces all three allocator domains atomically. It
+saves the old allocators so that the wrappers can delegate to them, then sets
+the new hooks.
+
+```c
+// CPython: Modules/_tracemalloc.c:810 tracemalloc_start
+PyMemAllocatorEx alloc;
+alloc.malloc  = tracemalloc_malloc_gil;
+alloc.calloc  = tracemalloc_calloc_gil;
+alloc.realloc = tracemalloc_realloc_gil;
+alloc.free    = tracemalloc_free;
+
+PyMem_GetAllocator(PYMEM_DOMAIN_RAW, &allocators.raw);
+PyMem_SetAllocator(PYMEM_DOMAIN_RAW, &alloc);
+
+PyMem_GetAllocator(PYMEM_DOMAIN_MEM, &allocators.mem);
+PyMem_SetAllocator(PYMEM_DOMAIN_MEM, &alloc);
+
+PyMem_GetAllocator(PYMEM_DOMAIN_OBJ, &allocators.obj);
+PyMem_SetAllocator(PYMEM_DOMAIN_OBJ, &alloc);
+```
+
+The `_gil` suffix variants acquire the GIL before recording so that the
+`traces` table is never mutated from two threads simultaneously.
+
+### Recording a trace
+
+Every allocation flows through `tracemalloc_add_trace()`. It captures the
+current frame stack, interns the resulting traceback, and stores the mapping
+from pointer to `(traceback, size)`.
+
+```c
+// CPython: Modules/_tracemalloc.c:320 tracemalloc_add_trace
+traceback = traceback_get_or_intern(tstate);
+if (traceback == NULL)
+    return -1;
+
+trace.size     = size;
+trace.traceback = traceback;
+
+/* traces is a custom hash table: pointer -> trace_t */
+return _Py_hashtable_set(tracemalloc_state.traces, ptr, &trace);
+```
+
+If the pointer is already present (a `realloc` that returned the same
+address), the entry is updated in place rather than removed and re-inserted.
+
+### Traceback interning
+
+Raw frame data is expensive to store for every allocation. `_tracemalloc.c`
+interns tracebacks in a second hash table so that many allocations with the
+same call stack share one `traceback_t` object.
+
+```c
+// CPython: Modules/_tracemalloc.c:198 traceback_get_or_intern
+hash = traceback_hash(traceback);
+entry = _Py_hashtable_get(tracemalloc_state.tracebacks, traceback);
+if (entry != NULL)
+    return entry;   /* already interned */
+
+copy = raw_malloc(traceback_size(traceback));
+memcpy(copy, traceback, traceback_size(traceback));
+_Py_hashtable_set(tracemalloc_state.tracebacks, copy, copy);
+return copy;
+```
+
+The intern table is keyed by value (frame-by-frame equality) rather than by
+pointer, so two call stacks that happen to be identical in content share the
+same allocation.
+
+### Retrieving a traceback
+
+`_PyTraceMalloc_GetTraceback()` is the public C API used by the `tracemalloc`
+Python module and by other CPython internals.
+
+```c
+// CPython: Modules/_tracemalloc.c:980 _PyTraceMalloc_GetTraceback
+trace_t *trace = _Py_hashtable_get(tracemalloc_state.traces, (void *)ptr);
+if (trace == NULL)
+    return NULL;    /* pointer not tracked */
+return traceback_to_pyobject(trace->traceback, NULL);
+```
+
+The returned object is a tuple of `FrameSummary`-compatible tuples in the same
+format as `traceback.extract_stack()`, built lazily by `traceback_to_pyobject`.
+
+## gopy notes
+
+- gopy does not use `PyMemAllocatorEx`; the hook installation pattern in
+  `tracemalloc_start()` has no direct equivalent. A Go-level shim would need
+  to wrap `runtime.SetFinalizer` or a custom allocator to approximate it.
+- `_Py_hashtable_*` is an internal CPython hash table not exposed to Python.
+  gopy uses standard Go maps; the pointer-keyed `traces` table maps to
+  `map[uintptr]traceEntry`.
+- Traceback interning (the `tracebacks` table) is important for memory
+  efficiency; gopy should replicate it with a content-addressed map over a
+  `[]Frame` slice key.
+- `tracemalloc_filter_domain()` takes an integer domain id corresponding to
+  the `PYMEM_DOMAIN_*` constants; gopy must export the same constants from its
+  `_tracemalloc` module.
+
+## CPython 3.14 changes
+
+- 3.14 introduced per-interpreter tracing state, moving several globals from
+  `_tracemalloc.c` into the interpreter struct (`PyInterpreterState`). The
+  public `tracemalloc` API is unchanged but internal field names differ from
+  3.12.
+- `tracemalloc_start()` now accepts a `max_nframe` argument at the C level in
+  addition to the Python-facing wrapper, aligning the two interfaces.
+- The `_PyTraceMalloc_NewReference()` hook removed in 3.12 stays absent in
+  3.14; gopy can ignore it.

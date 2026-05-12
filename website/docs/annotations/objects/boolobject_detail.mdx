@@ -1,0 +1,57 @@
+---
+title: "Objects/boolobject.c"
+description: CPython implementation of the Python bool type as an immortal-singleton subclass of int
+cpython_path: Objects/boolobject.c
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: objects/bool.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+|-------|--------|------|------|
+| 1–22 | (file header) | `bool` inherits from `long`; immortal singletons | `objects.Bool` embeds `Int` |
+| 24 | `PyBool_Type` forward | Type declared before use | `objects.BoolType` |
+| 33–50 | `PyBool_FromLong` | Returns `Py_True` or `Py_False` without allocation | `objects.NewBool` |
+| 52–66 | `bool_repr` | Returns the string `"True"` or `"False"` | `objects.boolRepr` |
+| 68–90 | `bool_and` | Bitwise AND short-circuit for booleans | not yet ported as separate slot |
+| 91–113 | `bool_or` | Bitwise OR short-circuit for booleans | not yet ported as separate slot |
+| 114–136 | `bool_xor` | Bitwise XOR short-circuit for booleans | not yet ported as separate slot |
+| 138–160 | `bool_new` | Raises `TypeError` when called on a subclass | not yet ported |
+| 222 | `PyBool_Type` | Full type singleton; `tp_base = &PyLong_Type` | `objects.BoolType` |
+
+## Reading
+
+### Singleton subtype
+
+<Cpy src="Objects/boolobject.c" sym="PyBool_Type" /> sets `tp_base = &PyLong_Type`, making `bool` a subtype of `int`. There are exactly two instances: `Py_True` (internal value 1) and `Py_False` (internal value 0). Both are immortal: CPython 3.12+ marks them with `_Py_IMMORTAL_REFCNT` so `Py_INCREF`/`Py_DECREF` become no-ops for them.
+
+gopy mirrors this with `objects.Bool` embedding `objects.Int` and exposing `objects.True()` / `objects.False()` as fixed package-level pointers. Go's garbage collector handles lifetime, so there is no immortality mechanism; the singletons are simply never unreachable.
+
+### Construction
+
+<Cpy src="Objects/boolobject.c" sym="PyBool_FromLong" /> is the only legitimate constructor. A non-zero argument returns `Py_True`; zero returns `Py_False`. No allocation happens. `objects.NewBool` is a direct translation: one `if` branch returning `trueSingleton` or `falseSingleton`.
+
+### Repr
+
+<Cpy src="Objects/boolobject.c" sym="bool_repr" /> compares the object pointer against `Py_True` and emits the string literal `"True"` or `"False"`. gopy's `boolRepr` does the same pointer comparison against `trueSingleton`.
+
+### Arithmetic bypass
+
+`bool_and`, `bool_or`, and `bool_xor` avoid the full `long` arithmetic path for the common bool-op-bool case: they extract the underlying 0/1 integer directly and call `PyBool_FromLong` on the result. For mixed `bool op int` calls they fall through to the regular long slots. gopy inherits the `Int` arithmetic slots and does not yet implement the bypass; the result is always correct but slightly slower for pure-boolean bitwise operations.
+
+### Subclassing guard
+
+<Cpy src="Objects/boolobject.c" sym="bool_new" /> raises `TypeError: type 'bool' is not an acceptable base type` when `type` is not `bool` itself. This makes `bool` effectively final. gopy does not yet enforce this guard.
+
+### Hash
+
+<Cpy src="Objects/boolobject.c" /> does not define a separate `tp_hash`; `PyBool_Type` inherits `long_hash`. gopy's `BoolType` registers an inline function that returns 1 for `trueSingleton` and 0 for `falseSingleton`, which matches `long_hash` for those two values.
+
+## gopy mirror
+
+The entire port is in `/objects/bool.go`. `Bool`, `BoolType`, `True`, `False`, `NewBool`, and `boolRepr` are all present. The arithmetic bypass slots (`bool_and`, `bool_or`, `bool_xor`) and the `bool_new` subclassing guard are pending.

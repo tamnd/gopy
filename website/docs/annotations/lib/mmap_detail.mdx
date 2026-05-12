@@ -1,0 +1,64 @@
+---
+title: "mmapmodule.c: memory-mapped file objects"
+description: "Annotated walkthrough of CPython Modules/mmapmodule.c covering mmap_new platform branching (mmap vs MapViewOfFile), mmap_read/write/seek/find, ACCESS_READ/WRITE/COPY/NONE flags, resize, buffer protocol export, and 3.14 changes"
+cpython_path: Modules/mmapmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+ported_to: module/mmap
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`mmapmodule.c` implements the `mmap.mmap` type. It maps a file (or anonymous region) into the process address space and exposes it as a Python buffer with file-like read/write/seek methods. The same Python API covers both POSIX `mmap(2)` and Windows `MapViewOfFile`.
+
+## Map
+
+| Lines | Symbol | Notes |
+|-------|--------|-------|
+| 1–70 | Includes and platform guards | `<sys/mman.h>` vs `<windows.h>`, `MAP_ANONYMOUS` fallback macro |
+| 71–160 | `mmap_object` struct | Holds `data` pointer, `size`, `pos`, fd copy, access flag, Windows handles |
+| 161–300 | `mmap_new` (POSIX path) | Opens fd, calls `mmap(2)`, stores pointer; `ACCESS_READ` maps to `PROT_READ` only |
+| 301–440 | `mmap_new` (Windows path) | `CreateFileMapping` then `MapViewOfFile`; `ACCESS_COPY` uses `FILE_MAP_COPY` |
+| 441–520 | `mmap_close` | `munmap` / `UnmapViewOfFile`; marks object closed; called by `__del__` and `__exit__` |
+| 521–620 | `mmap_read` | Copies bytes from `data + pos` into a new `bytes` object; advances `pos` |
+| 621–700 | `mmap_read_byte` / `mmap_write_byte` | Single-byte random-access helpers used by `__getitem__`/`__setitem__` |
+| 701–800 | `mmap_write` | Copies from Python buffer into `data + pos`; enforces `ACCESS_READ` guard |
+| 801–880 | `mmap_seek` | Updates `pos` with `SEEK_SET`/`SEEK_CUR`/`SEEK_END` semantics; clamps to `[0, size]` |
+| 881–980 | `mmap_find` / `mmap_rfind` | Naive `memmem`-style search within the mapped region; returns byte offset or -1 |
+| 981–1060 | `mmap_resize` | POSIX: `ftruncate` then `mremap`; Windows: remap via new `CreateFileMapping` |
+| 1061–1160 | Buffer protocol (`mmap_buffer_getbuf`) | Exports `Py_buffer` with `PyBUF_SIMPLE`; increments `exports` counter to block resize |
+| 1161–1240 | `ACCESS_*` constants | `ACCESS_READ=1`, `ACCESS_WRITE=2`, `ACCESS_COPY=3`, `ACCESS_NONE=4` (3.14 addition) |
+| 1241–1400 | Type object and module init | `PyType_Ready`, method table, `mmap.error` alias for `OSError` |
+
+## Reading
+
+### mmap_new and platform branching
+
+<Cpy src="Modules/mmapmodule.c" start={161} end={440} />
+
+`mmap_new` is split by `#ifdef MS_WINDOWS`. On POSIX, it calls `mmap(fd, length, prot, flags, offset)` where `prot` is derived from the `access` argument: `ACCESS_READ` yields `PROT_READ`, `ACCESS_WRITE` yields `PROT_READ|PROT_WRITE`, `ACCESS_COPY` yields `PROT_READ|PROT_WRITE` with `MAP_PRIVATE`. `ACCESS_NONE` (new in 3.14) maps with `PROT_NONE`, useful for reserving address space without backing permissions.
+
+On Windows, `CreateFileMapping` is called with a protection constant (`PAGE_READONLY`, `PAGE_READWRITE`, or `PAGE_WRITECOPY`), then `MapViewOfFile` with a corresponding access flag. The two handles are stored in `mmap_object` and closed in `mmap_close`.
+
+### read, write, seek, and find
+
+<Cpy src="Modules/mmapmodule.c" start={521} end={980} />
+
+`mmap_read(n)` returns `min(n, size - pos)` bytes as a `bytes` object and advances `pos`. `mmap_write` performs the symmetric operation and checks `ACCESS_READ` before touching the mapped memory. `mmap_seek` implements the three `SEEK_*` modes with boundary clamping; seeking past the end raises `ValueError`.
+
+`mmap_find` and `mmap_rfind` scan the mapped region linearly using `memmem` where available and a fallback `memchr` loop otherwise. Both accept an optional `start`/`end` slice window.
+
+### Buffer protocol and resize
+
+<Cpy src="Modules/mmapmodule.c" start={981} end={1160} />
+
+`mmap_buffer_getbuf` increments `ob_exports` on the `mmap_object`. `mmap_resize` checks `ob_exports > 0` and raises `BufferError` if any view is outstanding, matching the same guard CPython uses on `bytearray`. On POSIX, resize calls `ftruncate` to change the backing file, then `mremap` (Linux) or a `munmap`/`mmap` pair (macOS). On Windows the entire `CreateFileMapping`/`MapViewOfFile` sequence is repeated with the new size.
+
+## gopy notes
+
+- `ACCESS_NONE` (`PROT_NONE` on POSIX) was added in 3.14; include it in the constants table even on platforms where its only use is address-space reservation.
+- The `ob_exports` counter is the correct way to block resize while a buffer view is held. Do not use a simple boolean; multiple concurrent `memoryview` objects each call `getbuf` independently.
+- On macOS, `mremap` is absent. Port the `munmap` + `mmap` fallback path (lines ~1010-1040) rather than unconditionally using `mremap`.
+- `mmap_find` returns a Python `int` offset, not a slice. Keep the return type consistent with `bytes.find`.
+- Windows `ACCESS_COPY` semantics (copy-on-write to private pages, original file unchanged) must be tested explicitly; it is distinct from `ACCESS_WRITE` which writes through to the file.

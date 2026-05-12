@@ -1,0 +1,86 @@
+---
+title: Lib/numbers.py
+description: "Lib/numbers.py: Numeric ABC tower (PEP 3141)"
+cpython_path: Lib/numbers.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink path="Lib/numbers.py" />
+
+`Lib/numbers.py` defines the five-level numeric ABC hierarchy specified by PEP 3141. Every abstract method in the tower corresponds to a Python operator or built-in function. Concrete built-in types (`int`, `float`, `complex`) are wired in at the bottom of the file via `register()` calls rather than through inheritance, so the hierarchy does not appear in their MROs.
+
+## Map
+
+| Symbol | Lines | Kind | Notes |
+|---|---|---|---|
+| `Number` | 37-46 | ABC | Root; sets `__hash__ = None` |
+| `Complex` | 57-168 | ABC | Adds `__complex__`, `real`, `imag`, arithmetic, `conjugate`, `__eq__` |
+| `Complex.register(complex)` | 169 | registration | Links the builtin `complex` type |
+| `Real` | 172-289 | ABC | Adds `__float__`, `__trunc__`, floor/ceil/round, ordering, `//`, `%` |
+| `Real.register(float)` | 289 | registration | Links the builtin `float` type |
+| `Rational` | 292-326 | ABC | Adds `numerator`/`denominator` properties; provides `__float__` default |
+| `Integral` | 328-427 | ABC | Adds `__int__`, `__index__`, three-arg `pow`, bit-shift and bitwise ops |
+| `Integral.register(int)` | 427 | registration | Links the builtin `int` type |
+
+## Reading
+
+### The __add__/__radd__ pattern
+
+Every binary operator in `Complex` is declared as a pair of abstract methods. The forward method (`__add__`) handles `self + other`; the reflected method (`__radd__`) handles `other + self`. Both are marked `@abstractmethod`, so concrete subclasses must implement both or inherit concrete versions.
+
+```python
+# CPython: Lib/numbers.py:96 Complex.__add__
+@abstractmethod
+def __add__(self, other):
+    """self + other"""
+    raise NotImplementedError
+
+@abstractmethod
+def __radd__(self, other):
+    """other + self"""
+    raise NotImplementedError
+```
+
+`__sub__` and `__rsub__` are the one exception: they are provided as concrete defaults that reduce to negation plus addition (lines 116-122), so subclasses only need to implement `__neg__` and `__add__`.
+
+### The register() calls and why they are not inheritance
+
+Registering `complex`, `float`, and `int` via `ABCMeta.register` rather than listing them as subclasses avoids two problems. First, the built-in types already have a fixed MRO determined in C; retrofitting the ABC tower into that MRO would require touching `typeobject.c`. Second, `Decimal` satisfies all the abstract methods of `Real` numerically but must not be registered as a `Real` because `Decimal + float` is undefined, and the ABCs promise interoperability.
+
+```python
+# CPython: Lib/numbers.py:169 Complex.register
+Complex.register(complex)
+
+# CPython: Lib/numbers.py:289 Real.register
+Real.register(float)
+
+# CPython: Lib/numbers.py:427 Integral.register
+Integral.register(int)
+```
+
+After these calls, `isinstance(1, numbers.Integral)` returns `True` even though `int.__mro__` contains no ABC class.
+
+### Rational and the numerator/denominator contract
+
+`Rational` adds two abstract properties and overrides `__float__` with an integer-division implementation that avoids floating-point overflow on huge numerators:
+
+```python
+# CPython: Lib/numbers.py:317 Rational.__float__
+def __float__(self):
+    """float(self) = self.numerator / self.denominator"""
+    return int(self.numerator) / int(self.denominator)
+```
+
+The explicit `int()` casts ensure that a custom `Rational` subclass whose `numerator` property returns a non-`int` Integral still works correctly. `fractions.Fraction` inherits this default; `Integral` overrides it again at line 413 with the simpler `float(int(self))`.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/numbers/`.
+
+The abstract method stubs are pure Python and straightforward to translate. The key dependency is `ABCMeta` (from `module/abc/`) and its `register` method. The three `register()` calls at the bottom of the file must run after the built-in types exist, so they belong in a module init function that runs after the core type system is set up. `fractions.Fraction` registration can be deferred until `module/fractions/` is ported.

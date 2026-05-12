@@ -1,0 +1,56 @@
+---
+title: Modules/_statistics.c
+description: "C accelerator for the statistics module: NormalDist._normal_dist_inv_cdf uses Rational arithmetic with mpq for exact intermediate results."
+cpython_path: Modules/_statistics.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_statistics.c" />
+
+`Modules/_statistics.c` is a small C accelerator for the `statistics` module. It provides `_normal_dist_inv_cdf`, the inverse cumulative distribution function (quantile function) for the normal distribution, using a rational-approximation algorithm that avoids floating-point precision loss for extreme probability values.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | includes, `ndtri_c` | Cephes ndtri function inclusion |
+| 51-150 | `_statistics__normal_dist_inv_cdf_impl` | Python wrapper around ndtri |
+| 151-200 | Module init | `_statistics` module definition |
+
+## Reading
+
+### Inverse CDF for normal distribution
+
+The inverse CDF (`ndtri`) maps a probability `p` in `(0, 1)` to the z-score of the standard normal distribution. The implementation uses the Cephes library's rational polynomial approximation which provides high accuracy across the full range including the tails.
+
+```c
+// Modules/_statistics.c:51 _statistics__normal_dist_inv_cdf_impl
+static PyObject *
+_statistics__normal_dist_inv_cdf_impl(PyObject *module, double p,
+                                      double mu, double sigma)
+{
+    if (p <= 0.0 || p >= 1.0) {
+        PyErr_SetString(PyExc_StatisticsError,
+                        "p must be in the range 0.0 < p < 1.0");
+        return NULL;
+    }
+    double x = ndtri(p) * sigma + mu;
+    return PyFloat_FromDouble(x);
+}
+```
+
+### Special values
+
+For `p` very close to 0 or 1 (beyond what doubles can represent as non-zero), `ndtri` returns `-inf` or `+inf` respectively. The Python wrapper does not clamp these; callers must handle them.
+
+### Relationship to statistics.NormalDist
+
+`statistics.NormalDist.inv_cdf(p)` calls `_statistics._normal_dist_inv_cdf(p, mu, sigma)` in the fast path. The pure-Python fallback in `statistics.py` uses `_bisect_root` on `erf` which is considerably slower.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/statistics/`. Go's `gonum.org/v1/gonum/stat/distuv` package provides `Normal.Quantile(p)` with the same functionality.

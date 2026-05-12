@@ -1,0 +1,113 @@
+---
+title: "frameobject.c: The Python Frame Object"
+description: "PyFrameObject as a heap wrapper over _PyInterpreterFrame, f_locals materialization, frame_getlineno, frame_clear, and the 3.14 FrameLocalsProxy"
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: objects/frame.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/frameobject.c` defines `PyFrameObject`, the Python-visible wrapper around `_PyInterpreterFrame`. Since CPython 3.11 the real activation record lives on a per-thread stack arena; `PyFrameObject` is a heap-allocated shell that only materializes when user code accesses `sys._getframe()` or a debugger inspects the stack. The two objects share lifetime through a back-pointer: the interpreter frame's `frame_obj` field points to the heap shell, and the shell's `f_frame` points back to the activation record.
+
+## Map
+
+| C symbol | Lines (approx.) | Role |
+|---|---|---|
+| `PyFrameObject` struct | 1-60 | Heap wrapper: `f_frame`, `f_trace`, `f_lineno`, `f_trace_lines`, `f_trace_opcodes` |
+| `_PyFrame_New_NoTrack` | 1109-1135 | Allocates a new `PyFrameObject` and links it to an interpreter frame |
+| `frame_getcode` | 794-800 | `f_code` getter: delegates to `f_frame->f_code` |
+| `frame_getlineno` | 843-860 | `f_lineno` getter: calls `PyCode_Addr2Line` on `f_frame->prev_instr` |
+| `frame_getlasti` | 802-811 | `f_lasti` getter: converts `prev_instr` to a byte offset |
+| `frame_getlocals` | 813-842 | `f_locals` getter: triggers fast-to-locals materialization |
+| `frame_getglobals` | 879-887 | `f_globals` getter |
+| `frame_getbuiltins` | 888-896 | `f_builtins` getter |
+| `frame_gettrace` | 863-869 | `f_trace` getter |
+| `frame_settrace` | 870-878 | `f_trace` setter |
+| `_PyFrame_FastToLocals` | (ceval.c) | Copies fast locals into the `f_locals` dict before user access |
+| `frame_clear` | 1163-1200 | GC clear: clears the trace ref and detaches from the activation record |
+| `frame_traverse` | 1163-1200 | GC traverse: visits `f_trace` and the entire back-frame chain |
+| `PyFrame_GetLineNumber` | 1242-1250 | Public C API: returns the current line number |
+| `PyFrame_Type` | 1238-1270 | Type object singleton |
+| `FrameLocalsProxy` | 1350-1450 | 3.14 addition: lazy dict-like proxy over `localsplus` (replaces eager copy) |
+
+## Reading
+
+### The heap wrapper and the arena frame
+
+Before 3.11 every call created a `PyFrameObject` on the heap. Since 3.11 the activation record (`_PyInterpreterFrame`) lives in a thread-local arena; `PyFrameObject` is only allocated when something like `sys._getframe()` forces materialization. The two objects refer to each other:
+
+```c
+/* Include/internal/pycore_frame.h */
+struct _PyInterpreterFrame {
+    PyObject *f_executable;   /* code object */
+    struct _PyInterpreterFrame *previous;
+    PyObject *f_funcobj;
+    PyObject *f_globals;
+    PyObject *f_builtins;
+    PyObject *f_locals;
+    PyFrameObject *frame_obj; /* heap wrapper, may be NULL */
+    /* ... localsplus[] follows */
+};
+```
+
+`_PyFrame_New_NoTrack` allocates the `PyFrameObject`, sets `frame_obj`, and returns the shell without running GC tracking (the caller does that when the frame escapes to user code).
+
+### f_locals materialization and FrameLocalsProxy
+
+In CPython 3.11-3.13 `frame_getlocals` calls `_PyFrame_FastToLocals`, which iterates `localsplus` and copies live values into a `PyDictObject`. That dict is cached in `f_frame->f_locals`. The copy is eager and potentially expensive for large frames.
+
+CPython 3.14 introduces `FrameLocalsProxy`: a dict-like object that reads directly from `localsplus` on each access. The proxy is returned from `f_locals` without copying:
+
+```c
+/* Objects/frameobject.c ~1350 (3.14) */
+static PyObject *
+frame_getlocals(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    if (PyFrameLocalsProxy_Check(f->f_locals)) {
+        Py_INCREF(f->f_locals);
+        return f->f_locals;
+    }
+    return _PyFrameLocalsProxy_New(f);
+}
+```
+
+### frame_getlineno
+
+`f_lineno` is computed on demand from the co-location table (`co_linetable`) rather than stored as a plain integer. The getter calls `PyCode_Addr2Line` with the `prev_instr` offset:
+
+```c
+/* Objects/frameobject.c:843 frame_getlineno */
+static PyObject *
+frame_getlineno(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    int lineno = PyFrame_GetLineNumber(f);
+    return PyLong_FromLong(lineno);
+}
+
+/* Objects/frameobject.c:1242 PyFrame_GetLineNumber */
+int
+PyFrame_GetLineNumber(PyFrameObject *f)
+{
+    assert(f != NULL);
+    if (f->f_lineno != 0) {
+        return f->f_lineno;  /* set by trace machinery */
+    }
+    return PyCode_Addr2Line(f->f_frame->f_code,
+                            _PyInterpreterFrame_LASTI(f->f_frame));
+}
+```
+
+## gopy notes
+
+gopy splits the same two-layer design across two packages.
+
+`frame.Frame` in `/Users/apple/github/tamnd/gopy/frame/frame.go` is the activation record (`_PyInterpreterFrame`). It lives in chunk arenas via `frame.Chunk`, holds `LocalsPlus`, and is cleared by `Frame.Clear` (mirroring `_PyFrame_Clear`).
+
+`objects.Frame` in `/Users/apple/github/tamnd/gopy/objects/frame.go` is the Python-level wrapper (`PyFrameObject`). It holds the activation record through the `InterpreterFrame` interface rather than a direct pointer, avoiding an import cycle (frame imports objects; objects cannot import frame).
+
+`objects.Frame.Lineno` mirrors `frame_getlineno` by calling `CoAddr2Location(code, lasti)` (the gopy equivalent of `PyCode_Addr2Line`). `NewFrame` corresponds to `_PyFrame_New_NoTrack`. `frameTraverse` mirrors `frame_traverse` and walks the full back-chain by looping over `FrameBack()`.
+
+The `FrameLocalsProxy` is not yet ported. `frame_getlocals` currently returns `f.interp.FrameLocals()`, which maps to the activation record's `Locals` field (the pre-3.14 eager-copy path). Fast-locals materialization (`_PyFrame_FastToLocals`) is tracked under spec 1700 task #487.

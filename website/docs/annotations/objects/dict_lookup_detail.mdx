@@ -1,0 +1,141 @@
+---
+title: "Objects/dictobject.c — lookup section"
+description: "Annotation of the hash table lookup machinery in CPython's dict implementation"
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 5000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`dictobject.c` implements Python's `dict` type. This page focuses on the lookup path: how a key is hashed, how collisions are resolved, and how the `dk_lookup` function pointer selects the right strategy for a given dict's key set.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~680  | `_Py_dict_lookup` | Central lookup; calls `dk->dk_lookup` |
+| ~530  | `unicode_get_index` | Fast path for dicts with only unicode keys |
+| ~580  | `lookdict_unicode` | Unicode-key lookup with full collision loop |
+| ~630  | `lookdict` | General lookup for mixed-type keys |
+| ~760  | `dictkeys_generic_lookup` | Hash table scan with perturbation |
+| ~290  | `dk_indices` | Index array sized by `int8/16/32/64` based on capacity |
+
+## Reading
+
+### dk_lookup dispatch
+
+Every `PyDictKeysObject` carries a `dk_lookup` function pointer. When a dict is created or mutated the pointer is set to the most specific strategy that fits the current key set.
+
+```c
+// CPython: Objects/dictobject.c:680 _Py_dict_lookup
+Py_ssize_t
+_Py_dict_lookup(PyDictObject *mp, PyObject *key,
+                Py_hash_t hash, PyObject **value_addr)
+{
+    PyDictKeysObject *dk = mp->ma_keys;
+    DictKeysKind kind = dk->dk_kind;
+
+    if (kind == DICT_KEYS_UNICODE_EXACT) {
+        return unicode_get_index(dk, key, hash, value_addr);
+    }
+    if (kind == DICT_KEYS_UNICODE) {
+        return lookdict_unicode(mp, key, hash, value_addr);
+    }
+    return lookdict(mp, key, hash, value_addr);
+}
+```
+
+`DICT_KEYS_UNICODE_EXACT` means every key is an interned unicode string and no deletion has ever occurred. That case uses a branch-free index lookup.
+
+### Perturbation-based collision resolution
+
+When a slot is occupied by a different key, the lookup loop uses the classic Python perturbation scheme to pick the next candidate slot.
+
+```c
+// CPython: Objects/dictobject.c:640 dictkeys_generic_lookup
+static Py_ssize_t
+dictkeys_generic_lookup(PyDictKeysObject *dk, PyObject *key,
+                         Py_hash_t hash)
+{
+    const size_t mask = DK_MASK(dk);
+    size_t i = (size_t)hash & mask;
+    size_t perturb = (size_t)hash;
+
+    for (;;) {
+        Py_ssize_t ix = dictkeys_get_index(dk, i);
+        if (ix == DKIX_EMPTY)
+            return DKIX_EMPTY;
+        if (ix >= 0) {
+            PyDictKeyEntry *ep = &DK_ENTRIES(dk)[ix];
+            if (ep->me_hash == hash && ep->me_key == key)
+                return ix;
+            /* rich comparison fallback */
+            ...
+        }
+        perturb >>= PERTURB_SHIFT;   /* PERTURB_SHIFT = 5 */
+        i = (i * 5 + perturb + 1) & mask;
+    }
+}
+```
+
+`PERTURB_SHIFT = 5` means the high bits of the hash influence the probe sequence, which avoids clustering even for keys whose lower bits collide.
+
+### dk_indices sizing
+
+The index array is a flat array of signed integers. The element width grows with the dict capacity so that small dicts use 1-byte indices and large dicts use 8-byte indices.
+
+```c
+// CPython: Objects/dictobject.c:292 dictkeys_get_index
+static inline Py_ssize_t
+dictkeys_get_index(const PyDictKeysObject *keys, Py_ssize_t i)
+{
+    int log2size = DK_LOG_SIZE(keys);
+    if (log2size < 8) {
+        const int8_t *indices = (const int8_t *)(keys->dk_indices);
+        return indices[i];
+    }
+    else if (log2size < 16) {
+        const int16_t *indices = (const int16_t *)(keys->dk_indices);
+        return indices[i];
+    }
+    else if (log2size < 32) {
+        const int32_t *indices = (const int32_t *)(keys->dk_indices);
+        return indices[i];
+    }
+    else {
+        const int64_t *indices = (const int64_t *)(keys->dk_indices);
+        return indices[i];
+    }
+}
+```
+
+The sentinel values `DKIX_EMPTY = -1` and `DKIX_DUMMY = -2` fit in `int8_t`, so even the smallest representation can signal an empty or deleted slot.
+
+### Compact (combined) table layout
+
+Since Python 3.6 dicts store entries contiguously in insertion order. The index array maps hash buckets to positions in `DK_ENTRIES`, not directly to keys. Deletions write `DKIX_DUMMY` into the index array without moving entries.
+
+```c
+// CPython: Objects/dictobject.c:361 DK_ENTRIES
+#define DK_ENTRIES(dk) \
+    ((PyDictKeyEntry *)(&((int8_t *)((dk)->dk_indices))[dk->dk_nindices * \
+        (dk->dk_kind == DICT_KEYS_GENERAL ? sizeof(int64_t) : \
+         DK_IXSIZE(dk))]))
+```
+
+This layout means iteration is O(n) over a compact array and cache-friendly, while lookup is still O(1) through the index array.
+
+## gopy notes
+
+- `_Py_dict_lookup` maps to `objects.Dict.lookup` in gopy. The three strategies are replicated as separate methods guarded by a `kind` field on `DictKeys`.
+- The perturbation loop is a direct translation: `perturb >>= 5; i = (i*5 + perturb + 1) & mask`.
+- `dk_indices` sizing is represented by a Go interface with `int8`, `int16`, `int32`, and `int64` backing slices selected at resize time.
+- `DKIX_DUMMY` is used in gopy to mark tombstones during deletion, matching CPython's behavior exactly.
+
+## CPython 3.14 changes
+
+- 3.14 introduces `DICT_KEYS_UNICODE_EXACT` as a distinct kind separate from `DICT_KEYS_UNICODE`, allowing the hot path for interned-key dicts to skip hash comparison entirely.
+- The index array backing type is now selected at key-table creation time instead of being re-cast on every access, reducing branch overhead in `dictkeys_get_index`.
+- Watch callbacks (`PyDict_Watch`) added in 3.12 are now called inside `_Py_dict_lookup` for monitored dicts, adding a check at the top of the function that is a no-op when no watchers are registered.

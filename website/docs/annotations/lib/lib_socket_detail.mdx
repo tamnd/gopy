@@ -1,0 +1,79 @@
+---
+title: Lib/socket.py
+description: "socket module wrapper: adds create_connection, create_server, getaddrinfo convenience, socket context-manager support, and the makefile() bridge to the io layer."
+cpython_path: Lib/socket.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/socket.py" />
+
+`Lib/socket.py` is a Python wrapper around the `_socket` C extension. It re-exports all constants and the low-level `socket` class from `_socket`, then adds convenience functions (`create_connection`, `create_server`, `getfqdn`), context-manager support on `socket`, the `makefile()` bridge to `io`, and the `socketpair` helper.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | imports, re-exports | Import all from `_socket`; platform guards |
+| 81-200 | `socket` subclass | Adds `__enter__`/`__exit__`, `makefile`, `sendfile` |
+| 201-350 | `create_connection` | DNS lookup + connect with timeout and source_address |
+| 351-450 | `create_server` | Convenience server socket with SO_REUSEADDR |
+| 451-600 | `getfqdn`, `gethostbyname_ex` wrappers | DNS helpers |
+| 601-900 | `socketpair`, `fromfd`, `fromshare` | Socket construction helpers |
+
+## Reading
+
+### create_connection
+
+`create_connection(address, timeout, source_address)` calls `getaddrinfo` to resolve the host, iterates the results, and tries each address family in turn, returning the first successfully connected socket. This handles IPv4/IPv6 dual-stack transparently.
+
+```python
+# CPython: Lib/socket.py:201 create_connection
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
+                      source_address=None, *, all_errors=False):
+    host, port = address
+    exceptions = []
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        sock = socket(af, socktype, proto)
+        try:
+            sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            exceptions.clear()
+            return sock
+        except error as exc:
+            exceptions.append(exc)
+            sock.close()
+    ...
+```
+
+### makefile() and the io bridge
+
+`socket.makefile(mode, buffering)` wraps the socket's file descriptor in a `FileIO`, wraps that in a `BufferedReader` or `BufferedWriter`, and optionally wraps that in a `TextIOWrapper`. The `closefd=False` flag is used so the socket fd is not closed when the file object is garbage collected.
+
+```python
+# CPython: Lib/socket.py:235 socket.makefile
+def makefile(self, mode="r", buffering=None, *,
+             encoding=None, errors=None, newline=None):
+    for c in mode:
+        if c not in {"r", "w", "b"}:
+            raise ValueError("invalid mode %r" % mode)
+    writing = "w" in mode
+    reading = "r" in mode or not writing
+    raw = SocketIO(self, mode)
+    ...
+    return io.TextIOWrapper(buffer, encoding, errors, newline)
+```
+
+### create_server
+
+`create_server(address, *, family=AF_INET, backlog=None, reuse_port=False, dualstack_ipv6=False)` creates a listening socket with `SO_REUSEADDR` set and calls `bind` + `listen`. The `dualstack_ipv6` flag enables `IPV6_V6ONLY=0` on platforms that support it.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/socket/`. Go's `net` package provides `net.Dial`, `net.Listen`, and `net.LookupHost` which cover the same functionality. The `makefile()` bridge maps to wrapping a `net.Conn` in a `bufio.ReadWriter`.

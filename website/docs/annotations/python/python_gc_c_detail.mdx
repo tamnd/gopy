@@ -1,0 +1,84 @@
+---
+title: Python/gc.c
+description: "Cyclic garbage collector: tri-color mark-and-sweep across three generations, handle_weakrefs finalizer ordering, tp_finalize callback, and the gc module public API."
+cpython_path: Python/gc.c
+cpython_version: "3.14"
+lines: 2100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/gc.c`
+
+<CpyLink path="Python/gc.c" />
+
+`Python/gc.c` implements CPython's cyclic garbage collector. Reference counting handles
+acyclic garbage; this collector finds and frees objects involved in reference cycles that
+refcount alone cannot break.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `PyGC_Head`, generation lists | Doubly-linked GC object lists |
+| 201-500 | `move_unreachable`, `update_refs` | Mark phase: compute effective refcounts |
+| 501-800 | `move_legacy_finalizers`, `finalize_garbage` | Finalizer ordering |
+| 801-1100 | `handle_weakrefs` | Weak reference callback dispatch |
+| 1101-1400 | `collect`, `collect_with_callback` | Top-level collection entry point |
+| 1401-2100 | `gc` module methods | `gc.collect`, `gc.disable`, `gc.get_objects`, etc. |
+
+## Reading
+
+### Tri-color mark phase
+
+The mark phase works on a generation list. Each `PyGC_Head` has a `gc_refs` field. The
+algorithm:
+
+1. `update_refs`: copy `ob_refcnt` into `gc_refs` for every object in the generation.
+2. `subtract_refs`: for each object, decrement `gc_refs` of every object it refers to.
+3. Objects with `gc_refs == 0` after step 2 are unreachable from outside the generation.
+
+```c
+// CPython: Python/gc.c:380 move_unreachable
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    PyGC_Head *gc = GC_NEXT(young);
+    while (gc != young) {
+        PyGC_Head *next = GC_NEXT(gc);
+        if (gc_get_refs(gc) != 0) {
+            /* reachable: move to reachable list */
+            ...
+        } else {
+            move_legacy_finalizer_reachable(unreachable);
+        }
+        gc = next;
+    }
+}
+```
+
+### Finalizer ordering
+
+Objects with `tp_finalize` or `__del__` are called before freeing. CPython must
+call finalizers in the correct order to avoid use-after-free. Objects that are
+resurrected by a finalizer (their refcount rises above 0) are moved to generation 2 and
+collected on a later pass.
+
+### Generation promotion
+
+Objects that survive a collection of generation N are promoted to generation N+1. The
+default thresholds are 700, 10, 10: a generation-0 collection runs after every 700 new
+allocations; generation 1 after every 10 generation-0 collections; generation 2 after
+every 10 generation-1 collections.
+
+### Python 3.14 incremental GC
+
+CPython 3.14 introduced an incremental GC that breaks large collection work into smaller
+slices to reduce pause times. The `gc` module exposes `gc.set_incremental(True/False)`.
+
+## gopy notes
+
+gopy relies on the Go garbage collector for all memory management. There is no cyclic
+collector and no `tp_finalize` ordering concern. The `gc` module (`module/gc/`) can expose
+stub implementations of `gc.collect`, `gc.disable`, and `gc.enable` that are no-ops.

@@ -1,0 +1,142 @@
+---
+title: Lib/asyncio/taskgroups.py
+description: TaskGroup async context manager. Collects coroutines via create_task(), waits for all, and raises ExceptionGroup if any fail.
+cpython_path: Lib/asyncio/taskgroups.py
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/asyncio/taskgroups.py`
+
+<CpyLink path="Lib/asyncio/taskgroups.py" />
+
+`taskgroups.py` implements `asyncio.TaskGroup`, an async context manager for running a collection of coroutines concurrently and treating them as a unit. Coroutines are added via `create_task()` inside the `async with` block. On `__aexit__`, the group waits for every task to finish. If any task raises an unhandled exception, the group cancels all remaining tasks and then raises an `ExceptionGroup` that bundles every failure together.
+
+The design is a direct backport of the nursery concept from the Trio library. It enforces structured concurrency: tasks cannot outlive the scope that created them, and failures are surfaced to the enclosing scope rather than being silently swallowed.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/asyncio/taskgroups.py" lines="1-15">1-15</Cpy> | imports | `exceptions`, `tasks`, `events` | n/a |
+| <Cpy path="Lib/asyncio/taskgroups.py" lines="16-25">16-25</Cpy> | `__all__` | Exports `TaskGroup` | n/a |
+| <Cpy path="Lib/asyncio/taskgroups.py" lines="26-50">26-50</Cpy> | `TaskGroup.__init__`, `TaskGroup.__aenter__` | Initialize task set and error list; record the parent task | Not yet ported |
+| <Cpy path="Lib/asyncio/taskgroups.py" lines="51-120">51-120</Cpy> | `TaskGroup.__aexit__` | Wait for all tasks; handle errors, propagate cancellation, raise ExceptionGroup | Not yet ported |
+| <Cpy path="Lib/asyncio/taskgroups.py" lines="121-140">121-140</Cpy> | `TaskGroup.create_task` | Schedule a coroutine as a task on the group's loop, register the done callback | Not yet ported |
+| <Cpy path="Lib/asyncio/taskgroups.py" lines="141-150">141-150</Cpy> | `TaskGroup._on_task_done` | Done callback: collect exceptions, trigger cancellation of siblings | Not yet ported |
+
+## Reading
+
+### `__aenter__` and task registration (lines 26 to 50)
+
+<CpyLink path="Lib/asyncio/taskgroups.py" lines="26-50" />
+
+`__aenter__` records the current task as `_parent_task`. This reference is used during exit to cancel the parent if a child raises, and to call `_parent_task.uncancel()` once the group has handled the cancellation. The internal sets `_tasks` and `_errors` start empty.
+
+```python
+class TaskGroup:
+    def __init__(self):
+        self._task_counter = 0
+        self._on_completed_fut = None
+        self._parent_task = None
+        self._parent_cancel_requested = False
+        self._tasks = set()
+        self._errors = []
+        self._base_error = None
+        self._entered = False
+
+    async def __aenter__(self):
+        if self._entered:
+            raise RuntimeError(
+                f"TaskGroup {self!r} has already been entered"
+            )
+        self._entered = True
+        self._loop = events.get_running_loop()
+        self._parent_task = tasks.current_task()
+        if self._parent_task is None:
+            raise RuntimeError(
+                "TaskGroup cannot determine the parent task"
+            )
+        return self
+```
+
+`create_task()` schedules the coroutine via `self._loop.create_task()`, adds the new task to `_tasks`, and attaches `_on_task_done` as a done callback. Calling `create_task()` after `__aexit__` has started raises `RuntimeError`.
+
+### `__aexit__`: waiting and error propagation (lines 51 to 120)
+
+<CpyLink path="Lib/asyncio/taskgroups.py" lines="51-120" />
+
+`__aexit__` is the most complex part of the file. It runs in several phases.
+
+First, if the `async with` body itself raised an exception, `__aexit__` records it and immediately cancels all pending tasks. If the body completed normally, it simply waits.
+
+The wait loop uses a `Future` (`_on_completed_fut`) that `_on_task_done` resolves once the last task finishes. The loop re-awaits it in a `try/except CancelledError` block so that external cancellations (from a parent `TaskGroup` or `Runner.close()`) are forwarded to all child tasks.
+
+```python
+async def __aexit__(self, et, exc, tb):
+    self._exiting = True
+    if exc is not None and self._is_base_error(exc):
+        self._base_error = exc
+
+    propagate_cancellation_error = \
+        exc if isinstance(exc, exceptions.CancelledError) else None
+
+    if exc is not None:
+        self._errors.append(exc)
+        if self._tasks:
+            self._abort()
+
+    try:
+        if self._tasks:
+            await self._wait()
+    except exceptions.CancelledError as ex:
+        if self._parent_cancel_requested and not self._parent_task.cancelling():
+            raise
+        else:
+            propagate_cancellation_error = ex
+
+    if self._errors:
+        # Exceptions are heavy objects; build the group only when needed.
+        me = BaseExceptionGroup("unhandled errors in a TaskGroup", self._errors)
+        raise me from None
+```
+
+After the wait loop drains, the method inspects `_errors`. If it is non-empty it raises a `BaseExceptionGroup` (or `ExceptionGroup` if all errors are non-base exceptions) containing every collected exception. The original body exception, if any, is included in the group rather than raised on its own.
+
+### `_on_task_done`: the done callback (lines 141 to 150)
+
+<CpyLink path="Lib/asyncio/taskgroups.py" lines="141-150" />
+
+Every task in the group registers this callback. When a task finishes, `_on_task_done` removes it from `_tasks`. If the task ended with an exception that is not `CancelledError`, the exception is appended to `_errors` and `_abort()` is called to cancel all remaining sibling tasks.
+
+```python
+def _on_task_done(self, task):
+    self._tasks.discard(task)
+    if self._on_completed_fut is not None and not self._tasks:
+        if not self._on_completed_fut.done():
+            self._on_completed_fut.set_result(None)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    self._errors.append(exc)
+    if self._is_base_error(exc) and self._base_error is None:
+        self._base_error = exc
+    self._abort()
+    self._parent_task.cancel()
+    self._parent_cancel_requested = True
+```
+
+Cancelling the parent task causes the `await self._wait()` in `__aexit__` to be interrupted with a `CancelledError`, which wakes up the exit handler so it can finalize early once all siblings have been cancelled too. `_parent_cancel_requested` is the flag that distinguishes this programmatic cancellation from an external one, allowing the exit handler to call `_parent_task.uncancel()` afterward.
+
+## gopy mirror
+
+Not yet ported. A Go equivalent would use an `errgroup.Group` from `golang.org/x/sync/errgroup` as the structural model, but the asyncio version has additional responsibilities: it must forward cancellations from the parent context into child goroutines, collect multiple simultaneous errors into a joined error, and distinguish its own cancellations from external ones. A faithful port would wrap the goroutine group with a cancellable context and a shared error slice guarded by a mutex, mirroring `_tasks`, `_errors`, and `_abort()`.
+
+## CPython 3.14 changes
+
+`TaskGroup` was added in CPython 3.11 (bpo-46752), shipping alongside `ExceptionGroup` support from PEP 654. In 3.12 the exit logic was revised to correctly handle the case where the enclosing task is cancelled externally while the group is already aborting due to a child failure; the `_parent_cancel_requested` flag and `_parent_task.uncancel()` call were introduced in that revision. In 3.14 `TaskGroup.__repr__` was updated to include the count of running tasks, and a new `name` parameter was added to `create_task()` so that tasks spawned by a group can be given descriptive names for `asyncio.get_event_loop().print_debug()` output.

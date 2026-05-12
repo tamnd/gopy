@@ -1,0 +1,158 @@
+---
+title: "Modules/_functoolsmodule.c"
+description: "Annotation of CPython's _functoolsmodule.c: lru_cache, partial, reduce, and fast-call dispatch"
+cpython_path: Modules/_functoolsmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_functoolsmodule.c" />
+
+`_functoolsmodule.c` is the C backbone of Python's `functools` standard library. It provides
+`functools.partial`, `functools.reduce`, and the `functools.lru_cache` decorator, all in C for
+performance. The module is loaded by `Lib/functools.py` as `_functools`, which then re-exports
+the names under their public spellings.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `lru_cache_object` | struct | 80-130 | Per-cache state: dict, hits, misses, typed flag, maxsize |
+| `lru_cache_make_key` | function | 400-460 | Build the dict-lookup tuple key |
+| `lru_cache_wrapper_call` | function | 470-540 | Main wrapper: check cache, call, store |
+| `partial_new` | function | 140-200 | Construct a `partial` object |
+| `partial_call` | function | 200-270 | Prepend args, merge kwargs, dispatch |
+| `reduce_impl` | function | 700-760 | Accumulator loop for `functools.reduce` |
+| `_functools_lru_cache_impl` | function | 550-620 | `@lru_cache` decorator factory |
+| `functools_module` | PyModuleDef | 1370-1400 | Module registration |
+
+## Reading
+
+### lru_cache_object layout and cache dict
+
+The cache is stored as a plain Python `dict` keyed by specially constructed tuples. The
+`lru_cache_object` struct holds all mutable cache state inline, avoiding a separate heap
+allocation per call.
+
+```c
+// CPython: Modules/_functoolsmodule.c:82 lru_cache_object
+typedef struct lru_cache_object {
+    lru_list_elem root;  /* includes PyObject_HEAD */
+    PyObject *cache;
+    Py_ssize_t hits;
+    Py_ssize_t misses;
+    int typed;
+    Py_ssize_t maxsize;
+    PyObject *func;
+    PyObject *cache_info_type;
+    Py_ssize_t full;
+} lru_cache_object;
+```
+
+`hits` and `misses` are raw `Py_ssize_t` counters incremented on every call. `typed` is a C
+`int` (0 or 1) set once at decoration time. When `maxsize` is -1 the cache is unbounded and
+the underlying dict grows without eviction.
+
+### lru_cache_make_key: typed vs untyped tuple key
+
+Every unique combination of positional and keyword arguments needs a hashable dict key.
+`lru_cache_make_key` builds that key as a tuple. When `typed=True`, the type of each argument
+is appended after its value so that `f(1)` and `f(1.0)` map to different entries.
+
+```c
+// CPython: Modules/_functoolsmodule.c:412 lru_cache_make_key
+static PyObject *
+lru_cache_make_key(PyObject *args, PyObject *kwds, int typed)
+{
+    ...
+    if (typed) {
+        for (Py_ssize_t i = 0; i < nargs; i++) {
+            PyObject *arg = PyTuple_GET_ITEM(args, i);
+            PyTuple_SET_ITEM(key, pos++, Py_NewRef(Py_TYPE(arg)));
+        }
+    }
+    ...
+}
+```
+
+Keyword arguments are flattened into the tuple as alternating key-value pairs after the
+positional arguments. The sentinel `kwd_mark` object (a single module-level singleton) separates
+positional from keyword sections so that `f(1, x=2)` and `f(1, 2)` cannot collide.
+
+### partial_call: prepend args and merge keywords
+
+`partial_call` is invoked every time a `partial` object is called. It must combine the stored
+partial arguments with the live call arguments, and merge the stored keyword dictionary with
+any keywords supplied at call time. The merge follows Python's `**` override rule: keywords
+supplied at call time win over keywords stored in the `partial` object.
+
+```c
+// CPython: Modules/_functoolsmodule.c:221 partial_call
+static PyObject *
+partial_call(partialobject *pto, PyObject *args, PyObject *kw)
+{
+    PyObject *ret;
+    PyObject *argapply = NULL;
+
+    /* Merge positional args */
+    if (PyTuple_GET_SIZE(pto->args) == 0) {
+        argapply = Py_NewRef(args);
+    } else {
+        argapply = PySequence_Concat(pto->args, args);
+        if (argapply == NULL) return NULL;
+    }
+    /* Merge keyword args: call-time kw overrides stored kw */
+    if (pto->kw == Py_None || PyDict_GET_SIZE(pto->kw) == 0) {
+        ret = PyObject_Call(pto->fn, argapply, kw);
+    } else {
+        ...
+        PyDict_Merge(kwdict, kw, 1);
+        ret = PyObject_Call(pto->fn, argapply, kwdict);
+    }
+    ...
+}
+```
+
+`_PyObject_FastCallDict` is used in the fast path for callables that expose the vectorcall
+protocol, bypassing the tuple-building overhead entirely when the argument count is small.
+
+### reduce_impl: accumulator loop
+
+`functools.reduce` is a straightforward left-fold. The C implementation avoids the overhead of
+a Python-level loop and accesses the iterator protocol directly via `iternext`.
+
+```c
+// CPython: Modules/_functoolsmodule.c:726 reduce_impl
+static PyObject *
+functools_reduce(PyObject *self, PyObject *args)
+{
+    ...
+    it = PyObject_GetIter(seq);
+    ...
+    while ((op2 = iternext(it))) {
+        result = PyObject_CallFunctionObjArgs(func, op1, op2, NULL);
+        Py_DECREF(op1);
+        Py_DECREF(op2);
+        if (result == NULL) goto Fail;
+        op1 = result;
+    }
+    ...
+}
+```
+
+When an initial value is supplied it becomes `op1` before the loop starts. Without an initial
+value the first element of the iterable is consumed to seed `op1`, and `TypeError` is raised if
+the sequence is empty.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/_functools/` (C backing) and `module/functools/` (pure-Python
+wrapper, mirroring CPython's split). The `partial` type and `reduce` built-in are the highest
+priority because several standard-library modules depend on them. `lru_cache` requires a
+working dict and a doubly-linked list for the LRU eviction ring, implemented as a Go struct
+embedding a `map` and two `*lru_list_elem` pointers.

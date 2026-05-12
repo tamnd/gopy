@@ -1,0 +1,66 @@
+---
+title: Include/pyerrors.h (part 2)
+description: "Exception hierarchy macros: PyExceptionInstance_Check, PyExceptionClass_Check, _PyErr_ChainExceptions, warning API (PyErr_WarnEx, PyErr_WarnFormat), and the PyErr_SetFromErrnoWithFilename family."
+cpython_path: Include/pyerrors.h
+cpython_version: "3.14"
+lines: 220
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/pyerrors.h` (part 2)
+
+<CpyLink path="Include/pyerrors.h" />
+
+This annotation covers the exception-testing macros, the OS-error helpers, the warning
+API, and the chained-exception utilities declared in `Include/pyerrors.h`. For the core
+`PyErr_SetString` / `PyErr_Occurred` / `PyErr_Fetch` declarations see the
+`include_pyerrors_h` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-60 | `PyExceptionInstance_Check`, `PyExceptionClass_Check` | Type predicates for exception objects |
+| 61-110 | `PyErr_SetFromErrno`, `PyErr_SetFromErrnoWithFilename` | OS errno to Python OSError conversion |
+| 111-160 | `PyErr_WarnEx`, `PyErr_WarnFormat`, `PyErr_WarnExplicit` | Warning API |
+| 161-220 | `_PyErr_ChainExceptions`, `PyErr_SetImportErrorWithNameFrom` | Chaining and import errors |
+
+## Reading
+
+### `PyExceptionInstance_Check`
+
+```c
+// CPython: Include/pyerrors.h:22 PyExceptionInstance_Check
+#define PyExceptionInstance_Check(x) \
+    (PyType_IsSubtype(Py_TYPE(x), (PyTypeObject *)PyExc_BaseException))
+```
+
+This macro is the standard way to test whether an arbitrary Python object is an exception
+instance. It returns true for `Exception`, `BaseException`, and all their subclasses.
+
+### `PyErr_SetFromErrno`
+
+`PyErr_SetFromErrno(exc)` reads `errno` and calls `PyErr_SetObject(exc, OSError(errno,
+strerror(errno)))`. `PyErr_SetFromErrnoWithFilename` additionally sets the `filename`
+attribute, which is printed in `FileNotFoundError` messages.
+
+### Warning API
+
+`PyErr_WarnEx(category, message, stacklevel)` issues a warning by calling the
+`warnings.warn` machinery. `stacklevel` controls how far up the call stack the warning
+appears to originate. `stacklevel=2` (common in C extensions) attributes the warning to
+the Python caller rather than to the C function.
+
+### `_PyErr_ChainExceptions`
+
+This internal function sets `__context__` on the current exception to a prior exception,
+implementing the "during handling of the above exception" chain without going through
+Python-level `raise`.
+
+## gopy notes
+
+`PyExceptionInstance_Check` maps to `py.IsInstance(x, py.BaseException)` in gopy. The
+warning API maps to `module/warnings/`. `_PyErr_ChainExceptions` is internal to
+`Python/errors.c`; the gopy analogue is handled in `vm/eval_unwind.go`.

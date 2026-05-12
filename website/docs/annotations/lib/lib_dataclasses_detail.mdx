@@ -1,0 +1,86 @@
+---
+title: Lib/dataclasses.py
+description: "dataclasses module: @dataclass decorator, field(), fields(), asdict(), astuple(), make_dataclass(), and the __init__/__repr__/__eq__ code generation pipeline."
+cpython_path: Lib/dataclasses.py
+cpython_version: "3.14"
+lines: 1310
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/dataclasses.py`
+
+<CpyLink path="Lib/dataclasses.py" />
+
+`Lib/dataclasses.py` implements the `@dataclass` decorator. It inspects class annotations,
+collects `Field` descriptors, then generates and `exec`s `__init__`, `__repr__`, `__eq__`,
+and optionally `__lt__`/`__hash__` source strings at class creation time. Nothing happens at
+instance creation beyond running the generated `__init__`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-120 | `Field`, `field()` | Descriptor for one dataclass field, carries default, repr, compare, hash flags |
+| 121-350 | `_process_class` | Core: collect fields, build init/repr/eq code strings, `exec` them |
+| 351-500 | `dataclass` | Decorator entry point; calls `_process_class` |
+| 501-700 | `fields`, `asdict`, `astuple` | Introspection helpers |
+| 701-900 | `make_dataclass`, `replace` | Dynamic class creation and functional copy |
+| 901-1310 | Internal helpers | `_field_init`, `_init_fn`, `_repr_fn`, `_eq_fn`, `_hash_fn` code generators |
+
+## Reading
+
+### Code generation via `exec`
+
+`dataclasses` generates `__init__` as a source string and `exec`s it in a namespace that
+already contains the field defaults and type annotations. This avoids any runtime overhead
+per-instance since the result is a real function object.
+
+```python
+# CPython: Lib/dataclasses.py:500 _create_fn
+def _create_fn(name, args, body, *, globals=None, locals=None,
+               return_type=MISSING):
+    if locals is None:
+        locals = {}
+    if return_type is not MISSING:
+        locals['_return_type'] = return_type
+    args = ','.join(args)
+    body = '\n'.join(f'  {b}' for b in body)
+    txt = f' def {name}({args}):\n{body}'
+    local_vars = ', '.join(locals.keys())
+    txt = f"def __create_fn__({local_vars}):\n{txt}\n return {name}"
+    ns = {}
+    exec(txt, globals, ns)
+    return ns['__create_fn__'](**locals)
+```
+
+### `Field` and `field()`
+
+`field()` returns a `Field` sentinel. `_process_class` recognizes it and substitutes the
+actual default or `default_factory` call into the generated `__init__` body.
+
+```python
+# CPython: Lib/dataclasses.py:285 Field.__init__
+class Field:
+    __slots__ = ('default', 'default_factory', 'repr', 'hash',
+                 'init', 'compare', 'metadata', 'kw_only',
+                 '_field_type', 'name', 'type')
+```
+
+### `__post_init__` hook
+
+If the class defines `__post_init__`, the generated `__init__` appends a call to it at the
+end, passing any `InitVar` pseudo-fields as positional arguments.
+
+### `asdict` recursion
+
+`asdict` deep-copies the values using `copy.deepcopy` and recurses into nested dataclasses,
+lists, tuples, and dicts. The recursion preserves the original container types.
+
+## gopy notes
+
+Not yet ported. The `exec`-based code generation requires a working `compile`/`exec` path.
+The planned port lives in `module/dataclasses/`. An interim approach could generate the
+methods directly in Go without source string compilation, but that would diverge from
+CPython's behaviour for classes that override `__init_subclass__`.

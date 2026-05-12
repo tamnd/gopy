@@ -1,0 +1,128 @@
+---
+title: "Lib/unittest/runner.py"
+description: Implements TextTestRunner and TextTestResult, which drive test execution and write human-readable output to a stream.
+cpython_path: Lib/unittest/runner.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/unittest/runner.py
+
+<CpyLink path="Lib/unittest/runner.py" />
+
+`runner.py` is a short but structurally important file: it connects the abstract `TestSuite` execution model to real output. `TextTestResult` keeps track of errors, failures, and skips while a run is in progress, and `TextTestRunner` wires a result object, a stream, and a suite together into a single `run()` call. Output verbosity, buffer mode, and timing are all controlled here.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/unittest/runner.py" lines="1-20">1-20</Cpy> | imports | Pulls in `sys`, `time`, `warnings`, and the `result` module. |
+| <Cpy path="Lib/unittest/runner.py" lines="21-40">21-40</Cpy> | `_WritelnDecorator` | Thin wrapper around any stream that adds a `writeln()` method. |
+| <Cpy path="Lib/unittest/runner.py" lines="41-120">41-120</Cpy> | `TextTestResult` | Subclass of `TestResult`; overrides `addSuccess`, `addError`, `addFailure`, `addSkip`, and `printErrors`. |
+| <Cpy path="Lib/unittest/runner.py" lines="121-160">121-160</Cpy> | `TextTestResult.printErrors` | Iterates `errors` and `failures` lists and formats each traceback to the stream. |
+| <Cpy path="Lib/unittest/runner.py" lines="161-200">161-200</Cpy> | `TextTestRunner`, `TextTestRunner.run` | Constructs a `TextTestResult`, calls `suite(result)`, prints timing, and returns the result. |
+
+## Reading
+
+### _WritelnDecorator
+
+The decorator forwards every attribute lookup to the wrapped stream, adding only a `writeln()` convenience method. This keeps the runner stream-agnostic: you can pass `sys.stdout`, a `StringIO`, or any file-like object.
+
+```python
+# CPython: Lib/unittest/runner.py:23 _WritelnDecorator
+class _WritelnDecorator(object):
+    """Used to decorate file-like objects with a handy 'writeln' method"""
+    def __init__(self,stream):
+        self.stream = stream
+
+    def __getattr__(self, attr):
+        if attr in ('stream', '__getstate__'):
+            raise AttributeError(attr)
+        return getattr(self.stream,attr)
+
+    def writeln(self, arg=None):
+        if arg:
+            self.write(arg)
+        self.write('\n') # text-mode streams translate to \r\n if needed
+```
+
+### TextTestResult outcome methods
+
+`TextTestResult` overrides the four outcome methods from `TestResult`. In dot mode (verbosity 1) each outcome writes a single character; in verbose mode it writes the test description and a word. The character/word pairs are `.`/`ok`, `E`/`ERROR`, `F`/`FAIL`, and `s`/`skipped`.
+
+```python
+# CPython: Lib/unittest/runner.py:68 TextTestResult.addSuccess
+def addSuccess(self, test):
+    super().addSuccess(test)
+    if self.showAll:
+        self._write_status(test, "ok")
+    else:
+        self.stream.write('.')
+        self.stream.flush()
+
+# CPython: Lib/unittest/runner.py:75 TextTestResult.addError
+def addError(self, test, err):
+    super().addError(test, err)
+    if self.showAll:
+        self._write_status(test, "ERROR")
+    else:
+        self.stream.write('E')
+        self.stream.flush()
+```
+
+### startTestRun / stopTestRun timing
+
+`TextTestRunner.run()` records `time.perf_counter()` before and after the suite call, then formats elapsed seconds into the summary line. The `startTestRun` and `stopTestRun` hooks on the result object let plugins observe the same boundary.
+
+```python
+# CPython: Lib/unittest/runner.py:176 TextTestRunner.run
+def run(self, test):
+    "Run the given test case or test suite."
+    result = self._makeResult()
+    registerResult(result)
+    result.failfast = self.failfast
+    result.buffer = self.buffer
+    result.tb_locals = self.tb_locals
+    with warnings.catch_warnings():
+        ...
+        startTime = time.perf_counter()
+        startTestRun = getattr(result, 'startTestRun', None)
+        if startTestRun is not None:
+            startTestRun()
+        try:
+            test(result)
+        finally:
+            stopTestRun = getattr(result, 'stopTestRun', None)
+            if stopTestRun is not None:
+                stopTestRun()
+        stopTime = time.perf_counter()
+    timeTaken = stopTime - startTime
+    ...
+```
+
+### printErrors output
+
+`printErrors` is called after the suite finishes. It iterates the `errors` and `failures` lists and prints each traceback via `printErrorList`. The separator line (`=` or `-` repeated 70 times) visually separates the dot-progress line from the tracebacks.
+
+```python
+# CPython: Lib/unittest/runner.py:121 TextTestResult.printErrors
+def printErrors(self):
+    if self.dots or self.showAll:
+        self.stream.writeln()
+    self.printErrorList('ERROR', self.errors)
+    self.printErrorList('FAIL', self.failures)
+
+def printErrorList(self, flavour, errors):
+    for test, err in errors:
+        self.stream.writeln(self.separator1)
+        self.stream.writeln("%s: %s" % (flavour,self.getDescription(test)))
+        self.stream.writeln(self.separator2)
+        self.stream.writeln("%s" % err)
+```
+
+## gopy notes
+
+`runner.py` is small enough to port in a single pass. The main dependency is `TextTestResult`, which inherits from `result.TestResult` (in `Lib/unittest/result.py`). A gopy port would represent the result object as an interface with `AddSuccess`, `AddError`, `AddFailure`, and `AddSkip` methods, and implement `TextTestResult` as a concrete struct that writes to an `io.Writer`. The timing logic maps directly to `time.Now()` and `time.Since()`. Stream buffering via `_WritelnDecorator` becomes a simple `bufio.Writer` wrapper with a `Writeln` helper.

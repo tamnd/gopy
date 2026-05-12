@@ -1,0 +1,105 @@
+---
+title: "pycore_parser.h: Internal Parser Entry Points"
+description: "Annotation of _PyParser_ASTFromString, _PyParser_ASTFromFile, PyCompilerFlags, and start symbol constants in CPython 3.14"
+cpython_path: Include/internal/pycore_parser.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+ported_to: parser/pegen/action_helpers_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_parser.h` is a small header that exposes the two internal entry
+points the rest of CPython uses to turn source text into an AST. Public
+callers use `Py_CompileString`; everything inside `Python/` calls these
+two functions directly, bypassing the public ABI layer.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Notes |
+|---|---|---|---|
+| `_PyParser_ASTFromString` | function decl | 20-28 | Parse a `const char *` buffer into a `mod_ty` AST node |
+| `_PyParser_ASTFromFile` | function decl | 30-40 | Parse an open `FILE *` into a `mod_ty` AST node |
+| `PyCompilerFlags` | struct (ref) | 42 | Carries `cf_flags` and `cf_feature_version`; defined in `cpython/compile.h` |
+| `PyCF_ONLY_AST` | macro (ref) | 44 | Flag that stops after AST construction, no bytecode |
+| `Py_file_input` | constant | 48 | Start symbol: full module (`mod_ty` variant `Module`) |
+| `Py_eval_input` | constant | 49 | Start symbol: single expression (`mod_ty` variant `Expression`) |
+| `Py_single_input` | constant | 50 | Start symbol: interactive single statement |
+| `Py_func_type_input` | constant | 51 | Start symbol: PEP 484 function type comment |
+
+## Reading
+
+### Entry point signatures
+
+Both functions share the same return type and trailing arguments; they differ
+only in how the source is supplied.
+
+```c
+// Include/internal/pycore_parser.h:20
+extern struct _mod *
+_PyParser_ASTFromString(
+    const char *str,
+    PyObject *filename,
+    int start,                 /* Py_file_input etc. */
+    PyCompilerFlags *flags,
+    PyArena *arena);
+
+// Include/internal/pycore_parser.h:30
+extern struct _mod *
+_PyParser_ASTFromFile(
+    FILE *fp,
+    PyObject *filename,
+    const char *enc,           /* encoding hint, may be NULL */
+    int start,
+    const char *ps1,           /* interactive prompt strings */
+    const char *ps2,
+    PyCompilerFlags *flags,
+    int *errcode,
+    PyArena *arena);
+```
+
+Both functions return `NULL` on error with a Python exception set. The `arena`
+parameter owns all AST node allocations; freeing the arena frees the entire
+tree at once.
+
+### Start symbol constants and `pegen`
+
+The `start` integer selects the grammar entry rule passed to the PEG parser in
+`Parser/pegen.c`. The three common values map to grammar rules as follows:
+
+```c
+// Include/internal/pycore_parser.h:48
+#define Py_file_input   257   /* Grammar rule: file */
+#define Py_eval_input   258   /* Grammar rule: eval */
+#define Py_single_input 256   /* Grammar rule: interactive */
+```
+
+Inside `Parser/Python.asdl` these map to the `Module`, `Expression`, and
+`Interactive` variants of `mod_ty`. The PEG parser (`Parser/pegen.c`) reads
+the start symbol once at the top of `_PyPegen_run_parser` and dispatches to
+the appropriate rule function.
+
+### `PyCompilerFlags` and feature version
+
+```c
+// cpython/compile.h (referenced from pycore_parser.h:42)
+typedef struct {
+    int cf_flags;
+    int cf_feature_version;  /* minor version for __future__ annotations */
+} PyCompilerFlags;
+```
+
+`cf_feature_version` was added in 3.8 to implement PEP 563 (`from __future__
+import annotations`). In 3.14, `PyCF_OPTIMIZED_AST` is a new flag that
+requests the optimizer to run before returning the AST tree to the caller.
+
+## gopy notes
+
+- gopy's parser entry point is `parser/pegen/action_helpers_gen.go`, which
+  is generated from the CPython PEG grammar and action helpers.
+- The `start` symbol integer is not currently threaded through; gopy defaults
+  to file-level parsing. Interactive and eval modes are future work.
+- `PyCompilerFlags` has no direct counterpart yet; `cf_feature_version` will
+  matter when `from __future__ import annotations` (PEP 563) is implemented.
+- `PyArena` is replaced by Go's GC; no explicit arena free is needed.

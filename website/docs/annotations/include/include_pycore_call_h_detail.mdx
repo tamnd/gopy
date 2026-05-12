@@ -1,0 +1,64 @@
+---
+title: Include/internal/pycore_call.h
+description: "Internal call helpers: _PyObject_CallNoArgs, _PyObject_Call1Arg, and _PyObject_FastCallDict. Avoid vectorcall overhead for simple call sites inside the interpreter."
+cpython_path: Include/internal/pycore_call.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_call.h" />
+
+`pycore_call.h` provides low-overhead call helpers for sites inside the CPython interpreter that call Python callables from C. The public API (`PyObject_Call`, `PyObject_CallOneArg`) routes through the vectorcall protocol; these internal helpers add further shortcuts for zero- and one-argument calls and for cases where the argument tuple is already built.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `_PyObject_CallNoArgs` | Inline; calls with empty args and NULL kwargs |
+| 41-80 | `_PyObject_Call1Arg` | Inline; calls with a single positional argument |
+| 81-120 | `_PyObject_FastCallDict` | Call with C array of args plus optional dict of kwargs |
+
+## Reading
+
+### `_PyObject_CallNoArgs`
+
+```c
+// Include/internal/pycore_call.h:1 _PyObject_CallNoArgs
+static inline PyObject *
+_PyObject_CallNoArgs(PyObject *func) {
+    return _PyObject_FastCallDict(func, NULL, 0, NULL);
+}
+```
+
+This is a two-level shortcut. Most call sites that pass no arguments previously called `PyObject_CallObject(func, NULL)`, which allocated an empty tuple. `_PyObject_CallNoArgs` avoids that allocation entirely by routing through the vectorcall fast path.
+
+### `_PyObject_Call1Arg`
+
+```c
+// Include/internal/pycore_call.h:41 _PyObject_Call1Arg
+static inline PyObject *
+_PyObject_Call1Arg(PyObject *func, PyObject *arg) {
+    return _PyObject_FastCallDict(func, &arg, 1, NULL);
+}
+```
+
+Passing `&arg` as the args array avoids building an argument tuple for the common case of a single argument. This pattern is used throughout `typeobject.c` for slot calls like `tp_hash`, `tp_repr`, and `tp_richcompare`.
+
+### `_PyObject_FastCallDict`
+
+`_PyObject_FastCallDict` is the workhorse. It checks whether `func` supports the vectorcall protocol (`PY_VECTORCALL_ARGUMENTS_OFFSET`), and if so calls `vectorcallfunc` directly. Otherwise it falls back to building a tuple and dict and calling `tp_call`.
+
+```c
+// Include/internal/pycore_call.h:81 _PyObject_FastCallDict
+PyObject *_PyObject_FastCallDict(
+    PyObject *callable,
+    PyObject *const *args, Py_ssize_t nargs,
+    PyObject *kwargs);
+```
+
+## gopy notes
+
+Not yet ported. gopy's equivalent call path goes through `vm.CallObject` in `vm/eval_call.go`. The no-args and one-arg shortcuts map naturally to separate Go branches that avoid allocating a `[]py.Object` slice for trivial call sites.

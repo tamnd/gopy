@@ -1,0 +1,114 @@
+---
+title: Lib/getopt.py
+description: "Parser for Unix-style short and long command-line options, modelled after the C getopt() function."
+cpython_path: Lib/getopt.py
+cpython_version: "3.14"
+lines: 232
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/getopt.py`
+
+<CpyLink path="Lib/getopt.py" />
+
+`getopt` is a small, low-level module for parsing command-line options in the traditional Unix style. It exposes two functions, `getopt()` and `gnu_getopt()`, and a single exception class `GetoptError`. The module does not build a Namespace or perform type coercion; it returns raw `(option, value)` pairs and leaves interpretation to the caller. For new code, the standard library recommends `argparse`, but `getopt` remains useful for scripts that need byte-for-byte compatibility with existing shell argument conventions.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-29 | module header | Docstring and contributor credits |
+| 30-34 | `__all__`, imports | Public API list; imports `os` and `gettext` |
+| 36-47 | `GetoptError` | Exception with `opt` and `msg` attributes |
+| 47 | `error` | Alias for `GetoptError` for backward compatibility |
+| 49-92 | `getopt` | POSIX-style parser; stops at first non-option argument |
+| 94-153 | `gnu_getopt` | GNU-style parser; allows options and non-options to be intermixed |
+| 155-172 | `do_longs` | Processes a single long option token from the argument list |
+| 177-202 | `long_has_args` | Resolves a possibly-abbreviated long option name against the declared list |
+| 204-218 | `do_shorts` | Processes a run of short option characters from a single argv element |
+| 220-228 | `short_has_arg` | Looks up whether a short option character requires or accepts an argument |
+| 230-232 | `__main__` block | Self-test: parses `sys.argv[1:]` with `-a:b` and `--alpha=` `--beta` |
+
+## Reading
+
+### getopt: POSIX stop-at-first-non-option
+
+`getopt()` iterates `args` in a `while` loop that terminates as soon as an element does not start with `-`, equals the bare `-` sentinel, or equals `--`. The `--` token is consumed and the rest of `args` is returned unchanged as the trailing positional list. Every token that starts with `--` is dispatched to `do_longs`; everything else goes to `do_shorts`. This strict left-to-right, stop-early behavior mirrors the C library `getopt()` and is intentionally different from GNU behavior.
+
+```python
+# CPython: Lib/getopt.py:49 getopt
+def getopt(args, shortopts, longopts = []):
+    opts = []
+    if isinstance(longopts, str):
+        longopts = [longopts]
+    else:
+        longopts = list(longopts)
+    while args and args[0].startswith('-') and args[0] != '-':
+        if args[0] == '--':
+            args = args[1:]
+            break
+        if args[0].startswith('--'):
+            opts, args = do_longs(opts, args[0][2:], longopts, args[1:])
+        else:
+            opts, args = do_shorts(opts, args[0][1:], shortopts, args[1:])
+    return opts, args
+```
+
+### gnu_getopt: intermixed scanning and return-in-order mode
+
+`gnu_getopt()` extends `getopt()` in two important ways. First, it continues scanning for options after encountering non-option arguments, collecting them in `prog_args`. Second, when the short-option string starts with `-`, it activates "return-in-order" mode: each non-option argument is returned as an `(option=None, value=arg_list)` pair rather than accumulated silently. Starting with `+` or having `POSIXLY_CORRECT` set reverts to POSIX stop-early behavior.
+
+```python
+# CPython: Lib/getopt.py:94 gnu_getopt
+def gnu_getopt(args, shortopts, longopts = []):
+    opts = []
+    prog_args = []
+    ...
+    return_in_order = False
+    if shortopts.startswith('-'):
+        shortopts = shortopts[1:]
+        all_options_first = False
+        return_in_order = True
+    elif shortopts.startswith('+'):
+        shortopts = shortopts[1:]
+        all_options_first = True
+    elif os.environ.get("POSIXLY_CORRECT"):
+        all_options_first = True
+    else:
+        all_options_first = False
+```
+
+### long_has_args: prefix matching and optional arguments
+
+`long_has_args()` resolves a (possibly abbreviated) long option name by filtering the declared `longopts` list for entries that start with `opt`. An exact match takes priority. If no exact match exists, the prefix must be unambiguous (exactly one candidate). The function returns a two-tuple of `(has_arg, canonical_name)` where `has_arg` is `True`, `False`, or the string `'?'` for optional arguments (declared with `=?`).
+
+```python
+# CPython: Lib/getopt.py:177 long_has_args
+def long_has_args(opt, longopts):
+    possibilities = [o for o in longopts if o.startswith(opt)]
+    if not possibilities:
+        raise GetoptError(_('option --%s not recognized') % opt, opt)
+    if opt in possibilities:
+        return False, opt
+    elif opt + '=' in possibilities:
+        return True, opt
+    elif opt + '=?' in possibilities:
+        return '?', opt
+    if len(possibilities) > 1:
+        raise GetoptError(
+            _("option --%s not a unique prefix; possible options: %s")
+            % (opt, ", ".join(possibilities)),
+            opt,
+        )
+    ...
+```
+
+## gopy notes
+
+`getopt` is entirely pure Python with no C extension dependency. It is straightforward to port to Go as a package with two exported functions and one error type. The main subtlety is that Go has no direct equivalent to Python's list slice reassignment (`opts, args = do_longs(...)`), so the Go version should pass and return slices by value or use pointer parameters. `GetoptError` maps cleanly to a Go struct implementing the `error` interface with `Opt` and `Msg` string fields.
+
+## CPython 3.14 changes
+
+No functional changes were made to `getopt` in 3.14. The file is stable and receives only minor maintenance updates (typo fixes, updated contributor email addresses). The optional-argument convention (`=?`) has been present since the Peter Astrand addition and remains unchanged.

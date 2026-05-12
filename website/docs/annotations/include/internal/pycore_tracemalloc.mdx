@@ -1,0 +1,114 @@
+---
+title: Include/internal/pycore_tracemalloc.h
+description: Internal tracemalloc API for per-allocation tracking with size and traceback metadata.
+cpython_path: Include/internal/pycore_tracemalloc.h
+cpython_version: "3.14"
+lines: ~80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_tracemalloc.h`
+
+<CpyLink path="Include/internal/pycore_tracemalloc.h" />
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `_PyTraceMalloc_Init` | function | Initializes per-interpreter tracemalloc state; installs the allocator hooks |
+| `_PyTraceMalloc_Fini` | function | Tears down tracemalloc state and frees all tracking tables |
+| `_PyTraceMalloc_Track` | function | Records a `{ptr -> (size, traceback)}` entry on every allocation |
+| `_PyTraceMalloc_Untrack` | function | Removes a tracked pointer on free |
+| `_PyTraceMalloc_GetMemory` | function | Returns total memory overhead of the tracking tables |
+| `_Py_tracemalloc_config` | struct field | Per-interpreter config: enabled flag, nframe depth limit |
+| `_PyTraceMalloc_TracebackHere` | function | Captures the current Python call stack for a traceback entry |
+
+All symbols live behind `#ifdef Py_BUILD_CORE`. The public `tracemalloc` module surface (`tracemalloc.start`, `.stop`, `.get_traced_memory`) is implemented on top of these internals in `Modules/_tracemalloc.c`.
+
+## Reading
+
+### Hook installation
+
+`_PyTraceMalloc_Init` replaces the default `PyMemAllocatorEx` for the `PYMEM_DOMAIN_OBJ` and `PYMEM_DOMAIN_MEM` domains with wrapper allocators that call `_PyTraceMalloc_Track` after each successful alloc and `_PyTraceMalloc_Untrack` before each free.
+
+```c
+// CPython: Modules/_tracemalloc.c
+static void *
+tracemalloc_alloc(int use_calloc, void *ctx, size_t nelem, size_t elsize)
+{
+    ...
+    ptr = alloc->malloc(alloc->ctx, size);
+    if (ptr != NULL) {
+        if (_PyTraceMalloc_Track(domain, (uintptr_t)ptr, size) < 0) {
+            ...
+        }
+    }
+    return ptr;
+}
+```
+
+The hook layer means `_PyTraceMalloc_Track` is on the hot path for every Python-heap allocation while tracing is active. The implementation keeps the per-entry cost low by storing tracebacks in an interned hash table shared across all pointers that share the same call stack.
+
+### Per-interpreter tracking table
+
+Each `PyInterpreterState` carries a `_PyTraceMalloc_State` struct. The heart of it is two hash tables: one mapping `(domain, ptr)` to a `TracemapEntry` (size + traceback pointer), and one interning unique `Traceback` objects.
+
+```c
+// CPython: Include/internal/pycore_tracemalloc.h
+typedef struct {
+    /* used by tracemalloc_realloc() */
+    int reentrant;
+    /* Table of all traced memory blocks */
+    _Py_hashtable_t *traces;
+    /* Table of unique tracebacks */
+    _Py_hashtable_t *tracebacks;
+    /* Peak memory usage */
+    size_t peak_traced_memory;
+    size_t traced_memory;
+} _PyTraceMalloc_State;
+```
+
+The separation of `traces` from `tracebacks` is the main memory-efficiency trick: many pointers share the same traceback (same call site, same stack depth), so deduplication keeps the table size proportional to unique allocation sites rather than total allocation count.
+
+### Traceback capture
+
+`_PyTraceMalloc_TracebackHere` walks the interpreter's frame stack up to `_Py_tracemalloc_config.max_nframe` frames and builds a `Traceback` struct of `(filename, lineno)` pairs.
+
+```c
+// CPython: Modules/_tracemalloc.c
+static traceback_t *
+traceback_get_frames(PyThreadState *tstate)
+{
+    traceback_t *traceback = &_Py_tracemalloc_traceback;
+    traceback->nframe = 0;
+
+    PyFrameObject *pyframe = PyThreadState_GetFrame(tstate);
+    while (pyframe != NULL && traceback->nframe < _Py_tracemalloc_config.max_nframe) {
+        frame_t *frame = &traceback->frames[traceback->nframe++];
+        frame->filename = ...;
+        frame->lineno   = PyFrame_GetLineNumber(pyframe);
+        ...
+    }
+    return traceback_intern(traceback);
+}
+```
+
+The `traceback_intern` call computes a hash of the frame sequence and reuses an existing `Traceback` object if the stack matches. This is why traceback memory overhead grows slowly even under heavy allocation pressure.
+
+## gopy mirror
+
+`pycore_tracemalloc.h` has not been ported to gopy. The Go runtime has its own allocation and profiling tooling (`runtime/pprof`, `runtime.MemStats`) that serves a similar diagnostic purpose. A gopy port would require:
+
+1. A per-interpreter equivalent of `_PyTraceMalloc_State` added to the interpreter struct.
+2. Allocation hooks wired into the `objects` package wherever `PyObject`-like structs are created.
+3. A `module/tracemalloc/` package exposing the public `tracemalloc` API.
+
+None of these are scheduled in the current v0.12.1 scope.
+
+## CPython 3.14 changes
+
+- `_PyTraceMalloc_State` was moved from a global variable to a field on `PyInterpreterState` in 3.12, enabling per-subinterpreter tracing. This layout is unchanged in 3.14.
+- `_PyTraceMalloc_GetMemory` is new in 3.13; earlier versions computed table overhead inline in `tracemalloc.get_traced_memory`.
+- The `max_nframe` cap was raised from 128 to 512 in 3.14 to better support deep async call stacks.

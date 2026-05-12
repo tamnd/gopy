@@ -1,0 +1,150 @@
+---
+title: "importlib/util.py"
+description: "Public importlib utilities — spec helpers, lazy loading, encoding"
+cpython_path: Lib/importlib/util.py
+cpython_version: "3.14"
+lines: 279
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`importlib/util.py` is the public-facing API layer over the two frozen bootstrap
+modules. It re-exports the most useful symbols and adds `LazyLoader` and the
+`find_spec` convenience wrapper. Unlike the bootstrap files, this module is
+loaded from the file system in the normal way and may import other stdlib
+modules freely.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 18–20 | `source_hash` | Computes the hash stored in hash-based `.pyc` headers |
+| 23–35 | `resolve_name` | Converts a relative name like `..foo` to an absolute module name |
+| 38–66 | `_find_spec_from_path` | Internal helper — looks up spec without importing parents |
+| 69–111 | `find_spec` | Public query: returns spec (and imports parent packages) without executing the module |
+| 118–164 | `_incompatible_extension_module_restrictions` | Context manager to bypass multi-interpreter extension compatibility checks |
+| 167–231 | `_LazyModule` | `types.ModuleType` subclass that triggers load on first `__getattribute__` |
+| 234–273 | `LazyLoader` | Loader wrapper that installs `_LazyModule` and defers `exec_module` |
+| 276–279 | `__all__` | Public surface: `LazyLoader`, `find_spec`, `module_from_spec`, etc. |
+
+Re-exports from `_bootstrap` and `_bootstrap_external`:
+
+| Symbol | Origin |
+|--------|--------|
+| `module_from_spec` | `_bootstrap:809` |
+| `spec_from_loader` | `_bootstrap:665` |
+| `spec_from_file_location` | `_bootstrap_external:560` |
+| `decode_source` | `_bootstrap_external:543` |
+| `cache_from_source` | `_bootstrap_external:239` |
+| `source_from_cache` | `_bootstrap_external:310` |
+| `MAGIC_NUMBER` | `_bootstrap_external:224` |
+
+## Reading
+
+### Querying a spec without importing
+
+`find_spec` lets callers ask "does this module exist and where?" without
+actually running its code. If the module name contains a dot, all parent
+packages are imported first so that `__path__` is populated.
+
+```python
+# CPython: Lib/importlib/util.py:69 find_spec
+def find_spec(name, package=None):
+    fullname = resolve_name(name, package) if name.startswith('.') else name
+    if fullname not in sys.modules:
+        parent_name = fullname.rpartition('.')[0]
+        if parent_name:
+            parent = __import__(parent_name, fromlist=['__path__'])
+            parent_path = parent.__path__
+        else:
+            parent_path = None
+        return _find_spec(fullname, parent_path)
+    else:
+        module = sys.modules[fullname]
+        ...
+        return spec
+```
+
+### Lazy loading
+
+`LazyLoader.exec_module` replaces the module's class with `_LazyModule` instead
+of executing the module body immediately. The first attribute access on the
+resulting module triggers the real `exec_module` call under an `RLock`, ensuring
+only one thread loads the module.
+
+```python
+# CPython: Lib/importlib/util.py:256 LazyLoader.exec_module
+def exec_module(self, module):
+    import threading
+    module.__spec__.loader = self.loader
+    module.__loader__ = self.loader
+    loader_state = {}
+    loader_state['__dict__'] = module.__dict__.copy()
+    loader_state['__class__'] = module.__class__
+    loader_state['lock'] = threading.RLock()
+    loader_state['is_loading'] = False
+    module.__spec__.loader_state = loader_state
+    module.__class__ = _LazyModule
+```
+
+`_LazyModule.__getattribute__` checks `loader_state['is_loading']` to handle
+re-entrant access (for example, when the module imports itself during
+initialisation). Re-entrant calls return the partially initialised attribute
+rather than deadlocking.
+
+```python
+# CPython: Lib/importlib/util.py:171 _LazyModule.__getattribute__
+def __getattribute__(self, attr):
+    __spec__ = object.__getattribute__(self, '__spec__')
+    loader_state = __spec__.loader_state
+    with loader_state['lock']:
+        if object.__getattribute__(self, '__class__') is _LazyModule:
+            if loader_state['is_loading']:
+                return loader_state['__class__'].__getattribute__(self, attr)
+            loader_state['is_loading'] = True
+            ...
+            __spec__.loader.exec_module(self)
+            ...
+    return getattr(self, attr)
+```
+
+### Relative name resolution
+
+`resolve_name` counts leading dots to determine the import level, then delegates
+to `_bootstrap._resolve_name` which trims the package name to find the base.
+
+```python
+# CPython: Lib/importlib/util.py:23 resolve_name
+def resolve_name(name, package):
+    if not name.startswith('.'):
+        return name
+    level = 0
+    for character in name:
+        if character != '.':
+            break
+        level += 1
+    return _resolve_name(name[level:], package, level)
+```
+
+## gopy notes
+
+- `find_spec` is the recommended introspection entry point. gopy's test suite
+  uses it to verify that `sys.meta_path` is correctly populated before running
+  any end-to-end import tests.
+- `LazyLoader` depends on `threading.RLock`. gopy maps this to a Go
+  `sync.Mutex` wrapped in the `_thread` module port at `module/_thread/`.
+- `decode_source` is re-exported here but lives in `_bootstrap_external`. The
+  implementation calls `tokenize.detect_encoding`; gopy's parser reads encoding
+  cookies directly in `parser/pegen/tokenizer.go`, so this re-export is
+  informational.
+- `_incompatible_extension_module_restrictions` is a no-op concern for gopy
+  until `.so` extension support is added.
+
+## CPython 3.14 changes
+
+- `source_hash` now wraps `_imp.source_hash(_imp.pyc_magic_number_token, ...)`
+  directly, replacing the earlier use of a hard-coded token constant. This ties
+  the hash to the actual running interpreter's magic number.
+- `__all__` was updated to include `source_hash` as a public symbol.
+- No changes to `LazyLoader` or `find_spec` semantics from 3.13.

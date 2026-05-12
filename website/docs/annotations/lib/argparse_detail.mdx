@@ -1,0 +1,143 @@
+---
+title: "argparse.py: command-line argument parsing"
+description: "ArgumentParser._parse_known_args, Action subclasses, _get_value type conversion, format_help/format_usage, and 3.14 suggest_on_error"
+cpython_path: Lib/argparse.py
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+ported_to: module/argparse/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`argparse.py` (~2500 lines) is a self-contained pure-Python module. Its central
+class is `ArgumentParser`, which builds an `_ActionsContainer` of `Action`
+objects, runs a two-phase parse (known args then unrecognised), converts raw
+strings to typed values, and formats help text. CPython 3.14 added
+`suggest_on_error` to surface did-you-mean hints on unknown arguments and
+invalid choices.
+
+## Map
+
+| Line range | Symbol | Role |
+|---|---|---|
+| 1-90 | module header, `__all__` | imports, version string |
+| 91-250 | `Action` base and subclasses | `_StoreAction`, `_StoreTrueAction`, `_AppendAction`, etc. |
+| 251-400 | `_ActionsContainer` | registry for actions, groups, mutually exclusive groups |
+| 401-550 | `ArgumentParser.__init__` | parents, prefix chars, conflict handlers |
+| 551-850 | `_parse_known_args` | core two-phase tokeniser and consumer |
+| 851-1000 | `_get_value`, `_get_values` | type conversion and nargs expansion |
+| 1001-1150 | `_check_value` | choices validation (3.14: `suggest_on_error`) |
+| 1151-1400 | `HelpFormatter` | `format_help`, `format_usage`, section/group layout |
+| 1401-1600 | `RawDescriptionHelpFormatter`, `ArgumentDefaultsHelpFormatter` | formatter subclasses |
+| 1601-1800 | `FileType` | factory for file-opening type converters |
+| 1801-2500 | `Namespace`, `_SubParsersAction`, `_MutuallyExclusiveGroup` | remaining public API |
+
+## Reading
+
+### _parse_known_args
+
+The parser tokenises `args` into a flat list of `(type, value)` tuples using
+`_parse_optional` and then consumes them left-to-right. Positionals and
+optionals interleave in a single pass controlled by the `_get_nargs_pattern`
+regex for each action.
+
+```python
+# Lib/argparse.py:2308-2380  (_parse_known_args, core loop)
+def _parse_known_args(self, arg_strings, namespace):
+    # ...
+    arg_string_pattern_parts = []
+    arg_strings_iter = iter(arg_strings)
+    for i, arg_string in enumerate(arg_strings_iter):
+        if arg_string == '--':
+            arg_string_pattern_parts.append('-')
+            for arg_string in arg_strings_iter:
+                arg_string_pattern_parts.append('A')
+        elif arg_string[0] in self.prefix_chars:
+            option_string_indices[i] = arg_string
+            arg_string_pattern_parts.append('O')
+        else:
+            arg_string_pattern_parts.append('A')
+
+    arg_string_pattern = ''.join(arg_string_pattern_parts)
+    # consume_optional / consume_positional alternate here
+```
+
+The pattern string (`'OAA-OA'` etc.) is matched by each action's nargs regex
+to determine how many tokens to consume. This is the trickiest part of the
+module to port because it mixes regex matching with mutable index bookkeeping.
+
+### Action subclasses and _get_value
+
+Every action stores a `type` callable (default `None`, meaning identity). The
+`_get_value` method calls that callable and wraps exceptions in
+`ArgumentTypeError`.
+
+```python
+# Lib/argparse.py:2489-2520  (_get_value)
+def _get_value(self, action, arg_string):
+    type_func = self._registry_get('type', action.type, action.type)
+    if not callable(type_func):
+        msg = _('%r is not callable')
+        raise ArgumentError(action, msg % type_func)
+    try:
+        result = type_func(arg_string)
+    except ArgumentTypeError:
+        name = getattr(action.type, '__name__', repr(action.type))
+        args = {'type': name, 'value': arg_string}
+        msg = str(_sys.exc_info()[1])
+        raise ArgumentError(action, msg)
+    except (TypeError, ValueError):
+        name = getattr(action.type, '__name__', repr(action.type))
+        args = {'type': name, 'value': arg_string}
+        msg = _('invalid %(type)s value: %(value)r')
+        raise ArgumentError(action, msg % args)
+    return result
+```
+
+### format_help, format_usage, and 3.14 suggest_on_error
+
+`HelpFormatter` builds help text by walking `_action_groups`. Each group
+produces a section with a heading and a list of action strings formatted by
+`_format_action`. Long option strings are wrapped with `textwrap`.
+
+`suggest_on_error` (added in 3.14) hooks into `_check_value` and the unknown
+option handler. When enabled, `difflib.get_close_matches` is called on the bad
+token against the known choices or option strings, and the closest match is
+appended to the error message.
+
+```python
+# Lib/argparse.py:2560-2580  (_check_value with suggest_on_error, 3.14)
+def _check_value(self, action, value):
+    if action.choices is not None and value not in action.choices:
+        args = {'value': value,
+                'choices': ', '.join(map(repr, action.choices))}
+        msg = _('invalid choice: %(value)r (choose from %(choices)s)')
+        if self.suggest_on_error:
+            import difflib
+            suggestions = difflib.get_close_matches(
+                str(value), [str(c) for c in action.choices], n=1)
+            if suggestions:
+                args['suggestion'] = suggestions[0]
+                msg += _('; did you mean: %(suggestion)r?')
+        raise ArgumentError(action, msg % args)
+```
+
+## gopy notes
+
+- `_parse_known_args` uses `re.match` heavily on the pattern string. Port
+  `_get_nargs_pattern` and the associated regex cache (`_get_option_tuples`)
+  before attempting the main parse loop.
+- The `type` registry (`_registry_get('type', ...)`) allows string aliases like
+  `'int'` to resolve to built-in types. The Go port must replicate this lookup
+  table so that user code passing `type='int'` still works.
+- `_SubParsersAction` stores a nested `ArgumentParser` per subcommand. Recursive
+  calls to `parse_args` mean the Go port must support re-entrant parser state.
+- `suggest_on_error` is `False` by default in 3.14 and must be opt-in. Do not
+  enable it unconditionally in the port.
+- `FileType` opens files lazily (on first access of the returned object, not at
+  parse time). If the Go port uses `os.File`, ensure the open call is deferred
+  to the same point.
+- `ArgumentDefaultsHelpFormatter` appends `(default: %(default)s)` by
+  overriding `_get_help_string`. The format string uses `%`-style substitution
+  via `action.__dict__`, not `str.format`. Keep that detail intact.

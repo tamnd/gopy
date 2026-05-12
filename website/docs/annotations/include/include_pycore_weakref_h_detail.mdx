@@ -1,0 +1,133 @@
+---
+title: Include/internal/pycore_weakref.h
+description: "Annotated reading of CPython internal weak-reference helpers: ob_weaklistoffset access, atomic ref fetch, liveness check, and tp_weaklistoffset mechanics."
+cpython_path: Include/internal/pycore_weakref.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_weakref.h` is a small private header that exposes the
+low-level weak-reference helpers used by the GC, the type machinery, and the eval loop.
+The public `weakref` module (`Modules/_weakref.c`) and the object protocol
+(`Objects/weakrefobject.c`) both include this header. The stable C API surface in
+`Include/weakrefobject.h` is intentionally thin; the details that matter for correct
+GC and safe finalisation live here.
+
+<CpyLink path="Include/internal/pycore_weakref.h" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~15   | `_PyObject_GetWeakRef` macro | Reads the weakref list head via `tp_weaklistoffset` |
+| ~25   | `_PyObject_IS_GC` / weaklist guard | Checks that the type actually supports weakrefs before dereferencing the offset |
+| ~35   | `_PyWeakref_IS_DEAD` | Tests whether the referent has been cleared (pointer is NULL or `Py_None`) |
+| ~45   | `_PyWeakref_GetRef` | Atomically loads the referent and returns a strong reference, or NULL if dead |
+| ~58   | `_PyObject_ClearWeakRefsNoLock` | Called by the GC to null out all weakrefs to a dying object |
+| ~70   | `tp_weaklistoffset` convention note | Inline comment documenting the offset encoding |
+
+## Reading
+
+### `_PyObject_GetWeakRef` and `tp_weaklistoffset`
+
+Python objects opt in to weak-reference support by setting `tp_weaklistoffset` to a
+non-zero value in their `PyTypeObject`. The value is a byte offset from the start of the
+object's C struct to a `PyObject *` slot that holds the head of a singly-linked list of
+`PyWeakReference` objects pointing at this instance.
+
+```c
+// CPython: Include/internal/pycore_weakref.h:15 _PyObject_GetWeakRef
+static inline PyObject **
+_PyObject_GET_WEAKREFS_LISTPTR(PyObject *op)
+{
+    Py_ssize_t offset = Py_TYPE(op)->tp_weaklistoffset;
+    return (PyObject **)((char *)op + offset);
+}
+```
+
+The offset convention means that a type gains weak-reference support simply by adding a
+`PyObject *` field at a fixed position in its struct and recording the field's offset in
+`tp_weaklistoffset`. No base class with a dedicated weakref slot is required. `list`,
+`dict`, and most user-defined classes all use this mechanism independently.
+
+When `tp_weaklistoffset` is zero (or negative, which encodes a different scheme used by
+a few built-in types), the object cannot be weakly referenced and
+`weakref.ref(obj)` raises `TypeError`.
+
+### `_PyWeakref_IS_DEAD` and `_PyWeakref_GetRef`: safe referent access
+
+A `PyWeakReference` stores its referent in `wr_object`. The GC clears this field to
+`Py_None` when the referent is collected. Two macros let callers check liveness and
+obtain a safe strong reference without racing the GC.
+
+```c
+// CPython: Include/internal/pycore_weakref.h:35 _PyWeakref_IS_DEAD
+static inline int
+_PyWeakref_IS_DEAD(PyObject *ref)
+{
+    /* wr_object is Py_None after the referent is cleared */
+    return (((PyWeakReference *)ref)->wr_object == Py_None);
+}
+```
+
+```c
+// CPython: Include/internal/pycore_weakref.h:45 _PyWeakref_GetRef
+static inline int
+_PyWeakref_GetRef(PyObject *ref, PyObject **pobj)
+{
+    PyObject *obj = _Py_atomic_load_ptr_relaxed(
+                        &((PyWeakReference *)ref)->wr_object);
+    if (obj == NULL || obj == Py_None) {
+        *pobj = NULL;
+        return 0;   /* dead */
+    }
+    *pobj = Py_NewRef(obj);
+    return 1;       /* alive, caller holds a strong ref */
+}
+```
+
+The atomic load is needed because the GC may run in a different thread (or, on
+free-threaded builds, concurrently) and clear `wr_object` at any point. Callers that
+need to use the referent must call `_PyWeakref_GetRef`, which either returns a strong
+reference or signals dead. The pattern prevents a time-of-check/time-of-use race between
+testing `IS_DEAD` and dereferencing the pointer.
+
+### `_PyObject_ClearWeakRefsNoLock`: GC teardown
+
+When the GC is about to collect an object it first calls finalizers, then calls
+`_PyObject_ClearWeakRefsNoLock` to notify all outstanding weakrefs. Each weakref's
+`wr_object` field is set to `Py_None` and, if the weakref has a callback, the callback
+is placed on a pending-call list to run after the GC cycle completes.
+
+```c
+// CPython: Include/internal/pycore_weakref.h:58 _PyObject_ClearWeakRefsNoLock
+void _PyObject_ClearWeakRefsNoLock(PyObject *object);
+```
+
+The "NoLock" suffix signals that the caller is responsible for holding the correct GC
+lock before calling this function. The GC always holds the world-stop lock at this point,
+so no additional synchronisation is needed in the current (GIL-based) build. On
+free-threaded builds, the GC acquires a per-object lock before calling this function.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (the weakref list head would live on the object struct,
+mirroring `tp_weaklistoffset`; `_PyWeakref_GetRef` maps to a helper in
+`objects/weakref.go`).
+
+Key mapping targets:
+
+- `tp_weaklistoffset` encoding has no direct counterpart in gopy yet. The planned
+  approach stores a `weakrefs []*WeakRef` slice on types that opt in, rather than using
+  a byte-offset indirection.
+- `_PyWeakref_IS_DEAD` and `_PyWeakref_GetRef` will map to methods on a `WeakRef` struct
+  in `objects/weakref.go`.
+- `_PyObject_ClearWeakRefsNoLock` maps to a GC hook called from the finalizer path in
+  the planned `vm/gc.go` (not yet implemented).
+- Weak-reference callback scheduling (the pending-call list) depends on the
+  interpreter-state machinery tracked in the v0.13 milestone.

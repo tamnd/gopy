@@ -1,0 +1,71 @@
+---
+title: Python/specialize.c (part 2)
+description: "Specialization part 2: _Py_Specialize_BinaryOp for int/float/str ADD, _Py_Specialize_CompareOp, _Py_Specialize_UnpackSequence, _Py_Specialize_ForIter, and the deopt backoff counter."
+cpython_path: Python/specialize.c
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/specialize.c` (part 2)
+
+<CpyLink path="Python/specialize.c" />
+
+This annotation covers the arithmetic, comparison, unpack, and iteration specializations
+in `Python/specialize.c`. For `_Py_Specialize_LoadAttr` / `StoreAttr` see the
+`compile/specialize_c` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-400 | `_Py_Specialize_BinaryOp` | Replace `BINARY_OP` with type-specific variant |
+| 401-700 | `_Py_Specialize_CompareOp` | Replace `COMPARE_OP` with type-specific variant |
+| 701-950 | `_Py_Specialize_UnpackSequence` | Replace `UNPACK_SEQUENCE` for known-length sequences |
+| 951-1200 | `_Py_Specialize_ForIter` | Replace `FOR_ITER` for known iterator types |
+| 1201-2200 | Deopt and miss counters | `_Py_BackoffCounter` mechanics |
+
+## Reading
+
+### `_Py_Specialize_BinaryOp`
+
+`BINARY_OP` specializes to `BINARY_OP_ADD_INT` when both operands are `int`, to
+`BINARY_OP_ADD_FLOAT` for `float`, and to `BINARY_OP_ADD_UNICODE` for `str`. The
+specializer checks the types at the specialization point; on type mismatch during
+execution, the specialized variant falls back to the generic `BINARY_OP`.
+
+```c
+// CPython: Python/specialize.c:1420 binary_op_fail_kind
+static void
+binary_op_fail_kind(int oparg, PyObject *lhs, PyObject *rhs)
+{
+    switch (oparg) {
+    case NB_ADD:
+        if (!PyLong_CheckExact(lhs)) {
+            SPECIALIZATION_FAIL(BINARY_OP, SPEC_FAIL_BINARY_OP_ADD_DIFFERENT_TYPES);
+            return;
+        }
+        ...
+    }
+}
+```
+
+### `_Py_Specialize_ForIter`
+
+`FOR_ITER` specializes to `FOR_ITER_LIST`, `FOR_ITER_TUPLE`, `FOR_ITER_RANGE`, or
+`FOR_ITER_GEN` based on the type of the iterator on the stack. These variants call the
+type's `tp_iternext` directly without the generic `PyObject_GetIter` overhead.
+
+### Deopt and backoff
+
+If a specialised variant encounters a type mismatch at runtime, it deoptimizes back to
+the generic opcode and decrements a `_Py_BackoffCounter`. When the counter reaches zero,
+the specializer is allowed to try again. This prevents hot code paths from thrashing
+between specialized and generic variants.
+
+## gopy notes
+
+gopy uses a generic dispatch switch with no specialization. The `BINARY_OP` variants map
+to type-switch code in `vm/eval_simple.go`. Adaptive specialization is not yet planned.

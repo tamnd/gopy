@@ -1,0 +1,111 @@
+---
+title: Lib/configparser.py
+description: "INI-style configuration file parser with section/option lookup, interpolation, and a MutableMapping interface."
+cpython_path: Lib/configparser.py
+cpython_version: "3.14"
+lines: 1415
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/configparser.py`
+
+<CpyLink path="Lib/configparser.py" />
+
+`Lib/configparser.py` implements a full parser for INI-style configuration files. A configuration file is divided into named sections (marked by `[section]` headers) containing key-value pairs separated by `=` or `:`. The module exposes `RawConfigParser` as the foundation, `ConfigParser` as the standard subclass with `%(key)s` interpolation, and a richer `ExtendedInterpolation` variant that supports cross-section references. All parsers implement `MutableMapping`, so a config object can be used wherever a mapping is expected.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 176-384 | Exception hierarchy | `Error`, `NoSectionError`, `DuplicateSectionError`, `DuplicateOptionError`, `NoOptionError`, `InterpolationError` and its subclasses, `ParsingError`, `MissingSectionHeaderError`, `MultilineContinuationError`, `UnnamedSectionDisabledError`, `InvalidWriteError` |
+| 395-410 | `Interpolation` | No-op base class; all `before_*` hooks return the value unchanged |
+| 411-481 | `BasicInterpolation` | Expands `%(key)s` references within the same section or DEFAULT |
+| 483-556 | `ExtendedInterpolation` | Expands `${section:key}` references across sections |
+| 559-603 | `_ReadState`, `_Line`, `_CommentSpec` | Internal state and comment-stripping helpers used during `_read` |
+| 606-1232 | `RawConfigParser` | Core parser: section/option CRUD, `_read` line-by-line parser, `write`, `MutableMapping` protocol |
+| 1233-1330 | `ConfigParser` | Subclass that wires `BasicInterpolation` by default and overrides `get`/`items` |
+| 1331-1360 | `SectionProxy` | Mapping view over a single section, enabling `parser['section']['key']` syntax |
+| 1361-1415 | `ConverterMapping` | Descriptor that auto-generates `getint`/`getfloat`/`getboolean` style methods from a converter dict |
+
+## Reading
+
+### Comment stripping with _CommentSpec and _Line
+
+The 3.14 rework introduced `_CommentSpec` and `_Line` to separate comment stripping from the main parse loop. `_CommentSpec` compiles a single regex from all configured comment prefixes (full-line and inline). `_Line` is a `str` subclass that carries `clean` (the stripped version) and `has_comments` alongside the original text. The main loop in `_read_inner` iterates over `map(self._comments.wrap, fp)`, so every line is pre-stripped before any branching logic sees it.
+
+```python
+# CPython: Lib/configparser.py:585 _CommentSpec.__init__
+class _CommentSpec:
+    def __init__(self, full_prefixes, inline_prefixes):
+        full_patterns = (
+            fr'^({re.escape(prefix)}).*'
+            for prefix in full_prefixes
+        )
+        inline_patterns = (
+            fr'(^|\s)({re.escape(prefix)}.*)'
+            for prefix in inline_prefixes
+        )
+        self.pattern = re.compile('|'.join(itertools.chain(full_patterns, inline_patterns)))
+```
+
+### Interpolation hooks
+
+Every getter path goes through `self._interpolation.before_get(parser, section, option, value, defaults)`. The `Interpolation` base returns the value unchanged (raw mode). `BasicInterpolation._interpolate_some` walks the string character by character, expanding `%(name)s` tokens by looking them up in a merged defaults-plus-section mapping. The recursion depth is capped at `MAX_INTERPOLATION_DEPTH` (10) to prevent infinite loops from circular references.
+
+```python
+# CPython: Lib/configparser.py:441 BasicInterpolation._interpolate_some
+def _interpolate_some(self, parser, option, accum, rest, section, map, depth):
+    rawval = parser.get(section, option, raw=True, fallback=rest)
+    if depth > MAX_INTERPOLATION_DEPTH:
+        raise InterpolationDepthError(option, section, rawval)
+    while rest:
+        p = rest.find("%")
+        if p < 0:
+            accum.append(rest)
+            return
+        ...
+```
+
+### The _read_inner parse loop
+
+`_read_inner` is the line-by-line state machine that populates `self._sections`. It uses `_ReadState` to track the current section dict, current option name, indentation level, and accumulated errors. Lines that start with more indentation than the previous key are treated as continuation values (appended to the current option's list). Section headers, key-value pairs, and blank lines are handled by `_handle_rest`. Strict mode errors (duplicate sections, duplicate options) are collected rather than raised immediately; `_read` calls `ParsingError._raise_all` at the end to combine them into a single exception.
+
+```python
+# CPython: Lib/configparser.py:1074 RawConfigParser._read_inner
+def _read_inner(self, fp, fpname):
+    st = _ReadState()
+    for st.lineno, line in enumerate(map(self._comments.wrap, fp), start=1):
+        if not line.clean:
+            if self._empty_lines_in_values:
+                if (not line.has_comments and
+                    st.cursect is not None and
+                    st.optname and
+                    st.cursect[st.optname] is not None):
+                    st.cursect[st.optname].append('')
+            else:
+                st.indent_level = sys.maxsize
+            continue
+        ...
+```
+
+### SectionProxy and the mapping interface
+
+`RawConfigParser` implements `MutableMapping`. `__getitem__` returns a `SectionProxy` rather than a raw dict, which means `parser['section']` gives an object that resolves option lookups through the full `get` path (including interpolation and DEFAULT merging). This design means that `parser['section']['key']` and `parser.get('section', 'key')` are exactly equivalent in behaviour.
+
+```python
+# CPython: Lib/configparser.py:1017 RawConfigParser.__getitem__
+def __getitem__(self, key):
+    if key != self.default_section and not self.has_section(key):
+        raise KeyError(key)
+    return self._proxies[key]
+```
+
+## gopy notes
+
+`configparser` has not been ported to gopy. The planned package path is `module/configparser/`. The module is entirely pure Python with no C extension dependency, so it can be shipped as `stdlib/configparser.py` and loaded by the interpreter without any Go wrapper. The exception classes and `SectionProxy` descriptor machinery are the parts most likely to require Go-side support once full class and descriptor support lands.
+
+## CPython 3.14 changes
+
+CPython 3.14 refactored comment handling into the `_CommentSpec` and `_Line` helper classes, replacing the previous inline regex application in `_read_inner`. The `allow_unnamed_section` constructor argument (added in 3.13) gained write support via `_write_section`'s new `unnamed` keyword. `InvalidWriteError` was added to catch keys that would parse back as section headers. The `MultilineContinuationError` exception is new in 3.14, raised when a key without a value is followed by an indented continuation line. Dataclasses were explicitly excluded from imports (see the comment at line 146) after profiling showed the import overhead was measurable at startup.

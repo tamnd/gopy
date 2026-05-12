@@ -1,0 +1,134 @@
+---
+title: Modules/_md5module.c
+description: MD5 hash type backed by the HACL* verified C implementation.
+cpython_path: Modules/_md5module.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_md5module.c`
+
+<CpyLink path="Modules/_md5module.c" />
+
+<overview>
+Single-type extension module exposing `md5` objects. The digest logic is
+fully delegated to the HACL* formally-verified C library under
+`Modules/_hacl/`. The Python layer is thin: it allocates a `MD5object`,
+wraps the three-step HACL* API (init / update / digest), and handles the
+`usedforsecurity` keyword that was added for FIPS environments.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `MD5object` | C struct | Holds `md5_state_s` (opaque HACL* state) plus a `lock` for thread safety |
+| `MD5_new` | function | Module-level constructor; accepts initial `data` and `usedforsecurity` |
+| `md5_update` | method | Feeds a buffer into `Hacl_Hash_MD5_update` |
+| `md5_digest` | method | Calls `Hacl_Hash_MD5_digest`, returns 16-byte `bytes` |
+| `md5_hexdigest` | method | Same as digest but hex-encodes to a 32-char `str` |
+| `md5_copy` | method | Calls `Hacl_Hash_MD5_copy`, returns independent `MD5object` |
+| `md5_file` | function | Reads a file object in chunks and digests each chunk |
+| `MD5Type` | `PyTypeObject` | Registered as `_md5.md5` |
+| `_md5module` | `PyModuleDef` | Module definition; single-phase init |
+
+## Reading
+
+### State allocation and the HACL* init call
+
+`MD5_new` allocates the Python object and calls `Hacl_Hash_MD5_init` to
+obtain a fresh `md5_state_s *`. The pointer is stored directly on the
+struct; there is no separate `__init__` slot.
+
+```c
+// Modules/_md5module.c:85  MD5_new
+static PyObject *
+MD5_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    MD5object *new;
+    ...
+    new = (MD5object *)type->tp_alloc(type, 0);
+    if (new == NULL)
+        return NULL;
+    new->hash_state = Hacl_Hash_MD5_malloc();
+    ...
+}
+```
+
+`Hacl_Hash_MD5_malloc` internally calls `Hacl_Hash_MD5_init` and returns
+a heap-allocated opaque state. `tp_dealloc` must call the matching
+`Hacl_Hash_MD5_free`.
+
+### Thread safety around `update`
+
+CPython releases the GIL for the `Hacl_Hash_MD5_update` call when the
+input buffer is large enough (the threshold is `PY_BUF_LOCK_THRESHOLD`,
+currently 2048 bytes). A per-object `lock` field guards concurrent access
+when the GIL is not held.
+
+```c
+// Modules/_md5module.c:138  md5_update
+static PyObject *
+md5_update(MD5object *self, PyObject *obj)
+{
+    Py_buffer vw;
+    if (PyArg_Parse(obj, "y*", &vw) == 0)
+        return NULL;
+    if (vw.len >= PY_BUF_LOCK_THRESHOLD) {
+        ENTER_HASHXOF(self)
+        Hacl_Hash_MD5_update(self->hash_state, vw.buf, vw.len);
+        LEAVE_HASHXOF(self)
+    } else {
+        Hacl_Hash_MD5_update(self->hash_state, vw.buf, vw.len);
+    }
+    PyBuffer_Release(&vw);
+    Py_RETURN_NONE;
+}
+```
+
+### `copy` and independent state lifetime
+
+`md5_copy` allocates a second `MD5object` and calls `Hacl_Hash_MD5_copy`
+to duplicate the internal state. The two objects are then completely
+independent; updating one does not affect the other.
+
+```c
+// Modules/_md5module.c:162  md5_copy
+static PyObject *
+md5_copy(MD5object *self, PyObject *unused)
+{
+    MD5object *newobj;
+    if ((newobj = (MD5object *)MD5Type.tp_alloc(&MD5Type, 0)) == NULL)
+        return NULL;
+    ENTER_HASHXOF(self)
+    newobj->hash_state = Hacl_Hash_MD5_copy(self->hash_state);
+    LEAVE_HASHXOF(self)
+    if (newobj->hash_state == NULL) {
+        Py_DECREF(newobj);
+        return PyErr_NoMemory();
+    }
+    return (PyObject *)newobj;
+}
+```
+
+## gopy mirror
+
+Not yet ported. When ported, the natural location is
+`module/hashlib/` (sharing a package with the other hash modules).
+The HACL* C state would be bridged via `cgo` or replaced with
+`crypto/md5` from the Go standard library, which provides equivalent
+behaviour.
+
+## CPython 3.14 changes
+
+- The HACL* backend replaced the legacy hand-rolled C implementation
+  that had been in CPython since the 1990s. The switch happened in 3.13
+  and carried through to 3.14 with no further API changes.
+- `usedforsecurity=False` keyword argument is accepted but has no effect
+  on the HACL* path (it exists solely to satisfy FIPS-aware callers that
+  use `hashlib.md5(usedforsecurity=False)`).
+- `md5_file` is a non-public helper used by `hashlib` internals; its
+  signature is not part of the documented C API.

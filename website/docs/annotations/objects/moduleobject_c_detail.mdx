@@ -1,0 +1,180 @@
+---
+title: Objects/moduleobject.c
+description: "Module object layout, construction, multi-phase init, and attribute lookup with import suggestions"
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/moduleobject.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–60 | `PyModuleObject` layout | `md_dict`, `md_state`, `md_def`, `md_weaklist` fields |
+| 61–130 | `PyModule_NewObject` | Allocate module, create `md_dict`, call `module_init_dict` |
+| 131–180 | `PyModule_New` | Thin wrapper: decode bytes name then call `PyModule_NewObject` |
+| 181–300 | `module_init_dict` | Set `__name__`, `__doc__`, `__package__`, `__loader__`, `__spec__` |
+| 301–420 | `PyModule_ExecDef` | Multi-phase init: run `Py_mod_exec` slots in order |
+| 421–530 | `module_getattro` | Attribute lookup; suggest sibling module on `AttributeError` |
+| 531–600 | `PyModule_GetFilenameObject` | Extract `__spec__.origin` or `__file__` |
+| 601–700 | `PyModule_GetDef` / `PyModule_GetState` | Accessors for `md_def` and inline C state pointer |
+
+## Reading
+
+### PyModuleObject layout and PyModule_NewObject
+
+`PyModuleObject` is a fixed-layout C struct. The four key fields are:
+
+- `md_dict`: the module's attribute namespace, a regular `PyDictObject`.
+- `md_def`: a pointer to the `PyModuleDef` used to create the module,
+  or `NULL` for modules created from Python source.
+- `md_state`: a pointer to the per-interpreter C state block allocated
+  inline when `md_def->m_size > 0`.
+- `md_weaklist`: weak-reference list head.
+
+`PyModule_NewObject` allocates the struct, creates an empty dict for
+`md_dict`, then delegates attribute initialisation to `module_init_dict`.
+
+```c
+// CPython: Objects/moduleobject.c:75 PyModule_NewObject
+PyObject *
+PyModule_NewObject(PyObject *name)
+{
+    PyModuleObject *m;
+    m = PyObject_GC_New(PyModuleObject, &PyModule_Type);
+    if (m == NULL)
+        return NULL;
+    m->md_def = NULL;
+    m->md_state = NULL;
+    m->md_weaklist = NULL;
+    m->md_name = NULL;
+    m->md_dict = PyDict_New();
+    if (m->md_dict == NULL)
+        goto fail;
+    if (module_init_dict(m, m->md_dict, name, NULL) < 0)
+        goto fail;
+    PyObject_GC_Track(m);
+    return (PyObject *)m;
+fail:
+    Py_DECREF(m);
+    return NULL;
+}
+```
+
+### module_init_dict and dunder attributes
+
+`module_init_dict` is called both at construction time and from
+`PyModule_ExecDef`. It writes five dunder keys into `md_dict`.
+
+`__name__` is set from the `name` argument. `__doc__` is set to `None`
+unless `def->m_doc` is non-NULL. `__package__` and `__loader__` are
+initialised to `None` so that import machinery can overwrite them.
+`__spec__` is set to `None` and later replaced by the import system.
+
+```c
+// CPython: Objects/moduleobject.c:196 module_init_dict
+static int
+module_init_dict(PyModuleObject *mod, PyObject *md_dict,
+                 PyObject *name, PyObject *doc)
+{
+    if (PyDict_SetItemString(md_dict, "__name__", name) != 0)
+        return -1;
+    if (PyDict_SetItemString(md_dict, "__doc__",
+                             doc != NULL ? doc : Py_None) != 0)
+        return -1;
+    if (PyDict_SetItemString(md_dict, "__package__", Py_None) != 0)
+        return -1;
+    if (PyDict_SetItemString(md_dict, "__loader__", Py_None) != 0)
+        return -1;
+    if (PyDict_SetItemString(md_dict, "__spec__", Py_None) != 0)
+        return -1;
+    /* store a borrowed reference to the name for fast access */
+    mod->md_name = name;
+    return 0;
+}
+```
+
+### PyModule_ExecDef for multi-phase init
+
+Multi-phase init was introduced in PEP 451. A `PyModuleDef` may carry an
+array of `PyModuleDef_Slot` entries. `PyModule_ExecDef` iterates over
+them and dispatches on the slot id.
+
+- `Py_mod_create` slots are handled before `PyModule_ExecDef` is called.
+- `Py_mod_exec` slots are called here in order, each receiving the
+  module object. If any slot returns non-zero, initialisation aborts.
+- `Py_mod_multiple_interpreters` is a flag slot, not a callable.
+
+```c
+// CPython: Objects/moduleobject.c:355 PyModule_ExecDef
+int
+PyModule_ExecDef(PyObject *module, PyModuleDef *def)
+{
+    PyModuleDef_Slot *cur_slot;
+    if (def->m_slots == NULL)
+        return 0;
+    for (cur_slot = def->m_slots; cur_slot->slot != 0; cur_slot++) {
+        if (cur_slot->slot == Py_mod_exec) {
+            typedef int (*execfunc)(PyObject *);
+            execfunc thunk = (execfunc)cur_slot->value;
+            if (thunk(module) != 0) {
+                if (!PyErr_Occurred())
+                    PyErr_Format(PyExc_SystemError,
+                        "execution of module %s failed "
+                        "without setting an exception",
+                        def->m_name);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+```
+
+### module_getattro and the ModuleNotFoundError suggestion
+
+`module_getattro` first calls `PyObject_GenericGetAttr`. On failure it
+checks whether `__spec__` has a `parent` attribute. If the parent names
+a package that is already in `sys.modules`, the error message is
+augmented with a hint: "Did you mean: ...?". This is the mechanism that
+produces the familiar "did you forget to import X?" suggestion.
+
+```c
+// CPython: Objects/moduleobject.c:464 module_getattro
+static PyObject *
+module_getattro(PyObject *m, PyObject *name)
+{
+    PyObject *attr = PyObject_GenericGetAttr(m, name);
+    if (attr || !PyErr_ExceptionMatches(PyExc_AttributeError))
+        return attr;
+    /* ... retrieve __spec__, check parent in sys.modules,
+       replace AttributeError with a more informative message ... */
+    PyErr_Format(PyExc_AttributeError,
+                 "module %R has no attribute %R", m, name);
+    return NULL;
+}
+```
+
+The full suggestion logic (lines 470-525) reads `__spec__.parent`,
+looks up `sys.modules[parent]`, and checks whether the attribute name
+matches any exported name in the parent package before appending the
+hint string.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (file `module.go`).
+
+The repo has `objects/module.go` which defines `Module` and
+`PyModule_New` but does not yet implement `PyModule_ExecDef` or the
+multi-phase slot machinery. `module_getattro` with the
+`ModuleNotFoundError` suggestion is also absent. The `md_state` inline
+C state pattern has no direct Go equivalent; the planned approach is to
+store a `[]byte` in the `Module` struct and hand out `unsafe.Pointer`
+slices when `m_size > 0`.

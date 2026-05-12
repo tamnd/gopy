@@ -1,0 +1,111 @@
+---
+title: pycore_moduleobject.h
+description: "Internal module object struct and fast accessors"
+cpython_path: Include/internal/pycore_moduleobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Internal header that exposes `PyModuleObject` (the concrete C layout behind
+every `types.ModuleType` instance) and the fast accessor macros used by the
+import machinery and extension module slots.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–20 | `PyModuleObject` | Concrete struct layout for module objects |
+| 21–35 | `_PyModule_GetDef` | Fast `md_def` accessor, bypasses Python attribute lookup |
+| 36–50 | `_PyModule_GetState` | Fast `md_state` accessor for multi-phase init modules |
+| 51–62 | `_PyModule_IsInitialized` | Check that `md_dict` is populated |
+| 63–80 | include guards | Standard `Py_BUILD_CORE` guards |
+
+## Reading
+
+### PyModuleObject struct
+
+The public `PyObject *` that Python code sees as a module is backed by
+`PyModuleObject`. Five fields beyond the base `PyObject_HEAD` drive the entire
+module lifecycle.
+
+```c
+// CPython: Include/internal/pycore_moduleobject.h:8 PyModuleObject
+struct PyModuleObject {
+    PyObject_HEAD
+    PyObject     *md_dict;      /* module.__dict__ */
+    PyModuleDef  *md_def;       /* pointer to the C-level definition */
+    void         *md_state;     /* per-module state for multi-phase init */
+    PyObject     *md_weaklist;  /* weak-reference list head */
+    PyObject     *md_name;      /* cached module.__name__ (str) */
+};
+```
+
+`md_state` is `NULL` for single-phase (legacy) extension modules. For
+multi-phase modules it points to an allocator-managed block whose size is
+`PyModuleDef.m_size`.
+
+### Fast accessors
+
+`_PyModule_GetDef` and `_PyModule_GetState` dereference `md_def` and
+`md_state` without going through `PyObject_GetAttr`. They are used inside
+tight loops in the import machinery where the Python attribute overhead would
+be visible.
+
+```c
+// CPython: Include/internal/pycore_moduleobject.h:22 _PyModule_GetDef
+static inline PyModuleDef *
+_PyModule_GetDef(PyObject *mod)
+{
+    assert(PyModule_Check(mod));
+    return ((PyModuleObject *)mod)->md_def;
+}
+
+// CPython: Include/internal/pycore_moduleobject.h:36 _PyModule_GetState
+static inline void *
+_PyModule_GetState(PyObject *mod)
+{
+    assert(PyModule_Check(mod));
+    return ((PyModuleObject *)mod)->md_state;
+}
+```
+
+### Initialization check
+
+`_PyModule_IsInitialized` is used during import to distinguish a module that
+has been inserted into `sys.modules` as a placeholder from one that has fully
+run its `PyInit_xxx` or `exec` slot.
+
+```c
+// CPython: Include/internal/pycore_moduleobject.h:51 _PyModule_IsInitialized
+static inline int
+_PyModule_IsInitialized(PyObject *mod)
+{
+    assert(PyModule_Check(mod));
+    return ((PyModuleObject *)mod)->md_dict != NULL;
+}
+```
+
+## gopy notes
+
+- `PyModuleObject` is ported as `objects.Module` in `objects/module.go`. The
+  five fields map directly: `md_dict` is `Dict`, `md_def` is `Def`, `md_state`
+  is `State` (a `unsafe.Pointer` wrapped in an `any`), `md_weaklist` is omitted
+  (weak refs not yet implemented), and `md_name` is `Name`.
+- `_PyModule_GetDef` and `_PyModule_GetState` are inlined as Go methods on
+  `objects.Module`. No separate accessor functions are needed.
+- `_PyModule_IsInitialized` maps to `objects.Module.IsInitialized()`, which
+  checks whether `Dict` is non-nil.
+- The `md_def` pointer is used in `vm/eval_import.go` to locate the
+  `Py_mod_exec` slot during multi-phase initialization.
+
+## CPython 3.14 changes
+
+- `md_name` was added in 3.3 and is unchanged through 3.14.
+- 3.12 introduced per-interpreter module state; `md_state` allocation now
+  respects the interpreter's memory domain rather than the global allocator.
+- `_PyModule_IsInitialized` changed its check from testing `md_def != NULL`
+  to testing `md_dict != NULL` in 3.12, aligning with how placeholder modules
+  are represented during circular imports.

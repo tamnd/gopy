@@ -1,0 +1,93 @@
+---
+title: "Include/internal/pycore_dtoa.h"
+description: Internal header exposing David Gay's double-to-string and string-to-double conversion routines plus the x87 FPU precision macros that guard them on 32-bit x86.
+cpython_path: Include/internal/pycore_dtoa.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Include/internal/pycore_dtoa.h
+
+<CpyLink path="Include/internal/pycore_dtoa.h" />
+
+CPython's float-to-string and string-to-float paths rely on David Gay's `dtoa.c`, a battle-tested implementation that produces the shortest decimal representation that round-trips back to the same IEEE 754 double. This header is the sole internal declaration surface for that library. It also houses the x87 FPU precision macros, which are required on 32-bit x86 because the x87 registers default to 80-bit extended precision, and Gay's algorithm assumes strict 64-bit IEEE semantics.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| <Cpy path="Include/internal/pycore_dtoa.h" lines="1-15">1-15</Cpy> | Include guard, `Py_BUILD_CORE`, includes | Boilerplate; gates the declarations behind the internal build flag. |
+| <Cpy path="Include/internal/pycore_dtoa.h" lines="17-22">17-22</Cpy> | `_Py_dg_strtod` | Converts a null-terminated decimal string to a `double`; wraps Gay's `strtod`. Caller must check `errno` for overflow/underflow. |
+| <Cpy path="Include/internal/pycore_dtoa.h" lines="24-30">24-30</Cpy> | `_Py_dg_dtoa` | Converts a `double` to a malloc'd decimal string in shortest-representation form. Caller frees with `_Py_dg_freedtoa`. |
+| <Cpy path="Include/internal/pycore_dtoa.h" lines="32-36">32-36</Cpy> | `_Py_dg_freedtoa` | Releases the buffer returned by `_Py_dg_dtoa`, returning it to Gay's internal `Bigint` memory pool. |
+| <Cpy path="Include/internal/pycore_dtoa.h" lines="38-52">38-52</Cpy> | `_Py_SET_53_BIT_PRECISION` / `_Py_RESTORE_FP_PREC` | Paired macros that save and restore the x87 FPU control word, forcing 53-bit (double) mantissa width for the duration of a `dtoa` or `strtod` call. Active only when `x87` is defined. |
+| <Cpy path="Include/internal/pycore_dtoa.h" lines="54-60">54-60</Cpy> | No-op fallback macros | On non-x87 targets both macros expand to nothing, so call sites compile identically everywhere. |
+
+## Reading
+
+### _Py_dg_dtoa and the shortest-representation contract
+
+Gay's algorithm guarantees that the decimal string it emits is the shortest sequence of digits whose value, when parsed back with `strtod`, produces the same bit pattern as the input. This is the property that makes `repr(1.1)` return `'1.1'` rather than `'1.1000000000000001'`.
+
+```c
+# CPython: Include/internal/pycore_dtoa.h:24 _Py_dg_dtoa
+extern char* _Py_dg_dtoa(double d, int mode, int ndigits,
+                          int *decpt, int *sign, char **rve);
+```
+
+The `mode` argument selects the conversion style: 0 for shortest, 1 for scientific, 2 for fixed-point. `decpt` receives the decimal-point position, `sign` receives the sign bit, and `rve` points to the end of the returned string. The buffer is always freed through `_Py_dg_freedtoa`.
+
+### _Py_dg_freedtoa and the Bigint pool
+
+Gay's implementation internally allocates `Bigint` structs for multi-precision arithmetic. Rather than calling `free` directly, it recycles them in a thread-local pool indexed by size class. `_Py_dg_freedtoa` hands the string buffer back to this pool rather than to the system allocator, reducing fragmentation during repeated float formatting.
+
+```c
+# CPython: Modules/_math/dtoa.c:593 Bfree
+static void
+Bfree(Bigint *v)
+{
+    if (v) {
+        int k = v->k;
+        *cast(Bigint **, v) = freelist[k];
+        freelist[k] = v;
+    }
+}
+```
+
+### x87 precision macros
+
+On 32-bit x86, the FPU control word's precision field defaults to `PC_80` (80-bit extended), which causes intermediate results to exceed IEEE 64-bit range. The macros bracket every call to Gay's routines to force `PC_53` (53-bit double) for the duration.
+
+```c
+# CPython: Include/internal/pycore_dtoa.h:38 _Py_SET_53_BIT_PRECISION
+#ifdef x87
+#define _Py_SET_53_BIT_PRECISION                \
+    unsigned short _old_387_cw;                  \
+    _Py_SET_87_UCW(_old_387_cw);                 \
+    _Py_SET_387_UCW((_old_387_cw & 0xFCFF) | 0x0200)
+
+#define _Py_RESTORE_FP_PREC                      \
+    _Py_SET_387_UCW(_old_387_cw)
+#else
+#define _Py_SET_53_BIT_PRECISION
+#define _Py_RESTORE_FP_PREC
+#endif
+```
+
+### _Py_dg_strtod and errno
+
+`_Py_dg_strtod` mirrors the standard `strtod` interface but uses Gay's internal arithmetic to avoid platform differences in rounding. Callers check `errno == ERANGE` to detect overflow to `Inf` or underflow to zero.
+
+```c
+# CPython: Include/internal/pycore_dtoa.h:17 _Py_dg_strtod
+extern double _Py_dg_strtod(const char *s00, char **se);
+```
+
+The `se` output parameter, if non-NULL, is set to the first character that was not consumed, matching the `strtod` convention. CPython's `float.__new__` feeds the result of Python's string-to-float path through this function after stripping whitespace and the optional leading sign.
+
+## gopy notes
+
+gopy does not yet have a direct port of Gay's `dtoa.c`. Float formatting currently delegates to Go's `strconv.FormatFloat` with the `'g'` verb and `-1` precision, which also produces shortest-representation output using the Ryu algorithm. The x87 macros have no Go equivalent because Go's compiler never emits x87 instructions on any supported platform. The `_Py_dg_freedtoa` pool has no counterpart either; Go's garbage collector handles the equivalent allocations automatically.

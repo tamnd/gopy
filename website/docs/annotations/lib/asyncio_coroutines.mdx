@@ -1,0 +1,74 @@
+---
+title: asyncio/coroutines.py
+cpython_path: "Lib/asyncio/coroutines.py"
+cpython_version: "3.14"
+gopy_status: "not_ported"
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+
+<CpyLink path="Lib/asyncio/coroutines.py" />
+
+## Overview
+
+`coroutines.py` provides two public predicates used throughout the asyncio
+machinery: `iscoroutine` and `iscoroutinefunction`. It also housed the
+`@coroutine` decorator that bridged generator-based coroutines into the
+`async def` world, but that decorator was deprecated in Python 3.11 and
+removed in 3.12. The file today is roughly 80 lines of focused utility code.
+
+
+## Reading
+
+### iscoroutine
+
+`iscoroutine(obj)` returns `True` when `obj` is a coroutine object. The
+check is a thin wrapper around `inspect.iscoroutine`, which ultimately tests
+whether the underlying code object carries the `CO_COROUTINE` flag:
+
+```python
+# CPython: Lib/asyncio/coroutines.py
+def iscoroutine(obj):
+    """Return True if obj is a coroutine object."""
+    return inspect.iscoroutine(obj)
+```
+
+In the C layer, `CO_COROUTINE` is bit 0x0100 of `co_flags`. Any `async def`
+body compiles to a code object with that flag set, so a live coroutine
+(the object returned when you call an `async def` function without `await`)
+passes this test.
+
+### iscoroutinefunction
+
+`iscoroutinefunction(obj)` handles the decorated-function case that a plain
+`inspect.iscoroutinefunction` call would miss. Decoration layers such as
+`functools.wraps` store the original callable in `__wrapped__`, so asyncio
+walks the chain:
+
+```python
+# CPython: Lib/asyncio/coroutines.py
+def iscoroutinefunction(obj):
+    """Return True if obj is a coroutine function."""
+    return (inspect.iscoroutinefunction(obj) or
+            getattr(obj, '_is_coroutine', None) is _is_coroutine)
+```
+
+The sentinel `_is_coroutine = object()` is an identity token rather than a
+plain boolean, which prevents external code from spoofing the attribute with
+`True`. Third-party decorators that want asyncio compatibility set
+`wrapper._is_coroutine = asyncio.coroutines._is_coroutine` on their wrapper.
+
+## gopy mirror
+
+This file is **not yet ported**. When ported it will live at
+`module/asyncio/coroutines.go` and export `Iscoroutine` and
+`Iscoroutinefunction` as Go functions operating on `objects.Object`.
+
+## CPython 3.14 changes
+
+- The `@coroutine` generator-wrapper decorator was removed in 3.12; no trace
+  of it remains in 3.14.
+- `iscoroutinefunction` behaviour is unchanged but the internal sentinel
+  pattern is stable and considered public API.
+- No further removals are planned for 3.14 in this file.

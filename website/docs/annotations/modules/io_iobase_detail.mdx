@@ -1,0 +1,117 @@
+---
+title: "iobase.c — IOBase ABC"
+description: "Annotated reading of Modules/_io/iobase.c, the abstract base classes for Python's IO hierarchy"
+cpython_path: Modules/_io/iobase.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_io/iobase.c` defines the four abstract base classes that sit at the root of Python's IO hierarchy: `IOBase`, `RawIOBase`, `BufferedIOBase`, and `TextIOBase`. Concrete classes like `FileIO`, `BytesIO`, and `TextIOWrapper` inherit from these ABCs and override the abstract methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | includes / forward decls | Module-level setup |
+| 61–130 | `iobase_unsupported` | Raises `UnsupportedOperation` |
+| 131–185 | `iobase_close` | Flush then mark closed |
+| 186–230 | `iobase_closed` (property) | Checks `__IOBase_closed` attribute |
+| 231–290 | `iobase_readline` | Default one-byte-at-a-time read |
+| 291–360 | `iobase_readlines` / `iobase_writelines` | Default list-based impls |
+| 361–410 | `iobase_iter` / `iobase_iternext` | Makes IOBase iterable |
+| 411–480 | `iobase_enter` / `iobase_exit` | Context manager support |
+| 481–560 | `RawIOBase` methods | `read`, `readall` defaults |
+| 561–620 | `BufferedIOBase` methods | `read`, `read1`, `write` defaults |
+| 621–700 | `TextIOBase` methods | `read`, `readline`, `write` defaults |
+
+## Reading
+
+### Closing and the closed property
+
+`iobase_close` is the canonical shutdown path. It calls `flush` first, then sets `__IOBase_closed` to `True` on the instance dict. The closed property simply looks that attribute up.
+
+```c
+// CPython: Modules/_io/iobase.c:131 iobase_close
+static PyObject *
+iobase_close(PyObject *self, PyObject *args)
+{
+    if (IS_CLOSED(self))
+        Py_RETURN_NONE;
+
+    PyObject *res = PyObject_CallMethodNoArgs(self, _PyIO_str_flush);
+    if (res == NULL)
+        return NULL;
+    Py_DECREF(res);
+
+    return PyObject_SetAttr(self, _PyIO_str___IOBase_closed, Py_True) < 0
+           ? NULL : Py_None;
+}
+```
+
+The `IS_CLOSED` macro delegates to the `closed` property, which does `PyObject_GetAttr(self, "__IOBase_closed")`. Subclasses may shadow `__IOBase_closed` on their C struct for speed, but the attribute lookup is the authoritative path.
+
+### Default readline
+
+When a subclass only implements `read(1)`, the default `readline` works by calling that method in a loop. It stops on `b""` (EOF), `b"\n"`, or any read that returns fewer bytes than requested.
+
+```c
+// CPython: Modules/_io/iobase.c:231 iobase_readline
+static PyObject *
+iobase_readline(PyObject *self, PyObject *args)
+{
+    Py_ssize_t limit = -1;
+    /* ... argument parsing ... */
+    PyObject *buffer = PyList_New(0);
+    while (limit < 0 || PyList_GET_SIZE(buffer) < limit) {
+        PyObject *b = _PyObject_CallMethod(self, &_Py_ID(read), "n", 1);
+        if (b == NULL) { Py_DECREF(buffer); return NULL; }
+        if (!PyBytes_Check(b) || PyBytes_GET_SIZE(b) == 0) {
+            Py_DECREF(b); break;
+        }
+        if (PyList_Append(buffer, b) < 0) { Py_DECREF(b); Py_DECREF(buffer); return NULL; }
+        Py_DECREF(b);
+        /* break on newline */
+    }
+    return _PyBytes_Join(b"", buffer);
+}
+```
+
+This is intentionally slow. Subclasses override it with a buffered scan.
+
+### Context manager
+
+`__enter__` checks the closed flag and returns `self`. `__exit__` calls `close()` unconditionally, matching Python's guarantee that the stream is closed even when the body raises.
+
+```c
+// CPython: Modules/_io/iobase.c:411 iobase_enter
+static PyObject *
+iobase_enter(PyObject *self, PyObject *args)
+{
+    if (iobase_is_closed(self)) {
+        PyErr_SetString(PyExc_ValueError, "I/O operation on closed file");
+        return NULL;
+    }
+    Py_INCREF(self);
+    return self;
+}
+```
+
+### readlines and writelines
+
+`readlines` appends lines from `readline()` into a list, respecting an optional `hint` byte count. `writelines` iterates the argument and calls `write` on each item, with no separator added between items.
+
+## gopy notes
+
+- `IOBase` maps to an interface in gopy. The `closed` property becomes a boolean field on a base struct embedded in every concrete IO type.
+- `iobase_readline` is the fallback path; gopy concrete types all provide their own `Readline` that avoids the per-byte allocation.
+- The `__IOBase_closed` attribute check has no Go equivalent. gopy uses a `closed bool` field and checks it directly.
+- Context manager support is handled by the `__enter__`/`__exit__` protocol dispatch in `vm/eval_call.go`.
+
+## CPython 3.14 changes
+
+- `iobase_close` was updated to use `PyObject_SetAttr` directly rather than `_PyObject_SetAttrId`, following the removal of the `_Py_Identifier` fast path in 3.13.
+- The `UnsupportedOperation` exception is now defined in `_io` and re-exported from `io`, rather than being defined in the Python `io` module and imported into `_io`. This reversed dependency was cleaned up in 3.14.
+- `TextIOBase.read` and `TextIOBase.readline` now explicitly raise `UnsupportedOperation` rather than returning a generic `NotImplementedError`, matching documented behaviour.

@@ -1,0 +1,68 @@
+---
+title: Include/cpython/unicodeobject.h
+description: "CPython-private Unicode API: compact ASCII and compact non-ASCII object layouts, kind/data accessors, interning internals, and the fast-path PyUnicode_READ_CHAR macro."
+cpython_path: Include/cpython/unicodeobject.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/cpython/unicodeobject.h" />
+
+`Include/cpython/unicodeobject.h` exposes the internal layout of `PyUnicodeObject` and the CPython-private string API. The public `Include/unicodeobject.h` provides the stable ABI; this header adds the compact layout structs, the kind/data accessor macros, interning internals, and functions used by the compiler and parser.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyASCIIObject`, `PyCompactUnicodeObject` | Compact string layouts for ASCII and non-ASCII |
+| 81-160 | `PyUnicodeObject` | Legacy flexible string layout (pre-3.3 compat) |
+| 161-250 | `PyUnicode_KIND`, `PyUnicode_DATA`, `PyUnicode_READ` | Kind/data accessor macros |
+| 251-320 | Interning API | `_PyUnicode_InternInPlace`, `_PyUnicode_IsInterned` |
+| 321-400 | Compiler/parser helpers | `_PyUnicode_EqualToASCIIString`, `_PyUnicode_FromId` |
+
+## Reading
+
+### Compact string layout
+
+Since Python 3.3, most strings use a "compact" layout where the character data immediately follows the header in memory. ASCII strings use `PyASCIIObject` (header only, UTF-8 data in `ob_val[]`). Non-ASCII compact strings use `PyCompactUnicodeObject` which adds a `utf8` cache pointer and character count.
+
+```c
+// Include/cpython/unicodeobject.h:1 PyASCIIObject
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t length;   /* number of code points */
+    Py_hash_t  hash;
+    struct {
+        unsigned int interned:2;
+        unsigned int kind:3;     /* PyUnicode_1BYTE_KIND, 2BYTE, 4BYTE */
+        unsigned int compact:1;
+        unsigned int ascii:1;
+    } state;
+    wchar_t *wstr;       /* NULL in 3.13+ (removed) */
+} PyASCIIObject;
+```
+
+### Kind and data accessors
+
+`PyUnicode_KIND(op)` returns the character width (1, 2, or 4 bytes). `PyUnicode_DATA(op)` returns a `void *` to the character array. `PyUnicode_READ(kind, data, index)` reads one code point at the given index using the appropriate width.
+
+```c
+// Include/cpython/unicodeobject.h:161 PyUnicode_READ
+#define PyUnicode_READ(kind, data, index)  \
+    ((kind) == PyUnicode_1BYTE_KIND        \
+     ? ((const Py_UCS1 *)(data))[(index)] \
+     : (kind) == PyUnicode_2BYTE_KIND      \
+       ? ((const Py_UCS2 *)(data))[(index)] \
+       : ((const Py_UCS4 *)(data))[(index)])
+```
+
+### Interning
+
+`_PyUnicode_InternInPlace` checks whether the string's `state.interned` flag is set; if not, it looks up the string in the per-interpreter interning table (a `dict`) and either stores it or replaces it with the existing interned copy. Interned strings can be compared by identity (`is`) rather than by value.
+
+## gopy notes
+
+The gopy string layer is in `objects/str.go`. It stores Go `string` values rather than CPython's three-layout system. The kind/data accessor pattern has no direct equivalent; Go strings are always UTF-8 and code-point access uses `[]rune` conversion or `unicode/utf8` functions.

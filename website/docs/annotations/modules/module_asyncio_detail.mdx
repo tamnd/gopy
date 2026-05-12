@@ -1,0 +1,143 @@
+---
+title: "_asynciomodule.c - asyncio C accelerator"
+description: "FutureObj/TaskObj structs, future state machine, coroutine send loop, and the 3.14 eager task factory"
+cpython_path: Modules/_asynciomodule.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: module/asyncio
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_asynciomodule.c` is the C accelerator for `asyncio.futures` and
+`asyncio.tasks`. Python falls back to the pure-Python equivalents in
+`Lib/asyncio/futures.py` and `Lib/asyncio/tasks.py` when this module is
+absent. The file registers `_asyncio.Future`, `_asyncio.Task`, and
+`_asyncio.current_task` among others.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `FutureObj` | struct | 1-80 | C layout for `asyncio.Future`: state enum, result/exception slots, callbacks list, loop ref |
+| `TaskObj` | struct | 81-130 | Extends `FutureObj` with coro, context, `fut_waiter`, step handle |
+| `future_init` | function | 200-260 | Validates running loop, zeroes state to `PENDING` |
+| `future_set_result` | function | 320-370 | Guards against non-PENDING state, stores result, schedules callbacks |
+| `future_set_exception` | function | 380-440 | Validates exception type (no `StopIteration`), stores, schedules callbacks |
+| `future_schedule_callbacks` | function | 450-490 | Iterates callback list, calls `loop.call_soon` for each entry |
+| `task_step_impl` | function | 900-1020 | Core coroutine driver: calls `coro.send(value)` or `coro.throw(exc)`, handles `StopIteration` as return |
+| `task_step` | function | 1025-1060 | Clears `fut_waiter`, restores context, delegates to `task_step_impl` |
+| `task_wakeup` | function | 1065-1100 | Future done-callback that extracts result/exception and re-enters `task_step` |
+| `task_eager_start` | function | 1400-1480 | 3.14 eager factory: runs first coroutine step synchronously before returning Task |
+| `_asyncio_current_task_impl` | function | 1800-1830 | Returns running task for current thread state |
+| `module_exec` | function | 2900-2970 | Adds types and state-machine constants to the module dict |
+
+## Reading
+
+### FutureObj and the state machine
+
+Every `asyncio.Future` is backed by a `FutureObj`:
+
+```c
+/* Modules/_asynciomodule.c:42 FutureObj */
+typedef struct {
+    PyObject_HEAD
+    PyObject *fut_loop;
+    PyObject *fut_callbacks;
+    PyObject *fut_exception;
+    PyObject *fut_result;
+    PyObject *fut_source_tb;
+    fut_state fut_state;   /* PENDING, CANCELLED, FINISHED */
+    int fut_log_tb;
+    int fut_blocking;
+    PyObject *dict;
+    PyObject *fut_weakreflist;
+    pyfutureobj_t *fut_cancel_message;
+} FutureObj;
+```
+
+State transitions are strict. `future_set_result` raises `InvalidStateError` if
+`fut_state != PENDING`. After storing the result it calls
+`future_schedule_callbacks`, which iterates `fut_callbacks` and posts each
+entry via `loop.call_soon`. Callbacks are cleared from the list immediately so
+a second `add_done_callback` after completion goes directly to `call_soon`.
+
+### task_step_impl: the coroutine send loop
+
+`task_step_impl` is the heart of cooperative scheduling:
+
+```c
+/* Modules/_asynciomodule.c:912 task_step_impl */
+static PyObject *
+task_step_impl(TaskObj *task, PyObject *exc)
+{
+    PyObject *result;
+    if (exc == NULL) {
+        result = _PyObject_CallMethodIdOneArg(task->task_coro,
+                                              &PyId_send, Py_None);
+    } else {
+        result = _PyObject_CallMethodIdOneArg(task->task_coro,
+                                              &PyId_throw, exc);
+    }
+    if (result != NULL) {
+        /* coroutine yielded a Future-like */
+        ...
+        PyObject *o = PyObject_GetAttrString(result, "_asyncio_future_blocking");
+        ...
+    } else if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
+        /* coroutine returned */
+        PyObject *val = ((PyStopIterationObject *)exc)->value;
+        future_set_result((FutureObj *)task, val);
+    } else {
+        future_set_exception((FutureObj *)task, PyErr_GetRaisedException());
+    }
+}
+```
+
+When the coroutine yields a `Future`, `task_step_impl` sets
+`fut_blocking = 0` on that future and registers `task_wakeup` as a
+done-callback. `task_wakeup` fires when the awaited future settles, extracting
+its result or exception and calling `task_step` again.
+
+### 3.14 eager task factory
+
+CPython 3.12 introduced `loop.set_task_factory` with an eager variant. 3.14
+consolidates this into `task_eager_start`:
+
+```c
+/* Modules/_asynciomodule.c:1408 task_eager_start */
+static PyObject *
+task_eager_start(TaskObj *task)
+{
+    /* Run the first step synchronously. */
+    if (task_step_impl(task, NULL) == NULL) {
+        ...
+    }
+    if (task->task_state != TASK_STATE_PENDING) {
+        /* Task finished in first step - return it directly */
+        return (PyObject *)task;
+    }
+    /* Not done yet - schedule normally */
+    return _PyObject_CallMethodIdNoArgs(task->task_loop, &PyId_call_soon, ...);
+}
+```
+
+The eager factory avoids one event-loop round-trip for coroutines that complete
+synchronously (common with cache hits or already-resolved futures).
+
+## gopy notes
+
+- `FutureObj` maps naturally to a Go struct; the `fut_state` enum becomes a
+  Go `int32` with atomic access for thread safety.
+- `task_step_impl` is the trickiest part to port. In gopy the coroutine is a
+  Go generator-style object; `send` becomes a method call returning
+  `(value, error)`. `StopIteration` maps to `io.EOF` or a sentinel error.
+- `fut_callbacks` uses a Python list. The gopy port uses a `[]CallbackEntry`
+  slice; no refcount overhead.
+- The eager factory requires that the first `task_step` be synchronous.
+  gopy achieves this by calling `TaskStep` directly in the factory before
+  handing off to the scheduler.
+- `_asyncio_current_task_impl` reads per-thread state. In gopy this becomes
+  a goroutine-local stored in the `ThreadState` struct passed through the
+  call stack.

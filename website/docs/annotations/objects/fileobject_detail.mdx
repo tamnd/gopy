@@ -1,0 +1,131 @@
+---
+title: "Objects/fileobject.c"
+description: "C bridge between OS file descriptors and Python file objects"
+cpython_path: Objects/fileobject.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/fileobject.c` is the thin C bridge that connects raw OS file descriptors to the Python `io` stack. It does not implement buffering or the full `io.*` hierarchy — that lives in `Modules/_io/`. This file provides four public helpers that the rest of the runtime uses to cross the boundary between C `int fd` values and Python objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | includes / statics | Headers and `_Py_SET_53BIT_PRECISION` guard |
+| 31–80 | `PyFile_FromFd` | Wrap an fd into a Python file object via `io.open` |
+| 81–120 | `PyObject_AsFileDescriptor` | Extract an fd from a Python object via `fileno()` |
+| 121–165 | `PyFile_WriteObject` | Write a Python object's repr or str to a file |
+| 166–200 | `PyFile_WriteString` | Write a bare C string to a file |
+
+## Reading
+
+### PyFile_FromFd
+
+`PyFile_FromFd` looks up the `io` module, calls `io.open(fd, ...)`, and returns the resulting Python object. The caller retains ownership of the fd — Python does not dup it.
+
+```c
+// CPython: Objects/fileobject.c:41 PyFile_FromFd
+PyObject *
+PyFile_FromFd(int fd, const char *name, const char *mode, int buffering,
+              const char *encoding, const char *errors,
+              const char *newline, int closefd)
+{
+    PyObject *io, *open, *stream;
+
+    io = PyImport_ImportModule("io");
+    if (io == NULL)
+        return NULL;
+    open = PyObject_GetAttrString(io, "open");
+    Py_DECREF(io);
+    if (open == NULL)
+        return NULL;
+    stream = PyObject_CallFunction(open, "isisssO",
+                                   fd, mode, buffering,
+                                   encoding, errors, newline,
+                                   closefd ? Py_True : Py_False);
+    Py_DECREF(open);
+    return stream;
+}
+```
+
+The `"isisssO"` format string maps directly onto the `io.open` signature. Passing `closefd=False` keeps the fd alive after the Python object is garbage-collected.
+
+### PyObject_AsFileDescriptor
+
+This function accepts anything with a `fileno()` method, not just `PyFileObject`. It is the canonical way for C extensions to obtain a raw fd from a Python argument.
+
+```c
+// CPython: Objects/fileobject.c:90 PyObject_AsFileDescriptor
+int
+PyObject_AsFileDescriptor(PyObject *o)
+{
+    int fd;
+    PyObject *meth;
+
+    if (PyLong_Check(o)) {
+        fd = PyLong_AsInt(o);
+    }
+    else if ((meth = PyObject_GetAttrString(o, "fileno")) != NULL) {
+        PyObject *fno = PyObject_CallNoArgs(meth);
+        Py_DECREF(meth);
+        if (fno == NULL)
+            return -1;
+        fd = PyLong_AsInt(fno);
+        Py_DECREF(fno);
+    }
+    else {
+        PyErr_SetString(PyExc_TypeError,
+                        "argument must be an int or have a fileno() method");
+        return -1;
+    }
+    if (fd < 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "file descriptor cannot be a negative integer (-1)");
+        return -1;
+    }
+    return fd;
+}
+```
+
+### PyFile_WriteObject and PyFile_WriteString
+
+`PyFile_WriteObject` calls `PyObject_Repr` or `PyObject_Str` depending on the `flags` argument (`Py_PRINT_RAW`), then writes the result to the file. `PyFile_WriteString` is a convenience wrapper that encodes a C string literal and delegates to `PyFile_WriteObject`.
+
+```c
+// CPython: Objects/fileobject.c:145 PyFile_WriteObject
+int
+PyFile_WriteObject(PyObject *v, PyObject *f, int flags)
+{
+    PyObject *writer, *value, *result;
+    if (f == NULL || f == Py_None) {
+        PyErr_SetString(PyExc_TypeError, "writeobject with NULL file");
+        return -1;
+    }
+    writer = PyObject_GetAttrString(f, "write");
+    if (writer == NULL)
+        return -1;
+    value = (flags & Py_PRINT_RAW) ? PyObject_Str(v) : PyObject_Repr(v);
+    if (value == NULL) { Py_DECREF(writer); return -1; }
+    result = PyObject_CallOneArg(writer, value);
+    Py_DECREF(value);
+    Py_DECREF(writer);
+    Py_XDECREF(result);
+    return (result == NULL) ? -1 : 0;
+}
+```
+
+## gopy notes
+
+- `PyFile_FromFd` maps cleanly onto a Go helper that calls `builtins.open` via the vm. The `closefd` boolean needs to survive as a Python `bool` argument, so pass it through `objects.True` / `objects.False`.
+- `PyObject_AsFileDescriptor` is used by `socket`, `select`, and `os` modules. The gopy port should live in `objects/protocol.go` alongside other duck-typed accessors.
+- `PyFile_WriteObject` is called by the REPL's print path. In gopy the write method lookup can use the cached `__write__` slot once slot caching is in place.
+
+## CPython 3.14 changes
+
+- The `name` parameter of `PyFile_FromFd` is no longer written back as `stream.name`; that assignment was removed because `io.open` sets it internally.
+- `PyObject_CallNoArgs` replaces the older `_PyObject_CallNoArg` (underscored) spelling throughout this file.
+- `PyLong_AsInt` (new in 3.14, replacing `_PyLong_AsInt`) is used for fd extraction, matching the stable ABI promotion of that helper.

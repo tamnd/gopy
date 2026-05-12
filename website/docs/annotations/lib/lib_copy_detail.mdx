@@ -1,0 +1,74 @@
+---
+title: Lib/copy.py
+description: "copy and deepcopy: shallow copy dispatches through __copy__, deepcopy uses a memo dict to handle cycles and dispatches through __deepcopy__, __reduce_ex__, or type-specific copiers."
+cpython_path: Lib/copy.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/copy.py" />
+
+`Lib/copy.py` provides `copy` (shallow copy) and `deepcopy` (recursive deep copy). `copy` dispatches through `__copy__` or the type's `__reduce_ex__` protocol. `deepcopy` uses a `memo` dict keyed on object identity to handle cycles and shared references, and dispatches through `__deepcopy__`, `__reduce_ex__`, or a dispatch table of type-specific copiers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | imports, `_copy_dispatch`, `_deepcopy_dispatch` | Type dispatch tables |
+| 51-120 | `copy` | Shallow copy dispatcher |
+| 121-250 | `deepcopy` | Deep copy with memo dict |
+| 251-300 | `_reconstruct`, `_deepcopy_atomic`, helpers | Reconstruction from `__reduce_ex__`; atomic-type no-op copiers |
+
+## Reading
+
+### copy dispatch
+
+`copy(x)` first checks `_copy_dispatch` for built-in types (int, float, str, etc. all return `x` unchanged since they are immutable). Then it looks for `__copy__`. Finally it falls back to `__reduce_ex__(4)` to get a reconstruction recipe.
+
+```python
+# CPython: Lib/copy.py:51 copy
+def copy(x):
+    cls = type(x)
+    copier = _copy_dispatch.get(cls)
+    if copier:
+        return copier(x)
+    copier = getattr(cls, '__copy__', None)
+    if copier is not None:
+        return copier()
+    reductor = getattr(cls, '__reduce_ex__', None)
+    rv = reductor(4)
+    return _reconstruct(x, None, *rv)
+```
+
+### deepcopy memo dict
+
+`deepcopy` passes a `memo` dict through every recursive call. Before copying, it checks `memo[id(x)]`; if present, the object was already copied and the existing copy is returned. This handles cycles (a list containing itself) and ensures shared references remain shared in the copy.
+
+```python
+# CPython: Lib/copy.py:121 deepcopy
+def deepcopy(x, memo=None, _nil=[]):
+    if memo is None:
+        memo = {}
+    d = id(x)
+    y = memo.get(d, _nil)
+    if y is not _nil:
+        return y
+    cls = type(x)
+    copier = _deepcopy_dispatch.get(cls)
+    if copier is not None:
+        y = copier(x, memo)
+    ...
+    memo[d] = y
+    return y
+```
+
+### Atomic types
+
+`_deepcopy_atomic` is registered for immutable types like `int`, `float`, `str`, `bytes`, `bool`, `NoneType`, `type`, `range`, `slice`. It simply returns the original object without copying, since immutable objects can be safely shared.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/copy/`. A Go port would use `reflect.DeepCopy`-style recursion with a `map[uintptr]interface{}` memo dict. The `__copy__`/`__deepcopy__` protocol hooks would check for corresponding Go interface methods.

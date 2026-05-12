@@ -1,0 +1,68 @@
+---
+title: "timemodule.c annotation"
+description: "Platform dispatch for time.time, perf_counter, process_time, struct_time, and sleep"
+cpython_path: Modules/timemodule.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+ported_to: module/time/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`timemodule.c` implements the `time` built-in module. It is thin on arithmetic and heavy on platform dispatch: the same Python function selects from a set of OS clock APIs at compile time and, for some clocks, at runtime.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-80 | includes, `_Py_clock_info_t` | Platform feature detection macros, clock-info struct |
+| 81-200 | `pysecondstospectimespec` / `_PyTime_*` | Internal time conversion helpers shared with other modules |
+| 201-380 | `time_time` / `time_time_ns` | Wall clock via `gettimeofday` or `clock_gettime(CLOCK_REALTIME)` |
+| 381-520 | `time_perf_counter` / `_ns` | High-resolution monotonic clock; platform selection at compile time |
+| 521-640 | `time_process_time` / `_ns` | CPU time via `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` or `getrusage` |
+| 641-800 | `time_sleep` | `select`/`nanosleep` loop with signal-interruption restart |
+| 801-1000 | `tmtotuple`, `timetuple_to_tm` | `struct_time` construction and round-trip to C `struct tm` |
+| 1001-1200 | `time_gmtime`, `time_localtime` | Wrappers around `gmtime_r` / `localtime_r` |
+| 1201-1400 | `time_mktime` | Inverse of `localtime`; platform `mktime` with DST hint |
+| 1401-1600 | `time_strftime`, `time_strptime` | Format and parse; `strptime` delegates to `_strptime.py` |
+| 1601-1800 | `time_tzset`, `time_monotonic` | POSIX tzset, `CLOCK_MONOTONIC` wrapper |
+| 1801-2000 | Module init, method table | `PyModuleDef`, attribute setup (`timezone`, `altzone`, `daylight`, `tzname`) |
+
+## Reading
+
+### Platform dispatch for `perf_counter`
+
+`time_perf_counter` (<CpyLink path="Modules/timemodule.c" line={410} label="line 410"/>) selects a backend in priority order:
+
+1. `QueryPerformanceCounter` on Windows.
+2. `clock_gettime(CLOCK_MONOTONIC)` on Linux/macOS when available.
+3. `mach_absolute_time` on older macOS.
+4. `gettimeofday` as the final fallback (not monotonic, but the only universal option).
+
+The selected backend is stored in a module-level function pointer (`_Py_GetPerfCounter`) so that subsequent calls pay no branch cost. The `get_clock_info("perf_counter")` path reads a parallel `_Py_clock_info_t` struct to report resolution and adjustability to Python callers.
+
+### `time_sleep` signal interruption
+
+`time_sleep` (<CpyLink path="Modules/timemodule.c" line={650} label="line 650"/>) does not call `nanosleep` once. It loops:
+
+1. Computes the absolute deadline before the first sleep.
+2. Calls `nanosleep` (or `select` on platforms without it).
+3. If interrupted by `EINTR`, checks whether a Python signal handler is pending via `Py_MakePendingCalls`. If a handler raises an exception, sleep returns the exception immediately.
+4. Otherwise, recomputes remaining time from the deadline and loops.
+
+This means `time.sleep` is interruptible by `KeyboardInterrupt` on all platforms and by any signal that has a Python handler. The total elapsed time may be slightly more than the requested duration due to scheduler jitter between the signal and the restart.
+
+### `struct_time` and DST fold
+
+`tmtotuple` (<CpyLink path="Modules/timemodule.c" line={820} label="line 820"/>) converts a C `struct tm` to a `struct_time` named tuple. The ninth field `tm_isdst` carries `-1` (unknown), `0` (standard), or `1` (DST). CPython 3.6 added a `tm_gmtoff` and `tm_zone` extension beyond the ISO C standard. `time_localtime` fills these from `localtime_r` on POSIX; on Windows they are approximated from `_tzset` globals. gopy must reproduce the extension fields because user code queries `t.tm_gmtoff` by name.
+
+## gopy notes
+
+- Go's `time.Now().UnixNano()` covers `time.time_ns`. Divide by `1e9` for `time.time`.
+- `time.perf_counter` maps to `time.Now()` with a process-start baseline stored at init. Go's `runtime` package exposes `runtime_nanotime` internally, but `time.Now()` is the public equivalent.
+- `time.process_time` maps to `syscall.Getrusage(RUSAGE_SELF)` summing `Utime` and `Stime`.
+- `time_sleep` restart-on-EINTR logic must be replicated in Go using `time.After` or `time.Sleep` inside a loop that checks for pending goroutine cancellation (context) rather than POSIX signals.
+- `struct_time` should be a named-tuple-like object; expose `tm_gmtoff` and `tm_zone` as attributes from the start to avoid a compatibility break later.
+- 3.14 deprecates `time.clock` (already removed) and adds `time.CLOCK_TAI` on Linux kernels that support it. Add the constant conditionally via a build tag.
+---

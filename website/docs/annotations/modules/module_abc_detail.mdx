@@ -1,0 +1,96 @@
+---
+title: "_abc.c: ABCMeta C accelerator"
+description: "ABCMeta._abc_data C struct layout, _abc_instancecheck and _abc_subclasscheck accelerators, register() cache update, and invalidation counter"
+cpython_path: Modules/_abc.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+ported_to: module/_abc/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_abc.c` is a compact C accelerator for the pure-Python `abc` module.
+It replaces the cache lookup and subclass-check hot paths that would
+otherwise run in Python. The module exports a handful of C functions that
+`abc.ABCMeta` delegates to via its `__instancecheck__` and
+`__subclasscheck__` methods.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-60 | `_abc_data` struct | Per-class cache: positive set, negative set, invalidation counter |
+| 61-120 | `_abc_data_new` / `_abc_data_dealloc` | Allocation and GC traversal for the data object |
+| 121-180 | `_abc_get_cache_token` | Returns the global `abc_invalidation_counter` as a Python int |
+| 181-240 | `_abc_init` | Attaches a fresh `_abc_data` to a new ABCMeta class |
+| 241-310 | `_abc_register` | Adds a class to `_abc_subclasses`, bumps invalidation counter |
+| 311-360 | `_abc_instancecheck` | Fast path: checks `_abc_cache`, falls back to `_abc_subclasscheck` |
+| 361-400 | `_abc_subclasscheck` | MRO walk with negative-cache short-circuit |
+
+## Reading
+
+### `_abc_data` C struct layout
+
+<Cpy path="Modules/_abc.c" lines="1-60" />
+
+Each `ABCMeta` class carries an `_abc_data` sidecar object:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    uint64_t        _abc_negative_cache_version;
+    PyObject       *_abc_registry;      /* weakref set of registered classes */
+    PyObject       *_abc_cache;         /* weakref set: positive hits */
+    PyObject       *_abc_negative_cache;/* weakref set: negative hits */
+    PyObject       *_abc_subclasses;    /* weakref set: direct subclasses */
+} _abc_data;
+```
+
+The `_abc_negative_cache_version` field shadows the module-level
+`abc_invalidation_counter`. When the two differ, the negative cache is
+stale and is cleared before the next check. This lets `register()` on any
+class invalidate all negative caches across all ABCMeta instances with a
+single counter increment.
+
+### `_abc_instancecheck` fast path
+
+<Cpy path="Modules/_abc.c" lines="311-360" />
+
+`_abc_instancecheck(cls, instance)` proceeds in three steps.
+
+1. Check `type(instance)` and `type(instance).__mro__` against the positive
+   cache (`_abc_cache`). If either is present, return `True` immediately.
+2. Delegate to `_abc_subclasscheck(cls, type(instance))`.
+3. If step 2 returns `True`, add `type(instance)` to `_abc_cache` and return
+   `True`. Otherwise fall through to the Python-level `__subclasshook__`.
+
+The positive cache stores weak references, so it does not prevent garbage
+collection of short-lived types created at runtime.
+
+### `_abc_subclasscheck` and the negative cache
+
+<Cpy path="Modules/_abc.c" lines="361-400" />
+
+`_abc_subclasscheck(cls, subclass)` checks the invalidation counter before
+anything else. If `data->_abc_negative_cache_version` differs from the
+module counter, the negative cache set is cleared and the version is updated.
+
+The MRO walk then checks each entry of `subclass.__mro__` against the
+registry. A hit adds `subclass` to the positive cache. A confirmed miss adds
+it to the negative cache. Both paths use `PySet_Contains` on the weakref
+sets, so dead references are ignored transparently.
+
+## gopy notes
+
+- `_abc_data` maps to a Go struct held as a field on the `ABCMeta` type
+  object, not as a Python-visible attribute.
+- The invalidation counter should be a package-level `atomic.Uint64` so
+  that `register()` and cache reads are safe under concurrent GIL-free
+  operation.
+- Weak-reference sets (`_abc_cache`, `_abc_negative_cache`) can use
+  `map[uintptr]weakref` keyed on `tp_id`, cleared during type deallocation.
+- The `_abc_get_cache_token` function is the only public counter accessor;
+  port it as a zero-argument function returning a Python `int` wrapping the
+  current counter value.
+- See `module/_abc/module.go` for the current gopy port of this module.

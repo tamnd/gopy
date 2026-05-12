@@ -1,0 +1,92 @@
+---
+title: Lib/typing.py
+description: "typing module: Generic, TypeVar, Protocol, Union, Callable, Annotated, get_type_hints(), overload, and the runtime machinery that makes type annotations work without a type checker."
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 3200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/typing.py`
+
+<CpyLink path="Lib/typing.py" />
+
+`Lib/typing.py` provides the runtime support for PEP 484-style type annotations. It does
+not check types at runtime; its job is to let annotation expressions evaluate without
+raising exceptions, provide reflection APIs like `get_type_hints`, and offer protocol
+machinery for structural subtyping.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `TypeVar`, `ParamSpec`, `TypeVarTuple` | Type variable classes |
+| 201-600 | `_GenericAlias`, `_SpecialForm` | Subscription machinery for `Generic[T]`, `Union[X, Y]` etc. |
+| 601-900 | `Generic` | Base class; `__class_getitem__`, `__init_subclass__` |
+| 901-1200 | `Protocol` | Structural subtyping base; `runtime_checkable` |
+| 1201-1600 | `Callable`, `Annotated`, `Literal`, `Final` | Special forms |
+| 1601-2000 | `get_type_hints`, `get_args`, `get_origin` | Reflection helpers |
+| 2001-3200 | Aliases, `overload`, `cast`, `TYPE_CHECKING`, deprecated forms | Utilities |
+
+## Reading
+
+### `_SpecialForm` and subscription
+
+Special forms like `Union`, `Optional`, `Literal`, and `ClassVar` are instances of
+`_SpecialForm`, not classes. Their `__getitem__` returns a `_GenericAlias` that records the
+arguments without doing any evaluation.
+
+```python
+# CPython: Lib/typing.py:340 _SpecialForm.__getitem__
+def __getitem__(self, parameters):
+    item = self._getitem(self, parameters)
+    ...
+    return item
+```
+
+### `get_type_hints`
+
+`get_type_hints` resolves string annotations by evaluating them in the module's global
+namespace. In Python 3.14 with `from __future__ import annotations` (PEP 563) all
+annotations are strings; `get_type_hints` is the canonical way to materialize them.
+
+```python
+# CPython: Lib/typing.py:2100 get_type_hints
+def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
+    ...
+    hints = {}
+    for name, value in obj.__annotations__.items():
+        if isinstance(value, str):
+            value = ForwardRef(value)
+        hints[name] = _eval_type(value, globalns, localns)
+    return hints
+```
+
+### `Protocol` and `runtime_checkable`
+
+`Protocol` uses a metaclass that overrides `__instancecheck__` to perform structural
+checking: it verifies that the candidate object has all methods listed in `Protocol.__protocol_attrs__`. This only works when the protocol is decorated with
+`@runtime_checkable`.
+
+```python
+# CPython: Lib/typing.py:1780 _ProtocolMeta.__instancecheck__
+def __instancecheck__(cls, instance):
+    if (cls._is_runtime_protocol and
+            not cls.__abstractmethods__):
+        return _is_protocol_compatible(instance, cls)
+    return super().__instancecheck__(instance)
+```
+
+### `overload`
+
+`@overload` registers alternate signatures in a per-module `_overload_registry` dict. At
+runtime all overloaded variants are shadowed by the last non-decorated implementation. The
+registry is used only by type checkers and `get_overloads()`.
+
+## gopy notes
+
+Not yet ported. Most of `typing` is pure annotation scaffolding and will map to no-op or
+trivial Go types in `module/typing/`. The critical path is `get_type_hints` and
+`Protocol.__instancecheck__`, which depend on `eval` and the attribute-lookup protocol.

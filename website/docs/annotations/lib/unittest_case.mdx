@@ -1,0 +1,228 @@
+---
+title: Lib/unittest/case.py
+description: TestCase class with setUp/tearDown lifecycle, all assertion helpers, subTest context manager, addCleanup stack, and skip/expectedFailure decorators.
+cpython_path: Lib/unittest/case.py
+cpython_version: "3.14"
+lines: 1628
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/unittest/case.py`
+
+<CpyLink path="Lib/unittest/case.py" />
+
+`case.py` is the heaviest file in the `unittest` package at roughly 1628
+lines. It defines `TestCase`, the base class that every test class inherits
+from, plus the full suite of assertion helpers, the `subTest` context
+manager, the cleanup stack, and the skip/expected-failure decorators.
+
+The execution model is xUnit: `TestCase.run` drives the lifecycle through a
+sequence of calls (`_callSetUp`, `_callTestMethod`, `_callTearDown`,
+`doCleanups`) each wrapped in a `testPartExecutor` context manager that
+routes exceptions to a `TestResult` object without propagating them. This
+design guarantees that `tearDown` always executes even when `setUp` raises,
+and that the cleanup stack always drains regardless of what `tearDown` did.
+
+`_Outcome` is an internal mutable accumulator used inside `run`. It holds
+the current `TestResult` reference and tracks whether the test is still in
+a success state, so each phase can inspect and update it without needing to
+re-enter the result's public API.
+
+The 3.14 release added four new assertion methods: `assertIsSubclass` (line
+1350), `assertNotIsSubclass` (line 1364), `assertHasAttr` (line 1380),
+`assertNotHasAttr` (line 1390), `assertStartsWith` (line 1474), and
+`assertEndsWith` (line 1505). These fill gaps that users previously worked
+around with explicit `assertTrue` / `assertFalse` calls.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/unittest/case.py" lines="1-44">1-44</Cpy> | Module header, imports | `sys`, `functools`, `difflib`, `pprint`, `re`, `warnings`, `contextlib`, `traceback`, `time`, `types`. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="45-130">45-130</Cpy> | `_Outcome`, `testPartExecutor` | Internal accumulator; `testPartExecutor` is a context manager that catches exceptions and writes them to `TestResult` without re-raising. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="131-210">131-210</Cpy> | `skip`, `skipIf`, `skipUnless`, `expectedFailure` | Module-level decorators; `skip` sets `__unittest_skip__` on the item, `expectedFailure` sets `__unittest_expecting_failure__`. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="211-415">211-415</Cpy> | `_AssertRaisesBaseContext`, `_AssertRaisesContext`, `_AssertWarnsContext`, `_AssertLogsContext` | Context manager implementations backing `assertRaises`, `assertWarns`, `assertLogs`, and `assertNoLogs`. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="414-545">414-545</Cpy> | `TestCase.__init__`, `addCleanup`, `enterContext`, `addClassCleanup`, `setUp`, `tearDown`, `setUpClass`, `tearDownClass` | Construction records the test method name; `addCleanup` appends `(func, args, kwargs)` to a list drained by `doCleanups`. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="547-635">547-635</Cpy> | `subTest`, `_callSetUp`, `_callTestMethod`, `_callTearDown` | `subTest` is a context manager that records sub-test failures without stopping the parent; `_callTestMethod` resolves the method by name and calls it. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="634-760">634-760</Cpy> | `run`, `doCleanups` | Core lifecycle; `run` orchestrates `_callSetUp` / `_callTestMethod` / `_callTearDown` via `testPartExecutor`, checks skip/expectedFailure flags, then calls `doCleanups`. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="758-920">758-920</Cpy> | `assertTrue`, `assertFalse`, `assertRaises`, `assertWarns`, `assertLogs`, `assertNoLogs` | Entry points that either run a callable directly or return a context manager depending on whether `args` is non-empty. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="920-1190">920-1190</Cpy> | `assertEqual`, `assertNotEqual`, `assertAlmostEqual`, `assertSequenceEqual`, `assertListEqual`, `assertTupleEqual`, `assertSetEqual`, `assertIn`, `assertIs`, `assertIsNone`, `assertDictEqual`, `assertCountEqual` | Assertion helpers; most delegate to `_baseAssertEqual` which calls `==` and raises `AssertionError` with a `difflib` diff on failure. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="1293-1545">1293-1545</Cpy> | `assertLess`, `assertGreater`, `assertIsInstance`, `assertIsSubclass`, `assertHasAttr`, `assertStartsWith`, `assertEndsWith`, `assertRaisesRegex`, `assertWarnsRegex`, `assertRegex` | Relational and pattern-matching assertions; `assertIsSubclass`, `assertHasAttr`, `assertStartsWith`, `assertEndsWith` are new in 3.14. | (not ported) |
+| <Cpy path="Lib/unittest/case.py" lines="1545-1628">1545-1628</Cpy> | `FunctionTestCase`, `_SubTest` | `FunctionTestCase` wraps a plain function as a `TestCase`; `_SubTest` is the object stored by `subTest`. | (not ported) |
+
+## Reading
+
+### `TestCase.run` lifecycle (lines 634 to 760)
+
+<CpyLink path="Lib/unittest/case.py" lines="634-760" />
+
+```python
+def run(self, result=None):
+    if result is None:
+        result = self.defaultTestResult()
+        startTestRun = getattr(result, 'startTestRun', None)
+        stopTestRun  = getattr(result, 'stopTestRun',  None)
+        if startTestRun is not None:
+            startTestRun()
+    else:
+        stopTestRun = None
+
+    result.startTest(self)
+    testMethod = getattr(self, self._testMethodName)
+    if (getattr(self.__class__, '__unittest_skip__', False) or
+            getattr(testMethod, '__unittest_skip__', False)):
+        try:
+            skip_why = (getattr(self.__class__, '__unittest_skip_why__', '')
+                        or getattr(testMethod, '__unittest_skip_why__', ''))
+            self._addSkip(result, self.id(), skip_why)
+        finally:
+            result.stopTest(self)
+        return
+
+    expecting_failure = (
+        getattr(self,        '__unittest_expecting_failure__', False) or
+        getattr(testMethod,  '__unittest_expecting_failure__', False)
+    )
+    outcome = _Outcome(result)
+    try:
+        self._outcome = outcome
+        with outcome.testPartExecutor(self):
+            self._callSetUp()
+        if outcome.success:
+            outcome.expecting_failure = expecting_failure
+            with outcome.testPartExecutor(self, subTest=False):
+                self._callTestMethod(testMethod)
+            outcome.expecting_failure = False
+            with outcome.testPartExecutor(self):
+                self._callTearDown()
+        self.doCleanups()
+        ...
+    finally:
+        outcome = self._outcome
+        result.stopTest(self)
+        if stopTestRun is not None:
+            stopTestRun()
+```
+
+`run` uses `_Outcome` as a mutable result accumulator. Each phase
+(`setUp`, test method, `tearDown`) runs inside a `testPartExecutor` context
+manager that catches exceptions and routes them to the result without
+propagating them. This is what allows `tearDown` to always execute even when
+`setUp` raises, and `doCleanups` to always drain regardless of what
+`tearDown` did.
+
+`@skip` and `@expectedFailure` are checked at the start of `run` via
+`__unittest_skip__` and `__unittest_expecting_failure__` attributes. A
+skipped test calls `result.addSkip` and returns immediately without
+executing `setUp` or the test method. An expected failure that unexpectedly
+passes is reported via `result.addUnexpectedSuccess`.
+
+### `assertRaises` context manager (lines 253 to 300)
+
+<CpyLink path="Lib/unittest/case.py" lines="253-340" />
+
+```python
+class _AssertRaisesContext(_AssertRaisesBaseContext):
+    _base_type = BaseException
+    _base_type_str = 'BaseException'
+
+    def __exit__(self, exc_type, exc_value, tb):
+        if exc_type is None:
+            try:
+                exc_name = self.expected.__name__
+            except AttributeError:
+                exc_name = str(self.expected)
+            if self.obj_name:
+                self._raiseFailure("{} not raised by {}".format(
+                    exc_name, self.obj_name))
+            else:
+                self._raiseFailure("{} not raised".format(exc_name))
+        else:
+            traceback.clear_frames(tb)
+        if not issubclass(exc_type, self.expected):
+            return False
+        self.exception = exc_value.with_traceback(None)
+        if self.expected_regex is not None:
+            expected_regex = self.expected_regex
+            if not expected_regex.search(str(exc_value)):
+                self._raiseFailure('"{}" does not match "{}"'.format(
+                    expected_regex.pattern, str(exc_value)))
+        return True
+```
+
+When used as `with self.assertRaises(SomeError):`, the `with` block's
+`__exit__` is called with exception info if an exception occurred, or with
+three `None` arguments if no exception was raised. The first branch handles
+the no-exception case and calls `_raiseFailure` (which raises
+`AssertionError`). The second branch checks
+`issubclass(exc_type, self.expected)`: returning `False` lets an unrelated
+exception propagate normally; returning `True` suppresses the exception and
+stores it as `self.exception` so the test can inspect it after the `with`
+block.
+
+`assertRaisesRegex` works identically but adds a regex search on the string
+representation of the caught exception before returning `True`.
+
+### `subTest` context manager (lines 547 to 576)
+
+<CpyLink path="Lib/unittest/case.py" lines="547-576" />
+
+```python
+@contextlib.contextmanager
+def subTest(self, msg=_subtest_msg_sentinel, **params):
+    """Return a context manager that will return the enclosed block
+    of code in a subtest identified by the optional message and
+    keyword parameters.  A failure in the subtest marks the test
+    case as failed but resumes execution at the end of the enclosed
+    block, allowing further test code to be executed.
+    """
+    if not isinstance(self._outcome, _Outcome):
+        # If the test is run at the top level, allow subTest() to be called
+        raise TypeError(...)
+    outcome = self._outcome
+    parent = self._subtest
+    if parent is None:
+        params_map = _OrderedChainMap(params)
+    else:
+        params_map = parent.params.new_child(params)
+    self._subtest = _SubTest(self, msg, params_map)
+    try:
+        with outcome.testPartExecutor(self._subtest, subTest=True):
+            yield self._subtest
+    finally:
+        self._subtest = parent
+```
+
+`subTest` is a context manager that records a sub-test failure without
+stopping the parent test. The key mechanism is that `testPartExecutor`
+receives `subTest=True`, which causes it to call `result.addSubTest` rather
+than `result.addFailure`. That means the test continues executing after the
+`with` block even when the sub-test body raises `AssertionError`.
+
+Each `subTest` call pushes a new `_SubTest` onto a chain, so nested
+`subTest` calls accumulate their parameters into a `ChainMap`. The parent
+`_subtest` reference is restored in the `finally` clause so that exceptions
+outside the `with` block are attributed to the parent correctly.
+
+## gopy mirror
+
+`unittest.case` is not yet ported. It depends on `contextlib`,
+`difflib`, `functools`, `pprint`, `re`, `traceback`, `time`, and the
+sibling modules `unittest.result` and `unittest.util`. A port would
+represent `TestCase` as a Go struct embedding a `*testing.T`-compatible
+result sink, translate the assertion methods as Go functions operating
+on gopy Python objects, and implement `subTest` using a deferred cleanup
+stack. The `@skip` / `@expectedFailure` decorators would be represented
+as attribute tags set on the bound method object before `run` inspects
+them.
+
+## CPython 3.14 changes
+
+CPython 3.14 added six assertion methods to `TestCase`:
+`assertIsSubclass`, `assertNotIsSubclass`, `assertHasAttr`,
+`assertNotHasAttr`, `assertStartsWith`, and `assertEndsWith`. These
+consolidate patterns that previously required `assertTrue(issubclass(...))`
+or `assertTrue(hasattr(...))` calls and give better failure messages. The
+rest of the lifecycle (`run`, `subTest`, cleanup stack) was not changed.

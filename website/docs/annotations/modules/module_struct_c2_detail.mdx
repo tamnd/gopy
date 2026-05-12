@@ -1,0 +1,137 @@
+---
+title: "_struct.c — struct module C implementation"
+description: "Annotated reading of CPython Modules/_struct.c, the C backend for the struct module"
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+The `struct` module packs and unpacks binary data according to a format string.
+`_struct.c` is the C backend; it compiles the format string once into an array
+of `formatcode` descriptors and reuses that array on every pack/unpack call.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | `formatdef` table | Maps format characters to size, alignment, pack/unpack functions |
+| 121–350 | `calcsize` | Sums byte sizes, applies alignment padding |
+| 351–700 | `pack_int`, `pack_float`, `pack_char`, … | Per-type packer functions |
+| 701–950 | `unpack_int`, `unpack_float`, `unpack_char`, … | Per-type unpacker functions |
+| 951–1200 | `s_object` / `Struct` type | Caches compiled `s_packing` array, `s_size` |
+| 1201–1500 | `s_pack`, `s_pack_into` | Iterates `s_packing`, calls packer per code |
+| 1501–1700 | `s_unpack`, `s_unpack_from`, `s_iter_unpack` | Iterates `s_packing`, calls unpacker per code |
+| 1701–1900 | `prepare_s_object` | Parses format string, builds `s_packing` |
+| 1901–2100 | Byte-order prefix handling | Sets endian flag from `>`, `<`, `=`, `!`, `@` |
+| 2101–2400 | Module init, `PyDoc` strings | `PyModuleDef`, method table |
+
+## Reading
+
+### Format string compilation
+
+The `Struct` object compiles the format string in `prepare_s_object`. Each
+character is looked up in the `formatdef` table for the active byte order and
+stored as a triple of `(formatcode, size, count)` in the `s_packing` array.
+This work happens once at `Struct.__init__` time, not on every pack call.
+
+```c
+// CPython: Modules/_struct.c:1720 prepare_s_object
+static int
+prepare_s_object(PyStructObject *self, PyObject *o_format)
+{
+    ...
+    for (p = fmt; p < end; ) {
+        ...
+        e = getentry(c, f);   /* look up format char */
+        ...
+        codes->fmtdef = e;
+        codes->offset = size;
+        codes->size   = e->size;
+        codes->repeat = num;
+        size += e->size * num;
+    }
+}
+```
+
+### Byte order and alignment
+
+The first character of the format string selects a `formatdef` table. Native
+order (`@`) uses `sizeof`/`alignof` from the C compiler. Network order (`!`)
+is big-endian with no alignment. `=` is native byte order but no alignment.
+
+```c
+// CPython: Modules/_struct.c:1901 whichtable
+static const formatdef *
+whichtable(const char **pfmt)
+{
+    const char *fmt = (*pfmt)++;
+    switch (*fmt) {
+    case '<': return lilendian_table;
+    case '>': case '!': return bigendian_table;
+    case '=': return native_table;
+    case '@': default: *pfmt = fmt; return native_table;
+    }
+}
+```
+
+### Packing a buffer
+
+`s_pack_into` iterates the pre-compiled `s_packing` array and calls the
+`pack` function pointer stored in each `formatdef`. Buffer bounds are checked
+once up front.
+
+```c
+// CPython: Modules/_struct.c:1320 s_pack_into
+static PyObject *
+s_pack_into(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    ...
+    res = s_object->s_packing;
+    while (res->fmtdef != NULL) {
+        r = res->fmtdef->pack(pbuf + res->offset,
+                              args[i++], res->fmtdef);
+        if (r != 0) return NULL;
+        res++;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+### `calcsize` and alignment padding
+
+For native byte order, `calcsize` inserts padding bytes so that each field
+is aligned to its natural boundary, matching the C ABI. Standard-size formats
+(`<`, `>`, `=`, `!`) never pad.
+
+```c
+// CPython: Modules/_struct.c:210 align_up
+static Py_ssize_t
+align_up(Py_ssize_t offset, Py_ssize_t alignment)
+{
+    return (offset + alignment - 1) & -alignment;
+}
+```
+
+## gopy notes
+
+The `struct` module in gopy is ported at `module/struct/`. The key mapping is:
+
+- `s_packing` array maps to a Go slice of a `formatCode` struct.
+- Endian selection uses `encoding/binary.LittleEndian` / `BigEndian`.
+- Native-alignment padding follows the same `align_up` formula.
+- Pack/unpack function pointers become a Go interface method dispatch.
+
+The `calcsize` path is the trickiest to match exactly: CPython uses the C
+compiler's `alignof`, so the golden values must be compared on the same
+architecture. Tests in `module/struct/module_test.go` pin expected sizes.
+
+## CPython 3.14 changes
+
+- The `Struct` type gained a `__class_getitem__` stub (returns `NotImplemented`)
+  to silence generic-alias errors when users write `struct.Struct[int]`.
+- Error messages for overflow in pack operations were made more specific,
+  including the field index in the format string.
+- No algorithmic changes to `_siftup`/pack/unpack logic.

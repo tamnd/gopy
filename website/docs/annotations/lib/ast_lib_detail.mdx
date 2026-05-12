@@ -1,0 +1,100 @@
+---
+title: "Lib/ast.py"
+description: "CPython high-level AST utilities: parse, unparse, walk, NodeVisitor, literal_eval"
+cpython_path: Lib/ast.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/ast.py` provides the public Python API for working with abstract syntax trees. The heavy lifting (parsing bytes into an AST) is done in C by `Python/ast.c` and `Python/Python-ast.c`; this file layers convenience functions and pure-Python visitors on top.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | module header / imports | Imports `_ast`, re-exports all node types |
+| 41–60 | `parse()` | Wraps `compile()` in `ast.PyCF_ONLY_AST` mode |
+| 61–90 | `literal_eval()` | Safe expression evaluator for constant nodes |
+| 91–130 | `fix_missing_locations()` | Fills `lineno`/`col_offset` on generated nodes |
+| 131–200 | `NodeVisitor` | Base visitor with `visit()` and `generic_visit()` |
+| 201–260 | `NodeTransformer` | Subclass that may replace or remove nodes |
+| 261–360 | `walk()` | BFS generator over every node in a tree |
+| 361–600 | `_Unparser` / `unparse()` | Reconstructs Python source text from an AST |
+
+## Reading
+
+### parse and compile mode
+
+`ast.parse()` is a thin wrapper: it calls the built-in `compile()` with `PyCF_ONLY_AST` so the compiler stops after building the AST and returns it instead of a code object.
+
+```python
+# CPython: Lib/ast.py:41 parse
+def parse(source, filename="<unknown>", mode="exec", *,
+          type_comments=False, feature_version=None):
+    flags = PyCF_ONLY_AST
+    if type_comments:
+        flags |= PyCF_TYPE_COMMENTS
+    if feature_version is not None:
+        ...
+    return compile(source, filename, mode, flags, ...)
+```
+
+### literal_eval — safe constant evaluation
+
+`literal_eval()` walks the AST recursively and only permits `Constant`, `Tuple`, `List`, `Set`, `Dict`, and `BinOp`/`UnaryOp` nodes whose operators are `+`/`-`. Anything else raises `ValueError`.
+
+```python
+# CPython: Lib/ast.py:62 literal_eval
+def literal_eval(node_or_string):
+    if isinstance(node_or_string, str):
+        node_or_string = parse(node_or_string.lstrip(" \t"), mode='eval')
+    if isinstance(node_or_string, Expression):
+        node_or_string = node_or_string.body
+    def _convert(node):
+        if isinstance(node, Constant):
+            return node.value
+        elif isinstance(node, Tuple):
+            return tuple(map(_convert, node.elts))
+        ...
+        raise ValueError('malformed node or string')
+    return _convert(node_or_string)
+```
+
+### NodeVisitor and NodeTransformer
+
+`NodeVisitor.visit()` dispatches to `visit_ClassName` or falls back to `generic_visit()`. `NodeTransformer` overrides `generic_visit()` so it splices return values back into the parent's field list, allowing in-place tree rewriting.
+
+```python
+# CPython: Lib/ast.py:131 NodeVisitor.visit
+def visit(self, node):
+    method = 'visit_' + node.__class__.__name__
+    visitor = getattr(self, method, self.generic_visit)
+    return visitor(node)
+```
+
+### unparse — AST back to source
+
+`_Unparser` is a `NodeVisitor` subclass that writes tokens into a buffer. `unparse()` instantiates it, calls `visit()` on the root, and returns the joined string. Operator precedence is handled by tracking the current precedence level and inserting parentheses when needed.
+
+```python
+# CPython: Lib/ast.py:362 unparse
+def unparse(ast_obj):
+    unparser = _Unparser()
+    return unparser.visit(ast_obj)
+```
+
+## gopy notes
+
+- `ast.parse()` maps directly to `compile.Compile()` with a mode flag; no separate port is needed beyond wiring the flag.
+- `literal_eval()` should be ported as a pure Go recursive switch on AST node type. The CPython implementation is a useful reference for the exact set of allowed node combinations.
+- `NodeVisitor`/`NodeTransformer` are not needed for the gopy compiler pipeline, which uses its own typed AST walk helpers.
+- `fix_missing_locations()` has a Go analogue in the compiler's location-filling pass; keep them in sync when adding new statement nodes.
+
+## CPython 3.14 changes
+
+- `ast.parse()` gained a `optimize` parameter (mirrors the `-O` flag) that runs the peephole optimizer on the AST before returning it.
+- `_Unparser` handles the new `TypeAlias` statement introduced in 3.12 and the `type` soft keyword used in 3.13+ generics syntax.
+- `literal_eval()` now raises `RecursionError` instead of crashing on deeply nested structures.

@@ -1,0 +1,52 @@
+---
+title: "hashlib.py: OpenSSL dispatch, guaranteed algorithms, and file_digest"
+description: "Annotated walkthrough of Lib/hashlib.py covering new() dispatch, algorithms_guaranteed/available, SHAKE XOF, file_digest streaming, and the usedforsecurity flag"
+cpython_path: Lib/hashlib.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: module/hashlib/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | module header | Docstring, `__always_supported` tuple, `__all__` |
+| 41–90 | `__get_builtin_constructor` | Lookup table for pure-Python fallbacks (md5, sha1, sha2 family) |
+| 91–140 | `__get_openssl_constructor` | Wraps `_hashlib.new(name)` with `usedforsecurity` forwarding |
+| 141–180 | `new()` | Tries OpenSSL first; falls back to built-in; raises `ValueError` on miss |
+| 181–210 | `algorithms_guaranteed`, `algorithms_available` | Frozensets populated at import time from `_hashlib` and built-in probes |
+| 211–250 | `SHAKE128`, `SHAKE256` | Subclasses adding `digest(length)` and `hexdigest(length)` for XOF |
+| 251–280 | `file_digest(fileobj, digest)` | Streaming helper; accepts name string or callable; 8 KiB read loop |
+| 281–300 | Per-name convenience aliases | `md5 = __func_from_name('md5')`, etc. |
+
+## Reading
+
+### new() dispatch and the usedforsecurity flag
+
+`new(name, data=b'', usedforsecurity=True)` is the main entry point. It tries `_hashlib.new(name, usedforsecurity=usedforsecurity)` first. If that raises `ValueError` (algorithm unknown to OpenSSL) it falls back to `__get_builtin_constructor(name)`. The `usedforsecurity=False` path allows hash functions that are blocked by FIPS-mode OpenSSL (notably MD5 and SHA-1) to still be used for non-security purposes such as checksums or content addressing.
+
+In 3.14, the flag is forwarded consistently through all code paths including the built-in constructors, whereas earlier releases only forwarded it to OpenSSL.
+
+### algorithms_guaranteed and algorithms_available
+
+`algorithms_guaranteed` is the set of names that every CPython installation must support regardless of OpenSSL version. As of 3.14 this is `{'md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'sha3_224', 'sha3_256', 'sha3_384', 'sha3_512', 'shake_128', 'shake_256', 'blake2b', 'blake2s'}`.
+
+`algorithms_available` is populated by calling `_hashlib.openssl_md_meth_names()` and unioning with the built-in set. It may include names like `'sm3'` or `'ripemd160'` depending on the linked OpenSSL build.
+
+### file_digest and SHAKE XOF
+
+`file_digest(fileobj, digest)` reads the file in 8 KiB chunks to avoid loading large files into memory. The `digest` argument may be a name string (passed to `new()`) or any callable that returns a hash object. The function checks `fileobj.read` exists but does not require a specific base class.
+
+`SHAKE128` and `SHAKE256` override `digest` and `hexdigest` to require a `length` positional argument, matching the XOF (extendable-output function) semantics where output length is chosen at finalization time rather than fixed by the algorithm.
+
+## gopy notes
+
+- Go's `crypto/md5`, `crypto/sha1`, `crypto/sha256`, `crypto/sha512`, and `golang.org/x/crypto` cover the guaranteed set. Mapping CPython's name strings to Go constructors is the main porting task.
+- `usedforsecurity` has no direct Go equivalent. A boolean on the Go hash object suffices to mirror the flag without affecting actual crypto behavior.
+- `file_digest` is straightforward to port using `io.ReadFull` in a loop with a fixed `[8192]byte` buffer.
+- SHAKE XOF requires `golang.org/x/crypto/sha3.ShakeHash`; the `digest(length)` call maps to `Sum` after `Write`.
+- `algorithms_available` depends on the OpenSSL build at runtime. For gopy the set should be computed once at module init from whatever Go crypto packages are linked.

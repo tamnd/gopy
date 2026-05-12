@@ -1,0 +1,130 @@
+---
+title: tupleobject.c
+description: "CPython implementation of the immutable tuple sequence type with freelist allocator"
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/tupleobject.c` implements Python's built-in `tuple` type. Its defining performance concern is allocation speed: small tuples are recycled through a per-interpreter freelist, making repeated `(a, b, c)` constructions essentially free after the first one. The hash algorithm was upgraded from a djb2-style accumulator to an XXH-inspired mix in 3.8 and has been stable since.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 33 | `tuple_alloc` | Pop from freelist or call `PyObject_GC_NewVar` |
+| 67 | `tuple_get_empty` | Return the statically allocated empty tuple singleton |
+| 74 | `PyTuple_New` | Public C API: allocate and zero-fill an n-item tuple |
+| 171 | `PyTuple_Pack` | Varargs constructor: pack N C-level objects into a new tuple |
+| 241 | `tuple_dealloc` | Push back to freelist or free; untrack from GC |
+| 263 | `tuple_repr` | Build `"(a, b, c)"` representation |
+| 315 | `tuple_hash` | XXH-inspired accumulator; result cached in `ob_hash` |
+| 351 | `tuple_length` | Return `Py_SIZE` |
+| 359 | `tuple_contains` | Linear scan via `PyObject_RichCompareBool` |
+| 369 | `tuple_item` | Bounds-checked index access |
+| 444 | `tuple_slice` | Return a new tuple covering a slice range |
+| 629 | `tuple_richcompare` | Element-wise lexicographic comparison |
+| 678 | `tuple_subtype_new` | Allocate a subtype tuple by iterating the argument |
+| 720 | `tuple_new_impl` | `__new__`: call `tuple_subtype_new` or fast-path for `tuple` itself |
+| 738 | `tuple_vectorcall` | Vectorcall entry point for `tuple(iterable)` |
+| 1026 | `tupleiter_dealloc` | Release iterator state |
+| 1042 | `tupleiter_next` | Advance iterator, return next item |
+| 1177 | `maybe_freelist_push` | Conditionally push a tuple onto the per-size freelist |
+
+## Reading
+
+### Freelist allocator
+
+`tuple_alloc` checks `_Py_FREELIST_POP` before calling the GC allocator. Each interpreter maintains independent freelist buckets indexed by `size - 1`, up to `PyTuple_MAXSAVESIZE`. This avoids cross-interpreter contention in sub-interpreter workloads introduced in 3.12.
+
+```c
+// CPython: Objects/tupleobject.c:33 tuple_alloc
+static PyTupleObject *
+tuple_alloc(Py_ssize_t size)
+{
+    assert(size != 0);    // The empty tuple is statically allocated.
+    Py_ssize_t index = size - 1;
+    if (index < PyTuple_MAXSAVESIZE) {
+        PyTupleObject *op = _Py_FREELIST_POP(PyTupleObject, tuples[index]);
+        if (op != NULL) {
+            _PyTuple_RESET_HASH_CACHE(op);
+            return op;
+        }
+    }
+    PyTupleObject *result = PyObject_GC_NewVar(PyTupleObject, &PyTuple_Type, size);
+    if (result != NULL) {
+        _PyTuple_RESET_HASH_CACHE(result);
+    }
+    return result;
+}
+```
+
+### Hash: XXH-inspired accumulator
+
+The algorithm (line 315) accumulates per-element hashes using three prime multipliers (`XXPRIME_1`, `XXPRIME_2`, `XXPRIME_5`) and a rotation step. The result is stored atomically in `ob_hash` so concurrent reads in free-threaded builds do not recompute.
+
+```c
+// CPython: Objects/tupleobject.c:315 tuple_hash
+static Py_hash_t
+tuple_hash(PyObject *op)
+{
+    PyTupleObject *v = _PyTuple_CAST(op);
+    Py_uhash_t acc = FT_ATOMIC_LOAD_SSIZE_RELAXED(v->ob_hash);
+    if (acc != (Py_uhash_t)-1) {
+        return acc;
+    }
+    Py_ssize_t len = Py_SIZE(v);
+    acc = _PyTuple_HASH_XXPRIME_5;
+    for (Py_ssize_t i = 0; i < len; i++) {
+        Py_uhash_t lane = PyObject_Hash(v->ob_item[i]);
+        if (lane == (Py_uhash_t)-1) { return -1; }
+        acc += lane * _PyTuple_HASH_XXPRIME_2;
+        acc = _PyTuple_HASH_XXROTATE(acc);
+        acc *= _PyTuple_HASH_XXPRIME_1;
+    }
+    acc += len ^ (_PyTuple_HASH_XXPRIME_5 ^ 3527539UL);
+    if (acc == (Py_uhash_t)-1) { acc = 1546275796; }
+    FT_ATOMIC_STORE_SSIZE_RELAXED(v->ob_hash, acc);
+    return acc;
+}
+```
+
+### Rich comparison
+
+`tuple_richcompare` (line 629) walks both tuples in parallel until it finds a differing element, then dispatches only that pair through `PyObject_RichCompare`. Length comparison handles the case where one tuple is a prefix of the other.
+
+```c
+// CPython: Objects/tupleobject.c:629 tuple_richcompare
+static PyObject *
+tuple_richcompare(PyObject *v, PyObject *w, int op)
+{
+    PyTupleObject *vt = (PyTupleObject *)v;
+    PyTupleObject *wt = (PyTupleObject *)w;
+    Py_ssize_t vlen = Py_SIZE(vt), wlen = Py_SIZE(wt);
+    Py_ssize_t i;
+    for (i = 0; i < vlen && i < wlen; i++) {
+        int k = PyObject_RichCompareBool(vt->ob_item[i], wt->ob_item[i], Py_EQ);
+        if (k < 0) return NULL;
+        if (!k) break;
+    }
+    if (i >= vlen || i >= wlen) {
+        Py_RETURN_RICHCOMPARE(vlen, wlen, op);
+    }
+    if (op == Py_EQ) { Py_RETURN_FALSE; }
+    if (op == Py_NE) { Py_RETURN_TRUE; }
+    return PyObject_RichCompare(vt->ob_item[i], wt->ob_item[i], op);
+}
+```
+
+## gopy notes
+
+The freelist maps to a fixed-size slice of object pools keyed by tuple length, one pool per interpreter state. gopy's `objects/tuple.go` should mirror `PyTuple_MAXSAVESIZE` and use the same index arithmetic `size - 1`. Hash caching belongs on the struct alongside `ob_hash`; the free-threaded atomic store/load should use Go's `sync/atomic` equivalents. `PyTuple_Pack` is the most-called constructor from generated C wrappers and should be ported early.
+
+## CPython 3.14 changes
+
+- The freelist became per-interpreter in 3.12 via `_Py_FREELIST_POP`/`_Py_FREELIST_PUSH`; 3.14 carries this forward unchanged.
+- Free-threaded builds use `FT_ATOMIC_LOAD_SSIZE_RELAXED` and `FT_ATOMIC_STORE_SSIZE_RELAXED` for the cached hash field, allowing concurrent readers without a lock.
+- `tuple_vectorcall` (line 738) was added to support the vectorcall protocol so `tuple(iterable)` avoids boxing the single argument.

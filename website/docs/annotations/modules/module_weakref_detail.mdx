@@ -1,0 +1,97 @@
+---
+title: "Modules/_weakref.c: weakref module"
+description: "Re-export wrappers, dead-ref cleanup, and module registration for the weakref C extension"
+cpython_path: Modules/_weakref.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: module/weakref/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_weakref.c` is a thin shell. Almost all logic lives in
+`Objects/weakrefobject.c`; this file re-exports a handful of functions as
+module-level callables, adds `_remove_dead_weakref` for list cleanup, and
+registers the module with the interpreter.
+
+## Map
+
+| C symbol | Lines (approx) | Role | Go equivalent |
+|---|---|---|---|
+| `weakref_getweakrefcount` | 20-40 | Delegates to `PyWeakref_GetWeakrefCount` | `weakref.Getweakrefcount` |
+| `weakref_getweakrefs` | 42-65 | Delegates to `PyWeakref_GetWeakrefs`, returns list | `weakref.Getweakrefs` |
+| `weakref_proxy` | 67-90 | Delegates to `PyWeakref_NewProxy` | `weakref.Proxy` |
+| `weakref_ref` | 92-115 | Delegates to `PyWeakref_NewRef` | `weakref.Ref` |
+| `_remove_dead_weakref` | 117-155 | Removes a dead ref from a dict by key | `weakref.RemoveDeadWeakref` |
+| `weakref_exec` | 157-180 | Module exec slot, imports `ref` type from `Objects/` | module init |
+| `_PyWeakref_ModuleDef` | 182-200 | `PyModuleDef` struct, sets name and methods | module def |
+
+## Reading
+
+### ref and proxy re-exports
+
+The four callables (`ref`, `proxy`, `getweakrefcount`, `getweakrefs`) each
+wrap a single `PyWeakref_*` function from `Objects/weakrefobject.c`. The
+wrappers exist only to attach Python-level docstrings and to appear in the
+module method table. No logic is duplicated.
+
+```c
+// CPython: Modules/_weakref.c:67
+static PyObject *
+weakref_proxy(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    ...
+    return PyWeakref_NewProxy(object, callback);
+}
+```
+
+### `_remove_dead_weakref`
+
+This function is called by the garbage collector after a referent is
+collected. It receives a dict and a key, looks up the entry, and removes it
+only if the stored value is a dead weakref. The conditional check prevents
+accidental deletion of a live ref that was inserted under the same key after
+collection.
+
+```c
+// CPython: Modules/_weakref.c:117
+static PyObject *
+_weakref__remove_dead_weakref_impl(PyObject *module,
+                                   PyObject *dct, PyObject *key)
+{
+    if (_PyDict_DelItemIf(dct, key, is_dead_weakref, NULL) < 0) {
+        ...
+    }
+    Py_RETURN_NONE;
+}
+```
+
+### Module exec slot
+
+CPython 3.12+ uses a multi-phase init (`Py_mod_exec`) rather than
+`PyInit_*`. The exec slot borrows the `ref` type from the core
+`PyWeakref_RefType` and re-exposes it as `weakref.ref`.
+
+```c
+// CPython: Modules/_weakref.c:157
+static int
+weakref_exec(PyObject *m)
+{
+    if (PyModule_AddObjectRef(m, "ref",
+            (PyObject *)&_PyWeakref_RefType) < 0) {
+        return -1;
+    }
+    return 0;
+}
+```
+
+## gopy notes
+
+- `module/weakref/module.go` wraps the same four object-layer functions.
+- `_remove_dead_weakref` maps to a dict `DelItemIf` helper; gopy uses
+  `objects/dict_mutate.go` for conditional deletion.
+- The module does not own the `ref` type. That type is defined in
+  `objects/` and registered here by reference, matching CPython's pattern.
+- Multi-phase init is represented in gopy as a plain `ModuleInit` function
+  called once at startup; there is no separate exec slot concept yet.

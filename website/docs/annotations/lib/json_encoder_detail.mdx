@@ -1,0 +1,131 @@
+---
+title: "json/encoder.py: JSONEncoder internals"
+description: "Deep annotation of JSONEncoder.encode, the _make_iterencode closure, C accelerator path, and chunked output strategy"
+cpython_path: Lib/json/encoder.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+ported_to: module/json/encoder.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's `Lib/json/encoder.py` implements `JSONEncoder`, the default serializer
+used by `json.dumps`. Most hot paths delegate to a C extension (`_json`) when
+available. The pure-Python fallback lives entirely in this file and is the
+reference for gopy.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | module-level constants | `ESCAPE`, `ESCAPE_ASCII`, `HAS_UTF8` regex patterns |
+| 32-60 | `encode_basestring` | Pure-Python string escaper, fallback only |
+| 62-80 | `encode_basestring_ascii` | ASCII-safe escaper; replaced by `_json.encode_basestring_ascii` at import time |
+| 82-180 | `JSONEncoder.__init__` | Stores `sort_keys`, `indent`, `separators`, `default`, `ensure_ascii` |
+| 182-210 | `JSONEncoder.default` | Raises `TypeError`; subclasses override this |
+| 212-250 | `JSONEncoder.encode` | Top-level entry: fast path for str/int, then delegates to `iterencode` |
+| 252-290 | `JSONEncoder.iterencode` | Builds chunked iterator; picks C or Python encoder |
+| 292-400 | `_make_iterencode` | Pure-Python recursive closure over lists, dicts, scalars |
+
+## Reading
+
+### encode entry point and fast path
+
+`JSONEncoder.encode` has a two-branch structure. Scalar strings and integers
+skip the chunked iterator entirely:
+
+```python
+def encode(self, o):
+    # Fast path for simple types avoids chunk overhead.
+    if isinstance(o, str):
+        if self.ensure_ascii:
+            return encode_basestring_ascii(o)
+        else:
+            return encode_basestring(o)
+    chunks = self.iterencode(o, _one_shot=True)
+    if not isinstance(chunks, (list, tuple)):
+        chunks = list(chunks)
+    return ''.join(chunks)
+```
+
+The `_one_shot=True` hint tells `_make_iterencode` to accumulate into a list
+rather than yield, saving generator overhead for small objects.
+
+### C accelerator substitution
+
+At module load time, CPython replaces the pure-Python encoders with C versions:
+
+```python
+try:
+    from _json import encode_basestring_ascii as c_encode_basestring_ascii
+    from _json import encode_basestring as c_encode_basestring
+    from _json import make_encoder as c_make_encoder
+except ImportError:
+    c_make_encoder = None
+
+# Later in iterencode:
+if (self.check_circular and
+        self.ensure_ascii and
+        self.sort_keys is False and   # C encoder does not support sort_keys
+        ...):
+    _encoder = c_make_encoder(...)
+else:
+    _encoder = _make_iterencode(...)
+```
+
+The C path is only taken when `sort_keys` is `False` and `default` has not been
+overridden. Any subclass that customises `default` falls back to Python.
+
+### `_make_iterencode` closure layout
+
+The inner closure captures encoder settings once and returns a recursive
+`_iterencode` function. Dict serialisation applies `sort_keys` here:
+
+```python
+def _make_iterencode(markers, _default, _encoder, _indent, _key_separator,
+                     _item_separator, _sort_keys, _skipkeys, _one_shot, ...):
+
+    def _iterencode_dict(dct, ...):
+        items = sorted(dct.items()) if _sort_keys else dct.items()
+        for key, value in items:
+            ...
+            yield from _iterencode(value, ...)
+
+    def _iterencode(o, ...):
+        if isinstance(o, str):
+            yield _encoder(o)
+        elif o is None:
+            yield 'null'
+        elif o is True:
+            yield 'true'
+        elif o is False:
+            yield 'false'
+        elif isinstance(o, int):
+            yield _intstr(o)
+        elif isinstance(o, float):
+            yield _floatstr(o)
+        elif isinstance(o, (list, tuple)):
+            yield from _iterencode_list(o, ...)
+        elif isinstance(o, dict):
+            yield from _iterencode_dict(o, ...)
+        else:
+            yield from _iterencode(_default(o), ...)
+
+    return _iterencode
+```
+
+Circular-reference detection uses an `id`-keyed `markers` dict passed through
+every recursive call.
+
+## gopy notes
+
+- The C accelerator path (`c_make_encoder`) maps to a native Go encoder; gopy
+  should route the same conditions to a Go fast path rather than re-implementing
+  the Python closure.
+- `sort_keys` traversal order must be lexicographic over the string form of each
+  key, matching CPython's `sorted(dct.items())` behaviour.
+- `indent` can be an integer (spaces) or a string; both forms must round-trip
+  identically in tests.
+- Circular detection via `markers` must use object identity (`id(o)`), not
+  equality, to match CPython semantics.

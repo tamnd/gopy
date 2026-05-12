@@ -1,0 +1,111 @@
+---
+title: Modules/_ctypes/callproc.c
+description: "ctypes foreign function call dispatch: assembles libffi cif from argument types, marshals Python objects to C values, calls the function, and converts the return value."
+cpython_path: Modules/_ctypes/callproc.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_ctypes/callproc.c`
+
+<CpyLink path="Modules/_ctypes/callproc.c" />
+
+`Modules/_ctypes/callproc.c` is the core of the ctypes call machinery. When a ctypes
+function object is called, it assembles a `ffi_cif` (call interface) from the argument
+types, converts each Python argument to its C representation using `SETFUNC`, calls the
+foreign function with GIL released via `ffi_call`, then converts the return value back to
+a Python object using `GETFUNC`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | includes, `PyCArgObject` | Argument holder with type tag and union value |
+| 81-250 | `ConvParam` | Python-to-C argument marshaling for each ctypes type |
+| 251-500 | `_CallProc` | Main call assembler: build args array, call ffi_call |
+| 501-700 | `call_function` | Python entry point; extracts errcheck callback |
+| 701-900 | `_ctypes_callproc` | Low-level call with GIL management |
+| 901-1100 | `SetResult`, `GetResult` | Return value conversion |
+| 1101-1600 | error handling, `GetLastError`/`errno` | Per-thread errno/HRESULT capture |
+
+## Reading
+
+### `ConvParam`: Python-to-C argument conversion
+
+`ConvParam` converts a Python object to a `PyCArgObject` holding a C-typed value. It
+checks for `_as_parameter_` protocol, then dispatches on the type's `SETFUNC`.
+
+```c
+// CPython: Modules/_ctypes/callproc.c:145 ConvParam
+static int
+ConvParam(PyObject *obj, Py_ssize_t index, struct argument *pa)
+{
+    StgInfo *info;
+    if (PyObject_TypeCheck(obj, &PyCArg_Type)) {
+        PyCArgObject *carg = (PyCArgObject *)obj;
+        *pa = carg->value;
+        return 0;
+    }
+    if (CDataObject_Check(obj)) {
+        ...
+        pa->ffi_type = info->ffi_type_pointer;
+        pa->value.p = ((CDataObject *)obj)->b_ptr;
+        return 0;
+    }
+    ...
+```
+
+### `_CallProc`: ffi_cif assembly and dispatch
+
+`_CallProc` builds the `ffi_type *` array for arguments, calls `ffi_prep_cif`, then
+releases the GIL and calls `ffi_call`.
+
+```c
+// CPython: Modules/_ctypes/callproc.c:330 _CallProc
+static PyObject *
+_CallProc(PPROC pProc, PyObject *argtuple, ...)
+{
+    ffi_cif cif;
+    ffi_type **atypes;
+    ...
+    result = ffi_prep_cif(&cif, cc, argcount, rtype, atypes);
+    if (result != FFI_OK) { ... }
+    Py_BEGIN_ALLOW_THREADS
+    ffi_call(&cif, pProc, resmem, avalues);
+    Py_END_ALLOW_THREADS
+    ...
+```
+
+### Per-thread errno capture
+
+After each foreign call, ctypes captures the C `errno` (and `GetLastError` on Windows)
+into per-thread storage so `ctypes.get_errno()` can return it safely from any thread.
+
+```c
+// CPython: Modules/_ctypes/callproc.c:460 _ctypes_save_errno
+static void
+_ctypes_save_errno(void)
+{
+    errno_t *ts_errno = &_PyRuntime.errno_state.eno;
+    *ts_errno = errno;
+#ifdef MS_WIN32
+    ...
+#endif
+}
+```
+
+## gopy notes
+
+Not yet ported. Go's `cgo` provides direct C function calls without an intermediate
+libffi layer. For a ctypes port at `module/_ctypes/`, the `_CallProc` machinery would
+need to either use cgo or embed libffi. The `PyCArgObject` protocol maps to a Go
+`interface` with a `CValue() unsafe.Pointer` method.
+
+## CPython 3.14 changes
+
+3.14 added support for `ffi_type_complex_float` and `ffi_type_complex_double` in the
+argument type registry, enabling ctypes functions to accept C `_Complex float` arguments.
+The `_ctypes_save_errno` mechanism was unified with the new `errno` thread-state field.

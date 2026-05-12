@@ -1,0 +1,128 @@
+---
+title: "Tools/clinic/clinic.py"
+description: "Argument Clinic: a DSL-driven code generator that reads annotated C comment blocks and emits PyArg_ParseTuple boilerplate, docstrings, and impl declarations."
+cpython_path: "Tools/clinic/clinic.py"
+cpython_version: "3.14"
+lines: 7469
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Tools/clinic/clinic.py
+
+<CpyLink path="Tools/clinic/clinic.py" />
+
+Argument Clinic is CPython's code generator for argument parsing. It reads `/*[clinic input] ... [clinic start generated code]*/` blocks embedded in C source files, parses a small DSL that describes function signatures and converters, and emits the C boilerplate that would otherwise be written by hand: `PyArg_ParseTuple`/`PyArg_ParseTupleAndKeywords` calls, docstring macros, `_Py_clinic_` impl declarations, and the checksum sentinel that prevents stale output from silently surviving edits.
+
+The tool was restructured for CPython 3.12 into a `libclinic/` package. `clinic.py` itself is only an 11-line entry point that delegates to `libclinic.cli.main()`. The substantive code lives across about 7,458 lines spread over 19 modules inside `libclinic/`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Tools/clinic/libclinic/block_parser.py" lines="13-60">13-60</Cpy> | `Block` | Dataclass representing one verbatim or clinic block extracted from a source file |
+| <Cpy path="Tools/clinic/libclinic/block_parser.py" lines="61-155">61-155</Cpy> | `BlockParser` | Iterator that splits a C source file into verbatim and clinic block tokens |
+| <Cpy path="Tools/clinic/libclinic/block_parser.py" lines="131-155">131-155</Cpy> | `BlockParser.parse_clinic_block` | Reads DSL text up to the `[clinic start generated code]` sentinel and validates checksum |
+| <Cpy path="Tools/clinic/libclinic/app.py" lines="63-217">63-217</Cpy> | `Clinic` | Top-level orchestrator: holds destinations, drives `DSLParser`, writes output |
+| <Cpy path="Tools/clinic/libclinic/app.py" lines="161-217">161-217</Cpy> | `Clinic.parse` | Feeds blocks into the DSL parser and collects rendered output per destination |
+| <Cpy path="Tools/clinic/libclinic/dsl_parser.py" lines="241-267">241-267</Cpy> | `DSLParser` | State-machine parser for the clinic DSL inside a block |
+| <Cpy path="Tools/clinic/libclinic/dsl_parser.py" lines="403-406">403-406</Cpy> | `at_classmethod` | Sets function kind to `CLASS_METHOD` |
+| <Cpy path="Tools/clinic/libclinic/dsl_parser.py" lines="442-445">442-445</Cpy> | `at_staticmethod` | Sets function kind to `STATIC_METHOD` |
+| <Cpy path="Tools/clinic/libclinic/dsl_parser.py" lines="906-919">906-919</Cpy> | `parse_converter` | Resolves a converter name to a `CConverter` subclass via `eval_ast_expr` |
+| <Cpy path="Tools/clinic/libclinic/converters.py" lines="210-252">210-252</Cpy> | `int_converter` | Emits `i` format unit; handles `accept` for bool/int subclasses |
+| <Cpy path="Tools/clinic/libclinic/converters.py" lines="528-631">528-631</Cpy> | `str_converter` | Emits `s`, `z`, `y`, `s*` etc. depending on `accept` and `zeroes` flags |
+| <Cpy path="Tools/clinic/libclinic/converters.py" lines="492-527">492-527</Cpy> | `object_converter` | Emits `O` or `O!`; optionally accepts a typecheck subtype |
+| <Cpy path="Tools/clinic/libclinic/converters.py" lines="865-984">865-984</Cpy> | `self_converter` | Handles the implicit `self` parameter; emits no format unit |
+| <Cpy path="Tools/clinic/libclinic/parse_args.py" lines="1-942">1-942</Cpy> | `parse_args.py` | Generates the full `PyArg_Parse*` or `_PyArg_Parse*` call body from a `Function` |
+| <Cpy path="Tools/clinic/libclinic/codegen.py" lines="73-115">73-115</Cpy> | `BlockPrinter.print_block` | Writes a rendered block to the output file, including the checksum line |
+| <Cpy path="Tools/clinic/libclinic/codegen.py" lines="201-231">201-231</Cpy> | `CodeGen` | Accumulates `#ifndef` guards and `#include` directives for limited API mode |
+| <Cpy path="Tools/clinic/libclinic/cli.py" lines="40-66">40-66</Cpy> | `parse_file` | Entry point per file: detects limited API marker, instantiates `Clinic`, writes result |
+| <Cpy path="Tools/clinic/libclinic/cli.py" lines="95-197">95-197</Cpy> | `run_clinic` | Drives batch mode (`--make`), converter listing, and single-file processing |
+
+## Reading
+
+### DSL block structure
+
+A clinic block is a C block comment with a specific shape. The opening delimiter is `/*[clinic input]` and the closing generated-code fence is `[clinic start generated code]`. Everything between those two fences is the DSL input. Everything after the fence up to `[clinic end generated code: ...]` is the previously generated output and a checksum:
+
+```python
+# CPython: Tools/clinic/libclinic/block_parser.py:131 BlockParser.parse_clinic_block
+def parse_clinic_block(self, dsl_name: str) -> Block:
+    ...
+    # The checksum in the end marker is validated here.
+    # compute_checksum(input_text) must match what was written last time.
+```
+
+The checksum format in source looks like:
+
+```c
+/*[clinic end generated code: output=3f2d348b8b9b1234 input=a9049054013a1b77]*/
+```
+
+`output=` is the SHA-1 prefix of the generated text; `input=` is the SHA-1 prefix of the DSL block itself. `BlockPrinter.print_block` (codegen.py:73) writes this line via `libclinic.compute_checksum()`.
+
+### CConverter hierarchy
+
+Every parameter type maps to a `CConverter` subclass. The `format_unit` class attribute decides what single-character code (or multi-character code for buffer types) goes into the format string. `converter_init` is called with the keyword arguments the user wrote in the DSL annotation. `parse_arg` emits the C snippet that reads from the argument list into the local variable:
+
+```python
+# CPython: Tools/clinic/libclinic/converters.py:210 int_converter
+class int_converter(CConverter):
+    type = 'int'
+    default_type = int
+    format_unit = 'i'
+    c_ignored_default = "-1"
+
+    def converter_init(self, *, accept={int}, ...):
+        ...
+
+# CPython: Tools/clinic/libclinic/converters.py:528 str_converter
+class str_converter(CConverter):
+    type = 'const char *'
+    default_type = (str, Null, NoneType)
+    format_unit = 's'
+
+    def converter_init(self, *, accept={str}, zeroes=False):
+        ...
+```
+
+### @classmethod and @staticmethod decorators
+
+The DSL supports `@classmethod` and `@staticmethod` annotations above the function name. `DSLParser.at_classmethod` (dsl_parser.py:403) sets `function.kind = CLASS_METHOD`; `at_staticmethod` (dsl_parser.py:442) sets `STATIC_METHOD`. Both reject conversion if the function is already a getter/setter. The `self_converter` class suppresses the `self` parameter from the format string for static methods while keeping the `defining_class` slot for class methods.
+
+```python
+# CPython: Tools/clinic/libclinic/dsl_parser.py:403 DSLParser.at_classmethod
+def at_classmethod(self) -> None:
+    if self.kind is not CALLABLE:
+        fail("@classmethod must be before other decorators")
+    self.kind = CLASS_METHOD
+
+# CPython: Tools/clinic/libclinic/dsl_parser.py:442 DSLParser.at_staticmethod
+def at_staticmethod(self) -> None:
+    if self.kind is not CALLABLE:
+        fail("@staticmethod must be before other decorators")
+    self.kind = STATIC_METHOD
+```
+
+### Limited API mode output
+
+When a source file defines `Py_LIMITED_API` (detected via regex in `cli.py:parse_file`), `Clinic` is instantiated with `limited_capi=True`. `CodeGen` then omits internal header includes and routes argument parsing through the public `PyArg_Parse*` forms instead of the internal `_PyArg_Parse*` forms. The `#ifndef Py_LIMITED_API` guards around inline helpers are also suppressed:
+
+```python
+# CPython: Tools/clinic/libclinic/cli.py:40 parse_file
+LIMITED_CAPI_REGEX = re.compile(r'# *define +Py_LIMITED_API')
+
+def parse_file(filename: str, *, limited_capi: bool = False, ...) -> None:
+    with open(filename) as f:
+        raw = f.read()
+    if LIMITED_CAPI_REGEX.search(raw):
+        limited_capi = True
+    clinic = Clinic(language, ..., limited_capi=limited_capi)
+```
+
+## gopy notes
+
+gopy does not use Argument Clinic. The Go toolchain has no equivalent of the C macro layer that Clinic generates; function signatures and argument validation are written directly in Go. The `libclinic/` package is therefore not ported and carries no counterpart in the gopy tree.
+
+Understanding Clinic is still useful for reading any CPython C source that has been clinified: the `/*[clinic input]*/` block is the authoritative description of a function's signature, and the generated code below it is derived mechanically from it.

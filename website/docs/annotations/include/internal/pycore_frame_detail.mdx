@@ -1,0 +1,60 @@
+---
+title: "Include/internal/pycore_frame.h"
+description: The inline frame struct that the tier-1 eval loop allocates on the C stack to represent one Python activation record
+cpython_path: Include/internal/pycore_frame.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython 3.11 replaced heap-allocated `PyFrameObject` instances with a compact `_PyInterpreterFrame` that normally lives on the C stack, threaded through a linked list via `previous`. This header defines the struct layout, the stack-pointer accessors, the owner enum that records where the frame was allocated, and the incomplete-frame predicate used during frame setup.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `_PyInterpreterFrame` | Inline frame struct holding all per-call execution state |
+| 31-50 | `_PyInterpreterFrame.f_executable` | Strong reference to the code object (or other executable) being run |
+| 51-70 | `_PyInterpreterFrame.f_globals` | Borrowed reference to the global namespace dict |
+| 71-80 | `_PyInterpreterFrame.f_locals` | Borrowed reference to the local namespace (NULL for optimized frames) |
+| 81-90 | `_PyInterpreterFrame.f_builtins` | Borrowed reference to the builtins dict for fast LOAD_GLOBAL lookup |
+| 91-120 | `_PyInterpreterFrame.prev_instr` | Pointer to the last executed instruction, used as the program counter |
+| 121-140 | `_PyInterpreterFrame.localsplus` | Flexible array of `PyObject *` holding locals, cells, free vars, and the value stack |
+| 141-155 | `_PyInterpreterFrame.frame_obj` | Backpointer to the heap `PyFrameObject` if one has been materialised, else NULL |
+| 156-170 | `_PyInterpreterFrame.owner` | `_PyFrameOwner` enum value recording the frame's allocation site |
+| 171-180 | `FRAME_OWNED_BY_CSTACK` | Owner constant for frames allocated on the C stack inside `_PyEval_EvalFrameDefault` |
+| 181-185 | `FRAME_OWNED_BY_GENERATOR` | Owner constant for frames embedded inside a `PyGenObject` |
+| 186-190 | `FRAME_OWNED_BY_FRAME_OBJECT` | Owner constant for frames that were moved to the heap when a `PyFrameObject` was requested |
+| 191-195 | `_PyFrame_SetStackPointer` | Write the current value-stack top back into the frame |
+| 196-200 | `_PyFrame_GetStackPointer` | Derive the current stack top from `prev_instr` and the code object |
+| 201-210 | `_PyFrame_IsIncomplete` | Predicate returning true while the frame is still being set up and is not yet safe to inspect |
+
+## Reading
+
+### _PyInterpreterFrame struct
+
+Before CPython 3.11, every function call allocated a `PyFrameObject` on the heap. The "lazy frames" redesign moved the execution state into `_PyInterpreterFrame`, which is typically allocated in the large C-stack array that `_PyEval_EvalFrameDefault` reserves at the start of each call to the eval loop. The heap `PyFrameObject` is only created on demand, for example when user code calls `sys._getframe()` or when a debugger requests the frame.
+
+`f_executable` holds a strong reference to the code object so that the code object cannot be freed while the frame is live. All other dict references (`f_globals`, `f_locals`, `f_builtins`) are borrowed because the module or function object is guaranteed to outlive the frame.
+
+### localsplus and the value stack
+
+`localsplus` is a flexible-array member at the end of the struct. Its layout for a given code object is: `co_nlocals` local variable slots, followed by `co_ncellvars` cell slots, followed by `co_nfreevars` free variable slots, followed by the value stack growing upward. The total capacity is `co_nlocalsplus + co_stacksize` entries. The eval loop uses `_PyFrame_GetStackPointer` to find the current stack top without storing a redundant field in the struct.
+
+### Owner enum
+
+The `owner` field uses the `_PyFrameOwner` enum to record where the frame struct lives. `FRAME_OWNED_BY_CSTACK` means the memory is inside the eval loop's on-stack frame array and must not be freed explicitly. `FRAME_OWNED_BY_GENERATOR` means the struct is embedded in a `PyGenObject` on the heap; the generator's dealloc path owns the memory. `FRAME_OWNED_BY_FRAME_OBJECT` means the struct was copied to the heap as part of materialising a `PyFrameObject`; the frame object's dealloc path frees it.
+
+The distinction matters during finalization. When a generator is garbage-collected without being exhausted, the GC calls `gen_dealloc`, which checks `owner` to decide how to clean up the embedded frame without double-freeing.
+
+### Stack pointer accessors and _PyFrame_IsIncomplete
+
+`_PyFrame_SetStackPointer(frame, sp)` stores `sp` back into the frame by encoding it relative to `prev_instr`. This indirection lets the eval loop avoid a redundant pointer field while still supporting frame inspection.
+
+`_PyFrame_IsIncomplete(frame)` returns true when `prev_instr` points before the first real instruction of the code object, which happens during the RESUME opcode phase. Debuggers and `sys.settrace` must not inspect a frame that is incomplete because fields like `f_locals` and `localsplus` may not yet be populated.
+
+## gopy notes
+
+gopy's equivalent is `vm.Frame` in `vm/frame.go`, which is heap-allocated and reference-counted rather than stack-allocated. The `localsplus` flexible array maps to `vm.Frame.Locals` (a Go slice covering local variables and cells) plus the value stack embedded in the eval loop as a Go slice. The `owner` enum has no direct counterpart because gopy frames are always heap-allocated. `_PyFrame_IsIncomplete` is not ported; gopy's RESUME handling initialises all frame fields before the frame becomes visible to any observer. The `prev_instr` program counter maps to `vm.Frame.PC`, an integer index into the instruction slice.

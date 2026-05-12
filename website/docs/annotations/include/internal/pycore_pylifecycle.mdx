@@ -1,0 +1,107 @@
+---
+title: Include/internal/pycore_pylifecycle.h
+description: Internal interpreter lifecycle API covering initialization, finalization, and interpreter/thread state management.
+cpython_path: Include/internal/pycore_pylifecycle.h
+cpython_version: "3.14"
+lines: ~100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_pylifecycle.h`
+
+<CpyLink path="Include/internal/pycore_pylifecycle.h" />
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `_Py_InitializeMain` | function | Second phase of interpreter startup; sets up `__main__`, site, warnings |
+| `_Py_FinalizeEx` | function | Tears down the interpreter, flushes stdio, runs `atexit` handlers |
+| `_PyRuntime_Initialize` | function | One-time init of the process-wide `_PyRuntime` struct |
+| `_PyRuntime_Finalize` | function | Clears the process-wide runtime state |
+| `_PyInterpreterState_New` | function | Allocates and links a new `PyInterpreterState` |
+| `_PyInterpreterState_Delete` | function | Unlinks and frees an interpreter state |
+| `_PyThreadState_New` | function | Allocates a `PyThreadState` and attaches it to an interpreter |
+| `_PyThreadState_Delete` | function | Detaches and frees a thread state |
+| `_Py_ClearStandardStreamEncoding` | function | Resets the cached encoding/errors for stdin, stdout, stderr |
+
+The header is included by `Python/pylifecycle.c` and by the embedding API headers. Nothing in it is part of the stable ABI; all symbols carry the `_Py` or `_PyRuntime` internal prefix.
+
+## Reading
+
+### Two-phase initialization
+
+CPython 3.8 split startup into two phases via `PyConfig`. `_Py_InitializeMain` is phase two: it imports `site`, sets `sys.argv`, and configures standard-stream encodings. Phase one (`_PyRuntime_Initialize` followed by core interpreter bootstrap) must already be complete before `_Py_InitializeMain` is called.
+
+```c
+// CPython: Python/pylifecycle.c
+PyStatus
+_Py_InitializeMain(void)
+{
+    PyStatus status = pyinit_main(_PyRuntime.interpreters.main);
+    ...
+    return status;
+}
+```
+
+Knowing the two-phase boundary matters when reading gopy's `pythonrun` package: the Go side only needs phase-two semantics because there is no dynamic `site` import and no `sys.argv` to populate from a real OS process.
+
+### Interpreter and thread state allocation
+
+Each `_PyInterpreterState_New` call allocates a fresh interpreter and appends it to the linked list rooted at `_PyRuntime.interpreters.head`. `_PyThreadState_New` then allocates a `PyThreadState`, sets its `interp` pointer, and pushes it onto that interpreter's thread-state stack.
+
+```c
+// CPython: Python/pystate.c
+PyInterpreterState *
+_PyInterpreterState_New(PyThreadState *tstate)
+{
+    ...
+    interp->id = _PyRuntime.interpreters.next_id++;
+    HEAD_LOCK(runtime);
+    interp->next = runtime->interpreters.head;
+    runtime->interpreters.head = interp;
+    HEAD_UNLOCK(runtime);
+    return interp;
+}
+```
+
+The linked-list structure is relevant to gopy's `vm` package: the evaluator loop holds a pointer to the current thread state and must not cross interpreter boundaries without re-acquiring state.
+
+### Finalization ordering
+
+`_Py_FinalizeEx` enforces a strict teardown order: `atexit` callbacks, then module `__del__` methods, then garbage collection, then thread-state cleanup, then runtime struct zeroing. Violating this order causes dangling `PyObject *` references in CPython's C extensions.
+
+```c
+// CPython: Python/pylifecycle.c
+int
+_Py_FinalizeEx(void)
+{
+    ...
+    /* Flush sys.stdout and sys.stderr */
+    if (flush_std_files() < 0) {
+        status = -1;
+    }
+    /* Run atexit functions */
+    _Py_FinalizeAtExit(tstate);
+    ...
+    _PyRuntime_Finalize();
+    return status;
+}
+```
+
+## gopy mirror
+
+gopy does not port `pycore_pylifecycle.h` as a standalone header. The lifecycle responsibilities are split across two packages:
+
+- `/pythonrun/runstring.go` handles interpreter startup and houses the equivalent of `_Py_InitializeMain`: it wires up built-in modules, seeds `sys.modules`, and prepares the evaluation state before any user bytecode runs.
+- `state/state.go` (when present) owns the interpreter/thread state structs that mirror `PyInterpreterState` and `PyThreadState`.
+
+There is no `_Py_FinalizeEx` equivalent yet; gopy programs exit via normal Go process termination.
+
+## CPython 3.14 changes
+
+- `_PyRuntime_Initialize` gained a `PyStatus` return type in 3.12 and that signature is unchanged in 3.14.
+- `_Py_ClearStandardStreamEncoding` was moved from `pylifecycle.c` internal linkage to this header in 3.13 to support subinterpreters with independent stream encodings.
+- `_PyInterpreterState_New` now accepts an explicit `PyThreadState *` caller argument (added in 3.12) so the runtime can record which thread requested the new interpreter.

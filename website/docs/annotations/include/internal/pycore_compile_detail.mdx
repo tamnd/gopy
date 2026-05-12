@@ -1,0 +1,135 @@
+---
+title: "pycore_compile.h: Compiler Internal API"
+description: "Metadata structs, the optimizer hook, and the Assemble entry point used by CPython's bytecode compiler in 3.14"
+cpython_path: Include/internal/pycore_compile.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: compile/compiler.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink file="Include/internal/pycore_compile.h" />
+
+`pycore_compile.h` is the internal boundary between the front-end compiler
+(`Python/compile.c`) and the back-end assembler (`Python/assemble.c`). It also
+declares the optimizer hook that the 3.12+ specializing adaptive interpreter
+uses to install a peephole or tier-2 optimizer.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-15  | includes, forward decls | boilerplate | Needs `pycore_uops.h` for `_PyUOpInstruction` |
+| 16-35 | `_PyCompile_CodeUnitMetadata` | struct | Per-code-object metadata forwarded to `PyCodeObject` |
+| 36-50 | `_PyCompile_ConstCacheUnit` | struct | Dedup cache entry for constants folded at compile time |
+| 51-62 | `_PyOptimizer` / optimizer hook | struct + typedef | Pluggable optimizer called from `_PyCode_Quicken` |
+| 63-72 | `_PyCompile_Assemble` | function | Entry point that converts a `cfg_builder` to a `PyCodeObject` |
+| 73-80 | `_PyCompile_CleanDoc` | function | Strips leading whitespace from docstrings during assembly |
+
+## Reading
+
+### _PyCompile_CodeUnitMetadata
+
+This struct carries all the non-instruction metadata that `compile.c` collects
+while visiting the AST. It is passed into `_PyCompile_Assemble` alongside the
+control-flow graph so the assembler does not need to reach back into the
+compiler state.
+
+```c
+/* Include/internal/pycore_compile.h:16 */
+typedef struct {
+    PyObject *u_name;        /* qualified name str */
+    PyObject *u_qualname;
+    int       u_argcount;
+    int       u_posonlyargcount;
+    int       u_kwonlyargcount;
+    int       u_firstlineno;
+    int       u_varcount;    /* total locals including hidden */
+    PyObject *u_varnames;    /* list of local names */
+    PyObject *u_cellvars;
+    PyObject *u_freevars;
+    int       u_flags;       /* CO_* flags bitfield */
+} _PyCompile_CodeUnitMetadata;
+```
+
+The assembler copies these fields directly into the `PyCodeObject` it
+allocates, so any value that must appear in the final code object must be
+present here before `_PyCompile_Assemble` is called.
+
+### _PyCompile_ConstCacheUnit and constant folding
+
+The compiler maintains a dict of interned constants to avoid emitting duplicate
+`LOAD_CONST` operands for the same value. Each entry in that dict is a
+`_PyCompile_ConstCacheUnit`.
+
+```c
+/* Include/internal/pycore_compile.h:36 */
+typedef struct {
+    PyObject *key;    /* the constant value */
+    int       index;  /* index into co_consts */
+} _PyCompile_ConstCacheUnit;
+```
+
+In 3.14, the cache is also used by the constant-folding peephole pass so that
+folded expressions reuse existing entries rather than appending new ones.
+
+### _PyOptimizer hook (3.12+, extended in 3.14)
+
+The optimizer hook was introduced in 3.12 to allow the specializing adaptive
+interpreter to swap in a different optimizer per code object. In 3.14 it gained
+a second entry point for tier-2 uop traces.
+
+```c
+/* Include/internal/pycore_compile.h:51 */
+typedef struct _PyOptimizer {
+    uint16_t  optim_type;
+    uint16_t  resume_threshold;
+    uint16_t  backedge_threshold;
+    int (*optimize)(struct _PyOptimizer *self,
+                    struct _PyInterpreterFrame *frame,
+                    _Py_CODEUNIT *instr,
+                    int stacklevel);
+} _PyOptimizer;
+
+extern _PyOptimizer *_PyOptimizer_Default;
+```
+
+Calling `_PyOptimizer_Default->optimize(...)` replaces instruction sequences
+in-place with specialized or uop versions. gopy's v0.12 optimizer (tracked in
+`compile/flowgraph_passes.go`) models this hook as an interface rather than a
+function pointer struct.
+
+### _PyCompile_Assemble
+
+```c
+/* Include/internal/pycore_compile.h:63 */
+PyCodeObject *_PyCompile_Assemble(
+    _PyCompile_CodeUnitMetadata *metadata,
+    PyObject                    *filename,
+    struct cfg_builder          *g);
+```
+
+This is the single exit point from the compiler. It takes the metadata struct
+and the completed control-flow graph, runs the liveness and stack-depth passes,
+linearises the basic blocks, encodes exception tables, and allocates the
+`PyCodeObject`. Returning NULL means an exception is set.
+
+## gopy notes
+
+- `_PyCompile_CodeUnitMetadata` maps to `CodeUnitMeta` in `compile/compiler.go`.
+  Fields are kept in the same order to make side-by-side diffs with CPython
+  readable.
+- `_PyCompile_ConstCacheUnit` maps to the `constCache` map (type
+  `map[any]int`) in the same file. A full struct is not needed because Go maps
+  already provide O(1) lookup and insertion.
+- The `_PyOptimizer` hook maps to the `Optimizer` interface in
+  `compile/flowgraph_passes.go`. The default peephole optimizer is
+  `PeepholeOptimizer`; the tier-2 uop optimizer is `UOpOptimizer` (v0.12 scope).
+- `_PyCompile_Assemble` maps to `Assemble` in `compile/compiler.go`, which
+  calls into `compile/flowgraph.go` for linearisation and
+  `compile/flowgraph_stackdepth.go` for depth computation.
+- The 3.14 addition of `_PyCompile_CleanDoc` is handled inline in the
+  `visitStmt` function rather than as a separate call because Go string
+  processing makes the trim trivial to inline.

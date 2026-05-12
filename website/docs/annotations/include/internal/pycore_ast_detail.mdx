@@ -1,0 +1,105 @@
+---
+title: "pycore_ast.h: Generated AST Internal Header"
+description: "How the internal AST header is generated from Python.asdl and how arena allocation ties into the node tree"
+cpython_path: Include/internal/pycore_ast.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: parser/ast.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink file="Include/internal/pycore_ast.h" />
+
+`pycore_ast.h` is a machine-generated file. It is produced by
+`Parser/asdl_c.py` from the grammar description at `Parser/Python.asdl` and
+should never be edited by hand. The public face of the same types lives in
+`Include/cpython/Python-ast.h`. This internal header adds fields and helpers
+that the compiler pipeline uses but that the stable C-API does not expose.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-10  | include guard, includes | boilerplate | Pulls in `pycore_asdl.h` for `asdl_seq` |
+| 11-30 | `_Py_asdl_seq` / `asdl_seq` | struct | Variable-length node array allocated in an arena |
+| 31-50 | `_Py_asdl_int_seq` | struct | Specialised sequence for integer fields |
+| 51-65 | `_PyAST_Validate` | function | Walks the tree and asserts invariants before compilation |
+| 66-80 | `_PyAST_ExpressionDepth` | function | Returns maximum nesting depth (used for stack size hints) |
+
+## Reading
+
+### How the file is generated
+
+`Parser/asdl_c.py` reads `Parser/Python.asdl` and emits three C files in one
+run.
+
+```
+Python.asdl
+    --> asdl_c.py
+            --> Include/cpython/Python-ast.h   (public structs)
+            --> Include/internal/pycore_ast.h  (internal helpers)
+            --> Python/Python-ast.c            (init / visit code)
+```
+
+The ASDL grammar describes each node kind as either a `product` (fixed fields)
+or a `sum` (tagged union). Each sum alternative becomes a C struct with a
+`_kind` discriminant and a union body. The generator emits one `typedef` per
+kind so that the compiler can switch on `node->kind` without casting.
+
+Because the header is generated, line numbers shift between CPython releases.
+Annotations that cite specific lines should confirm against the 3.14 tag.
+
+### _Py_asdl_seq and arena allocation
+
+All AST nodes and their sequences are allocated from a `PyArena`. The arena
+frees everything in one shot when the compiler finishes, which avoids
+per-node `Py_DECREF` overhead.
+
+```c
+/* Include/internal/pycore_ast.h:11 (approx) */
+typedef struct {
+    Py_ssize_t size;
+    void      *typed_elements[1];  /* flexible array */
+} asdl_seq;
+
+/* Helpers in Python/Python-ast.c */
+asdl_seq *_Py_asdl_seq_new(Py_ssize_t size, PyArena *arena);
+void      *asdl_seq_GET(asdl_seq *s, Py_ssize_t i);
+void       asdl_seq_SET(asdl_seq *s, Py_ssize_t i, void *val);
+```
+
+`_Py_asdl_seq_new` calls `PyArena_Malloc`, so the returned pointer must never
+be freed individually. Callers pass `arena` down through every action in
+`Parser/action_helpers.c`.
+
+### _PyAST_Validate
+
+After `_PyPegen_run_parser` returns, the compiler calls `_PyAST_Validate` to
+check structural invariants (no NULL children, valid enum values). This is a
+debug-mode guard; release builds skip it via `#ifdef Py_DEBUG`.
+
+```c
+/* Include/internal/pycore_ast.h:51 (approx) */
+int _PyAST_Validate(mod_ty mod);
+```
+
+The function returns `0` and sets an exception on failure. In gopy the
+equivalent check is part of the parser's own return-path validation rather than
+a separate post-pass, because Go's type system and nil checks replace several
+categories of invariant that C cannot enforce statically.
+
+## gopy notes
+
+- `parser/ast.go` contains hand-written Go structs derived from `Python.asdl`
+  directly, not from the generated C header. The ASDL file is the true source
+  of truth for both CPython and gopy.
+- `asdl_seq` becomes a typed slice in Go (for example `[]Expr`, `[]Stmt`).
+  Arena allocation is replaced by normal GC; the arena lifetime guarantee is
+  not needed because Go's escape analysis and GC handle it.
+- `_PyAST_Validate` has no direct counterpart. Equivalent safety comes from
+  the typed return values of each parser action function in
+  `parser/pegen/action_helpers_gen.go`.
+- `_PyAST_ExpressionDepth` is replicated in `compile/flowgraph_stackdepth.go`
+  as part of the stack-depth estimation pass.

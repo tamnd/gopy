@@ -1,0 +1,102 @@
+---
+title: "Include/import.h: Module Import Public API"
+description: "Public C API for importing modules, managing sys.modules, and controlling import locks; covers PyImport_ImportModule through AppendInittab"
+cpython_path: Include/import.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: vm/eval_import.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`import.h` is the stable public face of the import system. It exposes the
+functions that C extensions and embedding hosts call to load modules, inspect
+`sys.modules`, and register built-in extension initialisation tables. The
+internals (`_PyImport_*` machinery, finders, loaders) live in
+`Include/internal/pycore_import.h`.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-10 | guard, includes | macro | `Py_LIMITED_API` guard; pulls in `object.h` |
+| 11-25 | `PyImport_ImportModule` | function decl | Import by name, returns new reference |
+| 26-40 | `PyImport_ImportModuleNoBlock` | function decl | Deprecated in 3.13; equivalent to `ImportModule` now |
+| 41-60 | `PyImport_ImportModuleLevel` | function decl | Full `__import__` equivalent with level and fromlist |
+| 61-75 | `PyImport_AddModule` | function decl | Upsert entry in `sys.modules`, returns borrowed ref |
+| 76-85 | `PyImport_GetModule` / `SetModule` | function decl | Direct `sys.modules` get/set by name key |
+| 86-95 | `Py_FrozenFlag` | extern int | Global flag; non-zero when running from frozen modules |
+| 96-105 | `PyImport_AppendInittab` | function decl | Register a new built-in module before `Py_Initialize` |
+| 106-115 | `_PyImport_AcquireLock` / `ReleaseLock` | function decl | Per-interpreter import mutex (underscore = semi-private) |
+| 116-120 | `PyImport_ReloadModule` | function decl | Reload a previously imported module object |
+
+## Reading
+
+### ImportModule and ImportModuleLevel
+
+```c
+PyAPI_FUNC(PyObject *) PyImport_ImportModule(const char *name);
+
+PyAPI_FUNC(PyObject *) PyImport_ImportModuleLevel(
+    const char *name,
+    PyObject   *globals,
+    PyObject   *locals,
+    PyObject   *fromlist,
+    int         level      /* 0 = absolute, >0 = relative */
+);
+```
+
+`ImportModule(name)` is a thin wrapper that calls `ImportModuleLevel` with
+`globals=NULL`, `locals=NULL`, `fromlist=NULL`, `level=0`. The `level`
+parameter maps directly to the second argument of the Python `__import__`
+builtin. A non-zero `fromlist` suppresses the usual "return the top-level
+package" behaviour and returns the rightmost name instead.
+
+### AddModule, GetModule, SetModule
+
+```c
+PyAPI_FUNC(PyObject *) PyImport_AddModule(const char *name);
+PyAPI_FUNC(PyObject *) PyImport_GetModule(PyObject *name);
+PyAPI_FUNC(int)        PyImport_SetModule(PyObject *name, PyObject *module);
+```
+
+`AddModule` creates a bare `PyModuleObject` and inserts it into
+`sys.modules` if the key is absent, then returns a borrowed reference.
+`GetModule` and `SetModule` are the 3.13-stable wrappers around direct
+`sys.modules` dict access. Callers that need to manipulate `sys.modules`
+before the import lock is held should prefer these over direct dict calls so
+that subinterpreter isolation is respected.
+
+### Import lock and AppendInittab
+
+```c
+PyAPI_FUNC(int)  _PyImport_AcquireLock(void);
+PyAPI_FUNC(int)  _PyImport_ReleaseLock(void);
+
+PyAPI_FUNC(int)  PyImport_AppendInittab(
+    const char *name,
+    PyObject *(*initfunc)(void)
+);
+```
+
+The import lock is a per-interpreter recursive mutex. `AcquireLock` returns 1
+on success, 0 if the lock is owned by another thread (rare; callers should
+retry), and -1 on error. `AppendInittab` must be called before
+`Py_Initialize`; it appends one row to the `_PyImport_Inittab` array that the
+bootstrap import machinery consults for built-in modules.
+
+## gopy notes
+
+- `PyImport_ImportModuleLevel` is the backing function for the `IMPORT_NAME`
+  opcode handler in `vm/eval_import.go`. The `level` and `fromlist` arguments
+  are taken directly from the code object and the stack.
+- `_PyImport_AcquireLock` / `ReleaseLock` have no direct gopy equivalent yet.
+  Import serialisation is currently handled by the Go runtime scheduler
+  (single-goroutine execution per interpreter instance).
+- `PyImport_AppendInittab` is approximated by `stdlibinit/registry.go`, which
+  registers Go-implemented modules before the interpreter starts. The calling
+  convention differs (Go function values rather than C pointers) but the
+  semantics are the same.
+- `Py_FrozenFlag` is not yet implemented; gopy always loads from the stdlib
+  package tree rather than from a frozen archive.

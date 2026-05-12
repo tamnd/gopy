@@ -1,0 +1,108 @@
+---
+title: Modules/_sha512module.c
+description: SHA-512 and SHA-384 hash implementations backed by the HACL* verified cryptography library.
+cpython_path: Modules/_sha512module.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+This module provides the `_sha512` built-in extension, which exposes SHA-512 and SHA-384
+digest objects to Python. Since CPython 3.12 the low-level arithmetic is delegated to
+[HACL*](https://github.com/hacl-star/hacl-star), a formally verified C library, replacing
+the hand-rolled implementation that lived here before.
+
+## Map
+
+| Symbol | Kind | Notes |
+|---|---|---|
+| `SHA512object` | struct | holds `sha512_state_s` and an `is_sha384` flag |
+| `sha512type` | `PyTypeObject` | `digest_size=64`, `block_size=128` |
+| `sha384type` | `PyTypeObject` | `digest_size=48`, `block_size=128` |
+| `SHA512_new` | function | constructs either type; dispatches on `is_sha384` |
+| `SHA512_copy` | method | returns a fresh object sharing the accumulated state |
+| `SHA512_digest` | method | finalises a copy, returns `bytes` of length 64 or 48 |
+| `SHA512_hexdigest` | method | same but hex-encoded |
+| `SHA512_update` | method | feeds more data into the HACL* state |
+| `_sha512_module` | `PyModuleDef` | registers both types and the module-level constructors |
+
+## Reading
+
+### Object layout and the `is_sha384` flag
+
+```c
+typedef struct {
+    PyObject_HEAD
+    int is_sha384;
+    Hacl_Hash_SHA2_state_t_512 *state;
+} SHA512object;
+```
+
+A single C struct covers both algorithms. The `is_sha384` flag is checked at finalisation
+time to decide how many bytes to read out of the HACL* state. This keeps the code paths
+for update and copy identical between the two variants.
+
+### Constructing a new hash object
+
+```c
+static SHA512object *
+newSHA512object(PyTypeObject *type)
+{
+    SHA512object *sha;
+    sha = (SHA512object *)PyObject_GC_New(SHA512object, type);
+    if (sha == NULL)
+        return NULL;
+    sha->state = Hacl_Hash_SHA2_malloc_512();
+    if (sha->state == NULL) {
+        PyObject_GC_Del(sha);
+        return NULL;
+    }
+    PyObject_GC_Track(sha);
+    return sha;
+}
+```
+
+`Hacl_Hash_SHA2_malloc_512` allocates and zeroes the HACL* internal state. The object is
+tracked by the GC so the finaliser can call `Hacl_Hash_SHA2_free_512` even if a cycle
+prevents normal reference counting from firing.
+
+### Finalisation and digest extraction
+
+```c
+static PyObject *
+SHA512_digest(SHA512object *self, PyObject *args)
+{
+    uint8_t digest[SHA512_DIGESTSIZE];
+    Hacl_Hash_SHA2_state_t_512 *state_copy;
+
+    state_copy = Hacl_Hash_SHA2_copy_512(self->state);
+    if (self->is_sha384)
+        Hacl_Hash_SHA2_finish_384(state_copy, digest);
+    else
+        Hacl_Hash_SHA2_finish_512(state_copy, digest);
+    Hacl_Hash_SHA2_free_512(state_copy);
+    return PyBytes_FromStringAndSize((char *)digest,
+                                     self->is_sha384 ? SHA384_DIGESTSIZE
+                                                     : SHA512_DIGESTSIZE);
+}
+```
+
+The state is copied before finalisation so that `update` can continue to be called on the
+original object after `digest()` returns. CPython's `hashlib` contract requires this.
+
+## gopy mirror
+
+Not yet ported. The natural home would be `module/_sha512/` following the flat layout
+convention. The HACL* dependency would be replaced by `crypto/sha512` from the Go standard
+library, which is also a pure-Go verified implementation. The `is_sha384` flag maps cleanly
+to a boolean field on a Go struct, and the two `PyTypeObject` entries map to two
+`objects.Type` singletons registered at module init.
+
+## CPython 3.14 changes
+
+- The HACL* state type was renamed from `Hacl_Hash_SHA2_state_t_512` to a typedef alias
+  introduced in `_hacl/include/krml/types.h`; the module itself is unchanged.
+- A `usedforsecurity` keyword argument was added to the module-level constructors to align
+  with `hashlib.sha512()`. The flag is passed through but has no effect on the HACL* path.

@@ -1,0 +1,144 @@
+---
+title: Include/internal/pycore_long.h
+description: "Internal integer header: compact representation, digit array, small-int cache, and fast-path helpers"
+cpython_path: Include/internal/pycore_long.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_long.h" />
+
+CPython's `int` type went through a major internal redesign in 3.12. The
+classic `ob_digit[]` array is still present for large integers, but small
+integers now use a "compact" layout that fits entirely in the fixed header,
+avoiding a heap allocation for the digit array. This header exposes the
+machinery behind both layouts and the small-integer cache.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 15-40 | `PyLongObject` (internals) | Tag bits encoding sign, zero, and compact flag in the leading word |
+| 45-60 | `_PyLong_IsCompact` | Predicate: true when the value fits in the header without an `ob_digit` array |
+| 62-80 | `_PyLong_CompactValue` | Fast extraction of the integer value from a compact object |
+| 85-100 | `_PyLong_DigitCount` | Number of digits in the `ob_digit` array for non-compact objects |
+| 110-130 | `_PY_NSMALLPOSINTS` / `_PY_NSMALLNEGINTS` | Cache bounds for the small-integer singleton table |
+| 140-160 | `_PyLong_GetSmallInt_internal` | Direct cache lookup without bounds checking |
+| 165-190 | `_PyLong_FromSTR` | Parse a string with an explicit base into a new `int` object |
+
+## Reading
+
+### Compact representation and tag bits
+
+Prior to 3.12, every `PyLongObject` paid for a `Py_ssize_t ob_size` field
+(encoding digit count and sign) plus a pointer to `ob_digit[]` on the heap.
+For values that fit in a single digit (roughly -2^30 to 2^30 on 64-bit
+platforms), 3.12 introduced a "compact" variant: the value is stored directly
+in the `lv_tag` word alongside a flag that tells readers which layout is
+active.
+
+The tag word packs three pieces of information into its low bits:
+
+- bit 0: compact flag (1 = compact, 0 = general)
+- bit 1: sign (0 = non-negative, 1 = negative for compact; for general,
+  sign is derived from `ob_size` as before)
+- remaining bits: the actual digit value for compact objects, or the digit
+  count for general objects
+
+```c
+// CPython: Include/internal/pycore_long.h:47 _PyLong_IsCompact
+static inline int
+_PyLong_IsCompact(const PyLongObject *op)
+{
+    return op->long_value.lv_tag & 1;
+}
+```
+
+`_PyLong_CompactValue` decodes the value by right-shifting the tag and
+applying the sign bit. It is safe to call only after confirming
+`_PyLong_IsCompact` is true.
+
+```c
+// CPython: Include/internal/pycore_long.h:65 _PyLong_CompactValue
+static inline Py_ssize_t
+_PyLong_CompactValue(const PyLongObject *op)
+{
+    Py_ssize_t sign = 1 - (op->long_value.lv_tag & 3);
+    return sign * (Py_ssize_t)(op->long_value.lv_tag >> 2);
+}
+```
+
+The sign encoding (`1 - (tag & 3)`) produces 1 for tag bit 1 = 0 and -1 for
+tag bit 1 = 1, matching the convention that zero is stored as a non-negative
+compact with value 0.
+
+### Digit count and the general layout
+
+For integers that do not fit in the compact form, `_PyLong_DigitCount` returns
+the length of the `ob_digit` array. This is just the absolute value of
+`ob_size` from the general header, but expressed through an accessor so the
+representation can change without touching call sites.
+
+```c
+// CPython: Include/internal/pycore_long.h:88 _PyLong_DigitCount
+static inline Py_ssize_t
+_PyLong_DigitCount(const PyLongObject *op)
+{
+    assert(!_PyLong_IsCompact(op));
+    return (Py_ssize_t)(op->long_value.lv_tag >> 3);
+}
+```
+
+Digits are stored in base 2^30 on 32-bit platforms and 2^15 on certain
+embedded targets, little-endian (least significant digit first). The
+`ob_digit` flexible array member sits at the end of `PyLongObject`, so for
+compact objects the array has zero logical elements even though the struct
+member exists in the C layout.
+
+### Small-integer cache
+
+CPython pre-allocates a table of singleton `int` objects for the range
+`[-_PY_NSMALLNEGINTS, _PY_NSMALLPOSINTS)`. Lookups into this range never
+allocate; they return a borrowed reference to the cached object.
+
+```c
+// CPython: Include/internal/pycore_long.h:112 _PY_NSMALLPOSINTS
+#define _PY_NSMALLPOSINTS  257
+#define _PY_NSMALLNEGINTS  5
+```
+
+The asymmetry (257 positive, 5 negative) reflects real-world usage: loop
+counters, list indices, and small arithmetic results are almost always
+non-negative, while -1 through -5 cover the most common error-sentinel and
+iteration patterns.
+
+`_PyLong_GetSmallInt_internal` is the unchecked fast path used inside the
+interpreter's hot loop. It indexes directly into the interpreter state's
+`small_ints` array. Callers that might receive an out-of-range value use the
+public `PyLong_FromLong` which bounds-checks first.
+
+`_PyLong_FromSTR` is the internal entry point for `int(s, base)`. It handles
+the base-prefix detection (`0x`, `0o`, `0b`) and delegates digit parsing to
+`_PyLong_FromByteArray` for large values or returns a compact object for
+small results.
+
+## gopy notes
+
+Status: not yet ported.
+
+The Go `int` type and the `math/big.Int` type together cover what CPython
+splits across the compact and general layouts. The planned mapping is:
+
+- Compact integers: a Go `int64` field on the `objects.Int` struct, valid when
+  a `compact` flag is set. This avoids allocating a `big.Int` for the common
+  case.
+- General integers: a `*big.Int` field used when the value overflows `int64`.
+- Small-integer cache: a package-level `[262]objects.Int` array (257 + 5)
+  initialized in `objects/int.go` `init()`, matching CPython's bounds.
+- `_PyLong_IsCompact` / `_PyLong_CompactValue`: planned as `IsCompact() bool`
+  and `CompactValue() int64` methods on `objects.Int`.
+
+Planned package path: `objects/int.go`.

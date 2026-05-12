@@ -1,0 +1,121 @@
+---
+title: Modules/_threadmodule.c
+description: "CPython source annotation: _threadmodule.c"
+cpython_path: Modules/_threadmodule.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_threadmodule.c" />
+
+`_threadmodule.c` implements the `_thread` built-in module, the low-level foundation that `threading` builds on. It covers thread creation, lock primitives (plain `lock` and `RLock`), thread-local storage via `_local`, and several identity and introspection helpers.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `thread_start_new_thread` | function | 60 | Bootstrap wrapper; acquires GIL before calling user callable |
+| `t_bootstrap` | function | 40 | Native thread entry point; manages GIL lifecycle |
+| `lockobject` | type | 200 | Plain non-reentrant lock backed by `PyThread_type_lock` |
+| `lock_acquire` | method | 80 | Timed acquire using `PY_TIMEOUT_T` and `Py_BEGIN_ALLOW_THREADS` |
+| `lock_release` | method | 20 | Unconditional release; raises `RuntimeError` if not held |
+| `RLock` | type | 250 | Reentrant lock; tracks owner thread id and recursion count |
+| `thread_get_ident` | function | 15 | Returns `PyThread_get_thread_ident()` as Python int |
+| `thread_get_native_id` | function | 15 | Returns OS-level thread id (Linux tid, macOS `pthread_mach_thread_np`, etc.) |
+| `_local` | type | 300 | Per-thread attribute namespace; stores dict keyed by thread id |
+| `daemon_threads_allowed` | function | 10 | Returns interpreter-level flag controlling daemon thread policy |
+
+## Reading
+
+### Thread creation and GIL bootstrap
+
+`thread_start_new_thread` validates the callable and args, then calls `PyThread_start_new_thread` with `t_bootstrap` as the native entry point. The bootstrap acquires the GIL with `PyEval_AcquireThread` before touching any Python objects, and releases it on the way out regardless of whether the callable raised.
+
+```c
+// CPython: Modules/_threadmodule.c:134 t_bootstrap
+static void
+t_bootstrap(void *boot_raw)
+{
+    struct bootstate *boot = (struct bootstate *) boot_raw;
+    PyThreadState *tstate = boot->tstate;
+    PyObject *res;
+
+    tstate->thread_id = PyThread_get_thread_ident();
+    _PyEval_AcquireThread(tstate);
+    tstate->interp->num_threads++;
+    res = PyObject_Call(boot->func, boot->args, boot->keyw);
+    ...
+}
+```
+
+The `bootstate` struct carries the interpreter state, callable, positional args, and keyword args so the native thread can reconstruct the Python call context from scratch.
+
+### Lock acquisition with timeout
+
+`lock_acquire` maps the Python `timeout` float (seconds) to `PY_TIMEOUT_T` (microseconds). Negative values mean block forever; zero means a non-blocking trylock. The actual wait happens inside `PyThread_acquire_lock_timed`, called between `Py_BEGIN_ALLOW_THREADS` and `Py_END_ALLOW_THREADS` so other threads can run while this one waits.
+
+```c
+// CPython: Modules/_threadmodule.c:329 lock_acquire_impl
+static PyObject *
+lock_acquire_impl(lockobject *self, int blocking, double timeout)
+{
+    _PyTime_t timeout_us;
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    r = PyThread_acquire_lock_timed(self->lock_lock,
+                                    timeout_us, 1);
+    Py_END_ALLOW_THREADS
+    return PyBool_FromLong(r == PY_LOCK_ACQUIRED);
+}
+```
+
+`RLock` short-circuits the platform lock when the calling thread already owns it, incrementing a recursion counter instead. On release the counter is decremented; only when it reaches zero is the underlying lock actually released.
+
+```c
+// CPython: Modules/_threadmodule.c:578 rlock_acquire_impl
+if (self->rlock_count > 0 &&
+    self->rlock_owner == PyThread_get_thread_ident()) {
+    self->rlock_count++;
+    Py_RETURN_TRUE;
+}
+```
+
+### Thread-local storage (_local)
+
+`_local` stores a per-instance dictionary keyed by thread identity. On every attribute access it looks up the current thread's id in that dictionary and swaps `self.__dict__` to point at the thread-local sub-dict before delegating to the normal attribute machinery.
+
+```c
+// CPython: Modules/_threadmodule.c:1102 _local_get_dict
+static PyObject *
+_local_get_dict(localobject *self, PyThreadState *tstate)
+{
+    PyObject *id = PyLong_FromUnsignedLong(
+                       PyThread_get_thread_ident());
+    PyObject *dict = PyDict_GetItemWithError(self->dicts, id);
+    if (dict == NULL) {
+        dict = PyDict_New();
+        PyDict_SetItem(self->dicts, id, dict);
+    }
+    Py_DECREF(id);
+    return dict;
+}
+```
+
+When a thread exits, its entry is removed from `dicts` via a weakref callback registered against the `threading.current_thread()` object, preventing unbounded growth.
+
+### Identity helpers and daemon policy
+
+`thread_get_ident` wraps `PyThread_get_thread_ident()`, which is the value used as dictionary keys inside `_local` and by `threading.get_ident()`. `thread_get_native_id` calls a platform-specific API (`gettid` on Linux, `pthread_mach_thread_np` on macOS) to return the OS-visible thread id, useful for correlating with profilers and `ps` output.
+
+`daemon_threads_allowed` reads `tstate->interp->config.daemon_threads` and returns a Python bool. Daemon status cannot be changed after a thread starts; the flag is copied from the creating thread's interpreter config at bootstrap time.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/thread/`.
+
+The port needs a Go equivalent of `PyThread_type_lock` (a `sync.Mutex` wrapper), a `PY_TIMEOUT_T` conversion utility (float seconds to `time.Duration`), and the `_local` type backed by a `sync.Map` keyed by goroutine id. The goroutine-id approach diverges from CPython's OS-thread id; a shim using `runtime.LockOSThread` plus `C.pthread_self()` may be needed for strict compatibility. `RLock` maps cleanly to `sync.Mutex` plus an owner field and recursion counter. The bootstrap wrapper corresponds to a `go func()` closure that calls `vm.Eval` after acquiring the interpreter lock.

@@ -1,0 +1,107 @@
+---
+title: pycore_interp.h
+description: "Internal header: PyInterpreterState full struct definition"
+cpython_path: Include/internal/pycore_interp.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`PyInterpreterState` is the per-interpreter runtime record.
+CPython 3.12 broke apart `_PyRuntimeState` and migrated most per-interpreter
+fields here to support sub-interpreter isolation (PEP 684).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | includes | pulls in `pycore_gc.h`, `pycore_warnings.h`, codec types |
+| 41–80 | `PyInterpreterState.id` / `next` | integer ID and linked-list pointer across all live interpreters |
+| 81–130 | `modules` / `modules_by_index` | `sys.modules` dict and flat index array for fast module lookup |
+| 131–160 | `builtins` / `sysdict` | cached references to the builtins and sys dicts |
+| 161–200 | `importlib` / `import_func` | bootstrapped importlib module and `__import__` callable |
+| 201–240 | `gc` | `_PyGC_Head` free lists, generation thresholds, stats |
+| 241–270 | codec fields | `codec_search_path`, `codec_search_cache`, `codec_error_registry` |
+| 271–300 | `warnings_filters` | per-interpreter warning filter list |
+| 301–330 | `audit_hooks` | singly-linked list of `sys.addaudithook` callbacks |
+| 331–360 | `object_arena` | small-object allocator arena pointer |
+| 361–400 | `co_extra_freefuncs` | array of destructors for per-code-object extension slots |
+
+## Reading
+
+### Identity and the interpreter list
+
+Every interpreter gets a unique `id` assigned at creation. The runtime keeps
+all live interpreters in a singly-linked list through `next`.
+
+```c
+// CPython: Include/internal/pycore_interp.h:52 PyInterpreterState
+struct _is {
+    struct _is *next;
+    int64_t id;
+    int64_t id_refcount;   /* used by _xxsubinterpreters module */
+    ...
+};
+```
+
+`_PyInterpreterState_GET()` reads the current thread's `PyThreadState` and
+follows `tstate->interp` to reach this struct in O(1).
+
+### Module table
+
+`modules` is the `sys.modules` dict. `modules_by_index` is a `PyObject**`
+array indexed by `PyModuleDef.m_base.m_index`, which lets the VM resolve a
+cached module in one pointer dereference instead of a dict lookup.
+
+```c
+// CPython: Include/internal/pycore_interp.h:97 PyInterpreterState.modules
+    PyObject *modules;
+    PyObject *modules_by_index;
+    Py_ssize_t modules_by_index_size;
+```
+
+### GC state
+
+The garbage collector's per-generation `_PyGC_Head` rings and collection
+counters live directly inside `PyInterpreterState` so that each
+sub-interpreter runs its own GC cycle independently.
+
+```c
+// CPython: Include/internal/pycore_interp.h:210 PyInterpreterState.gc
+    struct _gc_runtime_state gc;
+```
+
+### Code-object extension slots
+
+Packages like `Cython` attach per-code-object data via
+`_PyCode_GetExtra` / `_PyCode_SetExtra`. The matching destructor array is
+stored here so it is freed when the interpreter shuts down.
+
+```c
+// CPython: Include/internal/pycore_interp.h:375 co_extra_freefuncs
+    Py_freefunc *co_extra_freefuncs;
+    Py_ssize_t   co_extra_freefuncs_size;
+```
+
+## gopy notes
+
+gopy models interpreter state in `objects/module.go` (`Module`) and
+`vm/eval_import.go` for the import machinery. There is no direct equivalent
+of `PyInterpreterState` as a single struct; the fields are spread across
+`vm.VM`, the module registry, and the GC in `objects/`.
+
+When porting GC or sub-interpreter features, the logical grouping in
+`_PyGC_Head` and the `modules_by_index` fast-path are the two pieces most
+worth matching.
+
+## CPython 3.14 changes
+
+- `id_refcount` was added in 3.12 for `_xxsubinterpreters` and is still
+  present in 3.14 with the same semantics.
+- The `_PyObject_Arena` field (`object_arena`) was introduced in 3.12 as
+  part of PEP 684; 3.14 keeps it but the arena implementation gained a
+  per-interpreter freelist trim at shutdown.
+- Audit hook storage moved from a global list to this per-interpreter list in
+  3.12 (PEP 578 follow-up). No structural change in 3.14.

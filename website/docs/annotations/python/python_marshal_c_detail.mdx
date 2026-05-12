@@ -1,0 +1,69 @@
+---
+title: Python/marshal.c
+description: "marshal module: binary serialization of Python code objects and constants used by .pyc files. Supports int, float, complex, bytes, str, tuple, list, dict, set, frozenset, and code objects."
+cpython_path: Python/marshal.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/marshal.c" />
+
+`Python/marshal.c` implements the `marshal` module, the binary format used to store compiled Python code objects in `.pyc` files. Unlike `pickle`, `marshal` is intentionally limited to the types needed for bytecode distribution: integers, floats, bytes, strings, tuples, lists, dicts, sets, frozensets, booleans, `None`, `Ellipsis`, and `code` objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `WFILE`, `RFILE` | Writer/reader state structs; buffer or file object |
+| 151-400 | `w_object` | Recursive serializer dispatch |
+| 401-700 | `w_long`, `w_string`, `w_bytes` | Primitive write helpers |
+| 701-900 | `w_complex_object` | Serialize code objects, tuples, dicts |
+| 901-1200 | `r_object` | Recursive deserializer dispatch |
+| 1201-1500 | `r_long`, `r_string`, `r_bytes` | Primitive read helpers |
+| 1501-1800 | Python-visible `marshal.dumps`, `marshal.loads`, `marshal.dump`, `marshal.load` | Module API |
+
+## Reading
+
+### Type tags
+
+Each serialized value is prefixed with a single-byte type tag. Common tags: `TYPE_INT` (`i`), `TYPE_FLOAT` (`g` for binary float), `TYPE_STRING` (`s`), `TYPE_UNICODE` (`u`), `TYPE_TUPLE` (`(`), `TYPE_CODE` (`c`). The high bit of the tag is the `FLAG_REF` bit that enables object sharing in the reference table.
+
+```c
+// Python/marshal.c:151 w_object dispatch
+static void
+w_object(PyObject *v, WFILE *p)
+{
+    if (v == Py_None)         { w_byte(TYPE_NONE, p); return; }
+    if (v == Py_Ellipsis)     { w_byte(TYPE_ELLIPSIS, p); return; }
+    if (PyLong_CheckExact(v)) { w_PyLong(v, p); return; }
+    if (PyBytes_CheckExact(v)) { w_byte(TYPE_STRING, p); w_bytes_impl(v, p); return; }
+    if (PyCode_Check(v))      { w_complex_object(v, p); return; }
+    ...
+}
+```
+
+### Code object serialization
+
+`PyCodeObject` is serialized field by field in a fixed order: `co_argcount`, `co_posonlyargcount`, `co_kwonlyargcount`, `co_nlocals`, `co_stacksize`, `co_flags`, `co_code` (bytecode), `co_consts` (tuple of constants), `co_names`, `co_varnames`, `co_freevars`, `co_cellvars`, `co_filename`, `co_name`, `co_firstlineno`, and `co_lnotab` (line number table).
+
+```c
+// Python/marshal.c:701 w_complex_object (code section)
+case TYPE_CODE:
+    w_long(co->co_argcount, p);
+    w_long(co->co_posonlyargcount, p);
+    w_object(co->co_consts, p);
+    w_object(co->co_names, p);
+    w_object((PyObject *)co->co_code, p);
+    ...
+```
+
+### Reference table for sharing
+
+When `FLAG_REF` is set on a tag, the writer assigns the object an index in `p->refs` and the reader stores the deserialized object at that index. Later occurrences of the same object are replaced with a `TYPE_REF` tag containing the index, reducing file size for repeated constants.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/marshal/`. gopy uses a custom bytecode representation; the marshal format needs to be adapted to gopy's `PyCodeObject` field layout. The reference table optimization maps to a `map[py.Object]int` keyed on object identity.

@@ -1,0 +1,136 @@
+---
+title: Objects/obmalloc.c
+description: "Annotation: pymalloc arena/pool/block allocator in CPython 3.14"
+cpython_path: Objects/obmalloc.c
+cpython_version: "3.14"
+lines: 3800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/obmalloc.c" />
+
+`obmalloc.c` contains pymalloc, CPython's built-in small-object allocator. It sits between the Python runtime and the system `malloc`, handling all allocations of 512 bytes or smaller through a three-tier structure: arenas, pools, and blocks.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-120 | constants and macros | Size class thresholds, pool/arena size constants |
+| 121-280 | struct definitions | `poolp` (pool header), `arena_object`, `usedpools` array |
+| 281-500 | arena management | `new_arena`, arena freelist, mmap vs malloc selection |
+| 501-900 | `PyObject_Malloc` | Fast path: size class lookup, pool selection, block pop |
+| 901-1100 | `PyObject_Free` | Block push, pool state transitions, arena release |
+| 1101-1400 | `PyObject_Realloc` | Size-class-aware realloc with copy fallback |
+| 1401-1800 | pool init and trim | `pymalloc_pool_extend`, unused pool trimming |
+| 1801-2200 | `usedpools` indexing | Size class to pool bin mapping, `INDEX2SIZE` macro |
+| 2201-2800 | debug allocator | Redzone patterns, `_PyObject_DebugMallocStats` |
+| 2801-3200 | `_PyMem_*` allocators | Raw memory allocator hooks and domain dispatch |
+| 3201-3800 | stats and malloc hooks | `pymalloc_alloc`, `malloc_alloc`, mimalloc bridge |
+
+## Reading
+
+### Three-tier layout: arenas, pools, blocks
+
+pymalloc organises memory in three nested layers.
+
+An arena is 256 KB, obtained from the OS with `mmap` (on POSIX) or `VirtualAlloc` (on Windows). Each arena is divided into 64 pools of 4 KB each. A pool holds identically sized blocks. The block size is fixed per pool and is chosen from 32 size classes covering 1-512 bytes in 16-byte steps.
+
+```c
+// CPython: Objects/obmalloc.c:126 POOL_SIZE
+#define POOL_SIZE               4096    /* 4 KiB */
+#define ARENA_SIZE          (256 << 10) /* 256 KiB */
+#define POOLS_IN_ARENA      (ARENA_SIZE / POOL_SIZE)  /* 64 */
+
+/* Size classes: requests are rounded up to the next multiple of ALIGNMENT */
+#define ALIGNMENT               16
+#define SMALL_REQUEST_THRESHOLD 512
+#define NB_SMALL_SIZE_CLASSES   (SMALL_REQUEST_THRESHOLD / ALIGNMENT)  /* 32 */
+```
+
+Requests larger than 512 bytes bypass pymalloc entirely and go straight to the system allocator.
+
+### usedpools array and the fast path in PyObject_Malloc
+
+The `usedpools` array is the heart of the allocator. It contains one doubly-linked list head per size class. Each head points to the pools that currently have at least one free block.
+
+```c
+// CPython: Objects/obmalloc.c:248 usedpools
+static poolp usedpools[2 * NB_SMALL_SIZE_CLASSES];
+```
+
+`PyObject_Malloc` maps the requested size to a size class with a single shift, then pops from the pool's internal freeblock singly-linked list.
+
+```c
+// CPython: Objects/obmalloc.c:541 PyObject_Malloc
+void *
+PyObject_Malloc(size_t nbytes)
+{
+    uint size = (uint)(nbytes - 1) >> ALIGNMENT_SHIFT;
+    poolp pool = usedpools[size + size];  /* each entry occupies two slots */
+    if (pool != pool->nextpool) {
+        /* fast path: pool has a free block */
+        block *bp = pool->freeblock;
+        pool->freeblock = *(block **)bp;
+        return (void *)bp;
+    }
+    /* slow path: find or allocate a pool */
+}
+```
+
+The freeblock field in the pool header is a singly-linked list of free blocks threaded through the free memory itself. Popping a block is two pointer dereferences and one store, so the fast path is branch-minimal.
+
+### Pool header and arena management
+
+Each pool begins with a `poolp` header that records the size class, the current freeblock pointer, and the next untouched block (for pools that have never been fully used).
+
+```c
+// CPython: Objects/obmalloc.c:188 pool_header
+struct pool_header {
+    union { block *_padding; uint count; } ref;  /* number of allocated blocks */
+    block *freeblock;   /* singly-linked list of free blocks */
+    struct pool_header *nextpool;  /* for usedpools doubly-linked list */
+    struct pool_header *prevpool;
+    uint arenaindex;    /* which arena this pool belongs to */
+    uint szidx;         /* size class index */
+    uint nextoffset;    /* byte offset of next never-used block */
+    uint maxnextoffset; /* when nextoffset reaches this, pool is full */
+};
+typedef struct pool_header *poolp;
+```
+
+When a pool's last free block is returned (pool becomes full), it is unlinked from `usedpools`. When its first block is freed (pool becomes non-full again), it is re-linked at the front.
+
+Arena allocation selects `mmap` on Linux and macOS when the system supports it, because `mmap`-allocated memory is returned to the OS when the arena is freed, while `malloc`-allocated memory may remain in the process's address space. The selection is made at build time via `WITH_PYMALLOC_MMAP`.
+
+```c
+// CPython: Objects/obmalloc.c:342 new_arena
+static struct arena_object *
+new_arena(void)
+{
+#ifdef WITH_PYMALLOC_MMAP
+    address = (uintptr_t)mmap(NULL, ARENA_SIZE,
+                              PROT_READ|PROT_WRITE,
+                              MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+#else
+    address = (uintptr_t)malloc(ARENA_SIZE);
+#endif
+}
+```
+
+Arenas that have no live pools are returned to the OS immediately after `PyObject_Free` empties the last pool.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/obmalloc.go` inside the `objects` package (or a dedicated `pymalloc` package if the allocator is extracted as a standalone layer).
+
+Priority considerations:
+
+- Go has its own garbage collector, so a direct port of pymalloc is not needed for functional correctness. The allocator is relevant mainly for profiling parity and for the debug allocator's redzone checks.
+- The debug allocator (`_PyObject_DebugMallocStats`, redzone patterns) may be useful during early development to catch off-by-one errors in manually managed buffers (string backing stores, bytecode arrays).
+- If gopy ever targets embedded or WASM runtimes without a native GC, a port of the arena/pool/block layout would allow object allocation without depending on the Go runtime.
+- The `usedpools` trick (indexing by `size + size`) is a performance detail that does not need to be reproduced in Go; `sync.Pool` covers the equivalent use case.
+- The mimalloc bridge (lines 3201+) is entirely out of scope.

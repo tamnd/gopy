@@ -1,0 +1,161 @@
+---
+title: Modules/_collectionsmodule.c
+description: "Annotated reading of CPython's _collectionsmodule.c: deque and defaultdict"
+cpython_path: Modules/_collectionsmodule.c
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_collectionsmodule.c" />
+
+This file implements two Python built-ins in C: `collections.deque` and `collections.defaultdict`. Both are exposed through the `_collections` extension module and re-exported by the pure-Python `collections` package.
+
+## Map
+
+| Symbol | Lines (approx) | Purpose |
+|---|---|---|
+| `BLOCKLEN` macro | 1-30 | Block size constant (64 items per node) |
+| `block` struct | 31-60 | Doubly-linked array node holding 64 object pointers |
+| `dequeobject` struct | 61-120 | Deque head: leftblock, rightblock, leftindex, rightindex, len, maxlen, state |
+| `deque_new` | 121-170 | Allocate deque, seed with one centre-aligned block |
+| `deque_append` | 171-230 | Append to right end, O(1) amortized |
+| `deque_appendleft` | 231-290 | Append to left end, O(1) amortized |
+| `deque_pop` | 291-350 | Remove from right end |
+| `deque_popleft` | 351-410 | Remove from left end |
+| `deque_rotate` | 411-520 | Rotate n steps, block-pointer fast path for large n |
+| `deque_count` | 521-570 | Linear scan with rich compare |
+| `deque_contains` | 571-620 | Linear scan, returns bool |
+| `dequeiterobject` struct | 621-660 | Iterator state: deque ref, block pointer, index, mutation counter |
+| `dequeiter_new` | 661-710 | Allocate forward iterator |
+| `dequeiter_next` | 711-790 | Advance iterator, detect mutation via state field |
+| `dequereviter_new` | 791-840 | Allocate reverse iterator |
+| `defaultdict` struct | 1800-1910 | Subclass of dict, adds default_factory slot |
+| `defdict_missing` | 1911-1970 | `__missing__`: call factory, insert, return value |
+| `defdict_copy` | 1971-2020 | Copy preserving default_factory |
+| module init | 2021-2400 | `_collections_state`, `PyInit__collections` |
+
+## Reading
+
+### dequeobject layout and block chaining
+
+A deque is not a ring buffer. It is a doubly-linked list of fixed-size array blocks. Each block holds `BLOCKLEN` (64) `PyObject*` pointers. The deque tracks only the two outermost blocks and the logical start/end indexes within them.
+
+```c
+// CPython: Modules/_collectionsmodule.c:61 dequeobject
+typedef struct {
+    PyObject_VAR_HEAD
+    block *leftblock;
+    block *rightblock;
+    Py_ssize_t leftindex;   /* in range(BLOCKLEN) */
+    Py_ssize_t rightindex;  /* in range(BLOCKLEN) */
+    Py_ssize_t maxlen;      /* -1 means unbounded */
+    uint64_t state;         /* mutation counter for iterators */
+    PyObject *weakreflist;
+} dequeobject;
+```
+
+When `leftindex` reaches 0 on an `appendleft`, a new block is prepended and `leftindex` resets to `BLOCKLEN - 1`. When `rightindex` reaches `BLOCKLEN - 1` on an `append`, a new block is appended and `rightindex` resets to 0. Block allocation is O(1), and block deallocation on pop is O(1) as well, making both ends amortized O(1) across any sequence of push/pop operations.
+
+`maxlen` is stored directly on the struct. When set, `deque_append` drops the opposite end rather than growing, keeping the deque at exactly `maxlen` items without any extra allocation.
+
+### deque_append, deque_appendleft, and deque_rotate
+
+`deque_append` and `deque_appendleft` are mirror images. The right-side path:
+
+```c
+// CPython: Modules/_collectionsmodule.c:171 deque_append
+static PyObject *
+deque_append(dequeobject *deque, PyObject *item)
+{
+    if (deque->rightindex == BLOCKLEN - 1) {
+        block *b = newblock();
+        if (b == NULL)
+            return NULL;
+        b->leftlink = deque->rightblock;
+        deque->rightblock->rightlink = b;
+        deque->rightblock = b;
+        deque->rightindex = -1;
+    }
+    Py_INCREF(item);
+    deque->len++;
+    deque->rightindex++;
+    deque->rightblock->data[deque->rightindex] = item;
+    if (deque->maxlen >= 0 && Py_SIZE(deque) > deque->maxlen)
+        deque_popleft(deque, NULL);
+    Py_RETURN_NONE;
+}
+```
+
+`deque_rotate(n)` moves `abs(n)` items from one end to the other. For rotations where `abs(n)` is large enough to span whole blocks, CPython relinks block pointers rather than moving items one by one. The per-item loop is the slow fallback for partial blocks.
+
+```c
+// CPython: Modules/_collectionsmodule.c:411 deque_rotate
+static PyObject *
+deque_rotate(dequeobject *deque, PyObject *const *args, Py_ssize_t nargs)
+```
+
+The `state` field is incremented on every structural mutation. Iterators snapshot `state` at creation and raise `RuntimeError` if it has changed.
+
+### dequeiterobject and mutation detection
+
+The iterator holds a direct C pointer into the block chain plus the mutation counter snapshot from creation time.
+
+```c
+// CPython: Modules/_collectionsmodule.c:711 dequeiter_next
+static PyObject *
+dequeiter_next(dequeiterobject *it)
+{
+    if (it->deque->state != it->state) {
+        it->len = -1;
+        PyErr_SetString(PyExc_RuntimeError,
+                        "deque mutated during iteration");
+        return NULL;
+    }
+    /* advance index; cross block boundary by following rightlink */
+}
+```
+
+Crossing a block boundary during iteration moves `it->b` to the next block and resets the slot index to 0. This is a single pointer dereference, keeping iteration O(1) per element.
+
+### defaultdict and the __missing__ protocol
+
+`defaultdict` is a thin C subclass of `dict`. It adds one extra pointer slot, `default_factory`, and overrides `tp_as_mapping->mp_subscript` to delegate to `__missing__` on key errors.
+
+```c
+// CPython: Modules/_collectionsmodule.c:1911 defdict_missing
+static PyObject *
+defdict_missing(defdictobject *dd, PyObject *key)
+{
+    PyObject *factory = dd->default_factory;
+    PyObject *value;
+    if (factory == NULL || factory == Py_None) {
+        PyErr_SetObject(PyExc_KeyError, key);
+        return NULL;
+    }
+    value = PyObject_CallNoArgs(factory);
+    if (value == NULL)
+        return NULL;
+    if (PyObject_SetItem((PyObject *)dd, key, value) < 0) {
+        Py_DECREF(value);
+        return NULL;
+    }
+    return value;
+}
+```
+
+Passing `None` as `default_factory` explicitly disables the missing behaviour and restores normal `KeyError` semantics, matching the documented contract.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/collections/`.
+
+The deque block chain maps naturally to a Go slice of `[64]py.Object` fixed arrays. The `state` mutation counter becomes a `uint64` on the struct, compared by iterators on each step.
+
+`defaultdict` can be a Go struct embedding `*objects.Dict` with an additional `defaultFactory py.Object` field. The `__missing__` method is registered on the type object during module init, mirroring the C `defdict_missing` function.
+
+`maxlen` enforcement and block recycling are the two pieces most likely to need close testing against CPython edge cases: boundary conditions at exactly `maxlen`, rotate with `maxlen` set, and pickle round-trip behaviour.

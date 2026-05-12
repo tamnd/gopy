@@ -1,0 +1,106 @@
+---
+title: namespaceobject.c
+description: "SimpleNamespace: a plain object backed by __dict__"
+cpython_path: Objects/namespaceobject.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/namespaceobject.c` implements `types.SimpleNamespace`, a minimal object whose only storage is its `__dict__`. It is used by `argparse.Namespace` and by `importlib` for `ModuleSpec` attribute bundles.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | struct / layout | `_PyNamespaceObject` with single `ns_dict` field |
+| 41–80 | `namespace_new` | Allocates object; creates empty dict for `ns_dict` |
+| 81–120 | `namespace_init` | Iterates kwargs; calls `PyObject_SetAttr` for each pair |
+| 121–160 | `namespace_repr` | Sorts keys; formats as `namespace(k=v, ...)` |
+| 161–200 | `namespace_richcompare` | Delegates to `PyObject_RichCompare` on the two `ns_dict` dicts |
+| 201–230 | `namespace_getstate` / `namespace_setstate` | Pickle support via `ns_dict` copy |
+| 231–270 | `namespace_dealloc` | Clears `ns_dict` then frees the object |
+| 271–300 | `PyNamespace_Type` | Type object wiring `tp_new`, `tp_init`, `tp_repr`, `tp_richcompare` |
+
+## Reading
+
+### Construction from keyword arguments
+
+`namespace_new` allocates the object and builds an empty dict. `namespace_init` then iterates the `kwds` dict and calls `PyObject_SetAttr` for each pair. This two-step design lets subclasses override `__init__` without touching `__new__`, and attribute setting goes through the normal descriptor protocol rather than bypassing it.
+
+```c
+// CPython: Objects/namespaceobject.c:81 namespace_init
+static int
+namespace_init(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    if (kwds == NULL)
+        return 0;
+    PyObject *key, *value;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(kwds, &pos, &key, &value)) {
+        if (PyObject_SetAttr(self, key, value) != 0)
+            return -1;
+    }
+    return 0;
+}
+```
+
+### Sorted repr
+
+`namespace_repr` sorts the keys before formatting so that `repr` output is deterministic regardless of dict insertion order. The sorted list is built with `PyDict_Keys` followed by `PyList_Sort`. Each pair is rendered as `key=repr(value)` and joined with `", "`.
+
+```c
+// CPython: Objects/namespaceobject.c:121 namespace_repr
+static PyObject *
+namespace_repr(PyObject *ns)
+{
+    PyObject *keys = PyDict_Keys(((PyNamespaceObject *)ns)->ns_dict);
+    PyList_Sort(keys);
+    /* format each (key, value) pair and join with ", " */
+    return PyUnicode_FromFormat("namespace(%s)", joined);
+}
+```
+
+### Equality via dict comparison
+
+`namespace_richcompare` unwraps `ns_dict` from both operands and delegates to `PyObject_RichCompare`. Only `Py_EQ` and `Py_NE` are handled; all other operators return `NotImplemented`.
+
+```c
+// CPython: Objects/namespaceobject.c:161 namespace_richcompare
+static PyObject *
+namespace_richcompare(PyObject *self, PyObject *other, int op)
+{
+    if (op != Py_EQ && op != Py_NE)
+        Py_RETURN_NOTIMPLEMENTED;
+    PyObject *d1 = ((PyNamespaceObject *)self)->ns_dict;
+    PyObject *d2 = ((PyNamespaceObject *)other)->ns_dict;
+    return PyObject_RichCompare(d1, d2, op);
+}
+```
+
+### Pickle round-trip
+
+`namespace_getstate` returns a copy of `ns_dict` and `namespace_setstate` calls `PyDict_Update` to restore it. The copy is shallow, matching standard dict pickling behavior.
+
+```c
+// CPython: Objects/namespaceobject.c:201 namespace_getstate
+static PyObject *
+namespace_getstate(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return PyDict_Copy(((PyNamespaceObject *)self)->ns_dict);
+}
+```
+
+## gopy notes
+
+`SimpleNamespace` maps to a Go struct embedding `Object` with a single `Dict` field. The `getattro`/`setattro` pair is covered by the generic attribute protocol in `objects/`. The sorted-keys repr needs `dict.Keys()` plus `slices.Sort`. The `namespace_richcompare` path reduces to comparing two `Dict` objects with the existing `Dict.RichCompare` helper.
+
+One subtlety: `_PyNamespace_New` is called by importlib C code directly, bypassing `__init__`. The gopy port needs a separate exported constructor that skips the Python-level init path. Pickle support is stubbed but not yet connected to the `pickle` module port.
+
+## CPython 3.14 changes
+
+- No structural changes to `namespaceobject.c` in 3.14. The file has been stable since 3.3.
+- 3.12 added `__replace__` for the `copy.replace` protocol. That method is present in 3.14 at roughly line 255.
+- The `tp_members` table exposes `__dict__` as a read-only member so introspection tools can reach it without going through `__getattribute__`.

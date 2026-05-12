@@ -1,0 +1,112 @@
+---
+title: Lib/statistics.py
+description: "Pure-Python descriptive statistics using exact rational arithmetic where possible"
+cpython_path: Lib/statistics.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/statistics.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–70 | module header, `_sum()` | imports, exact rational accumulation helper |
+| 71–180 | `mean`, `fmean`, `geometric_mean` | central tendency functions |
+| 181–280 | `median`, `median_low`, `median_high`, `median_grouped` | order statistics |
+| 281–350 | `mode`, `multimode` | frequency-based statistics |
+| 351–470 | `variance`, `pvariance`, `stdev`, `pstdev` | dispersion, two-pass algorithm |
+| 471–560 | `covariance`, `correlation`, `linear_regression` | bivariate statistics |
+| 561–780 | `NormalDist` class | normal distribution object with full protocol |
+| 781–900 | `NormalDist.pdf`, `.cdf`, `.inv_cdf` | density and quantile functions |
+| 901–980 | `NormalDist.overlap`, `.quantiles`, `.samples` | distribution utilities |
+| 981–1100 | internal helpers, `__all__` | `_erf_inf`, `_convert`, `_coerce`, exports |
+
+## Reading
+
+### Exact rational accumulation in `_sum` and `mean`
+
+`mean` delegates to the internal `_sum` helper, which converts integer inputs to `fractions.Fraction` so that the total is exact before dividing. `_sum` returns a `(type, Fraction_total, count)` triple. `_convert` then coerces the result back to the dominant numeric type so callers see `int`, `float`, or `Decimal` as appropriate.
+
+```python
+# CPython: Lib/statistics.py:151 mean
+def mean(data):
+    T, total, count = _sum(data)
+    if count < 1:
+        raise StatisticsError('mean requires at least one data point')
+    return _convert(total / count, T)
+```
+
+`fmean` skips the exact path and uses `math.fsum` for a fast but still numerically careful floating-point mean. `geometric_mean` converts to logarithms, calls `math.fsum`, then exponentiates, handling the sign check for negative inputs before delegating.
+
+### Median variants and mode
+
+`median` sorts a copy of the data and picks the middle element (or averages the two middle elements for even-length sequences). `median_low` and `median_high` always return an actual data value rather than an interpolated one. `median_grouped` treats data as a histogram and interpolates within the bin that contains the median, using the classic `L + (n/2 - cf) / f * interval` formula.
+
+```python
+# CPython: Lib/statistics.py:247 median_grouped
+def median_grouped(data, interval=1):
+    data = sorted(data)
+    n = len(data)
+    if n == 0:
+        raise StatisticsError("no median for empty data")
+    x = data[n // 2]
+    L = x - interval / 2
+    cf = data.index(x)
+    f = data.count(x)
+    return L + interval * (n / 2 - cf) / f
+```
+
+`mode` returns the single most common value (raising `StatisticsError` if the data is empty). `multimode` returns a list of all values that share the maximum frequency.
+
+### Two-pass variance and stdev
+
+`variance` computes the mean in a first pass, then accumulates squared deviations in a second pass. This avoids catastrophic cancellation in the naive one-pass formula. When the caller already has the mean it can pass it as `xbar` to skip the internal mean calculation.
+
+```python
+# CPython: Lib/statistics.py:367 variance
+def variance(data, xbar=None):
+    if iter(data) is data:
+        data = list(data)
+    n = len(data)
+    if n < 2:
+        raise StatisticsError('variance requires at least two data points')
+    if xbar is None:
+        T, xbar, _ = _sum(data)
+        xbar = _convert(xbar / n, T)
+    T, total, count = _sum((x - xbar) ** 2 for x in data)
+    return _convert(total / (count - 1), T)
+```
+
+`pvariance` divides by `n` instead of `n - 1`. `stdev` and `pstdev` are thin wrappers that apply `math.sqrt` or the type-appropriate square-root to the variance result.
+
+### `NormalDist`: the distribution object
+
+`NormalDist` stores `_mu` (mean) and `_sigma` (standard deviation) and exposes the full suite of normal distribution operations. Arithmetic operators are defined so that `NormalDist(mu1, sigma1) + NormalDist(mu2, sigma2)` produces a new `NormalDist` with the summed parameters, reflecting the sum of independent normals.
+
+```python
+# CPython: Lib/statistics.py:743 NormalDist.cdf
+def cdf(self, x):
+    "Cumulative distribution function. P(X <= x)"
+    return 0.5 * (1.0 + erf((x - self._mu) / (self._sigma * _SQRT2)))
+```
+
+`inv_cdf` (the quantile function) uses a rational approximation for the central region and a separate approximation for the tails, matching Abramowitz and Stegun tables to about seven significant digits. `pdf` is the standard Gaussian density formula expressed in terms of `math.exp`.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/statistics/`.
+
+Key porting notes:
+
+- `_sum` relies on `fractions.Fraction` for exact integer paths. `module/fractions/` must be in place before `mean` over integer lists returns the correct type.
+- `NormalDist.cdf` and `pdf` depend on `math.erf` and `math.exp`. Both are available in gopy's `math` module port.
+- `NormalDist.inv_cdf` uses a multi-branch rational approximation coded inline. Port it as a direct translation with the same coefficient literals, not a library call, to preserve the exact numerical behaviour.
+- `median_grouped` uses `list.index` and `list.count`, which are O(n) scans. The semantics are correct as long as floating-point equality works; document this as a known limitation matching CPython.
+- `covariance` and `linear_regression` are straightforward numeric loops with no exotic dependencies and can be ported independently of the exact-arithmetic path.

@@ -1,0 +1,107 @@
+---
+title: "Lib/abc.py"
+description: "CPython abstract base class machinery — ABCMeta, ABC, abstractmethod"
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/abc.py` is the pure-Python layer of the abstract base class system. The
+heavy lifting lives in the C accelerator module `_abc`, but this file owns the
+public API: `ABCMeta`, `ABC`, `abstractmethod`, and friends.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–25 | module preamble | imports `_abc`, sets `__all__` |
+| 26–55 | `abstractmethod` | decorator; sets `__isabstractmethod__ = True` |
+| 56–80 | `abstractclassmethod` / `abstractstaticmethod` | deprecated wrappers |
+| 81–130 | `ABCMeta.__new__` | collects abstract names into `__abstractmethods__` frozenset; calls `_abc._abc_init` |
+| 131–160 | `ABCMeta.register` | records virtual subclass; invalidates caches |
+| 161–185 | `ABCMeta.__instancecheck__` | delegates to `_abc._abc_instancecheck` |
+| 186–200 | `ABC` | convenience base; `metaclass=ABCMeta` |
+
+## Reading
+
+### abstractmethod
+
+The decorator is a two-liner: set a flag on the function and return it.
+Anything that cooperates with `ABCMeta` reads that flag later.
+
+```python
+# CPython: Lib/abc.py:26 abstractmethod
+def abstractmethod(funcobj):
+    """A decorator indicating abstract methods."""
+    funcobj.__isabstractmethod__ = True
+    return funcobj
+```
+
+### ABCMeta.__new__
+
+`__new__` runs once per class definition. It scans every name in the new
+namespace plus every base class for the `__isabstractmethod__` flag and
+assembles the frozenset.
+
+```python
+# CPython: Lib/abc.py:81 ABCMeta.__new__
+def __new__(mcls, name, bases, namespace, /, **kwargs):
+    cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+    # Compute set of abstract method names
+    abstracts = {name
+                 for name, value in namespace.items()
+                 if getattr(value, "__isabstractmethod__", False)}
+    for base in bases:
+        for name in getattr(base, "__abstractmethods__", set()):
+            value = getattr(cls, name, None)
+            if getattr(value, "__isabstractmethod__", False):
+                abstracts.add(name)
+    cls.__abstractmethods__ = frozenset(abstracts)
+    _abc._abc_init(cls)
+    return cls
+```
+
+### register and subclass checks
+
+`register` delegates straight to the C accelerator, which maintains a weak-ref
+set and bumps an invalidation counter so cached answers are discarded.
+
+```python
+# CPython: Lib/abc.py:131 ABCMeta.register
+def register(cls, subclass):
+    """Register a virtual subclass of an ABC."""
+    return _abc._abc_register(cls, subclass)
+```
+
+Both `__instancecheck__` and `__subclasscheck__` follow the same pattern:
+call the C function, fall back to the default MRO check if it returns
+`NotImplemented`.
+
+```python
+# CPython: Lib/abc.py:161 ABCMeta.__instancecheck__
+def __instancecheck__(cls, instance):
+    """Override for isinstance(instance, cls)."""
+    return _abc._abc_instancecheck(cls, instance)
+```
+
+## gopy notes
+
+- `_abc._abc_init`, `_abc._abc_register`, `_abc._abc_instancecheck`, and
+  `_abc._abc_subclasscheck` are C-level entry points. gopy implements them in
+  `module/_abc/`.
+- `__abstractmethods__` is stored on the type object. gopy tracks it in
+  `objects/type.go` as a `frozenset` field evaluated at class-creation time.
+- `ABCMeta.__new__` must run before `type.__new__` sets the MRO, so gopy
+  calls it from the metaclass dispatch in `objects/type_call.go`.
+
+## CPython 3.14 changes
+
+- The `_abc` C module gained `_abc_get_cache_token` in 3.13; no interface
+  change in 3.14.
+- `abstractmethod` now raises `TypeError` if applied to a non-callable (added
+  in 3.13, preserved in 3.14).
+- `abstractclassmethod` and `abstractstaticmethod` were removed; they had been
+  deprecated since 3.3.

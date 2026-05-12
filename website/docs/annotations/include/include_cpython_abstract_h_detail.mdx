@@ -1,0 +1,90 @@
+---
+title: Include/cpython/abstract.h
+description: "CPython vectorcall protocol: _PyObject_Vectorcall, fast-call helpers, and the PY_VECTORCALL_ARGUMENTS_OFFSET flag"
+cpython_path: Include/cpython/abstract.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/cpython/abstract.h` declares the vectorcall family of C-API entry points introduced in PEP 590. These are the fast paths CPython uses internally whenever it calls a Python callable from C without going through the slower `tp_call` slot.
+
+Source: <CpyLink path="Include/cpython/abstract.h" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–20 | guard + includes | Include guard, pulls in `Include/cpython/object.h` |
+| 22–35 | `PY_VECTORCALL_ARGUMENTS_OFFSET` | Flag macro signalling the caller owns the slot at `args[-1]` |
+| 37–55 | `_PyObject_Vectorcall` | Core vectorcall dispatcher |
+| 56–68 | `_PyObject_FastCall` | Convenience wrapper for plain C arrays without kwargs |
+| 69–85 | `PyObject_VectorcallMethod` | Call a method by name using vectorcall |
+| 86–105 | `_PyObject_VectorcallTstate` | Tstate-accepting variant used in the eval loop |
+| 106–120 | `PyObject_Vectorcall` | Stable-ABI wrapper added in 3.9 |
+
+## Reading
+
+### PY_VECTORCALL_ARGUMENTS_OFFSET and the args array layout
+
+The vectorcall convention passes arguments as a C pointer `args` pointing into the middle of a larger array. When `PY_VECTORCALL_ARGUMENTS_OFFSET` is set in `nargsf`, the slot at `args[-1]` is owned by the caller and may be temporarily overwritten by the callee to pass `self` without allocating a new array. This is the key optimisation that lets method calls avoid a heap allocation for the prepended self argument.
+
+```c
+// CPython: Include/cpython/abstract.h:22 PY_VECTORCALL_ARGUMENTS_OFFSET
+#define PY_VECTORCALL_ARGUMENTS_OFFSET \
+    ((size_t)1 << (8 * sizeof(size_t) - 1))
+```
+
+The actual argument count is recovered by masking the flag out:
+
+```c
+// CPython: Include/cpython/abstract.h:30 PyVectorcall_NARGS
+static inline Py_ssize_t
+PyVectorcall_NARGS(size_t n)
+{
+    return n & ~PY_VECTORCALL_ARGUMENTS_OFFSET;
+}
+```
+
+### _PyObject_Vectorcall vs tp_call
+
+`tp_call` is the original slot: it receives a `PyTupleObject` for positional args and a `PyDictObject` for keyword args. Both must be allocated even for simple calls. `_PyObject_Vectorcall` skips both allocations by passing a raw C array plus an inline keyword-name tuple. The dispatcher checks whether the callable's type has the `Py_TPFLAGS_HAVE_VECTORCALL` flag and routes accordingly, falling back to `tp_call` only when necessary.
+
+```c
+// CPython: Include/cpython/abstract.h:37 _PyObject_Vectorcall
+static inline PyObject *
+_PyObject_Vectorcall(PyObject *callable, PyObject *const *args,
+                     size_t nargsf, PyObject *kwnames)
+{
+    assert(kwnames == NULL || PyTuple_Check(kwnames));
+    assert(args != NULL || PyVectorcall_NARGS(nargsf) == 0);
+    vectorcallfunc func = PyVectorcall_Function(callable);
+    if (func == NULL) {
+        Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+        return _PyObject_MakeTpCall(
+            _PyThreadState_GET(), callable, args, nargs, kwnames);
+    }
+    return func(callable, args, nargsf, kwnames);
+}
+```
+
+### PyObject_VectorcallMethod
+
+This helper looks up an attribute by name and calls it in one step using the `ARGUMENTS_OFFSET` trick to prepend `self` in-place. It is used by the eval loop for `CALL_METHOD` and by several C modules to avoid the overhead of a separate `PyObject_GetAttr` plus call sequence.
+
+```c
+// CPython: Include/cpython/abstract.h:69 PyObject_VectorcallMethod
+PyAPI_FUNC(PyObject *) PyObject_VectorcallMethod(
+    PyObject *name, PyObject *const *args, size_t nargsf,
+    PyObject *kwnames);
+```
+
+The first element of `args` is `self`; the remaining `PyVectorcall_NARGS(nargsf) - 1` elements are the positional arguments. The `name` must be an interned unicode string for the fast attribute lookup to fire.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (protocol layer). The vectorcall flag and NARGS extractor are straightforward constant and inline function ports. The dispatcher logic lives alongside the `tp_call` fallback in `objects/protocol.go` once the type-slot infrastructure is in place. `PyObject_VectorcallMethod` will require the attribute lookup path in `objects/type.go` to be wired up first.

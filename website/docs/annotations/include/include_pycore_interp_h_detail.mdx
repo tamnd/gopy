@@ -1,0 +1,122 @@
+---
+title: Include/internal/pycore_interp.h
+description: "Per-interpreter state struct, GIL fields, and runtime pointer for CPython 3.14"
+cpython_path: Include/internal/pycore_interp.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_interp.h" />
+
+`_PyInterpreterState` is the root object for a single Python interpreter instance. A process may host multiple interpreters simultaneously (via `Py_NewInterpreter`). This header defines every field that hangs off that root, from the module table to per-interpreter GIL configuration to the interned-string ID cache.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–35 | file prologue | Guard macros, forward declarations, includes |
+| 36–70 | `_PyRuntimeState` pointer | `_PyRuntime` extern declaration and accessor macro |
+| 72–130 | `_PyInterpreterState` identity fields | `id`, `id_refcount`, `requires_idref`, `id_mutex` |
+| 131–180 | module and import fields | `modules`, `modules_by_index`, `importlib`, `import_func` |
+| 181–210 | builtin namespace fields | `builtins`, `builtins_copy`, `sysdict`, `sysdict_copy` |
+| 211–245 | GC state | `gc` substructure (`collecting`, `generation0`, thresholds) |
+| 246–285 | eval/ceval fields | `ceval` substructure: `eval_breaker`, `pending`, `tracing_possible` |
+| 286–320 | thread bookkeeping | `threads` substructure: `head`, `count`, `main` |
+| 321–360 | codec and encoding cache | `codec_search_cache`, `codec_search_path`, `codec_error_registry` |
+| 361–400 | `_Py_ID` string cache | Per-interpreter interned identifiers for common names |
+
+## Reading
+
+### Identity fields and the runtime pointer
+
+The interpreter state is always reachable from the process-wide runtime singleton:
+
+```c
+// CPython: Include/internal/pycore_interp.h:36 _PyRuntime
+PyAPI_DATA(_PyRuntimeState) _PyRuntime;
+```
+
+Every per-interpreter pointer that needs to reach process-global state goes through `_PyRuntime`. The interpreter carries its own numeric identity alongside a reference count used by sub-interpreters that share no objects with the main interpreter:
+
+```c
+// CPython: Include/internal/pycore_interp.h:72 _PyInterpreterState.id
+struct _PyInterpreterState {
+    /* ... */
+    int64_t id;
+    int64_t id_refcount;
+    int requires_idref;
+    PyThread_type_lock id_mutex;
+```
+
+`id` is assigned monotonically at creation time and is stable for the interpreter's lifetime. `id_refcount` counts external handles (e.g. `_interpreters.get_current()` return values) and gates interpreter finalisation: the interpreter cannot be destroyed while `id_refcount > 0`.
+
+### Module table and import machinery
+
+```c
+// CPython: Include/internal/pycore_interp.h:131 _PyInterpreterState.modules
+    PyObject *modules;            /* sys.modules dict */
+    PyObject *modules_by_index;   /* list indexed by module def index */
+    PyObject *importlib;          /* _bootstrap module */
+    PyObject *import_func;        /* builtins.__import__ */
+    struct _Py_import_state imports;
+```
+
+`modules` is the same object exposed as `sys.modules`. The eval loop looks here on every `IMPORT_NAME` instruction. `modules_by_index` is a parallel list keyed by the integer slot assigned to each extension module at load time, used by `PyState_FindModule` for fast C-side lookups without touching the dict.
+
+`importlib` holds a direct reference to `_bootstrap` so that the import machinery can be invoked even before `sys` is fully initialised.
+
+### GIL fields and ceval state
+
+CPython 3.12 introduced per-interpreter GILs (PEP 684). The relevant fields live in the `ceval` substructure:
+
+```c
+// CPython: Include/internal/pycore_interp.h:246 _PyInterpreterState.ceval
+    struct _ceval_state {
+        int instrumentation_version;
+        int tracing_possible;
+        Py_ssize_t eval_breaker;    /* avoid type punning; see pycore_ceval.h */
+        struct _pending_calls pending;
+        /* per-interpreter GIL (free-threading builds) */
+        struct _gil_runtime_state *gil;
+    } ceval;
+```
+
+`eval_breaker` is a bitmask checked at the top of the eval loop on every backward branch and function entry. When any bit is set the loop exits its fast path to handle signals, pending calls, or GIL release requests. Writing `eval_breaker` from another thread is the primary mechanism for async-safe interrupts.
+
+`gil` is `NULL` in the default build where the GIL is process-wide and lives in `_PyRuntimeState`. In free-threading builds each interpreter owns its own GIL instance, allowing true parallelism across interpreters that share no heap objects.
+
+### Codec cache and `_Py_ID` string cache
+
+```c
+// CPython: Include/internal/pycore_interp.h:321 _PyInterpreterState.codec_search_cache
+    PyObject *codec_search_cache;     /* dict: encoding name -> codec tuple */
+    PyObject *codec_search_path;      /* list of codec search functions */
+    PyObject *codec_error_registry;   /* dict: error handler name -> callable */
+```
+
+Codec lookups normalise the encoding name (lowercasing, hyphen-to-underscore) and cache the resulting `(encoder, decoder, reader, writer)` tuple. The cache is per-interpreter so that sub-interpreters with restricted import paths cannot pollute each other's codec tables.
+
+The `_Py_ID` cache stores pre-interned `PyObject *` pointers for identifiers that the runtime uses frequently (names like `__init__`, `__new__`, `append`, `read`). Each interpreter interns these independently at startup so that cross-interpreter object sharing rules are not violated:
+
+```c
+// CPython: Include/internal/pycore_interp.h:361 _Py_interp_id_strings
+    struct _Py_interp_id_strings {
+        /* One field per identifier listed in pycore_id_extras.h */
+        PyObject *_Py_ID(__init__);
+        PyObject *_Py_ID(__new__);
+        /* ... approximately 250 more entries ... */
+    } id_strings;
+```
+
+Access goes through the `&_PyInterp_ID(interp, name)` macro, which expands to the address of the appropriate `id_strings` field, avoiding a dict lookup on every attribute access.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `vm/interp.go` for the `_PyInterpreterState` equivalent. The `modules` and `modules_by_index` fields map to the existing `objects/module.go` and `objects/dict.go` types. The `ceval` substructure, particularly `eval_breaker`, is the highest-priority piece because the eval loop in `vm/eval_gen.go` already needs an interrupt check point on backward branches.
+
+The per-interpreter GIL is out of scope until the free-threading build target is added. The `_Py_ID` string cache will be approximated by a package-level `sync.Map` of pre-interned string objects initialised at `vm.Initialize` time.

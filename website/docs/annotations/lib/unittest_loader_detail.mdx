@@ -1,0 +1,103 @@
+---
+title: Lib/unittest/loader.py
+description: "TestLoader: discovers and loads test cases from modules, classes, and file paths, implementing the test discovery protocol used by python -m unittest discover."
+cpython_path: Lib/unittest/loader.py
+cpython_version: "3.14"
+lines: 520
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/unittest/loader.py`
+
+<CpyLink path="Lib/unittest/loader.py" />
+
+`Lib/unittest/loader.py` implements `TestLoader`, the class responsible for building
+`TestSuite` objects from test sources. It can load tests from a `TestCase` class, a module,
+a dotted name string, or walk a directory tree using the discovery protocol. The module-level
+`defaultTestLoader` instance is what `python -m unittest discover` uses.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-40 | imports, `VALID_MODULE_NAME` | Regex for `test*.py` pattern matching |
+| 41-120 | `TestLoader` attributes | `testMethodPrefix`, `sortTestMethodsUsing`, `suiteClass` |
+| 121-220 | `loadTestsFromTestCase` | Load all `test*` methods from a `TestCase` subclass |
+| 221-310 | `loadTestsFromModule` | Inspect module for `TestCase` subclasses |
+| 311-380 | `loadTestsFromName`, `loadTestsFromNames` | Dotted-name resolution and batch loading |
+| 381-480 | `discover` | Directory walk with `VALID_MODULE_NAME` pattern |
+| 481-520 | `defaultTestLoader` | Module-level singleton instance |
+
+## Reading
+
+### `loadTestsFromTestCase`: method name collection
+
+`loadTestsFromTestCase` calls `getTestCaseNames` to collect all methods whose names start
+with `testMethodPrefix` (default `"test"`), then sorts them using `sortTestMethodsUsing`
+(default `str.__lt__`). Each name becomes a `TestCase` instance with that method as its
+`runTest`.
+
+```python
+# CPython: Lib/unittest/loader.py:130 loadTestsFromTestCase
+def loadTestsFromTestCase(self, testCaseClass):
+    if issubclass(testCaseClass, suite.TestSuite):
+        raise TypeError(...)
+    testCaseNames = self.getTestCaseNames(testCaseClass)
+    if not testCaseNames and hasattr(testCaseClass, 'runTest'):
+        testCaseNames = ['runTest']
+    loaded_suite = self.suiteClass(map(testCaseClass, testCaseNames))
+    return loaded_suite
+```
+
+### `loadTestsFromName`: dotted-name resolution
+
+`loadTestsFromName` splits a dotted name and resolves it step by step: first importing
+the longest importable prefix, then using `getattr` for the remaining parts. The result
+can be a module, class, method, or `TestSuite`.
+
+```python
+# CPython: Lib/unittest/loader.py:250 loadTestsFromName
+def loadTestsFromName(self, name, module=None):
+    parts = name.split('.')
+    if module is None:
+        parts_copy = parts[:]
+        while parts_copy:
+            try:
+                module = __import__('.'.join(parts_copy))
+                break
+            except ImportError:
+                del parts_copy[-1]
+```
+
+### `discover`: directory walk and pattern matching
+
+`discover` walks the start directory recursively looking for files whose names match
+`VALID_MODULE_NAME` (default `test*.py`). Each matching file is imported as a module
+using its dotted path relative to the top-level directory, and `loadTestsFromModule`
+is called on the result.
+
+```python
+# CPython: Lib/unittest/loader.py:400 _get_module_from_path
+def _get_module_from_path(self, path, full_path, pattern):
+    ...
+    name = self._get_name_from_path(full_path)
+    try:
+        module = sys.modules[name]
+    except KeyError:
+        ...
+        module = importlib.import_module(name)
+```
+
+## gopy notes
+
+Not yet ported. gopy's test suite uses Go's `testing` package and `go test`. The
+`TestLoader` discovery protocol is only relevant when running `Lib/test/` against gopy's
+VM, at which point the standard `unittest` discovery mechanism drives test collection.
+
+## CPython 3.14 changes
+
+3.14 added `TestLoader.errors` as a list that accumulates loading errors rather than
+raising immediately, allowing discovery to continue past broken modules. The
+`VALID_MODULE_NAME` regex is now exposed as a class attribute that subclasses can override.

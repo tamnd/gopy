@@ -1,0 +1,87 @@
+---
+title: "context.c: Context Variables"
+description: "PyContext, PyContextVar, and PyContextToken objects, Context.run() thread-state push/pop, and ContextVar HAMT lookup and update"
+cpython_path: Python/context.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: module/contextlib/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`context.c` implements the three public types in `contextvars`: `Context`, `ContextVar`, and `Token`. A `Context` is a thin wrapper around a HAMT snapshot. `ContextVar.set()` returns a `Token` that can revert the variable to its previous value, giving structured undo without mutable state.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `PyContext_New` | Allocate empty context with fresh HAMT root |
+| 61-140 | `PyContext_CopyCurrent` | Snapshot the current thread's active context |
+| 141-210 | `PyContext_Enter` / `PyContext_Exit` | Push/pop context on `PyThreadState.context` |
+| 211-310 | `context_run` | `Context.run(callable, *args, **kwargs)` with enter/exit guards |
+| 311-390 | `PyContextVar_New` | Allocate `ContextVar` with optional default value |
+| 391-460 | `PyContextVar_Get` | HAMT lookup; falls back to `var->default_value` |
+| 461-530 | `PyContextVar_Set` | HAMT assoc; returns `Token` carrying old value |
+| 531-580 | `PyContextVar_Reset` | Validate and apply token to restore previous value |
+| 581-600 | module init | Register `_contextvars` built-in module |
+
+## Reading
+
+### Context.run() push/pop
+
+`context_run` enters the context, calls the callable, then exits regardless of whether an exception was raised. The push stores the previous context pointer and the pop restores it, so nested `run()` calls form a stack on the thread state.
+
+```c
+// Python/context.c:211
+static PyObject *
+context_run(PyContext *self, PyObject *const *args,
+            Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (PyContext_Enter((PyObject *)self)) { return NULL; }
+    PyObject *result = PyObject_Vectorcall(args[0],
+                                           args + 1, nargs - 1, kwnames);
+    if (PyContext_Exit((PyObject *)self)) {
+        Py_XDECREF(result); return NULL;
+    }
+    return result;
+}
+```
+
+### ContextVar.set() and Token
+
+`PyContextVar_Set` calls `_PyHamt_Assoc` to produce a new HAMT root, then replaces the thread's active context with a new `PyContext` wrapping that root. The returned `Token` records the variable, the old value (or a sentinel for "was unset"), and the context it was created from.
+
+```c
+// Python/context.c:461
+PyObject *
+PyContextVar_Set(PyObject *ovar, PyObject *val)
+{
+    PyContextVar *var = (PyContextVar *)ovar;
+    PyContext *ctx = current_context();
+    PyObject *old_val = NULL;
+    _PyHamt_Find(ctx->ctx_vars, (PyObject *)var, &old_val);
+
+    PyHamtObject *new_hamt = _PyHamt_Assoc(ctx->ctx_vars,
+                                            (PyObject *)var, val);
+    ...
+    return make_token(var, old_val);  /* Token holds old_val for reset */
+}
+```
+
+### 3.14 changes
+
+3.14 added `PyContext_GetCurrent` as a stable ABI function, replacing direct access to `PyThreadState.context`. The token invalidation check was tightened: `ContextVar.reset(token)` now raises `ValueError` if the token was created by a different context than the one currently active, closing a latent bug where tokens could be applied out of order across `run()` boundaries.
+
+## gopy notes
+
+- The Go port is in `module/contextlib/module.go`. `PyContext` maps to a `Context` struct holding a `*Hamt` value. Enter/exit are methods on `*vm.ThreadState`.
+- `context_run` is ported with a `defer` for the exit call so panics still unwind the context stack correctly.
+- `PyContextVar_Get` returns `(value, found bool)` in Go rather than writing through a pointer, matching Go idioms while preserving the CPython fallback-to-default logic.
+- Token invalidation checks use pointer equality on the `*Context` that created the token, matching CPython's object-identity comparison.
+- The sentinel for "variable was unset before set()" is a package-level `unsetSentinel` value rather than `NULL`, avoiding nil ambiguity in Go.
+---
+sidebar_label: context.c
+sidebar_position: 12
+custom_edit_url: null
+---

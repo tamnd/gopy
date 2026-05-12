@@ -1,0 +1,119 @@
+---
+title: "Objects/genobject.c"
+description: "Generator, coroutine, and async generator object implementation"
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Generator, coroutine, and async generator objects all live here. The three types share a common header layout (`PyGenObject`) and diverge primarily in how finalization and the async iteration protocol are handled.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | `PyGenObject` layout | Shared struct for gen, coro, async gen |
+| 61–140 | `gen_send_ex2` | Unified send/throw entry point |
+| 141–175 | `gen_iternext` | Calls `gen_send_ex2(NULL)` for `__next__` |
+| 176–220 | `_PyGen_yf` | Returns current yield-from target |
+| 221–300 | `gen_close` | Throws `GeneratorExit` into the frame |
+| 301–380 | `gen_throw` | Injects an arbitrary exception into the frame |
+| 381–460 | `gen_finalize` | Calls `gen_close` on GC collection if not exhausted |
+| 461–560 | Coroutine type | `PyCoroObject`, `coro_await`, `coro_origin_clear` |
+| 561–800 | Async generator | `asyncgen_asend`, `asyncgen_athrow`, async iteration protocol |
+
+## Reading
+
+### gen_send_ex2: the unified send entry point
+
+Every path that resumes a generator or coroutine — `send`, `throw`, and plain iteration — funnels through `gen_send_ex2`. It validates the generator state, restores the frame, pushes the sent value onto the stack, and calls `_PyEval_EvalFrameDefault`.
+
+```c
+// CPython: Objects/genobject.c:164 gen_send_ex2
+static PyObject *
+gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject *exc)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyFrameObject *f = gen->gi_frame;
+
+    if (gen->gi_frame_state == FRAME_CREATED && arg && arg != Py_None) {
+        /* ... error: can't send non-None to new generator ... */
+    }
+    /* push arg / exc, resume frame */
+    result = _PyEval_EvalFrameDefault(tstate, frame, exc != NULL);
+    /* update gi_frame_state after return */
+    return result;
+}
+```
+
+`arg` is the value sent in; `exc` is non-NULL when called from `gen_throw`. Both `__next__` and `send` reach here — `__next__` passes `Py_None` as `arg`.
+
+### _PyGen_yf: inspecting the yield-from target
+
+`_PyGen_yf` peeks at the top of the suspended frame's value stack to find the object currently being delegated to by `yield from`. It returns NULL if the generator is not suspended in a `yield from`.
+
+```c
+// CPython: Objects/genobject.c:221 _PyGen_yf
+PyObject *
+_PyGen_yf(PyGenObject *gen)
+{
+    if (gen->gi_frame_state != FRAME_SUSPENDED) {
+        return NULL;
+    }
+    _PyInterpreterFrame *frame = (_PyInterpreterFrame *)gen->gi_iframe;
+    /* The opcode before the current instruction is SEND or YIELD_FROM */
+    if (_Py_OPCODE(_PyFrame_GetBytecode(frame)[...]) != SEND) {
+        return NULL;
+    }
+    return Py_NewRef(TOP());
+}
+```
+
+This is used by `gen_throw` to decide whether to forward the exception to the sub-iterator rather than injecting it directly into the generator frame.
+
+### gen_close and GeneratorExit
+
+`gen_close` is the implementation of `generator.close()`. It throws `GeneratorExit` into the frame via `gen_throw`. If the generator catches `GeneratorExit` and yields again, `RuntimeError` is raised.
+
+```c
+// CPython: Objects/genobject.c:300 gen_close
+static PyObject *
+gen_close(PyGenObject *gen, PyObject *args)
+{
+    PyObject *yf = _PyGen_yf(gen);
+    if (yf) {
+        /* forward close() to the sub-iterator */
+        _gen_yf_close(gen, yf);
+    }
+    return gen_throw(gen, GeneratorExit, NULL, NULL);
+}
+```
+
+### Async generator helpers
+
+`asyncgen_asend` and `asyncgen_athrow` are small helper objects returned by `__anext__` and `athrow()`. They implement `__await__` so that `async for` and `async with` can drive the async generator through the normal coroutine machinery.
+
+```c
+// CPython: Objects/genobject.c:620 asyncgen_asend_iternext
+static PyObject *
+asyncgen_asend_iternext(PyAsyncGenASend *o)
+{
+    return gen_send_ex2((PyGenObject *)o->ags_gen, o->ags_sendval, NULL);
+}
+```
+
+## gopy notes
+
+- `gen_send_ex2` maps to `vm.genSendEx2` in `vm/eval_gen.go`. The Go port must replicate the frame-state transitions (`FRAME_CREATED`, `FRAME_SUSPENDED`, `FRAME_COMPLETED`) using the same integer constants.
+- `_PyGen_yf` has a direct analogue; the opcode check relies on `SEND` being the instruction preceding the resume point, which holds in the gopy bytecode layout.
+- Async generator `asend`/`athrow` objects are not yet ported; they are blocked on the async iteration protocol tracked under task #487.
+- `gen_finalize` interacts with the cyclic GC. gopy uses Go's GC, so a finalizer registered via `runtime.SetFinalizer` on the generator wrapper object plays this role.
+
+## CPython 3.14 changes
+
+- The frame layout moved from heap-allocated `PyFrameObject` to inline `_PyInterpreterFrame` embedded in the generator struct (`gi_iframe`). Accessing the frame now goes through `gen->gi_iframe` rather than `gen->gi_frame`.
+- `gen_send_ex2` replaced the older `gen_send_ex` (which took a single `exc` flag) in 3.12; 3.14 adds further branch hints (`_Py_LIKELY`) around the common non-throwing path.
+- Async generator finalisation hooks (`sys.set_asyncgen_finalizer`) gained a fast-path skip when no hook is registered, reducing overhead on tight `async for` loops.

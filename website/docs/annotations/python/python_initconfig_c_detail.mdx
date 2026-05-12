@@ -1,0 +1,79 @@
+---
+title: Python/initconfig.c
+description: "Interpreter initialization configuration: PyConfig struct, _PyConfig_Read, _PyConfig_InitPathConfig, environment variable and command-line flag parsing, and the Py_InitializeFromConfig entry point."
+cpython_path: Python/initconfig.c
+cpython_version: "3.14"
+lines: 3200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/initconfig.c`
+
+<CpyLink path="Python/initconfig.c" />
+
+`Python/initconfig.c` owns interpreter startup configuration. It parses environment
+variables (`PYTHONPATH`, `PYTHONDONTWRITEBYTECODE`, etc.), command-line flags
+(`-O`, `-W`, `-X`), and the computed paths (`sys.path`, `sys.prefix`) into a `PyConfig`
+struct, then passes that struct to `Py_InitializeFromConfig`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | `PyConfig` defaults, `PyConfig_InitPythonConfig` | Zero config struct with sane defaults |
+| 301-700 | Environment variable parsing | `PYTHONPATH`, `PYTHONINSPECT`, `PYTHONOPTIMIZE`, etc. |
+| 701-1200 | Command-line parsing | `-c`, `-m`, `-W`, `-X` flags |
+| 1201-1800 | `_PyConfig_InitPathConfig` | `sys.prefix`, `sys.exec_prefix`, `sys.path` computation |
+| 1801-3200 | `Py_InitializeFromConfig` | Drive full interpreter initialization sequence |
+
+## Reading
+
+### `PyConfig` struct (selected fields)
+
+```c
+// CPython: Include/cpython/initconfig.h (used by initconfig.c)
+typedef struct {
+    int isolated;
+    int use_environment;
+    int dev_mode;
+    int optimization_level;      /* -O flag count */
+    int verbose;
+    wchar_t *program_name;
+    PyWideStringList argv;
+    PyWideStringList xoptions;   /* -X options */
+    PyWideStringList warnoptions;/* -W options */
+    wchar_t *pythonpath_env;     /* PYTHONPATH */
+    int write_bytecode;
+    ...
+} PyConfig;
+```
+
+### `sys.path` computation
+
+`_PyConfig_InitPathConfig` calls `_PyPathConfig_ComputeSysPath0` to find the script
+directory and `_PyGetPath` to compute the initial `sys.path` from `PYTHONPATH`, the
+installation prefix, and zipimport paths. This is the most platform-dependent part of
+initialization.
+
+### `-X` options
+
+`-X dev` enables development mode (extra assertions, tracemalloc). `-X faulthandler`
+installs the fault handler. `-X importtime` measures import times. These are parsed from
+`config.xoptions` and applied during `Py_InitializeFromConfig`.
+
+### `Py_InitializeFromConfig` sequence
+
+1. Apply `PyConfig` settings to the interpreter state.
+2. Initialize types (`_PyTypes_Init`).
+3. Initialize builtins (`_PyBuiltins_Init`).
+4. Initialize `sys` module.
+5. Initialize importlib and frozen modules.
+6. Set `sys.path`.
+
+## gopy notes
+
+gopy initializes via `pythonrun/runstring.go` and the `stdlibinit` registry. There is no
+`PyConfig` struct; configuration is passed as Go arguments to the run function. `sys.path`
+is a static list of built-in module names since path-based import is not yet implemented.

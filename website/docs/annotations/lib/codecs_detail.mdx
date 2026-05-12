@@ -1,0 +1,141 @@
+---
+title: codecs.py
+description: "CPython Lib/codecs.py: codec registry and stream wrappers"
+cpython_path: Lib/codecs.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`codecs.py` sits between Python callers and the C codec machinery in
+`Modules/_codecsmodule.c`. It provides the search-function registry,
+`CodecInfo` named tuple, incremental codec base classes, and stream wrappers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | imports, `BOM_*` constants | byte-order marks for UTF-x encodings |
+| 61–120 | `CodecInfo` | `collections.namedtuple` with encode/decode/streamreader/streamwriter |
+| 121–180 | `register()` `lookup()` | add/find a codec search function via C extension |
+| 181–260 | `open()` | wraps a binary file with `StreamReaderWriter` |
+| 261–360 | `EncoderWrapper` `DecoderWrapper` | adapt incremental codecs to the stateless interface |
+| 361–500 | `IncrementalEncoder` `IncrementalDecoder` | base classes for stateful codecs |
+| 501–620 | `StreamWriter` | buffered write side, `write()` / `writelines()` / `reset()` |
+| 621–760 | `StreamReader` | buffered read side, `read()` / `readline()` / `readlines()` |
+| 761–840 | `StreamReaderWriter` | combines both sides for `open()` |
+| 841–920 | `StreamRecoder` | re-encodes on the fly between two codecs |
+| 921–1000 | `charmap_encode()` `charmap_decode()` | single-byte charmap codec helpers |
+| 1001–1100 | `make_encoding_map()` `make_identity_dict()` | charmap construction utilities |
+
+## Reading
+
+### register and lookup
+
+`register()` and `lookup()` delegate entirely to the C extension. The search
+function receives a lowercase encoding name and must return a `CodecInfo` or
+`None`.
+
+```python
+# CPython: Lib/codecs.py:128 register
+def register(search_function):
+    _codecs.register(search_function)
+```
+
+```python
+# CPython: Lib/codecs.py:140 lookup
+def lookup(encoding):
+    return _codecs.lookup(encoding)
+```
+
+The returned `CodecInfo` is a named tuple with four callables: `encode`,
+`decode`, `streamreader`, and `streamwriter`.
+
+### open and StreamReaderWriter
+
+`open()` opens a binary file then wraps it with a `StreamReaderWriter` so
+callers get a text-mode file object backed by an arbitrary codec.
+
+```python
+# CPython: Lib/codecs.py:195 open
+def open(filename, mode='rb', encoding=None,
+         errors='strict', buffering=-1):
+    ...
+    file = builtins.open(filename, mode, buffering)
+    if encoding is None:
+        return file
+    info = lookup(encoding)
+    srw = StreamReaderWriter(file,
+                             info.streamreader,
+                             info.streamwriter,
+                             errors)
+    srw.encoding = encoding
+    return srw
+```
+
+### IncrementalEncoder and IncrementalDecoder
+
+These base classes define the contract for stateful codecs. Subclasses must
+implement `encode()` / `decode()`. The `reset()` method is a no-op in the
+base but overridden by stateful codecs such as UTF-16.
+
+```python
+# CPython: Lib/codecs.py:385 IncrementalEncoder
+class IncrementalEncoder:
+    def __init__(self, errors='strict'):
+        self.errors = errors
+        self.buffer = ""
+
+    def encode(self, input, final=False):
+        raise NotImplementedError
+
+    def reset(self):
+        pass
+
+    def getstate(self):
+        return 0
+
+    def setstate(self, state):
+        pass
+```
+
+### charmap_encode
+
+`charmap_encode` converts a Unicode string to bytes using a mapping dict. The
+mapping must cover every character that appears in the input or the call
+raises `UnicodeEncodeError`.
+
+```python
+# CPython: Lib/codecs.py:940 charmap_encode
+def charmap_encode(input, errors='strict', mapping=None):
+    return _codecs.charmap_encode(input, errors, mapping)
+```
+
+## gopy notes
+
+- `_codecs` is `Modules/_codecsmodule.c`. The Go equivalent should expose a
+  `RegisterCodec(searchFn)` function and store search functions in a
+  slice protected by a `sync.RWMutex`.
+- `CodecInfo` can be a plain Go struct; the four function fields map to
+  `func([]byte, string) ([]byte, int, error)` signatures (encode side) and
+  their mirror for decode.
+- `StreamReader` and `StreamWriter` are stateful; model them as structs
+  holding an `io.Reader` / `io.Writer` plus a pending-byte buffer.
+- `IncrementalEncoder`/`IncrementalDecoder` map naturally to Go interfaces.
+  Name them `IncrementalEncoderIface` or similar to avoid collision with the
+  concrete base type.
+- `charmap_encode`/`charmap_decode` are thin wrappers around the C function;
+  re-implement them as a pure Go loop over `[]rune` for the initial port.
+
+## CPython 3.14 changes
+
+- `StreamReader.read()` now raises `UnicodeDecodeError` with a more precise
+  byte-offset when the codec returns partial data at EOF.
+- The `errors` argument is validated earlier in `IncrementalEncoder.__init__`
+  using the same helper that `str.encode` uses, giving consistent error
+  messages.
+- `make_encoding_map()` gained a fast path for identity mappings to reduce
+  startup cost for Latin-1-family codecs.
+- No new public symbols were added between 3.13 and 3.14 for this module.

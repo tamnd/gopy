@@ -1,0 +1,76 @@
+---
+title: Python/abstract.c
+description: "Abstract object protocol: PyObject_Call, PyObject_GetItem/SetItem/DelItem, PySequence_Length/GetItem/SetItem, PyMapping_Keys/Values/Items, PyNumber_Add through the number slots."
+cpython_path: Python/abstract.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/abstract.c`
+
+<CpyLink path="Python/abstract.c" />
+
+`Python/abstract.c` implements the abstract object API declared in `Include/abstract.h`.
+These are the C-level entry points for object operations that dispatch through Python's
+type slots (`tp_as_sequence`, `tp_as_mapping`, `nb_add`, etc.).
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | `PyObject_Call`, `_PyObject_CallMethodId` | Generic callable dispatch |
+| 301-700 | `PyObject_GetItem`, `PyObject_SetItem`, `PyObject_DelItem` | Subscript protocol |
+| 701-1100 | `PySequence_*` | Sequence length, concatenation, repeat, contains |
+| 1101-1500 | `PyMapping_*` | Mapping keys/values/items, `has_key` |
+| 1501-2800 | `PyNumber_*` | Arithmetic, bitwise, unary through number slots |
+
+## Reading
+
+### `PyObject_Call`
+
+`PyObject_Call(callable, args, kwargs)` checks for `tp_call` or `tp_vectorcall` and
+dispatches. It is the C equivalent of calling `callable(*args, **kwargs)`.
+
+```c
+// CPython: Python/abstract.c:202 PyObject_Call
+PyObject *
+PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs)
+{
+    ...
+    vectorcallfunc func = _PyVectorcall_Function(callable);
+    if (func != NULL) {
+        return _PyVectorcall_Call(func, callable, args, kwargs);
+    }
+    ternaryfunc call = Py_TYPE(callable)->tp_call;
+    if (call != NULL) {
+        return call(callable, args, kwargs);
+    }
+    ...
+}
+```
+
+### `PyObject_GetItem`
+
+`PyObject_GetItem(obj, key)` tries `tp_as_mapping->mp_subscript` first, then
+`tp_as_sequence->sq_item` (converting the key to an integer). This means a class can
+support both mapping and sequence subscript.
+
+### `PyNumber_Add` coercion
+
+`PyNumber_Add(a, b)` tries `a.__add__(b)` first, then `b.__radd__(a)` if the first
+returns `NotImplemented`. If both fail, `TypeError` is raised. This dispatch is done by
+the `binary_op1` helper shared by all binary numeric operators.
+
+### `PySequence_Contains`
+
+`PySequence_Contains(seq, ob)` calls `sq_contains` if defined, or falls back to iterating
+the sequence and comparing with `PyObject_RichCompareBool(item, ob, Py_EQ)`.
+
+## gopy notes
+
+`objects/protocol.go` implements the abstract protocol functions for gopy. `PyObject_Call`
+maps to `py.Call`. `PyObject_GetItem` maps to `py.GetItem`. The number slot dispatch in
+`PyNumber_Add` is replicated in `vm/eval_simple.go` for `BINARY_OP`.

@@ -1,0 +1,63 @@
+---
+title: Modules/signalmodule.c
+description: "signal module: signal() handler registration, raise_signal, SIG_DFL/SIG_IGN constants, wakeup fd via set_wakeup_fd, and the pending signal check in the eval loop."
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 1050
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/signalmodule.c`
+
+<CpyLink path="Modules/signalmodule.c" />
+
+`Modules/signalmodule.c` implements `signal`. It registers C-level signal handlers with
+the OS and arranges for the Python handler to be called between bytecode instructions.
+The eval loop checks `_Py_eval_breaker` after each instruction; when a signal arrives,
+the C handler sets this flag.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `signal_handler` C function, `_PySignal_AfterFork` | OS-level handler and fork cleanup |
+| 201-450 | `signal_signal_impl`, `signal_getsignal_impl` | Python API |
+| 451-650 | `set_wakeup_fd` | Write a byte to a pipe/socket on signal delivery |
+| 651-900 | `raise_signal`, `pthread_kill` wrapper | Signal delivery helpers |
+| 901-1050 | Module init | Constants: `SIGINT`, `SIGTERM`, `SIG_DFL`, `SIG_IGN` |
+
+## Reading
+
+### Signal delivery to Python
+
+The C signal handler cannot call Python directly (GIL may not be held). Instead it:
+1. Writes the signal number to `Handlers[signum].func`.
+2. Sets `_Py_eval_breaker` (an atomic flag).
+3. Optionally writes a byte to the wakeup fd.
+
+Between bytecode instructions the eval loop checks `_Py_eval_breaker`; if set, it calls
+`handle_signals` which iterates `Handlers[]` and calls each registered Python callable.
+
+### `set_wakeup_fd`
+
+`set_wakeup_fd(fd)` sets a non-blocking fd (typically the write end of a `os.pipe()` or
+a `socket`) that receives a single byte for each signal. This allows `select()`/`poll()`
+event loops to wake up on signals without polling.
+
+```python
+# CPython: Modules/signalmodule.c:740 set_wakeup_fd_impl
+# The fd must be non-blocking; a EAGAIN error is silently ignored.
+```
+
+### `SIGINT` default handler
+
+The default `SIGINT` handler raises `KeyboardInterrupt` in the main thread by setting
+`_Py_HandlePending` and `InterruptOccurred`.
+
+## gopy notes
+
+Not yet ported. Signal handling in gopy will use `os/signal.Notify` to route signals to a
+Go channel, then convert them to `KeyboardInterrupt` or call registered Python handlers.
+Planned path: `module/signal/`.

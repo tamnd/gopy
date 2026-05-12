@@ -1,0 +1,161 @@
+---
+title: "Lib/asyncio/unix_events.py"
+description: Unix-specific event loop extensions covering signal handling via a self-pipe, child-process watchers, and FIFO/socket pipe transports.
+cpython_path: Lib/asyncio/unix_events.py
+cpython_version: "3.14"
+lines: 972
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/asyncio/unix_events.py
+
+<CpyLink path="Lib/asyncio/unix_events.py" />
+
+This file extends `BaseSelectorEventLoop` with the parts that only make sense on POSIX: OS signal delivery through a self-pipe trick, child-process reaping via `pidfd` or a background thread, and non-blocking pipe transports for stdin/stdout/stderr plumbing. It also defines the default Unix event loop policy.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/asyncio/unix_events.py" lines="54-482">54-482</Cpy> | `_UnixSelectorEventLoop` | Core Unix loop; owns `_signal_handlers` dict and the active child watcher; picks `_PidfdChildWatcher` when `pidfd_open` is available, falls back to `_ThreadedChildWatcher` |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="90-133">90-133</Cpy> | `add_signal_handler` | Registers a callback for a POSIX signal; installs `_sighandler_noop` via `signal.signal` and calls `signal.set_wakeup_fd` to route signal bytes into the selector self-pipe |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="135-143">135-143</Cpy> | `_handle_signal` | Actual in-loop signal dispatcher; looks up the handle and calls `_add_callback_signalsafe` |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="145-175">145-175</Cpy> | `remove_signal_handler` | Restores `SIG_DFL` (or `default_int_handler` for SIGINT) and disables `set_wakeup_fd` when the last handler is removed |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="197-217">197-217</Cpy> | `_make_subprocess_transport` | Creates `_UnixSubprocessTransport`, registers the PID with the child watcher, and awaits the startup waiter future |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="484-626">484-626</Cpy> | `_UnixReadPipeTransport` | Read-side transport for a FIFO, socket, or character device; `_read_ready` calls `os.read` and feeds bytes to the protocol, or signals EOF |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="628-831">628-831</Cpy> | `_UnixWritePipeTransport` | Write-side transport; attempts a direct `os.write` first, buffers the remainder, and drains in `_write_ready`; detects remote close via a reader on the write fd |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="857-891">857-891</Cpy> | `_PidfdChildWatcher` | Linux-only; opens a `pidfd` with `os.pidfd_open`, registers it as a readable fd, and calls `os.waitpid` in `_do_wait` once the fd becomes readable |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="893-951">893-951</Cpy> | `_ThreadedChildWatcher` | Portable fallback; spawns one daemon thread per child that blocks on `os.waitpid`, then calls the callback via `loop.call_soon_threadsafe` |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="953-962">953-962</Cpy> | `can_use_pidfd` | Runtime probe that calls `pidfd_open` on the current PID to confirm kernel support and SECCOMP policy |
+| <Cpy path="Lib/asyncio/unix_events.py" lines="965-972">965-972</Cpy> | `_UnixDefaultEventLoopPolicy` | Binds `_loop_factory = _UnixSelectorEventLoop`; exported as `_DefaultEventLoopPolicy` |
+
+## Reading
+
+### The self-pipe signal trick
+
+The loop installs a no-op C-level signal handler and routes signal bytes into the selector socket pair via `set_wakeup_fd`. When the selector wakes up, `_process_self_data` (defined in `BaseSelectorEventLoop`) dispatches each byte to `_handle_signal`.
+
+```python
+# CPython: Lib/asyncio/unix_events.py:90 _UnixSelectorEventLoop.add_signal_handler
+def add_signal_handler(self, sig, callback, *args):
+    if (coroutines.iscoroutine(callback) or
+            coroutines._iscoroutinefunction(callback)):
+        raise TypeError("coroutines cannot be used "
+                        "with add_signal_handler()")
+    self._check_signal(sig)
+    self._check_closed()
+    try:
+        signal.set_wakeup_fd(self._csock.fileno())
+    except (ValueError, OSError) as exc:
+        raise RuntimeError(str(exc))
+
+    handle = events.Handle(callback, args, self, None)
+    self._signal_handlers[sig] = handle
+
+    try:
+        signal.signal(sig, _sighandler_noop)
+        signal.siginterrupt(sig, False)
+    except OSError as exc:
+        del self._signal_handlers[sig]
+        if not self._signal_handlers:
+            try:
+                signal.set_wakeup_fd(-1)
+            except (ValueError, OSError) as nexc:
+                logger.info('set_wakeup_fd(-1) failed: %s', nexc)
+        if exc.errno == errno.EINVAL:
+            raise RuntimeError(f'sig {sig} cannot be caught')
+        else:
+            raise
+```
+
+### _PidfdChildWatcher: Linux pidfd reaping
+
+On Linux 5.3+ the watcher opens a file descriptor for the child PID, registers it with the loop's reader, and lets the selector tell it when the child has exited. No threads, no SIGCHLD.
+
+```python
+# CPython: Lib/asyncio/unix_events.py:869 _PidfdChildWatcher.add_child_handler
+def add_child_handler(self, pid, callback, *args):
+    loop = events.get_running_loop()
+    pidfd = os.pidfd_open(pid)
+    loop._add_reader(pidfd, self._do_wait, pid, pidfd, callback, args)
+
+# CPython: Lib/asyncio/unix_events.py:874 _PidfdChildWatcher._do_wait
+def _do_wait(self, pid, pidfd, callback, args):
+    loop = events.get_running_loop()
+    loop._remove_reader(pidfd)
+    try:
+        _, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        returncode = 255
+        logger.warning(
+            "child process pid %d exit status already read: "
+            " will report returncode 255",
+            pid)
+    else:
+        returncode = waitstatus_to_exitcode(status)
+
+    os.close(pidfd)
+    callback(pid, returncode, *args)
+```
+
+### _UnixReadPipeTransport._read_ready
+
+The read-ready callback calls `os.read` with a 256 KiB cap, feeds bytes to the protocol, or closes the transport on EOF. `BlockingIOError` and `InterruptedError` are silently retried on the next selector wakeup.
+
+```python
+# CPython: Lib/asyncio/unix_events.py:547 _UnixReadPipeTransport._read_ready
+def _read_ready(self):
+    try:
+        data = os.read(self._fileno, self.max_size)
+    except (BlockingIOError, InterruptedError):
+        pass
+    except OSError as exc:
+        self._fatal_error(exc, 'Fatal read error on pipe transport')
+    else:
+        if data:
+            self._protocol.data_received(data)
+        else:
+            if self._loop.get_debug():
+                logger.info("%r was closed by peer", self)
+            self._closing = True
+            self._loop._remove_reader(self._fileno)
+            self._loop.call_soon(self._protocol.eof_received)
+            self._loop.call_soon(self._call_connection_lost, None)
+```
+
+### _ThreadedChildWatcher: portable POSIX fallback
+
+When `pidfd_open` is not available, each child gets a daemon thread that calls blocking `os.waitpid`. The result is injected back into the event loop thread via `call_soon_threadsafe`.
+
+```python
+# CPython: Lib/asyncio/unix_events.py:927 _ThreadedChildWatcher._do_waitpid
+def _do_waitpid(self, loop, expected_pid, callback, args):
+    assert expected_pid > 0
+
+    try:
+        pid, status = os.waitpid(expected_pid, 0)
+    except ChildProcessError:
+        pid = expected_pid
+        returncode = 255
+        logger.warning(
+            "Unknown child process pid %d, will report returncode 255",
+            pid)
+    else:
+        returncode = waitstatus_to_exitcode(status)
+        if loop.get_debug():
+            logger.debug('process %s exited with returncode %s',
+                         expected_pid, returncode)
+
+    if loop.is_closed():
+        logger.warning("Loop %r that handles pid %r is closed", loop, pid)
+    else:
+        loop.call_soon_threadsafe(callback, pid, returncode, *args)
+
+    self._threads.pop(expected_pid)
+```
+
+## gopy notes
+
+A Go port of this file splits naturally into three pieces. Signal handling maps to `signal.Notify` on a channel plus a goroutine that forwards values into the run loop via a non-blocking channel write, replacing the self-pipe. Child watching maps to `_PidfdChildWatcher` on Linux (using `unix.PidfdOpen`) and to a goroutine calling `syscall.Wait4` on other platforms, mirroring `_ThreadedChildWatcher`. The pipe transports map to `net.Pipe` or `os.Pipe` file descriptors registered with the selector, with the same split between a 256 KiB read buffer and a write-buffer-plus-drain strategy.

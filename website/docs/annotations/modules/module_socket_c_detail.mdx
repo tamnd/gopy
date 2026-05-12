@@ -1,0 +1,107 @@
+---
+title: Modules/_socketmodule.c
+description: "CPython socket module C extension: wraps POSIX and Winsock APIs into PySocketSockObject, implementing connect, accept, send, recv, and address family conversions."
+cpython_path: Modules/_socketmodule.c
+cpython_version: "3.14"
+lines: 6800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_socketmodule.c`
+
+<CpyLink path="Modules/_socketmodule.c" />
+
+`Modules/_socketmodule.c` is the C extension that backs Python's `socket` module. It wraps
+BSD socket / Winsock2 system calls into `PySocketSockObject`, a Python object that holds a
+file descriptor and an address family. The module handles address family encoding,
+non-blocking connect/accept with the GIL released, and platform differences between POSIX
+and Windows.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | includes, platform guards | OS detection, Winsock vs POSIX headers |
+| 201-600 | `PySocketSockObject` | Socket object struct and type object |
+| 601-1200 | address conversion | `setipaddr`, `idna_converter`, `getsockaddrarg`, `getsockaddrlen` |
+| 1201-2000 | `sock_connect`, `sock_accept` | Connect and accept with GIL-release retry loop |
+| 2001-3200 | `sock_send`, `sock_recv` | Send/recv families with GIL-release and buffer protocol |
+| 3201-4500 | `sock_setsockopt`, `sock_getsockopt` | Socket option get/set with type dispatch |
+| 4501-5500 | module-level functions | `getaddrinfo`, `getnameinfo`, `socketpair`, `setdefaulttimeout` |
+| 5501-6800 | type and module init | `PySocketSock_Type`, `PyInit__socket` |
+
+## Reading
+
+### `PySocketSockObject` and timeout
+
+Every socket object stores the file descriptor, address family, protocol, and a timeout
+value. A negative timeout means blocking; zero means non-blocking; positive means the
+`select`-then-call pattern.
+
+```c
+// CPython: Modules/_socketmodule.c:210 PySocketSockObject
+typedef struct {
+    PyObject_HEAD
+    SOCKET_T sock_fd;
+    int sock_family;
+    int sock_type;
+    int sock_proto;
+    PyObject *sock_timeout;  /* stored as float seconds; None -> blocking */
+} PySocketSockObject;
+```
+
+### GIL-release pattern in `sock_connect`
+
+Blocking socket calls release the GIL so other threads continue while the syscall waits.
+The pattern is `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` around the raw syscall.
+
+```c
+// CPython: Modules/_socketmodule.c:1240 sock_connect_impl
+static int
+sock_connect_impl(PySocketSockObject *s, void* Py_UNUSED(data))
+{
+    int res;
+    Py_BEGIN_ALLOW_THREADS
+    res = connect(s->sock_fd,
+                  SAS2SA(&s->sock_addr.storage),
+                  s->sock_addr.addrlen);
+    Py_END_ALLOW_THREADS
+    return res == 0;
+}
+```
+
+For non-blocking sockets with a timeout, `sock_connect` calls `select` in a loop, checking
+for writability after each `EINPROGRESS`, releasing the GIL on each `select` call.
+
+### Address family encoding: `getsockaddrarg`
+
+`getsockaddrarg` converts a Python address object into a `sockaddr` struct. It dispatches
+on `s->sock_family`, handling `AF_INET` (2-tuple), `AF_INET6` (4-tuple), `AF_UNIX` (string
+path), and `AF_BLUETOOTH` family variants.
+
+```c
+// CPython: Modules/_socketmodule.c:1380 getsockaddrarg AF_INET
+case AF_INET: {
+    struct sockaddr_in* addr = &addrbuf->in;
+    char *hostp;
+    int port, result;
+    if (!PyTuple_Check(args) || !PyArg_ParseTuple(args, "eti:getsockaddrarg",
+                                                  "idna", &hostp, &port))
+        return 0;
+    ...
+```
+
+## gopy notes
+
+Not yet ported. The Go standard library's `net` package covers the high-level interface.
+A direct port of `_socketmodule.c` would target `module/socket/`, providing `socket.socket`
+objects with `Connect`, `Accept`, `Send`, `Recv` methods calling into `syscall` or `golang.org/x/net`.
+The GIL-release pattern maps naturally to goroutine scheduling.
+
+## CPython 3.14 changes
+
+3.14 added `socket.SOCK_NONBLOCK` and `socket.SOCK_CLOEXEC` on Linux, and improved
+`getaddrinfo` to respect the system `hosts` file ordering more faithfully. The
+`socket.create_connection` helper gained a `local_addr` parameter for bind-before-connect.

@@ -1,0 +1,69 @@
+---
+title: Include/pymem.h
+description: "Public memory API: PyMem_Malloc/Realloc/Free macros, PyMem_RawMalloc for pre-GIL allocations, and the PyMemAllocatorEx hook point for custom allocator injection."
+cpython_path: Include/pymem.h
+cpython_version: "3.14"
+lines: 145
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/pymem.h`
+
+<CpyLink path="Include/pymem.h" />
+
+`Include/pymem.h` declares the public-facing memory API. It splits allocations into three
+domains: `PyMem_` (object memory, GIL must be held), `PyMem_Raw_` (raw C heap, no GIL
+requirement), and `PyObject_` (object allocator, usually pymalloc). Each domain can be
+replaced independently with `PyMem_SetAllocator`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-40 | `PyMemAllocatorDomain`, `PyMemAllocatorEx` | Enum and allocator struct for custom hooks |
+| 41-90 | `PyMem_SetAllocator`, `PyMem_GetAllocator` | Allocator injection/inspection API |
+| 91-120 | `PyMem_Malloc`, `PyMem_Realloc`, `PyMem_Free` | Object-domain allocator macros |
+| 121-145 | `PyMem_RawMalloc`, `PyMem_RawCalloc`, `PyMem_RawFree` | Raw-domain allocator functions |
+
+## Reading
+
+### Three allocation domains
+
+| Domain prefix | GIL required | Typical backing |
+|---|---|---|
+| `PyMem_Raw_` | No | `malloc` |
+| `PyMem_` | Yes | pymalloc or `malloc` |
+| `PyObject_` | Yes | pymalloc |
+
+Pre-GIL or post-GIL code (signal handlers, finalizers before the interpreter is fully up)
+must use `PyMem_Raw*`. Using `PyMem_*` without holding the GIL is undefined behaviour.
+
+### `PyMemAllocatorEx`
+
+```c
+// CPython: Include/pymem.h:44 PyMemAllocatorEx
+typedef struct {
+    void *ctx;
+    void* (*malloc) (void *ctx, size_t size);
+    void* (*calloc) (void *ctx, size_t nelem, size_t elsize);
+    void* (*realloc)(void *ctx, void *ptr, size_t new_size);
+    void  (*free)   (void *ctx, void *ptr);
+} PyMemAllocatorEx;
+```
+
+A custom allocator is injected per-domain via `PyMem_SetAllocator(domain, &alloc)`. The
+`ctx` pointer is passed as the first argument to every callback, allowing stateful
+allocators (arena pools, leak trackers).
+
+### `PyMem_Malloc` on size 0
+
+By contract `PyMem_Malloc(0)` returns a unique non-NULL pointer. Code that conditionally
+checks the return value for NULL to detect failure must also check size.
+
+## gopy notes
+
+The Go runtime manages memory automatically. gopy does not expose `PyMem_` APIs to user
+code; internally, Python object structs are allocated with `new(T)` or `sync.Pool` for hot
+paths. The `PyMemAllocatorEx` hook has no Go analogue.

@@ -1,0 +1,126 @@
+---
+title: Modules/timemodule.c
+description: "CPython source annotation: Modules/timemodule.c"
+cpython_path: Modules/timemodule.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/timemodule.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–80 | includes, `_PyTime_t` typedef | nanosecond int64 type and conversion helpers |
+| 81–220 | `time_time`, `time_time_ns` | wall clock via `gettimeofday` or `clock_gettime` |
+| 221–400 | `perf_counter_impl` | monotonic high-res counter via `CLOCK_MONOTONIC_RAW` or `QueryPerformanceCounter` |
+| 401–560 | `pysleep` | `nanosleep`/`select` loop with `EINTR` retry |
+| 561–900 | `time_strftime` | UTF-8 encoding loop over `strftime` output |
+| 901–1200 | `struct_time`, `gettmarg` | `time.struct_time` construction from `gmtime_r`/`localtime_r` |
+| 1201–1600 | `time_gmtime`, `time_localtime` | public wrappers calling `gettmarg` |
+| 1601–2000 | module init, `PyDoc` strings | `PyModuleDef`, docstrings, method table |
+
+## Reading
+
+### _PyTime_t and the nanosecond integer type
+
+CPython 3.14 represents internal timestamps as a signed 64-bit nanosecond count
+called `_PyTime_t`. All public `time` functions convert platform values into this
+type before exposing them to Python. The helpers `_PyTime_FromSecondsDouble` and
+`_PyTime_AsSecondsDouble` are the two crossing points between floating-point
+seconds and the integer representation.
+
+```c
+// CPython: Modules/timemodule.c:47 _PyTime_t
+typedef int64_t _PyTime_t;
+
+// CPython: Modules/timemodule.c:61 _PyTime_FromSecondsDouble
+static _PyTime_t
+_PyTime_FromSecondsDouble(double d)
+{
+    return (_PyTime_t)(d * 1e9);
+}
+```
+
+The int64 range covers roughly plus or minus 292 years from the epoch, which is
+sufficient for any realistic wall-clock use. Overflow is checked via
+`_PyTime_check_overflow` before returning values to Python callers.
+
+### pysleep and the EINTR retry loop
+
+`pysleep` implements `time.sleep`. On POSIX it calls `nanosleep` and, when the
+call is interrupted by a signal (`EINTR`), recomputes the remaining interval and
+retries. The CPython signal machinery runs between the retry attempts via
+`Py_MakePendingCalls`, so `KeyboardInterrupt` is delivered promptly even during
+long sleeps.
+
+```c
+// CPython: Modules/timemodule.c:422 pysleep
+static int
+pysleep(_PyTime_t timeout)
+{
+    _PyTime_t deadline = _PyTime_Add(_PyTime_GetMonotonicClock(), timeout);
+    do {
+        struct timespec ts;
+        if (_PyTime_AsTimespec(timeout, &ts) < 0)
+            return -1;
+        int err = nanosleep(&ts, NULL);
+        if (err == 0)
+            break;
+        if (errno != EINTR) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return -1;
+        }
+        /* EINTR: run pending calls then recalculate remaining time */
+        if (Py_MakePendingCalls() < 0)
+            return -1;
+        timeout = _PyTime_Subtract(deadline, _PyTime_GetMonotonicClock());
+    } while (timeout > 0);
+    return 0;
+}
+```
+
+On Windows the loop uses `WaitForSingleObjectEx` with an alertable wait so that
+APC callbacks (used by the wakeup-fd mechanism) fire during the sleep.
+
+### perf_counter and the platform monotonic source
+
+`time.perf_counter` is backed by `CLOCK_MONOTONIC_RAW` on Linux (immune to NTP
+slew), `mach_absolute_time` on macOS, and `QueryPerformanceCounter` on Windows.
+The selection happens at module init and is cached in a static function pointer
+`perf_func`.
+
+```c
+// CPython: Modules/timemodule.c:255 perf_counter_impl
+static PyObject *
+perf_counter_impl(PyObject *module, int info)
+{
+    _PyTime_t t;
+    if (_PyTime_GetPerfCounterWithInfo(&t, info ? &_Py_clock_info : NULL) < 0)
+        return NULL;
+    return _PyTime_AsNanosecondsObject(t);   /* ns variant */
+}
+```
+
+`struct_time` is built from `gmtime_r` (UTC) or `localtime_r` (local) via the
+shared helper `gettmarg`, which copies the nine `struct tm` fields plus the
+`tm_gmtoff` and `tm_zone` extensions into a `PyStructSequence`. The `strftime`
+wrapper iterates buffer sizes starting at 256 bytes, doubling on truncation, and
+encodes the final `char*` result as UTF-8.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/time/`.
+
+The nanosecond typedef maps naturally to `int64` in Go. The platform clock
+selection (`CLOCK_MONOTONIC_RAW` vs `QueryPerformanceCounter`) will be handled
+via Go's `time.Now()` and `runtime` build tags. The `EINTR` retry loop in
+`pysleep` becomes a `for` loop around `time.Sleep` with a check against
+`pythonrun.MakePendingCalls`. `struct_time` will be a `PyStructSequence`
+registered during module init, mirroring the approach used by `module/os/`.

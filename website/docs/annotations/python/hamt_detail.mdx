@@ -1,0 +1,88 @@
+---
+title: "hamt.c: Hash Array Mapped Trie"
+description: "HAMT node types (Bitmap, Array, Collision), persistent immutable update semantics, and context variable backing store"
+cpython_path: Python/hamt.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: objects/hamt.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`hamt.c` implements a persistent, immutable Hash Array Mapped Trie. It is the backing data structure for `contextvars.Context`. Each `Assoc` or `Without` operation returns a new root without modifying the old one, giving context objects copy-on-write semantics at `O(log32 N)` cost.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | type definitions | `PyHamtNode_Bitmap`, `PyHamtNode_Array`, `PyHamtNode_Collision` structs |
+| 81-200 | `hamt_node_bitmap_*` | Bitmap node: up to 32 children addressed by popcount index |
+| 201-430 | `hamt_node_array_*` | Array node: full 32-slot child array, used when bitmap node overflows |
+| 431-620 | `hamt_node_collision_*` | Collision node: linear list for keys that share all 32 hash bits |
+| 621-900 | `hamt_node_find` dispatch | Recursive find across node types |
+| 901-1200 | `hamt_node_assoc` dispatch | Recursive copy-on-write insert/update |
+| 1201-1450 | `hamt_node_without` dispatch | Recursive copy-on-write delete |
+| 1451-1620 | `_PyHamt_New/_PyHamt_Assoc/_PyHamt_Without/_PyHamt_Find` | Public API wrapping the node dispatch |
+| 1621-1800 | `PyHamtIterator` | Depth-first stack-based iterator for `Context.items()` |
+
+## Reading
+
+### Bitmap node structure
+
+A bitmap node stores up to 32 key-value pairs. The 32-bit `b_bitmap` field has one bit per used slot; `popcount(bitmap & mask)` converts a 5-bit hash fragment into a dense array index. This avoids allocating empty slots.
+
+```c
+// Python/hamt.c:81
+typedef struct {
+    PyObject_HEAD
+    uint32_t      b_bitmap;
+    PyObject     *b_array[1];   /* pairs: key, value, or sub-node marker */
+} PyHamtNode_Bitmap;
+
+static Py_ssize_t
+hamt_node_bitmap_find(PyHamtNode_Bitmap *node, uint32_t shift,
+                      PyObject *key, Py_hash_t hash, PyObject **val)
+{
+    uint32_t bit = hamt_bitpos(hash, shift);
+    if (!(node->b_bitmap & bit)) { return F_NOT_FOUND; }
+    Py_ssize_t idx = hamt_bitcount(node->b_bitmap & (bit - 1));
+    ...
+}
+```
+
+### Persistent insert (Assoc)
+
+`hamt_node_bitmap_assoc` never mutates in place. It allocates a new bitmap node with the updated slot and returns it. The caller similarly replaces only the pointer on the path from root to the changed leaf, leaving all sibling subtrees shared.
+
+```c
+// Python/hamt.c:901
+static PyHamtNode *
+hamt_node_bitmap_assoc(PyHamtNode_Bitmap *node, uint32_t shift,
+                       Py_hash_t hash, PyObject *key, PyObject *val,
+                       int *added_leaf)
+{
+    ...
+    PyHamtNode_Bitmap *new = hamt_node_bitmap_clone(node);
+    Py_XDECREF(new->b_array[val_idx]);
+    new->b_array[val_idx] = Py_NewRef(val);
+    return (PyHamtNode *)new;
+}
+```
+
+### 3.14 changes
+
+3.14 added `_PyHamt_NewWithHash` to accept a pre-computed hash, avoiding a second `tp_hash` call when the hash is already known (common in `ContextVar.set`). The iterator gained a `__length_hint__` implementation for faster list conversion.
+
+## gopy notes
+
+- The Go port lives in `objects/hamt.go` and mirrors the three node types as Go structs with the same field layout. Pointer sharing across versions is handled by Go's GC rather than CPython's reference counts.
+- `hamt_bitcount` maps to `bits.OnesCount32` from `math/bits`.
+- `hamt_bitpos` is `uint32(1) << ((hash >> shift) & 0x1f)`.
+- The iterator uses a `[maxDepth]iterFrame` array on the stack rather than a heap-allocated linked list, matching CPython's approach.
+- All three node `find`/`assoc`/`without` paths include the same test vectors used in `Lib/test/test_hamt.py`.
+---
+sidebar_label: hamt.c
+sidebar_position: 11
+custom_edit_url: null
+---

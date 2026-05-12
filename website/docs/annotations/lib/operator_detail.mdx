@@ -1,0 +1,101 @@
+---
+title: Lib/operator.py
+description: Annotated reading of the operator module that exposes Python's built-in operators as first-class callable functions.
+cpython_path: Lib/operator.py
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-15 | module header | imports `_operator`, builds `__all__` |
+| 16-40 | arithmetic functions | `add`, `sub`, `mul`, `truediv`, `floordiv`, `mod`, `pow`, `neg`, `pos`, `abs` |
+| 41-55 | comparison functions | `lt`, `le`, `eq`, `ne`, `ge`, `gt` |
+| 56-70 | bitwise functions | `and_`, `or_`, `xor_`, `invert`, `lshift`, `rshift` |
+| 71-85 | sequence operations | `contains`, `getitem`, `setitem`, `delitem`, `concat`, `length_hint` |
+| 86-100 | augmented-assignment | `iadd`, `isub`, `imul`, `itruediv`, `ifloordiv`, `imod`, `ipow`, etc. |
+| 101-110 | boolean helpers | `truth`, `not_`, `is_`, `is_not` |
+| 111-115 | index conversion | `index` |
+| 116-145 | callable factories | `attrgetter`, `itemgetter`, `methodcaller` |
+| 146-150 | aliases | `__lt__ = lt` style dunder aliases |
+
+## Reading
+
+### Simple operator functions
+
+Most functions in this file are two-liners that just call into `_operator`, the C module that does the real work. The Python file exists so that the docstrings are readable and so that `help(operator.add)` works.
+
+```python
+def add(a, b):
+    "Same as a + b."
+    return _operator.add(a, b)
+```
+
+The in-place variants follow the same pattern but call the corresponding C slot directly (`nb_inplace_add`, etc.) rather than `nb_add`, so `iadd(a, b)` is equivalent to `a += b` and returns the result.
+
+### Callable factories: attrgetter and itemgetter
+
+These are the most interesting objects in the module because they produce closures used heavily by `sorted`, `min`, `max`, and `functools`.
+
+```python
+# simplified; real implementation is in _operator.c
+class attrgetter:
+    def __init__(self, attr, *attrs):
+        self._attrs = (attr,) + attrs
+
+    def __call__(self, obj):
+        if len(self._attrs) == 1:
+            return getattr(obj, self._attrs[0])
+        return tuple(getattr(obj, a) for a in self._attrs)
+```
+
+Dotted names such as `attrgetter("foo.bar")` are split on `"."` at construction time and applied with a chain of `getattr` calls. `itemgetter` is the same pattern but calls `operator.getitem` instead of `getattr`. Both classes implement `__repr__` so they round-trip through `repr()`.
+
+### methodcaller
+
+`methodcaller` stores a method name plus pre-bound positional and keyword arguments and calls `getattr(obj, name)(*args, **kwargs)` on each invocation.
+
+```python
+class methodcaller:
+    def __init__(self, name, /, *args, **kwargs):
+        self.__name = name
+        self._args = args
+        self._kwargs = kwargs
+
+    def __call__(self, obj):
+        return getattr(obj, self.__name)(*self._args, **self._kwargs)
+```
+
+This makes it possible to write `map(methodcaller("strip"), lines)` without a lambda.
+
+### truth, not_, index and boolean coercion
+
+```python
+def truth(a):
+    "Return True if a is true, False otherwise."
+    return True if a else False
+
+def not_(a):
+    "Same as not a."
+    return not a
+
+def index(a):
+    "Return a converted to an integer.  Equivalent to a.__index__()."
+    return a.__index__()
+```
+
+`index` is the hook that `list.__getitem__` and `range` use to accept numpy integers. Anything that implements `__index__` passes.
+
+## gopy notes
+
+- All arithmetic and comparison functions map directly to the abstract-object protocol slots already in `objects/protocol.go`. A thin Go wrapper that calls those helpers is the full implementation.
+- `attrgetter` and `itemgetter` need their own `*TypeObject` registrations; they are the only objects in this module that are not just Python-callable Go functions.
+- Dotted `attrgetter` names require splitting on `"."` at construction time and storing a `[]string` slice; keep the single-name path allocation-free by storing the string directly.
+- `methodcaller` pre-binds args and kwargs exactly like `functools.partial`, so its call path can share the `callArgs` helper once that is extracted.
+- The dunder aliases at the bottom (`__add__ = add`, etc.) should be set as normal attributes on the module object after all functions are registered.
+- `index` is already partially covered by the `__index__` slot in `objects/object.go`; this function just needs to call that slot and raise `TypeError` if absent.

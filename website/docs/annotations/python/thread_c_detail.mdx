@@ -1,0 +1,107 @@
+---
+title: Python/thread.c
+description: "Platform-independent thread entry point and TLS bootstrap"
+cpython_path: Python/thread.c
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/thread.c` is the thin platform-independent layer that sits in front of `Python/thread_pthread.c` (POSIX) or `Python/thread_nt.c` (Windows). It defines the `bootstrap_data` struct, the `t_bootstrap` entry function, and the public `PyThread_start_new_thread` wrapper. The platform files provide the actual `pthread_create` / `CreateThread` call.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | includes, `bootstrap_data` struct | carries `func`, `arg`, and the new `PyThreadState` across the OS boundary |
+| 41–110 | `t_bootstrap` | initializes `PyThreadState`, acquires GIL, calls the Python callable, cleans up |
+| 111–150 | `thread_PyThread_start_new_thread` | allocates `bootstrap_data`, calls into the platform `PyThread_start_new_thread` |
+| 151–180 | `thread_excepthook`, module init | `threading.excepthook` plumbing and `_thread` module registration |
+
+## Reading
+
+### `bootstrap_data` — crossing the OS thread boundary
+
+The OS thread creation API (`pthread_create`, `CreateThread`) accepts a single `void*` argument. CPython packs everything the new thread needs into a heap-allocated `bootstrap_data` and passes its pointer as that argument.
+
+```c
+// CPython: Python/thread.c:28 bootstrap_data
+typedef struct {
+    void (*func)(void *);
+    void *arg;
+    PyThreadState *tstate;
+} bootstrap_data;
+```
+
+### `t_bootstrap` — new-thread entry point
+
+`t_bootstrap` is the actual function the OS calls when the thread starts. It acquires the GIL, binds the new `PyThreadState`, runs the Python callable, then releases the GIL and calls `PyThreadState_Delete`.
+
+```c
+// CPython: Python/thread.c:47 t_bootstrap
+static void
+t_bootstrap(void *boot_raw)
+{
+    bootstrap_data *boot = (bootstrap_data *) boot_raw;
+    PyThreadState *tstate = boot->tstate;
+    void (*func)(void*) = boot->func;
+    void *arg = boot->arg;
+    PyMem_RawFree(boot_raw);
+
+    PyEval_AcquireThread(tstate);
+    func(arg);
+    PyThreadState_Clear(tstate);
+    PyEval_ReleaseThread(tstate);
+    PyThreadState_Delete(tstate);
+}
+```
+
+### `thread_PyThread_start_new_thread` — public API
+
+The Python-level `_thread.start_new_thread` lands here. It allocates a fresh `PyThreadState` for the child, packs `bootstrap_data`, then delegates to the platform layer.
+
+```c
+// CPython: Python/thread.c:118 thread_PyThread_start_new_thread
+static PyObject *
+thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
+{
+    PyObject *func, *args, *keyw = NULL;
+    bootstrap_data *boot;
+
+    if (!PyArg_UnpackTuple(fargs, "start_new_thread", 2, 3,
+                           &func, &args, &keyw))
+        return NULL;
+
+    boot = PyMem_RawMalloc(sizeof(bootstrap_data));
+    boot->func = t_bootstrap;   /* indirection via platform layer */
+    boot->arg  = /* ... */;
+    boot->tstate = _PyThreadState_New(/* interp */);
+
+    PyThread_start_new_thread(t_bootstrap, (void*) boot);
+    /* returns thread id ... */
+}
+```
+
+### Exception handling in threads
+
+If the callable raises and the exception is not handled, `t_bootstrap` calls `PyErr_WriteUnraisable` (or the registered `threading.excepthook`) so the interpreter does not silently swallow the error.
+
+```c
+// CPython: Python/thread.c:80 t_bootstrap exception path
+    if (_PyErr_Occurred(tstate)) {
+        PyErr_WriteUnraisable(NULL);
+        _PyErr_Clear(tstate);
+    }
+```
+
+## gopy notes
+
+gopy spawns goroutines rather than OS threads, so `t_bootstrap` has no direct equivalent. The GIL acquisition pattern (`PyEval_AcquireThread` / `PyEval_ReleaseThread`) does matter: any goroutine that calls into the Python evaluator must hold the GIL for that interpreter state. The `bootstrap_data` pattern maps roughly to a goroutine closure capturing the callable and its `PyThreadState`.
+
+`_thread.start_new_thread` is stubbed in `module/_thread/`; the Go side uses `go func()` with the appropriate GIL bookkeeping.
+
+## CPython 3.14 changes
+
+3.14 removed the global `_PyRuntime.threads` lock in favour of per-interpreter thread lists. `_PyThreadState_New` now takes an explicit `PyInterpreterState*` argument. `t_bootstrap` was updated accordingly; the old implicit global-state lookup is gone.

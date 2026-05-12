@@ -1,0 +1,63 @@
+---
+title: Lib/_pydatetime.py
+description: "Pure-Python fallback for datetime: date, time, datetime, timedelta, timezone, and tzinfo with arithmetic, formatting, and ISO 8601 parsing."
+cpython_path: Lib/_pydatetime.py
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/_pydatetime.py" />
+
+`Lib/_pydatetime.py` is the pure-Python implementation of the `datetime` module (the C accelerator lives in `Modules/_datetimemodule.c`). It defines `date`, `time`, `datetime`, `timedelta`, `timezone`, and the `tzinfo` abstract base class. Python imports the C version when available and falls back to this file otherwise.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | helpers, constants | `_DAYS_IN_MONTH`, `_ymd2ord`, `_ord2ymd`, epoch constants |
+| 201-600 | `timedelta` | Duration arithmetic; `days`, `seconds`, `microseconds` normalization |
+| 601-900 | `date` | Year/month/day storage; `strftime`, `isoformat`, `fromordinal` |
+| 901-1200 | `time` | Hour/minute/second/microsecond; UTC offset support |
+| 1201-1800 | `datetime` | Combines date and time; `now()`, `utcnow()`, `fromtimestamp` |
+| 1801-2200 | `timezone` | Fixed-offset `tzinfo` subclass |
+| 2201-2800 | `tzinfo` | Abstract base; `utcoffset`, `dst`, `tzname` protocol |
+
+## Reading
+
+### timedelta normalization
+
+`timedelta.__new__` accepts `days`, `seconds`, `microseconds`, `milliseconds`, `minutes`, `hours`, `weeks` as keyword arguments. It normalizes them so that `0 <= microseconds < 1000000`, `0 <= seconds < 86400`, and days can be any integer. Overflow raises `OverflowError`.
+
+```python
+# CPython: Lib/_pydatetime.py:201 timedelta.__new__
+class timedelta:
+    def __new__(cls, days=0, seconds=0, microseconds=0, ...):
+        us = microseconds + 1000 * milliseconds + 1000000 * (seconds + 60 * (minutes + 60 * (hours + 24 * weeks)))
+        d, us = divmod(us, 86400 * 10**6)
+        d += days
+        s, us = divmod(us, 10**6)
+        ...
+```
+
+### datetime.now() and fromtimestamp
+
+`datetime.now(tz=None)` calls `time.time()` and converts the POSIX timestamp to a `datetime` object. If `tz` is provided, the result is localized; otherwise it is a naive local-time datetime.
+
+```python
+# CPython: Lib/_pydatetime.py:1201 datetime.now
+@classmethod
+def now(cls, tz=None):
+    t = _time.time()
+    return cls.fromtimestamp(t, tz)
+```
+
+### ISO 8601 parsing
+
+`datetime.fromisoformat(date_string)` (Python 3.7+, extended in 3.11 to accept full ISO 8601) parses strings like `2023-04-15T14:30:00+05:30`. It uses hand-written parsing rather than `strptime` for performance.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/datetime/`. Go's `time.Time` covers most of the same surface; `time.Duration` maps to `timedelta`. The `tzinfo` protocol maps to Go's `time.Location`.

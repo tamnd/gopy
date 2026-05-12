@@ -1,0 +1,123 @@
+---
+title: urllib/request.py
+description: "HTTP/FTP/file URL fetching: opener machinery, handlers, and redirects"
+cpython_path: Lib/urllib/request.py
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+The top-level `urlopen` convenience function and the full handler-chain machinery
+for HTTP, FTP, and local file URLs. Redirect following, cookie integration, and
+proxy configuration all live here.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | module header, `urlopen` | build default opener and call `open` |
+| 121–280 | `Request` | container for URL, headers, method, data |
+| 281–430 | `OpenerDirector` | chain handlers; dispatch `open` / `error` |
+| 431–520 | `BaseHandler` | base class; priority, `parent` link |
+| 521–680 | `HTTPDefaultErrorHandler`, `HTTPRedirectHandler` | 3xx redirect following |
+| 681–800 | `ProxyHandler` | reads `http_proxy` / `https_proxy` env vars |
+| 801–980 | `AbstractHTTPHandler`, `HTTPHandler`, `HTTPSHandler` | open TCP connection, send request |
+| 981–1100 | `HTTPCookieProcessor` | integrate `CookieJar` with handler chain |
+| 1101–1400 | `FileHandler`, `FTPHandler`, `DataHandler` | non-HTTP scheme handlers |
+| 1401–2700 | auth handlers, error helpers, utility functions | digest/basic auth, `pathname2url` |
+
+## Reading
+
+### urlopen and OpenerDirector
+
+`urlopen` is a thin wrapper that calls `build_opener` to assemble a default
+`OpenerDirector` and immediately calls `open` on it. The opener holds an ordered
+list of `BaseHandler` subclasses. Dispatch goes through
+`OpenerDirector._call_chain`, which walks handlers in priority order looking for
+a method named `protocol_open` (or `protocol_error_code` for error dispatch).
+
+```python
+# CPython: Lib/urllib/request.py:218 urlopen
+def urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, *,
+            cafile=None, capath=None, cadefault=False, context=None):
+    ...
+    return opener.open(url, data, timeout)
+```
+
+`OpenerDirector.open` normalises the `Request`, calls `protocol_open` handlers,
+then passes the result through every `protocol_response` handler in sequence.
+
+### Request
+
+`Request` stores the URL, optional POST body (`data`), a `headers` dict, an
+explicit `method` override, and an `unverifiable` flag used by cookie policy.
+Header names are title-cased on insertion.
+
+```python
+# CPython: Lib/urllib/request.py:328 Request.__init__
+class Request:
+    def __init__(self, url, data=None, headers={}, origin_req_host=None,
+                 unverifiable=False, method=None):
+        self.full_url = url
+        self.headers = {}
+        for key, value in headers.items():
+            self.add_header(key, value)
+```
+
+### AbstractHTTPHandler and do_open
+
+`AbstractHTTPHandler._open` normalises the request, then calls `do_open` with
+the appropriate connection class (`HTTPConnection` or `HTTPSConnection`). Inside
+`do_open` the connection is reused from `request.host` if one already exists in
+the handler.
+
+```python
+# CPython: Lib/urllib/request.py:1309 AbstractHTTPHandler.do_open
+def do_open(self, http_class, req, **http_conn_args):
+    ...
+    h = http_class(host, timeout=req.timeout, **http_conn_args)
+    ...
+    h.request(req.get_method(), req.selector, req.data, headers,
+               encode_chunked=req.has_header('Transfer-encoding'))
+    r = h.getresponse()
+```
+
+### HTTPRedirectHandler
+
+Handles 301, 302, 303, 307, and 308. For 303 the method is forced to `GET` and
+the body is dropped. For 307/308 the original method and body are preserved.
+The handler raises `HTTPError` after 10 consecutive redirects to break loops.
+
+```python
+# CPython: Lib/urllib/request.py:663 HTTPRedirectHandler.redirect_request
+def redirect_request(self, req, fp, code, msg, headers, newurl):
+    m = req.get_method()
+    if code in (301, 302, 303, 307, 308):
+        ...
+        return Request(newurl, headers=newheaders, origin_req_host=...,
+                       unverifiable=True, method=newmethod)
+```
+
+## gopy notes
+
+- `OpenerDirector._call_chain` iterates handler methods by name using
+  `getattr`. gopy needs dynamic method dispatch or a pre-built dispatch table
+  keyed on protocol and phase strings.
+- `HTTPHandler.do_open` instantiates `http.client.HTTPConnection` directly.
+  That module must be ported and importable before `urllib.request` can function.
+- `ProxyHandler` calls `os.environ.get` at handler construction time. gopy's
+  `os` module shim must expose `environ`.
+- Cookie integration via `HTTPCookieProcessor` requires `http.cookiejar` to be
+  importable. The two modules have a circular dependency at the type level
+  (`CookieJar` references `Request`); gopy should break this with an interface.
+
+## CPython 3.14 changes
+
+- `urlopen` now accepts an `ssl.SSLContext` via the `context` keyword and
+  propagates it down to `HTTPSHandler` without requiring a custom opener.
+- `HTTPRedirectHandler` gained explicit support for 308 Permanent Redirect,
+  preserving method and body in the same way as 307.
+- Several internal helpers that were previously relying on `urllib.parse` string
+  utilities now go through the stricter NUL-rejecting paths added in 3.14.

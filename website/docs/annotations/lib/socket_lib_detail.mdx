@@ -1,0 +1,101 @@
+---
+title: Lib/socket.py
+description: "CPython source annotation: Lib/socket.py"
+cpython_path: Lib/socket.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/socket.py" />
+
+`Lib/socket.py` is the pure-Python layer that sits on top of the `_socket` C extension. It re-exports the AF_* and SOCK_* constants, wraps the raw `_socket.socket` type in a subclass that adds buffered I/O and context-manager support, and provides several convenience factory functions for common connection patterns.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-100 | module header, imports | Pull in `_socket`, `os`, `io`, `selectors`; re-export constants |
+| ~100-250 | `socket` class | Subclass of `_socket.socket`; adds `makefile()`, `__enter__`/`__exit__`, `sendfile()` |
+| ~250-320 | `socket.makefile()` | Returns a buffered `SocketIO` wrapper around the socket fd |
+| ~320-430 | `create_connection()` | `getaddrinfo` loop with optional source address and timeout |
+| ~430-530 | `create_server()` | Binds and listens; sets `SO_REUSEADDR` and optionally `SO_REUSEPORT` |
+| ~530-560 | `setdefaulttimeout()` / `getdefaulttimeout()` | Module-level timeout forwarded to `_socket` |
+| ~560-900 | constant re-exports, `has_dualstack_ipv6()`, `fromfd()`, helper guards | Compatibility surface and platform probes |
+
+## Reading
+
+### socket class and makefile()
+
+The `socket` class in `Lib/socket.py` subclasses `_socket.socket` to add a `makefile()` method. The C type provides raw send/recv; `makefile()` layers Python `io` buffering on top so callers can treat a socket like a file object. The returned object is a `SocketIO` instance wrapped in `BufferedReader`, `BufferedWriter`, or `BufferedRWPair` depending on the requested mode.
+
+```python
+# CPython: Lib/socket.py:239 socket.makefile
+    def makefile(self, mode="r", buffering=None, *,
+                 encoding=None, errors=None, newline=None):
+        """makefile(...) -> an I/O stream connected to the socket"""
+        writing = "w" in mode
+        reading = "r" in mode or not writing
+        assert reading or writing
+        raw = SocketIO(self, mode)
+        ...
+```
+
+The `SocketIO` object holds a reference to the socket so that the socket's reference count stays positive for the lifetime of the file-like object. Closing the file does not close the socket; the caller must close the socket separately.
+
+### create_connection() and getaddrinfo loop
+
+`create_connection()` is the recommended way to open a client TCP socket. It calls `getaddrinfo()` to resolve the host and port into a list of `(family, type, proto, canonname, sockaddr)` tuples and then tries each in turn, closing failed sockets before moving on. This makes it transparently dual-stack: if the host has both A and AAAA records, it will try the IPv6 address first (subject to OS ordering) and fall back to IPv4.
+
+```python
+# CPython: Lib/socket.py:330 create_connection
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
+                      source_address=None, *, all_errors=False):
+    host, port = address
+    exceptions = []
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        sock = None
+        try:
+            sock = socket(af, socktype, proto)
+            if timeout is not _GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            exceptions.clear()
+            return sock
+        except error as exc:
+            ...
+```
+
+The `all_errors` keyword (added in 3.11) controls whether all exceptions are aggregated into an `ExceptionGroup` or only the last one is raised.
+
+### create_server() and socket options
+
+`create_server()` is a factory for server-side sockets. It always sets `SO_REUSEADDR` on POSIX systems to allow rebinding after a crash. When `reuse_port=True` is requested it additionally sets `SO_REUSEPORT`, which lets multiple processes bind the same port for load distribution. On Windows neither option is set in the same way because the platform semantics differ.
+
+```python
+# CPython: Lib/socket.py:454 create_server
+def create_server(address, *, family=AF_INET, backlog=None,
+                  reuse_port=False, dualstack_ipv6=False):
+    ...
+    sock = socket(family, SOCK_STREAM)
+    try:
+        if os.name not in ('nt', 'cygwin') and \
+                hasattr(_socket, 'SO_REUSEADDR'):
+            sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+        if reuse_port:
+            sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
+        ...
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/socket/`.
+
+The C extension `_socket` would need to be ported first as a Go package that wraps the OS networking syscalls. The pure-Python layer in `Lib/socket.py` would then be either re-implemented in Go or loaded from the stdlib snapshot. The `makefile()` buffering logic maps naturally onto Go's `bufio` package. The `create_connection()` loop corresponds closely to `net.Dial` with a custom resolver, though the fallback-per-address behavior would need explicit implementation. `create_server()` maps to `net.Listen` plus `syscall.SetsockoptInt` calls for `SO_REUSEADDR` and `SO_REUSEPORT`.

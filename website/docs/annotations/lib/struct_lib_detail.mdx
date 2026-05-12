@@ -1,0 +1,71 @@
+---
+title: Lib/struct.py
+description: "CPython 3.14 annotation: Lib/struct.py"
+cpython_path: Lib/struct.py
+cpython_version: "3.14"
+lines: 12
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/struct.py" />
+
+`struct.py` is the smallest shim in the standard library. The entire file is a single `from _struct import *` statement with a brief module docstring. Every callable, every constant, and the `Struct` class itself come from the C extension `_struct`. This file exists for two reasons: `import struct` must work as a plain dotted name, and `help(struct)` must show a useful docstring even though the symbols are defined in C.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-8 | module docstring | human-readable summary for `help()` |
+| 9 | `from _struct import *` | pulls in all public names from the C extension |
+| 10-12 | `__doc__` override / `__all__` | ensures the docstring is visible and controls star-import scope |
+
+## Reading
+
+### The single-line import
+
+The entire public API of `struct` is delivered by one line. There is no Python logic in this file beyond the import itself.
+
+```python
+# CPython: Lib/struct.py:9 module
+from _struct import *
+```
+
+`_struct` defines `__all__` to be `['Struct', 'pack', 'pack_into', 'unpack', 'unpack_from', 'iter_unpack', 'calcsize', 'error']`. The star-import therefore brings exactly those names into the `struct` namespace. Any private helpers inside `_struct` remain unexported.
+
+### Why this file exists
+
+The C extension is named `_struct` (leading underscore), which by convention signals an implementation detail. User code is expected to write `import struct`, not `import _struct`. The shim provides a stable public name, decouples the public API from the internal module name, and lets the docstring be maintained in Python source rather than in a C string literal.
+
+```python
+# CPython: Lib/struct.py:1 docstring
+"""Functions to convert between Python values and C structs.
+Python uses a format string as a compact description of the layout of
+the C struct and the conversion to/from Python values.
+"""
+```
+
+The docstring is important because `pydoc` and `help()` display it. Without this file, `help(struct)` would show the raw C-extension docstring, which is typically shorter and harder to browse.
+
+### Struct, pack, unpack, and calcsize
+
+All four of the core symbols are C-level objects from `Modules/_struct.c`. `Struct` is a C type that caches the compiled format string; `pack`/`unpack` are module-level convenience functions that create a temporary `Struct` internally. `calcsize` returns the number of bytes a format string represents without packing any values.
+
+```python
+# CPython: Lib/struct.py:9 pack
+# pack, unpack, calcsize, Struct are all imported from _struct via the star import.
+# Defined in Modules/_struct.c.
+from _struct import *  # exposes Struct, pack, pack_into, unpack, unpack_from,
+                       # iter_unpack, calcsize, error
+```
+
+`iter_unpack` was added in Python 3.4 and returns an iterator that reads successive chunks from a bytes-like buffer, avoiding the need to manually slice and loop.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/struct/`.
+
+The C extension `_struct` must be ported as `module/_struct/`. It contains the format-string parser, the pack/unpack engine for all standard-size and native-size format codes, and the `Struct` type with its compiled-format cache. Once `module/_struct/` exists, `Lib/struct.py` can be vendored verbatim under `stdlib/struct.py` with no additional Go code because the star-import will resolve to the Go-backed module at runtime.

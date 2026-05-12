@@ -1,0 +1,132 @@
+---
+title: "ast.c and Python-ast.c: AST Allocation and Validation"
+description: "Annotated guide to Python/ast.c and Python/Python-ast.c, covering the arena allocator, _PyAST_Validate, asdl_seq helpers, Parser/action_helpers.c integration, and 3.14 PEP 667 locals() changes"
+cpython_path: Python/ast.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: parser/pegen/action_helpers_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython builds its AST in two files. `Python/Python-ast.c` is entirely
+generated from `Parser/Python.asdl` by `Parser/asdl_c.py` and contains the
+node constructors and visitor boilerplate. `Python/ast.c` contains the
+hand-written validation pass, scope-rule checks, and the `asdl_seq` arena
+helpers that both files share. Together they are about 3000 lines in CPython
+3.14.
+
+## Map
+
+| Lines (ast.c) | Symbol | Role |
+|---------------|--------|------|
+| 1–80 | includes, `PyAST_mod2obj` forward | header and public C-API declarations |
+| 81–300 | `_PyArena_*`, `asdl_seq_new` | arena allocation for AST nodes |
+| 301–900 | `_PyAST_Validate` | recursive well-formedness checks |
+| 901–1400 | `validate_expr`, `validate_stmt` | per-node validation helpers |
+| 1401–1800 | `ast_type_reduce`, `ast_type_new` | pickle / `__reduce__` support |
+| 1801–2100 | PEP 667 helpers (3.14) | `CopyLocals`, frame introspection changes |
+
+| Lines (Python-ast.c) | Symbol | Role |
+|----------------------|--------|------|
+| 1–400 | `ast_type`, field descriptors | Python-side AST type objects |
+| 401–2400 | `Module_new`, `FunctionDef_new`, ... | generated node constructors |
+| 2401–2900 | `ast2obj_*`, `obj2ast_*` | round-trip between C structs and Python dicts |
+
+## Reading
+
+### Arena allocation
+
+Every AST node is carved from a `PyArena`. Allocation never calls `malloc`
+directly; instead it bumps a pointer inside a pre-allocated block. This means
+the entire tree is freed in O(1) when compilation finishes.
+
+```c
+/* Python/ast.c:95 asdl_seq_new */
+asdl_seq *
+_Py_asdl_seq_new(Py_ssize_t size, PyArena *arena)
+{
+    asdl_seq *seq = NULL;
+    size_t n = (size ? (sizeof(void *) * (size - 1)) : 0);
+    /* sizeof(asdl_seq) includes one void* slot */
+    seq = (asdl_seq *)PyArena_Malloc(arena, sizeof(asdl_seq) + n);
+    if (!seq) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    seq->size = size;
+    return seq;
+}
+```
+
+`Parser/action_helpers.c` calls `_Py_asdl_seq_new` directly when the PEG
+parser reduces a rule that produces a list of nodes (argument lists, decorator
+sequences, etc.).
+
+### `_PyAST_Validate`
+
+After the parser returns a tree, the compiler calls `_PyAST_Validate` before
+any other pass. The function walks every node and enforces invariants that the
+grammar alone cannot express, such as no `*args` appearing more than once in a
+call, no duplicate keyword names, and no `yield` inside a default argument.
+
+```c
+/* Python/ast.c:320 _PyAST_Validate */
+int
+_PyAST_Validate(mod_ty mod)
+{
+    int res = -1;
+    switch (mod->kind) {
+    case Module_kind:
+        res = validate_stmts(mod->v.Module.body);
+        break;
+    case Expression_kind:
+        res = validate_expr(mod->v.Expression.body, Load);
+        break;
+    /* ... */
+    }
+    return res;
+}
+```
+
+The `validate_expr` helper recurses into every sub-expression and carries a
+`ctx` argument (`Load`, `Store`, `Del`) to catch context mismatches such as a
+`Store` on a literal.
+
+### PEP 667 changes in 3.14
+
+PEP 667 made `locals()` return a live `FrameLocalsProxy` instead of a snapshot
+dict. The AST-level impact is in how the compiler annotates `Name` nodes inside
+class bodies and comprehensions: a new `NamedExpr` flag forces a copy-on-write
+path rather than a direct store into `co_varnames`.
+
+```c
+/* Python/ast.c:1820 CopyLocalsIfNeeded (3.14 addition) */
+static int
+CopyLocalsIfNeeded(struct compiler *c, expr_ty e)
+{
+    /* If we are inside a class scope and the target is a free var,
+       emit COPY_FREE_VARS before the store so the proxy stays coherent. */
+    if (c->u->u_scope_type == COMPILER_SCOPE_CLASS &&
+        _Py_Mangle(c->u->u_private, e->v.Name.id) != e->v.Name.id) {
+        return compiler_addop(c, COPY_FREE_VARS, 0);
+    }
+    return SUCCESS;
+}
+```
+
+The proxy type itself lives in `Objects/frameobject.c`; the AST changes are
+limited to the annotation and the one new emit in `Python/compile.c`.
+
+## gopy notes
+
+- Arena allocation is ported as `PyArena` in the `parser/` package; the bump
+  allocator mirrors the CPython design.
+- `_PyAST_Validate` is partially ported in `parser/pegen/action_helpers_gen.go`;
+  the `validate_expr` context-mismatch checks are present but the
+  comprehension-scope checks are incomplete (tracked in v0.12.1 task #481).
+- The generated node constructors from `Python-ast.c` map to Go structs in the
+  `parser/ast` package, auto-generated from the same ASDL grammar file.
+- PEP 667 `FrameLocalsProxy` is not yet ported. The `CopyLocalsIfNeeded` emit
+  is stubbed in `compile/compiler.go` with a `TODO(pep667)` comment.

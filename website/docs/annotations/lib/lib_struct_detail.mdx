@@ -1,0 +1,58 @@
+---
+title: Lib/struct.py
+description: "struct module stub that re-exports from _struct C extension: pack, unpack, pack_into, unpack_from, iter_unpack, calcsize, and the Struct compiled-format class."
+cpython_path: Lib/struct.py
+cpython_version: "3.14"
+lines: 14
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/struct.py`
+
+<CpyLink path="Lib/struct.py" />
+
+`Lib/struct.py` is a one-line re-export shim that makes `_struct` available as `struct`.
+All functionality lives in `Modules/_struct.c`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-14 | Re-export from `_struct` | `pack`, `unpack`, `pack_into`, `unpack_from`, `iter_unpack`, `calcsize`, `Struct`, `error` |
+
+## Reading
+
+### `Struct` compiled format
+
+`Struct(fmt)` compiles a format string once and caches the parsed representation. Repeated
+`pack`/`unpack` calls on the same `Struct` instance are faster than calling the module-
+level functions, which re-parse the format string each time.
+
+### Format string syntax
+
+| Char | Meaning |
+|------|---------|
+| `>` / `<` / `!` / `=` / `@` | Byte order (big, little, network, native-aligned, native) |
+| `b B h H i I l L q Q` | Signed/unsigned integers of 1-8 bytes |
+| `f d` | float32, float64 |
+| `s p` | Pascal and C strings |
+| `x` | Pad byte |
+| `n N` | `ssize_t`, `size_t` |
+
+### `pack_into` and zero-copy
+
+`pack_into(fmt, buffer, offset, *v)` writes directly into a writable buffer (e.g. a
+`bytearray` or `memoryview`) at `offset`, avoiding a temporary `bytes` allocation.
+
+### `iter_unpack`
+
+`iter_unpack(fmt, buffer)` returns an iterator that yields one tuple per `calcsize(fmt)`
+bytes, allowing streaming decode of packed binary data without slicing the buffer.
+
+## gopy notes
+
+`module/struct/` provides a partial Go port. `pack` and `unpack` for the common integer
+and float formats are implemented. `Struct` compiled format, `pack_into`, and `iter_unpack`
+are planned.

@@ -1,0 +1,87 @@
+---
+title: "cellobject.c: Cell Variables and Closures"
+description: "PyCellObject layout, PyCell_New/Get/Set, cell_dealloc, and the MAKE_CELL opcode interaction for free variable capture in CPython 3.14"
+cpython_path: Objects/cellobject.c
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: objects/cell.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/cellobject.c` implements `PyCellObject`, the one-slot container that lets inner functions share a mutable binding with their enclosing scope. The compiler emits `MAKE_CELL` for every variable that crosses a scope boundary; at runtime that opcode allocates a `PyCellObject` in the enclosing frame's `localsplus` array. Inner frames then receive pointers to those cells via `COPY_FREE_VARS`. Both frames read and write `ob_ref` through `LOAD_DEREF` and `STORE_DEREF`.
+
+## Map
+
+| C symbol | Lines (approx.) | Role |
+|---|---|---|
+| `PyCellObject` struct | 1-20 | Single-slot wrapper: `ob_ref` is the shared binding, `NULL` means unbound |
+| `cell_new` | 22-40 | `tp_new`: allocates the cell; does not fill `ob_ref` |
+| `PyCell_New` | 42-55 | Public constructor; optionally fills `ob_ref` from a caller-supplied object |
+| `PyCell_Get` | 57-65 | Returns `ob_ref` with an incremented refcount (or `NULL` if unbound) |
+| `PyCell_Set` | 67-82 | Atomically swaps `ob_ref`; decrements the old value |
+| `cell_dealloc` | 84-96 | `tp_dealloc`: clears `ob_ref` before freeing the object |
+| `cell_traverse` | 98-110 | GC visit: skips `ob_ref` when `NULL` |
+| `cell_clear` | 112-120 | GC clear: sets `ob_ref = NULL` to break reference cycles |
+| `cell_repr` | 122-140 | Renders `<cell at 0x... object at 0x...>` or `<cell at 0x... empty>` |
+| `PyCell_Type` | 142-150 | Type object; `tp_traverse` and `tp_clear` wire up the cyclic GC hooks |
+
+## Reading
+
+### Cell variable vs free variable
+
+CPython distinguishes two roles for the same struct. A **cell variable** is one that the enclosing function owns and wraps in a cell so an inner function can share it. A **free variable** is the inner function's name for the same cell. Both roles point at the same `PyCellObject`; the distinction is purely in the code object's `co_cellvars` and `co_freevars` tuples.
+
+At call time the bytecode sequence is:
+
+```c
+/* enclosing frame, Objects/cellobject.c PyCell_New */
+PyCellObject *cell = (PyCellObject *)PyCell_New(initial_value);
+LOCALSPLUS[cell_index] = (PyObject *)cell;  /* MAKE_CELL result */
+
+/* inner frame receives the pointer via COPY_FREE_VARS */
+LOCALSPLUS[free_index] = (PyObject *)cell;  /* same pointer */
+```
+
+### PyCell_Set and the NULL sentinel
+
+`ob_ref == NULL` is the "unbound" sentinel. `PyCell_Set(cell, NULL)` legally unbinds the slot. Reading an unbound cell via `LOAD_DEREF` raises `NameError` (fast locals) or `UnboundLocalError`. `PyCell_Get` returns `NULL` on an empty cell without raising; the opcode handler owns the exception.
+
+```c
+/* Objects/cellobject.c:67 PyCell_Set */
+int
+PyCell_Set(PyObject *op, PyObject *value)
+{
+    PyObject *old;
+    if (!PyCell_Check(op)) { /* ... */ }
+    old = ((PyCellObject *)op)->ob_ref;
+    Py_XINCREF(value);
+    ((PyCellObject *)op)->ob_ref = value;
+    Py_XDECREF(old);
+    return 0;
+}
+```
+
+### cell_dealloc and the GC dance
+
+`cell_dealloc` runs `Py_XDECREF(op->ob_ref)` before freeing memory. Because cells participate in the cyclic GC, `cell_traverse` and `cell_clear` also exist. `cell_clear` sets `ob_ref = NULL` so the GC can break a cycle through the cell without freeing the cell itself.
+
+```c
+/* Objects/cellobject.c:84 cell_dealloc */
+static void
+cell_dealloc(PyCellObject *op)
+{
+    _PyObject_GC_UNTRACK(op);
+    Py_XDECREF(op->ob_ref);
+    PyObject_GC_Del(op);
+}
+```
+
+## gopy notes
+
+gopy ports `PyCellObject` as `objects.Cell` in `/Users/apple/github/tamnd/gopy/objects/cell.go`. The `Contents` field replaces `ob_ref`; `nil` serves as the unbound sentinel.
+
+`NewCell(contents)` merges `cell_new` and `PyCell_New`. Go's GC removes the need for `cell_dealloc` and `cell_clear`, but `cellTraverse` survives because gopy's tracing GC still needs to visit reachable objects through the cycle detector.
+
+`MAKE_CELL` allocates a cell via `NewCell(nil)` and stores it in the enclosing frame's `LocalsPlus`; `COPY_FREE_VARS` copies those pointers into the inner frame's free-var slots. `LOAD_DEREF` and `STORE_DEREF` read and write `Cell.Contents` directly, matching CPython's inline access in the bytecode dispatch loop.

@@ -1,0 +1,105 @@
+---
+title: Python/pylifecycle.c
+description: "CPython interpreter lifecycle: Py_Initialize, Py_Finalize, interpreter creation/destruction, pre-initialization config, and the multi-phase startup sequence."
+cpython_path: Python/pylifecycle.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/pylifecycle.c`
+
+<CpyLink path="Python/pylifecycle.c" />
+
+`Python/pylifecycle.c` implements CPython's startup and shutdown sequence.
+`Py_InitializeFromConfig` is the main entry point; it runs in multiple phases to allow
+configuration, pre-initialization (signal handling, locale), core initialization (type
+system, built-ins), and full initialization (stdlib, site). `Py_FinalizeEx` runs the
+reverse: calling finalizers, clearing modules, running GC, and freeing interpreter state.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-100 | includes, forward decls | Phase flags, pre-init state |
+| 101-400 | `pyinit_preinit` | Signal setup, locale config, pre-config validation |
+| 401-800 | `pyinit_core` | Type system, built-ins, import system bootstrap |
+| 801-1200 | `pyinit_main` | Site module, readline, `__main__`, faulthandler |
+| 1201-1600 | `Py_InitializeFromConfig` | Orchestrates all three phases |
+| 1601-2000 | `Py_FinalizeEx` | Module teardown, GC finalization, memory release |
+| 2001-2500 | `Py_NewInterpreter`, `Py_EndInterpreter` | Sub-interpreter lifecycle |
+| 2501-3000 | misc helpers | `Py_AtExit`, `Py_ExitStatusException`, `_Py_ClearStandardStreamEncoding` |
+
+## Reading
+
+### Multi-phase initialization
+
+Startup is split into three phases to allow embedding code to configure Python between
+phases. `pyinit_preinit` runs with minimal state; `pyinit_core` bootstraps the type and
+import systems; `pyinit_main` imports the site module and sets up `__main__`.
+
+```c
+// CPython: Python/pylifecycle.c:1250 Py_InitializeFromConfig
+PyStatus
+Py_InitializeFromConfig(const PyConfig *config)
+{
+    ...
+    status = pyinit_preinit(runtime, &config);
+    if (_PyStatus_EXCEPTION(status)) goto done;
+    status = pyinit_core(runtime, &config, &tstate);
+    if (_PyStatus_EXCEPTION(status)) goto done;
+    status = pyinit_main(tstate);
+    ...
+```
+
+### `Py_FinalizeEx`: shutdown order
+
+`Py_FinalizeEx` must tear down in a specific order to avoid dangling references.
+`_Py_FinalizeInterpreter` calls module `__del__`, clears `sys.modules`, runs GC,
+clears thread states, then frees the interpreter structure.
+
+```c
+// CPython: Python/pylifecycle.c:1680 Py_FinalizeEx
+int
+Py_FinalizeEx(void)
+{
+    ...
+    _Py_FinalizeInterpreter(tstate);
+    /* After this point, no Python code can run */
+    _PyRuntime_Finalize(&_PyRuntime);
+    return 0;
+}
+```
+
+### Sub-interpreter creation
+
+`Py_NewInterpreter` creates an isolated interpreter state sharing the same process but
+with its own `sys.modules`, `builtins`, and GIL (or no GIL in the free-threaded build).
+
+```c
+// CPython: Python/pylifecycle.c:2050 Py_NewInterpreterFromConfig
+PyStatus
+Py_NewInterpreterFromConfig(PyThreadState **tstate_p,
+                            const PyInterpreterConfig *config)
+{
+    PyInterpreterState *interp = PyInterpreterState_New();
+    ...
+    status = pycore_init_types(interp);
+    ...
+    status = init_interp_main(tstate);
+```
+
+## gopy notes
+
+`pythonrun/runstring.go` in gopy is the partial equivalent of `pyinit_main`. Full
+lifecycle management (multiple phases, sub-interpreters) is not yet implemented. The
+`pyinit_core` sequence is the model for any future `gopy.Initialize()` function.
+
+## CPython 3.14 changes
+
+3.14 added `Py_NewInterpreterFromConfig` as the public API for sub-interpreter creation
+with an explicit `PyInterpreterConfig`. `pyinit_core` gained hooks for the new
+`annotationlib` lazy annotation evaluation module. `Py_FinalizeEx` now drains the
+`_Py_FinalizeDeferred` list before clearing thread states.

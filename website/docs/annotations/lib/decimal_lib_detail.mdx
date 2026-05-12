@@ -1,0 +1,83 @@
+---
+title: Lib/decimal.py
+description: "Thin shim that selects the _decimal C extension or _pydecimal pure-Python fallback and re-exports the public API"
+cpython_path: Lib/decimal.py
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/decimal.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–20 | module header | Docstring, `__version__`, `__libmpdec_version__` |
+| 21–45 | import block | Try `import _decimal`, fall back to `_pydecimal` |
+| 46–60 | public re-exports | `Decimal`, `Context`, `DecimalException` hierarchy |
+| 61–72 | context helpers | `getcontext`, `setcontext`, `localcontext` |
+| 73–80 | `__all__` | Canonical public name list |
+
+## Reading
+
+### Selecting the implementation
+
+The module's only job is choosing which backend to load. The `try/except ImportError` block runs at import time. If the C extension `_decimal` is present (it is in all standard CPython builds), every name comes from there. Otherwise the pure-Python `_pydecimal` module provides identical behaviour at lower speed.
+
+```python
+# CPython: Lib/decimal.py:21 import block
+try:
+    from _decimal import *
+    from _decimal import (Clamped, InvalidOperation, DivisionByZero,
+                          Inexact, Rounded, Subnormal, Overflow, Underflow,
+                          FloatOperation)
+    from _decimal import __version__, __libmpdec_version__
+except ImportError:
+    from _pydecimal import *
+    from _pydecimal import (Clamped, InvalidOperation, DivisionByZero,
+                            Inexact, Rounded, Subnormal, Overflow, Underflow,
+                            FloatOperation)
+    from _pydecimal import __version__
+```
+
+The wildcard import combined with the explicit tuple import ensures that both the signal exception classes and the version strings are available regardless of which backend wins.
+
+### Public API surface
+
+`Decimal`, `Context`, and the `DecimalException` hierarchy are the three load-bearing exports. `Decimal` is a numeric type with configurable precision and rounding. `Context` holds thread-local arithmetic settings (precision, rounding mode, enabled traps). The exception classes (`Overflow`, `Inexact`, `Rounded`, etc.) double as both signal flags within a `Context` and as proper Python exceptions that can be raised or caught.
+
+```python
+# CPython: Lib/decimal.py:46 public names
+# All of the following originate in _decimal (C) or _pydecimal (Python).
+#   Decimal        - the numeric type
+#   Context        - arithmetic context (prec, rounding, Emin, Emax, clamp,
+#                    flags, traps)
+#   DefaultContext, BasicContext, ExtendedContext - pre-built contexts
+#   DecimalException and its subclasses: Clamped, InvalidOperation,
+#     DivisionByZero, Inexact, Rounded, Subnormal, Overflow, Underflow,
+#     FloatOperation
+```
+
+### Context helpers
+
+`getcontext` and `setcontext` wrap the backend's thread-local storage. `localcontext` is a context manager that saves and restores the current context around a `with` block, allowing temporary precision changes without affecting other threads.
+
+```python
+# CPython: Lib/decimal.py:61 context helpers
+# getcontext()         -> returns the current thread Context
+# setcontext(ctx)      -> installs ctx as the current thread Context
+# localcontext(ctx)    -> context manager; restores previous Context on exit
+```
+
+The implementation of the thread-local slot itself lives in the C extension (`_decimal.c`, `PyDec_GetCurrentContext` / `PyDec_SetCurrentContext`) or, for the fallback, in `_pydecimal.py` using `threading.local`.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/decimal/`.
+
+The port will need two layers: a Go-native fast path analogous to `_decimal` (wrapping `libmpdec` or a pure-Go decimal library) and a Python-level shim in `module/decimal/module.go` that registers `Decimal`, `Context`, and the signal classes. The `localcontext` context manager requires `__enter__`/`__exit__` support on the `Context` type, which depends on the context-manager protocol being in place first (task #463).

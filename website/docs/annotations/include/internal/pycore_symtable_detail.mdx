@@ -1,0 +1,121 @@
+---
+title: "pycore_symtable.h: Symbol Table Internals"
+description: "Internal types, flag constants, and scope bits that back CPython's symbol table pass"
+cpython_path: Include/internal/pycore_symtable.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: compile/symtable.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink file="Include/internal/pycore_symtable.h" />
+
+CPython's symbol table pass runs before bytecode emission. It walks the AST
+once, assigns every name a scope, and records binding information in a tree of
+`_symtable_entry` objects (exposed to Python as `symtable.SymbolTableEntry`).
+This header declares the C-side layout for that tree.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-20  | `DEF_*` macros | flags | Bitfield packed into `ste_symbols` dict values |
+| 21-35 | `SCOPE_*` macros | scope codes | Extracted from the upper bits of each symbol entry |
+| 36-75 | `_symtable_entry` / `PySTEntryObject` | struct | One node per scope in the tree |
+| 76-100 | `_PySymtable` | struct | Root handle passed through the compiler pipeline |
+| 101-120 | `_PySymtable_Build`, `_PySymtable_Free` | functions | Public API used by `compile.c` |
+
+## Reading
+
+### DEF_* and SCOPE_* constants
+
+Each name in a scope is stored as a `long` value in `ste_symbols`. The low bits
+are `DEF_*` flags recording how the name was bound; the upper bits hold one
+`SCOPE_*` code after the analysis pass resolves free/cell status.
+
+```c
+/* Include/internal/pycore_symtable.h:1 */
+#define DEF_GLOBAL      0x1   /* global stmt */
+#define DEF_LOCAL       0x2   /* assignment, import, function def */
+#define DEF_PARAM       0x4   /* formal parameter */
+#define DEF_NONLOCAL    0x8   /* nonlocal stmt */
+#define DEF_FREE        0x10  /* name used but not defined in scope */
+#define DEF_CELL        0x40  /* referenced by inner scope */
+#define DEF_IMPORT      0x100 /* imported name */
+
+#define SCOPE_OFFSET    11
+#define SCOPE_MASK      (0x7 << SCOPE_OFFSET)
+#define LOCAL           1
+#define GLOBAL_EXPLICIT 2
+#define GLOBAL_IMPLICIT 3
+#define FREE            4
+#define CELL            5
+```
+
+The `SCOPE_OFFSET` shift means scope codes live above all `DEF_*` bits, so a
+single integer encodes both binding and scope without overlap.
+
+### PySTEntryObject fields
+
+`PySTEntryObject` is a `PyObject` subtype, so every entry is heap-allocated and
+participates in reference counting.
+
+```c
+/* Include/internal/pycore_symtable.h:36 */
+struct _symtable_entry {
+    PyObject_HEAD
+    PyObject     *ste_id;         /* int: id(AST node) */
+    PyObject     *ste_symbols;    /* dict: name -> long flags */
+    PyObject     *ste_name;       /* str: function/class name */
+    PyObject     *ste_varnames;   /* list: params in order */
+    PyObject     *ste_children;   /* list: nested PySTEntryObject */
+    PyObject     *ste_directives; /* list: global/nonlocal stmts */
+    _Py_block_ty  ste_type;       /* FunctionBlock / ClassBlock / ... */
+    int           ste_nested;     /* 1 if inside another function */
+    unsigned      ste_free : 1;   /* scope has free variables */
+    unsigned      ste_child_free : 1;
+    unsigned      ste_generator : 1;
+    unsigned      ste_coroutine : 1;
+    unsigned      ste_comprehension : 1;
+    /* ... more bitfields ... */
+    int           ste_lineno;
+    struct symtable *ste_table;   /* back-pointer to root */
+};
+```
+
+`ste_children` forms the tree. The compiler walks this list to emit `MAKE_CELL`
+and `COPY_FREE_VARS` instructions before any function body.
+
+### _PySymtable root struct
+
+```c
+/* Include/internal/pycore_symtable.h:76 */
+struct symtable {
+    PyObject        *st_filename;  /* str: source file name */
+    PySTEntryObject *st_cur;       /* entry being visited */
+    PySTEntryObject *st_top;       /* module-level entry */
+    PyObject        *st_blocks;    /* dict: id(node) -> entry */
+    PyObject        *st_stack;     /* list: entry stack during walk */
+    PyObject        *st_global;    /* borrowed ref to top ste_symbols */
+    int              st_nscopes;   /* total scope count */
+    PyFutureFeatures *st_future;   /* from __future__ imports */
+};
+```
+
+`st_blocks` maps AST node identity to its `PySTEntryObject`, which lets the
+compiler look up any node's scope information in O(1) during code generation.
+
+## gopy notes
+
+- `DEF_*` and `SCOPE_*` constants are in `compile/symtable.go` as typed
+  `const` blocks. The bit layout is preserved verbatim so that test fixtures
+  comparing flag values stay valid against CPython's own `symtable` module.
+- `PySTEntryObject` maps to `STEntry` (a plain Go struct, no `PyObject_HEAD`).
+  The `ste_symbols` dict becomes `map[string]int64` for direct bit operations.
+- `_PySymtable` maps to `SymTable` in the same file. The `st_blocks` dict
+  becomes `map[int]*STEntry` keyed on the AST node's position integer (line
+  shifted with col) since Go has no `id()` equivalent.
+- `ste_children` becomes `[]*STEntry` to avoid indirection through a Python
+  list object.

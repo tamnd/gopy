@@ -1,0 +1,67 @@
+---
+title: Lib/pprint.py
+description: "pprint module: PrettyPrinter recursively formats Python objects with indentation, width limits, and cycle detection, producing multi-line output for nested structures."
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pprint.py" />
+
+`Lib/pprint.py` provides `PrettyPrinter` and the `pprint`, `pformat`, `isreadable`, `isrecursive` module-level functions. `PrettyPrinter` formats Python objects with indentation and line-width control, detecting cycles and abbreviating repeated objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | imports, `_id_sets` | Cycle detection set; constants |
+| 51-200 | `PrettyPrinter.__init__`, `pprint`, `pformat` | Printer configuration; entry points |
+| 201-400 | `_pprint_dict`, `_pprint_list`, `_pprint_tuple`, `_pprint_set` | Type-specific formatters |
+| 401-500 | `_format`, `_repr` | Recursive dispatch; width-aware line splitting |
+| 501-600 | `isreadable`, `isrecursive`, `_safe_repr` | Utility functions |
+
+## Reading
+
+### Width-aware line splitting
+
+`_format(object, stream, indent, allowance, context, level)` first computes `repr(object)`. If it fits within the remaining width (`self._width - indent - allowance`), it is written as a single line. Otherwise the type-specific formatter is called to write an indented multi-line form.
+
+```python
+# CPython: Lib/pprint.py:401 _format
+def _format(self, object, stream, indent, allowance, context, level):
+    rep = self._repr(object, context, level)
+    max_width = self._width - indent - allowance
+    if len(rep) <= max_width:
+        stream.write(rep)
+        return
+    p = self._dispatch.get(type(object).__repr__, None)
+    if p is not None:
+        p(self, object, stream, indent, allowance, context, level + 1)
+    else:
+        stream.write(rep)
+```
+
+### Cycle detection
+
+`context` is a set of `id()` values of objects currently being formatted. Before recursing into a container, `_format` checks whether `id(object) in context`. If so it writes `...` instead of recursing, preventing infinite loops.
+
+```python
+# CPython: Lib/pprint.py:420 cycle check
+if id(object) in context:
+    stream.write('...')
+    return
+context.add(id(object))
+...
+context.discard(id(object))
+```
+
+### Dispatch table
+
+`_dispatch` maps `type.__repr__` methods to type-specific printer functions. This allows `PrettyPrinter` to be extended for custom types by subclassing and adding entries to `_dispatch`.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/pprint/`. A Go implementation would use `fmt.Stringer`-style dispatch and a `strings.Builder` for the output buffer.

@@ -1,0 +1,114 @@
+---
+title: "pycore_import.h: Internal Import Machinery"
+description: "Annotation of _PyImport_LoadDynamicModuleWithSpec, _PyImport_FixupExtensionObject, the frozen module table, and per-interpreter import state in CPython 3.14"
+cpython_path: Include/internal/pycore_import.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: vm/eval_import.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_import.h` declares the internal API for the import system. The public
+`__import__` builtin and `importlib` call into this layer; it is also the
+seam between the interpreter core and extension modules (`.so`/`.pyd` files).
+The 3.14 changes reorganise per-interpreter state and add stricter isolation
+for sub-interpreters.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Notes |
+|---|---|---|---|
+| `_Py_frozen_module` | struct | 20-30 | Describes one entry in the built-in frozen module table |
+| `_PyImport_FrozenModules` | extern | 32 | Null-terminated array of `_Py_frozen_module` |
+| `_PyImport_FrozenBootstrap` | extern | 33 | Subset used during `Py_Initialize` before `importlib` is ready |
+| `_PyImport_FrozenStdlib` | extern | 34 | Standard-library frozen modules (added 3.11) |
+| `_PyImport_FixupBuiltin` | function decl | 40-44 | Register a newly loaded built-in module in `sys.modules` |
+| `_PyImport_FixupExtensionObject` | function decl | 46-52 | Cache a loaded extension module for reuse across imports |
+| `_PyImport_LoadDynamicModuleWithSpec` | function decl | 54-62 | Load a `.so`/`.pyd` extension from a `ModuleSpec` |
+| `_PyImport_InterpreterData` | struct | 70-105 | Per-interpreter import state (3.14 rename from `_import_state`) |
+| `_PyImport_InterpreterData.modules` | field | 75 | The `sys.modules` dict for this interpreter |
+| `_PyImport_InterpreterData.modules_by_index` | field | 78 | List indexed by `m_base.m_index` for fast lookup |
+| `_PyImport_InterpreterData.importlib` | field | 82 | Cached reference to the `_bootstrap` module |
+| `_PyImport_InterpreterData.import_func` | field | 85 | Cached `__import__` callable |
+| `_PyImport_InterpreterData.pkgcontext` | field | 90 | Current package for relative imports |
+
+## Reading
+
+### Frozen module table
+
+The frozen module table is a simple sorted array terminated by a
+`{NULL, NULL, 0}` sentinel.
+
+```c
+// Include/internal/pycore_import.h:20
+struct _Py_frozen_module {
+    const char *name;
+    const unsigned char *code;   /* marshalled code object bytes */
+    int size;                    /* negative size means a package */
+};
+
+extern const struct _Py_frozen_module _PyImport_FrozenModules[];
+extern const struct _Py_frozen_module _PyImport_FrozenBootstrap[];
+extern const struct _Py_frozen_module _PyImport_FrozenStdlib[];
+```
+
+A negative `size` signals that the frozen entry is a package (it has an
+`__path__`). The bootstrap table is searched first during early
+initialization, before the full frozen table is consulted.
+
+### `_PyImport_FixupExtensionObject`
+
+```c
+// Include/internal/pycore_import.h:46
+extern int
+_PyImport_FixupExtensionObject(
+    PyObject *mod,
+    PyObject *name,       /* fully-qualified name, e.g. "numpy.core._multiarray" */
+    PyObject *filename,   /* path to the .so */
+    PyObject *modules);   /* sys.modules dict */
+```
+
+After `dlopen` and the module init function return a live `PyModuleObject`,
+this function stores it in two places: `sys.modules[name]` and the
+per-interpreter `modules_by_index` list. On a second import of the same
+extension, `_PyImport_FindExtensionObject` finds the cached entry and returns
+it without calling `dlopen` again.
+
+### `_PyImport_InterpreterData` (3.14)
+
+The struct was renamed from `_import_state` in 3.13 to
+`_PyImport_InterpreterData` in 3.14 as part of the sub-interpreter isolation
+work. Each `PyInterpreterState` embeds one instance.
+
+```c
+// Include/internal/pycore_import.h:70
+struct _PyImport_InterpreterData {
+    PyObject *modules;             /* sys.modules */
+    PyObject *modules_by_index;    /* list, indexed by m_base.m_index */
+    PyObject *importlib;           /* _bootstrap module */
+    PyObject *import_func;         /* builtins.__import__ */
+    /* ... lock and path-related fields omitted for brevity ... */
+};
+```
+
+In 3.14, `modules_by_index` is no longer shared across sub-interpreters.
+Each interpreter gets its own index space, which removes a class of
+use-after-free bugs when an extension is unloaded in one interpreter while
+another is still running.
+
+## gopy notes
+
+- `vm/eval_import.go` implements `IMPORT_NAME` and `IMPORT_FROM` opcodes. It
+  currently resolves modules through the `module/` package tree rather than
+  the CPython frozen-table mechanism.
+- The frozen module table concept maps to `stdlibinit/registry.go`, which
+  registers built-in Go module implementations at startup.
+- `_PyImport_FixupExtensionObject` has no direct equivalent yet; gopy modules
+  are registered at compile time, not loaded via `dlopen`.
+- `_PyImport_InterpreterData.pkgcontext` for relative imports is partially
+  handled in `vm/eval_import.go` via the `__package__` attribute lookup.
+- The 3.14 per-interpreter index isolation is not yet relevant because gopy
+  runs a single interpreter, but the field layout should be followed when
+  multi-interpreter support is added.

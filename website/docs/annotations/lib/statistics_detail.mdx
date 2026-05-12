@@ -1,0 +1,74 @@
+---
+title: "statistics.py: Descriptive Statistics"
+description: "Fraction-based accumulation for mean, two-pass variance, NormalDist, quantile interpolation, and linear_regression added in Python 3.14."
+cpython_path: Lib/statistics.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: module/statistics
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`statistics.py` provides exact and approximate descriptive statistics using a mix
+of `Fraction` accumulation for integer inputs, `Decimal` for fixed-point inputs,
+and `float` for everything else. The module has no C accelerator.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–60 | imports, `__all__` | `math`, `numbers`, `fractions`, `decimal`, `itertools` |
+| 61–130 | `_sum`, `_coerce`, `_convert` | Type-unification helpers for mixed numeric inputs |
+| 131–220 | `mean`, `fmean` | Arithmetic mean via `Fraction` sum and fast float mean |
+| 221–290 | `geometric_mean`, `harmonic_mean` | Log-space and reciprocal-sum variants |
+| 291–420 | `median`, `median_low`, `median_high`, `median_grouped` | Sort-based and interpolated medians |
+| 421–500 | `mode`, `multimode` | `Counter`-based most-frequent-value search |
+| 501–620 | `_ss`, `variance`, `pvariance`, `stdev`, `pstdev` | Two-pass sum-of-squares and standard deviation |
+| 621–720 | `covariance`, `correlation` | Pairwise two-pass algorithms, Pearson r |
+| 721–820 | `linear_regression` | Slope and intercept via covariance and variance |
+| 821–1000 | `NormalDist` | Gaussian distribution object, `pdf`, `cdf`, `inv_cdf` |
+| 1001–1100 | `quantiles` | Inclusive and exclusive interpolation methods |
+| 1101–1200 | `StatisticsError`, helper guards | Input validation and empty-sequence errors |
+
+## Reading
+
+### `mean` and `fmean` accumulation strategies
+
+`mean` converts each element to `Fraction` before summing, then converts the
+exact rational total back to the input numeric type via `_convert`. This avoids
+catastrophic cancellation for integer sequences while producing the same type the
+caller passed in. `fmean` uses `math.fsum` instead, which is faster for large
+float sequences but sacrifices the exact-integer guarantee.
+
+### Two-pass variance algorithm
+
+`_ss` computes the sum and then loops a second time to accumulate
+`(x - mean)**2` using the corrected two-pass formula rather than the one-pass
+`E[x^2] - E[x]^2` formula, which is numerically unstable for nearly-equal values.
+`variance` and `stdev` call `_ss` and divide by `n - 1` (Bessel's correction).
+`pvariance` and `pstdev` divide by `n` for the population case.
+
+### `NormalDist` and `quantiles`
+
+`NormalDist` stores `mu` and `sigma` and provides `pdf`, `cdf` (via `math.erfc`),
+and `inv_cdf` (a rational approximation to the probit function). `quantiles`
+supports two methods: `inclusive` uses `(n-1)` intervals anchored at the data
+endpoints, and `exclusive` uses `(n+1)` intervals with notional points beyond the
+data range. The chosen method changes the interpolation formula for each cut point
+but shares the same linear-interpolation step.
+
+## gopy notes
+
+- `_sum` returns a `(type, Fraction)` pair encoding the dominant numeric type.
+  The port must track this pair through accumulation and call `_convert` at the
+  end, matching CPython's type-promotion rules exactly.
+- `covariance` and `correlation` were added in 3.10. `linear_regression` gained a
+  `proportional` keyword argument in 3.11 and confidence-interval support in 3.14.
+  The port should gate each addition behind a feature constant rather than
+  backporting all changes into one flat implementation.
+- `NormalDist.inv_cdf` uses a minimax rational approximation with hardcoded
+  coefficients. Port the coefficients verbatim (see `statistics.py` around line 950)
+  and add a comment citing the Abramowitz and Stegun reference that CPython cites.
+- `StatisticsError` is a subclass of `ValueError`. The gopy port must register it
+  as a proper exception subtype so `except ValueError` catches it.

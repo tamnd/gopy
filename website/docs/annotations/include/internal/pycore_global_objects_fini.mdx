@@ -1,0 +1,109 @@
+---
+title: Include/internal/pycore_global_objects_fini.h
+description: Finalization declarations for immortal objects and small-int/encoding caches cleared at interpreter shutdown.
+cpython_path: Include/internal/pycore_global_objects_fini.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_global_objects_fini.h`
+
+<CpyLink path="Include/internal/pycore_global_objects_fini.h" />
+
+## Map
+
+This header is the finalization counterpart to `Include/internal/pycore_global_objects.h`.
+Where `pycore_global_objects.h` declares the immortal singletons and small-int array
+that are pre-allocated at startup, this header declares the functions that
+validate and tear them down during `Py_Finalize`.
+
+| Symbol | Declared in | Purpose |
+|---|---|---|
+| `_PyStaticObjects_CheckRefcnt` | `pycore_global_objects_fini.h` | Asserts every immortal object still carries the immortal refcount after shutdown |
+| `_PyUnicode_FiniEncodings` | `pycore_global_objects_fini.h` | Releases codec state cached on the `PyInterpreterState` |
+| `_PyLong_FiniSmallInts` | `pycore_global_objects_fini.h` | Drops references held in the `[-5, 256]` small-integer array |
+
+All three functions are called from `Py_FinalizeEx` in `Python/pylifecycle.c`,
+in the order listed above, after all user code and `atexit` handlers have
+finished.
+
+## Reading
+
+### Refcount audit: `_PyStaticObjects_CheckRefcnt`
+
+Immortal objects use `_Py_IMMORTAL_REFCNT` (a large sentinel, e.g. `0xFFFFFFFF`
+on 32-bit builds) to prevent the reference counter from ever reaching zero.
+After shutdown, if anything decremented an immortal object's refcount through a
+bug, this function will catch it:
+
+```c
+// Include/internal/pycore_global_objects_fini.h
+extern void _PyStaticObjects_CheckRefcnt(PyInterpreterState *);
+```
+
+The implementation iterates the table of statically allocated objects defined in
+`Python/global_objects.c` and calls `_PyObject_ASSERT` on each one:
+
+```c
+// Python/global_objects.c  (implementation, referenced by the header)
+void
+_PyStaticObjects_CheckRefcnt(PyInterpreterState *interp)
+{
+    // Immortal refcount must still equal _Py_IMMORTAL_REFCNT.
+    _PyObject_ASSERT((PyObject *)&_Py_ID(empty),
+                     Py_REFCNT(&_Py_ID(empty)) == _Py_IMMORTAL_REFCNT);
+    ...
+}
+```
+
+Failures here indicate a refcount leak introduced by an extension module or
+a bug in the core that treated an immortal object as mortal.
+
+### Small-integer cache teardown: `_PyLong_FiniSmallInts`
+
+CPython pre-allocates `PyLongObject` instances for integers in `[-5, 256]`.
+At finalization, `_PyLong_FiniSmallInts` decrements the refcount on each one so
+the memory is reclaimed:
+
+```c
+// Include/internal/pycore_global_objects_fini.h
+extern void _PyLong_FiniSmallInts(PyInterpreterState *);
+```
+
+The function body (in `Objects/longobject.c`) walks the fixed-size array and
+calls `Py_DECREF`. Because the objects are immortal during normal execution,
+this is the only legitimate path that allows their refcount to fall.
+
+### Encoding cache release: `_PyUnicode_FiniEncodings`
+
+The `PyInterpreterState` caches a handful of codec-related objects so that
+`str.encode` and `bytes.decode` do not re-import the codec module on every
+call. `_PyUnicode_FiniEncodings` clears those cached references:
+
+```c
+// Include/internal/pycore_global_objects_fini.h
+extern void _PyUnicode_FiniEncodings(struct _Py_unicode_state *);
+```
+
+It is called before the `codec` module is torn down so there is no risk of
+invoking Python code through a half-finalized codec.
+
+## gopy mirror
+
+Not applicable. Go's garbage collector owns all object memory; there is no
+immortal-refcount scheme and no fixed small-integer array to audit or free.
+The closest analogy is that Go's `sync.Pool` caches are drained automatically
+when the GC runs.
+
+The `_PyUnicode_FiniEncodings` concept does not apply either: gopy does not
+cache codec state on an interpreter struct.
+
+## CPython 3.14 changes
+
+3.14 extended `_PyStaticObjects_CheckRefcnt` to cover the new per-interpreter
+immortal singletons introduced by PEP 703 (no-GIL). The function now accepts
+a `PyInterpreterState *` argument instead of operating on a single global
+table, allowing each sub-interpreter to be audited independently.

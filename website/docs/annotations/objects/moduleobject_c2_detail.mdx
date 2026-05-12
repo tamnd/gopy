@@ -1,0 +1,137 @@
+---
+title: "Objects/moduleobject.c"
+description: "Module object implementation, including multi-phase init and shutdown teardown"
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`moduleobject.c` implements `PyModuleObject`, the runtime representation of a Python module. Beyond storage (`__dict__`), the file handles `PyModuleDef`-based multi-phase initialisation, systematic attribute clearing during interpreter shutdown, and the module `__repr__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | `PyModuleObject` layout | `md_dict`, `md_def`, `md_state`, `md_weaklist` |
+| 61–130 | `PyModule_NewObject` / `PyModule_New` | Allocate module, populate `__name__` and `__doc__` |
+| 131–200 | `PyModule_GetDict` | Return `md_dict`; error if module is not a module object |
+| 201–280 | `PyModule_GetName` / `PyModule_GetFilename` | Extract `__name__` and `__file__` from `md_dict` |
+| 281–360 | `PyModule_GetState` / `PyModule_GetDef` | Access the C-level `md_state` blob and `md_def` pointer |
+| 361–420 | `module___init_subclass__` | No-op stub satisfying `type.__init_subclass__` contract |
+| 421–500 | `_PyModule_Clear` | Replaces all live dict values with `None` for orderly shutdown |
+| 501–550 | `module_repr` | Formats `<module 'name' from 'file'>` or `<module 'name' (built-in)>` |
+| 551–600 | `PyModule_Type` setup | `tp_*` slot assignments and `PyModuleDef` type registration |
+
+## Reading
+
+### PyModule_NewObject: constructing a module
+
+`PyModule_NewObject` is the internal constructor called by the import system and by user code via `types.ModuleType(name)`. It allocates the object, creates a fresh `__dict__`, and sets `__name__`, `__doc__`, `__package__`, `__loader__`, and `__spec__` to their initial values.
+
+```c
+// CPython: Objects/moduleobject.c:61 PyModule_NewObject
+PyObject *
+PyModule_NewObject(PyObject *name)
+{
+    PyModuleObject *m = PyObject_GC_New(PyModuleObject, &PyModule_Type);
+    if (m == NULL) return NULL;
+    m->md_dict = PyDict_New();
+    if (m->md_dict == NULL) goto fail;
+    if (module_init_dict(m, m->md_dict, name, NULL) != 0) goto fail;
+    m->md_def = NULL;
+    m->md_state = NULL;
+    m->md_weaklist = NULL;
+    m->md_name = Py_NewRef(name);
+    _PyObject_GC_TRACK(m);
+    return (PyObject *)m;
+fail:
+    Py_DECREF(m);
+    return NULL;
+}
+```
+
+`module_init_dict` writes the `__name__` string and initialises `__doc__` to `None`, `__package__` to `None`, `__loader__` to `None`, and `__spec__` to `None`.
+
+### _PyModule_Clear: shutdown teardown
+
+`_PyModule_Clear` is called by the interpreter during `Py_FinalizeEx` to break reference cycles and allow objects to be collected in dependency order. It makes two passes over `md_dict`: the first pass replaces every value whose name does not start with an underscore with `None`; the second pass clears the underscore-prefixed names.
+
+```c
+// CPython: Objects/moduleobject.c:421 _PyModule_Clear
+void
+_PyModule_Clear(PyObject *self)
+{
+    PyObject *dict = ((PyModuleObject *)self)->md_dict;
+    if (dict == NULL) return;
+    /* pass 1: clear non-dunder names */
+    _PyModule_ClearDict(dict);
+}
+
+// CPython: Objects/moduleobject.c:440 _PyModule_ClearDict
+void
+_PyModule_ClearDict(PyObject *dict)
+{
+    PyObject *key, *value;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(dict, &pos, &key, &value)) {
+        if (value == Py_None) continue;
+        if (PyUnicode_Check(key) &&
+            PyUnicode_GET_LENGTH(key) > 0 &&
+            PyUnicode_READ_CHAR(key, 0) == '_') continue;
+        PyDict_SetItem(dict, key, Py_None);
+    }
+}
+```
+
+The two-pass strategy ensures that `__builtins__` and `__name__` (underscore-prefixed) outlive ordinary module globals, so that exception handlers and `__del__` methods can still reference them during collection.
+
+### module_repr: the module string representation
+
+`module_repr` reads `__name__` and `__file__` (or `__spec__.origin`) directly from `md_dict` and formats a human-readable string. Built-in modules that have no `__file__` get the `(built-in)` suffix.
+
+```c
+// CPython: Objects/moduleobject.c:501 module_repr
+static PyObject *
+module_repr(PyModuleObject *m)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    return PyObject_CallMethod(interp->importlib, "_module_repr", "O", m);
+}
+```
+
+In 3.14 the repr is delegated to `importlib._bootstrap._module_repr` so that the `__spec__` can be consulted for a more informative string (e.g. including the loader class name for namespace packages).
+
+### PyModuleDef and multi-phase init
+
+When a C extension uses `PyModuleDef` with `Py_mod_exec` slots, the import machinery calls `PyModule_FromDefAndSpec2` rather than `PyModule_New`. The module object is created first (phase 1), then each `Py_mod_exec` slot function is invoked with the partially-initialised module (phase 2), allowing circular imports between extension modules.
+
+```c
+// CPython: Objects/moduleobject.c:285 PyModule_GetState
+void *
+PyModule_GetState(PyObject *m)
+{
+    if (!PyModule_Check(m)) {
+        PyErr_BadArgument();
+        return NULL;
+    }
+    return ((PyModuleObject *)m)->md_state;
+}
+```
+
+`md_state` points to a `md_def->m_size`-byte block allocated alongside the module object. It gives C extensions a place to store per-interpreter mutable state without global variables.
+
+## gopy notes
+
+- `PyModule_NewObject` maps to `objects.NewModule` in `objects/module.go`. The `md_state` field has no equivalent in pure-Python modules; gopy modules store extra state in the dict or in Go struct fields on the module wrapper.
+- `_PyModule_Clear` is replicated in `objects.ModuleClear`, called from `vm.finalize` during interpreter teardown. The two-pass ordering (non-dunder before dunder) must be preserved or `__del__` methods that reference `__name__` will see `None` too early.
+- `module_repr` delegation to `importlib._bootstrap` means gopy must have a working `importlib` at the point where `repr(module)` is first called. The stub in `objects/module.go` returns a static format string until `importlib` is fully bootstrapped.
+- `PyModule_GetDef` and `PyModule_GetState` have no callers inside gopy itself; they exist for C-API compatibility and are stubbed as returning `nil`.
+
+## CPython 3.14 changes
+
+- `md_name` was added as a dedicated field on `PyModuleObject` in 3.13 to allow fast `__name__` access without a dict lookup. In 3.14 `module_repr` and `PyModule_GetName` use `md_name` directly instead of calling `PyDict_GetItemWithError` on `md_dict`.
+- The `Py_mod_multiple_interpreters` slot (`Py_MOD_PER_INTERPRETER_GIL_SUPPORTED`) introduced in 3.12 is now checked in `PyModule_FromDefAndSpec2` with a hard error if a module claims per-interpreter support but allocates non-zero `m_size` with a NULL `m_clear`.
+- `module___init_subclass__` gained a `__module_globals__` parameter in 3.14 as part of the per-module `__class_getitem__` overhaul, though the default implementation remains a no-op.

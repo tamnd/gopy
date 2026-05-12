@@ -1,0 +1,126 @@
+---
+title: Lib/email/__init__.py
+description: "CPython email package init: message_from_string, message_from_bytes, message_from_file, and the layered parser/policy architecture"
+cpython_path: Lib/email/__init__.py
+cpython_version: "3.14"
+lines: 61
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/__init__.py" />
+
+This file is the public entry point of the `email` package. It defines four
+convenience functions that accept raw text or bytes and return a fully parsed
+message object. No parsing logic lives here; the file purely couples the right
+parser class to the right input type and forwards the result. All heavy lifting
+is in `email.parser`, `email.feedparser`, `email.message`, and `email.policy`.
+
+The email package has two parallel object models: the legacy `Message` class
+governed by `Compat32` policy, and the modern `EmailMessage` class governed by
+`EmailPolicy`. The `_class` and `policy` parameters on every entry point
+determine which model the caller receives.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-5 | module header | Copyright, author, contact |
+| 7-25 | `__all__` | Public names re-exported from the package |
+| 31-37 | `message_from_string` | Parse a `str`; delegates to `Parser.parsestr` |
+| 39-45 | `message_from_bytes` | Parse `bytes`; delegates to `BytesParser.parsebytes` |
+| 47-53 | `message_from_file` | Parse an open text file; delegates to `Parser.parse` |
+| 55-61 | `message_from_binary_file` | Parse an open binary file; delegates to `BytesParser.parse` |
+
+## Reading
+
+### message_from_string and message_from_bytes: entry-point dispatch
+
+Each function imports its parser class inside the function body (deferred
+import) and delegates immediately. The deferred import prevents a circular
+dependency: `email/__init__.py` is the package root, and `email.parser`
+imports from `email.message`, which imports from `email.policy`. Deferring
+avoids the cycle without any runtime cost once the submodules are cached in
+`sys.modules`.
+
+```python
+# CPython: Lib/email/__init__.py:31 message_from_string
+def message_from_string(s, *args, **kws):
+    """Parse a string into a Message object model.
+
+    Optional _class and strict are passed to the Parser constructor.
+    """
+    from email.parser import Parser
+    return Parser(*args, **kws).parsestr(s)
+```
+
+```python
+# CPython: Lib/email/__init__.py:39 message_from_bytes
+def message_from_bytes(s, *args, **kws):
+    """Parse a bytes string into a Message object model.
+
+    Optional _class and strict are passed to the Parser constructor.
+    """
+    from email.parser import BytesParser
+    return BytesParser(*args, **kws).parsebytes(s)
+```
+
+The `*args` and `**kws` pass-through means that `_class` and `policy` are
+consumed entirely by the `Parser` or `BytesParser` constructor, not by these
+wrapper functions. In CPython 3.6 and later the `policy` keyword defaults to
+`email.policy.compat32` inside `Parser.__init__`, so callers that omit it
+receive a legacy `Message` object.
+
+### message_from_file: Parser vs BytesParser selection
+
+The text-file and binary-file variants differ only in which parser class they
+construct. `message_from_file` wraps `Parser.parse` (which reads `str` lines
+from the file object), while `message_from_binary_file` wraps
+`BytesParser.parse` (which reads raw bytes and decodes internally).
+
+```python
+# CPython: Lib/email/__init__.py:47 message_from_file
+def message_from_file(fp, *args, **kws):
+    """Read a file and parse its contents into a Message object model.
+
+    Optional _class and strict are passed to the Parser constructor.
+    """
+    from email.parser import Parser
+    return Parser(*args, **kws).parse(fp)
+```
+
+```python
+# CPython: Lib/email/__init__.py:55 message_from_binary_file
+def message_from_binary_file(fp, *args, **kws):
+    """Read a binary file and parse its contents into a Message object model.
+
+    Optional _class and strict are passed to the Parser constructor.
+    """
+    from email.parser import BytesParser
+    return BytesParser(*args, **kws).parse(fp)
+```
+
+### EmailMessage vs Message, and the policy parameter
+
+Callers that want the modern API pass `policy=email.policy.default` (which
+sets `message_factory` to `EmailMessage` internally) or pass `_class` directly.
+The `compat32` default preserves backward compatibility with code written for
+Python 2 and early Python 3. The init module does not inspect the policy value
+at all; it is opaque data forwarded to the parser layer.
+
+The layered architecture runs: entry-point (this file) -> `Parser` ->
+`FeedParser` -> `Message`/`EmailMessage`. Policy objects hook into the
+`FeedParser` at header parsing time and into `Message` at attribute access
+time.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/email/` (public name `email`).
+
+The four entry-point functions are each a one-liner once `email.parser` is
+available. The larger dependency is the `email.policy` subsystem, which must
+implement both `Compat32` and `EmailPolicy` with their different header
+encoding rules before any test in `Lib/test/test_email/` can pass.

@@ -1,0 +1,69 @@
+---
+title: Include/abstract.h
+description: "Public abstract object protocol API: PyObject_Call, PyObject_GetAttr/SetAttr, PySequence_*, PyMapping_*, PyNumber_*, and PyIter_* stable ABI functions."
+cpython_path: Include/abstract.h
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/abstract.h" />
+
+`Include/abstract.h` is the public stable ABI for the abstract object protocol. It declares the functions that operate on any Python object through its type's slot functions: attribute access, calling, number/sequence/mapping operations, and iteration. Extension modules and embedding code use these functions to avoid depending on concrete type internals.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `PyObject_Call`, `PyObject_CallNoArgs` | Call protocol; with/without args |
+| 61-140 | `PyObject_GetAttr`, `PyObject_SetAttr`, `PyObject_HasAttr` | Attribute access |
+| 141-230 | `PyNumber_*` | Arithmetic, bitwise, coercion, `PyNumber_Index` |
+| 231-330 | `PySequence_*` | Length, getitem, setitem, contains, concat |
+| 331-420 | `PyMapping_*` | Keys, values, items, GetItem, SetItem, HasKey |
+| 421-500 | `PyIter_Next`, `PyIter_Send`, `PyObject_GetIter` | Iterator protocol |
+
+## Reading
+
+### Call protocol
+
+`PyObject_Call(callable, args, kwargs)` is the lowest-level public call that accepts a pre-built args tuple and optional kwargs dict. `PyObject_CallNoArgs` and `PyObject_CallOneArg` are optimized variants. All of these route through the type's `tp_call` slot or the vectorcall protocol.
+
+```c
+// Include/abstract.h:1 PyObject_Call
+PyAPI_FUNC(PyObject *) PyObject_Call(
+    PyObject *callable, PyObject *args, PyObject *kwargs);
+
+PyAPI_FUNC(PyObject *) PyObject_CallNoArgs(PyObject *callable);
+
+PyAPI_FUNC(PyObject *) PyObject_CallOneArg(
+    PyObject *callable, PyObject *arg);
+```
+
+### Attribute access
+
+`PyObject_GetAttr(o, name)` calls `o->ob_type->tp_getattro(o, name)`. For most objects this routes to `PyObject_GenericGetAttr` which searches the MRO for data descriptors, the instance dict, and non-data descriptors in that order.
+
+```c
+// Include/abstract.h:61 PyObject_GetAttr
+PyAPI_FUNC(PyObject *) PyObject_GetAttr(PyObject *o, PyObject *attr_name);
+PyAPI_FUNC(int)        PyObject_SetAttr(PyObject *o, PyObject *attr_name, PyObject *v);
+PyAPI_FUNC(int)        PyObject_HasAttr(PyObject *o, PyObject *attr_name);
+```
+
+### Number and sequence protocols
+
+`PyNumber_Add(o1, o2)` calls `o1->ob_type->tp_as_number->nb_add`. If the slot returns `NotImplemented`, the reflected operation `o2->tp_as_number->nb_radd` is tried. This implements Python's operator dispatch including `__add__` and `__radd__`.
+
+```c
+// Include/abstract.h:141 PyNumber_Add
+PyAPI_FUNC(PyObject *) PyNumber_Add(PyObject *o1, PyObject *o2);
+PyAPI_FUNC(PyObject *) PyNumber_Index(PyObject *o);  /* __index__ protocol */
+PyAPI_FUNC(PyObject *) PySequence_GetItem(PyObject *o, Py_ssize_t i);
+PyAPI_FUNC(int)        PySequence_Contains(PyObject *seq, PyObject *ob);
+```
+
+## gopy notes
+
+The gopy equivalent is `objects/protocol.go`, which implements `GetAttr`, `SetAttr`, `Call`, and arithmetic operations on the `Object` interface. The number/sequence/mapping dispatch follows the same slot-lookup logic as CPython, dispatching through the type's method table.

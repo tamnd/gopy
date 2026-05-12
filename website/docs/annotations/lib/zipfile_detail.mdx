@@ -1,0 +1,129 @@
+---
+title: "zipfile/__init__.py: Central-Directory Parser and Decompressor Chain"
+description: "Annotates ZipFile._RealGetContents, ZipExtFile.read, ZipInfo metadata, write/open compression dispatch, the Path class, and 3.14 changes"
+cpython_path: Lib/zipfile/__init__.py
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Lib/zipfile/__init__.py` is the single-file implementation of Python's ZIP
+archive support. The module covers reading, writing, and appending archives in
+ZIP and ZIP64 formats. It builds on `zlib`, `bz2`, `lzma`, and (in 3.14)
+`zstd` for compression, and on `io` for stream abstraction.
+
+The two most important runtime paths are `ZipFile._RealGetContents`, which
+parses the central directory on open, and `ZipExtFile.read`, which pulls
+decompressed bytes through a chain of wrappers built at extraction time.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | module constants, `BadZipFile`, `LargeZipFile` | Public API surface, error types |
+| 121-310 | `ZipInfo` | Per-entry metadata: filename, dates, CRC, compress sizes |
+| 311-480 | `ZipInfo.from_file` | Build a `ZipInfo` from a filesystem path |
+| 481-680 | `_ZipWriteFile` | Writable wrapper; accumulates CRC and sizes, then patches local header |
+| 681-910 | `ZipExtFile` | Readable wrapper; holds decompressor object, manages buffering |
+| 911-1050 | `ZipExtFile.read` / `read1` | Core decompressor dispatch; calls `_read2` until buffer satisfied |
+| 1051-1350 | `ZipFile.__init__` / `_RealGetContents` | Central-directory scan; ZIP64 EOCD fallback |
+| 1351-1550 | `ZipFile.open` | Builds `ZipExtFile`; selects decompressor by `compress_type` |
+| 1551-1750 | `ZipFile.write` / `writestr` | Compression dispatch for writes; defers to `_ZipWriteFile` |
+| 1751-1950 | `ZipFile.extractall` / `extract` | High-level extraction; delegates path safety to `_extract_member` |
+| 1951-2100 | `ZipFile.close` | Flushes central directory; writes EOCD or ZIP64 EOCD |
+| 2101-2250 | `Path` | `pathlib`-style facade over `ZipFile` |
+| 2251-2400 | `_strip_extra`, helpers | Extra-field parsing, ZIP64 promotion logic |
+
+## Reading
+
+### Central-directory parsing (`_RealGetContents`)
+
+`_RealGetContents` is called once during `ZipFile.__init__` for read and
+append modes. It seeks backward from the end of the file to find the
+End-Of-Central-Directory record (EOCD), then reads each central-directory
+entry into a `ZipInfo` object.
+
+```python
+# CPython: Lib/zipfile/__init__.py  (simplified)
+def _RealGetContents(self):
+    fp = self.fp
+    try:
+        endrec = _EndRecData(fp)          # locate EOCD (or ZIP64 EOCD)
+    except OSError:
+        raise BadZipFile("File is not a zip file")
+    size_cd = endrec[_ECD_SIZE]           # central-directory byte length
+    offset_cd = endrec[_ECD_OFFSET]      # offset of first CD entry
+    fp.seek(offset_cd)
+    data = fp.read(size_cd)
+    ...
+    while count < total:
+        centdir = data[pos : pos + sizeCentralDir]
+        x = ZipInfo._from_central_directory_data(centdir, data, pos)
+        self.filelist.append(x)
+        self.NameToInfo[x.filename] = x
+        ...
+```
+
+ZIP64 archives store the true EOCD offset in a ZIP64-EOCD-locator record just
+before the standard EOCD. `_EndRecData` handles both cases and returns a
+unified tuple.
+
+### Decompressor chain (`ZipExtFile.read`)
+
+`ZipFile.open` constructs a `ZipExtFile` whose `_decompressor` field is set to
+a `zlib.decompressobj`, `bz2.BZ2Decompressor`, or similar object depending on
+`compress_type`. `read` pulls raw bytes from the underlying file object and
+feeds them through the decompressor.
+
+```python
+def _read2(self, n):
+    if self._compress_type == ZIP_STORED:
+        data = self._fileobj.read(n)
+    else:
+        while len(self._left) < n:
+            raw = self._fileobj.read(min(n * 4, self._compress_left))
+            if not raw:
+                break
+            self._left += self._decompressor.decompress(raw)
+            self._compress_left -= len(raw)
+        data, self._left = self._left[:n], self._left[n:]
+    self._crc = crc32(data, self._crc)
+    return data
+```
+
+`read1` exposes the same contract but limits the internal read to one buffer
+chunk, making it suitable for `io.BufferedReader` wrapping.
+
+### Path facade
+
+`Path` wraps a `ZipFile` and implements `__truediv__`, `open`, `iterdir`, and
+`is_dir` so that archive members can be navigated like a filesystem tree.
+
+```python
+root = zipfile.Path(archive, at="pkg/")
+for child in root.iterdir():
+    if child.name.endswith(".py"):
+        print(child.read_text())
+```
+
+Members are matched by prefix: a path is a directory if any stored name starts
+with `path.at + "/"`.
+
+## gopy notes
+
+- `ZipInfo` date fields use a packed MS-DOS format (`date_time` tuple).
+  gopy will decode these in the struct layer rather than in `ZipInfo` itself,
+  matching CPython's approach at `ZipInfo._from_central_directory_data`.
+- The decompressor chain maps cleanly to Go `io.Reader` composition.
+  Each compression type becomes a constructor registered in a dispatch table
+  keyed by `compress_type` integer.
+- ZIP64 promotion (`_strip_extra`) touches every write path. Port this helper
+  before `ZipFile.write` to avoid silent truncation of large-file metadata.
+- 3.14 adds `ZIP_ZSTANDARD` (`compress_type = 93`). The decompressor dispatch
+  table gains one entry; no structural change to `ZipExtFile`.
+- `BadZipFile` (alias `BadZipfile`) should map to a gopy exception class;
+  `LargeZipFile` is raised only when ZIP64 is disabled explicitly.

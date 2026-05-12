@@ -1,0 +1,74 @@
+---
+title: Objects/descrobject.c (part 2)
+description: "descrobject part 2: property getter/setter/deleter chaining, classmethod_descriptor and staticmethod_descriptor, slot_wrapper vs method_wrapper distinction, and the mappingproxy read-only view."
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/descrobject.c` (part 2)
+
+<CpyLink path="Objects/descrobject.c" />
+
+This annotation covers `property`, `classmethod`, `staticmethod`, and `mappingproxy` in
+`Objects/descrobject.c`. For the core `PyWrapperDescrObject` and `PyGetSetDescrObject`
+see the `objects_descr` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | `property` object | `getter`/`setter`/`deleter` chaining, `__get__`/`__set__`/`__delete__` |
+| 301-600 | `classmethod_descriptor` | Wraps a C function as a classmethod |
+| 601-800 | `staticmethod_descriptor` | Wraps a C function as a static method |
+| 801-1100 | `slot_tp_descr_get` | `__get__` for slot wrappers |
+| 1101-1600 | `mappingproxy` | Read-only proxy over a dict |
+
+## Reading
+
+### `property` chaining
+
+`property(fget).setter(fset)` creates a new `property` object copying the `fget` from the
+original and setting `fset`. This pattern allows `@name.setter` to add a setter to an
+existing property.
+
+```c
+// CPython: Objects/descrobject.c:1380 property_setter
+static PyObject *
+property_setter(propertyobject *self, PyObject *args)
+{
+    return property_copy(self, NULL, PyTuple_GET_ITEM(args, 0), NULL);
+}
+```
+
+### `classmethod_descriptor` vs Python `classmethod`
+
+`classmethod_descriptor` is the C-level equivalent of `@classmethod`. It wraps C-level
+slot functions (like `dict.fromkeys`) that need to receive `cls` as the first argument.
+The Python-level `classmethod` is a separate object type in `funcobject.c`.
+
+### `mappingproxy`
+
+`mappingproxy` wraps an arbitrary mapping and raises `TypeError` on any mutation attempt.
+It is used for `type.__dict__` and module `__dict__` to prevent accidental modification
+through the read-only view.
+
+```c
+// CPython: Objects/descrobject.c:1520 mappingproxy_setitem
+static int
+mappingproxy_setitem(mappingproxyobject *pp, PyObject *key, PyObject *value)
+{
+    PyErr_SetString(PyExc_TypeError,
+                    "'mappingproxy' object does not support item assignment");
+    return -1;
+}
+```
+
+## gopy notes
+
+`objects/property.go` implements the `property` descriptor. `objects/mapping_proxy.go`
+implements `mappingproxy`. The classmethod and staticmethod descriptors are in
+`objects/method.go`. The chaining API (`getter`/`setter`/`deleter`) is ported.

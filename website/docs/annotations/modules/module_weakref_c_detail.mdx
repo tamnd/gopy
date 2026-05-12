@@ -1,0 +1,130 @@
+---
+title: Modules/_weakref.c
+description: "Thin C module that re-exports weak-reference API from Objects/weakrefobject.c into the public _weakref extension"
+cpython_path: Modules/_weakref.c
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_weakref.c" />
+
+`Modules/_weakref.c` is one of CPython's smallest extension modules. Its entire
+job is to assemble a public Python-visible module (`_weakref`) from symbols
+that live in `Objects/weakrefobject.c`. The file is worth studying because it
+illustrates the deliberate CPython split between the object implementation
+layer and the importable module surface.
+
+## Map
+
+| Symbol | Kind | File of origin | Purpose |
+|---|---|---|---|
+| `_weakref_getweakrefcount_impl` | function | `Modules/_weakref.c` | Wraps `_PyWeakref_GetWeakrefCount` query |
+| `_weakref_getweakrefs_impl` | function | `Modules/_weakref.c` | Returns list of all weak refs to an object |
+| `_weakref_proxy_impl` | function | `Modules/_weakref.c` | Creates a proxy weak reference |
+| `_weakref_ref_impl` | function | `Modules/_weakref.c` | Creates a plain `weakref.ref` |
+| `PyWeakref_NewRef` | function | `Objects/weakrefobject.c` | Allocates a `weakref` object (called by `_weakref_ref_impl`) |
+| `PyWeakref_NewProxy` | function | `Objects/weakrefobject.c` | Allocates a proxy object (called by `_weakref_proxy_impl`) |
+| `_PyWeakref_GetWeakrefCount` | function | `Objects/weakrefobject.c` | Returns raw count from `tp_weaklist` chain |
+| `PyObject_GetWeakRefList` | function | `Objects/weakrefobject.c` | Returns the `tp_weaklist` chain head |
+| `proxy_call` | slot | `Objects/weakrefobject.c` | `tp_call` for callable proxies |
+| `_weakref_module_methods[]` | table | `Modules/_weakref.c` | Method table wired into `PyModuleDef` |
+| `_weakrefmodule` | `PyModuleDef` | `Modules/_weakref.c` | Module definition struct |
+
+## Reading
+
+### Why this split exists
+
+CPython separates the object implementation from the module surface for two
+reasons. First, the garbage collector and the type machinery need `weakref`
+internals (`tp_weaklistoffset`, `_PyWeakref_ClearRef`) before any module is
+imported, so those symbols must live in `Objects/`. Second, the public API
+(`weakref.ref`, `weakref.proxy`, etc.) should be accessible by name from
+Python code, which requires an importable module. Putting both in the same file
+would couple module import machinery to the GC, or force `Objects/` to depend
+on module infrastructure it should not know about.
+
+`_weakref.c` is therefore intentionally trivial. It does not define any types
+or allocate any objects itself. All allocation and bookkeeping is delegated to
+`Objects/weakrefobject.c`.
+
+```c
+// CPython: Modules/_weakref.c:1 module header
+/*
+ * _weakref module -- a collection of functions for interacting
+ * with weak references.
+ */
+#include "Python.h"
+#include "pycore_weakref.h"
+```
+
+### Re-exported functions: ref, proxy, getweakrefcount, getweakrefs
+
+Each of the four public functions is a thin wrapper. `_weakref_ref_impl` calls
+`PyWeakref_NewRef`; `_weakref_proxy_impl` calls `PyWeakref_NewProxy`. Neither
+function touches the `weakref` struct directly.
+
+```c
+// CPython: Modules/_weakref.c:24 _weakref_ref_impl
+static PyObject *
+_weakref_ref_impl(PyObject *module, PyObject *object, PyObject *callback)
+{
+    return PyWeakref_NewRef(object, callback);
+}
+```
+
+```c
+// CPython: Modules/_weakref.c:38 _weakref_proxy_impl
+static PyObject *
+_weakref_proxy_impl(PyObject *module, PyObject *object, PyObject *callback)
+{
+    return PyWeakref_NewProxy(object, callback);
+}
+```
+
+`getweakrefcount` dereferences `tp_weaklistoffset` to walk the singly-linked
+`weakref` chain and return its length as a Python `int`.
+`getweakrefs` does the same traversal but collects every live `weakref` object
+into a list before returning.
+
+### The proxy_call slot and callable proxies
+
+`Objects/weakrefobject.c` defines two proxy types: `PyWeakProxy_Type` (for
+non-callable referents) and `PyCallableWeakProxy_Type` (for callable
+referents). The callable variant sets `tp_call` to `proxy_call`, which
+dereferences the proxy, checks that the referent is still alive, and forwards
+the call to `PyObject_Call` on the live object.
+
+```c
+// CPython: Objects/weakrefobject.c:290 proxy_call
+static PyObject *
+proxy_call(PyWeakReference *proxy, PyObject *args, PyObject *kwargs)
+{
+    PyObject *ref = PyWeakref_GET_OBJECT(proxy);
+    if (ref == Py_None) {
+        PyErr_SetString(PyExc_ReferenceError,
+                        "weakly-referenced object no longer exists");
+        return NULL;
+    }
+    return PyObject_Call(ref, args, kwargs);
+}
+```
+
+`Modules/_weakref.c` has no involvement in `proxy_call`. It surfaces the proxy
+type through `PyWeakProxy_Type` (exported from `Objects/`) by attaching it to
+the module dict via `PyModule_AddObject` under the name `ProxyType`.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/weakref/`
+
+The existing `module/weakref/module.go` is already present in the gopy tree.
+The implementation should expose `ref`, `proxy`, `getweakrefcount`, and
+`getweakrefs`, delegating to the `objects/` weak-reference layer and mirroring
+the CPython split. The callable-proxy `tp_call` equivalent in Go would be a
+method on a `CallableProxy` struct that checks liveness before forwarding via
+the objects protocol interface.

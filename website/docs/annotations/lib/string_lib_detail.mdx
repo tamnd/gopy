@@ -1,0 +1,89 @@
+---
+title: string.py
+description: "Lib/string.py: string utilities and formatting"
+cpython_path: Lib/string.py
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`string` provides string constants, the `Formatter` class that backs the built-in `str.format()` protocol, and `Template` for simple `$`-style variable substitution.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | module docstring, imports | setup |
+| 41–70 | `ascii_letters`, `digits`, `punctuation`, `printable`, `whitespace` | character-set constants |
+| 71–80 | `capwords` | simple title-case helper |
+| 81–200 | `Formatter` | `str.format()` extensibility hook |
+| 201–250 | `Template` | `$`-variable substitution |
+
+## Reading
+
+### Character-set constants
+
+The constants are plain module-level strings. `ascii_letters` is the concatenation of `ascii_lowercase` and `ascii_uppercase`. `printable` is the union of `digits`, `ascii_letters`, `punctuation`, and `whitespace`. These are intentionally ASCII-only; Unicode equivalents live in the `unicodedata` module.
+
+```python
+# CPython: Lib/string.py:41 constants
+ascii_lowercase = 'abcdefghijklmnopqrstuvwxyz'
+ascii_uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+ascii_letters   = ascii_lowercase + ascii_uppercase
+digits          = '0123456789'
+punctuation     = r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""
+whitespace      = ' \t\n\r\x0b\x0c'
+printable       = digits + ascii_letters + punctuation + whitespace
+```
+
+### Formatter: vformat and the field pipeline
+
+`Formatter.format` calls `vformat`, which calls `_vformat`. The inner function iterates over `parse(format_string)`, which yields `(literal_text, field_name, format_spec, conversion)` tuples. For each field it calls `get_field` (resolving attribute and index access), then `convert_field` (`!r`, `!s`, `!a`), then `format_field` (dispatching to `format(obj, spec)`).
+
+```python
+# CPython: Lib/string.py:163 Formatter.vformat
+def vformat(self, format_string, args, kwargs):
+    used_args = set()
+    result, _ = self._vformat(format_string, args, kwargs, used_args, 2)
+    self.check_unused_args(used_args, args, kwargs)
+    return result
+```
+
+Subclasses override individual hooks without replacing the whole pipeline. `check_unused_args` is a no-op in the base class but allows strict-mode formatters that reject unused positional arguments.
+
+### Template: regex-based substitution
+
+`Template` compiles a single regex from the class-level `delimiter`, `idpattern`, and `braceidpattern` attributes. The pattern matches four alternatives: escaped delimiter, braced variable, plain variable, and an invalid placeholder. `substitute` raises `ValueError` for invalid or missing keys; `safe_substitute` leaves unresolved placeholders in place.
+
+```python
+# CPython: Lib/string.py:214 Template.substitute
+def substitute(self, mapping=_sentinel, /, **kws):
+    if mapping is _sentinel:
+        mapping = kws
+    elif kws:
+        mapping = _ChainMap(kws, mapping)
+    def convert(mo):
+        named = mo.group('named') or mo.group('braced')
+        if named is not None:
+            return str(mapping[named])
+        if mo.group('escaped') is not None:
+            return self.delimiter
+        raise ValueError('Invalid placeholder')
+    return self.pattern.sub(convert, self.template)
+```
+
+Subclasses can change the delimiter or variable pattern by overriding class attributes and calling `_compile_pattern` from `__init_subclass__`.
+
+## gopy notes
+
+`Formatter.parse` is implemented in C for CPython (`_string.formatter_field_name_split` and `_string.formatter_parser`). A Go port must reimplement the mini-language parser: handle `{{`/`}}` escapes, zero-indexed auto-numbering, and nested format specs (one level deep only). The recursion limit passed as `2` to `_vformat` enforces this.
+
+`Template.pattern` is compiled at class creation time. In Go, the equivalent regex must be compiled once per `Template` type definition, not per instance. The four named groups (`escaped`, `named`, `braced`, `invalid`) map directly to Go named submatches.
+
+`capwords` is a one-liner (`' '.join(x.capitalize() for x in s.split(sep))`) and does not need special treatment beyond ensuring that `str.capitalize` semantics (only the first character of each word is uppercased, rest are lowercased) are matched by the Go port.
+
+## CPython 3.14 changes
+
+`Template` gained `__init_subclass__` support so that overriding `delimiter` or `idpattern` on a subclass automatically recompiles `pattern` without requiring the subclass to call `super().__init__`. This replaces the fragile `__init_subclass__` metaclass workaround present in 3.12. The `Formatter` public API is unchanged.

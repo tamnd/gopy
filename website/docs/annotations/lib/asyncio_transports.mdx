@@ -1,0 +1,239 @@
+---
+title: Lib/asyncio/transports.py
+description: Abstract transport interfaces for asyncio; BaseTransport, ReadTransport, WriteTransport, Transport, DatagramTransport, and SubprocessTransport define the I/O contract that event-loop backends implement.
+cpython_path: Lib/asyncio/transports.py
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/asyncio/transports.py`
+
+<CpyLink path="Lib/asyncio/transports.py" />
+
+`transports.py` defines the abstract base classes that event-loop
+backends implement to expose OS-level I/O to asyncio protocols. Transports
+own the connection. They manage the OS socket or pipe, buffer outgoing
+data, and call into the protocol when data arrives or the connection
+changes state.
+
+The hierarchy has a clean structure. `BaseTransport` holds the attributes
+common to every transport: lifecycle control (`close`, `is_closing`),
+metadata access (`get_extra_info`), and protocol wiring
+(`set_protocol`/`get_protocol`). `ReadTransport` and `WriteTransport`
+split reading and writing concerns: this separation exists because
+SSL, subprocess, and datagram transports do not all support both
+directions. `Transport` inherits both and represents a full-duplex
+byte-stream connection (the normal TCP case). `DatagramTransport`
+inherits only `BaseTransport` and adds `sendto`. `SubprocessTransport`
+exposes the three pipes and process metadata of a child process.
+
+All methods that have a meaningful default are implemented here. Concrete
+transport subclasses inside `selector_events.py`, `proactor_events.py`,
+and `sslproto.py` override the abstract or stub methods to call the
+underlying OS primitives.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/asyncio/transports.py" lines="1-30">1-30</Cpy> | Module header, `__all__` | Exports all six transport classes; no external asyncio imports. | (not ported) |
+| <Cpy path="Lib/asyncio/transports.py" lines="31-100">31-100</Cpy> | `BaseTransport` | `__init__` stores extra info dict; `close`, `is_closing`, `get_extra_info`, `set_protocol`, `get_protocol` define the universal transport contract. | (not ported) |
+| <Cpy path="Lib/asyncio/transports.py" lines="101-150">101-150</Cpy> | `ReadTransport` | Extends `BaseTransport`; adds `is_reading`, `pause_reading`, `resume_reading`; pausing a closed or already-paused transport is a no-op. | (not ported) |
+| <Cpy path="Lib/asyncio/transports.py" lines="151-250">151-250</Cpy> | `WriteTransport` | Extends `BaseTransport`; adds `set_write_buffer_limits`, `get_write_buffer_size`, `get_write_buffer_limits`, `write`, `writelines`, `write_eof`, `can_write_eof`, `abort`. | (not ported) |
+| <Cpy path="Lib/asyncio/transports.py" lines="251-270">251-270</Cpy> | `Transport` | Inherits both `ReadTransport` and `WriteTransport`; no additional methods; represents full-duplex byte-stream connections. | (not ported) |
+| <Cpy path="Lib/asyncio/transports.py" lines="271-310">271-310</Cpy> | `DatagramTransport` | Extends `BaseTransport`; adds `sendto(data, addr=None)` and `abort`; `addr` is `None` when the socket is already connected. | (not ported) |
+| <Cpy path="Lib/asyncio/transports.py" lines="311-350">311-350</Cpy> | `SubprocessTransport` | Extends `BaseTransport`; adds `get_pid`, `get_returncode`, `get_pipe_transport(fd)`, `send_signal`, `terminate`, `kill`; `get_pipe_transport` returns the `ReadTransport` or `WriteTransport` for fd 0, 1, or 2. | (not ported) |
+
+## Reading
+
+### `BaseTransport`: lifecycle and metadata (lines 31 to 100)
+
+<CpyLink path="Lib/asyncio/transports.py" lines="31-100" />
+
+```python
+class BaseTransport:
+    def __init__(self, extra=None):
+        if extra is None:
+            extra = {}
+        self._extra = extra
+        self._protocol = None
+        self._closing = False
+
+    def get_extra_info(self, name, default=None):
+        return self._extra.get(name, default)
+
+    def is_closing(self):
+        return self._closing
+
+    def close(self):
+        raise NotImplementedError
+
+    def set_protocol(self, protocol):
+        self._protocol = protocol
+
+    def get_protocol(self):
+        return self._protocol
+```
+
+`get_extra_info` provides a uniform key-value store for transport
+metadata. Concrete transports populate `_extra` at construction time with
+keys like `'socket'` (the raw `socket.socket`), `'peername'`
+(`getpeername()` result), `'sockname'` (`getsockname()`), `'compression'`
+(for SSL), and `'subprocess'` (for subprocesses). User code calls
+`transport.get_extra_info('peername')` rather than casting the transport
+to a concrete type and accessing an attribute directly. This lets code
+that works with transports stay abstract.
+
+`is_closing` is the observable state of the `_closing` flag that concrete
+transports set when `close()` is called. The flag is set before the
+actual OS close completes because OS closure is asynchronous: the socket
+is not removed from the selector until the current I/O iteration finishes.
+A protocol that checks `transport.is_closing()` in `connection_lost` to
+decide whether to reconnect must therefore not call `transport.write` once
+`is_closing()` returns `True`.
+
+`set_protocol` and `get_protocol` decouple transport creation from
+protocol assignment. The event loop creates the transport, calls
+`set_protocol`, and then calls `protocol.connection_made(transport)`. This
+ordering guarantees that when `connection_made` fires the protocol can
+call `transport.write` immediately.
+
+### `WriteTransport`: write buffer and flow control (lines 151 to 250)
+
+<CpyLink path="Lib/asyncio/transports.py" lines="151-250" />
+
+```python
+class WriteTransport(BaseTransport):
+    def set_write_buffer_limits(self, high=None, low=None):
+        if high is None:
+            if low is None:
+                high = 64 * 1024
+            else:
+                high = 4 * low
+        if low is None:
+            low = high // 4
+        if not high >= low >= 0:
+            raise ValueError(
+                f'high ({high!r}) must be >= low ({low!r}) must be >= 0')
+        self._high_water = high
+        self._low_water = low
+
+    def get_write_buffer_limits(self):
+        return (self._low_water, self._high_water)
+
+    def write(self, data):
+        raise NotImplementedError
+
+    def writelines(self, list_of_data):
+        data = b''.join(list_of_data)
+        self.write(data)
+
+    def write_eof(self):
+        raise NotImplementedError
+
+    def can_write_eof(self):
+        raise NotImplementedError
+
+    def abort(self):
+        raise NotImplementedError
+```
+
+`set_write_buffer_limits` establishes the high- and low-water marks that
+drive the `pause_writing` / `resume_writing` protocol callbacks. The
+defaults (64 KiB high, 16 KiB low) are a practical compromise: small
+enough to limit memory use per connection, large enough that a single
+large `write` call does not immediately trigger backpressure on most
+systems. The constraint `high >= low >= 0` prevents degenerate
+configurations where the low-water mark exceeds the high-water mark, which
+would make the transport oscillate between pause and resume on every write.
+
+`writelines` is a convenience that joins and delegates to `write`. This
+matters for protocols that build a response from multiple buffers: a
+single `write` is more efficient than N small writes because the transport
+can coalesce them into one `sendall` call.
+
+`write_eof` sends a TCP FIN on the write side of the connection while
+keeping the read side open (TCP half-close). Not all transports support
+this; `can_write_eof` lets the caller check before attempting it. SSL
+transports return `False` from `can_write_eof` because TLS does not
+support half-close in the same way TCP does.
+
+`abort` closes the connection immediately without flushing the write
+buffer. It is the correct choice when the connection is already broken
+(e.g., the remote side has disconnected) and waiting for the write buffer
+to drain would block forever.
+
+### `ReadTransport`: pause and resume (lines 101 to 150)
+
+<CpyLink path="Lib/asyncio/transports.py" lines="101-150" />
+
+```python
+class ReadTransport(BaseTransport):
+    def is_reading(self):
+        raise NotImplementedError
+
+    def pause_reading(self):
+        raise NotImplementedError
+
+    def resume_reading(self):
+        raise NotImplementedError
+```
+
+```python
+# Concrete example from selector_events.py:
+def pause_reading(self):
+    if self._closing or not self._reading:
+        return
+    self._reading = False
+    self._loop._remove_reader(self._sock_fd)
+    ...
+
+def resume_reading(self):
+    if self._closing or self._reading:
+        return
+    self._reading = True
+    self._loop._add_reader(self._sock_fd, self._read_ready)
+    ...
+```
+
+The abstract definitions in this file contain no logic. The concrete
+implementation in `selector_events.py` shown above illustrates the intent:
+`pause_reading` removes the socket's file descriptor from the selector's
+read-interest set, which means the event loop will stop calling
+`_read_ready` (and therefore stop calling `protocol.data_received`). This
+is the transport side of the backpressure protocol. A downstream consumer
+(such as an `asyncio.StreamReader`) calls `transport.pause_reading` when
+its internal buffer reaches a threshold, preventing the inbound data rate
+from exceeding the processing rate.
+
+`is_reading` is a 3.7 addition that allows protocols to check whether
+reading is currently paused without needing to track this state
+themselves.
+
+## gopy mirror
+
+`asyncio` transports are not yet ported to gopy. The class hierarchy maps
+to a set of Go interfaces. `BaseTransport` becomes an interface with
+`Close()`, `IsClosing() bool`, `GetExtraInfo(name string) any`,
+`SetProtocol(p Protocol)`, and `GetProtocol() Protocol`. `WriteTransport`
+embeds `BaseTransport` and adds `Write(data []byte) error`,
+`WriteEOF() error`, `CanWriteEOF() bool`, and `Abort()`. The write buffer
+and high/low watermark logic would be a concrete `writeBuffer` struct
+shared by TCP and SSL implementations. Go's goroutine model makes the
+`pause_reading`/`resume_reading` mechanism less critical because
+backpressure can also be applied by simply not reading from the
+connection's channel, but the interface must still be present for
+compatibility.
+
+## CPython 3.14 changes worth noting
+
+`ReadTransport.is_reading` was added in 3.7 (gh-32108). In 3.12,
+`WriteTransport.get_write_buffer_limits` was added so callers can
+retrieve the high/low watermarks set at construction time without
+needing to track them separately. `SubprocessTransport.get_pipe_transport`
+gained a note in 3.13 clarifying that it returns `None` for any fd that
+was not set to `PIPE` in the `subprocess.Popen` call. In 3.14, no API
+changes were made to this file; the abstractions are considered stable.

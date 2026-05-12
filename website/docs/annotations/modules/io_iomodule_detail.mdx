@@ -1,0 +1,144 @@
+---
+title: "_iomodule.c — built-in open() and module bootstrap"
+description: "Annotated reading of Modules/_io/_iomodule.c from CPython 3.14"
+cpython_path: Modules/_io/_iomodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_iomodule.c` is the entry point for CPython's `_io` extension module. It
+registers `open()`, `open_code()`, and the exception types, and owns the
+module-level state struct that every other `_io` source file reaches through
+`_PyIO_State_GET()`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | includes / forward decls | pulls in `clinic` generated code |
+| 61–100 | `_PyIO_State` | per-module state: exception refs, `UnsupportedOperation` |
+| 101–140 | `DEFAULT_BUFFER_SIZE` | constant 8192 exposed to Python |
+| 141–360 | `_io_open_impl()` | full implementation of built-in `open()` |
+| 361–420 | `_io_open_code_impl()` | hook for importlib path-based opens |
+| 421–480 | `_io_methods[]` | method table wired to `PyModuleDef` |
+| 481–500 | `PyInit__io()` | module init, registers types and exceptions |
+
+## Reading
+
+### Module state
+
+Every `_io` object stores a pointer back to the module so that it can reach
+shared exception types without a global variable. The state struct is small
+but critical.
+
+```c
+// CPython: Modules/_io/_iomodule.c:79 _PyIO_State
+typedef struct {
+    PyObject *unsupported_operation;
+    /* Interned strings used as dict keys inside BufferedIO */
+    PyObject *str_read;
+    PyObject *str_write;
+    PyObject *str_readinto;
+} _PyIO_State;
+```
+
+`_PyIO_State_GET()` is a one-liner macro that calls
+`PyModule_GetState(module)` and casts the result, so every helper that
+receives the module pointer can read these fields at zero allocation cost.
+
+### open() mode validation
+
+`_io_open_impl()` is the most-called function in the entire `_io` stack. The
+first thing it does is walk the `mode` string character by character and set
+boolean flags.
+
+```c
+// CPython: Modules/_io/_iomodule.c:175 _io_open_impl
+int reading = 0, writing = 0, appending = 0, updating = 0;
+int text = 0, binary = 0, universal = 0;
+
+for (i = 0; i < mode_len; i++) {
+    char c = mode[i];
+    switch (c) {
+    case 'r': reading = 1; break;
+    case 'w': writing = 1; break;
+    case 'a': appending = 1; break;
+    case '+': updating = 1; break;
+    case 't': text = 1; break;
+    case 'b': binary = 1; break;
+    /* 'x' exclusive-create handled separately */
+    }
+}
+```
+
+Invalid combinations — such as `"rt+b"` or supplying both `text` and `binary`
+— are rejected with `ValueError` before any file descriptor is opened.
+
+### Layer construction
+
+After validation, `_io_open_impl()` builds the I/O stack bottom-up. Raw mode
+(`"rb"` with `buffering=0`) returns a bare `FileIO`. Otherwise it wraps the
+raw layer in a `Buffered*` object, and then optionally in a `TextIOWrapper`.
+
+```c
+// CPython: Modules/_io/_iomodule.c:270 _io_open_impl
+/* 1. Raw layer */
+raw = PyObject_CallFunctionObjArgs(
+        (PyObject *)&PyFileIO_Type, nameobj, mode_obj, NULL);
+
+/* 2. Buffered layer */
+if (buffering < 0)
+    buffering = DEFAULT_BUFFER_SIZE;   /* 8192 */
+
+if (updating)
+    buffer = PyObject_CallFunction(state->BufferedRandom, ...);
+else if (writing || appending)
+    buffer = PyObject_CallFunction(state->BufferedWriter, ...);
+else
+    buffer = PyObject_CallFunction(state->BufferedReader, ...);
+
+/* 3. Text layer */
+if (!binary)
+    wrapper = PyObject_CallFunction(state->TextIOWrapper, ...);
+```
+
+Each step is guarded by an error check; any failure decrefs all partially
+constructed objects before returning `NULL`.
+
+### DEFAULT_BUFFER_SIZE
+
+The constant is defined as a C macro and then re-exported as a Python integer
+attribute by `PyInit__io()`.
+
+```c
+// CPython: Modules/_io/_iomodule.c:107 DEFAULT_BUFFER_SIZE
+#define DEFAULT_BUFFER_SIZE (8 * 1024)   /* 8192 bytes */
+```
+
+Eight kilobytes matches the default page size on most OSes and has been the
+value since Python 2's `file` type.
+
+## gopy notes
+
+- `_io_open_impl()` maps directly to the `open()` builtin; gopy should route
+  all `CALL` bytecodes that resolve to `builtins.open` through the Go
+  equivalent of this function.
+- `DEFAULT_BUFFER_SIZE` is exposed as `_io.DEFAULT_BUFFER_SIZE`; gopy's `_io`
+  module object must set this attribute to `8192`.
+- The per-module state pattern has no direct Go analogue; gopy uses a package-
+  level struct instead.
+- `open_code()` is used only by the import system. It can be stubbed initially
+  and wired to the real path codec later.
+
+## CPython 3.14 changes
+
+- The `mode` parser was tightened in 3.13 to reject `"U"` (universal newlines
+  mode) with `DeprecationWarning` becoming a hard `ValueError`.
+- `open_code()` gained an audit event in 3.12; 3.14 carries it forward
+  unchanged.
+- Argument Clinic (`_io_open_impl` clinic signature) was refreshed; the
+  generated file `clinic/_io/_iomodule.c.h` changed but the runtime behaviour
+  is identical.

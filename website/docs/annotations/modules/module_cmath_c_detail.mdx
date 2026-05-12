@@ -1,0 +1,65 @@
+---
+title: Modules/cmathmodule.c
+description: "cmath module: complex transcendental functions (sin, cos, exp, log, sqrt, phase, polar, rect) with careful IEEE 754 handling for infinity and NaN inputs."
+cpython_path: Modules/cmathmodule.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/cmathmodule.c" />
+
+`Modules/cmathmodule.c` implements the `cmath` module for complex arithmetic transcendental functions. It wraps C99's `<complex.h>` where available and falls back to explicit real/imaginary arithmetic, handling the many special cases (NaN, infinity, negative zero, branch cuts) mandated by IEEE 754.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `Py_CARG`, `c_abs` | Argument extraction; magnitude |
+| 151-400 | `cmath_exp`, `cmath_log`, `cmath_sqrt` | Exponential and logarithmic functions |
+| 401-650 | `cmath_sin`, `cmath_cos`, `cmath_tan`, hyperbolic | Trig and hyperbolic functions |
+| 651-850 | `cmath_phase`, `cmath_polar`, `cmath_rect` | Polar coordinate conversions |
+| 851-1200 | `cmath_isnan`, `cmath_isinf`, `cmath_isclose` | Predicates; module init |
+
+## Reading
+
+### Special-case handling in cmath_exp
+
+Complex `exp(z)` where `z = x + iy` is `e^x * (cos(y) + i*sin(y))`. For `x = +inf` and `y = 0`, the result is `(+inf, 0)`. For `x = +inf` and `y = nan`, the result is `(+inf, nan)`. These edge cases require explicit checks rather than relying on the C library.
+
+```c
+// Modules/cmathmodule.c:151 cmath_exp_impl
+static Py_complex
+cmath_exp_impl(PyObject *module, Py_complex z)
+{
+    if (!Py_IS_FINITE(z.real) || !Py_IS_FINITE(z.imag)) {
+        /* handle inf/nan cases explicitly per C99 Annex G */
+    }
+    double r = exp(z.real);
+    return (Py_complex){r * cos(z.imag), r * sin(z.imag)};
+}
+```
+
+### polar, phase, rect
+
+`cmath.phase(z)` returns `atan2(z.imag, z.real)` (the angle in radians). `cmath.polar(z)` returns `(abs(z), phase(z))` as a tuple. `cmath.rect(r, phi)` constructs a complex from polar form: `r * exp(i*phi) = r*cos(phi) + i*r*sin(phi)`.
+
+```c
+// Modules/cmathmodule.c:651 cmath_rect_impl
+static PyObject *
+cmath_rect_impl(PyObject *module, double r, double phi)
+{
+    Py_complex z = {r * cos(phi), r * sin(phi)};
+    return PyComplex_FromCComplex(z);
+}
+```
+
+### Branch cuts
+
+The branch cuts for `cmath.log`, `cmath.sqrt`, `cmath.asin`, `cmath.acos` match the C99 standard (Annex G) which in turn follows Kahan's original definitions. The imaginary part of `sqrt(-1 + 0j)` is `+0.0`, but of `sqrt(-1 - 0j)` is `-0.0`. CPython tests these edge cases in `Lib/test/test_cmath.py`.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/cmath/`. Go's `math/cmplx` package implements the same functions with matching IEEE 754 branch cut behavior; the port would wrap those functions and expose them as Python callables.

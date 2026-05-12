@@ -1,0 +1,120 @@
+---
+title: Lib/select.py (selectors)
+description: "CPython source annotation: Lib/selectors.py"
+cpython_path: Lib/selectors.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/selectors.py" />
+
+`Lib/selectors.py` is a pure-Python abstraction over the OS I/O multiplexing primitives: `select`, `poll`, `epoll` (Linux), and `kqueue` (macOS/BSD). It presents a uniform `BaseSelector` interface regardless of which primitive is available on the current platform, and picks the most capable implementation at import time via the `DefaultSelector` alias. The module is used by `asyncio`, `socketserver`, and `multiprocessing` among others.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-50 | module header, imports, `EVENT_READ`/`EVENT_WRITE` | Constants and `SelectorKey` namedtuple definition |
+| ~50-80 | `SelectorKey` | `namedtuple` with fields `fileobj`, `fd`, `events`, `data` |
+| ~80-180 | `BaseSelector` | Abstract base; `register`, `unregister`, `modify`, `select`, `close`, `get_key`, `get_map` |
+| ~180-260 | `SelectSelector` | `select.select`-based; always available; maintains read/write fd sets |
+| ~260-330 | `PollSelector` | `select.poll`-based; Linux/macOS; O(n) but no fd limit like `select` |
+| ~330-430 | `EpollSelector` | `select.epoll`-based; Linux only; O(1) event delivery, edge/level trigger |
+| ~430-520 | `KqueueSelector` | `select.kqueue`-based; macOS/BSD; uses kevent with EVFILT_READ/EVFILT_WRITE |
+| ~520-600 | `DefaultSelector` alias, platform probe | Assigned to best available class at module load time |
+
+## Reading
+
+### SelectorKey namedtuple and the registration contract
+
+`SelectorKey` is the currency of the selectors API. Every call to `register()` returns one, and `select()` returns a list of `(key, events)` pairs. Keeping a namedtuple (rather than a mutable object) makes it safe to hand references to user code without worrying about mutation.
+
+```python
+# CPython: Lib/selectors.py:64 SelectorKey
+SelectorKey = namedtuple('SelectorKey', ['fileobj', 'fd', 'events', 'data'])
+SelectorKey.__doc__ = """SelectorKey(fileobj, fd, events, data)
+
+    Object used to associate a file object to its backing file descriptor,
+    selected event mask, and attached data.
+    ...
+    """
+```
+
+The `fd` field is always an integer file descriptor obtained via `_fileobj_lookup()`, which calls `fileno()` on anything that is not already an int. `fileobj` retains the original object (a `socket`, a `file`, etc.) so that the caller does not have to maintain a separate fd-to-object mapping.
+
+### BaseSelector.register, unregister, and modify
+
+`BaseSelector` stores keys in a `_SelectorMapping`, which is a thin `Mapping` view over the internal `_fd_to_key` dict. `register` validates that the fd is not already registered and that the events mask is non-empty, then delegates to the concrete subclass's `_register` hook. `modify` is implemented as `unregister` followed by `register` in the base class; subclasses such as `EpollSelector` override it to call `epoll.modify` directly for atomicity.
+
+```python
+# CPython: Lib/selectors.py:169 BaseSelector.register
+    def register(self, fileobj, events, data=None):
+        if (not events) or (events & ~(EVENT_READ | EVENT_WRITE)):
+            raise ValueError("Invalid events: {!r}".format(events))
+        key = SelectorKey(fileobj=fileobj, fd=self._fileobj_lookup(fileobj),
+                          events=events, data=data)
+        if key.fd in self._fd_to_key:
+            raise KeyError("{!r} is already registered".format(fileobj))
+        self._fd_to_key[key.fd] = key
+        return key
+```
+
+`unregister` accepts either the original `fileobj` or its integer fd, which makes it convenient to call from a close handler where the file object may already be closed (closing an fd makes `fileno()` raise, but the int is still valid as a lookup key).
+
+### EpollSelector and timeout conversion
+
+`EpollSelector` is the most capable implementation on Linux. It registers fds with `epoll.register` using a bitmask that maps `EVENT_READ` to `EPOLLIN` and `EVENT_WRITE` to `EPOLLOUT`. Its `select()` method converts the Python-convention timeout (seconds as float, `None` means block forever) to the millisecond integer that `epoll.poll` expects.
+
+```python
+# CPython: Lib/selectors.py:388 EpollSelector.select
+    def select(self, timeout=None):
+        if timeout is None:
+            timeout = -1
+        elif timeout <= 0:
+            timeout = 0
+        else:
+            # epoll_wait() has a resolution of 1 millisecond, round away
+            # from zero to wait *at least* timeout seconds.
+            timeout = math.ceil(timeout * 1e3) * 1e-3
+
+        max_ev = max(len(self._fd_to_key), 1)
+        ready = []
+        try:
+            fd_event_list = self._selector.poll(timeout, max_ev)
+        except InterruptedError:
+            return ready
+        ...
+```
+
+The `InterruptedError` catch (replacing the old `EINTR` check) is important: on platforms where signal delivery can interrupt `epoll_wait`, the correct behavior is to return an empty ready list so the caller can check for pending signals and re-enter `select()`.
+
+The `KqueueSelector` does the same timeout conversion but translates events into a pair of `kevent` descriptors (one per direction) because `kqueue` tracks read and write readiness as separate filter types (`EVFILT_READ`, `EVFILT_WRITE`) rather than as bits in a single mask.
+
+### DefaultSelector fallback chain
+
+At the bottom of the module, `DefaultSelector` is set to the most capable available class by probing for the presence of the underlying `select` module attributes:
+
+```python
+# CPython: Lib/selectors.py:591 DefaultSelector assignment
+if 'KqueueSelector' in globals():
+    DefaultSelector = KqueueSelector
+elif 'EpollSelector' in globals():
+    DefaultSelector = EpollSelector
+elif 'PollSelector' in globals():
+    DefaultSelector = PollSelector
+else:
+    DefaultSelector = SelectSelector
+```
+
+The `globals()` probe works because each selector class is defined inside a `if hasattr(select, 'epoll'):` guard, so the name simply does not exist in the module namespace when the primitive is absent. This is cleaner than a try/except import and avoids leaving partially constructed class objects around.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/selectors/`.
+
+The Go standard library covers most of this surface already. `epoll`/`kqueue`/`select` are used internally by the Go runtime's netpoller; user code rarely calls them directly. A faithful port would wrap `golang.org/x/sys/unix.EpollWait` and `unix.Kevent` to expose the CPython `SelectorKey`-based API to Python code running under gopy. The `SelectorKey` namedtuple maps to a Go struct with a `PyObject` wrapper. The timeout conversion logic (seconds float to millisecond int, rounding away from zero) must be reproduced exactly to avoid test divergence with CPython. `DefaultSelector` would be assigned at init time by probing build tags rather than `hasattr`, since Go's platform support is compile-time rather than runtime.

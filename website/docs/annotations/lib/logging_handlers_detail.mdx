@@ -1,0 +1,158 @@
+---
+title: Lib/logging/handlers.py
+description: "File rotation, socket, memory, and async queue handlers"
+cpython_path: Lib/logging/handlers.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/logging/handlers.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–60 | module header, imports | `struct`, `socket`, `pickle`, `queue`, time constants |
+| 61–180 | `BaseRotatingHandler` | Abstract rotation base: `shouldRollover`, `doRollover` |
+| 181–340 | `RotatingFileHandler` | Size-based rotation with `backupCount` |
+| 341–560 | `TimedRotatingFileHandler` | Calendar-aligned rotation: interval, suffix, `computeRollover` |
+| 561–680 | `WatchedFileHandler` | Inode-watch rotation for external log rotators |
+| 681–790 | `SocketHandler` | TCP socket transport with pickle framing |
+| 791–870 | `DatagramHandler` | UDP socket transport |
+| 871–960 | `SysLogHandler` | RFC-3164/RFC-5424 syslog over UDP/TCP/Unix socket |
+| 961–1040 | `NTEventLogHandler` | Windows Event Log via `win32evtlog` |
+| 1041–1130 | `SMTPHandler` | Email via `smtplib` |
+| 1131–1220 | `MemoryHandler` | In-memory buffer with `shouldFlush`/`flush` target |
+| 1221–1340 | `QueueHandler`, `QueueListener` | Async logging to a `queue.Queue` or `asyncio.Queue` |
+| 1341–1400 | `HTTPHandler` | HTTP POST/GET transport |
+
+## Reading
+
+### RotatingFileHandler.doRollover
+
+Size-based rotation renames the current log file to `.1`, shifts older backups down (`.1` to `.2`, etc.), and opens a fresh file. The shift loop runs in reverse order so it does not overwrite a backup before it has been renamed.
+
+```python
+# CPython: Lib/logging/handlers.py:222 RotatingFileHandler.doRollover
+def doRollover(self):
+    if self.stream:
+        self.stream.close()
+        self.stream = None
+    if self.backupCount > 0:
+        for i in range(self.backupCount - 1, 0, -1):
+            sfn = self.rotation_filename("%s.%d" % (self.baseFilename, i))
+            dfn = self.rotation_filename("%s.%d" % (self.baseFilename, i + 1))
+            if os.path.exists(sfn):
+                if os.path.exists(dfn):
+                    os.remove(dfn)
+                os.rename(sfn, dfn)
+        dfn = self.rotation_filename(self.baseFilename + ".1")
+        if os.path.exists(dfn):
+            os.remove(dfn)
+        self.rotate(self.baseFilename, dfn)
+    if not self.delay:
+        self.stream = self._open()
+```
+
+`shouldRollover` checks `os.path.getsize(self.baseFilename)` against `self.maxBytes` before every `emit` call. A `maxBytes` of zero disables size checking entirely, making the handler behave like a plain `FileHandler`.
+
+### TimedRotatingFileHandler rotation interval computation
+
+The interval is expressed as a multiple of seconds. `computeRollover` snaps the next rollover time to a calendar boundary (midnight for `'D'`, the next weekday boundary for `'W0'`–`'W6'`, and the next hour boundary for `'H'`). DST transitions are accounted for by recomputing the boundary in local time.
+
+```python
+# CPython: Lib/logging/handlers.py:407 TimedRotatingFileHandler.computeRollover
+def computeRollover(self, currentTime):
+    result = currentTime + self.interval
+    if self.when == 'MIDNIGHT' or self.when.startswith('W'):
+        t = time.localtime(currentTime)
+        currentHour = t[3]
+        currentMinute = t[4]
+        currentSecond = t[5]
+        currentDay = t[6]
+        r = _MIDNIGHT - ((currentHour * 60 + currentMinute) * 60 +
+                currentSecond)
+        if r <= 0:
+            r += _MIDNIGHT
+        ...
+        result = currentTime + r
+    return result
+```
+
+Old backup files are found by `getFilesToDelete`, which lists directory entries matching the log file's stem plus the rotation suffix pattern and sorts them so the oldest are deleted when `backupCount` is exceeded.
+
+### SocketHandler.emit with pickle framing
+
+`SocketHandler` serialises the `LogRecord` to a pickle payload and prepends a 4-byte big-endian length so the receiver can re-assemble complete records from a TCP stream. A failed send closes the socket, which will be re-opened on the next call.
+
+```python
+# CPython: Lib/logging/handlers.py:719 SocketHandler.emit
+def emit(self, record):
+    try:
+        msg = self.format(record)
+        record = copy.copy(record)
+        record.msg = msg
+        record.args = None
+        record.exc_info = None
+        record.exc_text = None
+        s = self.makePickle(record)
+        self.send(s)
+    except Exception:
+        self.handleError(record)
+
+# CPython: Lib/logging/handlers.py:693 SocketHandler.makePickle
+def makePickle(self, record):
+    ei = record.exc_info
+    if ei:
+        dummy = self.format(record)
+        record.exc_info = None
+    d = dict(record.__dict__)
+    d['msg'] = record.getMessage()
+    d['args'] = None
+    s = pickle.dumps(d, 1)
+    slen = struct.pack(">L", len(s))
+    return slen + s
+```
+
+### MemoryHandler with shouldFlush and QueueHandler/QueueListener
+
+`MemoryHandler` accumulates records in `self.buffer`. `shouldFlush` returns `True` when the buffer reaches `capacity` or when a record of level `flushLevel` (default `ERROR`) arrives. `flush` forwards the buffer to `self.target` and clears it.
+
+```python
+# CPython: Lib/logging/handlers.py:1178 MemoryHandler.shouldFlush
+def shouldFlush(self, record):
+    return (len(self.buffer) >= self.capacity) or \
+            (record.levelno >= self.flushLevel)
+```
+
+`QueueHandler.emit` puts a prepared copy of the record onto a `queue.Queue` (or any object with a `put_nowait` method, including `asyncio.Queue`). `QueueListener` runs a background thread that calls `queue.get()` in a loop and dispatches each record to a list of real handlers, calling `prepare` to undo any record mutations made by `QueueHandler`.
+
+```python
+# CPython: Lib/logging/handlers.py:1283 QueueListener._monitor
+def _monitor(self):
+    q = self.queue
+    has_task_done = hasattr(q, 'task_done')
+    while True:
+        try:
+            record = self.dequeue(True)
+            if record is self._sentinel:
+                break
+            self.handle(record)
+            if has_task_done:
+                q.task_done()
+        except queue.Empty:
+            break
+```
+
+`stop()` enqueues the sentinel object so the monitor thread exits cleanly after draining remaining records.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/logging/` (same package as `__init__.py`; the handlers will live in a `handlers.go` file within that package to match CPython's sub-module layout).
+
+Rotation logic requires `os.Rename`, `os.Remove`, and `filepath` utilities. The pickle framing in `SocketHandler` will need a Go-side serialisation format (JSON or `encoding/gob`) because CPython pickle is not available. `QueueHandler`/`QueueListener` map naturally onto Go channels and goroutines. `MemoryHandler` is straightforward slice buffering.

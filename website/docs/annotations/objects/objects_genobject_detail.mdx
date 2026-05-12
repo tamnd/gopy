@@ -1,0 +1,81 @@
+---
+title: Objects/genobject.c
+description: "Generator, coroutine, and async generator objects: PyGenObject layout with gi_iframe, gen_send_ex2 resumption, yield-from delegation via _PyGen_yf, and the finalizer that throws GeneratorExit."
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 980
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/genobject.c`
+
+<CpyLink path="Objects/genobject.c" />
+
+`Objects/genobject.c` defines `PyGenObject`, `PyCoroObject`, and `PyAsyncGenObject`. All
+three share the same C struct layout and most of the same machinery; they differ in which
+opcodes create them, which `send`/`throw` methods they expose, and how `close()` behaves.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-150 | `PyGenObject` struct, `gen_new_with_qualname` | Object layout and construction |
+| 151-400 | `gen_send_ex2`, `gen_send` | Resume the frame and handle the result |
+| 401-580 | `gen_throw`, `gen_close` | Exception injection and close protocol |
+| 581-750 | `_PyGen_yf`, `gen_yf` | `yield from` delegation target |
+| 751-980 | `PyAsyncGenObject`, `aclose`, `athrow` | Async generator extras |
+
+## Reading
+
+### `gen_send_ex2`
+
+`gen_send_ex2` is the common resumption path for all three types. It checks that the frame
+is not already running (prevents re-entry), restores the frame, calls
+`_PyEval_EvalFrameDefault`, and translates the result:
+
+- `StopIteration` raised: return `NULL` with no current exception (signals exhaustion)
+- Normal value: the value is whatever `YIELD_VALUE` put on the stack
+- Any other exception: propagate
+
+```c
+// CPython: Objects/genobject.c:190 gen_send_ex2
+static PySendResult
+gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult,
+             int exc, int closing)
+{
+    ...
+    if (gen->gi_frame_state == FRAME_COMPLETED) {
+        ...
+        *presult = NULL;
+        return PYGEN_ERROR;
+    }
+    ...
+    result = _PyEval_EvalFrameDefault(tstate, frame, exc);
+    ...
+}
+```
+
+### `yield from` delegation
+
+`_PyGen_yf(gen)` returns the object being `yield from`'d by the generator (if any), by
+peeking at the value on the suspended frame's stack. `SEND` and `THROW` opcodes use this
+to forward sends and exceptions through chains of generators.
+
+### `gen_close`
+
+`gen_close` calls `gen_throw(GeneratorExit)`. If the generator handles `GeneratorExit` and
+yields again, `close()` raises `RuntimeError`. If it returns or re-raises `GeneratorExit`,
+`close()` returns None.
+
+### `PyAsyncGenObject`
+
+Async generators have an additional `ag_running_async` flag to detect `await` inside the
+generator body, and an `aclose()` method that returns an `aclose` awaitable.
+
+## gopy notes
+
+`vm/eval_gen.go` implements `gen_send_ex2`-equivalent logic. Generator frames are stored
+in `objects/function.go`. `yield from` delegation is handled by the SEND opcode in
+`vm/eval_simple.go`. Async generator support (`PyAsyncGenObject`) is partially implemented.

@@ -1,0 +1,103 @@
+---
+title: Lib/email/parser.py
+description: "Thin facade classes that drive FeedParser to build a Message tree from a string, file, or bytes"
+cpython_path: Lib/email/parser.py
+cpython_version: "3.14"
+lines: 128
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/parser.py" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 16-64 | `Parser` | Parses text strings and text file objects into a `Message` tree |
+| 41-54 | `Parser.parse` | Reads a file object in 8 KiB chunks and feeds each to `FeedParser` |
+| 56-64 | `Parser.parsestr` | Wraps the string in `StringIO` and delegates to `parse` |
+| 67-72 | `HeaderParser` | Subclass that always passes `headersonly=True` |
+| 75-119 | `BytesParser` | Binary counterpart; wraps an inner `Parser` and decodes bytes with `surrogateescape` |
+| 95-107 | `BytesParser.parse` | Wraps a binary file in `TextIOWrapper` and defers to the inner `Parser` |
+| 110-119 | `BytesParser.parsebytes` | Decodes a `bytes` object and calls the inner `parsestr` |
+| 122-127 | `BytesHeaderParser` | Headers-only binary parser |
+
+## Reading
+
+### The `_class` and `policy` constructor arguments
+
+Both `Parser` and `BytesParser` accept a `_class` argument that controls which Python class is instantiated for each message node in the tree. When `_class` is `None`, `FeedParser` falls back to the class returned by `policy.message_factory`, or to `email.message.Message` if the policy does not provide one.
+
+The `policy` argument is a `Policy` object (default `compat32`) that governs header encoding, line length, and defect handling. Passing `policy=email.policy.default` switches the tree to the modern `EmailMessage` API.
+
+```python
+# CPython: Lib/email/parser.py:17 Parser.__init__
+def __init__(self, _class=None, *, policy=compat32):
+    self._class = _class
+    self.policy = policy
+```
+
+### Deferred import of `FeedParser`
+
+`FeedParser` is imported at module top level in the current CPython source. Historically this import was deferred inside methods to break a circular dependency between `email.parser` and `email.feedparser` (both lived in packages that imported each other transitively). The top-level import is safe now because the package initialization order is stable, but the design comment is worth noting when porting: any circular-import risk must be handled at the Go package graph level rather than with lazy initialisation tricks.
+
+```python
+# CPython: Lib/email/parser.py:12 module-level import
+from email.feedparser import FeedParser, BytesFeedParser
+```
+
+### `Parser.parse` and the 8 KiB read loop
+
+`Parser.parse` is the canonical entry point. It creates a fresh `FeedParser`, optionally calls `_set_headersonly()` to cap parsing at the end of the header block, then streams the file in 8 KiB chunks. The walrus-operator loop terminates when `fp.read` returns an empty bytes-like object.
+
+```python
+# CPython: Lib/email/parser.py:41 Parser.parse
+def parse(self, fp, headersonly=False):
+    feedparser = FeedParser(self._class, policy=self.policy)
+    if headersonly:
+        feedparser._set_headersonly()
+    while data := fp.read(8192):
+        feedparser.feed(data)
+    return feedparser.close()
+```
+
+### `BytesParser` and `surrogateescape`
+
+`BytesParser` converts binary input to text using the `ASCII` codec with the `surrogateescape` error handler. This preserves arbitrary byte values (0x80-0xFF) as lone surrogates (U+DC80 to U+DCFF) in the Python string. The surrogates round-trip back to the original bytes in `BytesGenerator.write`, so no binary data is lost even when the message is regenerated.
+
+```python
+# CPython: Lib/email/parser.py:103 BytesParser.parse
+fp = TextIOWrapper(fp, encoding='ascii', errors='surrogateescape')
+try:
+    return self.parser.parse(fp, headersonly)
+finally:
+    fp.detach()
+```
+
+The `detach()` call in the `finally` block is critical: it prevents `TextIOWrapper` from closing the underlying binary file when the wrapper is garbage-collected.
+
+### `HeaderParser` and `BytesHeaderParser`
+
+These are thin subclasses that simply hard-wire `headersonly=True`. They exist as convenience names; the parser does not implement any special code path for them beyond the flag that stops `_parsegen` at the end of the header block.
+
+```python
+# CPython: Lib/email/parser.py:67 HeaderParser
+class HeaderParser(Parser):
+    def parse(self, fp, headersonly=True):
+        return Parser.parse(self, fp, True)
+```
+
+## gopy notes
+
+**Port status:** not started.
+
+**Planned package path:** `module/email/` (or a sub-package `module/email/parser/`).
+
+**Go implementation notes:**
+
+- `Parser` and `BytesParser` are thin wrappers. Their primary role is to own `_class`/`policy` state and instantiate `FeedParser`. In Go, this maps to a `Parser` struct with `factory` and `policy` fields, and a `Parse(r io.Reader) (*Message, error)` method.
+- The 8 KiB streaming loop translates naturally to an `io.Reader` loop. Go's `io.ReadFull` or `bufio.Reader` with a fixed buffer size covers this.
+- The `surrogateescape` round-trip for binary parsing requires tracking which bytes were surrogate-escaped. One approach is a dedicated byte-oriented `FeedParser` variant that works directly on `[]byte` and never performs a text conversion, matching `BytesFeedParser`'s semantics.
+- `HeaderParser` becomes a constructor option (`headersOnly bool`) rather than a separate type.

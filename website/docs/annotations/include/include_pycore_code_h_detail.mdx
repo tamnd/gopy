@@ -1,0 +1,142 @@
+---
+title: Include/internal/pycore_code.h
+description: "Internal code object layout: adaptive bytecode array, instruction word, inline caches, and exception table varint encoding"
+cpython_path: Include/internal/pycore_code.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Internal-only header guarded by `Py_BUILD_CORE`. Defines the adaptive bytecode
+infrastructure introduced by PEP 659 (specializing adaptive interpreter): the
+`_Py_CODEUNIT` instruction word, the `_PyCode_CODE` and `_PyCode_NBYTES` macros
+that address the mutable `co_code_adaptive` buffer, per-instruction inline cache
+structs for every specializable opcode family, the `CO_FAST_*` kind flags that
+classify locals plus cell and free variables, varint helpers for the exception
+table, and the backoff counter machinery that governs re-specialization attempts.
+
+<CpyLink path="Include/internal/pycore_code.h" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 16-17 | `_PyCode_CODE` / `_PyCode_NBYTES` | Pointer and byte-count for `co_code_adaptive` |
+| 21-41 | `_Py_OPCODE` / `_Py_OPARG` / `_Py_MAKE_CODEUNIT` | Read and write the 16-bit instruction word |
+| 46-49 | `_PyCode_HAS_EXECUTORS` / `_PyCode_HAS_INSTRUMENTATION` | Predicate macros for optional code object state |
+| 67-161 | Inline cache structs | `_PyLoadGlobalCache`, `_PyAttrCache`, `_PyLoadMethodCache`, `_PyCallCache`, etc. |
+| 119-161 | `INLINE_CACHE_ENTRIES_*` macros | Cache slot counts used by the assembler and disassembler |
+| 163-207 | `CO_FAST_*` flags / `_PyLocals_Kind` | Per-variable classification (arg, local, cell, free, hidden) |
+| 210-253 | `_PyCodeConstructor` | Builder struct passed to `_PyCode_New` |
+| 259-282 | `_PyCode_GetVarnames` / `_PyCode_GetCellvars` / `_PyCode_GetFreevars` | Computed tuple accessors |
+| 301-326 | `_Py_Specialize_*` declarations | Entry points for each specialization family |
+| 388-432 | `parse_varint` / `write_varint` / `write_signed_varint` | Exception table encoding helpers |
+| 444-485 | `ADAPTIVE_WARMUP_VALUE` / `adaptive_counter_*` | Backoff counter constants and constructors |
+| 531-569 | `_PyCode_GetTLBC*` | Thread-local bytecode (free-threaded build only) |
+
+## Reading
+
+### The instruction word and `co_code_adaptive`
+
+Each Python instruction is one `_Py_CODEUNIT`, a 16-bit struct with an 8-bit
+opcode field (`op.code`) and an 8-bit inline argument field (`op.arg`). The
+`PyCodeObject` carries two logical instruction arrays: the read-only `co_code`
+exposed to Python, and the writable `co_code_adaptive` used by the interpreter
+at runtime. The two macros below are the only sanctioned way to reach the
+adaptive copy.
+
+```c
+// CPython: Include/internal/pycore_code.h:16 _PyCode_CODE
+#define _PyCode_CODE(CO) _Py_RVALUE((_Py_CODEUNIT *)(CO)->co_code_adaptive)
+#define _PyCode_NBYTES(CO) (Py_SIZE(CO) * (Py_ssize_t)sizeof(_Py_CODEUNIT))
+```
+
+`Py_SIZE(CO)` stores the instruction count (number of `_Py_CODEUNIT` words, not
+bytes), so `_PyCode_NBYTES` converts to a byte count by multiplying by the word
+size. The `_Py_RVALUE` cast suppresses spurious lvalue warnings on some
+compilers.
+
+Opcode and argument fields are read and written through accessor macros rather
+than direct bit manipulation, keeping the word layout abstract:
+
+```c
+// CPython: Include/internal/pycore_code.h:21 _Py_OPCODE
+#define _Py_OPCODE(word) ((word).op.code)
+#define _Py_OPARG(word)  ((word).op.arg)
+```
+
+### Inline cache structs and `_PyAttrCache`
+
+Every specializable opcode reserves a run of `_Py_CODEUNIT`-sized slots
+immediately after its instruction word. These slots are collectively the "inline
+cache" for that instruction. Different opcode families use different structs. The
+attribute access family uses `_PyAttrCache` for `STORE_ATTR` and a wider
+`_PyLoadMethodCache` for `LOAD_ATTR` (which must accommodate both plain attribute
+loads and method loads):
+
+```c
+// CPython: Include/internal/pycore_code.h:102 _PyAttrCache
+typedef struct {
+    _Py_BackoffCounter counter;
+    uint16_t version[2];
+    uint16_t index;
+} _PyAttrCache;
+
+typedef struct {
+    _Py_BackoffCounter counter;
+    uint16_t type_version[2];
+    union {
+        uint16_t keys_version[2];
+        uint16_t dict_offset;
+    };
+    uint16_t descr[4];
+} _PyLoadMethodCache;
+```
+
+`INLINE_CACHE_ENTRIES_LOAD_ATTR` is defined as the larger of the two (the
+`_PyLoadMethodCache` size) so the same slot count covers both uses. The
+`counter` field is a `_Py_BackoffCounter` that counts down toward the next
+specialization attempt, using exponential backoff on repeated misses.
+
+### Exception table varint encoding
+
+The `co_exceptiontable` bytes object stores exception handler ranges in a
+variable-length integer encoding. Each field uses 6 data bits per byte, with bit
+6 as a continuation flag (set when more bytes follow) and bit 7 always clear.
+The helpers below encode and decode this format:
+
+```c
+// CPython: Include/internal/pycore_code.h:388 parse_varint
+static inline unsigned char *
+parse_varint(unsigned char *p, int *result) {
+    int val = p[0] & 63;
+    while (p[0] & 64) {
+        p++;
+        val = (val << 6) | (p[0] & 63);
+    }
+    *result = val;
+    return p+1;
+}
+```
+
+The exception table format is documented in `InternalDocs/exception_handling.md`.
+Each entry covers a bytecode range (start, length) mapped to a handler offset and
+stack depth, all stored as successive varints.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `compile/` (instruction representation) and a future
+`objects/codeobject_adaptive.go` for the `co_code_adaptive` buffer and inline
+cache layout.
+
+The gopy compiler (`compile/flowgraph.go`) currently stores instructions in a
+`[]Instr` slice using named fields, so `_Py_OPCODE` / `_Py_OPARG` have no direct
+equivalents. Porting the inline cache structs is a prerequisite for the
+specializing interpreter work planned for v0.13. The exception table varint
+helpers map cleanly to Go `encoding/binary`-style functions and will be ported
+when the exception table emitter in `compile/flowgraph_except.go` is extended to
+write the compact format CPython 3.11+ expects.

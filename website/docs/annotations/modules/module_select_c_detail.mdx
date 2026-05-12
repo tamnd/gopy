@@ -1,0 +1,123 @@
+---
+title: Modules/selectmodule.c
+description: "CPython select module C extension: wraps select, poll, epoll, kqueue, and devpoll into Python objects for I/O multiplexing across platforms."
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/selectmodule.c`
+
+<CpyLink path="Modules/selectmodule.c" />
+
+`Modules/selectmodule.c` implements the `select` module, exposing five I/O-readiness
+mechanisms as Python objects. POSIX `select(2)` is available everywhere; `poll(2)` on POSIX
+platforms other than macOS; `epoll(7)` on Linux; `kqueue`/`kevent` on BSD and macOS;
+`devpoll` on Solaris. Each mechanism is wrapped in its own type with `register`,
+`unregister`, `modify`, and `poll` methods. Platform guards in the C source enable only the
+mechanisms the host OS provides.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-120 | includes and platform guards | OS-specific headers, `fd_set` size constants |
+| 121-380 | `select_select` | Module-level `select()` wrapping `fd_set` |
+| 381-700 | `pollObject` | `poll(2)` wrapper with dict-based fd registry |
+| 701-1100 | `devpollObject` | Solaris `/dev/poll` wrapper |
+| 1101-1500 | `pyepoll` | Linux `epoll` wrapper with `EPOLLET` / `EPOLLONESHOT` support |
+| 1501-1950 | `kqueue`, `kevent` | BSD/macOS `kqueue`/`kevent` objects |
+| 1951-2200 | module init | `PyInit_select`, constant registration |
+
+## Reading
+
+### `select_select`: fd_set assembly
+
+The module-level `select()` function converts Python sequences of socket/file objects into
+C `fd_set` bitmaps, calls `select(2)` with the GIL released, then rebuilds Python lists
+from the returned `fd_set` masks.
+
+```c
+// CPython: Modules/selectmodule.c:160 select_select_impl
+static PyObject *
+select_select_impl(PyObject *module, PyObject *iwtd, PyObject *owtd,
+                   PyObject *ewtd, PyObject *timeout_obj)
+{
+    fd_set ifdset, ofdset, efdset;
+    struct timeval tv, *tvp;
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    n = select(maxfd+1, &ifdset, &ofdset, &efdset, tvp);
+    Py_END_ALLOW_THREADS
+```
+
+The maximum file descriptor is tracked while building `fd_set` and passed as the first
+argument to `select(2)`. File descriptors above `FD_SETSIZE` (typically 1024) raise
+`ValueError` because `fd_set` is a fixed-size bitmap.
+
+### `pollObject`: dict-based registry
+
+`pollObject` stores the registered file descriptors in a C `pollfd` array rebuilt from a
+Python dict on each `poll()` call. The dict maps fd integers to event masks, allowing
+`register`, `unregister`, and `modify` to be O(1) dict operations.
+
+```c
+// CPython: Modules/selectmodule.c:430 poll_register_impl
+static PyObject *
+poll_register_impl(pollObject *self, int fd, unsigned short eventmask)
+{
+    PyObject *key, *value;
+    int err;
+
+    if (fd < 0) {
+        PyErr_SetString(PyExc_ValueError, "Invalid file descriptor: ...");
+        return NULL;
+    }
+    key = PyLong_FromLong(fd);
+    value = PyLong_FromLong(eventmask);
+    err = PyDict_SetItem(self->dict, key, value);
+    ...
+    self->ufd_uptodate = 0;  /* mark array as stale */
+```
+
+The `ufd_uptodate` flag triggers a rebuild of the `pollfd` array at the start of the next
+`poll()` call, amortizing the rebuild cost across multiple `register` calls.
+
+### `pyepoll`: edge-triggered and one-shot modes
+
+The `epoll` wrapper exposes `EPOLLET` (edge-triggered) and `EPOLLONESHOT` as integer
+constants that callers OR into the event mask passed to `register`. The `epoll_ctl` syscall
+is called directly; the GIL is not released because `epoll_ctl` is expected to return
+immediately.
+
+```c
+// CPython: Modules/selectmodule.c:1140 pyepoll_internal_ctl
+static int
+pyepoll_internal_ctl(int epfd, int op, int fd, unsigned int events)
+{
+    struct epoll_event ev;
+    int result;
+
+    ev.events = events;
+    ev.data.fd = fd;
+    Py_BEGIN_ALLOW_THREADS
+    result = epoll_ctl(epfd, op, fd, &ev);
+    Py_END_ALLOW_THREADS
+    return result;
+}
+```
+
+## gopy notes
+
+Not yet ported. The Go standard library provides `syscall.Select` and the `golang.org/x/sys`
+package exposes `epoll` and `kqueue` primitives. A `module/select/` port would wrap these
+and expose `select.select`, `select.poll`, and `select.epoll` as Go types. In practice,
+gopy's event-loop integration would use `select` primarily to support asyncio.
+
+## CPython 3.14 changes
+
+3.14 corrected `kqueue.control` to respect the timeout parameter on all BSD variants.
+The `select.select` function gained an audit event. No new polling mechanisms were added.

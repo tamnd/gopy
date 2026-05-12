@@ -1,0 +1,117 @@
+---
+title: typing.py
+description: "Runtime PEP 484 machinery: TypeVar, Generic, Protocol, and alias forms"
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/typing.py` is the pure-Python runtime layer for PEP 484 type hints.
+It does not enforce types at runtime; instead it provides the objects that
+type checkers, `get_type_hints()`, and `isinstance()` use as anchors.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–180 | `_SpecialForm` | Backs `Union`, `Optional`, `ClassVar`, `Final`, `Literal` |
+| 181–400 | `TypeVar` / `ParamSpec` / `TypeVarTuple` | Type parameter objects used by generic definitions |
+| 401–700 | `_GenericAlias` | Represents parameterized types such as `list[int]` |
+| 701–900 | `Generic` | Base class; `__class_getitem__` returns `_GenericAlias` |
+| 901–1200 | `Protocol` | Structural subtyping base; `runtime_checkable` enables `isinstance` |
+| 1201–1600 | `get_type_hints()` | Resolves annotations, evaluates string forward refs |
+| 1601–2000 | `overload`, `cast`, `dataclass_transform` | Decorator and utility forms |
+| 2001–3000 | Compatibility shims, deprecated aliases | `List`, `Dict`, `Tuple`, etc. redirecting to builtins |
+
+## Reading
+
+### `_SpecialForm` and subscription
+
+`_SpecialForm` is a descriptor-like object returned by `@_SpecialForm`. When
+subscripted (`Union[int, str]`), its `__getitem__` calls the registered
+`_getitem` callback. This avoids creating real generic aliases for forms that
+have special semantics.
+
+```python
+# CPython: Lib/typing.py:95 _SpecialForm.__getitem__
+class _SpecialForm(_Final, _root=True):
+    def __getitem__(self, parameters):
+        item = self._getitem(self, parameters)
+        if not isinstance(item, (_GenericAlias, _SpecialGenericAlias)):
+            return item
+        ...
+        return item
+```
+
+### `_GenericAlias` for parameterized types
+
+`_GenericAlias` wraps an `__origin__` (the bare type) and `__args__` (the
+parameter tuple). It forwards attribute access to the origin and handles
+nested substitution when further subscripted.
+
+```python
+# CPython: Lib/typing.py:450 _GenericAlias.__getattr__
+def __getattr__(self, attr):
+    if attr in {'__origin__', '__args__', ...}:
+        return super().__getattribute__(attr)
+    return getattr(self.__origin__, attr)
+```
+
+### Protocol and `runtime_checkable`
+
+`Protocol` subclasses accumulate `__protocol_attrs__` (the set of names
+that define the structural interface). When decorated with
+`@runtime_checkable`, `__instancecheck__` iterates that set and checks
+whether the candidate object has each attribute.
+
+```python
+# CPython: Lib/typing.py:1050 _ProtocolMeta.__instancecheck__
+def __instancecheck__(cls, instance):
+    if not cls.__protocol_attrs__:
+        return True
+    for attr in cls.__protocol_attrs__:
+        if not hasattr(instance, attr):
+            return False
+    return True
+```
+
+### `get_type_hints()` and forward reference resolution
+
+String annotations are evaluated against the module globals and locals using
+`eval()`. `get_type_hints()` retrieves `__annotations__`, replaces every
+`str` value with the result of `eval(hint, globalns, localns)`, and
+recursively resolves nested `_GenericAlias` args.
+
+```python
+# CPython: Lib/typing.py:1320 get_type_hints
+hints = {}
+for name, value in annotations.items():
+    if isinstance(value, str):
+        value = ForwardRef(value)
+    hints[name] = _eval_type(value, globalns, localns)
+return hints
+```
+
+## gopy notes
+
+- `_GenericAlias.__getitem__` triggers another round of substitution; gopy
+  models this with a recursive `Substitute(args)` method on `GenericAlias`.
+- `get_type_hints()` calls `eval()` which requires the full expression
+  evaluator; currently deferred until the eval gate lands.
+- `TypeVarTuple` unpacking (`*Ts`) requires `__typing_unpacked_tuple_args__`
+  plumbing through `_GenericAlias`; tracked as a separate task.
+- Deprecated aliases (`List`, `Dict`, etc.) are thin wrappers; they map to
+  the same gopy objects as `list` and `dict`.
+
+## CPython 3.14 changes
+
+- `TypeAlias` (PEP 613) and the `type` soft keyword (PEP 695) were added in
+  3.12; 3.14 removes the `TypeAlias` form in favour of the statement syntax.
+- `@override` (PEP 698) landed in 3.12 and is present unchanged.
+- `ReadOnly` for `TypedDict` fields (PEP 705) added in 3.13; 3.14 carries it
+  forward without changes.
+- Several long-deprecated aliases (`typing.List`, `typing.Dict`, etc.) emit
+  `DeprecationWarning` in 3.12+ and are scheduled for removal in 3.14.

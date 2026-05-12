@@ -1,0 +1,156 @@
+---
+title: Lib/unittest/runner.py
+description: "Annotation: Lib/unittest/runner.py"
+cpython_path: Lib/unittest/runner.py
+cpython_version: "3.14"
+lines: 240
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink path="Lib/unittest/runner.py" />
+
+`Lib/unittest/runner.py` contains two public classes and one private helper. `_WritelnDecorator` wraps a stream to add a `writeln` convenience method. `TextTestResult` extends `result.TestResult` to write dots or verbose lines to that stream. `TextTestRunner` ties them together: it creates the result, runs the suite, and prints the final summary.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 16-29 | `_WritelnDecorator` | Wraps a file-like stream; adds `writeln(arg=None)` |
+| 32-178 | `TextTestResult` | Stream-printing result; verbosity controls dot vs full-name mode |
+| 40-50 | `TextTestResult.__init__` | Sets `showAll`, `dots`, `_theme`, `_newline`, `durations` |
+| 52-57 | `getDescription` | Returns test name, optionally with first docstring line |
+| 59-65 | `startTest` | Writes test name in verbose mode before the test runs |
+| 67-78 | `_write_status` | Shared writer called by all `addXxx` methods |
+| 96-121 | `addSuccess`, `addError`, `addFailure` | Write status character or full label |
+| 123-130 | `addSkip` | Writes `skipped reason` or `s` |
+| 152-178 | `printErrors`, `printErrorList` | Prints full tracebacks after the run |
+| 181-240 | `TextTestRunner` | Runner; owns `run()` and `_makeResult()` |
+| 189-208 | `TextTestRunner.__init__` | Stores verbosity, buffer, warnings, failfast, durations |
+| 210-217 | `_makeResult` | Instantiates `resultclass` with stream, descriptions, verbosity |
+| 241-313 | `run` | Creates result, times the suite, prints summary |
+
+## Reading
+
+### `_WritelnDecorator` and stream wrapping
+
+All attribute access on the decorator (except `stream` itself) is forwarded to the wrapped stream via `__getattr__`. The `stream` guard prevents infinite recursion if the stream is inspected before `__init__` completes.
+
+```python
+# CPython: Lib/unittest/runner.py:16 _WritelnDecorator
+class _WritelnDecorator(object):
+    def __init__(self, stream):
+        self.stream = stream
+
+    def __getattr__(self, attr):
+        if attr in ('stream', '__getstate__'):
+            raise AttributeError(attr)
+        return getattr(self.stream, attr)
+
+    def writeln(self, arg=None):
+        if arg:
+            self.write(arg)
+        self.write('\n')
+```
+
+`TextTestRunner.__init__` wraps `sys.stderr` (or a caller-supplied stream) in `_WritelnDecorator` before passing it to `TextTestResult`, so the result can call `self.stream.writeln()` without caring whether the underlying stream supports that method.
+
+### Verbosity modes and ANSI theming
+
+`showAll` (verbosity 2 and above) prints the full test name and result on each line. `dots` (verbosity 1) prints a single character. Both can be false at verbosity 0, which produces no per-test output. `_theme` is a namespace of ANSI escape sequences from `_colorize.get_theme`; it is used in every `addXxx` method when writing to a TTY.
+
+```python
+# CPython: Lib/unittest/runner.py:40 TextTestResult.__init__
+def __init__(self, stream, descriptions, verbosity, *, durations=None):
+    super(TextTestResult, self).__init__(stream, descriptions, verbosity)
+    self.stream = stream
+    self.showAll = verbosity > 1
+    self.dots = verbosity == 1
+    self.descriptions = descriptions
+    self._theme = get_theme(tty_file=stream).unittest
+    self._newline = True
+    self.durations = durations
+```
+
+### `addSuccess`, `addFailure`, `addError`, and `addSkip`
+
+Each method calls `super()` first to append to `self.errors` or `self.failures`, then emits to the stream. The theme colours wrap each status string so output is coloured when writing to a TTY. In CPython 3.14 these strings changed from plain text (`"ok"`, `"ERROR"`) to ANSI-wrapped forms.
+
+```python
+# CPython: Lib/unittest/runner.py:96 addSuccess
+def addSuccess(self, test):
+    super(TextTestResult, self).addSuccess(test)
+    t = self._theme
+    if self.showAll:
+        self._write_status(test, f"{t.passed}ok{t.reset}")
+    elif self.dots:
+        self.stream.write(f"{t.passed}.{t.reset}")
+        self.stream.flush()
+
+# CPython: Lib/unittest/runner.py:105 addError
+def addError(self, test, err):
+    super(TextTestResult, self).addError(test, err)
+    t = self._theme
+    if self.showAll:
+        self._write_status(test, f"{t.fail}ERROR{t.reset}")
+    elif self.dots:
+        self.stream.write(f"{t.fail}E{t.reset}")
+        self.stream.flush()
+
+# CPython: Lib/unittest/runner.py:113 addSkip
+def addSkip(self, test, reason):
+    super(TextTestResult, self).addSkip(test, reason)
+    if self.showAll:
+        self._write_status(test, "skipped {0!r}".format(reason))
+    elif self.dots:
+        self.stream.write("s")
+        self.stream.flush()
+```
+
+### `TextTestRunner.run`: timing and failfast
+
+`time.perf_counter` measures wall-clock time around the suite call. `failfast` is set on the result object before the suite runs; `TestResult.addFailure` and `TestResult.addError` check it and call `self.stop()` if it is set, which sets `shouldStop = True` and causes the loader to break out of its iteration.
+
+```python
+# CPython: Lib/unittest/runner.py:241 TextTestRunner.run
+def run(self, test):
+    result = self._makeResult()
+    registerResult(result)
+    result.failfast = self.failfast
+    result.buffer = self.buffer
+    result.tb_locals = self.tb_locals
+    with warnings.catch_warnings():
+        ...
+        start_time = time.perf_counter()
+        startTestRun = getattr(result, 'startTestRun', None)
+        if startTestRun is not None:
+            startTestRun()
+        try:
+            test(result)
+        finally:
+            stopTestRun = getattr(result, 'stopTestRun', None)
+            if stopTestRun is not None:
+                stopTestRun()
+        stop_time = time.perf_counter()
+    time_taken = stop_time - start_time
+    result.printErrors()
+    run = result.testsRun
+    self.stream.writeln("Ran %d test%s in %.3fs" %
+                        (run, run != 1 and "s" or "", time_taken))
+    if not result.wasSuccessful():
+        self.stream.write(f"{t.fail_info}FAILED{t.reset} ...")
+    else:
+        self.stream.write(f"{t.passed}OK{t.reset}")
+    return result
+```
+
+`test(result)` works because `TestSuite.__call__` delegates to `TestSuite.run(result)`. The `startTestRun`/`stopTestRun` methods are called via `getattr` rather than a direct call so that result classes that do not implement them are not penalised. The `result` object is returned so callers can inspect it programmatically without re-running tests.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/unittest/`.
+
+`_WritelnDecorator` maps to a thin Go struct wrapping an `io.Writer` with an extra `Writeln` method. The `TextTestResult` verbosity logic is straightforward to port since it is conditional writes to a stream. The ANSI theme integration requires either a stub or a Go equivalent that checks `isatty`; the `_colorize` module is itself unported. Timing via `time.perf_counter` maps to `time.Now()` in Go, and the delta to `time.Since`. The `startTestRun`/`stopTestRun` optional protocol maps to a Go interface with a default no-op implementation.

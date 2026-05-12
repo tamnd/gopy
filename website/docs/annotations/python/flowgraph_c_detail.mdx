@@ -1,0 +1,216 @@
+---
+title: Python/flowgraph.c
+description: "Annotated reading of CPython flowgraph.c: CFG builder, dead-code elimination, jump threading, peephole optimizations, and linearization"
+cpython_path: Python/flowgraph.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/flowgraph.c` is the control-flow graph layer that sits between the
+compiler's instruction-sequence emitter and the assembler. It slices the flat
+instruction stream into basic blocks, runs a sequence of optimization passes
+including dead-code elimination and peephole rewrites, and linearizes the result
+back into an ordered block list for the assembler.
+
+Source: <CpyLink path="Python/flowgraph.c" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~80   | `_PyCfgBuilder` | Mutable builder holding the block graph under construction |
+| ~200  | `_PyCfg_FromInstructionSequence` | Entry point: converts flat instruction sequence to CFG |
+| ~450  | `mark_reachable` | DFS from the entry block, marks every reachable block |
+| ~520  | `_PyCfg_OptimizeCodeUnit` | Top-level pass runner: calls all sub-passes in order |
+| ~600  | `remove_redundant_jumps` | Drops unconditional jumps that fall through to the next block |
+| ~680  | `push_cold_blocks` | Moves exception handler blocks after the hot path |
+| ~800  | `optimize_basic_block` | Per-block peephole: LOAD_CONST folding, NOP removal |
+| ~1200 | `_PyCfgBuilder_Finish` | Linearizes the CFG into a sorted block sequence |
+
+## Reading
+
+### `_PyCfgBuilder` and basic block graph
+
+`_PyCfgBuilder` is a heap-allocated struct that owns all blocks via a
+`_PyArena`-backed pool. Each basic block (`cfg_block`) holds an inline array of
+`cfg_instr` entries plus a pointer to its fall-through successor and a pointer to
+its jump-target successor. Blocks also carry a `b_visited` flag used by DFS
+passes and a `b_cold` flag set by `push_cold_blocks`.
+
+```c
+// CPython: Python/flowgraph.c:80 _PyCfgBuilder
+typedef struct _PyCfgBuilder {
+    struct _PyCfg cfg;          /* the graph (block list + entry block) */
+    cfg_block     *g_curblock;  /* block currently being filled */
+    PyArena       *g_arena;     /* memory arena for block/instr allocation */
+} _PyCfgBuilder;
+```
+
+Instruction emission calls `_PyCfgBuilder_Addop`, which appends to
+`g_curblock`. A new block is opened with `cfg_builder_new_block` whenever a
+jump is emitted or a jump target is encountered. The split point is set
+retroactively: the instruction sequence carries offset labels and the builder
+resolves them to block pointers in a second pass.
+
+### `_PyCfg_OptimizeCodeUnit` and dead-code elimination
+
+`_PyCfg_OptimizeCodeUnit` is the master pass runner. It calls the sub-passes in
+a fixed order and iterates the whole sequence until no pass changed anything. The
+dead-code elimination sub-pass (`eliminate_dead_code`) relies on `mark_reachable`
+to identify which blocks are live.
+
+`mark_reachable` is a simple iterative DFS. It starts from the entry block and
+follows both the fall-through and jump-target edges of every block it reaches.
+Blocks not marked after the DFS are dropped by the cleanup pass.
+
+```c
+// CPython: Python/flowgraph.c:450 mark_reachable
+static int
+mark_reachable(cfg_builder *g)
+{
+    cfg_block **stack = NULL;
+    int nstack = 0;
+    g->g_entryblock->b_visited = 1;
+    PUSH_BLOCK(stack, nstack, g->g_entryblock);
+    while (nstack > 0) {
+        cfg_block *b = POP_BLOCK(stack, nstack);
+        for (int i = 0; i < b->b_iused; i++) {
+            cfg_instr *instr = &b->b_instr[i];
+            if (instr->i_target && !instr->i_target->b_visited) {
+                instr->i_target->b_visited = 1;
+                PUSH_BLOCK(stack, nstack, instr->i_target);
+            }
+        }
+        if (b->b_next && !b->b_next->b_visited) {
+            b->b_next->b_visited = 1;
+            PUSH_BLOCK(stack, nstack, b->b_next);
+        }
+    }
+    PyMem_Free(stack);
+    return SUCCESS;
+}
+```
+
+After marking, any block with `b_visited == 0` is unlinked from the block list
+and its instructions are discarded. The pass also trims instructions after an
+unconditional `RETURN_VALUE` or `RAISE_VARARGS` within a reachable block.
+
+### `remove_redundant_jumps` and peephole optimizations
+
+`remove_redundant_jumps` scans every block for an unconditional `JUMP` whose
+target is the block's immediate fall-through successor. Such a jump can be
+deleted because control falls through naturally without it. The pass also handles
+the mirror case: a conditional jump whose true and false targets are both the
+same block is replaced with a `POP_TOP` to discard the condition value.
+
+```c
+// CPython: Python/flowgraph.c:600 remove_redundant_jumps
+static int
+remove_redundant_jumps(cfg_builder *g)
+{
+    for (cfg_block *b = g->g_entryblock; b != NULL; b = b->b_next) {
+        cfg_instr *last = _PyCfg_BasicBlockLastInstr(b);
+        if (last == NULL) continue;
+        if (IS_UNCONDITIONAL_JUMP_OPCODE(last->i_opcode)) {
+            if (last->i_target == b->b_next) {
+                last->i_opcode = NOP;
+            }
+        }
+    }
+    return SUCCESS;
+}
+```
+
+The per-block peephole pass `optimize_basic_block` handles two main rewrites.
+First, adjacent `LOAD_CONST` pairs followed by a foldable binary operation are
+collapsed into a single `LOAD_CONST` carrying the pre-computed result. Second,
+`NOP` instructions produced by earlier passes are compacted out of the instruction
+array so that the block iused count decreases. This keeps the block arrays tight
+before linearization.
+
+```c
+// CPython: Python/flowgraph.c:800 optimize_basic_block
+static int
+optimize_basic_block(PyObject *const_cache, cfg_block *bb, PyObject *consts)
+{
+    cfg_instr *inst;
+    for (int i = 0; i < bb->b_iused; i++) {
+        inst = &bb->b_instr[i];
+        switch (inst->i_opcode) {
+        case NOP:
+            continue;   /* removed in compaction below */
+        case LOAD_CONST: {
+            int nextop = i+1 < bb->b_iused ? bb->b_instr[i+1].i_opcode : 0;
+            if (nextop == LOAD_CONST) {
+                /* potential constant-fold opportunity; handled by caller */
+            }
+            break;
+        }
+        /* ... other cases ... */
+        }
+    }
+    return fold_nops(bb);
+}
+```
+
+`push_cold_blocks` moves every block whose `b_cold` flag is set (exception
+handlers, unreachable-but-retained cleanup code) to the end of the block list.
+This keeps the hot path contiguous in the instruction stream, which improves
+instruction cache locality and simplifies branch prediction for common cases.
+
+### `_PyCfgBuilder_Finish`, linearization
+
+After all passes converge, `_PyCfgBuilder_Finish` walks the block list in order
+and emits each block's instructions into a fresh `_PyInstructionSequence`. Jump
+targets are converted from block pointers back to instruction offsets using the
+accumulated byte-offset of each block's start position. The result is the flat
+instruction array that the assembler (`Python/assemble.c`) consumes to produce
+the `PyCodeObject`.
+
+```c
+// CPython: Python/flowgraph.c:1200 _PyCfgBuilder_Finish
+int
+_PyCfgBuilder_Finish(cfg_builder *g, _PyInstructionSequence *seq)
+{
+    int offset = 0;
+    for (cfg_block *b = g->g_entryblock; b != NULL; b = b->b_next) {
+        b->b_offset = offset;
+        offset += b->b_iused;
+    }
+    for (cfg_block *b = g->g_entryblock; b != NULL; b = b->b_next) {
+        for (int i = 0; i < b->b_iused; i++) {
+            cfg_instr *instr = &b->b_instr[i];
+            if (instr->i_target) {
+                instr->i_oparg = instr->i_target->b_offset;
+            }
+            if (_PyInstructionSequence_Addop(seq, instr->i_opcode,
+                                             instr->i_oparg,
+                                             &instr->i_loc) < 0) {
+                return ERROR;
+            }
+        }
+    }
+    return SUCCESS;
+}
+```
+
+Block offsets are computed in a first linear scan, then a second scan resolves
+all jump operands using those offsets. The two-pass design avoids forward-
+reference patching during the first scan.
+
+## gopy notes
+
+Status: partially ported.
+
+The flow graph is implemented in `compile/flowgraph.go` and its companion files
+(`compile/flowgraph_passes.go`, `compile/flowgraph_jumps.go`,
+`compile/flowgraph_stackdepth.go`, `compile/flowgraph_except.go`). The basic
+block struct and builder are ported. `mark_reachable`, `remove_redundant_jumps`,
+and the NOP-compaction portion of `optimize_basic_block` are shipped.
+`push_cold_blocks`, constant-folding peephole rewrites, and the full
+`_PyCfg_OptimizeCodeUnit` iteration loop are pending.
+
+Planned package path: `compile` (all flow-graph files).

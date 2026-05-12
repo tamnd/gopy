@@ -1,0 +1,148 @@
+---
+title: "Objects/capsule.c"
+description: "PyCapsule: opaque C-pointer wrapper for safe cross-module ABI transfer"
+cpython_path: Objects/capsule.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`PyCapsule` wraps an opaque `void *` pointer so that C extension modules can
+hand raw pointers to each other without exposing them to Python code. The
+capsule carries a name string that is verified on import, a destructor called
+at dealloc time, and an optional context pointer for caller-private data.
+NumPy, ctypes, and most extension modules that expose a C API use capsules.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | struct `PyCapsule` | fields: `pointer`, `name`, `destructor`, `context` |
+| 31–60 | `PyCapsule_New` | allocate capsule, store pointer and name |
+| 61–90 | `PyCapsule_GetPointer` | verify name, return `pointer` |
+| 91–120 | `PyCapsule_GetName` / `SetName` | read/write the name field |
+| 121–150 | `PyCapsule_GetDestructor` / `SetDestructor` | read/write the destructor |
+| 151–180 | `PyCapsule_GetContext` / `SetContext` | read/write the context pointer |
+| 181–220 | `PyCapsule_Import` | resolve `"module.attr"` via `PyImport_ImportModule` |
+| 221–250 | `capsule_dealloc`, `PyType_Capsule` | type object and dealloc slot |
+
+## Reading
+
+### PyCapsule_New
+
+`PyCapsule_New` stores the raw pointer and name without copying the name string.
+The caller is responsible for keeping the name alive for the lifetime of the
+capsule (the CPython convention is to use a string literal).
+
+```c
+// CPython: Objects/capsule.c:48 PyCapsule_New
+PyObject *
+PyCapsule_New(void *pointer, const char *name, PyCapsule_Destructor destructor)
+{
+    PyCapsule *capsule;
+    if (!pointer) {
+        PyErr_SetString(PyExc_ValueError, "PyCapsule_New called with null pointer");
+        return NULL;
+    }
+    capsule = PyObject_GC_New(PyCapsule, &PyCapsule_Type);
+    if (!capsule)
+        return NULL;
+    capsule->pointer    = pointer;
+    capsule->name       = name;
+    capsule->context    = NULL;
+    capsule->destructor = destructor;
+    return (PyObject *)capsule;
+}
+```
+
+### PyCapsule_GetPointer name check
+
+Every `GetPointer` call validates the name to catch mismatched capsules at the
+point of use. A `NULL` expected name matches any capsule name (including `NULL`).
+
+```c
+// CPython: Objects/capsule.c:75 PyCapsule_GetPointer
+void *
+PyCapsule_GetPointer(PyObject *o, const char *name)
+{
+    PyCapsule *capsule = (PyCapsule *)o;
+    if (!PyCapsule_IsValid(o, name)) {
+        PyErr_SetString(PyExc_ValueError,
+            "PyCapsule_GetPointer called with incorrect name");
+        return NULL;
+    }
+    return capsule->pointer;
+}
+```
+
+`PyCapsule_IsValid` compares the stored name and the requested name with
+`strcmp`, treating two `NULL` pointers as equal and a `NULL`/non-`NULL` pair
+as a mismatch.
+
+### PyCapsule_Import module resolution
+
+`PyCapsule_Import` parses a dotted path of the form `"pkg.mod.attr"`, imports
+the module, then does a series of `PyObject_GetAttrString` calls to walk the
+attribute chain and retrieve the capsule.
+
+```c
+// CPython: Objects/capsule.c:195 PyCapsule_Import
+void *
+PyCapsule_Import(const char *name, int no_block)
+{
+    /* Split "a.b.c" into module "a.b" and attribute "c". */
+    ...
+    object = PyImport_ImportModule(trace);
+    ...
+    object = PyObject_GetAttrString(object, name);
+    ...
+    return PyCapsule_GetPointer(object, name);
+}
+```
+
+The `no_block` parameter was meaningful in Python 2's import lock model; in
+Python 3 it is accepted but ignored.
+
+### Destructor and dealloc
+
+`capsule_dealloc` calls the stored destructor (if any) before freeing memory.
+The destructor receives the capsule object itself, so it can call `GetName` and
+`GetContext` to identify which capsule is being torn down.
+
+```c
+// CPython: Objects/capsule.c:237 capsule_dealloc
+static void
+capsule_dealloc(PyObject *o)
+{
+    PyCapsule *capsule = (PyCapsule *)o;
+    if (capsule->destructor)
+        capsule->destructor(o);
+    PyObject_GC_Del(o);
+}
+```
+
+## gopy notes
+
+- gopy does not yet have a `PyCapsule` equivalent. The closest analogue would
+  be a Go struct holding a `unsafe.Pointer` plus a name string, registered as
+  an `objects.Object`.
+- `PyCapsule_Import` depends on `PyImport_ImportModule`, which maps to
+  `vm/eval_import.go` `importModule`. The dotted-name split and attribute walk
+  can be implemented with `objects/protocol.go` `GetAttr`.
+- The destructor slot has no direct parallel in gopy's GC model. The Go
+  finalizer (`runtime.SetFinalizer`) is the closest option, but it fires
+  asynchronously. A reference-counted teardown path (matching CPython's
+  `Py_DECREF` dealloc) is preferable for correctness.
+- Extension modules that use capsules (NumPy `numpy.core.multiarray._ARRAY_API`,
+  ctypes `_ctypes._pointer_type_cache`) will not load until this type is present.
+
+## CPython 3.14 changes
+
+- `PyCapsule` gained no new fields in 3.14.
+- The `no_block` parameter of `PyCapsule_Import` is formally deprecated in the
+  docs as of 3.12 and will be removed in a future version.
+- The free-threaded build (3.13+) added a critical-section lock around
+  `PyCapsule_GetPointer` to protect concurrent read/write of the name field,
+  though in practice capsule names are set once at module init and never changed.

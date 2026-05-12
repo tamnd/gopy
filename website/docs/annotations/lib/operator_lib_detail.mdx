@@ -1,0 +1,140 @@
+---
+title: Lib/operator.py
+description: "Pure-Python fallback for the operator module: attrgetter, itemgetter, methodcaller, augmented-assignment aliases, and comparison wrappers"
+cpython_path: Lib/operator.py
+cpython_version: "3.14"
+lines: 320
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/operator.py" />
+
+`operator.py` is the pure-Python reference implementation of the `operator` module. At runtime the C extension `_operator` replaces most of it via `from _operator import *` near the bottom of the file. What remains as non-replaceable Python: the dunder-name aliases (`__add__ = add`, etc.) assigned after the import, and the class bodies of `attrgetter`, `itemgetter`, and `methodcaller`, which the C version mirrors in structure.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–25 | module header | `__all__`, imports |
+| 26–55 | `lt`, `le`, `eq`, `ne`, `ge`, `gt` | Six comparison wrappers |
+| 56–80 | `not_`, `truth`, `is_`, `is_not` | Logical and identity predicates |
+| 81–140 | `abs` through `xor` | Arithmetic, bitwise, and `matmul` operators |
+| 141–190 | `iadd` through `ixor` | Augmented assignment operators |
+| 191–215 | `concat`, `contains`, `delitem`, `getitem`, `setitem` | Sequence operations |
+| 216–230 | `length_hint` | `__length_hint__` protocol fallback |
+| 231–235 | `call` | First-class callable wrapper |
+| 236–265 | `attrgetter` | Dotted attribute access as a callable |
+| 266–290 | `itemgetter` | Subscript access as a callable |
+| 291–315 | `methodcaller` | Named method call as a callable |
+| 316–320 | dunder aliases | `__lt__ = lt`, `__add__ = add`, etc. |
+
+## Reading
+
+### Comparison wrappers: eq, ne, lt, le, gt, ge
+
+The six comparison functions are thin wrappers that make Python's comparison operators available as first-class callables. They are picklable by name and composable with `map`, `filter`, and `sorted`.
+
+```python
+# CPython: Lib/operator.py:26 lt
+def lt(a, b):
+    "Same as a < b."
+    return a < b
+
+# CPython: Lib/operator.py:34 eq
+def eq(a, b):
+    "Same as a == b."
+    return a == b
+```
+
+`ne` is not defined as `not eq(a, b)` because `__ne__` and `__eq__` are independent slots. An object may override `__ne__` to return something other than `not self.__eq__(other)`.
+
+### Augmented assignment operators: iadd, isub, imul and aliases
+
+The `i`-prefixed functions implement in-place operators. They modify the left operand when the type supports it (mutable containers) and return the result, which may be the same object or a new one (for immutable types).
+
+```python
+# CPython: Lib/operator.py:158 iadd
+def iadd(a, b):
+    "Same as a += b."
+    a += b
+    return a
+
+# CPython: Lib/operator.py:163 imul
+def imul(a, b):
+    "Same as a *= b."
+    a *= b
+    return a
+```
+
+Each augmented function also gets a dunder alias after the `_operator` import: `__iadd__ = iadd`, `__imul__ = imul`, etc. The alias block is what makes these picklable under both names.
+
+### attrgetter, itemgetter, methodcaller objects
+
+All three are callable classes whose `__reduce__` methods support pickling. The constructor precomputes a `_call` closure to avoid attribute lookup overhead on each invocation.
+
+`attrgetter` splits dotted paths at construction time and chains `getattr` calls in a loop:
+
+```python
+# CPython: Lib/operator.py:243 attrgetter.__init__ single-attr path
+def __init__(self, attr, /, *attrs):
+    if not attrs:
+        if not isinstance(attr, str):
+            raise TypeError('attribute name must be a string')
+        self._attrs = (attr,)
+        names = attr.split('.')
+        def func(obj):
+            for name in names:
+                obj = getattr(obj, name)
+            return obj
+        self._call = func
+```
+
+`itemgetter` wraps one or more subscript operations. With a single key it returns the item directly; with multiple keys it returns a tuple:
+
+```python
+# CPython: Lib/operator.py:272 itemgetter.__call__ multi-item path
+def __call__(self, obj):
+    return tuple(obj[i] for i in self._items)
+```
+
+`methodcaller` stores the method name, positional args, and keyword args. Its `__reduce__` has a special case for keyword arguments: because `(class, (name,) + args)` cannot encode `**kwargs`, it wraps the reconstruction in a `functools.partial`:
+
+```python
+# CPython: Lib/operator.py:309 methodcaller.__reduce__
+def __reduce__(self):
+    if not self._kwargs:
+        return self.__class__, (self._name,) + self._args
+    else:
+        from functools import partial
+        return partial(self.__class__, self._name, **self._kwargs), self._args
+```
+
+### `__all__` and the double-underscore aliasing
+
+The `__all__` list at the top of the file enumerates both the plain names (`add`, `mul`) and the dunder aliases (`__add__`, `__mul__`). After the `from _operator import *` line, the C-backed names occupy the same module namespace. The alias block at the bottom then points every dunder name at the corresponding plain name:
+
+```python
+# CPython: Lib/operator.py:316 dunder alias block (excerpt)
+__lt__ = lt
+__le__ = le
+__eq__ = eq
+__ne__ = ne
+__ge__ = ge
+__gt__ = gt
+__add__ = add
+__mul__ = mul
+__matmul__ = matmul
+# ... continues for all operators
+```
+
+This ensures that `operator.__add__` and `operator.add` are the same object after import. Both names survive a `pickle` round-trip because both appear in the module's `__dict__`.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/operator/`.
+
+The comparison wrappers (`lt`, `le`, `eq`, `ne`, `ge`, `gt`) are a direct translation into Go functions that call the corresponding `objects/protocol.go` comparison entries. The `iadd` / `imul` family must return the augmented object, which for immutable types will be a new allocation. `attrgetter`, `itemgetter`, and `methodcaller` each need a Go struct with `Call` and `Reduce` methods; `Reduce` on `methodcaller` with kwargs will need the `functools.partial` object from `module/functools/`. `length_hint` is used in several allocation hot paths (`objects/list.go`, `objects/bytes.go`) and should be ported before the container types that call it.

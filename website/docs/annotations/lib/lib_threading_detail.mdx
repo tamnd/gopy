@@ -1,0 +1,73 @@
+---
+title: Lib/threading.py
+description: "threading module: Thread lifecycle (start/run/join/daemon), Lock/RLock/Condition/Semaphore/Event/Barrier synchronisation primitives, local() thread-local storage, and Timer."
+cpython_path: Lib/threading.py
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/threading.py`
+
+<CpyLink path="Lib/threading.py" />
+
+`Lib/threading.py` builds the high-level threading API on top of `_thread` (a C extension
+that wraps OS threads). It provides `Thread`, the synchronisation primitives, and the
+`local()` thread-local storage class.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `Lock`, `RLock` | Thin wrappers around `_thread.lock` / `_thread.RLock` |
+| 201-450 | `Condition`, `Semaphore`, `BoundedSemaphore`, `Event`, `Barrier` | Higher-level synchronisation |
+| 451-900 | `Thread` | Thread lifecycle, `start`/`run`/`join`/`daemon` |
+| 901-1100 | `Timer` | Delayed callback thread |
+| 1101-1300 | `local` | Thread-local storage via `_threading_local` |
+| 1301-1500 | `current_thread`, `enumerate`, `main_thread`, `settrace`, `setprofile` | Introspection |
+
+## Reading
+
+### `Thread.start` and the `_bootstrap` wrapper
+
+`Thread.start()` calls `_thread.start_new_thread(self._bootstrap, ())`. `_bootstrap`
+calls `_bootstrap_inner` inside a `try/except` that catches all exceptions, stores
+unhandled ones in `self._exc_info`, and calls the `excepthook` if set.
+
+```python
+# CPython: Lib/threading.py:960 Thread.start
+def start(self):
+    with _active_limbo_lock:
+        _limbo[self] = self
+    try:
+        _start_new_thread(self._bootstrap, ())
+    except Exception:
+        ...
+    self._started.wait()
+```
+
+### `Condition` and `wait`
+
+`Condition.wait(timeout)` releases the underlying lock, registers the calling thread's
+`Event` with the waiter list, and blocks on the event. `notify()` pops one waiter and sets
+its event. `notify_all()` sets all waiters.
+
+### `Barrier`
+
+`Barrier(parties)` blocks each calling thread until `parties` threads have called
+`barrier.wait()`. Then all are released simultaneously. A broken barrier raises
+`BrokenBarrierError` in all waiting threads.
+
+### `local`
+
+`threading.local()` returns an object whose attribute accesses go through
+`_local.__getattribute__` which dispatches to a per-thread `dict` stored in
+`_thread._local`. Each thread gets an independent namespace.
+
+## gopy notes
+
+Not yet ported. `threading.Thread` will map to goroutines in `module/threading/`.
+`Lock` maps to `sync.Mutex`, `RLock` to `sync.RWMutex`, `Condition` to
+`sync.Cond`, `Event` to a channel. `local()` maps to goroutine-local context.

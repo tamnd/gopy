@@ -1,0 +1,77 @@
+---
+title: Include/object.h
+description: "Public object API: PyObject and PyVarObject structs, reference counting macros, Py_TYPE/Py_SIZE accessors, Py_None/Py_True/Py_False singletons, and the rich comparison protocol."
+cpython_path: Include/object.h
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/object.h" />
+
+`Include/object.h` is the foundational public header of the C API. It defines `PyObject` and `PyVarObject`, the reference-counting macros (`Py_INCREF`, `Py_DECREF`), the `Py_TYPE`/`Py_SIZE` accessors, the singleton objects (`Py_None`, `Py_True`, `Py_False`, `Py_Ellipsis`), the rich comparison constants, and `PyObject_TypeCheck`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyObject`, `PyVarObject` | Core struct definitions |
+| 81-200 | `Py_REFCNT`, `Py_TYPE`, `Py_SIZE` | Struct field accessor macros |
+| 201-350 | `Py_INCREF`, `Py_DECREF`, `Py_XINCREF`, `Py_XDECREF` | Reference count management |
+| 351-450 | `Py_None`, `Py_True`, `Py_False`, `Py_Ellipsis`, `Py_NotImplemented` | Singleton objects |
+| 451-580 | `Py_LT`, `Py_LE`, etc.; `PyObject_TypeCheck` | Rich comparison constants; type checking |
+| 581-700 | `Py_NewRef`, `Py_XNewRef`, `Py_Is*` | New-reference helpers; identity checks |
+
+## Reading
+
+### PyObject layout
+
+Every Python object begins with `PyObject_HEAD` which expands to `Py_ssize_t ob_refcnt; PyTypeObject *ob_type`. Variable-length objects additionally have `Py_ssize_t ob_size` via `PyObject_VAR_HEAD`. In the free-threaded build (3.13+) the refcount is replaced with a bitfield that also encodes immortality and GC state.
+
+```c
+// Include/object.h:1 PyObject
+struct _object {
+    Py_ssize_t ob_refcnt;
+    PyTypeObject *ob_type;
+};
+
+struct _varObject {
+    PyObject ob_base;
+    Py_ssize_t ob_size;
+};
+
+#define PyObject_HEAD  struct _object ob_base;
+#define PyObject_VAR_HEAD  struct _varObject ob_base;
+```
+
+### Py_INCREF and Py_DECREF
+
+`Py_INCREF` increments the reference count. `Py_DECREF` decrements it and calls `_Py_Dealloc` when it reaches zero. In debug builds, both macros also check for NULL and for deallocation under active reference-count overflow.
+
+```c
+// Include/object.h:201 Py_INCREF (simplified)
+static inline void Py_INCREF(PyObject *op) {
+    if (_Py_IsImmortal(op)) return;
+    op->ob_refcnt++;
+}
+static inline void Py_DECREF(PyObject *op) {
+    if (_Py_IsImmortal(op)) return;
+    if (--op->ob_refcnt == 0) _Py_Dealloc(op);
+}
+```
+
+### Singletons
+
+`Py_None`, `Py_True`, `Py_False`, `Py_Ellipsis`, and `Py_NotImplemented` are immortal singletons. Since 3.12 they use `_Py_IMMORTAL_REFCNT` which prevents `Py_DECREF` from ever reaching zero.
+
+```c
+// Include/object.h:351 Py_None
+PyAPI_DATA(PyObject) _Py_NoneStruct;
+#define Py_None (&_Py_NoneStruct)
+```
+
+## gopy notes
+
+The gopy equivalent is `objects/object.go` and `objects/protocol.go`. `PyObject` maps to the `Object` interface with `Type() *Type` and `Hash() (Int, error)` methods. Reference counting is replaced by Go's garbage collector; `Py_INCREF`/`Py_DECREF` become no-ops or are omitted entirely.

@@ -1,0 +1,93 @@
+---
+title: "Include/methodobject.h — Method Object Header"
+description: "PyCFunction typedefs, PyMethodDef struct, METH_* flags, PyCFunctionObject layout, and vectorcall slot in CPython 3.14"
+cpython_path: Include/methodobject.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: objects/function.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython exposes built-in functions to Python code as `PyCFunctionObject` instances. This header
+defines the typedefs, the `PyMethodDef` descriptor struct that every C extension fills in, and the
+full set of `METH_*` calling-convention flags introduced through 3.14.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-10 | `PyCFunction` | typedef | Single-argument C function pointer (`PyObject*, PyObject*`) |
+| 11-15 | `PyCFunctionWithKeywords` | typedef | Three-argument variant adding a keyword dict |
+| 16-22 | `_PyCFunctionFast` | typedef | Fastcall signature (`PyObject*, PyObject* const*, Py_ssize_t`) |
+| 23-30 | `_PyCFunctionFastWithKeywords` | typedef | Fastcall plus keyword-names tuple |
+| 31-55 | `PyMethodDef` | struct | `ml_name`, `ml_meth`, `ml_flags`, `ml_doc` |
+| 56-85 | `METH_*` flags | defines | Calling-convention and binding flags |
+| 86-110 | `PyCFunctionObject` | struct | Instance layout including vectorcall slot |
+| 111-130 | `PyMethodObject` | struct | Bound-method wrapper |
+| 131-150 | API functions | declarations | `PyCFunction_New`, `PyCFunction_NewEx`, `PyCFunction_GET_*` macros |
+
+## Reading
+
+### PyCFunction typedefs
+
+```c
+typedef PyObject *(*PyCFunction)(PyObject *self, PyObject *args);
+typedef PyObject *(*PyCFunctionWithKeywords)(PyObject *self,
+                                             PyObject *args,
+                                             PyObject *kwargs);
+typedef PyObject *(*_PyCFunctionFast)(PyObject *self,
+                                      PyObject *const *args,
+                                      Py_ssize_t nargs);
+typedef PyObject *(*_PyCFunctionFastWithKeywords)(PyObject *self,
+                                                   PyObject *const *args,
+                                                   Py_ssize_t nargs,
+                                                   PyObject *kwnames);
+```
+
+The plain `PyCFunction` pointer is the historic two-argument form. The `_PyCFunctionFast` family
+avoids building an argument tuple, passing a C array and a count instead. Callers select the right
+typedef by reading `ml_flags`.
+
+### PyMethodDef struct
+
+```c
+struct PyMethodDef {
+    const char  *ml_name;   /* method name */
+    PyCMethodDef ml_meth;   /* implementation */
+    int          ml_flags;  /* flags bits (METH_*) */
+    const char  *ml_doc;    /* docstring or NULL */
+};
+```
+
+A sentinel entry with `ml_name == NULL` terminates method tables. Extensions that define module or
+type methods embed a static array of these structs and pass it to `PyModule_Create` or
+`PyType_Ready`.
+
+### METH_* flags and the 3.14 FASTCALL+KEYWORDS combination
+
+```c
+#define METH_VARARGS    0x0001
+#define METH_KEYWORDS   0x0002
+#define METH_NOARGS     0x0004
+#define METH_O          0x0008
+#define METH_CLASS      0x0010
+#define METH_STATIC     0x0020
+#define METH_FASTCALL   0x0080
+```
+
+`METH_FASTCALL | METH_KEYWORDS` selects `_PyCFunctionFastWithKeywords`. CPython 3.14 formalised
+this combination as a stable ABI entry point (previously it was considered internal). Binding flags
+`METH_CLASS` and `METH_STATIC` are mutually exclusive with each other and orthogonal to the
+calling-convention bits.
+
+## gopy notes
+
+- `PyMethodDef` maps to the `MethodDef` struct in `objects/function.go`.
+- gopy uses a Go function pointer (`FuncGo`) in place of a raw `PyCFunction`; the trampoline in
+  `vm/eval_call.go` dispatches on the flags field using the same bitmask values.
+- `METH_FASTCALL | METH_KEYWORDS` dispatch was added in the v0.12 tier-2 work; earlier calls
+  fell through to the `METH_VARARGS` path.
+- The vectorcall slot (`vectorcallfunc`) in `PyCFunctionObject` corresponds to `VectorCall` in
+  `objects/function.go`; it is populated during type initialisation, not per-instance.

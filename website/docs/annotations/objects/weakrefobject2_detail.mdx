@@ -1,0 +1,169 @@
+---
+title: "Objects/weakrefobject.c"
+description: "CPython weak reference implementation: PyWeakReference layout, callback dispatch, and ob_weaklist threading"
+cpython_path: Objects/weakrefobject.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`weakrefobject.c` implements the `weakref.ref` and `weakref.proxy` types.
+A weak reference does not prevent the referent from being collected. When the
+referent is deallocated, `PyObject_ClearWeakRefs` nulls every outstanding
+reference and fires any registered callbacks.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | `PyWeakReference` struct, macros | Object layout and `wr_object` / `wr_callback` fields |
+| 81–200 | `insert_head`, `insert_after` | Thread `PyWeakReference` into the referent's `ob_weaklist` |
+| 201–380 | `PyWeakref_NewRef` | Allocates or returns a cached `ref` for the same `(object, callback)` pair |
+| 381–480 | `PyWeakref_NewProxy` | Like `NewRef` but wraps in a proxy that forwards attribute access |
+| 481–600 | `PyWeakref_GetObject` / `GET_OBJECT` | Safe vs. inline fast paths to retrieve the live referent |
+| 601–750 | `handle_callback` | Calls `wr_callback(ref)` after NULLing `wr_object` |
+| 751–900 | `PyObject_ClearWeakRefs` | Iterates `ob_weaklist`, NULLs each ref, fires callbacks |
+| 901–1000 | `_PyWeakref_Type`, `_PyWeakProxy_Type` | `PyTypeObject` definitions for both public types |
+
+## Reading
+
+### PyWeakReference layout and ob_weaklist
+
+Every weakly-referenceable object carries an `ob_weaklist` head pointer (set
+by `Py_TPFLAGS_HAVE_WEAKREFS` and the `tp_weaklistoffset` field). The list is
+intrusive: `PyWeakReference` nodes are linked through `wr_object_prev` and
+`wr_object_next` directly inside the ref object.
+
+```c
+// CPython: Objects/weakrefobject.c:12 PyWeakReference
+struct _PyWeakReference {
+    PyObject_HEAD
+    PyObject        *wr_object;       /* referent, or Py_None when dead    */
+    PyObject        *wr_callback;     /* callable or NULL                  */
+    Py_hash_t        hash;            /* cached hash of wr_object          */
+    PyWeakReference *wr_object_prev;  /* doubly-linked list on referent    */
+    PyWeakReference *wr_object_next;
+};
+```
+
+The list is headed by the referent's `ob_weaklist` slot. `insert_head` adds a
+new ref at the front; `insert_after` is used when a second ref without a
+callback can share a slot with an existing ref.
+
+### PyWeakref_NewRef and deduplication
+
+If the referent already has a callback-less ref and the caller passes no
+callback, the same `PyWeakReference` object is returned with its refcount
+bumped. This deduplication is the fast path for `weakref.ref(x)` called
+repeatedly on the same object.
+
+```c
+// CPython: Objects/weakrefobject.c:201 PyWeakref_NewRef
+PyObject *
+PyWeakref_NewRef(PyObject *ob, PyObject *callback)
+{
+    PyWeakReference *result   = NULL;
+    PyWeakReference **list    = GET_WEAKREFS_LISTPTR(ob);
+    PyWeakReference *ref      = *list;
+
+    if (callback == NULL || callback == Py_None) {
+        /* Try to reuse a live, callback-less ref at the list head. */
+        if (ref != NULL && ref->wr_callback == NULL
+                        && ref->wr_object != Py_None) {
+            return Py_NewRef((PyObject *)ref);
+        }
+    }
+    result = PyObject_GC_New(PyWeakReference, &_PyWeakref_RefType);
+    if (result == NULL) return NULL;
+
+    result->wr_object   = ob;        /* borrowed; intentionally not INCREF */
+    result->wr_callback = Py_XNewRef(callback);
+    result->hash        = -1;
+    insert_head(result, list);
+    PyObject_GC_Track(result);
+    return (PyObject *)result;
+}
+```
+
+Note that `wr_object` is stored as a borrowed reference. Keeping the referent
+alive is explicitly not the job of the weak reference.
+
+### PyObject_ClearWeakRefs and handle_callback
+
+`PyObject_ClearWeakRefs` is called from `tp_dealloc` of any type that
+supports weak references, immediately before the object's memory is freed.
+
+```c
+// CPython: Objects/weakrefobject.c:751 PyObject_ClearWeakRefs
+void
+PyObject_ClearWeakRefs(PyObject *object)
+{
+    PyWeakReference **list = GET_WEAKREFS_LISTPTR(object);
+
+    while (*list != NULL) {
+        PyWeakReference *current = *list;
+        /* NULL the reference before firing the callback. */
+        Py_INCREF(current);
+        current->wr_object = Py_None;    /* marks the ref as dead */
+        /* Remove from the list. */
+        *list = current->wr_object_next;
+        if (*list != NULL)
+            (*list)->wr_object_prev = NULL;
+
+        if (current->wr_callback != NULL)
+            handle_callback(current);
+
+        Py_DECREF(current);
+    }
+}
+```
+
+`handle_callback` calls `wr_callback(ref)` inside a temporary `PyErr_Fetch`
+/ `PyErr_Restore` guard so that exceptions raised by callbacks do not
+propagate out of `tp_dealloc`.
+
+### PyWeakref_GetObject vs. GET_OBJECT
+
+`PyWeakref_GET_OBJECT` is the unsafe inline macro used in performance-critical
+paths. It returns `wr_object` directly without checking whether the ref type
+is correct. `PyWeakref_GetObject` is the safe API: it validates the argument
+type and returns `None` if the referent is dead.
+
+```c
+// CPython: Objects/weakrefobject.c:601 PyWeakref_GetObject
+PyObject *
+PyWeakref_GetObject(PyObject *ref)
+{
+    if (ref == NULL || !PyWeakref_Check(ref)) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    return PyWeakref_GET_OBJECT(ref);   /* ((PyWeakReference *)ref)->wr_object */
+}
+```
+
+## gopy notes
+
+- `PyWeakReference` maps to `objects/weakref.go` as a struct embedding
+  `BaseObject`. The `WrObject` field is stored as an `Object` interface (never
+  incref'd), and `WrCallback` is an `Object` that may be `nil`.
+- `ob_weaklist` is modelled as a `*WeakReference` pointer embedded in types
+  that set `Py_TPFLAGS_HAVE_WEAKREFS`. Types that do not support weak
+  references leave this field `nil` and return an error from `NewRef`.
+- `PyObject_ClearWeakRefs` is called from every `tp_dealloc` equivalent in
+  gopy. Because gopy uses Go GC rather than reference counting, the clear is
+  driven by a `runtime.SetFinalizer` registered at object allocation time.
+- Callback execution order matches CPython: callbacks fire in the same order
+  the refs were inserted (FIFO on the list head).
+
+## CPython 3.14 changes
+
+- The `wr_object_prev` / `wr_object_next` fields were renamed from
+  `wr_prev` / `wr_next` in 3.12 for clarity; 3.14 carries this naming.
+- In 3.13 the free-threading build added per-object locks around
+  `ob_weaklist` manipulation; 3.14 inherits that locking.
+- `PyWeakref_GetRef` (3.13+) is the new preferred safe accessor, returning
+  a strong reference to the live object or `NULL` if dead, avoiding the
+  `None`-sentinel ambiguity of the older `PyWeakref_GetObject`.

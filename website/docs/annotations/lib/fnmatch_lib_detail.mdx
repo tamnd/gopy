@@ -1,0 +1,158 @@
+---
+title: "Lib/fnmatch.py"
+description: "Unix filename pattern matching with translate, fnmatch, and filter"
+cpython_path: Lib/fnmatch.py
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/fnmatch.py` provides Unix shell-style filename pattern matching. It
+is a pure-Python module with no C extension. The four public names are
+`fnmatch`, `fnmatchcase`, `filter`, and `translate`. The module is used
+directly by `glob.py` and indirectly by `pathlib`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–20 | module header | docstring, imports, `__all__` |
+| 21–45 | `fnmatch` | normalizes case then delegates to `fnmatchcase` |
+| 46–60 | `fnmatchcase` | compiles and matches a pattern against a name |
+| 61–80 | `filter` | applies one compiled pattern to a list of names |
+| 81–105 | `_compile_pattern` | `@lru_cache` wrapper around `re.compile(translate(pat))` |
+| 106–180 | `translate` | converts `*`, `?`, `[seq]` glob syntax to a regex string |
+
+## Reading
+
+### fnmatch and normcase
+
+`fnmatch` calls `os.path.normcase` on both the name and pattern before
+matching. On Windows, `normcase` lowercases and converts forward slashes
+to backslashes, making matching case-insensitive. On POSIX, `normcase` is
+a no-op, so the function is case-sensitive by default.
+
+```python
+# CPython: Lib/fnmatch.py:30 fnmatch
+def fnmatch(name, pat):
+    name = os.path.normcase(name)
+    pat = os.path.normcase(pat)
+    return fnmatchcase(name, pat)
+```
+
+### fnmatchcase and _compile_pattern
+
+`fnmatchcase` fetches (or builds) a compiled regex via `_compile_pattern`
+and calls `match` on it. The trailing `\Z` anchor ensures the entire name
+must match the pattern, not just a prefix.
+
+```python
+# CPython: Lib/fnmatch.py:46 fnmatchcase
+def fnmatchcase(name, pat):
+    match = _compile_pattern(pat)
+    return match(name) is not None
+
+@functools.lru_cache(maxsize=256)
+def _compile_pattern(pat):
+    return re.compile(translate(pat)).match
+```
+
+### filter list comprehension
+
+`filter` avoids repeatedly calling `fnmatch` per element. It compiles the
+pattern once and runs the resulting `match` callable over every name in a
+single list comprehension.
+
+```python
+# CPython: Lib/fnmatch.py:65 filter
+def filter(names, pat):
+    result = []
+    pat = os.path.normcase(pat)
+    match = _compile_pattern(pat)
+    return [name for name in names if match(os.path.normcase(name))]
+```
+
+### translate pattern-to-regex
+
+`translate` iterates over the pattern character by character. It converts
+`*` to `.*`, `?` to `.`, and `[seq]` bracket expressions to their regex
+equivalents. The `[!...]` negation form is rewritten to `[^...]`. Special
+regex metacharacters inside bracket expressions are escaped with
+`re.escape`. The result is wrapped in `(?s:...)\Z` so that `.` matches
+any character including newline and the anchor is at the string end.
+
+```python
+# CPython: Lib/fnmatch.py:106 translate
+def translate(pat):
+    STAR = object()
+    res = []
+    i, n = 0, len(pat)
+    while i < n:
+        c = pat[i]
+        i += 1
+        if c == '*':
+            res.append(STAR)
+        elif c == '?':
+            res.append('.')
+        elif c == '[':
+            j = i
+            if j < n and pat[j] == '!':
+                j += 1
+            if j < n and pat[j] == ']':
+                j += 1
+            while j < n and pat[j] != ']':
+                j += 1
+            if j >= n:
+                res.append(r'\[')
+            else:
+                stuff = pat[i:j]
+                i = j + 1
+                if '\\' in stuff:
+                    stuff = stuff.replace('\\', r'\\')
+                if stuff[0] == '!':
+                    stuff = '^' + stuff[1:]
+                elif stuff[0] in (']', '^'):
+                    stuff = '\\' + stuff
+                res.append(f'[{stuff}]')
+        else:
+            res.append(re.escape(c))
+    # collapse adjacent STAR sentinels and emit final regex
+    ...
+    return r'(?s:%s)\Z' % ''.join(chunks)
+```
+
+## gopy notes
+
+- `_compile_pattern` uses `functools.lru_cache(maxsize=256)`. The Go
+  equivalent is a `sync.Map` keyed on the normalized pattern string, or a
+  small fixed-size LRU implemented with a doubly-linked list and a map.
+- `fnmatch` calls `os.path.normcase`. In gopy, `module/os/path` must
+  expose a `Normcase` function that lowercases on Windows and is a no-op
+  on POSIX. The `runtime.GOOS` constant provides the platform check.
+- The `translate` function's `STAR` sentinel approach (collect parts then
+  collapse adjacent stars) prevents the pathological `.*.*.*` regex that
+  older versions generated. The Go port must replicate this collapsing step
+  exactly, as it affects performance on adversarial inputs.
+- `filter` returns a new list. Go callers that want an iterator should wrap
+  the compiled regex in a function that scans a `[]string` slice, avoiding
+  the intermediate allocation.
+- `translate` wraps the result in `(?s:...)\Z`. Go's `regexp` package uses
+  `(?s)` for dot-all mode and `\z` for end-of-string. The CPython `\Z`
+  must be changed to `\z` when emitting patterns for Go's `regexp/syntax`.
+
+## CPython 3.14 changes
+
+- The `translate` function was refactored in 3.12 to use the `STAR`
+  sentinel pattern described above, replacing the earlier character-class
+  concatenation approach. This fixed several edge cases with adjacent `*`
+  characters.
+- In 3.13, `translate` gained awareness of path separators via the `seps`
+  keyword argument when called from `glob.translate`, though the
+  standalone `fnmatch.translate` signature is unchanged.
+- The `_compile_pattern` LRU cache size was raised from 32 to 256 in 3.11
+  to better serve workloads that glob large directories with many distinct
+  patterns.
+- No breaking changes were made to the public API between 3.13 and 3.14.
+  The module remains pure Python with no C accelerator.

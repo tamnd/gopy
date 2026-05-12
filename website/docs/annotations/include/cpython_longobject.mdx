@@ -1,0 +1,100 @@
+---
+title: Include/cpython/longobject.h
+description: CPython-internal integer API declaring PyLongObject layout, compact-int accessors, and sign/digit helpers.
+cpython_path: Include/cpython/longobject.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: objects/long.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/longobject.h`
+
+<CpyLink path="Include/cpython/longobject.h" />
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `PyLongObject` | struct | Internal integer object: `lv_tag` + `ob_digit[]` |
+| `NON_SIZE_BITS` | macro | Number of tag bits that are not the digit count |
+| `SIGN_MASK` | macro | Bitmask isolating the sign field from `lv_tag` |
+| `digit` / `twodigits` | typedef | Storage unit for base-2^30 digit array |
+| `_PyLong_IsCompact` | inline | True when the value fits in a single `lv_tag`-encoded word |
+| `_PyLong_IsNonNegativeCompact` | inline | True when compact and sign bit is clear |
+| `PyUnstable_Long_IsCompact` | function | Public (unstable) form of the compact predicate |
+| `PyUnstable_Long_CompactValue` | function | Extracts the C `Py_ssize_t` from a compact integer |
+| `_PyLong_New` | function | Allocate a new `PyLongObject` with `ndigits` digit slots |
+| `_PyLong_IsZero` | inline | True when `lv_tag` encodes zero |
+| `_PyLong_IsPositive` | inline | True when sign bits indicate a positive value |
+| `_PyLong_IsNegative` | inline | True when sign bits indicate a negative value |
+
+## Reading
+
+### The `lv_tag` layout
+
+CPython 3.12 replaced the old `ob_size` sign-encoding with a dedicated `lv_tag` field. The lower `NON_SIZE_BITS` bits carry sign and a "compact" flag; the remaining upper bits store the digit count.
+
+```c
+/* Include/cpython/longobject.h */
+#define NON_SIZE_BITS  3
+#define SIGN_MASK      3   /* bits [1:0] of lv_tag */
+
+struct _PyLongObject {
+    PyObject_HEAD
+    uintptr_t lv_tag;   /* sign | compact flag | ndigits */
+    digit      ob_digit[1];
+};
+```
+
+A "compact" integer is one whose absolute value fits in a single 30-bit digit and whose sign is encoded entirely inside `lv_tag`, so `ob_digit` is unused. This avoids a heap allocation for the common small-integer case.
+
+### Compact-int fast path
+
+The two `PyUnstable_Long_*` functions expose the compact representation to extension authors without requiring them to read `ob_digit` directly.
+
+```c
+static inline int
+_PyLong_IsCompact(const PyLongObject *op) {
+    return op->long_value.lv_tag < (2 << NON_SIZE_BITS);
+}
+
+/* Extract value only when IsCompact() is true */
+Py_ssize_t PyUnstable_Long_CompactValue(const PyLongObject *op);
+```
+
+In gopy these map to `IsCompact()` and `CompactValue()` methods on the `Long` type in `objects/long.go`, preserving the same fast path for small integers.
+
+### Sign predicates
+
+Rather than comparing `ob_size` against zero as CPython 3.11 did, the new predicates mask `lv_tag`.
+
+```c
+static inline int
+_PyLong_IsNegative(const PyLongObject *op) {
+    return (op->long_value.lv_tag & SIGN_MASK) == SIGN_MASK;
+}
+
+static inline int
+_PyLong_IsPositive(const PyLongObject *op) {
+    return (op->long_value.lv_tag & SIGN_MASK) == 1;
+}
+
+static inline int
+_PyLong_IsZero(const PyLongObject *op) {
+    return (op->long_value.lv_tag & SIGN_MASK) == 0
+        && (op->long_value.lv_tag >> NON_SIZE_BITS) == 0;
+}
+```
+
+## gopy mirror
+
+`objects/long.go` ports the full `PyLongObject` representation. Go does not have a macro system, so `NON_SIZE_BITS` and `SIGN_MASK` are untyped constants, and each `static inline` predicate becomes a method on `*Long`.
+
+The `_PyLong_New(ndigits)` allocator maps to `newLong(ndigits int) *Long` which pre-allocates the `Digits` slice to the requested length, matching the CPython contract that callers fill digits in-place before the object is exposed.
+
+## CPython 3.14 changes
+
+3.14 keeps the `lv_tag` layout introduced in 3.12 stable. The primary change visible in this header is that `PyUnstable_Long_IsCompact` and `PyUnstable_Long_CompactValue` are now declared with `PyAPI_FUNC` rather than `static inline`, allowing the ABI to evolve independently of the header.

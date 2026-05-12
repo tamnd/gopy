@@ -1,0 +1,88 @@
+---
+title: "pycore_ceval.h: Eval Loop Control"
+description: "Annotation of CPython Include/internal/pycore_ceval.h covering the eval_breaker word, signal handling, GIL drop requests, and _Py_HandlePending"
+cpython_path: Include/internal/pycore_ceval.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_ceval.h` defines the interpreter-thread control plane. Its central artifact is the `eval_breaker` word, a single atomic integer that lets any OS thread interrupt the eval loop on the next opcode boundary without taking a lock.
+
+## Map
+
+| Lines | Symbol | Kind | Purpose |
+|-------|--------|------|---------|
+| 1-30 | `_PyEval_SignalReceived` | function | Sets the signal-pending bit in `eval_breaker` |
+| 31-60 | `_PyEval_AddPendingCall` | function | Queues a deferred C callback for the main thread |
+| 61-100 | `eval_breaker` bit layout | macros | Bit positions for each interrupt source |
+| 101-130 | `_Py_HandlePending` | function | Drains the pending-call queue and resets bits |
+| 131-160 | `_PyEvalFrameDefault` | function | Main eval loop entry point signature |
+| 161-200 | `_PyEval_EvalFrameDefault` | function | Public trampoline that dispatches to frame hooks |
+
+## Reading
+
+### `eval_breaker` bit layout
+
+The `eval_breaker` field lives in `PyInterpreterState` and is checked once per backward jump and once per `RESUME` opcode. Each interrupt source owns a distinct bit so that a single atomic load is enough to decide whether to break out of the fast path.
+
+```c
+/* bit positions within eval_breaker */
+#define _PY_GIL_DROP_REQUEST_BIT        (1U << 0)
+#define _PY_SIGNALS_PENDING_BIT         (1U << 1)
+#define _PY_CALLS_TO_DO_BIT             (1U << 2)
+#define _PY_ASYNC_EXCEPTION_BIT         (1U << 3)
+#define _PY_GC_SCHEDULED_BIT            (1U << 4)
+#define _PY_EVAL_EXPLICIT_MERGE_BIT     (1U << 5)
+```
+
+Setting any bit is done with an atomic OR so no lock is required from a signal handler or a second thread. Clearing is deferred to `_Py_HandlePending`, which runs inside the eval loop under the GIL.
+
+### `_Py_HandlePending` drain loop
+
+```c
+int
+_Py_HandlePending(PyThreadState *tstate)
+{
+    /* 1. re-acquire GIL if another thread requested a drop */
+    if (_Py_eval_breaker_bit_is_set(interp, _PY_GIL_DROP_REQUEST_BIT)) {
+        /* ... drop and re-acquire ... */
+    }
+    /* 2. run pending calls */
+    if (_Py_eval_breaker_bit_is_set(interp, _PY_CALLS_TO_DO_BIT)) {
+        if (make_pending_calls(tstate) != 0) return -1;
+    }
+    /* 3. dispatch Python-level signals */
+    if (_Py_eval_breaker_bit_is_set(interp, _PY_SIGNALS_PENDING_BIT)) {
+        if (handle_signals(tstate) != 0) return -1;
+    }
+    /* 4. schedule GC if threshold crossed */
+    if (_Py_eval_breaker_bit_is_set(interp, _PY_GC_SCHEDULED_BIT)) {
+        _PyGC_Collect(tstate, 1, _Py_GC_REASON_HEAP);
+    }
+    return 0;
+}
+```
+
+Each branch clears its own bit before doing work to prevent re-entry. If work produces a new exception the function returns `-1` and the eval loop unwinds.
+
+### `_PyEvalFrameDefault` signature
+
+```c
+PyObject *
+_PyEvalFrameDefault(PyThreadState *tstate,
+                    _PyInterpreterFrame *frame,
+                    int throwflag);
+```
+
+`throwflag` is non-zero when the caller wants to throw an exception into a generator frame (the `THROW` path). The frame carries its own `f_lasti` program counter so the function is re-entrant across generator resumes.
+
+## gopy notes
+
+- `vm/eval_gen.go` implements the equivalent eval loop. The `evalBreaker` field on `ThreadState` mirrors the CPython atomic word, using a `sync/atomic` `uint32`.
+- Bit constants are defined in `vm/eval_simple.go` as `const` values matching the CPython positions so that future debug tooling can compare state dumps directly.
+- `_Py_HandlePending` is ported in `vm/eval_unwind.go` as `handlePending`. GC scheduling calls into `objects/gc.go` rather than the CPython cyclic collector.
+- The GIL drop request bit is present but inert in gopy because the current runtime is single-threaded. The bit is reserved so the layout matches and monitoring code that inspects raw state dumps remains compatible.

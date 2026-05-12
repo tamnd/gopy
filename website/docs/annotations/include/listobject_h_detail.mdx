@@ -1,0 +1,81 @@
+---
+title: "Include/listobject.h: List Object Layout and Macros"
+description: "PyListObject struct fields (ob_item, allocated), GET_ITEM/SET_ITEM macros vs bounds-checked API, PyList_New pre-allocation, and sort stability guarantee"
+cpython_path: Include/listobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: objects/list.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`PyListObject` is CPython's mutable sequence. The public header is thin (fewer than 50 lines), but the internal header at `Include/cpython/listobject.h` exposes the two fields that drive all performance-sensitive operations: the item pointer array and the over-allocated capacity counter.
+
+## Map
+
+| Lines | Symbol | Kind |
+|-------|--------|------|
+| 1–10 | `PyList_Type` extern declaration | variable |
+| 11–14 | `PyList_Check` / `PyList_CheckExact` | macros |
+| 15–18 | `PyList_New` | function |
+| 19–22 | `PyList_Size` | function |
+| 23–30 | `PyList_GetItem` / `PyList_SetItem` | functions |
+| 31–36 | `PyList_Insert` / `PyList_Append` | functions |
+| 37–44 | `PyList_GetSlice` / `PyList_SetSlice` | functions |
+| 45–52 | `PyList_Sort` / `PyList_Reverse` | functions |
+| 53–58 | `PyList_AsTuple` | function |
+| 60–70 | `PyListObject` struct | struct (cpython/listobject.h) |
+| 71–80 | `PyList_GET_ITEM` / `PyList_SET_ITEM` | macros (cpython/listobject.h) |
+
+## Reading
+
+### PyListObject struct
+
+```c
+/* Include/cpython/listobject.h */
+typedef struct {
+    PyObject_VAR_HEAD
+    PyObject **ob_item;   /* pointer to item array, NULL when ob_size == 0 */
+    Py_ssize_t allocated; /* number of slots allocated in ob_item */
+} PyListObject;
+```
+
+`ob_size` (from `PyObject_VAR_HEAD`) is the logical length visible to Python code. `allocated` is the physical capacity of the `ob_item` array. The invariant is `0 <= ob_size <= allocated`. When `ob_size` equals `allocated`, `list_resize` is called with a growth factor of roughly 1.125 plus a small constant, giving amortized O(1) appends.
+
+`ob_item` is `NULL` only when `ob_size == 0` immediately after `PyList_New(0)`. Any append immediately allocates.
+
+### GET_ITEM / SET_ITEM macros vs bounds-checked API
+
+```c
+/* unchecked, O(1), for internal use only */
+#define PyList_GET_ITEM(op, i)  ((PyListObject *)(op))->ob_item[i]
+#define PyList_SET_ITEM(op, i, v) \
+    (((PyListObject *)(op))->ob_item[i] = (v))
+
+/* bounds-checked public API */
+PyObject *PyList_GetItem(PyObject *op, Py_ssize_t index);
+int       PyList_SetItem(PyObject *op, Py_ssize_t index, PyObject *item);
+```
+
+The macro forms skip the `PyList_Check` guard and the index range check. They are intended for tight inner loops (e.g., inside `listiter_next`) where the caller already owns the list and controls the index. `PyList_SetItem` steals a reference to `item`, just as `PyList_SET_ITEM` does. Both the macro and the function leave `ob_item[i]` holding a borrowed reference from the caller's perspective after the call.
+
+`PyList_GetItem` returns a borrowed reference and sets `IndexError` on out-of-range access. Callers that need a new reference must call `Py_INCREF` on the result.
+
+### PyList_New and sort stability
+
+```c
+PyObject *PyList_New(Py_ssize_t size);
+int       PyList_Sort(PyObject *list);
+```
+
+`PyList_New(n)` allocates `ob_item` with room for exactly `n` slots and sets all entries to `NULL`. The caller must fill every slot before the list escapes to Python code; an unfilled slot passed to the garbage collector will cause a crash. The typical pattern is to call `PyList_SET_ITEM` in a loop immediately after `PyList_New`.
+
+`PyList_Sort` uses Timsort (implemented in `Objects/listobject.c`). Timsort is a stable sort: equal elements retain their original relative order. This is guaranteed by the Python language reference and relied upon by `sorted()` with a key function when the key produces equal values.
+
+## gopy notes
+
+- `objects/list.go` represents `ob_item` as a Go slice (`[]Object`), so `len` is `ob_size` and `cap` is `allocated`. The slice header makes the over-allocation transparent to the Go GC.
+- `PyList_GET_ITEM` and `PyList_SET_ITEM` are inlined as direct slice index expressions `l.items[i]` without bounds checks, guarded by the same caller contract as in CPython.
+- `PyList_SetItem` reference-stealing is modeled by transferring ownership of the `Object` value without calling `DecRef` on the old slot, then calling `DecRef` on the displaced element if it is non-nil.
+- Sort stability is preserved because the underlying `slices.SortStableFunc` from the Go standard library is also a stable sort.

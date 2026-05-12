@@ -1,0 +1,111 @@
+---
+title: "Objects/odictobject.c: OrderedDict Implementation"
+description: "Doubly-linked node layer on top of dict, move_to_end, popitem, reversed iteration, and order-preserving equality"
+cpython_path: Objects/odictobject.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: objects/dict.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/odictobject.c` implements `collections.OrderedDict`. Since 3.7 the
+built-in `dict` preserves insertion order, so `OrderedDict` is now a thin
+subclass. Its extra value lies in `move_to_end`, `popitem(last=True/False)`,
+order-sensitive equality, and `__reversed__` iteration, none of which plain
+`dict` provides.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_odictnode` struct | Per-key doubly-linked node (`prev`, `next`, `key`, `hash`) |
+| 81-180 | `_odict_FOREACH` macro | Cursor macro over the node ring |
+| 181-340 | `odict_new` / `odict_init` | Allocate ring sentinel, call `dict.__init__` |
+| 341-520 | `odict_setitem` / `odict_delitem` | Insert/remove node in sync with dict |
+| 521-640 | `odict_move_to_end` | Relink node to head or tail |
+| 641-780 | `odict_popitem` | Pop from tail (`last=True`) or head (`last=False`) |
+| 781-920 | `odict_richcompare` | Order-aware `==` and `!=` |
+| 921-1050 | `odictiter_new` / `odictiter_next` | `__iter__` and `__reversed__` walker |
+| 1051-1200 | `odict_repr` / `odict_reduce` | Repr and pickle support |
+| 1201-1500 | Type objects, `PyODict_*` C-API | Public C-API surface |
+
+## Reading
+
+### Doubly-linked node management
+
+Every key in an `OrderedDict` has a matching `_odictnode` allocated alongside
+the dict entry. The node carries a `key` reference and the precomputed `hash`
+so that traversal never touches the hash table:
+
+```c
+typedef struct _odictnode {
+    PyObject *key;
+    Py_hash_t hash;
+    struct _odictnode *next;
+    struct _odictnode *prev;
+} _odictnode;
+```
+
+`odict_setitem` calls `dict.__setitem__` first, then splices a new node at the
+tail. `odict_delitem` unlinks the node before calling `dict.__delitem__`, so a
+failed dict delete leaves the list intact.
+
+### move_to_end and popitem
+
+`odict_move_to_end` is a pure linked-list relink. It detaches the node for the
+given key and appends it to the tail (or prepends to the head when
+`last=False`). No hash-table writes are needed because order lives entirely in
+the node ring.
+
+`odict_popitem` reads the tail (or head) node, grabs the key, calls
+`odict_delitem`, and returns the `(key, value)` pair. The `last` argument
+controls which end is used:
+
+```c
+static PyObject *
+odict_popitem(PyODictObject *self, PyObject *args)
+{
+    int last = 1;
+    /* ... parse last ... */
+    _odictnode *node = last ? _odict_LAST(self) : _odict_FIRST(self);
+    /* build (key, value) then delete */
+}
+```
+
+### Order-preserving equality
+
+Two `OrderedDict` instances are equal only when both keys and their order
+match. `odict_richcompare` first checks `len`, then walks both node rings in
+lockstep, comparing keys by identity before falling back to `==`:
+
+```c
+for (node = _odict_FIRST(a), bnode = _odict_FIRST(b);
+     node != NULL;
+     node = _odictnode_NEXT(node), bnode = _odictnode_NEXT(bnode)) {
+    int eq = PyObject_RichCompareBool(
+                 _odictnode_KEY(node),
+                 _odictnode_KEY(bnode), Py_EQ);
+    if (eq <= 0) return eq ? NULL : Py_False;
+}
+```
+
+Comparing an `OrderedDict` with a plain `dict` falls through to dict equality
+(order is ignored), matching the documented Python behaviour.
+
+## gopy notes
+
+- `objects/dict.go` tracks insertion order via a slice of keys rather than a
+  C linked list. `OrderedDict` is represented as a dict subclass flag
+  (`dictOrderedFlag`) that activates the order-aware paths.
+- `move_to_end` is ported as `(*Dict).MoveToEnd(key, last bool)`. The slice
+  rotation is O(n) in the worst case, matching CPython's O(1) only when the
+  key is already at an end.
+- `popitem` delegates to `MoveToEnd` followed by a regular `Pop`, keeping the
+  two code paths consistent.
+- The reversed iterator wraps a descending index over the key slice rather than
+  walking a node ring backward.
+- 3.14 change: `_odictnode` gained a `hash` field to avoid rehashing during
+  `__reversed__` traversal. The gopy slice approach already carries no hash
+  cost during iteration, so no action is needed.

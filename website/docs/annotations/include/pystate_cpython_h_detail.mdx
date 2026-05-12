@@ -1,0 +1,113 @@
+---
+title: "pystate.h (cpython/) — thread and interpreter state"
+description: "Annotated reading of CPython's thread-state header: PyThreadState, exception state, tracing hooks, and fast-path accessors"
+cpython_path: Include/cpython/pystate.h
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/cpython/pystate.h` is the CPython-extension tier of the thread-state API. The fully public `Python.h` exposes only opaque pointers and a handful of accessors; this header exposes the real struct layouts for embedders and CPython internals that need to read fields directly. It is included automatically when `Py_LIMITED_API` is not defined.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50 | `_PyErr_StackItem` | One frame in the nested exception save/restore stack |
+| 51–90 | `PyThreadState` (frame / depth) | Current frame pointer, recursion limit, and call depth |
+| 91–140 | `PyThreadState` (tracing) | `c_tracefunc`, `c_profilefunc`, and their `void*` arguments |
+| 141–190 | `PyThreadState` (exception) | `current_exception`, `exc_info`, and the `_PyErr_StackItem` head |
+| 191–230 | `PyThreadState` (async hooks) | `async_gen_firstiter`, `async_gen_finalizer` callbacks |
+| 231–280 | `PyInterpreterState` pointer | Forward-declared struct and `interp` field in thread state |
+| 281–320 | `_PyThreadState_GET` / `_PyInterpreterState_GET` | Inline fast accessors via `_PyRuntime` |
+| 321–350 | GIL and ceval signals | `eval_breaker`, `gilstate_counter`, pending calls flag |
+
+## Reading
+
+### Nested exception state
+
+Python allows `except` clauses to be re-entered and exceptions to be replaced. Each such nesting level is one `_PyErr_StackItem` pushed onto a singly-linked list hanging off the thread state.
+
+```c
+// CPython: Include/cpython/pystate.h:28 _PyErr_StackItem
+typedef struct _PyErr_StackItem {
+    PyObject *exc_value;
+    struct _PyErr_StackItem *previous_item;
+} _PyErr_StackItem;
+```
+
+`PyThreadState.exc_info` points to the top of this stack. `_PyErr_StackPush` and `_PyErr_StackPop` manage it around `except` block entry and exit. The field was renamed from `exc_traceback`/`exc_value`/`exc_type` triple to a single normalised `exc_value` in 3.12.
+
+### Frame pointer and recursion depth
+
+The thread state keeps a direct pointer to the currently executing frame. This pointer moves on every function call and return; it is the primary link between the eval loop and the object layer.
+
+```c
+// CPython: Include/cpython/pystate.h:68 PyThreadState frame fields
+struct _PyThreadState {
+    struct _PyInterpreterFrame *current_frame;
+    int recursion_depth;
+    int recursion_limit;
+    int recursion_headroom;  /* space reserved for error recovery */
+    /* ... */
+};
+```
+
+`recursion_headroom` reserves a small number of extra frames so that `RecursionError` can itself be constructed and raised without hitting a hard crash. The interpreter checks `recursion_depth >= recursion_limit - recursion_headroom` at each call site.
+
+### Tracing and profiling hooks
+
+`c_tracefunc` and `c_profilefunc` are C-level function pointers set by `sys.settrace` and `sys.setprofile` respectively. When either is non-NULL the eval loop calls them at the corresponding event points. The companion `void*` fields carry the user-supplied `arg` passed to `PyEval_SetTrace`.
+
+```c
+// CPython: Include/cpython/pystate.h:104 tracing fields
+    Py_tracefunc c_tracefunc;
+    Py_tracefunc c_profilefunc;
+    PyObject    *c_traceobj;
+    PyObject    *c_profileobj;
+    int          tracing;        /* non-zero while inside a trace call */
+```
+
+The `tracing` flag prevents re-entrant trace calls: if the trace function itself triggers Python execution, the inner frames are not traced.
+
+### Async generator hooks
+
+Two optional callbacks let embedders intercept async generator lifecycle events. `async_gen_firstiter` is called the first time `__anext__` is invoked on a freshly created async generator. `async_gen_finalizer` is called when the generator is about to be garbage-collected with a non-exhausted iterator.
+
+```c
+// CPython: Include/cpython/pystate.h:200 async gen hooks
+    PyObject *async_gen_firstiter;
+    PyObject *async_gen_finalizer;
+```
+
+`sys.set_asyncgen_hooks` writes these fields. They default to NULL, in which case the interpreter skips the calls entirely. The hook mechanism was added in 3.6 alongside `PEP 525`.
+
+### Fast thread-state accessors
+
+The two inline functions below are the hot path for every piece of CPython that needs the current thread or interpreter. They read directly from the `_PyRuntime` global rather than going through a TLS lookup on every call.
+
+```c
+// CPython: Include/cpython/pystate.h:293 _PyThreadState_GET
+static inline PyThreadState *
+_PyThreadState_GET(void) {
+    return _PyRuntime.gilstate.tstate_current;
+}
+
+// CPython: Include/cpython/pystate.h:299 _PyInterpreterState_GET
+static inline PyInterpreterState *
+_PyInterpreterState_GET(void) {
+    return _PyThreadState_GET()->interp;
+}
+```
+
+On free-threaded builds (3.13+) `tstate_current` becomes a thread-local variable rather than a single pointer in `_PyRuntime`.
+
+## gopy notes
+
+gopy maps `PyThreadState` to `vm.ThreadState` in `vm/eval_gen.go`. The `current_frame` pointer corresponds to the `frame` field on the Go struct. Recursion depth tracking follows CPython's model with `RecursionDepth` and `RecursionLimit` fields. The `c_tracefunc`/`c_profilefunc` pair is not yet ported; `sys.settrace` is stubbed. The `_PyErr_StackItem` linked list is approximated by a Go slice in `objects/instance.go` that grows and shrinks around `except` block entry. `_PyThreadState_GET` has no direct equivalent because gopy passes the thread state explicitly through most call paths rather than relying on a global.
+
+## CPython 3.14 changes
+
+3.14 continues the free-threaded work from 3.13. `gilstate_counter` is replaced by per-thread reference-count buffers in the no-GIL build. `eval_breaker` became a per-interpreter atomic rather than a field on each thread state, reducing cache pressure in multi-threaded programs. The `_PyErr_StackItem` layout is unchanged. `recursion_headroom` was introduced in 3.11 and has not changed since.

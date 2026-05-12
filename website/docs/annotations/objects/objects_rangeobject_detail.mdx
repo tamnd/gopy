@@ -1,0 +1,98 @@
+---
+title: Objects/rangeobject.c
+description: "range object: O(1) __len__, __contains__, __getitem__ via integer arithmetic, lazy iterator with rangeiterobject, and rich comparison by value-equality of the represented sequence."
+cpython_path: Objects/rangeobject.c
+cpython_version: "3.14"
+lines: 720
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/rangeobject.c`
+
+<CpyLink path="Objects/rangeobject.c" />
+
+`Objects/rangeobject.c` implements Python's built-in `range` type. All operations are
+integer-arithmetic-only with no list allocation. The iterator (`rangeiterobject`) holds a
+current index and reduces `__next__` to a single addition.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-100 | `rangeobject` struct, `range_new` | Construction from start/stop/step |
+| 101-300 | `range_length_obj`, `compute_range_length` | O(1) length computation |
+| 301-450 | `range_item`, `range_contains` | O(1) index and membership |
+| 451-580 | `range_richcompare` | Value-based equality |
+| 581-720 | `rangeiterobject`, `rangeiter_next` | Lazy iterator |
+
+## Reading
+
+### O(1) length
+
+The length formula is `max(0, ceil((stop - start) / step))`. For large-integer ranges
+CPython uses `PyLong` arithmetic so the length never overflows.
+
+```c
+// CPython: Objects/rangeobject.c:154 compute_range_length
+static PyObject *
+compute_range_length(PyObject *start, PyObject *stop, PyObject *step)
+{
+    /* if step > 0: max(0, (stop - start + step - 1) / step)
+       if step < 0: max(0, (stop - start + step + 1) / step) */
+    ...
+}
+```
+
+### O(1) `__contains__`
+
+Membership is tested by checking divisibility: `(value - start) % step == 0` and
+`0 <= (value - start) // step < length`.
+
+```c
+// CPython: Objects/rangeobject.c:358 range_contains_long
+static int
+range_contains_long(rangeobject *r, PyObject *ob)
+{
+    int cmp1, cmp2, cmp3;
+    PyObject *tmp1 = NULL, *tmp2 = NULL;
+    /* ob >= start */
+    cmp1 = PyObject_RichCompareBool(r->start, ob, Py_LE);
+    ...
+    /* (ob - start) % step == 0 */
+    ...
+}
+```
+
+### `rangeiter_next`
+
+The iterator stores `index` and `len`. Each `__next__` call computes
+`start + index * step`, increments `index`, and returns. When `index >= len` it raises
+`StopIteration`.
+
+```c
+// CPython: Objects/rangeobject.c:640 rangeiter_next
+static PyObject *
+rangeiter_next(rangeiterobject *r)
+{
+    if (r->index < r->len) {
+        long result = (long)(r->start +
+                             (unsigned long)(r->index++) * r->step);
+        return PyLong_FromLong(result);
+    }
+    return NULL;
+}
+```
+
+### Rich comparison
+
+Two ranges are equal if and only if they represent the same sequence of values. CPython
+checks: same length, and if length is non-zero, same first element and (if length > 1) same
+last element (which determines step).
+
+## gopy notes
+
+Not yet ported. `range` is a built-in type that must live in the core objects layer. The Go
+struct will hold `start`, `stop`, `step` as `*big.Int` to handle arbitrary-precision ranges
+as CPython does.

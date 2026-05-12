@@ -1,0 +1,127 @@
+---
+title: "_cursesmodule.c — ncurses terminal UI"
+description: "Annotation of CPython Modules/_cursesmodule.c, the ncurses wrapper backing the curses module"
+cpython_path: Modules/_cursesmodule.c
+cpython_version: "3.14"
+lines: 4000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_cursesmodule.c` wraps the ncurses (or PDCurses on Windows) C library to give Python
+programs a terminal UI toolkit. `Lib/curses/__init__.py` and `Lib/curses/wrapper.py`
+add a few convenience helpers on top; almost all real work lives in this extension.
+The module centres on `PyCursesWindow`, a Python type that owns a single `WINDOW*`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–150 | includes / platform guards | ncurses headers, `PyCursesInitialised` macro |
+| 151–400 | `PyCursesWindow` struct + type slots | Owns a `WINDOW*`; all window methods hang here |
+| 401–700 | `initscr` / `endwin` | Screen lifecycle; `setjmp`/`longjmp` guard |
+| 701–1100 | `addch` / `addstr` / `addnstr` | Character and string output with optional attributes |
+| 1101–1400 | `move` / `refresh` / `clear` | Cursor movement and screen redraw |
+| 1401–1700 | `getch` / `getstr` / `getkey` | Keyboard input, timeout handling |
+| 1701–2100 | `newwin` / `subwin` / `derwin` | Window and sub-window creation |
+| 2101–2500 | color API | `start_color`, `init_pair`, `color_pair`, `init_color` |
+| 2501–2900 | attribute constants | `A_BOLD`, `A_UNDERLINE`, `A_REVERSE` etc. |
+| 2901–4000 | method tables, module init | `PyMethodDef`, `PyModuleDef`, `PyInit__curses` |
+
+## Reading
+
+### PyCursesInitialised guard and setjmp/longjmp
+
+ncurses crashes hard if you call window functions before `initscr()`. CPython guards
+every entry point with a macro that returns a Python exception if the screen has not
+been initialised. ncurses itself uses `setjmp`/`longjmp` internally for fatal error
+recovery, which is why the module must avoid C++ destructors across ncurses frames.
+
+```c
+// CPython: Modules/_cursesmodule.c:175 PyCursesInitialised
+#define PyCursesInitialised \
+    if (!initialised) { \
+        PyErr_SetString(PyCursesError, \
+                        "must call initscr() first"); \
+        return NULL; \
+    }
+```
+
+### initscr and endwin
+
+`initscr()` allocates the `stdscr` global, sets terminal raw mode, and records that
+the module is live. `endwin()` restores the terminal. Both are thin wrappers because
+ncurses manages the underlying terminal state.
+
+```c
+// CPython: Modules/_cursesmodule.c:410 PyCurses_InitScr
+static PyObject *
+PyCurses_InitScr(PyObject *self, PyObject *args)
+{
+    WINDOW *win = initscr();
+    if (win == NULL) {
+        PyErr_SetString(PyCursesError, "initscr() returned NULL");
+        return NULL;
+    }
+    initialised = TRUE;
+    return (PyObject *) PyCursesWindow_New(state, win, NULL);
+}
+```
+
+### addstr: text output with attributes
+
+`addstr` is the most-used window method. It accepts an optional `(y, x)` pair to move
+first, plus an optional integer attribute mask. The implementation decodes the Python
+`str` to the locale encoding before calling ncurses `waddnstr`.
+
+```c
+// CPython: Modules/_cursesmodule.c:730 PyCursesWindow_AddStr
+    if (use_xy)
+        rtn = wmove(self->win, y, x);
+    if (rtn != ERR) {
+        Py_BEGIN_ALLOW_THREADS
+        rtn = waddnstr(self->win, str, n);
+        Py_END_ALLOW_THREADS
+    }
+    if (attr_p) wattrset(self->win, attr_old);
+```
+
+### Color API
+
+Color support requires calling `start_color()` once, then `init_pair(n, fg, bg)` to
+define a palette entry, and `color_pair(n)` to produce an attribute integer that can
+be OR'd with `A_BOLD` etc.
+
+```c
+// CPython: Modules/_cursesmodule.c:2110 PyCurses_Start_Color
+static PyObject *
+PyCurses_Start_Color(PyObject *self, PyObject *args)
+{
+    PyCursesInitialised;
+    if (start_color() == ERR) {
+        PyErr_SetString(PyCursesError, "start_color() returned ERR");
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+## gopy notes
+
+- `curses` is not in the gopy port scope; terminal UI is outside the CPython stdlib
+  subset targeted for v0.12.x.
+- If ported later, `PyCursesWindow` maps to a Go struct holding an `*nc.Window`
+  (from a cgo ncurses binding). The `setjmp`/`longjmp` path has no Go equivalent;
+  replace with a deferred `recover()`.
+- The `PyCursesInitialised` guard becomes a boolean field on the module state struct
+  checked at the start of each method.
+
+## CPython 3.14 changes
+
+- 3.9: `get_wch()` added for wide-character input.
+- 3.10: `PyCursesWindow` slots converted to the multi-phase module init pattern.
+- 3.11: `ncursesw` (wide-char) is now preferred over plain `ncurses` on Linux.
+- 3.13: `curses.get_escdelay()` / `set_escdelay()` and `get_tabsize()` /
+  `set_tabsize()` added.
+- 3.14: No functional changes; internal cleanup of the `PyCurses_API` capsule layout.

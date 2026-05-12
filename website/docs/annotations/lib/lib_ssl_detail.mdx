@@ -1,0 +1,71 @@
+---
+title: Lib/ssl.py
+description: "ssl module wrapper: SSLContext creation, wrap_socket/wrap_bio, certificate loading, and the high-level create_default_context for secure TLS connections."
+cpython_path: Lib/ssl.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/ssl.py" />
+
+`Lib/ssl.py` wraps the `_ssl` C extension which uses OpenSSL. It provides `SSLContext`, `SSLSocket`, `SSLObject`, and the `create_default_context()` convenience function. The module handles certificate verification, SNI, ALPN protocol negotiation, and the handshake lifecycle.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | imports, constants | `PROTOCOL_TLS_CLIENT`, `CERT_REQUIRED`, `OP_*` flags |
+| 101-300 | `SSLContext` | Context object; `load_cert_chain`, `load_verify_locations` |
+| 301-500 | `SSLSocket` | Inherits `socket`; `do_handshake`, `read`, `write` |
+| 501-650 | `SSLObject` | Non-socket TLS object for use with `SSLContext.wrap_bio` |
+| 651-850 | `create_default_context` | Secure context with hostname verification and ALPN |
+| 851-1200 | `cert_time_to_seconds`, helpers | Certificate parsing utilities |
+
+## Reading
+
+### create_default_context
+
+`create_default_context()` creates an `SSLContext` with `PROTOCOL_TLS_CLIENT`, enables `CERT_REQUIRED`, loads the system CA bundle via `load_default_certs()`, and disables old protocol versions. This is the recommended entry point for HTTPS clients.
+
+```python
+# CPython: Lib/ssl.py:651 create_default_context
+def create_default_context(purpose=Purpose.SERVER_AUTH, *,
+                           cafile=None, capath=None, cadata=None):
+    context = SSLContext(PROTOCOL_TLS_CLIENT)
+    context.verify_mode = CERT_REQUIRED
+    context.check_hostname = True
+    if cafile or capath or cadata:
+        context.load_verify_locations(cafile, capath, cadata)
+    else:
+        context.load_default_certs(purpose)
+    return context
+```
+
+### SSLSocket.do_handshake
+
+`do_handshake()` completes the TLS handshake. After a successful handshake, `cipher()` returns the negotiated cipher suite, `getpeercert()` returns the peer's certificate, and `selected_alpn_protocol()` returns the negotiated ALPN protocol.
+
+```python
+# CPython: Lib/ssl.py:301 SSLSocket.do_handshake
+def do_handshake(self, block=False):
+    self._check_connected()
+    timeout = self.gettimeout()
+    try:
+        self._sslobj.do_handshake()
+    except SSLWantReadError:
+        if self.timeout == 0.0 and not block:
+            raise
+        select.select([self], [], [], timeout)
+        self._sslobj.do_handshake()
+```
+
+### wrap_bio for async I/O
+
+`SSLContext.wrap_bio(incoming, outgoing, server_side, server_hostname)` creates an `SSLObject` that reads from and writes to `MemoryBIO` objects rather than a socket. This is the interface used by `asyncio` to integrate TLS without blocking I/O.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/ssl/`. Go's `crypto/tls` package provides equivalent functionality; the port would wrap `tls.Config` as `SSLContext` and expose `tls.Conn` as `SSLSocket`.

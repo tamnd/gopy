@@ -1,0 +1,150 @@
+---
+title: "pickle: dispatch table, opcodes, memo, and protocol 5"
+description: "How Pickler.dump routes through the dispatch table, save_reduce handles __reduce_ex__, the Unpickler opcode loop, memo for circular references, and protocol 5 out-of-band buffers"
+cpython_path: Lib/pickle.py
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: module/pickle
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pickle` serialises arbitrary Python objects to a byte stream and deserialises them back.
+The pure-Python `Lib/pickle.py` is the reference implementation; `_pickle` is a C
+accelerator that mirrors it exactly. Protocol versions 0-5 are supported; protocol 5
+added out-of-band buffer support for zero-copy transfer of large binary objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | module constants, opcodes, exceptions | Opcode bytes (`MARK`, `STOP`, etc.) and `PickleError` hierarchy |
+| 201-350 | `Pickler.__init__`, `dump` | Entry point; selects framing for protocols 4+ |
+| 351-850 | `Pickler` dispatch table, `save_reduce`, `save_global` | Per-type save methods plus `__reduce_ex__` and memo |
+| 1001-1450 | `Unpickler.__init__`, `load`, opcode handlers | Opcode dispatch loop; `load_global`, `load_reduce`, `load_build` |
+| 1451-1600 | Protocol 5 (`PickleBuffer`, `NEXT_BUFFER`, `READONLY_BUFFER`) | Out-of-band buffer callbacks |
+| 1601-1800 | `dump`, `dumps`, `load`, `loads` | Module-level convenience wrappers |
+
+## Reading
+
+### Pickler dispatch table and `save`
+
+`Pickler.save` checks the memo for already-seen objects, then routes by `type(obj)`:
+
+```python
+# Lib/pickle.py (simplified)
+def save(self, obj, save_persistent_id=True):
+    # Check memo first (handles circular refs and shared objects)
+    x = self.memo.get(id(obj))
+    if x is not None:
+        self.write(self.get(x[0]))
+        return
+    # Persistent ID hook
+    if save_persistent_id:
+        pid = self.persistent_id(obj)
+        if pid is not None:
+            self.save_pers(pid)
+            return
+    t = type(obj)
+    if t is int:
+        self.save_int(obj); return
+    reduce = getattr(obj, '__reduce_ex__', None)
+    rv = reduce(self.proto)
+    self.save_reduce(obj=obj, *rv)
+```
+
+Types without an entry fall through to `__reduce_ex__`.
+
+### `save_reduce` and `__reduce_ex__`
+
+`save_reduce` handles the five-tuple `(callable, args, state, listitems, dictitems)` from
+`__reduce_ex__` and emits a `GLOBAL`/`REDUCE` opcode sequence:
+
+```python
+# Lib/pickle.py (simplified)
+def save_reduce(self, func, args, state=None,
+                listitems=None, dictitems=None,
+                state_setter=None, obj=None):
+    save = self.save
+    write = self.write
+    save(func)
+    save(args)
+    write(REDUCE)
+    if obj is not None:
+        # Memoize immediately after REDUCE so recursive structures work
+        if id(obj) not in self.memo:
+            self.memoize(obj)
+    if state is not None:
+        save(state)
+        write(BUILD)
+```
+
+`memoize` assigns a numeric index and emits a `PUT` opcode so the unpickler can record
+the reconstructed object in its own memo before processing the rest of the stream.
+
+### Unpickler opcode loop and memo for circular references
+
+`Unpickler.load` reads one opcode byte at a time and dispatches to a handler. The memo
+dict maps integer keys (written by `PUT`/`BINPUT`) to live objects:
+
+```python
+# Lib/pickle.py (simplified)
+def load(self):
+    read = self.read
+    dispatch = self.dispatch
+    while True:
+        key = read(1)
+        if not key:
+            raise EOFError
+        assert isinstance(key, bytes_types)
+        dispatch[key[0]](self)   # calls e.g. load_binput, load_reduce
+        # STOP handler raises _Stop(value) to return the root object
+
+def load_binput(self):
+    i = self.read(1)[0]
+    self.memo[i] = self.stack[-1]  # record by index
+
+def load_binget(self):
+    self.append(self.memo[self.read(1)[0]])  # restore by index
+```
+
+Circular references work because `PUT` is emitted right after `REDUCE`, before
+`__setstate__` runs, so any forward reference in `state` finds the object in the memo.
+
+### Protocol 5 out-of-band buffers
+
+Protocol 5 adds `PickleBuffer` and two opcodes (`NEXT_BUFFER`, `READONLY_BUFFER`).
+The pickler calls an optional `buffer_callback` instead of inlining large binary data:
+
+```python
+# Lib/pickle.py (simplified)
+def save_picklebuffer(self, obj):
+    if self.proto < 5:
+        raise PicklingError("PickleBuffer can only be pickled with protocol >= 5")
+    with obj.raw() as m:
+        if m.readonly:
+            self.write(READONLY_BUFFER)
+        else:
+            self.write(NEXT_BUFFER)
+        if self.buffer_callback is not None:
+            self.buffer_callback(obj)
+        else:
+            # Inline fallback: write as bytes
+            self.save_bytes(bytes(m))
+```
+
+The unpickler's `buffer_callback` receives `PickleBuffer` objects in stream order,
+enabling zero-copy reconstruction on the receiving end.
+
+## gopy notes
+
+- The opcode dispatch table maps cleanly to a `[256]func(*Unpickler)` array in Go for
+  direct byte indexing, faster than Python's dict lookup.
+- Memo deduplication uses `id(obj)` (pointer identity). The Go side must hold a strong
+  reference alongside the uintptr key to prevent GC address reuse.
+- `__reduce_ex__` resolution requires `objects/protocol.go`; already wired for protocol 2+.
+- Protocol 5 `PickleBuffer` wraps a `memoryview`. Represent it as a slice header and defer
+  the full C buffer protocol until `memoryview` is ported.
+- CPython 3.14: `pickle.loads` now takes `buffers` as keyword-only, and `Pickler` has a
+  `noside_effects` fast-path for immutable types.

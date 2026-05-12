@@ -1,0 +1,134 @@
+---
+title: "_queuemodule.c - queue.SimpleQueue C accelerator"
+description: "SimpleQueue C struct with mutex and condvar, put/get with optional timeout, ShutDown exception (3.13+), and 3.14 changes"
+cpython_path: Modules/_queuemodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: module/queue
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_queuemodule.c` provides the C-accelerated `queue.SimpleQueue` type
+and the `queue.ShutDown` exception introduced in CPython 3.13. The pure-Python
+`Queue` / `LifoQueue` / `PriorityQueue` classes remain in `Lib/queue.py` and
+are not accelerated here.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `simplequeue_state` | struct | 20-55 | Per-module state: holds references to `SimpleQueueType` and `ShutDownType` |
+| `SimpleQueueObject` | struct | 60-95 | C layout: `PyMutex lock`, `_PyEventRc *not_empty`, `_PyObjectQueue lst`, `shutdown` flag |
+| `simplequeue_new` | function | 110-145 | Allocates object, inits mutex and condvar, sets `shutdown = 0` |
+| `simplequeue_dealloc` | function | 150-175 | Destroys condvar and mutex, frees `lst` items |
+| `_queue_SimpleQueue_put_impl` | function | 200-260 | Acquires mutex, appends to `lst`, signals `not_empty`, releases mutex |
+| `_queue_SimpleQueue_get_impl` | function | 270-380 | Acquires mutex, waits on `not_empty` with optional timeout, pops head, checks `shutdown` |
+| `_queue_SimpleQueue_get_nowait_impl` | function | 385-420 | Non-blocking get: returns `Empty` immediately if `lst` is empty or queue is shut down |
+| `_queue_SimpleQueue_shutdown_impl` | function | 430-480 | Sets `shutdown = 1`, broadcasts `not_empty` to unblock all waiters |
+| `simplequeue_queue_size` | function | 490-510 | Returns `lst` length under lock |
+| `ShutDown` | type | 520-560 | Exception class: raised by `get` / `get_nowait` when queue is shut down and empty |
+| `module_exec` | function | 565-595 | Adds `SimpleQueue` type and `ShutDown` exception to the `_queue` module |
+
+## Reading
+
+### SimpleQueueObject struct
+
+The C struct keeps synchronization primitives and the item list together:
+
+```c
+/* Modules/_queuemodule.c:62 SimpleQueueObject */
+typedef struct {
+    PyObject_HEAD
+    PyMutex lock;
+    _PyEventRc *not_empty;   /* broadcast when an item is added */
+    _PyObjectQueue lst;      /* singly-linked list of items */
+    int shutdown;
+    int lock_inited;
+} SimpleQueueObject;
+```
+
+`_PyObjectQueue` is an intrusive linked list from `Include/internal/pycore_queue.h`.
+`_PyEventRc` is the reference-counted event primitive used by `PyMutex`-based
+condition variables since CPython 3.12. Prior to 3.12 this was a
+`pthread_cond_t` guarded by the GIL.
+
+### put and get with optional timeout
+
+`put` is unconditional (unbounded queue):
+
+```c
+/* Modules/_queuemodule.c:215 _queue_SimpleQueue_put_impl */
+static PyObject *
+_queue_SimpleQueue_put_impl(SimpleQueueObject *self, PyObject *item,
+                             int block, PyObject *timeout)
+{
+    /* block and timeout args are accepted but ignored (unbounded queue) */
+    PyMutex_Lock(&self->lock);
+    if (self->shutdown) {
+        PyMutex_Unlock(&self->lock);
+        PyErr_SetString(ShutDownError, "put to a shut-down queue");
+        return NULL;
+    }
+    _PyObjectQueue_Put(&self->lst, item);
+    Py_INCREF(item);
+    _PyEventRc_Signal(self->not_empty);
+    PyMutex_Unlock(&self->lock);
+    Py_RETURN_NONE;
+}
+```
+
+`get` with timeout converts the Python `timeout` float to nanoseconds and
+calls `_PyMutex_LockTimed`. After waking it re-checks the queue under the lock
+in a loop to handle spurious wakeups:
+
+```c
+/* Modules/_queuemodule.c:290 _queue_SimpleQueue_get_impl (abbreviated) */
+for (;;) {
+    PyMutex_Lock(&self->lock);
+    item = _PyObjectQueue_Get(&self->lst);
+    if (item != NULL || self->shutdown) {
+        PyMutex_Unlock(&self->lock);
+        break;
+    }
+    /* wait, then retry */
+    _PyEventRc_Wait(self->not_empty, &self->lock, deadline_ns);
+    PyMutex_Unlock(&self->lock);
+    if (timed_out) { /* set by _PyEventRc_Wait */
+        PyErr_SetString(EmptyError, "get timed out");
+        return NULL;
+    }
+}
+if (item == NULL && self->shutdown) {
+    PyErr_SetString(ShutDownError, "..."); return NULL;
+}
+```
+
+### ShutDown exception and 3.13/3.14 changes
+
+`queue.ShutDown` was added in CPython 3.13 (bpo-91078). Calling
+`q.shutdown(immediate=True)` sets `shutdown = 1` and broadcasts the condvar,
+causing all waiting `get` callers to raise `ShutDown` once the queue is empty.
+`shutdown(immediate=False)` (the default) lets remaining items drain first.
+
+In 3.14 the `_PyEventRc` API was stabilised and `_PyObjectQueue` replaced the
+earlier `_Py_queue_item` linked list. The public Python API did not change.
+
+## gopy notes
+
+- `SimpleQueueObject` maps to a Go struct with `sync.Mutex`, a
+  `sync.Cond` (equivalent to `not_empty`), and a `[]any` slice for the
+  item list. No intrusive linked list is needed.
+- The timeout path should use `time.Now().Add(d)` and loop on
+  `cond.WaitWithDeadline` (or a `time.After` select). Match CPython's
+  re-check-under-lock loop to avoid lost-wakeup bugs.
+- `shutdown` is a plain `bool` guarded by the same mutex; no atomics needed
+  because every access already holds the lock.
+- `ShutDown` becomes a Go error type registered in the exception table.
+  `get_nowait` returns `(nil, ErrEmpty)` or `(nil, ErrShutDown)` depending
+  on state; callers convert these to the Python exception objects.
+- The `block` and `timeout` arguments on `put` are accepted for API
+  compatibility but have no effect (unbounded queue). Match CPython's
+  behaviour of raising `ShutDown` on `put` after shutdown rather than
+  silently discarding the item.

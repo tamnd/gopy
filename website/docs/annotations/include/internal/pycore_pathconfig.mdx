@@ -1,0 +1,119 @@
+---
+title: Include/internal/pycore_pathconfig.h
+description: Internal path configuration API that seeds sys.path, prefix, and program location at interpreter startup.
+cpython_path: Include/internal/pycore_pathconfig.h
+cpython_version: "3.14"
+lines: ~80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_pathconfig.h`
+
+<CpyLink path="Include/internal/pycore_pathconfig.h" />
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `_PyPathConfig` | struct | Holds all computed path strings for one interpreter instance |
+| `_PyPathConfig.prefix` | field | Installation prefix (equivalent of `sys.prefix`) |
+| `_PyPathConfig.exec_prefix` | field | Platform-specific prefix (equivalent of `sys.exec_prefix`) |
+| `_PyPathConfig.module_search_path_env` | field | Value of `PYTHONPATH` env variable at startup |
+| `_PyPathConfig.program_full_path` | field | Absolute path to the Python executable |
+| `_PyPathConfig.home` | field | Value of `PYTHONHOME` env variable, or NULL |
+| `_PyConfig_InitPathConfig` | function | Populates a `_PyPathConfig` from a `PyConfig` and the process environment |
+| `_Py_GetPathWithConfig` | function | Returns the colon-separated `sys.path` string derived from a `_PyPathConfig` |
+| `_PyPathConfig_Clear` | function | Frees all `wchar_t *` strings inside a `_PyPathConfig` |
+
+The struct and all functions are guarded by `Py_BUILD_CORE`. The public `Py_GetPath()` and `sys.path` are built on top of `_Py_GetPathWithConfig`.
+
+## Reading
+
+### Struct layout and ownership
+
+Every field in `_PyPathConfig` is a heap-allocated `wchar_t *` string. `_PyPathConfig_Clear` must be called to free them; partial initialization is safe because `_PyPathConfig_Clear` checks for NULL before freeing.
+
+```c
+// CPython: Include/internal/pycore_pathconfig.h
+typedef struct {
+    wchar_t *program_full_path;
+    wchar_t *prefix;
+    wchar_t *exec_prefix;
+    wchar_t *module_search_path_env;
+    wchar_t *home;
+    wchar_t *stdlib_dir;
+    /* set by Py_SetPath */
+    wchar_t *module_search_paths_str;
+} _PyPathConfig;
+```
+
+`stdlib_dir` (added in 3.11) points directly to the standard library tree and is used by the frozen module importer to locate `.py` fallbacks when the frozen bytecode is unavailable.
+
+### Path computation flow
+
+`_PyConfig_InitPathConfig` calls the platform-specific `getpath` function (implemented via a small embedded Python script in `Modules/getpath.py` since CPython 3.11). The script resolves the executable location, walks up to find `prefix` by looking for landmark files (`lib/python3.x/os.py`), and emits the final path list.
+
+```c
+// CPython: Python/pathconfig.c
+PyStatus
+_PyConfig_InitPathConfig(PyConfig *config, int compute_path_config)
+{
+    PyStatus status;
+    _PyPathConfig pathconfig = _PyPathConfig_INIT;
+
+    status = pathconfig_init_from_config(&pathconfig, config);
+    if (_PyStatus_EXCEPTION(status)) {
+        goto done;
+    }
+    if (compute_path_config) {
+        status = _PyPathConfig_ComputeSysPath0(
+            config->program_name, &pathconfig);
+    }
+    ...
+done:
+    _PyPathConfig_Clear(&pathconfig);
+    return status;
+}
+```
+
+The fact that path computation itself runs a mini Python interpreter (for `getpath.py`) means it cannot be called before the core runtime is initialized. This is why `_PyConfig_InitPathConfig` is phase-one work, invoked during `Py_InitializeFromConfig` before any user code runs.
+
+### Public surface mapping
+
+`_Py_GetPathWithConfig` assembles the final `sys.path` list by concatenating (in order): the script directory, `PYTHONPATH` entries, and the computed stdlib paths. It then stores the result on `sys.path` by calling `PySys_SetObject`.
+
+```c
+// CPython: Python/pathconfig.c
+static PyStatus
+set_sys_path(PyThreadState *tstate, _PyPathConfig *pathconfig)
+{
+    PyObject *path_list = pathconfig_module_search_paths(pathconfig);
+    if (path_list == NULL) {
+        return _PyStatus_ERR("can't compute sys.path");
+    }
+    if (PySys_SetObject("path", path_list) < 0) {
+        Py_DECREF(path_list);
+        return _PyStatus_ERR("can't set sys.path");
+    }
+    Py_DECREF(path_list);
+    return _PyStatus_OK();
+}
+```
+
+## gopy mirror
+
+`pycore_pathconfig.h` has no direct counterpart in gopy. The design decision is intentional: gopy modules are statically linked at compile time, so there is no filesystem path to search at runtime. The consequences are:
+
+- `sys.path` is either empty or contains a single placeholder; no `PYTHONPATH` logic is needed.
+- `sys.prefix` and `sys.exec_prefix` are not set to meaningful values.
+- The `importlib` machinery in gopy bypasses the path-based finders entirely and resolves module names against the static registry in `stdlibinit/registry.go`.
+
+If gopy ever supports dynamic `.py` loading (not in scope for v0.12.1), a minimal `_PyPathConfig`-equivalent struct and a Go port of `_PyConfig_InitPathConfig` would be needed.
+
+## CPython 3.14 changes
+
+- `getpath.py` (the Python-language path computation script introduced in 3.11) received several fixes in 3.13 and 3.14 for edge cases involving symbolic-linked executables on macOS and Windows UNC paths.
+- `stdlib_dir` is now guaranteed non-NULL after successful `_PyConfig_InitPathConfig` in 3.13 and later; earlier versions left it NULL on some build configurations.
+- `_PyPathConfig_Clear` was made public to `Py_BUILD_CORE_MODULE` in 3.14 to allow extension modules that embed their own sub-interpreter to clean up path state without calling private symbols.

@@ -1,0 +1,154 @@
+---
+title: Modules/_bisectmodule.c
+description: "Annotated reading of CPython's _bisectmodule.c: binary search and sorted-insert helpers"
+cpython_path: Modules/_bisectmodule.c
+cpython_version: "3.14"
+lines: 260
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_bisectmodule.c" />
+
+This file implements the `bisect` module in C. The pure-Python fallback is in `Lib/bisect.py`. The module exposes four public functions: `bisect_left`, `bisect_right`, `insort_left`, and `insort_right`. Internally, all four delegate to one of two core routines, `internal_bisect_left` and `internal_bisect_right`.
+
+## Map
+
+| Symbol | Lines (approx) | Purpose |
+|---|---|---|
+| `internal_bisect_left` | 1-70 | Core binary search, left-insertion point |
+| `internal_bisect_right` | 71-140 | Core binary search, right-insertion point |
+| `bisect_left` | 141-180 | Python wrapper: validate args, call `internal_bisect_left` |
+| `bisect_right` | 181-220 | Python wrapper: validate args, call `internal_bisect_right` |
+| `insort_left` | 221-240 | `bisect_left` then `list.insert` |
+| `insort_right` | 241-255 | `bisect_right` then `list.insert` |
+| module init | 256-260 | `PyInit__bisect` |
+
+## Reading
+
+### internal_bisect_left and internal_bisect_right
+
+Both routines take a list, a target value, and an optional `[lo, hi)` range. They narrow the range with a standard binary search loop, differing only in the comparison direction that controls which side a tie falls on.
+
+```c
+// CPython: Modules/_bisectmodule.c:1 internal_bisect_left
+static Py_ssize_t
+internal_bisect_left(PyObject *list, PyObject *item,
+                     Py_ssize_t lo, Py_ssize_t hi,
+                     PyObject *key)
+{
+    PyObject *litem;
+    Py_ssize_t mid;
+    int res;
+
+    while (lo < hi) {
+        mid = ((size_t)lo + (size_t)hi) / 2;
+        litem = PyList_GET_ITEM(list, mid);
+        if (key != Py_None) {
+            litem = PyObject_CallOneArg(key, litem);
+            if (litem == NULL) return -1;
+        }
+        res = PyObject_RichCompareBool(litem, item, Py_LT);
+        if (key != Py_None) Py_DECREF(litem);
+        if (res < 0) return -1;
+        if (res)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+```
+
+`internal_bisect_right` uses `Py_GT` (item strictly greater than list element) so that equal elements are passed on the right side, yielding the right-insertion point.
+
+The midpoint computation uses `(size_t)` casts to avoid signed overflow on large lists. On a 64-bit build `Py_ssize_t` is 64 bits, but the cast is present as a correctness guard.
+
+### lo/hi parameter handling in bisect_left and bisect_right
+
+The Python wrappers validate and clamp the `lo` and `hi` parameters before forwarding to the internal routine.
+
+```c
+// CPython: Modules/_bisectmodule.c:141 bisect_left
+static PyObject *
+bisect_left(PyObject *module, PyObject *const *args,
+            Py_ssize_t nargs, PyObject *kwnames)
+{
+    Py_ssize_t lo = 0, hi = -1, index;
+    PyObject *list, *item, *key = Py_None;
+
+    /* parse positional and keyword args: list, item, lo=0, hi=len, key=None */
+
+    if (hi == -1) {
+        hi = PySequence_Size(list);
+        if (hi < 0) return NULL;
+    }
+    if (lo < 0) {
+        PyErr_SetString(PyExc_ValueError, "lo must be non-negative");
+        return NULL;
+    }
+    index = internal_bisect_left(list, item, lo, hi, key);
+    if (index < 0) return NULL;
+    return PyLong_FromSsize_t(index);
+}
+```
+
+Negative `lo` raises `ValueError`. Negative `hi` is treated as `len(list)` rather than a Python-style wrap-around index, which differs from slicing semantics. This is documented behaviour.
+
+### key argument path
+
+When `key` is not `None`, each comparison applies `key(list[mid])` before comparing to `item`. The key is called and the result immediately decremented after the comparison, so only one key-transformed object is live at a time. This means the key function is called O(log n) times, not O(n).
+
+```c
+// CPython: Modules/_bisectmodule.c:30 key call inside bisect_left loop
+        if (key != Py_None) {
+            litem = PyObject_CallOneArg(key, litem);
+            if (litem == NULL) return -1;
+        }
+        res = PyObject_RichCompareBool(litem, item, Py_LT);
+        if (key != Py_None) Py_DECREF(litem);
+```
+
+The caller is responsible for applying the same `key` to `item` before calling `bisect_left`/`bisect_right`. The module does not transform `item` itself, only the list elements. This matches the documented contract.
+
+### insort_left and insort_right
+
+Both insort functions find the insertion index, then call `PyList_Insert`.
+
+```c
+// CPython: Modules/_bisectmodule.c:221 insort_left
+static PyObject *
+insort_left(PyObject *module, PyObject *const *args,
+            Py_ssize_t nargs, PyObject *kwnames)
+{
+    Py_ssize_t index;
+    PyObject *list, *item, *key = Py_None;
+    Py_ssize_t lo = 0, hi = -1;
+
+    /* parse args same as bisect_left */
+
+    index = internal_bisect_left(list, item, lo, hi, key);
+    if (index < 0) return NULL;
+    if (key != Py_None)
+        item = PyObject_CallOneArg(key, item);
+    if (PyList_Insert(list, index, item) < 0) {
+        if (key != Py_None) Py_DECREF(item);
+        return NULL;
+    }
+    if (key != Py_None) Py_DECREF(item);
+    Py_RETURN_NONE;
+}
+```
+
+`PyList_Insert` is O(n) because it shifts all elements to the right of the insertion point. `bisect` + `insort` on a list is therefore O(n) overall, with O(log n) comparisons and O(n) data movement. For truly sorted insertion at scale, a balanced BST or `sortedcontainers.SortedList` is preferable.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/bisect/`.
+
+`internal_bisect_left` and `internal_bisect_right` translate to Go functions with signature `func internalBisectLeft(list *objects.List, item py.Object, lo, hi int, key py.Object) (int, error)`. The key-call path and DECREF discipline map to `py.Decref` calls in Go.
+
+The `lo`/`hi` defaulting logic (hi defaults to `len(list)` when omitted, negative `lo` is an error) should be reproduced exactly so edge-case callers get identical behaviour. The midpoint overflow guard is not needed in Go since `int` is at least 64 bits on all supported platforms, but keeping it as `(uint(lo)+uint(hi))/2` is harmless and documents the intent.

@@ -1,0 +1,73 @@
+---
+title: "Include/bytesobject.h: bytes object header"
+description: "Struct layout, unsafe buffer macros, construction functions, and in-place concatenation for PyBytesObject"
+cpython_path: Include/bytesobject.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: objects/bytes.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/bytesobject.h` covers the public API for immutable byte strings. The header splits across two files: the stable ABI surface in `Include/bytesobject.h` and the internal struct definition in `Include/cpython/bytesobject.h`. The unsafe buffer macros in the internal header are the hot path for C extensions that need direct memory access without going through the checked API.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-8 | `PyBytes_Type` | extern | type object singleton |
+| 9-14 | `PyBytes_Check` / `PyBytes_CheckExact` | macro | type-check helpers |
+| 17-22 | `PyBytes_FromString` | function | copies NUL-terminated C string |
+| 23-30 | `PyBytes_FromStringAndSize` | function | copies buffer of explicit length |
+| 31-38 | `PyBytes_FromFormat` | function | printf-style bytes construction |
+| 39-44 | `PyBytes_FromFormatV` | function | va_list variant of FromFormat |
+| 45-50 | `PyBytes_Size` | function | safe length query, checks type |
+| 51-56 | `PyBytes_AsString` | function | returns internal buffer, no copy |
+| 57-64 | `PyBytes_AsStringAndSize` | function | fills pointer and length out-params |
+| 65-72 | `PyBytes_Concat` | function | builds new object, decrefs both inputs |
+| 73-80 | `PyBytes_ConcatAndDel` | function | concat then Py_DECREF right operand |
+| 84-88 | `PyBytes_AS_STRING` | unsafe macro | direct ob_val pointer, no type check |
+| 89-94 | `PyBytes_GET_SIZE` | unsafe macro | reads ob_size without type check |
+| 95-100 | `_PyBytes_Resize` | internal | in-place resize before first publish |
+
+## Reading
+
+### Struct layout (cpython/bytesobject.h)
+
+```c
+typedef struct {
+    PyObject_VAR_HEAD
+    Py_hash_t ob_shash;    /* cached hash, -1 if not yet computed */
+    char ob_val[1];        /* NUL-terminated character data */
+} PyBytesObject;
+```
+
+Like tuples, the character data lives inline with the object header. `PyBytes_FromStringAndSize(s, n)` allocates `sizeof(PyBytesObject) + n` bytes in one call, copies `s` into `ob_val`, and appends a NUL terminator so the buffer is safe to pass to C functions expecting a C string. The inline allocation is what makes `PyBytes_AS_STRING` safe: the pointer arithmetic is always within the same heap block.
+
+### Unsafe macros
+
+```c
+#define PyBytes_AS_STRING(op)  (assert(PyBytes_Check(op)), ((PyBytesObject *)(op))->ob_val)
+#define PyBytes_GET_SIZE(op)   (assert(PyBytes_Check(op)), Py_SIZE(op))
+```
+
+Both macros include an `assert` in debug builds but compile away completely in release builds (`NDEBUG`). Extensions that call these on an object they did not verify as `PyBytes_CheckExact` first risk reading garbage data from an unrelated struct. The checked equivalents `PyBytes_AsString` and `PyBytes_Size` perform the `isinstance` check and set `TypeError` on failure.
+
+### PyBytes_ConcatAndDel and in-place merge
+
+```c
+void PyBytes_Concat(PyObject **pv, PyObject *w);
+void PyBytes_ConcatAndDel(PyObject **pv, PyObject *w);
+```
+
+Both functions take a pointer-to-pointer for the left operand. If `*pv` has a reference count of 1 and the total length fits within the existing allocation (only possible after `_PyBytes_Resize` pre-allocation), CPython may reuse the buffer. In practice this rarely triggers because `PyBytes_FromStringAndSize` allocates exactly `n` bytes. The main value of `ConcatAndDel` is ergonomic: it calls `Py_DECREF(w)` unconditionally after the concat, letting callers chain operations without manual decrefs.
+
+`_PyBytes_Resize` is the only way to grow a bytes object in place, and it is only valid before the object has been handed to any other code. The compiler uses it when building a bytes literal that is assembled in multiple steps.
+
+## gopy notes
+
+- `objects/bytes.go` backs `PyBytesObject` with a Go `[]byte`. The inline struct trick is not replicated; the slice header and backing array are separate allocations, which means `PyBytes_AS_STRING` cannot be a zero-copy cast. Instead the macro maps to a method that returns the slice's underlying pointer via `unsafe.SliceData`.
+- `ob_shash` maps to a `hash int64` field initialized to -1. The first call to `BytesHash` computes a FNV-derived hash matching CPython's `_Py_HashBytes` and caches it.
+- `PyBytes_ConcatAndDel` is implemented as a thin wrapper around `BytesConcat` followed by `DecRef`. The in-place resize fast path is not attempted because Go's garbage collector does not expose realloc semantics.
+- `PyBytes_FromFormat` delegates to `fmt.Sprintf` with a thin format-string translator. Only the subset of format codes that CPython documents for `PyBytes_FromFormat` (percent-d, percent-s, percent-R, percent-p) are supported.

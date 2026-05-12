@@ -1,0 +1,77 @@
+---
+title: Objects/longobject.c (part 2)
+description: "longobject part 2: Karatsuba multiplication for large ints, division via Knuth Algorithm D, bit_length/bit_count, to_bytes/from_bytes, and the compact integer optimisation for -5 to 256."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/longobject.c` (part 2)
+
+<CpyLink path="Objects/longobject.c" />
+
+This annotation covers the multiplication, division, and utility methods of
+`Objects/longobject.c`. For construction, small-integer caching, addition, subtraction,
+and `__repr__` see the `objects_longobject` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-800 | `long_mul`, `k_mul` | Schoolbook and Karatsuba multiplication |
+| 801-1600 | `long_divrem`, `l_divmod` | Knuth Algorithm D long division |
+| 1601-2200 | `long_mod`, `long_divmod` | Modulo and divmod |
+| 2201-2800 | `long_pow` | Binary exponentiation with Montgomery modular reduction |
+| 2801-3400 | `long_bit_length`, `long_bit_count` | Bit operations |
+| 3401-6000 | `long_to_bytes`, `long_from_bytes`, `long_as_integer_ratio` | Conversion utilities |
+
+## Reading
+
+### Karatsuba multiplication
+
+For integers above `KARATSUBA_CUTOFF` (typically 70 digits), `k_mul` uses the Karatsuba
+algorithm: split each operand into two halves, recurse on 3 products instead of 4, then
+combine. This gives O(n^1.585) instead of O(n^2).
+
+```c
+// CPython: Objects/longobject.c:3210 k_mul
+static PyLongObject *
+k_mul(PyLongObject *a, PyLongObject *b)
+{
+    Py_ssize_t asize = _PyLong_DigitCount(a);
+    Py_ssize_t bsize = _PyLong_DigitCount(b);
+    Py_ssize_t shift = bsize >> 1;
+    /* Split: ah*2^shift + al, bh*2^shift + bl */
+    ...
+    /* t1 = (ah+al)*(bh+bl), t2 = ah*bh, t3 = al*bl */
+    /* result = t2*2^(2*shift) + (t1-t2-t3)*2^shift + t3 */
+    ...
+}
+```
+
+### Knuth Algorithm D
+
+`long_divrem` implements Knuth Algorithm D (TAOCP Vol.2, §4.3.1). It normalises the
+divisor to have the high bit set, performs multi-digit long division, and un-normalises
+the remainder. This is the fallback for divisions that cannot use a single hardware divide.
+
+### Small-integer cache
+
+Integers from -5 to 256 are singletons stored in `_PyLong_SMALL_INTS`. Arithmetic
+operations check whether the result fits in this range and return the cached singleton.
+This avoids allocation for the most common integer values.
+
+### `to_bytes` / `from_bytes`
+
+`int.to_bytes(length, byteorder)` packs the integer into a `bytes` object in big or
+little endian order. `int.from_bytes(bytes, byteorder)` is the inverse. Both support
+`signed=True` for two's-complement encoding.
+
+## gopy notes
+
+gopy uses `math/big.Int` for arbitrary-precision integers. Karatsuba multiplication is
+provided by `math/big` automatically. The compact integer optimisation maps to Go's
+`int64` fast path in `objects/int.go`.

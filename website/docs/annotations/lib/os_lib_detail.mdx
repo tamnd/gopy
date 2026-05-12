@@ -1,0 +1,167 @@
+---
+title: Lib/os.py
+description: "Docusaurus annotation for CPython Lib/os.py"
+cpython_path: Lib/os.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`os.py` is the portability shim that presents one unified namespace regardless
+of whether the process runs on a POSIX or NT host. It imports the platform C
+extension (`posix` or `nt`) wholesale, wraps the environment in a
+`MutableMapping`, and adds pure-Python helpers (`walk`, `makedirs`,
+`fsencode`/`fsdecode`) that have no C counterpart.
+
+Source: <CpyLink path="Lib/os.py" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-22 | module docstring, imports | `abc`, `sys`, `stat` |
+| 36-39 | `__all__` (initial) | seed list; extended after platform import |
+| 52-101 | platform import block | `from posix import *` or `from nt import *` |
+| 103 | `sys.modules['os.path'] = path` | installs `posixpath` or `ntpath` as `os.path` |
+| 110-... | `_have_functions` block | builds `supports_*` sets |
+| 211-241 | `makedirs` | recursive mkdir with `exist_ok` |
+| 243-295 | `removedirs` | recursive rmdir walking upward |
+| 297-... | `walk` | stack-based directory tree generator |
+| 437-... | `fwalk` | `walk` variant yielding open directory fds |
+| 693-799 | `_Environ`, `environ` | live MutableMapping backed by `putenv`/`unsetenv` |
+| 851-877 | `fsencode`, `fsdecode` | filesystem codec pair via `_fscodec()` closure |
+| ~1100 | `urandom` | falls through to the C-level builtin |
+
+## Reading
+
+### Platform-conditional import
+
+The first thing `os.py` does after its own header imports is decide which C
+extension to pull in. The chosen module is star-imported so every syscall
+wrapper (`open`, `stat`, `unlink`, etc.) lands directly in `os`'s namespace.
+`os.path` is then set to the matching pure-path module and injected into
+`sys.modules` so that `import os.path` finds it.
+
+```python
+# CPython: Lib/os.py:52 platform import block
+if 'posix' in _names:
+    name = 'posix'
+    linesep = '\n'
+    from posix import *
+    import posixpath as path
+elif 'nt' in _names:
+    name = 'nt'
+    linesep = '\r\n'
+    from nt import *
+    import ntpath as path
+else:
+    raise ImportError('no os specific module found')
+
+sys.modules['os.path'] = path
+```
+
+### `_Environ` and live environment mutation
+
+`os.environ` is not a plain dict. It is a `_Environ` instance (a
+`MutableMapping`) that calls `putenv` on every write and `unsetenv` on every
+delete. This guarantees that child processes spawned after an assignment see
+the updated value without any explicit flush step.
+
+```python
+# CPython: Lib/os.py:696 _Environ
+class _Environ(MutableMapping):
+    def __setitem__(self, key, value):
+        key = self.encodekey(key)
+        value = self.encodevalue(value)
+        putenv(key, value)
+        self._data[key] = value
+
+    def __delitem__(self, key):
+        encodedkey = self.encodekey(key)
+        unsetenv(encodedkey)
+        del self._data[encodedkey]
+```
+
+The `encodekey`/`encodevalue` callables are set at construction time by
+`_create_environ_mapping` (line 769) and differ between POSIX (bytes keys) and
+Windows (str keys).
+
+### `walk` implementation
+
+`walk` uses an explicit stack rather than recursion to avoid hitting Python's
+default recursion limit on deep trees. When `topdown=True` the caller can
+mutate `dirnames` in place to prune subtrees; the implementation reads
+`dirnames` back after the `yield` before pushing child directories. The
+`followlinks=False` default prevents infinite loops caused by symlink cycles.
+
+```python
+# CPython: Lib/os.py:297 walk
+def walk(top, topdown=True, onerror=None, followlinks=False):
+    sys.audit("os.walk", top, topdown, onerror, followlinks)
+    stack = [fspath(top)]
+    islink, join = path.islink, path.join
+    while stack:
+        top = stack.pop()
+        if isinstance(top, tuple):
+            yield top
+            continue
+        # ... scandir, sort into dirs/nondirs, push or yield
+```
+
+### `makedirs` and `removedirs`
+
+`makedirs` is a recursive mkdir-p. The `exist_ok` flag was added in Python 3.2
+to handle the race between the `path.exists` check and the actual `mkdir`
+call. `removedirs` is the inverse: it calls `rmdir` on the leaf and then walks
+up the tree, stopping silently when a directory is non-empty.
+
+```python
+# CPython: Lib/os.py:211 makedirs
+def makedirs(name, mode=0o777, exist_ok=False):
+    head, tail = path.split(name)
+    if not tail:
+        head, tail = path.split(head)
+    if head and tail and not path.exists(head):
+        try:
+            makedirs(head, exist_ok=exist_ok)
+        except FileExistsError:
+            pass
+    try:
+        mkdir(name, mode)
+    except OSError:
+        if not exist_ok or not path.isdir(name):
+            raise
+```
+
+### `fsencode` and `fsdecode`
+
+Both functions are produced by the `_fscodec()` factory (line 851), which
+captures the filesystem encoding and error handler in a closure. On POSIX the
+error handler is `surrogateescape`; on Windows with `mbcs` encoding it is
+`strict`. The factory pattern means the encoding is determined once at import
+time rather than queried on every call.
+
+```python
+# CPython: Lib/os.py:851 fsencode
+def fsencode(filename):
+    filename = fspath(filename)
+    if isinstance(filename, str):
+        return filename.encode(encoding, errors)
+    else:
+        return filename
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/os/`.
+
+The platform-import block maps cleanly to Go build tags (`//go:build !windows`
+vs `//go:build windows`). `_Environ` should be a Go struct implementing the
+`MutableMapping` protocol backed by `os.Getenv`/`os.Setenv`/`os.Unsetenv`.
+`walk` can use `os.ReadDir` internally. `fsencode`/`fsdecode` rely on
+`syscall.UTF16ToString` on Windows and `[]byte` identity on POSIX. `urandom`
+delegates to `crypto/rand.Read`.

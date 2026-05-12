@@ -1,0 +1,117 @@
+---
+title: "Include/moduleobject.h + Include/cpython/moduleobject.h — module object internals"
+description: "PyModuleDef struct fields, PyModuleDef_Base, PyModule_New/Create/GetDict, multi-phase init slots, Py_mod_exec, and Py_mod_multiple_interpreters"
+cpython_path: Include/moduleobject.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: objects/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Module creation in CPython has two paths: the legacy single-phase path
+(`PyModule_Create`) and the multi-phase path (`PyModuleDef_Init` plus slot
+callbacks). Both paths share `PyModuleDef` as the central descriptor. The
+public header (`Include/moduleobject.h`) exposes the stable ABI surface, while
+the cpython-tier header adds internal fields and the slot constants used for
+multi-phase initialization.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-12 | guard + includes | boilerplate | public header only |
+| 14-22 | `PyModuleDef_Base` | struct | ref-count + linked-list node for all loaded defs |
+| 24-55 | `PyModuleDef` | struct | full descriptor, see Reading below |
+| 57-70 | `PyModule_New` | C API | creates module by name, no def |
+| 71-80 | `PyModule_NewObject` | C API | same but accepts `PyObject *name` |
+| 82-95 | `PyModule_Create` / `PyModule_Create2` | C API | single-phase init from def |
+| 97-110 | `PyModuleDef_Init` | C API | registers def for multi-phase init |
+| 112-124 | `PyModuleDef_Slot` | struct | slot index + value pointer |
+| 126-134 | `Py_mod_create` / `Py_mod_exec` | `#define` | slot indices 1 and 2 |
+| 136-142 | `Py_mod_multiple_interpreters` | `#define` | slot index 3, 3.12+ |
+| 144-150 | `PyModule_GetDict` / `PyModule_GetName` | C API | dict and name accessors |
+
+## Reading
+
+### PyModuleDef_Base and PyModuleDef
+
+`PyModuleDef_Base` is a small header prepended to every `PyModuleDef` so the
+interpreter can keep a linked list of all module definitions across imports:
+
+```c
+typedef struct PyModuleDef_Base {
+    PyObject_HEAD
+    PyObject *(*m_init)(void);
+    Py_ssize_t m_index;
+    PyObject *m_copy;
+} PyModuleDef_Base;
+```
+
+The full `PyModuleDef` adds the user-facing fields:
+
+```c
+typedef struct PyModuleDef {
+    PyModuleDef_Base m_base;
+    const char      *m_name;
+    const char      *m_doc;
+    Py_ssize_t       m_size;   /* -1 = no per-interpreter state */
+    PyMethodDef     *m_methods;
+    PyModuleDef_Slot *m_slots; /* NULL for single-phase init */
+    traverseproc     m_traverse;
+    inquiry          m_clear;
+    freefunc         m_free;
+} PyModuleDef;
+```
+
+`m_size == -1` means the module cannot be safely used across sub-interpreters
+(its state lives in C globals). A non-negative `m_size` allocates that many
+bytes of per-interpreter module state accessible via `PyModule_GetState`.
+
+### Multi-phase initialization slots
+
+When `m_slots` is non-NULL, `PyModuleDef_Init` is called instead of
+`PyModule_Create`. The slots array is terminated by `{0, NULL}` and may
+contain:
+
+```c
+#define Py_mod_create                    1
+#define Py_mod_exec                      2
+#define Py_mod_multiple_interpreters     3
+
+typedef struct {
+    int slot;
+    void *value;
+} PyModuleDef_Slot;
+```
+
+`Py_mod_create` lets the extension supply its own `PyObject *` (useful for
+subclassing `ModuleType`). `Py_mod_exec` is a callback typed as
+`int (*)(PyObject *module)` that populates the module after creation; any
+non-zero return triggers an import error. `Py_mod_multiple_interpreters` was
+added in 3.12 to opt a module into safe sub-interpreter use.
+
+### PyModule_New and PyModule_GetDict
+
+```c
+PyObject *PyModule_New(const char *name);
+PyObject *PyModule_GetDict(PyObject *module);  /* borrowed ref */
+```
+
+`PyModule_New` is the minimal constructor: it creates a bare module with an
+empty `__dict__` and sets only `__name__`. `PyModule_GetDict` returns the
+module's underlying dict as a borrowed reference; callers must not decref it.
+
+## gopy notes
+
+- `objects/module.go` defines `Module` with fields mirroring `PyModuleDef`:
+  `Name`, `Doc`, `Methods`, and a `State` slice for `m_size > 0` cases.
+- Single-phase init is handled by `NewModule` in `objects/module.go`;
+  multi-phase init (`Py_mod_exec` callback) is driven from
+  `vm/eval_import.go` during the import machinery.
+- `Py_mod_multiple_interpreters` is not yet enforced in gopy because
+  sub-interpreter isolation is a future milestone; the slot is parsed and
+  stored but not acted on.
+- `PyModule_GetDict` maps to `m.Dict()` returning `*Dict` without
+  incrementing the reference count, preserving the borrowed-ref contract.

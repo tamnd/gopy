@@ -1,0 +1,133 @@
+---
+title: _codecsmodule.c
+description: "C backing for the codecs module: registry, lookup, encode/decode dispatch, and alias normalization"
+cpython_path: Modules/_codecsmodule.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_codecsmodule.c` is the thin C layer that backs Python's `codecs` module. It wires
+Python-callable functions to the internal codec registry held in
+`Python/codecs.c`. The roughly 900 lines cover registration, lookup, encode/decode
+dispatch, and a handful of helpers such as `charmap_build`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | Module docstring and includes | Boilerplate |
+| 61–120 | `_codecs_register_impl` | Adds a search function to the registry |
+| 121–200 | `_codecs_lookup_impl` | Returns a `CodecInfo` 4-tuple |
+| 201–380 | `_codecs_encode_impl` / `_codecs_decode_impl` | Direct encode/decode dispatch |
+| 381–520 | Per-codec wrappers: `utf_8_encode`, `latin_1_decode`, etc. | Inline codec helpers |
+| 521–700 | `charmap_encode_impl` / `charmap_decode_impl` | Charmap codec core |
+| 701–800 | `charmap_build_impl` | Builds a decoding map from a Unicode string |
+| 801–900 | `PyInit__codecs` | Module definition and method table |
+
+## Reading
+
+### Registry registration
+
+`_codecs.register` accepts any callable and appends it to the internal search function
+list. When a codec name is later looked up, each registered function is tried in order
+until one returns a `CodecInfo` or `None`.
+
+```c
+// CPython: Modules/_codecsmodule.c:75 _codecs_register_impl
+static PyObject *
+_codecs_register_impl(PyObject *module, PyObject *search_function)
+{
+    if (PyCodec_Register(search_function) < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+```
+
+`PyCodec_Register` in `Python/codecs.c` appends the function to a module-level list
+stored on the interpreter state; it does not call the function at registration time.
+
+### Alias normalization in lookup
+
+Before calling any registered search function, CPython normalizes the codec name:
+hyphens and spaces become underscores, the name is lowercased, and a handful of
+well-known aliases (`utf-8`, `UTF8`, `u8`) are mapped to their canonical form
+(`utf_8`). The normalization lives in `Python/codecs.c:_PyCodec_Lookup` and is
+transparent to `_codecsmodule.c`.
+
+```c
+// CPython: Modules/_codecsmodule.c:121 _codecs_lookup_impl
+static PyObject *
+_codecs_lookup_impl(PyObject *module, const char *encoding)
+{
+    return _PyCodec_Lookup(encoding);
+}
+```
+
+The returned object is the `CodecInfo` named tuple with four fields: `encode`,
+`decode`, `streamreader`, `streamwriter`.
+
+### encode / decode dispatch
+
+`_codecs.encode` and `_codecs.decode` look up the codec by name, then call the
+appropriate callable directly. The `errors` argument defaults to `"strict"` when
+omitted.
+
+```c
+// CPython: Modules/_codecsmodule.c:228 _codecs_encode_impl
+static PyObject *
+_codecs_encode_impl(PyObject *module, PyObject *obj,
+                    const char *encoding, const char *errors)
+{
+    if (encoding == NULL)
+        encoding = PyUnicode_GetDefaultEncoding();
+    return PyCodec_Encode(obj, encoding, errors);
+}
+```
+
+`PyCodec_Encode` resolves the codec, calls the encoder, and returns the
+`(bytes, length)` tuple that the encoder produces.
+
+### charmap_build
+
+`charmap_build` takes a Unicode string of exactly 256 characters and returns a
+dictionary mapping each ordinal (0-255) to the corresponding Unicode character.
+It is used by the `encodings/` package to construct decoding tables for
+single-byte charsets.
+
+```c
+// CPython: Modules/_codecsmodule.c:729 charmap_build_impl
+static PyObject *
+charmap_build_impl(PyObject *module, PyObject *map)
+{
+    /* map must be a str of length 256 */
+    if (PyUnicode_GET_LENGTH(map) != 256) {
+        PyErr_SetString(PyExc_TypeError,
+                        "argument must be a str of length 256");
+        return NULL;
+    }
+    return PyUnicode_AsCharmapString(map, NULL);
+}
+```
+
+## gopy notes
+
+- The registry itself lives in the interpreter state (`PyInterpreterState.codec_search_path`).
+  The gopy port should mirror this with a per-interpreter slice of callables.
+- Alias normalization should be a standalone function so it can be unit-tested
+  independently of the search path.
+- `charmap_build` is straightforward: iterate 256 code points, populate a dict.
+- The per-codec wrappers (`utf_8_encode`, etc.) are convenience shims; the real
+  implementations live in `Modules/cjkcodecs/` and `Modules/_codecsmodule.c`.
+  Port the dispatch layer first; the per-codec implementations can follow.
+
+## CPython 3.14 changes
+
+- `_codecs.register` now raises `TypeError` immediately if the argument is not
+  callable, rather than deferring the error to the first lookup.
+- The `CodecInfo` named tuple gained a `_is_text_encoding` attribute used by
+  `open()` to decide whether a codec is suitable for text files.
+- Several legacy codec aliases that were deprecated in 3.10 (`unicode_internal`,
+  `rot_13` as a text codec) were removed in 3.14.

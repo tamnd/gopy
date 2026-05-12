@@ -1,0 +1,114 @@
+---
+title: Lib/pprint.py
+description: "Annotated reading of CPython Lib/pprint.py"
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 640
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pprint.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-40 | module header | imports, `__all__`, version note |
+| 41-90 | `pprint()`, `pformat()` | convenience entry points |
+| 91-180 | `PrettyPrinter.__init__()` | parameter validation, instance setup |
+| 181-260 | `PrettyPrinter.pformat()`, `.pprint()`, `.isreadable()`, `.isrecursive()` | public API methods |
+| 261-360 | `PrettyPrinter._format()` | central dispatch: scalar fast-path then per-type routing |
+| 361-420 | `_pprint_dict()` | sorted key iteration, recursive value formatting |
+| 421-460 | `_pprint_list()`, `_pprint_tuple()` | sequence formatting with compact mode |
+| 461-500 | `_pprint_set()`, `_pprint_frozenset()` | set/frozenset with sorted repr |
+| 501-560 | `_pprint_str()` | multi-line string wrapping |
+| 561-620 | `_safe_repr()` | cycle detection via `_recursion()`, readable/recursive flags |
+| 621-640 | `_recursion()`, `_perfcheck()` | sentinel repr for cycles, internal perf helper |
+
+## Reading
+
+### PrettyPrinter initialisation and parameters
+
+`PrettyPrinter.__init__` validates the four formatting knobs before storing them. `width` caps the line length (default 80). `depth` limits recursive expansion (default unlimited). `compact` packs short items onto one line. `sort_dicts` (added in 3.8) controls whether dict keys are sorted before display.
+
+```python
+# CPython: Lib/pprint.py:91 PrettyPrinter.__init__
+def __init__(self, indent=1, width=80, depth=None, stream=None, *,
+             compact=False, sort_dicts=True, underscore_numbers=False):
+    indent = int(indent)
+    width = int(width)
+    if indent < 0:
+        raise ValueError('indent must be >= 0')
+    if depth is not None and depth <= 0:
+        raise ValueError('depth must be > 0')
+    if not width:
+        raise ValueError('width must be != 0')
+    self._depth = depth
+    self._indent_per_level = indent
+    self._width = width
+    ...
+```
+
+The stream defaults to `sys.stdout` and is resolved lazily on first use, so the module can be imported before stdout is available.
+
+### _format dispatch and per-type handlers
+
+`_format` is the recursive workhorse. It checks the current depth against `self._depth`, calls `_safe_repr` for a single-line attempt, and if the result fits within the remaining column budget it writes it directly. Otherwise it looks up a type-specific handler in `self._dispatch`.
+
+```python
+# CPython: Lib/pprint.py:261 PrettyPrinter._format
+def _format(self, object, stream, indent, allowance, context, level):
+    objid = id(object)
+    if objid in context:
+        stream.write(_recursion(object))
+        self._recursive = True
+        self._readable = False
+        return
+    rep = self._repr(object, context, level)
+    max_width = self._width - indent - allowance
+    if len(rep) <= max_width:
+        stream.write(rep)
+        return
+    p = self._dispatch.get(type(object).__repr__, None)
+    if p is not None:
+        context[objid] = 1
+        p(self, object, stream, indent, allowance, context, level + 1)
+        del context[objid]
+    ...
+```
+
+The `_dispatch` table maps `type.__repr__` methods to handler functions. Registering by `__repr__` rather than by `type` means subclasses that do not override `__repr__` naturally inherit the pretty-printer handler.
+
+### _safe_repr and cycle detection
+
+`_safe_repr` mirrors the dispatch logic but produces a string instead of writing to a stream, and it propagates `readable` and `recursive` flags up the call stack. When a container id is already present in `context`, it substitutes the `_recursion(object)` sentinel and sets `recursive = True`.
+
+```python
+# CPython: Lib/pprint.py:561 _safe_repr
+def _safe_repr(object, context, maxlevels, level, sort_dicts):
+    typ = type(object)
+    if typ in _builtin_scalars:
+        return repr(object), True, False
+
+    r = getattr(typ, "__repr__", None)
+
+    if issubclass(typ, dict) and r is dict.__repr__:
+        ...
+        objid = id(object)
+        if objid in context:
+            return _recursion(object), False, True
+        context[objid] = 1
+        ...
+        del context[objid]
+        ...
+```
+
+The `context` dict serves as a visited set. Because it is passed by reference through every recursive call, any container that appears twice on the current call stack is detected immediately without a full graph traversal.
+
+## gopy notes
+
+Status: not yet ported.
+
+The `pprint` module is a pure-Python formatting utility with no C extension component. A port would live at `module/pprint/` in the gopy tree. The main dependency is a working `repr()` for all built-in types, so this port is blocked until `objects/str.go`, `objects/dict.go`, and `objects/type.go` cover `__repr__` for containers. `_safe_repr` cycle detection maps cleanly to a `map[uintptr]struct` visited set in Go.

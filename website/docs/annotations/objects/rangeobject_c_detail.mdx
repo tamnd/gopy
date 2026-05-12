@@ -1,0 +1,162 @@
+---
+title: Objects/rangeobject.c
+description: "Annotation: CPython range object and its iterators"
+cpython_path: Objects/rangeobject.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/rangeobject.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–80 | `rangeobject` | Struct: `start`, `stop`, `step`, `length` (all `PyObject *` Python ints) |
+| 81–220 | `range_new` | Constructor: validates arguments, computes length via `range_length_obj` |
+| 221–310 | `range_length_obj` | Overflow-safe length formula using Python arbitrary-precision ints |
+| 311–420 | `range_item` | `start + i * step` with bounds check |
+| 421–560 | `range_contains` | Fast integer path bypasses iteration; falls back to sequential scan |
+| 561–680 | `range_subscript` | Slice support: maps a Python `slice` onto a new `range` |
+| 681–820 | `range_iter`, `rangeiterobject` | Fast iterator for ranges fitting in `long` |
+| 821–1000 | `longrangeiter`, `longrangeiterobject` | Arbitrary-precision iterator for ranges exceeding `LONG_MAX` |
+| 1001–1200 | `PyRange_Type` and helpers | `__repr__`, `__reduce__`, `count`, `index`, `__reversed__` |
+
+## Reading
+
+### rangeobject struct and range_length_obj
+
+Unlike most sequence types, `range` is immutable and stores all four parameters as
+Python integer objects (not C longs). This allows `range` to represent sequences
+whose length exceeds `LONG_MAX` on 32-bit platforms, and it avoids silently wrapping
+on overflow.
+
+```c
+// CPython: Objects/rangeobject.c:14 rangeobject
+typedef struct {
+    PyObject_HEAD
+    PyObject *start;   /* Python int */
+    PyObject *stop;    /* Python int */
+    PyObject *step;    /* Python int, never zero */
+    PyObject *length;  /* Python int, precomputed */
+} rangeobject;
+```
+
+`range_length_obj` computes `max(0, ceil((stop - start) / step))` entirely in Python
+integer arithmetic to stay overflow-safe. The formula is the same as the C-level
+`compute_range_length` but operates on `PyObject *` throughout.
+
+```c
+// CPython: Objects/rangeobject.c:221 range_length_obj
+static PyObject *
+range_length_obj(PyObject *start, PyObject *stop, PyObject *step)
+{
+    /* lo = start, hi = stop, step = step (may be negative) */
+    /* if step > 0: length = max(0, (hi - lo + step - 1) / step)  */
+    /* if step < 0: length = max(0, (lo - hi - step - 1) / (-step)) */
+    int cmp = PyObject_RichCompareBool(step, _PyLong_Zero, Py_GT);
+    PyObject *lo, *hi, *diff, *tmp, *result;
+    if (cmp > 0) {
+        lo = start; hi = stop;
+    } else {
+        lo = stop;  hi = start;
+        step = PyNumber_Negative(step);   /* work with positive divisor */
+    }
+    diff = PyNumber_Subtract(hi, lo);     /* hi - lo                   */
+    if (PyObject_RichCompareBool(diff, _PyLong_Zero, Py_LE) > 0) {
+        Py_DECREF(diff);
+        return PyLong_FromLong(0);        /* empty range               */
+    }
+    tmp    = PyNumber_Add(diff, step);    /* hi - lo + step            */
+    Py_DECREF(diff);
+    tmp    = PyNumber_Subtract(tmp, _PyLong_One); /* ... - 1           */
+    result = PyNumber_FloorDivide(tmp, step);
+    Py_DECREF(tmp);
+    return result;
+}
+```
+
+### range_item, range_contains, and range_subscript
+
+`range_item(r, i)` computes `r->start + i * r->step`. The bounds check is performed
+in C-long space when the range fits, but falls through to Python int arithmetic for
+long ranges. Negative indices are normalised by adding `length` before the check.
+
+```c
+// CPython: Objects/rangeobject.c:311 range_item
+static PyObject *
+range_item(rangeobject *r, Py_ssize_t i)
+{
+    Py_ssize_t len = PyLong_AsSsize_t(r->length);
+    if (i < 0)
+        i += len;
+    if (i < 0 || i >= len) {
+        PyErr_SetString(PyExc_IndexError, "range object index out of range");
+        return NULL;
+    }
+    /* result = start + i * step */
+    PyObject *idx    = PyLong_FromSsize_t(i);
+    PyObject *scaled = PyNumber_Multiply(idx, r->step);
+    Py_DECREF(idx);
+    PyObject *result = PyNumber_Add(r->start, scaled);
+    Py_DECREF(scaled);
+    return result;
+}
+```
+
+`range_contains` applies a fast path when the candidate is a Python int (or bool):
+it checks that `(val - start)` is non-negative, less than the range length times
+`step`, and exactly divisible by `step`. This makes `x in range(N)` O(1) rather
+than O(N).
+
+`range_subscript` handles `r[i]` (integer) and `r[start:stop:step]` (slice). For
+slices it calls `PySlice_GetIndicesEx` to clamp the indices, then constructs a new
+`range` from `new_start`, `new_stop`, and `new_step = r->step * slice_step`.
+
+### range_iter and longrangeiterobject
+
+For ranges whose `start`, `stop`, and `step` all fit in a C `long`, CPython uses
+`rangeiterobject`, which stores plain `long` fields and advances with a single
+integer addition per step. The iterator raises `StopIteration` when `index >= len`.
+
+```c
+// CPython: Objects/rangeobject.c:730 rangeiter_next
+static PyObject *
+rangeiter_next(rangeiterobject *r)
+{
+    if (r->index >= r->len)
+        return NULL;   /* signals StopIteration to the caller */
+    long result = (long)(r->start + (unsigned long)(r->step) * r->index);
+    r->index++;
+    return PyLong_FromLong(result);
+}
+```
+
+When the range is too large for `long` fields, `range.__iter__` returns a
+`longrangeiterobject` instead. This iterator stores `PyObject *` values for
+`index`, `start`, and `step`, and performs a Python-level `index += step` on each
+call. It is slower than `rangeiterobject` but handles arbitrarily large ranges
+correctly.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (files `range.go`, `range_iter.go`).
+
+Key decisions pending:
+
+- `rangeobject` maps to a Go struct with four `Object` fields (`Start`, `Stop`,
+  `Step`, `Length`), all holding Python integer values. Using `Object` rather than
+  `int64` preserves arbitrary-precision semantics and matches CPython's design.
+- `range_length_obj` must be ported in full using the `objects.Int` arithmetic
+  methods, not cast to `int64` early, to avoid overflow on 32-bit-range-like inputs.
+- `range_contains` fast path is important for performance: it must be implemented
+  before the type is considered complete, as the `in` operator on `range` is a
+  common pattern in CPython's own test suite.
+- `rangeiterobject` (C-long fast path) and `longrangeiterobject` (arbitrary-
+  precision) should be two separate Go structs implementing the `Iterator` interface,
+  selected by `range.__iter__` based on whether `length` fits in `int64`.

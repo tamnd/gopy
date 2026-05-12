@@ -1,0 +1,174 @@
+---
+title: Modules/_pickle.c
+description: "CPython C accelerator for pickle: PicklerObject layout, save_reduce framing, fast dispatch, and Unpickler fast paths"
+cpython_path: Modules/_pickle.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_pickle.c" />
+
+`Modules/_pickle.c` is the C accelerator behind the `pickle` module. It defines `PicklerObject` and `UnpicklerObject`, implements type-specific fast-save dispatch, and provides the `load_*` family of opcodes for the unpickler. The Python-level `_pickle` module exposes these types directly; the pure-Python `pickle.py` falls back to them automatically when the C extension is present.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `PicklerObject` | struct | 130-195 | Pickler state: write buffer, memo dict, protocol, dispatch table |
+| `UnpicklerObject` | struct | 210-290 | Unpickler state: input buffer, stack, memo, persistent_load |
+| `_Pickler_Write` | function | 420-475 | Append bytes to the write buffer, flush when full |
+| `save_reduce` | function | 2100-2230 | Emit REDUCE/NEWOBJ/NEWOBJ_EX framing for arbitrary objects |
+| `save_type` | function | 1980-2050 | Fast path for built-in types via `__reduce_ex__` |
+| `save_long` | function | 1400-1470 | Encode Python int as LONG1/LONG4/INT pickle opcodes |
+| `save_bytes` | function | 1490-1560 | Encode bytes as SHORT_BINBYTES or BINBYTES |
+| `save_str` | function | 1570-1640 | Encode str as SHORT_BINUNICODE or BINUNICODE8 |
+| `save_list` | function | 1660-1730 | Emit EMPTY_LIST then batch-append via APPENDS |
+| `save_dict` | function | 1750-1830 | Emit EMPTY_DICT then batch-set via SETITEMS |
+| `load_binstring` | function | 4200-4260 | Decode protocol-1 binary string opcode |
+| `load_short_binunicode` | function | 4340-4390 | Decode SHORT_BINUNICODE (len fits in 1 byte) |
+| `load_reduce` | function | 4900-4960 | Pop callable and arg tuple, call, push result |
+| `load_persistent_id` | function | 3800-3860 | Invoke persistent_load hook from C |
+| `Pickler_dump` | function | 2900-2960 | Python-facing `Pickler.dump()` entry point |
+| `Unpickler_load` | function | 5200-5280 | Python-facing `Unpickler.load()` dispatch loop |
+
+## Reading
+
+### PicklerObject layout and write buffer
+
+`PicklerObject` carries two primary data members for output: a contiguous write buffer (`output_buffer` / `output_len`) and a memo `PyDict` that maps `id(obj)` to `(memo_index, obj)` pairs. The buffer is pre-allocated and grown geometrically; `_Pickler_Write` appends raw bytes directly, avoiding per-byte Python calls.
+
+```c
+// CPython: Modules/_pickle.c:130 PicklerObject
+typedef struct PicklerObject {
+    PyObject_HEAD
+    PyObject *pers_func;        /* persistent_id(), or NULL */
+    PyObject *dispatch_table;   /* per-pickler dispatch override */
+    PyObject *write;            /* file-like write(), or NULL for buffer mode */
+    PyObject *output_buffer;    /* bytearray accumulator */
+    Py_ssize_t output_len;
+    Py_ssize_t max_output_len;
+    int proto;                  /* pickle protocol 0-5 */
+    int bin;                    /* proto >= 1 */
+    int framing;                /* proto >= 4 */
+    Py_ssize_t frame_start;
+    PyObject *memo;             /* id -> (index, obj) */
+    ...
+} PicklerObject;
+```
+
+The memo dict is a plain `PyDict`. Keys are C `long` object IDs cast to Python ints; values are 2-tuples. A memo hit in `save_pers` short-circuits to a `BINGET`/`LONG_BINGET` opcode emission rather than re-serialising the object.
+
+### save_reduce framing
+
+`save_reduce` is the general-purpose serialisation path invoked when no type-specific fast path applies. It emits a sequence of opcodes that, when replayed by the unpickler, reconstruct the object by calling a callable with an argument tuple.
+
+```c
+// CPython: Modules/_pickle.c:2100 save_reduce
+static int
+save_reduce(PicklerObject *self, PyObject *args, PyObject *obj)
+{
+    PyObject *callable, *argtuple, *state, *listitems, *dictitems, *state_setter;
+    int use_newobj = 0, use_newobj_ex = 0;
+
+    /* Unpack the 2-6 element tuple returned by __reduce_ex__ */
+    ...
+    /* Prefer NEWOBJ or NEWOBJ_EX over REDUCE when possible */
+    if (use_newobj_ex) {
+        /* emit NEWOBJ_EX: cls, args, kwargs */
+    } else if (use_newobj) {
+        /* emit NEWOBJ: cls.__new__(cls, *args) */
+    } else {
+        if (save(self, callable, 0) < 0) return -1;
+        if (save(self, argtuple, 0) < 0) return -1;
+        if (_Pickler_Write(self, &reduce_op, 1) < 0) return -1;
+    }
+    ...
+}
+```
+
+Protocol 4 and 5 wrap the entire stream in framing opcodes (`FRAME`) so that the unpickler can pre-allocate buffers. `save_reduce` is also where `__reduce__` vs `__reduce_ex__` negotiation happens.
+
+### Fast-save dispatch for common types
+
+Before falling through to `__reduce_ex__`, `save()` checks the object's exact type against a static dispatch table. The checks are ordered from most to least common to minimise branch cost.
+
+```c
+// CPython: Modules/_pickle.c:2460 save
+static int
+save(PicklerObject *self, PyObject *obj, int pers_save)
+{
+    PyTypeObject *type = Py_TYPE(obj);
+
+    if (type == &PyLong_Type)   return save_long(self, obj);
+    if (type == &PyBytes_Type)  return save_bytes(self, obj);
+    if (type == &PyUnicode_Type) return save_str(self, obj);
+    if (type == &PyList_Type)   return save_list(self, obj);
+    if (type == &PyDict_Type)   return save_dict(self, obj);
+    if (type == &PyTuple_Type)  return save_tuple(self, obj);
+    if (type == &PyFloat_Type)  return save_float(self, obj);
+    if (type == &PyBool_Type)   return save_bool(self, obj);
+    ...
+    /* Fall through to __reduce_ex__ */
+    return save_reduce(self, ...);
+}
+```
+
+`save_list` batches up to `BATCHSIZE` (1000) items per `APPENDS` opcode using a temporary mark. `save_dict` does the same with `SETITEMS`. This keeps opcode streams short for large containers.
+
+### Unpickler fast paths and load_reduce
+
+The unpickler dispatch loop in `Unpickler_load` indexes into a `dispatch` function pointer array keyed by opcode byte. The two unicode fast paths avoid Python-level attribute lookup.
+
+```c
+// CPython: Modules/_pickle.c:4340 load_short_binunicode
+static int
+load_short_binunicode(UnpicklerObject *self)
+{
+    PyObject *obj;
+    Py_ssize_t len;
+    const char *s;
+
+    if (_Unpickler_Read(self, &s, 1) < 0) return -1;
+    len = (unsigned char)s[0];
+    if (_Unpickler_Read(self, &s, len) < 0) return -1;
+    obj = PyUnicode_DecodeUTF8(s, len, "surrogatepass");
+    if (obj == NULL) return -1;
+    PDATA_PUSH(self->stack, obj, -1);
+    return 0;
+}
+```
+
+`load_reduce` pops the top two stack items (callable and args tuple), calls the callable, and pushes the result:
+
+```c
+// CPython: Modules/_pickle.c:4900 load_reduce
+static int
+load_reduce(UnpicklerObject *self)
+{
+    PyObject *callable, *argtuple, *obj;
+
+    PDATA_POP(self->stack, argtuple);
+    PDATA_POP(self->stack, callable);
+    obj = PyObject_CallObject(callable, argtuple);
+    Py_DECREF(callable);
+    Py_DECREF(argtuple);
+    if (obj == NULL) return -1;
+    PDATA_PUSH(self->stack, obj, -1);
+    return 0;
+}
+```
+
+The `persistent_id` C fast path checks `self->pers_func` before entering the Python call machinery, saving a `PyObject_GetAttr` on every non-persistent object.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/pickle/`.
+
+The write-buffer management (`_Pickler_Write`, frame flushing) maps naturally to a Go `bytes.Buffer` with a frame-offset integer. The memo dict becomes a `map[uintptr]memoEntry`. The opcode dispatch loop is a `switch` over a `byte` read from the input reader. Type-specific save functions become methods on a `Pickler` struct.
+
+The main risk area is `save_reduce` negotiation: `__reduce_ex__` protocol selection interacts with the class hierarchy through `objects/type.go` and `objects/usertype.go`, both of which are still stabilising as of v0.12.1.

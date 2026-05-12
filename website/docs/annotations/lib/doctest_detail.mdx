@@ -1,0 +1,124 @@
+---
+title: "doctest: extraction, execution, and directive handling"
+description: "How DocTestFinder recursively extracts examples, DocTestRunner captures output and diffs it, and how ELLIPSIS and NORMALIZE_WHITESPACE directives alter matching"
+cpython_path: Lib/doctest.py
+cpython_version: "3.14"
+lines: 2600
+status: annotated
+ported_to: module/doctest
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`doctest` finds Python interactive examples embedded in docstrings and runs them,
+comparing actual output to expected output. Two public entry points, `testmod` and
+`testfile`, drive the full pipeline: find, compile, run, and report.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | module constants, `_EXAMPLE_RE` | Regex that recognises `>>>` and `...` continuation lines |
+| 101-250 | `Example` | Dataclass holding source, want, lineno, and indent |
+| 251-450 | `DocTest` | Container of `Example` objects plus name and filename |
+| 451-750 | `DocTestFinder` | Recursively walks modules, classes, and functions to collect `DocTest` objects |
+| 751-900 | `DocTestParser` | Parses a docstring into a list of `Example` and plain-text items |
+| 901-1200 | `DocTestRunner` | Executes examples, captures stdout, and checks results |
+| 1201-1450 | `OutputChecker` | Compares got/want with optional directives; produces diff on failure |
+| 1451-1600 | `DebugRunner` | Subclass that raises `DocTestFailure` instead of recording failures |
+| 1601-1800 | directive constants (`ELLIPSIS`, etc.), `register_optionflag` | Bitmask flags for per-example behaviour |
+| 1801-2000 | `DocTestSuite`, `DocFileSuite` | `unittest.TestSuite` wrappers |
+| 2001-2200 | `testmod`, `testfile` | Top-level convenience functions |
+| 2201-2600 | `DocTestCase`, `_DocTestRunner`, script mode | `unittest.TestCase` adapter and `__main__` runner |
+
+## Reading
+
+### `DocTestFinder.find` recursive extraction
+
+`find` walks a live Python object graph. For a module it inspects `__dict__`; for a
+class it recurses into each method and nested class. Each docstring is handed to
+`DocTestParser.get_doctest`:
+
+```python
+# Lib/doctest.py (simplified)
+def _find(self, tests, obj, name, module, source_lines, globs, seen):
+    if id(obj) in seen:
+        return
+    seen[id(obj)] = True
+    test = self._get_test(obj, name, module, globs, source_lines)
+    if test is not None:
+        tests.append(test)
+    # Recurse into members
+    for valname, val in self._find_lineno_iter(obj, source_lines):
+        self._find(tests, val, f'{name}.{valname}',
+                   module, source_lines, globs, seen)
+```
+
+The `seen` dict prevents infinite loops when objects have circular `__dict__` references.
+`source_lines` is the module source split by lines, used to compute accurate `lineno`
+values for each example.
+
+### `DocTestRunner.run` output capture and diff
+
+`run` sets up a temporary `sys.stdout` replacement, compiles each example's source with
+`compile(..., 'single')`, and `exec`s it in the test's `globs` dict:
+
+```python
+# Lib/doctest.py (simplified)
+def __run(self, test, compileflags, out):
+    for i, example in enumerate(test.examples):
+        # Redirect stdout
+        save_stdout = sys.stdout
+        sys.stdout = self._fakeout
+        try:
+            exec(compile(example.source, '<doctest>', 'single',
+                         compileflags, True), test.globs)
+            got = self._fakeout.getvalue()
+        finally:
+            sys.stdout = save_stdout
+            self._fakeout.truncate(0)
+        outcome = self._check_output(example, got, self.optionflags)
+        if outcome is FAILURE:
+            self.report_failure(out, test, example, got)
+```
+
+When `got` does not match `example.want`, `OutputChecker.output_difference` builds a
+unified diff and returns it as a string for the failure report.
+
+### ELLIPSIS and NORMALIZE_WHITESPACE directives
+
+Directives are parsed from inline comments in the expected output, e.g.
+`# doctest: +ELLIPSIS`. They modify `optionflags` for that single example:
+
+```python
+# Lib/doctest.py (simplified)
+_OPTION_DIRECTIVE_RE = re.compile(
+    r'#\s*doctest:\s*([^\n\'"]*)$', re.MULTILINE)
+
+def _find_options(self, source):
+    options = {}
+    for m in _OPTION_DIRECTIVE_RE.finditer(source):
+        for flag in m.group(1).split(','):
+            flag = flag.strip()
+            if flag[:1] == '+':
+                options[_nameToOption[flag[1:]]] = True
+            elif flag[:1] == '-':
+                options[_nameToOption[flag[1:]]] = False
+    return options
+```
+
+With `ELLIPSIS` active, `OutputChecker.check_output` converts `...` tokens in `want`
+into `.*` and uses `re.match`. With `NORMALIZE_WHITESPACE`, any run of whitespace in
+both `got` and `want` is collapsed to a single space before comparison.
+
+## gopy notes
+
+- `DocTestParser` relies on `re` module features (named groups, multiline flags) that
+  are already ported; no blockers there.
+- `exec` with `'single'` compile mode prints expression results automatically via
+  `sys.displayhook`. The gopy `exec` path must honour `displayhook` for doctest output
+  to match.
+- The `_fakeout` capture object is a `StringIO`-like buffer. The gopy port can use the
+  existing `io.StringIO` implementation in `module/io`.
+- `DocTestSuite` and `DocFileSuite` depend on `unittest`. Port order: `doctest` parser
+  and runner first, `unittest` integration deferred to a later milestone.

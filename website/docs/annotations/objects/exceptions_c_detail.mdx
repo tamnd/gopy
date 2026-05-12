@@ -1,0 +1,165 @@
+---
+title: Objects/exceptions.c
+description: "Annotation: CPython built-in exception hierarchy"
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 2900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/exceptions.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | `PyBaseExceptionObject` | Struct layout: `args`, `notes`, `traceback`, `context`, `cause`, `suppress_context` |
+| 121–350 | `BaseException_new`, `BaseException_init` | Allocation and `args` tuple initialization |
+| 351–500 | `BaseException_str`, `BaseException_repr` | `__str__` three-way branch, `__repr__` formatting |
+| 501–600 | `BaseException_add_note` | Appends a string note to `self->notes`, creating the list lazily |
+| 601–820 | chain-field getsets | `__traceback__`, `__context__`, `__cause__`, `__suppress_context__` descriptors |
+| 821–1000 | `SimpleExtendsException` macro | Stamps out leaf classes with no extra C fields |
+| 1001–1300 | `OSError` family | `PyOSErrorObject` with `errno`, `strerror`, `filename`, `filename2`; errno-to-subclass map |
+| 1301–1450 | `StopIteration` | Adds `.value` slot; `StopIteration_init` extracts `args[0]` |
+| 1451–1700 | `SyntaxError` | Extra fields: `filename`, `lineno`, `offset`, `end_lineno`, `end_offset`, `text` |
+| 1701–2100 | `ExceptionGroup` / `BaseExceptionGroup` | PEP 654: `message`, `excs`, `subgroup`, `split`, `derive`, `add_note` |
+| 2101–2900 | `_PyExc_InitState`, singletons | Registers all types into `builtins` at interpreter startup |
+
+## Reading
+
+### BaseException layout and lifecycle
+
+Every exception in CPython inherits from `BaseException`. The C struct carries five
+chained fields beyond the normal object header. `args` is a tuple of the positional
+arguments passed to the constructor. `notes` is `NULL` until `add_note()` is called
+for the first time, at which point it is initialised as a list. The four remaining
+fields implement PEP 3134 (`__context__`) and PEP 415 (`__cause__`,
+`__suppress_context__`).
+
+```c
+// CPython: Objects/exceptions.c:91 PyBaseExceptionObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *dict;              /* instance __dict__, lazily allocated    */
+    PyObject *args;              /* tuple of constructor positional args   */
+    PyObject *notes;             /* list[str] from add_note(), or NULL     */
+    PyObject *traceback;         /* __traceback__ frame chain              */
+    PyObject *context;           /* __context__: active exception at raise */
+    PyObject *cause;             /* __cause__: set by raise X from Y       */
+    char      suppress_context;  /* True when __cause__ was set explicitly  */
+} PyBaseExceptionObject;
+```
+
+`BaseException.__str__` applies a three-way branch: empty `args` returns the empty
+string, a single element returns `str(args[0])`, and multiple elements return
+`str(self.args)`. This matches the observed Python behaviour for `str(ValueError())`,
+`str(ValueError("x"))`, and `str(ValueError("x", "y"))`.
+
+```c
+// CPython: Objects/exceptions.c:235 BaseException_str
+static PyObject *
+BaseException_str(PyBaseExceptionObject *self)
+{
+    switch (PyTuple_GET_SIZE(self->args)) {
+    case 0:
+        return PyUnicode_FromString("");
+    case 1:
+        return PyObject_Str(PyTuple_GET_ITEM(self->args, 0));
+    default:
+        return PyObject_Str(self->args);
+    }
+}
+```
+
+### ExceptionGroup and add_note
+
+`add_note` (PEP 678, Python 3.11) is defined on `BaseException` itself. It rejects
+non-string arguments and appends to `self->notes`, creating the list on first use.
+
+```c
+// CPython: Objects/exceptions.c:502 BaseException_add_note
+static PyObject *
+BaseException_add_note(PyObject *self, PyObject *note)
+{
+    if (!PyUnicode_Check(note)) {
+        PyErr_Format(PyExc_TypeError,
+                     "note must be a str, not '%s'",
+                     Py_TYPE(note)->tp_name);
+        return NULL;
+    }
+    PyBaseExceptionObject *e = (PyBaseExceptionObject *)self;
+    if (e->notes == NULL) {
+        e->notes = PyList_New(0);
+        if (e->notes == NULL)
+            return NULL;
+    }
+    if (PyList_Append(e->notes, note) < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+```
+
+`ExceptionGroup.__new__` (PEP 654) enforces that `exceptions` is a non-empty
+sequence of `BaseException` instances. When any member is not an `Exception`, the
+return type is `BaseExceptionGroup` rather than `ExceptionGroup`. The `subgroup` and
+`split` methods walk the nested tree recursively, applying a predicate to each leaf.
+
+### SyntaxError attributes and OSError errno mapping
+
+`SyntaxError` extracts `args[1]` when it is a four- or five-element tuple and stores
+the elements into `filename`, `lineno`, `offset`, `text`, and (since 3.10)
+`end_lineno` / `end_offset` as dedicated C slots, making them available as fast
+getsets rather than dict lookups.
+
+`OSError.__init__` handles two, three, and five positional arguments. The
+two-argument form `OSError(errno, strerror)` stores both fields. After initialisation
+the constructor consults an internal table to decide whether to return a subclass
+instance (`FileNotFoundError`, `PermissionError`, `IsADirectoryError`, etc.) for the
+given `errno` value.
+
+```c
+// CPython: Objects/exceptions.c:948 OSError_init
+static int
+OSError_init(PyOSErrorObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *myerrno = NULL, *strerror = NULL;
+    PyObject *filename = NULL, *filename2 = NULL;
+    /* Accepts 2, 3, or 5 positional args; ignores others for backwards compat. */
+    if (!PyArg_UnpackTuple(args, "OSError", 0, 5,
+                           &myerrno, &strerror, &filename,
+                           &_Py_SINGLETON(empty_tuple), &filename2))
+        return -1;
+    Py_XSETREF(self->myerrno,   Py_XNewRef(myerrno));
+    Py_XSETREF(self->strerror,  Py_XNewRef(strerror));
+    Py_XSETREF(self->filename,  Py_XNewRef(filename));
+    Py_XSETREF(self->filename2, Py_XNewRef(filename2));
+    return 0;
+}
+```
+
+`StopIteration.__init__` reads `args[0]` (or `None` when `args` is empty) and
+caches it in `self->value`. The generator `RETURN_VALUE` path in `ceval.c` reads
+this field directly rather than calling `getattr` on the exception object.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (files `exception.go`, `exception_syntax.go`,
+`exception_os.go`, `exception_group.go`).
+
+Key decisions pending:
+
+- `PyBaseExceptionObject` maps to a Go struct embedding `Object` with direct fields
+  for `Args`, `Notes`, `Traceback`, `Context`, `Cause`, and `SuppressContext`. Using
+  struct fields (not a generic attribute dict) is required so the VM can read them
+  without a map lookup on every `raise` and `except` instruction.
+- `OSError` subclass selection (the errno-to-type table) lives in a small `var`
+  slice in `exception_os.go`, populated in an `init` function, mirroring CPython's
+  `_PyExc_MapException`.
+- `SyntaxError` is needed early because the compiler emits it for parse failures
+  before the full exception hierarchy is in place.
+- `ExceptionGroup` tree-walking methods (`subgroup`, `split`, `derive`) can be
+  deferred until the test suite exercises PEP 654 behaviour.

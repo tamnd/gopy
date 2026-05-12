@@ -1,0 +1,139 @@
+---
+title: Include/cpython/dictobject.h
+description: "CPython-private dict API: PyDictObject layout, compact split/combined table structure, version tag, dict watchers, and mutation helpers."
+cpython_path: Include/cpython/dictobject.h
+cpython_version: "3.14"
+lines: 106
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/cpython/dictobject.h" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 5-6 | `PyDictKeysObject`, `PyDictValues` | Forward typedef for the compact-dict key/value arrays |
+| 11-33 | `PyDictObject` | Full dict struct: `ma_used`, `_ma_watcher_tag`, `ma_keys`, `ma_values` |
+| 35-36 | `_PyDict_GetItem_KnownHash` | Lookup with caller-supplied hash, bypassing rehash |
+| 38 | `_PyDict_GetItemStringWithError` | Deprecated (3.14): use `PyDict_GetItemStringRef` instead |
+| 39-40 | `PyDict_SetDefault` | Insert key with default value if absent; return current value |
+| 42-50 | `PyDict_SetDefaultRef` | Like `PyDict_SetDefault` but returns status code and stores result via out-param |
+| 53-63 | `PyDict_GET_SIZE` | Inline: read `ma_used` atomically in free-threaded builds |
+| 65 | `PyDict_ContainsString` | Membership test with a C string key |
+| 67 | `_PyDict_NewPresized` | Allocate a dict pre-sized to hold at least `minused` items |
+| 69-70 | `PyDict_Pop`, `PyDict_PopString` | Remove a key and optionally return its value |
+| 73-76 | `_PyDict_Pop` | Deprecated (3.14): use `PyDict_Pop` instead |
+| 80-92 | `PY_FOREACH_DICT_EVENT`, `PyDict_WatchEvent` | Enum of mutation events for watcher callbacks |
+| 97 | `PyDict_WatchCallback` | Callback signature: `(event, dict, key, new_value) -> int` |
+| 100-105 | `PyDict_AddWatcher`, `PyDict_ClearWatcher`, `PyDict_Watch`, `PyDict_Unwatch` | Watcher registration and per-dict subscription |
+
+## Reading
+
+### PyDictObject: the compact layout
+
+`PyDictObject` (lines 11-33) is CPython's primary hash-table struct. Its four fields are the public surface of the compact-dict design introduced in Python 3.6.
+
+```c
+// CPython: Include/cpython/dictobject.h:11 PyDictObject
+typedef struct {
+    PyObject_HEAD
+
+    /* Number of items in the dictionary */
+    Py_ssize_t ma_used;
+
+    /* Bits 0-7:  dict watcher IDs
+       Bits 8-11: watched mutation counter for tier-2 optimizer
+       Bits 12-31: currently unused
+       Bits 32-63: unique id in free-threaded build */
+    uint64_t _ma_watcher_tag;
+
+    PyDictKeysObject *ma_keys;
+
+    /* NULL for a combined table; non-NULL for a split table */
+    PyDictValues *ma_values;
+} PyDictObject;
+```
+
+`ma_used` is the live item count, equivalent to `len(d)`. In the free-threaded build it is read via `_Py_atomic_load_ssize_relaxed` to avoid torn reads.
+
+`_ma_watcher_tag` replaces the simpler `ma_version_tag` field that appeared in 3.6-3.13. The low 8 bits identify which watcher slots (0-7) are watching this dict. Bits 8-11 are a four-bit mutation counter used by the tier-2 adaptive specializer to detect stale inline caches without a full version-tag comparison. In free-threaded CPython (PEP 703), bits 32-63 hold a per-object unique ID for per-thread reference counting.
+
+### Combined vs split table layout
+
+The `ma_keys` / `ma_values` pair determines which of two storage strategies the dict uses.
+
+**Combined table** (`ma_values == NULL`): keys and their corresponding values are stored together inside `PyDictKeysObject`. This is the default for most dicts. `PyDictKeysObject` is an opaque struct containing the hash index array, the key-value entry array, and metadata.
+
+**Split table** (`ma_values != NULL`): keys live in a shared `PyDictKeysObject` (typically the one from the type's `tp_dict`), and values live in a separate `PyDictValues` array allocated per-instance. CPython uses split tables for instance dicts of classes with a stable set of attributes, allowing many instances to share one key array.
+
+The transition from split to combined happens automatically when an instance dict gains an unexpected key (one not present in the shared key object). After that point the dict behaves like any ordinary combined dict.
+
+### Version tag and staleness detection
+
+Every mutation to a dict increments the version information in `_ma_watcher_tag`. The tier-2 optimizer uses the four-bit mutation counter (bits 8-11) to guard speculative assumptions about dict contents. When the counter has changed, the specializer treats its cached assumption as stale and re-specializes.
+
+The previous 64-bit `ma_version_tag` (Python 3.6-3.13) was a monotonically increasing process-global counter. The 3.14 design replaces it with the combined watcher/counter field to support both watcher callbacks and the optimizer in one word without doubling the struct size.
+
+```c
+// CPython: Include/cpython/dictobject.h:23 _ma_watcher_tag
+    uint64_t _ma_watcher_tag;
+```
+
+### PyDict_SetDefaultRef and the new dict mutation API
+
+`PyDict_SetDefaultRef` (lines 42-50) is the 3.14 replacement for `PyDict_SetDefault`. Instead of returning a borrowed reference to the associated value, it returns an integer status code and stores a new reference in an out-parameter, making the ownership transfer explicit and safe in free-threaded code.
+
+```c
+// CPython: Include/cpython/dictobject.h:50 PyDict_SetDefaultRef
+PyAPI_FUNC(int) PyDict_SetDefaultRef(
+    PyObject *mp,
+    PyObject *key,
+    PyObject *default_value,
+    PyObject **result);
+```
+
+Return values: `-1` on error, `0` if `key` was absent and `default_value` was inserted, `1` if `key` was already present. `*result` receives the current value (existing or newly inserted) as a new reference.
+
+### Dict watchers
+
+The watcher API (lines 78-105) lets C extensions and the runtime itself register callbacks that fire on any dict mutation. Up to 8 watcher slots exist, identified by IDs 0-7. The low 8 bits of `_ma_watcher_tag` form a bitmask: bit `i` is set when watcher `i` is watching the dict.
+
+```c
+// CPython: Include/cpython/dictobject.h:97 PyDict_WatchCallback
+typedef int(*PyDict_WatchCallback)(
+    PyDict_WatchEvent event,
+    PyObject* dict,
+    PyObject* key,
+    PyObject* new_value);
+```
+
+The six event kinds are `ADDED`, `MODIFIED`, `DELETED`, `CLONED`, `CLEARED`, and `DEALLOCATED`. For `CLEARED` and `DEALLOCATED`, `key` and `new_value` are NULL. Returning a non-zero value from the callback is an error; CPython prints a warning and continues.
+
+```c
+// CPython: Include/cpython/dictobject.h:100 PyDict_AddWatcher
+PyAPI_FUNC(int) PyDict_AddWatcher(PyDict_WatchCallback callback);
+PyAPI_FUNC(int) PyDict_ClearWatcher(int watcher_id);
+PyAPI_FUNC(int) PyDict_Watch(int watcher_id, PyObject* dict);
+PyAPI_FUNC(int) PyDict_Unwatch(int watcher_id, PyObject* dict);
+```
+
+`PyDict_AddWatcher` allocates a watcher ID and returns it. `PyDict_Watch` marks a specific dict as watched by that watcher. `PyDict_Unwatch` removes the watcher from a dict without unregistering the watcher itself.
+
+## gopy notes
+
+**Port status**: partially ported.
+
+**Planned package path**: `objects/`
+
+**Go implementation notes**:
+
+- `PyDictObject` is implemented in `objects/dict.go` as the `Dict` struct. The `ma_used` field maps to a `used int` field. `ma_keys` and `ma_values` are represented via Go maps and slices rather than the compact `PyDictKeysObject` layout; a full port of the compact layout is deferred.
+- The `_ma_watcher_tag` watcher bitmask is not yet implemented in gopy. The dict watcher API (`objects/dict.go`) is a stub. Watcher support is needed before the tier-2 optimizer can use dict version checks.
+- `PyDict_SetDefaultRef` is not yet ported. The `PyDict_SetDefault` semantics are available via `objects/dict_mutate.go` using borrowed references.
+- `PyDict_Pop` and `PyDict_PopString` are ported in `objects/dict_mutate.go`.
+- `_PyDict_NewPresized` corresponds to `NewDictPresized` in `objects/dict.go`, which pre-allocates the underlying Go map with `make(map[...]..., minused)`.
+- The split-table optimization is not implemented. All gopy dicts use a single combined backing store. Split tables may be revisited when instance dictionary performance becomes a bottleneck.
+- `PyDict_GET_SIZE` is an inline accessor in `objects/dict.go` that reads the `used` field directly (no atomic needed, as gopy does not yet implement free-threaded execution).

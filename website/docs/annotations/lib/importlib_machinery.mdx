@@ -1,0 +1,188 @@
+---
+title: "Lib/importlib/machinery.py"
+description: Public namespace that re-exports all concrete finders, loaders, and module-spec types from CPython's frozen bootstrap layer.
+cpython_path: Lib/importlib/machinery.py
+cpython_version: "3.14"
+lines: 50
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/importlib/machinery.py
+
+<CpyLink path="Lib/importlib/machinery.py" />
+
+`importlib.machinery` is a thin re-export module. Every name it exposes is
+actually defined in `_bootstrap.py` or `_bootstrap_external.py` (the frozen
+bootstrap files that the interpreter loads before the normal import system is
+available). The file's own contribution is `all_suffixes()` and the deprecation
+shim for `DEBUG_BYTECODE_SUFFIXES` / `OPTIMIZED_BYTECODE_SUFFIXES`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/importlib/machinery.py" lines="3">3</Cpy> | `ModuleSpec` | Module specification object; holds `name`, `loader`, `origin`, `cached`, `submodule_search_locations`, `has_location` |
+| <Cpy path="Lib/importlib/machinery.py" lines="4">4</Cpy> | `BuiltinImporter` | Meta-path finder/loader for built-in C modules (`sys`, `_io`, etc.) |
+| <Cpy path="Lib/importlib/machinery.py" lines="5">5</Cpy> | `FrozenImporter` | Meta-path finder/loader for frozen (bytecode-embedded) modules |
+| <Cpy path="Lib/importlib/machinery.py" lines="6-10">6-10</Cpy> | `SOURCE_SUFFIXES`, `BYTECODE_SUFFIXES`, `EXTENSION_SUFFIXES` | Lists of recognised file suffixes for each loader category |
+| <Cpy path="Lib/importlib/machinery.py" lines="11">11</Cpy> | `WindowsRegistryFinder` | Meta-path finder that looks up modules in the Windows registry (no-op on other platforms) |
+| <Cpy path="Lib/importlib/machinery.py" lines="12">12</Cpy> | `PathFinder` | Meta-path finder that searches `sys.path` using `PathEntryFinder` hooks |
+| <Cpy path="Lib/importlib/machinery.py" lines="13">13</Cpy> | `FileFinder` | Path-entry finder backed by the filesystem; caches directory listings and dispatches to the appropriate loader by suffix |
+| <Cpy path="Lib/importlib/machinery.py" lines="14">14</Cpy> | `SourceFileLoader` | Loads `.py` source files; handles bytecode caching in `__pycache__` |
+| <Cpy path="Lib/importlib/machinery.py" lines="15">15</Cpy> | `SourcelessFileLoader` | Loads `.pyc` files that have no corresponding source |
+| <Cpy path="Lib/importlib/machinery.py" lines="16">16</Cpy> | `ExtensionFileLoader` | Loads `.so` / `.pyd` C extension modules via `_imp.create_dynamic` / `_imp.exec_dynamic` |
+| <Cpy path="Lib/importlib/machinery.py" lines="17">17</Cpy> | `AppleFrameworkLoader` | macOS-specific subclass of `ExtensionFileLoader` for framework bundles |
+| <Cpy path="Lib/importlib/machinery.py" lines="18">18</Cpy> | `NamespaceLoader` | Loader for namespace packages (directories with no `__init__.py`) |
+| <Cpy path="Lib/importlib/machinery.py" lines="21-23">21-23</Cpy> | `all_suffixes()` | Returns the concatenation of all three suffix lists; useful for membership tests |
+| <Cpy path="Lib/importlib/machinery.py" lines="34-50">34-50</Cpy> | `__getattr__` | Module-level `__getattr__` that issues a `DeprecationWarning` when `DEBUG_BYTECODE_SUFFIXES` or `OPTIMIZED_BYTECODE_SUFFIXES` is accessed |
+
+## Reading
+
+### ModuleSpec (defined in _bootstrap.py:565)
+
+`ModuleSpec` is the single object that carries everything the import system
+needs to know about a module before it is loaded. Its most-used attributes are
+`origin` (the file path or `"built-in"`), `cached` (the `.pyc` path, derived
+lazily), `submodule_search_locations` (non-None for packages), and `has_location`
+(controls whether `__file__` is set on the module).
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:565 ModuleSpec
+class ModuleSpec:
+    def __init__(self, name, loader, *, origin=None, loader_state=None,
+                 is_package=None):
+        self.name = name
+        self.loader = loader
+        self.origin = origin
+        self.loader_state = loader_state
+        self.submodule_search_locations = [] if is_package else None
+        self._set_fileattr = False
+        self._cached = None
+```
+
+`cached` is a lazy property: it calls `_bootstrap_external._get_cached(self.origin)`
+only the first time it is read, avoiding disk access during spec construction.
+
+### BuiltinImporter and FrozenImporter (defined in _bootstrap.py:974, 1026)
+
+Both are stateless (all methods are `@classmethod` or `@staticmethod`). They
+implement `find_spec`, `create_module`, and `exec_module`, which is the full
+two-phase load protocol introduced in Python 3.4.
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:985 BuiltinImporter.find_spec
+@classmethod
+def find_spec(cls, fullname, path=None, target=None):
+    if _imp.is_builtin(fullname):
+        return spec_from_loader(fullname, cls, origin=cls._ORIGIN)
+    else:
+        return None
+```
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:992 BuiltinImporter.create_module
+@staticmethod
+def create_module(spec):
+    """Create a built-in module"""
+    if spec.name not in sys.builtin_module_names:
+        raise ImportError(f'{spec.name!r} is not a built-in module',
+                          name=spec.name)
+    return _call_with_frames_removed(_imp.create_builtin, spec)
+```
+
+### SourceFileLoader and ExtensionFileLoader (defined in _bootstrap_external.py:962, 1032)
+
+`SourceFileLoader` is the loader most Python files go through. Its key
+contribution over the base `SourceLoader` is `path_stats`, which reads
+`st_mtime` and `st_size` from the filesystem to decide whether a cached `.pyc`
+is still valid.
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:962 SourceFileLoader
+class SourceFileLoader(FileLoader, SourceLoader):
+    """Concrete implementation of SourceLoader using the file system."""
+
+    def path_stats(self, path):
+        """Return the metadata for the path."""
+        st = _path_stat(path)
+        return {'mtime': st.st_mtime, 'size': st.st_size}
+```
+
+`ExtensionFileLoader` delegates directly to `_imp.create_dynamic` and
+`_imp.exec_dynamic`, which call the C-level `PyImport_ExecCodeModuleWithPathnames`
+pathway:
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:1051 ExtensionFileLoader.create_module
+def create_module(self, spec):
+    """Create an uninitialized extension module"""
+    module = _bootstrap._call_with_frames_removed(
+        _imp.create_dynamic, spec)
+    return module
+
+# CPython: Lib/importlib/_bootstrap_external.py:1059 ExtensionFileLoader.exec_module
+def exec_module(self, module):
+    """Initialize an extension module"""
+    _bootstrap._call_with_frames_removed(_imp.exec_dynamic, module)
+```
+
+### FileFinder (defined in _bootstrap_external.py:1322)
+
+`FileFinder` caches directory listings keyed by `st_mtime`. On a cache miss it
+calls `_fill_cache()` to re-read the directory. For each candidate it iterates
+`self._loaders` (a flat list of `(suffix, loader_class)` pairs built from the
+`loader_details` passed to `__init__`) to find the first matching suffix.
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:1331 FileFinder.__init__
+def __init__(self, path, *loader_details):
+    loaders = []
+    for loader, suffixes in loader_details:
+        loaders.extend((suffix, loader) for suffix in suffixes)
+    self._loaders = loaders
+    self.path = _path_abspath(path) if path and path != '.' else _os.getcwd()
+    self._path_mtime = -1
+    self._path_cache = set()
+    self._relaxed_path_cache = set()
+```
+
+### Deprecation shim for DEBUG/OPTIMIZED_BYTECODE_SUFFIXES
+
+The module's `__getattr__` hook intercepts attribute access so that accessing
+the now-deprecated constants triggers a `DeprecationWarning` pointing users to
+`BYTECODE_SUFFIXES` instead.
+
+```python
+# CPython: Lib/importlib/machinery.py:34 __getattr__
+def __getattr__(name):
+    import warnings
+    if name == 'DEBUG_BYTECODE_SUFFIXES':
+        warnings.warn('importlib.machinery.DEBUG_BYTECODE_SUFFIXES is '
+                      'deprecated; use importlib.machinery.BYTECODE_SUFFIXES '
+                      'instead.',
+                      DeprecationWarning, stacklevel=2)
+        return _DEBUG_BYTECODE_SUFFIXES
+    ...
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+```
+
+## gopy notes
+
+- `ModuleSpec` is the central data structure the entire import system passes
+  around. It must be a first-class gopy object before any loader can be wired.
+  The definition is in `_bootstrap.py:565`; port that class in full, including
+  the lazy `cached` property and the `has_location` setter.
+- `BuiltinImporter` and `FrozenImporter` can be ported as stateless structs
+  with class-method equivalents. Their `create_module` calls `_imp.create_builtin`
+  / `_imp.create_dynamic`, which map to gopy's existing C-extension init paths.
+- `SOURCE_SUFFIXES`, `BYTECODE_SUFFIXES`, and `EXTENSION_SUFFIXES` are simple
+  string slices. gopy should expose them as package-level variables in the
+  `importlib/machinery` module wrapper.
+- `FileFinder` is the most complex piece here. Its directory-listing cache and
+  case-insensitive mode (`_relax_case()` on Windows/macOS) require filesystem
+  abstractions. Port the full class rather than just the `find_spec` entry point.
+- `AppleFrameworkLoader` and `WindowsRegistryFinder` are platform-specific.
+  They can be no-op stubs on Linux and treated as dead code on other platforms
+  for the initial port.

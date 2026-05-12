@@ -1,0 +1,101 @@
+---
+title: "Objects/complexobject.c: complex number internals"
+description: "Py_complex C struct, construction, arithmetic helpers, rich comparison, and hash via sys.hash_info"
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: objects/complex.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/complexobject.c` implements Python's built-in `complex` type. At around 700 lines it is one of the smaller object files, but it is notable for splitting the arithmetic into a plain C layer (`Py_complex` struct and `_Py_c_*` helpers) and a Python object layer (`PyComplexObject`). This separation lets the math be reused without touching the GC or reference counts.
+
+## Map
+
+| Lines (approx) | Symbol | Purpose |
+|---|---|---|
+| 1-50 | `Py_complex` layout | C struct with `real` and `imag` doubles |
+| 51-180 | `_Py_c_sum`, `_Py_c_diff` | addition and subtraction on bare C structs |
+| 181-310 | `_Py_c_prod`, `_Py_c_quot` | multiplication and division; NaN/inf handling |
+| 311-370 | `_Py_c_pow`, `_Py_c_abs` | power and absolute value |
+| 371-480 | `complex_new` | `__new__` parsing of (real, imag) arguments |
+| 481-560 | `complex_richcompare` | equality only; ordering raises `TypeError` |
+| 561-620 | `complex_hash` | hash using `sys.hash_info` modulus and `_Py_HashDouble` |
+| 621-700 | number protocol | `nb_add`, `nb_mul`, `nb_neg`, etc. wired to `_Py_c_*` |
+
+## Reading
+
+### Py_complex C struct
+
+The arithmetic layer works entirely on a plain C struct. No Python object is involved until the result is boxed by `PyComplex_FromCComplex`.
+
+```c
+// CPython: Objects/complexobject.c:22 Py_complex
+typedef struct {
+    double real;
+    double imag;
+} Py_complex;
+```
+
+This means `_Py_c_prod` and friends can be called from the math module or the cmath module without allocating a `PyComplexObject` each time.
+
+### Multiplication and division
+
+Multiplication follows the textbook formula. Division guards against the denominator being zero and against intermediate overflow when both components are very large, using the Smith (1962) robust algorithm.
+
+```c
+// CPython: Objects/complexobject.c:209 _Py_c_quot
+Py_complex
+_Py_c_quot(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    double abs_breal = b.real < 0 ? -b.real : b.real;
+    double abs_bimag = b.imag < 0 ? -b.imag : b.imag;
+
+    if (abs_breal >= abs_bimag) {
+        double ratio = b.imag / b.real;
+        double denom = b.real + b.imag * ratio;
+        r.real = (a.real + a.imag * ratio) / denom;
+        r.imag = (a.imag - a.real * ratio) / denom;
+    } else {
+        double ratio = b.real / b.imag;
+        double denom = b.real * ratio + b.imag;
+        r.real = (a.real * ratio + a.imag) / denom;
+        r.imag = (a.imag * ratio - a.real) / denom;
+    }
+    return r;
+}
+```
+
+### Hash
+
+The hash of a complex number whose imaginary part is zero must equal the hash of the equivalent real number (a Python invariant for numeric types). When the imaginary part is non-zero CPython combines the two hashes via a multiplier derived from `sys.hash_info`.
+
+```c
+// CPython: Objects/complexobject.c:573 complex_hash
+static Py_hash_t
+complex_hash(PyComplexObject *v)
+{
+    Py_uhash_t hashreal, hashimag, combined;
+    hashreal = (Py_uhash_t)_Py_HashDouble((PyObject *)v, v->cval.real);
+    if (hashreal == (Py_uhash_t)-1)
+        return -1;
+    hashimag = (Py_uhash_t)_Py_HashDouble((PyObject *)v, v->cval.imag);
+    if (hashimag == (Py_uhash_t)-1)
+        return -1;
+    combined = hashreal + _PyHASH_IMAG * hashimag;
+    if (combined == (Py_uhash_t)-1)
+        combined = (Py_uhash_t)-2;
+    return (Py_hash_t)combined;
+}
+```
+
+## gopy notes
+
+- `objects/complex.go` mirrors the two-layer split: a `goComplex` struct (two `float64` fields) handles pure math, and `ComplexObject` wraps it for the Python object protocol.
+- `_Py_c_quot` is ported verbatim using the Smith-robust branch; the original algorithmic structure is preserved rather than delegating to `cmplx.Div` from `math/cmplx`, because Go's standard library does not use the same NaN-propagation rules in all edge cases.
+- `complex_richcompare` returns `NotImplemented` for `<`, `<=`, `>`, `>=`; gopy raises `TypeError` from the same comparison entry point.
+- The hash invariant (imaginary part zero implies hash equals real hash) is covered by a table-driven test in `objects/complex_test.go`.
+- <CpyLink file="Objects/complexobject.c" line={573}>complex_hash</CpyLink> is the reference for the `_PyHASH_IMAG` multiplier.

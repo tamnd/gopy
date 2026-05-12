@@ -1,0 +1,162 @@
+---
+title: Include/cpython/methodobject.h
+description: CPython-internal API for C-function objects, PyMethodDef, and METH_* flag constants.
+cpython_path: Include/cpython/methodobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: objects/method.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/methodobject.h`
+
+<CpyLink path="Include/cpython/methodobject.h" />
+
+## Map
+
+`methodobject.h` is split across two headers in CPython's include layout.
+The stable ABI surface (`PyMethodDef`, `PyCFunction`, `METH_*` flags) lives in
+`Include/methodobject.h`. The internal-only struct layout and access macros live
+here in `Include/cpython/methodobject.h`.
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `PyMethodDef` | struct | Describes one C-implemented method: name, pointer, flags, docstring |
+| `PyCFunctionObject` | struct | The Python object wrapping a `PyMethodDef` at runtime |
+| `PyCFunction_GET_FUNCTION` | macro | Reads `m_ml->ml_meth` from a `PyCFunctionObject *` |
+| `PyCFunction_GET_SELF` | macro | Reads `m_self` (the bound instance, or `NULL` for unbound) |
+| `PyCFunction_GET_FLAGS` | macro | Reads `m_ml->ml_flags` |
+| `PyCFunction_GET_MODULE` | macro | Reads `m_module` (the module the function belongs to) |
+
+### `PyMethodDef` fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ml_name` | `const char *` | Method name exposed to Python |
+| `ml_meth` | `PyCFunction` | C function pointer |
+| `ml_flags` | `int` | Combination of `METH_*` flags |
+| `ml_doc` | `const char *` | Docstring (may be `NULL`) |
+
+### `PyCFunctionObject` fields
+
+| Field | Meaning |
+|---|---|
+| `m_ml` | Pointer to the `PyMethodDef` |
+| `m_self` | Bound `self` object, or `NULL` |
+| `m_module` | Module object, or `NULL` |
+| `m_weakreflist` | Weak-reference list head |
+| `vectorcall` | `vectorcallfunc` slot, filled when `METH_FASTCALL` is set |
+
+### `METH_*` flags
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `METH_VARARGS` | `0x0001` | Called as `f(self, args)` where `args` is a tuple |
+| `METH_KEYWORDS` | `0x0002` | Called as `f(self, args, kwargs)` |
+| `METH_NOARGS` | `0x0004` | Called as `f(self, NULL)`; accepts no arguments |
+| `METH_O` | `0x0008` | Called as `f(self, arg)` with exactly one argument |
+| `METH_CLASS` | `0x0010` | Receives the class as `self` instead of an instance |
+| `METH_STATIC` | `0x0020` | Receives no implicit first argument |
+| `METH_FASTCALL` | `0x0080` | Vectorcall convention: `f(self, args, nargs, kwnames)` |
+
+`METH_CLASS` and `METH_STATIC` are mutually exclusive. `METH_FASTCALL` may be
+combined with `METH_KEYWORDS` to enable `METH_FASTCALL | METH_KEYWORDS`.
+
+## Reading
+
+### Struct layout
+
+The two structs are deliberately compact. `PyMethodDef` is a plain C struct with
+no `PyObject_HEAD`; it is not a Python object itself. `PyCFunctionObject` wraps
+it at runtime:
+
+```c
+// Include/methodobject.h (stable ABI portion)
+struct PyMethodDef {
+    const char  *ml_name;
+    PyCFunction  ml_meth;
+    int          ml_flags;
+    const char  *ml_doc;
+};
+```
+
+```c
+// Include/cpython/methodobject.h (internal portion)
+struct PyCFunctionObject {
+    PyObject_HEAD
+    PyMethodDef *m_ml;      /* Description of the C function to call */
+    PyObject    *m_self;    /* Passed as 'self' arg to the C func, can be NULL */
+    PyObject    *m_module;  /* The __module__ attribute, can be anything */
+    PyObject    *m_weakreflist;
+    vectorcallfunc vectorcall;
+};
+```
+
+The `vectorcall` field was added in 3.9. When it is non-`NULL`, the call
+machinery uses the vectorcall protocol instead of going through
+`PyCFunction_Call`, which avoids building a temporary argument tuple.
+
+### Access macros
+
+The three main accessor macros read fields through a cast rather than through
+direct member access, so calling code does not depend on the exact struct layout:
+
+```c
+// Include/cpython/methodobject.h
+#define PyCFunction_GET_FUNCTION(func) \
+    (((PyCFunctionObject *)func)->m_ml->ml_meth)
+
+#define PyCFunction_GET_SELF(func) \
+    (((PyCFunctionObject *)func)->m_self)
+
+#define PyCFunction_GET_FLAGS(func) \
+    (((PyCFunctionObject *)func)->m_ml->ml_flags)
+```
+
+All three macros evaluate their argument twice, so passing an expression with
+side effects is unsafe.
+
+### Calling convention dispatch
+
+The call path in `Objects/call.c` inspects `ml_flags` to decide how to invoke
+the C function. The fast path for `METH_FASTCALL | METH_KEYWORDS` avoids any
+tuple allocation:
+
+```c
+// Objects/methodobject.c
+static PyObject *
+cfunction_vectorcall_FASTCALL_KEYWORDS(
+    PyObject *func, PyObject *const *stack,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyCFunctionObject *cf = (PyCFunctionObject *)func;
+    _PyCFunctionFastWithKeywords meth =
+        (_PyCFunctionFastWithKeywords)(void(*)(void))cf->m_ml->ml_meth;
+    PyObject *self = cf->m_self;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    return meth(self, stack, nargs, kwnames);
+}
+```
+
+This is the path taken by most built-in methods in 3.14; the older
+`METH_VARARGS` path is still supported for extension modules that have not been
+updated.
+
+## gopy mirror
+
+Ported to `/Users/apple/github/tamnd/gopy/objects/method.go`.
+
+`PyMethodDef` maps to `MethodDef` and `PyCFunctionObject` maps to
+`CFunction`. The `METH_*` constants are defined as `const` iota-style values.
+The three access macros become methods on the `CFunction` type:
+`GetFunction`, `GetSelf`, and `GetFlags`. The `vectorcall` slot is present
+and is wired into gopy's call dispatch in `vm/eval_call.go`.
+
+## CPython 3.14 changes
+
+3.14 added `METH_STACKLESS` as an internal flag used by Stackless-aware
+builds; it is not part of the stable ABI. The `PyCFunctionObject` struct
+gained a second vectorcall path for methods that carry a `self` argument
+from `__init_subclass__` and similar hooks. The access macros are unchanged.

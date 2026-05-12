@@ -1,0 +1,143 @@
+---
+title: Modules/_io/textio.c
+description: "CPython source annotation: textio.c"
+cpython_path: Modules/_io/textio.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/textio.c" />
+
+`textio.c` implements `TextIOWrapper`, the class Python programs interact with when they `open()` a file in text mode. It handles codec lookup, line-ending translation (universal newlines), incremental encoding and decoding, and a tell/seek protocol that snapshots codec state so the stream can be repositioned precisely even inside multi-byte sequences.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `textiowrapper_init` | method | 150 | Codec lookup, `newline` argument parsing, buffer attachment |
+| `_textiowrapper_read_chunk` | function | 120 | Reads one chunk from buffer, decodes it, appends to pending string |
+| `textiowrapper_read` | method | 80 | Top-level `read(n)` dispatch |
+| `textiowrapper_readline` | method | 150 | Incremental readline with universal newline handling |
+| `_textiowrapper_writeflush` | function | 60 | Encodes pending write string and passes bytes to underlying buffer |
+| `textiowrapper_write` | method | 80 | Accumulates text; flushes via `_textiowrapper_writeflush` |
+| `textiowrapper_tell` | method | 120 | Encodes codec state + byte offset into opaque cookie |
+| `textiowrapper_seek` | method | 140 | Decodes cookie; resets codec and repositions underlying buffer |
+| `textiowrapper_flush` | method | 30 | Flushes pending text then calls `buffer.flush()` |
+| `textiowrapper_close` | method | 40 | Flush + close; idempotent |
+
+## Reading
+
+### Initialization: codec lookup and newline translation
+
+`textiowrapper_init` calls `_PyCodec_LookupTextEncoding` to get an incremental encoder/decoder pair. It validates the `newline` argument (must be `None`, `""`, `"\n"`, `"\r"`, or `"\r\n"`) and sets three booleans that drive the translation hot path: `readtranslate`, `readuniversal`, and `writetranslate`.
+
+```c
+// CPython: Modules/_io/textio.c:627 textiowrapper_init
+self->readuniversal  = (newline == NULL || newline[0] == '\0');
+self->readtranslate  = (newline == NULL);
+self->writetranslate = (newline != NULL && newline[0] != '\0');
+self->writenl = ...;   /* "\r\n" on Windows when newline=None */
+```
+
+`readuniversal` enables the universal newline scanner, which rewrites `\r` and `\r\n` to `\n` in the decoded string. `writetranslate` replaces `\n` in write output with the platform line ending (or the explicit `newline` argument).
+
+### Reading: chunk decode loop
+
+`_textiowrapper_read_chunk` is the engine behind both `read()` and `readline()`. It fetches a chunk of bytes from the underlying buffer, runs them through the incremental decoder, and appends the resulting string to `self->decoded_chars`. The decoder is stateful: it may hold a partial multi-byte sequence across calls.
+
+```c
+// CPython: Modules/_io/textio.c:1094 _textiowrapper_read_chunk
+input_chunk = PyObject_CallMethodObjArgs(
+                  self->buffer, _PyIO_str_read1,
+                  self->chunk_size, NULL);
+...
+decoded = PyObject_CallMethodObjArgs(
+              self->decoder, _PyIO_str_decode,
+              input_chunk, eof_obj, NULL);
+if (_textiowrapper_set_decoded_chars(self, decoded) < 0)
+    goto error;
+```
+
+`read1` (not `read`) is used intentionally: it returns whatever bytes are immediately available without blocking for a full buffer, which keeps interactive streams responsive.
+
+### readline with universal newlines
+
+`textiowrapper_readline` scans `self->decoded_chars` character by character looking for a line terminator. When `readuniversal` is set it recognises `\n`, `\r`, and `\r\n`. The tricky case is a lone `\r` at the end of the decoded buffer: the scanner must peek at the next chunk to determine whether it is followed by `\n` before deciding whether to emit `\r\n` or `\r`.
+
+```c
+// CPython: Modules/_io/textio.c:1387 textiowrapper_readline
+if (self->readuniversal) {
+    if (c == '\r') {
+        /* might be \r\n, need one more character */
+        if (!has_next_char) {
+            if (_textiowrapper_read_chunk(self, 1) < 0)
+                goto error;
+            has_next_char = ...; /* re-check */
+        }
+        if (next_char == '\n') {
+            /* consume the \n too */
+            self->decoded_chars_used++;
+        }
+        c = '\n';   /* normalise */
+    }
+}
+```
+
+### Write path: accumulation and flush
+
+`textiowrapper_write` appends to `self->pending_bytes` (a list of string objects waiting to be encoded) and tracks the total pending byte count. When that count exceeds one buffer size, or when `write_through` is set, `_textiowrapper_writeflush` is called immediately.
+
+```c
+// CPython: Modules/_io/textio.c:1229 textiowrapper_write
+PyList_Append(self->pending_bytes, text);
+self->pending_bytes_count += textlen;
+
+if (self->write_through ||
+    self->pending_bytes_count > self->chunk_size) {
+    if (_textiowrapper_writeflush(self) < 0)
+        goto error;
+}
+```
+
+`_textiowrapper_writeflush` joins the pending list into one string, applies `writetranslate` newline substitution, encodes with the incremental encoder, and passes the resulting bytes object to `self->buffer.write()`.
+
+```c
+// CPython: Modules/_io/textio.c:1193 _textiowrapper_writeflush
+joined = PyUnicode_Join(_PyIO_str_empty, self->pending_bytes);
+...
+if (self->writetranslate) {
+    joined = _PyObject_CallMethodIdOneArg(
+                 joined, &PyId_replace, self->writenl_obj);
+}
+b = PyObject_CallMethodObjArgs(
+        self->encoder, _PyIO_str_encode, joined, NULL);
+PyObject_CallMethodObjArgs(self->buffer, _PyIO_str_write, b, NULL);
+```
+
+### tell and seek with codec state snapshot
+
+`tell` must return a value from which `seek` can restore both the byte position and the codec's internal state (for example, a partial UTF-16 surrogate). CPython encodes this as an opaque 128-bit "cookie": the lower 64 bits are the raw byte offset returned by `buffer.tell()`, and the upper bits pack three fields: the number of characters to skip after decoding (to handle multi-character sequences that straddle a chunk boundary), a "bytes to feed" count, and a flag indicating whether the decoder needs a final `decode(b"", final=True)` call before the skip.
+
+```c
+// CPython: Modules/_io/textio.c:1520 textiowrapper_tell
+/* Snapshot the decoder state before re-decoding from start_pos */
+cookie = textiowrapper_get_locale_pos(
+             self,
+             start_pos,       /* raw offset where decoding began */
+             bytes_to_feed,   /* bytes needed to reach current char */
+             chars_to_skip,   /* decoded chars to discard after decode */
+             need_eof);       /* whether final decode is needed */
+```
+
+`seek` reverses this: it extracts the fields from the cookie, seeks the underlying buffer to `start_pos`, resets the decoder to a clean state, feeds exactly `bytes_to_feed` bytes through the decoder, then discards `chars_to_skip` characters from the result.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/io/`.
+
+The codec interface maps to Go's `golang.org/x/text/transform` (`Transformer`) for incremental encode and decode. The pending-bytes list is a `[]string` accumulator; the flush step joins with `strings.Join`, applies newline translation with `strings.ReplaceAll`, encodes, and writes to the underlying buffered stream. The tell/seek cookie can be represented as a `uint128` (two `uint64` fields) or a big-endian-encoded `*big.Int`. Universal newline handling belongs in a thin scanner over the decoded string, following the same `\r`-peek logic as CPython. `write_through` mode sets a flag that bypasses accumulation entirely, forwarding each write immediately to the buffer layer.

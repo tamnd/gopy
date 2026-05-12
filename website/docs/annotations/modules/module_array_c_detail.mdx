@@ -1,0 +1,86 @@
+---
+title: Modules/arraymodule.c
+description: "array module: typed homogeneous mutable sequences with typecode-dispatched pack/unpack, buffer protocol export, and binary file I/O via frombytes/tobytes."
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/arraymodule.c" />
+
+`Modules/arraymodule.c` implements the `array.array` type: a mutable sequence of items all of the same C primitive type. Unlike `list`, every element is stored directly in a contiguous C buffer rather than as a `PyObject*`. The file contains the `arraydescr` type table, memory management, the full sequence API, the buffer protocol implementation, and binary I/O helpers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `arraydescr`, type table | Per-typecode descriptor with pack/unpack functions |
+| 201-500 | `arrayobject`, `newarrayobject` | Struct and constructor; validates typecode |
+| 501-900 | sequence methods | `array_append`, `array_extend`, `array_insert`, `array_pop` |
+| 901-1300 | `array_frombytes`, `array_tobytes` | Binary import/export |
+| 1301-1700 | `array_fromfile`, `array_tofile` | File-based I/O |
+| 1701-2100 | buffer protocol | `array_buffer_info`, `getbuffer`, `releasebuffer` |
+| 2101-2500 | type wiring | `PyArray_Type`, module init |
+
+## Reading
+
+### arraydescr type table
+
+Each entry in `descriptors[]` maps a typecode character (`b`, `B`, `h`, `H`, `i`, `I`, `l`, `L`, `q`, `Q`, `f`, `d`) to its item size and pack/unpack functions. The pack function converts a Python object to raw bytes in the buffer; unpack does the reverse.
+
+```c
+// Modules/arraymodule.c:1 arraydescr (entry for 'd')
+static const arraydescr descriptors[] = {
+    {'b', 1, b_getitem, b_setitem, "b"},
+    {'h', sizeof(short), h_getitem, h_setitem, "h"},
+    {'i', sizeof(int),   i_getitem, i_setitem, "i"},
+    {'d', sizeof(double), d_getitem, d_setitem, "d"},
+    {'\0', 0, NULL, NULL, NULL}  /* sentinel */
+};
+```
+
+### Memory management and resize
+
+`array.append` and `array.extend` call `array_resize` which uses `PyMem_Realloc` on the internal `ob_item` buffer. The growth factor mirrors `list`: approximately 1.125x plus a constant, amortizing reallocations.
+
+```c
+// Modules/arraymodule.c:501 array_append_impl
+static PyObject *
+array_append_impl(arrayobject *self, PyObject *v)
+{
+    Py_ssize_t n = Py_SIZE(self);
+    if (array_resize(self, n + 1) == -1) return NULL;
+    return (*self->ob_descr->setitem)(self, n, v);
+}
+```
+
+### Buffer protocol
+
+`getbuffer` exposes the raw `ob_item` buffer using the `Py_buffer` protocol. This allows zero-copy passing of array contents to C extensions, `ctypes`, `struct.pack_into`, and NumPy. The format string (`"d"` for double, `"i"` for int, etc.) comes from `ob_descr->formats`.
+
+```c
+// Modules/arraymodule.c:1701 array_buffer_getbuf
+static int
+array_buffer_getbuf(arrayobject *self, Py_buffer *view, int flags)
+{
+    view->buf    = self->ob_item;
+    view->len    = Py_SIZE(self) * self->ob_descr->itemsize;
+    view->format = (char *)self->ob_descr->formats;
+    view->itemsize = self->ob_descr->itemsize;
+    view->ndim   = 1;
+    view->shape  = &view->len; /* adjusted below */
+    view->strides = &view->itemsize;
+    return 0;
+}
+```
+
+### Binary I/O
+
+`array.frombytes(buf)` appends items parsed from a bytes-like object. `array.tobytes()` returns the raw buffer as `bytes`. `fromfile(f, n)` reads exactly `n` items from a binary file object and appends them; it raises `EOFError` if fewer than `n` items are available.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/array/`. The Go equivalent would use a `[]byte` backing slice with typed views (cast via `unsafe.Slice`), matching the buffer-protocol semantics for zero-copy interop.

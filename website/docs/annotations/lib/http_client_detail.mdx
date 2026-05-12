@@ -1,0 +1,95 @@
+---
+title: "http/client.py: HTTPConnection and HTTPResponse internals"
+description: "Detailed annotations for HTTPConnection._send_request, chunked response parsing, header storage, tunnel CONNECT, and the 3.14 blocksize change"
+cpython_path: Lib/http/client.py
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+ported_to: module/http/client
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`http/client.py` implements the low-level HTTP/1.1 client protocol. Two classes carry almost all of the logic: `HTTPConnection` manages the socket lifecycle and request serialisation, while `HTTPResponse` owns response parsing and streaming.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | module constants | Status codes, `_MAXLINE`, `_MAXHEADERS`, default `blocksize` |
+| 81–210 | `HTTPResponse.__init__`, `begin` | Socket wrapping, status line parsing, header ingestion |
+| 211–390 | `HTTPResponse._read_status` | Status line tokenisation, 100-continue loop |
+| 391–560 | `HTTPResponse.read`, `_safe_read` | Normal and chunked body streaming |
+| 561–680 | `HTTPConnection.__init__` | Host/port parsing, timeout, source address |
+| 681–820 | `HTTPConnection.connect`, `close` | Socket creation, SSL wrapping |
+| 821–980 | `HTTPConnection._send_request` | Header assembly, body encoding, `Content-Length` vs chunked decision |
+| 981–1100 | `HTTPConnection.send`, `_send_output` | Buffer flush, auto-connect |
+| 1101–1240 | `HTTPConnection.set_tunnel` | CONNECT proxy setup |
+| 1241–1400 | `HTTPConnection.putrequest`, `putheader`, `endheaders` | Incremental header API |
+| 1401–1600 | `HTTPSConnection`, helpers | TLS defaults, `_tunnel_host` logic |
+
+## Reading
+
+### `_send_request` and header case-insensitive storage
+
+`_send_request` (around line 1260) normalises header names with `str.title()` before storing them in an internal list. The list preserves insertion order but lookup uses a case-folded scan so that callers can pass `content-type` or `Content-Type` interchangeably.
+
+```python
+# CPython Lib/http/client.py (simplified)
+def _send_request(self, method, url, body, headers, encode_chunked=False):
+    # Normalise header names for deduplication check
+    header_names = {k.lower() for k, v in headers.items()}
+    if 'content-length' not in header_names:
+        if body is not None:
+            self.putheader('Content-Length', str(len(body)))
+    for hdr, value in headers.items():
+        self.putheader(hdr, value)
+    self.endheaders(body, encode_chunked=encode_chunked)
+```
+
+The 3.14 release bumped the default `blocksize` from 8192 to 16384. Code that passes `blocksize` explicitly is unaffected, but anything relying on the default will now issue larger socket writes.
+
+### Chunked response parsing in `_read_chunked`
+
+`_read_chunked` reads one chunk at a time. Each chunk begins with a hex length line, optionally followed by chunk extensions that CPython ignores. A zero-length chunk signals end-of-body.
+
+```python
+# CPython Lib/http/client.py (simplified)
+def _read_chunked(self, amt):
+    value = []
+    while True:
+        line = self.fp.readline(_MAXLINE + 1)
+        chunk_left = int(line.split(b';', 1)[0], 16)
+        if chunk_left == 0:
+            break
+        value.append(self._safe_read(chunk_left))
+        self._safe_read(2)  # discard trailing CRLF
+    return b''.join(value)
+```
+
+The extension field after `;` is stripped but not validated. A port must preserve this behaviour to stay compatible with servers that emit extensions.
+
+### Tunnel CONNECT via `set_tunnel`
+
+`set_tunnel` records a target host and optional headers, then `_tunnel` issues a `CONNECT` request over the raw socket before the TLS handshake. The proxy response must be exactly `200`; anything else raises `OSError`.
+
+```python
+# CPython Lib/http/client.py (simplified)
+def _tunnel(self):
+    connect = b'CONNECT %s:%d HTTP/1.0\r\n' % (
+        self._tunnel_host.encode(), self._tunnel_port)
+    self.send(connect)
+    # read until blank line
+    response = self.response_class(self.sock, method=self._method)
+    response.begin()
+    if response.status != http.HTTPStatus.OK:
+        self.close()
+        raise OSError(f'Tunnel connection failed: {response.status}')
+```
+
+## gopy notes
+
+- The chunked reader uses `readline` with a size cap (`_MAXLINE + 1 = 65537`). A Go port should replicate this cap to avoid unbounded reads on malformed responses.
+- `HTTPResponse.begin` does a 100-continue drain loop. The loop limit is 100 iterations, matching `_MAXLINE` semantics by convention, not by the same constant.
+- Header storage is a plain list of `(name, value)` tuples, not a dict. The `HTTPMessage` wrapper (from `email.message`) provides case-insensitive dict-like access on top.
+- `blocksize` (now 16384 in 3.14) affects `endheaders` and `send`; it is not the socket buffer size.

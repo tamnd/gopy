@@ -1,0 +1,82 @@
+---
+title: "contextlib.py: Advanced Context Manager Utilities"
+description: "ExitStack callback chain, AsyncContextManager, redirect_stdout/redirect_stderr, suppress, and asynccontextmanager generator protocol"
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: module/contextlib
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`contextlib` provides the building blocks that Python code uses to write context
+managers without subclassing. The most important design decision in the file is
+that `ExitStack` and `AsyncExitStack` are the only classes that handle exception
+suppression dynamically. Every other utility is a wrapper around the generator
+or decorator protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | module preamble | `__all__`, `ABC` import, `wraps` import |
+| 51-120 | `AbstractContextManager` | `__enter__` returns `self`; `__exit__` returns `None`; `__class_getitem__` for generics |
+| 121-160 | `AbstractAsyncContextManager` | Same shape as above with `__aenter__` / `__aexit__` |
+| 161-240 | `contextmanager` | Decorator wrapping a generator in `_GeneratorContextManager` |
+| 241-310 | `_GeneratorContextManager` | `__enter__` calls `next`; `__exit__` sends exception or calls `next` to close |
+| 311-370 | `asynccontextmanager` | Async variant; `__aexit__` uses `athrow` / `asend` |
+| 371-420 | `closing` | Calls `obj.close()` on exit; simplest example of the protocol |
+| 421-460 | `nullcontext` | No-op; useful as a default argument placeholder |
+| 461-510 | `suppress` | Catches listed exception types in `__exit__`; returns `True` to suppress |
+| 511-560 | `redirect_stdout` / `redirect_stderr` | Swaps `sys.stdout` / `sys.stderr` on enter and restores on exit |
+| 561-650 | `ExitStack` | Callback chain; `_push_cm_exit`, `push`, `enter_context`, `callback`, `close` |
+| 651-700 | `AsyncExitStack` | Async variant of `ExitStack`; `aclose` is a coroutine |
+
+## Reading
+
+### `_GeneratorContextManager.__exit__`
+
+This is the most subtle method in the file. On a clean exit it calls `next` and
+expects `StopIteration`. If the generator yields a second time, `RuntimeError`
+is raised. On an exceptional exit it calls `throw` on the generator. If the
+generator re-raises the same exception, `__exit__` returns `False` (propagate).
+If it raises a different exception, that new exception replaces the original. If
+it exits cleanly (no raise after `throw`), `__exit__` returns `True` (suppress).
+
+### ExitStack callback chain
+
+`ExitStack._exit_callbacks` is a `deque` of `(is_sync, callback)` pairs. When
+`close` is called (or the block exits), the deque is drained in LIFO order.
+Each callback receives the current `(exc_type, exc, tb)` triple. If a callback
+returns a truthy value the exception is suppressed and subsequent callbacks
+receive `(None, None, None)`. If a callback raises, the new exception replaces
+the current one. This chain is why `ExitStack` can be used to compose an
+arbitrary number of context managers reliably.
+
+### `asynccontextmanager` generator protocol
+
+`_AsyncGeneratorContextManager.__aexit__` follows the same logic as the
+synchronous version but uses `athrow` to inject exceptions into an async
+generator. The `asend(None)` call advances past the `yield` on a clean exit.
+CPython 3.12 added a finalizer that closes the async generator if `__aexit__`
+was never called, matching the `contextmanager` finalizer added in 3.2.
+
+### 3.14 changes
+
+`AbstractContextManager` and `AbstractAsyncContextManager` both gained
+`__class_getitem__` returning `GenericAlias`, enabling syntax like
+`AbstractContextManager[int]` for type annotations without importing `typing`.
+`chdir` was added as a new utility (line ~580 in 3.13+) that changes the
+working directory on enter and restores it on exit.
+
+## gopy notes
+
+- `contextmanager` and `asynccontextmanager` depend on generator `throw` /
+  `athrow`, which requires the generator frame resumption path in `vm/eval_gen.go`.
+- `suppress` is a thin wrapper and is already functional in `module/contextlib`.
+- `ExitStack` is the main remaining gap. The callback deque and the exception
+  replacement logic need careful porting because Go does not have a direct
+  equivalent of Python's exception chaining.
+- `redirect_stdout` swaps `sys.stdout`, which requires `module/sys` to expose a
+  mutable `stdout` attribute. That attribute is tracked in `module/sys/module.go`.

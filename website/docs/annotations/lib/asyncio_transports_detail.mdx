@@ -1,0 +1,146 @@
+---
+title: asyncio/transports.py
+description: "Transport ABC hierarchy: the stable interface between protocols and I/O implementations"
+cpython_path: Lib/asyncio/transports.py
+cpython_version: "3.14"
+lines: 330
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`transports.py` defines the abstract base classes that asyncio I/O implementations (selector, proactor, SSL) must satisfy. A transport owns the socket and calls into a protocol. User code normally never subclasses these directly — it receives a concrete transport from `loop.create_connection` and drives it through the `WriteTransport` interface.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | module top | imports, `__all__` |
+| 31–90 | `BaseTransport` | metadata, closing, protocol slot |
+| 91–130 | `ReadTransport` | pause/resume reading |
+| 131–220 | `WriteTransport` | write, drain limits, EOF, abort |
+| 221–240 | `Transport` | combines read and write sides |
+| 241–280 | `DatagramTransport` | `sendto`, `abort` |
+| 281–330 | `SubprocessTransport` | pid, returncode, pipe accessors |
+
+## Reading
+
+### BaseTransport carries metadata and the close gate
+
+`get_extra_info` is the escape hatch to implementation details (socket object, peer name, SSL cipher, etc.) without breaking the abstraction. `is_closing` allows callers to check whether `close` has already been called.
+
+```python
+# CPython: Lib/asyncio/transports.py:31 BaseTransport
+class BaseTransport:
+    def __init__(self, extra=None):
+        if extra is None:
+            extra = {}
+        self._extra = extra
+
+    def get_extra_info(self, name, default=None):
+        return self._extra.get(name, default)
+
+    def is_closing(self):
+        raise NotImplementedError
+
+    def close(self):
+        raise NotImplementedError
+
+    def set_protocol(self, protocol):
+        raise NotImplementedError
+
+    def get_protocol(self):
+        raise NotImplementedError
+```
+
+### WriteTransport governs the send path and back-pressure
+
+`write` queues bytes for delivery. `set_write_buffer_limits` sets the high-water and low-water marks that trigger `pause_writing` / `resume_writing` on the protocol. `get_write_buffer_size` lets callers inspect the current queue depth.
+
+```python
+# CPython: Lib/asyncio/transports.py:131 WriteTransport
+class WriteTransport(BaseTransport):
+    def set_write_buffer_limits(self, high=None, low=None):
+        raise NotImplementedError
+
+    def get_write_buffer_size(self):
+        raise NotImplementedError
+
+    def get_write_buffer_limits(self):
+        raise NotImplementedError
+
+    def write(self, data):
+        raise NotImplementedError
+
+    def writelines(self, list_of_data):
+        self.write(b''.join(list_of_data))
+
+    def write_eof(self):
+        raise NotImplementedError
+
+    def can_write_eof(self):
+        raise NotImplementedError
+
+    def abort(self):
+        raise NotImplementedError
+```
+
+`writelines` is the one method with a real default body: it concatenates and delegates to `write`. `abort` closes the transport immediately, discarding any buffered data, unlike `close` which flushes first.
+
+### ReadTransport controls inbound flow
+
+The three methods form a simple gate: `is_reading` queries the current state, `pause_reading` stops delivering data to the protocol, and `resume_reading` restarts delivery.
+
+```python
+# CPython: Lib/asyncio/transports.py:91 ReadTransport
+class ReadTransport(BaseTransport):
+    def is_reading(self):
+        raise NotImplementedError
+
+    def pause_reading(self):
+        raise NotImplementedError
+
+    def resume_reading(self):
+        raise NotImplementedError
+```
+
+`StreamReader` uses these via `StreamReaderProtocol` to implement the `limit`-based back-pressure: once the internal buffer exceeds the limit, it calls `pause_reading`; once the buffer drains, it calls `resume_reading`.
+
+### SubprocessTransport exposes process metadata
+
+Beyond the normal transport interface, `SubprocessTransport` adds accessors for the child process: `get_pid`, `get_returncode`, `get_pipe_transport` (returns the `ReadTransport` or `WriteTransport` for a given fd), `send_signal`, `terminate`, and `kill`.
+
+```python
+# CPython: Lib/asyncio/transports.py:281 SubprocessTransport
+class SubprocessTransport(BaseTransport):
+    def get_pid(self):
+        raise NotImplementedError
+
+    def get_returncode(self):
+        raise NotImplementedError
+
+    def get_pipe_transport(self, fd):
+        raise NotImplementedError
+
+    def send_signal(self, signal):
+        raise NotImplementedError
+
+    def terminate(self):
+        raise NotImplementedError
+
+    def kill(self):
+        raise NotImplementedError
+```
+
+## gopy notes
+
+- `BaseTransport._extra` is a plain `dict` passed in at construction time by the concrete implementation. The selector transport populates it with `socket`, `sockname`, `peername`, and `compression` keys.
+- `writelines` is the only default implementation in the file. When porting, this can stay as a simple loop over the slice calling the Go `write` equivalent.
+- `DatagramTransport.sendto` takes an optional `addr` argument. When `addr` is `None`, the transport uses the address it was connected to. This maps to two distinct syscalls (`sendto` vs `send`) in the Go port.
+- `abort` versus `close` is a critical distinction for the Go port. `abort` must drop the send queue and close without flushing; `close` must drain. Both eventually call `connection_lost` on the protocol.
+
+## CPython 3.14 changes
+
+- `get_write_buffer_limits` was added in 3.11 to make the high/low watermark values readable, not just writable.
+- Type annotations were added to the full file in 3.13 and revised in 3.14 alongside the buffer-protocol typing work (PEP 688).
+- No methods were removed or renamed in 3.14; the hierarchy is stable.

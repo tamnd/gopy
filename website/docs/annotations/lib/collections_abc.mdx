@@ -1,0 +1,145 @@
+---
+title: "Lib/_collections_abc.py"
+description: "Defines the abstract base classes for Python's collections hierarchy, from Hashable through MutableMapping and Set algebra."
+cpython_path: "Lib/_collections_abc.py"
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/_collections_abc.py
+
+<CpyLink path="Lib/_collections_abc.py" />
+
+This file is the canonical home of every abstract base class that ships under
+`collections.abc`. It builds on `abc.ABCMeta` to let third-party classes
+register themselves as virtual subclasses without inheriting, and it supplies
+concrete mixin methods so that implementing one or two abstract primitives
+gives you the rest of the protocol for free.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/_collections_abc.py" lines="1-90">1-90</Cpy> | module preamble, `__all__`, `ABCMeta` imports | Registers the module and lists every exported name |
+| <Cpy path="Lib/_collections_abc.py" lines="91-130">91-130</Cpy> | `Hashable` | ABC with abstract `__hash__`; `__subclasshook__` checks for a non-None `__hash__` attribute |
+| <Cpy path="Lib/_collections_abc.py" lines="131-180">131-180</Cpy> | `Awaitable`, `Coroutine`, `AsyncIterable`, `AsyncIterator`, `AsyncGenerator` | Async protocol ABCs mirroring the sync chain |
+| <Cpy path="Lib/_collections_abc.py" lines="181-240">181-240</Cpy> | `Iterable`, `Iterator`, `Generator` | Core iteration ABCs; `Iterator.__subclasshook__` requires both `__iter__` and `__next__` |
+| <Cpy path="Lib/_collections_abc.py" lines="241-290">241-290</Cpy> | `Reversible`, `Sized`, `Container`, `Collection` | Single-method ABCs; `Collection` composes all three |
+| <Cpy path="Lib/_collections_abc.py" lines="291-380">291-380</Cpy> | `Callable` | ABC with abstract `__call__`; `__subclasshook__` inspects `__call__` on the class |
+| <Cpy path="Lib/_collections_abc.py" lines="381-530">381-530</Cpy> | `Sequence`, mixin methods | Derives `index`, `count`, `__contains__`, `__iter__`, `__reversed__` from `__getitem__` and `__len__` |
+| <Cpy path="Lib/_collections_abc.py" lines="531-620">531-620</Cpy> | `MutableSequence`, mixin methods | Derives `append`, `clear`, `reverse`, `extend`, `pop`, `remove`, `__iadd__` from `insert` and the `Sequence` primitives |
+| <Cpy path="Lib/_collections_abc.py" lines="621-750">621-750</Cpy> | `Mapping`, `MutableMapping` | Derives `keys`, `items`, `values`, `get`, `__eq__`, `__contains__`; `MutableMapping` adds `pop`, `popitem`, `clear`, `update`, `setdefault` |
+| <Cpy path="Lib/_collections_abc.py" lines="751-860">751-860</Cpy> | `KeysView`, `ItemsView`, `ValuesView` | Read-only views backed by a `Mapping`; implement `__contains__` and `__iter__` |
+| <Cpy path="Lib/_collections_abc.py" lines="861-1000">861-1000</Cpy> | `Set`, `MutableSet`, set algebra methods | `__and__`, `__or__`, `__sub__`, `__xor__` and their reflected/in-place variants; `_hash` helper |
+
+## Reading
+
+### ABCMeta registration and `__subclasshook__`
+
+`ABCMeta` drives two distinct paths for virtual subclass checks. An explicit
+`register()` call adds a class to an internal `_abc_registry` weak set. The
+`__subclasshook__` classmethod provides structural typing: if it returns
+`True` or `False` the answer is final; returning `NotImplemented` falls back
+to the normal MRO walk.
+
+```python
+# CPython: Lib/_collections_abc.py:100 Hashable.__subclasshook__
+@classmethod
+def __subclasshook__(cls, C):
+    if cls is Hashable:
+        return _check_methods(C, "__hash__")
+    return NotImplemented
+```
+
+`_check_methods` walks the MRO of `C` and returns `False` if any class in the
+chain sets the named attribute to `None` (the marker Python uses to explicitly
+block a protocol), `True` if a non-None value is found, and `NotImplemented`
+if the attribute is absent everywhere.
+
+### Sequence mixin derivation
+
+`Sequence` declares only `__getitem__` and `__len__` as abstract. The five
+concrete methods below are pure Python derivations that any read-only sequence
+gets for free.
+
+```python
+# CPython: Lib/_collections_abc.py:430 Sequence.index
+def index(self, value, start=0, stop=None):
+    if start is not None and start < 0:
+        start = max(len(self) + start, 0)
+    if stop is not None and stop < 0:
+        stop += len(self)
+    i = start
+    while stop is None or i < stop:
+        v = self[i]
+        if v is value or v == value:
+            return i
+        i += 1
+    raise ValueError
+```
+
+The `__contains__` mixin uses identity comparison first (`v is value`) before
+equality, matching the same short-circuit pattern used in `list.__contains__`.
+
+### MutableSequence derived operations
+
+`MutableSequence` requires only `insert` plus the `Sequence` primitives. From
+those it derives eight more methods. The `pop` derivation is illustrative
+because it must handle both positive and negative indices before delegating to
+`__delitem__`.
+
+```python
+# CPython: Lib/_collections_abc.py:571 MutableSequence.pop
+def pop(self, index=-1):
+    v = self[index]
+    del self[index]
+    return v
+```
+
+`reverse` is also derived purely from index arithmetic and `__setitem__` /
+`__getitem__`, making it O(n) swaps with no temporary allocation.
+
+### Set algebra via `__and__`, `__or__`, `__sub__`, `__xor__`
+
+`Set` implements all six binary operators in terms of two primitives: `__contains__` and `__iter__`. The pattern is identical across all four operators: guard with `isinstance(other, Set)`, then build a new instance via `_from_iterable` (a classmethod that defaults to calling `cls`).
+
+```python
+# CPython: Lib/_collections_abc.py:900 Set.__and__
+def __and__(self, other):
+    if not isinstance(other, Iterable):
+        return NotImplemented
+    return self._from_iterable(value for value in other if value in self)
+
+# CPython: Lib/_collections_abc.py:920 Set._hash
+def _hash(self):
+    MAX = sys.maxsize
+    MASK = 2 * MAX + 1
+    n = len(self)
+    h = 1927868237 * (n + 1)
+    h &= MASK
+    for x in self:
+        hx = hash(x)
+        h ^= (hx ^ (hx << 16) ^ 89869747) * 3644798167
+        h &= MASK
+    h = h * 69069 + 907133923
+    h &= MASK
+    if h > MAX:
+        h -= MASK + 1
+    if h == -1:
+        h = 590923713
+    return h
+```
+
+`_hash` is exposed as a standalone function rather than `__hash__` because
+`Set` is mutable by default; frozen subclasses call it explicitly.
+
+## gopy notes
+
+- `_check_methods` (private helper, not exported) has no gopy analogue yet. Protocol checking in gopy is done at type-object registration time via `objects/protocol.go`.
+- The `Sequence.index` mixin's identity-before-equality trick (`v is value or v == value`) maps to gopy's `ObjectsAreSame` guard in `objects/object.go`.
+- `MutableMapping.update` accepts keyword arguments, a `Mapping`, or an iterable of pairs. gopy's `dict.update` (`objects/dict_mutate.go`) follows the same three-branch dispatch.
+- Set algebra operators all return `_from_iterable(...)`, which means the return type follows the left operand's class. gopy mirrors this in `objects/usertype.go` by calling the type's own constructor.
+- The `_hash` bit-mixing algorithm is CPython-specific. gopy defers hashing of set-like user types to the host Go map, so this function is not ported directly.

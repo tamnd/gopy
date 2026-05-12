@@ -1,0 +1,118 @@
+---
+title: Modules/_io/bufferedio.c
+description: "BufferedReader, BufferedWriter, and BufferedRWPair C implementations: the buffering layer between raw FileIO and TextIOWrapper, managing read-ahead buffers and write coalescing."
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_io/bufferedio.c`
+
+<CpyLink path="Modules/_io/bufferedio.c" />
+
+`Modules/_io/bufferedio.c` implements the buffered I/O layer of CPython's `_io` module.
+It provides `BufferedReader`, `BufferedWriter`, `BufferedRandom`, and `BufferedRWPair`,
+each wrapping a raw `FileIO`-like object. `BufferedReader` maintains a read-ahead buffer;
+`BufferedWriter` coalesces small writes into a larger block before calling `raw.write()`;
+`BufferedRandom` combines both for seekable files.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `buffered` struct | Buffer, pos, raw pointer, lock, and readahead fields |
+| 201-600 | `BufferedReader` init and `_bufferedreader_read_generic` | Read path with buffer refill |
+| 601-900 | `_bufferedreader_readinto` | Readinto bypassing buffer when request exceeds buffer size |
+| 901-1200 | `BufferedWriter` init and `_bufferedwriter_flush_unlocked` | Write path and flush |
+| 1201-1500 | `buffered_seek`, `buffered_tell` | Seek adjusting logical position and discarding stale buffer |
+| 1501-1800 | `BufferedRandom` | Combines reader and writer, switching modes on seek |
+| 1801-2200 | `BufferedRWPair` | Wrapper pairing two separate reader and writer objects |
+| 2201-2800 | type objects and `PyInit` | `PyBufferedReader_Type`, `PyBufferedWriter_Type` |
+
+## Reading
+
+### Read-ahead buffer and buffer refill
+
+`BufferedReader` maintains a contiguous `buffer` of `buffer_size` bytes. `read(n)` first
+copies from the buffer, then calls `raw.read()` to refill when needed. The logical read
+position is `raw_pos - (raw_buf_end - pos)`, tracking how far ahead the raw layer has read.
+
+```c
+// CPython: Modules/_io/bufferedio.c:300 _bufferedreader_fill_buffer
+static Py_ssize_t
+_bufferedreader_fill_buffer(buffered *self)
+{
+    Py_ssize_t start, len, n;
+    if (VALID_READ_BUFFER(self))
+        start = self->read_end;
+    else
+        start = 0;
+    len = self->buffer_size - start;
+    n = self->raw->ob_type->tp_as_buffer...  /* raw.readinto(view) */
+    ...
+    self->read_end = start + n;
+    return n;
+}
+```
+
+### `_bufferedwriter_flush_unlocked`: write coalescing
+
+`BufferedWriter` accumulates writes in `self->buffer`. On flush (or when the buffer is
+full), it calls `raw.write()` in a loop until all buffered data is consumed. The loop
+handles short writes by advancing the buffer position.
+
+```c
+// CPython: Modules/_io/bufferedio.c:990 _bufferedwriter_flush_unlocked
+static PyObject *
+_bufferedwriter_flush_unlocked(buffered *self)
+{
+    Py_ssize_t written = 0;
+    Py_buffer data;
+    ...
+    while (self->write_pos < self->write_end) {
+        n = self->raw_write(self->raw, ...);  /* raw.write() */
+        ...
+        self->write_pos += n;
+        written += n;
+    }
+    return PyLong_FromSsize_t(written);
+}
+```
+
+### `buffered_seek`: discarding stale read-ahead
+
+When `seek()` moves the file position, any buffered read-ahead data is invalid. The
+implementation resets `read_pos` and `read_end` to zero and calls `raw.seek()` to set the
+underlying file descriptor position. For `BufferedRandom`, a flush of the write buffer
+precedes the seek.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1520 buffered_seek_impl
+static PyObject *
+buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
+{
+    ...
+    if (self->readable)
+        _bufferedreader_reset_buf(self);
+    n = PyObject_CallMethodObjArgs(self->raw, _PyIO_str_seek, ...);
+    ...
+    self->pos = n;
+    return PyLong_FromSsize_t(n);
+}
+```
+
+## gopy notes
+
+Not yet ported. The Go equivalent is `bufio.Reader` and `bufio.Writer`. A `module/io/`
+port would wrap these and expose `BufferedReader` and `BufferedWriter` as gopy types.
+The locking model (`self->lock` in CPython) maps to `sync.Mutex` protecting the buffer
+fields.
+
+## CPython 3.14 changes
+
+3.14 improved `BufferedWriter.write()` to avoid an extra copy when the incoming buffer is
+larger than the internal buffer size. `BufferedReader` gained `read1()` performance
+improvements for the common single-chunk case.

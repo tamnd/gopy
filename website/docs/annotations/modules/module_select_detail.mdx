@@ -1,0 +1,111 @@
+---
+title: "selectmodule.c"
+description: "select/poll/epoll/kqueue C interfaces: platform-conditional I/O multiplexing primitives"
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/selectmodule.c` exposes POSIX and BSD I/O multiplexing primitives to Python. Each interface (`select`, `poll`, `epoll`, `kqueue`, `devpoll`) is compiled only when the host OS provides it, guarded by `#ifdef` blocks throughout the file.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–100 | includes, `selectmodule_state` | module state, platform guards |
+| 101–320 | `select_select_impl` | wraps POSIX `select()`, builds `fd_set` |
+| 321–500 | `poll_new`, `poll_dealloc`, `poll_poll_impl` | `poll()` object and `struct pollfd` array |
+| 501–700 | `select_poll_impl` | module-level `select.poll()` factory |
+| 701–1000 | `pyepoll_*` family | Linux `epoll_create`, `epoll_ctl`, `epoll_wait` |
+| 1001–1100 | `epoll_iternext` | iterator over `epoll_event` results |
+| 1101–1400 | `kqueue_event_*`, `kqueue_queue_*` | BSD `kevent` type and `kqueue` fd object |
+| 1401–1500 | `kqueue_event_richcompare` | `kevent` comparison by `ident` and `filter` |
+| 1501–1700 | `devpoll_*` | Solaris `/dev/poll` interface |
+| 1701–3000 | method tables, `PyTypeObject` defs, `PyModuleDef` | type and module plumbing |
+
+## Reading
+
+### Building `fd_set` for `select()`
+
+`select_select_impl` iterates three Python sequences (rlist, wlist, xlist), calls `PyObject_AsFileDescriptor` on each item, and sets the corresponding bit in a stack-allocated `fd_set`. The highest fd seen becomes `nfds`.
+
+```c
+// CPython: Modules/selectmodule.c:198 select_select_impl
+for (i = 0; i < imax; i++) {
+    o = PySequence_GetItem(ilist, i);
+    v = PyObject_AsFileDescriptor(o);
+    if (v < 0) goto finally;
+    if (v >= FD_SETSIZE) {
+        PyErr_SetString(PyExc_ValueError,
+                        "file descriptor out of range in select()");
+        goto finally;
+    }
+    FD_SET(v, &ifdset);
+    if (v > max) max = v;
+}
+```
+
+### `poll()` with `struct pollfd`
+
+The `pollObject` stores a `pymapping` of `fd -> events` and rebuilds a `struct pollfd` array on each call to `poll_poll_impl`. The array is allocated with `PyMem_New` so its size can track late `register`/`unregister` calls.
+
+```c
+// CPython: Modules/selectmodule.c:440 poll_poll_impl
+ufds = PyMem_New(struct pollfd, self->ufd_len);
+if (ufds == NULL) { PyErr_NoMemory(); return NULL; }
+i = 0;
+while (PyDict_Next(self->dict, &ppos, &key, &value)) {
+    ufds[i].fd      = (int)PyLong_AsLong(key);
+    ufds[i].events  = (short)PyLong_AsLong(value);
+    i++;
+}
+Py_BEGIN_ALLOW_THREADS
+result = poll(ufds, self->ufd_len, timeout);
+Py_END_ALLOW_THREADS
+```
+
+### `epoll` iterator
+
+After `epoll_wait` fills the event array, `epoll_iternext` walks it one entry at a time and yields `(fd, event_mask)` tuples. The iterator holds a reference to the parent `pyEpoll` object to keep the fd alive.
+
+```c
+// CPython: Modules/selectmodule.c:1042 epoll_iternext
+if (it->index >= it->nfds) {
+    PyErr_SetNone(PyExc_StopIteration);
+    return NULL;
+}
+ev = &it->evs[it->index++];
+return Py_BuildValue("ii", ev->data.fd, ev->events);
+```
+
+### `kevent` rich comparison
+
+`kqueue_event_richcompare` compares two `kevent` structs field by field. Only `ident` and `filter` together define event identity; `flags`, `fflags`, and `data` are excluded from equality so that a registered event matches its fired counterpart.
+
+```c
+// CPython: Modules/selectmodule.c:1456 kqueue_event_richcompare
+result = ((a->e.ident == b->e.ident) &&
+          (a->e.filter == b->e.filter));
+switch (op) {
+    case Py_EQ: PyBool_FromLong(result);  break;
+    case Py_NE: PyBool_FromLong(!result); break;
+    ...
+}
+```
+
+## gopy notes
+
+- The `fd_set` size limit (`FD_SETSIZE`, typically 1024) is checked at the C layer; any Go port must replicate this bound before calling into the OS.
+- `poll_poll_impl` releases the GIL around `poll()`. A Go port should drop any equivalent lock before the syscall.
+- `epoll` and `kqueue` types own file descriptors created by `epoll_create1`/`kqueue()` respectively; finalizers must close them.
+- Platform guards mean the module surface differs by OS. Port only what the target OS provides; do not stub missing interfaces.
+
+## CPython 3.14 changes
+
+- Python 3.3 added the `selectors` module (`Lib/selectors.py`) as a high-level wrapper; `selectmodule.c` remains the ABI substrate with no interface changes at that point.
+- 3.9 added `select.epoll.fileno()` and made `close()` idempotent on the epoll fd.
+- 3.13 fixed a reference leak in `poll_poll_impl` when `PyDict_Next` is called on a dict that changes size during iteration.
+- 3.14 tightened `EBADF` handling: bad fds in the result set now raise `OSError` with the offending fd attached rather than returning silently.

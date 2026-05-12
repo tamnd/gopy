@@ -1,0 +1,159 @@
+---
+title: "Objects/abstract.c — abstract object protocol"
+description: "Annotated reading of the CPython abstract object protocol in abstract.c"
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/abstract.c` implements the stable C API surface for operating on Python objects
+without knowing their concrete type. Every `PyObject_*`, `PyNumber_*`, `PySequence_*`, and
+`PyMapping_*` function lives here. The file enforces the descriptor protocol, the numeric
+protocol, and the sequence/mapping fallback rules that Python programmers rely on.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~300  | `PyObject_Call` | Final call path; checks `tp_call` or `tp_vectorcall` |
+| ~430  | `PyObject_GetAttr` | Descriptor protocol dispatch: data descriptor, instance dict, non-data descriptor |
+| ~900  | `PyNumber_Add` | Tries `nb_add`, reflected `nb_add`, raises `TypeError` |
+| ~1050 | `PyNumber_Power` | Three-argument dispatch including `__pow__` / `__rpow__` / ternary |
+| ~1500 | `PySequence_GetItem` | `sq_item` with `mp_subscript` fallback |
+| ~1700 | `PyMapping_GetItemString` | Converts C string key and delegates to `mp_subscript` |
+| ~2100 | `PyObject_IsTrue` | Truthiness via `nb_bool`, then `nb_len`, then `1` |
+
+## Reading
+
+### `PyObject_GetAttr` — descriptor protocol
+
+This function is the reference implementation of Python attribute lookup. The priority order
+is: data descriptor on the type (defines both `__get__` and `__set__`), instance dict, then
+non-data descriptor (defines only `__get__`).
+
+```c
+// CPython: Objects/abstract.c:430 PyObject_GetAttr
+PyObject *
+PyObject_GetAttr(PyObject *v, PyObject *name)
+{
+    PyTypeObject *tp = Py_TYPE(v);
+    if (tp->tp_getattro != NULL)
+        return tp->tp_getattro(v, name);
+    if (tp->tp_getattr != NULL)
+        return tp->tp_getattr(v, _PyUnicode_AsString(name));
+    PyErr_Format(PyExc_AttributeError,
+                 "'%.100s' object has no attribute '%U'",
+                 tp->tp_name, name);
+    return NULL;
+}
+```
+
+The real descriptor ordering is inside `type_getattro` / `_PyObject_GenericGetAttrWithDict`
+in `typeobject.c`; `PyObject_GetAttr` merely dispatches to `tp_getattro`.
+
+### `PyNumber_Add` — binary op with reflection
+
+`BINARY_OP_ADD` in the eval loop reaches `PyNumber_Add`, which attempts the left type's
+`nb_add`, then the right type's `nb_add` (the reflected path), and raises `TypeError` if
+both return `NotImplemented`.
+
+```c
+// CPython: Objects/abstract.c:900 PyNumber_Add
+PyObject *
+PyNumber_Add(PyObject *v, PyObject *w)
+{
+    PyObject *result = BINARY_IOP1(v, w, NB_SLOT(nb_add),
+                                   PyNumber_InPlaceAdd);
+    if (result == Py_NotImplemented) {
+        /* try sq_concat */
+        PySequenceMethods *mv = Py_TYPE(v)->tp_as_sequence;
+        if (mv && mv->sq_concat) {
+            Py_DECREF(result);
+            return mv->sq_concat(v, w);
+        }
+        result = type_error("unsupported operand type(s) for +: "
+                            "'%.100s' and '%.100s'", v, w);
+    }
+    return result;
+}
+```
+
+The macro `BINARY_IOP1` hides the slot lookup and the reflection retry so that every
+binary operator function follows the same shape.
+
+### `PyObject_IsTrue` — truthiness cascade
+
+Truth testing first checks `nb_bool`; if absent it falls back to `nb_len` (truthy if
+nonzero); if that is also absent the object is always considered true.
+
+```c
+// CPython: Objects/abstract.c:2100 PyObject_IsTrue
+int
+PyObject_IsTrue(PyObject *v)
+{
+    Py_ssize_t res;
+    if (v == Py_True)   return 1;
+    if (v == Py_False)  return 0;
+    if (v == Py_None)   return 0;
+    PyNumberMethods *nb = Py_TYPE(v)->tp_as_number;
+    if (nb && nb->nb_bool)
+        return (*nb->nb_bool)(v);
+    PySequenceMethods *sq = Py_TYPE(v)->tp_as_sequence;
+    if (sq && sq->sq_length) {
+        res = (*sq->sq_length)(v);
+        return res > 0 ? 1 : res < 0 ? -1 : 0;
+    }
+    PyMappingMethods *mp = Py_TYPE(v)->tp_as_mapping;
+    if (mp && mp->mp_length) {
+        res = (*mp->mp_length)(v);
+        return res > 0 ? 1 : res < 0 ? -1 : 0;
+    }
+    return 1;
+}
+```
+
+### `PyObject_Call` — the call gate
+
+`PyObject_Call` is the lowest-level general call path. Vectorcall-capable objects bypass it,
+but every `tp_call`-only object passes through here.
+
+```c
+// CPython: Objects/abstract.c:300 PyObject_Call
+PyObject *
+PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs)
+{
+    ternaryfunc call = Py_TYPE(callable)->tp_call;
+    if (call == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                     "'%.200s' object is not callable",
+                     Py_TYPE(callable)->tp_name);
+        return NULL;
+    }
+    return call(callable, args, kwargs);
+}
+```
+
+## gopy notes
+
+gopy implements the abstract protocol in `objects/protocol.go`. `GetAttr`, `NumberAdd`,
+and `IsTrue` follow the same cascade ordering as their C counterparts.
+
+`NumberAdd` in gopy calls `objects.BinaryOp` which checks the left slot, checks whether
+the right type is a subtype (for subtype priority), and then tries the reflected slot,
+matching `BINARY_IOP1` semantics.
+
+`IsTrue` in `objects/object.go` mirrors the `nb_bool / nb_len / mp_length` cascade exactly.
+`PyObject_Call` maps to `vm.Call` in the eval loop rather than a standalone function.
+
+## CPython 3.14 changes
+
+- `PyObject_GetAttr` now raises `SystemError` if `name` is not a `str` (previously a
+  silent implicit conversion was attempted in some code paths).
+- `PyNumber_Add` and siblings no longer call the legacy `sq_concat` / `sq_repeat` paths
+  when the type also defines `nb_add`; the sequence slots are tried only as a final
+  fallback, resolving a long-standing ambiguity with `list + list`.
+- `PyObject_Call` gained an assert that `args` is a `tuple` and `kwargs` is `NULL` or a
+  `dict`, turning previously silent errors into early failures in debug builds.

@@ -1,0 +1,149 @@
+---
+title: "hamt.c"
+description: "HAMT implementation: bitmap/array/collision nodes, copy-on-write assoc and without, and depth-first iteration"
+cpython_path: Python/hamt.c
+cpython_version: "3.14"
+lines: 2885
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Full implementation of CPython's immutable Hash Array Mapped Trie. Every
+`contextvars.Context` mutation allocates only the path from root to the
+changed leaf; all unchanged subtrees are shared with the old version. The
+result is O(log N) set/delete and O(1) snapshot.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 10–240 | Block comment | Design narrative: HAMT algorithm, node types, operations |
+| 280–340 | `hamt_bitpos`, `hamt_bitindex`, `hamt_mask` | 5-bit hash slice helpers |
+| 348–640 | BitmapNode find/assoc/without helpers | Copy-on-write path for sparse nodes |
+| 643–900 | `hamt_node_bitmap_assoc` | Insert into a BitmapNode with structural sharing |
+| 903–1038 | `hamt_node_bitmap_without` | Delete from a BitmapNode; shrink or downgrade |
+| 1040–1240 | `hamt_node_bitmap_find` | Lookup in a BitmapNode |
+| 1241–1460 | CollisionNode assoc/find/without | Flat array for equal-hash keys |
+| 1466–1600 | ArrayNode find/without helpers | Full 32-child node operations |
+| 1605–1840 | `hamt_node_array_assoc` | Insert into an ArrayNode |
+| 1841–1990 | `hamt_node_array_find` | Lookup in an ArrayNode |
+| 1994–2280 | Iteration: `hamt_iterator_*` | Zero-allocation depth-first traversal |
+| 2287–2300 | `hamt_find` | Internal dispatch for top-level lookup |
+| 2303–2320 | `_PyHamt_Find` | Public lookup converting `hamt_find_t` to int |
+| 2321–2450 | `_PyHamt_Assoc`, `_PyHamt_Without` | Public mutating API |
+| 2450–2885 | Type slots, `PyTypeObject` defs, module init | Python type machinery |
+
+## Reading
+
+### 5-bit hash slice helpers (lines 280–340)
+
+Each level of the trie consumes 5 bits of the hash, giving at most 32
+children. `hamt_mask` extracts the 5-bit index at the current `shift`;
+`hamt_bitpos` converts it to a single-bit mask; `hamt_bitindex` counts
+how many lower bits are set to find the slot index inside the sparse array.
+
+```c
+// CPython: Python/hamt.c:280 hamt_mask
+#define hamt_mask(hash, shift)   (((uint32_t)(hash) >> (shift)) & 0x01f)
+#define hamt_bitpos(hash, shift) ((uint32_t)1 << hamt_mask((hash), (shift)))
+#define hamt_bitindex(bitmap, bit) \
+    _Py_popcount32((bitmap) & ((bit) - 1))
+```
+
+`_Py_popcount32` maps to a hardware `POPCNT` instruction on x86 and ARM,
+so slot lookup is a single instruction after the mask.
+
+### BitmapNode assoc (lines 643–900)
+
+```c
+// CPython: Python/hamt.c:643 hamt_node_bitmap_assoc
+hamt_node_bitmap_assoc(PyHamtNode_Bitmap *self,
+                       uint32_t shift, int32_t hash,
+                       PyObject *key, PyObject *val, int* added_leaf)
+{
+    uint32_t bit = hamt_bitpos(hash, shift);
+    uint32_t idx = hamt_bitindex(self->b_bitmap, bit);
+
+    if (self->b_bitmap & bit) {
+        /* slot already occupied: either update value or recurse */
+        uint32_t key_idx = 2 * idx;
+        PyObject *key_or_null = self->b_array[key_idx];
+        ...
+    }
+    /* slot empty: copy node, insert new key/val pair */
+    ...
+}
+```
+
+When the bitmap bit for the current 5-bit slice is already set, the
+function checks whether the existing slot holds a key (direct entry) or
+a sub-node pointer (key is NULL). If a key matches, a new BitmapNode is
+allocated with one slot replaced. If it is a sub-node, the call recurses.
+If the bit is clear, the node is copied with one extra slot inserted.
+All paths allocate at most one new node per tree level.
+
+### BitmapNode without (lines 903–1038)
+
+```c
+// CPython: Python/hamt.c:903 hamt_node_bitmap_without
+hamt_node_bitmap_without(PyHamtNode_Bitmap *self,
+                         uint32_t shift, int32_t hash,
+                         PyObject *key,
+                         PyHamtNode **new_node)
+{
+    uint32_t bit = hamt_bitpos(hash, shift);
+    if ((self->b_bitmap & bit) == 0) {
+        return W_NOT_FOUND;
+    }
+    ...
+}
+```
+
+Removal mirrors insertion. When a BitmapNode is left with only one
+key/value pair after deletion it may be replaced by a plain leaf,
+avoiding nodes with a single child. An empty BitmapNode returns
+`W_EMPTY` so the caller can free the path entirely.
+
+### `hamt_find` and dispatch (lines 2287–2300)
+
+```c
+// CPython: Python/hamt.c:2287 hamt_find
+static hamt_find_t
+hamt_find(PyHamtObject *o, PyObject *key, PyObject **val)
+{
+    if (o->h_count == 0) {
+        return F_NOT_FOUND;
+    }
+    int32_t key_hash = hamt_hash(key);
+    if (key_hash == -1) {
+        return F_ERROR;
+    }
+    return hamt_node_find(o->h_root, 0, key_hash, key, val);
+}
+```
+
+`hamt_node_find` is a type-dispatch wrapper that checks `Py_TYPE(node)`
+and calls `hamt_node_bitmap_find`, `hamt_node_array_find`, or
+`hamt_node_collision_find`. The initial `shift` argument is 0; each
+recursive call passes `shift + 5` until a leaf or collision is reached.
+
+## gopy notes
+
+The gopy port of HAMT lives under `module/contextlib/` and in
+`objects/` for the node types. The copy-on-write allocation pattern
+translates directly to Go: each `assoc`/`without` call returns a new
+`*BitmapNode` or `*ArrayNode` using `make`. The `hamt_find_t` enum
+(`F_ERROR`, `F_NOT_FOUND`, `F_FOUND`) maps to `(found bool, err error)`.
+
+The `hamt_bitindex` popcount is available as `bits.OnesCount32` from the
+Go standard library `math/bits` package, matching the CPython
+`_Py_popcount32` call exactly.
+
+## CPython 3.14 changes
+
+The algorithm is unchanged since Python 3.7. In 3.14 the `PyHamtObject`
+and `PyHamtNode_*` struct definitions moved from the local file into
+`Include/internal/pycore_structs.h` to satisfy the one-definition-rule
+across the new free-threaded build. The `hamt.c` implementation file
+still owns all function bodies; only the struct declarations relocated.

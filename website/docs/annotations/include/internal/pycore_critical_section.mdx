@@ -1,0 +1,107 @@
+---
+title: Include/internal/pycore_critical_section.h
+description: Per-object critical section API that serializes access to mutable objects in free-threaded builds and compiles away under the GIL.
+cpython_path: Include/internal/pycore_critical_section.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+This header defines the critical section API introduced for CPython's
+free-threaded (no-GIL) build. A critical section is a lightweight, per-object
+lock region that replaces the GIL's coarse exclusion with fine-grained
+protection of individual mutable objects. Under the GIL build every macro
+expands to nothing, so the same source can be compiled for both runtimes
+without `#ifdef` clutter.
+
+## Map
+
+| Symbol | Kind | Purpose |
+|--------|------|---------|
+| `PyCriticalSection` | struct | Linked-list node on the thread state representing one active lock region |
+| `PyCriticalSection2` | struct | Two-object variant; holds locks for two objects simultaneously |
+| `Py_BEGIN_CRITICAL_SECTION(op)` | macro | Acquires the per-object lock for `op` and pushes a node onto the thread's section stack |
+| `Py_END_CRITICAL_SECTION()` | macro | Pops the top node and releases the corresponding lock |
+| `Py_BEGIN_CRITICAL_SECTION2(a, b)` | macro | Two-object variant; acquires locks in pointer-order to avoid deadlock |
+| `Py_END_CRITICAL_SECTION2()` | macro | Two-object release |
+| `_PyCriticalSection_Begin` | function | Runtime entry point called by the macros in the free-threaded build |
+| `_PyCriticalSection_End` | function | Runtime exit point |
+| `_PyCriticalSection_SuspendAll` | function | Used by the stop-the-world mechanism to drain all active sections before GC |
+
+## Reading
+
+### The `PyCriticalSection` struct
+
+```c
+// Include/internal/pycore_critical_section.h (CPython 3.14)
+struct PyCriticalSection {
+    // Lowest bit encodes "unlocked" state; remaining bits are the PyMutex pointer.
+    uintptr_t _cs_mutex;
+    // Previous section on this thread's stack (NULL at base).
+    struct PyCriticalSection *_cs_prev;
+};
+```
+
+Each thread keeps a stack of `PyCriticalSection` nodes. When a section is
+entered, the node is pushed onto `PyThreadState.critical_section`. When it
+exits, the runtime pops the node and, if the section was interrupted by a
+stop-the-world pause, re-acquires the suspended locks before returning.
+
+### Macro expansion in the two builds
+
+```c
+// Free-threaded build
+#define Py_BEGIN_CRITICAL_SECTION(op)        \
+    {                                        \
+        PyCriticalSection _cs;               \
+        _PyCriticalSection_Begin(&_cs, &_PyObject_CAST(op)->ob_mutex)
+
+#define Py_END_CRITICAL_SECTION()            \
+        _PyCriticalSection_End(&_cs);        \
+    }
+
+// GIL build -- entire body disappears
+#define Py_BEGIN_CRITICAL_SECTION(op)  {
+#define Py_END_CRITICAL_SECTION()      }
+```
+
+Because the macros open and close a C block, `PyCriticalSection` lives on the
+stack, so there is no heap allocation. The GIL build pays zero cost at runtime.
+
+### Usage in `Objects/`
+
+```c
+// Objects/dictobject.c (representative pattern)
+int
+PyDict_SetItem(PyObject *op, PyObject *key, PyObject *value)
+{
+    Py_BEGIN_CRITICAL_SECTION(op);
+    int res = insertdict(mp, key, hash, value);
+    Py_END_CRITICAL_SECTION();
+    return res;
+}
+```
+
+The same pattern appears in `listobject.c`, `setobject.c`, and dozens of other
+mutable-container operations. The two-object form (`Py_BEGIN_CRITICAL_SECTION2`)
+is used when two dicts must be updated atomically, such as `dict.update()`.
+
+## gopy mirror
+
+Not applicable. gopy uses Go's runtime for memory management and relies on
+goroutine scheduling rather than a GIL or per-object mutexes. There is no
+`PyCriticalSection` equivalent in the gopy object model. Object-level
+concurrency, if ever needed, would be handled by `sync.Mutex` embedded in
+individual struct types.
+
+## CPython 3.14 changes
+
+- The two-object form `PyCriticalSection2` was stabilized in 3.13 and carried
+  forward unchanged.
+- 3.14 adds `_PyCriticalSection_SuspendAll`, which the new incremental cyclic
+  GC uses to safely inspect all live objects without racing against concurrent
+  mutations.
+- The `_cs_mutex` field encoding (lock pointer in upper bits, status flag in
+  bit 0) is now documented in `pycore_lock.h` alongside `PyMutex`.

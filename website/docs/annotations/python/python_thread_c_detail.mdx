@@ -1,0 +1,72 @@
+---
+title: Python/thread.c
+description: "Platform threading primitives: PyThread_start_new_thread, PyThread_acquire_lock/release_lock, thread-local storage via Py_tss_t, and the GIL bootstrap helpers."
+cpython_path: Python/thread.c
+cpython_version: "3.14"
+lines: 520
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/thread.c`
+
+<CpyLink path="Python/thread.c" />
+
+`Python/thread.c` is the platform-independent threading API used by CPython internals. It
+sits above OS threading libraries (pthreads on POSIX, Win32 on Windows) and provides the
+lock and thread-local storage primitives the GIL and the import lock depend on.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | `PyThread_start_new_thread` | Launch an OS thread running a C function |
+| 81-200 | `PyThread_allocate_lock`, `PyThread_acquire_lock`, `PyThread_release_lock` | Mutex API |
+| 201-320 | `Py_tss_t`, `PyThread_tss_create`, `PyThread_tss_get`, `PyThread_tss_set` | Thread-local storage |
+| 321-520 | Platform includes | `thread_pthread.h` or `thread_nt.h` via `#include` |
+
+## Reading
+
+### `PyThread_start_new_thread`
+
+```c
+// CPython: Python/thread.c:45 PyThread_start_new_thread
+unsigned long
+PyThread_start_new_thread(void (*func)(void *), void *arg)
+{
+    ...
+    return _PyThread_start_new_thread(func, arg, &config);
+}
+```
+
+The function returns the OS thread ID or 0 on failure. The new thread begins executing
+`func(arg)` immediately. No `PyThreadState` is created here; the C thread must call
+`PyGILState_Ensure` before using the Python API.
+
+### `PyThread_acquire_lock` with timeout
+
+`PyThread_acquire_lock_timed(lock, microseconds, intr_flag)` supports timed acquisition.
+`intr_flag=1` means a signal interruption returns `PY_LOCK_INTR` rather than retrying.
+This is used by `threading.Lock.acquire(timeout=...)`.
+
+### `Py_tss_t` thread-local storage
+
+`Py_tss_t` wraps `pthread_key_t` on POSIX and `DWORD` (TlsAlloc) on Windows. The
+`PyThread_tss_*` API is the portable way to store per-thread C pointers, used for
+exception state and the thread dictionary pointer.
+
+```c
+// CPython: Python/thread.c:230 Py_tss_t
+typedef struct {
+    int _is_initialized;
+    NATIVE_TSS_KEY_T _key;
+} Py_tss_t;
+```
+
+## gopy notes
+
+gopy has no GIL and no OS-thread bootstrap; goroutines handle concurrency. The
+`threading` module (`module/threading/`) will expose Python-level `Thread`, `Lock`, and
+`Event` objects backed by Go channels and `sync.Mutex`. `Py_tss_t` has no Go analogue;
+goroutine-local context uses `context.Context`.

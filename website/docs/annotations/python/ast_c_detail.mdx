@@ -1,0 +1,129 @@
+---
+title: Python/ast.c
+description: "AST validation pass, deprecation warnings, and the ast.parse() call chain"
+cpython_path: Python/ast.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/ast.c` implements the validation pass that runs after the parser produces an AST but before the compiler walks it. It checks structural invariants that the parser cannot express in its grammar, emits `SyntaxWarning` for deprecated constructs, and raises `SyntaxError` for outright violations. The file also contains the C-level implementation of the `ast` module's `parse()` function.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-25 | includes + forward decls | `pycore_ast.h`, `pycore_compile.h`, static prototypes |
+| 26-60 | `ast_warn` | Emit `DeprecationWarning` or `SyntaxWarning` with location |
+| 61-100 | `validate_expr` | Recursive expression node validator |
+| 101-160 | `validate_stmt` | Recursive statement node validator |
+| 161-200 | `validate_arguments` | Checks on function argument lists |
+| 201-240 | `validate_pattern` | Structural-pattern node validator (3.10+) |
+| 241-280 | `validate_mod` | Top-level module/interactive/expression dispatch |
+| 281-310 | `_PyAST_Validate` | Public entry point; sets up recursion counter |
+| 311-370 | `ast_type_reduce` | `__reduce__` support for pickling AST nodes |
+| 371-430 | `ast_parse` | C implementation of `ast.parse()` |
+| 431-500 | `ast_literal_eval` | C implementation of `ast.literal_eval()` |
+| 501-560 | `ast_get_docstring` | C implementation of `ast.get_docstring()` |
+| 561-600 | module init (`PyInit__ast`) | Registers the `_ast` extension module |
+
+## Reading
+
+### Validation entry point and recursion guard
+
+`_PyAST_Validate` is the sole public symbol in this file. It is called from `Python/pythonrun.c` immediately after `PyParser_ASTFromStringObject` returns, and also from `compile()` when passed a pre-built AST object.
+
+```c
+// CPython: Python/ast.c:281 _PyAST_Validate
+int
+_PyAST_Validate(mod_ty mod)
+{
+    int res = -1;
+    PyThreadState *tstate = _PyThreadState_GET();
+    int recursion_limit = C_RECURSION_LIMIT;
+    int starting_recursion_depth;
+    /* ... set up depth counter ... */
+    res = validate_mod(mod);
+    /* ... restore depth counter ... */
+    return res;
+}
+```
+
+The recursion counter mirrors the one in `ceval.c`. It exists because deeply nested AST nodes can blow the C stack before they blow the Python recursion limit. The counter is decremented in every `validate_expr` and `validate_stmt` call and raises `RecursionError` if it reaches zero.
+
+### validate_stmt: parse-time vs. semantic errors
+
+`validate_stmt` handles the distinction between errors the parser cannot catch and errors that require semantic context. Pure structural checks (wrong node kind in a position, missing required fields) raise `SystemError` because they indicate a bug in the parser or in code that constructs AST nodes manually. Semantic errors (augmented assignment to a non-store target, `return` outside function) raise `SyntaxError` with a proper filename and line number.
+
+```c
+// CPython: Python/ast.c:101 validate_stmt
+static int
+validate_stmt(struct validator *state, stmt_ty stmt)
+{
+    /* ... */
+    switch (stmt->kind) {
+    case AugAssign_kind:
+        ret = validate_expr(state, stmt->v.AugAssign.target, Store)
+              && validate_expr(state, stmt->v.AugAssign.value, Load);
+        break;
+    /* ... */
+    }
+    return ret;
+}
+```
+
+The `context` argument (Load / Store / Del) threads through all `validate_expr` calls so that the validator can reject `(a + b) = c` (AugAssign with a non-Name/Subscript/Attribute target) without a separate tree walk.
+
+### ast_warn and deprecated syntax
+
+`ast_warn` centralises the emission of source-location-tagged warnings. It is called from within the validate functions rather than from the parser, which allows the warning to carry the post-parse `lineno`/`col_offset` from the node rather than the raw token position.
+
+```c
+// CPython: Python/ast.c:26 ast_warn
+static int
+ast_warn(struct validator *state, expr_ty node, const char *msg)
+{
+    if (PyErr_WarnExplicit(
+            PyExc_DeprecationWarning, msg,
+            state->filename,
+            node->lineno,
+            NULL, NULL) < 0)
+    {
+        /* ... convert to SyntaxWarning at -Werror ... */
+        return 0;
+    }
+    return 1;
+}
+```
+
+In CPython 3.14 this is used for tuple unpacking in comprehension targets that were previously silently accepted. The warning fires during validation rather than at runtime so that `-W error::DeprecationWarning` turns it into a compile-time `SyntaxError`.
+
+### ast.parse() call chain
+
+The Python-level `ast.parse(source, filename, mode)` call reaches `ast_parse` in C via the `_ast` extension module. The call chain is:
+
+1. `ast.parse()` (Lib/ast.py) calls `compile(source, filename, mode, PyCF_ONLY_AST)`.
+2. `compile()` (built-in) calls `Py_CompileStringExFlags` with `PyCF_ONLY_AST` set.
+3. `Py_CompileStringExFlags` calls `PyParser_ASTFromStringObject`, then checks the flag and returns the raw `mod_ty` wrapped as a Python object instead of calling `_PyCompile_CodeGen`.
+4. `_PyAST_Validate` is called before the `mod_ty` is wrapped, so any structural error surfaces as a `SyntaxError` from `ast.parse()` rather than from a later `compile()` call.
+
+```c
+// CPython: Python/ast.c:371 ast_parse
+static PyObject *
+ast_parse(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+          PyObject *kwnames)
+{
+    /* ... extract source, filename, mode ... */
+    return PyRun_StringFlags(source, compile_mode, globals, locals, &flags);
+}
+```
+
+The `PyCF_ONLY_AST` flag is the single mechanism that short-circuits compilation and returns the tree. There is no separate "parse-only" API at the C level.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `compile/astvalidate`. The Go port will implement `Validate(mod ast.Mod) error` as the equivalent of `_PyAST_Validate`. The recursion guard will use a `depth int` field on a validator struct passed by pointer through every recursive call, matching the CPython `struct validator` pattern. The `ast_warn` logic will be handled via the existing `compile.Compiler` warning infrastructure once that is in place.

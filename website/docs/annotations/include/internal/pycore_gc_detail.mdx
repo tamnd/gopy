@@ -1,0 +1,56 @@
+---
+title: "Include/internal/pycore_gc.h"
+description: Internal GC bookkeeping structures and macros that manage the cyclic garbage collector's generational lists
+cpython_path: Include/internal/pycore_gc.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's cyclic garbage collector is built on a singly-threaded doubly-linked list threaded through every GC-tracked object. This header defines the in-object header (`PyGC_Head`), the bit-packed prev pointer that carries finalization and collecting flags, the accessor macros that read and write those pointers safely, the per-generation bookkeeping struct, and the track/untrack primitives that move objects on and off the generation list.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `PyGC_Head` | Doubly-linked list node prepended to every GC-managed object |
+| 31-50 | `_PyGC_PREV_MASK_FINALIZED` | Bit flag stored in the prev pointer indicating `__del__` has been called |
+| 51-70 | `_PyGC_PREV_MASK_COLLECTING` | Bit flag stored in the prev pointer indicating the object is in the current collection set |
+| 71-110 | `gc_get_next` / `gc_set_next` | Read and write the `gc_next` field of a `PyGC_Head` node |
+| 111-150 | `gc_get_prev` / `gc_set_prev` | Read and write the `gc_prev` field while preserving the low-order flag bits |
+| 151-180 | `_PyObject_GC_TRACK` | Link an object into the youngest generation list |
+| 181-210 | `_PyObject_GC_UNTRACK` | Remove an object from whichever generation list it currently occupies |
+| 211-230 | `generation` struct | Holds the doubly-linked sentinel node, object `count`, and collection `threshold` for one generation |
+| 231-250 | `_Py_GEN_MAX` | Constant defining the number of GC generations (3 in the default build) |
+
+## Reading
+
+### PyGC_Head layout
+
+`PyGC_Head` is a two-pointer struct that CPython prepends to every object whose type sets `Py_TPFLAGS_HAVE_GC`. The object pointer that user code holds points just past this header, so `AS_GC(op)` steps back by `sizeof(PyGC_Head)` to reach it.
+
+The `gc_next` field is a plain `uintptr_t` pointer to the next node. The `gc_prev` field doubles as a pointer and a flag word. Because all `PyGC_Head` structs are at least 8-byte aligned, the two lowest bits of `gc_prev` are always zero in a valid pointer, so CPython borrows them for `_PyGC_PREV_MASK_FINALIZED` (bit 0) and `_PyGC_PREV_MASK_COLLECTING` (bit 1). The accessor macros mask those bits off before dereferencing.
+
+### Flag bits in gc_prev
+
+`_PyGC_PREV_MASK_FINALIZED` is set once the collector has invoked the object's `tp_finalize` slot. This prevents the finalizer from running a second time if the object is resurrected and later collected again.
+
+`_PyGC_PREV_MASK_COLLECTING` is set on every object moved into the "unreachable" working set during a collection pass. The mark phase uses this to distinguish objects the collector is actively examining from objects sitting in the generation list waiting for a future collection.
+
+Both flags must be cleared before `gc_get_prev` can return a usable pointer, which is what the masking constant `_PyGC_PREV_MASK_FINALIZED | _PyGC_PREV_MASK_COLLECTING` accomplishes.
+
+### Track and untrack
+
+`_PyObject_GC_TRACK(op)` casts `op` back to its `PyGC_Head`, inserts the node at the head of the youngest generation's doubly-linked list, and increments the generation's `count`. It asserts in debug builds that the node is not already linked.
+
+`_PyObject_GC_UNTRACK(op)` splices the node out of whatever list it currently lives in by relinking the predecessor and successor, then zeroes the node's pointers. Container types call this in their `tp_dealloc` slot before freeing element references, so that `tp_traverse` is never invoked on a partially-destroyed object.
+
+### Generation struct and _Py_GEN_MAX
+
+Each of the `_Py_GEN_MAX` generations (default 3) is represented by a `generation` struct holding a `PyGC_Head` sentinel node used as the list head/tail, an integer `count` of objects currently in the list, and an integer `threshold` that triggers a collection of that generation when `count` exceeds it. The interpreter state embeds an array of these structs so the collector can walk all generations in a single loop.
+
+## gopy notes
+
+gopy does not implement a cyclic garbage collector, so `PyGC_Head` and the generational machinery have no direct equivalent. The track/untrack macros are no-ops in the gopy object model. When porting container types that call `_PyObject_GC_TRACK` or `_PyObject_GC_UNTRACK`, those calls can be dropped. The flag-bit constants are irrelevant unless a future cycle-detection pass is added.

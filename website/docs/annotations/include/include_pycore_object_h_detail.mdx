@@ -1,0 +1,151 @@
+---
+title: Include/internal/pycore_object.h
+description: Internal object header covering reference counting, deallocation, GC tracking, and immortal objects
+cpython_path: Include/internal/pycore_object.h
+cpython_version: "3.14"
+lines: 280
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_object.h" />
+
+This header is included by the interpreter core and extension modules that need
+sub-`PyObject_` access to object internals. User code never sees it. The
+machinery here is the skeleton that holds reference counting, deallocation,
+GC participation, and the new immortal-object scheme together.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 20-40 | `_PyObject_HEAD_EXTRA` | Doubly-linked list pointers for the tracing allocator |
+| 55-70 | `_Py_NewReference` | Initialize refcount and optionally insert into the tracing list |
+| 72-85 | `_Py_ForgetReference` | Remove an object from the tracing list before deallocation |
+| 90-110 | `_Py_Dealloc` | Inline wrapper that dispatches to `tp_dealloc` |
+| 130-145 | `_PyObject_IsFreed` | Guard that detects use of a deallocated object |
+| 160-175 | `_PyObject_GC_IS_TRACKED` | Test whether an object is registered with the cyclic GC |
+| 200-230 | `_Py_IMMORTAL_REFCNT` | Sentinel refcount value for immortal objects |
+| 235-260 | `_Py_IsImmortal` | Inline check against the immortal sentinel |
+
+## Reading
+
+### _PyObject_HEAD_EXTRA and the tracing allocator
+
+When CPython is built with `Py_TRACE_REFS` (the `--with-trace-refs` configure
+flag), every live `PyObject` is threaded into a doubly-linked list rooted at
+the interpreter state. The macro `_PyObject_HEAD_EXTRA` expands to two extra
+pointer fields that are the prev/next links. In a normal release build the
+macro is empty, so the struct layout is unchanged.
+
+```c
+// CPython: Include/internal/pycore_object.h:25 _PyObject_HEAD_EXTRA
+#ifdef Py_TRACE_REFS
+#  define _PyObject_HEAD_EXTRA  \
+    PyObject *_ob_next;         \
+    PyObject *_ob_prev;
+#else
+#  define _PyObject_HEAD_EXTRA
+#endif
+```
+
+`_Py_NewReference` is called by the allocators (`PyObject_New`,
+`PyObject_GC_New`, and the type-specific fast paths) after zeroing the memory.
+It sets `ob_refcnt` to 1 and, when tracing is active, splices the new object
+into the head of the list.
+
+`_Py_ForgetReference` is the inverse: it unlinks the object just before the
+type's `tp_dealloc` is invoked. The two always appear as a matched pair across
+the object lifetime.
+
+### _Py_Dealloc and deallocation dispatch
+
+`_Py_Dealloc` is the single choke-point that the `Py_DECREF` family of macros
+reach when the refcount hits zero. It is declared inline in this header so the
+compiler can eliminate the call overhead on the hot path.
+
+```c
+// CPython: Include/internal/pycore_object.h:95 _Py_Dealloc
+static inline void
+_Py_Dealloc(PyObject *op)
+{
+    destructor dealloc = Py_TYPE(op)->tp_dealloc;
+#ifdef Py_TRACE_REFS
+    _Py_ForgetReference(op);
+#endif
+    (*dealloc)(op);
+}
+```
+
+The separation of `_Py_ForgetReference` from the actual `tp_dealloc` call
+means the tracing list is consistent even if `tp_dealloc` itself performs
+Python-level operations that could trigger further allocations.
+
+`_PyObject_IsFreed` exists for debug builds. It checks whether `ob_type`
+points at a known-dead type sentinel (the freed-object type), giving a
+clear diagnostic instead of a silent heap corruption crash.
+
+```c
+// CPython: Include/internal/pycore_object.h:133 _PyObject_IsFreed
+static inline int
+_PyObject_IsFreed(PyObject *op)
+{
+    return _PyMem_IsPtrFreed(op) ||
+           _PyMem_IsPtrFreed(Py_TYPE(op)) ||
+           Py_TYPE(op) == &_PyFree_Type;
+}
+```
+
+### GC tracking and immortal objects
+
+`_PyObject_GC_IS_TRACKED` reads the `_gc_prev` pointer embedded in the GC
+header that precedes tracked objects. A non-zero value means the object is
+currently in one of the GC generations.
+
+```c
+// CPython: Include/internal/pycore_object.h:163 _PyObject_GC_IS_TRACKED
+#define _PyObject_GC_IS_TRACKED(o) \
+    (_PyGCHead_PREV(_Py_AS_GC(o)) != 0)
+```
+
+Immortal objects, introduced in CPython 3.12 and extended in 3.14, use a
+special sentinel value for `ob_refcnt`. The `Py_INCREF` and `Py_DECREF` macros
+both skip the arithmetic when they detect the sentinel, so immortal objects
+accumulate no reference-count traffic and are never deallocated. Common
+singletons (small integers, interned strings, `None`, `True`, `False`) are
+immortalized at interpreter startup.
+
+```c
+// CPython: Include/internal/pycore_object.h:203 _Py_IMMORTAL_REFCNT
+#if SIZEOF_VOID_P > 4
+#  define _Py_IMMORTAL_REFCNT  (Py_ssize_t)(UINT_MAX >> 2)
+#else
+#  define _Py_IMMORTAL_REFCNT  (Py_ssize_t)(USHRT_MAX >> 2)
+#endif
+
+static inline int
+_Py_IsImmortal(PyObject *op)
+{
+    return op->ob_refcnt == _Py_IMMORTAL_REFCNT;
+}
+```
+
+The platform split (32-bit vs. 64-bit) ensures the sentinel cannot be reached
+by legitimate reference-count increments in any realistic program, while still
+fitting in the `ob_refcnt` field.
+
+## gopy notes
+
+Status: not yet ported.
+
+The reference-counting model in gopy is currently handled by Go's garbage
+collector. The concepts in this header map loosely to:
+
+- `_PyObject_HEAD_EXTRA`: not needed (Go GC does not use an explicit object list, though a debug mode could add one).
+- `_Py_NewReference` / `_Py_ForgetReference`: no direct equivalent; construction and finalization are handled by Go's runtime.
+- `_Py_Dealloc`: the planned `objects/` package will need a `Dealloc(ob Object)` dispatcher that calls the type's destructor hook.
+- `_PyObject_GC_IS_TRACKED`: planned as a flag on the base `Object` struct in `objects/object.go`.
+- Immortal objects: planned as a compile-time constant sentinel on the `RefCount` field; tracked in the v0.12.1 scope.
+
+Planned package path: `objects/object.go`, `objects/gc.go`.

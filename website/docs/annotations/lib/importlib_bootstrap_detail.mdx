@@ -1,0 +1,134 @@
+---
+title: "_bootstrap.py"
+description: "Frozen bootstrap importer — runs before any file I/O is possible"
+cpython_path: Lib/importlib/_bootstrap.py
+cpython_version: "3.14"
+lines: 1570
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_bootstrap.py` is the frozen core of Python's import system. It is baked into
+the interpreter at build time (`make regen-importlib`) and executes before the
+file system is accessible. No injected globals may be referenced at class or
+module level — only inside function bodies, after `_setup()` has run.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 23–27 | `_object_name` | Returns `__qualname__` of any object for error messages |
+| 62–135 | `_WeakValueDictionary` | Stripped-down weak-value dict used for `_blocking_on` |
+| 226–390 | `_ModuleLock` | Per-module RLock with deadlock detection |
+| 392–410 | `_DummyModuleLock` | Single-threaded fallback |
+| 429–463 | `_get_module_lock` | Gets or creates the lock for a module name |
+| 466–480 | `_lock_unlock_module` | Acquires then releases — waits for initialising modules |
+| 483–491 | `_call_with_frames_removed` | Sentinel for `remove_importlib_frames` in `import.c` |
+| 565–663 | `ModuleSpec` | Data class carrying name, loader, origin, search paths |
+| 736–806 | `_init_module_attrs` | Sets `__name__`, `__loader__`, `__package__`, `__spec__`, `__file__` |
+| 914–955 | `_load_unlocked` | Creates, registers, and executes a module from a spec |
+| 974–1023 | `BuiltinImporter` | Meta-path finder/loader for `sys.builtin_module_names` |
+| 1026–1216 | `FrozenImporter` | Meta-path finder/loader for frozen bytecode modules |
+| 1308–1354 | `_find_and_load_unlocked` | Resolves parent, calls `_find_spec`, calls `_load_unlocked` |
+| 1360–1391 | `_find_and_load` | Hot path — fast-returns cached modules, acquires lock otherwise |
+| 1394–1406 | `_gcd_import` | Greatest-common-denominator import; entry point for `__import__` |
+| 1517–1554 | `_setup` | Injects `sys`, `_imp`, `_thread`, `_warnings`, `_weakref` |
+
+## Reading
+
+### The main import dispatch
+
+`_find_and_load` is the function `Python/import.c` calls for every `import`
+statement. The fast path avoids locking entirely when the module is already in
+`sys.modules` and fully initialised.
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1360 _find_and_load
+def _find_and_load(name, import_):
+    module = sys.modules.get(name, _NEEDS_LOADING)
+    if (module is _NEEDS_LOADING or
+        getattr(getattr(module, "__spec__", None), "_initializing", False)):
+        with _ModuleLockManager(name):
+            module = sys.modules.get(name, _NEEDS_LOADING)
+            if module is _NEEDS_LOADING:
+                return _find_and_load_unlocked(name, import_)
+        _lock_unlock_module(name)
+    ...
+    return module
+```
+
+### Setting module attributes
+
+`_init_module_attrs` populates the dunder attributes that user code reads. It
+is called from both `_load_unlocked` and `_exec` (the reload path).
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:736 _init_module_attrs
+def _init_module_attrs(spec, module, *, override=False):
+    if (override or getattr(module, '__name__', None) is None):
+        try:
+            module.__name__ = spec.name
+        except AttributeError:
+            pass
+    # __loader__, __package__, __spec__, __path__, __file__, __cached__
+    # each follow the same override-or-skip pattern
+    ...
+    return module
+```
+
+### Frame stripping
+
+`_call_with_frames_removed` is a deliberate no-op. Its real work happens on the
+C side: `remove_importlib_frames` in `Python/import.c` walks the traceback and
+strips every consecutive importlib frame that ends with a call to this function,
+keeping tracebacks clean for users.
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:483 _call_with_frames_removed
+def _call_with_frames_removed(f, *args, **kwds):
+    return f(*args, **kwds)
+```
+
+### Per-module locking and deadlock detection
+
+`_ModuleLock.acquire` checks for deadlocks by walking the `_blocking_on` graph
+before blocking. If thread A holds lock X and is waiting on lock Y while thread
+B holds Y and is waiting on X, `_has_deadlocked` returns `True` and a
+`_DeadlockError` is raised. CPython accepts partial initialisation rather than
+deadlocking on circular imports across threads.
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:288 _ModuleLock.has_deadlock
+def has_deadlock(self):
+    return _has_deadlocked(
+        target_id=_thread.get_ident(),
+        seen_ids=set(),
+        candidate_ids=[self.owner],
+        blocking_on=_blocking_on,
+    )
+```
+
+## gopy notes
+
+- `ModuleSpec` maps to `objects/modulespec.go` (planned). Fields `name`,
+  `loader`, `origin`, `submodule_search_locations`, and `_set_fileattr` must
+  all be exported.
+- `_call_with_frames_removed` has no Go equivalent yet. The VM simply calls the
+  function directly; frame stripping is a future cleanup pass.
+- `_ModuleLock` deadlock detection depends on `_thread.get_ident()` and a live
+  `_blocking_on` dict. gopy uses goroutine-local state; the lock model will
+  need a mapping from goroutine ID to pending locks.
+- `BuiltinImporter` and `FrozenImporter` are the first two entries on
+  `sys.meta_path`. gopy populates these in `vm/eval_import.go`.
+
+## CPython 3.14 changes
+
+- `_blocking_on` was converted to a `_WeakValueDictionary` (GH-106176) so that
+  thread-local lock lists are collected as soon as the thread exits, preventing
+  a memory leak present in earlier releases.
+- `_find_spec` now copies `sys.meta_path` before iterating (GH-130094) to
+  guard against finders that mutate the list during traversal.
+- `_ModuleLock` now uses an `RLock` internally instead of a plain `Lock`,
+  fixing re-entrant import deadlocks caused by signal handlers and the GC
+  running `__del__` during import.

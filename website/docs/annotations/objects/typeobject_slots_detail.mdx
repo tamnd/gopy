@@ -1,0 +1,138 @@
+---
+title: "Objects/typeobject.c — slot-filling machinery"
+description: "Annotated reading of the CPython slot-filling section in typeobject.c"
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 8000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/typeobject.c` is the largest file in CPython. This page covers the slot-filling
+subsystem: how a type inherits C-level slots from its bases and how Python-level dunder
+methods are wrapped in generic C slot functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~7200 | `slotdefs[]` | Table mapping slot offsets to dunder names; drives all slot inheritance |
+| ~7350 | `fixup_slot_dispatchers` | Iterates `slotdefs[]` and fills every inheritable slot for a type |
+| ~7280 | `update_one_slot` | For one slot, walks the MRO to find the most-derived defining class |
+| ~6100 | `_PyType_Lookup` | MRO attribute search used by `update_one_slot` |
+| ~6800 | `type_ready` | Finalizes a newly created type: inherits slots, builds method wrappers |
+| ~5400 | `slot_tp_repr` | Generic wrapper: calls `__repr__` on the Python side |
+| ~5420 | `slot_tp_hash` | Generic wrapper: calls `__hash__` |
+| ~5600 | `slot_nb_add` | Generic wrapper: calls `__add__` / `__radd__` |
+
+## Reading
+
+### `slotdefs[]` — the registry
+
+Every inheritable slot has one entry in `slotdefs[]`. Each entry records the slot's offset
+inside `PyTypeObject`, the dunder name (e.g. `"__repr__"`), and the generic C wrapper to
+install when a Python method covers that slot.
+
+```c
+// CPython: Objects/typeobject.c:7200 slotdefs
+static slotdef slotdefs[] = {
+    TPSLOT("__repr__", tp_repr, slot_tp_repr, wrap_unaryfunc, ...),
+    TPSLOT("__hash__", tp_hash, slot_tp_hash, wrap_hashfunc, ...),
+    NBSLOT("__add__", nb_add, slot_nb_add, wrap_binaryfunc_l, ...),
+    ...
+    {NULL}
+};
+```
+
+`TPSLOT` and `NBSLOT` are macros that compute the byte offset with `offsetof` so the table
+is independent of any particular pointer value.
+
+### `update_one_slot` — MRO walk for one slot
+
+Given a type and one `slotdef`, this function walks `tp_mro` from most-derived to least.
+For each base it checks whether that base's slot differs from the generic wrapper; if so,
+it records that implementation and stops.
+
+```c
+// CPython: Objects/typeobject.c:7280 update_one_slot
+static slotdef *
+update_one_slot(PyTypeObject *type, slotdef *p)
+{
+    PyObject *mro = type->tp_mro;
+    void **tptr = (void **)((char *)type + p->offset);
+    void *specific = NULL;
+    int n = (int)PyTuple_GET_SIZE(mro);
+    for (int i = 0; i < n; i++) {
+        PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(mro, i);
+        void *base_slot = *(void **)((char *)base + p->offset);
+        if (base_slot != NULL && base_slot != p->function)
+            specific = base_slot;
+    }
+    *tptr = specific ? specific : p->function;
+    return p + 1; /* advance to next slotdef with same offset */
+}
+```
+
+### `fixup_slot_dispatchers` — whole-type pass
+
+After `type_ready` assembles the MRO it calls `fixup_slot_dispatchers` to apply
+`update_one_slot` for every entry in `slotdefs[]`.
+
+```c
+// CPython: Objects/typeobject.c:7350 fixup_slot_dispatchers
+static void
+fixup_slot_dispatchers(PyTypeObject *type)
+{
+    slotdef *p = slotdefs;
+    while (p->name)
+        p = update_one_slot(type, p);
+}
+```
+
+This single loop is responsible for all slot inheritance in CPython.
+
+### `slot_nb_add` — a generic binary wrapper
+
+The generic wrappers follow a uniform pattern: call `_PyObject_LookupSpecial` on `self`
+for the forward dunder, try it, and if `NotImplemented` is returned try the reflected
+dunder on the right-hand operand.
+
+```c
+// CPython: Objects/typeobject.c:5600 slot_nb_add
+static PyObject *
+slot_nb_add(PyObject *self, PyObject *other)
+{
+    PyObject *r;
+    int do_other = !Py_IS_TYPE(self, Py_TYPE(other));
+    PyObject *stack[1] = {other};
+    r = vectorcall_maybe(NULL, &_Py_ID(__add__), self, stack, 1);
+    if (r != Py_NotImplemented || !do_other)
+        return r;
+    Py_DECREF(r);
+    return vectorcall_maybe(NULL, &_Py_ID(__radd__), other, stack, 1);
+}
+```
+
+## gopy notes
+
+gopy mirrors this subsystem in `objects/type.go`. The Go equivalent of `slotdefs[]` is a
+slice of `slotDef` structs built at init time. `fixupSlotDispatchers` iterates that slice.
+`UpdateOneSlot` performs the same MRO walk but operates on Go interface slots rather than
+C function pointers.
+
+Wrappers such as `slotNbAdd` live in `objects/type_call.go` and delegate to
+`objects.CallMethod`, which handles the `NotImplemented` retry loop.
+
+`_PyType_Lookup` maps to `TypeLookup` in `objects/type.go` and is shared with attribute
+lookup in `objects/descr.go`.
+
+## CPython 3.14 changes
+
+- The `slotdefs[]` table gained entries for `__buffer__` and `__release_buffer__`
+  (PEP 688), adding `tp_as_buffer->bf_getbuffer` and `bf_releasebuffer` to the
+  inheritable set.
+- `type_ready` now validates `tp_vectorcall_offset` earlier to catch misuse of the
+  vectorcall protocol in extension types.
+- Several generic wrappers switched from `_PyObject_CallMethodIdOneArg` to direct
+  vectorcall via `_PyObject_VectorcallMethod`, removing one dict lookup per call.

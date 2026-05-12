@@ -1,0 +1,121 @@
+---
+title: textio.c
+description: "TextIOWrapper — encode/decode layer over a buffered binary stream"
+cpython_path: Modules/_io/textio.c
+cpython_version: "3.14"
+lines: 3300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`textio.c` sits at the top of the I/O stack. `TextIOWrapper` takes a `BufferedIOBase` binary stream and a codec name, then presents a character-mode interface. All newline translation lives here, not in the layers below.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–150 | includes, `textio` struct | Fields: buffer, codec state, pending decoded chars, newlines seen |
+| 151–480 | `IncrementalNewlineDecoder` type | Universal newline translation as a codec filter |
+| 481–720 | `textiowrapper_init` | Codec lookup, BOM detection, `line_buffering` setup |
+| 721–1020 | `textiowrapper_write` | Encode str, write to buffer, optional line-buffer flush |
+| 1021–1500 | `textiowrapper_read` | Read from buffer, decode, handle pending chars |
+| 1501–1900 | `textiowrapper_readline` | Buffered line scan with newline translation |
+| 1901–2200 | `textiowrapper_tell` | Encoding cookie arithmetic |
+| 2201–2600 | `textiowrapper_seek` | Restore codec state from cookie |
+| 2601–3300 | `tp_methods`, `tp_getset`, `tp_new`/`tp_init` | Type plumbing and property descriptors |
+
+## Reading
+
+### read and decode
+
+`textiowrapper_read` reads a chunk from the underlying buffer, passes the bytes through the incremental decoder, and appends the result to `self->decoded_chars`. It then slices out the requested character count.
+
+```c
+// CPython: Modules/_io/textio.c:1080 textiowrapper_read
+static PyObject *
+textiowrapper_read(textio *self, PyObject *args)
+{
+    ...
+    input_chunk = _textiowrapper_read_chunk(self, self->chunk_size);
+    if (input_chunk == NULL) goto fail;
+    decoded = PyObject_CallMethodOneArg(self->decoder,
+                                        &_Py_ID(decode), input_chunk);
+    ...
+    _textiowrapper_set_decoded_chars(self, decoded);
+}
+```
+
+`_textiowrapper_read_chunk` calls `buffer.read1` (preferred) or `buffer.read` and returns raw bytes. The decoded string is stored on the object so that subsequent character-at-a-time reads do not call back into the buffer.
+
+### write and encoding
+
+`textiowrapper_write` encodes the incoming `str` with `encoder.encode`, forwards the resulting bytes to `self->buffer.write`, and then — if `line_buffering` is on — checks whether any `\n` or `\r` character was present and calls `self->buffer.flush` if so.
+
+```c
+// CPython: Modules/_io/textio.c:768 textiowrapper_write
+    b = PyObject_CallMethodOneArg(self->encoder,
+                                   &_Py_ID(encode), text);
+    if (b == NULL) return NULL;
+    res = PyObject_CallMethodOneArg(self->buffer,
+                                    &_Py_ID(write), b);
+    if (res == NULL) goto error;
+    if (self->line_buffering &&
+        (PyUnicode_FindChar(text, '\n', 0, len, 1) >= 0 ||
+         PyUnicode_FindChar(text, '\r', 0, len, 1) >= 0))
+    {
+        if (textiowrapper_flush_unlocked(self) < 0) goto error;
+    }
+```
+
+### readline and newline translation
+
+`textiowrapper_readline` reads chunks, passes each through `IncrementalNewlineDecoder._translate_newlines`, and scans for a line terminator. Universal newline mode (`\r\n`, `\r`, `\n` all count) is handled inside the decoder so the rest of the method only looks for `\n`.
+
+```c
+// CPython: Modules/_io/textio.c:1610 textiowrapper_readline
+    while (1) {
+        chunks = _textiowrapper_read_chunk(self, 0);
+        if (chunks == NULL) goto fail;
+        decoded = PyObject_CallMethodOneArg(
+            self->decoder, &_Py_ID(decode), chunks);
+        ...
+        nl = PyUnicode_FindChar(decoded, '\n', 0,
+                                PyUnicode_GET_LENGTH(decoded), 1);
+        if (nl >= 0) {
+            /* found — trim and return */
+            ...
+        }
+    }
+```
+
+### tell and the encoding cookie
+
+`textiowrapper_tell` encodes the current position as a 64-bit integer called the "encoding cookie." The cookie packs the raw stream byte offset, the number of chars to skip from the decoded output, and a snapshot of the codec's internal state. This allows `seek` to restore the exact decode position without re-reading from the start.
+
+```c
+// CPython: Modules/_io/textio.c:1930 textiowrapper_tell
+    /* cookie = start_pos
+     *        | (dec_flags  << 64)
+     *        | (bytes_to_feed << 128)
+     *        | (chars_to_skip << 192)
+     *        | (need_eof << 256)
+     * All fields packed into a Python int via bit shifts.
+     */
+    cookie = _textiowrapper_encode_cookie(
+        start_pos, dec_flags, bytes_to_feed,
+        chars_to_skip, need_eof);
+```
+
+## gopy notes
+
+- `IncrementalNewlineDecoder` is a standalone Go struct in gopy; it does not inherit from a codec base class and does not hold a Python object reference.
+- The encoding cookie is represented as a `uint64` packed struct in gopy, avoiding arbitrary-precision arithmetic for the common case where `start_pos` fits in 40 bits.
+- `textiowrapper_read` calls `buffer.read1` via the `BufferedIOBase` interface in gopy; the `read1` method is defined on `BufferedReader` and returns at most one buffer's worth of data.
+- Line buffering is checked with a simple `strings.ContainsAny(text, "\r\n")` scan rather than two `PyUnicode_FindChar` calls.
+
+## CPython 3.14 changes
+
+- `IncrementalNewlineDecoder` now handles lone `\r` at the very end of a stream without requiring a flush call; previously a trailing `\r` was silently dropped.
+- `textiowrapper_write` gained a fast path that bypasses the encoder when the string is pure ASCII and the codec is `utf-8` or `ascii`, matching the same optimisation already present in `read`.
+- The encoding cookie format is unchanged from 3.11 but the packing and unpacking helpers were moved from `textio.c` into a new internal header so the test suite can call them directly.

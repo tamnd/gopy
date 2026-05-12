@@ -1,0 +1,100 @@
+---
+title: "Include/cpython/funcobject.h — function object internals"
+description: "PyFunctionObject fields, GET_CODE/GET_GLOBALS/GET_CLOSURE macros, PyCFunction typedefs, PyMethodDef, and CO_* flag constants"
+cpython_path: Include/cpython/funcobject.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: objects/function.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython stores every Python `def` statement as a `PyFunctionObject`. This header
+exposes the full C layout used by the interpreter, the accessor macros that the
+eval loop calls on every CALL opcode, the `PyCFunction` family of typedefs for
+built-in callables, and the `PyMethodDef` table that wires C functions into
+module or type method lists.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-10 | guard + includes | boilerplate | depends on `funcobject.h` (public) |
+| 12-35 | `PyFunctionObject` | struct | full field layout, see Reading below |
+| 37-42 | `PyFunction_GET_CODE` | macro | reads `func_code` without incref |
+| 43-48 | `PyFunction_GET_GLOBALS` | macro | reads `func_globals` without incref |
+| 49-54 | `PyFunction_GET_CLOSURE` | macro | reads `func_closure`, may be NULL |
+| 56-70 | `PyCFunction` / `PyCFunctionWithKeywords` | typedef | C-level call signatures |
+| 72-90 | `PyMethodDef` | struct | name, meth pointer, flags, doc |
+| 92-110 | `CO_OPTIMIZED` and friends | `#define` | code-object flag bits |
+| 112-120 | `PyFunction_NewWithQualName` | C API | internal constructor |
+
+## Reading
+
+### PyFunctionObject layout
+
+The struct holds every attribute visible on a Python function object. Key fields:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *func_code;       /* PyCodeObject — the bytecode */
+    PyObject *func_globals;    /* dict — the defining module's globals */
+    PyObject *func_defaults;   /* tuple or NULL */
+    PyObject *func_kwdefaults; /* dict or NULL */
+    PyObject *func_closure;    /* tuple of cells or NULL */
+    PyObject *func_doc;
+    PyObject *func_name;
+    PyObject *func_dict;
+    PyObject *func_weakreflist;
+    PyObject *func_module;
+    PyObject *func_annotations;
+    PyObject *func_typeparams;
+    vectorcallfunc vectorcall;
+} PyFunctionObject;
+```
+
+`func_closure` is a tuple of `PyCellObject` values. The closure is NULL for
+functions that capture no free variables, so callers must guard before indexing.
+
+### Accessor macros
+
+The three GET macros return borrowed references and skip the type check that
+`PyObject_GetAttr` would perform, making them safe only inside the eval loop
+where the type is already guaranteed.
+
+```c
+#define PyFunction_GET_CODE(func)    (((PyFunctionObject *)func)->func_code)
+#define PyFunction_GET_GLOBALS(func) (((PyFunctionObject *)func)->func_globals)
+#define PyFunction_GET_CLOSURE(func) (((PyFunctionObject *)func)->func_closure)
+```
+
+### PyCFunction typedefs and PyMethodDef
+
+Built-in functions exposed to Python are typed as one of:
+
+```c
+typedef PyObject *(*PyCFunction)(PyObject *self, PyObject *args);
+typedef PyObject *(*PyCFunctionWithKeywords)(PyObject *self,
+                                             PyObject *args,
+                                             PyObject *kwargs);
+```
+
+`PyMethodDef` binds a name string to one of these pointers, a flags word
+(`METH_VARARGS`, `METH_FASTCALL`, `METH_NOARGS`, etc.), and an optional doc
+string. A NULL-terminated array of `PyMethodDef` is what `PyModule_Create`
+iterates to populate a module's namespace.
+
+## gopy notes
+
+- `objects/function.go` mirrors `PyFunctionObject` as `Function` with the same
+  field set. `FuncCode`, `FuncGlobals`, and `FuncClosure` map one-for-one.
+- The GET macros correspond to Go methods `Code()`, `Globals()`, and `Closure()`
+  on `*Function`; all return unretained pointers matching the borrowed-ref
+  semantics of the macros.
+- `PyMethodDef` is represented as `objects.MethodDef`; module initialization
+  iterates the slice in `objects/module.go` the same way CPython's
+  `PyModule_Create` iterates the C array.
+- CO_* flag bits are declared in `compile/compiler.go` as typed constants and
+  checked during code-object construction.

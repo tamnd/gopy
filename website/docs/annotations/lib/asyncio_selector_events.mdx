@@ -1,0 +1,162 @@
+---
+title: asyncio/selector_events.py
+cpython_path: "Lib/asyncio/selector_events.py"
+cpython_version: "3.14"
+gopy_status: "not_ported"
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+
+<CpyLink path="Lib/asyncio/selector_events.py" />
+
+## Overview
+
+`selector_events.py` (~1000 lines) provides the selector-based event loop
+that is the default on Unix. `_SelectorEventLoop` extends `BaseEventLoop` by
+wiring up a `selectors.DefaultSelector` (backed by `epoll` on Linux, `kqueue`
+on macOS, `select` elsewhere) as the I/O poller. The file also houses the
+transport implementations for stream and datagram sockets:
+`_SelectorSocketTransport` and `_SelectorDatagramTransport`. These transports
+buffer outgoing data and register interest in read/write readiness events with
+the selector.
+
+
+## Reading
+
+### Selector registration and `_process_events`
+
+`BaseSelectorEventLoop.__init__` wraps a `selectors.DefaultSelector` and
+stores it as `self._selector`. When the loop wants to watch a file descriptor
+for readability or writability it calls the internal helpers `_add_reader` /
+`_add_writer`, which translate the request into a `selector.register` or
+`selector.modify` call:
+
+```python
+# CPython: Lib/asyncio/selector_events.py
+def _add_reader(self, fd, callback, *args):
+    self._check_closed()
+    handle = events.Handle(callback, args, self, None)
+    try:
+        key = self._selector.get_key(fd)
+    except KeyError:
+        self._selector.register(fd, selectors.EVENT_READ,
+                                (handle, None))
+    else:
+        mask, (reader, writer) = key.events, key.data
+        self._selector.modify(fd, mask | selectors.EVENT_READ,
+                              (handle, writer))
+        if reader is not None:
+            reader.cancel()
+    return handle
+```
+
+After each `select` call `_process_events` walks the returned event list and
+fires the stored callbacks:
+
+```python
+# CPython: Lib/asyncio/selector_events.py
+def _process_events(self, event_list):
+    for key, mask in event_list:
+        fileobj, (reader, writer) = key.fileobj, key.data
+        if mask & selectors.EVENT_READ and reader is not None:
+            if reader._cancelled:
+                self._remove_reader(fileobj)
+            else:
+                self._add_callback(reader)
+        if mask & selectors.EVENT_WRITE and writer is not None:
+            if writer._cancelled:
+                self._remove_writer(fileobj)
+            else:
+                self._add_callback(writer)
+```
+
+`_add_callback` appends the `Handle` to `_ready` so it runs in the same
+`_run_once` batch that already fired timers. Cancelled handles are cleaned up
+in-place rather than being removed eagerly, which avoids an extra
+`selector.modify` round-trip on the hot path.
+
+### `_SelectorSocketTransport`: buffered writes
+
+`_SelectorSocketTransport` is the transport object handed to a protocol after
+`create_connection` succeeds. It holds a `_buffer` bytearray and registers a
+write-readiness callback only when data is waiting, keeping the selector
+subscription minimal:
+
+```python
+# CPython: Lib/asyncio/selector_events.py
+def write(self, data):
+    ...
+    if not self._buffer:
+        # Fast path: try to send immediately.
+        try:
+            n = self._sock.send(data)
+        except (BlockingIOError, InterruptedError):
+            n = 0
+        ...
+        if n == len(data):
+            return   # All sent, no need to register for writability.
+        data = memoryview(data)[n:]
+
+    self._buffer.extend(data)
+    self._loop._add_writer(self._sock_fd, self._write_ready)
+```
+
+`_write_ready` is invoked by `_process_events` when the socket becomes
+writable. It drains as much of `_buffer` as the kernel will accept, then
+removes the write-registration once the buffer is empty:
+
+```python
+# CPython: Lib/asyncio/selector_events.py
+def _write_ready(self):
+    ...
+    try:
+        n = self._sock.send(self._buffer)
+    except (BlockingIOError, InterruptedError):
+        pass
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException as exc:
+        self._loop._remove_writer(self._sock_fd)
+        self._buffer.clear()
+        self._fatal_error(exc, 'Fatal write error on socket transport')
+    else:
+        if n:
+            del self._buffer[:n]
+        if not self._buffer:
+            self._loop._remove_writer(self._sock_fd)
+            if self._closing:
+                self._call_connection_lost(None)
+```
+
+This back-pressure pattern (register on demand, deregister when drained)
+prevents the selector from waking up needlessly for a socket that has nothing
+to send.
+
+### `_SelectorDatagramTransport`
+
+`_SelectorDatagramTransport` follows the same pattern but queues `(data,
+addr)` pairs because UDP has no stream abstraction. Each `sendto` either
+succeeds immediately or appends to `_buffer`; `_sendto_ready` drains the
+queue in order. Read events call `recvfrom` and dispatch to
+`protocol.datagram_received`.
+
+## gopy mirror
+
+This file is **not yet ported**. When ported it will live at
+`module/asyncio/selector_events.go`. The selector abstraction maps to
+Go's `syscall.Select` or `golang.org/x/sys/unix.EpollWait` depending on
+platform, wrapped by an interface that mirrors `selectors.BaseSelector`.
+The transport write-buffer loop maps directly to a `[]byte` slice with the
+same register-on-demand, deregister-when-drained pattern.
+
+## CPython 3.14 changes
+
+- The `loop` parameter removal that affected high-level APIs did not change
+  the internal transport or selector APIs.
+- Python 3.12 added `_SelectorSocketTransport._read_ready__on_eof` as a
+  distinct method split from `_read_ready` to clarify EOF handling. Both
+  methods are present in 3.14.
+- No new platform-specific selector backends were added in 3.14; the
+  `selectors.DefaultSelector` alias continues to resolve to `EpollSelector`
+  on Linux and `KqueueSelector` on macOS.

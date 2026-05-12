@@ -1,0 +1,88 @@
+---
+title: Lib/unittest/__init__.py
+description: "Annotation: Lib/unittest/__init__.py"
+cpython_path: Lib/unittest/__init__.py
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink path="Lib/unittest/__init__.py" />
+
+The `unittest` package exposes its full public API through this single init module. It re-exports every name from its sub-modules so that callers only need `import unittest` rather than importing individual submodules directly. The file is intentionally thin: its job is assembly, not logic.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 47-52 | `__all__` | Canonical list of exported public names |
+| 54 | `__unittest` | Sentinel that suppresses this file from test tracebacks |
+| 56-69 | import block | Pulls symbols from result, case, suite, loader, main, runner, signals |
+| 72-73 | `__dir__` | Adds `IsolatedAsyncioTestCase` to `dir(unittest)` without importing it |
+| 75-80 | `__getattr__` | Lazy-loads `IsolatedAsyncioTestCase` from `.async_case` on first access |
+
+## Reading
+
+### The `__all__` list and re-exports
+
+`__all__` declares the authoritative contract for `from unittest import *`. Every name listed there has a corresponding binding in the import block below it.
+
+```python
+# CPython: Lib/unittest/__init__.py:47 __all__
+__all__ = ['TestResult', 'TestCase', 'IsolatedAsyncioTestCase', 'TestSuite',
+           'TextTestRunner', 'TestLoader', 'FunctionTestCase', 'main',
+           'defaultTestLoader', 'SkipTest', 'skip', 'skipIf', 'skipUnless',
+           'expectedFailure', 'TextTestResult', 'installHandler',
+           'registerResult', 'removeResult', 'removeHandler',
+           'addModuleCleanup', 'doModuleCleanups', 'enterModuleContext']
+```
+
+The four foundational classes (`TestCase`, `TestSuite`, `TestLoader`, `TestResult`) come from separate sub-modules but are surfaced here so user code never has to reach into `unittest.case` or `unittest.loader` directly. `defaultTestLoader` is the singleton instance of `TestLoader` that `unittest.main()` uses when no explicit loader is passed.
+
+```python
+# CPython: Lib/unittest/__init__.py:56 import block
+from .result import TestResult
+from .case import (addModuleCleanup, TestCase, FunctionTestCase, SkipTest, skip,
+                   skipIf, skipUnless, expectedFailure, doModuleCleanups,
+                   enterModuleContext)
+from .suite import BaseTestSuite, TestSuite
+from .loader import TestLoader, defaultTestLoader
+from .main import TestProgram, main
+from .runner import TextTestRunner, TextTestResult
+from .signals import installHandler, registerResult, removeResult, removeHandler
+```
+
+### The `__unittest` traceback sentinel
+
+```python
+# CPython: Lib/unittest/__init__.py:54 __unittest
+__unittest = True
+```
+
+Every unittest sub-module sets this module-level variable. The traceback formatter in `result.py` checks for it and hides frames from these files when printing test failures, so users see their own code rather than framework internals.
+
+### Lazy async import via `__getattr__`
+
+`IsolatedAsyncioTestCase` pulls in `asyncio` at import time, so loading it eagerly would slow down every program that imports `unittest`. PEP 562 module `__getattr__` defers that cost until the name is first accessed.
+
+```python
+# CPython: Lib/unittest/__init__.py:75 __getattr__
+def __getattr__(name):
+    if name == 'IsolatedAsyncioTestCase':
+        global IsolatedAsyncioTestCase
+        from .async_case import IsolatedAsyncioTestCase
+        return IsolatedAsyncioTestCase
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+```
+
+The `global` statement caches the result so the import fires only once. `__dir__` at line 72 ensures `IsolatedAsyncioTestCase` appears in `dir(unittest)` even before `__getattr__` has run.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/unittest/`.
+
+The init module itself requires no Go logic. It will be shipped as a pure-Python file loaded from the stdlib bundle, once the sub-modules (`case`, `suite`, `loader`, `result`, `runner`) are ported. The `__unittest` traceback-filter sentinel must be respected by the gopy traceback formatter when printing test failure output. The `IsolatedAsyncioTestCase` lazy-load can be deferred indefinitely since gopy does not yet support `asyncio`.

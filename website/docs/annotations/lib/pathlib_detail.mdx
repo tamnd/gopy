@@ -1,0 +1,129 @@
+---
+title: "Lib/pathlib/__init__.py"
+description: "Object-oriented filesystem path abstraction: pure flavour classes for parsing and manipulation, and the concrete Path class for all I/O operations."
+cpython_path: "Lib/pathlib/__init__.py"
+cpython_version: "3.14"
+lines: 1506
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/pathlib/\_\_init\_\_.py
+
+<CpyLink path="Lib/pathlib/__init__.py" />
+
+The file implements all six public path types: `PurePosixPath`, `PureWindowsPath`, and their concrete counterparts, plus the abstract bases `PurePath` and `Path`. It relies on `Lib/pathlib/_os.py` for low-level helpers and on `glob._StringGlobber` for pattern matching.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| <Cpy path="Lib/pathlib/__init__.py" lines="46-50">46-50</Cpy> | `UnsupportedOperation` | Exception raised for platform-unsupported operations |
+| <Cpy path="Lib/pathlib/__init__.py" lines="52-79">52-79</Cpy> | `_PathParents` | Sequence view over logical ancestors of a path |
+| <Cpy path="Lib/pathlib/__init__.py" lines="81-593">81-593</Cpy> | `PurePath` | Base class: parsing, comparison, pure manipulation; no I/O |
+| <Cpy path="Lib/pathlib/__init__.py" lines="128-159">128-159</Cpy> | `PurePath.__new__` / `__init__` | Accepts positional segments and joins them |
+| <Cpy path="Lib/pathlib/__init__.py" lines="175-185">175-185</Cpy> | `PurePath.__truediv__` / `__rtruediv__` | `/` operator path joining via `with_segments` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="285-326">285-326</Cpy> | `PurePath._parse_path` / `_parse_pattern` | Low-level split of raw strings into drive/root/tail |
+| <Cpy path="Lib/pathlib/__init__.py" lines="345-400">345-400</Cpy> | `drive` / `root` / `anchor` / `parts` / `parent` / `parents` | Core path component properties |
+| <Cpy path="Lib/pathlib/__init__.py" lines="402-473">402-473</Cpy> | `name` / `stem` / `suffix` / `suffixes` | Filename component properties |
+| <Cpy path="Lib/pathlib/__init__.py" lines="409-445">409-445</Cpy> | `with_name` / `with_stem` / `with_suffix` | Immutable path manipulation returning new instances |
+| <Cpy path="Lib/pathlib/__init__.py" lines="479-510">479-510</Cpy> | `relative_to` / `is_relative_to` | Subpath relationship tests with optional `walk_up` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="547-593">547-593</Cpy> | `full_match` / `match` | Glob-style pattern matching against path components |
+| <Cpy path="Lib/pathlib/__init__.py" lines="595-615">595-615</Cpy> | `PurePosixPath` / `PureWindowsPath` | Flavour subclasses that fix `parser` to `posixpath`/`ntpath` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="618-759">618-759</Cpy> | `_Info` | Cached `os.stat` wrapper shared across `Path` method calls |
+| <Cpy path="Lib/pathlib/__init__.py" lines="761-818">761-818</Cpy> | `_copy_info` | Internal helper: copies stat metadata between paths |
+| <Cpy path="Lib/pathlib/__init__.py" lines="820-960">820-960</Cpy> | `Path` (existence tests) | `stat`, `lstat`, `exists`, `is_dir`, `is_file`, `is_symlink`, etc. |
+| <Cpy path="Lib/pathlib/__init__.py" lines="962-1014">962-1014</Cpy> | `Path.open` / `read_bytes` / `read_text` / `write_bytes` / `write_text` | File content helpers delegating to `io.open` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="1030-1090">1030-1090</Cpy> | `Path.iterdir` / `glob` / `rglob` | Directory scanning via `os.scandir` and `_StringGlobber` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="1095-1185">1095-1185</Cpy> | `Path.absolute` / `cwd` / `resolve` | Path resolution against the working directory or the filesystem |
+| <Cpy path="Lib/pathlib/__init__.py" lines="1207-1295">1207-1295</Cpy> | `Path.mkdir` / `chmod` / `unlink` / `rmdir` | Filesystem mutation: create, chmod, delete |
+| <Cpy path="Lib/pathlib/__init__.py" lines="1265-1335">1265-1335</Cpy> | `Path.rename` / `replace` / `copy` / `copy_into` | Move and copy operations |
+| <Cpy path="Lib/pathlib/__init__.py" lines="1370-1440">1370-1440</Cpy> | `Path.move` / `move_into` | Rename-based move with cross-device fallback |
+| <Cpy path="Lib/pathlib/__init__.py" lines="1440-1506">1440-1506</Cpy> | `Path.expanduser` / `home` / `as_uri` / `from_uri` | Home-dir expansion and URI conversions |
+
+## Reading
+
+### PurePath: the flavour system
+
+`PurePath` stores nothing but the raw string segments passed to `__new__`. Every method derives its result from `_parse_path`, which calls `self.parser` (either `posixpath` or `ntpath`) to split the string into drive, root, and tail components. Subclasses set the parser at class level; no state is carried at instance level beyond the raw strings.
+
+```python
+# CPython: Lib/pathlib/__init__.py:128 PurePath.__new__
+def __new__(cls, *args, **kwargs):
+    if cls is PurePath:
+        cls = PureWindowsPath if os.name == 'nt' else PurePosixPath
+    return object.__new__(cls)
+
+def __init__(self, *args):
+    paths = []
+    for arg in args:
+        try:
+            if isinstance(arg, PurePath):
+                paths += arg._raw_paths
+            else:
+                paths.append(arg)
+        except TypeError:
+            raise TypeError(
+                "argument should be str or os.PathLike, not %r"
+                % type(arg))
+    self._raw_paths = paths
+```
+
+### `__truediv__`: path joining with the `/` operator
+
+The `/` operator creates a new path by forwarding both operands to `with_segments`. Because `with_segments` simply passes the arguments to `cls()`, the join semantics come entirely from `_parse_path` and mirror `os.path.join`: an absolute right-hand operand discards everything on the left.
+
+```python
+# CPython: Lib/pathlib/__init__.py:175 PurePath.__truediv__
+def __truediv__(self, key):
+    try:
+        return self.with_segments(self, key)
+    except TypeError:
+        return NotImplemented
+
+def __rtruediv__(self, key):
+    try:
+        return self.with_segments(key, self)
+    except TypeError:
+        return NotImplemented
+```
+
+### `iterdir` and `glob`: scandir-based traversal
+
+`iterdir` wraps a single `os.scandir` call and maps each `DirEntry` back to a `Path` using `_from_dir_entry`. `glob` builds a selector chain from a parsed pattern via `_StringGlobber`, then feeds it the root directory. `rglob` prepends `**` to the pattern before delegating to `glob`.
+
+```python
+# CPython: Lib/pathlib/__init__.py:1030 Path.iterdir
+def iterdir(self):
+    root_dir = str(self)
+    with os.scandir(root_dir) as scandir_it:
+        entries = list(scandir_it)
+    if root_dir == '.':
+        return (self._from_dir_entry(e, e.name) for e in entries)
+    else:
+        return (self._from_dir_entry(e, e.path) for e in entries)
+```
+
+### `mkdir`: recursive parent creation
+
+`mkdir` calls `os.mkdir` directly and catches `FileNotFoundError` to optionally recurse up the parent chain when `parents=True`. The `exist_ok` flag is handled by catching `OSError` and re-raising only when the target is not already a directory.
+
+```python
+# CPython: Lib/pathlib/__init__.py:1207 Path.mkdir
+def mkdir(self, mode=0o777, parents=False, exist_ok=False):
+    try:
+        os.mkdir(self, mode)
+    except FileNotFoundError:
+        if not parents or self.parent == self:
+            raise
+        self.parent.mkdir(parents=True, exist_ok=True)
+        self.mkdir(mode, parents=False, exist_ok=exist_ok)
+    except OSError:
+        if not exist_ok or not self.is_dir():
+            raise
+```
+
+## gopy notes
+
+gopy does not yet ship a `pathlib` port. The pure manipulation half (`PurePath`, `with_name`, `with_suffix`, path joining) maps cleanly onto Go string operations and is a realistic near-term target. The concrete `Path` I/O methods wrap `os.*` syscalls that gopy already exposes through the `os` module stubs, so they can be wired in once the class machinery supports properties and `__truediv__`.

@@ -1,0 +1,138 @@
+---
+title: "Modules/mathmodule.c"
+description: "C implementation of the math module: floor/ceil dispatch, fsum, log, factorial, and numeric predicates"
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/mathmodule.c` implements the `math` module. All functions operate on C `double` via `<math.h>` and report domain / range errors through `math_error()`. Functions that accept non-float Python objects delegate to dunder methods before converting.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| ~50  | `math_error` | Translates `errno` / `HUGE_VAL` into `ValueError` or `OverflowError` |
+| ~120 | `math_floor_impl` / `math_ceil_impl` | Dispatch to `__floor__` / `__ceil__` for non-float; fall back to `floor(3)` |
+| ~200 | `math_fsum_impl` | Extended-precision summation via Neumaier partial-sum algorithm |
+| ~80  | `math_isfinite_impl` / `math_isinf_impl` / `math_isnan_impl` | Thin wrappers around `isfinite` / `isinf` / `isnan` |
+| ~150 | `math_log_impl` | Single-argument natural log; optional second argument gives `log(x)/log(base)` |
+| ~300 | `math_factorial_impl` | Divide-and-conquer product tree for large `n` |
+| ~100 | `math_sumprod_impl` | Added in 3.12; inner product using `fma` where available |
+| ~80  | `math_comb_impl` / `math_perm_impl` | Combinations and permutations with exact integer arithmetic |
+| ~50  | `math_methods[]` | Module method table |
+
+## Reading
+
+### floor and ceil: dunder dispatch
+
+For integer and `Decimal` arguments, `math.floor` and `math.ceil` must return an integer, not a float. The C implementation looks up `__floor__` / `__ceil__` on the type before calling the C `floor(3)`.
+
+```c
+// CPython: Modules/mathmodule.c:390 math_floor_impl
+static PyObject *
+math_floor_impl(PyObject *module, PyObject *x)
+{
+    if (!PyFloat_CheckExact(x)) {
+        PyObject *method = _PyObject_LookupSpecial(x, &_Py_ID(__floor__));
+        if (method != NULL)
+            return PyObject_CallNoArgs(method);
+        if (PyErr_Occurred())
+            return NULL;
+    }
+    double xi = PyFloat_AsDouble(x);
+    if (xi == -1.0 && PyErr_Occurred())
+        return NULL;
+    return PyLong_FromDouble(floor(xi));
+}
+```
+
+### fsum: extended-precision summation
+
+`math.fsum` returns a float that is the exact sum of the input iterable, without intermediate rounding. It maintains a list of non-overlapping partial sums and merges them using the Neumaier algorithm.
+
+```c
+// CPython: Modules/mathmodule.c:1060 math_fsum_impl
+static PyObject *
+math_fsum_impl(PyObject *module, PyObject *seq)
+{
+    /* partial sums array, grown as needed */
+    double *p = NULL;
+    Py_ssize_t n = 0, m = NUM_PARTIALS;
+    double x, y, t, hi, lo = 0.0, yr, inf_sum = 0.0, special_sum = 0.0;
+
+    /* iterate the input, fold each value into p[] */
+    while ((item = PyIter_Next(iter)) != NULL) {
+        x = PyFloat_AsDouble(item);
+        /* Neumaier merge loop */
+        for (Py_ssize_t i = 0; i < n; i++) {
+            if (fabs(x) < fabs(p[i])) { yr = x; x = p[i]; p[i] = yr; }
+            hi = x + p[i];
+            lo += (x - hi) + p[i];
+            x = hi;
+        }
+        p[n++] = x;
+    }
+    /* collapse partials to a single double */
+    ...
+}
+```
+
+### math.log with optional base
+
+`math_log_impl` detects a second argument and computes `log(x) / log(base)`, with a fast path for base 2 (`log2`) and base 10 (`log10`) to preserve accuracy.
+
+```c
+// CPython: Modules/mathmodule.c:714 math_log_impl
+static PyObject *
+math_log_impl(PyObject *module, PyObject *x, int group_right_1,
+              PyObject *base)
+{
+    PyObject *num, *den;
+    num = loghelper(x, m_log);
+    if (num == NULL || base == NULL)
+        return num;
+    den = loghelper(base, m_log);
+    if (den == NULL) { Py_DECREF(num); return NULL; }
+    PyObject *result = PyNumber_TrueDivide(num, den);
+    Py_DECREF(num); Py_DECREF(den);
+    return result;
+}
+```
+
+### math.factorial: divide-and-conquer
+
+For small `n`, `math_factorial_impl` uses a simple loop. For large `n`, it builds a balanced product tree: split `[1..n]` into halves, recurse, then multiply the two results. This reduces the number of big-integer multiplications from `O(n)` to `O(n log n)`.
+
+```c
+// CPython: Modules/mathmodule.c:1580 factorial_odd_part
+/* Compute product of odd integers in [m, n] using recursive splitting */
+static PyObject *
+factorial_odd_part(unsigned long n)
+{
+    if (n < 3) return PyLong_FromLong(n < 2 ? 1 : 3);
+    unsigned long m = (n - 1) | 1;   /* largest odd <= n */
+    PyObject *lo = factorial_odd_part(n / 2);
+    PyObject *hi = factorial_odd_part_range(n / 2 + 1, m);
+    PyObject *res = PyNumber_Multiply(lo, hi);
+    Py_DECREF(lo); Py_DECREF(hi);
+    return res;
+}
+```
+
+## gopy notes
+
+- `math_floor` and `math_ceil` require the `__floor__` / `__ceil__` dunder lookup path; the Go port must call `objects.LookupSpecial` before falling through to `math.Floor`.
+- `math_fsum` relies on `double` bit-level properties; translate it from C to Go verbatim using `math.Float64bits` / `math.Float64frombits` where alignment is needed.
+- `math_factorial` for large `n` returns a Python `int` of arbitrary precision. The Go port must use `math/big.Int` for the product tree.
+- `math_sumprod` uses `fma(a, b, c)` (fused multiply-add) for accuracy; Go 1.21 added `math.FMA` which maps directly.
+
+## CPython 3.14 changes
+
+- `math.sumprod` added in 3.12 is now documented stable; its `fma` fast path is enabled on all tier-1 platforms in 3.14.
+- `math.fma(x, y, z)` added in 3.13 exposes the hardware fused multiply-add directly.
+- `math.euler_gamma` constant added in 3.13.
+- `math.factorial` raises `TypeError` (not `ValueError`) for float arguments as of 3.10; 3.14 keeps that behavior.

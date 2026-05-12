@@ -1,0 +1,122 @@
+---
+title: "_hashlib.c — OpenSSL hash module"
+description: "Annotation of CPython Modules/_hashlib.c, the OpenSSL-backed hashlib implementation"
+cpython_path: Modules/_hashlib.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's `_hashlib` module wraps OpenSSL's EVP (envelope) digest API to implement
+`hashlib`. A thin Python layer in `Lib/hashlib.py` dispatches to this extension for
+all named algorithms that OpenSSL knows about, falling back to `_sha3` and `_blake2`
+for algorithms CPython ships its own C code for.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | includes / defines | OpenSSL and Python headers, `Py_buffer` helpers |
+| 121–310 | `EVPobject` | C struct and type slots for a single hash context |
+| 311–480 | `EVP_new_impl` | Allocate and initialise an `EVP_MD_CTX` |
+| 481–560 | `EVPXOF` path | Extendable-output variant for `shake_128` / `shake_256` |
+| 561–720 | `hashlib_new` | Top-level dispatch by algorithm name |
+| 721–860 | `EVP_digest_impl` / `EVP_hexdigest_impl` | Copy context, finalise, return bytes or hex |
+| 861–960 | `EVP_update_impl` | Feed data into an existing context |
+| 961–1080 | `usedforsecurity` handling | FIPS guard wired through `EVP_DigestInit_ex` flags |
+| 1081–1300 | `hashlib_file_digest` | Chunked file hashing |
+| 1301–2500 | method tables, module init | `PyMethodDef`, `PyModuleDef`, `PyInit__hashlib` |
+
+## Reading
+
+### EVP_new_impl: creating a context
+
+Every hash object starts here. The function allocates an `EVP_MD_CTX`, looks up the
+digest by name via `EVP_get_digestbyname`, and calls `EVP_DigestInit_ex` to bind the
+algorithm.
+
+```c
+// CPython: Modules/_hashlib.c:311 EVP_new_impl
+static PyObject *
+EVP_new_impl(PyTypeObject *type, PyObject *name_obj, PyObject *data_obj,
+             int usedforsecurity)
+{
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (ctx == NULL) return _setException(PyExc_MemoryError, NULL);
+    const EVP_MD *digest = py_digest_by_name(state, name_obj, usedforsecurity);
+    if (!EVP_DigestInit_ex(ctx, digest, NULL)) { ... }
+    ...
+}
+```
+
+### EVPXOF: shake_128 and shake_256
+
+Extendable-output functions do not have a fixed digest length. CPython exposes them
+through a separate code path that calls `EVP_DigestFinalXOF` instead of
+`EVP_DigestFinal_ex`, and requires the caller to pass an explicit length argument to
+`digest()`.
+
+```c
+// CPython: Modules/_hashlib.c:490 EVPXOF_digest_impl
+static PyObject *
+EVPXOF_digest_impl(EVPobject *self, Py_ssize_t length)
+{
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_MD_CTX_copy_ex(ctx, self->ctx);
+    unsigned char *digest = PyMem_Malloc(length);
+    EVP_DigestFinalXOF(ctx, digest, (size_t)length);
+    ...
+}
+```
+
+### usedforsecurity and FIPS mode
+
+Python 3.9 added the `usedforsecurity` keyword argument. When `False`, the digest is
+initialised with `EVP_MD_CTX_FLAG_NON_FIPS_ALLOW`, letting callers use MD5 or SHA-1
+in non-security contexts (e.g. checksums) even on a FIPS-enabled system.
+
+```c
+// CPython: Modules/_hashlib.c:975 py_digest_by_name
+    if (!usedforsecurity) {
+        EVP_MD_CTX_set_flags(ctx, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
+    }
+    if (!EVP_DigestInit_ex(ctx, digest, NULL)) {
+        _setException(PyExc_ValueError, "unknown hash name");
+        return NULL;
+    }
+```
+
+### hashlib.file_digest: chunked hashing
+
+`hashlib.file_digest(fileobj, digest)` reads the file in `HASHXOF_DIGESTSIZE`-sized
+chunks (8 KB) and feeds each chunk into the hash. It releases the GIL around the
+`read()` call when the file object is a true C-level `FILE*`.
+
+```c
+// CPython: Modules/_hashlib.c:1100 hashlib_file_digest_impl
+    while (1) {
+        Py_BEGIN_ALLOW_THREADS
+        n = fread(buf, 1, sizeof(buf), fp);
+        Py_END_ALLOW_THREADS
+        if (n == 0) break;
+        if (!EVP_DigestUpdate(ctx, buf, n)) { ... }
+    }
+```
+
+## gopy notes
+
+- `hashlib` is not yet ported. The gopy equivalent will wrap Go's `crypto/*` packages
+  rather than OpenSSL directly, so `usedforsecurity` will be a no-op on non-FIPS builds.
+- `shake_128` / `shake_256` need the XOF calling convention; mark as deferred until the
+  standard fixed-length digests are green.
+- `file_digest` can reuse Go's `io.Reader` loop with a 32 KB buffer.
+
+## CPython 3.14 changes
+
+- 3.9: `usedforsecurity` keyword added (bpo-9216).
+- 3.11: `hashlib.file_digest()` added (gh-87071).
+- 3.13: Internal OpenSSL 3.x legacy provider wiring; `EVP_MD_CTX_FLAG_NON_FIPS_ALLOW`
+  behaviour updated for OpenSSL 3.
+- 3.14: No functional changes to `_hashlib.c`; build-system drop of OpenSSL 1.1.x support.

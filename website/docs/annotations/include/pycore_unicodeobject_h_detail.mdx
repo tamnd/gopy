@@ -1,0 +1,117 @@
+---
+title: pycore_unicodeobject.h
+description: "Internal Unicode string helpers: struct layout, ASCII/compact macros, interning, and fast comparison"
+cpython_path: Include/internal/pycore_unicodeobject.h
+cpython_version: "3.14"
+lines: 308
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Internal-only header guarded by `Py_BUILD_CORE`. Exposes the three-tier Unicode
+object layout, character classification helpers, codec internals, interning
+routines, and the fast `_PyUnicode_EqualToASCIIString` comparison used throughout
+the interpreter hot paths.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 16-23 | `_PyUnicode_IsXidStart` / `IsXidContinue` | Identifier character class tests |
+| 28-30 | `_PyUnicode_CheckConsistency` | Debug validator for Unicode objects |
+| 33-34 | `_PyUnicode_InternedSize` / `_Immortal` | Interning pool size metrics |
+| 43-48 | `_PyUnicode_FastFill` | Unsafe bulk fill (no bounds check) |
+| 53-59 | `_PyUnicode_FastCopyCharacters` | Unsafe bulk copy between strings |
+| 63-65 | `_PyUnicode_FromASCII` | Construct from raw ASCII buffer |
+| 78-83 | `_PyUnicodeWriter` helpers | PEP 3101 advanced format writer |
+| 217-229 | `_PyUnicode_EqualToASCIIId` / `String` | Fast right-hand-ASCII equality tests |
+| 276-280 | `_PyUnicode_InitState` / `Fini` | Interpreter lifecycle hooks |
+| 289-294 | `_PyUnicode_InternMortal` / `Immortal` / `InternInPlace` | Interning tiers (3.12+) |
+
+## Reading
+
+### The Three-Tier Object Layout
+
+Python 3.3 introduced a flexible string representation (PEP 393). The three
+concrete structs are defined in `Include/cpython/unicodeobject.h`, but the
+internal header builds on them:
+
+- `PyASCIIObject` stores pure-ASCII strings inline after the struct. No separate
+  buffer pointer. `_PyUnicode_IS_ASCII` and `_PyUnicode_IS_COMPACT` both return 1.
+- `PyCompactUnicodeObject` extends `PyASCIIObject` with a `utf8` cache field for
+  Latin-1 or UCS-2/4 compact strings. `_PyUnicode_IS_COMPACT` returns 1;
+  `_PyUnicode_IS_ASCII` returns 0.
+- `PyUnicodeObject` is the "legacy" non-compact form with a separate `data.any`
+  pointer. Both flags return 0. In practice CPython itself never constructs these
+  since 3.12, but extension code written before that may still produce them.
+
+Python 3.12 removed `wstr` and `wstr_length` from `PyASCIIObject`. Code using
+`_PyUnicode_WSTR_LENGTH` must be conditioned on `PY_VERSION_HEX < 0x030c0000`.
+
+### Fast ASCII Equality
+
+```c
+// CPython: Include/internal/pycore_unicodeobject.h:226 _PyUnicode_EqualToASCIIString
+PyAPI_FUNC(int) _PyUnicode_EqualToASCIIString(
+    PyObject *left,
+    const char *right           /* ASCII-encoded string */
+    );
+```
+
+This is the go-to comparison in the eval loop and type machinery whenever the
+right-hand operand is a compile-time string literal. It short-circuits on length
+and the `_PyUnicode_IS_ASCII` fast path before falling back to `memcmp`.
+
+### Interning Tiers (3.12+)
+
+```c
+// CPython: Include/internal/pycore_unicodeobject.h:289 _PyUnicode_InternMortal
+PyAPI_FUNC(void) _PyUnicode_InternMortal(PyInterpreterState *interp, PyObject **);
+PyAPI_FUNC(void) _PyUnicode_InternImmortal(PyInterpreterState *interp, PyObject **);
+PyAPI_FUNC(void) _PyUnicode_InternInPlace(PyInterpreterState *interp, PyObject **p);
+```
+
+Mortal strings are freed when the interpreter shuts down. Immortal strings live
+for the process lifetime and skip reference counting. `_PyUnicode_InternInPlace`
+is a convenience alias kept for backporting; new code should pick the tier
+explicitly.
+
+### Unsafe Fast Operations
+
+```c
+// CPython: Include/internal/pycore_unicodeobject.h:43 _PyUnicode_FastFill
+extern void _PyUnicode_FastFill(
+    PyObject *unicode,
+    Py_ssize_t start,
+    Py_ssize_t length,
+    Py_UCS4 fill_char
+    );
+```
+
+Used inside string builder paths where the caller already holds a freshly
+allocated, not-yet-shared string. No argument validation means a wrong `length`
+silently writes past the buffer — the tradeoff CPython accepts for builder
+throughput.
+
+## gopy notes
+
+gopy represents Python strings as Go `string` values (immutable UTF-8 byte
+slices). The three-tier layout does not have a direct Go equivalent, so gopy
+tracks only two properties per string object: whether the content is pure ASCII
+and whether it has been interned. `_PyUnicode_EqualToASCIIString` maps to a Go
+helper that compares a `string` against a Go `string` literal with the same
+short-circuit strategy. Interning uses a `sync.Map` keyed on the string value,
+with a separate immortal set that never shrinks.
+
+The `wstr` removal in 3.12 means gopy has no wide-string path to implement.
+
+## CPython 3.14 changes
+
+- `_PyUnicode_Dedent` was added (line 258) as an internal accelerator for
+  `textwrap.dedent`, avoiding the round-trip through Python.
+- The `_PyUnicodeASCIIIter_Type` type object (line 282) is now exposed in the
+  internal header so the specializing adaptive interpreter can use it from
+  `specialize.c` without a forward declaration in every file.
+- `_PyUnicode_AsUTF8NoNUL` (line 302) was promoted to a `PyAPI_FUNC` export for
+  `_sqlite3`, replacing an inline workaround that existed since 3.11.

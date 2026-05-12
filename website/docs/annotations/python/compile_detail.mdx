@@ -1,0 +1,112 @@
+---
+title: "Python/compile.c"
+description: The CPython bytecode compiler that walks an AST and emits a code object for every scope in a module
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 8000
+status: annotated
+go_path: compile/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| CPython symbol | Lines (approx) | gopy counterpart |
+|---|---|---|
+| `_PyAST_Compile` / `_PyAST_CompileObject` | 353-410 | `compile/compiler.go` `Compile` |
+| `compiler_unit` struct | 610-700 | `compile/codegen.go` `compilerUnit` |
+| `compiler` struct | 700-760 | `compile/codegen.go` `Compiler` |
+| `new_compiler` | 760-820 | `compile/codegen.go` `newCompiler` |
+| `compiler_mod` / `compile_codegen` | 412-550 | `compile/compiler.go` `compilerMod` |
+| `compiler_set_qualname` | 644-680 | `compile/codegen.go` `setQualname` |
+| `compiler_function` | 1390-1500 | `compile/codegen_stmt_funclike.go` `visitFunctionDef` |
+| `compiler_class` / `codegen_class` | 1515-1700 | `compile/codegen_class.go` `visitClassDef` |
+| `codegen_lambda` | 1999-2050 | `compile/codegen_stmt_funclike.go` `visitLambda` |
+| `codegen_nameop` | 3186-3287 | `compile/codegen_expr_name.go` `visitName` |
+| `codegen_add_yield_from` | 472-510 | `compile/codegen_expr_misc.go` `visitYieldFrom` |
+| `compiler_arguments` | 1311-1390 | `compile/codegen_stmt_funclike.go` `emitArguments` |
+| `codegen_make_closure` | 923-990 | `compile/codegen_stmt_funclike.go` `emitMakeClosure` |
+| `assemble_exception_table` | Python/assemble.c:157 | `compile/assemble_exceptions.go` `assembleExceptionTable` |
+| `codegen_comprehension` | varies | `compile/codegen_expr_comp.go` |
+
+## Reading
+
+### The compiler pipeline
+
+<CpyLink file="Python/compile.c" line={353}>_PyAST_CompileObject</CpyLink> is the single public entry point. It runs three sequential passes and returns a `PyCodeObject`.
+
+```
+symtable.Build(ast)          // resolve every name to its scope
+  → codegen walk             // emit instructions into a flowgraph
+    → flowgraph.Optimize     // eliminate dead blocks, insert prefix ops
+      → assemble             // linearise into bytes + exception table
+```
+
+In gopy `compile/compiler.go` `Compile` follows the same order: `symtable.Build`, then `compileScope` recursively for every nested scope, then `flowgraph.Optimize`, then `assemble.Assemble`.
+
+The compiler holds a stack of `compiler_unit` objects, one per open scope. Entering a function or class pushes a new unit; exiting pops it and finalises the code object. gopy represents this with a `compilerUnit` value stored in `Compiler.scope`.
+
+### Name resolution and FAST / DEREF slots
+
+<CpyLink file="Python/codegen.c" line={3186}>codegen_nameop</CpyLink> maps a bare name to one of six opcode families depending on the scope flag the symtable stored for that name:
+
+- `DEF_LOCAL` with no free-variable status: `LOAD_FAST` / `STORE_FAST` / `DELETE_FAST`
+- `CELL` or `FREE`: `LOAD_DEREF` / `STORE_DEREF` / `DELETE_DEREF` and `MAKE_CELL` on function entry
+- `DEF_GLOBAL` or implicit global: `LOAD_GLOBAL` / `STORE_GLOBAL`
+- `DEF_NONLOCAL`: routed to the enclosing cell slot
+- class body fall-through: `LOAD_NAME` / `STORE_NAME`
+
+```go
+// compile/codegen_expr_name.go
+func (c *Compiler) visitNameLoad(id ast.Identifier, loc Loc) error {
+    scope := c.scope.symEntry.GetScope(string(id))
+    switch scope {
+    case symtable.ScopeLocal:
+        return c.emitFast(LOAD_FAST, id, loc)
+    case symtable.ScopeCell, symtable.ScopeFree:
+        return c.emitClosure(LOAD_DEREF, id, loc)
+    ...
+    }
+}
+```
+
+Name mangling (`__x` inside a class body becoming `_ClassName__x`) is handled by `symtable.Mangle` before the name ever reaches codegen. That mirrors CPython's `_Py_Mangle` in `Python/symtable.c:3207`.
+
+### Function and class scope isolation
+
+<CpyLink file="Python/codegen.c" line={1390}>codegen_function</CpyLink> compiles the function body inside a fresh `compiler_unit`, then <CpyLink file="Python/codegen.c" line={923}>codegen_make_closure</CpyLink> emits `MAKE_CELL` for every cell variable followed by `MAKE_FUNCTION` (or `COPY_FREE_VARS`) to lift free variables into the closure tuple.
+
+For classes, <CpyLink file="Python/codegen.c" line={1623}>codegen_class</CpyLink> wraps the body in a special scope where `__class__` is a cell. gopy `compile/codegen_class.go` `visitClassBody` reproduces the same `__class__` / `__classdict__` preamble.
+
+Comprehensions are isolated the same way: each `listcomp`, `setcomp`, `dictcomp`, or `genexpr` gets its own `compiler_unit`. The outer scope passes only the outermost iterable as an argument, and the inner code object is compiled separately. gopy `compile/codegen_expr_comp.go` `emitInnerComprehensionCode` follows this pattern. When the symtable marks a comprehension `CompInlined`, gopy skips the isolation and emits directly into the enclosing scope (CPython 3.12+ behaviour).
+
+### PEP 380 yield-from lowering and exception table emission
+
+`yield from x` cannot be a single opcode because the inner iterator may need to propagate `throw()` and `close()` calls. CPython lowers it to:
+
+```
+GET_YIELD_FROM_ITER
+LOAD_CONST None          # initial send value
+SEND         <end>       # loop head
+YIELD_VALUE
+RESUME       1
+JUMP_BACKWARD <send>
+<end>: END_SEND
+```
+
+gopy `compile/codegen_expr_misc.go` `visitYieldFrom` reproduces this exactly (CPython `Python/codegen.c:472`).
+
+The exception table is a compact byte stream appended to the code object. <CpyLink file="Python/assemble.c" line={157}>assemble_exception_table</CpyLink> walks the linearised instruction stream and emits variable-length entries encoding (start, length, target, depth, lasti) tuples using a base-128 varint. gopy `compile/assemble_exceptions.go` `assembleExceptionTable` is a line-for-line port.
+
+## gopy notes
+
+gopy splits `Python/compile.c` across several files:
+
+- `compile/compiler.go` holds the pipeline driver (`Compile`, `compileScope`).
+- `compile/codegen.go` holds `Compiler`, `compilerUnit`, `enterScope`, `exitScope`, `setQualname`.
+- `compile/codegen_expr_name.go` holds `visitName` and the six opcode-family helpers.
+- `compile/codegen_class.go`, `codegen_stmt_funclike.go`, `codegen_expr_comp.go` hold the corresponding `compiler_*` / `codegen_*` ports.
+- `compile/assemble_exceptions.go` ports `Python/assemble.c` exception-table emission.
+
+The flowgraph passes (`compile/flowgraph_passes.go`, `flowgraph_jumps.go`) correspond to `Python/flowgraph.c`. Exception block tracking during codegen is in `compile/codegen_fblock.go`, mirroring CPython's `fblockinfo` stack.

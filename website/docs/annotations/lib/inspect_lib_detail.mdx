@@ -1,0 +1,184 @@
+---
+title: Lib/inspect.py
+description: "Introspection utilities: predicates, signature, getsource, stack frames, and async detection"
+cpython_path: Lib/inspect.py
+cpython_version: "3.14"
+lines: 3800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/inspect.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | module header | Imports, `__all__`, `CO_*` flag constants |
+| 121–300 | type predicates | `isfunction`, `ismethod`, `isbuiltin`, `isclass`, `ismodule`, `iscode`, etc. |
+| 301–420 | `getmembers` / `getmembers_static` | MRO-aware attribute enumeration |
+| 421–560 | `getmodule` / `getfile` / `getsourcefile` | File location helpers |
+| 561–700 | `getsourcelines` / `getsource` | Source retrieval via `linecache` |
+| 701–800 | `getdoc` / `getcomments` / `cleandoc` | Docstring and comment extraction |
+| 801–950 | `getfullargspec` | Legacy argument introspection |
+| 951–1200 | `Parameter` / `BoundArguments` | Immutable parameter descriptors |
+| 1201–1700 | `Signature` / `signature()` | Full callable signature retrieval |
+| 1701–1900 | `_signature_from_callable` | Core dispatch for functions, builtins, classes |
+| 1901–2100 | `_signature_from_function` | Code-object path for Python functions |
+| 2101–2300 | `_signature_from_builtin` | `__text_signature__` parser path |
+| 2301–2500 | async predicates | `iscoroutinefunction`, `isasyncgenfunction`, `isawaitable` |
+| 2501–2700 | `Traceback` / `FrameInfo` | Named-tuple wrappers for frame data |
+| 2701–2900 | `stack` / `currentframe` / `getouterframes` | Live call-stack inspection |
+| 2901–3200 | `classify_class_attrs` | Descriptor-aware attribute classification |
+| 3201–3500 | `getannotations` | PEP 563/649 annotation evaluation |
+| 3501–3800 | `walktree` / misc helpers | AST and class-tree utilities |
+
+## Reading
+
+### Type predicates and getmembers with MRO traversal
+
+The predicate family (`isfunction`, `ismethod`, `isbuiltin`, `isclass`, etc.)
+all call `isinstance` or check `type(obj)` directly against internal C types
+exposed via `types.*`. They are intentionally shallow: they test only the
+object in hand, not whether it is callable in general.
+
+```python
+# CPython: Lib/inspect.py:174 isfunction
+def isfunction(object):
+    """Return true if the object is a user-defined function."""
+    return isinstance(object, types.FunctionType)
+```
+
+```python
+# CPython: Lib/inspect.py:213 isbuiltin
+def isbuiltin(object):
+    """Return true if the object is a built-in function or bound method."""
+    return isinstance(object, types.BuiltinFunctionType)
+```
+
+`getmembers` walks `dir(object)` and calls `getattr` for each name, catching
+`AttributeError` to handle dynamic descriptors that raise. When the object is
+a class, it respects MRO order: the first hit in `dir()` is already resolved
+by Python's normal attribute lookup, so `getmembers` itself does not need to
+re-walk the MRO explicitly.
+
+```python
+# CPython: Lib/inspect.py:311 getmembers
+def getmembers(object, predicate=None):
+    mro = ()
+    names = dir(object)
+    # :anomaly: for classes, dir() already reflects the MRO
+    processed = set()
+    for key in names:
+        try:
+            value = getattr(object, key)
+            ...
+        except AttributeError:
+            ...
+    return results
+```
+
+`getmembers_static` (added 3.11) avoids `getattr` and uses
+`types.MappingProxyType` iteration over each class in `object.__mro__`
+directly, which means it never triggers descriptors.
+
+### signature() and Parameter / BoundArguments
+
+`signature()` is the high-level entry point. It dispatches through
+`_signature_from_callable`, which handles five distinct code paths:
+
+1. Python functions: reads `__code__` and `__annotations__` directly.
+2. Built-in functions / methods: parses `__text_signature__` when present,
+   falls back to `(*args, **kwargs)`.
+3. Classes: looks for `__new__` then `__init__`, strips the first parameter.
+4. Callable objects: follows `__call__`.
+5. `functools.partial`: unwraps and rebinds partial arguments.
+
+`Parameter` instances are immutable (they use `__setattr__` overrides).
+`BoundArguments` is produced by `Signature.bind` and holds an `OrderedDict`
+of name-to-value mappings.
+
+```python
+# CPython: Lib/inspect.py:1101 Parameter.__setattr__
+def __setattr__(self, name, value):
+    if name in self._bound_fields:
+        raise AttributeError('not writable')
+    return super().__setattr__(name, value)
+```
+
+```python
+# CPython: Lib/inspect.py:1620 Signature.bind
+def bind(self, /, *args, **kwargs):
+    return self._bind(args, kwargs)
+```
+
+`BoundArguments.apply_defaults` fills in default values and `VAR_POSITIONAL`
+empty tuples so callers do not need to check for missing keys.
+
+### getsourcelines, getsource, and linecache integration
+
+`getsourcelines` retrieves source by:
+
+1. Calling `getsourcefile` to find a `.py` file path (or `None` for builtins).
+2. Calling `linecache.getlines(file)` to get the full file text, respecting
+   the `linecache` invalidation protocol used by `importlib`.
+3. Using `findsource` to locate the object's definition line by scanning for
+   `def`/`class` patterns or matching the code object's `co_firstlineno`.
+
+```python
+# CPython: Lib/inspect.py:978 getsourcelines
+def getsourcelines(object):
+    object = unwrap(object)
+    lines, lnum = findsource(object)
+    return getblock(lines[lnum:]), lnum + 1
+```
+
+`getblock` uses `tokenize` to walk tokens and stop at the first complete
+logical block, which correctly handles multi-line strings and nested
+definitions. `getsource` joins the result of `getsourcelines` into a single
+string.
+
+### iscoroutinefunction and isasyncgenfunction
+
+These predicates check code-object flags rather than the runtime type, so they
+work on both native coroutines and functions wrapped with
+`functools.wraps`/`contextlib.wraps`.
+
+```python
+# CPython: Lib/inspect.py:2310 iscoroutinefunction
+def iscoroutinefunction(object):
+    """Return true if the object is a coroutine function."""
+    return (callable(object) and
+            _has_code_flag(object, CO_COROUTINE) or
+            isinstance(object, functools.partial) and
+            iscoroutinefunction(object.func))
+```
+
+```python
+# CPython: Lib/inspect.py:2340 isasyncgenfunction
+def isasyncgenfunction(object):
+    return bool((isfunction(object) or ismethod(object)) and
+                object.__code__.co_flags & CO_ASYNC_GENERATOR)
+```
+
+`stack()` and `currentframe()` use `sys._getframe` to climb the call stack.
+`getouterframes` wraps each frame in a `FrameInfo` named tuple that includes
+the filename, line number, function name, and source context lines, which is
+the format consumed by `traceback` and most debuggers.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/inspect/`.
+
+The predicate functions (`isfunction`, `isclass`, etc.) can be ported once
+gopy's object model stabilises its type tags. `getmembers` depends on
+`dir()` being fully implemented. `signature()` requires the `__code__` and
+`__annotations__` attributes to be present on function objects, as well as
+`__text_signature__` parsing for builtins. The linecache-based source
+retrieval (`getsource`, `getsourcelines`) is deprioritised because gopy does
+not ship Python source files. Stack-inspection helpers (`stack()`,
+`currentframe()`, `getouterframes()`) depend on exposing Go call-frame
+information, which is a separate open question.

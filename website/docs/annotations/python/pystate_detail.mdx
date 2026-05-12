@@ -1,0 +1,254 @@
+---
+title: "Python/pystate.c"
+description: Allocates and manages PyInterpreterState and PyThreadState, bootstraps the per-interpreter GIL, and exposes the eval-breaker flag that interrupts the dispatch loop between threads.
+cpython_path: Python/pystate.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: state/state.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Python/pystate.c
+
+<CpyLink path="Python/pystate.c" />
+
+`pystate.c` owns the two central bookkeeping structures in CPython's
+runtime: `PyInterpreterState` (one per interpreter, holds the module
+tables, builtins, GC state, warnings filters, and the per-interpreter
+GIL) and `PyThreadState` (one per OS thread, holds the current frame,
+the recursion counter, the tracing hooks, the `exc_info` stack, and the
+eval-breaker flags).
+
+The single process-wide `_PyRuntime` instance of `_PyRuntimeState` is
+declared in `pycore_runtime.h` and defined in `Python/pylifecycle.c`.
+Every interpreter hangs off `_PyRuntime.interpreters.head`. Every
+thread hangs off its interpreter's `tstate_head`. The file is therefore
+the root of the entire object graph that `Py_Initialize` builds.
+
+`_PyThreadState_Bind` and `_PyThreadState_Unbind` attach and detach
+a thread from its interpreter's linked list under `HEAD_LOCK`, the
+mutex that serializes mutations to that list. `_Py_EnsureFuncTstateNotNULL`
+is a debug assert used throughout the VM that aborts if the current
+thread state is unexpectedly NULL, preventing silent corruption.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/pystate.c" lines="1-80">1-80</Cpy> | File preamble, `HEAD_LOCK` / `HEAD_UNLOCK` macros | Acquires `_PyRuntime.interpreters.mutex` around linked-list mutations to the interpreter and thread chains. | `state/state.go` (mutex on `Runtime.interpreters`) |
+| <Cpy path="Python/pystate.c" lines="81-300">81-300</Cpy> | `interpreter_new`, `_PyInterpreterState_New`, `PyInterpreterState_New` | Allocate and zero-initialize a `PyInterpreterState`; assign a monotonic ID; link into `_PyRuntime.interpreters`. | `state/state.go:NewInterpreter` |
+| <Cpy path="Python/pystate.c" lines="301-500">301-500</Cpy> | `PyInterpreterState_Clear`, `PyInterpreterState_Delete` | Drop all module references from the interpreter's `modules` dict, unlink from `_PyRuntime`, and free the struct. Runs GC finalization before the clear. | not yet ported |
+| <Cpy path="Python/pystate.c" lines="501-750">501-750</Cpy> | `new_threadstate`, `_PyThreadState_New`, `PyThreadState_New`, `PyThreadState_Clear`, `PyThreadState_Delete` | Allocate a `PyThreadState`; install default recursion limits and tracing flags; link into the interpreter's `tstate_head`. `Clear` drops all held references. `Delete` detaches and frees. | `state/state.go:AttachThread`, `state/state.go:NewThread` |
+| <Cpy path="Python/pystate.c" lines="751-950">751-950</Cpy> | `_PyThreadState_Bind`, `_PyThreadState_Unbind`, `_Py_EnsureFuncTstateNotNULL` | Attach or detach a thread from the interpreter's linked list under `HEAD_LOCK`. `_Py_EnsureFuncTstateNotNULL` aborts if the TLS thread state is NULL at a call site that requires it. | `state/state.go:AttachThread` (bind path) |
+| <Cpy path="Python/pystate.c" lines="951-1150">951-1150</Cpy> | `_PyThreadState_Swap`, `tstate_activate`, `tstate_deactivate`, `_PyEval_ReleaseLock` | GIL handoff. Writes the new tstate into TLS, signals the eval breaker on the yielding thread, and blocks until the GIL mutex is acquired. | `gil/gil.go`, `vm/threadstate.go` |
+| <Cpy path="Python/pystate.c" lines="1151-1400">1151-1400</Cpy> | `PyGILState_Ensure`, `PyGILState_Release`, `_PyGILState_GetThisThreadState` | Re-entrant GIL acquire for C extensions. Allocates a `PyThreadState` on first call from a foreign thread; re-entrancy tracked with `gilstate_counter`. | `gil/gil.go` (partial) |
+| <Cpy path="Python/pystate.c" lines="1401-1600">1401-1600</Cpy> | `_PyEval_InitThreads`, eval-breaker flag management (`_Py_set_eval_breaker_bit`, `_Py_unset_eval_breaker_bit`) | Bootstrap the per-interpreter GIL at first thread creation; provide the atomic helpers the eval loop polls after every `RESUME` and every backward jump. | `gil/breaker.go`, `gil/bits.go` |
+| <Cpy path="Python/pystate.c" lines="1601-1800">1601-1800</Cpy> | `current_fast_get`, `_PyThreadState_GetCurrent`, `_PyThreadState_NewID`, finalization helpers | TLS-based current-thread lookup used by `_PyThreadState_GET()` in the eval loop. `_PyThreadState_NewID` atomically bumps the per-interpreter ID counter. | `state/state.go` (threadIDCounter) |
+
+## Reading
+
+### `_PyRuntimeState` fields and the global `_PyRuntime`
+
+<CpyLink path="Python/pystate.c" lines="1-80" />
+
+`_PyRuntime` is a single static `_PyRuntimeState` defined in
+`Python/pylifecycle.c` and accessible everywhere via
+`_PyRuntime` (or the macro `_PyRuntime`). It holds the master interpreter
+list, the pre-init config, the signal handlers table, the finalizing flag,
+and the two TLS keys for current thread state and GIL-state:
+
+```c
+// CPython: Include/internal/pycore_runtime_structs.h:171 _PyRuntimeState
+struct _PyRuntimeState {
+    int preinitializing;
+    int preinitialized;
+    int core_initialized;
+    int initialized;
+
+    struct {
+        PyInterpreterState *head;  /* linked list of all interpreters  */
+        int64_t next_id;
+        PyMutex mutex;             /* HEAD_LOCK / HEAD_UNLOCK target   */
+    } interpreters;
+
+    struct {
+        unsigned long main_thread;  /* OS thread ID of the main thread */
+    } main_thread;
+
+    /* two TLS keys */
+    Py_tss_t autoTSSkey;           /* current PyThreadState *         */
+    Py_tss_t gilstate_autoTSSkey;  /* PyGILState thread state         */
+    ...
+};
+```
+
+In gopy, `state.Runtime` mirrors this struct with the interpreter slice
+replacing the linked list. The two TLS keys are absent: gopy passes
+`*state.Thread` explicitly through the call chain rather than relying on
+thread-local storage.
+
+### `PyInterpreterState_New` / `Clear` / `Delete` and the interpreter list
+
+<CpyLink path="Python/pystate.c" lines="81-500" />
+
+```c
+// CPython: Python/pystate.c:117 interpreter_new
+static PyInterpreterState *
+interpreter_new(struct _PyRuntimeState *runtime,
+                PyInterpreterState *main_interp)
+{
+    PyInterpreterState *interp = PyMem_RawCalloc(1, sizeof(PyInterpreterState));
+    if (interp == NULL) return NULL;
+
+    HEAD_LOCK(runtime);
+    interp->id = runtime->interpreters.next_id++;
+    interp->next = runtime->interpreters.head;
+    runtime->interpreters.head = interp;
+    HEAD_UNLOCK(runtime);
+
+    _PyEval_InitState(interp);   /* sets up the per-interp GIL struct */
+    return interp;
+}
+```
+
+`PyInterpreterState_Clear` walks `interp->modules_by_index`, calls
+`Py_CLEAR` on each module, then clears `interp->sysdict`,
+`interp->builtins`, and the warning filters list. It does this under
+the import lock so no concurrent import can observe a partially cleared
+interpreter. `PyInterpreterState_Delete` unlinks the interpreter from
+`_PyRuntime.interpreters.head` under `HEAD_LOCK` and then calls
+`PyMem_RawFree`.
+
+gopy's `state.Runtime.NewInterpreter` allocates a `*Interpreter`, assigns
+an ID from an atomic counter, and appends to `Runtime.interpreters`. The
+clear and delete paths are not yet ported; they will land with the
+lifecycle teardown work.
+
+### `PyThreadState_New` / `Delete` / `Get` / `Swap` and the thread state stack
+
+<CpyLink path="Python/pystate.c" lines="501-950" />
+
+```c
+// CPython: Python/pystate.c:548 new_threadstate
+static PyThreadState *
+new_threadstate(PyInterpreterState *interp, int init_signal_handling)
+{
+    PyThreadState *tstate = PyMem_RawCalloc(1, sizeof(PyThreadState));
+    if (tstate == NULL) return NULL;
+
+    tstate->interp = interp;
+    tstate->recursion_limit = interp->ceval.recursion_limit;
+    tstate->recursion_remaining = tstate->recursion_limit;
+    tstate->id = _PyThreadState_NewID(interp);
+
+    HEAD_LOCK(interp->runtime);
+    tstate->next = interp->threads.head;
+    if (tstate->next != NULL)
+        tstate->next->prev = tstate;
+    interp->threads.head = tstate;
+    HEAD_UNLOCK(interp->runtime);
+
+    return tstate;
+}
+```
+
+`PyThreadState_Get` is the public API equivalent of the inline
+`_PyThreadState_GET()` macro. It reads the TLS key and aborts (via
+`Py_FatalError`) if the result is NULL, making it safe to use at
+call sites where a NULL return would indicate a programmer error.
+`PyThreadState_GetUnchecked` returns NULL instead of aborting.
+
+`_PyThreadState_Swap` is the GIL handoff primitive. It releases the
+current thread's claim on the GIL, writes the new `tstate` into the TLS
+slot, and acquires the GIL on behalf of the new thread. The eval loop
+calls this indirectly via `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS`
+around blocking I/O and C calls.
+
+### `_PyThreadState_Bind` / `_Unbind` for attaching a thread to an interpreter
+
+<CpyLink path="Python/pystate.c" lines="751-950" />
+
+```c
+// CPython: Python/pystate.c:812 _PyThreadState_Bind
+void
+_PyThreadState_Bind(PyThreadState *tstate)
+{
+    // Mark the thread as attached so the GIL skip-and-acquire logic
+    // in _PyEval_AcquireLock can find it.
+    tstate->status = _Py_THREAD_ATTACHED;
+
+    // Install into TLS so _PyThreadState_GET() works from this thread.
+    _PyThreadState_SET(tstate);
+
+    // Let the eval breaker know a new thread has joined the interpreter.
+    _PyEval_SignalAsyncExc(tstate->interp);
+}
+```
+
+`_PyThreadState_Unbind` reverses the operation: sets `status` to
+`_Py_THREAD_DETACHED`, clears the TLS key, and decrements the
+interpreter's live-thread counter. When that counter reaches zero and
+`interp->finalizing` is set, `_PyThreadState_Unbind` triggers
+interpreter shutdown.
+
+### Eval-breaker flag and `_PyEval_InitThreads`
+
+<CpyLink path="Python/pystate.c" lines="1401-1600" />
+
+```c
+// CPython: Include/internal/pycore_ceval.h:338 _Py_set_eval_breaker_bit
+static inline void
+_Py_set_eval_breaker_bit(PyInterpreterState *interp, uintptr_t bit)
+{
+    uintptr_t old = _Py_atomic_load_uintptr_relaxed(&interp->ceval.eval_breaker);
+    if (old & bit) return;
+    _Py_atomic_or_uintptr(&interp->ceval.eval_breaker, bit);
+}
+```
+
+The eval breaker is a bitmask polled by the dispatch loop at every
+`RESUME` instruction and every backward jump (`JUMP_BACKWARD`). Any
+non-zero value diverts execution to a handler that checks pending calls,
+pending signals, GIL drop requests, and GC triggers. The bit constants
+map directly to `_PY_*_BIT` values in `pycore_ceval.h`; gopy mirrors
+them in `gil/bits.go` with identical numeric assignments so any debug
+print of the breaker word lines up with CPython.
+
+`_PyEval_InitThreads` initializes the per-interpreter GIL struct the
+first time `_start_the_world` would block. In 3.14 with PEP 684, each
+interpreter gets its own `struct _gil_runtime_state` embedded in
+`interp->ceval.gil`, so two interpreters can run Python bytecode in
+parallel on different OS threads as long as they do not share mutable
+objects.
+
+## gopy notes
+
+gopy ports `pystate.c` across three packages:
+
+`state/state.go` carries `Runtime`, `Interpreter`, and `Thread`,
+which mirror `_PyRuntimeState`, `PyInterpreterState`, and
+`PyThreadState` respectively. Fields not yet needed (GC state,
+`sysdict`, warning filters) are omitted. The thread ID counter at
+`state/state.go:156` matches `_PyThreadState_NewID` at
+<Cpy path="Python/pystate.c" lines="1601-1650">Python/pystate.c:1601</Cpy>:
+both use an atomic increment starting from 1, with 0 reserved as
+the "never assigned" sentinel used by context variable cache
+invalidation.
+
+`gil/breaker.go` and `gil/bits.go` port the eval-breaker bitmask
+and the `_Py_set_eval_breaker_bit` / `_Py_unset_eval_breaker_bit`
+helpers. The bit constants in `gil/bits.go` match the `_PY_*_BIT`
+definitions in `pycore_ceval.h` numerically.
+
+`vm/threadstate.go` holds the `threadVM` struct (eval breaker
+pointer, frame stack, pending-call queue, legacy tracing hooks)
+which mirrors the fields CPython hangs off `PyThreadState` that
+gopy keeps out of `state.Thread` to avoid circular imports.
+
+The GIL acquire/release logic (`_PyThreadState_Swap`,
+`PyGILState_Ensure` / `PyGILState_Release`) is partially ported
+in `gil/gil.go`. The two-TLS-key design is absent: gopy passes
+`*state.Thread` as an explicit argument instead of using
+thread-local storage.

@@ -1,0 +1,118 @@
+---
+title: "Python/ceval_gil.c: GIL Acquisition, Eval Breaker, and Per-Interpreter GIL"
+description: "take_gil/drop_gil, eval_breaker flag, _Py_HandlePending dispatch, SIGINT handling, and 3.14 per-interpreter GIL"
+cpython_path: Python/ceval_gil.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/ceval_gil.c` implements the Global Interpreter Lock (GIL): the mutex that serializes bytecode execution across threads, the eval-breaker flag that asks the running thread to yield, and the pending-call dispatch that handles signals and cross-thread requests.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | Includes and constants | `INTERVAL` (default 5 ms switch interval), gil struct layout |
+| 61-180 | `create_gil` / `destroy_gil` | Allocates the `_gil_runtime_state` struct with a mutex and two condition variables |
+| 181-350 | `take_gil` | Blocks until the GIL is available, sets `tstate->gilstate_counter`, wakes the eval breaker |
+| 351-460 | `drop_gil` | Releases the GIL and signals the next waiting thread; also called on `Py_BEGIN_ALLOW_THREADS` |
+| 461-560 | `_PyEval_EvalFrameDefault` glue | Inline checks that call `take_gil` / `drop_gil` around C extension calls |
+| 561-680 | `_Py_HandlePending` | Dispatches pending calls, GIL drop requests, and signal checks when eval breaker fires |
+| 681-780 | `Py_MakePendingCalls` | Drains the `pendingcalls` ring buffer; called from `_Py_HandlePending` |
+| 781-900 | Per-interpreter GIL stubs (3.14) | `_PyInterpreterState_SetRunningMain`, sub-interpreter GIL separation |
+
+## Reading
+
+### take_gil: the blocking acquisition path
+
+`take_gil` is the hot path for every thread that wants to run Python bytecode. It spins on a condition variable until the current holder sets `gil_locked` to 0 or drops the GIL voluntarily after `INTERVAL` milliseconds.
+
+```c
+// CPython: Python/ceval_gil.c:220 take_gil
+static void
+take_gil(PyThreadState *tstate)
+{
+    _PyRuntimeState *runtime = &_PyRuntime;
+    struct _gil_runtime_state *gil = &runtime->ceval.gil;
+
+    /* Announce that we are waiting */
+    MUTEX_LOCK(gil->mutex);
+    if (!_Py_atomic_load_relaxed(&gil->locked)) {
+        goto _ready;
+    }
+    /* Ask the current holder to drop by setting eval_breaker */
+    SET_GIL_DROP_REQUEST(runtime);
+
+    while (_Py_atomic_load_relaxed(&gil->locked)) {
+        COND_TIMED_WAIT(gil->cond, gil->mutex, INTERVAL, timed_out);
+        if (timed_out) {
+            SET_GIL_DROP_REQUEST(runtime);
+        }
+    }
+_ready:
+    _Py_atomic_store_relaxed(&gil->locked, 1);
+    MUTEX_UNLOCK(gil->mutex);
+    COND_SIGNAL(gil->switch_cond);
+}
+```
+
+### eval_breaker and _Py_HandlePending
+
+The eval breaker is a single atomic integer checked at the top of every opcode dispatch iteration. Any subsystem that needs attention (signals, GIL drop requests, periodic callbacks) sets a bit in `eval_breaker` and waits for the running thread to call `_Py_HandlePending`.
+
+```c
+// CPython: Python/ceval_gil.c:570 _Py_HandlePending
+int
+_Py_HandlePending(PyThreadState *tstate)
+{
+    _PyRuntimeState *runtime = &_PyRuntime;
+
+    /* GIL drop request from another thread */
+    if (_Py_eval_breaker_bit_is_set(tstate, _PY_GIL_DROP_REQUEST_BIT)) {
+        drop_gil(tstate);
+        take_gil(tstate);
+    }
+
+    /* Signal/interrupt check */
+    if (_Py_eval_breaker_bit_is_set(tstate, _PY_SIGNALS_PENDING_BIT)) {
+        if (handle_signals(tstate) != 0) {
+            return -1;
+        }
+    }
+
+    /* Pending calls (registered via Py_AddPendingCall) */
+    if (_Py_eval_breaker_bit_is_set(tstate, _PY_CALLS_TO_DO_BIT)) {
+        if (make_pending_calls(tstate) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+```
+
+### 3.14 per-interpreter GIL
+
+Python 3.12 introduced `Py_TPFLAGS_BASETYPE` sub-interpreter isolation and 3.14 extends this to allow each `PyInterpreterState` to own an independent GIL. The key new entry point is `_PyInterpreterState_SetRunningMain`, which pins the running thread to a specific interpreter's GIL rather than the process-wide one.
+
+```c
+// CPython: Python/ceval_gil.c:840 _PyInterpreterState_SetRunningMain (3.14 stub)
+void
+_PyInterpreterState_SetRunningMain(PyInterpreterState *interp)
+{
+    /* Bind this OS thread to interp's own gil field */
+    PyThreadState *tstate = _PyThreadState_GET();
+    assert(tstate->interp == interp);
+    take_gil(tstate);   /* interp->ceval.gil, not _PyRuntime.ceval.gil */
+}
+```
+
+## gopy notes
+
+- gopy does not implement a GIL. The Go runtime's goroutine scheduler is used instead. The eval loop in `vm/eval_gen.go` has no `take_gil` / `drop_gil` calls.
+- `eval_breaker` maps conceptually to the `vm.InterruptFlag` atomic in gopy, which is checked at back-edges and `RESUME` opcodes.
+- `Py_MakePendingCalls` / `Py_AddPendingCall` are tracked under task #481. The ring buffer has not been ported yet; signal delivery currently goes through Go channels.
+- The 3.14 per-interpreter GIL is not applicable to gopy's threading model, but `PyInterpreterState` isolation is relevant to the sub-interpreter work planned for v0.13.

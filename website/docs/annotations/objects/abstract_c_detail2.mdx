@@ -1,0 +1,195 @@
+---
+title: "Objects/abstract.c (number and sequence protocol)"
+description: "Annotated guide to binary op dispatch, number protocol, sequence protocol, subscript, length, and iteration in CPython 3.14"
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 2900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/abstract.c" />
+
+## Map
+
+| Symbol | Approx. lines | Purpose |
+|---|---|---|
+| `binary_op1` | 290-380 | Core reflected-op dispatch for binary number operations |
+| `binary_iop1` | 385-440 | In-place variant; tries `nb_inplace_*` before falling back to `binary_op1` |
+| `PyNumber_Add` | 445-490 | Public entry point for `+`; also tries `sq_concat` |
+| `PyNumber_Multiply` | 530-580 | Public entry point for `*`; also tries `sq_repeat` |
+| `PySequence_Concat` | 1550-1590 | Sequence `+` via `sq_concat` |
+| `PySequence_Repeat` | 1595-1640 | Sequence `*` via `sq_repeat` |
+| `PyObject_GetItem` | 180-230 | `obj[key]` via `mp_subscript` then `sq_item` |
+| `PyObject_SetItem` | 235-280 | `obj[key] = value` via `mp_ass_subscript` then `sq_ass_item` |
+| `PyObject_Length` | 115-140 | `len(obj)` via `sq_length` or `mp_length` |
+| `PyObject_LengthHint` | 145-178 | `operator.length_hint(obj)` with `__length_hint__` fallback |
+| `PyIter_Next` | 2840-2880 | Advance an iterator one step via `tp_iternext` |
+
+## Reading
+
+### binary_op1 and the reflected-op dispatch protocol
+
+`binary_op1` is the single function that handles every binary numeric operator (`+`, `-`, `*`, `/`, `//`, `%`, `**`, `&`, `|`, `^`, `<<`, `>>`). It implements the three-way dispatch specified by the data model: try the left operand's slot first, check whether the result is `Py_NotImplemented`, and if so try the right operand's reflected slot.
+
+There is one special case: if the right operand's type is a strict subclass of the left operand's type, CPython tries the right operand's reflected slot first. This lets subclasses override operators without having to monkey-patch the base class.
+
+```c
+// CPython: Objects/abstract.c:290 binary_op1
+static PyObject *
+binary_op1(PyObject *v, PyObject *w, const int op_slot, const char *op_name)
+{
+    binaryfunc slotv;
+    binaryfunc slotw;
+    ...
+    if (Py_TYPE(w)->tp_as_number != NULL &&
+        Py_TYPE(w)->tp_as_number != Py_TYPE(v)->tp_as_number &&
+        PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v))) {
+        /* Right is a subtype: try reflected slot first */
+        slotw = NB_BINOP(Py_TYPE(w)->tp_as_number, op_slot);
+        if (slotw == slotv)
+            slotw = NULL;
+    }
+    if (slotv) {
+        x = slotv(v, w);
+        if (x != Py_NotImplemented)
+            return x;
+        ...
+    }
+    if (slotw) {
+        x = slotw(w, v);
+        if (x != Py_NotImplemented)
+            return x;
+        ...
+    }
+    Py_RETURN_NOTIMPLEMENTED;
+}
+```
+
+`binary_iop1` tries the in-place slot (e.g. `nb_inplace_add`) before delegating to `binary_op1`. Because Python's `+=` may rebind the name rather than mutate the object, `binary_iop1` returning `Py_NotImplemented` is not an error; the caller then falls through to the plain `binary_op1` path.
+
+```c
+// CPython: Objects/abstract.c:385 binary_iop1
+static PyObject *
+binary_iop1(PyObject *v, PyObject *w, const int iop_slot, const int op_slot,
+            const char *op_name)
+{
+    PyNumberMethods *mv = Py_TYPE(v)->tp_as_number;
+    if (mv != NULL) {
+        binaryfunc slot = NB_BINOP(mv, iop_slot);
+        if (slot) {
+            PyObject *x = slot(v, w);
+            if (x != Py_NotImplemented)
+                return x;
+            Py_DECREF(x);
+        }
+    }
+    return binary_op1(v, w, op_slot, op_name);
+}
+```
+
+### PyNumber_Add, PyNumber_Multiply, and sequence fallbacks
+
+`PyNumber_Add` calls `binary_op1` with the `nb_add` slot offset. If both operands lack `nb_add` (or both return `Py_NotImplemented`), it falls back to `sq_concat`, which is the sequence concatenation slot. This is why `"a" + "b"` works even though `str` does not set `nb_add`.
+
+`PyNumber_Multiply` follows the same pattern but also probes `sq_repeat` (left operand) and `sq_inplace_repeat` when the right operand is an integer. This double-slot design means that `[1, 2] * 3` routes through the sequence protocol while `Fraction(1, 2) * Fraction(3, 4)` routes through the number protocol.
+
+```c
+// CPython: Objects/abstract.c:445 PyNumber_Add
+PyObject *
+PyNumber_Add(PyObject *v, PyObject *w)
+{
+    PyObject *result = binary_op1(v, w, NB_SLOT(nb_add), "+");
+    if (result != Py_NotImplemented)
+        return result;
+    Py_DECREF(result);
+    /* Try sq_concat */
+    PySequenceMethods *mv = Py_TYPE(v)->tp_as_sequence;
+    if (mv && mv->sq_concat) {
+        return mv->sq_concat(v, w);
+    }
+    ...
+}
+```
+
+`PySequence_Concat` and `PySequence_Repeat` are the direct sequence-protocol entry points used when the caller knows it has a sequence. They do not try the number protocol; they raise `TypeError` immediately if `sq_concat` or `sq_repeat` is absent.
+
+### PyObject_GetItem, PyObject_SetItem, PyObject_Length, PyObject_LengthHint, and PyIter_Next
+
+`PyObject_GetItem` follows a two-slot priority order: mapping first (`mp_subscript`), then sequence (`sq_item`). This ordering means that types implementing both protocols, such as numpy arrays, behave as mappings when indexed.
+
+```c
+// CPython: Objects/abstract.c:180 PyObject_GetItem
+PyObject *
+PyObject_GetItem(PyObject *o, PyObject *key)
+{
+    if (o == NULL || key == NULL) {
+        return null_error();
+    }
+    PyMappingMethods *m = Py_TYPE(o)->tp_as_mapping;
+    if (m && m->mp_subscript) {
+        PyObject *item = m->mp_subscript(o, key);
+        ...
+        return item;
+    }
+    PySequenceMethods *ms = Py_TYPE(o)->tp_as_sequence;
+    if (ms && ms->sq_item) {
+        ...
+    }
+    ...
+}
+```
+
+`PyObject_SetItem` mirrors `PyObject_GetItem`, checking `mp_ass_subscript` before `sq_ass_item`.
+
+`PyObject_Length` calls `sq_length` if the type has a sequence protocol, otherwise `mp_length`. It does not call `__len__` through the attribute mechanism; that only happens at the Python level via `len()` in `bltinmodule.c`, which calls `PyObject_Length`.
+
+`PyObject_LengthHint` tries `__len__` first (via `PyObject_Length`), then falls back to `__length_hint__`. If neither is present it returns the supplied default. The result is clamped to zero to prevent negative pre-allocations.
+
+```c
+// CPython: Objects/abstract.c:145 PyObject_LengthHint
+Py_ssize_t
+PyObject_LengthHint(PyObject *o, Py_ssize_t defaultvalue)
+{
+    ...
+    rv = PyObject_Length(o);
+    if (rv >= 0)
+        return rv;
+    if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+        PyErr_Clear();
+    } else {
+        return -1;
+    }
+    /* Try __length_hint__ */
+    hint = _PyObject_LookupSpecial(o, &_Py_ID(__length_hint__), &tp);
+    ...
+}
+```
+
+`PyIter_Next` calls `tp_iternext` directly, bypassing the `__next__` attribute lookup. It translates `StopIteration` into a `NULL` return with no active exception, which is the contract the `FOR_ITER` bytecode instruction relies on.
+
+```c
+// CPython: Objects/abstract.c:2840 PyIter_Next
+PyObject *
+PyIter_Next(PyObject *iter)
+{
+    PyObject *result;
+    result = (*Py_TYPE(iter)->tp_iternext)(iter);
+    if (result == NULL &&
+        !PyErr_Occurred() &&
+        Py_TYPE(iter)->tp_iternext != &_PyObject_NextNotImplemented)
+    {
+        PyErr_SetNone(PyExc_StopIteration);
+    }
+    return result;
+}
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (as free functions in `objects/protocol.go`, which already exists as a stub).
+
+`binary_op1` is the highest-priority item: it gates every arithmetic operator test. The reflected-subtype check requires that `IsSubtype` is already reliable, which depends on the MRO linearization work tracked separately. `PyObject_GetItem` and `PyObject_SetItem` can be ported independently once `objects.Type` exposes both `TpAsMapping` and `TpAsSequence` slot structs. `PyIter_Next` is straightforward and can land as soon as `tp_iternext` slots are populated for the built-in types.

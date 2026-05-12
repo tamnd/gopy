@@ -1,0 +1,119 @@
+---
+title: urllib/parse.py
+description: "URL parsing utilities: splitting, joining, encoding, and decoding"
+cpython_path: Lib/urllib/parse.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Core URL manipulation library. Implements RFC 3986 splitting, percent-encoding, query string encoding, and relative URL resolution.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | module header, `uses_params` | scheme table and sentinel sets |
+| 61–180 | `urlparse`, `ParseResult` | parse URL into 6-tuple with params |
+| 181–280 | `urlsplit`, `SplitResult` | parse URL into 5-tuple, omits params |
+| 281–340 | `urlunparse`, `urlunsplit` | reassemble components into a URL string |
+| 341–420 | `urljoin` | resolve a relative URL against a base |
+| 421–520 | `quote`, `quote_plus` | percent-encode a string or bytes |
+| 521–580 | `unquote`, `unquote_plus` | decode percent-encoded strings |
+| 581–680 | `urlencode` | encode a mapping or sequence to query string |
+| 681–900 | `_splitnetloc`, netloc helpers | extract username, password, hostname, port |
+
+## Reading
+
+### urlparse and ParseResult
+
+`urlparse` delegates to `urlsplit` and then isolates the params component (the
+semicolon-separated part of the path used in older HTTP standards). The return
+value is a `ParseResult` named tuple whose `netloc` property is further parsed
+on demand.
+
+```python
+# CPython: Lib/urllib/parse.py:401 urlparse
+def urlparse(urlstring, scheme='', allow_fragments=True):
+    url, params = _splitparams(spliturl)
+    return ParseResult(scheme, netloc, url, params, query, fragment)
+```
+
+`ParseResult` exposes `username`, `password`, `hostname`, and `port` as cached
+properties. Each delegates to `_splitnetloc` / `_splitauthority` helpers so the
+main parse stays zero-allocation for callers that never inspect credentials.
+
+### urlsplit and SplitResult
+
+`urlsplit` is the workhorse. It handles the scheme, authority, path, query, and
+fragment in one pass without splitting off params.
+
+```python
+# CPython: Lib/urllib/parse.py:449 urlsplit
+def urlsplit(urlstring, scheme='', allow_fragments=True):
+    netloc = query = fragment = ''
+    i = urlstring.find(':')
+    if i > 0:
+        ...
+    return SplitResult(scheme, netloc, url, query, fragment)
+```
+
+Results are interned in a module-level LRU cache keyed on the input string, so
+repeated calls with the same URL are essentially free.
+
+### urljoin
+
+Resolves a `url` against a `base` following RFC 3986 section 5.2. The function
+re-parses both strings, merges the path segments with `_remove_dot_segments`,
+and rebuilds with `urlunsplit`.
+
+```python
+# CPython: Lib/urllib/parse.py:537 urljoin
+def urljoin(base, url, allow_fragments=True):
+    bscheme, bnetloc, bpath, bparams, bquery, bfragment = urlparse(base, ...)
+    scheme, netloc, path, params, query, fragment = urlparse(url, bscheme, ...)
+    if not netloc:
+        netloc = bnetloc
+    ...
+    return urlunparse((scheme, netloc, path, params, query, fragment))
+```
+
+### quote and urlencode
+
+`quote` percent-encodes every byte not in the `safe` set. The default safe set
+is `/`. `urlencode` calls `quote_plus` on each key-value pair and joins with
+`&`. Passing `doseq=True` expands list values into repeated keys.
+
+```python
+# CPython: Lib/urllib/parse.py:857 urlencode
+def urlencode(query, doseq=False, safe='', encoding=None,
+              errors=None, quote_via=quote_plus):
+    ...
+    l = []
+    for k, v in query:
+        l.append(quote_via(k, safe) + '=' + quote_via(v, safe))
+    return '&'.join(l)
+```
+
+## gopy notes
+
+- `ParseResult` and `SplitResult` are named tuples. In gopy these map to plain
+  structs with positional accessors plus computed properties for the netloc
+  sub-fields.
+- The module-level result cache uses `functools.lru_cache`. gopy's
+  `module/functools` must be available before `urllib.parse` is imported.
+- `_remove_dot_segments` has no public alias; it is a private path-normalisation
+  helper that gopy needs to port to support `urljoin` fully.
+- `quote` operates on bytes internally. The Go port needs to match CPython's
+  encoding/error-handler plumbing to avoid divergence on non-ASCII input.
+
+## CPython 3.14 changes
+
+- The internal result cache was switched from a hand-rolled dict to
+  `functools.lru_cache` in 3.14, capping memory growth automatically.
+- `urlsplit` now raises `ValueError` on URLs containing ASCII NUL (`\x00`),
+  matching the stricter validation added across the `http` stack.
+- `quote`'s `safe` parameter now accepts a `bytes` argument directly without
+  an intermediate decode step.

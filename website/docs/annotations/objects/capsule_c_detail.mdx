@@ -1,0 +1,123 @@
+---
+title: Objects/capsule.c
+description: "PyCapsule object: opaque C pointer wrapper for C API inter-extension exports"
+cpython_path: Objects/capsule.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/capsule.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–30 | includes, `PyCapsule` struct | object layout |
+| 31–70 | `PyCapsule_New` | constructor, name ownership |
+| 71–100 | `PyCapsule_GetPointer` | pointer retrieval with name check |
+| 101–120 | `PyCapsule_GetName`, `PyCapsule_SetName` | name accessors |
+| 121–150 | `PyCapsule_GetContext`, `PyCapsule_SetContext` | context pointer accessors |
+| 151–170 | `PyCapsule_GetDestructor`, `PyCapsule_SetDestructor` | destructor accessors |
+| 171–185 | `capsule_dealloc` | destructor invocation on GC |
+| 186–200 | `capsule_repr`, `PyCapsule_Type` | repr and type object |
+
+## Reading
+
+### PyCapsule struct layout
+
+A capsule wraps four C-level values. There is no Python-visible API to read them directly; callers must use the typed accessor functions.
+
+```c
+// CPython: Objects/capsule.c:1 PyCapsule
+typedef struct {
+    PyObject_HEAD
+    void      *pointer;             /* the wrapped C pointer              */
+    const char *name;               /* dot-qualified name for type-safety */
+    void      *context;             /* caller-managed side-channel data   */
+    PyCapsule_Destructor destructor; /* called on dealloc, may be NULL    */
+} PyCapsuleObject;
+```
+
+The `name` is a plain `const char *`. CPython does not copy it; the caller is responsible for keeping the string alive for the capsule's lifetime. By convention the name is a module-qualified symbol path such as `"mymodule._C_API"`, which `PyCapsule_GetPointer` checks against the requested name before handing out the pointer.
+
+### PyCapsule_New and PyCapsule_GetPointer
+
+`PyCapsule_New` allocates the object and stores the pointer, name, and destructor without any copying or validation beyond a NULL-pointer check.
+
+```c
+// CPython: Objects/capsule.c:31 PyCapsule_New
+PyObject *
+PyCapsule_New(void *pointer, const char *name, PyCapsule_Destructor destructor)
+{
+    PyCapsuleObject *capsule;
+
+    if (!pointer) {
+        PyErr_SetString(PyExc_ValueError,
+                        "PyCapsule_New called with null pointer");
+        return NULL;
+    }
+    capsule = PyObject_GC_New(PyCapsuleObject, &PyCapsule_Type);
+    if (!capsule) return NULL;
+    capsule->pointer    = pointer;
+    capsule->name       = name;
+    capsule->context    = NULL;
+    capsule->destructor = destructor;
+    return (PyObject *)capsule;
+}
+```
+
+`PyCapsule_GetPointer` refuses to return the pointer if the name does not match the requested name. This prevents one extension from accidentally consuming another extension's capsule.
+
+```c
+// CPython: Objects/capsule.c:71 PyCapsule_GetPointer
+void *
+PyCapsule_GetPointer(PyObject *o, const char *name)
+{
+    PyCapsuleObject *capsule = (PyCapsuleObject *)o;
+
+    if (!PyCapsule_CheckExact(o)) { /* type check */ ... }
+    if (!_PyCapsule_check_name(capsule->name, name)) {
+        PyErr_Format(PyExc_ValueError,
+                     "PyCapsule_GetPointer called with incorrect name");
+        return NULL;
+    }
+    return capsule->pointer;
+}
+```
+
+### Destructor invocation and inter-extension use pattern
+
+`capsule_dealloc` calls the stored destructor (if non-NULL) before freeing the object. The destructor receives the capsule itself, so it can recover both the pointer and the context to free any associated resources.
+
+```c
+// CPython: Objects/capsule.c:171 capsule_dealloc
+static void
+capsule_dealloc(PyObject *o)
+{
+    PyCapsuleObject *capsule = (PyCapsuleObject *)o;
+    if (capsule->destructor)
+        capsule->destructor(o);
+    PyObject_GC_Del(o);
+}
+```
+
+The conventional C API export pattern stores a capsule in the module's `__dict__` under a well-known key (often `"_C_API"`). A consumer extension calls `PyImport_ImportModule`, looks up that key, retrieves the pointer via `PyCapsule_GetPointer` with the matching name, and casts it to a function table struct. This avoids linking the two extensions at build time.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (file `capsule.go`).
+
+Key items for porting:
+
+- A `CapsuleObject` struct holding a `unsafe.Pointer`, a `name string`, a `context unsafe.Pointer`, and a destructor function value of type `func(*Object)`.
+- `CapsuleNew` validating the pointer is non-nil and constructing the object.
+- `CapsuleGetPointer` performing the name equality check before returning the pointer, to preserve the type-safety guarantee.
+- `capsuleDealloc` invoking the destructor through the finalizer mechanism used by the rest of the objects package.
+- The context field is important for extension authors that need to attach per-capsule cleanup metadata without polluting the primary pointer.
+
+Because Go extension modules do not share a dynamic linker symbol table the way C extensions do, the capsule pattern in gopy is most useful for exporting Go function tables to cgo-based extension code. The name check remains semantically important even in that context.

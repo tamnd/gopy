@@ -1,0 +1,148 @@
+---
+title: "gzip.py: Member Seeking, Multi-Member Streams, and Convenience API"
+description: "Annotates GzipFile member seeking, _PaddedFile for multi-member streams, BadGzipFile on bad magic, compress/decompress convenience functions, and 3.14 changes"
+cpython_path: Lib/gzip.py
+cpython_version: "3.14"
+lines: 550
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Lib/gzip.py` wraps the `zlib` module to provide RFC 1952 gzip file support.
+It is one of the smaller stdlib compression modules but contains several
+non-obvious behaviors: multi-member stream concatenation, the `_PaddedFile`
+trick for pushing back bytes after a member boundary, and seek emulation over
+a non-seekable decompressor.
+
+The 3.14 release adds `BadGzipFile` as a public exception (previously it was
+only available as `gzip.BadGzipFile` with no guarantee of stability) and
+exposes `mtime` control in the convenience functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | imports, constants, `BadGzipFile` | `FTEXT`, `FHCRC`, `FNAME`, `FCOMMENT` flag bits; public error type |
+| 51-130 | `GzipFile.__init__` | Open for read or write; set up `_GzipReader` or compressor |
+| 131-220 | `GzipFile.write` / `flush` / `close` | Write path; delegates to `zlib.compressobj`; writes header on first write |
+| 221-310 | `GzipFile.read` / `read1` / `readinto` | Read path; delegates to `_GzipReader`; unwraps `EOFError` at member end |
+| 311-360 | `GzipFile.seek` | Emulated forward seek (read-and-discard); backward seek rewinds to start |
+| 361-410 | `_PaddedFile` | Wraps a file object; allows pushing back a small byte buffer before real reads |
+| 411-500 | `_GzipReader` | `io.BufferedIOBase` subclass; handles header parse, decompression, multi-member chaining |
+| 501-535 | `compress` / `decompress` | Convenience functions; no file I/O |
+| 536-550 | `open` | `GzipFile` factory with `pathlib.Path` support |
+
+## Reading
+
+### Multi-member streams and `_PaddedFile`
+
+A gzip file may consist of several concatenated members, each with its own
+header and trailer. `_GzipReader._read_gzip_header` reads and validates a
+header; when it returns `False` the reader knows the stream is exhausted. At
+the boundary between two members, the reader has already consumed bytes
+belonging to the next header while verifying the previous member's CRC32 and
+ISIZE trailer. `_PaddedFile` solves this by prepending those leftover bytes
+before future reads from the underlying file object.
+
+```python
+class _PaddedFile:
+    """Minimal wrapper that prepends a byte buffer before the real file."""
+    def __init__(self, f, prepend=b""):
+        self._buffer = prepend
+        self._length = len(prepend)
+        self.file    = f
+        self._read   = 0
+
+    def read(self, size):
+        if self._read < self._length:
+            available = self._length - self._read
+            if size <= available:
+                chunk = self._buffer[self._read : self._read + size]
+                self._read += size
+                return chunk
+            else:
+                chunk = self._buffer[self._read:]
+                self._read = self._length
+                return chunk + self.file.read(size - len(chunk))
+        return self.file.read(size)
+```
+
+After each member's trailer is verified, `_GzipReader` calls
+`self._fp = _PaddedFile(self._fp._fp, unused_data)` to inject whatever bytes
+`zlib.decompressobj` left in `unused_data` back in front of the stream.
+
+### Member seeking
+
+`GzipFile.seek` supports both read and write modes but the behavior differs:
+
+- **Write mode**: only forward seek (adding null bytes) is supported.
+- **Read mode**: backward seek is implemented by rewinding the underlying file
+  to position 0 and reconstructing `_GzipReader` from scratch, then reading
+  forward to the target offset.
+
+```python
+def seek(self, offset, whence=io.SEEK_SET):
+    if self.mode == WRITE:
+        if whence != io.SEEK_SET:
+            if whence == io.SEEK_CUR:
+                offset += self._pos
+            else:
+                raise OSError("Illegal argument")
+        if offset < self._pos:
+            raise OSError("Negative seek in write mode")
+        count = offset - self._pos
+        chunk = b"\0" * 1024
+        for _ in range(count // 1024):
+            self.write(chunk)
+        self.write(b"\0" * (count % 1024))
+    else:
+        if whence == io.SEEK_END:
+            ...
+        if offset < self._pos:
+            self._rewind()          # re-open reader at file start
+        count = offset - self._pos
+        for _ in range(count // 1024):
+            self.read(1024)
+        self.read(count % 1024)
+    return self._pos
+```
+
+Backward seek is O(n) in the distance from the file start. For large gzip
+files, callers should use `tarfile` or `zipfile` (which allow random access
+via uncompressed index) rather than `gzip` directly.
+
+### `compress` and `decompress` convenience functions
+
+These are thin wrappers over `GzipFile` that operate entirely in memory using
+`io.BytesIO`. They accept an optional `mtime` parameter; passing `mtime=0`
+produces reproducible output regardless of wall-clock time.
+
+```python
+import gzip
+
+data = b"hello world\n" * 1000
+compressed = gzip.compress(data, compresslevel=9, mtime=0)
+assert gzip.decompress(compressed) == data
+```
+
+In 3.14, `compress` gains a `compresslevel` alias for the positional argument
+and `decompress` raises `BadGzipFile` (instead of `OSError`) when the magic
+bytes `\x1f\x8b` are absent.
+
+## gopy notes
+
+- `_PaddedFile` is small but load-bearing: multi-member decompression breaks
+  without it. Port it verbatim before `_GzipReader`.
+- `BadGzipFile` must be a subclass of `OSError` to match CPython. In gopy,
+  map it to a Go struct embedding the `OSError` exception class.
+- The `compresslevel` parameter maps to `zlib.Z_BEST_COMPRESSION` (9) at the
+  top and `zlib.Z_BEST_SPEED` (1) at the bottom. gopy passes this integer
+  directly to the underlying `zlib` binding; no translation needed.
+- `GzipFile.seek` in read mode is safe to port as-is: it simply re-creates
+  `_GzipReader` and discards bytes. The cost is acceptable for the test suite,
+  which does not seek over large files.
+- 3.14 changes `decompress` to raise `BadGzipFile` on bad magic. The gopy
+  port should implement this directly rather than mapping through `OSError`.

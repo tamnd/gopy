@@ -1,0 +1,151 @@
+---
+title: "_ctypes.c — ctypes C implementation"
+description: "Annotated reading of Modules/_ctypes/_ctypes.c, the C backend for Python's ctypes FFI module"
+cpython_path: Modules/_ctypes/_ctypes.c
+cpython_version: "3.14"
+lines: 5500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_ctypes/_ctypes.c` is the core C extension backing the `ctypes` module. It defines the
+`CData` base type, all metaclasses (`SimpleType`, `StructType`, `UnionType`, `PointerType`),
+the `StgDict` storage-descriptor dict, and the foreign-function call machinery.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | includes, `CDataObject` struct | Base object layout: `b_ptr`, `b_length`, `b_objects` |
+| 121–400 | `StgDict_new` / `StgDict_clone` | Per-type storage descriptor dict |
+| 401–900 | `SimpleType_new` | Metaclass that maps format chars to C types |
+| 901–1400 | `StructType_new` / `UnionType_new` | Struct/union layout via `_ctypes_alloc_format_string` |
+| 1401–2200 | `PyCFuncPtr` / `CDLL` wrappers | Foreign function pointer boxing |
+| 2201–3000 | `_build_result` | Decode return value after foreign call |
+| 3001–3800 | `argtypes` / `restype` setters | Argument marshalling descriptors |
+| 3801–5500 | getsets, type objects, module init | `PyModuleDef`, type registrations |
+
+## Reading
+
+### CData base layout
+
+Every ctypes value inherits from `CDataObject`. The two key fields are `b_ptr` (raw memory pointer)
+and `b_length` (byte count of the owned buffer).
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:87 CDataObject
+typedef struct {
+    PyObject_HEAD
+    char *b_ptr;         /* pointer to memory block */
+    int   b_needsfree;   /* must we free the memory? */
+    CDataObject *b_base; /* pointer to base object or NULL */
+    Py_ssize_t b_size;   /* size of memory block in bytes */
+    Py_ssize_t b_length; /* number of fields */
+    PyObject *b_objects; /* references we need to keep */
+    union value b_value;
+} CDataObject;
+```
+
+`b_objects` is a dict that pins Python objects whose memory is referenced by `b_ptr`, preventing
+premature garbage collection during a foreign call.
+
+### SimpleType metaclass
+
+`SimpleType_new` is called when user code writes `class MyInt(ctypes.c_int): pass`. It reads the
+`_type_` class attribute (a single format character such as `"i"`) and wires up the correct
+`getfunc`/`setfunc` pair from the internal `fielddesc_table`.
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:432 SimpleType_new
+static PyObject *
+SimpleType_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *result;
+    PyObject *proto;
+    const char *proto_str;
+    Py_ssize_t proto_len;
+    StgDictObject *stgdict;
+    struct fielddesc *fmt;
+
+    result = PyType_Type.tp_new(type, args, kwds);
+    if (!result)
+        return NULL;
+    proto = PyObject_GetAttrString(result, "_type_");
+    /* ... fielddesc_table lookup, stgdict population ... */
+    return result;
+}
+```
+
+The `fielddesc_table` maps each format character to a `(getfunc, setfunc, size, align)` tuple so
+that `SimpleType` never needs to hardcode individual C types.
+
+### Structure layout with `_ctypes_alloc_format_string`
+
+When a `Structure` subclass is created, `StructType_new` iterates the `_fields_` sequence and
+accumulates alignment-padded offsets. It delegates format-string construction to the helper below.
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:1012 _ctypes_alloc_format_string
+int
+_ctypes_alloc_format_string(const char *prefix, const char *suffix,
+                             char **result)
+{
+    size_t len;
+    char *p;
+    len = (prefix ? strlen(prefix) : 0) + strlen(suffix) + 1;
+    p = PyMem_Malloc(len);
+    if (p == NULL) { PyErr_NoMemory(); return -1; }
+    if (prefix) strcpy(p, prefix);
+    else *p = '\0';
+    strcat(p, suffix);
+    *result = p;
+    return 0;
+}
+```
+
+### `_build_result` — decoding the return value
+
+After `libffi` returns from a foreign call, `_build_result` converts the raw C value back to a
+Python object using the `restype` descriptor stored in the `StgDict`.
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:2254 _build_result
+static PyObject *
+_build_result(PyObject *result, PyObject *callargs,
+              int outmask, int inoutmask, unsigned int numretvals)
+{
+    /* If restype has an errcheck callable, call it now. */
+    if (self->errcheck) {
+        PyObject *v = PyObject_CallFunctionObjArgs(
+                self->errcheck, result, self, callargs, NULL);
+        Py_DECREF(result);
+        result = v;
+    }
+    /* Pack multiple out-params into a tuple. */
+    /* ... */
+    return result;
+}
+```
+
+`errcheck` lets Python code intercept the raw return value before it reaches the caller, which is
+the standard pattern for Windows `HRESULT` error checking.
+
+## gopy notes
+
+`ctypes` is a pure FFI layer that gopy does not need to port; Go code calling C uses `cgo` instead.
+However, the `StgDict` design is relevant to gopy's own type-descriptor cache (`typeDict` in
+`objects/type.go`): both store per-type layout metadata in a dict attached to the type object
+rather than inline in the type struct.
+
+The `b_objects` pinning pattern also mirrors gopy's need to keep Python-side references alive when
+passing Go slices into Python callbacks.
+
+## CPython 3.14 changes
+
+- The `_ctypes` module was restructured in 3.13 to split `_ctypes.c` into several sub-files
+  (`callproc.c`, `stgdict.c`). In 3.14 the split is stable and `_ctypes.c` focuses on type
+  objects and the module init.
+- `PyCFuncPtr` gained a new `__call__` fast path that avoids a full `_PyArg_ParseStack` round-trip
+  when `argtypes` is `None`.
+- `StgDictObject` is no longer publicly exposed; user code must use `ctypes.util` helpers.

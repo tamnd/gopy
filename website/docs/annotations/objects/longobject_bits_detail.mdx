@@ -1,0 +1,150 @@
+---
+title: "longobject.c: bit operations and conversion helpers"
+description: "Annotation of compact integer checks, overflow-safe conversions, float-to-int, GCD, and size_t bounds in longobject.c"
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: objects/int.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Objects/longobject.c` implements Python's arbitrary-precision integer type.
+This annotation covers the compact-integer fast paths, conversion helpers
+(`PyLong_AsLong`, `PyLong_AsSize_t`, `PyLong_FromDouble`), and the binary GCD
+algorithm (`_PyLong_GCD`). These routines appear throughout the interpreter
+and are among the most performance-sensitive paths in the object layer.
+
+## Map
+
+| C symbol | Lines (approx) | Purpose |
+|---|---|---|
+| `_PyLong_IsZero` | 120-125 | Inline check: compact zero |
+| `_PyLong_IsPositive` | 126-131 | Inline check: sign bit clear and non-zero |
+| `_PyLong_IsNegative` | 132-137 | Inline check: sign bit set |
+| `PyLong_AsLong` | 340-400 | Convert to C `long`, raise `OverflowError` on overflow |
+| `PyLong_AsSize_t` | 410-445 | Convert to `size_t`, reject negative values |
+| `PyLong_FromDouble` | 600-650 | Round `double` toward zero, convert to `PyLongObject` |
+| `_PyLong_GCD` | 3800-3870 | Binary GCD algorithm for `math.gcd` fast path |
+
+## Reading
+
+### Compact integer predicates
+
+CPython 3.12+ stores integers up to a certain digit count directly in a
+single machine word (the "compact" representation). The three predicates test
+only the tag word, avoiding digit-array access entirely.
+
+```c
+// Objects/longobject.c:120  _PyLong_IsZero
+static inline int
+_PyLong_IsZero(const PyLongObject *op)
+{
+    return (op->long_value.lv_tag & ~_PyLong_NON_SIZE_BITS) == 0;
+}
+
+// Objects/longobject.c:132  _PyLong_IsNegative
+static inline int
+_PyLong_IsNegative(const PyLongObject *op)
+{
+    return (op->long_value.lv_tag & SIGN_MASK) != 0;
+}
+```
+
+`_PyLong_IsPositive` is the remaining case: tag present, sign bit clear.
+All three avoid a branch into digit storage, making them safe as fast-path
+guards inside tight loops.
+
+### PyLong_AsLong and overflow detection
+
+`PyLong_AsLong` sums digits with base `PyLong_BASE` and detects overflow by
+comparing the accumulated value against `LONG_MAX` before adding each digit.
+When the digit count exceeds what fits in `long`, it raises `OverflowError`
+immediately rather than accumulating.
+
+```c
+// Objects/longobject.c:355  PyLong_AsLong (simplified excerpt)
+long
+PyLong_AsLong(PyObject *vv)
+{
+    PyLongObject *v = (PyLongObject *)vv;
+    Py_ssize_t ndigits = _PyLong_DigitCount(v);
+    if (ndigits == 0)
+        return 0;
+    if (ndigits > (Py_ssize_t)(sizeof(long)/sizeof(digit)))
+        goto overflow;
+    unsigned long x = 0;
+    while (--ndigits >= 0)
+        x = x * PyLong_BASE + v->long_value.ob_digit[ndigits];
+    /* sign and range checks omitted for brevity */
+    return (long)x;
+overflow:
+    PyErr_SetString(PyExc_OverflowError,
+                    "Python int too large to convert to C long");
+    return -1;
+}
+```
+
+`PyLong_AsSize_t` follows the same structure but rejects negative inputs first,
+then delegates to `PyLong_AsUnsignedLong` capped at `SIZE_MAX`.
+
+### PyLong_FromDouble: float-to-integer conversion
+
+`PyLong_FromDouble` uses `frexp` to split the double into mantissa and
+exponent, then builds digits bottom-up. It truncates toward zero, matching
+`int(3.9) == 3` and `int(-3.9) == -3`.
+
+```c
+// Objects/longobject.c:606  PyLong_FromDouble
+PyObject *
+PyLong_FromDouble(double dval)
+{
+    if (Py_IS_INFINITY(dval)) {
+        PyErr_SetString(PyExc_OverflowError,
+            "cannot convert float infinity to integer");
+        return NULL;
+    }
+    if (Py_IS_NAN(dval)) {
+        PyErr_SetString(PyExc_ValueError,
+            "cannot convert float NaN to integer");
+        return NULL;
+    }
+    /* extract exponent, build digit array from mantissa bits */
+    ...
+}
+```
+
+### _PyLong_GCD: binary algorithm
+
+`_PyLong_GCD` implements the binary (Stein) GCD. It strips trailing zero
+digits with `_PyLong_NumBits` / shift, then alternates halving and
+subtraction. The binary algorithm avoids division and is faster than
+Euclidean for large integers.
+
+```c
+// Objects/longobject.c:3810  _PyLong_GCD (excerpt)
+while (!_PyLong_IsZero(b)) {
+    /* remove common factors of 2 */
+    if (_PyLong_IsEven(a) && _PyLong_IsEven(b)) { ... }
+    if (PyObject_RichCompareBool((PyObject*)a,
+                                 (PyObject*)b, Py_LT) > 0)
+        SWAP(a, b);
+    b = long_sub(b, a);   /* b = b - a */
+}
+```
+
+## gopy notes
+
+- `objects/int.go` ports `_PyLong_IsZero`, `_PyLong_IsPositive`, and
+  `_PyLong_IsNegative` as methods on the internal `intObject` type using
+  Go's `big.Int` sign query instead of tag-bit inspection.
+- `PyLong_AsLong` is ported as `intAsLong`; the overflow check uses
+  `big.Int.IsInt64` before calling `Int64()`.
+- `PyLong_FromDouble` is ported as `intFromFloat`; the NaN and Inf guards
+  are preserved exactly. The digit-build loop is replaced by
+  `big.Float.Int(nil)`.
+- `_PyLong_GCD` is not yet ported. `math.gcd` currently falls back to the
+  Go standard library `big.Int.GCD`.

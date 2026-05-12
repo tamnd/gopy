@@ -1,0 +1,78 @@
+---
+title: Objects/memoryobject.c (part 2)
+description: "memoryview slicing and reshaping: PyBUF_SIMPLE vs PyBUF_WRITABLE flags, multi-dimensional strides, cast() between compatible formats, tolist() recursive unpacking, and the buffer release protocol."
+cpython_path: Objects/memoryobject.c
+cpython_version: "3.14"
+lines: 3200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/memoryobject.c` (part 2)
+
+<CpyLink path="Objects/memoryobject.c" />
+
+This annotation covers the slicing, casting, and `tolist` facilities in
+`Objects/memoryobject.c`. For the buffer protocol basics and `__getitem__` see the
+`objects_memoryobject_c` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-400 | Buffer flags, `PyBUF_*` constants | Flag semantics for `__buffer__` callers |
+| 401-800 | `memory_subscript`, `memory_ass_subscript` | Slicing and item assignment |
+| 801-1200 | `memory_cast` | Re-interpret format without copy |
+| 1201-1600 | `memory_tolist` | Recursive unpack to nested Python lists |
+| 1601-2000 | `memory_tobytes`, `memory_hex` | Copy-out and hex dump |
+| 2001-3200 | Contiguity checks, `copy_buffer` | C- and Fortran-order contiguity validation |
+
+## Reading
+
+### `PyBUF_SIMPLE` vs `PyBUF_WRITABLE`
+
+`PyBUF_SIMPLE` requests a contiguous, read-only view. `PyBUF_WRITABLE` additionally
+requires that the underlying buffer permits writes. Requesting `WRITABLE` on a bytes
+object raises `BufferError`.
+
+### Multi-dimensional strides
+
+A memoryview can have `ndim > 1`. The strides array specifies the byte offset between
+consecutive elements along each axis. C-contiguous arrays have strides `[shape[1]*itemsize, itemsize]` for 2D; Fortran-contiguous has them reversed.
+
+```c
+// CPython: Objects/memoryobject.c:1050 mem_get_item_pointer
+static char *
+mem_get_item_pointer(Py_buffer *view, Py_ssize_t *indices)
+{
+    char *ptr = (char *)view->buf;
+    for (int i = 0; i < view->ndim; i++)
+        ptr += indices[i] * view->strides[i];
+    return ptr;
+}
+```
+
+### `cast()`
+
+`memory.cast(format)` re-interprets the buffer's bytes as a different item type without
+copying. The cast is only valid between formats of equal total byte size, and only for
+1D or fully-contiguous buffers.
+
+```python
+# CPython: Objects/memoryobject.c:870 memory_cast
+# The new view shares the same buf pointer; only format/itemsize/shape change.
+```
+
+### `tolist()`
+
+`tolist()` unpacks the memoryview into nested Python lists by recursively applying
+`PyObject_CallMethodObjArgs` on each element, converting from the native format struct
+code to the appropriate Python type.
+
+## gopy notes
+
+The first `objects_memoryobject_c` annotation covers construction and the buffer
+protocol. This annotation covers the higher-level slice/cast/tolist API. Both belong in
+the `objects/` layer. The cast operation is a thin wrapper over buffer pointer arithmetic
+with no data movement.

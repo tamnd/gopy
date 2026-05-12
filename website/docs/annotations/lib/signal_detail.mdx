@@ -1,0 +1,66 @@
+---
+title: "signalmodule.c: signal handling in CPython"
+description: "Annotated walkthrough of CPython Modules/signalmodule.c covering signal_signal, wakeup fd, SIG_DFL/SIG_IGN, raise_/pthread_kill, sigwait/sigtimedwait POSIX wrappers, and 3.14 changes"
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+ported_to: module/signal
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`signalmodule.c` is the C extension that backs the Python `signal` module. It wires POSIX/Windows signal primitives into the Python runtime and provides the wakeup fd mechanism that lets the eval loop react to signals without races.
+
+## Map
+
+| Lines | Symbol | Notes |
+|-------|--------|-------|
+| 1–60 | Includes and macros | Platform guards for `<signal.h>`, Windows `SetConsoleCtrlHandler`, `ITIMER_*` |
+| 61–150 | Module-level statics | `Handlers[]` array (one slot per signal), `wakeup` fd state, `is_tripped` flag |
+| 151–260 | `signal_handler` (C handler) | Async-safe trampoline: sets `Handlers[sig_num].tripped`, writes one byte to wakeup fd |
+| 261–380 | `signal_signal` | Python-facing `signal.signal()`; validates signum and handler, installs via `sigaction`/`signal` |
+| 381–470 | `signal_getsignal` | Returns current handler object from `Handlers[]`; never calls OS |
+| 471–560 | `SIG_DFL` / `SIG_IGN` sentinels | Module-level Python int constants wrapping the C macros |
+| 561–660 | Wakeup fd: `set_wakeup_fd` | Stores fd, validates non-blocking, called from `signal.set_wakeup_fd()` |
+| 661–720 | Wakeup fd: write path | Inside `signal_handler`: `write(wakeup_fd, &signum, 1)` with `EINTR` suppression |
+| 721–820 | `signal_raise` / `raise_` | Wraps POSIX `raise()`; on Windows uses `GenerateConsoleCtrlEvent` for CTRL_C |
+| 821–920 | `pthread_kill` binding | Wraps `pthread_kill`; only compiled when `HAVE_PTHREAD_KILL` is defined |
+| 921–1040 | `sigwait` / `sigwaitinfo` | Synchronous signal wait; builds `sigset_t` from Python frozenset of signal numbers |
+| 1041–1140 | `sigtimedwait` | `sigwaitinfo` with `struct timespec` timeout derived from float seconds argument |
+| 1141–1240 | `signal_set_handlers` / `_PySignal_AfterFork` | Reset handlers to `SIG_DFL` after `fork`; called by `os.fork` wrappers |
+| 1241–1400 | Module init (`PyInit_signal`) | Populates `SIG*` int constants from `<signal.h>` macros, registers `signal_handler` for `SIGINT` |
+
+## Reading
+
+### signal_signal and handler installation
+
+<Cpy src="Modules/signalmodule.c" start={261} end={380} />
+
+`signal_signal` is the implementation of `signal.signal(signum, handler)`. It rejects attempts to set `SIGKILL` or `SIGSTOP`, converts the Python handler to a `sigaction` struct (using `signal_handler` as the C-level trampoline for any callable), and calls `sigaction`. The old handler object is returned. The `Handlers[]` array holds a Python object reference per signal number so `getsignal` can return the exact same object the caller passed in.
+
+In 3.14, the function gained a check that raises `ValueError` when called from a non-main thread on platforms where `sigaction` is thread-unsafe, rather than silently installing a handler that may never fire.
+
+### Wakeup fd and async-safe delivery
+
+<Cpy src="Modules/signalmodule.c" start={561} end={720} />
+
+The wakeup fd is the bridge between async signal delivery and the GIL-holding eval loop. `signal_handler` (the C trampoline) may fire at any point; it cannot acquire the GIL. Instead it writes one byte (the signal number) to the wakeup fd. The eval loop calls `set_wakeup_fd` once during startup and polls or selects on the read end. When it wakes it reads the byte, then calls the registered Python handler under the GIL.
+
+`set_wakeup_fd` enforces that the fd is in non-blocking mode (checked via `fcntl`) to prevent the signal handler from hanging on a full pipe.
+
+### POSIX wrappers: raise_, pthread_kill, sigwait, sigtimedwait
+
+<Cpy src="Modules/signalmodule.c" start={721} end={1140} />
+
+`raise_` is a thin wrapper around POSIX `raise()` that delivers a signal to the calling thread. `pthread_kill` extends this to an arbitrary thread by tid (a Python `int` mapped to `pthread_t`).
+
+`sigwait` and `sigtimedwait` provide synchronous signal consumption without a handler. The caller passes a frozenset of signal numbers; the module builds a `sigset_t`, calls `sigwaitinfo` or `sigtimedwait`, and returns a `signal.siginfo` named-tuple. These are POSIX-only and not available on Windows.
+
+## gopy notes
+
+- The `Handlers[]` array is indexed by raw signal number up to `NSIG` (typically 64 on Linux). Allocate a fixed slice at module init rather than a map to match CPython's O(1) dispatch.
+- The wakeup fd write uses `SA_RESTART`-exempt `write` syscall. In Go, use `syscall.Write` with the raw fd, not `os.File.Write`, to avoid the runtime poller re-entering.
+- `_PySignal_AfterFork` must be called in gopy's `os.fork` wrapper to reset signal state in the child process; skipping it leaves stale Go goroutine signal registrations active.
+- `sigtimedwait` is not available on macOS (`ENOSYS`). Port the `#ifdef HAVE_SIGTIMEDWAIT` guard and raise `OSError(ENOSYS)` on unsupported platforms.
+- 3.14 removes the silent no-op when `signal.signal()` is called from a non-main thread; the port must match by checking goroutine identity against the main goroutine.

@@ -1,0 +1,65 @@
+---
+title: Lib/pathlib/__init__.py
+description: "pathlib public API: PurePath and Path classes, path arithmetic with /operator, stat/chmod/open/mkdir/glob, and the flavour abstraction for Windows vs POSIX paths."
+cpython_path: Lib/pathlib/__init__.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pathlib/__init__.py" />
+
+`Lib/pathlib/__init__.py` defines `PurePath`, `PurePosixPath`, `PureWindowsPath`, `Path`, `PosixPath`, and `WindowsPath`. `PurePath` is immutable and provides parsing, normalization, and the `/` operator for joining. `Path` adds filesystem operations (`stat`, `open`, `mkdir`, `glob`, `rename`, etc.).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | imports, `_PathParents` | Imports; the `parents` sequence proxy |
+| 81-400 | `PurePath` | Immutable path: `parts`, `name`, `stem`, `suffix`, `//operator`, comparison |
+| 401-600 | `PurePosixPath`, `PureWindowsPath` | Platform-specific pure paths |
+| 601-900 | `Path` | Filesystem path: `stat`, `open`, `read_text`, `write_text`, `mkdir`, `unlink` |
+| 901-1100 | `Path.glob`, `Path.walk` | Recursive directory traversal |
+| 1101-1200 | `PosixPath`, `WindowsPath` | Concrete platform subclasses |
+
+## Reading
+
+### PurePath: immutable path arithmetic
+
+`PurePath` stores a normalized tuple of path parts. The `/` operator calls `__truediv__` which creates a new `PurePath` from the joined string.
+
+```python
+# CPython: Lib/pathlib/__init__.py:81 PurePath.__truediv__
+class PurePath:
+    def __truediv__(self, key):
+        try:
+            return self._from_parsed_parts(self._drv, self._root,
+                                           self._parts + type(self)(key)._parts)
+        except TypeError:
+            return NotImplemented
+```
+
+`parts` returns a tuple; `name` is the final component; `stem` strips the final suffix; `suffix` is the extension including the dot.
+
+### Path.open and filesystem ops
+
+`Path.open(mode, buffering, encoding, ...)` delegates to `io.open(str(self), ...)`. `read_text` and `write_text` are convenience wrappers. `stat()` calls `os.stat(self)`.
+
+```python
+# CPython: Lib/pathlib/__init__.py:601 Path.open
+def open(self, mode='r', buffering=-1, encoding=None,
+         errors=None, newline=None):
+    return self._accessor.open(self, flags, mode)
+```
+
+### glob and walk
+
+`Path.glob(pattern)` calls `_WildcardSelector` or `_RecursiveWildcardSelector` depending on whether `**` is present. In CPython 3.12 the glob implementation was rewritten to use `os.scandir` instead of `os.listdir`, improving performance and enabling `follow_symlinks` control.
+
+`Path.walk()` (added in 3.12) mirrors `os.walk` but yields `(dirpath, dirnames, filenames)` tuples where each element is a `Path`.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/pathlib/`. Go's `path/filepath` package covers most of the filesystem operations; `filepath.Join`, `filepath.Glob`, and `filepath.WalkDir` map to the corresponding `Path` methods.

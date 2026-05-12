@@ -1,0 +1,126 @@
+---
+title: Include/internal/pycore_tuple.h
+description: "Annotated reading of CPython tuple internals: ITEMS macro, unchecked GET/SET_ITEM, free-list size array, MaybeUntrack GC optimization"
+cpython_path: Include/internal/pycore_tuple.h
+cpython_version: "3.14"
+lines: 40
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_tuple.h` is the private header for tuple internals. It
+provides a direct-access items macro, unchecked variants of the public
+`GET_ITEM`/`SET_ITEM` macros, the free-list size constants that govern how many
+tuples of each length are cached, and the GC untrack helper that avoids tracking
+tuples whose contents are all immortal or non-container objects.
+
+Source: <CpyLink path="Include/internal/pycore_tuple.h" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~8    | `_PyTuple_ITEMS` | Macro for direct pointer to the inline item array |
+| ~14   | `PyTuple_GET_ITEM` / `PyTuple_SET_ITEM` | Unchecked item access used in hot paths |
+| ~22   | `PyTuple_NFREELISTS` / `PyTuple_MAXSAVESIZE` | Free-list dimension constants (both 20) |
+| ~32   | `_PyTuple_MaybeUntrack` | Removes tuple from GC tracking when safe |
+
+## Reading
+
+### `_PyTuple_ITEMS`, inline item array pointer
+
+Tuples store their elements in a fixed-length array allocated directly after the
+`PyTupleObject` header in the same memory block. `_PyTuple_ITEMS` casts the
+object pointer and returns a pointer to the first element slot. Using this macro
+in the interpreter avoids a pointer dereference to an external array, which is
+why tuple item access is faster than list item access in CPython hot paths.
+
+```c
+// CPython: Include/internal/pycore_tuple.h:8 _PyTuple_ITEMS
+#define _PyTuple_ITEMS(op) (((PyTupleObject *)(op))->ob_item)
+```
+
+The macro is intentionally not a function; the compiler can fold the resulting
+pointer arithmetic into a single address calculation with no branching.
+
+### `PyTuple_GET_ITEM` and `PyTuple_SET_ITEM`, unchecked access
+
+The public `PyTuple_GetItem` and `PyTuple_SetItem` check index bounds and type
+before every access. The internal macros skip those checks entirely. They are
+used exclusively in code paths that have already validated the operands (the
+compiler, the eval loop, and the C object layer).
+
+```c
+// CPython: Include/internal/pycore_tuple.h:14 PyTuple_GET_ITEM
+#define PyTuple_GET_ITEM(op, i) (_PyTuple_ITEMS(op)[i])
+#define PyTuple_SET_ITEM(op, i, v) \
+    do { _PyTuple_ITEMS(op)[i] = (v); } while (0)
+```
+
+`PyTuple_SET_ITEM` does not steal a reference and does not adjust reference
+counts. The caller owns that responsibility. Misuse produces silent reference
+leaks or use-after-free bugs, so the macros are restricted to the private
+include path.
+
+### Free-list size constants
+
+CPython maintains per-length free lists for small tuples. A tuple of length `n`
+whose reference count drops to zero is not freed immediately; it is pushed onto
+`free_list[n]` if the list has fewer than `PyTuple_MAXSAVESIZE` entries and `n`
+is below `PyTuple_NFREELISTS`. Both constants are 20, so tuples of length 0
+through 19 are eligible for pooling, with up to 20 cached instances per length.
+
+```c
+// CPython: Include/internal/pycore_tuple.h:22 PyTuple_NFREELISTS
+#define PyTuple_NFREELISTS    20
+#define PyTuple_MAXSAVESIZE   20
+```
+
+The zero-length tuple is a special case: only one instance ever exists (the
+immortal `()` singleton), so slot 0 of the free list is effectively always at
+capacity after the first allocation.
+
+### `_PyTuple_MaybeUntrack`, GC optimization
+
+The cyclic GC only needs to visit objects that might be part of a reference
+cycle. A tuple whose elements are all non-container types (integers, strings,
+floats, `None`, and other immortal or non-GC objects) can never participate in a
+cycle. `_PyTuple_MaybeUntrack` walks the item array after construction and calls
+`PyObject_GC_UnTrack` if every element passes the test, removing the tuple from
+the GC generation list entirely.
+
+```c
+// CPython: Include/internal/pycore_tuple.h:32 _PyTuple_MaybeUntrack
+static inline void
+_PyTuple_MaybeUntrack(PyObject *op)
+{
+    PyTupleObject *t = (PyTupleObject *) op;
+    if (!PyTuple_CheckExact(op) || !_PyObject_GC_IS_TRACKED(op))
+        return;
+    for (Py_ssize_t i = Py_SIZE(t); --i >= 0; ) {
+        PyObject *elt = PyTuple_GET_ITEM(op, i);
+        if (_PyObject_GC_MAY_BE_TRACKED(elt))
+            return;
+    }
+    PyObject_GC_UnTrack(op);
+}
+```
+
+This is called in `PyTuple_New` after filling the item array and in
+`_PyTuple_FromArray`. It is not called on tuples built through
+`PyTuple_SET_ITEM` loops that end without an explicit track/untrack call.
+
+## gopy notes
+
+Status: not yet ported.
+
+Tuples in gopy are represented as immutable Go slices of `objects.Object` wrapped
+in a `TupleObject` struct in `objects/tuple.go`. The inline item array layout is
+not replicated because Go does not allow trailing variable-length arrays in structs.
+`PyTuple_GET_ITEM` / `PyTuple_SET_ITEM` map to direct slice indexing with no bounds
+check suppression at this time. `PyTuple_NFREELISTS` / `PyTuple_MAXSAVESIZE` are not
+implemented; Go's GC handles allocation pressure. `_PyTuple_MaybeUntrack` has no
+equivalent because gopy does not implement a cyclic GC.
+
+Planned package path: `objects` (tuple struct and constructor helpers).

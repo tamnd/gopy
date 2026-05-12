@@ -1,0 +1,74 @@
+---
+title: Lib/_pyio.py
+description: "Pure-Python I/O: RawIOBase, BufferedIOBase, TextIOBase abstract bases; FileIO, BytesIO, StringIO concrete classes; BufferedReader/Writer/Random wrapping raw I/O; and TextIOWrapper with codec and newline handling."
+cpython_path: Lib/_pyio.py
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/_pyio.py`
+
+<CpyLink path="Lib/_pyio.py" />
+
+`Lib/_pyio.py` is the pure-Python reference implementation of `io`. The C accelerated
+version lives in `Modules/_io/`. Both implement the same protocol; this file is the
+canonical documentation and the fallback used when the C version is not available.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `IOBase` | Abstract root; `close()`, `__enter__`/`__exit__`, `readable/writable/seekable` |
+| 201-450 | `RawIOBase`, `BufferedIOBase`, `TextIOBase` | Protocol layers |
+| 451-700 | `FileIO` | OS-level file descriptor wrapper |
+| 701-950 | `BytesIO` | In-memory bytes buffer |
+| 951-1200 | `BufferedReader`, `BufferedWriter`, `BufferedRandom` | Buffered wrappers over `RawIOBase` |
+| 1201-2000 | `TextIOWrapper` | Codec-aware text layer over `BufferedIOBase` |
+
+## Reading
+
+### `IOBase.close` and idempotency
+
+`IOBase.close` sets `self.__IOBase_closed = True` and flushes. Subsequent calls to `read`,
+`write`, or `seek` raise `ValueError("I/O operation on closed file")`. The closed check is
+done by `_checkClosed` which is called at the top of every I/O method.
+
+### `BufferedReader.read`
+
+`BufferedReader.read(size)` fills an internal `_read_buf` from the underlying `RawIOBase`
+in chunks of `buffer_size`. If `size == -1` it reads until EOF, appending to the buffer.
+
+```python
+# CPython: Lib/_pyio.py:780 BufferedReader.read
+def read(self, size=None):
+    if size is None or size == -1:
+        chunks = [self._read_buf[self._read_pos:]]
+        self._reset_read_buf()
+        while True:
+            chunk = self.raw.read(self.buffer_size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b''.join(chunks)
+```
+
+### `TextIOWrapper` newline handling
+
+`TextIOWrapper` translates newlines on read and write according to the `newline` parameter.
+`newline=None` (universal newline mode) converts `\r`, `\r\n`, and `\n` to `\n` on read.
+`newline='\r\n'` converts `\n` to `\r\n` on write. The codec layer handles the
+bytes-to-str conversion separately.
+
+### Codec incremental decode
+
+`TextIOWrapper` uses an incremental decoder (`codecs.getincrementaldecoder`) so that
+multi-byte characters split across buffer boundaries are handled correctly.
+
+## gopy notes
+
+`module/io/` partially mirrors this file. `BytesIO` and `StringIO` are the most-ported
+classes; `BufferedReader` and `TextIOWrapper` require the OS file descriptor layer from
+`module/os/`. The `_pyio` pure-Python fallback is available as a reference for edge cases.

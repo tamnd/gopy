@@ -1,0 +1,193 @@
+---
+title: Lib/ntpath.py (Windows path implementation)
+description: Windows os.path backend covering UNC paths, drive letters, backslash normalization, and variable expansion.
+cpython_path: Lib/ntpath.py
+cpython_version: "3.14"
+lines: 820
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`ntpath.py` is the `os.path` implementation used on Windows (and on Cygwin/MinGW
+when targeting Windows-style paths).  It is the most complex of the three path
+backends because it must handle two drive syntaxes (classic `C:` drive letters
+and UNC `\\server\share` paths), two valid separators (`\` and `/`), and several
+Windows-specific normalization rules.
+
+## Map
+
+| Function | Lines (approx.) | Notes |
+|---|---|---|
+| `normcase` | ~10 | lower-case + backslash normalization |
+| `isabs` | ~15 | drive-relative vs rooted; `C:foo` is not absolute |
+| `join` | ~70 | drive-letter-aware; UNC root wins |
+| `split` | ~20 | head/tail split on last separator |
+| `splitdrive` | ~60 | UNC + drive-letter detection |
+| `splitroot` | ~65 | 3.12+ replacement for splitdrive internals |
+| `splitext` | ~5 | delegates to `genericpath._splitext` |
+| `basename` | ~5 | tail from split |
+| `dirname` | ~5 | head from split |
+| `commonprefix` | ~3 | delegates to genericpath |
+| `exists` / `isfile` / `isdir` | ~30 | stat-based, handle NUL device |
+| `islink` | ~12 | reparse-point detection on Windows |
+| `isdevdrive` | ~10 | 3.12+ Dev Drive detection |
+| `expandvars` | ~55 | `%VAR%` and `$VAR` expansion |
+| `expanduser` | ~40 | `~` via USERPROFILE / HOMEPATH |
+| `normpath` | ~60 | collapse `.` and `..`, fix separators |
+| `abspath` | ~15 | `GetFullPathNameW` on Windows; os.getcwd otherwise |
+| `realpath` | ~50 | resolves symlinks; on non-Windows falls back to abspath |
+| `relpath` | ~35 | relative path from a start |
+| `commonpath` | ~10 | delegates to genericpath |
+
+## Reading
+
+### `splitdrive`: two distinct path syntaxes in one function
+
+Drive detection is the heart of what makes `ntpath` different.  A path can start
+with a classic drive letter (`C:\...`), a UNC path (`\\server\share\...`), or
+a device path (`\\?\...` or `\\.\...`).  `splitdrive` (and its internal helper
+`splitroot` added in 3.12) must distinguish all of them before any other function
+can reason about the path.
+
+```python
+# CPython: Lib/ntpath.py ~130
+def splitdrive(p):
+    """Split a pathname into drive/UNC sharepoint and relative path specifiers.
+    Returns a 2-tuple (drive_or_unc, path); either part may be empty.
+
+    If you assign
+        result = splitdrive(p)
+    It is always true that:
+        result[0] + result[1] == p
+
+    If the path contained a drive letter, drive will contain everything
+    up to and including the colon:
+        splitdrive("c:/dir") == ("c:", "/dir")
+
+    If the path contained a UNC path, the drive will contain the host name
+    and the share up to but not including the fourth directory separator
+    character:
+        splitdrive("//host/computer/dir") == ("//host/computer", "/dir")
+
+    Paths cannot contain both a drive letter and a UNC path.
+    """
+    p = os.fspath(p)
+    if isinstance(p, bytes):
+        sep = b'\\'
+        altsep = b'/'
+        colon = b':'
+    else:
+        sep = '\\'
+        altsep = '/'
+        colon = ':'
+    return splitroot(p)[:2]
+```
+
+The key insight: `C:foo` has a drive letter but is NOT absolute (the path is
+relative to the current directory on drive C).  `C:\foo` is absolute.
+`\\server\share` is both a drive and the root.
+
+### `normpath`: backslash normalization and `..` resolution
+
+`normpath` is what most callers actually want when they need a canonical path
+string without hitting the filesystem.  It converts forward slashes to
+backslashes, collapses runs of separators, and resolves `.` and `..` components
+using a stack.
+
+```python
+# CPython: Lib/ntpath.py ~530
+def normpath(path):
+    """Normalize path, eliminating double slashes, etc."""
+    path = os.fspath(path)
+    if isinstance(path, bytes):
+        sep = b'\\'
+        altsep = b'/'
+        curdir = b'.'
+        pardir = b'..'
+        special_prefixes = (b'\\\\.\\', b'\\\\?\\')
+    else:
+        sep = '\\'
+        altsep = '/'
+        curdir = '.'
+        pardir = '..'
+        special_prefixes = ('\\\\.\\', '\\\\?\\')
+    if path.startswith(special_prefixes):
+        # in the case of paths with these prefixes:
+        # \\.\ -> device names
+        # \\?\ -> literal extended-length paths
+        # do not do any normalization, but return the path
+        # unchanged apart from the call to fspath()
+        return path
+    path = path.replace(altsep, sep)
+    prefix, path = splitdrive(path)
+    ...
+    comps = path.split(sep)
+    i = 0
+    while i < len(comps):
+        if not comps[i] or comps[i] == curdir:
+            del comps[i]
+        elif comps[i] == pardir:
+            if i > 0 and comps[i-1] != pardir:
+                del comps[i-1:i+1]
+                i -= 1
+            elif i == 0 and prefix.endswith(sep):
+                del comps[i]
+            else:
+                i += 1
+        else:
+            i += 1
+    ...
+```
+
+The `special_prefixes` guard is critical: device paths (`\\.\COM1`) and
+extended-length paths (`\\?\C:\very\long\path`) must not be touched because
+normalization would change their semantics.
+
+### `expandvars`: dual `%VAR%` and `$VAR` syntax
+
+Windows batch convention uses `%VAR%` but Python's `ntpath.expandvars` also
+accepts Unix-style `$VAR` and `${VAR}` for portability.  The parsing is done
+with a hand-written character loop rather than a regex so it can handle nested
+percent signs and respect quoting.
+
+```python
+# CPython: Lib/ntpath.py ~390
+def expandvars(path):
+    """Expand shell variables of the forms $var, ${var} and %var%.
+
+    Unknown variables are left unchanged."""
+    path = os.fspath(path)
+    ...
+    if isinstance(path, bytes):
+        if b'$' not in path and b'%' not in path:
+            return path
+    else:
+        if '$' not in path and '%' not in path:
+            return path
+    ...
+    # fast-path: skip allocation when there is nothing to expand
+```
+
+The fast-path membership test before the full parse loop is a pattern repeated
+throughout `ntpath`; Windows paths are often long and allocation matters.
+
+## gopy mirror
+
+Not yet ported.  On a Go host the natural counterpart is `path/filepath` on
+Windows, but gopy needs a pure-Python-compatible implementation so that Python
+code calling `os.path.normpath` gets character-exact CPython results regardless
+of host OS.  The porting work belongs in `module/ntpath/`.
+
+The trickiest pieces to port are `splitdrive` (UNC detection requires careful
+byte-vs-string handling) and `realpath` (which calls `GetFullPathNameW` on a real
+Windows system but must fall back gracefully on Linux/macOS CI).
+
+## CPython 3.14 changes
+
+- `splitroot` was added in 3.12 as a public API alongside `splitdrive`; in 3.14
+  `splitdrive` is implemented in terms of `splitroot` rather than the other way
+  around.
+- `isdevdrive` (Dev Drive / ReFS volume detection) was added in 3.12 and
+  stabilized in 3.13.
+- No structural changes between 3.13 and 3.14 for this file.

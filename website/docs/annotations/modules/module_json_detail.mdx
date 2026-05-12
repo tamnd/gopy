@@ -1,0 +1,150 @@
+---
+title: "_json module internals (_json.c)"
+description: "encode_basestring_ascii escape loop, scanstring_unicode surrogate-pair assembly, make_scanner C closure binding, and listencode_dict/list recursion in CPython's _json extension"
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: module/json
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_json.c` accelerates the two hot paths in `json`: encoding Python objects to
+JSON text and decoding JSON text back to Python objects. The pure-Python
+fallback lives in `Lib/json/encoder.py` and `Lib/json/decoder.py`; the C
+extension replaces the inner loops with direct Unicode buffer access, cutting
+allocation and function-call overhead.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | includes, `PyScannerObject`, `PyEncoderObject` structs | scanner/encoder state holding Python callables |
+| 61-180 | `encode_basestring` / `encode_basestring_ascii` | per-character escape loops for Unicode and ASCII |
+| 181-400 | `scanstring_unicode` | JSON string decoder with surrogate-pair assembly |
+| 401-520 | `scanner_new` / `scanner_call` / `py_make_scanner` | scanner C-closure binding |
+| 521-700 | `scan_once_unicode` | top-level value dispatch (object, array, string, number, literals) |
+| 701-820 | `encoder_new` / `py_make_encoder` | encoder closure binding |
+| 821-1000 | `encoder_encode_string` | routes to `encode_basestring_ascii` or `encode_basestring` |
+| 1001-1100 | `encoder_listencode_list` | recursive list serializer |
+| 1101-1200 | `encoder_listencode_dict` | recursive dict serializer with key coercion and sort |
+
+## Reading
+
+### `encode_basestring_ascii`: the escape loop
+
+The function scans a Python Unicode string character by character. For
+codepoints above 0x7F or control characters it emits a `\uXXXX` escape;
+everything else is passed through as-is into a growing `PyUnicodeWriter`
+buffer.
+
+```c
+// Modules/_json.c  ~line 100
+while (end < input_chars) {
+    Py_UCS4 c = PyUnicode_READ(kind, data, end);
+    if (c > 0x7f || c <= 0x1f || c == '"' || c == '\\') {
+        /* emit chars from [begin, end) then the escape */
+        if (begin < end)
+            PyUnicodeWriter_WriteSubstring(writer, s, begin, end);
+        begin = end + 1;
+        switch (c) {
+            case '"':  rc = PyUnicodeWriter_WriteASCII(writer, "\\\"", 2); break;
+            case '\\': rc = PyUnicodeWriter_WriteASCII(writer, "\\\\", 2); break;
+            case '\n': rc = PyUnicodeWriter_WriteASCII(writer, "\\n",  2); break;
+            /* ... other control chars ... */
+            default:
+                if (c > 0xFFFF)
+                    /* emit \uXXXX\uXXXX surrogate pair */
+                    rc = encoder_encode_surrogatepair(writer, c);
+                else
+                    rc = encoder_encode_unicode_escape(writer, c);
+        }
+        if (rc < 0) goto bail;
+    }
+    end++;
+}
+```
+
+The `begin`/`end` cursor pattern avoids building an intermediate Python
+string for every plain ASCII run; a single `WriteSubstring` covers an entire
+run of safe characters.
+
+### `scanstring_unicode`: surrogate-pair assembly
+
+The decoder must reassemble surrogate pairs that were split across two
+`\uXXXX` escapes. After decoding the high surrogate (0xD800-0xDBFF) it
+peeks ahead for the `\u` prefix of a low surrogate.
+
+```c
+// Modules/_json.c  ~line 280
+if (0xD800 <= c && c <= 0xDBFF) {
+    /* look ahead for \uXXXX low surrogate */
+    if ((next_end + 6 < end) &&
+        buf[next_end] == '\\' && buf[next_end + 1] == 'u') {
+        Py_UCS4 c2 = decode_4hex(buf + next_end + 2, &err);
+        if (!err && 0xDC00 <= c2 && c2 <= 0xDFFF) {
+            c = 0x10000 + (((c - 0xD800) << 10) | (c2 - 0xDC00));
+            next_end += 6;
+        }
+    }
+    /* if no valid low surrogate, fall through and emit the lone surrogate */
+}
+```
+
+If no valid low surrogate follows, CPython emits the lone high surrogate as
+a `surrogatepass`-style codepoint rather than raising, matching the behavior
+of `str.encode('utf-8', 'surrogatepass')`.
+
+### `py_make_scanner` / `py_make_encoder`: C closure binding
+
+Python's `json.JSONDecoder` calls `c_make_scanner(self)` which allocates a
+`PyScannerObject` holding references to the decoder's Python callables
+(`parse_float`, `parse_int`, `parse_constant`, `strict`). This is the C
+analogue of a closure: the scanner object holds state so `scan_once_unicode`
+does not need to look up attributes on the decoder on every call.
+
+```c
+// Modules/_json.c  ~line 480
+static PyObject *
+py_make_scanner(PyObject *module, PyObject *ctx)
+{
+    PyScannerObject *s = PyObject_GC_New(PyScannerObject, ...);
+    /* borrow references from ctx (the JSONDecoder instance) */
+    s->parse_float    = PyObject_GetAttr(ctx, &_Py_ID(parse_float));
+    s->parse_int      = PyObject_GetAttr(ctx, &_Py_ID(parse_int));
+    s->parse_constant = PyObject_GetAttr(ctx, &_Py_ID(parse_constant));
+    s->strict         = PyObject_IsTrue(
+                            PyObject_GetAttr(ctx, &_Py_ID(strict)));
+    /* ... error checks ... */
+    PyObject_GC_Track(s);
+    return (PyObject *)s;
+}
+```
+
+### `encoder_listencode_dict`: recursive dict serializer
+
+`encoder_listencode_dict` iterates the dict, coerces non-string keys
+(integers, floats, booleans, `None`) to their JSON string equivalents, then
+recurses via `encoder_listencode_obj` for values. A depth counter guards
+against unbounded recursion; exceeding `MAX_INDENT` raises `ValueError`.
+
+The sort path calls `PyMapping_Keys` then `PyList_Sort`, so key ordering is
+stable. After sorting, a second pass zips keys with `PyObject_GetItem` lookups
+rather than iterating the dict again, preserving sorted order even if a key's
+`__eq__` or `__hash__` mutated the dict during coercion.
+
+### 3.14 changes
+
+3.14 replaced the ad-hoc `_PyUnicodeWriter` API used throughout `_json.c`
+with the new stable `PyUnicodeWriter` (PEP 756). Function signatures inside
+`encode_basestring_ascii` and `scanstring_unicode` changed from
+`_PyUnicodeWriter_Prepare` / `_PyUnicodeWriter_Finish` to
+`PyUnicodeWriter_Create` / `PyUnicodeWriter_Finish`. The observable behavior
+is identical; only the internal buffer management strategy changed.
+
+## gopy notes
+
+- `encode_basestring_ascii` is ported as `encodeStringASCII(w *strings.Builder, s string)` in `module/json/encode.go`, using the same `begin`/`end` cursor pattern over a Go `[]rune` slice.
+- The surrogate-pair assembly in `scanstring_unicode` is ported in `module/json/decode.go` as `decodeSurrogate(hi, lo rune) rune` called from the string scanner.
+- `PyScannerObject` / `PyEncoderObject` map to unexported Go structs `scanner` and `encoder`; their Python-callable fields become `objects.Object` fields populated by `MakeScanner` / `MakeEncoder`. The depth guard is a `depth int` parameter threaded through recursive calls, raising `objects.ValueError` at depth 1000.

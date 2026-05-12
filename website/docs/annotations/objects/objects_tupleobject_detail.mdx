@@ -1,0 +1,94 @@
+---
+title: Objects/tupleobject.c
+description: "tuple implementation: fixed-length immutable sequence, free list for 1-20 element tuples to avoid allocation, tuple packing/unpacking helpers, and hash computation."
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/tupleobject.c" />
+
+`Objects/tupleobject.c` implements the `tuple` type. Tuples are fixed-length immutable sequences of `PyObject*` pointers. The file provides the allocator with a per-interpreter free list for small tuples, rich comparison, hashing, and the C-level `PyTuple_Pack` helper.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | free list | Per-interpreter free list for tuples of size 0-20 |
+| 81-200 | `tuple_new_impl`, `PyTuple_New` | Allocator; free list or heap |
+| 201-320 | `tuple_dealloc` | Free list return or heap dealloc |
+| 321-450 | `tuplerichcompare` | Lexicographic comparison |
+| 451-550 | `tuplehash` | xxHash-derived polynomial hash |
+| 551-700 | `PyTuple_Pack`, sequence methods | C API helper; `len`, `getitem`, `contains` |
+
+## Reading
+
+### Free list
+
+Small tuples (0 to `PyTuple_MAXSAVESIZE = 20`) are stored on a per-interpreter free list rather than returned to the heap. `tuple_dealloc` clears all items and pushes the tuple object onto `state->free_list[size]` if the list is not full (`state->numfree[size] < PyTuple_MAXFREELIST`).
+
+```c
+// Objects/tupleobject.c:201 tuple_dealloc
+static void
+tuple_dealloc(PyTupleObject *op)
+{
+    Py_ssize_t i = Py_SIZE(op);
+    while (--i >= 0) Py_XDECREF(op->ob_item[i]);
+    if (i < PyTuple_MAXSAVESIZE) {
+        struct _Py_tuple_state *state = &_PyInterpreterState_GET()->tuple;
+        if (state->numfree[i] < PyTuple_MAXFREELIST) {
+            op->ob_item[0] = (PyObject *)state->free_list[i];
+            state->free_list[i] = op;
+            state->numfree[i]++;
+            return;
+        }
+    }
+    PyObject_GC_Del(op);
+}
+```
+
+### Hash computation
+
+`tuplehash` accumulates a polynomial hash over the element hashes using constants from xxHash. The empty tuple has a fixed hash of `-1` (mapped to `-2` per Python's convention). The hash is cached in `ob_shash` after the first computation.
+
+```c
+// Objects/tupleobject.c:451 tuplehash
+static Py_hash_t
+tuplehash(PyTupleObject *v)
+{
+    Py_uhash_t x = 0x345678UL;
+    Py_ssize_t len = Py_SIZE(v);
+    PyObject **p = v->ob_item;
+    while (--len >= 0) {
+        Py_hash_t y = PyObject_Hash(*p++);
+        x = (x ^ y) * _PyHASH_MULTIPLIER;
+    }
+    return x == (Py_uhash_t)-1 ? -2 : (Py_hash_t)x;
+}
+```
+
+### PyTuple_Pack
+
+`PyTuple_Pack(n, ...)` is the C API helper that allocates a new tuple and fills it from a variadic argument list. It is used extensively inside the interpreter for building argument tuples.
+
+```c
+// Objects/tupleobject.c:551 PyTuple_Pack
+PyObject *
+PyTuple_Pack(Py_ssize_t n, ...)
+{
+    va_list vargs;
+    va_start(vargs, n);
+    PyObject *result = PyTuple_New(n);
+    for (Py_ssize_t i = 0; i < n; i++)
+        PyTuple_SET_ITEM(result, i, Py_NewRef(va_arg(vargs, PyObject *)));
+    va_end(vargs);
+    return result;
+}
+```
+
+## gopy notes
+
+The gopy tuple is in `objects/`. Go tuples are represented as `[]py.Object` slices for variable-length cases or as fixed-size structs for small known tuples. The free list optimization maps to `sync.Pool` in Go.

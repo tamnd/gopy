@@ -1,0 +1,131 @@
+---
+title: Lib/re/__init__.py
+description: "Annotated reading: Lib/re/__init__.py"
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/re/__init__.py" />
+
+This file is the public face of the `re` module. It owns the compile-result
+cache, re-exports the `Pattern` and `Match` types, and provides every
+convenience entry point (match, search, fullmatch, findall, finditer, sub,
+subn, split). The actual parsing and compilation happen in `_parser.py` and
+`_compiler.py`; this file is mostly dispatch and caching.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | module header, imports | Pulls in `_compiler`, `_parser`, `enum`, `functools` |
+| 51-80 | `RegexFlag` enum | `IGNORECASE`, `MULTILINE`, `DOTALL`, `VERBOSE`, `ASCII`, `UNICODE`, `LOCALE`, `NOFLAG` |
+| 81-110 | `_cache`, `_MAXCACHE` | LRU dict used by `compile()` |
+| 111-140 | `compile()` | Public entry point, checks cache before calling `_compiler.compile` |
+| 141-160 | `purge()` | Clears `_cache` |
+| 161-200 | `match()`, `search()`, `fullmatch()` | Single-match entry points, compile-and-call |
+| 201-250 | `findall()`, `finditer()` | Multi-match entry points |
+| 251-310 | `sub()`, `subn()` | Substitution entry points |
+| 311-350 | `split()` | Split entry point |
+| 351-380 | `escape()` | Escapes special characters in a pattern string |
+| 381-400 | `Pattern`, `Match` re-exports | Aliases for `_compiler.Pattern` / `_compiler.Match` |
+
+## Reading
+
+### compile() and the _cache dict
+
+`compile()` is the central function. Every other entry point calls it
+internally (or inlines the same lookup). The cache key is a `(pattern, flags)`
+tuple. When the cache exceeds `_MAXCACHE` entries the oldest entry is discarded
+by calling `next(iter(_cache))`.
+
+```python
+# CPython: Lib/re/__init__.py:304 compile
+def compile(pattern, flags=0):
+    "Compile a regular expression pattern, returning a Pattern object."
+    return _compile(pattern, flags)
+```
+
+```python
+# CPython: Lib/re/__init__.py:271 _compile
+def _compile(pattern, flags):
+    if isinstance(flags, RegexFlag):
+        flags = flags.value
+    try:
+        return _cache[type(pattern), pattern, flags]
+    except KeyError:
+        pass
+    p = _compiler.compile(pattern, flags)
+    if len(_cache) >= _MAXCACHE:
+        # Drop an arbitrary item
+        try:
+            del _cache[next(iter(_cache))]
+        except (StopIteration, RuntimeError):
+            pass
+    _cache[type(pattern), pattern, flags] = p
+    return p
+```
+
+The key includes `type(pattern)` so that a `bytes` pattern and a `str` pattern
+with the same content hash differently. This matters because the SRE engine
+handles bytes and str patterns through different code paths.
+
+### RegexFlag and flag propagation
+
+`RegexFlag` is a standard-library `enum.IntFlag`. The individual names
+(`re.IGNORECASE`, `re.I`, etc.) are aliases onto its members. Passing an
+`IntFlag` value directly to `compile()` is accepted; the `.value` is extracted
+before the cache lookup so that the integer and the enum member hash
+identically.
+
+```python
+# CPython: Lib/re/__init__.py:54 RegexFlag
+class RegexFlag(enum.IntFlag):
+    ASCII      = A = sre_compile.SRE_FLAG_ASCII
+    IGNORECASE = I = sre_compile.SRE_FLAG_IGNORECASE
+    LOCALE     = L = sre_compile.SRE_FLAG_LOCALE
+    UNICODE    = U = sre_compile.SRE_FLAG_UNICODE
+    MULTILINE  = M = sre_compile.SRE_FLAG_MULTILINE
+    DOTALL     = S = sre_compile.SRE_FLAG_DOTALL
+    VERBOSE    = X = sre_compile.SRE_FLAG_VERBOSE
+    NOFLAG     = 0
+    ...
+```
+
+Flag conflicts (ASCII with UNICODE, LOCALE with UNICODE) are detected in
+`_parser.py` at parse time, not here.
+
+### Convenience entry points
+
+`match()`, `search()`, `fullmatch()`, `findall()`, `finditer()`, `sub()`,
+`subn()`, and `split()` are thin wrappers. Each calls `_compile(pattern,
+flags)` and then delegates to the same-named method on the returned `Pattern`
+object.
+
+```python
+# CPython: Lib/re/__init__.py:192 search
+def search(pattern, string, flags=0):
+    """Scan through string looking for a match to the pattern, returning
+    a Match object, or None if no match was found."""
+    return _compile(pattern, flags).search(string)
+```
+
+The only subtlety is `sub()` and `subn()`: when the replacement argument is a
+callable the pattern's `.sub()` method handles it directly. When it is a
+string it is first processed by `_parser.parse_repl()` to expand `\1`-style
+back-references.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/re/`
+
+The cache logic in `_compile()` is straightforward to port as a Go `sync.Map`
+or a plain `map` protected by a mutex. `RegexFlag` maps cleanly to a Go
+`uint32` const block. The entry-point functions become methods on a module
+object that holds the cache. The real work is in `_parser.py` and
+`_compiler.py`, which must be ported first before this file is meaningful.

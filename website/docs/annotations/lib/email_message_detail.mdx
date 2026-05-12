@@ -1,0 +1,94 @@
+---
+title: Lib/email/message.py
+description: "Message and EmailMessage classes. Header dict with case-insensitive keys, get_payload with Content-Transfer-Encoding decode, walk() MIME tree traversal, and set_payload with charset encoding."
+cpython_path: Lib/email/message.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/email/message.py`
+
+<CpyLink path="Lib/email/message.py" />
+
+`Lib/email/message.py` defines `Message`, the foundational email object, and `EmailMessage`,
+the higher-level subclass introduced in Python 3.6 that hooks into the Content-Manager
+protocol. Every other part of the email package builds on these two classes.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-800 | `Message` | Core email message object with header list, payload, and MIME tree API |
+| 801-950 | `MIMEPart` | Mixin that adds typed header access and content manager dispatch |
+| 951-1100 | `EmailMessage` | Modern subclass combining Message with MIMEPart |
+
+## Reading
+
+### Header dict with case-insensitive keys
+
+`Message` stores headers as a list of `(name, value)` pairs in `self._headers`. Lookup is
+case-insensitive because RFC 5322 says header names are case-insensitive.
+
+```python
+# CPython: Lib/email/message.py:132 get
+def get(self, name, failobj=None):
+    name = name.lower()
+    for k, v in self._headers:
+        if k.lower() == name:
+            return self.policy.header_fetch_parse(k, v)
+    return failobj
+```
+
+The stored values are raw strings. `header_fetch_parse` from the active `Policy` turns them
+into structured objects when the new-style API is in use.
+
+### `get_payload` and the decode flag
+
+`get_payload(decode=False)` has two very different code paths depending on the `decode`
+argument and whether the message is multipart.
+
+```python
+# CPython: Lib/email/message.py:254 get_payload
+def get_payload(self, i=None, decode=False):
+    if self.is_multipart():
+        if decode:
+            return None
+        if i is None:
+            return self._payload
+        return self._payload[i]
+    if not decode:
+        return self._payload
+    cte = str(self.get('content-transfer-encoding', '')).lower()
+    if cte == 'quoted-printable':
+        return quopri.decodestring(self._payload.encode())
+```
+
+When `decode=True` the method strips the Content-Transfer-Encoding layer and returns
+`bytes`. This is the correct entry point for reading binary attachments.
+
+### `walk()` and MIME tree traversal
+
+`walk()` is a depth-first generator over the MIME part tree.
+
+```python
+# CPython: Lib/email/message.py:438 walk
+def walk(self):
+    yield self
+    if self.is_multipart():
+        for subpart in self.get_payload():
+            yield from subpart.walk()
+```
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/email/message`. The Go type will need to
+represent the header list as `[]headerPair` and implement case-insensitive lookup without
+converting to a map, preserving duplicate header ordering as CPython does.
+
+## CPython 3.14 changes
+
+`EmailMessage` gained tighter integration with `email.contentmanager`. The `get_body`,
+`iter_attachments`, and `iter_parts` methods now delegate to `raw_data_manager` by default.

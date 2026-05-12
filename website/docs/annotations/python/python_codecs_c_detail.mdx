@@ -1,0 +1,73 @@
+---
+title: Python/codecs.c
+description: "Codec registry: PyCodec_Register, PyCodec_Lookup, the search function chain, and the built-in error handler registry for encode/decode errors."
+cpython_path: Python/codecs.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/codecs.c" />
+
+`Python/codecs.c` implements the codec registry that backs `str.encode()`, `bytes.decode()`, and `codecs.lookup()`. It stores a list of search functions, normalizes codec names, and provides the error handler registry used by `surrogateescape`, `replace`, `ignore`, `xmlcharrefreplace`, and `backslashreplace`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `PyCodec_Register`, `_PyCodec_Lookup` | Register and look up codec search functions |
+| 151-350 | `normalizestring`, `_PyCodec_Normalize` | Codec name normalization (case-fold, replace `-` with `_`) |
+| 351-550 | `PyCodec_Encode`, `PyCodec_Decode` | Encode/decode dispatch through registered codec |
+| 551-750 | `PyCodec_RegisterError`, `PyCodec_LookupError` | Error handler registry |
+| 751-1000 | Built-in error handlers | `strict_errors`, `ignore_errors`, `replace_errors`, `xmlcharrefreplace_errors`, `backslashreplace_errors`, `surrogatepass_errors`, `surrogateescape_errors` |
+
+## Reading
+
+### Search function chain
+
+The registry maintains a list of search functions (callables that accept a codec name and return a `CodecInfo` tuple or `None`). `_PyCodec_Lookup` normalizes the name and tries each search function in order. CPython's built-in encodings are registered via `encodings/__init__.py` which maps names to modules in the `encodings/` package.
+
+```c
+// Python/codecs.c:1 _PyCodec_Lookup
+PyObject *
+_PyCodec_Lookup(const char *encoding)
+{
+    PyObject *v = codec_cache_get(encoding);
+    if (v != NULL) return v;
+    /* normalize name */
+    PyObject *name = _PyCodec_Normalize(encoding);
+    /* try each search function */
+    for (i = 0; i < PyList_GET_SIZE(search_path); i++) {
+        v = PyObject_CallOneArg(PyList_GET_ITEM(search_path, i), name);
+        if (v != NULL && v != Py_None) {
+            codec_cache_set(encoding, v);
+            return v;
+        }
+    }
+    return NULL;
+}
+```
+
+### Error handler registry
+
+`PyCodec_RegisterError(name, error)` stores an error handler callable in a per-interpreter dict. `PyCodec_LookupError(name)` retrieves it. The built-in handlers are registered at interpreter startup in `_PyCodec_InitRegistry`.
+
+```c
+// Python/codecs.c:551 PyCodec_RegisterError
+int
+PyCodec_RegisterError(const char *name, PyObject *error)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    return PyDict_SetItemString(interp->codec_error_registry, name, error);
+}
+```
+
+### surrogateescape error handler
+
+`surrogateescape_errors` is the handler behind `errors='surrogateescape'`. On decode it replaces undecodable bytes with surrogate characters (`U+DC80` to `U+DCFF`). On encode it converts those surrogates back to the original bytes. This round-trips arbitrary binary data through Python `str` without data loss.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/codecs/`. The error handler registry maps to a Go `map[string]ErrorHandler` in the interpreter state. The `surrogateescape` handler is particularly important for gopy's file I/O layer.

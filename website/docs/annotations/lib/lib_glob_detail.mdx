@@ -1,0 +1,65 @@
+---
+title: Lib/glob.py
+description: "glob module: glob() and iglob() pattern matching with *, **, ?, [], rglob via os.scandir, and the translate() helper that converts glob patterns to regex."
+cpython_path: Lib/glob.py
+cpython_version: "3.14"
+lines: 340
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/glob.py`
+
+<CpyLink path="Lib/glob.py" />
+
+`Lib/glob.py` implements Unix-style filename pattern matching. `glob()` returns a sorted
+list; `iglob()` is a generator. The `**` pattern recursively matches zero or more
+directory levels.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | `glob`, `iglob` | Public entry points |
+| 81-200 | `_iglob`, `_iterdir`, `_rlistdir` | Inner generators: flat and recursive |
+| 201-280 | `_glob_translate` | Convert glob pattern to `re` pattern |
+| 281-340 | `fnmatch` helpers | `has_magic`, `_ishidden` utilities |
+
+## Reading
+
+### `**` recursive matching
+
+When a pattern segment is `**`, `_rlistdir` walks the directory tree using `os.scandir`
+and yields all nested paths. The `**` pattern only matches whole directory components, not
+partial names.
+
+```python
+# CPython: Lib/glob.py:143 _rlistdir
+def _rlistdir(dirname, dironly):
+    names = _listdir(dirname, dironly)
+    for x in names:
+        yield x
+        path = os.path.join(dirname, x) if dirname else x
+        for y in _rlistdir(path, dironly):
+            yield os.path.join(x, y)
+```
+
+### `_glob_translate`
+
+`_glob_translate(pat)` converts a glob pattern to a `re` pattern:
+- `*` becomes `[^/]*` (any chars except `/`)
+- `**` becomes `.*` (any chars including `/`)
+- `?` becomes `[^/]`
+- `[abc]` becomes `[abc]` (character class)
+- `[!abc]` becomes `[^abc]`
+
+### Hidden files
+
+On POSIX, `*` does not match dotfiles by default. `glob` and `iglob` have a `hidden`
+parameter (Python 3.13+) to explicitly include or exclude hidden files.
+
+## gopy notes
+
+`module/fnmatch/` provides `fnmatch` and `fnmatchcase`. `glob` requires `os.scandir` and
+`os.listdir` from `module/os/`. Planned path: `module/glob/`.

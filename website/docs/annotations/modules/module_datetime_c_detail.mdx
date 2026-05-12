@@ -1,0 +1,131 @@
+---
+title: Modules/_datetimemodule.c
+description: "CPython source annotation: Modules/_datetimemodule.c"
+cpython_path: Modules/_datetimemodule.c
+cpython_version: "3.14"
+lines: 6600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_datetimemodule.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | includes, `MINYEAR`/`MAXYEAR` | constants, forward decls |
+| 121–400 | byte-field macros | `PyDateTime_DATE_GET_YEAR`, `GET_MONTH`, `GET_DAY`, etc. |
+| 401–700 | `ymd_to_ord`, `ord_to_ymd` | proleptic Gregorian ordinal arithmetic |
+| 701–1100 | `date_new` | field validation and `date` object allocation |
+| 1101–1800 | `datetime_new` | field validation extended with hour/minute/second/microsecond/tzinfo |
+| 1801–2400 | `timedelta_new` | normalization of days/seconds/microseconds |
+| 2401–2900 | `datetime_combine` | merges a `date` and a `time` into a `datetime` |
+| 2901–3600 | `datetime_astimezone` | UTC conversion via `utcoffset()` protocol |
+| 3601–4400 | `datetime_strftime`, `datetime_strptime` | format string handling |
+| 4401–5200 | arithmetic methods | `__add__`, `__sub__`, `__radd__` for date and timedelta |
+| 5201–5900 | `PyDateTime_CAPI` struct | C-level fast constructors exported via capsule |
+| 5901–6600 | module init | `PyModuleDef`, type registration, capsule export |
+
+## Reading
+
+### PyDateTime_CAPI and C-level fast constructors
+
+CPython exports a `PyDateTime_CAPI` struct through a module capsule so that
+third-party C extensions (NumPy, pandas, Arrow) can construct `datetime` objects
+without going through the Python call stack. The struct holds function pointers
+for `Date_FromDate`, `DateTime_FromDateAndTime`, `Time_FromTime`, and
+`Delta_FromDelta`, each bypassing argument parsing and validation.
+
+```c
+// CPython: Modules/_datetimemodule.c:5210 PyDateTime_CAPI
+static PyDateTime_CAPI CAPI = {
+    .DateType           = &PyDateTime_DateType,
+    .DateTimeType       = &PyDateTime_DateTimeType,
+    .TimeType           = &PyDateTime_TimeType,
+    .DeltaType          = &PyDateTime_DeltaType,
+    .TZInfoType         = &PyDateTime_TZInfoType,
+    .Date_FromDate      = new_date_ex,
+    .DateTime_FromDateAndTime = new_datetime_ex,
+    .Time_FromTime      = new_time_ex,
+    .Delta_FromDelta    = new_delta_ex,
+};
+```
+
+Consumers retrieve the struct with `PyCapsule_Import("datetime.datetime_CAPI", 0)`
+and then call the function pointers directly. The gopy port must export an
+equivalent capsule from `module/datetime/` so that any future C-extension bridge
+can locate it by the same name.
+
+### date_new and datetime_new field validation
+
+`date_new` enforces the year/month/day ranges before allocating the object.
+Year must be in [1, 9999], month in [1, 12], and day in [1, days_in_month(year, month)].
+The day upper bound is computed by `days_in_month`, which handles February leap
+years via `is_leap`.
+
+```c
+// CPython: Modules/_datetimemodule.c:722 date_new
+static PyObject *
+date_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+{
+    int year, month, day;
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "iii", date_kws,
+                                     &year, &month, &day))
+        return NULL;
+    if (check_date_args(year, month, day) < 0)
+        return NULL;
+    return new_date_ex(year, month, day, type);
+}
+```
+
+`datetime_new` extends this with four additional fields validated in
+`check_time_args`: hour in [0, 23], minute in [0, 59], second in [0, 59],
+and microsecond in [0, 999999]. The `tzinfo` argument is accepted as-is; its
+`utcoffset()` return value is only checked when conversion methods are called.
+
+### byte-field macros and timedelta normalization
+
+`datetime` objects store date and time components as raw bytes in a fixed layout
+within the Python object struct. The macros extract fields with no overhead.
+
+```c
+// CPython: Modules/_datetimemodule.c:142 PyDateTime_DATE_GET_YEAR
+#define PyDateTime_DATE_GET_YEAR(o) \
+    ((((PyDateTime_Date*)(o))->data[0] << 8) | \
+      ((PyDateTime_Date*)(o))->data[1])
+
+// CPython: Modules/_datetimemodule.c:148 PyDateTime_DATE_GET_MONTH
+#define PyDateTime_DATE_GET_MONTH(o) \
+    (((PyDateTime_Date*)(o))->data[2])
+
+// CPython: Modules/_datetimemodule.c:151 PyDateTime_DATE_GET_DAY
+#define PyDateTime_DATE_GET_DAY(o) \
+    (((PyDateTime_Date*)(o))->data[3])
+```
+
+`timedelta_new` normalizes its three constructor arguments so that seconds is
+always in [0, 86399] and microseconds in [0, 999999], carrying overflow into the
+next coarser unit. The normalization is a simple cascade of integer division and
+remainder, matching the Python-level `timedelta` contract exactly.
+
+`datetime_combine` allocates a new `datetime` by extracting the date fields from
+a `date` argument and the time fields from a `time` argument, then calls
+`new_datetime_ex2` with the combined set. `datetime_astimezone` fetches the
+source `utcoffset()`, subtracts it to get UTC, adds the target offset, and
+returns a new `datetime` stamped with the target `tzinfo`.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/datetime/`.
+
+The byte-field layout will be replicated as a Go struct with explicit field
+offsets, and the macros become inline getter methods. The `PyDateTime_CAPI`
+capsule export requires the capsule mechanism to be functional first (tracked
+separately). Field validation in `date_new` and `datetime_new` translates
+directly to Go range checks before calling the internal allocator. `timedelta`
+normalization is pure arithmetic with no platform dependency and will be ported
+verbatim.

@@ -1,0 +1,91 @@
+---
+title: Lib/logging/__init__.py
+description: "logging package: Logger hierarchy with propagation, Handler/Formatter/Filter protocol, LogRecord construction, level filtering, and thread-safe emit via _acquireLock."
+cpython_path: Lib/logging/__init__.py
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/logging/__init__.py`
+
+<CpyLink path="Lib/logging/__init__.py" />
+
+`Lib/logging/__init__.py` is the entry point for Python's logging framework. It defines
+`Logger`, `Handler`, `Formatter`, `Filter`, and `LogRecord`. The design uses a tree of
+`Logger` objects linked by dotted names; a message that a logger does not handle propagates
+to its parent until it reaches the root logger.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | Level constants, `getLevelName`, `addLevelName` | Numeric level / name mapping |
+| 201-500 | `LogRecord` | Record of a single log event with all context fields |
+| 501-800 | `Formatter` | `format()`, `formatTime()`, `formatException()` |
+| 801-1100 | `Handler` base class | `emit()` protocol, `_acquireLock`, filter chain |
+| 1101-1500 | `Logger` | `debug`/`info`/`warning`/`error`/`critical`, propagation |
+| 1501-2200 | `Manager`, `getLogger`, `basicConfig` | Logger registry and configuration helpers |
+
+## Reading
+
+### `LogRecord` construction
+
+`Logger.makeRecord` creates a `LogRecord` dict-like object capturing `name`, `levelno`,
+`pathname`, `lineno`, `msg`, `args`, and the stack info. The `pathname` and `lineno` come
+from `sys._getframe(stacklevel)`.
+
+```python
+# CPython: Lib/logging/__init__.py:342 LogRecord.__init__
+def __init__(self, name, level, pathname, lineno,
+             msg, args, exc_info, func=None, sinfo=None):
+    ct = time.time()
+    self.name = name
+    self.msg = msg
+    self.args = args
+    self.levelname = getLevelName(level)
+    self.levelno = level
+    self.pathname = pathname
+    self.lineno = lineno
+    ...
+```
+
+### Propagation
+
+`Logger.callHandlers` walks up the logger tree via `logger.parent` until it finds a handler
+that accepts the record or reaches the root. `propagate = False` stops the walk at a node.
+
+```python
+# CPython: Lib/logging/__init__.py:1620 Logger.callHandlers
+def callHandlers(self, record):
+    c = self
+    found = 0
+    while c:
+        for hdlr in c.handlers:
+            found = found + 1
+            if record.levelno >= hdlr.level:
+                hdlr.handle(record)
+        if not c.propagate:
+            c = None
+        else:
+            c = c.parent
+```
+
+### Thread safety via `_acquireLock`
+
+`Handler.handle` acquires a per-handler reentrant lock before calling `emit`. This prevents
+interleaved log lines when multiple threads log to the same handler.
+
+### `basicConfig`
+
+`basicConfig` configures the root logger with a `StreamHandler` to `sys.stderr` if no
+handlers are attached. It is idempotent: repeated calls are no-ops.
+
+## gopy notes
+
+Not yet ported. `logging` is a practical dependency for most real programs. Planned path:
+`module/logging/`. The tree structure and `LogRecord` fields can be ported
+straightforwardly; the `stacklevel` frame-walking for `pathname`/`lineno` requires frame
+introspection support.

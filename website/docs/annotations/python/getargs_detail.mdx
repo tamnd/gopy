@@ -1,0 +1,115 @@
+---
+title: "Python/getargs.c"
+description: The CPython argument-parsing engine that maps Python objects to C values using a format string
+cpython_path: Python/getargs.c
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| CPython symbol | Lines (approx) | Role |
+|---|---|---|
+| `vgetargs1_impl` | 400-900 | Core format-string parser loop |
+| `convertsimple` | 900-1500 | Per-format-char conversion dispatcher |
+| `vgetargskeywords` | 1500-1900 | Keyword argument extraction |
+| `_PyArg_Parser` struct | Include/cpython/modsupport.h | Pre-parsed format cache |
+| `_PyArg_UnpackKeywordsWithVararg` | 1900-2050 | Clinic-generated stack-based entry |
+| `_PyArg_NoKeywords` | 2050-2100 | Fast rejection for positional-only callables |
+| `convertitem` | 300-400 | Single-item dispatch wrapper |
+| `float_argument_error` | 200-250 | Type-mismatch error helper |
+
+## Reading
+
+### The format-string loop
+
+`PyArg_ParseTuple` and `PyArg_ParseTupleAndKeywords` both bottom out in <CpyLink file="Python/getargs.c" line={400}>vgetargs1_impl</CpyLink>. This function walks a `const char *format` pointer one character at a time, consuming one Python object per format unit.
+
+The loop handles grouping characters `(` / `)` to accept nested tuples, optional markers `|` to begin the optional section, and the positional-end marker `$`. For each non-special character it calls `convertitem` which dispatches to `convertsimple`.
+
+```c
+/* Python/getargs.c (simplified) */
+while ((c = *format++) != '\0') {
+    if (c == '(')  { push tuple level; continue; }
+    if (c == ')')  { pop tuple level;  continue; }
+    if (c == '|')  { min = nargs; continue; }
+    if (c == '$')  { kwonly_start = i; continue; }
+    msg = convertitem(stack[i++], &format, p_va, flags, ...);
+    if (msg) goto error;
+}
+```
+
+gopy does not yet have a direct port of `vgetargs1_impl`. Python calls into Go modules use the `vm` call machinery and Go variadic signatures. The format-string API surface appears at the C extension boundary, which gopy currently handles through `objects/protocol.go` and the `vm/eval_call.go` argument-passing layer.
+
+### Format characters and their C types
+
+<CpyLink file="Python/getargs.c" line={900}>convertsimple</CpyLink> is a large switch over the format character. The most common codes:
+
+| Code | C type | Notes |
+|---|---|---|
+| `i` | `int` | `PyLong_AsLong`, range-checked to `INT_MIN..INT_MAX` |
+| `l` | `long` | `PyLong_AsLong` |
+| `n` | `Py_ssize_t` | `PyLong_AsSsize_t` |
+| `L` | `long long` | `PyLong_AsLongLong` |
+| `k` | `unsigned long` | `PyLong_AsUnsignedLongMask`, no overflow check |
+| `f` | `float` | `PyFloat_AsDouble` then narrowed |
+| `d` | `double` | `PyFloat_AsDouble` |
+| `D` | `Py_complex` | `PyComplex_AsCComplex` |
+| `C` | `int` (Unicode code point) | single-character string |
+| `s` | `const char *` | UTF-8 bytes of a str, no embedded NULs |
+| `z` | `const char *` | like `s` but accepts `None` as `NULL` |
+| `y` | `const char *` | bytes-like, raw buffer |
+| `S` | `PyObject *` | must be exactly `bytes` |
+| `O` | `PyObject *` | any object, reference borrowed |
+| `p` | `int` | boolean predicate via `PyObject_IsTrue` |
+| `O!` | `PyObject *` | type-checked: next vararg is `PyTypeObject *` |
+| `O&` | `PyObject *` | converter callback: `int conv(PyObject *, void *)` |
+
+The `O&` pattern is the extensible hook that lets C code register custom converters. The format loop pulls a function pointer from the vararg list and calls it with the Python object and a destination pointer. This is how `Py_buffer` parsing, `ctypes` conversions, and many third-party types integrate without modifying `getargs.c`.
+
+### Keyword argument extraction
+
+<CpyLink file="Python/getargs.c" line={1500}>vgetargskeywords</CpyLink> handles `PyArg_ParseTupleAndKeywords`. It takes both the positional `args` tuple and the `kwargs` dict, a `char **kwlist` giving allowed keyword names in order, and the same format string. The function:
+
+1. Counts positional arguments already supplied.
+2. Iterates `kwlist` to match remaining format slots against `kwargs`.
+3. Raises `TypeError` if an unexpected keyword is present or a required slot is unfilled.
+
+For keyword-only arguments (after `$` in the format), positional supply is forbidden and the slot must come from `kwargs`.
+
+### Pre-parsed format cache and the clinic API
+
+<CpyLink file="Python/getargs.c" line={1900}>_PyArg_UnpackKeywordsWithVararg</CpyLink> and its siblings are the entry points used by Argument Clinic-generated code. Instead of a format string they accept a pre-populated `_PyArg_Parser` that caches the keyword name list as a tuple, the minimum and maximum positional counts, and a pre-parsed format for fast slot mapping. This avoids re-scanning the format string on every call.
+
+```c
+/* Clinic-generated call pattern */
+static PyObject *
+mymodule_func_impl(PyObject *module, int x, const char *s);
+
+static PyObject *
+mymodule_func(PyObject *module, PyObject *const *args, Py_ssize_t nargs,
+              PyObject *kwnames) {
+    static _Py_IDENTIFIER(s);
+    static _PyArg_Parser _parser = {"is:func", _keywords, 0};
+    int x; const char *s;
+    if (!_PyArg_ParseStackAndKeywords(args, nargs, kwnames,
+                                      &_parser, &x, &s))
+        return NULL;
+    return mymodule_func_impl(module, x, s);
+}
+```
+
+The `_PyArg_Parser` struct is initialised lazily on the first call and then reused. gopy modules written in Go do not use this pattern but the calling convention shapes how `vm/eval_call.go` constructs argument arrays for built-in slots.
+
+## gopy notes
+
+`Python/getargs.c` has no direct Go port in gopy today. The functionality it provides falls into two areas:
+
+1. **Built-in argument validation.** gopy built-in functions written in Go receive `([]objects.Object, map[string]objects.Object)` directly from the VM. Type checking is done with Go type assertions rather than a format string. See `objects/protocol.go` for the helper that extracts a single typed argument.
+
+2. **C extension boundary.** When gopy adds C extension support, `vgetargs1_impl` will need a port. The format-character table and `O&` callback pattern documented above are the highest-priority pieces to translate first.
+
+The `_PyArg_Parser` cache is an optimisation detail; the logical behaviour of keyword unpacking is already present in `vm/eval_call.go` `buildCallArgs` which handles positional, keyword, `*args`, and `**kwargs` for pure-Python calls.

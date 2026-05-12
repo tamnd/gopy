@@ -1,0 +1,117 @@
+---
+title: bufferedio.c
+description: "BufferedReader, BufferedWriter, BufferedRandom, BufferedRWPair — the CPython buffered I/O layer"
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`bufferedio.c` implements the four buffered I/O classes that sit between Python's text layer and the raw file descriptor. Every class holds a `Py_buffer`-backed ring buffer and a pointer to a `RawIOBase` stream below it.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | module init, `BufferedIOBase` | Base type and ABC registration |
+| 121–480 | `BufferedReader` type + `bufferedreader_read` | Fill buffer, satisfy read request, handle partial reads |
+| 481–820 | `BufferedWriter` type + `_bufferedwriter_flush_unlocked` | Drain buffer to raw stream |
+| 821–1100 | `buffered_seek` / `buffered_tell` | Coordinate logical and raw position |
+| 1101–1500 | Lock helpers, `_buffered_raw_read`, `_buffered_raw_tell` | Thread safety wrappers |
+| 1501–2200 | `BufferedRandom` | Combines reader and writer with shared buffer |
+| 2201–2800 | `BufferedRWPair` | Two independent raw streams under one object |
+| 2801–3500 | `tp_methods`, `tp_getset`, `tp_new`/`tp_init` for all four types | Type plumbing |
+
+## Reading
+
+### Buffer fill and read satisfaction
+
+`bufferedreader_read` is the hot path. It first tries to satisfy the request from bytes already in the buffer, then calls `_buffered_raw_read` to top up, and finally copies the slice the caller asked for.
+
+```c
+// CPython: Modules/_io/bufferedio.c:634 bufferedreader_read
+static PyObject *
+bufferedreader_read(buffered *self, Py_ssize_t n)
+{
+    Py_ssize_t have = READAHEAD(self);
+    if (n <= have)
+        return _bufferedreader_read_fast(self, n);
+    return _bufferedreader_read_generic(self, n);
+}
+```
+
+`READAHEAD` is a macro that computes `self->buffer_size - self->pos` after adjusting for how far the raw stream has been read ahead. A partial read from the raw layer does not raise — it returns a shorter bytes object and leaves the buffer pointer intact.
+
+### Write flush
+
+`_bufferedwriter_flush_unlocked` loops over `write()` calls until the buffer is empty or the raw stream returns an error. It handles `EINTR` by retrying through `_PyIO_trap_eintr`.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1087 _bufferedwriter_flush_unlocked
+static int
+_bufferedwriter_flush_unlocked(buffered *self)
+{
+    Py_ssize_t written = 0;
+    Py_buffer data;
+    ...
+    while (self->write_pos < self->write_end) {
+        n = self->raw->write(... &data ...);
+        if (n == -1) {
+            if (_PyIO_trap_eintr()) continue;
+            goto error;
+        }
+        self->write_pos += n;
+    }
+    ...
+}
+```
+
+### Seek and tell
+
+`buffered_seek` must flush any pending writes, call `raw.seek`, then reset the buffer so stale bytes are not returned to the caller.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1320 buffered_seek
+static PyObject *
+buffered_seek(buffered *self, PyObject *args)
+{
+    ...
+    res = PyObject_CallMethodObjArgs(self->raw, &_Py_ID(seek), target, whence_obj, NULL);
+    if (res == NULL) return NULL;
+    _bufferedreader_reset_buf(self);   /* invalidate stale read-ahead */
+    _bufferedwriter_reset_buf(self);   /* discard unflushed writes */
+    self->pos = 0;
+    ...
+}
+```
+
+`buffered_tell` adds the logical in-buffer offset to the value returned by `raw.tell()`.
+
+### Thread safety
+
+Every public method acquires `self->lock` (a `PyThread_type_lock`) via `_PyRLock_acquire`. The pattern wraps the body in a macro pair so an exception during I/O still releases the lock.
+
+```c
+// CPython: Modules/_io/bufferedio.c:222 CHECK_INITIALIZED_LOCK
+#define ENTER_BUFFERED(self) \
+    if (!ENTER_BUFFERED_BUSY(self)) { \
+        PyErr_SetString(PyExc_RuntimeError, \
+            "reentrant call inside buffered I/O"); \
+        return NULL; \
+    }
+```
+
+## gopy notes
+
+- The buffer is a plain `[]byte` slice in gopy, not a `Py_buffer`. The `READAHEAD` and `WRITEAHEAD` macros become helper methods on the buffered struct.
+- `_PyRLock_acquire` maps to `sync.Mutex` with a re-entrancy counter stored per goroutine using `runtime.Goexit`-safe storage.
+- `_buffered_raw_read` and `_buffered_raw_tell` call the `RawIOBase` interface methods directly; no Python frame dispatch is needed.
+- `EINTR` retry logic is irrelevant on Windows paths and is skipped behind a build tag.
+
+## CPython 3.14 changes
+
+- `O_CLOEXEC` is now set unconditionally on `BufferedReader`'s internal raw stream when it is created from a filename.
+- `BufferedRWPair` gained a `read1` method in 3.12; 3.14 adds a `readinto1` delegation.
+- The `_PyIO_trap_eintr` helper was promoted to a non-static symbol so the text layer can call it directly without duplicating the retry loop.

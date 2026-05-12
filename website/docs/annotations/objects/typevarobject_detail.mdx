@@ -1,0 +1,120 @@
+---
+title: typevarobject.c
+description: "TypeVar, ParamSpec, TypeVarTuple, TypeAliasType: PEP 695 typing objects"
+cpython_path: Objects/typevarobject.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/typevarobject.c` implements four runtime objects introduced by the PEP 612/646/695 typing overhaul: `TypeVar`, `TypeVarTuple`, `ParamSpec`, and `TypeAliasType`. It also provides the `GenericAlias` type returned by `list[int]` and the C-level fast paths for `typing.get_origin` and `typing.get_args`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | `typevar_new` | Allocates `TypeVar`; stores name, bound, constraints, variance |
+| 81–180 | `typevar_repr` | Returns `~T` (contravariant), `+T` (covariant), or `T` |
+| 181–260 | `typevar_richcompare` | Identity-based equality; distinct `TypeVar`s with the same name are not equal |
+| 261–380 | `paramspec_new` | Allocates `ParamSpec`; creates `.args` and `.kwargs` sub-objects |
+| 381–460 | `typevartuple_new` | Allocates `TypeVarTuple`; exposes `__typing_unpack_form__` |
+| 461–620 | `typealias_new` | Allocates `TypeAliasType`; stores name, params, lazy annotate thunk |
+| 621–720 | `typealias_value_get` | Evaluates lazy `__value__` on first access (PEP 649) |
+| 721–860 | `Py_GenericAlias` | Creates `GenericAlias` when a built-in type is subscripted |
+| 861–980 | `ga_getitem` / `ga_repr` | `GenericAlias.__getitem__` and `__repr__` |
+| 981–1100 | `ga_richcompare` | Structural equality comparing `__origin__` and `__args__` |
+| 1101–1260 | `typing_get_origin` / `typing_get_args` | C-level fast dispatch; falls back to attribute lookup |
+| 1261–1500 | Type object definitions | `PyTypeVar_Type`, `PyParamSpec_Type`, `PyTypeVarTuple_Type`, `PyTypeAlias_Type` |
+
+## Reading
+
+### TypeVar allocation and variance
+
+`typevar_new` stores the bound as a raw object reference and converts the `constraints` sequence to a tuple. Variance is encoded as a single `char` field (`'+'`, `'-'`, or `0`) rather than a Python-level attribute. `typevar_repr` reads that field to prefix the name string.
+
+```c
+// CPython: Objects/typevarobject.c:1 typevar_new
+static PyObject *
+typevar_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    TypeVarObject *tv = PyObject_GC_New(TypeVarObject, type);
+    tv->tv_name        = Py_NewRef(name);   /* interned str */
+    tv->tv_bound       = Py_XNewRef(bound); /* NULL if absent */
+    tv->tv_constraints = PySequence_Tuple(constraints);
+    tv->tv_variance    = variance_char;     /* '+', '-', or 0 */
+    return (PyObject *)tv;
+}
+```
+
+### Lazy TypeAliasType value (PEP 649)
+
+`typealias_value_get` is the getter for `TypeAliasType.value`. On first call it invokes `annotationlib.call_annotate_function` to evaluate the stored annotate thunk, caches the result in `ta_value`, and returns it. Subsequent calls skip evaluation entirely.
+
+```c
+// CPython: Objects/typevarobject.c:621 typealias_value_get
+static PyObject *
+typealias_value_get(PyObject *self, void *Py_UNUSED(ignored))
+{
+    TypeAliasObject *ta = (TypeAliasObject *)self;
+    if (ta->ta_value == NULL) {
+        ta->ta_value = _PyAnnotationLib_CallAnnotateFunction(
+                           ta->ta_annotate, FORMAT_VALUE);
+        if (ta->ta_value == NULL)
+            return NULL;
+    }
+    return Py_NewRef(ta->ta_value);
+}
+```
+
+### GenericAlias construction
+
+`Py_GenericAlias` is registered as `__class_getitem__` on every built-in sequence and mapping type. When Python evaluates `list[int]`, the interpreter calls `type.__class_getitem__(list, int)`, which calls `Py_GenericAlias(list, int)` and returns a `GenericAlias` wrapping the pair.
+
+```c
+// CPython: Objects/typevarobject.c:721 Py_GenericAlias
+PyObject *
+Py_GenericAlias(PyObject *origin, PyObject *args)
+{
+    if (!PyTuple_Check(args))
+        args = PyTuple_Pack(1, args);
+    gaobject *alias = PyObject_GC_New(gaobject, &Py_GenericAlias_Type);
+    alias->origin = Py_NewRef(origin);
+    alias->args   = Py_NewRef(args);
+    PyObject_GC_Track(alias);
+    return (PyObject *)alias;
+}
+```
+
+### ParamSpec sub-objects
+
+`paramspec_new` creates two companion objects, `.args` and `.kwargs`, stored as `ParamSpecArgs` and `ParamSpecKwargs` instances. These are what appear in `Callable[P.args, P.kwargs]` patterns.
+
+```c
+// CPython: Objects/typevarobject.c:261 paramspec_new
+static PyObject *
+paramspec_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    ParamSpecObject *ps = PyObject_GC_New(ParamSpecObject, type);
+    ps->ps_name   = Py_NewRef(name);
+    ps->ps_args   = PyObject_CallOneArg(
+                        (PyObject *)&PyParamSpecArgs_Type, (PyObject *)ps);
+    ps->ps_kwargs = PyObject_CallOneArg(
+                        (PyObject *)&PyParamSpecKwargs_Type, (PyObject *)ps);
+    return (PyObject *)ps;
+}
+```
+
+## gopy notes
+
+`objects/union_type.go` covers `UnionType` (`X | Y`) but not `GenericAlias`. A partial port lives in `objects/generic_alias.go`. `TypeVar`, `TypeVarTuple`, and `ParamSpec` are not yet first-class Go structs. The plan is to introduce them in the `objects` package once PEP 695 syntax lands in the compiler.
+
+The lazy annotation path (PEP 649) has no gopy equivalent yet. `typealias_value_get` will need an `annotationlib` module stub before it can be ported. `typing.get_origin` and `typing.get_args` are handled entirely in `module/types/module.go` via attribute lookup, without the C-level fast path.
+
+## CPython 3.14 changes
+
+- 3.14 added PEP 649 support to `TypeAliasType`. The `ta_value` slot is now initialized to `NULL` and populated lazily by `typealias_value_get` through `_PyAnnotationLib_CallAnnotateFunction`. In 3.12-3.13 the value was evaluated eagerly at construction time.
+- `typevar_new` gained an `infer_variance` keyword argument (3.12) that sets `tv_variance` automatically based on usage. That keyword is present and stable in 3.14.
+- `typing_get_origin` and `typing_get_args` were added as C-level functions in 3.13 to replace the pure-Python implementations in `Lib/typing.py`. They are unchanged in 3.14.
+- The `PyTypeVar_Type`, `PyParamSpec_Type`, `PyTypeVarTuple_Type`, and `PyTypeAlias_Type` symbols are all part of the limited C API as of 3.12.

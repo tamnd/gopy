@@ -1,0 +1,140 @@
+---
+title: Modules/_hashlibmodule.c
+description: "Annotated reading: CPython hashlib module C extension wrapping OpenSSL EVP"
+cpython_path: Modules/_hashlibmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashlibmodule.c" />
+
+The `_hashlib` extension module wraps the OpenSSL [EVP (envelope)](https://docs.openssl.org/3.3/man7/evp/) high-level interface to provide `hashlib.new()` and algorithm-specific constructors such as `hashlib.sha256()`. Each Python hash object is an `EVPobject` holding an `EVP_MD_CTX` pointer. The module also provides a C fast path for `hashlib.pbkdf2_hmac()` and honours the `usedforsecurity` flag for FIPS-restricted environments.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `EVPobject` | struct | 60-85 | Python object wrapping `EVP_MD_CTX *` and digest name |
+| `EVP_Type` | `PyTypeObject` | 1320-1390 | Type registration for hash objects |
+| `EVPnew` | function | 140-220 | Allocates an `EVPobject` and initialises its `EVP_MD_CTX` |
+| `_hashlib_new_impl` | function | 230-310 | `hashlib.new()` dispatch: looks up algorithm, calls `EVPnew` |
+| `_hashlib_HASH_update_impl` | function | 350-420 | `hash.update()` with GIL release for large buffers |
+| `_hashlib_HASH_digest_impl` | function | 430-480 | `hash.digest()`: copy-then-finalize pattern |
+| `_hashlib_HASH_hexdigest_impl` | function | 485-530 | `hash.hexdigest()`: same pattern, hex-encodes result |
+| `_hashlib_pbkdf2_hmac_impl` | function | 850-980 | C fast path for PBKDF2-HMAC, releases GIL |
+| `usedforsecurity` param | argument | 230, 1050 | Skips FIPS-restricted algorithms when `False` |
+| Algorithm constructor table | array | 1250-1310 | Maps name strings to `EVP_MD *` fetch calls |
+
+## Reading
+
+### EVPobject and hashlib.new() dispatch
+
+`EVPobject` (line 60) stores an `EVP_MD_CTX *` as its primary field. An `EVP_MD_CTX` in OpenSSL holds all in-progress state for a digest operation: the algorithm descriptor, accumulated bytes, and any engine-specific context. The object also caches the digest name as a Python `str` for `hash.name`.
+
+```c
+// CPython: Modules/_hashlibmodule.c:60 EVPobject
+typedef struct {
+    PyObject_HEAD
+    EVP_MD_CTX    *ctx;       /* OpenSSL digest context */
+    PyObject      *name;      /* cached Python string, e.g. "sha256" */
+    int            lock_init; /* 1 if self->lock has been initialised */
+    PyThread_type_lock lock;
+} EVPobject;
+```
+
+`_hashlib_new_impl` (line 230) is the implementation of `hashlib.new(name, data=b"", *, usedforsecurity=True)`. It calls `EVP_MD_fetch` to resolve the algorithm name through the OpenSSL provider system. When `usedforsecurity=False`, the fetch uses the `"fips=no"` property string, allowing MD5 and SHA-1 to be used even in a FIPS-enabled build.
+
+```c
+// CPython: Modules/_hashlibmodule.c:230 _hashlib_new_impl
+static PyObject *
+_hashlib_new_impl(PyObject *module, const char *name,
+                  PyObject *data, int usedforsecurity)
+{
+    const char *properties = usedforsecurity ? "" : "fips=no";
+    EVP_MD *digest = EVP_MD_fetch(NULL, name, properties);
+    if (digest == NULL) {
+        /* raise ValueError: unsupported hash type */
+    }
+    return EVPnew(state, digest, data);
+}
+```
+
+`EVPnew` (line 140) allocates the `EVPobject`, calls `EVP_MD_CTX_new()`, then `EVP_DigestInit_ex()`. If `data` is non-empty it immediately calls `_hashlib_HASH_update_impl` so `hashlib.new("sha256", initial_data)` is equivalent to `hashlib.new("sha256"); h.update(initial_data)`.
+
+### GIL release in update()
+
+`_hashlib_HASH_update_impl` (line 350) is the critical path for hashing large byte buffers. For buffers larger than a compile-time threshold (2048 bytes in CPython 3.14), the implementation releases the GIL before calling `EVP_DigestUpdate`, then reacquires it afterwards. Shorter buffers skip the acquire/release overhead.
+
+```c
+// CPython: Modules/_hashlibmodule.c:350 _hashlib_HASH_update_impl
+static PyObject *
+_hashlib_HASH_update_impl(EVPobject *self, PyObject *obj)
+{
+    GET_BUFFER_VIEW_OR_ERROUT(obj, &view);
+    if (view.len >= HASHXOF_DIGEST_SIZE) {
+        /* release GIL for large buffers */
+        Py_BEGIN_ALLOW_THREADS
+        locked = PyThread_acquire_lock(self->lock, WAIT_LOCK);
+        EVP_DigestUpdate(self->ctx, view.buf, view.len);
+        PyThread_release_lock(self->lock);
+        Py_END_ALLOW_THREADS
+    } else {
+        EVP_DigestUpdate(self->ctx, view.buf, view.len);
+    }
+    /* ... */
+}
+```
+
+The per-object `lock` field serialises concurrent `update()` calls from multiple threads while the GIL is released, matching the thread-safety contract documented in `hashlib`.
+
+### digest() / hexdigest() copy-then-finalize pattern
+
+Neither `digest()` nor `hexdigest()` advances the original context. Instead, both copy the `EVP_MD_CTX` first with `EVP_MD_CTX_copy_ex`, then call `EVP_DigestFinal_ex` on the copy. This allows calling `digest()` at any point without consuming the running state.
+
+```c
+// CPython: Modules/_hashlibmodule.c:430 _hashlib_HASH_digest_impl
+static PyObject *
+_hashlib_HASH_digest_impl(EVPobject *self)
+{
+    EVP_MD_CTX *temp_ctx = EVP_MD_CTX_new();
+    if (!EVP_MD_CTX_copy_ex(temp_ctx, self->ctx))
+        goto error;
+    unsigned int digest_size;
+    EVP_DigestFinal_ex(temp_ctx, digest, &digest_size);
+    EVP_MD_CTX_free(temp_ctx);
+    return PyBytes_FromStringAndSize((char *)digest, digest_size);
+}
+```
+
+`_hashlib_HASH_hexdigest_impl` (line 485) follows the identical copy-then-finalize sequence, then formats each byte as two hex characters using a fixed lookup table rather than `sprintf`, avoiding locale issues.
+
+### pbkdf2_hmac C fast path and usedforsecurity
+
+`_hashlib_pbkdf2_hmac_impl` (line 850) accepts `hash_name`, `password`, `salt`, `iterations`, and an optional `dklen`. It resolves the HMAC digest with `EVP_MD_fetch` (respecting `usedforsecurity`), then calls OpenSSL's `PKCS5_PBKDF2_HMAC` directly. The GIL is released for the duration of the derivation, which may run millions of HMAC iterations.
+
+```c
+// CPython: Modules/_hashlibmodule.c:920 _hashlib_pbkdf2_hmac_impl (GIL release)
+    Py_BEGIN_ALLOW_THREADS
+    retval = PKCS5_PBKDF2_HMAC(
+        (const char *)password.buf, (int)password.len,
+        (const unsigned char *)salt.buf, (int)salt.len,
+        iterations, digest, dklen, key);
+    Py_END_ALLOW_THREADS
+```
+
+The `usedforsecurity=False` path is particularly important for `pbkdf2_hmac`: legacy deployments sometimes use MD5-based PBKDF2 for non-security purposes (e.g. deterministic key derivation for test data), and FIPS mode would otherwise reject the call entirely.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/hashlib/`.
+
+The Go standard library covers SHA-1, SHA-2, SHA-3, MD5, and BLAKE2 natively in `crypto/` and `golang.org/x/crypto`. For those algorithms, the port can use pure-Go implementations without cgo, which simplifies cross-compilation. Algorithms only available through OpenSSL (SM3, RIPEMD-160 in FIPS mode, certain XOFs) would require a cgo bridge or be gated behind a build tag.
+
+The copy-then-finalize pattern maps to the `hash.Hash` interface in Go: `Sum()` appends the current digest without finalising state, which is equivalent behavior. The GIL-release pattern maps to goroutine scheduling naturally since Go does not hold a global lock.
+
+`pbkdf2_hmac` has a pure-Go equivalent in `golang.org/x/crypto/pbkdf2`. The `usedforsecurity` parameter has no direct Go analog. The port should accept the parameter for API compatibility and ignore it, or check a build-time FIPS tag via `crypto/internal/boring` if strict compliance is needed.

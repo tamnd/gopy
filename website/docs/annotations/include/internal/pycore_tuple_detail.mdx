@@ -1,0 +1,92 @@
+---
+title: "pycore_tuple.h: internal tuple layout"
+description: "PyTupleObject flexible array, per-size free lists up to 20 elements, and the MaybeUntrack GC optimization in CPython 3.14"
+cpython_path: Include/internal/pycore_tuple.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: objects/tuple.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_tuple.h` exposes the internal layout of immutable tuples.
+Unlike lists, tuples use a flexible array member so the items live
+immediately after the header in a single allocation. The file also
+declares the per-size free lists and the `_PyTuple_MaybeUntrack` helper
+used by the GC.
+
+## Map
+
+| Lines | Symbol | Kind | Purpose |
+|-------|--------|------|---------|
+| 1–25 | `PyTupleObject` | struct | tuple header with `ob_item` flexible array |
+| 26–45 | `_Py_tuple_freelist` | struct | per-interpreter free lists (one chain per size, 0..20) |
+| 46–60 | `PyTuple_MAXSAVESIZE` | macro | max size tracked by free list (20) |
+| 61–70 | `PyTuple_MAXFREELIST` | macro | max depth per size chain (8) |
+| 71–80 | `_PyTuple_MaybeUntrack` | function | remove tuple from GC tracking if all items are untracked |
+
+## Reading
+
+### PyTupleObject struct
+
+Tuples are immutable so their length is fixed at creation and the item
+array is part of the same heap block.
+
+```c
+typedef struct {
+    PyObject_VAR_HEAD       /* ob_refcnt, ob_type, ob_size */
+    PyObject *ob_item[1];   /* flexible array; actual length is ob_size */
+} PyTupleObject;
+```
+
+Because the items are inline, `PyTuple_GET_ITEM(op, i)` is a single
+pointer dereference with no indirection through a separate buffer pointer.
+
+### Per-size free lists
+
+CPython maintains one singly-linked free list per non-zero tuple size from
+1 through `PyTuple_MAXSAVESIZE` (20). Each chain holds at most
+`PyTuple_MAXFREELIST` (8) recycled objects. The empty tuple (size 0) is a
+singleton stored separately in `_Py_INTERP_CACHED_OBJECT(empty_tuple)`.
+
+```c
+struct _Py_tuple_freelist {
+    /* One chain per size 1..PyTuple_MAXSAVESIZE */
+    PyTupleObject *items[PyTuple_MAXSAVESIZE];
+    int           numfree[PyTuple_MAXSAVESIZE];
+};
+```
+
+On deallocation, if `ob_size` is in range and the chain is not full, the
+tuple header is pushed onto the chain. The next allocation of the same
+size pops it and reinitializes `ob_item` in place.
+
+### `_PyTuple_MaybeUntrack`
+
+After filling a tuple's items the runtime calls this to remove the tuple
+from the cyclic GC worklist when none of the items can participate in a
+cycle (for example, when all items are ints or strings). This avoids the
+GC visiting a large fraction of all live tuples on each collection.
+
+```c
+static inline void
+_PyTuple_MaybeUntrack(PyObject *op) {
+    PyTupleObject *t = (PyTupleObject *)op;
+    for (Py_ssize_t i = 0; i < Py_SIZE(t); i++) {
+        if (_PyObject_GC_MAY_BE_TRACKED(t->ob_item[i]))
+            return;
+    }
+    _PyObject_GC_UNTRACK(op);
+}
+```
+
+## gopy notes
+
+`objects/tuple.go` stores items as a Go slice (`[]Object`) rather than
+an inline C array, so the single-allocation property does not hold. The
+free-list recycling is omitted since Go's GC handles short-lived tuples
+efficiently. `_PyTuple_MaybeUntrack` has no direct equivalent because
+gopy does not implement a tracing GC. The empty-tuple singleton is
+reproduced as a package-level `emptyTuple` variable initialized at
+startup.

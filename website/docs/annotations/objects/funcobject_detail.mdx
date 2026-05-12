@@ -1,0 +1,99 @@
+---
+title: "funcobject.c: Python function object internals"
+description: "How CPython stores and exposes the function object fields: code, globals, defaults, closure, and 3.14 annotation laziness"
+cpython_path: Objects/funcobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+ported_to: objects/function.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/funcobject.c` defines `PyFunction_Type` and the full lifecycle of a
+Python function object from allocation through attribute access. It is one of
+the most-read files in CPython because every `def` statement ultimately lands
+here.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-60 | `PyFunctionObject` (struct layout) | Canonical fields: `func_code`, `func_globals`, `func_builtins`, `func_defaults`, `func_kwdefaults`, `func_closure`, `func_annotations`, `func_name`, `func_qualname` |
+| 61-130 | `PyFunction_NewWithQualName` | Allocates and zero-initialises; borrows globals from frame |
+| 131-220 | `func_get_code` / `func_set_code` | Getter validates `code.co_nfreevars` matches closure length |
+| 221-310 | `func_set_defaults` | Accepts a tuple or `None`; clears on `None` |
+| 311-400 | `func_get_annotations` | Lazy dict creation; returns empty dict rather than `None` in 3.14 |
+| 401-500 | `func_set_annotations` | 3.14 splits storage into value annotations vs type-parameter annotations |
+| 501-620 | `func_traverse` / `func_clear` | GC support; visits every borrowed and owned reference |
+| 621-720 | `func_repr` | Produces `<function qualname at 0x...>` |
+| 721-800 | `PyFunction_Type` definition | Slots: `tp_call` delegates to `_PyObject_Call`, vectorcall set to `_PyFunction_Vectorcall` |
+
+## Reading
+
+### PyFunctionObject struct fields
+
+The nine fields live in `Include/cpython/funcobject.h`. The most important for
+the compiler are `func_code` (a `PyCodeObject`), `func_globals` (the module
+dict at definition time), and `func_closure` (a tuple of `PyCell` objects, one
+per free variable).
+
+```c
+// CPython: Objects/funcobject.c:63 PyFunction_NewWithQualName
+self->func_code    = Py_NewRef(code);
+self->func_globals = Py_NewRef(globals);
+self->func_closure = NULL;   // set later by MAKE_FUNCTION
+```
+
+`func_defaults` and `func_kwdefaults` are optional. They are `NULL` when the
+function has no defaults rather than an empty tuple, so callers must
+null-check before iterating.
+
+### func_get_code / func_set_code guard
+
+Setting `__code__` is allowed at runtime but CPython rejects any code object
+whose `co_nfreevars` count does not match the existing closure length. This
+prevents silent mismatches between cell indices and the closure tuple.
+
+```c
+// CPython: Objects/funcobject.c:140 func_set_code
+if (PySys_Audit("object.__setattr__", "OsO", func, "__code__", value) < 0)
+    return -1;
+nclosure = (func->func_closure == NULL ? 0 :
+            PyTuple_GET_SIZE(func->func_closure));
+nfree = ((PyCodeObject *)value)->co_nfreevars;
+if (nclosure != nfree) {
+    PyErr_Format(PyExc_ValueError, ...);
+    return -1;
+}
+```
+
+### Annotation laziness in 3.14
+
+Before 3.14, `func_annotations` held a plain dict. From 3.14 onward, CPython
+stores a compact representation and materialises the dict only on first access.
+`func_get_annotations` now calls `_PyFunction_SetAnnotations` which can hold
+either a dict (value annotations) or a `NULL`-sentinel tuple (type-parameter
+annotations from `PEP 695`). The getter always returns a dict, creating one
+from the compact form on demand.
+
+```c
+// CPython: Objects/funcobject.c:348 func_get_annotations
+if (func->func_annotations == NULL) {
+    func->func_annotations = PyDict_New();
+    if (func->func_annotations == NULL)
+        return NULL;
+}
+return Py_NewRef(func->func_annotations);
+```
+
+## gopy notes
+
+`objects/function.go` mirrors the struct with Go fields `Code`, `Globals`,
+`Defaults`, `KwDefaults`, and `Closure`. The annotation dict is stored eagerly
+(no lazy materialisation yet). The `func_set_code` closure-length guard is
+implemented in `(*Function).SetCode` and raises `ValueError` on mismatch,
+matching CPython behaviour.
+
+The vectorcall path (`_PyFunction_Vectorcall`) is not yet ported; calls route
+through the slower `tp_call` equivalent. Tracking issue: task #481.

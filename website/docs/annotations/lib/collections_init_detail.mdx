@@ -1,0 +1,91 @@
+---
+title: Lib/collections/__init__.py
+description: "Lib/collections/__init__.py: specialized container datatypes"
+cpython_path: Lib/collections/__init__.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink path="Lib/collections/__init__.py" />
+
+`Lib/collections/__init__.py` is the pure-Python layer of the `collections` module. Wherever a C acceleration exists (in `_collections`), the file imports it and silently replaces the Python version; the pure-Python code then serves as the canonical readable reference. The file also aliases `collections.abc` by pointing `sys.modules['collections.abc']` at `_collections_abc` (line 32), a historical compatibility shim from when the abc classes lived directly in `collections`.
+
+## Map
+
+| Symbol | Lines | Kind | Notes |
+|---|---|---|---|
+| `_Link` | 86-87 | class | Doubly-linked node for `OrderedDict`; slots: `prev`, `next`, `key`, `__weakref__` |
+| `OrderedDict` | 89-343 | class | `dict` subclass; insertion-order iteration via circular linked list |
+| `OrderedDict.move_to_end` | 194-217 | method | Splices a link to head or tail in O(1) |
+| `namedtuple` | 361-533 | factory | Returns a new `tuple` subclass built with `eval` + `type()` |
+| `_count_elements` | 540-544 | helper | Tally loop; replaced by C version if available |
+| `Counter` | 551-988 | class | `dict` subclass; multiset arithmetic via `__add__`, `__sub__`, `__or__`, `__and__` |
+| `Counter.most_common` | 625-642 | method | Full sort or `heapq.nlargest` depending on whether `n` is given |
+| `ChainMap` | 995-1123 | class | `MutableMapping` over a list of dicts; writes go to `maps[0]` |
+| `ChainMap.new_child` | 1063-1072 | method | Prepends a fresh dict (or a provided mapping) to the chain |
+| `UserDict` | 1130-1221 | class | `MutableMapping` wrapper; `self.data` is the backing dict |
+| `UserList` | 1227-1354 | class | `MutableSequence` wrapper; `self.data` is the backing list |
+| `UserString` | 1360-1609 | class | `Sequence` wrapper; `self.data` is the backing str |
+
+## Reading
+
+### namedtuple: eval-based class creation
+
+`namedtuple` builds a new class without `exec` or string templates. It constructs `__new__` by `eval`-ing a lambda string (the only reliable way to get a function with named positional parameters), then passes everything into `type()` with an explicit namespace dict.
+
+```python
+# CPython: Lib/collections/__init__.py:446 namedtuple factory body
+code = f'lambda _cls, {arg_list}: _tuple_new(_cls, ({arg_list}))'
+__new__ = eval(code, namespace)
+__new__.__name__ = '__new__'
+```
+
+The namespace passed to `eval` contains only `_tuple_new` and a blank `__builtins__`, preventing accidental capture of module globals. Field accessors are installed as `_tuplegetter` descriptors (a `property` wrapping `operator.itemgetter`) at lines 511-513. The class is finally assembled at line 515 with `type(typename, (tuple,), class_namespace)`. The `__module__` attribute is set by inspecting the caller's frame via `sys._getframemodulename` so that `pickle` can round-trip instances.
+
+### OrderedDict: the circular doubly-linked list
+
+`OrderedDict` inherits from `dict` for O(1) key lookup, and maintains a parallel circular doubly-linked list for ordering. The sentinel node (`__hardroot`) is never deleted; its `prev` and `next` always point to the tail and head of the sequence.
+
+```python
+# CPython: Lib/collections/__init__.py:119 OrderedDict.__setitem__
+def __setitem__(self, key, value,
+                dict_setitem=dict.__setitem__, proxy=_proxy, Link=_Link):
+    if key not in self:
+        self.__map[key] = link = Link()
+        root = self.__root
+        last = root.prev
+        link.prev, link.next, link.key = last, root, key
+        last.next = link
+        root.prev = proxy(link)
+    dict_setitem(self, key, value)
+```
+
+`prev` pointers are stored as weak-reference proxies (line 130) to prevent circular reference cycles that would block the garbage collector. `move_to_end` splices the node out of its current position and reattaches it at the tail or head in six pointer assignments; it uses the node's `link_next.prev` weak proxy rather than `link.prev` directly to avoid creating a strong reference (lines 199-217).
+
+### Counter: multiset arithmetic and most_common
+
+`Counter.__missing__` returns 0 for absent keys (line 616), which means `c[x]` never raises `KeyError` and arithmetic operators can read counts for keys that only exist in the other operand. The multiset operators keep only positive counts in their results, matching the mathematical multiset definition.
+
+```python
+# CPython: Lib/collections/__init__.py:625 Counter.most_common
+def most_common(self, n=None):
+    if n is None:
+        return sorted(self.items(), key=_itemgetter(1), reverse=True)
+    global heapq
+    if heapq is None:
+        import heapq
+    return heapq.nlargest(n, self.items(), key=_itemgetter(1))
+```
+
+`heapq` is imported lazily (line 62 pre-declares `heapq = None`) to keep module import time fast. For a full sort the simpler `sorted()` path is faster than a heap when `n` equals the full length; `heapq.nlargest` wins when `n` is small relative to the total number of elements.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/collections/`.
+
+`namedtuple` is the hardest piece: the `eval`-based `__new__` construction has no direct Go equivalent. The port should build the lambda body as a bytecode object directly rather than going through `eval`, or use a closure-based approach that captures field names at factory time. `OrderedDict`'s doubly-linked list maps cleanly to a Go struct with `prev`/`next` pointers; the weak-reference proxy on `prev` can be approximated with a non-owning pointer plus a finalizer. `Counter` and `ChainMap` are straightforward dict wrappers. `UserDict`, `UserList`, and `UserString` are thin delegation wrappers and can be ported as Python-level classes backed by the corresponding gopy built-in types.

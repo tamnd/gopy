@@ -1,0 +1,130 @@
+---
+title: "Objects/dictobject.c (resize and iteration)"
+description: "Annotated guide to dict merge, resize, view objects, iteration, and deletion tombstones in CPython 3.14"
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 5800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+## Map
+
+| Symbol | Approx. lines | Purpose |
+|---|---|---|
+| `dict_merge` | 2050-2180 | Core merge loop shared by `update`, `|=`, and constructor |
+| `PyDict_Merge` | 2182-2210 | Public C API entry point wrapping `dict_merge` |
+| `dictresize` | 870-970 | Rehash into a new `PyDictKeysObject` at the requested capacity |
+| `dict_keys` | 3350-3380 | Build a `dict_keys` view object |
+| `dict_values` | 3385-3410 | Build a `dict_values` view object |
+| `dict_items` | 3415-3445 | Build a `dict_items` view object |
+| `dictiter_iternextkey` | 3600-3660 | Advance a key iterator one step |
+| `dictiter_iternextvalue` | 3665-3720 | Advance a value iterator one step |
+| `dictiter_iternextitem` | 3725-3800 | Advance an item iterator one step |
+| `dict_pop` | 2450-2490 | Remove and return a value by key, with optional default |
+| `dict_popitem` | 2500-2560 | Remove and return an arbitrary `(key, value)` pair |
+| `DKIX_EMPTY / DKIX_DUMMY` | 110-120 | Sentinel indices marking empty slots and deletion tombstones |
+
+## Reading
+
+### dict_merge and PyDict_Merge
+
+`dict_merge` is the single function that backs `dict.update(other)`, the `dict | other` operator, and the `dict(**kwargs)` fast path. It branches early on whether `other` is itself a dict (allowing direct key-array iteration) or a generic mapping (falling back to `PyMapping_Keys` plus `PyObject_GetItem`).
+
+```c
+// CPython: Objects/dictobject.c:2050 dict_merge
+static int
+dict_merge(PyObject *a, PyObject *b, int override)
+{
+    PyDictObject *mp, *other;
+    ...
+    if (PyDict_CheckExact(b)) {
+        other = (PyDictObject *)b;
+        if (other->ma_used == 0)
+            return 0;
+        ...
+    }
+    else {
+        keys = PyMapping_Keys(b);
+        ...
+    }
+}
+```
+
+`PyDict_Merge` is the thin public wrapper. It validates that `a` is actually a dict, then delegates to `dict_merge` with the caller-supplied `override` flag (0 = keep existing, 1 = overwrite, 2 = raise on conflict).
+
+```c
+// CPython: Objects/dictobject.c:2182 PyDict_Merge
+int
+PyDict_Merge(PyObject *a, PyObject *b, int override)
+{
+    if (!PyDict_Check(a)) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    return dict_merge(a, b, override);
+}
+```
+
+### dictresize and the tombstone protocol
+
+When the load factor of the hash table crosses the resize threshold, `dictresize` allocates a fresh `PyDictKeysObject` with the requested power-of-two capacity and re-inserts every live entry. Dead slots (tombstones) are skipped during the rehash, which compacts the table and clears accumulated `DKIX_DUMMY` entries.
+
+`DKIX_EMPTY` (`-1`) marks a slot that has never held an entry. `DKIX_DUMMY` (`-2`) marks a slot from which an entry was deleted. Lookup probes must skip `DKIX_DUMMY` slots but may stop at `DKIX_EMPTY` slots, so deletions use `DKIX_DUMMY` to preserve probe chains without keeping the entry alive.
+
+```c
+// CPython: Objects/dictobject.c:110 DKIX_EMPTY
+#define DKIX_EMPTY (-1)
+#define DKIX_DUMMY (-2)  /* tombstone */
+```
+
+```c
+// CPython: Objects/dictobject.c:870 dictresize
+static int
+dictresize(PyDictObject *mp, uint8_t log2_newsize, int unicode)
+{
+    ...
+    /* Insert entries from old keys into new_keys. */
+    for (i = 0; i < numentries; i++) {
+        ep = &ep0[i];
+        if (ep->me_value != NULL) {
+            insertdict_clean(mp, ep->me_key, ep->me_hash, ep->me_value);
+        }
+    }
+    ...
+}
+```
+
+### View objects and iterators
+
+`dict_keys`, `dict_values`, and `dict_items` each allocate a lightweight `dictviewobject` that holds a borrowed reference to the underlying dict. The view does not copy data; it delegates `__len__`, `__iter__`, and `__contains__` back to the live dict.
+
+The three iterator types (`dictiter_iternextkey`, `dictiter_iternextvalue`, `dictiter_iternextitem`) share the same guard: they compare `di_used` (captured at iterator creation) against `ma_used` (current count) and raise `RuntimeError: dictionary changed size during iteration` on mismatch.
+
+```c
+// CPython: Objects/dictobject.c:3600 dictiter_iternextkey
+static PyObject *
+dictiter_iternextkey(dictiterobject *di)
+{
+    if (di->di_used != mp->ma_used) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "dictionary changed size during iteration");
+        di->di_used = -1;
+        return NULL;
+    }
+    ...
+}
+```
+
+`dict_pop` walks the hash table for the given key, captures the value, marks the slot `DKIX_DUMMY`, and decrements `ma_used`. `dict_popitem` scans backwards from the last-used compact-array index to find a live entry, avoiding an O(n) scan in the common case where deletion follows insertion order.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (as `objects.Dict`, alongside the existing `objects/dict.go` skeleton).
+
+The merge and resize logic depends on a complete `PyDictKeysObject` representation with typed index arrays (int8/int16/int32/int64 depending on capacity). That foundation must land before `dict_merge` and `dictresize` can be translated. The view objects map naturally to thin Go structs holding a pointer to the parent `Dict`; the iterator structs translate to `DictKeyIter`, `DictValueIter`, and `DictItemIter` types implementing `objects.Iterator`.

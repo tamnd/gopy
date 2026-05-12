@@ -1,0 +1,75 @@
+---
+title: Lib/os.py
+description: "os module Python layer: _Environ mapping backed by putenv/unsetenv, os.path dispatching to posixpath/ntpath, os.walk generator, os.fspath, os.makedirs, and os.replace."
+cpython_path: Lib/os.py
+cpython_version: "3.14"
+lines: 1150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/os.py`
+
+<CpyLink path="Lib/os.py" />
+
+`Lib/os.py` is the Python layer of the `os` module. It imports from `posix`/`nt` (the C
+extension) and adds pure-Python utilities: `_Environ`, `os.path`, `os.walk`,
+`os.makedirs`, `os.fspath`, and various wrappers.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-100 | Imports, `name`, `path` selection | Import posix or nt; select `posixpath` or `ntpath` |
+| 101-300 | `_Environ` | `MutableMapping` backed by `putenv`/`unsetenv` |
+| 301-550 | `os.walk` | Depth-first directory tree generator |
+| 551-700 | `os.makedirs`, `os.removedirs`, `os.renames` | Recursive directory operations |
+| 701-900 | `os.fspath`, `os.fsencode`, `os.fsdecode` | Filesystem path protocol |
+| 901-1150 | `os.replace`, `os.link`, `os.symlink`, `os.scandir` wrappers | Thin Python wrappers |
+
+## Reading
+
+### `_Environ`
+
+`_Environ` subclasses `MutableMapping`. `__setitem__` calls `putenv(key, value)`;
+`__delitem__` calls `unsetenv(key)`. The underlying dict is populated from `environ` at
+module import time.
+
+```python
+# CPython: Lib/os.py:680 _Environ.__setitem__
+def __setitem__(self, key, value):
+    ...
+    self.putenv(key, value)
+    self._data[key] = value
+```
+
+### `os.walk`
+
+`os.walk(top, topdown=True, onerror=None, followlinks=False)` yields `(dirpath, dirnames,
+filenames)` tuples. With `topdown=True`, the caller can prune `dirnames` in-place to
+control recursion.
+
+```python
+# CPython: Lib/os.py:417 walk
+def walk(top, topdown=True, onerror=None, followlinks=False):
+    sys.audit("os.walk", top, topdown, onerror, followlinks)
+    return _walk(fspath(top), topdown, onerror, followlinks)
+```
+
+### `os.fspath`
+
+`os.fspath(path)` returns `path` unchanged if it is a `str` or `bytes`, or calls
+`path.__fspath__()` if it defines one (as `pathlib.Path` does). This is the PEP 519
+path-like object protocol.
+
+### `os.makedirs`
+
+`os.makedirs(path, mode=0o777, exist_ok=False)` creates intermediate directories
+recursively. With `exist_ok=True` it suppresses `FileExistsError` for the leaf directory.
+
+## gopy notes
+
+Not yet ported. `module/os/` will wrap Go's `os` package. `_Environ` can use Go's
+`os.Getenv`/`os.Setenv`/`os.Unsetenv`. `os.walk` maps to a recursive `os.ReadDir` loop.
+`os.fspath` is a protocol check that the gopy type system will handle via `__fspath__`.

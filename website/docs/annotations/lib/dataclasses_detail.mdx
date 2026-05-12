@@ -1,0 +1,134 @@
+---
+title: "Lib/dataclasses.py"
+description: "CPython dataclass decorator — field descriptors, __init__ codegen, KW_ONLY, InitVar"
+cpython_path: Lib/dataclasses.py
+cpython_version: "3.14"
+lines: 1300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/dataclasses.py` implements the `@dataclass` decorator entirely in
+pure Python. It inspects a class at decoration time, derives field metadata
+from annotations, then synthesises and `exec`s the required dunder methods
+into the class namespace.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | module preamble | imports, sentinel objects, `__all__` |
+| 61–150 | `Field` / `field()` | descriptor carrying metadata and `default_factory` |
+| 151–200 | `_FIELD`, `_FIELD_INITVAR`, `_FIELD_CLASSVAR` | internal field-kind markers |
+| 201–280 | `_process_class` | main entry; collects fields, calls all synthesis helpers |
+| 281–380 | `_init_fn` / `_field_init` | builds `__init__` source string then `exec`s it |
+| 381–440 | `_repr_fn` | builds `__repr__` source string |
+| 441–490 | `_eq_fn` / `_hash_fn` | builds `__eq__` and `__hash__` source strings |
+| 491–560 | `_set_new_attribute` | guarded setattr; skips if user defined method |
+| 561–620 | `KW_ONLY` | sentinel class; marks transition to keyword-only fields |
+| 621–680 | `InitVar` | descriptor for init-only parameters that bypass field storage |
+| 681–750 | `dataclass` | public decorator; dispatches to `_process_class` |
+| 751–900 | `fields`, `asdict`, `astuple`, `replace` | introspection and copy helpers |
+| 901–1300 | `make_dataclass`, `_recursive_repr` | dynamic class factory; repr guard |
+
+## Reading
+
+### Field and default_factory
+
+A `Field` records everything about one class variable. When `default_factory`
+is set, `__init__` must call it per-instance rather than sharing a single
+default object.
+
+```python
+# CPython: Lib/dataclasses.py:61 Field.__init__
+class Field:
+    __slots__ = ('default', 'default_factory', 'repr', 'hash',
+                 'init', 'compare', 'metadata', 'kw_only',
+                 '_field_type', 'name', 'type')
+    def __init__(self, default, default_factory, init, repr, hash,
+                 compare, metadata, kw_only):
+        self.default = default
+        self.default_factory = default_factory
+        # ... remaining assignments
+```
+
+### _process_class field collection
+
+`_process_class` walks `cls.__mro__` in reverse so subclass fields shadow base
+fields, then partitions fields by `KW_ONLY` position.
+
+```python
+# CPython: Lib/dataclasses.py:201 _process_class
+def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen,
+                   match_args, kw_only, slots, weakref_slot):
+    fields = {}
+    # Walk MRO in reverse to collect inherited fields first
+    for b in cls.__mro__[-1:0:-1]:
+        base_fields = getattr(b, _FIELDS, None)
+        if base_fields is not None:
+            for f in base_fields.values():
+                fields[f.name] = f
+    # ... then process cls's own annotations
+```
+
+### _field_init: code generation via exec
+
+Rather than building an AST, `_field_init` assembles a Python source string
+for the body of `__init__` and hands it to `exec`. The generated namespace is
+then spliced into the class.
+
+```python
+# CPython: Lib/dataclasses.py:310 _field_init
+def _field_init(f, frozen, has_post_init, self_name, globals):
+    # Emit an assignment line, or a factory call, depending on f.default_factory
+    if f.default_factory is MISSING:
+        # simple assignment: self.x = x
+        return f'  {self_name}.{f.name} = {f.name}\n'
+    else:
+        # factory: self.x = __dataclass_fields__["x"].default_factory()
+        globals[f'_dflt_{f.name}'] = f.default_factory
+        return (f'  if {f.name} is _HAS_DEFAULT_FACTORY:\n'
+                f'    {self_name}.{f.name} = _dflt_{f.name}()\n'
+                f'  else:\n'
+                f'    {self_name}.{f.name} = {f.name}\n')
+```
+
+### InitVar and KW_ONLY
+
+`InitVar` is a generic alias wrapper. `_process_class` recognises it by type
+check and marks the field as `_FIELD_INITVAR` so it appears in `__init__`
+but is never stored.
+
+`KW_ONLY` is a bare sentinel object used as a field default to signal that
+all subsequent fields in the annotation order must be keyword-only in the
+generated `__init__`.
+
+```python
+# CPython: Lib/dataclasses.py:561 KW_ONLY
+class KW_ONLY:
+    """Sentinel; fields after this in the annotation order become kw-only."""
+```
+
+## gopy notes
+
+- `_process_class` calls `exec` to install synthesised dunder methods. gopy
+  supports `exec` with a namespace dict via `vm/eval_gen.go`; the generated
+  source uses only assignments and simple conditionals, all covered.
+- `InitVar` uses `__class_getitem__` to return a `_InitVar` wrapper. gopy
+  implements `__class_getitem__` for descriptor types in `objects/class_getitem.go`.
+- `frozen=True` dataclasses install `__setattr__` and `__delattr__` that raise
+  `FrozenInstanceError`. gopy routes slot assignment through `objects/instance.go`
+  and can install per-type overrides.
+- `asdict` and `astuple` recurse into nested dataclasses and containers; they
+  rely on `copy.deepcopy`, which is not yet ported. They are out of scope for
+  the current milestone.
+
+## CPython 3.14 changes
+
+- `slots=True` dataclasses now correctly handle `__weakref__` when
+  `weakref_slot=True` is also passed (bug fixed in 3.13, stabilised in 3.14).
+- `replace()` now accepts keyword arguments whose names match `InitVar` fields,
+  consistent with `__init__` behaviour (new in 3.13).
+- `make_dataclass` gained a `module` parameter so the synthesised class reports
+  the correct `__module__` (new in 3.12, no change in 3.14).

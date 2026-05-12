@@ -1,0 +1,115 @@
+---
+title: Lib/contextlib.py
+description: "contextmanager, asynccontextmanager, closing, suppress, ExitStack, and AbstractContextManager"
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 680
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/contextlib.py" />
+
+`contextlib` provides utilities for working with context managers. The core pieces are the `@contextmanager` decorator (turning generators into context managers), the `ExitStack` for composing an arbitrary number of context managers at runtime, and a set of small helpers (`closing`, `suppress`, `nullcontext`). All of it is pure Python.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | imports, `AbstractContextManager`, `AbstractAsyncContextManager` | ABCs registered via `abc.ABC` |
+| 41-140 | `_GeneratorContextManager` | Base class backing `@contextmanager` |
+| 141-180 | `contextmanager` | Decorator that wraps a generator function |
+| 181-240 | `_AsyncGeneratorContextManager` | Base class backing `@asynccontextmanager` |
+| 241-260 | `asynccontextmanager` | Async variant of the decorator |
+| 261-300 | `closing`, `nullcontext` | Trivial one-method context managers |
+| 301-340 | `suppress` | Context manager that silently swallows listed exception types |
+| 341-420 | `redirect_stdout`, `redirect_stderr` | Temporary stream redirection |
+| 421-560 | `ExitStack` | Composable stack of context managers and callbacks |
+| 561-620 | `AsyncExitStack` | Async variant of `ExitStack` |
+| 621-680 | `aclosing`, `chdir` | Async closing helper and directory-change context manager |
+
+## Reading
+
+### contextmanager and GeneratorContextManager
+
+`@contextmanager` converts a generator function into a context manager. The decorator returns a helper function that, when called, constructs a `_GeneratorContextManager` around the generator object. `__enter__` advances the generator to the first `yield` and returns the yielded value. `__exit__` sends an exception into the generator (or calls `next` on normal exit) and handles the `StopIteration` that signals the generator returned cleanly.
+
+```python
+# CPython: Lib/contextlib.py:141 contextmanager
+def contextmanager(func):
+    @wraps(func)
+    def helper(*args, **kwds):
+        return _GeneratorContextManager(func, args, kwds)
+    return helper
+```
+
+```python
+# CPython: Lib/contextlib.py:86 _GeneratorContextManager.__exit__
+def __exit__(self, typ, value, traceback):
+    if typ is None:
+        try:
+            next(self.gen)
+        except StopIteration:
+            return False
+        else:
+            raise RuntimeError("generator didn't stop")
+    else:
+        ...
+        try:
+            self.gen.throw(value)
+        except StopIteration as exc:
+            return exc is not value
+        except RuntimeError as exc:
+            ...
+```
+
+The exception path is the tricky part. When `__exit__` calls `gen.throw(value)`, a well-behaved generator catches the exception, does cleanup, and falls off the end (raising `StopIteration`). If the generator raises a different exception, `__exit__` lets it propagate. If it yields again, that is a bug and `RuntimeError` is raised.
+
+### ExitStack._push_cm_exit
+
+`ExitStack` maintains a list of callbacks in LIFO order. `enter_context(cm)` calls `cm.__enter__()` and then registers a wrapper around `cm.__exit__` with `_push_cm_exit`. The wrapper adapts the three-argument `__exit__` signature to the single-boolean convention the stack uses internally, and also handles suppression: if any `__exit__` returns a truthy value, the exception is swallowed and the remaining callbacks still run.
+
+```python
+# CPython: Lib/contextlib.py:453 ExitStack._push_cm_exit
+def _push_cm_exit(self, cm, cm_exit):
+    def _exit_wrapper(exc_type, exc, tb):
+        suppress_exc = cm_exit(exc_type, exc, tb)
+        if suppress_exc:
+            return True
+    _exit_wrapper.__wrapped__ = cm
+    self._exit_callbacks.append((True, _exit_wrapper))
+```
+
+The `__wrapped__` attribute lets `ExitStack.__repr__` show the original context manager rather than the lambda-like wrapper.
+
+### AbstractContextManager ABC
+
+`AbstractContextManager` provides a default `__enter__` that returns `self` and declares `__exit__` as an abstract method. Subclasses only need to implement `__exit__`. Classes that already define both dunder methods can be registered without inheriting, via `register()`.
+
+```python
+# CPython: Lib/contextlib.py:12 AbstractContextManager
+class AbstractContextManager(ABC):
+    def __enter__(self):
+        return self
+
+    @abc.abstractmethod
+    def __exit__(self, exc_type, exc_value, traceback):
+        return None
+
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is AbstractContextManager:
+            return (hasattr(C, '__enter__') and hasattr(C, '__exit__'))
+        return NotImplemented
+```
+
+`__subclasshook__` makes `isinstance(obj, AbstractContextManager)` return `True` for any object that has both dunders, without requiring explicit `register()` calls.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/contextlib/`.
+
+The existing skeleton at `module/contextlib/module.go` currently exposes only a stub. The full port needs `_GeneratorContextManager` backed by gopy's generator/iterator machinery, `ExitStack` as a Go struct with a slice of callback closures, and `suppress` using the standard exception-matching helpers already in `vm/`. The async variants (`asynccontextmanager`, `AsyncExitStack`) depend on the async/await infrastructure and will follow after the sync port is green.

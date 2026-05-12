@@ -1,0 +1,146 @@
+---
+title: asyncio/unix_events.py
+description: "Unix event loop extensions: signals, pipes, subprocesses, and child watchers"
+cpython_path: Lib/asyncio/unix_events.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`unix_events.py` layers Unix-specific behaviour on top of the selector loop.
+It adds POSIX signal delivery, raw pipe transports, and subprocess spawning with
+child-exit tracking via `SIGCHLD`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50 | imports / `__all__` | signal, os, subprocess imports |
+| 51–180 | `_UnixSelectorEventLoop` | subclass adding signal support |
+| 181–260 | `add_signal_handler` / `remove_signal_handler` | `signal.set_wakeup_fd` plumbing |
+| 261–340 | `_UnixReadPipeTransport` | async reads from an `os.pipe` fd |
+| 341–440 | `_UnixWritePipeTransport` | async writes to an `os.pipe` fd |
+| 441–580 | `_UnixSubprocessTransport` | spawns child via `subprocess.Popen`, wires stdio pipes |
+| 581–720 | `AbstractChildWatcher` | ABC: `add_child_handler`, `remove_child_handler` |
+| 721–860 | `SafeChildWatcher` | `waitpid(-1, WNOHANG)` in SIGCHLD handler |
+| 861–1000 | `ThreadedChildWatcher` | background thread calls `os.waitpid` per child |
+| 1001–1100 | `PidfdChildWatcher` | Linux `pidfd_open` watcher (3.9+) |
+| 1101–1200 | `DefaultEventLoopPolicy` | returns `_UnixSelectorEventLoop` as the default |
+| 1201–1400 | helper functions | `_sighandler_noop`, pipe-fd helpers |
+
+## Reading
+
+### Signal delivery via `set_wakeup_fd`
+
+`add_signal_handler` installs a Python-level handler with `signal.signal`, then
+calls `signal.set_wakeup_fd` with one end of a self-pipe. When a signal fires,
+the OS writes a byte into the pipe; the selector wakes up and dispatches the
+registered `Handle`.
+
+```python
+# CPython: Lib/asyncio/unix_events.py:183 _UnixSelectorEventLoop.add_signal_handler
+def add_signal_handler(self, sig, callback, *args):
+    self._check_signal(sig)
+    self._check_closed()
+    handle = events.Handle(callback, args, self, None)
+    self._signal_handlers[sig] = handle
+    try:
+        # set_wakeup_fd writes the signal number as a byte
+        signal.set_wakeup_fd(self._csock.fileno())
+        signal.signal(sig, _sighandler_noop)
+    except OSError as exc:
+        del self._signal_handlers[sig]
+        raise
+```
+
+The `_read_from_self` reader callback drains the self-pipe and calls every
+pending signal handle in `_signal_handlers`.
+
+### Pipe transport write path
+
+`_UnixWritePipeTransport.write` mirrors the socket transport: try an immediate
+`os.write`, buffer the remainder, register a writable-fd callback.
+
+```python
+# CPython: Lib/asyncio/unix_events.py:390 _UnixWritePipeTransport.write
+def write(self, data):
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError(...)
+    if not data or self._conn_lost:
+        ...
+        return
+    if not self._buffer:
+        try:
+            n = os.write(self._fileno, data)
+        except (BlockingIOError, InterruptedError):
+            n = 0
+        if n == len(data):
+            return
+        data = memoryview(data)[n:]
+    self._buffer += data
+    self._loop.add_writer(self._fileno, self._write_ready)
+```
+
+### Subprocess spawning
+
+`_UnixSubprocessTransport._start` uses `subprocess.Popen` with `close_fds=True`
+and pre-opened pipe fds for stdin/stdout/stderr. After `Popen` returns, each
+stdio fd is wrapped in a read or write pipe transport and attached to the
+`SubprocessProtocol`.
+
+```python
+# CPython: Lib/asyncio/unix_events.py:480 _UnixSubprocessTransport._start
+async def _start(self, args, shell, stdin, stdout, stderr, bufsize, **kwargs):
+    popen_args = (shlex.join(args),) if shell else args
+    self._proc = subprocess.Popen(
+        popen_args, shell=shell,
+        stdin=stdin, stdout=stdout, stderr=stderr,
+        bufsize=bufsize, **kwargs)
+    self._pid = self._proc.pid
+    self._loop.get_child_watcher().add_child_handler(
+        self._pid, self._child_watcher_callback, self)
+```
+
+### `ThreadedChildWatcher`
+
+The default child watcher since 3.12. It spawns one `threading.Thread` per
+child that blocks on `os.waitpid(pid, 0)`. When the thread returns, it schedules
+the registered child handler back on the event loop thread via
+`loop.call_soon_threadsafe`.
+
+```python
+# CPython: Lib/asyncio/unix_events.py:900 ThreadedChildWatcher.add_child_handler
+def add_child_handler(self, pid, callback, *args):
+    loop = events.get_running_loop()
+    thread = threading.Thread(
+        target=self._do_waitpid, args=(loop, pid, callback, args),
+        daemon=True, name=f"waitpid-{pid}")
+    self._threads[pid] = thread
+    thread.start()
+```
+
+## gopy notes
+
+- Signal handling maps to `os/signal.Notify` with a channel; a goroutine drains
+  the channel and calls registered Go callbacks. No self-pipe is needed.
+- `_UnixReadPipeTransport` and `_UnixWritePipeTransport` map directly to
+  goroutines reading/writing `os.File` objects obtained from `os.Pipe`.
+- `ThreadedChildWatcher` maps to a goroutine per child calling
+  `syscall.Wait4`. The callback is dispatched onto the event-loop goroutine via
+  a channel.
+- `PidfdChildWatcher` is Linux-specific; the Go equivalent polls a `pidfd` with
+  `epoll`.
+
+## CPython 3.14 changes
+
+- `FastChildWatcher` and `MultiLoopChildWatcher` were removed in 3.12. 3.14
+  ships only `SafeChildWatcher`, `ThreadedChildWatcher`, and
+  `PidfdChildWatcher`.
+- `ThreadedChildWatcher` became the default policy on Linux in 3.12 and that
+  decision stands in 3.14.
+- `_UnixSubprocessTransport` gained a `process_group` kwarg (3.11) that is
+  forwarded to `Popen`; unchanged in 3.14.
+- `PidfdChildWatcher` auto-enables itself when `os.pidfd_open` is available,
+  which is all Linux kernels >= 5.3 with glibc >= 2.30.

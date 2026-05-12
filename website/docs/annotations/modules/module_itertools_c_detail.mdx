@@ -1,0 +1,236 @@
+---
+title: "Modules/itertoolsmodule.c"
+description: "Annotation of CPython's itertoolsmodule.c: chain, islice, product, groupby, and accumulate"
+cpython_path: Modules/itertoolsmodule.c
+cpython_version: "3.14"
+lines: 4500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/itertoolsmodule.c" />
+
+`itertoolsmodule.c` implements the entire `itertools` module as a collection of stateful C
+iterator types. Each type has an `__iter__` that returns itself and an `__next__` (the
+`tp_iternext` slot) that advances internal state and produces the next value. The file is
+large because each iterator is self-contained: struct, `tp_new`, `tp_dealloc`, `tp_iternext`,
+and `__reduce__` are all defined inline.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `chain_object` / `chain_iternext` | struct + iternext | 160-280 | Exhaust one iterator, advance to next |
+| `islice_object` / `islice_next` | struct + iternext | 900-1050 | Skip counter and stop sentinel |
+| `product_object` / `product_next` | struct + iternext | 1300-1500 | State array and carry-increment loop |
+| `groupby_object` / `groupby_next` | struct + iternext | 1700-1900 | Advance past equal keys |
+| `accumulate_object` / `accumulate_next` | struct + iternext | 2100-2280 | Initial sentinel, binary function call |
+| `combinations_object` | struct | 2400-2600 | Index array, lexicographic advance |
+| `permutations_object` | struct | 2700-2900 | In-place Fisher-Yates advance |
+| `cycle_object` | struct | 600-720 | Save-to-list then replay |
+| `repeat_object` | struct | 750-860 | Fixed count or infinite |
+| `module init` | PyModuleDef | 4460-4500 | Type registration |
+
+## Reading
+
+### chain_iternext: exhaust and advance
+
+`chain` holds a tuple of source iterables and a `source` pointer to the currently active
+iterator. When the active source raises `StopIteration`, `chain_iternext` replaces it with the
+next iterable from the tuple and retries. When the tuple is exhausted it returns `NULL`
+without setting an exception, which signals `StopIteration` to the caller.
+
+```c
+// CPython: Modules/itertoolsmodule.c:214 chain_iternext
+static PyObject *
+chain_iternext(chainobject *lz)
+{
+    PyObject *item;
+
+    while (lz->source != NULL) {
+        item = (*Py_TYPE(lz->source)->tp_iternext)(lz->source);
+        if (item != NULL)
+            return item;
+        /* Source exhausted: clear exception, advance tuple index */
+        if (PyErr_ExceptionMatches(PyExc_StopIteration))
+            PyErr_Clear();
+        else if (PyErr_Occurred())
+            return NULL;
+        Py_CLEAR(lz->source);
+        lz->source = next_source_from_tuple(lz);
+    }
+    return NULL; /* all sources exhausted */
+}
+```
+
+`chain.from_iterable` uses a lazy variant that pulls the inner iterables one at a time from an
+outer iterator, rather than pre-building the tuple.
+
+### islice_next: skip counter and stop sentinel
+
+`islice` needs to handle `start`, `stop`, and `step` arguments. The `cnt` field tracks how
+many items have been yielded. Items before `start` are consumed and discarded. Items at or
+beyond `stop` cause the iterator to return `NULL`.
+
+```c
+// CPython: Modules/itertoolsmodule.c:968 islice_next
+static PyObject *
+islice_next(isliceobject *lz)
+{
+    PyObject *item;
+    PyObject *it = lz->it;
+    Py_ssize_t stop = lz->stop;
+
+    if (lz->cnt > stop)
+        return NULL;
+
+    /* Skip ahead to the next yield point */
+    Py_ssize_t oldnext = lz->next;
+    while (lz->cnt < oldnext) {
+        item = (*Py_TYPE(it)->tp_iternext)(it);
+        if (item == NULL) return NULL;
+        Py_DECREF(item);
+        lz->cnt++;
+    }
+    item = (*Py_TYPE(it)->tp_iternext)(it);
+    if (item == NULL) return NULL;
+    lz->cnt++;
+    lz->next += lz->step;
+    return item;
+}
+```
+
+When `stop` is `PY_SSIZE_T_MAX` the iterator runs until the underlying source is exhausted,
+matching the behaviour of `islice(it, start, None)`.
+
+### product state array and carry increment
+
+`product` computes the Cartesian product of its input pools. The state is an array of indices
+(one per pool) that is advanced by a carry-increment loop starting from the rightmost pool,
+mirroring how an odometer rolls over.
+
+```c
+// CPython: Modules/itertoolsmodule.c:1440 product_next
+static PyObject *
+product_next(productobject *lz)
+{
+    PyObject **pools = lz->pools;
+    Py_ssize_t *indices = lz->indices;
+    Py_ssize_t npools = lz->npools;
+
+    /* Build result tuple from current indices */
+    PyObject *result = PyTuple_New(npools);
+    for (Py_ssize_t i = 0; i < npools; i++) {
+        PyObject *pool = pools[i];
+        PyTuple_SET_ITEM(result, i,
+            Py_NewRef(PyTuple_GET_ITEM(pool, indices[i])));
+    }
+
+    /* Advance: carry from the right */
+    Py_ssize_t i = npools - 1;
+    while (i >= 0) {
+        indices[i]++;
+        if (indices[i] < PyTuple_GET_SIZE(pools[i]))
+            break;
+        indices[i] = 0;
+        i--;
+    }
+    if (i < 0) lz->stopped = 1;
+    return result;
+}
+```
+
+All pools are pre-converted to tuples in `product_new`, so index access inside `product_next`
+is O(1) and never calls Python.
+
+### groupby_next: advance past equal keys
+
+`groupby` groups consecutive elements that share the same key. Its state is the current target
+key value (`tgtkey`) and the last item fetched (`currvalue`). On each call to `groupby_next`
+it advances past any items that are equal to the previous group's key before starting a new
+`_grouper` sub-iterator.
+
+```c
+// CPython: Modules/itertoolsmodule.c:1820 groupby_next
+static PyObject *
+groupby_next(groupbyobject *gbo)
+{
+    PyObject *newvalue, *newkey, *r;
+
+    /* Advance until the key changes */
+    while (gbo->currkey == NULL ||
+           PyObject_RichCompareBool(gbo->currkey, gbo->tgtkey, Py_EQ)) {
+        newvalue = (*Py_TYPE(gbo->it)->tp_iternext)(gbo->it);
+        if (newvalue == NULL) return NULL;
+        Py_XDECREF(gbo->currvalue);
+        gbo->currvalue = newvalue;
+        newkey = PyObject_CallOneArg(gbo->keyfunc, newvalue);
+        if (newkey == NULL) return NULL;
+        Py_XDECREF(gbo->currkey);
+        gbo->currkey = newkey;
+    }
+    Py_INCREF(gbo->currkey);
+    Py_XDECREF(gbo->tgtkey);
+    gbo->tgtkey = gbo->currkey;
+    r = PyTuple_Pack(2, gbo->tgtkey, grouper_new(gbo));
+    return r;
+}
+```
+
+The `_grouper` sub-iterator holds a reference back to the parent `groupby` object and stops
+as soon as the key changes, leaving `currvalue` in place for the parent to pick up next time.
+
+### accumulate_next: initial sentinel and binary function call
+
+`accumulate` supports an optional `initial` value and an optional `func` argument. The
+`initial` sentinel is indicated by a `NULL` `total` field; on the first call `total` is set
+to `initial` (or the first element) without consuming `func`.
+
+```c
+// CPython: Modules/itertoolsmodule.c:2220 accumulate_next
+static PyObject *
+accumulate_next(accumulateobject *lz)
+{
+    PyObject *val, *newtotal;
+
+    if (lz->total == NULL) {
+        /* First call: return initial or first element */
+        if (lz->initial != Py_None) {
+            lz->total = Py_NewRef(lz->initial);
+            return Py_NewRef(lz->total);
+        }
+        val = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
+        if (val == NULL) return NULL;
+        lz->total = val;
+        return Py_NewRef(lz->total);
+    }
+
+    val = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
+    if (val == NULL) return NULL;
+
+    if (lz->binop == Py_None || lz->binop == NULL)
+        newtotal = PyNumber_Add(lz->total, val);
+    else
+        newtotal = PyObject_CallFunctionObjArgs(lz->binop, lz->total, val, NULL);
+
+    Py_DECREF(val);
+    if (newtotal == NULL) return NULL;
+    Py_SETREF(lz->total, newtotal);
+    return Py_NewRef(lz->total);
+}
+```
+
+When no `func` is provided the default is `operator.add`, but the implementation detects
+`lz->binop == NULL` and calls `PyNumber_Add` directly to avoid the attribute lookup overhead.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/itertools/`. Each iterator type maps to a Go struct implementing
+the `objects.Iterator` interface. The carry-increment loop in `product_next` translates
+directly to a Go `for` loop over a `[]int` index slice. `groupby` requires particular care
+because the `_grouper` sub-iterator shares mutable state with the parent; the Go port will use
+a shared pointer to a common state struct rather than back-references. `chain.from_iterable`
+will be a separate type from `chain` to keep the lazy outer-iterator path clean.

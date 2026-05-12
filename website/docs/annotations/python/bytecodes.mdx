@@ -23,8 +23,7 @@ headers:
 * `Python/executor_cases.c.h`, the tier-2 micro-op bodies, included
   inside the `enter_tier_two:` block of the same function.
 
-Every opcode is defined as one of three DSL forms. `inst(OPNAME, (...))
-{ body }` is a pure tier-1 instruction. `op(NAME, (...)) { body }` is a
+Every opcode is defined as one of three DSL forms. `inst(OPNAME, (...)) { body }` is a pure tier-1 instruction. `op(NAME, (...)) { body }` is a
 reusable fragment that can be composed into a `macro`. `macro(OPNAME) =
 NAME1 + NAME2 + ...;` assembles a tier-1 opcode from named fragments,
 each of which becomes a separate micro-op in the tier-2 executor. The

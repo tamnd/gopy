@@ -1,0 +1,52 @@
+---
+title: "hmac.py: HMAC construction, constant-time comparison, and the new() factory"
+description: "Annotated walkthrough of Lib/hmac.py covering ipad/opad key derivation, update/digest/hexdigest, compare_digest, the new() convenience factory, and 3.14 changes"
+cpython_path: Lib/hmac.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: module/hmac/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | module header | Imports (`hashlib`, `_hashlib`, `warnings`); `__all__` |
+| 31–55 | `HMAC.__init__` | Key normalisation, ipad/opad XOR, inner/outer hash seeding |
+| 56–80 | `HMAC.update` | Feeds data into the inner hash only |
+| 81–110 | `HMAC.digest`, `hexdigest` | Finalises inner, feeds into outer, returns bytes or hex string |
+| 111–130 | `HMAC.copy` | Deep-copies both inner and outer hash objects |
+| 131–155 | `HMAC.digest_size`, `block_size` | Read-only properties delegating to inner hash |
+| 156–175 | `new()` | Module-level factory; thin wrapper around `HMAC(key, msg, digestmod)` |
+| 176–200 | `compare_digest` | Delegates to `_hashlib.compare_digest` (C) or pure-Python fallback |
+
+## Reading
+
+### Key derivation and the ipad/opad construction
+
+`HMAC.__init__(key, msg=None, digestmod='')` follows RFC 2104. If `len(key)` exceeds the hash's `block_size`, the key is first hashed to produce a shorter key. The key is then zero-padded to `block_size` bytes. Two derived keys are produced by XORing every byte with `0x36` (ipad) and `0x5c` (opad). The inner hash is seeded with the ipad key; the outer hash is seeded with the opad key. In 3.14, passing `digestmod=''` (the old default) raises `TypeError` rather than silently choosing MD5, completing a deprecation that started in 3.4.
+
+The `digestmod` argument accepts a name string (forwarded to `hashlib.new`), a constructor callable, or a module with a `new` attribute.
+
+### digest and hexdigest finalisation
+
+`digest()` copies the inner hash (via `.copy()`), finalises it, then feeds the result into a copy of the outer hash and finalises that. Copies are used so the `HMAC` object remains usable for further `update()` calls after `digest()` is called, matching the behaviour of `hashlib` hash objects.
+
+`hexdigest()` returns `digest().hex()`. There is no separate implementation.
+
+### compare_digest and timing safety
+
+`compare_digest(a, b)` delegates to `_hashlib.compare_digest`, a C function that compares two byte strings or ASCII strings in constant time using a bitwise-OR accumulator. This prevents timing side-channels when checking MAC values. The pure-Python fallback (used when `_hashlib` is absent) iterates both strings with `zip` and ORs differences, padding differences to the shorter length, but is not guaranteed to be constant-time on all Python implementations.
+
+In 3.14 the function raises `TypeError` if the argument types differ (bytes vs str), closing a subtle comparison bug present in earlier releases.
+
+## gopy notes
+
+- Go's `crypto/hmac` package implements the same RFC 2104 construction. The gopy port wraps it rather than reimplementing the XOR key derivation.
+- The `digestmod` dispatch mirrors `hashlib.new()` dispatch; the same name-to-constructor table used in `module/hashlib` should be reused.
+- `HMAC.copy()` requires that the underlying Go hash implements `encoding.BinaryMarshaler` and `encoding.BinaryUnmarshaler` (all standard library hashes do) or provides a `Clone` method.
+- `compare_digest` maps directly to `crypto/subtle.ConstantTimeCompare`. The gopy port should expose this at the Python level as a built-in call, not a pure-Go loop in Python bytecode.
+- The `digestmod` required-argument change in 3.14 should be enforced at the Go argument-parsing layer; no special casing needed beyond a nil check.

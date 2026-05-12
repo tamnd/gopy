@@ -1,0 +1,74 @@
+---
+title: Objects/boolobject.c
+description: "PyBool_Type: True and False singletons, bool_new enforcement of the two-value invariant, bool_repr, and why bool is a subclass of int."
+cpython_path: Objects/boolobject.c
+cpython_version: "3.14"
+lines: 160
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/boolobject.c`
+
+<CpyLink path="Objects/boolobject.c" />
+
+`Objects/boolobject.c` defines `PyBool_Type` and the `True`/`False` singletons. `bool` is
+a subclass of `int`: `True` has `ob_ival = 1` and `False` has `ob_ival = 0`. This means
+all integer operations work on booleans automatically.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-40 | `_Py_FalseStruct`, `_Py_TrueStruct` | Static singleton objects |
+| 41-80 | `bool_new` | Returns `True` or `False`; never allocates |
+| 81-130 | `bool_repr`, `bool_and`, `bool_or`, `bool_xor` | Override `&`/`|`/`^` to return bool |
+| 131-160 | `PyBool_Type` definition | Type slots |
+
+## Reading
+
+### Singleton enforcement
+
+`bool_new` converts any value to a `bool` by calling `PyObject_IsTrue` and returning the
+pre-existing singleton. Subclassing `bool` is allowed but calling the subclass constructor
+still returns a `bool` instance (not the subclass), which is the documented behaviour.
+
+```c
+// CPython: Objects/boolobject.c:55 bool_new
+static PyObject *
+bool_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    ...
+    ok = PyObject_IsTrue(x);
+    if (ok < 0) return NULL;
+    return PyBool_FromLong(ok);
+}
+```
+
+### `bool_and` / `bool_or` / `bool_xor`
+
+These override `int`'s bitwise operators to return a `bool` when both operands are `bool`.
+If either operand is a plain `int`, the `int` operation is used and returns an `int`.
+
+```c
+// CPython: Objects/boolobject.c:88 bool_and
+static PyObject *
+bool_and(PyObject *a, PyObject *b)
+{
+    if (!PyBool_Check(a) || !PyBool_Check(b))
+        return PyLong_Type.tp_as_number->nb_and(a, b);
+    return PyBool_FromLong(
+        (a == Py_True) & (b == Py_True));
+}
+```
+
+### `bool` as `int`
+
+`True + True == 2`, `True * 3 == 3`. The arithmetic is inherited from `PyLong_Type` with
+no overrides. Only `__repr__` and the three bitwise operators are overridden.
+
+## gopy notes
+
+`True` and `False` are singletons in `objects/`. `bool` inherits from `int`, so arithmetic
+on booleans returns `int`. The `PyBool_Check` predicate maps to `py.IsBool(obj)` in gopy.

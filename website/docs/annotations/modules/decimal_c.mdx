@@ -1,0 +1,168 @@
+---
+title: Modules/_decimal/_decimal.c
+description: mpdecimal-backed C implementation of the decimal module; defines DecimalType and ContextType and routes all arithmetic through mpd_q* signal-trapping functions.
+cpython_path: Modules/_decimal/_decimal.c
+cpython_version: "3.14"
+lines: 5000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_decimal/_decimal.c`
+
+<CpyLink path="Modules/_decimal/_decimal.c" />
+
+<overview>
+This is the largest single C file in CPython's Modules tree. It implements the
+`decimal` module entirely in C by wrapping the mpdecimal library (libmpdec).
+The pure-Python fallback is `Lib/_pydecimal.py`; this file shadows it whenever
+the interpreter is built with mpdecimal support, which is the default.
+
+Two Python types are defined: `Decimal` and `Context`. Every `Decimal` instance
+carries an `mpd_t` value (mpdecimal's internal representation). Every arithmetic
+operation is forwarded to the corresponding `mpd_q*` function, which records
+IEEE 754 signals (Inexact, Overflow, DivisionByZero, etc.) into the context's
+status word. The Python layer then checks that word and raises the appropriate
+Python exception if a trap is set.
+</overview>
+
+## Map
+
+### Top-level types
+
+| Python name | C object | Source region |
+|---|---|---|
+| `Decimal` | `PyDecType` | `~line 360` |
+| `Context` | `PyDecContextType` | `~line 3800` |
+
+### Key structs
+
+| Struct | Purpose |
+|---|---|
+| `PyDecObject` | Holds `mpd_t mpd` inline (flexible array at end) |
+| `PyDecContextObject` | Holds `mpd_context_t ctx` and the per-context trap/signal dicts |
+
+### Arithmetic dispatch (representative sample)
+
+| Python method | mpdecimal function |
+|---|---|
+| `__add__` | `mpd_qadd` |
+| `__sub__` | `mpd_qsub` |
+| `__mul__` | `mpd_qmul` |
+| `__truediv__` | `mpd_qdiv` |
+| `__mod__` | `mpd_qrem` |
+| `__pow__` | `mpd_qpow` |
+| `sqrt` | `mpd_qsqrt` |
+| `ln` | `mpd_qln` |
+| `exp` | `mpd_qexp` |
+
+### Module-level functions
+
+| Function | Purpose |
+|---|---|
+| `getcontext` | Returns the current thread-local `Context` |
+| `setcontext` | Sets the current thread-local `Context` |
+| `localcontext` | Returns a context manager wrapping a copy of the current context |
+| `DecimalTuple` | Named-tuple constructor for `(sign, digits, exponent)` |
+
+## Reading
+
+### Memory layout of `PyDecObject`
+
+```c
+/* The mpd_t holds a pointer to its own coefficient array.
+   For small decimals we allocate the coefficient inline right after
+   the struct to avoid a second malloc. */
+typedef struct {
+    PyObject_HEAD
+    /* alloc flags: MPD_STATIC | MPD_STATIC_DATA for inline data */
+    mpd_t   *mpd;           /* points into data[] for small values */
+    mpd_t    _mpd;          /* the actual mpd_t */
+    mpd_uint_t data[_Py_DEC_MINALLOC]; /* inline coefficient storage */
+} PyDecObject;
+```
+
+The inline coefficient trick means that the common case (a decimal that fits
+in `_Py_DEC_MINALLOC` words) requires only one allocation, keeping
+`Decimal(42)` as cheap as possible.
+
+### Signal trapping in arithmetic helpers
+
+All binary arithmetic goes through a single macro pattern:
+
+```c
+/* Example: Decimal.__add__ */
+static PyObject *
+dec_mpd_qadd(PyObject *v, PyObject *w, PyObject *context)
+{
+    PyObject *result;
+    uint32_t status = 0;        /* mpdecimal signal accumulator */
+
+    CONVERT_BINOP_RAISE(&v, &w, context);  /* coerce operands */
+
+    result = PyDecType_New(context);
+    if (result == NULL) goto error;
+
+    mpd_qadd(MPD(result), MPD(v), MPD(w),
+             CTX(context), &status);
+
+    /* Translate mpdecimal signals to Python exceptions/traps */
+    if (dec_addstatus(context, status) < 0) {
+        Py_DECREF(result);
+        result = NULL;
+    }
+
+error:
+    CLEANUP_PAIR(v, w);
+    return result;
+}
+```
+
+`dec_addstatus` ORs `status` into the context's status word and then checks
+each set bit against the context's trap flags. If a trap is set for that signal,
+it raises the corresponding Python exception (`decimal.Overflow`,
+`decimal.DivisionByZero`, etc.).
+
+### Context thread-locality
+
+```c
+/* Each thread owns a PyDecContextObject stored in its thread state dict
+   under the key _decimal_module_state->tls_context_key. */
+static PyObject *
+PyDec_GetCurrentContext(PyObject *module)
+{
+    PyObject *dict = PyThreadState_GetDict();   /* never NULL */
+    _decimal_state *state = _decimal_get_state(module);
+    PyObject *ctx = PyDict_GetItemWithError(dict, state->tls_context_key);
+    if (ctx == NULL) {
+        /* First access: install a copy of the default context */
+        ctx = context_copy(state->default_context, NULL);
+        if (PyDict_SetItem(dict, state->tls_context_key, ctx) < 0) { ... }
+    }
+    return ctx;
+}
+```
+
+The pattern avoids C-level thread-local storage so it works correctly across
+sub-interpreters, each of which has its own thread-state dict.
+
+## gopy mirror
+
+Not yet ported to gopy. A port would live in `module/decimal/`. The key
+dependency is binding libmpdec via cgo or re-implementing the coefficient
+arithmetic in Go. Given the size of the file (~5000 lines) and the tight
+coupling to mpdecimal, a cgo wrapper is the most practical first step.
+
+## CPython 3.14 changes
+
+- `_decimal` was converted to multi-phase init (`Py_mod_exec`) in 3.12;
+  3.14 adds `Py_mod_multiple_interpreters` support so separate interpreters
+  each get an independent default context.
+- `Decimal.__format__` gained support for the `z` flag (coerce negative zero
+  to positive zero), matching the 3.11 spec update that was previously only
+  in the pure-Python fallback.
+- The mpdecimal bundled copy was updated to 2.5.4, which fixes several
+  corner cases in `mpd_qpow` for subnormal bases.
+- Several internal helpers were annotated with `_Py_ALWAYS_INLINE` after
+  profiling showed them on the hot path for tight arithmetic loops.

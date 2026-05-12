@@ -1,0 +1,136 @@
+---
+title: "Lib/contextlib.py (async and ExitStack)"
+description: "Async context managers, asynccontextmanager decorator, AsyncExitStack, suppress, redirect_stdout/redirect_stderr, and chdir"
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 680
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/contextlib.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–40 | module header / imports | `abc`, `sys`, `collections.abc` imports; `__all__` |
+| 41–80 | `AbstractContextManager` | `__enter__` / `__exit__` ABC with default `__exit__` returning `None` |
+| 81–120 | `AbstractAsyncContextManager` | `__aenter__` / `__aexit__` ABC |
+| 121–200 | `contextmanager` | Generator-based sync CM; `_GeneratorContextManager` |
+| 201–290 | `asynccontextmanager` | `AsyncGeneratorContextManager`; wraps an async generator |
+| 291–360 | `closing` / `nullcontext` | Resource-close helper; no-op CM for optional wrapping |
+| 361–420 | `suppress` | Swallows listed exception types in `__exit__` |
+| 421–470 | `redirect_stdout` / `redirect_stderr` | Temporarily replace `sys.stdout` / `sys.stderr` |
+| 471–510 | `chdir` | `os.chdir` in `__enter__`, restore in `__exit__` (added 3.11) |
+| 511–600 | `ExitStack` | Sync callback/CM stack with `_push_cm_exit` |
+| 601–680 | `AsyncExitStack` | Async variant; `_push_async_cm_exit`, `aclose` |
+
+## Reading
+
+### AsyncContextManager protocol and asynccontextmanager
+
+`AbstractAsyncContextManager` defines the minimal async CM contract.
+`asynccontextmanager` wraps an async generator so a single `yield` separates
+setup from teardown. The decorator returns `AsyncGeneratorContextManager`,
+which drives the generator with `asend`/`athrow`.
+
+```python
+# CPython: Lib/contextlib.py:81 AbstractAsyncContextManager
+class AbstractAsyncContextManager(ABC):
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return None
+```
+
+```python
+# CPython: Lib/contextlib.py:230 AsyncGeneratorContextManager.__aexit__
+async def __aexit__(self, typ, value, traceback):
+    if typ is None:
+        try:
+            await self.gen.__anext__()
+        except StopAsyncIteration:
+            return False
+        else:
+            raise RuntimeError("generator didn't stop")
+    else:
+        ...
+        try:
+            await self.gen.athrow(value)
+        except StopAsyncIteration as exc:
+            return exc is not value
+        except RuntimeError as exc:
+            ...
+```
+
+The key invariant: if the async generator raises `StopAsyncIteration` on the
+first `__anext__` call, the body exited cleanly. If it yields again, that is a
+bug and `RuntimeError` is raised.
+
+### suppress, redirect_stdout, and chdir
+
+These three are structurally simple CMs that each store state in `__enter__`
+and restore or discard it in `__exit__`.
+
+`suppress` checks `issubclass(exc_type, self._exceptions)` and returns `True`
+to silence matching exceptions. It does not interact with chaining, so
+`__cause__` and `__context__` are left untouched.
+
+```python
+# CPython: Lib/contextlib.py:365 suppress.__exit__
+def __exit__(self, exctype, excinst, exctb):
+    return exctype is not None and issubclass(exctype, self._exceptions)
+```
+
+`redirect_stdout` saves the original stream, installs the replacement, and
+restores on exit even if an exception propagates.
+
+```python
+# CPython: Lib/contextlib.py:432 _RedirectStream.__enter__
+def __enter__(self):
+    self._old_targets.append(getattr(sys, self._stream))
+    setattr(sys, self._stream, self._new_target)
+    return self._new_target
+```
+
+`chdir` (added in 3.11) calls `os.getcwd()` at entry and `os.chdir(self._old)`
+at exit. It is useful in test suites that mutate the working directory.
+
+### AsyncExitStack and _push_async_cm_exit
+
+`AsyncExitStack` mirrors `ExitStack` but its `__aexit__` runs callbacks with
+`await`. The internal list holds either sync callables or coroutine functions
+tagged with a boolean flag.
+
+`_push_async_cm_exit` is the bridge that converts an async CM's `__aexit__`
+method into an entry on the callback stack.
+
+```python
+# CPython: Lib/contextlib.py:635 AsyncExitStack._push_async_cm_exit
+def _push_async_cm_exit(self, cm, cm_exit):
+    async def _exit_wrapper(exc_type, exc, tb):
+        return await cm_exit(exc_type, exc, tb)
+    _exit_wrapper.__wrapped__ = cm
+    self._push_async_exit(_exit_wrapper)
+```
+
+During `__aexit__`, the stack is unwound in LIFO order. Each callback that
+returns a truthy value suppresses the current exception, which is then replaced
+with `None` for the next callback in the chain.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/contextlib/`.
+
+The sync half (`contextmanager`, `ExitStack`, `suppress`, `closing`,
+`nullcontext`) is partially scaffolded in `module/contextlib/module.go`.
+The async half (`asynccontextmanager`, `AsyncExitStack`,
+`AbstractAsyncContextManager`) requires coroutine and async-generator support
+in the VM, which is tracked as a later milestone. `redirect_stdout`,
+`redirect_stderr`, and `chdir` depend on `module/sys` exposing a mutable
+`stdout`/`stderr` and on `module/os` exposing `getcwd`/`chdir`.

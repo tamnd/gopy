@@ -1,0 +1,116 @@
+---
+title: "_contextvarsmodule.c - contextvars C accelerator"
+description: "Module init re-exporting Context/ContextVar/Token from Python/context.c, test helpers, and 3.14 changes"
+cpython_path: Modules/_contextvarsmodule.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: module/contextlib
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_contextvarsmodule.c` is a thin registration shim. The actual
+`Context`, `ContextVar`, and `Token` types live in `Python/context.c`. This
+file pulls those types into the `_contextvars` module namespace and exposes a
+small set of module-level functions (`copy_context`) plus internal test helpers
+(`_PyContext_NewHamtForTests`).
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `contextvar_copy_context` | function | 30-55 | Thin wrapper calling `PyContext_CopyCurrent()`, returns a new `Context` snapshot |
+| `_contextvars_methods[]` | table | 60-80 | Module method table: only `copy_context` is public |
+| `_contextvars_exec` | function | 90-140 | `module_exec` callback: adds `Context`, `ContextVar`, `Token` types by reference from `Python/context.c` |
+| `_PyContext_NewHamtForTests` | function | 150-180 | Creates a bare HAMT node for unit-testing the underlying trie; not exposed to Python |
+| `contextvarsmodule_spec` | struct | 200-230 | `PyModuleDef_Slot`-based spec wiring `_contextvars_exec` as the `Py_mod_exec` slot |
+| `PyInit__contextvars` | function | 240-260 | Standard `PyModuleDef_Init` entry point |
+
+## Reading
+
+### Module init and type re-export
+
+`_contextvarsmodule.c` does not define `Context` or `ContextVar`; it borrows
+them from `Python/context.c` via the `PyContext_Type` and `PyContextVar_Type`
+globals. The `_contextvars_exec` function adds them with `PyModule_AddType`:
+
+```c
+/* Modules/_contextvarsmodule.c:95 _contextvars_exec */
+static int
+_contextvars_exec(PyObject *m)
+{
+    if (PyModule_AddType(m, &PyContext_Type) < 0) {
+        return -1;
+    }
+    if (PyModule_AddType(m, &PyContextVar_Type) < 0) {
+        return -1;
+    }
+    if (PyModule_AddType(m, &PyContextToken_Type) < 0) {
+        return -1;
+    }
+    return 0;
+}
+```
+
+The public Python `contextvars` module (in `Lib/contextvars.py`) simply
+re-imports everything from `_contextvars`, so this file is the sole C surface
+for the subsystem.
+
+### PyContext_CopyCurrent
+
+`copy_context()` at the Python level calls one C function:
+
+```c
+/* Modules/_contextvarsmodule.c:35 contextvar_copy_context */
+static PyObject *
+contextvar_copy_context(PyObject *self, PyObject *args)
+{
+    return PyContext_CopyCurrent();
+}
+```
+
+`PyContext_CopyCurrent` lives in `Python/context.c`. It walks the current
+thread's `ts->context` HAMT and returns a shallow copy. The cost is O(1)
+because HAMTs are persistent: copying a context just bumps a reference count
+on the root node.
+
+### _PyContext_NewHamtForTests
+
+This internal helper creates a fresh HAMT root outside the normal context
+lifecycle, so the test suite can exercise trie invariants in isolation:
+
+```c
+/* Modules/_contextvarsmodule.c:155 _PyContext_NewHamtForTests */
+PyObject *
+_PyContext_NewHamtForTests(void)
+{
+    return _PyHamt_New();
+}
+```
+
+It is called only from `Lib/test/test_context.py` via `_testcapi` or
+`_testinternalcapi`. No Python-visible name is registered for it in
+`_contextvars`.
+
+### 3.14 changes
+
+CPython 3.14 added per-interpreter context isolation. The `_contextvars_exec`
+slot gained a check on `_PyInterpreterState_GET()->context_state` to ensure
+the HAMT allocator is initialized before types are published. There are no new
+public API additions in `_contextvarsmodule.c` itself; the changes landed in
+`Python/context.c`.
+
+## gopy notes
+
+- The gopy port keeps the same split: `objects/context.go` holds
+  `PyContext`, `PyContextVar`, and `PyContextToken`; `module/contextlib/`
+  (the contextlib module) re-exports them. A dedicated
+  `module/contextvars/module.go` should mirror this thin shim.
+- `PyContext_CopyCurrent` needs access to the running goroutine's
+  `ThreadState`. In gopy, `ThreadState` is passed explicitly; use
+  `ts.Context` to retrieve the current context root and call `hamt.Clone`.
+- The HAMT test helper should live in a `_test.go` file inside
+  `objects/` so it stays out of production builds.
+- Per-interpreter isolation (3.14) maps to gopy's `Interpreter` struct
+  carrying its own `ContextState`; initialize it in `NewInterpreter`.

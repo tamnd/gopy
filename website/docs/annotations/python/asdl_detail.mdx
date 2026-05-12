@@ -1,0 +1,107 @@
+---
+title: Parser/asdl.c
+description: "Parser for the ASDL grammar files that describe AST node types"
+cpython_path: Parser/asdl.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Parser/asdl.c` is a build-time-only file. It parses `Parser/Python.asdl` (the grammar describing Python's AST node types) and produces an in-memory `asdl_module` tree. That tree is consumed by `Tools/peg_generator/` to generate `Python/Python-ast.c` and the `Lib/ast` module stubs. The file is never compiled into the CPython interpreter itself.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50 | includes, `asdl_arena` | bump-allocator arena used for all ASDL parse objects |
+| 51–110 | `asdl_type`, `asdl_constructor`, `asdl_field` structs | in-memory representation of one ASDL type definition |
+| 111–180 | tokenizer helpers (`asdl_tok_*`) | hand-written lexer: identifiers, punctuation, `*`/`?` modifiers |
+| 181–260 | `asdl_parse` | recursive-descent parser; builds `asdl_module` from an open file |
+| 261–300 | `asdl_free`, printing helpers | arena teardown and debug dump of the parsed module |
+
+## Reading
+
+### The `asdl_field` modifier encoding
+
+ASDL fields carry an optional sequence (`*`) or optional (`?`) modifier. The C struct encodes this with an `int seq` and `int opt` flag rather than an enum, keeping the struct trivially constructable from the parser.
+
+```c
+// CPython: Parser/asdl.c:72 asdl_field
+typedef struct {
+    asdl_identifier name;
+    asdl_identifier type;
+    int seq;   /* 1 if field is a sequence (*) */
+    int opt;   /* 1 if field is optional (?) */
+} asdl_field;
+```
+
+### `asdl_constructor` and `asdl_type`
+
+Every ASDL sum type (such as `expr`) has one or more constructors (such as `BinOp`, `Name`). Product types have a single implicit constructor. Both are represented by `asdl_constructor` with a list of `asdl_field` nodes.
+
+```c
+// CPython: Parser/asdl.c:85 asdl_constructor
+typedef struct {
+    asdl_identifier name;
+    asdl_seq       *fields;   /* asdl_field* elements */
+} asdl_constructor;
+
+typedef struct {
+    asdl_identifier  name;
+    enum { PRODUCT, SUM } kind;
+    union {
+        asdl_constructor *product;
+        asdl_seq         *types;   /* asdl_constructor* for sum */
+    } v;
+    asdl_seq *attributes;
+} asdl_type;
+```
+
+### `asdl_parse` — entry point
+
+`asdl_parse` opens the `.asdl` file, drives the tokenizer, and builds the module tree. The recursive-descent rules follow the ASDL grammar directly: `module -> "module" id "{" type* "}"`.
+
+```c
+// CPython: Parser/asdl.c:210 asdl_parse
+asdl_module *
+asdl_parse(const char *filename, asdl_arena *arena)
+{
+    struct tokenizer tok;
+    asdl_module *module;
+
+    if (asdl_tok_init(&tok, filename) < 0)
+        return NULL;
+    module = asdl_parse_module(&tok, arena);
+    asdl_tok_fini(&tok);
+    return module;   /* NULL on parse error */
+}
+```
+
+### Arena teardown
+
+All allocations go through `asdl_arena`; `asdl_free` releases the whole module in one shot. This is safe because ASDL objects have no destructors and no circular references.
+
+```c
+// CPython: Parser/asdl.c:270 asdl_free
+void
+asdl_free(asdl_arena *arena)
+{
+    _PyArena_Free(arena);
+}
+```
+
+## gopy notes
+
+gopy does not run the ASDL parser at runtime. The AST node types that `Parser/asdl.c` describes are instead defined statically in the `compile/` package as Go structs generated once from `Parser/Python.asdl`. The correspondence is:
+
+- `asdl_type` with `kind == SUM` maps to a Go interface (for example `expr`).
+- Each `asdl_constructor` maps to a concrete Go struct implementing that interface (for example `BinOpExpr`).
+- `asdl_field` modifiers `seq` and `opt` map to slice and pointer fields respectively.
+
+No gopy code imports or calls anything from `Parser/asdl.c`; it is purely a reference for understanding the AST shape.
+
+## CPython 3.14 changes
+
+In CPython 3.14 the ASDL generator moved from `Tools/asdl_c.py` to the `Tools/peg_generator/pegen/` package, but `Parser/asdl.c` itself changed very little. The main addition is support for `attributes` on product types, which earlier versions only allowed on sum types. The `asdl_type.attributes` field now exists for both `PRODUCT` and `SUM` kinds.

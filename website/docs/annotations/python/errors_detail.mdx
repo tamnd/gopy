@@ -1,0 +1,304 @@
+---
+title: "Python/errors.c"
+description: Implements the full CPython exception API including set, format, fetch, restore, normalize, match, implicit chaining, and the WriteUnraisable path for exceptions ignored in finalizers and callbacks.
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: errors/api.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Python/errors.c
+
+<CpyLink path="Python/errors.c" />
+
+`errors.c` is the runtime half of Python's exception system. It owns
+the thread-local exception slot (the three-tuple `(type, value, traceback)`
+in the legacy API, the single `tstate->current_exception` pointer in
+the modern `_PyErr_*` API), and it provides every C API function that
+sets, clears, inspects, or propagates exceptions.
+
+The file divides cleanly into five groups: the core set/get/clear API
+(`PyErr_SetString`, `PyErr_Format`, `PyErr_SetObject`, `PyErr_SetNone`,
+`PyErr_Occurred`, `PyErr_Clear`); the fetch/restore/normalize trio
+carried forward for ABI compatibility (`PyErr_Fetch`, `PyErr_Restore`,
+`PyErr_NormalizeException`); the matching and subtype predicates
+(`PyErr_ExceptionMatches`, `PyErr_GivenExceptionMatches`); the implicit
+exception context machinery (`_PyErr_ChainExceptions`,
+`_PyErr_FormatFromCause`); and the WriteUnraisable path for exceptions
+that arise in contexts where they cannot propagate (`PyErr_WriteUnraisable`).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/errors.c" lines="1-100">1-100</Cpy> | `_PyErr_Restore`, `_PyErr_SetObject` | Store `(type, value, traceback)` triple into `tstate->current_exception`. The modern path stores only `value`; type and traceback are derived from it. | `errors/api.go:Restore`, `errors/api.go:Set` |
+| <Cpy path="Python/errors.c" lines="100-200">100-200</Cpy> | `_PyErr_SetString`, `PyErr_SetString`, `PyErr_SetNone` | Convenience wrappers: `SetString` boxes the C string into a `str` object and calls `_PyErr_SetObject`; `SetNone` passes `NULL` as the value. | `errors/api.go:SetString` |
+| <Cpy path="Python/errors.c" lines="200-350">200-350</Cpy> | `PyErr_Occurred`, `_PyErr_Occurred` | Read `tstate->current_exception` without clearing it. Returns a borrowed reference in CPython; NULL when no exception is set. | `errors/api.go:Occurred` |
+| <Cpy path="Python/errors.c" lines="350-530">350-530</Cpy> | `PyErr_Clear`, `_PyErr_Clear`, `PyErr_Fetch`, `PyErr_Restore` | `Clear` discards the current exception. `Fetch` atomically removes and returns the three-tuple; `Restore` installs a previously fetched triple. Both are legacy compatibility shims over the single-pointer modern API. | `errors/api.go:Clear`, `errors/api.go:Fetch`, `errors/api.go:Restore` |
+| <Cpy path="Python/errors.c" lines="531-700">531-700</Cpy> | `PyErr_NormalizeException` | Ensures the exception value is an instance of the exception type; calls `type(value)` if the value is not already an instance. Also attaches the traceback to the instance's `__traceback__`. | `errors/api.go:NormalizeException` |
+| <Cpy path="Python/errors.c" lines="700-900">700-900</Cpy> | `PyErr_GivenExceptionMatches`, `PyErr_ExceptionMatches` | Walk the MRO of the raised exception type to check if it is a subtype of the target type. Handle tuples of types (matching any element). | `errors/builtins.go:Match`, `errors/builtins.go:IsSubtype` |
+| <Cpy path="Python/errors.c" lines="900-1100">900-1100</Cpy> | `_PyErr_ChainExceptions`, `_PyErr_ChainExceptionsCause` | Set `exc.__context__` to the currently-active exception when an exception is raised inside an exception handler, implementing PEP 3134 implicit chaining. `ChainExceptionsCause` additionally sets `__cause__` and `__suppress_context__`. | not yet ported |
+| <Cpy path="Python/errors.c" lines="1100-1250">1100-1250</Cpy> | `_PyErr_FormatFromCause`, `_PyErr_FormatV`, `PyErr_Format` | `PyErr_Format` is `printf`-style exception construction; `_PyErr_FormatFromCause` additionally links the new exception to the currently-active exception as its `__cause__`. | `errors/api.go:Format` |
+| <Cpy path="Python/errors.c" lines="1250-1500">1250-1500</Cpy> | `PyErr_WriteUnraisable`, `_PyErr_WriteUnraisableMsg` | Log an exception that cannot be propagated (raised in `__del__`, `__exit__` during another exception, GC finalization). Calls `sys.unraisablehook` if set; falls back to writing to `sys.stderr`. | not yet ported |
+
+## Reading
+
+### `PyErr_SetString` / `PyErr_Format` / `PyErr_SetObject` / `PyErr_SetNone`
+
+<CpyLink path="Python/errors.c" lines="83-200" />
+
+All four ultimately call `_PyErr_SetObject`, which does the actual
+slot write:
+
+```c
+// CPython: Python/errors.c:83 _PyErr_SetObject
+void
+_PyErr_SetObject(PyThreadState *tstate, PyObject *exception, PyObject *value)
+{
+    /* Normalize: if value is not already an instance of exception,
+       call exception(value) to make it one. This is the "lazy
+       normalization" path; PyErr_NormalizeException does it eagerly. */
+    if (exception != NULL && PyExceptionClass_Check(exception) &&
+        value != NULL && !PyExceptionInstance_Check(value)) {
+        PyObject *fixed_value;
+        fixed_value = _PyErr_CreateException(exception, value);
+        Py_XDECREF(value);
+        value = fixed_value;
+    }
+    PyObject *old_exc = tstate->current_exception;
+    tstate->current_exception = Py_XNewRef(value);
+    Py_XDECREF(old_exc);
+}
+```
+
+`PyErr_SetString` boxes its `const char *` argument with
+`PyUnicode_FromString` before calling `_PyErr_SetObject`.
+`PyErr_SetNone` passes `NULL` as both type and value (the type is
+implicit in the exception instance after normalization).
+`PyErr_Format` calls `PyUnicode_FromFormat` and then `_PyErr_SetObject`.
+
+In gopy, `errors.SetString` and `errors.Format` map directly to these
+functions. The lazy normalization step is a no-op in gopy because
+`errors.New` always returns an already-normalized `*Exception` instance.
+
+### `PyErr_Occurred` / `PyErr_Clear` / `PyErr_Fetch` / `PyErr_Restore` (the three-tuple era)
+
+<CpyLink path="Python/errors.c" lines="350-530" />
+
+Before CPython 3.12, the exception state was a `(type, value, traceback)`
+triple stored in `tstate->curexc_type`, `tstate->curexc_value`, and
+`tstate->curexc_traceback`. CPython 3.12 unified these into the single
+`tstate->current_exception` pointer pointing to the exception instance
+(which already carries `__traceback__`). The old `PyErr_Fetch` /
+`PyErr_Restore` API is now a compatibility shim:
+
+```c
+// CPython: Python/errors.c:460 _PyErr_Fetch
+void
+_PyErr_Fetch(PyThreadState *tstate,
+             PyObject **p_type, PyObject **p_value, PyObject **p_traceback)
+{
+    PyObject *exc = tstate->current_exception;
+    tstate->current_exception = NULL;
+    if (exc == NULL) {
+        *p_type = NULL; *p_value = NULL; *p_traceback = NULL;
+        return;
+    }
+    *p_value = exc;
+    *p_type  = Py_NewRef(Py_TYPE(exc));
+    *p_traceback = Py_XNewRef(PyException_GetTraceback(exc));
+}
+```
+
+`PyErr_Restore` takes the three pointers back and calls
+`_PyErr_SetObject(tstate, type, value)`, discarding the `type` argument
+(which is now redundant) and relying on `Py_TYPE(value)` for the type.
+
+gopy keeps the same `Fetch` / `Restore` pair in `errors/api.go`. The
+traceback is stored in `errors.Exception.TB` rather than as a separate
+`*traceback.Traceback` field on the thread state, so `Fetch` returns the
+triple by reconstructing the type from `exc.ExcType`.
+
+### `PyErr_NormalizeException`
+
+<CpyLink path="Python/errors.c" lines="531-700" />
+
+```c
+// CPython: Python/errors.c:501 _PyErr_NormalizeException
+void
+_PyErr_NormalizeException(PyThreadState *tstate, PyObject **exc,
+                           PyObject **val, PyObject **tb)
+{
+    /* Already normalized if val is an instance of exc. */
+    if (*exc == NULL) return;
+    if (PyExceptionInstance_Check(*val) &&
+        PyObject_TypeCheck(*val, (PyTypeObject *)*exc)) {
+        /* Attach traceback if not already set. */
+        if (*tb != NULL) {
+            PyException_SetTraceback(*val, *tb);
+        }
+        return;
+    }
+    /* Call exc(val) to produce an instance. */
+    PyObject *type = *exc;
+    PyObject *value = *val;
+    PyObject *fixed = PyObject_CallOneArg(type, value);
+    Py_XDECREF(value);
+    *val = fixed;
+    if (*tb != NULL && fixed != NULL) {
+        PyException_SetTraceback(fixed, *tb);
+    }
+}
+```
+
+Normalization is idempotent: if the value is already an instance of
+the exception class, only the traceback attachment step runs. This
+matters for `RAISE_VARARGS` with one argument, where the argument is
+already a fully formed exception instance and normalization must be
+a no-op.
+
+In gopy, `errors.NormalizeException` is currently a no-op (see
+`errors/api.go:147`) because `errors.Set` always constructs a fully
+normalized `*Exception`. The function is retained as a named hook
+so callers that follow the CPython pattern compile without changes.
+
+### `PyErr_ExceptionMatches` / `PyErr_GivenExceptionMatches`
+
+<CpyLink path="Python/errors.c" lines="700-900" />
+
+```c
+// CPython: Python/errors.c:327 PyErr_GivenExceptionMatches
+int
+PyErr_GivenExceptionMatches(PyObject *err, PyObject *exc)
+{
+    if (err == NULL || exc == NULL) return 0;
+
+    /* exc can be a tuple: match any element */
+    if (PyTuple_Check(exc)) {
+        Py_ssize_t i, n = PyTuple_GET_SIZE(exc);
+        for (i = 0; i < n; i++) {
+            if (PyErr_GivenExceptionMatches(err, PyTuple_GET_ITEM(exc, i)))
+                return 1;
+        }
+        return 0;
+    }
+
+    /* Both must be exception classes; walk err's MRO for exc. */
+    if (PyExceptionClass_Check(err) && PyExceptionClass_Check(exc))
+        return PyObject_IsSubclass(err, exc);
+
+    /* err might be an instance; use its type for the subclass check. */
+    return PyErr_GivenExceptionMatches(Py_TYPE(err), exc);
+}
+```
+
+`PyErr_ExceptionMatches(exc)` is the convenience form that reads the
+current exception from `tstate` and calls `PyErr_GivenExceptionMatches`.
+
+gopy ports this as `errors.Match(exc, t)` in `errors/builtins.go:129`
+and `errors.IsSubtype(sub, super)` in `errors/builtins.go:121`. The
+tuple-of-types form is handled by the `MATCH_CLASS` opcode in the VM
+rather than by a recursive call inside `Match`.
+
+### `_PyErr_ChainExceptions` for implicit exception context
+
+<CpyLink path="Python/errors.c" lines="900-1100" />
+
+```c
+// CPython: Python/errors.c:938 _PyErr_ChainExceptions
+void
+_PyErr_ChainExceptions(PyThreadState *tstate,
+                        PyObject *typ, PyObject *val, PyObject *tb)
+{
+    if (val == NULL) return;
+    _PyErr_NormalizeException(tstate, &typ, &val, &tb);
+
+    PyObject *cur_exc = tstate->current_exception;
+    if (cur_exc != NULL) {
+        /* PEP 3134: set val.__context__ = cur_exc when raising inside
+           an except block. */
+        if (PyException_GetContext(val) == NULL) {
+            PyException_SetContext(val, Py_NewRef(cur_exc));
+        }
+    }
+    _PyErr_Restore(tstate, typ, val, tb);
+}
+```
+
+This is the primitive the VM calls when a new exception is raised while
+another exception is active (i.e., inside an `except` block). The
+`__context__` link makes `raise ValueError from None` print both
+exceptions by default (unless `__suppress_context__` is `True`).
+
+`_PyErr_FormatFromCause` is the explicit-cause variant. It calls
+`_PyErr_Format` to build the new exception, then chains the currently
+active exception as `__cause__` (not just `__context__`), and sets
+`__suppress_context__ = False` so the `During handling...` line prints.
+
+Neither `_PyErr_ChainExceptions` nor `_PyErr_FormatFromCause` is ported
+to gopy yet. `errors.RaiseFrom` in `errors/api.go:134` covers the
+explicit `raise X from Y` case; implicit chaining will land with the
+`PUSH_EXC_INFO` handler rewrite.
+
+### `PyErr_WriteUnraisable` for ignored exceptions in `__del__` and callbacks
+
+<CpyLink path="Python/errors.c" lines="1250-1500" />
+
+```c
+// CPython: Python/errors.c:1278 _PyErr_WriteUnraisableMsg
+void
+_PyErr_WriteUnraisableMsg(const char *err_msg_str, PyObject *obj)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *exc = tstate->current_exception;
+    tstate->current_exception = NULL;
+    if (exc == NULL) return;
+
+    /* Try sys.unraisablehook first. */
+    PyObject *hook = _PySys_GetAttr(tstate, &_Py_ID(unraisablehook));
+    if (hook != NULL && hook != Py_None) {
+        /* Build UnraisableHookArgs and call hook(args). */
+        ...
+        return;
+    }
+
+    /* Fallback: write to sys.stderr. */
+    PyObject *f = _PySys_GetAttr(tstate, &_Py_ID(stderr));
+    if (f != NULL) {
+        PyFile_WriteObject(exc, f, 0);
+    }
+}
+```
+
+`PyErr_WriteUnraisable` is the required disposal path for exceptions in
+`__del__`, `__exit__` called during unwinding, GC callbacks, and
+`atexit` handlers. Silently discarding such exceptions would make
+debugging impossible. `sys.unraisablehook` (PEP 542, added in 3.8)
+lets test suites convert unraisable exceptions into hard failures.
+
+gopy does not yet port `PyErr_WriteUnraisable`. The GC module note in
+`module/gc/weakref.go:104` records where it is needed.
+
+## gopy notes
+
+The `errors` package in gopy (`errors/api.go`, `errors/exception.go`,
+`errors/builtins.go`) ports the core of `Python/errors.c`:
+
+- `errors.Set` / `errors.SetString` / `errors.Format` map to
+  `_PyErr_SetObject` / `_PyErr_SetString` / `_PyErr_FormatV`.
+- `errors.Occurred` / `errors.Clear` map to `_PyErr_Occurred` /
+  `_PyErr_Clear`.
+- `errors.Fetch` / `errors.Restore` preserve the three-tuple API for
+  callers that follow CPython's fetch-normalize-restore idiom.
+- `errors.NormalizeException` is a no-op stub kept for API
+  compatibility.
+- `errors.Match` and `errors.IsSubtype` map to
+  `PyErr_GivenExceptionMatches` and `PyObject_IsSubclass` on exception
+  types.
+- `errors.RaiseFrom` covers the explicit `raise X from Y` case.
+
+Not yet ported: `_PyErr_ChainExceptions` (implicit `__context__`
+linking), `_PyErr_FormatFromCause`, and `PyErr_WriteUnraisable`.

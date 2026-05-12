@@ -1,0 +1,114 @@
+---
+title: Lib/shlex.py
+description: "Lexical tokenizer for simple shell-like syntaxes, with POSIX and non-POSIX modes and helper functions for safe shell quoting."
+cpython_path: Lib/shlex.py
+cpython_version: "3.14"
+lines: 351
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/shlex.py`
+
+<CpyLink path="Lib/shlex.py" />
+
+`shlex` provides a class and a set of module-level helpers for splitting strings using shell-like tokenization rules. The `shlex` class is a stateful lexer that reads from any file-like stream or a string, tracks line numbers, supports an inclusion stack (so one source can push another), and produces tokens one at a time via `get_token()`. The module also exposes `split()`, `join()`, and `quote()` as convenient top-level functions for the common case of splitting or safely quoting a single string.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-12 | module header | Docstring, contributor credits, imports |
+| 13 | `__all__` | Exports `shlex`, `split`, `quote`, `join` |
+| 15-303 | `shlex` | Stateful lexer class |
+| 17-64 | `shlex.__init__` | Initializes stream, character-class attributes, state machine, and punctuation mode |
+| 66-68 | `shlex.punctuation_chars` | Read-only property exposing the frozen punctuation set |
+| 70-74 | `shlex.push_token` | Pushes a pre-formed token onto the pushback deque |
+| 76-88 | `shlex.push_source` | Saves current stream state and switches to a new input stream |
+| 90-97 | `shlex.pop_source` | Restores the previous stream from the file stack |
+| 99-129 | `shlex.get_token` | Returns next token, handling pushback, source inclusions, and EOF |
+| 131-275 | `shlex.read_token` | Core state-machine loop that reads characters and transitions between states |
+| 277-285 | `shlex.sourcehook` | Resolves a filename for source inclusion (cpp-like relative paths) |
+| 287-293 | `shlex.error_leader` | Formats an Emacs-friendly error prefix with filename and line number |
+| 295-302 | `shlex.__iter__`, `shlex.__next__` | Iterator protocol wrapping `get_token()` |
+| 304-312 | `split` | Module-level convenience: splits a string in POSIX mode with whitespace splitting |
+| 315-317 | `join` | Module-level convenience: joins a list of strings into a safely-quoted shell command |
+| 320-338 | `quote` | Returns a shell-safe quoted version of a single string |
+| 341-351 | `_print_tokens`, `__main__` | Debug helper and self-test entry point |
+
+## Reading
+
+### The state machine in read_token
+
+`read_token()` is the heart of the module. It maintains a single `state` character that drives a large `while True` loop. The key states are: `' '` (whitespace, between tokens), `'a'` (accumulating a word), `'c'` (accumulating a punctuation-char token), a quote character such as `'"'` or `"'"` (inside a quoted string), and an escape character such as `'\\'` (escape sequence). Transitions happen character by character. When POSIX mode is off, quote characters are included in the returned token; in POSIX mode they are stripped and the content is merged into the surrounding word.
+
+```python
+# CPython: Lib/shlex.py:131 shlex.read_token
+def read_token(self):
+    quoted = False
+    escapedstate = ' '
+    while True:
+        if self.punctuation_chars and self._pushback_chars:
+            nextchar = self._pushback_chars.pop()
+        else:
+            nextchar = self.instream.read(1)
+        if nextchar == '\n':
+            self.lineno += 1
+        ...
+        if self.state is None:
+            self.token = ''        # past end of file
+            break
+        elif self.state == ' ':
+            ...
+```
+
+### Source inclusion stack
+
+The `push_source()` and `pop_source()` methods implement a depth-first inclusion mechanism analogous to the C preprocessor `#include`. When the lexer sees a token equal to `self.source` (a user-configurable string, not set by default), `get_token()` reads the next token as a filename, calls `sourcehook()` to open it, and pushes it. At EOF of the inner stream, `pop_source()` closes it and restores the outer stream. This allows scripts that parse config files with an `include` directive to use `shlex` directly without writing their own stack.
+
+```python
+# CPython: Lib/shlex.py:76 shlex.push_source
+def push_source(self, newstream, newfile=None):
+    "Push an input source onto the lexer's input source stack."
+    if isinstance(newstream, str):
+        newstream = StringIO(newstream)
+    self.filestack.appendleft((self.infile, self.instream, self.lineno))
+    self.infile = newfile
+    self.instream = newstream
+    self.lineno = 1
+```
+
+### quote and the safe-char fast path
+
+`quote()` must handle arbitrary Python strings, including those with Unicode characters. In 3.13+ the fast path encodes the string to bytes and uses `bytes.translate()` with a deletion table to check whether only safe ASCII characters are present. If they are, the original string is returned unchanged. Otherwise the function wraps the string in single quotes and escapes any embedded single quote as `'"'"'`. The `isinstance` guard ensures a `TypeError` is raised early for non-string input.
+
+```python
+# CPython: Lib/shlex.py:320 quote
+def quote(s):
+    """Return a shell-escaped version of the string *s*."""
+    if not s:
+        return "''"
+
+    if not isinstance(s, str):
+        raise TypeError(f"expected string object, got {type(s).__name__!r}")
+
+    safe_chars = (b'%+,-./0123456789:=@'
+                  b'ABCDEFGHIJKLMNOPQRSTUVWXYZ_'
+                  b'abcdefghijklmnopqrstuvwxyz')
+    if s.isascii() and not s.encode().translate(None, delete=safe_chars):
+        return s
+    return "'" + s.replace("'", "'\"'\"'") + "'"
+```
+
+### punctuation_chars mode
+
+When `punctuation_chars` is truthy, the lexer activates an additional state `'c'` for runs of punctuation characters (`();<>|&` by default). These characters are removed from `wordchars` and accumulated separately so they form their own tokens rather than being merged into adjacent words. A secondary `_pushback_chars` deque is used alongside the main `pushback` deque, because punctuation tokens may consume a character that belongs to the next word token and need to put it back at the character level rather than the token level.
+
+## gopy notes
+
+Porting `shlex` to Go requires representing the state machine's `state` variable as a rune (Go's character type). The `filestack` and `pushback` deques map to Go `container/list` or simple slices. `StringIO` wrapping for string inputs maps to `strings.NewReader`. The `sourcehook` method that opens files would need a configurable hook interface in Go rather than an overridable method. The `quote()` fast path using `bytes.translate` can be replicated in Go with a `strings.IndexFunc` over a rune predicate.
+
+## CPython 3.14 changes
+
+No functional changes were made to `shlex` in 3.14. The module's public API (`split`, `join`, `quote`, `shlex`) and its state-machine behavior are stable. The `quote()` fast-path using `bytes.translate()` was introduced in 3.12 and carries over unchanged.

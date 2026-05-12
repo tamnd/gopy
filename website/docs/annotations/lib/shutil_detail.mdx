@@ -1,0 +1,182 @@
+---
+title: "Lib/shutil.py"
+description: "High-level file and directory operations: copying, moving, tree removal, archive creation and unpacking, and the PATH-based which() search."
+cpython_path: "Lib/shutil.py"
+cpython_version: "3.14"
+lines: 1652
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/shutil.py
+
+<CpyLink path="Lib/shutil.py" />
+
+`shutil` provides higher-level file utilities that compose the lower-level `os` and `io` interfaces. The module detects at import time which fast-copy kernel interfaces are available (`sendfile`, `copy_file_range`, `fcopyfile`) and selects the most efficient path for each copy operation. Archive support is dispatched through a registry of named formats.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| <Cpy path="Lib/shutil.py" lines="56-74">56-74</Cpy> | Module-level feature flags | `_USE_CP_SENDFILE`, `_USE_CP_COPY_FILE_RANGE`, `_HAS_FCOPYFILE` detect kernel fast-copy APIs |
+| <Cpy path="Lib/shutil.py" lines="75-96">75-96</Cpy> | Exception hierarchy | `Error`, `SameFileError`, `SpecialFileError`, `ReadError`, `RegistryError` |
+| <Cpy path="Lib/shutil.py" lines="98-117">98-117</Cpy> | `_fastcopy_fcopyfile` | macOS `fcopyfile(3)` zero-copy path for file-to-file copies |
+| <Cpy path="Lib/shutil.py" lines="137-177">137-177</Cpy> | `_fastcopy_copy_file_range` | Linux `copy_file_range(2)` path; supports reflink on capable filesystems |
+| <Cpy path="Lib/shutil.py" lines="178-228">178-228</Cpy> | `_fastcopy_sendfile` | Linux/Android/Solaris `sendfile(2)` zero-copy path |
+| <Cpy path="Lib/shutil.py" lines="229-257">229-257</Cpy> | `_copyfileobj_readinto` / `copyfileobj` | Portable fallback: chunked `readinto` / `read`+`write` loop |
+| <Cpy path="Lib/shutil.py" lines="283-354">283-354</Cpy> | `copyfile` | Copies file data, dispatches to fast-copy paths, rejects named pipes |
+| <Cpy path="Lib/shutil.py" lines="355-408">355-408</Cpy> | `copymode` | Copies permission bits; uses `lchmod` for symlinks when available |
+| <Cpy path="Lib/shutil.py" lines="409-474">409-474</Cpy> | `copystat` | Copies mode, atime, mtime, flags, xattrs; uses `follow_symlinks=False` on symlinks |
+| <Cpy path="Lib/shutil.py" lines="475-531">475-531</Cpy> | `copy` / `copy2` | `copy` = `copyfile` + `copymode`; `copy2` = `copyfile` + `copystat` |
+| <Cpy path="Lib/shutil.py" lines="533-544">533-544</Cpy> | `ignore_patterns` | Factory returning a callable that filters names against `fnmatch` patterns |
+| <Cpy path="Lib/shutil.py" lines="545-609">545-609</Cpy> | `_copytree` | Internal recursive worker: respects `symlinks`, `ignore`, `copy_function`, and `dirs_exist_ok` |
+| <Cpy path="Lib/shutil.py" lines="611-667">611-667</Cpy> | `copytree` | Public entry: calls `os.scandir` then delegates to `_copytree` |
+| <Cpy path="Lib/shutil.py" lines="669-712">669-712</Cpy> | `_rmtree_unsafe` | Race-prone deletion using `os.walk`; used when `openat`/`unlinkat` are unavailable |
+| <Cpy path="Lib/shutil.py" lines="714-809">714-809</Cpy> | `_rmtree_safe_fd` / `_rmtree_safe_fd_step` | fd-based deletion immune to symlink-race attacks; uses `openat`/`unlinkat` |
+| <Cpy path="Lib/shutil.py" lines="810-857">810-857</Cpy> | `rmtree` | Public entry: resolves `onerror`/`onexc` callbacks, selects safe vs. unsafe implementation |
+| <Cpy path="Lib/shutil.py" lines="876-941">876-941</Cpy> | `move` | Tries `os.rename` first; falls back to `copy2` + `rmtree` for cross-device moves |
+| <Cpy path="Lib/shutil.py" lines="992-1063">992-1063</Cpy> | `_make_tarball` | Creates `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, or `.tar.zst` archives |
+| <Cpy path="Lib/shutil.py" lines="1064-1148">1064-1148</Cpy> | `_make_zipfile` | Creates `.zip` archives using `zipfile.ZipFile` |
+| <Cpy path="Lib/shutil.py" lines="1150-1182">1150-1182</Cpy> | `get_archive_formats` / `register_archive_format` / `unregister_archive_format` | Registry for named archive producers |
+| <Cpy path="Lib/shutil.py" lines="1184-1249">1184-1249</Cpy> | `make_archive` | Dispatches to a registered archive function by format name |
+| <Cpy path="Lib/shutil.py" lines="1251-1370">1251-1370</Cpy> | `get_unpack_formats` / `register_unpack_format` / `unpack_archive` | Registry and dispatcher for archive extractors |
+| <Cpy path="Lib/shutil.py" lines="1456-1494">1456-1494</Cpy> | `chown` | Changes file owner and group by name or numeric id |
+| <Cpy path="Lib/shutil.py" lines="1560-1641">1560-1641</Cpy> | `which` | Searches PATH directories for an executable matching `cmd` and `mode` |
+
+## Reading
+
+### `copyfile`: fast-copy dispatch
+
+`copyfile` is the central dispatch point. It checks for named pipes (which cannot be copied as regular files), then opens source and destination and tries each platform-specific fast path in order: `fcopyfile` on macOS, `copy_file_range` then `sendfile` on Linux, a Windows `readinto` loop for large files, and finally the generic `copyfileobj` fallback. Each fast path raises `_GiveupOnFastCopy` on any condition that disqualifies it.
+
+```python
+# CPython: Lib/shutil.py:283 copyfile
+def copyfile(src, dst, *, follow_symlinks=True):
+    sys.audit("shutil.copyfile", src, dst)
+    if _samefile(src, dst):
+        raise SameFileError("{!r} and {!r} are the same file".format(src, dst))
+    # ... special-file checks omitted for brevity ...
+    if not follow_symlinks and _islink(src):
+        os.symlink(os.readlink(src), dst)
+    else:
+        with open(src, 'rb') as fsrc:
+            with open(dst, 'wb') as fdst:
+                if _HAS_FCOPYFILE:
+                    try:
+                        _fastcopy_fcopyfile(fsrc, fdst, posix._COPYFILE_DATA)
+                        return dst
+                    except _GiveupOnFastCopy:
+                        pass
+                elif _USE_CP_SENDFILE or _USE_CP_COPY_FILE_RANGE:
+                    if _USE_CP_COPY_FILE_RANGE:
+                        try:
+                            _fastcopy_copy_file_range(fsrc, fdst)
+                            return dst
+                        except _GiveupOnFastCopy:
+                            pass
+                    if _USE_CP_SENDFILE:
+                        try:
+                            _fastcopy_sendfile(fsrc, fdst)
+                            return dst
+                        except _GiveupOnFastCopy:
+                            pass
+                copyfileobj(fsrc, fdst)
+    return dst
+```
+
+### `_fastcopy_sendfile`: zero-copy on Linux
+
+The `sendfile` path calls `os.sendfile` in a loop, advancing `offset` by the number of bytes transferred each iteration. If the kernel reports `ENOTSOCK` (old Linux kernels that only support socket destinations), the module-level flag `_USE_CP_SENDFILE` is cleared so the path is never tried again in the same process.
+
+```python
+# CPython: Lib/shutil.py:178 _fastcopy_sendfile
+def _fastcopy_sendfile(fsrc, fdst):
+    global _USE_CP_SENDFILE
+    try:
+        infd = fsrc.fileno()
+        outfd = fdst.fileno()
+    except Exception as err:
+        raise _GiveupOnFastCopy(err)
+    blocksize = _determine_linux_fastcopy_blocksize(infd)
+    offset = 0
+    while True:
+        try:
+            sent = os.sendfile(outfd, infd, offset, blocksize)
+        except OSError as err:
+            err.filename = fsrc.name
+            err.filename2 = fdst.name
+            if err.errno == errno.ENOTSOCK:
+                _USE_CP_SENDFILE = False
+                raise _GiveupOnFastCopy(err)
+            if err.errno == errno.ENOSPC:
+                raise err from None
+            if offset == 0 and os.lseek(outfd, 0, os.SEEK_CUR) == 0:
+                raise _GiveupOnFastCopy(err)
+            raise err
+        else:
+            if sent == 0:
+                break
+            offset += sent
+```
+
+### `rmtree`: fd-based safe deletion
+
+When `openat`/`unlinkat` are available, `rmtree` uses `_rmtree_safe_fd`, which maintains an explicit stack of open directory file descriptors. Each step opens subdirectories with `O_DIRECTORY | O_NOFOLLOW` relative to the parent fd, making the walk immune to TOCTOU symlink substitution attacks. The unsafe `_rmtree_unsafe` variant is used on platforms that lack these syscalls.
+
+```python
+# CPython: Lib/shutil.py:810 rmtree
+def rmtree(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None):
+    sys.audit("shutil.rmtree", path, dir_fd)
+    if ignore_errors:
+        def onexc(*args):
+            pass
+    elif onerror is None and onexc is None:
+        def onexc(*args):
+            raise
+    elif onexc is None:
+        if onerror is None:
+            def onexc(*args):
+                raise
+        else:
+            def onexc(*args):
+                func, path, exc = args
+                if exc is None:
+                    exc_info = None, None, None
+                else:
+                    exc_info = type(exc), exc, exc.__traceback__
+                return onerror(func, path, exc_info)
+    _rmtree_impl(path, dir_fd, onexc)
+```
+
+### `which`: PATH-based executable search
+
+`which` splits PATH into directories and probes each one. On Windows it also expands PATHEXT to find the canonical extension. On POSIX the search is a simple `os.access` check. When `cmd` already contains a directory component, PATH scanning is skipped and only that directory is checked.
+
+```python
+# CPython: Lib/shutil.py:1560 which
+def which(cmd, mode=os.F_OK | os.X_OK, path=None):
+    use_bytes = isinstance(cmd, bytes)
+    dirname, cmd = os.path.split(cmd)
+    if dirname:
+        path = [dirname]
+    else:
+        if path is None:
+            path = os.environ.get("PATH", None)
+            if path is None:
+                try:
+                    path = os.confstr("CS_PATH")
+                except (AttributeError, ValueError):
+                    path = os.defpath
+        if not path:
+            return None
+        if use_bytes:
+            path = os.fsencode(path).split(os.fsencode(os.pathsep))
+        else:
+            path = os.fsdecode(path).split(os.pathsep)
+    # ... PATHEXT handling and final os.access loop follow ...
+```
+
+## gopy notes
+
+`shutil` is not yet ported in gopy. The copy family (`copyfile`, `copy`, `copy2`, `copystat`) is the highest-priority slice because gopy's `pathlib.Path.copy` implementation will need it. The `sendfile` and `copy_file_range` fast paths map directly to `golang.org/x/sys/unix` calls. `rmtree` and `copytree` are straightforward to port once `os.scandir` and `os.walk` are stable. Archive dispatch (`make_archive`, `unpack_archive`) is low priority and can be deferred until the Go `archive/tar` and `archive/zip` bindings are ready.

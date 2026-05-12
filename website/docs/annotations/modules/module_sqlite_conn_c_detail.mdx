@@ -1,0 +1,108 @@
+---
+title: Modules/_sqlite/connection.c
+description: "pysqlite Connection object: wraps a sqlite3* handle, manages transactions, executes SQL, and implements the DB-API 2.0 connection interface including isolation level and autocommit."
+cpython_path: Modules/_sqlite/connection.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_sqlite/connection.c`
+
+<CpyLink path="Modules/_sqlite/connection.c" />
+
+`Modules/_sqlite/connection.c` implements `sqlite3.Connection`, the main object in the
+`sqlite3` module. Each `Connection` holds a `sqlite3 *` handle opened with `sqlite3_open_v2`.
+The file implements the DB-API 2.0 connection interface: transaction control (`commit`,
+`rollback`, `isolation_level`), cursor creation, `execute`/`executemany`/`executescript`
+shortcuts, custom function/aggregate/collation registration, and the WAL mode hooks.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-100 | `pysqlite_Connection` struct | sqlite3 handle, isolation_level, autocommit, detect_types |
+| 101-280 | `pysqlite_connection_init` | `sqlite3_open_v2`, URI support, timeout, check_same_thread setup |
+| 281-500 | `pysqlite_connection_commit_impl`, `pysqlite_connection_rollback_impl` | Transaction control |
+| 501-700 | `pysqlite_connection_cursor` | Cursor factory, row_factory |
+| 701-900 | `pysqlite_connection_execute` | Shortcut calling `cursor().execute()` |
+| 901-1200 | `pysqlite_connection_create_function_impl` | `sqlite3_create_function_v2` with GIL management |
+| 1201-1500 | `pysqlite_connection_set_authorizer_impl` | Authorization callback wrapper |
+| 1501-2000 | type object, `PyConnection_Type` | Slots, properties, context manager protocol |
+
+## Reading
+
+### Opening and timeout
+
+`pysqlite_connection_init` calls `sqlite3_open_v2` with `SQLITE_OPEN_READWRITE |
+SQLITE_OPEN_CREATE` by default, or flags derived from the `uri=True` keyword. The
+`timeout` parameter sets `sqlite3_busy_timeout` to handle `SQLITE_BUSY` by sleeping.
+
+```c
+// CPython: Modules/_sqlite/connection.c:145 pysqlite_connection_init
+static int
+pysqlite_connection_init(pysqlite_Connection *self, PyObject *args,
+                         PyObject *kwargs)
+{
+    ...
+    rc = sqlite3_open_v2(database_utf8, &self->db, flags, NULL);
+    if (rc != SQLITE_OK) { ... }
+    sqlite3_busy_timeout(self->db, (int)(timeout * 1000));
+```
+
+### Transaction control and `isolation_level`
+
+`commit` calls `sqlite3_exec(self->db, "COMMIT", ...)` and `rollback` calls `ROLLBACK`.
+When `isolation_level` is set (legacy API), an implicit `BEGIN` is issued before DML
+statements. When `autocommit=True` (new in 3.12), no implicit transactions are opened.
+
+```c
+// CPython: Modules/_sqlite/connection.c:310 pysqlite_connection_commit_impl
+static PyObject *
+pysqlite_connection_commit_impl(pysqlite_Connection *self)
+{
+    if (!pysqlite_check_thread(self) || !pysqlite_check_connection(self))
+        return NULL;
+    if (!sqlite3_get_autocommit(self->db)) {
+        int rc = sqlite3_exec(self->db, "COMMIT", NULL, NULL, NULL);
+        ...
+    }
+    Py_RETURN_NONE;
+}
+```
+
+### Custom function registration
+
+`create_function` wraps a Python callable as a `sqlite3` scalar function via
+`sqlite3_create_function_v2`. The wrapper acquires the GIL, calls the Python function,
+and converts the result to a SQLite value using the `_pysqlite_seterror` protocol.
+
+```c
+// CPython: Modules/_sqlite/connection.c:960 _pysqlite_func_callback
+static void
+_pysqlite_func_callback(sqlite3_context *context, int argc,
+                        sqlite3_value **argv)
+{
+    PyGILState_STATE threadstate = PyGILState_Ensure();
+    ...
+    py_retval = PyObject_CallObject(aggregate_instance, args);
+    _pysqlite_build_py_params(context, argc, argv);
+    ...
+    PyGILState_Release(threadstate);
+}
+```
+
+## gopy notes
+
+Not yet ported. The Go `database/sql` package provides a generic SQL interface; the
+`modernc.org/sqlite` pure-Go driver covers SQLite without cgo. A `module/sqlite3/` port
+would wrap `database/sql` or call `sqlite3_*` directly via cgo.
+
+## CPython 3.14 changes
+
+3.14 added `Connection.autocommit` as the preferred transaction control, deprecating
+`isolation_level`. `sqlite3_create_window_function` is now exposed as
+`Connection.create_window_function`. The `detect_types` flag gained `PARSE_DECLTYPES`
+performance improvements.

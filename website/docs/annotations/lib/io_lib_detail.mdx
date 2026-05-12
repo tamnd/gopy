@@ -1,0 +1,78 @@
+---
+title: Lib/io.py
+description: "CPython 3.14 annotation: Lib/io.py"
+cpython_path: Lib/io.py
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/io.py" />
+
+`io.py` is a thin Python shim whose primary job is to re-export everything from the C extension `_io`. All real I/O machinery lives in `_io`; this file exists so that `import io` works as a plain module name, so that `help(io)` surfaces a readable docstring, and so that pure-Python fallbacks remain available on platforms where the C extension cannot be built.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-20 | module header | docstring, import of `_io` and `abc` |
+| 21-25 | `DEFAULT_BUFFER_SIZE` | re-exported constant (8192 bytes) |
+| 26-55 | abstract base classes | `RawIOBase`, `BufferedIOBase`, `TextIOBase`, `IOBase` re-exported from `_io` |
+| 56-70 | concrete classes | `FileIO`, `BytesIO`, `StringIO`, `BufferedReader`, `BufferedWriter`, `BufferedRandom`, `BufferedRWPair`, `TextIOWrapper` re-exported |
+| 71-80 | `open` | alias to `_io.open`; `open_code` alias to `_io.open_code` |
+| 81-90 | `IncrementalNewlineDecoder` | re-exported from `_io` |
+| 91-100 | `__all__` and ABC registration | lists public names; registers ABCs against the C concrete types |
+
+## Reading
+
+### The Python-vs-C fallback pattern
+
+CPython ships a pure-Python implementation of the I/O stack alongside the C one. On a normal build, `_io` is always available and `io.py` delegates to it immediately. The fallback path (pure Python in `_pyio`) is kept for environments such as early interpreter bootstrap or alternative Python implementations.
+
+```python
+# CPython: Lib/io.py:1 module
+"""The io module provides the Python interfaces to stream handling.
+
+...
+"""
+# This is a compatibility shim. The actual implementation is in _io.
+from _io import (DEFAULT_BUFFER_SIZE, BlockingIOError, UnsupportedOperation,
+                 open, open_code, ...)
+```
+
+The existence of this file means user code can always write `import io` without caring whether `_io` is a C extension or a pure Python module loaded from `_pyio`.
+
+### DEFAULT_BUFFER_SIZE
+
+The constant `DEFAULT_BUFFER_SIZE = 8192` is defined in `_io` at the C level and re-exported here. It is the default internal buffer size used by `BufferedReader` and `BufferedWriter` when no explicit buffer size is given. Code that needs to tune I/O performance often compares chunk sizes against this value.
+
+```python
+# CPython: Lib/io.py:25 DEFAULT_BUFFER_SIZE
+DEFAULT_BUFFER_SIZE = _io.DEFAULT_BUFFER_SIZE  # 8192
+```
+
+Changing this constant in user code has no effect on already-constructed buffered objects. It is read only at construction time inside the C `BufferedReader.__init__`.
+
+### Abstract base class re-exports
+
+`IOBase`, `RawIOBase`, `BufferedIOBase`, and `TextIOBase` are defined as C types inside `_io` but are also registered as virtual superclasses of each other via `abc.ABCMeta`. The shim re-exports them so that `isinstance(f, io.IOBase)` works for any file-like object, including third-party ones that inherit from the pure-Python ABCs in `_pyio`.
+
+```python
+# CPython: Lib/io.py:30 IOBase
+from _io import (IOBase, RawIOBase, BufferedIOBase, TextIOBase,
+                 FileIO, BytesIO, StringIO, BufferedReader,
+                 BufferedWriter, BufferedRandom, BufferedRWPair,
+                 TextIOWrapper, IncrementalNewlineDecoder)
+```
+
+The ABC registration near line 91 calls `RawIOBase.register(FileIO)` and similar, ensuring the MRO reported by `isinstance` is consistent regardless of whether the concrete class was constructed from C or Python.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/io/`.
+
+The C extension `_io` must be ported first as `module/_io/`. It contains `FileIO`, the buffered layer, `TextIOWrapper`, and the ABC hierarchy. The `io.py` shim itself can then be vendored under `stdlib/io.py` with no additional Go code; the re-exports will resolve to the Go-backed `_io` module at runtime. `DEFAULT_BUFFER_SIZE` should be exposed as a module-level integer attribute on the `_io` module object.

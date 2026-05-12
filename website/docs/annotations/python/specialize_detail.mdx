@@ -1,0 +1,103 @@
+---
+title: "specialize.c: Adaptive Specialization"
+description: "Annotation for CPython's adaptive instruction specialization engine, covering LoadAttr cache, BinaryOp fast paths, and tier-2 uop promotion"
+cpython_path: Python/specialize.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: compile/flowgraph_passes.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`specialize.c` implements CPython's adaptive interpreter. When an instruction is
+executed enough times, the runtime rewrites it in-place with a faster
+specialized variant. In 3.14, successful specializations can also be promoted
+into tier-2 micro-operations (uops) for the optimizer.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | `_PyAdaptiveCounter` | Backoff counter embedded in each cache entry; decrements on each miss and triggers re-specialization at zero |
+| 121–350 | `_Py_Specialize_LoadAttr` | Main entry point for `LOAD_ATTR_ADAPTIVE`; probes type version tag and selects a slot variant |
+| 351–600 | `_Py_Specialize_StoreAttr` | Mirror of LoadAttr for stores; guards against descriptors that define `__set__` |
+| 601–900 | `_Py_Specialize_BinaryOp` | Numeric fast path; checks both operand types and rewrites to `BINARY_OP_ADD_INT`, `_FLOAT`, or `_UNICODE` |
+| 901–1100 | `_Py_Specialize_CompareOp` | Selects `COMPARE_OP_INT` / `_FLOAT` / `_STR` |
+| 1101–1400 | `_Py_Specialize_Call` | Handles `CALL_ADAPTIVE`; covers `PyCFunction`, bound methods, and Python callables |
+| 1401–1700 | `_Py_Specialize_Subscribe` | `BINARY_SUBSCR` variants: list index, dict key, and tuple index |
+| 1701–2000 | `specialize_class_load` | Helper shared by LoadAttr and LoadSuper; validates `tp_version_tag` |
+| 2001–2400 | `_Py_Specialization_Stats` | Compile-time stats counters (enabled with `SPECIALIZATION_STATS`) |
+| 2401–3000 | uop promotion helpers | `_PyOptimizer_Optimize` glue that feeds a hot trace into the tier-2 compiler |
+
+## Reading
+
+### `_PyAdaptiveCounter` backoff
+
+Every inline cache slot contains a small counter. On a specialization miss the
+counter is decremented. When it reaches zero the runtime calls the appropriate
+`_Py_Specialize_*` function to attempt re-specialization.
+
+```c
+/* Python/specialize.c:42 _PyAdaptiveCounter_Trigger */
+static inline int
+_PyAdaptiveCounter_Trigger(_PyAdaptiveCounter *counter)
+{
+    counter->value -= (1 << ADAPTIVE_BACKOFF_BITS);
+    return counter->value <= 0;
+}
+```
+
+The macro `ADAPTIVE_BACKOFF_BITS` (currently 3) gives eight misses before the
+next re-specialization attempt. This prevents thrashing on polymorphic call
+sites.
+
+### `_Py_Specialize_LoadAttr` cache probe
+
+```c
+/* Python/specialize.c:180 _Py_Specialize_LoadAttr */
+int
+_Py_Specialize_LoadAttr(PyObject *owner, _Py_CODEUNIT *instr, PyObject *name)
+{
+    PyTypeObject *type = Py_TYPE(owner);
+    if (type->tp_dict == NULL) {
+        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_NO_DICT);
+        goto fail;
+    }
+    ...
+    instr->op.code = LOAD_ATTR_SLOT;
+    return 0;
+fail:
+    STAT_INC(LOAD_ATTR, failure);
+    instr->op.code = LOAD_ATTR;
+    return 0;
+}
+```
+
+The function never raises; it silently falls back to the generic opcode so the
+interpreter can continue.
+
+### Tier-2 uop promotion
+
+Once a trace is hot enough, `_PyOptimizer_Optimize` replaces a `RESUME` with a
+`ENTER_EXECUTOR` opcode that points at a compiled `_PyExecutorObject`. The
+specialization side-channel feeds type-version information into the uop
+compiler so guards can be omitted when types are proven stable.
+
+```c
+/* Python/specialize.c:2450 maybe_promote_to_tier2 */
+static void
+maybe_promote_to_tier2(_PyInterpreterFrame *frame, _Py_CODEUNIT *instr)
+{
+    if (_Py_IsMainInterpreter(_PyInterpreterState_GET())) {
+        _PyOptimizer_Optimize(frame, instr, NULL);
+    }
+}
+```
+
+## gopy notes
+
+- The adaptive counter lives in `objects/object.go` as `AdaptiveCounter`.
+- `_Py_Specialize_LoadAttr` logic is partially mirrored in `compile/flowgraph_passes.go`; the type-version tag check is omitted because gopy resolves attribute slots at compile time.
+- BinaryOp specialization is not yet ported. The fallback generic arithmetic path in `vm/eval_gen.go` handles all numeric types today.
+- Uop promotion glue is tracked under v0.12 scope (task #482).

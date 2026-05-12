@@ -1,0 +1,137 @@
+---
+title: "tarfile.py: Format Detection, Header Decode, and Extraction Filters"
+description: "Annotates TarFile.open factory, TarInfo.frombuf header decode, ExFileObject sparse reads, the extraction filter API added in 3.12, and 3.14 changes"
+cpython_path: Lib/tarfile.py
+cpython_version: "3.14"
+lines: 2900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Lib/tarfile.py` implements tar archive reading and writing with support for
+POSIX ustar, GNU tar, and PAX (POSIX.1-2001) formats. The file is structured
+around three main classes: `TarInfo` for per-member metadata, `ExFileObject`
+for reading member data as a stream, and `TarFile` for archive-level
+operations.
+
+Format detection happens at open time in `TarFile.open`. Header decoding runs
+in `TarInfo.frombuf`. Extraction safety, tightened progressively since 3.12,
+is controlled by a pluggable filter API.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | constants, `TarError` hierarchy | Public API surface, format identifiers (`USTAR_FORMAT`, `GNU_FORMAT`, `PAX_FORMAT`) |
+| 101-280 | `TarInfo` fields | Per-member metadata: name, size, mode, uid, gid, mtime, type, linkname |
+| 281-520 | `TarInfo.frombuf` | Decode a 512-byte header block; handles ustar, GNU, PAX |
+| 521-700 | `TarInfo.tobuf` | Encode metadata back to a 512-byte block; selects format by field widths |
+| 701-850 | `TarInfo._proc_gnulong` | Read GNU long-name and long-link extension blocks |
+| 851-1000 | `TarInfo._proc_pax` | Accumulate PAX extended-header key/value pairs |
+| 1001-1200 | `ExFileObject` | `io.BufferedReader` subclass; handles sparse-file map for GNU sparse entries |
+| 1201-1400 | `TarFile.__init__` / `open` | Format detection; dispatches to `taropen`, `gzopen`, `bz2open`, `xzopen` |
+| 1401-1600 | `TarFile.getmembers` / `getmember` | Lazy-load member list; index by name |
+| 1601-1800 | `TarFile.extractall` / `extract` | High-level extraction; applies filter before each member |
+| 1801-2000 | `TarFile._extract_member` | Low-level dispatch by member type (regular, dir, link, symlink, device) |
+| 2001-2200 | `TarFile.addfile` / `add` | Write a member from a `TarInfo` plus optional file object |
+| 2201-2450 | filter functions (`fully_trusted`, `tar`, `data`) | Built-in extraction filters introduced in 3.12 |
+| 2451-2650 | `_Stream` | Transparent compression wrapper used by `gzopen`/`bz2open`/`xzopen` |
+| 2651-2900 | `itn`, `nti`, `stn`, `nts`, CRC helpers | Number/string field codecs shared by encode and decode paths |
+
+## Reading
+
+### Format detection (`TarFile.open`)
+
+`TarFile.open` is the canonical entry point. When `mode` includes `"r:*"` or
+`"r|*"`, it tries each registered format opener in order and returns the first
+that succeeds.
+
+```python
+# CPython: Lib/tarfile.py  (simplified)
+@classmethod
+def open(cls, name=None, mode="r", fileobj=None, bufsize=RECORDSIZE, **kwargs):
+    ...
+    if ":" in mode:
+        filemode, comptype = mode.split(":", 1)
+        comptype = comptype or "tar"
+        if comptype in cls.OPEN_METH:
+            return cls.OPEN_METH[comptype](name, filemode, fileobj, **kwargs)
+        raise CompressionError(f"unknown compression type {comptype!r}")
+    if mode == "r":
+        for comptype in cls.OPEN_METH:
+            try:
+                return cls.OPEN_METH[comptype](name, "r", fileobj, **kwargs)
+            except (ReadError, CompressionError):
+                continue
+        raise ReadError("file could not be opened successfully")
+```
+
+`OPEN_METH` maps compression names (`"gz"`, `"bz2"`, `"xz"`, `"tar"`) to
+classmethods. Each classmethod wraps the file object in a `_Stream` if needed,
+then calls `cls.taropen`.
+
+### Header decode (`TarInfo.frombuf`)
+
+A tar header is a 512-byte block. `frombuf` unpacks the block using
+`struct.unpack_from`, validates the checksum, then dispatches on the magic
+field to select the format-specific processing path.
+
+```python
+@classmethod
+def frombuf(cls, buf, encoding, errors):
+    tarinfo = cls()
+    tarinfo.name  = nts(buf[0:100],   encoding, errors)
+    tarinfo.mode  = nti(buf[100:108])
+    tarinfo.uid   = nti(buf[108:116])
+    tarinfo.gid   = nti(buf[116:124])
+    tarinfo.size  = nti(buf[124:136])
+    tarinfo.mtime = nti(buf[136:148])
+    ...
+    magic = buf[257:265]
+    if magic == POSIX_MAGIC:
+        tarinfo.format = USTAR_FORMAT
+    elif magic[:5] == GNU_MAGIC[:5]:
+        tarinfo.format = GNU_FORMAT
+    ...
+    return tarinfo
+```
+
+GNU long names are stored in synthetic members of type `GNUTYPE_LONGNAME`;
+`_proc_gnulong` reads those blocks and patches the `name` field of the
+following real member before returning it to the caller.
+
+### Extraction filters (3.12+)
+
+`extractall` passes each `TarInfo` through a filter callable before writing
+to disk. The built-in filters form a trust hierarchy.
+
+```python
+# Using the "data" filter (recommended for untrusted archives)
+with tarfile.open("archive.tar.gz") as tf:
+    tf.extractall(path="/tmp/out", filter="data")
+```
+
+`filter="data"` rejects absolute paths, paths with `..` components, special
+file types (devices, fifos), and symlinks that point outside the destination
+tree. In 3.14, the default changes from `"fully_trusted"` to `"data"` for new
+code; a `DeprecationWarning` is raised when no filter is specified.
+
+## gopy notes
+
+- `nti` and `itn` convert between octal ASCII fields and integers. They also
+  handle the GNU base-256 encoding for values too large for octal. Port these
+  two helpers first; everything else calls them.
+- `ExFileObject` uses an internal sparse-map (`_sparse`) list of
+  `(offset, size)` pairs to skip holes in GNU sparse entries. The read loop
+  must check this map before every underlying `read` call.
+- The filter API passes a `TarInfo` and a destination path to a callable and
+  expects either a (possibly modified) `TarInfo` back or `None` to skip the
+  member. gopy should model this as a function type rather than an interface,
+  matching Python's callable convention.
+- 3.14 deprecates extraction without an explicit filter. The gopy port should
+  default to `"data"` immediately and omit the deprecation path entirely.
+- PAX headers use UTF-8 by specification. The `encoding` and `errors`
+  parameters on `frombuf` apply only to ustar and GNU members.

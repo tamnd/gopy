@@ -1,0 +1,75 @@
+---
+title: Modules/socketmodule.c
+description: "socket module: sock_fd lifecycle, connect/bind/listen/accept/recv/send/sendto, setsockopt/getsockopt, getaddrinfo/getnameinfo, inet_pton/ntoa, setblocking/settimeout, and the timeout error mapping."
+cpython_path: Modules/socketmodule.c
+cpython_version: "3.14"
+lines: 6500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/socketmodule.c`
+
+<CpyLink path="Modules/socketmodule.c" />
+
+`Modules/socketmodule.c` wraps the POSIX socket API for `socket`. It handles file-
+descriptor lifecycle, blocking/timeout mode, error-code translation, and address family
+portability across POSIX and Windows.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-500 | `PySocketSockObject` struct, `sock_new`, `sock_close` | Socket object lifecycle |
+| 501-1200 | `sock_connect`, `sock_bind`, `sock_listen`, `sock_accept` | Connection API |
+| 1201-2000 | `sock_recv`, `sock_recvfrom`, `sock_send`, `sock_sendto`, `sock_sendall` | Data transfer |
+| 2001-2800 | `sock_setsockopt`, `sock_getsockopt` | Socket options |
+| 2801-3500 | `sock_setblocking`, `sock_settimeout`, `sock_gettimeout` | Blocking mode |
+| 3501-4500 | `getaddrinfo`, `getnameinfo` | Name resolution |
+| 4501-6500 | `inet_pton`, `inet_ntop`, `htons`/`htonl`, module constants | Address conversion |
+
+## Reading
+
+### Blocking vs timeout mode
+
+`sock.setblocking(False)` calls `fcntl(fd, F_SETFL, O_NONBLOCK)`. `sock.settimeout(t)`
+puts the socket in non-blocking mode and stores `t` in `so_timeout`. All blocking
+operations (`recv`, `send`, `connect`, `accept`) implement their own `select`/`poll` loop
+when timeout is set, rather than using `SO_RCVTIMEO`/`SO_SNDTIMEO`.
+
+```c
+// CPython: Modules/socketmodule.c:850 internal_connect
+static int
+internal_connect(PySocketSockObject *s, struct sockaddr *addr, int addrlen,
+                 int raise)
+{
+    int res;
+    Py_BEGIN_ALLOW_THREADS
+    res = connect(s->sock_fd, addr, addrlen);
+    Py_END_ALLOW_THREADS
+    if (res != 0) {
+        if (errno == EINPROGRESS && s->sock_timeout > 0) {
+            /* wait until writable */
+            ...
+        }
+    }
+    return res;
+}
+```
+
+### `sendall`
+
+`sock.sendall(data)` retries `send` in a loop until all bytes are sent or an error occurs.
+Partial sends (when the OS buffer is full) cause a retry with the remaining bytes.
+
+### Error mapping
+
+POSIX `errno` values are translated to `OSError` subclasses (`ConnectionRefusedError`,
+`TimeoutError`, etc.) by `set_error()` which maps `ECONNREFUSED`, `ETIMEDOUT`, etc.
+
+## gopy notes
+
+Not yet ported. `module/socket/` is planned. The Go backend will use `net.Conn` from the
+Go standard library, which handles the timeout and non-blocking mode internally. The
+address family constants (`AF_INET`, `AF_INET6`, etc.) are module-level integers.

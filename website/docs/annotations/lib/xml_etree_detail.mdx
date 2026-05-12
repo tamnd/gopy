@@ -1,0 +1,120 @@
+---
+title: Lib/xml/etree/ElementTree.py
+description: Annotated reading notes for CPython's ElementTree XML library
+cpython_path: Lib/xml/etree/ElementTree.py
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/xml/etree/ElementTree.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | module header, imports | Public API list, conditional C acceleration import |
+| 121–350 | `Element` | Core tree node: tag, attrib, text, tail, child list |
+| 351–430 | `ElementTree` | Wrapper holding the root; owns `parse()` and `write()` |
+| 431–530 | `XMLParser` | Expat-backed push parser; feeds `TreeBuilder` |
+| 531–620 | `TreeBuilder` | SAX-style event sink that assembles `Element` nodes |
+| 621–720 | `iterparse` | Incremental pull-parse yielding (event, element) pairs |
+| 721–820 | `tostring` / `tostringlist` | Serialization to bytes or list of byte chunks |
+| 821–1000 | `_serialize_xml` / `_serialize_html` | Recursive serializers, namespace handling |
+| 1001–1200 | XPath subset | `findall`, `find`, `findtext`, `iterfind`, path tokenizer |
+| 1201–1400 | `_Element_Py` | Pure-Python fallback matching C layout |
+| 1401–1600 | `_elementtree` bridge | Imports C extension; aliases replace pure-Python symbols |
+| 1601–1800 | helpers, `VERSION`, `__all__` | Version string, public re-exports |
+
+## Reading
+
+### Element: the node model
+
+Every XML node is an `Element`. The class stores four scalar attributes (`tag`, `attrib`, `text`, `tail`) and a plain list called `_children` in the pure-Python path (named `ob_items` in the C struct). Random-access child operations delegate to that list directly.
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:121 Element
+class Element:
+    tag = None
+    attrib = None
+    text = None
+    tail = None
+
+    def __init__(self, tag, attrib={}, **extra):
+        if attrib:
+            attrib = {**attrib, **extra}
+        else:
+            attrib = extra
+        self.tag = tag
+        self.attrib = attrib
+        self._children = []
+```
+
+The C acceleration mirrors this layout exactly. `_elementtree.Element` is a C struct whose `ob_items` field is a `PyListObject*`. When the C module is available, the name `Element` is rebound to the C type at the bottom of the file, so callers see no difference.
+
+### ElementTree.parse() and XMLParser
+
+`ElementTree.parse()` opens a file, creates an `XMLParser` (which wraps CPython's `xml.parsers.expat`), and feeds the file to it in 64 KB chunks. The `XMLParser` drives a `TreeBuilder`, which handles `start`, `end`, `data`, and `comment` events to assemble the tree.
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:431 XMLParser.__init__
+class XMLParser:
+    def __init__(self, *, target=None, encoding=None):
+        try:
+            from xml.parsers import expat
+        except ImportError:
+            raise ImportError(
+                "No module named xml.parsers.expat"
+            ) from None
+        parser = expat.ParserCreate(encoding, "}")
+        if target is None:
+            target = TreeBuilder()
+        self.parser = parser
+        self.target = target
+        self._error = expat.error
+        self._names = {}
+        parser.DefaultHandlerExpand = self._default
+        parser.StartElementHandler = self._start
+        parser.EndElementHandler = self._end
+        parser.CharacterDataHandler = self._data
+        if hasattr(target, "comment"):
+            parser.CommentHandler = self._comment
+        if hasattr(target, "pi"):
+            parser.ProcessingInstructionHandler = self._pi
+        try:
+            self.entity = {}
+            parser.UseForeignDTD(True)
+            parser.SetParamEntityParsing(
+                expat.XML_PARAM_ENTITY_PARSING_UNLESS_STANDALONE)
+        except expat.error:
+            pass
+```
+
+`iterparse()` wraps the same machinery but yields control back to the caller after every `end` event, enabling streaming over large documents without holding the full tree in memory.
+
+### XPath subset and tostring()
+
+The XPath engine covers a subset of the 1.0 syntax: tag steps, `*`, `.`, `..`, predicates of the form `[@attr]` and `[tag]`, and the `//` descendant axis. It is implemented as a recursive-descent tokenizer feeding a list of selector callables that are chained via `|`.
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:1001 findall
+def findall(self, path, namespaces=None):
+    return list(self.iterfind(path, namespaces))
+```
+
+`tostring()` is a thin wrapper around `tostringlist()`, which drives `_serialize_xml` or `_serialize_html` recursively. Each call pushes byte chunks into a list; the list is joined at the end. Namespace declarations are tracked in a `_namespaces` dict so `xmlns:` attributes are emitted only once per serialization scope.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/xml_etree/` (public name `xml.etree.ElementTree`).
+
+Key porting decisions:
+
+- The C acceleration (`_elementtree`) provides a fast `Element` type. The Go port will start with the pure-Python path (`_Element_Py`) as the reference, then consider a native Go struct as an optional fast path.
+- `iterparse` relies on coroutine-style interleaving of Expat callbacks with caller iteration. The Go port will model this with a goroutine feeding a channel, matching the generator semantics.
+- The XPath subset tokenizer can be ported as a straight recursive-descent parser without a third-party library.
+- Namespace handling in serialization is stateful across recursive calls. The Go port will pass a `nsmap` value down the call stack rather than using a closure variable.

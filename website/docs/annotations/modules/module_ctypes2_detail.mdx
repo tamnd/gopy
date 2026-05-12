@@ -1,0 +1,66 @@
+---
+title: Modules/_ctypes/_ctypes.c (part 2)
+description: "ctypes part 2: Structure layout with _fields_, bit-field packing, POINTER type factory, byref() for pass-by-reference, cast(), and ctypes.CDLL library loading with cdecl/stdcall calling conventions."
+cpython_path: Modules/_ctypes/_ctypes.c
+cpython_version: "3.14"
+lines: 5200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_ctypes/_ctypes.c` (part 2)
+
+<CpyLink path="Modules/_ctypes/_ctypes.c" />
+
+This annotation covers `Structure` layout, `POINTER`, `byref`, `cast`, and library loading
+in `_ctypes.c`. For the basic `Simple_Type` scalar types and `Array` see the
+`modules_ctypes_c` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-600 | `Structure._fields_` processing | `StructField` descriptor per field, offset and size computation |
+| 601-1100 | Bit-field packing | Sub-byte field allocation following C ABI rules |
+| 1101-1600 | `POINTER` type factory | `LP_*` classes, `contents` property, `byref()` |
+| 1601-2200 | `cast()` | Reinterpret a ctypes object as a different type |
+| 2201-5200 | `CDLL`, `LibraryLoader`, calling convention dispatch | dlopen, function pointer, argtypes/restype |
+
+## Reading
+
+### `Structure._fields_` layout
+
+When `_fields_` is assigned, `StructField_setter` iterates the fields list, accumulates
+byte offsets according to the target platform's ABI alignment rules, and creates one
+`StructFieldDescriptor` per field. The `Structure.__init__` then uses these descriptors
+for `__getattr__`/`__setattr__`.
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:2480 StructField_setter
+static int
+StructField_setter(PyObject *self, PyObject *value, void *data)
+{
+    ...
+    offset = AlignUp(current_offset, stginfo->align);
+    ...
+}
+```
+
+### `byref(obj)`
+
+`byref(obj)` is a faster equivalent of `POINTER(type)(obj)` that creates a temporary
+pointer without allocating a full `POINTER` instance. It is only valid as a function
+argument, not storable.
+
+### `CDLL` and `FuncPtr`
+
+`CDLL(name)` calls `dlopen(name, RTLD_LOCAL|RTLD_NOW)`. Attribute access on the returned
+object creates a `FuncPtr` that wraps the symbol. Calling the `FuncPtr` invokes `libffi`
+`ffi_call` with the declared `argtypes` and `restype`.
+
+## gopy notes
+
+Not yet ported in gopy. `ctypes` requires `libffi` integration and platform ABI knowledge.
+It is not currently on the gopy roadmap since gopy targets pure-Python workloads. The
+`objects/` layer does not expose C struct layout APIs.

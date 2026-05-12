@@ -1,0 +1,178 @@
+---
+title: Modules/_json.c
+description: "CPython C accelerator for json: fast string encoding, scanstring decoder, encode_obj dispatch, and circular-reference detection"
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_json.c" />
+
+`Modules/_json.c` is the C accelerator for the `json` module. It provides two entry points used by `json/encoder.py` and `json/decoder.py`: `encode_basestring_ascii` (and its non-ASCII variant) for output encoding, and `scanstring` for input decoding. The `JSONEncoder` and `JSONDecoder` Python classes delegate to these functions when the C extension is available, falling back to pure Python otherwise.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `encoder_encode_string` | function | 120-230 | Emit a JSON string with ASCII-safe escaping |
+| `encoder_encode_float` | function | 250-290 | Emit a float, checking for NaN/Inf |
+| `encoder_listencode_list` | function | 310-420 | Recursively encode a list, tracking indent level |
+| `encoder_listencode_dict` | function | 440-580 | Recursively encode a dict, detecting circular refs |
+| `encoder_listencode_obj` | function | 590-700 | Top-level dispatch: list/dict/str/int/float/bool/None |
+| `scanstring_unicode` | function | 750-950 | Decode a JSON string literal, handling all escape forms |
+| `scan_once_unicode` | function | 970-1100 | Advance past one JSON value, return (value, end_index) |
+| `JSONDecoder_new` | function | 1150-1200 | Allocate decoder state, cache scanner callable |
+| `_markers` check | inline | 450, 490 | Circular-reference detection via id-keyed dict |
+| `escape_table` | table | 60-110 | 256-entry lookup: 0 = pass-through, else escape char |
+
+## Reading
+
+### encode_string C fast path
+
+The encoder walks the input `PyUnicode` object one code point at a time using a pre-built 256-entry `escape_table`. Code points below 0x20 or equal to `"`, `\`, or `/` are replaced with their `\uXXXX` or short-escape equivalents. The fast path stays entirely in C for all-ASCII strings with no special characters, appending directly to a `_PyUnicodeWriter`.
+
+```c
+// CPython: Modules/_json.c:120 encoder_encode_string
+static PyObject *
+encoder_encode_string(PyEncoderObject *s, PyObject *obj)
+{
+    /* Use PyUnicode_DATA / PyUnicode_KIND to get raw buffer */
+    Py_ssize_t i, length;
+    int kind;
+    const void *data;
+    _PyUnicodeWriter writer;
+
+    _PyUnicodeWriter_Init(&writer);
+    /* opening quote */
+    if (_PyUnicodeWriter_WriteChar(&writer, '"') < 0) goto error;
+
+    length = PyUnicode_GET_LENGTH(obj);
+    kind   = PyUnicode_KIND(obj);
+    data   = PyUnicode_DATA(obj);
+
+    for (i = 0; i < length; i++) {
+        Py_UCS4 c = PyUnicode_READ(kind, data, i);
+        /* escape_table[c] == 0 means emit c directly */
+        if (c > 0x7f || escape_table[c] == 0) {
+            if (_PyUnicodeWriter_WriteChar(&writer, c) < 0) goto error;
+        } else {
+            /* emit \n, \t, \uXXXX, etc. */
+            ...
+        }
+    }
+    if (_PyUnicodeWriter_WriteChar(&writer, '"') < 0) goto error;
+    return _PyUnicodeWriter_Finish(&writer);
+error:
+    _PyUnicodeWriter_Dealloc(&writer);
+    return NULL;
+}
+```
+
+Surrogate pairs (lone surrogates in the string) are handled by the `ensure_ascii=False` variant, which re-encodes them as `\uD800`-style escape sequences to produce valid JSON when `ensure_ascii=True`.
+
+### scanstring_unicode C decoder
+
+`scanstring_unicode` decodes a single JSON string starting just after the opening `"`. It advances a character pointer and handles all six short escapes (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`) plus `\uXXXX` surrogate pairs inline.
+
+```c
+// CPython: Modules/_json.c:750 scanstring_unicode
+static PyObject *
+scanstring_unicode(PyObject *pystr, Py_ssize_t end, int strict, Py_ssize_t *next_end_ptr)
+{
+    _PyUnicodeWriter writer;
+    Py_ssize_t len = PyUnicode_GET_LENGTH(pystr);
+    int kind = PyUnicode_KIND(pystr);
+    const void *data = PyUnicode_DATA(pystr);
+
+    _PyUnicodeWriter_Init(&writer);
+
+    while (end < len) {
+        Py_UCS4 c = PyUnicode_READ(kind, data, end++);
+        if (c == '"') break;          /* end of string */
+        if (c != '\\') {
+            /* fast path: emit c directly */
+            if (strict && c < 0x20) goto invalid_char;
+            if (_PyUnicodeWriter_WriteChar(&writer, c) < 0) goto error;
+            continue;
+        }
+        /* handle escape sequence */
+        c = PyUnicode_READ(kind, data, end++);
+        switch (c) {
+            case 'u': {
+                /* decode 4 hex digits, check for surrogate pair */
+                Py_UCS4 uni = scanstring_parse_hex4(...);
+                if (0xD800 <= uni && uni <= 0xDBFF) {
+                    /* high surrogate: expect \uDC00-\uDFFF */
+                    ...
+                }
+                ...
+            }
+            ...
+        }
+    }
+    *next_end_ptr = end;
+    return _PyUnicodeWriter_Finish(&writer);
+    ...
+}
+```
+
+When `strict=True`, control characters below 0x20 raise `JSONDecodeError`. Lone surrogates are passed through as-is when `ensure_ascii=False` to preserve round-trip fidelity with Python strings that contain surrogates.
+
+### encode_obj dispatch and circular reference detection
+
+`encoder_listencode_obj` is the recursive dispatch hub. It checks the object's type in order: `None`, `True`, `False`, `int`, `float`, `str`, `list`/`tuple`, `dict`. Unknown types call the encoder's `default()` method.
+
+```c
+// CPython: Modules/_json.c:590 encoder_listencode_obj
+static int
+encoder_listencode_obj(PyEncoderObject *s, _PyUnicodeWriter *writer,
+                       PyObject *obj, Py_ssize_t indent_level)
+{
+    if (obj == Py_None)  return encoder_encode_key_value(..., "null", 4);
+    if (obj == Py_True)  return encoder_encode_key_value(..., "true", 4);
+    if (obj == Py_False) return encoder_encode_key_value(..., "false", 5);
+    if (PyLong_Check(obj))    return encoder_encode_long(s, writer, obj);
+    if (PyFloat_Check(obj))   return encoder_encode_float(s, writer, obj);
+    if (PyUnicode_Check(obj)) return encoder_encode_string(s, obj); /* appends to writer */
+    if (PyList_Check(obj) || PyTuple_Check(obj))
+        return encoder_listencode_list(s, writer, obj, indent_level);
+    if (PyDict_Check(obj))
+        return encoder_listencode_dict(s, writer, obj, indent_level);
+    /* call s->defaultfn(obj), recurse on result */
+    ...
+}
+```
+
+Circular reference detection uses `_markers`, a `PyDict` mapping `id(container)` to the container itself. `encoder_listencode_list` and `encoder_listencode_dict` both insert the container before recursing and delete it after.
+
+```c
+// CPython: Modules/_json.c:450 encoder_listencode_dict (marker insert)
+    if (s->markers != Py_None) {
+        int has_key;
+        PyObject *id = PyLong_FromVoidPtr(dct);
+        has_key = PyDict_Contains(s->markers, id);
+        if (has_key) {
+            PyErr_SetString(PyExc_ValueError, "Circular reference detected");
+            Py_DECREF(id);
+            return -1;
+        }
+        if (PyDict_SetItem(s->markers, id, dct) < 0) { Py_DECREF(id); return -1; }
+        ...
+        PyDict_DelItem(s->markers, id);
+    }
+```
+
+`JSONDecoder._scanner` is set to `scan_once_unicode` (wrapped as a Python callable) by `JSONDecoder_new`. The Python `decode()` method calls `self._scanner(s, 0)` directly, so the C fast path is taken on every decode without any Python-level loop overhead.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/json/`.
+
+The encoder side maps cleanly onto a `strings.Builder` (or `bytes.Buffer`) passed through recursive calls. The `escape_table` becomes a `[256]byte` package-level variable. `scanstring_unicode` maps to a function that walks a `[]rune` slice (or the raw `string` bytes after UTF-8 validation). The circular-reference `_markers` dict becomes a `map[uintptr]struct{}` keyed on `reflect.ValueOf(v).Pointer()`.
+
+The main integration point is `encoder_listencode_obj`'s `default()` fallback: in gopy this dispatches through the `objects/protocol.go` call machinery, which must be wired up before the module can handle user-defined types.

@@ -1,0 +1,119 @@
+---
+title: frozen.c
+description: "Registry of frozen modules baked into the interpreter binary"
+cpython_path: Python/frozen.c
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`frozen.c` holds the registry of Python modules whose bytecode is compiled
+directly into the CPython binary. These modules are available before any
+filesystem access, which makes them critical for startup.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–15 | file header | Auto-generated notice; do not edit by hand |
+| 16–60 | `_PyFrozenModules[]` | Array of `(name, code, size)` triples |
+| 61–75 | `_PyFrozenModules_len` | Length of the array, used by the lookup loop |
+| 76–100 | `_PyImport_FindFrozenObject` | Lookup by name; returns a code object or `NULL` |
+
+## Reading
+
+### The frozen module array
+
+Each entry is a `struct _frozen` with three fields: a C string name, a pointer
+to the bytecode bytes, and a signed size. A negative size signals that the
+module is a package, so the importer must set `__path__`.
+
+```c
+// CPython: Python/frozen.c:16 _PyFrozenModules
+static const struct _frozen _PyFrozenModules[] = {
+    /* bootstrap */
+    {"_frozen_importlib",         _Py_M__importlib__bootstrap,
+                                  (int)sizeof(_Py_M__importlib__bootstrap)},
+    {"_frozen_importlib_external",_Py_M__importlib__bootstrap_external,
+                                  (int)sizeof(_Py_M__importlib__bootstrap_external)},
+    /* packages: size is negative */
+    {"encodings", _Py_M__encodings, -(int)sizeof(_Py_M__encodings)},
+    ...
+    {0, 0, 0}  /* sentinel */
+};
+```
+
+Key frozen modules and their roles:
+
+| Name | Sign | Role |
+|------|------|------|
+| `_frozen_importlib` | positive | `_bootstrap.py`: core import logic |
+| `_frozen_importlib_external` | positive | `_bootstrap_external.py`: filesystem importer |
+| `zipimport` | positive | ZIP archive importer |
+| `encodings.utf_8` | positive | UTF-8 codec needed before filesystem is ready |
+| `encodings` | negative | Package marker; triggers `__path__` setting |
+
+### Length constant
+
+`_PyFrozenModules_len` lets callers iterate the array without a sentinel scan.
+It is computed from `sizeof` at compile time.
+
+```c
+// CPython: Python/frozen.c:61 _PyFrozenModules_len
+const size_t _PyFrozenModules_len =
+    (sizeof(_PyFrozenModules) / sizeof(_PyFrozenModules[0])) - 1;
+```
+
+### Lookup function
+
+`_PyImport_FindFrozenObject` scans the array linearly by name. On a hit it
+calls `PyMarshal_ReadObjectFromString` to deserialize the bytecode bytes into
+a live code object. The negative-size convention is checked here: when `size`
+is negative the absolute value is passed to the unmarshaller and the caller
+receives a flag indicating a package.
+
+```c
+// CPython: Python/frozen.c:76 _PyImport_FindFrozenObject
+PyObject *
+_PyImport_FindFrozenObject(PyObject *name, int *p_ispackage)
+{
+    const char *namestr = PyUnicode_AsUTF8(name);
+    if (namestr == NULL) return NULL;
+    for (const struct _frozen *p = _PyFrozenModules; p->name != NULL; p++) {
+        if (strcmp(p->name, namestr) == 0) {
+            if (p_ispackage) *p_ispackage = (p->size < 0);
+            int size = (p->size < 0) ? -p->size : p->size;
+            return PyMarshal_ReadObjectFromString((const char *)p->code, size);
+        }
+    }
+    return NULL;
+}
+```
+
+## gopy notes
+
+- The frozen module registry is replicated in `stdlibinit/registry.go`. Instead
+  of bytecode arrays, gopy stores Go functions (one per module) that return a
+  fresh `objects.Module`. The negative-size package convention is represented by
+  a boolean `IsPackage` field on each registry entry.
+- `_PyImport_FindFrozenObject` maps to `vm/eval_import.go`
+  `importFrozen`. The linear scan is identical; the marshal step is replaced by
+  calling the registered Go factory function.
+- `_frozen_importlib` and `_frozen_importlib_external` are the only truly
+  critical entries for gopy startup. They are registered first in
+  `stdlibinit/registry.go` to mirror CPython ordering.
+- `zipimport` is registered as a stub that returns `ErrNotImplemented` because
+  gopy does not support ZIP-sourced imports yet.
+
+## CPython 3.14 changes
+
+- Python 3.11 was the landmark release: it froze the entire `importlib`
+  package plus many `encodings` codecs to cut startup time by roughly 10-15%.
+  The `frozen.c` array grew from 3 entries to over 200.
+- 3.12 added a hash field to `struct _frozen` for integrity checking when
+  `-R` (hash randomization) is active.
+- 3.14 continues to expand the set of frozen stdlib modules. The
+  `Tools/scripts/freeze_modules.py` script regenerates `frozen.c` as part of
+  the standard build, so the file should be treated as generated output.

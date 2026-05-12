@@ -1,0 +1,139 @@
+---
+title: Lib/gzip.py
+description: "Annotation: CPython Lib/gzip.py"
+cpython_path: Lib/gzip.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/gzip.py" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | module header, imports | `BadGzipFile`, constants (`FTEXT`, `FHCRC`, `FNAME`, `FCOMMENT`, `FEXTRA`) |
+| 41–60 | `BadGzipFile` | exception raised on malformed or truncated gzip data |
+| 61–180 | `GzipFile.__init__`, `GzipFile.close` | mode/compresslevel/mtime setup, underlying file ownership |
+| 181–260 | `_GzipWriter._write_gzip_header` | magic bytes, method, flags, mtime, OS byte |
+| 261–360 | `_GzipReader._read_gzip_header` | header parsing, multi-stream detection, flag decoding |
+| 361–460 | `GzipFile.write` | buffer accumulation, `zlib.compressobj` integration |
+| 461–540 | `GzipFile.read`, `GzipFile.read1`, `GzipFile.peek` | decompression, CRC verification, multi-stream stitching |
+| 541–600 | `open`, `compress`, `decompress` | module-level convenience wrappers |
+
+## Reading
+
+### GzipFile init and _GzipWriter._write_gzip_header
+
+`GzipFile.__init__` accepts `mode`, `compresslevel`, and `mtime`. When writing
+it creates a `_GzipWriter` internally and immediately writes the 10-byte fixed
+gzip header plus optional filename field.
+
+The `mtime` parameter controls the 4-byte modification-time field in the
+header. Passing `mtime=0` produces a reproducible output regardless of wall
+time, which is useful for deterministic builds.
+
+```python
+# CPython: Lib/gzip.py:181 _GzipWriter._write_gzip_header
+def _write_gzip_header(self, compresslevel):
+    self._fp.write(b'\037\213')  # magic number
+    self._fp.write(b'\010')      # method: deflate
+    ...
+    mtime = self._write_mtime
+    if mtime is None:
+        mtime = time.time()
+    write32u(self._fp, int(mtime))
+    if compresslevel == BEST_COMPRESSION:
+        self._fp.write(b'\002')
+    elif compresslevel == BEST_SPEED:
+        self._fp.write(b'\004')
+    else:
+        self._fp.write(b'\000')
+    self._fp.write(b'\377')      # OS: unknown
+```
+
+The OS byte is always `0xff` (unknown) in CPython's implementation. RFC 1952
+defines values for Unix (`0x03`), NTFS (`0x0b`), and others, but CPython
+does not expose OS selection to callers.
+
+### _GzipReader._read_gzip_header and multi-stream support
+
+`_read_gzip_header` parses one gzip member header from the current file
+position. It checks the two-byte magic, reads the method byte (must be 8 for
+deflate), then decodes the flags byte to determine which optional header fields
+are present.
+
+```python
+# CPython: Lib/gzip.py:261 _GzipReader._read_gzip_header
+def _read_gzip_header(self):
+    magic = self._fp.read(2)
+    if magic == b'':
+        return False
+    if magic != b'\037\213':
+        raise BadGzipFile(f'Not a gzipped file ({magic!r})')
+    (method, flag, self._last_mtime) = struct.unpack("<BBIxx",
+                                                      self._fp.read(8))
+    if method != 8:
+        raise BadGzipFile('Unknown compression method')
+    if flag & FEXTRA:
+        ...
+    if flag & FNAME:
+        ...  # read null-terminated filename
+    if flag & FCOMMENT:
+        ...  # read null-terminated comment
+    if flag & FHCRC:
+        ...  # read and verify header CRC16
+    return True
+```
+
+After `_read_eof` detects the end of one deflate stream, `_GzipReader` calls
+`_read_gzip_header` again to check for a concatenated second member. This is
+how multi-stream gzip files (produced by tools like `pigz` or by appending
+two `.gz` files) are transparently decompressed as a single byte stream.
+
+### GzipFile.write() and buffer accumulation
+
+`GzipFile.write()` feeds data to a `zlib.compressobj` and accumulates the
+compressed output. It also updates a running CRC-32 and an uncompressed-byte
+counter; both values are written into the 8-byte gzip trailer on `close()`.
+
+```python
+# CPython: Lib/gzip.py:361 GzipFile.write
+def write(self, data):
+    self._check_not_closed()
+    if self.mode != WRITE:
+        import errno
+        raise OSError(errno.EBADF, "write() on read-only GzipFile object")
+    if isinstance(data, (bytes, bytearray)):
+        length = len(data)
+    else:
+        data = memoryview(data)
+        length = data.nbytes
+    if length > 0:
+        self._crc = zlib.crc32(data, self._crc)
+        self._size += length
+        self._fp.write(self._compress.compress(data))
+    return length
+```
+
+Calling `flush()` with `zlib.Z_SYNC_FLUSH` forces all buffered compressed data
+to the underlying file without closing the deflate stream, which is useful for
+streaming scenarios where the reader needs periodic progress.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/gzip/`.
+
+The Go standard library's `compress/gzip` covers the basic read/write path,
+but a faithful port of the Python `GzipFile` API must expose `mtime`,
+`compresslevel`, and the `BadGzipFile` exception type (mapped to a Go error
+sentinel). Multi-stream support in `_GzipReader` requires explicit re-entry
+logic that is absent from `compress/gzip`'s `Reader`, so that portion must be
+ported directly with CPython citations rather than delegated to the Go package.
+The `compress`, `decompress`, and `open` module-level helpers are thin wrappers
+and can be ported last.

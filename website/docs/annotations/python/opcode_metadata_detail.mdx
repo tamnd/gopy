@@ -1,0 +1,108 @@
+---
+title: "opcode_metadata.h: Opcode Metadata Tables"
+description: "Annotation for CPython's generated opcode metadata header, covering cache slot counts, specialization chains, jump tables, and opcode property flags"
+cpython_path: Python/opcode_metadata.h
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/opcode_metadata.h` is a generated file produced by
+`Tools/cases_generator/opcode_metadata_generator.py` from the instruction
+definitions in `Python/bytecodes.c`. It provides every constant lookup table
+the interpreter core needs at runtime without hitting a switch statement:
+cache slot counts, adaptive specialization chains, jump-target flags, and
+per-opcode property bitmasks.
+
+Never edit this file by hand. Regenerate it with `make regen-cases`.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| 1–30 | header guard and includes | Standard `#ifndef Py_OPCODE_METADATA_H` guard; included by `ceval.c` and the optimizer |
+| 31–120 | `_PyOpcode_Caches` | `uint8_t` array indexed by opcode; gives the number of `_Py_CODEUNIT` cache slots that follow each instruction in the bytecode stream |
+| 121–260 | `_PyOpcode_Specializations` | `uint8_t[MAX_SPECIALIZATIONS]` table; each row lists the specialized variants an adaptive opcode can rewrite to, terminated by zero |
+| 261–400 | `_PyOpcode_Jump` | `uint8_t` array; non-zero means the opcode is a jump and the operand encodes the target offset |
+| 401–700 | `OPCODE_HAS_*` macros | Bit-flag helpers such as `OPCODE_HAS_ARG`, `OPCODE_HAS_JUMP`, `OPCODE_HAS_EXC`, `OPCODE_HAS_FREE`, `OPCODE_HAS_LOCAL`, `OPCODE_HAS_EVAL_BREAK` |
+| 701–1100 | `_PyOpcode_opcode_metadata` | Array of `struct opcode_metadata`; stores `valid_entry`, `instr_format`, and `flags` per opcode |
+| 1101–1500 | `_PyOpcode_uop_metadata` | Parallel array for micro-operations (uops); same shape as `_PyOpcode_opcode_metadata` but indexed by uop id |
+| 1501–2000 | `UOP_ID_*` defines | Integer constants for each uop, generated from `_Py_UOpsSymbol` entries in `bytecodes.c` |
+| 2001–3000 | `_PyOpcode_macro_expansion` | Per-opcode expansion table used by the tier-2 compiler to decompose a bytecode into its constituent uops |
+
+## Reading
+
+### `_PyOpcode_Caches`: cache slot layout
+
+The adaptive interpreter stores inline caches in the bytecode array immediately
+after the instruction word. `_PyOpcode_Caches` tells the interpreter how many
+extra words to skip:
+
+```c
+/* Python/opcode_metadata.h:45 _PyOpcode_Caches */
+extern const uint8_t _PyOpcode_Caches[256];
+
+/* excerpt (values are in _Py_CODEUNIT units, each = 2 bytes) */
+[LOAD_ATTR]        = 9,   /* 9 cache slots for type version + method flag */
+[BINARY_SUBSCR]    = 1,
+[CALL]             = 3,
+[BINARY_OP]        = 1,
+[COMPARE_OP]       = 1,
+[FOR_ITER]         = 1,
+```
+
+The `RESUME` and most control-flow opcodes have zero cache slots.
+
+### `_PyOpcode_Specializations`: adaptive chains
+
+Each adaptive opcode has a row in this table listing the concrete variants the
+specializer may select. The runtime tries each candidate in order and writes the
+first successful one back into the bytecode:
+
+```c
+/* Python/opcode_metadata.h:130 _PyOpcode_Specializations */
+extern const uint8_t _PyOpcode_Specializations[256][MAX_SPECIALIZATIONS];
+
+/* LOAD_ATTR row */
+[LOAD_ATTR] = {
+    LOAD_ATTR_INSTANCE_VALUE,
+    LOAD_ATTR_MODULE,
+    LOAD_ATTR_WITH_HINT,
+    LOAD_ATTR_SLOT,
+    LOAD_ATTR_CLASS,
+    LOAD_ATTR_METHOD_WITH_VALUES,
+    LOAD_ATTR_METHOD_NO_DICT,
+    LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES,
+    LOAD_ATTR_NONDESCRIPTOR_NO_DICT,
+    0,
+},
+```
+
+### Opcode property flags and 3.14 additions
+
+`_PyOpcode_opcode_metadata` stores a `flags` field built from the `OPCODE_HAS_*`
+macros. The optimizer and compiler both query these flags to avoid unsafe
+transformations:
+
+```c
+/* Python/opcode_metadata.h:410 OPCODE_HAS_ARG */
+#define OPCODE_HAS_ARG(OP)        (_PyOpcode_opcode_metadata[OP].flags & HAS_ARG_FLAG)
+#define OPCODE_HAS_JUMP(OP)       (_PyOpcode_opcode_metadata[OP].flags & HAS_JUMP_FLAG)
+#define OPCODE_HAS_EVAL_BREAK(OP) (_PyOpcode_opcode_metadata[OP].flags & HAS_EVAL_BREAK_FLAG)
+#define OPCODE_HAS_DEOPT(OP)      (_PyOpcode_opcode_metadata[OP].flags & HAS_DEOPT_FLAG)
+#define OPCODE_HAS_ERROR(OP)      (_PyOpcode_opcode_metadata[OP].flags & HAS_ERROR_FLAG)
+#define OPCODE_HAS_ESCAPES(OP)    (_PyOpcode_opcode_metadata[OP].flags & HAS_ESCAPES_FLAG)
+```
+
+3.14 added `HAS_ESCAPES_FLAG` to mark instructions that may execute arbitrary
+Python code (and therefore invalidate speculative type assumptions). The tier-2
+optimizer uses this flag to decide where to insert guard instructions.
+
+## gopy notes
+
+- gopy uses a hand-maintained equivalent in `compile/flowgraph.go`: the `instrSize` function returns the same cache-slot count as `_PyOpcode_Caches` for each opcode.
+- The specialization chain table has no direct counterpart yet; gopy's adaptive path is handled in `vm/eval_gen.go` through switch cases rather than a lookup table.
+- `OPCODE_HAS_JUMP` semantics are replicated in `compile/flowgraph_jumps.go` via the `isJump` predicate.
+- The `_PyOpcode_macro_expansion` table is referenced by the tier-2 scope (v0.12, task #482) but not yet ported.

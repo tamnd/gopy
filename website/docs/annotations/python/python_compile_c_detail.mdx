@@ -1,0 +1,88 @@
+---
+title: Python/compile.c
+description: "Bytecode compiler: walks the AST from symtable output, emits instructions via a flowgraph CFG, optimizes basic blocks, and writes the final PyCodeObject."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 9000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+`Python/compile.c` is the bytecode compiler. It receives an AST and a symbol table and emits bytecode instructions into a control-flow graph (CFG) of basic blocks. After all instructions are emitted, a series of passes optimizes the CFG, computes stack depths, assigns final instruction offsets, and writes the result into a `PyCodeObject`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `compiler` struct, init | Compiler state; instruction buffer, block list |
+| 301-700 | `compiler_enter_scope`, `compiler_exit_scope` | Scope nesting for functions, classes, comprehensions |
+| 701-1500 | `compiler_mod`, `compiler_stmt` | Top-level and statement dispatch |
+| 1501-3000 | `compiler_function`, `compiler_class` | Function and class compilation |
+| 3001-5000 | `compiler_expr`, `compiler_boolop`, `compiler_compare` | Expression compilation |
+| 5001-6500 | `compiler_comprehension`, `compiler_sync_comprehension` | List/set/dict comprehensions, generator expressions |
+| 6501-8000 | `compiler_try`, `compiler_with`, `compiler_match` | Exception handling, context managers, pattern matching |
+| 8001-9000 | `assemble`, `optimize_basic_block`, `compute_stack_depth` | CFG finalization and code object assembly |
+
+## Reading
+
+### CFG basic blocks
+
+The compiler emits instructions into basic blocks. A new block is created for each branch target (loop back edges, if/else branches, exception handlers). `compiler_next_block` allocates a new block; `compiler_use_next_block` sets it as the current emission target.
+
+```c
+// Python/compile.c:301 compiler_enter_scope
+static int
+compiler_enter_scope(struct compiler *c, identifier name,
+                     int scope_type, void *key, int lineno)
+{
+    struct compiler_unit *u = PyMem_Calloc(1, sizeof(*u));
+    u->u_blocks = NULL;
+    u->u_curblock = compiler_new_block(c);
+    /* push u onto scope stack */
+    return 1;
+}
+```
+
+### Instruction emission
+
+`ADDOP(c, loc, opcode)` is the primary macro for adding an instruction. Instructions are stored as `struct instr` entries in the current basic block. Jump instructions store target block pointers that are resolved to offsets in `assemble`.
+
+```c
+// Python/compile.c:701 compiler_stmt dispatch
+static int
+compiler_stmt(struct compiler *c, stmt_ty s)
+{
+    switch (s->kind) {
+    case FunctionDef_kind:
+        return compiler_function(c, s, 0);
+    case ClassDef_kind:
+        return compiler_class(c, s);
+    case Return_kind:
+        return compiler_return(c, s);
+    ...
+    }
+}
+```
+
+### assemble: CFG to code object
+
+After all instructions are emitted, `assemble` runs optimization passes (`optimize_basic_block` does peephole constant folding), computes stack depths via `stackdepth`, assigns instruction offsets, and calls `makecode` to build the final `PyCodeObject`.
+
+```c
+// Python/compile.c:8001 assemble
+static PyCodeObject *
+assemble(struct compiler *c, int addNone)
+{
+    if (!optimize_cfg(c->u, c->c_st)) return NULL;
+    if (!compute_exception_table(c->u)) return NULL;
+    if (!stackdepth(c->u)) return NULL;
+    return makecode(c, ...);
+}
+```
+
+## gopy notes
+
+The gopy compiler is in `compile/`. It follows the same CFG-based architecture: `compile/flowgraph.go` manages basic blocks, `compile/codegen_stmt.go` dispatches on statement AST nodes, and `compile/flowgraph_passes.go` runs the optimization passes. The final code object is written in `compile/compiler.go`.

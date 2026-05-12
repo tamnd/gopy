@@ -1,0 +1,93 @@
+---
+title: "BufferedWriter / BufferedReader detail"
+description: "Annotation of pending-buffer write loop, flush syscall, read1/_read_unlocked, peek, seek rewind in Modules/_io/bufferedio.c"
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: module/io
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`bufferedio.c` implements `BufferedWriter`, `BufferedReader`, and `BufferedRandom`.
+The file is split into three broad regions: the shared `BufferedObject` C struct and
+locking helpers (~line 1–400), the reader half (~400–1600), and the writer half
+(~1600–2700), with `BufferedRandom` combining both at the tail.
+
+All public methods acquire a reentrant lock (`ENTER_BUFFERED`) before touching
+internal state. The lock is a `PyThread_type_lock` paired with a condition variable
+so that a blocked `read()` can be woken when data arrives.
+
+## Map
+
+| Region | Lines (approx) | What lives there |
+|--------|---------------|-----------------|
+| Struct + helpers | 1-400 | `buffered` C struct, lock macros, `_bufferedwriter_reset_buf` |
+| BufferedReader init | 400-700 | `_io_BufferedReader___init___impl`, buffer alloc |
+| `_read_unlocked` | 700-1050 | inner read loop, refill from raw, short-read handling |
+| `read1` / `peek` | 1050-1300 | single-syscall read, peek without consuming |
+| Seek / tell (reader) | 1300-1600 | rewind raw position, discard buffer on seek |
+| BufferedWriter init | 1600-1850 | `_io_BufferedWriter___init___impl`, flush-on-close |
+| `_bufferedwriter_flush_unlocked` | 1850-2100 | write loop, partial-write retry, raw.write |
+| `BufferedWriter.write` | 2100-2400 | copy-into-buffer path, overflow triggers flush |
+| Seek / tell (writer) | 2400-2600 | flush before seek, reset buffer offset |
+| BufferedRandom | 2600-3000 | delegates to reader/writer halves, mode switch |
+
+## Reading
+
+### BufferedWriter.write and the pending-buffer loop
+
+<Cpy src="Modules/_io/bufferedio.c" lines="2100-2250" />
+
+`bufferedwriter_write` copies the caller's bytes into the internal buffer until
+it is full, then calls `_bufferedwriter_flush_unlocked`. The flush function loops
+(`while (written < buffer_size)`) calling `raw.write` until every byte is
+consumed or a `BlockingIOError` is raised. On `BlockingIOError` the already-written
+count is stored in `self->write_pos` so the next `write` or `flush` resumes from
+the right offset rather than re-sending bytes.
+
+The 3.14 change here is that `raw.write` is now invoked through
+`PyObject_CallMethodOneArg` instead of a cached method slot, making the path
+consistent with subclass override semantics.
+
+### BufferedReader._read_unlocked and read1
+
+<Cpy src="Modules/_io/bufferedio.c" lines="700-900" />
+
+`_read_unlocked` is the workhorse. When the requested `n` bytes are not all
+present in the buffer it issues one `raw.read` call to refill, copies what it
+needs, and returns. It never issues a second syscall in the same call (that
+distinguishes it from `read` which loops). `read1` enforces this by capping `n`
+at `self->buffer_size` before delegating to `_read_unlocked`.
+
+`peek` is even simpler: it calls `_read_unlocked(0)` to ensure the buffer has
+at least one byte, then returns a memoryview of the internal buffer without
+advancing `self->pos`. The caller must not hold a reference past the next
+mutating call, which CPython documents but does not enforce at the C level.
+
+### Seek and state rewind
+
+<Cpy src="Modules/_io/bufferedio.c" lines="1300-1450" />
+
+`bufferedreader_seek` flushes the pending buffer, computes the raw offset
+(`raw_offset = self->pos - self->read_end`), issues `raw.seek(target - raw_offset)`
+and then zeroes `self->pos`, `self->read_pos`, and `self->read_end` so the buffer
+is considered empty. `BufferedWriter.seek` first calls `_bufferedwriter_flush_unlocked`
+then performs the same raw seek and buffer reset. Getting this order wrong
+(reset before flush) was the source of <CpyLink issue="bpo-26zero" /> which was
+fixed in 3.12 and is still present in 3.14.
+
+## gopy notes
+
+- The reentrant lock is modelled as `sync.Mutex` + `sync.Cond` in `module/io`.
+- `_read_unlocked` maps to `bufferedReaderReadUnlocked` in `module/io/reader.go`.
+- The partial-write retry loop in `_bufferedwriter_flush_unlocked` must preserve
+  the `write_pos` offset across `BlockingIOError`; the Go port raises
+  `io.ErrNoProgress` sentinel instead.
+- `peek` returns a slice of the internal `[]byte` buffer directly. The Go port
+  documents that the slice is invalidated by any subsequent mutating call.
+- 3.14 removed the `write_lock` fast path that bypassed the condition variable
+  when the GIL was held. The Go port never had this path, so no change needed.

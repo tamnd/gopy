@@ -1,0 +1,153 @@
+---
+title: bltinmodule.c
+description: "Built-in functions and the builtins module: len, print, isinstance, iter, next, sorted, and import"
+cpython_path: Python/bltinmodule.c
+cpython_version: "3.14"
+lines: 2843
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+The single file that defines every function in the `builtins` namespace.
+Each built-in is a C function following one of three calling conventions:
+`METH_NOARGS`, `METH_O` (single argument), or `METH_FASTCALL` (positional
+array plus keyword names tuple). The `METH_FASTCALL` convention dominates
+because it avoids allocating a temporary tuple on every call.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | module init | `PyMethodDef` table and `PyModuleDef` for builtins |
+| 81–130 | `builtin___import__` | Dispatches to `importlib._bootstrap._call_with_frames_removed` |
+| 131–200 | `builtin_abs` | Calls `PyNumber_Absolute` |
+| 201–350 | `builtin_isinstance` | Type check with ABC `__instancecheck__` fallback |
+| 351–450 | `builtin_iter` | One-arg `__iter__` or two-arg sentinel form |
+| 451–510 | `builtin_len` | Calls `PyObject_Length` |
+| 511–700 | `builtin_next` | Advances iterator, optional default on `StopIteration` |
+| 701–950 | `builtin_print` | Writes to `sys.stdout` with sep, end, file, flush |
+| 951–1100 | `builtin_sorted` | Builds list then calls `.sort(key, reverse)` |
+| 1101–2843 | remaining built-ins | `range`, `zip`, `map`, `filter`, `eval`, `exec`, `compile`, etc. |
+
+## Reading
+
+### `builtin_len`
+
+The simplest illustration of the `METH_O` pattern: one argument, no keywords.
+
+```c
+// CPython: Python/bltinmodule.c:451 builtin_len
+static PyObject *
+builtin_len(PyObject *module, PyObject *obj)
+{
+    Py_ssize_t res;
+    res = PyObject_Length(obj);
+    if (res < 0 && PyErr_Occurred())
+        return NULL;
+    return PyLong_FromSsize_t(res);
+}
+```
+
+`PyObject_Length` routes through `sq_length` for sequences and `mp_length`
+for mappings. The negative-with-error guard is needed because some objects
+legitimately return 0 from `mp_length`.
+
+### `builtin_print`
+
+`print` is `METH_FASTCALL | METH_KEYWORDS`. The implementation resolves
+`file` from the keyword arguments first; if absent it reads `sys.stdout`
+through `_PySys_GetAttr`. Each positional argument is converted with
+`PyObject_Str` and written with `sep` between items, then `end` is appended.
+
+```c
+// CPython: Python/bltinmodule.c:701 builtin_print
+static PyObject *
+builtin_print(PyObject *module, PyObject *const *args, Py_ssize_t nargs,
+              PyObject *kwnames)
+```
+
+The `flush` keyword triggers an explicit `file.flush()` call after writing.
+Note that `file` defaults to `None` at the C level, not to `sys.stdout`
+directly; the `None`-to-stdout substitution happens inside the function body
+so that replacing `sys.stdout` at runtime is respected on every call.
+
+### `builtin_isinstance`
+
+After a fast `Py_TYPE(inst) == (PyTypeObject *)cls` hit, the function falls
+back to the full abstract check which handles tuples of types and the ABC
+`__instancecheck__` hook.
+
+```c
+// CPython: Python/bltinmodule.c:201 builtin_isinstance
+static PyObject *
+builtin_isinstance(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *inst = args[0];
+    PyObject *cls  = args[1];
+    int retval;
+
+    retval = PyObject_IsInstance(inst, cls);
+    if (retval < 0)
+        return NULL;
+    return PyBool_FromLong(retval);
+}
+```
+
+`PyObject_IsInstance` is defined in `abstract.c`; it handles tuple unions,
+`__instancecheck__`, and the `__mro_entries__` protocol.
+
+### `builtin_sorted`
+
+`sorted` is intentionally simple: build a list then delegate to `list.sort`.
+This keeps `METH_FASTCALL` overhead minimal and reuses all of Timsort.
+
+```c
+// CPython: Python/bltinmodule.c:951 builtin_sorted
+static PyObject *
+builtin_sorted(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+               PyObject *kwnames)
+{
+    PyObject *newlist, *v, *seq;
+    /* ... keyword extraction omitted ... */
+    seq = args[0];
+    newlist = PySequence_List(seq);
+    if (newlist == NULL)
+        return NULL;
+    v = _PyObject_CallMethodIdObjArgs(newlist, &PyId_sort, key, reverse, NULL);
+    Py_DECREF(newlist);
+    /* ... */
+}
+```
+
+The key and reverse keywords are forwarded verbatim to `list.sort` rather
+than being interpreted again in C, so any change to sort semantics only needs
+to live in one place.
+
+## gopy notes
+
+- `builtin_len` maps to `objects.Len` in `objects/protocol.go`, which
+  dispatches through the `LenFunc` slot on the type object.
+- `builtin_print` is implemented in `module/builtins/print.go`. gopy resolves
+  `sys.stdout` through `vm.GetSysAttr` rather than `_PySys_GetAttr`.
+- `builtin_isinstance` calls `objects.IsInstance` in `objects/protocol.go`.
+  The ABC fallback goes through `__instancecheck__` via the normal attribute
+  lookup path.
+- `builtin_sorted` follows the same build-list-then-sort pattern. The list
+  sort call is made via `vm.CallMethod` in `vm/eval_call.go` to stay within
+  the eval loop and pick up any sort override on a subclass of `list`.
+- `builtin___import__` dispatches to gopy's import system in
+  `vm/eval_import.go` rather than to importlib directly, though the
+  `importlib._bootstrap` stubs are loaded and consulted for package imports.
+
+## CPython 3.14 changes
+
+- Several built-ins that were `METH_VARARGS` in 3.10 had already migrated to
+  `METH_FASTCALL` by 3.12. In 3.14 `builtin_print` drops its last
+  `PyArg_ParseTupleAndKeywords` call in favour of manual `kwnames` scanning,
+  completing that migration.
+- `builtin___import__` gained a guard in 3.13 that raises `ImportWarning` when
+  the `level` argument is negative. 3.14 promotes that to a hard `ValueError`.
+- `builtin_isinstance` in 3.14 short-circuits the ABC path for `type` objects
+  that are known not to define `__instancecheck__`, using the type version tag
+  to cache this knowledge across calls.

@@ -1,0 +1,83 @@
+---
+title: "Python/frozen.c and Tools/freeze/: Frozen Module Embedding"
+description: "The _PyImport_FrozenModules table, _Py_freeze_module struct, and how importlib bootstrap is baked into the CPython binary"
+cpython_path: Python/frozen.c
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: stdlibinit/registry.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/frozen.c` is a thin table file: it lists every module whose bytecode has been compiled into the interpreter binary. The actual freeze toolchain lives in `Tools/freeze/` and in the `Makefile` target `freeze_importlib`. At runtime, `import` resolves names against this table before touching the file system.
+
+## Map
+
+| Lines | Symbol | File | Role |
+|-------|--------|------|------|
+| 1-30 | `_Py_freeze_module` struct | Python/frozen.c | Fields: `name` (C string), `code` (byte array pointer), `size` (int) |
+| 31-80 | `_PyImport_FrozenModules[]` | Python/frozen.c | Sentinel-terminated array of all frozen entries |
+| 81-100 | `_PyImport_FrozenBootstrap[]` / `_PyImport_FrozenStdlib[]` | Python/frozen.c | Separate sub-tables introduced in 3.11 to partition bootstrap from stdlib frozen modules |
+| 1-200 | `freeze.py` entry point | Tools/freeze/freeze.py | Compiles a `.py` file to a C byte array and writes a `.h` suitable for inclusion |
+| 201-600 | `makefreeze.py` | Tools/freeze/makefreeze.py | Generates the `_PyImport_FrozenModules` table by iterating the build manifest |
+| 600-1000 | `regen-frozen` Makefile target | Makefile | Drives `freeze_importlib` to regenerate `Python/frozen.c` from `Lib/importlib/` sources |
+
+## Reading
+
+### The `_Py_freeze_module` struct
+
+Every entry in the frozen table is a `_Py_freeze_module`. A negative `size` field marks a package (has `__path__`); a positive `size` marks a plain module.
+
+```c
+/* Python/frozen.c ~5 */
+struct _frozen {
+    const char *name;
+    const unsigned char *code;
+    int size;
+    int is_package;             /* added 3.12; replaces sign convention */
+    PyObject *(*get_code)(void); /* added 3.14 for lazy decode */
+};
+```
+
+The `get_code` function pointer is new in 3.14: it allows the bytecode to be decompressed on first import rather than at startup, reducing RSS for large embedded stdlib builds.
+
+### Bootstrap partitioning (3.11+)
+
+Before 3.11 all frozen modules shared one table. 3.11 split them into `_PyImport_FrozenBootstrap` (the handful of modules needed to start `importlib`) and `_PyImport_FrozenStdlib` (everything else). The import machinery searches bootstrap first, then stdlib, then the legacy table.
+
+```c
+/* Python/import.c ~1420 (consumer of frozen.c data) */
+static const struct _frozen *
+find_frozen(PyObject *nameobj)
+{
+    ...
+    p = _PyImport_FrozenBootstrap;
+    for (; p->name != NULL; p++) {
+        if (strcmp(name, p->name) == 0) return p;
+    }
+    p = _PyImport_FrozenStdlib;
+    for (; p->name != NULL; p++) {
+        if (strcmp(name, p->name) == 0) return p;
+    }
+    ...
+}
+```
+
+### `Py_FrozenFlag` and isolated configs
+
+When `Py_FrozenFlag` is set (via `PyConfig.pathconfig_warnings = 0` in modern API), the interpreter suppresses all path-related warnings that would normally fire when the standard library cannot be found on disk. Frozen builds rely on this to stay silent about missing `.py` files.
+
+```c
+/* Python/initconfig.c ~2510 */
+if (_Py_IsMainInterpreter(interp) && config->pathconfig_warnings) {
+    /* warn about missing stdlib only when not frozen */
+}
+```
+
+## gopy notes
+
+- `stdlibinit/registry.go` plays the same role as `_PyImport_FrozenModules`: it maps module names to Go-native module objects registered at init time.
+- gopy does not embed `.pyc` bytecode arrays. There is no direct equivalent of the `code` field; Go module objects implement the full module interface instead.
+- The `stdlib/MANIFEST.txt` file tracks which CPython stdlib files have been ported, serving as a build-time parallel to CPython's freeze manifest.
+- `Py_FrozenFlag` is not needed in gopy because path searching for `.py` files is not implemented at all; every module is either registered in the registry or missing.

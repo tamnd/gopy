@@ -1,0 +1,129 @@
+---
+title: "Modules/posixmodule.c: os Module POSIX Layer"
+description: "Platform-wrapping C layer for the os module, covering file I/O, stat_result, os.walk, and dirfd-relative syscalls"
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 15000
+status: annotated
+ported_to: module/os
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`posixmodule.c` is the largest C file in CPython. It backs both `posix` (on
+UNIX) and `nt` (on Windows) under the unified `os` namespace. The file is
+structured as a long sequence of thin syscall wrappers generated partly by
+`Modules/clinic/posixmodule.c.h` (the Argument Clinic output). Platform
+guards (`#ifdef MS_WINDOWS`) appear throughout; this annotation focuses on the
+POSIX path.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–400 | includes, feature-test macros, path helpers | `path_t` converter, `POSIX_CALL` macro |
+| 401–900 | `os_open_impl`, `os_read_impl`, `os_write_impl`, `os_close_impl` | basic file descriptor I/O |
+| 901–1500 | `stat_result` type, `os_stat_impl`, `os_lstat_impl`, `os_fstat_impl` | `struct stat` to Python namedtuple |
+| 1501–2200 | `os_listdir_impl`, `os_scandir_impl`, `ScandirIterator` | directory listing and `DirEntry` object |
+| 2201–3000 | `os_walk_impl` | recursive topdown/bottomup generator |
+| 3001–3800 | `os_open_impl` (openat), `os_access_impl` (faccessat), `os_stat_impl` (fstatat) | dirfd-relative variants |
+| 3801–6000 | `os_chmod_impl`, `os_chown_impl`, `os_link_impl`, `os_unlink_impl`, etc. | metadata and link operations |
+| 6001–9000 | process management: `os_fork_impl`, `os_exec*`, `os_waitpid_impl` | fork/exec/wait family |
+| 9001–12000 | `os_pipe_impl`, `os_dup_impl`, `os_dup2_impl`, select/poll wrappers | fd duplication and I/O multiplexing |
+| 12001–15000 | `os_urandom_impl`, `os_cpu_count_impl`, module init | entropy, CPU count, `PyModuleDef` |
+
+## Reading
+
+### os.open / os.read / os.write / os.close
+
+Each function is a direct `open(2)` / `read(2)` / `write(2)` / `close(2)`
+wrapper. The `path_t` converter normalises Python `str`, `bytes`, and
+`os.PathLike` objects into a C `const char *` before the syscall. `os.read`
+allocates a `bytes` object of the requested size and shrinks it if the actual
+read is shorter. All blocking syscalls release the GIL.
+
+```c
+// CPython: Modules/posixmodule.c:401 os_open_impl
+static int
+os_open_impl(PyObject *module, path_t *path, int flags, int mode, int dir_fd)
+{
+    int fd;
+    Py_BEGIN_ALLOW_THREADS
+#ifdef HAVE_OPENAT
+    if (dir_fd != DEFAULT_DIR_FD)
+        fd = openat(dir_fd, path->narrow, flags, mode);
+    else
+#endif
+        fd = open(path->narrow, flags, mode);
+    Py_END_ALLOW_THREADS
+    if (fd < 0)
+        return posix_error();
+    return fd;
+}
+```
+
+### stat_result namedtuple
+
+`stat_result` is a fixed-size sequence subclass with 10 positional fields
+(`st_mode` through `st_ctime`) plus platform extras. CPython fills it by
+calling `stat_result_new` with a 10-tuple, then patching the extra attributes
+directly onto the object. The `st_atime`, `st_mtime`, and `st_ctime` float
+values are synthesised from the integer seconds and nanoseconds fields.
+
+```c
+// CPython: Modules/posixmodule.c:901 fill_time
+static void
+fill_time(PyObject *module, PyObject *v, int index,
+          time_t sec, unsigned long nsec)
+{
+    /* store integer ns field, then float field = sec + nsec*1e-9 */
+    PyObject *fval = PyFloat_FromDouble(sec + 1e-9 * nsec);
+    PyStructSequence_SET_ITEM(v, index,   PyLong_FromLong(sec));
+    PyStructSequence_SET_ITEM(v, index+3, fval);
+}
+```
+
+### os.walk topdown generator
+
+`os_walk_impl` uses an explicit stack (a Python list of pending directories)
+rather than C recursion. In topdown mode it yields `(dirpath, dirnames,
+filenames)` before descending, so the caller can prune `dirnames` in place.
+In bottomup mode it appends the current entry to a deferred list and processes
+it after the recursive descent. `ScandirIterator` is used internally so each
+level only calls `opendir`/`readdir` once.
+
+```c
+// CPython: Modules/posixmodule.c:2201 os_walk_impl
+/* Simplified sketch */
+while (stack not empty) {
+    top = stack.pop();
+    scandir(top) -> split into dirs, nondirs;
+    if (topdown) yield (top, dirs, nondirs);
+    for d in dirs (not pruned): stack.push(d);
+    if (!topdown) yield (top, dirs, nondirs);
+}
+```
+
+### dirfd-relative functions (openat/faccessat)
+
+Functions that accept a `dir_fd` keyword argument are guarded by
+`HAVE_OPENAT`, `HAVE_FACCESSAT`, etc. at compile time. The `dir_fd` parameter
+is an `int` defaulting to `AT_FDCWD` (the constant `DEFAULT_DIR_FD` in CPython
+source). When `dir_fd != DEFAULT_DIR_FD`, the `*at` variant of the syscall is
+called; otherwise the plain syscall is used. Python raises `NotImplementedError`
+on platforms where the `*at` family is absent.
+
+## gopy notes
+
+- `path_t` maps to a Go interface accepting `string`, `[]byte`, and
+  `os.PathLike`-equivalent. The `PathLike` protocol check should mirror
+  `objects/protocol.go`.
+- `stat_result` maps to a `StructSequence` with 10 named fields. The gopy
+  `StructSequence` machinery (not yet shipped) is the blocker for a full port.
+- `os.walk` can be ported as a Go generator using a channel or a closure-based
+  iterator. The explicit stack approach translates cleanly to a `[]string`
+  slice in Go.
+- 3.14 changes: `os.process_cpu_count()` was added as a distinct function from
+  `os.cpu_count()`. `os.stat` gained `st_birthtime` on Linux 6.11+ via
+  `statx(2)`. Several `dir_fd` functions gained Windows support via new NT
+  handle-relative APIs.

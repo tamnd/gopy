@@ -1,0 +1,111 @@
+---
+title: "Include/internal/pycore_object_stack.h"
+description: Internal header defining the page-allocated linked-list stack of borrowed PyObject pointers that the cyclic garbage collector uses as its gray-set worklist during mark-and-sweep traversal.
+cpython_path: Include/internal/pycore_object_stack.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Include/internal/pycore_object_stack.h
+
+<CpyLink path="Include/internal/pycore_object_stack.h" />
+
+CPython's cyclic garbage collector must traverse the entire reachable object graph during the mark phase without relying on unbounded C-stack recursion, which would overflow on deeply nested object graphs. `_PyObjectStack` is the explicit worklist that replaces recursion. Each node in the linked list holds a page-sized array of borrowed `PyObject *` pointers; when a page fills, a new node is prepended, and when a page drains, the node is freed immediately. This design keeps allocation cost proportional to the peak gray-set size rather than the total number of objects visited.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| <Cpy path="Include/internal/pycore_object_stack.h" lines="1-18">1-18</Cpy> | Include guard, includes, `_PyObjectStackChunk` struct | Page-sized node containing a fixed array of `PyObject *` slots and a `prev` pointer to the previous chunk. |
+| <Cpy path="Include/internal/pycore_object_stack.h" lines="20-28">20-28</Cpy> | `_PyObjectStack` struct | Thin wrapper holding a pointer to the top `_PyObjectStackChunk` and the current fill index within that chunk. |
+| <Cpy path="Include/internal/pycore_object_stack.h" lines="30-44">30-44</Cpy> | `_PyObjectStack_Push` | Appends a borrowed `PyObject *` to the stack. Allocates a new chunk via `_PyMem_RawMalloc` when the current chunk is full. Returns -1 on allocation failure. |
+| <Cpy path="Include/internal/pycore_object_stack.h" lines="46-58">46-58</Cpy> | `_PyObjectStack_Pop` | Removes and returns the top pointer. Returns `NULL` when the stack is empty and frees each chunk when its last entry is consumed. |
+| <Cpy path="Include/internal/pycore_object_stack.h" lines="60-72">60-72</Cpy> | `_PyObjectStack_Clear` | Drops all remaining pointers without visiting them and frees every chunk. Called on error paths to prevent leaks. |
+| <Cpy path="Include/internal/pycore_object_stack.h" lines="74-80">74-80</Cpy> | `_PyObjectStack_IsEmpty` | Inline predicate; returns true when the top chunk pointer is `NULL`. Used in the GC main loop to terminate traversal. |
+
+## Reading
+
+### Chunk layout and page-sized allocation
+
+Each `_PyObjectStackChunk` is exactly one page in size (`_Py_OBJECT_STACK_CHUNK_SIZE`, typically 4096 bytes). The struct packs a `prev` pointer and an array of `PyObject *` entries into that page. Allocating whole pages from `_PyMem_RawMalloc` (which bypasses the object allocator) avoids fragmentation and keeps the working set aligned with the OS page table.
+
+```c
+# CPython: Include/internal/pycore_object_stack.h:10 _PyObjectStackChunk
+#define _Py_OBJECT_STACK_CHUNK_SIZE 4096
+
+typedef struct _PyObjectStackChunk {
+    struct _PyObjectStackChunk *prev;
+    Py_ssize_t n;
+    PyObject *objs[
+        (_Py_OBJECT_STACK_CHUNK_SIZE
+         - sizeof(struct _PyObjectStackChunk *)
+         - sizeof(Py_ssize_t))
+        / sizeof(PyObject *)];
+} _PyObjectStackChunk;
+```
+
+### Push and the gray-set traversal loop
+
+The GC mark phase pushes every newly discovered container onto the stack immediately after setting its `GRAY` flag. The traversal loop then pops one object at a time, visits its references via `tp_traverse`, and pushes any white (unvisited) referents. This iterative approach replaces the recursive `visit_reachable` pattern from older CPython versions.
+
+```c
+# CPython: Modules/gc.c:712 gc_mark_live
+static int
+gc_mark_live(PyGC_Head *gc, _PyObjectStack *stack)
+{
+    PyObject *op = FROM_GC(gc);
+    if (_PyObject_IS_GC_TRACKED(op) && gc_is_white(gc)) {
+        gc_set_gray(gc);
+        if (_PyObjectStack_Push(stack, op) < 0) {
+            return -1;  /* allocation failure */
+        }
+    }
+    return 0;
+}
+```
+
+### Pop and chunk deallocation
+
+When `_PyObjectStack_Pop` exhausts the current chunk (its fill index reaches zero), it walks one step back through the `prev` pointer, frees the empty chunk, and continues popping from the previous page. This eager deallocation prevents the stack from accumulating empty pages between GC cycles.
+
+```c
+# CPython: Include/internal/pycore_object_stack.h:46 _PyObjectStack_Pop
+static inline PyObject *
+_PyObjectStack_Pop(_PyObjectStack *stack)
+{
+    _PyObjectStackChunk *chunk = stack->head;
+    if (chunk == NULL) {
+        return NULL;
+    }
+    PyObject *obj = chunk->objs[--chunk->n];
+    if (chunk->n == 0) {
+        stack->head = chunk->prev;
+        _PyMem_RawFree(chunk);
+    }
+    return obj;
+}
+```
+
+### Clear on error paths
+
+If any GC sub-phase returns early due to a memory error, `_PyObjectStack_Clear` is called unconditionally to release every chunk. The borrowed pointers are not decremented because the GC holds no ownership over the objects it is traversing.
+
+```c
+# CPython: Include/internal/pycore_object_stack.h:60 _PyObjectStack_Clear
+static inline void
+_PyObjectStack_Clear(_PyObjectStack *stack)
+{
+    while (stack->head != NULL) {
+        _PyObjectStackChunk *chunk = stack->head;
+        stack->head = chunk->prev;
+        _PyMem_RawFree(chunk);
+    }
+}
+```
+
+## gopy notes
+
+gopy's garbage collector is Go's own tracing GC, so there is no direct port of `_PyObjectStack`. The struct is referenced here because any future implementation of CPython-compatible `gc` module semantics (including `gc.collect()` and cycle detection for `__del__` ordering) would need an equivalent iterative worklist. The page-sized chunk design is worth preserving in any such port because Go's escape analysis will not keep large stack-allocated worklists on the goroutine stack.

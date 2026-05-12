@@ -1,0 +1,171 @@
+---
+title: longobject.c
+description: "Python int implementation: digit-limb arithmetic, C bridge, and compact ints"
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 5000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`longobject.c` is the complete implementation of Python's `int` type. It covers
+the C-Python bridge (`PyLong_FromLong`, `PyLong_AsLong`), arbitrary-precision
+arithmetic using a base-2^30 digit array, number-theoretic algorithms
+(`long_pow` with Montgomery-style modular reduction), and binary I/O helpers
+used by `struct`, `pickle`, and `hashlib`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | includes, constants | `_PY_NSMALLPOSINTS`, `PyLong_SHIFT`, digit type |
+| 82–220 | `PyLong_FromLong` / `PyLong_FromUnsignedLong` | C long to Python int, singleton fast path |
+| 222–350 | `PyLong_AsLong` / `PyLong_AsUnsignedLong` | Python int to C long, overflow check |
+| 352–500 | `_PyLong_FromByteArray` / `_PyLong_ToByteArray` | binary protocol support |
+| 502–700 | `long_add` / `long_sub` | digit-by-digit addition and subtraction |
+| 702–950 | `long_mul` | O(n^2) schoolbook multiplication with Karatsuba threshold |
+| 952–1200 | `long_divrem` / `long_div` / `long_mod` | Knuth Algorithm D division |
+| 1202–1600 | `long_pow` | left-to-right binary exponentiation, modular variant |
+| 1602–2000 | bitwise ops | `long_and`, `long_or`, `long_xor`, `long_lshift`, `long_rshift` |
+| 2002–2500 | `long_format` | int-to-string in any base 2-36 |
+| 2502–3000 | `PyLong_FromString` | string-to-int parser |
+| 3002–4000 | comparisons, hashing | `long_richcompare`, `long_hash` |
+| 4002–5000 | type object, slots | `PyLong_Type`, number protocol wiring |
+
+## Reading
+
+### C-to-Python bridge with singleton fast path
+
+```c
+// CPython: Objects/longobject.c:82 PyLong_FromLong
+PyObject *
+PyLong_FromLong(long ival)
+{
+    if (IS_SMALL_INT(ival)) {
+        return get_small_int((sdigit)ival);
+    }
+    /* Count digits needed */
+    unsigned long abs_ival = (ival < 0) ? 0UL - (unsigned long)ival
+                                        : (unsigned long)ival;
+    Py_ssize_t ndigits = 0;
+    unsigned long t = abs_ival;
+    while (t) { ++ndigits; t >>= PyLong_SHIFT; }
+    PyLongObject *v = _PyLong_New(ndigits);
+    ...
+}
+```
+
+Values in `-5..256` return a pre-allocated immortal singleton via
+`get_small_int`. This is the highest-frequency allocation path in the
+interpreter, so even one branch eliminated here matters.
+
+### Digit-limb addition
+
+```c
+// CPython: Objects/longobject.c:502 long_add
+static PyObject *
+long_add(PyLongObject *a, PyLongObject *b)
+{
+    if (_PyLong_IsCompact(a) && _PyLong_IsCompact(b)) {
+        /* Fast path: both values fit in a single word */
+        stwodigits sum = _PyLong_CompactValue(a)
+                       + _PyLong_CompactValue(b);
+        return PyLong_FromSsize_t((Py_ssize_t)sum);
+    }
+    /* General digit-by-digit addition with carry */
+    ...
+}
+```
+
+The compact fast path avoids digit-array manipulation for small operands
+entirely. The slow path iterates over `ob_digit` arrays with an explicit
+`carry` variable, mirroring Knuth Vol. 2 Algorithm A.
+
+### Knuth D division
+
+```c
+// CPython: Objects/longobject.c:952 long_divrem
+static int
+long_divrem(PyLongObject *a, PyLongObject *b,
+            PyLongObject **pdiv, PyLongObject **prem)
+{
+    Py_ssize_t size_a = _PyLong_DigitCount(a);
+    Py_ssize_t size_b = _PyLong_DigitCount(b);
+    if (size_b == 0) {
+        PyErr_SetString(PyExc_ZeroDivisionError,
+                        "integer division or modulo by zero");
+        return -1;
+    }
+    if (size_a < size_b ||
+        (size_a == size_b &&
+         a->long_value.ob_digit[size_a-1]
+             < b->long_value.ob_digit[size_b-1])) {
+        /* |a| < |b|: quotient is 0, remainder is a */
+        ...
+    }
+    ...
+}
+```
+
+For multi-limb divisors, `long_divrem` normalises, estimates each quotient
+digit using the top two dividend digits over the top divisor digit, then
+corrects the estimate at most twice (Knuth's proof that correction is rare).
+
+### `long_pow` with modular exponentiation
+
+```c
+// CPython: Objects/longobject.c:1202 long_pow
+static PyObject *
+long_pow(PyObject *v, PyObject *w, PyObject *x)
+{
+    /* If x (modulus) is supplied, use left-to-right binary method
+       with reduction mod x at each step. */
+    ...
+    for (i = _PyLong_DigitCount(b) - 1; i >= 0; --i) {
+        twodigits bi = b->long_value.ob_digit[i];
+        for (j = 1 << (PyLong_SHIFT-1); j != 0; j >>= 1) {
+            MULT(z, z, z);       /* square */
+            if (bi & j)
+                MULT(z, a, z);   /* multiply */
+            if (c != NULL)
+                irem(z, c, &z);  /* reduce */
+        }
+    }
+    ...
+}
+```
+
+Without a modulus, `long_pow` falls back to repeated squaring. With a modulus
+it reduces after every squaring and multiply to keep intermediate values small,
+which is critical for `pow(base, exp, mod)` used in RSA key operations.
+
+## gopy notes
+
+gopy implements `objects.Int` using `math/big.Int` for the digit array,
+delegating all multi-limb arithmetic to the Go standard library rather than
+porting Knuth D directly. This trades some allocation overhead for correctness
+and maintainability.
+
+The singleton pool (`-5..256`) is reproduced in `objects/int.go` as a
+package-level `[262]Int` array initialised at `init()` time, matching
+`IS_SMALL_INT` semantics.
+
+`PyLong_FromLong` / `PyLong_AsLong` are ported as `objects.IntFromInt64` and
+`objects.IntToInt64`, including the overflow-check path that mirrors CPython's
+`PyLong_AsLong` digit-scan loop.
+
+`_PyLong_FromByteArray` / `_PyLong_ToByteArray` are ported in
+`objects/int_bytes.go` and are exercised by `struct.pack` and `int.to_bytes`.
+
+## CPython 3.14 changes
+
+- Python 3.12 compact representation is stable; 3.14 did not change the digit
+  layout.
+- `long_pow` gained an early-exit for `exp == 0` returning `1` even when
+  `base == 0`, matching the mathematical convention `0**0 == 1` more explicitly.
+- `PyLong_AsLong` now raises `PyExc_ValueError` (not `PyExc_OverflowError`) when
+  passed a non-integer type, aligning with the `__index__` protocol changes.
+- String-to-int conversion (`PyLong_FromString`) added a configurable digit
+  group separator check used by `int("1_000_000")` and the new
+  `sys.set_int_max_str_digits` limit introduced in 3.11 and tightened in 3.14.

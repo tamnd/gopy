@@ -1,0 +1,108 @@
+---
+title: "ceval.c: The CPython Eval Loop"
+description: "Annotated guide to Python/ceval.c, covering the dispatch table, trace hooks, specialization warm-up, and tier-2 uop connection in CPython 3.14"
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/ceval.c` is the thin shell that wraps `Python/ceval_macros.h` and the
+generated `Python/generated_cases.c.h`. In CPython 3.14 the file is roughly 900
+lines because the giant instruction body was moved to generated code; what
+remains is the dispatcher and its surrounding infrastructure.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | includes, `Py_DEFAULT_RECURSION_LIMIT` | compile-time limits and header pull-ins |
+| 121–300 | `_PyEval_EvalFrameDefault` prologue | frame setup, computed-goto table init |
+| 301–560 | dispatch loop body | `DISPATCH`, `PREDICT`, `JUMPBY` macros |
+| 561–680 | `_Py_Specialize_*` warm-up stubs | per-opcode specialization entry points |
+| 681–780 | `maybe_call_line_trace`, `maybe_call_exc_trace` | `f_trace` / `f_trace_opcodes` hooks |
+| 781–900 | `_PyEval_SetTrace`, `_PyEval_SetProfile` | public C-API for trace and profile |
+
+## Reading
+
+### `_PyEval_EvalFrameDefault` entry
+
+The function receives a `_PyInterpreterFrame` pointer. The first act is
+defensive: check recursion depth, check for pending calls, then jump into the
+dispatch loop via the computed-goto table.
+
+```c
+/* Python/ceval.c:130 _PyEval_EvalFrameDefault */
+PyObject *
+_PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag)
+{
+    /* ... register declarations ... */
+#ifdef Py_COMPUTED_GOTOS
+    static void *opcode_targets[256] = { ... };
+#endif
+    START_FRAME:
+    /* check recursion, pending calls, signal handlers */
+    DISPATCH();
+}
+```
+
+The `DISPATCH()` macro expands to either a computed-goto (`goto
+*opcode_targets[opcode]`) or a `switch` statement, depending on the compiler.
+Computed-goto builds on GCC/Clang are measurably faster because each
+instruction tail-jumps directly to the next handler rather than re-entering a
+loop header.
+
+### Specialization warm-up counters
+
+Every back-edge and call site carries an adaptive counter stored in the
+`_Py_OPARG` of an `RESUME` or `CALL` instruction. When the counter reaches zero
+the interpreter calls a `_Py_Specialize_*` function to rewrite the bytecode
+in-place with a specialized opcode such as `LOAD_ATTR_SLOT`.
+
+```c
+/* Python/ceval.c:571 warm-up for LOAD_ATTR */
+void
+_Py_Specialize_LoadAttr(PyObject *owner, _Py_CODEUNIT *instr, PyObject *name)
+{
+    /* inspect type, write specialized opcode or ADAPTIVE back-off */
+}
+```
+
+This is the tier-1 inline cache mechanism. Tier-2 uop dispatch (the optimizer
+introduced in 3.12 and extended in 3.14) connects here: once a code object
+accumulates enough tier-1 hits, `_PyOptimizer_Optimize` is called to build a
+`_PyUOpExecutor` and patch the `RESUME` to `ENTER_EXECUTOR`.
+
+### Trace hooks
+
+`f_trace` and the per-opcode `f_trace_opcodes` flag are checked inside
+`maybe_call_line_trace`. The hook fires when the line number changes or, with
+`f_trace_opcodes` set, on every opcode.
+
+```c
+/* Python/ceval.c:692 maybe_call_line_trace */
+static int
+maybe_call_line_trace(Py_tracefunc func, PyObject *obj,
+                      PyThreadState *tstate, _PyInterpreterFrame *frame,
+                      int *instr_prev)
+{
+    /* compute new line, call func if changed */
+}
+```
+
+Setting a trace function disables computed-goto specialization because the
+interpreter must inspect every instruction boundary.
+
+## gopy notes
+
+- The dispatch loop lives in `vm/eval_gen.go`, generated from the same opcode
+  table used by CPython's `Tools/cases_generator`.
+- Specialization stubs (`_Py_Specialize_*`) are not yet ported. The adaptive
+  counter logic is tracked in the v0.12.1 scope under task #476.
+- Trace and profile hooks (`f_trace`) are stubbed; the public setter
+  `_PyEval_SetTrace` maps to `vm.SetTrace` but the per-opcode path is not wired.
+- The tier-2 `ENTER_EXECUTOR` opcode is recognized in `vm/eval_gen.go` but
+  dispatches to a no-op executor pending spec 1700 completion.

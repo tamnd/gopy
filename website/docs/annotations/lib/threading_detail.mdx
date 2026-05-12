@@ -1,0 +1,56 @@
+---
+title: "threading.py: Thread lifecycle, synchronization primitives, and thread-local storage"
+description: "Annotates Lib/threading.py covering Thread._bootstrap_inner exception handling, Lock/RLock/Condition/Semaphore/Event/Barrier, local() thread-local storage, and 3.14 daemon-thread default changes"
+cpython_path: Lib/threading.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink file="Lib/threading.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-80 | module preamble | Imports `_thread`, sets `_HAVE_THREAD_NATIVE_ID`, defines `_start_new_thread` alias |
+| 81-200 | `Lock`, `RLock` | Thin wrappers around `_thread.lock`; `RLock` tracks owning thread and recursion count |
+| 201-350 | `Condition` | Built on any lock; `wait()` appends a waiter lock, `notify()` releases waiters |
+| 351-430 | `Semaphore`, `BoundedSemaphore` | Counter guarded by `Condition`; bounded variant raises `ValueError` on over-release |
+| 431-480 | `Event` | Boolean flag plus `Condition`; `wait()` delegates to `Condition.wait_for` |
+| 481-580 | `Barrier` | Two-phase rendezvous; `_enter`/`_exit` phases tracked with an internal `Condition` |
+| 581-700 | `local` | Thread-local storage via `_threading_local` C helper; `__new__` per-thread dict |
+| 701-900 | `Thread` class | `__init__`, `start`, `run`, `join`, `daemon` property, `name` property |
+| 901-1020 | `Thread._bootstrap_inner` | Calls `run()`, catches all exceptions, invokes `excepthook`, handles `SystemExit` |
+| 1021-1150 | `_MainThread`, `_DummyThread` | Singletons representing the main OS thread and threads created outside Python |
+| 1151-1300 | `current_thread`, `main_thread`, `enumerate`, `active_count` | Module-level registry backed by `_active` and `_limbo` dicts |
+| 1301-1400 | `_shutdown` | Joins all non-daemon threads; called by `Py_Finalize` via `atexit` |
+
+## Reading
+
+### Thread._bootstrap_inner exception handling
+
+<Cpy file="Lib/threading.py" line="901" />
+
+`_bootstrap_inner` is the true thread entry point. It installs the thread in `_active`, calls `self.run()`, and on any unhandled exception consults `threading.excepthook`. If `excepthook` itself raises, CPython falls back to `sys.excepthook`. A bare `SystemExit` is silently swallowed so that `sys.exit()` inside a thread does not crash the interpreter. After the body finishes (success or exception), the thread removes itself from `_active` and from `_limbo` if it was still there.
+
+### Synchronization primitive design
+
+<Cpy file="Lib/threading.py" line="201" />
+
+`Condition` is the load-bearing primitive. Every higher-level class (`Semaphore`, `Event`, `Barrier`) owns a `Condition`. The waiter-lock pattern in `Condition.wait` pre-dates `_thread.lock.acquire(timeout)` and still appears in 3.14: a fresh `Lock` is appended to `self._waiters`, then the caller releases the outer lock and blocks on the waiter lock. `notify(n)` pops up to `n` waiters and releases each one.
+
+`RLock` diverges from `Lock` by keeping `_owner` (thread ident) and `_count` (recursion depth). Acquiring an already-owned `RLock` from the same thread just increments `_count`; releasing decrements it and only truly unlocks at zero.
+
+### 3.14 changes: daemon thread default and `local` C acceleration
+
+In CPython 3.14 the `daemon` parameter to `Thread.__init__` still defaults to `None`, which inherits from the creating thread, but `_DummyThread` now marks itself daemon unconditionally so that dummy threads never block `_shutdown`. The `local()` class continues to delegate to the `_threading_local` C extension (`_thread` module) introduced in 3.12 for per-thread dict lookup without the GIL.
+
+## gopy notes
+
+- `RLock._owner` stores a raw thread ident (`int`). gopy can use goroutine IDs but must map them to CPython-style idents for compatibility with `current_thread().ident`.
+- `Condition._waiters` is a `collections.deque` of `Lock` objects. The gopy port needs a channel-per-waiter approach or a slice of `sync.Mutex` analogues.
+- `_bootstrap_inner` exception routing through `excepthook` depends on `sys.excepthook` being settable. The gopy `sys` module must expose a mutable `excepthook` attribute.
+- `_shutdown` iterates `_active` while threads may still be modifying it. CPython takes a snapshot via `list(_active.values())`. The gopy port must replicate that snapshot to avoid concurrent-map issues.

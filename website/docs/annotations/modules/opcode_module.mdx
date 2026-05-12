@@ -1,0 +1,122 @@
+---
+title: Modules/_opcode.c
+description: The _opcode C extension that exposes opcode metadata and stack-effect computation to Python tools like dis.
+cpython_path: Modules/_opcode.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_opcode` is a small but load-bearing built-in module. It gives Python-level tools
+(primarily `dis`) access to opcode metadata tables and the `stack_effect` function, which
+computes the net change in stack depth for a single instruction. The compiler uses
+`stack_effect` internally to calculate `co_stacksize` for every code object it emits.
+
+## Map
+
+| Symbol | Kind | Notes |
+|---|---|---|
+| `_opcode_stack_effect` | function | net stack change for `(opcode, oparg, jump)` |
+| `opname` | list | index-to-name mapping, length 256 |
+| `opmap` | dict | name-to-opcode mapping |
+| `hascompare` | list | opcodes that perform comparisons |
+| `hasjabs` | list | opcodes with absolute jump targets |
+| `hasjrel` | list | opcodes with relative jump targets |
+| `haslocal` | list | opcodes that read/write `LOAD_FAST`-family slots |
+| `hasconst` | list | opcodes whose argument indexes `co_consts` |
+| `hasfree` | list | opcodes that reference free/cell variables |
+| `hasjump` | list | union of `hasjabs` and `hasjrel` |
+| `_opcode_module` | `PyModuleDef` | registers everything above |
+
+## Reading
+
+### `stack_effect` signature and dispatch
+
+```c
+static PyObject *
+_opcode_stack_effect_impl(PyObject *module, int opcode, PyObject *oparg,
+                          int jump)
+{
+    int effect;
+    int _oparg = 0;
+
+    if (oparg != Py_None) {
+        if (!PyLong_CheckExact(oparg)) {
+            PyErr_SetString(PyExc_TypeError, "oparg must be an int or None");
+            return NULL;
+        }
+        _oparg = (int)PyLong_AsLong(oparg);
+        if (_oparg == -1 && PyErr_Occurred())
+            return NULL;
+    }
+
+    effect = PyCompile_OpcodeStackEffectWithJump(opcode, _oparg, jump);
+    if (effect == PY_INVALID_STACK_EFFECT) {
+        PyErr_SetString(PyExc_ValueError, "invalid opcode or oparg");
+        return NULL;
+    }
+    return PyLong_FromLong(effect);
+}
+```
+
+The real work is done by `PyCompile_OpcodeStackEffectWithJump` in
+`Python/compile.c`. The `jump` parameter controls which branch of a conditional
+jump is evaluated: `1` for taken, `0` for not taken, `-1` for the worst case.
+`dis.stack_effect` forwards all three keyword arguments through unchanged.
+
+### Opcode table construction at module init
+
+```c
+static int
+_opcode_exec(PyObject *m)
+{
+    PyObject *opname_list = PyList_New(256);
+    /* ... fill with "<%r>" placeholders ... */
+    for (int i = 0; i < 256; i++) {
+        const char *name = _PyOpcode_OpName[i];
+        if (name != NULL) {
+            PyObject *s = PyUnicode_FromString(name);
+            PyList_SET_ITEM(opname_list, i, s);
+        }
+    }
+    if (PyModule_AddObject(m, "opname", opname_list) < 0)
+        goto error;
+    /* opmap is the inverse dict ... */
+}
+```
+
+The tables `_PyOpcode_OpName` and `_PyOpcode_HasArg` are generated at build time
+from `Lib/opcode.py` and live in `Include/opcode_ids.h`. The C module just
+reshapes them into the Python containers `dis` expects.
+
+### `hasjump` as a derived set
+
+```c
+/* hasjump = hasjabs | hasjrel */
+PyObject *hasjump = PyNumber_Or(hasjabs, hasjrel);
+```
+
+`hasjump` is not a standalone table in CPython's opcode metadata; it is computed
+here by OR-ing the two primary jump sets. Any tool that wants to test whether an
+instruction transfers control unconditionally can query `hasjump` rather than
+maintaining its own union.
+
+## gopy mirror
+
+Not yet ported. In gopy the compiler already has access to opcode metadata through
+`compile/opcode.go`. Exposing that metadata as a Python module would require a
+`module/_opcode/` package that wraps the same tables and re-exports them as
+`objects.List` and `objects.Dict` values, plus a Go implementation of
+`stack_effect` delegating to `compile.StackEffect`.
+
+## CPython 3.14 changes
+
+- Specialised instructions (those with names starting with `RESUME_`,
+  `LOAD_FAST_AND_CLEAR`, etc.) were added to the generated tables; `opname` grew
+  entries for all specialisation slots.
+- `hasjump` was promoted to a first-class exported name alongside `hasjabs` and
+  `hasjrel` after being an undocumented alias for several releases.
+- The `_PyOpcode_Caches` table was also exposed as `_inline_cache_entries` for
+  use by advanced bytecode inspection tools.

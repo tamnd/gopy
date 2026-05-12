@@ -1,0 +1,70 @@
+---
+title: "_pydecimal.py: Pure-Python Decimal Arithmetic"
+description: "Digit-array representation, rounding modes, signal traps, and the Context object in CPython's pure-Python fallback for decimal arithmetic."
+cpython_path: Lib/_pydecimal.py
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+ported_to: module/decimal
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_pydecimal.py` is the pure-Python reference implementation of the `decimal` module.
+CPython normally loads the C accelerator `_decimal`, but the pure-Python file is the
+authoritative spec for behavior and the fallback on platforms without the C extension.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | module header, `__all__` | Imports, version note, public API list |
+| 121–310 | `DefaultContext`, signal classes | Sentinel objects for the 15 trap signals |
+| 311–600 | `Context` | Thread-local rounding mode, precision, traps |
+| 601–900 | `_convert_other` | Coerce int/float/str to `Decimal` before ops |
+| 901–1400 | `Decimal.__new__`, `_int_to_string` | Digit-tuple storage, coefficient array |
+| 1401–2200 | `Decimal` arithmetic methods | `__add__`, `__mul__`, `__divmod__`, `__pow__` |
+| 2201–2700 | Rounding helpers | `_round_half_even`, `_round_ceiling`, etc. |
+| 2701–3200 | `Decimal` comparison and conversion | `__eq__`, `__lt__`, `to_eng_string` |
+| 3201–3800 | `Decimal` special methods | `sqrt`, `ln`, `log10`, `exp` |
+| 3801–4400 | `Context` arithmetic dispatch | Mirrors `Decimal` methods, applies context |
+| 4401–5200 | `localcontext`, `setcontext` | Thread-local context management |
+| 5201–6000 | `_ContextManager`, named contexts | `BasicContext`, `ExtendedContext`, tests |
+
+## Reading
+
+### Digit-array representation
+
+A `Decimal` stores its coefficient as a tuple of integer digits in `_int` and an
+integer exponent in `_exp`. The sign is a separate `_sign` field (0 or 1).
+Special values (`Infinity`, `NaN`, `sNaN`) are encoded via `_is_special`.
+This mirrors the General Decimal Arithmetic specification layout directly.
+
+### Context and rounding modes
+
+`Context` holds `prec` (precision), `rounding` (one of the `ROUND_*` constants),
+and a dict of trap flags. When an operation produces an inexact result, it calls
+`context._raise_error(signal)`. If the trap is set, a Python exception is raised.
+If not, the signal flag is recorded silently and a default value is returned.
+The nine rounding modes (`ROUND_HALF_EVEN`, `ROUND_UP`, `ROUND_FLOOR`, etc.) are
+each implemented as a private `_round_*` function and dispatched by name from a
+`_rounding_modes` dict.
+
+### `_convert_other` and arithmetic dispatch
+
+Every binary operator calls `_convert_other(other)` first. The function returns
+`NotImplemented` for unrecognized types, allowing Python's reflected-operator
+protocol to take over. For `int` inputs it calls `Decimal(other)` directly.
+Arithmetic then proceeds via coefficient manipulation under the active context's
+precision, rounding, and trap settings.
+
+## gopy notes
+
+- The C extension `_decimal` wraps `libmpdec`. The pure-Python file is the port
+  target for gopy because it expresses every algorithm in auditable Python.
+- Signal classes (`InvalidOperation`, `DivisionByZero`, etc.) map to Go error
+  sentinel values in the port.
+- `localcontext()` requires goroutine-local storage. In gopy this is implemented
+  via `vm.Frame` context chaining rather than `threading.local`.
+- 3.14 added `Decimal.from_number` as a cleaner alternative to `Decimal(float)`.
+  The `_convert_other` path was updated to call it.

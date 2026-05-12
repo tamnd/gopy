@@ -1,0 +1,103 @@
+---
+title: Lib/weakref.py
+description: "ref() and proxy() wrapping _weakref, WeakValueDictionary, WeakKeyDictionary, WeakSet, and finalize()"
+cpython_path: Lib/weakref.py
+cpython_version: "3.14"
+lines: 580
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/weakref.py" />
+
+`weakref` is the Python-level wrapper around the `_weakref` C extension. It adds the higher-level containers (`WeakValueDictionary`, `WeakKeyDictionary`, `WeakSet`) and the `finalize()` helper on top of the raw `ref` and `proxy` types defined in C.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | imports, `ref`, `proxy`, `CallableProxyType` | Re-export the C-level types from `_weakref` |
+| 31-70 | `_IterationGuard` | Context manager that defers dict mutation during iteration |
+| 71-200 | `WeakValueDictionary` | Dict-like container holding weak refs to values |
+| 201-320 | `WeakKeyDictionary` | Dict-like container holding weak refs to keys |
+| 321-420 | `WeakSet` | Set-like container holding weak refs to members |
+| 421-530 | `finalize` | Cleanup callback tied to object lifetime |
+| 531-580 | `_remove_dead_weakref`, module-level helpers | Bookkeeping utilities shared by all containers |
+
+## Reading
+
+### ref() and proxy() from _weakref
+
+The public `ref` and `proxy` names are simply re-exported from the C module `_weakref`. `ref(obj, callback=None)` returns a weak reference object; calling it returns the referent or `None` if it has been collected. `proxy(obj, callback=None)` returns an object that forwards attribute access to the referent and raises `ReferenceError` when the referent is gone.
+
+```python
+# CPython: Lib/weakref.py:14 ref proxy exports
+from _weakref import (
+    getweakrefcount,
+    getweakrefs,
+    ref,
+    proxy,
+    CallableProxyType,
+    ProxyType,
+    ReferenceType,
+    _remove_dead_weakref,
+)
+```
+
+All the heavy lifting (callback scheduling on GC, thread safety for the callback list) lives in `Objects/weakrefobject.c`. The Python module does not duplicate any of that logic.
+
+### WeakValueDictionary and _IterationGuard
+
+`WeakValueDictionary` stores weak references as dict values. When a referent is collected the callback removes the dead entry from the underlying `dict`. The problem is that iteration holds the GIL but collection callbacks can fire between steps. `_IterationGuard` defers removals by incrementing a counter on `__enter__` and flushing the pending-removal list on `__exit__`.
+
+```python
+# CPython: Lib/weakref.py:31 _IterationGuard
+class _IterationGuard:
+    def __init__(self, weakcontainer):
+        self.weakcontainer = weakcontainer
+
+    def __enter__(self):
+        w = self.weakcontainer
+        self._count = w._iterating
+        w._iterating += 1
+        return self
+
+    def __exit__(self, e, t, b):
+        w = self.weakcontainer
+        w._iterating -= 1
+        if not w._iterating:
+            w._commit_removals()
+```
+
+`WeakValueDictionary.__setitem__` wraps the value in a `KeyedRef` (a `ref` subclass that also stores the key) so the removal callback can find and delete the right entry without iterating the whole dict.
+
+```python
+# CPython: Lib/weakref.py:105 WeakValueDictionary.__setitem__
+def __setitem__(self, key, value):
+    if self._pending_removals:
+        self._commit_removals()
+    self.data[key] = KeyedRef(value, self._remove, key)
+```
+
+### finalize()
+
+`finalize` registers an arbitrary callback to run after an object is garbage-collected. It is implemented entirely in Python on top of `ref`. The class keeps a module-level `_registry` dict (weak-keyed on the finalizer itself) so that `atexit` can flush any remaining finalizers at interpreter shutdown.
+
+```python
+# CPython: Lib/weakref.py:525 finalize.__call__
+def __call__(self):
+    info = self._registry.pop(self._key, None)
+    if info is not None:
+        return info.func(*info.args, **info.kwargs)
+```
+
+The `_key` stored in each `finalize` instance is an integer id rather than a reference to the object, which prevents the finalizer itself from keeping the target alive.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/weakref/`.
+
+The C foundation (`_weakref`) maps to `objects/weakref.go` in gopy. The Python containers (`WeakValueDictionary`, `WeakKeyDictionary`, `WeakSet`) will be ported as Go structs that hold `map[K]*WeakRef` with the same deferred-removal logic. `finalize()` depends on Go finalizers (`runtime.SetFinalizer`) rather than CPython's GC callbacks, so the callback guarantee at interpreter shutdown needs a separate atexit hook.

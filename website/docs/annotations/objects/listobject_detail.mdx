@@ -1,0 +1,95 @@
+---
+title: "Objects/listobject.c: List Object Detail"
+description: "Annotation of CPython's list implementation covering over-allocation, slice assignment, timsort, reversal, and free-list recycling"
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+ported_to: objects/list.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's list object is a dynamically-resized array of `PyObject *` pointers.
+The implementation lives entirely in `Objects/listobject.c` and touches several
+subsystems: memory management, timsort, the free-list allocator, and the object
+watcher API.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 40–96 | `list_resize` | Over-allocation formula and `ob_item` realloc |
+| 97–140 | `list_preallocate_exact` | No-slack resize used by `list()` constructor |
+| 141–240 | `ins1` / `list_insert_impl` | Single-element insert with memmove shift |
+| 241–430 | `list_ass_slice` | General slice assignment using memmove |
+| 431–530 | `listextend` / `_PyList_AppendTakeRef` | Bulk extend path |
+| 531–720 | `listsort` / `list_sort_impl` | Timsort entry point and run-merge loop |
+| 721–880 | `merge_collapse` / `merge_force_collapse` | Timsort merge bookkeeping |
+| 881–1050 | `binarysort` / `merge_lo` / `merge_hi` | Timsort inner sort kernels |
+| 1051–1120 | `list_reverse_impl` | In-place pointer swap reversal |
+| 1121–1200 | `list_dealloc` | Decrement all items, return shell to free list |
+| 1201–1280 | `PyList_New` | Allocate from free list or heap |
+| 1281–1400 | `list_subscript` | `__getitem__` dispatch for int and slice |
+| 1401–1520 | `list_ass_subscript` | `__setitem__` / `__delitem__` dispatch |
+| 1521–1620 | `listiter_*` | List iterator type and `__length_hint__` |
+| 1621–1700 | `list_*_watcher` | Watcher event dispatch for monitoring |
+
+## Reading
+
+### list_resize: over-allocation formula
+
+<Cpy path="Objects/listobject.c" lines="40-96" />
+
+The formula allocates extra capacity to amortise append cost.
+For a target size `n`, the new allocation is roughly `n + n/8 + 6`, clamped so
+that lists under 9 elements grow by fixed steps (0, 4, 8, 16, 25, ...).
+The key invariant is `ob_alloc >= ob_size`; `ob_size` is the live count.
+
+```c
+// Objects/listobject.c:55
+new_allocated = ((size_t)newsize + (newsize >> 3) + 6) & ~(size_t)3;
+```
+
+Shrinkage triggers a re-alloc only when `ob_size < ob_alloc / 2`, preventing
+thrash on repeated append-and-pop sequences.
+
+### list_ass_slice: memmove for slice mutation
+
+<Cpy path="Objects/listobject.c" lines="241-430" />
+
+Slice assignment is the most complex path. The function handles three cases:
+
+1. Replacement slice same length as new values: in-place pointer swap.
+2. Shorter replacement: memmove tail left, then resize down.
+3. Longer replacement: resize up first, memmove tail right, then fill.
+
+The temporary buffer (`recycle`) holds displaced items so their refcounts can
+be decremented safely after the memmove, avoiding use-after-free if a
+`__del__` re-enters the list.
+
+### list_sort_impl: timsort entry
+
+<Cpy path="Objects/listobject.c" lines="531-720" />
+
+The sort clears `ob_item` to `NULL` for the duration so that re-entrant access
+raises `ValueError` rather than corrupting state. A `MergeState` struct tracks
+the pending run stack (at most 85 entries for lists up to `2^64` elements by
+the merge invariant). Natural runs are detected with `count_run`; runs shorter
+than `minrun` are extended with `binarysort`. Merge policy follows the
+Liskov-style invariant: `run[i] > run[i+1] + run[i+2]`.
+
+## gopy notes
+
+- `list_resize` maps to `listResize` in `objects/list.go`. The Go side uses a
+  `[]Object` slice, so Go's own growth heuristic applies; gopy overrides it to
+  match CPython's formula for behavioural parity.
+- Timsort is not re-implemented; `sort.SliceStable` is used with a CPython-
+  compatible key wrapper. Stability and `key=` / `reverse=` semantics match.
+- The free list (`numfree`, max 256 shells) is approximated with a `sync.Pool`
+  in `objects/list.go` to avoid per-allocation GC pressure.
+- Watcher events (`LIST_APPEND`, `LIST_INSERT`, `LIST_SET_ITEM`, `LIST_CLEAR`,
+  `LIST_DEALLOC`) are forwarded through `objects/protocol.go`
+  `NotifyListWatchers`.
+- `list_ass_slice` recycle buffer behaviour is preserved: decrements happen
+  after the memmove equivalent so that `__del__` callbacks see a consistent list.

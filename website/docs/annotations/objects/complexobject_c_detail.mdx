@@ -1,0 +1,160 @@
+---
+title: Objects/complexobject.c
+description: "CPython 3.14 complex number object: Py_complex struct, C-level arithmetic helpers, slot implementations, repr formatting, and equality comparison"
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+## Map
+
+| Symbol | Approx. lines | Role |
+|---|---|---|
+| `Py_complex` struct | ~30 (Include/cpython/complexobject.h) | Two `double` fields: `real` and `imag` |
+| `c_sum` / `c_diff` | ~55 | C-level addition and subtraction of `Py_complex` values |
+| `c_prod` | ~70 | C-level multiplication with explicit cross terms |
+| `c_quot` | ~85 | C-level division with denominator underflow guard |
+| `c_pow` | ~110 | C-level exponentiation via `cexp(b * clog(a))` |
+| `PyComplexObject` | ~145 | Python heap type wrapping a `Py_complex` |
+| `complex_add` / `complex_mul` | ~350 | `nb_add` and `nb_multiply` slots, dispatch to `c_sum` / `c_prod` |
+| `complex_repr` | ~510 | Formats as `(real+imagj)` or `imagj` |
+| `complex_richcompare` | ~580 | Equality only; ordering raises `TypeError` |
+| `PyArg_Parse 'D'` | ~750 | Format character for `Py_complex` in argument parsing |
+
+## Reading
+
+### `Py_complex` and the C-level helper functions
+
+The `Py_complex` struct is defined in the public C API header, not in the `.c` file itself. It holds two `double` fields, `real` and `imag`, with no additional metadata. All arithmetic on these values is done through the `c_*` helper functions, which return `Py_complex` by value.
+
+```c
+// CPython: Objects/complexobject.c:55 c_sum
+Py_complex
+c_sum(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    r.real = a.real + b.real;
+    r.imag = a.imag + b.imag;
+    return r;
+}
+```
+
+`c_diff` is symmetric. `c_prod` expands the four cross terms and applies the identity `i^2 = -1`:
+
+```c
+// CPython: Objects/complexobject.c:70 c_prod
+Py_complex
+c_prod(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    r.real = a.real * b.real - a.imag * b.imag;
+    r.imag = a.real * b.imag + a.imag * b.real;
+    return r;
+}
+```
+
+`c_quot` guards against denominator underflow by checking whether the absolute values of the divisor's components are large enough before dividing. `c_pow` converts to polar form using `cexp` and `clog`, so it handles non-integer exponents naturally but introduces floating-point rounding for integer powers.
+
+### Python slot implementations (`complex_add`, `complex_mul`)
+
+The `nb_add` and `nb_multiply` slots extract `Py_complex` values from their operands, call the corresponding `c_*` helper, and wrap the result in a new `PyComplexObject`. Both slots accept mixed float/complex operands by promoting a float to a complex with zero imaginary part.
+
+```c
+// CPython: Objects/complexobject.c:352 complex_add
+static PyObject *
+complex_add(PyObject *v, PyObject *w)
+{
+    Py_complex result;
+    Py_complex a, b;
+    TO_COMPLEX(v, a);
+    TO_COMPLEX(w, b);
+    PyFPE_START_PROTECT("complex_add", return 0)
+    result = c_sum(a, b);
+    PyFPE_END_PROTECT(result)
+    return PyComplex_FromCComplex(result);
+}
+```
+
+`TO_COMPLEX` is a macro that calls `PyComplex_AsCComplex` and short-circuits with `NULL` on error. The `PyFPE_START_PROTECT` / `PyFPE_END_PROTECT` pair is a no-op on most modern platforms but historically guarded against SIGFPE on architectures that raised it for IEEE 754 exceptions.
+
+### `complex_repr` formatting
+
+The formatting rules are: if the real part is zero, emit just `imagj`; otherwise emit `(real+imagj)` or `(real-imagj)` depending on the sign of the imaginary part. Each component is formatted with `repr(float)` precision via `PyOS_double_to_string`.
+
+```c
+// CPython: Objects/complexobject.c:512 complex_repr
+static PyObject *
+complex_repr(PyComplexObject *v)
+{
+    int precision = 0;
+    char format_code = 'r';
+    PyObject *result = NULL;
+    ...
+    if (v->cval.real == 0. && copysign(1.0, v->cval.real) == 1.0) {
+        /* Real part is +0: just show imaginary */
+        ...
+    } else {
+        /* Show both parts in parens */
+        ...
+    }
+}
+```
+
+The `copysign` check ensures that `-0+2j` still shows the real part (as `-0+2j`), not just `2j`. This matches the invariant that `eval(repr(x)) == x`.
+
+### Equality-only rich comparison (`complex_richcompare`)
+
+Complex numbers have no natural total order, so `complex_richcompare` raises `TypeError` for `<`, `<=`, `>`, and `>=`. Only `==` and `!=` are meaningful and compare both components.
+
+```c
+// CPython: Objects/complexobject.c:581 complex_richcompare
+static PyObject *
+complex_richcompare(PyObject *v, PyObject *w, int op)
+{
+    PyObject *res;
+    Py_complex i;
+    int equal;
+
+    if (op != Py_EQ && op != Py_NE) {
+        goto Unimplemented;
+    }
+    ...
+    equal = (i.real == ((PyComplexObject *)w)->cval.real &&
+             i.imag == ((PyComplexObject *)w)->cval.imag);
+    ...
+Unimplemented:
+    Py_RETURN_NOTIMPLEMENTED;
+}
+```
+
+Returning `Py_NotImplemented` from `Unimplemented` lets Python fall through to the reflected operator on the other operand before raising `TypeError`.
+
+### The `'D'` format character in argument parsing
+
+`PyArg_ParseTuple` and friends recognise the format character `'D'` to extract a `Py_complex` from a Python argument. The converter calls `PyComplex_AsCComplex`, which handles `complex`, `float`, and any type implementing `__complex__`.
+
+```c
+// CPython: Objects/complexobject.c:752 PyArg_Parse_D
+/* In Python/getargs.c, the 'D' converter calls: */
+if (!PyComplex_Check(arg)) {
+    Py_complex v = PyComplex_AsCComplex(arg);
+    if (v.real == -1.0 && PyErr_Occurred())
+        return NULL;
+    *p = v;
+}
+```
+
+The sentinel `real == -1.0 && PyErr_Occurred()` pattern is the standard CPython convention for signalling conversion failure from a `Py_complex`-returning function, since there is no separate error pointer in the return type.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (a new `objects/complex.go` file).
+
+The `Py_complex` struct maps directly to a Go struct with two `float64` fields. The `c_*` helper functions are pure arithmetic and translate one-to-one. The `complex_repr` formatting rules (sign of `-0`, parentheses) must be reproduced explicitly because Go's `fmt` package does not match CPython's output. The `complex_richcompare` ordering-raises-TypeError behaviour needs a guard before any comparison dispatch. The `'D'` argument parsing converter will be handled as part of the `getargs` port rather than inside `objects/complex.go`.

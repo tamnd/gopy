@@ -1,0 +1,59 @@
+---
+title: Include/pythonrun.h
+description: "Public run-string and run-file API: Py_CompileString, PyRun_SimpleString, PyRun_FileExFlags, and PyErr_Print. Entry points for embedding Python in a C application."
+cpython_path: Include/pythonrun.h
+cpython_version: "3.14"
+lines: 140
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/pythonrun.h`
+
+<CpyLink path="Include/pythonrun.h" />
+
+`Include/pythonrun.h` declares the high-level execution entry points. These are the
+functions an embedding application calls to run Python source without going through the
+compiler pipeline manually.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-40 | `Py_CompileString`, `Py_CompileStringExFlags` | Compile source to a code object |
+| 41-90 | `PyRun_SimpleString`, `PyRun_SimpleStringFlags` | Run source in `__main__` |
+| 91-120 | `PyRun_FileExFlags`, `PyRun_InteractiveLoopFlags` | Run from a file object |
+| 121-140 | `PyErr_Print`, `PyErr_PrintEx`, `PyErr_Display` | Exception reporting |
+
+## Reading
+
+### `Py_CompileString`
+
+`Py_CompileString` takes a NUL-terminated source string, a filename (for tracebacks), and
+a `start` token (`Py_eval_input`, `Py_file_input`, `Py_single_input`). It returns a code
+object or NULL on error.
+
+```c
+// CPython: Include/pythonrun.h:18 Py_CompileString
+#define Py_CompileString(str, p, s) \
+    Py_CompileStringExFlags(str, p, s, NULL, -1)
+```
+
+### `PyRun_SimpleString`
+
+`PyRun_SimpleString` calls `Py_CompileString` with `Py_file_input`, then evaluates the
+resulting code object in `__main__`'s namespace. Return value: 0 on success, -1 if an
+unhandled exception occurred.
+
+### `PyErr_Print` and `PyErr_Display`
+
+`PyErr_Print` calls `sys.excepthook` if it is set; `PyErr_Display` is the low-level fallback
+that writes the traceback to `sys.stderr` directly. Embedders that want to capture exception
+output should call `PyErr_Fetch`/`PyErr_Normalize` before formatting.
+
+## gopy notes
+
+`pythonrun/runstring.go` mirrors this header. `RunString` compiles and evaluates a source
+string in the given namespace. The `start` argument distinction (`eval` vs `file` vs
+`single`) is handled by the compile layer in `compile/`.

@@ -1,0 +1,100 @@
+---
+title: "csv.py: thin wrapper over _csv"
+description: "How csv.py re-exports symbols from the _csv C extension, plus DictReader, DictWriter, and Dialect registration"
+cpython_path: Lib/csv.py
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: module/csv/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`csv.py` is almost entirely a thin shim. The heavy lifting (parsing, quoting,
+dialect validation) lives in the `_csv` C extension. The Python file re-exports
+that module's public names, then adds `DictReader`, `DictWriter`, and a handful
+of convenience helpers on top.
+
+## Map
+
+| Line range | Symbol | Role |
+|---|---|---|
+| 1-8 | `from _csv import *` | re-exports all C-level names |
+| 9-14 | `__version__`, `__doc__` | module metadata |
+| 15-60 | `DictReader` | wraps `reader` iterator, yields dicts |
+| 61-120 | `DictWriter` | wraps `writer`, maps fieldnames to rows |
+| 121-155 | `Dialect` | base class; `register_dialect` delegates to `_csv` |
+| 156-175 | `excel`, `excel_tab`, `unix_dialect` | built-in dialect subclasses |
+| 176-200 | `Sniffer` | heuristic dialect detector |
+
+## Reading
+
+### Re-export pattern
+
+CPython keeps the fast path entirely in C and uses the Python file only for the
+public API surface. The star-import at the top of the file pulls in `reader`,
+`writer`, `register_dialect`, `unregister_dialect`, `get_dialect`,
+`list_dialects`, `field_size_limit`, and all the `QUOTE_*` constants.
+
+```python
+# Lib/csv.py:6
+from _csv import *
+# _csv exposes: reader, writer, register_dialect, unregister_dialect,
+# get_dialect, list_dialects, field_size_limit, Error, QUOTE_ALL,
+# QUOTE_MINIMAL, QUOTE_NONNUMERIC, QUOTE_NONE, Dialect (C type)
+```
+
+Any gopy port must implement `_csv` as a built-in module first. The Python
+layer then compiles without changes.
+
+### DictReader
+
+`DictReader` wraps the low-level `reader` object and yields `dict` rows keyed
+by `fieldnames`. The fieldname list is read lazily from the first row when
+`fieldnames` is not supplied at construction time.
+
+```python
+# Lib/csv.py:82-95  (DictReader.__next__)
+def __next__(self):
+    if self.line_num == 0:
+        self.fieldnames  # side-effect: read header row if needed
+    row = next(self.reader)
+    self.line_num = self.reader.line_num
+    while row == []:
+        row = next(self.reader)
+    d = dict(zip(self.fieldnames, row))
+    lf = len(self.fieldnames)
+    lr = len(row)
+    if lf < lr:
+        d[self.restkey] = row[lf:]
+    elif lf > lr:
+        for key in self.fieldnames[lr:]:
+            d[key] = self.restval
+    return d
+```
+
+### Dialect registration
+
+User-defined dialects must subclass `csv.Dialect` and set class-level
+attributes. `register_dialect` validates the attributes through `_csv`'s C
+validator before storing the dialect name.
+
+```python
+# Lib/csv.py:152-155  (register_dialect)
+def register_dialect(name, dialect=None, **fmtparams):
+    # Dialect() call merges fmtparams over the base dialect,
+    # then _csv.register_dialect validates field types.
+    if dialect is not None:
+        dialect = type(str(name), (dialect,), fmtparams)
+    _csv.register_dialect(name, dialect)
+```
+
+## gopy notes
+
+- `_csv` must be a built-in module registered before `csv` is imported. The
+  `Sniffer` class is pure Python and can be ported after `_csv`.
+- `DictReader.fieldnames` uses a `@property` that mutates `self._fieldnames` on
+  first access. The Go port needs to handle that lazy-init path carefully.
+- `excel` and `excel_tab` are registered via `register_dialect` at module init
+  time (bottom of `csv.py`). Ensure the built-in module init calls
+  `register_dialect` before user code runs.

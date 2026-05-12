@@ -1,0 +1,125 @@
+---
+title: setobject.c
+description: "CPython implementation of the set and frozenset hash-table types"
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 2650
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/setobject.c` implements both `set` and `frozenset`. The core data structure is an open-addressing hash table of `setentry` records. Small sets (up to `PySet_MINSIZE = 8` slots) store the table inline in the object body; larger sets allocate a separate array. Collision resolution uses a short burst of linear probing followed by a perturbation step derived from the upper bits of the hash.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 57 | `setentry` | Struct holding `hash` and `key` for one table slot |
+| 285 | `set_add_entry_takeref` | Insert with open-addressing probe; handle dummy/active/unused slots |
+| 481 | `set_contains_entry` | Lookup returning found/not-found without mutating the table |
+| 496 | `set_discard_entry` | Remove an entry and install the dummy sentinel |
+| 676 | `set_merge_lock_held` | Bulk-insert all entries from another set, resizing as needed |
+| 744 | `set_pop` | Remove and return an arbitrary element |
+| 1063 | `frozenset_hash_impl` | Commutative XOR-based hash over all active entries |
+| 1342 | `set_or` | Union: copy left operand then merge right into it |
+| 1438 | `set_and` | Intersection: iterate the smaller set, keep elements in both |
+| 1554 | `set_difference` | Difference: copy left, discard anything in right |
+| 1785 | `set_symmetric_difference` | Symmetric difference: union minus intersection |
+| 1993 | `set_new` | `__new__`: allocate and optionally populate from an iterable |
+
+## Reading
+
+### Probe sequence in `set_add_entry`
+
+The inner loop runs up to `LINEAR_PROBES` consecutive steps before perturbing. The perturbation mixes in upper hash bits via a right shift and a linear congruential step, giving good distribution for integer-keyed sets where lower bits cluster.
+
+```c
+// CPython: Objects/setobject.c:285 set_add_entry_takeref
+static int
+set_add_entry_takeref(PySetObject *so, PyObject *key, Py_hash_t hash)
+{
+    size_t perturb = hash;
+    size_t mask    = so->mask;
+    size_t i       = (size_t)hash & mask;
+
+    while (1) {
+        setentry *entry = &so->table[i];
+        int probes = (i + LINEAR_PROBES <= mask) ? LINEAR_PROBES : 0;
+        do {
+            if (entry->hash == 0 && entry->key == NULL)
+                goto found_unused_or_dummy;
+            if (entry->hash == hash) {
+                /* equality check elided for brevity */
+                goto found_active;
+            }
+            entry++;
+        } while (probes--);
+        perturb >>= PERTURB_SHIFT;
+        i = (i * 5 + 1 + perturb) & mask;
+    }
+```
+
+### Dummy sentinel and `set_discard_entry`
+
+Deletion stores the module-level `dummy` object in `entry->key` and sets `entry->hash` to `-1`. This keeps probe chains intact: a slot holding `dummy` is treated as "was occupied" during lookup but "available" during insertion.
+
+```c
+// CPython: Objects/setobject.c:496 set_discard_entry
+static int
+set_discard_entry(PySetObject *so, PyObject *key, Py_hash_t hash)
+{
+    setentry *entry;
+    int status = set_lookkey(so, key, hash, &entry);
+    if (status < 0)               return -1;
+    if (status == SET_LOOKKEY_NO_MATCH) return DISCARD_NOTFOUND;
+    PyObject *old_key = entry->key;
+    FT_ATOMIC_STORE_SSIZE_RELAXED(entry->hash, -1);
+    FT_ATOMIC_STORE_SSIZE_RELAXED(so->used, so->used - 1);
+    FT_ATOMIC_STORE_PTR_RELEASE(entry->key, dummy);
+    Py_DECREF(old_key);
+    return DISCARD_FOUND;
+}
+```
+
+### `frozenset_hash`: commutative XOR accumulator
+
+Because set membership is order-independent, the hash must be commutative. `frozenset_hash_impl` XORs a bit-shuffled version of every slot's `hash` field (including null and dummy slots for vectorization), then subtracts out the spurious contributions from empty and dummy slots.
+
+```c
+// CPython: Objects/setobject.c:1063 frozenset_hash_impl
+static Py_hash_t
+frozenset_hash_impl(PyObject *self)
+{
+    PySetObject *so = _PySet_CAST(self);
+    Py_uhash_t hash = 0;
+    setentry *entry;
+
+    for (entry = so->table; entry <= &so->table[so->mask]; entry++)
+        hash ^= _shuffle_bits(entry->hash);
+
+    /* Remove the effect of an odd number of NULL entries */
+    if ((so->mask + 1 - so->fill) & 1)
+        hash ^= _shuffle_bits(0);
+    /* Remove the effect of an odd number of dummy entries */
+    if ((so->fill - so->used) & 1)
+        hash ^= _shuffle_bits(-1);
+
+    hash ^= ((Py_uhash_t)PySet_GET_SIZE(self) + 1) * 1927868237UL;
+    hash ^= (hash >> 11) ^ (hash >> 25);
+    hash  = hash * 69069U + 907133923UL;
+    if (hash == (Py_uhash_t)-1)
+        hash = 590923713UL;
+    return (Py_hash_t)hash;
+}
+```
+
+## gopy notes
+
+The inline table trick (slots embedded in the `PySetObject` body when `used <= PySet_MINSIZE`) requires the Go struct to contain an `[8]setentry` array alongside a `*[]setentry` pointer, with the active pointer being the array address for small sets. gopy should port `set_add_entry`, `set_discard_entry`, and `set_lookkey` as a unit since they share assumptions about the dummy sentinel and probe sequence. `frozenset_hash` should be ported verbatim including `_shuffle_bits`, because the magic constants are load-bearing for hash stability across Python releases.
+
+## CPython 3.14 changes
+
+- Free-threaded builds wrap mutation paths in critical sections; `set_merge_lock_held` (line 676) is the lock-held variant called from within those sections.
+- The `FT_ATOMIC_STORE_PTR_RELEASE` / `FT_ATOMIC_STORE_SSIZE_RELAXED` wrappers in `set_discard_entry` are new in 3.13/3.14 to support concurrent readers in the no-GIL build.
+- `set_add_entry` was renamed to `set_add_entry_takeref` in 3.14 to make reference-ownership explicit at the call site.

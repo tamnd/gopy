@@ -1,0 +1,236 @@
+---
+title: "Python/typeobject.c (MRO and slot inheritance)"
+description: "Objects/typeobject.c sections covering C3 MRO, type construction, slot inheritance, and magic-method wrappers"
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 10000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+`typeobject.c` is the largest single source file in CPython. It implements
+`type` itself (the root metaclass), the `object` base type, MRO computation,
+type construction (`type.__new__`), slot inheritance, magic-method wrapper
+descriptors, and the `super` built-in. This page covers the five subsystems
+most relevant to porting: MRO, type construction, slot inheritance, the
+`update_one_slot` machinery, and the name/qualname descriptors.
+
+## Map
+
+| Approx. lines | Symbol | Purpose |
+|---------------|--------|---------|
+| 1800-1950 | `mro_implementation` | C3 linearization algorithm |
+| 1950-2010 | `mro_internal` | Wrapper that caches the result on `tp_mro` |
+| 6100-6400 | `type_new_impl` | Core of `type.__new__`: metaclass, bases, namespace, slots |
+| 6400-6600 | `type_new_set_slots` | Parses `__slots__` and allocates member descriptors |
+| 7200-7600 | `inherit_slots` | Copies `tp_*` function pointers from base to derived type |
+| 7600-7900 | `update_one_slot` | Installs a C-level slot from the MRO for a single magic method |
+| 8400-8500 | `type_set_name` | Descriptor setter for `__name__` |
+| 8500-8600 | `type_set_qualname` | Descriptor setter for `__qualname__` |
+| 9800-9950 | `type_subclasses` | Implementation of `type.__subclasses__` |
+
+## Reading
+
+### mro_implementation: C3 linearization
+
+The MRO algorithm is C3, first described by Barrett et al. in 1996 and adopted
+by Python 2.3. The implementation works with a list of "to-merge" sequences:
+the linearizations of each base class followed by the base list itself.
+
+At each step it looks for the first element of the first non-empty sequence
+that does not appear in the tail of any other sequence. When found, that type
+is appended to the output and removed from all sequences. When no such
+candidate exists the bases have an irreconcilable ordering conflict, and
+`TypeError` is raised.
+
+```c
+// CPython: Objects/typeobject.c:1832 mro_implementation
+static PyObject *
+mro_implementation(PyTypeObject *type)
+{
+    /* Grab the linearization of each base and the base list itself. */
+    ...
+    while (1) {
+        PyTypeObject *winner = NULL;
+        for (i = 0; i < ntodo; i++) {
+            cand = (PyTypeObject *)PyList_GET_ITEM(todo[i], 0);
+            if (tail_contains(todo, ntodo, cand))
+                continue;
+            winner = cand;
+            break;
+        }
+        if (winner == NULL) {
+            PyErr_SetString(PyExc_TypeError,
+                "Cannot create a consistent MRO");
+            goto error;
+        }
+        ...
+    }
+}
+```
+
+`mro_internal` calls `mro_implementation`, validates that the result is a
+tuple containing the type itself as the first element, and stores it in
+`type->tp_mro`. A type's `tp_mro` is read by attribute lookup, `isinstance`,
+`issubclass`, and slot inheritance every time they run, so it is set once and
+thereafter treated as immutable.
+
+### type_new_impl: constructing a new type
+
+`type_new_impl` is the C function behind `type(name, bases, namespace)` and
+every `class` statement. Its responsibilities, in order, are:
+
+1. Determine the winning metaclass by scanning the bases for any metatype that
+   is more derived than `type`.
+2. Validate the base list (no duplicate bases, no mixing of layout-incompatible
+   C bases).
+3. Call the metaclass `tp_alloc` to get a zeroed `PyTypeObject`.
+4. Copy `__name__`, `__qualname__`, `__module__`, `__doc__` from the namespace.
+5. Delegate `__slots__` processing to `type_new_set_slots`.
+6. Call `PyType_Ready` to fill inherited slots and build the MRO.
+
+```c
+// CPython: Objects/typeobject.c:6187 type_new_impl
+static PyObject *
+type_new_impl(PyTypeObject *metatype, PyObject *args, PyObject *kwds)
+{
+    PyObject *name, *bases, *orig_dict;
+    ...
+    /* Determine the proper metatype. */
+    winner = _PyType_CalculateMetaclass(metatype, bases);
+    if (winner == NULL)
+        return NULL;
+    if (winner != metatype) {
+        if (winner->tp_new != type_new)
+            return winner->tp_new(winner, args, kwds);
+        metatype = winner;
+    }
+    ...
+}
+```
+
+`__slots__` parsing in `type_new_set_slots` iterates the sequence, validates
+each name, and creates a `PyMemberDef` for each slot. It also sets
+`tp_basicsize` to `base->tp_basicsize + n_slots * sizeof(PyObject *)` so the
+allocator reserves the right amount of memory.
+
+### inherit_slots and update_one_slot
+
+After `PyType_Ready` builds the MRO it calls `inherit_slots`, which copies
+`tp_*` function pointers from the first base that defines each one. This is a
+large cascade of `SLOTDEFINED`/`COPYSLOT` macro calls, one per slot.
+
+```c
+// CPython: Objects/typeobject.c:7241 inherit_slots
+static void
+inherit_slots(PyTypeObject *type, PyTypeObject *base)
+{
+    ...
+    COPYSLOT(tp_repr);
+    COPYSLOT(tp_hash);
+    COPYSLOT(tp_call);
+    COPYSLOT(tp_str);
+    ...
+    /* Number slots */
+    COPYSLOT(tp_as_number->nb_add);
+    ...
+}
+```
+
+`update_one_slot` handles the inverse direction: when a Python-level class
+defines a magic method (`__add__`, `__repr__`, etc.), the corresponding C slot
+must be pointed at a wrapper that calls back into Python. The function walks
+the MRO to find the most-derived definition, then selects the appropriate
+`slotdef` wrapper function.
+
+```c
+// CPython: Objects/typeobject.c:7643 update_one_slot
+static slotdef *
+update_one_slot(PyTypeObject *type, slotdef *p)
+{
+    PyObject *descr;
+    PyWrapperDescrObject *d;
+    void *generic = NULL, *specific = NULL;
+    int use_generic = 0;
+    Py_ssize_t offset = p->offset;
+    void **tptr = resolve_slotdups(type, p->name_strobj);
+    ...
+    SEARCH_MRO:
+    for (mro = type->tp_mro, i = 0; i < n; i++) {
+        base = (PyTypeObject *) PyTuple_GET_ITEM(mro, i);
+        descr = find_name_in_mro(type, p->name_strobj, &error);
+        ...
+    }
+    ...
+}
+```
+
+The slot wrapper objects themselves are `PyWrapperDescrObject` instances
+stored in `type.__dict__`. When the interpreter calls `tp_repr` on a Python
+type, it goes through `slot_tp_repr`, which does a MRO lookup for `__repr__`
+and calls the result. This indirection is why overriding a magic method in a
+subclass works without recompiling the C extension that uses the slot.
+
+### type.__name__, type.__qualname__, and type.__subclasses__
+
+`type_set_name` and `type_set_qualname` are `tp_members`-style setters
+registered as data descriptors on `type`. Both validate that the new value is a
+plain `str` with no embedded null bytes, then update the internal `tp_name`
+pointer (for `__name__`) or the `__qualname__` entry in `tp_dict`.
+
+```c
+// CPython: Objects/typeobject.c:8432 type_set_name
+static int
+type_set_name(PyTypeObject *type, PyObject *value, void *context)
+{
+    if (!check_set_special_type_attr(type, value, "__name__"))
+        return -1;
+    if (!PyUnicode_Check(value)) {
+        PyErr_Format(PyExc_TypeError,
+            "can only assign string to %s.__name__, not '%s'",
+            type->tp_name, Py_TYPE(value)->tp_name);
+        return -1;
+    }
+    ...
+}
+```
+
+`type_subclasses` iterates the `tp_subclasses` weak-reference dictionary,
+filters out any references whose referents have been garbage collected, and
+returns a fresh list. The weak-reference indirection is what allows subclasses
+to be collected without preventing the base type from also being collected
+later.
+
+```c
+// CPython: Objects/typeobject.c:9832 type_subclasses
+static PyObject *
+type_subclasses(PyTypeObject *type, PyObject *args)
+{
+    PyObject *list = PyList_New(0);
+    if (list == NULL)
+        return NULL;
+    PyObject *subclasses = type->tp_subclasses;
+    if (subclasses == NULL)
+        return list;
+    /* tp_subclasses is a dict mapping id -> weakref. */
+    ...
+}
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+The five subsystems map to planned Go code as follows:
+
+- `mro_implementation`: planned as `objects.ComputeMRO(typ *Type) ([]*Type, error)` in `objects/type.go`, implementing C3 with the same conflict-detection logic.
+- `type_new_impl`: the `type.__new__` path is partially handled by `objects/usertype.go` today (class body execution). The metaclass-resolution and slot-filling steps are not yet ported.
+- `inherit_slots`: will become a table-driven loop over a `[]slotDef` slice in `objects/type.go`, mirroring the `COPYSLOT` cascade.
+- `update_one_slot`: planned as `objects.UpdateOneSlot(typ *Type, sd *SlotDef)`, called from `PyType_Ready` equivalent after MRO is set.
+- `type_set_name` / `type_set_qualname`: planned as `SetName` / `SetQualName` methods on `*objects.Type`.
+- `type_subclasses`: planned as `(*objects.Type).Subclasses() []*objects.Type`, using Go weak pointers (`runtime.SetFinalizer`-based) for the subclass list.
+
+Planned package path: `objects/type.go`, `objects/usertype.go`.

@@ -1,0 +1,89 @@
+---
+title: "_struct.c: struct pack/unpack internals"
+description: "Format-string parsing, native vs standard alignment, buffer protocol for pack_into/unpack_from, and the formatcode dispatch table"
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 1700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's `_struct` module is a thin C layer over a format-string interpreter.
+`struct.pack` and `struct.unpack` are the two main entry points, but the real
+work happens inside a compiled `Struct` object that caches the parsed format
+on first use.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-80 | `formatdef` table | Maps each format character to size, alignment, and pack/unpack callbacks |
+| 81-350 | `s_object` / `prepare_s_object` | Compiled struct type: format string intern, size cache, format code list |
+| 351-650 | `s_pack` / `s_unpack` | Top-level pack/unpack: iterate format codes, call per-code callbacks |
+| 651-900 | `pack_into` / `unpack_from` | Buffer-protocol variants: accept writable/read-only memoryview |
+| 901-1200 | Native format handlers (`bp_*`) | Big-endian and native byte-order handlers for b/h/i/l/q/f/d |
+| 1201-1500 | Standard format handlers (`lp_*`) | Little-endian, fixed-width IEEE 754, no padding |
+| 1501-1700 | Module init, `calcsize`, `iter_unpack` | `struct.calcsize`, lazy iterator object `unpack_iterator` |
+
+## Reading
+
+### Format-string parsing and the `formatdef` table
+
+The heart of `_struct.c` is the `formatdef` array (around line 100).
+Each entry is a `formatdef` struct:
+
+```c
+typedef struct _formatdef {
+    char format;
+    Py_ssize_t size;
+    Py_ssize_t alignment;
+    PyObject* (*unpack)(const char *, const formatdef *);
+    int        (*pack)(char *, PyObject *, const formatdef *);
+} formatdef;
+```
+
+`prepare_s_object` walks the format string once, expands repeat counts
+(e.g. `4h` becomes four `h` codes), computes total size with alignment padding,
+and stores a `formatcode` array on the `s_object`. Subsequent calls to
+`s_pack` / `s_unpack` iterate that pre-built array, so repeat invocations
+pay no parsing cost.
+
+### Native vs standard alignment
+
+The format string prefix selects one of four `formatdef` tables:
+
+| Prefix | Table | Endian | Padding |
+|--------|-------|--------|---------|
+| `@` (default) | `native_table` | native | native alignment |
+| `=` | `native_table` | native | no padding |
+| `<` | `lilendian_table` | little | no padding |
+| `>` or `!` | `bigendian_table` | big | no padding |
+
+`native_table` uses `sizeof` and `offsetof` at compile time, so
+`struct.calcsize('@i')` can return 4 or 8 depending on the platform.
+Standard tables always use fixed widths (e.g. `i` is always 4 bytes).
+
+### `pack_into` and `unpack_from` buffer protocol
+
+<Cpy path="Modules/_struct.c" lines="651-900" />
+
+Both variants call `PyArg_ParseTuple` with the `"y*"` or `"w*"` format code
+to obtain a `Py_buffer`. The offset argument is range-checked against
+`view.len` before any write. On success, `PyBuffer_Release` is called in all
+exit paths, including error paths, to avoid reference leaks against
+`memoryview` objects backed by `array.array` or `mmap`.
+
+3.14 note: `iter_unpack` now raises `BufferError` instead of `struct.error`
+when the underlying buffer is resized between iterations.
+
+## gopy notes
+
+- The `formatdef` table maps cleanly to a Go `map[byte]formatEntry` where
+  each entry holds size, alignment, and a pair of function values.
+- `s_object` corresponds to a `CompiledStruct` struct caching `[]formatCode`
+  and total `Size int`.
+- Buffer-protocol handling (`pack_into`/`unpack_from`) should accept Go
+  `[]byte` slices directly; no separate memoryview layer is needed.
+- Native alignment on Go side: use `unsafe.Sizeof` and `unsafe.Alignof` in
+  an `init()` table built at startup.

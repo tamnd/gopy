@@ -1,0 +1,64 @@
+---
+title: Lib/email/mime/text.py
+description: "MIMEText: constructs a text/plain or text/html MIME part, encoding the payload via a Charset object and setting Content-Transfer-Encoding automatically."
+cpython_path: Lib/email/mime/text.py
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/mime/text.py" />
+
+`Lib/email/mime/text.py` defines `MIMEText`, the standard way to create a `text/*` MIME part. It wraps `MIMENonMultipart` and calls `set_payload` with a `Charset` object, which handles encoding and sets `Content-Transfer-Encoding` automatically.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-10 | imports | `MIMENonMultipart`, `email.charset` |
+| 12-60 | `MIMEText` | Constructor accepting text, subtype, charset |
+
+## Reading
+
+### Constructor and charset handling
+
+`MIMEText.__init__` accepts the text payload, a subtype (default `plain`), and a charset (default `us-ascii`). The charset can be either a string or a `Charset` instance. It delegates to `MIMENonMultipart.__init__` to set up the Content-Type header, then calls `set_payload`.
+
+```python
+# CPython: Lib/email/mime/text.py:12 MIMEText.__init__
+class MIMEText(MIMENonMultipart):
+    def __init__(self, _text, _subtype='plain', _charset=None,
+                 *, policy=None):
+        if _charset is None:
+            _charset = 'us-ascii'
+        MIMENonMultipart.__init__(self, 'text', _subtype,
+                                  policy=policy,
+                                  **{'charset': str(_charset)})
+        self.set_payload(_text, _charset)
+```
+
+### `set_payload` and Content-Transfer-Encoding
+
+`Message.set_payload(payload, charset)` calls `charset.body_encode(payload)` which encodes the text and sets the `Content-Transfer-Encoding` header. For `us-ascii` and `iso-8859-1`, the encoding is `7bit` or `8bit`. For `utf-8`, it is `base64` or `quoted-printable` depending on the charset's `body_encoding` attribute.
+
+```python
+# CPython: Lib/email/message.py:258 Message.set_payload
+def set_payload(self, payload, charset=None):
+    if charset is not None and not isinstance(charset, Charset):
+        charset = Charset(charset)
+    if charset is not None:
+        payload = charset.body_encode(payload)
+        self.add_header('Content-Transfer-Encoding',
+                        charset.get_body_encoding())
+    self._payload = payload
+```
+
+### Subtype variants
+
+While the default is `text/plain`, the same class constructs `text/html`, `text/csv`, and any other `text/*` subtype by passing `_subtype`. The Content-Type charset parameter is set from `str(_charset)` so the header reads `Content-Type: text/plain; charset="utf-8"`.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/email/mime/`. The Go equivalent is a factory function that builds a `Message` with a pre-set Content-Type and encodes the body using Go's `mime/quotedprintable` or `encoding/base64` packages.

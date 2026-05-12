@@ -1,0 +1,165 @@
+---
+title: "Objects/memoryobject.c"
+description: "CPython memoryview type: buffer protocol, element access, and multidimensional slicing"
+cpython_path: Objects/memoryobject.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`memoryobject.c` implements the `memoryview` built-in type. A `memoryview`
+wraps a `Py_buffer` struct and exposes shaped, typed, read-only or read-write
+views over raw memory owned by another object (`bytes`, `bytearray`,
+`array.array`, and any C extension that exports the buffer protocol).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | macros, flag helpers | Contiguity and `PyBUF_*` validation |
+| 81–300 | `PyMemoryView_FromObject` | Entry point: calls `getbuffer` on the source |
+| 301–450 | `PyMemoryView_FromBuffer` | Wraps an already-filled `Py_buffer` directly |
+| 451–700 | `memory_getitem` / `memory_setitem` | Per-element read/write via format descriptor |
+| 701–950 | `memory_subscript` | Multidimensional slice and index dispatch |
+| 951–1200 | `memory_tobytes` | Copies view contents into a new `bytes` object |
+| 1201–1400 | `memory_toreadonly` | Returns a read-only cast of the same view |
+| 1401–2200 | Format/shape/stride helpers | `pack_single`, `unpack_single`, strides arithmetic |
+| 2201–3000 | `PyMemoryView_Type` definition | `tp_as_buffer`, `tp_methods`, richcompare |
+
+## Reading
+
+### Py_buffer and PyMemoryView_FromObject
+
+The `Py_buffer` struct is the lingua franca of the buffer protocol. Every
+buffer-exporting type fills one in its `bf_getbuffer` slot.
+
+```c
+// CPython: Objects/memoryobject.c:81 PyMemoryView_FromObject
+PyObject *
+PyMemoryView_FromObject(PyObject *base)
+{
+    PyMemoryViewObject *mview;
+    Py_buffer view;
+
+    if (!PyObject_CheckBuffer(base)) {
+        PyErr_Format(PyExc_TypeError,
+            "memoryview: a bytes-like object is required, not '%.100s'",
+            Py_TYPE(base)->tp_name);
+        return NULL;
+    }
+    if (PyObject_GetBuffer(base, &view, PyBUF_FULL_RO) < 0)
+        return NULL;
+    mview = (PyMemoryViewObject *)PyMemoryView_FromBuffer(&view);
+    PyBuffer_Release(&view);
+    return (PyObject *)mview;
+}
+```
+
+`PyObject_GetBuffer` invokes `tp_as_buffer->bf_getbuffer` on `base`. The
+flag `PyBUF_FULL_RO` requests shape, strides, suboffsets, and format. If the
+source does not support the buffer protocol the call raises `TypeError`.
+
+### Wrapping a bare Py_buffer
+
+When the caller already holds a `Py_buffer` (for example, from a C extension),
+`PyMemoryView_FromBuffer` skips the protocol call and copies the struct fields.
+
+```c
+// CPython: Objects/memoryobject.c:301 PyMemoryView_FromBuffer
+PyObject *
+PyMemoryView_FromBuffer(const Py_buffer *info)
+{
+    PyMemoryViewObject *mview;
+    mview = (PyMemoryViewObject *)_PyObject_GC_New(&PyMemoryView_Type);
+    if (mview == NULL)
+        return NULL;
+    mview->mbuf  = NULL;
+    mview->hash  = -1;
+    mview->flags = 0;
+    copy_buffer(&mview->view, info);  /* shallow copy of all Py_buffer fields */
+    _PyObject_GC_TRACK(mview);
+    return (PyObject *)mview;
+}
+```
+
+### Element access via format descriptor
+
+`memory_getitem` converts a flat index to a byte offset using `strides` and
+`suboffsets`, then calls `unpack_single` to decode one element according to
+`view.format`.
+
+```c
+// CPython: Objects/memoryobject.c:451 memory_getitem
+static PyObject *
+memory_getitem(PyMemoryViewObject *self, Py_ssize_t index)
+{
+    Py_buffer *view = &self->view;
+    CHECK_RELEASED(self);
+
+    if (view->ndim == 0) {
+        PyErr_SetString(PyExc_TypeError,
+            "invalid indexing of 0-dim memory");
+        return NULL;
+    }
+    if (index < 0) index += view->shape[0];
+    if (index < 0 || index >= view->shape[0]) {
+        PyErr_SetString(PyExc_IndexError, "index out of bounds");
+        return NULL;
+    }
+    char *ptr = (char *)view->buf + index * view->strides[0];
+    return unpack_single(self, ptr, view->format);
+}
+```
+
+### Multidimensional slicing
+
+`memory_subscript` is the `mp_subscript` slot. A plain integer routes to
+`memory_getitem`; a `slice` object builds a new `memoryview` with adjusted
+`shape`, `strides`, and `buf` pointer.
+
+```c
+// CPython: Objects/memoryobject.c:701 memory_subscript
+static PyObject *
+memory_subscript(PyMemoryViewObject *self, PyObject *key)
+{
+    Py_buffer *view = &self->view;
+    CHECK_RELEASED(self);
+
+    if (PyIndex_Check(key)) {
+        Py_ssize_t i = PyNumber_AsSsize_t(key, PyExc_IndexError);
+        if (i == -1 && PyErr_Occurred()) return NULL;
+        return memory_getitem(self, i);
+    }
+    if (PySlice_Check(key))
+        return memory_slice(self, key);
+
+    PyErr_SetString(PyExc_TypeError, "memoryview: invalid slice key");
+    return NULL;
+}
+```
+
+## gopy notes
+
+- `Py_buffer` maps to a Go struct in `objects/buffer.go`. The `format` C string
+  pointer is copied into a Go `string` at acquisition time. `shape` and
+  `strides` are stored as `[]int64` slices.
+- `bf_getbuffer` and `bf_releasebuffer` are modelled as an optional
+  `BufferProtocol` interface on object types, checked at construction time.
+- Strides arithmetic in `memory_getitem` ports directly; `suboffsets` (used by
+  PIL-style indirect arrays) is deferred.
+- `memory_tobytes` is exercised by `bytes(mv)` and must handle non-contiguous
+  views by iterating with the strides loop rather than a single `memcpy`.
+- `memory_toreadonly` creates a new `MemoryViewObject` sharing the same backing
+  slice with the `readonly` flag set to `true`.
+
+## CPython 3.14 changes
+
+- `PyMemoryView_FromObject` gained an internal fast path for `memoryview` inputs
+  that are already contiguous, skipping a redundant `getbuffer` round-trip.
+- Format string validation is now stricter: unknown format characters raise
+  `ValueError` at view creation time rather than deferring the error to element
+  access time.
+- `memory_toreadonly` (`toreadonly()`) was introduced in 3.8 and is unchanged in
+  3.14.

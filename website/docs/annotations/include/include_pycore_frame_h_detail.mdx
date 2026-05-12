@@ -1,0 +1,108 @@
+---
+title: Include/internal/pycore_frame.h
+description: "Internal frame struct layout, ownership model, and stack discipline for CPython 3.14"
+cpython_path: Include/internal/pycore_frame.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_frame.h" />
+
+Every Python call frame lives in a `_PyInterpreterFrame`. This header defines that struct, the ownership constants that track where each frame is allocated, and the small set of inline helpers the eval loop uses to test frame state.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–30 | file prologue | Guard macros, includes (`pycore_code.h`, `pycore_stackref.h`) |
+| 32–80 | `_PyInterpreterFrame` | Core frame struct: executable, locals, globals, builtins, lasti, owner |
+| 82–95 | `FRAME_OWNED_BY_*` | Enum constants for frame ownership |
+| 97–115 | `_PyFrameLocalsProxy` | Thin object wrapping the fast-locals array as a mapping |
+| 117–145 | `_PyFrame_IsIncomplete` | Inline predicate: is the frame mid-construction? |
+| 147–175 | `_PyFrame_GetLocalsArray` | Pointer arithmetic into the frame's fast-locals block |
+| 177–200 | stack discipline macros | `_PyFrame_SetStackPointer`, `_PyFrame_GetStackPointer` |
+
+## Reading
+
+### _PyInterpreterFrame struct layout
+
+The struct packs every piece of state the eval loop touches on a hot path into a single allocation. The fields in order:
+
+```c
+// CPython: Include/internal/pycore_frame.h:32 _PyInterpreterFrame
+typedef struct _PyInterpreterFrame {
+    PyObject *f_executable;       /* strong ref to code object or NULL */
+    struct _PyInterpreterFrame *previous;
+    PyObject *f_locals;           /* strong ref, or NULL */
+    PyObject *f_globals;          /* borrowed ref */
+    PyObject *f_builtins;         /* borrowed ref */
+    _PyStackRef *f_stackpointer;
+    int f_lasti;                  /* index of last attempted instruction */
+    int f_lineno;                 /* only valid if f_frame_obj != NULL */
+    char owner;
+    /* ... fast locals and eval stack follow in the same allocation */
+    PyFrameObject *frame_obj;     /* lazily allocated PyFrameObject */
+} _PyInterpreterFrame;
+```
+
+`f_executable` holds a strong reference to the code object for the duration of the call. `f_locals` is only populated lazily when user code accesses `frame.f_locals`; most frames never materialise it. `f_globals` and `f_builtins` are borrowed because the module dict and builtins dict outlive any individual call frame.
+
+`f_lasti` tracks the word offset of the last instruction that started execution. The eval loop advances it before dispatching each opcode so that tracebacks and `frame.f_lineno` stay accurate even mid-instruction.
+
+### Ownership constants and the frame lifecycle
+
+```c
+// CPython: Include/internal/pycore_frame.h:82 FRAME_OWNED_BY_CSTACK
+#define FRAME_OWNED_BY_CSTACK        0
+#define FRAME_OWNED_BY_THREAD        1
+#define FRAME_OWNED_BY_GENERATOR     2
+#define FRAME_OWNED_BY_FRAME_OBJECT  3
+```
+
+`owner` is a one-byte tag written when the frame is pushed and read when it is popped or cleared. The four states map directly to the four allocation strategies CPython uses:
+
+- `FRAME_OWNED_BY_CSTACK` -- frame lives in the C stack frame of `_PyEval_EvalFrameDefault`. This is the common case for normal function calls.
+- `FRAME_OWNED_BY_THREAD` -- frame was allocated on the thread's shadow stack (the "frame cache").
+- `FRAME_OWNED_BY_GENERATOR` -- the frame was heap-allocated as part of a generator or coroutine object and will survive the C call that created it.
+- `FRAME_OWNED_BY_FRAME_OBJECT` -- a `PyFrameObject` has been materialised and now owns the frame memory; the frame must not be freed until the PyFrameObject is collected.
+
+The distinction matters for `_Py_DECREF` discipline: frames in the first two categories can be returned to the frame allocator immediately on return, while frames in the last two require reference-count coordination.
+
+### _PyFrame_IsIncomplete and the frame proxy
+
+```c
+// CPython: Include/internal/pycore_frame.h:117 _PyFrame_IsIncomplete
+static inline int
+_PyFrame_IsIncomplete(_PyInterpreterFrame *frame)
+{
+    if (frame->owner >= FRAME_OWNED_BY_GENERATOR) {
+        return 0;
+    }
+    return frame->f_stackpointer == NULL;
+}
+```
+
+A frame is "incomplete" while `CALL` is still pushing arguments onto the stack before `RESUME` has run. The eval loop checks this to avoid touching fast locals or the code object while the frame is only half-initialised.
+
+`_PyFrameLocalsProxy` wraps the fast-locals array as a `dict`-like object. It is created on first access to `frame.f_locals` and updates its view lazily. The struct is minimal:
+
+```c
+// CPython: Include/internal/pycore_frame.h:97 _PyFrameLocalsProxy
+typedef struct {
+    PyObject_HEAD
+    _PyInterpreterFrame *frame;
+} _PyFrameLocalsProxy;
+```
+
+Mutations through the proxy write directly into the fast-locals slots so that the running frame sees the change immediately without a dict copy.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/frame.go` for the frame struct and ownership constants. The `_PyFrameLocalsProxy` type will map to a Go struct implementing the mapping protocol defined in `objects/protocol.go`. The incomplete-frame predicate translates naturally to a Go method on the frame type.
+
+The ownership model has no direct Go equivalent. The current plan is to represent it as an integer tag on the frame struct and handle deallocation through the same reference-counting layer used for other heap objects.

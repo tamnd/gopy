@@ -1,0 +1,76 @@
+---
+title: "pycore_list.h: internal list layout"
+description: "PyListObject struct fields, iterator internals, free-list recycling, and watcher notification in CPython 3.14"
+cpython_path: Include/internal/pycore_list.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: objects/list.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_list.h` exposes the internal fields of `PyListObject` that are
+hidden behind the stable ABI. It also declares the iterator struct and the
+per-interpreter free list that recycles small list headers.
+
+## Map
+
+| Lines | Symbol | Kind | Purpose |
+|-------|--------|------|---------|
+| 1–20 | `PyListObject` | struct | list header (ob_item pointer, ob_size, allocated) |
+| 21–40 | `_PyListIterObject` | struct | forward iterator (it_seq, it_index) |
+| 41–55 | `_PyListRevIterObject` | struct | reverse iterator (it_seq, it_index) |
+| 56–70 | `_Py_list_freelist` | struct | per-interpreter free-list state |
+| 71–80 | `_PyList_NotifyEvent` | enum | watcher event codes (append, insert, item_set, ...) |
+
+## Reading
+
+### PyListObject struct
+
+```c
+typedef struct {
+    PyObject_VAR_HEAD           /* ob_refcnt, ob_type, ob_size */
+    PyObject **ob_item;         /* pointer to item array on the heap */
+    Py_ssize_t allocated;       /* slots allocated (>= ob_size) */
+} PyListObject;
+```
+
+`ob_size` is the logical length; `allocated` is the capacity of the
+`ob_item` array. The growth formula keeps `allocated` between `ob_size`
+and roughly `ob_size * 9/8 + 6`, so appends are amortized O(1).
+
+### Iterator structs
+
+Both forward and reverse iterators hold a borrowed reference to the list
+and a current index. Mutation of the underlying list is not detected at
+the C level; user code must not rely on iterator safety.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t  it_index;
+    PyListObject *it_seq;   /* NULL when exhausted */
+} _PyListIterObject;
+```
+
+### Free list and watchers
+
+CPython keeps up to `PyList_MAXFREELIST` (80 in 3.14) dead `PyListObject`
+headers per interpreter. When a list is deallocated its header goes onto
+the free list; the next `PyList_New` pops from it, skipping the allocator.
+The `ob_item` buffer is always freed separately.
+
+`_PyList_NotifyEvent` codes include `PyList_EVENT_APPEND`,
+`PyList_EVENT_INSERT`, `PyList_EVENT_ITEM_SET`, `PyList_EVENT_CLEAR`,
+and `PyList_EVENT_DEALLOCATED`. Watchers are registered per-interpreter
+via `PyList_AddWatcher`.
+
+## gopy notes
+
+`objects/list.go` stores items in a Go slice, so `ob_item` and `allocated`
+map to the slice's backing array and cap. The free list is not implemented
+since Go's GC manages allocation. Watcher events are partially wired:
+`APPEND` and `ITEM_SET` fire today; `INSERT`, `CLEAR`, and `DEALLOCATED`
+are stubs that return `nil`. The iterator structs map to `listIterator`
+and `listRevIterator` in the same file.

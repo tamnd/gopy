@@ -1,0 +1,78 @@
+---
+title: Lib/functools.py
+description: "functools Python layer: wraps() copying __wrapped__/__module__/__name__/__qualname__/__doc__/__dict__, total_ordering filling in comparison methods, cached_property descriptor, and singledispatch registry."
+cpython_path: Lib/functools.py
+cpython_version: "3.14"
+lines: 980
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/functools.py`
+
+<CpyLink path="Lib/functools.py" />
+
+`Lib/functools.py` re-exports from `_functools` (C extension) and adds pure-Python
+utilities: `wraps`, `total_ordering`, `cached_property`, `singledispatch`, and
+`singledispatchmethod`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | Re-exports from `_functools` | `partial`, `reduce`, `lru_cache`, `cmp_to_key` |
+| 81-160 | `wraps`, `update_wrapper` | Copy function metadata to a wrapper |
+| 161-300 | `total_ordering` | Fill in `__lt__`/`__gt__`/`__le__`/`__ge__` from one defined method |
+| 301-500 | `cached_property` | Lazy attribute computed once, stored in `__dict__` |
+| 501-700 | `singledispatch` | Type-based dispatch with `register()` and MRO fallback |
+| 701-980 | `singledispatchmethod` | `singledispatch` for methods with classmethod support |
+
+## Reading
+
+### `update_wrapper`
+
+`update_wrapper(wrapper, wrapped)` copies `__module__`, `__name__`, `__qualname__`,
+`__annotations__`, `__doc__`, and `__dict__` from `wrapped` to `wrapper`, and sets
+`__wrapped__ = wrapped`. `@wraps(f)` is `functools.update_wrapper(wrapper, f)` as a
+decorator.
+
+```python
+# CPython: Lib/functools.py:68 update_wrapper
+def update_wrapper(wrapper, wrapped, ...):
+    for attr in assigned:
+        try:
+            value = getattr(wrapped, attr)
+        except AttributeError:
+            pass
+        else:
+            setattr(wrapper, attr, value)
+    ...
+    wrapper.__wrapped__ = wrapped
+    return wrapper
+```
+
+### `total_ordering`
+
+`@total_ordering` inspects the class for which comparison methods are defined and adds the
+missing ones. It builds a dispatch table mapping each missing method to an expression using
+the defined one (e.g. `__gt__` from `__lt__`: `return NotImplemented if result is
+NotImplemented else not result and self != other`).
+
+### `cached_property`
+
+`cached_property(func)` is a non-data descriptor. On first access, it calls `func(self)`
+and stores the result directly in `self.__dict__[attrname]`, shadowing the descriptor for
+all subsequent accesses.
+
+### `singledispatch` MRO fallback
+
+`singledispatch` maintains a `dispatch_cache` dict from type to implementation. On cache
+miss, it walks the type's MRO looking for a registered type. Virtual subclasses (via
+`register`) are checked before the MRO walk.
+
+## gopy notes
+
+`module/functools/` partially implements this. `wraps` and `update_wrapper` are ported.
+`total_ordering` requires `__dict__` attribute writing on class objects. `cached_property`
+requires a non-data descriptor with `__dict__` storage. `singledispatch` is planned.

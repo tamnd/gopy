@@ -1,0 +1,61 @@
+---
+title: Include/cpython/floatobject.h
+description: "CPython-private float API: PyFloatObject layout, PyFloat_PACK/UNPACK for endian-safe serialization, and the per-interpreter free list."
+cpython_path: Include/cpython/floatobject.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/cpython/floatobject.h" />
+
+`Include/cpython/floatobject.h` exposes the `PyFloatObject` struct layout and the endian-safe pack/unpack helpers used by `marshal` and `struct`. The public `Include/floatobject.h` provides the stable ABI.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-20 | `PyFloatObject` | Struct layout; `ob_fval` field |
+| 21-45 | `PyFloat_PACK2/4/8`, `PyFloat_UNPACK2/4/8` | Endian-aware IEEE 754 pack/unpack |
+| 46-60 | `PyFloat_GET_VALUE` | Inline accessor macro |
+
+## Reading
+
+### PyFloatObject layout
+
+`PyFloatObject` has a single meaningful field beyond the object header: `ob_fval`, a C `double`. There is no fractional part or sign bit stored separately; the entire IEEE 754 double precision value is stored in `ob_fval`.
+
+```c
+// Include/cpython/floatobject.h:1 PyFloatObject
+struct PyFloatObject {
+    PyObject_HEAD
+    double ob_fval;   /* the actual float value */
+};
+
+static inline double
+PyFloat_GET_VALUE(PyObject *op) {
+    return ((PyFloatObject *)op)->ob_fval;
+}
+```
+
+### Pack/unpack for serialization
+
+`PyFloat_PACK8(p, x, le)` writes the double `x` to 8 bytes at `p` in little-endian (`le=1`) or big-endian (`le=0`) byte order. These are used by `struct.pack` format codes `d` and `f`, and by `marshal` to write floats into `.pyc` files in a platform-independent byte order.
+
+```c
+// Include/cpython/floatobject.h:21 PyFloat_PACK8
+int PyFloat_PACK8(char *p, double x, int le);
+double PyFloat_UNPACK8(const char *p, int le);
+int PyFloat_PACK4(char *p, float x, int le);
+float PyFloat_UNPACK4(const char *p, int le);
+```
+
+### Free list
+
+Each interpreter maintains a free list of recycled `PyFloatObject` instances. `PyFloat_FromDouble` pops from the list before calling `PyObject_Malloc`; `float_dealloc` pushes to the free list (up to `PyFloat_MAXFREELIST` items). The free list is stored in `_PyInterpreterState.float_state`.
+
+## gopy notes
+
+The gopy float type wraps a Go `float64`. The pack/unpack helpers are not needed because Go's `encoding/binary` package handles endian-safe float serialization. The free list is replaced by Go's garbage collector.

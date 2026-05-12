@@ -1,0 +1,112 @@
+---
+title: fileio.c
+description: "RawIOBase over POSIX/Windows file descriptors — open, read, write, seek, close"
+cpython_path: Modules/_io/fileio.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`fileio.c` is the lowest layer of CPython's I/O stack. It wraps a single OS file descriptor and exposes `RawIOBase`. The buffered layer sits directly above it; nothing else calls into the OS below this file.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | includes, `fileio` struct | Platform guards, fd/name/closefd fields |
+| 81–350 | `fileio_init` | `open()` flag mapping, `O_CLOEXEC`, directory check |
+| 351–500 | `fileio_readinto` | `read(2)` into a `Py_buffer`, EINTR retry |
+| 501–620 | `fileio_write` | `write(2)` from a `Py_buffer`, partial-write loop |
+| 621–720 | `fileio_seek` / `fileio_tell` | `lseek64` wrappers |
+| 721–850 | `fileio_truncate` | `ftruncate64` with seek-back |
+| 851–950 | `fileio_close` | `close(fd)`, optional `closefd` guard |
+| 951–1050 | `fileio_readable` / `fileio_writable` / `fileio_seekable` | Capability queries from `O_RDONLY`/`O_WRONLY`/`O_RDWR` |
+| 1051–1400 | `tp_methods`, `tp_getset`, `tp_new`/`tp_init`, Windows path | Type plumbing and `CreateFile` branch |
+
+## Reading
+
+### Init and open flags
+
+`fileio_init` converts the Python `mode` string into POSIX `open(2)` flags, then calls `open` with `O_CLOEXEC` set unconditionally on POSIX to prevent fd leaks across `exec`. It also `stat`-checks the result and raises `IsADirectoryError` if the fd turned out to be a directory.
+
+```c
+// CPython: Modules/_io/fileio.c:209 fileio_init
+    flags = _Py_open_cloexec_flag;   /* O_CLOEXEC or equivalent */
+    switch (rawmode[0]) {
+    case 'r': flags |= O_RDONLY; break;
+    case 'w': flags |= O_WRONLY | O_CREAT | O_TRUNC; break;
+    case 'a': flags |= O_WRONLY | O_CREAT | O_APPEND; break;
+    case 'x': flags |= O_WRONLY | O_CREAT | O_EXCL; break;
+    }
+    if (updating) flags |= O_RDWR & ~O_RDONLY & ~O_WRONLY;
+```
+
+After `open`, a `fstat` call checks `S_ISDIR(st.st_mode)`. If true the fd is closed immediately and `IsADirectoryError` is raised before the `fileio` object is returned to the caller.
+
+### readinto
+
+`fileio_readinto` accepts a writable `Py_buffer`, releases the GIL, calls `read(2)`, then reacquires. A return value of `0` signals EOF and the method returns `None` rather than `b""`.
+
+```c
+// CPython: Modules/_io/fileio.c:394 fileio_readinto
+    Py_BEGIN_ALLOW_THREADS
+    errno = 0;
+    n = read(self->fd, buf.buf, buf.len);
+    Py_END_ALLOW_THREADS
+    if (n < 0) {
+        if (errno == EAGAIN)
+            Py_RETURN_NONE;
+        PyErr_SetFromErrno(PyExc_OSError);
+        goto done;
+    }
+```
+
+`EAGAIN` on a non-blocking fd returns `None`, signalling the caller to retry. `EINTR` is handled by the `Py_BEGIN_ALLOW_THREADS` / signal-check dance that CPython performs on GIL reacquisition.
+
+### write
+
+`fileio_write` does not loop: a single `write(2)` call is made and the actual byte count is returned. The caller (usually `BufferedWriter`) is responsible for calling again if the count is less than the buffer length.
+
+```c
+// CPython: Modules/_io/fileio.c:456 fileio_write
+    Py_BEGIN_ALLOW_THREADS
+    errno = 0;
+    n = write(self->fd, data.buf, data.len);
+    Py_END_ALLOW_THREADS
+    if (n < 0 || n > data.len) {
+        if (errno == EAGAIN)
+            Py_RETURN_NONE;
+        PyErr_SetFromErrno(PyExc_OSError);
+        goto done;
+    }
+    return PyLong_FromSsize_t(n);
+```
+
+### seek and tell
+
+Both methods call `_Py_lseek` which expands to `lseek64` on Linux and `_lseeki64` on Windows. `fileio_tell` is just `fileio_seek` called with `SEEK_CUR` and offset `0`.
+
+```c
+// CPython: Modules/_io/fileio.c:524 fileio_seek
+    res = _Py_lseek(self->fd, pos, whence);
+    if (res == (off_t)-1 && errno != 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    return PyLong_FromOff_t(res);
+```
+
+## gopy notes
+
+- The gopy equivalent stores an `*os.File` rather than a raw `int` fd. `Read` and `Write` calls go through the Go `io` interfaces, so no GIL-release pattern is needed.
+- The `EAGAIN` / non-blocking path is preserved: when `Read` returns `os.ErrDeadlineExceeded` or `syscall.EAGAIN`, the gopy method returns `None`.
+- The directory check is done with `fi.IsDir()` on the `os.FileInfo` returned by `f.Stat()` immediately after `os.OpenFile`.
+- On Windows gopy delegates to `os.File` which uses `CreateFile` internally; no separate Windows branch is needed.
+
+## CPython 3.14 changes
+
+- `O_CLOEXEC` is now always passed even when the caller supplies a raw integer fd via `closefd=False`; previously it was skipped for the integer-fd path.
+- `fileio_init` gained a fast path that avoids `fstat` when the fd was inherited from a `socketpair` and the `S_ISSOCK` bit is already known.
+- The `readinto` method now raises `BufferError` if the supplied buffer is read-only rather than silently corrupting memory via a stale pointer on certain allocators.

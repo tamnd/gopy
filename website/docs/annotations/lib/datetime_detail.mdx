@@ -1,0 +1,64 @@
+---
+title: "_pydatetime.py annotation"
+description: "Pure-Python fallback for date, datetime, time, timedelta, and tzinfo"
+cpython_path: Lib/_pydatetime.py
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+ported_to: objects/datetime.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython ships two implementations of the `datetime` module: a C accelerator (`Modules/_datetimemodule.c`) and this pure-Python fallback. The fallback is the authoritative readable reference. The C module replicates it exactly; when they diverge the C module is the bug.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-60 | module header, `MINYEAR`/`MAXYEAR` | Constants: year range 1-9999, epoch helpers |
+| 61-200 | `_check_*` helpers | Argument validation (year, month, day, hour, ...) |
+| 201-400 | `timedelta` | Stores `days`, `seconds`, `microseconds` after normalization |
+| 401-420 | `timedelta._getstate` / `__reduce__` | Pickle protocol |
+| 421-700 | `date` | Proleptic Gregorian calendar arithmetic |
+| 701-900 | `tzinfo` / `timezone` | Abstract base plus fixed-offset concrete class |
+| 901-1400 | `time` | Wall-clock time with optional tzinfo |
+| 1401-2200 | `datetime` | Combines `date` + `time`; heaviest class |
+| 2201-2400 | `datetime.fromisoformat` | Fast path parser for ISO 8601 strings |
+| 2401-2700 | `strptime` bridge, `_wrap_strftime` | Format string expansion and locale hooks |
+
+## Reading
+
+### timedelta normalization
+
+`timedelta.__new__` accepts keyword arguments in any combination of weeks, days, hours, minutes, seconds, milliseconds, and microseconds. All values are collapsed into three canonical fields. The normalization loop (<CpyLink path="Lib/_pydatetime.py" line={215} label="line 215"/>):
+
+1. Converts every unit to a `(days, seconds, microseconds)` triple.
+2. Carries microseconds into seconds when `abs(us) >= 1_000_000`.
+3. Carries seconds into days when `abs(s) >= 86_400`.
+4. Raises `OverflowError` if days fall outside `[-999999999, 999999999]`.
+
+The result is always in canonical form: `0 <= microseconds < 1_000_000` and `0 <= seconds < 86_400`.
+
+### utcoffset / dst / tzname protocol
+
+Any class that subclasses `tzinfo` must implement these three methods. `datetime` calls each one defensively and validates the return type (<CpyLink path="Lib/_pydatetime.py" line={700} label="line 700"/>):
+
+- `utcoffset` must return a `timedelta` with magnitude less than one day, or `None`.
+- `dst` same contract; used only for display and fold arithmetic.
+- `tzname` must return a `str` or `None`.
+
+The `_check_tzinfo_arg` helper enforces these constraints at construction time so no runtime surprises occur during arithmetic.
+
+### `datetime.fromisoformat` fast path
+
+Before 3.11, `fromisoformat` accepted only the exact format produced by `isoformat()`. Since 3.11 it covers the full ISO 8601 profile. The fast path in `_parse_isoformat_datetime` (<CpyLink path="Lib/_pydatetime.py" line={2230} label="line 2230"/>) avoids `strptime` entirely by scanning fixed-width fields with integer slicing and checking separator characters directly. The slow path falls back to a regex for edge cases such as week dates.
+
+## gopy notes
+
+- `timedelta` normalization is purely integer arithmetic and ports cleanly to Go with `int64` fields.
+- The `tzinfo` protocol maps naturally to a Go interface with `UTCOffset`, `DST`, and `TZName` methods.
+- `fromisoformat` fast path avoids importing `re`; the Go port can skip the regex engine entirely for the common case.
+- `MINYEAR`/`MAXYEAR` are module-level constants; expose them via `objects.DatetimeModule` attributes.
+- 3.14 adds `datetime.strptime` cache invalidation when the locale changes (bpo-28638 follow-up). The gopy port should track locale state in the same way.
+---

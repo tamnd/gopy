@@ -1,0 +1,82 @@
+---
+cpython_path: "Lib/multiprocessing/process.py"
+---
+
+# multiprocessing/process.py
+
+**CPython path:** `Lib/multiprocessing/process.py` (~350 lines)
+
+`BaseProcess` and `Process` live here. This module is the backbone of CPython's multiprocessing support: every child process, regardless of start method (fork, spawn, forkserver), is represented by a `BaseProcess` subclass.
+
+---
+
+## Reading: BaseProcess lifecycle
+
+`BaseProcess.__init__` records the target callable, args, kwargs, and a name. It also captures the authentication key and the daemon flag from the parent. A `_children` weak set on the class tracks every `Process` that has been started but not yet joined.
+
+```python
+# Lib/multiprocessing/process.py
+class BaseProcess(object):
+    def __init__(self, group=None, target=None, name=None,
+                 args=(), kwargs={}, *, daemon=None):
+        ...
+        self._target = target
+        self._args = tuple(args)
+        self._kwargs = dict(kwargs)
+        self._name = name or type(self)._name_template % ...
+        if daemon is not None:
+            self.daemon = daemon
+        _dangling.add(self)
+```
+
+`start()` calls `self._popen = self._Popen(self)` (the platform-specific Popen subclass) and adds `self` to `_children`. From this point forward the child process exists as an OS-level entity.
+
+---
+
+## Reading: _bootstrap and run
+
+`_bootstrap()` runs inside the child process. It installs signal handlers (resetting `SIGPIPE` on POSIX, etc.), initialises logging, and then calls `self.run()`. Cleanup finalizers registered with `util.Finalize` are executed after `run()` returns or raises.
+
+```python
+# Lib/multiprocessing/process.py
+def _bootstrap(self, parent_sentinel=None):
+    ...
+    try:
+        self.run()
+        exitcode = 0
+    except (KeyboardInterrupt, SystemExit) as e:
+        ...
+    finally:
+        util._exit_function()
+    sys.exit(exitcode)
+```
+
+`run()` is intentionally simple: it calls `self._target(*self._args, **self._kwargs)` if a target was provided, or does nothing. Subclasses override `run()` to implement custom process logic.
+
+---
+
+## Reading: join and _children cleanup
+
+`join(timeout)` calls `self._popen.wait(timeout)`. If the child has exited, `_children` is pruned via `_children.discard(self)`. The `_children` collection is a `WeakSet`, so processes that are garbage-collected without being joined are automatically removed.
+
+```python
+# Lib/multiprocessing/process.py
+def join(self, timeout=None):
+    assert self._popen is not None, 'can only join a started process'
+    res = self._popen.wait(timeout)
+    if res is not None:
+        _children.discard(self)
+
+def _cleanup(cls):
+    for p in list(cls._children):
+        if p._popen.poll() is not None:
+            cls._children.discard(p)
+```
+
+`active_children()` calls `_cleanup()` first, then returns a list of the surviving entries in `_children`.
+
+---
+
+## Status in gopy
+
+Not yet ported. gopy does not currently implement multiprocessing; all concurrency is single-process via goroutines and the GIL emulation layer.

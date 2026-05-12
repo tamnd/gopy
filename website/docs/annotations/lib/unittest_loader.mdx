@@ -1,0 +1,137 @@
+---
+title: "Lib/unittest/loader.py"
+description: Implements TestLoader, which discovers and loads test cases from modules, names, classes, and filesystem directories.
+cpython_path: Lib/unittest/loader.py
+cpython_version: "3.14"
+lines: 450
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/unittest/loader.py
+
+<CpyLink path="Lib/unittest/loader.py" />
+
+`loader.py` contains `TestLoader`, the object responsible for turning Python modules, dotted names, test-case classes, and filesystem directories into `TestSuite` trees. It is the entry point that `unittest.main()` and the command-line test runner use before any test runs. The discovery logic in `discover()` walks the filesystem, applies a glob pattern, and imports matching modules, making it the bridge between the file system and the in-memory suite tree.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/unittest/loader.py" lines="1-30">1-30</Cpy> | imports, `__all__` | Minimal imports: `os`, `re`, `sys`, `traceback`, `types`, `functools`. |
+| <Cpy path="Lib/unittest/loader.py" lines="31-60">31-60</Cpy> | `VALID_MODULE_NAME` regex | Pattern used by `discover()` to decide whether a filename is a loadable module. |
+| <Cpy path="Lib/unittest/loader.py" lines="61-100">61-100</Cpy> | `TestLoader` class header, `testMethodPrefix`, `sortTestMethodsUsing` | Class-level configuration attributes with defaults (`"test"` and `operator.lt`). |
+| <Cpy path="Lib/unittest/loader.py" lines="101-160">101-160</Cpy> | `loadTestsFromModule` | Iterates module attributes, selects `TestCase` subclasses, delegates to `loadTestsFromTestCase`. |
+| <Cpy path="Lib/unittest/loader.py" lines="161-230">161-230</Cpy> | `loadTestsFromName`, `loadTestsFromNames` | Resolves a dotted name to a module, class, method, or callable, then wraps the result in a suite. |
+| <Cpy path="Lib/unittest/loader.py" lines="231-280">231-280</Cpy> | `loadTestsFromTestCase` | Enumerates test methods on a `TestCase` class using `getTestCaseNames`, constructs one instance per method. |
+| <Cpy path="Lib/unittest/loader.py" lines="281-320">281-320</Cpy> | `getTestCaseNames` | Filters and sorts method names by `testMethodPrefix` and `sortTestMethodsUsing`. |
+| <Cpy path="Lib/unittest/loader.py" lines="321-370">321-370</Cpy> | `discover` (entry) | Validates the start directory, resolves it to a package, and delegates to `_find_tests`. |
+| <Cpy path="Lib/unittest/loader.py" lines="371-430">371-430</Cpy> | `_find_tests`, `_get_module_from_name` | Recursive filesystem walk, pattern matching, import, and error handling for discovery. |
+| <Cpy path="Lib/unittest/loader.py" lines="431-450">431-450</Cpy> | `_makeFailedTest`, `defaultTestLoader` | Creates a synthetic failing test for import errors; module-level singleton loader instance. |
+
+## Reading
+
+### loadTestsFromModule
+
+`loadTestsFromModule` is the core collector. It walks every name in `dir(module)`, checks whether the object is a `TestCase` subclass (but not `TestCase` itself), then calls `loadTestsFromTestCase` on each one. The results are combined into a single `TestSuite`.
+
+```python
+# CPython: Lib/unittest/loader.py:120 TestLoader.loadTestsFromModule
+def loadTestsFromModule(self, module, *, pattern=None):
+    """Return a suite of all test cases contained in the given module"""
+    tests = []
+    for name in dir(module):
+        obj = getattr(module, name)
+        if isinstance(obj, type) and issubclass(obj, case.TestCase):
+            tests.append(self.loadTestsFromTestCase(obj))
+
+    load_tests = getattr(module, 'load_tests', None)
+    tests = self.suiteClass(tests)
+    if load_tests is not None:
+        try:
+            return load_tests(self, tests, pattern)
+        except Exception as e:
+            ...
+    return tests
+```
+
+### loadTestsFromName dotted-name resolution
+
+`loadTestsFromName` splits the dotted string and repeatedly calls `getattr` to walk from the module down to the named object. It handles four cases: a module, a `TestCase` subclass, a method on a `TestCase`, and a plain callable that returns a suite.
+
+```python
+# CPython: Lib/unittest/loader.py:165 TestLoader.loadTestsFromName
+def loadTestsFromName(self, name, module=None):
+    """Return a suite of all test cases given a string specifier."""
+    parts = name.split('.')
+    if module is None:
+        parts_copy = parts[:]
+        while parts_copy:
+            try:
+                module_name = '.'.join(parts_copy)
+                module = __import__(module_name)
+                ...
+                break
+            except ImportError:
+                ...
+                parts_copy.pop()
+        ...
+    obj = module
+    for part in parts[1:]:
+        parent, obj = obj, getattr(obj, part)
+    ...
+```
+
+### getTestCaseNames filtering and sorting
+
+`getTestCaseNames` collects every method name on a `TestCase` class whose name starts with `testMethodPrefix` (default `"test"`), then sorts them using `sortTestMethodsUsing`. Setting `sortTestMethodsUsing = None` disables sorting, preserving definition order.
+
+```python
+# CPython: Lib/unittest/loader.py:285 TestLoader.getTestCaseNames
+def getTestCaseNames(self, testCaseClass):
+    """Return a sorted sequence of method names found within testCaseClass"""
+    def shouldIncludeMethod(attrname):
+        if not attrname.startswith(self.testMethodPrefix):
+            return False
+        testFunc = getattr(testCaseClass, attrname)
+        if not callable(testFunc):
+            return False
+        fullName = f'%s.%s.%s' % (
+            testCaseClass.__module__, testCaseClass.__qualname__, attrname
+        )
+        return self.testNamePatterns is None or \
+            any(fnmatchcase(fullName, pattern) for pattern in self.testNamePatterns)
+    testFnNames = list(filter(shouldIncludeMethod, dir(testCaseClass)))
+    if self.sortTestMethodsUsing:
+        testFnNames.sort(key=functools.cmp_to_key(self.sortTestMethodsUsing))
+    return testFnNames
+```
+
+### discover() filesystem walk
+
+`discover()` normalises `start_dir` to an absolute path, determines whether it is inside a package (by looking for `__init__.py`), and calls `_find_tests` recursively. Each Python file matching `pattern` (default `"test*.py"`) is imported via `_get_module_from_name` and passed to `loadTestsFromModule`.
+
+```python
+# CPython: Lib/unittest/loader.py:375 TestLoader._find_tests
+def _find_tests(self, start_dir, pattern, namespace=False):
+    """Used by discovery. Yields test suites it loads."""
+    paths = sorted(os.listdir(start_dir))
+    for path in paths:
+        full_path = os.path.join(start_dir, path)
+        if os.path.isfile(full_path):
+            if not VALID_MODULE_NAME.match(path):
+                continue
+            if not self._match_path(path, full_path, pattern):
+                continue
+            name = self._get_name_from_path(full_path)
+            ...
+            yield self._get_module_from_name(name)
+        elif os.path.isdir(full_path):
+            ...
+            yield from self._find_tests(full_path, pattern, namespace)
+```
+
+## gopy notes
+
+`TestLoader` touches three distinct Go-side concerns. First, method enumeration (`getTestCaseNames`) depends on Python's `dir()` and `callable()`, which in gopy map to the type's method table and the `tp_call` slot check. Second, `loadTestsFromName` relies on `__import__` and `getattr` chaining, which maps to gopy's import machinery and attribute lookup protocol. Third, `discover()` uses `os.path` and `fnmatch`, both of which have direct Go equivalents in `path/filepath` and `path/filepath.Match`. A port should implement `TestLoader` as a struct with function-typed fields for `SortTestMethodsUsing` and `TestNamePatterns`, mirroring the Python class attributes.

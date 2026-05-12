@@ -1,0 +1,95 @@
+---
+title: "_functoolsmodule.c: partial, reduce, cmp_to_key, lru_cache"
+description: "Line-by-line annotations for CPython's _functools C accelerator, covering the partial type, reduce accumulator, cmp_to_key wrapper, and the lru_cache doubly-linked recency list."
+cpython_path: Modules/_functoolsmodule.c
+cpython_version: "3.14"
+lines: 1300
+status: annotated
+ported_to: module/_functools/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_functools` is the C accelerator that `Lib/functools.py` imports with
+`from _functools import ...`. It defines four public names: `partial`,
+`cmp_to_key`, `reduce`, and `_lru_cache_wrapper`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 120–128 | `placeholder_new`, `placeholder_type_spec` | Singleton sentinel type for `partial` |
+| 136–165 | `partialobject` | C struct: frozen callable plus args, keywords, phcount |
+| 167–350 | `partial_new` | Validate callable, merge nested partial args, count placeholders |
+| 350–796 | `partial_call` | Spread frozen args (filling placeholders left-to-right) then call |
+| 796–953 | `partial_type_spec`, descriptors | `tp_repr`, `tp_richcompare`, `tp_getattro` for partial |
+| 953–989 | `_functools_cmp_to_key_impl` | Build a `KeyObject` wrapping a comparator |
+| 990–1083 | `_functools_reduce_impl` | Fold a 2-arg function over an iterator with optional seed |
+| 1084–1120 | `lru_list_elem` | Doubly-linked node carrying key and cached result |
+| 1120–1522 | `lru_cache_object` | Struct: `Cache` dict, LRU list root, hit/miss counters |
+| 1522–1810 | `lru_cache_new`, `lru_cache_call` | Wrapper construction and the per-call cache probe |
+| 1810–1830 | `lru_cache_type_spec` | Type spec wiring `cache_info`, `cache_clear`, `__wrapped__` |
+| 1830–1870 | `_functools_exec` | Module init: populate dict with all six exported names |
+
+## Reading
+
+### partial_new: merging nested partials
+
+<Cpy file="Modules/_functoolsmodule.c" line={167} />
+
+When the wrapped function is itself a `partial` with no `__dict__` override,
+`partial_new` folds the two layers together. Placeholder slots in the inner
+`args` tuple are filled left-to-right from the outer positional list; leftover
+outer args are appended at the tail. A trailing `Placeholder` in the merged
+`args` raises `TypeError` immediately.
+
+The gopy port (`partialNew`, line 136 of `module/_functools/module.go`) mirrors
+this by iterating `ptoArgs`, swapping each `Placeholder` for the next element
+of `newArgs`, then appending any remainder.
+
+### reduceFunc: accumulator loop
+
+<Cpy file="Modules/_functoolsmodule.c" line={990} />
+
+The loop is a standard iterator drain. If no seed is supplied, the first
+element from the iterator becomes the accumulator. On an empty iterator with
+no seed, CPython raises `TypeError: reduce() of empty iterable with no initial
+value`. The gopy port tracks `acc == nil` to detect this condition without a
+separate "seen first" flag.
+
+```go
+if acc == nil {
+    acc = v
+    continue
+}
+next, cerr := objects.Call(fn, objects.NewTuple([]objects.Object{acc, v}), nil)
+acc = next
+```
+
+### lru_cache doubly-linked list
+
+<Cpy file="Modules/_functoolsmodule.c" line={1084} />
+
+CPython uses a circular doubly-linked list of `lru_list_elem` nodes. The root
+node is a permanent dummy; `root.next` is the most-recent entry, `root.prev`
+is the least-recent. On a cache hit the matching node is spliced out and
+reinserted at `root.next`. On a miss, when the cache is at capacity, the node
+at `root.prev` is evicted before the new entry is inserted.
+
+The gopy `LruCacheWrapper` struct (line 631) carries the same fields: a
+`*objects.Dict` for `Cache`, `root *lruListNode` as the sentinel, and
+`Hits`/`Misses` int64 counters. `kwdMark` is a package-level singleton that
+separates positional and keyword sections of a composite cache key, mirroring
+`state->kwd_mark` allocated in `_functools_exec`.
+
+## gopy notes
+
+- `Placeholder` singleton is returned by `TpNew` unconditionally, matching
+  CPython's `placeholder_new` which ignores `cls` and returns the module-level
+  singleton.
+- The 3.14 addition of `Placeholder` and `_PlaceholderType` is fully
+  implemented. The `partial` Placeholder-merge logic (phcount tracking) is new
+  in CPython 3.14 and present in the gopy port.
+- `cmp_to_key` returns a `KeyObject` whose `tp_richcompare` dispatches back to
+  the user comparator via a sign-to-bool mapping, matching
+  `keyobject_richcompare` at line ~500 of the C source.

@@ -1,0 +1,213 @@
+---
+title: "Objects/bytesobject.c (search and format)"
+description: "Annotated reading of CPython bytes internals: Horspool search, split/join, %-formatting, and single-byte interning"
+cpython_path: Objects/bytesobject.c
+cpython_version: "3.14"
+lines: 3600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/bytesobject.c` implements the immutable `bytes` type. Its 3600 lines fall into
+four broad areas: creation and interning of short objects, Boyer-Moore-Horspool search
+used by `find`, `count`, and `index`, the split/join family that operates on buffer views,
+and `%`-style formatting mirrored from `unicodeobject.c`. The file also owns the
+`bytesiter` type at the very end.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120  | `PyBytesObject`, `characters[256]` | Struct layout; single-byte intern table; empty-bytes singleton |
+| 121–280 | `PyBytes_FromStringAndSize` | Main constructor; returns singleton or intern for `len <= 1` |
+| 281–520 | `bytes_find_internal`, `bytes_count` | Horspool/BMH search; shared by `find`, `index`, `rfind`, `rindex`, `count` |
+| 521–900 | `bytes_split`, `bytes_rsplit`, `bytes_splitlines` | Split variants; return a new `list` of `bytes` objects |
+| 901–1100 | `bytes_join` | Accumulates buffer sizes in one pass, allocates once, copies in second pass |
+| 1101–2200 | `bytes_format` | `%`-operator formatting: `%s`, `%d`, `%r`, `%x`, `%o`, conversion loop |
+| 2201–3600 | `bytes_richcompare`, `bytes_subscript`, `bytesiter`, protocol slots | Comparison, indexing, iteration |
+
+## Reading
+
+### `PyBytes_FromStringAndSize`: interning for short objects
+
+For a null `str` argument CPython allocates a fresh object. For `size == 0` it returns the
+module-level `nullstring` singleton. For `size == 1` it returns one of the 256 pre-allocated
+`characters` entries, avoiding any heap allocation for single-byte literals.
+
+```c
+// CPython: Objects/bytesobject.c:155 PyBytes_FromStringAndSize
+PyObject *
+PyBytes_FromStringAndSize(const char *str, Py_ssize_t size)
+{
+    if (size == 0) {
+        return (PyObject *)nullstring;   /* singleton */
+    }
+    if (size == 1 && str != NULL) {
+        return (PyObject *)characters[(unsigned char)*str];
+    }
+    /* allocate a new PyBytesObject with ob_size == size */
+    PyBytesObject *op = (PyBytesObject *)
+        PyObject_Malloc(PyBytesObject_SIZE + size);
+    ...
+    memcpy(op->ob_sval, str, size);
+    op->ob_sval[size] = '\0';   /* null-terminate for C interop */
+    op->ob_shash = -1;
+    return (PyObject *)op;
+}
+```
+
+The `characters` table is initialized at interpreter startup in `_PyBytes_Init`. Every
+call that produces a single-byte result (for example `bytes_subscript` when the index is
+an integer) goes through `PyBytes_FromStringAndSize` and therefore hits the intern table
+automatically, with no explicit interning step.
+
+### `bytes_find_internal`: Boyer-Moore-Horspool search
+
+CPython delegates all substring search in `bytes` to `_PyBytes_Find` (and its reverse
+counterpart), which selects between a naive O(nm) scan for short needles and a
+Boyer-Moore-Horspool (BMH) variant for longer ones. BMH builds a 256-entry bad-character
+skip table then slides the pattern right by the skip distance on each mismatch.
+
+```c
+// CPython: Objects/bytesobject.c:310 bytes_find_internal
+static Py_ssize_t
+bytes_find_internal(PyBytesObject *self, PyObject *args, int dir)
+{
+    const char *sub;
+    Py_ssize_t sub_len, start = 0, end = PY_SSIZE_T_MAX;
+    ...
+    if (dir > 0)
+        return stringlib_find_slice(
+                   PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
+                   sub, sub_len, start, end);
+    else
+        return stringlib_rfind_slice(
+                   PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
+                   sub, sub_len, start, end);
+}
+```
+
+`stringlib_find_slice` (in `Objects/stringlib/fastsearch.h`) implements FASTSEARCH, which
+combines a Bloom filter pre-check with the BMH skip table. The Bloom filter lets the inner
+loop skip positions that cannot contain the first character of the needle without consulting
+the full skip table.
+
+```c
+// CPython: Objects/stringlib/fastsearch.h:120 FASTSEARCH
+/* build skip table */
+for (i = 0; i < mlast; i++) {
+    STRINGLIB_BLOOM_ADD(mask, p[i]);
+    if (p[i] == p[mlast - 1])
+        skip = mlast - i - 1;
+}
+STRINGLIB_BLOOM_ADD(mask, p[mlast]);
+
+for (i = 0; i <= n - m; ) {
+    if (s[i + mlast] == p[mlast]) {
+        /* candidate: check full needle */
+        ...
+    }
+    if (!STRINGLIB_BLOOM(mask, s[i + m]))
+        i += m;
+    else
+        i++;
+}
+```
+
+### `bytes_join`: two-pass buffer accumulation
+
+`bytes.join(iterable)` first iterates `iterable` to collect all items and sum their
+lengths, then allocates a single `PyBytesObject` of exactly the required size, and finally
+copies each item's buffer in a second pass. This avoids quadratic copying from repeated
+concatenation.
+
+```c
+// CPython: Objects/bytesobject.c:960 bytes_join
+static PyObject *
+bytes_join(PyBytesObject *self, PyObject *iterable)
+{
+    /* pass 1: collect items, compute total length */
+    PyObject *seq = PySequence_Fast(iterable, "");
+    Py_ssize_t seqlen = PySequence_Fast_GET_SIZE(seq);
+    Py_ssize_t seplen = PyBytes_GET_SIZE(self);
+    Py_ssize_t sz = 0;
+    for (i = 0; i < seqlen; i++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(seq, i);
+        sz += PyBytes_GET_SIZE(item);
+        if (i > 0) sz += seplen;
+    }
+
+    /* pass 2: allocate once and copy */
+    PyObject *res = PyBytes_FromStringAndSize(NULL, sz);
+    char *p = PyBytes_AS_STRING(res);
+    for (i = 0; i < seqlen; i++) {
+        if (i > 0) {
+            memcpy(p, PyBytes_AS_STRING(self), seplen);
+            p += seplen;
+        }
+        PyObject *item = PySequence_Fast_GET_ITEM(seq, i);
+        Py_ssize_t n = PyBytes_GET_SIZE(item);
+        memcpy(p, PyBytes_AS_STRING(item), n);
+        p += n;
+    }
+    return res;
+}
+```
+
+### `bytes_format`: the `%` operator
+
+`bytes.__mod__` implements `%`-style formatting by scanning the format string for `%`
+conversion specifiers and dispatching each to a helper. The implementation mirrors
+`unicode_format` in `unicodeobject.c` closely enough that shared helpers live in
+`Objects/stringlib/`.
+
+```c
+// CPython: Objects/bytesobject.c:1180 bytes_format
+switch (fmtcnt >= 0 ? *fmt : '\0') {
+case 'd': case 'i':
+    x = PyLong_AsLong(v);
+    buf = _PyBytes_FormatLong(v, flags, prec, 'd', &pbuf, &len);
+    break;
+case 'x':
+    buf = _PyBytes_FormatLong(v, flags, prec, 'x', &pbuf, &len);
+    break;
+case 's':
+    temp = PyBytes_FromObject(v);   /* calls __bytes__ if present */
+    pbuf = PyBytes_AS_STRING(temp);
+    len  = PyBytes_GET_SIZE(temp);
+    break;
+case 'r':
+    temp = PyObject_Repr(v);
+    /* encode repr to ASCII for bytes context */
+    ...
+    break;
+}
+```
+
+The format loop accumulates results into a `_PyBytesWriter` structure (a resizable buffer
+helper defined in `Objects/bytesobject.c`) rather than building a Python list and joining,
+which saves one allocation and one copy for typical short format strings.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/bytes.go` for the type, constructor, and interning;
+`objects/bytes_search.go` for the FASTSEARCH/BMH implementation; `objects/bytes_format.go`
+for `%`-formatting; `objects/bytes_iter.go` for the iterator.
+
+Key porting decisions to resolve:
+
+- The 256-entry `characters` intern table and the empty-bytes singleton map to package-level
+  `[256]*Bytes` and `*Bytes` variables in `objects/bytes.go`, initialized in the package
+  `init` function. All construction paths must route through a single `newBytes` helper that
+  applies the intern check so no call site can bypass it.
+- The FASTSEARCH Bloom filter uses bit manipulation on a `uint64` mask. The Go port in
+  `objects/bytes_search.go` will replicate the same constants and shift widths so that
+  search performance matches CPython on common patterns.
+- `bytes_join`'s two-pass pattern is straightforward to port. The `_PyBytesWriter` helper
+  has no direct Go analogue; the port will use a `[]byte` grown with `append` and converted
+  to a `Bytes` object at the end, which achieves the same single-copy property.
+- `bytes_format` shares logic with the `str` formatter. The port order will be `bytes`
+  first (simpler ASCII-only context), then `str` reusing the shared conversion helpers.

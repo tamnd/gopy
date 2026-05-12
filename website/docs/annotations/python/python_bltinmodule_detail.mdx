@@ -1,0 +1,71 @@
+---
+title: Python/bltinmodule.c
+description: "Built-in functions implementation: print, len, range, isinstance, issubclass, hasattr, getattr, setattr, delattr, vars, dir, iter, next, callable, abs, round, and more."
+cpython_path: Python/bltinmodule.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/bltinmodule.c" />
+
+`Python/bltinmodule.c` implements the built-in functions that live in the `builtins` module. It is one of the first C files loaded at interpreter startup. The file contains `print`, `len`, `type`, `isinstance`, `issubclass`, `getattr`, `setattr`, `hasattr`, `vars`, `dir`, `iter`, `next`, `map`, `zip`, `sorted`, `reversed`, `abs`, `round`, `divmod`, `pow`, `input`, `open`, and others.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `builtin_print`, `builtin_input` | Terminal I/O |
+| 201-500 | `builtin_len`, `builtin_abs`, `builtin_round` | Numeric and size builtins |
+| 501-800 | `builtin_isinstance`, `builtin_issubclass` | Type hierarchy checks |
+| 801-1100 | `builtin_getattr`, `builtin_setattr`, `builtin_hasattr`, `builtin_delattr` | Attribute access |
+| 1101-1400 | `builtin_vars`, `builtin_dir`, `builtin_callable` | Introspection |
+| 1401-1700 | `builtin_iter`, `builtin_next`, `builtin_sorted` | Iterator protocol |
+| 1701-2200 | `builtin_map`, `builtin_zip`, `builtin_filter` | Lazy sequence combinators |
+| 2201-3000 | `builtin_open`, `builtin_compile`, `builtin_exec`, `builtin_eval` | I/O and code execution |
+
+## Reading
+
+### isinstance and issubclass
+
+`builtin_isinstance(inst, cls)` dispatches to `PyObject_IsInstance`. For a single type it calls `PyType_IsSubtype`. For a tuple of types it iterates and short-circuits on the first match. The `__instancecheck__` and `__subclasscheck__` hooks on the type's metaclass are respected.
+
+```c
+// Python/bltinmodule.c:501 builtin_isinstance_impl
+static PyObject *
+builtin_isinstance_impl(PyObject *module, PyObject *obj, PyObject *class_or_tuple)
+{
+    int retval = PyObject_IsInstance(obj, class_or_tuple);
+    if (retval < 0) return NULL;
+    return PyBool_FromLong(retval);
+}
+```
+
+### getattr with default
+
+`getattr(obj, name)` calls `PyObject_GetAttr`. The three-argument form `getattr(obj, name, default)` calls `_PyObject_GetAttrWithoutError` and returns `default` on `AttributeError` without setting an exception.
+
+```c
+// Python/bltinmodule.c:801 builtin_getattr_impl
+static PyObject *
+builtin_getattr_impl(PyObject *module, PyObject *object,
+                     PyObject *name, PyObject *default_value)
+{
+    if (default_value != NULL) {
+        v = _PyObject_GetAttrWithoutError(object, name);
+        if (v == NULL) { PyErr_Clear(); Py_INCREF(default_value); return default_value; }
+        return v;
+    }
+    return PyObject_GetAttr(object, name);
+}
+```
+
+### open delegates to io.open
+
+`builtin_open` calls `PyObject_Call(io_open, args, kwargs)` where `io_open` is the cached `io.open` callable loaded at module init. This means `open()` in Python calls the same code path as `io.open()`.
+
+## gopy notes
+
+The gopy built-in functions are partly in `objects/` (for type-based ones like `len`, `isinstance`) and partly in the VM (`vm/eval_call.go` for call dispatch). The `builtins` module object is initialized in `vm/eval_import.go` or `objects/module.go`.

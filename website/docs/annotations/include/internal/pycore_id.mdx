@@ -1,0 +1,88 @@
+---
+title: Include/internal/pycore_id.h
+description: Lazily-interned string singleton cache. _Py_Identifier holds a C string literal and caches the corresponding PyUnicodeObject on first use, avoiding redundant hash lookups for fixed attribute names.
+cpython_path: Include/internal/pycore_id.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_id.h`
+
+<CpyLink path="Include/internal/pycore_id.h" />
+
+Internal identifier mechanism for lazily-interned string singletons. This header defines
+the `_Py_Identifier` struct and the `_PyUnicode_FromId` function that together let C
+extension and interpreter code hold onto a fixed string name without paying a hash lookup
+on every access.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-40 | `_Py_Identifier` struct, `_Py_static_string_init` | Struct definition and static initializer macro |
+| 40-80 | `_PyUnicode_FromId` | Lazy-intern entry point; allocates on first call, returns cached pointer thereafter |
+
+## Reading
+
+### `_Py_Identifier`
+
+Many internal operations need to look up a fixed attribute name repeatedly, for example
+`__init__`, `__getitem__`, or `__class__`. Doing a full `PyDict_GetItem` with a
+freshly-created `PyUnicodeObject` on each call is wasteful. `_Py_Identifier` provides a
+lightweight cache: the string is interned once, stored in the struct, and every subsequent
+call returns the cached pointer.
+
+```c
+// Include/internal/pycore_id.h (CPython 3.14)
+typedef struct _Py_Identifier {
+    struct _Py_Identifier *next;
+    const char *string;
+    PyObject *object;
+} _Py_Identifier;
+```
+
+`next` forms a singly-linked list so the interpreter can visit all live identifiers during
+shutdown and clear their `object` pointers, preventing leaks when the unicode interning
+table is torn down.
+
+### `_PyUnicode_FromId`
+
+```c
+extern PyObject *_PyUnicode_FromId(_Py_Identifier *);
+```
+
+On the first call the function creates a new `PyUnicodeObject` from `id->string`, interns
+it, stores the result in `id->object`, and appends `id` to the interpreter's identifier
+linked list. On every subsequent call it returns `id->object` directly.
+
+```c
+static _Py_Identifier PyId___init__ = _Py_static_string_init("__init__");
+result = _PyObject_CallMethodId(obj, &PyId___init__, NULL);
+```
+
+### Deprecation trajectory
+
+`_Py_Identifier` is being phased out in favor of `_Py_ID()` macros backed by
+`Include/internal/pycore_global_strings.h`. The new approach pre-interns a fixed set of
+well-known names at interpreter startup rather than lazily on first access, and avoids the
+linked-list bookkeeping entirely.
+
+```c
+// New style:
+PyObject *name = &_Py_ID(__init__);   // always valid, no NULL check needed
+
+// Old style (being removed):
+static _Py_Identifier PyId___init__ = _Py_static_string_init("__init__");
+PyObject *name = _PyUnicode_FromId(&PyId___init__);  // may return NULL on OOM
+```
+
+Code that still references `_Py_Identifier` in CPython 3.14 is considered legacy.
+
+## gopy notes
+
+Not yet ported. gopy uses Go string constants and map lookups for internal attribute names.
+The closest analogue is the `objects/` package, where attribute lookups go through
+`py.Object.GetAttr` without a caching layer equivalent to `_Py_Identifier`.

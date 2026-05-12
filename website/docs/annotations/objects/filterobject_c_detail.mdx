@@ -1,0 +1,85 @@
+---
+title: Objects/filterobject.c
+description: "filter built-in iterator: wraps a predicate and an iterator, yielding only elements for which the predicate is truthy (or the element itself when predicate is None)."
+cpython_path: Objects/filterobject.c
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/filterobject.c" />
+
+`Objects/filterobject.c` implements the `filter` built-in. A `filterobject` wraps a predicate callable and an iterator, and yields only the elements for which the predicate returns a truthy value. When the predicate is `None`, it uses the element's own truthiness.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `filterobject`, `filter_new` | Struct and constructor; stores `func` and `it` |
+| 51-110 | `filter_next` | Pull from iterator, test predicate, repeat |
+| 111-150 | `filter_reduce`, `PyFilter_Type` | Pickle support and type slot wiring |
+
+## Reading
+
+### filterobject construction
+
+`filter_new` calls `PyObject_GetIter(seq)` to get an iterator from the second argument, then stores both the predicate and the iterator on the object.
+
+```c
+// Objects/filterobject.c:1 filterobject
+typedef struct {
+    PyObject_HEAD
+    PyObject *func;
+    PyObject *it;
+} filterobject;
+
+// Objects/filterobject.c:20 filter_new_impl
+static PyObject *
+filter_new_impl(PyTypeObject *type, PyObject *func, PyObject *iterable)
+{
+    PyObject *it = PyObject_GetIter(iterable);
+    if (it == NULL) return NULL;
+    filterobject *lz = PyObject_GC_New(filterobject, type);
+    lz->func = Py_NewRef(func);
+    lz->it   = it;
+    return (PyObject *)lz;
+}
+```
+
+### filter_next: predicate loop
+
+`filter_next` loops until the wrapped iterator is exhausted. For each element it either calls `func(item)` or, when `func` is `None` or `Py_None`, tests the element directly with `PyObject_IsTrue`.
+
+```c
+// Objects/filterobject.c:51 filter_next
+static PyObject *
+filter_next(filterobject *lz)
+{
+    for (;;) {
+        PyObject *item = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
+        if (item == NULL) return NULL;
+        int ok;
+        if (lz->func == Py_None || lz->func == NULL) {
+            ok = PyObject_IsTrue(item);
+        } else {
+            PyObject *good = PyObject_CallOneArg(lz->func, item);
+            if (good == NULL) { Py_DECREF(item); return NULL; }
+            ok = PyObject_IsTrue(good);
+            Py_DECREF(good);
+        }
+        if (ok > 0) return item;
+        Py_DECREF(item);
+        if (ok < 0) return NULL;
+    }
+}
+```
+
+### Pickle support
+
+`filter_reduce` returns a tuple `(filter, (func, it))` that recreates the filter by passing `func` and a reconstructed iterator. This mirrors the pattern used by `map` and `zip`.
+
+## gopy notes
+
+Not yet ported. The planned package path is `objects/filter.go`. The Go version would hold a `py.Object` predicate and a `py.Iterator`, with `Next()` implementing the same predicate loop.

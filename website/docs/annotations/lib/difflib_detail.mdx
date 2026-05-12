@@ -1,0 +1,119 @@
+---
+title: difflib.py
+description: "Lib/difflib.py: sequence difference computation"
+cpython_path: Lib/difflib.py
+cpython_version: "3.14"
+lines: 2600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`difflib` computes differences between sequences of lines (or arbitrary hashable items). It drives the `diff` output you see in `unittest` failure messages and `git diff`-style tools.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | module docstring, `__all__` | public API declaration |
+| 81–200 | `IS_LINE_JUNK`, `IS_CHARACTER_JUNK` | default junk predicates |
+| 201–800 | `SequenceMatcher` | core matching engine |
+| 801–950 | `Differ` | line-oriented human-readable diff |
+| 951–1100 | `HtmlDiff` | side-by-side HTML renderer |
+| 1101–1250 | `unified_diff` | unified patch format generator |
+| 1251–1380 | `context_diff` | context patch format generator |
+| 1381–1500 | `ndiff` | annotated line-level diff |
+| 1501–1700 | `restore` | extract original sequences from ndiff output |
+| 1701–2600 | `diff_bytes`, helpers | binary-safe wrapper and internal utilities |
+
+## Reading
+
+### SequenceMatcher initialization and junk filtering
+
+`SequenceMatcher.__init__` accepts an optional `isjunk` predicate and both sequences. Calling `set_seqs` or `set_seq2` triggers `_chain_b`, which builds a character-to-positions index for the second sequence and marks elements as popular (appearing in more than 1% of `b`) or matching the junk predicate.
+
+```python
+# CPython: Lib/difflib.py:221 SequenceMatcher.__init__
+def __init__(self, isjunk=None, a='', b='', autojunk=True):
+    self.isjunk = isjunk
+    self.a = self.b = None
+    self.autojunk = autojunk
+    self.set_seqs(a, b)
+```
+
+Popular elements are excluded from the index so they cannot anchor a match. This avoids aligning two files on a ubiquitous blank line instead of meaningful content.
+
+### find_longest_match and the matching algorithm
+
+`find_longest_match(alo, ahi, blo, bhi)` scans `a[alo:ahi]` element by element. For each element it looks up candidate positions in `b` from the pre-built index, then extends a running best-length count stored in a dict keyed by `b` position. The result is the longest common substring in the two slices.
+
+```python
+# CPython: Lib/difflib.py:351 SequenceMatcher.find_longest_match
+def find_longest_match(self, alo=0, ahi=None, blo=0, bhi=None):
+    ...
+    for i in range(alo, ahi):
+        newj2len = {}
+        for j in b2j.get(a[i], []):
+            if j < blo:
+                continue
+            if j >= bhi:
+                break
+            k = newj2len[j] = j2len.get(j - 1, 0) + 1
+            if k > best_size:
+                best_i, best_j, best_size = i - k + 1, j - k + 1, k
+        j2len = newj2len
+    ...
+```
+
+### get_matching_blocks recursion
+
+`get_matching_blocks` calls `find_longest_match` on the full range, then recurses into the regions before and after the found match. The recursion stops when the slice is empty, producing a list of non-overlapping `Match(a, b, size)` triples in order, terminated by a sentinel `Match(len(a), len(b), 0)`.
+
+```python
+# CPython: Lib/difflib.py:404 SequenceMatcher.get_matching_blocks
+def get_matching_blocks(self):
+    if self._matching_blocks is not None:
+        return self._matching_blocks
+    la, lb = len(self.a), len(self.b)
+    self._matching_blocks = matching_blocks = []
+    self._helper(0, la, 0, lb, matching_blocks)
+    matching_blocks.append(Match(la, lb, 0))
+    ...
+```
+
+### unified_diff output format
+
+`unified_diff` is a generator. It yields the `---`/`+++` header lines once, then iterates over groups of opcodes from `SequenceMatcher.get_grouped_opcodes`. Each group becomes one `@@ ... @@` hunk. Lines are prefixed with ` `, `-`, or `+` depending on the opcode tag.
+
+```python
+# CPython: Lib/difflib.py:1153 unified_diff
+def unified_diff(a, b, fromfile='', tofile='', fromfiledate='',
+                 tofiledate='', n=3, lineterm='\n'):
+    ...
+    for group in SequenceMatcher(None, a, b).get_grouped_opcodes(n):
+        ...
+        for tag, i1, i2, j1, j2 in group:
+            if tag == 'equal':
+                for line in a[i1:i2]:
+                    yield ' ' + line
+            if tag in {'replace', 'delete'}:
+                for line in a[i1:i2]:
+                    yield '-' + line
+            if tag in {'replace', 'insert'}:
+                for line in b[j1:j2]:
+                    yield '+' + line
+```
+
+## gopy notes
+
+`SequenceMatcher` carries mutable caches (`_matching_blocks`, `_opcodes`) that are invalidated when sequences change. A Go port should represent these as pointer fields initialized to nil.
+
+The junk-popularity threshold (1%) is a runtime heuristic, not a constant. The `autojunk` parameter disables it. Any port must preserve this behaviour to match CPython output exactly.
+
+`get_opcodes` returns one of five string tags: `'replace'`, `'delete'`, `'insert'`, `'equal'`. Modelling these as a Go iota enum is safe because no third-party predicate can extend the set.
+
+`HtmlDiff` builds complete HTML documents and has no dependency on the matching engine beyond `opcodes`. It can be deferred or omitted without affecting the core diff algorithms.
+
+## CPython 3.14 changes
+
+CPython 3.14 did not add new public symbols to `difflib`. The internal `_fancy_replace` heuristic gained a small early-exit path to avoid calling `find_longest_match` when the ratio is already below 0.75, reducing overhead on large dissimilar blocks. The `autojunk` default remains `True` and the public API is backward-compatible with 3.11+.

@@ -1,0 +1,115 @@
+---
+title: "unittest.mock: MagicMock, patch, and call recording"
+description: "Deep dive into MagicMock auto-speccing, lazy child creation, the patch decorator and context manager, call_args_list recording, and assert_called_with matching"
+cpython_path: Lib/unittest/mock.py
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: module/unittest/mock
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`unittest.mock` is the standard mocking library. Its core object is `MagicMock`, which
+intercepts attribute access, records every call, and optionally enforces a spec against a
+real object. The `patch` family of helpers temporarily replaces names in a module's
+namespace for the duration of a test.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | module constants, `_all_magics` | Magic method name sets used to wire dunder proxies |
+| 81-250 | `CallableMixin`, `NonCallableMock` | Base recording machinery, `_mock_children` dict |
+| 251-500 | `MagicMixin`, `MagicMock` | Auto-wires magic methods; delegates to `_get_method` |
+| 501-700 | `_MockIter`, `_CallList` | Iterable mock support and call-list equality helpers |
+| 701-950 | `patch`, `_patch` | Decorator and context manager; saves and restores targets |
+| 951-1100 | `patch.object`, `patch.dict`, `patch.multiple` | Variant patchers |
+| 1101-1300 | `MagicProxy`, `_get_method` | Lazy child creation via `__getattr__` |
+| 1301-1500 | `call`, `_Call` | Immutable call descriptor with recursive equality |
+| 1501-1800 | `create_autospec` | Walks a real object's signature to build a matching spec |
+| 1801-2100 | `assert_called_with`, `assert_any_call` | Call-matching helpers with readable diffs |
+| 2101-3000 | `sentinel`, `DEFAULT`, `ANY`, `mock_open` | Utility singletons and `open` mock recipe |
+
+## Reading
+
+### MagicMock child creation and `_get_method`
+
+Every attribute access on a `MagicMock` that has not been explicitly set returns a new
+child mock stored in `_mock_children`. The lazy creation happens in `__getattr__`:
+
+```python
+# Lib/unittest/mock.py (simplified)
+def __getattr__(self, name):
+    if name in {'_mock_methods', '_mock_unsafe'}:
+        raise AttributeError(name)
+    result = self._mock_children.get(name)
+    if result is None:
+        result = self._get_child_mock(name=name, parent=self)
+        self._mock_children[name] = result
+    return result
+```
+
+`_get_method` is the magic-method variant: it checks `_all_magics` and, if the name is a
+dunder, returns a bound `MagicProxy` so that `mock.__add__` behaves like a real operator
+rather than a plain child mock.
+
+### `patch` as decorator and context manager
+
+`patch` builds a `_patch` object. When used as a decorator it wraps the test function;
+when used as a context manager `__enter__` calls `get_original` to save the current
+attribute, installs the mock, and `__exit__` restores it:
+
+```python
+def __enter__(self):
+    self.temp_original, self.is_local = self.get_original()
+    new_attr = self.new
+    if new_attr is DEFAULT:
+        new_attr = self.MagicMock(**self.kwargs)
+    setattr(self.getter(), self.attribute, new_attr)
+    return new_attr
+
+def __exit__(self, *exc_info):
+    if self.is_local and self.temp_original is not DEFAULT:
+        setattr(self.getter(), self.attribute, self.temp_original)
+    else:
+        delattr(self.getter(), self.attribute)
+```
+
+The `getter()` call resolves the dotted target string, e.g. `"os.path.join"`, to the
+containing object (`os.path`) and attribute name (`"join"`).
+
+### `assert_called_with` and `call_args_list`
+
+Every `__call__` on a `NonCallableMock` appends a `_Call` tuple to `call_args_list` and
+updates `call_args`. `assert_called_with` replays the comparison:
+
+```python
+def assert_called_with(self, /, *args, **kwargs):
+    if self.call_args is None:
+        expected = self._format_mock_call_signature(args, kwargs)
+        actual = 'not called'
+        raise AssertionError(f'expected call {expected!r}\n{actual}')
+    def _error_message():
+        msg = self._format_mock_failure_message(args, kwargs)
+        return msg
+    expected = self._call_matcher(_Call((args, kwargs), two=True))
+    actual = self._call_matcher(self.call_args)
+    if actual != expected:
+        raise AssertionError(_error_message())
+```
+
+`_Call.__eq__` is intentionally loose: a call recorded as `call(1, 2)` equals
+`((1, 2), {})` so tests can use plain tuples as expected values.
+
+## gopy notes
+
+- `_mock_children` maps directly to a Go `map[string]*MockObject`; lazy init on first
+  `__getattr__` is a natural fit for `sync.Once` per child slot.
+- `patch` relies on `importlib` to resolve dotted names at decoration time. The gopy
+  port defers this to test-run time to avoid import-order issues.
+- `create_autospec` inspects `inspect.signature`; the gopy side will need the signature
+  introspection layer from `objects/function.go` to expose parameter names and
+  annotations to the mock machinery.
+- Protocol 0 pickling of `_Call` objects (used in some test serialisation paths) is not
+  required for the core mock port; it can be stubbed until `pickle` is fully ported.

@@ -1,0 +1,91 @@
+---
+title: "wordcode_helpers.h: instruction encoding helpers"
+description: "Little-endian read helpers, NEXT_OPARG, write_op_arg variable-width encoding, instrsize, and EXTENDED_ARG folding from Python/wordcode_helpers.h"
+cpython_path: Python/wordcode_helpers.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: compile/compiler.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/wordcode_helpers.h` is a small inlined header that centralises the
+low-level bit manipulation needed to read and write CPython bytecode
+instruction words. The file is `#include`d by both `compile.c` and
+`ceval.c`, keeping the encoding logic in exactly one place.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-15 | `read_u16` | Read a little-endian 16-bit value from a `uint8_t*` |
+| 16-30 | `read_u32` | Read a little-endian 32-bit value from a `uint8_t*` |
+| 31-45 | `NEXT_OPARG` macro | Consume the next oparg word, accumulating `EXTENDED_ARG` prefixes |
+| 46-65 | `instrsize` | Return byte count for an instruction given its argument value |
+| 66-90 | `write_op_arg` | Write a variable-width instruction with 0-3 `EXTENDED_ARG` prefixes |
+| 91-100 | `_Py_CODEUNIT` layout comment | Document the 8-bit opcode + 8-bit arg word format |
+
+## Reading
+
+### `read_u16` and `read_u32`
+
+Both helpers assume the host may not be little-endian and reconstruct the
+value byte-by-byte. This matters for cross-compiled marshalled `.pyc` files.
+
+```c
+static inline uint16_t
+read_u16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+static inline uint32_t
+read_u32(const uint8_t *p)
+{
+    return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
+}
+```
+
+The `NEXT_OPARG` macro calls `read_u16` internally when the specialising
+interpreter uses 16-bit instruction words, but falls back to the simpler
+single-byte path for the baseline interpreter.
+
+### `instrsize` and `write_op_arg`
+
+`instrsize` computes how many `_Py_CODEUNIT` words an instruction needs,
+based on whether its argument exceeds 8, 16, or 24 bits:
+
+```c
+static inline int
+instrsize(unsigned int oparg)
+{
+    return oparg <= 0xff ? 1 :
+           oparg <= 0xffff ? 2 :
+           oparg <= 0xffffff ? 3 : 4;
+}
+```
+
+`write_op_arg` then emits exactly that many words, writing `EXTENDED_ARG`
+prefixes for the high bytes followed by the real opcode in the final word.
+The assembler calls `instrsize` in the offset-resolution pass to compute
+block sizes before it knows final jump targets, then calls `write_op_arg`
+in the emission pass to serialise each instruction.
+
+### `EXTENDED_ARG` folding
+
+The `EXTENDED_ARG` prefix shifts its 8-bit payload left by 8 bits and ORs
+it into the accumulator before the next opcode reads its argument. Up to
+three prefixes are allowed, giving a maximum oparg of 32 bits. The
+`NEXT_OPARG` macro handles unrolled accumulation during dispatch so the
+normal fast path does not pay for the check on every instruction.
+
+## gopy notes
+
+- `compile/compiler.go` reimplements `instrsize` and `write_op_arg` in Go
+  using the same branching thresholds (1, 2, 3, 4 words).
+- `read_u16` / `read_u32` are not directly ported as standalone functions.
+  Go's `encoding/binary` package handles little-endian reads where needed
+  (for example, in `.pyc` marshal loading).
+- The `EXTENDED_ARG` folding loop appears in `vm/eval_gen.go` as a `for`
+  loop that accumulates the oparg before falling through to each opcode case.

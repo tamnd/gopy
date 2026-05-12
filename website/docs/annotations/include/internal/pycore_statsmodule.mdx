@@ -1,0 +1,123 @@
+---
+title: Include/internal/pycore_statsmodule.h
+description: Build-time opt-in counters that track hit, miss, and deoptimization rates for each specialization in the adaptive interpreter.
+cpython_path: Include/internal/pycore_statsmodule.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+This header is the public face of CPython's specialization statistics
+subsystem. The subsystem is compiled in only when CPython is built with
+`--enable-specialization-stats` (or the internal `Py_STATS` preprocessor
+flag). In a normal build every symbol in this header either vanishes via
+`#define` no-ops or is absent entirely, so the hot interpreter loop pays
+zero overhead.
+
+The statistics are used by the CPython core team to measure the effectiveness
+of the adaptive specializing interpreter introduced in 3.11 and extended
+through 3.14. They answer questions like: "What fraction of `LOAD_ATTR`
+executions hit the specialized fast path?" and "How often does
+`CALL_PY_EXACT_ARGS` deoptimize back to the generic form?"
+
+## Map
+
+| Symbol | Kind | Purpose |
+|--------|------|---------|
+| `SPECIALIZATION_STATS_GC` | preprocessor flag | Defined when the stats build is active; guards all stat-emitting code in `Objects/` and `Python/` |
+| `_Py_GatherSpecializationStats()` | function | Aggregates per-opcode counters from all interpreter threads into a single summary dict |
+| `_Py_PrintSpecializationStats(int reset)` | function | Prints the summary to `stderr` (or a file set via `PYTHONSTATS`); optionally resets counters |
+| `_Py_StatsOn()` | function | Enables collection at runtime (used by the `_testinternalcapi` module) |
+| `_Py_StatsOff()` | function | Disables collection without clearing accumulated counts |
+| `_PyStats` | struct | Per-interpreter storage for the raw counters; embedded in `PyInterpreterState` under `Py_STATS` |
+
+### Counter layout inside `_PyStats`
+
+Each opcode family that can specialize has a nested struct with at minimum
+these fields:
+
+| Field | Meaning |
+|-------|---------|
+| `success` | Specialization succeeded and the fast path ran |
+| `failure` | Specialization was attempted but the guard failed; instruction stays generic |
+| `hit` | Already-specialized instruction executed successfully |
+| `deferred` | Object was not yet warm enough; specialization deferred |
+| `miss` | Specialized instruction executed but its guard failed at runtime (triggers deopt) |
+| `deopt` | Counter bumped when a specialized instruction degrades back to `RESUME`-style generic |
+
+## Reading
+
+### Guard macro pattern in the eval loop
+
+```c
+// Python/ceval.c (CPython 3.14, simplified)
+#ifdef Py_STATS
+#  define STAT_INC(opname, name) \
+       do { STATS->opname##_stats.name++; } while (0)
+#  define STAT_DEC(opname, name) \
+       do { STATS->opname##_stats.name--; } while (0)
+#else
+#  define STAT_INC(opname, name) ((void)0)
+#  define STAT_DEC(opname, name) ((void)0)
+#endif
+```
+
+Every specialization site in the generated eval loop calls `STAT_INC` so that
+the same source double-compiles: a stats binary for profiling and a lean
+production binary with the counters stripped.
+
+### Gathering and printing stats
+
+```c
+// Include/internal/pycore_statsmodule.h (CPython 3.14)
+#ifdef Py_STATS
+PyAPI_FUNC(PyObject *) _Py_GatherSpecializationStats(void);
+PyAPI_FUNC(void)       _Py_PrintSpecializationStats(int reset);
+PyAPI_FUNC(void)       _Py_StatsOn(void);
+PyAPI_FUNC(void)       _Py_StatsOff(void);
+#else
+// No-op stubs so call sites compile unconditionally.
+#define _Py_GatherSpecializationStats() (Py_None)
+#define _Py_PrintSpecializationStats(r) ((void)0)
+#define _Py_StatsOn()  ((void)0)
+#define _Py_StatsOff() ((void)0)
+#endif
+```
+
+`_Py_PrintSpecializationStats(1)` is called at interpreter shutdown when
+`PYTHONSTATS=1` is set. The output is a plain-text table one line per
+(opcode, counter) pair, easy to grep or import into a spreadsheet.
+
+### Representative output
+
+```
+opcode                    hit      miss   deferred     deopt   failure   success
+LOAD_ATTR_MODULE      4823901       124          0       0          0    1203
+CALL_PY_EXACT_ARGS    9102384      8821          0    1042          0    6714
+BINARY_OP_ADD_INT     3310029        47          0       0          0     991
+```
+
+The `failure` column counts cases where specialization was tried and rejected
+(wrong type, too polymorphic, etc.). A high `deopt` rate on a specific opcode
+is a signal to look at the guard conditions for that specialization.
+
+## gopy mirror
+
+Not yet ported. gopy's bytecode interpreter is in `vm/eval_gen.go` and does
+not yet have an adaptive specializing layer. When the tier-2 optimizer work
+(v0.12 scope) advances to per-opcode specialization, a parallel stats
+subsystem can be added as a build tag (`//go:build gopystats`) following the
+same `STAT_INC` / no-op pattern so that production builds remain zero-overhead.
+
+## CPython 3.14 changes
+
+- The counter struct was reorganized in 3.14 to match the new `_SPECIALIZED`
+  / `_QUICKENED` opcode naming introduced alongside the two-tier optimizer.
+  Previous releases used flatter names tied to the old specialization scheme.
+- `_Py_StatsOn` and `_Py_StatsOff` are new in 3.14; earlier versions only
+  supported compile-time toggling, not runtime toggling via `_testinternalcapi`.
+- The `PYTHONSTATS` environment variable now accepts a file path in addition
+  to the boolean `1`, allowing stats to be written to a file rather than
+  `stderr`.

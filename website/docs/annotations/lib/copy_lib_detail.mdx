@@ -1,0 +1,175 @@
+---
+title: Lib/copy.py
+description: "Shallow and deep copy for arbitrary Python objects, with cycle detection via a memo dict."
+cpython_path: Lib/copy.py
+cpython_version: "3.14"
+lines: 287
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/copy.py`
+
+<CpyLink path="Lib/copy.py" />
+
+`Lib/copy.py` implements the two public copying operations: `copy()` for shallow copies and `deepcopy()` for recursive deep copies. A third function, `replace()`, was added in 3.13 and delegates to `__replace__` for immutable-friendly value substitution. The file is self-contained: the only stdlib dependency at import time is `types`, `weakref`, and `copyreg.dispatch_table`. No C extension is required; all dispatch is pure Python.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-60 | module docstring, imports, `Error` | Module header and exception class |
+| 62-101 | `copy` | Shallow copy dispatcher |
+| 103-108 | `_copy_atomic_types`, `_copy_builtin_containers` | Fast-path sets for `copy()` |
+| 110-163 | `deepcopy` | Deep copy with memo dict and cycle detection |
+| 165-167 | `_atomic_types` | Fast-path set for `deepcopy()` |
+| 172-210 | `_deepcopy_list`, `_deepcopy_tuple`, `_deepcopy_dict`, `_deepcopy_method` | Per-type deep copy helpers |
+| 212-226 | `_keep_alive` | Prevents premature GC of temporary objects during deep copy |
+| 228-271 | `_reconstruct` | Pickle-protocol reconstruction shared by both `copy` and `deepcopy` |
+| 276-287 | `replace` | Field-replacement via `__replace__` |
+
+## Reading
+
+### copy: atomic fast paths and the dispatch chain
+
+`copy()` checks membership in two frozenset-like sets before doing anything else. Types in `_copy_atomic_types` (immutables such as `int`, `str`, `frozenset`, `type`, `weakref.ref`) are returned as-is. Types in `_copy_builtin_containers` (`list`, `dict`, `set`, `bytearray`) are copied by calling `cls.copy(x)` directly. Everything else goes through `__copy__`, then `copyreg.dispatch_table`, then `__reduce_ex__`.
+
+```python
+# CPython: Lib/copy.py:62 copy
+def copy(x):
+    cls = type(x)
+
+    if cls in _copy_atomic_types:
+        return x
+    if cls in _copy_builtin_containers:
+        return cls.copy(x)
+
+    if issubclass(cls, type):
+        return x
+
+    copier = getattr(cls, "__copy__", None)
+    if copier is not None:
+        return copier(x)
+
+    reductor = dispatch_table.get(cls)
+    if reductor is not None:
+        rv = reductor(x)
+    else:
+        reductor = getattr(x, "__reduce_ex__", None)
+        if reductor is not None:
+            rv = reductor(4)
+        else:
+            reductor = getattr(x, "__reduce__", None)
+            if reductor:
+                rv = reductor()
+            else:
+                raise Error("un(shallow)copyable object of type %s" % cls)
+
+    if isinstance(rv, str):
+        return x
+    return _reconstruct(x, None, *rv)
+```
+
+The `issubclass(cls, type)` branch handles metaclasses and class objects: copying a class returns the class itself, just like copying an int returns the int.
+
+### deepcopy: memo dict and pre-registration
+
+`deepcopy()` stores each copy in `memo` indexed by `id(x)` before recursing into the object's contents. This ordering is critical: if a container references itself, the recursive call will find the in-progress copy in `memo` and return it rather than looping. The `_nil` sentinel avoids a separate `in` check.
+
+```python
+# CPython: Lib/copy.py:110 deepcopy
+def deepcopy(x, memo=None, _nil=[]):
+    cls = type(x)
+
+    if cls in _atomic_types:
+        return x
+
+    d = id(x)
+    if memo is None:
+        memo = {}
+    else:
+        y = memo.get(d, _nil)
+        if y is not _nil:
+            return y
+
+    copier = _deepcopy_dispatch.get(cls)
+    if copier is not None:
+        y = copier(x, memo)
+    else:
+        if issubclass(cls, type):
+            y = x
+        else:
+            copier = getattr(x, "__deepcopy__", None)
+            if copier is not None:
+                y = copier(memo)
+            else:
+                reductor = dispatch_table.get(cls)
+                if reductor:
+                    rv = reductor(x)
+                else:
+                    reductor = getattr(x, "__reduce_ex__", None)
+                    if reductor is not None:
+                        rv = reductor(4)
+                    else:
+                        reductor = getattr(x, "__reduce__", None)
+                        if reductor:
+                            rv = reductor()
+                        else:
+                            raise Error(
+                                "un(deep)copyable object of type %s" % cls)
+                if isinstance(rv, str):
+                    y = x
+                else:
+                    y = _reconstruct(x, memo, *rv)
+
+    if y is not x:
+        memo[d] = y
+        _keep_alive(x, memo)
+    return y
+```
+
+`_keep_alive` appends `x` to `memo[id(memo)]`, a slot that is never a real object key. This guarantees `x` stays alive for the duration of the copy even if it is a temporary with no other references, which would otherwise make `id(x)` reusable mid-copy.
+
+### _deepcopy_list and the pre-registration pattern
+
+Each container helper follows the same pattern: allocate the empty container, register it in `memo` under the source's `id`, then fill it. The list helper illustrates the pattern most clearly.
+
+```python
+# CPython: Lib/copy.py:172 _deepcopy_list
+def _deepcopy_list(x, memo, deepcopy=deepcopy):
+    y = []
+    memo[id(x)] = y
+    append = y.append
+    for a in x:
+        append(deepcopy(a, memo))
+    return y
+```
+
+Tuples cannot use this pattern directly because they are immutable and must be constructed all at once. `_deepcopy_tuple` instead deep-copies all elements into a temporary list, checks `memo` for a cycle (another object may have already placed the result), and only then builds the final tuple.
+
+### replace: __replace__ delegation
+
+`replace()` was added in Python 3.13 (PEP 728 / dataclasses synergy). It is a thin wrapper that looks up `__replace__` on the object's class and delegates to it.
+
+```python
+# CPython: Lib/copy.py:276 replace
+def replace(obj, /, **changes):
+    cls = obj.__class__
+    func = getattr(cls, '__replace__', None)
+    if func is None:
+        raise TypeError(f"replace() does not support {cls.__name__} objects")
+    return func(obj, **changes)
+```
+
+Named tuples and frozen dataclasses both define `__replace__`. User-defined classes may define it too. There is no fallback to pickle hooks.
+
+## gopy notes
+
+`copy` and `deepcopy` are needed for any Python code that calls them on gopy-managed objects. The key integration points are the `__copy__`, `__deepcopy__`, and `__reduce_ex__` slots on `objects/object.go`. The `_copy_atomic_types` set maps to types that gopy already treats as value types. `_reconstruct` is closely related to the pickle `load_reduce` path and should share implementation with the pickle port.
+
+Planned package path: `module/copy/`.
+
+## CPython 3.14 changes
+
+3.14 refactored `copy()` to use explicit set membership checks (`_copy_atomic_types`, `_copy_builtin_containers`) rather than the older `_copy_dispatch` table, removing several wrapper lambda functions. The `replace()` function was promoted from `dataclasses` in 3.13 and is now part of this module's public API. `deepcopy()` logic is otherwise unchanged.

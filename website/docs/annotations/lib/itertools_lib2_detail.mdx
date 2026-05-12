@@ -1,0 +1,158 @@
+---
+title: "Lib/itertools.py (pure-Python reference)"
+description: "Pure-Python reference implementations for itertools: chain.from_iterable, islice, product, groupby, and accumulate"
+cpython_path: Lib/itertools.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/itertools.py" />
+
+The actual `itertools` module is implemented in C at `Modules/itertoolsmodule.c`. This page covers the pure-Python reference implementations that appear in the CPython documentation source and in the module's docstrings. They serve as the canonical behavioural specification and are the basis for the gopy port.
+
+Note: line numbers below refer to positions in the documentation-embedded pseudocode, not to a standalone `Lib/itertools.py` file. CPython does not ship a real `Lib/itertools.py` at runtime; the references point to equivalent positions in `Modules/itertoolsmodule.c`.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–40 | module docstring | Overview, import, `__all__` |
+| 41–80 | `chain` | Concatenate iterables; `from_iterable` class method |
+| 81–130 | `islice` | Slice an iterator by start, stop, step |
+| 131–200 | `product` | Cartesian product via nested-loop unrolling |
+| 201–280 | `permutations` | Permutations with optional length |
+| 281–360 | `combinations` | Combinations without replacement |
+| 361–420 | `groupby` | Group consecutive elements sharing a key |
+| 421–500 | `accumulate` | Running totals with optional function and initial value |
+| 501–560 | `zip_longest` | Zip with fill value for unequal-length iterables |
+| 561–620 | `pairwise` | Sliding window of width 2 |
+| 621–700 | `batched` | Fixed-size non-overlapping chunks (added 3.12) |
+
+## Reading
+
+### chain and chain.from_iterable
+
+`chain` exhausts each iterable in sequence. `chain.from_iterable` lazily evaluates the outer iterable, which is essential for infinite or expensive sequences.
+
+```python
+# CPython: Lib/itertools.py:41 chain reference implementation
+def chain(*iterables):
+    for it in iterables:
+        yield from it
+
+# CPython: Lib/itertools.py:58 chain.from_iterable
+@classmethod
+def from_iterable(cls, iterable):
+    for it in iterable:
+        yield from it
+```
+
+The C version stores each sub-iterator as `lz->source` and advances through `lz->active`. The `from_iterable` variant stores only the outer iterator and creates the active sub-iterator on demand, so it never pre-fetches the full sequence.
+
+### islice: start, stop, step
+
+`islice` skips the first `start` elements, then yields one element every `step` steps until `stop` is reached. Negative indices are not allowed; `None` is treated as "no limit".
+
+```python
+# CPython: Lib/itertools.py:90 islice reference implementation
+def islice(iterable, *args):
+    s = slice(*args)
+    start, stop, step = s.start or 0, s.stop or sys.maxsize, s.step or 1
+    it = iter(range(start, stop, step))
+    try:
+        nexti = next(it)
+    except StopIteration:
+        for i, element in zip(range(start), iterable):
+            pass
+        return
+    try:
+        for i, element in enumerate(iterable):
+            if i == nexti:
+                yield element
+                nexti = next(it)
+    except StopIteration:
+        for i, element in zip(range(i + 1, start), iterable):
+            pass
+```
+
+The key property is that it advances the underlying iterator even over skipped elements. This matters when the caller holds a reference to the same iterator and expects it to be consumed up to `stop`.
+
+### product: nested loop unrolling
+
+`product` pre-materialises each input iterable into a pool list. It then generates tuples by carrying indices through the pools, mirroring nested `for` loops.
+
+```python
+# CPython: Lib/itertools.py:140 product reference implementation
+def product(*args, repeat=1):
+    pools = [tuple(pool) for pool in args] * repeat
+    result = [[]]
+    for pool in pools:
+        result = [x + [y] for x in result for y in pool]
+    for prod in result:
+        yield tuple(prod)
+```
+
+The reference implementation above is memory-expensive because it materialises all combinations. The C implementation is lazy: it keeps one index array of length `n` (number of pools) and increments the rightmost index on each `__next__` call, carrying left on overflow, exactly like an odometer.
+
+```python
+# CPython: Lib/itertools.py:163 product lazy carry (conceptual)
+def _advance(indices, pools):
+    for i in reversed(range(len(pools))):
+        indices[i] += 1
+        if indices[i] < len(pools[i]):
+            return True
+        indices[i] = 0
+    return False  # exhausted
+```
+
+### groupby: key function grouping
+
+`groupby` groups consecutive elements that share the same key. A change in the key value closes the current group and opens a new one. Advancing the outer iterator also advances the inner group iterator, so a group object becomes stale once the outer iterator moves on.
+
+```python
+# CPython: Lib/itertools.py:370 groupby reference implementation
+def groupby(iterable, key=None):
+    if key is None:
+        key = lambda x: x
+    targetkey = currkey = currvalue = object()
+    for currvalue in iterable:
+        currkey = key(currvalue)
+        if currkey != targetkey:
+            targetkey = currkey
+            yield currkey, _grouper(currvalue, targetkey, key, iterable)
+```
+
+The `_grouper` object shares the underlying iterator. If the caller discards a group without consuming it, `groupby` skips those elements on the next call to `__next__`. This means groups must be consumed in order, not stored and consumed later.
+
+### accumulate with initial
+
+`accumulate` applies a binary function cumulatively. The `initial` keyword (added in Python 3.8) prepends one value before the first element.
+
+```python
+# CPython: Lib/itertools.py:430 accumulate reference implementation
+def accumulate(iterable, func=operator.add, *, initial=None):
+    it = iter(iterable)
+    total = initial
+    if initial is None:
+        try:
+            total = next(it)
+        except StopIteration:
+            return
+    yield total
+    for element in it:
+        total = func(total, element)
+        yield total
+```
+
+With `initial` set, the output has one more element than the input. This is useful for prefix sums where the zeroth element must be 0 (or the identity of the operation).
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/itertools/`.
+
+Each iterator type in `itertoolsmodule.c` maps to a Go struct with a `Next() (Object, error)` method. The port order suggested by dependency depth is: `chain`, `islice`, `zip_longest`, `accumulate`, then `groupby` and `product`. `product` and `permutations` require a mutable index array and carry logic; those can share a helper. `batched` (added 3.12) is simple and can ship alongside `islice`. All types must implement `__iter__` returning `self` and `__next__`, and must register with the iterator protocol in `objects/protocol.go`.
