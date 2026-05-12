@@ -1,0 +1,98 @@
+---
+title: Lib/inspect.py (part 3)
+description: "inspect.py part 3: signature, Parameter, BoundArguments, getmembers, getmodule."
+cpython_path: Lib/inspect.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/inspect.py" />
+
+This annotation covers signature introspection. See `lib_inspect2_detail` for `getfile`, `getsource`, `getclosurevars`, `getfullargspec`, and frame inspection.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `signature` | Return a `Signature` for any callable |
+| 81-180 | `Parameter` | Represents one parameter with kind, default, annotation |
+| 181-260 | `BoundArguments` | Result of `Signature.bind` |
+| 261-360 | `getmembers` | List `(name, value)` pairs for an object |
+| 361-500 | `getmodule` | Find what module defined an object |
+
+## Reading
+
+### `signature`
+
+```python
+# CPython: Lib/inspect.py:3180 signature
+def signature(obj, *, follow_wrapped=True, globals=None, locals=None, eval_str=False):
+    if not callable(obj):
+        raise TypeError(f'{obj!r} is not a callable object')
+    if isinstance(obj, types.MethodType):
+        sig = signature(obj.__func__, follow_wrapped=follow_wrapped, ...)
+        return _signature_bound_method(sig)
+    if isinstance(obj, functools.partial):
+        sig = signature(obj.func, ...)
+        return _signature_get_partial(sig, obj)
+    if isinstance(obj, types.FunctionType):
+        return Signature.from_function(obj, ...)
+    if hasattr(obj, '__signature__'):
+        return obj.__signature__
+    ...
+```
+
+`signature` dispatches by callable type. Methods drop `self`. `functools.partial` adjusts the signature by removing pre-filled parameters. Custom callables can set `__signature__` to override introspection.
+
+### `Parameter`
+
+```python
+# CPython: Lib/inspect.py:2560 Parameter.__init__
+class Parameter:
+    POSITIONAL_ONLY = _ParameterKind.POSITIONAL_ONLY
+    POSITIONAL_OR_KEYWORD = _ParameterKind.POSITIONAL_OR_KEYWORD
+    VAR_POSITIONAL = _ParameterKind.VAR_POSITIONAL
+    KEYWORD_ONLY = _ParameterKind.KEYWORD_ONLY
+    VAR_KEYWORD = _ParameterKind.VAR_KEYWORD
+    empty = _empty
+
+    def __init__(self, name, kind, *, default=_empty, annotation=_empty):
+        if kind not in _ParameterKind:
+            raise ValueError(f'invalid value for "kind" attribute')
+        if default is not _empty and kind in (_VAR_POSITIONAL, _VAR_KEYWORD):
+            raise ValueError(f'{kind.description} parameters cannot have default values')
+        ...
+```
+
+`POSITIONAL_ONLY` parameters are before `/` in the signature. `KEYWORD_ONLY` parameters are after `*` or `*args`. `VAR_POSITIONAL` is `*args`, `VAR_KEYWORD` is `**kwargs`. `Parameter.empty` is the sentinel for "no default" and "no annotation".
+
+### `BoundArguments`
+
+```python
+# CPython: Lib/inspect.py:2920 Signature.bind
+class Signature:
+    def bind(self, *args, **kwargs):
+        arguments = {}
+        ...
+        for param in self.parameters.values():
+            if param.kind == _POSITIONAL_OR_KEYWORD:
+                if args:
+                    arguments[param.name] = args[0]
+                    args = args[1:]
+                elif param.name in kwargs:
+                    arguments[param.name] = kwargs.pop(param.name)
+                elif param.default is not _empty:
+                    pass  # Default used; not in arguments
+                else:
+                    raise TypeError(f"missing a required argument: '{param.name}'")
+        return BoundArguments(self, arguments)
+```
+
+`sig.bind(1, 2, x=3)` returns a `BoundArguments` where `arguments` maps parameter names to values. `apply_defaults()` fills in defaults. Used by `functools.wraps` to forward calls.
+
+## gopy notes
+
+`signature` is `module/inspect.Signature` in `module/inspect/module.go`. `Parameter` is a Go struct. `Signature.bind` iterates `parameters` matching args/kwargs, building a Go `map[string]objects.Object`.

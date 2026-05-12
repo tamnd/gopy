@@ -1,0 +1,115 @@
+---
+title: Objects/abstract.c (part 5)
+description: "Objects/abstract.c part 5: PyObject_Call, PyObject_Repr, PyObject_Str, PyObject_ASCII, PyObject_RichCompare."
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/abstract.c" />
+
+This annotation covers the core object protocol functions. See `objects_abstract4_detail` for `PyNumber_*`, `PySequence_*`, and `PyMapping_*` operations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyObject_Call` | Call any callable with `args` tuple + `kwargs` dict |
+| 81-160 | `PyObject_CallOneArg` | Fast path for single-argument calls |
+| 161-240 | `PyObject_Repr` | Call `__repr__`, validate result is a string |
+| 241-320 | `PyObject_Str` | Call `__str__`, fallback to `__repr__` |
+| 321-600 | `PyObject_RichCompare` | Dispatch `<`, `<=`, `==`, `!=`, `>`, `>=` |
+
+## Reading
+
+### `PyObject_Call`
+
+```c
+// CPython: Objects/abstract.c:280 PyObject_Call
+PyObject *
+PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs)
+{
+    ternaryfunc call = Py_TYPE(callable)->tp_call;
+    if (call == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                     "'%.200s' object is not callable",
+                     Py_TYPE(callable)->tp_name);
+        return NULL;
+    }
+    PyObject *result = (*call)(callable, args, kwargs);
+    return _Py_CheckFunctionResult(tstate, callable, result, NULL);
+}
+```
+
+`tp_call` is the C slot for `__call__`. `_Py_CheckFunctionResult` verifies that a non-NULL result has no pending exception and a NULL result has an exception set.
+
+### `PyObject_Repr`
+
+```c
+// CPython: Objects/abstract.c:540 PyObject_Repr
+PyObject *
+PyObject_Repr(PyObject *v)
+{
+    if (v == NULL) {
+        return PyUnicode_FromString("<NULL>");
+    }
+    if (Py_TYPE(v)->tp_repr == NULL) {
+        return PyUnicode_FromFormat("<%s object at %p>", Py_TYPE(v)->tp_name, v);
+    }
+    PyObject *res = (*Py_TYPE(v)->tp_repr)(v);
+    if (res == NULL) return NULL;
+    if (!PyUnicode_Check(res)) {
+        PyErr_Format(PyExc_TypeError,
+                     "__repr__ returned non-string (type %.200s)",
+                     Py_TYPE(res)->tp_name);
+        Py_DECREF(res);
+        return NULL;
+    }
+    return res;
+}
+```
+
+If `tp_repr` is NULL, a default `<type at 0x...>` repr is produced. This cannot be overridden without setting `tp_repr`. The enforcement of "return a string" is here, not in `tp_repr` implementations.
+
+### `PyObject_RichCompare`
+
+```c
+// CPython: Objects/abstract.c:740 PyObject_RichCompare
+PyObject *
+PyObject_RichCompare(PyObject *v, PyObject *w, int op)
+{
+    PyObject *res = do_richcompare(v, w, op);
+    return res;
+}
+
+static PyObject *
+do_richcompare(PyObject *v, PyObject *w, int op)
+{
+    richcmpfunc f;
+    /* Try left operand first */
+    if (!Py_IS_TYPE(v, Py_TYPE(w)) &&
+        PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v)) &&
+        (f = Py_TYPE(w)->tp_richcompare) != NULL) {
+        /* Right operand is a subtype: try it first (reflected) */
+        res = (*f)(w, v, _Py_SwappedOp[op]);
+        if (res != Py_NotImplemented) return res;
+        Py_DECREF(res);
+    }
+    if ((f = Py_TYPE(v)->tp_richcompare) != NULL) {
+        res = (*f)(v, w, op);
+        if (res != Py_NotImplemented) return res;
+        Py_DECREF(res);
+    }
+    /* Default: identity comparison for == and !=, TypeError for others */
+    ...
+}
+```
+
+The subtype-first rule ensures `MyInt.__eq__` is called before `int.__eq__` when comparing `MyInt() == 1`. `Py_NotImplemented` signals "I can't compare these"; the other operand gets a chance via the reflected operation.
+
+## gopy notes
+
+`PyObject_Call` is `objects.Call` in `objects/call.go`. `PyObject_Repr` calls `tp_repr` via `objects.Repr`. `PyObject_RichCompare` is `objects.RichCompare` dispatching through `objects.Type.RichCompare` with the subtype-first rule.

@@ -1,0 +1,116 @@
+---
+title: Modules/_threadmodule.c (part 6)
+description: "_threadmodule.c part 6: Lock.acquire, Lock.release, RLock, Condition wait/notify, Event."
+cpython_path: Modules/_threadmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_threadmodule.c" />
+
+This annotation covers thread synchronization primitives. See `modules_threading5_detail` for `Thread`, `start`, `join`, `daemon`, and the GIL interaction.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Lock.acquire` | Block until lock is available |
+| 81-160 | `Lock.release` | Release the lock; wake waiting threads |
+| 161-240 | `RLock` | Reentrant lock: same thread can acquire multiple times |
+| 241-340 | `Condition.wait` | Wait for notification with optional timeout |
+| 341-600 | `Condition.notify` / `notify_all` | Wake waiting threads |
+
+## Reading
+
+### `Lock.acquire`
+
+```c
+// CPython: Modules/_threadmodule.c:80 lock_PyThread_acquire_lock
+static PyObject *
+lock_PyThread_acquire_lock(lockobject *self, PyObject *args, PyObject *kwds)
+{
+    double timeout = -1.0;  /* -1 = blocking */
+    int blocking = 1;
+    PyArg_ParseTupleAndKeywords(args, kwds, "|id:acquire", kwlist, &blocking, &timeout);
+
+    PyLockStatus r;
+    Py_BEGIN_ALLOW_THREADS
+    if (timeout < 0) {
+        r = PyThread_acquire_lock_timed(self->lock_lock, -1, 1);
+    } else {
+        r = PyThread_acquire_lock_timed(self->lock_lock,
+            (long long)(timeout * 1e6), 1);  /* microseconds */
+    }
+    Py_END_ALLOW_THREADS
+    return PyBool_FromLong(r == PY_LOCK_ACQUIRED);
+}
+```
+
+`acquire(blocking=True, timeout=-1)` blocks indefinitely. `acquire(False)` returns immediately. `acquire(timeout=0.5)` waits up to 0.5 seconds. The GIL is released during the wait so other Python threads can run.
+
+### `RLock`
+
+```c
+// CPython: Modules/_threadmodule.c:340 rlock_acquire
+static PyObject *
+rlock_acquire(rlockobject *self, PyObject *args, PyObject *kwds)
+{
+    unsigned long tid = PyThread_get_thread_ident();
+    if (self->rlock_count > 0 && self->rlock_owner == tid) {
+        /* Reentrant acquisition by same thread */
+        unsigned long count = self->rlock_count + 1;
+        if (count <= self->rlock_count) {
+            PyErr_SetString(PyExc_OverflowError, "Internal lock count overflow");
+            return NULL;
+        }
+        self->rlock_count = count;
+        Py_RETURN_TRUE;
+    }
+    /* Acquire the underlying lock */
+    PyLockStatus r;
+    Py_BEGIN_ALLOW_THREADS
+    r = PyThread_acquire_lock_timed(self->rlock_lock, ...);
+    Py_END_ALLOW_THREADS
+    if (r == PY_LOCK_ACQUIRED) {
+        self->rlock_owner = tid;
+        self->rlock_count = 1;
+    }
+    return PyBool_FromLong(r == PY_LOCK_ACQUIRED);
+}
+```
+
+`RLock` tracks the owning thread id and a count. The same thread can acquire `n` times; it must release `n` times before the lock is free. Used in `threading.Condition` and `threading.Lock`-based context managers.
+
+### `Condition.wait`
+
+```python
+# CPython: Lib/threading.py:340 Condition.wait
+def wait(self, timeout=None):
+    if not self._is_owned():
+        raise RuntimeError("cannot wait on un-acquired lock")
+    waiter = _allocate_lock()
+    waiter.acquire()
+    self._waiters.append(waiter)
+    saved_state = self._release_save()
+    gotit = False
+    try:
+        if timeout is None:
+            waiter.acquire()
+            gotit = True
+        else:
+            gotit = waiter.acquire(True, timeout)
+        return gotit
+    finally:
+        self._acquire_restore(saved_state)
+        if not gotit:
+            self._waiters.remove(waiter)
+```
+
+`wait` releases the condition's lock, blocks on a private `waiter` lock, then re-acquires the condition's lock before returning. This is the Mesa-style monitor: the condition may no longer hold when `wait` returns, so callers should use `while not condition: wait()`.
+
+## gopy notes
+
+`Lock.acquire` is `module/thread.LockAcquire` in `module/thread/module.go` using `sync.Mutex`. `RLock` uses a Go `sync.Mutex` plus owner goroutine ID and count. `Condition.wait` releases the underlying mutex and blocks on a `sync.Cond`. `notify` calls `cond.Signal()`, `notify_all` calls `cond.Broadcast()`.

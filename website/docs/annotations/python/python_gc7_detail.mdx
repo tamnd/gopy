@@ -1,0 +1,100 @@
+---
+title: Python/gc.c (part 7)
+description: "Python/gc.c part 7: generational collection, collect(), move_unreachable, subtract_refs, gc thresholds."
+cpython_path: Python/gc.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/gc.c" />
+
+This annotation covers the GC collection algorithm. See `python_gc6_detail` for `gc.enable`, `gc.disable`, `gc.get_objects`, and the GC object header.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | GC generations | Three-generation thresholds and counts |
+| 81-180 | `gc_collect_main` | Entry: update generations, call `collect` |
+| 181-300 | `subtract_refs` | Compute effective reference counts within generation |
+| 301-420 | `move_unreachable` | Identify and isolate unreachable objects |
+| 421-600 | `finalize_garbage` | Call `__del__` / finalizers on unreachable objects |
+
+## Reading
+
+### GC generations
+
+```c
+// CPython: Python/gc.c:80 GC generations
+typedef struct {
+    PyGC_Head head;
+    Py_ssize_t count;     /* number of objects in this generation */
+    Py_ssize_t threshold; /* collect when count > threshold */
+} PyGeneration;
+
+/* Default thresholds: 700, 10, 10 */
+/* Collect gen0 when count > 700. After 10 gen0 collections, collect gen1.
+   After 10 gen1 collections, collect gen2 (full collection). */
+```
+
+The three-generation scheme is based on the hypothesis that most objects die young. Short-lived objects (temporaries, list elements) cycle through gen0. Long-lived objects (module globals, long-running dicts) are promoted to gen2 after surviving multiple collections.
+
+### `subtract_refs`
+
+```c
+// CPython: Python/gc.c:340 subtract_refs
+static void
+subtract_refs(PyGC_Head *containers)
+{
+    PyGC_Head *gc = GC_NEXT(containers);
+    for (; gc != containers; gc = GC_NEXT(gc)) {
+        PyObject *op = FROM_GC(gc);
+        traverseproc traverse = Py_TYPE(op)->tp_traverse;
+        traverse(op, (visitproc)visit_decref, NULL);
+    }
+}
+
+static int
+visit_decref(PyObject *op, void *parent)
+{
+    if (_PyObject_IS_GC(op)) {
+        _PyGCHead_DECREF(_Py_AS_GC(op));
+    }
+    return 0;
+}
+```
+
+`subtract_refs` uses `tp_traverse` to find all object references within the generation being collected. For each reference, the `gc_refs` count is decremented. After this pass, any object with `gc_refs == 0` can only be referenced from outside the generation and is reachable.
+
+### `move_unreachable`
+
+```c
+// CPython: Python/gc.c:420 move_unreachable
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    PyGC_Head *gc = GC_NEXT(young);
+    while (gc != young) {
+        PyGC_Head *next = GC_NEXT(gc);
+        if (_PyGCHead_REFS(gc) != 0) {
+            /* Still reachable from outside: restore and mark as reachable */
+            _PyObject_GC_SET_FINALIZED(gc);  /* avoid double finalization */
+            gc = next;
+        } else {
+            /* Unreachable: move to unreachable list */
+            move_legacy_finalizers(gc, unreachable);
+            gc_list_move(gc, unreachable);
+            gc = next;
+        }
+    }
+}
+```
+
+Objects with `gc_refs == 0` are moved to the `unreachable` list. Then a second pass traverses reachable objects and marks their referents reachable (pulling them back from `unreachable` if needed). This handles the case where reachable object A references unreachable object B.
+
+## gopy notes
+
+Go uses a tracing GC, not CPython's reference counting with cycle collector. For gopy's GC annotation purposes: CPython's GC is documented via annotations; gopy relies on Go's runtime GC for memory management. The `gc` module is `module/gc/module.go` exposing the threshold API but delegating collection to Go's `runtime.GC()`.
