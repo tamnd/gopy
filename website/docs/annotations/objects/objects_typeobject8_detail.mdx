@@ -1,0 +1,97 @@
+---
+title: Objects/typeobject.c (part 8)
+description: "Objects/typeobject.c part 8: type.__subclasshook__, type.__instancecheck__, type.__subclasscheck__, abstract base class protocol."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+This annotation covers the abstract class checking protocol. See `objects_typeobject7_detail` for `type.__new__`, `type.__init__`, MRO computation, and descriptor lookup.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `type_instancecheck` | `isinstance(obj, cls)` dispatch |
+| 81-160 | `type_subclasscheck` | `issubclass(sub, cls)` dispatch |
+| 161-260 | `__subclasshook__` protocol | ABCMeta hook for virtual subclasses |
+| 261-360 | `type.__or__` | Union type: `int \| str` |
+| 361-500 | `PyType_IsSubtype` | C-level fast subtype check |
+
+## Reading
+
+### `type_instancecheck`
+
+```c
+// CPython: Objects/typeobject.c:4200 type_instancecheck
+static PyObject *
+type_instancecheck(PyObject *cls, PyObject *instance)
+{
+    /* isinstance(instance, cls) */
+    int retval = PyObject_IsInstance(instance, cls);
+    if (retval < 0) return NULL;
+    return PyBool_FromLong(retval);
+}
+```
+
+`isinstance` calls `__instancecheck__` on the class. `PyObject_IsInstance` checks the MRO, then if the class has a `__subclasshook__` it calls it. Classes that override `__instancecheck__` (like `ABCMeta`) can recognize instances that are not in the MRO.
+
+### `type_subclasscheck`
+
+```c
+// CPython: Objects/typeobject.c:4240 type_subclasscheck
+static PyObject *
+type_subclasscheck(PyObject *cls, PyObject *sub)
+{
+    /* issubclass(sub, cls) */
+    int retval = PyObject_IsSubclass(sub, cls);
+    if (retval < 0) return NULL;
+    return PyBool_FromLong(retval);
+}
+```
+
+`issubclass` similarly dispatches to `__subclasscheck__`. For concrete types this reduces to MRO membership. For ABCs it calls `__subclasshook__` first: if it returns `NotImplemented`, the normal MRO check proceeds.
+
+### `__subclasshook__` protocol
+
+```c
+// CPython: Objects/typeobject.c:4300 abstract_issubclass
+static int
+abstract_issubclass(PyObject *derived, PyObject *cls)
+{
+    /* Look up __subclasshook__ on cls.__mro__ */
+    PyObject *hook = _PyObject_LookupSpecial(cls, &_Py_ID(__subclasshook__));
+    if (hook != NULL) {
+        PyObject *r = PyObject_CallOneArg(hook, derived);
+        if (r != Py_NotImplemented) return PyObject_IsTrue(r);
+        Py_DECREF(r);
+    }
+    /* Fall back: check if derived is in cls.__subclasses__() */
+    return type_is_subtype_base_chain(derived, cls);
+}
+```
+
+`__subclasshook__` returning `True` or `False` overrides the MRO check. This powers `collections.abc.Sized` recognizing any class with `__len__`, for example, without requiring explicit inheritance.
+
+### `type.__or__`
+
+```c
+// CPython: Objects/typeobject.c:4480 type_or
+static PyObject *
+type_or(PyObject *self, PyObject *other)
+{
+    /* int | str  →  UnionType(int, str) */
+    return Py_GenericAlias(self, other);  /* Actually: _Py_union_type_or */
+}
+```
+
+`int | str` creates a `types.UnionType`. This is used in type annotations: `def f(x: int | None)`. `isinstance(x, int | str)` also works: `UnionType.__instancecheck__` iterates the union members.
+
+## gopy notes
+
+`type_instancecheck` is `objects.TypeInstanceCheck` in `objects/type.go`. `PyObject_IsInstance` is `objects.IsInstance` which checks the MRO via `objects.IsSubtype`. `__subclasshook__` is called via `objects.LookupSpecial`. `type.__or__` returns `objects.NewUnionType` defined in `objects/union_type.go`.

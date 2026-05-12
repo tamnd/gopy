@@ -1,0 +1,89 @@
+---
+title: Lib/profile.py (part 2)
+description: "profile.py part 2: Profile.runcall, calibrate, print_stats, Stats.sort_stats, dump_stats."
+cpython_path: Lib/profile.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/profile.py" />
+
+This annotation covers profiling output and calibration. See `lib_profile1_detail` for `Profile.__init__`, `run`, and the trace hook.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Profile.runcall` | Profile a single function call |
+| 81-160 | `Profile.calibrate` | Measure profiler overhead |
+| 161-280 | `Profile.print_stats` / `dump_stats` | Emit profile data |
+| 281-400 | `Stats.sort_stats` | Sort profile entries by key |
+| 401-500 | `Stats.print_callers` / `print_callees` | Show caller/callee relationships |
+
+## Reading
+
+### `runcall`
+
+```python
+# CPython: Lib/profile.py:180 runcall
+def runcall(self, func, /, *args, **kw):
+    """Profile a single call of the callable object func."""
+    self.enable()
+    try:
+        return func(*args, **kw)
+    finally:
+        self.disable()
+```
+
+`runcall` is the lowest-overhead entry point: no `exec` overhead, no string compilation. Used when the caller already has a reference to the function.
+
+### `calibrate`
+
+```python
+# CPython: Lib/profile.py:330 calibrate
+def calibrate(self, m, verbose=0):
+    """Return the profiler bias: the overhead per event in seconds.
+    Call this in a quiet environment and average several runs."""
+    # Run a null function m times with profiling on/off and compare
+    ...
+    return (t_with - t_without) / (2 * m)
+```
+
+The profiler bias is the extra time charged per call event due to profiling itself. Subtract it from each call's time via `self.bias`. The default `bias=0` is fine for coarse profiling; `calibrate` matters when profiling very fast functions.
+
+### `Stats.sort_stats`
+
+```python
+# CPython: Lib/profile.py:560 sort_stats
+def sort_stats(self, *field):
+    """Sort the profiling data by the named fields."""
+    # field: 'calls', 'cumulative', 'filename', 'line',
+    #        'name', 'nfl', 'pcalls', 'stdname', 'time'
+    self.fcn_list = sorted(self.stats.keys(),
+                           key=lambda x: tuple(self.sort_arg_dict_default[k](x) for k in self.sort_keys))
+    return self
+```
+
+`Stats` wraps a dict mapping `(filename, lineno, funcname)` to `(pcalls, ncalls, tt, ct, callers)`. `sort_stats` orders the keys for subsequent `print_stats` calls. `'cumulative'` sorts by `ct` (total time in subtree); `'time'` sorts by `tt` (time exclusive to function).
+
+### `print_callers`
+
+```python
+# CPython: Lib/profile.py:640 print_callers
+def print_callers(self, *amount):
+    """Print callers of each profiled function."""
+    for func in self.top_level:
+        print(f'Function {func_get_function_name(func)} was called by...')
+        callers = self.stats[func][4]
+        for caller, stats in sorted(callers.items()):
+            print(f'        {func_get_function_name(caller)} ... {stats}')
+```
+
+The `callers` sub-dict maps each caller's `(filename, lineno, funcname)` key to `(pcalls, ncalls, tt, ct)` so you can see where time entered each function from.
+
+## gopy notes
+
+`Profile.runcall` is `module/profile.RunCall`. `calibrate` uses `time.Now` and runs a tight benchmark loop. `Stats` is `module/profile.Stats` with the same sort key mapping. `print_callers` iterates `Stats.callers` which is populated during the trace hook.

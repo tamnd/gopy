@@ -1,0 +1,105 @@
+---
+title: Modules/_heapqmodule.c (part 2)
+description: "_heapqmodule.c part 2: heappushpop, heapreplace, nlargest, nsmallest, _siftup/_siftdown."
+cpython_path: Modules/_heapqmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_heapqmodule.c" />
+
+This annotation covers the combined push/pop operations and the `nlargest`/`nsmallest` helpers. See `modules_heapq1_detail` for `heappush`, `heappop`, and `heapify`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `heappushpop` | Push then pop in one operation (faster than two calls) |
+| 81-160 | `heapreplace` | Pop root then push (no size change) |
+| 161-280 | `_siftup` / `_siftdown` | Internal heap fixup helpers |
+| 281-400 | `nlargest` | Find N largest elements efficiently |
+| 401-500 | `nsmallest` | Find N smallest elements efficiently |
+
+## Reading
+
+### `heappushpop`
+
+```c
+// CPython: Modules/_heapqmodule.c:280 heappushpop
+static PyObject *
+heappushpop(PyObject *self, PyObject *args)
+{
+    /* If item <= heap[0], return item directly without touching the heap. */
+    PyObject *heap, *item;
+    if (!PyArg_UnpackTuple(args, "heappushpop", 2, 2, &heap, &item))
+        return NULL;
+    if (PyList_GET_SIZE(heap) == 0) return item;
+    PyObject *top = PyList_GET_ITEM(heap, 0);
+    int cmp = PyObject_RichCompareBool(item, top, Py_LT);
+    if (cmp < 0) return NULL;
+    if (cmp) {
+        Py_INCREF(item);
+        return item;  /* item is smaller than root; heap unchanged */
+    }
+    /* item >= root: replace root, sift down */
+    PyObject *returnval = Py_NewRef(top);
+    PyList_SET_ITEM(heap, 0, Py_NewRef(item));
+    _siftup((PyListObject *)heap, 0);
+    return returnval;
+}
+```
+
+`heappushpop` is faster than `heappush` followed by `heappop` because the "item is smaller" case is O(1). Used in `nlargest` to maintain a running min-heap of the N largest seen so far.
+
+### `heapreplace`
+
+```c
+// CPython: Modules/_heapqmodule.c:340 heapreplace
+static PyObject *
+heapreplace(PyObject *self, PyObject *args)
+{
+    /* Pop root and push new item; heap size stays constant. */
+    PyObject *heap, *item;
+    PyObject *returnval = Py_NewRef(PyList_GET_ITEM(heap, 0));
+    PyList_SET_ITEM(heap, 0, Py_NewRef(item));
+    _siftup((PyListObject *)heap, 0);
+    return returnval;
+}
+```
+
+`heapreplace` is O(log n). Unlike `heappop` + `heappush` it does one sift instead of two. Raises `IndexError` on an empty heap. The new item may be larger or smaller than the popped root.
+
+### `nlargest`
+
+```c
+// CPython: Modules/_heapqmodule.c:420 nlargest
+static PyObject *
+nlargest(PyObject *self, PyObject *args)
+{
+    /* Build a min-heap of size n; replace root when a larger item is seen. */
+    Py_ssize_t n;
+    PyObject *it = PyObject_GetIter(iterable);
+    /* Fill heap with first n items */
+    ...
+    /* For remaining items: if item > heap[0], heapreplace */
+    while ((item = PyIter_Next(it)) != NULL) {
+        if (PyObject_RichCompareBool(item, PyList_GET_ITEM(heap, 0), Py_GT) > 0)
+            heapreplace_internal(heap, item);
+        else
+            Py_DECREF(item);
+    }
+    /* Sort descending */
+    PyList_Sort(heap);
+    PyList_Reverse(heap);
+    return heap;
+}
+```
+
+`nlargest(n, iterable)` uses a min-heap of size `n`: the root is the smallest of the `n` largest seen. For `n << len(iterable)` this is O(m log n) vs O(m log m) for full sort. For small `n` or small `m`, it falls back to `sorted(iterable, reverse=True)[:n]`.
+
+## gopy notes
+
+`heappushpop` is `module/heapq.HeapPushPop` in `module/heapq/module.go`. `heapreplace` is `module/heapq.HeapReplace`. `nlargest` and `nsmallest` use `objects.ListSort` and `objects.ListReverse` for the final sort. `_siftup` and `_siftdown` are unexported helpers `siftUp` / `siftDown`.

@@ -1,0 +1,111 @@
+---
+title: Modules/_struct.c (part 4)
+description: "_struct.c part 4: format code table (B, H, I, L, Q, f, d, s, p), packing helpers."
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_struct.c" />
+
+This annotation covers the per-type pack/unpack helpers for integer and floating-point format codes. See `modules_struct3_detail` for `pack_into`, `unpack_from`, `iter_unpack`, and native format.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `B`, `b` (unsigned/signed byte) | 1-byte integer pack/unpack |
+| 101-200 | `H`, `h` (unsigned/signed short) | 2-byte integer |
+| 201-300 | `I`, `i` / `L`, `l` (unsigned/signed int/long) | 4-byte integer |
+| 301-400 | `Q`, `q` (unsigned/signed long long) | 8-byte integer |
+| 401-500 | `f`, `d` (float/double) | IEEE 754 floating point |
+| 501-600 | `s`, `p` (char array, Pascal string) | Byte string types |
+
+## Reading
+
+### Integer pack helpers
+
+```c
+// CPython: Modules/_struct.c:320 bu_pack (unsigned byte)
+static int
+bu_pack(char *p, PyObject *v, const formatdef *f)
+{
+    long x = PyLong_AsLong(v);
+    if (x == -1 && PyErr_Occurred()) return -1;
+    if (x < 0 || x > 255) {
+        PyErr_SetString(StructError, "ubyte format requires 0 <= number <= 255");
+        return -1;
+    }
+    *p = (char)x;
+    return 0;
+}
+
+// CPython: Modules/_struct.c:340 bu_unpack (unsigned byte)
+static PyObject *
+bu_unpack(const char *p, const formatdef *f)
+{
+    return PyLong_FromLong((unsigned char)*p);
+}
+```
+
+Each format code has a `*_pack` and `*_unpack` function. The pack function validates range, then writes bytes in the correct byte order. The unpack function reads bytes and returns a Python object.
+
+### Multi-byte integers
+
+```c
+// CPython: Modules/_struct.c:480 lp_pack (big-endian 4-byte unsigned)
+static int
+lp_pack(char *p, PyObject *v, const formatdef *f)
+{
+    unsigned long x = (unsigned long)PyLong_AsUnsignedLong(v);
+    p[0] = (char)(x >> 24) & 0xff;
+    p[1] = (char)(x >> 16) & 0xff;
+    p[2] = (char)(x >> 8)  & 0xff;
+    p[3] = (char)(x)       & 0xff;
+    return 0;
+}
+```
+
+Big-endian packing writes the most significant byte first. Little-endian packing reverses the order. Native format uses `memcpy` directly with no byte swapping.
+
+### Float and double
+
+```c
+// CPython: Modules/_struct.c:620 bp_pack_float (big-endian float)
+static int
+bp_pack_float(char *p, PyObject *v, const formatdef *f)
+{
+    double x = PyFloat_AsDouble(v);
+    if (x == -1.0 && PyErr_Occurred()) return -1;
+    return _PyFloat_Pack4(x, (unsigned char *)p, 0);  /* 0 = big-endian */
+}
+```
+
+`_PyFloat_Pack4` and `_PyFloat_Pack8` in `Python/pyfloat.c` handle IEEE 754 conversion. They are used here rather than a `memcpy` cast to avoid undefined behavior on platforms where `float` is not IEEE 754.
+
+### Pascal string `p`
+
+```c
+// CPython: Modules/_struct.c:720 s_pack (char array)
+static int
+s_pack(char *p, PyObject *v, const formatdef *f)
+{
+    /* '4s' packs a bytes object into exactly 4 bytes, null-padded or truncated */
+    Py_buffer vbuf;
+    PyObject_GetBuffer(v, &vbuf, PyBUF_SIMPLE);
+    Py_ssize_t n = Py_MIN(vbuf.len, f->size);
+    memcpy(p, vbuf.buf, n);
+    if (n < f->size) memset(p + n, '\0', f->size - n);
+    PyBuffer_Release(&vbuf);
+    return 0;
+}
+```
+
+`'4s'` is a fixed-width byte field (null-padded on pack, returns exactly 4 bytes on unpack). `'p'` (Pascal string) uses the first byte as the length: `struct.pack('4p', b'hi')` gives `b'\x02hi\x00'`.
+
+## gopy notes
+
+Each format code's pack/unpack pair is a `formatHandler` struct in `module/struct/format.go`. Multi-byte integers use `binary.BigEndian` or `binary.LittleEndian` from `encoding/binary`. Float packing uses `math.Float32bits` / `math.Float64bits` and the appropriate byte-order encoder. `'s'` and `'p'` are handled by `packCharArray` and `packPascalString`.

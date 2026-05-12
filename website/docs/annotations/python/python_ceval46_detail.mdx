@@ -1,0 +1,110 @@
+---
+title: Python/ceval.c (part 46)
+description: "Python/ceval.c part 46: BINARY_SUBSCR_TUPLE_INT, STORE_SUBSCR_DICT, COPY, SWAP."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers tuple subscript specialization and stack manipulation opcodes. See `python_ceval45_detail` for list/dict subscript specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_SUBSCR_TUPLE_INT` | Specialized tuple index with int key |
+| 81-160 | `STORE_SUBSCR_DICT` | Specialized dict item assignment |
+| 161-240 | `COPY` | Duplicate a stack slot |
+| 241-320 | `SWAP` | Exchange two stack slots |
+| 321-500 | `PUSH_EXC_INFO` / `POP_EXCEPT` | Exception state on the stack |
+
+## Reading
+
+### `BINARY_SUBSCR_TUPLE_INT`
+
+```c
+// CPython: Python/ceval.c:2780 BINARY_SUBSCR_TUPLE_INT
+inst(BINARY_SUBSCR_TUPLE_INT, (unused/1, tuple, sub -- res)) {
+    DEOPT_IF(!PyTuple_CheckExact(tuple));
+    DEOPT_IF(!PyLong_CheckExact(sub));
+    Py_ssize_t index = PyLong_AsSSizeT(sub);
+    DEOPT_IF(index < 0 || index >= PyTuple_GET_SIZE(tuple));
+    res = Py_NewRef(PyTuple_GET_ITEM(tuple, index));
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+Specialization guard: tuple type exact, int type exact, non-negative index in range. Falls back to `BINARY_SUBSCR` on any mismatch. Hot path avoids the full `sq_item` slot dispatch.
+
+### `STORE_SUBSCR_DICT`
+
+```c
+// CPython: Python/ceval.c:2860 STORE_SUBSCR_DICT
+inst(STORE_SUBSCR_DICT, (unused/1, dict, sub, value --)) {
+    DEOPT_IF(!PyDict_CheckExact(dict));
+    int err = PyDict_SetItem(dict, sub, value);
+    DECREF_INPUTS();
+    ERROR_IF(err != 0, error);
+    DISPATCH();
+}
+```
+
+`d[key] = val` when `d` is a plain dict. Skips the `mp_ass_subscript` slot overhead. Uses `PyDict_SetItem` which handles hash computation and collision resolution.
+
+### `COPY`
+
+```c
+// CPython: Python/ceval.c:3020 COPY
+inst(COPY, (bottom, unused[oparg-1] -- bottom, unused[oparg-1], top)) {
+    assert(oparg > 0);
+    top = Py_NewRef(bottom);
+    DISPATCH();
+}
+```
+
+`COPY i` pushes a reference to the `i`th item from the top. `COPY 1` duplicates the top of stack. Used in assignments like `x = y = expr` and augmented assignments where the target must be preserved.
+
+### `SWAP`
+
+```c
+// CPython: Python/ceval.c:3040 SWAP
+inst(SWAP, (bottom, unused[oparg-2], top --
+            top, unused[oparg-2], bottom)) {
+    assert(oparg >= 2);
+    /* Exchange TOS with the item oparg positions down */
+    PyObject *temp = bottom;
+    bottom = top;
+    top = temp;
+    DISPATCH();
+}
+```
+
+`SWAP 2` exchanges TOS and TOS1. Used extensively by the compiler for multi-target assignments and exception cleanup without introducing temporary names.
+
+### `PUSH_EXC_INFO`
+
+```c
+// CPython: Python/ceval.c:3100 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    if (exc_info->previous_item == NULL) {
+        prev_exc = Py_NewRef(Py_None);
+    } else {
+        prev_exc = Py_NewRef(exc_info->exc_value);
+    }
+    exc_info->exc_value = Py_NewRef(new_exc);
+    DISPATCH();
+}
+```
+
+`PUSH_EXC_INFO` is emitted at the start of every `except` block. It saves the current active exception and installs the new one. `POP_EXCEPT` restores the saved exception when the `except` block exits.
+
+## gopy notes
+
+`BINARY_SUBSCR_TUPLE_INT` is in `vm/eval_simple.go` as a specialization guard. `STORE_SUBSCR_DICT` calls `objects.DictSetItem`. `COPY` and `SWAP` manipulate `vm.stack` directly by index. `PUSH_EXC_INFO` / `POP_EXCEPT` manage `vm.excStack` in `vm/eval_unwind.go`.

@@ -1,0 +1,115 @@
+---
+title: Objects/genobject.c (part 3)
+description: "Objects/genobject.c part 3: gen_throw, gen_close, coroutine.throw, async generator cleanup."
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genobject.c" />
+
+This annotation covers exception injection and cleanup for generators and coroutines. See `objects_generatorobject5_detail` for `gen_send_ex`, frame resumption, and `StopIteration` propagation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `gen_throw` | Inject an exception into a generator |
+| 81-160 | `gen_close` | Finalize a generator with `GeneratorExit` |
+| 161-260 | `coro_throw` | Coroutine variant of throw |
+| 261-380 | Async generator cleanup | `aclose()` and `athrow()` |
+| 381-500 | `PyGen_SetStopIterationValue` | Capture the generator return value |
+
+## Reading
+
+### `gen_throw`
+
+```c
+// CPython: Objects/genobject.c:480 gen_throw
+static PyObject *
+gen_throw(PyGenObject *gen, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* gen.throw(exc) or gen.throw(type, value, traceback) */
+    PyObject *typ = args[0];
+    PyObject *val = nargs > 1 ? args[1] : NULL;
+    PyObject *tb  = nargs > 2 ? args[2] : NULL;
+    if (PyExceptionInstance_Check(typ)) {
+        val = typ;
+        typ = PyExceptionInstance_Class(typ);
+    }
+    /* Check if the generator is already closed */
+    if (gen->gi_frame_state == FRAME_COMPLETED) {
+        PyErr_SetObject(typ, val);
+        return NULL;
+    }
+    PyObject *yf = _PyGen_yf(gen);
+    if (yf) {
+        /* Sub-generator: delegate throw to it */
+        ...
+    }
+    /* Inject the exception into the generator's frame */
+    _PyErr_SetObject(tstate, typ, val);
+    return gen_send_ex(gen, Py_None, 1, 0);
+}
+```
+
+`generator.throw(exc)` injects `exc` at the point where the generator is suspended. If the generator is delegating via `yield from` / `await`, the throw is recursively forwarded to the innermost sub-generator.
+
+### `gen_close`
+
+```c
+// CPython: Objects/genobject.c:560 gen_close
+static PyObject *
+gen_close(PyGenObject *gen, PyObject *args)
+{
+    PyObject *yf = _PyGen_yf(gen);
+    int err = 0;
+    if (yf) {
+        /* Close the sub-generator first */
+        err = gen_close_iter(yf);
+    }
+    if (err == 0) {
+        PyErr_SetNone(PyExc_GeneratorExit);
+    }
+    PyObject *retval = gen_send_ex(gen, Py_None, err != 0, 1);
+    if (retval) {
+        const char *msg = "generator ignored GeneratorExit";
+        if (PyCoro_CheckExact(gen)) msg = "coroutine ignored GeneratorExit";
+        Py_DECREF(retval);
+        PyErr_SetString(PyExc_RuntimeError, msg);
+        return NULL;
+    }
+    ...
+}
+```
+
+`generator.close()` throws `GeneratorExit`. If the generator catches it and yields again, `RuntimeError("generator ignored GeneratorExit")` is raised. This enforces the contract that generators must not suppress `GeneratorExit`.
+
+### `PyGen_SetStopIterationValue`
+
+```c
+// CPython: Objects/genobject.c:80 PyGen_SetStopIterationValue
+int
+PyGen_SetStopIterationValue(PyObject *value)
+{
+    /* Called when a generator executes 'return value'.
+       Stores value in the thread state so StopIteration(value)
+       can be raised by the caller. */
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (value == NULL || value == Py_None) {
+        tstate->stopiteration_value = NULL;
+    } else {
+        tstate->stopiteration_value = Py_NewRef(value);
+    }
+    return 0;
+}
+```
+
+`return value` inside a generator compiles to `RETURN_VALUE`. The interpreter calls `PyGen_SetStopIterationValue(value)` then sets the frame state to `FRAME_COMPLETED`. The caller's `SEND`/`FOR_ITER` opcode checks for this value to populate `StopIteration.value`.
+
+## gopy notes
+
+`gen_throw` is `objects.GeneratorThrow` in `objects/generator.go`. Sub-generator delegation checks `objects.IsGenerator`. `gen_close` sends `GeneratorExit` via `objects.GeneratorClose`. `PyGen_SetStopIterationValue` stores the return value in `vm.Thread.stopIterValue` and is consumed by `vm.evalSend`.
