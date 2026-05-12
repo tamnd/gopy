@@ -1,0 +1,78 @@
+---
+title: Objects/unicodeobject.c
+description: "Objects/unicodeobject.c: str internals. Compact ASCII/Latin1/UCS2/UCS4 kinds, interning table, encode/decode dispatch, PyUnicode_FromFormat, join, replace, split, format."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 15500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+`Objects/unicodeobject.c` is the largest file in CPython (~15,500 lines). It implements Python's `str` type. Since PEP 393 (Python 3.3), strings use a flexible internal representation: ASCII strings use a compact 1-byte-per-char layout, Latin-1 strings use 1 byte per char, BMP strings use 2 bytes, and full Unicode uses 4 bytes. This avoids wasting memory on short ASCII strings while supporting the full Unicode range.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-500 | Object layout, `_PyUnicode_New`, `PyUnicode_New` | Allocation by kind |
+| 501-1500 | Encoding/decoding: UTF-8, UTF-16, UTF-32, Latin-1, ASCII, raw-unicode-escape | Codec dispatch |
+| 1501-2500 | `PyUnicode_FromFormat`, `PyUnicode_FromObject` | Construction |
+| 2501-3500 | `PyUnicode_Decode`, `PyUnicode_Encode` | Generic codec interface |
+| 3501-5000 | String operations: `find`, `count`, `replace`, `split`, `join`, `strip` | Method implementations |
+| 5001-6500 | `unicode_format` | `%` formatting and `str.format()` |
+| 6501-8000 | `PyUnicode_CompareWithASCIIString`, `PyUnicode_RichCompare`, `unicode_hash` | Comparison and hashing |
+| 8001-10000 | Interning: `PyUnicode_InternInPlace`, `_Py_ID` table | String interning |
+| 10001-15500 | `tp_methods`, `tp_as_sequence`, `tp_as_mapping` | `str` type slots and methods |
+
+## Reading
+
+### PEP 393 compact representation
+
+The layout of a Unicode object is:
+
+```c
+// CPython: Include/cpython/unicodeobject.h PyASCIIObject
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t length;
+    Py_hash_t  hash;
+    struct { ... unsigned int kind:3; unsigned int compact:1; unsigned int ascii:1; ... } state;
+    wchar_t   *wstr;  /* deprecated */
+} PyASCIIObject;
+```
+
+For `kind=1` (Latin-1), the character data immediately follows the `PyASCIIObject` header. For `kind=2` (UCS-2) and `kind=4` (UCS-4), a `PyCompactUnicodeObject` header is used instead.
+
+### Interning
+
+`PyUnicode_InternInPlace` looks up the string in `interned` (a `dict`). If found, it replaces the caller's reference with the interned singleton. Short identifiers (`NAME` tokens, attribute names) are automatically interned.
+
+```c
+// CPython: Objects/unicodeobject.c:14910 PyUnicode_InternInPlace
+void
+PyUnicode_InternInPlace(PyObject **p)
+{
+    PyObject *s = *p;
+    ...
+    PyObject *t = PyDict_SetDefault(interned, s, s);
+    if (t != s) {
+        Py_SETREF(*p, Py_NewRef(t));
+    }
+    ...
+}
+```
+
+### `unicode_hash`
+
+Uses SipHash-1-3 (or FNV on old builds) to hash the UTF-8 encoded form. The result is cached in `_PyASCIIObject_CAST(op)->hash`.
+
+### `PyUnicode_FromFormat`
+
+Formats a C string pattern with printf-like substitutions, but using Python object types (`%R` for `repr()`, `%S` for `str()`, `%U` for a `PyUnicodeObject*`).
+
+## gopy notes
+
+The gopy equivalent is `objects/str.go`. gopy stores strings as Go `string` (immutable UTF-8 bytes). The PEP 393 kind system is not replicated; Go's `rune` slice is used for character-level operations. String interning uses a Go `sync.Map`. `PyUnicode_FromFormat` maps to Go's `fmt.Sprintf`.

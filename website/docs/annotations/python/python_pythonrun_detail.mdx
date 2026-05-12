@@ -1,0 +1,82 @@
+---
+title: Python/pythonrun.c
+description: "Python/pythonrun.c: PyRun_String, PyRun_File, PyRun_InteractiveLoop, run_mod. Parse+compile+exec pipeline for string and file sources."
+cpython_path: Python/pythonrun.c
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/pythonrun.c" />
+
+`Python/pythonrun.c` implements the high-level parse-compile-execute pipeline. It bridges the interpreter's public API (`PyRun_String`, `PyRun_File`) to the lower-level compiler and eval loop. This is the code path taken by `exec()`, `eval()`, the `python -c` flag, and `python file.py`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyRun_SimpleStringFlags`, `PyRun_SimpleFileExFlags` | Simple top-level entry points |
+| 101-300 | `PyRun_StringFlags`, `PyRun_FileExFlags` | Core string and file runners |
+| 301-500 | `run_eval_code_obj`, `run_mod` | Execute a code object |
+| 501-700 | `PyRun_InteractiveLoopFlags`, `PyRun_InteractiveOneObjectFlags` | REPL loop |
+| 701-900 | `handle_system_exit` | Converts `SystemExit` to exit code |
+| 901-1100 | `flush_io`, `_PyObject_CallMethodIdOneArg` helpers | Output flushing |
+
+## Reading
+
+### `PyRun_StringFlags`
+
+The canonical entry point for `exec(string, globals, locals)`:
+
+```c
+// CPython: Python/pythonrun.c:1015 PyRun_StringFlags
+PyObject *
+PyRun_StringFlags(const char *str, int start, PyObject *globals,
+                  PyObject *locals, PyCompilerFlags *flags)
+{
+    PyObject *ret = NULL;
+    mod_ty mod;
+    PyArena *arena = _PyArena_New();
+    ...
+    mod = _PyParser_ASTFromString(str, "<string>", start, flags, arena);
+    if (mod != NULL)
+        ret = run_mod(mod, "<string>", globals, locals, flags, arena, NULL);
+    _PyArena_Free(arena);
+    return ret;
+}
+```
+
+The `start` parameter is the grammar start symbol: `Py_eval_input` for expressions, `Py_file_input` for a module, `Py_single_input` for interactive mode.
+
+### `run_mod`
+
+```c
+// CPython: Python/pythonrun.c:1085 run_mod
+static PyObject *
+run_mod(mod_ty mod, PyObject *filename, PyObject *globals, PyObject *locals,
+        PyCompilerFlags *flags, PyArena *arena, PyObject *interactive_src)
+{
+    PyCodeObject *co = _PyAST_Compile(mod, filename, flags, -1, arena);
+    if (co == NULL) return NULL;
+    ...
+    PyObject *v = run_eval_code_obj(tstate, co, globals, locals);
+    Py_DECREF(co);
+    return v;
+}
+```
+
+`_PyAST_Compile` runs the full compiler pipeline (AST -> symbol table -> bytecode). `run_eval_code_obj` calls `PyEval_EvalCode`.
+
+### Interactive loop
+
+`PyRun_InteractiveLoopFlags` reads lines, attempts to compile them as `Py_single_input`, and prints the result if it is not `None`. It uses `sys.ps1` and `sys.ps2` for the prompts.
+
+### `handle_system_exit`
+
+If the code raises `SystemExit`, `handle_system_exit` converts the exception to an integer exit code (or prints the exception message and uses exit code 1), then calls `Py_FinalizeEx` and `exit()`.
+
+## gopy notes
+
+The gopy equivalent is `pythonrun/runstring.go`. `PyRun_StringFlags` maps to `pythonrun.RunString`; the parse-compile-eval pipeline is `parser.ParseString` -> `compile.Compile` -> `vm.EvalCode`. The interactive loop is not yet implemented in gopy.

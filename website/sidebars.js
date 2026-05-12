@@ -300,6 +300,10 @@ const sidebars = {
         'annotations/python/python_ast2_detail',
         'annotations/python/python_abstractobject_detail',
         'annotations/python/python_specialize_detail',
+        'annotations/python/python_pylifecycle_detail',
+        'annotations/python/python_pystate_detail',
+        'annotations/python/python_pythonrun_detail',
+        'annotations/python/python_initconfig_detail',
       ],
     },
     {
@@ -464,6 +468,12 @@ const sidebars = {
         'annotations/objects/objects_descrobject2_detail',
         'annotations/objects/objects_typevarobject_detail',
         'annotations/objects/objects_dictobject2_detail',
+        'annotations/objects/objects_abstractobject_detail',
+        'annotations/objects/objects_typeobject_detail',
+        'annotations/objects/objects_object_detail',
+        'annotations/objects/objects_unicodeobject_detail',
+        'annotations/objects/objects_methodobject_detail',
+        'annotations/objects/objects_moduleobject_detail',
       ],
     },
     {

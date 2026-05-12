@@ -1,0 +1,108 @@
+---
+title: Objects/typeobject.c
+description: "Objects/typeobject.c: type creation, MRO (C3 linearization), slot inheritance, __init_subclass__, type.__call__, PyType_Ready, and the metatype protocol."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 9800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+`Objects/typeobject.c` is one of the largest files in CPython (~9800 lines). It implements the `type` metatype, `PyType_Ready` (slot inheritance), C3 MRO linearization, and the slot-wrapper machinery that exposes C-level slots as Python-visible methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | Forward declarations, internal helpers | Slot update machinery |
+| 201-700 | `type_call`, `type_new`, `type_init` | `type.__call__`, `type.__new__` |
+| 701-1200 | `mro_implementation`, `mro_check_linearization` | C3 MRO algorithm |
+| 1201-2000 | `PyType_Ready` | Initialize a type: fill slots, compute MRO, set up method wrappers |
+| 2001-3500 | Slot wrappers | `slot_tp_*` functions that call Python-level dunder methods |
+| 3501-5000 | `type_getattro`, `type_setattro` | Attribute access on type objects |
+| 5001-6500 | `inherit_slots`, `fixup_slot_dispatchers` | Slot inheritance from base types |
+| 6501-9800 | `tp_methods`, `tp_getset`, `type_members` | `type`'s own methods and attributes |
+
+## Reading
+
+### `type.__call__` and object construction
+
+```c
+// CPython: Objects/typeobject.c:1058 type_call
+static PyObject *
+type_call(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *obj;
+    ...
+    obj = type->tp_new(type, args, kwds);
+    if (obj == NULL) return NULL;
+    ...
+    if (type->tp_init != NULL) {
+        int res = type->tp_init(obj, args, kwds);
+        if (res < 0) {
+            Py_DECREF(obj);
+            return NULL;
+        }
+    }
+    return obj;
+}
+```
+
+`type.__call__` first calls `tp_new` to allocate, then `tp_init` to initialize. Subclasses that override `__new__` and/or `__init__` have their slots replaced by `slot_tp_new`/`slot_tp_init`, which dispatch to Python via `_PyObject_Call`.
+
+### C3 MRO linearization
+
+`mro_implementation` implements the C3 linearization algorithm. It takes a type and its bases, runs C3 merge on their MRO lists, and returns the computed MRO as a tuple.
+
+```c
+// CPython: Objects/typeobject.c:1780 mro_implementation
+static PyObject *
+mro_implementation(PyTypeObject *type)
+{
+    ...
+    // Build list of linearizations of bases + list of direct bases
+    // Run C3 merge
+    ...
+}
+```
+
+### `PyType_Ready`
+
+Initializes a statically defined type. This includes: setting `ob_type` if not set, computing the MRO, inheriting unset slots from the base type, filling in the `tp_dict` with methods and attributes, and calling `PyType_Modified` to invalidate caches.
+
+```c
+// CPython: Objects/typeobject.c:7060 PyType_Ready
+int
+PyType_Ready(PyTypeObject *type)
+{
+    ...
+    if (type->tp_base == NULL && type != &PyBaseObject_Type) {
+        type->tp_base = &PyBaseObject_Type;
+        Py_INCREF(type->tp_base);
+    }
+    /* Initialize tp_bases */
+    bases = type->tp_bases;
+    if (bases == NULL) {
+        bases = PyTuple_Pack(1, type->tp_base);
+        ...
+        type->tp_bases = bases;
+    }
+    /* Compute MRO */
+    mro = mro_implementation(type);
+    ...
+    /* Inherit special slots */
+    inherit_slots(type, (PyTypeObject *)type->tp_base);
+    ...
+}
+```
+
+### Slot wrappers
+
+`slot_tp_repr`, `slot_tp_hash`, `slot_tp_richcompare`, etc. are generated wrappers. When a Python class defines `__repr__`, `type_new` (or `fixup_slot_dispatchers`) installs `slot_tp_repr` into `tp_repr`. This wrapper calls `type_lookup(type, "__repr__")` and then `_PyObject_CallOneArg(func, self)`.
+
+## gopy notes
+
+The gopy equivalent is split across `objects/type.go`, `objects/type_call.go`, and `objects/usertype.go`. `PyType_Ready` maps to `objects.NewType`; C3 MRO is in `objects/type.go:mro`; slot wrappers are implemented as Go closures stored in the `Type` struct's slot fields.

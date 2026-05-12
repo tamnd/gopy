@@ -1,0 +1,92 @@
+---
+title: Python/pystate.c
+description: "Python/pystate.c: interpreter state and thread state management. PyInterpreterState_New/Clear/Delete, PyThreadState_New/Get/Swap, GIL locking, _PyRuntime."
+cpython_path: Python/pystate.c
+cpython_version: "3.14"
+lines: 1900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/pystate.c" />
+
+`Python/pystate.c` manages the `PyInterpreterState` and `PyThreadState` structs that are the backbone of the CPython runtime. Each OS thread that runs Python code has a `PyThreadState`; each isolated interpreter has a `PyInterpreterState`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `_PyRuntime` global, `_PyRuntimeState_Init` | Process-global runtime state |
+| 201-500 | `PyInterpreterState_New`, `PyInterpreterState_Clear`, `PyInterpreterState_Delete` | Interpreter lifecycle |
+| 501-900 | `PyThreadState_New`, `PyThreadState_Clear`, `PyThreadState_Delete` | Thread state lifecycle |
+| 901-1200 | `PyThreadState_Get`, `PyThreadState_Swap`, `_PyThreadState_GET` | Current thread access |
+| 1201-1600 | GIL: `_PyEval_TakeGIL`, `_PyEval_DropGIL` | GIL acquisition and release |
+| 1601-1900 | `Py_BEGIN_ALLOW_THREADS`, `Py_END_ALLOW_THREADS` | GIL release macros |
+
+## Reading
+
+### `PyInterpreterState`
+
+```c
+// CPython: Include/internal/pycore_interp.h PyInterpreterState (excerpt)
+struct _is {
+    struct _is *next;
+    struct _ts *tstate_head;
+    PyObject *modules;        // sys.modules
+    PyObject *sysdict;        // sys.__dict__
+    PyObject *builtins;       // __builtins__
+    PyObject *importlib;
+    struct _ceval_state ceval;
+    ...
+};
+```
+
+Each interpreter is an island: separate `sys.modules`, separate `builtins`, separate type cache. Thread states hang off `tstate_head`.
+
+### `PyThreadState`
+
+```c
+// CPython: Include/cpython/pystate.h PyThreadState (excerpt)
+struct _ts {
+    struct _ts *prev;
+    struct _ts *next;
+    PyInterpreterState *interp;
+    _PyErr_StackItem *exc_info;   // current exception
+    _PyStackChunkObject *datastack_chunk;
+    _PyCFrame *cframe;            // current frame chain
+    uint64_t id;
+    ...
+};
+```
+
+`cframe` points to the current `_PyCFrame`, which links to the active `_PyInterpreterFrame`.
+
+### GIL operations
+
+The GIL is per-interpreter in Python 3.12+ (when using `PyInterpreterConfig_OWN_GIL`). `_PyEval_TakeGIL` is the slow path called when a thread wants the GIL after it has been requested:
+
+```c
+// CPython: Python/ceval_gil.c take_gil (simplified)
+static void
+take_gil(PyThreadState *tstate)
+{
+    ...
+    MUTEX_LOCK(gil->mutex);
+    while (!_Py_atomic_load_relaxed(&gil->locked)) {
+        ...
+        COND_TIMED_WAIT(gil->cond, gil->mutex, INTERVAL, timed_out);
+    }
+    ...
+    _Py_atomic_store_relaxed(&gil->holder, tstate);
+    MUTEX_UNLOCK(gil->mutex);
+}
+```
+
+### `PyThreadState_Swap`
+
+`PyThreadState_Swap(new_tstate)` atomically sets the current thread's tstate pointer to `new_tstate` and returns the old one. Used by `Py_BEGIN_ALLOW_THREADS` to release the GIL and save the current tstate.
+
+## gopy notes
+
+Status: partially ported. gopy's equivalent of `PyInterpreterState` is an implicit global (goroutine-local context threaded through `vm.Frame`). There is no GIL in gopy; goroutine safety is achieved via Go's memory model. `PyThreadState` maps to the goroutine stack plus the `vm.Frame` chain. `_PyRuntime` maps to package-level variables in `objects/` initialized at startup.

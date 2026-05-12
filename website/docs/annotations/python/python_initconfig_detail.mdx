@@ -1,0 +1,99 @@
+---
+title: Python/initconfig.c
+description: "Python/initconfig.c: PyConfig and PyPreConfig structs, config parsing from command line and environment, config validation, _PyConfig_Read, Py_GetPath."
+cpython_path: Python/initconfig.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/initconfig.c" />
+
+`Python/initconfig.c` implements the configuration pipeline that translates command-line arguments and environment variables into the `PyConfig` struct that controls interpreter initialization. It is the implementation of PEP 587 (`PyConfig`) and PEP 578 (audit hooks).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `PyPreConfig` | Pre-init configuration: allocator, locale, UTF-8 mode |
+| 301-700 | `PyConfig` fields and defaults | All 70+ config fields with their defaults |
+| 701-1200 | `_PyConfig_Read` | Read config from argv, env vars, PyConfig fields |
+| 1201-1600 | `config_init_argv`, `config_init_env` | Argv and environment parsing |
+| 1601-2000 | `config_init_sys_path_config` | sys.path construction |
+| 2001-2800 | `PyConfig_InitPythonConfig`, `PyConfig_InitIsolatedConfig`, `PyConfig_SetArgv` | Public API |
+
+## Reading
+
+### `PyConfig` key fields
+
+```c
+// CPython: Include/cpython/initconfig.h PyConfig (excerpt)
+struct PyConfig {
+    int  isolated;          // -I flag
+    int  use_environment;   // read env vars
+    int  dev_mode;          // -X dev
+    int  install_signal_handlers;
+    int  use_hash_randomization;
+    int  faulthandler;
+    int  tracemalloc;
+    int  int_max_str_digits; // -X int_max_str_digits
+    int  optimization_level; // -O
+    int  parser_debug;       // -d
+    int  verbose;            // -v
+    int  quiet;              // -q
+    wchar_t *program_name;
+    PyWideStringList argv;
+    PyWideStringList xoptions;  // -X options
+    PyWideStringList warnoptions;
+    wchar_t *pythonpath_env;   // PYTHONPATH
+    PyWideStringList module_search_paths;
+    ...
+};
+```
+
+### `_PyConfig_Read`
+
+Reads configuration sources in priority order:
+1. Programmatically set fields in `PyConfig`
+2. Command-line arguments (`argv`)
+3. Environment variables (`PYTHONPATH`, `PYTHONUTF8`, etc.)
+4. Python path configuration file (`._pth` files)
+5. Compiled-in defaults
+
+```c
+// CPython: Python/initconfig.c:3280 _PyConfig_Read
+PyStatus
+_PyConfig_Read(PyConfig *config, int compute_path_config)
+{
+    status = config_read_env_vars(config);
+    ...
+    status = config_read_cmdline(config);
+    ...
+    if (compute_path_config)
+        status = config_init_path_config(config, 0);
+    ...
+}
+```
+
+### `PyConfig_InitIsolatedConfig`
+
+Initializes a config with all environment-reading and site-package loading disabled, suitable for embedding Python in an application that manages its own environment.
+
+```c
+// CPython: Python/initconfig.c:1035 PyConfig_InitIsolatedConfig
+void
+PyConfig_InitIsolatedConfig(PyConfig *config)
+{
+    config->isolated = 1;
+    config->use_environment = 0;
+    config->user_site_directory = 0;
+    config->site_import = 0;
+    ...
+}
+```
+
+## gopy notes
+
+Status: not yet ported as a full `PyConfig`. gopy's startup configuration is currently hardcoded. A future `PyConfig` port would allow embedding applications to control gopy the same way CPython embedding works. The key fields needed immediately are `argv`, `pythonpath_env`, `optimization_level`, and `verbose`.

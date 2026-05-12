@@ -1,0 +1,77 @@
+---
+title: Python/pylifecycle.c
+description: "Python/pylifecycle.c: interpreter lifecycle. Py_InitializeFromConfig, Py_FinalizeEx, Py_NewInterpreter, interpreter state setup, pre-init configuration, runtime init phases."
+cpython_path: Python/pylifecycle.c
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/pylifecycle.c" />
+
+`Python/pylifecycle.c` manages the full interpreter lifecycle from cold start to teardown. It is the implementation behind `Py_Initialize`, `Py_Finalize`, `Py_NewInterpreter`, and the subinterpreter isolation added in Python 3.12.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | Pre-init config, `_PyRuntime` init | First-phase initialization |
+| 201-600 | `Py_InitializeFromConfig`, `pyinit_core` | Core init: hash secret, codecs, builtins |
+| 601-1000 | `pyinit_main` | Main-phase init: site, signal, warnings |
+| 1001-1400 | `Py_FinalizeEx` | Teardown: flush IO, call atexit, GC finalize |
+| 1401-1800 | `Py_NewInterpreter`, `Py_EndInterpreter` | Subinterpreter management |
+| 1801-2400 | Helpers: `add_main_module`, `init_sys_streams`, `init_import_size` | Subsystem helpers |
+
+## Reading
+
+### Initialization phases
+
+CPython 3.12 divides initialization into multiple phases to support embedding use cases:
+
+1. **Pre-init** (`Py_PreInitialize`): Sets LC_CTYPE locale, configures memory allocator, sets up signal handlers. Can run before GIL exists.
+2. **Core** (`pyinit_core`): Creates `_PyRuntime`, initializes the GIL, bootstraps the type system, creates the first interpreter state and thread state, initializes built-in types and modules.
+3. **Main** (`pyinit_main`): Imports `site`, sets up `sys.argv`, initializes `warnings`, runs `site.py`.
+
+```c
+// CPython: Python/pylifecycle.c:1015 Py_InitializeFromConfig
+PyStatus
+Py_InitializeFromConfig(const PyConfig *config)
+{
+    ...
+    status = pyinit_core(runtime, src_config, &tstate);
+    ...
+    status = pyinit_main(tstate);
+    ...
+}
+```
+
+### `Py_FinalizeEx`
+
+Calls all registered `atexit` functions, waits for daemon threads, calls `gc.collect()` twice to finalize reference cycles, clears module `__dict__`s in reverse import order, calls `tp_finalize` on remaining live objects, then frees the interpreter state.
+
+### `Py_NewInterpreter`
+
+Creates a new interpreter state (its own `sys.modules`, `builtins`, `sys`, and import system). Since Python 3.12, subinterpreters can have their own GIL (`Py_NewInterpreterFromConfig` with `gil=PyInterpreterConfig_OWN_GIL`).
+
+```c
+// CPython: Python/pylifecycle.c:1580 Py_NewInterpreterFromConfig
+PyThreadState *
+Py_NewInterpreterFromConfig(const PyInterpreterConfig *config)
+{
+    ...
+    interp = PyInterpreterState_New();
+    ...
+    tstate = new_threadstate(interp);
+    ...
+    status = init_interp_create_gil(tstate, config->gil);
+    ...
+    status = pyinit_interp_main(tstate);
+    return tstate;
+}
+```
+
+## gopy notes
+
+Status: not yet ported (as a full lifecycle). gopy's `pythonrun/runstring.go` covers the simple "initialize + run" path. The multi-phase init, `PyConfig`, and subinterpreter machinery would be needed for an embedding API. The gopy equivalent of `Py_InitializeFromConfig` is the implicit initialization in `init()` functions across the `objects/`, `vm/`, and `stdlibinit/` packages.

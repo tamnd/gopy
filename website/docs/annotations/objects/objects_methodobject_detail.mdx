@@ -1,0 +1,77 @@
+---
+title: Objects/methodobject.c
+description: "Objects/methodobject.c: PyCFunction and PyCMethodObject. Wraps C functions as Python callables. METH_VARARGS, METH_FASTCALL, METH_NOARGS, METH_O calling conventions."
+cpython_path: Objects/methodobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/methodobject.c" />
+
+`Objects/methodobject.c` implements `PyCFunctionObject` and `PyCMethodObject`, which wrap C function pointers as callable Python objects. Every built-in function (`len`, `print`, `range`) and every method defined via `PyMethodDef` uses one of these types.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyCFunction_NewEx`, `PyCMethod_New` | Constructors |
+| 81-200 | `PyCFunction_Call`, `method_call` | Calling conventions dispatch |
+| 201-350 | `PyCFunction_GET_FUNCTION`, `PyCFunction_GET_FLAGS` | Accessor macros |
+| 351-500 | `tp_repr`, `tp_richcompare`, `tp_hash` | Slots for built-in function type |
+| 501-600 | `PyMethodDef` registration, `PyCFunctionObject` type def | Type object |
+
+## Reading
+
+### Calling conventions
+
+`PyMethodDef.ml_flags` selects the calling convention:
+
+| Flag | Signature | Notes |
+|------|-----------|-------|
+| `METH_VARARGS` | `f(self, args)` | Classic; `args` is a tuple |
+| `METH_VARARGS | METH_KEYWORDS` | `f(self, args, kwargs)` | Full signature |
+| `METH_FASTCALL` | `f(self, *args, nargs)` | C array of PyObject* |
+| `METH_FASTCALL | METH_KEYWORDS` | `f(self, *args, nargs, kwnames)` | Vectorcall |
+| `METH_NOARGS` | `f(self, NULL)` | No arguments |
+| `METH_O` | `f(self, arg)` | Exactly one argument |
+| `METH_CLASS` | prepended | `classmethod` variant |
+| `METH_STATIC` | prepended | `staticmethod` variant |
+
+### `method_call` dispatch
+
+```c
+// CPython: Objects/methodobject.c:140 method_call
+static PyObject *
+method_call(PyObject *func, PyObject *args, PyObject *kwargs)
+{
+    PyCFunction meth = PyCFunction_GET_FUNCTION(func);
+    PyObject *self = PyCFunction_GET_SELF(func);
+    int flags = PyCFunction_GET_FLAGS(func);
+
+    switch (flags & ~(METH_CLASS | METH_STATIC | METH_COEXIST)) {
+    case METH_VARARGS:
+        ...
+        return meth(self, args);
+    case METH_VARARGS | METH_KEYWORDS:
+        return ((PyCFunctionWithKeywords)(void(*)(void))meth)(self, args, kwargs);
+    case METH_FASTCALL | METH_KEYWORDS:
+        return _PyCFunction_Vectorcall(func, ...);
+    ...
+    }
+}
+```
+
+### `PyCMethod_New` and the `__module__` attribute
+
+`PyCMethod_New` creates a method bound to a specific type (`cls`), used for `METH_CLASS` methods. The type is stored in `m_ml` (the `PyMethodDef`) and accessible as `__self__.__class__`.
+
+### Vectorcall support
+
+`PyCFunctionObject` implements the vectorcall protocol (`tp_vectorcall`). This allows the interpreter to call built-in functions via `CALL_INTRINSIC_1` and `CALL_BUILTIN_FAST` specialized opcodes without creating an intermediate tuple.
+
+## gopy notes
+
+The gopy equivalent is `objects/method.go`. Built-in methods are Go functions wrapped in a `Method` struct that holds the function pointer and calling convention flags. The vectorcall fast path is approximated by direct Go function calls when the call site is monomorphic.

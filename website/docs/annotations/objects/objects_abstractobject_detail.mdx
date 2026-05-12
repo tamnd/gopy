@@ -1,0 +1,114 @@
+---
+title: Objects/abstract.c
+description: "Objects/abstract.c: the abstract object protocol. PyObject_Call, PyObject_GetAttr, PyObject_SetAttr, PyNumber_*, PySequence_*, PyMapping_*, PyIter_Next."
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 2900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/abstract.c" />
+
+`Objects/abstract.c` implements the C-level abstract object protocol: the set of `PyObject_*`, `PyNumber_*`, `PySequence_*`, and `PyMapping_*` functions that operate on any Python object via its type's slot table. This file is the bridge between C extension code and Python's operator semantics.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `PyObject_Call`, `_PyObject_CallMethod*` | Call protocol |
+| 201-450 | `PyObject_GetAttr`, `PyObject_SetAttr`, `PyObject_GenericGetAttr` | Attribute access |
+| 451-700 | `PyObject_GetItem`, `PyObject_SetItem`, `PyObject_DelItem` | Subscript protocol |
+| 701-1000 | `PyNumber_Add`, `PyNumber_Subtract`, ..., `PyNumber_Index` | Numeric protocol |
+| 1001-1400 | `PySequence_Length`, `PySequence_GetItem`, `PySequence_Contains`, `PySequence_List`, `PySequence_Tuple` | Sequence protocol |
+| 1401-1700 | `PyMapping_Size`, `PyMapping_GetItemString`, `PyMapping_Keys`, `PyMapping_Values`, `PyMapping_Items` | Mapping protocol |
+| 1701-2000 | `PyObject_GetIter`, `PyIter_Next`, `PyAIter_Send` | Iterator protocol |
+| 2001-2900 | `PyObject_IsTrue`, `PyObject_Not`, `PyObject_Repr`, `PyObject_Str`, `PyObject_ASCII`, `PyObject_Bytes` | Miscellaneous protocol |
+
+## Reading
+
+### `PyObject_Call`
+
+The primary call entry point. Delegates to `tp_call` if present, otherwise raises `TypeError`.
+
+```c
+// CPython: Objects/abstract.c:290 PyObject_Call
+PyObject *
+PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs)
+{
+    ...
+    ternaryfunc call = Py_TYPE(callable)->tp_call;
+    if (call == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                     "'%.200s' object is not callable",
+                     Py_TYPE(callable)->tp_name);
+        return NULL;
+    }
+    PyObject *result = call(callable, args, kwargs);
+    ...
+    return result;
+}
+```
+
+### `PyObject_GetAttr`
+
+```c
+// CPython: Objects/abstract.c:906 PyObject_GetAttr
+PyObject *
+PyObject_GetAttr(PyObject *v, PyObject *name)
+{
+    PyTypeObject *tp = Py_TYPE(v);
+    if (tp->tp_getattro != NULL)
+        return (*tp->tp_getattro)(v, name);
+    ...
+}
+```
+
+Dispatches through `tp_getattro`. The default `tp_getattro` is `PyObject_GenericGetAttr`, which searches the MRO for data descriptors, the instance `__dict__`, then non-data descriptors.
+
+### `PyNumber_Add` and binary operator dispatch
+
+```c
+// CPython: Objects/abstract.c:1012 binary_op1
+static PyObject *
+binary_op1(PyObject *v, PyObject *w, const int op_slot, const char *op_name)
+{
+    binaryfunc slotv = NB_BINOP(Py_TYPE(v)->tp_as_number, op_slot);
+    binaryfunc slotw = NB_BINOP(Py_TYPE(w)->tp_as_number, op_slot);
+    ...
+    if (slotv) {
+        x = slotv(v, w);
+        if (x != Py_NotImplemented) return x;
+        Py_DECREF(x);
+    }
+    if (slotw && slotw != slotv) {
+        x = slotw(w, v);
+        ...
+    }
+    Py_RETURN_NOTIMPLEMENTED;
+}
+```
+
+Tries the left operand's slot first; falls back to the right operand's reflected slot if `Py_NotImplemented` is returned.
+
+### `PyIter_Next`
+
+```c
+// CPython: Objects/abstract.c:3031 PyIter_Next
+PyObject *
+PyIter_Next(PyObject *iter)
+{
+    PyObject *result;
+    result = (*Py_TYPE(iter)->tp_iternext)(iter);
+    if (result == NULL && !PyErr_Occurred())
+        PyErr_SetNone(PyExc_StopIteration);
+    return result;
+}
+```
+
+Calls `tp_iternext`. If it returns `NULL` without setting an exception, it sets `StopIteration`.
+
+## gopy notes
+
+The gopy equivalent is `objects/protocol.go` and the `vm/` call sites. `PyObject_Call` maps to `vm.Call`; attribute access maps to `objects.GetAttr`. The `PyNumber_*` family maps to the `objects/object.go` binary-op dispatch using Go interface assertions on `py.Object`.

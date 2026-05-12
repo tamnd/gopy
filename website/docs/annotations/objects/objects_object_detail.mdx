@@ -1,0 +1,107 @@
+---
+title: Objects/object.c
+description: "Objects/object.c: PyObject_Repr, PyObject_Str, PyObject_Hash, PyObject_RichCompare, PyObject_IsTrue, reference counting, Py_INCREF/DECREF, and the type name table."
+cpython_path: Objects/object.c
+cpython_version: "3.14"
+lines: 2100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/object.c" />
+
+`Objects/object.c` implements the baseline `object` behavior that all Python types inherit: `repr`, `str`, `hash`, rich comparison, identity, truthiness, printing, and reference counting. It also defines the type display machinery and the special sentinel values `Py_None`, `Py_NotImplemented`, and `Py_Ellipsis`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_Py_NoneStruct`, `_Py_NotImplementedStruct`, `_Py_EllipsisObject` | Singleton objects |
+| 101-300 | `PyObject_Repr`, `PyObject_ASCII`, `PyObject_Str` | String representation |
+| 301-500 | `PyObject_Hash`, `_Py_HashBytes`, `_Py_HashDouble` | Hashing |
+| 501-700 | `PyObject_RichCompare`, `PyObject_RichCompareBool` | Comparison dispatch |
+| 701-900 | `PyObject_IsTrue`, `PyObject_Not` | Truthiness |
+| 901-1100 | `Py_INCREF`, `Py_DECREF`, `_Py_Dealloc` | Reference counting |
+| 1101-1400 | `PyObject_Dir`, `_PyObject_GetAttrWithoutError` | Directory and attribute helpers |
+| 1401-1800 | `object_richcompare`, `object_hash`, `object_repr`, `object_str` | Default `object` implementations |
+| 1801-2100 | `type_repr`, `PyType_Name`, `_PyType_IsSubtype` | Type helpers |
+
+## Reading
+
+### `PyObject_Repr`
+
+```c
+// CPython: Objects/object.c:511 PyObject_Repr
+PyObject *
+PyObject_Repr(PyObject *v)
+{
+    PyObject *res;
+    if (PyErr_CheckSignals()) return NULL;
+    ...
+    if (Py_TYPE(v)->tp_repr == NULL)
+        return PyUnicode_FromFormat("<%s object at %p>",
+                                   Py_TYPE(v)->tp_name, v);
+    res = (*Py_TYPE(v)->tp_repr)(v);
+    if (!PyUnicode_Check(res)) {
+        PyErr_Format(PyExc_TypeError,
+                     "__repr__ returned non-string (type %.200s)",
+                     Py_TYPE(res)->tp_name);
+        Py_DECREF(res);
+        return NULL;
+    }
+    return res;
+}
+```
+
+Calls `tp_repr`; falls back to the `<type at address>` format if `tp_repr` is NULL; validates that the result is a `str`.
+
+### `PyObject_RichCompare`
+
+```c
+// CPython: Objects/object.c:812 PyObject_RichCompare
+PyObject *
+PyObject_RichCompare(PyObject *v, PyObject *w, int op)
+{
+    PyObject *res;
+    assert(Py_LT <= op && op <= Py_GE);
+    if (!Py_IS_TYPE(v, Py_TYPE(w)) &&
+        PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v)) &&
+        (Py_TYPE(w)->tp_richcompare != NULL)) {
+        res = (*Py_TYPE(w)->tp_richcompare)(w, v, _Py_SwappedOp[op]);
+        if (res != Py_NotImplemented) return res;
+        Py_DECREF(res);
+    }
+    if (Py_TYPE(v)->tp_richcompare != NULL) {
+        res = (*Py_TYPE(v)->tp_richcompare)(v, w, op);
+        if (res != Py_NotImplemented) return res;
+        Py_DECREF(res);
+    }
+    ...
+}
+```
+
+Tries the subtype's reflected comparison first (if applicable), then the left operand's, then falls back to identity comparison for `==`/`!=`.
+
+### `PyObject_Hash`
+
+Default hash is the object's memory address (`id(obj) // 16`). Types can override via `tp_hash`. The hash is cached in `ob_shash` for strings and frozen sets to avoid recomputation.
+
+### `_Py_Dealloc`
+
+```c
+// CPython: Objects/object.c:2432 _Py_Dealloc
+void
+_Py_Dealloc(PyObject *op)
+{
+    destructor dealloc = Py_TYPE(op)->tp_dealloc;
+    ...
+    (*dealloc)(op);
+}
+```
+
+Called by `Py_DECREF` when the refcount reaches zero. Dispatches to the type's `tp_dealloc`.
+
+## gopy notes
+
+The gopy equivalent is `objects/object.go`. `PyObject_Repr` maps to `objects.Repr`; `PyObject_RichCompare` maps to `objects.RichCompare`; reference counting is replaced by Go's garbage collector. `Py_None`, `Py_NotImplemented`, and `Py_Ellipsis` are singleton `objects.NoneType`, `objects.NotImplementedType`, and `objects.EllipsisType` instances.

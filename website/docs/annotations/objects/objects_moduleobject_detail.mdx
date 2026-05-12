@@ -1,0 +1,90 @@
+---
+title: Objects/moduleobject.c
+description: "Objects/moduleobject.c: module object layout, PyModule_New, module __dict__, module_exec, multi-phase initialization (PEP 489), module state."
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/moduleobject.c" />
+
+`Objects/moduleobject.c` implements the `module` type. Every `import` statement creates a `PyModuleObject`. The file handles single-phase and multi-phase module initialization (PEP 489), module `__dict__` setup, and the `module_exec` slot used by `importlib`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyModule_New`, `PyModule_NewObject` | Allocate and name a module |
+| 81-200 | `PyModule_GetDict`, `PyModule_AddObject*` | Module dict access; add constants/functions |
+| 201-400 | `PyModuleDef_Init`, multi-phase slots | PEP 489 `PyModuleDef` registration |
+| 401-600 | `module_init`, `module_exec`, `module_traverse`, `module_clear` | Lifecycle methods |
+| 601-900 | `tp_methods`, `tp_getset`, `tp_repr` | `module` type slots |
+
+## Reading
+
+### `PyModule_New`
+
+```c
+// CPython: Objects/moduleobject.c:55 PyModule_NewObject
+PyObject *
+PyModule_NewObject(PyObject *name)
+{
+    PyModuleObject *m;
+    m = (PyModuleObject *)PyType_GenericAlloc(&PyModule_Type, 0);
+    ...
+    m->md_dict = PyDict_New();
+    ...
+    if (PyDict_SetItemString(m->md_dict, "__name__", name) != 0)
+        goto fail;
+    ...
+    return (PyObject *)m;
+}
+```
+
+Allocates a `PyModuleObject`, creates its `__dict__`, and sets `__name__`, `__doc__`, `__package__`, `__loader__`, and `__spec__` to `None` or appropriate defaults.
+
+### `PyModule_AddObject` and friends
+
+```c
+// CPython: Objects/moduleobject.c:203 PyModule_AddObjectRef
+int
+PyModule_AddObjectRef(PyObject *m, const char *name, PyObject *value)
+{
+    PyObject *dict = PyModule_GetDict(m);
+    ...
+    return PyDict_SetItemString(dict, name, value);
+}
+```
+
+`PyModule_AddObject` (deprecated: steals reference) and `PyModule_AddObjectRef` (preferred: does not steal) add a named attribute to a module.
+
+### PEP 489 multi-phase initialization
+
+Multi-phase modules define a `PyModuleDef` with `m_slots` (a `PyModuleDef_Slot[]`) instead of calling `Py_InitModule`. The slots include `Py_mod_create` (to allocate a custom module type), `Py_mod_exec` (to populate the module), and `Py_mod_multiple_interpreters`.
+
+```c
+// CPython: Objects/moduleobject.c:315 _PyModule_ExecDef
+int
+_PyModule_ExecDef(PyObject *module, PyModuleDef *def)
+{
+    ...
+    for (cur_slot = def->m_slots; cur_slot && cur_slot->slot; cur_slot++) {
+        if (cur_slot->slot == Py_mod_exec) {
+            int (*func)(PyObject *) = cur_slot->value;
+            if (func(module) != 0) return -1;
+        }
+    }
+    return 0;
+}
+```
+
+### Module state
+
+`PyModuleDef.m_size` specifies the amount of per-module state storage allocated alongside the `PyModuleObject`. `PyModule_GetState` returns a pointer to this storage, allowing C extension modules to store private data without using global variables.
+
+## gopy notes
+
+The gopy equivalent is `objects/module.go`. `PyModule_New` maps to `objects.NewModule`. Module state is stored as a Go map of interface values (the module's `__dict__`). Multi-phase initialization maps to a `ModuleSpec` struct with optional `exec` and `create` Go functions.
