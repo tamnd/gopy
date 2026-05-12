@@ -1,0 +1,117 @@
+---
+title: Modules/_io (part 9)
+description: "_io part 9: TextIOWrapper.write, readline, tell, seek, _rewind."
+cpython_path: Modules/_io/textio.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/textio.c" />
+
+This annotation covers `TextIOWrapper` read/write and seeking. See `modules_io8_detail` for `TextIOWrapper.__init__`, codec negotiation, and the write-through path.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `TextIOWrapper.write` | Encode and pass to buffer |
+| 81-180 | `TextIOWrapper.readline` | Read up to newline, handling partial reads |
+| 181-280 | `TextIOWrapper.read` | Read n chars or all remaining text |
+| 281-380 | `TextIOWrapper.tell` | Report codec-aware byte position |
+| 381-600 | `TextIOWrapper.seek` | Seek to a previously-told position |
+
+## Reading
+
+### `TextIOWrapper.write`
+
+```c
+// CPython: Modules/_io/textio.c:1420 _io_TextIOWrapper_write_impl
+static PyObject *
+_io_TextIOWrapper_write_impl(textio *self, PyObject *text)
+{
+    PyObject *b = self->encoder ?
+        PyObject_CallMethodOneArg(self->encoder, &_Py_ID(encode), text) :
+        text;
+    ...
+    if (self->write_through) {
+        return _PyObject_CallMethodIdObjArgs(self->buffer, &PyId_write, b, NULL);
+    }
+    /* Accumulate in pending_bytes */
+    self->pending_bytes_count += bytes_len;
+    if (self->pending_bytes_count > self->chunk_size) {
+        _textiowrapper_writeflush(self);
+    }
+    return PyLong_FromSsize_t(text_len);
+}
+```
+
+`TextIOWrapper.write` encodes the string via the configured codec (e.g., UTF-8 incremental encoder), then either writes directly through to the buffer or accumulates in `pending_bytes` until `chunk_size` (8192 bytes) is reached.
+
+### `TextIOWrapper.readline`
+
+```c
+// CPython: Modules/_io/textio.c:1620 _io_TextIOWrapper_readline_impl
+static PyObject *
+_io_TextIOWrapper_readline_impl(textio *self, Py_ssize_t limit)
+{
+    while (1) {
+        /* Search decoded_chars for newline */
+        Py_ssize_t nl = _PyUnicode_FindChar(self->decoded_chars, '\n',
+                                             self->decoded_chars_used, ..., 1);
+        if (nl != -1) break;
+        /* Need more data: read from buffer */
+        if (!_textiowrapper_read_chunk(self, -1)) break;
+    }
+    return _textiowrapper_get_decoded_chars(self, chars_to_grab);
+}
+```
+
+`readline` searches `decoded_chars` (the already-decoded text buffer) for `'\n'`. If not found, it reads another chunk from the underlying binary buffer via `_textiowrapper_read_chunk`, which calls `buffer.read1`. The newline search is O(n) over the decoded text.
+
+### `TextIOWrapper.tell`
+
+```c
+// CPython: Modules/_io/textio.c:1800 _io_TextIOWrapper_tell_impl
+static PyObject *
+_io_TextIOWrapper_tell_impl(textio *self)
+{
+    /* Flush pending bytes first */
+    _textiowrapper_writeflush(self);
+    PyObject *raw_pos = _PyObject_CallMethodIdNoArgs(self->buffer, &PyId_tell);
+    /* Encode tell: pack (raw_pos, decoder_state) into a single integer */
+    PyObject *cookie = _textiowrapper_encode_tell_cookie(self, raw_pos, ...);
+    return cookie;
+}
+```
+
+`TextIOWrapper.tell` returns a "cookie" — not a raw byte offset but an integer encoding both the raw position and the codec decoder state. This is needed because multi-byte codecs (UTF-8, UTF-16) may decode a character spanning a buffer boundary.
+
+### `TextIOWrapper.seek`
+
+```c
+// CPython: Modules/_io/textio.c:1880 _io_TextIOWrapper_seek_impl
+static PyObject *
+_io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
+{
+    if (whence == SEEK_CUR && PyLong_AsLong(cookieObj) == 0)
+        return _io_TextIOWrapper_tell_impl(self);  /* tell() */
+    if (whence == SEEK_END && PyLong_AsLong(cookieObj) == 0) {
+        _textiowrapper_set_decoded_chars(self, NULL, 0);
+        return _PyObject_CallMethodIdObjArgs(self->buffer, &PyId_seek, ...);
+    }
+    /* Decode the cookie back to (raw_pos, decoder_state) */
+    cookie_t cookie = _textiowrapper_decode_tell_cookie(cookieObj);
+    _PyObject_CallMethodIdObjArgs(self->buffer, &PyId_seek, cookie.start_pos, ...);
+    /* Replay decoder to get back to the exact character position */
+    ...
+}
+```
+
+Seeking to an arbitrary `tell`-returned position requires replaying the codec from `cookie.start_pos`. This is why `TextIOWrapper` positions are opaque cookies: rewinding the decoder state cannot be done with a raw byte offset alone.
+
+## gopy notes
+
+`TextIOWrapper.write` is `module/io.TextIOWrapperWrite` in `module/io/module.go`. It calls `encoding/codec.Encode` then `bufio.Writer.Write`. `readline` scans `strings.IndexByte(buf, '\n')`. `tell`/`seek` encode the position as a packed `int64` with codec state bits.

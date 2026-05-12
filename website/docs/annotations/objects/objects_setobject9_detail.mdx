@@ -1,0 +1,130 @@
+---
+title: Objects/setobject.c (part 9)
+description: "setobject.c part 9: set.update, set.intersection_update, set.difference_update, set.symmetric_difference_update."
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/setobject.c" />
+
+This annotation covers in-place set operations. See `objects_setobject8_detail` for `set.add`, `set.discard`, `set.remove`, `set.pop`, and `set.__contains__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `set.update` | `s |= other` — add all elements of other |
+| 81-160 | `set.intersection_update` | `s &= other` — keep only elements in both |
+| 161-240 | `set.difference_update` | `s -= other` — remove elements in other |
+| 241-360 | `set.symmetric_difference_update` | `s ^= other` — toggle membership |
+| 361-500 | `set.copy` / `set.clear` | Shallow copy and clear |
+
+## Reading
+
+### `set.update`
+
+```c
+// CPython: Objects/setobject.c:1820 set_update_internal
+static int
+set_update_internal(PySetObject *so, PyObject *other)
+{
+    if (PyAnySet_Check(other)) {
+        /* Fast path: iterate the hash table directly */
+        Py_ssize_t pos = 0;
+        setentry *entry;
+        Py_hash_t hash;
+        while (_PySet_NextEntry(other, &pos, &entry->key, &hash)) {
+            if (set_add_entry(so, entry->key, hash) < 0) return -1;
+        }
+        return 0;
+    }
+    /* General path: iterate and add */
+    PyObject *it = PyObject_GetIter(other);
+    ...
+}
+```
+
+`s.update(t)` where `t` is a set uses `_PySet_NextEntry` to walk the hash table directly rather than calling `__iter__`. For non-set iterables, it falls back to the general iterator path.
+
+### `set.intersection_update`
+
+```c
+// CPython: Objects/setobject.c:1900 set_intersection_update
+static PyObject *
+set_intersection_update(PySetObject *so, PyObject *args)
+{
+    PyObject *tmp = set_intersection(so, args);
+    if (tmp == NULL) return NULL;
+    /* Replace so's table with tmp's table */
+    set_swap_bodies(so, (PySetObject *)tmp);
+    Py_DECREF(tmp);
+    Py_RETURN_NONE;
+}
+```
+
+`s &= t` computes a new intersection set, then swaps its internal hash table with `s`'s. `set_swap_bodies` swaps the `table`, `fill`, `used`, `mask`, and other fields atomically. The old table is freed when `tmp` is decremented.
+
+### `set.difference_update`
+
+```c
+// CPython: Objects/setobject.c:1960 set_difference_update_internal
+static int
+set_difference_update_internal(PySetObject *so, PyObject *other)
+{
+    if (PyAnySet_Check(other)) {
+        Py_ssize_t pos = 0; setentry *entry; Py_hash_t hash;
+        while (_PySet_NextEntry(other, &pos, &entry->key, &hash)) {
+            set_discard_entry(so, entry->key, hash);
+        }
+        return 0;
+    }
+    ...
+}
+```
+
+`s -= t` iterates `t` and discards each element from `s`. For set-type `t`, it walks the hash table; for arbitrary iterables, it calls `__iter__`. Discarding a missing element is a no-op.
+
+### `set.symmetric_difference_update`
+
+```c
+// CPython: Objects/setobject.c:2020 set_symmetric_difference_update
+static PyObject *
+set_symmetric_difference_update(PySetObject *so, PyObject *other)
+{
+    /* For each element in other: if in so → discard, else → add */
+    PyObject *it = PyObject_GetIter(other);
+    PyObject *key;
+    while ((key = PyIter_Next(it)) != NULL) {
+        if (set_contains_key(so, key)) {
+            set_discard_key(so, key);
+        } else {
+            set_add_key(so, key);
+        }
+        Py_DECREF(key);
+    }
+    ...
+}
+```
+
+`s ^= t` toggles membership for each element of `t`. An element in `s` but not `t` stays; an element in `t` but not `s` is added; an element in both is removed. This is the in-place XOR for sets.
+
+### `set.copy`
+
+```c
+// CPython: Objects/setobject.c:2100 set_copy
+static PyObject *
+set_copy(PySetObject *so, PyObject *Py_UNUSED(ignored))
+{
+    return make_new_set(&PySet_Type, (PyObject *)so);
+}
+```
+
+`s.copy()` creates a new set and inserts all elements from `s`. For `frozenset`, `frozenset.copy()` returns the same object (immutable, so no copy is needed).
+
+## gopy notes
+
+`set.update` is `objects.SetUpdate` in `objects/set.go`. `intersection_update` uses `objects.SetSwapBodies`. `difference_update` calls `objects.SetDiscardEntry`. `symmetric_difference_update` calls `objects.SetContainsKey` then add or discard. `set.copy` calls `objects.NewSetFromSet`.

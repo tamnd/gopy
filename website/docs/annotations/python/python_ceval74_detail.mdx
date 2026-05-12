@@ -1,0 +1,116 @@
+---
+title: Python/ceval.c (part 74)
+description: "Python/ceval.c part 74: WITH_EXCEPT_START, PUSH_EXC_INFO, POP_EXCEPT, RERAISE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers exception handling opcodes. See `python_ceval73_detail` for `FOR_ITER`, `GET_AITER`, and `END_ASYNC_FOR`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PUSH_EXC_INFO` | Save old exception state, push new exception |
+| 81-160 | `POP_EXCEPT` | Restore previous exception state |
+| 161-240 | `WITH_EXCEPT_START` | Call `__exit__(type, value, tb)` on exception |
+| 241-360 | `RERAISE` | Re-raise current or saved exception |
+| 361-500 | `CLEANUP_THROW` | Handle exceptions from `throw()` into a generator |
+
+## Reading
+
+### `PUSH_EXC_INFO`
+
+```c
+// CPython: Python/ceval.c:3820 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    if (exc_info->previous_item == NULL) {
+        /* outermost exception handler */
+    }
+    PyObject *prev_exc = exc_info->exc_value;
+    /* Push old exception, install new */
+    exc_info->exc_value = Py_NewRef(new_exc);
+    prev_exc_info = prev_exc;
+}
+```
+
+`PUSH_EXC_INFO` runs when entering an `except` block. It saves the current active exception (`tstate->exc_info->exc_value`) on the stack as `prev_exc`, then sets the new exception as the active one. This implements exception nesting.
+
+### `POP_EXCEPT`
+
+```c
+// CPython: Python/ceval.c:3860 POP_EXCEPT
+inst(POP_EXCEPT, (exc_value --)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    PyObject *value = exc_info->exc_value;
+    exc_info->exc_value = exc_value;  /* restore saved */
+    Py_XDECREF(value);
+}
+```
+
+`POP_EXCEPT` runs at the end of an `except` block. It pops `prev_exc` from the stack and restores it as the active exception, effectively undoing what `PUSH_EXC_INFO` did.
+
+### `WITH_EXCEPT_START`
+
+```c
+// CPython: Python/ceval.c:3920 WITH_EXCEPT_START
+inst(WITH_EXCEPT_START, (exit_func, lasti, exc -- exit_func, lasti, exc, res)) {
+    /* Call exit.__exit__(type(exc), exc, exc.__traceback__) */
+    PyObject *tp = PyExceptionInstance_Class(exc);
+    PyObject *tb = PyException_GetTraceback(exc);
+    res = PyObject_CallFunctionObjArgs(exit_func, tp, exc, tb, NULL);
+    Py_XDECREF(tb);
+    ERROR_IF(res == NULL, error);
+}
+```
+
+`with cm:` compiles so that if the body raises, `WITH_EXCEPT_START` calls `cm.__exit__(type, value, traceback)`. If `__exit__` returns true, the exception is suppressed; if false, it propagates. `RERAISE` handles the propagation case.
+
+### `RERAISE`
+
+```c
+// CPython: Python/ceval.c:3980 RERAISE
+inst(RERAISE, (vals[oparg], exc --)) {
+    if (oparg) {
+        /* Restore lasti to the WITH block's entry point */
+        frame->f_lasti = PyLong_AsLong(vals[0]);
+    }
+    assert(PyExceptionInstance_Check(exc));
+    _PyErr_SetRaisedException(tstate, Py_NewRef(exc));
+    goto exception_unwind;
+}
+```
+
+`RERAISE` is used at the end of an `except` clause to re-raise the caught exception if `__exit__` returned false. `oparg=1` means "restore the traceback lasti" for the `with` statement's location.
+
+### `CLEANUP_THROW`
+
+```c
+// CPython: Python/ceval.c:4040 CLEANUP_THROW
+inst(CLEANUP_THROW, (exc, val --)) {
+    /* Handle exception from gen.throw(): if StopIteration, extract value */
+    if (PyErr_GivenExceptionMatches(exc, PyExc_StopIteration)) {
+        PyObject *retval = ((PyStopIterationObject *)exc)->value;
+        Py_INCREF(retval);
+        Py_DECREF(exc);
+        Py_DECREF(val);
+        PUSH(retval);
+    } else {
+        _PyErr_SetRaisedException(tstate, Py_NewRef(exc));
+        goto exception_unwind;
+    }
+}
+```
+
+`CLEANUP_THROW` is used in `yield from` and `await` to handle exceptions thrown into a subgenerator. `StopIteration` signals normal completion and its `.value` becomes the result of the `yield from` expression.
+
+## gopy notes
+
+`PUSH_EXC_INFO` / `POP_EXCEPT` are in `vm/eval_unwind.go`. `WITH_EXCEPT_START` calls `objects.CallExit`. `RERAISE` calls `vm.setException`. `CLEANUP_THROW` extracts `.value` from `objects.StopIteration`.

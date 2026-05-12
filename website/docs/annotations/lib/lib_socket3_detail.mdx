@@ -1,0 +1,117 @@
+---
+title: Lib/socket.py (part 3)
+description: "socket.py part 3: socket.create_connection, create_server, getaddrinfo, setblocking, makefile."
+cpython_path: Lib/socket.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/socket.py" />
+
+This annotation covers high-level socket utilities. See `lib_socket2_detail` for `socket.socket.__init__`, `bind`, `listen`, `accept`, `connect`, and `recv`/`send`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `socket.create_connection` | Connect to (host, port) with timeout and fallback |
+| 81-160 | `socket.create_server` | Bind and listen on (host, port) |
+| 161-240 | `socket.getaddrinfo` | DNS + socket parameter resolution |
+| 241-360 | `socket.setblocking` | Toggle blocking mode |
+| 361-500 | `socket.makefile` | Wrap socket in a file-like object |
+
+## Reading
+
+### `socket.create_connection`
+
+```python
+# CPython: Lib/socket.py:810 create_connection
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
+                      source_address=None, *, all_errors=False):
+    host, port = address
+    exceptions = []
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        sock = socket(af, socktype, proto)
+        try:
+            sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            return sock
+        except error as exc:
+            exceptions.append(exc)
+            sock.close()
+    if all_errors:
+        raise ExceptionGroup("create_connection failed", exceptions)
+    raise exceptions[-1]  # last error
+```
+
+`create_connection` tries each address family returned by `getaddrinfo` in order (IPv4 before IPv6 by default on most systems). With `all_errors=True` (Python 3.11+), it raises an `ExceptionGroup` listing every failure.
+
+### `socket.create_server`
+
+```python
+# CPython: Lib/socket.py:870 create_server
+def create_server(address, *, family=AF_INET, backlog=None,
+                  reuse_port=False, dualstack_ipv6=False):
+    sock = socket(family, SOCK_STREAM)
+    if reuse_port:
+        sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
+    if dualstack_ipv6:
+        sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
+    sock.bind(address)
+    sock.listen(backlog if backlog is not None else 128)
+    return sock
+```
+
+`create_server(('', 8080))` creates a ready-to-accept TCP server socket. `dualstack_ipv6=True` disables `IPV6_V6ONLY` so an IPv6 socket also accepts IPv4 connections on Linux.
+
+### `socket.getaddrinfo`
+
+```python
+# CPython: Lib/socket.py:60 getaddrinfo (delegates to C)
+# Returns: [(family, type, proto, canonname, sockaddr), ...]
+# Example:
+# getaddrinfo('example.com', 80, AF_UNSPEC, SOCK_STREAM)
+# → [(AF_INET6, SOCK_STREAM, 6, '', ('2606:...', 80, 0, 0)),
+#    (AF_INET,  SOCK_STREAM, 6, '', ('93.184.216.34', 80))]
+```
+
+`getaddrinfo` is the POSIX resolver. It translates a hostname + service into a list of socket parameters. The C implementation calls `getaddrinfo(3)`. The Python wrapper adds the `flags` defaults and normalizes the return type.
+
+### `socket.setblocking`
+
+```python
+# CPython: Lib/socket.py:670 setblocking
+def setblocking(self, flag):
+    self.settimeout(None if flag else 0.0)
+```
+
+`setblocking(False)` sets the socket to non-blocking mode (timeout=0). `setblocking(True)` restores blocking (timeout=None). Both delegate to `settimeout` which calls `fcntl(O_NONBLOCK)` on POSIX or `ioctlsocket(FIONBIO)` on Windows.
+
+### `socket.makefile`
+
+```python
+# CPython: Lib/socket.py:220 makefile
+def makefile(self, mode="r", buffering=None, *,
+             encoding=None, errors=None, newline=None):
+    for c in mode:
+        if c not in {"r", "w", "b"}:
+            raise ValueError("invalid mode %r" % mode)
+    writing = "w" in mode
+    reading = "r" in mode or not writing
+    raw = SocketIO(self, "w" if writing and not reading else
+                         "r" if reading and not writing else "rw")
+    ...
+    return io.open(raw, mode, buffering, encoding, errors, newline)
+```
+
+`makefile` wraps a socket in a `SocketIO` object (which implements `RawIOBase`) then layers buffering and text decoding on top via `io.open`. The underlying socket is not closed when the file object is garbage-collected (the socket has its own reference count).
+
+## gopy notes
+
+`create_connection` is `module/socket.CreateConnection` in `module/socket/module.go`. It calls `net.Dial` with the resolved address. `create_server` calls `net.Listen`. `getaddrinfo` calls `net.LookupHost`. `makefile` wraps the connection in a `bufio.ReadWriter`.
