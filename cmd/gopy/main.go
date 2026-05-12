@@ -251,6 +251,7 @@ func runSource(src string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
+	registerBuiltinsModule(g)
 	installPathFinder("")
 	ts := state.NewThread()
 	return pythonrun.RunSimpleString(ts, src, g, stderr)
@@ -266,6 +267,7 @@ func runFile(path string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
+	registerBuiltinsModule(g)
 	installPathFinder(path)
 	ts := state.NewThread()
 	return pythonrun.RunAnyFile(ts, path, g, stderr)
@@ -283,10 +285,22 @@ func runInteractive(stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
+	registerBuiltinsModule(g)
 	installPathFinder("")
 	ts := state.NewThread()
 	if pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, g) != 0 {
 		return 1
 	}
 	return 0
+}
+
+// registerBuiltinsModule registers the builtins module in sys.modules
+// so `import builtins` resolves to the same dict that frames use as
+// their __builtins__. Mirrors CPython's Py_InitializeConfig which
+// places builtins in interp->modules at startup.
+//
+// CPython: Python/pylifecycle.c:1413 init_interp_main (builtins registration)
+func registerBuiltinsModule(d *objects.Dict) {
+	m := objects.NewModuleWithDict("builtins", d)
+	imp.AddModule("builtins", m)
 }

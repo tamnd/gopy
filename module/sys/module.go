@@ -108,6 +108,13 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "exc_info", objects.NewBuiltinFunction("exc_info", excInfo)); err != nil {
 		return nil, err
 	}
+	// sys._getframe([depth]) returns the frame depth levels up the call
+	// stack. depth=0 is the immediate caller's frame.
+	//
+	// CPython: Python/sysmodule.c:1180 sys__getframe_impl
+	if err := setItem(md, "_getframe", objects.NewBuiltinFunction("_getframe", getFrame)); err != nil {
+		return nil, err
+	}
 	// stdout/stderr/stdin wrap the process file descriptors. CPython
 	// hands these to PyConfig and then PyConfig_InitPythonConfig
 	// stamps them onto sys; gopy's PyConfig port is incomplete so the

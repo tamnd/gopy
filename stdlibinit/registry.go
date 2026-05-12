@@ -21,6 +21,12 @@
 package stdlibinit
 
 import (
+	// Built-in module: builtins. Registers itself via
+	// module/builtins/module.go init(). Wraps builtins.Init() so
+	// `import builtins` resolves in the stdlib without cmd/gopy startup.
+	// CPython: Modules/builtinsmodule.c:3116 builtin_init
+	_ "github.com/tamnd/gopy/module/builtins"
+
 	// Built-in module: gc. Registers itself via module/gc/module.go
 	// init().
 	// CPython: Modules/config.c.in:47 {"gc", PyInit_gc}

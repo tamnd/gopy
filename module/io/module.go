@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
@@ -92,6 +93,11 @@ func buildModule() (*objects.Module, error) {
 		{"_TextIOBase", stubType("_io._TextIOBase")},
 
 		{"UnsupportedOperation", unsupportedOpType},
+
+		// BlockingIOError: CPython's _io module re-exports this exception
+		// class so io.py can import it via `from _io import BlockingIOError`.
+		// CPython: Modules/_io/_iomodule.c:695 (BlockingIOError registration)
+		{"BlockingIOError", errors.PyExc_BlockingIOError},
 
 		{"DEFAULT_BUFFER_SIZE", objects.NewInt(int64(DefaultBufferSize))},
 
