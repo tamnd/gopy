@@ -658,9 +658,8 @@ func strTranslateMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: translate() argument must be a dict")
 	}
-	runes := []rune(s)
 	var out []rune
-	for _, r := range runes {
+	for _, r := range s {
 		key := NewInt(int64(r))
 		v, err := table.GetItem(key)
 		if err != nil {
@@ -690,33 +689,51 @@ func strMakeTrans(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) == 0 || len(args) > 3 {
 		return nil, fmt.Errorf("TypeError: maketrans() takes 1 to 3 arguments (%d given)", len(args))
 	}
-	out := NewDict()
 	if len(args) == 1 {
-		mp, ok := args[0].(*Dict)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: maketrans() argument 1 must be a dict")
-		}
-		for _, k := range mp.Keys() {
-			v, _ := mp.GetItem(k)
-			var intKey Object
-			switch kt := k.(type) {
-			case *Int:
-				intKey = kt
-			case *Unicode:
-				rs := []rune(kt.Value())
-				if len(rs) != 1 {
-					return nil, fmt.Errorf("TypeError: string keys in translate table must be of length 1")
-				}
-				intKey = NewInt(int64(rs[0]))
-			default:
-				return nil, fmt.Errorf("TypeError: maketrans() argument 1 has bad key type")
-			}
-			if err := out.SetItem(intKey, v); err != nil {
-				return nil, err
-			}
-		}
-		return out, nil
+		return makeTransFromDict(args[0])
 	}
+	return makeTransFromStrings(args)
+}
+
+// makeTransFromDict builds the translation table from the one-arg
+// dict form. Each key must be an int or a length-1 string.
+func makeTransFromDict(arg Object) (Object, error) {
+	mp, ok := arg.(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: maketrans() argument 1 must be a dict")
+	}
+	out := NewDict()
+	for _, k := range mp.Keys() {
+		v, _ := mp.GetItem(k)
+		intKey, err := makeTransKey(k)
+		if err != nil {
+			return nil, err
+		}
+		if err := out.SetItem(intKey, v); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func makeTransKey(k Object) (Object, error) {
+	switch kt := k.(type) {
+	case *Int:
+		return kt, nil
+	case *Unicode:
+		rs := []rune(kt.Value())
+		if len(rs) != 1 {
+			return nil, fmt.Errorf("TypeError: string keys in translate table must be of length 1")
+		}
+		return NewInt(int64(rs[0])), nil
+	}
+	return nil, fmt.Errorf("TypeError: maketrans() argument 1 has bad key type")
+}
+
+// makeTransFromStrings builds the table from the (from, to[, delete])
+// string form. Pairs each rune in `from` with the matching rune in
+// `to`, then maps every rune in `delete` to None.
+func makeTransFromStrings(args []Object) (Object, error) {
 	fromStr, ok1 := args[0].(*Unicode)
 	toStr, ok2 := args[1].(*Unicode)
 	if !ok1 || !ok2 {
@@ -727,6 +744,7 @@ func strMakeTrans(args []Object, _ map[string]Object) (Object, error) {
 	if len(fromR) != len(toR) {
 		return nil, fmt.Errorf("ValueError: the first two maketrans arguments must have equal length")
 	}
+	out := NewDict()
 	for i, r := range fromR {
 		if err := out.SetItem(NewInt(int64(r)), NewInt(int64(toR[i]))); err != nil {
 			return nil, err
@@ -890,16 +908,17 @@ func strExpandTabsMethod(args []Object, _ map[string]Object) (Object, error) {
 	var b strings.Builder
 	col := 0
 	for _, r := range s {
-		if r == '\t' {
+		switch r {
+		case '\t':
 			if tabsize > 0 {
 				spaces := tabsize - (col % tabsize)
 				b.WriteString(strings.Repeat(" ", spaces))
 				col += spaces
 			}
-		} else if r == '\n' || r == '\r' {
+		case '\n', '\r':
 			b.WriteRune(r)
 			col = 0
-		} else {
+		default:
 			b.WriteRune(r)
 			col++
 		}

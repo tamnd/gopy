@@ -39,16 +39,17 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 	// Regular user classes use the instance-level slots.
 	//
 	// CPython: Objects/typeobject.c inherit_slots (type_getattro inheritance)
-	if IsSubtype(t, typeType) {
+	switch {
+	case IsSubtype(t, typeType):
 		t.Getattro = typeGetAttr
 		t.Setattro = typeSetAttr
-	} else if IsSubtype(t, DictType) {
+	case IsSubtype(t, DictType):
 		t.Getattro = dictSubclassGetAttr
 		t.Setattro = dictSubclassSetAttr
 		// Inherit DictType.TpNew so instances are *Dict, not *Instance.
 		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
 		t.TpNew = DictType.TpNew
-	} else {
+	default:
 		t.Getattro = instanceGetAttr
 		t.Setattro = instanceSetAttr
 	}
@@ -243,6 +244,16 @@ func lookupOnType(t *Type, name string) (Object, bool) {
 //
 // CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
 func fixupSlotDispatchers(t *Type) {
+	fixupCallReprStr(t)
+	inheritSlotsFromBases(t)
+	fixupHashAndIter(t)
+	fixupRichCmpAndBool(t)
+	fixupSubscriptSlots(t)
+	fixupDescriptorSlots(t)
+}
+
+// fixupCallReprStr wires tp_call, tp_repr, and tp_str.
+func fixupCallReprStr(t *Type) {
 	if lookupDunderCallable(t, "__call__") {
 		t.Call = slotTpCall
 		t.Vectorcall = nil
@@ -255,11 +266,15 @@ func fixupSlotDispatchers(t *Type) {
 	} else if t.Repr != nil && t.Str == nil {
 		t.Str = t.Repr
 	}
-	// Inherit C-level slots from base types when not overridden by a
-	// Python-level dunder. This matters for metaclass hierarchies where
-	// class ABCMeta(type) should inherit type.Repr, type.Call, etc.
-	//
-	// CPython: Objects/typeobject.c:9770 inherit_slots
+}
+
+// inheritSlotsFromBases pulls C-level slots from base types when they
+// are not overridden by a Python-level dunder. Matters for metaclass
+// hierarchies where `class ABCMeta(type)` should inherit type.Repr,
+// type.Call, etc.
+//
+// CPython: Objects/typeobject.c:9770 inherit_slots
+func inheritSlotsFromBases(t *Type) {
 	for _, base := range t.Bases {
 		if t.Repr == nil && base.Repr != nil {
 			t.Repr = base.Repr
@@ -274,6 +289,10 @@ func fixupSlotDispatchers(t *Type) {
 			t.Hash = base.Hash
 		}
 	}
+}
+
+// fixupHashAndIter wires tp_hash, tp_iter, and tp_iternext.
+func fixupHashAndIter(t *Type) {
 	if lookupDunderCallable(t, "__hash__") {
 		t.Hash = slotTpHash
 	} else if t.Hash == nil {
@@ -285,6 +304,10 @@ func fixupSlotDispatchers(t *Type) {
 	if lookupDunderCallable(t, "__next__") {
 		t.IterNext = slotTpIterNext
 	}
+}
+
+// fixupRichCmpAndBool wires tp_richcompare and nb_bool.
+func fixupRichCmpAndBool(t *Type) {
 	if hasAnyDunder(t, "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__") {
 		t.RichCmp = slotTpRichCompare
 	}
@@ -293,11 +316,14 @@ func fixupSlotDispatchers(t *Type) {
 	} else if lookupDunderCallable(t, "__len__") {
 		ensureNumberMethods(t).Bool = slotNbBoolFromLen
 	}
+}
+
+// fixupSubscriptSlots wires the mapping/sequence subscription slots
+// (length, getitem, setitem, delitem, contains).
+func fixupSubscriptSlots(t *Type) {
 	if lookupDunderCallable(t, "__len__") {
-		m := ensureMappingMethods(t)
-		m.Length = slotMpLength
-		s := ensureSequenceMethods(t)
-		s.Length = slotMpLength
+		ensureMappingMethods(t).Length = slotMpLength
+		ensureSequenceMethods(t).Length = slotMpLength
 	}
 	if lookupDunderCallable(t, "__getitem__") {
 		ensureMappingMethods(t).GetItem = slotMpSubscript
@@ -313,11 +339,15 @@ func fixupSlotDispatchers(t *Type) {
 	if lookupDunderCallable(t, "__contains__") {
 		ensureSequenceMethods(t).Contains = slotSqContains
 	}
-	// Descriptor protocol slots: wire DescrGet when __get__ exists,
-	// DescrSet when __set__ or __delete__ exists.
-	//
-	// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
-	//   (slotdefs entries for tp_descr_get / tp_descr_set)
+}
+
+// fixupDescriptorSlots wires DescrGet when __get__ exists, DescrSet
+// when __set__ or __delete__ exists.
+//
+// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
+//
+//	(slotdefs entries for tp_descr_get / tp_descr_set)
+func fixupDescriptorSlots(t *Type) {
 	if lookupDunderCallable(t, "__get__") {
 		t.DescrGet = slotTpDescrGet
 	}

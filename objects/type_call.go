@@ -63,17 +63,7 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 	//
 	// CPython: Objects/typeobject.c:1748 type_call
 	if cls.TpNew != nil {
-		inst, err := cls.TpNew(cls, args, kwargs)
-		if err != nil {
-			return nil, err
-		}
-		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
-			bound := bindDescr(init, inst, cls)
-			if _, err := callBound(bound, args, kwargs); err != nil {
-				return nil, err
-			}
-		}
-		return inst, nil
+		return typeCallViaTpNew(cls, args, kwargs)
 	}
 	// Some built-ins still expose construction through Call (super
 	// landed before TpNew did); honor it as a fallback. Skip the
@@ -97,27 +87,8 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		return typeMetaclassCall(cls, args, kwargs)
 	}
 
-	// Refuse to instantiate abstract classes (those with a non-empty
-	// __abstractmethods__ frozenset). The check mirrors object_new in
-	// CPython before the alloc; we do it here so every call path (user
-	// types and metaclass subtypes) hits it.
-	//
-	// CPython: Objects/typeobject.c:3550 object_new (Py_TPFLAGS_IS_ABSTRACT branch)
-	if abs, _ := LookupDescriptor(cls, "__abstractmethods__"); abs != nil {
-		if s, ok := abs.(*Set); ok && s.Len() > 0 {
-			names := make([]string, 0, s.Len())
-			for _, o := range s.Items() {
-				if u, ok := o.(*Unicode); ok {
-					names = append(names, u.Value())
-				}
-			}
-			word := "method"
-			if len(names) != 1 {
-				word = "methods"
-			}
-			return nil, fmt.Errorf("TypeError: Can't instantiate abstract class %s without an implementation for abstract %s '%s'",
-				cls.Name, word, strings.Join(names, ", "))
-		}
+	if err := checkNotAbstract(cls); err != nil {
+		return nil, err
 	}
 
 	inst := NewInstance(cls)
@@ -128,6 +99,52 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		}
 	}
 	return inst, nil
+}
+
+// typeCallViaTpNew allocates through the type's tp_new slot, then
+// runs __init__ when the type has one registered as a descriptor.
+//
+// CPython: Objects/typeobject.c:1748 type_call (tp_new + tp_init path)
+func typeCallViaTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	inst, err := cls.TpNew(cls, args, kwargs)
+	if err != nil {
+		return nil, err
+	}
+	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
+		bound := bindDescr(init, inst, cls)
+		if _, err := callBound(bound, args, kwargs); err != nil {
+			return nil, err
+		}
+	}
+	return inst, nil
+}
+
+// checkNotAbstract refuses to instantiate a class whose
+// __abstractmethods__ frozenset is non-empty. Mirrors the
+// Py_TPFLAGS_IS_ABSTRACT branch of object_new.
+//
+// CPython: Objects/typeobject.c:3550 object_new
+func checkNotAbstract(cls *Type) error {
+	abs, _ := LookupDescriptor(cls, "__abstractmethods__")
+	if abs == nil {
+		return nil
+	}
+	s, ok := abs.(*Set)
+	if !ok || s.Len() == 0 {
+		return nil
+	}
+	names := make([]string, 0, s.Len())
+	for _, o := range s.Items() {
+		if u, ok := o.(*Unicode); ok {
+			names = append(names, u.Value())
+		}
+	}
+	word := "method"
+	if len(names) != 1 {
+		word = "methods"
+	}
+	return fmt.Errorf("TypeError: Can't instantiate abstract class %s without an implementation for abstract %s '%s'",
+		cls.Name, word, strings.Join(names, ", "))
 }
 
 // typeMetaclassCall handles calling a user-defined metaclass (a subclass

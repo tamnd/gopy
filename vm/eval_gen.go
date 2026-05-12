@@ -167,11 +167,11 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		retVal  objects.Object
 	)
 	switch {
-	case flags&uint32(compile.CoCoroutine) != 0:
+	case flags&compile.CoCoroutine != 0:
 		c := objects.NewCoroutine(name)
 		yieldCh, sendCh = c.YieldCh, c.SendCh
 		retVal = c
-	case flags&uint32(compile.CoAsyncGenerator) != 0:
+	case flags&compile.CoAsyncGenerator != 0:
 		ag := objects.NewAsyncGenerator(name)
 		yieldCh, sendCh = ag.YieldCh, ag.SendCh
 		retVal = ag

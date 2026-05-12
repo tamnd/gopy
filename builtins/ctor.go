@@ -317,7 +317,7 @@ func bindDictCtor(t *objects.Type) {
 				if err := mergeDict(d, src); err != nil {
 					return nil, err
 				}
-			} else if hasKeys, err := dictHasKeys(args[1]); err == nil && hasKeys {
+			} else if dictHasKeys(args[1]) {
 				if err := mergeMappingInto(d, args[1]); err != nil {
 					return nil, err
 				}
@@ -336,9 +336,9 @@ func bindDictCtor(t *objects.Type) {
 	}))
 }
 
-func dictHasKeys(o objects.Object) (bool, error) {
+func dictHasKeys(o objects.Object) bool {
 	_, err := objects.GetAttr(o, objects.NewStr("keys"))
-	return err == nil, nil
+	return err == nil
 }
 
 func mergeMappingInto(dst *objects.Dict, m objects.Object) error {

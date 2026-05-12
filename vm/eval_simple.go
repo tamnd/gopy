@@ -973,15 +973,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// Frames built without an explicit Builtins dict (the v0.7
 		// pattern that uses globals as both) fall through to globals.
 		key := objects.NewStr("__build_class__")
-		bc, ok, err := lookupIn(e.f.Builtins, key)
-		if err != nil {
-			return 0, nil, nil, false, true, err
-		}
+		bc, ok := lookupIn(e.f.Builtins, key)
 		if !ok {
-			bc, ok, err = lookupIn(e.f.Globals, key)
-			if err != nil {
-				return 0, nil, nil, false, true, err
-			}
+			bc, ok = lookupIn(e.f.Globals, key)
 		}
 		if !ok {
 			return 0, nil, nil, false, true, fmt.Errorf("NameError: __build_class__ not found")
@@ -1413,9 +1407,7 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 
 	switch op {
 	case compile.LOAD_NAME:
-		if v, ok, err := lookupIn(e.f.Locals, keyObj); err != nil {
-			return nil, err
-		} else if ok {
+		if v, ok := lookupIn(e.f.Locals, keyObj); ok {
 			e.pushObject(v)
 			return v, nil
 		}
@@ -1424,15 +1416,11 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		if pushNull {
 			e.push(stackref.Null)
 		}
-		if v, ok, err := lookupIn(e.f.Globals, keyObj); err != nil {
-			return nil, err
-		} else if ok {
+		if v, ok := lookupIn(e.f.Globals, keyObj); ok {
 			e.pushObject(v)
 			return v, nil
 		}
-		if v, ok, err := lookupIn(e.f.Builtins, keyObj); err != nil {
-			return nil, err
-		} else if ok {
+		if v, ok := lookupIn(e.f.Builtins, keyObj); ok {
 			e.pushObject(v)
 			return v, nil
 		}
@@ -1626,27 +1614,27 @@ func mroNumberSlot(o objects.Object, pick func(*objects.NumberMethods) func(a, b
 	return nil
 }
 
-func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool, error) {
+func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool) {
 	if scope == nil {
-		return nil, false, nil
+		return nil, false
 	}
 	if d, ok := scope.(*objects.Dict); ok {
 		v, err := d.GetItem(key)
 		if err != nil {
-			//nolint:nilerr // a missing key is the not-found signal for name lookup
-			return nil, false, nil
+			// Missing key is the not-found signal for name lookup.
+			return nil, false
 		}
-		return v, true, nil
+		return v, true
 	}
-	// Non-Dict scope (e.g. EnumDict — a user subclass of dict). Use the
+	// Non-Dict scope (e.g. EnumDict, a user subclass of dict). Use the
 	// mapping protocol: __getitem__, treating KeyError as a miss.
 	//
 	// CPython: Python/ceval.c LOAD_NAME uses PyObject_GetItem on locals
 	v, err := objects.GetItem(scope, key)
 	if err != nil {
-		return nil, false, nil
+		return nil, false
 	}
-	return v, true, nil
+	return v, true
 }
 
 func storeIn(scope objects.Object, key, value objects.Object) error {

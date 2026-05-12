@@ -466,7 +466,7 @@ func setIntersect(a, b *Set) (*Set, error) {
 // setUnion returns a new set containing all elements from a and b.
 //
 // CPython: Objects/setobject.c:1505 set_union
-func setUnion(a, b *Set) (*Set, error) {
+func setUnion(a, b *Set) *Set {
 	out := NewSet()
 	for _, e := range a.entries {
 		if e.used {
@@ -478,7 +478,7 @@ func setUnion(a, b *Set) (*Set, error) {
 			out.insert(e.hash, e.key)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // setDiff returns a new set with elements in a but not b.
@@ -562,7 +562,7 @@ func setOr(a, b Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	return setUnion(as, bs)
+	return setUnion(as, bs), nil
 }
 
 func setSubtract(a, b Object) (Object, error) {
@@ -807,11 +807,7 @@ func setUnionMethod(args []Object, _ map[string]Object) (Object, error) {
 		if !ok {
 			return nil, fmt.Errorf("TypeError: union() argument must be a set")
 		}
-		var err error
-		result, err = setUnion(result, os)
-		if err != nil {
-			return nil, err
-		}
+		result = setUnion(result, os)
 	}
 	return result, nil
 }

@@ -199,11 +199,12 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 		}
 		// An async generator is both a coroutine and a generator; set
 		// CO_ASYNC_GENERATOR in that case. CPython: compute_code_flags.
-		if sc.Generator && sc.Coroutine {
+		switch {
+		case sc.Generator && sc.Coroutine:
 			u.Flags |= CoAsyncGenerator
-		} else if sc.Generator {
+		case sc.Generator:
 			u.Flags |= CoGenerator
-		} else if sc.Coroutine {
+		case sc.Coroutine:
 			u.Flags |= CoCoroutine
 		}
 	case symtable.ClassBlock:

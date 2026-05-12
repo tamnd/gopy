@@ -89,12 +89,24 @@ func init() {
 //
 // CPython: Objects/funcobject.c:806 func_getsetlist
 func registerFunctionGetSets() {
-	noneIfNil := func(o Object) Object {
-		if o == nil {
-			return None()
-		}
-		return o
+	registerFunctionIdentityGetSets()
+	registerFunctionReadOnlyGetSets()
+	registerFunctionTypeParamsGetSet()
+	registerFunctionDictGetSets()
+}
+
+// noneIfNil returns None when o is nil, otherwise o. Used by the
+// function getters that map an absent Go field to Python's None.
+func noneIfNil(o Object) Object {
+	if o == nil {
+		return None()
 	}
+	return o
+}
+
+// registerFunctionIdentityGetSets installs __doc__, __name__,
+// __qualname__, __module__: the small mutable identity surface.
+func registerFunctionIdentityGetSets() {
 	SetTypeDescr(FunctionType, "__doc__", NewGetSetDescr("__doc__",
 		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Doc), nil },
 		func(o Object, v Object) error { o.(*Function).Doc = v; return nil }))
@@ -121,6 +133,12 @@ func registerFunctionGetSets() {
 	SetTypeDescr(FunctionType, "__module__", NewGetSetDescr("__module__",
 		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Module), nil },
 		func(o Object, v Object) error { o.(*Function).Module = v; return nil }))
+}
+
+// registerFunctionReadOnlyGetSets installs the read-only attribute
+// surface: defaults, kwdefaults, closure, code, globals, builtins,
+// annotations.
+func registerFunctionReadOnlyGetSets() {
 	SetTypeDescr(FunctionType, "__defaults__", NewGetSetDescr("__defaults__",
 		func(o Object) (Object, error) {
 			f := o.(*Function)
@@ -175,6 +193,12 @@ func registerFunctionGetSets() {
 			return d, nil
 		},
 		nil))
+}
+
+// registerFunctionTypeParamsGetSet installs __type_params__, which is
+// the only field with a typed setter (must be tuple) that did not fit
+// the identity bucket.
+func registerFunctionTypeParamsGetSet() {
 	SetTypeDescr(FunctionType, "__type_params__", NewGetSetDescr("__type_params__",
 		func(o Object) (Object, error) {
 			t := o.(*Function).Typeparams
@@ -196,60 +220,71 @@ func registerFunctionGetSets() {
 			f.Typeparams = t
 			return nil
 		}))
-	// __isabstractmethod__ stores in __dict__ so decorators like
-	// abstractmethod can stamp it without a dedicated struct field.
-	//
-	// CPython: Objects/funcobject.c:805 func_get_isabstractmethod /
-	// CPython: Objects/funcobject.c:823 func_set_isabstractmethod
+}
+
+// registerFunctionDictGetSets installs __isabstractmethod__ and
+// __dict__, both of which read through f.Dict so decorators like
+// abstractmethod can stamp attributes without a dedicated field.
+//
+// CPython: Objects/funcobject.c:755 func_get_dict / func_set_dict
+// CPython: Objects/funcobject.c:805 func_get_isabstractmethod
+// CPython: Objects/funcobject.c:823 func_set_isabstractmethod
+func registerFunctionDictGetSets() {
 	SetTypeDescr(FunctionType, "__isabstractmethod__", NewGetSetDescr("__isabstractmethod__",
-		func(o Object) (Object, error) {
-			f := o.(*Function)
-			if f.Dict == nil {
-				return False(), nil
-			}
-			v, err := f.Dict.GetItem(NewStr("__isabstractmethod__"))
-			if err != nil || v == nil {
-				return False(), nil
-			}
-			return v, nil
-		},
-		func(o Object, v Object) error {
-			f := o.(*Function)
-			if v == nil {
-				if f.Dict == nil {
-					return nil
-				}
-				return f.Dict.DelItem(NewStr("__isabstractmethod__"))
-			}
-			if f.Dict == nil {
-				f.Dict = NewDict()
-			}
-			return f.Dict.SetItem(NewStr("__isabstractmethod__"), v)
-		}))
-	// __dict__ exposes the function's attribute namespace directly.
-	//
-	// CPython: Objects/funcobject.c:755 func_get_dict / func_set_dict
+		funcGetIsAbstractMethod,
+		funcSetIsAbstractMethod))
 	SetTypeDescr(FunctionType, "__dict__", NewGetSetDescr("__dict__",
-		func(o Object) (Object, error) {
-			f := o.(*Function)
-			if f.Dict == nil {
-				f.Dict = NewDict()
-			}
-			return f.Dict, nil
-		},
-		func(o Object, v Object) error {
-			f := o.(*Function)
-			if v == nil {
-				f.Dict = nil
-				return nil
-			}
-			d, ok := v.(*Dict)
-			if !ok {
-				return fmt.Errorf("TypeError: __dict__ must be set to a dict object")
-			}
-			f.Dict = d
+		funcGetDict,
+		funcSetDict))
+}
+
+func funcGetIsAbstractMethod(o Object) (Object, error) {
+	f := o.(*Function)
+	if f.Dict == nil {
+		return False(), nil
+	}
+	v, err := f.Dict.GetItem(NewStr("__isabstractmethod__"))
+	if err != nil || v == nil {
+		//nolint:nilerr // missing key reads as False, per func_get_isabstractmethod
+		return False(), nil
+	}
+	return v, nil
+}
+
+func funcSetIsAbstractMethod(o Object, v Object) error {
+	f := o.(*Function)
+	if v == nil {
+		if f.Dict == nil {
 			return nil
-		}))
+		}
+		return f.Dict.DelItem(NewStr("__isabstractmethod__"))
+	}
+	if f.Dict == nil {
+		f.Dict = NewDict()
+	}
+	return f.Dict.SetItem(NewStr("__isabstractmethod__"), v)
+}
+
+func funcGetDict(o Object) (Object, error) {
+	f := o.(*Function)
+	if f.Dict == nil {
+		f.Dict = NewDict()
+	}
+	return f.Dict, nil
+}
+
+func funcSetDict(o Object, v Object) error {
+	f := o.(*Function)
+	if v == nil {
+		f.Dict = nil
+		return nil
+	}
+	d, ok := v.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: __dict__ must be set to a dict object")
+	}
+	f.Dict = d
+	return nil
 }
 
 // funcGetAttr is FunctionType.Getattro. It resolves getset descriptors
