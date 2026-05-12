@@ -1,0 +1,117 @@
+---
+title: Modules/socketmodule.c (part 2)
+description: "Modules/socketmodule.c part 2: socket.recv_into, socket.sendmsg, socket.recvmsg, socket.makefile, socket.setblocking, socket.settimeout."
+cpython_path: Modules/socketmodule.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/socketmodule.c" />
+
+This annotation covers advanced socket methods and I/O. See `modules_socket_detail` for `socket.__init__`, `bind`, `connect`, `accept`, `send`, `recv`, and `close`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `socket.recv_into` | Receive into a writable buffer (zero-copy) |
+| 81-200 | `socket.sendmsg` / `socket.recvmsg` | Scatter-gather I/O with ancillary data |
+| 201-340 | `socket.makefile` | Wrap socket in a file-like object |
+| 341-480 | `socket.setblocking` / `socket.settimeout` | Non-blocking and timeout modes |
+| 481-620 | `socket.getaddrinfo` | Resolve hostname + port to address tuples |
+| 621-1000 | SSL integration | `ssl.wrap_socket` and TLS context support |
+
+## Reading
+
+### `socket.recv_into`
+
+```c
+// CPython: Modules/socketmodule.c:3280 sock_recv_into
+static PyObject *
+sock_recv_into(PySocketSockObject *s, PyObject *args)
+{
+    Py_buffer buf;
+    Py_ssize_t recvlen = 0;
+    int flags = 0;
+    /* Get a writable buffer view */
+    if (!PyArg_ParseTuple(args, "w*|ni:recv_into", &buf, &recvlen, &flags))
+        return NULL;
+    if (recvlen < 0 || recvlen > buf.len)
+        recvlen = buf.len;
+    /* recv directly into the buffer */
+    Py_ssize_t n = sock_recv_guts(s, buf.buf, recvlen, flags);
+    PyBuffer_Release(&buf);
+    if (n < 0) return NULL;
+    return PyLong_FromSsize_t(n);
+}
+```
+
+`socket.recv_into(ba)` reads directly into a `bytearray` or any writable buffer without a temporary `bytes` allocation. Returns the number of bytes received.
+
+### `socket.sendmsg`
+
+```c
+// CPython: Modules/socketmodule.c:3480 sock_sendmsg
+/* sendmsg(buffers, ancdata=[], flags=0, address=None)
+   buffers   -- sequence of bytes-like objects (scatter-gather)
+   ancdata   -- sequence of (cmsg_level, cmsg_type, data) tuples
+   address   -- destination for UDP sockets
+*/
+```
+
+`sendmsg` uses `writev`-style scatter-gather I/O. Ancillary data carries out-of-band information like file descriptors (`SCM_RIGHTS`), process credentials, or timestamp requests.
+
+### `socket.makefile`
+
+```c
+// CPython: Lib/socket.py:240 makefile (Python wrapper)
+def makefile(self, mode='r', buffering=None, *,
+             encoding=None, errors=None, newline=None):
+    """Return a file object associated with the socket.
+
+    The socket must be in blocking mode; it can have a timeout,
+    but the file object's internal buffer may cause timeout issues.
+    """
+    for c in mode:
+        if c not in {'r', 'w', 'b'}:
+            raise ValueError("invalid mode %r (only r, w, b allowed)" % (mode,))
+    writing = 'w' in mode
+    reading = 'r' in mode or not writing
+    assert reading or writing
+    raw = SocketIO(self, 'wb' if writing else 'rb')
+    ...
+    return io.BufferedRWPair(reader, writer) if reading and writing else ...
+```
+
+`socket.makefile('rb')` wraps the socket in a `BufferedReader` for line-oriented protocols like HTTP/1.1. The socket must be duplicated (`socket.dup()`) to avoid double-close when both the socket and file are garbage collected.
+
+### `socket.settimeout`
+
+```c
+// CPython: Modules/socketmodule.c:2680 sock_settimeout
+static PyObject *
+sock_settimeout(PySocketSockObject *s, PyObject *arg)
+{
+    double timeout;
+    if (arg == Py_None) {
+        /* Blocking mode */
+        s->sock_timeout = _PyTime_FromSeconds(-1);
+        internal_setblocking(s, 1);
+    } else {
+        timeout = PyFloat_AsDouble(arg);
+        s->sock_timeout = _PyTime_FromSecondsObject(arg, ...);
+        /* For non-zero timeout: use select/poll in send/recv */
+        internal_setblocking(s, 0);
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`socket.settimeout(5.0)` sets the socket to non-blocking mode internally but uses `select` in each `send`/`recv` call to implement the timeout. `settimeout(0)` is equivalent to `setblocking(False)`.
+
+## gopy notes
+
+`socket.recv_into` is `module/socket.RecvInto` in `module/socket/module.go` using `syscall.Read` with a `[]byte` backed by the buffer protocol. `socket.sendmsg`/`recvmsg` use `syscall.Sendmsg`/`Recvmsg`. `socket.makefile` returns a `module/io.BufferedRWPair`. Timeout is implemented with `net.Conn.SetDeadline`.

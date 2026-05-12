@@ -1,0 +1,114 @@
+---
+title: Lib/calendar.py (part 2)
+description: "Lib/calendar.py part 2: TextCalendar, HTMLCalendar, formatmonth, formatyear, month_abbr, day_abbr, setfirstweekday."
+cpython_path: Lib/calendar.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/calendar.py" />
+
+This annotation covers calendar formatting. See `lib_calendar_detail` for `Calendar`, `monthcalendar`, `itermonthdays`, `itermonthdates`, and `monthrange`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `TextCalendar.formatweek` | Format one week row as a string |
+| 81-200 | `TextCalendar.formatmonth` | Format a full month as a multiline string |
+| 201-340 | `TextCalendar.formatyear` | Format all 12 months in a grid |
+| 341-460 | `HTMLCalendar` | Subclass generating HTML table output |
+| 461-540 | `setfirstweekday` / `firstweekday` | Module-level first-day-of-week setting |
+| 541-600 | `month_abbr` / `day_abbr` / `month_name` / `day_name` | Locale-sensitive name arrays |
+
+## Reading
+
+### `TextCalendar.formatmonth`
+
+```python
+# CPython: Lib/calendar.py:240 formatmonth
+class TextCalendar(Calendar):
+    def formatmonth(self, theyear, themonth, w=0, l=0):
+        """Return a month's calendar string, multi-week."""
+        v = []
+        a = v.append
+        a(self.formatmonthname(theyear, themonth, 7 * (w + 1) - 1))
+        a('\n' * l)
+        a(self.formatweekheader(w))
+        a('\n' * l)
+        for week in self.monthdays2calendar(theyear, themonth):
+            a(self.formatweek(week, w))
+            a('\n' * l)
+        return ''.join(v)
+```
+
+`calendar.month(2024, 1)` returns a multi-line string with week rows. `w` is the width of each day column (default 2), `l` is extra blank lines between rows.
+
+### `HTMLCalendar`
+
+```python
+# CPython: Lib/calendar.py:340 HTMLCalendar
+class HTMLCalendar(Calendar):
+    """Generate HTML calendar tables.
+
+    Each day cell has class 'mon', 'tue', ..., 'sun'.
+    Weekend cells additionally have class 'sat' or 'sun'.
+    Empty cells (outside the month) have class 'noday'.
+    """
+    def formatday(self, day, weekday):
+        if day == 0:
+            return '<td class="noday">&nbsp;</td>'
+        return '<td class="%s">%d</td>' % (self.cssclasses[weekday], day)
+
+    def formatmonth(self, theyear, themonth, withyear=True):
+        v = []
+        a = v.append
+        a('<table border="0" cellpadding="0" cellspacing="0" class="month">')
+        a('\n')
+        a(self.formatmonthname(theyear, themonth, withyear=withyear))
+        a('\n')
+        a(self.formatweekheader())
+        a('\n')
+        for week in self.monthdays2calendar(theyear, themonth):
+            a(self.formatweek(week))
+            a('\n')
+        a('</table>')
+        a('\n')
+        return ''.join(v)
+```
+
+`HTMLCalendar().formatmonth(2024, 1)` generates a `<table>` with `<td class="mon">`, `<td class="sat">` etc. CSS classes allow styling weekdays differently.
+
+### `month_abbr` / `day_abbr`
+
+```python
+# CPython: Lib/calendar.py:50 _localized_month/_localized_day
+# month_abbr = ['', 'Jan', 'Feb', 'Mar', ..., 'Dec']  (index 0 unused)
+# month_name = ['', 'January', ..., 'December']
+# day_abbr   = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+# day_name   = ['Monday', ..., 'Sunday']
+#
+# These are locale-sensitive: built from locale.nl_langinfo when available.
+```
+
+The empty string at index 0 of `month_abbr` allows 1-based month indexing: `month_abbr[1] == 'Jan'`.
+
+### `setfirstweekday`
+
+```python
+# CPython: Lib/calendar.py:74 setfirstweekday
+def setfirstweekday(firstweekday):
+    """Set weekday (0=Monday, 6=Sunday) to use as first column."""
+    if not MONDAY <= firstweekday <= SUNDAY:
+        raise IllegalWeekdayError(firstweekday)
+    _localized_day.firstweekday = firstweekday
+```
+
+`calendar.setfirstweekday(6)` makes Sunday the first column of the week, as used in US calendars. The `locale` module's `calendar` format (via `LC_TIME`) may also affect the starting day.
+
+## gopy notes
+
+`calendar` is pure Python. `TextCalendar` and `HTMLCalendar` use `module/calendar/module.go`. `month_abbr`/`day_abbr` are initialized from `time.Month.String()` in Go. `setfirstweekday` sets a module-level variable checked by `monthdays2calendar`.

@@ -1,0 +1,121 @@
+---
+title: Lib/statistics.py (part 2)
+description: "Lib/statistics.py part 2: variance, stdev, pvariance, pstdev, covariance, correlation, linear_regression."
+cpython_path: Lib/statistics.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/statistics.py" />
+
+This annotation covers spread and correlation measures. See `lib_statistics_detail` for `mean`, `median`, `mode`, `fmean`, `geometric_mean`, `harmonic_mean`, `multimode`, `quantiles`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `variance` / `stdev` | Sample variance and standard deviation |
+| 81-180 | `pvariance` / `pstdev` | Population variance and standard deviation |
+| 181-320 | `_ss` | Helper: sum of squares about the mean |
+| 321-460 | `covariance` | Measure of how two variables vary together |
+| 461-580 | `correlation` | Pearson correlation coefficient |
+| 581-700 | `linear_regression` | Fit a line y = slope*x + intercept |
+
+## Reading
+
+### `variance`
+
+```python
+# CPython: Lib/statistics.py:620 variance
+def variance(data, xbar=None):
+    """Return the sample variance of data.
+
+    Raises StatisticsError if fewer than 2 data points.
+    xbar -- pre-computed mean (pass to avoid recomputing).
+    """
+    if iter(data) is data:
+        data = list(data)
+    n = len(data)
+    if n < 2:
+        raise StatisticsError('variance requires at least two data points')
+    T, total, count = _ss(data, xbar)
+    return _convert(total / (count - 1), T)   # Bessel's correction: n-1
+```
+
+Sample variance uses `n-1` (Bessel's correction) to give an unbiased estimator. Population variance uses `n` (the full count).
+
+### `_ss`
+
+```python
+# CPython: Lib/statistics.py:420 _ss
+def _ss(data, c=None):
+    """Return (T, sum_of_squares, count) for data."""
+    if c is None:
+        c = fmean(data)
+    T = type(c)
+    # Use compensated summation to reduce floating-point error
+    total = _Σ = 0
+    count = 0
+    for x in data:
+        d = x - c
+        total += d
+        _Σ += d*d
+        count += 1
+    # Compensate for rounding in (x-c): total should be 0 if c=mean
+    ss = _Σ - total*total/count
+    return T, ss, count
+```
+
+The compensated sum reduces catastrophic cancellation when data values are close to the mean. The `total` term corrects for accumulated floating-point drift in `d = x - c`.
+
+### `correlation`
+
+```python
+# CPython: Lib/statistics.py:720 correlation
+def correlation(x, y, /, *, method='linear'):
+    """Return the Pearson correlation coefficient for x and y.
+
+    method='ranked': Spearman rank correlation.
+    """
+    n = len(x)
+    if n != len(y):
+        raise StatisticsError('correlation requires that both inputs have same number of data points')
+    if n < 2:
+        raise StatisticsError('correlation requires at least two data points')
+    xbar = fmean(x)
+    ybar = fmean(y)
+    num = sum((xi - xbar) * (yi - ybar) for xi, yi in zip(x, y))
+    den = sqrt(sum((xi - xbar)**2 for xi in x) * sum((yi - ybar)**2 for yi in y))
+    if not den:
+        raise StatisticsError('at least one of the inputs is constant')
+    return num / den
+```
+
+Pearson `r` is 1.0 for perfect positive linear correlation, -1.0 for perfect negative, 0 for no linear relationship. `method='ranked'` first converts values to ranks for Spearman's `rho`.
+
+### `linear_regression`
+
+```python
+# CPython: Lib/statistics.py:780 linear_regression
+def linear_regression(x, y, /, *, proportional=False):
+    """Return the slope and intercept of a linear regression y = slope*x + intercept.
+
+    proportional=True: force intercept=0, fit y = slope*x.
+    """
+    n = len(x)
+    xbar = fmean(x)
+    ybar = fmean(y)
+    slope = sum((xi - xbar)*(yi - ybar) for xi, yi in zip(x, y)) / \
+            sum((xi - xbar)**2 for xi in x)
+    intercept = ybar - slope * xbar
+    return LinearRegression(slope=slope, intercept=intercept)
+```
+
+Returns a `LinearRegression` named tuple with `slope` and `intercept`. Ordinary least squares minimizes the sum of squared residuals.
+
+## gopy notes
+
+`statistics` is pure Python. `_ss` uses compensated summation. `variance`/`stdev` are implemented in `module/statistics/module.go`. `correlation` and `linear_regression` use Go's `math.Sqrt`. The `Fraction` and `Decimal` type support (via `_convert`) uses `module/fractions` and `module/decimal`.

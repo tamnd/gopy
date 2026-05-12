@@ -1,0 +1,110 @@
+---
+title: Objects/tupleobject.c (part 4)
+description: "Objects/tupleobject.c part 4: tuple.__new__ fast paths, tuple free list, _PyTuple_MaybeUntrack, PyTuple_Pack."
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/tupleobject.c" />
+
+This annotation covers allocation fast paths and GC interaction. See `objects_tupleobject3_detail` for `tuple.__getitem__`, `tuple.count`, `tuple.index`, `tuple.__hash__`, and `tuple.__iter__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Tuple free list | Cache of recently freed tuples to avoid repeated `malloc`/`free` |
+| 81-180 | `tuple.__new__` fast paths | Empty tuple singleton; single-element tuple reuse |
+| 181-280 | `_PyTuple_MaybeUntrack` | Remove tuple from GC if all elements are untracked |
+| 281-400 | `PyTuple_Pack` | Varargs helper: `PyTuple_Pack(3, a, b, c)` |
+
+## Reading
+
+### Tuple free list
+
+```c
+// CPython: Objects/tupleobject.c:38 free list
+/* Tuples of length 1..20 are cached in a per-size free list of up to 20 entries.
+   When a tuple is freed it is pushed onto free_list[len]. When a new tuple of
+   the same size is needed it is popped without calling malloc. */
+#define MAXSAVESIZE  20
+#define MAXSAVEDTUPLES  20
+static PyTupleObject *free_list[MAXSAVESIZE];
+static int numfree[MAXSAVESIZE];
+```
+
+The free list dramatically reduces allocator pressure for short-lived tuples (e.g., argument tuples in function calls). Only tuples of length 1–20 are cached; length-0 tuples use a global singleton.
+
+### `tuple.__new__` fast paths
+
+```c
+// CPython: Objects/tupleobject.c:68 tuplesubtype_alloc
+static PyTupleObject *
+tuple_alloc(Py_ssize_t size)
+{
+    /* Fast path: pop from free list */
+    if (size < MAXSAVESIZE && (op = free_list[size]) != NULL) {
+        free_list[size] = (PyTupleObject *)op->ob_item[0];
+        numfree[size]--;
+        _Py_NewReference((PyObject *)op);
+        return op;
+    }
+    /* Fallback: allocate */
+    return (PyTupleObject *)PyObject_GC_NewVar(PyTupleObject, &PyTuple_Type, size);
+}
+```
+
+The empty tuple `()` is a global singleton: `PyTuple_New(0)` always returns the same object. `PyTuple_New(1)` may return a cached 1-element tuple from the free list.
+
+### `_PyTuple_MaybeUntrack`
+
+```c
+// CPython: Objects/tupleobject.c:280 _PyTuple_MaybeUntrack
+void
+_PyTuple_MaybeUntrack(PyObject *op)
+{
+    /* If all elements of the tuple are untracked by the GC
+       (immutable: int, str, float, None, True, False, bytes, frozenset),
+       untrack the tuple itself. This avoids visiting it on every GC cycle. */
+    PyTupleObject *t = (PyTupleObject *)op;
+    for (Py_ssize_t i = Py_SIZE(t); --i >= 0; ) {
+        PyObject *elt = PyTuple_GET_ITEM(t, i);
+        if (_PyObject_GC_IS_TRACKED(elt))
+            return;  /* At least one tracked element — keep tuple tracked */
+    }
+    _PyObject_GC_UNTRACK(op);
+}
+```
+
+A tuple of only ints/strings/floats does not need to be in the GC. `_PyTuple_MaybeUntrack` is called after building a tuple to remove it from the GC lists, reducing GC overhead for common patterns like `(1, 'a', True)`.
+
+### `PyTuple_Pack`
+
+```c
+// CPython: Objects/tupleobject.c:320 PyTuple_Pack
+PyObject *
+PyTuple_Pack(Py_ssize_t n, ...)
+{
+    va_list vargs;
+    va_start(vargs, n);
+    PyObject *result = PyTuple_New(n);
+    if (result == NULL) { va_end(vargs); return NULL; }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *item = va_arg(vargs, PyObject *);
+        Py_INCREF(item);
+        PyTuple_SET_ITEM(result, i, item);
+    }
+    va_end(vargs);
+    return result;
+}
+```
+
+`PyTuple_Pack(3, a, b, c)` is the idiomatic C way to build a 3-element tuple. It increments each element's reference count. Widely used in the exception machinery, `PyErr_Format`, etc.
+
+## gopy notes
+
+The free list is `objects.TupleFreeList` in `objects/tuple.go`. `_PyTuple_MaybeUntrack` is `objects.TupleMaybeUntrack` which calls `vm.GCUntrack`. `PyTuple_Pack` is `objects.TuplePack(a, b, c ...)`. The empty-tuple singleton is `objects.EmptyTuple`.

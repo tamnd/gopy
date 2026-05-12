@@ -1,0 +1,134 @@
+---
+title: Python/ceval.c (part 17)
+description: "Python/ceval.c part 17: CALL_FUNCTION_EX, KW_NAMES, CALL_INTRINSIC_1/2, FORMAT_VALUE, BUILD_STRING."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers the extended call opcodes and string formatting. See `python_ceval16_detail` for unpacking opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `CALL_FUNCTION_EX` | `func(*args, **kwargs)` — call with unpacked args |
+| 81-180 | `KW_NAMES` | Attach keyword names tuple to the next CALL |
+| 181-280 | `CALL_INTRINSIC_1` / `CALL_INTRINSIC_2` | Built-in intrinsic operations (print, import, etc.) |
+| 281-380 | `FORMAT_VALUE` | `f'{expr!r}'` — format one f-string expression |
+| 381-500 | `BUILD_STRING` | Concatenate N strings from the stack |
+
+## Reading
+
+### `CALL_FUNCTION_EX`
+
+```c
+// CPython: Python/ceval.c:3180 CALL_FUNCTION_EX
+inst(CALL_FUNCTION_EX, (func, unused, callargs, kwargs[oparg] -- result)) {
+    /* func(*callargs, **kwargs)
+       oparg=0: no kwargs; oparg=1: kwargs dict present */
+    if (!PyTuple_CheckExact(callargs)) {
+        PyObject *tmp = PySequence_Tuple(callargs);
+        Py_DECREF(callargs);
+        callargs = tmp;
+        ERROR_IF(callargs == NULL, error);
+    }
+    if (oparg) {
+        if (!PyDict_CheckExact(kwargs)) {
+            PyObject *d = PyDict_New();
+            if (PyDict_Update(d, kwargs) < 0) { ... }
+            Py_DECREF(kwargs);
+            kwargs = d;
+        }
+    }
+    result = PyObject_Call(func, callargs, kwargs ? kwargs : NULL);
+    ...
+}
+```
+
+`f(*a, **kw)` where `a` is not already a tuple uses `PySequence_Tuple` to convert it. This handles generators, lists, and other iterables.
+
+### `KW_NAMES`
+
+```c
+// CPython: Python/ceval.c:3060 KW_NAMES
+inst(KW_NAMES, (--)) {
+    /* Load the keyword names tuple for the next CALL instruction.
+       oparg is an index into co_consts. */
+    assert(call_shape.kwnames == NULL);
+    assert(oparg < PyTuple_GET_SIZE(frame->f_code->co_consts));
+    call_shape.kwnames = GETITEM(frame->f_code->co_consts, oparg);
+}
+```
+
+`f(a, b=1, c=2)` compiles to push `a`, push `1`, push `2`, `KW_NAMES (('b', 'c'),)`, `CALL 3`. The `KW_NAMES` instruction loads the keyword names so the `CALL` handler can split positional and keyword arguments.
+
+### `CALL_INTRINSIC_1`
+
+```c
+// CPython: Python/ceval.c:3240 CALL_INTRINSIC_1
+inst(CALL_INTRINSIC_1, (value -- res)) {
+    /* oparg selects which intrinsic to call:
+       INTRINSIC_1_INVALID = 0
+       INTRINSIC_PRINT = 1           -- used in debugging
+       INTRINSIC_IMPORT_STAR = 2     -- from mod import *
+       INTRINSIC_STOPITERATION_ERROR = 3
+       INTRINSIC_ASYNC_GEN_WRAP = 4
+       INTRINSIC_UNARY_POSITIVE = 5  -- +x
+       INTRINSIC_LIST_TO_TUPLE = 6
+       INTRINSIC_TYPEVAR = 7         -- PEP 695
+       ... */
+    assert(oparg > 0 && oparg < MAX_INTRINSIC_1);
+    res = _PyIntrinsics_UnaryFunctions[oparg].func(tstate, value);
+    ERROR_IF(res == NULL, error);
+}
+```
+
+Intrinsics are used for operations that are too infrequent or complex to justify a dedicated opcode but are needed by the compiler.
+
+### `FORMAT_VALUE`
+
+```c
+// CPython: Python/ceval.c:3420 FORMAT_VALUE
+inst(FORMAT_VALUE, (fmt_spec if (oparg & FVS_MASK), value -- result)) {
+    /* f'{expr!r:spec}' — oparg encodes conversion + has_spec */
+    int which_conversion = oparg & FVC_MASK;
+    int have_fmt_spec   = (oparg & FVS_MASK) == FVS_HAVE_SPEC;
+    switch (which_conversion) {
+    case FVC_STR:  value = PyObject_Str(value); break;
+    case FVC_REPR: value = PyObject_Repr(value); break;
+    case FVC_ASCII: value = PyObject_ASCII(value); break;
+    }
+    if (have_fmt_spec) {
+        result = PyObject_Format(value, fmt_spec);
+    } else {
+        result = PyObject_Str(value) if !PyUnicode_CheckExact(value) else value;
+    }
+}
+```
+
+`f'{x!r:>10}'` compiles to `LOAD x`, `FORMAT_VALUE FVC_REPR|FVS_HAVE_SPEC`, where the format spec `'>10'` is also on the stack. `!s`=str, `!r`=repr, `!a`=ascii.
+
+### `BUILD_STRING`
+
+```c
+// CPython: Python/ceval.c:3460 BUILD_STRING
+inst(BUILD_STRING, (pieces[oparg] -- str)) {
+    /* Join oparg strings from the stack into one.
+       Used to implement f-strings: f'{a}{b}{c}' = BUILD_STRING 3 */
+    str = _PyUnicode_JoinArray(&_Py_STR(empty), pieces, oparg);
+    ERROR_IF(str == NULL, error);
+    DECREF_INPUTS();
+}
+```
+
+`f'{a}{b}'` compiles to `FORMAT_VALUE a`, `FORMAT_VALUE b`, `BUILD_STRING 2`. The strings are joined without a separator using `_PyUnicode_JoinArray`.
+
+## gopy notes
+
+`CALL_FUNCTION_EX` is in `vm/eval_call.go`. `KW_NAMES` sets `vm.CallShape.KwNames`. `FORMAT_VALUE` is in `vm/eval_simple.go` using `objects.ObjectStr`/`Repr`/`ASCII`. `BUILD_STRING` uses `objects.UnicodeJoin`. `CALL_INTRINSIC_1`/`2` dispatch to `vm.intrinsics1`/`intrinsics2` function tables.

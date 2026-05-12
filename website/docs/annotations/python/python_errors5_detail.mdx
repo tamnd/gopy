@@ -1,0 +1,125 @@
+---
+title: Python/errors.c (part 5)
+description: "Python/errors.c part 5: _PyErr_ProgramDealloc, PyErr_SyntaxLocationObject, PyErr_BadInternalCall, _PyErr_TrySetFromCause."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers syntax error location, internal call errors, and miscellaneous helpers. See `python_errors4_detail` for `PyErr_Format`, chaining, and `_PyErr_StackItem`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyErr_SyntaxLocationObject` | Set `filename`/`lineno`/`offset` on a `SyntaxError` |
+| 81-180 | `PyErr_BadInternalCall` | Raise `SystemError` for internal programming errors |
+| 181-280 | `_PyErr_TrySetFromCause` | Set an error only if no error is already set |
+| 281-380 | `PyErr_WarnEx` | Issue a warning via `warnings.warn` |
+| 381-500 | `_PyErr_ChainExceptions` | Chain two exceptions manually |
+
+## Reading
+
+### `PyErr_SyntaxLocationObject`
+
+```c
+// CPython: Python/errors.c:1680 PyErr_SyntaxLocationObject
+void
+PyErr_SyntaxLocationObject(PyObject *filename, int lineno, int col_offset)
+{
+    /* Set the location fields on the current SyntaxError exception. */
+    PyObject *exc = tstate->current_exception;
+    if (exc == NULL || !PyErr_GivenExceptionMatches(exc, PyExc_SyntaxError))
+        return;
+    /* Set filename */
+    if (filename != NULL)
+        PyObject_SetAttr(exc, &_Py_ID(filename), filename);
+    /* Set lineno */
+    PyObject_SetAttr(exc, &_Py_ID(lineno), PyLong_FromLong(lineno));
+    /* Set offset */
+    if (col_offset != -1)
+        PyObject_SetAttr(exc, &_Py_ID(offset), PyLong_FromLong(col_offset));
+    /* Try to fill in the source text from the file */
+    if (filename != NULL) {
+        PyObject *source = _PyErr_GetSourceLine(filename, lineno);
+        if (source) PyObject_SetAttr(exc, &_Py_ID(text), source);
+    }
+}
+```
+
+Called by the compiler and tokenizer to annotate `SyntaxError` with the exact source location. `_PyErr_GetSourceLine` opens the source file and reads line `lineno` for `SyntaxError.text`.
+
+### `PyErr_BadInternalCall`
+
+```c
+// CPython: Python/errors.c:1780 PyErr_BadInternalCall
+void
+PyErr_BadInternalCall(void)
+{
+    /* Raise SystemError: bad argument to internal function */
+    assert(0 && "bad argument to internal function");
+    PyErr_SetString(PyExc_SystemError,
+        "bad argument to internal function");
+}
+```
+
+`PyErr_BadInternalCall` is called when a C extension passes `NULL` to a function that requires a valid Python object. The `assert(0)` fires in debug builds to catch the bug at the source.
+
+### `PyErr_WarnEx`
+
+```c
+// CPython: Python/errors.c:1860 PyErr_WarnEx
+int
+PyErr_WarnEx(PyObject *category, const char *text, Py_ssize_t stack_level)
+{
+    /* Invoke warnings.warn(text, category, stacklevel=stack_level) */
+    PyObject *warnings = PyImport_ImportModuleNoBlock("warnings");
+    if (warnings == NULL) return -1;
+    PyObject *warn = PyObject_GetAttr(warnings, &_Py_ID(warn));
+    PyObject *res = PyObject_CallFunction(warn, "sOn",
+                                          text, category, stack_level);
+    Py_XDECREF(res);
+    Py_DECREF(warn);
+    Py_DECREF(warnings);
+    return res == NULL ? -1 : 0;
+}
+```
+
+`PyErr_WarnEx(PyExc_DeprecationWarning, "use foo instead", 2)` issues a `DeprecationWarning` pointing 2 frames up the call stack (the caller of the caller). Used by `functools.wraps` compatibility shims, deprecated API wrappers, etc.
+
+### `_PyErr_ChainExceptions`
+
+```c
+// CPython: Python/errors.c:1940 _PyErr_ChainExceptions
+void
+_PyErr_ChainExceptions(PyObject *typ, PyObject *val, PyObject *tb)
+{
+    /* Set the current exception, chaining the existing one as __context__. */
+    if (val == NULL) {
+        Py_XDECREF(typ);
+        Py_XDECREF(tb);
+        return;
+    }
+    if (!PyExceptionInstance_Check(val)) {
+        ...
+    }
+    PyObject *exc2 = tstate->current_exception;
+    if (exc2 != NULL) {
+        /* Chain: new exception's __context__ = old exception */
+        Py_INCREF(exc2);
+        PyException_SetContext(val, exc2);
+    }
+    _PyErr_Restore(tstate, typ, val, tb);
+}
+```
+
+Used in C code that catches an exception (via `PyErr_Fetch`) and wants to raise a different exception while preserving the original as `__context__`.
+
+## gopy notes
+
+`PyErr_SyntaxLocationObject` is `errors.SyntaxLocationObject` in `vm/errors.go`. `PyErr_BadInternalCall` is `errors.BadInternalCall` which calls `panic` in debug mode. `PyErr_WarnEx` is `errors.WarnEx` which dispatches to `module/warnings`. `_PyErr_ChainExceptions` is `errors.ChainExceptions`.

@@ -1,0 +1,79 @@
+---
+title: Include/cpython/tupleobject.h
+description: "Include/cpython/tupleobject.h: PyTupleObject layout, PyTuple_GET_ITEM, PyTuple_SET_ITEM, _PyTuple_CAST macros."
+cpython_path: Include/cpython/tupleobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/cpython/tupleobject.h" />
+
+`cpython/tupleobject.h` exposes the internal struct layout and the unsafe-but-fast macros for direct tuple element access.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `PyTupleObject` | Struct with `ob_size` count and flexible `ob_item` array |
+| 31-55 | `PyTuple_GET_ITEM` / `PyTuple_SET_ITEM` | Unchecked item access macros |
+| 56-80 | `_PyTuple_CAST` | Assert-checked cast from `PyObject *` to `PyTupleObject *` |
+
+## Reading
+
+### `PyTupleObject`
+
+```c
+// CPython: Include/cpython/tupleobject.h:10 PyTupleObject
+struct PyTupleObject {
+    PyObject_VAR_HEAD          /* ob_refcnt, ob_type, ob_size (element count) */
+    PyObject *ob_item[1];      /* flexible array of element pointers */
+};
+/* ob_item[ob_size] is a NULL sentinel (not counted in ob_size) */
+```
+
+Tuples are allocated as a single block: `sizeof(PyTupleObject) + ob_size * sizeof(PyObject *)`. The element array follows the header in memory, giving O(1) random access.
+
+### `PyTuple_GET_ITEM` / `PyTuple_SET_ITEM`
+
+```c
+// CPython: Include/cpython/tupleobject.h:35 PyTuple_GET_ITEM
+static inline PyObject *
+PyTuple_GET_ITEM(PyObject *op, Py_ssize_t i)
+{
+    PyTupleObject *t = _PyTuple_CAST(op);
+    assert(i >= 0 && i < Py_SIZE(t));
+    return t->ob_item[i];
+}
+
+static inline void
+PyTuple_SET_ITEM(PyObject *op, Py_ssize_t i, PyObject *v)
+{
+    /* Does NOT Py_INCREF(v) or Py_DECREF(old). Caller owns the ref. */
+    PyTupleObject *t = _PyTuple_CAST(op);
+    assert(i >= 0 && i < Py_SIZE(t));
+    t->ob_item[i] = v;
+}
+```
+
+`PyTuple_GET_ITEM` omits the bounds check in release builds (`NDEBUG`). `PyTuple_SET_ITEM` skips reference counting — it is only safe to use when constructing a freshly allocated tuple (no existing elements to decref).
+
+### `_PyTuple_CAST`
+
+```c
+// CPython: Include/cpython/tupleobject.h:60 _PyTuple_CAST
+static inline PyTupleObject *
+_PyTuple_CAST(PyObject *op)
+{
+    assert(PyTuple_Check(op));
+    return (PyTupleObject *)op;
+}
+```
+
+`_PyTuple_CAST` asserts the type in debug builds. In `PyTuple_GET_ITEM`/`SET_ITEM` calls throughout the interpreter, the type is often known statically, so the assert is the only overhead.
+
+## gopy notes
+
+`objects.Tuple` in `objects/tuple.go` stores elements as a Go `[]objects.Object`. `PyTuple_GET_ITEM(t, i)` maps to `t.Items[i]` with no bounds check in hot paths. `PyTuple_SET_ITEM` during construction is `t.Items[i] = v` without reference counting (Go GC handles this). `_PyTuple_CAST` has no equivalent — Go's type system provides the guarantee.

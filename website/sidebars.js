@@ -354,6 +354,8 @@ const sidebars = {
         'annotations/python/python_ceval15_detail',
         'annotations/python/python_ceval16_detail',
         'annotations/python/python_typeobject3_detail',
+        'annotations/python/python_ceval17_detail',
+        'annotations/python/python_errors5_detail',
       ],
     },
     {
@@ -577,6 +579,8 @@ const sidebars = {
         'annotations/objects/objects_dictobject5_detail',
         'annotations/objects/objects_fileobject2_detail',
         'annotations/objects/objects_complexobject4_detail',
+        'annotations/objects/objects_tupleobject4_detail',
+        'annotations/objects/objects_longobject9_detail',
       ],
     },
     {
@@ -831,6 +835,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_unicodeobject_h_detail',
         'annotations/include/include_internal_pycore_bytesobject_h_detail',
         'annotations/include/include_internal_pycore_exceptions_h_detail',
+        'annotations/include/include_cpython_tupleobject_h_detail',
       ],
     },
     {
@@ -1091,6 +1096,7 @@ const sidebars = {
         'annotations/modules/modules_binascii2_detail',
         'annotations/modules/modules_array2_detail',
         'annotations/modules/modules_mmap2_detail',
+        'annotations/modules/modules_socket2_detail',
       ],
     },
     {
@@ -1648,6 +1654,8 @@ const sidebars = {
         'annotations/lib/lib_fractions2_detail',
         'annotations/lib/lib_json2_detail',
         'annotations/lib/lib_os2_detail',
+        'annotations/lib/lib_calendar2_detail',
+        'annotations/lib/lib_statistics2_detail',
       ],
     },
   ],

@@ -1,0 +1,117 @@
+---
+title: Objects/longobject.c (part 9)
+description: "Objects/longobject.c part 9: compact int layout (ob_digit), _PyLong_IsCompact, PyLong_AsLong, PyLong_AsDouble, small integer cache."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers the compact int representation added in Python 3.12 and the conversion helpers. See `objects_longobject8_detail` for `bit_length`, `to_bytes`, and `from_bytes`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Compact int layout | Single-digit ints store value inline (no `ob_digit` heap array) |
+| 81-180 | `_PyLong_IsCompact` / `_PyLong_CompactValue` | Inline value access without digit-array indirection |
+| 181-300 | `PyLong_AsLong` | Convert to C `long`; raise `OverflowError` if too large |
+| 301-400 | `PyLong_AsDouble` | Convert to `double`; may lose precision |
+| 401-500 | Small integer cache | `_Py_SINGLETON(small_ints)` for -5 to 256 |
+
+## Reading
+
+### Compact int layout
+
+```c
+// CPython: Objects/longobject.c:38 compact layout (Python 3.12+)
+/* For integers that fit in a single 30-bit digit (roughly -2^30 to 2^30-1),
+   the value is stored inline in the PyLongObject header rather than in a
+   separate ob_digit array. This eliminates one level of indirection. */
+
+struct _PyLongValue {
+    uintptr_t lv_tag;   /* bottom 3 bits: sign + ndigits; upper bits: value if compact */
+    digit ob_digit[1];  /* flexible array; unused for compact ints */
+};
+
+#define _PyLong_IsNonNegativeCompact(op) (((op)->long_value.lv_tag & 3) == 1)
+```
+
+Compact ints (Python 3.12+) pack the value into `lv_tag` when it fits in `PYLONG_COMPACT_BITS` bits. This eliminates a pointer dereference for common small values.
+
+### `_PyLong_IsCompact`
+
+```c
+// CPython: Objects/longobject.c:80 _PyLong_IsCompact
+static inline int
+_PyLong_IsCompact(const PyLongObject *op)
+{
+    /* Returns 1 if the value fits in a single digit and is stored
+       inline in lv_tag. */
+    return op->long_value.lv_tag < (2 << NON_SIZE_BITS);
+}
+
+static inline Py_ssize_t
+_PyLong_CompactValue(const PyLongObject *op)
+{
+    assert(_PyLong_IsCompact(op));
+    /* Extract the value from the tag bits */
+    return (Py_ssize_t)op->long_value.lv_tag >> (NON_SIZE_BITS + 1);
+}
+```
+
+Hot code like `BINARY_OP_ADD_INT` checks `_PyLong_IsCompact` first and uses `_PyLong_CompactValue` directly to avoid `ob_digit` allocation.
+
+### `PyLong_AsLong`
+
+```c
+// CPython: Objects/longobject.c:240 PyLong_AsLong
+long
+PyLong_AsLong(PyObject *vv)
+{
+    /* Fast path for compact ints */
+    if (PyLong_CheckExact(vv) && _PyLong_IsCompact((PyLongObject *)vv)) {
+        Py_ssize_t val = _PyLong_CompactValue((PyLongObject *)vv);
+        if (val >= LONG_MIN && val <= LONG_MAX) return (long)val;
+    }
+    /* General: check digit count and extract value */
+    long res;
+    int overflow;
+    res = PyLong_AsLongAndOverflow(vv, &overflow);
+    if (overflow) {
+        PyErr_SetString(PyExc_OverflowError,
+            "Python int too large to convert to C long");
+        return -1;
+    }
+    return res;
+}
+```
+
+`PyLong_AsLong` is used extensively in the C API. The compact fast path avoids digit-array access for the common case.
+
+### Small integer cache
+
+```c
+// CPython: Objects/longobject.c:420 small int cache
+/* _Py_SINGLETON(small_ints)[i+_PY_NSMALLNEGINTS] is the PyLongObject for integer i,
+   where -5 <= i <= 256. These are immortal objects (never freed). */
+#define _PY_NSMALLNEGINTS   5     /* cache -5 to -1 */
+#define _PY_NSMALLPOSINTS   257   /* cache 0 to 256 */
+
+PyObject *
+_PyLong_GetSmallInt_impl(int value)
+{
+    assert(-_PY_NSMALLNEGINTS <= value && value < _PY_NSMALLPOSINTS);
+    return (PyObject *)&_Py_SINGLETON(small_ints)[value + _PY_NSMALLNEGINTS];
+}
+```
+
+`PyLong_FromLong(42)` returns the cached singleton. The cache covers -5 to 256, which covers nearly all loop counters, small indices, and ASCII character codes used in typical programs.
+
+## gopy notes
+
+`objects.Int` in `objects/int.go` uses Go's `int64` for small values and `*big.Int` for large ones. The compact layout is approximated: values fitting in `int64` are stored directly. `PyLong_AsLong` is `objects.IntAsLong`. The small int cache is `objects.SmallInts[261]` — an array of pre-allocated `objects.Int` values for -5 to 255.
