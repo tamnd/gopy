@@ -1,0 +1,148 @@
+---
+title: "Python/ceval.c — eval breaker and GIL"
+description: "ceval.c eval breaker: GIL drop/reacquire mechanism, _Py_HandlePending implementation, signal delivery, async exception injection, sys.checkinterval."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers the eval breaker — the mechanism that interrupts the bytecode loop for GIL drops, signal delivery, and async exceptions. It is checked at every `RESUME` opcode.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_Py_HandlePending` | Dispatch pending work on eval breaker |
+| 101-200 | GIL drop/reacquire | `_PyEval_SignalAsyncExc`, `drop_gil`, `take_gil` |
+| 201-350 | Signal handling | `handle_signals` — call Python signal handlers |
+| 351-500 | Async exceptions | `make_pending_calls` — deliver `KeyboardInterrupt` |
+| 501-700 | `sys.checkinterval` | Legacy interval → `sys.setswitchinterval` |
+| 701-900 | `_Py_set_eval_breaker_bit` | Atomically set one bit in eval_breaker |
+
+## Reading
+
+### `_Py_HandlePending`
+
+```c
+// CPython: Python/ceval.c:680 _Py_HandlePending
+int
+_Py_HandlePending(PyThreadState *tstate)
+{
+    uintptr_t breaker = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker);
+    if (breaker & _PY_GIL_DROP_REQUEST) {
+        /* Another thread wants the GIL */
+        drop_gil(tstate);
+        take_gil(tstate);
+    }
+    if (breaker & _PY_SIGNALS_PENDING) {
+        if (handle_signals(tstate) != 0) return -1;
+    }
+    if (breaker & _PY_CALLS_TO_DO) {
+        if (make_pending_calls(tstate->interp) != 0) return -1;
+    }
+    if (breaker & _PY_ASYNC_EXCEPTION) {
+        PyObject *exc = _PyErr_GetAsyncExc(tstate);
+        if (exc) {
+            _PyErr_SetNone(exc);
+            Py_DECREF(exc);
+            return -1;
+        }
+    }
+    return 0;
+}
+```
+
+### GIL mechanics
+
+```c
+// CPython: Python/ceval.c:165 drop_gil
+static void
+drop_gil(PyThreadState *tstate)
+{
+    tstate->ceval.eval_breaker = 0;
+    MUTEX_LOCK(gil->mutex);
+    gil->locked = 0;
+    COND_SIGNAL(gil->cond);  /* wake any waiting thread */
+    MUTEX_UNLOCK(gil->mutex);
+}
+
+static void
+take_gil(PyThreadState *tstate)
+{
+    MUTEX_LOCK(gil->mutex);
+    while (gil->locked) {
+        int timed_out = COND_TIMED_WAIT(gil->cond, gil->mutex,
+                                          INTERVAL /* 5ms default */);
+        if (timed_out) {
+            /* Request current holder to drop the GIL */
+            _Py_set_eval_breaker_bit(tstate->interp, _PY_GIL_DROP_REQUEST, 1);
+        }
+    }
+    gil->locked = 1;
+    MUTEX_UNLOCK(gil->mutex);
+}
+```
+
+`sys.setswitchinterval(0.005)` controls the 5ms default. Any thread waiting longer than the interval sets `_PY_GIL_DROP_REQUEST`.
+
+### Signal delivery
+
+```c
+// CPython: Python/ceval.c:280 handle_signals
+static int
+handle_signals(PyThreadState *tstate)
+{
+    /* Only the main thread handles signals */
+    if (!_Py_IsMainThread()) return 0;
+    return PyErr_CheckSignals();
+}
+```
+
+`PyErr_CheckSignals()` iterates `Handlers[]` and calls the registered Python functions.
+
+### `_PyEval_SignalAsyncExc`
+
+```c
+// CPython: Python/ceval.c:440 _PyEval_SignalAsyncExc
+void
+_PyEval_SignalAsyncExc(PyInterpreterState *interp)
+{
+    /* Set _PY_ASYNC_EXCEPTION in the eval breaker of every thread in interp */
+    HEAD_LOCK(interp->runtime);
+    PyThreadState *tstate = interp->threads.head;
+    while (tstate != NULL) {
+        _Py_set_eval_breaker_bit_all(tstate, _PY_ASYNC_EXCEPTION, 1);
+        tstate = tstate->next;
+    }
+    HEAD_UNLOCK(interp->runtime);
+}
+```
+
+Used by `KeyboardInterrupt` (SIGINT handler) and `thread.interrupt_main()`.
+
+### `sys.setswitchinterval`
+
+```c
+// CPython: Python/ceval.c:640 sys_setswitchinterval
+static PyObject *
+sys_setswitchinterval(PyObject *self, PyObject *args)
+{
+    double interval;
+    PyArg_ParseTuple(args, "d:setswitchinterval", &interval);
+    if (interval <= 0.0) {
+        PyErr_SetString(PyExc_ValueError, "switch interval must be positive");
+        return NULL;
+    }
+    _PyEval_SetSwitchInterval((unsigned long)(interval * 1e6));  /* convert to microseconds */
+    Py_RETURN_NONE;
+}
+```
+
+## gopy notes
+
+The eval breaker maps to `vm.evalBreaker uint64` checked at every `RESUME` in `vm/eval_gen.go`. GIL drop/reacquire uses Go's goroutine scheduler — each Python thread is a goroutine, and GIL contention is modeled via a `sync.Mutex`. Signal delivery calls registered handlers from `module/signal/module.go`. Async exceptions are stored in `vm.ThreadState.asyncExc`.

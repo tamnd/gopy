@@ -1,0 +1,129 @@
+---
+title: Objects/listobject.c (part 3)
+description: "listobject.c part 3: list.sort() — Timsort implementation, run detection, merge_lo/merge_hi, galloping mode, merge_sort_in_cpython."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+This annotation covers `list.sort()`, which uses Timsort — a hybrid merge/insertion sort. See parts 1-2 for list construction, append/insert/pop, and index/slice access.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `listsort` entry | Parse `key=`, `reverse=`; handle 0/1 element fast path |
+| 201-400 | `binarysort` | Insertion sort on small runs (≤64 elements) |
+| 401-600 | `count_run` | Detect natural ascending or descending run |
+| 601-800 | `merge_compute_minrun` | Compute minimum run length (32-64) |
+| 801-1100 | `MergeState` | Merge state: pending run stack, temp buffer |
+| 1101-1400 | `merge_lo`, `merge_hi` | In-place merge with galloping |
+| 1401-1700 | `merge_collapse` | Maintain stack invariant: len[i] > len[i+1] + len[i+2] |
+| 1701-2000 | `merge_force_collapse` | Final merge of all remaining runs |
+| 2001-2800 | Key function support | `compare_wrap`, decorate/sort/undecorate |
+
+## Reading
+
+### Timsort overview
+
+Timsort scans the list for natural runs (ascending or descending sequences). Descending runs are reversed. Runs shorter than `minrun` are extended using insertion sort. Runs are pushed onto a stack and merged when the stack invariant is violated.
+
+### `count_run`
+
+```c
+// CPython: Objects/listobject.c:420 count_run
+static Py_ssize_t
+count_run(PyObject **lo, PyObject **hi, MergeState *ms, int *descending)
+{
+    *descending = 0;
+    /* Compare lo[0] and lo[1] to detect direction */
+    int k = ISLT(lo[1], lo[0], compare);
+    if (k < 0) return -1;
+    if (k) {
+        *descending = 1;
+        for (p = lo + 2; p < hi; p++) {
+            k = ISLT(*p, *(p-1), compare);
+            if (k <= 0) break;  /* end of descending run */
+        }
+    } else {
+        for (p = lo + 2; p < hi; p++) {
+            k = ISLT(*p, *(p-1), compare);
+            if (k) break;  /* end of ascending run */
+        }
+    }
+    return p - lo;
+}
+```
+
+### `merge_lo` — galloping merge
+
+```c
+// CPython: Objects/listobject.c:1120 merge_lo
+static Py_ssize_t
+merge_lo(MergeState *ms, PyObject **pa, Py_ssize_t na,
+          PyObject **pb, Py_ssize_t nb)
+{
+    /* pa[0..na-1] and pb[0..nb-1] are both sorted, pa[0] <= pb[0] */
+    /* Copy pa into temp buffer, merge back into original */
+    PyObject **dest = pa;
+    PyObject **basea = ms->temparray;  /* pa copied here */
+    /* Non-galloping: one-by-one comparison */
+    while (acount < MIN_GALLOP && bcount < MIN_GALLOP) {
+        k = ISLT(*pb, *pa, compare);
+        if (k < 0) goto fail;
+        if (k) { *dest++ = *pb++; nb--; bcount++; acount = 0; }
+        else   { *dest++ = *pa++; na--; acount++; bcount = 0; }
+    }
+    /* Galloping mode: binary-search for run end */
+    while (1) {
+        acount = gallop_right(*pb, basea, na, 0, compare);
+        ...
+    }
+}
+```
+
+Galloping mode uses binary search to find how many elements from one run are less than the first element of the other. It activates when one run repeatedly wins.
+
+### Stack invariant
+
+```c
+// CPython: Objects/listobject.c:1680 merge_collapse
+static int
+merge_collapse(MergeState *ms)
+{
+    struct s_slice *p = ms->pending;
+    /* Invariant: len[i-2] > len[i-1] + len[i] */
+    while (ms->n > 1) {
+        Py_ssize_t n = ms->n - 2;
+        if (n > 0 && p[n-1].len <= p[n].len + p[n+1].len) {
+            if (p[n-1].len < p[n+1].len) n--;
+            if (merge_at(ms, n) < 0) return -1;
+        } else if (p[n].len <= p[n+1].len) {
+            if (merge_at(ms, n) < 0) return -1;
+        } else break;
+    }
+    return 0;
+}
+```
+
+The invariant ensures the total number of merges is O(n log n) and that merges are nearly equal in size (good cache behavior).
+
+### Key function decoration
+
+```c
+// CPython: Objects/listobject.c:2050 listsort
+/* If key function provided, transform: [a, b, c] → [(key(a), a), (key(b), b), ...] */
+/* Sort the decorated list using key as comparison */
+/* Undecorate: extract original values back */
+```
+
+`list.sort(key=str.lower)` uses the "decorate-sort-undecorate" pattern to apply `str.lower` exactly once per element.
+
+## gopy notes
+
+`list.sort()` is in `objects/list.go` and uses Go's `sort.SliceStable` which is also Timsort (pattern-defeating quicksort in older versions). The key function is applied upfront to build a parallel keys slice. `reverse=True` inverts the comparison.

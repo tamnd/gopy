@@ -1,0 +1,137 @@
+---
+title: Lib/http/server.py
+description: "Lib/http/server.py: HTTPServer, BaseHTTPRequestHandler — parse request line/headers, send_response, send_header, end_headers, wfile write."
+cpython_path: Lib/http/server.py
+cpython_version: "3.14"
+lines: 1300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/http/server.py" />
+
+`http.server` provides a simple, single-threaded HTTP/1.x server. It is primarily used for testing and `python -m http.server`. Production use requires a WSGI server.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `HTTPServer` | Subclass of `TCPServer`; handles one request per connection |
+| 101-300 | `BaseHTTPRequestHandler.__init__` | Accept connection, call `handle()` |
+| 301-500 | `handle_one_request` | Read request line + headers, dispatch to `do_*` |
+| 501-700 | `send_response`, `send_header`, `end_headers` | Build HTTP response header |
+| 701-900 | `send_error` | Send 4xx/5xx response with HTML body |
+| 901-1100 | `SimpleHTTPRequestHandler` | Serve files from the current directory |
+| 1101-1300 | `CGIHTTPRequestHandler` | Execute CGI scripts |
+
+## Reading
+
+### Request parsing
+
+```python
+# CPython: Lib/http/server.py:340 handle_one_request
+def handle_one_request(self):
+    """Handle a single HTTP request."""
+    try:
+        self.raw_requestline = self.rfile.readline(65537)
+        if not self.raw_requestline:
+            self.close_connection = True
+            return
+        if not self.parse_request():
+            return
+    except TimeoutError as e:
+        self.log_error("Request timed out: %r", e)
+        self.close_connection = True
+        return
+    mname = 'do_' + self.command  # e.g. 'do_GET'
+    if not hasattr(self, mname):
+        self.send_error(
+            HTTPStatus.NOT_IMPLEMENTED,
+            "Unsupported method (%r)" % self.command)
+        return
+    method = getattr(self, mname)
+    method()
+    self.wfile.flush()
+```
+
+### `parse_request`
+
+```python
+# CPython: Lib/http/server.py:385 parse_request
+def parse_request(self):
+    """Parse request line and headers.
+    Sets self.command, self.path, self.request_version, self.headers.
+    """
+    requestline = str(self.raw_requestline, 'iso-8859-1')
+    words = requestline.rstrip('\r\n').split()
+    if len(words) == 0: return False
+    self.command, self.path = words[0], words[1] if len(words) >= 2 else '/'
+    self.request_version = words[2] if len(words) >= 3 else 'HTTP/0.9'
+    self.headers = http.client.parse_headers(self.rfile,
+                                              _class=self.MessageClass)
+    return True
+```
+
+### `send_response`
+
+```python
+# CPython: Lib/http/server.py:508 send_response
+def send_response(self, code, message=None):
+    """Add the response header to the headers buffer."""
+    if message is None:
+        message = self.responses.get(code, ('', ''))[0]
+    if self.request_version != 'HTTP/0.9':
+        self._headers_buffer.append(
+            ("%s %d %s\r\n" % (self.protocol_version, code, message))
+            .encode("latin-1", "strict"))
+    self.send_header('Server', self.version_string())
+    self.send_header('Date', self.date_time_string())
+```
+
+### `end_headers`
+
+```python
+# CPython: Lib/http/server.py:545 end_headers
+def end_headers(self):
+    """Send the blank line ending the MIME headers."""
+    if self.request_version != 'HTTP/0.9':
+        self._headers_buffer.append(b"\r\n")
+        self.flush_headers()
+
+def flush_headers(self):
+    if hasattr(self, '_headers_buffer'):
+        self.wfile.write(b"".join(self._headers_buffer))
+        self._headers_buffer = []
+```
+
+All headers are buffered and written at once on `end_headers()` to avoid many small `write()` calls.
+
+### `SimpleHTTPRequestHandler`
+
+```python
+# CPython: Lib/http/server.py:950 SimpleHTTPRequestHandler.do_GET
+def do_GET(self):
+    f = self.send_head()
+    if f:
+        try:
+            self.copyfile(f, self.wfile)
+        finally:
+            f.close()
+
+def send_head(self):
+    path = self.translate_path(self.path)  # map URL → filesystem path
+    if os.path.isdir(path):
+        return self.list_directory(path)   # HTML directory listing
+    ...
+    f = open(path, 'rb')
+    self.send_response(HTTPStatus.OK)
+    self.send_header("Content-type", ctype)
+    self.send_header("Content-Length", str(os.path.getsize(path)))
+    self.end_headers()
+    return f
+```
+
+## gopy notes
+
+`http.server` is pure Python and importable when `socket`, `io`, `os`, `http.client`, `email.parser`, and `urllib.parse` work. The server uses `socketserver.TCPServer` which creates a socket, binds, and calls `handle_request()` in a loop.

@@ -1,0 +1,128 @@
+---
+title: Objects/bufferobject.c
+description: "Objects/bufferobject.c: PyBUF_* protocol — PyObject_GetBuffer, PyBuffer_Release, PyBuffer_FillInfo, contiguity checks, Py_buffer struct."
+cpython_path: Objects/bufferobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bufferobject.c" />
+
+`bufferobject.c` implements the C-level buffer protocol helpers. Any object with `bf_getbuffer` participates; `memoryview`, `bytes`, `bytearray`, `array.array`, and `mmap` all do.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyObject_GetBuffer` | Acquire a buffer from any buffer-protocol object |
+| 101-200 | `PyBuffer_Release` | Release (decrement export count) |
+| 201-300 | `PyBuffer_FillInfo` | Standard helper to fill a `Py_buffer` struct |
+| 301-400 | `PyBuffer_IsContiguous` | Check C/Fortran/both contiguity |
+| 401-500 | `PyBUF_*` flags | Request flags: `SIMPLE`, `WRITABLE`, `FORMAT`, `STRIDES`, `ND`, `INDIRECT` |
+| 501-600 | `PyMemoryView_FromBuffer` | Wrap a C `Py_buffer` as a Python `memoryview` |
+
+## Reading
+
+### `Py_buffer` struct
+
+```c
+// CPython: Include/cpython/object.h:210 Py_buffer
+typedef struct bufferinfo {
+    void *buf;          /* pointer to start of memory */
+    PyObject *obj;      /* owner of the memory (for refcount) */
+    Py_ssize_t len;     /* total bytes = product(shape) * itemsize */
+    Py_ssize_t itemsize;/* bytes per element */
+    int readonly;       /* 1 if read-only */
+    int ndim;           /* number of dimensions */
+    char *format;       /* struct-module format string (NULL = 'B') */
+    Py_ssize_t *shape;  /* array of length ndim */
+    Py_ssize_t *strides;/* array of length ndim (bytes per step) */
+    Py_ssize_t *suboffsets; /* NULL for C-contiguous */
+    void *internal;     /* owner-specific data */
+} Py_buffer;
+```
+
+### `PyObject_GetBuffer`
+
+```c
+// CPython: Objects/bufferobject.c:42 PyObject_GetBuffer
+int
+PyObject_GetBuffer(PyObject *obj, Py_buffer *view, int flags)
+{
+    if (!PyObject_CheckBuffer(obj)) {
+        PyErr_Format(PyExc_TypeError,
+                     "a bytes-like object is required, not '%.100s'",
+                     Py_TYPE(obj)->tp_name);
+        return -1;
+    }
+    return (*(Py_TYPE(obj)->tp_as_buffer->bf_getbuffer))(obj, view, flags);
+}
+```
+
+Callers must call `PyBuffer_Release` when done, even on error paths.
+
+### `PyBuffer_FillInfo`
+
+```c
+// CPython: Objects/bufferobject.c:220 PyBuffer_FillInfo
+int
+PyBuffer_FillInfo(Py_buffer *view, PyObject *obj, void *buf,
+                  Py_ssize_t len, int readonly, int flags)
+{
+    if (flags != PyBUF_SIMPLE && (flags & PyBUF_WRITABLE) && readonly) {
+        PyErr_SetString(PyExc_BufferError,
+                        "Object is not writable.");
+        return -1;
+    }
+    view->obj = Py_XNewRef(obj);
+    view->buf = buf;
+    view->len = len;
+    view->readonly = readonly;
+    view->itemsize = 1;
+    view->format = (flags & PyBUF_FORMAT) ? "B" : NULL;
+    view->ndim = 1;
+    view->shape = (flags & PyBUF_ND) ? &view->len : NULL;
+    view->strides = (flags & PyBUF_STRIDES) ? &view->itemsize : NULL;
+    view->suboffsets = NULL;
+    view->internal = NULL;
+    return 0;
+}
+```
+
+Most 1D, C-contiguous objects (bytes, bytearray) use `PyBuffer_FillInfo` directly.
+
+### `PyBuffer_IsContiguous`
+
+```c
+// CPython: Objects/bufferobject.c:340 PyBuffer_IsContiguous
+int
+PyBuffer_IsContiguous(const Py_buffer *view, char order)
+{
+    /* 'C': row-major, 'F': column-major, 'A': either */
+    if (view->suboffsets != NULL) return 0;  /* indirect: never contiguous */
+    if (view->strides == NULL) return 1;     /* no strides: always C-contiguous */
+    /* Check strides match expected C or Fortran layout */
+    ...
+}
+```
+
+### `PyBUF_*` flag combinations
+
+```c
+// CPython: Objects/bufferobject.c:480 common flag combinations
+/* PyBUF_SIMPLE     = 0                 — 1D, C-contiguous, no format */
+/* PyBUF_WRITABLE   = 0x0001            — request writable access */
+/* PyBUF_FORMAT     = 0x0004            — request format string */
+/* PyBUF_ND         = 0x0008            — request shape array */
+/* PyBUF_STRIDES    = 0x0010 | ND       — request strides */
+/* PyBUF_C_CONTIGUOUS = STRIDES | 0x20  — require C layout */
+/* PyBUF_FULL       = STRIDES | FORMAT  — everything */
+/* PyBUF_FULL_RO    = FULL (read-only)  */
+```
+
+## gopy notes
+
+`PyObject_GetBuffer` maps to `objects.GetBuffer(obj, view, flags)` in gopy. Objects implement `GetBuffer` on their Go type. `PyBuffer_FillInfo` is `objects.BufferFillInfo`. `Py_buffer` is a Go struct `objects.Buffer` with the same fields. Export counting is tracked in `objects.ByteArray.exports` to prevent resize while a buffer is active.

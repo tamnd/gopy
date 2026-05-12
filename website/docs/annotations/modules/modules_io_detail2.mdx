@@ -1,0 +1,158 @@
+---
+title: Modules/_io/ (part 2)
+description: "_io part 2: BufferedReader/Writer/RWPair — C implementation. Peek buffer, read-ahead, flush, seek, interaction with RawIOBase."
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/bufferedio.c" />
+
+This annotation covers the buffered I/O layer. See `modules_io_detail` for `FileIO` (the raw layer) and `TextIOWrapper` (the text layer).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `BufferedReader` creation | Wraps a `RawIOBase`, allocates read buffer |
+| 201-500 | `_bufferedreader_raw_read` | Call `raw.readinto()`, fill internal buffer |
+| 501-800 | `buffered_read` | Return bytes from buffer, refill as needed |
+| 801-1000 | `buffered_peek` | Return buffer contents without consuming |
+| 1001-1200 | `buffered_read1` | Single `raw.readinto()` call, no looping |
+| 1201-1500 | `BufferedWriter` creation | Wraps a `RawIOBase`, allocates write buffer |
+| 1501-1800 | `buffered_write` | Accumulate into buffer, flush when full |
+| 1801-2000 | `buffered_flush` | Drain buffer to raw |
+| 2001-2300 | `BufferedRandom` | Seekable combined read+write buffer |
+| 2301-3000 | `seek`/`tell` | Flush, seek raw, reset buffer position |
+
+## Reading
+
+### Read buffer fill
+
+```c
+// CPython: Modules/_io/bufferedio.c:280 _bufferedreader_raw_read
+static Py_ssize_t
+_bufferedreader_raw_read(buffered *self, char *start, Py_ssize_t len)
+{
+    Py_buffer buf;
+    PyObject *memobj = PyMemoryView_FromMemory(start, len, PyBUF_WRITE);
+    PyObject *res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto), memobj);
+    Py_DECREF(memobj);
+    Py_ssize_t n = PyLong_AsSsize_t(res);
+    Py_DECREF(res);
+    return n;  /* -1 = EOF signal, 0 = non-blocking no data, >0 = bytes read */
+}
+```
+
+### `read(n)`
+
+```c
+// CPython: Modules/_io/bufferedio.c:540 buffered_read
+static PyObject *
+buffered_read(buffered *self, PyObject *args)
+{
+    Py_ssize_t n = -1;
+    /* Serve from buffer first */
+    Py_ssize_t avail = READAHEAD(self);
+    if (n > 0 && avail >= n) {
+        /* Fast path: entire request in buffer */
+        PyObject *res = PyBytes_FromStringAndSize(
+            self->buffer + self->pos, n);
+        self->pos += n;
+        return res;
+    }
+    /* Need more data: refill buffer */
+    ...
+    while (current_size < n) {
+        Py_ssize_t r = _bufferedreader_raw_read(self, ...);
+        if (r == 0) break;  /* EOF */
+        ...
+    }
+    return PyBytes_FromStringAndSize(out, current_size);
+}
+```
+
+### `peek`
+
+```c
+// CPython: Modules/_io/bufferedio.c:860 buffered_peek
+static PyObject *
+buffered_peek(buffered *self, PyObject *args)
+{
+    /* Return existing buffer contents; refill if empty */
+    if (READAHEAD(self) == 0) {
+        /* Refill but don't advance pos */
+        _bufferedreader_reset_buf(self);
+        Py_ssize_t r = _bufferedreader_raw_read(self, self->buffer, self->buffer_size);
+        ...
+    }
+    return PyBytes_FromStringAndSize(
+        self->buffer + self->pos, READAHEAD(self));
+}
+```
+
+`peek(n)` returns up to `n` bytes from the buffer but does not advance the read position.
+
+### Write and flush
+
+```c
+// CPython: Modules/_io/bufferedio.c:1560 buffered_write
+static PyObject *
+buffered_write(buffered *self, PyObject *args)
+{
+    Py_buffer data;
+    PyArg_ParseTuple(args, "y*:write", &data);
+    /* Copy into write buffer */
+    Py_ssize_t avail = self->buffer_size - self->write_pos;
+    if (data.len <= avail) {
+        memcpy(self->buffer + self->write_pos, data.buf, data.len);
+        self->write_pos += data.len;
+    } else {
+        /* Buffer full: flush then write remaining */
+        _bufferedwriter_flush_unlocked(self);
+        ...
+    }
+    return PyLong_FromSsize_t(data.len);
+}
+
+// CPython: Modules/_io/bufferedio.c:1720 _bufferedwriter_flush_unlocked
+static int
+_bufferedwriter_flush_unlocked(buffered *self)
+{
+    /* Write buffer contents to raw, handling partial writes */
+    while (self->write_pos < self->write_end) {
+        PyObject *res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(write), ...);
+        Py_ssize_t n = PyLong_AsSsize_t(res);
+        self->write_pos += n;
+    }
+    self->write_pos = self->write_end = 0;
+    return 0;
+}
+```
+
+### `seek`
+
+```c
+// CPython: Modules/_io/bufferedio.c:2080 buffered_seek
+static PyObject *
+buffered_seek(buffered *self, PyObject *args)
+{
+    /* Flush write buffer first */
+    if (IS_WRITABLE(self) && self->write_pos < self->write_end)
+        _bufferedwriter_flush_unlocked(self);
+    /* Seek raw stream */
+    PyObject *res = PyObject_CallMethodObjArgs(self->raw, &_Py_ID(seek),
+                                               target, whence_obj, NULL);
+    /* Invalidate read buffer */
+    self->pos = self->raw_pos = PyLong_AsSsize_t(res);
+    _bufferedreader_reset_buf(self);
+    return res;
+}
+```
+
+## gopy notes
+
+`BufferedReader` is in `module/_io/buffered_reader.go` with a `[]byte` buffer. `read(n)` is a two-phase approach: serve from buffer then fill. `BufferedWriter` accumulates in a `[]byte` and flushes via the raw `write` method. `seek` calls `raw.Seek()` (a `io.Seeker`) and resets the buffer.

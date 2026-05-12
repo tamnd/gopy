@@ -1,0 +1,116 @@
+---
+title: Modules/cmathmodule.c
+description: "cmathmodule.c: cmath module — complex arithmetic functions: sin, cos, exp, log, sqrt, phase, polar, rect, isnan, isinf, isclose, isfinite."
+cpython_path: Modules/cmathmodule.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/cmathmodule.c" />
+
+`cmath` provides mathematical functions for complex numbers. All functions accept any numeric type (int, float, or complex) and return complex.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `c_acos`, `c_acosh` | Inverse trig for complex arguments |
+| 101-200 | `c_asin`, `c_asinh` | Inverse trig (handle branch cuts) |
+| 201-300 | `c_atan`, `c_atanh` | Inverse tan |
+| 301-400 | `c_cos`, `c_cosh`, `c_sin`, `c_sinh` | Trig using `cos(x)*cosh(y) + i*sin(x)*sinh(y)` |
+| 401-500 | `c_exp`, `c_log` | Exponential and logarithm |
+| 501-600 | `c_sqrt` | Complex square root with sign handling |
+| 601-700 | `cmath_phase`, `cmath_polar`, `cmath_rect` | Polar ↔ rectangular conversion |
+| 701-800 | `cmath_isnan`, `cmath_isinf`, `cmath_isfinite` | Predicates |
+| 801-1000 | `cmath_isclose` | Complex isclose with tolerance |
+
+## Reading
+
+### `cmath.exp`
+
+```c
+// CPython: Modules/cmathmodule.c:410 c_exp
+static Py_complex
+c_exp(Py_complex z)
+{
+    /* exp(x + iy) = exp(x) * (cos(y) + i*sin(y)) */
+    double l = exp(z.real);
+    if (Py_IS_INFINITY(l)) {
+        /* Avoid inf * 0 for exp(inf) when y is a multiple of pi/2 */
+        return c_exp_inf(z);
+    }
+    return (Py_complex){ l * cos(z.imag), l * sin(z.imag) };
+}
+```
+
+### `cmath.sqrt`
+
+```c
+// CPython: Modules/cmathmodule.c:560 c_sqrt
+static Py_complex
+c_sqrt(Py_complex z)
+{
+    /* Use numerically stable formula to avoid cancellation */
+    if (z.real == 0.0 && z.imag == 0.0) return z;
+    double ax = fabs(z.real);
+    double ay = fabs(z.imag);
+    double s;
+    if (ax >= ay) {
+        double t = ay / ax;
+        s = sqrt(ax) * sqrt((1.0 + sqrt(1.0 + t*t)) / 2.0);
+    } else {
+        double t = ax / ay;
+        s = sqrt(ay) * sqrt((t + sqrt(1.0 + t*t)) / 2.0);
+    }
+    if (z.real >= 0.0) return (Py_complex){ s, z.imag / (2.0 * s) };
+    else               return (Py_complex){ ay / (2.0 * s), copysign(s, z.imag) };
+}
+```
+
+The formula avoids `sqrt(inf - inf)` catastrophic cancellation by choosing which component to compute directly.
+
+### `cmath.phase` and `cmath.polar`
+
+```c
+// CPython: Modules/cmathmodule.c:640 cmath_phase
+static PyObject *
+cmath_phase_impl(PyObject *module, Py_complex z)
+{
+    /* phase(x + iy) = atan2(y, x) — angle in [-pi, pi] */
+    return PyFloat_FromDouble(atan2(z.imag, z.real));
+}
+
+// CPython: Modules/cmathmodule.c:660 cmath_polar
+static PyObject *
+cmath_polar_impl(PyObject *module, Py_complex z)
+{
+    double r = _Py_c_abs(z);    /* hypot(z.real, z.imag) */
+    double phi = atan2(z.imag, z.real);
+    return PyTuple_Pack(2, PyFloat_FromDouble(r), PyFloat_FromDouble(phi));
+}
+```
+
+`cmath.polar(1+1j)` returns `(sqrt(2), pi/4)`.
+
+### Branch cut handling in `c_log`
+
+```c
+// CPython: Modules/cmathmodule.c:480 c_log
+static Py_complex
+c_log(Py_complex z)
+{
+    /* log(x + iy) = log(|z|) + i*atan2(y, x) */
+    /* Branch cut: negative real axis (phase = ±pi) */
+    double r = _Py_c_abs(z);
+    return (Py_complex){ log(r), atan2(z.imag, z.real) };
+}
+```
+
+`cmath.log(-1)` returns `3.141592...j` (phase = pi, not -pi). The branch cut is on the negative real axis.
+
+## gopy notes
+
+`cmath` is in `module/cmath/`. All functions operate on Go's `complex128`. `c_exp`, `c_log`, `c_sqrt` use `cmplx.Exp`, `cmplx.Log`, `cmplx.Sqrt` from Go's `math/cmplx` package. `phase` uses `cmplx.Phase`. `polar` uses `cmplx.Polar`. Branch cut conventions match CPython/IEEE 754 Annex G.

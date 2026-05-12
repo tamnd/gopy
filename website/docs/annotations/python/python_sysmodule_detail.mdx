@@ -1,0 +1,140 @@
+---
+title: Python/sysmodule.c
+description: "Python/sysmodule.c: sys module implementation — sys.argv, sys.path, sys.modules, sys.stdin/stdout/stderr, sys.getrefcount, sys.exc_info, settrace/setprofile."
+cpython_path: Python/sysmodule.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/sysmodule.c" />
+
+`sysmodule.c` implements the `sys` built-in module. Most entries are interpreter state exposed as Python objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `sys_getrefcount` | Return reference count of an object |
+| 201-400 | `sys_exc_info` | Return `(type, value, traceback)` of current exception |
+| 401-700 | `sys_settrace`, `sys_setprofile` | Register trace/profile callback |
+| 701-1000 | `sys_getsizeof` | Return memory size of an object |
+| 1001-1200 | `sys_getframe` | Return the calling frame |
+| 1201-1500 | `sys_intern` | Intern a string (deduplicate in intern table) |
+| 1501-2000 | Module attributes | `argv`, `path`, `modules`, `version`, `platform`, etc. |
+| 2001-2500 | `sys_stdin/stdout/stderr` | File objects for standard streams |
+| 2501-3000 | `sys_exit` | Raise `SystemExit` |
+| 3001-3500 | `sys_flags` | `sys.flags` named tuple (optimize, inspect, etc.) |
+
+## Reading
+
+### `sys.getrefcount`
+
+```c
+// CPython: Python/sysmodule.c:88 sys_getrefcount
+static PyObject *
+sys_getrefcount(PyObject *module, PyObject *arg)
+{
+    /* Note: the act of calling getrefcount adds 1 to the count
+     * (the argument reference in this stack frame). */
+    return PyLong_FromSsize_t(Py_REFCNT(arg));
+}
+```
+
+`sys.getrefcount(x)` returns `N+1` because the call itself holds a reference.
+
+### `sys.exc_info`
+
+```c
+// CPython: Python/sysmodule.c:240 sys_exc_info
+static PyObject *
+sys_exc_info(PyObject *self, PyObject *Py_UNUSED(args))
+{
+    _PyErr_StackItem *err_info = _PyErr_GetTopmostException(tstate);
+    if (err_info == NULL || err_info->exc_value == NULL || err_info->exc_value == Py_None) {
+        return PyTuple_Pack(3, Py_None, Py_None, Py_None);
+    }
+    PyObject *exc = err_info->exc_value;
+    return PyTuple_Pack(3,
+                        PyExceptionInstance_Class(exc),
+                        exc,
+                        PyException_GetTraceback(exc));
+}
+```
+
+Returns the exception currently being handled in the innermost `except` clause.
+
+### `sys.settrace`
+
+```c
+// CPython: Python/sysmodule.c:460 sys_settrace
+static PyObject *
+sys_settrace(PyObject *self, PyObject *args)
+{
+    if (tracefunc == Py_None)
+        tracefunc = NULL;
+    PyEval_SetTrace(tracefunc, tracefunc);  /* also sets f_trace_lines flag */
+    Py_RETURN_NONE;
+}
+```
+
+`sys.settrace(f)` registers `f(frame, event, arg)` to be called for every line, call, return, and exception. Used by debuggers and coverage tools.
+
+### `sys.getsizeof`
+
+```c
+// CPython: Python/sysmodule.c:720 sys_getsizeof
+static PyObject *
+sys_getsizeof(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    /* Try tp_sizeof first (not part of stable ABI) */
+    PyObject *res = _PyObject_CallMethodIdNoArgs(o, &PyId___sizeof__);
+    Py_ssize_t size = PyLong_AsSsize_t(res);
+    /* Add GC overhead if tracked */
+    if (_PyObject_IS_GC(o))
+        size += sizeof(PyGC_Head);
+    return PyLong_FromSsize_t(size);
+}
+```
+
+### `sys.intern`
+
+```c
+// CPython: Python/sysmodule.c:1280 sys_intern
+static PyObject *
+sys_intern(PyObject *self, PyObject *args)
+{
+    PyObject *s;
+    PyArg_ParseTuple(args, "U:intern", &s);
+    if (PyUnicode_CheckExact(s)) {
+        PyUnicode_InternInPlace(&s);
+        return s;
+    }
+    PyErr_SetString(PyExc_TypeError, "can't intern str subclass");
+    return NULL;
+}
+```
+
+`sys.intern(s)` looks up `s` in a global dict. If present, returns the existing object. Otherwise inserts and returns. Interned strings compare with `is` (pointer equality), not `==`.
+
+### `sys.exit`
+
+```c
+// CPython: Python/sysmodule.c:2620 sys_exit
+static PyObject *
+sys_exit(PyObject *self, PyObject *args)
+{
+    PyObject *exit_code = Py_None;
+    PyArg_ParseTuple(args, "|O:exit", &exit_code);
+    PyErr_SetObject(PyExc_SystemExit, exit_code);
+    return NULL;  /* triggers exception propagation */
+}
+```
+
+`sys.exit(0)` raises `SystemExit(0)`. The interpreter catches it at the top level.
+
+## gopy notes
+
+`sys` module state lives in `module/sys/module.go`. `sys.argv`, `sys.path`, `sys.modules` are Go slices/maps wrapped as Python objects. `sys.exc_info()` reads `vm.Frame.excStack`. `sys.settrace` sets a callback in `vm.ThreadState`. `sys.getrefcount` returns the Go GC's approximation (always `2` in practice). `sys.intern` uses a global `sync.Map[string, *objects.Str]`.

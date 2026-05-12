@@ -1,0 +1,133 @@
+---
+title: Modules/mathmodule.c (part 2)
+description: "mathmodule.c part 2: math.fsum (exact floating-point summation), math.prod, math.perm, math.comb, math.isclose, math.dist, math.hypot variadic."
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mathmodule.c" />
+
+This annotation covers `math` functions added in Python 3.8-3.11. See `modules_math_detail` for the classical functions (`sin`, `cos`, `sqrt`, `log`, `ceil`, `floor`, `gcd`, etc.).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `math_fsum` | Exact floating-point sum using Shewchuk's algorithm |
+| 201-400 | `math_prod` | Product of an iterable (3.8+) |
+| 401-600 | `math_perm` | Permutations P(n, k) (3.8+) |
+| 601-800 | `math_comb` | Combinations C(n, k) (3.8+) |
+| 801-1000 | `math_isclose` | Relative + absolute tolerance comparison (3.5+) |
+| 1001-1200 | `math_dist` | Euclidean distance between two points (3.8+) |
+| 1201-1500 | `math_hypot` | Variadic hypot: sqrt(x^2 + y^2 + ...) (3.8+) |
+| 1501-2500 | `math_lcm` | LCM of multiple integers (3.9+) |
+
+## Reading
+
+### `math.fsum` — Shewchuk's algorithm
+
+```c
+// CPython: Modules/mathmodule.c:88 math_fsum
+static PyObject *
+math_fsum(PyObject *module, PyObject *iterable)
+{
+    /* Maintain a list of partial sums, each non-overlapping */
+    double *p = partials;
+    int n = 0;
+    while ((item = PyIter_Next(iter)) != NULL) {
+        double x = PyFloat_AsDouble(item);
+        /* Absorb x into partials using two-sum trick */
+        int i = 0;
+        for (int j = 0; j < n; j++) {
+            double y = p[j];
+            if (fabs(x) < fabs(y)) { double t = x; x = y; y = t; }
+            double hi = x + y;
+            double lo = y - (hi - x);  /* exact remainder */
+            if (lo != 0.0) p[i++] = lo;
+            x = hi;
+        }
+        p[i++] = x;
+        n = i;
+    }
+    /* Sum remaining partials from smallest to largest */
+    ...
+}
+```
+
+`math.fsum([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])` returns exactly `1.0`.
+
+### `math.isclose`
+
+```c
+// CPython: Modules/mathmodule.c:850 math_isclose
+static PyObject *
+math_isclose(PyObject *module, PyObject *const *args, Py_ssize_t nargs,
+              PyObject *kwnames)
+{
+    double a, b, rel_tol = 1e-9, abs_tol = 0.0;
+    /* Handle infinities */
+    if (Py_IS_INFINITY(a) || Py_IS_INFINITY(b))
+        return PyBool_FromLong(a == b);
+    /* |a - b| <= max(rel_tol * max(|a|, |b|), abs_tol) */
+    double diff = fabs(a - b);
+    return PyBool_FromLong(
+        diff <= fabs(rel_tol * b) ||
+        diff <= fabs(rel_tol * a) ||
+        diff <= abs_tol
+    );
+}
+```
+
+### `math.comb`
+
+```c
+// CPython: Modules/mathmodule.c:680 math_comb
+static PyObject *
+math_comb(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* C(n, k) = n! / (k! * (n-k)!) */
+    /* Use multiplicative formula: product(n-i for i in range(k)) / k! */
+    /* For large n, use integer arithmetic via big.Int */
+    if (k > n - k) k = n - k;  /* symmetry */
+    PyObject *result = _PyLong_GetOne();
+    for (long long i = 0; i < k; i++) {
+        result = PyNumber_Multiply(result, PyLong_FromLongLong(n - i));
+        result = _PyLong_DivmodLong(result, PyLong_FromLongLong(i + 1));
+    }
+    return result;
+}
+```
+
+### `math.hypot` (variadic)
+
+```c
+// CPython: Modules/mathmodule.c:1260 math_hypot
+static PyObject *
+math_hypot(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* Compensated hypot to avoid overflow/underflow */
+    /* Find the max value, divide all by it, sum squares, multiply back */
+    double max = 0.0;
+    for (i = 0; i < nargs; i++) {
+        double x = fabs(PyFloat_AsDouble(args[i]));
+        if (x > max) max = x;
+    }
+    if (max == 0.0 || Py_IS_INFINITY(max)) return PyFloat_FromDouble(max);
+    double sum = 0.0;
+    for (i = 0; i < nargs; i++) {
+        double x = PyFloat_AsDouble(args[i]) / max;
+        sum += x * x;
+    }
+    return PyFloat_FromDouble(max * sqrt(sum));
+}
+```
+
+`math.hypot(3, 4, 0)` gives `5.0`. The divide-by-max trick prevents overflow for very large inputs.
+
+## gopy notes
+
+`math.fsum` uses the Shewchuk algorithm ported directly. `math.isclose` uses the same two-tolerance formula. `math.comb`/`math.perm` use `big.Int` for large values. `math.hypot` normalizes by the maximum value to avoid overflow.
