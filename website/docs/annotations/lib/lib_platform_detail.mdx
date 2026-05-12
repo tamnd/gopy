@@ -1,0 +1,83 @@
+---
+title: Lib/platform.py
+description: "platform: system identification. python_version, python_implementation, machine, processor, uname, system, node, release, version, architecture."
+cpython_path: Lib/platform.py
+cpython_version: "3.14"
+lines: 980
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/platform.py" />
+
+`platform` provides a cross-platform interface for querying system information: OS name, version, machine architecture, processor type, Python version, and implementation. Most data is read from `os.uname()`, `sys.version`, and optional platform-specific APIs. Results are cached after first call.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | imports, constants | `os`, `sys`, `struct` |
+| 81-200 | `uname`, `uname_result` | `os.uname()` wrapper with caching |
+| 201-350 | `system`, `node`, `release`, `version`, `machine`, `processor` | Individual field accessors |
+| 351-450 | `architecture` | Pointer size and linkage model |
+| 451-600 | `python_version`, `python_version_tuple`, `python_build`, `python_compiler`, `python_branch`, `python_revision`, `python_implementation` | Python interpreter metadata |
+| 601-750 | `platform` | Formatted one-line platform string |
+| 751-980 | Windows/macOS/Linux-specific helpers | `win32_ver`, `mac_ver`, `libc_ver`, `freedesktop_os_release` |
+
+## Reading
+
+### `uname` and caching
+
+`uname()` returns a `uname_result` named tuple wrapping `os.uname()`. The result is cached in a module-level variable after the first call.
+
+```python
+# CPython: Lib/platform.py:92 uname
+_uname_cache = None
+
+def uname():
+    global _uname_cache
+    if _uname_cache is not None:
+        return _uname_cache
+    ...
+    _uname_cache = uname_result(system, node, release, version, machine, processor)
+    return _uname_cache
+```
+
+### `architecture`
+
+```python
+# CPython: Lib/platform.py:380 architecture
+def architecture(executable=sys.executable, bits='', linkage=''):
+    ...
+    size = struct.calcsize('P') * 8
+    ...
+```
+
+Reads the pointer size (`struct.calcsize('P') * 8`) to determine 32-bit vs 64-bit. On some platforms it also reads the ELF header or Mach-O magic to detect the linkage model.
+
+### `python_implementation`
+
+```python
+# CPython: Lib/platform.py:480 python_implementation
+def python_implementation():
+    return sys.implementation.name
+```
+
+Returns `'CPython'` for the reference interpreter, `'PyPy'` for PyPy, etc.
+
+### `freedesktop_os_release` (Linux)
+
+Reads `/etc/os-release` or `/usr/lib/os-release` and returns a dict of key-value pairs following the freedesktop.org spec. This is the modern way to identify Linux distributions.
+
+```python
+# CPython: Lib/platform.py:880 freedesktop_os_release
+def freedesktop_os_release():
+    ...
+    with open('/etc/os-release', encoding='utf-8') as f:
+        ...
+```
+
+## gopy notes
+
+Status: not yet ported. `platform` is a thin wrapper around `os.uname()`, `sys.version`, and `sys.implementation`. All data is available from Go's `runtime` package (`runtime.GOOS`, `runtime.GOARCH`) and `os.Hostname()`. The `python_*` family of functions should return gopy-specific values, e.g., `python_implementation()` returns `'gopy'`.

@@ -1,0 +1,77 @@
+---
+title: Lib/select.py
+description: "select module stub: re-exports _select C extension. select(), poll, epoll, kqueue, kevent. Low-level I/O readiness notification."
+cpython_path: Lib/select.py
+cpython_version: "3.14"
+lines: 1
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/selectmodule.c" />
+
+`select` wraps OS I/O multiplexing APIs. There is no `Lib/select.py`; the module is entirely in C (`Modules/selectmodule.c`). It is the low-level foundation that `selectors` and `asyncio` build on.
+
+## Map
+
+| Symbol | Platform | Role |
+|--------|----------|------|
+| `select(rlist, wlist, xlist, timeout)` | All | POSIX `select(2)` |
+| `poll` | POSIX | `poll(2)` object with `register`/`unregister`/`poll` |
+| `epoll` | Linux | `epoll_create`/`epoll_ctl`/`epoll_wait` object |
+| `kqueue` | macOS/BSD | `kqueue(2)` object |
+| `kevent` | macOS/BSD | `struct kevent` wrapper |
+| `devpoll` | Solaris | `/dev/poll` object |
+| `EPOLLIN`, `EPOLLOUT`, ... | Linux | epoll event flags |
+
+## Reading
+
+### `select.select`
+
+```python
+# CPython: Modules/selectmodule.c select_select_impl
+import select
+readable, writable, exceptional = select.select([sock], [], [], 1.0)
+```
+
+The three lists contain file-like objects with a `fileno()` method (or integers directly). The timeout is in seconds as a float. Returns three lists of ready objects.
+
+The POSIX `select` call is limited to `FD_SETSIZE` file descriptors (typically 1024). For larger numbers of fds, `poll` or `epoll` should be used.
+
+### `select.poll`
+
+```python
+# CPython: Modules/selectmodule.c poll_poll_impl
+p = select.poll()
+p.register(fd, select.POLLIN | select.POLLOUT)
+events = p.poll(timeout_ms)  # timeout in milliseconds
+```
+
+Returns a list of `(fd, event)` pairs. No `FD_SETSIZE` limit.
+
+### `select.epoll` (Linux)
+
+```python
+# CPython: Modules/selectmodule.c pyepoll_poll_impl
+ep = select.epoll()
+ep.register(fd, select.EPOLLIN | select.EPOLLET)
+events = ep.poll(timeout=1.0, maxevents=-1)
+ep.close()
+```
+
+Edge-triggered (`EPOLLET`) mode fires only on transitions, reducing spurious wakeups. `maxevents=-1` means "return all ready events."
+
+### `select.kqueue` and `kevent` (macOS/BSD)
+
+```python
+# CPython: Modules/selectmodule.c kqueue_event_Object
+kq = select.kqueue()
+ev = select.kevent(fd, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_ADD)
+kq.control([ev], 0)  # register
+events = kq.control(None, 4, 1.0)  # wait up to 1s for 4 events
+```
+
+## gopy notes
+
+Status: not yet ported. `select.select` wraps `syscall.Select`; `poll` wraps `syscall.Poll`; `epoll` wraps `golang.org/x/sys/unix` epoll APIs. These are needed for `selectors` and `asyncio`. A realistic gopy port should implement at least `select.select` and the platform-native multiplexer (`epoll` on Linux, `kqueue` on macOS).

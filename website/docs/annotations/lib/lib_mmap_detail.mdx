@@ -1,0 +1,67 @@
+---
+title: Lib/mmap.py
+description: "mmap: memory-mapped file support. mmap object creation, ACCESS_READ/WRITE/COPY flags, find/seek/read/write, resize, move. C extension with no Python fallback."
+cpython_path: Lib/mmap.py
+cpython_version: "3.14"
+lines: 1
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mmapmodule.c" />
+
+`mmap` is implemented entirely in C (`Modules/mmapmodule.c`). There is no `Lib/mmap.py`. The module wraps the OS memory-mapping API (`mmap(2)` on POSIX, `CreateFileMapping`/`MapViewOfFile` on Windows) and exposes it as a file-like object that supports direct memory access and the buffer protocol.
+
+## Map
+
+| Symbol | Role |
+|--------|------|
+| `mmap(fileno, length, ...)` | Map a file or anonymous region |
+| `ACCESS_READ`, `ACCESS_WRITE`, `ACCESS_COPY` | Access mode flags |
+| `ALLOCATIONGRANULARITY`, `PAGESIZE` | Platform constants |
+| `read(n)`, `write(data)` | File-like I/O |
+| `find(sub, start, end)` | Search within the mapped region |
+| `seek(pos, whence)` | Reposition the read/write pointer |
+| `resize(newsize)` | Change the mapped size |
+| `move(dest, src, count)` | Copy bytes within the map |
+| `close()` | Unmap the region |
+
+## Reading
+
+### Construction
+
+```python
+# CPython: Modules/mmapmodule.c mmap_new
+import mmap
+m = mmap.mmap(fd, 0)            # map entire file
+m = mmap.mmap(-1, 4096)         # anonymous map (4 KB)
+m = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)  # read-only
+```
+
+`length=0` on POSIX maps the entire file. On Windows the file must have a non-zero size.
+
+### Buffer protocol
+
+`mmap` objects implement the PEP 3118 buffer protocol. A `memoryview` of an `mmap` gives direct access to the mapped bytes without copying, which is useful for zero-copy file parsing.
+
+### `find` and searching
+
+```python
+# CPython: Modules/mmapmodule.c mmap_find_method
+pos = m.find(b'hello', start, end)
+```
+
+Returns the byte offset of the first occurrence of `sub` in the mapped region between `start` and `end`, or `-1` if not found. Uses `memmem` or equivalent C function internally.
+
+### `ACCESS_COPY`
+
+Copy-on-write mode: writes modify a private copy of the page and are not propagated to the underlying file or to other processes mapping the same file. Used for read-mostly scenarios where rare modifications should not affect the source.
+
+### `resize`
+
+On POSIX calls `ftruncate` + `mremap`. Not supported on all platforms; may raise `OSError` if the underlying OS does not support remapping in-place.
+
+## gopy notes
+
+Status: not yet ported. Go's `syscall.Mmap` / `golang.org/x/sys/unix.Mmap` provides the underlying primitive. The gopy `mmap` object needs to implement the buffer protocol interface so that `memoryview` works. The file-like methods (`read`, `write`, `seek`, `tell`) are straightforward wrappers around pointer arithmetic.

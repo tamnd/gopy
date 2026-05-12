@@ -1,0 +1,97 @@
+---
+title: Lib/selectors.py
+description: "selectors: high-level I/O multiplexing. DefaultSelector, SelectSelector, EpollSelector, KqueueSelector. SelectorKey namedtuple, register/unregister/select."
+cpython_path: Lib/selectors.py
+cpython_version: "3.14"
+lines: 590
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/selectors.py" />
+
+`selectors` provides a high-level I/O event notification interface on top of `select`/`poll`/`epoll`/`kqueue`. It is the foundation of `asyncio`'s event loop. `DefaultSelector` automatically picks the most efficient mechanism available on the current platform.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `EVENT_READ`, `EVENT_WRITE`, `SelectorKey` | Constants and named tuple |
+| 61-160 | `BaseSelector` | Abstract base class |
+| 161-240 | `_BaseSelectorImpl` | Shared registration map |
+| 241-310 | `SelectSelector` | `select.select`-based; available everywhere |
+| 311-390 | `PollSelector` | `select.poll`-based; POSIX |
+| 391-470 | `EpollSelector` | `select.epoll`-based; Linux |
+| 471-540 | `DevpollSelector` | `/dev/poll`-based; Solaris |
+| 541-590 | `KqueueSelector`, `DefaultSelector` | kqueue (macOS/BSD); auto-selected best |
+
+## Reading
+
+### `SelectorKey`
+
+```python
+# CPython: Lib/selectors.py:28 SelectorKey
+SelectorKey = namedtuple('SelectorKey', ['fileobj', 'fd', 'events', 'data'])
+```
+
+- `fileobj`: the registered file object (socket, pipe, etc.)
+- `fd`: the file descriptor integer
+- `events`: bitmask of `EVENT_READ | EVENT_WRITE`
+- `data`: arbitrary user data attached at registration time
+
+### `register` and `unregister`
+
+```python
+# CPython: Lib/selectors.py:188 _BaseSelectorImpl.register
+def register(self, fileobj, events, data=None):
+    if fileobj in self._map:
+        raise KeyError("{!r} is already registered".format(fileobj))
+    key = SelectorKey(fileobj=fileobj, fd=self._fileobj_lookup(fileobj),
+                      events=events, data=data)
+    self._fd_to_key[key.fd] = key
+    self._map[fileobj] = key
+    return key
+```
+
+`_BaseSelectorImpl` maintains two dicts: `_fd_to_key` (fd to key) and `_map` (fileobj to key). Subclasses add the fd to the OS-specific notification set in their `register` override.
+
+### `select` return value
+
+`select(timeout=None)` returns a list of `(key, events)` pairs. `events` is a bitmask indicating which events are ready (may be a subset of the registered events).
+
+```python
+# CPython: Lib/selectors.py:270 SelectSelector.select
+def select(self, timeout=None):
+    ...
+    r, w, _ = self._select(self._readers, self._writers, [], timeout)
+    r = set(r)
+    w = set(w)
+    ready = []
+    for fd in r | w:
+        events = 0
+        if fd in r:
+            events |= EVENT_READ
+        if fd in w:
+            events |= EVENT_WRITE
+        key = self._key_from_fd(fd)
+        if key:
+            ready.append((key, events & key.events))
+    return ready
+```
+
+### `EpollSelector`
+
+Uses `select.epoll` (Linux 2.5.44+). `register` calls `self._epoll.register(fd, epoll_events)`. `select` calls `self._epoll.poll(timeout, max_events)` which returns `[(fd, event), ...]`.
+
+### `DefaultSelector`
+
+Alias to the best available selector on the current platform:
+- Linux: `EpollSelector`
+- macOS/BSD: `KqueueSelector`
+- Other POSIX: `PollSelector`
+- Windows: `SelectSelector`
+
+## gopy notes
+
+Status: not yet ported. `selectors` is the critical path for `asyncio`. Go's `net.Conn` and `os.File` with goroutines obviate the need for explicit selector management in most cases, but a faithful `selectors` port is needed for CPython compatibility. The Go port would wrap `golang.org/x/sys/unix.EpollWait` (Linux) or `unix.Kevent` (macOS).

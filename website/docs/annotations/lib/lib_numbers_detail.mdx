@@ -1,0 +1,71 @@
+---
+title: Lib/numbers.py
+description: "numbers: Abstract Base Classes for the numeric tower. Number, Complex, Real, Rational, Integral. ABCMeta registration and the __abstractmethods__ protocol."
+cpython_path: Lib/numbers.py
+cpython_version: "3.14"
+lines: 404
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/numbers.py" />
+
+`numbers` defines the PEP 3141 numeric tower as a hierarchy of ABCs: `Number > Complex > Real > Rational > Integral`. Concrete types (`int`, `float`, `complex`, `fractions.Fraction`, `decimal.Decimal`) are registered with these ABCs, enabling `isinstance` checks against the abstract tower. The module has no runtime arithmetic logic.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `Number` | Root ABC; no abstract methods |
+| 31-180 | `Complex` | `real`, `imag`, `__abs__`, `conjugate`, `__complex__`, arithmetic ops |
+| 181-280 | `Real` | Adds `__float__`, `__floor__`, `__ceil__`, `__round__`, `__trunc__`, comparison ops |
+| 281-340 | `Rational` | Adds `numerator`, `denominator`; inherits `Real` |
+| 341-404 | `Integral` | Adds bitwise ops, `__int__`, `__index__`, `__pow__` |
+
+## Reading
+
+### Abstract method declarations
+
+The ABCs declare abstract methods that subclasses must implement. For example, `Complex` requires `__complex__`, `real`, `imag`, and `conjugate`:
+
+```python
+# CPython: Lib/numbers.py:68 Complex
+class Complex(Number):
+    @abstractmethod
+    def __complex__(self):
+        """Return a builtin complex instance."""
+
+    @abstractmethod
+    def real(self):
+        """Retrieve the real component of this number."""
+
+    @abstractmethod
+    def imag(self):
+        """Retrieve the imaginary component of this number."""
+```
+
+### Default implementations
+
+Many operator methods have default implementations in terms of the abstract ones. For example, `Complex.__pos__` returns `+self` via `complex(self)`, and `Complex.__abs__` uses `sqrt(self.real**2 + self.imag**2)` as a default if not overridden.
+
+```python
+# CPython: Lib/numbers.py:122 Complex.__abs__
+def __abs__(self):
+    return _math.hypot(self.real, self.imag)
+```
+
+### Registration
+
+`int` is registered as `Integral`, `float` as `Real`, `complex` as `Complex`. `fractions.Fraction` registers itself as `Rational`. `decimal.Decimal` registers as `Number` only (it is not `Real` because it cannot be losslessly converted to `float`).
+
+```python
+# CPython: Lib/numbers.py:400 bottom of file
+Integral.register(int)
+Real.register(float)
+Complex.register(complex)
+```
+
+## gopy notes
+
+Status: not yet ported. `numbers` has no runtime logic; it is purely ABC registration. The gopy port needs `module/numbers/` to expose the five ABCs and to call `register()` on `int`, `float`, and `complex` at module init time. `fractions.Fraction` will register itself when `module/fractions/` is ported.

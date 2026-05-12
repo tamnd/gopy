@@ -1,0 +1,87 @@
+---
+title: Lib/shlex.py
+description: "shlex: shell-like lexer. shlex class for tokenizing, split() convenience function, quote() for safe shell escaping, join()."
+cpython_path: Lib/shlex.py
+cpython_version: "3.14"
+lines: 340
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/shlex.py" />
+
+`shlex` implements a lexer for simple shell-like syntax. `shlex.split` splits a string into tokens the way a POSIX shell would, handling quoting and escaping. `shlex.quote` wraps a string in single quotes for safe shell interpolation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | imports | `os`, `re`, `collections.deque` |
+| 51-280 | `shlex` class | Stateful lexer; `read_token`, `push_token`, `get_token` |
+| 281-320 | `split` | Tokenize a string using `shlex` |
+| 321-340 | `quote`, `join` | Shell-safe quoting |
+
+## Reading
+
+### `shlex` class state machine
+
+`shlex` reads characters one at a time from a string or file-like object. The state machine has states: `' '` (whitespace), `'a'` (alphanumeric token), `'"'`/`"'"` (quoted strings), `'#'` (comment), and `'e'` (escape).
+
+```python
+# CPython: Lib/shlex.py:148 shlex.read_token
+def read_token(self):
+    quoted = False
+    escapedstate = ' '
+    while True:
+        nextchar = self.instream.read(1)
+        ...
+        if self.state == ' ':
+            if not nextchar:
+                self.state = None; break
+            elif nextchar in self.whitespace:
+                if self.token or (self.posix and quoted):
+                    break
+            elif nextchar in self.commenters:
+                self.instream.readline()
+            elif nextchar in self.wordchars:
+                self.token += nextchar
+                self.state = 'a'
+            elif nextchar in self.quotes:
+                ...
+                self.state = nextchar
+```
+
+### `split`
+
+```python
+# CPython: Lib/shlex.py:300 split
+def split(s, comments=False, posix=True):
+    lex = shlex(s, posix=posix)
+    lex.whitespace_split = True
+    if not comments:
+        lex.commenters = ''
+    return list(lex)
+```
+
+With `posix=True` (default) it handles POSIX quoting rules: `'foo bar'` becomes `foo bar` (quotes removed, contents preserved).
+
+### `quote`
+
+```python
+# CPython: Lib/shlex.py:325 quote
+_find_unsafe = re.compile(r'[^\w@%+=:,./-]').search
+
+def quote(s):
+    if not s:
+        return "''"
+    if _find_unsafe(s) is None:
+        return s
+    return "'" + s.replace("'", "'\"'\"'") + "'"
+```
+
+Returns the string unchanged if it contains only safe characters, or wraps it in single quotes with internal single quotes escaped via `'"'"'`.
+
+## gopy notes
+
+Status: not yet ported. Pure Python. `shlex.split` is commonly used by `subprocess` callers on Unix. `shlex.quote` is needed by any code that builds shell commands dynamically. The state-machine lexer translates directly to Go with a `strings.Reader` as input.

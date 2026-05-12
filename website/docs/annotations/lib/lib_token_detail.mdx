@@ -1,0 +1,73 @@
+---
+title: Lib/token.py
+description: "token: integer constants for Python token types (NAME, NUMBER, STRING, OP, etc.) and the tok_name reverse-lookup dict. Auto-generated from Grammar/Tokens."
+cpython_path: Lib/token.py
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/token.py" />
+
+`token` exports integer constants for every Python token type. It is auto-generated from `Grammar/Tokens` by `Tools/build/generate_token.py`. The constants are used by `tokenize`, `ast`, and parser tooling to identify token kinds without hard-coding magic numbers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-10 | Module header | Auto-generated notice |
+| 11-70 | Token constants | `ENDMARKER`, `NAME`, `NUMBER`, `STRING`, `NEWLINE`, `OP`, ... |
+| 71-80 | `tok_name`, `EXACT_TOKEN_TYPES` | Reverse lookup and operator-to-token map |
+
+## Reading
+
+### Token constants
+
+```python
+# CPython: Lib/token.py:11 constants
+ENDMARKER = 0
+NAME = 1
+NUMBER = 2
+STRING = 3
+NEWLINE = 4
+NL = 61
+COMMENT = 60
+OP = 54
+ERRORTOKEN = 59
+ENCODING = 62
+TYPE_COMMENT = 63
+TYPE_IGNORE = 64
+SOFT_KEYWORD = 65
+```
+
+`NL` (61) is a non-logical newline (inside brackets or a backslash continuation), while `NEWLINE` (4) is a logical newline that terminates a statement.
+
+### `tok_name`
+
+```python
+# CPython: Lib/token.py:72 tok_name
+tok_name = {v: k for k, v in globals().items() if isinstance(v, int) and not k.startswith('_')}
+```
+
+Reverse lookup: `tok_name[1]` returns `'NAME'`.
+
+### `EXACT_TOKEN_TYPES`
+
+Maps multi-character operator strings to their token constants, used by `tokenize` to produce exact token types for operators like `'**'`, `'>>'`, `'//'`.
+
+```python
+# CPython: Lib/token.py:74 EXACT_TOKEN_TYPES
+EXACT_TOKEN_TYPES = {
+    '!=': NOTEQUAL,
+    '%': PERCENT,
+    '%=': PERCENTEQUAL,
+    '&': AMPER,
+    ...
+}
+```
+
+## gopy notes
+
+Status: effectively already represented in the gopy parser's token type enumeration. The `token` module just needs to expose the same integer constants as Python-visible names from `module/token/`. The values must exactly match those in the CPython `token.py` for bytecode and AST compatibility.

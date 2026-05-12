@@ -1,0 +1,88 @@
+---
+title: Lib/reprlib.py
+description: "reprlib: Repr class for size-limited repr output. recursive_repr decorator, aRepr singleton. Used by pprint and the REPL to avoid infinite recursion and huge output."
+cpython_path: Lib/reprlib.py
+cpython_version: "3.14"
+lines: 178
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/reprlib.py" />
+
+`reprlib` provides a `Repr` class that generates size-limited string representations, truncating long sequences and strings with `...`. It is used by `pprint`, the interactive REPL, and logging infrastructure to prevent enormous outputs from hanging or flooding output.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `recursive_repr` | Decorator that returns `'...'` for recursive calls |
+| 31-80 | `Repr` class attributes | `maxlevel`, `maxdict`, `maxlist`, `maxlong`, `maxstring`, etc. |
+| 81-160 | `Repr.repr*` methods | Per-type repr dispatch |
+| 161-178 | `aRepr`, `repr` | Module-level singleton and top-level function |
+
+## Reading
+
+### `recursive_repr`
+
+Decorates `__repr__` methods to detect and break recursion. On re-entry it returns `fillvalue` (default `'...'`) instead of recursing.
+
+```python
+# CPython: Lib/reprlib.py:9 recursive_repr
+def recursive_repr(fillvalue='...'):
+    def decorating_function(user_function):
+        wrapper = _recursive_repr(fillvalue)(user_function)
+        return wrapper
+    return decorating_function
+```
+
+Internally uses a thread-local set of object IDs to detect when the same object is being repr'd while already repr'ing it.
+
+### `Repr.repr1`
+
+The dispatcher. Calls `repr_TYPE` if defined, otherwise falls back to `builtins.repr` with a level check.
+
+```python
+# CPython: Lib/reprlib.py:90 Repr.repr1
+def repr1(self, x, level):
+    typename = type(x).__name__
+    if ' ' in typename:
+        parts = typename.split()
+        typename = '_'.join(parts)
+    if hasattr(self, 'repr_' + typename):
+        return getattr(self, 'repr_' + typename)(x, level)
+    else:
+        return self.repr_instance(x, level)
+```
+
+### `Repr.repr_list` and truncation
+
+```python
+# CPython: Lib/reprlib.py:108 Repr.repr_list
+def repr_list(self, x, level):
+    return self._repr_iterable(x, level, '[', ']', self.maxlist)
+
+def _repr_iterable(self, x, level, left, right, maxitems, trail=''):
+    n = len(x)
+    if level <= 0 and n:
+        s = '...'
+    else:
+        newlevel = level - 1
+        repr1 = self.repr1
+        pieces = [repr1(elem, newlevel) for elem in islice(x, maxitems)]
+        if n > maxitems:
+            pieces.append('...')
+        s = ', '.join(pieces)
+    return '%s%s%s' % (left, s, right)
+```
+
+`maxlist` (default 6) controls how many list items are shown before truncation.
+
+### `aRepr` singleton
+
+`aRepr = Repr()` is the module-level instance used by the top-level `repr()` function (not `builtins.repr`). The interactive REPL uses it via `sys.displayhook`.
+
+## gopy notes
+
+Status: not yet ported. `reprlib` is a pure-Python utility needed by `pprint` and the interactive loop. The `recursive_repr` decorator needs a goroutine-local set of `uintptr` (object addresses) rather than CPython's `threading.local`. The per-type `repr_*` dispatch is straightforward to port.

@@ -1,0 +1,63 @@
+---
+title: Lib/signal.py
+description: "signal: Python-level signal handlers. signal(), getsignal(), raise_signal(), pause(), setitimer/getitimer, pthread_kill, valid_signals. Wraps _signal C extension."
+cpython_path: Lib/signal.py
+cpython_version: "3.14"
+lines: 68
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/signal.py" />
+
+`signal` provides Python-level signal handling. The Python layer (`Lib/signal.py`) is mostly a thin re-export of the C extension `_signal`. The actual signal handling logic, including the write-to-pipe mechanism that wakes the eval loop, lives in `Modules/signalmodule.c` and `Python/ceval.c`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-35 | Re-export from `_signal` | `signal`, `getsignal`, `SIG_DFL`, `SIG_IGN`, `SIGINT`, etc. |
+| 36-68 | `Signals` enum, convenience constants | `Signals(IntEnum)` wrapping each signal number |
+
+## Reading
+
+### Signal handler installation
+
+```python
+# CPython: Modules/signalmodule.c signal_signal_impl
+import signal
+old = signal.signal(signal.SIGINT, handler)
+```
+
+`signal.signal(signum, handler)` installs a Python callable as the handler for `signum`. The handler is called with `(signum, frame)` from the main thread between bytecode instructions (not from within the C signal handler itself).
+
+### How Python defers signal delivery
+
+The C signal handler (`signal_handler` in `signalmodule.c`) does not call Python code directly (that would be unsafe from an async signal context). Instead it sets a flag (`Handlers[signum].set = 1`) and writes a byte to the self-pipe (`_Py_write_nocancel(wakeup_fd, ...)`). The eval loop checks `_Py_atomic_load(&eval_breaker)` between instructions; when it sees a pending signal, it calls `handle_signals()` from the main thread.
+
+### `Signals` enum
+
+Python 3.5+ wraps the signal integer constants in a `Signals(IntEnum)`:
+
+```python
+# CPython: Lib/signal.py:40 Signals
+class Signals(IntEnum):
+    SIGABRT = _signal.SIGABRT
+    SIGFPE = _signal.SIGFPE
+    SIGILL = _signal.SIGILL
+    SIGINT = _signal.SIGINT
+    SIGSEGV = _signal.SIGSEGV
+    SIGTERM = _signal.SIGTERM
+    ...
+```
+
+This allows `repr` to show `<Signals.SIGINT: 2>` instead of just `2`.
+
+### `setitimer` and `getitimer`
+
+Available on POSIX only. `setitimer(which, seconds, interval=0.0)` arms a timer that sends `SIGALRM` (or `SIGVTALRM`/`SIGPROF`). `getitimer(which)` returns the remaining time and interval.
+
+## gopy notes
+
+Status: partially relevant. Signal handling in gopy uses Go's `os/signal.Notify` channel mechanism rather than the C write-to-pipe approach. The `signal.signal()` function needs to bridge between a Python callable and a Go `chan os.Signal`. The eval-loop breaker mechanism in gopy uses a similar atomic flag checked between instructions.

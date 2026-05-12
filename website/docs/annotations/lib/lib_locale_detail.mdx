@@ -1,0 +1,77 @@
+---
+title: Lib/locale.py
+description: "locale: POSIX locale interface. setlocale, getlocale, localeconv, format_string, currency, atof, atoi, str, resetlocale, getdefaultlocale."
+cpython_path: Lib/locale.py
+cpython_version: "3.14"
+lines: 640
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/locale.py" />
+
+`locale` wraps the POSIX locale C API (`setlocale`, `localeconv`) and provides higher-level number and currency formatting that respects locale conventions. Much of the module is pure Python built on top of `_locale` (the C extension for `setlocale`/`localeconv`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LC_*` constants, `_locale` import | Locale category constants |
+| 81-180 | `setlocale`, `getlocale` | Get/set the locale for a category |
+| 181-280 | `localeconv` | Return dict of numeric/monetary formatting conventions |
+| 281-400 | `format_string`, `currency` | Format numbers and currency strings |
+| 401-500 | `atof`, `atoi` | Locale-aware string-to-number conversion |
+| 501-580 | `getdefaultlocale`, `getpreferredencoding` | System locale detection |
+| 581-640 | `resetlocale`, `normalize` | Locale name normalization |
+
+## Reading
+
+### `setlocale`
+
+```python
+# CPython: Lib/locale.py:108 setlocale
+def setlocale(category, locale=None):
+    if locale and not isinstance(locale, _str_type):
+        locale = normalize(_build_localename(locale))
+    result = _setlocale(category, locale)
+    if result is None:
+        raise Error("unsupported locale setting")
+    return result
+```
+
+Wraps the C `setlocale`. The `_str_type` check allows passing a `(language, encoding)` tuple.
+
+### `localeconv`
+
+Returns a dict with keys like `'decimal_point'`, `'thousands_sep'`, `'grouping'`, `'currency_symbol'`, `'int_curr_symbol'`, `'positive_sign'`, `'negative_sign'`. These come from `_locale.localeconv()` (the C call) and are cached.
+
+### `format_string`
+
+```python
+# CPython: Lib/locale.py:216 format_string
+def format_string(f, val, grouping=False, monetary=False):
+    ...
+    result = f % val
+    ...
+    if grouping:
+        result = _group(result, monetary)
+    return result
+```
+
+`grouping=True` inserts the locale's thousands separator at the positions specified by the `'grouping'` conv entry.
+
+### `getpreferredencoding`
+
+```python
+# CPython: Lib/locale.py:602 getpreferredencoding
+def getpreferredencoding(do_setlocale=True):
+    ...
+    return _locale._getdefaultlocale()[1] or 'UTF-8'
+```
+
+Used by `open()` and `sys.getfilesystemencoding()` to determine the default text encoding on platforms where it is not UTF-8.
+
+## gopy notes
+
+Status: not yet ported. `locale` requires C-level `setlocale`/`localeconv` which are inherently process-global and not goroutine-safe. The Go port needs `golang.org/x/text/language` for locale data and should expose `localeconv()` as a read-only snapshot rather than a mutable process-global state. `getpreferredencoding()` can return `'UTF-8'` unconditionally on modern systems.

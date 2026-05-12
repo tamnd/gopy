@@ -1,0 +1,76 @@
+---
+title: Lib/getopt.py
+description: "getopt: Unix-style command-line argument parsing. getopt() for short options, gnu_getopt() for GNU-style intermixed args, GetoptError exception."
+cpython_path: Lib/getopt.py
+cpython_version: "3.14"
+lines: 210
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/getopt.py" />
+
+`getopt` provides traditional Unix option parsing. It is considered lower-level than `argparse`; most new code should use `argparse`. `getopt` is still widely used in scripts and tools that want minimal dependencies or exact POSIX option compatibility.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `GetoptError`, `error` | Exception class |
+| 41-120 | `getopt` | POSIX-style option parsing |
+| 121-210 | `gnu_getopt` | GNU-style parsing allowing options after non-option args |
+
+## Reading
+
+### `getopt`
+
+`getopt(args, shortopts, longopts=[])` parses `args` against a short option string and a list of long option names.
+
+```python
+# CPython: Lib/getopt.py:52 getopt
+def getopt(args, shortopts, longopts=[]):
+    opts = []
+    if type(longopts) == type(""):
+        longopts = [longopts]
+    else:
+        longopts = list(longopts)
+    while args and args[0].startswith('-') and args[0] != '-':
+        if args[0].startswith('--'):
+            opts, args = do_longs(opts, args[0][2:], longopts, args[1:])
+        else:
+            opts, args = do_shorts(opts, args[0][1:], shortopts, args[1:])
+    return opts, args
+```
+
+Short options: a string like `'hvo:'` where `:` means the option takes an argument. Long options: a list like `['help', 'verbose', 'output=']` where `=` means the option takes an argument.
+
+Returns `(opts, args)`: `opts` is a list of `(option, value)` pairs; `args` is the remaining non-option arguments.
+
+### `gnu_getopt`
+
+Like `getopt` but continues parsing after the first non-option argument instead of stopping. This matches GNU convention where `cmd arg1 -v arg2` is valid.
+
+```python
+# CPython: Lib/getopt.py:126 gnu_getopt
+def gnu_getopt(args, shortopts, longopts=[]):
+    opts = []
+    prog_args = []
+    ...
+    while args:
+        if args[0].startswith('--') and len(args[0]) > 2:
+            opts, args = do_longs(opts, args[0][2:], longopts, args[1:])
+        elif args[0].startswith('-') and args[0] != '-':
+            opts, args = do_shorts(opts, args[0][1:], shortopts, args[1:])
+        else:
+            if all_options_first:
+                prog_args += args
+                break
+            prog_args.append(args[0])
+            args = args[1:]
+    return opts, prog_args
+```
+
+## gopy notes
+
+Status: not yet ported. Pure Python, very small. Direct Go port of the two functions with a `GetoptError` equivalent. No special CPython internals needed.

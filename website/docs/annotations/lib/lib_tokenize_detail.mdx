@@ -1,0 +1,104 @@
+---
+title: Lib/tokenize.py
+description: "tokenize: pure-Python lexer that generates (type, string, start, end, line) 5-tuples. generate_tokens, open, detect_encoding, TokenInfo, TokenError."
+cpython_path: Lib/tokenize.py
+cpython_version: "3.14"
+lines: 690
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/tokenize.py" />
+
+`tokenize` is a pure-Python lexer that reads a Python source file and produces a stream of `TokenInfo` named tuples. It is used by `ast.parse` (indirectly), `tabnanny`, `py_compile`, and many code formatting tools. Unlike the C tokenizer used by the parser, this module operates on byte streams and handles encoding detection.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Regex patterns | `PseudoToken`, `Token`, `Whitespace`, `Comment`, `String` regexes |
+| 81-150 | `TokenInfo`, `TokenError` | Named tuple and exception |
+| 151-230 | `detect_encoding` | BOM and coding cookie detection |
+| 231-350 | `open` | Encoding-aware file open |
+| 351-600 | `_tokenize`, `generate_tokens` | Core lexer generator |
+| 601-690 | `tokenize`, `untokenize` | Public API and reverse tokenization |
+
+## Reading
+
+### `TokenInfo`
+
+```python
+# CPython: Lib/tokenize.py:86 TokenInfo
+TokenInfo = collections.namedtuple('TokenInfo', 'type string start end line')
+```
+
+- `type`: integer from `token` module
+- `string`: the matched text
+- `start`/`end`: `(row, col)` tuples (1-indexed row, 0-indexed col)
+- `line`: the complete source line
+
+### `detect_encoding`
+
+Reads the BOM and first two lines to determine the file encoding per PEP 263. The coding cookie pattern is `# -*- coding: <encoding> -*-` or `# coding: <encoding>`.
+
+```python
+# CPython: Lib/tokenize.py:168 detect_encoding
+def detect_encoding(readline):
+    bom_found = False
+    encoding = None
+    default = 'utf-8'
+    def read_or_stop():
+        ...
+    def find_cookie(line):
+        ...
+    first = read_or_stop()
+    if first.startswith(BOM_UTF8):
+        bom_found = True
+        first = first[3:]
+        default = 'utf-8-sig'
+    ...
+```
+
+### `generate_tokens`
+
+The core generator. It reads the source line by line (via the `readline` callable) and applies the `PseudoToken` regex to each line, yielding `TokenInfo` objects. It tracks indentation level with a stack to emit `INDENT` and `DEDENT` tokens.
+
+```python
+# CPython: Lib/tokenize.py:425 generate_tokens (simplified)
+def generate_tokens(readline):
+    ...
+    indents = [0]
+    ...
+    while True:
+        line = readline()
+        ...
+        while column < indents[-1]:
+            indents.pop()
+            yield TokenInfo(DEDENT, '', (lnum, 0), (lnum, 0), line)
+        ...
+        for token in TokenRegex.finditer(line):
+            ...
+            yield TokenInfo(type, token.string, spos, epos, line)
+```
+
+### `untokenize`
+
+Reconstructs source text from a token stream. It is used by tools like `lib2to3` that want to modify tokens and regenerate code.
+
+```python
+# CPython: Lib/tokenize.py:147 untokenize
+def untokenize(iterable):
+    tokens = []
+    prev_row = 1
+    prev_col = 0
+    ...
+    for token_info in iterable:
+        ...
+        tokens.append(token_string)
+    return ''.join(tokens)
+```
+
+## gopy notes
+
+Status: not yet ported. `tokenize` is needed by `inspect.getsource`, `ast.parse` in source-mode, and several stdlib tools. The encoding detection logic is self-contained Python. The main dependency is the `token` module's constants. The regex-based lexer translates to Go's `regexp` package or a hand-written lexer matching the same patterns.
