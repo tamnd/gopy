@@ -1,0 +1,114 @@
+---
+title: Python/ceval.c (part 71)
+description: "Python/ceval.c part 71: STORE_SUBSCR, DELETE_SUBSCR, BINARY_SUBSCR specializations."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers subscript get/set/delete opcodes and their adaptive specializations. See `python_ceval70_detail` for `LOAD_FAST`, `LOAD_FAST_CHECK`, and `DELETE_FAST`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_SUBSCR` | `a[i]` — call `__getitem__` |
+| 81-180 | `BINARY_SUBSCR_LIST_INT` | Specialization for list + int index |
+| 181-280 | `BINARY_SUBSCR_DICT` | Specialization for dict lookup |
+| 281-380 | `STORE_SUBSCR` | `a[i] = v` — call `__setitem__` |
+| 381-500 | `DELETE_SUBSCR` | `del a[i]` — call `__delitem__` |
+
+## Reading
+
+### `BINARY_SUBSCR`
+
+```c
+// CPython: Python/ceval.c:2180 BINARY_SUBSCR
+inst(BINARY_SUBSCR, (container, sub -- res)) {
+    res = PyObject_GetItem(container, sub);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(container);
+    Py_DECREF(sub);
+}
+```
+
+`a[i]` compiles to `LOAD_NAME a`, `LOAD_NAME i`, `BINARY_SUBSCR`. `PyObject_GetItem` dispatches to `tp_as_mapping->mp_subscript` or `tp_as_sequence->sq_item` depending on the type.
+
+### `BINARY_SUBSCR_LIST_INT`
+
+```c
+// CPython: Python/ceval.c:2210 BINARY_SUBSCR_LIST_INT
+inst(BINARY_SUBSCR_LIST_INT, (list, sub -- res)) {
+    DEOPT_IF(!PyList_CheckExact(list));
+    DEOPT_IF(!PyLong_CheckExact(sub));
+    Py_ssize_t index = PyLong_AsLong(sub);
+    DEOPT_IF(index < 0);
+    DEOPT_IF(index >= PyList_GET_SIZE(list));
+    res = Py_NewRef(PyList_GET_ITEM(list, index));
+    Py_DECREF(list);
+    Py_DECREF(sub);
+}
+```
+
+When `BINARY_SUBSCR` is specialized for `list[int]`, it bypasses `PyObject_GetItem` entirely: it reads `ob_item[index]` directly after bounds checking. Negative indices are not handled in the fast path — they deopt to the generic form.
+
+### `BINARY_SUBSCR_DICT`
+
+```c
+// CPython: Python/ceval.c:2250 BINARY_SUBSCR_DICT
+inst(BINARY_SUBSCR_DICT, (dict, sub -- res)) {
+    DEOPT_IF(!PyDict_CheckExact(dict));
+    res = PyDict_GetItemWithError(dict, sub);
+    if (res == NULL) {
+        if (!_PyErr_Occurred(tstate)) {
+            _PyErr_SetKeyError(sub);
+        }
+        goto error;
+    }
+    Py_INCREF(res);
+    Py_DECREF(dict);
+    Py_DECREF(sub);
+}
+```
+
+`BINARY_SUBSCR_DICT` calls `PyDict_GetItemWithError` instead of the generic mapping protocol. This skips the `tp_as_mapping` indirection. A missing key still raises `KeyError`; `None` is a valid value (unlike `PyDict_GetItem` which returns `NULL` for both missing and error).
+
+### `STORE_SUBSCR`
+
+```c
+// CPython: Python/ceval.c:2320 STORE_SUBSCR
+inst(STORE_SUBSCR, (v, container, sub --)) {
+    /* container[sub] = v */
+    int err = PyObject_SetItem(container, sub, v);
+    Py_DECREF(v);
+    Py_DECREF(container);
+    Py_DECREF(sub);
+    ERROR_IF(err != 0, error);
+}
+```
+
+Stack order: `v` is pushed first (it's the value being assigned), then `container`, then `sub`. So `a[i] = v` compiles as: `LOAD v`, `LOAD a`, `LOAD i`, `STORE_SUBSCR`. The reversed-from-source stack layout is a recurring CPython pattern.
+
+### `DELETE_SUBSCR`
+
+```c
+// CPython: Python/ceval.c:2360 DELETE_SUBSCR
+inst(DELETE_SUBSCR, (container, sub --)) {
+    /* del container[sub] */
+    int err = PyObject_DelItem(container, sub);
+    Py_DECREF(container);
+    Py_DECREF(sub);
+    ERROR_IF(err != 0, error);
+}
+```
+
+`del a[i]` delegates to `tp_as_mapping->mp_ass_subscript(container, sub, NULL)`. Passing `NULL` as the value signals deletion in the mapping protocol.
+
+## gopy notes
+
+`BINARY_SUBSCR` is in `vm/eval_simple.go` and calls `objects.GetItem`. `BINARY_SUBSCR_LIST_INT` reads `objects.List.Items[index]` directly. `BINARY_SUBSCR_DICT` calls `objects.DictGetItemWithError`. `STORE_SUBSCR` calls `objects.SetItem`. `DELETE_SUBSCR` calls `objects.DelItem`.

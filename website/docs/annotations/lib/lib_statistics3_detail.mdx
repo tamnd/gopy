@@ -1,0 +1,118 @@
+---
+title: Lib/statistics.py (part 3)
+description: "statistics.py part 3: variance, stdev, pstdev, pvariance, NormalDist."
+cpython_path: Lib/statistics.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/statistics.py" />
+
+This annotation covers variance and the `NormalDist` class. See `lib_statistics2_detail` for `mean`, `median`, `mode`, and `harmonic_mean`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `variance` / `pvariance` | Sample and population variance |
+| 81-160 | `stdev` / `pstdev` | Standard deviations |
+| 161-260 | `NormalDist.__init__` | Normal distribution object |
+| 261-380 | `NormalDist.cdf` / `pdf` | Cumulative distribution and density |
+| 381-500 | `NormalDist.overlap` / `samples` | Distribution operations |
+
+## Reading
+
+### `variance`
+
+```python
+# CPython: Lib/statistics.py:610 variance
+def variance(data, xbar=None):
+    if iter(data) is data:
+        data = list(data)
+    n = len(data)
+    if n < 2:
+        raise StatisticsError('variance requires at least two data points')
+    if xbar is None:
+        xbar = mean(data)
+    # Two-pass: compute sum of squared deviations
+    total = sum((x - xbar)**2 for x in data)
+    return total / (n - 1)   # Bessel's correction
+```
+
+`variance` uses Bessel's correction (`n-1`) for the unbiased sample estimator. If `xbar` is pre-computed, it is reused to avoid a second pass. For integer data, the subtraction promotes to `Fraction` internally to avoid float cancellation errors.
+
+### `pvariance`
+
+```python
+# CPython: Lib/statistics.py:660 pvariance
+def pvariance(data, mu=None):
+    if iter(data) is data:
+        data = list(data)
+    n = len(data)
+    if n < 1:
+        raise StatisticsError('pvariance requires at least one data point')
+    if mu is None:
+        mu = mean(data)
+    total = sum((x - mu)**2 for x in data)
+    return total / n  # population: divide by n, not n-1
+```
+
+`pvariance` divides by `n` (the population variance). `variance` divides by `n-1` (the sample variance, Bessel-corrected). Use `pvariance` when `data` is the entire population; `variance` when it is a sample.
+
+### `NormalDist`
+
+```python
+# CPython: Lib/statistics.py:820 NormalDist
+class NormalDist:
+    __slots__ = ('_mu', '_sigma')
+
+    def __init__(self, mu=0.0, sigma=1.0):
+        if sigma < 0:
+            raise StatisticsError('sigma must be non-negative')
+        self._mu = float(mu)
+        self._sigma = float(sigma)
+
+    @classmethod
+    def from_samples(cls, data):
+        if len(data) < 2:
+            raise StatisticsError(...)
+        return cls(mean(data), stdev(data))
+```
+
+`NormalDist` is a value object. `from_samples` fits a normal distribution to data via sample mean and standard deviation. `__slots__` avoids the instance `__dict__` overhead for a class expected to be instantiated in loops.
+
+### `NormalDist.cdf`
+
+```python
+# CPython: Lib/statistics.py:920 cdf
+def cdf(self, x):
+    # Cumulative distribution function P(X <= x)
+    return 0.5 * (1.0 + math.erf((x - self._mu) / (self._sigma * _SQRT2)))
+```
+
+`_SQRT2 = math.sqrt(2)`. The CDF uses the error function: `erf` is in `math` and delegates to the C library. `cdf(mu)` returns 0.5 by the symmetry of the normal distribution.
+
+### `NormalDist.overlap`
+
+```python
+# CPython: Lib/statistics.py:980 overlap
+def overlap(self, other):
+    # Bhattacharyya coefficient: 0.0 = no overlap, 1.0 = identical
+    X = self
+    Y = other
+    if X._sigma == 0.0 and Y._sigma == 0.0:
+        return float(X._mu == Y._mu)
+    if X._sigma == 0.0 or Y._sigma == 0.0:
+        return float((X.cdf(Y._mu) - X.cdf(Y._mu - X._sigma)) if Y._sigma == 0.0 else ...)
+    ...
+    return math.exp(-0.25 * (log(v) + (X._mu - Y._mu)**2 / (X._sigma**2 + Y._sigma**2)))
+```
+
+`overlap` measures the similarity of two normal distributions using the Bhattacharyya coefficient. Returns 0.0 for non-overlapping distributions and 1.0 for identical ones. Useful in ML for comparing class-conditional distributions.
+
+## gopy notes
+
+`variance`/`pvariance` are `module/statistics.Variance` / `module/statistics.PVariance` in `module/statistics/module.go`. `NormalDist` is `module/statistics.NormalDist` backed by `mu float64` and `sigma float64`. `cdf` uses `math.Erf`. `from_samples` calls `Mean` then `Stdev`.

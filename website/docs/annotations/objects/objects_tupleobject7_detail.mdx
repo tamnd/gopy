@@ -1,0 +1,120 @@
+---
+title: Objects/tupleobject.c (part 7)
+description: "Objects/tupleobject.c part 7: tuple.__new__, tuple free list, tuple hash, tuple.__getnewargs__."
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/tupleobject.c" />
+
+This annotation covers tuple allocation, the free list, hashing, and pickle support. See `objects_tupleobject6_detail` for tuple iteration, `__contains__`, and index/count methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `tuple.__new__` | Allocate and fill a tuple from an iterable |
+| 81-160 | Tuple free list | Pool of empty and small tuples |
+| 161-240 | `tuple.__hash__` | xxHash-based hash of all elements |
+| 241-360 | `tuple.__repr__` | `(a, b, c)` string construction |
+| 361-500 | `tuple.__getnewargs__` | Pickle protocol support |
+
+## Reading
+
+### `tuple.__new__`
+
+```c
+// CPython: Objects/tupleobject.c:68 tuple_new_impl
+static PyObject *
+tuple_new_impl(PyTypeObject *type, PyObject *iterable)
+{
+    if (iterable == NULL) return PyTuple_New(0);
+    if (PyTuple_CheckExact(iterable)) {
+        if (type == &PyTuple_Type) {
+            Py_INCREF(iterable);
+            return iterable;  /* tuple(t) returns t unchanged */
+        }
+    }
+    return PySequence_Tuple(iterable);
+}
+```
+
+`tuple(t)` where `t` is already a tuple returns the same object (no copy). `tuple(t)` where `t` is a subtype still copies because the result must be exactly `tuple`. `PySequence_Tuple` iterates and builds a fresh tuple.
+
+### Tuple free list
+
+```c
+// CPython: Objects/tupleobject.c:22 free list
+#define PyTuple_MAXSAVESIZE 20
+#define PyTuple_MAXFREELIST 2000
+
+static PyTupleObject *free_list[PyTuple_MAXSAVESIZE];
+static int numfree[PyTuple_MAXSAVESIZE];
+
+void
+_PyTuple_MaybeUntrack(PyObject *v)
+{
+    /* Remove from GC if all elements are untracked scalars */
+    ...
+}
+```
+
+Tuples of size 0–19 are pooled. The empty tuple is a singleton: `PyTuple_New(0)` always returns the same object. For sizes 1–19, up to 2000 tuples per size are recycled. This makes `(a, b)` construction inside tight loops nearly free.
+
+### `tuple.__hash__`
+
+```c
+// CPython: Objects/tupleobject.c:340 tuplehash
+static Py_hash_t
+tuplehash(PyTupleObject *v)
+{
+    Py_ssize_t len = Py_SIZE(v);
+    Py_uhash_t acc = _PyHASH_XXPRIME_5;
+    for (Py_ssize_t i = 0; i < len; i++) {
+        Py_uhash_t lane = PyObject_Hash(v->ob_item[i]);
+        if (lane == (Py_uhash_t)-1) return -1;
+        acc += lane * _PyHASH_XXPRIME_2;
+        acc = _PyHASH_XXROTATE(acc);
+        acc *= _PyHASH_XXPRIME_1;
+    }
+    acc += len ^ (_PyHASH_XXPRIME_5 ^ 3527539UL);
+    return (acc == (Py_uhash_t)-1) ? 1546275796 : acc;
+}
+```
+
+Tuple hash combines element hashes using a reduced xxHash. Order matters: `(1, 2)` and `(2, 1)` have different hashes. The `== -1` sentinel is avoided by substituting a fixed constant.
+
+### `tuple.__repr__`
+
+```c
+// CPython: Objects/tupleobject.c:280 tuplerichcompare / tuple_repr
+static PyObject *
+tuple_repr(PyTupleObject *v)
+{
+    Py_ssize_t n = Py_SIZE(v);
+    if (n == 0) return PyUnicode_FromString("()");
+    /* Parentheses, comma-separated repr of items */
+    /* Single element: trailing comma — (1,) */
+    ...
+}
+```
+
+A one-element tuple requires a trailing comma: `(1,)`. Without it, `(1)` would be parsed as the integer `1`. `tuple.__repr__` uses `_PyUnicodeWriter` to concatenate element reprs without building intermediate strings.
+
+### `tuple.__getnewargs__`
+
+```python
+# CPython: Objects/tupleobject.c:420 tuple_getnewargs
+def __getnewargs__(self):
+    return (self[:],)
+```
+
+The pickle protocol for tuples. `__getnewargs__` returns a one-element tuple containing the tuple itself (as a list copy). `pickle.loads(pickle.dumps((1,2,3)))` calls `tuple.__new__(tuple, [1, 2, 3])` to reconstruct.
+
+## gopy notes
+
+`tuple.__new__` is `objects.TupleNew` in `objects/tuple.go`. The free list is `objects.TupleFreeList` — a `[20][]* Tuple` pool. `tuplehash` is `objects.Tuple.Hash` using Go's `hash/fnv` with xxHash-equivalent mixing. `tuple.__getnewargs__` returns `objects.Tuple{self}`.

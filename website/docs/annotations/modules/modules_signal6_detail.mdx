@@ -1,0 +1,142 @@
+---
+title: Modules/signalmodule.c (part 6)
+description: "signalmodule.c part 6: signal.signal, signal.raise_signal, signal.pthread_kill, Handlers table."
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/signalmodule.c" />
+
+This annotation covers the signal installation API and the handlers table. See `modules_signal5_detail` for `signal.pause`, `signal.alarm`, `signal.setitimer`, and wakeup fd.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Handlers table | Per-signal Python callable storage |
+| 81-180 | `signal.signal` | Install a Python handler for a signal |
+| 181-280 | `signal.getsignal` | Retrieve the current handler |
+| 281-380 | `signal.raise_signal` | Raise a signal in the current process |
+| 381-500 | `signal.pthread_kill` | Send a signal to a specific thread (POSIX) |
+
+## Reading
+
+### Handlers table
+
+```c
+// CPython: Modules/signalmodule.c:80 Handlers
+static struct {
+    _Py_atomic_int tripped;
+    PyObject *func;
+} Handlers[NSIG];
+
+/* Special sentinel values */
+#define SIG_DFL_VALUE  ((PyObject *)&_Py_TrueStruct)
+#define SIG_IGN_VALUE  ((PyObject *)&_Py_FalseStruct)
+```
+
+Each signal number maps to a `func` — either `SIG_DFL`, `SIG_IGN`, or a callable. `tripped` is an atomic flag set by the C signal handler; the eval loop checks it after each opcode and calls the Python handler on the main thread.
+
+### `signal.signal`
+
+```c
+// CPython: Modules/signalmodule.c:320 signal_signal_impl
+static PyObject *
+signal_signal_impl(PyObject *module, int signalnum, PyObject *handler)
+{
+    if (_Py_IsMainInterpreter(tstate->interp) == 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "signal only works in main thread");
+        return NULL;
+    }
+    PyObject *old_handler = Handlers[signalnum].func;
+    if (handler == IgnoreHandler) {
+        signal(signalnum, SIG_IGN);
+        Handlers[signalnum].func = IgnoreHandler;
+    } else if (handler == DefaultHandler) {
+        signal(signalnum, SIG_DFL);
+        Handlers[signalnum].func = DefaultHandler;
+    } else {
+        if (!PyCallable_Check(handler)) {
+            PyErr_SetString(PyExc_TypeError, "signal handler must be callable");
+            return NULL;
+        }
+        signal(signalnum, signal_handler);
+        Handlers[signalnum].func = Py_NewRef(handler);
+    }
+    Py_XDECREF(old_handler);
+    return old_handler ? old_handler : Py_None;
+}
+```
+
+Signal handlers can only be installed from the main thread — the OS delivers signals to the process, and Python's signal machinery runs on the main thread's eval loop. `signal_handler` (the C trampoline) sets `tripped = 1`; the actual Python callable runs later in safe context.
+
+### `signal.getsignal`
+
+```c
+// CPython: Modules/signalmodule.c:380 signal_getsignal_impl
+static PyObject *
+signal_getsignal_impl(PyObject *module, int signalnum)
+{
+    if (signalnum < 1 || signalnum >= NSIG) {
+        PyErr_SetString(PyExc_ValueError, "signal number out of range");
+        return NULL;
+    }
+    PyObject *old_handler = Handlers[signalnum].func;
+    if (old_handler == NULL) return Py_NewRef(DefaultHandler);
+    return Py_NewRef(old_handler);
+}
+```
+
+`signal.getsignal(SIGINT)` returns `signal.default_int_handler` if Python hasn't been modified, or the installed callable. Returns `signal.SIG_DFL` / `signal.SIG_IGN` for OS-level defaults.
+
+### `signal.raise_signal`
+
+```c
+// CPython: Modules/signalmodule.c:440 signal_raise_signal_impl
+static PyObject *
+signal_raise_signal_impl(PyObject *module, int signalnum)
+{
+    int err = raise(signalnum);
+    if (err) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`signal.raise_signal(signal.SIGTERM)` calls the C `raise()` function, which delivers the signal to the current process synchronously. Python's handler will run at the next eval-loop check.
+
+### `signal.pthread_kill`
+
+```c
+// CPython: Modules/signalmodule.c:490 signal_pthread_kill_impl
+static PyObject *
+signal_pthread_kill_impl(PyObject *module, unsigned long thread_id,
+                          int signalnum)
+{
+#ifdef HAVE_PTHREAD_KILL
+    int err = pthread_kill((pthread_t)thread_id, signalnum);
+    if (err != 0) {
+        errno = err;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+#else
+    PyErr_SetString(PyExc_OSError, "pthread_kill not supported");
+    return NULL;
+#endif
+}
+```
+
+`signal.pthread_kill(tid, signal.SIGUSR1)` sends a signal to a specific POSIX thread. `threading.get_ident()` returns the `tid`. Unavailable on Windows.
+
+## gopy notes
+
+The handlers table is `module/signal.Handlers` in `module/signal/module.go`. `signal.signal` stores the callable and installs a Go `os/signal.Notify` channel listener. `signal.raise_signal` calls `syscall.Kill(os.Getpid(), sig)`. `signal.pthread_kill` is a stub on non-POSIX platforms.
