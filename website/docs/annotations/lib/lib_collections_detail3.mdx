@@ -1,0 +1,91 @@
+---
+title: Lib/collections/__init__.py (part 3)
+description: "collections part 3: ChainMap, Counter, UserDict, UserList, UserString. deque performance characteristics. defaultdict edge cases."
+cpython_path: Lib/collections/__init__.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/collections/__init__.py" />
+
+This annotation covers `ChainMap`, `Counter`, and the `User*` wrapper classes. See `lib_collections2_detail` for `OrderedDict`, `deque`, `namedtuple`, and `defaultdict`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `ChainMap` | Dict-like view over multiple dicts |
+| 151-400 | `Counter` | Dict subclass for multiset counting |
+| 401-550 | `UserDict`, `UserList`, `UserString` | Subclassable wrappers for built-in types |
+
+## Reading
+
+### `ChainMap`
+
+`ChainMap(*maps)` groups multiple dicts (or mappings) into a single view. Lookups search the maps in order; writes go to the first map.
+
+```python
+# CPython: Lib/collections/__init__.py:897 ChainMap.__getitem__
+def __getitem__(self, key):
+    for mapping in self.maps:
+        try:
+            return mapping[key]
+        except KeyError:
+            pass
+    return self.__missing__(key)
+```
+
+`new_child(m=None)` creates a new `ChainMap` with a fresh dict prepended, useful for scoping.
+
+### `Counter`
+
+`Counter` is a `dict` subclass for counting hashable objects. `Counter(iterable)` counts occurrences; arithmetic operators add, subtract, intersect, and union counts.
+
+```python
+# CPython: Lib/collections/__init__.py:614 Counter.__add__
+def __add__(self, other):
+    if not isinstance(other, Counter):
+        return NotImplemented
+    result = Counter()
+    for elem, count in self.items():
+        newcount = count + other[elem]
+        if newcount > 0:
+            result[elem] = newcount
+    for elem, count in other.items():
+        if elem not in self and count > 0:
+            result[elem] = count
+    return result
+```
+
+`most_common(n)` returns the top `n` elements by count, using a heap when `n` is given.
+
+```python
+# CPython: Lib/collections/__init__.py:623 Counter.most_common
+def most_common(self, n=None):
+    if n is None:
+        return sorted(self.items(), key=_itemgetter(1), reverse=True)
+    return _heapq.nlargest(n, self.items(), key=_itemgetter(1))
+```
+
+### `UserDict`
+
+`UserDict` wraps a regular `dict` in `self.data`. Subclasses override methods to customize dict behavior without the complexities of subclassing `dict` directly (where some special methods bypass overrides).
+
+```python
+# CPython: Lib/collections/__init__.py:1126 UserDict.__setitem__
+def __setitem__(self, key, item):
+    self.data[key] = item
+```
+
+All operations delegate to `self.data`. `UserDict(initial_data)` initializes `self.data` by calling `self.update(initial_data)`, which respects the subclass's `__setitem__`.
+
+### `UserString`
+
+`UserString` wraps a Python string in `self.data`. It implements all `str` methods by delegating to `self.data`, returning `self.__class__` instances where appropriate to preserve the subclass type.
+
+## gopy notes
+
+`Counter` is needed for Python scripts that do frequency analysis. In gopy it maps to a `map[py.Object]int`. `ChainMap` requires a list of `py.Object` (dict) references. `most_common` depends on `heapq.nlargest`. `UserDict`/`UserList`/`UserString` are rarely needed directly but required for compatibility with `unittest.mock` and similar tools.

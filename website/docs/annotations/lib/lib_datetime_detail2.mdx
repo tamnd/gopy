@@ -1,0 +1,88 @@
+---
+title: Lib/datetime.py (part 2)
+description: "datetime part 2: datetime arithmetic, strptime, timezone-aware operations, timedelta, fold disambiguation, ISO 8601 parsing (fromisoformat), UTC offset rules."
+cpython_path: Lib/datetime.py
+cpython_version: "3.14"
+lines: 2900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/datetime.py" />
+
+This annotation supplements `lib_datetime_detail` with arithmetic, timezone disambiguation (PEP 495 fold), ISO 8601 parsing, and the `timedelta` implementation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `timedelta` | Duration: days, seconds, microseconds |
+| 201-400 | `date` arithmetic | `date + timedelta`, `date - date` |
+| 401-700 | `datetime` construction | `now()`, `utcnow()`, `fromtimestamp()`, `fromisoformat()` |
+| 701-900 | `datetime` arithmetic | `datetime + timedelta`, `datetime - datetime` |
+| 901-1100 | `fold` and DST disambiguation | PEP 495 wall clock fold |
+| 1101-1300 | `strftime` / `strptime` | Format and parse |
+| 1301-1600 | `timezone` | Fixed-offset `tzinfo` subclass |
+| 1601-1900 | `astimezone` | Convert between timezones |
+| 1901-2900 | `time`, `date`, `datetime` `fromisoformat` | ISO 8601 parsing (Python 3.11+) |
+
+## Reading
+
+### `timedelta` normalization
+
+`timedelta` stores duration in three fields: `days`, `seconds` (0-86399), `microseconds` (0-999999). The constructor normalizes any input to this canonical form.
+
+```python
+# CPython: Lib/datetime.py:367 timedelta.__new__
+def __new__(cls, days=0, seconds=0, microseconds=0,
+            milliseconds=0, minutes=0, hours=0, weeks=0):
+    ...
+    d, s, us = _check_tzinfo_arg(days, seconds, microseconds,
+                                  milliseconds, minutes, hours, weeks)
+    ...
+    self = object.__new__(cls)
+    self._days = d
+    self._seconds = s
+    self._microseconds = us
+    return self
+```
+
+Total duration in microseconds is `(days * 86400 + seconds) * 1_000_000 + microseconds`.
+
+### `fold` and DST transition disambiguation
+
+PEP 495 added `fold=0|1` to `datetime` and `time`. When a local clock repeats due to a DST fall-back, `fold=0` means the first occurrence and `fold=1` the second. Most `tzinfo` implementations ignore `fold` unless they implement `fromutc`.
+
+### `fromisoformat` (Python 3.11+)
+
+Python 3.11 extended `fromisoformat` to accept any valid ISO 8601 format, including formats with `Z` for UTC, fractional seconds, and week-number dates.
+
+```python
+# CPython: Lib/datetime.py:1580 datetime.fromisoformat
+@classmethod
+def fromisoformat(cls, date_string):
+    dstr = date_string.upper()
+    ...
+    # Handles: 2023-01-15, 2023-01-15T10:30:00, 2023-01-15T10:30:00Z,
+    # 2023-01-15T10:30:00+05:30, 2023W015, etc.
+```
+
+### `astimezone`
+
+```python
+# CPython: Lib/datetime.py:1935 datetime.astimezone
+def astimezone(self, tz=None):
+    if tz is None:
+        tz = timezone(self.utcoffset() or timedelta())
+    ...
+    utc = self.replace(tzinfo=self.tzinfo).utctimetuple()
+    ...
+    return tz.fromutc(datetime(*utc[:6]).replace(tzinfo=tz))
+```
+
+Converts a timezone-aware datetime to a different timezone by converting to UTC first, then converting to the target timezone.
+
+## gopy notes
+
+`datetime` is partially available via the C extension `_datetime`. A gopy port should wrap Go's `time.Time` type. Key differences: Go's `time.Time` is always timezone-aware (with `time.UTC` or a `*time.Location`), while Python's `datetime` can be naive. `fold` requires storing an extra boolean per `time.Time` value.

@@ -1,0 +1,90 @@
+---
+title: Lib/enum.py (part 2)
+description: "enum part 2: EnumType metaclass __new__, _generate_next_value_, _missing_, Flag bitwise ops, auto(), StrEnum, IntFlag, ReprEnum."
+cpython_path: Lib/enum.py
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/enum.py" />
+
+This annotation covers `EnumType.__new__` (the metaclass that builds enum classes), `Flag` bitwise operations, and the newer helper classes. See `lib_enum_detail` for basic `Enum`, `IntEnum`, and `auto()`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `EnumType.__new__` | Build the enum class from a namespace |
+| 301-500 | `EnumType.__call__`, `_missing_` | Lookup by value with missing hook |
+| 501-700 | `Flag` | Bitwise flag enum; `__and__`, `__or__`, `__xor__`, `__invert__` |
+| 701-850 | `IntFlag` | `Flag` that also behaves as `int` |
+| 851-950 | `StrEnum` | `Enum` that also behaves as `str` |
+| 951-1050 | `ReprEnum` | Mixin for enums whose `repr` shows the value |
+| 1051-1200 | `auto` | Auto-generate values via `_generate_next_value_` |
+| 1201-1400 | `_EnumDict` | Custom namespace dict that captures definitions in order |
+| 1401-3000 | Helper functions | `unique`, `verify`, `global_enum`, `show_flag_values` |
+
+## Reading
+
+### `EnumType.__new__`: building enum members
+
+When Python executes `class Color(Enum): RED = 1`, `EnumType.__new__` is called. It:
+1. Separates the class body into descriptors, enum member definitions, and dunder methods
+2. Creates an `_EnumDict` that tracks member names in definition order
+3. For each member value, creates an instance of the enum class (calling `__new__` and optionally `__init__`)
+4. Stores instances in `cls._value2member_map_` for reverse lookup
+
+```python
+# CPython: Lib/enum.py:255 EnumType.__new__
+class EnumType(type):
+    def __new__(metacls, cls, bases, classdict, *, boundary=None, _simple=False, **kwds):
+        ...
+        # Create the actual enum members
+        for name in classdict._member_names:
+            value = classdict[name]
+            ...
+            enum_member = __new__(enum_class, *args)
+            enum_member._name_ = name
+            enum_member._value_ = value
+            ...
+            enum_class._member_map_[name] = enum_member
+            enum_class._value2member_map_[value] = enum_member
+```
+
+### `_missing_` hook
+
+If `Enum(value)` doesn't find `value` in `_value2member_map_`, it calls `cls._missing_(value)`. The default raises `ValueError`; subclasses can override to return a sentinel or a dynamically created member.
+
+### `Flag` bitwise operations
+
+```python
+# CPython: Lib/enum.py:896 Flag.__or__
+def __or__(self, other):
+    if isinstance(other, self.__class__):
+        return self.__class__(self._value_ | other._value_)
+    return NotImplemented
+```
+
+Combined flags that don't correspond to a named member are represented as a pseudo-member with a combined value. `Flag.__contains__` tests if a flag is a subset of a composite.
+
+### `StrEnum`
+
+```python
+# CPython: Lib/enum.py:1140 StrEnum
+class StrEnum(str, Enum):
+    def __new__(cls, value, *args, **kwargs):
+        if not isinstance(value, str):
+            raise TypeError(f'{value!r} is not a string')
+        return str.__new__(cls, value)
+    def _generate_next_value_(name, start, count, last_values):
+        return name.lower()
+```
+
+Members are also `str` instances, so `MyEnum.VALUE == 'value'` (useful for config keys, HTTP methods, etc.).
+
+## gopy notes
+
+`EnumType` is a metaclass; gopy needs to support metaclasses before `enum` can be fully ported. The member creation loop maps to runtime `Type` construction with custom `__new__`. `_value2member_map_` maps to a Go `map[interface{}]*EnumMember`.

@@ -1,0 +1,90 @@
+---
+title: Lib/dataclasses.py (part 2)
+description: "dataclasses part 2: __init__ code generation, field ordering, frozen classes (__setattr__/__delattr__), __post_init__, slots=True, kw_only, match_args."
+cpython_path: Lib/dataclasses.py
+cpython_version: "3.14"
+lines: 1350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/dataclasses.py" />
+
+This annotation covers the `__init__` code generation, frozen dataclasses, and the `slots=True` option introduced in Python 3.10. See `lib_dataclasses_detail` for `@dataclass`, `field()`, and the basic decorator.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `_process_class` | Main dataclass transformation |
+| 201-400 | `_init_fn` | `__init__` code generation via `exec` |
+| 401-550 | `_frozen_setattr`, `_frozen_delattr` | Frozen class mutation guard |
+| 551-700 | `_hash_fn`, `_eq_fn` | `__hash__` and `__eq__` generation |
+| 701-850 | `_repr_fn` | `__repr__` generation |
+| 851-1000 | `slots=True` logic | Create a new class with `__slots__` |
+| 1001-1150 | `kw_only`, `match_args` | PEP 681 and structural pattern matching |
+| 1151-1350 | `fields()`, `asdict()`, `astuple()`, `replace()` | Introspection utilities |
+
+## Reading
+
+### `__init__` code generation
+
+`_init_fn` builds the `__init__` function by constructing a Python source string and calling `exec`. This is necessary because the number and names of parameters vary per class.
+
+```python
+# CPython: Lib/dataclasses.py:543 _init_fn
+def _init_fn(fields, frozen, has_post_init, self_name, globals, slots):
+    ...
+    body_lines = []
+    for f in fields:
+        ...
+        if f.default is MISSING and f.default_factory is MISSING:
+            body_lines.append(f'{self_name}.{f.name} = {f.name}')
+        elif f.default_factory is not MISSING:
+            body_lines.append(f'if {f.name} is HAS_DEFAULT_FACTORY:')
+            body_lines.append(f'  {self_name}.{f.name} = {f.default_factory_name}()')
+            body_lines.append(f'else:')
+            body_lines.append(f'  {self_name}.{f.name} = {f.name}')
+    ...
+    return _create_fn('__init__', ..., body_lines, ...)
+```
+
+`_create_fn` calls `exec(f"def {name}({args}):\n  {body}")` in a temporary namespace, then returns the resulting function.
+
+### Frozen classes
+
+For `@dataclass(frozen=True)`, `__setattr__` and `__delattr__` are replaced:
+
+```python
+# CPython: Lib/dataclasses.py:320 _frozen_setattr
+def _frozen_setattr(self, name, value):
+    if type(self) is cls or type(self) in cls.__mro__:
+        raise FrozenInstanceError('cannot assign to field %r' % name)
+    object.__setattr__(self, name, value)
+```
+
+This allows inheritance from frozen dataclasses as long as the subclass is not itself frozen.
+
+### `slots=True` (Python 3.10+)
+
+When `slots=True`, `_process_class` creates a new class that inherits from the decorated class and adds `__slots__` for all defined fields. This reduces memory use and speeds up attribute access.
+
+```python
+# CPython: Lib/dataclasses.py:1012 _add_slots
+def _add_slots(cls, is_frozen, has_weakref_slot):
+    cls_dict = {}
+    for key, value in cls.__dict__.items():
+        if key not in ('__dict__', '__weakref__'):
+            cls_dict[key] = value
+    cls_dict['__slots__'] = tuple(f.name for f in fields(cls))
+    return type(cls)(cls.__name__, cls.__bases__, cls_dict)
+```
+
+### `__post_init__`
+
+If the class defines `__post_init__`, the generated `__init__` calls it at the end with the `InitVar` fields as arguments.
+
+## gopy notes
+
+`dataclasses` is a high-priority port because many libraries (pydantic, attrs) use it. The generated `__init__` approach via `exec` requires gopy's `exec()` to work correctly. An alternative is to generate the `__init__` as a Go closure at class creation time rather than compiling Python source. `frozen=True` maps to overriding `__setattr__` in gopy's class creation path.

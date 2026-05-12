@@ -1,0 +1,86 @@
+---
+title: Lib/itertools.py
+description: "itertools C extension: product, permutations, combinations, combinations_with_replacement, chain, cycle, repeat, count, groupby, islice, filterfalse, starmap, zip_longest, accumulate."
+cpython_path: Lib/itertools.py
+cpython_version: "3.14"
+lines: 1
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/itertoolsmodule.c" />
+
+`itertools` is implemented entirely in C (`Modules/itertoolsmodule.c`). There is no `Lib/itertools.py`. The module provides lazy iterators for efficient looping without creating intermediate lists.
+
+## Map
+
+| Symbol | Category | Role |
+|--------|----------|------|
+| `count(start, step)` | Infinite | Arithmetic counter |
+| `cycle(iterable)` | Infinite | Repeat iterable infinitely |
+| `repeat(obj, times)` | Infinite | Repeat an object N times |
+| `chain(*iterables)` | Combining | Concatenate iterables |
+| `chain.from_iterable(it)` | Combining | Flatten one level |
+| `islice(it, stop)` | Slicing | Iterator slice |
+| `compress(data, selectors)` | Filtering | Filter by boolean mask |
+| `filterfalse(pred, it)` | Filtering | Elements where pred is False |
+| `dropwhile(pred, it)` | Filtering | Drop while pred is True |
+| `takewhile(pred, it)` | Filtering | Take while pred is True |
+| `starmap(func, it)` | Mapping | `func(*args)` for each `args` in `it` |
+| `zip_longest(*its, fillvalue)` | Combining | Zip with fill for uneven lengths |
+| `groupby(it, key)` | Grouping | Group consecutive equal-key elements |
+| `accumulate(it, func, initial)` | Accumulating | Running reduction |
+| `product(*its, repeat)` | Combinatoric | Cartesian product |
+| `permutations(it, r)` | Combinatoric | r-length permutations |
+| `combinations(it, r)` | Combinatoric | r-length combinations without replacement |
+| `combinations_with_replacement(it, r)` | Combinatoric | With replacement |
+| `pairwise(it)` | Sliding window | Overlapping pairs (3.10+) |
+| `batched(it, n)` | Batching | Non-overlapping n-tuples (3.12+) |
+
+## Reading
+
+### `groupby` semantics
+
+`groupby(iterable, key)` groups consecutive elements that share the same key value. It does NOT sort the input; callers that want all elements with the same key together must sort first.
+
+```python
+# CPython: Modules/itertoolsmodule.c groupby_next
+for key, group in itertools.groupby(['aab', 'abb', 'bbc'], key=lambda s: s[0]):
+    print(key, list(group))
+# a ['aab']
+# a ['abb']   <-- not grouped with previous 'a' because 'b' appeared in between
+# b ['bbc']
+```
+
+### `accumulate` with initial
+
+```python
+# CPython: Modules/itertoolsmodule.c accumulate_next
+list(itertools.accumulate([1, 2, 3, 4], operator.mul, initial=1))
+# [1, 1, 2, 6, 24]
+```
+
+`initial` (Python 3.8+) prepends a starting value. Equivalent to `reduce` but returns all intermediate results.
+
+### `batched` (Python 3.12+)
+
+```python
+# CPython: Modules/itertoolsmodule.c batched_next
+list(itertools.batched('ABCDE', 3))
+# [('A', 'B', 'C'), ('D', 'E')]
+```
+
+Returns tuples of exactly `n` items; the last tuple may be shorter.
+
+### `pairwise` (Python 3.10+)
+
+```python
+# CPython: Modules/itertoolsmodule.c pairwise_next
+list(itertools.pairwise('ABCD'))
+# [('A', 'B'), ('B', 'C'), ('C', 'D')]
+```
+
+## gopy notes
+
+Status: not yet ported. Pure-Go lazy iterators are straightforward to implement with closures or structs. `product`, `permutations`, and `combinations` are the most complex (they maintain state arrays). `groupby` requires careful handling of the sub-iterator lifetime.

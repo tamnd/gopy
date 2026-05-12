@@ -1,0 +1,94 @@
+---
+title: Lib/typing.py (extensions)
+description: "typing.py part 2: Protocol, runtime_checkable, TypedDict, Literal, Final, Annotated, TypeVar with constraints, ParamSpec, TypeVarTuple, Unpack, Never, LiteralString."
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 3800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/typing.py" />
+
+This annotation covers the advanced `typing` module constructs added in Python 3.8-3.12. See `lib_typing_detail` for the core generics (`Generic`, `Union`, `Optional`, `Callable`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `Protocol`, `runtime_checkable` | Structural subtyping via `__protocol_attrs__` |
+| 201-400 | `TypedDict` | Dict subtype with per-key type annotations |
+| 401-550 | `Literal` | Type that represents a fixed set of values |
+| 551-700 | `Final` | Marks a variable as immutable |
+| 701-850 | `Annotated` | Attach metadata to a type hint |
+| 851-1000 | `TypeVar` with constraints, `ParamSpec` | Type variable extensions |
+| 1001-1150 | `TypeVarTuple`, `Unpack` | Variadic generics (PEP 646) |
+| 1151-1250 | `Never`, `NoReturn`, `LiteralString`, `Self` | Special forms |
+| 1251-1400 | `assert_never`, `assert_type`, `reveal_type` | Type checker utilities |
+| 1401-1600 | `get_type_hints`, `get_overloads` | Runtime introspection |
+
+## Reading
+
+### `Protocol`
+
+`Protocol` enables structural (duck-type) subtyping. A class is a virtual subclass of a `Protocol` if it implements all the protocol's abstract methods, even without explicit inheritance.
+
+```python
+# CPython: Lib/typing.py:1845 Protocol.__init_subclass__
+class Protocol(metaclass=_ProtocolMeta):
+    ...
+    def __init_subclass__(cls, *args, **kwargs):
+        ...
+        if '__protocol_attrs__' not in cls.__dict__:
+            cls.__protocol_attrs__ = frozenset(
+                attr for attr in dir(cls)
+                if not attr.startswith('_') or attr.startswith('__') and attr.endswith('__')
+            )
+```
+
+`@runtime_checkable` enables `isinstance(obj, MyProtocol)` checks at runtime.
+
+### `TypedDict`
+
+```python
+# CPython: Lib/typing.py:2240 TypedDict
+class Movie(TypedDict):
+    name: str
+    year: int
+```
+
+`TypedDict` creates a dict subtype with per-key annotations. At runtime, it is a plain `dict`; the annotations are used only by type checkers.
+
+### `Literal`
+
+```python
+# CPython: Lib/typing.py:490 Literal
+Status = Literal['pending', 'active', 'closed']
+```
+
+`Literal` restricts a value to a set of specific values. The `__args__` tuple stores the allowed values.
+
+### `Annotated`
+
+```python
+# CPython: Lib/typing.py:730 Annotated
+MaxLen100 = Annotated[str, MaxLength(100)]
+```
+
+`Annotated[T, metadata...]` wraps a type with arbitrary metadata. `get_type_hints(func, include_extras=True)` preserves the metadata; without `include_extras`, the `Annotated` wrapper is stripped.
+
+### `ParamSpec`
+
+Captures the parameter specification of a callable, enabling typed decorators:
+
+```python
+# CPython: Lib/typing.py:2490 ParamSpec
+P = ParamSpec('P')
+T = TypeVar('T')
+def decorator(func: Callable[P, T]) -> Callable[P, T]: ...
+```
+
+## gopy notes
+
+`typing` is used extensively in Python 3.10+ code. gopy needs `get_type_hints()` for runtime annotation inspection (used by `dataclasses`, `attrs`, etc.). `Protocol.__subclasshook__` for `runtime_checkable` requires gopy's `isinstance` to call the hook. `TypeVar`, `Union`, and `Optional` are needed for `dataclasses` field type introspection.
