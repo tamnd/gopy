@@ -953,10 +953,30 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.RERAISE:
-		// oparg n: stack contains [..., exc, n_other]. Pop the exception
-		// (top after dropping n) and re-raise. v0.6 keeps it simple:
-		// pop top, raise.
+		// Stack: [values[oparg], exc]. Pop exc and reraise it through the
+		// thread state so its real type survives propagation. For
+		// oparg >= 1 the bytecode emitter stashed the with-block's
+		// lasti at values[0]; restore the frame's instruction pointer
+		// from it so the eventual traceback reports the original
+		// raising offset, not the cleanup site. values[oparg] stay on
+		// stack.
+		//
+		// CPython: Python/bytecodes.c:1429 RERAISE
+		if oparg > 2 {
+			return 0, nil, nil, false, true, fmt.Errorf("vm: RERAISE: invalid oparg %d", oparg)
+		}
 		exc := e.popObject()
+		if oparg >= 1 {
+			lasti := e.peek(int(oparg) - 1).AsObject()
+			if li, ok := lasti.(*objects.Int); ok {
+				v, _ := li.Int64()
+				e.f.InstrPtr = int(v) * 2
+			}
+		}
+		if pyExc, ok := exc.(*pyerrors.Exception); ok {
+			pyerrors.Raise(e.ts, pyExc)
+			return 0, nil, nil, false, true, excSentinel(pyExc)
+		}
 		return 0, nil, nil, false, true, fmt.Errorf("%s", objectRepr(exc))
 
 	case compile.INTERPRETER_EXIT:
