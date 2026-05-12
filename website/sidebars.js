@@ -295,6 +295,7 @@ const sidebars = {
         'annotations/python/python_initconfig_c_detail',
         'annotations/python/python_pythonrun_c_detail',
         'annotations/python/python_builtins_detail',
+        'annotations/python/python_compile2_detail',
       ],
     },
     {
@@ -452,6 +453,8 @@ const sidebars = {
         'annotations/objects/objects_cellobject_detail',
         'annotations/objects/objects_iterobject_detail',
         'annotations/objects/objects_sliceobject_detail',
+        'annotations/objects/objects_classobject2_detail',
+        'annotations/objects/objects_boolobject_detail',
       ],
     },
     {
@@ -855,6 +858,8 @@ const sidebars = {
         'annotations/modules/module_signal_detail',
         'annotations/modules/module_time_detail',
         'annotations/modules/module_os_detail',
+        'annotations/modules/module_io2_detail',
+        'annotations/modules/module_socket2_detail',
       ],
     },
     {
@@ -1284,6 +1289,9 @@ const sidebars = {
         'annotations/lib/lib_subprocess_detail',
         'annotations/lib/lib_json_detail',
         'annotations/lib/lib_csv_detail',
+        'annotations/lib/lib_threading_detail',
+        'annotations/lib/lib_os_detail',
+        'annotations/lib/lib_collections2_detail',
       ],
     },
   ],

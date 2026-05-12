@@ -1,0 +1,70 @@
+---
+title: Lib/collections/__init__.py
+description: "collections module Python layer: OrderedDict (doubly-linked list of keys), namedtuple code-generation, ChainMap multi-mapping view, Counter arithmetic, and UserDict/UserList/UserString."
+cpython_path: Lib/collections/__init__.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/collections/__init__.py`
+
+<CpyLink path="Lib/collections/__init__.py" />
+
+`Lib/collections/__init__.py` provides the high-level collection types. `deque` and
+`defaultdict` come from `_collections` (C extension); this file adds `OrderedDict`,
+`namedtuple`, `ChainMap`, `Counter`, and the `User*` wrappers.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-100 | Re-exports from `_collections` | `deque`, `defaultdict`, `_count_elements` |
+| 101-400 | `OrderedDict` | Insertion-order dict backed by a doubly-linked key list |
+| 401-700 | `namedtuple` | Code-generates a tuple subclass with named fields |
+| 701-900 | `ChainMap` | Read-through view of multiple mappings |
+| 901-1100 | `Counter` | Int-valued multiset with arithmetic operations |
+| 1101-1200 | `UserDict`, `UserList`, `UserString` | Mutable wrappers for subclassing |
+
+## Reading
+
+### `OrderedDict` doubly-linked key list
+
+`OrderedDict` maintains a separate doubly-linked list of `(prev, next, key)` nodes in
+`self.__root`. `__setitem__` appends to the list; `__delitem__` unlinks the node;
+`move_to_end` relinks the node to the front or back.
+
+```python
+# CPython: Lib/collections/__init__.py:150 OrderedDict.__setitem__
+def __setitem__(self, key, value, ...):
+    if key not in self:
+        self.__root  # link
+        ...
+    super().__setitem__(key, value)
+```
+
+### `namedtuple` code generation
+
+`namedtuple('Point', ['x', 'y'])` generates a class body as a string and `exec`s it. The
+generated class subclasses `tuple` and provides `_fields`, `_make`, `_asdict`, `_replace`,
+and named `property` slots for each field.
+
+### `Counter` arithmetic
+
+`Counter` supports `+`, `-`, `&` (intersection), `|` (union) with other `Counter` objects.
+The result omits zero and negative counts from `+` and `-`. `most_common(n)` uses
+`heapq.nlargest` for efficiency.
+
+### `ChainMap.new_child`
+
+`ChainMap.new_child(m=None)` creates a new `ChainMap` with `m` (or an empty dict) as the
+first map, and the existing `ChainMap`'s maps as the rest. This is the recommended way to
+create nested scopes.
+
+## gopy notes
+
+Not yet ported. `OrderedDict` is needed by many stdlib modules. `namedtuple` requires
+`exec` support. The planned path is `module/collections/`. `Counter` can use a `dict`
+subclass in Go with arithmetic methods.

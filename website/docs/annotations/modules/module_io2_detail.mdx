@@ -1,0 +1,79 @@
+---
+title: Modules/_io/bufferedio.c (part 2)
+description: "BufferedWriter.write with internal buffer management, BufferedRWPair, flush() drain with EINTR retry, _io.DEFAULT_BUFFER_SIZE, and the readline() lock-free fast path."
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_io/bufferedio.c` (part 2)
+
+<CpyLink path="Modules/_io/bufferedio.c" />
+
+This annotation covers the write path and `readline` in `Modules/_io/bufferedio.c`.
+For the `BufferedReader` read path, the internal lock, and the `_io` module structure
+see the `module_io_iobase_c` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-400 | `BufferedWriter.write` | Buffer fill and flush trigger |
+| 401-700 | `BufferedWriter.flush` | Drain to underlying raw stream with retry |
+| 701-950 | `BufferedRWPair` | Non-seekable read+write buffer over two raw streams |
+| 951-1200 | `BufferedRandom` | Seekable read/write buffer |
+| 1201-2800 | `readline` lock-free path | Read until `\n` without acquiring the full buffer lock |
+
+## Reading
+
+### `BufferedWriter.write`
+
+`write(b)` appends bytes to `self.buffer`. When the buffer reaches `buffer_size`, it calls
+`self.raw.write(self.buffer)` to flush. If the raw write is non-blocking and raises
+`BlockingIOError`, the unwritten bytes are stored and `write` returns the number of bytes
+accepted.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1840 buffered_write
+static PyObject *
+buffered_write(buffered *self, PyObject *args)
+{
+    Py_buffer data;
+    ...
+    if (VALID_WRITE_BUFFER(self) &&
+        self->readable_pos == self->write_pos) {
+        /* fast path: append to existing buffer */
+        ...
+    }
+    if (avail + written < data.len) {
+        /* buffer full: flush first */
+        ...
+    }
+}
+```
+
+### `readline` fast path
+
+`readline()` scans the read buffer for `\n` without acquiring the write lock. If found,
+it slices the buffer and returns immediately. Only if a `\n` is not in the buffer does it
+fall through to the full `_readahead` path.
+
+### `_io.DEFAULT_BUFFER_SIZE`
+
+The default is 8192 bytes on all platforms. `io.open` uses this when `buffering=-1` (the
+default). Buffer size can be changed by passing an explicit integer to `open(buffering=N)`.
+
+### `BufferedRWPair`
+
+`BufferedRWPair` wraps two separate raw streams (one readable, one writable) into a single
+buffered object. It is used by `socket.makefile()` when a socket is opened in both read
+and write mode.
+
+## gopy notes
+
+The gopy `io` layer wraps Go's `io.Reader`/`io.Writer` interfaces. `BufferedWriter` maps
+to `bufio.Writer`. The `readline` scan loop is not yet implemented; gopy's `readline` falls
+back to byte-by-byte reading.

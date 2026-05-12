@@ -1,0 +1,75 @@
+---
+title: Python/compile.c (part 2)
+description: "Compiler part 2: comprehension scoping with nested compiler units, class body compilation with __class__ cell, decorator application, augmented assignment, walrus operator (:=), and match/case compilation."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/compile.c` (part 2)
+
+<CpyLink path="Python/compile.c" />
+
+This annotation covers comprehension scoping, class compilation, the walrus operator, and
+`match`/`case` (structural pattern matching) in `Python/compile.c`. For the function call
+compilation, import, and exception handling see the `python_compile_c` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-500 | Comprehension compiler | Nested compiler unit, `iter` argument injection |
+| 501-900 | Class body compiler | `__class__` cell, `__build_class__`, `__classcell__` |
+| 901-1300 | Augmented assignment | `LOAD_/STORE_` pair with in-place binary op |
+| 1301-1600 | Walrus operator `:=` | `COPY` + assignment in comprehension scope |
+| 1601-3000 | `match`/`case` | Pattern matching: wildcard, capture, class, or, guard |
+
+## Reading
+
+### Comprehension as nested function
+
+Every list/set/dict comprehension and generator expression compiles into a nested function.
+The outermost iterable is passed as the first argument (`.0`); inner iterables are
+re-evaluated in the nested scope. This nested function is called immediately for
+list/set/dict comprehensions and returned as a generator for generator expressions.
+
+```c
+// CPython: Python/compile.c:1142 compiler_comprehension
+static int
+compiler_comprehension(struct compiler *c, expr_ty e, int type,
+                       identifier name, asdl_seq *generators, expr_ty elt, ...)
+{
+    ...
+    if (compiler_enter_scope(c, name, COMPILER_SCOPE_COMPREHENSION, ...) < 0)
+        return ERROR;
+    ...
+}
+```
+
+### `__class__` cell for `super()`
+
+When a method body references `super()` with no arguments, the compiler implicitly adds
+a `__class__` cell variable that holds the defining class. `LOAD_CLOSURE` at the end of
+the class body captures it for the methods.
+
+### `match`/`case` compilation
+
+Structural pattern matching compiles to a decision tree of `MATCH_CLASS`,
+`MATCH_MAPPING`, `MATCH_SEQUENCE`, and `IS_OP`/`CONTAINS_OP` checks. Each pattern test
+either falls through to the pattern body or jumps to the next `case`. Guard expressions
+are compiled after the structural match succeeds.
+
+### Walrus operator in comprehensions
+
+`:=` inside a comprehension assigns to the *enclosing* scope, not the comprehension's
+nested scope. The compiler uses `COPY` (duplicate stack top) to both use the value in the
+comprehension and store it in the outer frame.
+
+## gopy notes
+
+`compile/codegen_expr.go` handles comprehensions. `compile/codegen_class.go` handles
+class body compilation including the `__class__` cell. `match`/`case` is partially
+implemented in `compile/codegen_stmt.go`.

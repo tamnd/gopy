@@ -1,0 +1,69 @@
+---
+title: Objects/classobject.c (part 2)
+description: "instancemethod and bound-method pickling, PyMethod_New, method_call vectorcall path, unbound function call on wrong type, and PyMethod_GET_FUNCTION/GET_SELF."
+cpython_path: Objects/classobject.c
+cpython_version: "3.14"
+lines: 420
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/classobject.c` (part 2)
+
+<CpyLink path="Objects/classobject.c" />
+
+This annotation covers the method call path, vectorcall support, and pickling in
+`Objects/classobject.c`. For the basic `PyMethodObject` struct and `__get__` descriptor
+see the `objects_method` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | `PyMethod_New` | Bound method construction |
+| 81-200 | `method_call`, `method_vectorcall` | Dispatching a method call |
+| 201-320 | `method_reduce` | Pickling support |
+| 321-420 | `PyMethod_GET_FUNCTION`, `PyMethod_GET_SELF` | Inline accessors |
+
+## Reading
+
+### `method_vectorcall`
+
+When the function stored in a bound method implements the vectorcall protocol, `method_vectorcall`
+avoids building an argument tuple. It prepends `self` to the argument vector using the
+`PY_VECTORCALL_ARGUMENTS_OFFSET` trick (borrows one slot before the array pointer).
+
+```c
+// CPython: Objects/classobject.c:110 method_vectorcall
+static PyObject *
+method_vectorcall(PyObject *method, PyObject *const *args,
+                  size_t nargsf, PyObject *kwnames)
+{
+    PyObject *self = PyMethod_GET_SELF(method);
+    PyObject *func = PyMethod_GET_FUNCTION(method);
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    /* Prepend self by moving the pointer back one slot */
+    PyObject *const *newargs = args - 1;
+    newargs[0] = self;
+    return func->ob_type->tp_vectorcall(func, newargs, nargs + 1, kwnames);
+}
+```
+
+### Pickling
+
+`method_reduce` returns `(getattr, (self, method_name))` so that unpickling a bound method
+calls `getattr(self, name)` to reconstruct it. This only works for methods that can be
+looked up by name.
+
+### Unbound call type check
+
+When a function is called with an explicit first argument that is not an instance of the
+expected type (a pre-Python-3 pattern), CPython 3 raises `TypeError` explaining that the
+descriptor expected a specific type.
+
+## gopy notes
+
+`objects/method.go` implements `PyMethodObject`. The vectorcall path (`method_vectorcall`)
+is not yet implemented; all calls go through `__call__`. The `PY_VECTORCALL_ARGUMENTS_OFFSET`
+slot trick is specific to the CPython memory layout and has no direct Go equivalent.
