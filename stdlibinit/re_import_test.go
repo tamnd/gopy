@@ -73,12 +73,12 @@ func TestSreCompileAndMatch(t *testing.T) {
 	// code / groupindex / indexgroup are the compiled engine args from
 	// _compiler.py; we pass minimal placeholders here.
 	args := []objects.Object{
-		objects.NewStr("hello"),    // pattern
-		objects.NewInt(0),          // flags
-		objects.NewList(nil),       // code (empty; Go backend ignores this)
-		objects.NewInt(0),          // groups
-		objects.NewDict(),          // groupindex
-		objects.NewTuple(nil),      // indexgroup
+		objects.NewStr("hello"), // pattern
+		objects.NewInt(0),       // flags
+		objects.NewList(nil),    // code (empty; Go backend ignores this)
+		objects.NewInt(0),       // groups
+		objects.NewDict(),       // groupindex
+		objects.NewTuple(nil),   // indexgroup
 	}
 	pat, err := objects.Vectorcall(compileFn, args, uint(len(args)), nil)
 	if err != nil {

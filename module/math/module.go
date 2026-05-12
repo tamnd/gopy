@@ -368,24 +368,24 @@ func mathHypot(args []objects.Object, kwargs map[string]objects.Object) (objects
 		}
 		vals[i] = gomath.Abs(v)
 	}
-	max := vals[0]
+	maxVal := vals[0]
 	for _, v := range vals[1:] {
-		if v > max {
-			max = v
+		if v > maxVal {
+			maxVal = v
 		}
 	}
-	if gomath.IsInf(max, 0) {
+	if gomath.IsInf(maxVal, 0) {
 		return objects.NewFloat(gomath.Inf(1)), nil
 	}
-	if max == 0 {
+	if maxVal == 0 {
 		return objects.NewFloat(0), nil
 	}
 	var sum float64
 	for _, v := range vals {
-		s := v / max
+		s := v / maxVal
 		sum += s * s
 	}
-	return objects.NewFloat(max * gomath.Sqrt(sum)), nil
+	return objects.NewFloat(maxVal * gomath.Sqrt(sum)), nil
 }
 
 // mathDegrees implements math.degrees(x).

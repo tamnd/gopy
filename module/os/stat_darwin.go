@@ -23,7 +23,7 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 		return
 	}
 	ino = sys.Ino
-	dev = uint64(sys.Dev) //nolint:unconvert // Dev is int32 on Darwin
+	dev = uint64(sys.Dev)
 	nlink = uint64(sys.Nlink)
 	uid = sys.Uid
 	gid = sys.Gid

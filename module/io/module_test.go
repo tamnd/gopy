@@ -185,7 +185,7 @@ func TestFileIOReadText(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi := NewFileIO(f, path, "r", true, false)
-	defer fi.Close() //nolint
+	defer fi.Close()
 	data, err := fi.Read(-1)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -211,7 +211,7 @@ func TestFileIOWrite(t *testing.T) {
 	if n != 7 {
 		t.Fatalf("Write returned %d, want 7", n)
 	}
-	fi.Close() //nolint
+	fi.Close()
 	disk, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +233,7 @@ func TestFileIOSeekTell(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi := NewFileIO(f, path, "r", true, false)
-	defer fi.Close() //nolint
+	defer fi.Close()
 	if _, err := fi.Seek(2, 0); err != nil {
 		t.Fatalf("Seek: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestFileIOCall(t *testing.T) {
 		t.Fatalf("fileIOCall: %v", err)
 	}
 	fi := obj.(*FileIO)
-	defer fi.Close() //nolint
+	defer fi.Close()
 	data, err := fi.Read(-1)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -305,7 +305,7 @@ func TestFileIOGetattr(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi := NewFileIO(f, path, "r", true, false)
-	defer fi.Close() //nolint
+	defer fi.Close()
 
 	attr, err := fileIOGetattr(fi, objects.NewStr("name"))
 	if err != nil {
@@ -332,7 +332,7 @@ func TestFileIONotReadableError(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi := NewFileIO(f, path, "w", false, true)
-	defer fi.Close() //nolint
+	defer fi.Close()
 	_, err = fi.Read(1)
 	if err == nil || !strings.Contains(err.Error(), "not readable") {
 		t.Fatalf("err = %v, want not-readable", err)
@@ -354,7 +354,7 @@ func TestTextIOWrapperRead(t *testing.T) {
 	}
 	fi := NewFileIO(f, path, "r", true, false)
 	tw := NewTextIOWrapper(fi, "utf-8", "strict", path, "r")
-	defer tw.Close() //nolint
+	defer tw.Close()
 
 	got, err := tw.Read(-1)
 	if err != nil {
@@ -378,7 +378,7 @@ func TestTextIOWrapperReadline(t *testing.T) {
 	}
 	fi := NewFileIO(f, path, "r", true, false)
 	tw := NewTextIOWrapper(fi, "utf-8", "strict", path, "r")
-	defer tw.Close() //nolint
+	defer tw.Close()
 
 	line, err := tw.Readline(-1)
 	if err != nil {
@@ -428,7 +428,7 @@ func TestTextIOWrapperGetattr(t *testing.T) {
 	}
 	fi := NewFileIO(f, path, "r", true, false)
 	tw := NewTextIOWrapper(fi, "utf-8", "strict", path, "r")
-	defer tw.Close() //nolint
+	defer tw.Close()
 
 	for _, attrName := range []string{"name", "mode", "encoding", "errors", "closed"} {
 		attr, err := textIOWrapperGetattr(tw, objects.NewStr(attrName))
@@ -486,7 +486,7 @@ func TestIOOpenTextRoundtrip(t *testing.T) {
 		t.Fatalf("open(r): %v", err)
 	}
 	tr := robj.(*TextIOWrapper)
-	defer tr.Close() //nolint
+	defer tr.Close()
 	got, err := tr.Read(-1)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -519,7 +519,7 @@ func TestIOOpenBinaryRoundtrip(t *testing.T) {
 		t.Fatalf("open(rb): %v", err)
 	}
 	rfi := robj.(*FileIO)
-	defer rfi.Close() //nolint
+	defer rfi.Close()
 	data, err := rfi.Read(-1)
 	if err != nil {
 		t.Fatalf("Read: %v", err)

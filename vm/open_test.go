@@ -50,7 +50,7 @@ func TestOpenBuiltinRoundTripsThroughVM(t *testing.T) {
 		t.Fatalf("open(r): %v", err)
 	}
 	rfile := out.(*_io.TextIOWrapper)
-	defer rfile.Close() //nolint
+	defer rfile.Close()
 	got, err := rfile.Read(-1)
 	if err != nil {
 		t.Fatalf("Read: %v", err)

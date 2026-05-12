@@ -12,7 +12,6 @@
 package io
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"strings"
@@ -32,7 +31,6 @@ type TextIOWrapper struct {
 	name     string
 	mode     string
 	closed   bool
-	scanner  *bufio.Scanner
 }
 
 // TextIOWrapperType is the type singleton for _io.TextIOWrapper.
@@ -223,10 +221,7 @@ func (t *TextIOWrapper) Write(s string) (int, error) {
 //
 // CPython: Modules/_io/textio.c textiowrapper_flush
 func (t *TextIOWrapper) Flush() error {
-	if err := t.checkUsable(); err != nil {
-		return err
-	}
-	return nil
+	return t.checkUsable()
 }
 
 // Close flushes and closes the underlying raw file.

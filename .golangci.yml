@@ -339,19 +339,25 @@ linters:
           - gocritic
       # fileIOModeFlags mirrors the mode-parsing switch in
       # Modules/_io/fileio.c; collapsing it would diverge from CPython.
+      # OpenFile with a caller-supplied path is the entire contract of FileIO.
       - path: module/io/fileio\.go
         linters:
           - gocyclo
+          - gosec
       # statSysFields returns the 7-field Stat_t breakdown matching
-      # CPython's posixmodule.c stat result tuple fields.
+      # CPython's posixmodule.c stat result tuple fields. The named-return
+      # pattern mirrors the C struct layout; naked returns are intentional.
       - path: module/os/stat_
         linters:
           - gocritic
+          - nakedret
       # os.module.go mirrors posixmodule.c's large dispatch table.
+      # makedirs uses 0o777 to match Python's os.makedirs default (umask trims it).
       - path: module/os/module\.go
         linters:
           - gocognit
           - gocyclo
+          - gosec
 
 formatters:
   enable:

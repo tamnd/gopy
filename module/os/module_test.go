@@ -121,9 +121,8 @@ func TestEnviron(t *testing.T) {
 	}
 	pathKey := "PATH"
 	if runtime.GOOS == "windows" {
-		pathKey = "Path"
-		if _, err2 := envDict.GetItem(objects.NewStr("PATH")); err2 != nil {
-			pathKey = "PATH"
+		if _, err2 := envDict.GetItem(objects.NewStr("Path")); err2 == nil {
+			pathKey = "Path"
 		}
 	}
 	v, err := envDict.GetItem(objects.NewStr(pathKey))
@@ -132,19 +131,16 @@ func TestEnviron(t *testing.T) {
 	}
 	got, _ := objects.Str(v)
 	sep := string(os.PathListSeparator)
-	if !strings.Contains(got, sep) && len(got) == 0 {
+	if !strings.Contains(got, sep) && got == "" {
 		t.Errorf("PATH/Path looks wrong: %q", got)
 	}
 }
 
 func TestGetenv(t *testing.T) {
-	d := buildOSDict(t)
-
 	t.Setenv("GOPY_TEST_VAR", "hello")
+	// Build after setenv so the function reads the live env.
+	d := buildOSDict(t)
 	result := callFn(t, d, "getenv", []objects.Object{objects.NewStr("GOPY_TEST_VAR")})
-	// Re-build after setenv so the function reads the live env.
-	d = buildOSDict(t)
-	result = callFn(t, d, "getenv", []objects.Object{objects.NewStr("GOPY_TEST_VAR")})
 	got, _ := objects.Str(result)
 	if got != "hello" {
 		t.Errorf("getenv('GOPY_TEST_VAR') = %q, want 'hello'", got)

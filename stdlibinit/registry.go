@@ -181,6 +181,8 @@ import (
 	// CPython: Modules/_stat.c:290 stat_exec
 	_ "github.com/tamnd/gopy/module/_stat"
 
+	// Pure-Python shim modules backed by stdlib vendored .py files.
+	// Each registers itself via an init() that calls imp.AppendInittab.
 	_ "github.com/tamnd/gopy/module/argparse"
 	_ "github.com/tamnd/gopy/module/contextlib"
 	_ "github.com/tamnd/gopy/module/dataclasses"
