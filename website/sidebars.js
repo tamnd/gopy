@@ -314,6 +314,7 @@ const sidebars = {
         'annotations/python/python_gc_detail',
         'annotations/python/python_thread_detail',
         'annotations/python/python_import_detail',
+        'annotations/python/python_ceval5_detail',
       ],
     },
     {
@@ -490,6 +491,7 @@ const sidebars = {
         'annotations/objects/objects_longobject3_detail',
         'annotations/objects/objects_weakrefobject_detail',
         'annotations/objects/objects_genericaliasobject_detail',
+        'annotations/objects/objects_classobject_detail',
       ],
     },
     {
@@ -712,6 +714,7 @@ const sidebars = {
         'annotations/include/include_cpython_listobject2_detail',
         'annotations/include/include_code_h_detail',
         'annotations/include/include_frameobject_h_detail',
+        'annotations/include/include_internal_pycore_frame_h_detail',
       ],
     },
     {

@@ -1,0 +1,80 @@
+---
+title: Objects/classobject.c
+description: "Objects/classobject.c: PyMethod (bound method), PyInstanceMethod — method binding, __func__, __self__, descriptor protocol."
+cpython_path: Objects/classobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/classobject.c" />
+
+`classobject.c` implements the bound method type (`PyMethod`) and the unbound instance method type (`PyInstanceMethod`). Both are produced by the descriptor protocol when a function is accessed via an instance or class.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyMethodObject` struct | `im_func` (function), `im_self` (instance) |
+| 101-300 | `PyMethod_New`, `method_call`, `method_get` | Creation and calling |
+| 301-450 | `method_richcompare` | `method1 == method2` comparison |
+| 451-600 | `PyInstanceMethod_Type` | `classmethod`-style unbound wrapper |
+
+## Reading
+
+### Bound method creation
+
+```c
+// CPython: Objects/classobject.c:22 PyMethodObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *im_func;  /* the underlying function */
+    PyObject *im_self;  /* the instance it's bound to */
+    PyObject *im_weakreflist;
+} PyMethodObject;
+```
+
+When `obj.method` is accessed and `method` is a function defined in the class, `function.__get__(obj, type)` is called. That calls `PyMethod_New(func, obj)`, binding the instance.
+
+### Calling a bound method
+
+```c
+// CPython: Objects/classobject.c:180 method_call
+static PyObject *
+method_call(PyObject *method, PyObject *args, PyObject *kwargs)
+{
+    PyMethodObject *im = (PyMethodObject *)method;
+    /* Prepend self to args */
+    PyObject *newargs = PyTuple_New(PyTuple_GET_SIZE(args) + 1);
+    PyTuple_SET_ITEM(newargs, 0, Py_NewRef(im->im_self));
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(args); i++)
+        PyTuple_SET_ITEM(newargs, i+1, Py_NewRef(PyTuple_GET_ITEM(args, i)));
+    return PyObject_Call(im->im_func, newargs, kwargs);
+}
+```
+
+The bound method prepends `self` to `args` and calls the underlying function directly.
+
+### `__eq__` for methods
+
+```c
+// CPython: Objects/classobject.c:335 method_richcompare
+static PyObject *
+method_richcompare(PyObject *self, PyObject *other, int op)
+{
+    if (op != Py_EQ && op != Py_NE) Py_RETURN_NOTIMPLEMENTED;
+    PyMethodObject *a = (PyMethodObject *)self;
+    PyMethodObject *b = (PyMethodObject *)other;
+    int eq = PyObject_RichCompareBool(a->im_func, b->im_func, Py_EQ)
+          && PyObject_RichCompareBool(a->im_self, b->im_self, Py_EQ);
+    ...
+}
+```
+
+Two bound methods are equal if they wrap the same function and are bound to the same (by identity) instance.
+
+## gopy notes
+
+Bound methods are in `objects/method.go`. The `method_call` implementation is critical for performance: it must not allocate a new tuple every time. CPython uses a fast path (`CALL_METHOD` opcode) that avoids allocating a `PyMethod` object altogether for simple calls. gopy's `vm/eval_call.go` has a similar optimization.

@@ -1,0 +1,121 @@
+---
+title: Python/ceval.c (part 5)
+description: "Python/ceval.c part 5: generator opcodes (YIELD_VALUE, SEND, RESUME, RETURN_GENERATOR), async/await (GET_AWAITABLE, GET_AITER, GET_ANEXT)."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 5500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers the generator and coroutine opcodes introduced or revised in CPython 3.11-3.14. See parts 1-4 for the eval loop structure, basic opcodes, exception handling, and container opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `RETURN_GENERATOR` | Convert a frame into a generator object |
+| 101-300 | `YIELD_VALUE` | Suspend generator, return value to caller |
+| 301-500 | `SEND` | Resume generator with a value (PEP 342) |
+| 501-700 | `RESUME` | Entry-point opcode for every frame (3.11+) |
+| 701-900 | `GET_AWAITABLE`, `GET_AITER`, `GET_ANEXT` | `async for` and `await` iteration |
+| 901-1100 | `CLEANUP_THROW` | Generator `throw()` cleanup |
+| 1101-1300 | `ASYNC_GEN_WRAP`, `BEFORE_ASYNC_WITH` | Async generator helpers |
+
+## Reading
+
+### `RETURN_GENERATOR`
+
+```c
+// CPython: Python/ceval.c:3720 RETURN_GENERATOR
+inst(RETURN_GENERATOR, (-- gen)) {
+    assert(frame->owner == FRAME_OWNED_BY_THREAD);
+    PyGenObject *gen = _PyGen_SetStopIterationValue(...);
+    /* Transfer frame ownership to the generator */
+    frame->owner = FRAME_OWNED_BY_GENERATOR;
+    ...
+    gen = (PyObject *)_PyGen_NewWithQualName(frame, ...);
+    /* Return the generator; the frame is now suspended */
+    DISPATCH();
+}
+```
+
+`RETURN_GENERATOR` is the first opcode in every `def` that contains `yield`. It runs once at call time, packages the frame as a generator, and returns it. The frame's bytecode starts executing from `RESUME` when `.send(None)` or `next()` is called.
+
+### `YIELD_VALUE`
+
+```c
+// CPython: Python/ceval.c:3780 YIELD_VALUE
+inst(YIELD_VALUE, (retval -- value)) {
+    frame->instr_ptr = next_instr;  /* save next instruction */
+    assert(STACK_LEVEL() == 0);
+    /* Transfer to the caller's frame */
+    _PyFrame_SetStackPointer(frame, stack_pointer);
+    tstate->exc_info = frame->previous_instr;
+    ...
+    /* Return the yielded value to the send() caller */
+    goto return_or_yield;
+}
+```
+
+After `YIELD_VALUE`, the frame's instruction pointer points to the opcode after `YIELD_VALUE`. The next `send()` or `next()` call will resume from there.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:3840 SEND
+inst(SEND, (receiver, v -- receiver, retval)) {
+    /* receiver is a generator/coroutine/iterator */
+    if (tstate->c_tracefunc == NULL) {
+        retval = receiver->ob_type->tp_iternext(receiver);
+        /* Or if receiver is a generator: call gen_send_ex */
+    }
+    if (retval == NULL) {
+        ...
+        JUMPBY(oparg);  /* jump past the loop if StopIteration */
+    }
+}
+```
+
+`SEND` is the opcode for `yield from expr` and `await expr`. It dispatches `value` to `receiver.__next__` or `receiver.send(value)`.
+
+### `RESUME`
+
+```c
+// CPython: Python/ceval.c:100 RESUME
+inst(RESUME, (-- )) {
+    /* Entry opcode: check for interrupts, trace events, generator injection */
+    if (_Py_HandlePending(tstate) != 0) {
+        goto error;
+    }
+    /* If this is a generator resuming, check for thrown exception */
+    if (oparg & RESUME_OPARG_THROW_BIT) {
+        ...
+    }
+}
+```
+
+Every Python frame starts with `RESUME`. It handles signals, GC requests, and the throw-into-generator case.
+
+### `GET_AWAITABLE`
+
+```c
+// CPython: Python/ceval.c:3900 GET_AWAITABLE
+inst(GET_AWAITABLE, (iterable -- iter)) {
+    iter = _PyCoro_GetAwaitableIter(iterable);
+    if (iter == NULL) {
+        _PyErr_SetString(tstate, PyExc_TypeError,
+                         "object is not awaitable");
+        goto error;
+    }
+}
+```
+
+`_PyCoro_GetAwaitableIter` checks for a coroutine or an object with `__await__`.
+
+## gopy notes
+
+Generator and coroutine support is in `vm/eval_gen.go` and `objects/function.go`. `RETURN_GENERATOR` creates a `*objects.Generator` from the current frame. `YIELD_VALUE` suspends by saving state and returning. `SEND` and `RESUME` are the re-entry points. Async generators use `ASYNC_GEN_WRAP` to wrap yielded values in `AsyncGeneratorValueWrapper`.

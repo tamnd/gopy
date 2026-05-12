@@ -1,0 +1,79 @@
+---
+title: Include/internal/pycore_frame.h
+description: "Include/internal/pycore_frame.h: _PyInterpreterFrame definition, FRAME_OWNED_BY_*, localsplus layout, frame stack pointer helpers."
+cpython_path: Include/internal/pycore_frame.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_frame.h" />
+
+`pycore_frame.h` is the internal definition of `_PyInterpreterFrame`. It is included only by C files inside CPython, not by extension code. The public API surface is `Include/cpython/frameobject.h`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyInterpreterFrame` struct | Full layout with all fields |
+| 81-140 | `FRAME_OWNED_BY_*` constants | Frame lifetime tracking |
+| 141-200 | `_PyFrame_SetStackPointer`, `_PyFrame_GetStackPointer` | Inline stack pointer accessors |
+| 201-250 | `_PyFrame_IsIncomplete`, `_PyFrame_IsRunnable` | State predicates |
+
+## Reading
+
+### Full frame layout
+
+```c
+// CPython: Include/internal/pycore_frame.h:22 _PyInterpreterFrame
+struct _PyInterpreterFrame {
+    PyObject *f_executable;         /* PyCodeObject or callable */
+    struct _PyInterpreterFrame *previous;
+    PyObject *f_funcobj;            /* PyFunctionObject */
+    PyObject *f_globals;            /* __globals__ dict */
+    PyObject *f_builtins;           /* builtins dict */
+    PyObject *f_locals;             /* NULL until FastToLocals is called */
+    PyFrameObject *frame_obj;       /* heap object, NULL until needed */
+    _Py_CODEUNIT *instr_ptr;        /* current instruction */
+    _Py_CODEUNIT *return_offset;    /* where to jump on return */
+    int stackdepth;                 /* current stack depth */
+    int nlocalsplus;                /* len(localsplus) */
+    char owner;                     /* FRAME_OWNED_BY_* */
+    /* Variable-size array: locals, cells, free vars, value stack */
+    PyObject *localsplus[1];
+};
+```
+
+`localsplus` serves double duty: the low indices are fast locals (one per `co_localsplusnames` entry), and the high indices are the operand stack. `stackdepth` tracks how many stack entries are currently in use.
+
+### Stack pointer helpers
+
+```c
+// CPython: Include/internal/pycore_frame.h:165 _PyFrame_GetStackPointer
+static inline PyObject **
+_PyFrame_GetStackPointer(struct _PyInterpreterFrame *frame)
+{
+    PyObject **sp = frame->localsplus + frame->nlocalsplus + frame->stackdepth;
+    return sp;
+}
+```
+
+The stack grows upward from `localsplus + nlocalsplus`. This unified layout means locals and stack are in a single contiguous allocation, improving cache locality.
+
+### Frame ownership states
+
+```c
+// CPython: Include/internal/pycore_frame.h:82 ownership
+#define FRAME_OWNED_BY_THREAD       0  /* normal execution, stack-allocated */
+#define FRAME_OWNED_BY_GENERATOR    1  /* suspended generator, heap-allocated */
+#define FRAME_OWNED_BY_FRAME_OBJECT 2  /* kept alive by a PyFrameObject */
+#define FRAME_OWNED_BY_CSTACK       3  /* C extension internal frame */
+```
+
+When a generator is suspended (after `YIELD_VALUE`), `owner` changes to `FRAME_OWNED_BY_GENERATOR`. The frame is then heap-resident and outlives the C stack frame that created it.
+
+## gopy notes
+
+`vm.Frame` in gopy combines the role of `_PyInterpreterFrame` and `PyFrameObject`. The unified `localsplus` layout is approximated by two separate Go slices: `frame.Locals` (fixed-size, includes cells and free vars) and `frame.Stack` (growable). This avoids the complexity of the single-allocation layout at the cost of an extra pointer indirection.
