@@ -1,0 +1,118 @@
+---
+title: Python/compile.c (part 10)
+description: "Python/compile.c part 10: compiler_comprehension, compiler_genexp, compiler_dictcomp, comprehension scoping."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers comprehension and generator expression compilation. See `compile/codegen_stmt.go` (gopy) and `python_compile9_detail` for statement compilation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `compiler_comprehension` | Shared entry for all comprehension types |
+| 81-160 | `compiler_listcomp` | `[x for x in it]` |
+| 161-240 | `compiler_setcomp` | `{x for x in it}` |
+| 241-320 | `compiler_dictcomp` | `{k: v for k in it}` |
+| 321-500 | `compiler_genexp` | `(x for x in it)` |
+
+## Reading
+
+### `compiler_comprehension`
+
+```c
+// CPython: Python/compile.c:5280 compiler_comprehension
+static int
+compiler_comprehension(struct compiler *c, expr_ty e, int type,
+                       identifier name, asdl_comprehension_seq *generators,
+                       expr_ty elt, expr_ty val)
+{
+    /* Comprehensions compile to a nested function with a single argument '.0'
+       (the outermost iterable), called immediately.
+       
+       [elt for x in iter if cond]
+       =>  (lambda .0: [elt for x in .0 if cond])(iter)
+    */
+    PyObject *qualname = _Py_Mangle(c->u->u_private, name);
+    struct compiler_unit *u = compiler_enter_scope(c, qualname, COMPILER_SCOPE_COMPREHENSION, ...);
+    ...
+    compiler_comprehension_generator(c, generators, 0, 0, elt, val, type);
+    ...
+    compiler_exit_scope(c);
+    /* Call the inner function with the first iterator */
+    VISIT(c, expr, ((comprehensionobject *)generators[0])->iter);
+    ADDOP(c, GET_ITER);
+    ADDOP_I(c, CALL, 0);
+}
+```
+
+The outermost iterable is evaluated in the enclosing scope. The rest of the comprehension runs in a fresh scope (so `x` doesn't leak). The generated inner function takes `.0` (the first iterator) as its only argument.
+
+### `compiler_genexp`
+
+```c
+// CPython: Python/compile.c:5380 compiler_genexp
+static int
+compiler_genexp(struct compiler *c, expr_ty e)
+{
+    /* Generator expressions compile like listcomps but yield instead of append.
+       The RESUME at the top makes the function a generator. */
+    static identifier name;
+    if (!name) name = PyUnicode_InternFromString("<genexpr>");
+    return compiler_comprehension(c, e, COMP_GENEXP, name,
+                                  e->v.GeneratorExp.generators,
+                                  e->v.GeneratorExp.elt, NULL);
+}
+```
+
+`(x for x in it)` generates a function named `<genexpr>`. The body uses `YIELD_VALUE` instead of `LIST_APPEND`/`SET_ADD`. Calling the function returns a generator iterator.
+
+### Comprehension scoping
+
+```c
+// CPython: Python/compile.c:5200 compiler_comprehension_generator
+static int
+compiler_comprehension_generator(struct compiler *c,
+                                  asdl_comprehension_seq *generators,
+                                  int gen_index, int depth,
+                                  expr_ty elt, expr_ty val, int type)
+{
+    /* Nested for-loops in comprehensions */
+    comprehension_ty gen = generators[gen_index];
+    if (gen->is_async) {
+        /* async for ... in ... */
+        ...
+    } else {
+        ADDOP(c, GET_ITER);
+        compiler_use_next_block(c, start);
+        ADDOP_JUMP(c, FOR_ITER, anchor);
+    }
+    VISIT(c, expr, gen->target);  /* Store loop variable */
+    /* Process 'if' clauses */
+    for (int i = 0; i < asdl_seq_LEN(gen->ifs); i++) {
+        VISIT(c, expr, asdl_seq_GET(gen->ifs, i));
+        ADDOP_JUMP(c, POP_JUMP_IF_FALSE, start);
+    }
+    /* Recurse for nested comprehensions */
+    if (gen_index + 1 < asdl_seq_LEN(generators)) {
+        VISIT(c, expr, asdl_seq_GET(generators, gen_index + 1)->iter);
+        compiler_comprehension_generator(c, generators, gen_index + 1, depth + 1, elt, val, type);
+    } else {
+        /* Innermost: emit the element expression */
+        ...
+    }
+}
+```
+
+Each `for` clause in a comprehension translates to a `GET_ITER` + `FOR_ITER` + `STORE` loop. Nested comprehensions recurse. `if` clauses compile to conditional jumps back to the loop start.
+
+## gopy notes
+
+`compiler_comprehension` is in `compile/codegen_expr.go` as `compileComprehension`. It calls `compiler.enterScope(SCOPE_COMPREHENSION)` and emits `GET_ITER` + `CALL 0` in the outer scope. `compiler_genexp` emits `RESUME 0` at the top of the inner code object to make it a generator. Async comprehensions use `GET_AITER` + `GET_ANEXT`.

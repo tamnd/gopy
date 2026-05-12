@@ -415,6 +415,7 @@ const sidebars = {
         'annotations/python/python_errors10_detail',
         'annotations/python/python_import8_detail',
         'annotations/python/python_ceval48_detail',
+        'annotations/python/python_compile10_detail',
       ],
     },
     {
@@ -1273,6 +1274,7 @@ const sidebars = {
         'annotations/modules/modules_csv4_detail',
         'annotations/modules/modules_sqlite5_detail',
         'annotations/modules/modules_ssl5_detail',
+        'annotations/modules/modules_hashlib6_detail',
       ],
     },
     {

@@ -1,0 +1,90 @@
+---
+title: Modules/_hashopenssl.c (part 6)
+description: "_hashopenssl.c part 6: SHAKE_128/256, Blake2b, Blake2s, hashlib.new, available_algorithms."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+This annotation covers variable-length hash functions and the `hashlib.new` constructor. See `modules_hashlib5_detail` for SHA-256, SHA-512, SHA-3 family, and the `HASH` object type.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SHAKE_128` / `SHAKE_256` | Variable-length extendable output functions |
+| 81-160 | `Blake2b` / `Blake2s` | BLAKE2 hash family |
+| 161-260 | `hashlib.new` | Create a hash by name string |
+| 261-360 | `algorithms_available` | Set of names supported by the OpenSSL build |
+| 361-500 | `algorithms_guaranteed` | Names guaranteed on all platforms |
+
+## Reading
+
+### `SHAKE_128.digest`
+
+```c
+// CPython: Modules/_hashopenssl.c:820 EVPXOF_digest
+static PyObject *
+EVPXOF_digest(EVPobject *self, PyObject *args, PyObject *kwdict)
+{
+    /* SHAKE: digest takes a length parameter */
+    Py_ssize_t length;
+    if (!PyArg_ParseTupleAndKeywords(args, kwdict, "n", ..., &length))
+        return NULL;
+    PyObject *retval = PyBytes_FromStringAndSize(NULL, length);
+    EVP_DigestFinalXOF(self->ctx, (unsigned char *)PyBytes_AS_STRING(retval),
+                       (size_t)length);
+    return retval;
+}
+```
+
+SHAKE functions are "extendable output functions" (XOF). `hashlib.shake_128(data).digest(20)` produces a 20-byte digest; `digest(64)` produces 64 bytes from the same hash state. The output length is chosen by the caller, not fixed by the algorithm.
+
+### `hashlib.new`
+
+```c
+// CPython: Modules/_hashopenssl.c:1080 hashlib_new
+static PyObject *
+hashlib_new(PyObject *module, PyObject *args, PyObject *kwdict)
+{
+    const char *name;
+    PyObject *data_obj = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwdict, "s|O*:new", ..., &name, &data_obj))
+        return NULL;
+    /* Look up the algorithm by name in the OpenSSL EVP registry */
+    const EVP_MD *digest = EVP_get_digestbyname(name);
+    if (digest == NULL) {
+        PyErr_Format(PyExc_ValueError, "unsupported hash type %s", name);
+        return NULL;
+    }
+    return EVPnew(get_hashlib_state(module), digest, data_obj);
+}
+```
+
+`hashlib.new('sha256', data=b'hello')` is equivalent to `hashlib.sha256(b'hello')` but works for any algorithm name the system's OpenSSL supports, including hardware-specific ones.
+
+### `algorithms_available`
+
+```c
+// CPython: Modules/_hashopenssl.c:1180 hashlib_algorithms_available
+static PyObject *
+hashlib_algorithms_available(PyObject *module, PyObject *noargs)
+{
+    /* Walk the OpenSSL algorithm list and collect names */
+    PyObject *alg_set = PySet_New(NULL);
+    OBJ_NAME_do_all(OBJ_NAME_TYPE_MD_METH,
+                    _openssl_hash_name_mapper, alg_set);
+    return alg_set;
+}
+```
+
+`hashlib.algorithms_available` returns the set of algorithm names the current OpenSSL version supports. It is a superset of `algorithms_guaranteed` which lists names that must be present on all CPython installations.
+
+## gopy notes
+
+`SHAKE_128` and `SHAKE_256` use `golang.org/x/crypto/sha3` XOF interface. `Blake2b`/`Blake2s` use `golang.org/x/crypto/blake2b` and `blake2s`. `hashlib.new` is `module/hashlib.New` in `module/hashlib/module.go`, dispatching by name to a registry of hash constructors. `algorithms_available` and `algorithms_guaranteed` are static sets populated at module init.
