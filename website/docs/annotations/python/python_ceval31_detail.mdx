@@ -1,0 +1,116 @@
+---
+title: Python/ceval.c (part 31)
+description: "Python/ceval.c part 31: BEFORE_ASYNC_WITH, GET_AITER, GET_ANEXT, SEND into async generators, ASYNC_GEN_ASEND."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers async iteration and async context manager opcodes. See `python_ceval30_detail` for `SEND`, `YIELD_VALUE`, and `RETURN_GENERATOR`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `GET_AITER` | Call `__aiter__` to get an async iterator |
+| 81-180 | `GET_ANEXT` | Call `__anext__` to get the next awaitable |
+| 181-280 | `BEFORE_ASYNC_WITH` | Call `__aenter__`; push the context manager and its result |
+| 281-380 | `WITH_EXCEPT_START` | Call `__aexit__` with the current exception |
+| 381-500 | `ASYNC_GEN_ASEND` | Specialized SEND for async generators with asynchronous send |
+
+## Reading
+
+### `GET_AITER`
+
+```c
+// CPython: Python/ceval.c:2680 GET_AITER
+inst(GET_AITER, (obj -- aiter)) {
+    /* Call obj.__aiter__() — must return an object with __anext__ */
+    PyTypeObject *type = Py_TYPE(obj);
+    if (type->tp_as_async == NULL || type->tp_as_async->am_aiter == NULL) {
+        PyErr_Format(PyExc_TypeError,
+            "'async for' requires an object with __aiter__ method, got %.100s",
+            type->tp_name);
+        Py_DECREF(obj);
+        ERROR_IF(true, error);
+    }
+    aiter = (*type->tp_as_async->am_aiter)(obj);
+    Py_DECREF(obj);
+    ERROR_IF(aiter == NULL, error);
+    /* Validate: the result must also have __anext__ */
+    if (Py_TYPE(aiter)->tp_as_async == NULL ||
+        Py_TYPE(aiter)->tp_as_async->am_anext == NULL) {
+        PyErr_Format(PyExc_TypeError, ...);
+        Py_DECREF(aiter);
+        ERROR_IF(true, error);
+    }
+}
+```
+
+`async for x in aobj:` compiles to `GET_AITER` followed by a loop of `GET_ANEXT` + `SEND`. The two-step validation (call `__aiter__`, then check `__anext__` on the result) catches objects that return non-iterators from `__aiter__`.
+
+### `GET_ANEXT`
+
+```c
+// CPython: Python/ceval.c:2740 GET_ANEXT
+inst(GET_ANEXT, (aiter -- aiter, awaitable)) {
+    PyTypeObject *t = Py_TYPE(aiter);
+    PyObject *next = (*t->tp_as_async->am_anext)(aiter);
+    if (next == NULL) ERROR_IF(true, error);
+    /* Must be awaitable (has __await__) */
+    if (PyCoro_CheckExact(next)) {
+        awaitable = next;
+    } else {
+        awaitable = _PyCoro_GetAwaitableIter(next);
+        Py_DECREF(next);
+        ERROR_IF(awaitable == NULL, error);
+    }
+}
+```
+
+`am_anext` returns an awaitable (typically a coroutine or `AsyncGenAThrow`). The awaitable is then driven by `SEND` as part of the loop body. `StopAsyncIteration` from `am_anext` signals end of the loop.
+
+### `BEFORE_ASYNC_WITH`
+
+```c
+// CPython: Python/ceval.c:2820 BEFORE_ASYNC_WITH
+inst(BEFORE_ASYNC_WITH, (mgr -- mgr, aenter)) {
+    /* Pushes the context manager and the awaitable from __aenter__() */
+    PyObject *enter = _PyObject_LookupSpecial(mgr, &_Py_ID(__aenter__));
+    PyObject *res = PyObject_CallNoArgs(enter);
+    Py_DECREF(enter);
+    ERROR_IF(res == NULL, error);
+    /* Also lookup __aexit__ early to ensure it exists */
+    PyObject *aexit = _PyObject_LookupSpecial(mgr, &_Py_ID(__aexit__));
+    ERROR_IF(aexit == NULL, error);
+    Py_DECREF(aexit);  /* used later by WITH_EXCEPT_START */
+    aenter = _PyCoro_GetAwaitableIter(res);
+    Py_DECREF(res);
+    ERROR_IF(aenter == NULL, error);
+}
+```
+
+`async with cm as x:` compiles to `BEFORE_ASYNC_WITH`, then `SEND` to drive the `__aenter__` coroutine, then the body, then `WITH_EXCEPT_START` which drives `__aexit__`.
+
+### `ASYNC_GEN_ASEND`
+
+```c
+// CPython: Python/ceval.c:2940 ASYNC_GEN_ASEND
+inst(ASYNC_GEN_ASEND, (agen, value -- agen, awaitable)) {
+    /* Wrap the (agen, value) pair into an AsyncGenAThrow/AsyncGenANextAwaitable
+       so that the outer event loop can drive it via send/throw. */
+    awaitable = _PyAsyncGenValueWrapperNew(value);
+    if (awaitable == NULL) ERROR_IF(true, error);
+}
+```
+
+Async generator expressions (`async def f(): yield x`) use `ASYNC_GEN_ASEND` to produce awaitables that the event loop drives. Each `yield` inside an async generator is wrapped as an awaitable that resolves to the sent value.
+
+## gopy notes
+
+`GET_AITER` calls `objects.TypeAsyncAiter`. `GET_ANEXT` calls `objects.TypeAsyncAnext`. `BEFORE_ASYNC_WITH` is in `vm/eval_gen.go` and calls `objects.LookupSpecial` for `__aenter__`/`__aexit__`. `ASYNC_GEN_ASEND` creates an `objects.AsyncGenANextAwaitable` in `objects/async_gen.go`.

@@ -1,0 +1,138 @@
+---
+title: Lib/functools.py (part 3)
+description: "Lib/functools.py part 3: reduce, total_ordering, singledispatch, singledispatchmethod — higher-order tools."
+cpython_path: Lib/functools.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/functools.py" />
+
+This annotation covers `reduce`, `total_ordering`, and single dispatch. See `module/functools_detail` for `lru_cache`, `wraps`, and `cached_property`, and `lib_functools_detail` for `partial` and `partialmethod`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `reduce` | Left fold over an iterable (C version in `_functools`) |
+| 61-160 | `total_ordering` | Fill in missing comparison methods from the ones defined |
+| 161-300 | `singledispatch` | Register per-type implementations of a generic function |
+| 301-420 | `singledispatchmethod` | `singledispatch` for instance/class methods |
+| 421-500 | `_find_impl` | MRO walk to find the most specific registered type |
+
+## Reading
+
+### `reduce`
+
+```python
+# CPython: Lib/functools.py:240 reduce (pure-Python fallback)
+def reduce(function, iterable, initializer=_initial_missing):
+    it = iter(iterable)
+    if initializer is _initial_missing:
+        try:
+            value = next(it)
+        except StopIteration:
+            raise TypeError("reduce() of empty iterable with no initial value")
+    else:
+        value = initializer
+    for element in it:
+        value = function(value, element)
+    return value
+```
+
+`functools.reduce(op.add, [1,2,3,4])` gives `10`. The C implementation in `_functools` is used automatically; this pure-Python version shows the semantics. Unlike `sum`, `reduce` works with any binary operation.
+
+### `total_ordering`
+
+```python
+# CPython: Lib/functools.py:182 total_ordering
+_convert = {
+    '__lt__': [('__gt__', _gt_from_lt), ('__le__', _le_from_lt), ('__ge__', _ge_from_lt)],
+    '__le__': [('__ge__', _ge_from_le), ('__lt__', _lt_from_le), ('__gt__', _gt_from_le)],
+    '__gt__': [('__lt__', _lt_from_gt), ('__ge__', _ge_from_gt), ('__le__', _le_from_gt)],
+    '__ge__': [('__le__', _le_from_ge), ('__gt__', _gt_from_ge), ('__lt__', _lt_from_ge)],
+}
+
+def total_ordering(cls):
+    roots = {op for op in _convert if getattr(cls, op, None) is not getattr(object, op, None)}
+    if not roots:
+        raise ValueError('must have at least one ordering operation defined')
+    root = max(roots)
+    for opname, opfunc in _convert[root]:
+        if opname not in roots:
+            opfunc.__name__ = opname
+            setattr(cls, opname, opfunc)
+    return cls
+```
+
+`@total_ordering` requires `__eq__` plus one of `__lt__`, `__le__`, `__gt__`, `__ge__`. It fills in the other three. The generated methods call the root method via `NotImplemented` chaining.
+
+### `singledispatch`
+
+```python
+# CPython: Lib/functools.py:838 singledispatch
+def singledispatch(func):
+    """Transform a function into a single-dispatch generic function."""
+    registry = {}
+    dispatch_cache = WeakValueDictionary()
+    cache_token = None
+
+    def dispatch(cls):
+        if cls in registry:
+            return registry[cls]
+        try:
+            impl = cache[cls]
+        except KeyError:
+            impl = _find_impl(cls, registry)
+            cache[cls] = impl
+        return impl
+
+    def register(cls, func=None):
+        if func is None:
+            return lambda f: register(cls, f)
+        registry[cls] = func
+        dispatch_cache.clear()
+        return func
+
+    @wraps(func)
+    def wrapper(*args, **kw):
+        if not args:
+            raise TypeError(...)
+        return dispatch(args[0].__class__)(*args, **kw)
+
+    wrapper.register = register
+    wrapper.dispatch = dispatch
+    wrapper.registry = types.MappingProxyType(registry)
+    return wrapper
+```
+
+`@singledispatch` creates a generic function. `@func.register(int)` registers the `int` implementation. The dispatch cache uses a `WeakValueDictionary` so subclasses don't prevent GC of the registry.
+
+### `_find_impl`
+
+```python
+# CPython: Lib/functools.py:796 _find_impl
+def _find_impl(cls, registry):
+    """Walk the MRO looking for the most specific registered type."""
+    mro = _compose_mro(cls, registry.keys())
+    match = None
+    for t in mro:
+        if match is not None:
+            if (t in registry and t not in cls.__mro__
+                    and match not in cls.__mro__
+                    and issubclass(t, match)):
+                raise RuntimeError(...)
+            break
+        if t in registry:
+            match = t
+    return registry.get(match, registry.get(object))
+```
+
+`_compose_mro` inserts registered ABC types into the MRO at the right position so that `isinstance`-style dispatch works even for virtual subclasses. If two ABCs are both registered and neither is a subtype of the other, `RuntimeError` is raised.
+
+## gopy notes
+
+`reduce` is `module/functools.Reduce` in `module/functools/module.go`. `total_ordering` is implemented as a class decorator that adds comparison methods. `singledispatch` uses a Go `map[objects.Type]objects.Object` for the registry; `_find_impl` walks `objects.Type.MRO()`.

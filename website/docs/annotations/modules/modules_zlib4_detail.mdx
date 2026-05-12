@@ -1,0 +1,122 @@
+---
+title: Modules/zlibmodule.c (part 4)
+description: "zlibmodule.c part 4: Decompress object, zlib.decompress streaming, Z_SYNC_FLUSH, wbits parameter."
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/zlibmodule.c" />
+
+This annotation covers decompression. See `modules_zlib3_detail` for `zlib.compress`, `Compress` object, and `deflate` internals.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `zlib.decompress` | One-shot decompress using `Z_FINISH` |
+| 81-180 | `Decompress.__new__` | Allocate and initialize `z_stream` for decompression |
+| 181-300 | `Decompress.decompress` | Feed chunks; accumulate output; handle `Z_STREAM_END` |
+| 301-400 | `Decompress.flush` | Flush remaining buffered output |
+| 401-500 | `wbits` encoding | Gzip vs zlib vs raw deflate selection |
+
+## Reading
+
+### `zlib.decompress`
+
+```c
+// CPython: Modules/zlibmodule.c:620 zlib_decompress_impl
+static PyObject *
+zlib_decompress_impl(PyObject *module, Py_buffer *data, int wbits,
+                     Py_ssize_t bufsize)
+{
+    z_stream zst;
+    zst.zalloc = zst.zfree = zst.opaque = Z_NULL;
+    zst.next_in = data->buf;
+    zst.avail_in = data->len;
+    if (inflateInit2(&zst, wbits) != Z_OK) { ... }
+    /* Grow output buffer until Z_STREAM_END */
+    do {
+        PyBytes_Resize(result, output_len * 2);
+        zst.next_out = ...;
+        zst.avail_out = ...;
+        err = inflate(&zst, Z_FINISH);
+    } while (err == Z_BUF_ERROR || zst.avail_out == 0);
+    inflateEnd(&zst);
+    ...
+}
+```
+
+`zlib.decompress` doubles the output buffer until `inflate` returns `Z_STREAM_END`. The initial `bufsize` (default 16 KiB) is the first guess; for large compressed streams this doubles several times.
+
+### `Decompress.decompress`
+
+```c
+// CPython: Modules/zlibmodule.c:820 zlib_Decompress_decompress_impl
+static PyObject *
+zlib_Decompress_decompress_impl(compobject *self, Py_buffer *data,
+                                Py_ssize_t max_length)
+{
+    self->zst.next_in = data->buf;
+    self->zst.avail_in = data->len;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        err = inflate(&self->zst, Z_SYNC_FLUSH);
+        Py_END_ALLOW_THREADS
+        if (err == Z_NEED_DICT) {
+            /* Application must call set_dictionary() */
+            ...
+        }
+        if (err == Z_STREAM_END) {
+            self->eof = 1;
+            break;
+        }
+        /* Grow output buffer if needed */
+    } while (self->zst.avail_out == 0);
+    ...
+}
+```
+
+`Z_SYNC_FLUSH` decompresses as much as available input allows and flushes to the output buffer. Streaming use: `d = zlib.decompressobj(); out = d.decompress(chunk1) + d.decompress(chunk2) + d.flush()`.
+
+### `wbits` parameter
+
+```c
+// CPython: Modules/zlibmodule.c:100 wbits documentation
+/* wbits controls the window size and format:
+   +8 to +15: zlib format (RFC 1950), window size = 2^wbits
+   -8 to -15: raw deflate (no header)
+   +24 to +31 (= +16 + 8..15): gzip format (RFC 1952)
+   +40 to +47 (= +32 + 8..15): auto-detect zlib or gzip
+*/
+```
+
+`zlib.decompress(data, wbits=47)` (or `wbits=-15` for raw deflate) selects the format. The Python `gzip` module uses `wbits=47` to handle both gzip and zlib headers transparently.
+
+### `Decompress.flush`
+
+```c
+// CPython: Modules/zlibmodule.c:920 zlib_Decompress_flush_impl
+static PyObject *
+zlib_Decompress_flush_impl(compobject *self, Py_ssize_t length)
+{
+    /* Drain any remaining output with Z_FINISH.
+       After flush(), the Decompress object should not be used. */
+    self->zst.avail_in = 0;
+    self->zst.next_in = NULL;
+    do {
+        err = inflate(&self->zst, Z_FINISH);
+        /* accumulate output */
+    } while (err == Z_BUF_ERROR);
+    ...
+}
+```
+
+`flush()` finalizes the stream. For gzip files, calling `flush()` after `Z_STREAM_END` raises `error: Error -3 while decompressing data: incorrect data check` — the checksum verification happens at `Z_STREAM_END`.
+
+## gopy notes
+
+`zlib.decompress` is `module/zlib.Decompress` in `module/zlib/module.go` using `compress/zlib`. The `Decompress` object wraps `zlib.Reader`. `wbits` selects between `compress/zlib`, `compress/gzip`, and `compress/flate` readers. `flush()` calls `zlib.Reader.Close()`.

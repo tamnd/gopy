@@ -1,0 +1,126 @@
+---
+title: Objects/unicodeobject.c (part 9)
+description: "Objects/unicodeobject.c part 9: str.encode, PyUnicode_AsEncodedString, codec lookup, incremental encoders."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers the encode path. See `objects_strobject8_detail` for `str.decode` and codec infrastructure, and earlier parts for `str.__new__`, `__format__`, and search methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `str.encode` | Python-level entry; resolve codec name and errors handler |
+| 81-200 | `PyUnicode_AsEncodedString` | Core: look up codec, call encoder, check result type |
+| 201-320 | `PyCodec_Encode` | Codec registry lookup and dispatch |
+| 321-440 | `_PyUnicode_AsUTF8` | Fast path: return internal UTF-8 cache if present |
+| 441-600 | Incremental encoder | `codecs.getincrementalencoder` flow |
+
+## Reading
+
+### `str.encode`
+
+```c
+// CPython: Objects/unicodeobject.c:11420 unicode_encode_impl
+static PyObject *
+unicode_encode_impl(PyObject *self, const char *encoding, const char *errors)
+{
+    if (encoding == NULL)
+        encoding = PyUnicode_GetDefaultEncoding();  /* "utf-8" */
+    return PyUnicode_AsEncodedString(self, encoding, errors);
+}
+```
+
+`"hello".encode()` defaults to UTF-8. `"hello".encode('latin-1', 'replace')` replaces unencodable characters with `?`. The `errors` argument is passed verbatim to the codec.
+
+### `PyUnicode_AsEncodedString`
+
+```c
+// CPython: Objects/unicodeobject.c:3620 PyUnicode_AsEncodedString
+PyObject *
+PyUnicode_AsEncodedString(PyObject *unicode, const char *encoding,
+                          const char *errors)
+{
+    /* Fast paths for common encodings */
+    if (_Py_IsUTF8Encoding(encoding)) {
+        return _PyUnicode_AsUTF8String(unicode, errors);
+    }
+    if (_Py_IsASCIIEncoding(encoding)) {
+        return PyUnicode_EncodeASCII(...);
+    }
+    /* General path: look up codec */
+    PyObject *v = PyCodec_Encode(unicode, encoding, errors);
+    if (!PyBytes_Check(v)) {
+        PyErr_Format(PyExc_TypeError,
+            "'%.400s' encoder returned '%s' instead of 'bytes'",
+            encoding, Py_TYPE(v)->tp_name);
+        Py_DECREF(v);
+        return NULL;
+    }
+    return v;
+}
+```
+
+The fast paths bypass the codec registry for the two most common encodings. Non-bytes return values from a custom codec trigger `TypeError` — encoders must return `bytes`.
+
+### `_PyUnicode_AsUTF8`
+
+```c
+// CPython: Objects/unicodeobject.c:3980 _PyUnicode_AsUTF8
+const char *
+_PyUnicode_AsUTF8(PyObject *unicode)
+{
+    /* Return the cached UTF-8 representation if available.
+       If not, encode and cache it in self->utf8. */
+    if (PyUnicode_IS_ASCII(unicode)) {
+        /* ASCII strings: the internal buffer IS the UTF-8 */
+        return (const char *)PyUnicode_DATA(unicode);
+    }
+    if (((PyCompactUnicodeObject *)unicode)->utf8 != NULL) {
+        return ((PyCompactUnicodeObject *)unicode)->utf8;
+    }
+    /* Encode and cache */
+    PyObject *bytes = _PyUnicode_AsUTF8String(unicode, "strict");
+    ...
+    ((PyCompactUnicodeObject *)unicode)->utf8 = cache;
+    return cache;
+}
+```
+
+`_PyUnicode_AsUTF8` is used by `PyUnicode_AsUTF8AndSize` which C extensions call to get a `const char *` for passing to C APIs. The cache means repeated calls are O(1) after the first. The cached buffer is freed when the `str` object is deallocated.
+
+### Incremental encoder
+
+```python
+# CPython: Lib/codecs.py:180 IncrementalEncoder
+class IncrementalEncoder:
+    """Stateful encoder for streaming use."""
+    def __init__(self, errors='strict'):
+        self.errors = errors
+        self.buffer = ""
+
+    def encode(self, input, final=False):
+        raise NotImplementedError
+
+    def reset(self):
+        pass
+
+    def getstate(self):
+        return 0
+
+    def setstate(self, state):
+        pass
+```
+
+`codecs.getincrementalencoder('utf-8')()` returns a stateful encoder. Feed partial strings via `encode(chunk)` and call `encode('', final=True)` to flush. Used by `TextIOWrapper` for streaming writes.
+
+## gopy notes
+
+`str.encode` is `objects.UnicodeEncode` in `objects/str.go`. `PyUnicode_AsEncodedString` calls `objects.CodecEncode`. `_PyUnicode_AsUTF8` returns `objects.Str.UTF8Cache` (a `[]byte` field populated on first access). Incremental encoders are `module/codecs.IncrementalEncoder` in `module/codecs/module.go`.

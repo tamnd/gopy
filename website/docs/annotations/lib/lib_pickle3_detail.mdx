@@ -1,0 +1,129 @@
+---
+title: Lib/pickle.py (part 3)
+description: "Lib/pickle.py part 3: Pickler.dump_reduce, persistent_id, dispatch_table, __reduce_ex__, object reconstruction."
+cpython_path: Lib/pickle.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pickle.py" />
+
+This annotation covers the `__reduce__` protocol and customization hooks. See `modules_pickle2_detail` for `Pickler.__init__`, opcodes, and the C accelerator, and `lib_pickle_detail` for `Unpickler` and the dispatch tables.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Pickler.dump_reduce` | Core: serialize via `__reduce__` / `__reduce_ex__` |
+| 81-180 | `persistent_id` | Hook to replace an object with an external reference |
+| 181-280 | `dispatch_table` | Per-pickler or global copyreg dispatch override |
+| 281-380 | `Pickler.save_newobj` | Optimize construction via `__new__` when safe |
+| 381-500 | `Pickler.save_global` | Serialize a function or class as a dotted import path |
+
+## Reading
+
+### `Pickler.dump_reduce`
+
+```python
+# CPython: Lib/pickle.py:488 Pickler.save_reduce
+def save_reduce(self, func, args, state=None,
+                listitems=None, dictitems=None,
+                state_setter=None, obj=None):
+    """Write a REDUCE opcode followed by func, args, and optional state."""
+    save = self.save
+    write = self.write
+    save(func)
+    save(args)
+    write(REDUCE)
+    if obj is not None:
+        self.memoize(obj)
+    if state is not None:
+        save(state)
+        if state_setter is None:
+            write(BUILD)
+        else:
+            ...
+```
+
+`REDUCE` pops `(func, args)` from the stack and pushes `func(*args)`. `BUILD` calls `obj.__setstate__(state)` or updates `obj.__dict__`. This is the pickle protocol's universal object reconstruction path.
+
+### `persistent_id`
+
+```python
+# CPython: Lib/pickle.py:280 Pickler.save_pers
+def save_pers(self, pid):
+    """Write a PERSID/BINPERSID opcode for an externally-identified object."""
+    if not isinstance(pid, str):
+        raise PicklingError("persistent_id() must return str or None, not %s"
+                            % type(pid).__name__)
+    write = self.write
+    if self.proto >= 2:
+        save = self.save
+        save(pid)
+        write(BINPERSID)
+    else:
+        write(PERSID + str(pid).encode("ascii") + b'\n')
+```
+
+Override `Pickler.persistent_id` to return a string key for objects that should not be serialized inline (e.g., database rows, large shared buffers). The unpickler's `persistent_load` hook maps the key back to the object.
+
+### `dispatch_table`
+
+```python
+# CPython: Lib/pickle.py:380 Pickler.save
+def save(self, obj, save_persistent_id=True):
+    ...
+    # Check per-pickler dispatch table first
+    t = type(obj)
+    reduce = getattr(self, 'dispatch_table', {}).get(t)
+    if reduce is not None:
+        rv = reduce(obj)
+    elif t in copyreg.dispatch_table:
+        reduce = copyreg.dispatch_table[t]
+        rv = reduce(obj)
+    elif getattr(t, '__reduce_ex__', None) is not None:
+        rv = obj.__reduce_ex__(self.proto)
+    ...
+```
+
+`pickle.Pickler(f, protocol=5)` can have a per-instance `dispatch_table = copyreg.dispatch_table.copy()` that overrides global copyreg entries. This is the recommended way to customize pickling in a library without affecting other code.
+
+### `save_newobj`
+
+```python
+# CPython: Lib/pickle.py:560 Pickler.save_newobj
+def save_newobj(self, obj):
+    """Optimized pickling using NEWOBJ: cls.__new__(cls, *args).
+    Only used when __reduce_ex__ returns (cls, args) with protocol >= 2.
+    """
+    cls = obj.__class__
+    args = obj.__reduce_ex__(2)[1]
+    self.save(cls)
+    self.save(args)
+    write(NEWOBJ)  # Unpickler: push cls.__new__(cls, *args)
+```
+
+`NEWOBJ` avoids calling `cls(...)` (which might have validation logic) and calls `cls.__new__(cls, *args)` directly. Protocol 4 added `NEWOBJ_EX` for classes with keyword arguments.
+
+### `save_global`
+
+```python
+# CPython: Lib/pickle.py:620 Pickler.save_global
+def save_global(self, obj, name=None):
+    """Pickle a function or class by its dotted module.name path."""
+    if name is None:
+        name = getattr(obj, '__qualname__', None)
+    module_name = whichmodule(obj, name)
+    ...
+    write(GLOBAL + bytes(module_name, "utf-8") + b'\n' +
+          bytes(dotted_name, "utf-8") + b'\n')
+```
+
+Functions and classes are pickled as `(module, qualname)` pairs. `__qualname__` (e.g., `Outer.Inner.method`) is used for nested classes. The unpickler reconstructs by `import module; getattr(module, qualname)`.
+
+## gopy notes
+
+`Pickler.save_reduce` is `module/pickle.PicklerSaveReduce` in `module/pickle/module.go`. `persistent_id` calls a user-supplied Go callback. `dispatch_table` is a `map[objects.Type]func(objects.Object) objects.Object`. `save_global` uses `objects.GetModule` and `objects.GetAttr` to serialize the dotted path.

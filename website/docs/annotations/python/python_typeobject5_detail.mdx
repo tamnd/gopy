@@ -1,0 +1,125 @@
+---
+title: Python/typeobject.c (part 5)
+description: "Python/typeobject.c part 5: type.__init_subclass__, type.__set_name__, type.__class_getitem__, metaclass resolution."
+cpython_path: Python/typeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/typeobject.c" />
+
+This annotation covers class creation hooks. See `python_typeobject4_detail` for `type.__new__`, MRO computation, and descriptor protocol, and earlier parts for `type.__call__` and `__init__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `type_new_impl` body (continued) | Call `__set_name__` on namespace members |
+| 81-180 | `__init_subclass__` | Notify base classes of new subclass creation |
+| 181-280 | `type.__class_getitem__` | Default `cls[item]` returning `GenericAlias` |
+| 281-400 | Metaclass resolution | Determine the metaclass from bases |
+| 401-600 | `_PyType_CalculateMetaclass` | Walk bases to find the most-derived metaclass |
+
+## Reading
+
+### `__set_name__` dispatch
+
+```c
+// CPython: Python/typeobject.c:2980 type_new_set_names
+static int
+type_new_set_names(PyTypeObject *type)
+{
+    /* After the class body is executed, walk the namespace dict.
+       For each value that defines __set_name__, call it. */
+    PyObject *dict = type->tp_dict;
+    PyObject *key, *value;
+    Py_ssize_t i = 0;
+    while (PyDict_Next(dict, &i, &key, &value)) {
+        PyObject *set_name = PyObject_GetAttr(value, &_Py_ID(__set_name__));
+        if (set_name == NULL) {
+            PyErr_Clear();
+            continue;
+        }
+        PyObject *res = PyObject_CallFunctionObjArgs(set_name, type, key, NULL);
+        Py_DECREF(set_name);
+        if (res == NULL) return -1;
+        Py_DECREF(res);
+    }
+    return 0;
+}
+```
+
+`__set_name__` is called after the class is created, before `__init_subclass__`. Descriptors use it to learn the attribute name they're assigned to: `class Foo: x = MyDescriptor()` triggers `MyDescriptor.__set_name__(Foo, 'x')`.
+
+### `__init_subclass__`
+
+```c
+// CPython: Python/typeobject.c:3020 type_new_init_subclass
+static int
+type_new_init_subclass(PyTypeObject *type, PyObject *kwds)
+{
+    /* Call super().__init_subclass__(**kwds) on the first base
+       that defines it (not counting the new type itself). */
+    PyObject *super = PyObject_CallOneArg((PyObject *)&PySuper_Type,
+                                         (PyObject *)type);
+    ...
+    PyObject *func = PyObject_GetAttr(super, &_Py_ID(__init_subclass__));
+    PyObject *result = PyObject_VectorcallDict(func, NULL, 0, kwds);
+    ...
+}
+```
+
+`class Foo(Base, metaclass=Meta, key=val):` passes `key=val` as keyword arguments to `Base.__init_subclass__`. The default implementation (`object.__init_subclass__`) raises `TypeError` if any keywords are passed, which enforces that subclasses don't silently accept unexpected keyword arguments.
+
+### `type.__class_getitem__`
+
+```c
+// CPython: Python/typeobject.c:3120 type_class_getitem
+static PyObject *
+type_class_getitem(PyObject *cls, PyObject *args)
+{
+    /* Default implementation: return GenericAlias(cls, args).
+       Enabled by PEP 585 (Python 3.9+). */
+    return Py_GenericAlias(cls, args);
+}
+```
+
+`list[int]` calls `list.__class_getitem__(int)` which returns `list[int]` (a `types.GenericAlias`). This enables runtime parametrization of built-in types without importing `typing`. `dict[str, int]`, `tuple[int, ...]`, etc. all use this mechanism.
+
+### Metaclass resolution
+
+```c
+// CPython: Python/typeobject.c:3200 _PyType_CalculateMetaclass
+PyTypeObject *
+_PyType_CalculateMetaclass(PyTypeObject *metatype, PyObject *bases)
+{
+    /* For each base, check its metaclass.
+       The result must be a subtype of all base metaclasses. */
+    Py_ssize_t nbases = PyTuple_GET_SIZE(bases);
+    PyTypeObject *winner = metatype;
+    for (Py_ssize_t i = 0; i < nbases; i++) {
+        PyObject *base = PyTuple_GET_ITEM(bases, i);
+        PyTypeObject *base_meta = Py_TYPE(base);
+        if (PyType_IsSubtype(winner, base_meta)) continue;
+        if (PyType_IsSubtype(base_meta, winner)) {
+            winner = base_meta;
+            continue;
+        }
+        PyErr_SetString(PyExc_TypeError,
+            "metaclass conflict: "
+            "the metaclass of a derived class must be a (non-strict) "
+            "subclass of the metaclasses of all its bases");
+        return NULL;
+    }
+    return winner;
+}
+```
+
+The metaclass conflict error occurs when two bases have incompatible metaclasses (neither is a subtype of the other). The fix is to create a metaclass that inherits from both: `class Meta(MetaA, MetaB): pass`.
+
+## gopy notes
+
+`__set_name__` dispatch is `compile.typeNewSetNames` in `objects/type.go`. `__init_subclass__` is `objects.TypeNewInitSubclass`. `type.__class_getitem__` returns `objects.GenericAlias`. `_PyType_CalculateMetaclass` is `objects.CalculateMetaclass` which walks the base list.

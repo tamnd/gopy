@@ -1,0 +1,108 @@
+---
+title: Modules/binascii.c (part 4)
+description: "binascii.c part 4: binascii.crc32, crc_hqx, hexlify/unhexlify, b2a_uu, a2b_uu."
+cpython_path: Modules/binascii.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/binascii.c" />
+
+This annotation covers CRC routines and uuencoding. See `modules_binascii3_detail` for `b2a_base64`, `a2b_base64`, `b2a_hex`, `a2b_hex`, and the lookup table structure.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `binascii.crc32` | CRC-32 (ISO 3309) for use in zlib/gzip/zip checksums |
+| 81-160 | `binascii.crc_hqx` | CRC-CCITT for BinHex 4.0 format |
+| 161-260 | `binascii.hexlify` / `hexlify` | Alias: `bytes.hex()` delegates here |
+| 261-360 | `binascii.unhexlify` | Decode hex pairs to bytes |
+| 361-500 | `b2a_uu` / `a2b_uu` | Unix-to-Unix encode/decode |
+
+## Reading
+
+### `binascii.crc32`
+
+```c
+// CPython: Modules/binascii.c:820 binascii_crc32_impl
+static PyObject *
+binascii_crc32_impl(PyObject *module, Py_buffer *data, unsigned int crc)
+{
+    /* Use zlib's crc32() — it is faster than a pure-C table lookup
+       because zlib can use hardware CRC32 instructions (SSE4.2, ARM CRC32). */
+    unsigned long result = crc32(crc ^ 0xFFFFFFFFUL,
+                                 data->buf, data->len) ^ 0xFFFFFFFFUL;
+    return PyLong_FromUnsignedLong(result & 0xFFFFFFFF);
+}
+```
+
+`binascii.crc32(b'hello')` returns a signed 32-bit integer (cast to unsigned via `& 0xFFFFFFFF`). The XOR with `0xFFFFFFFF` converts between the "complement" CRC used by zlib and the raw polynomial. `binascii.crc32(data, prev_crc)` chains CRC computations.
+
+### `binascii.crc_hqx`
+
+```c
+// CPython: Modules/binascii.c:880 binascii_crc_hqx_impl
+static PyObject *
+binascii_crc_hqx_impl(PyObject *module, Py_buffer *data, unsigned int crc)
+{
+    /* CRC-CCITT (polynomial 0x1021), table-driven */
+    unsigned char *buf = data->buf;
+    for (Py_ssize_t i = 0; i < data->len; i++) {
+        crc = ((crc << 8) & 0xFF00) ^
+              crctab_hqx[((crc >> 8) ^ *buf++) & 0xFF];
+    }
+    return PyLong_FromUnsignedLong(crc & 0xFFFF);
+}
+```
+
+`crc_hqx` uses a 256-entry lookup table for the CCITT polynomial. It is used exclusively with the BinHex 4.0 format (`.hqx` files), a Mac encoding format rarely seen outside legacy archival work.
+
+### `binascii.hexlify`
+
+```c
+// CPython: Modules/binascii.c:360 binascii_hexlify_impl
+static PyObject *
+binascii_hexlify_impl(PyObject *module, Py_buffer *argbuf, int sep,
+                      int bytes_per_sep)
+{
+    /* Map each byte to two hex characters using a lookup table */
+    static const char hexdigits[] = "0123456789abcdef";
+    PyObject *result = PyBytes_FromStringAndSize(NULL, argbuf->len * 2);
+    char *out = PyBytes_AS_STRING(result);
+    unsigned char *in = argbuf->buf;
+    for (Py_ssize_t i = 0; i < argbuf->len; i++) {
+        *out++ = hexdigits[*in >> 4];
+        *out++ = hexdigits[*in++ & 0x0f];
+    }
+    return result;
+}
+```
+
+`binascii.hexlify(b'\xde\xad')` returns `b'dead'`. The `sep` and `bytes_per_sep` arguments (added in 3.8) insert a separator every N bytes: `hexlify(b'\xde\xad\xbe\xef', sep=b':', bytes_per_sep=2)` returns `b'dead:beef'`.
+
+### `b2a_uu`
+
+```c
+// CPython: Modules/binascii.c:160 binascii_b2a_uu_impl
+static PyObject *
+binascii_b2a_uu_impl(PyObject *module, Py_buffer *data, int backtick)
+{
+    /* UU encode: groups of 3 bytes -> 4 characters (6-bit groups + 32).
+       Line starts with the encoded length character. */
+    int len = data->len;  /* Must be <= 45 */
+    PyObject *result = PyBytes_FromStringAndSize(NULL, 2 + ((len + 2) / 3) * 4);
+    char *out = PyBytes_AS_STRING(result);
+    *out++ = ' ' + len;  /* Length prefix */
+    ...
+}
+```
+
+UU encoding encodes 3 bytes at a time into 4 printable ASCII characters by mapping 6-bit groups to `' '...'_'` (ASCII 32..95). The `backtick=True` option (Python 3.7+) uses `` ` `` instead of space for the zero byte, for compatibility with some UU encoders.
+
+## gopy notes
+
+`binascii.crc32` is `module/binascii.CRC32` in `module/binascii/module.go` using `hash/crc32.IEEETable`. `crc_hqx` uses a local table. `hexlify`/`unhexlify` use `encoding/hex`. `b2a_uu`/`a2b_uu` are implemented with the 6-bit group encoding directly.
