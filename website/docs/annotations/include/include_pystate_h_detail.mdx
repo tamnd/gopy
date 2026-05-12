@@ -1,0 +1,74 @@
+---
+title: Include/pystate.h
+description: "Public thread-state and interpreter-state API: PyInterpreterState, PyThreadState, PyGILState_STATE, Py_BEGIN_ALLOW_THREADS/Py_END_ALLOW_THREADS, and the per-thread dictionary."
+cpython_path: Include/pystate.h
+cpython_version: "3.14"
+lines: 210
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/pystate.h`
+
+<CpyLink path="Include/pystate.h" />
+
+`Include/pystate.h` is the public header for interpreter and thread state. It declares the
+opaque `PyInterpreterState` and `PyThreadState` types, the GIL release/reacquire macros,
+and the `PyGILState` convenience API for code that may or may not already hold the GIL.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-50 | Forward declarations, `PyInterpreterState` opaque handle | Interpreter-level state |
+| 51-120 | `PyThreadState` opaque handle, accessors | Per-thread Python state |
+| 121-160 | `Py_BEGIN_ALLOW_THREADS`, `Py_END_ALLOW_THREADS` | GIL release/reacquire macros |
+| 161-210 | `PyGILState_STATE`, `PyGILState_Ensure`, `PyGILState_Release` | C-thread GIL management |
+
+## Reading
+
+### GIL release macros
+
+The `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` pair is a macro pair that saves and
+restores the current thread state. They declare a local `_save` variable which means the
+two macros must appear in the same lexical scope.
+
+```c
+// CPython: Include/pystate.h:150 Py_BEGIN_ALLOW_THREADS
+#define Py_BEGIN_ALLOW_THREADS { \
+    PyThreadState *_save; \
+    _save = PyEval_SaveThread();
+
+#define Py_END_ALLOW_THREADS \
+    PyEval_RestoreThread(_save); \
+}
+```
+
+Any Python API call between these macros is undefined behaviour because the calling thread
+does not hold the GIL.
+
+### `PyGILState_Ensure` / `PyGILState_Release`
+
+These are the safe entry points for C threads that were not started by Python (for example,
+callback threads from a C library). `PyGILState_Ensure` acquires the GIL, creating a new
+`PyThreadState` if necessary, and returns a token. `PyGILState_Release` uses the token to
+release the GIL and optionally destroy the thread state.
+
+```c
+// CPython: Include/pystate.h:180 PyGILState_Ensure
+PyAPI_FUNC(PyGILState_STATE) PyGILState_Ensure(void);
+PyAPI_FUNC(void) PyGILState_Release(PyGILState_STATE);
+```
+
+### Per-thread dictionary
+
+`PyThreadState_GetDict()` returns a `dict` local to the current thread. It is used by
+`threading.local()` and by profiling hooks.
+
+## gopy notes
+
+gopy uses goroutines rather than OS threads and has no GIL. The `PyThreadState` concept
+maps to goroutine-local state via `context.Context`. The `Py_BEGIN_ALLOW_THREADS` /
+`Py_END_ALLOW_THREADS` pattern has no equivalent; blocking operations simply run in a
+goroutine.

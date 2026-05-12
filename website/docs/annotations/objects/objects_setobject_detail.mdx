@@ -1,0 +1,82 @@
+---
+title: Objects/setobject.c
+description: "set and frozenset: open-addressing hash table with linear probing, add/discard/pop, set-algebraic operations (union, intersection, difference, symmetric_difference), and issubset/issuperset."
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 1850
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/setobject.c`
+
+<CpyLink path="Objects/setobject.c" />
+
+`Objects/setobject.c` implements both `set` and `frozenset`. The storage is an
+open-addressing hash table with a small-set optimisation: sets up to 8 elements use an
+embedded `smalltable` that avoids a heap allocation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `setentry`, `PySetObject` structs | Table entry and set object layout |
+| 201-450 | `set_add_entry`, `set_contains_entry` | Core hash-table primitives |
+| 451-650 | `set_add_key`, `set_discard_key`, `set_pop` | Public mutation operations |
+| 651-900 | `set_merge`, `set_update_internal` | Bulk insert from iterables |
+| 901-1300 | `set_and`, `set_or`, `set_sub`, `set_xor` | Set algebra |
+| 1301-1600 | `set_issubset`, `set_issuperset`, `set_isdisjoint` | Relational operations |
+| 1601-1850 | Type definitions | `PySet_Type`, `PyFrozenSet_Type` |
+
+## Reading
+
+### Open-addressing with linear probing
+
+The hash table uses the same perturbation strategy as `dict`: after a collision the probe
+index advances by `(5 * i + 1 + perturb) & mask` where `perturb` starts as the full hash
+and is right-shifted on each step.
+
+```c
+// CPython: Objects/setobject.c:150 set_lookkey
+static setentry *
+set_lookkey(PySetObject *so, PyObject *key, Py_hash_t hash)
+{
+    setentry *table;
+    setentry *entry;
+    size_t perturb;
+    size_t mask = so->mask;
+    size_t i = (size_t)hash & mask;
+    ...
+    perturb = hash;
+    while (1) {
+        ...
+        perturb >>= PERTURB_SHIFT;
+        i = (i*5 + 1 + perturb) & mask;
+    }
+}
+```
+
+### Small-set optimisation
+
+`PySetObject` has an embedded `smalltable[8]`. For sets of 8 or fewer entries `so->table`
+points into `smalltable`, avoiding a malloc. When the set grows past the fill threshold
+`set_table_resize` allocates a new table on the heap and moves `so->table`.
+
+### `set_pop`
+
+`set_pop` finds the first occupied slot starting from `so->finger` (a cached position) and
+removes it. `finger` prevents `O(n)` scanning from the start on each call.
+
+### Set algebra
+
+`set_and` (intersection) iterates the smaller set and tests membership in the larger set for
+each entry. `set_or` (union) copies the larger set and merges the smaller. `set_sub`
+(difference) iterates `self` and omits entries present in `other`.
+
+## gopy notes
+
+Not yet ported. The `set` and `frozenset` types belong in the core objects layer. The Go
+implementation will use a `map[uint64]pyObject` with the same perturbation hash to match
+CPython's bucket distribution. `frozenset` is identical to `set` with all mutation methods
+omitted and `__hash__` defined.

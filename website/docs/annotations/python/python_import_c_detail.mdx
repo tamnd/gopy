@@ -1,0 +1,94 @@
+---
+title: Python/import.c
+description: "Import machinery: PyImport_ImportModule, _PyImport_FindExtensionObject, sys.modules cache, import lock, frozen module table, and the builtin/frozen/path-based loader dispatch."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/import.c`
+
+<CpyLink path="Python/import.c" />
+
+`Python/import.c` is the C layer of the import system. It manages `sys.modules`, the
+import lock, the frozen module table, and the `importlib` bootstrap. The high-level
+`__import__` built-in delegates to `importlib._bootstrap._find_and_load`, but all
+`sys.modules` mutations and lock acquisition happen here.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | Import lock, `_PyImport_AcquireLock` | Per-interpreter recursive import lock |
+| 301-600 | `sys.modules` helpers | `_PyImport_GetModuleAttrString`, module cache lookup/insert |
+| 601-900 | `PyImport_ImportModule`, `PyImport_Import` | Top-level public API |
+| 901-1300 | `_PyImport_FindExtensionObject` | Extension module (.so/.pyd) lookup and init |
+| 1301-1700 | Frozen module table, `PyImport_ImportFrozenModule` | Built-in frozen module loading |
+| 1701-3000 | `importlib` bootstrap, `_PyImport_InitImportFunc` | Bootstrap handoff to `importlib` |
+
+## Reading
+
+### Import lock
+
+The import lock is a per-interpreter recursive mutex. A thread that already holds the lock
+may re-enter (for circular imports). Deadlock detection raises `ImportError`.
+
+```c
+// CPython: Python/import.c:185 _PyImport_AcquireLock
+_PyImport_AcquireLock(PyInterpreterState *interp)
+{
+    _PyRecursiveMutex_Lock(&interp->imports.lock);
+}
+```
+
+### `sys.modules` cache
+
+Every import begins with a `sys.modules` lookup. The cache stores the fully initialized
+module object. A partially-initialized module is also placed in `sys.modules` before
+execution so that circular imports find a module object rather than triggering a second
+import.
+
+```c
+// CPython: Python/import.c:470 import_get_module
+static PyObject *
+import_get_module(PyThreadState *tstate, PyObject *abs_name)
+{
+    PyObject *modules = tstate->interp->imports.modules;
+    ...
+    return PyObject_GetItem(modules, abs_name);
+}
+```
+
+### Frozen modules
+
+Frozen modules are byte-compiled code objects embedded in the interpreter binary. CPython
+3.11+ freezes `importlib._bootstrap` and `importlib._bootstrap_external` to speed up
+interpreter startup without touching the file system.
+
+```c
+// CPython: Python/import.c:1380 PyImport_ImportFrozenModuleObject
+int
+PyImport_ImportFrozenModuleObject(PyObject *name)
+{
+    ...
+    p = find_frozen(name, &info);
+    if (p == NULL) return 0;
+    ...
+    co = PyMarshal_ReadObjectFromString((const char *)info.data, info.size);
+    ...
+}
+```
+
+### `importlib` handoff
+
+At interpreter startup `_PyImport_InitImportFunc` installs `importlib._bootstrap.__import__`
+as `builtins.__import__`. From that point all Python-level imports go through `importlib`.
+
+## gopy notes
+
+`vm/eval_import.go` handles IMPORT_NAME and IMPORT_FROM opcodes. The `sys.modules` cache
+lives in the interpreter state. Frozen modules include the stdlibinit registry; path-based
+loading is not yet implemented.

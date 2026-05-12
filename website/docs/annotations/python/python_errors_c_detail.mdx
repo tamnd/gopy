@@ -1,0 +1,93 @@
+---
+title: Python/errors.c
+description: "Exception raising and handling: PyErr_SetString, PyErr_Format, PyErr_Occurred, PyErr_Fetch/Restore, PyErr_NormalizeException, PyErr_WriteUnraisable, and the chained exception machinery."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 1680
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/errors.c`
+
+<CpyLink path="Python/errors.c" />
+
+`Python/errors.c` is the core exception signalling layer. It owns the thread-state
+exception fields and every function that sets, tests, clears, or formats an exception in
+the C runtime.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `PyErr_Restore`, `PyErr_SetObject`, `PyErr_SetString` | Set the current exception |
+| 201-450 | `PyErr_Occurred`, `PyErr_Clear`, `PyErr_Fetch`, `PyErr_Normalize` | Test and retrieve |
+| 451-700 | `PyErr_Format`, `PyErr_FormatV` | String-formatted exception messages |
+| 701-950 | `PyErr_SetFromErrno`, `PyErr_SetFromWindowsErr` | OS-error helpers |
+| 951-1200 | Chaining machinery | `__context__`, `__cause__`, `__suppress_context__` |
+| 1201-1680 | `PyErr_WriteUnraisable`, warning machinery | Background error reporting |
+
+## Reading
+
+### `PyErr_SetObject`
+
+```c
+// CPython: Python/errors.c:68 PyErr_SetObject
+void
+PyErr_SetObject(PyObject *exception, PyObject *value)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    _PyErr_SetObject(tstate, exception, value);
+}
+```
+
+The exception is stored directly in `tstate->current_exception` (Python 3.12+). Earlier
+versions used three separate fields (`exc_type`, `exc_value`, `exc_traceback`); the
+3.12 consolidation stores a single normalized exception object.
+
+### `PyErr_Normalize`
+
+Normalization ensures `exc_value` is an instance of `exc_type`. If `exc_value` is not yet
+an instance (for example a raw string was passed), normalization calls `exc_type(exc_value)`
+and replaces the stored value. This is what allows `raise ValueError("msg")` to work with
+either a class or an instance.
+
+```c
+// CPython: Python/errors.c:364 PyErr_NormalizeException
+void
+PyErr_NormalizeException(PyObject **exc, PyObject **val, PyObject **tb)
+{
+    ...
+    if (!PyExceptionInstance_Check(*val)) {
+        PyObject *args;
+        if (*val == Py_None || *val == NULL)
+            args = PyTuple_New(0);
+        else if (PyTuple_Check(*val))
+            args = *val;
+        else
+            args = PyTuple_Pack(1, *val);
+        *val = _PyObject_CallOneArg(*exc, args);
+        ...
+    }
+    ...
+}
+```
+
+### Chained exceptions
+
+When an exception is raised inside an `except` block, `Python/errors.c` sets
+`__context__` automatically. `raise X from Y` additionally sets `__cause__` and clears
+`__suppress_context__`. The context chain is walked by the traceback printer.
+
+### `PyErr_WriteUnraisable`
+
+Used for exceptions that occur in destructors or `tp_finalize` callbacks where there is no
+Python caller to propagate to. It calls `sys.unraisablehook` if defined, then falls back
+to writing to `sys.stderr`.
+
+## gopy notes
+
+`errors.Raise` in gopy maps to `_PyErr_SetObject`. The normalized exception object model
+is handled in `objects/`. The chained-exception fields (`__context__`, `__cause__`) are
+set by the vm layer during RAISE_VARARGS handling.
