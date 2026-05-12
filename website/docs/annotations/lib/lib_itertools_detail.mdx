@@ -1,0 +1,85 @@
+---
+title: Lib/itertools.py
+description: "itertools module: chain, cycle, repeat, islice, zip_longest, product, permutations, combinations — implemented in the _itertools C extension with this file providing documentation stubs."
+cpython_path: Modules/itertoolsmodule.c
+cpython_version: "3.14"
+lines: 4000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/itertoolsmodule.c" />
+
+The `itertools` module is implemented entirely in C (`Modules/itertoolsmodule.c`). This page annotates the C source. It provides lazy iterator combinators: `chain`, `cycle`, `repeat`, `islice`, `filterfalse`, `takewhile`, `dropwhile`, `zip_longest`, `product`, `permutations`, `combinations`, and `combinations_with_replacement`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `chainobject`, `chain.from_iterable` | Iterator of iterators; lazy flattening |
+| 201-400 | `cycleobject` | Cycling iterator; buffer accumulates then replays |
+| 401-600 | `repeatobject` | Repeat a value N times or infinitely |
+| 601-900 | `isliceobject`, `takewhile`, `dropwhile` | Slicing and predicate-based selection |
+| 901-1200 | `filterfalseobject`, `starmap`, `ziplong` | Inverse filter; apply; zip with fill |
+| 1201-2000 | `productobject` | Cartesian product; pool arrays and index counter |
+| 2001-3000 | `permutationsobject` | Knuth Algorithm L in-place permutation |
+| 3001-4000 | `combinationsobject`, `combinations_wr` | k-subset enumeration |
+
+## Reading
+
+### chain: iterator of iterators
+
+`chain` holds a source iterator and a current active iterator. `chain_next` calls `next(active)`; on exhaustion it calls `next(source)` to get the next iterator and sets it as active.
+
+```c
+// Modules/itertoolsmodule.c:1 chainobject
+typedef struct {
+    PyObject_HEAD
+    PyObject *source;   /* outer iterator */
+    PyObject *active;   /* current inner iterator */
+} chainobject;
+
+// chain_next
+static PyObject *
+chain_next(chainobject *lz)
+{
+    PyObject *item;
+    while (lz->active) {
+        item = (*Py_TYPE(lz->active)->tp_iternext)(lz->active);
+        if (item) return item;
+        Py_CLEAR(lz->active);
+        lz->active = (*Py_TYPE(lz->source)->tp_iternext)(lz->source);
+    }
+    return NULL;
+}
+```
+
+### product: Cartesian product
+
+`product` stores the input pools as a list of tuples and an index array. Each call to `product_next` increments the rightmost index that has not yet exhausted its pool, carrying over to the left when needed (like counting in mixed radix).
+
+```c
+// Modules/itertoolsmodule.c:1201 product_next (carry loop)
+static PyObject *
+product_next(productobject *lz)
+{
+    /* build result tuple from indices */
+    /* increment: scan right-to-left, carry if pool exhausted */
+    for (i = npools - 1; i >= 0; i--) {
+        lz->indices[i]++;
+        if (lz->indices[i] < PyTuple_GET_SIZE(pool)) break;
+        lz->indices[i] = 0;
+        if (i == 0) { lz->stopped = 1; return NULL; }
+    }
+    ...
+}
+```
+
+### permutations: Knuth Algorithm L
+
+`permutations` maintains an array of indices and a cycles array. Each `permutations_next` call uses Knuth's Algorithm L to advance the permutation in-place without allocating intermediate arrays.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/itertools/`. Each iterator would be a Go struct implementing a `Next() (py.Object, bool)` method. Go's `iter` package (1.23+) provides `iter.Seq[V]` which maps to the same concept.

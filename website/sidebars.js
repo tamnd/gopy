@@ -284,6 +284,7 @@ const sidebars = {
         'annotations/python/python_codegen_detail',
         'annotations/python/python_codecs_c_detail',
         'annotations/python/python_peephole_detail',
+        'annotations/python/python_bltinmodule_detail',
       ],
     },
     {
@@ -428,6 +429,7 @@ const sidebars = {
         'annotations/objects/python_typeobject_c_detail',
         'annotations/objects/objects_dictobject_detail',
         'annotations/objects/objects_bytesobject_detail',
+        'annotations/objects/objects_unicodeobject_c_detail',
       ],
     },
     {
@@ -635,6 +637,7 @@ const sidebars = {
         'annotations/include/include_abstract_h_detail',
         'annotations/include/include_pyerrors_h_detail',
         'annotations/include/include_cpython_listobject_h_detail',
+        'annotations/include/include_cpython_floatobject_h_detail',
       ],
     },
     {
@@ -1231,6 +1234,8 @@ const sidebars = {
         'annotations/lib/lib_collections_abc_detail',
         'annotations/lib/lib_copy_detail',
         'annotations/lib/lib_pprint_detail',
+        'annotations/lib/lib_functools_detail',
+        'annotations/lib/lib_itertools_detail',
       ],
     },
   ],

@@ -1,0 +1,70 @@
+---
+title: Lib/functools.py
+description: "functools module: partial, reduce, lru_cache, cached_property, total_ordering, singledispatch, and wraps — higher-order function utilities."
+cpython_path: Lib/functools.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/functools.py" />
+
+`Lib/functools.py` provides higher-order function utilities. Most are accelerated by the `_functools` C extension; this file contains the pure-Python fallbacks and the implementations that require Python-level features like decorators and descriptors (`cached_property`, `total_ordering`, `singledispatch`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | imports, re-exports | Import from `_functools`; `WRAPPER_ASSIGNMENTS` |
+| 61-120 | `update_wrapper`, `wraps` | Copy `__name__`, `__doc__`, `__dict__`, `__wrapped__` |
+| 121-200 | `total_ordering` | Derive missing comparison methods from `__eq__` + one other |
+| 201-320 | `cmp_to_key` | Wrap old-style comparison into a `Key` class |
+| 321-500 | `lru_cache` | Bounded LRU cache decorator (delegates to `_functools`) |
+| 501-650 | `cached_property` | Non-data descriptor caching first-access result in instance dict |
+| 651-850 | `singledispatch` | Type-based dispatch using `functools.dispatch` MRO registry |
+| 851-1000 | `reduce`, `partial` | Fold and partial application (re-export from `_functools`) |
+
+## Reading
+
+### total_ordering
+
+`total_ordering` inspects which comparison methods the class already has (among `__lt__`, `__le__`, `__gt__`, `__ge__`) and derives the rest from `__eq__` and the one provided method. For example, if only `__lt__` is defined, `__le__(a, b)` is derived as `a < b or a == b`.
+
+```python
+# CPython: Lib/functools.py:121 total_ordering
+def total_ordering(cls):
+    roots = {op for op in _convert if getattr(cls, op, None) is not getattr(object, op, None)}
+    if not roots:
+        raise ValueError('must have at least one ordering operation defined')
+    root = max(roots)
+    for opname, opfunc in _convert[root]:
+        if opname not in roots:
+            opfunc.__name__ = opname
+            setattr(cls, opname, opfunc)
+    return cls
+```
+
+### cached_property
+
+`cached_property` is a non-data descriptor (no `__set__`). On first `instance.attr` access, it calls the wrapped function, stores the result in `instance.__dict__[attr_name]`, and returns it. On subsequent access, the instance dict lookup short-circuits the descriptor entirely.
+
+```python
+# CPython: Lib/functools.py:501 cached_property.__get__
+class cached_property:
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        val = self.func(instance)
+        instance.__dict__[self.attrname] = val
+        return val
+```
+
+### singledispatch MRO registry
+
+`singledispatch` decorates a function to become a generic function. `register(type)` associates an implementation with a type. Dispatch checks the registry for the argument's type; if not found it walks the MRO using `functools._find_impl` which returns the most specific registered ancestor type.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/functools/`. `partial` and `lru_cache` are already started in `module/functools/module.go`. `singledispatch` would require Go interface type assertions. `cached_property` maps to `sync.Once` or a lazy-init pattern.

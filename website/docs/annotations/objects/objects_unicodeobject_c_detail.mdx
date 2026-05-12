@@ -1,0 +1,71 @@
+---
+title: Objects/unicodeobject.c
+description: "str implementation: compact ASCII/UCS1/UCS2/UCS4 layouts, interning, encode/decode, find/split/join/replace, and the format string mini-language."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 15000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+`Objects/unicodeobject.c` is the largest file in CPython. It implements the `str` type with four internal encodings (ASCII, UCS-1, UCS-2, UCS-4), interning, all string methods (`find`, `split`, `join`, `replace`, `encode`, `format`, etc.), and the `%` and `format()` mini-languages.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-500 | constructors | `PyUnicode_FromString`, `PyUnicode_FromOrdinal`, format helpers |
+| 501-1500 | encoding/decoding | `PyUnicode_AsUTF8`, `PyUnicode_AsEncodedString`, codec dispatch |
+| 1501-3000 | search | `unicode_find`, `unicode_index`, `unicode_count` |
+| 3001-5000 | split/join | `unicode_split`, `unicode_rsplit`, `unicode_join` |
+| 5001-7000 | replace/translate | `unicode_replace`, `unicode_translate` |
+| 7001-9000 | case operations | `unicode_upper`, `unicode_lower`, `unicode_title`, `unicode_casefold` |
+| 9001-11000 | format | `unicode_format`, `_PyUnicode_FormatLong`, `format_spec` mini-language |
+| 11001-15000 | interning, repr, misc | `PyUnicode_InternInPlace`, `unicode_repr`, `PyUnicode_Type` |
+
+## Reading
+
+### Compact layouts
+
+After PEP 393 (Python 3.3), strings use the most compact layout that can represent all code points. ASCII strings use `PyASCIIObject` with 1 byte per character. Non-ASCII strings that fit in Latin-1 use UCS-1 (1 byte/char). BMP strings use UCS-2 (2 bytes/char). Strings with code points above U+FFFF use UCS-4 (4 bytes/char).
+
+```c
+// Objects/unicodeobject.c:1 _PyUnicode_New (compact alloc)
+PyObject *
+_PyUnicode_New(Py_ssize_t length, int kind)
+{
+    size_t char_size = PyUnicode_KIND_SIZE(kind, length + 1);
+    /* allocate header + character data in one block */
+    PyObject *obj = (PyObject *)PyObject_Malloc(
+        sizeof(PyASCIIObject) + char_size);
+    ...
+}
+```
+
+### Interning
+
+`PyUnicode_InternInPlace` checks a per-interpreter weak-value dict. If the string is already interned, the object is replaced with the interned copy. `sys.intern(s)` is the Python-level interface; the C compiler also interns all name/attribute strings in bytecode.
+
+```c
+// Objects/unicodeobject.c:11001 PyUnicode_InternInPlace
+void
+PyUnicode_InternInPlace(PyObject **p)
+{
+    PyObject *s = *p;
+    if (_PyUnicode_STATE(s).interned == SSTATE_INTERNED_IMMORTAL) return;
+    PyObject *t = PyDict_SetDefault(interned, s, s);
+    if (t != s) { Py_SETREF(*p, t); return; }  /* replace with existing */
+    _PyUnicode_STATE(s).interned = SSTATE_INTERNED_MORTAL;
+}
+```
+
+### encode dispatch
+
+`str.encode(encoding, errors)` calls `PyUnicode_AsEncodedString` which uses the codec registry (`Python/codecs.c`) to find the encoder for the given encoding name and calls it. The result is always a `bytes` object.
+
+## gopy notes
+
+The gopy string type wraps a Go `string` (always UTF-8). The four-layout compaction does not apply since Go strings are always UTF-8. Interning maps to a `map[string]*Str` in the interpreter state. The `encode` method dispatches through the codec registry in `module/codecs/`.
