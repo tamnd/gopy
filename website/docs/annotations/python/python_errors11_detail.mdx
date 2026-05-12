@@ -1,0 +1,119 @@
+---
+title: Python/errors.c (part 11)
+description: "Python/errors.c part 11: _PyErr_ChainExceptions, _PyErr_FormatFromCause, PyErr_SetImportErrorWithNameFrom, exception notes."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers exception chaining and note APIs. See `python_errors10_detail` for `PyErr_SetString`, `PyErr_Format`, `PyErr_Fetch`/`Restore`, and `_PyErr_NormalizeException`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyErr_ChainExceptions1` | Chain active exception as `__context__` |
+| 81-160 | `_PyErr_FormatFromCause` | Format + chain (for `raise X from Y`) |
+| 161-240 | `PyErr_SetImportErrorWithNameFrom` | Set `ImportError` with `name` and `path` |
+| 241-340 | `BaseException.add_note` | Attach a string note to an exception (3.11+) |
+| 341-500 | `_PyErr_WriteUnraisable` | Print unraisable exception to `sys.stderr` |
+
+## Reading
+
+### `_PyErr_ChainExceptions1`
+
+```c
+// CPython: Python/errors.c:680 _PyErr_ChainExceptions1
+void
+_PyErr_ChainExceptions1(PyObject *exc)
+{
+    /* Called when a new exception replaces the current one.
+       The old exception becomes __context__ of the new one. */
+    if (exc == NULL) return;
+    PyObject *cur_exc = tstate->current_exception;
+    if (cur_exc == NULL) return;
+    /* Don't chain if the new exception is the same object */
+    if (exc == cur_exc) return;
+    /* Set __context__ if not already set */
+    if (PyException_GetContext(exc) == NULL) {
+        PyException_SetContext(exc, Py_NewRef(cur_exc));
+    }
+}
+```
+
+Implicit exception chaining: when an exception is raised while handling another, the original becomes `__context__`. This is what produces `"During handling of the above exception, another exception occurred:"` in tracebacks.
+
+### `_PyErr_FormatFromCause`
+
+```c
+// CPython: Python/errors.c:720 _PyErr_FormatFromCause
+PyObject *
+_PyErr_FormatFromCause(PyObject *exception, const char *format, ...)
+{
+    /* Like PyErr_Format, but also chains the current exception as __cause__
+       and sets __suppress_context__ = True */
+    PyObject *exc = tstate->current_exception;
+    PyErr_Clear();
+    PyErr_Format(exception, format, ...);
+    PyObject *new_exc = tstate->current_exception;
+    PyException_SetCause(new_exc, Py_NewRef(exc));
+    return NULL;
+}
+```
+
+`raise ValueError("msg") from original_exc` uses explicit chaining. `__cause__` is set and `__suppress_context__` is `True`, so the traceback shows `"The above exception was the direct cause:"` instead of the implicit context message.
+
+### `BaseException.add_note`
+
+```c
+// CPython: Python/errors.c:790 BaseException_add_note
+static PyObject *
+BaseException_add_note(PyObject *self, PyObject *note)
+{
+    if (!PyUnicode_Check(note)) {
+        PyErr_Format(PyExc_TypeError,
+                     "note must be a str, not '%s'",
+                     Py_TYPE(note)->tp_name);
+        return NULL;
+    }
+    PyObject *notes = PyObject_GetAttr(self, &_Py_ID(__notes__));
+    if (notes == NULL) {
+        PyErr_Clear();
+        notes = PyList_New(0);
+        PyObject_SetAttr(self, &_Py_ID(__notes__), notes);
+    }
+    PyList_Append(notes, note);
+    Py_RETURN_NONE;
+}
+```
+
+`exc.add_note("hint")` appends to `exc.__notes__`, a list created on first use. The `traceback` module prints notes after the exception message. Added in Python 3.11 for enriching exceptions without subclassing.
+
+### `_PyErr_WriteUnraisable`
+
+```c
+// CPython: Python/errors.c:860 _PyErr_WriteUnraisable
+void
+_PyErr_WriteUnraisable(PyObject *obj)
+{
+    /* Print to sys.unraisablehook or sys.stderr */
+    PyObject *hook = _PySys_GetAttr(tstate, &_Py_ID(unraisablehook));
+    if (hook != NULL && hook != PyExc_ignore) {
+        PyObject *args = PyTuple_Pack(1, unraisable_hook_args);
+        PyObject_Call(hook, args, NULL);
+    }
+    /* Fallback: write to stderr */
+    PyErr_Display(exc_type, exc_value, exc_tb);
+}
+```
+
+Used for exceptions that occur in `__del__`, finalizer callbacks, and thread exceptions. `sys.unraisablehook` (added in 3.8) allows custom handling. The default hook prints a warning to stderr.
+
+## gopy notes
+
+`_PyErr_ChainExceptions1` is `vm.ChainExceptions` in `vm/eval_unwind.go`. `add_note` is in `objects/exception.go` appending to `__notes__`. `_PyErr_WriteUnraisable` calls `sys.unraisablehook` via `objects.CallOneArg` or falls back to writing to `os.Stderr`.

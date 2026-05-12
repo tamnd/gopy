@@ -1,0 +1,110 @@
+---
+title: Objects/longobject.c (part 16)
+description: "Objects/longobject.c part 16: int.bit_length, int.bit_count, int.to_bytes, int.from_bytes, compact int fast paths."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers integer utility methods and the compact integer optimization. See `objects_longobject15_detail` for `int.__new__`, `int.__add__`, `int.__mul__`, and digit arithmetic.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Compact int fast path | Integers fitting in one `ob_digit` slot |
+| 81-160 | `int.bit_length` | Number of bits needed to represent the value |
+| 161-240 | `int.bit_count` | Popcount: number of 1 bits |
+| 241-320 | `int.to_bytes` | Serialize to big- or little-endian bytes |
+| 321-600 | `int.from_bytes` | Deserialize from bytes |
+
+## Reading
+
+### Compact int fast path
+
+```c
+// CPython: Objects/longobject.c:90 _PyLong_IsCompact
+static inline int
+_PyLong_IsCompact(const PyLongObject *op) {
+    return op->long_value.lv_tag < (2 << NON_SIZE_BITS);
+}
+
+static inline Py_ssize_t
+_PyLong_CompactValue(const PyLongObject *op) {
+    /* Extract signed value from tag+digit */
+    Py_ssize_t sign = 1 - (op->long_value.lv_tag & 2);
+    return sign * (Py_ssize_t)op->long_value.ob_digit[0];
+}
+```
+
+CPython 3.12+ stores small integers (fitting in one 30-bit digit) in a compact form: the tag encodes the sign and the single digit. This avoids the pointer indirection of `ob_digit[0]` for the common case. `BINARY_OP_ADD_INT` specialization uses this directly.
+
+### `int.bit_length`
+
+```c
+// CPython: Objects/longobject.c:820 long_bit_length
+static PyObject *
+long_bit_length(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    PyLongObject *a = (PyLongObject *)self;
+    Py_ssize_t ndigits = _PyLong_DigitCount(a);
+    if (ndigits == 0) return PyLong_FromLong(0);
+    digit msd = a->long_value.ob_digit[ndigits - 1];
+    /* bit_length = (ndigits - 1) * PyLong_SHIFT + bit_length_of(msd) */
+    int msd_bits = _Py_bit_length(msd);
+    return PyLong_FromSsize_t((ndigits - 1) * PyLong_SHIFT + msd_bits);
+}
+```
+
+`(1024).bit_length()` returns `11`. The most significant digit `msd` contributes `_Py_bit_length(msd)` bits; each of the remaining digits contributes `PyLong_SHIFT` (30) bits.
+
+### `int.to_bytes`
+
+```c
+// CPython: Objects/longobject.c:880 long_to_bytes_impl
+static PyObject *
+long_to_bytes_impl(PyObject *self, Py_ssize_t length, PyObject *byteorder,
+                   int is_signed)
+{
+    /* byteorder: 'big' or 'little' */
+    PyObject *bytes = PyBytes_FromStringAndSize(NULL, length);
+    if (_PyLong_AsByteArray((PyLongObject *)self,
+                            (unsigned char *)PyBytes_AS_STRING(bytes),
+                            length, little_endian, is_signed) < 0) {
+        Py_DECREF(bytes);
+        return NULL;
+    }
+    return bytes;
+}
+```
+
+`(256).to_bytes(2, 'big')` returns `b'\x01\x00'`. `_PyLong_AsByteArray` serializes the digit array into bytes, handling sign extension for signed=True. Overflow raises `OverflowError`.
+
+### `int.from_bytes`
+
+```c
+// CPython: Objects/longobject.c:940 long_from_bytes_impl
+static PyObject *
+long_from_bytes_impl(PyTypeObject *type, PyObject *bytes_obj,
+                     PyObject *byteorder, int is_signed)
+{
+    Py_buffer view;
+    PyObject_GetBuffer(bytes_obj, &view, PyBUF_SIMPLE);
+    PyObject *result = _PyLong_FromByteArray(
+        (unsigned char *)view.buf, view.len,
+        little_endian, is_signed);
+    PyBuffer_Release(&view);
+    return result;
+}
+```
+
+`int.from_bytes(b'\xff', 'big', signed=True)` returns `-1`. `_PyLong_FromByteArray` builds the digit array from the byte sequence. The `signed` parameter controls whether the leading byte is treated as a sign bit.
+
+## gopy notes
+
+Compact int fast path is `objects.LongIsCompact` in `objects/long.go`. `int.bit_length` uses `bits.Len` on the most significant word. `int.to_bytes` is `objects.LongToBytes` calling `big.Int.Bytes()` with byte-order reversal. `int.from_bytes` is `objects.LongFromBytes` using `new(big.Int).SetBytes(...)`.

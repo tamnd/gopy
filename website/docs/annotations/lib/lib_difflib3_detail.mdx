@@ -1,0 +1,109 @@
+---
+title: Lib/difflib.py (part 3)
+description: "difflib.py part 3: SequenceMatcher.find_longest_match, get_matching_blocks, get_opcodes, ratio."
+cpython_path: Lib/difflib.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/difflib.py" />
+
+This annotation covers the core matching algorithm. See `lib_difflib2_detail` for `SequenceMatcher.__init__`, `set_seqs`, junk detection, and the `Differ` class.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `find_longest_match` | Find longest common substring in a range |
+| 81-180 | `get_matching_blocks` | All non-overlapping matching blocks (recursive) |
+| 181-260 | `get_opcodes` | Convert matching blocks to edit operations |
+| 261-360 | `ratio` | Similarity score [0, 1] |
+| 361-500 | `unified_diff` / `context_diff` | Human-readable patch format generators |
+
+## Reading
+
+### `find_longest_match`
+
+```python
+# CPython: Lib/difflib.py:310 SequenceMatcher.find_longest_match
+def find_longest_match(self, alo=0, ahi=None, blo=0, bhi=None):
+    # j2len[j] = length of longest match ending with b[j]
+    j2len = {}
+    nothing = []
+    for i in range(alo, ahi):
+        newj2len = {}
+        for j in self.b2j.get(a[i], nothing):
+            if j < blo:
+                continue
+            if j >= bhi:
+                break
+            k = newj2len[j] = j2len.get(j - 1, 0) + 1
+            if k > best_size:
+                best_i, best_j, best_size = i - k + 1, j - k + 1, k
+        j2len = newj2len
+    # Extend past junk
+    while (best_i > alo and best_j > blo and
+           not isjunk(b[best_j - 1]) and a[best_i - 1] == b[best_j - 1]):
+        best_i -= 1; best_j -= 1; best_size += 1
+    ...
+    return Match(best_i, best_j, best_size)
+```
+
+`b2j` maps each element of `b` to the list of indices where it appears. For each position in `a`, `j2len[j]` tracks how far the current matching run extends ending at `b[j]`. The extension phase grows the match backward and forward past junk.
+
+### `get_matching_blocks`
+
+```python
+# CPython: Lib/difflib.py:395 SequenceMatcher.get_matching_blocks
+def get_matching_blocks(self):
+    if self.matching_blocks is not None:
+        return self.matching_blocks
+    la, lb = len(self.a), len(self.b)
+    # Use a stack instead of recursion
+    queue = [(0, la, 0, lb)]
+    matching_blocks = []
+    while queue:
+        alo, ahi, blo, bhi = queue.pop()
+        i, j, k = x = self.find_longest_match(alo, ahi, blo, bhi)
+        if k:
+            matching_blocks.append(x)
+            if alo < i and blo < j:
+                queue.append((alo, i, blo, j))
+            if i + k < ahi and j + k < bhi:
+                queue.append((i + k, ahi, j + k, bhi))
+    matching_blocks.sort()
+    matching_blocks.append(Match(la, lb, 0))  # sentinel
+    self.matching_blocks = matching_blocks
+    return matching_blocks
+```
+
+This is a non-recursive version of the Hunt-McIlroy algorithm. For each longest match found, the regions before and after it are pushed onto the queue to be processed independently. The result is a sorted list of non-overlapping matching blocks.
+
+### `get_opcodes`
+
+```python
+# CPython: Lib/difflib.py:450 SequenceMatcher.get_opcodes
+def get_opcodes(self):
+    i = j = 0
+    answer = []
+    for ai, bj, size in self.get_matching_blocks():
+        tag = ''
+        if i < ai and j < bj:     tag = 'replace'
+        elif i < ai:               tag = 'delete'
+        elif j < bj:               tag = 'insert'
+        if tag:
+            answer.append((tag, i, ai, j, bj))
+        if size:
+            answer.append(('equal', ai, ai + size, bj, bj + size))
+        i, j = ai + size, bj + size
+    return answer
+```
+
+Opcodes describe how to transform `a` into `b`. Each tuple is `(tag, i1, i2, j1, j2)`: `a[i1:i2]` maps to `b[j1:j2]`. Tags: `'equal'`, `'replace'`, `'delete'`, `'insert'`. Used by `HtmlDiff` and `Differ`.
+
+## gopy notes
+
+`SequenceMatcher` is in `module/difflib/module.go`. `find_longest_match` uses a Go `map[int]int` for `j2len`. `get_matching_blocks` uses an explicit Go stack (slice). `get_opcodes` returns a `[]objects.Tuple` of 5-element tuples.

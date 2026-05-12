@@ -1,0 +1,116 @@
+---
+title: Modules/_io/ (part 8)
+description: "_io part 8: BufferedReader.read, BufferedWriter.write, double buffering, peek, BufferedRWPair."
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/bufferedio.c" />
+
+This annotation covers buffered I/O read/write paths. See `modules_io7_detail` for `BufferedReader.__init__`, `BufferedWriter.__init__`, and the `RawIOBase` interface.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `BufferedReader.read` | Fill buffer, return requested bytes |
+| 101-200 | `BufferedReader.peek` | Return buffered data without consuming |
+| 201-300 | `BufferedWriter.write` | Append to buffer, flush when full |
+| 301-400 | `BufferedWriter.flush` | Write buffer to raw stream |
+| 401-600 | `BufferedRWPair` | Combine separate reader and writer raw streams |
+
+## Reading
+
+### `BufferedReader.read`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1080 buffered_read
+static PyObject *
+buffered_read(buffered *self, PyObject *args)
+{
+    Py_ssize_t n = -1;
+    PyObject *res;
+
+    if (n == 0) return PyBytes_FromStringAndSize(NULL, 0);
+    if (n < 0) return _bufferedreader_read_all(self);
+
+    /* How much is already buffered? */
+    Py_ssize_t have = READAHEAD(self);
+    if (n <= have) {
+        /* Fast path: entirely in buffer */
+        res = PyBytes_FromStringAndSize(self->buffer + self->pos, n);
+        self->pos += n;
+        return res;
+    }
+    /* Slow path: need to refill */
+    return _bufferedreader_read_generic(self, n);
+}
+```
+
+`READAHEAD(self)` is `self->readable.buffer_size - self->pos`. The fast path avoids a syscall entirely. `_bufferedreader_read_generic` may call the raw stream's `readinto` one or more times to accumulate enough data.
+
+### `BufferedWriter.write`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1580 buffered_write
+static PyObject *
+buffered_write(buffered *self, PyObject *args)
+{
+    Py_ssize_t written = 0;
+    Py_buffer data;
+    PyArg_ParseTuple(args, "y*:write", &data);
+
+    /* If data fits in remaining buffer space, just copy */
+    Py_ssize_t avail = self->buffer_size - self->writable.write_end;
+    if (data.len <= avail) {
+        memcpy(self->buffer + self->writable.write_end, data.buf, data.len);
+        self->writable.write_end += data.len;
+        written = data.len;
+    } else {
+        /* Flush buffer, then write */
+        if (_bufferedwriter_flush_unlocked(self) < 0) goto end;
+        if (data.len > self->buffer_size) {
+            /* Bypass buffer for large writes */
+            written = _bufferedwriter_raw_write(self, data.buf, data.len);
+        } else {
+            memcpy(self->buffer, data.buf, data.len);
+            self->writable.write_end = data.len;
+            written = data.len;
+        }
+    }
+    ...
+}
+```
+
+Small writes are copied into the buffer. Large writes bypass the buffer and go directly to the raw stream. This avoids double-copying large data through the buffer.
+
+### `BufferedReader.peek`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1160 bufferedreader_peek
+static PyObject *
+bufferedreader_peek(buffered *self, PyObject *args)
+{
+    Py_ssize_t n = 0;
+    /* Return whatever is in the buffer without consuming it.
+       May return less or more than n bytes. */
+    if (READAHEAD(self) > 0) {
+        return PyBytes_FromStringAndSize(
+            self->buffer + self->pos,
+            self->readable.buffer_size - self->pos);
+    }
+    /* Buffer empty: fill it */
+    if (_bufferedreader_fill_buffer(self) <= 0) return PyBytes_FromStringAndSize(NULL, 0);
+    return PyBytes_FromStringAndSize(self->buffer, self->readable.buffer_size - self->pos);
+}
+```
+
+`peek()` returns buffered data without advancing `pos`. Used by `TextIOWrapper` to look ahead for multi-byte sequences and line endings without consuming bytes that belong to the next read.
+
+## gopy notes
+
+`BufferedReader` is `module/io.BufferedReader` in `module/io/bufferedio.go`. `read` uses a Go byte slice buffer; the fast path is `buf[pos:pos+n]`. `BufferedWriter.write` appends to a `bytes.Buffer` and calls `flush` when full. `peek` returns `buf[pos:]` without advancing.
