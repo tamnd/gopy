@@ -1,0 +1,113 @@
+---
+title: Objects/tupleobject.c (part 3)
+description: "tupleobject.c part 3: tuple hash (xxHash-based), tuple free list, _PyTuple_MaybeUntrack, tuple unpacking via tp_iter, structseq."
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/tupleobject.c" />
+
+This annotation covers tuple hashing, memory management optimizations, and the `structseq` type used by `os.stat`, `time.localtime`, and `pwd.getpwnam`. See `objects_tupleobject_detail` and `objects_tupleobject2_detail` for basic construction and iteration.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `tuplehash` | Hash combining element hashes with xxHash-like mixing |
+| 101-200 | Free list | 20 per-length caches for tuples of len 0-20 |
+| 201-300 | `_PyTuple_MaybeUntrack` | Remove from GC if all elements are untracked |
+| 301-500 | `structseq` type | Named tuple-like type for C-defined sequences |
+| 501-700 | `structseq_new`, `structseq_repr` | Construction and display |
+| 701-800 | `structseq` visible fields | Hidden fields (n_sequence_fields vs n_unnamed_fields) |
+
+## Reading
+
+### Tuple hash
+
+```c
+// CPython: Objects/tupleobject.c:48 tuplehash
+static Py_hash_t
+tuplehash(PyTupleObject *v)
+{
+    /* Accumulate element hashes with xxHash-inspired mixing */
+    Py_uhash_t acc = _PyHASH_XXROTATE;
+    Py_ssize_t len = Py_SIZE(v);
+    for (Py_ssize_t i = 0; i < len; i++) {
+        Py_uhash_t lane = PyObject_Hash(v->ob_item[i]);
+        if (lane == (Py_uhash_t)-1) return -1;
+        acc += lane * _PyHASH_XXPRIME_2;
+        acc = _PyHASH_XXROTATE(acc);
+        acc *= _PyHASH_XXPRIME_1;
+    }
+    acc += len ^ (_PyHASH_XXPRIME_5 ^ 3527539UL);
+    return acc == (Py_uhash_t)-1 ? 1546275796 : acc;
+}
+```
+
+The mixing constants come from xxHash. Tuples are hashable; lists are not (because lists are mutable).
+
+### Free list
+
+```c
+// CPython: Objects/tupleobject.c:120 tuple_alloc
+/* tuples of length 0 to PyTuple_MAXSAVESIZE (20) are cached in a free list */
+/* Each length has a stack of up to PyTuple_MAXFREELIST (2000) saved shells */
+static PyTupleObject *free_list[PyTuple_MAXSAVESIZE][PyTuple_MAXFREELIST];
+static int numfree[PyTuple_MAXSAVESIZE];
+
+static PyObject *
+tuple_alloc(Py_ssize_t size)
+{
+    if (size < PyTuple_MAXSAVESIZE && numfree[size] > 0) {
+        PyTupleObject *op = free_list[size][--numfree[size]];
+        _Py_NewReference((PyObject *)op);
+        return (PyObject *)op;
+    }
+    return PyObject_GC_NewVar(PyTupleObject, &PyTuple_Type, size);
+}
+```
+
+The free list avoids malloc/free for common small tuples.
+
+### `_PyTuple_MaybeUntrack`
+
+```c
+// CPython: Objects/tupleobject.c:248 _PyTuple_MaybeUntrack
+void
+_PyTuple_MaybeUntrack(PyObject *op)
+{
+    /* If no element is tracked by the GC, the tuple itself need not be tracked */
+    PyTupleObject *t = (PyTupleObject *)op;
+    for (Py_ssize_t i = 0; i < Py_SIZE(t); i++) {
+        if (_PyObject_GC_IS_TRACKED(t->ob_item[i])) return;
+    }
+    _PyObject_GC_UNTRACK(op);
+}
+```
+
+A tuple of ints/strings/floats is not GC-tracked, saving GC overhead.
+
+### `structseq`
+
+```c
+// CPython: Objects/tupleobject.c:360 PyStructSequence_New
+PyObject *
+PyStructSequence_New(PyTypeObject *type)
+{
+    /* A structseq is a tuple subclass with named fields */
+    /* n_sequence_fields: fields accessible by index */
+    /* n_unnamed_fields:  hidden fields (visible in repr but not iterable) */
+    /* e.g. os.stat_result has 10 sequence fields + 3 hidden ns fields */
+    ...
+}
+```
+
+`os.stat_result` is a `structseq` with `st_mode`, `st_ino`, etc. as both attributes and positional elements.
+
+## gopy notes
+
+`tuple` hash uses the same xxHash mixing constants. The free list is not used in gopy (Go GC handles allocation). `_PyTuple_MaybeUntrack` is approximated by not adding tuples of non-container elements to the GC tracking set. `structseq` types are defined in `objects/structseq.go` as a `PyTupleSubtype` with a field name table.

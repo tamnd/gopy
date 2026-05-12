@@ -1,0 +1,107 @@
+---
+title: Lib/mailbox.py
+description: "Lib/mailbox.py: Mailbox, Maildir, mbox, MH, Babyl, MMDF — access and modify email mailbox formats. Message, folder access, locking."
+cpython_path: Lib/mailbox.py
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/mailbox.py" />
+
+`mailbox` provides read/write access to five email storage formats. `Maildir` is the modern standard; `mbox` is the classic Unix format.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Mailbox` | Abstract base: `add`, `remove`, `__iter__`, `keys` |
+| 101-400 | `Maildir` | One-file-per-message in `cur/`/`new/`/`tmp/` |
+| 401-700 | `mbox` | Single file, `From ` separator lines |
+| 701-900 | `MH` | `MH` folder format with numeric filenames and `.mh_sequences` |
+| 901-1100 | `Babyl`, `MMDF` | Older formats |
+| 1101-1400 | `Message` classes | `MaildirMessage`, `mboxMessage` with format-specific metadata |
+| 1401-2000 | Locking | `_create_carefully`, `_lock_file`, `_unlock_file` |
+
+## Reading
+
+### `Maildir.add`
+
+```python
+# CPython: Lib/mailbox.py:295 Maildir.add
+def add(self, message):
+    """Add a message to the mailbox and return its key."""
+    tmp_file = self._create_tmp()
+    try:
+        self._dump_message(message, tmp_file)
+    finally:
+        tmp_file.close()
+    # Move from tmp/ to new/ using rename (atomic)
+    new_key = os.path.basename(tmp_file.name).split(':')[0]
+    new_subpath = os.path.join('new', new_key)
+    os.rename(tmp_file.name, os.path.join(self._path, new_subpath))
+    return new_subpath
+```
+
+The `tmp → new` atomic rename is the Maildir delivery protocol — guarantees no partial messages.
+
+### `mbox` format
+
+```python
+# CPython: Lib/mailbox.py:558 mbox._generate_toc
+def _generate_toc(self):
+    """Build table of contents: list of (start_offset, stop_offset) pairs."""
+    self._file.seek(0)
+    self._toc = {}
+    key = 0
+    start = None
+    for line in self._file:
+        if line.startswith(b'From '):
+            if start is not None:
+                self._toc[key] = (start, self._file.tell() - len(line))
+                key += 1
+            start = self._file.tell() - len(line)
+    if start is not None:
+        self._toc[key] = (start, self._file.tell())
+```
+
+The `From ` (with trailing space) separator line marks the start of each message.
+
+### `mbox` locking
+
+```python
+# CPython: Lib/mailbox.py:490 mbox._lock_file
+def _lock_file(self, f, dotlock=True):
+    """Acquire an advisory lock on the mbox file."""
+    if dotlock:
+        # Create <file>.lock — BSD-style dot-lock
+        try:
+            fd = os.open(f.name + '.lock',
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            raise ExternalClashError('dot lock clash: %s.lock' % f.name)
+    if hasattr(fcntl, 'lockf'):
+        fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+```
+
+Two-level locking: dot-lock (safe across NFS) + `flock`/`lockf` (fast for local filesystems).
+
+### `Maildir` flags
+
+```python
+# CPython: Lib/mailbox.py:350 MaildirMessage flags
+# Filename: unique:2,flags
+# Flags: S=Seen, R=Replied, F=Flagged, T=Trashed, D=Draft, P=Passed
+class MaildirMessage(Message):
+    def get_flags(self):
+        return self.get_subdir() == 'cur' and self._info[2:] or ''
+    def set_flags(self, flags):
+        self._info = '2,' + ''.join(sorted(flags))
+```
+
+## gopy notes
+
+`mailbox` is pure Python and importable when `email`, `os`, `fcntl`, `io`, `time`, and `socket` work. The Maildir `tmp → new` pattern uses `os.rename` which calls `syscall.Rename` — atomic on POSIX. The `mbox` TOC is rebuilt on each open.

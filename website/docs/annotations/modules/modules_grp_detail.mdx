@@ -1,0 +1,86 @@
+---
+title: Modules/grpmodule.c
+description: "Modules/grpmodule.c: grp module — POSIX group database. getgrgid, getgrnam, getgrall. Returns named tuples with gr_name, gr_passwd, gr_gid, gr_mem."
+cpython_path: Modules/grpmodule.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/grpmodule.c" />
+
+`grp` provides access to the POSIX group database (`/etc/group`). Available only on Unix-like systems.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `mkgrent` | Convert a C `struct group *` to a Python named tuple |
+| 61-120 | `grp_getgrgid` | Look up group by numeric GID |
+| 121-180 | `grp_getgrnam` | Look up group by name |
+| 181-250 | `grp_getgrall` | Return all groups as a list |
+
+## Reading
+
+### `mkgrent`
+
+```c
+// CPython: Modules/grpmodule.c:38 mkgrent
+static PyObject *
+mkgrent(PyObject *module, struct group *p)
+{
+    /* Returns grp.struct_group(gr_name, gr_passwd, gr_gid, gr_mem) */
+    PyObject *v = PyStructSequence_New(&StructGrpType);
+    PyStructSequence_SET_ITEM(v, 0, PyUnicode_DecodeFSDefault(p->gr_name));
+    PyStructSequence_SET_ITEM(v, 1, PyUnicode_DecodeFSDefault(p->gr_passwd));
+    PyStructSequence_SET_ITEM(v, 2, PyLong_FromLong((long)p->gr_gid));
+    /* gr_mem: NULL-terminated array of member names → Python list */
+    PyObject *members = PyList_New(0);
+    for (char **mem = p->gr_mem; *mem; mem++)
+        PyList_Append(members, PyUnicode_DecodeFSDefault(*mem));
+    PyStructSequence_SET_ITEM(v, 3, members);
+    return v;
+}
+```
+
+### `getgrgid`
+
+```c
+// CPython: Modules/grpmodule.c:82 grp_getgrgid
+static PyObject *
+grp_getgrgid(PyObject *module, PyObject *args)
+{
+    gid_t gid;
+    PyArg_ParseTuple(args, "O&:getgrgid", _Py_Uid_Converter, &gid);
+    struct group *p = getgrgid(gid);
+    if (p == NULL) {
+        PyErr_Format(PyExc_KeyError, "getgrgid(): gid not found: %d", (int)gid);
+        return NULL;
+    }
+    return mkgrent(module, p);
+}
+```
+
+### `getgrall`
+
+```c
+// CPython: Modules/grpmodule.c:200 grp_getgrall
+static PyObject *
+grp_getgrall(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *d = PyList_New(0);
+    struct group *p;
+    setgrent();  /* rewind */
+    while ((p = getgrent()) != NULL) {
+        PyList_Append(d, mkgrent(module, p));
+    }
+    endgrent();
+    return d;
+}
+```
+
+## gopy notes
+
+`grp` is in `module/grp/`. `getgrgid` calls `user.LookupGroupId(fmt.Sprint(gid))` from Go's `os/user` package. `getgrnam` calls `user.LookupGroup(name)`. `getgrall` reads `/etc/group` directly (Go's `os/user` doesn't expose it). The named tuple is `objects.StructGroup`.

@@ -328,6 +328,7 @@ const sidebars = {
         'annotations/python/python_ceval_breaker_detail',
         'annotations/python/python_codecs_detail',
         'annotations/python/python_traceback_detail',
+        'annotations/python/python_import2_detail',
       ],
     },
     {
@@ -522,6 +523,8 @@ const sidebars = {
         'annotations/objects/objects_bufferobject_detail',
         'annotations/objects/objects_longobject6_detail',
         'annotations/objects/objects_descrobject_detail3',
+        'annotations/objects/objects_unicodeobject4_detail',
+        'annotations/objects/objects_tupleobject3_detail',
       ],
     },
     {
@@ -757,6 +760,8 @@ const sidebars = {
         'annotations/include/include_internal_pycore_dict_h_detail',
         'annotations/include/include_internal_pycore_list_h_detail',
         'annotations/include/include_internal_pycore_typeobject_h_detail',
+        'annotations/include/include_internal_pycore_code_h_detail',
+        'annotations/include/include_internal_pycore_optimizer_h_detail',
       ],
     },
     {
@@ -989,6 +994,9 @@ const sidebars = {
         'annotations/modules/modules_select_detail',
         'annotations/modules/modules_termios_detail',
         'annotations/modules/modules_mmap_detail',
+        'annotations/modules/modules_grp_detail',
+        'annotations/modules/modules_pwd_detail',
+        'annotations/modules/modules_lzma_detail',
       ],
     },
     {
@@ -1506,6 +1514,7 @@ const sidebars = {
         'annotations/lib/lib_fnmatch_detail',
         'annotations/lib/lib_xml_dom_detail',
         'annotations/lib/lib_zipfile_detail2',
+        'annotations/lib/lib_mailbox_detail',
       ],
     },
   ],

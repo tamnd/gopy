@@ -1,0 +1,118 @@
+---
+title: Python/import.c (part 2)
+description: "Python/import.c part 2: sys.meta_path finders, sys.path_hooks, PathFinder, FileFinder, source loader, bytecode cache (__pycache__)."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+This annotation covers the import machinery beyond `__import__`. See `python_import_detail` for the bootstrap importlib and `sys.modules` cache. This part covers the finder/loader protocol and path-based importing.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `_PyImport_ImportModuleLevelObject` | Main `__import__` implementation: absolute and relative imports |
+| 201-400 | `import_find_module` | Consult `sys.meta_path` finders |
+| 401-600 | `import_load_module` | Call loader, exec in module namespace |
+| 601-800 | `_PyImport_FixupBuiltin` | Register built-in module in `sys.modules` |
+| 801-1000 | `sys.meta_path` | `BuiltinImporter`, `FrozenImporter`, `PathFinder` |
+| 1001-1200 | `PathFinder.find_spec` | Walk `sys.path`, call `path_hooks` |
+| 1201-1400 | `FileFinder` | Search directory for `.py`, `.pyc`, `.so` |
+| 1401-1600 | `SourceFileLoader` | Load and compile `.py` files |
+| 1601-2000 | Bytecode cache | `__pycache__/name.cpython-314.pyc` creation |
+
+## Reading
+
+### Import dispatch
+
+```c
+// CPython: Python/import.c:88 _PyImport_ImportModuleLevelObject
+PyObject *
+_PyImport_ImportModuleLevelObject(PyObject *name, PyObject *globals,
+                                  PyObject *locals, PyObject *fromlist,
+                                  int level)
+{
+    /* Level > 0: relative import; compute package prefix */
+    if (level > 0) {
+        abs_name = resolve_name(name, globals, level);
+    } else {
+        abs_name = Py_NewRef(name);
+    }
+    /* Check sys.modules first */
+    PyObject *mod = PyDict_GetItemWithError(sys_modules, abs_name);
+    if (mod != NULL) goto done;
+    /* Ask meta_path finders */
+    mod = import_find_and_load(tstate, abs_name);
+    done:
+    if (fromlist && fromlist != Py_None) {
+        return handle_fromlist(mod, fromlist);
+    }
+    return top_level_package(mod, abs_name);
+}
+```
+
+### `sys.meta_path` lookup
+
+```c
+// CPython: Python/import.c:310 import_find_module
+static PyObject *
+import_find_module(PyThreadState *tstate, PyObject *name,
+                   PyObject *path, PyObject *target)
+{
+    /* Walk sys.meta_path calling finder.find_spec(name, path, target) */
+    PyObject *meta_path = PySys_GetObject("meta_path");
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(meta_path); i++) {
+        PyObject *finder = PyList_GET_ITEM(meta_path, i);
+        PyObject *spec = PyObject_CallMethodObjArgs(finder,
+                                                    &_Py_ID(find_spec),
+                                                    name, path, target, NULL);
+        if (spec != Py_None) return spec;
+    }
+    return Py_None;
+}
+```
+
+### Bytecode cache
+
+```c
+// CPython: Python/import.c:1550 _PyImport_GetSourceFileLoader
+/* Path: <package>/__pycache__/<module>.cpython-314.pyc */
+/* Header: magic number (4 bytes) + flags (4) + mtime (4) + size (4) */
+/* If cache is fresh (mtime + size match), load bytecode directly */
+/* Otherwise: compile .py → bytecode, write to __pycache__ */
+static int
+write_bytecode_file(PyObject *cpathname, PyObject *data, ...)
+{
+    /* atomic write: write to temp file, then rename */
+    FILE *fp = _Py_wfopen(tmp_path, L"wb");
+    ...
+    rename(tmp_path, cpathname);
+}
+```
+
+The magic number encodes the CPython version. Bytecode from a different version is rejected and recompiled.
+
+### `FileFinder.find_spec`
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:1520 FileFinder
+class FileFinder:
+    def find_spec(self, name, target=None):
+        tail_module = name.rpartition('.')[2]
+        # Search for name.py, name.pyc, name.so, name/__init__.py
+        for suffix, loader_class in self._loaders:
+            full_path = _path_join(self.path, tail_module + suffix)
+            if _path_isfile(full_path):
+                return self._get_spec(loader_class, name, full_path, [self.path], target)
+        return None
+```
+
+## gopy notes
+
+`python_import_detail` covers bootstrap. This part: `_PyImport_ImportModuleLevelObject` is `vm.Import` in gopy. `sys.meta_path` is populated at startup with `BuiltinImporter` (gopy's native Go modules), `FrozenImporter` (stdlib `.py` files vendored in `stdlib/`), and a `PathFinder` for the filesystem. Bytecode caching is not used; gopy compiles `.py` to AST at load time.

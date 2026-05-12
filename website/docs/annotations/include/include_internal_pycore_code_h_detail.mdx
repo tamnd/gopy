@@ -1,0 +1,88 @@
+---
+title: "Include/internal/pycore_code.h"
+description: "pycore_code.h: code object internals — _PyCoLocals_CAST, co_localspluskinds, co_localsplusnames, inline cache layout, _Py_OPCODE_CACHE_SIZE."
+cpython_path: Include/internal/pycore_code.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_code.h" />
+
+`pycore_code.h` extends the public `PyCodeObject` with internal fields for the specializing optimizer's inline caches and the locals/cell/free variable kind encoding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `_PyCoLocals_CAST` | Access to local variable kinds array |
+| 61-120 | `CO_FAST_LOCAL` / `CO_FAST_CELL` / `CO_FAST_FREE` | Bits in `co_localspluskinds` |
+| 121-180 | `_Py_OPCODE_CACHE_SIZE` | Size in 16-bit words for each specializable opcode |
+| 181-240 | Inline cache structs | `_PyLoadGlobalCache`, `_PyAttrCache`, `_PyCacheVersionItem` |
+| 241-300 | `_PyCode_Warmup` | Warmup counter before specialization |
+
+## Reading
+
+### Local variable kind encoding
+
+```c
+// CPython: Include/internal/pycore_code.h:28 CO_FAST kinds
+#define CO_FAST_LOCAL   0x20   /* regular local variable */
+#define CO_FAST_CELL    0x40   /* cell variable (referenced by inner function) */
+#define CO_FAST_FREE    0x80   /* free variable (from enclosing scope) */
+/* Stored in co_localspluskinds — one byte per entry in co_localsplusnames */
+```
+
+`LOAD_FAST` uses the index into `co_localsplusnames`. The kind byte tells the compiler whether to use `LOAD_FAST` (local), `LOAD_DEREF` (cell/free), or both.
+
+### `_Py_OPCODE_CACHE_SIZE`
+
+```c
+// CPython: Include/internal/pycore_code.h:135 _Py_OPCODE_CACHE_SIZE
+/* Number of 16-bit words reserved after each specializable opcode */
+#define LOAD_GLOBAL_CACHE_SIZE  4   /* 2 version + 2 value slots */
+#define LOAD_ATTR_CACHE_SIZE    10  /* version + type + offset */
+#define CALL_CACHE_SIZE         4   /* version + callable */
+/* Inline cache is stored in the bytecode array itself, after the opcode */
+```
+
+### `_PyLoadGlobalCache`
+
+```c
+// CPython: Include/internal/pycore_code.h:165 _PyLoadGlobalCache
+typedef struct {
+    uint32_t module_keys_version;   /* ma_version_tag of the module dict */
+    uint32_t builtin_keys_version;  /* ma_version_tag of builtins dict */
+    PyObject *ptr;                  /* cached value: the global object */
+} _PyLoadGlobalCache;
+```
+
+`LOAD_GLOBAL_MODULE` reads `ptr` directly if `module_keys_version` matches — a single load instead of a dict lookup.
+
+### `_PyAttrCache`
+
+```c
+// CPython: Include/internal/pycore_code.h:188 _PyAttrCache
+typedef struct {
+    uint32_t version;       /* tp_version_tag of the type */
+    uint32_t index;         /* slot/dict index */
+} _PyAttrCache;
+```
+
+`LOAD_ATTR_SLOT` reads `ob_item[index]` directly. `LOAD_ATTR_WITH_DICT` uses the index to look up a key in the instance dict.
+
+### Warmup
+
+```c
+// CPython: Include/internal/pycore_code.h:256 _PyCode_Warmup
+#define ADAPTIVE_WARMUP_INITIAL    8
+/* An instruction starts as RESUME (warm-up). After ADAPTIVE_WARMUP_INITIAL
+ * executions, the specialization machinery attempts to specialize it.
+ */
+```
+
+## gopy notes
+
+Inline caches are not used in gopy's current bytecode interpreter. The fields are documented here for context in the tier-2 optimizer work (v0.12.x). `co_localspluskinds` maps to `objects.Code.LocalKinds []byte`. `CO_FAST_CELL`/`CO_FAST_FREE` determine whether `LOAD_DEREF` or `LOAD_FAST` is emitted.

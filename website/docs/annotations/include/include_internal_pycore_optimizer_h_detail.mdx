@@ -1,0 +1,84 @@
+---
+title: "Include/internal/pycore_optimizer.h"
+description: "pycore_optimizer.h: tier-2 optimizer interface — _PyExecutorObject, _PyUOpInstruction, _PyOptimizerObject, optimize_and_get_executor."
+cpython_path: Include/internal/pycore_optimizer.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_optimizer.h" />
+
+`pycore_optimizer.h` defines the API for CPython 3.12+ tier-2 optimizers. The default optimizer (since 3.13) is a copy-and-patch JIT; the interface allows plugging in alternative optimizers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `_PyUOpInstruction` | A micro-op (uop): opcode, operand, target |
+| 51-100 | `_PyExecutorObject` | A compiled trace: array of uops + metadata |
+| 101-140 | `_PyOptimizerObject` | Optimizer vtable: `optimize`, `resume_threshold` |
+| 141-170 | `_PyOptimizer_NewUOpOptimizer` | Create the default uop optimizer |
+| 171-200 | `_PyOptimizer_Optimize` | Entry point: attempt to optimize a trace |
+
+## Reading
+
+### `_PyUOpInstruction`
+
+```c
+// CPython: Include/internal/pycore_optimizer.h:28 _PyUOpInstruction
+typedef struct {
+    uint32_t opcode : 16;
+    uint32_t operand0 : 16;
+    uint32_t jump_target;
+    uint64_t operand1;
+} _PyUOpInstruction;
+```
+
+A uop is a decoded, simplified version of a bytecode instruction. `operand1` may hold a pointer (e.g., a cached type object) for specialized uops.
+
+### `_PyExecutorObject`
+
+```c
+// CPython: Include/internal/pycore_optimizer.h:55 _PyExecutorObject
+typedef struct _PyExecutorObject {
+    PyObject_HEAD
+    _PyVMData vm_data;            /* exit counters, code pointer */
+    uint32_t n_instructions;
+    _PyUOpInstruction instructions[];  /* the compiled trace */
+} _PyExecutorObject;
+```
+
+The executor is stored in the inline cache of the `ENTER_EXECUTOR` opcode. When execution reaches `ENTER_EXECUTOR`, the uop loop runs until a guard fails or the trace exits.
+
+### `_PyOptimizerObject`
+
+```c
+// CPython: Include/internal/pycore_optimizer.h:110 _PyOptimizerObject
+typedef struct {
+    PyObject_HEAD
+    uint16_t resume_threshold;   /* how many times to execute before optimizing */
+    uint16_t backedge_threshold;
+    int (*optimize)(struct _PyOptimizer *, PyCodeObject *, _Py_CODEUNIT *,
+                    _PyExecutorObject **, int);
+} _PyOptimizerObject;
+```
+
+`resume_threshold` defaults to 16: after 16 executions of the `RESUME` at function entry, the optimizer tries to build a trace.
+
+### `_PyOptimizer_Optimize`
+
+```c
+// CPython: Include/internal/pycore_optimizer.h:165 _PyOptimizer_Optimize
+int
+_PyOptimizer_Optimize(PyThreadState *tstate, _Py_CODEUNIT *start,
+                      PyObject *locals, _PyExecutorObject **exec_ptr);
+/* Returns 0 on success (exec_ptr filled), -1 on failure (no executor) */
+/* Called when an instruction's counter saturates */
+```
+
+## gopy notes
+
+The tier-2 optimizer is in gopy at `compile/flowgraph_passes.go` (optimization passes on the flowgraph IR). The `_PyExecutorObject` / uop loop model maps to gopy's `vm/eval_gen.go` dispatch table. `_PyOptimizerObject` resume thresholds are emulated via a counter in `vm.Frame` that triggers re-specialization.

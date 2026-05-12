@@ -1,0 +1,90 @@
+---
+title: Modules/pwdmodule.c
+description: "Modules/pwdmodule.c: pwd module — POSIX password database. getpwuid, getpwnam, getpwall. Returns struct_passwd named tuples."
+cpython_path: Modules/pwdmodule.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/pwdmodule.c" />
+
+`pwd` provides access to the POSIX user account database (`/etc/passwd`). Available only on Unix-like systems.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `mkpwent` | Convert `struct passwd *` to Python named tuple |
+| 61-110 | `pwd_getpwuid` | Look up by UID |
+| 111-160 | `pwd_getpwnam` | Look up by username |
+| 161-200 | `pwd_getpwall` | Return all users |
+
+## Reading
+
+### `mkpwent`
+
+```c
+// CPython: Modules/pwdmodule.c:42 mkpwent
+static PyObject *
+mkpwent(PyObject *module, struct passwd *p)
+{
+    /* Returns pwd.struct_passwd:
+     * (pw_name, pw_passwd, pw_uid, pw_gid, pw_gecos, pw_dir, pw_shell) */
+    PyObject *v = PyStructSequence_New(&StructPwdType);
+    PyStructSequence_SET_ITEM(v, 0, PyUnicode_DecodeFSDefault(p->pw_name));
+    PyStructSequence_SET_ITEM(v, 1, PyUnicode_DecodeFSDefault(p->pw_passwd));
+    PyStructSequence_SET_ITEM(v, 2, _PyLong_FromUid(p->pw_uid));
+    PyStructSequence_SET_ITEM(v, 3, _PyLong_FromGid(p->pw_gid));
+    PyStructSequence_SET_ITEM(v, 4, PyUnicode_DecodeFSDefault(p->pw_gecos));
+    PyStructSequence_SET_ITEM(v, 5, PyUnicode_DecodeFSDefault(p->pw_dir));
+    PyStructSequence_SET_ITEM(v, 6, PyUnicode_DecodeFSDefault(p->pw_shell));
+    return v;
+}
+```
+
+`pw_passwd` is typically `'x'` on modern systems (actual hash in `/etc/shadow`).
+
+### `getpwuid`
+
+```c
+// CPython: Modules/pwdmodule.c:78 pwd_getpwuid
+static PyObject *
+pwd_getpwuid(PyObject *module, PyObject *args)
+{
+    uid_t uid;
+    PyArg_ParseTuple(args, "O&:getpwuid", _Py_Uid_Converter, &uid);
+    struct passwd *p = getpwuid(uid);
+    if (p == NULL) {
+        PyErr_Format(PyExc_KeyError, "getpwuid(): uid not found: %d", (int)uid);
+        return NULL;
+    }
+    return mkpwent(module, p);
+}
+```
+
+`pwd.getpwuid(os.getuid())` returns the current user's record.
+
+### `getpwall`
+
+```c
+// CPython: Modules/pwdmodule.c:168 pwd_getpwall
+static PyObject *
+pwd_getpwall(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *d = PyList_New(0);
+    struct passwd *p;
+    setpwent();
+    while ((p = getpwent()) != NULL) {
+        PyList_Append(d, mkpwent(module, p));
+    }
+    endpwent();
+    return d;
+}
+```
+
+## gopy notes
+
+`pwd` is in `module/pwd/`. `getpwuid` and `getpwnam` use Go's `os/user.LookupId` and `os/user.Lookup`. `getpwall` reads `/etc/passwd` directly since Go's `os/user` doesn't expose it. The named tuple is `objects.StructPasswd`.

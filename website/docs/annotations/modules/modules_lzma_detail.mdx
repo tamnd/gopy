@@ -1,0 +1,108 @@
+---
+title: Modules/_lzmamodule.c
+description: "_lzmamodule.c: lzma / xz compression — LZMACompressor, LZMADecompressor, compress, decompress. Format constants FORMAT_XZ, FORMAT_ALONE, FORMAT_RAW."
+cpython_path: Modules/_lzmamodule.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_lzmamodule.c" />
+
+`_lzma` wraps liblzma (part of xz-utils) for LZMA2/XZ compression. The pure Python `lzma` module (`Lib/lzma.py`) adds the `LZMAFile` class on top.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Format constants | `FORMAT_XZ`, `FORMAT_ALONE`, `FORMAT_RAW` |
+| 101-250 | `LZMACompressor` | Streaming compressor: compress/flush |
+| 251-500 | `LZMADecompressor` | Streaming decompressor: decompress |
+| 501-700 | `lzma_compress` | One-shot compress |
+| 701-900 | `lzma_decompress` | One-shot decompress |
+| 901-1200 | Filter encoding | LZMA2 preset, delta, branch/call/jump filters |
+
+## Reading
+
+### Format selection
+
+```c
+// CPython: Modules/_lzmamodule.c:48 format constants
+/* FORMAT_XZ   = 1: .xz container (most common, supports stream checksums) */
+/* FORMAT_ALONE = 2: .lzma legacy format (single-stream, no magic) */
+/* FORMAT_RAW  = 3: raw LZMA/LZMA2 stream (no container, caller provides filter spec) */
+/* FORMAT_AUTO = 0: autodetect by magic number (for decompression only) */
+```
+
+### `LZMACompressor`
+
+```c
+// CPython: Modules/_lzmamodule.c:160 _lzma_LZMACompressor_impl
+static PyObject *
+_lzma_LZMACompressor_impl(PyTypeObject *type, int format, int check,
+                           uint32_t preset, PyObject *filters)
+{
+    lzma_stream *lzs = &self->lzs;
+    lzma_ret ret;
+    if (format == FORMAT_XZ)
+        ret = lzma_easy_encoder(lzs, preset, check);
+    else if (format == FORMAT_ALONE)
+        ret = lzma_alone_encoder(lzs, &options);
+    else
+        ret = lzma_raw_encoder(lzs, raw_filters);
+    ...
+}
+
+static PyObject *
+_lzma_LZMACompressor_compress_impl(Compressor *self, Py_buffer *data)
+{
+    self->lzs.avail_in = data->len;
+    self->lzs.next_in  = data->buf;
+    PyObject *result = grow_buffer(initial_size);
+    do {
+        lzma_ret r = lzma_code(&self->lzs, LZMA_RUN);
+        ...
+    } while (self->lzs.avail_in > 0);
+    return result;
+}
+```
+
+### `LZMADecompressor`
+
+```c
+// CPython: Modules/_lzmamodule.c:480 _lzma_LZMADecompressor_decompress_impl
+static PyObject *
+_lzma_LZMADecompressor_decompress_impl(Decompressor *self,
+                                        Py_buffer *data, Py_ssize_t max_length)
+{
+    self->lzs.avail_in = data->len;
+    self->lzs.next_in  = data->buf;
+    do {
+        lzma_ret r = lzma_code(&self->lzs, LZMA_RUN);
+        if (r == LZMA_STREAM_END) {
+            self->eof = 1;
+            /* Any bytes after the end: store in unused_data */
+            self->unused_data = PyBytes_FromStringAndSize(
+                (char *)self->lzs.next_in, self->lzs.avail_in);
+            break;
+        }
+        ...
+    } while (self->lzs.avail_in > 0);
+    return result;
+}
+```
+
+### Filter chain
+
+```c
+// CPython: Modules/_lzmamodule.c:940 encode_filter_spec
+/* Filters can be chained: [delta_filter, lzma2_filter] */
+/* Common presets: preset=6 (default) = LZMA2 with 8 MiB dict */
+/* Custom: filters=[{'id': lzma.FILTER_LZMA2, 'preset': lzma.PRESET_EXTREME}] */
+```
+
+## gopy notes
+
+`lzma` is in `module/lzma/` using Go's `github.com/ulikunitz/xz` package. `FORMAT_XZ` uses `xz.NewWriter`/`xz.NewReader`. `FORMAT_ALONE` uses the legacy lzma2 reader. `FORMAT_RAW` uses the raw LZMA2 streams. The `preset` level maps to the `DictCap` and `LC`/`LP`/`PB` parameters.

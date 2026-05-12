@@ -1,0 +1,113 @@
+---
+title: Objects/unicodeobject.c (part 4)
+description: "unicodeobject.c part 4: str.startswith/endswith, str.count, str.encode, str.format (vformat), str.format_map, template string parsing."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 15000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers prefix/suffix matching, encoding, and the `str.format` mini-language. See parts 1-3 for construction, find/replace, split/join, and strip.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `unicode_startswith`, `unicode_endswith` | Prefix/suffix check, tuple support |
+| 201-400 | `unicode_count` | Count non-overlapping occurrences |
+| 401-600 | `unicode_encode` | `str.encode(encoding, errors)` |
+| 601-1000 | `unicode_format` | `str.format()` — parse format string, substitute fields |
+| 1001-1300 | `_PyUnicode_FormatLong` | Integer format in `str.format` (`d`, `x`, `o`, `b`) |
+| 1301-1600 | `_PyUnicode_FormatFloat` | Float format in `str.format` (`f`, `e`, `g`, `%`) |
+
+## Reading
+
+### `startswith` with tuple
+
+```c
+// CPython: Objects/unicodeobject.c:88 unicode_startswith
+static PyObject *
+unicode_startswith(PyObject *self, PyObject *args)
+{
+    PyObject *subobj;
+    Py_ssize_t start = 0, end = PY_SSIZE_T_MAX;
+    PyArg_ParseTuple(args, "O|nn:startswith", &subobj, &start, &end);
+    if (PyTuple_Check(subobj)) {
+        /* Check each element of the tuple */
+        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(subobj); i++) {
+            PyObject *substring = PyTuple_GET_ITEM(subobj, i);
+            if (tailmatch(self, substring, start, end, -1) > 0)
+                Py_RETURN_TRUE;
+        }
+        Py_RETURN_FALSE;
+    }
+    return PyBool_FromLong(tailmatch(self, subobj, start, end, -1));
+}
+```
+
+`'hello'.startswith(('he', 'wo'))` returns `True` — any match in the tuple suffices.
+
+### `str.encode`
+
+```c
+// CPython: Objects/unicodeobject.c:490 unicode_encode
+static PyObject *
+unicode_encode(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    const char *encoding = NULL, *errors = NULL;
+    PyArg_ParseTupleAndKeywords(args, kwargs, "|ss:encode", kwlist, &encoding, &errors);
+    if (encoding == NULL) encoding = "utf-8";
+    if (errors == NULL)   errors   = "strict";
+    return PyUnicode_AsEncodedString(self, encoding, errors);
+}
+```
+
+### `str.format` field parsing
+
+```c
+// CPython: Objects/unicodeobject.c:660 unicode_format
+/* Parse: '{field_name!conversion:format_spec}' */
+/* field_name = auto (empty), index (0, 1, ...), or name */
+/* conversion = 'r' (repr), 's' (str), 'a' (ascii) */
+/* format_spec = format mini-language */
+static int
+parse_field(SubString *input, SubString *field_name, SubString *format_spec,
+            Py_UCS4 *conversion)
+{
+    /* Find '}', handling nested '{...}' in format_spec */
+    ...
+}
+```
+
+`'{0!r:>10}'.format('hello')` → `"     'hello'"`: apply `repr`, then right-align in 10 chars.
+
+### `_PyUnicode_FormatLong`
+
+```c
+// CPython: Objects/unicodeobject.c:1080 _PyUnicode_FormatLong
+static PyObject *
+_PyUnicode_FormatLong(PyObject *val, int alt, int prec, int type)
+{
+    /* type: 'd' decimal, 'x' hex lowercase, 'X' hex upper, 'o' octal, 'b' binary */
+    switch (type) {
+    case 'd': result = PyObject_Str(val); break;
+    case 'x': result = PyNumber_ToBase(val, 16); break;
+    case 'X': /* hex uppercase */; break;
+    case 'o': result = PyNumber_ToBase(val, 8); break;
+    case 'b': result = PyNumber_ToBase(val, 2); break;
+    }
+    /* Apply alt flag: '#' prefix (0x, 0o, 0b) */
+    /* Apply precision: minimum digit count */
+    ...
+}
+```
+
+`'{:#010x}'.format(255)` → `'0x000000ff'`.
+
+## gopy notes
+
+`startswith`/`endswith` use `strings.HasPrefix`/`HasSuffix` for single values and loop for tuples. `str.encode` calls `codecs.Encode(s, encoding, errors)`. `str.format` is parsed by `objects/strformat.go`. Integer format types use `strconv.FormatInt` with base 2/8/10/16.
