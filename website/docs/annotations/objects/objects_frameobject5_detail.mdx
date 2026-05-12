@@ -1,0 +1,112 @@
+---
+title: Objects/frameobject.c (part 5)
+description: "Objects/frameobject.c part 5: frame locals proxy, FrameLocalsProxy, frame inspection API."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/frameobject.c" />
+
+This annotation covers the frame locals abstraction. See `objects_frameobject4_detail` for `PyFrameObject` layout, `f_locals`, `f_lineno`, and `frame.clear()`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `FrameLocalsProxy` | Lazy dict-like view over `localsplus` |
+| 81-180 | `PyFrame_FastToLocalsWithError` | Copy `localsplus` into `f_locals` dict |
+| 181-260 | `PyFrame_LocalsToFast` | Write `f_locals` dict back into `localsplus` |
+| 261-360 | `frame.f_locals` property | Return the proxy or dict |
+| 361-500 | `sys._getframe` / `inspect.currentframe` | Obtain a live frame reference |
+
+## Reading
+
+### `FrameLocalsProxy`
+
+```c
+// CPython: Objects/frameobject.c:180 FrameLocalsProxy_getitem
+static PyObject *
+FrameLocalsProxy_getitem(PyObject *self, PyObject *key)
+{
+    PyFrameLocalsProxyObject *proxy = (PyFrameLocalsProxyObject *)self;
+    PyFrameObject *frame = proxy->frame;
+    /* Look up name in co_varnames, co_cellvars, co_freevars */
+    PyCodeObject *co = frame->f_frame->f_code;
+    int i = _PyCode_GetVarIndex(co, key);
+    if (i >= 0) {
+        PyObject *val = frame->f_frame->localsplus[i];
+        if (val == NULL) {
+            PyErr_SetObject(PyExc_KeyError, key);
+            return NULL;
+        }
+        if (PyCell_Check(val)) val = PyCell_GET(val);
+        return Py_NewRef(val);
+    }
+    /* Fall through to f_extra_locals for module/class frames */
+    ...
+}
+```
+
+`FrameLocalsProxy` added in Python 3.13 replaces the materialized `f_locals` dict for function frames. Reading a variable looks it up directly in `localsplus` without copying all locals into a dict first. Writing a variable updates `localsplus` directly.
+
+### `PyFrame_FastToLocalsWithError`
+
+```c
+// CPython: Objects/frameobject.c:340 PyFrame_FastToLocalsWithError
+int
+PyFrame_FastToLocalsWithError(PyFrameObject *f)
+{
+    /* Copy all localsplus values into f_locals dict */
+    PyCodeObject *co = f->f_frame->f_code;
+    for (int i = 0; i < co->co_nlocalsplus; i++) {
+        PyObject *value = f->f_frame->localsplus[i];
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        if (value == NULL) {
+            PyObject_DelItem(f->f_locals, name);
+        } else {
+            if (PyCell_Check(value)) value = PyCell_GET(value);
+            PyObject_SetItem(f->f_locals, name, value);
+        }
+    }
+    return 0;
+}
+```
+
+`PyFrame_FastToLocalsWithError` materializes the frame locals into a dict. It is called when `f.f_locals` is accessed from C (e.g., `locals()`, `inspect.getframe()`). Cell variables are unwrapped before insertion.
+
+### `PyFrame_LocalsToFast`
+
+```c
+// CPython: Objects/frameobject.c:400 PyFrame_LocalsToFast
+void
+PyFrame_LocalsToFast(PyFrameObject *f, int clear)
+{
+    /* Write f_locals dict back into localsplus.
+       Used by debuggers that modify locals. */
+    PyCodeObject *co = f->f_frame->f_code;
+    for (int i = 0; i < co->co_nlocalsplus; i++) {
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        PyObject *value = PyObject_GetItem(f->f_locals, name);
+        if (value == NULL) {
+            if (clear) {
+                Py_CLEAR(f->f_frame->localsplus[i]);
+            }
+        } else {
+            if (PyCell_Check(f->f_frame->localsplus[i]))
+                PyCell_SET(f->f_frame->localsplus[i], value);
+            else
+                f->f_frame->localsplus[i] = value;
+        }
+    }
+}
+```
+
+`PyFrame_LocalsToFast` is the reverse: after `pdb` modifies `f.f_locals`, this propagates changes back to `localsplus`. Without this step, changes to `f_locals` would not affect the actual local variables.
+
+## gopy notes
+
+`FrameLocalsProxy` is `objects.FrameLocalsProxy` in `objects/namespace.go`. It accesses `frame.Locals` directly. `PyFrame_FastToLocalsWithError` is `frame.FastToLocals` in `vm/eval_gen.go`. `PyFrame_LocalsToFast` is `frame.LocalsToFast`. `sys._getframe` returns the current `*Frame` by walking the goroutine's call stack.

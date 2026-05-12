@@ -1,0 +1,126 @@
+---
+title: Lib/os.py (part 4)
+description: "Lib/os.py part 4: os.walk, os.scandir, os.environ, os.getenv, DirEntry."
+cpython_path: Lib/os.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/os.py" />
+
+This annotation covers directory traversal and environment access. See `lib_os3_detail` for `os.path`, `os.stat`, `os.open`, and the process management functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `os.scandir` | Iterate directory entries as `DirEntry` objects |
+| 81-180 | `DirEntry` | Cached stat information for a directory entry |
+| 181-280 | `os.walk` | Recursive directory traversal |
+| 281-380 | `os.environ` | Mapping of environment variables |
+| 381-500 | `os.getenv` / `os.putenv` | Read/write individual environment variables |
+
+## Reading
+
+### `os.scandir`
+
+```c
+// CPython: Modules/posixmodule.c:12840 os_scandir_impl
+static PyObject *
+os_scandir_impl(PyObject *module, path_t *path)
+{
+    ScandirIterator *iterator = PyObject_New(ScandirIterator, &ScandirIter_Type);
+#ifdef MS_WINDOWS
+    iterator->handle = FindFirstFileW(path->wide, &iterator->file_data);
+#else
+    iterator->dirp = opendir(path->narrow ? path->narrow : ".");
+#endif
+    return (PyObject *)iterator;
+}
+```
+
+`os.scandir(path)` returns a context manager/iterator of `DirEntry` objects. On Linux it uses `getdents64` via `readdir`; on Windows it uses `FindFirstFile`/`FindNextFile`. The `DirEntry` objects cache `stat` data so `entry.stat()` may be free.
+
+### `DirEntry`
+
+```c
+// CPython: Modules/posixmodule.c:12680 DirEntry_stat
+static PyObject *
+DirEntry_stat(DirEntry *self, PyObject *args, PyObject *kwargs)
+{
+    int follow_symlinks = 1;
+    /* Check cached stat */
+    if (!follow_symlinks && self->lstat) return Py_NewRef(self->lstat);
+    if (follow_symlinks && self->stat) return Py_NewRef(self->stat);
+    /* Compute stat from d_ino / d_type if available */
+    PyObject *st = _PyObject_CallMethodIdObjArgs(os_module, &PyId_stat, ...);
+    if (follow_symlinks) self->stat = Py_NewRef(st);
+    else self->lstat = Py_NewRef(st);
+    return st;
+}
+```
+
+`DirEntry.stat()` caches the result. On Linux, `d_type` from `readdir` allows `is_dir()`/`is_file()` without a `stat` syscall. `DirEntry.name` and `DirEntry.path` are always available without a syscall.
+
+### `os.walk`
+
+```python
+# CPython: Lib/os.py:380 walk
+def walk(top, topdown=True, onerror=None, followlinks=False):
+    """Directory tree generator."""
+    with scandir(top) as scandir_it:
+        entries = list(scandir_it)
+    dirs = []
+    nondirs = []
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir(follow_symlinks=followlinks)
+        except OSError:
+            is_dir = False
+        if is_dir:
+            dirs.append(entry.name)
+        else:
+            nondirs.append(entry.name)
+    if topdown:
+        yield top, dirs, nondirs
+        for dirname in dirs:
+            yield from walk(join(top, dirname), topdown, onerror, followlinks)
+    else:
+        for dirname in dirs:
+            yield from walk(join(top, dirname), topdown, onerror, followlinks)
+        yield top, dirs, nondirs
+```
+
+`os.walk` is a generator. `topdown=True` yields each directory before its contents (pre-order); `topdown=False` is post-order. The `dirs` list is mutable: removing entries prevents recursion into those subdirectories.
+
+### `os.environ`
+
+```python
+# CPython: Lib/os.py:680 Environ
+class _Environ(MutableMapping):
+    def __getitem__(self, key):
+        try:
+            return self._data[self.encodekey(key)]
+        except KeyError:
+            raise KeyError(key) from None
+
+    def __setitem__(self, key, value):
+        self.putenv(key, value)
+        self._data[self.encodekey(key)] = self.encodevalue(value)
+
+    def __delitem__(self, key):
+        self.unsetenv(key)
+        try:
+            del self._data[self.encodekey(key)]
+        except KeyError:
+            raise KeyError(key) from None
+```
+
+`os.environ` is a `MutableMapping` backed by `os.putenv`/`os.unsetenv`. Modifying it calls the C-level `putenv` immediately, so child processes inherit the changes. Keys and values are bytes on POSIX (`os.environb`) or strings on Windows/with text encoding.
+
+## gopy notes
+
+`os.scandir` is `module/os.Scandir` in `module/os/module.go`, using `os.ReadDir`. `DirEntry` caches the `os.FileInfo` result. `os.walk` uses the pure-Python implementation via `stdlib/os.py`. `os.environ` is a `module/os.Environ` struct backed by `os.Getenv`/`os.Setenv`.

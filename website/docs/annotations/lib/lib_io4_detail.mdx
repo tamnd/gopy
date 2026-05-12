@@ -1,0 +1,113 @@
+---
+title: Lib/_pyio.py (part 4)
+description: "_pyio.py part 4: TextIOWrapper, BufferedWriter, BufferedRandom, FileIO."
+cpython_path: Lib/_pyio.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/_pyio.py" />
+
+This annotation covers buffered and text I/O wrappers. See `lib_io3_detail` for `BytesIO`, `StringIO`, `BufferedReader`, and the abstract base classes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `FileIO` | Raw unbuffered file I/O |
+| 81-180 | `BufferedWriter` | Write buffer with flush-on-full |
+| 181-300 | `BufferedRandom` | Seekable buffered I/O (read+write) |
+| 301-440 | `TextIOWrapper.__init__` | Wraps a binary stream with encoding |
+| 441-600 | `TextIOWrapper.read` / `write` | Encode/decode with incremental codec |
+
+## Reading
+
+### `FileIO`
+
+```python
+# CPython: Lib/_pyio.py:1380 FileIO.__init__
+class FileIO(RawIOBase):
+    def __init__(self, name, mode='r', closefd=True, opener=None):
+        if opener is None:
+            self._fd = os.open(name, flags, 0o666)
+        else:
+            self._fd = opener(name, flags)
+        self._closefd = closefd
+        self._blksize = DEFAULT_BUFFER_SIZE
+
+    def readinto(self, b):
+        self._checkReadable()
+        return os.readinto(self._fd, b)
+
+    def write(self, b):
+        self._checkWritable()
+        return os.write(self._fd, b)
+```
+
+`FileIO` is the raw layer: no buffering, no encoding. `opener` allows custom file descriptors (e.g., `os.open` with `O_DIRECT`). `readinto` writes into a pre-allocated buffer, avoiding copies.
+
+### `BufferedWriter`
+
+```python
+# CPython: Lib/_pyio.py:1820 BufferedWriter.write
+class BufferedWriter(BufferedIOBase):
+    def write(self, b):
+        with self._write_lock:
+            self._write_buf += bytes(b)
+            if len(self._write_buf) > self.buffer_size:
+                self._flush_unlocked()
+        return len(b)
+
+    def _flush_unlocked(self):
+        while self._write_buf:
+            n = self.raw.write(self._write_buf)
+            del self._write_buf[:n]
+```
+
+`BufferedWriter` accumulates writes in `_write_buf`. When the buffer exceeds `buffer_size` (default 8KB), it flushes to the raw stream. Partial writes from the raw layer are handled by the loop in `_flush_unlocked`.
+
+### `TextIOWrapper.__init__`
+
+```python
+# CPython: Lib/_pyio.py:2180 TextIOWrapper.__init__
+class TextIOWrapper(TextIOBase, TextIO):
+    def __init__(self, buffer, encoding=None, errors=None, newline=None,
+                 line_buffering=False, write_through=False):
+        self._buffer = buffer
+        encoding = io.text_encoding(encoding)
+        self._encoding = encoding
+        self._errors = errors or 'strict'
+        self._decoder = None
+        self._encoder = None
+        self._newline = newline
+        self._line_buffering = line_buffering
+        self._write_through = write_through
+```
+
+`TextIOWrapper` wraps a binary stream with incremental encoding/decoding. `write_through=True` flushes the binary buffer after every write (useful for TTYs). `line_buffering=True` flushes on newline. Decoders are created lazily on the first read.
+
+### `TextIOWrapper.read`
+
+```python
+# CPython: Lib/_pyio.py:2380 TextIOWrapper.read
+def read(self, size=None):
+    self._checkReadable()
+    self._checkClosed()
+    decoder = self._decoder or self._get_decoder()
+    if size is None or size < 0:
+        result = (self._get_decoded_chars() +
+                  decoder.decode(self.buffer.read(), final=True))
+        self._set_decoded_chars('')
+        self._snapshot = None
+        return result
+    ...
+```
+
+The `_decoder` is an `IncrementalDecoder` from `codecs`. It handles multi-byte characters split across buffer boundaries. `_get_decoded_chars` returns any characters left over from the previous read. `_snapshot` stores the raw buffer state for `tell()`/`seek()`.
+
+## gopy notes
+
+`FileIO` is `module/io.FileIO` in `module/io/module.go`, wrapping `os.File`. `BufferedWriter` uses a Go `[]byte` slice as the write buffer. `TextIOWrapper` uses `golang.org/x/text/encoding` for non-UTF8 encodings; UTF-8 uses the stdlib `unicode/utf8`. Incremental decoding uses `transform.Reader`.

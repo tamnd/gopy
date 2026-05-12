@@ -1,0 +1,94 @@
+---
+title: Lib/pathlib/_local.py (part 5)
+description: "pathlib part 5: Path.open, Path.read_text, Path.write_text, Path.mkdir, Path.rename."
+cpython_path: Lib/pathlib/_local.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pathlib/_local.py" />
+
+This annotation covers file I/O and directory operations. See `lib_pathlib4_detail` for `Path.__new__`, `Path.stat`, glob, and `Path.iterdir`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Path.open` | Open the file and return a file object |
+| 81-160 | `Path.read_text` / `Path.write_text` | Whole-file read/write helpers |
+| 161-240 | `Path.read_bytes` / `Path.write_bytes` | Binary counterparts |
+| 241-340 | `Path.mkdir` | Create the directory, optionally with parents |
+| 341-500 | `Path.rename` / `Path.replace` | Rename with and without overwrite |
+
+## Reading
+
+### `Path.open`
+
+```python
+# CPython: Lib/pathlib/_local.py:820 Path.open
+def open(self, mode='r', buffering=-1, encoding=None,
+         errors=None, newline=None):
+    """Open the file pointed by this path and return a file object."""
+    if "b" not in mode:
+        encoding = io.text_encoding(encoding)
+    return self._accessor.open(self, flags=os.O_RDONLY, mode=0o666)
+```
+
+`path.open()` delegates to the accessor (the OS-specific layer). `io.text_encoding` maps `None` to `'locale'` or `'utf-8'` depending on `PYTHONUTF8` and the `encoding` warning. The file object is the same as `open(str(path), ...)`.
+
+### `Path.read_text`
+
+```python
+# CPython: Lib/pathlib/_local.py:860 Path.read_text
+def read_text(self, encoding=None, errors=None, newline=None):
+    """Return the decoded contents of the pointed-to file as a string."""
+    encoding = io.text_encoding(encoding)
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+        return f.read()
+```
+
+`path.read_text()` is a one-liner convenience; it opens, reads, and closes. The `encoding` and `errors` arguments mirror `open()`. For large files, prefer `path.open()` and read in chunks.
+
+### `Path.mkdir`
+
+```python
+# CPython: Lib/pathlib/_local.py:940 Path.mkdir
+def mkdir(self, mode=0o777, parents=False, exist_ok=False):
+    """Create a new directory at this given path."""
+    try:
+        os.mkdir(self, mode)
+    except FileNotFoundError:
+        if not parents or self.parent == self:
+            raise
+        self.parent.mkdir(parents=True, exist_ok=True)
+        self.mkdir(mode, parents=False, exist_ok=exist_ok)
+    except OSError:
+        if not exist_ok or not self.is_dir():
+            raise
+```
+
+`path.mkdir(parents=True, exist_ok=True)` creates all intermediate directories and silently succeeds if the directory already exists. The recursive approach: on `FileNotFoundError`, create the parent first, then retry. On `OSError` with `exist_ok=True`, suppress only if it is already a directory.
+
+### `Path.rename`
+
+```python
+# CPython: Lib/pathlib/_local.py:1000 Path.rename
+def rename(self, target):
+    """Rename this path to the target path, returning the new Path."""
+    os.rename(self, target)
+    return self.with_name(Path(target).name) if isinstance(target, str) else target
+
+def replace(self, target):
+    """Rename this path to the target path, overwriting the target."""
+    os.replace(self, target)
+    return self.with_name(Path(target).name) if isinstance(target, str) else target
+```
+
+`rename` calls `os.rename` which is atomic on POSIX for same-filesystem renames but may fail if target exists on some platforms. `replace` uses `os.replace` which atomically overwrites the target on POSIX (equivalent to `rename(2)` semantics).
+
+## gopy notes
+
+`Path.open` calls `os.Open`/`os.OpenFile` via `module/os.Open`. `Path.read_text` uses `io.ReadAll`. `Path.mkdir` calls `os.Mkdir` or `os.MkdirAll`. `Path.rename` calls `os.Rename`. `Path.replace` also calls `os.Rename` (POSIX `rename(2)` is always replace).

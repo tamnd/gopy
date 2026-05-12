@@ -1,0 +1,111 @@
+---
+title: Objects/genobject.c (part 5)
+description: "Objects/genobject.c part 5: async generators, aclose, athrow, asend, ag_running."
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genobject.c" />
+
+This annotation covers async generators. See `objects_generatorobject4_detail` for sync generators, coroutines, `send`, `throw`, and `close`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `AsyncGenerator` type object | Fields beyond `Generator`: `ag_running`, `ag_origin` |
+| 81-180 | `asend` object | Awaitable produced by `ag.asend(value)` |
+| 181-280 | `athrow` object | Awaitable produced by `ag.athrow(exc)` |
+| 281-380 | `aclose` | Finalization: throw `GeneratorExit` asynchronously |
+| 381-500 | `ag_finalizer` / `sys.set_asyncgen_finalizer` | Hook for event loop cleanup |
+
+## Reading
+
+### `asend` object
+
+```c
+// CPython: Objects/genobject.c:680 async_gen_asend_iternext
+static PyObject *
+async_gen_asend_iternext(PyAsyncGenASend *o)
+{
+    /* Drives one step of the async generator */
+    PyAsyncGenObject *gen = o->ags_gen;
+    if (o->ags_state == AWAITABLE_STATE_CLOSED)
+        return NULL;
+    PyObject *result = gen_send_ex2(gen->ag_gen, o->ags_sendval, 0, 0);
+    if (result && _PyAsyncGenValueWrapper_CheckExact(result)) {
+        /* Got a yielded value: unwrap and return for await */
+        PyObject *val = ((PyAsyncGenValueWrapper *)result)->agvw_val;
+        Py_DECREF(result);
+        o->ags_state = AWAITABLE_STATE_ITER;
+        return val;
+    }
+    o->ags_state = AWAITABLE_STATE_CLOSED;
+    return result;
+}
+```
+
+`ag.asend(val)` returns an `async_gen_asend` object. Each `__next__` call on it advances the async generator by one `yield`. The yielded value is wrapped in `PyAsyncGenValueWrapper` to distinguish it from a `return` value.
+
+### `ag_running` guard
+
+```c
+// CPython: Objects/genobject.c:620 async_gen_send
+static PyObject *
+async_gen_send_impl(PyAsyncGenObject *o, PyObject *arg)
+{
+    if (o->ag_running) {
+        PyErr_SetString(PyExc_ValueError,
+                        "asynchronous generator already running");
+        return NULL;
+    }
+    o->ag_running = 1;
+    PyObject *result = gen_send_ex2(o->ag_gen, arg, 0, 0);
+    o->ag_running = 0;
+    return result;
+}
+```
+
+`ag_running` prevents re-entering an async generator while it is executing. Unlike sync generators (which get a `ValueError` from the frame's `f_executing` flag), async generators need an explicit guard because the event loop can interleave coroutine steps.
+
+### `ag_finalizer`
+
+```c
+// CPython: Objects/genobject.c:820 async_gen_dealloc
+static void
+async_gen_dealloc(PyAsyncGenObject *gen)
+{
+    /* If the generator was not exhausted, call ag_finalizer */
+    if (gen->ag_origin_or_finalizer != NULL &&
+        gen->ag_closed == 0) {
+        /* Schedule aclose() on the event loop */
+        PyObject *finalizer = gen->ag_origin_or_finalizer;
+        PyObject_CallOneArg(finalizer, (PyObject *)gen);
+    }
+    gen_dealloc((PyGenObject *)gen);
+}
+```
+
+`sys.set_asyncgen_finalizer(hook)` registers a hook called when an async generator is garbage-collected before exhaustion. `asyncio` uses this to schedule `aclose()` on the event loop, ensuring `finally` blocks run. Without this hook, unfinished async generators silently leak resources.
+
+### `aclose`
+
+```c
+// CPython: Objects/genobject.c:760 async_gen_aclose
+static PyObject *
+async_gen_aclose(PyAsyncGenObject *o, PyObject *Py_UNUSED(arg))
+{
+    if (o->ag_closed) Py_RETURN_NONE;
+    return async_gen_athrow_new(o, NULL);
+}
+```
+
+`await ag.aclose()` creates an `athrow` with `None` (which maps to throwing `GeneratorExit`). The async generator's `finally` block runs asynchronously. After `aclose`, `ag_closed` is set and further `asend`/`asend` raise `StopAsyncIteration`.
+
+## gopy notes
+
+`AsyncGenerator` is `objects.AsyncGenerator` in `objects/instance.go`. `asend` and `athrow` are awaitable wrappers in `objects/namespace.go`. `ag_running` is a bool field on the Go struct. `ag_finalizer` is registered via `module/sys.SetAsyncgenFinalizer` and called from the goroutine finalizer.

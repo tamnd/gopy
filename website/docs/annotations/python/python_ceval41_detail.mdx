@@ -1,0 +1,128 @@
+---
+title: Python/ceval.c (part 41)
+description: "Python/ceval.c part 41: RESUME, PUSH_EXC_INFO, POP_EXCEPT, RERAISE, CHECK_EXC_MATCH."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers exception handling opcodes. See `python_ceval40_detail` for closure, generator, and `SEND`/`YIELD_VALUE` opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `RESUME` | Function entry marker for tracing |
+| 81-160 | `PUSH_EXC_INFO` | Save the current exception and set the new one |
+| 161-240 | `POP_EXCEPT` | Restore the saved exception after handling |
+| 241-340 | `RERAISE` | Re-raise the current or a saved exception |
+| 341-500 | `CHECK_EXC_MATCH` | Test if the active exception matches a type |
+
+## Reading
+
+### `RESUME`
+
+```c
+// CPython: Python/ceval.c:4620 RESUME
+inst(RESUME, (--)) {
+    /* oparg: 0=entry, 1=yield, 2=await, 3=yield-from
+       Used by tracing machinery to distinguish function start from resume.
+       Also: set f_lasti to -1 at function entry. */
+    if (oparg == 0) {
+        /* Check for pending calls (signals, GIL drop) */
+        if (_Py_HandlePending(tstate) != 0) ERROR_IF(true, error);
+    }
+}
+```
+
+`RESUME` is the first opcode of every code object. At `oparg=0` (function entry) it checks for pending calls (signals, finalization, GIL yield). At `oparg=1` it marks a resume from `yield`. Tracing hooks (Python-level `sys.settrace`) can inspect `oparg` to know why execution resumed.
+
+### `PUSH_EXC_INFO`
+
+```c
+// CPython: Python/ceval.c:4680 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    /* Save the currently active exception and activate new_exc */
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    if (exc_info->exc_value != NULL) {
+        prev_exc = exc_info->exc_value;
+    } else {
+        prev_exc = Py_NewRef(Py_None);
+    }
+    exc_info->exc_value = Py_NewRef(new_exc);
+    /* new_exc's __context__ is the old active exception */
+    if (!_PyBaseExceptionObject_caught(new_exc)) {
+        PyException_SetContext(new_exc, Py_XNewRef(exc_info->exc_value));
+    }
+}
+```
+
+`PUSH_EXC_INFO` is emitted at the entry of each `except` block. It saves the previous active exception (`exc_info->exc_value`) on the stack and installs `new_exc` as the active exception. The saved value is later restored by `POP_EXCEPT`.
+
+### `POP_EXCEPT`
+
+```c
+// CPython: Python/ceval.c:4730 POP_EXCEPT
+inst(POP_EXCEPT, (exc_value --)) {
+    /* Restore the previous exception */
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    PyObject *value = exc_info->exc_value;
+    exc_info->exc_value = exc_value == Py_None ? NULL : Py_NewRef(exc_value);
+    Py_DECREF(value);
+    Py_DECREF(exc_value);
+}
+```
+
+At the end of the `except` block, `POP_EXCEPT` restores the exception saved by `PUSH_EXC_INFO`. This implements the "exception stack": nested `except` blocks each have their own active exception. `sys.exc_info()` returns `tstate->exc_info->exc_value`.
+
+### `RERAISE`
+
+```c
+// CPython: Python/ceval.c:4780 RERAISE
+inst(RERAISE, (values[oparg], exc --)) {
+    /* oparg=0: raise exc (used at end of except block for bare 'raise')
+       oparg=1: raise with saved lasti (for 'finally' re-raise)
+       oparg=2: RERAISE in except* */
+    assert(oparg >= 0 && oparg <= 2);
+    if (oparg) {
+        PyObject *lasti = values[0];
+        frame->f_lasti = PyLong_AsLong(lasti) - RESUME_UNIT;
+    }
+    Py_INCREF(exc);
+    _PyErr_SetRaisedException(tstate, exc);
+    goto error;
+}
+```
+
+`raise` without an argument in an `except` block emits `RERAISE 0`. In `finally`, `RERAISE 1` restores `f_lasti` so tracebacks point to the original raise site.
+
+### `CHECK_EXC_MATCH`
+
+```c
+// CPython: Python/ceval.c:4840 CHECK_EXC_MATCH
+inst(CHECK_EXC_MATCH, (left, right -- left, b)) {
+    /* Used for: except ExcType:
+       Checks if 'left' (the active exception) is an instance of 'right' */
+    assert(PyExceptionInstance_Check(left));
+    if (!PyExceptionClass_Check(right)) {
+        _PyErr_SetString(tstate, PyExc_TypeError,
+                         CANNOT_CATCH_MSG);
+        Py_DECREF(right);
+        ERROR_IF(true, error);
+    }
+    int res = PyErr_GivenExceptionMatches(left, right);
+    Py_DECREF(right);
+    b = res ? Py_True : Py_False;
+}
+```
+
+`except ValueError:` emits `LOAD_GLOBAL ValueError`, `CHECK_EXC_MATCH`. `PyErr_GivenExceptionMatches` checks `isinstance(exc, exc_type)` and also handles tuples of types (`except (A, B):`). The result is a bool pushed onto the stack.
+
+## gopy notes
+
+`RESUME` is in `vm/eval_simple.go`; it calls `CheckPendingCalls` at function entry. `PUSH_EXC_INFO` and `POP_EXCEPT` manipulate `goroutine.ExcInfo` in `vm/eval_unwind.go`. `RERAISE` calls `errors.Raise`. `CHECK_EXC_MATCH` calls `objects.ExceptionMatches`.

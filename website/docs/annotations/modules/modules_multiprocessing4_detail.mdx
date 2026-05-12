@@ -1,0 +1,102 @@
+---
+title: Lib/multiprocessing/process.py (part 4)
+description: "multiprocessing part 4: Process.start, spawn vs fork, Process._bootstrap, AuthenticationString."
+cpython_path: Lib/multiprocessing/process.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/multiprocessing/process.py" />
+
+This annotation covers process lifecycle. See `lib_multiprocessing3_detail` for `Pool`, `Queue`, `Pipe`, and shared memory.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Start methods | `fork`, `spawn`, `forkserver` and their tradeoffs |
+| 81-180 | `Process.start` | Dispatch to the start-method context |
+| 181-280 | `Process._bootstrap` | Entry point in the child process |
+| 281-380 | `AuthenticationString` | HMAC-based process authentication |
+| 381-500 | `Process.join` / `terminate` | Wait for or kill the child |
+
+## Reading
+
+### Start methods
+
+```python
+# CPython: Lib/multiprocessing/context.py:180 start methods
+# fork: copy the parent process (fast, but unsafe with threads)
+# spawn: start a fresh Python interpreter (safe, slower)
+# forkserver: a server process forks on demand (safe, moderate overhead)
+#
+# Default: fork on Linux/macOS (pre-3.12), spawn on Windows and macOS 3.12+
+```
+
+`fork` is fast but can deadlock if the parent had locks held by other threads at fork time. `spawn` is safe: the child starts fresh and imports `__main__` again, so all objects must be picklable. `forkserver` uses a pre-forked server to avoid the thread-safety issues of `fork`.
+
+### `Process.start`
+
+```python
+# CPython: Lib/multiprocessing/process.py:120 Process.start
+def start(self):
+    """Start the child process."""
+    self._check_closed()
+    assert self._popen is None, 'cannot start a process twice'
+    assert self._parent_pid == os.getpid(), 'can only start a process object created by current process'
+    _cleanup()
+    self._popen = self._Popen(self)
+    self._sentinel = self._popen.sentinel
+    _children.add(self)
+```
+
+`Process.start` creates a `Popen` object (platform-specific: `_posixsubprocess` on POSIX, `subprocess` on Windows). The `sentinel` is a file descriptor that becomes readable when the child exits, used by `multiprocessing.managers`.
+
+### `Process._bootstrap`
+
+```python
+# CPython: Lib/multiprocessing/process.py:340 Process._bootstrap
+def _bootstrap(self, parent_sentinel=None):
+    """Entry point for the child process."""
+    from . import util, context
+    try:
+        # Re-initialize random, logging, etc.
+        util._flush_std_streams()
+        # Run the target function
+        self._target(*self._args, **self._kwargs)
+        exitcode = 0
+    except (KeyboardInterrupt, SystemExit) as e:
+        exitcode = e.code if isinstance(e, SystemExit) else 1
+    except:
+        import traceback
+        sys.stderr.write('Process %s:\n' % self.name)
+        traceback.print_exc()
+        exitcode = 1
+    finally:
+        util._exit_function()
+    sys.exit(exitcode)
+```
+
+`_bootstrap` is the first Python code that runs in the child. It calls the `target` function, catches all exceptions, and exits with an appropriate code. `util._exit_function` runs `atexit` handlers and flushes buffers.
+
+### `Process.join`
+
+```python
+# CPython: Lib/multiprocessing/process.py:150 Process.join
+def join(self, timeout=None):
+    """Wait until child process terminates."""
+    assert self._parent_pid == os.getpid(), 'can only join a child process'
+    assert self._popen is not None, 'can only join a started process'
+    res = self._popen.wait(timeout)
+    if res is not None:
+        _children.discard(self)
+```
+
+`join()` calls `waitpid` (or `WaitForSingleObject` on Windows) with an optional timeout. `_children` is a set of all active `Process` objects; discarding from it allows the `Process` to be garbage collected.
+
+## gopy notes
+
+`multiprocessing` is not yet ported to gopy. The module ships as pure Python via `stdlib/multiprocessing/`. `Process.start` would need OS-level `fork`/`exec` support. The authentication string uses `hmac` which is available via `module/hmac`.

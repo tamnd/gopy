@@ -1,0 +1,104 @@
+---
+title: Lib/re/__init__.py (part 4)
+description: "re part 4: re.compile, Pattern.search, Pattern.findall, Pattern.sub, re module cache."
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/re/__init__.py" />
+
+This annotation covers the public `re` module API and caching layer. See `lib_re3_detail` for `Pattern` internals, `Match` objects, group references, and the `_sre` C engine.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Module-level cache | `_cache` dict for compiled patterns |
+| 81-160 | `re.compile` | Compile a pattern string to a `Pattern` |
+| 161-240 | `re.search` / `re.match` | Shortcut: compile + search |
+| 241-340 | `re.findall` / `re.finditer` | Find all matches |
+| 341-500 | `re.sub` / `re.subn` | Replace matches |
+
+## Reading
+
+### Module-level cache
+
+```python
+# CPython: Lib/re/__init__.py:320 _cache
+_cache = {}
+_MAXCACHE = 512
+
+def _compile(pattern, flags):
+    # Cache key: (type(pattern), pattern, flags)
+    try:
+        return _cache[type(pattern), pattern, flags]
+    except KeyError:
+        pass
+    if len(_cache) >= _MAXCACHE:
+        # Clear half the cache using a simple FIFO strategy
+        for _ in range(_MAXCACHE // 2):
+            _cache.popitem(last=False)  # requires dict to be ordered
+    p = _compiler.compile(pattern, flags)
+    _cache[type(pattern), pattern, flags] = p
+    return p
+```
+
+The module-level cache holds up to 512 compiled patterns. The cache key includes the pattern type (`str` vs `bytes`) because `b'abc'` and `'abc'` compile differently. On overflow, the oldest half is discarded.
+
+### `re.compile`
+
+```python
+# CPython: Lib/re/__init__.py:220 compile
+def compile(pattern, flags=0):
+    """Compile a regular expression pattern, returning a Pattern object."""
+    return _compile(pattern, flags)
+```
+
+`re.compile` is a thin wrapper over `_compile`. If `pattern` is already a `Pattern` object and `flags == 0`, it is returned unchanged. If `flags` differs, a new pattern is compiled (combining the stored flags with the new ones).
+
+### `re.sub`
+
+```python
+# CPython: Lib/re/__init__.py:280 sub
+def sub(pattern, repl, string, count=0, flags=0):
+    """Return the string obtained by replacing the leftmost non-overlapping
+    occurrences of pattern in string by the replacement repl."""
+    return _compile(pattern, flags).sub(repl, string, count)
+```
+
+`re.sub(r'\d+', 'N', s)` compiles the pattern (from cache if available) and calls `Pattern.sub`. `repl` can be a string (with `\1`, `\g<name>` group references) or a callable that receives the `Match` and returns a replacement string.
+
+### `Pattern.findall`
+
+```c
+// CPython: Modules/_sre.c:2180 pattern_findall
+static PyObject *
+pattern_findall(PatternObject *self, PyObject *args, PyObject *kw)
+{
+    PyObject *list = PyList_New(0);
+    Py_ssize_t pos = 0, endpos = PY_SSIZE_T_MAX;
+    state_init(&state, self, string, pos, endpos);
+    while (state_search(&state) >= 0) {
+        if (self->groups == 0)
+            item = PySequence_GetSlice(string, state.start, state.end);
+        else if (self->groups == 1)
+            item = state_getslice(&state, 1, string, 1);
+        else
+            item = match_getallgroups(&state, string);
+        PyList_Append(list, item);
+        if (state.start == state.end) state.start++;  /* avoid infinite loop */
+        else state.start = state.end;
+    }
+    return list;
+}
+```
+
+`re.findall` returns a list of strings (no groups), a list of strings (one group), or a list of tuples (multiple groups). Zero-length matches are handled by advancing by one position to avoid infinite loops.
+
+## gopy notes
+
+The `re` module cache is `module/re._cache` in `module/re/module.go`, a Go `map` with LRU eviction. `re.compile` calls `regexp.MustCompile` or Go's `syntax` package for flag translation. `Pattern.sub` uses `regexp.ReplaceAllFunc`. `findall` uses `regexp.FindAllString` / `FindAllStringSubmatch`.

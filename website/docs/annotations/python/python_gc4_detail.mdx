@@ -1,0 +1,104 @@
+---
+title: Python/gc.c (part 4)
+description: "Python/gc.c part 4: cyclic garbage collection, generation promotion, finalizers, tp_finalize."
+cpython_path: Python/gc.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/gc.c" />
+
+This annotation covers the cyclic collector internals. See `lib_gc3_detail` for `gc.collect`, `gc.get_objects`, thresholds, and callbacks.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Generation structure | Three generations with thresholds |
+| 81-180 | `move_unreachable` | Identify objects not reachable from roots |
+| 181-280 | `finalize_garbage` | Call `tp_finalize` before collection |
+| 281-380 | `handle_weakrefs` | Clear weak references before sweeping |
+| 381-500 | Generation promotion | Move survivors to the next generation |
+
+## Reading
+
+### Generation structure
+
+```c
+// CPython: Python/gc.c:80 generations
+struct gc_generation {
+    PyGC_Head head;     /* doubly-linked list of tracked objects */
+    Py_ssize_t threshold;  /* collect when count exceeds this */
+    Py_ssize_t count;      /* new allocations since last collection */
+};
+
+static struct gc_generation generations[NUM_GENERATIONS] = {
+    /* gen 0: threshold=700, gen 1: threshold=10, gen 2: threshold=10 */
+    {{...}, 700, 0},
+    {{...}, 10, 0},
+    {{...}, 10, 0},
+};
+```
+
+Generation 0 is collected most often (every 700 new allocations by default). Objects that survive a gen-0 collection are promoted to gen-1; survivors of gen-1 go to gen-2. Long-lived objects accumulate in gen-2 and are collected rarely.
+
+### `move_unreachable`
+
+```c
+// CPython: Python/gc.c:420 move_unreachable
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    /* Two-pass algorithm:
+       Pass 1: Set gc_refs = ob_refcnt for all objects.
+       Pass 2: For each object, subtract 1 from gc_refs for each
+               reference it holds to another tracked object.
+       Objects with gc_refs > 0 after pass 2 are reachable from
+       outside the generation; those with gc_refs == 0 are candidates. */
+    PyGC_Head *gc = GC_NEXT(young);
+    while (gc != young) {
+        if (gc_get_refs(gc) != 0) {
+            /* Reachable: traverse and mark descendants reachable */
+            PyObject *op = FROM_GC(gc);
+            traverseproc traverse = Py_TYPE(op)->tp_traverse;
+            traverse(op, visit_reachable, (void *)young);
+            ...
+        } else {
+            gc_list_move(gc, unreachable);
+        }
+        gc = GC_NEXT(young);
+    }
+}
+```
+
+The reference-counting trick: subtract internal references to find objects with no external references. Objects with `gc_refs == 0` form the unreachable set. A traversal then rescues objects reachable from the reachable set (handling cross-generation references).
+
+### `finalize_garbage`
+
+```c
+// CPython: Python/gc.c:680 finalize_garbage
+static void
+finalize_garbage(PyThreadState *tstate, PyGC_Head *finalizers)
+{
+    /* Call tp_finalize on each object before collection */
+    PyGC_Head *gc = GC_NEXT(finalizers);
+    while (gc != finalizers) {
+        PyObject *op = FROM_GC(gc);
+        PyGC_Head *next = GC_NEXT(gc);
+        if (Py_TYPE(op)->tp_finalize != NULL) {
+            _PyObject_GC_SET_FINALIZED(op);
+            Py_TYPE(op)->tp_finalize(op);
+        }
+        gc = next;
+    }
+}
+```
+
+`tp_finalize` is called before the object is freed. For Python classes, this invokes `__del__`. Objects with finalizers are moved to a separate list (`_gc_finalizers`) and collected in a later cycle, since `__del__` may revive the object.
+
+## gopy notes
+
+The cyclic GC is `runtime/gc.go` in gopy. Generation thresholds are `gc.Gen0Threshold` etc. `move_unreachable` uses Go's `runtime.SetFinalizer` for objects with `__del__`. The three-generation structure maps to `gc.Generation0/1/2` linked lists. `tp_finalize` is called via `objects.CallFinalizer`.
