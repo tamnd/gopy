@@ -1,0 +1,84 @@
+---
+title: Modules/_decimal/_decimal.c (part 5)
+description: "_decimal.c part 5: Decimal context signals, Context.create_decimal, Decimal.quantize, Decimal.normalize."
+cpython_path: Modules/_decimal/_decimal.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_decimal/_decimal.c" />
+
+This annotation covers the C implementation of `decimal.Context` operations. See `lib_decimal2_detail` for `Decimal.fma`, `ln`, `exp`, and context traps in pure Python.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Context.create_decimal` | Create a Decimal from various inputs under the context |
+| 81-180 | `Decimal.quantize` | Round to a given exponent |
+| 181-260 | `Decimal.normalize` | Remove trailing zeros |
+| 261-360 | Thread-local context | `getcontext()` / `setcontext()` |
+| 361-500 | `decimal.localcontext` | Temporary context with `with` statement |
+
+## Reading
+
+### `Context.create_decimal`
+
+```c
+// CPython: Modules/_decimal/_decimal.c:3280 ctx_create_decimal
+static PyObject *
+ctx_create_decimal(PyObject *v, PyObject *args)
+{
+    /* Create a new Decimal, applying the current context's precision
+       and rounding mode. Signals are raised as configured. */
+    mpd_t *mpd = mpd_qnew();
+    if (PyUnicode_Check(input)) {
+        mpd_qset_string(mpd, str, ctx, &status);
+    } else if (PyLong_Check(input)) {
+        mpd_qset_i64(mpd, val, ctx, &status);
+    }
+    _PyDec_CheckStatus(ctx, status);
+    return PyDecType_FromMPD(&PyDec_Type, mpd, ctx);
+}
+```
+
+`Context.create_decimal` applies the context's precision and rounding to the input. `Decimal(x)` uses the current context; `ctx.create_decimal(x)` uses `ctx` explicitly.
+
+### `Decimal.quantize`
+
+```c
+// CPython: Modules/_decimal/_decimal.c:2980 dec_quantize
+static PyObject *
+dec_quantize(PyObject *v, PyObject *args, PyObject *kwds)
+{
+    /* Round self to the same exponent as exp.
+       Decimal('3.14159').quantize(Decimal('0.01')) == Decimal('3.14') */
+    mpd_qquantize(mpd_result, mpd_self, mpd_exp, ctx, &status);
+    _PyDec_CheckStatus(ctx, status);
+    return PyDecType_FromMPD(&PyDec_Type, mpd_result, ctx);
+}
+```
+
+`quantize` is the key operation for financial rounding: `amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)` rounds to two decimal places.
+
+### Thread-local context
+
+```c
+// CPython: Modules/_decimal/_decimal.c:1280 PyDec_GetCurrentContext
+static mpd_context_t *
+PyDec_GetCurrentContext(void)
+{
+    /* Retrieve the thread-local decimal context */
+    PyObject *ctx = PyObject_CallNoArgs(module_state->getcontext);
+    return ((PyDecContext *)ctx)->ctx;
+}
+```
+
+Each thread has its own decimal context (precision, rounding mode, traps). `decimal.getcontext()` retrieves it; `decimal.setcontext()` replaces it. `decimal.localcontext(prec=50)` uses a context manager to temporarily override.
+
+## gopy notes
+
+`Context.create_decimal` is `module/decimal.ContextCreateDecimal` in `module/decimal/module.go`. It delegates to `shopspring/decimal` or a libmpdec wrapper. `Decimal.quantize` calls `decimal.NewFromFloat(...).StringFixed(scale)`. Thread-local contexts are stored in `goroutine-local` storage via `sync.Map`.

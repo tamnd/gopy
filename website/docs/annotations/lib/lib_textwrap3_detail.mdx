@@ -1,0 +1,92 @@
+---
+title: Lib/textwrap.py (part 3)
+description: "textwrap.py part 3: TextWrapper._wrap_chunks, dedent, indent, shorten."
+cpython_path: Lib/textwrap.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/textwrap.py" />
+
+This annotation covers the core wrapping algorithm and utility functions. See `modules_textwrap2_detail` for `TextWrapper.__init__` and `wrap`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `TextWrapper._wrap_chunks` | Place word chunks onto lines |
+| 81-160 | `textwrap.dedent` | Remove common leading whitespace |
+| 161-240 | `textwrap.indent` | Add a prefix to each line |
+| 241-400 | `textwrap.shorten` | Truncate to a max width with ellipsis |
+
+## Reading
+
+### `TextWrapper._wrap_chunks`
+
+```python
+# CPython: Lib/textwrap.py:320 _wrap_chunks
+def _wrap_chunks(self, chunks):
+    """Wrap a sequence of text chunks (alternating whitespace and words)."""
+    lines = []
+    chunks.reverse()  # Will pop from end (efficient)
+    while chunks:
+        cur_line = []
+        cur_len = 0
+        if lines:
+            indent = self.subsequent_indent
+        else:
+            indent = self.initial_indent
+        width = self.width - len(indent)
+        
+        while chunks:
+            l = len(chunks[-1])
+            if cur_len + l <= width:
+                cur_len += l
+                cur_line.append(chunks.pop())
+            else:
+                break
+        
+        if chunks and len(chunks[-1]) > width:
+            self._handle_long_word(chunks, cur_line, cur_len, width)
+        ...
+        lines.append(indent + ''.join(cur_line))
+    return lines
+```
+
+The algorithm greedily fills each line with as many chunks as fit. `chunks` alternates between whitespace and words. Reversing and popping is O(1) per chunk.
+
+### `textwrap.dedent`
+
+```python
+# CPython: Lib/textwrap.py:420 dedent
+def dedent(text):
+    """Remove any common leading whitespace from all lines in text."""
+    _whitespace_only_re = re.compile('^[ \t]+$', re.MULTILINE)
+    _leading_whitespace_re = re.compile('(^[ \t]*)(?:[^ \t\n])', re.MULTILINE)
+    text = _whitespace_only_re.sub('', text)
+    indents = _leading_whitespace_re.findall(text)
+    margin = reduce(commonprefix, indents) if indents else ''
+    ...
+    return re.sub(r'(?m)^' + margin, '', text)
+```
+
+`textwrap.dedent` strips the common prefix from all non-empty lines. It is idempotent. Used with triple-quoted docstrings: `textwrap.dedent('''  line1\n  line2''')` removes the leading spaces.
+
+### `textwrap.shorten`
+
+```python
+# CPython: Lib/textwrap.py:480 shorten
+def shorten(text, width, **kwargs):
+    """Collapse and truncate the given text to fit in the given width."""
+    w = TextWrapper(width=width, max_lines=1, **kwargs)
+    return w.fill(' '.join(text.split()))
+```
+
+`textwrap.shorten('Hello World', width=8)` returns `'Hello...'` (using the default placeholder `'...'`). First normalizes whitespace, then wraps to one line with `max_lines=1`.
+
+## gopy notes
+
+`TextWrapper._wrap_chunks` is `module/textwrap.WrapChunks` in `module/textwrap/module.go`. It works on a `[]string` slice and uses Go's `strings.Builder` to assemble lines. `dedent` uses `regexp.FindAllString` to find common indentation. `shorten` calls `strings.Fields` to normalize whitespace then calls `Wrap`.

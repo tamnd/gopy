@@ -1,0 +1,86 @@
+---
+title: Python/ceval.c (part 58)
+description: "Python/ceval.c part 58: RAISE_VARARGS, RERAISE, CHECK_EXC_MATCH, exception matching and chaining."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers exception raising and matching. See `python_ceval57_detail` for import opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `RAISE_VARARGS` | `raise`, `raise exc`, `raise exc from cause` |
+| 81-160 | `RERAISE` | `raise` (bare) in an except block |
+| 161-260 | `CHECK_EXC_MATCH` | `except ExcType:` matching |
+| 261-360 | `CHECK_EG_MATCH` | `except* ExcType:` for exception groups |
+| 361-500 | Exception chaining logic | `__cause__`, `__context__`, `__traceback__` |
+
+## Reading
+
+### `RAISE_VARARGS`
+
+```c
+// CPython: Python/ceval.c:6020 RAISE_VARARGS
+inst(RAISE_VARARGS, (args[oparg] -- )) {
+    /* oparg: 0 = bare raise, 1 = raise exc, 2 = raise exc from cause */
+    PyObject *cause = NULL, *exc = NULL;
+    if (oparg == 2) {
+        cause = args[1];
+        exc   = args[0];
+    } else if (oparg == 1) {
+        exc = args[0];
+    }
+    int err = do_raise(tstate, exc, cause);
+    if (err > 0) {
+        assert(_PyErr_Occurred(tstate));
+        Py_DECREF(exc);
+        Py_XDECREF(cause);
+        goto exception_unwind;
+    }
+    ...
+}
+```
+
+`do_raise` handles the three forms: bare `raise` (re-raises the current exception), `raise exc` (raises exc with `__context__` chaining), and `raise exc from cause` (sets `__cause__` and `__suppress_context__`).
+
+### `CHECK_EXC_MATCH`
+
+```c
+// CPython: Python/ceval.c:6080 CHECK_EXC_MATCH
+inst(CHECK_EXC_MATCH, (left, right -- left, b)) {
+    assert(PyExceptionInstance_Check(left));
+    int res = PyErr_GivenExceptionMatches(left, right);
+    b = res ? Py_True : Py_False;
+    DISPATCH();
+}
+```
+
+`PyErr_GivenExceptionMatches` handles tuples of exception types: `except (ValueError, TypeError)`. It uses `issubclass` to check, so catching a base class catches all subclasses.
+
+### `CHECK_EG_MATCH`
+
+```c
+// CPython: Python/ceval.c:6120 CHECK_EG_MATCH
+inst(CHECK_EG_MATCH, (val, match_type -- rest, match)) {
+    /* For 'except* ExcType:' — split the ExceptionGroup */
+    PyObject *match, *rest;
+    int res = _PyExc_Group_MatchAndExtract(val, match_type, &match, &rest);
+    if (res < 0) ERROR_IF(true, error);
+    /* match is the sub-group that matched, rest is the remainder */
+    DISPATCH();
+}
+```
+
+`except* ValueError` calls `_PyExc_Group_MatchAndExtract` which recursively walks the exception group, collecting matching exceptions into `match` and non-matching into `rest`.
+
+## gopy notes
+
+`RAISE_VARARGS` is in `vm/eval_unwind.go`. It calls `errors.Raise(exc, cause)` which sets `exc.__context__` and `exc.__cause__`. `CHECK_EXC_MATCH` calls `objects.ExceptionMatches`. `CHECK_EG_MATCH` calls `objects.ExceptionGroupMatchAndExtract` which uses `objects.IsInstance` recursively.

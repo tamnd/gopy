@@ -1,0 +1,89 @@
+---
+title: Objects/dictobject.c (part 10)
+description: "Objects/dictobject.c part 10: dict.pop, dict.popitem, dict.get, dict.items, dict.keys, dict.values."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers dict access and view methods. See `objects_dictobject9_detail` for `dict.update`, `setdefault`, `__or__`, and `_PyDict_MergeEx`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dict.pop` | Remove and return a key's value |
+| 81-160 | `dict.popitem` | Remove and return an arbitrary `(key, value)` pair |
+| 161-240 | `dict.get` | Return value or default without raising |
+| 241-360 | `dict.keys` / `dict.values` / `dict.items` | Return view objects |
+| 361-500 | `dict_view` iteration | Iterate over keys/values/items |
+
+## Reading
+
+### `dict.pop`
+
+```c
+// CPython: Objects/dictobject.c:3380 dict_pop_impl
+static PyObject *
+dict_pop_impl(PyDictObject *self, PyObject *key, PyObject *default_value)
+{
+    PyObject *old_value;
+    Py_hash_t hash = PyObject_Hash(key);
+    if (hash == -1) return NULL;
+    /* Look up and remove atomically */
+    Py_ssize_t ix = _Py_dict_lookup(self, key, hash, &old_value);
+    if (ix == DKIX_EMPTY) {
+        if (default_value != NULL) return Py_NewRef(default_value);
+        PyErr_SetObject(PyExc_KeyError, key);
+        return NULL;
+    }
+    dict_delete_at(self, ix);
+    return old_value;
+}
+```
+
+`dict.pop(key, default)` looks up and removes in one operation, avoiding a double lookup. Raises `KeyError` if key is missing and no default is given.
+
+### `dict.popitem`
+
+```c
+// CPython: Objects/dictobject.c:3440 dict_popitem_impl
+static PyObject *
+dict_popitem_impl(PyDictObject *self)
+{
+    /* Remove and return the last inserted item (LIFO since Python 3.7) */
+    if (PyDict_GET_SIZE(self) == 0) {
+        PyErr_SetString(PyExc_KeyError, "popitem(): dictionary is empty");
+        return NULL;
+    }
+    /* Walk backwards through the entries to find the last non-dummy slot */
+    Py_ssize_t i = self->ma_used - 1;
+    ...
+    return PyTuple_Pack(2, key, value);
+}
+```
+
+`dict.popitem()` returns items in LIFO order (last inserted first) since Python 3.7. Used to process a dict while shrinking it.
+
+### View objects
+
+```c
+// CPython: Objects/dictobject.c:3600 dictkeys_new
+static PyObject *
+dictkeys_new(PyObject *dict, PyObject *Py_UNUSED(ignored))
+{
+    /* Returns a view that reflects future changes to the dict */
+    return _PyDictView_New(dict, &PyDictKeys_Type);
+}
+```
+
+`dict.keys()`, `dict.values()`, and `dict.items()` return view objects that hold a reference to the underlying dict. Iterating a view while modifying the dict raises `RuntimeError: dictionary changed size during iteration`.
+
+## gopy notes
+
+`dict.pop` is `objects.DictPop` in `objects/dict_mutate.go`. `dict.popitem` scans the entries array backwards. View objects are `*objects.DictKeysView`, `*objects.DictValuesView`, `*objects.DictItemsView` in `objects/dict_iter.go`. They hold a reference to the dict and version-check on each iteration step.
