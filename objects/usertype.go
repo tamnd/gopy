@@ -316,58 +316,71 @@ func fixupCallReprStr(t *Type) {
 // CPython: Objects/typeobject.c:9770 inherit_slots
 func inheritSlotsFromBases(t *Type) {
 	for _, base := range t.Bases {
-		if t.Repr == nil && base.Repr != nil {
-			t.Repr = base.Repr
-		}
-		if t.Str == nil && base.Str != nil {
-			t.Str = base.Str
-		}
-		if t.Call == nil && base.Call != nil {
-			t.Call = base.Call
-		}
-		if t.Hash == nil && base.Hash != nil {
-			t.Hash = base.Hash
-		}
-		if t.TpNew == nil && base.TpNew != nil {
-			t.TpNew = base.TpNew
-		}
-		if t.Iter == nil && base.Iter != nil {
-			t.Iter = base.Iter
-		}
-		if t.IterNext == nil && base.IterNext != nil {
-			t.IterNext = base.IterNext
-		}
-		if t.RichCmp == nil && base.RichCmp != nil {
-			t.RichCmp = base.RichCmp
-		}
-		if t.DescrGet == nil && base.DescrGet != nil {
-			t.DescrGet = base.DescrGet
-		}
-		if t.DescrSet == nil && base.DescrSet != nil {
-			t.DescrSet = base.DescrSet
-		}
-		if t.Format == nil && base.Format != nil {
-			t.Format = base.Format
-		}
-		if t.TpTraverse == nil && base.TpTraverse != nil {
-			t.TpTraverse = base.TpTraverse
-		}
-		if t.Number == nil && base.Number != nil {
-			cp := *base.Number
-			t.Number = &cp
-		}
-		if t.Sequence == nil && base.Sequence != nil {
-			cp := *base.Sequence
-			t.Sequence = &cp
-		}
-		if t.Mapping == nil && base.Mapping != nil {
-			cp := *base.Mapping
-			t.Mapping = &cp
-		}
-		if t.Async == nil && base.Async != nil {
-			cp := *base.Async
-			t.Async = &cp
-		}
+		inheritBasicSlots(t, base)
+		inheritProtocolTables(t, base)
+	}
+}
+
+// inheritBasicSlots copies the scalar slot pointers from base to t for
+// every slot t does not already define.
+func inheritBasicSlots(t, base *Type) {
+	if t.Repr == nil {
+		t.Repr = base.Repr
+	}
+	if t.Str == nil {
+		t.Str = base.Str
+	}
+	if t.Call == nil {
+		t.Call = base.Call
+	}
+	if t.Hash == nil {
+		t.Hash = base.Hash
+	}
+	if t.TpNew == nil {
+		t.TpNew = base.TpNew
+	}
+	if t.Iter == nil {
+		t.Iter = base.Iter
+	}
+	if t.IterNext == nil {
+		t.IterNext = base.IterNext
+	}
+	if t.RichCmp == nil {
+		t.RichCmp = base.RichCmp
+	}
+	if t.DescrGet == nil {
+		t.DescrGet = base.DescrGet
+	}
+	if t.DescrSet == nil {
+		t.DescrSet = base.DescrSet
+	}
+	if t.Format == nil {
+		t.Format = base.Format
+	}
+	if t.TpTraverse == nil {
+		t.TpTraverse = base.TpTraverse
+	}
+}
+
+// inheritProtocolTables copies the Number / Sequence / Mapping / Async
+// tables as deep copies so per-subclass fixup writes never mutate the
+// base type's struct.
+func inheritProtocolTables(t, base *Type) {
+	if t.Number == nil && base.Number != nil {
+		cp := *base.Number
+		t.Number = &cp
+	}
+	if t.Sequence == nil && base.Sequence != nil {
+		cp := *base.Sequence
+		t.Sequence = &cp
+	}
+	if t.Mapping == nil && base.Mapping != nil {
+		cp := *base.Mapping
+		t.Mapping = &cp
+	}
+	if t.Async == nil && base.Async != nil {
+		cp := *base.Async
+		t.Async = &cp
 	}
 }
 
