@@ -1,0 +1,91 @@
+---
+title: Lib/datetime.py (part 3)
+description: "datetime.py part 3: datetime.now, datetime.fromtimestamp, timedelta arithmetic, timezone, strftime/strptime."
+cpython_path: Lib/datetime.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/datetime.py" />
+
+This annotation covers datetime construction and timezone handling. See `lib_datetime2_detail` for `date`, `time`, `timedelta`, `__new__`, and `__repr__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `datetime.now` | Return current local or UTC time |
+| 81-160 | `datetime.fromtimestamp` | Convert POSIX timestamp to datetime |
+| 161-240 | `timedelta` arithmetic | Add/subtract `timedelta`, normalize days |
+| 241-340 | `timezone` | Fixed-offset `tzinfo` subclass |
+| 341-500 | `strftime` / `strptime` | Format/parse datetime strings |
+
+## Reading
+
+### `datetime.now`
+
+```python
+# CPython: Lib/datetime.py:1640 datetime.now
+@classmethod
+def now(cls, tz=None):
+    t = _time.time()
+    return cls.fromtimestamp(t, tz)
+```
+
+`datetime.now()` uses `time.time()` (POSIX timestamp). Without `tz`, returns local time. With `tz=timezone.utc`, returns UTC. The `_time` module is the C `time` module; `_time.time()` calls `gettimeofday` or `clock_gettime(CLOCK_REALTIME)`.
+
+### `datetime.fromtimestamp`
+
+```python
+# CPython: Lib/datetime.py:1660 datetime.fromtimestamp
+@classmethod
+def fromtimestamp(cls, t, tz=None):
+    frac, t = _math.modf(t)
+    us = round(frac * 1e6)
+    if us >= 1000000:
+        t += 1; us -= 1000000
+    elif us < 0:
+        t -= 1; us += 1000000
+    converter = _time.localtime if tz is None else _time.gmtime
+    struct = converter(t)
+    ss = min(struct.tm_sec, 59)  # Clamp for leap seconds
+    result = cls(struct.tm_year, struct.tm_mon, struct.tm_mday,
+                 struct.tm_hour, struct.tm_min, ss, us)
+    if tz is not None:
+        result = result.replace(tzinfo=timezone.utc).astimezone(tz)
+    return result
+```
+
+Fractional seconds are extracted via `modf`. `tm_sec == 60` (leap second) is clamped to 59. UTC timestamps go through `gmtime`; local timestamps go through `localtime`.
+
+### `timezone`
+
+```python
+# CPython: Lib/datetime.py:2340 timezone
+class timezone(tzinfo):
+    def __new__(cls, offset, name=_Omitted):
+        if not isinstance(offset, timedelta):
+            raise TypeError("offset must be a timedelta")
+        if name is _Omitted:
+            if not offset:
+                return cls.utc  # Singleton for UTC
+            name = None
+        return cls._create(offset, name)
+
+    def utcoffset(self, dt):
+        return self._offset
+
+    def tzname(self, dt):
+        if self._name is None:
+            return self._name_from_offset(self._offset)
+        return self._name
+```
+
+`timezone(timedelta(hours=5, minutes=30))` represents IST (UTC+5:30). `timezone.utc` is a singleton. `astimezone(tz)` converts between timezones using `utcoffset()`.
+
+## gopy notes
+
+`datetime.now` is `module/datetime.DatetimeNow` in `module/datetime/module.go`. Uses `time.Now()`. `fromtimestamp` uses `time.Unix(sec, nsec).In(loc)`. `timezone` is `module/datetime.Timezone` wrapping a `time.Location`. `strftime` uses `time.Format` with a CPython-to-Go format conversion.

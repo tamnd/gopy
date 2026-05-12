@@ -1,0 +1,78 @@
+---
+title: Objects/cellobject.c (part 3)
+description: "Objects/cellobject.c part 3: PyCellObject layout, PyCell_New, PyCell_Get, PyCell_Set, empty cell handling."
+cpython_path: Objects/cellobject.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/cellobject.c" />
+
+This annotation covers the cell object implementation. See `python_ceval60_detail` for `MAKE_CELL`, `LOAD_DEREF`, and `STORE_DEREF`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `PyCellObject` layout | Single pointer `ob_ref` wrapping a value |
+| 61-120 | `PyCell_New` | Create a cell with optional initial content |
+| 121-180 | `PyCell_Get` / `PyCell_Set` | Thread-safe read/write |
+| 181-300 | `cell.__repr__` / `__eq__` | String representation and equality |
+
+## Reading
+
+### `PyCellObject` layout
+
+```c
+// CPython: Objects/cellobject.c:10 PyCellObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *ob_ref;  /* NULL if cell is empty */
+} PyCellObject;
+```
+
+A cell is just a mutable box containing one reference. `ob_ref == NULL` means the variable is unbound (not yet assigned, or `del`-ed). `LOAD_DEREF` raises `UnboundLocalError` when `ob_ref` is NULL.
+
+### `PyCell_New`
+
+```c
+// CPython: Objects/cellobject.c:20 PyCell_New
+PyObject *
+PyCell_New(PyObject *obj)
+{
+    PyCellObject *op = (PyCellObject *)PyObject_GC_New(PyCellObject, &PyCell_Type);
+    op->ob_ref = Py_XNewRef(obj);
+    _PyObject_GC_TRACK(op);
+    return (PyObject *)op;
+}
+```
+
+Cell objects are GC-tracked because they can participate in reference cycles (a closure that references itself). `Py_XNewRef` handles `obj == NULL` (empty cell).
+
+### Thread safety
+
+```c
+// CPython: Objects/cellobject.c:60 PyCell_Set
+int
+PyCell_Set(PyObject *op, PyObject *value)
+{
+    PyObject *old;
+    if (!PyCell_Check(op)) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    old = PyCell_GET(op);
+    PyCell_SET(op, Py_XNewRef(value));
+    Py_XDECREF(old);
+    return 0;
+}
+```
+
+`PyCell_SET` is a direct macro: `((PyCellObject*)op)->ob_ref = v`. The decref of the old value happens after the new value is stored, avoiding a window where the value is unreachable. Under the GIL, this is safe; with per-object locks in 3.13+, cell access requires holding the cell's lock.
+
+## gopy notes
+
+`PyCellObject` is `objects.Cell` in `objects/cell.go`. `ob_ref` is a `*objects.Object`. `PyCell_Set` updates the pointer. `LOAD_DEREF` reads `cell.Ref` and raises `objects.UnboundLocalError` if `nil`. `STORE_DEREF` sets `cell.Ref`.

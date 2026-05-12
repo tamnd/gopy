@@ -1,0 +1,98 @@
+---
+title: Modules/mathmodule.c (part 7)
+description: "mathmodule.c part 7: math.isclose, math.prod, math.comb, math.perm, math.dist, math.hypot variadic."
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mathmodule.c" />
+
+This annotation covers combinatorial and distance math functions. See `modules_math6_detail` for `math.sqrt`, `math.log`, `math.floor`, `math.ceil`, and `math.factorial`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `math.isclose` | Approximate equality test |
+| 81-160 | `math.prod` | Product of an iterable |
+| 161-240 | `math.comb` | Combinations `C(n, k)` |
+| 241-320 | `math.perm` | Permutations `P(n, k)` |
+| 321-600 | `math.hypot` / `math.dist` | Euclidean distance, variadic hypot |
+
+## Reading
+
+### `math.isclose`
+
+```c
+// CPython: Modules/mathmodule.c:2820 math_isclose_impl
+static PyObject *
+math_isclose_impl(PyObject *module, double a, double b,
+                  double rel_tol, double abs_tol)
+{
+    /* Default: rel_tol=1e-9, abs_tol=0.0 */
+    if (a == b) return Py_True;
+    if (Py_IS_INFINITY(a) || Py_IS_INFINITY(b)) return Py_False;
+    double diff = fabs(b - a);
+    return (diff <= fabs(rel_tol * b) || diff <= fabs(rel_tol * a) || diff <= abs_tol)
+           ? Py_True : Py_False;
+}
+```
+
+`math.isclose(a, b, rel_tol=1e-9, abs_tol=0.0)` returns `True` if the relative or absolute difference is within tolerance. The two `rel_tol` comparisons handle the case where `a` or `b` is much larger.
+
+### `math.comb`
+
+```c
+// CPython: Modules/mathmodule.c:2480 math_comb_impl
+static PyObject *
+math_comb_impl(PyObject *module, PyObject *n, PyObject *k)
+{
+    /* C(n, k) = n! / (k! * (n-k)!)
+       Use: C(n, k) = C(n, n-k) when k > n/2 */
+    if (PyObject_RichCompareBool(k, n_minus_k, Py_GT) == 1) {
+        k = n_minus_k;  /* Use smaller k */
+    }
+    /* Iterative: result = 1; for i in range(k): result = result * (n-i) / (i+1) */
+    PyObject *result = PyLong_FromLong(1);
+    for (long i = 0; i < k_long; i++) {
+        result = PyNumber_Multiply(result, n_minus_i);
+        result = PyNumber_FloorDivide(result, i_plus_1);
+    }
+    return result;
+}
+```
+
+`math.comb(10, 3)` returns `120`. The iterative formula divides at each step to keep the intermediate value from growing too large. The result is always exact (integer division is exact at each step).
+
+### `math.hypot` variadic
+
+```c
+// CPython: Modules/mathmodule.c:2640 math_hypot
+static PyObject *
+math_hypot(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* Numerically stable: find max, then sum (x/max)^2 */
+    double max = 0.0;
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        double x = fabs(PyFloat_AsDouble(args[i]));
+        if (x > max) max = x;
+    }
+    if (max == 0.0 || Py_IS_INFINITY(max)) return PyFloat_FromDouble(max);
+    double sum = 0.0;
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        double x = PyFloat_AsDouble(args[i]) / max;
+        sum += x * x;
+    }
+    return PyFloat_FromDouble(max * sqrt(sum));
+}
+```
+
+`math.hypot(3, 4, 5)` returns `sqrt(50)`. The two-pass algorithm prevents overflow: scaling by `max` keeps all values in `[0, 1]`. `math.dist([x1,y1], [x2,y2])` is `math.hypot(x2-x1, y2-y1)`.
+
+## gopy notes
+
+`math.isclose` is `module/math.IsClose` in `module/math/module.go`. `math.comb` uses `big.Int` multiplication/division for large inputs. `math.hypot` variadic is `module/math.HypotMulti` using the two-pass scaling algorithm. `math.prod` uses `math/big.Int` or `float64` depending on input types.

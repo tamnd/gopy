@@ -1,0 +1,94 @@
+---
+title: Python/ceval.c (part 67)
+description: "Python/ceval.c part 67: COMPARE_OP specializations, COMPARE_OP_INT, COMPARE_OP_FLOAT, COMPARE_OP_STR."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `COMPARE_OP` specializations. See `python_ceval66_detail` for `BINARY_OP` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `COMPARE_OP` baseline | Generic comparison via `PyObject_RichCompare` |
+| 81-160 | `COMPARE_OP_INT` | Fast path: compact integer comparison |
+| 161-240 | `COMPARE_OP_FLOAT` | Fast path: `double` comparison |
+| 241-320 | `COMPARE_OP_STR` | Fast path: string `==` via pointer check |
+| 321-500 | `IS_OP` / `CONTAINS_OP` | `is`, `is not`, `in`, `not in` |
+
+## Reading
+
+### `COMPARE_OP_INT`
+
+```c
+// CPython: Python/ceval.c:2420 COMPARE_OP_INT
+inst(COMPARE_OP_INT, (left, right -- res)) {
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)left), COMPARE_OP);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)right), COMPARE_OP);
+    int sign;
+    Py_ssize_t vl = _PyLong_CompactValue((PyLongObject *)left);
+    Py_ssize_t vr = _PyLong_CompactValue((PyLongObject *)right);
+    switch (oparg >> 4) {
+    case Py_LT: sign = vl < vr; break;
+    case Py_LE: sign = vl <= vr; break;
+    case Py_EQ: sign = vl == vr; break;
+    case Py_NE: sign = vl != vr; break;
+    case Py_GT: sign = vl > vr; break;
+    case Py_GE: sign = vl >= vr; break;
+    }
+    res = (sign ^ (oparg & 16)) ? Py_True : Py_False;
+    Py_INCREF(res);
+    Py_DECREF(left); Py_DECREF(right);
+}
+```
+
+`oparg >> 4` encodes the comparison operator; `oparg & 16` inverts for `not in`/`!=` variants. The compact int check ensures no digit-array arithmetic is needed.
+
+### `COMPARE_OP_STR`
+
+```c
+// CPython: Python/ceval.c:2500 COMPARE_OP_STR
+inst(COMPARE_OP_STR, (left, right -- res)) {
+    DEOPT_IF(!PyUnicode_CheckExact(left), COMPARE_OP);
+    DEOPT_IF(!PyUnicode_CheckExact(right), COMPARE_OP);
+    int eq;
+    if (left == right) {
+        eq = 1;  /* Same object: always equal */
+    } else {
+        eq = (PyUnicode_GET_LENGTH(left) == PyUnicode_GET_LENGTH(right) &&
+              PyUnicode_DATA(left) == PyUnicode_DATA(right));
+        if (!eq) eq = (_PyUnicode_Equal(left, right));
+    }
+    int sign = (oparg >> 4 == Py_EQ) ? eq : !eq;
+    res = (sign ^ (oparg & 16)) ? Py_True : Py_False;
+    ...
+}
+```
+
+String equality first checks pointer identity (interned strings), then length + data pointer (same buffer sharing), then byte-by-byte equality. `COMPARE_OP_STR` only specializes for `==` and `!=`; ordering (`<`, `>`) falls back to the generic path.
+
+### `CONTAINS_OP`
+
+```c
+// CPython: Python/ceval.c:2580 CONTAINS_OP
+inst(CONTAINS_OP, (left, right -- res)) {
+    /* oparg: 0 = "in", 1 = "not in" */
+    int b = PySequence_Contains(right, left);
+    ERROR_IF(b < 0, error);
+    res = (b ^ oparg) ? Py_True : Py_False;
+    Py_INCREF(res); Py_DECREF(left); Py_DECREF(right);
+}
+```
+
+`CONTAINS_OP` calls `PySequence_Contains`, which tries `__contains__` then falls back to iteration. For sets and dicts, `__contains__` is the O(1) hash lookup.
+
+## gopy notes
+
+`COMPARE_OP_INT` is in `vm/eval_simple.go`. Compact int comparison is a direct `int64` comparison. `COMPARE_OP_STR` calls `objects.UnicodeEqual`. `CONTAINS_OP` calls `objects.SequenceContains`. `IS_OP` compares pointer identity (`left == right`).
