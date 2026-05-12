@@ -1,0 +1,100 @@
+---
+title: Objects/typeobject.c (part 12)
+description: "Objects/typeobject.c part 12: type.__subclasscheck__, type.__instancecheck__, mro_internal, C3 linearization."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+This annotation covers `isinstance`/`issubclass` and MRO computation. See `objects_typeobject11_detail` for `type.__new__`, `type.__init__`, and slot inheritance.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `type.__instancecheck__` | `isinstance(obj, cls)` |
+| 81-160 | `type.__subclasscheck__` | `issubclass(sub, cls)` |
+| 161-280 | `mro_internal` | Compute the MRO for a new type |
+| 281-420 | C3 linearization | The merge algorithm |
+| 421-600 | `_PyType_Lookup` | Attribute lookup following the MRO |
+
+## Reading
+
+### `type.__instancecheck__`
+
+```c
+// CPython: Objects/typeobject.c:4880 type_instancecheck
+static PyObject *
+type_instancecheck(PyObject *cls, PyObject *instance)
+{
+    int r = PyObject_IsInstance(instance, cls);
+    if (r < 0) return NULL;
+    return PyBool_FromLong(r);
+}
+
+// CPython: Objects/typeobject.c:3120 PyObject_IsInstance
+int
+PyObject_IsInstance(PyObject *inst, PyObject *cls)
+{
+    /* Check __class__ attribute first for virtual subclasses */
+    PyObject *icls = PyObject_GetAttr(inst, &_Py_ID(__class__));
+    if (PyType_Check(cls)) {
+        /* Fast path: check ob_type */
+        int result = PyObject_TypeCheck(inst, (PyTypeObject *)cls);
+        if (!result && icls != NULL)
+            result = PyType_IsSubtype((PyTypeObject *)icls, (PyTypeObject *)cls);
+        ...
+    }
+}
+```
+
+`isinstance` checks the actual type first, then `__class__` (which may differ for proxy objects). ABCs (abstract base classes) can override `__instancecheck__` to implement virtual subclassing.
+
+### C3 linearization
+
+```c
+// CPython: Objects/typeobject.c:2480 mro_internal
+static PyObject *
+mro_internal(PyTypeObject *type, PyObject **p_old_mro)
+{
+    /* C3 linearization:
+       L[C(B1, B2, ...)] = C + merge(L[B1], L[B2], ..., [B1, B2, ...])
+       merge: take the head of the first list if it doesn't appear in the
+              tail of any other list. Remove it from all lists. Repeat.
+    */
+    ...
+}
+```
+
+C3 ensures that the MRO is consistent with both the local precedence order (subclass before base) and the monotonicity constraint (the MRO of a base is preserved in the subclass's MRO). A TypeError is raised when no consistent linearization exists.
+
+### `_PyType_Lookup`
+
+```c
+// CPython: Objects/typeobject.c:3640 _PyType_Lookup
+PyObject *
+_PyType_Lookup(PyTypeObject *type, PyObject *name)
+{
+    /* Search the MRO for `name` */
+    PyObject *mro = type->tp_mro;
+    Py_ssize_t n = PyTuple_GET_SIZE(mro);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *base = PyTuple_GET_ITEM(mro, i);
+        PyObject *dict = ((PyTypeObject *)base)->tp_dict;
+        PyObject *res = PyDict_GetItemWithError(dict, name);
+        if (res != NULL) return res;
+    }
+    return NULL;
+}
+```
+
+`_PyType_Lookup` walks the MRO and searches each class's `__dict__`. It does NOT call `__getattribute__`; it is the raw slot lookup used by the attribute machinery.
+
+## gopy notes
+
+`type.__instancecheck__` is `objects.TypeInstanceCheck` in `objects/type.go`. MRO computation is `objects.ComputeMRO` using the C3 algorithm. `_PyType_Lookup` is `objects.TypeLookup`, which walks `type.MRO` and calls `objects.DictGetItem` on each class's dict.

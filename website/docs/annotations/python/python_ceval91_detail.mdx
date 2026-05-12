@@ -1,0 +1,95 @@
+---
+title: Python/ceval.c (part 91)
+description: "Python/ceval.c part 91: BINARY_OP, BINARY_OP_ADD_INT, BINARY_OP_ADD_UNICODE, BINARY_OP_MULTIPLY_INT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers binary arithmetic specializations. See `python_ceval90_detail` for `LOAD_GLOBAL` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_OP` | Generic binary operation dispatcher |
+| 81-160 | `BINARY_OP_ADD_INT` | Specialization for `int + int` |
+| 161-240 | `BINARY_OP_ADD_UNICODE` | Specialization for `str + str` |
+| 241-320 | `BINARY_OP_MULTIPLY_INT` | Specialization for `int * int` |
+| 321-500 | `BINARY_OP_SUBTRACT_INT` / `FLOAT` variants | Other numeric specializations |
+
+## Reading
+
+### `BINARY_OP`
+
+```c
+// CPython: Python/ceval.c:5420 BINARY_OP
+inst(BINARY_OP, (lhs, rhs -- res)) {
+    assert(NB_ADD <= oparg && oparg <= NB_INPLACE_XOR);
+    PyObject *(*binary_op)(PyObject *, PyObject *) = _PyEval_BinaryOps[oparg];
+    res = binary_op(lhs, rhs);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(lhs);
+    Py_DECREF(rhs);
+}
+```
+
+`BINARY_OP` uses a dispatch table indexed by `oparg` (e.g., `NB_ADD`, `NB_MULTIPLY`). The dispatch table holds function pointers to `PyNumber_Add`, `PyNumber_Multiply`, etc.
+
+### `BINARY_OP_ADD_INT`
+
+```c
+// CPython: Python/ceval.c:5480 BINARY_OP_ADD_INT
+inst(BINARY_OP_ADD_INT, (left, right -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyLong_CheckExact(right), BINARY_OP);
+    STAT_INC(BINARY_OP, hit);
+    res = _PyLong_Add((PyLongObject *)left, (PyLongObject *)right);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(left);
+    Py_DECREF(right);
+}
+```
+
+`BINARY_OP_ADD_INT` calls `_PyLong_Add` directly, bypassing the `PyNumber_Add` dispatch. `_PyLong_Add` has a fast path for small integers (the `compact` representation).
+
+### `BINARY_OP_ADD_UNICODE`
+
+```c
+// CPython: Python/ceval.c:5520 BINARY_OP_ADD_UNICODE
+inst(BINARY_OP_ADD_UNICODE, (left, right -- res)) {
+    DEOPT_IF(!PyUnicode_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyUnicode_CheckExact(right), BINARY_OP);
+    res = PyUnicode_Concat(left, right);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(left);
+    Py_DECREF(right);
+}
+```
+
+String concatenation is specialized to call `PyUnicode_Concat` directly. `PyUnicode_Concat` allocates the result string and copies both parts; for repeated concatenation, use `''.join(parts)` instead.
+
+### `BINARY_OP_MULTIPLY_INT`
+
+```c
+// CPython: Python/ceval.c:5560 BINARY_OP_MULTIPLY_INT
+inst(BINARY_OP_MULTIPLY_INT, (left, right -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyLong_CheckExact(right), BINARY_OP);
+    res = _PyLong_Multiply((PyLongObject *)left, (PyLongObject *)right);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(left);
+    Py_DECREF(right);
+}
+```
+
+`_PyLong_Multiply` has a fast path for small integers (fitting in one `ob_digit`) using C integer multiply. Larger integers use Karatsuba or schoolbook multiplication.
+
+## gopy notes
+
+`BINARY_OP` is in `vm/eval_simple.go` dispatching via a switch on `oparg`. `BINARY_OP_ADD_INT` calls `objects.IntAdd`. `BINARY_OP_ADD_UNICODE` calls `objects.StrConcat`. Specializations are not inline-cached yet; the generic path calls `objects.BinaryOp`.

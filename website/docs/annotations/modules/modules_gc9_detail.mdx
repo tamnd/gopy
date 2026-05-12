@@ -1,0 +1,106 @@
+---
+title: Modules/gcmodule.c (part 9)
+description: "gcmodule.c part 9: gc.collect, gc.get_objects, gc.get_threshold, gc.set_threshold, finalization."
+cpython_path: Modules/gcmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/gcmodule.c" />
+
+This annotation covers the `gc` module's Python-level interface. See `modules_gc8_detail` for the generational collector algorithm and cycle detection.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `gc.collect` | Trigger a garbage collection |
+| 81-160 | `gc.get_objects` | List all tracked objects |
+| 161-240 | `gc.get_threshold` / `gc.set_threshold` | Tune collection thresholds |
+| 241-340 | `gc.get_count` | Current generation counts |
+| 341-500 | Finalization order | `__del__` and weakref callbacks |
+
+## Reading
+
+### `gc.collect`
+
+```c
+// CPython: Modules/gcmodule.c:2080 gc_collect_impl
+static PyObject *
+gc_collect_impl(PyObject *module, int generation)
+{
+    GCState *gcstate = get_gc_state();
+    Py_ssize_t n;
+    if (generation == NUM_GENERATIONS - 1) {
+        /* Full collection */
+        n = gc_collect_main(gcstate, generation, NULL, NULL, 0);
+    } else {
+        n = gc_collect_main(gcstate, generation, NULL, NULL, 0);
+    }
+    return PyLong_FromSsize_t(n);
+}
+```
+
+`gc.collect()` returns the number of unreachable objects found. `gc.collect(0)` collects only generation 0 (the youngest); `gc.collect(2)` is a full collection.
+
+### `gc.get_objects`
+
+```c
+// CPython: Modules/gcmodule.c:2140 gc_get_objects_impl
+static PyObject *
+gc_get_objects_impl(PyObject *module, int generation)
+{
+    GCState *gcstate = get_gc_state();
+    PyObject *result = PyList_New(0);
+    /* Walk all tracked objects in the specified generation */
+    for (int gen = 0; gen <= MAX_GEN; gen++) {
+        if (generation != -1 && gen != generation) continue;
+        gc_list_for_each(head, obj):
+            PyList_Append(result, obj);
+    }
+    return result;
+}
+```
+
+`gc.get_objects()` returns all objects currently tracked by the GC. The returned list itself is not included. Useful for debugging memory leaks.
+
+### Finalization order
+
+```c
+// CPython: Modules/gcmodule.c:1480 finalize_garbage
+static void
+finalize_garbage(PyThreadState *tstate, PyGC_Head *collectable)
+{
+    /* Call __del__ on each unreachable object with a finalizer */
+    for each obj in collectable with __del__:
+        PyObject_CallMethodNoArgs(obj, &_Py_ID(__del__));
+    /* After __del__, check if obj is still unreachable.
+       If __del__ resurrected the object, move it out. */
+}
+```
+
+`__del__` can resurrect objects by storing a reference. After finalization, the GC re-checks reachability. Objects that survive are moved to `gc.garbage` (the list of uncollectable objects).
+
+### `gc.get_threshold`
+
+```c
+// CPython: Modules/gcmodule.c:2220 gc_get_threshold_impl
+static PyObject *
+gc_get_threshold_impl(PyObject *module)
+{
+    GCState *gcstate = get_gc_state();
+    return Py_BuildValue("(iii)",
+        gcstate->generations[0].threshold,
+        gcstate->generations[1].threshold,
+        gcstate->generations[2].threshold);
+}
+```
+
+The default thresholds are `(700, 10, 10)`: after 700 new objects are allocated, generation 0 is collected; after 10 generation-0 collections, generation 1 is collected, etc.
+
+## gopy notes
+
+`gc.collect` is `module/gc.Collect` in `module/gc/module.go`. It calls `vm.GCCollect`. `gc.get_objects` walks `vm.GCState.Tracked`. `gc.get_threshold`/`set_threshold` read/write `vm.GCState.Thresholds`. Finalization calls `__del__` via `objects.CallMethodNoArgs`.

@@ -1,0 +1,88 @@
+---
+title: Lib/types.py (part 3)
+description: "types.py part 3: SimpleNamespace, MappingProxyType, DynamicClassAttribute, GenericAlias, UnionType."
+cpython_path: Lib/types.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/types.py" />
+
+This annotation covers the less-common but important types in the `types` module. See `lib_types2_detail` for `FunctionType`, `MethodType`, `CodeType`, and `ModuleType`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `SimpleNamespace` | Mutable namespace with attribute access |
+| 61-140 | `MappingProxyType` | Read-only view of a dict |
+| 141-220 | `DynamicClassAttribute` | Descriptor with different behavior on class vs instance |
+| 221-300 | `GenericAlias` | `list[int]`, `dict[str, int]` — parameterized generics |
+| 301-400 | `UnionType` | `int | str` — union type expressions |
+
+## Reading
+
+### `SimpleNamespace`
+
+```python
+# CPython: Lib/types.py:34 SimpleNamespace
+class SimpleNamespace:
+    def __init__(self, /, **kwargs):
+        self.__dict__.update(kwargs)
+    def __repr__(self):
+        items = (f'{k}={v!r}' for k, v in self.__dict__.items())
+        return f'{type(self).__name__}({", ".join(items)})'
+    def __eq__(self, other):
+        if isinstance(self, SimpleNamespace) and isinstance(other, SimpleNamespace):
+            return self.__dict__ == other.__dict__
+        return NotImplemented
+```
+
+`types.SimpleNamespace(x=1, y=2)` creates an object where `ns.x == 1`. Unlike a dict, attributes are accessed with `.` syntax. Useful as a lightweight alternative to a class or `dataclasses.dataclass`.
+
+### `MappingProxyType`
+
+```python
+# CPython: Objects/descrobject.c: 2100 (C type, but exposed in types.py)
+# MappingProxyType wraps a dict and exposes read-only access.
+# Setting items raises TypeError.
+```
+
+`types.MappingProxyType(d)` is used for `cls.__dict__` to prevent accidental modification of a class's namespace. It supports all read operations: iteration, `len`, `__getitem__`, `keys`, `values`, `items`.
+
+### `DynamicClassAttribute`
+
+```python
+# CPython: Lib/types.py:60 DynamicClassAttribute
+class DynamicClassAttribute:
+    def __init__(self, fget=None, fset=None, fdel=None, doc=None):
+        self.fget = fget
+        ...
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            if self.__doc__:
+                return self
+            raise AttributeError(self.attrname)
+        if self.fget is None:
+            raise AttributeError(...)
+        return self.fget(obj)
+```
+
+When accessed on the class (`obj is None`), `DynamicClassAttribute` raises `AttributeError`, allowing the metaclass to provide a different value. When accessed on an instance, it behaves like a normal property. Used by `enum.Enum` to make `Enum.name` and `Enum.value` instance-only.
+
+### `GenericAlias`
+
+```c
+// CPython: Objects/genericaliasobject.c: Ga_getitem
+/* list[int].__class_getitem__(int) returns GenericAlias(list, (int,)) */
+/* Subscript: dict[str, int] → GenericAlias(dict, (str, int)) */
+```
+
+`GenericAlias` objects are created by `list[int]`, `dict[str, int]`, etc. They support `isinstance` checks via `__instancecheck__`, equality, `repr`, and `__class_getitem__` chaining. `typing.get_args(list[int])` returns `(int,)`.
+
+## gopy notes
+
+`SimpleNamespace` is `objects.SimpleNamespace` in `objects/namespace.go`. `MappingProxyType` is `objects.MappingProxy` in `objects/mapping_proxy.go`. `DynamicClassAttribute` is `objects.DynamicClassAttribute`. `GenericAlias` is `objects.GenericAlias` in `objects/generic_alias.go`. `UnionType` is `objects.UnionType` in `objects/union_type.go`.
