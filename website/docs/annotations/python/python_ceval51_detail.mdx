@@ -1,0 +1,87 @@
+---
+title: Python/ceval.c (part 51)
+description: "Python/ceval.c part 51: LOAD_GLOBAL specializations — LOAD_GLOBAL_MODULE, LOAD_GLOBAL_BUILTIN."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `LOAD_GLOBAL` specializations. See `python_ceval50_detail` for `FOR_ITER` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_GLOBAL_MODULE` | Load a name from the module's `__dict__` |
+| 81-160 | `LOAD_GLOBAL_BUILTIN` | Load a builtin with version-checked cache |
+| 161-260 | `LOAD_GLOBAL` (generic) | Fallback: module dict then builtins |
+| 261-360 | Cache invalidation | Module dict version tag |
+| 361-500 | `STORE_GLOBAL` / `DELETE_GLOBAL` | Write and delete module-level names |
+
+## Reading
+
+### `LOAD_GLOBAL_MODULE`
+
+```c
+// CPython: Python/ceval.c:4360 LOAD_GLOBAL_MODULE
+inst(LOAD_GLOBAL_MODULE, (unused/4 -- null if (oparg & 1), res)) {
+    /* Cache: (globals_version, index) */
+    PyDictObject *dict = (PyDictObject *)GLOBALS();
+    DEOPT_IF(!PyDict_CheckExact(dict));
+    PyDictKeysObject *keys = dict->ma_keys;
+    DEOPT_IF(cache->version != keys->dk_version);
+    /* Direct index lookup using cached position */
+    PyObject *res = _PyDictValues_GetItemByIndex(dict->ma_values, cache->index);
+    DEOPT_IF(res == NULL);
+    Py_INCREF(res);
+    DISPATCH();
+}
+```
+
+`LOAD_GLOBAL_MODULE` caches the index into the module dict's values array. Valid as long as `dk_version` matches. This avoids a hash lookup on every global variable access in a hot loop.
+
+### `LOAD_GLOBAL_BUILTIN`
+
+```c
+// CPython: Python/ceval.c:4420 LOAD_GLOBAL_BUILTIN
+inst(LOAD_GLOBAL_BUILTIN, (unused/4 -- null if (oparg & 1), res)) {
+    /* Cache: (builtins_version, globals_version, index) */
+    DEOPT_IF(cache->builtins_version != builtins_dict->ma_version_tag);
+    DEOPT_IF(cache->globals_version != globals_dict->ma_version_tag);
+    /* Direct lookup in builtins dict */
+    PyObject *res = _PyDictValues_GetItemByIndex(builtins_dict->ma_values, cache->index);
+    DEOPT_IF(res == NULL);
+    Py_INCREF(res);
+    DISPATCH();
+}
+```
+
+The globals version check is important: if any global with the same name as the builtin is defined, the specialization deoptimizes. This allows `len = my_len` to shadow the builtin correctly.
+
+### Generic `LOAD_GLOBAL`
+
+```c
+// CPython: Python/ceval.c:4480 LOAD_GLOBAL
+inst(LOAD_GLOBAL, (unused/4 -- null if (oparg & 1), res)) {
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg >> 1);
+    /* Check module dict first */
+    res = PyDict_GetItemWithError(GLOBALS(), name);
+    if (res != NULL) { Py_INCREF(res); DISPATCH(); }
+    /* Then builtins */
+    res = PyDict_GetItemWithError(BUILTINS(), name);
+    if (res != NULL) { Py_INCREF(res); DISPATCH(); }
+    PyErr_Format(PyExc_NameError, "name '%.200s' is not defined", ...);
+    ERROR_IF(true, error);
+}
+```
+
+The fallback always checks globals then builtins. No specialization cache is consulted.
+
+## gopy notes
+
+`LOAD_GLOBAL_MODULE` checks `objects.Dict.Version` against a cached value and reads from a cached index. `LOAD_GLOBAL_BUILTIN` checks both the module dict version (to detect shadowing) and the builtins dict version. Both are in `vm/eval_simple.go`. `STORE_GLOBAL` calls `objects.DictSetItem(frame.Globals, name, value)`.

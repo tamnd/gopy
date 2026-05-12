@@ -1,0 +1,95 @@
+---
+title: Objects/dictobject.c (part 9)
+description: "Objects/dictobject.c part 9: dict.update, dict.setdefault, dict.__or__, dict.copy, dict merge operators."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers dict bulk operations and merge operators. See `objects_dictobject8_detail` for `dict.__getitem__`, `__setitem__`, `__delitem__`, and split-table layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dict.update` | Merge another mapping or iterable of pairs |
+| 81-160 | `dict.setdefault` | Set key only if absent |
+| 161-260 | `dict.__or__` / `__ior__` | `d1 \| d2` merge operator (Python 3.9+) |
+| 261-360 | `dict.copy` | Shallow copy |
+| 361-500 | `_PyDict_MergeEx` | Internal merge with conflict detection |
+
+## Reading
+
+### `dict.update`
+
+```c
+// CPython: Objects/dictobject.c:2920 dict_update_common
+static int
+dict_update_common(PyObject *self, PyObject *args, PyObject *kwds,
+                   const char *methname)
+{
+    /* dict.update([other,] **kwds)
+       other can be a dict, a mapping with 'keys', or an iterable of (k, v) */
+    if (args != NULL) {
+        PyObject *arg = PyTuple_GET_ITEM(args, 0);
+        if (PyDict_CheckExact(arg)) {
+            return PyDict_Merge(self, arg, 1);  /* 1 = override */
+        } else if (PyObject_HasAttr(arg, str_keys)) {
+            return PyDict_Merge(self, arg, 1);
+        } else {
+            return PyDict_MergeFromSeq2(self, arg, 1);
+        }
+    }
+    if (kwds && PyDict_GET_SIZE(kwds)) {
+        return PyDict_Merge(self, kwds, 1);
+    }
+    return 0;
+}
+```
+
+`d.update({'a': 1})` uses `PyDict_Merge` (fast dict-to-dict). `d.update([('a', 1)])` uses `PyDict_MergeFromSeq2` (iterate pairs). `d.update(a=1)` processes the `**kwds`.
+
+### `dict.setdefault`
+
+```c
+// CPython: Objects/dictobject.c:3020 dict_setdefault_impl
+static PyObject *
+dict_setdefault_impl(PyDictObject *self, PyObject *key, PyObject *default_value)
+{
+    /* Return self[key] if key in self, else self[key] = default and return default */
+    PyObject *val = PyDict_GetItemWithError((PyObject *)self, key);
+    if (val == NULL && !PyErr_Occurred()) {
+        PyDict_SetItem((PyObject *)self, key, default_value);
+        val = default_value;
+    }
+    return Py_XNewRef(val);
+}
+```
+
+`d.setdefault('key', []).append(x)` is the classic pattern for accumulating values. The lookup and insert are not atomic (no locking), but within a single thread it is always correct.
+
+### `dict.__or__`
+
+```c
+// CPython: Objects/dictobject.c:3120 dict_or
+static PyObject *
+dict_or(PyObject *self, PyObject *other)
+{
+    /* {**self, **other} — other's keys win on conflict */
+    if (!PyDict_Check(self) || !PyDict_Check(other)) return Py_NotImplemented;
+    PyObject *new = PyDict_Copy(self);
+    PyDict_Merge(new, other, 1);  /* 1 = override */
+    return new;
+}
+```
+
+`d1 | d2` returns a new dict with all keys from both, with `d2` taking precedence. `d1 |= d2` does the merge in place. Added in Python 3.9 (PEP 584).
+
+## gopy notes
+
+`dict.update` is `objects.DictUpdate` in `objects/dict_mutate.go`. It dispatches on the input type using `objects.IsDict` fast path. `dict.setdefault` is `objects.DictSetDefault`. `dict.__or__` calls `objects.DictCopy` then `objects.DictMerge`. `_PyDict_MergeEx` (for `**kwargs` duplicate detection) is `objects.DictMergeEx` which returns an error on duplicate keys.

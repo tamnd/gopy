@@ -1,0 +1,81 @@
+---
+title: Modules/_multiprocessing/semaphore.c (part 5)
+description: "_multiprocessing semaphore.c part 5: SemLock acquire/release, rebuild_context, shared memory segment."
+cpython_path: Modules/_multiprocessing/semaphore.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_multiprocessing/semaphore.c" />
+
+This annotation covers multiprocessing synchronization primitives. See `module_multiprocessing4_detail` for `Process`, `Queue`, `Pipe`, and `Manager`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SemLock.__init__` | Create a named or unnamed POSIX semaphore |
+| 81-180 | `SemLock.acquire` | Decrement with optional timeout |
+| 181-260 | `SemLock.release` | Increment and wake waiting processes |
+| 261-360 | `SemLock._rebuild` | Reconstruct from FD for pickling |
+| 361-500 | Shared memory | `/dev/shm`-based memory segments |
+
+## Reading
+
+### `SemLock.acquire`
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:280 semlock_acquire
+static PyObject *
+semlock_acquire(SemLockObject *self, PyObject *args, PyObject *kwds)
+{
+    double timeout = -1.0;  /* -1 = block forever */
+    int blocking = 1;
+    ...
+    if (!blocking) {
+        int res = sem_trywait(self->handle);
+        return PyBool_FromLong(res == 0);
+    }
+    if (timeout > 0) {
+        struct timespec deadline;
+        ...
+        int res = sem_timedwait(self->handle, &deadline);
+        return PyBool_FromLong(res == 0);
+    }
+    Py_BEGIN_ALLOW_THREADS
+    sem_wait(self->handle);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_TRUE;
+}
+```
+
+`SemLock` wraps POSIX semaphores (`sem_open`/`sem_init`). It is the foundation for `multiprocessing.Lock`, `Semaphore`, `BoundedSemaphore`, and `Condition`. The GIL is released during blocking `sem_wait` so other Python threads can run.
+
+### `SemLock._rebuild`
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:480 semlock_rebuild
+static PyObject *
+semlock_rebuild(PyTypeObject *type, PyObject *args)
+{
+    /* Used by multiprocessing to pass a lock between processes via pickling.
+       The semaphore name (for named) or fd (for unnamed) is transferred. */
+    SEM_HANDLE handle;
+    char *name = NULL;
+    if (name) {
+        handle = sem_open(name, 0);  /* Reopen by name */
+    } else {
+        handle = (SEM_HANDLE)fd;     /* Inherit fd across fork */
+    }
+    return newsemlockobject(type, handle, kind, maxvalue, name);
+}
+```
+
+Named semaphores persist in `/dev/shm` (or the kernel's semaphore namespace). They survive process death if not explicitly `sem_unlink`-ed. Unnamed semaphores are passed via file descriptor inheritance across `fork`.
+
+## gopy notes
+
+`SemLock` is `module/multiprocessing.SemLock` in `module/multiprocessing/module.go`. It wraps `sync.Mutex` for inter-goroutine use. For inter-process use (cross-fork), it falls back to named POSIX semaphores via `syscall.Open` on `/dev/shm/`. `_rebuild` reconstructs from the inherited file descriptor.

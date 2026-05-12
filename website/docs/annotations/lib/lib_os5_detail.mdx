@@ -1,0 +1,91 @@
+---
+title: Lib/os.py (part 5)
+description: "os.py part 5: os.walk, os.scandir, DirEntry, os.stat_result, os.environ."
+cpython_path: Lib/os.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/os.py" />
+
+This annotation covers directory traversal and file metadata. See `module_os4_detail` for `os.open`, `os.read`, `os.write`, `os.close`, and process management.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `os.scandir` | Efficient directory listing with `DirEntry` |
+| 81-160 | `DirEntry` | Cached file metadata from the OS |
+| 161-260 | `os.walk` | Top-down or bottom-up directory traversal |
+| 261-360 | `os.stat_result` | Named tuple for `os.stat()` output |
+| 361-500 | `os.environ` | Mapping interface to environment variables |
+
+## Reading
+
+### `os.scandir` and `DirEntry`
+
+```python
+# CPython: Lib/os.py:1080 scandir
+# (wraps Modules/posixmodule.c os_scandir_impl)
+
+# DirEntry provides:
+#   .name       — filename (not full path)
+#   .path       — full path
+#   .inode()    — inode number
+#   .is_dir()   — True if this is a directory (follows symlinks by default)
+#   .is_file()  — True if this is a regular file
+#   .is_symlink() — True if this is a symbolic link
+#   .stat()     — os.stat_result (cached)
+```
+
+`os.scandir()` returns a context manager (`ScandirIterator`) that yields `DirEntry` objects. The OS provides `is_dir`/`is_file` information "for free" on most platforms (via `d_type` on Linux, `FindFileData.dwFileAttributes` on Windows), avoiding extra `stat` calls.
+
+### `os.walk`
+
+```python
+# CPython: Lib/os.py:340 walk
+def walk(top, topdown=True, onerror=None, followlinks=False):
+    """Directory tree generator.
+    For each directory in the tree rooted at top, yields (dirpath, dirnames, filenames)."""
+    with scandir(top) as scandir_it:
+        dirs = []
+        nondirs = []
+        for entry in scandir_it:
+            if entry.is_dir(follow_symlinks=followlinks):
+                dirs.append(entry.name)
+            else:
+                nondirs.append(entry.name)
+    if topdown:
+        yield top, dirs, nondirs
+    for dirname in dirs:
+        new_path = path.join(top, dirname)
+        yield from walk(new_path, topdown, onerror, followlinks)
+    if not topdown:
+        yield top, dirs, nondirs
+```
+
+`topdown=True` yields a directory before its contents, allowing `dirs` to be modified in-place to prune subtrees. `topdown=False` yields leaves first (useful for `shutil.rmtree`).
+
+### `os.environ`
+
+```python
+# CPython: Lib/os.py:690 environ
+class _Environ(MutableMapping):
+    """Mapping interface to environment variables."""
+    def __setitem__(self, key, value):
+        putenv(key, value)
+        self._data[key] = value
+
+    def __delitem__(self, key):
+        unsetenv(key)
+        del self._data[key]
+```
+
+`os.environ` is an `_Environ` instance initialized at import time from `os.environb` (bytes-keyed). `os.environ['PATH'] = ...` calls the C `putenv` and updates the in-memory dict. Changes are inherited by child processes created with `os.fork`.
+
+## gopy notes
+
+`os.scandir` is `module/os.Scandir` in `module/os/module.go`, wrapping `os.ReadDir` and returning `*DirEntry` objects that cache `FileInfo`. `os.walk` is a pure-Go recursive generator using Go channels. `os.environ` is backed by `os.Environ()` and `os.Setenv`/`os.Unsetenv`.
