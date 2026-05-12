@@ -1,0 +1,161 @@
+---
+title: Lib/ftplib.py (part 2)
+description: "Lib/ftplib.py part 2: FTP.storbinary, FTP.retrlines, FTP.retrbinary, FTP.mlsd, FTP.nlst, FTP_TLS."
+cpython_path: Lib/ftplib.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/ftplib.py" />
+
+This annotation covers data transfer commands and TLS. See `lib_ftplib_detail` for `FTP.__init__`, `login`, `cwd`, `mkd`, `rmd`, `size`, and passive/active mode negotiation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `FTP.storbinary` | Upload a file in binary mode (STOR) |
+| 101-220 | `FTP.storlines` | Upload a file in ASCII/text mode |
+| 221-350 | `FTP.retrbinary` | Download a file in binary mode (RETR + callback) |
+| 351-500 | `FTP.retrlines` | Download a file line by line (RETR + line callback) |
+| 501-620 | `FTP.nlst` | List names in directory (NLST command) |
+| 621-750 | `FTP.mlsd` | Machine-readable directory listing (MLSD command) |
+| 751-900 | `FTP_TLS` | Subclass adding TLS via `ssl.wrap_socket` |
+
+## Reading
+
+### `FTP.storbinary`
+
+```python
+# CPython: Lib/ftplib.py:480 storbinary
+def storbinary(self, cmd, fp, blocksize=8192, callback=None, rest=None):
+    """Store a file in binary mode.
+
+    cmd     -- STOR command, e.g. 'STOR filename'
+    fp      -- file-like object to read from
+    blocksize -- bytes per send call (default 8192)
+    callback  -- called after each block is sent
+    rest    -- restart marker (REST command before STOR)
+    """
+    self.voidcmd('TYPE I')
+    with self.transfercmd(cmd, rest) as conn:
+        while 1:
+            buf = fp.read(blocksize)
+            if not buf:
+                break
+            conn.sendall(buf)
+            if callback:
+                callback(buf)
+    return self.voidresp()
+```
+
+`TYPE I` sets binary (image) transfer mode. `transfercmd` opens the data connection using passive or active mode. After the loop the command channel reads the 226 Transfer complete reply via `voidresp`.
+
+### `FTP.retrbinary`
+
+```python
+# CPython: Lib/ftplib.py:520 retrbinary
+def retrbinary(self, cmd, callback, blocksize=8192, rest=None):
+    """Retrieve a file in binary mode, calling callback for each block."""
+    self.voidcmd('TYPE I')
+    with self.transfercmd(cmd, rest) as conn:
+        while 1:
+            data = conn.recv(blocksize)
+            if not data:
+                break
+            callback(data)
+    return self.voidresp()
+```
+
+`callback` receives raw `bytes` chunks. A common pattern is `callback=open(filename,'wb').write`.
+
+### `FTP.retrlines`
+
+```python
+# CPython: Lib/ftplib.py:548 retrlines
+def retrlines(self, cmd, callback=None):
+    """Retrieve a file or directory listing, calling callback for each line."""
+    if callback is None:
+        callback = print
+    self.voidcmd('TYPE A')  # ASCII mode
+    with self.transfercmd(cmd) as conn, \
+         conn.makefile('r', encoding=self.encoding) as fp:
+        while 1:
+            line = fp.readline(self.maxline + 1)
+            if not line:
+                break
+            if line[-2:] == CRLF:
+                line = line[:-2]
+            elif line[-1:] == '\n':
+                line = line[:-1]
+            callback(line)
+    return self.voidresp()
+```
+
+Used for `LIST` (directory listing) and text file downloads. `TYPE A` sets ASCII mode which translates CRLF on the wire to newlines.
+
+### `FTP.mlsd`
+
+```python
+# CPython: Lib/ftplib.py:620 mlsd
+def mlsd(self, path="", facts=[]):
+    """Return an iterator of (name, facts_dict) for each entry in path.
+
+    Uses the MLSD command (RFC 3659). facts is a list of fact names
+    to request, e.g. ['type', 'size', 'modify'].
+    """
+    if facts:
+        self.sendcmd('OPTS MLST ' + ';'.join(facts) + ';')
+    if path:
+        cmd = 'MLSD %s' % path
+    else:
+        cmd = 'MLSD'
+    lines = []
+    self.retrlines(cmd, lines.append)
+    for line in lines:
+        facts_found, _, name = line.rstrip(CRLF).partition(' ')
+        entry = {}
+        for fact in facts_found[:-1].split(';'):
+            key, _, value = fact.partition('=')
+            entry[key.lower()] = value
+        yield name, entry
+```
+
+`mlsd` yields `(name, dict)` pairs. `facts_dict` contains keys like `type` (`file`, `dir`, `cdir`, `pdir`), `size`, `modify` (ISO 8601 timestamp).
+
+### `FTP_TLS`
+
+```python
+# CPython: Lib/ftplib.py:780 FTP_TLS
+class FTP_TLS(FTP):
+    """FTP subclass supporting TLS (RFC 4217)."""
+
+    def __init__(self, host='', user='', passwd='', acct='',
+                 keyfile=None, certfile=None, context=None, ...):
+        ...
+        if context is None:
+            context = ssl.create_default_context()
+        self.context = context
+
+    def auth(self):
+        """Set up secure control connection by using TLS/SSL."""
+        self.sendcmd('AUTH TLS')
+        self.sock = self.context.wrap_socket(self.sock,
+                                             server_hostname=self.host)
+        self.file = self.sock.makefile('r')
+
+    def prot_p(self):
+        """Set up secure data connection."""
+        self.sendcmd('PBSZ 0')
+        self.sendcmd('PROT P')
+        self._prot_p = True
+```
+
+`FTP_TLS.login` calls `auth()` before sending credentials. `prot_p()` enables encryption on the data channel too (PROT P). The default `PROT C` leaves the data channel unencrypted.
+
+## gopy notes
+
+`ftplib` is pure Python. `FTP.storbinary`/`retrbinary` use `objects.Socket` via `module/socket`. `FTP_TLS` wraps with `module/ssl.SSLContext.WrapSocket`. `FTP.mlsd` is a generator implemented in Go in `module/ftplib/module.go`.

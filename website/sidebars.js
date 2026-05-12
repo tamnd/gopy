@@ -344,6 +344,7 @@ const sidebars = {
         'annotations/python/python_import3_detail',
         'annotations/python/python_ceval11_detail',
         'annotations/python/python_errors4_detail',
+        'annotations/python/python_ceval12_detail',
       ],
     },
     {
@@ -555,6 +556,8 @@ const sidebars = {
         'annotations/objects/objects_unicodeobject6_detail',
         'annotations/objects/objects_abstract2_detail',
         'annotations/objects/objects_listobject5_detail',
+        'annotations/objects/objects_exceptions2_detail',
+        'annotations/objects/objects_genobject2_detail',
       ],
     },
     {
@@ -1058,6 +1061,8 @@ const sidebars = {
         'annotations/modules/modules_winapi_detail',
         'annotations/modules/modules_posixpath2_detail',
         'annotations/modules/modules_codeop_detail',
+        'annotations/modules/modules_hashlib2_detail',
+        'annotations/modules/modules_sqlite_detail',
       ],
     },
     {
@@ -1601,6 +1606,8 @@ const sidebars = {
         'annotations/lib/lib_struct2_detail',
         'annotations/lib/lib_inspect2_detail',
         'annotations/lib/lib_difflib2_detail',
+        'annotations/lib/lib_ftplib2_detail',
+        'annotations/lib/lib_zipimport2_detail',
       ],
     },
   ],

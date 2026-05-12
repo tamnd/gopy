@@ -1,0 +1,137 @@
+---
+title: Objects/exceptions.c (part 2)
+description: "Objects/exceptions.c part 2: SyntaxError (filename, lineno, offset, text), OSError (errno, strerror, filename), ExceptionGroup."
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/exceptions.c" />
+
+This annotation covers specialized exception subclasses. See `objects_exceptions_detail` for `BaseException`, `Exception`, `ValueError`, `TypeError`, and the exception hierarchy.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `SyntaxError.__init__` | Store `filename`, `lineno`, `offset`, `text`, `end_lineno`, `end_offset` |
+| 121-350 | `SyntaxError.__str__` | Format `filename:lineno: message (text)` |
+| 351-600 | `OSError.__init__` | Store `errno`, `strerror`, `filename`, `filename2` |
+| 601-800 | `OSError.__str__` | Format `[Errno N] strerror: 'filename'` |
+| 801-1000 | `UnicodeError` attributes | `encoding`, `object`, `start`, `end`, `reason` |
+| 1001-1200 | `ExceptionGroup` | `split`, `subgroup`, `derive` methods |
+
+## Reading
+
+### `SyntaxError.__init__`
+
+```c
+// CPython: Objects/exceptions.c:1280 SyntaxError_init
+static int
+SyntaxError_init(PySyntaxErrorObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *info = NULL;
+    Py_ssize_t lenargs = PyTuple_GET_SIZE(args);
+    if (lenargs >= 2) {
+        info = PyTuple_GET_ITEM(args, 1);  /* (filename, lineno, offset, text) */
+        self->filename = PyTuple_GET_ITEM(info, 0);
+        self->lineno   = PyTuple_GET_ITEM(info, 1);
+        self->offset   = PyTuple_GET_ITEM(info, 2);
+        self->text     = PyTuple_GET_ITEM(info, 3);
+        /* 3.10+: end_lineno, end_offset */
+        if (PyTuple_GET_SIZE(info) >= 7) {
+            self->end_lineno  = PyTuple_GET_ITEM(info, 5);
+            self->end_offset  = PyTuple_GET_ITEM(info, 6);
+        }
+    }
+    ...
+}
+```
+
+The compiler raises `SyntaxError` with a 2-tuple `(msg, (filename, lineno, offset, text, end_lineno, end_offset))`. `end_lineno`/`end_offset` were added in 3.10 to support the caret underline.
+
+### `OSError.__init__`
+
+```c
+// CPython: Objects/exceptions.c:780 OSError_init
+static int
+OSError_init(PyOSErrorObject *self, PyObject *args, PyObject *kwds)
+{
+    switch (PyTuple_GET_SIZE(args)) {
+    case 2:
+        self->myerrno  = PyTuple_GET_ITEM(args, 0);
+        self->strerror = PyTuple_GET_ITEM(args, 1);
+        break;
+    case 3:
+        self->myerrno  = PyTuple_GET_ITEM(args, 0);
+        self->strerror = PyTuple_GET_ITEM(args, 1);
+        self->filename = PyTuple_GET_ITEM(args, 2);
+        break;
+    case 4:
+        /* Windows: winerror */
+        ...
+    }
+    /* If myerrno is an int, set subclass to the matching OSError subclass
+       (FileNotFoundError for errno.ENOENT, etc.) */
+    ...
+}
+```
+
+`OSError` is aliased to `EnvironmentError` and `IOError`. The `errno` value is used to select the appropriate subclass: `FileNotFoundError` (ENOENT), `PermissionError` (EACCES), `IsADirectoryError` (EISDIR), etc.
+
+### `OSError.__str__`
+
+```c
+// CPython: Objects/exceptions.c:870 OSError_str
+static PyObject *
+OSError_str(PyOSErrorObject *self)
+{
+    if (self->filename) {
+        if (self->filename2) {
+            return PyUnicode_FromFormat("[Errno %S] %S: %R -> %R",
+                self->myerrno, self->strerror,
+                self->filename, self->filename2);
+        }
+        return PyUnicode_FromFormat("[Errno %S] %S: %R",
+            self->myerrno, self->strerror, self->filename);
+    }
+    return PyUnicode_FromFormat("[Errno %S] %S",
+        self->myerrno, self->strerror);
+}
+```
+
+`filename2` is set by `os.rename(src, dst)` when the operation fails, so the error message shows both paths.
+
+### `ExceptionGroup`
+
+```python
+# CPython: Lib/python3.xx/test (illustrative usage)
+# Objects/exceptions.c:2100 ExceptionGroup_split
+eg = ExceptionGroup("multiple errors", [ValueError(1), TypeError(2), ValueError(3)])
+match, rest = eg.split(ValueError)
+# match: ExceptionGroup("multiple errors", [ValueError(1), ValueError(3)])
+# rest:  ExceptionGroup("multiple errors", [TypeError(2)])
+```
+
+```c
+// CPython: Objects/exceptions.c:2140 ExceptionGroup_split
+static PyObject *
+ExceptionGroup_split(PyObject *self, PyObject *matcher_value)
+{
+    /* Partition exceptions into (matching, non-matching) groups.
+       Recurse into nested ExceptionGroups. */
+    ...
+    PyObject *match  = _PyExceptionGroup_Create(name, match_list);
+    PyObject *nonmatch = _PyExceptionGroup_Create(name, nonmatch_list);
+    return PyTuple_Pack(2, match, nonmatch);
+}
+```
+
+`ExceptionGroup.split` is used by `except*` clauses. The `derive` method allows subclasses to return their own type from `split`/`subgroup`.
+
+## gopy notes
+
+`SyntaxError` fields are stored on `objects.SyntaxError` in `objects/exceptions.go`. `OSError` subclass selection from `errno` is in `objects/oserror.go`. `ExceptionGroup.split` is `objects.ExceptionGroupSplit`. The `except*` VM opcode dispatches to this.

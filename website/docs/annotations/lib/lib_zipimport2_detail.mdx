@@ -1,0 +1,109 @@
+---
+title: Lib/zipimport.py (part 2)
+description: "Lib/zipimport.py part 2: zipimporter.exec_module, get_data, get_source, get_filename, is_package — ZIP import internals."
+cpython_path: Lib/zipimport.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/zipimport.py" />
+
+This annotation covers the module execution and data access methods. See `lib_zipimport_detail` for `zipimporter.__init__`, `find_module`, `find_spec`, and the ZIP directory cache.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `zipimporter.exec_module` | Execute a module found in a ZIP archive |
+| 81-200 | `zipimporter.get_code` | Return a `code` object for a module inside the ZIP |
+| 201-320 | `zipimporter.get_source` | Return the source text for a module |
+| 321-440 | `zipimporter.get_data` | Read arbitrary data from the ZIP archive |
+| 441-560 | `zipimporter.get_filename` | Return the hypothetical `.py` path inside the ZIP |
+| 561-700 | `zipimporter.is_package` | True if the entry is a package directory |
+
+## Reading
+
+### `zipimporter.exec_module`
+
+```python
+# CPython: Lib/zipimport.py:240 exec_module
+def exec_module(self, module):
+    code = self.get_code(module.__name__)
+    if code is None:
+        raise ImportError(f"cannot load module {module.__name__!r}")
+    module.__file__ = self.get_filename(module.__name__)
+    module.__cached__ = importlib.util.cache_from_source(module.__file__)
+    exec(code, module.__dict__)
+```
+
+`exec_module` runs the compiled code object in the module's namespace. The `__file__` attribute is set to a virtual path like `archive.zip/pkg/module.py` even though no file at that path exists on disk.
+
+### `zipimporter.get_code`
+
+```python
+# CPython: Lib/zipimport.py:280 get_code
+def get_code(self, fullname):
+    """Return the code object for fullname, or None."""
+    mi = _get_module_info(self, fullname)
+    if mi is None:
+        return None
+    code = _get_data(self.archive, mi)
+    # Try .pyc first (pre-compiled bytecode)
+    if mi.ispackage:
+        path = mi.fullpath + '/__init__'
+    else:
+        path = mi.fullpath
+    # Check for .pyc in the ZIP
+    try:
+        data = _get_data(self.archive, path + '.pyc')
+        return marshal.loads(data[16:])  # skip 16-byte .pyc header
+    except KeyError:
+        pass
+    # Fall back to compiling .py source
+    source = _get_data(self.archive, path + '.py').decode()
+    return compile(source, path + '.py', 'exec', optimize=-1)
+```
+
+`get_code` first looks for a `.pyc` bytecode file in the ZIP (skipping the 16-byte magic/timestamp/size header). If not found, it reads and compiles the `.py` source.
+
+### `zipimporter.get_data`
+
+```python
+# CPython: Lib/zipimport.py:380 get_data
+def get_data(self, pathname):
+    """Return the data at pathname as bytes.
+
+    pathname -- the path within or below the ZIP archive.
+    Raises OSError if not found.
+    """
+    key = pathname
+    if pathname.startswith(self.archive + path.sep):
+        key = pathname[len(self.archive) + 1:]
+    try:
+        return _get_data(self.archive, key)
+    except KeyError:
+        raise OSError(f"[Errno 2] No such file or directory: {pathname!r}")
+```
+
+`get_data` is used by `pkgutil.get_data` and resource loaders to read non-Python files (templates, data files) from a ZIP package.
+
+### `zipimporter.is_package`
+
+```python
+# CPython: Lib/zipimport.py:560 is_package
+def is_package(self, fullname):
+    """Return True if fullname is a package (has __init__.py)."""
+    mi = _get_module_info(self, fullname)
+    if mi is None:
+        raise ZipImportError(f"can't find module {fullname!r}", name=fullname)
+    return mi.ispackage
+```
+
+A module is a package if its entry in the ZIP directory corresponds to `pkg/__init__.py`. The `ispackage` flag is set during the directory scan in `zipimporter.__init__`.
+
+## gopy notes
+
+`zipimport` is in `module/zipimport/module.go`. `get_code` uses `compile.Compile` for source or `marshal.Unmarshal` for `.pyc` bytecode. `get_data` reads from a `zip.ReadCloser` cached per-archive. `is_package` checks the `zipimporter.files` map for an `__init__` entry.

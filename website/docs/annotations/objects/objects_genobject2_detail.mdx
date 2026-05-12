@@ -1,0 +1,120 @@
+---
+title: Objects/genobject.c (part 2)
+description: "Objects/genobject.c part 2: coroutine objects (PyCoro_Type), async generators (PyAsyncGen_Type), aclose/athrow, asend."
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genobject.c" />
+
+This annotation covers coroutines and async generators. See `objects_genobject_detail` for `PyGenObject`, `gen_send_ex`, `gen_close`, and `PyGen_Type`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `PyCoro_New` | Create a coroutine object from a frame |
+| 121-280 | `coro_await` | `__await__` returns a `coroutine_wrapper` |
+| 281-450 | `PyAsyncGen_New` | Create an async generator from a frame |
+| 451-620 | `async_gen_asend` | `__anext__` — advance async generator (returns an awaitable) |
+| 621-780 | `async_gen_athrow` | `athrow(exc)` — throw an exception into async generator |
+| 781-1000 | `async_gen_aclose` | `aclose()` — finalize an async generator |
+
+## Reading
+
+### `PyCoro_New`
+
+```c
+// CPython: Objects/genobject.c:720 PyCoro_New
+PyObject *
+PyCoro_New(PyFrameObject *f, PyObject *name, PyObject *qualname)
+{
+    return gen_new_with_qualname(&PyCoro_Type, f, name, qualname);
+}
+```
+
+Coroutines are created by `RETURN_GENERATOR` when the frame's code object has `CO_COROUTINE` set. They share the same `PyGenObject` layout as generators; only the type pointer differs.
+
+### `coro_await`
+
+```c
+// CPython: Objects/genobject.c:780 coro_await
+static PyObject *
+coro_await(PyCoroObject *coro)
+{
+    /* Return a coroutine_wrapper that drives the coroutine via __next__. */
+    PyCoroWrapper *cw = PyObject_GC_New(PyCoroWrapper, &_PyCoroWrapper_Type);
+    cw->cw_coroutine = (PyCoroObject *)Py_NewRef(coro);
+    return (PyObject *)cw;
+}
+```
+
+`await expr` desugars to `GET_AWAITABLE` which calls `__await__`. For native coroutines `__await__` returns a `coroutine_wrapper` that forwards `send`/`throw`/`close` to the underlying coroutine.
+
+### `PyAsyncGen_New`
+
+```c
+// CPython: Objects/genobject.c:900 PyAsyncGen_New
+PyObject *
+PyAsyncGen_New(PyFrameObject *f, PyObject *name, PyObject *qualname)
+{
+    PyAsyncGenObject *ag = (PyAsyncGenObject *)gen_new_with_qualname(
+        &PyAsyncGen_Type, f, name, qualname);
+    ag->ag_running_async = 0;
+    ag->ag_closed = 0;
+    ag->ag_origin_or_finalizer = NULL;
+    return (PyObject *)ag;
+}
+```
+
+Async generators have two extra fields: `ag_running_async` prevents re-entrant iteration, and `ag_closed` tracks whether `aclose()` has completed.
+
+### `async_gen_asend`
+
+```c
+// CPython: Objects/genobject.c:960 async_gen_asend_new
+static PyObject *
+async_gen_asend_new(PyAsyncGenObject *gen, PyObject *sendval)
+{
+    /* Create an 'asend' awaitable that, when driven, advances the generator
+       by sending sendval. */
+    PyAsyncGenASend *asend = PyObject_GC_New(PyAsyncGenASend, &_PyAsyncGenASend_Type);
+    asend->ags_gen = (PyAsyncGenObject *)Py_NewRef(gen);
+    asend->ags_sendval = Py_XNewRef(sendval);
+    asend->ags_state = AWAITABLE_STATE_ITER;
+    return (PyObject *)asend;
+}
+```
+
+`async for x in agen` compiles to `GET_AITER`, then a loop of `GET_ANEXT` (calls `__anext__` = `async_gen_asend_new`) + `SEND` to drive the resulting awaitable.
+
+### `async_gen_aclose`
+
+```c
+// CPython: Objects/genobject.c:1120 async_gen_aclose
+static PyObject *
+async_gen_aclose(PyAsyncGenObject *o, PyObject *arg)
+{
+    /* Return an athrow awaitable that throws GeneratorExit. */
+    if (o->ag_running_async) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "aclose(): asynchronous generator already running");
+        return NULL;
+    }
+    if (o->ag_closed) {
+        /* Already closed — return a no-op awaitable */
+        return async_gen_athrow_new(o, NULL);
+    }
+    return async_gen_athrow_new(o, NULL);  /* NULL = throw GeneratorExit */
+}
+```
+
+`async with contextlib.aclosing(agen):` calls `aclose()` on exit. The runtime also calls it via the finalizer hook if an async generator is garbage collected without being fully consumed.
+
+## gopy notes
+
+`PyCoro_Type` is `objects.CoroutineType` in `objects/coroutine.go`. `PyAsyncGen_Type` is `objects.AsyncGenType` in `objects/asyncgen.go`. `async_gen_asend` / `athrow` / `aclose` awaitables are `objects.AsyncGenASend`, `AsyncGenAThrow`, `AsyncGenAClose`. The `ag_running_async` guard is replicated in Go.

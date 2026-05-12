@@ -1,0 +1,128 @@
+---
+title: Modules/_hashopenssl.c / Lib/hashlib.py (part 2)
+description: "hashlib part 2: SHAKE (variable-length), BLAKE2b/BLAKE2s, hmac integration, hashlib.new() dispatch, file_digest."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+This annotation covers variable-length digests and the Python-level `hashlib` dispatch. See `modules_hashlib_detail` for `md5`, `sha1`, `sha256`, `sha512`, `update`, `digest`, `hexdigest`, and `copy`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `SHAKE` digest objects | Variable-length output: `shake_128.digest(length)` |
+| 101-250 | `BLAKE2b` / `BLAKE2s` | keyed hashing, personalization, tree hashing |
+| 251-400 | `hashlib.new` | Dispatch by name to OpenSSL or built-in implementation |
+| 401-600 | `hmac.new` / `HMAC` | HMAC construction using `hashlib` digest objects |
+| 601-800 | `hashlib.file_digest` | Hash entire file efficiently |
+| 801-900 | `algorithms_available` / `algorithms_guaranteed` | Runtime discovery of available hash names |
+
+## Reading
+
+### `SHAKE` variable-length output
+
+```c
+// CPython: Modules/_hashopenssl.c:580 SHAKE_digest
+static PyObject *
+SHAKE_digest(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    Py_ssize_t length;
+    if (!_PyArg_ParseStack(args, nargs, "n", &length)) return NULL;
+    if (length < 0) {
+        PyErr_SetString(PyExc_ValueError, "length must be non-negative");
+        return NULL;
+    }
+    unsigned char *digest = PyMem_Malloc(length);
+    EVP_DigestFinalXOF(self->ctx, digest, length);  /* XOF = extendable output */
+    PyObject *result = PyBytes_FromStringAndSize((char *)digest, length);
+    PyMem_Free(digest);
+    return result;
+}
+```
+
+SHAKE-128 and SHAKE-256 are XOFs (extendable output functions) from SHA-3. The `length` parameter to `digest()` is variable, unlike fixed-length SHA-2 digests.
+
+### `BLAKE2b`
+
+```c
+// CPython: Modules/_hashopenssl.c:720 blake2b_new
+/* BLAKE2b parameters:
+   data        -- initial data to hash
+   digest_size -- output length in bytes (1-64 for BLAKE2b, 1-32 for BLAKE2s)
+   key         -- optional key (up to 64 bytes) for keyed hashing
+   salt        -- optional 16-byte personalization salt
+   person      -- optional 16-byte personalization string
+   fanout/depth/leaf_size/node_offset/node_depth/inner_size -- tree hashing
+*/
+```
+
+BLAKE2b accepts a key of up to 64 bytes, turning it into a MAC (message authentication code) without a separate HMAC construction. `digest_size` allows truncated output.
+
+### `hashlib.new`
+
+```python
+# CPython: Lib/hashlib.py:162 new
+def new(name, data=b'', **kwargs):
+    """Create a new hash object using the named algorithm.
+
+    Tries OpenSSL first, falls back to built-in implementations
+    (_md5, _sha1, _sha256, _sha512, _blake2, _sha3).
+    """
+    try:
+        return __get_openssl_constructor(name)(data, **kwargs)
+    except ValueError:
+        pass
+    return __get_builtin_constructor(name)(data, **kwargs)
+```
+
+`hashlib.new('sha256')` is equivalent to `hashlib.sha256()`. The registry of built-in constructors covers the guaranteed algorithms (md5, sha1, sha2 family, sha3 family, blake2).
+
+### `hashlib.file_digest`
+
+```python
+# CPython: Lib/hashlib.py:280 file_digest
+def file_digest(fileobj, digest, /, *, _bufsize=2**18):
+    """Hash the contents of a file-like object.
+
+    digest -- a hash name string or a callable returning a hash object
+    """
+    if isinstance(digest, str):
+        digestobj = new(digest)
+    else:
+        digestobj = digest()
+    buf = bytearray(_bufsize)
+    view = memoryview(buf)
+    while True:
+        size = fileobj.readinto(buf)
+        if size == 0:
+            break
+        digestobj.update(view[:size])
+    return digestobj
+```
+
+`file_digest` uses `readinto` with a reusable `bytearray` to avoid allocation on each read. The default buffer size is 256 KiB.
+
+### `algorithms_guaranteed`
+
+```python
+# CPython: Lib/hashlib.py:80 algorithms_guaranteed
+algorithms_guaranteed = {
+    'md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512',
+    'sha3_224', 'sha3_256', 'sha3_384', 'sha3_512',
+    'shake_128', 'shake_256',
+    'blake2b', 'blake2s',
+}
+```
+
+`algorithms_available` includes everything OpenSSL provides on the current platform. `algorithms_guaranteed` is the portable subset that every conforming Python installation must include.
+
+## gopy notes
+
+`hashlib` is in `module/hashlib/module.go`. `SHAKE.digest` uses Go's `golang.org/x/crypto/sha3.ShakeHash`. `BLAKE2b`/`BLAKE2s` use `golang.org/x/crypto/blake2b` and `blake2s`. `file_digest` uses Go's `io.ReadFull` loop. `algorithms_guaranteed` is a constant frozenset in `module/hashlib`.

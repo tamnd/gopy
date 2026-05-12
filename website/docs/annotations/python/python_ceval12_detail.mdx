@@ -1,0 +1,112 @@
+---
+title: Python/ceval.c (part 12)
+description: "Python/ceval.c part 12: COPY_FREE_VARS, MAKE_CELL, LOAD_CLOSURE, LOAD_DEREF, STORE_DEREF — closures and free variables."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers cell and free variable opcodes used to implement closures. See `python_ceval11_detail` for generator and iterator opcodes, and `python_ceval_detail` for the main eval loop.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `COPY_FREE_VARS` | Copy closure cells from enclosing frame on function entry |
+| 81-180 | `MAKE_CELL` | Allocate a `CellObject` for a variable captured by a nested function |
+| 181-280 | `LOAD_CLOSURE` | Push a cell reference onto the stack (for building closure tuples) |
+| 281-400 | `LOAD_DEREF` | Load the value inside a cell or free variable |
+| 401-500 | `STORE_DEREF` | Store a value into a cell or free variable |
+| 501-600 | `DELETE_DEREF` | Clear a cell (set its content to NULL) |
+
+## Reading
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:4980 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (--)) {
+    /* Copy the free variables from the closure tuple into the frame's
+       localsplus array at positions co_nlocals + len(co_cellvars) .. end. */
+    PyCodeObject *co = frame->f_code;
+    PyObject *closure = ((PyFunctionObject *)FRAME_CLOSURE(frame))->func_closure;
+    int offset = co->co_nlocals + co->co_ncellvars;
+    for (int i = 0; i < co->co_nfreevars; ++i) {
+        PyObject *cell = PyTuple_GET_ITEM(closure, i);
+        frame->localsplus[offset + i] = Py_NewRef(cell);
+    }
+}
+```
+
+`COPY_FREE_VARS` runs as the very first instruction of any function that has free variables. It populates the frame's `localsplus` slots for free variables from the closure tuple stored on the function object.
+
+### `MAKE_CELL`
+
+```c
+// CPython: Python/ceval.c:5020 MAKE_CELL
+inst(MAKE_CELL, (--)) {
+    /* Turn a local variable slot into a cell object so inner functions
+       can reference it. The current value (if any) is moved inside the cell. */
+    PyObject **slot = &GETLOCAL(oparg);
+    PyObject *cell = PyCell_New(*slot);
+    if (cell == NULL) goto error;
+    Py_XDECREF(*slot);
+    *slot = cell;
+}
+```
+
+`MAKE_CELL` is emitted for each variable in `co_cellvars`. It replaces the raw object in the local slot with a `PyCellObject` wrapper. After this, `LOAD_DEREF`/`STORE_DEREF` access the contents through `PyCell_GET`/`PyCell_SET`.
+
+### `LOAD_DEREF`
+
+```c
+// CPython: Python/ceval.c:5080 LOAD_DEREF
+inst(LOAD_DEREF, (-- value)) {
+    PyObject *cell = GETLOCAL(oparg);
+    value = PyCell_GET(cell);
+    if (value == NULL) {
+        _PyEval_FormatExcUnbound(tstate, frame->f_code, oparg);
+        ERROR_IF(true, error);
+    }
+    Py_INCREF(value);
+}
+```
+
+`oparg` indexes into `localsplus` starting at position `co_nlocals` (cell variables first, then free variables). If `PyCell_GET` returns NULL the variable has been deleted; `_PyEval_FormatExcUnbound` raises `NameError` with the variable name.
+
+### `STORE_DEREF`
+
+```c
+// CPython: Python/ceval.c:5110 STORE_DEREF
+inst(STORE_DEREF, (v --)) {
+    PyObject *cell = GETLOCAL(oparg);
+    PyObject *old_value = PyCell_GET(cell);
+    PyCell_SET(cell, v);
+    Py_XDECREF(old_value);
+}
+```
+
+`STORE_DEREF` writes a new value into the cell. The old value is decremented after the new one is set (the cell is the shared reference; assignment does not create a new cell).
+
+### `LOAD_CLOSURE`
+
+```c
+// CPython: Python/ceval.c:5060 LOAD_CLOSURE
+inst(LOAD_CLOSURE, (-- value)) {
+    /* Push the cell object itself, not its contents.
+       Used when building the closure tuple for a nested function. */
+    value = Py_NewRef(GETLOCAL(oparg));
+    assert(PyCell_Check(value));
+}
+```
+
+`LOAD_CLOSURE` is used during `MAKE_FUNCTION`: cell objects are pushed onto the stack and collected into the closure tuple argument.
+
+## gopy notes
+
+`PyCellObject` is `objects.CellObject` in `objects/cell.go`. `COPY_FREE_VARS` is in `vm/eval_gen.go`. `MAKE_CELL`, `LOAD_DEREF`, `STORE_DEREF`, `LOAD_CLOSURE`, and `DELETE_DEREF` are in `vm/eval_simple.go`. The closure tuple on a function is `objects.FunctionObject.Closure`.

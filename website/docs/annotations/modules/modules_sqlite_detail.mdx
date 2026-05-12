@@ -1,0 +1,125 @@
+---
+title: Modules/_sqlite/
+description: "Modules/_sqlite/: sqlite3.connect, Connection, Cursor.execute, Row, detect_types, adapters/converters."
+cpython_path: Modules/_sqlite/connection.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sqlite/connection.c" />
+
+`_sqlite` is the C extension backing the `sqlite3` module. It wraps the SQLite C library for Python.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `sqlite3.connect` | Open or create a database file; return `Connection` |
+| 121-350 | `Connection.__init__` | Set `detect_types`, `isolation_level`, `check_same_thread` |
+| 351-550 | `Connection.cursor` | Return a `Cursor` for the connection |
+| 551-800 | `Cursor.execute` | Prepare and execute a SQL statement |
+| 801-1000 | `Cursor.fetchone` / `fetchmany` / `fetchall` | Retrieve result rows |
+| 1001-1300 | `Row` | Named-column row object |
+| 1301-1800 | Adapters / converters | Python-to-SQLite type mapping |
+
+## Reading
+
+### `sqlite3.connect`
+
+```c
+// CPython: Modules/_sqlite/connection.c:180 pysqlite_connection_init
+static int
+pysqlite_connection_init(pysqlite_Connection *self, PyObject *args,
+                         PyObject *kwargs)
+{
+    char *database;
+    int timeout = 5;          /* seconds before SQLITE_BUSY error */
+    int detect_types = 0;
+    char *isolation_level = "";
+    int check_same_thread = 1;
+    /* sqlite3_open_v2 with SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE */
+    int rc = sqlite3_open_v2(database, &self->db, flags, NULL);
+    if (rc != SQLITE_OK) {
+        _pysqlite_seterror(state, self->db);
+        return -1;
+    }
+    sqlite3_busy_timeout(self->db, (int)(timeout * 1000));
+    ...
+}
+```
+
+`detect_types=PARSE_DECLTYPES` enables type converters registered with `register_converter`. `isolation_level=None` disables autocommit and uses manual transaction management.
+
+### `Cursor.execute`
+
+```c
+// CPython: Modules/_sqlite/cursor.c:420 _pysqlite_query_execute
+static PyObject *
+_pysqlite_query_execute(pysqlite_Cursor *self, int multiple,
+                        PyObject *args)
+{
+    PyObject *operation;
+    PyObject *parameters_list = NULL;
+    /* sqlite3_prepare_v2: compile SQL to bytecode */
+    int rc = sqlite3_prepare_v2(self->db->db, sql, -1,
+                                &self->statement->st, &tail);
+    /* Bind parameters */
+    for (int i = 0; i < num_params; i++) {
+        PyObject *param = PySequence_GetItem(params, i);
+        pysqlite_microprotocols_adapt(param, ...);  /* adapter lookup */
+        sqlite3_bind_*(...);
+    }
+    /* Execute */
+    rc = pysqlite_step(self->statement->st, self->db);
+    ...
+}
+```
+
+`execute` prepares the SQL with `sqlite3_prepare_v2`, binds parameters (using registered adapters for custom types), and calls `sqlite3_step` to execute. Results are fetched lazily on `fetchone`/`fetchall`.
+
+### `Row`
+
+```c
+// CPython: Modules/_sqlite/row.c:60 pysqlite_row_new
+static PyObject *
+pysqlite_row_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    /* Row(cursor, data_tuple)
+       Stores the column description from cursor.description
+       and the raw data tuple. Supports name-based access:
+       row['column_name'], row[0], iteration, len(). */
+    pysqlite_Row *self = (pysqlite_Row *)type->tp_alloc(type, 0);
+    self->description = Py_NewRef(cursor->description);
+    self->data = Py_NewRef(data);
+    return (PyObject *)self;
+}
+```
+
+`Row` supports `row['name']` by scanning `cursor.description` for a matching column name. It is the default `row_factory` when `sqlite3.Row` is set on the connection.
+
+### Adapters and converters
+
+```python
+# CPython: Lib/sqlite3/__init__.py (illustrative)
+import sqlite3, datetime
+
+def adapt_date(val):
+    return val.isoformat()
+
+def convert_date(val):
+    return datetime.date.fromisoformat(val.decode())
+
+sqlite3.register_adapter(datetime.date, adapt_date)
+sqlite3.register_converter("DATE", convert_date)
+
+con = sqlite3.connect(":memory:", detect_types=sqlite3.PARSE_DECLTYPES)
+```
+
+Adapters convert Python objects to SQLite-compatible types before binding. Converters transform SQLite column values back to Python objects when fetching. `PARSE_DECLTYPES` uses the declared column type; `PARSE_COLNAMES` uses annotations in the SQL alias (`... AS "x [DATE]"`).
+
+## gopy notes
+
+`sqlite3` is in `module/sqlite3/module.go`. The Go implementation wraps `github.com/mattn/go-sqlite3` (cgo) or `modernc.org/sqlite` (pure Go). `Cursor.execute` calls `sqlite3.Stmt.Exec`. `Row` is `module/sqlite3.Row`. Adapters/converters use a per-connection registry map.
