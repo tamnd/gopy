@@ -74,8 +74,8 @@ const config = {
           alt: 'gopy logo',
           src: 'img/logo.png',
           srcDark: 'img/logo.png',
-          width: 26,
-          height: 26,
+          width: 32,
+          height: 32,
         },
         hideOnScroll: false,
         items: [
@@ -127,8 +127,8 @@ const config = {
         logo: {
           alt: 'gopy logo',
           src: 'img/logo.png',
-          width: 28,
-          height: 28,
+          width: 32,
+          height: 32,
         },
         links: [
           {

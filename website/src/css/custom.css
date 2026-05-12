@@ -279,6 +279,7 @@ h4:hover .hash-link {
 }
 
 .navbar__brand { font-family: var(--gopy-font-display); font-weight: 700; }
+.navbar__logo { border-radius: 4px; }
 .navbar__title { letter-spacing: -0.01em; }
 .navbar__link {
   font-weight: 500;
@@ -371,27 +372,35 @@ h4:hover .hash-link {
 .button--primary {
   background: var(--gopy-primary);
   border-color: var(--gopy-primary);
-  color: var(--gopy-primary-fg);
+  color: #ffffff;
   box-shadow: none;
 }
 
 .button--primary:hover {
   background: var(--gopy-primary-hover);
   border-color: var(--gopy-primary-hover);
-  color: var(--gopy-primary-fg);
+  color: #ffffff;
   box-shadow: none;
 }
 
 .button--secondary {
-  background: var(--gopy-bg-surface);
-  border: 1px solid var(--gopy-border-strong);
+  background: transparent;
+  border: 1px solid rgba(144, 122, 169, 0.45);
   color: var(--gopy-text-primary);
 }
 
 .button--secondary:hover {
-  background: var(--gopy-bg-elevated);
+  background: var(--gopy-primary-softer);
   border-color: var(--gopy-primary);
   color: var(--gopy-text-primary);
+}
+
+[data-theme='dark'] .button--secondary {
+  border-color: rgba(196, 167, 231, 0.40);
+}
+
+[data-theme='dark'] .button--secondary:hover {
+  background: var(--gopy-primary-soft);
 }
 
 /* =========================================================================
