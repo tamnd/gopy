@@ -1,0 +1,75 @@
+---
+title: Objects/typevarobject.c
+description: "TypeVar, ParamSpec, TypeVarTuple, and TypeAliasType C objects: the PEP 695 type parameter syntax support, __type_params__ on generic functions and classes, and the Generic.__class_getitem__ subscription."
+cpython_path: Objects/typevarobject.c
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/typevarobject.c`
+
+<CpyLink path="Objects/typevarobject.c" />
+
+`Objects/typevarobject.c` provides C-level implementations of `TypeVar`, `ParamSpec`,
+`TypeVarTuple`, and `TypeAliasType` introduced in PEP 695 (Python 3.12+). These are the
+objects created by `type T = ...` and `def f[T](...)` syntax.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | `TypeVarObject` struct, `typevar_new` | `TypeVar` construction with bounds and constraints |
+| 301-550 | `typevar_repr`, `typevar_mro_entries` | Display and generic alias creation |
+| 551-750 | `ParamSpecObject`, `TypeVarTupleObject` | Variadic type parameters |
+| 751-950 | `TypeAliasTypeObject` | `type X = Y` alias syntax |
+| 951-1100 | `typevar_subscript` | `TypeVar[int]` subscription returns `GenericAlias` |
+
+## Reading
+
+### `TypeVar` with bound and constraints
+
+```c
+// CPython: Objects/typevarobject.c:78 TypeVarObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *name;
+    PyObject *bound;         /* T = TypeVar('T', bound=X) */
+    PyObject *evaluate_bound; /* lazy eval for PEP 649 annotations */
+    PyObject *constraints;   /* T = TypeVar('T', X, Y) */
+    PyObject *evaluate_constraints;
+    unsigned char covariant;
+    unsigned char contravariant;
+    unsigned char infer_variance;
+} TypeVarObject;
+```
+
+### PEP 695 `type T = X`
+
+`type T = X` compiles to `TypeAliasType('T', lambda: X)`. The lambda defers evaluation
+of the right-hand side, implementing PEP 649 lazy annotation semantics.
+
+```c
+// CPython: Objects/typevarobject.c:760 TypeAliasTypeObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *name;
+    PyObject *type_params;   /* tuple of TypeVar/ParamSpec/TypeVarTuple */
+    PyObject *compute_value; /* callable that returns the aliased type */
+    PyObject *value;         /* cached result, or NULL if not yet computed */
+} TypeAliasTypeObject;
+```
+
+### `__type_params__`
+
+Functions and classes defined with `[T, ...]` syntax have a `__type_params__` tuple
+containing the `TypeVar`/`ParamSpec`/`TypeVarTuple` objects. The compiler emits
+`COPY_FREE_VARS` and `LOAD_DEREF` to capture these into the function.
+
+## gopy notes
+
+Not yet ported. `typevarobject.c` is needed for full PEP 695 syntax support. The gopy
+compiler would need to emit the `__type_params__` tuple and handle `type T = X` aliasing.
+Planned path: `objects/typevar.go`.

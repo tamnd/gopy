@@ -1,0 +1,66 @@
+---
+title: Modules/zlibmodule.c
+description: "zlib module: compress/decompress one-shot functions, Compress and Decompress stateful objects wrapping deflate/inflate streams, wbits parameter for zlib/gzip/raw deflate, and adler32/crc32."
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 1050
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/zlibmodule.c`
+
+<CpyLink path="Modules/zlibmodule.c" />
+
+`Modules/zlibmodule.c` wraps the zlib C library for `zlib`. It provides one-shot
+`compress`/`decompress` and stateful `Compress`/`Decompress` objects for streaming
+compression.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `zlib_compress_impl`, `zlib_decompress_impl` | One-shot compression |
+| 201-500 | `Compress` object | Stateful `deflate` stream |
+| 501-800 | `Decompress` object | Stateful `inflate` stream with unconsumed_tail |
+| 801-1050 | `adler32`, `crc32`, module constants | Checksum functions |
+
+## Reading
+
+### `wbits` encoding
+
+The `wbits` parameter controls both the window size and the format:
+- `wbits=15` (default): zlib format (header + adler32 checksum)
+- `wbits=31` (`15 + 16`): gzip format (gzip header + CRC32)
+- `wbits=-15`: raw deflate (no header, no checksum)
+
+### `Compress.compress`
+
+`Compress.compress(data)` calls `deflate(Z_NO_FLUSH)` on the input and returns whatever
+output is available. `Compress.flush(mode)` calls `deflate(Z_SYNC_FLUSH)` or
+`deflate(Z_FINISH)`. Callers must call `flush()` to drain the stream.
+
+```c
+// CPython: Modules/zlibmodule.c:340 zlib_Compress_compress_impl
+static PyObject *
+zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
+{
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    err = deflate(&self->zst, Z_NO_FLUSH);
+    Py_END_ALLOW_THREADS
+    ...
+}
+```
+
+### `Decompress.unconsumed_tail`
+
+If `Decompress.decompress(data, max_length=0)` hits `max_length` before exhausting the
+input, it stores the unused input in `self.unconsumed_tail`. Callers must call
+`decompress` again with `unconsumed_tail` to drain remaining data.
+
+## gopy notes
+
+Not yet ported. `zlib` is used by `zipfile`, `gzip`, and `http.client`. The Go backend
+will use `compress/zlib` and `compress/flate`. Planned path: `module/zlib/`.
