@@ -1,0 +1,98 @@
+---
+title: Objects/weakrefobject.c
+description: "Objects/weakrefobject.c: PyWeakref_NewRef, PyWeakref_NewProxy, weak reference callbacks, tp_weaklistoffset, finalization."
+cpython_path: Objects/weakrefobject.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/weakrefobject.c" />
+
+Weak references allow holding a reference to an object without preventing it from being garbage-collected. Objects opt in by setting `tp_weaklistoffset` in their type object.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `PyWeakReference` struct | Object layout, `wr_object`, `wr_callback`, `wr_hash` |
+| 151-400 | `PyWeakref_NewRef`, `PyWeakref_NewProxy` | Create weak ref and proxy |
+| 401-650 | `weakref_dealloc`, callback invocation | GC finalization path |
+| 651-900 | `PyObject_ClearWeakRefs` | Called from `tp_dealloc` of weakly-referenceable objects |
+
+## Reading
+
+### Object layout
+
+```c
+// CPython: Objects/weakrefobject.c:18 PyWeakReference
+struct _PyWeakReference {
+    PyObject_HEAD
+    PyObject *wr_object;    /* the referent (or Py_None if dead) */
+    PyObject *wr_callback;  /* callable or NULL */
+    Py_hash_t wr_hash;      /* hash(wr_object), cached */
+    PyWeakReference *wr_object_prev;  /* doubly-linked list per referent */
+    PyWeakReference *wr_object_next;
+};
+```
+
+All weak references to the same object form a doubly-linked list via `wr_object_prev`/`wr_object_next`. The list head is stored at `tp_weaklistoffset` inside the referent.
+
+### Creating a weak reference
+
+```c
+// CPython: Objects/weakrefobject.c:200 PyWeakref_NewRef
+PyObject *
+PyWeakref_NewRef(PyObject *ob, PyObject *callback)
+{
+    if (!PyType_SUPPORTS_WEAKREFS(Py_TYPE(ob))) {
+        PyErr_Format(PyExc_TypeError,
+                     "cannot create weak reference to '%s' object",
+                     Py_TYPE(ob)->tp_name);
+        return NULL;
+    }
+    /* Check if an identical (no-callback) ref already exists */
+    PyWeakReference **list = GET_WEAKREFS_LISTPTR(ob);
+    if (callback == Py_None) callback = NULL;
+    if (callback == NULL && *list != NULL && Py_IS_TYPE(*list, &_PyWeakref_RefType)) {
+        Py_INCREF(*list);
+        return (PyObject *)*list;  /* reuse existing */
+    }
+    /* Allocate new weak ref */
+    ...
+    insert into doubly-linked list;
+    return ref;
+}
+```
+
+No-callback weak references to the same object are deduplicated.
+
+### Clearing on deallocation
+
+```c
+// CPython: Objects/weakrefobject.c:730 PyObject_ClearWeakRefs
+void
+PyObject_ClearWeakRefs(PyObject *object)
+{
+    PyWeakReference **list = GET_WEAKREFS_LISTPTR(object);
+    /* Walk the list, set wr_object = Py_None, invoke callbacks */
+    while (*list != NULL) {
+        PyWeakReference *current = *list;
+        current->wr_object = Py_None;
+        if (current->wr_callback != NULL) {
+            PyObject *cbresult = PyObject_CallOneArg(current->wr_callback,
+                                                     (PyObject *)current);
+            ...
+        }
+        ...
+    }
+}
+```
+
+`tp_dealloc` of every weakly-referenceable type must call `PyObject_ClearWeakRefs` before freeing memory.
+
+## gopy notes
+
+`weakref` support is in `module/weakref/`. For gopy objects to be weakly referenceable, their Go struct needs a `weakrefs` field (the list head). `PyObject_ClearWeakRefs` is called from the Go finalizer registered by `runtime.SetFinalizer`. The proxy type (`weakref.proxy`) must forward all attribute access to the referent and raise `ReferenceError` when the referent is dead.

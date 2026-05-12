@@ -1,0 +1,96 @@
+---
+title: Python/gc.c
+description: "Python/gc.c: tri-color mark, generational collection, tp_traverse, tp_clear, reference cycle detection, finalization ordering."
+cpython_path: Python/gc.c
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/gc.c" />
+
+CPython's reference-counting allocator handles simple cases; `Python/gc.c` handles reference cycles. The collector is a generational mark-sweep that uses `tp_traverse` to walk live objects and `tp_clear` to break cycles.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | GC header, `PyGC_Head` | Double-linked list entry prepended to every tracked object |
+| 201-500 | `move_unreachable`, `move_legacy_finalizers` | Mark phase |
+| 501-800 | `finalize_garbage`, `handle_weakrefs` | Finalization before sweep |
+| 801-1100 | `collect` | Full collection: move to unreachable, finalize, sweep |
+| 1101-1400 | `_PyGC_Collect`, `_PyObject_GC_Alloc` | Entry points |
+| 1401-2200 | `PyObject_GC_Track`, `PyObject_GC_UnTrack`, `gc_traverse` | Object tracking API |
+
+## Reading
+
+### GC header
+
+```c
+// CPython: Python/gc.c:18 PyGC_Head
+typedef struct {
+    uintptr_t _gc_next;   /* low bits encode unreachable flag */
+    uintptr_t _gc_prev;   /* low bits encode visited flag */
+} PyGC_Head;
+```
+
+Every GC-tracked object has a `PyGC_Head` prepended in memory (before the `PyObject` pointer that users see). The two fields form a doubly-linked circular list for each generation.
+
+### Mark phase
+
+```c
+// CPython: Python/gc.c:380 move_unreachable
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    /* subtract_refs: for each object in young, call tp_traverse and
+       decrement gc_refs of each reachable object */
+    subtract_refs(young);
+    /* Any object with gc_refs == 0 is unreachable from outside young */
+    for each obj in young:
+        if gc_refs(obj) == 0:
+            move to unreachable list;
+        else:
+            mark as reachable, propagate to referents;
+}
+```
+
+The key insight: objects with `gc_refs > 0` after subtracting internal references are reachable from outside the generation.
+
+### Finalization ordering
+
+```c
+// CPython: Python/gc.c:640 finalize_garbage
+static void
+finalize_garbage(PyThreadState *tstate, PyGC_Head *collectable)
+{
+    /* Call __del__ on objects that have it, in reverse topological order */
+    for each obj with tp_finalize:
+        tp_finalize(obj);   /* may resurrect the object */
+    /* Re-scan: objects that survived finalization are moved back */
+    ...
+}
+```
+
+After `tp_finalize`, the collector re-checks reference counts. Resurrected objects are moved back to the tracked lists.
+
+### `tp_traverse` contract
+
+```c
+// CPython: Python/gc.c:1150 gc_traverse example (list)
+static int
+list_traverse(PyListObject *o, visitproc visit, void *arg)
+{
+    for (Py_ssize_t i = 0; i < Py_SIZE(o); i++)
+        Py_VISIT(o->ob_item[i]);
+    return 0;
+}
+```
+
+Every container type must implement `tp_traverse`. Failing to visit a reference breaks cycle detection for that container.
+
+## gopy notes
+
+gopy uses Go's GC, so `Python/gc.c` does not need to be ported directly. However, `tp_traverse` is still relevant: objects that hold references to other Python objects must register those references with Go's GC (via the object graph, not finalizers). Go's GC handles cycles natively. `gc.collect()` in gopy calls `runtime.GC()` and returns 0.

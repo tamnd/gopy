@@ -311,6 +311,7 @@ const sidebars = {
         'annotations/python/python_astc_detail',
         'annotations/python/python_errors_detail',
         'annotations/python/python_marshal_detail',
+        'annotations/python/python_gc_detail',
       ],
     },
     {
@@ -485,6 +486,8 @@ const sidebars = {
         'annotations/objects/objects_listobject2_detail',
         'annotations/objects/objects_tupleobject2_detail',
         'annotations/objects/objects_longobject3_detail',
+        'annotations/objects/objects_weakrefobject_detail',
+        'annotations/objects/objects_genericaliasobject_detail',
       ],
     },
     {
@@ -705,6 +708,8 @@ const sidebars = {
         'annotations/include/include_pythread_h_detail',
         'annotations/include/include_pyobject_h2_detail',
         'annotations/include/include_cpython_listobject2_detail',
+        'annotations/include/include_code_h_detail',
+        'annotations/include/include_frameobject_h_detail',
       ],
     },
     {

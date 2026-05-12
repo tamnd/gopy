@@ -1,0 +1,82 @@
+---
+title: Objects/genericaliasobject.c
+description: "Objects/genericaliasobject.c: Ga_new (list[int] syntax), __class_getitem__, __args__, __origin__, __parameters__, substitution."
+cpython_path: Objects/genericaliasobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genericaliasobject.c" />
+
+`Ga_Type` is the type of objects produced by `list[int]`, `dict[str, int]`, and similar subscript operations on built-in types. It was introduced in Python 3.9 (PEP 585) to allow built-in collection types to serve directly as generic aliases without importing from `typing`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Ga_new` | `__class_getitem__` calls this to create a `GenericAlias` |
+| 101-300 | `__args__`, `__origin__`, `__parameters__` | Introspection attributes |
+| 301-500 | `Ga_getitem` | `list[int][str]` — further subscripting |
+| 501-700 | `Ga_call`, `Ga_instancecheck` | `list[int](...)` and `isinstance` delegation |
+
+## Reading
+
+### Creating a generic alias
+
+```c
+// CPython: Objects/genericaliasobject.c:68 Ga_new
+PyObject *
+Py_GenericAlias(PyObject *origin, PyObject *args)
+{
+    if (!PyTuple_Check(args)) {
+        args = PyTuple_Pack(1, args);
+    }
+    gaobject *alias = PyObject_GC_New(gaobject, &Ga_Type);
+    alias->origin = Py_NewRef(origin);
+    alias->args   = Py_NewRef(args);
+    alias->parameters = NULL;  /* computed lazily */
+    ...
+    return (PyObject *)alias;
+}
+```
+
+`list[int]` calls `list.__class_getitem__(int)`, which calls `Py_GenericAlias(list, int)`.
+
+### `__parameters__`
+
+```c
+// CPython: Objects/genericaliasobject.c:180 ga_parameters
+static PyObject *
+ga_parameters(gaobject *self, void *unused)
+{
+    if (self->parameters == NULL) {
+        /* Collect TypeVar instances from args recursively */
+        self->parameters = _Py_make_parameters(self->args);
+    }
+    return Py_NewRef(self->parameters);
+}
+```
+
+`list[T].__parameters__` returns `(T,)`. This is used by `typing.get_args` and type checkers.
+
+### `__getitem__` (further subscripting)
+
+```c
+// CPython: Objects/genericaliasobject.c:320 Ga_getitem
+static PyObject *
+Ga_getitem(gaobject *self, PyObject *args)
+{
+    /* list[T][int] -> list[int]: substitute TypeVars */
+    PyObject *new_args = _Py_subs_parameters(self, self->args, self->parameters, args);
+    return Py_GenericAlias(self->origin, new_args);
+}
+```
+
+TypeVar substitution allows `class MyList(list[T]): ...` and `MyList[int]` to work.
+
+## gopy notes
+
+`GenericAlias` is in `objects/generic_alias.go`. The `__class_getitem__` slot on `list`, `dict`, `tuple`, `set`, and `type` must return a `GenericAlias`. `isinstance(x, list[int])` delegates to `list.__instancecheck__` (i.e., just checks `isinstance(x, list)`, ignoring the type arg). TypeVar substitution is only needed for the `typing` module integration.
