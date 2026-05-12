@@ -49,11 +49,6 @@ func writeStr(t *testing.T, obj objects.Object, s string) {
 	callMethod(t, obj, "write", objects.NewStr(s))
 }
 
-func writeBytes(t *testing.T, obj objects.Object, b []byte) {
-	t.Helper()
-	callMethod(t, obj, "write", objects.NewBytes(b))
-}
-
 func TestOpenReadsExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "in.txt")
