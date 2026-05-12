@@ -1,0 +1,115 @@
+---
+title: Python/import.c (part 7)
+description: "Python/import.c part 7: importlib bootstrap, _find_and_load, module spec, ModuleSpec."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+This annotation covers the importlib bootstrap layer. See `python_import6_detail` for `sys.path`, `sys.meta_path`, `PathFinder`, and the frozen importer.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_find_and_load` | Main import entry point after cache check |
+| 81-180 | `_find_spec` | Walk `sys.meta_path` to find a spec |
+| 181-280 | `ModuleSpec` | Carrier for import metadata |
+| 281-380 | `_load_unlocked` | Execute the module using its loader |
+| 381-600 | Import lock | Per-module lock prevents concurrent loading |
+
+## Reading
+
+### `_find_and_load`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1240 _find_and_load
+def _find_and_load(name, import_):
+    module = sys.modules.get(name, _NEEDS_LOADING)
+    if module is _NEEDS_LOADING:
+        return _find_and_load_unlocked(name, import_)
+    if module is None:
+        raise ModuleNotFoundError(f'import of {name} halted; use of None in sys.modules is unsupported')
+    _lock_unlock_module(name)
+    return module
+
+def _find_and_load_unlocked(name, import_):
+    path = None
+    parent = name.rpartition('.')[0]
+    if parent:
+        parent_module = sys.modules[parent]
+        path = getattr(parent_module, '__path__', None)
+    spec = _find_spec(name, path, None)
+    if spec is None:
+        raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+    return _load_unlocked(spec)
+```
+
+The `sys.modules` cache is checked first. For sub-packages (`pkg.mod`), the parent package is imported first and its `__path__` is used for the child search. `_NEEDS_LOADING` is a sentinel distinct from `None` (which marks blocked imports).
+
+### `_find_spec`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1180 _find_spec
+def _find_spec(name, path, target=None):
+    meta_path = sys.meta_path
+    if meta_path == []:
+        raise ImportError("sys.meta_path is empty")
+    for finder in meta_path:
+        with _ImportLockContext():
+            try:
+                find_spec = finder.find_spec
+            except AttributeError:
+                spec = finder.find_module(name, path)
+                ...
+            else:
+                spec = find_spec(name, path, target)
+        if spec is not None:
+            return spec
+    return None
+```
+
+`sys.meta_path` finders are tried in order: `BuiltinImporter`, `FrozenImporter`, `PathFinder`. Each gets `(name, path, target)`. The `path` for sub-packages comes from the parent's `__path__`. Custom finders can be prepended to intercept specific module names.
+
+### `ModuleSpec`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:340 ModuleSpec
+class ModuleSpec:
+    def __init__(self, name, loader, *, origin=None, loader_state=None,
+                 is_package=None):
+        self.name = name
+        self.loader = loader
+        self.origin = origin         # filename or None for built-ins
+        self.loader_state = loader_state
+        self.submodule_search_locations = [] if is_package else None
+        self._set_fileattr = False
+        self._cached = None
+```
+
+`ModuleSpec` carries all the metadata a loader needs. `origin` is the filename (`/path/to/foo.py`) or `None` for built-in/frozen. `submodule_search_locations` is the `__path__` for packages. Loaders receive the spec and use it to load the module.
+
+### Import lock
+
+```c
+// CPython: Python/import.c:480 _PyImport_AcquireLock
+int
+_PyImport_AcquireLock(void)
+{
+    /* Per-interpreter import lock: prevents two threads from importing
+       the same module simultaneously */
+    PyThread_acquire_lock(IMPORT_LOCK, WAIT_LOCK);
+    ...
+}
+```
+
+The import lock prevents two threads from loading the same module simultaneously. Circular imports are detected by checking `sys.modules` while holding the lock. If a module is partially initialized (already in `sys.modules` but not fully loaded), the importer returns the partial module.
+
+## gopy notes
+
+`_find_and_load` is `vm/eval_import.go:findAndLoad`. `sys.meta_path` is iterated via `objects.ListIter`. `ModuleSpec` is `objects.ModuleSpec` in `objects/module.go`. The import lock is a `sync.Mutex` per interpreter. `_load_unlocked` calls the loader's `exec_module` method.

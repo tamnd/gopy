@@ -1,0 +1,112 @@
+---
+title: Objects/typeobject.c (part 7)
+description: "Objects/typeobject.c part 7: type.__init_subclass__, type.__set_name__, MRO C3 linearization."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+This annotation covers class creation hooks and MRO computation. See `objects_typeobject6_detail` for `type.__new__`, `type.__call__`, descriptor protocol, and `__slots__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | C3 MRO algorithm | `mro_internal` and `pmerge` |
+| 101-200 | `type.__init_subclass__` | Called on each new subclass |
+| 201-300 | `type.__set_name__` | Called when a descriptor is assigned to a class |
+| 301-400 | `type.__subclasses__` | Return direct subclasses |
+| 401-600 | `type.__prepare__` | Return namespace dict for class body |
+
+## Reading
+
+### C3 MRO
+
+```c
+// CPython: Objects/typeobject.c:2180 mro_internal
+static PyObject *
+mro_internal(PyTypeObject *type, PyObject **p_old_mro)
+{
+    /* C3 linearization: merge the MROs of all bases */
+    PyObject *mro = mro_implementation(type);
+    ...
+}
+
+static PyObject *
+pmerge(PyObject *acc, PyObject **to_merge, Py_ssize_t to_merge_size)
+{
+    /* C3 merge step: find a head not in any tail, append it, repeat */
+    for (;;) {
+        for (Py_ssize_t i = 0; i < to_merge_size; i++) {
+            PyObject *candidate = PyList_GET_ITEM(to_merge[i], 0);
+            int ok = 1;
+            for (Py_ssize_t j = 0; j < to_merge_size; j++) {
+                if (tail_contains(to_merge[j], candidate)) { ok = 0; break; }
+            }
+            if (ok) {
+                PyList_Append(acc, candidate);
+                /* Remove candidate from all lists */
+                ...
+                goto again;
+            }
+        }
+        /* No candidate found: linearization impossible */
+        PyErr_SetString(PyExc_TypeError, "Cannot create a consistent MRO ...");
+        return NULL;
+    }
+}
+```
+
+C3 guarantees that a class always appears before its parents in the MRO, and that the local ordering of bases is preserved. `class D(B, C)` where both `B` and `C` inherit from `A` produces MRO `[D, B, C, A, object]`, not `[D, B, A, C, A, object]`.
+
+### `__init_subclass__`
+
+```c
+// CPython: Objects/typeobject.c:7480 type_new_init_subclass
+static int
+type_new_init_subclass(PyTypeObject *type, PyObject *kwds)
+{
+    /* Call type.__init_subclass__ on every base that defines it */
+    PyObject *super = PyObject_CallOneArg((PyObject *)&PySuper_Type,
+                                          (PyObject *)type);
+    PyObject *func = PyObject_GetAttr(super, &_Py_ID(__init_subclass__));
+    PyObject *result = PyObject_VectorcallDict(func, NULL, 0, kwds);
+    ...
+}
+```
+
+`__init_subclass__` is called on the parent class when a new subclass is defined. This enables plugin registration patterns: `class Plugin(Base, name='foo'): ...` passes `name='foo'` to `Base.__init_subclass__`. Django uses this for model registration.
+
+### `__set_name__`
+
+```c
+// CPython: Objects/typeobject.c:7540 set_names
+static int
+set_names(PyTypeObject *type)
+{
+    /* For each value in the class namespace, if it has __set_name__, call it */
+    PyObject *dict = type->tp_dict;
+    Py_ssize_t i = 0;
+    PyObject *key, *value;
+    while (PyDict_Next(dict, &i, &key, &value)) {
+        PyObject *set_name = _PyObject_LookupSpecial(value, &_Py_ID(__set_name__));
+        if (set_name != NULL) {
+            PyObject *res = PyObject_CallFunctionObjArgs(set_name, type, key, NULL);
+            Py_DECREF(set_name);
+            Py_XDECREF(res);
+        }
+    }
+    return 0;
+}
+```
+
+`__set_name__` lets descriptors know the attribute name they were assigned to. `class Foo: x = MyDescriptor()` calls `MyDescriptor.__set_name__(Foo, 'x')`. Without this, descriptors had to receive their name as a constructor argument.
+
+## gopy notes
+
+C3 MRO is `objects.ComputeMRO` in `objects/type.go`. `__init_subclass__` is called in `objects.TypeNew` via `objects.CallMethod`. `__set_name__` is `objects.SetNames` called after the class dict is populated. `type.__subclasses__` returns a list of `objects.Type` values from `Type.Subclasses`.

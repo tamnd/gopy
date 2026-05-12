@@ -1,0 +1,118 @@
+---
+title: Lib/shutil.py (part 2)
+description: "shutil part 2: shutil.copy2, shutil.copytree, shutil.rmtree, shutil.move, shutil.disk_usage."
+cpython_path: Lib/shutil.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/shutil.py" />
+
+This annotation covers tree operations. See `lib_shutil_detail` (part 1) for `shutil.copyfile`, `shutil.copystat`, `shutil.which`, and archive support.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `shutil.copy2` | Copy file content and metadata |
+| 81-180 | `shutil.copytree` | Recursively copy a directory tree |
+| 181-280 | `shutil.rmtree` | Recursively remove a directory tree |
+| 281-360 | `shutil.move` | Rename across filesystems using copy+delete |
+| 361-500 | `shutil.disk_usage` | Return disk space for a path |
+
+## Reading
+
+### `shutil.copy2`
+
+```python
+# CPython: Lib/shutil.py:340 copy2
+def copy2(src, dst, *, follow_symlinks=True):
+    """Copy data and metadata. Return the file's destination."""
+    if os.path.isdir(dst):
+        dst = os.path.join(dst, os.path.basename(src))
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    copystat(src, dst, follow_symlinks=follow_symlinks)
+    return dst
+```
+
+`copy2` copies both content and metadata (timestamps, permissions). If `dst` is a directory, the file is copied into it with the same name. `copystat` uses `os.stat` + `os.utime`/`os.chmod`; on platforms with `COPY_FILE_RANGE` or `sendfile`, `copyfile` uses those zero-copy syscalls.
+
+### `shutil.copytree`
+
+```python
+# CPython: Lib/shutil.py:560 copytree
+def copytree(src, dst, symlinks=False, ignore=None, copy_function=copy2,
+             ignore_dangling_symlinks=False, dirs_exist_ok=False):
+    """Recursively copy an entire directory tree."""
+    with os.scandir(src) as itr:
+        entries = list(itr)
+    os.makedirs(dst, exist_ok=dirs_exist_ok)
+    errors = []
+    for srcentry in entries:
+        srcname = os.path.join(src, srcentry.name)
+        dstname = os.path.join(dst, srcentry.name)
+        if srcentry.is_symlink():
+            linkto = os.readlink(srcname)
+            os.symlink(linkto, dstname)
+        elif srcentry.is_dir():
+            copytree(srcname, dstname, symlinks, ignore, copy_function, ...)
+        else:
+            copy_function(srcname, dstname)
+    copystat(src, dst)
+    return dst
+```
+
+`copytree` accepts a pluggable `copy_function` (default `copy2`). `ignore` is a callable `(src, names) -> names_to_skip`. `dirs_exist_ok=True` allows copying into an existing directory (added in Python 3.8).
+
+### `shutil.rmtree`
+
+```python
+# CPython: Lib/shutil.py:620 rmtree
+def rmtree(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None):
+    """Recursively delete a directory tree."""
+    if _use_fd_functions:
+        # Use file descriptors for atomicity on POSIX
+        return _rmtree_safe_fd(path, dir_fd, onexc or onerror)
+    try:
+        with os.scandir(path) as scandir_it:
+            entries = list(scandir_it)
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                rmtree(entry.path, ...)
+            else:
+                os.unlink(entry.path)
+        os.rmdir(path)
+    except OSError as err:
+        if onexc: onexc(os.rmdir, path, err)
+```
+
+`rmtree` uses `os.scandir` for efficiency. The `_rmtree_safe_fd` path (Linux/macOS) uses `openat`/`unlinkat` to avoid TOCTOU races. `onexc` replaces the deprecated `onerror` in Python 3.12.
+
+### `shutil.move`
+
+```python
+# CPython: Lib/shutil.py:760 move
+def move(src, dst, copy_function=copy2):
+    """Recursively move a file or directory."""
+    try:
+        os.rename(src, dst)
+    except OSError:
+        # Cross-device move: copy then delete
+        if os.path.isdir(src):
+            if _destinsrc(dst, src):
+                raise Error(f"Cannot move a directory '{src}' into itself '{dst}'")
+            copytree(src, dst, copy_function=copy_function, symlinks=True)
+            rmtree(src)
+        else:
+            copy_function(src, dst)
+            os.unlink(src)
+```
+
+`shutil.move` first tries `os.rename` (atomic on same filesystem). If that fails (e.g., cross-device), it falls back to copy+delete. The `_destinsrc` check prevents moving a directory into itself.
+
+## gopy notes
+
+`shutil.copytree` and `shutil.rmtree` use the pure-Python implementation via `stdlib/shutil.py`. `shutil.copyfile` uses `os.sendfile` where available via `module/os.Sendfile`. `shutil.disk_usage` calls `syscall.Statfs` on Linux/macOS.

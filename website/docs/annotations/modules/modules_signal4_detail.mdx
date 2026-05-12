@@ -1,0 +1,119 @@
+---
+title: Modules/signalmodule.c (part 4)
+description: "signalmodule part 4: signal.signal, signal.raise_signal, signal handlers and the wakeup fd."
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/signalmodule.c" />
+
+This annotation covers signal handler registration and delivery. See `modules_signal3_detail` for `signal.alarm`, `signal.setitimer`, `signal.sigwait`, and signal masks.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `signal.signal` | Register a Python callable as a signal handler |
+| 81-180 | `signal_handler` | C-level signal handler that sets a flag |
+| 181-260 | Pending signal dispatch | How the eval loop checks for pending signals |
+| 261-360 | `signal.set_wakeup_fd` | Wake up a select/poll loop on signal |
+| 361-500 | `signal.raise_signal` | Raise a signal programmatically |
+
+## Reading
+
+### `signal.signal`
+
+```c
+// CPython: Modules/signalmodule.c:480 signal_signal_impl
+static PyObject *
+signal_signal_impl(PyObject *module, int signalnum, PyObject *handler)
+{
+    PyOS_sighandler_t old_handler;
+    if (handler == IgnoreHandler)
+        old_handler = PyOS_signal(signalnum, SIG_IGN);
+    else if (handler == DefaultHandler)
+        old_handler = PyOS_signal(signalnum, SIG_DFL);
+    else {
+        Py_INCREF(handler);
+        Handlers[signalnum].func = handler;
+        old_handler = PyOS_signal(signalnum, signal_handler);
+    }
+    ...
+    return old_handler_obj;
+}
+```
+
+`signal.signal(SIGINT, handler)` installs a C-level `signal_handler` that just sets `Handlers[signum].tripped = 1` and writes to the wakeup fd. The Python `handler` is stored separately and called from the eval loop when it checks pending signals.
+
+### `signal_handler`
+
+```c
+// CPython: Modules/signalmodule.c:280 signal_handler
+static void
+signal_handler(int sig_num)
+{
+    int save_errno = errno;
+    Handlers[sig_num].tripped = 1;
+    /* Interrupt the eval loop */
+    _PyEval_SignalReceived(tstate);
+    /* Write signal number to wakeup fd */
+    if (wakeup.fd != INVALID_FD) {
+        unsigned char byte = (unsigned char)sig_num;
+        write(wakeup.fd, &byte, 1);
+    }
+    errno = save_errno;
+}
+```
+
+Signal handlers run asynchronously in any thread. To avoid race conditions, the C handler only sets a flag and calls `_PyEval_SignalReceived` (which sets `eval_breaker`). The actual Python callback is called from the main thread's eval loop.
+
+### Pending signal dispatch
+
+```c
+// CPython: Modules/signalmodule.c:380 handle_signals
+static int
+handle_signals(PyThreadState *tstate)
+{
+    for (int i = 1; i < NSIG; i++) {
+        if (Handlers[i].tripped) {
+            Handlers[i].tripped = 0;
+            PyObject *func = Handlers[i].func;
+            if (func == NULL || func == IgnoreHandler || func == DefaultHandler)
+                continue;
+            PyObject *result = PyObject_CallFunctionObjArgs(func,
+                PyLong_FromLong(i), tstate->frame->f_frame->f_code, NULL);
+            Py_XDECREF(result);
+        }
+    }
+    return 0;
+}
+```
+
+`handle_signals` is called from `RESUME` (at function entry) and on `_Py_HandlePending`. It iterates all signal numbers and calls the Python handler for any that tripped. This ensures signals are delivered in the main thread at safe points.
+
+### `signal.set_wakeup_fd`
+
+```c
+// CPython: Modules/signalmodule.c:560 signal_set_wakeup_fd
+static PyObject *
+signal_set_wakeup_fd(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    int fd, warn_on_full_buffer = 1;
+    PyArg_ParseTupleAndKeywords(args, kwds, "i|p:set_wakeup_fd",
+                                kwlist, &fd, &warn_on_full_buffer);
+    int old_fd = wakeup.fd;
+    wakeup.fd = fd;
+    wakeup.warn_on_full_buffer = warn_on_full_buffer;
+    return PyLong_FromLong(old_fd);
+}
+```
+
+`signal.set_wakeup_fd(fd)` makes the signal handler write a byte to `fd` when a signal arrives. `asyncio` uses this with a `socketpair`: the event loop's `select`/`epoll` wakes up, reads the signal number, and dispatches the Python handler. This bridges POSIX signals and async I/O.
+
+## gopy notes
+
+`signal.signal` is `module/signal.Signal` in `module/signal/module.go`. The C signal handler is replaced by `signal.Notify` (Go's channel-based signal API). Pending signals are checked in `vm/eval_simple.go` at `RESUME`. `set_wakeup_fd` writes to a Go channel that `asyncio` polls.

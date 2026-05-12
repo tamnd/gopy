@@ -1,0 +1,106 @@
+---
+title: Python/ceval.c (part 42)
+description: "Python/ceval.c part 42: CALL specializations, CALL_PY_EXACT_ARGS, CALL_BUILTIN_CLASS, CALL_BOUND_METHOD."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers specializing adaptive interpreter CALL opcodes. See `python_ceval41_detail` for `RESUME`, `PUSH_EXC_INFO`, `RERAISE`, and `CHECK_EXC_MATCH`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `CALL_PY_EXACT_ARGS` | Call a Python function with exact arity |
+| 81-160 | `CALL_PY_WITH_DEFAULTS` | Call with default arguments |
+| 161-240 | `CALL_BUILTIN_O` | Call a C function with one argument |
+| 241-340 | `CALL_BUILTIN_CLASS` | Call a type (constructor) |
+| 341-500 | `CALL_BOUND_METHOD_EXACT_ARGS` | Optimized bound method call |
+
+## Reading
+
+### `CALL_PY_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:4920 CALL_PY_EXACT_ARGS
+inst(CALL_PY_EXACT_ARGS, (unused, unused, callable, self_or_null, args[oparg] -- unused, unused, result)) {
+    /* Specialized for Python functions called with exactly co_argcount args, no defaults */
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    DEOPT_IF(tstate->interp->eval_breaker, CALL);
+    DEOPT_IF(code->co_argcount != oparg + (self_or_null != NULL), CALL);
+    /* Inline the frame push */
+    _PyInterpreterFrame *new_frame = _PyFrame_PushUnchecked(tstate, func, oparg + (self_or_null != NULL));
+    JUMPBY(INLINE_CACHE_ENTRIES_CALL);
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+`CALL_PY_EXACT_ARGS` is a specialization of `CALL` for the common case: a Python function with no defaults, no `*args`/`**kwargs`, called with the exact number of positional arguments. It bypasses argument parsing entirely and pushes the frame directly.
+
+### `CALL_BUILTIN_O`
+
+```c
+// CPython: Python/ceval.c:5020 CALL_BUILTIN_O
+inst(CALL_BUILTIN_O, (unused, unused, callable, self_or_null, args[oparg] -- unused, unused, res)) {
+    /* Specialized for C functions that take exactly one argument */
+    PyCFunction cfunc = PyCFunction_GET_FUNCTION(callable);
+    int nargs = oparg + (self_or_null != NULL);
+    DEOPT_IF(nargs != 1, CALL);
+    Py_BEGIN_ALLOW_THREADS
+    res = _PyCFunction_TrampolineCall(cfunc, PyCFunction_GET_SELF(callable), args[0]);
+    Py_END_ALLOW_THREADS
+}
+```
+
+`CALL_BUILTIN_O` handles C functions with the `METH_O` flag (exactly one argument, no keywords). `len(x)`, `str(x)`, `bool(x)` all qualify. The GIL is released around the call to allow other threads to run.
+
+### `CALL_BUILTIN_CLASS`
+
+```c
+// CPython: Python/ceval.c:5060 CALL_BUILTIN_CLASS
+inst(CALL_BUILTIN_CLASS, (unused, unused, callable, self_or_null, args[oparg] -- unused, unused, res)) {
+    /* Specialized for type.__call__ when callable is a type */
+    int total_args = oparg + (self_or_null != NULL);
+    DEOPT_IF(!PyType_Check(callable), CALL);
+    PyTypeObject *tp = (PyTypeObject *)callable;
+    DEOPT_IF(tp->tp_new == NULL, CALL);
+    res = tp->tp_new(tp, NULL, NULL);  /* simplified */
+    if (tp->tp_init != NULL && tp->tp_init != object_init) {
+        tp->tp_init(res, args, ...);
+    }
+}
+```
+
+`CALL_BUILTIN_CLASS` short-circuits `type.__call__` for common cases: `int(x)`, `list(x)`, `dict()`. It directly calls `tp_new` then `tp_init`, avoiding the generic `type.__call__` overhead.
+
+### `CALL_BOUND_METHOD_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:5120 CALL_BOUND_METHOD_EXACT_ARGS
+inst(CALL_BOUND_METHOD_EXACT_ARGS, (unused, unused, callable, self_or_null, args[oparg] -- unused, unused, res)) {
+    /* Specialized for bound method calls: obj.method(args) */
+    DEOPT_IF(!PyMethod_Check(callable), CALL);
+    PyObject *self = ((PyMethodObject *)callable)->im_self;
+    PyObject *func = ((PyMethodObject *)callable)->im_func;
+    /* Replace callable with func, prepend self */
+    Py_INCREF(self);
+    STACK_GROW(1);
+    args[-1] = self;
+    callable = func;
+    /* Fall through to CALL_PY_EXACT_ARGS */
+    ...
+}
+```
+
+Bound method calls extract `self` and `func` from the `PyMethodObject` and reorganize the stack so the frame push sees a plain function with `self` as the first argument. This avoids the generic attribute lookup on every call.
+
+## gopy notes
+
+`CALL_PY_EXACT_ARGS` is in `vm/eval_call.go`; it pushes a new `Frame` directly without argument parsing. `CALL_BUILTIN_O` calls Go functions registered with `METH_O`. `CALL_BUILTIN_CLASS` calls `objects.TypeCall`. `CALL_BOUND_METHOD_EXACT_ARGS` extracts `self` from `objects.Method` and recurses.

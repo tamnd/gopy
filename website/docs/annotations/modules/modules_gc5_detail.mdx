@@ -1,0 +1,101 @@
+---
+title: Modules/gcmodule.c (part 5)
+description: "gcmodule part 5: gc.get_referrers, gc.get_referents, gc.is_tracked, gc.freeze."
+cpython_path: Modules/gcmodule.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/gcmodule.c" />
+
+This annotation covers the `gc` module's inspection and control functions. See `python_gc4_detail` for cyclic collection internals, finalizers, and generation promotion.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `gc.get_referrers` | Find objects that refer to given objects |
+| 81-160 | `gc.get_referents` | Get objects directly referred to |
+| 161-240 | `gc.is_tracked` | Check if an object is in the GC |
+| 241-320 | `gc.freeze` / `gc.unfreeze` | Move gen-2 objects out of GC reach |
+| 321-400 | `gc.get_count` / `gc.get_threshold` | Query collection state |
+
+## Reading
+
+### `gc.get_referrers`
+
+```c
+// CPython: Modules/gcmodule.c:1280 gc_get_referrers
+static PyObject *
+gc_get_referrers(PyObject *self, PyObject *args)
+{
+    /* For each GC-tracked object, check if it refers to any of args */
+    PyObject *result = PyList_New(0);
+    for (int g = 0; g < NUM_GENERATIONS; g++) {
+        PyGC_Head *gc = GC_NEXT(&generations[g].head);
+        while (gc != &generations[g].head) {
+            PyObject *op = FROM_GC(gc);
+            traverseproc traverse = Py_TYPE(op)->tp_traverse;
+            if (traverse(op, referrers_visit, args) != 0) {
+                PyList_Append(result, op);
+            }
+            gc = GC_NEXT(gc);
+        }
+    }
+    return result;
+}
+```
+
+`gc.get_referrers(obj)` traverses all GC-tracked objects and returns those that directly reference `obj`. This is O(total GC objects) and can be slow. Used for debugging memory leaks.
+
+### `gc.get_referents`
+
+```c
+// CPython: Modules/gcmodule.c:1340 gc_get_referents
+static int
+referents_visit(PyObject *obj, void *arg)
+{
+    PyList_Append((PyObject *)arg, obj);
+    return 0;
+}
+
+static PyObject *
+gc_get_referents(PyObject *self, PyObject *args)
+{
+    PyObject *result = PyList_New(0);
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(args); i++) {
+        PyObject *obj = PyTuple_GET_ITEM(args, i);
+        traverseproc traverse = Py_TYPE(obj)->tp_traverse;
+        if (traverse) traverse(obj, referents_visit, result);
+    }
+    return result;
+}
+```
+
+`gc.get_referents(obj)` calls `tp_traverse` on `obj` and collects all directly referenced objects. Unlike `gc.get_referrers`, this is O(references from obj) not O(all objects).
+
+### `gc.freeze`
+
+```c
+// CPython: Modules/gcmodule.c:1420 gc_freeze
+static PyObject *
+gc_freeze(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    /* Move all gen-0/1/2 objects to the permanent generation (gen 3).
+       Frozen objects are never collected; they survive process forks. */
+    for (int i = 0; i < NUM_GENERATIONS; i++) {
+        gc_list_merge(&generations[i].head, &permanent_generation.head);
+        generations[i].count = 0;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`gc.freeze()` moves all tracked objects to a "permanent generation" that is never collected. Used before `os.fork()` to prevent the child from spending time collecting objects inherited from the parent. `gc.unfreeze()` moves them back.
+
+## gopy notes
+
+`gc.get_referrers` is `module/gc.GetReferrers` in `module/gc/module.go`. It uses `objects.Traverse` to walk referents. `gc.freeze` is `module/gc.Freeze` which moves objects to a permanent set excluded from the GC sweep. `gc.is_tracked` checks `objects.IsGCTracked`.

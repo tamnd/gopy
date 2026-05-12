@@ -1,0 +1,108 @@
+---
+title: Modules/selectmodule.c (part 4)
+description: "selectmodule part 4: select.poll, select.epoll, select.kqueue, DefaultSelector."
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/selectmodule.c" />
+
+This annotation covers platform-specific I/O multiplexing. See `modules_select3_detail` for `select.select`, `select.devpoll`, and the `selectors` module.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `select.poll` | Linux/macOS level-triggered poll |
+| 81-180 | `select.epoll` | Linux edge/level-triggered epoll |
+| 181-280 | `select.kqueue` | macOS/BSD kqueue |
+| 281-380 | `selectors.DefaultSelector` | Platform-best selector |
+| 381-500 | `selectors.EpollSelector` | epoll-backed high-level selector |
+
+## Reading
+
+### `select.poll`
+
+```c
+// CPython: Modules/selectmodule.c:820 poll_poll
+static PyObject *
+poll_poll(pollObject *self, PyObject *args)
+{
+    double timeout_double = -1;
+    struct pollfd *ufds = self->ufds;
+    Py_BEGIN_ALLOW_THREADS
+    int n = poll(ufds, self->ufd_len, (int)timeout);
+    Py_END_ALLOW_THREADS
+    PyObject *result_list = PyList_New(n);
+    for (int i = 0, j = 0; i < self->ufd_len && j < n; i++) {
+        if (ufds[i].revents) {
+            PyList_SET_ITEM(result_list, j++,
+                PyTuple_Pack(2, PyLong_FromLong(ufds[i].fd),
+                                PyLong_FromLong(ufds[i].revents)));
+        }
+    }
+    return result_list;
+}
+```
+
+`poll()` avoids the `select()` fd limit (1024 on some systems). It returns `(fd, events)` pairs for all ready fds. The GIL is released during the blocking `poll` syscall. `POLLIN`/`POLLOUT`/`POLLERR` are the common event flags.
+
+### `select.epoll`
+
+```c
+// CPython: Modules/selectmodule.c:1180 pyepoll_poll
+static PyObject *
+pyepoll_poll(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    int maxevents = -1, timeout = -1;
+    struct epoll_event *evs;
+    Py_BEGIN_ALLOW_THREADS
+    int nfds = epoll_wait(self->epfd, evs, maxevents, timeout);
+    Py_END_ALLOW_THREADS
+    PyObject *elist = PyList_New(nfds);
+    for (int i = 0; i < nfds; i++) {
+        PyList_SET_ITEM(elist, i,
+            PyTuple_Pack(2, PyLong_FromLong(evs[i].data.fd),
+                            PyLong_FromLong(evs[i].events)));
+    }
+    return elist;
+}
+```
+
+`epoll` scales to millions of file descriptors by using a kernel-maintained set (no linear scan). `EPOLLET` flag enables edge-triggered mode (notify only on state change, not while readable/writable). `epoll_create1(EPOLL_CLOEXEC)` ensures the epoll fd is not inherited by `exec`.
+
+### `selectors.EpollSelector`
+
+```python
+# CPython: Lib/selectors.py:420 EpollSelector.select
+class EpollSelector(BaseSelector):
+    def select(self, timeout=None):
+        if timeout is not None:
+            timeout = max(timeout, 0)
+        max_ev = max(len(self._fd_to_key), 1)
+        ready = []
+        try:
+            fd_event_list = self._epoll.poll(timeout, max_ev)
+        except InterruptedError:
+            return ready
+        for fd, event in fd_event_list:
+            events = 0
+            if event & ~select.EPOLLIN:
+                events |= EVENT_WRITE
+            if event & ~select.EPOLLOUT:
+                events |= EVENT_READ
+            key = self._fd_to_key.get(fd)
+            if key:
+                ready.append((key, events & key.events))
+        return ready
+```
+
+`selectors.DefaultSelector` picks the best available: `EpollSelector` on Linux, `KqueueSelector` on macOS, `PollSelector` on POSIX, `SelectSelector` as fallback. `asyncio` uses `DefaultSelector` as its I/O event loop backend.
+
+## gopy notes
+
+`select.poll` is `module/select.Poll` in `module/select/module.go`. `select.epoll` uses `syscall.EpollCreate1`/`EpollWait`. `selectors.DefaultSelector` picks `EpollSelector` on Linux or `KqueueSelector` on macOS. `asyncio` uses this via `module/asyncio`.

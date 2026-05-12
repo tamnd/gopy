@@ -1,0 +1,112 @@
+---
+title: Modules/binascii.c (part 5)
+description: "binascii part 5: base64 encoding/decoding, uu encode, hex encode/decode."
+cpython_path: Modules/binascii.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/binascii.c" />
+
+This annotation covers the encoding functions. See `modules_binascii4_detail` for `crc32`, `crc_hqx`, `b2a_qp`, and `a2b_qp`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `b2a_base64` | Encode bytes to base64 line |
+| 81-180 | `a2b_base64` | Decode base64 to bytes |
+| 181-260 | `b2a_hex` / `hexlify` | Encode bytes to hex string |
+| 261-360 | `a2b_hex` / `unhexlify` | Decode hex string to bytes |
+| 361-500 | `b2a_uu` / `a2b_uu` | UU encoding (deprecated) |
+
+## Reading
+
+### `b2a_base64`
+
+```c
+// CPython: Modules/binascii.c:420 binascii_b2a_base64_impl
+static PyObject *
+binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline)
+{
+    /* Encode up to 57 input bytes (produces 76 output chars per line) */
+    static const unsigned char table_b2a_base64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const unsigned char *bin_data = data->buf;
+    Py_ssize_t length = data->len;
+    Py_ssize_t out_len = (length + 2) / 3 * 4 + newline;
+    PyObject *rv = PyBytes_FromStringAndSize(NULL, out_len);
+    unsigned char *ascii_data = (unsigned char *)PyBytes_AS_STRING(rv);
+    while (length >= 3) {
+        *ascii_data++ = table_b2a_base64[bin_data[0] >> 2];
+        *ascii_data++ = table_b2a_base64[((bin_data[0] & 3) << 4) | (bin_data[1] >> 4)];
+        *ascii_data++ = table_b2a_base64[((bin_data[1] & 0xf) << 2) | (bin_data[2] >> 6)];
+        *ascii_data++ = table_b2a_base64[bin_data[2] & 0x3f];
+        bin_data += 3; length -= 3;
+    }
+    /* Handle remaining 1 or 2 bytes with padding */
+    ...
+    if (newline) *ascii_data++ = '\n';
+    return rv;
+}
+```
+
+`b2a_base64` encodes 3 bytes at a time into 4 ASCII characters using the standard base64 alphabet. The output is padded with `=` to a multiple of 4. `newline=True` (default) appends `\n` after each call, making it suitable for MIME.
+
+### `a2b_base64`
+
+```c
+// CPython: Modules/binascii.c:480 binascii_a2b_base64_impl
+static PyObject *
+binascii_a2b_base64_impl(PyObject *module, Py_buffer *data, int strict_mode)
+{
+    static const int table_a2b_base64[256] = { ... };  /* -1 for invalid */
+    const unsigned char *ascii_data = data->buf;
+    Py_ssize_t ascii_len = data->len;
+    /* Skip whitespace unless strict_mode */
+    ...
+    for (Py_ssize_t i = 0; i < ascii_len; i++) {
+        int v = table_a2b_base64[ascii_data[i]];
+        if (v < 0) {
+            if (strict_mode) {
+                PyErr_SetString(binascii_Error, "Non-base64 digit found");
+                return NULL;
+            }
+            continue;  /* skip invalid */
+        }
+        /* Accumulate bits */
+    }
+}
+```
+
+`a2b_base64` uses a 256-entry lookup table for O(1) character decoding. `strict_mode=True` (added in Python 3.11) raises on non-base64 characters including excessive padding.
+
+### `b2a_hex`
+
+```c
+// CPython: Modules/binascii.c:720 binascii_hexlify_impl
+static PyObject *
+binascii_hexlify_impl(PyObject *module, Py_buffer *data, int sep, int bytes_per_sep)
+{
+    static const char hexdigits[] = "0123456789abcdef";
+    Py_ssize_t srclen = data->len;
+    PyObject *rv = PyBytes_FromStringAndSize(NULL, srclen * 2);
+    const unsigned char *src = data->buf;
+    char *dest = PyBytes_AS_STRING(rv);
+    for (Py_ssize_t i = 0; i < srclen; i++) {
+        unsigned char c = src[i];
+        dest[2*i]   = hexdigits[c >> 4];
+        dest[2*i+1] = hexdigits[c & 0xf];
+    }
+    return rv;
+}
+```
+
+`binascii.hexlify(b'\xde\xad')` returns `b'dead'`. The `sep` and `bytes_per_sep` arguments (Python 3.8+) insert a separator every N bytes: `hexlify(b'\xde\xad\xbe\xef', sep=b':', bytes_per_sep=2)` returns `b'dead:beef'`.
+
+## gopy notes
+
+`b2a_base64` is `module/binascii.B2ABase64` using `encoding/base64.StdEncoding.EncodeToString`. `a2b_base64` uses `encoding/base64.StdEncoding.DecodeString`. `hexlify` uses `encoding/hex.EncodeToString`. `unhexlify` uses `encoding/hex.DecodeString`.

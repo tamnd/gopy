@@ -1,0 +1,109 @@
+---
+title: Lib/string.py (part 3)
+description: "string.py part 3: Formatter, Template, string constants, capwords."
+cpython_path: Lib/string.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/string.py" />
+
+This annotation covers `Formatter` and `Template`. See `lib_string2_detail` for `str.format` internals and the format spec mini-language.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | String constants | `ascii_letters`, `digits`, `punctuation`, etc. |
+| 61-180 | `Formatter` | Extensible `str.format`-like API |
+| 181-320 | `Template` | `$`-substitution for safe user-supplied strings |
+| 321-400 | `capwords` | Split, capitalize, join |
+
+## Reading
+
+### `Formatter`
+
+```python
+# CPython: Lib/string.py:160 Formatter.vformat
+class Formatter:
+    def vformat(self, format_string, args, kwargs):
+        used_args = set()
+        result, _ = self._vformat(format_string, args, kwargs, used_args, 2)
+        self.check_unused_args(used_args, args, kwargs)
+        return result
+
+    def _vformat(self, format_string, args, kwargs, used_args, recursion_depth):
+        if recursion_depth < 0:
+            raise ValueError('Max string formatting recursion exceeded')
+        result = []
+        for literal_text, field_name, format_spec, conversion in self.parse(format_string):
+            if literal_text:
+                result.append(literal_text)
+            if field_name is not None:
+                obj, _ = self.get_field(field_name, args, kwargs)
+                obj = self.convert_field(obj, conversion)
+                format_spec, _ = self._vformat(format_spec, args, kwargs, used_args, recursion_depth - 1)
+                result.append(self.format_field(obj, format_spec))
+        return ''.join(result), ...
+```
+
+`Formatter` is designed for subclassing: override `get_value`, `format_field`, or `convert_field` to customize behavior. `check_unused_args` can raise on unused positional/keyword arguments. The recursion depth limit prevents `{:{}}` infinite nesting.
+
+### `Template`
+
+```python
+# CPython: Lib/string.py:68 Template
+class Template:
+    delimiter = '$'
+    idpattern = r'(?a:[_a-z][_a-z0-9]*)'
+    braceidpattern = None
+    flags = _re.IGNORECASE
+
+    def substitute(self, mapping={}, /, **kws):
+        def convert(mo):
+            named = mo.group('named') or mo.group('braced')
+            if named is not None:
+                val = mapping[named]
+                return str(val)
+            if mo.group('escaped') is not None:
+                return self.delimiter
+            raise ValueError('Unrecognized substitution')
+        return self.pattern.sub(convert, self.template)
+
+    def safe_substitute(self, mapping={}, /, **kws):
+        def convert(mo):
+            named = mo.group('named') or mo.group('braced')
+            if named is not None:
+                try:
+                    return str(mapping[named])
+                except KeyError:
+                    return mo.group()
+            ...
+        return self.pattern.sub(convert, self.template)
+```
+
+`Template` is safer than `str.format` for user-supplied strings: `$name` only accesses top-level names, not arbitrary attribute/index access. `safe_substitute` leaves unrecognized placeholders as-is instead of raising. Used in `logging`, email templates, and code generation.
+
+### String constants
+
+```python
+# CPython: Lib/string.py:18 constants
+whitespace = ' \t\n\r\x0b\x0c'
+ascii_lowercase = 'abcdefghijklmnopqrstuvwxyz'
+ascii_uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+ascii_letters = ascii_lowercase + ascii_uppercase
+digits = '0123456789'
+hexdigits = digits + 'abcdef' + 'ABCDEF'
+octdigits = '01234567'
+punctuation = r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""
+printable = digits + ascii_letters + punctuation + whitespace
+```
+
+These constants are plain strings. They exist because `str.isdigit()` etc. also match Unicode digits; `string.digits` is always exactly `0-9`. Useful for `str.translate` tables and manual character classification.
+
+## gopy notes
+
+`Formatter` is in `module/string/module.go`. `Template` uses `module/re` for pattern matching. String constants are package-level variables. `capwords` uses `strings.Split` + `strings.Title` + `strings.Join`.

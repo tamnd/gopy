@@ -403,6 +403,8 @@ const sidebars = {
         'annotations/python/python_errors9_detail',
         'annotations/python/python_ceval41_detail',
         'annotations/python/python_gc4_detail',
+        'annotations/python/python_ceval42_detail',
+        'annotations/python/python_import7_detail',
       ],
     },
     {
@@ -673,6 +675,9 @@ const sidebars = {
         'annotations/objects/objects_exceptions5_detail',
         'annotations/objects/objects_generatorobject5_detail',
         'annotations/objects/objects_frameobject5_detail',
+        'annotations/objects/objects_typeobject7_detail',
+        'annotations/objects/objects_abstractobject3_detail',
+        'annotations/objects/objects_longobject13_detail',
       ],
     },
     {
@@ -1232,6 +1237,10 @@ const sidebars = {
         'annotations/modules/modules_ctypes4_detail',
         'annotations/modules/modules_multiprocessing4_detail',
         'annotations/modules/modules_threading4_detail',
+        'annotations/modules/modules_binascii5_detail',
+        'annotations/modules/modules_select4_detail',
+        'annotations/modules/modules_signal4_detail',
+        'annotations/modules/modules_gc5_detail',
       ],
     },
     {
@@ -1839,6 +1848,8 @@ const sidebars = {
         'annotations/lib/lib_os4_detail',
         'annotations/lib/lib_io4_detail',
         'annotations/lib/lib_re4_detail',
+        'annotations/lib/lib_shutil2_detail',
+        'annotations/lib/lib_string3_detail',
       ],
     },
   ],

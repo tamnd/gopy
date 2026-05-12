@@ -1,0 +1,128 @@
+---
+title: Objects/abstract.c (part 3)
+description: "Objects/abstract.c part 3: PySequence_*, PyMapping_*, PyNumber_*, PyIter_Send."
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/abstract.c" />
+
+This annotation covers the sequence, mapping, and number abstract APIs. See `objects_abstractobject2_detail` for `PyObject_Call`, `PyObject_GetAttr`, `PyObject_RichCompare`, and `PyObject_IsTrue`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PySequence_GetItem` / `SetItem` | Protocol-level sequence indexing |
+| 81-160 | `PyMapping_GetItemString` | Dict-like access by C string key |
+| 161-240 | `PyNumber_Add` / arithmetic | Number protocol dispatch |
+| 241-340 | `PyIter_Next` / `PyIter_Send` | Iterator protocol |
+| 341-500 | `PyObject_GetIter` | Get an iterator from any iterable |
+
+## Reading
+
+### `PySequence_GetItem`
+
+```c
+// CPython: Objects/abstract.c:860 PySequence_GetItem
+PyObject *
+PySequence_GetItem(PyObject *s, Py_ssize_t i)
+{
+    if (s == NULL) return null_error();
+    PySequenceMethods *m = Py_TYPE(s)->tp_as_sequence;
+    if (m == NULL || m->sq_item == NULL) {
+        PyErr_Format(PyExc_TypeError, "'%.200s' object is not subscriptable",
+                     Py_TYPE(s)->tp_name);
+        return NULL;
+    }
+    if (i < 0) {
+        Py_ssize_t len = PySequence_Size(s);
+        if (len < 0) return NULL;
+        i += len;
+    }
+    return m->sq_item(s, i);
+}
+```
+
+`PySequence_GetItem` handles negative indices by computing `len + i`. It dispatches via `tp_as_sequence->sq_item`. Objects that only implement `tp_as_mapping->mp_subscript` (dicts) are not sequences; `PySequence_GetItem` would fail on them.
+
+### `PyNumber_Add`
+
+```c
+// CPython: Objects/abstract.c:1060 PyNumber_Add
+PyObject *
+PyNumber_Add(PyObject *v, PyObject *w)
+{
+    PyObject *result = BINARY_OP1(v, w, NB_SLOT(nb_add), "+");
+    if (result != Py_NotImplemented) return result;
+    Py_DECREF(result);
+    /* Try sequence concatenation as fallback */
+    PySequenceMethods *mv = Py_TYPE(v)->tp_as_sequence;
+    PySequenceMethods *mw = Py_TYPE(w)->tp_as_sequence;
+    if (mv != NULL && mv->sq_concat != NULL)
+        return (*mv->sq_concat)(v, w);
+    return type_error("unsupported operand type(s) for +: '%.100s' and '%.100s'", v, w);
+}
+```
+
+`+` first tries `nb_add` (number protocol). If both return `NotImplemented`, it tries `sq_concat` (sequence concatenation). This is why `[1] + [2]` works (list implements `sq_concat`) and `1 + [2]` fails.
+
+### `PyIter_Send`
+
+```c
+// CPython: Objects/abstract.c:2780 PyIter_Send
+PySendResult
+PyIter_Send(PyObject *iter, PyObject *arg, PyObject **result)
+{
+    /* For generators/coroutines: use am_send (fast path).
+       For plain iterators: arg must be None, use tp_iternext. */
+    if (Py_TYPE(iter)->tp_as_async != NULL &&
+        Py_TYPE(iter)->tp_as_async->am_send != NULL) {
+        PySendResult res = Py_TYPE(iter)->tp_as_async->am_send(iter, arg, result);
+        return res;
+    }
+    if (arg != Py_None) {
+        PyErr_SetString(PyExc_TypeError, "can't send non-None value to a just-started generator");
+        return PYGEN_ERROR;
+    }
+    *result = Py_TYPE(iter)->tp_iternext(iter);
+    ...
+}
+```
+
+`PyIter_Send` drives both `yield from` (via `SEND` opcode) and `await`. The `am_send` slot (added in Python 3.10) is more efficient than `tp_iternext` because it avoids raising `StopIteration` for the normal "not done yet" case.
+
+### `PyObject_GetIter`
+
+```c
+// CPython: Objects/abstract.c:2720 PyObject_GetIter
+PyObject *
+PyObject_GetIter(PyObject *o)
+{
+    PyTypeObject *t = Py_TYPE(o);
+    getiterfunc f;
+    f = t->tp_iter;
+    if (f == NULL) {
+        if (PySequence_Check(o))
+            return PySeqIter_New(o);
+        return type_error("'%.200s' object is not iterable", o);
+    }
+    PyObject *res = (*f)(o);
+    if (res != NULL && !PyIter_Check(res)) {
+        PyErr_Format(PyExc_TypeError, "iter() returned non-iterator ...");
+        Py_DECREF(res);
+        return NULL;
+    }
+    return res;
+}
+```
+
+`iter(obj)` calls `tp_iter`. If absent but `PySequence_Check` returns true, a sequence iterator (`PySeqIter`) is returned that calls `__getitem__` with increasing indices. This is the legacy iterator protocol.
+
+## gopy notes
+
+`PySequence_GetItem` is `objects.SequenceGetItem`. `PyNumber_Add` is `objects.NumberAdd` which tries `__add__`/`__radd__` via `objects.BinaryOp`. `PyIter_Send` is `objects.IterSend` in `vm/eval_simple.go`. `PyObject_GetIter` is `objects.GetIter` which returns `objects.SeqIter` for sequences without `__iter__`.

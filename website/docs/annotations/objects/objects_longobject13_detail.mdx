@@ -1,0 +1,116 @@
+---
+title: Objects/longobject.c (part 13)
+description: "Objects/longobject.c part 13: int.to_bytes, int.from_bytes, int.bit_count, int.bit_length."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers byte conversion and bit operations. See `objects_longobject12_detail` for `int.__new__`, arithmetic, and `int.__hash__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `int.bit_length` | Number of bits needed to represent |
+| 81-160 | `int.bit_count` | Count of set bits (popcount) |
+| 161-260 | `int.to_bytes` | Convert to bytes in given byte order |
+| 261-380 | `int.from_bytes` | Construct from bytes |
+| 381-500 | `int.as_integer_ratio` | Exact rational representation |
+
+## Reading
+
+### `int.bit_length`
+
+```c
+// CPython: Objects/longobject.c:2040 long_bit_length
+static PyObject *
+long_bit_length(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Number of bits needed: floor(log2(|n|)) + 1 */
+    PyLongObject *z = (PyLongObject *)self;
+    Py_ssize_t ndigits = _PyLong_IsNonNegativeCompact(z) ?
+        _PyLong_CompactValue(z) : _PyLong_DigitCount(z);
+    if (ndigits == 0) return PyLong_FromLong(0);
+    /* Most significant digit */
+    digit msd = z->long_value.ob_digit[ndigits - 1];
+    int bits = (ndigits - 1) * PyLong_SHIFT + _Py_bit_length(msd);
+    return PyLong_FromSsize_t(bits);
+}
+```
+
+`(255).bit_length()` returns `8`; `(256).bit_length()` returns `9`. For compact ints (fits in one digit), the computation is a single `__builtin_clz` equivalent. For large ints, only the most significant digit needs bit-counting.
+
+### `int.bit_count`
+
+```c
+// CPython: Objects/longobject.c:2080 long_bit_count
+static PyObject *
+long_bit_count(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Count of 1 bits (popcount) in |self| */
+    PyLongObject *z = (PyLongObject *)self;
+    Py_ssize_t count = 0;
+    Py_ssize_t ndigits = _PyLong_IsNonNegativeCompact(z) ?
+        1 : _PyLong_DigitCount(z);
+    for (Py_ssize_t i = 0; i < ndigits; i++) {
+        count += _Py_popcount_32(z->long_value.ob_digit[i]);
+    }
+    return PyLong_FromSsize_t(count);
+}
+```
+
+`(7).bit_count()` returns `3` (binary `111`). Added in Python 3.10. Each 30-bit digit is popcounted separately using `__builtin_popcount`. Negative numbers use the absolute value.
+
+### `int.to_bytes`
+
+```c
+// CPython: Objects/longobject.c:2160 long_to_bytes
+static PyObject *
+long_to_bytes(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    Py_ssize_t length;
+    const char *byteorder_str;
+    int is_signed = 0;
+    /* length and byteorder are positional-or-keyword */
+    PyArg_ParseTupleAndKeywords(args, kwargs, "ns|p:to_bytes",
+                                kwlist, &length, &byteorder_str, &is_signed);
+    int little_endian = strcmp(byteorder_str, "little") == 0;
+    PyObject *result = PyBytes_FromStringAndSize(NULL, length);
+    _PyLong_AsByteArray((PyLongObject *)self, (unsigned char *)PyBytes_AS_STRING(result),
+                        length, little_endian, is_signed);
+    return result;
+}
+```
+
+`(1024).to_bytes(2, 'big')` returns `b'\x04\x00'`. `_PyLong_AsByteArray` fills the output buffer digit by digit. `OverflowError` is raised if `length` is too small. `signed=True` uses two's complement encoding.
+
+### `int.from_bytes`
+
+```c
+// CPython: Objects/longobject.c:2240 long_from_bytes
+static PyObject *
+long_from_bytes(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    Py_buffer bytes_val;
+    const char *byteorder_str;
+    int is_signed = 0;
+    PyArg_ParseTupleAndKeywords(args, kwargs, "y*s|p:from_bytes", ...);
+    PyObject *result = _PyLong_FromByteArray(
+        (const unsigned char *)bytes_val.buf, bytes_val.len,
+        little_endian, is_signed);
+    PyBuffer_Release(&bytes_val);
+    return result;
+}
+```
+
+`int.from_bytes(b'\x04\x00', 'big')` returns `1024`. Accepts any buffer protocol object. `signed=True` interprets the leading bit as the sign bit (two's complement). This is the inverse of `to_bytes`.
+
+## gopy notes
+
+`int.bit_length` is `objects.IntBitLength` using `bits.Len` from `math/bits`. `int.bit_count` uses `bits.OnesCount`. `int.to_bytes` converts to `big.Int` then calls `FillBytes`. `int.from_bytes` uses `new(big.Int).SetBytes(...)` with endian reversal for little-endian.
