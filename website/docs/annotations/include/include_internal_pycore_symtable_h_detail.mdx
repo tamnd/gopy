@@ -1,0 +1,83 @@
+---
+title: Include/internal/pycore_symtable.h
+description: "Include/internal/pycore_symtable.h: symtable_entry, _Py_Mangle, variable scope flags (DEF_LOCAL, USE, DEF_FREE, CELL)."
+cpython_path: Include/internal/pycore_symtable.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_symtable.h" />
+
+`pycore_symtable.h` declares the data structures used by the symbol table pass. The symbol table is built by `Python/symtable.c` and consumed by the compiler to determine variable scope and slot assignments.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | Scope flags | `DEF_GLOBAL`, `DEF_LOCAL`, `DEF_FREE`, `DEF_CELL`, `USE`, etc. |
+| 61-110 | `_Py_Mangle` | Name mangling for `__name` identifiers in class bodies |
+| 111-150 | `symtable_entry` | Per-scope entry: name dict, parent, children |
+
+## Reading
+
+### Scope flags
+
+```c
+// CPython: Include/internal/pycore_symtable.h:14 scope flags
+#define DEF_GLOBAL    0x01   /* explicit global statement */
+#define DEF_LOCAL     0x02   /* assignment in this scope */
+#define DEF_PARAM     0x04   /* function parameter */
+#define DEF_NONLOCAL  0x08   /* explicit nonlocal statement */
+#define USE           0x20   /* used (referenced) */
+#define DEF_FREE      0x40   /* referenced but defined in enclosing scope */
+#define DEF_CELL      0x80   /* referenced from nested scope (becomes cell var) */
+#define DEF_IMPORT   0x100   /* defined by import statement */
+#define DEF_ANNOT    0x200   /* name in annotation */
+#define DEF_COMP_ITER 0x400  /* first iterator of a comprehension */
+```
+
+A name's final scope is computed from the combination of these flags. A name with both `USE` and `DEF_FREE` becomes a free variable (loaded via `LOAD_DEREF`).
+
+### `_Py_Mangle`
+
+```c
+// CPython: Include/internal/pycore_symtable.h:75 _Py_Mangle
+/* Name mangling: __spam in class Foo becomes _Foo__spam.
+   Mangling applies when:
+   - The name starts with two underscores
+   - The name does not end with two or more underscores
+   - We are inside a class body */
+PyObject *_Py_Mangle(PyObject *privateobj, PyObject *ident);
+```
+
+`_Py_Mangle` is called during compilation, not at runtime. `privateobj` is the class name; `ident` is the identifier being mangled.
+
+### `symtable_entry`
+
+```c
+// CPython: Include/internal/pycore_symtable.h:112 symtable_entry
+typedef struct _symtable_entry {
+    PyObject_HEAD
+    PyObject *ste_id;           /* code object or module/class name */
+    PyObject *ste_symbols;      /* dict: name → flags (int) */
+    PyObject *ste_name;         /* name of scope */
+    PyObject *ste_varnames;     /* list of parameters */
+    PyObject *ste_children;     /* list of child scopes */
+    PyObject *ste_directives;   /* list of (name, lineno) for global/nonlocal */
+    int ste_type;               /* ModuleBlock, FunctionBlock, ClassBlock */
+    int ste_nested;             /* true if in a nested function */
+    unsigned ste_free : 1;      /* true if scope has free variables */
+    unsigned ste_child_free : 1; /* true if any child scope has free vars */
+    unsigned ste_generator : 1; /* true if this is a generator function */
+    unsigned ste_coroutine : 1; /* true if this is async def */
+} PySTEntryObject;
+```
+
+The compiler queries `ste_symbols` to assign variable slots and determine which names become cell/free variables.
+
+## gopy notes
+
+gopy's symbol table is in `compile/symtable.go`. `_Py_Mangle` is `compile.MangleName`. `symtable_entry` maps to `compile.SymTableEntry` with the same flag constants. The scope flags are defined in `compile/symtable_flags.go`.

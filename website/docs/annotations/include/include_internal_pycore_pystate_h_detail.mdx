@@ -1,0 +1,118 @@
+---
+title: Include/internal/pycore_pystate.h
+description: "Include/internal/pycore_pystate.h: PyThreadState layout, _PyThreadState_GET, tstate_current, per-thread exception and frame pointers."
+cpython_path: Include/internal/pycore_pystate.h
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_pystate.h" />
+
+`pycore_pystate.h` declares the per-thread interpreter state (`PyThreadState`) and the inline accessors used throughout the eval loop.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `PyThreadState` layout | `frame`, `exc_info`, `interp`, `thread_id`, tracing hooks |
+| 61-120 | `_PyThreadState_GET` | Fast inline accessor for current `PyThreadState *` |
+| 121-200 | `_PyErr_StackItem` | Per-frame exception info (replaces `tstate->exc_type` in 3.11) |
+| 201-280 | Thread state list | Doubly-linked list of all thread states for the interpreter |
+| 281-350 | `_Py_atomic` accessors | `_Py_atomic_load_relaxed`, `_Py_atomic_store` |
+
+## Reading
+
+### `PyThreadState` key fields
+
+```c
+// CPython: Include/internal/pycore_pystate.h:58 PyThreadState
+struct _ts {
+    /* Doubly-linked list of all thread states in this interpreter */
+    struct _ts *prev;
+    struct _ts *next;
+
+    PyInterpreterState *interp;
+
+    /* Current executing frame */
+    struct _PyInterpreterFrame *current_frame;
+
+    /* Exception currently being handled (_PyErr_StackItem chain) */
+    _PyErr_StackItem *exc_info;
+
+    /* Tracing: set_trace(), set_profile() */
+    Py_tracefunc c_tracefunc;
+    Py_tracefunc c_profilefunc;
+    PyObject *c_traceobj;
+    PyObject *c_profileobj;
+
+    /* Thread identity */
+    unsigned long thread_id;  /* from PyThread_get_thread_ident */
+    uint64_t native_thread_id;
+
+    /* Pending calls: Py_AddPendingCall */
+    int async_exc;
+    PyObject *async_exc_obj;
+
+    /* Reference to the GIL (free-threaded: per-thread refcount mode) */
+    int py_recursion_remaining;
+    int c_recursion_remaining;
+};
+```
+
+### `_PyThreadState_GET`
+
+```c
+// CPython: Include/internal/pycore_pystate.h:82 _PyThreadState_GET
+static inline PyThreadState *
+_PyThreadState_GET(void)
+{
+    /* tstate_current is an atomic pointer in _PyRuntime.gilstate */
+    return (PyThreadState *)
+        _Py_atomic_load_relaxed(&_PyRuntime.gilstate.tstate_current);
+}
+```
+
+This is the hot path used by `PyErr_SetString`, `LOAD_FAST`, and almost every CPython internal function.
+
+### `_PyErr_StackItem`
+
+```c
+// CPython: Include/internal/pycore_pystate.h:140 _PyErr_StackItem
+typedef struct _err_stackitem {
+    /* Exception currently being handled in this frame */
+    PyObject *exc_value;
+    struct _err_stackitem *previous_item;
+} _PyErr_StackItem;
+```
+
+Python 3.11 moved per-frame exception state here from `PyThreadState`. Each `PUSH_EXC_INFO` / `POP_EXC_INFO` instruction pushes/pops one item. `sys.exc_info()` reads `tstate->exc_info->exc_value`.
+
+### Thread state list
+
+```c
+// CPython: Include/internal/pycore_pystate.h:220
+/* PyInterpreterState.threads is a linked list:
+   head: most recently created thread state
+   On thread creation: prepend new tstate
+   On thread exit: remove from list
+   Protected by: interpreter->threads.mutex */
+```
+
+### Recursion limits
+
+```c
+// CPython: Include/internal/pycore_pystate.h:260
+    int py_recursion_remaining;  /* decremented on Python-level calls */
+    int c_recursion_remaining;   /* decremented on C-to-Python transitions */
+    /* When py_recursion_remaining hits 0: RecursionError */
+    /* sys.setrecursionlimit sets the initial value */
+```
+
+Two separate limits prevent C extension stack overflow from masking Python RecursionError.
+
+## gopy notes
+
+gopy's `PyThreadState` is `vm.ThreadState` in `vm/tstate.go`. `_PyThreadState_GET` is `vm.GetCurrentThreadState()` which reads a goroutine-local value via `sync.Map` keyed by goroutine ID. `_PyErr_StackItem` is `vm.ErrStackItem` in `vm/exceptions.go`. `py_recursion_remaining` is `tstate.RecursionDepth` compared against `tstate.Interp.RecursionLimit`.

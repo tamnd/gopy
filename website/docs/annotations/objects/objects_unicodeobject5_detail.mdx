@@ -1,0 +1,127 @@
+---
+title: Objects/unicodeobject.c (part 5)
+description: "Objects/unicodeobject.c part 5: str.format_map, str.translate, str.maketrans, str.encode, codec dispatch, PyUnicode_AsEncodedString."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers `str.format_map`, the codec interface, and the translation table mechanism. See `objects_unicodeobject_detail` through `objects_unicodeobject4_detail` for the basic API, PEP 393 compact strings, case operations, and `str.format`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `str.format_map` | Like `str.format(**mapping)` but takes any mapping |
+| 101-250 | `str.translate` / `str.maketrans` | Character-by-character substitution via a table |
+| 251-400 | `str.encode` | Encode to bytes using a named codec |
+| 401-600 | `PyUnicode_AsEncodedString` | Core codec dispatch used by `encode` |
+| 601-800 | `_PyUnicode_AsASCIIString` | Fast ASCII encoding without codec lookup |
+| 801-1000 | `PyUnicode_DecodeUTF8` | Fast UTF-8 decoder |
+| 1001-1500 | `PyUnicode_DecodeUTF8Stateful` | Incremental UTF-8 decoding for streams |
+
+## Reading
+
+### `str.format_map`
+
+```c
+// CPython: Objects/unicodeobject.c:4820 unicode_format_map
+static PyObject *
+unicode_format_map(PyObject *self, PyObject *map)
+{
+    /* Like str.format(**map) but:
+       1. The mapping is not copied into a dict first.
+       2. Attribute access ('{obj.attr}') is not supported.
+       Purpose: allow custom Mapping subclasses (e.g. defaultdict). */
+    return _PyObject_FormatMap(self, map);
+}
+```
+
+`'{key}'.format_map(some_mapping)` calls `some_mapping[key]` directly, which allows `__missing__` to be triggered on a `defaultdict`.
+
+### `str.maketrans`
+
+```c
+// CPython: Objects/unicodeobject.c:5020 unicode_maketrans
+static PyObject *
+unicode_maketrans(PyObject *null, PyObject *args)
+{
+    /* Builds a translation table dict:
+       x: str of from-chars, y: str of to-chars, z: str of delete-chars
+       OR
+       x: dict mapping ordinals/chars/strings to ordinals/chars/None */
+    ...
+    /* Result: {ord(from_char): ord(to_char), ord(del_char): None, ...} */
+}
+```
+
+`str.translate(table)` maps each character's code point through `table`: `table[ord(ch)]` gives the replacement ordinal or `None` (delete).
+
+### `str.translate`
+
+```c
+// CPython: Objects/unicodeobject.c:5100 unicode_translate
+static PyObject *
+unicode_translate(PyObject *self, PyObject *table)
+{
+    return _PyUnicode_TranslateCharmap(self, table, "ignore");
+}
+```
+
+The inner loop calls `PyObject_GetItem(table, PyLong_FromLong(ch))` for each character. If the result is `None`, the character is deleted; if it's an int, it becomes the replacement code point; if it's a string, the string is inserted.
+
+### `str.encode`
+
+```c
+// CPython: Objects/unicodeobject.c:5200 unicode_encode_impl
+static PyObject *
+unicode_encode_impl(PyObject *self, const char *encoding,
+                    const char *errors)
+{
+    return PyUnicode_AsEncodedString(self, encoding, errors);
+}
+```
+
+### `PyUnicode_AsEncodedString`
+
+```c
+// CPython: Objects/unicodeobject.c:3600 PyUnicode_AsEncodedString
+PyObject *
+PyUnicode_AsEncodedString(PyObject *unicode,
+                           const char *encoding, const char *errors)
+{
+    /* Fast path for UTF-8, ASCII, Latin-1 */
+    if (strcmp(encoding, "utf-8") == 0 || strcmp(encoding, "utf8") == 0)
+        return _PyUnicode_AsUTF8String(unicode, errors);
+    if (strcmp(encoding, "ascii") == 0)
+        return _PyUnicode_AsASCIIString(unicode, errors);
+    /* General path: look up codec by name */
+    PyObject *encoder = _PyCodec_LookupTextEncoding(encoding, "codecs.encode");
+    return _PyCodec_EncodeInternal(unicode, encoder, encoding, errors);
+}
+```
+
+### `PyUnicode_DecodeUTF8Stateful`
+
+```c
+// CPython: Objects/unicodeobject.c:1200 PyUnicode_DecodeUTF8Stateful
+PyObject *
+PyUnicode_DecodeUTF8Stateful(const char *s, Py_ssize_t size,
+                              const char *errors, Py_ssize_t *consumed)
+{
+    /* consumed: set to number of bytes consumed (for incremental decoding).
+       If consumed != NULL, incomplete sequences at the end are not errors. */
+    ...
+}
+```
+
+`consumed` is used by `codecs.getincrementaldecoder('utf-8')` to handle partial multi-byte sequences at buffer boundaries.
+
+## gopy notes
+
+`str.encode` calls `vm.CodecEncode` in `vm/codec.go`. Fast paths for UTF-8/ASCII/Latin-1 are implemented in `objects/unicode_encode.go`. `PyUnicode_DecodeUTF8Stateful` is `objects.UnicodeDecodeUTF8Stateful`, used by the incremental codec infrastructure in `module/codecs/incremental.go`.

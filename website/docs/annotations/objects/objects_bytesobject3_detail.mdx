@@ -1,0 +1,131 @@
+---
+title: Objects/bytesobject.c (part 3)
+description: "Objects/bytesobject.c part 3: bytes.decode, bytes.split/rsplit, bytes.replace, bytes.find/index, bytes formatting (%s/%d)."
+cpython_path: Objects/bytesobject.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytesobject.c" />
+
+This annotation covers string-like operations on bytes objects. See `objects_bytesobject_detail` for construction and `objects_bytesobject2_detail` for encoding and the bytes API.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `bytes_decode` | Decode bytes to str using a codec |
+| 101-250 | `bytes_split` / `bytes_rsplit` | Split on separator or whitespace |
+| 251-400 | `bytes_replace` | Replace sub-sequence |
+| 401-550 | `bytes_find` / `bytes_index` | Search for sub-sequence |
+| 551-700 | `bytes_count` | Count non-overlapping occurrences |
+| 701-900 | `bytes_join` | `sep.join(iterable)` |
+| 901-1200 | `bytes_format` | `%` formatting for bytes (3.5+) |
+
+## Reading
+
+### `bytes.decode`
+
+```c
+// CPython: Objects/bytesobject.c:2280 bytes_decode_impl
+static PyObject *
+bytes_decode_impl(PyObject *self, const char *encoding,
+                  const char *errors)
+{
+    return PyUnicode_FromEncodedObject(self, encoding, errors);
+}
+```
+
+`b'hello'.decode('utf-8')` calls the codec registered under `'utf-8'` in `encodings/`.
+
+### `bytes.split`
+
+```c
+// CPython: Objects/bytesobject.c:2340 bytes_split_impl
+static PyObject *
+bytes_split_impl(PyObject *self, PyObject *sep, Py_ssize_t maxsplit)
+{
+    Py_ssize_t len = PyBytes_GET_SIZE(self);
+    const char *s  = PyBytes_AS_STRING(self);
+    if (sep == Py_None) {
+        /* Whitespace split: any run of whitespace is a separator */
+        return split_whitespace(s, len, maxsplit);
+    }
+    Py_ssize_t n = PyBytes_GET_SIZE(sep);
+    const char *sub = PyBytes_AS_STRING(sep);
+    return split(s, len, sub, n, maxsplit);
+}
+```
+
+Whitespace splitting collapses runs and strips leading/trailing whitespace, like `str.split()`.
+
+### `bytes.replace`
+
+```c
+// CPython: Objects/bytesobject.c:2520 bytes_replace_impl
+static PyObject *
+bytes_replace_impl(PyObject *self, Py_buffer *old, Py_buffer *new,
+                   Py_ssize_t count)
+{
+    return stringlib_replace(PyBytes_AS_STRING(self),
+                             PyBytes_GET_SIZE(self),
+                             old->buf, old->len,
+                             new->buf, new->len,
+                             count);
+}
+```
+
+`stringlib_replace` is shared between `str` and `bytes`. It builds a new bytes object, avoiding in-place modification.
+
+### `bytes.find`
+
+```c
+// CPython: Objects/bytesobject.c:2620 bytes_find_impl
+static Py_ssize_t
+bytes_find_impl(PyObject *self, Py_buffer *sub, Py_ssize_t start,
+                Py_ssize_t stop)
+{
+    return stringlib_find_slice(
+        PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
+        sub->buf, sub->len,
+        start, stop);
+}
+```
+
+`stringlib_find_slice` uses a two-way string search algorithm for longer patterns.
+
+### `bytes.join`
+
+```c
+// CPython: Objects/bytesobject.c:2760 bytes_join_impl
+static PyObject *
+bytes_join_impl(PyObject *self, PyObject *iterable)
+{
+    /* Collect all items into a list first to know total length */
+    PyObject *seq;
+    ...
+    Py_ssize_t sz = PyBytes_GET_SIZE(self) * (n - 1);
+    for each item: sz += item_len;
+    PyObject *res = PyBytes_FromStringAndSize(NULL, sz);
+    /* Fill: item, sep, item, sep, ... */
+}
+```
+
+### `bytes` `%` formatting
+
+```c
+// CPython: Objects/bytesobject.c:2900 bytes_format
+/* b'%s %d' % (b'hello', 42)
+   Uses the same format string parser as str % formatting
+   but only supports %s (bytes), %d, %i, %u, %o, %x, %X, %f, %e, %g, %%
+   Raises TypeError for format specs that return str (e.g. repr). */
+```
+
+`bytes % args` was added in Python 3.5. `%s` requires a bytes-like object.
+
+## gopy notes
+
+`bytes.decode` calls `vm.CodecDecode` which dispatches to the registered codec in `module/codecs/`. `bytes.split` uses `objects/bytes_split.go`, sharing algorithm code with `str.split` via a generic `stringlib.go` package. `bytes.join` pre-allocates with `objects.NewBytesFromSize`.

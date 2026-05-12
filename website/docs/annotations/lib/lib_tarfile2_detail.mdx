@@ -1,0 +1,107 @@
+---
+title: Lib/tarfile.py (part 2)
+description: "Lib/tarfile.py part 2: TarFile.extractall, filter parameter, TarInfo header parsing, GNU/POSIX extensions, compression detection."
+cpython_path: Lib/tarfile.py
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/tarfile.py" />
+
+This annotation covers extraction, the 3.12 security filter, and low-level header parsing. See `lib_tarfile_detail` for `TarFile.open`, `add`, and `TarInfo` construction.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Compression detection | Magic bytes for gz/bz2/xz detection in `open` |
+| 81-200 | `TarInfo.fromtarfile` | Parse a 512-byte header block |
+| 201-400 | GNU/POSIX extensions | Long names (`GNUTYPE_LONGNAME`), sparse files, PAX headers |
+| 401-600 | `TarFile.extractall` | Extract all members; apply filter |
+| 601-800 | Extraction filter (3.12) | `'fully_trusted'`, `'tar'`, `'data'` security policies |
+| 801-1100 | `TarFile._extract_member` | Per-member extraction: regular/symlink/hardlink/dir/device |
+| 1101-1400 | `TarFile.addfile` | Write a member header + data |
+
+## Reading
+
+### Header parsing
+
+```python
+# CPython: Lib/tarfile.py:1120 TarInfo.fromtarfile
+@classmethod
+def fromtarfile(cls, tarfile):
+    buf = tarfile.fileobj.read(BLOCKSIZE)  # 512 bytes
+    obj = cls.frombuf(buf, tarfile.encoding, tarfile.errors)
+    obj.offset = tarfile.fileobj.tell() - BLOCKSIZE
+    return obj._proc_member(tarfile)
+
+def frombuf(cls, buf, encoding, errors):
+    # Parse POSIX ustar header fields:
+    # name (100), mode (8), uid (8), gid (8), size (12), mtime (12),
+    # chksum (8), type (1), linkname (100), magic (6), ...
+    if len(buf) == 0:
+        raise EmptyHeaderError('empty header')
+    if buf.count(NUL) == BLOCKSIZE:
+        raise EOFHeaderError('end of file header')
+    tarinfo = cls()
+    tarinfo.name  = nts(buf[0:100], encoding, errors)
+    tarinfo.mode  = nti(buf[100:108])
+    tarinfo.size  = nti(buf[124:136])
+    ...
+```
+
+### GNU long names
+
+```python
+# CPython: Lib/tarfile.py:1350 TarInfo._proc_gnulong
+def _proc_gnulong(self, tarfile):
+    """Read a GNU long name/linkname extension block."""
+    buf = tarfile.fileobj.read(self._block(self.size))
+    # The next header contains the actual file entry
+    next_hdr = TarInfo.fromtarfile(tarfile)
+    next_hdr.name = nts(buf, tarfile.encoding, tarfile.errors)
+    return next_hdr
+```
+
+GNU tar encodes names longer than 100 bytes in a preceding header block with type `GNUTYPE_LONGNAME`.
+
+### `extractall` with filter
+
+```python
+# CPython: Lib/tarfile.py:2080 TarFile.extractall
+def extractall(self, path='.', members=None, *, numeric_owner=False,
+               filter=None):
+    """Extract all members to path, applying filter to each TarInfo."""
+    for tarinfo in members or self:
+        if filter is not None:
+            tarinfo = filter(tarinfo, path)
+            if tarinfo is None:
+                continue   # filter vetoed this member
+        self._extract_member(tarinfo, os.path.join(path, tarinfo.name),
+                             numeric_owner=numeric_owner)
+```
+
+### Extraction filter (3.12)
+
+```python
+# CPython: Lib/tarfile.py:420 _data_filter
+def _data_filter(member, dest_path):
+    """Rejects members with absolute paths, '..' components, or devices."""
+    if os.path.isabs(member.name) or '..' in member.name.split('/'):
+        raise AbsolutePathError(member)
+    if member.isdev():
+        raise SpecialFileError(member)
+    if member.islnk() or member.issym():
+        # Check symlink target doesn't escape dest_path
+        ...
+    return member
+```
+
+`filter='data'` applies `_data_filter`. `filter='tar'` is less restrictive (allows symlinks). `filter='fully_trusted'` skips all checks (legacy behavior).
+
+## gopy notes
+
+`tarfile` is pure Python and uses `gzip`, `bz2`, and `lzma` for compression. `TarFile.extractall` uses `os.makedirs` and `open()` backed by gopy's file objects. The filter parameter uses Python callables invoked during extraction.

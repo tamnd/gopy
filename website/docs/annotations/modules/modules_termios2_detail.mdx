@@ -1,0 +1,92 @@
+---
+title: Modules/termios.c (part 2)
+description: "Modules/termios.c part 2: tcdrain, tcflush, tcsendbreak, tcsetpgrp, tcgetpgrp — terminal control beyond tcgetattr/tcsetattr."
+cpython_path: Modules/termios.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/termios.c" />
+
+This annotation covers terminal control functions beyond attribute get/set. See `modules_termios_detail` for `tcgetattr`, `tcsetattr`, and the termios constants.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `tcdrain` | Wait until all output has been transmitted |
+| 61-120 | `tcflush` | Discard queued input or output |
+| 121-180 | `tcsendbreak` | Send a break condition (zero bits) for a duration |
+| 181-260 | `tcgetpgrp` / `tcsetpgrp` | Get/set foreground process group for a terminal |
+| 261-400 | `openpty` / `forkpty` | Create a pseudo-terminal pair |
+
+## Reading
+
+### `tcdrain`
+
+```c
+// CPython: Modules/termios.c:310 termios_tcdrain_impl
+static PyObject *
+termios_tcdrain_impl(PyObject *module, int fd)
+{
+    /* Block until all pending output has been written to the terminal */
+    int ret;
+    Py_BEGIN_ALLOW_THREADS
+    ret = tcdrain(fd);
+    Py_END_ALLOW_THREADS
+    if (ret != 0)
+        return PyErr_SetFromErrno(PyExc_OSError);
+    Py_RETURN_NONE;
+}
+```
+
+Used before closing a serial port to ensure data is fully transmitted.
+
+### `tcflush`
+
+```c
+// CPython: Modules/termios.c:340 termios_tcflush_impl
+static PyObject *
+termios_tcflush_impl(PyObject *module, int fd, int queue)
+{
+    /* queue: TCIFLUSH (input), TCOFLUSH (output), TCIOFLUSH (both) */
+    if (tcflush(fd, queue) == -1)
+        return PyErr_SetFromErrno(PyExc_OSError);
+    Py_RETURN_NONE;
+}
+```
+
+### `tcgetpgrp` / `tcsetpgrp`
+
+```c
+// CPython: Modules/termios.c:390 termios_tcgetpgrp_impl
+static PyObject *
+termios_tcgetpgrp_impl(PyObject *module, int fd)
+{
+    /* Return the foreground process group ID for the terminal */
+    pid_t pgid = tcgetpgrp(fd);
+    if (pgid < 0)
+        return PyErr_SetFromErrno(PyExc_OSError);
+    return PyLong_FromPid(pgid);
+}
+```
+
+`tcgetpgrp(0)` returns the process group of the foreground job on the controlling terminal. Used by shell job control.
+
+### `openpty`
+
+```c
+// CPython: Modules/termios.c:180 (in pty.py, backed by os.openpty)
+/* os.openpty() opens a master/slave pseudo-terminal pair.
+   Returns (master_fd, slave_fd).
+   Used by pty.fork() and subprocess to create interactive sessions. */
+```
+
+`openpty` is actually in `posixmodule.c` but is part of the terminal control family exposed via `os` and `pty`.
+
+## gopy notes
+
+`termios` is in `module/termios/module.go`. `tcdrain`, `tcflush`, `tcgetpgrp`, `tcsetpgrp` use `syscall.Syscall` on Linux and `golang.org/x/sys/unix` on macOS. `openpty` uses `unix.Openpty`. All blocking calls release the GIL equivalent in gopy (i.e. allow other goroutines to run via `runtime.Gosched()`).

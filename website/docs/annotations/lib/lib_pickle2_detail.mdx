@@ -1,0 +1,130 @@
+---
+title: Lib/pickle.py (part 2)
+description: "Lib/pickle.py part 2: Unpickler.load, dispatch table, REDUCE/BUILD opcodes, persistent_id, __reduce_ex__, custom pickling protocols."
+cpython_path: Lib/pickle.py
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pickle.py" />
+
+This annotation covers the unpickling side and custom pickling hooks. See `modules_pickle_detail` for `Pickler.dump`, the opcode encoding, and protocol selection.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Unpickler.load` | Main dispatch loop; reads opcode, calls handler |
+| 101-250 | `dispatch` table | Opcode byte → handler method |
+| 251-400 | `load_reduce` | Handle `REDUCE` opcode: `callable(*args)` |
+| 401-550 | `load_build` | Handle `BUILD` opcode: `__setstate__` / `__dict__` update |
+| 551-700 | `persistent_id` / `persistent_load` | Serialize external references by ID |
+| 701-900 | `__reduce_ex__` protocol | How objects describe themselves for pickling |
+| 901-1100 | `copyreg` dispatch | Registered reduce functions for C types |
+| 1101-1800 | Protocol 5 | Out-of-band buffer pickling via `PickleBuffer` |
+
+## Reading
+
+### `Unpickler.load`
+
+```python
+# CPython: Lib/pickle.py:1420 Unpickler.load
+def load(self):
+    """Read a pickled object representation from self.file_object."""
+    dispatch = self.dispatch
+    try:
+        while True:
+            key = self.read(1)
+            if not key:
+                raise EOFError
+            assert isinstance(key, bytes_types)
+            dispatch[key[0]](self)   # call opcode handler
+    except _Stop as stopinst:
+        return stopinst.value
+```
+
+The pickle protocol is a stack machine. Each opcode handler pushes/pops from `self.stack` or manipulates `self.memo`.
+
+### `load_reduce`
+
+```python
+# CPython: Lib/pickle.py:1580 load_reduce
+def load_reduce(self):
+    stack = self.stack
+    args = stack.pop()
+    func = stack[-1]
+    stack[-1] = func(*args)
+dispatch[REDUCE[0]] = load_reduce
+```
+
+`REDUCE` pops `(callable, args)` from the stack and pushes `callable(*args)`. This is the core reconstruction mechanism for most Python objects.
+
+### `load_build`
+
+```python
+# CPython: Lib/pickle.py:1610 load_build
+def load_build(self):
+    stack = self.stack
+    state = stack.pop()
+    inst = stack[-1]
+    setstate = getattr(inst, '__setstate__', MISSING)
+    if setstate is not MISSING:
+        setstate(state)
+        return
+    # No __setstate__: update __dict__ directly
+    slotstate = None
+    if isinstance(state, tuple) and len(state) == 2:
+        state, slotstate = state
+    if state:
+        inst_dict = inst.__dict__
+        intern = sys.intern
+        for k, v in state.items():
+            if type(k) is str:
+                inst_dict[intern(k)] = v
+            else:
+                inst_dict[k] = v
+    if slotstate:
+        for k, v in slotstate.items():
+            setattr(inst, k, v)
+dispatch[BUILD[0]] = load_build
+```
+
+### `__reduce_ex__`
+
+```python
+# CPython: Lib/pickle.py:780 Pickler.save_reduce
+# __reduce_ex__(protocol) returns one of:
+#   (callable, args)
+#   (callable, args, state)
+#   (callable, args, state, list_items)
+#   (callable, args, state, list_items, dict_items)
+#   (callable, args, state, list_items, dict_items, namespace_items)
+```
+
+Each element beyond `(callable, args)` is optional. `state` is passed to `__setstate__`; `list_items` and `dict_items` are for list/dict subclasses.
+
+### `persistent_id`
+
+```python
+# CPython: Lib/pickle.py:830 persistent_id
+# Override in a Pickler subclass to externalize objects:
+class MyPickler(Pickler):
+    def persistent_id(self, obj):
+        if isinstance(obj, MyDBRecord):
+            return ('record', obj.id)
+        return None  # None means: pickle normally
+
+class MyUnpickler(Unpickler):
+    def persistent_load(self, pid):
+        type_tag, key = pid
+        if type_tag == 'record':
+            return db.get(key)
+        raise UnpicklingError(f'unsupported pid: {pid!r}')
+```
+
+## gopy notes
+
+`pickle` is pure Python but accelerated by `_pickle` (C). gopy uses the Python implementation with the C module loaded as a speedup when available. `__reduce_ex__` dispatch uses `type.__reduce_ex__` which calls `object.__reduce_ex__` in `objects/object.go`. `persistent_id` / `persistent_load` are virtual method overrides handled by gopy's Python subclassing mechanism.

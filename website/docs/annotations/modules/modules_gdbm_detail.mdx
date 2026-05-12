@@ -1,0 +1,115 @@
+---
+title: Modules/_dbmmodule.c / Modules/_gdbmmodule.c
+description: "_gdbmmodule.c: dbm.gnu — GNU dbm database binding; open, get/set/delete, keys, reorganize, sync."
+cpython_path: Modules/_gdbmmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_gdbmmodule.c" />
+
+`dbm.gnu` wraps the `gdbm` library, providing a persistent dict-like object backed by a `.gdbm` database file. It is one of several `dbm` backends selected by `dbm.open`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `gdbm_open` wrapper | `gdbm.open(filename, flag, mode)` |
+| 81-200 | `dbmobject_subscript` | `db[key]` — fetch and `db[key] = value` — store |
+| 201-300 | `dbmobject_keys` | Return list of all keys |
+| 301-400 | `dbmobject_delete` | `del db[key]` |
+| 401-500 | `dbmobject_reorganize` | Compact the database file |
+| 501-600 | `dbmobject_sync` | Flush in-memory cache to disk |
+
+## Reading
+
+### `gdbm.open`
+
+```c
+// CPython: Modules/_gdbmmodule.c:88 dbmopen
+static PyObject *
+dbmopen(PyObject *module, PyObject *args)
+{
+    const char *name;
+    const char *flags = "r";
+    int         iflags = GDBM_READER;
+    int         mode   = 0666;
+    if (!PyArg_ParseTuple(args, "s|si:open", &name, &flags, &mode))
+        return NULL;
+    /* Map flag string to GDBM flag:
+       'r' → GDBM_READER, 'w' → GDBM_WRITER,
+       'c' → GDBM_WRCREAT, 'n' → GDBM_NEWDB */
+    ...
+    GDBM_FILE dp = gdbm_open(name, 0, iflags, mode, NULL);
+    if (dp == NULL) {
+        PyErr_SetFromErrnoWithFilenameObject(DbmError, PyTuple_GET_ITEM(args, 0));
+        return NULL;
+    }
+    return newdbmobject(dp);
+}
+```
+
+### `db[key]` and `db[key] = value`
+
+```c
+// CPython: Modules/_gdbmmodule.c:180 dbmobject_subscript
+static PyObject *
+dbmobject_subscript(dbmobject *dp, PyObject *key)
+{
+    datum drec, krec;
+    if (!PyArg_Parse(key, "y*", &krec.dptr) ...) return NULL;
+    drec = gdbm_fetch(dp->di_dbm, krec);
+    if (drec.dptr == NULL) {
+        PyErr_SetObject(PyExc_KeyError, key);
+        return NULL;
+    }
+    PyObject *v = PyBytes_FromStringAndSize(drec.dptr, drec.dsize);
+    free(drec.dptr);
+    return v;
+}
+```
+
+All keys and values are `bytes`. The `datum` struct holds a `char *` and a `size_t`.
+
+### `keys()`
+
+```c
+// CPython: Modules/_gdbmmodule.c:280 dbm_keys
+/* Iterates using gdbm_firstkey / gdbm_nextkey */
+static PyObject *
+dbm_keys(dbmobject *dp, PyObject *args)
+{
+    PyObject *v = PyList_New(0);
+    datum key = gdbm_firstkey(dp->di_dbm);
+    while (key.dptr) {
+        PyList_Append(v, PyBytes_FromStringAndSize(key.dptr, key.dsize));
+        datum nextkey = gdbm_nextkey(dp->di_dbm, key);
+        free(key.dptr);
+        key = nextkey;
+    }
+    return v;
+}
+```
+
+### `reorganize`
+
+```c
+// CPython: Modules/_gdbmmodule.c:440 dbm_reorganize_impl
+/* gdbm never shrinks the database file; reorganize() rewrites it compactly. */
+static PyObject *
+dbm_reorganize_impl(dbmobject *dp)
+{
+    if (gdbm_reorganize(dp->di_dbm) != 0) {
+        PyErr_SetString(DbmError, gdbm_strerror(gdbm_errno));
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+## gopy notes
+
+`dbm.gnu` is in `module/dbm/gnu/module.go`. It uses cgo to call `libgdbm`. The `gdbm.open` API maps to `gdbm_open(3)` via `C.gdbm_open`. Key/value conversion uses `C.GoBytes` and `C.CBytes`. `reorganize` calls `C.gdbm_reorganize`.
