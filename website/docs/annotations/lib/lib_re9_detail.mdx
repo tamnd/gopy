@@ -1,0 +1,118 @@
+---
+title: Lib/re/__init__.py (part 9)
+description: "Lib/re/__init__.py part 9: re.fullmatch, re.sub, re.subn, re.escape, compiled pattern cache."
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/re/__init__.py" />
+
+This annotation covers the top-level `re` module functions. See `lib_re8_detail` for `re.compile`, `Pattern.match`, `Pattern.search`, and `Match` objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `re.fullmatch` | Match the entire string |
+| 81-160 | `re.sub` | Replace matches with a replacement |
+| 161-240 | `re.subn` | Replace and count substitutions |
+| 241-320 | `re.escape` | Escape special regex characters |
+| 321-500 | Pattern compile cache | LRU cache for `re.compile` |
+
+## Reading
+
+### `re.fullmatch`
+
+```python
+# CPython: Lib/re/__init__.py:220 fullmatch
+def fullmatch(pattern, string, flags=0):
+    return _compile(pattern, flags).fullmatch(string)
+```
+
+`re.fullmatch(r'\d+', '123')` succeeds; `re.fullmatch(r'\d+', '123abc')` fails (the pattern must match the entire string). Equivalent to `re.match(r'(?:\d+)\Z', string)` but clearer in intent.
+
+### `re.sub`
+
+```python
+# CPython: Lib/re/__init__.py:268 sub
+def sub(pattern, repl, string, count=0, flags=0):
+    return _compile(pattern, flags).sub(repl, string, count)
+```
+
+`re.sub(r'\s+', ' ', '  hello   world  ')` returns `' hello world '`. The `repl` argument can be a string (with `\1` backreferences) or a callable that receives the `Match` object and returns the replacement string.
+
+### Pattern.sub internals
+
+```python
+# CPython: Lib/re/_compiler.py — Pattern.sub
+def sub(self, repl, string, count=0):
+    if callable(repl):
+        filter = repl
+    else:
+        filter = _subx(self, repl)  # compile \1, \g<name> references
+    result = []
+    n = 0
+    i = 0
+    while not count or n < count:
+        m = self.search(string, i)
+        if not m:
+            break
+        result.append(string[i:m.start()])
+        result.append(filter(m))
+        i = m.end()
+        n += 1
+        if i == m.start():
+            i += 1  # avoid infinite loop on zero-length match
+    result.append(string[i:])
+    return string[:0].join(result)
+```
+
+`sub` builds the result by splicing literal text between matches and the replacement. Zero-length matches advance the position by 1 to prevent infinite loops. `string[:0].join(result)` preserves the string type (str or bytes).
+
+### `re.escape`
+
+```python
+# CPython: Lib/re/__init__.py:334 escape
+_special_chars_map = {ord(c): '\\' + c for c in r'\.^$*+?{}[]|()'
+                                                  + '\\'}
+def escape(pattern):
+    if isinstance(pattern, str):
+        return pattern.translate(_special_chars_map)
+    else:
+        ...
+```
+
+`re.escape('hello.world')` returns `r'hello\.world'`. The translation table is built at module load time. `re.escape` was updated in 3.7 to only escape characters that have special meaning in regex (not all non-alphanumeric characters).
+
+### Pattern compile cache
+
+```python
+# CPython: Lib/re/__init__.py:380 _compile
+_cache = {}
+_MAXCACHE = 512
+
+def _compile(pattern, flags):
+    try:
+        return _cache[type(pattern), pattern, flags]
+    except KeyError:
+        pass
+    if isinstance(pattern, Pattern):
+        if flags:
+            raise ValueError("cannot process flags argument with a compiled pattern")
+        return pattern
+    p = _compiler.compile(pattern, flags)
+    if len(_cache) >= _MAXCACHE:
+        _cache.clear()
+    _cache[type(pattern), pattern, flags] = p
+    return p
+```
+
+`re.compile` results are cached by `(type, pattern, flags)`. The cache holds up to 512 patterns; when full it is cleared entirely (not LRU-evicted). The `type` key distinguishes `str` patterns from `bytes` patterns with the same content.
+
+## gopy notes
+
+`re.sub` is `module/re.Sub` in `module/re/module.go`. The `_subx` backreference compiler parses `\1` and `\g<name>` into a callable. `re.escape` uses `strings.NewReplacer`. The pattern cache is a Go `sync.Map` keyed by `(patternType, patternStr, flags)`. `re.fullmatch` calls `regexp.MatchString` with anchors.

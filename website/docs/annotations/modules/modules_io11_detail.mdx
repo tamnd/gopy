@@ -1,0 +1,121 @@
+---
+title: Modules/_io/bufferedio.c (part 11)
+description: "_io bufferedio part 11: BufferedRandom, BufferedRWPair, peek, read_into_buffer."
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/bufferedio.c" />
+
+This annotation covers `BufferedRandom` and `BufferedRWPair`. See `modules_io10_detail` for `BufferedReader` and `BufferedWriter` read/write paths.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BufferedRandom.seek` | Seek with buffer flush |
+| 81-180 | `BufferedRandom.tell` | Current position accounting for buffer |
+| 181-280 | `BufferedRWPair` | Separate reader and writer for the same stream |
+| 281-380 | `_buffered_peek` | Look ahead without consuming |
+| 381-500 | `_read_into_buffer` | Fill the read buffer from raw |
+
+## Reading
+
+### `BufferedRandom.seek`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1820 bufferedrandom_seek
+static PyObject *
+bufferedrandom_seek(buffered *self, PyObject *args)
+{
+    Py_off_t target;
+    int whence = 0;
+    if (!PyArg_ParseTuple(args, "O&|i:seek", PyNumber_AsOff_t, &target, &whence)) return NULL;
+    /* Flush write buffer before seeking */
+    if (VALID_WRITE_BUFFER(self) && self->write_pos < self->write_end) {
+        if (_bufferedwriter_flush_unlocked(self) == NULL) return NULL;
+    }
+    /* Adjust for read buffer: seek target minus unread bytes */
+    if (VALID_READ_BUFFER(self)) {
+        if (whence == 1) /* SEEK_CUR */
+            target -= RAW_OFFSET(self);
+        RESET_BUFFER(self);
+    }
+    return PyObject_CallMethodOneArg(self->raw, &_Py_ID(seek),
+                                     _PyLong_FromOff_t(target));
+}
+```
+
+`BufferedRandom.seek` must flush the write buffer and adjust the target for any unread data in the read buffer before delegating to `raw.seek`. `SEEK_CUR` requires subtracting the number of unread bytes in the buffer because the raw position is already ahead of the logical position.
+
+### `BufferedRWPair`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1940 bufferedrwpair_read
+static PyObject *
+bufferedrwpair_read(rwpair *self, PyObject *args)
+{
+    return _PyObject_CallMethodIdObjArgs(self->reader, &PyId_read, args, NULL);
+}
+
+static PyObject *
+bufferedrwpair_write(rwpair *self, PyObject *args)
+{
+    return _PyObject_CallMethodIdObjArgs(self->writer, &PyId_write, args, NULL);
+}
+```
+
+`BufferedRWPair` pairs a `BufferedReader` and `BufferedWriter` over the same raw stream (e.g., a bidirectional socket). Read operations delegate to the reader; write operations delegate to the writer. This avoids the seek penalty of `BufferedRandom` for full-duplex streams.
+
+### `_buffered_peek`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1120 _buffered_peek
+static PyObject *
+_buffered_peek(buffered *self, Py_ssize_t n)
+{
+    /* Return unread bytes in the buffer without advancing position */
+    if (VALID_READ_BUFFER(self)) {
+        Py_ssize_t have = READAHEAD(self);
+        if (n <= have) {
+            return PyBytes_FromStringAndSize(self->buffer + self->pos, n);
+        }
+    }
+    /* Fill buffer */
+    if (_bufferedreader_fill_buffer(self) == -1) return NULL;
+    have = READAHEAD(self);
+    return PyBytes_FromStringAndSize(self->buffer + self->pos,
+                                     Py_MIN(n, have));
+}
+```
+
+`f.peek(1)` returns up to 1 byte from the buffer without advancing the position. It may return more bytes than requested (up to the full buffer). Used by `TextIOWrapper` to detect BOMs and newline styles without consuming the data.
+
+### `_read_into_buffer`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1060 _bufferedreader_fill_buffer
+static Py_ssize_t
+_bufferedreader_fill_buffer(buffered *self)
+{
+    Py_ssize_t requested = self->buffer_size - READAHEAD(self);
+    PyObject *data = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto),
+                                               self->memobj);
+    if (data == NULL) return -1;
+    Py_ssize_t n = PyLong_AsSsize_t(data);
+    Py_DECREF(data);
+    if (n == 0) return 0;  /* EOF */
+    self->read_end += n;
+    return n;
+}
+```
+
+`raw.readinto(memoryview)` writes directly into the buffer memory without an intermediate copy. This is the C-level equivalent of `io.RawIOBase.readinto` — the buffer's backing `memoryview` is passed and the raw layer fills it.
+
+## gopy notes
+
+`BufferedRandom.seek` is `objects.BufferedRandomSeek` in `objects/io.go`. The write-flush-before-seek logic calls `objects.BufferedWriterFlush`. `BufferedRWPair` holds `objects.BufferedReader` and `objects.BufferedWriter` fields. `_buffered_peek` is `objects.BufferedPeek`; reads ahead using `objects.RawReadInto`. `_bufferedreader_fill_buffer` uses `objects.MemoryView` passed to `objects.RawReadInto`.

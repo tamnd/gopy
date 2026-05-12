@@ -1,0 +1,115 @@
+---
+title: Objects/frameobject.c (part 10)
+description: "Objects/frameobject.c part 10: frame.f_locals, frame.f_lineno, _PyFrame_FastToLocals, FrameLocalsProxy."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/frameobject.c" />
+
+This annotation covers Python-visible frame attributes. See `objects_frameobject9_detail` for frame creation, `_PyFrame_New`, and the frame lifecycle.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `frame.f_locals` | Return locals dict (possibly materialized) |
+| 81-180 | `_PyFrame_FastToLocals` | Copy fast locals array to a dict |
+| 181-280 | `frame.f_lineno` | Current line number |
+| 281-380 | `FrameLocalsProxy` | Lazy proxy for `f_locals` in 3.13+ |
+| 381-500 | `frame.clear` | Release frame resources |
+
+## Reading
+
+### `frame.f_locals` and `_PyFrame_FastToLocals`
+
+```c
+// CPython: Objects/frameobject.c:180 frame_getlocals
+static PyObject *
+frame_getlocals(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    if (f->f_frame->f_code->co_flags & CO_OPTIMIZED) {
+        /* Optimized frame: copy fast locals to a dict */
+        if (f->f_frame->f_locals == NULL) {
+            f->f_frame->f_locals = PyDict_New();
+        }
+        _PyFrame_FastToLocalsWithError(f->f_frame);
+    }
+    return Py_NewRef(f->f_frame->f_locals);
+}
+
+void
+_PyFrame_FastToLocals(PyInterpreterFrame *frame)
+{
+    PyCodeObject *co = frame->f_code;
+    for (int i = 0; i < co->co_nlocalsplus; i++) {
+        PyObject *value = frame->localsplus[i];
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        if (value == NULL) {
+            PyObject_DelItem(locals, name);  /* unbound */
+        } else if (_PyLocals_GetKind(co->co_localspluskinds, i) == CO_FAST_CELL) {
+            value = PyCell_GET(value);  /* unwrap cell */
+            if (value != NULL)
+                PyDict_SetItem(locals, name, value);
+        } else {
+            PyDict_SetItem(locals, name, value);
+        }
+    }
+}
+```
+
+`frame.f_locals` triggers materialization of the fast locals array into a dict. Unbound variables are removed from the dict. Cell variables are unwrapped. Changes to the dict are NOT automatically reflected in the frame's fast locals — `f_locals` in an optimized frame is a snapshot, not a live view.
+
+### `FrameLocalsProxy` (Python 3.13+)
+
+```c
+// CPython: Objects/frameobject.c:380 FrameLocalsProxy
+/* In 3.13, f_locals returns a FrameLocalsProxy object that acts like a
+   dict but reads/writes directly to/from the frame's localsplus array.
+   This makes 'locals()[name] = value' actually work. */
+static PyObject *
+framelocalsproxy_getitem(PyFrameLocalsProxyObject *self, PyObject *key)
+{
+    /* Look up name in co_localsplusnames, return from localsplus */
+    ...
+}
+
+static int
+framelocalsproxy_setitem(PyFrameLocalsProxyObject *self, PyObject *key, PyObject *value)
+{
+    /* Find the slot in localsplus and set it directly */
+    ...
+}
+```
+
+`FrameLocalsProxy` was added in 3.13 to fix the long-standing issue that `locals()['x'] = 1` did not change `x`. The proxy directly reads/writes the frame's `localsplus` array, making `exec` in the current frame actually work.
+
+### `frame.f_lineno`
+
+```c
+// CPython: Objects/frameobject.c:240 frame_getlineno
+static PyObject *
+frame_getlineno(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    int lineno = PyFrame_GetLineNumber(f);
+    return PyLong_FromLong(lineno);
+}
+
+int
+PyFrame_GetLineNumber(PyFrameObject *f)
+{
+    assert(f != NULL);
+    if (f->f_lineno != 0) return f->f_lineno;
+    return PyCode_Addr2Line(f->f_frame->f_code, f->f_frame->f_lasti * 2);
+}
+```
+
+`frame.f_lineno` returns the current source line. For suspended frames (generators, tracing), `f_lineno` may be set explicitly; otherwise `PyCode_Addr2Line` decodes `co_linetable` using the current bytecode offset `f_lasti`.
+
+## gopy notes
+
+`frame.f_locals` is `vm.FrameGetLocals` in `vm/eval_simple.go`. `_PyFrame_FastToLocals` is `vm.FastToLocals`; walks `vm.Frame.Locals` copying to an `objects.Dict`. `FrameLocalsProxy` is `objects.FrameLocalsProxy` in `objects/frameobject.go`; reads/writes `vm.Frame.Locals` directly. `frame.f_lineno` decodes `compile.LocationTable`.

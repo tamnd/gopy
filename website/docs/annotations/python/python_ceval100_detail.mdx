@@ -1,0 +1,110 @@
+---
+title: Python/ceval.c (part 100)
+description: "Python/ceval.c part 100: RAISE_VARARGS, RERAISE, PUSH_EXC_INFO, POP_EXCEPT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers exception raising and the exception stack. See `python_ceval99_detail` for `RESUME`, `COPY_FREE_VARS`, and `RETURN_VALUE`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `RAISE_VARARGS` | Explicit `raise` statement |
+| 81-160 | `RERAISE` | Re-raise current exception (`raise` with no args) |
+| 161-240 | `PUSH_EXC_INFO` | Enter `except` clause: push exception info |
+| 241-340 | `POP_EXCEPT` | Exit `except` clause: pop exception info |
+| 341-500 | Exception chaining | `__cause__`, `__context__`, `__suppress_context__` |
+
+## Reading
+
+### `RAISE_VARARGS`
+
+```c
+// CPython: Python/ceval.c:3060 RAISE_VARARGS
+inst(RAISE_VARARGS, (args[oparg] --)) {
+    /* oparg: 0=reraise, 1=raise exc, 2=raise exc from cause */
+    PyObject *cause = NULL, *exc = NULL;
+    switch (oparg) {
+    case 2:
+        cause = args[1];
+        /* fall through */
+    case 1:
+        exc = args[0];
+        break;
+    }
+    if (do_raise(tstate, exc, cause)) {
+        assert(_PyErr_Occurred(tstate));
+        goto exception_unwind;
+    }
+    Py_XDECREF(exc);
+    Py_XDECREF(cause);
+}
+```
+
+`raise ValueError("msg")` compiles to `LOAD_GLOBAL ValueError; LOAD_CONST "msg"; CALL 1; RAISE_VARARGS 1`. `raise exc from cause` uses `oparg=2`. `do_raise` normalizes the exception (converts class to instance), sets `__cause__` and `__suppress_context__`, and sets it as the current exception.
+
+### `RERAISE`
+
+```c
+// CPython: Python/ceval.c:3120 RERAISE
+inst(RERAISE, (values[oparg], exc --)) {
+    /* Re-raise exception from the exception stack */
+    /* oparg=1: also restore the lasti for traceback */
+    if (oparg) {
+        PyObject *lasti = values[0];
+        frame->f_lasti = PyLong_AsLong(lasti);
+    }
+    assert(_PyErr_Occurred(tstate));
+    Py_INCREF(exc);
+    _PyErr_SetRaisedException(tstate, exc);
+    goto exception_unwind;
+}
+```
+
+`RERAISE` is emitted for bare `raise` inside `except` blocks and for `except*` clause re-raising. It re-raises the exception that is on top of the exception stack (pushed by `PUSH_EXC_INFO`). The `lasti` restoration ensures the traceback points to the original raise site.
+
+### `PUSH_EXC_INFO`
+
+```c
+// CPython: Python/ceval.c:3160 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    /* Push current exception onto the exception stack */
+    if (exc_info->previous_item == NULL) {
+        _PyErr_StackItem *new_item = ... /* alloc */;
+        exc_info->previous_item = new_item;
+    }
+    prev_exc = exc_info->exc_value;  /* old exception */
+    Py_XINCREF(new_exc);
+    exc_info->exc_value = new_exc;   /* install new exception */
+}
+```
+
+`PUSH_EXC_INFO` is the entry point into an `except` clause. It saves the previously active exception and installs the new one. This allows nested `except` handlers to correctly restore the exception context on exit.
+
+### `POP_EXCEPT`
+
+```c
+// CPython: Python/ceval.c:3200 POP_EXCEPT
+inst(POP_EXCEPT, (exc --)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    PyObject *value = exc_info->exc_value;
+    exc_info->exc_value = exc;  /* restore previous exception */
+    Py_XDECREF(value);
+    Py_DECREF(exc);
+}
+```
+
+`POP_EXCEPT` restores the exception that was active before the `except` block was entered. At the end of an `except` clause, the exception that was being handled is discarded and the enclosing exception context is restored.
+
+## gopy notes
+
+`RAISE_VARARGS` is in `vm/eval_unwind.go`; calls `vm.DoRaise` which normalizes and sets `vm.ThreadState.CurrentException`. `RERAISE` calls `vm.Reraise`. `PUSH_EXC_INFO` pushes onto `vm.ThreadState.ExcStack`. `POP_EXCEPT` pops and restores `vm.ThreadState.ExcStack`. Exception chaining sets `__cause__` and `__context__` on `objects.BaseException`.
