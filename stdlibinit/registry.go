@@ -76,6 +76,13 @@ import (
 	// CPython: Modules/config.c.in:51 {"_warnings", _PyWarnings_Init}
 	_ "github.com/tamnd/gopy/module/_warnings"
 
+	// Built-in module: time. Registers itself via
+	// module/_time/module.go init(). The Go directory name carries an
+	// underscore prefix to avoid colliding with Go's stdlib `time`
+	// package; the registered Python name is the bare `time`.
+	// CPython: Modules/config.c.in:43 {"time", PyInit_time}
+	_ "github.com/tamnd/gopy/module/_time"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
@@ -92,7 +99,6 @@ import (
 	_ "github.com/tamnd/gopy/module/pprint"
 	_ "github.com/tamnd/gopy/module/re"
 	_ "github.com/tamnd/gopy/module/signal"
-	_ "github.com/tamnd/gopy/module/time"
 	_ "github.com/tamnd/gopy/module/traceback"
 	_ "github.com/tamnd/gopy/module/weakref"
 
