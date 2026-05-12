@@ -1,0 +1,107 @@
+---
+title: Python/ceval.c (part 81)
+description: "Python/ceval.c part 81: BINARY_OP, BINARY_OP_ADD_INT, BINARY_OP_MULTIPLY_INT, BINARY_OP_ADD_FLOAT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers binary arithmetic specializations. See `python_ceval80_detail` for `IMPORT_NAME`, `IMPORT_FROM`, and `IMPORT_STAR`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_OP` | Generic binary arithmetic dispatch |
+| 81-160 | `BINARY_OP_ADD_INT` | Specialization: int + int |
+| 161-240 | `BINARY_OP_ADD_FLOAT` | Specialization: float + float |
+| 241-360 | `BINARY_OP_MULTIPLY_INT` | Specialization: int * int |
+| 361-500 | `BINARY_OP_SUBTRACT_INT` / `BINARY_OP_SUBTRACT_FLOAT` | Subtraction specializations |
+
+## Reading
+
+### `BINARY_OP`
+
+```c
+// CPython: Python/ceval.c:2020 BINARY_OP
+inst(BINARY_OP, (lhs, rhs -- res)) {
+    assert(NB_ADD <= oparg && oparg <= NB_INPLACE_XOR);
+    PyObject *(*binary_op)(PyObject *, PyObject *) = _PyEval_BinaryOps[oparg];
+    res = binary_op(lhs, rhs);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(lhs);
+    Py_DECREF(rhs);
+}
+```
+
+`BINARY_OP` uses a table of function pointers indexed by `oparg`. The same opcode handles `+`, `-`, `*`, `/`, `//`, `%`, `**`, `@`, `&`, `|`, `^`, `<<`, `>>` and their in-place variants.
+
+### `BINARY_OP_ADD_INT`
+
+```c
+// CPython: Python/ceval.c:2060 BINARY_OP_ADD_INT
+inst(BINARY_OP_ADD_INT, (left, right -- sum)) {
+    DEOPT_IF(!PyLong_CheckExact(left));
+    DEOPT_IF(!PyLong_CheckExact(right));
+    /* Check for compact int (value fits in 30 bits) */
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)left));
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)right));
+    Py_ssize_t lval = _PyLong_CompactValue((PyLongObject *)left);
+    Py_ssize_t rval = _PyLong_CompactValue((PyLongObject *)right);
+    /* Check for overflow */
+    Py_ssize_t result = lval + rval;
+    if (CHECK_OVERFLOW(lval, rval, result)) {
+        DEOPT_IF(true);
+    }
+    sum = _PyLong_FromCompact(result);
+    Py_DECREF(left);
+    Py_DECREF(right);
+}
+```
+
+`BINARY_OP_ADD_INT` handles the common case of adding two small integers (compact longs). It does the addition in C with overflow detection. If either operand is not compact (i.e., a bignum), it deoptimizes to `BINARY_OP`.
+
+### `BINARY_OP_ADD_FLOAT`
+
+```c
+// CPython: Python/ceval.c:2120 BINARY_OP_ADD_FLOAT
+inst(BINARY_OP_ADD_FLOAT, (left, right -- sum)) {
+    DEOPT_IF(!PyFloat_CheckExact(left));
+    DEOPT_IF(!PyFloat_CheckExact(right));
+    double dsum = ((PyFloatObject *)left)->ob_fval +
+                  ((PyFloatObject *)right)->ob_fval;
+    sum = _PyFloat_FromDouble_ConsumeInputs(left, right, dsum);
+    ERROR_IF(sum == NULL, error);
+}
+```
+
+`1.5 + 2.5` specializes to a single `double` addition with no type checks beyond the initial deopt guards. `_PyFloat_FromDouble_ConsumeInputs` tries to reuse one of the input float objects from the free list rather than allocating a new one.
+
+### `BINARY_OP_MULTIPLY_INT`
+
+```c
+// CPython: Python/ceval.c:2160 BINARY_OP_MULTIPLY_INT
+inst(BINARY_OP_MULTIPLY_INT, (left, right -- product)) {
+    DEOPT_IF(!PyLong_CheckExact(left) || !PyLong_CheckExact(right));
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)left));
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)right));
+    Py_ssize_t lval = _PyLong_CompactValue((PyLongObject *)left);
+    Py_ssize_t rval = _PyLong_CompactValue((PyLongObject *)right);
+    /* Use 64-bit multiply to detect overflow */
+    int64_t res = (int64_t)lval * (int64_t)rval;
+    DEOPT_IF(res > PY_SSIZE_T_MAX || res < PY_SSIZE_T_MIN);
+    product = _PyLong_FromCompact((Py_ssize_t)res);
+    ...
+}
+```
+
+Uses 64-bit arithmetic to detect 30-bit overflow. If the result doesn't fit in a compact long, it deoptimizes to `BINARY_OP` which calls `long_mul` for arbitrary-precision.
+
+## gopy notes
+
+`BINARY_OP` is in `vm/eval_simple.go`. It dispatches to `objects.NumericAdd`, `objects.NumericSubtract`, etc. `BINARY_OP_ADD_INT` adds `objects.Int.CompactVal` values directly. `BINARY_OP_ADD_FLOAT` accesses `objects.Float.Val` and allocates from the float free list. Specialization happens in `vm/specialize.go`.

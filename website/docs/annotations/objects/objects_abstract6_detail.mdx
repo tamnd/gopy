@@ -1,0 +1,120 @@
+---
+title: Objects/abstract.c (part 6)
+description: "abstract.c part 6: PyObject_Call, PyObject_Vectorcall, _PyObject_CallMethod, PyObject_CallOneArg."
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/abstract.c" />
+
+This annotation covers the object calling protocol. See `objects_abstract5_detail` for `PyObject_GetAttr`, `PyObject_SetAttr`, `PyObject_GetItem`, and `PyObject_SetItem`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyObject_Call` | `callable(args, kwargs)` — tuple+dict calling |
+| 81-160 | `PyObject_Vectorcall` | Fast C array calling convention |
+| 161-240 | `PyObject_CallNoArgs` | `callable()` with no arguments |
+| 241-360 | `PyObject_CallOneArg` | `callable(arg)` with one argument |
+| 361-500 | `_PyObject_CallMethod` | `obj.method(args...)` |
+
+## Reading
+
+### `PyObject_Call`
+
+```c
+// CPython: Objects/abstract.c:280 PyObject_Call
+PyObject *
+PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs)
+{
+    ternaryfunc call = Py_TYPE(callable)->tp_call;
+    if (call == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                     "'%.200s' object is not callable",
+                     Py_TYPE(callable)->tp_name);
+        return NULL;
+    }
+    PyObject *result = (*call)(callable, args, kwargs);
+    return _Py_CheckFunctionResult(tstate, callable, result, NULL);
+}
+```
+
+`PyObject_Call` is the legacy API. It requires a tuple for `args` and a dict (or `NULL`) for `kwargs`. Most internal callers use `PyObject_Vectorcall` to avoid allocating the tuple.
+
+### `PyObject_Vectorcall`
+
+```c
+// CPython: Objects/abstract.c:340 PyObject_Vectorcall
+PyObject *
+PyObject_Vectorcall(PyObject *callable, PyObject *const *args,
+                    size_t nargsf, PyObject *kwnames)
+{
+    vectorcallfunc func = _PyVectorcall_Function(callable);
+    if (func == NULL) {
+        /* Fall back to PyObject_Call: build tuple */
+        PyObject *argstuple = _PyTuple_FromArray(args, PyVectorcall_NARGS(nargsf));
+        return PyObject_Call(callable, argstuple, kwdict_from_kwnames(kwnames));
+    }
+    return func(callable, args, nargsf, kwnames);
+}
+```
+
+`PyObject_Vectorcall` is the preferred C API for calling objects. It passes arguments as a C array slice. The `PY_VECTORCALL_ARGUMENTS_OFFSET` flag allows the callee to use `args[-1]` temporarily. Falls back to `PyObject_Call` for types without `tp_vectorcall`.
+
+### `PyObject_CallNoArgs`
+
+```c
+// CPython: Objects/abstract.c:380 PyObject_CallNoArgs
+PyObject *
+PyObject_CallNoArgs(PyObject *func)
+{
+    return PyObject_Vectorcall(func, NULL, 0, NULL);
+}
+```
+
+`PyObject_CallNoArgs` is a thin wrapper. Used everywhere a callable is invoked with no arguments: `iter(obj)`, `next(it)`, `obj.__enter__()`.
+
+### `PyObject_CallOneArg`
+
+```c
+// CPython: Objects/abstract.c:400 PyObject_CallOneArg
+PyObject *
+PyObject_CallOneArg(PyObject *func, PyObject *arg)
+{
+    PyObject *const stack[1] = {arg};
+    return PyObject_Vectorcall(func, stack, 1 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
+}
+```
+
+`PyObject_CallOneArg(str, obj)` is `str(obj)`. The single-element stack array is passed directly without allocation. `PY_VECTORCALL_ARGUMENTS_OFFSET` allows the C callee to temporarily use `stack[-1]` for the `self` slot.
+
+### `_PyObject_CallMethod`
+
+```c
+// CPython: Objects/abstract.c:440 _PyObject_CallMethod
+PyObject *
+_PyObject_CallMethod(PyObject *obj, PyObject *name,
+                     const char *format, ...)
+{
+    PyObject *meth = PyObject_GetAttr(obj, name);
+    if (meth == NULL) return NULL;
+    va_list va; va_start(va, format);
+    PyObject *args = Py_VaBuildValue(format, va);
+    va_end(va);
+    PyObject *result = PyObject_Call(meth, args, NULL);
+    Py_DECREF(meth);
+    Py_DECREF(args);
+    return result;
+}
+```
+
+`_PyObject_CallMethod(d, "get", "OO", key, default)` calls `d.get(key, default)`. The `format` string uses `Py_BuildValue` syntax. Used extensively in CPython internals to call Python methods from C.
+
+## gopy notes
+
+`PyObject_Call` is `objects.Call(callable, args, kwargs)` in `objects/protocol.go`. `PyObject_Vectorcall` is `objects.Vectorcall`. `CallNoArgs` is `objects.CallNoArgs`. `CallOneArg` is `objects.CallOneArg`. `_PyObject_CallMethod` is `objects.CallMethod`.

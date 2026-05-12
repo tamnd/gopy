@@ -1,0 +1,110 @@
+---
+title: Lib/textwrap.py (part 4)
+description: "textwrap.py part 4: TextWrapper internals, _split_chunks, _wrap_chunks, _handle_long_word."
+cpython_path: Lib/textwrap.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/textwrap.py" />
+
+This annotation covers the `TextWrapper` internals. See `lib_textwrap3_detail` for `textwrap.wrap`, `fill`, `dedent`, and `indent`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `TextWrapper._split` | Split text into chunks |
+| 81-160 | `TextWrapper._wrap_chunks` | Assemble chunks into lines |
+| 161-240 | `TextWrapper._handle_long_word` | Deal with words longer than width |
+| 241-360 | `TextWrapper.wrap` | Top-level: split paragraphs and wrap |
+| 361-500 | `max_lines` / `placeholder` | Truncation with `...` suffix |
+
+## Reading
+
+### `TextWrapper._split`
+
+```python
+# CPython: Lib/textwrap.py:180 _split
+def _split(self, text):
+    """Split text into chunks: words and whitespace."""
+    chunks = self.wordsep_re.split(text)  # regex split on whitespace+punctuation
+    chunks = [c for c in chunks if c]
+    return chunks
+```
+
+The split regex (`wordsep_re`) matches whitespace and optional hyphenation points. The result alternates between word chunks and whitespace chunks. `break_on_hyphens=True` (default) allows breaks after hyphens within compound words.
+
+### `TextWrapper._wrap_chunks`
+
+```python
+# CPython: Lib/textwrap.py:230 _wrap_chunks
+def _wrap_chunks(self, chunks):
+    lines = []
+    cur_line = []
+    cur_len = 0
+    width = self.width
+    while chunks:
+        l = len(chunks[-1])
+        if cur_len + l <= width:
+            cur_line.append(chunks.pop())
+            cur_len += l
+        else:
+            if cur_line:
+                lines.append(''.join(reversed(cur_line)))
+                cur_line = []
+                cur_len = 0
+            else:
+                # Chunk itself is longer than width
+                self._handle_long_word(chunks, cur_line, cur_len, width)
+    if cur_line:
+        lines.append(''.join(reversed(cur_line)))
+    return lines
+```
+
+Chunks are consumed from the end (stack-like). When a chunk would exceed the line width, the current line is finalized. The reversed accumulation is an optimization: appending to the right end of a list is O(1).
+
+### `TextWrapper._handle_long_word`
+
+```python
+# CPython: Lib/textwrap.py:210 _handle_long_word
+def _handle_long_word(self, reversed_chunks, cur_line, cur_len, width):
+    if width < 1:
+        space_left = 1
+    else:
+        space_left = width - cur_len
+    if self.break_long_words:
+        # Cut the chunk at the available space
+        cur_line.append(reversed_chunks[-1][:space_left])
+        reversed_chunks[-1] = reversed_chunks[-1][space_left:]
+    elif not cur_line:
+        # No choice: emit the whole long word as a line
+        cur_line.append(reversed_chunks.pop())
+```
+
+`break_long_words=True` (default) cuts long words at exactly `width` characters. `break_long_words=False` emits the long word as an overflowing line rather than breaking it.
+
+### `max_lines` / `placeholder`
+
+```python
+# CPython: Lib/textwrap.py:390 wrap with max_lines
+def wrap(self, text):
+    chunks = self._split_chunks(text)
+    ...
+    if self.max_lines is not None:
+        if len(lines) == self.max_lines:
+            while lines[-1].endswith(' '):
+                lines[-1] = lines[-1][:-1]
+            if lines[-1][-1:] != self.placeholder[-1:]:
+                lines[-1] += self.placeholder  # append '...'
+    return lines
+```
+
+`textwrap.wrap(text, width=40, max_lines=3, placeholder=' ...')` returns at most 3 lines, appending ` ...` to the last line if the text was truncated.
+
+## gopy notes
+
+`TextWrapper._split` is `module/textwrap.Wrapper.split` in `module/textwrap/module.go`. It uses `regexp.MustCompile(wordsepPattern).Split`. `_wrap_chunks` is `wrapChunks`. `_handle_long_word` is `handleLongWord`. `max_lines` and `placeholder` are fields on the `Wrapper` struct.

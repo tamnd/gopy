@@ -1,0 +1,118 @@
+---
+title: Modules/_ctypes (part 7)
+description: "_ctypes part 7: ctypes.Structure layout, _fields_, padding, bit fields."
+cpython_path: Modules/_ctypes/stgdict.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ctypes/stgdict.c" />
+
+This annotation covers C struct layout in ctypes. See `modules_ctypes6_detail` for `ctypes.CDLL`, function prototypes, `argtypes`, and `restype`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `StgDict` | Per-type memory layout descriptor |
+| 81-180 | `Structure._fields_` processing | Compute offsets and total size |
+| 181-280 | Padding insertion | `_pack_` attribute and alignment |
+| 281-380 | Bit fields | `(name, type, bits)` tuples |
+| 381-600 | `Union` layout | All fields at offset 0 |
+
+## Reading
+
+### `StgDict`
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:60 StgDictObject
+typedef struct {
+    PyDictObject dict;
+    Py_ssize_t size;        /* sizeof the C struct */
+    Py_ssize_t align;       /* alignment requirement */
+    Py_ssize_t length;      /* number of fields */
+    ffi_type *ffi_type_pointer;  /* libffi type descriptor */
+    Py_ssize_t offset;      /* only for struct fields */
+    ...
+} StgDictObject;
+```
+
+`StgDict` is a `dict` subtype that stores the layout metadata. Every ctypes type has one. `ctypes.sizeof(SomeStruct)` reads `type_stgdict->size`.
+
+### `Structure._fields_` processing
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:380 StructUnionType_update_stgdict
+static int
+StructUnionType_update_stgdict(PyObject *type, PyObject *fields, int isStruct)
+{
+    Py_ssize_t offset = 0, size = 0, align = 0;
+    for each (name, type[, bits]) in fields:
+        StgDictObject *dict = PyType_stgdict(field_type);
+        Py_ssize_t field_align = (pack ? min(pack, dict->align) : dict->align);
+        /* Insert padding to meet alignment */
+        Py_ssize_t padding = (field_align - (offset % field_align)) % field_align;
+        offset += padding;
+        /* Record field offset */
+        PyDict_SetItem(stgdict, name, CField_FromDesc(dict, offset, ...));
+        offset += dict->size;
+        align = max(align, field_align);
+    /* Round total size up to alignment */
+    stgdict->size = (offset + align - 1) & ~(align - 1);
+    stgdict->align = align;
+}
+```
+
+`_fields_ = [('x', c_int), ('y', c_double)]` on x86-64 gives `x` at offset 0 (4 bytes), 4 bytes of padding, `y` at offset 8 (8 bytes), total size 16. The padding ensures `y` is 8-byte aligned.
+
+### `_pack_`
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:340 _pack_ attribute
+/* _pack_ = 1 disables padding:
+   class Packed(Structure):
+       _pack_ = 1
+       _fields_ = [('a', c_uint8), ('b', c_uint32)]
+   → a at 0, b at 1 (no padding), size = 5
+   Without _pack_: a at 0, b at 4, size = 8
+*/
+```
+
+`_pack_` overrides the natural alignment. Values of 1, 2, 4, 8 are common. Used when interfacing with packed network protocols or non-standard C structs.
+
+### Bit fields
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:460 bit field handling
+/* _fields_ = [('flags', c_uint, 4), ('value', c_uint, 12)] */
+/* flags occupies bits 0-3, value occupies bits 4-15
+   stored in one c_uint (4 bytes) */
+static PyObject *
+CField_FromDesc_bitfield(PyObject *type, Py_ssize_t offset, int bit_offset, int bit_size)
+{
+    /* Record bit_offset and bit_size for get/set accessors */
+    ...
+}
+```
+
+Bit fields share a storage unit. Accesses use bitwise masking and shifting. Bit field layout is platform-dependent (endianness affects bit numbering).
+
+### `Union` layout
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:540 Union layout
+/* Union: all fields at offset 0, size = max(field sizes) */
+if (!isStruct) {
+    offset = 0;  /* every field starts at 0 */
+    size = max(size, dict->size);
+}
+```
+
+`ctypes.Union` overlays all fields at offset 0. `ctypes.sizeof(MyUnion)` equals the size of the largest field. Used for type-punning (interpreting the same bytes as different types).
+
+## gopy notes
+
+`StgDict` metadata is stored as fields on `module/ctypes.Type` in `module/ctypes/module.go`. `_fields_` processing computes offsets via Go's `unsafe.Offsetof` for built-in types and manual calculation for user-defined structs. `_pack_` sets `align = min(pack, natural_align)`. Bit fields use `uint32` with bit-mask accessors.
