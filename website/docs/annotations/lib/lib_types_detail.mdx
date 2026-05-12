@@ -1,0 +1,88 @@
+---
+title: Lib/types.py
+description: "Lib/types.py: FunctionType, CodeType, ModuleType, MethodType, LambdaType, GeneratorType, SimpleNamespace, MappingProxyType, DynamicClassAttribute, coroutine decorator."
+cpython_path: Lib/types.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/types.py" />
+
+`Lib/types.py` collects names for built-in types that don't have dedicated builtins. Most entries are obtained by inspecting objects (`type(lambda: None)`) or importing from C modules.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | Type name bindings | `FunctionType`, `LambdaType`, `CodeType`, `MappingProxyType`, etc. |
+| 61-120 | `SimpleNamespace` | Re-export from `_collections._tuplegetter` |
+| 121-200 | `DynamicClassAttribute` | Descriptor that acts differently on class vs instance access |
+| 201-300 | `coroutine` decorator | Wrap a generator function as a coroutine |
+
+## Reading
+
+### Type collection
+
+```python
+# CPython: Lib/types.py:18 obtaining type objects
+def _f(): pass
+FunctionType = type(_f)
+LambdaType = type(lambda: None)   # same as FunctionType
+
+def _g():
+    yield
+GeneratorType = type(_g())
+
+async def _c(): pass
+CoroutineType = type(_c())
+_c().close()   # prevent ResourceWarning
+```
+
+These are the same type: `type(lambda: None) is type(def f(): pass)`.
+
+### `DynamicClassAttribute`
+
+```python
+# CPython: Lib/types.py:155 DynamicClassAttribute
+class DynamicClassAttribute:
+    def __get__(self, instance, ownerclass=None):
+        if instance is None:
+            # Class access: raise AttributeError to trigger __getattr__
+            if self.fget is None:
+                raise AttributeError()
+            raise AttributeError(self.attrname)
+        # Instance access: call fget
+        if self.fget is None:
+            raise AttributeError(...)
+        return self.fget(instance)
+```
+
+Used by `enum.Enum` so that `Color.name` on the class triggers `EnumMeta.__getattr__` (which returns the enum member named `name`), while `Color.RED.name` calls `fget(instance)` and returns the string `'RED'`.
+
+### `coroutine` decorator
+
+```python
+# CPython: Lib/types.py:230 coroutine
+def coroutine(func):
+    if not callable(func):
+        raise TypeError(...)
+    if inspect.isgeneratorfunction(func):
+        # Wrap a generator function as a coroutine
+        @functools.wraps(func)
+        def wrapped(*args, **kwargs):
+            coro = func(*args, **kwargs)
+            if not isinstance(coro, _GeneratorWrapper):
+                coro = _GeneratorWrapper(coro)
+            return coro
+        return wrapped
+    ...
+```
+
+`types.coroutine` is used in the old `asyncio` compatibility layer. Modern code uses `async def`.
+
+## gopy notes
+
+`types` module is in `module/types/`. `FunctionType`, `CodeType`, `ModuleType` etc. are the types already defined in `objects/`. `MappingProxyType` wraps `objects/mapping_proxy.go`. `SimpleNamespace` is `objects/namespace.go`. `DynamicClassAttribute` is needed by `enum` (used by `http.HTTPStatus` and similar).

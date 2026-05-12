@@ -498,6 +498,8 @@ const sidebars = {
         'annotations/objects/objects_namespaceobject_detail',
         'annotations/objects/objects_unionobject_detail',
         'annotations/objects/objects_mappingproxyobject_detail',
+        'annotations/objects/objects_longobject4_detail',
+        'annotations/objects/objects_floatobject2_detail',
       ],
     },
     {
@@ -1449,6 +1451,7 @@ const sidebars = {
         'annotations/lib/lib_io_detail3',
         'annotations/lib/lib_builtins_detail',
         'annotations/lib/lib_typing_extensions_detail2',
+        'annotations/lib/lib_types_detail',
       ],
     },
   ],

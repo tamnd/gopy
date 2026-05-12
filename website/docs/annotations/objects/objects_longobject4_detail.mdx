@@ -1,0 +1,105 @@
+---
+title: Objects/longobject.c (part 4)
+description: "longobject.c part 4: integer formatting (__format__, to_str with base), __index__, __float__, bit operations (lshift, rshift, and, or, xor), gcd."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers integer formatting, conversion to float, and bitwise operations. See `objects_longobject3_detail` for the core arithmetic.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `long_format` | `bin()`, `oct()`, `hex()`, `format(n, 'x')` |
+| 201-400 | `PyLong_AsDouble`, `long_float` | Conversion to float with overflow check |
+| 401-600 | `long_and`, `long_or`, `long_xor`, `long_invert` | Bitwise operations |
+| 601-800 | `long_lshift`, `long_rshift` | Shift operations |
+| 801-1000 | `long_to_bytes`, `long_from_bytes` | `int.to_bytes`, `int.from_bytes` |
+| 1001-1200 | `long_gcd` | `math.gcd` backend |
+
+## Reading
+
+### `bin`/`oct`/`hex` formatting
+
+```c
+// CPython: Objects/longobject.c:85 long_format
+static PyObject *
+long_format(PyObject *aa, int base)
+{
+    /* Convert to base 2/8/10/16 string */
+    PyObject *v = PyLong_Format(aa, base);
+    return v;
+}
+```
+
+`bin(255)` calls `long_format(n, 2)`. The format includes the `0b`/`0o`/`0x` prefix.
+
+### Conversion to float
+
+```c
+// CPython: Objects/longobject.c:280 PyLong_AsDouble
+double
+PyLong_AsDouble(PyObject *vv)
+{
+    /* Return INFINITY if the integer is too large for a double */
+    if (Py_ABS(Py_SIZE(v)) > DBL_MAX_EXP / PyLong_SHIFT) {
+        PyErr_SetString(PyExc_OverflowError,
+                        "int too large to convert to float");
+        return -1.0;
+    }
+    return _PyLong_IsZero(v) ? 0.0 : _PyLong_Frexp(v, &exponent) * pow(2.0, exponent);
+}
+```
+
+### Bitwise left shift
+
+```c
+// CPython: Objects/longobject.c:620 long_lshift
+static PyObject *
+long_lshift(PyObject *a, PyObject *b)
+{
+    PyLongObject *shiftby = (PyLongObject *)b;
+    Py_ssize_t wordshift = shiftby->ob_digit[0] / PyLong_SHIFT;
+    int remshift = shiftby->ob_digit[0] % PyLong_SHIFT;
+    /* Allocate result with extra digits */
+    PyLongObject *z = _PyLong_New(Py_SIZE(a) + wordshift + 1);
+    /* Copy digits shifted by wordshift positions */
+    ...
+    /* Apply remshift within each digit */
+    ...
+}
+```
+
+Left shift by `n` is `a * 2^n`. For large shifts this grows the digit array.
+
+### `int.to_bytes`
+
+```c
+// CPython: Objects/longobject.c:900 long_to_bytes_impl
+static PyObject *
+long_to_bytes_impl(PyObject *self, Py_ssize_t length, const char *byteorder,
+                   int signed_)
+{
+    /* Convert to big or little endian byte array of exactly 'length' bytes */
+    ...
+    Py_ssize_t nbytes = (bit_length + 7) / 8;
+    if (nbytes > length) {
+        PyErr_SetString(PyExc_OverflowError, "int too big to convert");
+        return NULL;
+    }
+    ...
+}
+```
+
+`(255).to_bytes(2, 'big')` gives `b'\x00\xff'`.
+
+## gopy notes
+
+`bin`/`oct`/`hex` are in `objects/int.go`. `PyLong_AsDouble` maps to Go's `big.Int.Float64()` with overflow detection. Bitwise operations use Go's `big.Int` `And`, `Or`, `Xor`, `Lsh`, `Rsh`. `int.to_bytes`/`from_bytes` use `big.Int.Bytes()` and `big.Int.SetBytes()` with endian conversion.

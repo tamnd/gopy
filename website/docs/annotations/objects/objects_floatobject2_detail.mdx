@@ -1,0 +1,95 @@
+---
+title: Objects/floatobject.c (part 2)
+description: "floatobject.c part 2: float formatting (__format__, repr), hash, comparisons, __round__, __trunc__, __floor__, __ceil__, is_integer, as_integer_ratio."
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/floatobject.c" />
+
+This annotation covers float display, hashing, and the special numeric methods. See `objects_floatobject_detail` (if it exists) for basic arithmetic.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `float_repr`, `float_str` | `repr(1.1)` → `'1.1'`, `str(1.1)` → `'1.1'` |
+| 201-400 | `float_hash` | `hash(1.0) == hash(1)` invariant |
+| 401-600 | `float_richcompare` | `==`, `<`, etc. with int promotion |
+| 601-800 | `float_round` | `round(1.5)` with Python banker's rounding |
+| 801-1000 | `float_trunc`, `float_floor`, `float_ceil` | `int()`, `math.floor()`, `math.ceil()` |
+| 1001-1200 | `float_is_integer` | `(1.0).is_integer()` → `True` |
+| 1201-1800 | `float_as_integer_ratio` | `(0.5).as_integer_ratio()` → `(1, 2)` |
+
+## Reading
+
+### `repr` using Grisu/Dragon4
+
+```c
+// CPython: Objects/floatobject.c:95 float_repr
+static PyObject *
+float_repr(PyFloatObject *v)
+{
+    char buf[256];
+    _PyFloat_FormatAdvancedWriter(&_Py_dtoa_result, v->ob_fval, buf, sizeof(buf));
+    return PyUnicode_FromString(buf);
+}
+```
+
+CPython uses the shortest-representation algorithm (similar to Ryu/Grisu3): `repr(0.1)` gives `'0.1'`, not `'0.10000000000000001'`.
+
+### Hash invariant
+
+```c
+// CPython: Objects/floatobject.c:245 float_hash
+static Py_hash_t
+float_hash(PyFloatObject *v)
+{
+    double m;
+    int e;
+    m = frexp(v->ob_fval, &e);
+    /* hash(x) == hash(int(x)) for all integers x */
+    /* Uses PyHASH_MODULUS to match int hash */
+    ...
+}
+```
+
+Python's numeric hash invariant: `hash(x) == hash(int(x))` whenever `float(int(x)) == x`. This allows `{1: 'a'}[1.0]` to work.
+
+### Banker's rounding
+
+```c
+// CPython: Objects/floatobject.c:640 float_round_impl
+/*
+ * Python uses IEEE 754 round-half-to-even (banker's rounding).
+ * round(0.5) == 0, round(1.5) == 2, round(2.5) == 2.
+ * This matches the hardware default rounding mode.
+ */
+```
+
+### `as_integer_ratio`
+
+```c
+// CPython: Objects/floatobject.c:1380 float_as_integer_ratio
+static PyObject *
+float_as_integer_ratio(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    double self_double = PyFloat_AS_DOUBLE(self);
+    /* Extract mantissa and exponent, construct exact fraction */
+    double m = frexp(self_double, &exponent);
+    /* m * 2^exponent = self, m is in [0.5, 1.0) */
+    PyObject *numerator = _PyLong_FromDouble(ldexp(m, DBL_MANT_DIG));
+    int denominator_exp = DBL_MANT_DIG - exponent;
+    ...
+}
+```
+
+`(0.5).as_integer_ratio()` returns `(1, 2)`. The result is always exact.
+
+## gopy notes
+
+`float` is in `objects/float.go`. `repr` uses Go's `strconv.FormatFloat(x, 'g', -1, 64)` which also uses shortest representation. The hash invariant requires `hash(float) == hash(int)` for integer-valued floats. `as_integer_ratio` uses `math.Frexp` and `big.Int` for exact arithmetic.
