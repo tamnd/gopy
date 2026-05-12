@@ -1,0 +1,92 @@
+---
+title: Modules/selectmodule.c (part 8)
+description: "selectmodule.c part 8: select.select, select.poll, select.epoll, select.kqueue — event loop primitives."
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/selectmodule.c" />
+
+This annotation covers the `select` module's I/O multiplexing interfaces. See `modules_select7_detail` for `select.devpoll` and the file descriptor abstraction.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `select.select` | POSIX `select(2)` wrapper |
+| 81-180 | `select.poll` | `poll(2)` object — register/unregister/poll |
+| 181-280 | `select.epoll` | Linux `epoll` interface |
+| 281-380 | `select.kqueue` | BSD `kqueue` interface |
+| 381-500 | FD abstraction | `fileno()` dispatch for sockets and files |
+
+## Reading
+
+### `select.select`
+
+```c
+// CPython: Modules/selectmodule.c:320 select_select_impl
+static PyObject *
+select_select_impl(PyObject *module, PyObject *iwtd, PyObject *owtd,
+                   PyObject *ewtd, PyObject *timeout_obj)
+{
+    fd_set ifd, ofd, efd;
+    struct timeval tv, *tvp = NULL;
+    /* Convert Python lists to fd_sets */
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    n = select(maxfd + 1, &ifd, &ofd, &efd, tvp);
+    Py_END_ALLOW_THREADS
+    if (n < 0) return PyErr_SetFromErrno(PyExc_OSError);
+    /* Build result lists from set bits */
+    return Py_BuildValue("(NNN)", rlist, wlist, xlist);
+}
+```
+
+`select.select(rlist, wlist, xlist, timeout)` wraps the POSIX `select` syscall. It accepts any file-like objects with `fileno()`. The GIL is released during the blocking call.
+
+### `select.poll`
+
+```c
+// CPython: Modules/selectmodule.c:560 poll_poll
+static PyObject *
+poll_poll(pollObject *self, PyObject *args)
+{
+    struct pollfd *ufds = self->ufds;
+    int timeout = -1;  /* block forever by default */
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    retval = poll(ufds, self->ufd_len, timeout);
+    Py_END_ALLOW_THREADS
+    if (retval < 0) return PyErr_SetFromErrno(PyExc_OSError);
+    /* Build list of (fd, event) pairs */
+}
+```
+
+`poll` is more scalable than `select` for large numbers of fds since it uses a linear array rather than a fixed-size bitset. The registered fds are stored in a C `pollfd` array rebuilt each time `poll()` is called.
+
+### `select.epoll`
+
+```c
+// CPython: Modules/selectmodule.c:880 pyepoll_poll
+static PyObject *
+pyepoll_poll(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    int nfds = -1;
+    double timeout = -1.0;
+    struct epoll_event *evs = alloca(nfds * sizeof(struct epoll_event));
+    Py_BEGIN_ALLOW_THREADS
+    nready = epoll_wait(self->epfd, evs, nfds, (int)(timeout * 1000));
+    Py_END_ALLOW_THREADS
+    /* Build list of (fd, event) tuples */
+}
+```
+
+`epoll` is O(1) per event rather than O(n) for the entire fd set. `EPOLLET` (edge-triggered) mode only reports events on transitions. Used by `asyncio` on Linux.
+
+## gopy notes
+
+`select.select` is `module/select.Select` in `module/select/module.go` using `syscall.Select`. `select.poll` uses `syscall.Poll`. `select.epoll` is `module/select.Epoll` backed by Go's `golang.org/x/sys/unix.EpollWait`. `kqueue` is only available on Darwin/BSD.

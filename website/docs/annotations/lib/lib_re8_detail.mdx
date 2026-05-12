@@ -1,0 +1,86 @@
+---
+title: Lib/re/__init__.py (part 8)
+description: "re/__init__.py part 8: re.fullmatch, re.findall, re.finditer, re.sub, re.subn."
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/re/__init__.py" />
+
+This annotation covers the top-level regex functions. See `modules_re7_detail` for `re.compile`, `Pattern.match`, `Pattern.search`, and the regex engine.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `re.fullmatch` | Match against the entire string |
+| 61-140 | `re.findall` | Return all non-overlapping matches as a list |
+| 141-220 | `re.finditer` | Iterator over `Match` objects |
+| 221-320 | `re.sub` | Replace matches with a string or callable |
+| 321-400 | `re.subn` | Like `sub`, also return the replacement count |
+
+## Reading
+
+### `re.fullmatch`
+
+```python
+# CPython: Lib/re/__init__.py:180 fullmatch
+def fullmatch(pattern, string, flags=0):
+    return _compile(pattern, flags).fullmatch(string)
+```
+
+`fullmatch` requires the entire string to match. `Pattern.fullmatch` is equivalent to adding `\A` and `\Z` anchors but more efficient because the engine knows it must consume all input.
+
+### `re.findall`
+
+```python
+# CPython: Lib/re/__init__.py:220 findall
+def findall(pattern, string, flags=0):
+    return _compile(pattern, flags).findall(string)
+```
+
+`Pattern.findall` internally calls `finditer` and collects results. For patterns with no groups, it returns a list of matched strings. For one group, a list of strings. For multiple groups, a list of tuples.
+
+### `re.sub`
+
+```python
+# CPython: Lib/re/__init__.py:280 sub
+def sub(pattern, repl, string, count=0, flags=0):
+    return _compile(pattern, flags).sub(repl, string, count)
+```
+
+`Pattern.sub(repl, string)`:
+
+```python
+# CPython: Lib/re/_compiler.py  (Pattern.sub implementation sketch)
+if callable(repl):
+    # call repl(match) for each match
+    result = []
+    for m in finditer(string):
+        result.append(repl(m))
+        ...
+else:
+    # template substitution: \1, \g<name>, etc.
+    result = template_sub(repl, string)
+return ''.join(result)
+```
+
+When `repl` is a callable, it receives each `Match` object and returns the replacement string. Template strings support `\1` (group number) and `\g<name>` (named group) backreferences.
+
+### `re.subn`
+
+```python
+# CPython: Lib/re/__init__.py:300 subn
+def subn(pattern, repl, string, count=0, flags=0):
+    return _compile(pattern, flags).subn(repl, string, count)
+```
+
+`subn` returns `(new_string, number_of_replacements)`. Useful when you need to know whether any replacements were actually made.
+
+## gopy notes
+
+`re.fullmatch` is `module/re.FullMatch` in `module/re/module.go`. `findall` collects all matches from `finditer`. `sub` calls `regexp.ReplaceAllStringFunc` when `repl` is callable, or `regexp.ReplaceAllString` for template strings. Template backreference `\1` is translated to Go's `$1`.

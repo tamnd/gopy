@@ -1,0 +1,100 @@
+---
+title: Python/symtable.c (part 11)
+description: "Python/symtable.c part 11: symtable_visit_expr, NAME resolution, FREE vs CELL classification, comprehension scope."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers name classification and closure analysis. See `compile/symtable10_detail` for `PySymtable_BuildObject`, scope types, and `symtable_visit_stmt`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `symtable_visit_expr` | Recursively visit expression nodes |
+| 81-160 | `symtable_visit_name` | Classify each `Name` node as LOCAL, FREE, GLOBAL, etc. |
+| 161-240 | FREE / CELL analysis | Post-pass to determine which locals become cells |
+| 241-360 | `analyze_block` | Propagate free variables through nested scopes |
+| 361-500 | Comprehension scopes | How `[x for x in it]` gets its own namespace |
+
+## Reading
+
+### `symtable_visit_name`
+
+```c
+// CPython: Python/symtable.c:1480 symtable_visit_name
+static int
+symtable_visit_name(struct symtable *st, identifier name, int ctx)
+{
+    long cur = _PyST_GetSymbol(st->st_cur, name);
+    long flags = 0;
+    switch (ctx) {
+        case Load:   flags = USE; break;
+        case Store:  flags = DEF_LOCAL; break;
+        case Del:    flags = DEF_LOCAL; break;
+        case AugStore: flags = DEF_LOCAL | USE; break;
+        ...
+    }
+    return symtable_add_def(st, name, flags);
+}
+```
+
+`DEF_LOCAL` marks a name as defined in the current scope. `USE` marks it as read. After visiting all statements, `analyze_block` uses these flags to decide whether a name is `LOCAL`, `FREE` (from an enclosing scope), or `GLOBAL`.
+
+### FREE / CELL analysis
+
+```c
+// CPython: Python/symtable.c:620 analyze_name
+static int
+analyze_name(PySTEntryObject *entry, PyObject *scopes,
+             PyObject *name, long flags, ...)
+{
+    if (flags & DEF_GLOBAL) {
+        SET_SCOPE(scopes, name, GLOBAL_EXPLICIT);
+    } else if (flags & DEF_LOCAL) {
+        SET_SCOPE(scopes, name, LOCAL);
+    } else if (bound && PySet_Contains(bound, name)) {
+        /* Name is bound in an enclosing scope: it's FREE here */
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);  /* propagate upward */
+    } else {
+        /* Not bound anywhere: implicit global */
+        SET_SCOPE(scopes, name, GLOBAL_IMPLICIT);
+    }
+    return 1;
+}
+```
+
+A name becomes `FREE` when it is used but not defined in the current scope, but it is defined in an enclosing scope. The enclosing scope's local variable is then upgraded to `CELL` so it can be shared.
+
+### `analyze_block`
+
+```c
+// CPython: Python/symtable.c:680 analyze_block
+static int
+analyze_block(PySTEntryObject *entry, PyObject *bound,
+              PyObject *free, PyObject *globals)
+{
+    /* First pass: collect all local defs */
+    /* Second pass: resolve each name */
+    /* Recurse into nested scopes, passing the set of bound names */
+    for each child_scope:
+        analyze_block(child, new_bound, child_free, globals);
+        /* Any names in child_free that are local here become CELL */
+        for name in child_free:
+            if PySet_Contains(local, name):
+                SET_SCOPE(scopes, name, CELL);
+}
+```
+
+`analyze_block` is recursive. Nested comprehensions and lambdas create child scopes. Names that are free in a child but local in the parent are marked `CELL` in the parent and `FREE` in the child.
+
+## gopy notes
+
+`symtable_visit_expr` is `compile.symtableVisitExpr` in `compile/codegen_expr_name.go`. `analyze_name` runs in `compile.analyzeName`. `FREE`/`CELL` classification populates `compile.SymbolTable.Cells` and `compile.SymbolTable.Frees`, which `MAKE_CELL` and `COPY_FREE_VARS` use at runtime.

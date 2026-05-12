@@ -1,0 +1,123 @@
+---
+title: Objects/unicodeobject.c (part 10)
+description: "Objects/unicodeobject.c part 10: str.replace, str.translate, str.encode, PyUnicode_AsEncodedString."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers string transformation methods. See `objects_unicodeobject9_detail` for `str.find`, `str.split`, `str.join`, and `str.strip`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `str.replace` | Replace all (or N) occurrences of a substring |
+| 81-160 | `str.translate` | Map characters through a translation table |
+| 161-240 | `str.encode` | Encode to `bytes` using a codec |
+| 241-340 | `PyUnicode_AsEncodedString` | C-level encode with error handler |
+| 341-500 | `str.maketrans` | Build a translation table |
+
+## Reading
+
+### `str.replace`
+
+```c
+// CPython: Objects/unicodeobject.c:9420 unicode_replace
+static PyObject *
+unicode_replace(PyObject *self, PyObject *args)
+{
+    PyObject *str1, *str2;
+    Py_ssize_t maxcount = -1;
+    if (!PyArg_ParseTuple(args, "UU|n:replace", &str1, &str2, &maxcount))
+        return NULL;
+    if (PyUnicode_GET_LENGTH(str1) == 1 && PyUnicode_GET_LENGTH(str2) == 1) {
+        /* Fast path: single character replace */
+        return replace_single_char(self, str1, str2, maxcount);
+    }
+    return replace(self, str1, str2, maxcount);
+}
+```
+
+Single-character replacement uses a dedicated fast path that avoids `memmove`. Multi-character replacement calls the general `replace` which uses `find` and rebuilds the string.
+
+### `str.translate`
+
+```c
+// CPython: Objects/unicodeobject.c:9480 unicode_translate
+static PyObject *
+unicode_translate(PyObject *self, PyObject *table)
+{
+    _PyUnicodeWriter writer;
+    _PyUnicodeWriter_Init(&writer);
+    Py_ssize_t len = PyUnicode_GET_LENGTH(self);
+    for (Py_ssize_t i = 0; i < len; i++) {
+        Py_UCS4 ch = PyUnicode_READ_CHAR(self, i);
+        PyObject *key = PyLong_FromLong(ch);
+        PyObject *value = PyObject_GetItem(table, key);
+        if (value == NULL) {
+            /* Not in table: keep original */
+            _PyUnicodeWriter_WriteChar(&writer, ch);
+        } else if (value == Py_None) {
+            /* Mapped to None: delete */
+        } else {
+            /* Mapped to int or str: replace */
+            ...
+        }
+    }
+    return _PyUnicodeWriter_Finish(&writer);
+}
+```
+
+`table` is any mapping from code point integer to code point integer, string, or `None`. `str.maketrans` builds such a mapping as a `dict`. `None` values delete the character.
+
+### `str.encode`
+
+```c
+// CPython: Objects/unicodeobject.c:3580 unicode_encode
+static PyObject *
+unicode_encode(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    const char *encoding = NULL;
+    const char *errors = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|ss:encode",
+                                     kwlist, &encoding, &errors))
+        return NULL;
+    return PyUnicode_AsEncodedString(self,
+        encoding ? encoding : "utf-8", errors);
+}
+```
+
+`str.encode()` defaults to `'utf-8'`. `str.encode('latin-1')` uses the codec registry to find the encoder.
+
+### `PyUnicode_AsEncodedString`
+
+```c
+// CPython: Objects/unicodeobject.c:3540 PyUnicode_AsEncodedString
+PyObject *
+PyUnicode_AsEncodedString(PyObject *unicode, const char *encoding,
+                           const char *errors)
+{
+    PyObject *v = _PyCodec_EncodeInternal(unicode, encoding,
+                                          errors, "strict");
+    if (v == NULL) return NULL;
+    if (!PyBytes_Check(v)) {
+        /* Some codecs return str; wrap in bytes */
+        PyErr_SetString(PyExc_TypeError, "encoder did not return a bytes object");
+        Py_DECREF(v);
+        return NULL;
+    }
+    return v;
+}
+```
+
+`PyUnicode_AsEncodedString` calls the codec via `_PyCodec_EncodeInternal`. Built-in codecs (UTF-8, ASCII, Latin-1) have fast C paths; other codecs go through the codec registry Python lookup.
+
+## gopy notes
+
+`str.replace` is `objects.StrReplace` in `objects/str.go` using `strings.Replace`. `str.translate` builds the result with a `strings.Builder`. `str.encode` calls `objects.StrEncode` which delegates to the codec registry in `module/codecs`.
