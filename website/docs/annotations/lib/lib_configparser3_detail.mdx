@@ -1,0 +1,115 @@
+---
+title: Lib/configparser.py (part 3)
+description: "configparser.py part 3: ConfigParser.read, read_string, _read, interpolation, BasicInterpolation."
+cpython_path: Lib/configparser.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/configparser.py" />
+
+This annotation covers the reading and interpolation machinery. See `lib_configparser2_detail` for `ConfigParser.__init__`, `get`, `set`, and the section/option model.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `ConfigParser.read` | Read one or more filenames into the config |
+| 81-180 | `_read` | Line-by-line parser: sections, options, continuations |
+| 181-280 | `BasicInterpolation` | `%(name)s` substitution |
+| 281-380 | `ExtendedInterpolation` | `${section:option}` substitution |
+| 381-500 | `RawConfigParser.get` | Retrieve without interpolation |
+
+## Reading
+
+### `_read`
+
+```python
+# CPython: Lib/configparser.py:1050 RawConfigParser._read
+def _read(self, fp, fpname):
+    cursect = None  # current section dict
+    sectname = None
+    optname = None
+    lineno = 0
+    indent_level = 0
+    e = None  # exception accumulator
+
+    for lineno, line in enumerate(fp, start=1):
+        # Skip comment lines and blank lines
+        if not line.strip() or line[0] in self._comment_prefixes:
+            if self._empty_lines_in_values:
+                if (cursect is not None and optname and
+                        cursect[optname] is not None):
+                    cursect[optname].append('')
+            else:
+                indent_level = sys.maxsize
+            continue
+        # Continuation line
+        first_nonspace = NONSPACECRE.search(line)
+        cur_indent_level = first_nonspace.start() if first_nonspace else 0
+        if (cursect is not None and optname and
+                cur_indent_level > indent_level):
+            cursect[optname].append(line.rstrip())
+        # Section header
+        elif line[0] == '[':
+            ...
+        # Option line
+        else:
+            ...
+```
+
+The parser is line-by-line with explicit state (`cursect`, `optname`). Multi-line values are continuation lines that start with more indentation than the key line. Comments can appear on their own lines only (inline comments require `inline_comment_prefixes`).
+
+### `BasicInterpolation`
+
+```python
+# CPython: Lib/configparser.py:390 BasicInterpolation.before_get
+class BasicInterpolation(Interpolation):
+    def before_get(self, parser, section, option, value, vars):
+        L = []
+        self._interpolate_some(parser, option, L, value, section, vars, 1)
+        return ''.join(L)
+
+    def _interpolate_some(self, parser, option, accum, rest, section, map, depth):
+        if depth > MAX_INTERPOLATION_DEPTH:
+            raise InterpolationDepthError(option, section, rest)
+        while rest:
+            p = rest.find('%')
+            if p < 0:
+                accum.append(rest)
+                break
+            accum.append(rest[:p])
+            rest = rest[p:]
+            if rest[1:2] == '(':
+                # %(name)s substitution
+                m = self._KEYCRE.match(rest)
+                var = parser.get(section, m.group(1), raw=True, vars=vars)
+                rest = m.group(2) + rest[m.end():]
+                self._interpolate_some(parser, option, accum, var, section, map, depth + 1)
+            elif rest[1:2] == '%':
+                accum.append('%')
+                rest = rest[2:]
+```
+
+`BasicInterpolation` handles `%(name)s` where `name` refers to another option in the same section (or `DEFAULT`). Recursive references are detected with a depth counter; depth > 10 raises `InterpolationDepthError`.
+
+### `ExtendedInterpolation`
+
+```python
+# CPython: Lib/configparser.py:440 ExtendedInterpolation.before_get
+class ExtendedInterpolation(Interpolation):
+    def before_get(self, parser, section, option, value, vars):
+        L = []
+        self._interpolate_some(parser, option, L, value, section, vars, 1)
+        return ''.join(L)
+    # Uses ${section:option} or ${option} (current section)
+```
+
+`ExtendedInterpolation` supports cross-section references: `${paths:base}/file.txt` pulls `base` from the `[paths]` section. This enables a more INI-like inheritance pattern than `BasicInterpolation`.
+
+## gopy notes
+
+`ConfigParser` is in `module/configparser/module.go`. `_read` iterates lines with Go `bufio.Scanner`. `BasicInterpolation` is a Go struct with `BeforeGet` method. Recursive depth is tracked with an integer counter passed through calls.

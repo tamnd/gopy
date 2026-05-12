@@ -1,0 +1,115 @@
+---
+title: Modules/zlibmodule.c (part 7)
+description: "zlibmodule.c part 7: Compress.compress, Compress.flush, Decompress.decompress, wbits, streaming."
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/zlibmodule.c" />
+
+This annotation covers the streaming compression objects. See `modules_zlib6_detail` for `zlib.compress`, `zlib.decompress`, `zlib.crc32`, and one-shot functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Compress.__new__` | Initialize `z_stream`, set level and strategy |
+| 81-180 | `Compress.compress` | Feed data; return compressed bytes so far |
+| 181-260 | `Compress.flush` | Flush pending data; optional `Z_FINISH` |
+| 261-360 | `Decompress.__new__` | Initialize `z_stream` for decompression |
+| 361-600 | `Decompress.decompress` | Feed compressed data; return decompressed bytes |
+
+## Reading
+
+### `Compress.compress`
+
+```c
+// CPython: Modules/zlibmodule.c:560 zlib_Compress_compress_impl
+static PyObject *
+zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
+{
+    PyObject *RetVal = NULL;
+    Py_ssize_t obuflen = DEF_BUF_SIZE;
+    self->zst.avail_in = data->len;
+    self->zst.next_in = data->buf;
+    do {
+        arrange_input_buffer(&self->zst, &data->len);
+        do {
+            obuflen = arrange_output_buffer(&self->zst, &RetVal, obuflen);
+            Py_BEGIN_ALLOW_THREADS
+            err = deflate(&self->zst, Z_NO_FLUSH);
+            Py_END_ALLOW_THREADS
+        } while (self->zst.avail_out == 0);
+    } while (self->zst.avail_in != 0);
+    return RetVal;
+}
+```
+
+`Compress.compress` feeds data into the `z_stream` in a double loop: outer loop feeds input chunks, inner loop drains the output buffer. `Z_NO_FLUSH` means "compress but keep data in internal buffer for better compression ratio". The GIL is released during `deflate`.
+
+### `Compress.flush`
+
+```c
+// CPython: Modules/zlibmodule.c:620 zlib_Compress_flush_impl
+static PyObject *
+zlib_Compress_flush_impl(compobject *self, int mode)
+{
+    /* mode: Z_SYNC_FLUSH, Z_FULL_FLUSH, Z_FINISH */
+    do {
+        obuflen = arrange_output_buffer(&self->zst, &RetVal, obuflen);
+        Py_BEGIN_ALLOW_THREADS
+        err = deflate(&self->zst, mode);
+        Py_END_ALLOW_THREADS
+    } while (err == Z_OK && self->zst.avail_out == 0);
+    /* Truncate to actual output */
+    ...
+}
+```
+
+`flush(Z_SYNC_FLUSH)` flushes all pending output; useful for network protocols. `flush(Z_FINISH)` finalizes the stream with the zlib checksum trailer. After `Z_FINISH`, the compressor cannot be reused.
+
+### `wbits` parameter
+
+| `wbits` | Format |
+|---------|--------|
+| 8..15 | zlib (with header/trailer) |
+| -8..-15 | raw deflate (no header) |
+| 24..31 (16+8..15) | gzip |
+| 40..47 (32+8..15) | automatic detection (decompress only) |
+
+The `wbits` parameter controls the window size and wrapping format. `zlib.compress` defaults to `wbits=15` (zlib). `gzip.compress` uses `wbits=31`.
+
+### `Decompress.decompress`
+
+```c
+// CPython: Modules/zlibmodule.c:720 zlib_Decompress_decompress_impl
+static PyObject *
+zlib_Decompress_decompress_impl(compobject *self, Py_buffer *data,
+                                 Py_ssize_t max_length)
+{
+    self->zst.avail_in = data->len;
+    self->zst.next_in = data->buf;
+    do {
+        obuflen = arrange_output_buffer_with_maximum(
+            &self->zst, &RetVal, obuflen, max_length);
+        Py_BEGIN_ALLOW_THREADS
+        err = inflate(&self->zst, Z_SYNC_FLUSH);
+        Py_END_ALLOW_THREADS
+    } while (err == Z_OK && self->zst.avail_out == 0 && obuflen < max_length);
+    if (self->zst.avail_in != 0) {
+        /* Unconsumed input: save for next call */
+        self->unconsumed_tail = PyBytes_FromStringAndSize(...);
+    }
+    return RetVal;
+}
+```
+
+`max_length` limits output to protect against zip bomb attacks. Unconsumed input is stored in `self.unconsumed_tail` and prepended to the next `decompress` call.
+
+## gopy notes
+
+`Compress` is `module/zlib.Compressor` in `module/zlib/module.go`. It wraps Go's `compress/zlib` or `compress/flate` writer. `flush` calls `w.Flush()` or `w.Close()`. `Decompress` wraps `compress/zlib.NewReader`. `wbits` routing selects between `zlib`, `flate`, and `compress/gzip`.

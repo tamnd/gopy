@@ -1,0 +1,122 @@
+---
+title: Python/symtable.c (part 9)
+description: "Python/symtable.c part 9: scope analysis, free/cell variable detection, global/nonlocal resolution."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers the scope analysis pass. See `python_symtable8_detail` for `PySymtable_BuildObject`, `symtable_visit_stmt`, and annotation handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `analyze_block` | Top-level scope analysis pass |
+| 81-180 | `analyze_name` | Assign scope flags (local, free, global, cell) |
+| 181-300 | `analyze_cells` | Promote locals to cells when closed over |
+| 301-420 | `update_symbols` | Propagate free variable information to enclosing scopes |
+| 421-600 | `drop_class_free` | Handle class scope's `__class__` cell specially |
+
+## Reading
+
+### `analyze_block`
+
+```c
+// CPython: Python/symtable.c:1020 analyze_block
+static int
+analyze_block(PySTEntryObject *ste, PyObject *bound, PyObject *free,
+              PyObject *global, PyObject *type_params)
+{
+    /* bound: names bound in enclosing scopes
+       free: names used free in this scope (output)
+       global: names declared global */
+    PyObject *newbound = PySet_New(bound);
+    PyObject *newfree = PySet_New(NULL);
+    PyObject *newglobal = PySet_New(global);
+
+    /* Analyze all nested scopes first */
+    for each child in ste->ste_children:
+        analyze_block(child, newbound, newfree, newglobal, ...);
+
+    /* Now analyze names in this scope */
+    for name, flags in ste->ste_symbols:
+        analyze_name(ste, newbound, name, flags, newfree, newglobal, ...);
+
+    /* Promote locals that are referenced from nested scopes to cells */
+    analyze_cells(newscope, newfree);
+    /* Propagate free vars to parent */
+    update_symbols(ste->ste_symbols, newscope, bound, newfree, ste->ste_type == ClassBlock);
+    PySet_Update(free, newfree);
+}
+```
+
+`analyze_block` is a post-order traversal: children are analyzed first, then the parent can see which names child scopes reference freely. This bottom-up propagation correctly handles `nonlocal` across multiple nesting levels.
+
+### `analyze_name`
+
+```c
+// CPython: Python/symtable.c:880 analyze_name
+static int
+analyze_name(PySTEntryObject *ste, PyObject *scopes, PyObject *name,
+             long flags, PyObject *bound, PyObject *local, PyObject *free,
+             PyObject *global)
+{
+    if (flags & DEF_GLOBAL) {
+        SET_SCOPE(scopes, name, GLOBAL_EXPLICIT);
+        PySet_Add(global, name);
+    } else if (flags & DEF_NONLOCAL) {
+        /* Find in enclosing scopes */
+        if (!PySet_Contains(bound, name)) {
+            PyErr_Format(PyExc_SyntaxError, "no binding for nonlocal '%U'", name);
+            return 0;
+        }
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);
+    } else if (flags & DEF_BOUND) {
+        SET_SCOPE(scopes, name, LOCAL);
+        PySet_Add(local, name);
+    } else if (PySet_Contains(global, name)) {
+        SET_SCOPE(scopes, name, GLOBAL_IMPLICIT);
+    } else if (PySet_Contains(bound, name)) {
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);
+    } else {
+        SET_SCOPE(scopes, name, GLOBAL_IMPLICIT);
+    }
+    return 1;
+}
+```
+
+The scope decision tree: explicit `global` beats `nonlocal` beats local binding beats enclosing-scope binding beats global-implicit (module level).
+
+### `analyze_cells`
+
+```c
+// CPython: Python/symtable.c:960 analyze_cells
+static int
+analyze_cells(PyObject *scopes, PyObject *free)
+{
+    /* For every name that is LOCAL and also appears in `free` (referenced by a child),
+       promote it to CELL */
+    PyObject *name;
+    Py_ssize_t pos = 0;
+    while (PySet_NextEntry(free, &pos, &name)) {
+        long scope = _PyST_GetScope(scopes, name);
+        if (scope == LOCAL) {
+            SET_SCOPE(scopes, name, CELL);
+        }
+    }
+}
+```
+
+If a name is bound locally and referenced freely by a nested function, it becomes a cell variable. The name appears in `co_cellvars`; the nested function lists it in `co_freevars`.
+
+## gopy notes
+
+`analyze_block` is in `compile/symtable.go` as `analyzeBlock`. `analyze_name` is `analyzeName`. `analyze_cells` promotes symbols to `ScopeCELL`. The sets are Go `map[string]struct{}` for `bound`, `free`, and `global`.

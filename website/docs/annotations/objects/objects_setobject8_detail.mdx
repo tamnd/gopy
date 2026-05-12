@@ -1,0 +1,115 @@
+---
+title: Objects/setobject.c (part 8)
+description: "Objects/setobject.c part 8: set.intersection, set.union, set.difference, set.symmetric_difference, in-place operators."
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/setobject.c" />
+
+This annotation covers set algebra. See `objects_setobject7_detail` for `set.__new__`, `add`, `discard`, `pop`, and the hash table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `set.union` (`\|`) | New set with all elements from both |
+| 81-160 | `set.intersection` (`&`) | New set with elements in both |
+| 161-240 | `set.difference` (`-`) | New set with elements only in self |
+| 241-320 | `set.symmetric_difference` (`^`) | Elements in one but not both |
+| 321-600 | In-place operators | `\|=`, `&=`, `-=`, `^=` via `set.update` family |
+
+## Reading
+
+### `set.union`
+
+```c
+// CPython: Objects/setobject.c:1680 set_or
+static PyObject *
+set_or(PySetObject *so, PyObject *other)
+{
+    if (!PyAnySet_Check(so) || !PyAnySet_Check(other))
+        Py_RETURN_NOTIMPLEMENTED;
+    PySetObject *result = (PySetObject *)set_copy(so, NULL);
+    if (result == NULL) return NULL;
+    if (set_update_internal(result, other) < 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return (PyObject *)result;
+}
+```
+
+`a | b` copies `a`, then adds all elements of `b`. `set.union(*others)` (the method form) iterates over multiple operands. The copy is a full shallow clone of the hash table.
+
+### `set.intersection`
+
+```c
+// CPython: Objects/setobject.c:1720 set_intersection
+static PyObject *
+set_intersection(PySetObject *so, PyObject *other)
+{
+    PySetObject *result = (PySetObject *)make_new_set(&PySet_Type, NULL);
+    if (result == NULL) return NULL;
+
+    if (PyAnySet_Check(other) && PySet_GET_SIZE(other) > PySet_GET_SIZE(so)) {
+        /* Iterate the smaller set */
+        return set_intersection(
+            (PySetObject *)other, (PyObject *)so);
+    }
+    PyObject *key, *it = PyObject_GetIter((PyObject *)so);
+    while ((key = PyIter_Next(it)) != NULL) {
+        int rv = set_contains_entry(
+            (PySetObject *)other, key, PyObject_Hash(key));
+        if (rv > 0) set_add_entry(result, key, hash);
+    }
+    return (PyObject *)result;
+}
+```
+
+`a & b` iterates the smaller set and tests each element against the larger. This O(min(|a|,|b|)) optimization avoids iterating both. For non-set iterables, the iterable is tested against `so`.
+
+### `set.difference`
+
+```c
+// CPython: Objects/setobject.c:1780 set_difference
+static PyObject *
+set_difference(PySetObject *so, PyObject *other)
+{
+    PySetObject *result = (PySetObject *)set_copy(so, NULL);
+    if (PyAnySet_Check(other)) {
+        return set_difference_update_internal(result, other);
+    }
+    PyObject *key, *it = PyObject_GetIter(other);
+    while ((key = PyIter_Next(it)) != NULL) {
+        set_discard_entry(result, key, PyObject_Hash(key));
+    }
+    return (PyObject *)result;
+}
+```
+
+`a - b` copies `a` then discards each element of `b`. For large `b` with small overlap, this is more efficient than building from scratch. `set_difference_update_internal` uses the slot iteration directly.
+
+### In-place operators
+
+```c
+// CPython: Objects/setobject.c:1860 set_ior
+static PyObject *
+set_ior(PySetObject *so, PyObject *other)
+{
+    if (!PyAnySet_Check(other)) Py_RETURN_NOTIMPLEMENTED;
+    if (set_update_internal(so, other) < 0) return NULL;
+    Py_INCREF(so);
+    return (PyObject *)so;
+}
+```
+
+`s |= t` modifies `s` in place. `set_update_internal` iterates `t` and inserts into `s`. The in-place operators return `so` (incremented) rather than a new set. `frozenset` does not support in-place operators.
+
+## gopy notes
+
+`set.union` is `objects.SetUnion` in `objects/set.go`. It copies the larger set and iterates the smaller. `set.intersection` checks `objects.SetContainsEntry` for each element. In-place operators mutate the `objects.Set` struct directly and return the same pointer.
