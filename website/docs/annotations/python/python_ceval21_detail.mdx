@@ -1,0 +1,111 @@
+---
+title: Python/ceval.c (part 21)
+description: "Python/ceval.c part 21: FOR_ITER specializations (LIST_REV_INT, RANGE_INT, TUPLE), SEND for generators, YIELD_VALUE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers iterator and generator opcodes. See `python_ceval20_detail` for comparison and conditional jump specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `FOR_ITER_LIST` | Iterate a list without calling `tp_iternext` |
+| 81-160 | `FOR_ITER_RANGE` | Iterate `range()` without creating an iterator object |
+| 161-260 | `FOR_ITER_TUPLE` | Iterate a tuple |
+| 261-380 | `SEND` | Send a value into a generator/coroutine (`yield from` / `await`) |
+| 381-500 | `YIELD_VALUE` | Suspend a generator and return a value |
+
+## Reading
+
+### `FOR_ITER_LIST`
+
+```c
+// CPython: Python/ceval.c:3020 FOR_ITER_LIST
+inst(FOR_ITER_LIST, (iter -- iter, next)) {
+    DEOPT_IF(Py_TYPE(iter) != &PyListIter_Type, FOR_ITER);
+    PyListIterObject *it = (PyListIterObject *)iter;
+    if (it->it_index >= PyList_GET_SIZE(it->it_seq)) {
+        /* Exhausted: pop iter, jump past the loop body */
+        Py_DECREF(iter);
+        JUMPBY(oparg + 1);
+        DISPATCH();
+    }
+    next = Py_NewRef(PyList_GET_ITEM(it->it_seq, it->it_index++));
+}
+```
+
+`for x in my_list:` specializes to `FOR_ITER_LIST`, bypassing `tp_iternext`. The index is incremented directly on the `PyListIterObject`. The specialization deoptimizes if the list is replaced mid-iteration (the size check catches this).
+
+### `FOR_ITER_RANGE`
+
+```c
+// CPython: Python/ceval.c:3100 FOR_ITER_RANGE
+inst(FOR_ITER_RANGE, (iter -- iter, next)) {
+    DEOPT_IF(Py_TYPE(iter) != &PyRangeIter_Type, FOR_ITER);
+    _PyRangeIterObject *r = (_PyRangeIterObject *)iter;
+    if (r->index >= r->len) {
+        Py_DECREF(iter);
+        JUMPBY(oparg + 1);
+        DISPATCH();
+    }
+    long value = (long)(r->start + r->step * r->index++);
+    next = PyLong_FromLong(value);
+}
+```
+
+`for i in range(n):` avoids creating an intermediate iterator object in some cases. The step-multiply computation uses `long` arithmetic and falls back to `PyLong_FromLong`. This is the hottest path in numeric loops.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:3240 SEND
+inst(SEND, (receiver, v -- receiver, retval)) {
+    /* Implement 'yield from' and 'await':
+       Try receiver.send(v) first (generator/coroutine protocol).
+       Fall back to next(receiver) if send returns NotImplemented. */
+    if (tstate->c_tracefunc == NULL) {
+        retval = PyIter_Send(receiver, v);
+    } else {
+        ...
+    }
+    if (retval == NULL) {
+        /* StopIteration or error — delegate to CLEANUP_THROW */
+        ...
+    }
+}
+```
+
+`yield from gen` compiles to `GET_ITER gen` + `SEND` in a loop. `PyIter_Send` calls `gen.send(value)` which resumes the inner generator at its last `YIELD_VALUE`.
+
+### `YIELD_VALUE`
+
+```c
+// CPython: Python/ceval.c:3380 YIELD_VALUE
+inst(YIELD_VALUE, (retval --)) {
+    /* Suspend the current generator:
+       1. Save the frame (already on the heap for generators)
+       2. Return retval to the caller of next()/send()
+       3. The frame will be resumed at the next instruction */
+    assert(frame->f_back != NULL);
+    PyGenObject *gen = _PyFrame_GetGenerator(frame);
+    gen->gi_frame_state = FRAME_SUSPENDED;
+    _PyFrame_SetStackPointer(frame, stack_pointer - 1);
+    tstate->current_frame = frame->previous;
+    frame->previous = NULL;
+    return retval;
+}
+```
+
+`YIELD_VALUE` does not allocate. Generator frames are heap-allocated when the generator is created. The frame pointer arithmetic and `current_frame` restore make generators zero-overhead relative to function calls.
+
+## gopy notes
+
+`FOR_ITER_LIST` is `vm.ForIterList` in `vm/eval_specialize.go`. `FOR_ITER_RANGE` is `vm.ForIterRange` using `objects.RangeIterator.Index`. `SEND` calls `objects.IterSend`. `YIELD_VALUE` sets `objects.GeneratorObject.FrameState = FrameSuspended` and returns the value to the `Send` caller.

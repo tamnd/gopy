@@ -1,0 +1,95 @@
+---
+title: Objects/genericaliasobject.c (part 2)
+description: "Objects/genericaliasobject.c part 2: GenericAlias.__getitem__, __instancecheck__, __subclasscheck__, __mro_entries__, __repr__."
+cpython_path: Objects/genericaliasobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genericaliasobject.c" />
+
+This annotation covers runtime type checking and nested parameterization. See `objects_genericalias_detail` for `Ga_new`, `__origin__`, `__args__`, and `list[int]` creation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `GenericAlias.__getitem__` | Further parameterize: `dict[str, list][int]` |
+| 81-180 | `__instancecheck__` | `isinstance(x, list[int])` — check origin type only |
+| 181-280 | `__subclasscheck__` | `issubclass(list, list[int])` — check origin |
+| 281-400 | `__mro_entries__` / `__repr__` | Class body resolution and display |
+
+## Reading
+
+### `GenericAlias.__getitem__`
+
+```c
+// CPython: Objects/genericaliasobject.c:380 ga_getitem
+static PyObject *
+ga_getitem(PyObject *self, PyObject *args)
+{
+    gaobject *alias = (gaobject *)self;
+    /* Substitute type variables: list[T][int] -> list[int] */
+    PyObject *new_args = _Py_subs_parameters(self, alias->args, alias->parameters, args);
+    return Py_GenericAlias(alias->origin, new_args);
+}
+```
+
+`list[T][int]` works when `T` is a `TypeVar`. `_Py_subs_parameters` replaces each `TypeVar` in `alias->args` with the corresponding concrete type from `args`. If no `TypeVar`s are present, subscripting a `GenericAlias` raises `TypeError`.
+
+### `__instancecheck__`
+
+```c
+// CPython: Objects/genericaliasobject.c:480 ga_instancecheck
+static PyObject *
+ga_instancecheck(PyObject *self, PyObject *instance)
+{
+    /* isinstance(x, list[int]) is equivalent to isinstance(x, list).
+       The type argument is NOT checked at runtime. */
+    gaobject *alias = (gaobject *)self;
+    int r = PyObject_IsInstance(instance, alias->origin);
+    return PyBool_FromLong(r);
+}
+```
+
+`isinstance([], list[int])` returns `True` for any list, regardless of element types. Python's generics are erased at runtime; type arguments exist only for static type checkers. A `DeprecationWarning` is raised to discourage this usage pattern.
+
+### `__mro_entries__`
+
+```c
+// CPython: Objects/genericaliasobject.c:540 ga_mro_entries
+static PyObject *
+ga_mro_entries(PyObject *self, PyObject *bases)
+{
+    /* When used as a base class: class MyList(list[int]): ...
+       Return the origin type so the MRO uses list, not list[int]. */
+    gaobject *alias = (gaobject *)self;
+    return PyTuple_Pack(1, alias->origin);
+}
+```
+
+`class MyList(list[int]): pass` is valid. `__mro_entries__` returns `(list,)` so the actual MRO uses `list` as the base. The type argument is recorded in `__orig_bases__` for introspection by `typing.get_type_hints`.
+
+### `__repr__`
+
+```c
+// CPython: Objects/genericaliasobject.c:280 ga_repr
+static PyObject *
+ga_repr(PyObject *self)
+{
+    gaobject *alias = (gaobject *)self;
+    /* Produce "list[int]" or "dict[str, list[int]]" */
+    PyObject *origin_repr = _PyObject_GetAttrId(alias->origin, &PyId___qualname__);
+    PyObject *args_repr = ... /* join with ", " */;
+    return PyUnicode_FromFormat("%U[%U]", origin_repr, args_repr);
+}
+```
+
+`repr(list[int])` produces `'list[int]'`. For nested aliases like `dict[str, list[int]]`, the inner alias `repr` is called recursively. `__qualname__` is used instead of `__name__` to correctly display nested classes.
+
+## gopy notes
+
+`GenericAlias.__getitem__` is `objects.GenericAliasGetItem` in `objects/generic_alias.go`. `__instancecheck__` delegates to `objects.IsInstance(instance, alias.Origin)`. `__mro_entries__` returns a single-element tuple containing the origin type. `__repr__` uses `objects.Repr` recursively on args.

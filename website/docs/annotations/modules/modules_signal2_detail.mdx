@@ -1,0 +1,97 @@
+---
+title: Modules/signalmodule.c (part 2)
+description: "Modules/signalmodule.c part 2: signal.signal, signal.raise_signal, signal handler invocation, wakeup fd, SIG_DFL/SIG_IGN."
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/signalmodule.c" />
+
+This annotation covers signal registration and delivery. See `modules_signal_detail` for `signal.getsignal`, `signal.alarm`, `signal.pause`, `SIGCHLD`, and the main thread restriction.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `signal.signal` | Register a Python handler for a Unix signal |
+| 101-220 | `signal_handler` | C-level trampoline called by the OS |
+| 221-360 | `_PyEval_SignalReceived` | Notify the eval loop that a signal is pending |
+| 361-480 | Wakeup fd | Write a byte to a pipe/socket on signal delivery |
+| 481-500 | `SIG_DFL` / `SIG_IGN` constants | Restore default or ignore |
+
+## Reading
+
+### `signal.signal`
+
+```c
+// CPython: Modules/signalmodule.c:560 signal_signal_impl
+static PyObject *
+signal_signal_impl(PyObject *module, int signalnum, PyObject *handler)
+{
+    /* Only the main thread can set signal handlers */
+    if (!_Py_IsMainThread() || !_Py_IsMainInterpreter(tstate)) {
+        PyErr_SetString(PyExc_ValueError,
+            "signal only works in main thread of the main interpreter");
+        return NULL;
+    }
+    PyObject *old_handler = Handlers[signalnum].func;
+    if (handler == IgnoreHandler) {
+        PyOS_setsig(signalnum, SIG_IGN);
+    } else if (handler == DefaultHandler) {
+        PyOS_setsig(signalnum, SIG_DFL);
+    } else {
+        /* Install the C trampoline */
+        PyOS_setsig(signalnum, signal_handler);
+    }
+    Handlers[signalnum].func = Py_NewRef(handler);
+    return old_handler;
+}
+```
+
+`signal.signal(signal.SIGINT, my_handler)` replaces the default `KeyboardInterrupt` handler. The C trampoline `signal_handler` is the actual OS handler; it just records that a signal arrived and notifies the eval loop.
+
+### `signal_handler` trampoline
+
+```c
+// CPython: Modules/signalmodule.c:280 signal_handler
+static void
+signal_handler(int sig_num)
+{
+    int save_errno = errno;
+    Handlers[sig_num].tripped = 1;
+    /* Notify the eval loop: set a flag in the thread state */
+    _PyEval_SignalReceived(tstate);
+    /* Write to wakeup fd if set (for select/poll loops) */
+    if (wakeup.fd != INVALID_FD) {
+        unsigned char byte = (unsigned char)sig_num;
+        (void)write(wakeup.fd, &byte, 1);
+    }
+    errno = save_errno;
+}
+```
+
+The C handler does the minimum safe work: set an int flag (async-signal-safe), poke the eval loop, and write one byte to the wakeup fd. Python code runs later when `_PyEval_MakePendingCalls` is called at a safe point.
+
+### `_PyEval_SignalReceived`
+
+```c
+// CPython: Python/ceval.c:220 _PyEval_SignalReceived
+void
+_PyEval_SignalReceived(PyThreadState *tstate)
+{
+    /* Set eval_breaker so the eval loop checks pending calls at the next
+       opcode boundary. */
+    _Py_atomic_store_relaxed(&tstate->eval_breaker, 1);
+    _Py_atomic_store_relaxed(&tstate->pending_calls_to_do, 1);
+}
+```
+
+`eval_breaker` is checked by the eval loop after every `N` instructions (default 100, controlled by `sys.setswitchinterval`). When set, the loop calls `_PyEval_EvalFrameDefault`'s `check_eval_breaker` which dispatches pending calls including signal handlers.
+
+## gopy notes
+
+`signal.signal` is `module/signal.Signal` in `module/signal/module.go`. The C trampoline is replaced by a Go channel write: `signalCh <- sigNum`. `_PyEval_SignalReceived` sets `vm.EvalBreaker` via an atomic store. The eval loop reads the channel in `vm.CheckPendingSignals`.

@@ -1,0 +1,132 @@
+---
+title: Python/Python-ast.c (part 3)
+description: "Python/Python-ast.c part 3: AST validator, ast.fix_missing_locations, ast.NodeVisitor, ast.NodeTransformer."
+cpython_path: Python/Python-ast.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/Python-ast.c" />
+
+This annotation covers AST traversal and validation. See `python_ast2_detail` for `ast.parse`, `compile`, and the generated AST node hierarchy, and `python_ast_detail` for the C struct layout and `_PyAST_Validate`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_PyAST_Validate` | Structural validation before compilation |
+| 101-220 | `ast.fix_missing_locations` | Fill in `lineno`/`col_offset` for synthesized nodes |
+| 221-360 | `ast.NodeVisitor` | Dispatch `visit_*` methods by node class name |
+| 361-500 | `ast.NodeTransformer` | Like NodeVisitor but rebuilds the tree |
+
+## Reading
+
+### `_PyAST_Validate`
+
+```c
+// CPython: Python/Python-ast.c:480 validate_expr
+static int
+validate_expr(struct validator *state, expr_ty exp, expr_context_ty ctx)
+{
+    /* Recursively validate the expression tree.
+       Checks: correct ctx (Load/Store/Del), non-empty sequences,
+       valid operator kinds, etc. */
+    switch (exp->kind) {
+    case BinOp_kind:
+        return validate_expr(state, exp->v.BinOp.left, Load) &&
+               validate_expr(state, exp->v.BinOp.right, Load);
+    case Starred_kind:
+        if (ctx == Load) {
+            PyErr_SetString(PyExc_ValueError,
+                "Starred expressions are not allowed in load context");
+            return 0;
+        }
+        return validate_expr(state, exp->v.Starred.value, ctx);
+    ...
+    }
+}
+```
+
+`_PyAST_Validate` is called by `compile()` before `symtable` analysis. It catches impossible trees that can be constructed with the `ast` module: `ast.Name(id='x', ctx=ast.Store())` as an expression, or an empty `ast.FunctionDef.body`.
+
+### `ast.fix_missing_locations`
+
+```python
+# CPython: Lib/ast.py:220 fix_missing_locations
+def fix_missing_locations(node):
+    """Recursively set lineno and col_offset on nodes that lack them."""
+    def _fix(node, lineno, col_offset, end_lineno, end_col_offset):
+        if 'lineno' in node._attributes:
+            if not hasattr(node, 'lineno'):
+                node.lineno = lineno
+            else:
+                lineno = node.lineno
+        ...
+        for child in ast.iter_child_nodes(node):
+            _fix(child, lineno, col_offset, end_lineno, end_col_offset)
+    _fix(node, 1, 0, 1, 0)
+    return node
+```
+
+When building AST nodes programmatically (e.g., for metaprogramming or code generation), you must set `lineno` and `col_offset` on every node or `compile()` will raise. `fix_missing_locations` propagates the parent's location to children that lack one.
+
+### `ast.NodeVisitor`
+
+```python
+# CPython: Lib/ast.py:400 NodeVisitor
+class NodeVisitor:
+    """Walk the AST and call visitor_* for each node type."""
+    def visit(self, node):
+        method = 'visit_' + node.__class__.__name__
+        visitor = getattr(self, method, self.generic_visit)
+        return visitor(node)
+
+    def generic_visit(self, node):
+        """Called if no specific visitor exists. Visits child nodes."""
+        for field, value in ast.iter_fields(node):
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, AST):
+                        self.visit(item)
+            elif isinstance(value, AST):
+                self.visit(value)
+```
+
+`NodeVisitor` is the base for `ast.NodeTransformer`, `compile.SymtableVisitor`, and user-defined AST passes. `visit_FunctionDef` is called for every `def` statement. If no `visit_X` method is defined, `generic_visit` recurses into children.
+
+### `ast.NodeTransformer`
+
+```python
+# CPython: Lib/ast.py:480 NodeTransformer
+class NodeTransformer(NodeVisitor):
+    """Like NodeVisitor, but visitor methods may return a node to replace."""
+    def generic_visit(self, node):
+        for field, old_value in ast.iter_fields(node):
+            if isinstance(old_value, list):
+                new_values = []
+                for item in old_value:
+                    if isinstance(item, AST):
+                        value = self.visit(item)
+                        if value is None: continue
+                        elif not isinstance(value, AST):
+                            new_values.extend(value)
+                            continue
+                    new_values.append(value)
+                old_value[:] = new_values
+            elif isinstance(old_value, AST):
+                new_value = self.visit(old_value)
+                if new_value is None:
+                    delattr(node, field)
+                else:
+                    setattr(node, field, new_value)
+        return node
+```
+
+A `visit_*` method returning `None` removes the node; returning a list replaces it with multiple nodes (useful for statement-level transformations). This is how code coverage tools (like `coverage.py`) instrument branches: by replacing `If` nodes.
+
+## gopy notes
+
+`_PyAST_Validate` is `compile.ValidateAST` in `compile/validate.go`. `fix_missing_locations` is `module/ast.FixMissingLocations`. `NodeVisitor` and `NodeTransformer` are implemented as Go interfaces in `compile/visitor.go` with a `Visit(node)` method and a default `GenericVisit` traversal.

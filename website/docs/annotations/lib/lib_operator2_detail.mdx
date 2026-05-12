@@ -1,0 +1,120 @@
+---
+title: Lib/operator.py (part 2)
+description: "Lib/operator.py part 2: operator.attrgetter, itemgetter, methodcaller, iadd/imul, operator.length_hint."
+cpython_path: Lib/operator.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/operator.py" />
+
+This annotation covers callable factories and in-place operators. See `lib_operator_detail` for simple operators (`add`, `sub`, `mul`, `truediv`, etc.) and comparison operators.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `attrgetter` | Callable that retrieves named attributes (supports dotted names) |
+| 81-180 | `itemgetter` | Callable that retrieves items by index/key |
+| 181-260 | `methodcaller` | Callable that calls a named method with fixed args |
+| 261-340 | In-place operators | `iadd`, `isub`, `imul`, `itruediv`, etc. |
+| 341-400 | `length_hint` | Estimate length using `__len__` or `__length_hint__` |
+
+## Reading
+
+### `attrgetter`
+
+```python
+# CPython: Lib/operator.py:160 attrgetter
+class attrgetter:
+    """Return a callable object that fetches the given attribute(s).
+       After f = attrgetter('name'), the call f(r) returns r.name.
+       After g = attrgetter('name', 'date'), the call g(r) returns (r.name, r.date).
+       After h = attrgetter('name.first', 'name.last'), the call h(r) returns
+       (r.name.first, r.name.last)."""
+    __slots__ = ('_attrs', '_call')
+    def __init__(self, attr, *attrs):
+        if not attrs:
+            if not isinstance(attr, str):
+                raise TypeError(...)
+            self._attrs = (attr,)
+            names = attr.split('.')
+            def func(obj):
+                for name in names:
+                    obj = getattr(obj, name)
+                return obj
+            self._call = func
+        else:
+            ...
+```
+
+`attrgetter('a.b.c')` is equivalent to `lambda x: x.a.b.c`. Used with `sorted` and `min`/`max`: `sorted(objs, key=attrgetter('date'))`. The C accelerator in `_operator` avoids the Python overhead.
+
+### `itemgetter`
+
+```python
+# CPython: Lib/operator.py:200 itemgetter
+class itemgetter:
+    """Return a callable that fetches item(s) from its operand using __getitem__.
+       After f = itemgetter(2), the call f(r) returns r[2].
+       After g = itemgetter(2, 5, 3), the call g(r) returns (r[2], r[5], r[3])."""
+    __slots__ = ('_items', '_call')
+    def __init__(self, item, *items):
+        if not items:
+            self._items = (item,)
+            def func(obj): return obj[item]
+            self._call = func
+        else:
+            self._items = items = (item,) + items
+            def func(obj): return tuple(obj[i] for i in items)
+            self._call = func
+```
+
+`sorted(rows, key=itemgetter(1))` sorts by the second column. `itemgetter(0, 2)` extracts two fields as a tuple. Used extensively with `itertools.groupby`.
+
+### `methodcaller`
+
+```python
+# CPython: Lib/operator.py:248 methodcaller
+class methodcaller:
+    """Return a callable that calls method 'name' with optional args/kwargs."""
+    __slots__ = ('_name', '_args', '_kwargs')
+    def __init__(self, name, /, *args, **kwargs):
+        self.__name = name
+        if not isinstance(self.__name, str):
+            raise TypeError(...)
+        self.__args = args
+        self.__kwargs = kwargs
+    def __call__(self, obj):
+        return getattr(obj, self.__name)(*self.__args, **self.__kwargs)
+```
+
+`methodcaller('strip', '-')(s)` is equivalent to `s.strip('-')`. Useful for `map`: `list(map(methodcaller('upper'), words))`.
+
+### `length_hint`
+
+```python
+# CPython: Lib/operator.py:370 length_hint
+def length_hint(obj, default=0):
+    """Return an estimate of the number of items in obj."""
+    if isinstance(obj, Sized):
+        return len(obj)
+    hint = getattr(type(obj), '__length_hint__', None)
+    if hint is None:
+        return default
+    val = hint(obj)
+    if val is NotImplemented:
+        return default
+    if not isinstance(val, int) or val < 0:
+        raise TypeError(...)
+    return val
+```
+
+`length_hint` is used by CPython's `list()` and `bytearray()` constructors to pre-allocate storage when the exact length is unknown. Iterators implement `__length_hint__` to provide an estimate.
+
+## gopy notes
+
+`attrgetter`, `itemgetter`, and `methodcaller` are `objects.AttrGetter`, `objects.ItemGetter`, `objects.MethodCaller` in `objects/operator.go`. The dotted-name split for `attrgetter` is done at construction time. `length_hint` is `objects.LengthHint` which checks `__len__` then `__length_hint__` via `objects.TypeLookup`.

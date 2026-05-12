@@ -1,0 +1,94 @@
+---
+title: Objects/unionobject.c (part 2)
+description: "Objects/unionobject.c part 2: UnionType.__instancecheck__, __subclasscheck__, __or__, __repr__, __args__ flattening."
+cpython_path: Objects/unionobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unionobject.c" />
+
+This annotation covers runtime use of `X | Y` union types. See `objects_uniontype_detail` for `union_new`, `__origin__`, deduplication, and `int | None` creation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `UnionType.__instancecheck__` | `isinstance(x, int | str)` — check each arm |
+| 81-180 | `UnionType.__subclasscheck__` | `issubclass(bool, int | str)` |
+| 181-280 | `UnionType.__or__` | `(int | str) | float` — flatten and deduplicate |
+| 281-400 | `__repr__` / `__args__` | Display and argument access |
+
+## Reading
+
+### `__instancecheck__`
+
+```c
+// CPython: Objects/unionobject.c:280 union_instancecheck
+static PyObject *
+union_instancecheck(PyObject *self, PyObject *instance)
+{
+    unionobject *alias = (unionobject *)self;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(alias->args);
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        PyObject *arg = PyTuple_GET_ITEM(alias->args, i);
+        int res = PyObject_IsInstance(instance, arg);
+        if (res < 0) return NULL;
+        if (res) Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+```
+
+`isinstance(x, int | str)` is equivalent to `isinstance(x, (int, str))`. The check iterates over `__args__`. `None` in a union (`int | None`) is represented as `type(None)` in `__args__`, so `isinstance(None, int | None)` checks against `NoneType`.
+
+### `UnionType.__or__`
+
+```c
+// CPython: Objects/unionobject.c:180 union_or
+static PyObject *
+union_or(PyObject *self, PyObject *other)
+{
+    /* Flatten: (int | str) | float -> int | str | float
+       Not (int | str) | float (nested union) */
+    PyObject *args = PyTuple_New(...);
+    /* Copy args from self */
+    unionobject *u = (unionobject *)self;
+    for (int i = 0; i < PyTuple_GET_SIZE(u->args); i++) {
+        PyTuple_SET_ITEM(args, i, Py_NewRef(PyTuple_GET_ITEM(u->args, i)));
+    }
+    /* Append other (or flatten if other is also a UnionType) */
+    ...
+    return make_union(args);
+}
+```
+
+`(int | str) | float` produces `int | str | float`, not `(int | str) | float`. Unions are always flat. Deduplication is also applied: `int | int` produces `int`.
+
+### `__repr__`
+
+```c
+// CPython: Objects/unionobject.c:380 union_repr
+static PyObject *
+union_repr(PyObject *self)
+{
+    unionobject *alias = (unionobject *)self;
+    /* Join __args__ with " | " */
+    PyObject *pieces = PyList_New(PyTuple_GET_SIZE(alias->args));
+    for (int i = 0; i < PyTuple_GET_SIZE(alias->args); i++) {
+        PyObject *arg = PyTuple_GET_ITEM(alias->args, i);
+        PyObject *repr = _PyObject_GetAttrId(arg, &PyId___qualname__);
+        PyList_SET_ITEM(pieces, i, repr);
+    }
+    return PyUnicode_Join(_Py_PIPE_SPACE, pieces);
+}
+```
+
+`repr(int | str | None)` produces `'int | str | None'`. `NoneType` is special-cased to display as `None` for readability.
+
+## gopy notes
+
+`UnionType.__instancecheck__` is `objects.UnionTypeInstanceCheck` in `objects/union_type.go`. `UnionType.__or__` calls `objects.MakeUnion` which deduplicates using a set of type IDs. `__repr__` joins the arg repr strings with `" | "`. The `__args__` tuple is stored as `objects.UnionType.Args []PyObject`.

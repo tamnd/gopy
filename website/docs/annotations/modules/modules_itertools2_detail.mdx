@@ -1,0 +1,117 @@
+---
+title: Modules/itertoolsmodule.c (part 2)
+description: "Modules/itertoolsmodule.c part 2: itertools.groupby, itertools.zip_longest, itertools.product, itertools.combinations, itertools.permutations."
+cpython_path: Modules/itertoolsmodule.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/itertoolsmodule.c" />
+
+This annotation covers combinatoric and grouping iterators. See `modules_itertools_detail` for `chain`, `islice`, `count`, `cycle`, `repeat`, `starmap`, `takewhile`, `dropwhile`, `filterfalse`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `groupby` | Group consecutive elements by a key function |
+| 101-220 | `zip_longest` | Zip with a fillvalue for exhausted iterators |
+| 221-380 | `product` | Cartesian product of input iterables |
+| 381-520 | `combinations` | r-length combinations without repetition |
+| 521-700 | `permutations` | r-length permutations |
+
+## Reading
+
+### `groupby`
+
+```c
+// CPython: Modules/itertoolsmodule.c:2120 groupby_next
+static PyObject *
+groupby_next(groupbyobject *lz)
+{
+    /* Advance until the key changes.
+       The current group iterator shares state with groupby:
+       calling next(group) advances lz->tgtkey. */
+    if (lz->currkey == NULL || lz->keycompare(lz->currkey, lz->tgtkey) != 0) {
+        /* New group: update currkey and return (key, group_iterator) */
+        PyObject *newkey = PyObject_CallOneArg(lz->keyfunc, lz->currvalue);
+        Py_XDECREF(lz->currkey);
+        lz->currkey = newkey;
+        lz->grouper = grouper_new(lz, newkey);
+        return PyTuple_Pack(2, newkey, lz->grouper);
+    }
+    ...
+}
+```
+
+`groupby` yields `(key, group)` pairs. The `group` iterator is lazy: it advances the underlying iterator. Importantly, consuming the next `(key, group)` pair invalidates the previous group. This is why `{k: list(g) for k, g in groupby(data, key)}` works but storing the group iterator directly does not.
+
+### `zip_longest`
+
+```c
+// CPython: Modules/itertoolsmodule.c:2580 zip_longest_next
+static PyObject *
+zip_longest_next(ziplongestobject *lz)
+{
+    PyObject *result = PyTuple_New(lz->tuplesize);
+    int numactive = lz->numactive;
+    for (int i = 0; i < lz->tuplesize; i++) {
+        PyObject *it = PyTuple_GET_ITEM(lz->ittuple, i);
+        PyObject *item;
+        if (it == Py_None) {
+            item = Py_NewRef(lz->fillvalue);
+        } else {
+            item = (*Py_TYPE(it)->tp_iternext)(it);
+            if (item == NULL) {
+                if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                    PyErr_Clear();
+                    /* Replace exhausted iterator with None */
+                    PyTuple_SET_ITEM(lz->ittuple, i, Py_None);
+                    numactive--;
+                    item = Py_NewRef(lz->fillvalue);
+                }
+            }
+        }
+        PyTuple_SET_ITEM(result, i, item);
+    }
+    if (numactive == 0) {
+        Py_DECREF(result);
+        return NULL;  /* All exhausted */
+    }
+    return result;
+}
+```
+
+`zip_longest([1,2], [3], fillvalue=0)` yields `(1,3)` then `(2,0)`. Exhausted iterators are replaced with `Py_None` in the internal tuple and the fill value is used thereafter.
+
+### `product`
+
+```c
+// CPython: Modules/itertoolsmodule.c:2820 product_next
+static PyObject *
+product_next(productobject *lz)
+{
+    /* Maintain indices[] into each pool.
+       Each call: increment rightmost index, carry left if needed. */
+    Py_ssize_t n = PyTuple_GET_SIZE(lz->pools);
+    for (Py_ssize_t i = n - 1; i >= 0; i--) {
+        lz->indices[i]++;
+        PyObject *pool = PyTuple_GET_ITEM(lz->pools, i);
+        if (lz->indices[i] == PyTuple_GET_SIZE(pool)) {
+            lz->indices[i] = 0;
+        } else {
+            return _product_make_tuple(lz);
+        }
+    }
+    return NULL;  /* All combinations exhausted */
+}
+```
+
+`product('AB', range(3))` yields `('A',0), ('A',1), ('A',2), ('B',0), ...`. The `indices[]` array works like a mixed-radix counter. All inputs are materialized into tuples upfront.
+
+## gopy notes
+
+`groupby` is `objects.GroupBy` in `objects/itertools.go`. The key comparison uses `objects.RichCompare(EQ)`. `zip_longest` tracks active iterators with a count. `product` stores pool tuples and an index array. `combinations` and `permutations` use index arrays with backtracking.
