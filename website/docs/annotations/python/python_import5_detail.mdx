@@ -1,0 +1,100 @@
+---
+title: Python/import.c (part 5)
+description: "Python/import.c part 5: _PyImport_LoadDynamicModuleWithSpec, _Py_InitModule, extension module caching, multi-phase init."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+This annotation covers C extension module loading. See `python_import4_detail` for `sys.modules` lookup, finders, loaders, and `importlib._bootstrap`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_PyImport_LoadDynamicModuleWithSpec` | Load a `.so`/`.pyd` file and call `PyInit_modname` |
+| 101-220 | `_Py_InitModule` | Initialize a legacy single-phase extension |
+| 221-360 | Multi-phase init | `Py_mod_create` + `Py_mod_exec` hooks (PEP 451) |
+| 361-480 | Extension module cache | `sys.modules` + per-interpreter `_PyImport_ExtensionMap` |
+| 481-500 | `import_get_module` | Fast path: look up `sys.modules` without the import lock |
+
+## Reading
+
+### `_PyImport_LoadDynamicModuleWithSpec`
+
+```c
+// CPython: Python/import.c:1280 _PyImport_LoadDynamicModuleWithSpec
+PyObject *
+_PyImport_LoadDynamicModuleWithSpec(PyObject *spec, FILE *fp)
+{
+    const char *name_str = PyUnicode_AsUTF8(spec->name);
+    /* Load the shared library */
+    void *handle = _PyImport_FindSharedFuncptr(name_str, ...);
+    /* Find PyInit_<name> */
+    PyObject *(*initfunc)(void) = dlsym(handle, init_funcname);
+    if (initfunc == NULL) {
+        PyErr_Format(PyExc_ImportError, "dynamic module does not define ...");
+        return NULL;
+    }
+    PyObject *m = (*initfunc)();
+    /* Handle multi-phase vs single-phase init */
+    if (Py_IS_TYPE(m, &PyModuleDef_Type)) {
+        return _PyImport_LoadMultiPhaseModule(spec, m);
+    }
+    return m;
+}
+```
+
+`import _json` calls this to load `_json.cpython-314-x86_64.so`. The `PyInit__json` symbol is found via `dlsym`. Single-phase: returns a `PyModule` directly. Multi-phase (PEP 451): returns a `PyModuleDef`.
+
+### Multi-phase init
+
+```c
+// CPython: Python/import.c:1380 _PyImport_LoadMultiPhaseModule
+static PyObject *
+_PyImport_LoadMultiPhaseModule(PyObject *spec, PyObject *def_obj)
+{
+    PyModuleDef *def = (PyModuleDef *)def_obj;
+    /* Phase 1: Py_mod_create — module object creation */
+    PyObject *m = NULL;
+    for each slot in def->m_slots:
+        if (slot.slot == Py_mod_create) m = slot.value(spec, def);
+    if (m == NULL) m = PyModule_NewObject(spec->name);
+    /* Phase 2: Py_mod_exec — module initialization */
+    for each slot in def->m_slots:
+        if (slot.slot == Py_mod_exec) slot.value(m);
+    return m;
+}
+```
+
+Multi-phase init separates module object creation from initialization. This allows the module to be placed in `sys.modules` before `exec` runs, preventing infinite import loops. Required for proper subinterpreter support.
+
+### Extension module caching
+
+```c
+// CPython: Python/import.c:1580 import_find_extension
+PyObject *
+import_find_extension(PyThreadState *tstate, PyObject *name, PyObject *path)
+{
+    /* Check if this extension is already loaded in this interpreter.
+       Key is (name, path) to handle reloads from different paths. */
+    PyObject *dict = IMPORTLIB(tstate)->_extensions;
+    PyObject *key = PyTuple_Pack(2, name, path);
+    PyObject *mod = PyDict_GetItem(dict, key);
+    if (mod != NULL && _PyImport_CheckSubinterpIncompatibleExtensionAllowed(name)) {
+        ...
+    }
+    return mod;
+}
+```
+
+Extension modules are cached per-interpreter by `(name, path)`. Re-importing the same `.so` returns the cached module without re-calling `PyInit_`. Single-phase extensions are shared across interpreters; multi-phase extensions can have per-interpreter state.
+
+## gopy notes
+
+`_PyImport_LoadDynamicModuleWithSpec` is not applicable in gopy (no shared library loading). Extension modules are statically registered in `stdlibinit/registry.go`. Multi-phase init is simulated by the registry's `CreateModule` and `ExecModule` function pairs. Extension cache is `vm.ImportState.Extensions` map.

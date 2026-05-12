@@ -375,6 +375,8 @@ const sidebars = {
         'annotations/python/python_symtable4_detail',
         'annotations/python/python_ceval27_detail',
         'annotations/python/python_compile6_detail',
+        'annotations/python/python_ceval28_detail',
+        'annotations/python/python_import5_detail',
       ],
     },
     {
@@ -620,6 +622,8 @@ const sidebars = {
         'annotations/objects/objects_dictobject6_detail',
         'annotations/objects/objects_typeobject5_detail',
         'annotations/objects/objects_descrobject6_detail',
+        'annotations/objects/objects_setobject4_detail',
+        'annotations/objects/objects_tupleobject5_detail',
       ],
     },
     {
@@ -1731,6 +1735,9 @@ const sidebars = {
         'annotations/lib/lib_cmath2_detail',
         'annotations/lib/lib_contextlib3_detail',
         'annotations/lib/lib_pathlib3_detail',
+        'annotations/lib/lib_decimal3_detail',
+        'annotations/lib/lib_fractions3_detail',
+        'annotations/lib/lib_numbers2_detail',
       ],
     },
   ],

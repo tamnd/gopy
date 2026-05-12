@@ -1,0 +1,78 @@
+---
+title: Lib/numbers.py (part 2)
+description: "Lib/numbers.py part 2: Number ABC hierarchy, Integral.__index__, Real.__trunc__, Complex.__abs__, abstract method registry."
+cpython_path: Lib/numbers.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/numbers.py" />
+
+This annotation covers the numeric tower and abstract method obligations. See `lib_numbers_detail` for `Number`, `Complex`, `Real`, `Rational`, `Integral` class hierarchy.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Integral.__index__` | Required for use as a sequence index |
+| 81-160 | `Real.__trunc__` | Truncate towards zero; required for `math.trunc` |
+| 161-220 | `Complex.__abs__` | Modulus; required for `abs()` |
+| 221-300 | Type registrations | Built-in types registered as `Number` subtypes |
+
+## Reading
+
+### `Integral.__index__`
+
+```python
+# CPython: Lib/numbers.py:380 Integral.__index__
+class Integral(Rational):
+    @abstractmethod
+    def __index__(self):
+        """Convert self to an int for sequence indexing."""
+
+# Registration at module bottom:
+Integral.register(int)
+```
+
+`__index__` is called by `operator.index`, list slicing, and array indexing. Custom integer types must implement it to be usable as indices. `bool` inherits `__index__` from `int` (returns 0 or 1).
+
+### `Real.__trunc__`
+
+```python
+# CPython: Lib/numbers.py:280 Real.__trunc__
+class Real(Complex):
+    @abstractmethod
+    def __trunc__(self):
+        """Truncate toward zero. Used by math.trunc()."""
+    @abstractmethod
+    def __floor__(self):
+        """Round down. Used by math.floor()."""
+    @abstractmethod
+    def __ceil__(self):
+        """Round up. Used by math.ceil()."""
+    @abstractmethod
+    def __round__(self, ndigits=None):
+        """Round to ndigits decimal places."""
+```
+
+`math.trunc(x)` calls `x.__trunc__()`. `math.floor(x)` calls `x.__floor__()`. These abstract methods define the minimal interface for a type to participate in rounding operations.
+
+### Type registrations
+
+```python
+# CPython: Lib/numbers.py:420 built-in registrations
+Complex.register(complex)
+Real.register(float)
+Rational.register(Fraction)  # from fractions module
+Integral.register(int)
+Integral.register(bool)  # bool is a subclass of int but also registered
+```
+
+The registrations make `isinstance(1, numbers.Integral)` return `True`. `isinstance(1.5, numbers.Real)` returns `True`. These are used by libraries like `numpy` and `sympy` to accept any numeric type.
+
+## gopy notes
+
+`numbers.Integral` is `objects.NumbersIntegral` in `objects/numbers.go`. Built-in registrations are in `objects/numbers_register.go`. `__index__` is called by `objects.OperatorIndex` which checks for `__index__` then `__int__`. `Real.__trunc__` is called by `module/math.Trunc`.

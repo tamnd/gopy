@@ -1,0 +1,73 @@
+---
+title: Lib/fractions.py (part 3)
+description: "Lib/fractions.py part 3: Fraction.__add__, Fraction.__mul__, Fraction.__truediv__, Fraction.limit_denominator."
+cpython_path: Lib/fractions.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/fractions.py" />
+
+This annotation covers fraction arithmetic. See `lib_fractions2_detail` for `Fraction.__new__`, `__repr__`, `__float__`, and `Fraction.from_decimal`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Fraction.__add__` | `a/b + c/d = (ad + bc) / bd`, then reduce |
+| 101-220 | `Fraction.__mul__` | `a/b * c/d = ac / bd`, cross-reduce first |
+| 221-340 | `Fraction.__truediv__` | `(a/b) / (c/d) = ad / bc` |
+| 341-500 | `Fraction.limit_denominator` | Best rational approximation |
+
+## Reading
+
+### `Fraction.__add__`
+
+```python
+# CPython: Lib/fractions.py:480 Fraction.__add__
+def _add(a, b):
+    """a + b as a Fraction."""
+    na, da = a.numerator, a.denominator
+    nb, db = b.numerator, b.denominator
+    g = math.gcd(da, db)
+    if g == 1:
+        return Fraction(na * db + nb * da, da * db, _normalize=False)
+    s = da // g  # da / gcd
+    t = na * (db // g) + nb * s
+    g2 = math.gcd(t, g)
+    return Fraction(t // g2, s * (db // g2), _normalize=False)
+```
+
+The Lehmer-Euclidean GCD shortcut avoids computing `da * db` when `gcd(da, db) > 1`, reducing intermediate integer sizes. `Fraction(1, 6) + Fraction(1, 4)` computes via gcd(6,4)=2: result is `Fraction(5, 12)`.
+
+### `Fraction.limit_denominator`
+
+```python
+# CPython: Lib/fractions.py:680 limit_denominator
+def limit_denominator(self, max_denominator=10**6):
+    """Return closest Fraction with denominator <= max_denominator."""
+    if max_denominator < 1:
+        raise ValueError("max_denominator should be at least 1")
+    if self.denominator <= max_denominator:
+        return Fraction(self)
+    # Stern-Brocot tree / mediants algorithm
+    p0, q0, p1, q1 = 0, 1, 1, 0
+    n, d = self.numerator, self.denominator
+    while True:
+        a = n // d
+        q2 = q0 + a * q1
+        if q2 > max_denominator: break
+        p0, q0, p1, q1 = p1, q1, p0 + a * p1, q2
+        n, d = d, n - a * d
+    ...
+    return max((p0, q0), (p1, q1), key=lambda r: -abs(self - Fraction(*r)))
+```
+
+`Fraction(math.pi).limit_denominator(100)` returns `Fraction(311, 99)`, the best approximation to pi with denominator at most 100. Uses the Stern-Brocot tree for efficient search.
+
+## gopy notes
+
+`Fraction.__add__` is `module/fractions.FractionAdd` in `module/fractions/module.go`. It uses `math/big.Int` for numerator and denominator. The GCD optimization uses `big.Int.GCD`. `limit_denominator` is `module/fractions.LimitDenominator` implementing the Stern-Brocot algorithm with `big.Int` arithmetic.

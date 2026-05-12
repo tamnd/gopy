@@ -1,0 +1,101 @@
+---
+title: Objects/setobject.c (part 4)
+description: "Objects/setobject.c part 4: set.intersection, set.union, set.difference, set.symmetric_difference, set.issubset."
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/setobject.c" />
+
+This annotation covers set algebra. See `objects_setobject3_detail` for `set.add`, `set.discard`, `set.pop`, hash table layout, and collision handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `set.intersection` | `s & t` — elements in both sets |
+| 81-180 | `set.union` | `s | t` — elements in either set |
+| 181-280 | `set.difference` | `s - t` — elements in s not in t |
+| 281-380 | `set.symmetric_difference` | `s ^ t` — elements in exactly one set |
+| 381-500 | `set.issubset` / `issuperset` | Subset/superset tests |
+
+## Reading
+
+### `set.intersection`
+
+```c
+// CPython: Objects/setobject.c:1480 set_intersection
+static PyObject *
+set_intersection(PySetObject *so, PyObject *other)
+{
+    /* Iterate over the smaller set; check membership in the larger. */
+    PySetObject *result = (PySetObject *)PySet_New(NULL);
+    if (PySet_GET_SIZE(so) > PyObject_Size(other)) {
+        /* Swap: iterate over other, check in so */
+        return set_intersection((PySetObject *)tmp, (PyObject *)so);
+    }
+    PyObject *key, *hash;
+    Py_ssize_t pos = 0;
+    while (set_next(so, &pos, &entry)) {
+        if (set_contains_entry(other, entry->key, entry->hash)) {
+            set_add_entry(result, entry->key, entry->hash);
+        }
+    }
+    return (PyObject *)result;
+}
+```
+
+The smaller set is iterated; each element is tested against the larger set. For `s & t` where `|s| << |t|`, this avoids iterating all of `t`. Uses cached hash values from `setentry.hash` to avoid recomputing.
+
+### `set.symmetric_difference`
+
+```c
+// CPython: Objects/setobject.c:1680 set_symmetric_difference
+static PyObject *
+set_symmetric_difference(PySetObject *so, PyObject *other)
+{
+    /* result = (so | other) - (so & other)
+       Equivalently: elements in exactly one of so, other. */
+    PyObject *result = PySet_New((PyObject *)so);
+    PyObject *it = PyObject_GetIter(other);
+    while ((item = PyIter_Next(it)) != NULL) {
+        if (set_contains_key(result, item)) {
+            set_discard_key(result, item);
+        } else {
+            set_add_key(result, item);
+        }
+    }
+    return result;
+}
+```
+
+Start with a copy of `so`, then for each item in `other`: if already in the result, remove it; otherwise add it. O(|so| + |other|).
+
+### `set.issubset`
+
+```c
+// CPython: Objects/setobject.c:1820 set_issubset
+static PyObject *
+set_issubset(PySetObject *so, PyObject *other)
+{
+    /* s <= t: every element of s is in t */
+    if (PySet_GET_SIZE(so) > PyObject_Size(other)) Py_RETURN_FALSE;
+    PyObject *key;
+    Py_ssize_t pos = 0;
+    while (set_next(so, &pos, &entry)) {
+        if (!set_contains_entry(other, entry->key, entry->hash))
+            Py_RETURN_FALSE;
+    }
+    Py_RETURN_TRUE;
+}
+```
+
+The size check is an O(1) optimization: if `|so| > |other|`, `so` cannot be a subset. Then each element of `so` is checked in `other`.
+
+## gopy notes
+
+`set.intersection` is `objects.SetIntersection` in `objects/set.go`. It iterates the smaller set and calls `objects.SetContainsEntry`. `set.union` uses `objects.SetUpdate` on a copy. `set.difference` copies the first set then calls `objects.SetDiscardKey` for each item in the second. `set.issubset` uses the same size optimization.

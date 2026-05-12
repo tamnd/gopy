@@ -1,0 +1,86 @@
+---
+title: Objects/tupleobject.c (part 5)
+description: "Objects/tupleobject.c part 5: tuple interning, tuple.__hash__, tuple.__contains__, tuple.count, tuple.index."
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/tupleobject.c" />
+
+This annotation covers tuple search and hashing. See `objects_tupleobject4_detail` for `tuple.__new__`, `PyTuple_New`, `PyTuple_Pack`, and the `ob_item` layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `tuple.__hash__` | Hash a tuple by combining element hashes |
+| 81-180 | `tuple.__contains__` | Linear scan for membership |
+| 181-280 | `tuple.count` | Count occurrences of a value |
+| 281-400 | Tuple interning | Small empty and one-element tuples are cached |
+
+## Reading
+
+### `tuple.__hash__`
+
+```c
+// CPython: Objects/tupleobject.c:380 tuplehash
+static Py_hash_t
+tuplehash(PyTupleObject *v)
+{
+    /* Use xxHash-based algorithm for tuples of any length.
+       Each element's hash is mixed in using a multiply-xor-rotate scheme. */
+    Py_ssize_t len = Py_SIZE(v);
+    Py_uhash_t acc = _PyHASH_XXROTATE(_PyHASH_MULTIPLIER);
+    for (Py_ssize_t i = 0; i < len; i++) {
+        Py_uhash_t lane = PyObject_Hash(v->ob_item[i]);
+        if (lane == (Py_uhash_t)-1) return -1;
+        acc += lane * _PyHASH_MULTIPLIER;
+        acc = _PyHASH_XXROTATE(acc);
+        acc *= _PyHASH_XXROTATE_MUL;
+    }
+    acc += len ^ (_PyHASH_MULTIPLIER ^ 3527539UL);
+    return (acc == (Py_uhash_t)-1) ? -2 : acc;
+}
+```
+
+Tuples are hashable (unlike lists) because they are immutable. `hash((1, 2, 3))` mixes each element's hash in order. The final result depends on both values and positions: `hash((1, 2)) != hash((2, 1))`.
+
+### Tuple interning
+
+```c
+// CPython: Objects/tupleobject.c:80 tuple free list
+/* CPython maintains per-size free lists for tuples of size 0..19.
+   tuple.__new__(size) checks the free list before calling malloc.
+   Empty tuple () is a singleton: _PyTuple_EMPTY. */
+static PyTupleObject *free_list[PyTuple_MAXSAVESIZE];
+static int numfree[PyTuple_MAXSAVESIZE];
+```
+
+The empty tuple `()` is a singleton: `() is ()` returns `True`. Tuples of size 1-19 are pooled in per-size free lists of up to 2000 items each. This dramatically reduces allocation overhead for tuple-heavy code.
+
+### `tuple.count`
+
+```c
+// CPython: Objects/tupleobject.c:480 tuplecount
+static PyObject *
+tuplecount(PyTupleObject *self, PyObject *v)
+{
+    Py_ssize_t count = 0;
+    for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) {
+        int cmp = PyObject_RichCompareBool(self->ob_item[i], v, Py_EQ);
+        if (cmp > 0) count++;
+        else if (cmp < 0) return NULL;  /* Error in __eq__ */
+    }
+    return PyLong_FromSsize_t(count);
+}
+```
+
+`(1, 2, 1, 3).count(1)` returns `2`. The comparison uses `PyObject_RichCompareBool` which calls `__eq__`, so custom types are supported.
+
+## gopy notes
+
+`tuple.__hash__` is `objects.TupleHash` in `objects/tuple.go`. It uses the same multiply-xor-rotate algorithm as CPython for compatibility. Tuple free lists are implemented as Go sync.Pools per size. The empty tuple singleton is `objects.EmptyTuple`.

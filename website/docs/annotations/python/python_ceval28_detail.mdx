@@ -1,0 +1,81 @@
+---
+title: Python/ceval.c (part 28)
+description: "Python/ceval.c part 28: MATCH_MAPPING, MATCH_SEQUENCE, MATCH_KEYS, GET_ITER, GET_AITER, GET_ANEXT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers pattern matching and async iteration opcodes. See `python_ceval27_detail` for import opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `MATCH_MAPPING` | `case {key: val}:` — check for `__keys__` protocol |
+| 81-180 | `MATCH_SEQUENCE` | `case [a, b]:` — check for sequence protocol (not str/bytes) |
+| 181-280 | `MATCH_KEYS` | Extract keys from a mapping for pattern matching |
+| 281-380 | `GET_ITER` | Call `iter()` on TOS; used by `for` loops |
+| 381-500 | `GET_AITER` / `GET_ANEXT` | Async iteration: `async for` |
+
+## Reading
+
+### `MATCH_MAPPING`
+
+```c
+// CPython: Python/ceval.c:5620 MATCH_MAPPING
+inst(MATCH_MAPPING, (subject -- subject, res)) {
+    /* A "mapping" for match purposes: has Py_TPFLAGS_MAPPING set,
+       OR has __keys__ in its type's __mro__. */
+    int match = PyType_HasFeature(Py_TYPE(subject), Py_TPFLAGS_MAPPING);
+    if (!match) {
+        PyObject *keys = _PyObject_LookupAttr(Py_TYPE(subject), &_Py_ID(keys));
+        match = (keys != NULL);
+        Py_XDECREF(keys);
+    }
+    res = match ? Py_True : Py_False;
+    Py_INCREF(res);
+}
+```
+
+`case {'x': x}:` first checks if the subject is a mapping. `dict` has `Py_TPFLAGS_MAPPING` set. Custom types can opt in by setting the flag or having a `keys` method. Strings and bytes have `Py_TPFLAGS_SEQUENCE` and are excluded from mapping patterns.
+
+### `MATCH_KEYS`
+
+```c
+// CPython: Python/ceval.c:5700 MATCH_KEYS
+inst(MATCH_KEYS, (subject, keys -- subject, keys, values_or_none)) {
+    /* Extract all keys from subject; push tuple of values or None on failure. */
+    PyObject *values_or_none = _PyEval_MatchKeys(tstate, subject, keys);
+    if (values_or_none == NULL) ERROR_IF(true, error);
+}
+```
+
+`_PyEval_MatchKeys` calls `subject.get(key, sentinel)` for each key. If any key is missing (returns `sentinel`), it returns `None` to indicate a failed match. Otherwise returns a tuple of values.
+
+### `GET_AITER`
+
+```c
+// CPython: Python/ceval.c:5820 GET_AITER
+inst(GET_AITER, (obj -- iter)) {
+    /* Async for: get the async iterator via __aiter__ */
+    PyObject *awaitable = type->tp_as_async->am_aiter(obj);
+    if (awaitable == NULL) ERROR_IF(true, error);
+    /* If __aiter__ returned a coroutine (old protocol), deprecate it */
+    if (PyCoro_CheckExact(awaitable)) {
+        ...  /* DeprecationWarning */
+    }
+    iter = awaitable;
+}
+```
+
+`async for x in obj:` calls `obj.__aiter__()` to get the async iterator. The iterator must implement `__anext__()` which returns an awaitable.
+
+## gopy notes
+
+`MATCH_MAPPING` is `vm.MatchMapping` in `vm/eval_gen.go`. It checks `objects.TypeHasFlags(Py_TPFLAGS_MAPPING)` or a `keys` attribute. `MATCH_KEYS` calls `vm.MatchKeys` which uses `objects.CallMethod(subject, "get", key, sentinel)`. `GET_AITER` calls `objects.AsyncIter`. `GET_ANEXT` calls `objects.AsyncNext`.

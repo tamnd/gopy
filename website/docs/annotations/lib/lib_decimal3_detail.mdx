@@ -1,0 +1,89 @@
+---
+title: Lib/decimal.py — _pydecimal (part 3)
+description: "_pydecimal part 3: Decimal.__add__, Decimal.__mul__, Decimal.sqrt, Decimal.quantize, Decimal.to_eng_string."
+cpython_path: Lib/_pydecimal.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/_pydecimal.py" />
+
+This annotation covers decimal arithmetic operations. See `lib_decimal2_detail` for `Decimal.__new__`, `Context`, `BasicContext`, `localcontext`, and signal trapping.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Decimal.__add__` | Decimal addition with rounding |
+| 101-220 | `Decimal.__mul__` | Decimal multiplication |
+| 221-360 | `Decimal.sqrt` | Square root to context precision |
+| 361-480 | `Decimal.quantize` | Round to a specific exponent |
+| 481-600 | `Decimal.to_eng_string` | Engineering notation (exponents divisible by 3) |
+
+## Reading
+
+### `Decimal.__add__`
+
+```python
+# CPython: Lib/_pydecimal.py:1580 Decimal.__add__
+def __add__(self, other, context=None):
+    other = _convert_other(other)
+    if other is NotImplemented: return other
+    if context is None: context = getcontext()
+    # Handle specials (NaN, Infinity)
+    ans = self._check_nans(other, context)
+    if ans: return ans
+    # Align exponents
+    exp = min(self._exp, other._exp)
+    ans = self._add(self, other, context)
+    return ans._fix(context)
+```
+
+`Decimal('0.1') + Decimal('0.2')` returns `Decimal('0.3')` exactly. The `_add` function aligns the two values by scaling the one with the larger exponent, then adds the coefficient integers. `_fix` rounds to the context precision.
+
+### `Decimal.quantize`
+
+```python
+# CPython: Lib/_pydecimal.py:2280 Decimal.quantize
+def quantize(self, exp, rounding=None, context=None):
+    """Quantize self to the same exponent as exp."""
+    exp = _convert_other(exp, raiseit=True)
+    if context is None: context = getcontext()
+    if rounding is None: rounding = context.rounding
+    # Round self so its exponent equals exp._exp
+    ans = self._rescale(exp._exp, rounding)
+    if ans._exp > context.Emax or ans._exp < context.Etiny():
+        return context._raise_error(InvalidOperation, ...)
+    return ans._fix(context)
+```
+
+`Decimal('3.14159').quantize(Decimal('0.01'))` returns `Decimal('3.14')`. This is the primary tool for financial calculations: `amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)`.
+
+### `Decimal.sqrt`
+
+```python
+# CPython: Lib/_pydecimal.py:2480 Decimal.sqrt
+def sqrt(self, context=None):
+    """Return the square root, using Newton's method."""
+    if context is None: context = getcontext()
+    ...
+    # Newton-Raphson: x_{n+1} = (x_n + self/x_n) / 2
+    # Iterate until convergence to context.prec+1 digits
+    prec = context.prec
+    ...
+    ans = Decimal(0)
+    while True:
+        ans_new = (ans + self / ans) / 2
+        if ans_new == ans: break
+        ans = ans_new
+    return ans._fix(context)
+```
+
+`Decimal(2).sqrt()` converges in O(log prec) iterations. Working precision is extended by a few digits to ensure the rounded result is correct.
+
+## gopy notes
+
+`Decimal.__add__` is `module/decimal.DecimalAdd` in `module/decimal/module.go`. It uses the `cockroachdb/apd` Go library for arbitrary-precision decimal arithmetic. `Decimal.quantize` wraps `apd.Context.Quantize`. `Decimal.sqrt` uses Newton-Raphson with extended precision via `apd`.
