@@ -236,11 +236,13 @@ func typeNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
 		}
 		bases = append(bases, t)
 	}
-	t := NewUserTypeKwargs(nameObj.v, bases, ns, kwargs)
-	// Stamp the metaclass: the new class's type is mcls, not the
-	// default typeType. This mirrors CPython's PyType_Ready setting
-	// Py_TYPE(type) to metatype.
-	t.Init(meta)
+	// NewUserTypeMeta stamps Py_TYPE(t) = meta before the namespace
+	// copy and __set_name__ pass, so PEP 487 hooks that resolve
+	// metaclass-defined methods via cls.<method> see the right
+	// metatype.
+	//
+	// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
+	t := NewUserTypeMeta(nameObj.v, bases, ns, kwargs, meta)
 	return t, nil
 }
 

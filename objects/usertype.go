@@ -35,11 +35,31 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 //
 // CPython: Objects/typeobject.c:4153 type_new (the mkw kwargs path)
 func NewUserTypeKwargs(name string, bases []*Type, ns *Dict, kwargs map[string]Object) *Type {
+	return NewUserTypeMeta(name, bases, ns, kwargs, nil)
+}
+
+// NewUserTypeMeta is the full-form constructor used by type.__new__.
+// meta is the metaclass to stamp on the new type; nil means inherit
+// the default typeType. Stamping happens before typeSetNames so PEP
+// 487 hooks that call cls.<metaclass_method>(...) resolve through the
+// real metatype, not the placeholder.
+//
+// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
+func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Object, meta *Type) *Type {
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
 	t := NewType(name, bases)
 	t.IsUser = true
+	// Stamp the metaclass first so the upcoming namespace pass and
+	// __set_name__ hooks see Py_TYPE(t) == meta, matching CPython where
+	// type_new sets the metatype as part of allocation. Skip a nil or
+	// typeType meta (NewType already wires the default).
+	//
+	// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
+	if meta != nil && meta != typeType {
+		t.Init(meta)
+	}
 	// Metaclasses (subtypes of type) must use typeGetAttr/typeSetAttr so
 	// that attribute access on their instances (which are *Type objects
 	// like `class Foo(metaclass=ABCMeta)`) goes through the correct path.
