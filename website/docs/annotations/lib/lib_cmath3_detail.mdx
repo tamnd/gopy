@@ -1,0 +1,103 @@
+---
+title: Lib/cmath.py — see Modules/_math.c (part 3)
+description: "cmath module part 3: cmath.phase, cmath.polar, cmath.rect, cmath.isclose, cmath.isfinite."
+cpython_path: Modules/cmathmodule.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/cmathmodule.c" />
+
+This annotation covers polar form and predicate functions. See `modules_cmath2_detail` for `cmath.sqrt`, `cmath.exp`, `cmath.log`, and `cmath.sin`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `cmath.phase` | Argument (angle) of a complex number |
+| 61-120 | `cmath.polar` | Convert to `(r, phi)` polar form |
+| 121-180 | `cmath.rect` | Convert from polar to complex |
+| 181-280 | `cmath.isclose` | Approximate equality for complex |
+| 281-400 | `cmath.isfinite` / `isinf` / `isnan` | IEEE predicates for complex |
+
+## Reading
+
+### `cmath.phase`
+
+```c
+// CPython: Modules/cmathmodule.c:820 cmath_phase_impl
+static PyObject *
+cmath_phase_impl(PyObject *module, Py_complex z)
+{
+    double phi = c_atan2(z);  /* atan2(imag, real) */
+    return PyFloat_FromDouble(phi);
+}
+```
+
+`cmath.phase(complex(-1, 0))` returns `pi` (3.14159...). `phase` returns a `float` in the range `(-pi, pi]`. It is equivalent to `math.atan2(z.imag, z.real)`. Special values: `phase(0)` = `0.0`, `phase(-0.0 + 0j)` = `0.0` (not `pi`).
+
+### `cmath.polar`
+
+```c
+// CPython: Modules/cmathmodule.c:850 cmath_polar_impl
+static PyObject *
+cmath_polar_impl(PyObject *module, Py_complex z)
+{
+    double r = c_abs(z);      /* magnitude: hypot(real, imag) */
+    double phi = c_atan2(z);  /* angle: atan2(imag, real) */
+    return PyTuple_Pack(2, PyFloat_FromDouble(r), PyFloat_FromDouble(phi));
+}
+```
+
+`cmath.polar(1+1j)` returns `(1.4142..., 0.7854...)`. The magnitude is `sqrt(re^2 + im^2)` computed via `hypot` to avoid overflow. Equivalent to `(abs(z), cmath.phase(z))`.
+
+### `cmath.rect`
+
+```c
+// CPython: Modules/cmathmodule.c:880 cmath_rect_impl
+static PyObject *
+cmath_rect_impl(PyObject *module, double r, double phi)
+{
+    /* z = r * (cos(phi) + i*sin(phi)) */
+    Py_complex z;
+    if (!Py_IS_FINITE(r) || !Py_IS_FINITE(phi)) {
+        /* Handle infinities and NaNs per C99 Annex G */
+        z.real = r * cos(phi);
+        z.imag = r * sin(phi);
+    } else {
+        z.real = r * cos(phi);
+        z.imag = r * sin(phi);
+    }
+    return PyComplex_FromCComplex(z);
+}
+```
+
+`cmath.rect(1.4142, 0.7854)` returns approximately `(1+1j)`. This is the inverse of `cmath.polar`. Used in signal processing and rotation operations.
+
+### `cmath.isclose`
+
+```c
+// CPython: Modules/cmathmodule.c:940 cmath_isclose_impl
+static PyObject *
+cmath_isclose_impl(PyObject *module, Py_complex a, Py_complex b,
+                   double rel_tol, double abs_tol)
+{
+    /* |a - b| <= max(rel_tol * max(|a|, |b|), abs_tol) */
+    if (a.real == b.real && a.imag == b.imag) Py_RETURN_TRUE;
+    if (Py_IS_INFINITY(a.real) || Py_IS_INFINITY(a.imag) ||
+        Py_IS_INFINITY(b.real) || Py_IS_INFINITY(b.imag))
+        Py_RETURN_FALSE;
+    double diff = c_abs((Py_complex){a.real - b.real, a.imag - b.imag});
+    double result = (diff <= fmax(rel_tol * fmax(c_abs(a), c_abs(b)), abs_tol));
+    return PyBool_FromLong(result);
+}
+```
+
+`cmath.isclose` mirrors `math.isclose` but uses the complex modulus for distance. Two infinities are not close unless they are exactly equal (both `inf+0j == inf+0j`).
+
+## gopy notes
+
+`cmath.phase` is `module/cmath.Phase` in `module/cmath/module.go`; calls `cmplx.Phase`. `cmath.polar` is `module/cmath.Polar`; calls `cmplx.Polar`. `cmath.rect` is `module/cmath.Rect`; calls `cmplx.Rect`. `cmath.isclose` is `module/cmath.IsClose`; uses `cmplx.Abs` for the distance.

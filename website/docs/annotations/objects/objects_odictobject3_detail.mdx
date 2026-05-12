@@ -1,0 +1,136 @@
+---
+title: Objects/odictobject.c (part 3)
+description: "Objects/odictobject.c part 3: OrderedDict.move_to_end, __reversed__, popitem, merge."
+cpython_path: Objects/odictobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/odictobject.c" />
+
+This annotation covers `OrderedDict`-specific methods. See `objects_odictobject2_detail` for the doubly-linked list structure and `__setitem__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `OrderedDict.move_to_end` | Move a key to the front or back |
+| 81-180 | `OrderedDict.__reversed__` | Reverse-order iterator |
+| 181-280 | `OrderedDict.popitem` | Remove and return the last (or first) item |
+| 281-400 | `odict_merge` | Merge while preserving order |
+| 401-500 | `OrderedDict.__eq__` | Order-sensitive equality |
+
+## Reading
+
+### `OrderedDict.move_to_end`
+
+```c
+// CPython: Objects/odictobject.c:780 odict_move_to_end
+static PyObject *
+odict_move_to_end(PyObject *self, PyObject *args)
+{
+    PyObject *key;
+    int last = 1;
+    if (!PyArg_ParseTuple(args, "O|p:move_to_end", &key, &last)) return NULL;
+    _ODictNode *node = _odict_find_node((PyODictObject *)self, key);
+    if (node == NULL) {
+        PyErr_SetObject(PyExc_KeyError, key);
+        return NULL;
+    }
+    /* Remove from current position */
+    _odict_remove_node((PyODictObject *)self, node);
+    /* Reinsert at end or beginning */
+    if (last)
+        _odict_add_tail((PyODictObject *)self, node);
+    else
+        _odict_add_head((PyODictObject *)self, node);
+    Py_RETURN_NONE;
+}
+```
+
+`od.move_to_end('key')` moves the key to the back (default). `od.move_to_end('key', last=False)` moves it to the front. This is O(1): it just re-links the node in the doubly-linked list.
+
+### `OrderedDict.__reversed__`
+
+```c
+// CPython: Objects/odictobject.c:860 odict_iter_reversed
+static PyObject *
+odict_iter_reversed(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return odictiterobject_new((PyODictObject *)self, 1 /*reversed*/);
+}
+
+static PyObject *
+odictiter_iternext(odictiterobject *di)
+{
+    if (di->di_current == NULL) return NULL;
+    _ODictNode *node = di->di_current;
+    di->di_current = di->reversed ? node->od_prev : node->od_next;
+    return ... /* key, value, or key-value pair */;
+}
+```
+
+`reversed(od)` returns an iterator that walks the doubly-linked list backward. The iterator stores a pointer to the current node; `od_prev` is followed at each step. Mutation during iteration raises `RuntimeError` (version tag check).
+
+### `OrderedDict.popitem`
+
+```c
+// CPython: Objects/odictobject.c:820 odict_popitem
+static PyObject *
+odict_popitem(PyObject *self, PyObject *args)
+{
+    int last = 1;
+    if (!PyArg_ParseTuple(args, "|p:popitem", &last)) return NULL;
+    PyODictObject *od = (PyODictObject *)self;
+    if (PyODict_SIZE(od) == 0) {
+        PyErr_SetString(PyExc_KeyError, "dictionary is empty");
+        return NULL;
+    }
+    _ODictNode *node = last ? od->od_last : od->od_first;
+    PyObject *key = node->od_key;
+    PyObject *value = PyODict_GetItemWithError(self, key);
+    PyODict_DelItem(self, key);
+    return PyTuple_Pack(2, key, value);
+}
+```
+
+`od.popitem()` removes and returns the `(key, value)` pair for the last inserted key (LIFO). `od.popitem(last=False)` removes the first key (FIFO). Together with `move_to_end`, these allow `OrderedDict` to implement an LRU cache.
+
+### `OrderedDict.__eq__`
+
+```c
+// CPython: Objects/odictobject.c:920 odict_richcompare
+static PyObject *
+odict_richcompare(PyObject *v, PyObject *w, int op)
+{
+    if (op != Py_EQ && op != Py_NE) Py_RETURN_NOTIMPLEMENTED;
+    if (!PyODict_Check(v) || !PyODict_Check(w)) {
+        /* OrderedDict vs plain dict: order does not matter */
+        return PyDict_Type.tp_richcompare(v, w, op);
+    }
+    /* Both OrderedDicts: compare content AND order */
+    if (PyODict_SIZE(v) != PyODict_SIZE(w)) {
+        return PyBool_FromLong(op == Py_NE);
+    }
+    /* Walk both linked lists simultaneously */
+    _ODictNode *vn = ((PyODictObject *)v)->od_first;
+    _ODictNode *wn = ((PyODictObject *)w)->od_first;
+    while (vn != NULL) {
+        if (!PyObject_RichCompareBool(vn->od_key, wn->od_key, Py_EQ)) {
+            return PyBool_FromLong(op == Py_NE);
+        }
+        vn = vn->od_next; wn = wn->od_next;
+    }
+    /* Same order: delegate to dict equality for values */
+    return PyDict_Type.tp_richcompare(v, w, op);
+}
+```
+
+`OrderedDict({'a': 1, 'b': 2}) != OrderedDict({'b': 2, 'a': 1})` — insertion order matters for `OrderedDict == OrderedDict`. But `OrderedDict({'a': 1}) == {'a': 1}` — comparison with a plain `dict` ignores order.
+
+## gopy notes
+
+`OrderedDict.move_to_end` is `objects.ODictMoveToEnd` in `objects/odictobject.go`. The node re-linking updates `od_prev`/`od_next` pointers. `__reversed__` is `objects.ODictReversed` returning an `objects.ODictIterReversed`. `popitem` is `objects.ODictPopItem`. `__eq__` walks the linked list using `objects.ODictFirst` / `objects.NodeNext`.

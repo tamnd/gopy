@@ -1,0 +1,104 @@
+---
+title: Modules/_bisectmodule.c (part 3)
+description: "_bisectmodule.c part 3: bisect_left, bisect_right, insort_left, insort_right."
+cpython_path: Modules/_bisectmodule.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_bisectmodule.c" />
+
+This annotation covers the binary search and insertion functions. See `modules_bisect2_detail` for the module setup, key function support, and the `lo`/`hi` parameter handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bisect_left` | Find leftmost insertion point |
+| 81-160 | `bisect_right` | Find rightmost insertion point |
+| 161-240 | `insort_left` | Insert in sorted position (left) |
+| 241-400 | `insort_right` | Insert in sorted position (right) |
+
+## Reading
+
+### `bisect_left`
+
+```c
+// CPython: Modules/_bisectmodule.c:68 internal_bisect_left
+static Py_ssize_t
+internal_bisect_left(PyObject *list, PyObject *item, Py_ssize_t lo, Py_ssize_t hi,
+                     PyObject *key)
+{
+    while (lo < hi) {
+        Py_ssize_t mid = ((size_t)lo + hi) / 2;
+        PyObject *litem = PySequence_GetItem(list, mid);
+        if (key != Py_None) {
+            PyObject *keyed = PyObject_CallOneArg(key, litem);
+            Py_DECREF(litem);
+            litem = keyed;
+        }
+        int k = PyObject_RichCompareBool(litem, item, Py_LT);
+        Py_DECREF(litem);
+        if (k < 0) return -1;
+        if (k) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+```
+
+`bisect_left(a, x)` returns the leftmost index `i` such that `a[i] >= x`. After the loop, `lo == hi` and all elements to the left are `< x`. The `((size_t)lo + hi) / 2` avoids signed integer overflow for large indices.
+
+### `bisect_right`
+
+```c
+// CPython: Modules/_bisectmodule.c:120 internal_bisect_right
+static Py_ssize_t
+internal_bisect_right(PyObject *list, PyObject *item, Py_ssize_t lo, Py_ssize_t hi,
+                      PyObject *key)
+{
+    while (lo < hi) {
+        Py_ssize_t mid = ((size_t)lo + hi) / 2;
+        PyObject *litem = PySequence_GetItem(list, mid);
+        if (key != Py_None) { ... }
+        int k = PyObject_RichCompareBool(item, litem, Py_LT);
+        Py_DECREF(litem);
+        if (k < 0) return -1;
+        if (k) hi = mid;
+        else lo = mid + 1;
+    }
+    return lo;
+}
+```
+
+`bisect_right(a, x)` returns the rightmost index `i` such that `a[i] <= x`. The difference from `bisect_left`: the comparison is `item < litem` (not `litem < item`), and the branches are swapped. For a sorted list with equal elements, `bisect_left` inserts before all equals, `bisect_right` inserts after all equals.
+
+### `insort_left`
+
+```c
+// CPython: Modules/_bisectmodule.c:180 bisect_insort_left
+static PyObject *
+bisect_insort_left(PyObject *module, PyObject *const *args, Py_ssize_t nargs,
+                   PyObject *kwnames)
+{
+    PyObject *list, *item;
+    Py_ssize_t index = internal_bisect_left(list, item, lo, hi, key);
+    if (index < 0) return NULL;
+    PyObject *ret = PyObject_CallMethodOneArg(list, &_Py_ID(insert),
+                                              PyLong_FromSsize_t(index));
+    return ret;
+}
+```
+
+`insort_left` finds the insertion point with `bisect_left`, then calls `list.insert(index, item)`. `list.insert` is O(n) due to shifting, so `insort` is O(n) total even though the search is O(log n).
+
+### `insort_right`
+
+`insort_right` (alias `insort`) is identical to `insort_left` except it uses `internal_bisect_right`. For lists with equal keys, `insort_right` preserves insertion order (new equal elements go after existing ones), which is the stable-sort property.
+
+## gopy notes
+
+`bisect.bisect_left` is `module/bisect.BisectLeft` in `module/bisect/module.go`. The inner loop uses `objects.RichCompareBool` with `objects.OpLT`. `bisect.insort_left` calls `objects.ListInsert` after finding the index. The `key` parameter wraps the key function call in a Go closure.

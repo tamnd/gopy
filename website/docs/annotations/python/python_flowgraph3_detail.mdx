@@ -1,0 +1,134 @@
+---
+title: Python/flowgraph.c (part 3)
+description: "Python/flowgraph.c part 3: remove_redundant_jumps, optimize_basic_blocks, lnotab generation."
+cpython_path: Python/flowgraph.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/flowgraph.c" />
+
+This annotation covers CFG optimization and bytecode linearization. See `python_flowgraph2_detail` for basic block construction and dead block elimination.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `remove_redundant_jumps` | Eliminate jumps to the next instruction |
+| 81-180 | `optimize_basic_blocks` | Fold constants, eliminate NOPs |
+| 181-280 | `propagate_line_numbers` | Assign line info to synthetic instructions |
+| 281-380 | `linearize_graph` | Arrange basic blocks for bytecode emission |
+| 381-500 | `write_location_table` | Emit `co_linetable` from basic blocks |
+
+## Reading
+
+### `remove_redundant_jumps`
+
+```c
+// CPython: Python/flowgraph.c:820 remove_redundant_jumps
+static int
+remove_redundant_jumps(cfg_builder *g)
+{
+    /* Remove JUMP_FORWARD that targets the immediately following block */
+    for each basic block b {
+        if (b->b_iused == 0) continue;
+        struct cfg_instr *last = basicblock_last_instr(b);
+        if (!IS_JUMP_OPCODE(last->i_opcode)) continue;
+        struct cfg_builder_block *target = last->i_target;
+        if (target == b->b_next) {
+            /* Jump to fall-through: replace with NOP */
+            last->i_opcode = NOP;
+        }
+    }
+    return SUCCESS;
+}
+```
+
+After basic block optimizations, some `JUMP_FORWARD` instructions target the immediately following block. These are replaced with `NOP` and later eliminated. This commonly happens after `if-else` chains where the `else` branch falls through.
+
+### `optimize_basic_blocks`
+
+```c
+// CPython: Python/flowgraph.c:680 optimize_basic_blocks
+static int
+optimize_basic_blocks(cfg_builder *g, PyObject *consts)
+{
+    for each basic block b {
+        for (int i = 0; i < b->b_iused; i++) {
+            struct cfg_instr *inst = &b->b_instr[i];
+            switch (inst->i_opcode) {
+            case NOP:
+                /* Mark for removal */
+                inst->i_opcode = 0;
+                break;
+            case LOAD_CONST:
+                /* Constant folding for unary/binary ops */
+                if (i + 1 < b->b_iused) {
+                    next = &b->b_instr[i + 1];
+                    if (is_const_fold_candidate(inst, next))
+                        fold_const(inst, next, consts);
+                }
+                break;
+            ...
+            }
+        }
+    }
+    return SUCCESS;
+}
+```
+
+The optimizer peephole-folds constant expressions within a basic block: `LOAD_CONST 1; LOAD_CONST 2; BINARY_OP +` becomes `LOAD_CONST 3`. It also folds `UNARY_NOT` after constant comparisons.
+
+### `linearize_graph`
+
+```c
+// CPython: Python/flowgraph.c:1020 linearize_graph
+static int
+linearize_graph(cfg_builder *g)
+{
+    /* Order blocks by DFS post-order, reverse, so entry block is first.
+       Exceptions blocks are placed after normal flow. */
+    int nblocks = 0;
+    for each block b in DFS order:
+        nblocks++;
+    /* Assign sequential positions */
+    for (int i = 0; i < nblocks; i++)
+        ordered[i]->b_offset = current_offset;
+        current_offset += ordered[i]->b_iused;
+    /* Patch jump targets with byte offsets */
+    for each block b:
+        for each instruction that is a jump:
+            inst->i_oparg = target->b_offset;
+    return SUCCESS;
+}
+```
+
+Linearization assigns byte offsets to each basic block and patches all jump instructions with their final targets. The ordering tries to place the hot path (normal flow) first so that fall-through is the common case, and exception handlers appear later.
+
+### `write_location_table`
+
+```c
+// CPython: Python/flowgraph.c:1140 write_location_table
+static int
+write_location_table(cfg_builder *g, PyObject **out)
+{
+    /* Emit co_linetable: compact encoding of (bytecode_offset, line_no) pairs */
+    struct locationtable_writer writer;
+    for each basic block b:
+        for (int i = 0; i < b->b_iused; i++) {
+            struct cfg_instr *instr = &b->b_instr[i];
+            write_location_entry_start(&writer, instr->i_loc);
+        }
+    *out = locationtable_finish(&writer);
+    return SUCCESS;
+}
+```
+
+`co_linetable` uses a variable-length encoding: each entry describes a run of instructions at the same source location. The encoding was redesigned in Python 3.11 to include column numbers in addition to line numbers, enabling precise error messages.
+
+## gopy notes
+
+`remove_redundant_jumps` is `compile.RemoveRedundantJumps` in `compile/flowgraph_passes.go`. `optimize_basic_blocks` is `compile.OptimizeBasicBlocks`. `linearize_graph` is `compile.LinearizeGraph`; jump patching uses `compile.PatchJumps`. `write_location_table` is `compile.WriteLocationTable` writing `compile.LocationEntry` structs.
