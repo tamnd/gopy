@@ -1,0 +1,114 @@
+---
+title: Objects/longobject.c (part 14)
+description: "Objects/longobject.c part 14: int.bit_length, int.bit_count, int.to_bytes, int.from_bytes, int.as_integer_ratio."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers integer utility methods. See `objects_longobject13_detail` for `int.__new__`, digit arithmetic, and modular operations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `int.bit_length` | Number of bits needed to represent the integer |
+| 81-140 | `int.bit_count` | Count of set bits (popcount) |
+| 141-260 | `int.to_bytes` | Serialize integer to a bytes object |
+| 261-380 | `int.from_bytes` | Deserialize bytes to integer |
+| 381-500 | `int.as_integer_ratio` | Return `(n, 1)` |
+
+## Reading
+
+### `int.bit_length`
+
+```c
+// CPython: Objects/longobject.c:3120 long_bit_length
+static PyObject *
+long_bit_length(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Number of bits in abs(self), ignoring leading zeros */
+    int sign;
+    size_t ndigits;
+    PyLongObject *a = (PyLongObject *)self;
+    ndigits = _PyLong_IsNonNegativeCompact(a) ? 1 : Py_ABS(_PyLong_DigitCount(a));
+    if (ndigits == 0) return PyLong_FromLong(0);
+    digit msd = PyLong_GetDigit(a, ndigits - 1);
+    return PyLong_FromSsize_t((ndigits - 1) * PyLong_SHIFT + _Py_bit_length(msd));
+}
+```
+
+`(255).bit_length()` returns 8. The most significant digit's bit length is computed with `_Py_bit_length`, equivalent to `floor(log2(x)) + 1`.
+
+### `int.bit_count`
+
+```c
+// CPython: Objects/longobject.c:3180 long_bit_count
+static PyObject *
+long_bit_count(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Number of 1 bits in abs(self) */
+    Py_ssize_t count = 0;
+    Py_ssize_t ndigits = _PyLong_DigitCount((PyLongObject *)self);
+    for (Py_ssize_t i = 0; i < ndigits; i++) {
+        digit d = PyLong_GetDigit((PyLongObject *)self, i);
+        count += _Py_popcount32(d);
+    }
+    return PyLong_FromSsize_t(count);
+}
+```
+
+`(255).bit_count()` returns 8. Uses `_Py_popcount32` (usually compiles to the `POPCNT` instruction). Counts bits in `abs(self)`.
+
+### `int.to_bytes`
+
+```c
+// CPython: Objects/longobject.c:3240 long_to_bytes
+static PyObject *
+long_to_bytes(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+              PyObject *kwnames)
+{
+    /* int.to_bytes(length=1, byteorder='big', *, signed=False) */
+    Py_ssize_t nbytes = PyLong_AsSsize_t(args[0]);
+    int little_endian = /* byteorder == 'little' */ ...;
+    int is_signed = /* signed kwarg */ ...;
+    PyObject *result = PyBytes_FromStringAndSize(NULL, nbytes);
+    if (_PyLong_AsByteArray((PyLongObject *)self, (unsigned char *)PyBytes_AS_STRING(result),
+                             nbytes, little_endian, is_signed) < 0)
+        return NULL;
+    return result;
+}
+```
+
+`(256).to_bytes(2, 'big')` returns `b'\x01\x00'`. `_PyLong_AsByteArray` extracts digits in the right order. Raises `OverflowError` if the integer doesn't fit in `length` bytes.
+
+### `int.from_bytes`
+
+```c
+// CPython: Objects/longobject.c:3310 long_from_bytes
+static PyObject *
+long_from_bytes(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs,
+                PyObject *kwnames)
+{
+    /* int.from_bytes(bytes, byteorder='big', *, signed=False) */
+    Py_buffer vbuf;
+    PyObject_GetBuffer(args[0], &vbuf, PyBUF_SIMPLE);
+    int little_endian = ...;
+    int is_signed = ...;
+    PyObject *result = _PyLong_FromByteArray((unsigned char *)vbuf.buf, vbuf.len,
+                                              little_endian, is_signed);
+    PyBuffer_Release(&vbuf);
+    return result;
+}
+```
+
+`int.from_bytes(b'\x01\x00', 'big')` returns `256`. Accepts any buffer-protocol object. Together with `to_bytes`, this pair provides portable serialization of arbitrary-precision integers.
+
+## gopy notes
+
+`int.bit_length` is `objects.IntBitLength` in `objects/int.go`, using `big.Int.BitLen()`. `int.bit_count` uses `bits.OnesCount` from `math/bits`. `int.to_bytes` uses `big.Int.FillBytes`. `int.from_bytes` constructs a `big.Int` via `big.Int.SetBytes` with sign extension for the `signed=True` case.

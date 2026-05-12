@@ -1,0 +1,94 @@
+---
+title: Python/ceval.c (part 47)
+description: "Python/ceval.c part 47: LOAD_ATTR specializations — LOAD_ATTR_MODULE, LOAD_ATTR_WITH_HINT, LOAD_ATTR_SLOT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `LOAD_ATTR` specializations for modules, instance dicts with hints, and slot-based types. See `python_ceval46_detail` for subscript specializations and stack manipulation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_ATTR_MODULE` | Attribute lookup on a module object |
+| 81-160 | `LOAD_ATTR_WITH_HINT` | Instance dict lookup with cached hash/index hint |
+| 161-260 | `LOAD_ATTR_SLOT` | C-extension slot attribute (no dict) |
+| 261-360 | `LOAD_ATTR_CLASS` | Class attribute that is not a descriptor |
+| 361-500 | `LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN` | Custom `__getattribute__` path |
+
+## Reading
+
+### `LOAD_ATTR_MODULE`
+
+```c
+// CPython: Python/ceval.c:3180 LOAD_ATTR_MODULE
+inst(LOAD_ATTR_MODULE, (unused/2, owner -- attr, null if (oparg & 1))) {
+    DEOPT_IF(!PyModule_CheckExact(owner));
+    PyDictObject *dict = (PyDictObject *)((PyModuleObject *)owner)->md_dict;
+    DEOPT_IF(dict == NULL);
+    PyObject *res;
+    Py_ssize_t index = cache->index;
+    DEOPT_IF(!_PyDict_HasOnlyUnicodeKeys(dict));
+    _PyDictValues *values = dict->ma_values;
+    DEOPT_IF(values == NULL);
+    res = _PyDictValues_GetItemByIndex(values, index);
+    DEOPT_IF(res == NULL);
+    Py_INCREF(res);
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+Module attribute access is very common (`os.path`, `sys.argv`). The specialization caches the value's index in the module dict's compact values array. No hash computation is needed on the hot path.
+
+### `LOAD_ATTR_WITH_HINT`
+
+```c
+// CPython: Python/ceval.c:3240 LOAD_ATTR_WITH_HINT
+inst(LOAD_ATTR_WITH_HINT, (unused/2, owner -- attr, null if (oparg & 1))) {
+    /* Cache: (dict_version, index_hint) */
+    DEOPT_IF(!PyObject_TypeHasFeature(Py_TYPE(owner), Py_TPFLAGS_MANAGED_DICT));
+    PyDictObject *dict = _PyObject_GetManagedDict(owner);
+    DEOPT_IF(dict == NULL || !PyDict_CheckExact(dict));
+    DEOPT_IF(dict->ma_version_tag != cache->version);
+    PyObject *name = GETITEM(FRAME_CO_NAMES, cache->name_or_flag);
+    PyObject *res = NULL;
+    Py_ssize_t hint = cache->index;
+    if (_PyDict_GetItemHint(dict, name, hint, &res) != hint) {
+        DEOPT_IF(true);
+    }
+    Py_INCREF(res);
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+The "hint" is the expected index in the instance dict. If the dict version matches and the item is still at that index, the lookup is O(1) without hashing. On version mismatch the specialization deoptimizes back to `LOAD_ATTR`.
+
+### `LOAD_ATTR_SLOT`
+
+```c
+// CPython: Python/ceval.c:3300 LOAD_ATTR_SLOT
+inst(LOAD_ATTR_SLOT, (unused/2, owner -- attr, null if (oparg & 1))) {
+    /* C extension type with __slots__; no instance dict */
+    Py_ssize_t offset = cache->index;
+    PyObject *res = *(PyObject **)((char *)owner + offset);
+    DEOPT_IF(res == NULL);
+    Py_INCREF(res);
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+For types defined with `__slots__` (or C extension types), attributes live at fixed offsets in the object struct. The cache stores the offset; the hot path is a single pointer dereference.
+
+## gopy notes
+
+`LOAD_ATTR_MODULE` is in `vm/eval_simple.go`; it checks for `*objects.Module` type and uses a cached index into `module.AttrValues`. `LOAD_ATTR_WITH_HINT` checks `objects.Dict.Version` and uses `objects.DictGetHint`. `LOAD_ATTR_SLOT` reads from a fixed offset in the object's Go struct using `unsafe.Pointer` arithmetic.

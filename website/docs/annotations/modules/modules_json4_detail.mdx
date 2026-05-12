@@ -1,0 +1,98 @@
+---
+title: Modules/_json.c (part 4)
+description: "_json.c part 4: JSONEncoder.iterencode, chunked encoding, float encoding, circular reference detection."
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_json.c" />
+
+This annotation covers the full encoder pipeline. See `modules_json3_detail` for `JSONDecoder`, `scanstring`, and `JSONObject`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `encoder_encode_string` | Fast path: encode a Python str as JSON string |
+| 81-160 | `encoder_encode_float` | Handle floats including `inf`/`nan` |
+| 161-260 | `encoder_listencode_obj` | Dispatch encode by type |
+| 261-380 | `encoder_listencode_dict` | Encode a dict as JSON object |
+| 381-500 | Circular reference check | `_encoder_listencode_obj` marker stack |
+
+## Reading
+
+### `encoder_encode_string`
+
+```c
+// CPython: Modules/_json.c:120 encoder_encode_string
+static PyObject *
+encoder_encode_string(PyEncoderObject *s, PyObject *obj)
+{
+    /* Scan for chars that need escaping */
+    Py_ssize_t i;
+    const char *input = PyUnicode_AsUTF8AndSize(obj, &i);
+    ...
+    if (has_special_chars) {
+        return encoder_encode_string_slow(s, obj);
+    }
+    /* Fast path: no escaping needed — wrap in quotes directly */
+    return PyUnicode_FromFormat("\"%s\"", input);
+}
+```
+
+Strings with no special characters (no `\`, `"`, or control characters) take the fast path: a single `PyUnicode_FromFormat` wraps the string in quotes. Strings needing escaping go through the slow path that uses `_PyUnicodeWriter`.
+
+### `encoder_encode_float`
+
+```c
+// CPython: Modules/_json.c:200 encoder_encode_float
+static PyObject *
+encoder_encode_float(PyEncoderObject *s, PyObject *obj)
+{
+    double val = PyFloat_AS_DOUBLE(obj);
+    if (!Py_IS_FINITE(val)) {
+        /* inf, -inf, nan: not valid JSON */
+        if (s->allow_nan) {
+            if (isinf(val)) return val > 0 ? "Infinity" : "-Infinity";
+            return PyUnicode_FromString("NaN");
+        }
+        PyErr_SetString(PyExc_ValueError,
+            "Out of range float values are not JSON compliant");
+        return NULL;
+    }
+    return PyFloat_Type.tp_repr(obj);
+}
+```
+
+By default `json.dumps(float('inf'))` raises `ValueError`. `json.dumps(float('inf'), allow_nan=True)` emits `Infinity` (a JavaScript-ism that is not valid JSON but useful for interop).
+
+### `encoder_listencode_dict`
+
+```c
+// CPython: Modules/_json.c:380 encoder_listencode_dict
+static int
+encoder_listencode_dict(PyEncoderObject *s, _PyUnicodeWriter *writer,
+                        PyObject *dct, Py_ssize_t indent_level)
+{
+    /* Check for circular reference */
+    Py_ssize_t ident = PyObject_Hash((PyObject *)dct);
+    if (PySet_Contains(s->markers, (PyObject *)dct)) {
+        PyErr_SetString(PyExc_ValueError, "Circular reference detected");
+        return -1;
+    }
+    PySet_Add(s->markers, (PyObject *)dct);
+    ...
+    PySet_Discard(s->markers, (PyObject *)dct);
+    return 0;
+}
+```
+
+The circular reference check uses a set keyed by object identity (the dict pointer, via its id). Adding and removing around the recursive call forms a call-stack-tracking mechanism. `json.dumps({'a': d}, check_circular=False)` disables this by leaving `s->markers` as `NULL`.
+
+## gopy notes
+
+`encoder_encode_string` is `module/json.EncodeString` in `module/json/module.go`. The fast path uses `strings.Builder` with a quote-and-copy when no escaping is needed. `encoder_encode_float` uses `strconv.FormatFloat`. `encoder_listencode_dict` tracks circular references via a `map[uintptr]struct{}` keyed on `objects.ID(obj)`.
