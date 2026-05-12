@@ -33,8 +33,27 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 	}
 	t := NewType(name, bases)
 	t.IsUser = true
-	t.Getattro = instanceGetAttr
-	t.Setattro = instanceSetAttr
+	// Metaclasses (subtypes of type) must use typeGetAttr/typeSetAttr so
+	// that attribute access on their instances (which are *Type objects
+	// like `class Foo(metaclass=ABCMeta)`) goes through the correct path.
+	// Dict subclasses use dict-specific attr slots since their instances
+	// are *Dict objects (from DictType.TpNew), not *Instance objects.
+	// Regular user classes use the instance-level slots.
+	//
+	// CPython: Objects/typeobject.c inherit_slots (type_getattro inheritance)
+	if IsSubtype(t, typeType) {
+		t.Getattro = typeGetAttr
+		t.Setattro = typeSetAttr
+	} else if IsSubtype(t, DictType) {
+		t.Getattro = dictSubclassGetAttr
+		t.Setattro = dictSubclassSetAttr
+		// Inherit DictType.TpNew so instances are *Dict, not *Instance.
+		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
+		t.TpNew = DictType.TpNew
+	} else {
+		t.Getattro = instanceGetAttr
+		t.Setattro = instanceSetAttr
+	}
 	// Inherit a per-instance __dict__ from any base that has one, then
 	// let __slots__ processing override it (e.g. the base contributes
 	// dict, but the subclass's __slots__ also adds nothing new — still
@@ -97,7 +116,7 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 			// def and still receive the class as the first argument.
 			//
 			// CPython: Objects/typeobject.c:4419 type_new_set_attrs
-			if s.v == "__init_subclass__" || s.v == "__class_getitem__" {
+			if s.v == "__init_subclass__" || s.v == "__class_getitem__" || s.v == "__prepare__" {
 				if _, isCM := v.(*ClassMethod); !isCM {
 					v = NewClassMethod(v)
 				}
@@ -178,6 +197,25 @@ func fixupSlotDispatchers(t *Type) {
 		t.Str = slotTpStr
 	} else if t.Repr != nil && t.Str == nil {
 		t.Str = t.Repr
+	}
+	// Inherit C-level slots from base types when not overridden by a
+	// Python-level dunder. This matters for metaclass hierarchies where
+	// class ABCMeta(type) should inherit type.Repr, type.Call, etc.
+	//
+	// CPython: Objects/typeobject.c:9770 inherit_slots
+	for _, base := range t.Bases {
+		if t.Repr == nil && base.Repr != nil {
+			t.Repr = base.Repr
+		}
+		if t.Str == nil && base.Str != nil {
+			t.Str = base.Str
+		}
+		if t.Call == nil && base.Call != nil {
+			t.Call = base.Call
+		}
+		if t.Hash == nil && base.Hash != nil {
+			t.Hash = base.Hash
+		}
 	}
 	if lookupDunderCallable(t, "__hash__") {
 		t.Hash = slotTpHash

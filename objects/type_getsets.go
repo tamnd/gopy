@@ -18,6 +18,7 @@ func init() {
 	register("__module__", typeGetModule, typeSetModule)
 	register("__bases__", typeGetBases, nil)
 	register("__mro__", typeGetMRO, nil)
+	register("__doc__", typeGetDoc, typeSetDoc)
 }
 
 // typeGetName returns t.Name. Mirrors type_name.
@@ -120,4 +121,35 @@ func typeGetMRO(o Object) (Object, error) {
 		items[i] = b
 	}
 	return NewTuple(items), nil
+}
+
+// typeGetDoc returns the type's __doc__. Looks in the type's own
+// descriptor table first (user classes store their docstring there
+// via STORE_NAME "__doc__"); returns None when absent.
+//
+// CPython: Objects/typeobject.c:1200 type_get_doc
+func typeGetDoc(o Object) (Object, error) {
+	t, ok := o.(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__doc__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if v, ok2 := typeDescrTable[t]["__doc__"]; ok2 {
+		return v, nil
+	}
+	return None(), nil
+}
+
+// typeSetDoc sets __doc__ on a user-defined type.
+//
+// CPython: Objects/typeobject.c:1227 type_set_doc
+func typeSetDoc(o Object, v Object) error {
+	t, ok := o.(*Type)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__doc__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if !t.IsUser {
+		return fmt.Errorf("TypeError: cannot set '__doc__' attribute of immutable type '%s'", t.Name)
+	}
+	SetTypeDescr(t, "__doc__", v)
+	return nil
 }
