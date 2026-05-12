@@ -1,0 +1,119 @@
+---
+title: Lib/heapq.py
+description: "heapq: min-heap push/pop, heapify, nlargest/nsmallest, merge. Pure-Python siftup/siftdown with optional C acceleration."
+cpython_path: Lib/heapq.py
+cpython_version: "3.14"
+lines: 568
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/heapq.py" />
+
+`heapq` implements a binary min-heap on a plain Python list. All public functions maintain the heap invariant: `heap[k] <= heap[2*k+1]` and `heap[k] <= heap[2*k+2]` for all valid `k`. The module ships a pure-Python implementation with optional replacement by a C extension (`_heapq`) at import time.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-90 | module header, `__about__` | Docstring with algorithm notes and references |
+| 91-155 | `heappush`, `heappop` | Core push and pop with sift operations |
+| 156-200 | `heappushpop`, `heapreplace` | Combined push-then-pop and replace-then-sift |
+| 201-250 | `heapify` | Transform a list into a heap in O(n) |
+| 251-350 | `_siftdown`, `_siftup` | Internal sift helpers |
+| 351-450 | `merge` | k-way merge of sorted iterables |
+| 451-568 | `nlargest`, `nsmallest` | Efficient top-N selection |
+
+## Reading
+
+### `heappush` and `_siftdown`
+
+`heappush` appends the new item to the end of the list and then sifts it up toward the root until the heap invariant holds.
+
+```python
+# CPython: Lib/heapq.py:130 heappush
+def heappush(heap, item):
+    """Push item onto heap, maintaining the heap invariant."""
+    heap.append(item)
+    _siftdown(heap, 0, len(heap)-1)
+```
+
+`_siftdown` (confusingly named, since it moves the item toward the root) compares the new item against its parent and swaps upward as long as the child is smaller.
+
+```python
+# CPython: Lib/heapq.py:212 _siftdown
+def _siftdown(heap, startpos, pos):
+    newitem = heap[pos]
+    while pos > startpos:
+        parentpos = (pos - 1) >> 1
+        parent = heap[parentpos]
+        if newitem < parent:
+            heap[pos] = parent
+            pos = parentpos
+            continue
+        break
+    heap[pos] = newitem
+```
+
+### `heappop` and `_siftup`
+
+`heappop` replaces the root with the last element, shrinks the list by one, and then sifts the new root down to restore the invariant.
+
+```python
+# CPython: Lib/heapq.py:139 heappop
+def heappop(heap):
+    """Pop the smallest item off the heap, maintaining the heap invariant."""
+    lastelt = heap.pop()
+    if heap:
+        returnitem = heap[0]
+        heap[0] = lastelt
+        _siftup(heap, 0)
+        return returnitem
+    return lastelt
+```
+
+`_siftup` pushes the item at `pos` down the tree by always choosing the smaller child, continuing until the item is a leaf or both children are larger.
+
+### `heapify`: linear-time construction
+
+`heapify` converts an arbitrary list into a heap by sifting down every non-leaf node from right to left. This is O(n) because most nodes are near the leaves and require few comparisons.
+
+```python
+# CPython: Lib/heapq.py:165 heapify
+def heapify(x):
+    """Transform list into a heap, in-place, in O(len(x)) time."""
+    n = len(x)
+    for i in reversed(range(n//2)):
+        _siftup(x, i)
+```
+
+### `nlargest` and `nsmallest`: top-N selection
+
+For small `n` relative to the input length, `nlargest` builds a min-heap of size `n` and maintains it as it scans. For large `n` it falls back to `sorted(..., reverse=True)[:n]`. The crossover threshold is roughly `n * 10 < len(iterable)`.
+
+```python
+# CPython: Lib/heapq.py:521 nlargest
+def nlargest(n, iterable, key=None):
+    if n < 0:
+        return []
+    it = iter(iterable)
+    result = _nlargest(n, it)
+    ...
+```
+
+### C acceleration
+
+At the bottom of the file the module replaces itself with the C extension if available:
+
+```python
+# CPython: Lib/heapq.py:560
+try:
+    from _heapq import *
+except ImportError:
+    pass
+```
+
+## gopy notes
+
+Status: not yet ported. The pure-Python logic translates directly to Go. The heap state is a `[]py.Object` slice. A Go port would implement `heappush`, `heappop`, `heapify`, and `nlargest`/`nsmallest` as methods or free functions operating on that slice. No special CPython internal hooks are needed.

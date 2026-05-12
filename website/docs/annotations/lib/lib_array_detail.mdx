@@ -1,0 +1,72 @@
+---
+title: Lib/array.py
+description: "array module stub: re-exports the C-level _array extension. Documents typecodes, buffer protocol, frombytes/tobytes, fromfile/tofile."
+cpython_path: Lib/array.py
+cpython_version: "3.14"
+lines: 1
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/arraymodule.c" />
+
+The `array` module is implemented entirely in C (`Modules/arraymodule.c`). There is no pure-Python `Lib/array.py`; the module is compiled into the interpreter. This annotation covers the C implementation.
+
+`array.array` stores a homogeneous sequence of machine-typed values (C `int`, `double`, etc.) in a compact contiguous buffer, unlike `list` which stores `PyObject*` pointers. It implements the buffer protocol, allowing zero-copy interop with `memoryview`, `struct`, and `ctypes`.
+
+## Map
+
+| Symbol | Role |
+|--------|------|
+| `array.array` | Typed array type with typecode |
+| `typecodes` | String of all valid single-character type codes |
+| `frombytes` / `tobytes` | Import/export raw bytes |
+| `fromfile` / `tofile` | Read/write typed data from file objects |
+| `fromlist` / `tolist` | Convert to/from a Python list |
+| `byteswap` | Reverse byte order in-place for all items |
+| `buffer_info` | Return `(address, length)` of the underlying buffer |
+
+## Reading
+
+### Typecodes
+
+Each `array` object is parameterized by a single-character typecode that determines the C type of each element and its size.
+
+| Code | C type | Size |
+|------|--------|------|
+| `'b'` | signed char | 1 |
+| `'B'` | unsigned char | 1 |
+| `'h'` | signed short | 2 |
+| `'H'` | unsigned short | 2 |
+| `'i'` | signed int | 2 or 4 |
+| `'I'` | unsigned int | 2 or 4 |
+| `'l'` | signed long | 4 or 8 |
+| `'L'` | unsigned long | 4 or 8 |
+| `'q'` | signed long long | 8 |
+| `'Q'` | unsigned long long | 8 |
+| `'f'` | float | 4 |
+| `'d'` | double | 8 |
+| `'u'` | Py_UCS4 (deprecated) | 4 |
+
+### `frombytes` and `tobytes`
+
+`frombytes(b)` appends items decoded from the raw bytes `b`. The length of `b` must be a multiple of `itemsize`. `tobytes()` returns a `bytes` object that is the raw memory content of the array, suitable for writing to disk or sending over a socket.
+
+### Buffer protocol
+
+`array.array` exports the PEP 3118 buffer protocol. A `memoryview` of an array has `format` set to the struct-format character corresponding to the typecode and `itemsize` equal to the C type size. This means NumPy and other buffer-aware code can read an `array` without copying.
+
+### `fromfile` and `tofile`
+
+```python
+# CPython: Modules/arraymodule.c array_fromfile
+# Reads n items from a binary file object f.
+a.fromfile(f, n)
+```
+
+`fromfile` calls `f.read(n * itemsize)` and then calls `frombytes` on the result. `tofile` calls `f.write(tobytes())`.
+
+## gopy notes
+
+Status: not yet ported. The Go port needs a concrete `ArrayObject` type with a `typecode` field and a `[]byte` backing buffer. The buffer protocol integration requires implementing `objects/buffer.go` interfaces. Typecode handling maps directly to Go's fixed-width integer and float types.

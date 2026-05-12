@@ -1,0 +1,82 @@
+---
+title: Lib/shelve.py
+description: "shelve: persistent dict-like object backed by dbm. Shelf, BsdDbShelf, DbfilenameShelf. Lazy pickling on write; optional writeback mode for in-place mutation."
+cpython_path: Lib/shelve.py
+cpython_version: "3.14"
+lines: 232
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/shelve.py" />
+
+`shelve` wraps a `dbm` database to provide a persistent dictionary where values are pickled Python objects. Keys must be strings; values can be any picklable object. `shelve.open` returns a `DbfilenameShelf` which selects the best available `dbm` backend.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | imports | `pickle`, `io`, `collections.abc` |
+| 51-180 | `Shelf` | Base class; maps `MutableMapping` operations to `dbm` + `pickle` |
+| 181-200 | `BsdDbShelf` | Subclass adding `first`/`next`/`previous`/`last`/`set_location` for BerkeleyDB-compatible cursor operations |
+| 201-215 | `DbfilenameShelf` | Opens a `dbm` database by filename |
+| 216-232 | `open` | Convenience function returning a `DbfilenameShelf` |
+
+## Reading
+
+### `Shelf.__getitem__` and pickling
+
+Values are stored as pickled bytes. On read, `pickle.loads` unpacks the bytes; on write, `pickle.dumps` serializes the value.
+
+```python
+# CPython: Lib/shelve.py:95 Shelf.__getitem__
+def __getitem__(self, key):
+    try:
+        value = self.cache[key]
+    except KeyError:
+        f = BytesIO(self.dict[key.encode(self.keyencoding)])
+        value = Unpickler(f).load()
+        if self.writeback:
+            self.cache[key] = value
+    return value
+
+def __setitem__(self, key, value):
+    if self.writeback:
+        self.cache[key] = value
+    f = BytesIO()
+    p = Pickler(f, self._protocol)
+    p.dump(value)
+    self.dict[key.encode(self.keyencoding)] = f.getvalue()
+```
+
+### Writeback mode
+
+When `writeback=True`, `Shelf` caches all accessed values in memory. On `sync()` or `close()`, all cached values are re-pickled and written back to the database. This allows in-place mutation of mutable values (e.g., `shelf['key'].append(1)` without explicit re-assignment), at the cost of holding everything in memory.
+
+```python
+# CPython: Lib/shelve.py:148 Shelf.sync
+def sync(self):
+    if self.writeback and self.cache:
+        self.writeback = False
+        for key, entry in self.cache.items():
+            self[key] = entry
+        self.writeback = True
+        self.cache = {}
+    if hasattr(self.dict, 'sync'):
+        self.dict.sync()
+```
+
+### `open`
+
+```python
+# CPython: Lib/shelve.py:230 open
+def open(filename, flag='c', protocol=None, writeback=False):
+    return DbfilenameShelf(filename, flag, protocol, writeback)
+```
+
+The `flag` parameter is passed directly to `dbm.open`: `'c'` (create), `'n'` (new), `'r'` (read-only), `'w'` (read-write).
+
+## gopy notes
+
+Status: not yet ported. The Go port needs a `dbm`-compatible key-value store backend (BoltDB, BadgerDB, or a simple flat-file approach) and a pickle decoder. Given the pickle dependency, shelve is a low-priority port target. The `Shelf` interface (`MutableMapping`) maps cleanly to Go's `map[string][]byte` with a serialization layer.

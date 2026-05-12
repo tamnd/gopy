@@ -1,0 +1,91 @@
+---
+title: Lib/statistics.py
+description: "statistics: mean, fmean, geometric_mean, harmonic_mean, median variants, mode, multimode, pvariance, pstdev, variance, stdev, NormalDist, and quantiles."
+cpython_path: Lib/statistics.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/statistics.py" />
+
+`statistics` provides basic statistical functions for numeric data. It uses exact rational arithmetic (`fractions.Fraction`) for integer and `Fraction` inputs, and float arithmetic for float inputs, to avoid the accumulated rounding errors that plague naive implementations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | imports, `__all__` | `fractions`, `math`, `numbers`, `decimal` |
+| 81-180 | `_sum`, `_fail_conversion`, `_coerce` | Type coercion and exact summation helpers |
+| 181-300 | `mean`, `fmean`, `geometric_mean`, `harmonic_mean` | Averages |
+| 301-420 | `median`, `median_low`, `median_high`, `median_grouped` | Median variants |
+| 421-500 | `mode`, `multimode` | Mode calculation |
+| 501-650 | `pvariance`, `pstdev`, `variance`, `stdev` | Variance and standard deviation |
+| 651-800 | `quantiles` | Quantile computation with Hyndman-Fan methods |
+| 801-1100 | `NormalDist` | Normal distribution object with pdf/cdf/inv_cdf |
+
+## Reading
+
+### Exact summation with `_sum`
+
+For non-float types, `statistics` accumulates a `Fraction` sum to avoid rounding drift. The helper function `_sum` iterates the data, converts each item to a common numeric type via `_coerce`, and accumulates into a `Fraction` or `Decimal`.
+
+```python
+# CPython: Lib/statistics.py:130 _sum
+def _sum(data, start=0):
+    count = 0
+    n, d = _coerce(type(start), int)
+    partials = {d: start}
+    T = int
+    for typ, values in groupby(data, type):
+        T = _coerce(T, typ)
+        for n, d in map(_exact_ratio, values):
+            count += 1
+            partials[d] = partials_get(d, 0) + n
+    ...
+```
+
+### `mean` and `fmean`
+
+`mean` uses exact arithmetic and returns the same type as the input (int inputs return a `Fraction`). `fmean` always returns a `float` and uses `math.fsum` for fast accurate summation.
+
+```python
+# CPython: Lib/statistics.py:190 fmean
+def fmean(data, weights=None):
+    ...
+    return math.fsum(data) / n
+```
+
+### `variance` and `stdev`
+
+Uses a two-pass algorithm: first compute the mean, then sum squared deviations. For float data this can accumulate error; the implementation converts to `Fraction` for integer/Fraction inputs.
+
+```python
+# CPython: Lib/statistics.py:554 variance
+def variance(data, xbar=None):
+    if iter(data) is data:
+        data = list(data)
+    n = len(data)
+    if n < 2:
+        raise StatisticsError('variance requires at least two data points')
+    T, total, count = _sum((x-xbar)**2 for x in data)
+    ...
+    return _convert(total/((count-1)*d*d), T)
+```
+
+### `NormalDist`
+
+`NormalDist` encapsulates a normal distribution parameterized by `mu` (mean) and `sigma` (standard deviation). It provides `pdf`, `cdf` (using `math.erfc`), `inv_cdf` (probit via rational approximation), `overlap` (Bhattacharyya coefficient), `quantiles`, and `samples` (using `random.gauss`).
+
+```python
+# CPython: Lib/statistics.py:860 NormalDist.cdf
+def cdf(self, x):
+    T = (x - self._mu) / (self._sigma * _sqrt2)
+    return 0.5 * (1 + _erf(T)) if T < 0 else 0.5 * _erfc(-T)
+```
+
+## gopy notes
+
+Status: not yet ported. The pure-Python implementation is straightforward to port. The key dependency is `fractions.Fraction` for exact arithmetic on integer inputs. `NormalDist.cdf` requires `math.erf`/`erfc`, available in Go's `math` package.

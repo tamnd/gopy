@@ -1,0 +1,99 @@
+---
+title: Lib/keyword.py
+description: "keyword: iskeyword, issoftkeyword, kwlist, softkwlist. The canonical lists of Python hard and soft keywords used by tokenize and other tools."
+cpython_path: Lib/keyword.py
+cpython_version: "3.14"
+lines: 56
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/keyword.py" />
+
+`keyword` exposes the canonical lists of Python hard keywords (`kwlist`) and soft keywords (`softkwlist`). It is auto-generated from `Tools/build/generate_token.py` and is used by `tokenize`, `ast`, IDE tooling, and `dis`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-10 | Module header | Auto-generated notice |
+| 11-50 | `kwlist`, `softkwlist` | Sorted lists of keyword strings |
+| 51-56 | `iskeyword`, `issoftkeyword` | Lookup functions |
+
+## Reading
+
+### `kwlist` (hard keywords)
+
+Hard keywords are reserved tokens that the parser always treats as keywords, regardless of context.
+
+```python
+# CPython: Lib/keyword.py:15 kwlist
+kwlist = [
+    'False',
+    'None',
+    'True',
+    'and',
+    'as',
+    'assert',
+    'async',
+    'await',
+    'break',
+    'class',
+    'continue',
+    'def',
+    'del',
+    'elif',
+    'else',
+    'except',
+    'finally',
+    'for',
+    'from',
+    'global',
+    'if',
+    'import',
+    'in',
+    'is',
+    'lambda',
+    'nonlocal',
+    'not',
+    'or',
+    'pass',
+    'raise',
+    'return',
+    'try',
+    'while',
+    'with',
+    'yield',
+]
+```
+
+### `softkwlist` (soft keywords, Python 3.12+)
+
+Soft keywords are identifiers that have special meaning only in specific syntactic positions. They can be used as variable names outside those positions.
+
+```python
+# CPython: Lib/keyword.py:54 softkwlist
+softkwlist = [
+    '_',
+    'case',
+    'match',
+    'type',
+]
+```
+
+`match`, `case`, and `type` became soft keywords when pattern matching (PEP 634) and the `type` statement (PEP 695) were introduced.
+
+### `iskeyword` and `issoftkeyword`
+
+```python
+# CPython: Lib/keyword.py:58 iskeyword
+iskeyword = frozenset(kwlist).__contains__
+issoftkeyword = frozenset(softkwlist).__contains__
+```
+
+Both are implemented as `frozenset.__contains__` for O(1) lookup.
+
+## gopy notes
+
+Status: `kwlist` is already effectively ported because the parser in gopy uses the same keyword set. The `keyword` module just needs to expose `kwlist`, `softkwlist`, `iskeyword`, and `issoftkeyword` as Python-visible names via `module/keyword/`. The lists must match the parser's token tables exactly.

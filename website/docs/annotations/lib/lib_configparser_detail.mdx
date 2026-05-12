@@ -1,0 +1,90 @@
+---
+title: Lib/configparser.py
+description: "configparser: INI-style config file parser. RawConfigParser, ConfigParser, SafeConfigParser (alias). Sections, options, interpolation (BasicInterpolation, ExtendedInterpolation), read/write."
+cpython_path: Lib/configparser.py
+cpython_version: "3.14"
+lines: 1280
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/configparser.py" />
+
+`configparser` reads and writes INI-format configuration files. The core class is `RawConfigParser`; `ConfigParser` adds value interpolation. The module uses `OrderedDict`-like section storage and a pluggable `Interpolation` class hierarchy.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Constants, exceptions | `DEFAULTSECT`, error hierarchy |
+| 101-200 | `Interpolation`, `BasicInterpolation`, `ExtendedInterpolation` | Value expansion strategies |
+| 201-600 | `RawConfigParser` | Core read/write, sections, options, no interpolation |
+| 601-900 | `ConfigParser` | Adds `%(key)s` interpolation; `SafeConfigParser` is an alias |
+| 901-1000 | `SectionProxy` | Mapping view of a single section |
+| 1001-1280 | `ConverterMapping`, helper regexes | Type converters, line parsing patterns |
+
+## Reading
+
+### File format
+
+INI files have sections (`[section]`) and key-value pairs (`key = value` or `key: value`). Keys are case-normalized to lowercase by default. Continuation lines start with whitespace. Comment lines start with `#` or `;`.
+
+### `RawConfigParser` internals
+
+Sections are stored in `self._sections`, a `dict` of `OrderedDict`. The `DEFAULT` section (`self._defaults`) provides fallback values for all sections. Reads are case-insensitive via `optionxform = str.lower`.
+
+```python
+# CPython: Lib/configparser.py:584 RawConfigParser.read_file
+def read_file(self, f, source=None):
+    ...
+    self._read(f, source)
+```
+
+`_read` is the line-by-line parser that handles section headers, key-value pairs, continuation lines, and comments using the compiled regex `SECTCRE` and `OPTCRE`.
+
+### `BasicInterpolation`
+
+`%(key)s` syntax: when `get(section, option)` is called, `BasicInterpolation.before_get` recursively substitutes `%(...)s` references within the same section or `DEFAULT`.
+
+```python
+# CPython: Lib/configparser.py:388 BasicInterpolation.before_get
+def before_get(self, parser, section, option, value, vars):
+    L = []
+    self._interpolate_some(parser, option, L, value, section, vars, 1)
+    return ''.join(L)
+```
+
+Recursion depth is capped at `MAX_INTERPOLATION_DEPTH = 10` to prevent infinite loops.
+
+### `ExtendedInterpolation`
+
+Uses `${section:key}` syntax and allows cross-section references:
+
+```python
+# CPython: Lib/configparser.py:416 ExtendedInterpolation.before_get
+def before_get(self, parser, section, option, value, vars):
+    L = []
+    self._interpolate_some(parser, option, L, value, section, vars, 1)
+    return ''.join(L)
+```
+
+Patterns like `${othersection:key}` retrieve `key` from `othersection`.
+
+### Type converters
+
+`ConfigParser` ships converters for `int`, `float`, and `boolean`. `getboolean` accepts `yes`/`no`, `true`/`false`, `on`/`off`, `1`/`0`. Custom converters can be added via the `converters` constructor argument, which automatically generates `get<type>` methods.
+
+```python
+# CPython: Lib/configparser.py:768 ConfigParser.getboolean
+_boolean_states = {'1': True, 'yes': True, 'true': True, 'on': True,
+                   '0': False, 'no': False, 'false': False, 'off': False}
+```
+
+### Write
+
+`write(fileobject)` serializes all sections and options back to INI format, preserving the section order.
+
+## gopy notes
+
+Status: not yet ported. The Go port would store sections as `map[string]map[string]string` with a separate `defaults` map. Interpolation can be a pluggable interface. The line parser is straightforward regex-based Go code.

@@ -1,0 +1,104 @@
+---
+title: Lib/fractions.py
+description: "fractions.Fraction: arbitrary-precision rational arithmetic. Normalization via GCD, arithmetic operators, __floor__/__ceil__/__round__, and conversion from float/decimal/string."
+cpython_path: Lib/fractions.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/fractions.py" />
+
+`fractions.Fraction` represents a rational number exactly as a numerator/denominator pair of arbitrary-precision integers, always normalized to lowest terms with a non-negative denominator. It participates in the `numbers` tower as a `Rational`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | imports, `_RATIONAL_FORMAT` | Regex for string parsing |
+| 61-200 | `Fraction.__new__` | Construction from int, float, Decimal, str, or numerator/denominator |
+| 201-280 | `limit_denominator` | Best approximation with bounded denominator |
+| 281-400 | Arithmetic operators | `__add__`, `__sub__`, `__mul__`, `__truediv__`, `__pow__`, negation |
+| 401-500 | Comparison operators | `__eq__`, `__lt__`, `__le__`, etc. |
+| 501-600 | Conversion and display | `__float__`, `__floor__`, `__ceil__`, `__round__`, `__str__`, `__repr__` |
+| 601-800 | `_operator_fallbacks` | Decorator that generates forward/reverse method pairs |
+
+## Reading
+
+### Construction and normalization
+
+```python
+# CPython: Lib/fractions.py:70 Fraction.__new__
+def __new__(cls, numerator=0, denominator=None, *, _normalize=True):
+    ...
+    if isinstance(numerator, float):
+        numerator, denominator = numerator.as_integer_ratio()
+    ...
+    g = math.gcd(numerator, denominator)
+    if denominator < 0:
+        g = -g
+    self._numerator = numerator // g
+    self._denominator = denominator // g
+```
+
+`float.as_integer_ratio()` returns the exact rational representation of the IEEE 754 double, so `Fraction(0.1)` gives `3602879701896397/36028797018963968`, not `1/10`.
+
+### `limit_denominator`
+
+Returns the closest `Fraction` with denominator at most `max_denominator`, using the Stern-Brocot tree / continued fraction algorithm.
+
+```python
+# CPython: Lib/fractions.py:226 limit_denominator
+def limit_denominator(self, max_denominator=10**6):
+    ...
+    p0, q0, p1, q1 = 0, 1, 1, 0
+    n, d = self._numerator, self._denominator
+    while True:
+        a = n//d
+        q2 = q0+a*q1
+        if q2 > max_denominator:
+            break
+        p0, q0, p1, q1 = p1, q1, p0+a*p1, q2
+        n, d = d, n-a*d
+    ...
+```
+
+### Arithmetic operators via `_operator_fallbacks`
+
+The `_operator_fallbacks` helper takes a function like `_add` and returns a pair `(forward, reverse)` that handle the `numbers` tower fallback logic, calling `int`, `Fraction`, or `float` variants as appropriate.
+
+```python
+# CPython: Lib/fractions.py:280 _add
+def _add(a, b):
+    da, db = a.denominator, b.denominator
+    return Fraction(a.numerator * db + b.numerator * da,
+                    da * db)
+
+__add__, __radd__ = _operator_fallbacks(_add, operator.add)
+```
+
+### `__round__`
+
+```python
+# CPython: Lib/fractions.py:555 Fraction.__round__
+def __round__(self, ndigits=None):
+    if ndigits is None:
+        floor, remainder = divmod(self.numerator, self.denominator)
+        if remainder * 2 < self.denominator:
+            return floor
+        elif remainder * 2 > self.denominator:
+            return floor + 1
+        elif floor % 2 == 0:
+            return floor    # banker's rounding
+        else:
+            return floor + 1
+    ...
+```
+
+Implements IEEE 754 round-half-to-even (banker's rounding) exactly.
+
+## gopy notes
+
+Status: not yet ported. The Go port needs `math/big.Int` for the numerator/denominator. Construction from `float` requires implementing `float.as_integer_ratio()` in Go (decompose IEEE 754 bits). The arithmetic operators are straightforward big-integer arithmetic.

@@ -1,0 +1,79 @@
+---
+title: Lib/pickle.py
+description: "pickle: Python object serialization. Pickler/Unpickler, dispatch tables, HIGHEST_PROTOCOL (5), reduction protocol (__reduce__, __reduce_ex__, __getstate__, __setstate__)."
+cpython_path: Lib/pickle.py
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pickle.py" />
+
+`pickle` serializes Python objects to a byte stream and deserializes them back. It handles arbitrary object graphs including cycles. The pure-Python implementation is replaced at import time by `_pickle` (written in C) when available. Protocol 5 (Python 3.8+) is the highest protocol and adds out-of-band buffer support.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Constants, opcodes | Protocol numbers, opcode bytes |
+| 101-300 | `Pickler` | Serialization; dispatch table |
+| 301-600 | Pickler dispatch methods | `save_none`, `save_bool`, `save_int`, `save_float`, `save_bytes`, `save_str`, `save_list`, `save_dict`, `save_reduce` |
+| 601-900 | Reduction protocol | `save_reduce`, `__reduce__`, `__reduce_ex__` |
+| 901-1400 | `Unpickler` | Deserialization; opcode dispatch |
+| 1401-1600 | Unpickler dispatch | `load_*` methods per opcode |
+| 1601-1800 | Helper functions, `dump`/`dumps`/`load`/`loads` | Top-level convenience API |
+
+## Reading
+
+### Pickle protocol opcodes
+
+The pickle format is a stack-based bytecode. Each opcode pushes, pops, or manipulates items on a virtual stack. The Unpickler executes opcodes until it hits `STOP` and returns the top of the stack.
+
+Key opcodes include `GLOBAL` (push a class/function by module and name), `REDUCE` (call a callable with a tuple of args), `BUILD` (call `__setstate__` on the top object), `MARK` (push a marker for variable-length collections), `DICT` (pop items down to the last mark and build a dict), and `SETITEMS` (update a dict).
+
+### `Pickler.save_reduce`
+
+The central serialization method. Most complex objects are pickled by calling `obj.__reduce_ex__(protocol)` which returns a tuple `(callable, args[, state[, list_items[, dict_items]]])`.
+
+```python
+# CPython: Lib/pickle.py:420 Pickler.save_reduce
+def save_reduce(self, func, args, state=None, listitems=None,
+                dictitems=None, state_setter=None, obj=None):
+    ...
+    save(func)
+    save(args)
+    write(REDUCE)
+    if obj is not None:
+        if id(obj) not in self.memo:
+            self.memoize(obj)
+    if state is not None:
+        self._save_reduce_override_state(state, obj, state_setter)
+    ...
+```
+
+### Memoization and cycles
+
+`Pickler.memo` is a dict mapping `id(obj)` to `(memo_id, obj)`. When an object is serialized, it is memoized. If the same object appears again, a `GET` opcode references the memo slot instead of re-serializing, enabling cycle handling.
+
+```python
+# CPython: Lib/pickle.py:247 Pickler.memoize
+def memoize(self, obj):
+    assert id(obj) not in self.memo
+    idx = len(self.memo)
+    self.memo[id(obj)] = idx, obj
+    self.write(self.put(idx))
+```
+
+### `__reduce_ex__` protocol
+
+Objects implement pickling by defining `__reduce__` or `__reduce_ex__`. The default `object.__reduce_ex__` uses `copyreg.__newobj__` and `__getstate__`/`__setstate__` for new-style classes, or `object.__reduce__` for the fallback.
+
+### Protocol 5: out-of-band buffers
+
+Protocol 5 adds `PickleBuffer` for zero-copy serialization of large binary data (e.g., NumPy arrays). The pickler calls the `buffer_callback` instead of inlining the data, allowing the caller to transmit the buffer via a separate channel.
+
+## gopy notes
+
+Status: not yet ported. `pickle` is a critical dependency for `shelve`, `multiprocessing`, and many frameworks. A gopy port requires implementing the full opcode dispatch for both Pickler and Unpickler. Protocol 2 compatibility is the minimum viable target since it supports `__reduce_ex__` with `__newobj__`. Protocols 4 and 5 require `FRAME` and `PickleBuffer` support.

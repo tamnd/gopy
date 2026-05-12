@@ -1,0 +1,111 @@
+---
+title: Lib/random.py
+description: "random: Mersenne Twister RNG, SystemRandom (os.urandom), choice/shuffle/sample, distribution generators (gauss, expovariate, betavariate, etc.)."
+cpython_path: Lib/random.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/random.py" />
+
+`random` provides a pseudorandom number generator based on the Mersenne Twister (MT19937) algorithm with a period of 2^19937-1. The module-level functions operate on a shared `Random` instance. `SystemRandom` uses `os.urandom` for cryptographically strong randomness but does not support seeding or state retrieval.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | imports, `Random` class header | MT19937 state; C extension `_random` replaces core methods |
+| 81-200 | `seed`, `getstate`, `setstate`, `getrandbits` | Seed and state management |
+| 201-320 | `random`, `uniform`, `triangular` | Core float generation |
+| 321-450 | `randrange`, `randint`, `choice`, `shuffle`, `sample` | Integer and sequence operations |
+| 451-600 | `choices` | Weighted random selection |
+| 601-750 | Distributions: `gauss`, `normalvariate`, `expovariate`, `betavariate`, `gammavariate`, `vonmisesvariate`, `paretovariate`, `weibullvariate` | Statistical distributions |
+| 751-850 | `SystemRandom` | `os.urandom`-backed RNG |
+| 851-900 | Module-level instance and function aliases | `_inst = Random(); random = _inst.random; ...` |
+
+## Reading
+
+### The Mersenne Twister core
+
+The actual MT19937 algorithm lives in `Modules/_randommodule.c`. The Python `Random` class delegates `random()` (returns a float in [0,1)) and `getrandbits(k)` to the C extension via `from _random import Random as _RealRandom`. All distribution functions are pure Python built on top of `self.random()`.
+
+### `seed`
+
+```python
+# CPython: Lib/random.py:119 Random.seed
+def seed(self, a=None, version=2):
+    if version == 1 or not isinstance(a, (str, bytes, bytearray)):
+        ...
+    elif isinstance(a, int):
+        a = int(a)
+    else:
+        ...
+    super().seed(a)
+    self.gauss_next = None
+```
+
+`version=2` (default since Python 3.2) hashes strings, bytes, and other types to an integer before seeding, giving better distribution. `version=1` uses the old Python 2 behavior for reproducibility.
+
+### `randrange` and `randint`
+
+```python
+# CPython: Lib/random.py:322 Random.randrange
+def randrange(self, start, stop=None, step=1):
+    # Returns a random int N such that start <= N < stop, step-aligned.
+    ...
+
+def randint(self, a, b):
+    return self.randrange(a, b+1)
+```
+
+### `shuffle`
+
+`shuffle` uses a Fisher-Yates shuffle. For `n > 2**53` items it uses `getrandbits` to avoid bias from floating-point precision limits.
+
+```python
+# CPython: Lib/random.py:396 Random.shuffle
+def shuffle(self, x):
+    randbelow = self._randbelow
+    for i in reversed(range(1, len(x))):
+        j = randbelow(i+1)
+        x[i], x[j] = x[j], x[i]
+```
+
+### `sample`
+
+`sample(population, k)` returns a list of `k` unique elements. For `k <= 5` or small populations it uses a set to track already-chosen indices; for larger `k` it copies the population and does a partial shuffle.
+
+### Gaussian distribution
+
+```python
+# CPython: Lib/random.py:618 Random.gauss
+def gauss(self, mu=0.0, sigma=1.0):
+    random = self.random
+    z = self.gauss_next
+    self.gauss_next = None
+    if z is None:
+        x2pi = random() * TWOPI
+        g2rad = _sqrt(-2.0 * _log(1.0 - random()))
+        z = _cos(x2pi) * g2rad
+        self.gauss_next = _sin(x2pi) * g2rad
+    return mu + z*sigma
+```
+
+The Box-Muller transform produces two independent Gaussian samples per call. The second is cached in `self.gauss_next` and returned on the next call.
+
+### `SystemRandom`
+
+```python
+# CPython: Lib/random.py:756 SystemRandom.random
+def random(self):
+    return (int.from_bytes(_urandom(7)) >> 3) * RECIP_BPF
+```
+
+`SystemRandom` reads 7 bytes from `os.urandom`, shifts to get 53 significant bits, and multiplies by `1/2^53` to get a float in [0,1). It overrides `seed` and `getstate`/`setstate` to raise `NotImplementedError`.
+
+## gopy notes
+
+Status: not yet ported. The Go port needs `math/rand/v2` for MT19937 or a compatible algorithm, plus `crypto/rand` for `SystemRandom`. The distribution functions are pure math and translate directly.

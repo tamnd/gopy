@@ -1,0 +1,118 @@
+---
+title: Lib/difflib.py
+description: "difflib: SequenceMatcher (longest common subsequence), unified_diff, context_diff, ndiff, HtmlDiff, get_close_matches. Pure Python diff engine."
+cpython_path: Lib/difflib.py
+cpython_version: "3.14"
+lines: 1250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/difflib.py" />
+
+`difflib` computes differences between sequences. `SequenceMatcher` is the core; it finds matching blocks using a hash-based approach inspired by Ratcliff/Obershelp. The diff output functions (`unified_diff`, `ndiff`) are built on top of it.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `__all__` | Public API |
+| 61-700 | `SequenceMatcher` | Matching blocks, ratio, opcodes |
+| 701-800 | `Differ` | Human-readable line-by-line diff with intraline marking |
+| 801-950 | `unified_diff`, `context_diff` | Standard diff output formats |
+| 951-1050 | `ndiff` | Differ-based output |
+| 1051-1150 | `get_close_matches` | Fuzzy string matching |
+| 1151-1250 | `HtmlDiff` | Side-by-side HTML diff |
+
+## Reading
+
+### `SequenceMatcher`
+
+`SequenceMatcher(a, b)` computes similarity between sequences `a` and `b`. The key methods are:
+
+- `get_matching_blocks()`: returns a list of `Match(a, b, size)` triples for non-overlapping matching regions, plus a sentinel `Match(len(a), len(b), 0)`.
+- `get_opcodes()`: returns a list of `(tag, i1, i2, j1, j2)` tuples where `tag` is one of `'equal'`, `'replace'`, `'delete'`, `'insert'`.
+- `ratio()`: `2.0 * M / T` where `M` is matching characters and `T` is total characters.
+
+The algorithm uses a hash table (`b2j`) mapping each element of `b` to the list of indices where it appears, enabling O(n) matching block detection.
+
+```python
+# CPython: Lib/difflib.py:191 SequenceMatcher.set_seq2
+def set_seq2(self, b):
+    self.b = b
+    self.matching_blocks = self.opcodes = None
+    self.fullbcount = None
+    self.__chain_b()
+
+def __chain_b(self):
+    b = self.b
+    self.b2j = b2j = {}
+    for i, elt in enumerate(b):
+        indices = b2j.setdefault(elt, [])
+        indices.append(i)
+```
+
+### `find_longest_match`
+
+The core primitive finds the longest matching block in `a[alo:ahi]` and `b[blo:bhi]`. It scans `a` left-to-right and uses `b2j` to find where each element appears in `b`, tracking the longest run.
+
+```python
+# CPython: Lib/difflib.py:298 SequenceMatcher.find_longest_match
+def find_longest_match(self, alo=0, ahi=None, blo=0, bhi=None):
+    ...
+    best_i = alo
+    best_j = blo
+    best_size = 0
+    j2len = {}
+    for i in range(alo, ahi):
+        newj2len = {}
+        for j in b2j.get(a[i], []):
+            if j < blo: continue
+            if j >= bhi: break
+            k = newj2len[j] = j2len.get(j-1, 0) + 1
+            if k > best_size:
+                best_i, best_j, best_size = i-k+1, j-k+1, k
+        j2len = newj2len
+    ...
+```
+
+`get_matching_blocks` calls `find_longest_match` recursively (divide and conquer on the non-matching regions).
+
+### `unified_diff`
+
+```python
+# CPython: Lib/difflib.py:1073 unified_diff
+def unified_diff(a, b, fromfile='', tofile='', fromfiledate='',
+                 tofiledate='', n=3, lineterm='\n'):
+    ...
+    for group in SequenceMatcher(None, a, b).get_grouped_opcodes(n):
+        ...
+```
+
+Outputs the standard `---`/`+++`/`@@` format. The `n` parameter controls context lines.
+
+### `get_close_matches`
+
+```python
+# CPython: Lib/difflib.py:738 get_close_matches
+def get_close_matches(word, possibilities, n=3, cutoff=0.6):
+    ...
+    result = []
+    s = SequenceMatcher()
+    s.set_seq2(word)
+    for x in possibilities:
+        s.set_seq1(x)
+        if s.real_quick_ratio() >= cutoff and \
+           s.quick_ratio() >= cutoff and \
+           s.ratio() >= cutoff:
+            result.append((s.ratio(), x))
+    result = _nlargest(n, result)
+    return [x for score, x in result]
+```
+
+Uses three progressively more expensive ratio checks (`real_quick_ratio`, `quick_ratio`, `ratio`) to filter candidates efficiently.
+
+## gopy notes
+
+Status: not yet ported. The algorithm is pure Python and translates directly to Go. The `b2j` hash table maps to `map[interface{}][]int`. `get_close_matches` is the primary entry point for suggestion features in the gopy REPL.

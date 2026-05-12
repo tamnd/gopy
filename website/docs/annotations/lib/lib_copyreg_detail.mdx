@@ -1,0 +1,81 @@
+---
+title: Lib/copyreg.py
+description: "copyreg: pickle dispatch table helpers. dispatch_table, pickle() to register reduction functions, __newobj__ and __newobj_ex__ constructors used by pickle protocol 2+."
+cpython_path: Lib/copyreg.py
+cpython_version: "3.14"
+lines: 94
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/copyreg.py" />
+
+`copyreg` provides the global dispatch table that `pickle` uses for extension types. It is the registration point for C extension types that need custom `__reduce__` behavior. The module is small (94 lines) but central to the pickle protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-25 | `dispatch_table`, `_reconstructor` | Global dispatch table and default reconstructor |
+| 26-50 | `pickle` | Register a reduce function for a type |
+| 51-70 | `constructor` | Validate and register a callable as a constructor |
+| 71-94 | `__newobj__`, `__newobj_ex__` | Protocol 2/4 constructors |
+
+## Reading
+
+### `dispatch_table`
+
+`dispatch_table` is a `dict` mapping type objects to reduce functions. `pickle.Pickler` checks this table (and the object's own `dispatch_table` attribute) before calling `__reduce_ex__`.
+
+```python
+# CPython: Lib/copyreg.py:12 dispatch_table
+dispatch_table = {}
+```
+
+### `pickle`
+
+Registers a reduce function for a type. The reduce function must accept one argument (the object) and return a tuple in the `__reduce__` protocol format.
+
+```python
+# CPython: Lib/copyreg.py:31 pickle
+def pickle(ob_type, pickle_function, constructor_ob=None):
+    if constructor_ob is not None:
+        constructor(constructor_ob)
+    dispatch_table[ob_type] = pickle_function
+```
+
+### `__newobj__` and `__newobj_ex__`
+
+Used by `pickle.Pickler` to reconstruct objects using `__new__` rather than `__init__`. Protocol 2 introduced `__newobj__`; protocol 4 introduced `__newobj_ex__` which passes keyword arguments.
+
+```python
+# CPython: Lib/copyreg.py:80 __newobj__
+def __newobj__(cls, *args):
+    return cls.__new__(cls, *args)
+
+def __newobj_ex__(cls, args, kwargs):
+    return cls.__new__(cls, *args, **kwargs)
+```
+
+When `Pickler` sees a `__reduce_ex__` return value using `__newobj__`, it emits the `NEWOBJ` opcode, which calls `cls.__new__(cls, *args)` directly without going through Python dispatch during unpickling, making reconstruction faster.
+
+### `_reconstructor`
+
+The fallback for old-style class reconstruction used when pickling instances that don't define `__reduce__`:
+
+```python
+# CPython: Lib/copyreg.py:24 _reconstructor
+def _reconstructor(cls, base, state):
+    if base is object:
+        obj = object.__new__(cls)
+    else:
+        obj = base.__new__(cls, state)
+    if base.__init__ != object.__init__:
+        base.__init__(obj, state)
+    return obj
+```
+
+## gopy notes
+
+Status: not yet ported. `dispatch_table` in gopy would be a `map[*py.Type]py.Object` (function). `__newobj__` and `__newobj_ex__` are simple wrappers and need to be registered as built-in functions visible to the pickle opcode decoder.

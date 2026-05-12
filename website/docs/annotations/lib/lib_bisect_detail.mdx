@@ -1,0 +1,90 @@
+---
+title: Lib/bisect.py
+description: "bisect: binary search insertion and in-place insert for sorted lists. bisect_left, bisect_right, insort_left, insort_right with optional key parameter."
+cpython_path: Lib/bisect.py
+cpython_version: "3.14"
+lines: 96
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/bisect.py" />
+
+`bisect` provides binary search over sorted sequences. The module is almost entirely replaced by the C extension `_bisect` at import time; the pure-Python code serves as reference and fallback. All four functions take an optional `lo`/`hi` pair to restrict the search range, and since Python 3.10 an optional `key` callable.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `bisect_right`, `bisect_left` | Binary search returning insertion index |
+| 41-60 | `insort_right`, `insort_left` | Search then insert in one call |
+| 61-80 | `bisect`, `insort` aliases | `bisect` = `bisect_right`; `insort` = `insort_right` |
+| 81-96 | C-extension override | `from _bisect import *` |
+
+## Reading
+
+### `bisect_right`
+
+Returns the index `i` such that all elements to the left are `<= x`. Inserting at `i` keeps the list sorted and places `x` after any existing entries equal to `x`.
+
+```python
+# CPython: Lib/bisect.py:15 bisect_right
+def bisect_right(a, x, lo=0, hi=None, *, key=None):
+    if lo < 0:
+        raise ValueError('lo must be non-negative')
+    if hi is None:
+        hi = len(a)
+    if key is None:
+        while lo < hi:
+            mid = (lo+hi)//2
+            if x < a[mid]: hi = mid
+            else: lo = mid+1
+    else:
+        while lo < hi:
+            mid = (lo+hi)//2
+            if x < key(a[mid]): hi = mid
+            else: lo = mid+1
+    return lo
+```
+
+The `key` path calls `key(a[mid])` on each probe element, not on `x`. This means `key` transforms the stored values, and the caller must pass an already-transformed `x` or accept that comparison uses `key` only on the sequence side.
+
+### `bisect_left`
+
+Returns the index `i` such that all elements to the left are `< x`. Inserting at `i` places `x` before any existing equal entries.
+
+```python
+# CPython: Lib/bisect.py:1 bisect_left
+def bisect_left(a, x, lo=0, hi=None, *, key=None):
+    ...
+    if key is None:
+        while lo < hi:
+            mid = (lo+hi)//2
+            if a[mid] < x: lo = mid+1
+            else: hi = mid
+    ...
+    return lo
+```
+
+The only difference from `bisect_right` is the comparison direction: `a[mid] < x` (strict) versus `x < a[mid]` (strict), which shifts the boundary by one for equal elements.
+
+### `insort_right` and `insort_left`
+
+Both call the corresponding `bisect` variant and then call `a.insert(index, x)`.
+
+```python
+# CPython: Lib/bisect.py:43 insort_right
+def insort_right(a, x, lo=0, hi=None, *, key=None):
+    if key is None:
+        lo = bisect_right(a, x, lo, hi)
+    else:
+        lo = bisect_right(a, key(x), lo, hi, key=key)
+    a.insert(lo, x)
+```
+
+When `key` is provided, `bisect_right` receives `key(x)` as the search value so that the comparison is symmetric: `key(stored)` is compared to `key(x)`.
+
+## gopy notes
+
+Status: not yet ported. The pure-Python code translates directly to Go generics or `interface{}` slices. The C extension path is irrelevant; gopy implements pure Go. The `key` parameter requires passing a callable `py.Object`, which adds one `vm.Call` per probe in the key path.

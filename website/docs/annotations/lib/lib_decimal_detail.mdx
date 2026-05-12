@@ -1,0 +1,87 @@
+---
+title: Lib/decimal.py
+description: "decimal: IBM General Decimal Arithmetic spec. Decimal type, Context (precision/rounding/traps), signals, and arithmetic operations. Pure-Python implementation; _decimal C extension replaces it at import."
+cpython_path: Lib/decimal.py
+cpython_version: "3.14"
+lines: 6200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/decimal.py" />
+
+`decimal` implements the IBM General Decimal Arithmetic specification (GDAS). It provides arbitrary-precision decimal floating-point arithmetic with configurable precision, rounding modes, and exception handling via `Context` objects. The pure-Python implementation in `Lib/decimal.py` is replaced at import time by `Modules/_decimal/` (based on `libmpdec`) when the C extension is available.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | Constants, signals, exceptions | Rounding modes, signal classes (Overflow, Inexact, etc.) |
+| 201-600 | `Decimal.__new__`, `_convert_other` | Construction from int, str, float, tuple |
+| 601-1200 | Arithmetic operators | `__add__`, `__mul__`, `__div__`, `__pow__`, comparison |
+| 1201-1800 | Mathematical functions | `sqrt`, `ln`, `log10`, `exp` |
+| 1801-2400 | `Context` class | Precision, rounding, trap mask, flags |
+| 2401-2800 | `DefaultContext`, `BasicContext`, `ExtendedContext` | Pre-defined context instances |
+| 2801-6200 | Helper classes (`_WorkRep`, `_Log10Memoize`) | Internal arithmetic support |
+
+## Reading
+
+### `Decimal` construction
+
+`Decimal` accepts integers, strings matching the GDAS numeric string grammar, tuples `(sign, digits, exponent)`, and floats. Float construction is exact (uses `float.as_integer_ratio`) but results in long representations:
+
+```python
+# CPython: Lib/decimal.py:495 Decimal.__new__ (float path)
+elif isinstance(value, float):
+    value = Decimal(value.as_integer_ratio()[0]) / Decimal(value.as_integer_ratio()[1])
+```
+
+### `Context` and rounding modes
+
+`Context` bundles precision, rounding rule, trap flags, and signal flags. The active context for a thread is accessed via `getcontext()`/`setcontext()`. Arithmetic operations use the calling thread's context unless a `Context` is passed explicitly.
+
+```python
+# CPython: Lib/decimal.py:3794 Context.__init__
+class Context:
+    def __init__(self, prec=None, rounding=None, Emin=None, Emax=None,
+                 capitals=None, clamp=None, flags=None, traps=None):
+```
+
+Rounding modes include `ROUND_HALF_UP`, `ROUND_HALF_EVEN` (banker's), `ROUND_CEILING`, `ROUND_FLOOR`, `ROUND_UP`, `ROUND_DOWN`, `ROUND_HALF_DOWN`, and `ROUND_05UP`.
+
+### Signals and traps
+
+Each signal (Overflow, Underflow, Inexact, Subnormal, InvalidOperation, DivisionByZero, Clamped, Rounded) can be either a trap (raises an exception) or a flag (records that the condition occurred). The `Context.traps` dict maps signal classes to booleans.
+
+```python
+# CPython: Lib/decimal.py:3854 Context._raise_error
+def _raise_error(self, condition, explanation=None, *args):
+    error = _condition_map.get(condition, condition)
+    if self.traps[condition]:
+        raise error(explanation)
+    self.flags[condition] = True
+```
+
+### Thread-local context
+
+`getcontext()` returns the current thread's `Context`, stored in a `threading.local()`. The module-level default is `DefaultContext` (precision=28, ROUND_HALF_EVEN, all traps off except InvalidOperation, DivisionByZero, Overflow).
+
+### C extension takeover
+
+At the bottom of the file, the pure-Python implementation is replaced:
+
+```python
+# CPython: Lib/decimal.py:6190
+try:
+    from _decimal import *
+    from _decimal import (Clamped, InvalidOperation, DivisionByZero,
+                          Inexact, Rounded, Subnormal, Overflow, Underflow,
+                          FloatOperation)
+except ImportError:
+    pass
+```
+
+## gopy notes
+
+Status: not yet ported. The Go ecosystem has `github.com/shopspring/decimal` and `cockroachdb/apd` (which wraps `libmpdec` directly). A faithful port should bind to `libmpdec` as the C extension does, rather than reimplementing the arithmetic. The `Context` thread-local mechanism maps to a goroutine-local pattern using `sync.Map` keyed on goroutine ID, or a context parameter threaded explicitly.

@@ -1,0 +1,88 @@
+---
+title: Lib/dis.py
+description: "dis: Python bytecode disassembler. dis(), disassemble(), get_instructions(), Instruction namedtuple, findlinestarts, stack_effect, opname/opmap tables."
+cpython_path: Lib/dis.py
+cpython_version: "3.14"
+lines: 590
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/dis.py" />
+
+`dis` disassembles Python bytecode into human-readable instruction listings. It is the primary tool for inspecting the output of the compiler. Since Python 3.12 the instruction format changed significantly: `RESUME`, cache entries, and `_SPECIALIZE_*` opcodes appear in the output.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `opname`, `opmap`, `hasconst`, `hasfree`, etc. | Opcode tables imported from `opcode` module |
+| 61-120 | `Instruction` | Named tuple: `opname`, `opcode`, `arg`, `argval`, `argrepr`, `offset`, `starts_line`, `is_jump_target` |
+| 121-220 | `get_instructions` | Iterator of `Instruction` objects for a code object |
+| 221-320 | `dis`, `disassemble` | Pretty-print disassembly to stdout or a stream |
+| 321-400 | `findlinestarts` | Map offsets to line numbers from `co_linetable` |
+| 401-470 | `stack_effect` | Compute stack effect of a single opcode |
+| 471-590 | `_get_instructions_bytes`, `_disassemble_bytes` | Low-level byte-level helpers |
+
+## Reading
+
+### `Instruction` namedtuple
+
+```python
+# CPython: Lib/dis.py:68 Instruction
+_Instruction = collections.namedtuple('_Instruction',
+    'opname opcode arg argval argrepr offset start_offset cache_offset '
+    'starts_line line_number end_line_number col_offset end_col_offset '
+    'is_jump_target positions')
+```
+
+Since Python 3.11+, each instruction carries precise source location: `line_number`, `col_offset`, `end_col_offset` from the `co_positions()` iterator.
+
+### `get_instructions`
+
+```python
+# CPython: Lib/dis.py:340 get_instructions
+def get_instructions(x, *, first_line=None, show_caches=False, adaptive=False):
+    co = _get_code_object(x)
+    linestarts = dict(findlinestarts(co))
+    exception_entries = _parse_exception_table(co)
+    return _get_instructions_bytes(co.co_code, co._varname_from_oparg,
+                                   co.co_consts, co.co_names,
+                                   linestarts=linestarts, ...)
+```
+
+`_get_code_object` accepts a function, method, class, module, string, or code object and extracts the `code` object.
+
+### Cache entries (Python 3.12+)
+
+Specializable opcodes are followed by "cache" words. `dis` can show or hide them via `show_caches`. Each specializable opcode has a known cache size stored in `_inline_cache_entries[opcode]`.
+
+```python
+# CPython: Lib/dis.py:192 _get_instructions_bytes (cache handling)
+cache_size = _inline_cache_entries[op]
+for i in range(cache_size):
+    if show_caches:
+        yield _make_cache_instruction(offset + 2 + i*2, ...)
+```
+
+### `stack_effect`
+
+Returns the net change in stack depth caused by a single instruction. Used by the compiler's `stackdepth` analysis and by tools that verify bytecode.
+
+```python
+# CPython: Lib/dis.py:112 stack_effect
+def stack_effect(opcode, oparg=None, *, jump=None):
+    ...
+    return _stack_effect(opcode, oparg, jump=jump)
+```
+
+`_stack_effect` is implemented in C (`_dis._stack_effect`).
+
+### `findlinestarts`
+
+Iterates over `code.co_linetable` (or `co_lnotab` in older protocols) to yield `(offset, lineno)` pairs where new source lines begin.
+
+## gopy notes
+
+Status: not yet ported. `dis` in gopy is primarily a debugging tool. The main dependency is access to `code.co_code` bytes and the opcode metadata tables. The `Instruction` namedtuple maps to a Go struct. `stack_effect` requires the full opcode metadata from `Include/internal/pycore_opcode_metadata.h`.
