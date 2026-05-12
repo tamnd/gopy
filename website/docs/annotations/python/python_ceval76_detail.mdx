@@ -1,0 +1,126 @@
+---
+title: Python/ceval.c (part 76)
+description: "Python/ceval.c part 76: LOAD_ATTR, LOAD_ATTR_INSTANCE_VALUE, LOAD_ATTR_METHOD_NO_DICT, STORE_ATTR."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers attribute load/store opcodes and their specializations. See `python_ceval75_detail` for `LOAD_GLOBAL`, `STORE_GLOBAL`, and `DELETE_GLOBAL`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_ATTR` | Generic attribute load |
+| 81-180 | `LOAD_ATTR_INSTANCE_VALUE` | Specialization: load from instance `__dict__` by index |
+| 181-280 | `LOAD_ATTR_MODULE` | Specialization: load from module dict by index |
+| 281-380 | `LOAD_ATTR_METHOD_NO_DICT` | Specialization: build bound method without instance dict |
+| 381-500 | `STORE_ATTR` / `STORE_ATTR_INSTANCE_VALUE` | Generic and fast attribute set |
+
+## Reading
+
+### `LOAD_ATTR`
+
+```c
+// CPython: Python/ceval.c:2700 LOAD_ATTR
+inst(LOAD_ATTR, (owner -- [self], attr)) {
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg >> 1);
+    if (oparg & 1) {
+        /* Method call form: push NULL+self or method+self */
+        int meth_found;
+        attr = _PyObject_GetMethod(owner, name, &meth_found);
+        if (meth_found) { PUSH(owner); }
+        else { PUSH(NULL); Py_DECREF(owner); }
+    } else {
+        attr = PyObject_GetAttr(owner, name);
+        Py_DECREF(owner);
+    }
+    ERROR_IF(attr == NULL, error);
+}
+```
+
+`x.name` compiles to `LOAD_ATTR`. When `oparg & 1` (method call form, used before `CALL`), CPython uses `_PyObject_GetMethod` which can return an unbound function + `self` to avoid allocating a bound method object.
+
+### `LOAD_ATTR_INSTANCE_VALUE`
+
+```c
+// CPython: Python/ceval.c:2760 LOAD_ATTR_INSTANCE_VALUE
+inst(LOAD_ATTR_INSTANCE_VALUE, (owner -- [null], attr)) {
+    /* oparg >> 1: attribute index in ob_dict */
+    _PyAttrCache *cache = (_PyAttrCache *)next_instr;
+    PyTypeObject *tp = Py_TYPE(owner);
+    DEOPT_IF(tp->tp_version_tag != cache->version);
+    assert(tp->tp_dictoffset > 0);
+    PyDictObject *dict = *(PyDictObject **)((char *)owner + tp->tp_dictoffset);
+    DEOPT_IF(dict == NULL);
+    DEOPT_IF(dict->ma_version_tag != cache->index);
+    PyDictUnicodeEntry *ep = ...;
+    attr = Py_NewRef(ep->me_value);
+    DEOPT_IF(attr == NULL);
+    Py_DECREF(owner);
+}
+```
+
+Once a `LOAD_ATTR` for `obj.x` is seen to always load from `obj.__dict__['x']` at the same slot, it specializes to a direct dict entry read. Checks `tp_version_tag` (type unchanged) and `dict->ma_version_tag` (dict not modified).
+
+### `LOAD_ATTR_MODULE`
+
+```c
+// CPython: Python/ceval.c:2820 LOAD_ATTR_MODULE
+inst(LOAD_ATTR_MODULE, (owner -- [null], attr)) {
+    _PyAttrCache *cache = (_PyAttrCache *)next_instr;
+    DEOPT_IF(!PyModule_CheckExact(owner));
+    PyDictObject *dict = ((PyModuleObject *)owner)->md_dict;
+    DEOPT_IF(dict->ma_version_tag != cache->version);
+    PyDictUnicodeEntry *ep = DK_UNICODE_ENTRIES(dict->ma_keys) + cache->index;
+    attr = Py_NewRef(ep->me_value);
+    Py_DECREF(owner);
+}
+```
+
+`import os; os.path` specializes to `LOAD_ATTR_MODULE`: reads directly from the module's `__dict__` by cached slot index, bypassing the generic attribute protocol.
+
+### `LOAD_ATTR_METHOD_NO_DICT`
+
+```c
+// CPython: Python/ceval.c:2880 LOAD_ATTR_METHOD_NO_DICT
+inst(LOAD_ATTR_METHOD_NO_DICT, (owner -- method, self)) {
+    /* For types without instance dicts (e.g., list, dict, str) */
+    _PyAttrCache *cache = (_PyAttrCache *)next_instr;
+    DEOPT_IF(Py_TYPE(owner)->tp_version_tag != cache->version);
+    PyObject *descr = cache->descr;
+    /* descr is a PyFunction or PyMethodDef slot */
+    method = Py_NewRef(descr);
+    self = owner;  /* push owner as self, no Py_DECREF */
+}
+```
+
+For built-in types like `list`, instance attributes are never stored in a `__dict__` (the type is fixed). This specialization pushes the descriptor directly as the callable and the object as `self`, forming a two-item call stack without allocating a `method` object.
+
+### `STORE_ATTR_INSTANCE_VALUE`
+
+```c
+// CPython: Python/ceval.c:2960 STORE_ATTR_INSTANCE_VALUE
+inst(STORE_ATTR_INSTANCE_VALUE, (owner, v --)) {
+    _PyAttrCache *cache = (_PyAttrCache *)next_instr;
+    DEOPT_IF(Py_TYPE(owner)->tp_version_tag != cache->version);
+    PyDictObject *dict = *(PyDictObject **)((char *)owner + tp->tp_dictoffset);
+    DEOPT_IF(dict == NULL || dict->ma_version_tag != cache->index);
+    PyObject *old_value = ep->me_value;
+    ep->me_value = v;  /* direct write */
+    Py_XDECREF(old_value);
+    Py_DECREF(owner);
+}
+```
+
+`obj.x = v` specialized to `STORE_ATTR_INSTANCE_VALUE` writes directly to the dict entry without calling `__setattr__`.
+
+## gopy notes
+
+`LOAD_ATTR` is in `vm/eval_simple.go`, calling `objects.GetAttr`. `LOAD_ATTR_INSTANCE_VALUE` reads from `objects.Instance.Dict` by slot index. `LOAD_ATTR_MODULE` reads `objects.Module.Dict`. `LOAD_ATTR_METHOD_NO_DICT` skips method allocation. Specialization logic is in `vm/specialize.go`.

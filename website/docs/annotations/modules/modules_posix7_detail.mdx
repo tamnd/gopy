@@ -1,0 +1,130 @@
+---
+title: Modules/posixmodule.c (part 7)
+description: "posixmodule.c part 7: os.open, os.read, os.write, os.close, os.pipe."
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/posixmodule.c" />
+
+This annotation covers low-level POSIX file descriptor operations. See `modules_posix6_detail` for `os.listdir`, `os.scandir`, `os.stat`, `os.lstat`, and `os.fstat`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `os.open` | Open a file, return an integer fd |
+| 81-160 | `os.read` / `os.readv` | Read from a file descriptor |
+| 161-240 | `os.write` / `os.writev` | Write to a file descriptor |
+| 241-360 | `os.close` | Close a file descriptor |
+| 361-500 | `os.pipe` / `os.pipe2` | Create a pipe pair |
+
+## Reading
+
+### `os.open`
+
+```c
+// CPython: Modules/posixmodule.c:4820 os_open_impl
+static int
+os_open_impl(PyObject *module, path_t *path, int flags, int mode, int dir_fd)
+{
+    int fd;
+    Py_BEGIN_ALLOW_THREADS
+#ifdef HAVE_OPENAT
+    if (dir_fd != DEFAULT_DIR_FD)
+        fd = openat(dir_fd, path->narrow, flags, mode);
+    else
+#endif
+        fd = open(path->narrow, flags, mode);
+    Py_END_ALLOW_THREADS
+    if (fd < 0) return posix_error();
+    return fd;
+}
+```
+
+`os.open` returns a raw integer file descriptor, unlike `open()` which returns a buffered file object. `flags` uses `os.O_RDONLY`, `os.O_WRONLY`, `os.O_CREAT`, etc. The `dir_fd` parameter enables `openat` for directory-relative paths.
+
+### `os.read`
+
+```c
+// CPython: Modules/posixmodule.c:5020 os_read_impl
+static PyObject *
+os_read_impl(PyObject *module, int fd, Py_ssize_t length)
+{
+    PyObject *buffer = PyBytes_FromStringAndSize(NULL, length);
+    Py_BEGIN_ALLOW_THREADS
+    n = read(fd, PyBytes_AS_STRING(buffer), length);
+    Py_END_ALLOW_THREADS
+    if (n < 0) {
+        Py_DECREF(buffer);
+        return posix_error();
+    }
+    if (n != length) _PyBytes_Resize(&buffer, n);
+    return buffer;
+}
+```
+
+`os.read(fd, 4096)` reads up to 4096 bytes and returns a `bytes` object. The GIL is released during the syscall. If fewer than `length` bytes are available (EOF or partial read), the returned bytes object is resized.
+
+### `os.write`
+
+```c
+// CPython: Modules/posixmodule.c:5060 os_write_impl
+static Py_ssize_t
+os_write_impl(PyObject *module, int fd, Py_buffer *data)
+{
+    Py_ssize_t size;
+    Py_BEGIN_ALLOW_THREADS
+    size = write(fd, data->buf, (size_t)data->len);
+    Py_END_ALLOW_THREADS
+    if (size < 0) return posix_error();
+    return size;
+}
+```
+
+`os.write(fd, b'hello')` returns the number of bytes actually written (may be less than requested on some file types). Accepts any buffer protocol object.
+
+### `os.close`
+
+```c
+// CPython: Modules/posixmodule.c:5100 os_close_impl
+static PyObject *
+os_close_impl(PyObject *module, int fd)
+{
+    int res;
+    Py_BEGIN_ALLOW_THREADS
+    res = close(fd);
+    Py_END_ALLOW_THREADS
+    if (res < 0) return posix_error();
+    Py_RETURN_NONE;
+}
+```
+
+`os.close(fd)` must be called once for each file descriptor returned by `os.open` or `os.pipe`. Closing an already-closed fd raises `OSError: [Errno 9] Bad file descriptor`.
+
+### `os.pipe`
+
+```c
+// CPython: Modules/posixmodule.c:5140 os_pipe_impl
+static PyObject *
+os_pipe_impl(PyObject *module)
+{
+    int fds[2];
+    int res;
+    Py_BEGIN_ALLOW_THREADS
+    res = pipe(fds);
+    Py_END_ALLOW_THREADS
+    if (res < 0) return posix_error();
+    return Py_BuildValue("(ii)", fds[0], fds[1]);
+}
+```
+
+`r, w = os.pipe()` returns `(read_fd, write_fd)`. Data written to `w` can be read from `r`. Used for inter-process communication: parent keeps one end, child keeps the other. `os.pipe2(os.O_CLOEXEC)` creates the pipe with `O_CLOEXEC` set atomically.
+
+## gopy notes
+
+`os.open` is `module/os.Open` in `module/os/module.go`. It calls `syscall.Open`. `os.read` calls `syscall.Read` and returns `objects.Bytes`. `os.write` calls `syscall.Write`. `os.close` calls `syscall.Close`. `os.pipe` calls `syscall.Pipe` and returns a 2-tuple of ints.

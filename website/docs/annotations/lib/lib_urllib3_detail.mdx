@@ -1,0 +1,136 @@
+---
+title: Lib/urllib (part 3)
+description: "urllib part 3: urllib.request.urlopen, Request, HTTPHandler, ProxyHandler."
+cpython_path: Lib/urllib/request.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/urllib/request.py" />
+
+This annotation covers HTTP request dispatching. See `lib_urllib2_detail` for `urllib.parse.urlparse`, `urlencode`, `quote`, and `unquote`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `urllib.request.urlopen` | Top-level HTTP/FTP/file open |
+| 81-160 | `Request` class | Encapsulate URL, headers, method |
+| 161-240 | `OpenerDirector` | Chain of handlers |
+| 241-360 | `HTTPHandler` | Open an HTTP URL |
+| 361-500 | `ProxyHandler` | Inject proxy from environment |
+
+## Reading
+
+### `urllib.request.urlopen`
+
+```python
+# CPython: Lib/urllib/request.py:220 urlopen
+def urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+            *, cafile=None, capath=None, cadefault=False, context=None):
+    global _opener
+    if context is not None:
+        opener = build_opener(HTTPSHandler(context=context))
+    elif cafile or capath or cadefault:
+        opener = build_opener(HTTPSHandler(...))
+    else:
+        if _opener is None:
+            _opener = build_opener()
+        opener = _opener
+    return opener.open(url, data, timeout)
+```
+
+`urlopen` builds (or reuses) a global `OpenerDirector` and delegates to it. Passing `context` (an `ssl.SSLContext`) replaces the default `HTTPSHandler` for that call only. The module-level `_opener` is the lazy global.
+
+### `Request` class
+
+```python
+# CPython: Lib/urllib/request.py:340 Request.__init__
+class Request:
+    def __init__(self, url, data=None, headers={}, origin_req_host=None,
+                 unverifiable=False, method=None):
+        self.full_url = url
+        self.data = data
+        self._tunnel_host = None
+        self.headers = {}
+        for key, value in headers.items():
+            self.add_header(key, value)
+        self.unverifiable = unverifiable
+        self.method = method
+
+    @property
+    def full_url(self):
+        return self._full_url
+
+    @full_url.setter
+    def full_url(self, url):
+        self._full_url, self.fragment = splittag(url)
+        self.type, self._r_host = splittype(self._full_url)
+```
+
+`Request` separates the URL into components. `method=None` means auto-detect: `GET` if `data` is `None`, `POST` if `data` is not `None`.
+
+### `OpenerDirector`
+
+```python
+# CPython: Lib/urllib/request.py:440 OpenerDirector.open
+class OpenerDirector:
+    def open(self, fullurl, data=None, timeout=...):
+        req = fullurl if isinstance(fullurl, Request) else Request(fullurl, data)
+        req.timeout = timeout
+        protocol = req.type
+        # Call all request handlers (e.g. ProxyHandler)
+        meth_name = protocol + '_request'
+        for processor in self.process_request.get(protocol, []):
+            meth = getattr(processor, meth_name)
+            req = meth(req)
+        # Open
+        r = self._open(req, data)
+        # Call all response handlers
+        ...
+        return r
+```
+
+Handlers are called in priority order. Request handlers (e.g., `ProxyHandler`) can modify the `Request` object before it is opened. Response handlers (e.g., `HTTPErrorProcessor`) can follow redirects or raise `HTTPError`.
+
+### `HTTPHandler`
+
+```python
+# CPython: Lib/urllib/request.py:1360 HTTPHandler.http_open
+class HTTPHandler(AbstractHTTPHandler):
+    def http_open(self, req):
+        return self.do_open(http.client.HTTPConnection, req)
+
+    def do_open(self, http_class, req, **http_conn_args):
+        host = req.host
+        h = http_class(host, timeout=req.timeout, **http_conn_args)
+        ...
+        h.request(req.get_method(), req.selector, req.data, headers)
+        r = h.getresponse()
+        return addinfourl(r, r.msg, req.full_url, r.status)
+```
+
+`HTTPHandler` creates an `http.client.HTTPConnection`, sends the request, and wraps the response in `addinfourl` (a file-like object with `.status`, `.headers`, `.url`).
+
+### `ProxyHandler`
+
+```python
+# CPython: Lib/urllib/request.py:760 ProxyHandler
+class ProxyHandler(BaseHandler):
+    def __init__(self, proxies=None):
+        if proxies is None:
+            proxies = getproxies()  # reads HTTP_PROXY, HTTPS_PROXY, etc.
+        for type, url in proxies.items():
+            setattr(self, '%s_open' % type,
+                    lambda r, proxy=url, type=type, meth=self.proxy_open:
+                           meth(r, proxy, type))
+```
+
+`ProxyHandler` reads `HTTP_PROXY`/`HTTPS_PROXY` environment variables and dynamically creates `http_open`/`https_open` methods that rewrite the request to go through the proxy.
+
+## gopy notes
+
+`urlopen` is `module/urllib.URLOpen` in `module/urllib/module.go`. It uses `net/http.Get` or `net/http.Post`. `Request` is `module/urllib.Request`. `HTTPHandler.do_open` creates an `http.Client` with the configured timeout. `ProxyHandler` uses `http.ProxyFromEnvironment`.

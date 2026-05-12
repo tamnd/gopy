@@ -1,0 +1,125 @@
+---
+title: Objects/rangeobject.c (part 5)
+description: "rangeobject.c part 5: range.__contains__, range.__getitem__, range.__len__, RangeIter."
+cpython_path: Objects/rangeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/rangeobject.c" />
+
+This annotation covers range membership testing and indexing. See `objects_rangeobject4_detail` for `range.__new__`, `range.start`/`stop`/`step`, and `range.__reversed__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `range.__len__` | Exact count of elements |
+| 81-160 | `range.__contains__` | O(1) membership test |
+| 161-240 | `range.__getitem__` | Index and slice access |
+| 241-360 | `rangeiterobject` | Fast iterator over range |
+| 361-500 | `range.index` / `range.count` | Search and count methods |
+
+## Reading
+
+### `range.__len__`
+
+```c
+// CPython: Objects/rangeobject.c:80 range_length
+static PyObject *
+range_length(rangeobject *r)
+{
+    return compute_range_length(r->start, r->stop, r->step);
+}
+
+static PyObject *
+compute_range_length(PyObject *start, PyObject *stop, PyObject *step)
+{
+    /* len = max(0, ceil((stop - start) / step)) */
+    PyObject *diff = PyNumber_Subtract(stop, start);
+    PyObject *result = PyNumber_FloorDivide(diff, step);
+    /* Adjust for ceiling division */
+    ...
+}
+```
+
+`len(range(1, 10, 2))` is 5 (values: 1, 3, 5, 7, 9). The calculation handles negative steps: `len(range(10, 0, -2))` is also 5.
+
+### `range.__contains__`
+
+```c
+// CPython: Objects/rangeobject.c:140 range_contains
+static int
+range_contains_long(rangeobject *r, PyObject *ob)
+{
+    /* Check: start <= ob < stop (or start >= ob > stop for negative step) */
+    /* Check: (ob - start) % step == 0 */
+    int cmp1, cmp2, cmp3;
+    PyObject *tmp = PyNumber_Subtract(ob, r->start);
+    PyObject *mod = PyNumber_Remainder(tmp, r->step);
+    int is_member = (PyObject_RichCompareBool(mod, _PyLong_Zero, Py_EQ)
+                     && in_bounds);
+    ...
+}
+```
+
+`42 in range(0, 100, 3)` does not iterate — it computes in O(1) using modular arithmetic: check bounds and check `(42 - 0) % 3 == 0`. This makes `range` useful as a set-of-integers alternative for membership tests.
+
+### `range.__getitem__`
+
+```c
+// CPython: Objects/rangeobject.c:200 range_item
+static PyObject *
+range_item(rangeobject *r, Py_ssize_t i)
+{
+    Py_ssize_t len = PyLong_AsSsize_t(range_length(r));
+    if (i < 0) i += len;
+    if (i < 0 || i >= len) {
+        PyErr_SetString(PyExc_IndexError, "range object index out of range");
+        return NULL;
+    }
+    /* result = start + i * step */
+    PyObject *idx = PyLong_FromSsize_t(i);
+    PyObject *scaled = PyNumber_Multiply(idx, r->step);
+    return PyNumber_Add(r->start, scaled);
+}
+```
+
+`range(2, 20, 3)[4]` = `2 + 4*3 = 14`. Negative indexing wraps around. Slice of a range returns a new range object (O(1), not O(n)).
+
+### `rangeiterobject`
+
+```c
+// CPython: Objects/rangeobject.c:320 rangeiter_next
+static PyObject *
+rangeiter_next(rangeiterobject *r)
+{
+    if (r->index >= r->len) return NULL;  /* StopIteration */
+    /* current = start + index * step */
+    long result = r->start + r->index * r->step;
+    r->index++;
+    return PyLong_FromLong(result);
+}
+```
+
+The fast path uses C `long` arithmetic when `start`, `stop`, `step` all fit in a C `long`. For large ranges (bigint), it falls back to `PyNumber_Add`/`PyNumber_Multiply`. The fast path is the common case.
+
+### `range.index`
+
+```python
+# CPython: Objects/rangeobject.c:440 range_index
+def index(self, value):
+    if value not in self:
+        raise ValueError(f'{value} is not in range')
+    # Compute: (value - start) // step
+    return (value - self.start) // self.step
+```
+
+`range(2, 20, 3).index(14)` returns 4. Like `__contains__`, it is O(1) using arithmetic, not a linear scan.
+
+## gopy notes
+
+`range.__len__` is `objects.Range.Len` in `objects/range.go`. `__contains__` computes `(x - start) % step == 0` using `big.Int` for safety. `__getitem__` is `objects.Range.GetItem`. `rangeiterobject` is `objects.RangeIter` with a `index int64` field.
