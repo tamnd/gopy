@@ -236,7 +236,7 @@ func typeNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
 		}
 		bases = append(bases, t)
 	}
-	t := NewUserType(nameObj.v, bases, ns)
+	t := NewUserTypeKwargs(nameObj.v, bases, ns, kwargs)
 	// Stamp the metaclass: the new class's type is mcls, not the
 	// default typeType. This mirrors CPython's PyType_Ready setting
 	// Py_TYPE(type) to metatype.
@@ -274,7 +274,7 @@ func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 		}
 		bases = append(bases, t)
 	}
-	return NewUserType(nameObj.v, bases, ns), nil
+	return NewUserTypeKwargs(nameObj.v, bases, ns, kwargs), nil
 }
 
 // bindDescr applies the descriptor protocol to descr if its type

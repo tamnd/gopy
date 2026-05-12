@@ -44,7 +44,7 @@ otherwise. Final gate closes #544.
 | 3 | D `funcobject.c` | PyStaticMethod_Type (all `sm_*` functions) | - | done |
 | 4 | D `funcobject.c` | PyFunction_Type (all `func_*` functions) | - | done |
 | 5 | C `classobject.c` | PyMethod_Type (all `method_*` functions) | - | done |
-| 6 | B `typeobject.c` | `type_new` pipeline (`type_new_*` functions) | 1,2,3,4,5 | partial |
+| 6 | B `typeobject.c` | `type_new` pipeline (`type_new_*` functions) | 1,2,3,4,5 | done |
 | 7 | B `typeobject.c` | `inherit_slots` (every slot edge) | 6 | partial |
 | 8 | E `ceval.c` | STORE_NAME / LOAD_NAME / DELETE_NAME | - | partial |
 | Gate | - | enum + re + fnmatch smoke | all | pending |
@@ -292,29 +292,50 @@ implementations earlier in the file. Every row must land.
 
 | C function | Purpose | gopy hook | Status |
 |------------|---------|-----------|--------|
-| `type_new` | top-level dispatch | `NewUserType` | partial |
+| `type_new` | top-level dispatch | `NewUserType` / `NewUserTypeKwargs` | done |
 | `type_new_get_bases` | resolve bases tuple | inline in `NewUserType` | done |
 | `type_new_alloc` | allocate type object | `NewType` | done |
-| `type_new_set_attrs` | stamp `__module__` / `__qualname__` / `__doc__`, classmethod-wrap PEP 487 hooks | partial (classmethod wrap done; defaults missing) | partial |
+| `type_new_set_attrs` | stamp `__module__` / `__qualname__` / `__doc__`, classmethod-wrap PEP 487 hooks | `copyNamespaceToType` | done |
 | `type_new_set_names` | PEP 487 `__set_name__` pass | `typeSetNames` | done |
-| `type_init_subclass` | PEP 487 `__init_subclass__` pass | `typeInitSubclass` | done |
+| `type_init_subclass` | PEP 487 `__init_subclass__` pass with kwargs | `typeInitSubclass` | done |
 | `type_new_descriptors` | `__slots__` -> MemberDescr table | `installSlots` | done |
 | `type_new_impl` | mro computation | `NewType` | done |
-| `type_new_set_doc` | docstring stamping | inline | pending |
-| `type_call` | metaclass call -> tp_new + tp_init | `TypeType.Call` | partial |
+| `type_new_set_doc` | docstring stamping | `emitInnerClassCode` (compile-time) | done |
+| `type_call` | metaclass call -> tp_new + tp_init | `TypeType.Call` | done |
 | `type_init` | type.__init__ | n/a (Go init) | done |
 | `type_getattro` | type attribute lookup | `typeGetAttr` | done |
 | `type_setattro` | type attribute set | `typeSetAttr` | done |
-| `fixup_slot_dispatchers` | wire C slots from Python dunders | `fixupSlotDispatchers` | partial |
+| `type_qualname` / `type_set_qualname` | `__qualname__` getset | `typeGetQualname` / `typeSetQualname` | done |
+| `fixup_slot_dispatchers` | wire C slots from Python dunders | `fixupSlotDispatchers` | partial (Phase 7 audit) |
 
 ### Gates
 
-| Gate | Command | Expected |
-|------|---------|----------|
-| 6.1 | `gopy -c 'class C: """doc"""\nprint(C.__doc__)'` | `doc` |
-| 6.2 | `gopy -c 'class C: pass\nprint(C.__module__)'` | `__main__` |
-| 6.3 | `gopy -c 'class C:\n class D: pass\nprint(C.D.__qualname__)'` | `C.D` |
-| 6.4 | `gopy -c 'class M(type):\n  def __init_subclass__(cls, **kw): cls.x=kw["x"]\nclass C(metaclass=M, x=1): pass\nprint(C.x)'` | `1` |
+| Gate | Command | Expected | Status |
+|------|---------|----------|--------|
+| 6.1 | `gopy -c 'class C:\n """doc"""\nprint(C.__doc__)'` | `doc` | pass |
+| 6.2 | `gopy -c 'class C: pass\nprint(C.__module__)'` | `__main__` | pass |
+| 6.3 | `gopy -c 'class C:\n class D: pass\nprint(C.D.__qualname__)'` | `C.D` | pass |
+| 6.4 | `gopy -c 'class B:\n def __init_subclass__(cls, **kw): cls.x = kw["x"]\nclass C(B, x=1): pass\nprint(C.x)'` | `1` | pass |
+
+### Side fixes shipped under Phase 6
+
+- `Type.Qualname` field added. `__qualname__` no longer shadows `__name__`,
+  so nested classes report the dotted path (`C.D`) instead of the bare
+  `D`. `typeSetQualname` honours the heap-type check the way CPython's
+  `type_set_qualname` does.
+- `copyNamespaceToType` now pulls `__qualname__` out of the namespace
+  and stamps it on `t.Qualname` directly. The raw key is skipped from
+  the descr table so the getset (not a stale descriptor) wins on
+  lookup.
+- `emitInnerClassCode` extracts the body's leading bare-string and
+  emits `LOAD_CONST docstring` + `STORE_NAME __doc__` after the
+  qualname store. Mirrors CPython's class-body docstring branch
+  without disturbing the existing `consumeDocstring` flow (which
+  pins to `consts[0]`, conflicting with the qualname const slot here).
+- `typeInitSubclass` now takes the class-creation kwargs. The path
+  from `__build_class__` -> `typeMetaCall` -> `NewUserTypeKwargs`
+  threads them so `__init_subclass__(cls, **kw)` actually sees the
+  PEP 487 keyword args.
 
 ### CPython citations
 
@@ -326,6 +347,9 @@ implementations earlier in the file. Every row must land.
 | 4 | `Objects/typeobject.c:4549` `type_new_set_names` |
 | 5 | `Objects/typeobject.c:4595` `type_init_subclass` |
 | 6 | `Objects/typeobject.c:9874` `fixup_slot_dispatchers` |
+| 7 | `Objects/typeobject.c:984` `type_qualname` |
+| 8 | `Objects/typeobject.c:1003` `type_set_qualname` |
+| 9 | `Python/codegen.c` `codegen_class_body` (docstring branch) |
 
 ## Phase 7 - `Objects/typeobject.c` inherit_slots
 

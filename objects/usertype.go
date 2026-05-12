@@ -26,6 +26,15 @@ import "fmt"
 //
 // CPython: Objects/typeobject.c:4153 type_new
 func NewUserType(name string, bases []*Type, ns *Dict) *Type {
+	return NewUserTypeKwargs(name, bases, ns, nil)
+}
+
+// NewUserTypeKwargs is the kwargs-aware variant of NewUserType. The
+// extra kwargs (metaclass-strip already done by the caller) flow
+// through to __init_subclass__ so PEP 487 hooks see them.
+//
+// CPython: Objects/typeobject.c:4153 type_new (the mkw kwargs path)
+func NewUserTypeKwargs(name string, bases []*Type, ns *Dict, kwargs map[string]Object) *Type {
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
@@ -109,7 +118,7 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 	if err := typeSetNames(t, ns); err != nil {
 		panic(err)
 	}
-	if err := typeInitSubclass(t); err != nil {
+	if err := typeInitSubclass(t, kwargs); err != nil {
 		panic(err)
 	}
 	return t
@@ -141,6 +150,14 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 			if u, ok := v.(*Unicode); ok {
 				t.Module = u.v
 			}
+		case "__qualname__":
+			if u, ok := v.(*Unicode); ok {
+				t.Qualname = u.v
+			}
+			// __qualname__ is also stored on the type via the getset
+			// path (typeSetQualname), so do not also stash a raw descr
+			// for it: the descr table would shadow the getset.
+			continue
 		}
 		SetTypeDescr(t, s.v, v)
 	}
@@ -193,10 +210,12 @@ func typeSetNames(t *Type, ns *Dict) error {
 // freshly built subclass. CPython runs this from type_new after the
 // type is fully constructed; it walks the MRO starting one position
 // past `t` (via super(t, t)) so the subclass's own override does not
-// recursively reapply.
+// recursively reapply. kwargs is the leftover class-creation kwargs
+// after the metaclass has been pulled out, so subclass hooks see
+// `class C(Base, foo=1):` as init_subclass(cls, foo=1).
 //
 // CPython: Objects/typeobject.c:4595 type_init_subclass
-func typeInitSubclass(t *Type) error {
+func typeInitSubclass(t *Type, kwargs map[string]Object) error {
 	for i := 1; i < len(t.MRO); i++ {
 		base := t.MRO[i]
 		descr, _ := lookupOnType(base, "__init_subclass__")
@@ -214,7 +233,16 @@ func typeInitSubclass(t *Type) error {
 		} else {
 			callable = descr
 		}
-		_, err := Call(callable, NewTuple(nil), nil)
+		var kwd *Dict
+		if len(kwargs) > 0 {
+			kwd = NewDict()
+			for k, v := range kwargs {
+				if err := kwd.SetItem(NewStr(k), v); err != nil {
+					return err
+				}
+			}
+		}
+		_, err := Call(callable, NewTuple(nil), kwd)
 		if err != nil {
 			return err
 		}
