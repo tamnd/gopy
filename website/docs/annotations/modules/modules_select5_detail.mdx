@@ -1,0 +1,98 @@
+---
+title: Modules/selectmodule.c (part 5)
+description: "selectmodule.c part 5: select.epoll, epoll.register/modify/unregister, epoll.poll, edge vs level trigger."
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/selectmodule.c" />
+
+This annotation covers Linux epoll support. See `modules_select4_detail` for `select.select`, `select.poll`, and `select.kqueue`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `select.epoll.__init__` | Create an epoll file descriptor |
+| 81-160 | `epoll.register` | Add a file descriptor to the epoll set |
+| 161-240 | `epoll.modify` | Change events for a registered fd |
+| 241-320 | `epoll.unregister` | Remove an fd from the epoll set |
+| 321-500 | `epoll.poll` | Wait for events, return list of `(fd, event)` |
+
+## Reading
+
+### `epoll.register`
+
+```c
+// CPython: Modules/selectmodule.c:1480 pyepoll_internal_ctl
+static PyObject *
+pyepoll_internal_ctl(int epfd, int op, int fd, unsigned int events)
+{
+    struct epoll_event ev;
+    ev.events = events;
+    ev.data.fd = fd;
+    int result = epoll_ctl(epfd, op, fd, &ev);
+    if (result < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`epoll.register(fd, select.EPOLLIN | select.EPOLLOUT)` calls `epoll_ctl(EPOLL_CTL_ADD, ...)`. `select.EPOLLET` adds edge-triggered mode, `select.EPOLLONESHOT` fires once then requires re-arming.
+
+### `epoll.poll`
+
+```c
+// CPython: Modules/selectmodule.c:1560 pyepoll_poll
+static PyObject *
+pyepoll_poll(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    double dtimeout = -1.0;
+    int maxevents = FD_SETSIZE;
+    struct epoll_event *evs = PyMem_New(struct epoll_event, maxevents);
+    
+    int nfds;
+    Py_BEGIN_ALLOW_THREADS
+    nfds = epoll_wait(self->epfd, evs, maxevents, (int)(dtimeout * 1000));
+    Py_END_ALLOW_THREADS
+    
+    PyObject *elist = PyList_New(nfds);
+    for (int i = 0; i < nfds; i++) {
+        PyList_SET_ITEM(elist, i,
+            PyTuple_Pack(2, PyLong_FromLong(evs[i].data.fd),
+                            PyLong_FromLong(evs[i].events)));
+    }
+    PyMem_Free(evs);
+    return elist;
+}
+```
+
+`epoll.poll(timeout)` blocks at most `timeout` seconds, then returns a list of `(fd, events)` tuples. The GIL is released during `epoll_wait` so other threads can run.
+
+### Edge vs level triggering
+
+```c
+// CPython: Modules/selectmodule.c:1420 epoll constants
+/*
+ * Level-triggered (default, EPOLLIN):
+ *   epoll.poll() returns the fd as long as data is available.
+ *   If you don't read all data, it fires again on the next poll.
+ *
+ * Edge-triggered (EPOLLIN | EPOLLET):
+ *   epoll.poll() fires only when the state changes (new data arrives).
+ *   You must read until EAGAIN or risk missing events.
+ *   Used for non-blocking sockets for highest performance.
+ */
+```
+
+Edge-triggered mode requires draining the read buffer completely on each notification. Missing a read means no further notification until new data arrives.
+
+## gopy notes
+
+`epoll.register` is `module/select.EpollRegister` in `module/select/module.go`. It calls `syscall.EpollCtl(EPOLL_CTL_ADD, ...)`. `epoll.poll` calls `syscall.EpollWait` with the GIL released via `runtime.LockOSThread` + unlocking. The event list is returned as `objects.NewList([]objects.Object{...})`.

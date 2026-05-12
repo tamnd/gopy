@@ -1,0 +1,78 @@
+---
+title: Python/ceval.c (part 50)
+description: "Python/ceval.c part 50: FOR_ITER specializations — FOR_ITER_LIST, FOR_ITER_TUPLE, FOR_ITER_RANGE, FOR_ITER_GEN."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `FOR_ITER` specializations for the most common iterator types. See `python_ceval49_detail` for `SEND`, `YIELD_VALUE`, and async iteration.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `FOR_ITER_LIST` | Specialization for `list_iterator` |
+| 81-160 | `FOR_ITER_TUPLE` | Specialization for `tuple_iterator` |
+| 161-240 | `FOR_ITER_RANGE` | Specialization for `range_iterator` |
+| 241-320 | `FOR_ITER_GEN` | Specialization for generator `__next__` |
+| 321-500 | `FOR_ITER` (generic) | General fallback via `tp_iternext` |
+
+## Reading
+
+### `FOR_ITER_LIST`
+
+```c
+// CPython: Python/ceval.c:4080 FOR_ITER_LIST
+inst(FOR_ITER_LIST, (unused/2, iter -- iter, next)) {
+    DEOPT_IF(Py_TYPE(iter) != &PyListIter_Type);
+    _PyListIterObject *it = (_PyListIterObject *)iter;
+    DEOPT_IF(it->it_index >= PyList_GET_SIZE(it->it_seq));
+    next = Py_NewRef(PyList_GET_ITEM(it->it_seq, it->it_index++));
+    DISPATCH();
+}
+```
+
+Direct index into `ob_item`. The guard checks the iterator type and bounds. No function call overhead: just a load and an increment.
+
+### `FOR_ITER_RANGE`
+
+```c
+// CPython: Python/ceval.c:4140 FOR_ITER_RANGE
+inst(FOR_ITER_RANGE, (unused/2, iter -- iter, next)) {
+    DEOPT_IF(Py_TYPE(iter) != &PyRangeIter_Type);
+    _PyRangeIterObject *r = (_PyRangeIterObject *)iter;
+    DEOPT_IF(r->len <= 0);
+    next = PyLong_FromLong(r->start);
+    r->start += r->step;
+    r->len--;
+    DISPATCH();
+}
+```
+
+`for i in range(n)` is the most common loop in Python. The specialization reads `start`, advances it by `step`, decrements `len`. No allocation for small integers that hit the `[−5, 256]` free list.
+
+### `FOR_ITER_GEN`
+
+```c
+// CPython: Python/ceval.c:4200 FOR_ITER_GEN
+inst(FOR_ITER_GEN, (unused/2, iter -- iter, next)) {
+    DEOPT_IF(!PyGen_CheckExact(iter));
+    PyGenObject *gen = (PyGenObject *)iter;
+    DEOPT_IF(gen->gi_frame_state == FRAME_COMPLETED);
+    /* Inline generator advancement */
+    _PyInterpreterFrame *gen_frame = (_PyInterpreterFrame *)gen->gi_iframe;
+    DISPATCH_INLINED(gen_frame);
+}
+```
+
+Generator `for` loops inline the generator frame switch. Instead of calling `gen.__next__()`, the interpreter switches directly to the generator's frame, avoiding the overhead of a Python call.
+
+## gopy notes
+
+`FOR_ITER_LIST` is in `vm/eval_simple.go`. It reads directly from `objects.List.Items[iter.Index]`. `FOR_ITER_RANGE` reads from `rangeIter.Start` and advances it. `FOR_ITER_GEN` calls `vm.evalGen` inline on the generator frame. All three deoptimize to the generic `FOR_ITER` which calls `objects.IterNext`.

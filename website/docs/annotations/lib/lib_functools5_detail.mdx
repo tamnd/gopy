@@ -1,0 +1,101 @@
+---
+title: Lib/functools.py (part 5)
+description: "functools.py part 5: lru_cache implementation, cache_info, cache_clear, typed argument hashing."
+cpython_path: Lib/functools.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/functools.py" />
+
+This annotation covers `lru_cache` internals. See `module_functools4_detail` for `reduce`, `partial`, `singledispatch`, and `cached_property`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `lru_cache` decorator | Memoize with a bounded LRU cache |
+| 81-180 | Cache key construction | Hash args + kwargs into a single key |
+| 181-280 | LRU linked list | Move-to-front on hit, evict on miss |
+| 281-360 | `cache_info` / `cache_clear` | Inspect and reset statistics |
+| 361-500 | `typed=True` | Keep separate cache entries by type |
+
+## Reading
+
+### `lru_cache` key construction
+
+```python
+# CPython: Lib/functools.py:480 _make_key
+_KWD_MARK = object()
+
+def _make_key(args, kwds, typed, kwd_mark=(_KWD_MARK,),
+              fasttypes={int, str}, type=type, len=len):
+    """Make a cache key from optionally typed positional and keyword arguments."""
+    key = args
+    if kwds:
+        key += kwd_mark
+        for item in kwds.items():
+            key += item
+    if typed:
+        key += tuple(type(v) for v in args)
+        if kwds:
+            key += tuple(type(v) for v in kwds.values())
+    if len(key) == 1 and type(key[0]) in fasttypes:
+        return key[0]
+    return _HashedSeq(key)
+```
+
+The cache key is a tuple of positional args, a sentinel, keyword arg pairs, and optionally types. `_HashedSeq` wraps the key and pre-computes its hash. Single-int and single-str keys skip the wrapping for speed.
+
+### LRU linked list
+
+```python
+# CPython: Lib/functools.py:540 lru_cache_wrapper
+class lru_cache_wrapper:
+    # Cache is a dict mapping key -> [PREV, NEXT, KEY, RESULT]
+    # Doubly linked list: root<->most_recent<->...<->least_recent<->root
+
+    def __call__(self, *args, **kwds):
+        key = make_key(args, kwds, typed)
+        link = cache.get(key)
+        if link is not None:
+            # Cache hit: move to front (most recently used)
+            link_prev, link_next, _key, result = link
+            link_prev[NEXT] = link_next
+            link_next[PREV] = link_prev
+            last = root[PREV]
+            last[NEXT] = root[PREV] = link
+            link[PREV] = last
+            link[NEXT] = root
+            hits += 1
+            return result
+        # Cache miss
+        result = user_function(*args, **kwds)
+        if len(cache) >= maxsize:
+            # Evict least recently used
+            oldroot = root
+            ...
+        cache[key] = [...]
+        misses += 1
+        return result
+```
+
+The LRU list is a circular doubly linked list where `root` serves as the sentinel node. Cache hits splice the node out of its current position and reinsert it at the tail. Eviction removes the head (oldest).
+
+### `cache_info`
+
+```python
+# CPython: Lib/functools.py:640 cache_info
+def cache_info():
+    """Report cache statistics."""
+    return _CacheInfo(hits, misses, maxsize, len(cache))
+```
+
+`f.cache_info()` returns a named tuple: `CacheInfo(hits=..., misses=..., maxsize=128, currsize=...)`. `f.cache_clear()` empties both the dict and the linked list.
+
+## gopy notes
+
+`lru_cache` is `module/functools.LRUCache` in `module/functools/module.go`. The cache is a `map[objects.Object]cacheEntry` where each entry is a struct with `prev`, `next`, `key`, `result`. `cache_info` returns `objects.NewNamedTuple("CacheInfo", ...)`. The `typed=True` case appends type objects to the key tuple.

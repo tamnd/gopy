@@ -1,0 +1,99 @@
+---
+title: Objects/unicodeobject.c (part 7)
+description: "Objects/unicodeobject.c part 7: str.join, str.replace, str.translate, str.maketrans."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers string transformation methods. See the earlier unicodeobject parts for `str.split`, `str.find`, `str.encode`, and intern table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `str.join` | Join an iterable of strings |
+| 81-180 | `str.replace` | Replace all occurrences of a substring |
+| 181-280 | `str.maketrans` | Build translation table |
+| 281-400 | `str.translate` | Apply translation table |
+| 401-500 | `str.expandtabs` | Replace tabs with spaces |
+
+## Reading
+
+### `str.join`
+
+```c
+// CPython: Objects/unicodeobject.c:9480 unicode_join
+static PyObject *
+unicode_join(PyObject *self, PyObject *iterable)
+{
+    /* Two passes: first collect all items into a list and measure total length,
+       then write them all into one allocation. */
+    PyObject *items = PySequence_Fast(iterable, "can only join an iterable");
+    Py_ssize_t seqlen = PySequence_Fast_GET_SIZE(items);
+    if (seqlen == 0) return PyUnicode_New(0, 0);
+    if (seqlen == 1) return PySequence_Fast_GET_ITEM(items, 0);
+    /* First pass: validate types and compute total length */
+    Py_ssize_t sz = 0;
+    for (Py_ssize_t i = 0; i < seqlen; i++) {
+        sz += PyUnicode_GET_LENGTH(item) + (i > 0 ? seplen : 0);
+    }
+    /* Second pass: write into a single buffer */
+    PyObject *res = PyUnicode_New(sz, maxchar);
+    ...
+}
+```
+
+`join` is O(n) in total output length: one allocation, one write pass. This is why `''.join(list_of_strings)` is much faster than `+=` in a loop.
+
+### `str.replace`
+
+```c
+// CPython: Objects/unicodeobject.c:9920 unicode_replace_impl
+static PyObject *
+unicode_replace_impl(PyObject *str, PyObject *substr, PyObject *replstr,
+                     Py_ssize_t count)
+{
+    /* Find all non-overlapping occurrences of substr in str,
+       replace up to count of them. */
+    if (PyUnicode_GET_LENGTH(substr) == 0) {
+        /* Empty pattern: insert replstr between every character */
+        ...
+    }
+    ...
+}
+```
+
+`str.replace('a', 'bb')` builds a new string in one pass after counting occurrences. The `count` argument limits replacements. Empty pattern replacement inserts `replstr` at every position including start and end.
+
+### `str.translate`
+
+```c
+// CPython: Objects/unicodeobject.c:10080 unicode_translate_impl
+static PyObject *
+unicode_translate_impl(PyObject *self, PyObject *table)
+{
+    /* table can be a dict {ord: ord|str|None} or any object with __getitem__ */
+    _PyUnicodeWriter writer;
+    _PyUnicodeWriter_Init(&writer);
+    for (Py_ssize_t i = 0; i < len; i++) {
+        Py_UCS4 ch = PyUnicode_READ(kind, data, i);
+        PyObject *res = PyObject_GetItem(table, PyLong_FromLong(ch));
+        if (res == Py_None) continue;  /* Delete character */
+        if (PyLong_Check(res)) _PyUnicodeWriter_WriteChar(&writer, res_as_int);
+        else _PyUnicodeWriter_WriteStr(&writer, res);
+    }
+    return _PyUnicodeWriter_Finish(&writer);
+}
+```
+
+`translate` uses `__getitem__` with the ordinal of each character. `None` maps to deletion. A missing key keeps the character unchanged. `str.maketrans` creates the typical mapping dict from `{old: new}` pairs.
+
+## gopy notes
+
+`str.join` is `objects.UnicodeJoin` in `objects/str.go`. It collects items via `objects.SequenceFast`, computes total length, then uses `strings.Builder` for the write pass. `str.replace` uses `strings.ReplaceN`. `str.translate` calls `objects.GetItem` on the table for each rune, accumulating into a `strings.Builder`.
