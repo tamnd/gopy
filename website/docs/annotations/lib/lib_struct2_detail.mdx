@@ -1,0 +1,102 @@
+---
+title: Lib/struct.py / Modules/_struct.c (part 2)
+description: "_struct.c part 2: Struct.pack_into, Struct.unpack_from, iter_unpack, native alignment (@), format string caching."
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_struct.c" />
+
+This annotation covers the `Struct` class methods and native alignment. See `modules_struct_detail` for `struct.pack`/`struct.unpack`, format codes, and byte order prefixes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Struct.__new__` | Compile a format string; cache size and alignment |
+| 81-200 | `Struct.pack_into` | Pack directly into a writable buffer at an offset |
+| 201-350 | `Struct.unpack_from` | Unpack from buffer at an offset |
+| 351-500 | `Struct.iter_unpack` | Return an iterator that unpacks successive chunks |
+| 501-650 | Native alignment (`@`) | Align each field to its natural C alignment |
+| 651-800 | `calcsize` | Return the byte size of a format string |
+| 801-1200 | Format caching | `_struct.cache` keeps recently-used `Struct` objects |
+
+## Reading
+
+### `Struct.pack_into`
+
+```c
+// CPython: Modules/_struct.c:1480 s_pack_into
+static PyObject *
+s_pack_into(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* pack_into(buffer, offset, v1, v2, ...) */
+    /* Get a writable buffer view */
+    Py_buffer buffer;
+    if (PyObject_GetBuffer(args[0], &buffer, PyBUF_WRITABLE) < 0) return NULL;
+    Py_ssize_t offset = PyLong_AsSsize_t(args[1]);
+    if (offset < 0) offset += buffer.len;  /* negative indexing */
+    if (offset < 0 || offset + soself->s_size > buffer.len) {
+        PyErr_Format(StructError, "pack_into requires a buffer of at least %zd bytes",
+                     offset + soself->s_size);
+        PyBuffer_Release(&buffer);
+        return NULL;
+    }
+    /* Pack into buffer.buf + offset */
+    if (s_object_pack(soself, args + 2, nargs - 2,
+                      (char *)buffer.buf + offset) < 0) { ... }
+    PyBuffer_Release(&buffer);
+    Py_RETURN_NONE;
+}
+```
+
+`pack_into` is used to write struct data directly into a `bytearray` or `mmap` without allocating a new `bytes` object.
+
+### `Struct.iter_unpack`
+
+```c
+// CPython: Modules/_struct.c:1620 s_iter_unpack
+/* Returns an iterator that calls unpack() repeatedly on successive
+   non-overlapping chunks of the buffer. */
+static PyObject *
+s_iter_unpack(PyObject *self, PyObject *buffer_obj)
+{
+    unpackiter *iter = PyObject_GC_New(unpackiter, &unpackiter_type);
+    iter->buf = buffer;
+    iter->s = soself;
+    iter->index = 0;
+    return (PyObject *)iter;
+}
+```
+
+`struct.iter_unpack('!I', data)` is equivalent to `[struct.unpack('!I', data[i:i+4]) for i in range(0, len(data), 4)]` but lazy.
+
+### Native alignment (`@`)
+
+```c
+// CPython: Modules/_struct.c:600 native alignment
+/* '@' prefix: native byte order + native alignment (C struct layout)
+   Fields are padded so each starts at a multiple of its size:
+   '@HI': H is at offset 0, pad byte at 2, I starts at offset 4.
+   Compare with '=' (native order, no alignment padding).
+*/
+```
+
+`struct.calcsize('@HI')` may return 8 (2 + 2 pad + 4) while `struct.calcsize('=HI')` returns 6 (2 + 4).
+
+### Format caching
+
+```c
+// CPython: Modules/_struct.c:820 cache
+/* struct.pack/unpack calls intern the Struct object for the format string.
+   A per-interpreter LRU cache of ~8 entries avoids recompilation for
+   commonly-used format strings. */
+```
+
+## gopy notes
+
+`struct` is accelerated by `_struct` C module. gopy's Go implementation is in `module/struct/module.go`. `pack_into` uses `objects.GetWritableBuffer` to get a `[]byte` slice. `iter_unpack` returns a Go generator backed by `struct.UnpackIterator`. The native alignment `@` uses `unsafe.Alignof` via a generated alignment table.

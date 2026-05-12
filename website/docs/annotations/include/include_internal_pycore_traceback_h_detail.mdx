@@ -1,0 +1,74 @@
+---
+title: Include/internal/pycore_traceback.h
+description: "Include/internal/pycore_traceback.h: PyTracebackObject layout, _Py_DisplaySourceLine, _PyTraceback_Add — traceback construction and display."
+cpython_path: Include/internal/pycore_traceback.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_traceback.h" />
+
+`pycore_traceback.h` declares the internal traceback struct and helpers used to build and print tracebacks.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `PyTracebackObject` | Linked list of frame snapshots |
+| 41-70 | `_PyTraceback_Add` | Append a new frame snapshot to the current traceback |
+| 71-100 | `_Py_DisplaySourceLine` | Read and display one source line (for `SyntaxError` caret) |
+
+## Reading
+
+### `PyTracebackObject`
+
+```c
+// CPython: Include/internal/pycore_traceback.h:14 PyTracebackObject
+typedef struct _Py_traceback_t {
+    PyObject_HEAD
+    struct _Py_traceback_t *tb_next;   /* inner frame */
+    PyFrameObject *tb_frame;           /* frame object (lazy) */
+    int tb_lasti;                      /* last instruction index */
+    int tb_lineno;                     /* source line number */
+} PyTracebackObject;
+```
+
+Tracebacks are built bottom-up: when an exception propagates up the call stack, `_PyTraceback_Add` prepends a new entry for each frame.
+
+### `_PyTraceback_Add`
+
+```c
+// CPython: Include/internal/pycore_traceback.h:50 _PyTraceback_Add
+void
+_PyTraceback_Add(PyThreadState *tstate, const char *funcname, const char *filename)
+{
+    /* Create a new PyTracebackObject and prepend it to tstate->exc_info.
+       Called from RAISE_VARARGS and exception re-raise in RERAISE. */
+    PyTracebackObject *tb = PyObject_GC_New(PyTracebackObject, &PyTraceBack_Type);
+    tb->tb_next   = tstate->exc_info->exc_value->__traceback__;
+    tb->tb_frame  = _PyFrame_GetFrameObject(tstate->current_frame);
+    tb->tb_lasti  = tstate->current_frame->prev_instr - _PyCode_CODE(code);
+    tb->tb_lineno = PyCode_Addr2Line(code, tb->tb_lasti * sizeof(_Py_CODEUNIT));
+    tstate->exc_info->exc_value->__traceback__ = tb;
+}
+```
+
+### `_Py_DisplaySourceLine`
+
+```c
+// CPython: Include/internal/pycore_traceback.h:78 _Py_DisplaySourceLine
+/* Open filename, seek to lineno, print the source line to f.
+   Used by traceback.print_exc() and SyntaxError display. */
+int _Py_DisplaySourceLine(PyObject *f, PyObject *filename,
+                           int lineno, int indent,
+                           int *truncated, PyObject *lookup_lines);
+```
+
+For `SyntaxError`, this also prints the caret (`^`) under the offending column using `co_positions()` data.
+
+## gopy notes
+
+`PyTracebackObject` is `objects.PyTracebackObject` in `objects/traceback.go`. `_PyTraceback_Add` is called from `vm/eval_unwind.go` when unwinding frames during exception propagation. `_Py_DisplaySourceLine` is `vm.DisplaySourceLine` which uses `os.Open` and reads the appropriate line.

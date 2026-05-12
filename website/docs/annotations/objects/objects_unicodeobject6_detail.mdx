@@ -1,0 +1,100 @@
+---
+title: Objects/unicodeobject.c (part 6)
+description: "Objects/unicodeobject.c part 6: str.split/rsplit, str.splitlines, str.partition/rpartition, str.strip/lstrip/rstrip."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers the string splitting and stripping methods. See previous `objects_unicodeobject*` annotations for construction, encoding, and `str.format`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `unicode_split` | `str.split(sep, maxsplit)` |
+| 101-200 | `unicode_rsplit` | `str.rsplit(sep, maxsplit)` — split from right |
+| 201-350 | `unicode_splitlines` | Split on line endings (`\n`, `\r`, `\r\n`, `\v`, `\f`, etc.) |
+| 351-500 | `unicode_partition` | `str.partition(sep)` — `(before, sep, after)` |
+| 501-650 | `unicode_rpartition` | `str.rpartition(sep)` — last occurrence |
+| 651-900 | `unicode_strip` | `str.strip(chars)` — strip leading and trailing |
+| 901-1200 | `_Py_unicode_Whitespace` | Unicode whitespace character set for whitespace-split |
+
+## Reading
+
+### `str.split`
+
+```c
+// CPython: Objects/unicodeobject.c:10280 unicode_split
+static PyObject *
+unicode_split(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *substring = Py_None;
+    Py_ssize_t maxcount = -1;
+    if (substring == Py_None)
+        /* Whitespace split */
+        return split_whitespace(self, maxcount);
+    return split(self, substring, maxcount);
+}
+```
+
+`'a  b  c'.split()` collapses multiple whitespace characters. `'a::b::c'.split('::', 1)` uses the explicit separator with a max count.
+
+### `str.splitlines`
+
+```c
+// CPython: Objects/unicodeobject.c:10380 unicode_splitlines
+static PyObject *
+unicode_splitlines(PyObject *self, int keepends)
+{
+    /* Line endings: \n, \r, \r\n, \v, \f, \x1c, \x1d, \x1e, \x85,  ,   */
+    return PyUnicode_Splitlines(self, keepends);
+}
+```
+
+`keepends=True` includes the line ending in each element. `str.splitlines()` splits on all Unicode line boundaries (not just `\n`).
+
+### `str.partition`
+
+```c
+// CPython: Objects/unicodeobject.c:10480 unicode_partition
+static PyObject *
+unicode_partition(PyObject *self, PyObject *sep_obj)
+{
+    Py_ssize_t pos = PyUnicode_Find(self, sep_obj, 0, PY_SSIZE_T_MAX, 1);
+    if (pos < 0) {
+        /* sep not found: return (self, '', '') */
+        return PyTuple_Pack(3, self, unicode_empty, unicode_empty);
+    }
+    Py_ssize_t sep_len = PyUnicode_GET_LENGTH(sep_obj);
+    return PyTuple_Pack(3,
+        PyUnicode_Substring(self, 0, pos),
+        sep_obj,
+        PyUnicode_Substring(self, pos + sep_len, PY_SSIZE_T_MAX));
+}
+```
+
+### `str.strip`
+
+```c
+// CPython: Objects/unicodeobject.c:10680 unicode_strip
+static PyObject *
+unicode_strip(PyObject *self, PyObject *args)
+{
+    PyObject *chars = Py_None;
+    if (chars == Py_None)
+        return _PyUnicode_XStrip(self, 3, Py_None);  /* strip whitespace */
+    return _PyUnicode_XStrip(self, 3, chars);  /* strip given chars */
+}
+```
+
+`_PyUnicode_XStrip` with mode 1 = lstrip, 2 = rstrip, 3 = both. For character sets, it builds a fast lookup set from the `chars` argument.
+
+## gopy notes
+
+`str.split` is `objects.UnicodeSplit` in `objects/unicode_split.go`. `str.splitlines` uses the same Unicode line boundary table as CPython. `str.partition` is `objects.UnicodePartition`. `str.strip` uses `objects.UnicodeStrip` with a `UnicodeSet` for fast character membership.

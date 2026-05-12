@@ -1,0 +1,102 @@
+---
+title: Lib/ipaddress.py (part 2)
+description: "Lib/ipaddress.py part 2: IPv6Address, IPv6Network, network containment, supernet/subnet iteration, address comparison operators."
+cpython_path: Lib/ipaddress.py
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/ipaddress.py" />
+
+This annotation covers IPv6 and network operations. See `lib_ipaddress_detail` for `IPv4Address`, `ip_address()`, `ip_network()`, and address/network basics.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `IPv6Address.__init__` | Parse IPv6 string, bytes, or int |
+| 101-250 | `IPv6Address` properties | `compressed`, `exploded`, `ipv4_mapped`, `scope_id` |
+| 251-400 | `IPv6Network` | Network with prefix length; `hosts()`, `subnets()` |
+| 401-550 | Containment | `address in network` — `__contains__` |
+| 551-700 | `supernet` / `subnets` | Parent and child networks |
+| 701-900 | `collapse_addresses` | Merge overlapping/adjacent networks |
+| 901-1100 | Address comparison | `__eq__`, `__lt__` based on packed integer |
+| 1101-2200 | `summarize_address_range` | Minimal set of networks covering a range |
+
+## Reading
+
+### `IPv6Address.__init__`
+
+```python
+# CPython: Lib/ipaddress.py:1680 IPv6Address
+class IPv6Address(_BaseAddress):
+    def __init__(self, address):
+        if isinstance(address, bytes):
+            # 16-byte packed representation
+            self._check_packed_address(address, 16)
+            bvs = _compat_from_bytes(address, 'big')
+        elif isinstance(address, int):
+            self._check_int_address(address)
+            bvs = address
+        else:
+            # String: parse with _check_ip_addresses
+            addr_str = str(address)
+            if '%' in addr_str:
+                addr_str, self._scope_id = addr_str.split('%', 1)
+            bvs = self._ip_int_from_string(addr_str)
+        self._ip = bvs
+```
+
+### `IPv6Address.compressed`
+
+```python
+# CPython: Lib/ipaddress.py:1820 compressed
+@property
+def compressed(self):
+    """Compress consecutive zero groups: 2001:db8::1."""
+    return _compress_hextets(self._string_from_ip_int(self._ip))
+```
+
+RFC 5952 canonical compression: the longest run of consecutive zero groups is replaced with `::`.
+
+### `IPv6Network.__contains__`
+
+```python
+# CPython: Lib/ipaddress.py:2030 _BaseNetwork.__contains__
+def __contains__(self, other):
+    if not isinstance(other, _IPAddressBase):
+        raise TypeError('%r is not an IP address or network' % other)
+    if isinstance(other, _BaseNetwork):
+        return (other.network_address >= self.network_address and
+                other.broadcast_address <= self.broadcast_address)
+    return (int(other) & int(self.netmask)) == int(self.network_address)
+```
+
+### `collapse_addresses`
+
+```python
+# CPython: Lib/ipaddress.py:2200 collapse_addresses
+def collapse_addresses(addresses):
+    """Return minimal set of networks that cover all input addresses/networks."""
+    # Sort by (network_address, prefix_length desc)
+    # Sweep: if current is a subnet of previous, skip; else emit previous
+    addrs = sorted(set(addresses), key=lambda x: (x.network_address, x.prefixlen))
+    i = addrs[0]
+    for j in addrs[1:]:
+        if i.supernet_of(j):
+            continue  # j is contained in i
+        elif i.network_address + (i.num_addresses - 1) + 1 == j.network_address \
+             and i.prefixlen == j.prefixlen:
+            i = i.supernet()  # merge adjacent same-size networks
+        else:
+            yield i
+            i = j
+    yield i
+```
+
+## gopy notes
+
+`ipaddress` is pure Python. `IPv6Address._ip` is a Python `int` (128-bit). `IPv6Network.__contains__` uses `int(other) & int(self.netmask)` which uses Python's arbitrary-precision arithmetic backed by gopy's `objects/longobject.go`.

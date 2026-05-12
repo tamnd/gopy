@@ -1,0 +1,119 @@
+---
+title: Lib/posixpath.py (part 2)
+description: "Lib/posixpath.py part 2: isabs, isfile, isdir, islink, isdevice, samefile, sameopenfile, getsize, getmtime, getatime, getctime."
+cpython_path: Lib/posixpath.py
+cpython_version: "3.14"
+lines: 550
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/posixpath.py" />
+
+This annotation covers the predicate and metadata functions. See `modules_posixpath_detail` for `join`, `split`, `realpath`, `expanduser`, and `expandvars`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `isabs` | True if path starts with `/` |
+| 41-100 | `isfile` / `isdir` / `islink` | File type predicates via `stat` / `lstat` |
+| 101-160 | `lexists` | `lstat` without following symlinks |
+| 161-220 | `samefile` | Compare two paths via `os.stat` device+inode |
+| 221-300 | `getsize` / `getmtime` / `getatime` | File metadata shortcuts |
+| 301-400 | `normpath` | Collapse `.`, `..`, and double slashes |
+| 401-550 | `normcase` | No-op on POSIX (case-sensitive filesystem) |
+
+## Reading
+
+### `isfile` / `isdir`
+
+```python
+# CPython: Lib/posixpath.py:180 isfile
+def isfile(path):
+    """Return True if path is an existing regular file."""
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISREG(st.st_mode)
+
+def isdir(path):
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISDIR(st.st_mode)
+```
+
+`isfile` follows symlinks (uses `stat`). `islink` uses `lstat`:
+
+```python
+def islink(path):
+    try:
+        st = os.lstat(path)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISLNK(st.st_mode)
+```
+
+### `samefile`
+
+```python
+# CPython: Lib/posixpath.py:238 samefile
+def samefile(f1, f2):
+    """True if f1 and f2 refer to the same file (same device+inode)."""
+    s1 = os.stat(f1)
+    s2 = os.stat(f2)
+    return os.path.samestat(s1, s2)
+
+def samestat(s1, s2):
+    return s1.st_ino == s2.st_ino and s1.st_dev == s2.st_dev
+```
+
+### `normpath`
+
+```python
+# CPython: Lib/posixpath.py:320 normpath
+def normpath(path):
+    """Normalize path: collapse // and . and .."""
+    if isinstance(path, bytes):
+        sep = b'/'
+        dot = b'.'
+    else:
+        sep = '/'
+        dot = '.'
+    initial_slashes = path.startswith(sep)
+    comps = path.split(sep)
+    new_comps = []
+    for comp in comps:
+        if comp in ('', dot):
+            continue
+        if comp != '..':
+            new_comps.append(comp)
+        elif not initial_slashes and not new_comps:
+            new_comps.append(comp)
+        elif new_comps and new_comps[-1] == '..':
+            new_comps.append(comp)
+        elif new_comps:
+            new_comps.pop()
+    comps = new_comps
+    path = sep.join(comps)
+    if initial_slashes:
+        path = sep * initial_slashes + path
+    return path or dot
+```
+
+### `getmtime`
+
+```python
+# CPython: Lib/posixpath.py:410 getmtime
+def getmtime(filename):
+    """Return last modification time as a float (Unix timestamp)."""
+    return os.stat(filename).st_mtime
+```
+
+## gopy notes
+
+`posixpath` is pure Python. `isfile`/`isdir` call `os.stat` which uses `syscall.Stat`. `samefile` compares `st_ino` and `st_dev` fields from `os.stat_result`. `normpath` is pure string manipulation.

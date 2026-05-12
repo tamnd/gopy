@@ -1,0 +1,119 @@
+---
+title: Python/ceval.c (part 11)
+description: "Python/ceval.c part 11: FOR_ITER specializations, SEND (generator/coroutine send), YIELD_VALUE, RESUME, async iteration protocol."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers iterator and generator opcodes. See `python_ceval10_detail` for CALL specializations and `python_ceval_detail` for the main eval loop.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `FOR_ITER_LIST` | `for x in list` — direct list iteration |
+| 101-200 | `FOR_ITER_TUPLE` | `for x in tuple` — direct tuple iteration |
+| 201-300 | `FOR_ITER_RANGE` | `for x in range(n)` — counter-based iteration |
+| 301-400 | `FOR_ITER_GEN` | `for x in gen` — inline generator advance |
+| 401-550 | `SEND` | Send a value into a generator or coroutine (`gen.send(val)`) |
+| 551-650 | `YIELD_VALUE` | Suspend the current generator frame |
+| 651-800 | `GET_AITER` / `GET_ANEXT` | Async iteration: `async for` desugaring |
+
+## Reading
+
+### `FOR_ITER_LIST`
+
+```c
+// CPython: Python/ceval.c:5280 FOR_ITER_LIST
+inst(FOR_ITER_LIST, (unused/1, iter -- iter, next)) {
+    DEOPT_IF(Py_TYPE(iter) != &PyListIter_Type, FOR_ITER);
+    PyListIterObject *it = (PyListIterObject *)iter;
+    PyListObject *seq = it->it_seq;
+    DEOPT_IF(seq == NULL, FOR_ITER);
+    DEOPT_IF(it->it_index >= PyList_GET_SIZE(seq), FOR_ITER);
+    next = PyList_GET_ITEM(seq, it->it_index);
+    Py_INCREF(next);
+    it->it_index++;
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+}
+```
+
+Avoids the `tp_iternext` virtual call for list iterators.
+
+### `FOR_ITER_RANGE`
+
+```c
+// CPython: Python/ceval.c:5400 FOR_ITER_RANGE
+inst(FOR_ITER_RANGE, (unused/1, iter -- iter, next)) {
+    DEOPT_IF(Py_TYPE(iter) != &PyRangeIter_Type, FOR_ITER);
+    PyRangeIterObject *r = (PyRangeIterObject *)iter;
+    DEOPT_IF(r->len == 0, FOR_ITER);  /* exhausted */
+    long value = r->start;
+    r->start = value + r->step;
+    r->len--;
+    next = PyLong_FromLong(value);  /* or use compact int cache */
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+}
+```
+
+For `range(1000)`, no Python int objects are created if values fit in the small-int cache.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:5620 SEND
+inst(SEND, (unused/1, receiver, v -- receiver, retval)) {
+    /* receiver.send(v) — used in 'yield from' and 'await' */
+    if (tstate->c_tracefunc == NULL) {
+        if (PyGen_CheckExact(receiver) || PyCoro_CheckExact(receiver)) {
+            /* Inline: push new frame for the generator */
+            retval = gen_send_ex((PyGenObject *)receiver, v, 0, 0);
+        }
+    }
+    ...
+}
+```
+
+`SEND` is the opcode generated for `yield from` and `await`. It sends a value to the sub-generator without an extra Python call.
+
+### `YIELD_VALUE`
+
+```c
+// CPython: Python/ceval.c:5780 YIELD_VALUE
+inst(YIELD_VALUE, (retval -- retval)) {
+    /* Suspend the current generator frame */
+    frame->gi_frame_state = FRAME_SUSPENDED;
+    _PyFrame_SetStackPointer(frame, stack_pointer - 1);
+    /* Return retval to the caller of send()/next() */
+    DISPATCH_TO_CALLER();
+}
+```
+
+After `YIELD_VALUE`, the frame's `prev_instr` points past the YIELD instruction. The next `send()` call resumes from there.
+
+### `GET_AITER` / `GET_ANEXT`
+
+```c
+// CPython: Python/ceval.c:5900 GET_AITER
+inst(GET_AITER, (obj -- aiter)) {
+    /* aiter = type(obj).__aiter__(obj) */
+    unaryfunc tp_aiter = Py_TYPE(obj)->tp_as_async->am_aiter;
+    if (tp_aiter == NULL)
+        _PyErr_Format(tstate, PyExc_TypeError,
+            "'async for' requires an object with __aiter__ method, got %.100s",
+            Py_TYPE(obj)->tp_name);
+    aiter = (*tp_aiter)(obj);
+}
+```
+
+`async for x in aobj` desugars to: `GET_AITER`, then a loop of `GET_ANEXT` + `SEND` (to drive the coroutine) + `STORE_FAST`.
+
+## gopy notes
+
+`FOR_ITER_LIST`, `FOR_ITER_RANGE` are specialized in `vm/eval_specialize.go`. `SEND` drives generators via `objects.GenSendEx` in `objects/genobject.go`. `YIELD_VALUE` sets `frame.FrameState = FrameSuspended` and returns to the caller frame. `GET_AITER`/`GET_ANEXT` use `objects.GetAIter`/`GetANext`.
