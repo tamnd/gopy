@@ -1,0 +1,98 @@
+---
+title: Python/ceval.c (part 6)
+description: "Python/ceval.c part 6: specialized opcodes — LOAD_ATTR_MODULE, LOAD_ATTR_WITH_HINT, CALL_PY_EXACT_ARGS, BINARY_OP_ADD_INT, inline caches."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 5500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers the specializing adaptive interpreter (introduced in CPython 3.11). Opcodes observe their operand types and replace themselves with faster specialized variants. See parts 1-5 for the base opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `SPECIALIZE_LOAD_ATTR` | Choose a specialized LOAD_ATTR variant |
+| 201-500 | `LOAD_ATTR_MODULE`, `LOAD_ATTR_WITH_HINT`, `LOAD_ATTR_SLOT` | Specialized attribute load |
+| 501-800 | `SPECIALIZE_CALL`, `CALL_PY_EXACT_ARGS`, `CALL_PY_GENERAL` | Specialized call |
+| 801-1100 | `BINARY_OP_ADD_INT`, `BINARY_OP_ADD_FLOAT`, `BINARY_OP_ADD_UNICODE` | Specialized binary ops |
+| 1101-1400 | `COMPARE_OP_INT`, `COMPARE_OP_FLOAT` | Specialized comparisons |
+| 1401-1800 | Cache invalidation, `_PyAdaptiveCounter` | Deoptimization machinery |
+
+## Reading
+
+### How specialization works
+
+```c
+// CPython: Python/ceval.c:50 specialization overview (comment)
+/*
+ * Each specializable opcode starts with a counter.
+ * After ADAPTIVE_COOLDOWN_VALUE successful unspecialized executions,
+ * the specializer examines the operand types and may replace the opcode
+ * with a specialized variant that skips the generic dispatch.
+ * If a later execution finds the types have changed, the specialized
+ * opcode deoptimizes back to the generic form.
+ */
+```
+
+### `LOAD_ATTR_MODULE`
+
+```c
+// CPython: Python/ceval.c:3120 LOAD_ATTR_MODULE
+inst(LOAD_ATTR_MODULE, (unused/1, owner -- attr, unused if (oparg & 1))) {
+    /* Cache: (module dict version, dict offset, cached value) */
+    uint32_t dict_version = read_u32(cache->version_or_index);
+    PyModuleObject *mod = (PyModuleObject *)owner;
+    if (mod->md_dict->ma_version_tag == dict_version) {
+        /* Cache hit: return cached value */
+        attr = cache->attr;
+        Py_INCREF(attr);
+    } else {
+        /* Cache miss: fall through to LOAD_ATTR */
+        DEOPT_IF(1);
+    }
+}
+```
+
+`LOAD_ATTR_MODULE` caches the dict version tag. If the module's `__dict__` hasn't been modified since the last load, the value is returned from the inline cache without a dict lookup.
+
+### `CALL_PY_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:4200 CALL_PY_EXACT_ARGS
+inst(CALL_PY_EXACT_ARGS, (unused/1, unused/2, callable, self_or_null, args[oparg] -- unused)) {
+    /* Specialized for: function with exact arg count match, no *args/**kwargs */
+    DEOPT_IF(!PyFunction_Check(callable));
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    DEOPT_IF(func->func_version != read_u32(cache->func_version));
+    /* Push a new frame directly (no arg-matching overhead) */
+    _PyInterpreterFrame *new_frame = _PyFrame_PushUnchecked(tstate, func, oparg + 1);
+    ...
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+`CALL_PY_EXACT_ARGS` checks the function version tag (invalidated when `__code__` changes) and avoids the full argument-matching code path.
+
+### `BINARY_OP_ADD_INT`
+
+```c
+// CPython: Python/ceval.c:2300 BINARY_OP_ADD_INT
+inst(BINARY_OP_ADD_INT, (left, right -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(left));
+    DEOPT_IF(!PyLong_CheckExact(right));
+    res = _PyLong_Add((PyLongObject *)left, (PyLongObject *)right);
+    ...
+}
+```
+
+Bypasses the `__add__` slot dispatch by directly calling `_PyLong_Add`.
+
+## gopy notes
+
+gopy does not yet implement the specializing adaptive interpreter. All opcodes execute the generic path. Adding specialization later would require inline cache slots in the bytecode stream (which gopy's compiler already emits as zero-filled entries, matching CPython's format) and the type version tag system on `objects.Type`.

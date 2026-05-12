@@ -1,0 +1,102 @@
+---
+title: Modules/signalmodule.c (part 2)
+description: "signalmodule.c part 2: signal delivery via eval breaker, wakeup_fd, sigaction vs signal, SIGINT handler, PyErr_SetInterrupt."
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/signalmodule.c" />
+
+This annotation covers the signal delivery path from OS handler to Python code. See `lib_signal_detail` for the Python-facing API.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `signal_handler` (C-level) | OS signal handler: sets eval breaker |
+| 201-400 | `_PySignal_AfterFork` | Reset handlers after `fork()` |
+| 401-600 | `trip_signal` | Set pending-signal flag and interrupt eval loop |
+| 601-800 | `_Py_HandlePending` | Called by `RESUME`; dispatch pending signals |
+| 801-1100 | `wakeup_fd` | Write to a file descriptor when a signal arrives |
+| 1101-1500 | `PyErr_SetInterrupt`, `PyErr_CheckSignals` | Manual interrupt injection |
+
+## Reading
+
+### Signal delivery path
+
+```
+OS signal ->
+  signal_handler (C async-signal-safe) ->
+    trip_signal() ->
+      interp->ceval.eval_breaker = 1 (atomic write)
+      write(wakeup_fd) if set
+
+RESUME opcode ->
+  if eval_breaker:
+    _Py_HandlePending() ->
+      for each pending signal:
+        call registered Python handler(signum, frame)
+```
+
+### `signal_handler`
+
+```c
+// CPython: Modules/signalmodule.c:185 signal_handler
+static void
+signal_handler(int sig_num)
+{
+    int save_errno = errno;
+    trip_signal(sig_num);
+    /* Write to wakeup_fd if set */
+    if (wakeup.fd != INVALID_FD) {
+        char byte = (char)sig_num;
+        write(wakeup.fd, &byte, 1);  /* best-effort, ignore errors */
+    }
+    errno = save_errno;
+}
+```
+
+The C handler is async-signal-safe: it only writes to atomic flags and the wakeup fd.
+
+### `_Py_HandlePending`
+
+```c
+// CPython: Modules/signalmodule.c:640 _Py_HandlePending
+int
+_Py_HandlePending(PyThreadState *tstate)
+{
+    /* Reset eval_breaker first */
+    _Py_atomic_store(&interp->ceval.eval_breaker, 0);
+    /* Check for SIGINT -> KeyboardInterrupt */
+    if (_Py_atomic_load(&is_tripped)) {
+        for (int i = 1; i < NSIG; i++) {
+            if (Handlers[i].func != SIG_DFL && Handlers[i].func != SIG_IGN) {
+                PyObject *result = PyObject_CallOneArg(Handlers[i].func, ...);
+                ...
+            }
+        }
+    }
+    /* Check for GC threshold, pending calls, etc. */
+    ...
+}
+```
+
+### `wakeup_fd`
+
+```python
+# CPython: Lib/signal.py (Python usage)
+import signal, socket
+rsock, wsock = socket.socketpair()
+signal.set_wakeup_fd(wsock.fileno())
+# Now a signal will write to wsock, waking up an event loop that polls rsock
+```
+
+The wakeup fd is the standard way to integrate signals with `asyncio`, `select`, and `epoll`. The event loop reads from `rsock` to discover the signal number.
+
+## gopy notes
+
+Signal handling in gopy uses Go's `os/signal` package. `signal.signal(SIGINT, handler)` registers a Go channel and goroutine that calls the Python handler. `PyErr_SetInterrupt` raises `KeyboardInterrupt` from any goroutine. The `wakeup_fd` mechanism maps to writing to a `net.Conn` pipe.

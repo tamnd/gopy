@@ -1,0 +1,98 @@
+---
+title: Lib/argparse.py (part 2)
+description: "argparse part 2: subparsers, ArgumentGroup, MutuallyExclusiveGroup, FileType, type coercion, custom Action, metavar, formatter_class."
+cpython_path: Lib/argparse.py
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/argparse.py" />
+
+This annotation covers advanced `argparse` features. See `lib_argparse_detail` (if it exists) for `ArgumentParser`, `add_argument`, and basic parsing.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `Action`, built-in action types | `_StoreAction`, `_StoreTrueAction`, `_AppendAction`, etc. |
+| 151-350 | `FileType` | Callable type that opens files |
+| 351-550 | `ArgumentGroup`, `MutuallyExclusiveGroup` | Grouping and exclusion |
+| 551-800 | `_SubParsersAction` | Subcommand support |
+| 801-1100 | Type coercion and `choices` | `type=int`, `choices=['a','b']` |
+| 1101-1400 | `HelpFormatter`, `RawTextHelpFormatter` | Help text formatting |
+| 1401-1800 | `metavar`, `dest` derivation | Argument display names |
+
+## Reading
+
+### `FileType`
+
+```python
+# CPython: Lib/argparse.py:1215 FileType
+class FileType:
+    def __init__(self, mode='r', bufsize=-1, encoding=None, errors=None):
+        self._mode = mode
+        self._bufsize = bufsize
+        ...
+
+    def __call__(self, string):
+        if string == '-':
+            if 'r' in self._mode:
+                return _sys.stdin
+            elif 'w' in self._mode:
+                return _sys.stdout
+        try:
+            return open(string, self._mode, self._bufsize, self._encoding, self._errors)
+        except OSError as e:
+            raise ArgumentTypeError(...)
+```
+
+`type=FileType('r')` opens the file and returns the file object as the argument value.
+
+### Subparsers
+
+```python
+# CPython: Lib/argparse.py:1310 _SubParsersAction.__call__
+def __call__(self, parser, namespace, values, option_string=None):
+    parser_name = values[0]
+    try:
+        subparser = self._name_parser_map[parser_name]
+    except KeyError:
+        raise ArgumentError(self, 'invalid choice: %r (choose from %s)' % ...)
+    # Parse remaining args with the subparser
+    subnamespace = Namespace()
+    subparser.parse_args(values[1:], subnamespace)
+    for key, value in vars(subnamespace).items():
+        setattr(namespace, key, value)
+```
+
+### Custom `Action`
+
+```python
+# CPython: Lib/argparse.py usage
+class VerboseAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        count = getattr(namespace, self.dest, 0)
+        setattr(namespace, self.dest, count + 1)
+
+parser.add_argument('-v', action=VerboseAction, dest='verbosity', default=0)
+```
+
+Custom actions must define `__call__(self, parser, namespace, values, option_string)`.
+
+### `MutuallyExclusiveGroup`
+
+```python
+# CPython: Lib/argparse.py:1520 MutuallyExclusiveGroup._group_check_conflict
+def _group_check_conflict(self, action):
+    mutex_action = self._option_string_actions.get(option_string)
+    if mutex_action and mutex_action.option_strings[0] in seen_non_default_actions:
+        msg = _('not allowed with argument %s')
+        raise ArgumentError(action, msg % mutex_action.option_strings[0])
+```
+
+## gopy notes
+
+`argparse` is pure Python and depends only on `sys`, `os`, `re`, `textwrap`, `copy`, and `gettext`. It is used by many CLI tools. In gopy the module can be run from the stdlib once `textwrap.fill` and `re.match` work correctly. The key dependency is `sys.argv` being correctly populated.
