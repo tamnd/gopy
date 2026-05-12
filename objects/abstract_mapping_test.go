@@ -9,8 +9,10 @@ func TestMappingCheckDict(t *testing.T) {
 	if !MappingCheck(NewDict()) {
 		t.Error("dict should pass MappingCheck")
 	}
-	if MappingCheck(NewList(nil)) {
-		t.Error("list has no mp_subscript so MappingCheck should be false")
+	// CPython's list has mp_subscript (for slice indexing), so
+	// PyMapping_Check(list) is true. Match that here.
+	if !MappingCheck(NewList(nil)) {
+		t.Error("list has mp_subscript so MappingCheck should be true")
 	}
 	if MappingCheck(nil) {
 		t.Error("nil should not pass MappingCheck")
@@ -31,8 +33,11 @@ func TestMappingSize(t *testing.T) {
 }
 
 func TestMappingSizeRejectsSequence(t *testing.T) {
-	if _, err := MappingSize(NewList(nil)); err == nil {
-		t.Error("list should fail MappingSize (it is a sequence, not a mapping)")
+	// Tuple does not expose mp_length (no mp_subscript either), so
+	// PyMapping_Size on a tuple still raises. List on the other hand
+	// carries mp_length and is a valid PyMapping_Size target.
+	if _, err := MappingSize(NewTuple(nil)); err == nil {
+		t.Error("tuple should fail MappingSize (no mp_length)")
 	}
 }
 
