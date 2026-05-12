@@ -1,0 +1,150 @@
+---
+title: Modules/socketmodule.c (part 5)
+description: "socketmodule.c part 5: socket.recv, socket.send, socket.connect, socket.accept."
+cpython_path: Modules/socketmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/socketmodule.c" />
+
+This annotation covers the core blocking I/O methods. See `modules_socket4_detail` for `socket.bind`, `socket.listen`, `setsockopt`, and `getaddrinfo`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `socket.connect` | Initiate a connection |
+| 81-180 | `socket.accept` | Accept an incoming connection |
+| 181-300 | `socket.recv` | Receive data |
+| 301-420 | `socket.send` / `socket.sendall` | Send data |
+| 421-600 | Timeout handling | `sock_call` retry loop |
+
+## Reading
+
+### `socket.connect`
+
+```c
+// CPython: Modules/socketmodule.c:3120 sock_connect
+static PyObject *
+sock_connect(PySocketSockObject *s, PyObject *addro)
+{
+    sock_addr_t addrbuf;
+    int addrlen, res;
+    if (!getsockaddrarg(s, addro, &addrbuf, &addrlen, "connect")) return NULL;
+    res = sock_call(s, 1, internal_connect, &ctx, 0, NULL, s->sock_timeout);
+    if (res < 0) return s->errorhandler();
+    Py_RETURN_NONE;
+}
+
+static int
+internal_connect(PySocketSockObject *s, void *data)
+{
+    connectctx *ctx = data;
+    int res = connect(s->sock_fd, ctx->addr, ctx->addrlen);
+    if (res < 0 && errno == EISCONN) res = 0;  /* already connected */
+    return res;
+}
+```
+
+`socket.connect((host, port))` converts the address tuple to a `sockaddr` via `getsockaddrarg`, then calls `connect(2)` through `sock_call`. On non-blocking sockets with a timeout, `sock_call` uses `select`/`poll` to wait.
+
+### `socket.accept`
+
+```c
+// CPython: Modules/socketmodule.c:3240 sock_accept
+static PyObject *
+sock_accept(PySocketSockObject *s, PyObject *args)
+{
+    sock_addr_t addrbuf;
+    socklen_t addrlen = sizeof(addrbuf);
+    SOCKET_T newfd;
+    int res;
+    res = sock_call(s, 0, internal_accept, &ctx, 0, NULL, s->sock_timeout);
+    if (res < 0) return s->errorhandler();
+    /* Wrap the new fd in a socket object */
+    PyObject *sock = PyObject_CallFunction((PyObject *)&PySocketModule.Sock_type,
+                                           "iiiO", s->sock_family, s->sock_type,
+                                           s->sock_proto, fdobj);
+    PyObject *addr = makesockaddr(s->sock_fd, &addrbuf, addrlen, s->sock_proto);
+    return PyTuple_Pack(2, sock, addr);
+}
+```
+
+`server.accept()` returns `(conn, address)`. The new socket inherits family, type, and protocol from the listening socket. The address is converted from the raw `sockaddr` to a Python tuple by `makesockaddr`.
+
+### `socket.recv`
+
+```c
+// CPython: Modules/socketmodule.c:3380 sock_recv
+static PyObject *
+sock_recv(PySocketSockObject *s, PyObject *args)
+{
+    Py_ssize_t recvlen;
+    int flags = 0;
+    if (!PyArg_ParseTuple(args, "n|i:recv", &recvlen, &flags)) return NULL;
+    PyObject *buf = PyBytes_FromStringAndSize(NULL, recvlen);
+    recvctx ctx = {PyBytes_AS_STRING(buf), recvlen, flags};
+    int res = sock_call(s, 0, internal_recv, &ctx, 0, NULL, s->sock_timeout);
+    if (res < 0) { Py_DECREF(buf); return s->errorhandler(); }
+    if (ctx.result < recvlen)
+        _PyBytes_Resize(&buf, ctx.result);
+    return buf;
+}
+```
+
+`sock.recv(4096)` allocates a `bytes` object of the requested size, then shrinks it to the actual number of bytes received. The pre-allocation avoids a copy. `recv_into` writes directly into a provided buffer.
+
+### `socket.sendall`
+
+```c
+// CPython: Modules/socketmodule.c:3520 sock_sendall
+static PyObject *
+sock_sendall(PySocketSockObject *s, PyObject *args)
+{
+    Py_buffer pbuf;
+    int flags = 0;
+    if (!PyArg_ParseTuple(args, "y*|i:sendall", &pbuf, &flags)) return NULL;
+    char *buf = pbuf.buf;
+    Py_ssize_t len = pbuf.len;
+    do {
+        Py_ssize_t n = sock_call_ex(s, 1, internal_send, &ctx, 0, NULL, s->sock_timeout);
+        if (n < 0) { PyBuffer_Release(&pbuf); return s->errorhandler(); }
+        buf += n;
+        len -= n;
+    } while (len > 0);
+    PyBuffer_Release(&pbuf);
+    Py_RETURN_NONE;
+}
+```
+
+`sendall` loops until all bytes are sent. Each iteration sends as much as the kernel accepts and advances the pointer. `send` (without `all`) returns the number of bytes actually sent, which may be less than the buffer length.
+
+### Timeout handling: `sock_call`
+
+```c
+// CPython: Modules/socketmodule.c:840 sock_call
+static int
+sock_call(PySocketSockObject *s, int writing, sock_call_ex_t func, void *ctx,
+          int connect, int *err, _PyTime_t timeout)
+{
+    /* Retry loop with select/poll for timeout */
+    do {
+        int r = func(s, ctx);
+        if (r >= 0) return r;
+        if (!CHECK_ERRNO(EINTR)) break;
+        /* Interrupted by signal: retry */
+    } while (1);
+    /* Timeout: use select/poll */
+    ...
+}
+```
+
+`sock_call` wraps every blocking operation. If the socket has a timeout, it polls with `select`/`poll` before each attempt. `EINTR` (interrupted by signal) triggers an unconditional retry. A `BlockingIOError` with `errno == EWOULDBLOCK` on a non-blocking socket propagates immediately.
+
+## gopy notes
+
+`socket.connect` is `module/socket.Connect` in `module/socket/module.go`; uses `net.DialTimeout`. `socket.accept` is `module/socket.Accept`; wraps the returned `net.Conn`. `socket.recv` is `module/socket.Recv`; reads into a Go `[]byte` and returns `objects.Bytes`. `socket.sendall` loops over `conn.Write`. Timeout is set via `conn.SetDeadline`.

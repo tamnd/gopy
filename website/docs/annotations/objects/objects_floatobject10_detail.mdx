@@ -1,0 +1,114 @@
+---
+title: Objects/floatobject.c (part 10)
+description: "Objects/floatobject.c part 10: float.__round__, float.hex, float.fromhex, float.__format__."
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/floatobject.c" />
+
+This annotation covers rounding, hex representation, and formatting. See `objects_floatobject9_detail` for arithmetic operations and `__hash__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `float.__round__` | Round to n decimal places |
+| 81-180 | `float.hex` | IEEE 754 hex representation |
+| 181-300 | `float.fromhex` | Parse IEEE 754 hex string |
+| 301-400 | `float.__format__` | Format spec (`f`, `e`, `g`, `%`) |
+| 401-500 | `_Py_dg_dtoa` glue | Double-to-string formatting |
+
+## Reading
+
+### `float.__round__`
+
+```c
+// CPython: Objects/floatobject.c:580 float_round
+static PyObject *
+float_round(PyObject *v, PyObject *o)
+{
+    double x = PyFloat_AS_DOUBLE(v);
+    double f;
+    int ndigits = 0;
+
+    if (o != Py_None) ndigits = _PyLong_AsInt(o);
+
+    if (ndigits == 0) {
+        /* Return int */
+        double rounded = _Py_dg_strtod(Py_DTOA_ROUND, ...);
+        return PyLong_FromDouble(rounded);
+    }
+    /* Scale, round, unscale */
+    f = pow(10.0, ndigits);
+    x = round(x * f) / f;
+    return PyFloat_FromDouble(x);
+}
+```
+
+`round(1.5)` returns `2` (an `int`, not a float). `round(1.234, 2)` returns `1.23` (a float). When `ndigits` is omitted or `None`, the result is an `int`. The "round half to even" (banker's rounding) rule is applied by `_Py_dg_strtod`.
+
+### `float.hex`
+
+```c
+// CPython: Objects/floatobject.c:380 float_hex
+static PyObject *
+float_hex(PyObject *v, PyObject *Py_UNUSED(ignored))
+{
+    double x = PyFloat_AS_DOUBLE(v);
+    /* Format: [sign] 0x [int_digit] . [frac_hex] p [sign] [exp] */
+    /* e.g., 1.0 -> "0x1.0000000000000p+0" */
+    /* e.g., -0.1 -> "-0x1.999999999999ap-4" */
+    int e;
+    double m = frexp(x, &e);  /* m in [0.5, 1.0) */
+    /* ... format as hex ... */
+    return PyUnicode_FromString(buf);
+}
+```
+
+`(1.0).hex()` returns `'0x1.0000000000000p+0'`. The hex format is exact: every `double` has a unique hex representation and can be round-tripped through `float.fromhex`. This is useful for serializing floats without loss of precision.
+
+### `float.fromhex`
+
+```c
+// CPython: Objects/floatobject.c:430 float_fromhex
+static PyObject *
+float_fromhex(PyObject *type, PyObject *arg)
+{
+    /* Parse: [sign] ('0x'|'0X') [int_part] ['.' frac_part] ('p'|'P') [sign] exp */
+    const char *s = PyUnicode_AsUTF8(arg);
+    /* ... parse mantissa and exponent ... */
+    double result = ldexp(mant, exp);  /* mant * 2^exp */
+    return PyFloat_FromDouble(result);
+}
+```
+
+`float.fromhex('0x1.8p+1')` returns `3.0` (= 1.5 * 2). `ldexp` multiplies by the binary exponent without intermediate precision loss. The parser handles `inf`, `-inf`, and `nan` as special cases.
+
+### `float.__format__`
+
+```c
+// CPython: Objects/floatobject.c:640 float_format
+static PyObject *
+float__format__(PyObject *self, PyObject *args)
+{
+    /* Dispatch to _PyFloat_FormatAdvancedWriter */
+    PyObject *format_spec;
+    if (!PyArg_ParseTuple(args, "U:__format__", &format_spec)) return NULL;
+    _PyUnicodeWriter writer;
+    _PyUnicodeWriter_Init(&writer);
+    _PyFloat_FormatAdvancedWriter(&writer, self, format_spec, 0,
+                                  PyUnicode_GET_LENGTH(format_spec));
+    return _PyUnicodeWriter_Finish(&writer);
+}
+```
+
+`format(3.14159, '.2f')` returns `'3.14'`. The format spec is parsed for fill/align, sign, width, grouping, precision, and type (`f`, `e`, `E`, `g`, `G`, `%`, `n`). `%` multiplies by 100 and appends `%`. `n` uses the locale decimal separator.
+
+## gopy notes
+
+`float.__round__` is `objects.FloatRound` in `objects/floatobject.go`; uses `math.Round` for the no-ndigits case and returns an `objects.Int`. `float.hex` is `objects.FloatHex` using `strconv.FormatFloat` with `'x'` verb. `float.fromhex` is `objects.FloatFromHex` using `strconv.ParseFloat`. `float.__format__` calls `objects.FormatFloat` with the parsed spec.

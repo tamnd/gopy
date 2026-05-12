@@ -1,0 +1,135 @@
+---
+title: Lib/zipfile/__init__.py (part 4)
+description: "Lib/zipfile/__init__.py part 4: ZipFile.read, ZipFile.extract, ZipFile.write, ZipFile.open."
+cpython_path: Lib/zipfile/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/zipfile/__init__.py" />
+
+This annotation covers reading and writing individual entries. See `lib_zipfile3_detail` for `ZipFile.__init__`, `_RealGetContents`, and the central directory parser.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `ZipFile.read` | Read a member into bytes |
+| 81-180 | `ZipFile.open` | Open a member as a file-like object |
+| 181-280 | `ZipFile.extract` | Extract a member to the filesystem |
+| 281-400 | `ZipFile.write` | Add a file to the archive |
+| 401-500 | `ZipFile.writestr` | Add bytes/str to the archive |
+
+## Reading
+
+### `ZipFile.read`
+
+```python
+# CPython: Lib/zipfile/__init__.py:1348 read
+def read(self, name, pwd=None):
+    with self.open(name, "r", pwd) as fp:
+        return fp.read()
+```
+
+`zf.read('hello.txt')` is a thin wrapper around `open`. All decompression, decryption, and CRC validation happen inside `ZipExtFile.read`.
+
+### `ZipFile.open`
+
+```python
+# CPython: Lib/zipfile/__init__.py:1280 open
+def open(self, name, mode="r", pwd=None, *, force_zip64=False):
+    if mode not in {"r", "w"}:
+        raise ValueError('open() requires mode "r" or "w"')
+    if not self.fp:
+        raise ValueError("Attempt to use ZIP archive that was already closed")
+    zinfo = self.getinfo(name) if isinstance(name, str) else name
+    if mode == "r":
+        self._filerefcnt += 1
+        zef_file = _SharedFile(self.fp, zinfo.header_offset, ...)
+        try:
+            return ZipExtFile(zef_file, mode, zinfo, pwd, True)
+        except:
+            zef_file.close()
+            raise
+    else:
+        return _ZipWriteFile(self, zinfo, zef_file)
+```
+
+`ZipFile.open` returns a `ZipExtFile` (for reading) or `_ZipWriteFile` (for writing). `_SharedFile` wraps the underlying file with a seek lock so multiple `ZipExtFile` instances can read concurrently. The reference count (`_filerefcnt`) prevents closing the archive while a member is open.
+
+### `ZipFile.extract`
+
+```python
+# CPython: Lib/zipfile/__init__.py:1370 extract
+def extract(self, member, path=None, pwd=None):
+    if not isinstance(member, ZipInfo):
+        member = self.getinfo(member)
+    if path is None:
+        path = os.getcwd()
+    return self._extract_member(member, path, pwd)
+
+def _extract_member(self, member, targetpath, pwd):
+    # Sanitize: strip leading '/' and '..' components
+    arcname = member.filename
+    arcname = os.path.splitdrive(arcname)[1]
+    invalid_path_parts = ('', os.path.curdir, os.path.pardir)
+    arcname = os.sep.join(x for x in arcname.split('/')
+                          if x not in invalid_path_parts)
+    targetpath = os.path.join(targetpath, arcname)
+    if member.is_dir():
+        os.makedirs(targetpath, exist_ok=True)
+        return targetpath
+    os.makedirs(os.path.dirname(targetpath), exist_ok=True)
+    with self.open(member, pwd=pwd) as source, \
+         open(targetpath, "wb") as target:
+        shutil.copyfileobj(source, target)
+    return targetpath
+```
+
+`_extract_member` sanitizes the archive path to prevent Zip Slip attacks (paths that contain `..` or absolute paths that could write outside the target directory). `is_dir()` checks for a trailing `/` in the filename.
+
+### `ZipFile.write`
+
+```python
+# CPython: Lib/zipfile/__init__.py:1680 write
+def write(self, filename, arcname=None, compress_type=None,
+          compresslevel=None):
+    zinfo = ZipInfo.from_file(filename, arcname,
+                              strict_timestamps=self._strict_timestamps)
+    if zinfo.is_dir():
+        zinfo.compress_size = 0
+        zinfo.CRC = 0
+        self.mkdir(zinfo)
+    else:
+        with open(filename, "rb") as f:
+            self.writestr(zinfo, f.read(), compress_type, compresslevel)
+```
+
+`zf.write('hello.py')` reads the file, computes the CRC, compresses it, and appends it to the archive. `ZipInfo.from_file` captures the file's `st_mtime` and mode. The compress type defaults to `ZIP_STORED` (no compression) if not specified.
+
+### `ZipFile.writestr`
+
+```python
+# CPython: Lib/zipfile/__init__.py:1730 writestr
+def writestr(self, zinfo_or_arcname, data, compress_type=None, compresslevel=None):
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    zinfo = ...  # build ZipInfo
+    zinfo.compress_size = len(data)
+    zinfo.CRC = crc32(data)
+    if compress_type is not None:
+        ...  # compress
+    self.fp.write(zinfo.FileHeader(zip64))
+    self.fp.write(data)
+    self.filelist.append(zinfo)
+    self.NameToInfo[zinfo.filename] = zinfo
+```
+
+`writestr` writes the local file header followed by the (optionally compressed) data. The central directory entry is deferred — `close()` writes all central directory records at the end. `CRC` is computed before compression.
+
+## gopy notes
+
+`zipfile` is a pure-Python module; gopy runs it directly. `ZipFile.open` uses `io.BufferedReader` wrapping `ZipExtFile`. Decompression is handled by `zlib.decompressobj` (via `module/zlib`) for `ZIP_DEFLATED` entries. `ZipFile.write` calls `os.stat` and `builtins.open` which resolve to gopy's `module/os` and `builtins.Open`.

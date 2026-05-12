@@ -1,0 +1,140 @@
+---
+title: Python/symtable.c (part 12)
+description: "Python/symtable.c part 12: analyze_block, analyze_name, scope resolution, free variable promotion."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers the second-pass analysis that resolves scope and free variables. See `python_symtable11_detail` for the first-pass visitor that builds the symbol table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `analyze_block` | Analyze a scope block |
+| 81-180 | `analyze_name` | Classify a name within a block |
+| 181-280 | `analyze_cells` | Mark cells in enclosing scope |
+| 281-380 | Free variable promotion | Propagate free vars through nested scopes |
+| 381-500 | `_PySymtable_Lookup` | Look up a name entry |
+
+## Reading
+
+### `analyze_block`
+
+```c
+// CPython: Python/symtable.c:1020 analyze_block
+static int
+analyze_block(PySTEntryObject *entry, PyObject *bound, PyObject *free,
+              PyObject *global)
+{
+    PyObject *local = PySet_New(NULL);
+    PyObject *newglobal = PySet_New(NULL);
+    PyObject *newfree = PySet_New(NULL);
+    PyObject *newbound = PySet_New(NULL);
+
+    /* Analyze each name in this block */
+    PyObject *name;
+    Py_hash_t pos;
+    while (PyDict_Next(entry->ste_symbols, &pos, &name, NULL)) {
+        analyze_name(entry, local, name, bound, free, global);
+    }
+    /* Process child blocks */
+    for (int i = 0; i < PyList_GET_SIZE(entry->ste_children); i++) {
+        PySTEntryObject *child = (PySTEntryObject *)PyList_GET_ITEM(entry->ste_children, i);
+        analyze_block(child, newbound, newfree, newglobal);
+    }
+    /* Promote free vars to cells in enclosing scope */
+    analyze_cells(local, newfree);
+    return 1;
+}
+```
+
+`analyze_block` does a depth-first traversal of the scope tree. Names are classified per-block, then child blocks are recursed. After children are processed, `analyze_cells` checks whether any of the child's free variables correspond to locals in this scope — those locals become cells.
+
+### `analyze_name`
+
+```c
+// CPython: Python/symtable.c:920 analyze_name
+static int
+analyze_name(PySTEntryObject *ste, PyObject *scopes,
+             PyObject *name, PyObject *bound, PyObject *free,
+             PyObject *global)
+{
+    long flags = _PyST_GetSymbol(ste, name);
+    if (flags & DEF_GLOBAL) {
+        SET_SCOPE(scopes, name, GLOBAL_EXPLICIT);
+        return 1;
+    }
+    if (flags & DEF_NONLOCAL) {
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);
+        return 1;
+    }
+    if (flags & DEF_BOUND) {
+        SET_SCOPE(scopes, name, LOCAL);
+        PySet_Add(bound, name);
+        return 1;
+    }
+    /* Not defined here: check if it's bound in an enclosing scope */
+    if (bound && PySet_Contains(bound, name)) {
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);
+        return 1;
+    }
+    /* Falls through to global */
+    SET_SCOPE(scopes, name, GLOBAL_IMPLICIT);
+    return 1;
+}
+```
+
+Each name is classified as `LOCAL`, `CELL`, `FREE`, `GLOBAL_EXPLICIT`, or `GLOBAL_IMPLICIT`. `DEF_BOUND` means the name is assigned in this scope. `DEF_NONLOCAL` forces the name to be resolved in an enclosing scope. If the name is not bound here and appears in `bound` (from the enclosing scope), it becomes a `FREE` variable.
+
+### `analyze_cells`
+
+```c
+// CPython: Python/symtable.c:960 analyze_cells
+static int
+analyze_cells(PyObject *scopes, PyObject *free)
+{
+    PyObject *name, *v;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(scopes, &pos, &name, &v)) {
+        long scope = PyLong_AS_LONG(v);
+        if (scope != LOCAL) continue;
+        if (!PySet_Contains(free, name)) continue;
+        /* This local is referenced as a free variable in a nested scope */
+        SET_SCOPE(scopes, name, CELL);
+    }
+    return 1;
+}
+```
+
+A `CELL` variable is a `LOCAL` that is also a `FREE` variable in at least one nested scope. The compiler allocates it as a `PyCell` instead of a plain local slot so that closures can share it.
+
+### Free variable promotion
+
+```c
+// CPython: Python/symtable.c:1100 (inside analyze_block)
+/* Propagate newfree upward to the enclosing block */
+PyObject *free_key;
+Py_ssize_t fpos = 0;
+while (PySet_NextEntry(newfree, &fpos, &free_key)) {
+    if (!PySet_Contains(local, free_key) &&
+        !PySet_Contains(global, free_key)) {
+        /* Not local and not global: propagate up */
+        PySet_Add(free, free_key);
+    }
+}
+```
+
+Free variables that are not resolved in the current block must be propagated to the parent block's `newfree` set. This continues up the scope chain until the variable is resolved as a `LOCAL`/`CELL` or reaches the module scope (where it becomes `GLOBAL_IMPLICIT`).
+
+## gopy notes
+
+`analyze_block` is `compile.AnalyzeBlock` in `compile/symtable.go`. `analyze_name` classifies names and updates `compile.ScopeMap`. `analyze_cells` promotes locals to cells; gopy marks these as `ScopeCell`. Free variable propagation fills `compile.FreeVars` sets on each `STEntry`.
