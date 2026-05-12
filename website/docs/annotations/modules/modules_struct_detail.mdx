@@ -1,0 +1,99 @@
+---
+title: Modules/struct module
+description: "struct module (Modules/_struct.c): pack/unpack binary data with format strings, Struct class, calcsize, iter_unpack."
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_struct.c" />
+
+The `struct` module converts between Python values and C structs packed into bytes objects. It is used heavily for binary protocol parsing (network packets, file formats, system calls).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | Format character table | `b`, `h`, `i`, `l`, `q`, `f`, `d`, `s`, `p`, `P`, etc. |
+| 301-700 | `s_pack`, `s_unpack` | Core pack/unpack implementations |
+| 701-1100 | `Struct` type | Cached compiled format object |
+| 1101-1400 | `calcsize`, `pack_into`, `unpack_from` | Buffer variants |
+| 1401-2000 | `iter_unpack` | Iterator over repeated structure |
+
+## Reading
+
+### Format string prefix
+
+```c
+// CPython: Modules/_struct.c:95 format_prefixes
+/* byte order / alignment prefix:
+   @  native order, native size, native alignment (default)
+   =  native order, standard size, no alignment
+   <  little-endian, standard size
+   >  big-endian, standard size
+   !  big-endian (network), standard size
+*/
+```
+
+Without a prefix, `@` is assumed. Standard size means C type sizes as defined by the C standard (`short`=2, `int`=4, etc.).
+
+### Pack implementation
+
+```c
+// CPython: Modules/_struct.c:840 s_pack
+static PyObject *
+s_pack(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyStructObject *soself = (PyStructObject *)self;
+    PyObject *result = PyBytes_FromStringAndSize(NULL, soself->s_size);
+    char *buf = PyBytes_AS_STRING(result);
+    for (Py_ssize_t i = 0; i < soself->s_len; i++) {
+        formatcode *code = &soself->s_codes[i];
+        PyObject *v = args[i];
+        code->fmtdef->pack(buf + code->offset, v, code->size, code->repeat);
+    }
+    return result;
+}
+```
+
+Each format character maps to a `formatdef` entry with `pack` and `unpack` function pointers. The `Struct` object pre-parses the format string once.
+
+### `iter_unpack`
+
+```c
+// CPython: Modules/_struct.c:1680 s_iter_unpack
+static PyObject *
+s_iter_unpack(PyObject *self, PyObject *buffer)
+{
+    /* Returns an iterator yielding successive tuples of size s_size from buffer */
+    unpackiterobject *it = PyObject_New(unpackiterobject, &unpackiter_type);
+    it->s = (PyStructObject *)self;
+    it->buf = buffer;
+    it->index = 0;
+    return (PyObject *)it;
+}
+```
+
+`iter_unpack` avoids creating a list of all tuples at once. Useful for streaming packet parsing.
+
+### `calcsize`
+
+```c
+// CPython: Modules/_struct.c:760 calcsize
+static PyObject *
+calcsize(PyObject *module, PyObject *format)
+{
+    PyStructObject *s_object = (PyStructObject *)cache_struct(module, format);
+    ...
+    return PyLong_FromSsize_t(s_object->s_size);
+}
+```
+
+`struct.calcsize('iHd')` computes the packed byte count without allocating a buffer.
+
+## gopy notes
+
+`struct` is needed for binary I/O in the stdlib (e.g., `zipfile`, `tarfile`, `wave`, `imghdr`). In gopy it is implemented in `module/struct/` using Go's `encoding/binary`. The format-string parser must handle repeat counts (`4s`, `10H`) and all byte-order prefixes. `Struct` objects cache the parsed format for repeated use.

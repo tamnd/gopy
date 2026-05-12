@@ -1,0 +1,109 @@
+---
+title: Modules/operator module
+description: "operator module: arithmetic, comparison, and in-place operator functions; attrgetter, itemgetter, methodcaller; index, length_hint."
+cpython_path: Modules/_operator.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_operator.c" />
+
+The `operator` module exposes Python's built-in operators as first-class functions. It is heavily used by `functools`, `itertools`, and sorting code.
+
+## Map
+
+| Category | Functions |
+|----------|-----------|
+| Arithmetic | `add`, `sub`, `mul`, `truediv`, `floordiv`, `mod`, `pow`, `neg`, `pos`, `abs` |
+| Bitwise | `and_`, `or_`, `xor`, `invert`, `lshift`, `rshift` |
+| Comparison | `lt`, `le`, `eq`, `ne`, `ge`, `gt` |
+| In-place | `iadd`, `isub`, `imul`, ... (all correspond to `+=`, `-=`, etc.) |
+| Sequence | `getitem`, `setitem`, `delitem`, `concat`, `contains`, `indexOf`, `countOf` |
+| Object | `attrgetter`, `itemgetter`, `methodcaller` |
+| Type checks | `is_`, `is_not`, `truth`, `not_` |
+| Misc | `index`, `length_hint` |
+
+## Reading
+
+### Simple operators
+
+```c
+// CPython: Modules/_operator.c:62 op_add
+static PyObject *
+op_add(PyObject *s, PyObject *a)
+{
+    PyObject *a1, *a2;
+    if (!PyArg_UnpackTuple(a, "add", 2, 2, &a1, &a2))
+        return NULL;
+    return PyNumber_Add(a1, a2);
+}
+```
+
+Each arithmetic function is a thin wrapper around the abstract object API (`PyNumber_*`, `PyObject_*`).
+
+### `attrgetter`
+
+```c
+// CPython: Modules/_operator.c:440 attrgetter_call
+static PyObject *
+attrgetter_call(attrgetterobject *ag, PyObject *args, PyObject *kw)
+{
+    PyObject *obj;
+    if (!PyArg_UnpackTuple(args, "attrgetter", 1, 1, &obj))
+        return NULL;
+    if (ag->nattrs == 1)
+        return PyObject_GetAttr(obj, ag->attr);
+    /* multiple attrs: return a tuple */
+    PyObject *result = PyTuple_New(ag->nattrs);
+    for (Py_ssize_t i = 0; i < ag->nattrs; i++)
+        PyTuple_SET_ITEM(result, i, PyObject_GetAttr(obj, ag->attrs[i]));
+    return result;
+}
+```
+
+Dotted access (`operator.attrgetter('a.b.c')`) is split on `.` and applied iteratively.
+
+### `itemgetter`
+
+```c
+// CPython: Modules/_operator.c:550 itemgetter_call
+static PyObject *
+itemgetter_call(itemgetterobject *ig, PyObject *args, PyObject *kw)
+{
+    PyObject *obj;
+    if (!PyArg_UnpackTuple(args, "itemgetter", 1, 1, &obj))
+        return NULL;
+    if (ig->nitems == 1)
+        return PyObject_GetItem(obj, ig->item);
+    /* multiple items: return a tuple */
+    ...
+}
+```
+
+`itemgetter` is the workhorse for `sorted(data, key=itemgetter('name'))` patterns.
+
+### `length_hint`
+
+```c
+// CPython: Modules/_operator.c:745 op_length_hint
+static PyObject *
+op_length_hint(PyObject *module, PyObject *args)
+{
+    PyObject *obj;
+    Py_ssize_t default_value = 0;
+    if (!PyArg_ParseTuple(args, "O|n:length_hint", &obj, &default_value))
+        return NULL;
+    Py_ssize_t hint = PyObject_LengthHint(obj, default_value);
+    ...
+    return PyLong_FromSsize_t(hint);
+}
+```
+
+`PyObject_LengthHint` tries `__len__` first, then `__length_hint__`. This is used by `list()` to pre-allocate storage.
+
+## gopy notes
+
+`operator` functions are in `module/operator/`. The `attrgetter`, `itemgetter`, and `methodcaller` types need to be proper callable objects with `__reduce__` support for pickle compatibility (used by `multiprocessing` and `concurrent.futures`).

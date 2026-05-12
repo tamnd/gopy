@@ -1,0 +1,91 @@
+---
+title: Modules/gc module
+description: "gc module (Python/gc.c): enable/disable GC, collect, get_objects, get_referrers, get_referents, callbacks, freeze/unfreeze."
+cpython_path: Modules/gcmodule.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/gcmodule.c" />
+
+The `gc` module exposes the cyclic garbage collector to Python code. The actual collection logic is in `Python/gc.c`; this file is the thin Python-facing wrapper.
+
+## Map
+
+| Symbol | Role |
+|--------|------|
+| `gc.enable()` / `gc.disable()` | Toggle automatic collection |
+| `gc.collect(generation)` | Trigger a collection manually |
+| `gc.get_count()` | Return `(count0, count1, count2)` for the three generations |
+| `gc.get_threshold()` | Return collection thresholds |
+| `gc.set_threshold(t0, t1, t2)` | Set thresholds |
+| `gc.get_objects(generation)` | List all tracked objects |
+| `gc.get_referrers(*objs)` | Objects that hold a reference to any of `objs` |
+| `gc.get_referents(*objs)` | Objects reachable from `objs` via `tp_traverse` |
+| `gc.is_tracked(obj)` | Whether `obj` is on the GC tracking list |
+| `gc.freeze()` / `gc.unfreeze()` | Move generation-2 objects to a permanent set |
+| `gc.callbacks` | List of callables invoked before/after each collection |
+
+## Reading
+
+### `gc.collect`
+
+```c
+// CPython: Modules/gcmodule.c:120 gc_collect_impl
+static PyObject *
+gc_collect_impl(PyObject *module, int generation)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (generation < 0 || generation > NUM_GENERATIONS - 1) {
+        PyErr_SetString(PyExc_ValueError, "invalid generation");
+        return NULL;
+    }
+    Py_ssize_t n = _PyGC_Collect(tstate, generation, _Py_GC_REASON_MANUAL);
+    return PyLong_FromSsize_t(n);
+}
+```
+
+`_PyGC_Collect` is in `Python/gc.c` and returns the number of unreachable objects freed.
+
+### `gc.get_objects`
+
+```c
+// CPython: Modules/gcmodule.c:205 gc_get_objects_impl
+static PyObject *
+gc_get_objects_impl(PyObject *module, Py_ssize_t generation)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *result = PyList_New(0);
+    ...
+    /* Walk the generation(s) and append each tracked object */
+    for each obj in gcstate->generation[g].head:
+        PyList_Append(result, FROM_GC(obj));
+    return result;
+}
+```
+
+The returned list includes the list itself (since it was just allocated and is now tracked).
+
+### `gc.freeze`
+
+```c
+// CPython: Modules/gcmodule.c:380 gc_freeze_impl
+static PyObject *
+gc_freeze_impl(PyObject *module)
+{
+    /* Move all generation-2 objects to the permanent generation.
+       Frozen objects are never collected; useful after import-time work. */
+    PyGC_Head *freeze = &_PyRuntime.gc.permanent_generation.head;
+    gc_list_merge(&gcstate->old[1].head, freeze);
+    ...
+}
+```
+
+`gc.freeze()` is called by the multiprocessing module after `fork()` to prevent the child from collecting objects that were allocated by the parent.
+
+## gopy notes
+
+gopy uses Go's runtime GC; there is no cyclic collector to expose. The `gc` module is implemented as a stub in `module/` that returns plausible values (`gc.isenabled()` returns `True`, `gc.collect()` returns `0`) so that code that imports `gc` for tuning does not crash.

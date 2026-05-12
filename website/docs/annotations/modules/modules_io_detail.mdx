@@ -1,0 +1,99 @@
+---
+title: Modules/_io module
+description: "Modules/_io: FileIO, BufferedReader/Writer/RWPair, TextIOWrapper, BytesIO, StringIO — the C-layer I/O stack."
+cpython_path: Modules/_io/_iomodule.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/_iomodule.c" />
+
+`_io` is a C extension module that implements the entire `io` module. The Python-level `io` module (`Lib/io.py`) is a thin re-export shim. The C layer provides `RawIOBase`, `BufferedIOBase`, `TextIOBase` and all their concrete subclasses.
+
+## Map
+
+| File | Symbol | Role |
+|------|--------|------|
+| `_iomodule.c` | Module init, `open()` | Entry point, `io.open` |
+| `fileio.c` | `FileIO` | Raw unbuffered file I/O via POSIX `read`/`write` |
+| `bufferedio.c` | `BufferedReader`, `BufferedWriter`, `BufferedRWPair`, `BufferedRandom` | Read-ahead/write-behind buffer layer |
+| `textio.c` | `TextIOWrapper` | Unicode encode/decode over a buffered stream |
+| `bytesio.c` | `BytesIO` | In-memory bytes buffer |
+| `stringio.c` | `StringIO` | In-memory text buffer |
+
+## Reading
+
+### `io.open` dispatch
+
+```c
+// CPython: Modules/_io/_iomodule.c:210 _io_open_impl
+static PyObject *
+_io_open_impl(PyObject *module, PyObject *file, const char *mode,
+              int buffering, const char *encoding, const char *errors,
+              const char *newline, int closefd, PyObject *opener)
+{
+    /* 1. Create raw layer */
+    PyObject *raw = PyObject_CallFunction((PyObject *)&PyFileIO_Type,
+                                          "Osi", file, rawmode, closefd);
+    /* 2. Wrap in buffer */
+    if (buffering > 0) {
+        if (updating)
+            buffer = PyObject_CallFunction(&PyBufferedRandom_Type, "Oi", raw, buffering);
+        else if (writing)
+            buffer = PyObject_CallFunction(&PyBufferedWriter_Type, "Oi", raw, buffering);
+        else
+            buffer = PyObject_CallFunction(&PyBufferedReader_Type, "Oi", raw, buffering);
+    }
+    /* 3. Wrap in text layer */
+    if (binary)
+        return buffer;
+    return PyObject_CallFunction(&PyTextIOWrapper_Type, "Osssi",
+                                 buffer, encoding, errors, newline, line_buffering);
+}
+```
+
+### `TextIOWrapper.read`
+
+```c
+// CPython: Modules/_io/textio.c:1340 textiowrapper_read_impl
+static PyObject *
+textiowrapper_read_impl(textio *self, Py_ssize_t n)
+{
+    /* Drain any pending decoded chars first */
+    result = textiowrapper_get_decoded_chars(self, -1);
+    /* Then read from the underlying buffer and decode */
+    while (...) {
+        PyObject *input_chunk = self->buffer->read(self->buffer, ...);
+        PyObject *decoded = self->codec_info->decode(input_chunk, ...);
+        ...
+    }
+    return PyUnicode_Concat(result, decoded);
+}
+```
+
+`TextIOWrapper` decodes incrementally using a codec's `IncrementalDecoder`. The internal `_decoded_chars` buffer holds characters that were decoded in the previous chunk but not yet consumed.
+
+### `BufferedReader` read-ahead
+
+```c
+// CPython: Modules/_io/bufferedio.c:980 buffered_read_impl
+static PyObject *
+buffered_read_impl(buffered *self, Py_ssize_t n)
+{
+    /* Fill the internal buffer if needed */
+    if (READAHEAD(self) < n) {
+        _bufferedreader_fill_buffer(self);
+    }
+    /* Copy from internal buffer to result */
+    ...
+}
+```
+
+The default read-ahead buffer is 8192 bytes. `_bufferedreader_fill_buffer` calls `raw.read(buffer_size)` once.
+
+## gopy notes
+
+The `io` module is foundational; `print()`, `sys.stdout`, `open()`, and file operations all depend on it. In gopy the `io` types are in `module/io/` and wrap Go's `io.Reader`/`io.Writer` interfaces. `TextIOWrapper` delegates encoding to `module/codecs/`. `BytesIO` and `StringIO` are backed by `bytes.Buffer` and `strings.Builder` respectively.

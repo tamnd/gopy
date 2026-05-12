@@ -1,0 +1,102 @@
+---
+title: Python/symtable.c
+description: "Python/symtable.c: symbol table construction, scope analysis, free variable detection, cell variable marking."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+The symbol table pass runs before bytecode generation. It walks the AST once to determine, for every name in every scope, whether the name is local, free, cell, global, or imported.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `PySymtable_BuildObject` | Entry point: walk module AST |
+| 201-500 | `symtable_enter_block`, `symtable_exit_block` | Scope stack management |
+| 501-800 | `symtable_visit_stmt` | Statement walker |
+| 801-1100 | `symtable_visit_expr` | Expression walker |
+| 1101-1400 | `symtable_analyze` | Post-walk: propagate free vars upward |
+| 1401-1800 | `analyze_block`, `analyze_name` | Per-scope free/cell resolution |
+
+## Reading
+
+### Entry point
+
+```c
+// CPython: Python/symtable.c:262 PySymtable_BuildObject
+struct symtable *
+PySymtable_BuildObject(mod_ty mod, PyObject *filename, PyFutureFeatures *future)
+{
+    struct symtable *st = symtable_new();
+    ...
+    VISIT(st, mod, mod);
+    if (!symtable_analyze(st))
+        goto error;
+    return st;
+}
+```
+
+### Scope entry and exit
+
+```c
+// CPython: Python/symtable.c:412 symtable_enter_block
+static int
+symtable_enter_block(struct symtable *st, identifier name,
+                     _Py_block_ty block, void *ast, ...)
+{
+    PySTEntryObject *prev = st->st_cur;
+    PySTEntryObject *ste = ste_new(st, name, block, ast, ...);
+    ...
+    st->st_cur = ste;
+    ...
+}
+```
+
+Each function, class, comprehension, or lambda gets its own `PySTEntryObject`.
+
+### Name recording
+
+```c
+// CPython: Python/symtable.c:720 symtable_add_def
+static int
+symtable_add_def(struct symtable *st, PyObject *name, int flag, ...)
+{
+    PyObject *o = PyDict_GetItemWithError(st->st_cur->ste_symbols, name);
+    long val = o ? PyLong_AsLong(o) : 0;
+    val |= flag;   /* DEF_LOCAL, DEF_GLOBAL, DEF_PARAM, DEF_FREE, ... */
+    return PyDict_SetItem(st->st_cur->ste_symbols, name, PyLong_FromLong(val));
+}
+```
+
+Flags are OR'd together so a name can be both `DEF_PARAM` and `DEF_ANNOT`.
+
+### Free variable propagation
+
+```c
+// CPython: Python/symtable.c:1180 analyze_block
+static int
+analyze_block(PySTEntryObject *ste, PyObject *bound, PyObject *free,
+              PyObject *global)
+{
+    /* names free in children that are bound here become cells */
+    for each child in ste->ste_children:
+        analyze_block(child, new_bound, child_free, global);
+    for name in child_free:
+        if name in bound:
+            mark as CELL in ste, FREE in child
+        else:
+            propagate to free (caller must handle)
+}
+```
+
+This two-pass structure means that a name referenced in an inner function only becomes a cell variable in the enclosing function after the inner function's scope is fully analyzed.
+
+## gopy notes
+
+`compile/flowgraph.go` and `compile/compiler.go` replicate this logic in Go. Free variables become `LOAD_DEREF`/`STORE_DEREF` opcodes; cell variables are allocated via `MAKE_CELL` at function entry. The `symtable_analyze` pass corresponds to the variable-resolution phase in `compile/compiler.go` before any bytecode is emitted.

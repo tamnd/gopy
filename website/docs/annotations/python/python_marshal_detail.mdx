@@ -1,0 +1,97 @@
+---
+title: Python/marshal.c
+description: "Python/marshal.c: .pyc file serialization format, marshal_write/read for all object types, magic number, version field."
+cpython_path: Python/marshal.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/marshal.c" />
+
+`Python/marshal.c` implements the binary serialization format used for `.pyc` files. It is simpler than `pickle`: it only handles a fixed set of built-in types and is not extensible.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | Type tags | `TYPE_INT`, `TYPE_STRING`, `TYPE_CODE`, etc. |
+| 151-500 | `w_object` | Recursive writer dispatch |
+| 501-900 | `r_object` | Recursive reader dispatch |
+| 901-1200 | `PyMarshal_WriteObjectToFile` | File-based writer entry |
+| 1201-1600 | `PyMarshal_ReadObjectFromFile` | File-based reader entry |
+
+## Reading
+
+### Type tags
+
+```c
+// CPython: Python/marshal.c:22 type tags
+#define TYPE_NULL               '0'
+#define TYPE_NONE               'N'
+#define TYPE_FALSE              'F'
+#define TYPE_TRUE               'T'
+#define TYPE_INT                'i'
+#define TYPE_FLOAT              'g'
+#define TYPE_COMPLEX            'y'
+#define TYPE_STRING             's'
+#define TYPE_TUPLE              '('
+#define TYPE_LIST               '['
+#define TYPE_DICT               '{'
+#define TYPE_CODE               'c'
+#define TYPE_REF                'r'   /* back-reference into object table */
+```
+
+The single-byte tag precedes each object's data. `TYPE_REF` supports de-duplication: any object can be added to an intern table and referenced later by index.
+
+### Writing a code object
+
+```c
+// CPython: Python/marshal.c:480 w_complex_object (code case)
+case PyCode_Type:
+    w_byte(TYPE_CODE, p);
+    w_long(co->co_argcount, p);
+    w_long(co->co_posonlyargcount, p);
+    w_long(co->co_kwonlyargcount, p);
+    w_long(co->co_stacksize, p);
+    w_long(co->co_flags, p);
+    w_object(co->co_code, p);        /* bytecode bytes */
+    w_object(co->co_consts, p);      /* tuple of constants */
+    w_object(co->co_names, p);       /* tuple of name strings */
+    w_object(co->co_localsplusnames, p);
+    ...
+    w_object(co->co_filename, p);
+    w_object(co->co_name, p);
+    w_object(co->co_qualname, p);
+    w_long(co->co_firstlineno, p);
+    w_object(co->co_linetable, p);
+    w_object(co->co_exceptiontable, p);
+```
+
+Every field of `PyCodeObject` is written in a fixed order. Reader and writer must agree on the exact sequence, which is why the `.pyc` magic number changes on every CPython release that touches the code object layout.
+
+### The flag byte and object interning
+
+```c
+// CPython: Python/marshal.c:220 w_object (flag_ref)
+static void
+w_object(PyObject *v, WFILE *p)
+{
+    char flag = '\0';
+    if (p->depth > MAX_MARSHAL_STACK_DEPTH) { ... }
+    /* If this object might be referenced again, add it to the table */
+    if (PyCode_Check(v) || PyTuple_Check(v) || ...) {
+        flag = FLAG_REF;
+        w_reserve_ref(p);   /* placeholder index in ref table */
+    }
+    ...
+}
+```
+
+`FLAG_REF` sets the high bit of the type tag byte. On reading, if the high bit is set the object is added to `r_ref_list` so later `TYPE_REF` tags can point back to it.
+
+## gopy notes
+
+gopy does not need to write `.pyc` files; it compiles Python source to in-memory bytecode. The marshal format is relevant only for pre-compiled stdlib files (`stdlibinit/`). If gopy ever wants to cache compiled code to disk, `Python/marshal.c` is the reference for the binary layout.

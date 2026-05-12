@@ -1,0 +1,99 @@
+---
+title: Python/errors.c
+description: "Python/errors.c: exception setting, clearing, fetching, PyErr_Format, PyErr_SetString, PyErr_Occurred, exception chaining."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+`Python/errors.c` is the low-level exception API. All C extension code and the interpreter itself sets, clears, and fetches exceptions through this file.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `PyErr_SetObject`, `PyErr_SetString` | Set current exception |
+| 201-400 | `PyErr_Occurred`, `PyErr_Clear`, `PyErr_Fetch` | Query and clear |
+| 401-700 | `PyErr_Format`, `_PyErr_FormatFromCause` | Formatted messages |
+| 701-1000 | `PyErr_SetExcInfo`, `_PyErr_StackItem` | Exception stack (per-frame) |
+| 1001-1300 | `_PyErr_ChainExceptions`, `PyException_SetCause` | Chaining (`raise X from Y`) |
+| 1301-1800 | `PyErr_WriteUnraisable`, `PyErr_Print` | Last-resort error output |
+
+## Reading
+
+### Setting an exception
+
+```c
+// CPython: Python/errors.c:78 PyErr_SetObject
+void
+PyErr_SetObject(PyObject *exception, PyObject *value)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    Py_XINCREF(exception);
+    Py_XINCREF(value);
+    _PyErr_Restore(tstate, exception, value, NULL);
+}
+```
+
+`_PyErr_Restore` stores the three exception components (type, value, traceback) into `tstate->exc_state`. The eval loop checks `tstate->curexc_type` after every opcode that can raise.
+
+### `PyErr_Format`
+
+```c
+// CPython: Python/errors.c:445 PyErr_Format
+PyObject *
+PyErr_Format(PyObject *exception, const char *format, ...)
+{
+    va_list vargs;
+    va_start(vargs, format);
+    PyObject *string = PyUnicode_FromFormatV(format, vargs);
+    va_end(vargs);
+    PyErr_SetObject(exception, string);
+    Py_XDECREF(string);
+    return NULL;
+}
+```
+
+Always returns `NULL` so callers can write `return PyErr_Format(...)` directly.
+
+### Exception chaining
+
+```c
+// CPython: Python/errors.c:1080 _PyErr_ChainExceptions
+void
+_PyErr_ChainExceptions(PyObject *typ, PyObject *val, PyObject *tb)
+{
+    /* Attach the currently-set exception as __context__ of val */
+    PyObject *cur_typ, *cur_val, *cur_tb;
+    PyErr_Fetch(&cur_typ, &cur_val, &cur_tb);
+    ...
+    PyException_SetContext(val, cur_val);
+    PyErr_Restore(typ, val, tb);
+}
+```
+
+This implements the implicit chaining (`raise X` inside an `except` block sets `X.__context__`). Explicit chaining (`raise X from Y`) calls `PyException_SetCause` instead.
+
+### Unraisable exceptions
+
+```c
+// CPython: Python/errors.c:1620 PyErr_WriteUnraisable
+void
+PyErr_WriteUnraisable(PyObject *obj)
+{
+    /* Called when an exception occurs in __del__, weakref callbacks,
+       or other places where exceptions cannot propagate. */
+    ...
+    PySys_WriteStderr("Exception ignored in: ");
+    ...
+}
+```
+
+## gopy notes
+
+gopy exception state lives in `vm.Frame` and `vm/eval_unwind.go`. `PyErr_SetObject` maps to setting the Go error on the frame. `PyErr_Format` maps to `fmt.Errorf` with a Python exception wrapper in `objects/`. The exception chaining logic (`__context__`, `__cause__`) is implemented in `vm/eval_unwind.go` for `RAISE_VARARGS`.

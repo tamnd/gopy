@@ -307,6 +307,10 @@ const sidebars = {
         'annotations/python/python_ceval_detail',
         'annotations/python/python_ceval4_detail',
         'annotations/python/python_compile3_detail',
+        'annotations/python/python_symtable_detail',
+        'annotations/python/python_astc_detail',
+        'annotations/python/python_errors_detail',
+        'annotations/python/python_marshal_detail',
       ],
     },
     {
@@ -904,6 +908,10 @@ const sidebars = {
         'annotations/modules/modules_csv_detail',
         'annotations/modules/modules_ctypes_detail',
         'annotations/modules/modules_sqlite3_detail',
+        'annotations/modules/modules_gc_detail',
+        'annotations/modules/modules_io_detail',
+        'annotations/modules/modules_operator_detail',
+        'annotations/modules/modules_struct_detail',
       ],
     },
     {

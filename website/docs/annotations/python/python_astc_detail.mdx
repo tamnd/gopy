@@ -1,0 +1,90 @@
+---
+title: Python/ast.c
+description: "Python/ast.c: AST construction from PEG parse tree, expression/statement node creation, location propagation, constant folding entry point."
+cpython_path: Python/ast.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ast.c" />
+
+`Python/ast.c` is the thin validation and entry-point layer between the PEG parser and the compiler. The PEG parser already produces Python AST objects; this file validates them and runs the constant-folding optimizer.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyAST_Validate` | Walk AST checking required fields |
+| 101-300 | `_PyAST_Optimize` | Run constant folding and peephole passes |
+| 301-600 | Helper validators | `validate_expr`, `validate_stmt`, etc. |
+
+## Reading
+
+### Validation entry point
+
+```c
+// CPython: Python/ast.c:72 PyAST_Validate
+int
+PyAST_Validate(mod_ty mod)
+{
+    int res = 0;
+    switch (mod->kind) {
+    case Module_kind:
+        res = validate_stmts(mod->v.Module.body);
+        break;
+    case Interactive_kind:
+        res = validate_stmts(mod->v.Interactive.body);
+        break;
+    case Expression_kind:
+        res = validate_expr(mod->v.Expression.body, Load);
+        break;
+    ...
+    }
+    return res;
+}
+```
+
+Validation is a safety net for `compile(ast_obj, ...)` called with a hand-built AST object. The PEG parser's output does not go through this path.
+
+### Constant folding
+
+```c
+// CPython: Python/ast.c:310 _PyAST_Optimize
+int
+_PyAST_Optimize(mod_ty mod, PyArena *arena, _PyASTOptimizeState *state)
+{
+    return astfold_mod(mod, arena, state);
+}
+```
+
+The actual folding is in `Python/ast_opt.c`. `_PyAST_Optimize` is called by `PyAST_CompileObject` just before `PySymtable_Build`.
+
+### Expression context checking
+
+```c
+// CPython: Python/ast.c:195 validate_expr
+static int
+validate_expr(expr_ty exp, expr_context_ty ctx)
+{
+    switch (exp->kind) {
+    case Name_kind:
+        return validate_expr_context(exp->v.Name.ctx, ctx);
+    case Attribute_kind:
+        return (validate_expr(exp->v.Attribute.value, Load) &&
+                validate_expr_context(exp->v.Attribute.ctx, ctx));
+    case Starred_kind:
+        return (ctx == Store || ctx == Del) &&
+               validate_expr(exp->v.Starred.value, ctx);
+    ...
+    }
+}
+```
+
+This catches structural errors like `del 1+2` (deleting a non-name/attribute expression).
+
+## gopy notes
+
+The Go compiler pipeline in `compile/compiler.go` does not have a separate validation pass; the compiler itself rejects invalid constructs during code generation. Constant folding is handled inline in `compile/codegen_expr.go` for literal arithmetic.
