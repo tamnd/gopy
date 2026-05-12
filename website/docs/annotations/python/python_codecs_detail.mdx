@@ -1,0 +1,107 @@
+---
+title: Python/codecs.c
+description: "Python/codecs.c: codec registry — PyCodec_Register, lookup, encode/decode dispatch, incremental codec protocol, charmap and error handlers."
+cpython_path: Python/codecs.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/codecs.c" />
+
+`codecs.c` implements the codec registry that backs `str.encode()`, `bytes.decode()`, and `codecs.open()`. Codec lookup normalizes the encoding name and calls registered search functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyCodec_Register` | Add a search function to the registry |
+| 101-250 | `_PyCodec_Lookup` | Normalize name, call search functions, cache result |
+| 251-450 | `PyCodec_Encode`, `PyCodec_Decode` | Encode/decode using a named codec |
+| 451-650 | `PyCodec_IncrementalEncoder` | `codecs.getincrementalencoder(name)()` |
+| 651-850 | Buffered incremental | `IncrementalDecoder.decode(data, final=False)` |
+| 851-1000 | Error handlers | `replace`, `ignore`, `xmlcharrefreplace`, `backslashreplace`, `namereplace` |
+| 1001-1200 | `PyCodec_LookupError` | Get a named error handler |
+
+## Reading
+
+### Codec lookup and normalization
+
+```c
+// CPython: Python/codecs.c:145 _PyCodec_Lookup
+PyObject *
+_PyCodec_Lookup(const char *encoding)
+{
+    /* Normalize: lowercase, replace hyphens and spaces with underscores */
+    char *normalized = codec_name_normalize(encoding);
+    /* Check cache first */
+    PyObject *cached = PyDict_GetItemString(interp->codec_search_cache, normalized);
+    if (cached) return cached;
+    /* Try each registered search function */
+    PyObject *search_path = interp->codec_search_path;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(search_path); i++) {
+        PyObject *func = PyList_GET_ITEM(search_path, i);
+        PyObject *result = PyObject_CallOneArg(func, normalized_str);
+        if (result && result != Py_None) {
+            PyDict_SetItemString(interp->codec_search_cache, normalized, result);
+            return result;
+        }
+    }
+    PyErr_Format(PyExc_LookupError, "unknown encoding: %s", encoding);
+    return NULL;
+}
+```
+
+`'UTF-8'`, `'utf-8'`, `'utf_8'`, and `'utf8'` all resolve to the same codec after normalization.
+
+### `PyCodec_Encode` / `PyCodec_Decode`
+
+```c
+// CPython: Python/codecs.c:290 PyCodec_Encode
+PyObject *
+PyCodec_Encode(PyObject *object, const char *encoding, const char *errors)
+{
+    PyObject *codec = _PyCodec_Lookup(encoding);
+    /* codec is a tuple: (encoder, decoder, inc_encoder, inc_decoder, stream_reader, stream_writer) */
+    PyObject *encoder = PyTuple_GET_ITEM(codec, 0);
+    PyObject *args = PyTuple_Pack(2, object, errors_str);
+    PyObject *result = PyObject_Call(encoder, args, NULL);
+    /* result is a tuple (bytes, length); return just the bytes */
+    return PyTuple_GET_ITEM(result, 0);
+}
+```
+
+### Incremental encoder/decoder protocol
+
+```c
+// CPython: Python/codecs.c:530 PyCodec_IncrementalEncoder
+PyObject *
+PyCodec_IncrementalEncoder(const char *encoding, const char *errors)
+{
+    PyObject *codec = _PyCodec_Lookup(encoding);
+    PyObject *inc_enc_cls = PyTuple_GET_ITEM(codec, 2);
+    return PyObject_CallFunctionObjArgs(inc_enc_cls, errors_str, NULL);
+}
+```
+
+`IncrementalEncoder.encode(data, final=False)` may buffer partial inputs. `final=True` flushes the buffer.
+
+### Built-in error handlers
+
+```c
+// CPython: Python/codecs.c:880 PyCodec_StrictErrors
+/* 'strict' — raise UnicodeEncodeError/UnicodeDecodeError */
+/* 'ignore'  — skip undecodable bytes */
+/* 'replace' — replace with '?' (encode) or U+FFFD (decode) */
+/* 'xmlcharrefreplace' — &#{ord}; for unencodable characters */
+/* 'backslashreplace' — \xNN or \uNNNN for unencodable */
+/* 'namereplace' — \N{NAME} using Unicode character names */
+```
+
+Error handlers are callables that receive a `UnicodeDecodeError` and return `(replacement, new_position)`.
+
+## gopy notes
+
+The codec registry is in `module/codecs/registry.go` as a `[]SearchFunc` slice. `_PyCodec_Lookup` normalizes via `strings.ToLower` + hyphen-to-underscore. Built-in codecs (`utf-8`, `utf-16`, `latin-1`, `ascii`, etc.) are registered during `stdlibinit`. Error handlers are a `map[string]ErrorHandler`. `PyCodec_Encode`/`Decode` call `objects.StrEncode`/`BytesDecode`.

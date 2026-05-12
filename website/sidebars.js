@@ -326,6 +326,7 @@ const sidebars = {
         'annotations/python/python_errors2_detail',
         'annotations/python/python_sysmodule_detail',
         'annotations/python/python_ceval_breaker_detail',
+        'annotations/python/python_codecs_detail',
       ],
     },
     {
@@ -518,6 +519,7 @@ const sidebars = {
         'annotations/objects/objects_memoryview_detail',
         'annotations/objects/objects_listobject3_detail',
         'annotations/objects/objects_bufferobject_detail',
+        'annotations/objects/objects_longobject6_detail',
       ],
     },
     {
@@ -750,6 +752,8 @@ const sidebars = {
         'annotations/include/include_internal_pycore_ceval_h_detail',
         'annotations/include/include_internal_pycore_object_h_detail',
         'annotations/include/include_internal_pycore_long_h_detail',
+        'annotations/include/include_internal_pycore_dict_h_detail',
+        'annotations/include/include_internal_pycore_list_h_detail',
       ],
     },
     {
@@ -978,6 +982,8 @@ const sidebars = {
         'annotations/modules/modules_io_detail2',
         'annotations/modules/modules_math_detail2',
         'annotations/modules/modules_cmath_detail',
+        'annotations/modules/modules_fcntl_detail',
+        'annotations/modules/modules_select_detail',
       ],
     },
     {
@@ -1490,6 +1496,8 @@ const sidebars = {
         'annotations/lib/lib_html_parser_detail',
         'annotations/lib/lib_tempfile_detail',
         'annotations/lib/lib_http_server_detail',
+        'annotations/lib/lib_http_cookiejar_detail',
+        'annotations/lib/lib_urllib_request_detail',
       ],
     },
   ],

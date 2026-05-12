@@ -1,0 +1,132 @@
+---
+title: Modules/selectmodule.c
+description: "selectmodule.c: select, poll, epoll, kqueue — I/O multiplexing. select.select(), select.poll(), select.epoll() (Linux), select.kqueue() (macOS/BSD)."
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/selectmodule.c" />
+
+`select` provides access to the OS I/O multiplexing interfaces used to wait for multiple file descriptors simultaneously.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `select_select` | POSIX `select()`: fd_set arrays, timeout |
+| 201-500 | `poll` type | POSIX `poll()`: event-based, no fd limit |
+| 501-800 | `epoll` type | Linux `epoll`: edge/level triggered |
+| 801-1100 | `kqueue` type | BSD/macOS `kqueue`: kevent registration |
+| 1101-1400 | `devpoll` type | Solaris `/dev/poll` |
+| 1401-2200 | Helpers | `fileno()` extraction, timeout conversion |
+
+## Reading
+
+### `select.select()`
+
+```c
+// CPython: Modules/selectmodule.c:88 select_select
+static PyObject *
+select_select(PyObject *self, PyObject *args)
+{
+    /* rlist, wlist, xlist = sequences of fd-like objects */
+    /* timeout = float seconds or None (blocking) */
+    fd_set ifdset, ofdset, efdset;
+    FD_ZERO(&ifdset); FD_ZERO(&ofdset); FD_ZERO(&efdset);
+    int max_fd = 0;
+    /* Fill fd_sets from Python lists */
+    for each fd in rlist: FD_SET(fd, &ifdset);
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    n = select(max_fd + 1, &ifdset, &ofdset, &efdset, timeout_ptr);
+    Py_END_ALLOW_THREADS
+    /* Build result lists from ready fd_sets */
+    ...
+}
+```
+
+`select()` has a hard limit of `FD_SETSIZE` (1024 on Linux) file descriptors. Use `poll` or `epoll` for more.
+
+### `poll` object
+
+```c
+// CPython: Modules/selectmodule.c:280 poll_register
+static PyObject *
+poll_register(pollObject *self, PyObject *args)
+{
+    int fd;
+    unsigned short events = POLLIN | POLLPRI | POLLOUT;
+    PyArg_ParseTuple(args, "O&|H:register", fileno, &fd, &events);
+    struct pollfd pfd = { fd, events, 0 };
+    /* Store in a list; rebuild on every poll() call */
+    ...
+}
+
+static PyObject *
+poll_poll(pollObject *self, PyObject *args)
+{
+    double timeout = -1;
+    /* Build pollfd array from registered fds */
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    n = poll(self->ufds, self->ufd_len, (int)(timeout * 1000));
+    Py_END_ALLOW_THREADS
+    /* Collect ready fds into result list of (fd, event) tuples */
+    ...
+}
+```
+
+### `epoll` (Linux)
+
+```c
+// CPython: Modules/selectmodule.c:620 pyepoll_register
+static PyObject *
+pyepoll_register(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    struct epoll_event ev;
+    ev.events = eventmask;   /* EPOLLIN | EPOLLOUT | EPOLLET, etc. */
+    ev.data.fd = fd;
+    Py_BEGIN_ALLOW_THREADS
+    res = epoll_ctl(self->epfd, EPOLL_CTL_ADD, fd, &ev);
+    Py_END_ALLOW_THREADS
+    ...
+}
+
+static PyObject *
+pyepoll_poll(pyEpoll_Object *self, PyObject *args)
+{
+    struct epoll_event evs[maxevents];
+    Py_BEGIN_ALLOW_THREADS
+    nfds = epoll_wait(self->epfd, evs, maxevents, (int)(timeout_ms));
+    Py_END_ALLOW_THREADS
+    /* Return list of (fd, event) tuples */
+    ...
+}
+```
+
+`EPOLLET` (edge-triggered) fires only on state changes; level-triggered fires as long as data is available.
+
+### `kqueue` (macOS/BSD)
+
+```c
+// CPython: Modules/selectmodule.c:980 kqueue_queue_control
+static PyObject *
+kqueue_queue_control(kqueueObject *self, PyObject *args)
+{
+    /* changelist: list of kevent to register/deregister */
+    /* eventlist: max events to return */
+    Py_BEGIN_ALLOW_THREADS
+    gotevents = kevent(self->kqfd, clist, nchanges, elist, nevents, timeout_ptr);
+    Py_END_ALLOW_THREADS
+    /* Return list of triggered kevent objects */
+    ...
+}
+```
+
+## gopy notes
+
+`select` is in `module/select/`. `select.select()` uses `syscall.Select`. `poll` uses `syscall.Poll`. `epoll` uses `syscall.EpollCreate1`, `EpollCtl`, `EpollWait` (Linux only). `kqueue` uses `syscall.Kqueue`, `Kevent` (macOS/BSD only). `asyncio` uses `epoll`/`kqueue` via these bindings.

@@ -1,0 +1,111 @@
+---
+title: Modules/fcntlmodule.c
+description: "fcntlmodule.c: POSIX fcntl bindings — fcntl(), ioctl(), flock(), lockf(). File control flags and advisory record locking."
+cpython_path: Modules/fcntlmodule.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/fcntlmodule.c" />
+
+`fcntl` wraps the POSIX file control functions. It is available only on Unix-like systems.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `fcntl_fcntl` | `fcntl(fd, cmd, arg=0)` — get/set file descriptor flags |
+| 81-180 | `fcntl_ioctl` | `ioctl(fd, request, arg)` — device-specific control |
+| 181-280 | `fcntl_flock` | `flock(fd, operation)` — BSD-style advisory file locks |
+| 281-400 | `fcntl_lockf` | `lockf(fd, cmd, length, start, whence)` — POSIX record locking |
+
+## Reading
+
+### `fcntl()`
+
+```c
+// CPython: Modules/fcntlmodule.c:48 fcntl_fcntl
+static PyObject *
+fcntl_fcntl(PyObject *self, PyObject *args)
+{
+    int fd, code;
+    /* Two call forms:
+     * fcntl(fd, cmd, int_arg=0)   → fcntl(fd, cmd, int) returns int
+     * fcntl(fd, cmd, bytes_arg)   → fcntl with struct arg, returns bytes
+     */
+    if (PyArg_ParseTuple(args, "O&i|i:fcntl", conv_descriptor, &fd, &code, &arg)) {
+        Py_BEGIN_ALLOW_THREADS
+        ret = fcntl(fd, code, (int)arg);
+        Py_END_ALLOW_THREADS
+        return PyLong_FromLong((long)ret);
+    }
+    ...
+}
+```
+
+Common uses: `fcntl.fcntl(fd, fcntl.F_SETFL, os.O_NONBLOCK)` sets a socket to non-blocking mode.
+
+### `ioctl()`
+
+```c
+// CPython: Modules/fcntlmodule.c:120 fcntl_ioctl
+static PyObject *
+fcntl_ioctl(PyObject *self, PyObject *args)
+{
+    /* ioctl(fd, request, arg) — request is device-specific */
+    if (PyArg_ParseTuple(args, "O&k|iy*:ioctl", ...)) {
+        Py_BEGIN_ALLOW_THREADS
+        ret = ioctl(fd, code, &buf);
+        Py_END_ALLOW_THREADS
+        ...
+    }
+}
+```
+
+`ioctl` is used for terminal settings (`TIOCGWINSZ` for terminal size), network interfaces, and device-specific operations.
+
+### `flock()`
+
+```c
+// CPython: Modules/fcntlmodule.c:215 fcntl_flock
+static PyObject *
+fcntl_flock(PyObject *self, PyObject *args)
+{
+    int fd, code;
+    PyArg_ParseTuple(args, "O&i:flock", conv_descriptor, &fd, &code);
+    Py_BEGIN_ALLOW_THREADS
+    ret = flock(fd, code);
+    Py_END_ALLOW_THREADS
+    if (ret < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`flock(fd, LOCK_EX)` acquires an exclusive lock on the entire file. `LOCK_SH` is shared, `LOCK_UN` releases. Locks are per-open-file-description (not per-process).
+
+### `lockf()`
+
+```c
+// CPython: Modules/fcntlmodule.c:305 fcntl_lockf
+static PyObject *
+fcntl_lockf(PyObject *self, PyObject *args)
+{
+    int fd, code, whence = 0;
+    PyObject *lenobj = NULL, *startobj = NULL;
+    /* lockf(fd, cmd, length=0, start=0, whence=SEEK_SET) */
+    /* Wraps fcntl(fd, F_SETLKW/F_SETLK/F_GETLK) with struct flock */
+    ...
+}
+```
+
+`lockf` supports byte-range locking (lock part of a file). `fcntl.LOCK_EX | fcntl.LOCK_NB` is non-blocking.
+
+## gopy notes
+
+`fcntl` is in `module/fcntl/`. `fcntl()` and `ioctl()` call `syscall.Fcntl` and `syscall.Ioctl`. `flock()` uses `syscall.Flock`. `lockf()` is implemented via `syscall.FcntlFlock` with a `syscall.Flock_t` struct.

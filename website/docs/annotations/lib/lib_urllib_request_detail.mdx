@@ -1,0 +1,115 @@
+---
+title: Lib/urllib/request.py
+description: "Lib/urllib/request.py: urlopen, OpenerDirector, handlers chain — HTTPHandler, HTTPSHandler, HTTPCookieProcessor, HTTPRedirectHandler, ProxyHandler."
+cpython_path: Lib/urllib/request.py
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/urllib/request.py" />
+
+`urllib.request` provides `urlopen()` and a composable handler chain. Each handler is responsible for one aspect of the request/response cycle.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `urlopen` | Module-level convenience function |
+| 151-400 | `Request` | Encapsulates URL, headers, method, data |
+| 401-700 | `OpenerDirector` | Builds the handler chain, dispatches requests |
+| 701-900 | `BaseHandler` | Base class; `handler_order` for sorting |
+| 901-1100 | `HTTPHandler` | Open HTTP connections via `http.client` |
+| 1101-1300 | `HTTPSHandler` | SSL; calls `HTTPHandler` with an SSL context |
+| 1301-1500 | `HTTPRedirectHandler` | Follow 301/302/303/307/308 redirects |
+| 1501-1700 | `HTTPCookieProcessor` | Extract and add cookies via `CookieJar` |
+| 1701-1900 | `ProxyHandler` | Route requests through a proxy |
+| 1901-2200 | `FileHandler` | Handle `file://` URLs |
+| 2201-2800 | `AbstractHTTPHandler` | Core HTTP request execution |
+
+## Reading
+
+### `urlopen`
+
+```python
+# CPython: Lib/urllib/request.py:82 urlopen
+def urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+            *, cafile=None, capath=None, cadefault=False, context=None):
+    global _opener
+    if cafile or capath or cadefault or context:
+        ...
+        opener = build_opener(HTTPSHandler(context=context))
+    elif _opener is None:
+        _opener = build_opener()
+    return _opener.open(url, data, timeout)
+```
+
+### `OpenerDirector`
+
+```python
+# CPython: Lib/urllib/request.py:430 OpenerDirector.open
+def open(self, fullurl, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT):
+    req = fullurl if isinstance(fullurl, Request) else Request(fullurl, data)
+    req.timeout = timeout
+    protocol = req.type
+    # Call all request handlers (in order)
+    meth = getattr(self, 'do_request_')
+    req = meth(req)
+    # Call the protocol handler (http_open, ftp_open, etc.)
+    result = self._call_chain(self.handle_open, protocol, protocol + '_open', req)
+    # Call all response handlers
+    ...
+    return result
+```
+
+### Handler chain ordering
+
+```python
+# CPython: Lib/urllib/request.py:680 build_opener
+def build_opener(*handlers):
+    """Create opener with default handlers + any custom ones."""
+    opener = OpenerDirector()
+    default_classes = [ProxyHandler, UnknownHandler, HTTPHandler,
+                       HTTPDefaultErrorHandler, HTTPRedirectHandler,
+                       HTTPCookieProcessor, HTTPErrorProcessor, FileHandler]
+    for handler_class in default_classes:
+        opener.add_handler(handler_class())
+    for h in handlers:
+        opener.add_handler(h)
+    return opener
+```
+
+### `HTTPHandler.http_open`
+
+```python
+# CPython: Lib/urllib/request.py:950 HTTPHandler.http_open
+def http_open(self, req):
+    return self.do_open(http.client.HTTPConnection, req)
+
+def do_open(self, http_class, req, **http_conn_args):
+    host = req.host
+    h = http_class(host, timeout=req.timeout, **http_conn_args)
+    h.request(req.get_method(), req.selector, req.data, headers)
+    r = h.getresponse()
+    return addinfourl(r, r.msg, req.full_url, r.status)
+```
+
+### `HTTPRedirectHandler`
+
+```python
+# CPython: Lib/urllib/request.py:1340 HTTPRedirectHandler.redirect_request
+def http_error_301(self, req, fp, code, msg, headers):
+    """Handle 301 Moved Permanently."""
+    newurl = headers['Location']
+    ...
+    newreq = Request(newurl, req.data, req.headers, origin_req_host=req.origin_req_host)
+    return self.parent.open(newreq, timeout=req.timeout)
+```
+
+Redirects reissue the request with the new URL. `307`/`308` preserve the method and body; `303` changes to GET.
+
+## gopy notes
+
+`urllib.request` is pure Python and importable when `http.client`, `http.cookiejar`, `socket`, `ssl`, `urllib.parse`, `urllib.error`, `io`, `os`, and `base64` work. The `OpenerDirector` pattern allows custom authentication and proxy handlers to be injected without subclassing.

@@ -1,0 +1,111 @@
+---
+title: Lib/http/cookiejar.py
+description: "Lib/http/cookiejar.py: CookieJar, FileCookieJar, MozillaCookieJar — RFC 2965/RFC 6265 cookie management, domain matching, path matching, expiry."
+cpython_path: Lib/http/cookiejar.py
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/http/cookiejar.py" />
+
+`http.cookiejar` manages cookies for `urllib.request`. It implements RFC 2965 and the de-facto RFC 6265 (Netscape) cookie standard.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `Cookie` | Named tuple-like: domain, path, name, value, expires, secure, etc. |
+| 151-400 | `CookieJar` | In-memory cookie store, `_cookies` dict |
+| 401-700 | `DefaultCookiePolicy` | Domain/path matching, security checks |
+| 701-1000 | `_cookies_from_attrs_set` | Parse `Set-Cookie` header into `Cookie` objects |
+| 1001-1300 | `extract_cookies` | Called on HTTP response: store matching cookies |
+| 1301-1600 | `add_cookie_header` | Called on HTTP request: add `Cookie:` header |
+| 1601-1900 | `FileCookieJar`, `LWPCookieJar` | Persist cookies to/from a file |
+| 1901-2500 | `MozillaCookieJar` | Netscape cookies.txt format |
+
+## Reading
+
+### Cookie storage structure
+
+```python
+# CPython: Lib/http/cookiejar.py:175 CookieJar._cookies
+class CookieJar:
+    def __init__(self, policy=None):
+        self._cookies = {}  # {domain: {path: {name: Cookie}}}
+        self._cookies_lock = threading.RLock()
+        self._policy = policy or DefaultCookiePolicy()
+```
+
+### Domain matching
+
+```python
+# CPython: Lib/http/cookiejar.py:450 DefaultCookiePolicy.domain_return_ok
+def domain_return_ok(self, domain, request):
+    """Return True if cookies from 'domain' should be sent to 'request'."""
+    req_host = request.host
+    # Exact match
+    if domain == req_host: return True
+    # .example.com matches sub.example.com
+    if domain.startswith('.'):
+        return req_host.endswith(domain) or req_host == domain[1:]
+    return False
+```
+
+### `extract_cookies`
+
+```python
+# CPython: Lib/http/cookiejar.py:1080 extract_cookies
+def extract_cookies(self, response, request):
+    """Read Set-Cookie headers from response, store in jar."""
+    with self._cookies_lock:
+        for header_value in response.info().get_all('Set-Cookie', []):
+            cookie_attrs = self._cookies_from_attrs_set(
+                header_value2cookie_attrs(header_value), request)
+            for cookie in cookie_attrs:
+                if self._policy.set_ok(cookie, request):
+                    self._cookies.setdefault(cookie.domain, {})
+                    self._cookies[cookie.domain].setdefault(cookie.path, {})
+                    self._cookies[cookie.domain][cookie.path][cookie.name] = cookie
+```
+
+### `add_cookie_header`
+
+```python
+# CPython: Lib/http/cookiejar.py:1340 add_cookie_header
+def add_cookie_header(self, request):
+    """Add Cookie header to outgoing request."""
+    with self._cookies_lock:
+        attrs = self._cookies_for_request(request)
+        if attrs:
+            request.add_unredirected_header(
+                'Cookie',
+                '; '.join('%s=%s' % (c.name, c.value) for c in attrs))
+```
+
+### `MozillaCookieJar`
+
+```python
+# CPython: Lib/http/cookiejar.py:2050 MozillaCookieJar.save
+def save(self, filename=None, ignore_discard=False, ignore_expires=False):
+    """Write cookies to file in Netscape format:
+    # HTTP Cookie File
+    .example.com\tTRUE\t/\tFALSE\t0\tname\tvalue
+    """
+    f = open(filename, "w")
+    f.write(self.header)
+    now = time.time()
+    for cookie in self:
+        ...
+        f.write("%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % (
+            cookie.domain, "TRUE" if cookie.domain.startswith('.') else "FALSE",
+            cookie.path, "TRUE" if cookie.secure else "FALSE",
+            int(cookie.expires or 0),
+            cookie.name, cookie.value))
+```
+
+## gopy notes
+
+`http.cookiejar` is pure Python and importable when `http.client`, `urllib.parse`, `time`, `threading`, and `re` work. The `_cookies` dict is a three-level nested dict: domain → path → name. Thread safety uses `threading.RLock`.

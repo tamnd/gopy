@@ -1,0 +1,108 @@
+---
+title: Objects/longobject.c (part 6)
+description: "longobject.c part 6: multiplication (Karatsuba for large ints), modular arithmetic (__mod__, __divmod__), pow with modulus, negative number two's complement display."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers large integer multiplication and modular operations. See parts 1-5 for basic arithmetic, string parsing, and byte array conversion.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `long_mul` | Dispatch: schoolbook for small, Karatsuba for large |
+| 201-400 | `k_mul` | Karatsuba algorithm: O(n^1.585) |
+| 401-600 | `k_lopsided_mul` | Karatsuba variant for heavily unequal lengths |
+| 601-800 | `long_mod`, `long_divmod` | Euclidean division with Python sign convention |
+| 801-1000 | `long_pow` | `pow(a, b, m)` — modular exponentiation |
+| 1001-1200 | `_PyLong_Format` | Format with sign, grouping, base prefix |
+
+## Reading
+
+### Karatsuba multiplication
+
+```c
+// CPython: Objects/longobject.c:240 k_mul
+static PyLongObject *
+k_mul(PyLongObject *a, PyLongObject *b)
+{
+    /* Karatsuba: split a = ah*B + al, b = bh*B + bl
+     * a*b = ah*bh*B^2 + ((ah+al)*(bh+bl) - ah*bh - al*bl)*B + al*bl
+     * Three multiplications instead of four.
+     */
+    Py_ssize_t n = Py_SIZE(b);
+    Py_ssize_t shift = n >> 1;    /* split point */
+    PyLongObject *ah, *al, *bh, *bl;
+    ah = long_rshift1(a, shift);  al = long_lslice(a, 0, shift);
+    bh = long_rshift1(b, shift);  bl = long_lslice(b, 0, shift);
+    PyLongObject *t1 = k_mul(ah, bh);   /* high * high */
+    PyLongObject *t2 = k_mul(al, bl);   /* low * low  */
+    PyLongObject *t3 = k_mul(          /* (ah+al)*(bh+bl) */
+        long_add(ah, al), long_add(bh, bl));
+    /* middle = t3 - t1 - t2 */
+    PyLongObject *middle = long_sub(long_sub(t3, t1), t2);
+    /* result = t1 * B^(2*shift) + middle * B^shift + t2 */
+    ...
+}
+```
+
+CPython switches to Karatsuba when the number of digits exceeds `KARATSUBA_CUTOFF` (70 digits by default).
+
+### Python's division sign convention
+
+```c
+// CPython: Objects/longobject.c:640 long_divmod
+static int
+long_divmod(PyLongObject *a, PyLongObject *b,
+            PyLongObject **pdiv, PyLongObject **pmod)
+{
+    /* Python floor division: result sign follows divisor */
+    /* 7 // 3 = 2, -7 // 3 = -3 (not -2) */
+    /* C truncation: -7 / 3 = -2 */
+    /* If signs differ and remainder != 0: adjust */
+    long_divrem(a, b, pdiv, pmod);
+    if (((*pmod)->ob_size < 0 && b->ob_size > 0) ||
+        ((*pmod)->ob_size > 0 && b->ob_size < 0)) {
+        *pmod = long_add(*pmod, b);
+        *pdiv = long_sub(*pdiv, _PyLong_GetOne());
+    }
+}
+```
+
+`-7 % 3` in Python is `2` (not `-1` as in C). The modulus always has the same sign as the divisor.
+
+### `pow(a, b, m)` — modular exponentiation
+
+```c
+// CPython: Objects/longobject.c:860 long_pow
+static PyObject *
+long_pow(PyObject *v, PyObject *w, PyObject *x)
+{
+    /* Fast path for x != None: modular exponentiation using square-and-multiply */
+    if (x != Py_None) {
+        /* Montgomery or binary method */
+        while (b > 0) {
+            if (b & 1)
+                result = (result * base) % mod;
+            base = (base * base) % mod;
+            b >>= 1;
+        }
+        return result;
+    }
+    /* No modulus: use bignum multiplication */
+    ...
+}
+```
+
+`pow(base, exp, mod)` is implemented as a C built-in and avoids creating the full intermediate `base**exp` value.
+
+## gopy notes
+
+`long_mul` for small integers uses Go `*big.Int.Mul`. For very large integers Go's `big.Int` already uses Karatsuba (threshold ~40 words). `long_divmod` uses `big.Int.DivMod` (truncated division) then adjusts sign to match Python floor semantics. `pow(a, b, m)` uses `big.Int.Exp(a, b, m)` which Go implements with Montgomery multiplication.

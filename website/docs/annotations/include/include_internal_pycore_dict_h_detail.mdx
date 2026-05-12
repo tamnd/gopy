@@ -1,0 +1,103 @@
+---
+title: "Include/internal/pycore_dict.h"
+description: "pycore_dict.h: dict internals — PyDictObject layout, compact key table, split vs combined dict, ma_keys/ma_values, lookup function pointer."
+cpython_path: Include/internal/pycore_dict.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_dict.h" />
+
+`pycore_dict.h` exposes the internal layout of Python's `dict`. Understanding this header is essential for comprehending dict performance, insertion order, and split-key optimization.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `PyDictObject` | The dict struct: `ma_used`, `ma_version_tag`, `ma_keys`, `ma_values` |
+| 51-100 | `PyDictKeysObject` | Key array: hash table indices + entries |
+| 101-140 | Split vs combined | `ma_values == NULL` → combined dict; non-NULL → split dict |
+| 141-170 | `dk_entries` | Entry array: `(hash, key, value)` triples |
+| 171-200 | `_PyDict_MINSIZE` | Initial key table size (8) |
+
+## Reading
+
+### `PyDictObject`
+
+```c
+// CPython: Include/internal/pycore_dict.h:18 PyDictObject
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t ma_used;           /* number of items */
+    uint64_t ma_version_tag;      /* incremented on every change */
+    PyDictKeysObject *ma_keys;    /* shared key object */
+    PyObject **ma_values;         /* NULL for combined; non-NULL for split */
+} PyDictObject;
+```
+
+`ma_version_tag` is used by iterators and guards (`dict.__len__` changed while iterating).
+
+### `PyDictKeysObject`
+
+```c
+// CPython: Include/internal/pycore_dict.h:58 PyDictKeysObject
+typedef struct {
+    Py_ssize_t dk_refcnt;      /* shared key sharing reference count */
+    uint8_t dk_log2_size;      /* log2 of the index table size */
+    uint8_t dk_log2_index_bytes; /* log2 of bytes per index entry */
+    uint8_t dk_kind;           /* DICT_KEYS_GENERAL / UNICODE / SPLIT */
+    uint32_t dk_version;       /* for per-key version (watched dicts) */
+    Py_ssize_t dk_usable;      /* remaining free entries */
+    Py_ssize_t dk_nentries;    /* used entries count */
+    char dk_indices[];         /* hash table: int8/int16/int32/int64 per slot */
+    /* followed by dk_entries[] array */
+} PyDictKeysObject;
+```
+
+The index table stores entry indices (not entries themselves), enabling insertion-order preservation with compact storage.
+
+### Combined vs split dict
+
+```c
+// CPython: Include/internal/pycore_dict.h:120 combined/split
+/*
+ * Combined dict (ma_values == NULL):
+ *   All keys and values stored in dk_entries.
+ *   Used for general-purpose dicts.
+ *
+ * Split dict (ma_values != NULL):
+ *   Keys are shared across all instances of the same class.
+ *   Values are stored in a separate ma_values array.
+ *   Used for instance __dict__ when the type is not modified.
+ *   Allows many instances to share one PyDictKeysObject.
+ */
+```
+
+Object instance `__dict__` values start as split dicts. If a key is added that wasn't in the shared key object, the dict is "unsplit" (converted to combined).
+
+### Entry layout
+
+```c
+// CPython: Include/internal/pycore_dict.h:150 PyDictKeyEntry
+typedef struct {
+    Py_hash_t me_hash;  /* cached hash of me_key; -1 if not cached */
+    PyObject *me_key;
+    PyObject *me_value; /* NULL in split dict (value in ma_values instead) */
+} PyDictKeyEntry;
+```
+
+### Index table size
+
+```c
+// CPython: Include/internal/pycore_dict.h:175 _PyDict_MINSIZE
+#define _PyDict_MINSIZE 8
+/* Load factor: resize when ma_used > dk_size * 2/3 */
+/* Index width: int8 for size<=128, int16 for <=32k, int32 for <=2G, int64 for larger */
+```
+
+## gopy notes
+
+`dict` in gopy is `objects/dict.go`. The internal implementation uses a Go `map[any]*dictEntry` for O(1) lookup plus a `[]dictEntry` slice for insertion order. `ma_version_tag` maps to `objects.Dict.version uint64`. Split dict optimization is approximated: instance `__dict__` starts with a shared key set and a separate values slice, upgraded to a full map on first novel key insertion.

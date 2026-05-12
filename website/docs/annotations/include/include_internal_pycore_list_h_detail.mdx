@@ -1,0 +1,75 @@
+---
+title: "Include/internal/pycore_list.h"
+description: "pycore_list.h: list internals — PyListObject layout, ob_item pointer, allocated/ob_size overallocation, _PyList_ITEMS macro, list freelists."
+cpython_path: Include/internal/pycore_list.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_list.h" />
+
+`pycore_list.h` exposes the internal list object layout and the free-list optimization for small lists.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `PyListObject` | ob_item pointer + allocated capacity |
+| 31-50 | `_PyList_ITEMS` | Zero-overhead macro to access ob_item |
+| 51-70 | `_Py_LIST_INITIAL_CAPACITY` | Growth pattern constants |
+| 71-80 | Free list | `_Py_list_state` with freelist for empty lists |
+
+## Reading
+
+### `PyListObject`
+
+```c
+// CPython: Include/internal/pycore_list.h:12 PyListObject
+typedef struct {
+    PyObject_VAR_HEAD       /* ob_size = current length */
+    PyObject **ob_item;     /* pointer to element array */
+    Py_ssize_t allocated;   /* allocated capacity (>= ob_size) */
+} PyListObject;
+```
+
+`ob_size` is the current number of elements; `allocated` is the capacity. When `ob_size == allocated`, the next `append` triggers a reallocation.
+
+### `_PyList_ITEMS`
+
+```c
+// CPython: Include/internal/pycore_list.h:36 _PyList_ITEMS
+#define _PyList_ITEMS(op) (((PyListObject *)(op))->ob_item)
+```
+
+`PyList_GET_ITEM(op, i)` is `_PyList_ITEMS(op)[i]` — a single array dereference with no bounds check.
+
+### Growth pattern
+
+```c
+// CPython: Objects/listobject.c:60 list_resize
+/* Growth formula: new_allocated = (ob_size >> 3) + (ob_size < 9 ? 3 : 6) */
+/* This gives approximately: 0,4,8,16,25,35,46,58,72,88,... */
+/* Over-allocation amortizes the O(n) realloc cost across O(1) appends */
+```
+
+For a list of 8 elements, `append` allocates capacity 16. For 16, it allocates 25, etc. The formula keeps the over-allocation factor under 12.5%.
+
+### Free list
+
+```c
+// CPython: Include/internal/pycore_list.h:62 _Py_list_state
+struct _Py_list_state {
+    /* Cache empty list structs to avoid malloc/free on frequent create/discard */
+    PyListObject *free_list[PyList_MAXFREELIST];
+    int numfree;
+};
+```
+
+When a list is deallocated (but not its element array), its `PyListObject` shell is saved in the free list. The next `PyList_New()` reuses it. `PyList_MAXFREELIST` is 80.
+
+## gopy notes
+
+`list` in gopy is `objects/list.go` backed by a Go `[]PyObject` slice. Go's slice already provides the over-allocation behavior: `append` uses a similar growth factor. The `_PyList_ITEMS` macro maps to direct slice indexing. The free list optimization is not replicated; Go's runtime handles allocator efficiency.
