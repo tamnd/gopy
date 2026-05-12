@@ -1,0 +1,70 @@
+---
+title: Lib/io.py (part 3)
+description: "io part 3: text_encoding default, RawIOBase, BufferedIOBase, TextIOBase ABCs, open() mode parsing, DEFAULT_BUFFER_SIZE."
+cpython_path: Lib/io.py
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/io.py" />
+
+`Lib/io.py` is a minimal shim that imports from the C extension `_io` and exposes the public API. The actual implementation is `Modules/_io/`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | Imports from `_io` | `FileIO`, `BytesIO`, `StringIO`, `BufferedReader`, etc. |
+| 31-60 | `text_encoding` | Default encoding helper (PEP 597) |
+| 61-100 | `open` alias, `DEFAULT_BUFFER_SIZE` | `open = _io.open`, `DEFAULT_BUFFER_SIZE = 8192` |
+
+## Reading
+
+### `text_encoding`
+
+```python
+# CPython: Lib/io.py:52 text_encoding
+def text_encoding(encoding, stacklevel=2, /):
+    if encoding is None or encoding == "locale":
+        if _bootlocale.getpreferredencoding(False) == 'UTF-8':
+            encoding = 'utf-8'
+        else:
+            encoding = 'locale'
+        if sys.flags.warn_default_encoding:
+            import warnings
+            warnings.warn(
+                "'encoding' argument not specified. The default encoding will be "
+                "UTF-8 in a future Python version.",
+                EncodingWarning, stacklevel + 1
+            )
+    return encoding
+```
+
+`text_encoding` was added in Python 3.10 (PEP 597). It warns when code opens a text file without specifying `encoding=`, since the default will change from the locale encoding to UTF-8.
+
+### ABC hierarchy
+
+```
+IOBase
+├── RawIOBase     (FileIO)
+├── BufferedIOBase (BytesIO, StringIO, Buffered*)
+└── TextIOBase    (TextIOWrapper, StringIO for text mode)
+```
+
+`IOBase` defines `close`, `fileno`, `flush`, `readable`, `readline`, `readlines`, `seek`, `seekable`, `tell`, `truncate`, `writable`, `writelines`. All are implemented in C with Python stubs for the abstract methods.
+
+### `DEFAULT_BUFFER_SIZE`
+
+```python
+# CPython: Lib/io.py:75
+DEFAULT_BUFFER_SIZE = 8 * 1024   # 8192 bytes
+```
+
+Used as the default `buffering` argument to `open()` and `BufferedReader`.
+
+## gopy notes
+
+`io.open` is the primary entry point for all file I/O in Python. In gopy `io.open` delegates to `module/io/open.go` which creates the appropriate wrapper stack (FileIO + Buffered + TextIOWrapper). `DEFAULT_BUFFER_SIZE = 8192` is used by the buffered layers. `text_encoding` must emit `EncodingWarning` when appropriate (requires `warnings` module).

@@ -1,0 +1,74 @@
+---
+title: Include/internal/pycore_uops.h
+description: "pycore_uops.h: micro-op (uop) types, _PyUOpInstruction, _PyExecutorObject, tier-2 optimizer data structures."
+cpython_path: Include/internal/pycore_uops.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_uops.h" />
+
+`pycore_uops.h` defines the data structures for CPython 3.13+'s tier-2 optimizer (the JIT-compiler precursor). The tier-2 optimizer translates bytecode into a micro-op (`uop`) trace that can be executed by `_PyUop_Executor`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `_PyUOpInstruction` | Single micro-op: opcode, oparg, target |
+| 51-120 | `_PyExecutorObject` | A compiled trace: array of uops + metadata |
+| 121-200 | `_PyOptimizer` | Optimizer interface (trace recording, threshold) |
+
+## Reading
+
+### `_PyUOpInstruction`
+
+```c
+// CPython: Include/internal/pycore_uops.h:22 _PyUOpInstruction
+typedef struct {
+    uint16_t opcode;
+    uint16_t oparg;
+    uint32_t target;    /* bytecode offset of the original instruction */
+    uint64_t operand;   /* immediate operand for some uops */
+} _PyUOpInstruction;
+```
+
+Uops are wider than bytecode instructions. The `operand` field carries 64-bit values (pointers, type tags) that cannot fit in `oparg`.
+
+### `_PyExecutorObject`
+
+```c
+// CPython: Include/internal/pycore_uops.h:68 _PyExecutorObject
+typedef struct _PyExecutorObject {
+    PyObject_VAR_HEAD
+    _PyVMData vm_data;
+    uint32_t exit_count;
+    uint32_t cold_exit_count;
+    _PyExecutorLinkListNode links;
+    _PyUOpInstruction trace[1];  /* variable-length uop array */
+} _PyExecutorObject;
+```
+
+An executor is a Python heap object containing a fixed uop trace. When a loop becomes "hot" (executes more than `optimizer_threshold` times), the optimizer records a trace and installs it via `ENTER_EXECUTOR`.
+
+### `ENTER_EXECUTOR`
+
+```c
+// CPython: Python/ceval.c (tier-2 dispatch)
+/* The bytecode ENTER_EXECUTOR oparg points to an _PyExecutorObject.
+   The executor dispatches uops directly, bypassing the normal eval loop. */
+inst(ENTER_EXECUTOR, (--)) {
+    _PyExecutorObject *executor = ...;
+    if (tstate->current_executor)
+        goto deopt;
+    tstate->current_executor = executor;
+    /* Execute the uop trace */
+    ...
+}
+```
+
+## gopy notes
+
+gopy implements a tier-2 optimizer in `compile/` (v0.12 scope). The `_PyUOpInstruction` struct maps to `compile.UOp`. The executor is a Go slice of `UOp` values stored in a `vm.Executor` struct. `ENTER_EXECUTOR` is handled in `vm/eval_gen.go` and dispatches to the uop eval loop in `vm/eval_uop.go`.

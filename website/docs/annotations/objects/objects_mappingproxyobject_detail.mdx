@@ -1,0 +1,73 @@
+---
+title: Objects/mappingproxyobject.c
+description: "Objects/mappingproxyobject.c: mappingproxyobject — read-only view of a dict, used for type.__dict__, module.__dict__ via types.MappingProxyType."
+cpython_path: Objects/mappingproxyobject.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/mappingproxyobject.c" />
+
+`mappingproxy` is a read-only wrapper around a `dict`. It is the type of `SomeClass.__dict__` and `some_module.__dict__`. The class `types.MappingProxyType` exposes it to Python code.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `mappingproxyobject` struct | Holds a reference to the underlying mapping |
+| 61-180 | `mappingproxy_getitem`, `mappingproxy_keys`, `mappingproxy_len` | Read-only dict protocol |
+| 181-260 | `mappingproxy_setitem` | Raises `TypeError: 'mappingproxy' object does not support item assignment` |
+| 261-300 | `PyDictProxy_New` | C API to wrap any mapping |
+
+## Reading
+
+### Lookup
+
+```c
+// CPython: Objects/mappingproxyobject.c:75 mappingproxy_getitem
+static PyObject *
+mappingproxy_getitem(mappingproxyobject *pp, PyObject *key)
+{
+    return PyObject_GetItem(pp->dict, key);
+}
+```
+
+All read operations delegate to the underlying dict. There is no copy; the proxy and the dict share the same underlying hash table.
+
+### Write rejection
+
+```c
+// CPython: Objects/mappingproxyobject.c:195 mappingproxy_setitem
+static int
+mappingproxy_setitem(mappingproxyobject *pp, PyObject *key, PyObject *value)
+{
+    PyErr_SetString(PyExc_TypeError,
+                    "'mappingproxy' object does not support item assignment");
+    return -1;
+}
+```
+
+This is why `SomeClass.__dict__['x'] = 1` raises `TypeError`; you must use `setattr(SomeClass, 'x', 1)` instead.
+
+### `PyDictProxy_New`
+
+```c
+// CPython: Objects/mappingproxyobject.c:270 PyDictProxy_New
+PyObject *
+PyDictProxy_New(PyObject *mapping)
+{
+    mappingproxyobject *pp;
+    pp = PyObject_New(mappingproxyobject, &PyDictProxy_Type);
+    pp->dict = Py_NewRef(mapping);
+    return (PyObject *)pp;
+}
+```
+
+Called by `type.__init__` to make `cls.__dict__` read-only after the class is created.
+
+## gopy notes
+
+`mappingproxy` is in `objects/mapping_proxy.go`. `type.__dict__` returns a `mappingproxy` wrapping the type's internal attribute dict. This is needed for correct `vars(SomeClass)` behavior and for `inspect.getmembers` which iterates `cls.__dict__`. The underlying dict is a plain Go `map` exposed via the `MappingProxy` type.

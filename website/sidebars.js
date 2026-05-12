@@ -497,6 +497,7 @@ const sidebars = {
         'annotations/objects/objects_memoryobject_detail',
         'annotations/objects/objects_namespaceobject_detail',
         'annotations/objects/objects_unionobject_detail',
+        'annotations/objects/objects_mappingproxyobject_detail',
       ],
     },
     {
@@ -723,6 +724,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_interp_h_detail',
         'annotations/include/include_internal_pycore_tstate_h_detail',
         'annotations/include/include_internal_pycore_opcode_h_detail',
+        'annotations/include/include_internal_pycore_uops_h_detail',
       ],
     },
     {
@@ -1443,6 +1445,7 @@ const sidebars = {
         'annotations/lib/lib_pathlib_detail4',
         'annotations/lib/lib_sys_detail',
         'annotations/lib/lib_argparse_detail2',
+        'annotations/lib/lib_io_detail3',
       ],
     },
   ],
