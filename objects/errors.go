@@ -21,7 +21,7 @@ var errIndexOutOfRange = errors.New("IndexError: index out of range")
 // errKeyNotFound signals a missing dict key. Mirrors PyExc_KeyError.
 // The message carries the "KeyError:" prefix so the vm unwind path
 // can promote it to a real PyExc_KeyError instance instead of a bare
-// Exception. isKeyError still recognises the sentinel via errors.Is.
+// Exception. isKeyError still recognizes the sentinel via errors.Is.
 //
 // CPython: Objects/exceptions.c:L2261 PyExc_KeyError
 var errKeyNotFound = errors.New("KeyError: key not found")
