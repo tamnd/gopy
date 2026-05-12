@@ -1,0 +1,109 @@
+---
+title: Objects/rangeobject.c (part 4)
+description: "Objects/rangeobject.c part 4: range.__contains__, range.__getitem__, range.count, range.index, slice handling."
+cpython_path: Objects/rangeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/rangeobject.c" />
+
+This annotation covers range membership and indexing. See `objects_rangeobject3_detail` for `range.__new__`, `__len__`, `__iter__`, and the range iterator.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `range.__contains__` | O(1) membership test using arithmetic |
+| 81-160 | `range.__getitem__` | Integer and slice indexing |
+| 161-240 | `range.count` | Count occurrences (always 0 or 1) |
+| 241-320 | `range.index` | Find position of a value |
+| 321-500 | `compute_range_length` | Safe integer arithmetic for large ranges |
+
+## Reading
+
+### `range.__contains__`
+
+```c
+// CPython: Objects/rangeobject.c:380 range_contains
+static int
+range_contains(rangeobject *r, PyObject *ob)
+{
+    /* Fast path: if ob is a plain int, use arithmetic */
+    if (PyLong_CheckExact(ob) || (PyLong_Check(ob) &&
+        !_PyLong_IsCompact((PyLongObject *)ob))) {
+        return range_contains_long(r, ob);
+    }
+    return (int)_PySequence_IterSearch((PyObject *)r, ob,
+                                       PY_ITERSEARCH_CONTAINS);
+}
+
+static int
+range_contains_long(rangeobject *r, PyObject *ob)
+{
+    /* Check: (ob - start) % step == 0 and 0 <= (ob - start) / step < length */
+    PyObject *tmp = PyNumber_Subtract(ob, r->start);
+    ...
+}
+```
+
+`x in range(0, 100, 2)` is O(1): `(x - 0) % 2 == 0 and 0 <= (x - 0) // 2 < 50`. Non-integer objects (e.g., `1.0`) fall back to iteration. This optimization is critical for `for i in range(n): if x in range(m):` patterns.
+
+### `range.__getitem__`
+
+```c
+// CPython: Objects/rangeobject.c:460 range_subscript
+static PyObject *
+range_subscript(rangeobject *r, PyObject *item)
+{
+    if (PyLong_CheckExact(item)) {
+        /* Integer index */
+        Py_ssize_t i = PyLong_AsSsize_t(item);
+        if (i < 0) i += r->length;
+        if (i < 0 || i >= r->length) {
+            PyErr_SetString(PyExc_IndexError, "range object index out of range");
+            return NULL;
+        }
+        return compute_item(r, i);
+    }
+    if (PySlice_Check(item)) {
+        /* Slice: return a new range object */
+        Py_ssize_t start, stop, step;
+        PySlice_Unpack(item, &start, &stop, &step);
+        Py_ssize_t slicelength = PySlice_AdjustIndices(r->length, &start, &stop, step);
+        /* Compute new start/stop/step relative to r */
+        return compute_slice(r, start, stop, step, slicelength);
+    }
+    ...
+}
+```
+
+Slicing a range returns a range, not a list: `range(0, 10)[2:8:2]` returns `range(2, 8, 2)`. This allows sliced ranges to be used in `for` loops without materializing a list.
+
+### `range.index`
+
+```c
+// CPython: Objects/rangeobject.c:540 range_index
+static PyObject *
+range_index(rangeobject *r, PyObject *ob)
+{
+    if (!range_contains_long(r, ob)) {
+        PyErr_SetString(PyExc_ValueError, "... is not in range");
+        return NULL;
+    }
+    /* Compute: (ob - start) // step */
+    PyObject *tmp = PyNumber_Subtract(ob, r->start);
+    PyObject *idx = PyNumber_FloorDivide(tmp, r->step);
+    ...
+    return idx;
+}
+```
+
+`range(0, 100, 3).index(12)` returns `4` because `(12 - 0) // 3 == 4`. The containment check is done first; if the value isn't in the range, `ValueError` is raised without iteration.
+
+## gopy notes
+
+`range.__contains__` is `objects.RangeContains` in `objects/range.go`. The fast path uses `big.Int` arithmetic for large ranges. `range.__getitem__` returns a new `objects.Range` for slice inputs. `range.index` computes the floor-divided offset.

@@ -1,0 +1,114 @@
+---
+title: Lib/unittest/case.py (part 3)
+description: "unittest/case.py part 3: TestCase.assertEqual, assertRaises, assertWarns, subTest, skip decorators."
+cpython_path: Lib/unittest/case.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/unittest/case.py" />
+
+This annotation covers assertion helpers and test control flow. See `lib_unittest2_detail` for `TestCase.run`, `setUp`/`tearDown`, and the result protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `assertEqual` | Core equality check with type-specific helpers |
+| 81-160 | `assertRaises` | Verify a callable raises a specific exception |
+| 161-240 | `assertWarns` | Verify a callable issues a specific warning |
+| 241-320 | `subTest` | Context manager for parameterized sub-cases |
+| 321-500 | Skip decorators | `@skip`, `@skipIf`, `@skipUnless`, `@expectedFailure` |
+
+## Reading
+
+### `assertEqual`
+
+```python
+# CPython: Lib/unittest/case.py:870 TestCase.assertEqual
+def assertEqual(self, first, second, msg=None):
+    if not first == second:
+        firstclass = first.__class__
+        secondclass = second.__class__
+        if firstclass is not secondclass:
+            assertion_func = self._baseAssertEqual
+        else:
+            assertion_func = self._type_equality_funcs.get(
+                firstclass, self._baseAssertEqual)
+        assertion_func(first, second, msg=msg)
+```
+
+`_type_equality_funcs` maps types to specialized comparers: `assertMultiLineEqual` for `str`, `assertSequenceEqual` for `list`/`tuple`, `assertDictEqual` for `dict`, `assertSetEqual` for `set`. These produce more informative diffs than the generic message.
+
+### `assertRaises`
+
+```python
+# CPython: Lib/unittest/case.py:740 TestCase.assertRaises
+def assertRaises(self, expected_exception, *args, **kwargs):
+    context = _AssertRaisesContext(expected_exception, self)
+    try:
+        return context.handle('assertRaises', args, kwargs)
+    except:
+        ...
+
+class _AssertRaisesContext:
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            raise self.test_case.failureException(
+                f'{self.expected.__name__} not raised')
+        if not issubclass(exc_type, self.expected):
+            return False  # re-raise
+        self.exception = exc_val
+        return True
+```
+
+Used as `with self.assertRaises(ValueError):` or `self.assertRaises(ValueError, fn, arg)`. As a context manager, it suppresses the expected exception and stores it in `.exception`. Unexpected exceptions propagate.
+
+### `subTest`
+
+```python
+# CPython: Lib/unittest/case.py:1100 TestCase.subTest
+@contextmanager
+def subTest(self, msg=_subtest_msg_sentinel, **params):
+    if not isinstance(self._outcome, _Outcome):
+        yield
+        return
+    parent = self._subtest
+    if parent is None:
+        self._subtest = _SubTest(self, msg, params)
+    else:
+        self._subtest = _SubTest(self, msg, {**parent.params, **params})
+    try:
+        with self._outcome.testPartExecutor(self._subtest):
+            yield
+    finally:
+        self._subtest = parent
+```
+
+`subTest` allows a loop to run multiple sub-cases without stopping on the first failure. Each failure is recorded independently; the test continues. Parameters appear in the failure message: `FAIL: test_foo (msg='bar', i=3)`.
+
+### Skip decorators
+
+```python
+# CPython: Lib/unittest/case.py:180 skip
+def skip(reason):
+    def decorator(test_item):
+        if not isinstance(test_item, type):
+            @functools.wraps(test_item)
+            def skip_wrapper(*args, **kwargs):
+                raise SkipTest(reason)
+            test_item = skip_wrapper
+        test_item.__unittest_skip__ = True
+        test_item.__unittest_skip_why__ = reason
+        return test_item
+    return decorator
+```
+
+`@skip("reason")` works on both test methods and entire `TestCase` classes. For classes, the `__unittest_skip__` attribute is checked by the loader. `@expectedFailure` marks the test as expected to fail; an unexpected pass is reported as an error.
+
+## gopy notes
+
+`TestCase` and its assertion helpers are in `module/unittest/module.go`. `assertEqual` dispatches to type-specific comparers via a Go map. `assertRaises` is implemented as a Go context object. `subTest` uses a nested result collector. Skip decorators set metadata fields on the callable wrapper.

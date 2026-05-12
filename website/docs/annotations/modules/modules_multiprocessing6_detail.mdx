@@ -1,0 +1,101 @@
+---
+title: Modules/_multiprocessing/ (part 6)
+description: "_multiprocessing part 6: SemLock acquire/release, semaphore timeouts, SemaphoreTracker, resource cleanup."
+cpython_path: Modules/_multiprocessing/semaphore.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_multiprocessing/semaphore.c" />
+
+This annotation covers semaphore lifecycle. See `modules_multiprocessing5_detail` for `multiprocessing.Queue`, `Pipe`, `BaseManager`, and inter-process communication primitives.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SemLock.__new__` | Create a POSIX or named semaphore |
+| 81-180 | `SemLock.acquire` | Block until semaphore count > 0, then decrement |
+| 181-280 | `SemLock.release` | Increment the semaphore count |
+| 281-380 | Timeout handling | `sem_timedwait` on POSIX, `WaitForSingleObjectEx` on Windows |
+| 381-600 | `SemaphoreTracker` | Watchdog process to clean up leaked semaphores |
+
+## Reading
+
+### `SemLock.acquire`
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:240 semlock_acquire
+static PyObject *
+semlock_acquire(SemLockObject *self, PyObject *args, PyObject *kwds)
+{
+    double timeout;  /* -1.0 = blocking, 0.0 = non-blocking */
+    int blocking;
+    ...
+    if (!blocking) {
+        /* Non-blocking: sem_trywait */
+        do { res = sem_trywait(self->handle); }
+        while (res < 0 && errno == EINTR);
+    } else if (timeout == -1.0) {
+        /* Blocking: sem_wait with EINTR retry */
+        Py_BEGIN_ALLOW_THREADS
+        do { res = sem_wait(self->handle); }
+        while (res < 0 && errno == EINTR);
+        Py_END_ALLOW_THREADS
+    } else {
+        /* Timed: sem_timedwait */
+        ...
+    }
+    if (res < 0 && errno == EAGAIN) Py_RETURN_FALSE;
+    if (res < 0) { PyErr_SetFromErrno(PyExc_OSError); return NULL; }
+    ++self->count;
+    Py_RETURN_TRUE;
+}
+```
+
+`acquire()` returns `True` on success, `False` on timeout (non-blocking or timed). `EINTR` is retried automatically. The `count` field tracks recursive acquisitions for `RLock` semantics.
+
+### Timeout handling
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:180 semlock_timedacquire
+#ifdef HAVE_SEM_TIMEDWAIT
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += (time_t)timeout;
+    deadline.tv_nsec += (long)((timeout - floor(timeout)) * 1e9);
+    /* normalize nsec */
+    if (deadline.tv_nsec >= 1000000000) {
+        deadline.tv_nsec -= 1000000000;
+        deadline.tv_sec++;
+    }
+    Py_BEGIN_ALLOW_THREADS
+    do { res = sem_timedwait(self->handle, &deadline); }
+    while (res < 0 && errno == EINTR);
+    Py_END_ALLOW_THREADS
+#endif
+```
+
+`sem_timedwait` takes an absolute `CLOCK_REALTIME` deadline, not a relative timeout. CPython computes the deadline by adding the relative timeout to `clock_gettime`. If `HAVE_SEM_TIMEDWAIT` is not defined, a polling loop with `sem_trywait` and `nanosleep` is used instead.
+
+### `SemaphoreTracker`
+
+The `SemaphoreTracker` is a separate child process started by the first use of a semaphore. When a process creates a named semaphore, it registers the name with the tracker via a pipe. If the process dies unexpectedly, the tracker unlinks the semaphore during its own cleanup.
+
+```python
+# CPython: Lib/multiprocessing/resource_tracker.py:120 ResourceTracker
+class ResourceTracker:
+    def _send(self, cmd, name, rtype):
+        msg = f'{cmd}:{rtype}:{name}\n'.encode('ascii')
+        # Write to tracker process stdin pipe
+        os.write(self._fd, msg)
+```
+
+On Linux, shared memory and semaphores live in `/dev/shm` and `/proc/sys/kernel/sem`. Without cleanup, they persist across reboots. The tracker ensures they are unlinked even if the creating process crashes.
+
+## gopy notes
+
+`SemLock` is in `module/multiprocessing/module.go` using Go's `sync.Mutex` and `sync.Cond` for in-process simulation. Cross-process semaphores use `syscall.Semget`/`Semop` on Linux. The resource tracker is `module/multiprocessing.ResourceTracker`, a goroutine monitoring a channel of registered names.

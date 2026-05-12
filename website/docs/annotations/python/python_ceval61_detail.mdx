@@ -1,0 +1,111 @@
+---
+title: Python/ceval.c (part 61)
+description: "Python/ceval.c part 61: FORMAT_VALUE, BUILD_STRING, CONVERT_VALUE, RESUME, SEND."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers f-string and generator-send opcodes. See `python_ceval60_detail` for `COPY_FREE_VARS`, `MAKE_CELL`, and closure opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `FORMAT_VALUE` | Apply conversion (`!r`, `!s`, `!a`) and format spec |
+| 81-160 | `BUILD_STRING` | Join multiple formatted pieces into one string |
+| 161-240 | `CONVERT_VALUE` | Apply `!r`/`!s`/`!a` conversion without format spec |
+| 241-340 | `SEND` | Send a value into a generator or coroutine |
+| 341-500 | `RESUME` | Entry point for generators and coroutines |
+
+## Reading
+
+### `FORMAT_VALUE`
+
+```c
+// CPython: Python/ceval.c:4220 FORMAT_VALUE
+inst(FORMAT_VALUE, (value, fmt_spec[flags & FVS_MASK] -- result)) {
+    /* flags: FVC_NONE/FVC_STR/FVC_REPR/FVC_ASCII | FVS_HAVE_SPEC */
+    int which_conversion = flags & FVC_MASK;
+    switch (which_conversion) {
+    case FVC_STR:  value = PyObject_Str(value); break;
+    case FVC_REPR: value = PyObject_Repr(value); break;
+    case FVC_ASCII: value = PyObject_ASCII(value); break;
+    }
+    PyObject *spec = (flags & FVS_HAVE_SPEC) ? fmt_spec : NULL;
+    result = PyObject_Format(value, spec);
+    ERROR_IF(result == NULL, error);
+}
+```
+
+`f"{x!r:>10}"` compiles to: push `x`, `FORMAT_VALUE` with `FVC_REPR | FVS_HAVE_SPEC`. The conversion flag applies `repr()` before `format(x, ">10")`.
+
+### `BUILD_STRING`
+
+```c
+// CPython: Python/ceval.c:4270 BUILD_STRING
+inst(BUILD_STRING, (pieces[oparg] -- str)) {
+    str = _PyUnicode_JoinArray(&_Py_STR(empty), pieces, oparg);
+    for (int i = 0; i < oparg; i++) Py_DECREF(pieces[i]);
+    ERROR_IF(str == NULL, error);
+}
+```
+
+`f"Hello {name}!"` compiles to: `LOAD_CONST "Hello "`, `LOAD_FAST name`, `FORMAT_VALUE`, `LOAD_CONST "!"`, `BUILD_STRING 3`. `_PyUnicode_JoinArray` joins `oparg` strings from the stack into one using an empty separator.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:4340 SEND
+inst(SEND, (receiver, v -- receiver, retval)) {
+    assert(STACK_LEVEL() >= 2);
+    PyObject *retval;
+    if (tstate->c_tracefunc == NULL) {
+        retval = PyIter_Send(receiver, v);
+    } else {
+        if (Py_IsNone(v) && PyIter_Check(receiver)) {
+            retval = Py_TYPE(receiver)->tp_iternext(receiver);
+        } else {
+            retval = PyObject_CallMethodOneArg(receiver, &_Py_ID(send), v);
+        }
+    }
+    if (retval == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
+            /* Generator finished: jump past the yield */
+            JUMPBY(oparg);
+        } else {
+            ERROR_IF(true, error);
+        }
+    }
+}
+```
+
+`SEND` drives `yield from` and `await`. It calls `receiver.send(v)` (or `next(receiver)` if `v is None`). When the sub-generator raises `StopIteration`, execution jumps past the `yield from` to continue the outer generator.
+
+### `RESUME`
+
+```c
+// CPython: Python/ceval.c:4400 RESUME
+inst(RESUME, (--)) {
+    /* oparg: 0 = initial call, 1 = yield resume, 2 = yield from resume, 3 = await resume */
+    TIER_ONE_ONLY
+    assert(tstate->cframe == frame->previous ||
+           tstate->cframe->current_frame == frame);
+    if (oparg != 0) {
+        /* Resuming after a yield: check for pending calls */
+        if (_Py_HandlePending(tstate) != 0) ERROR_IF(true, error);
+    }
+    DISPATCH();
+}
+```
+
+Every function starts with `RESUME 0`. Generators and coroutines have `RESUME 1/2/3` at each `yield`/`yield from`/`await` resume point. This is the hook for tracing, profiling, and the `sys.monitoring` API.
+
+## gopy notes
+
+`FORMAT_VALUE` is in `vm/eval_simple.go`; it calls `objects.Str`, `objects.Repr`, or `objects.ASCII` then `objects.Format`. `BUILD_STRING` uses `strings.Builder`. `SEND` is in `vm/eval_gen.go` and calls `objects.IterSend`. `RESUME` handles `vm.PendingCalls`.
