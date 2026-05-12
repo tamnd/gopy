@@ -1,0 +1,70 @@
+---
+title: Python/traceback.c
+description: "Traceback object: PyTracebackObject struct, tb_next chain construction during frame unwinding, _PyTraceBack_Print formatting with source lines and caret markers, and sys.tracebacklimit."
+cpython_path: Python/traceback.c
+cpython_version: "3.14"
+lines: 940
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/traceback.c`
+
+<CpyLink path="Python/traceback.c" />
+
+`Python/traceback.c` implements the `traceback` object type and the traceback printer.
+When an exception propagates through a frame, `_PyTraceBack_Here` prepends a new
+`PyTracebackObject` node to the chain. `_PyTraceBack_Print` walks the chain and formats
+each frame's file/line/function with the source line and a caret marker.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-120 | `PyTracebackObject` struct, `_PyTraceBack_Here` | Node construction during unwind |
+| 121-350 | `_PyTraceBack_Print`, `tb_printinternal` | Chain traversal and text output |
+| 351-600 | `_Py_DisplaySourceLine`, caret generation | Source-line fetch and `^~~~` markers |
+| 601-940 | `traceback` Python type | `tb_next`, `tb_frame`, `tb_lineno` properties |
+
+## Reading
+
+### `_PyTraceBack_Here`
+
+Called by the eval loop whenever an exception leaves a frame. It creates a new
+`PyTracebackObject` node pointing to the current frame, and prepends it to the
+exception's traceback chain.
+
+```c
+// CPython: Python/traceback.c:42 _PyTraceBack_Here
+int
+_PyTraceBack_Here(PyFrameObject *frame)
+{
+    PyObject *exc = tstate->current_exception;
+    PyObject *tb = PyException_GetTraceback(exc);
+    PyTracebackObject *newtb = PyObject_GC_New(PyTracebackObject, &PyTraceBack_Type);
+    newtb->tb_next = (PyTracebackObject *)tb;
+    newtb->tb_frame = (PyFrameObject *)Py_NewRef(frame);
+    newtb->tb_lasti = PyFrame_GetLasti(frame) * sizeof(_Py_CODEUNIT);
+    newtb->tb_lineno = PyFrame_GetLineNumber(frame);
+    PyException_SetTraceback(exc, (PyObject *)newtb);
+    ...
+}
+```
+
+### Caret markers (Python 3.11+)
+
+`_Py_DisplaySourceLine` fetches the source text of the offending line from the linecache
+and prints a second line of `^~~~` characters that span from `col_offset` to `end_col_offset`,
+giving precise multi-token error highlighting.
+
+### `sys.tracebacklimit`
+
+`_PyTraceBack_Print` reads `sys.tracebacklimit` and stops printing after that many frames.
+The default is 1000. Setting `sys.tracebacklimit = 0` suppresses the traceback entirely.
+
+## gopy notes
+
+`vm/eval_unwind.go` builds the traceback chain during exception propagation. The traceback
+object is represented in `objects/` as a linked list of frame references. The source-line
+fetching for caret display requires a linecache implementation (`module/linecache/`).

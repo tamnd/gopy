@@ -1,0 +1,74 @@
+---
+title: Lib/argparse.py
+description: "argparse: ArgumentParser action registry, add_argument with type/choices/nargs, parse_args/parse_known_args two-pass tokeniser, subparsers, and the HelpFormatter column-wrapping logic."
+cpython_path: Lib/argparse.py
+cpython_version: "3.14"
+lines: 2900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/argparse.py`
+
+<CpyLink path="Lib/argparse.py" />
+
+`Lib/argparse.py` is a self-contained command-line argument parser. It has no C extension
+backend. The central design is an action registry: each `add_argument` call creates an
+`Action` object stored in an `_actions` list; `parse_args` consumes `sys.argv` against
+those actions and populates a `Namespace`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-150 | `Action` base class, built-in actions | `_StoreAction`, `_AppendAction`, `_CountAction`, etc. |
+| 151-500 | `ArgumentParser.__init__`, `add_argument` | Parser construction and action registration |
+| 501-900 | `parse_args`, `parse_known_args` | Two-pass tokeniser and option string dispatch |
+| 901-1300 | `_parse_optional`, `_parse_positional` | Optional-argument and positional parsing |
+| 1301-1700 | `Namespace`, `_SubParsersAction` | Result namespace and subcommand dispatch |
+| 1701-2900 | `HelpFormatter` | Column-aware help text formatting |
+
+## Reading
+
+### Two-pass tokenisation
+
+`parse_known_args` first splits `argv` into option strings and positional argument values
+using `_parse_optional`. A second pass consumes positionals against their `nargs` patterns.
+This allows intermixed positionals and options.
+
+```python
+# CPython: Lib/argparse.py:1820 _parse_known_args
+def _parse_known_args(self, arg_strings, namespace):
+    # separate optional and positional argument strings
+    option_string_indices = {}
+    arg_string_pattern_parts = []
+    for i, arg_string in enumerate(arg_strings):
+        if arg_string[0:2] == '--' or arg_string[0:1] in self.prefix_chars:
+            option_string_indices[i] = arg_string
+            arg_string_pattern_parts.append('O')
+        else:
+            arg_string_pattern_parts.append('A')
+    ...
+```
+
+### `nargs` patterns
+
+`nargs` is compiled to a regex character class: `'?'` -> `(-*A?(-*)?)`; `'*'` -> `(-*[A-]*)`; `'+'` -> `(-*A(-*A)*)`. The two-pass tokeniser matches positional patterns against the `OAAA...` string.
+
+### `HelpFormatter`
+
+The formatter calculates column widths from terminal width (via `shutil.get_terminal_size`)
+and wraps help text with `textwrap.fill`. The `metavar` for each argument is derived from
+`dest` by uppercasing.
+
+### `_SubParsersAction`
+
+Subcommands are implemented as a positional action that stores a nested `ArgumentParser`
+per subcommand name. When `__call__` fires, it delegates to the subparser's
+`parse_args(remaining_argv, namespace)`.
+
+## gopy notes
+
+Not yet ported. `argparse` is pure Python and depends only on `textwrap`, `re`, `os`,
+`sys`, and `copy`. Planned path: `module/argparse/`.

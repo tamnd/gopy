@@ -1,0 +1,78 @@
+---
+title: Lib/pathlib/_abc.py
+description: "pathlib abstract base: PurePath string manipulation (joinpath, parent, name, suffix, stem, with_name, relative_to, is_relative_to, match) and Path traversal protocol."
+cpython_path: Lib/pathlib/_abc.py
+cpython_version: "3.14"
+lines: 620
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pathlib/_abc.py`
+
+<CpyLink path="Lib/pathlib/_abc.py" />
+
+`Lib/pathlib/_abc.py` defines the abstract path base classes introduced in CPython 3.12.
+`PurePath` provides all string-manipulation operations that do not touch the filesystem.
+`Path` extends it with I/O operations. The concrete `PosixPath` and `WindowsPath`
+subclasses live in `Lib/pathlib/_local.py`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | `_PathParents` | Sequence of parent paths |
+| 81-350 | `PurePath` | String manipulation: parse, join, parent, name, suffix |
+| 351-500 | `PurePath.relative_to`, `is_relative_to`, `match` | Comparison operations |
+| 501-620 | `PathBase` | Abstract I/O protocol (open, stat, iterdir, etc.) |
+
+## Reading
+
+### `PurePath` parsing
+
+`PurePath.__new__` joins all arguments with `os.sep` and calls `_from_parsed_string`. The
+result stores `_drv` (drive), `_root`, and `_tail` (list of path components) as slots.
+
+```python
+# CPython: Lib/pathlib/_abc.py:105 PurePath.__new__
+def __new__(cls, *args, **kwargs):
+    paths = []
+    for arg in args:
+        ...
+        paths.append(os.fspath(arg))
+    path = cls._from_parsed_parts(drv, root, tail)
+    return path
+```
+
+### `parent` and `parents`
+
+`PurePath.parent` returns `_from_parsed_parts(drv, root, tail[:-1])`. The `_PathParents`
+sequence wraps this with `__getitem__` and `__len__` for `path.parents[2]` style access.
+
+### `relative_to`
+
+`relative_to` compares leading components. In Python 3.12+ it also accepts `walk_up=True`
+which inserts `..` components to walk up out of the base before descending.
+
+```python
+# CPython: Lib/pathlib/_abc.py:400 PurePath.relative_to
+def relative_to(self, other, /, *_deprecated, walk_up=False):
+    other = self.with_segments(other, *_deprecated)
+    ...
+    if walk_up:
+        parts = ['..'] * (len(other._tail) - anchor_len) + self._tail[anchor_len:]
+    ...
+```
+
+### `match`
+
+`match` converts a glob pattern to a regex using `re.compile` and matches against the
+string representation. The `case_sensitive` parameter (default: platform-dependent) was
+added in Python 3.12.
+
+## gopy notes
+
+Not yet ported. `pathlib` depends on `os.path` and `os.fspath`, which must be available
+first. The `PurePath` string manipulation subset can be ported independently of the I/O
+methods. Planned path: `module/pathlib/`.

@@ -1,0 +1,88 @@
+---
+title: Objects/exceptions.c
+description: "Built-in exception hierarchy: BaseException struct, __init__/__str__/__repr__ for the root, chained exception fields (__context__/__cause__/__traceback__), and the full 60-node exception tree."
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 3400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/exceptions.c`
+
+<CpyLink path="Objects/exceptions.c" />
+
+`Objects/exceptions.c` defines the entire built-in exception class hierarchy. All exception
+classes are C types whose Python-visible attributes are managed by the `BaseException`
+C struct and a collection of per-class `tp_members` and `tp_getset` tables.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-400 | `BaseException` struct, `__init__`, `__new__` | Root exception: args tuple, chaining fields |
+| 401-700 | `__str__`, `__repr__`, `with_traceback` | String rendering and traceback attachment |
+| 701-1000 | `Exception`, `ArithmeticError`, `LookupError` | Intermediate abstract bases |
+| 1001-1800 | Concrete exceptions | `TypeError`, `ValueError`, `KeyError`, `AttributeError`, etc. |
+| 1801-2400 | `OSError` family | `OSError` with `errno`/`strerror`/`filename` attributes |
+| 2401-3400 | `SyntaxError`, `ImportError`, `StopIteration`, warnings | Structured exceptions with extra fields |
+
+## Reading
+
+### `BaseException` struct
+
+```c
+// CPython: Objects/exceptions.c:44 _PyBaseExceptionObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *dict;
+    PyObject *args;
+    PyObject *notes;
+    PyObject *traceback;
+    PyObject *context;
+    PyObject *cause;
+    char suppress_context;
+} _PyBaseExceptionObject;
+```
+
+`context` is set automatically when an exception is raised inside an `except` block.
+`cause` is set only by `raise X from Y`. `suppress_context` is True when `from` is used,
+which suppresses the "During handling of the above exception..." message in tracebacks.
+
+### `OSError` attribute dispatch
+
+`OSError.__new__` parses its arguments specially: a 2-tuple `(errno, strerror)` sets
+`self.errno` and `self.strerror`; a 3-tuple additionally sets `self.filename`. This is the
+C-level equivalent of `IOError(errno.ENOENT, "No such file", "/tmp/missing")`.
+
+```c
+// CPython: Objects/exceptions.c:1820 OSError_init
+static int
+OSError_init(PyOSErrorObject *self, PyObject *args, PyObject *kwds)
+{
+    if (!_PyArg_NoKeywords("OSError", kwds))
+        return -1;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+    if (nargs >= 2 && nargs <= 5) {
+        self->myerrno = PyTuple_GET_ITEM(args, 0);
+        self->strerror = PyTuple_GET_ITEM(args, 1);
+        if (nargs >= 3)
+            self->filename = PyTuple_GET_ITEM(args, 2);
+    }
+    ...
+}
+```
+
+### `SyntaxError` extra fields
+
+`SyntaxError` carries `filename`, `lineno`, `offset`, `text`, and (since 3.10) `end_lineno`
+and `end_offset` for multi-line error highlighting. These are used by the traceback printer
+to produce the caret-under-token display.
+
+## gopy notes
+
+The exception hierarchy is partially ported. `objects/` contains `BaseException`,
+`Exception`, `TypeError`, `ValueError`, `AttributeError`, `KeyError`, `IndexError`,
+`StopIteration`, and `RuntimeError`. `OSError` with its errno attributes is planned but
+not yet shipped.
