@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/compile"
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
@@ -82,6 +83,12 @@ func wrapConst(v any) (objects.Object, error) {
 		return objects.NewTuple(items), nil
 	case *compile.Code:
 		return liftNestedCode(x), nil
+	case []byte:
+		return objects.NewBytes(x), nil
+	case complex128:
+		return objects.NewComplex(real(x), imag(x)), nil
+	case ast.EllipsisType:
+		return objects.Ellipsis(), nil
 	case objects.Object:
 		return x, nil
 	}
@@ -125,6 +132,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// duplicate the top.
 		if oparg < 1 {
 			return 0, nil, nil, false, true, errors.New("vm: COPY oparg must be >= 1")
+		}
+		if e.f.StackTop < int(oparg) {
+			panic(fmt.Sprintf("vm: COPY %d: stack underflow (StackTop=%d, ip=%d, code=%s)", oparg, e.f.StackTop, e.f.InstrPtr, e.f.Code.Name))
 		}
 		ref := e.peek(int(oparg) - 1)
 		e.push(ref.Dup())
@@ -1628,7 +1638,15 @@ func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool, e
 		}
 		return v, true, nil
 	}
-	return nil, false, fmt.Errorf("vm: name lookup against unsupported scope type %T", scope)
+	// Non-Dict scope (e.g. EnumDict — a user subclass of dict). Use the
+	// mapping protocol: __getitem__, treating KeyError as a miss.
+	//
+	// CPython: Python/ceval.c LOAD_NAME uses PyObject_GetItem on locals
+	v, err := objects.GetItem(scope, key)
+	if err != nil {
+		return nil, false, nil
+	}
+	return v, true, nil
 }
 
 func storeIn(scope objects.Object, key, value objects.Object) error {
@@ -1638,7 +1656,10 @@ func storeIn(scope objects.Object, key, value objects.Object) error {
 	if d, ok := scope.(*objects.Dict); ok {
 		return d.SetItem(key, value)
 	}
-	return fmt.Errorf("vm: store against unsupported scope type %T", scope)
+	// Non-Dict scope: use the mapping protocol.
+	//
+	// CPython: Python/ceval.c STORE_NAME uses PyObject_SetItem on locals
+	return objects.SetItem(scope, key, value)
 }
 
 // unpackSeq unpacks seq into exactly n items, mirroring CPython's
