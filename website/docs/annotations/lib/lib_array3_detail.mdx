@@ -1,0 +1,115 @@
+---
+title: Lib/array.py — array module (part 3)
+description: "array module part 3: array.fromfile, array.tofile, array.tobytes, array.frombytes, buffer protocol."
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/arraymodule.c" />
+
+This annotation covers bulk I/O and the buffer protocol. See `lib_array2_detail` for `array.__new__`, `typecodes`, and element access methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `array.tobytes` / `array.frombytes` | Convert to/from raw bytes |
+| 81-180 | `array.tofile` / `array.fromfile` | Write/read directly to a binary file object |
+| 181-280 | `array.byteswap` | Reverse byte order of all elements (endian swap) |
+| 281-400 | Buffer protocol | `bf_getbuffer` for zero-copy access from `struct`, `ctypes` |
+| 401-500 | `array.extend` | Append all elements from another array or iterable |
+
+## Reading
+
+### `array.tobytes`
+
+```c
+// CPython: Modules/arraymodule.c:1120 array_tobytes_impl
+static PyObject *
+array_tobytes_impl(arrayobject *self)
+{
+    return PyBytes_FromStringAndSize(self->ob_item,
+                                     Py_SIZE(self) * self->ob_descr->itemsize);
+}
+```
+
+`array.tobytes()` is O(n) — it copies the raw memory. `array.frombytes(b)` is the inverse: it appends the raw bytes as typed elements. The byte representation is platform-native (little-endian on x86).
+
+### `array.fromfile`
+
+```c
+// CPython: Modules/arraymodule.c:1180 array_fromfile_impl
+static PyObject *
+array_fromfile_impl(arrayobject *self, PyObject *f, Py_ssize_t n)
+{
+    /* Read n items from a binary file object into the array */
+    Py_ssize_t nbytes = n * self->ob_descr->itemsize;
+    PyObject *b = PyObject_CallMethod(f, "read", "n", nbytes);
+    if (Py_SIZE(b) < nbytes) {
+        PyErr_SetString(PyExc_EOFError, "not enough items in file");
+        return NULL;
+    }
+    /* Resize array and copy */
+    if (array_resize(self, Py_SIZE(self) + n) == -1) return NULL;
+    memcpy(self->ob_item + (Py_SIZE(self) - n) * self->ob_descr->itemsize,
+           PyBytes_AS_STRING(b), nbytes);
+    return Py_None;
+}
+```
+
+`a.fromfile(f, 100)` reads exactly 100 elements. `EOFError` is raised if fewer bytes are available. `array.tofile(f)` writes `tobytes()` directly to the file — faster than writing element by element.
+
+### Buffer protocol
+
+```c
+// CPython: Modules/arraymodule.c:1360 array_buffer_getbuf
+static int
+array_buffer_getbuf(arrayobject *self, Py_buffer *view, int flags)
+{
+    view->buf = self->ob_item;
+    view->len = Py_SIZE(self) * self->ob_descr->itemsize;
+    view->readonly = 0;
+    view->itemsize = self->ob_descr->itemsize;
+    view->format = self->ob_descr->formats;  /* e.g. "i", "d" */
+    view->ndim = 1;
+    view->shape = &((PyVarObject *)self)->ob_size;
+    view->strides = &view->itemsize;
+    view->suboffsets = NULL;
+    Py_INCREF(self);
+    view->obj = (PyObject *)self;
+    return 0;
+}
+```
+
+The buffer protocol exposes the array's memory directly to `struct.pack_into`, `ctypes`, `numpy`, and `memoryview`. `view->format` uses `struct` format characters. Exporting via the buffer protocol increments `ob_exports`, preventing resize.
+
+### `array.byteswap`
+
+```c
+// CPython: Modules/arraymodule.c:1280 array_byteswap_impl
+static PyObject *
+array_byteswap_impl(arrayobject *self)
+{
+    char *p = self->ob_item;
+    Py_ssize_t itemsize = self->ob_descr->itemsize;
+    for (Py_ssize_t i = 0; i < Py_SIZE(self); i++, p += itemsize) {
+        /* Reverse 'itemsize' bytes in place */
+        for (Py_ssize_t j = 0; j < itemsize / 2; j++) {
+            char tmp = p[j];
+            p[j] = p[itemsize - 1 - j];
+            p[itemsize - 1 - j] = tmp;
+        }
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`array.byteswap()` converts between big-endian and little-endian representations in place. Used when reading binary files that use a different endianness than the host: read into an array, then `byteswap()`.
+
+## gopy notes
+
+`array.tobytes` is `objects.ArrayToBytes` in `objects/array.go`. `array.fromfile` reads via `objects.FileRead`. Buffer protocol is `objects.ArrayGetBuffer` returning a `Py_buffer` view of the underlying `[]byte`. `array.byteswap` reverses bytes in each item.

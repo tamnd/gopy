@@ -1,0 +1,110 @@
+---
+title: Python/frame.c (part 3)
+description: "Python/frame.c part 3: _PyFrame_New_NoTrack, _PyFrameObject_GC_New, frame state machine, frame linking."
+cpython_path: Python/frame.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/frame.c" />
+
+This annotation covers frame allocation and the interpreter frame stack. See `python_frame2_detail` for `_PyFrame_SetStackPointer`, `_PyFrame_GetCode`, and shadow frame layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyFrame_New_NoTrack` | Allocate a Python-level `PyFrameObject` without GC tracking |
+| 81-180 | `_PyFrameObject_GC_New` | Allocate with GC tracking (needed for `f_locals`) |
+| 181-280 | Frame state machine | `FRAME_CREATED`, `FRAME_SUSPENDED`, `FRAME_EXECUTING`, `FRAME_COMPLETED` |
+| 281-400 | Frame linking | `_PyFrame_SetLocalsplus`, `previous` frame pointer |
+| 401-500 | `_PyFrame_MakeAndSetFrameObject` | Upgrade an internal frame to a Python-visible one |
+
+## Reading
+
+### `_PyFrame_New_NoTrack`
+
+```c
+// CPython: Python/frame.c:38 _PyFrame_New_NoTrack
+PyFrameObject *
+_PyFrame_New_NoTrack(PyCodeObject *code)
+{
+    /* Used when creating a frame for a generator/coroutine.
+       The frame is not GC-tracked until f_locals is accessed. */
+    int extras = code->co_nlocalsplus + code->co_stacksize;
+    PyFrameObject *f = PyObject_GC_NewVar(PyFrameObject,
+                                          &PyFrame_Type, extras);
+    if (f == NULL) return NULL;
+    f->f_frame = (_PyInterpreterFrame *)f->_f_frame_data;
+    _PyFrame_Initialize(f->f_frame, code, NULL, 0, f);
+    _PyObject_GC_UNTRACK(f);  /* Don't track until f_locals is accessed */
+    return f;
+}
+```
+
+Frames start as GC-untracked to avoid overhead for short-lived frames. They become tracked when `f_locals` is accessed from Python (which creates a dict containing object references that the GC needs to trace).
+
+### Frame state machine
+
+```c
+// CPython: Python/frame.c:140 frame states
+/* FRAME_CREATED (0): frame allocated, not yet executing
+   FRAME_SUSPENDED (1): generator/coroutine suspended at a yield/await
+   FRAME_EXECUTING (2): currently executing on the thread stack
+   FRAME_COMPLETED (3): returned or raised; localsplus are valid but stale
+   FRAME_CLEARED (4): localsplus zeroed by frame.clear() */
+static inline bool
+_PyFrameHasCompleted(const _PyInterpreterFrame *f)
+{
+    return f->f_frame_state >= FRAME_COMPLETED;
+}
+```
+
+The state machine prevents invalid operations: you can't `send` to a `FRAME_EXECUTING` generator (raises `RuntimeError: already running`), and you can't call `frame.clear()` on a `FRAME_COMPLETED` frame.
+
+### `_PyFrame_MakeAndSetFrameObject`
+
+```c
+// CPython: Python/frame.c:220 _PyFrame_MakeAndSetFrameObject
+PyFrameObject *
+_PyFrame_MakeAndSetFrameObject(_PyInterpreterFrame *frame)
+{
+    /* Upgrade the lightweight internal frame to a full PyFrameObject.
+       This is needed when:
+       - sys._getframe() is called
+       - frame.f_locals is accessed
+       - a traceback is being built
+    */
+    PyFrameObject *f = _PyFrame_New_NoTrack(_PyFrame_GetCode(frame));
+    if (f == NULL) return NULL;
+    f->f_frame = frame;
+    frame->frame_obj = f;
+    return f;
+}
+```
+
+In CPython 3.11+, the eval loop operates on lightweight `_PyInterpreterFrame` objects (allocated on the C stack). A full `PyFrameObject` is only materialized on demand. This optimization reduces memory allocation and GC pressure.
+
+### Frame linking
+
+```c
+// CPython: Python/frame.c:280 frame previous chain
+/* Each frame holds a 'previous' pointer to the enclosing frame.
+   The top-of-stack frame is tstate->current_frame.
+   Tracebacks walk the previous chain: frame -> caller -> ... -> module
+   The chain is maintained by PUSH_FRAME / POP_FRAME in the eval loop. */
+static inline void
+_PyFrame_SetStackPointer(_PyInterpreterFrame *f, PyObject **sp)
+{
+    f->previous_instr = sp;  /* save for resume */
+}
+```
+
+The frame chain is the Python call stack. `traceback.extract_stack()` walks `tstate->current_frame->previous->previous->...`. Generator frames are not in the chain when suspended (they are linked back in when resumed by `SEND`).
+
+## gopy notes
+
+`_PyFrame_New_NoTrack` is `objects.FrameNew` in `objects/frame.go`. The frame state is `objects.Frame.State`. `_PyFrame_MakeAndSetFrameObject` is `objects.FrameMaterialize`. Frame linking uses `objects.Frame.Previous` field. `tstate->current_frame` is `vm.ThreadState.CurrentFrame`.

@@ -1,0 +1,128 @@
+---
+title: Objects/tupleobject.c (part 6)
+description: "Objects/tupleobject.c part 6: tuple free list, tuple subclass, PyTuple_Pack, _PyTuple_FromArray, tuple hashing."
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/tupleobject.c" />
+
+This annotation covers allocation and hashing internals. See `objects_tupleobject5_detail` for `tuple.__new__`, `tuple.__getitem__`, and `tuple.count`/`index`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Free list cache | Reuse tuples of size 0-20 without going through `malloc` |
+| 81-180 | `PyTuple_Pack` | Allocate a new tuple from a varargs list |
+| 181-280 | `_PyTuple_FromArray` | Allocate from a `PyObject **` array |
+| 281-380 | `tuple.__hash__` | FNV-like hash combining all element hashes |
+| 381-500 | `tuple.__add__` / `tuple.__mul__` | Concatenation and repetition |
+
+## Reading
+
+### Free list cache
+
+```c
+// CPython: Objects/tupleobject.c:38 free list
+#define PyTuple_MAXSAVESIZE 20
+#define PyTuple_MAXFREELIST 2000
+
+static PyTupleObject *free_list[PyTuple_MAXSAVESIZE];
+static int numfree[PyTuple_MAXSAVESIZE];
+
+static void
+tupledealloc(PyTupleObject *op)
+{
+    Py_ssize_t i = Py_SIZE(op);
+    if (0 < i && i < PyTuple_MAXSAVESIZE && numfree[i] < PyTuple_MAXFREELIST) {
+        /* Return to free list: store next pointer in first slot */
+        op->ob_item[0] = (PyObject *)free_list[i];
+        free_list[i] = op;
+        numfree[i]++;
+        return;
+    }
+    PyObject_GC_Del(op);
+}
+```
+
+The free list avoids `malloc`/`free` for the most common tuple sizes. `return (1, 2, 3)` from a function allocates a 3-tuple; when it's discarded, the memory goes back to `free_list[3]`. The next `(a, b, c)` tuple creation reuses it.
+
+### `PyTuple_Pack`
+
+```c
+// CPython: Objects/tupleobject.c:280 PyTuple_Pack
+PyObject *
+PyTuple_Pack(Py_ssize_t n, ...)
+{
+    va_list vargs;
+    va_start(vargs, n);
+    PyTupleObject *result = (PyTupleObject *)PyTuple_New(n);
+    if (result == NULL) { va_end(vargs); return NULL; }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *o = va_arg(vargs, PyObject *);
+        result->ob_item[i] = Py_NewRef(o);
+    }
+    va_end(vargs);
+    return (PyObject *)result;
+}
+```
+
+`PyTuple_Pack(3, a, b, c)` is used heavily in C extension code. It is equivalent to `(a, b, c)` in Python. All arguments must already be Python objects (no implicit conversion).
+
+### `tuple.__hash__`
+
+```c
+// CPython: Objects/tupleobject.c:380 tuplehash
+static Py_hash_t
+tuplehash(PyTupleObject *v)
+{
+    Py_uhash_t x = 0x345678UL;
+    Py_ssize_t len = Py_SIZE(v);
+    PyObject **p = v->ob_item;
+    Py_uhash_t mult = _PyHASH_MULTIPLIER;
+    while (--len >= 0) {
+        Py_uhash_t y = (Py_uhash_t)PyObject_Hash(*p++);
+        if (y == (Py_uhash_t)-1) return -1;
+        x = (x ^ y) * mult;
+        mult += (Py_uhash_t)(82520UL + len + len);
+    }
+    x += 97531UL;
+    if (x == (Py_uhash_t)-1) x = -2;
+    return (Py_hash_t)x;
+}
+```
+
+The tuple hash combines element hashes using a multiplicative FNV-like accumulator. The `mult` value grows with each iteration, reducing collisions for tuples with the same elements in different orders. `(1, 2, 3)` and `(3, 2, 1)` have different hashes.
+
+### `tuple.__mul__`
+
+```c
+// CPython: Objects/tupleobject.c:480 tuplerepeat
+static PyObject *
+tuplerepeat(PyTupleObject *a, Py_ssize_t n)
+{
+    if (Py_SIZE(a) == 0 || n <= 0) return PyTuple_New(0);
+    if (n > PY_SSIZE_T_MAX / Py_SIZE(a))
+        return PyErr_NoMemory();
+    Py_ssize_t size = Py_SIZE(a) * n;
+    PyTupleObject *np = (PyTupleObject *)PyTuple_New(size);
+    PyObject **p = np->ob_item;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        for (Py_ssize_t j = 0; j < Py_SIZE(a); j++) {
+            *p++ = Py_NewRef(a->ob_item[j]);
+        }
+    }
+    return (PyObject *)np;
+}
+```
+
+`(1, 2) * 3` returns `(1, 2, 1, 2, 1, 2)`. The elements are shared (not copied) since tuples are immutable. The overflow check prevents integer overflow in `Py_SIZE(a) * n`.
+
+## gopy notes
+
+The free list is `objects.TupleFreeList` in `objects/tuple.go`. `PyTuple_Pack` is `objects.TuplePack`. `tuple.__hash__` uses the same FNV-like accumulator. `tuple.__mul__` is `objects.TupleRepeat` sharing element pointers via `objects.Object` interface values.

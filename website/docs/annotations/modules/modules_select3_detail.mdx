@@ -1,0 +1,122 @@
+---
+title: Modules/selectmodule.c (part 3)
+description: "selectmodule.c part 3: epoll, kqueue, devpoll — platform-specific I/O multiplexers."
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/selectmodule.c" />
+
+This annotation covers `epoll` and `kqueue`. See `modules_select2_detail` for `select.select`, `poll`, and the `POLLIN`/`POLLOUT` constants.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `select.epoll` | Linux edge/level-triggered event notification |
+| 81-200 | `epoll.register` / `modify` / `unregister` | Add, change, remove file descriptors |
+| 201-320 | `epoll.poll` | Wait for events; return list of `(fd, event)` pairs |
+| 321-440 | `select.kqueue` | BSD/macOS event notification (kevent) |
+| 441-600 | `kqueue.control` | Add/delete events; wait; return `kevent` list |
+
+## Reading
+
+### `select.epoll`
+
+```c
+// CPython: Modules/selectmodule.c:1580 pyepoll_new
+static PyObject *
+pyepoll_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    int epfd = epoll_create1(EPOLL_CLOEXEC);
+    if (epfd == -1) return PyErr_SetFromErrno(PyExc_OSError);
+    return pyepoll_fromfd(type, epfd);
+}
+```
+
+`epoll_create1(EPOLL_CLOEXEC)` creates an epoll file descriptor. `EPOLL_CLOEXEC` ensures the fd is closed in child processes after `fork`/`exec`. The epoll fd monitors other fds and returns only the ones with pending events.
+
+### `epoll.register`
+
+```c
+// CPython: Modules/selectmodule.c:1640 pyepoll_register
+static PyObject *
+pyepoll_register(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    int fd;
+    unsigned int events = EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP;
+    struct epoll_event ev;
+    ev.events = events;
+    ev.data.fd = fd;
+    if (epoll_ctl(self->epfd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+        if (errno == EEXIST) {
+            PyErr_SetString(PyExc_FileExistsError,
+                "fd already registered for epoll");
+        } else {
+            PyErr_SetFromErrno(PyExc_OSError);
+        }
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`epoll.register(fd, select.EPOLLIN | select.EPOLLET)` registers `fd` for level-triggered (`EPOLLIN`) or edge-triggered (`EPOLLET`) read events. Edge-triggered mode fires only on state changes (new data arrives), not continuously while data is available.
+
+### `epoll.poll`
+
+```c
+// CPython: Modules/selectmodule.c:1720 pyepoll_poll
+static PyObject *
+pyepoll_poll(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    double timeout = -1.0;
+    int maxevents = -1;
+    struct epoll_event *evs;
+    int nfds;
+    Py_BEGIN_ALLOW_THREADS
+    nfds = epoll_wait(self->epfd, evs, maxevents,
+                      timeout < 0 ? -1 : (int)(timeout * 1e3));
+    Py_END_ALLOW_THREADS
+    PyObject *elist = PyList_New(nfds);
+    for (int i = 0; i < nfds; i++) {
+        PyList_SET_ITEM(elist, i,
+            PyTuple_Pack(2, PyLong_FromLong(evs[i].data.fd),
+                            PyLong_FromUnsignedLong(evs[i].events)));
+    }
+    return elist;
+}
+```
+
+`epoll_wait` blocks until events are ready or the timeout expires. The GIL is released during the wait. `maxevents=-1` uses a default of 1024 events per call.
+
+### `kqueue.control`
+
+```c
+// CPython: Modules/selectmodule.c:1920 kqueue_queue_control
+static PyObject *
+kqueue_queue_control(kqueue_queue_Object *self, PyObject *args)
+{
+    /* changelist: list of kevent objects to register/delete
+       maxevents: max events to return (0 for changes only)
+       timeout: seconds or None for blocking */
+    struct kevent *chl = ..., *evl = ...;
+    struct timespec timeout_s, *timeout_p = NULL;
+    int nfds;
+    Py_BEGIN_ALLOW_THREADS
+    nfds = kevent(self->kqfd, chl, nevents, evl, maxevents, timeout_p);
+    Py_END_ALLOW_THREADS
+    /* Return list of triggered kevent objects */
+    ...
+}
+```
+
+`kqueue.control(changelist, maxevents, timeout)` is the BSD analog of `epoll.poll`. `kevent` is a single syscall that both registers changes and retrieves events. `select.kevent(fd, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_ADD)` creates an event descriptor.
+
+## gopy notes
+
+`select.epoll` is `module/select.EPoll` in `module/select/module.go` using Go's `golang.org/x/sys/unix.EpollCreate1`. `epoll.poll` calls `unix.EpollWait`. `select.kqueue` is `module/select.KQueue` using `unix.Kqueue`. `kqueue.control` calls `unix.Kevent`.

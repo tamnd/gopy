@@ -1,0 +1,85 @@
+---
+title: Lib/bisect.py (part 3)
+description: "Lib/bisect.py part 3: bisect_left, bisect_right, insort, key parameter, C accelerator comparison."
+cpython_path: Lib/bisect.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/bisect.py" />
+
+This annotation covers the `key` parameter and the C vs Python implementation tradeoffs. See `lib_bisect2_detail` for the basic binary search algorithm and insertion functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bisect_left` with `key` | Binary search with a key function |
+| 81-160 | `bisect_right` with `key` | Right insertion point with a key function |
+| 161-230 | `insort_left` / `insort_right` | Insert maintaining sorted order |
+| 231-300 | C accelerator notes | `_bisect` module; when the key path bypasses C |
+
+## Reading
+
+### `bisect_left` with `key`
+
+```python
+# CPython: Lib/bisect.py:28 bisect_left
+def bisect_left(a, x, lo=0, hi=None, *, key=None):
+    """Return the leftmost index where x could be inserted in sorted a."""
+    if lo < 0:
+        raise ValueError('lo must be non-negative')
+    if hi is None:
+        hi = len(a)
+    if key is None:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if a[mid] < x:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if key(a[mid]) < x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+```
+
+The `key` parameter (added in Python 3.10) applies a transform before comparison. `bisect_left(words, 'hello', key=str.lower)` finds the insertion point for `'hello'` in a case-insensitively sorted list. The `key` function is called O(log n) times.
+
+### `insort_left`
+
+```python
+# CPython: Lib/bisect.py:100 insort_left
+def insort_left(a, x, lo=0, hi=None, *, key=None):
+    """Insert x in a in sorted order (leftmost position)."""
+    if key is None:
+        lo = bisect_left(a, x, lo, hi)
+    else:
+        lo = bisect_left(a, key(x), lo, hi, key=key)
+    a.insert(lo, x)
+```
+
+`insort_left` calls `bisect_left` then `list.insert`, making it O(log n + n) overall. The O(n) cost comes from `list.insert` shifting elements. For large sorted lists, use `sortedcontainers.SortedList` instead.
+
+### C accelerator
+
+```c
+// CPython: Modules/_bisectmodule.c:40 internal_bisect_left
+/* The C accelerator is used when key=None.
+   It calls PyObject_RichCompareBool(a[mid], x, Py_LT)
+   which is slightly faster than the Python path but otherwise identical.
+   When key != None, the Python implementation is used. */
+```
+
+The `_bisect` C module only accelerates the `key=None` case. With a Python `key` function, the Python implementation is always used. The C acceleration gives a 2-3x speedup for numeric lists where `Py_LT` dispatches directly to `PyLong_RichCompareBool`.
+
+## gopy notes
+
+`bisect_left` is `module/bisect.BisectLeft` in `module/bisect/module.go`. The key path calls the `key` function via `objects.CallOneArg`. The no-key path uses a direct comparison loop. `insort_left` calls `objects.ListInsert` after finding the position.

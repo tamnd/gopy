@@ -1,0 +1,115 @@
+---
+title: Modules/signalmodule.c (part 3)
+description: "signalmodule.c part 3: signal.raise_signal, signal.strsignal, signal.valid_signals, signal.set_wakeup_fd."
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/signalmodule.c" />
+
+This annotation covers signal utilities and the wakeup fd mechanism. See `modules_signal2_detail` for `signal.signal`, the C signal handler, and signal delivery to Python.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `signal.raise_signal` | Deliver a signal to the current process |
+| 81-160 | `signal.strsignal` | Return a description string for a signal number |
+| 161-260 | `signal.valid_signals` | Set of valid signal numbers for the platform |
+| 261-380 | `signal.set_wakeup_fd` | Write a byte to an fd when a signal is received |
+| 381-500 | `signal.sigwait` / `signal.sigwaitinfo` | Block until one of the specified signals is delivered |
+
+## Reading
+
+### `signal.raise_signal`
+
+```c
+// CPython: Modules/signalmodule.c:980 signal_raise_signal_impl
+static PyObject *
+signal_raise_signal_impl(PyObject *module, int signum)
+{
+    int err;
+    Py_BEGIN_ALLOW_THREADS
+    err = raise(signum);
+    Py_END_ALLOW_THREADS
+    if (err) return PyErr_SetFromErrno(PyExc_OSError);
+    Py_RETURN_NONE;
+}
+```
+
+`signal.raise_signal(signal.SIGINT)` is equivalent to pressing Ctrl+C in the current process. The GIL is released for the `raise()` call; the signal handler runs asynchronously and sets a flag that is checked at the next `eval_breaker` check.
+
+### `signal.set_wakeup_fd`
+
+```c
+// CPython: Modules/signalmodule.c:1080 signal_set_wakeup_fd_impl
+static PyObject *
+signal_set_wakeup_fd_impl(PyObject *module, int fd, int warn_on_full_buffer)
+{
+    /* When a signal is received, write the signal number as a byte to fd.
+       This is used to integrate signal handling with event loops:
+       the event loop can select/poll on 'fd'. */
+    if (fd != -1) {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (!(flags & O_NONBLOCK)) {
+            if (warn_on_full_buffer) {
+                PyErr_WarnEx(PyExc_RuntimeWarning,
+                    "set_wakeup_fd() fd is not in non-blocking mode", 1);
+            }
+        }
+    }
+    old_fd = wakeup.fd;
+    wakeup.fd = fd;
+    wakeup.warn_on_full_buffer = warn_on_full_buffer;
+    return PyLong_FromLong(old_fd);
+}
+```
+
+`set_wakeup_fd` is the standard way to integrate signal handling with `asyncio`, `selectors`, or other event loops. The event loop polls the wakeup fd; when a signal arrives, a byte is written to the fd, waking the event loop from its `select`/`epoll` call.
+
+### `signal.sigwait`
+
+```c
+// CPython: Modules/signalmodule.c:1180 signal_sigwait_impl
+static PyObject *
+signal_sigwait_impl(PyObject *module, sigset_t sigset)
+{
+    int signum;
+    Py_BEGIN_ALLOW_THREADS
+    int err = sigwait(&sigset, &signum);
+    Py_END_ALLOW_THREADS
+    if (err)
+        return PyErr_SetFromErrno(PyExc_OSError);
+    return PyLong_FromLong(signum);
+}
+```
+
+`signal.sigwait({signal.SIGINT, signal.SIGTERM})` blocks the calling thread until one of the listed signals is delivered, then returns the signal number. Signals must be blocked in all threads before calling `sigwait`; use `signal.pthread_sigmask` for this.
+
+### `signal.valid_signals`
+
+```c
+// CPython: Modules/signalmodule.c:1060 signal_valid_signals_impl
+static PyObject *
+signal_valid_signals_impl(PyObject *module)
+{
+    /* Return the set of valid signal numbers for the platform */
+    PyObject *sigs = PySet_New(NULL);
+    for (int sig = 1; sig < NSIG; sig++) {
+        if (sig != SIGKILL && sig != SIGSTOP) {
+            PySet_Add(sigs, PyLong_FromLong(sig));
+        }
+    }
+    return sigs;
+}
+```
+
+`signal.valid_signals()` returns a `frozenset` of valid signal numbers. On Linux this is 1–64; `SIGKILL` (9) and `SIGSTOP` (19) are excluded because they cannot be caught or ignored.
+
+## gopy notes
+
+`signal.raise_signal` is `module/signal.RaiseSignal` in `module/signal/module.go` calling `syscall.Kill(os.Getpid(), sig)`. `signal.set_wakeup_fd` stores the fd and writes a byte in the Go signal handler goroutine. `signal.sigwait` uses `signal.NotifyContext` or a buffered channel. `signal.valid_signals` returns the platform's `NSIG` range.

@@ -1,0 +1,111 @@
+---
+title: Python/ceval.c (part 35)
+description: "Python/ceval.c part 35: BINARY_OP specializations — ADD_INT, ADD_FLOAT, MULTIPLY_INT, MULTIPLY_FLOAT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers arithmetic specializations. See `python_ceval34_detail` for call specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_OP_ADD_INT` | `int + int` using compact integer fast path |
+| 81-160 | `BINARY_OP_ADD_FLOAT` | `float + float` using `ob_fval` directly |
+| 161-240 | `BINARY_OP_ADD_UNICODE` | `str + str` via `PyUnicode_Concat` |
+| 241-340 | `BINARY_OP_MULTIPLY_INT` | `int * int` with overflow check |
+| 341-500 | `BINARY_OP_MULTIPLY_FLOAT` | `float * float` with NaN/inf handling |
+
+## Reading
+
+### `BINARY_OP_ADD_INT`
+
+```c
+// CPython: Python/ceval.c:2820 BINARY_OP_ADD_INT
+inst(BINARY_OP_ADD_INT, (left, right -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyLong_CheckExact(right), BINARY_OP);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)left), BINARY_OP);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)right), BINARY_OP);
+    assert(_PyLong_BothAreCompact((PyLongObject *)left, (PyLongObject *)right));
+    stwodigits lv = _PyLong_CompactValue((PyLongObject *)left);
+    stwodigits rv = _PyLong_CompactValue((PyLongObject *)right);
+    stwodigits sum = lv + rv;
+    /* Check if result fits in a compact int */
+    if (_PyLong_IsCompactValue(sum)) {
+        res = (PyObject *)_PyLong_FromMedium((digit)sum);
+    } else {
+        res = PyLong_FromLongLong(sum);
+    }
+    Py_DECREF(left); Py_DECREF(right);
+}
+```
+
+`a + b` for small integers uses the compact representation (a single machine word). The `_PyLong_IsCompact` check ensures both operands fit; if either is a large integer (>30 bits), the specialization deoptimizes. For small integer results, `_PyLong_FromMedium` allocates from a slab.
+
+### `BINARY_OP_ADD_FLOAT`
+
+```c
+// CPython: Python/ceval.c:2880 BINARY_OP_ADD_FLOAT
+inst(BINARY_OP_ADD_FLOAT, (left, right -- res)) {
+    DEOPT_IF(!PyFloat_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyFloat_CheckExact(right), BINARY_OP);
+    double dleft = PyFloat_AS_DOUBLE(left);
+    double dright = PyFloat_AS_DOUBLE(right);
+    double dsum = dleft + dright;
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+    res = PyFloat_FromDouble(dsum);
+    Py_DECREF(left); Py_DECREF(right);
+}
+```
+
+Float addition reads `ob_fval` directly without going through `PyFloat_AsDouble` (which checks the type). `PyFloat_FromDouble` allocates from the float free list. For tight numerical loops, this specialization makes `a + b` nearly as fast as C `double` addition.
+
+### `BINARY_OP_ADD_UNICODE`
+
+```c
+// CPython: Python/ceval.c:2940 BINARY_OP_ADD_UNICODE
+inst(BINARY_OP_ADD_UNICODE, (left, right -- res)) {
+    DEOPT_IF(!PyUnicode_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyUnicode_CheckExact(right), BINARY_OP);
+    res = PyUnicode_Concat(left, right);
+    Py_DECREF(left); Py_DECREF(right);
+    ERROR_IF(res == NULL, error);
+}
+```
+
+`s1 + s2` for two `str` objects calls `PyUnicode_Concat` which allocates a new string. `s += other` may hit `_PyUnicode_Resize` if `s` is the only reference (avoiding an allocation). The specialization skips the `tp_as_sequence->sq_concat` virtual call.
+
+### `BINARY_OP_MULTIPLY_INT`
+
+```c
+// CPython: Python/ceval.c:3000 BINARY_OP_MULTIPLY_INT
+inst(BINARY_OP_MULTIPLY_INT, (left, right -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyLong_CheckExact(right), BINARY_OP);
+    DEOPT_IF(!_PyLong_BothAreCompact((PyLongObject *)left,
+                                     (PyLongObject *)right), BINARY_OP);
+    stwodigits lv = _PyLong_CompactValue((PyLongObject *)left);
+    stwodigits rv = _PyLong_CompactValue((PyLongObject *)right);
+    stwodigits prod = lv * rv;
+    if (!_PyLong_IsCompactValue(prod)) {
+        /* Overflow: fall back to the general path */
+        DEOPT_IF(true, BINARY_OP);
+    }
+    res = (PyObject *)_PyLong_FromMedium((digit)prod);
+    Py_DECREF(left); Py_DECREF(right);
+}
+```
+
+Integer multiplication overflow falls back to `BINARY_OP` (the general case) rather than raising. The general path handles arbitrary precision multiplication. For small integers (up to ~15 bits), `BINARY_OP_MULTIPLY_INT` avoids the full `PyLong_Type.nb_multiply` dispatch.
+
+## gopy notes
+
+`BINARY_OP_ADD_INT` is in `vm/eval_gen.go` and calls `objects.LongAdd` for compact integers, falling back to `big.Int.Add`. `BINARY_OP_ADD_FLOAT` reads `objects.Float.Value` directly and calls `objects.FloatFromFloat64`. `BINARY_OP_ADD_UNICODE` calls `objects.UnicodeConcat`. `BINARY_OP_MULTIPLY_INT` uses Go's native multiplication with overflow check.
