@@ -1,0 +1,84 @@
+---
+title: Objects/typeobject.c
+description: "PyTypeObject machinery: type creation, MRO computation (C3), slot inheritance, descriptor protocol, and metaclass dispatch for attribute access."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 9000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+`Objects/typeobject.c` is one of the largest files in CPython. It implements `PyTypeObject`, the metaclass machinery, MRO computation, slot inheritance, the descriptor protocol for attribute lookup, `type.__new__`, `object.__init__`, and `super`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-500 | slot wrappers, `slotdefs` | Wrapper functions bridging Python methods to C slots |
+| 501-1200 | `type_new`, `type_new_impl` | `type(name, bases, dict)` metaclass constructor |
+| 1201-1800 | `mro_internal`, `calculate_mro` | C3 linearization |
+| 1801-2500 | `type_ready`, `inherit_slots` | Finalize type; copy slots from base types |
+| 2501-3500 | `type_getattro`, `_PyType_Lookup` | MRO attribute lookup; descriptor priority |
+| 3501-5000 | `object_init`, `object_new`, `object_repr` | `object` base-class methods |
+| 5001-7000 | `slot_tp_*`, `update_one_slot` | Dynamic slot updaters for Python-defined types |
+| 7001-9000 | `super_getattro`, `supercheck` | `super()` proxy implementation |
+
+## Reading
+
+### C3 MRO computation
+
+`calculate_mro` implements the C3 linearization algorithm. It starts with the direct bases' MROs and the bases list, iteratively picks the head of the first list that does not appear in the tail of any other list, and appends it to the result.
+
+```c
+// Objects/typeobject.c:1201 mro_internal
+static PyObject *
+mro_internal(PyTypeObject *type, PyObject **p_old_mro)
+{
+    PyObject *mro = mro_implementation(type);
+    PyObject *old_mro = type->tp_mro;
+    type->tp_mro = mro;  /* atomic swap for free-threaded safety */
+    ...
+}
+```
+
+### _PyType_Lookup: descriptor search
+
+`_PyType_Lookup(type, name)` walks the MRO tuple and returns the first entry in any class's `__dict__` that matches `name`. The result is cached in the type's attribute lookup cache (`tp_cache`), keyed on the type's version tag. The cache is invalidated when the type's dict is modified.
+
+```c
+// Objects/typeobject.c:2501 _PyType_Lookup
+PyObject *
+_PyType_Lookup(PyTypeObject *type, PyObject *name)
+{
+    PyObject *mro = type->tp_mro;
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(mro); i++) {
+        PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(mro, i);
+        PyObject *dict = base->tp_dict;
+        PyObject *res = PyDict_GetItemWithError(dict, name);
+        if (res != NULL) return res;
+    }
+    return NULL;
+}
+```
+
+### slot inheritance and update_one_slot
+
+When a Python subclass defines `__add__`, `update_one_slot` is called to update the `nb_add` slot on the subclass's type object. This is the bridge between Python-level dunder methods and C-level slot function pointers. `inherit_slots` copies slots from the base type for slots not explicitly defined by the subclass.
+
+```c
+// Objects/typeobject.c:5001 update_one_slot (excerpt)
+static slotdef *
+update_one_slot(PyTypeObject *type, slotdef *p)
+{
+    /* look up p->name_strobj in the MRO */
+    /* if found and is a wrapper, set p->slot to the wrapper's C function */
+    ...
+}
+```
+
+## gopy notes
+
+The gopy type system is in `objects/type.go` and `objects/usertype.go`. MRO computation is in `objects/type.go:computeMRO` and follows the same C3 algorithm. Slot inheritance is handled by `objects/type.go:inherit`. The `_PyType_Lookup` fast path maps to `objects/type.go:Lookup` with a version-tag cache.

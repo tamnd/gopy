@@ -1,0 +1,84 @@
+---
+title: Lib/textwrap.py
+description: "textwrap module: TextWrapper.wrap splits text into lines respecting word boundaries, indentation, and max width; dedent strips common leading whitespace."
+cpython_path: Lib/textwrap.py
+cpython_version: "3.14"
+lines: 450
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/textwrap.py" />
+
+`Lib/textwrap.py` provides `TextWrapper`, `wrap`, `fill`, `dedent`, `indent`, and `shorten`. `TextWrapper` handles word-wrapping at a maximum line width while respecting break_on_hyphens, break_long_words, initial_indent, subsequent_indent, and expand_tabs.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | imports, `_whitespace_only_re` | Regex constants |
+| 51-300 | `TextWrapper` | Main class; `wrap`, `fill`, `_split`, `_wrap_chunks` |
+| 301-380 | `wrap`, `fill`, `shorten` | Module-level convenience wrappers |
+| 381-450 | `dedent`, `indent` | Whitespace normalization functions |
+
+## Reading
+
+### TextWrapper._split: tokenizing text
+
+`_split` breaks the input text into a list of chunks using a regex that splits on whitespace boundaries and optional hyphenation points. The resulting chunks alternate between word tokens and whitespace tokens.
+
+```python
+# CPython: Lib/textwrap.py:51 TextWrapper._split
+def _split(self, text):
+    chunks = self.wordsep_re.split(text)
+    chunks = [c for c in chunks if c]
+    return chunks
+```
+
+### _wrap_chunks: line assembly
+
+`_wrap_chunks` greedily accumulates chunks onto the current line until adding the next chunk would exceed `width`. When the line is full it is flushed to the result list and a new line starts with `subsequent_indent`.
+
+```python
+# CPython: Lib/textwrap.py:200 TextWrapper._wrap_chunks
+def _wrap_chunks(self, chunks):
+    lines = []
+    cur_line = []
+    cur_len = 0
+    width = self.width - len(self.subsequent_indent)
+    while chunks:
+        l = self.colwidth(chunks[-1])
+        if cur_len + l <= width:
+            cur_line.append(chunks.pop())
+            cur_len += l
+        else:
+            if cur_line:
+                lines.append(self.subsequent_indent + ''.join(cur_line[::-1]))
+            cur_line = []
+            cur_len = 0
+    if cur_line:
+        lines.append(self.subsequent_indent + ''.join(cur_line[::-1]))
+    return lines
+```
+
+### dedent: stripping common indentation
+
+`dedent` finds the longest common leading whitespace prefix across all non-empty lines and strips it. This is useful for unindenting docstrings or heredoc-style multi-line strings in source code.
+
+```python
+# CPython: Lib/textwrap.py:381 dedent
+def dedent(text):
+    lines = text.splitlines(keepends=True)
+    margin = None
+    for line in lines:
+        content = line.lstrip()
+        if content:
+            indent = line[:len(line) - len(content)]
+            margin = indent if margin is None else os.path.commonprefix([margin, indent])
+    return re.sub(r'(?m)^' + margin, '', text) if margin else text
+```
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/textwrap/`. Go's `strings` package does not include a word-wrap equivalent; a faithful port would implement `TextWrapper` as a Go struct with exported fields matching the Python attributes.

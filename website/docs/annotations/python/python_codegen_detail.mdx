@@ -1,0 +1,69 @@
+---
+title: Python/flowgraph.c
+description: "Flow graph infrastructure for the bytecode compiler: basic block management, instruction list, edge traversal, and the CFG-to-bytecode assembly pipeline."
+cpython_path: Python/flowgraph.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/flowgraph.c" />
+
+`Python/flowgraph.c` provides the control-flow graph (CFG) data structures and analysis passes used by the bytecode compiler (`compile.c`). It manages basic blocks, instruction lists, jump edges, exception table entries, and the final linearization pass that converts the CFG into a flat instruction sequence.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `cfg_builder`, `basicblock` | CFG and block structs; instruction list |
+| 201-500 | `cfg_builder_new_block`, `cfg_builder_addop` | Block allocation; instruction append |
+| 501-900 | `_PyCfg_OptimizeCodeUnit` | Optimization passes: dead-code elimination, constant folding |
+| 901-1300 | `_PyCfg_ToInstructionSequence` | Linearize CFG; assign block offsets |
+| 1301-1700 | `_PyCfg_ResolveJumps` | Backfill jump targets with final offsets |
+| 1701-2500 | `_PyCfg_BuildInstrSequence`, `_PyCfg_CheckRecursion` | Exception table; stack-depth validation |
+
+## Reading
+
+### Basic block structure
+
+Each `basicblock` contains a `b_instr` array of `cfg_instr` entries and pointers to successor blocks for fall-through and jump edges. Blocks are identified by their index in the block list; jump instructions store a pointer to the target block that is converted to a byte offset at the end.
+
+```c
+// Python/flowgraph.c:1 basicblock
+typedef struct basicblock_ {
+    struct basicblock_ *b_list;   /* linked list of all blocks */
+    cfg_instr *b_instr;           /* instruction array */
+    int b_iused, b_ialloc;        /* used / allocated instruction slots */
+    struct basicblock_ *b_next;   /* fall-through successor */
+    unsigned b_return: 1;         /* ends with RETURN_VALUE */
+    ...
+} basicblock;
+```
+
+### CFG optimization passes
+
+`_PyCfg_OptimizeCodeUnit` runs several passes over the CFG: constant folding (e.g., `LOAD_CONST 1; LOAD_CONST 2; BINARY_OP +` to `LOAD_CONST 3`), dead-code elimination (blocks with no predecessors are removed), and jump threading (a jump-to-jump is replaced by a direct jump to the final target).
+
+```c
+// Python/flowgraph.c:501 _PyCfg_OptimizeCodeUnit
+int
+_PyCfg_OptimizeCodeUnit(cfg_builder *g, PyObject *consts, PyObject *const_cache,
+                        int code_flags, int nlocals, int nparams)
+{
+    if (optimize_basic_block(g, consts, const_cache) < 0) return -1;
+    if (remove_unused_consts(g, consts) < 0) return -1;
+    if (eliminate_dead_code(g) < 0) return -1;
+    if (thread_jumps(g) < 0) return -1;
+    return 0;
+}
+```
+
+### Jump resolution
+
+After CFG linearization, `_PyCfg_ResolveJumps` iterates all jump instructions and replaces block pointers with the final byte offset. This is the last step before the instruction sequence is handed to `makecode` to build the `PyCodeObject`.
+
+## gopy notes
+
+The gopy equivalent is `compile/flowgraph.go`, `compile/flowgraph_passes.go`, and `compile/flowgraph_jumps.go`. The architecture mirrors CPython's CFG exactly: `compile/flowgraph.go` provides `Block` and `Instr`, the passes in `flowgraph_passes.go` perform dead-code elimination and constant folding, and `flowgraph_jumps.go` resolves jump offsets.

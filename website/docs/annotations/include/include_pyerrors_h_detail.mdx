@@ -1,0 +1,69 @@
+---
+title: Include/pyerrors.h
+description: "Public exception API: PyErr_Set*, PyErr_Fetch/Restore, PyErr_ExceptionMatches, PyErr_Clear, and exception type declarations for all built-in exceptions."
+cpython_path: Include/pyerrors.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/pyerrors.h" />
+
+`Include/pyerrors.h` is the public C API for Python's exception system. It declares the `PyErr_*` functions for setting, fetching, and testing exceptions, and exports the type objects for all built-in exception classes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `PyErr_SetString`, `PyErr_SetObject`, `PyErr_SetNone` | Set the current exception |
+| 61-120 | `PyErr_Fetch`, `PyErr_Restore`, `PyErr_GetRaisedException` | Fetch and restore exception state |
+| 121-180 | `PyErr_ExceptionMatches`, `PyErr_GivenExceptionMatches` | Type hierarchy match check |
+| 181-220 | `PyErr_Clear`, `PyErr_Print`, `PyErr_WriteUnraisable` | Clear and display exceptions |
+| 221-300 | Built-in exception type declarations | `PyExc_Exception`, `PyExc_ValueError`, etc. |
+
+## Reading
+
+### Setting exceptions
+
+`PyErr_SetString(type, message)` creates a new exception instance with the given message and stores it on the current thread state. `PyErr_SetObject(type, value)` takes a pre-built exception value. After calling either, every CPython C function should return NULL (or -1 for int-returning functions) to signal the error up the call stack.
+
+```c
+// Include/pyerrors.h:1 PyErr_SetString
+PyAPI_FUNC(void) PyErr_SetString(
+    PyObject *exception, const char *string);
+PyAPI_FUNC(void) PyErr_SetObject(
+    PyObject *exception, PyObject *value);
+PyAPI_FUNC(void) PyErr_SetNone(PyObject *exception);
+```
+
+### Fetch and restore (legacy API)
+
+`PyErr_Fetch` retrieves and clears the current exception, returning the type, value, and traceback as three `PyObject**` out-parameters. `PyErr_Restore` sets them back. This three-object API is the pre-3.12 convention; `PyErr_GetRaisedException` and `PyErr_SetRaisedException` are the 3.12+ simplified replacements.
+
+```c
+// Include/pyerrors.h:61 PyErr_Fetch (legacy)
+PyAPI_FUNC(void) PyErr_Fetch(PyObject **ptype, PyObject **pvalue,
+                             PyObject **ptraceback);
+PyAPI_FUNC(void) PyErr_Restore(PyObject *type, PyObject *value,
+                               PyObject *traceback);
+
+// 3.12+ simplified API:
+PyAPI_FUNC(PyObject *) PyErr_GetRaisedException(void);
+PyAPI_FUNC(void)       PyErr_SetRaisedException(PyObject *exc);
+```
+
+### ExceptionMatches and the type hierarchy
+
+`PyErr_ExceptionMatches(exc)` checks whether the current exception is an instance of `exc` or a subclass. `PyErr_GivenExceptionMatches(val, exc)` does the same check for an arbitrary exception value. Both use `PyType_IsSubtype` to walk the MRO.
+
+```c
+// Include/pyerrors.h:121 PyErr_ExceptionMatches
+PyAPI_FUNC(int) PyErr_ExceptionMatches(PyObject *exc);
+PyAPI_FUNC(int) PyErr_GivenExceptionMatches(PyObject *given, PyObject *exc);
+```
+
+## gopy notes
+
+The gopy exception system is in `objects/` and `vm/eval_unwind.go`. `PyErr_SetString` maps to `errors.New` or a typed error value; `PyErr_ExceptionMatches` maps to Go's `errors.As` / `errors.Is` pattern. The full CPython exception state (type + value + traceback) is collapsed to a single `error` in Go.

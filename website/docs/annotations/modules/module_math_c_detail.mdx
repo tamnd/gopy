@@ -1,0 +1,71 @@
+---
+title: Modules/mathmodule.c
+description: "math module C implementation: sin/cos/exp/log with special-case handling for NaN/inf, isclose/isfinite, gcd/lcm, comb/perm, and the integer floor/ceil/trunc protocol."
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mathmodule.c" />
+
+`Modules/mathmodule.c` implements the `math` module. It wraps the C standard library `<math.h>` functions and adds Python-specific handling for special float values (NaN, infinity, negative zero), the integer-protocol functions (`floor`, `ceil`, `trunc`), and combinatorial functions (`comb`, `perm`, `gcd`, `lcm`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | helpers, `math_1`, `math_2` | Generic one-/two-arg float function wrappers |
+| 201-600 | trig, exp, log wrappers | `sin`, `cos`, `tan`, `exp`, `log`, `log2`, `log10` |
+| 601-900 | `math_isclose`, `math_isfinite`, `math_isinf`, `math_isnan` | Float predicates |
+| 901-1200 | `math_gcd`, `math_lcm` | Greatest common divisor with multi-arg support |
+| 1201-1500 | `math_comb`, `math_perm` | Binomial coefficient; permutations |
+| 1501-2000 | `math_floor`, `math_ceil`, `math_trunc` | Integer protocol dispatch |
+
+## Reading
+
+### Generic float wrappers
+
+`math_1` and `math_2` handle the boilerplate for one- and two-argument float functions: convert the Python argument to a C `double`, call the C function, check for `errno` and NaN/inf error conditions, and return the result.
+
+```c
+// Modules/mathmodule.c:1 math_1 (generic wrapper)
+static PyObject *
+math_1(PyObject *arg, double (*func)(double), int can_overflow)
+{
+    double x = PyFloat_AsDouble(arg);
+    if (x == -1.0 && PyErr_Occurred()) return NULL;
+    errno = 0;
+    double r = func(x);
+    if (errno == ERANGE) { PyErr_SetString(PyExc_OverflowError, ...); return NULL; }
+    if (Py_IS_NAN(r) && !Py_IS_NAN(x)) { PyErr_SetString(PyExc_ValueError, ...); return NULL; }
+    return PyFloat_FromDouble(r);
+}
+```
+
+### math.floor, math.ceil: integer protocol
+
+`math_floor` and `math_ceil` first check for a `__floor__`/`__ceil__` method on the argument type (the integer protocol). Only if absent do they fall through to the C `floor()`/`ceil()` functions. This allows custom numeric types to define their own rounding behavior.
+
+```c
+// Modules/mathmodule.c:1501 math_floor
+static PyObject *
+math_floor(PyObject *module, PyObject *number)
+{
+    PyObject *method = _PyObject_LookupSpecial(number, &_Py_ID(__floor__));
+    if (method != NULL)
+        return PyObject_CallNoArgs(method);
+    double x = PyFloat_AsDouble(number);
+    return PyLong_FromDouble(floor(x));
+}
+```
+
+### math.isclose
+
+`math_isclose(a, b, rel_tol, abs_tol)` implements PEP 485. Two floats are considered close if `|a-b| <= max(rel_tol * max(|a|, |b|), abs_tol)`. Special cases: if either value is NaN, return False; if both are infinite with the same sign, return True.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/math/`. Go's `math` package covers all the transcendental functions with the same IEEE 754 semantics. The integer-protocol dispatch (`__floor__`, `__ceil__`) would need to be implemented as a type-switch in Go.
