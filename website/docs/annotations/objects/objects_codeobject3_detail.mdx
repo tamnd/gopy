@@ -1,0 +1,96 @@
+---
+title: Objects/codeobject.c (part 3)
+description: "Objects/codeobject.c part 3: PyCode_Addr2Line, _PyCode_InitAddressRange, co_positions, _PyCode_CODE."
+cpython_path: Objects/codeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/codeobject.c" />
+
+This annotation covers line number mapping and position tables. See `objects_codeobject2_detail` for `PyCode_New`, constants/names/varnames layout, and `objects_codeobject_detail` for the code object struct and `dis` disassembly.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyCode_Addr2Line` | Map bytecode offset to source line number |
+| 101-220 | `_PyLineTable_*` | Decode the `co_linetable` delta-encoded line table |
+| 221-360 | `co_positions()` | Iterator over (line, endline, col, endcol) for each instruction |
+| 361-500 | `_PyCode_InitAddressRange` | Initialize a `PyCodeAddressRange` for efficient sequential scanning |
+| 501-600 | `_PyCode_CODE` | Access the instruction array |
+
+## Reading
+
+### `PyCode_Addr2Line`
+
+```c
+// CPython: Objects/codeobject.c:680 PyCode_Addr2Line
+int
+PyCode_Addr2Line(PyCodeObject *co, int addrq)
+{
+    /* Binary search or sequential scan of co_linetable to find
+       the line number for bytecode offset addrq. */
+    if (addrq < 0) return co->co_firstlineno;
+    PyCodeAddressRange bounds;
+    _PyCode_InitAddressRange(co, &bounds);
+    return _PyLineTable_ScanRange(&bounds, addrq) ? bounds.ar_line : -1;
+}
+```
+
+`PyCode_Addr2Line` is used by the traceback machinery to show the source line number. It decodes the compressed `co_linetable` — a sequence of (bytecode_delta, line_delta) pairs.
+
+### `co_linetable` encoding
+
+```c
+// CPython: Objects/codeobject.c:240 line table format
+/* co_linetable is a sequence of entries, each 2 bytes:
+   byte 0: bytecode_delta  (units of 2 bytes = 1 word)
+   byte 1: line_delta
+   Special values:
+     line_delta = 0x80: no line info (generated code)
+     bytecode_delta = 0: end-of-table
+   This is the PEP 626 "positions" table format from Python 3.10+.
+*/
+```
+
+The table is compact: a typical function with 50 instructions compresses to ~100 bytes. The sequential scan `_PyCode_InitAddressRange` caches the current position for forward scans (common in traceback generation).
+
+### `co_positions()`
+
+```c
+// CPython: Objects/codeobject.c:380 code_co_positions
+static PyObject *
+code_co_positions(PyCodeObject *co, PyObject *noargs)
+{
+    /* Return an iterator yielding (line, endline, col, endcol)
+       for each instruction. Uses the positions table (co_linetable
+       in Python 3.11+, a separate table in 3.10). */
+    return new_lnotab_iterator(co);
+}
+```
+
+`code.co_positions()` is used by the interpreter for `SyntaxError` caret display and by `traceback` for fine-grained highlighting. Each entry covers one instruction word (2 bytes).
+
+### `_PyCode_CODE`
+
+```c
+// CPython: Objects/codeobject.c:540 _PyCode_CODE
+static inline _Py_CODEUNIT *
+_PyCode_CODE(PyCodeObject *co)
+{
+    /* Return a pointer to the first instruction word.
+       co_code_adaptive is a mutable copy for specialization;
+       original opcodes are preserved in co_code_bytes. */
+    return (_Py_CODEUNIT *)co->co_code_adaptive;
+}
+```
+
+`_PyCode_CODE` returns the mutable bytecode array. The adaptive specialization engine modifies this array in place. `co_code_bytes` (or `co_code` in older versions) holds the original unspecialized bytecode for `dis.dis`.
+
+## gopy notes
+
+`PyCode_Addr2Line` is `objects.CodeAddr2Line` in `objects/code.go`. The line table is stored as `objects.Code.LineTable []byte` using the same delta encoding. `co_positions()` returns `objects.CodePositionsIterator`. `_PyCode_CODE` maps to `objects.Code.Instructions []uint16`.

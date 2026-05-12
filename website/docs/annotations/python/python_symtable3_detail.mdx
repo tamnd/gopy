@@ -1,0 +1,148 @@
+---
+title: Python/symtable.c (part 3)
+description: "Python/symtable.c part 3: comprehension scoping, lambda, class body, global/nonlocal resolution, symbol flags."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers nested scopes and special-case rules. See `python_symtable2_detail` for `symtable_visit_stmt`, function entry, and `python_symtable_detail` for the `symtable` struct and top-level analysis.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `symtable_visit_comprehension` | Comprehension scope entry, iterable scoping rule |
+| 101-220 | `symtable_visit_params` | Record function parameters as `DEF_PARAM` |
+| 221-360 | `symtable_visit_expr` (lambda) | Lambda: implicit function scope, single-expression body |
+| 361-480 | `symtable_enter_block` (class) | Class body: `__class__` cell, `__classdict__` |
+| 481-600 | `analyze_name` | Resolve each name to LOCAL / FREE / GLOBAL / CELL |
+
+## Reading
+
+### `symtable_visit_comprehension`
+
+```c
+// CPython: Python/symtable.c:1580 symtable_visit_comprehension
+static int
+symtable_visit_comprehension(struct symtable *st, comprehension_ty e)
+{
+    /* The outermost iterable is evaluated in the enclosing scope.
+       The rest of the comprehension (target, ifs, inner iters) lives
+       in its own implicit function scope. */
+    VISIT(st, expr, e->iter);  /* iter is in the OUTER scope */
+    symtable_enter_block(st, comprehension_name, FunctionBlock, ...);
+    VISIT(st, expr, e->target); /* target is LOCAL to the comprehension */
+    VISIT_SEQ(st, expr, e->ifs);
+    ...
+    symtable_exit_block(st);
+}
+```
+
+`[x for x in range(10)]` creates an implicit function scope. The `range(10)` expression is evaluated in the enclosing scope; `x` is local to the comprehension. This is why `[x for x in a if (a := 1)]` raises `NameError`: the walrus target `a` leaks to the enclosing scope but the comprehension's `a` is a different binding.
+
+### `symtable_visit_params`
+
+```c
+// CPython: Python/symtable.c:1180 symtable_visit_params
+static int
+symtable_visit_params(struct symtable *st, asdl_arg_seq *args)
+{
+    for (int i = 0; i < asdl_seq_LEN(args); i++) {
+        arg_ty arg = asdl_seq_GET(args, i);
+        if (!symtable_add_def(st, arg->arg, DEF_PARAM, LOCATION(arg)))
+            return 0;
+    }
+    return 1;
+}
+```
+
+`DEF_PARAM` marks a name as a positional or keyword parameter. Later, `analyze_name` will classify it as `LOCAL` if no `global` or `nonlocal` statement overrides it. Defaults and annotations are visited in the enclosing scope before entering the function block.
+
+### Lambda scoping
+
+```c
+// CPython: Python/symtable.c:1640 symtable_visit_expr (Lambda)
+case Lambda_kind:
+    /* Lambda is a function with a single expression body.
+       Enter a new FunctionBlock, visit params, then visit the body expr. */
+    if (e->v.Lambda.args->defaults)
+        VISIT_SEQ(st, expr, e->v.Lambda.args->defaults);
+    symtable_enter_block(st, &_Py_ID(lambda), FunctionBlock, ...);
+    VISIT(st, arguments, e->v.Lambda.args);
+    VISIT(st, expr, e->v.Lambda.body);
+    symtable_exit_block(st);
+    break;
+```
+
+Lambda defaults are visited before entering the lambda scope, so `f = lambda x=x: x` captures the outer `x` in the default, not the parameter.
+
+### Class body
+
+```c
+// CPython: Python/symtable.c:720 symtable_enter_block (ClassBlock)
+/* When entering a ClassBlock:
+   - Define __class__ as a cell variable (PEP 3135)
+   - Define __classdict__ for the class namespace
+   - Methods that reference __class__ implicitly get a free variable pointing
+     to the cell in the class body's scope */
+if (block == ClassBlock) {
+    if (!symtable_add_def(st, &_Py_ID(__class__), DEF_IMPLICIT | DEF_LOCAL, loc))
+        return 0;
+}
+```
+
+`super()` with no arguments works because CPython implicitly creates a `__class__` cell in every class body. Methods that reference `super()` get a free variable `__class__` for free.
+
+### `analyze_name`
+
+```c
+// CPython: Python/symtable.c:400 analyze_name
+static int
+analyze_name(PySTEntryObject *ste, PyObject *scopes,
+             PyObject *name, long flags,
+             PyObject *bound, PyObject *local,
+             PyObject *free, PyObject *global)
+{
+    if (flags & DEF_GLOBAL) {
+        /* explicit global statement */
+        SET_SCOPE(scopes, name, GLOBAL_EXPLICIT);
+        return 1;
+    }
+    if (flags & DEF_NONLOCAL) {
+        /* nonlocal: must find binding in an enclosing function scope */
+        if (!bound || !PySet_Contains(bound, name)) {
+            PyErr_Format(PyExc_SyntaxError,
+                "no binding for nonlocal '%U' found", name);
+            return 0;
+        }
+        SET_SCOPE(scopes, name, FREE);
+        return 1;
+    }
+    if (flags & DEF_BOUND) {
+        SET_SCOPE(scopes, name, LOCAL);
+        /* Add to 'local' so inner scopes can see it as a free variable */
+        PySet_Add(local, name);
+        return 1;
+    }
+    /* Name is referenced but not bound here */
+    if (bound && PySet_Contains(bound, name)) {
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);
+    } else {
+        SET_SCOPE(scopes, name, GLOBAL_IMPLICIT);
+    }
+    return 1;
+}
+```
+
+`analyze_name` is the core of Python's scoping rules (LEGB minus Built-in, which is runtime). A name bound in an enclosing function becomes `FREE` in inner functions. A name referenced but not bound anywhere in the chain becomes `GLOBAL_IMPLICIT`.
+
+## gopy notes
+
+`symtable_visit_comprehension` is `compile.SymtableVisitComprehension` in `compile/symtable.go`. Comprehensions use `FunctionBlock` to get their own local scope. `analyze_name` is `compile.AnalyzeName`; the result is stored in `compile.SymbolFlags` per name per scope entry. Class `__class__` cell is created in `compile.EnterClassBlock`.

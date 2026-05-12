@@ -1,0 +1,112 @@
+---
+title: Python/ceval.c (part 18)
+description: "Python/ceval.c part 18: BINARY_SUBSCR specializations (LIST_INT, DICT_STR, GETITEM_TUPLE_INT), STORE_SUBSCR_LIST_INT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers subscript specializations. See `python_ceval17_detail` for call opcodes and string formatting.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_SUBSCR_LIST_INT` | `list[int]` — avoid `tp_as_mapping` call |
+| 81-160 | `BINARY_SUBSCR_TUPLE_INT` | `tuple[int]` — direct index into `ob_item` |
+| 161-260 | `BINARY_SUBSCR_DICT_STR` | `dict[str]` — use `_PyDict_GetItem_KnownHash` |
+| 261-380 | `BINARY_SUBSCR_GETITEM` | Cached `__getitem__` method call |
+| 381-500 | `STORE_SUBSCR_LIST_INT` | `list[int] = value` — skip `sq_ass_item` virtual call |
+
+## Reading
+
+### `BINARY_SUBSCR_LIST_INT`
+
+```c
+// CPython: Python/ceval.c:2020 BINARY_SUBSCR_LIST_INT
+inst(BINARY_SUBSCR_LIST_INT, (list, sub -- res)) {
+    DEOPT_IF(!PyList_CheckExact(list), BINARY_SUBSCR);
+    DEOPT_IF(!PyLong_CheckExact(sub), BINARY_SUBSCR);
+    /* Handle negative indexing */
+    Py_ssize_t index = _PyLong_IsCompact((PyLongObject *)sub) ?
+                        _PyLong_CompactValue((PyLongObject *)sub) :
+                        PyLong_AsSsize_t(sub);
+    if (index < 0) index += PyList_GET_SIZE(list);
+    DEOPT_IF((size_t)index >= (size_t)PyList_GET_SIZE(list), BINARY_SUBSCR);
+    res = Py_NewRef(PyList_GET_ITEM(list, index));
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+}
+```
+
+`my_list[0]` in a tight loop avoids calling `PyObject_GetItem` (which checks `tp_as_mapping`, `tp_as_sequence`, then dispatches). The specialization goes directly to `PyList_GET_ITEM`.
+
+### `BINARY_SUBSCR_DICT_STR`
+
+```c
+// CPython: Python/ceval.c:2100 BINARY_SUBSCR_DICT_STR
+inst(BINARY_SUBSCR_DICT_STR, (dict, sub -- res)) {
+    DEOPT_IF(!PyDict_CheckExact(dict), BINARY_SUBSCR);
+    DEOPT_IF(!PyUnicode_CheckExact(sub), BINARY_SUBSCR);
+    /* Reuse cached hash if available */
+    Py_hash_t hash = ((PyASCIIObject *)sub)->hash;
+    if (hash == -1) {
+        hash = PyObject_Hash(sub);
+        if (hash == -1) ERROR_IF(true, error);
+    }
+    res = _PyDict_GetItem_KnownHash(dict, sub, hash);
+    if (res == NULL) {
+        if (!_PyErr_Occurred(tstate)) {
+            _PyErr_SetKeyError(sub);
+        }
+        ERROR_IF(true, error);
+    }
+    Py_INCREF(res);
+}
+```
+
+`config['key']` with a string literal uses the cached hash from `PyASCIIObject.hash` (set at string interning time). `_PyDict_GetItem_KnownHash` skips the hash computation entirely.
+
+### `BINARY_SUBSCR_GETITEM`
+
+```c
+// CPython: Python/ceval.c:2160 BINARY_SUBSCR_GETITEM
+inst(BINARY_SUBSCR_GETITEM, (container, sub -- res)) {
+    /* Cache the __getitem__ method on the type's version tag. */
+    PyObject *getitem = cache->descr;
+    /* If the type hasn't changed (version_tag matches), call directly */
+    DEOPT_IF(Py_TYPE(container)->tp_version_tag != cache->tp_version, BINARY_SUBSCR);
+    res = PyObject_CallOneArg(getitem, sub);
+    ERROR_IF(res == NULL, error);
+}
+```
+
+For custom `__getitem__` types (e.g., NumPy arrays, SQLAlchemy queries), this specialization caches the `__getitem__` method descriptor and calls it directly on cache hit.
+
+### `STORE_SUBSCR_LIST_INT`
+
+```c
+// CPython: Python/ceval.c:2240 STORE_SUBSCR_LIST_INT
+inst(STORE_SUBSCR_LIST_INT, (value, list, sub --)) {
+    DEOPT_IF(!PyList_CheckExact(list), STORE_SUBSCR);
+    DEOPT_IF(!PyLong_CheckExact(sub), STORE_SUBSCR);
+    Py_ssize_t index = _PyLong_CompactValue((PyLongObject *)sub);
+    if (index < 0) index += PyList_GET_SIZE(list);
+    DEOPT_IF((size_t)index >= (size_t)PyList_GET_SIZE(list), STORE_SUBSCR);
+    PyObject *old_value = PyList_GET_ITEM(list, index);
+    PyList_SET_ITEM(list, index, Py_NewRef(value));
+    Py_DECREF(old_value);
+    Py_DECREF(list);
+    Py_DECREF(sub);
+}
+```
+
+`my_list[i] = x` in a loop compiles to `STORE_SUBSCR` which specializes to `STORE_SUBSCR_LIST_INT`. The specialization replaces the old element and adjusts reference counts without going through `sq_ass_item`.
+
+## gopy notes
+
+Subscript specializations are in `vm/eval_specialize.go`. `BINARY_SUBSCR_LIST_INT` calls `objects.ListGetItem`. `BINARY_SUBSCR_DICT_STR` calls `objects.DictGetItemKnownHash`. `BINARY_SUBSCR_GETITEM` caches the `__getitem__` method in the inline cache. `STORE_SUBSCR_LIST_INT` calls `objects.ListSetItem`.

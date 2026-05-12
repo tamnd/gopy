@@ -1,0 +1,131 @@
+---
+title: Lib/re/ (part 2)
+description: "Lib/re/ part 2: re.Pattern.search, findall, finditer, sub, subn, split — compiled pattern methods."
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/re/__init__.py" />
+
+This annotation covers compiled pattern methods. See `lib_re_detail` for `re.compile`, `re.match`, `re.fullmatch`, `re.search`, group captures, and the `_sre` C module.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Pattern.search` | Find the first match anywhere in the string |
+| 81-180 | `Pattern.findall` | Find all non-overlapping matches, return list |
+| 181-280 | `Pattern.finditer` | Find all matches, return iterator of `Match` objects |
+| 281-420 | `Pattern.sub` / `Pattern.subn` | Replace matches with a string or callable |
+| 421-580 | `Pattern.split` | Split string at match boundaries |
+| 581-700 | `Match` object | `.group()`, `.groups()`, `.groupdict()`, `.span()`, `.start()`, `.end()` |
+
+## Reading
+
+### `Pattern.findall`
+
+```python
+# CPython: Lib/re/__init__.py (delegates to _sre.SRE_Pattern.findall)
+# Implemented in Modules/_sre.c
+
+# findall behavior:
+# - No groups: return list of matching strings
+# - One group:  return list of strings for group 1
+# - Multiple:   return list of tuples of group strings
+```
+
+```c
+// CPython: Modules/_sre.c:1480 pattern_findall
+static PyObject *
+pattern_findall(PatternObject *self, PyObject *args, PyObject *kw)
+{
+    SRE_STATE state;
+    PyObject *list = PyList_New(0);
+    while (state.ptr <= state.end) {
+        if (!pattern_match_one(self, &state)) break;
+        /* Collect match according to group count */
+        if (self->groups == 0)
+            PyList_Append(list, PyUnicode_Substring(string, ...));
+        else if (self->groups == 1)
+            PyList_Append(list, state_getslice(&state, 1, string, 1));
+        else
+            PyList_Append(list, _pair(&state, string));
+        /* Advance past the match to find next */
+        state.ptr = state.start == state.ptr ? state.ptr + 1 : state.ptr;
+    }
+    return list;
+}
+```
+
+### `Pattern.sub`
+
+```python
+# CPython: Lib/re/__init__.py:234 sub
+def sub(pattern, repl, string, count=0, flags=0):
+    """Return string with all occurrences of pattern replaced by repl."""
+    return _compile(pattern, flags).sub(repl, string, count)
+```
+
+```c
+// CPython: Modules/_sre.c:1600 pattern_sub
+/* If repl is a string: process \1, \g<name> backreferences in repl.
+   If repl is callable: call repl(match) for each match. */
+```
+
+`re.sub(r'\d+', lambda m: str(int(m.group())*2), '3 dogs')` returns `'6 dogs'`. The callable form receives each `Match` object.
+
+### `Pattern.split`
+
+```python
+# CPython: Lib/re/__init__.py (delegates to _sre.SRE_Pattern.split)
+# re.split(r'(\s+)', 'a b  c') -> ['a', ' ', 'b', '  ', 'c']
+# Groups in the pattern are included in the result list.
+```
+
+```c
+// CPython: Modules/_sre.c:1680 pattern_split
+static PyObject *
+pattern_split(PatternObject *self, PyObject *args, PyObject *kw)
+{
+    /* Split at each match; include captured groups in output */
+    PyObject *list = PyList_New(0);
+    const char *last = state.beginning;
+    while (maxsplit == 0 || n < maxsplit) {
+        if (!pattern_match_one(self, &state)) break;
+        /* Append text before match */
+        PyList_Append(list, PyUnicode_Substring(string, last, state.start));
+        /* Append each captured group */
+        for (int i = 1; i <= self->groups; i++)
+            PyList_Append(list, state_getslice(&state, i, string, 0));
+        last = state.ptr;
+        n++;
+    }
+    PyList_Append(list, PyUnicode_Substring(string, last, state.end));
+    return list;
+}
+```
+
+### `Match` object
+
+```python
+# CPython: Modules/_sre.c (match object methods)
+m = re.search(r'(\d+)', 'abc 42 xyz')
+m.group(0)   # '42'  -- full match
+m.group(1)   # '42'  -- group 1
+m.groups()   # ('42',)
+m.span(0)    # (4, 6)
+m.start(0)   # 4
+m.end(0)     # 6
+m.groupdict()  # {} -- no named groups
+
+m2 = re.search(r'(?P<num>\d+)', 'abc 42 xyz')
+m2.groupdict()  # {'num': '42'}
+```
+
+## gopy notes
+
+`re.Pattern` and `Match` are implemented in `module/re/module.go`. `findall`, `sub`, `split` call the Go `regexp` package's equivalent methods. Named groups use `regexp.SubexpIndex`. The `_sre` backreference syntax (`\1`, `\g<name>`) is translated to Go's `$1`, `${name}` in replacement strings.

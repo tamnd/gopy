@@ -1,0 +1,124 @@
+---
+title: Modules/_io/ (part 2)
+description: "_io part 2: BufferedReader.read, BufferedWriter.write, TextIOWrapper.readline, TextIOWrapper.write, seek/tell."
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/bufferedio.c" />
+
+This annotation covers the buffered I/O layer. See `modules_io_detail` for `FileIO`, `RawIOBase`, `IOBase.__init__`, and `open()`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `BufferedReader.read` | Read n bytes; fill from the buffer or raw stream |
+| 121-280 | `BufferedReader.readline` | Read up to `\n` using the internal buffer |
+| 281-450 | `BufferedWriter.write` | Write bytes; flush when buffer full |
+| 451-620 | `BufferedWriter.flush` | Write the buffer to the raw stream |
+| 621-800 | `BufferedRWPair` | Combine reader and writer for socket-like bidirectional I/O |
+| 801-1100 | `TextIOWrapper.readline` | Decode bytes, handle universal newlines, track line number |
+| 1101-1400 | `TextIOWrapper.seek` / `tell` | Position in a text file with encoding-aware accounting |
+
+## Reading
+
+### `BufferedReader.read`
+
+```c
+// CPython: Modules/_io/bufferedio.c:680 _bufferedreader_read_generic
+static PyObject *
+_bufferedreader_read_generic(buffered *self, Py_ssize_t n)
+{
+    /* Case 1: all data is in the buffer */
+    if (self->readable_pos + n <= self->read_end) {
+        PyObject *res = PyBytes_FromStringAndSize(
+            self->buffer + self->readable_pos, n);
+        self->readable_pos += n;
+        return res;
+    }
+    /* Case 2: partial data in buffer + need more from raw */
+    Py_ssize_t current_size = self->read_end - self->readable_pos;
+    PyObject *chunks[2];
+    chunks[0] = PyBytes_FromStringAndSize(self->buffer + self->readable_pos,
+                                          current_size);
+    /* Refill buffer from raw */
+    _bufferedreader_fill_buffer(self);
+    Py_ssize_t remaining = n - current_size;
+    chunks[1] = PyBytes_FromStringAndSize(self->buffer, remaining);
+    self->readable_pos = remaining;
+    return PyBytes_Join(chunks[0], chunks[1]);
+}
+```
+
+The buffer size default is 8192 bytes. `read(-1)` reads until EOF, accumulating chunks.
+
+### `BufferedWriter.write`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1080 _bufferedwriter_write
+static PyObject *
+_bufferedwriter_write(buffered *self, PyObject *args)
+{
+    Py_buffer data;
+    PyArg_ParseTuple(args, "y*", &data);
+    Py_ssize_t written = 0;
+    if (self->write_pos + data.len <= self->buffer_size) {
+        /* Fast path: fits in buffer */
+        memcpy(self->buffer + self->write_pos, data.buf, data.len);
+        self->write_pos += data.len;
+        written = data.len;
+    } else {
+        /* Flush, then write (or write directly for large data) */
+        _bufferedwriter_flush_unlocked(self);
+        if (data.len > self->buffer_size) {
+            written = self->raw->tp_as_buffer->...write(data);
+        } else {
+            memcpy(self->buffer, data.buf, data.len);
+            self->write_pos = data.len;
+            written = data.len;
+        }
+    }
+    PyBuffer_Release(&data);
+    return PyLong_FromSsize_t(written);
+}
+```
+
+Large writes bypass the buffer and go directly to the raw stream. The buffer is flushed first if it contains pending data.
+
+### `TextIOWrapper.readline`
+
+```c
+// CPython: Modules/_io/textio.c:1380 _textiowrapper_readline
+/* Read a line, decoding bytes chunk by chunk:
+   1. Read chunk from buffer
+   2. Decode with self->decoder (a codec IncrementalDecoder)
+   3. Search decoded string for newline
+   4. Handle CR/LF/CRLF via universal newlines
+   5. Return line including the newline character
+*/
+```
+
+`readline()` is the bottleneck for line-oriented text protocols. The decoder is called incrementally; multi-byte encodings may split a character across chunk boundaries.
+
+### `TextIOWrapper.tell`
+
+```c
+// CPython: Modules/_io/textio.c:1680 textiowrapper_tell
+/* Return a "cookie" that encodes:
+   - raw stream position (bytes)
+   - decoder state (for encodings like UTF-16 with BOM)
+   - number of chars decoded from partial chunk
+   - pending CR (for CRLF mode)
+   The cookie can be passed back to seek() to resume exactly. */
+```
+
+Text mode `tell()` returns an opaque integer encoding both the byte offset and the decoder state. This allows seeking back to exact positions even in variable-width encodings.
+
+## gopy notes
+
+`BufferedReader.read` is `module/io.BufferedReader.Read` in `module/io/bufferedreader.go`. `BufferedWriter.write` is `module/io.BufferedWriter.Write`. `TextIOWrapper.readline` uses Go's `bufio.Reader.ReadLine`. `TextIOWrapper.tell` encodes the cookie using the same bit-packing as CPython.
