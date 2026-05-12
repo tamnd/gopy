@@ -114,13 +114,18 @@ import (
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
 	// `import traceback` and friends pulled in by unittest.
+	// Built-in module: _sre. Registers itself via module/_sre/module.go
+	// init(). Backs Lib/re/ with the compiled pattern engine. Go's
+	// regexp/RE2 backend.
+	// CPython: Modules/_sre/sre.c:1 (module init)
+	_ "github.com/tamnd/gopy/module/_sre"
+
 	_ "github.com/tamnd/gopy/module/argparse"
 	_ "github.com/tamnd/gopy/module/contextlib"
 	_ "github.com/tamnd/gopy/module/dataclasses"
 	_ "github.com/tamnd/gopy/module/fnmatch"
 	_ "github.com/tamnd/gopy/module/functools"
 	_ "github.com/tamnd/gopy/module/os"
-	_ "github.com/tamnd/gopy/module/re"
 	_ "github.com/tamnd/gopy/module/signal"
 	_ "github.com/tamnd/gopy/module/traceback"
 	_ "github.com/tamnd/gopy/module/weakref"
