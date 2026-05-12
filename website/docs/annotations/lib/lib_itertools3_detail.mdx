@@ -1,0 +1,151 @@
+---
+title: Lib/itertools.py (part 3)
+description: "itertools part 3: chain, islice, takewhile, dropwhile, groupby."
+cpython_path: Lib/itertools.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/itertools.py" />
+
+This annotation covers filtering and chaining iterators. See `lib_itertools2_detail` for `count`, `cycle`, `repeat`, `accumulate`, and `compress`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `chain` / `chain.from_iterable` | Concatenate iterables lazily |
+| 81-160 | `islice` | Slice an iterator by start/stop/step |
+| 161-240 | `takewhile` / `dropwhile` | Stop or skip while predicate holds |
+| 241-360 | `groupby` | Group consecutive elements by key |
+| 361-500 | `pairwise` / `batched` | Python 3.10+ sliding/fixed window iterators |
+
+## Reading
+
+### `chain`
+
+```python
+# CPython: Lib/itertools.py:42 chain
+class chain:
+    def __new__(cls, *iterables):
+        return _chain_from_iterable(iter(it) for it in iterables)
+
+    @classmethod
+    def from_iterable(cls, iterable):
+        for it in iterable:
+            yield from it
+```
+
+`chain('AB', 'CD')` yields `A B C D`. `chain.from_iterable` is the lazy version: `chain.from_iterable([range(3), range(3)])` never materializes the outer list as iterators. Both are implemented in C; the Python form above shows the semantics.
+
+### `islice`
+
+```python
+# CPython: Lib/itertools.py:120 islice
+class islice:
+    def __init__(self, iterable, *args):
+        # islice(it, stop) or islice(it, start, stop[, step])
+        s = slice(*args)
+        self._start, self._stop, self._step = s.start or 0, s.stop, s.step or 1
+        self._it = iter(iterable)
+        self._nexti = self._start
+
+    def __next__(self):
+        # Advance past skipped elements
+        while self._cnt < self._nexti:
+            next(self._it)
+            self._cnt += 1
+        if self._stop is not None and self._cnt >= self._stop:
+            raise StopIteration
+        val = next(self._it)
+        self._nexti += self._step
+        self._cnt += 1
+        return val
+```
+
+`islice(it, 2, 8, 2)` yields elements at indices 2, 4, 6. Unlike `list[2:8:2]`, `islice` does not require random access and works on any iterator. It advances past skipped elements by consuming them, not jumping.
+
+### `takewhile` / `dropwhile`
+
+```python
+# CPython: Lib/itertools.py:200 takewhile
+class takewhile:
+    def __init__(self, predicate, iterable):
+        self._pred = predicate
+        self._it = iter(iterable)
+
+    def __next__(self):
+        val = next(self._it)
+        if not self._pred(val):
+            raise StopIteration
+        return val
+
+# CPython: Lib/itertools.py:230 dropwhile
+class dropwhile:
+    def __init__(self, predicate, iterable):
+        self._pred = predicate
+        self._it = iter(iterable)
+        self._dropping = True
+
+    def __next__(self):
+        for val in self._it:
+            if self._dropping:
+                if not self._pred(val):
+                    self._dropping = False
+                    return val
+            else:
+                return val
+        raise StopIteration
+```
+
+`takewhile(lambda x: x < 5, [1,4,6,4,1])` yields `1 4` — it stops at the first `False`, never resuming. `dropwhile` skips elements while the predicate is true, then yields all remaining elements including those that match.
+
+### `groupby`
+
+```python
+# CPython: Lib/itertools.py:290 groupby
+class groupby:
+    def __init__(self, iterable, key=None):
+        self._it = iter(iterable)
+        self._key = key if key is not None else lambda x: x
+        self._tgtkey = self._currkey = self._currvalue = _sentinel
+
+    def __next__(self):
+        self._id += 1
+        while self._currkey == self._tgtkey:
+            self._currvalue = next(self._it)  # StopIteration propagates
+            self._currkey = self._key(self._currvalue)
+        self._tgtkey = self._currkey
+        return self._currkey, self._grouper(self._id)
+```
+
+`groupby` requires the input to be sorted by the key function. It groups consecutive elements with the same key. Each group is itself a lazy iterator sharing the underlying iterator; consuming the next group advances past the current one.
+
+### `pairwise` / `batched`
+
+```python
+# CPython: Lib/itertools.py:420 pairwise
+def pairwise(iterable):
+    # pairwise('ABCDE') -> AB BC CD DE
+    a, b = tee(iterable)
+    next(b, None)
+    return zip(a, b)
+
+# CPython: Lib/itertools.py:460 batched  (3.12+)
+def batched(iterable, n):
+    # batched('ABCDE', 2) -> AB CD E
+    if n < 1:
+        raise ValueError('n must be >= 1')
+    it = iter(iterable)
+    while batch := tuple(islice(it, n)):
+        yield batch
+```
+
+`pairwise` overlaps; `batched` does not. `batched('ABCDE', 2)` yields `('A','B')`, `('C','D')`, `('E',)`. The walrus-operator loop drains the iterator in chunks of exactly `n`, yielding the final partial batch if the length is not a multiple of `n`.
+
+## gopy notes
+
+`chain` is `objects.ChainIter` in `objects/itertools.go`. `islice` is `objects.IsliceIter`. `takewhile`/`dropwhile` are `objects.TakewhileIter` / `objects.DropwhileIter`. `groupby` is `objects.GroupbyIter` backed by `objects.GroupbyGroupIter`. `pairwise` is `objects.PairwiseIter`. `batched` is `objects.BatchedIter`.

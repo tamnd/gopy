@@ -1,0 +1,91 @@
+---
+title: Modules/posixmodule.c (part 7) — os.path
+description: "posixmodule.c: os.path.join, os.path.dirname, os.path.abspath, os.path.exists, os.path.isfile."
+cpython_path: Lib/posixpath.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/posixpath.py" />
+
+This annotation covers `os.path` (POSIX implementation). See `modules_posix6_detail` for `os.stat`, `os.scandir`, and `DirEntry`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `os.path.join` | Join path components |
+| 81-160 | `os.path.dirname` / `basename` | Split path into head/tail |
+| 161-240 | `os.path.abspath` | Canonicalize to absolute path |
+| 241-320 | `os.path.exists` / `isfile` / `isdir` | Test path type |
+| 321-500 | `os.path.commonpath` / `relpath` | Path relationships |
+
+## Reading
+
+### `os.path.join`
+
+```python
+# CPython: Lib/posixpath.py:76 join
+def join(a, *p):
+    a = os.fspath(a)
+    sep = _get_sep(a)
+    path = a
+    for b in p:
+        b = os.fspath(b)
+        if b.startswith(sep):
+            path = b  # Absolute component replaces everything
+        elif not path or path.endswith(sep):
+            path += b
+        else:
+            path += sep + b
+    return path
+```
+
+`os.path.join('/foo', 'bar', '/baz')` returns `'/baz'`: an absolute component resets the path. This matches the POSIX shell behavior of `cd /foo; cd /baz` ending at `/baz`.
+
+### `os.path.abspath`
+
+```python
+# CPython: Lib/posixpath.py:374 abspath
+def abspath(path):
+    cwd = os.getcwd()
+    return normpath(join(cwd, path))
+
+def normpath(path):
+    # Resolve . and .. components, remove double slashes
+    initial_slashes = path.startswith('/')
+    comps = path.split('/')
+    new_comps = []
+    for comp in comps:
+        if comp in ('', '.'):
+            continue
+        if comp == '..' and new_comps and new_comps[-1] != '..':
+            new_comps.pop()
+        else:
+            new_comps.append(comp)
+    path = '/'.join(new_comps)
+    return ('/' * initial_slashes) + path
+```
+
+`abspath` doesn't resolve symlinks (use `realpath` for that). It prepends `os.getcwd()` and normalizes `..` and `.` components. `normpath` is deterministic without filesystem calls.
+
+### `os.path.exists`
+
+```python
+# CPython: Lib/posixpath.py:166 exists
+def exists(path):
+    try:
+        os.stat(path)
+    except (OSError, ValueError):
+        return False
+    return True
+```
+
+`exists` catches `OSError` (no such file) and `ValueError` (bad path). It follows symlinks (use `lexists` for "does the symlink itself exist"). `isfile` additionally checks `stat.S_ISREG(st.st_mode)`.
+
+## gopy notes
+
+`os.path.join` is `module/os.PathJoin` in `module/os/module.go`. Uses `path/filepath.Join` with POSIX semantics. `abspath` calls `os.Getwd()` then `filepath.Join`. `exists` calls `os.Stat` and returns false on error. `isfile` checks `!info.IsDir()`.

@@ -1,0 +1,88 @@
+---
+title: Python/ceval.c (part 70)
+description: "Python/ceval.c part 70: LOAD_FAST specializations, LOAD_FAST_CHECK, LOAD_FAST_AND_CLEAR, LOAD_FROM_DICT_OR_GLOBALS."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `LOAD_FAST` variants. See `python_ceval69_detail` for `LOAD_GLOBAL` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_FAST` | Load local variable (no unbound check) |
+| 81-160 | `LOAD_FAST_CHECK` | Load with unbound check (first-time access) |
+| 161-240 | `LOAD_FAST_AND_CLEAR` | Load and set slot to NULL (comprehension `iter`) |
+| 241-320 | `LOAD_FROM_DICT_OR_GLOBALS` | PEP 709 inlined comprehension |
+| 321-500 | `STORE_FAST` / `DELETE_FAST` | Store and delete local variable |
+
+## Reading
+
+### `LOAD_FAST` vs `LOAD_FAST_CHECK`
+
+```c
+// CPython: Python/ceval.c:1240 LOAD_FAST
+inst(LOAD_FAST, (-- value)) {
+    value = GETLOCAL(oparg);
+    assert(value != NULL);  /* Compiler guarantees this via flow analysis */
+    Py_INCREF(value);
+}
+
+// CPython: Python/ceval.c:1260 LOAD_FAST_CHECK
+inst(LOAD_FAST_CHECK, (-- value)) {
+    value = GETLOCAL(oparg);
+    if (value == NULL) {
+        _PyEval_FormatExcCheckArg(tstate, PyExc_UnboundLocalError,
+                                  NAME_ERROR_MSG, ..., name);
+        ERROR_IF(true, error);
+    }
+    Py_INCREF(value);
+}
+```
+
+`LOAD_FAST` is used when the compiler proves via flow analysis that the variable is definitely assigned before this point. `LOAD_FAST_CHECK` is used for variables that might be unbound (e.g., assigned only in one branch of an `if`).
+
+### `LOAD_FAST_AND_CLEAR`
+
+```c
+// CPython: Python/ceval.c:1300 LOAD_FAST_AND_CLEAR
+inst(LOAD_FAST_AND_CLEAR, (-- value)) {
+    value = GETLOCAL(oparg);
+    SETLOCAL(oparg, NULL);  /* Clear the slot */
+    if (value == NULL) {
+        value = Py_None;
+        Py_INCREF(value);
+    }
+}
+```
+
+Used by the inlined comprehension optimization. The comprehension's `iter` is loaded from the enclosing frame's local slot and that slot is cleared (so the comprehension doesn't hold a reference to the iterable after it's done).
+
+### `DELETE_FAST`
+
+```c
+// CPython: Python/ceval.c:1380 DELETE_FAST
+inst(DELETE_FAST, (--)) {
+    PyObject *v = GETLOCAL(oparg);
+    if (v == NULL) {
+        _PyEval_FormatExcCheckArg(tstate, PyExc_UnboundLocalError,
+                                  NAME_ERROR_MSG, ..., name);
+        ERROR_IF(true, error);
+    }
+    SETLOCAL(oparg, NULL);
+    Py_DECREF(v);
+}
+```
+
+`del x` in a function compiles to `DELETE_FAST`. The slot is set to NULL; subsequent `LOAD_FAST` would use `LOAD_FAST_CHECK` and raise `UnboundLocalError`.
+
+## gopy notes
+
+`LOAD_FAST` is in `vm/eval_simple.go`. It reads `frame.Locals[oparg]` without nil check. `LOAD_FAST_CHECK` includes the nil check and calls `vm.FormatUnboundLocalError`. `DELETE_FAST` sets `frame.Locals[oparg] = nil`. `LOAD_FAST_AND_CLEAR` is used for the inlined comprehension iterator.

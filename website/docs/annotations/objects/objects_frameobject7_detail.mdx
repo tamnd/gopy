@@ -1,0 +1,86 @@
+---
+title: Objects/frameobject.c (part 7)
+description: "Objects/frameobject.c part 7: _PyInterpreterFrame layout, frame_alloc, FRAME_SUSPENDED, stack pointer management."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/frameobject.c" />
+
+This annotation covers the internal frame representation. See `objects_frameobject6_detail` for `PyFrameObject`, `frame.f_locals`, `frame.f_lineno`, and the tracing interface.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyInterpreterFrame` layout | Internal frame: localsplus, stack pointer, previous |
+| 81-160 | `_PyFrame_New_NoTrack` | Allocate a frame without GC tracking |
+| 161-240 | Frame states | `FRAME_CREATED`, `FRAME_SUSPENDED`, `FRAME_EXECUTING`, `FRAME_COMPLETED` |
+| 241-340 | `_PyFrame_LocalsToFast` | Sync from `f_locals` dict back to fast locals array |
+| 341-600 | Frame ownership | Generator frames vs call frames |
+
+## Reading
+
+### `_PyInterpreterFrame` layout
+
+```c
+// CPython: Objects/frameobject.c:40 _PyInterpreterFrame
+typedef struct _PyInterpreterFrame {
+    PyObject *f_funcobj;          /* Strong ref to the function */
+    PyObject *f_globals;          /* Borrowed ref to globals dict */
+    PyObject *f_builtins;         /* Borrowed ref to builtins dict */
+    PyObject *f_locals;           /* Strong ref to locals dict or NULL */
+    PyCodeObject *f_code;         /* Borrowed ref to code object */
+    PyFrameObject *frame_obj;     /* Weak ref to the Python-visible frame */
+    _Py_CODEUNIT *prev_instr;     /* Last instruction executed */
+    int stacktop;                 /* -1 when frame is suspended */
+    uint16_t return_offset;       /* For RETURN_VALUE and YIELD_VALUE */
+    char owner;                   /* FRAME_OWNED_BY_* */
+    PyObject *localsplus[1];      /* Fast locals + stack (variable-length) */
+} _PyInterpreterFrame;
+```
+
+`localsplus` is a single array: first `co_nlocalsplus` slots hold fast locals (parameters, local vars, cell vars, free vars), then the value stack grows upward from there. The stack pointer is `localsplus + co_nlocalsplus + stacktop`.
+
+### Frame states
+
+```c
+// CPython: Objects/frameobject.c:80 frame states
+#define FRAME_CREATED      0  /* Not yet executing */
+#define FRAME_SUSPENDED    1  /* At a yield, generator frame */
+#define FRAME_SUSPENDED_YIELD_FROM 2
+#define FRAME_EXECUTING    3  /* Currently on the CPU */
+#define FRAME_COMPLETED    4  /* Returned or raised; frame invalid */
+#define FRAME_CLEARED      5  /* All refs cleared */
+```
+
+`FRAME_SUSPENDED` is the generator state: the frame is paused at a `YIELD_VALUE`. `FRAME_EXECUTING` prevents re-entry. `FRAME_COMPLETED` means the frame is done but the `PyFrameObject` Python wrapper may still exist (for post-mortem inspection).
+
+### `_PyFrame_LocalsToFast`
+
+```c
+// CPython: Objects/frameobject.c:560 _PyFrame_LocalsToFast
+void
+_PyFrame_LocalsToFast(_PyInterpreterFrame *frame, int clear)
+{
+    /* Copy from f_locals dict back to the localsplus array */
+    /* Used by: debuggers, exec(), locals() assignment tricks */
+    PyObject *locals = frame->f_locals;
+    for (int i = 0; i < frame->f_code->co_nlocalsplus; i++) {
+        PyObject *name = PyTuple_GET_ITEM(frame->f_code->co_localsplusnames, i);
+        PyObject *value = PyObject_GetItem(locals, name);
+        Py_XDECREF(GETLOCAL(frame, i));
+        SETLOCAL(frame, i, value);
+    }
+}
+```
+
+Used by `exec()` and debuggers that modify `f_locals`. Normally, `f_locals` is a snapshot (fast-to-dict); `LocalsToFast` writes changes back from the dict into the fast array.
+
+## gopy notes
+
+`_PyInterpreterFrame` is `vm.Frame` in `vm/frame.go`. `localsplus` is a Go `[]objects.Object` slice. `stacktop` is the stack pointer index. Frame states are integer constants. `LocalsToFast` is `vm.Frame.LocalsToFast`, copying from the locals dict back to the slice.
