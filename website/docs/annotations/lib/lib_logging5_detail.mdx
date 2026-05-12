@@ -1,0 +1,124 @@
+---
+title: Lib/logging/__init__.py (part 5)
+description: "logging/__init__.py part 5: Handler.emit, StreamHandler, FileHandler, MemoryHandler, rotating handlers."
+cpython_path: Lib/logging/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/logging/__init__.py" />
+
+This annotation covers the handler hierarchy. See `lib_logging4_detail` for `Logger`, `LogRecord`, and the filter chain.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Handler.emit` | Base emit — subclasses override this |
+| 81-160 | `StreamHandler` | Write formatted records to a stream |
+| 161-240 | `FileHandler` | Write to a file; open/close management |
+| 241-320 | `NullHandler` | Do-nothing handler for library authors |
+| 321-500 | `Handler.handle` | Acquire lock, call emit, release lock |
+
+## Reading
+
+### `Handler.emit`
+
+```python
+# CPython: Lib/logging/__init__.py:940 Handler.emit
+def emit(self, record):
+    """
+    Do whatever it takes to actually log the specified logging record.
+    This version is intended to be implemented by subclasses and so
+    raises a NotImplementedError.
+    """
+    raise NotImplementedError('emit must be implemented by Handler subclasses')
+```
+
+`emit` is the abstract hook. All output handlers override this. The base `Handler.handle` method acquires a lock, calls `self.emit`, and releases the lock.
+
+### `StreamHandler`
+
+```python
+# CPython: Lib/logging/__init__.py:1060 StreamHandler.emit
+def emit(self, record):
+    try:
+        msg = self.format(record)
+        stream = self.stream
+        stream.write(msg + self.terminator)
+        self.flush()
+    except RecursionError:
+        raise
+    except Exception:
+        self.handleError(record)
+```
+
+`StreamHandler` catches all exceptions from `format` and `write` (except `RecursionError`) and calls `handleError`, which by default prints to `sys.stderr`. This ensures logging never crashes the application.
+
+### `Handler.handle`
+
+```python
+# CPython: Lib/logging/__init__.py:920 Handler.handle
+def handle(self, record):
+    rv = self.filter(record)
+    if rv:
+        self.acquire()
+        try:
+            self.emit(record)
+        finally:
+            self.release()
+    return rv
+```
+
+The lock is a `threading.RLock` so handlers can be called from multiple threads safely. `filter(record)` returns the record (or a modified version) if it passes all filters, or `False` to suppress it.
+
+### `FileHandler`
+
+```python
+# CPython: Lib/logging/__init__.py:1100 FileHandler.__init__
+class FileHandler(StreamHandler):
+    def __init__(self, filename, mode='a', encoding=None, delay=False,
+                 errors=None):
+        self.baseFilename = os.path.abspath(filename)
+        self.mode = mode
+        self.encoding = encoding
+        self.errors = errors
+        self.delay = delay
+        if delay:
+            self.stream = None
+        else:
+            StreamHandler.__init__(self, self._open())
+
+    def emit(self, record):
+        if self.stream is None:
+            self.stream = self._open()
+        StreamHandler.emit(self, record)
+```
+
+`delay=True` defers file creation until the first log message. This is useful for handlers at the WARNING level: if no warnings fire, no file is created.
+
+### `NullHandler`
+
+```python
+# CPython: Lib/logging/__init__.py:1200 NullHandler
+class NullHandler(Handler):
+    def handle(self, record):
+        pass
+    def emit(self, record):
+        pass
+    def createLock(self):
+        self.lock = None
+    def acquire(self):
+        pass
+    def release(self):
+        pass
+```
+
+Library authors add `logging.getLogger(__name__).addHandler(NullHandler())` to prevent "No handlers could be found" warnings when the library is used without any logging configuration.
+
+## gopy notes
+
+`StreamHandler` is `module/logging.StreamHandler` in `module/logging/module.go`. `emit` writes to the stream object via `objects.Write`. The lock is a Go `sync.Mutex`. `FileHandler` opens via `os.OpenFile`.

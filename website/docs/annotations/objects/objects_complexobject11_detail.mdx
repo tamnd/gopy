@@ -1,0 +1,110 @@
+---
+title: Objects/complexobject.c (part 11)
+description: "Objects/complexobject.c part 11: complex.__abs__, complex.conjugate, complex.__pow__, PyComplex_AsCComplex."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers complex number methods and the C API. See `objects_complexobject10_detail` for `PyComplex_FromDoubles`, arithmetic operations, and `__new__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `complex.__abs__` | Compute the modulus |
+| 61-120 | `complex.conjugate` | Return `a - bj` |
+| 121-200 | `complex.__pow__` | Complex exponentiation |
+| 201-300 | `PyComplex_AsCComplex` | Extract a `Py_complex` struct from a Python object |
+| 301-400 | `complex.__format__` | Format with `'e'`, `'f'`, `'g'` spec |
+
+## Reading
+
+### `complex.__abs__`
+
+```c
+// CPython: Objects/complexobject.c:480 complex_abs
+static PyObject *
+complex_abs(PyComplexObject *v)
+{
+    double result;
+    Py_complex c = v->cval;
+    /* hypot(real, imag) with overflow protection */
+    result = _Py_c_abs(c);
+    return PyFloat_FromDouble(result);
+}
+```
+
+`abs(3+4j)` returns `5.0`. `_Py_c_abs` is `hypot(real, imag)` with the same two-pass overflow protection as `math.hypot`.
+
+### `complex.conjugate`
+
+```c
+// CPython: Objects/complexobject.c:500 complex_conjugate
+static PyObject *
+complex_conjugate(PyComplexObject *self, PyObject *Py_UNUSED(ignored))
+{
+    Py_complex c = self->cval;
+    c.imag = -c.imag;
+    return PyComplex_FromCComplex(c);
+}
+```
+
+`(3+4j).conjugate()` returns `(3-4j)`. The real part is unchanged.
+
+### `complex.__pow__`
+
+```c
+// CPython: Objects/complexobject.c:380 complex_pow
+static PyObject *
+complex_pow(PyObject *v, PyObject *w, PyObject *z)
+{
+    if (z != Py_None) {
+        PyErr_SetString(PyExc_ValueError,
+            "complex modulo not allowed");
+        return NULL;
+    }
+    Py_complex a = PyComplex_AsCComplex(v);
+    Py_complex b = PyComplex_AsCComplex(w);
+    Py_complex p = _Py_c_pow(a, b);
+    return PyComplex_FromCComplex(p);
+}
+```
+
+`pow(a, b, mod)` is not supported for complex numbers (`mod` must be `None`). `_Py_c_pow` computes `exp(b * log(a))` using the identity `a^b = exp(b * ln|a| + ib*arg(a))`.
+
+### `PyComplex_AsCComplex`
+
+```c
+// CPython: Objects/complexobject.c:560 PyComplex_AsCComplex
+Py_complex
+PyComplex_AsCComplex(PyObject *op)
+{
+    Py_complex cv = {-1.0, 0.0};  /* error sentinel */
+    if (PyComplex_CheckExact(op)) {
+        return ((PyComplexObject *)op)->cval;
+    }
+    /* Try __complex__ */
+    PyObject *newop = _PyObject_LookupSpecial(op, &_Py_ID(__complex__));
+    if (newop != NULL) {
+        PyObject *res = PyObject_CallNoArgs(newop);
+        if (res != NULL && PyComplex_CheckExact(res))
+            cv = ((PyComplexObject *)res)->cval;
+        ...
+    }
+    /* Fall back to __float__ */
+    ...
+    return cv;
+}
+```
+
+`PyComplex_AsCComplex` follows the same coercion protocol as `__index__`/`__int__`: first `__complex__`, then `__float__` (with zero imaginary). This allows `numpy` types to participate in complex arithmetic.
+
+## gopy notes
+
+`complex.__abs__` is `objects.ComplexAbs` in `objects/complex.go` using `math.Hypot`. `complex.__pow__` calls `objects.ComplexPow` which uses `cmplx.Pow` from Go's `math/cmplx`. `PyComplex_AsCComplex` is `objects.AsComplex`, which calls `__complex__` then falls back to `__float__`.

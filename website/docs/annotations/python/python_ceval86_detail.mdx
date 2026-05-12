@@ -1,0 +1,107 @@
+---
+title: Python/ceval.c (part 86)
+description: "Python/ceval.c part 86: CALL, CALL_PY_EXACT_ARGS, CALL_PY_WITH_DEFAULTS, CALL_BOUND_METHOD_EXACT_ARGS."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers function call specializations. See `python_ceval85_detail` for `LOAD_ATTR` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `CALL` | Generic call — dispatch based on callable type |
+| 81-180 | `CALL_PY_EXACT_ARGS` | Call a Python function with exact positional count |
+| 181-280 | `CALL_PY_WITH_DEFAULTS` | Call a Python function that has default values |
+| 281-380 | `CALL_BOUND_METHOD_EXACT_ARGS` | Inline the self argument for bound methods |
+| 381-500 | `CALL_BUILTIN_FAST` / `CALL_BUILTIN_O` | Call C builtins with 1 or N args |
+
+## Reading
+
+### `CALL`
+
+```c
+// CPython: Python/ceval.c:4480 CALL
+inst(CALL, (callable, self_or_null, args[oparg] -- res)) {
+    int total_args = oparg + (self_or_null != NULL);
+    PyObject **arguments = args - (self_or_null != NULL);
+    PyObject *func = callable;
+    res = PyObject_Vectorcall(func, arguments, total_args | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
+    ERROR_IF(res == NULL, error);
+    /* cleanup: dec all args */
+    while (--total_args >= 0) Py_DECREF(arguments[total_args]);
+    Py_DECREF(func);
+}
+```
+
+`CALL` uses the vectorcall protocol (`PyObject_Vectorcall`). The `PY_VECTORCALL_ARGUMENTS_OFFSET` flag tells the callee it may temporarily write to `arguments[-1]`, which enables bound method optimization without copying the args array.
+
+### `CALL_PY_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:4540 CALL_PY_EXACT_ARGS
+inst(CALL_PY_EXACT_ARGS, (callable, self_or_null, args[oparg] -- unused)) {
+    /* Specialization: callable is a Python function with exactly oparg parameters,
+       no defaults, no *args, no **kwargs. */
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    DEOPT_IF(!PyFunction_Check(callable), CALL);
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    DEOPT_IF(code->co_argcount != oparg + (self_or_null != NULL), CALL);
+    /* Push a new frame directly onto the frame stack */
+    _PyInterpreterFrame *new_frame = _PyFrame_PushUnchecked(tstate, func, oparg + (self_or_null != NULL));
+    /* Copy args into new frame's localsplus */
+    ...
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+`CALL_PY_EXACT_ARGS` bypasses `PyObject_Vectorcall` entirely and pushes a new frame inline. `DISPATCH_INLINED` sets `frame = new_frame` and jumps to the first instruction without going through the C call stack. This is the "inlined call" that makes CPython 3.11+ significantly faster for pure Python.
+
+### `CALL_BOUND_METHOD_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:4620 CALL_BOUND_METHOD_EXACT_ARGS
+inst(CALL_BOUND_METHOD_EXACT_ARGS, (callable, unused, args[oparg] -- unused)) {
+    DEOPT_IF(!PyMethod_Check(callable), CALL);
+    /* Extract self and func from the method */
+    PyObject *self = ((PyMethodObject *)callable)->im_self;
+    PyObject *func = ((PyMethodObject *)callable)->im_func;
+    /* Place self into args[-1] via the OFFSET trick */
+    args[-1] = self;
+    Py_INCREF(self);
+    /* Now fall through to CALL_PY_EXACT_ARGS */
+    DEOPT_IF(!PyFunction_Check(func), CALL);
+    ...
+}
+```
+
+Bound method calls avoid building a temporary args array with `self` prepended. Instead, `self` is written into `args[-1]` (allowed by `PY_VECTORCALL_ARGUMENTS_OFFSET`) and the method body sees a contiguous array starting at `self`.
+
+### `CALL_BUILTIN_O`
+
+```c
+// CPython: Python/ceval.c:4700 CALL_BUILTIN_O
+inst(CALL_BUILTIN_O, (callable, unused, arg --  res)) {
+    /* oparg == 1: single positional argument, no kwargs */
+    DEOPT_IF(!PyCFunction_CheckExact(callable), CALL);
+    DEOPT_IF(PyCFunction_GET_FLAGS(callable) != METH_O, CALL);
+    PyCFunction cfunc = PyCFunction_GET_FUNCTION(callable);
+    res = cfunc(PyCFunction_GET_SELF(callable), arg);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(arg);
+    Py_DECREF(callable);
+}
+```
+
+`CALL_BUILTIN_O` is the fastest path for a C function declared `METH_O` (single argument, no keywords). It calls the C function pointer directly without going through `PyObject_Vectorcall`.
+
+## gopy notes
+
+`CALL` is in `vm/eval_call.go` and dispatches via `objects.Vectorcall`. `CALL_PY_EXACT_ARGS` pushes a new `vm.Frame` and jumps inline without a Go function call. `CALL_BOUND_METHOD_EXACT_ARGS` strips the bound method wrapper. `CALL_BUILTIN_O` calls the `objects.CFunction` directly.

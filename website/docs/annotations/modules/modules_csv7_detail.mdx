@@ -1,0 +1,110 @@
+---
+title: Modules/_csv.c (part 7)
+description: "_csv.c part 7: csv.writer, csv.DictWriter, Dialect validation, csv.register_dialect."
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_csv.c" />
+
+This annotation covers the writer side and dialect management. See `modules_csv6_detail` for `csv.reader`, the row parser, and quoting modes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `csv.writer` | Create a writer object bound to a file |
+| 81-180 | `Writer.writerow` | Format one row and write to the underlying file |
+| 181-260 | `Writer.writerows` | Iterate and call `writerow` for each |
+| 261-360 | Dialect validation | Check quotechar, delimiter, lineterminator constraints |
+| 361-500 | `csv.register_dialect` / `csv.unregister_dialect` | Global dialect registry |
+
+## Reading
+
+### `Writer.writerow`
+
+```c
+// CPython: Modules/_csv.c:820 csv_writerow
+static PyObject *
+csv_writerow(WriterObj *self, PyObject *seq)
+{
+    DialectObj *dialect = self->dialect;
+    PyObject *iter = PyObject_GetIter(seq);
+    while (1) {
+        PyObject *field = PyIter_Next(iter);
+        if (field == NULL) break;
+        /* Determine quoting */
+        int want_escape = 0;
+        PyObject *str = PyObject_Str(field);
+        /* Check if str contains delimiter or quotechar */
+        if (csv_join_append(self, str, ...) < 0) goto err;
+        Py_DECREF(str);
+        Py_DECREF(field);
+    }
+    /* append lineterminator and write to writer */
+    PyObject *line = _csvwriter_join_reset(self);
+    return PyObject_CallMethodOneArg(self->writeline, _Py_ID(write), line);
+}
+```
+
+`writerow` stringifies each field with `str()`, escapes/quotes as required by the dialect, and writes the assembled line to the file object's `write` method. Non-string values are converted before quoting checks.
+
+### Dialect validation
+
+```c
+// CPython: Modules/_csv.c:420 dialect_check_quoting
+static int
+dialect_check_quoting(int quoting)
+{
+    const StyleDesc *qs;
+    for (qs = quote_styles; qs->name; qs++) {
+        if ((int)qs->style == quoting) return 0;
+    }
+    PyErr_Format(PyExc_TypeError, "bad \"quoting\" value");
+    return -1;
+}
+
+// CPython: Modules/_csv.c:360 dialect_check_char
+static int
+dialect_check_char(const char *name, Py_UCS4 c, PyObject *src, bool allow_none)
+{
+    if (c == 0 && !allow_none) {
+        PyErr_Format(PyExc_TypeError, "\"%s\" must be a 1-character string", name);
+        return -1;
+    }
+    if (c >= 128) {
+        PyErr_Format(PyExc_TypeError,
+            "\"%s\" must be a 1-character string", name);
+        return -1;
+    }
+    return 0;
+}
+```
+
+The delimiter and quotechar must be single ASCII characters. `lineterminator` can be multi-character (`'\r\n'`). `quoting` must be one of `QUOTE_ALL`, `QUOTE_MINIMAL`, `QUOTE_NONNUMERIC`, or `QUOTE_NONE`.
+
+### `csv.register_dialect`
+
+```c
+// CPython: Modules/_csv.c:1020 csv_register_dialect
+static PyObject *
+csv_register_dialect(PyObject *module, PyObject *const *args, Py_ssize_t nargs,
+                     PyObject *kwnames)
+{
+    /* csv.register_dialect(name, dialect=None, **fmtparams) */
+    PyObject *name;
+    PyObject *dialect_inst = dialect_new(&DialectType, args, kwnames);
+    if (dialect_inst == NULL) return NULL;
+    return PyDict_SetItem(get_dialects_dict(module), name, dialect_inst);
+}
+```
+
+`csv.register_dialect('pipes', delimiter='|', quoting=csv.QUOTE_NONE)` stores a `Dialect` object in the module-level dialect registry dict. `csv.reader(f, 'pipes')` looks up the dialect by name.
+
+## gopy notes
+
+`csv.writer` is `module/csv.NewWriter` in `module/csv/module.go`. `writerow` calls `objects.Str` on each field and appends to a `strings.Builder`. `register_dialect` stores dialects in `module/csv.dialects` (a `map[string]*Dialect`). `dialect_check_char` validates via `len(rune) == 1 && rune < 128`.
