@@ -1,0 +1,79 @@
+---
+title: Modules/binascii.c (part 6)
+description: "binascii.c part 6: base64 encode/decode, b2a_hex, a2b_hex, crc32, crc_hqx."
+cpython_path: Modules/binascii.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/binascii.c" />
+
+This annotation covers binary-to-ASCII encoding and checksums. See `modules_binascii5_detail` for `b2a_base64`, `a2b_base64`, `b2a_uu`, and `a2b_uu`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `b2a_base64` | Encode binary to base64 line |
+| 81-160 | `a2b_base64` | Decode base64 to binary |
+| 161-240 | `b2a_hex` / `a2b_hex` | Hex encode/decode |
+| 241-320 | `crc32` | CRC-32 checksum (same as zlib.crc32) |
+| 321-500 | `crc_hqx` | CRC-CCITT for BinHex 4.0 |
+
+## Reading
+
+### `b2a_base64`
+
+```c
+// CPython: Modules/binascii.c:420 binascii_b2a_base64_impl
+static PyObject *
+binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline)
+{
+    /* Encode up to 57 bytes (standard base64 line length = 76 chars) */
+    const unsigned char *bin_data = data->buf;
+    Py_ssize_t bin_len = data->len;
+    /* Allocate: (bin_len * 4 / 3) + 2 for padding and newline */
+    PyObject *rv = PyBytes_FromStringAndSize(NULL, ...) ;
+    unsigned char *ascii_data = (unsigned char *)PyBytes_AS_STRING(rv);
+    /* Main loop: encode 3 bytes -> 4 chars */
+    while (bin_len >= 3) {
+        *ascii_data++ = table_b2a_base64[( bin_data[0] >> 2) & 0x3f];
+        *ascii_data++ = table_b2a_base64[((bin_data[0] << 4) | (bin_data[1] >> 4)) & 0x3f];
+        *ascii_data++ = table_b2a_base64[((bin_data[1] << 2) | (bin_data[2] >> 6)) & 0x3f];
+        *ascii_data++ = table_b2a_base64[  bin_data[2]                               & 0x3f];
+        bin_data += 3; bin_len -= 3;
+    }
+    /* Handle remaining 1 or 2 bytes with padding */
+    ...
+    if (newline) *ascii_data++ = '\n';
+    return rv;
+}
+```
+
+Base64 encodes 3 bytes as 4 ASCII characters using a 64-character alphabet. `newline=True` (default) appends `\n`, matching the MIME line format.
+
+### `crc32`
+
+```c
+// CPython: Modules/binascii.c:760 binascii_crc32_impl
+static PyObject *
+binascii_crc32_impl(PyObject *module, Py_buffer *data, unsigned int value)
+{
+    /* CRC-32: IEEE 802.3 polynomial 0xEDB88320 (reflected) */
+    Py_ssize_t len = data->len;
+    const unsigned char *buf = data->buf;
+    for (Py_ssize_t i = 0; i < len; i++) {
+        value = (value >> 8) ^ crc_32_tab[(value ^ buf[i]) & 0xff];
+    }
+    return PyLong_FromUnsignedLong(value & 0xffffffffUL);
+}
+```
+
+`binascii.crc32` and `zlib.crc32` use the same algorithm. The initial `value=0` is the standard. Chaining: `crc32(data2, crc32(data1))` extends the CRC over concatenated data.
+
+## gopy notes
+
+`b2a_base64` is `module/binascii.B2ABase64` in `module/binascii/module.go`. It wraps `encoding/base64.StdEncoding.EncodeToString`. `a2b_hex` uses `hex.DecodeString`. `crc32` wraps `hash/crc32.ChecksumIEEE`. `crc_hqx` uses a separate table for the CCITT polynomial.

@@ -1,0 +1,92 @@
+---
+title: Objects/abstract.c (part 4)
+description: "Objects/abstract.c part 4: PyObject_GetIter, PyIter_Next, PyObject_Call, PyObject_CallNoArgs, vectorcall."
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/abstract.c" />
+
+This annotation covers iteration and calling protocol. See `objects_abstractobject3_detail` for `PyNumber_*`, `PySequence_*`, and `PyMapping_*`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyObject_GetIter` | Get an iterator from any iterable |
+| 81-160 | `PyIter_Next` | Advance an iterator |
+| 161-260 | `PyObject_Call` | Call with args+kwargs tuple/dict |
+| 261-360 | `PyObject_Vectorcall` | Call with C array + kwnames |
+| 361-500 | `PyObject_CallOneArg` / `_NoArgs` | Convenience callers |
+
+## Reading
+
+### `PyObject_GetIter`
+
+```c
+// CPython: Objects/abstract.c:2780 PyObject_GetIter
+PyObject *
+PyObject_GetIter(PyObject *o)
+{
+    PyTypeObject *t = Py_TYPE(o);
+    getiterfunc f;
+    f = t->tp_iter;
+    if (f == NULL) {
+        /* Fall back: if tp_as_sequence->sq_item is defined, wrap in a sequence iterator */
+        if (t->tp_as_sequence && t->tp_as_sequence->sq_item) {
+            return PySeqIter_New(o);
+        }
+        PyErr_Format(PyExc_TypeError, "'%.200s' object is not iterable", t->tp_name);
+        return NULL;
+    }
+    PyObject *res = (*f)(o);
+    ...
+    return res;
+}
+```
+
+`iter(obj)` calls `tp_iter`. If not defined but `sq_item` is, a `seqiterobject` wraps the object, calling `sq_item(obj, 0)`, `sq_item(obj, 1)`, etc. until `IndexError`.
+
+### `PyObject_Vectorcall`
+
+```c
+// CPython: Objects/abstract.c:2920 PyObject_Vectorcall
+PyObject *
+PyObject_Vectorcall(PyObject *callable, PyObject *const *args,
+                    size_t nargsf, PyObject *kwnames)
+{
+    /* nargsf encodes nargs in the lower bits;
+       PY_VECTORCALL_ARGUMENTS_OFFSET is set if args[-1] can be overwritten */
+    assert(nargs >= 0);
+    vectorcallfunc func = _PyVectorcall_Function(callable);
+    if (func == NULL) {
+        return _PyObject_MakeTpCall(NULL, callable, args, nargs, kwnames);
+    }
+    return func(callable, args, nargsf, kwnames);
+}
+```
+
+Vectorcall is the fast calling convention added in PEP 590. Instead of building a tuple of arguments, callers pass a C array directly. Functions expose `tp_vectorcall_offset` pointing to their vectorcall function pointer.
+
+### `PyObject_CallOneArg`
+
+```c
+// CPython: Objects/abstract.c:2980 PyObject_CallOneArg
+PyObject *
+PyObject_CallOneArg(PyObject *func, PyObject *arg)
+{
+    assert(arg != NULL);
+    PyObject *const args[1] = {arg};
+    return PyObject_Vectorcall(func, args, 1 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
+}
+```
+
+`PyObject_CallOneArg` is a vectorcall wrapper for single-argument calls. `PY_VECTORCALL_ARGUMENTS_OFFSET` signals that `args[-1]` is a valid slot the callee can use temporarily.
+
+## gopy notes
+
+`PyObject_GetIter` is `objects.GetIter` in `objects/abstract.go`. It checks for `objects.IterableProtocol` first (Go interface), then falls back to sequence wrapping. `PyObject_Vectorcall` is `objects.Vectorcall`, which passes a Go slice directly to avoid intermediate allocations. `PyObject_CallOneArg` calls `objects.CallOneArg`.

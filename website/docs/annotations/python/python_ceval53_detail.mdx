@@ -1,0 +1,84 @@
+---
+title: Python/ceval.c (part 53)
+description: "Python/ceval.c part 53: COMPARE_OP specializations — COMPARE_OP_INT, COMPARE_OP_FLOAT, COMPARE_OP_STR."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `COMPARE_OP` specializations for integer, float, and string comparison. See `python_ceval52_detail` for `BINARY_OP` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `COMPARE_OP_INT` | Integer comparison specialization |
+| 81-160 | `COMPARE_OP_FLOAT` | Float comparison specialization |
+| 161-240 | `COMPARE_OP_STR` | String equality specialization |
+| 241-320 | `IS_OP` / `CONTAINS_OP` | Identity and membership tests |
+| 321-500 | `COMPARE_OP` (generic) | Fallback slot dispatch |
+
+## Reading
+
+### `COMPARE_OP_INT`
+
+```c
+// CPython: Python/ceval.c:4840 COMPARE_OP_INT
+inst(COMPARE_OP_INT, (unused/2, left, right -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(left) || !PyLong_CheckExact(right));
+    /* Fast path for compact integers (single-digit) */
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)left) ||
+             !_PyLong_IsCompact((PyLongObject *)right));
+    Py_ssize_t ileft = _PyLong_CompactValue((PyLongObject *)left);
+    Py_ssize_t iright = _PyLong_CompactValue((PyLongObject *)right);
+    int sign = (ileft > iright) - (ileft < iright);
+    res = PyBool_FromLong(compare_masks[oparg & 0xF] & (sign + 1));
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+The comparison result is computed as a sign (-1, 0, or +1) and then tested against a bitmask indexed by the comparison operator. This avoids a branch chain for `<`, `<=`, `==`, `>=`, `>`, `!=`.
+
+### `COMPARE_OP_FLOAT`
+
+```c
+// CPython: Python/ceval.c:4900 COMPARE_OP_FLOAT
+inst(COMPARE_OP_FLOAT, (unused/2, left, right -- res)) {
+    DEOPT_IF(!PyFloat_CheckExact(left) || !PyFloat_CheckExact(right));
+    double dleft = PyFloat_AS_DOUBLE(left);
+    double dright = PyFloat_AS_DOUBLE(right);
+    int sign = (dleft > dright) - (dleft < dright);
+    res = PyBool_FromLong(compare_masks[oparg & 0xF] & (sign + 1));
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+Direct `double` comparison using C relational operators. NaN handling: `(NaN > x)` is `false` and `(NaN < x)` is `false`, so `sign = 0`, and `0 == 0` is `true` but `NaN != NaN` is `true`. The bitmask covers this correctly.
+
+### `COMPARE_OP_STR`
+
+```c
+// CPython: Python/ceval.c:4960 COMPARE_OP_STR
+inst(COMPARE_OP_STR, (unused/2, left, right -- res)) {
+    DEOPT_IF(!PyUnicode_CheckExact(left) || !PyUnicode_CheckExact(right));
+    /* Only specializes '==' and '!=' */
+    DEOPT_IF((oparg & 0xF) != Py_EQ && (oparg & 0xF) != Py_NE);
+    int eq = _PyUnicode_Equal(left, right);
+    res = PyBool_FromLong((oparg & 0xF) == Py_EQ ? eq : !eq);
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+`_PyUnicode_Equal` checks pointer identity first (interned strings compare equal instantly), then falls back to length + memcmp.
+
+## gopy notes
+
+`COMPARE_OP_INT` is in `vm/eval_simple.go`. For compact integers, it reads `PyLong.CompactValue()` and uses a bitmask table. `COMPARE_OP_FLOAT` reads `objects.Float.Value` and uses the same bitmask. `COMPARE_OP_STR` checks pointer equality first via `objects.Is`, then `strings.Equal`.
