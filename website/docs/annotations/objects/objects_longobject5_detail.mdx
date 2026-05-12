@@ -1,0 +1,136 @@
+---
+title: Objects/longobject.c (part 5)
+description: "longobject.c part 5: int.__new__ parsing (from string with base), PyLong_FromString, strtol-style digit scanning, large integer string conversion."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers integer construction from strings, which feeds both `int('0xff', 16)` and `int('12345')`. See parts 1-4 for construction from C numerics, arithmetic, and formatting.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `long_new_impl` | `int.__new__` dispatch: no-arg, int arg, string arg |
+| 201-500 | `PyLong_FromString` | String → int, any base 2-36 or 0 (auto-detect) |
+| 501-800 | `_PyLong_DigitValue` | Lookup table: ASCII digit to value (0-35) |
+| 801-1200 | `_PyLong_FromByteArray` | Little-endian byte array → arbitrary-precision int |
+| 1201-1600 | `_PyLong_AsByteArray` | Arbitrary-precision int → byte array |
+| 1601-2000 | `long_from_binary_base` | Fast path for base 2/4/8/16/32 (single bit shift per digit) |
+
+## Reading
+
+### `int.__new__`
+
+```c
+// CPython: Objects/longobject.c:85 long_new_impl
+static PyObject *
+long_new_impl(PyTypeObject *type, PyObject *x, PyObject *obase)
+{
+    if (x == NULL) {
+        /* int() → 0 */
+        return _PyLong_GetZero();
+    }
+    if (obase == NULL) {
+        /* int(x) — convert x to int */
+        return PyNumber_Long(x);
+    }
+    /* int(x, base) — x must be str/bytes/bytearray */
+    Py_ssize_t base = PyLong_AsSsize_t(obase);
+    if (base != 0 && (base < 2 || base > 36)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "int() base must be >= 2 and <= 36, or 0");
+        return NULL;
+    }
+    return PyLong_FromUnicodeObject(x, (int)base);
+}
+```
+
+### `PyLong_FromString`
+
+```c
+// CPython: Objects/longobject.c:280 PyLong_FromString
+PyObject *
+PyLong_FromString(const char *str, char **pend, int base)
+{
+    /* Skip leading whitespace and optional sign */
+    if (*str == '+' || *str == '-') { sign = *str++; }
+    /* Auto-detect base from prefix */
+    if (base == 0) {
+        if (*str == '0') {
+            if (str[1] == 'x' || str[1] == 'X') base = 16;
+            else if (str[1] == 'o' || str[1] == 'O') base = 8;
+            else if (str[1] == 'b' || str[1] == 'B') base = 2;
+            else base = 10;
+        } else base = 10;
+    }
+    /* Skip 0x/0o/0b prefix */
+    ...
+    /* Scan digits */
+    if (is_power_of_2_base(base))
+        return long_from_binary_base(str, base);
+    return long_from_decimal(str, ...);
+}
+```
+
+`int('0b1010', 0)` detects base 2 from the `0b` prefix. `int('FF', 16)` parses hex directly.
+
+### Fast binary-base conversion
+
+```c
+// CPython: Objects/longobject.c:1680 long_from_binary_base
+static PyObject *
+long_from_binary_base(const char *start, int base)
+{
+    /* Each digit contributes exactly log2(base) bits */
+    int bits_per_char = (int)log2(base);  /* 1, 2, 3, or 4 */
+    Py_ssize_t n = length_of_string * bits_per_char;
+    Py_ssize_t ndigits = (n + PyLong_SHIFT - 1) / PyLong_SHIFT;
+    PyLongObject *z = _PyLong_New(ndigits);
+    /* Pack digits from right to left */
+    digit accum = 0;
+    int bits_in_accum = 0;
+    for (p = end - 1; p >= start; p--) {
+        int k = _PyLong_DigitValue[Py_CHARMASK(*p)];
+        accum |= (digit)k << bits_in_accum;
+        bits_in_accum += bits_per_char;
+        if (bits_in_accum >= PyLong_SHIFT) {
+            *pdigit++ = accum & PyLong_MASK;
+            accum >>= PyLong_SHIFT;
+            bits_in_accum -= PyLong_SHIFT;
+        }
+    }
+    ...
+}
+```
+
+For bases that are powers of 2, each character maps to exactly N bits. No division required.
+
+### `_PyLong_FromByteArray`
+
+```c
+// CPython: Objects/longobject.c:880 _PyLong_FromByteArray
+PyObject *
+_PyLong_FromByteArray(const unsigned char *bytes, size_t n,
+                      int little_endian, int is_signed)
+{
+    /* Build PyLongObject from raw bytes, handling sign extension */
+    const unsigned char *pstartbyte, *pendbyte;
+    int incr;
+    if (little_endian) { pstartbyte = bytes; incr = 1; }
+    else                { pstartbyte = bytes + n - 1; incr = -1; }
+    ...
+}
+```
+
+Used by `int.from_bytes()`. Handles both big-endian and little-endian byte order.
+
+## gopy notes
+
+`PyLong_FromString` is `objects.IntFromString` in Go, using `big.Int.SetString(s, base)` for most cases. The binary-base fast path uses `big.Int.SetString` which also has this optimization. `_PyLong_FromByteArray` maps to `big.Int.SetBytes` with endian reversal for little-endian input.

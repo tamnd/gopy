@@ -1,0 +1,115 @@
+---
+title: Lib/html/parser.py
+description: "Lib/html/parser.py: HTMLParser — event-driven HTML parser using markupbase. handle_starttag, handle_data, handle_endtag, handle_entityref, unescape."
+cpython_path: Lib/html/parser.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/html/parser.py" />
+
+`HTMLParser` is a lenient, event-driven HTML/XHTML parser. Unlike the SAX-style XML parsers it tolerates broken HTML. Users subclass it and override `handle_*` methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | Imports | `markupbase`, `re` patterns for tags |
+| 51-150 | `HTMLParser.__init__` | Parser state: `rawdata` buffer, `cdata_content_elements` |
+| 151-280 | `HTMLParser.feed` | Append to buffer, call `goahead(end=0)` |
+| 281-400 | `goahead` | Core scan loop: dispatch on `<`, `&`, or text |
+| 401-500 | `handle_*` stubs | Default no-op callbacks for user override |
+
+## Reading
+
+### State machine
+
+```python
+# CPython: Lib/html/parser.py:160 HTMLParser.feed
+def feed(self, data):
+    """Feed some text to the parser.  It is processed insofar as it consists
+    of complete elements; incomplete data is buffered until more data is fed
+    or close() is called."""
+    self.rawdata = self.rawdata + data
+    self.goahead(0)
+```
+
+Data is accumulated in `rawdata`. `goahead(0)` processes as much as possible; `goahead(1)` is called by `close()` to force parsing incomplete data.
+
+### Tag scanning
+
+```python
+# CPython: Lib/html/parser.py:295 goahead
+def goahead(self, end):
+    rawdata = self.rawdata
+    i = 0
+    while i < len(rawdata):
+        if self.convert_charrefs and not self.cdata_elem:
+            j = rawdata.find('<', i)
+            if j < 0:
+                ...  # no more tags
+                break
+            if i < j:
+                self.handle_data(rawdata[i:j])  # text between tags
+        ...
+        if rawdata[i:i+2] == '<!':
+            # comment, doctype, CDATA section
+            ...
+        elif rawdata[i] == '<':
+            # start or end tag
+            k = self.handle_starttag or self.handle_endtag ...
+```
+
+### `handle_starttag`
+
+```python
+# CPython: Lib/html/parser.py:420 handle_starttag
+def handle_starttag(self, tag, attrs):
+    """Called for each opening tag.
+    tag is the tag name lowercased, attrs is a list of (name, value) pairs.
+    """
+    pass  # override in subclass
+```
+
+Usage:
+
+```python
+# CPython: Lib/html/parser.py:1 example
+from html.parser import HTMLParser
+class MyParser(HTMLParser):
+    def handle_starttag(self, tag, attrs):
+        print(f"Start: {tag}, attrs={attrs}")
+    def handle_data(self, data):
+        print(f"Data: {data!r}")
+MyParser().feed('<p class="x">Hello</p>')
+```
+
+### Entity and character reference handling
+
+```python
+# CPython: Lib/html/parser.py:375 handle_charref
+def handle_charref(self, name):
+    """Called for numeric character references (&#NNN; or &#xNNN;)."""
+    pass
+
+def handle_entityref(self, name):
+    """Called for named character references (&amp;, &lt;, etc.)."""
+    pass
+```
+
+With `convert_charrefs=True` (default since 3.5), character and entity references are converted automatically before `handle_data` is called.
+
+### `unescape`
+
+```python
+# CPython: Lib/html/parser.py:490 unescape
+# Deprecated in 3.4, removed in 3.9; now in html module:
+# html.unescape('&lt;br&gt;') == '<br>'
+```
+
+## gopy notes
+
+`html.parser` is pure Python. It is importable in gopy when `re` and `markupbase` work. The `goahead` method uses regular-expression matching (`tagfind_tolerant`, `attrfind_tolerant`, etc.) compiled at import time.

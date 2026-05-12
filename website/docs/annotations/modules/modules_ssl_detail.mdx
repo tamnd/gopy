@@ -1,0 +1,126 @@
+---
+title: Modules/_ssl.c
+description: "_ssl.c: TLS/SSL bindings — SSLContext, SSLSocket, wrap_socket, certificate verification, SNI, protocol version negotiation."
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ssl.c" />
+
+`_ssl` wraps OpenSSL (or LibreSSL) to provide TLS for `ssl.SSLSocket` and `ssl.SSLContext`. The Python `ssl` module (`Lib/ssl.py`) builds the high-level API on top.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | Constants | `PROTOCOL_TLS_CLIENT`, `CERT_REQUIRED`, `OP_NO_SSLv2`, etc. |
+| 201-600 | `SSLContext` type | Wraps `SSL_CTX *` — ca certs, key/cert, options, verify mode |
+| 601-1000 | `SSLContext_wrap_socket` | Create `SSLSocket` from a regular socket + context |
+| 1001-1500 | `SSLSocket` type | Wraps `SSL *` — per-connection state |
+| 1501-2000 | `SSLSocket_do_handshake` | TLS handshake (blocking or non-blocking) |
+| 2001-2500 | `SSLSocket_read`, `SSLSocket_write` | Encrypted read/write |
+| 2501-3000 | `SSLSocket_getpeercert` | Parse X.509 certificate into a dict |
+| 3001-3500 | `SSLContext_load_cert_chain` | Load key+cert from file |
+| 3501-4000 | `SSLContext_load_verify_locations` | CA bundle loading |
+| 4001-5000 | SNI and hostname checking | `SSL_set_tlsext_host_name`, `match_hostname` |
+| 5001-6000 | Error handling | `_setSSLError` — translate OpenSSL errors to Python exceptions |
+
+## Reading
+
+### `SSLContext` creation
+
+```c
+// CPython: Modules/_ssl.c:280 _ssl__SSLContext_impl
+static PyObject *
+_ssl__SSLContext_impl(PyTypeObject *type, int proto_version)
+{
+    SSL_CTX *ctx = SSL_CTX_new(TLS_method());
+    /* Set safe defaults */
+    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    SSL_CTX_set_default_verify_paths(ctx);
+    ...
+}
+```
+
+`ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)` also sets `check_hostname=True` and `verify_mode=CERT_REQUIRED` in the Python layer.
+
+### `wrap_socket`
+
+```c
+// CPython: Modules/_ssl.c:780 _ssl__SSLObject_impl
+static PyObject *
+_ssl__SSLObject_impl(PyTypeObject *type, PyObject *ctx_arg,
+                     PyObject *sock, int server_side,
+                     PyObject *server_hostname)
+{
+    SSL *ssl = SSL_new(((PySSLContext *)ctx_arg)->ctx);
+    SSL_set_fd(ssl, PyObject_AsFileDescriptor(sock));
+    if (server_hostname && !server_side)
+        SSL_set_tlsext_host_name(ssl, hostname_utf8);
+    ...
+}
+```
+
+### Handshake
+
+```c
+// CPython: Modules/_ssl.c:1180 _ssl__SSLObject_do_handshake_impl
+static PyObject *
+_ssl__SSLObject_do_handshake_impl(PySSLObject *self)
+{
+    int ret;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        ret = SSL_do_handshake(self->ssl);
+        Py_END_ALLOW_THREADS
+        err = SSL_get_error(self->ssl, ret);
+    } while (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE);
+    if (ret < 1) return _setSSLError(...);
+    Py_RETURN_NONE;
+}
+```
+
+The handshake loop handles `WANT_READ`/`WANT_WRITE` for non-blocking sockets.
+
+### `read` / `write`
+
+```c
+// CPython: Modules/_ssl.c:1620 _ssl__SSLObject_read_impl
+static PyObject *
+_ssl__SSLObject_read_impl(PySSLObject *self, int len, int group_right_1,
+                           Py_buffer *buffer)
+{
+    Py_BEGIN_ALLOW_THREADS
+    count = SSL_read(self->ssl, mem, len);
+    Py_END_ALLOW_THREADS
+    ...
+}
+```
+
+### Certificate dict
+
+```c
+// CPython: Modules/_ssl.c:2700 _decode_certificate
+static PyObject *
+_decode_certificate(PySSLObject *self)
+{
+    X509 *certificate = SSL_get_peer_certificate(self->ssl);
+    /* Extract subject, issuer, notBefore, notAfter, subjectAltName */
+    PyObject *retval = PyDict_New();
+    PyDict_SetItemString(retval, "subject", parse_X509_name(X509_get_subject_name(certificate)));
+    PyDict_SetItemString(retval, "notAfter",  _PySSL_GetNotAfter(certificate));
+    ...
+    return retval;
+}
+```
+
+`ssl.SSLSocket.getpeercert()` returns a dict with `subject`, `issuer`, `notBefore`, `notAfter`, `subjectAltName` (list of `(tag, value)` pairs).
+
+## gopy notes
+
+`ssl` in gopy uses Go's `crypto/tls` package. `SSLContext` maps to `tls.Config`. `wrap_socket` returns an object wrapping `tls.Conn`. Handshake calls `tls.Conn.Handshake()`. Certificate parsing uses `x509.Certificate` fields mapped to the same Python dict structure. `CERT_REQUIRED` maps to `tls.RequireAndVerifyClientCert` on the server side and `InsecureSkipVerify=false` on the client side.

@@ -1,0 +1,128 @@
+---
+title: Objects/fileobject.c
+description: "Objects/fileobject.c: PyFile_* C API — PyFile_FromFd, PyFile_GetLine, PyFile_WriteString, PyFile_WriteObject. Bridges C stdio and Python file objects."
+cpython_path: Objects/fileobject.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/fileobject.c" />
+
+`Objects/fileobject.c` is the thin C API layer for file objects. The actual file I/O implementation lives in `Modules/_io/` (buffered/text I/O). This file provides the helpers used by C extension code and the interpreter itself.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `PyFile_FromFd` | Wrap a raw file descriptor in a Python file object |
+| 51-100 | `PyFile_GetLine` | Read one line (used by `input()`) |
+| 101-160 | `PyFile_WriteString` | Write a C string to a Python file object |
+| 161-220 | `PyFile_WriteObject` | Write `repr(obj)` or `str(obj)` to a file |
+| 221-300 | `_PyObject_Print` | Internal: print an object to a C `FILE *` |
+
+## Reading
+
+### `PyFile_FromFd`
+
+```c
+// CPython: Objects/fileobject.c:28 PyFile_FromFd
+PyObject *
+PyFile_FromFd(int fd, const char *name, const char *mode,
+              int buffering, const char *encoding,
+              const char *errors, const char *newline,
+              int closefd)
+{
+    /* Equivalent to io.open(fd, mode, buffering, encoding, errors, newline, closefd) */
+    PyObject *io = PyImport_ImportModule("_io");
+    PyObject *open = PyObject_GetAttrString(io, "open");
+    return PyObject_Call(open, args, kwargs);
+}
+```
+
+`PyFile_FromFd(1, "<stdout>", "w", -1, NULL, NULL, NULL, 0)` creates Python's `sys.stdout`.
+
+### `PyFile_GetLine`
+
+```c
+// CPython: Objects/fileobject.c:68 PyFile_GetLine
+PyObject *
+PyFile_GetLine(PyObject *f, int n)
+{
+    PyObject *result;
+    if (n <= 0)
+        result = PyObject_CallMethodNoArgs(f, &_Py_ID(readline));
+    else
+        result = PyObject_CallMethodOneArg(f, &_Py_ID(readline),
+                                           PyLong_FromLong(n));
+    /* Strip trailing newline if present */
+    ...
+    return result;
+}
+```
+
+Used by the interactive interpreter and `input()` builtin.
+
+### `PyFile_WriteString`
+
+```c
+// CPython: Objects/fileobject.c:115 PyFile_WriteString
+int
+PyFile_WriteString(const char *s, PyObject *f)
+{
+    if (f == NULL) {
+        /* No file: print to stderr directly */
+        fputs(s, stderr);
+        return 0;
+    }
+    PyObject *str = PyUnicode_FromString(s);
+    int res = PyFile_WriteObject(str, f, Py_PRINT_RAW);
+    Py_DECREF(str);
+    return res;
+}
+```
+
+Used extensively in the interpreter for error messages and tracebacks.
+
+### `PyFile_WriteObject`
+
+```c
+// CPython: Objects/fileobject.c:148 PyFile_WriteObject
+int
+PyFile_WriteObject(PyObject *v, PyObject *f, int flags)
+{
+    /* flags=0: use repr(); flags=Py_PRINT_RAW: use str() */
+    PyObject *writer = PyObject_GetAttr(f, &_Py_ID(write));
+    PyObject *value = (flags & Py_PRINT_RAW) ? PyObject_Str(v) : PyObject_Repr(v);
+    PyObject *result = PyObject_CallOneArg(writer, value);
+    ...
+}
+```
+
+`Py_PRINT_RAW` is the flag used by `print()` — it calls `str()`, not `repr()`.
+
+### `_PyObject_Print`
+
+```c
+// CPython: Objects/fileobject.c:228 _PyObject_Print
+int
+_PyObject_Print(PyObject *op, FILE *fp, int flags)
+{
+    /* Write to a C FILE *: used for debug output, tracebacks to stderr */
+    clearerr(fp);
+    if (op == NULL) {
+        fputs("<nil>", fp);
+    } else {
+        PyObject *s = (flags & Py_PRINT_RAW) ? PyObject_Str(op) : PyObject_Repr(op);
+        fputs(PyUnicode_AsUTF8(s), fp);
+        ...
+    }
+    return ferror(fp) ? -1 : 0;
+}
+```
+
+## gopy notes
+
+`PyFile_FromFd` maps to `io.OpenFd` in gopy's `_io` module. `sys.stdout`/`sys.stderr`/`sys.stdin` are created from fds 1/2/0. `PyFile_WriteString` and `PyFile_WriteObject` are used by the traceback printer (`vm/eval_unwind.go`) to write to `sys.stderr`.

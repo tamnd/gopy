@@ -1,0 +1,111 @@
+---
+title: Objects/floatobject.c (part 3)
+description: "floatobject.c part 3: float construction from string (PyFloat_FromString), __format__ with width/precision/type, float_new, fromhex/hex."
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/floatobject.c" />
+
+This annotation covers float construction from strings and the hex representation. See parts 1-2 for arithmetic, repr, hash, and rounding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `PyFloat_FromString` | Parse `'3.14'`, `'inf'`, `'nan'`, `'1e10'` |
+| 201-400 | `float_new_impl` | `float.__new__` dispatch |
+| 401-700 | `float_format` | `format(1.5, '.2f')` — all format types |
+| 701-900 | `float_hex`, `float_fromhex` | `(1.5).hex()` → `'0x1.8p+0'`, reverse |
+
+## Reading
+
+### `PyFloat_FromString`
+
+```c
+// CPython: Objects/floatobject.c:95 PyFloat_FromString
+PyObject *
+PyFloat_FromString(PyObject *v)
+{
+    const char *s = PyUnicode_AsUTF8AndSize(v, &len);
+    /* Skip leading/trailing whitespace */
+    while (Py_ISSPACE(*s)) s++;
+    /* Check for special values */
+    if (strncmp(s, "inf", 3) == 0 || strncmp(s, "infinity", 8) == 0)
+        return PyFloat_FromDouble(Py_HUGE_VAL);
+    if (strncmp(s, "-inf", 4) == 0 || ...)
+        return PyFloat_FromDouble(-Py_HUGE_VAL);
+    if (strncmp(s, "nan", 3) == 0 || strncmp(s, "-nan", 4) == 0)
+        return PyFloat_FromDouble(Py_NAN);
+    /* General case: strtod */
+    double x = PyOS_string_to_double(s, &end, PyExc_ValueError);
+    return PyFloat_FromDouble(x);
+}
+```
+
+`float('inf')`, `float('nan')`, and `float('-1.5e10')` all go through here.
+
+### `__format__`
+
+```c
+// CPython: Objects/floatobject.c:450 float_format
+static PyObject *
+float_format(PyObject *self, PyObject *args)
+{
+    double x = PyFloat_AS_DOUBLE(self);
+    _PyUnicodeWriter writer;
+    /* Parse format spec: [[fill]align][sign][z][#][0][width][grouping][.precision][type] */
+    /* type: 'e', 'E', 'f', 'F', 'g', 'G', 'n', '%', '' */
+    char type = format.type ? format.type : 'g';
+    int precision = format.precision >= 0 ? format.precision : 6;
+    /* Handle 'z' flag: negative zero becomes positive zero */
+    if (format.z_flag && x == 0.0) x = 0.0;
+    /* Format using _PyFloat_FormatAdvancedWriter */
+    ...
+}
+```
+
+`format(3.14159, '.2f')` gives `'3.14'`. `format(1e10, 'e')` gives `'1.000000e+10'`.
+
+### `float.hex()`
+
+```c
+// CPython: Objects/floatobject.c:720 float_hex
+static PyObject *
+float_hex(PyObject *v, PyObject *Py_UNUSED(ignored))
+{
+    double x = PyFloat_AS_DOUBLE(v);
+    double m = frexp(fabs(x), &e);
+    /* Format: [sign]0x[integer].[fraction]p[exponent] */
+    /* Mantissa in hex: 1 hex digit = 4 bits = 4 * ceil(DBL_MANT_DIG/4) */
+    int n_digits = (DBL_MANT_DIG + 3) / 4;
+    ...
+    /* e.g. 1.5 → 0x1.8p+0 */
+}
+```
+
+`(1.5).hex()` is `'0x1.8p+0'`: the mantissa `1.8` is hexadecimal, `p+0` means the exponent is 2^0.
+
+### `float.fromhex()`
+
+```c
+// CPython: Objects/floatobject.c:820 float_fromhex
+static PyObject *
+float_fromhex(PyTypeObject *type, PyObject *string)
+{
+    /* Parse [sign] '0x' hexdigits ['.' hexdigits] 'p' [sign] decimaldigits */
+    /* Reconstruct: mantissa * 2^exponent */
+    double result = ldexp(mantissa, exp);
+    return PyFloat_FromDouble(result);
+}
+```
+
+Exact round-trip: `float.fromhex(x.hex()) == x` for any finite float.
+
+## gopy notes
+
+`PyFloat_FromString` uses Go's `strconv.ParseFloat` which handles `inf`, `nan`, and all standard formats. `float.hex()` and `float.fromhex()` are ported directly using `math.Frexp`/`math.Ldexp`. `__format__` uses `strconv.FormatFloat` with the appropriate format verb mapped from Python's format type character.

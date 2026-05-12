@@ -1,0 +1,91 @@
+---
+title: "Include/internal/pycore_gc.h"
+description: "pycore_gc.h: GC internal structures — PyGC_Head doubly-linked list, generation config, gc_refs tracking, IS_TRACKED/IS_REACHABLE macros."
+cpython_path: Include/internal/pycore_gc.h
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_gc.h" />
+
+`pycore_gc.h` defines the internal structures used by the cyclic garbage collector. Every container object (list, dict, tuple, etc.) has a `PyGC_Head` prepended to its allocation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `PyGC_Head` | Doubly-linked list node prepended to every tracked object |
+| 51-100 | `_PyGC_BITS_*` macros | Bit flags stored in `_gc_prev` low bits |
+| 101-130 | Generation struct | `gc_list`, `count`, threshold for each of 3 generations |
+| 131-160 | `_PyObject_GC_IS_TRACKED` | Fast check: is this object currently in a GC list? |
+| 161-180 | `_Py_AS_GC` | Convert `PyObject *` ↔ `PyGC_Head *` |
+
+## Reading
+
+### `PyGC_Head`
+
+```c
+// CPython: Include/internal/pycore_gc.h:12 PyGC_Head
+typedef struct {
+    uintptr_t _gc_next;  /* next object in the GC doubly-linked list */
+    uintptr_t _gc_prev;  /* prev object + bit flags in low 2 bits */
+} PyGC_Head;
+```
+
+The GC list is embedded directly in the object's allocation, one `PyGC_Head` before `ob_refcnt`. This avoids a separate allocation for list membership.
+
+### Bit flags in `_gc_prev`
+
+```c
+// CPython: Include/internal/pycore_gc.h:58 _PyGC_BITS
+#define _PyGC_BITS_FINALIZED  (1)   /* tp_finalize already called */
+#define _PyGC_BITS_UNREACHABLE (2)  /* temporary: in unreachable list during collection */
+/* Low 2 bits are flags; high bits are the actual prev pointer (aligned) */
+#define _PyGCHead_PREV(g) ((PyGC_Head *)((g)->_gc_prev & ~3))
+```
+
+Because `PyGC_Head` is aligned to at least 4 bytes, the two low bits of `_gc_prev` are always zero and can be used as flags.
+
+### Generation structure
+
+```c
+// CPython: Include/internal/pycore_gc.h:110 _PyGC_generation
+struct gc_generation {
+    PyGC_Head head;      /* sentinel node for the doubly-linked list */
+    int threshold;       /* collection trigger: collect when count >= threshold */
+    int count;           /* number of objects or collections since last collection */
+};
+
+/* Three generations, indexed 0 (young) to 2 (old) */
+struct _gc_runtime_state {
+    struct gc_generation generations[NUM_GENERATIONS];
+    ...
+};
+```
+
+### `_Py_AS_GC`
+
+```c
+// CPython: Include/internal/pycore_gc.h:165 _Py_AS_GC
+#define _Py_AS_GC(o)  ((PyGC_Head *)(o) - 1)
+#define _Py_FROM_GC(g) ((PyObject *)((PyGC_Head *)(g) + 1))
+```
+
+`PyObject *` to `PyGC_Head *` is just pointer arithmetic: the GC header sits immediately before the object.
+
+### Tracking check
+
+```c
+// CPython: Include/internal/pycore_gc.h:145 _PyObject_GC_IS_TRACKED
+#define _PyObject_GC_IS_TRACKED(o) \
+    (_Py_AS_GC(o)->_gc_next != 0)
+```
+
+An object is tracked (in a GC generation list) when `_gc_next != 0`. Untracked objects have `_gc_next == 0` — the GC ignores them.
+
+## gopy notes
+
+In gopy the GC is Go's own concurrent mark-and-sweep GC; cyclic garbage is handled automatically. `PyGC_Head` has no direct equivalent. `_PyObject_GC_IS_TRACKED` maps to a boolean on `objects.Object` set when the object contains mutable references. Generation counts and thresholds are exposed via `gc.get_threshold()` / `gc.set_threshold()` using stored constants that match CPython defaults (700/10/10).

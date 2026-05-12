@@ -1,0 +1,103 @@
+---
+title: Modules/_multiprocessing/
+description: "_multiprocessing: C support for multiprocessing — SemLock (POSIX/Win32 semaphores), Connection (socket/pipe IPC), win32 process handles."
+cpython_path: Modules/_multiprocessing/semaphore.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_multiprocessing/semaphore.c" />
+
+`_multiprocessing` provides OS primitives that `multiprocessing` needs but that Python's threading module does not expose. The main components are `SemLock` (semaphore-based mutex/event) and `Connection` (socket or pipe IPC).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `SemLock` type | POSIX named/unnamed semaphore or Win32 `CreateSemaphore` |
+| 101-300 | `SemLock_acquire` | Block until acquired, with optional timeout |
+| 301-500 | `SemLock_release` | Release the semaphore |
+| 501-700 | `SemLock__rebuild` | Re-open a named semaphore by handle in a new process |
+| 701-900 | Recursive/non-recursive lock | Supports `RLock` (recursion count) vs plain `Lock` |
+| 901-1200 | Module init | `multiprocessing` top-level helpers |
+
+## Reading
+
+### `SemLock` creation
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:65 semlock_new
+static PyObject *
+semlock_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    SEM_HANDLE handle;
+#ifdef POSIX_SEMAPHORES_NOT_ENABLED
+    /* Fall back to POSIX named semaphores */
+    char name[SEM_NAME_LEN];
+    PyOS_snprintf(name, SEM_NAME_LEN, "/mp%d-%zd", getpid(), ...);
+    handle = sem_open(name, O_CREAT | O_EXCL, 0600, value);
+    sem_unlink(name);  /* immediately unlink so it auto-deletes */
+#else
+    /* POSIX unnamed semaphores (faster, no file system entry) */
+    sem_t *sem = (sem_t *)PyMem_Malloc(sizeof(sem_t));
+    sem_init(sem, 0, value);
+    handle = sem;
+#endif
+    ...
+}
+```
+
+### `acquire` with timeout
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:185 semlock_acquire
+static PyObject *
+semlock_acquire(SemLockObject *self, PyObject *args, PyObject *kwds)
+{
+    int block = 1;
+    double timeout = 0.0;
+    /* block=False: sem_trywait */
+    if (!block) {
+        res = sem_trywait(self->handle);
+        return res == 0 ? Py_True : Py_False;
+    }
+    /* timeout: sem_timedwait with absolute deadline */
+    if (timeout > 0.0) {
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec  += (time_t)timeout;
+        deadline.tv_nsec += (long)((timeout - (time_t)timeout) * 1e9);
+        Py_BEGIN_ALLOW_THREADS
+        res = sem_timedwait(self->handle, &deadline);
+        Py_END_ALLOW_THREADS
+    } else {
+        Py_BEGIN_ALLOW_THREADS
+        res = sem_wait(self->handle);
+        Py_END_ALLOW_THREADS
+    }
+    ...
+}
+```
+
+### Cross-process handle sharing
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:580 semlock__rebuild
+static PyObject *
+semlock__rebuild(PyTypeObject *type, PyObject *args)
+{
+    /* Re-attach to a semaphore by its name or handle, in a child process */
+    /* Used by ForkingPickler to serialize Lock/Semaphore across fork/spawn */
+    SEM_HANDLE handle = (SEM_HANDLE)h;
+    ...
+}
+```
+
+When a `multiprocessing.Lock` is passed to a child process via `spawn` (not `fork`), it is serialized by handle and re-opened in the child.
+
+## gopy notes
+
+`multiprocessing` is not in gopy's current scope. The annotation covers the C layer for reference. In Go, inter-process communication would use `os/exec` + channels, shared memory via `mmap`, or Unix domain sockets. The `SemLock` primitives map to `sync.Mutex`/`sync.Cond` for in-process use, or OS-specific semaphore wrappers for cross-process use.

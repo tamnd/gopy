@@ -1,0 +1,94 @@
+---
+title: Python/dynload_shlib.c
+description: "Python/dynload_shlib.c: dynamic extension module loading via dlopen — _PyImport_FindSharedFuncptr, module init function lookup, RTLD flags."
+cpython_path: Python/dynload_shlib.c
+cpython_version: "3.14"
+lines: 260
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/dynload_shlib.c" />
+
+`dynload_shlib.c` implements dynamic loading of C extension modules (`.so`/`.dylib`) on POSIX systems using `dlopen`. Windows has a separate `dynload_win.c`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `_Py_INIT_FUNC_PREFIX` | `"PyInit_"` — prefix for the module init function |
+| 51-130 | `_PyImport_FindSharedFuncptr` | `dlopen` the `.so`, locate `PyInit_<name>` |
+| 131-200 | `_PyImport_LoadDynamicModuleWithSpec` | Call init function, wrap result in `ModuleSpec` |
+| 201-260 | RTLD flags | `RTLD_NOW | RTLD_GLOBAL` selection logic |
+
+## Reading
+
+### `_PyImport_FindSharedFuncptr`
+
+```c
+// CPython: Python/dynload_shlib.c:75 _PyImport_FindSharedFuncptr
+dl_funcptr
+_PyImport_FindSharedFuncptr(const char *prefix, const char *shortname,
+                             const char *pathname, FILE *fp)
+{
+    void *handle;
+    char funcname[258];
+    /* Construct: "PyInit_" + shortname */
+    PyOS_snprintf(funcname, sizeof(funcname), "%s%s", prefix, shortname);
+    /* dlopen the shared library */
+    handle = dlopen(pathname, dlopenflags);
+    if (handle == NULL) {
+        const char *error = dlerror();
+        PyErr_Format(PyExc_ImportError,
+                     "dlopen(%s): %s", pathname, error);
+        return NULL;
+    }
+    /* Locate the init function */
+    dl_funcptr p = (dl_funcptr)dlsym(handle, funcname);
+    return p;
+}
+```
+
+### Init function calling convention
+
+```c
+// CPython: Python/dynload_shlib.c:165 _PyImport_LoadDynamicModuleWithSpec
+PyObject *
+_PyImport_LoadDynamicModuleWithSpec(PyObject *spec, FILE *fp)
+{
+    /* Build pathname from spec.origin */
+    const char *pathname = PyUnicode_AsUTF8(spec_origin);
+    /* Find the init function */
+    PyModInitFunction p0 = (PyModInitFunction)
+        _PyImport_FindSharedFuncptr(INIT_FUNCNAME_PREFIX, name_utf8, pathname, fp);
+    if (p0 == NULL) {
+        if (!PyErr_Occurred()) {
+            PyErr_Format(PyExc_ImportError,
+                         "dynamic module does not define module export function"
+                         " (%s)", funcname);
+        }
+        return NULL;
+    }
+    /* Call PyInit_<name>() — returns PyModuleDef * or PyObject * */
+    PyObject *mod = p0();
+    return mod;
+}
+```
+
+The init function must be named exactly `PyInit_<modulename>`. It returns either a `PyModuleDef *` (multi-phase init, 3.5+) or a fully-initialized `PyObject *` (single-phase).
+
+### RTLD flags
+
+```c
+// CPython: Python/dynload_shlib.c:48 dlopenflags
+/* Default: RTLD_NOW (resolve symbols immediately) | RTLD_GLOBAL (symbols visible to later loads) */
+/* sys.setdlopenflags() lets the user override, e.g. RTLD_LOCAL for isolation */
+int dlopenflags = sys_flags.dl_open_flags;
+```
+
+`RTLD_GLOBAL` is needed when extension A exports symbols used by extension B. `RTLD_LOCAL` is safer but may cause symbol conflicts.
+
+## gopy notes
+
+In gopy there are no `dlopen` extension modules; all modules are compiled into the Go binary. `dynload_shlib.c` documents the CPython mechanism for context. The `PyInit_` convention is relevant to gopy's FFI layer, where C extension modules can be wrapped by implementing `PyInit_<name>` in a Go-generated shim that calls back into Go.

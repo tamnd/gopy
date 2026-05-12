@@ -321,6 +321,7 @@ const sidebars = {
         'annotations/python/python_frozen_detail',
         'annotations/python/python_ceval7_detail',
         'annotations/python/python_modsupport_detail',
+        'annotations/python/python_dynload_detail',
       ],
     },
     {
@@ -506,6 +507,9 @@ const sidebars = {
         'annotations/objects/objects_floatobject2_detail',
         'annotations/objects/objects_bytearrayobject_detail',
         'annotations/objects/objects_complexobject2_detail',
+        'annotations/objects/objects_longobject5_detail',
+        'annotations/objects/objects_floatobject3_detail',
+        'annotations/objects/objects_fileobject_detail',
       ],
     },
     {
@@ -734,6 +738,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_opcode_h_detail',
         'annotations/include/include_internal_pycore_uops_h_detail',
         'annotations/include/include_cpython_bytearray_h_detail',
+        'annotations/include/include_internal_pycore_gc_h_detail',
       ],
     },
     {
@@ -955,6 +960,9 @@ const sidebars = {
         'annotations/modules/modules_zlib_detail',
         'annotations/modules/modules_itertools_detail',
         'annotations/modules/modules_socket_detail2',
+        'annotations/modules/modules_pickle_detail',
+        'annotations/modules/modules_ssl_detail',
+        'annotations/modules/modules_multiprocessing_detail',
       ],
     },
     {
@@ -1464,6 +1472,7 @@ const sidebars = {
         'annotations/lib/lib_builtins_detail',
         'annotations/lib/lib_typing_extensions_detail2',
         'annotations/lib/lib_types_detail',
+        'annotations/lib/lib_html_parser_detail',
       ],
     },
   ],
