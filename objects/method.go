@@ -293,6 +293,7 @@ func init() {
 			return descriptorSetWrappedAttribute(o, "__annotate__", v, "classmethod")
 		}))
 	bindClassGetitem(ClassMethodType)
+	addDescriptorSlotWrappers(ClassMethodType)
 }
 
 // classMethodTraverse visits the wrapped callable and instance dict.
@@ -585,6 +586,7 @@ func init() {
 			return descriptorSetWrappedAttribute(o, "__annotate__", v, "staticmethod")
 		}))
 	bindClassGetitem(StaticMethodType)
+	addDescriptorSlotWrappers(StaticMethodType)
 }
 
 // staticMethodTraverse visits the wrapped callable and instance dict.

@@ -37,6 +37,7 @@ func init() {
 	MethodDescrType.Vectorcall = methodDescrVectorcall
 	// Identity hash so method descriptors are hashable.
 	MethodDescrType.Hash = identityHash
+	addDescriptorSlotWrappers(MethodDescrType)
 }
 
 // NewMethodDescr builds a method descriptor that exposes name on

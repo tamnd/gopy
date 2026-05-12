@@ -87,6 +87,7 @@ func init() {
 	// FunctionType.Call is wired by the vm package on init since the
 	// call needs to push a frame and drive Eval; doing that from
 	// objects would be a circular import.
+	addDescriptorSlotWrappers(FunctionType)
 }
 
 // functionTraverse mirrors func_traverse. Visit order matches CPython

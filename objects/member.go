@@ -31,6 +31,7 @@ func init() {
 	MemberDescrType.Str = memberDescrRepr
 	MemberDescrType.DescrGet = memberDescrGet
 	MemberDescrType.DescrSet = memberDescrSet
+	addDescriptorSlotWrappers(MemberDescrType)
 }
 
 // NewMemberDescr builds a slot descriptor for name backed by the slot
