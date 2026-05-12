@@ -1,0 +1,109 @@
+---
+title: Lib/rlcompleter.py
+description: "Lib/rlcompleter.py: rlcompleter.Completer — tab completion for the Python REPL; global/attribute completion, readline integration."
+cpython_path: Lib/rlcompleter.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/rlcompleter.py" />
+
+`rlcompleter` provides tab completion for the interactive Python REPL via `readline`. It completes variable names, attribute names, and keyword names.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `Completer.__init__` | Set up namespace dict (default: `builtins` + `__main__`) |
+| 41-100 | `Completer.complete` | Dispatch: attribute or global completion |
+| 101-160 | `Completer.global_matches` | Complete names from the global namespace |
+| 161-200 | `Completer.attr_matches` | Complete `expr.attr` by calling `dir(expr)` |
+
+## Reading
+
+### `Completer.complete`
+
+```python
+# CPython: Lib/rlcompleter.py:82 Completer.complete
+def complete(self, text, state):
+    """Return the state-th completion for text."""
+    if self.use_main_ns:
+        self.namespace = __main__.__dict__
+    if state == 0:
+        # Build new completion list on state==0
+        if '.' in text:
+            self.matches = self.attr_matches(text)
+        else:
+            self.matches = self.global_matches(text)
+    try:
+        return self.matches[state]
+    except IndexError:
+        return None
+```
+
+### `global_matches`
+
+```python
+# CPython: Lib/rlcompleter.py:108 Completer.global_matches
+def global_matches(self, text):
+    """Return completions for names in namespace + builtins + keywords."""
+    import keyword
+    matches = []
+    seen = set()
+    n = len(text)
+    for word in self.namespace:
+        if word[:n] == text and word not in seen:
+            seen.add(word)
+            matches.append(word)
+    for word in dir(builtins):
+        if word[:n] == text and word not in seen:
+            seen.add(word)
+            matches.append(word + ('(' if callable(getattr(builtins, word)) else ''))
+    for word in keyword.kwlist:
+        if word[:n] == text and word not in seen:
+            seen.add(word)
+            matches.append(word)
+    return matches
+```
+
+### `attr_matches`
+
+```python
+# CPython: Lib/rlcompleter.py:145 Completer.attr_matches
+def attr_matches(self, text):
+    """Complete text of form 'expression.attribute'."""
+    m = re.match(r'(\w+(\.\w+)*)\.(\w*)', text)
+    if not m: return []
+    expr, attr = m.group(1), m.group(3)
+    try:
+        thisobject = eval(expr, self.namespace)
+    except Exception:
+        return []
+    words = set(dir(thisobject))
+    # Filter by prefix
+    n = len(attr)
+    return ['%s.%s' % (expr, w) for w in sorted(words)
+            if w[:n] == attr and not w.startswith('__')]
+```
+
+`attr_matches` uses `eval` to get the object, then `dir()` to list attributes. It filters out `__dunder__` names by default.
+
+### Auto-setup
+
+```python
+# CPython: Lib/rlcompleter.py:198
+# When imported, set up readline if available:
+try:
+    import readline
+    readline.set_completer(Completer().complete)
+    readline.parse_and_bind('tab: complete')
+except ImportError:
+    pass
+```
+
+## gopy notes
+
+`rlcompleter` is pure Python. It uses `readline.set_completer` and `readline.parse_and_bind` (gopy `module/readline`). `global_matches` uses `dir(builtins)` which calls `objects.Dir` on gopy's `builtins` module. `attr_matches` uses `eval` backed by `vm.EvalString`.

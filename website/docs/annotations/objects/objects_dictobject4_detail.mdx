@@ -1,0 +1,113 @@
+---
+title: Objects/dictobject.c (part 4)
+description: "Objects/dictobject.c part 4: dict comprehension, dict.fromkeys, dict copy/clear, compact dict (3.6+ ordering guarantee), dict resize policy."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers dict construction helpers and the compact/ordered dict internals. See `objects_dictobject_detail` through `objects_dictobject3_detail` for hash table probing, merge, and views.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dict_fromkeys_impl` | `dict.fromkeys(iterable, value)` |
+| 81-200 | `dict_copy_impl` | Shallow copy |
+| 201-300 | `dict_clear_impl` | Remove all key-value pairs, keep capacity |
+| 301-500 | Compact dict layout | `dk_indices` (hash index array) + `dk_entries` (insertion-order array) |
+| 501-650 | Resize policy | Double when 2/3 full; halve on shrink |
+| 651-800 | `_PyDict_Pop` | Remove and return a key-value pair |
+| 801-1000 | `dict_reversed` | `reversed(dict)` — iterate in reverse insertion order |
+
+## Reading
+
+### `dict.fromkeys`
+
+```c
+// CPython: Objects/dictobject.c:3580 dict_fromkeys_impl
+static PyObject *
+dict_fromkeys_impl(PyTypeObject *type, PyObject *iterable, PyObject *value)
+{
+    PyObject *d = type->tp_new(type, empty_tuple, NULL);
+    PyObject *it = PyObject_GetIter(iterable);
+    while ((key = PyIter_Next(it)) != NULL) {
+        PyObject *v = value ? Py_NewRef(value) : Py_NewRef(Py_None);
+        if (PyDict_SetItem(d, key, v) < 0) {
+            Py_DECREF(v); Py_DECREF(key); goto done;
+        }
+        Py_DECREF(v); Py_DECREF(key);
+    }
+    ...
+}
+```
+
+### Compact dict layout (3.6+)
+
+```c
+// CPython: Objects/dictobject.c:380 compact layout comment
+/* Since Python 3.6, dict preserves insertion order.
+   Implementation:
+   - dk_indices: sparse array of int8/int16/int32 indices (-1 = empty, -2 = dummy)
+   - dk_entries: dense array of (hash, key, value) in insertion order
+   When a key is deleted, its dk_entries slot is zeroed but the dense array
+   is not compacted until resize. */
+```
+
+The sparse `dk_indices` array is sized to `2^k` for fast modulo-by-AND. The dense `dk_entries` array only grows.
+
+### Resize policy
+
+```c
+// CPython: Objects/dictobject.c:540 dictresize
+static int
+dictresize(PyDictObject *mp, uint8_t log_newsize, int unicode)
+{
+    /* Grow: double (load > 2/3)
+       Shrink: halve (used < 1/5 after many deletes)
+       Minimum size: 8 */
+    Py_ssize_t newsize = 1 << log_newsize;
+    PyDictKeysObject *oldkeys = mp->ma_keys;
+    PyDictKeysObject *newkeys = new_keys_object(log_newsize, unicode);
+    ...
+    /* Rehash all non-dummy entries into newkeys */
+}
+```
+
+### `dict_reversed`
+
+```c
+// CPython: Objects/dictobject.c:880 dict_reversed
+/* Returns a reverse iterator over keys in reverse insertion order.
+   Uses dk_nentries as the starting index and decrements. */
+static PyObject *
+dict_reversed_impl(PyDictObject *mp, PyObject *args)
+{
+    return dictiter_new(mp, &PyDictRevIterKey_Type);
+}
+```
+
+`reversed({1: 'a', 2: 'b'})` returns keys in `[2, 1]` order.
+
+### `dict.copy`
+
+```c
+// CPython: Objects/dictobject.c:3620 dict_copy_impl
+static PyObject *
+dict_copy_impl(PyDictObject *mp)
+{
+    /* Shallow copy: new dict shares key objects and value objects. */
+    return PyDict_Copy((PyObject *)mp);
+}
+```
+
+`PyDict_Copy` calls `PyDict_Merge(new, mp, 1)`. For split-table dicts (instance `__dict__`), it unsplits first.
+
+## gopy notes
+
+`dict.fromkeys` is `objects.DictFromKeys` in `objects/dict_mutate.go`. The compact dict layout is preserved in gopy: `DictKeys.indices` is a `[]int32` and `DictKeys.entries` is `[]DictEntry` in insertion order. `dict_reversed` uses `objects.DictRevIterKey` backed by an index that decrements from `nEntries-1`.

@@ -1,0 +1,104 @@
+---
+title: Modules/_winapi.c
+description: "_winapi.c: _winapi — low-level Windows API: CreateProcess, CreatePipe, WaitForSingleObject, HANDLE management."
+cpython_path: Modules/_winapi.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_winapi.c" />
+
+`_winapi` provides the low-level Windows API bindings used by `subprocess` on Windows. It is a Windows-only C extension.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `HANDLE` type | Python object wrapping a Windows `HANDLE` |
+| 81-200 | `CreateProcess` | Spawn a process with I/O redirection |
+| 201-350 | `CreatePipe` | Create an anonymous pipe: returns (read_handle, write_handle) |
+| 351-500 | `WaitForSingleObject` | Block until a handle is signaled or timeout |
+| 501-650 | `GetExitCodeProcess` | Return process exit code |
+| 651-800 | `CloseHandle` | Release a Windows HANDLE |
+| 801-1400 | Named pipe API | `CreateNamedPipe`, `ConnectNamedPipe`, `WaitNamedPipe` |
+
+## Reading
+
+### `CreateProcess`
+
+```c
+// CPython: Modules/_winapi.c:300 winapi_CreateProcess_impl
+static PyObject *
+winapi_CreateProcess_impl(PyObject *module, LPCWSTR application_name,
+                          LPWSTR command_line, ...)
+{
+    STARTUPINFOEXW si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.hStdInput  = stdin_handle;
+    si.StartupInfo.hStdOutput = stdout_handle;
+    si.StartupInfo.hStdError  = stderr_handle;
+    si.StartupInfo.dwFlags   |= STARTF_USESTDHANDLES;
+
+    Py_BEGIN_ALLOW_THREADS
+    BOOL ret = CreateProcessW(application_name, command_line, NULL, NULL,
+                              TRUE,  /* inherit handles */
+                              creation_flags,
+                              environment, current_directory,
+                              (LPSTARTUPINFOW)&si, &pi);
+    Py_END_ALLOW_THREADS
+    if (!ret)
+        return PyErr_SetFromWindowsErr(GetLastError());
+    return Py_BuildValue("NNkk",
+        HANDLE_TO_PYNUM(pi.hProcess),
+        HANDLE_TO_PYNUM(pi.hThread),
+        pi.dwProcessId,
+        pi.dwThreadId);
+}
+```
+
+### `CreatePipe`
+
+```c
+// CPython: Modules/_winapi.c:410 winapi_CreatePipe_impl
+static PyObject *
+winapi_CreatePipe_impl(PyObject *module, PyObject *pipe_attrs, DWORD size)
+{
+    HANDLE read_pipe, write_pipe;
+    if (!CreatePipe(&read_pipe, &write_pipe,
+                    (LPSECURITY_ATTRIBUTES)pipe_attrs, size))
+        return PyErr_SetFromWindowsErr(GetLastError());
+    return Py_BuildValue("NN",
+        HANDLE_TO_PYNUM(read_pipe),
+        HANDLE_TO_PYNUM(write_pipe));
+}
+```
+
+`subprocess.Popen` uses `CreatePipe` to set up `stdin`/`stdout`/`stderr` redirection.
+
+### `WaitForSingleObject`
+
+```c
+// CPython: Modules/_winapi.c:540 winapi_WaitForSingleObject_impl
+static PyObject *
+winapi_WaitForSingleObject_impl(PyObject *module, HANDLE handle, DWORD milliseconds)
+{
+    DWORD result;
+    Py_BEGIN_ALLOW_THREADS
+    result = WaitForSingleObject(handle, milliseconds);
+    Py_END_ALLOW_THREADS
+    if (result == WAIT_FAILED)
+        return PyErr_SetFromWindowsErr(GetLastError());
+    return PyLong_FromUnsignedLong(result);
+}
+```
+
+Returns `WAIT_OBJECT_0` (0) when the handle is signaled, `WAIT_TIMEOUT` on timeout.
+
+## gopy notes
+
+`_winapi` is Windows-only. gopy builds for Linux/macOS by default. On Windows, `_winapi` is in `module/_winapi/module_windows.go` using Go's `syscall` package for `CreateProcess`, `CreatePipe`, and `WaitForSingleObject`. `HANDLE` is an `uintptr` in Go.

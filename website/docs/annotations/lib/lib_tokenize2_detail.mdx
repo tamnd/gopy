@@ -1,0 +1,111 @@
+---
+title: Lib/tokenize.py (part 2)
+description: "Lib/tokenize.py part 2: detect_encoding, open(), BOM handling, cookie comment encoding detection, generate_tokens vs tokenize."
+cpython_path: Lib/tokenize.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/tokenize.py" />
+
+This annotation covers encoding detection. See `lib_tokenize_detail` for `tokenize`, `generate_tokens`, token types, and the FSM.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `detect_encoding` | Detect file encoding from BOM or `# -*- coding: -*-` comment |
+| 61-140 | `open` | Open a Python source file with the correct encoding |
+| 141-250 | `_get_normal_name` | Normalize encoding name (e.g. `UTF-8` → `utf-8`) |
+| 251-400 | `_detect_encoding` | Read first two lines; look for BOM or encoding cookie |
+| 401-550 | `cookie_re` | Regex for PEP 263 encoding declaration |
+| 551-700 | `TokenError` / `StopTokenizing` | Exception types used by the tokenizer |
+
+## Reading
+
+### `detect_encoding`
+
+```python
+# CPython: Lib/tokenize.py:294 detect_encoding
+def detect_encoding(readline):
+    """Return (encoding, lines_consumed) for a Python source file.
+    Uses BOM detection first, then PEP 263 coding cookie.
+    readline: callable returning the next line as bytes.
+    """
+    bom_found = False
+    encoding = None
+    default = 'utf-8'
+
+    def find_cookie(line):
+        line_string = line.decode('latin-1')
+        match = cookie_re.match(line_string)
+        if not match: return None
+        return _get_normal_name(match.group(1))
+
+    first = readline()
+    if first.startswith(BOM_UTF8):
+        bom_found = True
+        first = first[3:]
+        default = 'utf-8-sig'
+    if first:
+        encoding = find_cookie(first)
+        if encoding:
+            return encoding, [first]
+
+    second = readline()
+    if second:
+        encoding = find_cookie(second)
+        if encoding:
+            return encoding, [first, second]
+
+    return default, [first, second]
+```
+
+### `cookie_re`
+
+```python
+# CPython: Lib/tokenize.py:62 cookie_re
+# PEP 263 encoding cookie:
+# "coding[=:]\s*([-\w.]+)" must appear in the first two lines
+# Examples:
+#   # -*- coding: utf-8 -*-
+#   # vim: set fileencoding=utf-8 :
+#   # coding: latin-1
+cookie_re = re.compile(
+    r'^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)', re.ASCII | re.MULTILINE)
+```
+
+### BOM detection
+
+```python
+# CPython: Lib/tokenize.py:310 BOM handling
+BOM_UTF8 = b'\xef\xbb\xbf'
+# If present at file start: encoding is UTF-8.
+# Presence without a coding cookie is fine; the BOM itself declares UTF-8.
+# BOM + coding cookie must agree (both UTF-8).
+```
+
+### `tokenize.open`
+
+```python
+# CPython: Lib/tokenize.py:400 open
+def open(filename):
+    """Open a file in read mode using the encoding detected by detect_encoding."""
+    buffer = builtins.open(filename, 'rb')
+    try:
+        encoding, lines = detect_encoding(buffer.readline)
+        buffer.seek(0)
+        text = io.TextIOWrapper(buffer, encoding, line_buffering=True)
+        text.mode = 'r'
+        return text
+    except:
+        buffer.close()
+        raise
+```
+
+## gopy notes
+
+`tokenize.open` uses `builtins.open` (gopy's `vm.BuiltinOpen`), `io.TextIOWrapper` (gopy `objects/textiowrapper.go`), and `detect_encoding` which is pure Python string manipulation. The BOM bytes constant is a Python `bytes` literal.

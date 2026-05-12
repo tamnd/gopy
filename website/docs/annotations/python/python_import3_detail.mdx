@@ -1,0 +1,95 @@
+---
+title: Python/import.c (part 3)
+description: "Python/import.c part 3: _PyImport_FixupExtensionObject, PyImport_ExecCodeModuleObject, reload, _PyImport_IsInitialized."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+This annotation covers C extension caching, code module execution, and `importlib.reload`. See `python_import_detail` and `python_import2_detail` for the import lock, `sys.modules`, and `_find_and_load`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyImport_FixupExtensionObject` | Cache a loaded C extension in `_PyImport_Extensions` |
+| 81-200 | `PyImport_ExecCodeModuleObject` | Execute a code object in a module dict |
+| 201-350 | `PyImport_ReloadModule` | `importlib.reload(module)` |
+| 351-500 | `_PyImport_IsInitialized` | Check that `sys.modules` exists (interpreter is ready) |
+| 501-700 | `_PyImport_GetModuleAttr` | `module.attribute` with import-safe error handling |
+
+## Reading
+
+### `_PyImport_FixupExtensionObject`
+
+```c
+// CPython: Python/import.c:88 _PyImport_FixupExtensionObject
+int
+_PyImport_FixupExtensionObject(PyObject *mod, PyObject *name,
+                                PyObject *filename, PyObject *modules)
+{
+    /* After a C extension is loaded:
+       1. Store mod in sys.modules[name]
+       2. Cache in _PyImport_Extensions[filename + name] for sub-interpreter reuse */
+    if (PyObject_SetItem(modules, name, mod) < 0) return -1;
+    /* If the module def has a per-interpreter state, don't cache it */
+    if (def->m_base.m_init != NULL) return 0;  /* multi-phase: skip cache */
+    PyObject *key = PyTuple_Pack(2, filename, name);
+    PyDict_SetItem(_PyImport_Extensions, key, mod);
+    ...
+}
+```
+
+C extension caching avoids re-calling `PyInit_*` for the same extension across `importlib.import_module` calls.
+
+### `PyImport_ExecCodeModuleObject`
+
+```c
+// CPython: Python/import.c:160 PyImport_ExecCodeModuleObject
+PyObject *
+PyImport_ExecCodeModuleObject(PyObject *name, PyObject *co,
+                               PyObject *pathname, PyObject *cpathname)
+{
+    /* Create or find module in sys.modules, then exec the code object in it */
+    PyObject *mod = import_get_module(tstate, name);
+    if (mod == NULL)
+        mod = PyImport_AddModuleObject(name);
+    PyObject *d = PyModule_GetDict(mod);
+    PyDict_SetItemString(d, "__file__", pathname);
+    /* Execute code object (the module body) */
+    PyObject *v = PyEval_EvalCode(co, d, d);
+    if (v == NULL) {
+        /* On error: remove from sys.modules */
+        PyDict_DelItem(tstate->interp->modules, name);
+        return NULL;
+    }
+    Py_DECREF(v);
+    return mod;
+}
+```
+
+### `PyImport_ReloadModule`
+
+```c
+// CPython: Python/import.c:260 PyImport_ReloadModule
+PyObject *
+PyImport_ReloadModule(PyObject *m)
+{
+    /* importlib.reload(m): re-execute the module's code in its existing dict.
+       sys.modules[name] is preserved so references remain valid. */
+    PyObject *reloaded = PyObject_CallMethodObjArgs(
+        interp->importlib, &_Py_ID(reload), m, NULL);
+    return reloaded;
+}
+```
+
+`reload` calls `importlib.reload` which re-runs `_find_and_load` but reuses the existing module object. New code replaces old bindings in `module.__dict__`.
+
+## gopy notes
+
+`_PyImport_FixupExtensionObject` is `vm.FixupExtension` in `vm/eval_import.go`. `PyImport_ExecCodeModuleObject` is `vm.ExecCodeModule`. `PyImport_ReloadModule` calls `vm.ImportlibReload`. The extension cache is `vm.extensionCache` (a `sync.Map`).

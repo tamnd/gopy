@@ -1,0 +1,88 @@
+---
+title: Include/internal/pycore_context.h
+description: "Include/internal/pycore_context.h: PyContext, PyContextVar, PyContextToken — PEP 567 contextvars internals."
+cpython_path: Include/internal/pycore_context.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_context.h" />
+
+`pycore_context.h` declares the internal layout of `contextvars.Context`, `ContextVar`, and `Token` objects. The backing store for `Context` is a `_PyHamt`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `PyContext` | Context object: `ctx_data` (`_PyHamt *`) + `ctx_entered` counter |
+| 41-70 | `PyContextVar` | `contextvars.ContextVar`: name, default value |
+| 71-100 | `PyContextToken` | Returned by `ContextVar.set()`; holds old value for rollback |
+| 101-120 | `_PyContext_Enter` / `_PyContext_Exit` | Called by `Context.run()` |
+
+## Reading
+
+### `PyContext`
+
+```c
+// CPython: Include/internal/pycore_context.h:18 PyContext
+typedef struct {
+    PyObject_HEAD
+    PyHamtObject *ctx_data;  /* immutable HAMT mapping ContextVar → value */
+    PyObject     *ctx_weakreflist;
+    uint64_t      ctx_entered;  /* how many Context.run() calls are active */
+} PyContext;
+```
+
+Each call to `ContextVar.set(val)` returns a `PyContextToken` and creates a new `PyContext` with the updated HAMT. The previous context is restored when the token is used with `reset()`.
+
+### `PyContextVar`
+
+```c
+// CPython: Include/internal/pycore_context.h:45 PyContextVar
+typedef struct {
+    PyObject_HEAD
+    PyObject *var_name;     /* str: name for repr */
+    PyObject *var_default;  /* default value or NULL */
+    uint64_t  var_hash;     /* cached hash of the var's id for HAMT lookup */
+} PyContextVar;
+```
+
+`ContextVar` uses identity (pointer address) as the key in the HAMT, not the name. `var_hash` caches `hash(id(self))`.
+
+### `PyContextToken`
+
+```c
+// CPython: Include/internal/pycore_context.h:70 PyContextToken
+typedef struct {
+    PyObject_HEAD
+    PyContext    *tok_ctx;      /* the context this token was created in */
+    PyContextVar *tok_var;      /* the variable that was modified */
+    PyObject     *tok_oldval;   /* value before the set (or _MISSING) */
+    int           tok_used;     /* True after reset() is called */
+} PyContextToken;
+```
+
+`Token.old_value` is `MISSING` if the variable had no value before `set()`.
+
+### `_PyContext_Enter` / `_PyContext_Exit`
+
+```c
+// CPython: Include/internal/pycore_context.h:102 _PyContext_Enter
+/* Called at the start of Context.run():
+   1. Save the current context on the thread state
+   2. Install ctx as the current context */
+int _PyContext_Enter(PyThreadState *ts, PyContext *ctx);
+
+/* Called at the end of Context.run():
+   Restore the previous context on the thread state. */
+int _PyContext_Exit(PyThreadState *ts, PyContext *ctx);
+```
+
+`asyncio` calls `_PyContext_Enter`/`_PyContext_Exit` around each `Task` execution to isolate context variable changes between tasks.
+
+## gopy notes
+
+gopy's context vars are in `module/contextvars/module.go` and `objects/context.go`. `PyContext.ctx_data` is `*objects.PyHamtObject`. `_PyContext_Enter` and `_PyContext_Exit` manipulate `tstate.CurrentContext` in `vm/tstate.go`. `asyncio` calls these via `contextvars.copy_context().run()`.

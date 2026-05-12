@@ -340,6 +340,8 @@ const sidebars = {
         'annotations/python/python_marshal2_detail',
         'annotations/python/python_errors3_detail',
         'annotations/python/python_clinic_detail',
+        'annotations/python/python_ceval10_detail',
+        'annotations/python/python_import3_detail',
       ],
     },
     {
@@ -546,6 +548,8 @@ const sidebars = {
         'annotations/objects/objects_listobject4_detail',
         'annotations/objects/objects_complexobject3_detail',
         'annotations/objects/objects_frameobject2_detail',
+        'annotations/objects/objects_descrobject4_detail',
+        'annotations/objects/objects_dictobject4_detail',
       ],
     },
     {
@@ -794,6 +798,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_genobject_h_detail',
         'annotations/include/include_internal_pycore_modsupport_h_detail',
         'annotations/include/include_internal_pycore_hamt_h_detail',
+        'annotations/include/include_internal_pycore_context_h_detail',
       ],
     },
     {
@@ -1043,6 +1048,8 @@ const sidebars = {
         'annotations/modules/modules_spwd_detail',
         'annotations/modules/modules_fcntl2_detail',
         'annotations/modules/modules_nis_detail',
+        'annotations/modules/modules_ossaudiodev_detail',
+        'annotations/modules/modules_winapi_detail',
       ],
     },
     {
@@ -1579,6 +1586,9 @@ const sidebars = {
         'annotations/lib/lib_wsgiref_detail',
         'annotations/lib/lib_curses_detail',
         'annotations/lib/lib_getpass_detail',
+        'annotations/lib/lib_tokenize2_detail',
+        'annotations/lib/lib_io2_detail',
+        'annotations/lib/lib_readline_detail',
       ],
     },
   ],

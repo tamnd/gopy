@@ -1,0 +1,107 @@
+---
+title: Python/ceval.c (part 10)
+description: "Python/ceval.c part 10: CALL specializations (CALL_PY_EXACT_ARGS, CALL_BUILTIN_O, CALL_BUILTIN_FAST), COPY_FREE_VARS, MAKE_FUNCTION."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers function call specializations and the function/closure creation instructions. See `python_ceval9_detail` for subscript and binary operator specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `CALL_PY_EXACT_ARGS` | Call a Python function with exactly the right number of args |
+| 101-200 | `CALL_PY_WITH_DEFAULTS` | Call with fewer args, filling defaults from `co_defaults` |
+| 201-300 | `CALL_BUILTIN_O` | Call a C function with one positional argument |
+| 301-400 | `CALL_BUILTIN_FAST` | Call a C METH_FASTCALL function without a tuple |
+| 401-500 | `CALL_BUILTIN_FAST_WITH_KEYWORDS` | METH_FASTCALL with keywords |
+| 501-600 | `COPY_FREE_VARS` | Copy free variable cells from enclosing scope into the frame |
+| 601-700 | `MAKE_FUNCTION` | Create a function object with defaults and annotations |
+| 701-900 | `RESUME` / `RETURN_VALUE` | Frame entry guard; return value to caller |
+
+## Reading
+
+### `CALL_PY_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:4280 CALL_PY_EXACT_ARGS
+inst(CALL_PY_EXACT_ARGS, (unused/1, unused/2, callable, self_or_null, args[oparg] -- res)) {
+    DEOPT_IF(!PyFunction_Check(callable), CALL);
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    DEOPT_IF(func->func_defaults != NULL, CALL);       /* has defaults */
+    DEOPT_IF(code->co_argcount != oparg + (self_or_null != NULL), CALL);
+    /* Push a new frame directly without going through _PyEval_EvalFrameDefault */
+    _PyInterpreterFrame *new_frame = _PyFrame_PushUnchecked(tstate, func, oparg);
+    ...
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+`DISPATCH_INLINED` switches to the new frame without a recursive C call. This is the "inline call" optimization in 3.11+.
+
+### `CALL_BUILTIN_O`
+
+```c
+// CPython: Python/ceval.c:4400 CALL_BUILTIN_O
+inst(CALL_BUILTIN_O, (unused/1, unused/2, callable, self_or_null, args[oparg] -- res)) {
+    DEOPT_IF(oparg != 1, CALL);
+    DEOPT_IF(!PyCFunction_CheckExact(callable), CALL);
+    PyCFunctionObject *cfunc = (PyCFunctionObject *)callable;
+    DEOPT_IF(PyCFunction_GET_FLAGS(cfunc) != METH_O, CALL);
+    /* Call directly: no tuple creation, no kwargs */
+    res = cfunc->vectorcallfunc(callable, &args[0], 1, NULL);
+    ...
+}
+```
+
+`len([1,2,3])` specializes to `CALL_BUILTIN_O` since `len` is `METH_O` (exactly one argument).
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:4700 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (-- )) {
+    /* oparg: number of free variables to copy.
+       Free variables come from the enclosing frame's cell array.
+       They are copied into the new frame's localsplus[co_nlocals:] slots. */
+    PyCodeObject *co = frame->f_code;
+    _PyInterpreterFrame *outer = frame->previous;
+    for (int i = 0; i < oparg; ++i) {
+        PyObject *o = PyTuple_GET_ITEM(frame->f_func->func_closure, i);
+        frame->localsplus[co->co_nlocals + i] = Py_NewRef(o);
+    }
+}
+```
+
+### `MAKE_FUNCTION`
+
+```c
+// CPython: Python/ceval.c:4780 MAKE_FUNCTION
+inst(MAKE_FUNCTION, (codeobj -- func)) {
+    /* Create a PyFunctionObject wrapping codeobj.
+       Flags (oparg bits) indicate which of:
+         0x01: default arguments tuple
+         0x02: keyword-only default dict
+         0x04: annotations dict
+         0x08: closure (tuple of cells)
+       are on the stack below codeobj. */
+    PyFunctionObject *f = _PyFunction_FromCodeObject(codeobj, globals);
+    if (oparg & 0x08) f->func_closure = POP();
+    if (oparg & 0x04) f->func_annotations = POP();
+    if (oparg & 0x02) f->func_kwdefaults = POP();
+    if (oparg & 0x01) f->func_defaults = POP();
+    func = (PyObject *)f;
+}
+```
+
+## gopy notes
+
+`CALL_PY_EXACT_ARGS` inline dispatch is in `vm/eval_call.go:InlineCall`. `CALL_BUILTIN_O` calls `vm.CallBuiltinO`. `COPY_FREE_VARS` copies from `frame.Func.Closure` into `frame.Locals[co.NLocals:]`. `MAKE_FUNCTION` is in `vm/eval_gen.go:OpMakeFunction`.

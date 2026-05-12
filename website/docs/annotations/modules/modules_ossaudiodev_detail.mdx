@@ -1,0 +1,95 @@
+---
+title: Modules/ossaudiodev.c
+description: "Modules/ossaudiodev.c: ossaudiodev — Open Sound System (Linux /dev/dsp) audio device; read, write, mixer controls."
+cpython_path: Modules/ossaudiodev.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/ossaudiodev.c" />
+
+`ossaudiodev` wraps the Linux Open Sound System (OSS) `/dev/dsp` audio device. Deprecated in Python 3.11 and removed in 3.13 (OSS itself was superseded by ALSA on Linux).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `oss_open_impl` | Open `/dev/dsp` for read/write |
+| 81-200 | `oss_read_impl` / `oss_write_impl` | Read/write raw PCM samples |
+| 201-350 | `oss_setfmt` | Set sample format (AFMT_S16_LE, etc.) |
+| 351-500 | `oss_channels` | Set mono/stereo channel count |
+| 501-650 | `oss_speed` | Set sample rate |
+| 651-800 | Mixer API | `/dev/mixer` volume and source controls |
+
+## Reading
+
+### `oss_open_impl`
+
+```c
+// CPython: Modules/ossaudiodev.c:88 oss_open_impl
+static PyObject *
+oss_open_impl(PyTypeObject *type, const char *device, int mode)
+{
+    /* device defaults to /dev/dsp; mode: O_RDONLY, O_WRONLY, O_RDWR */
+    int fd = open(device ? device : "/dev/dsp", mode);
+    if (fd < 0)
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, device);
+    OSSAudioObject *self = PyObject_New(OSSAudioObject, type);
+    self->fd   = fd;
+    self->mode = mode;
+    return (PyObject *)self;
+}
+```
+
+### `oss_read_impl`
+
+```c
+// CPython: Modules/ossaudiodev.c:180 oss_read_impl
+static PyObject *
+oss_read_impl(OSSAudioObject *self, int size)
+{
+    PyObject *rv = PyBytes_FromStringAndSize(NULL, size);
+    Py_BEGIN_ALLOW_THREADS
+    int nread = read(self->fd, PyBytes_AS_STRING(rv), size);
+    Py_END_ALLOW_THREADS
+    if (nread < 0) {
+        Py_DECREF(rv);
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    _PyBytes_Resize(&rv, nread);
+    return rv;
+}
+```
+
+### Setting sample format
+
+```c
+// CPython: Modules/ossaudiodev.c:260 oss_setfmt_impl
+/* AFMT_S16_LE: 16-bit signed little-endian
+   AFMT_U8:     8-bit unsigned
+   AFMT_S8:     8-bit signed
+   AFMT_MU_LAW: mu-law encoding */
+static PyObject *
+oss_setfmt_impl(OSSAudioObject *self, int val)
+{
+    if (ioctl(self->fd, SNDCTL_DSP_SETFMT, &val) == -1)
+        return PyErr_SetFromErrno(PyExc_OSError);
+    return PyLong_FromLong(val);
+}
+```
+
+### Mixer API
+
+```c
+// CPython: Modules/ossaudiodev.c:700 OssMixerObject
+/* /dev/mixer controls: SOUND_MIXER_VOLUME, SOUND_MIXER_PCM, etc.
+   get(control) → (left, right) 0-100
+   set(control, (left, right)) */
+```
+
+## gopy notes
+
+`ossaudiodev` was removed in Python 3.13 and is not in gopy's stdlib. Modern Linux audio uses ALSA via `ctypes` or `sounddevice`. The annotation is for historical completeness.

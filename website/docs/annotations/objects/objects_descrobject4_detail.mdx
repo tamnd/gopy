@@ -1,0 +1,102 @@
+---
+title: Objects/descrobject.c (part 4)
+description: "Objects/descrobject.c part 4: classmethod_get, staticmethod_get, slot wrappers (slot_tp_richcompare), PyWrapperDescrObject."
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/descrobject.c" />
+
+This annotation covers `classmethod`/`staticmethod` descriptor access and the slot wrapper mechanism that exposes C-level `tp_*` slots as Python methods. See `objects_descrobject_detail` through `objects_descrobject3_detail` for `PyMethodDescr`, `PyGetSetDescr`, and `property`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `classmethod_get` | `__get__` for `classmethod`: bind to the class |
+| 81-160 | `staticmethod_get` | `__get__` for `staticmethod`: return the raw function |
+| 161-300 | `PyWrapperDescrObject` | Wraps a C `tp_*` slot as a Python method |
+| 301-450 | `slot_tp_richcompare` | Generated wrapper for `__eq__`, `__lt__`, etc. |
+| 451-600 | `wrapperdescr_call` | Call a slot wrapper: call the C function via `d_wrapped` |
+
+## Reading
+
+### `classmethod.__get__`
+
+```c
+// CPython: Objects/descrobject.c:48 classmethod_get
+static PyObject *
+classmethod_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    /* classmethod bound to the class (or its metaclass) */
+    PyClassMethodObject *cm = (PyClassMethodObject *)self;
+    if (type == NULL) type = Py_TYPE(obj);
+    if (Py_TYPE(cm->cm_callable)->tp_descr_get != NULL) {
+        /* Inner callable is itself a descriptor (e.g. another classmethod) */
+        return Py_TYPE(cm->cm_callable)->tp_descr_get(
+            cm->cm_callable, type, (PyObject *)Py_TYPE(type));
+    }
+    return PyMethod_New(cm->cm_callable, type);
+}
+```
+
+`MyClass.my_classmethod` returns a bound method where `self` is `MyClass` (the class object, not an instance).
+
+### `staticmethod.__get__`
+
+```c
+// CPython: Objects/descrobject.c:100 staticmethod_get
+static PyObject *
+staticmethod_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    /* Returns the raw function — no binding */
+    PyStaticMethodObject *sm = (PyStaticMethodObject *)self;
+    if (Py_TYPE(sm->sm_callable)->tp_descr_get != NULL) {
+        return Py_TYPE(sm->sm_callable)->tp_descr_get(
+            sm->sm_callable, NULL, type);
+    }
+    return Py_NewRef(sm->sm_callable);
+}
+```
+
+`staticmethod` is a descriptor only in that it implements `__get__` (returns the function unmodified). It does not pass `self` or `cls`.
+
+### `PyWrapperDescrObject`
+
+```c
+// CPython: Objects/descrobject.c:180 PyWrapperDescrObject
+typedef struct {
+    PyDescrObject d_common;
+    PyWrapperBase *d_wrapped;  /* the C function pointer */
+    int d_base;                /* offset into PyObject for the slot */
+} PyWrapperDescrObject;
+```
+
+When Python calls `int.__add__(1, 2)`, it calls `wrapperdescr_call` which extracts the `tp_as_number->nb_add` slot from `int`'s type and calls it.
+
+### `slot_tp_richcompare`
+
+```c
+// CPython: Objects/typeobject.c:7800 slot_tp_richcompare
+/* This C function is installed as tp_richcompare for types that define
+   __eq__, __lt__, etc. in Python.  It looks up the appropriate __*__
+   method and calls it. */
+static PyObject *
+slot_tp_richcompare(PyObject *self, PyObject *other, int op)
+{
+    PyObject *stack[2] = {self, other};
+    PyObject *meth = lookup_method(self, richcmp_methods[op]);
+    if (meth == NULL) return Py_NewRef(Py_NotImplemented);
+    return vectorcall_method(meth, stack, 2);
+}
+```
+
+The `richcmp_methods` array maps `Py_EQ` → `__eq__`, `Py_LT` → `__lt__`, etc.
+
+## gopy notes
+
+`classmethod.__get__` is `objects.ClassMethodGet` in `objects/method.go`. `staticmethod.__get__` is `objects.StaticMethodGet`. `PyWrapperDescrObject` is `objects.WrapperDescr` which stores a Go function value as `d_wrapped`. `slot_tp_richcompare` is generated in `objects/type.go` as a dispatch through the type's `__eq__` / `__lt__` methods.
