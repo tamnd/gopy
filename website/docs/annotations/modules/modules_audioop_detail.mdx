@@ -1,0 +1,122 @@
+---
+title: Modules/audioop.c
+description: "Modules/audioop.c: audioop — raw audio processing: ulaw/alaw encoding, linear conversion, rate, bias, byteswap, rms, findfit."
+cpython_path: Modules/audioop.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/audioop.c" />
+
+`audioop` processes raw (uncompressed) audio data stored as bytes. It works on signed linear PCM samples at 1, 2, 3, or 4 bytes per sample and provides codec conversions (ulaw, alaw, ADPCM) and signal analysis.
+
+Deprecated in Python 3.11 and removed in Python 3.13.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `audioop_getsample` | Extract one sample as a Python int |
+| 101-250 | `audioop_max`, `audioop_rms`, `audioop_avg` | Signal statistics |
+| 251-400 | `audioop_bias`, `audioop_mul`, `audioop_add` | Sample arithmetic |
+| 401-550 | `audioop_lin2ulaw`, `audioop_ulaw2lin` | G.711 mu-law codec |
+| 551-700 | `audioop_lin2alaw`, `audioop_alaw2lin` | G.711 A-law codec |
+| 701-850 | `audioop_lin2adpcm`, `audioop_adpcm2lin` | IMA/DVI ADPCM codec |
+| 851-1000 | `audioop_ratecv` | Sample-rate conversion (linear interpolation) |
+| 1001-1200 | `audioop_byteswap`, `audioop_findfit` | Byte order swap, cross-correlation |
+
+## Reading
+
+### Sample extraction
+
+```c
+// CPython: Modules/audioop.c:82 audioop_getsample_impl
+static PyObject *
+audioop_getsample_impl(PyObject *module, Py_buffer *fragment,
+                       int width, Py_ssize_t index)
+{
+    /* width: bytes per sample (1, 2, 3, or 4) */
+    if (index < 0 || index >= fragment->len / width) {
+        PyErr_SetString(AudioopError, "index out of range");
+        return NULL;
+    }
+    int sample = GETSAMPLE32(width,
+                             (const unsigned char *)fragment->buf,
+                             index);
+    return PyLong_FromLong(sample);
+}
+```
+
+### RMS (root-mean-square) amplitude
+
+```c
+// CPython: Modules/audioop.c:160 audioop_rms_impl
+static PyObject *
+audioop_rms_impl(PyObject *module, Py_buffer *fragment, int width)
+{
+    double sum_squares = 0.0;
+    Py_ssize_t n = fragment->len / width;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        double val = GETSAMPLE32(width, fragment->buf, i);
+        sum_squares += val * val;
+    }
+    return PyLong_FromDouble(n > 0 ? sqrt(sum_squares / n) : 0.0);
+}
+```
+
+`audioop.rms(data, 2)` returns the RMS amplitude for 16-bit audio, useful for silence detection.
+
+### mu-law encoding
+
+```c
+// CPython: Modules/audioop.c:440 audioop_lin2ulaw_impl
+/* G.711 mu-law: compress 16-bit linear PCM to 8-bit */
+static PyObject *
+audioop_lin2ulaw_impl(PyObject *module, Py_buffer *fragment, int width)
+{
+    Py_ssize_t n = fragment->len / width;
+    unsigned char *cp = PyBytes_AS_STRING(rv);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int sample = GETSAMPLE32(width, fragment->buf, i) >> 16;
+        *cp++ = st_14linear2ulaw(sample);
+    }
+}
+```
+
+mu-law maps 13-bit linear samples to 8-bit compressed samples using logarithmic quantization. Used in North American telephone networks (G.711).
+
+### Rate conversion
+
+```c
+// CPython: Modules/audioop.c:880 audioop_ratecv_impl
+/* Linear interpolation sample-rate converter.
+   inrate, outrate: integer ratio (will be reduced by GCD).
+   state: (d, samps) from previous call for streaming use.
+*/
+static PyObject *
+audioop_ratecv_impl(PyObject *module, Py_buffer *fragment, int width,
+                    int nchannels, int inrate, int outrate,
+                    PyObject *state, int weightA, int weightB)
+```
+
+`audioop.ratecv` converts between sample rates using a simple weighted linear interpolation. It accepts a `state` tuple for incremental (streaming) conversion.
+
+### `findfit`
+
+```c
+// CPython: Modules/audioop.c:1080 audioop_findfit_impl
+/* Cross-correlation to find the position in 'reference' that
+   best matches 'fragment'.  Returns (offset, factor). */
+static PyObject *
+audioop_findfit_impl(PyObject *module, Py_buffer *fragment,
+                     Py_buffer *reference)
+```
+
+`audioop.findfit` is used for audio watermarking and tempo matching. It slides `fragment` over `reference` and returns the best-fit offset and scale factor.
+
+## gopy notes
+
+`audioop` was removed in Python 3.13 and is not in gopy's stdlib. The annotation is for completeness. Audio processing in modern Python uses `numpy`, `soundfile`, or `pyaudio`.

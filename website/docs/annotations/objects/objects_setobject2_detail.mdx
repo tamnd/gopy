@@ -1,0 +1,152 @@
+---
+title: Objects/setobject.c (part 2)
+description: "setobject.c part 2: set hash table probing, set_add_entry, set_discard_entry, set intersection/difference/union, frozenset hash."
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/setobject.c" />
+
+This annotation covers the hash table internals and bulk set operations. See `objects_setobject_detail` for basic construction and membership testing.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `set_add_entry` | Insert one element into the hash table |
+| 101-200 | `set_discard_entry` | Remove an element, leaving a dummy slot |
+| 201-350 | `set_table_resize` | Grow or shrink the hash table, rehash all entries |
+| 351-500 | `set_intersection` | `a & b` — smaller set drives the probe |
+| 501-650 | `set_difference` | `a - b` — iterate a, skip elements in b |
+| 651-800 | `set_union` | `a | b` — copy a, add all of b |
+| 801-900 | `frozenset_hash` | Commutative hash over all elements |
+
+## Reading
+
+### `set_add_entry`
+
+```c
+// CPython: Objects/setobject.c:135 set_add_entry
+static int
+set_add_entry(PySetObject *so, PyObject *key, Py_hash_t hash)
+{
+    setentry *table = so->table;
+    setentry *entry;
+    size_t perturb = hash;
+    size_t mask = so->mask;
+    size_t i = (size_t)hash & mask;
+
+    while (1) {
+        entry = &table[i];
+        if (entry->key == NULL)           /* empty slot */
+            break;
+        if (entry->hash == hash && entry->key != dummy) {
+            int cmp = PyObject_RichCompareBool(entry->key, key, Py_EQ);
+            if (cmp > 0) return 0;        /* already present */
+            if (cmp < 0) return -1;       /* error */
+        }
+        /* collision — open addressing with perturbation */
+        perturb >>= PERTURB_SHIFT;
+        i = (i * 5 + perturb + 1) & mask;
+    }
+    Py_INCREF(key);
+    entry->key  = key;
+    entry->hash = hash;
+    so->used++;
+    so->fill++;
+    if ((size_t)so->fill * 5 >= ((size_t)so->mask + 1) * 3)
+        return set_table_resize(so, so->used > 50000 ? so->used * 2 : so->used * 4);
+    return 0;
+}
+```
+
+The probe sequence is identical to dict: `i = (5*i + perturb + 1) & mask` with `perturb >>= 5` each step.
+
+### `set_discard_entry`
+
+```c
+// CPython: Objects/setobject.c:220 set_discard_entry
+static int
+set_discard_entry(PySetObject *so, PyObject *key, Py_hash_t hash)
+{
+    setentry *entry = set_lookkey(so, key, hash);
+    if (entry == NULL) return -1;
+    if (entry->key == NULL || entry->key == dummy)
+        return DISCARD_NOTFOUND;
+    /* Replace with dummy to keep probe chains intact */
+    Py_DECREF(entry->key);
+    entry->key = dummy;
+    so->used--;
+    return DISCARD_FOUND;
+}
+```
+
+Dummy slots preserve the collision chains of other entries that were inserted after the removed element.
+
+### `set_intersection`
+
+```c
+// CPython: Objects/setobject.c:390 set_intersection
+static PyObject *
+set_intersection(PySetObject *so, PyObject *other)
+{
+    PySetObject *result = (PySetObject *)make_new_set(&PySet_Type, NULL);
+    if (result == NULL) return NULL;
+    /* Drive with the smaller side */
+    if (PySet_GET_SIZE(other) > PySet_GET_SIZE(so)) {
+        PyObject *tmp = (PyObject *)so;
+        so    = (PySetObject *)other;
+        other = tmp;
+    }
+    Py_ssize_t pos = 0;
+    setentry *entry;
+    while (set_next((PySetObject *)other, &pos, &entry)) {
+        if (set_contains_entry(so, entry->key, entry->hash)) {
+            if (set_add_entry(result, entry->key, entry->hash)) {
+                Py_DECREF(result);
+                return NULL;
+            }
+        }
+    }
+    return (PyObject *)result;
+}
+```
+
+Driving with the smaller operand minimises the number of membership tests.
+
+### `frozenset_hash`
+
+```c
+// CPython: Objects/setobject.c:830 frozenset_hash
+static Py_hash_t
+frozenset_hash(PyObject *self)
+{
+    /* XOR of shuffled per-element hashes — commutative so order-independent */
+    PySetObject *v = (PySetObject *)self;
+    if (v->hash != -1) return v->hash;
+
+    Py_uhash_t hash = 0;
+    setentry *entry;
+    Py_ssize_t pos = 0;
+    while (set_next(v, &pos, &entry)) {
+        /* Spread bits: mix with a prime to avoid cancellation */
+        Py_uhash_t h = entry->hash;
+        hash ^= ((h ^ 89869747UL) ^ (h << 16)) * 3644798167UL;
+    }
+    /* Fold length into hash and mark cached */
+    hash = hash * 69069U + 907133923UL;
+    if (hash == (Py_uhash_t)-1) hash = 590923713UL;
+    v->hash = (Py_hash_t)hash;
+    return v->hash;
+}
+```
+
+`frozenset` is hashable because the result is cached and the mixing is commutative across elements.
+
+## gopy notes
+
+`set` uses the same open-addressing probe sequence as `dict`. `set_add_entry` is in `objects/set.go`. `frozenset_hash` is computed in `FrozenSetHash`, cached in the `PySetObject.hash` field. The dummy sentinel is `objects.DummyKey`.

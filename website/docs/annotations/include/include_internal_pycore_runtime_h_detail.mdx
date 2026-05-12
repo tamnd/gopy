@@ -1,0 +1,128 @@
+---
+title: Include/internal/pycore_runtime.h
+description: "Include/internal/pycore_runtime.h: _PyRuntimeState — the single per-process runtime struct holding all interpreter globals."
+cpython_path: Include/internal/pycore_runtime.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_runtime.h" />
+
+`_PyRuntimeState` is the global singleton that holds all interpreter-wide state: the list of interpreters, the GIL, the memory allocator hooks, the signal handler state, and the audit hook chain.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `_PyRuntimeState` forward decl | Used by many internal headers |
+| 51-150 | `_PyRuntimeState.interpreters` | Linked list of `PyInterpreterState` |
+| 151-200 | `_PyRuntimeState.gilstate` | GIL state: `autointerp_tstate`, `check_enabled` |
+| 201-280 | `_PyRuntimeState.signals` | POSIX signal handling fields |
+| 281-350 | `_PyRuntimeState.audit_hooks` | `sys.addaudithook` callback chain |
+| 351-400 | `_Py_RUNTIME_INIT` | Static zero-initializer macro |
+
+## Reading
+
+### `_PyRuntimeState` top-level layout
+
+```c
+// CPython: Include/internal/pycore_runtime.h:62 _PyRuntimeState
+struct _PyRuntimeState {
+    /* True after Py_Initialize() completes */
+    int initialized;
+    /* True after Py_Finalize() begins */
+    int finalizing;
+
+    /* All live interpreters */
+    struct {
+        PyThread_type_lock mutex;
+        PyInterpreterState *head;
+        PyInterpreterState *main;
+        int64_t next_id;
+    } interpreters;
+
+    /* GIL-related TSS key */
+    struct {
+        int check_enabled;
+        _Py_atomic_address tstate_current;
+        Py_tss_t autoTSSkey;   /* maps OS thread → PyThreadState */
+    } gilstate;
+
+    /* Memory allocator hooks (see PyMem_SetAllocator) */
+    struct {
+        PyMemAllocatorEx ctx;
+    } allocators;
+
+    /* Audit hooks added via sys.addaudithook() */
+    _Py_AuditHookEntry *audit_hooks;
+
+    /* Signal handling */
+    struct _Py_SignalState signals;
+};
+```
+
+There is exactly one `_PyRuntimeState` per process, stored in `_PyRuntime` (a global variable in `Python/pylifecycle.c`).
+
+### `gilstate`
+
+```c
+// CPython: Include/internal/pycore_runtime.h:120 gilstate
+    struct {
+        /* Whether gilstate_ensure checks that the GIL is held */
+        int check_enabled;
+        /* Current thread's PyThreadState — read/write with atomic ops */
+        _Py_atomic_address tstate_current;
+        /* TSS key: maps each OS thread to its PyThreadState * */
+        Py_tss_t autoTSSkey;
+    } gilstate;
+```
+
+`PyGILState_Ensure` reads `gilstate.autoTSSkey` to find (or create) the calling thread's `PyThreadState`.
+
+### Interpreter list
+
+```c
+// CPython: Include/internal/pycore_runtime.h:90 interpreters
+    struct {
+        PyThread_type_lock mutex;   /* protects head/next_id */
+        PyInterpreterState *head;   /* most recently created */
+        PyInterpreterState *main;   /* the first interpreter */
+        int64_t next_id;            /* monotonically increasing */
+    } interpreters;
+```
+
+`Py_NewInterpreter()` appends to `interpreters.head`. Each `PyInterpreterState` has a `next` pointer for the linked list.
+
+### Audit hooks
+
+```c
+// CPython: Include/internal/pycore_runtime.h:160 audit_hooks
+    /* Singly-linked list of audit hook callbacks */
+    /* Added by sys.addaudithook(callable) */
+    _Py_AuditHookEntry *audit_hooks;
+```
+
+`PySys_Audit(event, args)` walks this list and calls each hook. Hooks cannot be removed once added.
+
+### `_Py_RUNTIME_INIT`
+
+```c
+// CPython: Include/internal/pycore_runtime.h:380 _Py_RUNTIME_INIT
+/* Zero-initializes _PyRuntimeState at compile time */
+#define _Py_RUNTIME_INIT \
+    { \
+        .initialized = 0, \
+        .finalizing  = 0, \
+        .interpreters = { .mutex = NULL, .head = NULL, .main = NULL, .next_id = 0 }, \
+        ... \
+    }
+```
+
+`_PyRuntime` in `pylifecycle.c` is declared as `_PyRuntimeState _PyRuntime = _Py_RUNTIME_INIT;`, making it a zero-initialized BSS-like global.
+
+## gopy notes
+
+gopy has no `_PyRuntimeState` struct. Runtime-wide state is split between package-level Go variables: `vm.allInterpreters` (a slice of `*Interpreter`), the `sync.Mutex` protecting it, and `vm.currentTState` (a `sync.Map` from goroutine ID to `*ThreadState`). Audit hooks are a slice of Go functions in the `sys` module.

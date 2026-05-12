@@ -1,0 +1,137 @@
+---
+title: Lib/xmlrpc/client.py
+description: "Lib/xmlrpc/client.py: ServerProxy, _Method, Marshaller, Unmarshaller — XML-RPC call encoding, multicall, fault handling."
+cpython_path: Lib/xmlrpc/client.py
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/xmlrpc/client.py" />
+
+`xmlrpc.client` implements an XML-RPC client. `ServerProxy` wraps a remote URL; attribute access returns `_Method` proxies that serialize arguments to XML and deserialize the response.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Type constants | `MININT`, `MAXINT`, date/binary helpers |
+| 101-300 | `Marshaller` | Python values to XML-RPC XML |
+| 301-500 | `Unmarshaller` | Expat-based XML-RPC XML to Python values |
+| 501-650 | `loads` / `dumps` | Top-level encode/decode |
+| 651-800 | `Transport` | HTTP transport: `request`, `single_request`, `parse_response` |
+| 801-1000 | `ServerProxy` | `__getattr__` returns `_Method` |
+| 1001-1200 | `_Method` | `__call__` marshals and dispatches |
+| 1201-1400 | `MultiCall` | Batch multiple calls in one HTTP round-trip |
+| 1401-1600 | `Fault`, `ProtocolError` | Exception types |
+
+## Reading
+
+### `Marshaller`
+
+```python
+# CPython: Lib/xmlrpc/client.py:148 Marshaller.dump_value
+class Marshaller:
+    """Serialize Python objects to XML-RPC methodCall XML."""
+
+    dispatch = {}
+
+    def dump_int(self, value, write):
+        if not MININT <= value <= MAXINT:
+            raise OverflowError("int exceeds XML-RPC limits")
+        write('<value><int>%d</int></value>\n' % value)
+    dispatch[int] = dump_int
+
+    def dump_string(self, value, write, escape=_escape):
+        write('<value><string>%s</string></value>\n' % escape(value))
+    dispatch[str] = dump_string
+
+    def dump_array(self, value, write):
+        write('<value><array><data>\n')
+        for v in value:
+            self.dump_value(v, write)
+        write('</data></array></value>\n')
+    dispatch[list] = dispatch[tuple] = dump_array
+```
+
+### `Unmarshaller`
+
+```python
+# CPython: Lib/xmlrpc/client.py:310 Unmarshaller
+class Unmarshaller:
+    """Parse an XML-RPC response using Expat."""
+
+    def __init__(self, use_datetime=False, use_builtin_types=False):
+        self._type = None
+        self._stack = []
+        self._marks = []
+        self._data = []
+        self._parser = expat.ParserCreate()
+        self._parser.StartElementHandler  = self.start
+        self._parser.EndElementHandler    = self.end
+        self._parser.CharacterDataHandler = self._data.append
+
+    def end_int(self, data):
+        self._stack.append(int(data))
+        self._value = 0
+    dispatch['int'] = dispatch['i4'] = dispatch['i8'] = end_int
+```
+
+### `ServerProxy.__getattr__`
+
+```python
+# CPython: Lib/xmlrpc/client.py:870 ServerProxy.__getattr__
+class ServerProxy:
+    def __getattr__(self, name):
+        # Return a proxy that, when called, sends name as the RPC method
+        return _Method(self.__request, name)
+
+class _Method:
+    def __init__(self, send, name):
+        self.__send = send
+        self.__name = name
+    def __getattr__(self, name):
+        # Support dotted method names: proxy.system.listMethods()
+        return _Method(self.__send, '%s.%s' % (self.__name, name))
+    def __call__(self, *args):
+        return self.__send(self.__name, args)
+```
+
+### `MultiCall`
+
+```python
+# CPython: Lib/xmlrpc/client.py:1230 MultiCall
+class MultiCall:
+    """Collect multiple calls, send as system.multicall batch."""
+    def __init__(self, server):
+        self.__server = server
+        self.__call_list = []
+
+    def __getattr__(self, name):
+        return _MultiCallMethod(self.__call_list, name)
+
+    def __call__(self):
+        marshalled = [{'methodName': c[0], 'params': c[1]}
+                      for c in self.__call_list]
+        return MultiCallIterator(
+            self.__server.system.multicall(marshalled))
+```
+
+`MultiCall` batches N calls into one HTTP request via the `system.multicall` extension.
+
+### `Fault`
+
+```python
+# CPython: Lib/xmlrpc/client.py:1430 Fault
+class Fault(Exception):
+    """Raised when the server returns a <fault> response."""
+    def __init__(self, faultCode, faultString, **extra):
+        self.faultCode   = faultCode
+        self.faultString = faultString
+```
+
+## gopy notes
+
+`xmlrpc.client` is pure Python and importable when `http.client`, `urllib`, `xml.parsers.expat`, and `datetime` work. The `Transport` class opens an `http.client.HTTPConnection`.

@@ -526,6 +526,7 @@ const sidebars = {
         'annotations/objects/objects_descrobject_detail3',
         'annotations/objects/objects_unicodeobject4_detail',
         'annotations/objects/objects_tupleobject3_detail',
+        'annotations/objects/objects_setobject2_detail',
       ],
     },
     {
@@ -763,6 +764,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_typeobject_h_detail',
         'annotations/include/include_internal_pycore_code_h_detail',
         'annotations/include/include_internal_pycore_optimizer_h_detail',
+        'annotations/include/include_internal_pycore_runtime_h_detail',
       ],
     },
     {
@@ -999,6 +1001,7 @@ const sidebars = {
         'annotations/modules/modules_pwd_detail',
         'annotations/modules/modules_lzma_detail',
         'annotations/modules/modules_crypt_detail',
+        'annotations/modules/modules_audioop_detail',
       ],
     },
     {
@@ -1519,6 +1522,7 @@ const sidebars = {
         'annotations/lib/lib_mailbox_detail',
         'annotations/lib/lib_smtpd_detail',
         'annotations/lib/lib_imaplib_detail',
+        'annotations/lib/lib_xmlrpc_detail',
       ],
     },
   ],
