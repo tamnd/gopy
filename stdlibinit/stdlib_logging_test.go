@@ -82,10 +82,10 @@ func stdlibCompiler(src, filename string) (*objects.Code, error) {
 	}, nil
 }
 
-// installStdlibFinder wires a PathFinder that resolves pure-Python
+// installStdlibFinderLogging wires a PathFinder that resolves pure-Python
 // modules from the vendored stdlib tree. Returns a cleanup function
 // that restores the previous finder.
-func installStdlibFinder(t *testing.T) func() {
+func installStdlibFinderLogging(t *testing.T) func() {
 	t.Helper()
 	prev := imp.GetPathFinder()
 	imp.SetPathFinder(&imp.PathFinder{
@@ -123,7 +123,7 @@ func tryImport(exec imp.Executor, name string) (mod *objects.Module, err error) 
 // depends on _string (built-in, registered by stdlibinit) and on
 // templatelib (a sub-module in stdlib/string/).
 func TestImportString(t *testing.T) {
-	defer installStdlibFinder(t)()
+	defer installStdlibFinderLogging(t)()
 
 	ts := state.NewThread()
 	exec := &stdlibExec{ts: ts}
@@ -142,7 +142,7 @@ func TestImportString(t *testing.T) {
 // dependency is _copy which is not yet ported, so the test skips on a
 // ModuleNotFoundError.
 func TestImportCopy(t *testing.T) {
-	defer installStdlibFinder(t)()
+	defer installStdlibFinderLogging(t)()
 
 	ts := state.NewThread()
 	exec := &stdlibExec{ts: ts}
@@ -159,7 +159,7 @@ func TestImportCopy(t *testing.T) {
 
 // TestImportGettext imports the vendored gettext module.
 func TestImportGettext(t *testing.T) {
-	defer installStdlibFinder(t)()
+	defer installStdlibFinderLogging(t)()
 
 	ts := state.NewThread()
 	exec := &stdlibExec{ts: ts}
@@ -176,7 +176,7 @@ func TestImportGettext(t *testing.T) {
 
 // TestImportLogging imports the vendored logging package.
 func TestImportLogging(t *testing.T) {
-	defer installStdlibFinder(t)()
+	defer installStdlibFinderLogging(t)()
 
 	ts := state.NewThread()
 	exec := &stdlibExec{ts: ts}
@@ -194,7 +194,7 @@ func TestImportLogging(t *testing.T) {
 // TestImportLoggingHandlers imports logging.handlers, which requires
 // logging to already be importable.
 func TestImportLoggingHandlers(t *testing.T) {
-	defer installStdlibFinder(t)()
+	defer installStdlibFinderLogging(t)()
 
 	ts := state.NewThread()
 	exec := &stdlibExec{ts: ts}
@@ -212,7 +212,7 @@ func TestImportLoggingHandlers(t *testing.T) {
 
 // TestImportLoggingConfig imports logging.config.
 func TestImportLoggingConfig(t *testing.T) {
-	defer installStdlibFinder(t)()
+	defer installStdlibFinderLogging(t)()
 
 	ts := state.NewThread()
 	exec := &stdlibExec{ts: ts}
