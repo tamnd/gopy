@@ -1,0 +1,128 @@
+---
+title: Objects/dictobject.c (part 12)
+description: "Objects/dictobject.c part 12: dict.update, dict.__or__, dict.__ior__, _PyDict_MergeEx, dict views."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers dict merge operations and views. See `objects_dictobject11_detail` for `dict.__getitem__`, `dict.__setitem__`, and the hash table layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dict.update` | Merge another dict or iterable of pairs |
+| 81-160 | `_PyDict_MergeEx` | Internal merge with duplicate-key control |
+| 161-240 | `dict.__or__` / `dict.__ior__` | `d1 | d2` and `d1 |= d2` (3.9+) |
+| 241-360 | `dict.keys` / `dict.values` / `dict.items` | Return view objects |
+| 361-500 | Dict view iteration | `dictkeys_iter`, `dictvalues_iter`, `dictitems_iter` |
+
+## Reading
+
+### `dict.update`
+
+```c
+// CPython: Objects/dictobject.c:2180 dict_update_common
+static int
+dict_update_common(PyObject *self, PyObject *arg, PyObject *kwds)
+{
+    if (arg != NULL) {
+        if (PyDict_CheckExact(arg) || Py_TYPE(arg) == &PyDict_Type) {
+            /* Fast path: merge dict directly */
+            int result = PyDict_Merge(self, arg, 1);
+            if (result < 0) return result;
+        } else if (_PyObject_HasAttrId(arg, &PyId_keys)) {
+            /* Mapping: iterate keys and call __getitem__ */
+            ...
+        } else {
+            /* Iterable of (key, value) pairs */
+            PyObject *it = PyObject_GetIter(arg);
+            ...
+        }
+    }
+    /* Merge kwargs */
+    if (kwds != NULL && PyDict_GET_SIZE(kwds))
+        return PyDict_Merge(self, kwds, 1);
+    return 0;
+}
+```
+
+`dict.update` accepts another dict, a mapping (any object with `keys()`), or an iterable of `(key, value)` pairs. The `1` in `PyDict_Merge(..., 1)` means overwrite existing keys.
+
+### `_PyDict_MergeEx`
+
+```c
+// CPython: Objects/dictobject.c:2260 _PyDict_MergeEx
+int
+_PyDict_MergeEx(PyObject *a, PyObject *b, int override)
+{
+    /* override:
+       0 = do not overwrite existing keys
+       1 = overwrite
+       2 = raise TypeError on duplicate key (used by DICT_MERGE opcode) */
+    PyDictObject *mp = (PyDictObject *)a;
+    PyObject *keys = PyMapping_Keys(b);
+    for each key:
+        if (override == 2) {
+            if (PyDict_Contains(a, key)) {
+                raise_duplicate_keyword_error(key);
+                return -1;
+            }
+        }
+        if (override != 0 || !PyDict_Contains(a, key))
+            PyDict_SetItem(a, key, value);
+    return 0;
+}
+```
+
+`override=2` is used for `**kwargs` merging: duplicate keys are a `TypeError`, not a silent overwrite.
+
+### `dict.__or__`
+
+```c
+// CPython: Objects/dictobject.c:2340 dict_or
+static PyObject *
+dict_or(PyObject *self, PyObject *other)
+{
+    if (!PyDict_Check(self) || !PyDict_Check(other)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    PyObject *new = PyDict_Copy(self);
+    if (PyDict_Update(new, other) < 0) { Py_DECREF(new); return NULL; }
+    return new;
+}
+```
+
+`d1 | d2` (Python 3.9+) creates a copy of `d1` and updates it with `d2`. Values from `d2` overwrite `d1` for duplicate keys. `d1 |= d2` is `dict.__ior__` which calls `PyDict_Update` in place.
+
+### Dict view iteration
+
+```c
+// CPython: Objects/dictobject.c:2580 dictiter_iternextkey
+static PyObject *
+dictiter_iternextkey(dictiterobject *di)
+{
+    PyDictObject *mp = di->di_dict;
+    if (di->di_used != mp->ma_used) {
+        /* Dictionary changed size during iteration */
+        PyErr_SetString(PyExc_RuntimeError,
+            "dictionary changed size during iteration");
+        di->di_used = -1;
+        return NULL;
+    }
+    /* advance to next non-dummy slot */
+    ...
+}
+```
+
+Dict iteration detects size changes by comparing `di_used` (snapshot at iter creation) against `ma_used`. Insertions or deletions during iteration raise `RuntimeError`.
+
+## gopy notes
+
+`dict.update` is `objects.DictUpdate` in `objects/dict_mutate.go`. `_PyDict_MergeEx` is `objects.DictMergeEx`. `dict.__or__` is `objects.DictOr`. View objects are `objects.DictKeys`, `objects.DictValues`, `objects.DictItems` with iterators in `objects/dict_iter.go`.

@@ -1,0 +1,96 @@
+---
+title: Modules/posixmodule.c (part 8)
+description: "posixmodule.c part 8: os.stat, os.lstat, os.fstat, stat_result, os.access."
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/posixmodule.c" />
+
+This annotation covers file metadata. See `modules_posix7_detail` for `os.open`, `os.read`, `os.write`, and `os.close`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `os.stat` | Get file status by path (follows symlinks) |
+| 81-160 | `os.lstat` | Get file status without following symlinks |
+| 161-240 | `os.fstat` | Get file status by file descriptor |
+| 241-360 | `stat_result` | Named tuple holding `st_mode`, `st_size`, etc. |
+| 361-500 | `os.access` | Test file existence and permissions |
+
+## Reading
+
+### `os.stat`
+
+```c
+// CPython: Modules/posixmodule.c:3840 os_stat_impl
+static PyObject *
+os_stat_impl(PyObject *module, path_t *path, int dir_fd, int follow_symlinks)
+{
+    STRUCT_STAT st;
+    int result;
+    Py_BEGIN_ALLOW_THREADS
+    result = STAT(path->narrow, &st);
+    Py_END_ALLOW_THREADS
+    if (result != 0)
+        return path_error(path);
+    return _pystat_fromstructstat(module, &st);
+}
+```
+
+`STAT` expands to `stat` or `statat` depending on `dir_fd` and `follow_symlinks`. `Py_BEGIN_ALLOW_THREADS` releases the GIL during the syscall, allowing other threads to run while waiting on a slow filesystem.
+
+### `stat_result`
+
+```c
+// CPython: Modules/posixmodule.c:3620 _pystat_fromstructstat
+static PyObject *
+_pystat_fromstructstat(PyObject *module, STRUCT_STAT *st)
+{
+    posix_state *state = get_posix_state(module);
+    PyObject *v = PyStructSequence_New(state->StatResultType);
+    PyStructSequence_SET_ITEM(v, 0, PyLong_FromLong((long)st->st_mode));
+    PyStructSequence_SET_ITEM(v, 1, _PyLong_FromIno_t(st->st_ino));
+    PyStructSequence_SET_ITEM(v, 2, _PyLong_FromDev_t(st->st_dev));
+    PyStructSequence_SET_ITEM(v, 3, PyLong_FromLong((long)st->st_nlink));
+    PyStructSequence_SET_ITEM(v, 4, PyLong_FromLong((long)st->st_uid));
+    PyStructSequence_SET_ITEM(v, 5, PyLong_FromLong((long)st->st_gid));
+    PyStructSequence_SET_ITEM(v, 6, PyLong_FromLong((long)st->st_size));
+    /* timestamps */
+    ...
+    return v;
+}
+```
+
+`stat_result` is a `PyStructSequence`: it behaves like a named tuple. Fields are accessible by index (e.g., `st[0]` for `st_mode`) or by name (`st.st_mode`).
+
+### `os.access`
+
+```c
+// CPython: Modules/posixmodule.c:4020 os_access_impl
+static PyObject *
+os_access_impl(PyObject *module, path_t *path, int mode,
+               int dir_fd, int effective_ids, int follow_symlinks)
+{
+    int result;
+    Py_BEGIN_ALLOW_THREADS
+#ifdef MS_WINDOWS
+    result = win32_access(path, mode);
+#else
+    result = access(path->narrow, mode);
+#endif
+    Py_END_ALLOW_THREADS
+    return PyBool_FromLong(!result);
+}
+```
+
+`os.access(path, os.R_OK)` tests whether the current process can read `path`. `effective_ids=True` uses effective UID/GID instead of real UID/GID, relevant when `setuid` is involved.
+
+## gopy notes
+
+`os.stat` is `module/os.Stat` in `module/os/module.go` using `os.Stat(path)`. `stat_result` is `objects.StatResult` built from `os.FileInfo`. `os.lstat` uses `os.Lstat`. `os.fstat` calls `os.File.Stat()`. `os.access` uses `syscall.Access` on Unix.

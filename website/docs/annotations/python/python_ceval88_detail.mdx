@@ -1,0 +1,112 @@
+---
+title: Python/ceval.c (part 88)
+description: "Python/ceval.c part 88: IMPORT_NAME, IMPORT_FROM, IMPORT_STAR, __all__ filtering."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers import opcodes. See `python_ceval87_detail` for exception handling opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `IMPORT_NAME` | Execute `import foo.bar` |
+| 81-160 | `IMPORT_FROM` | Extract `bar` from a package `foo.bar` |
+| 161-240 | `IMPORT_STAR` | `from module import *` |
+| 241-400 | `import_all_from` | Filter names by `__all__` or leading underscore |
+
+## Reading
+
+### `IMPORT_NAME`
+
+```c
+// CPython: Python/ceval.c:4960 IMPORT_NAME
+inst(IMPORT_NAME, (level, fromlist -- res)) {
+    PyObject *name = GETITEM(names, oparg);
+    res = import_name(tstate, frame, name, fromlist, level);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(fromlist);
+    Py_DECREF(level);
+}
+```
+
+`import foo.bar as baz` compiles to `LOAD_CONST 0` (level=0), `LOAD_CONST None` (fromlist=None), `IMPORT_NAME foo.bar`. The actual import is `import_name`, which calls `__import__`.
+
+### `import_name`
+
+```c
+// CPython: Python/ceval.c:4920 import_name
+static PyObject *
+import_name(PyThreadState *tstate, _PyInterpreterFrame *frame,
+            PyObject *name, PyObject *fromlist, PyObject *level)
+{
+    _Py_IDENTIFIER(__import__);
+    PyObject *import_func, *res;
+    /* Look up builtins.__import__ */
+    import_func = _PyDict_GetItemIdWithError(frame->f_builtins, &PyId___import__);
+    if (import_func == NULL) {
+        PyErr_SetString(PyExc_ImportError, "__import__ not found");
+        return NULL;
+    }
+    /* Fast path: if __import__ is the builtin, call _PyImport_ImportModuleLevelObject */
+    if (import_func == _PyImport_ImportModuleLevelObject) {
+        ...
+    }
+    /* Slow path: call __import__(name, globals, locals, fromlist, level) */
+    return PyObject_CallFunctionObjArgs(import_func, name, ...);
+}
+```
+
+`import_name` checks whether `__import__` has been monkey-patched. If not, it calls the C implementation directly without constructing a Python frame.
+
+### `IMPORT_FROM`
+
+```c
+// CPython: Python/ceval.c:5000 IMPORT_FROM
+inst(IMPORT_FROM, (from -- from, res)) {
+    PyObject *name = GETITEM(names, oparg);
+    res = import_from(tstate, from, name);
+    ERROR_IF(res == NULL, error);
+}
+
+static PyObject *
+import_from(PyThreadState *tstate, PyObject *v, PyObject *name)
+{
+    PyObject *x = PyObject_GetAttr(v, name);
+    if (x == NULL && _PyErr_ExceptionMatches(tstate, PyExc_AttributeError)) {
+        /* Improve the error message for missing names */
+        ...
+    }
+    return x;
+}
+```
+
+`from foo import bar` compiles to `IMPORT_NAME foo`, then `IMPORT_FROM bar`. `IMPORT_FROM` calls `getattr(module, name)`.
+
+### `IMPORT_STAR`
+
+```c
+// CPython: Python/ceval.c:5040 IMPORT_STAR
+inst(IMPORT_STAR, (from --)) {
+    PyObject *locals = LOCALS();
+    if (_PyFrame_FastToLocalsWithError(frame) < 0) ERROR_IF(true, error);
+    PyObject *none = import_all_from(tstate, locals, from);
+    ERROR_IF(none == NULL, error);
+    Py_DECREF(none);
+    Py_DECREF(from);
+    if (_PyFrame_LocalsToFast(frame, 0) < 0) ERROR_IF(true, error);
+}
+```
+
+`from foo import *` first snapshots the current locals dict (since star-import updates the namespace), then calls `import_all_from`. `__all__` takes priority; otherwise all names not starting with `_` are imported.
+
+## gopy notes
+
+`IMPORT_NAME` calls `vm.ImportName` in `vm/eval_import.go`, which calls `objects.Import`. `IMPORT_FROM` calls `objects.GetAttr`. `IMPORT_STAR` calls `vm.ImportAllFrom` which reads `__all__` if present or filters by leading underscore.

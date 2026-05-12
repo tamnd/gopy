@@ -1,0 +1,97 @@
+---
+title: Lib/random.py (part 4)
+description: "random.py part 4: Random.choice, choices, shuffle, sample, gauss, normalvariate."
+cpython_path: Lib/random.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/random.py" />
+
+This annotation covers sampling and distribution functions. See `lib_random3_detail` for `Random.random`, `randint`, `randrange`, and the Mersenne Twister state.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Random.choice` | Pick one element from a non-empty sequence |
+| 81-160 | `Random.choices` | Pick k elements with replacement and optional weights |
+| 161-240 | `Random.shuffle` | Fisher-Yates in-place shuffle |
+| 241-320 | `Random.sample` | Pick k unique elements from a population |
+| 321-400 | `Random.gauss` / `normalvariate` | Normal distribution sampling |
+
+## Reading
+
+### `Random.choice`
+
+```python
+# CPython: Lib/random.py:370 Random.choice
+def choice(self, seq):
+    if not len(seq):
+        raise IndexError('Cannot choose from an empty sequence')
+    return seq[int(self.random() * len(seq))]
+```
+
+`choice` picks a uniformly random index by scaling `random()` (which is in `[0, 1)`) to `[0, len(seq))`. The `int()` truncates toward zero.
+
+### `Random.choices`
+
+```python
+# CPython: Lib/random.py:400 Random.choices
+def choices(self, population, weights=None, *, cum_weights=None, k=1):
+    if cum_weights is None:
+        if weights is None:
+            floor = _floor
+            n = len(population)
+            return [population[floor(random() * n)] for _ in _repeat(None, k)]
+        cum_weights = list(_accumulate(weights))
+    elif weights is not None:
+        raise TypeError('...')
+    total = cum_weights[-1] + 0.0
+    if total <= 0.0:
+        raise ValueError('Total of weights must be greater than zero')
+    bisect = _bisect
+    return [population[bisect(cum_weights, random() * total, 0, n)]
+            for _ in _repeat(None, k)]
+```
+
+`choices` with weights uses cumulative weights and `bisect` to find the selected index. This gives O(k log n) time for weighted sampling with replacement.
+
+### `Random.shuffle`
+
+```python
+# CPython: Lib/random.py:370 Random.shuffle
+def shuffle(self, x):
+    # Fisher-Yates algorithm
+    randbelow = self._randbelow
+    for i in reversed(range(1, len(x))):
+        j = randbelow(i + 1)
+        x[i], x[j] = x[j], x[i]
+```
+
+Fisher-Yates shuffle produces a uniformly random permutation in O(n) time. `_randbelow(n)` returns a uniformly random integer in `[0, n)` using rejection sampling to avoid modulo bias.
+
+### `Random.gauss`
+
+```python
+# CPython: Lib/random.py:620 Random.gauss
+def gauss(self, mu=0.0, sigma=1.0):
+    # Uses the Box-Muller transform, but only generates one of the pair.
+    z = self.gauss_next
+    self.gauss_next = None
+    if z is None:
+        x2pi = random() * TWOPI
+        g2rad = _sqrt(-2.0 * _log(1.0 - random()))
+        z = _cos(x2pi) * g2rad
+        self.gauss_next = _sin(x2pi) * g2rad
+    return mu + z * sigma
+```
+
+`gauss` caches one of the two values produced by the Box-Muller transform in `gauss_next`. `normalvariate` uses the Kinderman-Monahan method instead and does not cache.
+
+## gopy notes
+
+`Random.choice` is `module/random.Choice` in `module/random/module.go`. `choices` uses `sort.SearchFloat64s` for bisect. `shuffle` calls `rand.Intn` for `_randbelow`. `gauss` stores `gauss_next` on the `Random` struct.
