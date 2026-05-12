@@ -1,0 +1,78 @@
+---
+title: Lib/subprocess.py
+description: "subprocess module: Popen process lifecycle, communicate() with deadlock-safe read/write, check_call/check_output/run convenience wrappers, and the PIPE/DEVNULL/STDOUT redirection constants."
+cpython_path: Lib/subprocess.py
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/subprocess.py`
+
+<CpyLink path="Lib/subprocess.py" />
+
+`Lib/subprocess.py` provides the `Popen` class and the convenience wrappers `run`,
+`check_call`, `check_output`, and `call`. The platform-specific process spawning lives in
+`_posixsubprocess` (C extension) on POSIX and `winapi` on Windows.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | Constants, `CompletedProcess`, `CalledProcessError`, `TimeoutExpired` | Result and error types |
+| 301-600 | `Popen.__init__` | Process construction, pipe setup, fork/exec |
+| 601-900 | `Popen.communicate` | Read all output, write all input, wait |
+| 901-1100 | `Popen.wait`, `Popen.poll`, `Popen.kill`, `Popen.send_signal` | Process control |
+| 1101-1400 | `run`, `call`, `check_call`, `check_output` | Convenience wrappers |
+| 1401-2200 | POSIX helper: `_execute_child` | `fork`/`execve` with pipe dup2 |
+
+## Reading
+
+### `communicate` deadlock avoidance
+
+`communicate(input=None)` uses threads or `select` to simultaneously write to stdin and
+read from stdout/stderr. Writing stdin while the process's stdout/stderr buffers are full
+would deadlock; the threaded approach prevents this.
+
+```python
+# CPython: Lib/subprocess.py:1120 communicate (POSIX path)
+def communicate(self, input=None, timeout=None):
+    ...
+    if self._communication_started:
+        ...
+    else:
+        if self.stdin:
+            ...
+            stdout, stderr = self._communicate(input, endtime, timeout)
+```
+
+### `_execute_child` POSIX fork path
+
+After `fork()`, the child closes all file descriptors except those being redirected, calls
+`dup2` to set up the pipe ends, sets the process group if `start_new_session=True`, and
+calls `execve`. Any exception in the child is sent back through an error pipe as pickled
+data.
+
+### `run` with `check=True`
+
+`run(args, check=True)` raises `CalledProcessError` if the process exits with a non-zero
+return code. The exception carries `stdout` and `stderr` if they were captured.
+
+```python
+# CPython: Lib/subprocess.py:550 run
+def run(*popenargs, input=None, capture_output=False, timeout=None, check=False, **kwargs):
+    ...
+    with Popen(*popenargs, **kwargs) as process:
+        ...
+        if check and retcode:
+            raise CalledProcessError(retcode, process.args, ...)
+```
+
+## gopy notes
+
+Not yet ported. `subprocess` requires `os.fork`/`os.execve` or their Go equivalents
+(`os/exec`). Planned path: `module/subprocess/`. The Go implementation can use
+`exec.Command` for simple cases and `syscall.ForkExec` for full control over the
+file descriptor table.

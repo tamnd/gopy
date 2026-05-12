@@ -1,0 +1,73 @@
+---
+title: Lib/json/__init__.py
+description: "json package public API: dumps/loads/dump/load, JSONEncoder with default() hook, JSONDecoder with object_hook and object_pairs_hook, and the indent/separators/sort_keys options."
+cpython_path: Lib/json/__init__.py
+cpython_version: "3.14"
+lines: 360
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/json/__init__.py`
+
+<CpyLink path="Lib/json/__init__.py" />
+
+`Lib/json/__init__.py` is the entry point for the `json` package. It provides `dumps`,
+`loads`, `dump`, and `load` as thin wrappers over `JSONEncoder` and `JSONDecoder`. The
+speed-critical string scanning and encoding paths live in `Modules/_json.c`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-50 | Re-exports | `JSONDecodeError`, `JSONEncoder`, `JSONDecoder` |
+| 51-150 | `dumps`, `dump` | Encode Python object to JSON string or file |
+| 151-250 | `loads`, `load` | Decode JSON string or file to Python object |
+| 251-360 | Module-level docs | Parameter reference |
+
+## Reading
+
+### `dumps` parameters
+
+```python
+# CPython: Lib/json/__init__.py:183 dumps
+def dumps(obj, *, skipkeys=False, ensure_ascii=True, check_circular=True,
+          allow_nan=True, cls=None, indent=None, separators=None,
+          default=None, sort_keys=False, **kw):
+    ...
+    if cls is None:
+        cls = JSONEncoder
+    return cls(
+        skipkeys=skipkeys, ensure_ascii=ensure_ascii,
+        check_circular=check_circular, allow_nan=allow_nan, indent=indent,
+        separators=separators, default=default, sort_keys=sort_keys,
+        **kw).encode(obj)
+```
+
+`cls` allows a custom encoder; passing `cls=MyEncoder` is the standard way to extend JSON
+serialization without monkey-patching.
+
+### `default()` hook
+
+`JSONEncoder.default(obj)` is called when an object is not natively serializable. The
+default implementation raises `TypeError`. Override it to return a serializable
+representation.
+
+### `object_hook` and `object_pairs_hook`
+
+`JSONDecoder(object_hook=fn)` calls `fn(dict)` on every JSON object, allowing custom
+deserialization. `object_pairs_hook` receives an ordered list of `(key, value)` pairs,
+useful for preserving key order or building custom mapping types.
+
+### `allow_nan`
+
+When `allow_nan=True` (the default), `NaN`, `Infinity`, and `-Infinity` are encoded as
+JavaScript literals (not valid JSON). When `False`, they raise `ValueError`. Similarly on
+decoding, `nan` and `inf` tokens are accepted by default.
+
+## gopy notes
+
+Not yet ported. `module/json/` is planned. The encoder and decoder both depend on
+`Modules/_json.c` speed paths; the Go port will use `encoding/json` as the backend,
+adjusting for CPython's `NaN`/`Inf` handling and the `object_hook` callback.

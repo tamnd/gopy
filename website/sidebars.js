@@ -294,6 +294,7 @@ const sidebars = {
         'annotations/python/python_frozen_c_detail',
         'annotations/python/python_initconfig_c_detail',
         'annotations/python/python_pythonrun_c_detail',
+        'annotations/python/python_builtins_detail',
       ],
     },
     {
@@ -449,6 +450,8 @@ const sidebars = {
         'annotations/objects/objects_frameobject_detail',
         'annotations/objects/objects_genobject_detail',
         'annotations/objects/objects_cellobject_detail',
+        'annotations/objects/objects_iterobject_detail',
+        'annotations/objects/objects_sliceobject_detail',
       ],
     },
     {
@@ -661,6 +664,7 @@ const sidebars = {
         'annotations/include/include_pystate_h_detail',
         'annotations/include/include_pythonrun_h_detail',
         'annotations/include/include_pyerrors_h2_detail',
+        'annotations/include/include_pylifecycle_h_detail',
       ],
     },
     {
@@ -849,6 +853,8 @@ const sidebars = {
         'annotations/modules/module_statistics_detail',
         'annotations/modules/module_re_detail',
         'annotations/modules/module_signal_detail',
+        'annotations/modules/module_time_detail',
+        'annotations/modules/module_os_detail',
       ],
     },
     {
@@ -1275,6 +1281,9 @@ const sidebars = {
         'annotations/lib/lib_struct_detail',
         'annotations/lib/lib_warnings_detail',
         'annotations/lib/lib_weakref_detail',
+        'annotations/lib/lib_subprocess_detail',
+        'annotations/lib/lib_json_detail',
+        'annotations/lib/lib_csv_detail',
       ],
     },
   ],

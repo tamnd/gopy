@@ -1,0 +1,81 @@
+---
+title: Python/bltinmodule.c (part 2)
+description: "Built-in functions part 2: sorted() with key/reverse, zip() lazy iterator, map() and filter() lazy iterators, any/all short-circuit, vars/dir/getattr/setattr/delattr, input(), and compile()."
+cpython_path: Python/bltinmodule.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/bltinmodule.c` (part 2)
+
+<CpyLink path="Python/bltinmodule.c" />
+
+This annotation covers the second half of `Python/bltinmodule.c` focusing on iteration
+and introspection built-ins. For `print`, `len`, `type`, `isinstance`, `issubclass`,
+`range`, `repr`, `hash`, and the numeric built-ins see the `python_bltinmodule` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | `sorted`, `reversed` | Sorting with Timsort; reversed sequence |
+| 301-600 | `zip`, `map`, `filter` | Lazy iterator factories |
+| 601-800 | `any`, `all` | Short-circuit Boolean iteration |
+| 801-1100 | `vars`, `dir`, `getattr`, `setattr`, `delattr` | Object introspection and mutation |
+| 1101-1400 | `input`, `compile`, `exec`, `eval` | Code execution |
+| 1401-3000 | `open`, `super`, `object`, `staticmethod`, `classmethod` | Core class machinery |
+
+## Reading
+
+### `sorted`
+
+`sorted(iterable, key=None, reverse=False)` materialises the iterable into a list, then
+calls `list.sort`. The key function is applied once per element and the results are cached
+(decorate-sort-undecorate pattern internally managed by the sort comparator).
+
+### `zip` laziness
+
+`zip` creates a `zipobject` that holds N iterators. Each `__next__` call advances all N
+and returns a tuple. Exhaustion of any one iterator exhausts `zip`.
+
+```c
+// CPython: Python/bltinmodule.c:430 zip_next
+static PyObject *
+zip_next(zipobject *lz)
+{
+    Py_ssize_t tuplesize = lz->tuplesize;
+    PyObject *result = lz->result;
+    ...
+    for (Py_ssize_t i = 0; i < tuplesize; i++) {
+        PyObject *it = PyTuple_GET_ITEM(lz->ittuple, i);
+        PyObject *item = Py_TYPE(it)->tp_iternext(it);
+        if (item == NULL) {
+            ...
+            return NULL;
+        }
+        ...
+    }
+    return result;
+}
+```
+
+### `compile`
+
+`compile(source, filename, mode)` calls `PyAST_obj2mod`, `PyAST_CompileObject`, and
+returns a code object. The `mode` argument maps to the `start` token: `'exec'` for
+statements, `'eval'` for expressions, `'single'` for the REPL.
+
+### `super`
+
+`super()` with no arguments (zero-argument `super`) uses `__class__` cell and the first
+argument of the enclosing function. The `__class__` cell is implicitly created by the
+compiler when a method uses `super()`.
+
+## gopy notes
+
+`vm/eval_simple.go` handles `GET_AWAITABLE`, `GET_YIELD_FROM_ITER`, and many of the
+iteration opcodes. The `super()` zero-argument form requires the `__class__` cell variable
+support in `compile/codegen_expr_name.go`. `compile()` maps to `compile.Compile()`.

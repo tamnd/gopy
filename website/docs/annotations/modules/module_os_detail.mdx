@@ -1,0 +1,74 @@
+---
+title: Modules/posixmodule.c
+description: "os module (POSIX): stat/fstat, open/close/read/write/lseek, listdir/scandir, mkdir/rmdir/rename, fork/execve, waitpid, getenv/putenv, getcwd, and the DirEntry type."
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 14000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/posixmodule.c`
+
+<CpyLink path="Modules/posixmodule.c" />
+
+`Modules/posixmodule.c` is the largest module in CPython. It provides the `os` and `posix`
+modules by wrapping POSIX system calls. On Windows the same file compiles to an `nt` module
+with Win32 equivalents.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-1000 | `stat_result`, `statvfs_result` | Named-tuple wrappers for `stat()` output |
+| 1001-3000 | `os_stat_impl`, `os_fstat_impl`, `os_lstat_impl` | File metadata |
+| 3001-5000 | `os_open_impl`, `os_read_impl`, `os_write_impl`, `os_close_impl` | File I/O |
+| 5001-7000 | `os_listdir_impl`, `os_scandir_impl`, `DirEntry` | Directory listing |
+| 7001-9000 | `os_mkdir_impl`, `os_rmdir_impl`, `os_rename_impl`, `os_getcwd_impl` | Filesystem mutation |
+| 9001-11000 | `os_fork_impl`, `os_execve_impl`, `os_waitpid_impl` | Process management |
+| 11001-14000 | Environment, `os.path` bootstrap, `os.walk`, misc | Remaining API |
+
+## Reading
+
+### `DirEntry` and `scandir`
+
+`os.scandir()` returns an iterator of `DirEntry` objects. Unlike `listdir`, `DirEntry`
+caches the `stat` result from the directory read, so `entry.stat()` is often a no-op.
+`entry.is_file()` and `entry.is_dir()` check the cached `d_type` field from `dirent`.
+
+```c
+// CPython: Modules/posixmodule.c:5420 DirEntry_stat
+static PyObject *
+DirEntry_stat(DirEntry *self, PyObject *args, PyObject *kwargs)
+{
+    if (!self->stat) {
+        self->stat = _PyObject_CallMethodIdOneArg(
+            PyImport_ImportModuleNoBlock("os"),
+            &PyId_stat, self->path);
+    }
+    return Py_NewRef(self->stat);
+}
+```
+
+### `os_fork_impl`
+
+`os.fork()` calls `fork()` and then runs `_PyInterpreterState_AfterFork` in the child to
+reinitialize interpreter state (reset GIL, clear signal handlers, reset the import lock).
+
+### GIL release for blocking calls
+
+All blocking syscalls (`read`, `write`, `open`, `waitpid`) release the GIL with
+`Py_BEGIN_ALLOW_THREADS` so other threads can run while the syscall is in progress.
+
+### `os.environ` proxy
+
+`os.environ` is a `Mapping` that calls `os.getenv`/`os.putenv`/`os.unsetenv` on access.
+The `posixmodule.c` side provides the raw `getenv`/`putenv`; the `os` module in Python
+wraps it in `_Environ`.
+
+## gopy notes
+
+Not yet ported. `os` is a foundational module. The planned path is `module/os/`. The Go
+implementation will use `os` and `syscall` packages. `os.fork` / `os.execve` map to
+`syscall.ForkExec`. `DirEntry` maps to `os.DirEntry` from `os.ReadDir`.

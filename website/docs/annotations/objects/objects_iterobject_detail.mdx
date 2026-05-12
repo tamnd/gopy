@@ -1,0 +1,82 @@
+---
+title: Objects/iterobject.c
+description: "seqiterobject and calliterobject: the two generic iterators used by iter(). seqiterobject drives __getitem__ with incrementing index; calliterobject calls a sentinel-checked callable."
+cpython_path: Objects/iterobject.c
+cpython_version: "3.14"
+lines: 230
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/iterobject.c`
+
+<CpyLink path="Objects/iterobject.c" />
+
+`Objects/iterobject.c` defines the two general-purpose iterators created by the `iter()`
+built-in. Most built-in types have their own dedicated iterators; these are the fallbacks
+for objects that do not implement `__iter__` but do implement `__getitem__`, and for the
+two-argument form `iter(callable, sentinel)`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-130 | `seqiterobject`, `iter_new`, `iter_iternext` | Index-based iterator over `__getitem__` |
+| 131-230 | `calliterobject`, `calliter_new`, `calliter_iternext` | Callable-plus-sentinel iterator |
+
+## Reading
+
+### `seqiterobject`
+
+When `iter(obj)` is called on an object with `__getitem__` but no `__iter__`, CPython
+creates a `seqiterobject`. Each `__next__` call does `obj[it_index]` and increments the
+index. When `IndexError` or `StopIteration` is raised, the iterator is exhausted.
+
+```c
+// CPython: Objects/iterobject.c:62 iter_iternext
+static PyObject *
+iter_iternext(PyObject *iterator)
+{
+    seqiterobject *it = (seqiterobject *)iterator;
+    PyObject *seq = it->it_seq;
+    if (seq == NULL) return NULL;
+    PyObject *result = PySequence_GetItem(seq, it->it_index++);
+    if (result != NULL) return result;
+    if (PyErr_ExceptionMatches(PyExc_IndexError) ||
+        PyErr_ExceptionMatches(PyExc_StopIteration)) {
+        PyErr_Clear();
+        it->it_seq = NULL;
+        Py_DECREF(seq);
+    }
+    return NULL;
+}
+```
+
+### `calliterobject`
+
+`iter(callable, sentinel)` creates a `calliterobject`. Each `__next__` calls
+`callable()` with no arguments. If the result equals `sentinel` (by `==`), the iterator
+raises `StopIteration`.
+
+```c
+// CPython: Objects/iterobject.c:185 calliter_iternext
+static PyObject *
+calliter_iternext(calliterobject *it)
+{
+    PyObject *result = _PyObject_CallNoArgs(it->it_callable);
+    if (result != NULL) {
+        int ok = PyObject_RichCompareBool(it->it_sentinel, result, Py_EQ);
+        if (ok == 0) return result;
+        ...
+        return NULL;
+    }
+    ...
+}
+```
+
+## gopy notes
+
+Both iterator types are used by the `FOR_ITER` opcode path in `vm/eval_simple.go`. The
+`seqiterobject` pattern is also used by `tuple` and `list` when their dedicated iterators
+are not available. Both will be ported as part of the core objects layer.

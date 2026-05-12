@@ -1,0 +1,68 @@
+---
+title: Lib/csv.py
+description: "csv module Python layer: register_dialect, get_dialect, list_dialects, DictReader/DictWriter wrappers, Sniffer dialect detection. The parser and writer live in Modules/_csv.c."
+cpython_path: Lib/csv.py
+cpython_version: "3.14"
+lines: 380
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/csv.py`
+
+<CpyLink path="Lib/csv.py" />
+
+`Lib/csv.py` re-exports the C types from `_csv` and adds `DictReader`, `DictWriter`, and
+`Sniffer`. The actual CSV tokeniser is `_csv.reader` / `_csv.writer`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-30 | Re-exports from `_csv` | `reader`, `writer`, `Dialect`, `register_dialect`, `get_dialect` |
+| 31-200 | `DictReader` | Wraps `reader`; maps each row to a dict using `fieldnames` |
+| 201-300 | `DictWriter` | Wraps `writer`; serialises dicts using `fieldnames` order |
+| 301-380 | `Sniffer` | Detect delimiter and quote character from a sample |
+
+## Reading
+
+### `DictReader`
+
+`DictReader` takes a `fieldnames` parameter or infers field names from the first row. Each
+`__next__` call returns an `OrderedDict` mapping field names to values. The `restkey`
+parameter stores extra fields; `restval` fills missing fields.
+
+```python
+# CPython: Lib/csv.py:82 DictReader.__next__
+def __next__(self):
+    ...
+    row = next(self.reader)
+    ...
+    d = dict(zip(self.fieldnames, row))
+    lf = len(self.fieldnames)
+    lr = len(row)
+    if lf < lr:
+        d[self.restkey] = row[lf:]
+    elif lf > lr:
+        for key in self.fieldnames[lr:]:
+            d[key] = self.restval
+    return d
+```
+
+### `Sniffer.sniff`
+
+`Sniffer.sniff(sample)` analyses a sample string and returns a `Dialect` subclass with
+detected `delimiter` and `quotechar`. It tries to count character frequency patterns to
+identify the most likely delimiter.
+
+### `DictWriter.writeheader`
+
+`DictWriter.writeheader()` writes a row consisting of the `fieldnames` values. This
+convenience method was added in Python 2.7.
+
+## gopy notes
+
+Not yet ported. Once `module/csv/` lands with the `_csv` C backend equivalent, `DictReader`
+and `DictWriter` can be ported as thin Go structs that wrap the Go `csv.Reader` /
+`csv.Writer`. `Sniffer` is optional for the initial port.
