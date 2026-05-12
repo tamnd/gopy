@@ -1,0 +1,90 @@
+---
+title: Modules/arraymodule.c (part 5)
+description: "arraymodule.c part 5: array.append, array.extend, array.frombytes, array.tobytes, array.fromlist."
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/arraymodule.c" />
+
+This annotation covers array mutation and conversion. See `modules_array4_detail` for `array.__new__`, `array.__getitem__`, `array.__setitem__`, and type codes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `array.append` | Add one element to the end |
+| 81-160 | `array.extend` | Extend from another array or iterable |
+| 161-240 | `array.frombytes` | Append raw bytes |
+| 241-320 | `array.tobytes` | Return raw bytes of the array's data |
+| 321-600 | `array.fromlist` / `tolist` | Convert between array and list |
+
+## Reading
+
+### `array.append`
+
+```c
+// CPython: Modules/arraymodule.c:840 array_append_impl
+static PyObject *
+array_append_impl(arrayobject *self, PyObject *v)
+{
+    return ins(self, Py_SIZE(self), v);
+}
+
+static int
+ins(arrayobject *self, Py_ssize_t where, PyObject *v)
+{
+    if (array_resize(self, Py_SIZE(self) + 1) < 0) return -1;
+    memmove(self->ob_item + (where + 1) * self->ob_descr->itemsize,
+            self->ob_item + where * self->ob_descr->itemsize,
+            (Py_SIZE(self) - where - 1) * self->ob_descr->itemsize);
+    return setarrayitem(self, where, v);
+}
+```
+
+`append` is `ins` at the end, requiring no `memmove`. `ins` at other positions shifts elements right. `setarrayitem` converts the Python object to the array's type code using the type descriptor's `setitem` function.
+
+### `array.frombytes`
+
+```c
+// CPython: Modules/arraymodule.c:1020 array_frombytes_impl
+static PyObject *
+array_frombytes_impl(arrayobject *self, Py_buffer *buffer)
+{
+    if (buffer->len % self->ob_descr->itemsize != 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "bytes length not a multiple of item size");
+        return NULL;
+    }
+    Py_ssize_t n = Py_SIZE(self);
+    Py_ssize_t add = buffer->len / self->ob_descr->itemsize;
+    if (array_resize(self, n + add) < 0) return NULL;
+    memcpy(self->ob_item + n * self->ob_descr->itemsize,
+           buffer->buf, buffer->len);
+    Py_RETURN_NONE;
+}
+```
+
+`frombytes` appends raw bytes directly without element-by-element conversion. The byte count must be a multiple of the element size. On big-endian machines, the bytes are interpreted in the machine's native byte order.
+
+### `array.tobytes`
+
+```c
+// CPython: Modules/arraymodule.c:1060 array_tobytes_impl
+static PyObject *
+array_tobytes_impl(arrayobject *self)
+{
+    return PyBytes_FromStringAndSize(self->ob_item,
+                                     Py_SIZE(self) * self->ob_descr->itemsize);
+}
+```
+
+`tobytes` returns the raw binary representation of the array. Combined with `frombytes`, this is the canonical way to serialize/deserialize arrays to files or sockets without element-by-element conversion.
+
+## gopy notes
+
+`array.append` is `module/array.ArrayAppend` in `module/array/module.go`. It appends to a Go typed slice (e.g., `[]int32` for `'i'`). `frombytes` copies bytes directly via `unsafe`. `tobytes` returns `[]byte` as a `bytes` object.

@@ -1,0 +1,79 @@
+---
+title: Lib/zipfile/__init__.py (part 3)
+description: "zipfile/__init__.py part 3: ZipFile.open, ZipFile.extract, ZipFile.write, ZipInfo, compression methods."
+cpython_path: Lib/zipfile/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/zipfile/__init__.py" />
+
+This annotation covers reading and writing ZIP entries. See `lib_zipfile2_detail` for `ZipFile.__init__`, `namelist`, `infolist`, and the central directory.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `ZipFile.open` | Open a member as a file-like object |
+| 81-180 | `ZipFile.read` | Read a member's bytes |
+| 181-260 | `ZipFile.extract` / `extractall` | Extract member(s) to filesystem |
+| 261-360 | `ZipFile.write` | Add a file to the archive |
+| 361-500 | Compression methods | `ZIP_STORED`, `ZIP_DEFLATED`, `ZIP_BZIP2`, `ZIP_LZMA` |
+
+## Reading
+
+### `ZipFile.open`
+
+```python
+# CPython: Lib/zipfile/__init__.py:1380 ZipFile.open
+def open(self, name, mode="r", pwd=None, *, force_zip64=False):
+    if isinstance(name, ZipInfo):
+        zinfo = name
+    else:
+        zinfo = self.getinfo(name)
+    if mode == 'r':
+        return self._open_to_read(zinfo, pwd)
+    elif mode == 'w':
+        return self._open_to_write(zinfo, force_zip64=force_zip64)
+
+def _open_to_read(self, zinfo, pwd):
+    self._filerefcnt += 1
+    zef_file = _SharedFile(self.fp, zinfo.header_offset, ...)
+    return ZipExtFile(zef_file, 'rb', zinfo, pwd, True)
+```
+
+`ZipFile.open('data.json')` returns a `ZipExtFile` that decompresses on-the-fly. `_SharedFile` wraps the underlying file pointer, seeking to the member's data offset. Multiple members can be open simultaneously (the shared file handles concurrent seeks via locks).
+
+### `ZipFile.write`
+
+```python
+# CPython: Lib/zipfile/__init__.py:1660 ZipFile.write
+def write(self, filename, arcname=None, compress_type=None,
+          compresslevel=None):
+    fname, arcname = self._get_codecs(filename, arcname)
+    zinfo = ZipInfo.from_file(fname, arcname, ...)
+    if compress_type is not None:
+        zinfo.compress_type = compress_type
+    with open(fname, 'rb') as f:
+        self.writestr(zinfo, f.read(), compress_type, compresslevel)
+```
+
+`write` creates a `ZipInfo` from the file's `stat` result, then calls `writestr`. The local file header is written first, then the (possibly compressed) data. The central directory entry is appended to `self.filelist`.
+
+### Compression methods
+
+| Method | Value | Module |
+|--------|-------|--------|
+| `ZIP_STORED` | 0 | No compression |
+| `ZIP_DEFLATED` | 8 | `zlib.compress` |
+| `ZIP_BZIP2` | 12 | `bz2.compress` |
+| `ZIP_LZMA` | 14 | `lzma.compress` |
+
+Default is `ZIP_STORED`. `ZIP_DEFLATED` requires `zlib`. `compress_type` can be set per-file, overriding the archive default.
+
+## gopy notes
+
+`ZipFile.open` is `module/zipfile.ZipFileOpen` in `module/zipfile/module.go`. It uses Go's `archive/zip` for reading. `ZipFile.write` uses `zip.Writer.Create`. `ZIP_DEFLATED` maps to `zip.Deflate`. Custom compress types are handled by registering decoders.

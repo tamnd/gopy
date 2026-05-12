@@ -1,0 +1,81 @@
+---
+title: Objects/codeobject.c (part 6)
+description: "Objects/codeobject.c part 6: code.__new__, code.replace, _PyCode_GetCode, localsplusnames, exception table."
+cpython_path: Objects/codeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/codeobject.c" />
+
+This annotation covers code object construction and the 3.11+ format. See `objects_codeobject5_detail` for `co_consts`, `co_names`, `co_linetable`, and `co_lnotab`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `code.__new__` | Construct a code object from parameters |
+| 81-180 | `code.replace` | Clone a code object with changed fields |
+| 181-280 | `localsplusnames` / `localspluskinds` | Unified locals + cells + freevars table |
+| 281-380 | Exception table | Mapping from instruction range to handler |
+| 381-600 | `_PyCode_GetCode` | Reconstruct the instruction bytes |
+
+## Reading
+
+### `localsplusnames` / `localspluskinds`
+
+```c
+// CPython: Objects/codeobject.c:240 _PyCode_Validate_Varnames
+/* localspluskinds: bit flags per name
+   CO_FAST_LOCAL:   0x20 — regular local
+   CO_FAST_CELL:    0x40 — cell variable (closed over by inner function)
+   CO_FAST_FREE:    0x80 — free variable (from outer scope cell)
+   CO_FAST_ARG:     0x04 — positional argument
+   CO_FAST_KWARG:   0x08 — keyword argument
+*/
+```
+
+CPython 3.11+ unified `co_varnames`, `co_cellvars`, and `co_freevars` into a single `co_localsplusnames` tuple. `co_localspluskinds` is a bytes object (one byte per name) encoding which category each name falls into. `LOAD_FAST` and `LOAD_DEREF` share the same index space.
+
+### Exception table
+
+```c
+// CPython: Objects/codeobject.c:620 exception table encoding
+/* Entry: (start, size, target, depth_lasti)
+   start:  instruction offset of try block start
+   size:   number of instructions in try block
+   target: instruction offset of except handler
+   depth:  stack depth at start
+   lasti:  whether to push the last-instruction value */
+static int
+parse_exception_table(PyCodeObject *code, ...)
+{
+    /* Variable-length encoding: each entry uses 3-6 bytes */
+    /* start_offset and size are encoded as uvarint (1-2 bytes each) */
+    ...
+}
+```
+
+The exception table replaces the old block stack. Each try/except has an entry: `(start, end, handler, stack_depth)`. When an exception occurs, the interpreter scans the table to find the handler for the current instruction offset.
+
+### `code.replace`
+
+```c
+// CPython: Objects/codeobject.c:840 code_replace_impl
+static PyObject *
+code_replace_impl(PyCodeObject *self, ...)
+{
+    /* Create a new code object, replacing specified fields */
+    /* Used by: functools.wraps, unittest.mock, coverage.py */
+    return _PyCode_New(...);
+}
+```
+
+`code.replace(co_consts=new_consts)` creates a clone with modified constants. Used by testing tools to inject mocks, and by coverage tools to instrument bytecode. The new code object shares most fields with the original.
+
+## gopy notes
+
+`code.__new__` is `objects.NewCodeObject` in `objects/code.go`. `localsplusnames` is a Go `[]string`. `localspluskinds` is a `[]byte`. The exception table is `[]objects.ExceptionTableEntry` with binary search for fast lookup. `code.replace` clones the `objects.Code` struct with the override fields applied.
