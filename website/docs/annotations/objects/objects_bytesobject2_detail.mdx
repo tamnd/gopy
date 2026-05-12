@@ -1,0 +1,88 @@
+---
+title: Objects/bytesobject.c (part 2)
+description: "bytesobject.c part 2: bytes formatting (%b/%s/%r), bytes_concat, bytes_repeat, PyBytes_Concat, interning of short strings, decode method, bytes_contains."
+cpython_path: Objects/bytesobject.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytesobject.c" />
+
+This annotation covers the `bytes` type's formatting, concatenation, interning, and protocol methods. See also `objects_bytesobject_detail` for construction and the buffer protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `PyBytes_FromStringAndSize`, `PyBytes_FromFormat` | Construction |
+| 201-600 | `bytes_concat`, `PyBytes_Concat` | `+` operator |
+| 601-900 | `bytes_repeat` | `*` operator |
+| 901-1200 | `bytes_%` / `_PyBytes_FormatLong` | `%` formatting |
+| 1201-1600 | Short-string interning | `characters[256]` cache |
+| 1601-1900 | `bytes_decode` | `bytes.decode(encoding)` |
+| 1901-2200 | `bytes_contains` | `in` operator (substring search) |
+| 2201-3500 | `tp_methods`: `find`, `count`, `replace`, `split`, `join`, `upper`, `lower`, etc. | String-like methods |
+
+## Reading
+
+### Single-byte interning
+
+```c
+// CPython: Objects/bytesobject.c:1623 single_byte_interning
+static PyBytesObject *characters[256];
+
+PyObject *
+PyBytes_FromStringAndSize(const char *str, Py_ssize_t size)
+{
+    if (size == 0 && (op = nullstring) != NULL) {
+        return Py_NewRef(op);
+    }
+    if (size == 1 && str != NULL) {
+        op = characters[(unsigned char)str[0]];
+        if (op != NULL) return Py_NewRef(op);
+    }
+    ...
+}
+```
+
+A 256-element static array caches all single-byte `bytes` objects. `b'\x00'` through `b'\xff'` are singletons allocated at startup.
+
+### `PyBytes_Concat`
+
+```c
+// CPython: Objects/bytesobject.c:1050 PyBytes_Concat
+void
+PyBytes_Concat(PyObject **pv, PyObject *w)
+{
+    PyObject *v = *pv;
+    if (Py_SIZE(v) > PY_SSIZE_T_MAX - Py_SIZE(w)) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    PyObject *sv = _PyBytes_Resize(&v, Py_SIZE(v) + Py_SIZE(w));
+    ...
+    memcpy((void *)(((PyBytesObject *)sv)->ob_val + Py_SIZE(v)),
+           ((PyBytesObject *)w)->ob_val, Py_SIZE(w));
+    *pv = sv;
+    return;
+error:
+    Py_CLEAR(*pv);
+}
+```
+
+`_PyBytes_Resize` tries to resize in-place (if refcount == 1); otherwise allocates a new object and copies.
+
+### `bytes_decode`
+
+Calls `PyUnicode_Decode(buf, len, encoding, errors)`, which dispatches to the codec registry for the given encoding name.
+
+### `bytes` as a sequence
+
+`bytes` implements `sq_length`, `sq_item`, `sq_ass_item`, `sq_contains`. `b'sub' in b'string'` uses `_PyBytes_Find` (Boyer-Moore-Horspool search for long strings, naive for short).
+
+## gopy notes
+
+The gopy equivalent is `objects/str.go` (which handles both `str` and `bytes`). The interning of single bytes maps to a `[256]*Bytes` array in the package. `bytes.decode()` calls the codec registry. `in` operator maps to Go's `bytes.Contains`.

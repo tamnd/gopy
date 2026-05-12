@@ -474,6 +474,10 @@ const sidebars = {
         'annotations/objects/objects_unicodeobject_detail',
         'annotations/objects/objects_methodobject_detail',
         'annotations/objects/objects_moduleobject_detail',
+        'annotations/objects/objects_bytesobject2_detail',
+        'annotations/objects/objects_listobject2_detail',
+        'annotations/objects/objects_tupleobject2_detail',
+        'annotations/objects/objects_longobject3_detail',
       ],
     },
     {
@@ -692,6 +696,8 @@ const sidebars = {
         'annotations/include/include_pymath_h_detail',
         'annotations/include/include_pycapsule_h_detail',
         'annotations/include/include_pythread_h_detail',
+        'annotations/include/include_pyobject_h2_detail',
+        'annotations/include/include_cpython_listobject2_detail',
       ],
     },
     {
@@ -893,6 +899,8 @@ const sidebars = {
         'annotations/modules/modules_json_detail',
         'annotations/modules/modules_hashlib_detail',
         'annotations/modules/modules_csv_detail',
+        'annotations/modules/modules_ctypes_detail',
+        'annotations/modules/modules_sqlite3_detail',
       ],
     },
     {

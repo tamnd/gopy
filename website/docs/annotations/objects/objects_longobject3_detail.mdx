@@ -1,0 +1,86 @@
+---
+title: Objects/longobject.c (part 3)
+description: "longobject.c part 3: Karatsuba multiplication, small-int cache (-5 to 256), PyLong_AsLongLong/AsUnsignedLongLong, PyLong_FromDouble, PyLong_Format."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 5800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers the `int` type's small-int cache, Karatsuba multiplication, and the conversion and formatting routines. See also `objects_longobject_detail` and `objects_longobject2_detail` for addition/subtraction and division.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | Small-int cache `small_ints[-5:257]` | Cache for frequently used integers |
+| 201-500 | `PyLong_FromLong`, `PyLong_FromLongLong`, `PyLong_FromDouble` | Construction from C types |
+| 501-800 | `PyLong_AsLong`, `PyLong_AsLongLong`, `PyLong_AsUnsignedLongLong` | Conversion to C types |
+| 801-1200 | `long_mul`, Karatsuba multiplication | Multiplication for large integers |
+| 1201-1600 | `PyLong_Format`, `long_format` | Integer to decimal/hex/octal/binary string |
+| 1601-2000 | `PyLong_FromString`, `PyLong_FromUnicodeObject` | String to integer |
+| 2001-5800 | Bitwise ops, modular arithmetic, GCD, pow | Complete set of `int` operations |
+
+## Reading
+
+### Small-int cache
+
+```c
+// CPython: Objects/longobject.c:45 small_ints
+#define NSMALLPOSINTS  257
+#define NSMALLNEGINTS  5
+static PyLongObject *small_ints[NSMALLNEGINTS + NSMALLPOSINTS];
+```
+
+Integers from -5 to 256 are pre-allocated as singletons at startup. `PyLong_FromLong` returns a reference to the cached object for these values. This is why `a = 1; b = 1; a is b` is `True` in CPython.
+
+```c
+// CPython: Objects/longobject.c:295 PyLong_FromLong (fast path)
+if (-NSMALLNEGINTS <= ival && ival < NSMALLPOSINTS) {
+    return Py_NewRef(small_ints[ival + NSMALLNEGINTS]);
+}
+```
+
+### Karatsuba multiplication
+
+For `int`s with 70+ digits, CPython switches from the O(n^2) grade-school algorithm to Karatsuba (O(n^1.585)). The crossover threshold is set by `KARATSUBA_CUTOFF`.
+
+```c
+// CPython: Objects/longobject.c:3460 k_mul (Karatsuba)
+static PyLongObject *
+k_mul(PyLongObject *a, PyLongObject *b)
+{
+    ...
+    /* Split a and b in half */
+    asize = Py_ABS(Py_SIZE(a));
+    ...
+    shift = asize >> 1;
+    ...
+    /* Karatsuba: result = ah*bh * base^2n + ((ah+al)*(bh+bl) - ah*bh - al*bl) * base^n + al*bl */
+    ...
+}
+```
+
+### `PyLong_Format`
+
+Converts the `int` to a string representation. For small integers this is fast; for large ones it uses a divide-and-conquer algorithm that splits the number into two halves, formats each recursively, and concatenates.
+
+```c
+// CPython: Objects/longobject.c:1820 PyLong_Format
+PyObject *
+PyLong_Format(PyObject *aa, int base)
+{
+    ...
+    if (base == 10)
+        return long_format_binary(aa, 10, 0, &_writer, ...);
+    ...
+}
+```
+
+## gopy notes
+
+The gopy equivalent is `objects/int.go`. The small-int cache is replicated as a `[262]*Int` array. For arbitrary-precision arithmetic, gopy uses `math/big.Int` directly. Karatsuba is handled by `math/big.Int.Mul` internally. `PyLong_Format` maps to `big.Int.Text(base)`.

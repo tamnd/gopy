@@ -1,0 +1,79 @@
+---
+title: Modules/_sqlite/module.c
+description: "Modules/_sqlite/: sqlite3 module. Connection, Cursor, Row. execute/executemany/fetchone/fetchall, paramstyle, isolation_level, authorizer, trace."
+cpython_path: Modules/_sqlite/module.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sqlite/module.c" />
+
+`sqlite3` wraps the SQLite C library. The module is organized across several files: `module.c` (registration), `connection.c` (`sqlite3.Connection`), `cursor.c` (`sqlite3.Cursor`), `row.c` (`sqlite3.Row`), and `statement.c` (prepared statements).
+
+## Map
+
+| File | Role |
+|------|------|
+| `module.c` | Module registration, `connect()`, constants |
+| `connection.c` | `Connection`: open, close, execute, commit, rollback, create_function |
+| `cursor.c` | `Cursor`: execute, executemany, fetchone, fetchall, description |
+| `statement.c` | Prepared statement lifecycle |
+| `row.c` | `Row` factory: column-name access for query rows |
+| `microprotocols.c` | DB-API 2 adaptation protocol |
+
+## Reading
+
+### `connect`
+
+```c
+// CPython: Modules/_sqlite/module.c:68 pysqlite_connect
+static PyObject *
+pysqlite_connect(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    ...
+    /* Opens database:
+       database: str (":memory:" for in-memory)
+       timeout: float (default 5.0)
+       detect_types: int (0 = none, PARSE_DECLTYPES | PARSE_COLNAMES)
+       isolation_level: str or None
+       check_same_thread: bool (default True)
+       factory: type (default Connection)
+       cached_statements: int (default 128)
+    */
+    return pysqlite_connection_create(pysqlite_ConnectionType, args, kwargs);
+}
+```
+
+### `Cursor.execute`
+
+```c
+// CPython: Modules/_sqlite/cursor.c pysqlite_cursor_execute
+```
+
+Calls `sqlite3_prepare_v2` to parse the SQL, binds parameters (Python objects to SQLite types via the adaptation protocol), then calls `sqlite3_step` to begin execution.
+
+Python objects are mapped to SQLite types: `None` -> NULL, `int` -> INTEGER, `float` -> REAL, `str` -> TEXT, `bytes` -> BLOB.
+
+### Transaction management
+
+`Connection.isolation_level` controls implicit transaction handling. When set (non-None), DML statements (`INSERT`, `UPDATE`, `DELETE`) automatically begin a transaction. When `None`, the connection is in autocommit mode.
+
+### `create_function`
+
+```python
+# CPython: Lib/sqlite3/connection.py create_function
+conn.create_function("mysum", 2, lambda a, b: a + b)
+```
+
+Registers a Python callable as a SQLite user-defined function. SQLite calls it via `sqlite3_create_function_v2` with a callback that marshals C types to Python and back.
+
+### `Row` factory
+
+`sqlite3.Row` implements the `__getitem__` protocol for both integer indices and case-insensitive column names, allowing `row['columnname']` access.
+
+## gopy notes
+
+Status: not yet ported. Go has `database/sql` with `modernc.org/sqlite` (pure-Go SQLite) or `github.com/mattn/go-sqlite3` (cgo). A gopy `sqlite3` port would wrap `database/sql` with a Python DB-API 2.0 compatible interface: `Connection`, `Cursor`, `Row` types with the same attribute names.

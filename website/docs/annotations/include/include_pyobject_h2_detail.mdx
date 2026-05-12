@@ -1,0 +1,104 @@
+---
+title: Include/object.h (part 2)
+description: "object.h part 2: Py_TYPE, Py_REFCNT, Py_SIZE accessors, PyObject_HEAD_INIT, tp_* slot names, Py_TPFLAGS_*, PyObject_TypeCheck, PyType_Check."
+cpython_path: Include/object.h
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/object.h" />
+
+This annotation supplements `include_object_h_detail` with coverage of the slot-name macros, type flags, and the type-checking accessor macros. These are the building blocks every C extension author uses.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Py_TYPE`, `Py_REFCNT`, `Py_SET_TYPE` | Object field accessors |
+| 101-300 | `PyObject_TypeCheck`, `PyType_Check`, `PyList_Check`, etc. | Type-check macros |
+| 301-500 | `Py_TPFLAGS_*` | Type flags bitfield |
+| 501-700 | `PyTypeObject` slot names | `tp_name`, `tp_new`, `tp_init`, `tp_call`, `tp_repr`, etc. |
+| 701-900 | `PyNumberMethods`, `PySequenceMethods`, `PyMappingMethods`, `PyBufferProcs` | Sub-struct slot tables |
+
+## Reading
+
+### `Py_TYPE` and `Py_REFCNT`
+
+```c
+// CPython: Include/object.h:176 Py_TYPE
+static inline PyTypeObject *
+Py_TYPE(PyObject *ob) {
+    return ob->ob_type;
+}
+
+static inline Py_ssize_t
+Py_REFCNT(PyObject *ob) {
+    return ob->ob_refcnt;
+}
+```
+
+In Python 3.10+ these became inline functions rather than macros for better type safety and debugger support.
+
+### `Py_TPFLAGS_*`
+
+Type flags are bit positions in `PyTypeObject.tp_flags`. Key flags:
+
+| Flag | Meaning |
+|------|---------|
+| `Py_TPFLAGS_HEAPTYPE` | Allocated on heap (Python-defined class) vs static |
+| `Py_TPFLAGS_BASETYPE` | Can be subclassed |
+| `Py_TPFLAGS_HAVE_GC` | Participates in GC cycle detection |
+| `Py_TPFLAGS_IMMUTABLETYPE` | Type cannot be modified after creation (3.10+) |
+| `Py_TPFLAGS_MANAGED_DICT` | Uses the new managed dict protocol (3.12+) |
+| `Py_TPFLAGS_MANAGED_WEAKREF` | Supports weak references (3.12+) |
+| `Py_TPFLAGS_SEQUENCE` | Implements the sequence protocol |
+| `Py_TPFLAGS_MAPPING` | Implements the mapping protocol |
+
+### `PyNumberMethods`
+
+The sub-struct for numeric protocol slots:
+
+```c
+// CPython: Include/object.h:225 PyNumberMethods
+typedef struct {
+    binaryfunc  nb_add;
+    binaryfunc  nb_subtract;
+    binaryfunc  nb_multiply;
+    binaryfunc  nb_remainder;
+    binaryfunc  nb_divmod;
+    ternaryfunc nb_power;
+    unaryfunc   nb_negative;
+    unaryfunc   nb_positive;
+    unaryfunc   nb_absolute;
+    inquiry     nb_bool;
+    ...
+    binaryfunc  nb_floor_divide;
+    binaryfunc  nb_true_divide;
+    binaryfunc  nb_inplace_floor_divide;
+    binaryfunc  nb_inplace_true_divide;
+    unaryfunc   nb_index;
+    binaryfunc  nb_matrix_multiply;
+    binaryfunc  nb_inplace_matrix_multiply;
+} PyNumberMethods;
+```
+
+All slots are optional (can be NULL). The abstract object protocol checks for NULL before calling.
+
+### `PyObject_TypeCheck`
+
+```c
+// CPython: Include/object.h:315 PyObject_TypeCheck
+static inline int
+PyObject_TypeCheck(PyObject *ob, PyTypeObject *type) {
+    return Py_IS_TYPE(ob, type) || PyType_IsSubtype(Py_TYPE(ob), type);
+}
+```
+
+The common pattern for C extension type checking.
+
+## gopy notes
+
+`Py_TPFLAGS_*` maps to boolean fields in gopy's `Type` struct. `PyNumberMethods` maps to Go function fields in the `Type` struct (e.g., `Add func(*Object, *Object) (*Object, error)`). `PyObject_TypeCheck` maps to Go's type assertion `_, ok := obj.(*SomeType); ok || obj.Type().IsSubtype(targetType)`.

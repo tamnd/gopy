@@ -1,0 +1,90 @@
+---
+title: Objects/listobject.c (part 2)
+description: "listobject.c part 2: timsort implementation (list_sort), reverse, count, index, insert, pop, remove. PyList_Reverse, list_richcompare."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+This annotation covers `list.sort()` (timsort), mutating methods, and comparison. See also `objects_listobject_detail` for allocation, `append`, `extend`, and the sequence protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `list_insert`, `list_append`, `list_extend` | Mutating append operations |
+| 101-250 | `list_remove`, `list_index`, `list_count` | Search and remove |
+| 251-450 | `list_reverse` | In-place reversal |
+| 451-700 | `list_pop` | Pop by index |
+| 701-2400 | `list_sort`, timsort internals | Full timsort implementation |
+| 2401-2700 | `list_richcompare`, `list_copy`, `list_clear` | Comparison and copying |
+
+## Reading
+
+### Timsort
+
+`list.sort()` uses timsort, a hybrid stable sort combining mergesort and insertion sort. It was invented by Tim Peters for CPython and is now used in Java, Android, and many other runtimes.
+
+Key parameters:
+- `MIN_MERGE = 32`: minimum run length before merging
+- `MIN_GALLOP = 7`: threshold for switching to galloping mode
+
+```c
+// CPython: Objects/listobject.c:1058 list_sort_impl
+static PyObject *
+list_sort_impl(PyListObject *self, PyObject *keyfunc, int reverse)
+{
+    ...
+    /* Create run stack for merge tracking */
+    MergeState ms;
+    merge_init(&ms, saved_ob_size, keys != NULL, &lo);
+    ...
+    /* Find and extend natural runs, push onto stack */
+    lo.keys = keys;
+    lo.values = values;
+    nremaining = saved_ob_size;
+    ...
+    while (nremaining > 1) {
+        Py_ssize_t n = count_run(ms.keys, lo, hi, &descending);
+        if (n < minrun)
+            n = MIN(nremaining, minrun);
+        binarysort(ms.keys, lo, lo + n, lo + count_run(...));
+        ...
+        merge_collapse(&ms);
+    }
+    merge_force_collapse(&ms);
+    ...
+}
+```
+
+### Galloping mode
+
+During merge, if one run consistently "wins" (the element from one run is smaller than several consecutive elements from the other), timsort switches to galloping mode: binary search to find the run boundary in O(log n) instead of O(n) comparisons.
+
+### Key function optimization
+
+When `key=` is provided, `list.sort` pre-computes all key values into a temporary array. Comparisons are made on the keys; the original values follow the key values through swaps but are never directly compared. After sorting, keys are discarded.
+
+### `list.reverse`
+
+```c
+// CPython: Objects/listobject.c:1044 list_reverse_impl
+static PyObject *
+list_reverse_impl(PyListObject *self)
+{
+    if (Py_SIZE(self) > 1)
+        reverse_slice(self->ob_item, self->ob_item + Py_SIZE(self));
+    Py_RETURN_NONE;
+}
+```
+
+`reverse_slice` is a simple pointer swap loop.
+
+## gopy notes
+
+The gopy `list` implementation is in `objects/list.go` (not yet fully ported for sort). Timsort is available as Go's `slices.SortFunc` (Go 1.21+), which uses pdqsort (a variant of introsort). For exact CPython compatibility, a Go timsort implementation is needed to guarantee stable sort order and identical behavior on partially-sorted inputs.

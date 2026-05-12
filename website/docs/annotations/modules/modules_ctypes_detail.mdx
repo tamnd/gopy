@@ -1,0 +1,77 @@
+---
+title: Modules/_ctypes/ctypes.h
+description: "ctypes.h: ctypes internal types. CDataObject, StgInfo, ffi_type, PyCFuncPtrObject, ffi_cif. The libffi integration layer for calling C functions from Python."
+cpython_path: Modules/_ctypes/ctypes.h
+cpython_version: "3.14"
+lines: 380
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ctypes/ctypes.h" />
+
+`Modules/_ctypes/ctypes.h` defines the core structs for the `ctypes` module: `CDataObject` (the base for all ctypes instances), `StgInfo` (per-type storage info), and `PyCFuncPtrObject` (callable function pointer). `ctypes` uses `libffi` to call C functions with arbitrary signatures at runtime.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `CDataObject` | Base object for all `ctypes` types |
+| 61-140 | `StgInfo` | Per-type metadata: size, alignment, ffi_type, shape |
+| 141-200 | `PyCFuncPtrObject` | Function pointer object with `ffi_cif` |
+| 201-280 | `ffi_type` wrappers | Map Python ctypes types to libffi types |
+| 281-380 | Helper macros | `CDataObject_Check`, `StgInfo_Get`, `TYPEFLAG_*` |
+
+## Reading
+
+### `CDataObject`
+
+All ctypes values (`c_int`, `Structure`, `POINTER(...)`, etc.) are instances of types derived from `CDataObject`.
+
+```c
+// CPython: Modules/_ctypes/ctypes.h:45 CDataObject
+typedef struct tagCDataObject {
+    PyObject_HEAD
+    char *b_ptr;         /* pointer to memory block */
+    int   b_needsfree;   /* does b_ptr need to be freed? */
+    CDataObject *b_base; /* base object or NULL */
+    Py_ssize_t b_size;   /* size of memory block */
+    Py_ssize_t b_length; /* number of items in array/struct */
+    Py_ssize_t b_index;  /* index of this item in b_base */
+    PyObject *b_objects; /* internal objects, or NULL */
+} CDataObject;
+```
+
+`b_ptr` points to the raw memory. For values that own their memory, `b_needsfree=1` and the memory is freed on deallocation.
+
+### `StgInfo`
+
+Attached to every ctypes type (not instance). Stores the `ffi_type*` for libffi calls, the struct field layout for `Structure` types, and element types for `Array` and `POINTER` types.
+
+```c
+// CPython: Modules/_ctypes/ctypes.h:97 StgInfo
+typedef struct {
+    int initialized;
+    Py_ssize_t size;          /* number of bytes */
+    Py_ssize_t align;         /* alignment requirement */
+    Py_ssize_t length;        /* array length (if array) */
+    ffi_type ffi_type_pointer;/* pre-filled ffi_type */
+    PyObject *proto;          /* element type (for POINTER/Array) */
+    SETFUNC setfunc;          /* set value from Python object */
+    GETFUNC getfunc;          /* get value as Python object */
+    ...
+} StgInfo;
+```
+
+### `libffi` integration
+
+`PyCFuncPtrObject` holds a compiled `ffi_cif` (call interface) that describes the function's return type and argument types. Calling the function pointer invokes `ffi_call(&cif, fn_ptr, &result, args)`, which handles the platform ABI (stack layout, register passing) transparently.
+
+### `ctypes.Structure`
+
+Structure types build their field layout from a `_fields_` class attribute. Each field specifies a name, ctypes type, and optional bit width. `StgInfo` stores the computed `ffi_type.elements[]` array for the structure.
+
+## gopy notes
+
+Status: not yet ported. `ctypes` requires `libffi` integration and a full layout engine for C types. In Go, `cgo` provides direct C interop, making `ctypes` less critical. However, for Python scripts that use `ctypes` to call shared libraries, a gopy `ctypes` port would need to integrate with `unsafe.Pointer` and a Go `libffi` binding.

@@ -1,0 +1,97 @@
+---
+title: Objects/tupleobject.c (part 2)
+description: "tupleobject.c part 2: freelist for small tuples (sizes 0-19), tuple_hash, tuple_richcompare, PyTuple_Pack, tuple_new, _PyTuple_FromArray."
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 780
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/tupleobject.c" />
+
+This annotation covers `tuple`'s freelist (small-tuple caching), hashing, rich comparison, and the fast construction paths. See also `objects_tupleobject_detail` for the basic layout and sequence protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `tuple_freelist` | Per-size freelist for tuples 0-19 items |
+| 81-200 | `tuple_new_notrack`, `_PyTuple_FromArray` | Fast construction paths |
+| 201-350 | `PyTuple_Pack` | Variadic construction from C arguments |
+| 351-500 | `tuple_hash` | Hash using a mixed multiply-xor formula |
+| 501-650 | `tuple_richcompare` | Lexicographic comparison |
+| 651-780 | `tuple_repr`, `tuple_dealloc` | Repr and deallocation with freelist push |
+
+## Reading
+
+### Freelist for small tuples
+
+CPython maintains a freelist of recently deallocated tuples for sizes 0 through `PyTuple_MAXFREELIST-1` (20). When a small tuple is deallocated, its storage is not freed but instead pushed onto the freelist. The next allocation of the same size pops from the freelist, avoiding a `malloc`/`free` round-trip.
+
+```c
+// CPython: Objects/tupleobject.c:256 tuple_dealloc (freelist push)
+static void
+tuple_dealloc(PyObject *self)
+{
+    ...
+    Py_ssize_t i = Py_SIZE(op);
+    if (i > 0 && i < PyTuple_MAXFREELIST) {
+        struct _Py_tuple_state *state = ...;
+        if (state->numfree[i] < PyTuple_MAXSAVESIZE) {
+            op->ob_item[0] = (PyObject *) state->free_list[i];
+            state->free_list[i] = op;
+            state->numfree[i]++;
+            return;
+        }
+    }
+    PyObject_GC_Del(op);
+}
+```
+
+### `tuple_hash`
+
+Uses Py_uhash_t accumulation with a prime multiplier and XOR mixing, plus a final bit-spreading step. The hash of a 0-tuple is a fixed constant; the hash of a 1-tuple is the hash of its element with a rotation.
+
+```c
+// CPython: Objects/tupleobject.c:398 tuplehash
+static Py_hash_t
+tuplehash(PyTupleObject *v)
+{
+    Py_uhash_t x = 0x345678UL;
+    Py_ssize_t len = Py_SIZE(v);
+    PyObject **p = v->ob_item;
+    Py_uhash_t mult = _PyHASH_XXPRIME_5;
+    while (--len >= 0) {
+        Py_uhash_t y = (Py_uhash_t)PyObject_Hash(*p++);
+        x = (x ^ y) * mult;
+        mult += (Py_uhash_t)(82520UL + len + len);
+    }
+    x += 97531UL;
+    if (x == (Py_uhash_t)-1)
+        x = 590923713UL;
+    return x;
+}
+```
+
+### `PyTuple_Pack`
+
+```c
+// CPython: Objects/tupleobject.c:310 PyTuple_Pack
+PyObject *
+PyTuple_Pack(Py_ssize_t n, ...)
+{
+    va_list vargs;
+    va_start(vargs, n);
+    PyObject *result = _PyTuple_FromStackItems(n, ...);
+    va_end(vargs);
+    return result;
+}
+```
+
+Widely used in C extension code to create a tuple from a fixed number of `PyObject*` arguments without going through Python.
+
+## gopy notes
+
+The gopy equivalent is `objects/tuple.go`. The freelist optimization is not replicated in gopy (Go's allocator handles small objects efficiently). `tuple_hash` is ported as `objects/tuple.go:hash()` using the same prime mixing formula. `PyTuple_Pack` maps to `objects.NewTuple(items...)`.
