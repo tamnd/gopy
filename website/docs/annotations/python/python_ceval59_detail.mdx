@@ -1,0 +1,99 @@
+---
+title: Python/ceval.c (part 59)
+description: "Python/ceval.c part 59: WITH_EXCEPT_START, PUSH_EXC_INFO, POP_EXCEPT, CLEANUP_THROW."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers exception context management opcodes. See `python_ceval58_detail` for `RAISE_VARARGS`, `RERAISE`, and `CHECK_EXC_MATCH`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PUSH_EXC_INFO` | Save current exception, push new one |
+| 81-160 | `POP_EXCEPT` | Restore saved exception, pop handler frame |
+| 161-260 | `WITH_EXCEPT_START` | Call `__exit__` with active exception |
+| 261-380 | `CLEANUP_THROW` | Handle `throw()` into a generator |
+| 381-500 | Exception stack layout | How exc_info interacts with the value stack |
+
+## Reading
+
+### `PUSH_EXC_INFO`
+
+```c
+// CPython: Python/ceval.c:3820 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    if (exc_info->previous_item == NULL) {
+        assert(exc_info == &tstate->exc_state);
+    }
+    prev_exc = exc_info->exc_value;
+    DEAD(prev_exc);  /* Will be restored by POP_EXCEPT */
+    exc_info->exc_value = Py_NewRef(new_exc);
+}
+```
+
+`PUSH_EXC_INFO` saves the current active exception (`prev_exc`) onto the value stack and installs `new_exc` as the thread-state active exception. This enables `except` clauses to call `sys.exc_info()` and get the current exception.
+
+### `POP_EXCEPT`
+
+```c
+// CPython: Python/ceval.c:3848 POP_EXCEPT
+inst(POP_EXCEPT, (exc_value --)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    PyObject *value = exc_info->exc_value;
+    exc_info->exc_value = exc_value;
+    Py_XDECREF(value);
+}
+```
+
+`POP_EXCEPT` restores the previously active exception from the value stack. After the `except` block finishes, the exception that was active before the `try` is reinstated. This maintains correct `sys.exc_info()` behavior during nested exception handlers.
+
+### `WITH_EXCEPT_START`
+
+```c
+// CPython: Python/ceval.c:3880 WITH_EXCEPT_START
+inst(WITH_EXCEPT_START, (exit_self, lasti, exc --  exit_self, lasti, exc, res)) {
+    /* Call exit(exc_type, exc_val, exc_tb) */
+    PyObject *exc_type = Py_TYPE(exc);
+    PyObject *exc_tb = PyException_GetTraceback(exc);
+    PyObject *stack[4] = {NULL, exc_type, exc, exc_tb};
+    res = PyObject_Vectorcall(exit_self, stack + 1,
+                              3 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
+    Py_XDECREF(exc_tb);
+    ERROR_IF(res == NULL, error);
+}
+```
+
+`__exit__` receives `(exc_type, exc_value, exc_traceback)`. If it returns a truthy value, the exception is suppressed. `lasti` is the offset of the `WITH_EXCEPT_START` instruction, used to resume after the `with` block on suppression.
+
+### `CLEANUP_THROW`
+
+```c
+// CPython: Python/ceval.c:3940 CLEANUP_THROW
+inst(CLEANUP_THROW, (exc_value, last_sent_val, tb --  out0, out1)) {
+    /* Called when throw() raises StopIteration — unwrap it */
+    if (PyErr_GivenExceptionMatches(exc_value, PyExc_StopIteration)) {
+        out0 = Py_NewRef(Py_None);
+        out1 = Py_NewRef(((PyStopIterationObject *)exc_value)->value);
+    } else {
+        /* Re-raise */
+        Py_INCREF(exc_value);
+        PyErr_SetRaisedException(exc_value);
+        ERROR_IF(true, error);
+    }
+}
+```
+
+`CLEANUP_THROW` handles the case where `generator.throw(exc)` causes a `StopIteration` inside the generator. The `StopIteration.value` becomes the result of the `yield from` or `await` expression.
+
+## gopy notes
+
+`PUSH_EXC_INFO` is in `vm/eval_unwind.go`; it updates `vm.Frame.ExcInfo`. `POP_EXCEPT` restores the saved exception value. `WITH_EXCEPT_START` calls `objects.CallVectorcall` with the exit function. `CLEANUP_THROW` is in `vm/eval_gen.go` and unwraps `objects.StopIteration`.

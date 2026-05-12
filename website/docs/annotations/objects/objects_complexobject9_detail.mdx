@@ -1,0 +1,114 @@
+---
+title: Objects/complexobject.c (part 9)
+description: "Objects/complexobject.c part 9: complex.__format__, complex conjugate, __abs__, __bool__, PyComplex_AsCComplex."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers complex number output and conversion. See `objects_complexobject8_detail` for `complex.__new__`, arithmetic operations, and `__hash__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `complex.__repr__` / `__str__` | Format as `(a+bj)` or `bj` |
+| 81-160 | `complex.__format__` | Format spec for real and imaginary parts |
+| 161-240 | `complex.conjugate` | Return `a - bj` |
+| 241-320 | `complex.__abs__` | `sqrt(a² + b²)` with overflow protection |
+| 321-500 | `PyComplex_AsCComplex` | Extract `Py_complex` from any numeric type |
+
+## Reading
+
+### `complex.__repr__`
+
+```c
+// CPython: Objects/complexobject.c:480 complex_repr
+static PyObject *
+complex_repr(PyComplexObject *v)
+{
+    Py_complex c = v->cval;
+    char buf[256];
+    if (c.real == 0.) {
+        PyOS_snprintf(buf, sizeof(buf), "%gj", c.imag);
+    } else {
+        PyOS_snprintf(buf, sizeof(buf), "(%g%+gj)", c.real, c.imag);
+    }
+    return PyUnicode_FromString(buf);
+}
+```
+
+When the real part is zero, the complex number is formatted as `bj` (no parentheses). Otherwise it is `(a+bj)` or `(a-bj)`. The `%+g` format always prints the sign, producing `(1+2j)` and `(1-2j)`.
+
+### `complex.__abs__`
+
+```c
+// CPython: Objects/complexobject.c:540 complex_abs
+static PyObject *
+complex_abs(PyComplexObject *v)
+{
+    double result;
+    Py_BEGIN_ALLOW_THREADS
+    result = _Py_c_abs(v->cval);
+    Py_END_ALLOW_THREADS
+    if (result == Py_HUGE_VAL && !Py_IS_INFINITY(v->cval.real)
+        && !Py_IS_INFINITY(v->cval.imag)) {
+        PyErr_SetString(PyExc_OverflowError, "absolute value too large");
+        return NULL;
+    }
+    return PyFloat_FromDouble(result);
+}
+```
+
+`_Py_c_abs` is `hypot(real, imag)`, which is numerically stable and avoids intermediate overflow. The overflow check catches the case where neither component is infinite but the hypothenuse overflows `double`.
+
+### `complex.conjugate`
+
+```c
+// CPython: Objects/complexobject.c:570 complex_conjugate
+static PyObject *
+complex_conjugate(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    Py_complex c = ((PyComplexObject *)self)->cval;
+    c.imag = -c.imag;
+    return PyComplex_FromCComplex(c);
+}
+```
+
+`(3+4j).conjugate()` returns `(3-4j)`. The real part is unchanged; the imaginary part is negated. Conjugates are used in division: `a/b = a * conj(b) / abs(b)²`.
+
+### `PyComplex_AsCComplex`
+
+```c
+// CPython: Objects/complexobject.c:380 PyComplex_AsCComplex
+Py_complex
+PyComplex_AsCComplex(PyObject *op)
+{
+    Py_complex cv;
+    if (PyComplex_Check(op)) {
+        return ((PyComplexObject *)op)->cval;
+    }
+    /* Try __complex__ */
+    PyObject *newop = _PyObject_LookupSpecial(op, &_Py_ID(__complex__));
+    if (newop != NULL) {
+        PyObject *r = PyObject_CallNoArgs(newop);
+        /* extract from r */
+        ...
+    }
+    /* Fall back to __float__ */
+    double x = PyFloat_AsDouble(op);
+    cv.real = x; cv.imag = 0.;
+    return cv;
+}
+```
+
+Any object with `__complex__` or `__float__` can be used where a complex is expected. The fallback produces a complex with zero imaginary part, so `complex(3)` and `complex(3.0)` both yield `(3+0j)`.
+
+## gopy notes
+
+`complex.__repr__` is in `objects/complex.go`. `complex.__abs__` calls `math.Hypot`. `complex.conjugate` creates a new `objects.Complex` with negated imaginary part. `PyComplex_AsCComplex` tries `__complex__` via `objects.LookupSpecial` then falls back to `objects.AsFloat`.

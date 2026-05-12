@@ -1,0 +1,152 @@
+---
+title: Modules/_csv.c (part 5)
+description: "_csv.c part 5: csv.reader row parsing, dialect field parsing, quoting modes, csv.writer."
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_csv.c" />
+
+This annotation covers the core CSV parsing and writing logic. See `modules_csv4_detail` for `csv.Dialect`, dialect registration, and field parsing setup.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Reader_iternext` | Parse one line into a row list |
+| 101-240 | `parse_process_char` | State machine: character-by-character field parsing |
+| 241-340 | `Writer_writerow` | Format a sequence into CSV |
+| 341-460 | Quoting modes | `QUOTE_ALL`, `QUOTE_MINIMAL`, `QUOTE_NONNUMERIC`, `QUOTE_NONE` |
+| 461-600 | `join_append` | Append a field to the output buffer |
+
+## Reading
+
+### `Reader_iternext`
+
+```c
+// CPython: Modules/_csv.c:520 Reader_iternext
+static PyObject *
+Reader_iternext(ReaderObj *self)
+{
+    PyObject *fields = NULL;
+    Py_UCS4 c;
+    Py_ssize_t pos, linelen;
+    unsigned int kind;
+    const void *data;
+    PyObject *lineobj;
+
+    lineobj = PyIter_Next(self->input_iter);
+    if (lineobj == NULL) return NULL;  /* StopIteration */
+
+    self->field_len = 0;
+    self->state = START_RECORD;
+    linelen = PyUnicode_GET_LENGTH(lineobj);
+    data = PyUnicode_DATA(lineobj);
+    kind = PyUnicode_KIND(lineobj);
+
+    for (pos = 0; pos < linelen; pos++) {
+        c = PyUnicode_READ(kind, data, pos);
+        if (parse_process_char(self, module_state, c, &fields) < 0) {
+            Py_XDECREF(fields);
+            return NULL;
+        }
+    }
+    if (parse_process_char(self, module_state, 0, &fields) < 0) { /* EOF */
+        Py_XDECREF(fields);
+        return NULL;
+    }
+    return fields;
+}
+```
+
+The reader iterates over lines from `input_iter` (any iterable of strings). Each line is processed character by character through the `parse_process_char` state machine. A sentinel `0` character signals end-of-line to flush the last field.
+
+### `parse_process_char` state machine
+
+```c
+// CPython: Modules/_csv.c:400 parse_process_char
+static int
+parse_process_char(ReaderObj *self, _csvstate *module_state,
+                   Py_UCS4 c, PyObject **fields)
+{
+    switch (self->state) {
+    case START_RECORD:
+        if (c == '\n' || c == '\r' || c == 0) {
+            self->state = EAT_CRNL;
+            break;
+        }
+        /* Fall through to START_FIELD */
+    case START_FIELD:
+        if (c == self->dialect->quotechar && self->dialect->quoting != QUOTE_NONE) {
+            self->state = IN_QUOTED_FIELD;
+        } else if (c == self->dialect->delimiter) {
+            parse_save_field(self, fields);  /* empty field */
+        } else {
+            parse_add_char(self, c);
+            self->state = IN_FIELD;
+        }
+        break;
+    case IN_QUOTED_FIELD:
+        if (c == self->dialect->quotechar) {
+            self->state = QUOTE_IN_QUOTED_FIELD;
+        } else {
+            parse_add_char(self, c);
+        }
+        break;
+    /* ... more states ... */
+    }
+}
+```
+
+The state machine has 8 states: `START_RECORD`, `START_FIELD`, `ESCAPED_CHAR`, `IN_FIELD`, `IN_QUOTED_FIELD`, `QUOTE_IN_QUOTED_FIELD`, `EAT_CRNL`, `AFTER_ESCAPED_CRNL`. Quoting mode controls whether `"` starts a quoted field or is treated as a regular character.
+
+### `Writer_writerow`
+
+```c
+// CPython: Modules/_csv.c:780 csv_writerow
+static PyObject *
+csv_writerow(WriterObj *self, PyObject *seq)
+{
+    DialectObj *dialect = self->dialect;
+    PyObject *iter = PyObject_GetIter(seq);
+    PyObject *field;
+
+    self->rec_size = 0;
+    while ((field = PyIter_Next(iter)) != NULL) {
+        if (self->rec_size > 0)
+            join_append_data(self, dialect->delimiter, 0, 1, &quoted);
+        if (join_append(self, field, self->num_fields == 0) < 0) {
+            Py_DECREF(iter);
+            return NULL;
+        }
+        self->num_fields++;
+    }
+    /* Terminate with line terminator */
+    join_append_data(self, '\r', 0, 0, &quoted);
+    if (dialect->lineterminator[1])
+        join_append_data(self, '\n', 0, 0, &quoted);
+    return PyObject_CallMethodOneArg(self->writeline,
+                                     &_Py_ID(write), rec_obj);
+}
+```
+
+Each field is appended with `join_append`, which handles quoting. After all fields, the line terminator (`\r\n` by default, `\n` for `unix` dialect) is appended and the entire row is written via `writeline.write()`.
+
+### Quoting modes
+
+| Mode | Behavior |
+|------|----------|
+| `QUOTE_MINIMAL` | Quote only when delimiter/quotechar/newline appears in field |
+| `QUOTE_ALL` | Always quote every field |
+| `QUOTE_NONNUMERIC` | Quote non-numeric fields; reader converts unquoted fields to `float` |
+| `QUOTE_NONE` | Never quote; use `escapechar` instead |
+| `QUOTE_NOTNULL` | Quote all non-`None` fields (3.12+) |
+| `QUOTE_STRINGS` | Quote all string fields (3.12+) |
+
+## gopy notes
+
+`csv.reader` is `module/csv.Reader` in `module/csv/module.go`. `parse_process_char` is a Go switch on `reader.state`. `csv.writer` is `module/csv.Writer`; `writerow` iterates via `objects.Iter`. Quoting modes are integer constants mirroring `_csv.QUOTE_*`.

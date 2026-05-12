@@ -1,0 +1,107 @@
+---
+title: Lib/pprint.py (part 3)
+description: "pprint.py part 3: PrettyPrinter._pprint_dict, _pprint_set, _pprint_tuple, _pprint_dataclass, width/depth."
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pprint.py" />
+
+This annotation covers the collection formatters. See `lib_pprint2_detail` for `PrettyPrinter.__init__`, `pformat`, `_format`, and the repr dispatch.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_pprint_dict` | Format `{k: v, ...}` with optional sorting |
+| 81-160 | `_pprint_set` / `_pprint_frozenset` | Format sets with `{...}` or `frozenset({...})` |
+| 161-240 | `_pprint_tuple` | Format tuples; single-element gets trailing comma |
+| 241-320 | `_pprint_dataclass` | Format dataclass instances field-by-field |
+| 321-500 | Width/depth logic | `_format_items`, indent stack, `max_width` |
+
+## Reading
+
+### `_pprint_dict`
+
+```python
+# CPython: Lib/pprint.py:194 PrettyPrinter._pprint_dict
+def _pprint_dict(self, object, stream, indent, allowance, context, level):
+    write = stream.write
+    write('{')
+    if self._sort_dicts:
+        items = sorted(object.items(), key=_safe_tuple)
+    else:
+        items = object.items()
+    self._format_dict_items(items, stream, indent, allowance + 1,
+                            context, level)
+    write('}')
+```
+
+`sort_dicts=True` (the default) sorts keys with `_safe_tuple` to handle mixed-type keys gracefully. Pass `sort_dicts=False` to preserve insertion order, which is useful when dict order encodes meaning (configuration, JSON round-trips).
+
+### `_pprint_set`
+
+```python
+# CPython: Lib/pprint.py:230 PrettyPrinter._pprint_set
+def _pprint_set(self, object, stream, indent, allowance, context, level):
+    if not len(object):
+        stream.write(repr(object))
+        return
+    typ = object.__class__
+    if typ is set:
+        stream.write('{')
+        endchar = '}'
+    else:
+        stream.write(typ.__name__ + '({')
+        endchar = '})'
+        indent += len(typ.__name__) + 1
+    self._format_items(sorted(object, key=_safe_key),
+                       stream, indent, allowance + len(endchar),
+                       context, level)
+    stream.write(endchar)
+```
+
+Empty sets can't use `{}` (that's a dict literal), so `repr(set())` returns `'set()'`. Non-empty sets are always sorted for deterministic output. `frozenset` wraps in `frozenset({...})`.
+
+### `_pprint_tuple`
+
+```python
+# CPython: Lib/pprint.py:260 PrettyPrinter._pprint_tuple
+def _pprint_tuple(self, object, stream, indent, allowance, context, level):
+    if len(object) == 1:
+        stream.write('(')
+        self._format(object[0], stream, indent + 1, allowance + 2,
+                     context, level)
+        stream.write(',)')
+    else:
+        self._format_items(object, stream, indent + 1, allowance + 1,
+                           context, level, '(', ')')
+```
+
+Single-element tuples require the trailing comma. Multi-element tuples delegate to `_format_items` for width-aware line breaking.
+
+### `_pprint_dataclass`
+
+```python
+# CPython: Lib/pprint.py:290 PrettyPrinter._pprint_dataclass
+def _pprint_dataclass(self, object, stream, indent, allowance, context, level):
+    cls_name = object.__class__.__name__
+    stream.write(cls_name + '(')
+    indent += len(cls_name) + 1
+    items = [(f.name, getattr(object, f.name))
+             for f in dataclasses.fields(object)
+             if f.repr]
+    self._format_dict_items(items, stream, indent, allowance + 1,
+                            context, level, '=')
+    stream.write(')')
+```
+
+Dataclasses are formatted as `ClassName(field=value, ...)`. Only fields with `repr=True` (the default) are included. The separator is `=` not `: ` to match dataclass repr style.
+
+## gopy notes
+
+`PrettyPrinter` is `module/pprint.Printer` in `module/pprint/module.go`. `_pprint_dict` uses `objects.DictItems` and an optional sort. `_pprint_set` calls `objects.SetToSortedSlice`. `_pprint_dataclass` iterates `dataclasses.Fields` via the dataclasses module port.
