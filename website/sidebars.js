@@ -416,6 +416,7 @@ const sidebars = {
         'annotations/python/python_import8_detail',
         'annotations/python/python_ceval48_detail',
         'annotations/python/python_compile10_detail',
+        'annotations/python/python_symtable8_detail',
       ],
     },
     {
@@ -699,6 +700,7 @@ const sidebars = {
         'annotations/objects/objects_typeobject8_detail',
         'annotations/objects/objects_longobject14_detail',
         'annotations/objects/objects_complexobject8_detail',
+        'annotations/objects/objects_rangeobject3_detail',
       ],
     },
     {
@@ -1275,6 +1277,7 @@ const sidebars = {
         'annotations/modules/modules_sqlite5_detail',
         'annotations/modules/modules_ssl5_detail',
         'annotations/modules/modules_hashlib6_detail',
+        'annotations/modules/modules_zlib6_detail',
       ],
     },
     {
@@ -1893,6 +1896,7 @@ const sidebars = {
         'annotations/lib/lib_copyreg2_detail',
         'annotations/lib/lib_pickle4_detail',
         'annotations/lib/lib_profile2_detail',
+        'annotations/lib/lib_typing5_detail',
       ],
     },
   ],

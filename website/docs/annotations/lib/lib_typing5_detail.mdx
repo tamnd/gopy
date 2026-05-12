@@ -1,0 +1,93 @@
+---
+title: Lib/typing.py (part 5)
+description: "typing.py part 5: TypeVar, ParamSpec, TypeVarTuple, Generic.__class_getitem__, get_type_hints."
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/typing.py" />
+
+This annotation covers type variable creation and generic class machinery. See `module_typing4_detail` for `Union`, `Optional`, `Literal`, `Annotated`, and `get_origin`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `TypeVar` | Create a generic type variable |
+| 81-160 | `ParamSpec` | Type variable for parameter specifications |
+| 161-240 | `TypeVarTuple` | Type variable for variadic generics |
+| 241-360 | `Generic.__class_getitem__` | `List[int]` subscript resolution |
+| 361-500 | `get_type_hints` | Evaluate forward references in annotations |
+
+## Reading
+
+### `TypeVar`
+
+```python
+# CPython: Lib/typing.py:280 TypeVar
+class TypeVar(_Final, _root=True):
+    """Type variable.
+
+    Usage::
+        T = TypeVar('T')
+        S = TypeVar('S', bound=str)
+        A = TypeVar('A', int, str)   # constrained
+    """
+    __slots__ = ('__name__', '__bound__', '__constraints__',
+                 '__covariant__', '__contravariant__', '__infer_variance__')
+
+    def __init__(self, name, *constraints, bound=None,
+                 covariant=False, contravariant=False,
+                 infer_variance=False):
+        self.__name__ = name
+        self.__bound__ = bound
+        self.__constraints__ = constraints
+        ...
+```
+
+`TypeVar` objects are identity-compared: `T = TypeVar('T')` creates one, and `T is T` is `True`. The `bound` restricts what types `T` can be substituted with (`bound=str` means `T` must be `str` or a subclass).
+
+### `Generic.__class_getitem__`
+
+```python
+# CPython: Lib/typing.py:720 Generic.__class_getitem__
+def __class_getitem__(cls, params):
+    """Support for List[int], Dict[str, int], etc."""
+    if not isinstance(params, tuple):
+        params = (params,)
+    # Validate params are types or TypeVars
+    ...
+    return _GenericAlias(cls, params)
+```
+
+`List[int]` calls `List.__class_getitem__(int)`. `_GenericAlias` stores `(List, (int,))` and supports further subscripting. `isinstance([], List[int])` is not supported at runtime (type checkers only), but `get_origin(List[int]) is list` and `get_args(List[int]) == (int,)`.
+
+### `get_type_hints`
+
+```python
+# CPython: Lib/typing.py:2280 get_type_hints
+def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
+    """Return a dict of {name: type} from annotations.
+    Evaluates forward references (strings) in the appropriate namespaces."""
+    hints = {}
+    if isinstance(obj, type):
+        for base in reversed(obj.__mro__):
+            base_globals = getattr(sys.modules.get(base.__module__, None), '__dict__', {})
+            ann = base.__dict__.get('__annotations__', {})
+            for name, value in ann.items():
+                if isinstance(value, str):
+                    value = ForwardRef(value)
+                hints[name] = _eval_type(value, base_globals, localns)
+    ...
+    return hints
+```
+
+`get_type_hints` resolves `'int'` string annotations (used when `from __future__ import annotations` is in effect) by evaluating them in the module's global namespace. It walks the MRO so inherited annotations are included.
+
+## gopy notes
+
+`TypeVar` is `objects.TypeVar` in `objects/typevar.go`. `ParamSpec` is `objects.ParamSpec`. `Generic.__class_getitem__` returns `objects.GenericAlias` (defined in `objects/generic_alias.go`). `get_type_hints` is `module/typing.GetTypeHints` in `module/typing/module.go`; it calls `vm.EvalExpr` to evaluate string annotations.

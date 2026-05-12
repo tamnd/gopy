@@ -1,0 +1,86 @@
+---
+title: Objects/rangeobject.c (part 3)
+description: "Objects/rangeobject.c part 3: range.__contains__, range.__len__, range.__iter__, longrange_iterator."
+cpython_path: Objects/rangeobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/rangeobject.c" />
+
+This annotation covers range membership testing and iteration. See `python_ceval37_detail` for `FOR_ITER`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `range.__contains__` | O(1) membership test |
+| 81-160 | `range.__len__` | Compute length without iterating |
+| 161-260 | `range.__iter__` | Return a `range_iterator` |
+| 261-400 | `longrange_iterator` | Iterator for ranges that exceed `sys.maxsize` |
+
+## Reading
+
+### `range.__contains__`
+
+```c
+// CPython: Objects/rangeobject.c:320 range_contains
+static int
+range_contains(rangeobject *r, PyObject *ob)
+{
+    /* O(1) check: ob in range(start, stop, step)
+       Formula: (ob - start) % step == 0 and 0 <= (ob - start) / step < len */
+    if (!PyLong_CheckExact(ob) && !PyBool_Check(ob))
+        return (int)_PySequence_IterSearch(...);
+    PyObject *tmp = PyNumber_Subtract(ob, r->start);
+    if (!_PyLong_IsNonNegative(tmp)) goto out_of_range;
+    PyObject *rem = PyNumber_Remainder(tmp, r->step);
+    if (!_PyLong_IsZero(rem)) goto out_of_range;
+    PyObject *index = PyNumber_FloorDivide(tmp, r->step);
+    return PyObject_RichCompareBool(index, r->length, Py_LT);
+out_of_range:
+    return 0;
+}
+```
+
+`500 in range(0, 1000, 2)` is O(1): check that `(500-0) % 2 == 0` and `500/2 < 500`. For non-integer types, falls back to linear iteration.
+
+### `range.__len__`
+
+```c
+// CPython: Objects/rangeobject.c:280 range_length
+static PyObject *
+range_length(rangeobject *r)
+{
+    /* Already precomputed and stored as r->length */
+    Py_INCREF(r->length);
+    return r->length;
+}
+```
+
+`len(range(0, 100, 3))` is `ceil((100-0)/3) = 34`. The length is computed once at construction and stored as a Python int (so it handles ranges wider than `sys.maxsize`).
+
+### `longrange_iterator`
+
+```c
+// CPython: Objects/rangeobject.c:480 longrangeiter_next
+static PyObject *
+longrangeiter_next(longrangeiterobject *r)
+{
+    /* For ranges too large for a C long iterator */
+    if (PyObject_RichCompareBool(r->index, r->length, Py_GE)) return NULL;
+    PyObject *result = PyNumber_Add(r->start, PyNumber_Multiply(r->index, r->step));
+    PyObject *new_index = PyNumber_Add(r->index, _PyLong_GetOne());
+    Py_SETREF(r->index, new_index);
+    return result;
+}
+```
+
+Standard `range_iterator` uses a C `long` index for speed. `longrange_iterator` uses Python ints for the index when the range exceeds `LLONG_MAX`. `range(10**20)` works correctly.
+
+## gopy notes
+
+`range.__contains__` is `objects.RangeContains` in `objects/range.go`, using `big.Int` arithmetic. `range.__len__` returns the precomputed `r.Length` field. `range.__iter__` returns `objects.NewRangeIterator` which uses `int64` for small ranges and `big.Int` for large ones.

@@ -1,0 +1,114 @@
+---
+title: Python/symtable.c (part 8)
+description: "Python/symtable.c part 8: symtable_visit_params, symtable_analyze, scope binding, FREE vs CELL resolution."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers the scope analysis pass that determines whether each name is LOCAL, FREE, CELL, or GLOBAL. See `python_symtable7_detail` for `PySymtable_BuildObject`, `symtable_enter_block`, and name binding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `symtable_visit_params` | Mark function parameters as LOCAL |
+| 81-180 | `analyze_block` | Core recursive scope resolver |
+| 181-280 | `analyze_name` | Decide LOCAL/FREE/CELL/GLOBAL for one name |
+| 281-380 | `analyze_cells` | Promote LOCAL to CELL when captured |
+| 381-500 | FREE variable propagation | Pass FREE upward to enclosing scopes |
+
+## Reading
+
+### `analyze_block`
+
+```c
+// CPython: Python/symtable.c:680 analyze_block
+static int
+analyze_block(PySTEntryObject *ste, PyObject *bound, PyObject *free,
+              PyObject *global, PyObject *type_params)
+{
+    /* Walk child blocks first (bottom-up), collecting their free variables */
+    for (int i = 0; i < PyList_GET_SIZE(ste->ste_children); i++) {
+        PySTEntryObject *c = ...;
+        analyze_block(c, newbound, newfree, newglobal, ...);
+    }
+    /* Now resolve each name in this block */
+    PyObject *name;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(ste->ste_symbols, &pos, &name, NULL)) {
+        analyze_name(ste, scopes, name, bound, free, global, type_params);
+    }
+    ...
+}
+```
+
+`analyze_block` processes children before the parent, so a child's free variables are known when the parent decides whether to make them CELL (captured) or pass them further up.
+
+### `analyze_name`
+
+```c
+// CPython: Python/symtable.c:580 analyze_name
+static int
+analyze_name(PySTEntryObject *ste, PyObject *scopes, PyObject *name,
+             PyObject *bound, PyObject *free, PyObject *global,
+             PyObject *type_params)
+{
+    long flags = _PyST_GetSymbol(ste, name);
+    if (flags & DEF_GLOBAL) {
+        /* 'global x' declaration */
+        SET_SCOPE(scopes, name, GLOBAL_EXPLICIT);
+    } else if (flags & DEF_NONLOCAL) {
+        /* 'nonlocal x' — find it in an enclosing scope */
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);
+    } else if (flags & DEF_BOUND) {
+        /* Assigned in this scope: LOCAL */
+        SET_SCOPE(scopes, name, LOCAL);
+        PySet_Add(bound, name);
+    } else if (PySet_Contains(bound, name)) {
+        /* Used but not assigned here, bound in enclosing: FREE */
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);
+    } else {
+        /* Not bound anywhere in the function chain: GLOBAL_IMPLICIT */
+        SET_SCOPE(scopes, name, GLOBAL_IMPLICIT);
+    }
+    return 1;
+}
+```
+
+The name's scope is determined by: explicit `global`/`nonlocal`, local assignment (any `DEF_BOUND` flag), or presence in the accumulated `bound` set from enclosing scopes.
+
+### `analyze_cells`
+
+```c
+// CPython: Python/symtable.c:640 analyze_cells
+static int
+analyze_cells(PyObject *scopes, PyObject *free)
+{
+    /* Any LOCAL name that also appears in 'free' (from a child)
+       must become CELL so the child can close over it. */
+    PyObject *name;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(scopes, &pos, &name, NULL)) {
+        long v = PyLong_AS_LONG(PyDict_GetItem(scopes, name));
+        if (v != LOCAL) continue;
+        if (!PySet_Contains(free, name)) continue;
+        /* Promote to CELL */
+        PyDict_SetItem(scopes, name, PyLong_FromLong(CELL));
+    }
+    return 1;
+}
+```
+
+A variable is CELL if it is LOCAL to a function AND referenced as FREE in at least one nested function. CELL variables get a `PyCellObject` at runtime so they can be shared.
+
+## gopy notes
+
+`analyze_block` is `compile.analyzeBlock` in `compile/flowgraph.go`. It populates `symbolTable.Scopes` with `LOCAL`/`FREE`/`CELL`/`GLOBAL` constants. `analyze_cells` is `compile.analyzeCells`. The resulting scope map drives `MAKE_CELL` and `LOAD_DEREF`/`STORE_DEREF` emission in `compile/codegen_expr_name.go`.

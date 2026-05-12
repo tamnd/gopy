@@ -1,0 +1,92 @@
+---
+title: Modules/zlibmodule.c (part 6)
+description: "zlibmodule.c part 6: Decompress.decompress, flush, copy, Z_SYNC_FLUSH vs Z_FINISH, wbits parameter."
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/zlibmodule.c" />
+
+This annotation covers streaming decompression. See `modules_zlib5_detail` for `zlib.compress`, `decompress`, `Compress.compress`, and `Compress.flush`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Decompress.__init__` | Set up decompression state with `wbits` |
+| 81-180 | `Decompress.decompress` | Decompress a chunk |
+| 181-280 | `Decompress.flush` | Finish decompression and return remaining output |
+| 281-360 | `Decompress.copy` | Duplicate decompression state |
+| 361-500 | `wbits` parameter | Control format: zlib, gzip, raw deflate |
+
+## Reading
+
+### `Decompress.decompress`
+
+```c
+// CPython: Modules/zlibmodule.c:680 zlib_Decompress_decompress_impl
+static PyObject *
+zlib_Decompress_decompress_impl(compobject *self, Py_buffer *data,
+                                Py_ssize_t max_length)
+{
+    self->zst.next_in = (Bytef *)data->buf;
+    self->zst.avail_in = (uInt)data->len;
+    do {
+        /* Expand output buffer as needed */
+        arrange_input_buffer(&self->zst, &ibuflen);
+        err = inflate(&self->zst, Z_SYNC_FLUSH);
+        if (err == Z_NEED_DICT) {
+            PyErr_SetString(ZlibError, "decompression requires a preset dictionary");
+            return NULL;
+        }
+    } while (self->zst.avail_in != 0 && err != Z_STREAM_END);
+    ...
+}
+```
+
+`inflate` is called in a loop because a single call may not consume all input if the output buffer fills. `Z_SYNC_FLUSH` requests maximum output; the loop continues until all input is consumed.
+
+### `wbits` parameter
+
+```c
+// CPython: Modules/zlibmodule.c:840 wbits meaning
+/*
+ * wbits:
+ *   8 to 15     → zlib format (with zlib header)
+ *  -8 to -15    → raw deflate (no header)
+ *  24 to 31     → gzip format (wbits = 16 + window_bits)
+ *  40 to 47     → auto-detect zlib or gzip (wbits = 32 + window_bits)
+ *
+ * zlib.decompress(data, wbits=-15) decompresses raw deflate data.
+ * zlib.decompress(data, wbits=47) accepts either zlib or gzip.
+ */
+```
+
+The `wbits` value controls both the window size (8-15 bits) and the expected header format. `gzip.decompress` internally uses `wbits=47` to auto-detect headers.
+
+### `Decompress.copy`
+
+```c
+// CPython: Modules/zlibmodule.c:780 zlib_Decompress_copy_impl
+static PyObject *
+zlib_Decompress_copy_impl(compobject *self)
+{
+    /* Duplicate the entire decompression state */
+    compobject *ret_val = newcompobject(&Decomptype);
+    if (inflateCopy(&ret_val->zst, &self->zst) != Z_OK) {
+        PyErr_SetString(ZlibError, "couldn't copy object");
+        return NULL;
+    }
+    return (PyObject *)ret_val;
+}
+```
+
+`Decompress.copy()` creates an independent copy of the decompression state. This enables "checkpointing": decompress some data, copy the state, then explore multiple branches of decompressed data.
+
+## gopy notes
+
+`Decompress.decompress` is `module/zlib.DecompressDecompress` in `module/zlib/module.go`. It wraps `flate.NewReader` or `zlib.NewReader` or `gzip.NewReader` depending on `wbits`. Streaming is handled via `io.ReadAll` into a growing `bytes.Buffer`. `Decompress.copy` deep-copies the decompressor state.
