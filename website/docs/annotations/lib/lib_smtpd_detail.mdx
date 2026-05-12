@@ -1,0 +1,95 @@
+---
+title: Lib/smtpd.py
+description: "Lib/smtpd.py: SMTPServer, DebuggingServer, PureProxy — async SMTP server using asynchat/asyncore. DATA command, envelope handling, process_message hook."
+cpython_path: Lib/smtpd.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/smtpd.py" />
+
+`smtpd` provides a simple SMTP server framework. It uses `asynchat`/`asyncore` for non-blocking I/O and is primarily used for testing mail handling.
+
+Note: `smtpd` was deprecated in 3.6 and removed in 3.12. The annotation documents it for historical context and for projects targeting older Python versions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SMTPChannel` | Per-connection state machine: EHLO/HELO, MAIL, RCPT, DATA |
+| 81-300 | SMTP commands | `smtp_EHLO`, `smtp_MAIL`, `smtp_RCPT`, `smtp_DATA` |
+| 301-500 | `SMTPServer` | Async TCP listener: create channel on accept |
+| 501-650 | `DebuggingServer` | Print each received message to stdout |
+| 651-800 | `PureProxy` | Forward mail to another SMTP server |
+
+## Reading
+
+### `SMTPChannel` state machine
+
+```python
+# CPython: Lib/smtpd.py:68 SMTPChannel
+class SMTPChannel(asynchat.async_chat):
+    COMMAND = 0
+    DATA    = 1
+
+    def __init__(self, server, conn, addr, ...):
+        asynchat.async_chat.__init__(self, conn)
+        self.set_terminator(b'\r\n')  # command terminator
+        self._state = self.COMMAND
+        self._mailfrom = None
+        self._rcpttos = []
+        self._data = []
+        self.push('220 %s %s' % (server.fqdn, __version__))
+```
+
+### `smtp_DATA`
+
+```python
+# CPython: Lib/smtpd.py:200 smtp_DATA
+def smtp_DATA(self, arg):
+    if not self._rcpttos:
+        self.push('503 Error: need RCPT command')
+        return
+    self.push('354 End data with <CR><LF>.<CR><LF>')
+    self._state = self.DATA
+    self.set_terminator(b'\r\n.\r\n')  # end of message marker
+```
+
+When in DATA state, accumulate lines until the `\r\n.\r\n` terminator, then call `process_message`.
+
+### `process_message`
+
+```python
+# CPython: Lib/smtpd.py:360 SMTPServer.process_message
+def process_message(self, peer, mailfrom, rcpttos, data, **kwargs):
+    """Override this method to process a received message.
+    peer     — (host, port) of connecting client
+    mailfrom — MAIL FROM: address
+    rcpttos  — list of RCPT TO: addresses
+    data     — bytes: the complete message (headers + body)
+    """
+    raise NotImplementedError
+```
+
+### `DebuggingServer`
+
+```python
+# CPython: Lib/smtpd.py:510 DebuggingServer
+class DebuggingServer(SMTPServer):
+    def process_message(self, peer, mailfrom, rcpttos, data, **kwargs):
+        inheaders = True
+        lines = data.decode('utf-8', errors='replace').split('\n')
+        print('---------- MESSAGE FOLLOWS ----------')
+        for line in lines:
+            if inheaders and not line:
+                print('------------ END MESSAGE ------------')
+                inheaders = False
+            print(line)
+```
+
+## gopy notes
+
+`smtpd` is removed in Python 3.12 and not in gopy's stdlib. The annotation documents the design for reference. Modern replacements use `aiosmtpd` (asyncio-based) or a custom `asyncio.Protocol`.

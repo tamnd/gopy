@@ -329,6 +329,7 @@ const sidebars = {
         'annotations/python/python_codecs_detail',
         'annotations/python/python_traceback_detail',
         'annotations/python/python_import2_detail',
+        'annotations/python/python_thread2_detail',
       ],
     },
     {
@@ -997,6 +998,7 @@ const sidebars = {
         'annotations/modules/modules_grp_detail',
         'annotations/modules/modules_pwd_detail',
         'annotations/modules/modules_lzma_detail',
+        'annotations/modules/modules_crypt_detail',
       ],
     },
     {
@@ -1515,6 +1517,8 @@ const sidebars = {
         'annotations/lib/lib_xml_dom_detail',
         'annotations/lib/lib_zipfile_detail2',
         'annotations/lib/lib_mailbox_detail',
+        'annotations/lib/lib_smtpd_detail',
+        'annotations/lib/lib_imaplib_detail',
       ],
     },
   ],

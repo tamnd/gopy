@@ -1,0 +1,99 @@
+---
+title: Lib/imaplib.py
+description: "Lib/imaplib.py: IMAP4, IMAP4_SSL — send IMAP commands, parse tagged responses, handle literals, LOGIN/SELECT/FETCH/SEARCH/STORE/EXPUNGE."
+cpython_path: Lib/imaplib.py
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/imaplib.py" />
+
+`imaplib` is a low-level IMAP4rev1 (RFC 3501) client. It manages the socket, sends tagged commands, and parses responses including literal strings.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `IMAP4.__init__` | Connect, read greeting, login |
+| 101-300 | `IMAP4._command` | Send a tagged command |
+| 301-500 | `IMAP4._get_response` | Read tagged response, accumulate untagged data |
+| 501-700 | `IMAP4._get_literal` | Read a `{N}` literal block |
+| 701-1000 | High-level methods | `LOGIN`, `SELECT`, `FETCH`, `SEARCH`, `STORE`, `EXPUNGE`, `LOGOUT` |
+| 1001-1200 | `IMAP4_SSL` | TLS wrapper |
+| 1201-1600 | Response parsing | `ParseFlags`, `ParseResultList` |
+
+## Reading
+
+### Tagged command
+
+```python
+# CPython: Lib/imaplib.py:168 IMAP4._command
+def _command(self, name, *args):
+    """Send a tagged IMAP command.
+    Returns (typ, data): typ='OK'/'NO'/'BAD', data=list of responses.
+    """
+    tag = self._new_tag()  # 'IMAP001', 'IMAP002', ...
+    data = '%s %s' % (tag, name)
+    for arg in args:
+        if arg is None: continue
+        data = '%s %s' % (data, self._checkquote(arg))
+    self.send(('%s%s' % (data, CRLF)).encode('ascii'))
+    return self._get_tagged_response(tag)
+```
+
+### Response reading with literals
+
+```python
+# CPython: Lib/imaplib.py:325 IMAP4._get_response
+def _get_response(self):
+    """Read one response line; if it has a {N} literal, read N bytes."""
+    resp = self.readline()
+    if resp[-3:] == b'\r\n':
+        resp = resp[:-2]
+    # Check for literal: ends with {N}
+    litlen_match = Literal.match(resp)
+    if litlen_match:
+        size = int(litlen_match.group(1))
+        data = self.read(size)
+        resp = resp[:litlen_match.start(0)] + data
+    return resp
+```
+
+IMAP literals (`{123}` followed by 123 bytes) allow binary data in responses.
+
+### `FETCH`
+
+```python
+# CPython: Lib/imaplib.py:780 IMAP4.fetch
+def fetch(self, message_set, message_parts):
+    """Fetch (parts of) messages.
+    message_set: '1:3', '1,5', '*' etc.
+    message_parts: '(RFC822)' or '(BODY[TEXT])' or 'FLAGS' etc.
+    Returns (typ, data) where data is a list of message responses.
+    """
+    return self._command_and_get_response('FETCH', message_set, message_parts)
+```
+
+`imap.fetch('1:3', '(RFC822)')` fetches the full RFC 822 message for messages 1, 2, 3.
+
+### `SEARCH`
+
+```python
+# CPython: Lib/imaplib.py:920 IMAP4.search
+def search(self, charset, *criteria):
+    """Search for messages matching criteria.
+    charset: 'UTF-8' or None
+    criteria: 'FROM "user@example.com"', 'SINCE 01-Jan-2024', etc.
+    Returns (typ, [b'1 3 5 ...'])
+    """
+    if charset:
+        return self._command_and_get_response('SEARCH', 'CHARSET', charset, *criteria)
+    return self._command_and_get_response('SEARCH', *criteria)
+```
+
+## gopy notes
+
+`imaplib` is pure Python and importable when `socket`, `ssl`, `re`, `time`, and `binascii` work. The literal reading uses `self.read(N)` — a blocking read of exactly N bytes from the socket.
