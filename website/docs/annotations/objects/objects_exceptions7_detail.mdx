@@ -1,0 +1,98 @@
+---
+title: Objects/exceptions.c (part 7)
+description: "Objects/exceptions.c part 7: StopIteration.value, ExceptionGroup, BaseExceptionGroup, split, subgroup."
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/exceptions.c" />
+
+This annotation covers `StopIteration`, `ExceptionGroup`, and structured exception handling (PEP 654). See `objects_exceptions6_detail` for `BaseException.__init__`, `args`, traceback, `OSError`, and `SyntaxError`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `StopIteration.value` | Generator return value |
+| 81-160 | `BaseExceptionGroup.__new__` | Validate and store multiple exceptions |
+| 161-260 | `ExceptionGroup` | Subclass requiring only non-BaseException children |
+| 261-360 | `BaseExceptionGroup.split` | Partition by type predicate |
+| 361-600 | `BaseExceptionGroup.subgroup` | Filter to a subset of exceptions |
+
+## Reading
+
+### `StopIteration.value`
+
+```c
+// CPython: Objects/exceptions.c:540 StopIteration_init
+static int
+StopIteration_init(PyStopIterationObject *self, PyObject *args, PyObject *kwds)
+{
+    Py_ssize_t size = PyTuple_GET_SIZE(args);
+    if (size > 0) {
+        Py_INCREF(PyTuple_GET_ITEM(args, 0));
+        Py_XDECREF(self->value);
+        self->value = PyTuple_GET_ITEM(args, 0);
+    }
+    return BaseException_init((PyBaseExceptionObject *)self, args, kwds);
+}
+```
+
+`return value` inside a generator compiles to `RAISE_VARARGS` with a `StopIteration(value)`. The `value` attribute is how generators communicate their return value to `yield from` and `await`.
+
+### `BaseExceptionGroup.__new__`
+
+```c
+// CPython: Objects/exceptions.c:1640 BaseExceptionGroup_new
+static PyObject *
+BaseExceptionGroup_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *message, *excs;
+    PyArg_ParseTuple(args, "UO:BaseExceptionGroup", &message, &excs);
+    /* Validate: excs must be non-empty sequence of BaseException */
+    PyObject *lst = PySequence_List(excs);
+    if (PyList_GET_SIZE(lst) == 0) {
+        PyErr_SetString(PyExc_TypeError, "second argument must be a non-empty sequence");
+        return NULL;
+    }
+    for each exc in lst:
+        if not isinstance(exc, BaseException):
+            PyErr_SetString(PyExc_TypeError, "items must be BaseException instances");
+            return NULL;
+    ...
+}
+```
+
+`ExceptionGroup("msg", [ValueError(1), TypeError(2)])` packs multiple exceptions. `BaseExceptionGroup` accepts any `BaseException` (including `KeyboardInterrupt`). `ExceptionGroup` requires all exceptions to be non-`BaseException` (i.e., `Exception` subclasses), enabling use in `except*`.
+
+### `BaseExceptionGroup.split`
+
+```c
+// CPython: Objects/exceptions.c:1740 BaseExceptionGroup_split
+static PyObject *
+BaseExceptionGroup_split(PyObject *self, PyObject *matcher_func)
+{
+    /* Returns (matched, rest) where matched contains exceptions
+       satisfying matcher_func, rest contains those that don't */
+    PyObject *matched_list = PyList_New(0);
+    PyObject *rest_list = PyList_New(0);
+    for each exc in self->exceptions:
+        int rv = PyObject_IsTrue(PyObject_CallOneArg(matcher_func, exc));
+        if (rv) PyList_Append(matched_list, exc);
+        else PyList_Append(rest_list, exc);
+    /* Build new groups or None if empty */
+    PyObject *matched = len(matched_list) ? new_group(matched_list) : Py_None;
+    PyObject *rest = len(rest_list) ? new_group(rest_list) : Py_None;
+    return PyTuple_Pack(2, matched, rest);
+}
+```
+
+`split(lambda e: isinstance(e, TypeError))` partitions the group into `(TypeError_group, rest_group)`. Used by `except*` to route exceptions to the right handler. Returns `None` instead of an empty group.
+
+## gopy notes
+
+`StopIteration.value` is `objects.StopIterationValue` in `objects/exception.go`. `BaseExceptionGroup` is `objects.BaseExceptionGroup` with an `Exceptions` field of type `[]objects.Object`. `split` returns a 2-tuple of groups or `None`.

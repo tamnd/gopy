@@ -1,0 +1,109 @@
+---
+title: Python/import.c (part 9)
+description: "Python/import.c part 9: _bootstrap._find_and_load, _find_spec, sys.meta_path finders, import lock."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+This annotation covers the import system's find-and-load path. See `python_import8_detail` for `IMPORT_NAME`, `IMPORT_FROM`, `sys.modules` caching, and relative imports.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_find_and_load` | Outer entry: check `sys.modules`, call `_find_and_load_unlocked` |
+| 81-180 | `_find_and_load_unlocked` | Check for circular imports, call `_find_spec` |
+| 181-280 | `_find_spec` | Try each `sys.meta_path` finder |
+| 281-380 | Import lock | Per-module lock prevents duplicate initialization |
+| 381-600 | `_load_unlocked` | Call `spec.loader.exec_module` |
+
+## Reading
+
+### `_find_and_load`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1240 _find_and_load
+def _find_and_load(name, import_):
+    module = sys.modules.get(name, _NEEDS_LOADING)
+    if module is _NEEDS_LOADING:
+        return _find_and_load_unlocked(name, import_)
+    if module is None:
+        message = f'import of {name} halted; use of sys.modules[{name!r}] = None'
+        raise ModuleNotFoundError(message)
+    _lock_unlock_module(name)
+    return module
+```
+
+`sys.modules[name] = None` is a way to block an import (useful for mocking). The `_NEEDS_LOADING` sentinel distinguishes "not yet imported" from "explicitly blocked".
+
+### `_find_spec`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1200 _find_spec
+def _find_spec(name, path, target=None):
+    meta_path = sys.meta_path
+    if meta_path == []:
+        raise ImportError('sys.meta_path is empty')
+    for finder in meta_path:
+        with _ImportLockContext():
+            try:
+                find_spec = finder.find_spec
+            except AttributeError:
+                continue
+        spec = find_spec(name, path, target)
+        if spec is not None:
+            return spec
+    return None
+```
+
+`sys.meta_path` is tried in order. Built-in finders: `BuiltinImporter` (C extensions built into the interpreter), `FrozenImporter` (frozen stdlib modules), `PathFinder` (searches `sys.path`). A `None` spec from a finder means "I don't handle this module".
+
+### Import lock
+
+```c
+// CPython: Python/import.c:340 _get_module_lock
+static _PyRecursiveMutex *
+_get_module_lock(PyInterpreterState *interp, PyObject *name)
+{
+    /* Get or create a per-module lock */
+    PyObject *locks = interp->imports.locks;
+    PyObject *lock = PyDict_GetItemWithError(locks, name);
+    if (lock == NULL) {
+        lock = _PyThread_allocate_lock();
+        PyDict_SetItem(locks, name, lock);
+    }
+    return (_PyRecursiveMutex *)lock;
+}
+```
+
+Each module name gets its own recursive lock. This allows the importing thread to re-enter the same module (circular imports: module A imports B, B imports A; A's partial module is returned). A second thread trying to import the same module blocks until the first thread finishes.
+
+### `_load_unlocked`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1120 _load_unlocked
+def _load_unlocked(spec):
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module  # Install BEFORE exec_module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        try:
+            del sys.modules[spec.name]
+        except KeyError:
+            pass
+        raise
+    return sys.modules[spec.name]
+```
+
+The module is installed in `sys.modules` before `exec_module` runs. This handles circular imports: if `exec_module` triggers another import of the same module, the partial module is returned from `sys.modules`. If `exec_module` raises, the module is removed.
+
+## gopy notes
+
+`_find_and_load` is in `vm/eval_import.go` as `importFindAndLoad`. `_find_spec` iterates `objects.SysMetaPath`. The import lock is a per-module `sync.Mutex` in a `sync.Map`. `_load_unlocked` calls `objects.LoaderExecModule`.

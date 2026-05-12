@@ -1,0 +1,83 @@
+---
+title: Lib/weakref.py (part 3)
+description: "weakref.py part 3: WeakValueDictionary, WeakKeyDictionary, finalize, WeakSet."
+cpython_path: Lib/weakref.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/weakref.py" />
+
+This annotation covers weak collection types. See `lib_weakref2_detail` for `ref`, `proxy`, `WeakSet`, and the callback mechanism.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `WeakValueDictionary` | Dict where values are weak-referenced |
+| 81-160 | `WeakKeyDictionary` | Dict where keys are weak-referenced |
+| 161-240 | `finalize` | Call a function when an object is garbage collected |
+| 241-340 | `WeakSet` | Set of weakly-referenced objects |
+| 341-500 | Callback / cleanup machinery | Remove dead entries on GC |
+
+## Reading
+
+### `WeakValueDictionary`
+
+```python
+# CPython: Lib/weakref.py:160 WeakValueDictionary.__setitem__
+class WeakValueDictionary(_IterationGuard):
+    def __setitem__(self, key, value):
+        if self._pending_removals:
+            self._commit_removals()
+        self.data[key] = KeyedRef(value, self._remove, key)
+
+    def _remove(self, wr, selfref=ref(self)):
+        self = selfref()
+        if self is not None:
+            if self._iterating:
+                self._pending_removals.append(wr.key)
+            else:
+                try:
+                    del self.data[wr.key]
+                except KeyError:
+                    pass
+```
+
+When `value` is garbage collected, `_remove` is called with the dead `KeyedRef`. The removal is deferred if iteration is in progress (to avoid mutating a dict being iterated), then applied at the next `__setitem__` or explicit `_commit_removals`.
+
+### `WeakKeyDictionary`
+
+```python
+# CPython: Lib/weakref.py:380 WeakKeyDictionary.__setitem__
+class WeakKeyDictionary:
+    def __setitem__(self, key, value):
+        if self._pending_removals:
+            self._commit_removals()
+        self.data[ref(key, self._remove)] = value
+```
+
+`WeakKeyDictionary` stores weak refs as dict keys. When `key` dies, `_remove` deletes the entry. Used for caches where you want the cache entry to live only as long as the key lives (the canonical use case is storing computed attributes per instance without preventing GC).
+
+### `finalize`
+
+```python
+# CPython: Lib/weakref.py:520 finalize.__init__
+class finalize:
+    def __init__(self, obj, func, *args, **kwargs):
+        if not self._registered_with_atexit:
+            atexit.register(self._exitfunc)
+            finalize._registered_with_atexit = True
+        self._key = _key = (id(obj), next(self._index_iter))
+        self._weakref = ref(obj, lambda wr, _key=_key: finalize._registry.pop(_key))
+        finalize._registry[_key] = (self._weakref, func, args, kwargs, self._alive)
+```
+
+`weakref.finalize(obj, func, *args)` registers `func(*args)` to be called when `obj` is garbage collected. Unlike `__del__`, finalizers can hold references to external objects without creating reference cycles. `atexit` registration ensures finalizers run at interpreter shutdown.
+
+## gopy notes
+
+`WeakValueDictionary` is `module/weakref.WeakValueDict` in `module/weakref/module.go`. The dead-entry callback uses Go's `runtime.SetFinalizer`. `WeakKeyDictionary` uses weak map keys via finalizer-based cleanup. `finalize` wraps `objects.WeakRef` with a stored callback.

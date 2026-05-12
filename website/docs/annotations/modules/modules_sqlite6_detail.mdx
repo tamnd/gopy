@@ -1,0 +1,127 @@
+---
+title: Modules/_sqlite/ (part 6)
+description: "_sqlite part 6: Connection.execute, Cursor.fetchone, Cursor.fetchmany, Row factory, adapt/convert."
+cpython_path: Modules/_sqlite/connection.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sqlite/connection.c" />
+
+This annotation covers query execution and result fetching. See `modules_sqlite5_detail` for `Connection.__init__`, `connect`, `Cursor.__init__`, and parameter binding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Connection.execute` | Shortcut: create cursor, execute, return cursor |
+| 81-180 | `Cursor.execute` | Prepare statement, bind parameters, step |
+| 181-280 | `Cursor.fetchone` | Return next row as a tuple or row factory result |
+| 281-380 | `Cursor.fetchmany` | Return up to `n` rows |
+| 381-600 | Adapt/convert | Python-to-SQLite type adaptation and reverse |
+
+## Reading
+
+### `Connection.execute`
+
+```c
+// CPython: Modules/_sqlite/connection.c:780 pysqlite_connection_execute
+static PyObject *
+pysqlite_connection_execute(pysqlite_Connection *self, PyObject *args)
+{
+    PyObject *cursor = pysqlite_connection_cursor(self, NULL);
+    PyObject *result = pysqlite_cursor_execute(
+        (pysqlite_Cursor *)cursor, args);
+    if (result == NULL) {
+        Py_DECREF(cursor);
+        return NULL;
+    }
+    Py_DECREF(result);
+    return cursor;
+}
+```
+
+`conn.execute(sql)` is a convenience method that creates a cursor, executes the SQL, and returns the cursor. It avoids the boilerplate of `cur = conn.cursor(); cur.execute(sql); return cur`.
+
+### `Cursor.execute`
+
+```c
+// CPython: Modules/_sqlite/cursor.c:440 pysqlite_cursor_execute
+static PyObject *
+pysqlite_cursor_execute(pysqlite_Cursor *self, PyObject *args)
+{
+    const char *sql;
+    PyObject *parameters = NULL;
+    PyArg_ParseTuple(args, "s|O:execute", &sql, &parameters);
+
+    pysqlite_build_row_cast_map(self);
+    sqlite3_stmt *statement;
+    if (sqlite3_prepare_v2(self->db, sql, -1, &statement, NULL) != SQLITE_OK) {
+        /* raise OperationalError */
+    }
+    if (parameters) {
+        bind_parameters(self->state, statement, parameters);
+    }
+    self->next_row = _pysqlite_fetch_one_row(self);
+    return (PyObject *)self;
+}
+```
+
+`sqlite3_prepare_v2` compiles the SQL into a bytecode program. Bound parameters are passed via `sqlite3_bind_*`. The first row is pre-fetched into `self->next_row` so that `fetchone` can be called immediately.
+
+### Type adaptation
+
+```c
+// CPython: Modules/_sqlite/microprotocols.c:80 pysqlite_microprotocols_adapt
+PyObject *
+pysqlite_microprotocols_adapt(pysqlite_state *state, PyObject *obj,
+                               PyObject *protocol, PyObject *alternate)
+{
+    /* Check obj for __conform__(protocol) */
+    PyObject *adapt = PyObject_GetAttr(obj, state->str___conform__);
+    if (adapt != NULL) {
+        return PyObject_CallOneArg(adapt, protocol);
+    }
+    /* Check registered adapters */
+    PyObject *key = PyTuple_Pack(2, Py_TYPE(obj), protocol);
+    PyObject *adapter = PyDict_GetItemWithError(state->adapters, key);
+    if (adapter) return PyObject_CallOneArg(adapter, obj);
+    return alternate;
+}
+```
+
+`register_adapter(type, callable)` registers a Python-to-SQLite adapter. When storing an object of `type`, the callable is used to convert it. `register_converter(typename, callable)` registers the reverse: SQLite text to Python object on fetch.
+
+### `Cursor.fetchone`
+
+```c
+// CPython: Modules/_sqlite/cursor.c:580 pysqlite_cursor_fetchone
+static PyObject *
+pysqlite_cursor_fetchone(pysqlite_Cursor *self, PyObject *args)
+{
+    if (self->next_row == NULL) {
+        if (self->statement) {
+            Py_CLEAR(self->statement);
+        }
+        Py_RETURN_NONE;
+    }
+    PyObject *next_row = self->next_row;
+    self->next_row = _pysqlite_fetch_one_row(self);
+    if (self->row_factory != Py_None) {
+        PyObject *row = PyObject_CallFunctionObjArgs(
+            self->row_factory, self, next_row, NULL);
+        Py_DECREF(next_row);
+        return row;
+    }
+    return next_row;
+}
+```
+
+`fetchone` returns the pre-fetched row and advances to the next. The `row_factory` (default `None`, commonly `sqlite3.Row`) wraps the raw tuple. `sqlite3.Row` supports both index and column-name access.
+
+## gopy notes
+
+`Connection.execute` is `module/sqlite3.ConnExecute` in `module/sqlite3/module.go`. It uses `go-sqlite3` via CGo. `Cursor.execute` calls `db.Prepare(sql)` and `stmt.Step()`. The row factory is called via `objects.CallTwoArgs`. Type adaptation checks `__conform__` via `objects.LookupSpecial`.
