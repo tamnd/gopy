@@ -313,10 +313,12 @@ func listSetSlice(l *List, s *Slice, v Object) error {
 		return err
 	}
 	if step == 1 {
-		head := append([]Object{}, l.items[:start]...)
-		tail := append([]Object{}, l.items[stop:]...)
-		l.items = append(head, src...)
-		l.items = append(l.items, tail...)
+		newLen := start + len(src) + (len(l.items) - stop)
+		out := make([]Object, 0, newLen)
+		out = append(out, l.items[:start]...)
+		out = append(out, src...)
+		out = append(out, l.items[stop:]...)
+		l.items = out
 		l.size = int64(len(l.items))
 		return nil
 	}
@@ -381,7 +383,7 @@ func indexValueAsInt(key Object, typeName string) (int, error) {
 	return 0, fmt.Errorf("TypeError: %s indices must be integers or slices, not %s", typeName, key.Type().Name)
 }
 
-// drainIterableForSlice materialises an iterable into a slice for the
+// drainIterableForSlice materializes an iterable into a slice for the
 // slice-assignment path. Defined here (rather than reusing drainIterable
 // in builtins/) to keep objects/ self-contained.
 func drainIterableForSlice(o Object) ([]Object, error) {
@@ -400,7 +402,7 @@ func drainIterableForSlice(o Object) ([]Object, error) {
 	var out []Object
 	for {
 		v, err := itT.IterNext(it)
-		if err == ErrStopIteration {
+		if errors.Is(err, ErrStopIteration) {
 			return out, nil
 		}
 		if err != nil {

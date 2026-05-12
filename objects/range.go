@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 )
@@ -228,7 +229,7 @@ func rangeContainsIter(o, v Object) (bool, error) {
 	for {
 		x, err := IterNext(it)
 		if err != nil {
-			if err == ErrStopIteration {
+			if errors.Is(err, ErrStopIteration) {
 				return false, nil
 			}
 			return false, err
