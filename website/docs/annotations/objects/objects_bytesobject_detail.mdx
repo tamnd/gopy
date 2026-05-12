@@ -1,0 +1,82 @@
+---
+title: Objects/bytesobject.c
+description: "bytes implementation: immutable byte string with hash caching, interning for short single-byte values, find/count/split/join/replace methods, and the buffer protocol."
+cpython_path: Objects/bytesobject.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytesobject.c" />
+
+`Objects/bytesobject.c` implements the `bytes` type. Bytes objects are immutable sequences of integers in `[0, 255]`. The file provides the single-byte intern table (first 256 byte values are pre-allocated singletons), hash caching, the full string-like method suite (`find`, `replace`, `split`, `join`, etc.), and the buffer protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | single-byte intern table | `characters[256]`; singleton allocation |
+| 101-300 | `PyBytes_FromStringAndSize`, `_PyBytes_FromHex` | Constructors |
+| 301-600 | `bytes_find`, `bytes_count`, `bytes_index` | Search methods |
+| 601-1000 | `bytes_split`, `bytes_rsplit`, `bytes_join` | Splitting and joining |
+| 1001-1400 | `bytes_replace`, `bytes_translate` | Replacement and translation |
+| 1401-1800 | `bytes_strip`, `bytes_lower`, `bytes_upper` | Whitespace and case |
+| 1801-2500 | `bytes_decode`, `bytes_hex`, `bytes_fromhex` | Codec integration; hex encoding |
+| 2501-3500 | buffer protocol, hash, type wiring | `getbuffer`; `ob_shash`; `PyBytes_Type` |
+
+## Reading
+
+### Single-byte intern table
+
+`PyBytes_FromStringAndSize` for a single byte checks the intern table first. Each of the 256 single-byte values is allocated once at interpreter init and reused. This avoids allocation and comparison overhead for common patterns like `b'\n'`, `b' '`, and null bytes.
+
+```c
+// Objects/bytesobject.c:1 PyBytes_FromStringAndSize
+PyObject *
+PyBytes_FromStringAndSize(const char *str, Py_ssize_t size)
+{
+    if (size == 1 && str != NULL) {
+        return (PyObject *)characters[(unsigned char)*str];
+    }
+    /* allocate new PyBytesObject */
+    ...
+}
+```
+
+### Hash caching
+
+`ob_shash` stores the hash value after the first `hash()` call. `-1` means not yet computed (or an actual hash of -1 is stored as `-2`). The hash uses SipHash-1-3 on the byte content.
+
+```c
+// Objects/bytesobject.c:2501 bytes_hash
+static Py_hash_t
+bytes_hash(PyBytesObject *a)
+{
+    if (a->ob_shash == -1) {
+        a->ob_shash = _Py_HashBytes(a->ob_sval, Py_SIZE(a));
+    }
+    return a->ob_shash;
+}
+```
+
+### Buffer protocol
+
+`bytes_buffer_getbuf` exports the raw byte array as a read-only `Py_buffer`. This allows zero-copy passing of bytes data to C functions that accept `const char *`, including `struct.pack_into`, `ctypes`, and C extension modules.
+
+```c
+// Objects/bytesobject.c:2520 bytes_buffer_getbuf
+static int
+bytes_buffer_getbuf(PyBytesObject *self, Py_buffer *view, int flags)
+{
+    return PyBuffer_FillInfo(view, (PyObject*)self,
+                             (void *)self->ob_sval, Py_SIZE(self),
+                             1,  /* readonly */
+                             flags);
+}
+```
+
+## gopy notes
+
+The gopy bytes type wraps a Go `[]byte`. Single-byte interning maps to a `[256]*Bytes` array initialized at startup. Hash caching uses a `-1` sentinel on a `hash int64` field. The buffer protocol maps to exposing the underlying `[]byte` slice for zero-copy operations.

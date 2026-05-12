@@ -1,0 +1,59 @@
+---
+title: Python/peephole.c
+description: "Historical note: peephole.c was the CPython bytecode optimizer prior to Python 3.13; its function was absorbed into flowgraph.c. This page documents the original design."
+cpython_path: Python/peephole.c
+cpython_version: "3.14"
+lines: 0
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/flowgraph.c" />
+
+`Python/peephole.c` no longer exists as a separate file in CPython 3.13+. The peephole optimizer was merged into `Python/flowgraph.c` as part of the compiler refactor that introduced the CFG-based optimization pipeline. This page documents the historical design and where the equivalent functionality now lives.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| (historical) | `PyCode_Optimize` | Former entry point; called after bytecode assembly |
+| (historical) | `fold_binops_on_constants` | Constant fold `LOAD_CONST + LOAD_CONST + BINARY_OP` |
+| (historical) | `optimize_basic_block` | Per-block peephole passes |
+| (in 3.13+) | `_PyCfg_OptimizeCodeUnit` in `flowgraph.c` | Replacement entry point |
+
+## Reading
+
+### Historical design
+
+Before 3.13, `peephole.c` received the assembled bytecode as a `PyObject` of type `bytes` and made a second pass over it, replacing instruction sequences with shorter or faster equivalents. Key optimizations:
+
+- `LOAD_CONST 1; LOAD_CONST 2; BINARY_OP +` to `LOAD_CONST 3`
+- `LOAD_CONST x; POP_JUMP_IF_FALSE target` to `JUMP_FORWARD target` when `x` is falsy
+- Removal of `JUMP_FORWARD` that jumps only one instruction ahead
+- Folding of tuple and frozenset literals built from constants
+
+### Migration to flowgraph.c
+
+In Python 3.12-3.13, the compiler was restructured to work on a CFG of `basicblock` objects rather than the final bytecode. The peephole passes moved into `flowgraph.c` where they can operate on structured instructions (with jump targets as block pointers) rather than raw offsets. This enabled more powerful analyses like jump threading and dead-code elimination.
+
+```c
+// Python/flowgraph.c:501 _PyCfg_OptimizeCodeUnit (replacement)
+int
+_PyCfg_OptimizeCodeUnit(cfg_builder *g, PyObject *consts, ...)
+{
+    if (optimize_basic_block(g, consts, const_cache) < 0) return -1;
+    if (remove_unused_consts(g, consts) < 0) return -1;
+    if (eliminate_dead_code(g) < 0) return -1;
+    if (thread_jumps(g) < 0) return -1;
+    return 0;
+}
+```
+
+### gopy equivalent
+
+gopy's optimizer passes live in `compile/flowgraph_passes.go` which mirrors the new `flowgraph.c` architecture. The historical `peephole.c` design is preserved in the gopy codebase through the test golden files in `compile/`.
+
+## gopy notes
+
+No port needed for the historical `peephole.c`. The equivalent optimization code is in `compile/flowgraph_passes.go`, which was written following the CPython 3.13 CFG optimizer design.
