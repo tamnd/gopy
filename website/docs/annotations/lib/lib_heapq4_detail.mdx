@@ -1,0 +1,131 @@
+---
+title: Lib/heapq.py (part 4)
+description: "Lib/heapq.py part 4: heapq.merge, heapq.nlargest, heapq.nsmallest, _siftup, _siftdown."
+cpython_path: Lib/heapq.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/heapq.py" />
+
+This annotation covers merge, selection, and the sift primitives. See `modules_heapq3_detail` for `heappush`, `heappop`, and `heapify`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_siftdown` | Restore heap invariant upward |
+| 81-160 | `_siftup` | Restore heap invariant downward |
+| 161-260 | `heapq.merge` | Merge sorted iterables lazily |
+| 261-380 | `heapq.nlargest` | N largest elements |
+| 381-500 | `heapq.nsmallest` | N smallest elements |
+
+## Reading
+
+### `_siftdown`
+
+```python
+# CPython: Lib/heapq.py:198 _siftdown
+def _siftdown(heap, startpos, pos):
+    newitem = heap[pos]
+    while pos > startpos:
+        parentpos = (pos - 1) >> 1
+        parent = heap[parentpos]
+        if newitem < parent:
+            heap[pos] = parent
+            pos = parentpos
+            continue
+        break
+    heap[pos] = newitem
+```
+
+`_siftdown` "bubbles up" a newly inserted element at `pos` until the heap invariant holds. The element is compared to its parent `(pos-1)//2`; if smaller, the parent shifts down and the comparison repeats. This is O(log n).
+
+### `_siftup`
+
+```python
+# CPython: Lib/heapq.py:212 _siftup
+def _siftup(heap, pos):
+    endpos = len(heap)
+    startpos = pos
+    newitem = heap[pos]
+    childpos = 2*pos + 1  # left child
+    while childpos < endpos:
+        rightpos = childpos + 1
+        if rightpos < endpos and not heap[childpos] < heap[rightpos]:
+            childpos = rightpos  # use right child if smaller
+        heap[pos] = heap[childpos]
+        pos = childpos
+        childpos = 2*pos + 1
+    heap[pos] = newitem
+    _siftdown(heap, startpos, pos)
+```
+
+`_siftup` "sinks down" the element at `pos`. At each level it picks the smaller child and moves it up. At the end, the element is placed and `_siftdown` re-bubbles it (in case the final position is not the bottom). This two-phase approach reduces comparisons.
+
+### `heapq.merge`
+
+```python
+# CPython: Lib/heapq.py:312 merge
+def merge(*iterables, key=None, reverse=False):
+    h = []
+    h_append = h.append
+    if reverse:
+        _heappop, _heappush = _heappop_max, _heappush_max
+        direction = -1
+    else:
+        _heappop, _heappush = heappop, heappush
+        direction = 1
+    for order, it in enumerate(map(iter, iterables)):
+        try:
+            next = it.__next__
+            h_append([next(), order * direction, next])
+        except StopIteration:
+            pass
+    heapify(h)
+    while h:
+        try:
+            while True:
+                value, order, next = s = h[0]
+                yield value
+                s[0] = next()
+                _heappush(_heappop(h), h)  # replace top
+        except StopIteration:
+            _heappop(h)
+```
+
+`heapq.merge` uses a heap of `[current_value, tiebreak_order, next_fn]` triples. Each iteration yields the minimum and immediately fetches the next element from the same iterator to replace it. `order` breaks ties to maintain stable sort order across equal elements.
+
+### `heapq.nlargest`
+
+```python
+# CPython: Lib/heapq.py:540 nlargest
+def nlargest(n, iterable, key=None):
+    if n < 0: return []
+    it = iter(iterable)
+    if key is None:
+        result = _nlargest(n, it)  # C implementation
+        return sorted(result, reverse=True)
+    # key version: maintain a min-heap of (key(x), x)
+    result = sorted(islice(it, n), reverse=True)
+    if not result: return result
+    order = n
+    top = result[-1]
+    for elem in it:
+        k = key(elem)
+        if k > top:
+            insort(result, (k, order, elem))
+            result.pop()
+            top = result[-1]
+            order -= 1
+    return [r[-1] for r in result]
+```
+
+`nlargest(n, iterable)` uses a size-n min-heap. If the new element is larger than the heap minimum, it replaces it. Final sort gives the top-n in descending order. For small `n`, this is O(k log n) where k is the iterable length — much better than `sorted(iterable)[-n:]` which is O(k log k).
+
+## gopy notes
+
+`_siftdown` and `_siftup` are `objects.HeapSiftDown` and `objects.HeapSiftUp` in `objects/heapq.go`. `heapq.merge` is pure Python running directly. `heapq.nlargest` uses `module/heapq.NLargest` for the no-key case (C extension) and falls back to pure Python with `insort` for the key case.

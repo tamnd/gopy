@@ -1,0 +1,112 @@
+---
+title: Modules/gcmodule.c (part 10)
+description: "Modules/gcmodule.c part 10: gc.collect, gc.freeze, gc.get_referrers, gc.callbacks."
+cpython_path: Modules/gcmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/gcmodule.c" />
+
+This annotation covers garbage collection invocation and diagnostics. See `modules_gc9_detail` for the mark-and-sweep algorithm and generational collection.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `gc.collect` | Trigger a full collection |
+| 81-180 | `gc.freeze` / `gc.unfreeze` | Freeze objects for fork safety |
+| 181-280 | `gc.get_referrers` | Find all objects referring to given objects |
+| 281-380 | `gc.get_referents` | List objects referred to by given objects |
+| 381-500 | `gc.callbacks` | Pre/post-collection hook list |
+
+## Reading
+
+### `gc.collect`
+
+```c
+// CPython: Modules/gcmodule.c:2180 gc_collect_impl
+static PyObject *
+gc_collect_impl(PyObject *module, int generation)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    GCState *gcstate = &tstate->interp->gc;
+    if (gcstate->collecting) {
+        return PyLong_FromSsize_t(0);  /* already collecting */
+    }
+    Py_ssize_t n = _PyGC_Collect(tstate, generation, _Py_GC_REASON_MANUAL);
+    return PyLong_FromSsize_t(n);
+}
+```
+
+`gc.collect(generation=2)` triggers a full collection of all three generations. Returns the number of unreachable objects found. The `collecting` guard prevents re-entrant GC (e.g., from a `__del__` method calling `gc.collect`).
+
+### `gc.freeze`
+
+```c
+// CPython: Modules/gcmodule.c:2300 gc_freeze_impl
+static PyObject *
+gc_freeze_impl(PyObject *module)
+{
+    /* Move all objects from generations 0-2 to the permanent generation */
+    GCState *gcstate = &_PyRuntime.gc;
+    for (int i = 0; i < NUM_GENERATIONS; i++) {
+        gc_list_merge(&gcstate->generations[i].head, &gcstate->permanent_generation.head);
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`gc.freeze()` moves all currently tracked objects to a "permanent generation" that is never collected. Used after process initialization (e.g., after loading all modules) before `os.fork()`. The frozen objects are shared between parent and child, avoiding copy-on-write page faults during collection in the child.
+
+### `gc.get_referrers`
+
+```c
+// CPython: Modules/gcmodule.c:2400 gc_get_referrers
+static PyObject *
+gc_get_referrers(PyObject *module, PyObject *args)
+{
+    PyObject *result = PyList_New(0);
+    /* Walk all GC-tracked objects */
+    for (int i = 0; i < NUM_GENERATIONS + 1; i++) {
+        PyGC_Head *list = GEN_HEAD(gcstate, i);
+        PyGC_Head *gc;
+        for (gc = GC_NEXT(list); gc != list; gc = GC_NEXT(gc)) {
+            PyObject *obj = FROM_GC(gc);
+            if (referrers_include(obj, args)) {
+                PyList_Append(result, obj);
+            }
+        }
+    }
+    return result;
+}
+```
+
+`gc.get_referrers(x)` walks every GC-tracked object and checks if it references `x`. This is a debug/diagnostic tool — it is O(total heap size). `referrers_include` uses `tp_traverse` to enumerate all references from each object.
+
+### `gc.callbacks`
+
+```c
+// CPython: Modules/gcmodule.c:2480 gc_callbacks_doc
+/* gc.callbacks is a list of callables called before and after each collection.
+   Each callback receives (phase, info) where phase is 'start' or 'stop'
+   and info is a dict with 'generation', 'collected', 'uncollectable'. */
+```
+
+```python
+# CPython: Lib/gc.py — usage
+import gc
+def my_callback(phase, info):
+    if phase == 'stop':
+        print(f"GC collected {info['collected']} objects")
+gc.callbacks.append(my_callback)
+```
+
+`gc.callbacks` is a Python list. The GC calls each callback before and after collection, passing a `phase` string and a dict with statistics. Used by profiling tools and memory trackers.
+
+## gopy notes
+
+`gc.collect` is `module/gc.Collect` in `module/gc/module.go`. Go uses a concurrent GC — `module/gc.Collect` calls `runtime.GC()`. `gc.freeze` and `gc.get_referrers` are stubs in gopy (Go's GC manages all objects). `gc.callbacks` is a `objects.List`; callbacks are invoked via `vm.CallOneArg` with phase and info dict.

@@ -1,0 +1,109 @@
+---
+title: Objects/unicodeobject.c (part 11)
+description: "Objects/unicodeobject.c part 11: str.format, str.format_map, _PyUnicode_FormatLong, str.center/ljust/rjust."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers string formatting and padding. See `objects_unicodeobject10_detail` for `str.split`, `str.join`, and codec operations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `str.format` | PEP 3101 format string |
+| 81-180 | `str.format_map` | Format using a mapping directly |
+| 181-280 | `_PyUnicode_FormatLong` | Format an integer in a format spec |
+| 281-380 | `str.center` / `str.ljust` / `str.rjust` | Padding with fill character |
+| 381-500 | `str.expandtabs` | Replace tabs with spaces |
+
+## Reading
+
+### `str.format`
+
+```c
+// CPython: Objects/unicodeobject.c:14880 unicode_format
+static PyObject *
+unicode_format(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    /* Dispatch to _PyObject_FormatNoArgs for fast path,
+       or build_string_result for general case */
+    return _PyUnicode_FormatAdvancedWriter(NULL, self, args, kwds);
+}
+```
+
+`'{x:.2f}'.format(x=3.14)` calls `_PyUnicode_FormatAdvancedWriter` which parses the format string, performs field substitutions, and applies format specs. The parser handles literal text, `{field_name!conversion:format_spec}` fields, and nested `{}` for dynamic specs.
+
+### Field substitution
+
+```c
+// CPython: Objects/unicodeobject.c:14680 MarkupIterator_next
+static int
+MarkupIterator_next(MarkupIterator *self, SubString *literal, int *field_present,
+                    SubString *field_name, SubString *format_spec,
+                    Py_UCS4 *conversion, int *format_spec_needs_expanding)
+{
+    /* Scan for next '{' or end of string */
+    /* Return literal text before the field */
+    /* Parse {field_name!conv:spec} */
+}
+```
+
+The format string is parsed lazily by `MarkupIterator`. Literal text between `{...}` fields is yielded first. Field names support attribute access (`{obj.attr}`), indexing (`{seq[0]}`), and auto-numbering (`{}`, `{0}`, `{1}`).
+
+### `str.center`
+
+```c
+// CPython: Objects/unicodeobject.c:10280 unicode_center
+static PyObject *
+unicode_center(PyObject *self, PyObject *args)
+{
+    Py_ssize_t marg, left, width;
+    Py_UCS4 fillchar = ' ';
+    if (!PyArg_ParseTuple(args, "n|O&:center", &width, convert_uc, &fillchar)) return NULL;
+    marg = width - PyUnicode_GET_LENGTH(self);
+    if (marg <= 0) return Py_NewRef(self);
+    left = marg / 2 + (marg & width & 1);
+    return pad(self, left, marg - left, fillchar);
+}
+```
+
+`'x'.center(5)` returns `'  x  '`. `'x'.center(5, '-')` returns `'--x--'`. The left padding is `marg//2`; the odd-margin case (marg is odd and width is odd) adds one extra space on the left per the CPython convention. `pad` allocates a new string of the target width.
+
+### `str.expandtabs`
+
+```c
+// CPython: Objects/unicodeobject.c:10360 unicode_expandtabs
+static PyObject *
+unicode_expandtabs(PyObject *self, PyObject *args)
+{
+    int tabsize = 8;
+    Py_ssize_t col = 0;
+    _PyUnicodeWriter writer;
+    _PyUnicodeWriter_Init(&writer);
+    for (Py_ssize_t i = 0; i < PyUnicode_GET_LENGTH(self); i++) {
+        Py_UCS4 ch = PyUnicode_READ_CHAR(self, i);
+        if (ch == '\t') {
+            Py_ssize_t spaces = tabsize - (col % tabsize);
+            _PyUnicodeWriter_WriteChar(&writer, ' ', spaces);
+            col += spaces;
+        } else {
+            _PyUnicodeWriter_WriteChar(&writer, ch, 1);
+            col = (ch == '\n' || ch == '\r') ? 0 : col + 1;
+        }
+    }
+    return _PyUnicodeWriter_Finish(&writer);
+}
+```
+
+`'\thello\tworld'.expandtabs(4)` returns `'    hello   world'`. Tabs are expanded to the next multiple of `tabsize`. Column counting resets to 0 on `\n` and `\r`. The default tab size is 8 (not 4).
+
+## gopy notes
+
+`str.format` is `objects.StrFormat` in `objects/unicodeobject.go`; uses `objects.MarkupIterator` to parse the format string. `_PyUnicode_FormatLong` is `objects.FormatLong`; calls `strconv.FormatInt` with base/width/fill. `str.center` is `objects.StrCenter`; uses `strings.Repeat` for padding. `str.expandtabs` is `objects.StrExpandTabs`.

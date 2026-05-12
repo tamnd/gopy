@@ -1,0 +1,119 @@
+---
+title: Python/compile.c (part 17)
+description: "Python/compile.c part 17: compile_augassign, compile_namedexpr, compile_global, compile_nonlocal."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers assignment variants. See `python_compile16_detail` for pattern matching compilation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `compiler_augassign` | Compile `x += y` |
+| 81-180 | `compiler_namedexpr` | Compile walrus operator `:=` |
+| 181-280 | `compiler_global` | Emit `STORE_GLOBAL` for `global x` |
+| 281-380 | `compiler_nonlocal` | Record nonlocal declarations |
+| 381-500 | `compiler_annassign` | Compile annotated assignment `x: int = 1` |
+
+## Reading
+
+### `compiler_augassign`
+
+```c
+// CPython: Python/compile.c:3480 compiler_augassign
+static int
+compiler_augassign(struct compiler *c, stmt_ty s)
+{
+    expr_ty e = s->v.AugAssign.target;
+    /* Duplicate the target for loading and storing */
+    switch (e->kind) {
+    case Name_kind:
+        VISIT(c, expr, e);  /* LOAD the current value */
+        VISIT(c, expr, s->v.AugAssign.value);
+        ADDOP_I(c, BINARY_OP, NB_INPLACE_ADD);  /* or other op */
+        compiler_nameop(c, e->v.Name.id, Store);
+        break;
+    case Subscript_kind:
+        /* DUP_TOP_TWO, load, augop, ROT_THREE, STORE_SUBSCR */
+        ...
+        break;
+    case Attribute_kind:
+        /* COPY 1, load, augop, SWAP 2, STORE_ATTR */
+        ...
+        break;
+    }
+}
+```
+
+`x += 1` compiles differently depending on the target type. For names: load, add, store. For subscripts and attributes, the object and key/name must be available for the store after the operation — stack manipulation opcodes (`DUP_TOP_TWO`, `ROT_THREE`, `SWAP`) arrange this.
+
+### `compiler_namedexpr`
+
+```c
+// CPython: Python/compile.c:3560 compiler_namedexpr
+static int
+compiler_namedexpr(struct compiler *c, expr_ty e)
+{
+    /* (x := expr) — evaluate expr, duplicate, assign to x, leave copy on stack */
+    VISIT(c, expr, e->v.NamedExpr.value);
+    ADDOP_I(c, COPY, 1);  /* duplicate TOS */
+    compiler_nameop(c, e->v.NamedExpr.target->v.Name.id, Store);
+    /* result remains on stack as the value of the walrus expression */
+    return SUCCESS;
+}
+```
+
+`(y := x + 1)` evaluates `x + 1`, duplicates TOS, stores the duplicate into `y`, and leaves the original on the stack as the expression's value. The assignment always targets the enclosing function scope (never a comprehension's local scope).
+
+### `compiler_global`
+
+```c
+// CPython: Python/compile.c:3620 compiler_global
+static int
+compiler_global(struct compiler *c, stmt_ty s)
+{
+    /* global x, y — recorded in the symbol table, not emitted as code */
+    /* The symtable pass marks these names as GLOBAL_EXPLICIT */
+    /* No bytecode is emitted for the 'global' statement itself */
+    return SUCCESS;
+}
+```
+
+`global x` emits no bytecode. The effect is in the symbol table: the name is marked `GLOBAL_EXPLICIT` so that `LOAD_NAME`/`STORE_NAME` use `LOAD_GLOBAL`/`STORE_GLOBAL` instead of local frame access.
+
+### `compiler_annassign`
+
+```c
+// CPython: Python/compile.c:3680 compiler_annassign
+static int
+compiler_annassign(struct compiler *c, stmt_ty s)
+{
+    expr_ty tgt = s->v.AnnAssign.target;
+    /* In a module/class body: store annotation in __annotations__ */
+    if (s->v.AnnAssign.simple && c->u->u_ste->ste_type != FunctionBlock) {
+        VISIT(c, expr, s->v.AnnAssign.annotation);
+        ADDOP_NAME(c, LOAD_NAME, dunder_annotations, Load);
+        ADDOP_LOAD_CONST(c, target_name_str);
+        ADDOP(c, STORE_SUBSCR);  /* __annotations__[name] = annotation */
+    }
+    /* If there's a value: assign it */
+    if (s->v.AnnAssign.value) {
+        VISIT(c, expr, s->v.AnnAssign.value);
+        compiler_nameop(c, tgt->v.Name.id, Store);
+    }
+}
+```
+
+`x: int = 5` at module scope stores `int` in `__annotations__['x']` and assigns `5` to `x`. Inside a function, the annotation is not evaluated at runtime (unless `from __future__ import annotations` is in effect — then all annotations are stringified).
+
+## gopy notes
+
+`compiler_augassign` is `compile.CompileAugAssign` in `compile/codegen_stmt.go`. The subscript and attribute paths use `compile.EmitDupTopTwo` / `compile.EmitSwap`. `compiler_namedexpr` is `compile.CompileNamedExpr`; emits `COPY 1` then `STORE_NAME`. `compiler_annassign` is `compile.CompileAnnAssign`; emits `STORE_SUBSCR` for module-level annotations.
