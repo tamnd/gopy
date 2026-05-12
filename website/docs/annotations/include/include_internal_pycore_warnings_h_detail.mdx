@@ -1,0 +1,87 @@
+---
+title: Include/internal/pycore_warnings.h
+description: "Include/internal/pycore_warnings.h: _PyWarnings_InitState, _Py_WarningsState — per-interpreter warning filters and default action."
+cpython_path: Include/internal/pycore_warnings.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_warnings.h" />
+
+`pycore_warnings.h` declares the per-interpreter warning state embedded in `PyInterpreterState`. The `warnings` module and `PyErr_WarnEx` read and write this state.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-20 | `_Py_WarningsState` | Per-interpreter warning filters and registry |
+| 21-40 | `_PyWarnings_InitState` | Initialize `_Py_WarningsState` at interpreter creation |
+| 41-60 | Accessor macros | `_PyInterpreterState_GetWarningsModule` |
+
+## Reading
+
+### `_Py_WarningsState`
+
+```c
+// CPython: Include/internal/pycore_warnings.h:12 _Py_WarningsState
+struct _Py_WarningsState {
+    /* The list of warning filters: [(action, message, category, module, lineno), ...] */
+    PyObject *filters;
+    /* True if the filters list has been modified since last cache flush */
+    int filters_version;
+    /* The default action string: "default", "ignore", "error", etc. */
+    PyObject *_defaultaction;
+    /* Per-location registry: {(text, category, lineno): 1} */
+    /* One registry per module, stored as module.__warningregistry__ */
+    PyObject *_onceregistry;
+    /* Whether 'simplefilter("once")' is active */
+    int _filters_mutated;
+};
+```
+
+### `_PyWarnings_InitState`
+
+```c
+// CPython: Include/internal/pycore_warnings.h:34 _PyWarnings_InitState
+static inline void
+_PyWarnings_InitState(struct _Py_WarningsState *ws)
+{
+    ws->filters         = NULL;
+    ws->filters_version = 0;
+    ws->_defaultaction  = NULL;
+    ws->_onceregistry   = NULL;
+    ws->_filters_mutated = 0;
+}
+```
+
+Called from `_PyInterpreterState_New` before the `warnings` module is imported.
+
+### How `PyErr_WarnEx` uses this state
+
+```c
+// CPython: Lib/_warnings.c:420 warn_explicit
+/* warn_explicit looks up the filter list from _Py_WarningsState.filters.
+   For each filter tuple (action, message_re, category, module_re, lineno):
+     - if the warning matches, apply the action (ignore/error/always/once/default)
+   If no filter matches, apply _defaultaction.
+   The per-module registry (module.__warningregistry__) tracks "once" and "default"
+   warnings to avoid repeating them. */
+```
+
+### Filter version cache
+
+```c
+// CPython: Include/internal/pycore_warnings.h:18 filters_version
+    int filters_version;
+    /* Bumped each time filters is modified.
+       Callers can cache a copy and invalidate when the version changes. */
+```
+
+The `_warnings` C module bumps `filters_version` on every `warnings.filters` mutation, allowing fast-path checks in `PyErr_WarnEx` to skip the filter walk when nothing has changed.
+
+## gopy notes
+
+gopy stores warning state in `module/warnings/state.go` as a Go struct mirroring `_Py_WarningsState`. `PyErr_WarnEx` is in `vm/eval_warn.go` and reads `interp.WarningsState.Filters` (a `*PyListObject`). The filter-version cache optimization is implemented as an `int64` counter on the interpreter struct.

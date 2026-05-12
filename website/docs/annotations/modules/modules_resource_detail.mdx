@@ -1,0 +1,116 @@
+---
+title: Modules/resource.c
+description: "Modules/resource.c: resource.getrlimit, resource.setrlimit, resource.getrusage — POSIX process resource limits and usage."
+cpython_path: Modules/resource.c
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/resource.c" />
+
+`resource` wraps the POSIX `getrlimit(2)`, `setrlimit(2)`, and `getrusage(2)` system calls. It provides constants like `RLIMIT_CPU`, `RLIMIT_NOFILE`, and `RLIMIT_AS` and the `struct_rusage` named tuple.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | Module constants | `RLIMIT_*`, `RUSAGE_*`, `RLIM_INFINITY` |
+| 61-150 | `resource_getrlimit_impl` | Return `(soft, hard)` tuple for a resource |
+| 151-220 | `resource_setrlimit_impl` | Set `(soft, hard)` limits |
+| 221-300 | `resource_getrusage_impl` | Return `struct_rusage` for self or children |
+| 301-350 | `struct_rusage` | `structseq` with `ru_utime`, `ru_stime`, `ru_maxrss`, etc. |
+
+## Reading
+
+### `getrlimit`
+
+```c
+// CPython: Modules/resource.c:98 resource_getrlimit_impl
+static PyObject *
+resource_getrlimit_impl(PyObject *module, int resource)
+{
+    struct rlimit rl;
+    if (getrlimit(resource, &rl)) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    return Py_BuildValue("NN",
+        PyLong_FromRlim_t(rl.rlim_cur),   /* soft limit */
+        PyLong_FromRlim_t(rl.rlim_hard));  /* hard limit */
+}
+```
+
+`RLIM_INFINITY` is returned as `resource.RLIM_INFINITY` (a very large int).
+
+### `setrlimit`
+
+```c
+// CPython: Modules/resource.c:160 resource_setrlimit_impl
+static PyObject *
+resource_setrlimit_impl(PyObject *module, int resource, PyObject *limits)
+{
+    struct rlimit rl;
+    if (!PyArg_ParseTuple(limits, "O&O&",
+                          rlim_t_converter, &rl.rlim_cur,
+                          rlim_t_converter, &rl.rlim_hard))
+        return NULL;
+    if (setrlimit(resource, &rl)) {
+        if (errno == EINVAL)
+            PyErr_SetString(PyExc_ValueError,
+                "current limit exceeds maximum limit");
+        else if (errno == EPERM)
+            PyErr_SetString(PyExc_ValueError,
+                "not allowed to raise maximum limit");
+        else
+            PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+### `getrusage`
+
+```c
+// CPython: Modules/resource.c:240 resource_getrusage_impl
+static PyObject *
+resource_getrusage_impl(PyObject *module, int who)
+{
+    /* who: RUSAGE_SELF (0), RUSAGE_CHILDREN (-1), RUSAGE_THREAD (1) */
+    struct rusage ru;
+    if (getrusage(who, &ru)) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    return fill_rusage(&ru);   /* populate struct_rusage structseq */
+}
+```
+
+### `struct_rusage` fields
+
+```c
+// CPython: Modules/resource.c:280 struct_rusage_fields
+/* ru_utime   — user time (float seconds) */
+/* ru_stime   — system time (float seconds) */
+/* ru_maxrss  — maximum resident set size (bytes on Linux, kilobytes on macOS) */
+/* ru_ixrss   — shared memory size (not maintained on Linux) */
+/* ru_idrss   — unshared data size */
+/* ru_isrss   — unshared stack size */
+/* ru_minflt  — soft page faults */
+/* ru_majflt  — hard page faults */
+/* ru_nswap   — swaps */
+/* ru_inblock — block input operations */
+/* ru_oublock — block output operations */
+/* ru_msgsnd  — IPC messages sent */
+/* ru_msgrcv  — IPC messages received */
+/* ru_nsignals — signals received */
+/* ru_nvcsw   — voluntary context switches */
+/* ru_nivcsw  — involuntary context switches */
+```
+
+## gopy notes
+
+`resource` is in `module/resource/module.go`. `getrlimit`/`setrlimit` use `syscall.Getrlimit`/`syscall.Setrlimit`. `getrusage` uses `syscall.Getrusage`. `struct_rusage` is a `structseq` defined via `objects.NewStructSeqType`. `RLIM_INFINITY` is `syscall.RLIM_INFINITY` cast to a Python int.

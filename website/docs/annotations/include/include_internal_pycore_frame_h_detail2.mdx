@@ -1,0 +1,108 @@
+---
+title: Include/internal/pycore_frame.h (part 2)
+description: "pycore_frame.h part 2: _PyInterpreterFrame layout, frame linking, _PyFrame_IsIncomplete, _PyFrame_GetLocalsArray, LOAD/STORE_FAST helpers."
+cpython_path: Include/internal/pycore_frame.h
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_frame.h" />
+
+This annotation covers the frame struct layout and inline helpers. See `include_internal_pycore_frame_h_detail` for frame creation (`_PyFrame_PushUnchecked`) and the shadow frame stack.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `_PyInterpreterFrame` fields | `f_code`, `f_locals`, `f_globals`, `previous`, `f_lasti`, `owner` |
+| 61-120 | `frame_owner` enum | `FRAME_OWNED_BY_THREAD`, `FRAME_OWNED_BY_CSTACK`, `FRAME_OWNED_BY_GENERATOR` |
+| 121-180 | `_PyFrame_IsIncomplete` | True if frame is between push and first instruction |
+| 181-240 | `_PyFrame_GetLocalsArray` | Pointer to the fast locals array |
+| 241-350 | Inline fast-local helpers | `GETLOCAL`, `SETLOCAL`, `_PyFrame_HasCompleted` |
+
+## Reading
+
+### `_PyInterpreterFrame` layout
+
+```c
+// CPython: Include/internal/pycore_frame.h:56 _PyInterpreterFrame
+struct _PyInterpreterFrame {
+    PyObject *f_executable;    /* code object or NULL */
+    struct _PyInterpreterFrame *previous;
+    PyObject *f_funcobj;       /* function that created this frame */
+    PyObject *f_globals;
+    PyObject *f_builtins;
+    PyObject *f_locals;        /* NULL in optimized frames */
+    PyFrameObject *frame_obj;  /* backing PyFrameObject, created lazily */
+    _Py_CODEUNIT *prev_instr;  /* last executed instruction */
+    int f_lasti;               /* last instruction offset */
+    int return_offset;
+    char owner;                /* frame_owner enum */
+    /* Followed by fast locals array: PyObject *localsplus[nlocalsplus] */
+};
+```
+
+### `frame_owner`
+
+```c
+// CPython: Include/internal/pycore_frame.h:62 frame_owner
+typedef enum _frameowner {
+    FRAME_OWNED_BY_THREAD      = 0, /* on the C stack (normal call) */
+    FRAME_OWNED_BY_GENERATOR   = 1, /* inside a generator/coroutine */
+    FRAME_OWNED_BY_FRAME_OBJECT = 2, /* frame object outlived the C frame */
+    FRAME_OWNED_BY_CSTACK      = 3, /* on the shadow (C extension) stack */
+} _PyFrameOwner;
+```
+
+### `_PyFrame_IsIncomplete`
+
+```c
+// CPython: Include/internal/pycore_frame.h:138 _PyFrame_IsIncomplete
+static inline int
+_PyFrame_IsIncomplete(struct _PyInterpreterFrame *frame)
+{
+    /* A frame is incomplete if it has been pushed but
+       RESUME has not yet executed (i.e. prev_instr still points before it). */
+    if (frame->f_executable == NULL) return 1;
+    PyCodeObject *code = (PyCodeObject *)frame->f_executable;
+    return frame->prev_instr <
+           _PyCode_CODE(code) + code->_co_firsttraceable;
+}
+```
+
+Incomplete frames are skipped by `traceback` and `inspect.currentframe()`.
+
+### `_PyFrame_GetLocalsArray`
+
+```c
+// CPython: Include/internal/pycore_frame.h:195 _PyFrame_GetLocalsArray
+static inline PyObject **
+_PyFrame_GetLocalsArray(struct _PyInterpreterFrame *frame)
+{
+    /* The fast locals array lives immediately after the frame header */
+    return (PyObject **)((char *)frame + sizeof(struct _PyInterpreterFrame));
+}
+```
+
+`LOAD_FAST` and `STORE_FAST` index into this array by variable slot number.
+
+### `GETLOCAL` / `SETLOCAL`
+
+```c
+// CPython: Include/internal/pycore_frame.h:260 GETLOCAL
+#define GETLOCAL(i)     (frame->localsplus[i])
+#define SETLOCAL(i, v)  do { \
+    PyObject *tmp = GETLOCAL(i); \
+    GETLOCAL(i) = (v); \
+    Py_XDECREF(tmp); \
+} while (0)
+```
+
+`SETLOCAL` unconditionally decrefs the old value before replacing it. Variables that were never assigned hold `NULL`; `LOAD_FAST` checks for `NULL` and raises `UnboundLocalError`.
+
+## gopy notes
+
+gopy's frame is `vm.Frame` in `vm/frame.go`. `localsplus` is a `[]PyObject` slice sized to `code.Co_nlocalsplus`. `GETLOCAL` / `SETLOCAL` map to `frame.Locals[i]` with the same NULL-check semantics. `frame_owner` maps to `vm.FrameOwner` (`int8`). Incomplete-frame detection uses `frame.PrevInstr < frame.Code.FirstTraceable`.

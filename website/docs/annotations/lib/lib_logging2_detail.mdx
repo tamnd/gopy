@@ -1,0 +1,141 @@
+---
+title: Lib/logging/__init__.py (part 2)
+description: "Lib/logging/__init__.py part 2: Handler, FileHandler, StreamHandler, Formatter, Filter, LogRecord propagation, Manager."
+cpython_path: Lib/logging/__init__.py
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/logging/__init__.py" />
+
+This annotation covers handlers, formatters, filters, and the logger hierarchy. See `lib_logging_detail` for `Logger.log`, level filtering, and `basicConfig`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `LogRecord` | Structured log event: name, level, msg, args, exc_info |
+| 101-250 | `Formatter` | Format a `LogRecord` to a string |
+| 251-400 | `Filter`, `Filterer` | Attach callable or name-based filters to handlers/loggers |
+| 401-600 | `Handler` | Base handler: `emit`, `handle`, `format`, lock |
+| 601-750 | `StreamHandler` | Write formatted record to a stream |
+| 751-900 | `FileHandler` | `StreamHandler` with delayed file open and `mode`/`encoding` |
+| 901-1100 | `Manager` | Logger registry: `getLogger`, placeholder nodes |
+| 1101-1300 | `Logger.callHandlers` | Walk logger hierarchy until `propagate=False` |
+| 1301-1600 | `Logger.handle` | Apply filters, then call each handler |
+
+## Reading
+
+### `LogRecord`
+
+```python
+# CPython: Lib/logging/__init__.py:290 LogRecord.__init__
+class LogRecord:
+    def __init__(self, name, level, pathname, lineno,
+                 msg, args, exc_info, func=None, sinfo=None):
+        ct = time.time()
+        self.name      = name
+        self.msg       = msg
+        self.args      = args
+        self.levelname = getLevelName(level)
+        self.levelno   = level
+        self.pathname  = pathname
+        self.lineno    = lineno
+        self.exc_info  = exc_info
+        self.created   = ct
+        self.msecs     = (ct - int(ct)) * 1000
+        self.thread    = threading.get_ident()
+        self.process   = os.getpid()
+```
+
+### `Formatter.format`
+
+```python
+# CPython: Lib/logging/__init__.py:660 Formatter.format
+class Formatter:
+    def format(self, record):
+        record.message = record.getMessage()
+        if self.usesTime():
+            record.asctime = self.formatTime(record, self.datefmt)
+        s = self.formatMessage(record)  # apply self._fmt % record.__dict__
+        if record.exc_info:
+            if not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            s = s + '\n' + record.exc_text
+        if record.stack_info:
+            s = s + '\n' + self.formatStack(record.stack_info)
+        return s
+```
+
+### `Handler.handle`
+
+```python
+# CPython: Lib/logging/__init__.py:930 Handler.handle
+class Handler(Filterer):
+    def handle(self, record):
+        """Filter then emit, with the handler lock held."""
+        rv = self.filter(record)   # check all attached filters
+        if rv:
+            self.acquire()
+            try:
+                self.emit(record)
+            finally:
+                self.release()
+        return rv
+```
+
+### `StreamHandler.emit`
+
+```python
+# CPython: Lib/logging/__init__.py:1110 StreamHandler.emit
+class StreamHandler(Handler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            stream = self.stream
+            stream.write(msg + self.terminator)
+            self.flush()
+        except RecursionError:
+            raise
+        except Exception:
+            self.handleError(record)
+```
+
+`handleError` by default prints to `sys.stderr` but swallows the exception to avoid crashing the application.
+
+### `Logger.callHandlers`
+
+```python
+# CPython: Lib/logging/__init__.py:1560 Logger.callHandlers
+def callHandlers(self, record):
+    """Pass the record up the logger hierarchy."""
+    c = self
+    found = 0
+    while c:
+        for hdlr in c.handlers:
+            found += 1
+            if record.levelno >= hdlr.level:
+                hdlr.handle(record)
+        if not c.propagate:
+            c = None
+        else:
+            c = c.parent
+    if found == 0:
+        if lastResort:
+            if record.levelno >= lastResort.level:
+                lastResort.handle(record)
+        elif raiseExceptions and not self.manager.emittedNoHandlerWarning:
+            sys.stderr.write("No handlers could be found for logger"
+                             " \"%s\"\n" % self.name)
+            self.manager.emittedNoHandlerWarning = True
+```
+
+The hierarchy walk stops when `propagate=False` or when the root logger is reached.
+
+## gopy notes
+
+`logging` is pure Python. `LogRecord.thread` uses `threading.get_ident()` which maps to `vm.GetThreadIdent()`. `os.getpid()` returns the process ID via `syscall.Getpid()`. `FileHandler` uses `open()` which is gopy's built-in file object backed by `os.File`.

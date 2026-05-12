@@ -1,0 +1,142 @@
+---
+title: Python/gc.c (part 2)
+description: "Python/gc.c part 2: cyclic garbage collector — move_unreachable, move_legacy_finalizers, handle_weakrefs, finalize_garbage, collect_with_callback."
+cpython_path: Python/gc.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/gc.c" />
+
+This annotation covers the collection algorithm's inner phases. See `python_gc_detail` for generation management, `gc_collect`, and the public API.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `move_unreachable` | Move objects with zero adjusted refcount to unreachable set |
+| 101-200 | `move_legacy_finalizers` | Move objects with `__del__` to `finalizers` list |
+| 201-350 | `handle_weakrefs` | Nullify or queue weak references to dying objects |
+| 351-500 | `finalize_garbage` | Call `__del__` on finalizable objects |
+| 501-650 | `collect_with_callback` | Wrap `collect` with `gc.callbacks` calls |
+| 651-800 | `deduce_unreachable` | Compute reachable set by reference graph traversal |
+| 801-1000 | `gc_list_*` helpers | Doubly-linked GC list manipulation |
+
+## Reading
+
+### `deduce_unreachable`
+
+```c
+// CPython: Python/gc.c:680 deduce_unreachable
+static void
+deduce_unreachable(PyGC_Head *base, PyGC_Head *unreachable)
+{
+    /* Phase 1: Subtract internal references.
+       For each object, call tp_traverse and decrement gc_refs
+       for each referent in the base generation. */
+    subtract_refs(base);
+    /* Phase 2: Objects with gc_refs > 0 are reachable from outside.
+       Move them (and everything they can reach) to a reachable set. */
+    move_unreachable(base, unreachable);
+}
+```
+
+### `move_unreachable`
+
+```c
+// CPython: Python/gc.c:82 move_unreachable
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    PyGC_Head *gc = GC_NEXT(young);
+    while (gc != young) {
+        PyGC_Head *next = GC_NEXT(gc);
+        if (gc_get_refs(gc) != 0) {
+            /* Still reachable — traverse to propagate reachability */
+            PyObject *op = FROM_GC(gc);
+            traverseproc traverse = Py_TYPE(op)->tp_traverse;
+            (void) traverse(op,
+                            (visitproc)visit_reachable,
+                            (void *)young);
+            gc_set_refs(gc, 1);  /* mark as definitely reachable */
+        } else {
+            /* Zero refs — tentatively unreachable */
+            gc_list_move(gc, unreachable);
+            gc_set_refs(gc, GC_UNREACHABLE);
+        }
+        gc = next;
+    }
+}
+```
+
+Objects with `gc_refs == 0` after `subtract_refs` are placed in `unreachable`. `visit_reachable` is called during traversal to rescue objects that are still reachable via non-tracked references.
+
+### `handle_weakrefs`
+
+```c
+// CPython: Python/gc.c:280 handle_weakrefs
+static int
+handle_weakrefs(PyGC_Head *unreachable, PyGC_Head *old)
+{
+    /* For each unreachable object with weak references:
+       1. Nullify the weakref (set wr_object to Py_None).
+       2. If the weakref has a callback, move it to a pending list.
+       3. Call the callbacks (after finalizers, while the objects still exist). */
+    ...
+}
+```
+
+Weak reference callbacks are called after finalizers but before the referents are deallocated.
+
+### `finalize_garbage`
+
+```c
+// CPython: Python/gc.c:390 finalize_garbage
+static void
+finalize_garbage(PyThreadState *tstate, PyGC_Head *collectable)
+{
+    /* Call tp_finalize (i.e. __del__) on objects that have one.
+       After finalization an object may resurrect itself by creating
+       a new reference — survivors are moved out of the collectable list. */
+    destructor finalize;
+    PyGC_Head *gc = GC_NEXT(collectable);
+    while (gc != collectable) {
+        PyObject *op = FROM_GC(gc);
+        PyGC_Head *next = GC_NEXT(gc);
+        if (!_PyGCHead_FINALIZED(gc) &&
+            (finalize = Py_TYPE(op)->tp_finalize) != NULL) {
+            _PyGCHead_SET_FINALIZED(gc);
+            Py_INCREF(op);   /* keep alive during finalization */
+            finalize(op);
+            Py_DECREF(op);
+        }
+        gc = next;
+    }
+}
+```
+
+Resurrection is handled by `move_legacy_finalizers_reachable` which re-checks refcounts after all `__del__` calls complete.
+
+### `collect_with_callback`
+
+```c
+// CPython: Python/gc.c:580 collect_with_callback
+static Py_ssize_t
+collect_with_callback(PyThreadState *tstate, int generation)
+{
+    /* Fire gc.callbacks before and after collection */
+    invoke_gc_callback(tstate, "start", generation, 0, 0);
+    Py_ssize_t result = collect(tstate, generation, &collected, &uncollectable, 0);
+    invoke_gc_callback(tstate, "stop", generation, collected, uncollectable);
+    return result;
+}
+```
+
+`gc.callbacks` is a list of callables set up with `gc.callbacks.append(cb)`. Each receives `(phase, info)` where `phase` is `"start"` or `"stop"`.
+
+## gopy notes
+
+gopy relies on the Go GC for cycle collection. The GC phases described here have no direct equivalent. `gc.collect()` in gopy calls `runtime.GC()`. `gc.callbacks` is supported as a Python list but the callbacks receive synthetic `info` dicts since Go's GC does not report collected/uncollectable counts.

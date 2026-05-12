@@ -330,6 +330,8 @@ const sidebars = {
         'annotations/python/python_traceback_detail',
         'annotations/python/python_import2_detail',
         'annotations/python/python_thread2_detail',
+        'annotations/python/python_pyarena_detail',
+        'annotations/python/python_gc2_detail',
       ],
     },
     {
@@ -765,6 +767,8 @@ const sidebars = {
         'annotations/include/include_internal_pycore_code_h_detail',
         'annotations/include/include_internal_pycore_optimizer_h_detail',
         'annotations/include/include_internal_pycore_runtime_h_detail',
+        'annotations/include/include_internal_pycore_warnings_h_detail',
+        'annotations/include/include_internal_pycore_frame_h_detail2',
       ],
     },
     {
@@ -1002,6 +1006,8 @@ const sidebars = {
         'annotations/modules/modules_lzma_detail',
         'annotations/modules/modules_crypt_detail',
         'annotations/modules/modules_audioop_detail',
+        'annotations/modules/modules_signal_detail',
+        'annotations/modules/modules_resource_detail',
       ],
     },
     {
@@ -1523,6 +1529,7 @@ const sidebars = {
         'annotations/lib/lib_smtpd_detail',
         'annotations/lib/lib_imaplib_detail',
         'annotations/lib/lib_xmlrpc_detail',
+        'annotations/lib/lib_logging2_detail',
       ],
     },
   ],

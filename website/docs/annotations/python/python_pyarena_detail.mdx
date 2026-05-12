@@ -1,0 +1,120 @@
+---
+title: Python/pyarena.c
+description: "Python/pyarena.c: PyArena — bump allocator for AST nodes, block list management, pointer registration for GC cooperation."
+cpython_path: Python/pyarena.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/pyarena.c" />
+
+`PyArena` is a simple bump allocator used during compilation. AST nodes are allocated from it in bulk; the entire arena is freed at once when compilation completes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `PyArena_New` | Allocate arena and first block |
+| 51-100 | `PyArena_Free` | Free all blocks and tracked pointers |
+| 101-150 | `PyArena_Malloc` | Bump-allocate bytes from current block |
+| 151-200 | `PyArena_AddPyObject` | Register a Python object pointer for GC safety |
+
+## Reading
+
+### `PyArena` structure
+
+```c
+// CPython: Python/pyarena.c:18 _PyArena
+struct _PyArena {
+    block  *a_head;       /* current (most recently created) block */
+    block  *a_cur;        /* same as a_head (block list is LIFO) */
+    PyObject **a_objects; /* array of registered PyObject * pointers */
+    Py_ssize_t a_nobjects;
+    Py_ssize_t a_szobjects;
+};
+
+typedef struct _block {
+    size_t  ab_size;     /* total capacity */
+    size_t  ab_offset;   /* bytes already allocated */
+    struct _block *ab_next;
+    uint8_t ab_mem[1];   /* variable-length storage */
+} block;
+```
+
+### `PyArena_New`
+
+```c
+// CPython: Python/pyarena.c:55 PyArena_New
+PyArena *
+PyArena_New(void)
+{
+    PyArena *arena = (PyArena *)PyMem_Malloc(sizeof(PyArena));
+    if (!arena) return PyErr_NoMemory();
+    arena->a_head = block_new(DEFAULT_BLOCK_SIZE);
+    arena->a_cur  = arena->a_head;
+    arena->a_objects    = NULL;
+    arena->a_nobjects   = 0;
+    arena->a_szobjects  = 0;
+    return arena;
+}
+```
+
+`DEFAULT_BLOCK_SIZE` is 8 KB. A new block is chained when the current one fills up.
+
+### `PyArena_Malloc`
+
+```c
+// CPython: Python/pyarena.c:110 PyArena_Malloc
+void *
+PyArena_Malloc(PyArena *arena, size_t size)
+{
+    /* Round up to pointer alignment */
+    size = (size + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+    block *b = arena->a_cur;
+    if (b->ab_offset + size > b->ab_size) {
+        /* Overflow: allocate a new block at least big enough */
+        size_t newsize = b->ab_size * 2;
+        if (newsize < size) newsize = size + sizeof(block);
+        block *newb = block_new(newsize);
+        if (!newb) return PyErr_NoMemory();
+        newb->ab_next = arena->a_head;
+        arena->a_head = arena->a_cur = newb;
+        b = newb;
+    }
+    void *p = b->ab_mem + b->ab_offset;
+    b->ab_offset += size;
+    return p;
+}
+```
+
+Allocations are not individually freed. The offset never decreases.
+
+### `PyArena_AddPyObject`
+
+```c
+// CPython: Python/pyarena.c:160 PyArena_AddPyObject
+int
+PyArena_AddPyObject(PyArena *arena, PyObject *obj)
+{
+    /* Keep obj alive for the arena's lifetime and protect from GC */
+    if (arena->a_nobjects == arena->a_szobjects) {
+        /* Grow the pointer array */
+        Py_ssize_t newsz = arena->a_szobjects + 128;
+        arena->a_objects = PyMem_Realloc(arena->a_objects,
+                                          newsz * sizeof(PyObject *));
+        arena->a_szobjects = newsz;
+    }
+    Py_INCREF(obj);
+    arena->a_objects[arena->a_nobjects++] = obj;
+    return 0;
+}
+```
+
+String literals and identifier names are Python objects allocated outside the arena. `AddPyObject` keeps a reference so they are not collected while the arena lives.
+
+## gopy notes
+
+The gopy compiler uses Go's GC for AST node lifetimes, so there is no direct `PyArena` equivalent. The compiler package allocates AST node structs as Go heap values; the Go GC collects them when the compilation function returns. `PyArena_AddPyObject` has no equivalent because Go strings are values, not GC-tracked pointers.

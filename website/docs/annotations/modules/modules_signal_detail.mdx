@@ -1,0 +1,129 @@
+---
+title: Modules/signalmodule.c
+description: "Modules/signalmodule.c: signal.signal(), signal.raise_signal(), wakeup fd, SIGINT handler, PyErr_SetInterrupt."
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/signalmodule.c" />
+
+`signalmodule.c` bridges POSIX signals and Python. It installs C signal handlers that set a flag and optionally write to a wakeup fd. The eval loop checks the flag and dispatches to Python-level handlers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Signal table | `Handlers[NSIG]` — per-signal Python callable + C handler |
+| 101-250 | `signal_handler` | C-level signal handler: sets flag, writes wakeup fd |
+| 251-400 | `signal_signal_impl` | `signal.signal(signum, handler)` |
+| 401-550 | `signal_raise_signal_impl` | `signal.raise_signal(signum)` |
+| 551-700 | `signal_set_wakeup_fd_impl` | `signal.set_wakeup_fd(fd)` |
+| 701-900 | SIGINT handling | `PyErr_SetInterrupt`, `_PyErr_CheckSignals` |
+| 901-1100 | `signal_sigwait_impl` | `signal.sigwait(sigset)` — block until signal |
+| 1101-1400 | `signal_pthread_kill_impl` | `signal.pthread_kill(thread_id, signum)` |
+
+## Reading
+
+### Signal handler table
+
+```c
+// CPython: Modules/signalmodule.c:82 Handlers
+static struct {
+    _Py_atomic_int tripped;   /* set to 1 by C handler */
+    PyObject *func;           /* Python callable or SIG_DFL/SIG_IGN */
+} Handlers[NSIG];
+
+static _Py_atomic_int is_tripped;  /* any signal tripped */
+```
+
+### C-level signal handler
+
+```c
+// CPython: Modules/signalmodule.c:140 signal_handler
+static void
+signal_handler(int sig_num)
+{
+    int save_errno = errno;
+    /* Mark this signal as pending */
+    _Py_atomic_store_relaxed(&Handlers[sig_num].tripped, 1);
+    /* Wake up a blocked select/poll via the wakeup fd */
+    if (wakeup.fd != INVALID_FD) {
+        unsigned char byte = (unsigned char)sig_num;
+        _Py_write_noraise(wakeup.fd, &byte, 1);
+    }
+    _Py_atomic_store(&is_tripped, 1);
+    /* Reinstall on platforms that reset to SIG_DFL after delivery */
+#ifdef HAVE_SIGACTION
+    /* sigaction is persistent — no reinstall needed */
+#else
+    PyOS_setsig(sig_num, signal_handler);
+#endif
+    errno = save_errno;
+}
+```
+
+The handler is async-signal-safe: it only writes to an atomic and optionally writes one byte to a fd.
+
+### `signal.signal()`
+
+```c
+// CPython: Modules/signalmodule.c:310 signal_signal_impl
+static PyObject *
+signal_signal_impl(PyObject *module, int signalnum, PyObject *handler)
+{
+    /* Only the main thread can install signal handlers */
+    if (!_PyMainInterpreterThread_Check(tstate)) {
+        PyErr_SetString(PyExc_ValueError,
+            "signal only works in main thread");
+        return NULL;
+    }
+    PyObject *old_handler = Handlers[signalnum].func;
+    Py_INCREF(handler);
+    Handlers[signalnum].func = handler;
+    if (handler == IgnoreHandler)
+        PyOS_setsig(signalnum, SIG_IGN);
+    else if (handler == DefaultHandler)
+        PyOS_setsig(signalnum, SIG_DFL);
+    else
+        PyOS_setsig(signalnum, signal_handler);
+    Py_DECREF(old_handler);
+    return old_handler;
+}
+```
+
+### Wakeup fd
+
+```c
+// CPython: Modules/signalmodule.c:600 signal_set_wakeup_fd_impl
+/* signal.set_wakeup_fd(fd, *, warn_on_full_buffer=True)
+   Writes signal number as a byte to fd when any signal arrives.
+   Used to integrate signals with event loops (asyncio, select).
+*/
+static PyObject *
+signal_set_wakeup_fd_impl(PyObject *module, int fd, int warn_on_full_buffer)
+```
+
+`asyncio` calls `set_wakeup_fd` with the write end of a socket pair so that `select`/`epoll` wakes up when a signal arrives.
+
+### `PyErr_SetInterrupt` / `_PyErr_CheckSignals`
+
+```c
+// CPython: Modules/signalmodule.c:750 PyErr_SetInterrupt
+void
+PyErr_SetInterrupt(void)
+{
+    /* Simulate a SIGINT — checked by _PyErr_CheckSignals */
+    _Py_atomic_store(&Handlers[SIGINT].tripped, 1);
+    _Py_atomic_store(&is_tripped, 1);
+}
+```
+
+`_PyErr_CheckSignals` is called from `_Py_HandlePending` in the eval loop. It iterates `Handlers`, calls the Python handler for each tripped signal, and raises `KeyboardInterrupt` for SIGINT.
+
+## gopy notes
+
+gopy handles signals in `vm/signals.go`. `is_tripped` maps to `vm.signalTripped` (an `atomic.Bool`). `_PyErr_CheckSignals` is `vm.CheckSignals()`, called from the eval loop's pending-checks path. `signal.set_wakeup_fd` writes to `vm.wakeupFd`.
