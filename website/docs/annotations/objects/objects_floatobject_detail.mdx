@@ -1,0 +1,72 @@
+---
+title: Objects/floatobject.c
+description: "float implementation: PyFloat_FromDouble constructor with free list, IEEE 754 arithmetic, repr using shortest-round-trip algorithm, and hash consistent with int.__hash__."
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/floatobject.c" />
+
+`Objects/floatobject.c` implements the `float` type. Floats store a C `double` in a compact object with a per-interpreter free list for recycling. The file provides arithmetic, comparison, hashing (consistent with `int`), `repr` using the shortest-round-trip decimal algorithm, and serialization helpers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | free list | Per-interpreter free list; `PyFloat_FromDouble` |
+| 101-300 | `float_new`, `float_from_string` | Constructor; string parsing |
+| 301-600 | arithmetic slots | `float_add`, `float_sub`, `float_mul`, `float_truediv`, `float_pow` |
+| 601-900 | `float_richcompare` | IEEE 754 comparison including NaN handling |
+| 901-1100 | `float_hash` | Hash consistent with `int` via Py_HASH_MODULUS |
+| 1101-1400 | `float_repr`, `_Py_dg_dtoa` | Shortest-round-trip repr using David Gay's dtoa |
+| 1401-1800 | `float_as_integer_ratio`, `float_is_integer` | Conversion helpers; type wiring |
+
+## Reading
+
+### Free list
+
+`PyFloat_FromDouble(fval)` pops from `state->free_list` before calling `PyObject_Malloc`. `float_dealloc` pushes back onto the free list (up to `PyFloat_MAXFREELIST`). This avoids allocator calls for the common case of short-lived float temporaries in arithmetic.
+
+```c
+// Objects/floatobject.c:1 PyFloat_FromDouble
+PyObject *
+PyFloat_FromDouble(double fval)
+{
+    struct _Py_float_state *state = &_PyInterpreterState_GET()->float_state;
+    PyFloatObject *op = state->free_list;
+    if (op != NULL) {
+        state->free_list = (PyFloatObject *)Py_TYPE(op);
+        state->numfree--;
+        _PyObject_Init((PyObject *)op, &PyFloat_Type);
+    } else {
+        op = PyObject_Malloc(sizeof(PyFloatObject));
+    }
+    op->ob_fval = fval;
+    return (PyObject *)op;
+}
+```
+
+### float_hash: consistency with int
+
+`float_hash` for an integer-valued float (e.g., `3.0`) must equal `hash(3)`. The implementation converts to a fraction `m/e` where `m = mantissa` and `e = 2**exponent`, then computes `m * pow(2, e, _PyHASH_MODULUS) % _PyHASH_MODULUS` using modular arithmetic. This guarantees `hash(3.0) == hash(3)`.
+
+```c
+// Objects/floatobject.c:901 float_hash
+static Py_hash_t
+float_hash(PyFloatObject *v)
+{
+    return _Py_HashDouble((PyObject *)v, v->ob_fval);
+}
+```
+
+### Shortest-round-trip repr
+
+`float_repr` calls `_Py_dg_dtoa` (David Gay's dtoa library) which finds the shortest decimal representation that round-trips back to the same `double` value. For example, `repr(0.1)` produces `'0.1'` rather than `'0.10000000000000001'`.
+
+## gopy notes
+
+The gopy float is implemented as a Go `float64` wrapper in `objects/`. The free list maps to a `sync.Pool`. Hash consistency with int is handled by the same modular arithmetic formula in `objects/float.go` (or delegating to the existing `_Py_HashDouble` equivalent).

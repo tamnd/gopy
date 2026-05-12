@@ -430,6 +430,7 @@ const sidebars = {
         'annotations/objects/objects_dictobject_detail',
         'annotations/objects/objects_bytesobject_detail',
         'annotations/objects/objects_unicodeobject_c_detail',
+        'annotations/objects/objects_floatobject_detail',
       ],
     },
     {
@@ -1236,6 +1237,8 @@ const sidebars = {
         'annotations/lib/lib_pprint_detail',
         'annotations/lib/lib_functools_detail',
         'annotations/lib/lib_itertools_detail',
+        'annotations/lib/lib_operator_detail',
+        'annotations/lib/lib_contextlib_detail',
       ],
     },
   ],

@@ -1,0 +1,74 @@
+---
+title: Lib/operator.py
+description: "operator module: Python-level wrappers for operators as functions, attrgetter/itemgetter/methodcaller callable factories, and the __dunder__ equivalents for all operators."
+cpython_path: Lib/operator.py
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/operator.py" />
+
+`Lib/operator.py` is the pure-Python fallback for the `operator` module (the C accelerator is `Modules/_operator.c`). It exports every Python operator as a function (`operator.add`, `operator.mul`, `operator.getitem`, etc.), plus the `attrgetter`, `itemgetter`, and `methodcaller` callable factories used for key functions in `sorted` and `min`/`max`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | imports, `__all__` | Re-export from `_operator`; fallback definitions |
+| 51-150 | Arithmetic operators | `add`, `sub`, `mul`, `truediv`, `floordiv`, `mod`, `pow`, `neg`, `pos`, `abs` |
+| 151-220 | Comparison and bitwise | `lt`, `le`, `eq`, `ne`, `ge`, `gt`, `and_`, `or_`, `xor`, `lshift`, `rshift` |
+| 221-280 | Sequence operators | `getitem`, `setitem`, `delitem`, `contains`, `concat`, `repeat` |
+| 281-350 | `attrgetter`, `itemgetter`, `methodcaller` | Callable factories |
+
+## Reading
+
+### Function wrappers
+
+Each operator function is a thin wrapper that calls the corresponding dunder method. The `operator.add(a, b)` function is equivalent to `a + b`; using it as a key or reducing function avoids a lambda.
+
+```python
+# CPython: Lib/operator.py:51 add (pure-Python fallback)
+def add(a, b):
+    "Same as a + b."
+    return a + b
+```
+
+The C extension `_operator` provides optimized C versions of these. The Python file uses `try: from _operator import *; except ImportError: pass` to prefer C where available.
+
+### attrgetter
+
+`attrgetter('x.y.z')` returns a callable that, when called with an object `obj`, evaluates `obj.x.y.z`. Dotted names are split on `.` at construction time and the getter calls `getattr` in a loop.
+
+```python
+# CPython: Lib/operator.py:281 attrgetter
+class attrgetter:
+    def __init__(self, *attrs):
+        self._attrs = attrs
+        self._getters = [self._make_getter(a) for a in attrs]
+
+    def _make_getter(self, attr):
+        if '.' not in attr:
+            return lambda obj: getattr(obj, attr)
+        names = attr.split('.')
+        def getter(obj):
+            for name in names:
+                obj = getattr(obj, name)
+            return obj
+        return getter
+
+    def __call__(self, obj):
+        if len(self._getters) == 1:
+            return self._getters[0](obj)
+        return tuple(g(obj) for g in self._getters)
+```
+
+### itemgetter and methodcaller
+
+`itemgetter(key)` returns `lambda obj: obj[key]`. When multiple keys are given, it returns a tuple. `methodcaller('name', *args, **kwargs)` returns `lambda obj: obj.name(*args, **kwargs)`. Both are used as `key=` arguments to `sorted`, `min`, `max`.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/operator/`. The arithmetic wrappers are one-liners once the Go object protocol is in place. `attrgetter` and `itemgetter` require the `__getattr__` and `__getitem__` protocols which are implemented in `objects/protocol.go`.
