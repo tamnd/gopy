@@ -1,0 +1,122 @@
+---
+title: Objects/longobject.c (part 19)
+description: "Objects/longobject.c part 19: int bit operations, int.__lshift__, int.__rshift__, int.__and__, int.bit_length."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers bitwise operations on Python integers. See `objects_longobject18_detail` for `int.__add__`, `int.__mul__`, and Karatsuba multiplication.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `int.__and__` / `int.__or__` / `int.__xor__` | Bitwise logic |
+| 81-180 | `int.__lshift__` | Left shift by k bits |
+| 181-280 | `int.__rshift__` | Right shift by k bits (sign-extending) |
+| 281-380 | `int.bit_length` | Number of bits required to represent |
+| 381-500 | `int.bit_count` | Count set bits (popcount) |
+
+## Reading
+
+### `int.__and__`
+
+```c
+// CPython: Objects/longobject.c:4880 long_bitwise
+static PyObject *
+long_bitwise(PyLongObject *a, char op, PyLongObject *b)
+{
+    /* Operate on two's complement representation */
+    /* Negative numbers: ~n == -(n+1), used for sign extension */
+    digit msd_a = ..., msd_b = ...;  /* virtual sign-extension digits */
+    Py_ssize_t size = MAX(size_a, size_b);
+    PyLongObject *z = _PyLong_New(size);
+    for (Py_ssize_t i = 0; i < size; i++) {
+        digit da = (i < size_a) ? a->long_value.ob_digit[i] : msd_a;
+        digit db = (i < size_b) ? b->long_value.ob_digit[i] : msd_b;
+        switch (op) {
+        case '&': z->long_value.ob_digit[i] = da & db; break;
+        case '|': z->long_value.ob_digit[i] = da | db; break;
+        case '^': z->long_value.ob_digit[i] = da ^ db; break;
+        }
+    }
+    return long_normalize(z);
+}
+```
+
+Python integers use sign-magnitude internally but `&`, `|`, `^` behave as if operating on two's complement (infinite precision). Negative numbers are handled by sign-extending with `msd` (most significant digit) filled with `PyLong_MASK` for negative numbers and `0` for positive.
+
+### `int.__lshift__`
+
+```c
+// CPython: Objects/longobject.c:5020 long_lshift
+static PyObject *
+long_lshift(PyObject *v, PyObject *w)
+{
+    Py_ssize_t shiftby = PyLong_AsSsize_t(w);
+    Py_ssize_t wordshift = shiftby / PyLong_SHIFT;  /* digits to shift */
+    Py_ssize_t remshift = shiftby % PyLong_SHIFT;    /* bits within digit */
+    Py_ssize_t newsize = Py_ABS(Py_SIZE(a)) + wordshift + 1;
+    PyLongObject *z = _PyLong_New(newsize);
+    /* Zero the low wordshift digits */
+    memset(z->long_value.ob_digit, 0, wordshift * sizeof(digit));
+    /* Copy with bit shift */
+    digit accum = 0;
+    for (Py_ssize_t i = 0; i < Py_ABS(Py_SIZE(a)); i++) {
+        accum |= (twodigits)a->long_value.ob_digit[i] << remshift;
+        z->long_value.ob_digit[i + wordshift] = accum & PyLong_MASK;
+        accum >>= PyLong_SHIFT;
+    }
+    z->long_value.ob_digit[newsize - 1] = accum;
+    return long_normalize(z);
+}
+```
+
+`1 << 100` is efficient: `wordshift` whole digits are zero-filled, then the remaining bits are shifted across digit boundaries. No division needed: `PyLong_SHIFT` is 30 on 64-bit systems.
+
+### `int.bit_length`
+
+```c
+// CPython: Objects/longobject.c:5480 long_bit_length
+static PyObject *
+long_bit_length(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    PyLongObject *a = (PyLongObject *)self;
+    Py_ssize_t ndigits = Py_ABS(Py_SIZE(a));
+    if (ndigits == 0) return PyLong_FromLong(0);
+    Py_ssize_t msd = a->long_value.ob_digit[ndigits - 1];
+    Py_ssize_t msd_bits = 0;
+    while (msd) { msd >>= 1; msd_bits++; }
+    return PyLong_FromSsize_t((ndigits - 1) * PyLong_SHIFT + msd_bits);
+}
+```
+
+`(255).bit_length()` returns `8`. The result is `(ndigits - 1) * 30 + bits_in_msd`. The MSD (most significant digit) bit count is found by shifting right until zero. On modern hardware, `_bit_scan_reverse` or `__builtin_clz` could be used, but the simple loop is already fast for small integers.
+
+### `int.bit_count`
+
+```c
+// CPython: Objects/longobject.c:5520 long_bit_count
+static PyObject *
+long_bit_count(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Hamming weight / popcount */
+    Py_ssize_t count = 0;
+    for (Py_ssize_t i = 0; i < Py_ABS(Py_SIZE(a)); i++) {
+        count += _Py_popcount32(a->long_value.ob_digit[i]);
+    }
+    return PyLong_FromSsize_t(count);
+}
+```
+
+`(255).bit_count()` returns `8` (all bits set). `_Py_popcount32` uses `__builtin_popcount` on GCC/Clang or a portable fallback. Works on the absolute value — `(-255).bit_count() == 8`.
+
+## gopy notes
+
+`int.__and__/or/xor` are `objects.IntBitAnd/Or/Xor` in `objects/longobject.go`. Python's two's complement semantics for bitwise ops are implemented via sign-aware digit extension. `int.__lshift__` is `objects.IntLshift`; uses Go's `big.Int.Lsh`. `int.bit_length` is `objects.IntBitLength`; uses `big.Int.BitLen()`. `int.bit_count` is `objects.IntBitCount`; uses `math/bits.OnesCount`.

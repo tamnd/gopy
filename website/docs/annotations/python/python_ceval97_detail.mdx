@@ -1,0 +1,131 @@
+---
+title: Python/ceval.c (part 97)
+description: "Python/ceval.c part 97: FOR_ITER, FOR_ITER_LIST, FOR_ITER_RANGE, FOR_ITER_GEN."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers iteration specializations. See `python_ceval96_detail` for `CALL` specializations and `CALL_PY_EXACT_ARGS`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `GET_ITER` | Call `__iter__` and push the iterator |
+| 81-160 | `FOR_ITER` | Call `__next__` with inline cache |
+| 161-240 | `FOR_ITER_LIST` | Fast path for list iteration |
+| 241-320 | `FOR_ITER_RANGE` | Fast path for `range` iteration |
+| 321-500 | `FOR_ITER_GEN` | Inline generator iteration |
+
+## Reading
+
+### `GET_ITER`
+
+```c
+// CPython: Python/ceval.c:2820 GET_ITER
+inst(GET_ITER, (iterable -- iter)) {
+    iter = PyObject_GetIter(iterable);
+    ERROR_IF(iter == NULL, error);
+    Py_DECREF(iterable);
+}
+```
+
+`GET_ITER` calls `tp_iter` (i.e., `__iter__`). For list, tuple, dict, set, and other built-in types, `tp_iter` is a C function. For user-defined classes, it calls `__iter__` via the normal slot machinery.
+
+### `FOR_ITER`
+
+```c
+// CPython: Python/ceval.c:2860 FOR_ITER
+inst(FOR_ITER, (iter -- iter, next)) {
+    _PyForIterCache *cache = (_PyForIterCache *)next_instr;
+    if (ADAPTIVE_COUNTER_TRIGGERS(cache->counter)) {
+        _Py_Specialize_ForIter(iter, next_instr, oparg);
+        DISPATCH_SAME_OPARG();
+    }
+    next = (*Py_TYPE(iter)->tp_iternext)(iter);
+    if (next == NULL) {
+        if (_PyErr_Occurred(tstate)) {
+            if (!_PyErr_ExceptionMatches(tstate, PyExc_StopIteration))
+                goto error;
+            _PyErr_Clear(tstate);
+        }
+        JUMPBY(oparg + 1);  /* jump past the loop body */
+        DISPATCH();
+    }
+}
+```
+
+`FOR_ITER` calls `tp_iternext` directly (no Python-level attribute lookup). `StopIteration` causes an unconditional jump past the loop body. Other exceptions propagate normally. After warmup, `_Py_Specialize_ForIter` rewrites to a specialized variant.
+
+### `FOR_ITER_LIST`
+
+```c
+// CPython: Python/ceval.c:2920 FOR_ITER_LIST
+inst(FOR_ITER_LIST, (iter -- iter, next)) {
+    /* Validate: still a list iterator at the same version */
+    _PyForIterCache *cache = (_PyForIterCache *)next_instr;
+    DEOPT_IF(Py_TYPE(iter) != &PyListIter_Type, FOR_ITER);
+    _PyListIterObject *it = (_PyListIterObject *)iter;
+    assert(it->it_seq != NULL);
+    if (it->it_index >= PyList_GET_SIZE(it->it_seq)) {
+        /* Exhausted: clean up and jump */
+        it->it_seq = NULL;
+        JUMPBY(oparg + 1);
+        DISPATCH();
+    }
+    next = Py_NewRef(PyList_GET_ITEM(it->it_seq, it->it_index++));
+}
+```
+
+`FOR_ITER_LIST` reads from `it->it_seq->ob_item[it->it_index]` directly — no function call, no dict lookup, no error checking for `StopIteration`. The list is accessed through the `PyListIterObject` pointer stored in the iterator.
+
+### `FOR_ITER_RANGE`
+
+```c
+// CPython: Python/ceval.c:2960 FOR_ITER_RANGE
+inst(FOR_ITER_RANGE, (iter -- iter, next)) {
+    DEOPT_IF(Py_TYPE(iter) != &PyRangeIter_Type, FOR_ITER);
+    _PyRangeIterObject *r = (_PyRangeIterObject *)iter;
+    if (r->len <= 0) {
+        JUMPBY(oparg + 1);
+        DISPATCH();
+    }
+    long value = r->start;
+    r->start += r->step;
+    r->len--;
+    next = PyLong_FromLong(value);
+    ERROR_IF(next == NULL, error);
+}
+```
+
+`for i in range(1000000)` with `FOR_ITER_RANGE`: each iteration computes `r->start` and increments/decrements directly. Avoids creating intermediate `range_iterator` state and `StopIteration` exception objects. The `PyLong_FromLong` call is unavoidable unless small integer cache hits.
+
+### `FOR_ITER_GEN`
+
+```c
+// CPython: Python/ceval.c:3000 FOR_ITER_GEN
+inst(FOR_ITER_GEN, (iter -- iter, next)) {
+    DEOPT_IF(Py_TYPE(iter) != &PyGen_Type, FOR_ITER);
+    PyGenObject *gen = (PyGenObject *)iter;
+    DEOPT_IF(gen->gi_frame_state == FRAME_COMPLETED, FOR_ITER);
+    /* Resume the generator frame inline */
+    _PyInterpreterFrame *gen_frame = (_PyInterpreterFrame *)gen->gi_iframe;
+    gen_frame->previous = frame;
+    gen->gi_frame_state = FRAME_EXECUTING;
+    JUMPBY(INLINE_CACHE_ENTRIES_FOR_ITER);
+    frame = gen_frame;
+    DISPATCH_INLINED(frame);
+}
+```
+
+`FOR_ITER_GEN` inlines generator resumption into the eval loop — no `gen_send_ex2` call, no Python-level function dispatch. The generator's frame is pushed directly onto the C stack via `DISPATCH_INLINED`. This is the highest-performance path for `yield`-based generators.
+
+## gopy notes
+
+`GET_ITER` is in `vm/eval_simple.go`. `FOR_ITER` is in `vm/eval_gen.go`. `FOR_ITER_LIST` reads `objects.List.Items` directly. `FOR_ITER_RANGE` accesses `objects.RangeIter.Start`/`Step`/`Len`. `FOR_ITER_GEN` calls `vm.ResumeGenInline` which pushes the generator frame without leaving the eval loop.

@@ -1,0 +1,123 @@
+---
+title: Modules/_operator.c (part 4)
+description: "_operator.c part 4: operator.attrgetter, operator.itemgetter, operator.methodcaller."
+cpython_path: Modules/_operator.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_operator.c" />
+
+This annotation covers the composable accessor objects. See `modules_operator3_detail` for arithmetic and comparison operators.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `attrgetter` | Create a callable that gets attributes |
+| 81-180 | `attrgetter.__call__` | Apply nested attribute access |
+| 181-280 | `itemgetter` | Create a callable that gets items |
+| 281-400 | `methodcaller` | Create a callable that calls a method |
+
+## Reading
+
+### `attrgetter`
+
+```c
+// CPython: Modules/_operator.c:360 attrgetter_new
+static PyObject *
+attrgetter_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    attrgetterobject *ag;
+    PyObject *attr;
+    Py_ssize_t nattrs = PyTuple_GET_SIZE(args);
+    if (nattrs == 1) {
+        attr = PyTuple_GET_ITEM(args, 0);
+        /* Split on '.' for nested access: 'a.b.c' -> ('a', 'b', 'c') */
+        if (PyUnicode_Check(attr) && PyUnicode_Contains(attr, dot)) {
+            attr = PyUnicode_Split(attr, dot, -1);
+        }
+    }
+    ag->attr = attr;  /* tuple of name parts, or single name */
+    ag->nattrs = nattrs;
+    return (PyObject *)ag;
+}
+```
+
+`operator.attrgetter('x')` creates an object that calls `getattr(obj, 'x')`. `attrgetter('a.b.c')` splits on `.` and chains attribute accesses. `attrgetter('x', 'y')` with multiple arguments returns a tuple.
+
+### `attrgetter.__call__`
+
+```c
+// CPython: Modules/_operator.c:420 attrgetter_call
+static PyObject *
+attrgetter_call(attrgetterobject *ag, PyObject *args, PyObject *kw)
+{
+    PyObject *obj = PyTuple_GET_ITEM(args, 0);
+    if (ag->nattrs == 1) {
+        /* Single attribute or dotted chain */
+        if (PyTuple_Check(ag->attr)) {
+            /* Dotted: chain getattr calls */
+            for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(ag->attr); i++) {
+                PyObject *name = PyTuple_GET_ITEM(ag->attr, i);
+                obj = PyObject_GetAttr(obj, name);
+                if (obj == NULL) return NULL;
+            }
+            return obj;
+        }
+        return PyObject_GetAttr(obj, ag->attr);
+    }
+    /* Multiple attrs: return tuple */
+    PyObject *result = PyTuple_New(ag->nattrs);
+    for (Py_ssize_t i = 0; i < ag->nattrs; i++)
+        PyTuple_SET_ITEM(result, i, PyObject_GetAttr(obj, PyTuple_GET_ITEM(ag->attr, i)));
+    return result;
+}
+```
+
+`attrgetter('first_name')(person)` is equivalent to `person.first_name`. Used as `key` in `sorted(people, key=attrgetter('last_name', 'first_name'))`.
+
+### `itemgetter`
+
+```c
+// CPython: Modules/_operator.c:520 itemgetter_call
+static PyObject *
+itemgetter_call(itemgetterobject *ig, PyObject *args, PyObject *kw)
+{
+    PyObject *obj = PyTuple_GET_ITEM(args, 0);
+    if (ig->nitems == 1) {
+        return PyObject_GetItem(obj, ig->item);  /* single item */
+    }
+    PyObject *result = PyTuple_New(ig->nitems);
+    for (Py_ssize_t i = 0; i < ig->nitems; i++)
+        PyTuple_SET_ITEM(result, i, PyObject_GetItem(obj, PyTuple_GET_ITEM(ig->item, i)));
+    return result;
+}
+```
+
+`itemgetter(1)` returns a callable that does `obj[1]`. `itemgetter(0, 2)` returns a callable that returns `(obj[0], obj[2])`. Used as `key` in `sorted(rows, key=itemgetter(2))` to sort by column 2.
+
+### `methodcaller`
+
+```c
+// CPython: Modules/_operator.c:640 methodcaller_call
+static PyObject *
+methodcaller_call(methodcallerobject *mc, PyObject *args, PyObject *kw)
+{
+    PyObject *obj = PyTuple_GET_ITEM(args, 0);
+    PyObject *method = PyObject_GetAttr(obj, mc->name);
+    if (method == NULL) return NULL;
+    PyObject *result = PyObject_Call(method, mc->args, mc->kwds);
+    Py_DECREF(method);
+    return result;
+}
+```
+
+`methodcaller('upper')('hello')` calls `'hello'.upper()`. `methodcaller('encode', 'utf-8')('hello')` calls `'hello'.encode('utf-8')` — the arguments are stored in `mc->args` and `mc->kwds` at construction time.
+
+## gopy notes
+
+`attrgetter` is `objects.AttrGetter` in `objects/operator.go`. Dotted names are pre-split into `[]string` at construction. `itemgetter` is `objects.ItemGetter`; calls `objects.GetItem`. `methodcaller` is `objects.MethodCaller`; uses `objects.GetAttr` then `objects.Call`.
