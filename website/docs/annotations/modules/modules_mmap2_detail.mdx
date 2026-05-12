@@ -1,0 +1,120 @@
+---
+title: Modules/mmapmodule.c (part 2)
+description: "Modules/mmapmodule.c part 2: mmap.read, mmap.write, mmap.seek, mmap.tell, mmap.resize, mmap.find, buffer protocol."
+cpython_path: Modules/mmapmodule.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mmapmodule.c" />
+
+This annotation covers I/O methods and the buffer protocol. See `modules_mmap_detail` for `mmap.__new__`, `ACCESS_READ`/`WRITE`/`COPY`, `mmap.close`, and the POSIX/Windows platform differences.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `mmap.read` | Read bytes from the current position |
+| 81-160 | `mmap.write` | Write bytes at the current position |
+| 161-260 | `mmap.seek` / `mmap.tell` | Random access by file-position cursor |
+| 261-380 | `mmap.find` / `mmap.rfind` | Boyer-Moore-Horspool search within the mapped memory |
+| 381-500 | `mmap.resize` | Change the mapping size (`mremap` / `SetEndOfFile`) |
+| 501-700 | Buffer protocol | Export the mapped region as a writable `Py_buffer` |
+
+## Reading
+
+### `mmap.read`
+
+```c
+// CPython: Modules/mmapmodule.c:480 mmap_read_method
+static PyObject *
+mmap_read_method(mmap_object *self, PyObject *args)
+{
+    Py_ssize_t num_bytes = PY_SSIZE_T_MAX;  /* default: read to end */
+    PyArg_ParseTuple(args, "|n:read", &num_bytes);
+    CHECK_VALID(NULL);
+    if (num_bytes < 0) {
+        PyErr_SetString(PyExc_ValueError, "read length must be non-negative");
+        return NULL;
+    }
+    Py_ssize_t available = self->size - self->pos;
+    if (num_bytes > available) num_bytes = available;
+    PyObject *result = PyBytes_FromStringAndSize(self->data + self->pos, num_bytes);
+    self->pos += num_bytes;
+    return result;
+}
+```
+
+`mmap.read(n)` copies from mapped memory into a new `bytes` object. No system call is made — the kernel handles page faults lazily.
+
+### `mmap.find`
+
+```c
+// CPython: Modules/mmapmodule.c:620 mmap_find_method
+static PyObject *
+mmap_find_method(mmap_object *self, PyObject *args, int forward)
+{
+    Py_ssize_t start = self->pos, end = self->size;
+    Py_buffer sub;
+    /* Search self->data[start:end] for sub using memmem/a linear scan */
+    const char *p = memmem(self->data + start, end - start,
+                            sub.buf, sub.len);
+    if (p == NULL) {
+        PyBuffer_Release(&sub);
+        return PyLong_FromSsize_t(-1);
+    }
+    PyBuffer_Release(&sub);
+    return PyLong_FromSsize_t(p - self->data);
+}
+```
+
+`m.find(b'pattern')` uses `memmem` (glibc) or a portable fallback for fast byte-pattern search in the mapped region. Returns the byte offset or -1.
+
+### `mmap.resize`
+
+```c
+// CPython: Modules/mmapmodule.c:700 mmap_resize_method
+static PyObject *
+mmap_resize_method(mmap_object *self, PyObject *args)
+{
+    Py_ssize_t new_size;
+    /* POSIX: ftruncate + mremap */
+    ftruncate(self->fd, new_size);
+    void *new_data = mremap(self->data, self->size, new_size, MREMAP_MAYMOVE);
+    if (new_data == MAP_FAILED) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    self->data = new_data;
+    self->size = new_size;
+    Py_RETURN_NONE;
+}
+```
+
+`resize` changes the backing file size and remaps. Only supported on POSIX with `PROT_WRITE` access and on Windows with `ACCESS_WRITE`.
+
+### Buffer protocol
+
+```c
+// CPython: Modules/mmapmodule.c:820 mmap_buffer_getbuf
+static int
+mmap_buffer_getbuf(mmap_object *self, Py_buffer *view, int flags)
+{
+    /* Export the full mapped region as a flat, writable bytes buffer. */
+    if (PyBuffer_FillInfo(view, (PyObject *)self,
+                          self->data, self->size,
+                          self->access == ACCESS_READ ? 1 : 0,
+                          flags) < 0) return -1;
+    self->exports++;
+    return 0;
+}
+```
+
+`mmap` objects support `struct.pack_into(fmt, m, 0, ...)` and `bytes(m)` without copying. `ACCESS_READ` maps export a read-only buffer.
+
+## gopy notes
+
+`mmap.read`/`write` are in `module/mmap/module.go`. The mapped region is a `[]byte` backed by `syscall.Mmap`. `mmap.find` uses `bytes.Index`. `mmap.resize` uses `syscall.Ftruncate` + remapping. The buffer protocol exports the `[]byte` slice directly via `objects.GetWritableBuffer`.

@@ -1,0 +1,135 @@
+---
+title: Python/typeobject.c (part 3)
+description: "Python/typeobject.c part 3: slot update propagation, inherit_slots, add_getset, update_one_slot — slot inheritance machinery."
+cpython_path: Python/typeobject.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/typeobject.c" />
+
+This annotation covers slot inheritance and update propagation. See `objects_typeobject3_detail` for `type_new_impl`, MRO computation, and `__init_subclass__`, and `objects_typeobject2_detail` for type attribute lookup.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `inherit_slots` | Copy slot pointers from base types to a new subtype |
+| 121-280 | `update_one_slot` | Recompute a single slot when the type dict changes |
+| 281-460 | `type_modified_unlocked` | Invalidate the method cache when a type is mutated |
+| 461-650 | `add_getset` | Add `PyGetSetDef` descriptors to `tp_dict` |
+| 651-1000 | `fixup_slot_dispatchers` | Install `slot_tp_*` wrappers for Python-defined dunder methods |
+
+## Reading
+
+### `inherit_slots`
+
+```c
+// CPython: Python/typeobject.c:5280 inherit_slots
+static void
+inherit_slots(PyTypeObject *type, PyTypeObject *base)
+{
+    /* Copy slot function pointers from base to type when type's slot is NULL.
+       This implements "if type doesn't define it, use base's implementation." */
+    COPYSLOT(tp_repr);
+    COPYSLOT(tp_hash);
+    COPYSLOT(tp_call);
+    COPYSLOT(tp_str);
+    COPYSLOT(tp_getattro);
+    COPYSLOT(tp_setattro);
+    COPYSLOT(tp_richcompare);
+    COPYSLOT(tp_iter);
+    COPYSLOT(tp_iternext);
+    /* Number slots */
+    COPYNUMSLOT(nb_add);
+    COPYNUMSLOT(nb_subtract);
+    ...
+}
+
+#define COPYSLOT(SLOT) \
+    if (!type->SLOT && base->SLOT) { type->SLOT = base->SLOT; }
+```
+
+Slot inheritance makes `class Foo(list): pass` work: `Foo` inherits `tp_richcompare` from `list` without explicitly defining `__lt__`, etc. Each slot is copied only if `type` doesn't already define it.
+
+### `update_one_slot`
+
+```c
+// CPython: Python/typeobject.c:5480 update_one_slot
+static slotdef *
+update_one_slot(PyTypeObject *type, slotdef *p)
+{
+    /* For the slot described by p, search through type.__mro__ to find
+       the first class that defines the corresponding dunder method.
+       Install either the C implementation or a Python-to-C wrapper. */
+    PyObject *descr = NULL;
+    Py_ssize_t i;
+    for (i = 0; i < PyTuple_GET_SIZE(type->tp_mro); i++) {
+        PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(type->tp_mro, i);
+        /* Check base->tp_dict for the dunder name */
+        PyObject *d = base->tp_dict;
+        if (d == NULL) continue;
+        descr = PyDict_GetItemWithError(d, p->name_strobj);
+        if (descr != NULL) break;
+    }
+    if (descr == NULL || /* it's a C implementation */ ...)
+        STORE_SLOT(type, p->offset, p->function);
+    else
+        /* Install a slot_tp_* wrapper that calls the Python method */
+        STORE_SLOT(type, p->offset, p->wrapper);
+    ...
+}
+```
+
+`update_one_slot` is called when `type.__dict__` is modified (e.g., `MyClass.__add__ = lambda self, other: ...`). It scans the MRO to find the new implementation and updates the C slot pointer accordingly.
+
+### `type_modified_unlocked`
+
+```c
+// CPython: Python/typeobject.c:5620 type_modified_unlocked
+void
+type_modified_unlocked(PyTypeObject *type)
+{
+    /* Called when type.__dict__ changes. Invalidate the version tag
+       so inline caches in compiled bytecode are reset. */
+    type->tp_version_tag = 0;
+    /* Propagate to all known subclasses */
+    PyObject *subclasses = type->tp_subclasses;
+    if (subclasses != NULL) {
+        Py_ssize_t pos = 0;
+        PyObject *ref, *subclass;
+        while (PyDict_Next(subclasses, &pos, NULL, &ref)) {
+            subclass = PyWeakref_GET_OBJECT(ref);
+            if (subclass != Py_None)
+                type_modified_unlocked((PyTypeObject *)subclass);
+        }
+    }
+}
+```
+
+`tp_version_tag` is used by `LOAD_ATTR_WITH_HINTS` and other inline caches. Setting it to 0 invalidates all caches that reference this type. The invalidation propagates transitively down the subclass tree.
+
+### `fixup_slot_dispatchers`
+
+```c
+// CPython: Python/typeobject.c:5780 fixup_slot_dispatchers
+static void
+fixup_slot_dispatchers(PyTypeObject *type)
+{
+    /* For every slot defined in slotdefs[]:
+       run update_one_slot to install the correct C function pointer. */
+    slotdef *p;
+    for (p = slotdefs; p->name; p++) {
+        update_one_slot(type, p);
+    }
+}
+```
+
+`fixup_slot_dispatchers` is called once during `type_ready` (after class creation) to set all slot pointers based on the MRO. It is also called after `type_modified_unlocked` to refresh slots after dict mutation.
+
+## gopy notes
+
+`inherit_slots` is `objects.InheritSlots` in `objects/type.go`. `update_one_slot` is `objects.UpdateOneSlot`. `type_modified_unlocked` is `objects.TypeModified` which bumps `objects.Type.VersionTag` and invalidates `vm.InlineCache` entries. `fixup_slot_dispatchers` is called from `objects.TypeReady`.

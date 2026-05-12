@@ -1,0 +1,126 @@
+---
+title: Lib/os.py (part 2)
+description: "Lib/os.py part 2: os.walk, os.scandir, DirEntry, os.makedirs, os.removedirs, os.rename, os.replace."
+cpython_path: Lib/os.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/os.py" />
+
+This annotation covers directory traversal and file system operations. See `lib_os_detail` for `os.path`, `os.environ`, `os.getcwd`, `os.getpid`, and `os.stat`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `os.makedirs` | Create a directory tree, optionally existing-ok |
+| 81-180 | `os.removedirs` | Remove empty directories up the tree |
+| 181-320 | `os.walk` | Recursively yield `(dirpath, dirnames, filenames)` |
+| 321-480 | `os.scandir` / `DirEntry` | Efficient directory listing with cached stat info |
+| 481-620 | `os.rename` / `os.replace` | Rename or atomically replace a file |
+| 621-800 | `os.link` / `os.symlink` / `os.readlink` | Hard and symbolic links |
+
+## Reading
+
+### `os.makedirs`
+
+```python
+# CPython: Lib/os.py:212 makedirs
+def makedirs(name, mode=0o777, exist_ok=False):
+    """Create a directory tree. Like mkdir -p."""
+    head, tail = path.split(name)
+    if not tail:
+        head, tail = path.split(head)
+    if head and tail and not path.exists(head):
+        try:
+            makedirs(head, mode, exist_ok)
+        except FileExistsError:
+            pass
+    try:
+        mkdir(name, mode)
+    except OSError as e:
+        if not exist_ok or e.errno != errno.EEXIST or not path.isdir(name):
+            raise
+```
+
+`makedirs('/a/b/c', exist_ok=True)` creates all three directories. The race condition between `exists` check and `mkdir` is handled by catching `FileExistsError` and verifying `isdir`.
+
+### `os.walk`
+
+```python
+# CPython: Lib/os.py:420 walk
+def walk(top, topdown=True, onerror=None, followlinks=False):
+    """Recursively yield (dirpath, dirnames, filenames) for each directory."""
+    sys.audit('os.walk', top, topdown, onerror, followlinks)
+    return _walk(fspath(top), topdown, onerror, followlinks)
+
+def _walk(top, topdown, onerror, followlinks):
+    dirs = []
+    nondirs = []
+    walk_dirs = []
+    try:
+        with scandir(top) as scandir_it:
+            while True:
+                try:
+                    entry = next(scandir_it)
+                except StopIteration:
+                    break
+                try:
+                    is_dir = entry.is_dir()
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    dirs.append(entry.name)
+                    walk_dirs.append(entry.path)
+                else:
+                    nondirs.append(entry.name)
+    except OSError as error:
+        if onerror is not None:
+            onerror(error)
+        return
+    if topdown:
+        yield top, dirs, nondirs
+        for new_path in walk_dirs:
+            yield from _walk(new_path, topdown, onerror, followlinks)
+    else:
+        for new_path in walk_dirs:
+            yield from _walk(new_path, topdown, onerror, followlinks)
+        yield top, dirs, nondirs
+```
+
+`topdown=True` yields the parent before its children (allows pruning by modifying `dirnames` in place). `topdown=False` yields children before parents (good for `rmtree`-style bottom-up deletion).
+
+### `os.scandir` / `DirEntry`
+
+```python
+# CPython: Lib/os.py (uses posix.scandir)
+# DirEntry has:
+#   .name    -- filename without path
+#   .path    -- full path
+#   .inode() -- inode number
+#   .is_dir(follow_symlinks=True)  -- avoids extra stat call
+#   .is_file(follow_symlinks=True)
+#   .is_symlink()
+#   .stat(follow_symlinks=True) -- os.stat_result (cached)
+```
+
+`scandir` is more efficient than `listdir` + `stat` because it uses the `d_type` field from `getdents` on Linux, avoiding a `stat` call for each entry when only the file type is needed.
+
+### `os.replace`
+
+```python
+# CPython: Lib/os.py:580 replace
+# os.replace(src, dst) is the atomic rename:
+# - On POSIX: calls rename(src, dst) which is atomic on the same filesystem
+# - On Windows: calls MoveFileExW with MOVEFILE_REPLACE_EXISTING
+```
+
+`os.replace` is the portable, atomic way to update a file. Write to a temp file, then `os.replace(tmp, target)` to avoid partial reads of the target.
+
+## gopy notes
+
+`os.walk` is `module/os.Walk` in `module/os/module.go` using `filepath.WalkDir`. `os.scandir` returns `module/os.ScandirIterator` backed by `os.ReadDir`. `DirEntry.stat` is cached after the first call. `os.replace` uses `os.Rename` on POSIX and `syscall.MoveFileExW` on Windows.

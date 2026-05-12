@@ -1,0 +1,118 @@
+---
+title: Objects/fileobject.c (part 2)
+description: "Objects/fileobject.c part 2: PyFile_WriteObject, PyFile_WriteString, sys.stdin/stdout/stderr, _Py_SetStandardStreamEncoding."
+cpython_path: Objects/fileobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/fileobject.c" />
+
+This annotation covers the write helpers used by `print()` and the standard stream setup. See `objects_fileobject_detail` for `open()`, `FileIO.__init__`, and `BufferedWriter`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyFile_WriteObject` | Write `repr(obj)` or `str(obj)` to a file-like object |
+| 81-160 | `PyFile_WriteString` | Write a C string to a file-like object |
+| 161-260 | `sys.stdin` / `stdout` / `stderr` setup | Wrap OS file descriptors in `TextIOWrapper` |
+| 261-400 | `_Py_SetStandardStreamEncoding` | Override encoding before initialization |
+
+## Reading
+
+### `PyFile_WriteObject`
+
+```c
+// CPython: Objects/fileobject.c:48 PyFile_WriteObject
+int
+PyFile_WriteObject(PyObject *v, PyObject *f, int flags)
+{
+    /* flags: Py_PRINT_RAW = use str(); otherwise use repr() */
+    if (f == NULL || f == Py_None) {
+        PyErr_SetString(PyExc_TypeError,
+                        "writeobject with NULL file");
+        return -1;
+    }
+    PyObject *writer = PyObject_GetAttr(f, &_Py_ID(write));
+    if (writer == NULL) return -1;
+    PyObject *value;
+    if (flags & Py_PRINT_RAW)
+        value = PyObject_Str(v);
+    else
+        value = PyObject_Repr(v);
+    if (value == NULL) { Py_DECREF(writer); return -1; }
+    PyObject *result = PyObject_CallOneArg(writer, value);
+    Py_DECREF(writer);
+    Py_DECREF(value);
+    if (result == NULL) return -1;
+    Py_DECREF(result);
+    return 0;
+}
+```
+
+`print(obj, file=f)` calls `PyFile_WriteObject(obj, f, Py_PRINT_RAW)` which calls `str(obj)`, then `f.write(str_obj)`. The `Py_PRINT_RAW` flag distinguishes `print` (str) from `repr()` display.
+
+### `PyFile_WriteString`
+
+```c
+// CPython: Objects/fileobject.c:80 PyFile_WriteString
+int
+PyFile_WriteString(const char *s, PyObject *f)
+{
+    /* Write a NUL-terminated C string to f.
+       Used for tracebacks, prompts, and error messages. */
+    if (f == NULL) {
+        /* Fallback: write to stderr via C stdio */
+        fputs(s, stderr);
+        return 0;
+    }
+    PyObject *v = PyUnicode_FromString(s);
+    if (v == NULL) return -1;
+    int result = PyFile_WriteObject(v, f, Py_PRINT_RAW);
+    Py_DECREF(v);
+    return result;
+}
+```
+
+### `sys.stdin`/`stdout`/`stderr` setup
+
+```c
+// CPython: Objects/fileobject.c:200 _PySys_SetAttr
+/* Standard streams are set up in Py_InitializeMain:
+   sys.stdin  = TextIOWrapper(FileIO(0, 'r'), encoding, errors='replace')
+   sys.stdout = TextIOWrapper(FileIO(1, 'w'), encoding, line_buffering=True)
+   sys.stderr = TextIOWrapper(FileIO(2, 'w'), encoding, errors='backslashreplace')
+   The encoding is determined by locale or UTF-8 mode.
+*/
+```
+
+`sys.stdout` is line-buffered by default (flushes on `\n`). `sys.stderr` uses `errors='backslashreplace'` to prevent UnicodeEncodeError from masking the original error.
+
+### `_Py_SetStandardStreamEncoding`
+
+```c
+// CPython: Objects/fileobject.c:320 _Py_SetStandardStreamEncoding
+int
+_Py_SetStandardStreamEncoding(const char *encoding, const char *errors)
+{
+    /* Called before Py_Initialize() to override the default encoding.
+       Used by: PYTHONIOENCODING env variable, -X utf8, UTF-8 mode. */
+    if (_Py_StandardStreamEncoding == NULL) {
+        _Py_StandardStreamEncoding = strdup(encoding);
+    }
+    if (_Py_StandardStreamErrors == NULL) {
+        _Py_StandardStreamErrors = strdup(errors);
+    }
+    return 0;
+}
+```
+
+`PYTHONIOENCODING=utf-8:replace` sets the encoding to UTF-8 with `errors='replace'` for all three standard streams.
+
+## gopy notes
+
+`PyFile_WriteObject` is `objects.FileWriteObject` in `objects/fileobject.go`. Standard stream setup is in `pythonrun/init.go` which wraps `os.Stdin`/`Stdout`/`Stderr` as `objects.TextIOWrapper`. `_Py_SetStandardStreamEncoding` is respected via the `PYTHONIOENCODING` environment variable check in `pythonrun.SetupStandardStreams`.

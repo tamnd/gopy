@@ -1,0 +1,105 @@
+---
+title: Include/internal/pycore_exceptions.h
+description: "Include/internal/pycore_exceptions.h: PyBaseExceptionObject layout, exception group fields, _PyErr_GetTopmostException, exception state per frame."
+cpython_path: Include/internal/pycore_exceptions.h
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_exceptions.h" />
+
+`pycore_exceptions.h` defines the internal struct layouts of exception objects and helpers for reading the current exception state.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `PyBaseExceptionObject` | Internal struct with `args`, `notes`, `__dict__`, chain fields |
+| 61-110 | `PyExceptionGroupObject` | Extra fields for `ExceptionGroup` |
+| 111-150 | `_PyErr_GetTopmostException` | Read the active exception from the current `exc_info` chain |
+| 151-180 | `_PyException_AddNote` | Append a note string to `exc.__notes__` |
+
+## Reading
+
+### `PyBaseExceptionObject`
+
+```c
+// CPython: Include/internal/pycore_exceptions.h:28 PyBaseExceptionObject
+struct _PyBaseExceptionObject {
+    PyObject_HEAD
+    PyObject *args;              /* positional arguments tuple */
+    PyObject *notes;             /* list of note strings or NULL */
+    PyObject *__dict__;          /* instance dict or NULL */
+    PyObject *__cause__;         /* explicit chain: raise exc from cause */
+    PyObject *__context__;       /* implicit chain: exception during handling */
+    PyObject *__traceback__;     /* PyTracebackObject linked list */
+    char suppress_context;       /* __suppress_context__ flag */
+};
+```
+
+`__cause__` and `__context__` implement PEP 3134 exception chaining. `suppress_context` is set to True when `raise exc from cause` is used, suppressing the implicit "During handling of the above exception..." message.
+
+### `PyExceptionGroupObject`
+
+```c
+// CPython: Include/internal/pycore_exceptions.h:65 PyExceptionGroupObject
+struct _PyExceptionGroupObject {
+    PyBaseExceptionObject base;
+    PyObject *message;     /* the group's description string */
+    PyObject *excs;        /* tuple of contained exceptions */
+};
+```
+
+`ExceptionGroup("errors", [ValueError(1), TypeError(2)])` stores the message and a tuple of contained exceptions. Nested groups are allowed for hierarchical error reporting.
+
+### `_PyErr_GetTopmostException`
+
+```c
+// CPython: Include/internal/pycore_exceptions.h:120 _PyErr_GetTopmostException
+static inline _PyErr_StackItem *
+_PyErr_GetTopmostException(PyThreadState *tstate)
+{
+    /* Walk the exc_info chain to find the innermost active exception.
+       Returns the _PyErr_StackItem for the innermost except block. */
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    while ((exc_info->exc_value == NULL || exc_info->exc_value == Py_None) &&
+           exc_info->previous_item != NULL) {
+        exc_info = exc_info->previous_item;
+    }
+    return exc_info;
+}
+```
+
+Used by `sys.exc_info()` to retrieve the currently-handled exception. Returns the innermost `except` block's exception state.
+
+### `_PyException_AddNote`
+
+```c
+// CPython: Include/internal/pycore_exceptions.h:155 _PyException_AddNote
+int
+_PyException_AddNote(PyObject *exc, PyObject *note)
+{
+    /* PEP 678: exc.add_note(note) */
+    /* notes is created lazily as a list */
+    if (!PyUnicode_Check(note)) {
+        PyErr_SetString(PyExc_TypeError,
+            "note must be a str");
+        return -1;
+    }
+    PyObject *notes = PyObject_GetAttr(exc, &_Py_ID(__notes__));
+    if (notes == NULL) {
+        notes = PyList_New(0);
+        PyObject_SetAttr(exc, &_Py_ID(__notes__), notes);
+    }
+    return PyList_Append(notes, note);
+}
+```
+
+`exc.add_note("See docs for details")` appends to `exc.__notes__`. Notes are printed after the exception message in tracebacks. Added in Python 3.11 (PEP 678).
+
+## gopy notes
+
+`PyBaseExceptionObject` layout maps to `objects.BaseException` in `objects/exceptions.go` with fields `Args`, `Notes`, `Dict`, `Cause`, `Context`, `Traceback`, `SuppressContext`. `_PyErr_GetTopmostException` is `vm.GetTopmostException` reading `vm.Thread.ExcInfo`. `_PyException_AddNote` is `objects.ExceptionAddNote`.

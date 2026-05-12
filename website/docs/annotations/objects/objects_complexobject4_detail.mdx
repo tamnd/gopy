@@ -1,0 +1,113 @@
+---
+title: Objects/complexobject.c (part 4)
+description: "Objects/complexobject.c part 4: complex.__abs__, complex.conjugate, complex.__getnewargs__, complex parsing from strings."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers methods and string parsing. See `objects_complexobject3_detail` for `complex.__add__`/`__mul__`/`__truediv__`, `complex.__eq__`, and `complex.__hash__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `complex.__abs__` | `abs(z)` — Euclidean magnitude |
+| 61-120 | `complex.conjugate` | `z.conjugate()` — `real - imag*j` |
+| 121-220 | `complex.__getnewargs__` | Pickle support — reconstruct as `complex(real, imag)` |
+| 221-380 | `complex_from_string` | Parse `'1+2j'`, `'3j'`, `'-4.5'` strings |
+| 381-500 | `complex.__format__` | Format spec `'f'`, `'e'`, `'g'` applied to each component |
+
+## Reading
+
+### `complex.__abs__`
+
+```c
+// CPython: Objects/complexobject.c:580 complex_abs
+static PyObject *
+complex_abs(PyComplexObject *v)
+{
+    /* hypot(real, imag) — handles overflow in intermediate computation */
+    double result = _Py_c_abs(v->cval);
+    if (result == Py_HUGE_VAL) {
+        PyErr_SetString(PyExc_OverflowError,
+            "absolute value too large");
+        return NULL;
+    }
+    return PyFloat_FromDouble(result);
+}
+```
+
+`abs(3+4j)` returns `5.0`. `_Py_c_abs` is `hypot(real, imag)` which handles intermediate overflow (e.g., `abs(1e308 + 1e308j)`) better than `sqrt(r*r + i*i)`.
+
+### `complex.conjugate`
+
+```c
+// CPython: Objects/complexobject.c:620 complex_conjugate
+static PyObject *
+complex_conjugate(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Return complex(real, -imag) */
+    Py_complex c = ((PyComplexObject *)self)->cval;
+    c.imag = -c.imag;
+    return PyComplex_FromCComplex(c);
+}
+```
+
+`(3+4j).conjugate()` returns `(3-4j)`. Used in DSP and numerical algorithms where the conjugate has special properties (e.g., `z * z.conjugate() = abs(z)**2`).
+
+### `complex_from_string`
+
+```c
+// CPython: Objects/complexobject.c:680 complex_from_string_inner
+static PyObject *
+complex_from_string_inner(const char *s, Py_ssize_t len, void *type)
+{
+    /* Grammar:
+       complex ::= real | real sign imag 'j' | imag 'j'
+       real, imag ::= float (e.g., '3.14', '-1e10', 'inf', 'nan')
+       sign ::= '+' | '-'
+    */
+    double x = 0.0, y = 0.0;
+    /* Try to parse real part */
+    const char *t = _PyOS_ascii_strtod(s, &end);
+    x = t;
+    s = end;
+    if (*s == '+' || *s == '-') {
+        /* Parse imaginary part */
+        y = _PyOS_ascii_strtod(s, &end);
+        s = end;
+    }
+    if (*s == 'j' || *s == 'J') { s++; }
+    ...
+}
+```
+
+`complex('1+2j')`, `complex('-3j')`, `complex('inf+infj')` are all valid. The parser handles `nan`, `inf`, and scientific notation.
+
+### `complex.__format__`
+
+```python
+# CPython: Lib/test/test_complex.py (illustrative)
+# complex.__format__ applies the format spec to both components:
+>>> format(1+2j, '.2f')
+'(1.00+2.00j)'
+>>> format(1+2j, 'e')
+'(1.000000e+00+2.000000e+00j)'
+```
+
+```c
+// CPython: Objects/complexobject.c:740 complex___format___impl
+/* Format each component with the given spec, wrap in parens */
+```
+
+The format spec is applied independently to the real and imaginary parts. The sign of the imaginary part is always shown (e.g., `1.00+2.00j` not `1.00 2.00j`).
+
+## gopy notes
+
+`complex.__abs__` is `objects.ComplexAbs` in `objects/complex.go` using `math.Hypot`. `complex.conjugate` is `objects.ComplexConjugate`. `complex_from_string` is `objects.ComplexFromString` using `strconv.ParseFloat`. `complex.__format__` formats both components using `objects.FloatFormat`.

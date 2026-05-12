@@ -1,0 +1,118 @@
+---
+title: Lib/json/ (part 2)
+description: "Lib/json/ part 2: json.JSONEncoder (default, encode, iterencode, chunked output), _make_iterencode, float/int/None handling."
+cpython_path: Lib/json/encoder.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/json/encoder.py" />
+
+This annotation covers the JSON encoder. See `modules_json_detail2` for `json.loads`, `JSONDecoder`, and the C accelerator `_json.scanstring`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `JSONEncoder.__init__` | Configure sort_keys, indent, separators, default |
+| 81-200 | `JSONEncoder.default` | Override point for custom serialization |
+| 201-360 | `JSONEncoder.encode` | Serialize to a single string |
+| 361-550 | `JSONEncoder.iterencode` | Lazy iterator yielding string chunks |
+| 551-700 | `_make_iterencode` | Recursive closure implementing the encoding state machine |
+
+## Reading
+
+### `JSONEncoder.encode`
+
+```python
+# CPython: Lib/json/encoder.py:200 encode
+def encode(self, o):
+    """Return a JSON string representation of a Python data structure."""
+    # Fast path for simple scalars
+    if isinstance(o, str):
+        if self.ensure_ascii:
+            return encode_basestring_ascii(o)
+        else:
+            return encode_basestring(o)
+    # Otherwise use the full iterencode machinery
+    chunks = self.iterencode(o, _one_shot=True)
+    if not isinstance(chunks, (list, tuple)):
+        chunks = list(chunks)
+    return ''.join(chunks)
+```
+
+`encode` returns the complete JSON string at once. `iterencode` yields chunks lazily and is used for streaming large objects.
+
+### `_make_iterencode`
+
+```python
+# CPython: Lib/json/encoder.py:420 _make_iterencode
+def _make_iterencode(markers, _default, _encoder, _indent, _key_separator,
+                     _item_separator, _sort_keys, _skipkeys, _one_shot,
+                     ValueError=ValueError, ...):
+
+    def _iterencode(o, _current_indent_level):
+        if isinstance(o, str):
+            yield _encoder(o)
+        elif o is None:
+            yield 'null'
+        elif o is True:
+            yield 'true'
+        elif o is False:
+            yield 'false'
+        elif isinstance(o, int):
+            yield _intstr(o)
+        elif isinstance(o, float):
+            yield _floatstr(o)
+        elif isinstance(o, (list, tuple)):
+            yield from _iterencode_list(o, _current_indent_level)
+        elif isinstance(o, dict):
+            yield from _iterencode_dict(o, _current_indent_level)
+        else:
+            # Fall back to default()
+            o = _default(o)
+            yield from _iterencode(o, _current_indent_level)
+
+    return _iterencode
+```
+
+The circular reference detector uses `markers`: a dict mapping `id(obj)` to the object. If the same id appears during recursion, it raises `ValueError("Circular reference detected")`.
+
+### Float serialization
+
+```python
+# CPython: Lib/json/encoder.py:280 FLOAT_REPR
+# NaN and Infinity are not valid JSON
+def _floatstr(o):
+    if math.isnan(o) or math.isinf(o):
+        raise ValueError("Out of range float values are not JSON serializable: " + repr(o))
+    return repr(o)
+```
+
+By default `json.dumps(float('nan'))` raises `ValueError`. Setting `allow_nan=True` (non-standard) outputs bare `NaN`/`Infinity`.
+
+### `JSONEncoder.default`
+
+```python
+# CPython: Lib/json/encoder.py:180 default
+def default(self, o):
+    """Override this method to serialize custom Python objects."""
+    raise TypeError(f'Object of type {type(o).__name__} is not JSON serializable')
+```
+
+Subclass and override `default` to handle types like `datetime`, `Decimal`, or `dataclasses`:
+
+```python
+class MyEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, datetime):
+            return o.isoformat()
+        return super().default(o)
+```
+
+## gopy notes
+
+`json.JSONEncoder` is `module/json.JSONEncoder` in `module/json/encoder.go`. The C accelerator `_json.encode_basestring_ascii` is `module/json.EncodeBaseStringASCII`. `_make_iterencode` is implemented as a Go generator using a `chan string` or a recursive Go function yielding into a `strings.Builder`.

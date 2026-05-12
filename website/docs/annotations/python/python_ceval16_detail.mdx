@@ -1,0 +1,112 @@
+---
+title: Python/ceval.c (part 16)
+description: "Python/ceval.c part 16: UNPACK_SEQUENCE, UNPACK_EX, LIST_EXTEND, TUPLE_UNPACK_WITH_CALL, FOR_ITER specialization dispatch."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers sequence unpacking opcodes. See `python_ceval15_detail` for exception-handling opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `UNPACK_SEQUENCE` | `a, b, c = iterable` — fixed-length unpack |
+| 81-180 | `UNPACK_EX` | `a, *b, c = iterable` — starred unpack |
+| 181-280 | `LIST_EXTEND` | `[*a, *b]` — extend a list with an iterable |
+| 281-360 | `TUPLE_UNPACK_WITH_CALL` | Pass `*args` to a function call |
+| 361-500 | `UNPACK_SEQUENCE_TWO_TUPLE` / `LIST` / `TUPLE` | Specializations |
+
+## Reading
+
+### `UNPACK_SEQUENCE`
+
+```c
+// CPython: Python/ceval.c:2580 UNPACK_SEQUENCE
+inst(UNPACK_SEQUENCE, (seq -- values[oparg])) {
+    /* Unpack seq into oparg items. Push in reverse order
+       so the first item ends up on top of the stack. */
+    PyObject **top = stack_pointer + oparg - 1;
+    int res = _PySequence_IterSearch(seq, top, oparg, PY_ITERSEARCH_UNPACK);
+    if (res < 0) {
+        if (_PyErr_ExceptionMatches(tstate, PyExc_ValueError)) {
+            /* Provide a better error message */
+            ...
+        }
+        ERROR_IF(true, error);
+    }
+}
+```
+
+`a, b, c = [1, 2, 3]` is compiled to `LOAD [1,2,3]`, `UNPACK_SEQUENCE 3`. Items are pushed in reverse so `a` ends up at `stack[-3]`, `b` at `stack[-2]`, `c` at `stack[-1]`.
+
+### `UNPACK_SEQUENCE_TWO_TUPLE`
+
+```c
+// CPython: Python/ceval.c:2620 UNPACK_SEQUENCE_TWO_TUPLE
+inst(UNPACK_SEQUENCE_TWO_TUPLE, (seq -- val1, val0)) {
+    /* Specialization for 2-element tuple unpack: x, y = t */
+    DEOPT_IF(!PyTuple_CheckExact(seq), UNPACK_SEQUENCE);
+    DEOPT_IF(PyTuple_GET_SIZE(seq) != 2, UNPACK_SEQUENCE);
+    val0 = Py_NewRef(PyTuple_GET_ITEM(seq, 0));
+    val1 = Py_NewRef(PyTuple_GET_ITEM(seq, 1));
+    DECREF_INPUTS();
+}
+```
+
+`x, y = point` where `point` is a 2-tuple is hot enough to warrant a specialization that avoids the iterator protocol entirely.
+
+### `UNPACK_EX`
+
+```c
+// CPython: Python/ceval.c:2660 UNPACK_EX
+inst(UNPACK_EX, (seq -- lefts[oparg & 0xFF], starred, rights[oparg >> 8])) {
+    /* a, *b, c, d = iterable
+       oparg encodes: low byte = number of items before *, high byte = after * */
+    int totalargs = (oparg & 0xFF) + (oparg >> 8);
+    PyObject *list = PyObject_CallOneArg((PyObject *)&PyList_Type, seq);
+    Py_ssize_t listlen = PyList_GET_SIZE(list);
+    if (listlen < totalargs) {
+        PyErr_Format(PyExc_ValueError, "not enough values to unpack "
+                     "(expected at least %d, got %zd)", totalargs, listlen);
+        ERROR_IF(true, error);
+    }
+    /* Push: left items, starred slice, right items (reversed) */
+    ...
+}
+```
+
+`a, *b, c = [1, 2, 3, 4, 5]` leaves `a=1`, `b=[2,3,4]`, `c=5`. The starred expression always gets a `list`, even if the source is a tuple.
+
+### `LIST_EXTEND`
+
+```c
+// CPython: Python/ceval.c:2740 LIST_EXTEND
+inst(LIST_EXTEND, (iterable --)) {
+    PyObject *list = PEEK(oparg + 1);  /* list being built */
+    if (_PyList_Extend((PyListObject *)list, iterable) < 0) {
+        if (_PyErr_ExceptionMatches(tstate, PyExc_TypeError) &&
+            Py_TYPE(iterable)->tp_iter == NULL &&
+            !PySequence_Check(iterable)) {
+            _PyErr_Clear(tstate);
+            _PyErr_Format(tstate, PyExc_TypeError,
+                "'%.200s' object is not iterable",
+                Py_TYPE(iterable)->tp_name);
+        }
+        ERROR_IF(true, error);
+    }
+    Py_DECREF(iterable);
+}
+```
+
+`[*a, *b, 1, 2]` compiles to `BUILD_LIST 0`, `LIST_EXTEND 1` (for a), `LIST_EXTEND 1` (for b), `LIST_APPEND 1` twice. The `oparg` is the stack depth of the target list.
+
+## gopy notes
+
+`UNPACK_SEQUENCE` is `vm.UnpackSequence` in `vm/eval_simple.go`. `UNPACK_EX` is `vm.UnpackEx`. `UNPACK_SEQUENCE_TWO_TUPLE` is in `vm/eval_specialize.go`. `LIST_EXTEND` uses `objects.ListExtend`. `TUPLE_UNPACK_WITH_CALL` builds a tuple from the unpack and passes it as positional arguments.

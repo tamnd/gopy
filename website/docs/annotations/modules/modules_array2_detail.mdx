@@ -1,0 +1,127 @@
+---
+title: Modules/arraymodule.c (part 2)
+description: "Modules/arraymodule.c part 2: array.extend, array.fromfile, array.tofile, array.frombytes, array.tobytes, buffer protocol."
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/arraymodule.c" />
+
+This annotation covers I/O and bulk operations. See `modules_array_detail` for `array.__new__`, type codes, `append`, `insert`, `pop`, and the type descriptor table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `array.extend` | Append items from an iterable |
+| 81-200 | `array.frombytes` / `array.tobytes` | Raw binary I/O |
+| 201-340 | `array.fromfile` / `array.tofile` | Read/write raw typed data to a binary file |
+| 341-500 | Buffer protocol (`bf_getbuffer`) | Export a typed `Py_buffer` for zero-copy I/O |
+| 501-700 | `array.byteswap` | Swap byte order in place |
+| 701-800 | `array.__reduce_ex__` | Pickle support |
+
+## Reading
+
+### `array.frombytes`
+
+```c
+// CPython: Modules/arraymodule.c:680 array_frombytes
+static PyObject *
+array_frombytes(arrayobject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    Py_buffer buf;
+    if (PyObject_GetBuffer(args[0], &buf, PyBUF_SIMPLE) < 0) return NULL;
+    if (buf.len % self->ob_descr->itemsize != 0) {
+        PyErr_SetString(PyExc_ValueError,
+            "bytes length not a multiple of item size");
+        PyBuffer_Release(&buf);
+        return NULL;
+    }
+    Py_ssize_t n = buf.len / self->ob_descr->itemsize;
+    if (array_resize(self, Py_SIZE(self) + n) == -1) { ... }
+    memcpy(self->ob_item + Py_SIZE(self) - n, buf.buf, buf.len);
+    PyBuffer_Release(&buf);
+    Py_RETURN_NONE;
+}
+```
+
+`a.frombytes(b'\x01\x00\x02\x00')` on an `array('H')` (unsigned short) appends two elements: 1 and 2. The bytes are copied directly without element-by-element conversion.
+
+### `array.fromfile`
+
+```c
+// CPython: Modules/arraymodule.c:740 array_fromfile_impl
+static PyObject *
+array_fromfile_impl(arrayobject *self, PyObject *f, Py_ssize_t n)
+{
+    /* Read n * itemsize bytes from binary file f. */
+    PyObject *b = _PyObject_CallMethodIdObjArgs(f, &PyId_read,
+                                                PyLong_FromSsize_t(n * self->ob_descr->itemsize),
+                                                NULL);
+    if (b == NULL) return NULL;
+    Py_ssize_t nbytes = PyBytes_GET_SIZE(b);
+    if (nbytes != n * self->ob_descr->itemsize) {
+        PyErr_SetString(PyExc_EOFError, "read() didn't return enough bytes");
+        Py_DECREF(b);
+        return NULL;
+    }
+    /* Append the raw bytes */
+    array_frombytes(self, &b, 1);
+    Py_DECREF(b);
+    Py_RETURN_NONE;
+}
+```
+
+`a.fromfile(f, 10)` reads exactly `10 * itemsize` bytes from the file. Raises `EOFError` if fewer bytes are available.
+
+### Buffer protocol
+
+```c
+// CPython: Modules/arraymodule.c:1320 array_buffer_getbuf
+static int
+array_buffer_getbuf(arrayobject *self, Py_buffer *view, int flags)
+{
+    /* Export a typed buffer:
+       format = ob_descr->formats (e.g., 'H' for unsigned short)
+       itemsize = ob_descr->itemsize
+       shape = [Py_SIZE(self)]
+       strides = NULL (C-contiguous)
+    */
+    return PyBuffer_FillInfo(view, (PyObject *)self,
+                             self->ob_item, Py_SIZE(self) * self->ob_descr->itemsize,
+                             0, flags);
+}
+```
+
+`array` supports PEP 3118 typed buffers. `np.asarray(a)` creates a NumPy array sharing the `array` data without copying. The format string (`'H'`, `'d'`, etc.) enables correct type interpretation.
+
+### `array.byteswap`
+
+```c
+// CPython: Modules/arraymodule.c:800 array_byteswap_impl
+static PyObject *
+array_byteswap_impl(arrayobject *self)
+{
+    /* Swap bytes of each element for cross-endian I/O. */
+    char *p;
+    Py_ssize_t itemsize = self->ob_descr->itemsize;
+    for (p = self->ob_item; p < self->ob_item + Py_SIZE(self)*itemsize; p += itemsize) {
+        int i, j;
+        char tmp;
+        for (i = 0, j = itemsize - 1; i < j; i++, j--) {
+            tmp = p[i]; p[i] = p[j]; p[j] = tmp;
+        }
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`byteswap` converts between big-endian and little-endian in place. Used when reading binary data from a network protocol or file with known byte order.
+
+## gopy notes
+
+`array.frombytes` and `array.tobytes` are in `module/array/module.go`. `fromfile`/`tofile` use `io.Read`/`io.Write`. The buffer protocol exports the underlying `[]byte` slice. `byteswap` uses `encoding/binary.BigEndian.PutUint16` etc. depending on item size.
