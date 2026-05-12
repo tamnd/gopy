@@ -1,0 +1,120 @@
+---
+title: Python/ceval.c (part 99)
+description: "Python/ceval.c part 99: RESUME, COPY_FREE_VARS, MAKE_CELL, RETURN_VALUE, RETURN_CONST."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers frame entry and exit opcodes. See `python_ceval98_detail` for `BINARY_OP` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `RESUME` | Function entry; tracing and profiling hook |
+| 81-160 | `COPY_FREE_VARS` | Copy closure variables into the frame |
+| 161-240 | `MAKE_CELL` | Promote a local variable to a cell |
+| 241-340 | `RETURN_VALUE` | Return TOS to caller |
+| 341-500 | `RETURN_CONST` | Return a constant without a stack push |
+
+## Reading
+
+### `RESUME`
+
+```c
+// CPython: Python/ceval.c:1120 RESUME
+inst(RESUME, (--)) {
+    /* oparg: 0=function entry, 1=yield, 2=yield from, 3=send */
+    assert(tstate->tracing || tstate->cframe->use_tracing == 0);
+    if (_Py_atomic_load_relaxed_int32(&tstate->interp->eval_breaker)) {
+        if (oparg == 0) {
+            /* Function entry: handle tracing, profiling, signals */
+            handle_eval_breaker_from_resume(tstate, frame, oparg);
+        }
+    }
+}
+```
+
+`RESUME` is the first instruction of every function. It also appears after every `yield`/`yield from`/`send` resume point. `oparg == 0` means initial function entry; the other values distinguish generator resumption types. This unified design allows tracing to hook every resumption point with a single check.
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:1160 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (--)) {
+    /* oparg: number of free variables to copy from the closure tuple */
+    PyCodeObject *co = frame->f_code;
+    PyObject *closure = ((PyFunctionObject *)frame->f_funcobj)->func_closure;
+    int offset = co->co_nlocalsplus - oparg;
+    for (int i = 0; i < oparg; i++) {
+        PyObject *cell = PyTuple_GET_ITEM(closure, i);
+        SETLOCAL(offset + i, Py_NewRef(cell));
+    }
+}
+```
+
+`COPY_FREE_VARS` copies cell references from the function's `__closure__` tuple into the frame's locals array. This happens once at function entry. Free variables are stored as `PyCell` objects so that closures and nested functions share the same cell.
+
+### `MAKE_CELL`
+
+```c
+// CPython: Python/ceval.c:1200 MAKE_CELL
+inst(MAKE_CELL, (--)) {
+    /* oparg: index of local to wrap in a cell */
+    PyObject *val = GETLOCAL(oparg);
+    PyObject *cell = PyCell_New(val);
+    if (cell == NULL) goto error;
+    SETLOCAL(oparg, cell);
+    Py_XDECREF(val);
+}
+```
+
+`MAKE_CELL` is emitted for each local variable that is closed over by a nested function. The local's current value (the parameter, if any) is wrapped in a `PyCell`, and the cell replaces the local in the frame. Thereafter, `LOAD_DEREF`/`STORE_DEREF` access the cell's contents.
+
+### `RETURN_VALUE`
+
+```c
+// CPython: Python/ceval.c:2140 RETURN_VALUE
+inst(RETURN_VALUE, (retval --)) {
+    assert(STACK_LEVEL() == 0);
+    assert(frame != entry_frame);
+    _PyFrame_SetStackPointer(frame, stack_pointer);
+    _PyInterpreterFrame *gen_frame = frame->previous;
+    frame = cframe.current_frame = gen_frame;
+    /* Unlink the frame */
+    _PyFrame_DecRefLocals(frame);
+    _PyEvalFrameClearAndPop(tstate, frame);
+    stack_pointer = _PyFrame_GetStackPointer(gen_frame);
+    PUSH(retval);
+    DISPATCH();
+}
+```
+
+`RETURN_VALUE` pops `retval` from the callee's stack, unlinks the frame, restores the caller's frame pointer, and pushes `retval` onto the caller's stack. `_PyFrame_DecRefLocals` decrements the refcount of all local variables.
+
+### `RETURN_CONST`
+
+```c
+// CPython: Python/ceval.c:2180 RETURN_CONST
+inst(RETURN_CONST, (--)) {
+    /* Return a constant without touching the value stack */
+    PyObject *retval = GETITEM(FRAME_CO_CONSTS, oparg);
+    Py_INCREF(retval);
+    /* Same teardown as RETURN_VALUE but without popping */
+    ...
+    PUSH(retval);
+    DISPATCH();
+}
+```
+
+`RETURN_CONST` (added in 3.12) replaces the common `LOAD_CONST + RETURN_VALUE` sequence for `return None`, `return True`, `return 0`, etc. One fewer stack operation and one fewer instruction.
+
+## gopy notes
+
+`RESUME` is in `vm/eval_gen.go`; checks `vm.EvalBreaker` and calls `vm.HandleResume`. `COPY_FREE_VARS` copies from `objects.Function.Closure` into `vm.Frame.Locals`. `MAKE_CELL` creates `objects.Cell` and stores it in the frame. `RETURN_VALUE` calls `vm.FramePop` and pushes the return value. `RETURN_CONST` loads from `objects.Code.Consts`.

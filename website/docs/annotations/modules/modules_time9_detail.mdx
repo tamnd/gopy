@@ -1,0 +1,116 @@
+---
+title: Modules/timemodule.c (part 9)
+description: "timemodule.c part 9: time.sleep, time.monotonic, time.perf_counter, time.process_time."
+cpython_path: Modules/timemodule.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/timemodule.c" />
+
+This annotation covers high-resolution clocks and sleep. See `modules_time8_detail` for `time.time`, `time.gmtime`, `time.mktime`, and `time.strftime`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `time.sleep` | Suspend execution |
+| 81-160 | `time.monotonic` | Monotonic clock for elapsed time |
+| 161-240 | `time.perf_counter` | Highest-resolution clock for benchmarking |
+| 241-320 | `time.process_time` | CPU time used by the process |
+| 321-400 | `time.monotonic_ns` / `time.perf_counter_ns` | Nanosecond variants |
+
+## Reading
+
+### `time.sleep`
+
+```c
+// CPython: Modules/timemodule.c:380 time_sleep
+static PyObject *
+time_sleep(PyObject *self, PyObject *args)
+{
+    double secs;
+    if (!PyArg_ParseTuple(args, "d:sleep", &secs)) return NULL;
+    if (secs < 0) {
+        PyErr_SetString(PyExc_ValueError, "sleep length must be non-negative");
+        return NULL;
+    }
+    if (pysleep(secs) != 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static int
+pysleep(_PyTime_t timeout)
+{
+    /* Loop to handle EINTR (signal interruption) */
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        /* Platform-specific: select, nanosleep, WaitForSingleObjectEx */
+        int ret = _PyTime_AsTimeval(timeout, &timeout_tv, _PyTime_ROUND_CEILING);
+        err = select(0, NULL, NULL, NULL, &timeout_tv);
+        Py_END_ALLOW_THREADS
+        if (err == 0) break;
+        if (errno == EINTR) {
+            if (Py_MakePendingCalls() < 0) return -1;
+            /* Recalculate remaining time */
+            timeout = deadline - _PyTime_GetMonotonicClock();
+            if (timeout <= 0) break;
+        }
+    } while (1);
+    return 0;
+}
+```
+
+`time.sleep(0.1)` releases the GIL during the wait. `EINTR` (interrupted by a signal) triggers `Py_MakePendingCalls` (which processes signals) and then recalculates the remaining sleep time so the full duration is slept.
+
+### `time.monotonic`
+
+```c
+// CPython: Modules/timemodule.c:540 time_monotonic
+static PyObject *
+time_monotonic(PyObject *self, PyObject *unused)
+{
+    _PyTime_t t;
+    if (_PyTime_GetMonotonicClockWithInfo(&t, NULL) < 0) return NULL;
+    return _PyFloat_FromPyTime(t);
+}
+```
+
+`time.monotonic()` returns a float in seconds. The value is relative to an arbitrary point in the past — it never goes backward and is not affected by system clock adjustments. On Linux: `CLOCK_MONOTONIC`. On macOS: `mach_absolute_time`. On Windows: `QueryPerformanceCounter`.
+
+### `time.perf_counter`
+
+```c
+// CPython: Modules/timemodule.c:580 time_perf_counter
+static PyObject *
+time_perf_counter(PyObject *self, PyObject *unused)
+{
+    _PyTime_t t;
+    if (_PyTime_GetPerfCounterWithInfo(&t, NULL) < 0) return NULL;
+    return _PyFloat_FromPyTime(t);
+}
+```
+
+`time.perf_counter()` uses the highest-resolution timer available: on most platforms the same as `monotonic` but potentially with sub-nanosecond precision. Always used for benchmarking (`timeit`). `perf_counter_ns()` returns the raw integer nanosecond count without floating-point rounding.
+
+### `time.process_time`
+
+```c
+// CPython: Modules/timemodule.c:620 time_process_time
+static PyObject *
+time_process_time(PyObject *self, PyObject *unused)
+{
+    _PyTime_t t;
+    if (_PyTime_GetProcessTimeWithInfo(&t, NULL) < 0) return NULL;
+    return _PyFloat_FromPyTime(t);
+}
+```
+
+`time.process_time()` measures CPU time used by the Python process (user + system time), not wall-clock time. It does not include time spent sleeping. On POSIX: `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)`. Useful for profiling code that does heavy computation.
+
+## gopy notes
+
+`time.sleep` is `module/time.Sleep` in `module/time/module.go`; uses `time.Sleep` from Go's standard library and retries on signal interruption. `time.monotonic` is `module/time.Monotonic`; uses `time.Now()` relative to a fixed start. `time.perf_counter` uses Go's `runtime.nanotime()` via `time.Now()`. `time.process_time` uses `syscall.Getrusage`.
