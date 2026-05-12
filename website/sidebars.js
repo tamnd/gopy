@@ -304,6 +304,9 @@ const sidebars = {
         'annotations/python/python_pystate_detail',
         'annotations/python/python_pythonrun_detail',
         'annotations/python/python_initconfig_detail',
+        'annotations/python/python_ceval_detail',
+        'annotations/python/python_ceval4_detail',
+        'annotations/python/python_compile3_detail',
       ],
     },
     {

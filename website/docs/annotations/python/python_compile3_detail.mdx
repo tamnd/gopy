@@ -1,0 +1,100 @@
+---
+title: Python/compile.c (part 3)
+description: "Python/compile.c part 3: comprehension compilation, class body compilation, match/case statement compilation, f-string compilation, annotation scope."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 7200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers comprehension, class body, match/case, and f-string compilation in the CPython compiler. See `python_compile_c_detail` and `python_compile2_detail` for the main statement and expression compilation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | Comprehension compiler | `compiler_listcomp`, `compiler_setcomp`, `compiler_dictcomp`, `compiler_genexp` |
+| 301-600 | `compiler_comprehension` | Common setup: implicit function, `.send(None)`, `iter` argument |
+| 601-900 | Class body | `compiler_class`, `__build_class__` call |
+| 901-1200 | Match/case | `compiler_match`, `compiler_match_case`, pattern emitters |
+| 1201-1500 | F-string | `compiler_joined_str`, `compiler_formatted_value` |
+| 1501-1800 | Annotation scope (PEP 563/649) | `__annotations__`, deferred evaluation |
+| 1801-2500 | Helper utilities | `compiler_push_fblock`, `compiler_pop_fblock`, block stack management |
+
+## Reading
+
+### Comprehension as implicit function
+
+`[x*2 for x in range(10)]` compiles to an implicit function called with the outermost iterator. This isolates the comprehension scope.
+
+```c
+// CPython: Python/compile.c:4830 compiler_comprehension
+static int
+compiler_comprehension(struct compiler *c, expr_ty e, int type,
+                       Py_ssize_t asdl_seq_len, ...)
+{
+    /* Create a new code object for the comprehension */
+    VISIT(c, expr, outermost_iter);
+    ADDOP_I(c, GET_ITER, 0);
+    compiler_enter_scope(c, genexpr_name, COMPILER_SCOPE_COMPREHENSION, ...);
+    /* Emit: for var in .0: body */
+    ...
+    compiler_exit_scope(c);
+    ADDOP_I(c, CALL, 0);  /* call the implicit function */
+}
+```
+
+The `.0` local variable is the iterator argument passed into the implicit function.
+
+### Class body compilation
+
+```c
+// CPython: Python/compile.c:3120 compiler_class
+static int
+compiler_class(struct compiler *c, stmt_ty s)
+{
+    /* Load __build_class__ */
+    ADDOP(c, LOAD_BUILD_CLASS);
+    /* Create the class body as a function */
+    compiler_enter_scope(c, s->v.ClassDef.name, COMPILER_SCOPE_CLASS, ...);
+    ...
+    ADDOP(c, LOAD_CLOSURE);
+    ADDOP(c, COPY_FREE_VARS);
+    ADDOP(c, LOAD_CONST);  /* __name__ */
+    ADDOP(c, STORE_NAME);  /* __module__ = __name__ */
+    ...
+    compiler_exit_scope(c);
+    /* Call: __build_class__(body_func, name, *bases, **kwargs) */
+    ADDOP_I(c, CALL, 2 + n_bases);
+}
+```
+
+### Match/case compilation
+
+The compiler emits a series of conditional branches for each `case` pattern. Each pattern type has its own emitter: `compiler_pattern_literal`, `compiler_pattern_class`, `compiler_pattern_mapping`, `compiler_pattern_sequence`, etc.
+
+### F-string compilation
+
+```c
+// CPython: Python/compile.c:5620 compiler_joined_str
+static int
+compiler_joined_str(struct compiler *c, expr_ty e)
+{
+    for each part in e->v.JoinedStr.values:
+        if part is FormattedValue:
+            compiler_formatted_value(c, part);
+        else:
+            ADDOP_LOAD_CONST(c, part_str);
+    ADDOP_I(c, BUILD_STRING, n_parts);
+}
+```
+
+`BUILD_STRING n` pops `n` string objects and joins them. `compiler_formatted_value` emits `FORMAT_VALUE` with format spec.
+
+## gopy notes
+
+Comprehension compilation is in `compile/codegen_expr.go`. Class body compilation is in `compile/codegen_class.go`. Match/case is partially implemented. F-strings compile via `BUILD_STRING` which is handled in `vm/eval_gen.go`.

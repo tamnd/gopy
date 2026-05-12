@@ -1,0 +1,98 @@
+---
+title: Python/ceval.c (part 4)
+description: "Python/ceval.c part 4: exception handling opcodes (PUSH_EXC_INFO, POP_EXCEPT, RAISE_VARARGS, RERAISE), WITH_EXCEPT_START, CLEANUP_THROW, match/case opcodes."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 5500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers exception handling, `with` statement, and structural pattern matching opcodes. See `python_ceval_detail` (part 3) for iteration and container opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `PUSH_EXC_INFO`, `POP_EXCEPT` | Push/pop the exception info block |
+| 201-400 | `RAISE_VARARGS`, `RERAISE` | raise and reraise |
+| 401-600 | `CLEANUP_THROW`, `YIELD_VALUE` | Generator send/throw/close |
+| 601-800 | `BEFORE_WITH`, `WITH_EXCEPT_START` | `with` statement management |
+| 801-1000 | `COPY_FREE_VARS`, `MAKE_CELL` | Closure cell setup |
+| 1001-1200 | `MATCH_CLASS`, `MATCH_MAPPING`, `MATCH_SEQUENCE`, `MATCH_KEYS` | Structural pattern matching |
+| 1201-1400 | `COPY`, `SWAP` | Stack manipulation |
+| 1401-5500 | Specialized opcodes | `_BINARY_OP_ADD_INT`, `_LOAD_ATTR_MODULE`, etc. |
+
+## Reading
+
+### `RAISE_VARARGS`
+
+```c
+// CPython: Python/ceval.c:2940 RAISE_VARARGS
+inst(RAISE_VARARGS, (args[oparg] -- )) {
+    PyObject *cause = NULL, *exc = NULL;
+    switch (oparg) {
+    case 2:
+        cause = args[1];
+        /* fall through */
+    case 1:
+        exc = args[0];
+        /* fall through */
+    case 0:
+        if (do_raise(tstate, exc, cause)) {
+            ...
+        }
+    }
+    ...
+}
+```
+
+`oparg=0`: bare `raise` (reraise current exception). `oparg=1`: `raise exc`. `oparg=2`: `raise exc from cause`.
+
+### `PUSH_EXC_INFO` and `POP_EXCEPT`
+
+`PUSH_EXC_INFO` saves the current exception onto the exception stack and sets the new exception as current. `POP_EXCEPT` restores the previous exception from the stack.
+
+```c
+// CPython: Python/ceval.c:2885 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    prev_exc = exc_info->exc_value;
+    exc_info->exc_value = Py_NewRef(new_exc);
+}
+```
+
+### `BEFORE_WITH` and `WITH_EXCEPT_START`
+
+`BEFORE_WITH` calls `__enter__` on the context manager and pushes the result. `WITH_EXCEPT_START` calls `__exit__` with the exception info when the `with` body raises.
+
+```c
+// CPython: Python/ceval.c:3380 BEFORE_WITH
+inst(BEFORE_WITH, (mgr -- exit, res)) {
+    PyObject *enter = _PyObject_LookupSpecial(mgr, &_Py_ID(__enter__));
+    ...
+    exit = _PyObject_LookupSpecial(mgr, &_Py_ID(__exit__));
+    ...
+    res = _PyObject_CallNoArgs(enter);
+}
+```
+
+### `MATCH_CLASS`
+
+Pattern matching in Python 3.10+. `MATCH_CLASS` checks if TOS is an instance of the pattern class and extracts keyword attributes.
+
+```c
+// CPython: Python/ceval.c:3580 MATCH_CLASS
+inst(MATCH_CLASS, (subject, type, names -- attrs)) {
+    assert(PyTuple_CheckExact(names));
+    attrs = _PyMatchCase_IsInstance(tstate, subject, type, names, oparg);
+    ...
+}
+```
+
+## gopy notes
+
+Exception handling opcodes are in `vm/eval_unwind.go`. `RAISE_VARARGS` routes through `errors.Raise`. The exception stack (`exc_info`) maps to a field in `vm.Frame`. `BEFORE_WITH` / `WITH_EXCEPT_START` are in `vm/eval_stmt.go`. Match opcodes are partially implemented.

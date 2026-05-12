@@ -1,0 +1,116 @@
+---
+title: Python/ceval.c (part 3)
+description: "Python/ceval.c part 3: BINARY_OP dispatch, CALL_FUNCTION_EX, UNPACK_SEQUENCE, FOR_ITER, BUILD_TUPLE/LIST/SET/MAP, IMPORT_NAME/FROM, MAKE_FUNCTION."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 5500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers the container-building, iteration, import, and function-creation opcodes. See `python_ceval2_detail` and `python_ceval_c_detail` for the eval loop structure and the basic stack/load/store opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `BINARY_OP` | Dispatch all 13 binary/inplace operators |
+| 301-600 | `UNPACK_SEQUENCE`, `UNPACK_EX` | Sequence unpacking |
+| 601-900 | `FOR_ITER`, `GET_ITER` | For loop iteration |
+| 901-1200 | `BUILD_TUPLE`, `BUILD_LIST`, `BUILD_SET`, `BUILD_MAP` | Container construction |
+| 1201-1500 | `BUILD_CONST_KEY_MAP`, `DICT_UPDATE`, `LIST_APPEND`, etc. | Container accumulation |
+| 1501-1800 | `IMPORT_NAME`, `IMPORT_FROM`, `IMPORT_STAR` | Import opcodes |
+| 1801-2100 | `MAKE_FUNCTION` | Create a function object from code |
+| 2101-5500 | Remaining opcodes | `CALL_FUNCTION_EX`, `LOAD_SUPER_ATTR`, match opcodes |
+
+## Reading
+
+### `BINARY_OP`
+
+`BINARY_OP` oparg encodes one of 13 operators (ADD, SUBTRACT, MULTIPLY, etc.). The implementation tries the type-specific slot first, then calls the abstract protocol function.
+
+```c
+// CPython: Python/ceval.c:1845 BINARY_OP
+inst(BINARY_OP, (lhs, rhs -- res)) {
+    ...
+    assert(NB_ADD <= oparg && oparg <= NB_INPLACE_XOR);
+    PyObject *(*binary_op)(PyObject *, PyObject *);
+    binary_op = binary_ops[oparg];
+    res = binary_op(lhs, rhs);
+    ...
+}
+```
+
+`binary_ops[]` is a table of `PyNumber_Add`, `PyNumber_Subtract`, etc.
+
+### `FOR_ITER`
+
+```c
+// CPython: Python/ceval.c:2590 FOR_ITER
+inst(FOR_ITER, (iter -- iter, next)) {
+    /* tp_iternext raises StopIteration to signal exhaustion */
+    next = (*Py_TYPE(iter)->tp_iternext)(iter);
+    if (next == NULL) {
+        if (_PyErr_ExceptionMatches(tstate, PyExc_StopIteration)) {
+            _PyErr_Clear(tstate);
+        } else if (tstate->c_tracefunc != NULL) {
+            ...
+        }
+        JUMPBY(oparg);  /* jump past the loop body */
+        DISPATCH();
+    }
+}
+```
+
+### `BUILD_MAP` and `DICT_UPDATE`
+
+`BUILD_MAP count` pops `2*count` items from the stack (alternating key, value) and builds a `dict`. `DICT_UPDATE i` calls `dict.update` with the TOS mapping.
+
+### `MAKE_FUNCTION`
+
+```c
+// CPython: Python/ceval.c:3890 MAKE_FUNCTION
+inst(MAKE_FUNCTION, (codeobj -- func)) {
+    PyObject *qualname = PEEK(1);
+    func = (PyObject *)PyFunction_New(codeobj, GLOBALS());
+    ...
+    if (oparg & 0x08) {
+        /* has closure */
+        func->func_closure = POP();
+    }
+    if (oparg & 0x04) {
+        /* has annotations */
+        func->func_annotations = POP();
+    }
+    if (oparg & 0x02) {
+        /* has kwdefaults */
+        func->func_kwdefaults = POP();
+    }
+    if (oparg & 0x01) {
+        /* has defaults */
+        func->func_defaults = POP();
+    }
+}
+```
+
+The `oparg` bitmask indicates which optional components (defaults, kwdefaults, annotations, closure) are on the stack.
+
+### `IMPORT_NAME`
+
+```c
+// CPython: Python/ceval.c:3160 IMPORT_NAME
+inst(IMPORT_NAME, (level, fromlist -- module)) {
+    PyObject *name = GETITEM(names, oparg);
+    module = import_name(tstate, frame, name, fromlist, level);
+    ...
+}
+```
+
+Calls `__import__(name, globals, locals, fromlist, level)` which resolves to `importlib.__import__`.
+
+## gopy notes
+
+`BINARY_OP` is handled in `vm/eval_gen.go`. `FOR_ITER` and `GET_ITER` are in `vm/eval_simple.go`. `MAKE_FUNCTION` is in `vm/eval_call.go` and creates a `*objects.Function`. `IMPORT_NAME` routes through `vm/eval_import.go`.
