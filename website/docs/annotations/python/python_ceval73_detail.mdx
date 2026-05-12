@@ -1,0 +1,126 @@
+---
+title: Python/ceval.c (part 73)
+description: "Python/ceval.c part 73: FOR_ITER, GET_ITER, GET_AITER, GET_ANEXT, END_ASYNC_FOR."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers iteration and async iteration opcodes. See `python_ceval72_detail` for `MAKE_FUNCTION`, `RETURN_GENERATOR`, and `SEND`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `GET_ITER` | Call `iter()` on TOS |
+| 81-160 | `FOR_ITER` | Call `next()` on the iterator; jump on exhaustion |
+| 161-240 | `FOR_ITER_LIST` | Specialization for list iterators |
+| 241-360 | `GET_AITER` / `GET_ANEXT` | Async iteration setup |
+| 361-500 | `END_ASYNC_FOR` | Handle `StopAsyncIteration` at the end of `async for` |
+
+## Reading
+
+### `GET_ITER`
+
+```c
+// CPython: Python/ceval.c:3040 GET_ITER
+inst(GET_ITER, (iterable -- iter)) {
+    iter = PyObject_GetIter(iterable);
+    ERROR_IF(iter == NULL, error);
+    Py_DECREF(iterable);
+}
+```
+
+`for x in obj:` starts with `GET_ITER` which calls `PyObject_GetIter`. For sequences without `__iter__`, CPython creates a `seqiterobject` that calls `__getitem__` with increasing indices until `IndexError`.
+
+### `FOR_ITER`
+
+```c
+// CPython: Python/ceval.c:3080 FOR_ITER
+inst(FOR_ITER, (iter -- iter, next)) {
+    /* oparg = offset to jump on exhaustion */
+    PyObject *next = (*Py_TYPE(iter)->tp_iternext)(iter);
+    if (next == NULL) {
+        if (_PyErr_Occurred(tstate)) {
+            if (!_PyErr_ExceptionMatches(tstate, PyExc_StopIteration)) {
+                goto error;
+            }
+            _PyErr_Clear(tstate);
+        }
+        /* Jump past the loop body */
+        JUMPBY(oparg + 1);
+        DISPATCH();
+    }
+}
+```
+
+`FOR_ITER` calls `tp_iternext` directly (bypassing `__next__` method lookup). On `StopIteration`, the exception is cleared and execution jumps past the loop. Any other exception propagates.
+
+### `FOR_ITER_LIST`
+
+```c
+// CPython: Python/ceval.c:3120 FOR_ITER_LIST
+inst(FOR_ITER_LIST, (iter -- iter, next)) {
+    _PyListIterObject *it = (_PyListIterObject *)iter;
+    DEOPT_IF(!PyListIter_CheckExact(iter));
+    PyListObject *seq = it->it_seq;
+    if (seq == NULL || it->it_index >= PyList_GET_SIZE(seq)) {
+        /* Exhausted */
+        it->it_seq = NULL;
+        Py_CLEAR(seq);
+        JUMPBY(oparg + 1);
+        DISPATCH();
+    }
+    next = Py_NewRef(PyList_GET_ITEM(seq, it->it_index++));
+}
+```
+
+For `for x in some_list:`, the iterator is specialized to read `ob_item[index]` directly, incrementing the index in the iterator struct. This avoids the `tp_iternext` virtual dispatch.
+
+### `GET_AITER` / `GET_ANEXT`
+
+```c
+// CPython: Python/ceval.c:3200 GET_AITER
+inst(GET_AITER, (obj -- aiter)) {
+    unaryfunc getter = Py_TYPE(obj)->tp_as_async->am_aiter;
+    aiter = (*getter)(obj);
+    ...
+}
+
+// CPython: Python/ceval.c:3240 GET_ANEXT
+inst(GET_ANEXT, (aiter -- aiter, awaitable)) {
+    unaryfunc getter = Py_TYPE(aiter)->tp_as_async->am_anext;
+    awaitable = (*getter)(aiter);
+    ...
+}
+```
+
+`async for x in aobj:` uses `GET_AITER` once (calls `__aiter__`) then `GET_ANEXT` + `SEND`/`RESUME` on each iteration. `__aiter__` should return `self` for most async iterators; `__anext__` returns a coroutine.
+
+### `END_ASYNC_FOR`
+
+```c
+// CPython: Python/ceval.c:3300 END_ASYNC_FOR
+inst(END_ASYNC_FOR, (exc, val -- )) {
+    assert(exc != NULL);
+    if (PyErr_GivenExceptionMatches(exc, PyExc_StopAsyncIteration)) {
+        Py_DECREF(exc);
+        Py_DECREF(val);
+    } else {
+        /* Re-raise */
+        _PyErr_SetRaisedException(tstate, Py_NewRef(exc));
+        goto exception_unwind;
+    }
+}
+```
+
+`END_ASYNC_FOR` receives the exception from `GET_ANEXT` after it is raised. If it is `StopAsyncIteration`, the loop ends cleanly. Any other exception propagates as a real error.
+
+## gopy notes
+
+`GET_ITER` is in `vm/eval_simple.go`, calling `objects.GetIter`. `FOR_ITER` calls `objects.IterNext`. `FOR_ITER_LIST` reads `objects.ListIter.Index` directly. `GET_AITER`/`GET_ANEXT` call `objects.GetAIter`/`objects.GetANext`. `END_ASYNC_FOR` checks `objects.IsStopAsyncIteration`.

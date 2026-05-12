@@ -1,0 +1,132 @@
+---
+title: Modules/_csv.c (part 6)
+description: "_csv.c part 6: csv.reader row parsing, dialect quoting, QUOTE_NONNUMERIC, csv.writer."
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_csv.c" />
+
+This annotation covers the row parsing state machine and the writer. See `modules_csv5_detail` for `Dialect`, field parsing setup, and `csv.register_dialect`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Reader state machine | States: `START_FIELD`, `IN_FIELD`, `QUOTE_IN_FIELD`, etc. |
+| 81-180 | `parse_process_char` | Per-character state transitions |
+| 181-280 | `Reader.__next__` | Build a row list from the state machine |
+| 281-380 | `csv.writer.writerow` | Format a sequence as a CSV line |
+| 381-500 | `QUOTE_NONNUMERIC` | Auto-cast non-numeric fields |
+
+## Reading
+
+### Reader state machine
+
+```c
+// CPython: Modules/_csv.c:480 ReaderObj states
+typedef enum {
+    START_RECORD,
+    START_FIELD,
+    ESCAPED_CHAR,
+    IN_FIELD,
+    IN_QUOTED_FIELD,
+    ESCAPE_IN_QUOTED_FIELD,
+    QUOTE_IN_FIELD,
+    EAT_CRNL,
+    AFTER_ESCAPED_CRNL
+} ParserState;
+```
+
+The reader is a single-pass state machine. Each character advances the state or appends to the current field buffer. `IN_QUOTED_FIELD` collects characters until a closing quote; `QUOTE_IN_FIELD` handles `""` (escaped quote inside a quoted field).
+
+### `parse_process_char`
+
+```c
+// CPython: Modules/_csv.c:540 parse_process_char
+static int
+parse_process_char(ReaderObj *self, Py_UCS4 module_state, Py_UCS4 c)
+{
+    switch (self->state) {
+        case IN_FIELD:
+            if (c == self->dialect->delimiter ||
+                c == '\n' || c == '\r' || c == '\0') {
+                parse_save_field(self);
+                self->state = (c == '\n' || c == '\r') ? EAT_CRNL : START_FIELD;
+            } else if (c == self->dialect->escapechar) {
+                self->state = ESCAPED_CHAR;
+            } else {
+                parse_add_char(self, c);
+            }
+            break;
+        ...
+    }
+}
+```
+
+Each character is a single switch case. The dialect's `delimiter`, `quotechar`, and `escapechar` drive transitions. `parse_save_field` appends the accumulated buffer to the current row list and resets the field buffer.
+
+### `Reader.__next__`
+
+```c
+// CPython: Modules/_csv.c:680 Reader_iternext
+static PyObject *
+Reader_iternext(ReaderObj *self)
+{
+    /* Get next line from the underlying iterator */
+    PyObject *lineobj = PyIter_Next(self->input_iter);
+    if (lineobj == NULL) return NULL;
+    /* Process each character */
+    Py_ssize_t linelen = PyUnicode_GET_LENGTH(lineobj);
+    for (Py_ssize_t i = 0; i <= linelen; i++) {
+        Py_UCS4 c = (i < linelen) ? PyUnicode_READ_CHAR(lineobj, i) : 0;
+        parse_process_char(self, c);
+    }
+    return self->fields;  /* list of field strings */
+}
+```
+
+The `0` sentinel character at position `linelen` triggers field/record completion. The reader fetches one line at a time from its underlying iterator, which can be a file, a list of strings, or any iterable.
+
+### `csv.writer.writerow`
+
+```c
+// CPython: Modules/_csv.c:820 csv_writerow
+static PyObject *
+csv_writerow(WriterObj *self, PyObject *seq)
+{
+    Py_ssize_t num_fields = PySequence_Length(seq);
+    for (Py_ssize_t i = 0; i < num_fields; i++) {
+        PyObject *field = PySequence_GetItem(seq, i);
+        int append_ok = csv_join_append(self, field, i == num_fields - 1);
+        ...
+    }
+    /* Write the accumulated line to self->writeline */
+    return PyObject_CallOneArg(self->writeline, self->rec);
+}
+```
+
+`csv_join_append` decides whether a field needs quoting (contains delimiter, quotechar, or newline) and appends it to `self->rec`. The complete row is written via `self->writeline` (typically `file.write`).
+
+### `QUOTE_NONNUMERIC`
+
+```c
+// CPython: Modules/_csv.c:380 QUOTE_NONNUMERIC handling
+/* In reader: convert unquoted fields to float */
+if (self->dialect->quoting == QUOTE_NONNUMERIC) {
+    PyObject *val = PyFloat_FromString(field);
+    if (val == NULL) { PyErr_Clear(); val = field; }
+    else Py_DECREF(field);
+    return val;
+}
+```
+
+With `quoting=csv.QUOTE_NONNUMERIC`, unquoted fields are converted to `float`; quoted fields remain strings. A writer with the same setting quotes all non-numeric fields automatically.
+
+## gopy notes
+
+`csv.reader` is `module/csv.Reader` in `module/csv/module.go`. The state machine is a Go switch in `parseProcessChar`. `csv.writer.writerow` formats via `strings.Builder`. `QUOTE_NONNUMERIC` calls `strconv.ParseFloat` in the reader.

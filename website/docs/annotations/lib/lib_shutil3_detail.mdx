@@ -1,0 +1,114 @@
+---
+title: Lib/shutil.py (part 3)
+description: "shutil.py part 3: shutil.copy2, copytree, rmtree, disk_usage, which."
+cpython_path: Lib/shutil.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/shutil.py" />
+
+This annotation covers high-level file and directory operations. See `lib_shutil2_detail` for `shutil.copy`, `copyfile`, `copystat`, and `copyfileobj`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `shutil.copy2` | Copy file + metadata (mtime, permissions) |
+| 81-180 | `shutil.copytree` | Recursively copy a directory tree |
+| 181-260 | `shutil.rmtree` | Recursively remove a directory tree |
+| 261-360 | `shutil.disk_usage` | Query free/used/total bytes on a filesystem |
+| 361-500 | `shutil.which` | Find executable in PATH (like POSIX `which`) |
+
+## Reading
+
+### `shutil.copy2`
+
+```python
+# CPython: Lib/shutil.py:440 copy2
+def copy2(src, dst, *, follow_symlinks=True):
+    if os.path.isdir(dst):
+        dst = os.path.join(dst, os.path.basename(src))
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    copystat(src, dst, follow_symlinks=follow_symlinks)
+    return dst
+```
+
+`copy2` preserves timestamps, permissions, and extended attributes via `copystat`. `copy` (without 2) calls `copymode` instead, preserving only permissions. If `dst` is a directory, the file is copied into it with the same basename.
+
+### `shutil.copytree`
+
+```python
+# CPython: Lib/shutil.py:540 copytree
+def copytree(src, dst, symlinks=False, ignore=None, copy_function=copy2,
+             ignore_dangling_symlinks=False, dirs_exist_ok=False):
+    with os.scandir(src) as itr:
+        entries = list(itr)
+    return _copytree(entries=entries, src=src, dst=dst, symlinks=symlinks,
+                     ignore=ignore, copy_function=copy_function,
+                     ignore_dangling_symlinks=ignore_dangling_symlinks,
+                     dirs_exist_ok=dirs_exist_ok)
+```
+
+`copytree` recursively copies a directory tree. `ignore` is a callable `(dir, contents) -> set_of_names_to_skip`; `shutil.ignore_patterns('*.pyc', '__pycache__')` creates one. `dirs_exist_ok=True` (added in 3.8) allows the destination to already exist.
+
+### `shutil.rmtree`
+
+```python
+# CPython: Lib/shutil.py:620 rmtree
+def rmtree(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None):
+    if ignore_errors:
+        def onerror(*args): pass
+    elif onerror is None and onexc is None:
+        def onexc(func, path, exc): raise exc
+    ...
+    # Use fd-based removal on Linux for race-condition safety
+    if _use_fd_functions:
+        _rmtree_safe_fd(stack, topfd, onexc)
+    else:
+        _rmtree_unsafe(path, onexc)
+```
+
+`rmtree` uses `os.open` + `os.unlinkat`/`os.rmdir` with directory file descriptors on Linux to avoid TOCTOU races (an attacker replacing a directory with a symlink between `stat` and `rm`). The `onerror` parameter is deprecated in 3.12 in favor of `onexc`.
+
+### `shutil.disk_usage`
+
+```python
+# CPython: Lib/shutil.py:960 disk_usage
+_ntuple_diskusage = collections.namedtuple('usage', 'total used free')
+
+def disk_usage(path):
+    st = os.statvfs(path)
+    free = st.f_bavail * st.f_frsize
+    total = st.f_blocks * st.f_frsize
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    return _ntuple_diskusage(total, used, free)
+```
+
+`disk_usage('/')` returns a named tuple with `.total`, `.used`, `.free` in bytes. `f_bavail` is blocks available to unprivileged users (may be less than `f_bfree` due to reserved blocks).
+
+### `shutil.which`
+
+```python
+# CPython: Lib/shutil.py:1020 which
+def which(name, mode=os.F_OK | os.X_OK, path=None):
+    if path is None:
+        path = os.environ.get('PATH', None)
+        if path is None:
+            path = os.defpath
+    path_list = path.split(os.pathsep)
+    for directory in path_list:
+        full = os.path.join(directory, name)
+        if os.access(full, mode):
+            return full
+    return None
+```
+
+`shutil.which('python3')` walks `PATH` entries. On Windows, it also checks extensions from `PATHEXT`. Returns the full path or `None`.
+
+## gopy notes
+
+`shutil.copy2` is `module/shutil.Copy2` in `module/shutil/module.go`. `copytree` uses `os.WalkDir`. `rmtree` uses `os.RemoveAll`. `disk_usage` calls `syscall.Statfs`. `which` calls `exec.LookPath` from Go's `os/exec`.
