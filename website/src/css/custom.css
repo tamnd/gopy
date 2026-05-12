@@ -372,14 +372,14 @@ h4:hover .hash-link {
 .button--primary {
   background: var(--gopy-primary);
   border-color: var(--gopy-primary);
-  color: #ffffff;
+  color: #ffffff !important;
   box-shadow: none;
 }
 
 .button--primary:hover {
   background: var(--gopy-primary-hover);
   border-color: var(--gopy-primary-hover);
-  color: #ffffff;
+  color: #ffffff !important;
   box-shadow: none;
 }
 
