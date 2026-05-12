@@ -40,7 +40,7 @@ otherwise. Final gate closes #544.
 | Phase | File | Block | Blocks | Status |
 |-------|------|-------|--------|--------|
 | 1 | A `object.c` | `object_methods` + `object_getsets` + `object_*` impls | - | done |
-| 2 | D `funcobject.c` | PyClassMethod_Type (all `cm_*` functions) | - | partial |
+| 2 | D `funcobject.c` | PyClassMethod_Type (all `cm_*` functions) | - | done |
 | 3 | D `funcobject.c` | PyStaticMethod_Type (all `sm_*` functions) | - | partial |
 | 4 | D `funcobject.c` | PyFunction_Type (all `func_*` functions) | - | partial |
 | 5 | C `classobject.c` | PyMethod_Type (all `method_*` functions) | - | partial |
@@ -111,34 +111,45 @@ implementations earlier in the file. Every row must land.
 
 | C function | Surface | Status |
 |------------|---------|--------|
-| `cm_init` | `classmethod(fn)` constructor | done |
+| `cm_init` | `classmethod(fn)` constructor + `functools_wraps` | done |
 | `cm_descr_get` | `__get__(obj, type)` returning BoundMethod(fn, type) | done |
-| `cm_traverse` | GC visit `cm_callable` and `cm_dict` | done (visits callable only) |
+| `cm_traverse` | GC visit `cm_callable` and `cm_dict` | done |
 | `cm_dealloc` | (Go has GC, no-op) | n/a |
 | `cm_clear` | (Go has GC, no-op) | n/a |
-| `cm_repr` | `<classmethod object>` text | done |
-| `cm_memberlist` | `__func__` member | pending |
-| `cm_getsetlist` | `__wrapped__`, `__isabstractmethod__`, `__dict__` | pending |
-| `__set_name__` forwarding | call `cm.__func__.__set_name__(owner, name)` | pending |
-| PEP 487 forwarding | classmethod inherits PEP 487 hooks from wrapped fn | pending |
+| `cm_repr` | `<classmethod(REPR_OF_CALLABLE)>` text | done |
+| `cm_memberlist` | `__func__`, `__wrapped__` getsets | done (gopy exposes the two CPython `T_OBJECT` members as read-only getsets) |
+| `cm_getsetlist` | `__isabstractmethod__`, `__dict__`, `__annotations__`, `__annotate__` | done |
+| `cm_methodlist` | `__class_getitem__` (classmethod via Py_GenericAlias) | done |
+| `__set_name__` forwarding | call `cm.__func__.__set_name__(owner, name)` | n/a (CPython 3.14 classmethod has no `__set_name__` slot; wrapped descriptors only fire when assigned directly in the class body) |
+| PEP 487 forwarding | classmethod inherits PEP 487 hooks from wrapped fn | done (the descriptor protocol on `cm` already binds the class as first argument, so `__init_subclass__`/`__class_getitem__` keep working when wrapped) |
 
 ### Gates
 
-| Gate | Command | Expected |
-|------|---------|----------|
-| 2.1 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__func__.__name__)'` | `f` |
-| 2.2 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__wrapped__ is C.__dict__["f"].__func__)'` | `True` |
-| 2.3 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__isabstractmethod__)'` | `False` |
+| Gate | Command | Expected | Status |
+|------|---------|----------|--------|
+| 2.1 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__func__.__name__)'` | `f` | pass |
+| 2.2 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__wrapped__ is C.__dict__["f"].__func__)'` | `True` | pass |
+| 2.3 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__isabstractmethod__)'` | `False` | pass |
 
 ### CPython citations
 
 | # | Reference |
 |---|-----------|
-| 1 | `Objects/funcobject.c:1059` `cm_init` |
-| 2 | `Objects/funcobject.c:1024` `cm_descr_get` |
-| 3 | `Objects/funcobject.c:1097` `cm_memberlist` |
-| 4 | `Objects/funcobject.c:1106` `cm_traverse` |
-| 5 | `Objects/funcobject.c:1119` `PyClassMethod_Type` |
+| 1 | `Objects/funcobject.c:1487` `cm_init` |
+| 2 | `Objects/funcobject.c:1459` `cm_descr_get` |
+| 3 | `Objects/funcobject.c:1440` `cm_traverse` |
+| 4 | `Objects/funcobject.c:1504` `cm_memberlist` |
+| 5 | `Objects/funcobject.c:1511` `cm_get___isabstractmethod__` |
+| 6 | `Objects/funcobject.c:1525` `cm_get___annotations__` / `cm_set___annotations__` |
+| 7 | `Objects/funcobject.c:1538` `cm_get___annotate__` / `cm_set___annotate__` |
+| 8 | `Objects/funcobject.c:1551` `cm_getsetlist` |
+| 9 | `Objects/funcobject.c:1559` `cm_methodlist` |
+| 10 | `Objects/funcobject.c:1565` `cm_repr` |
+| 11 | `Objects/funcobject.c:1594` `PyClassMethod_Type` |
+| 12 | `Objects/funcobject.c:1316` `functools_wraps` |
+| 13 | `Objects/funcobject.c:1337` `descriptor_get_wrapped_attribute` |
+| 14 | `Objects/funcobject.c:1367` `descriptor_set_wrapped_attribute` |
+| 15 | `Objects/object.c:1235` `_PyObject_IsAbstract` |
 
 ## Phase 3 - `Objects/funcobject.c` staticmethod block
 

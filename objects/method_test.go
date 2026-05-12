@@ -58,6 +58,55 @@ func TestClassMethodBindsType(t *testing.T) {
 	}
 }
 
+// Phase 2 gates for spec 1704: classmethod must expose __func__,
+// __wrapped__, and __isabstractmethod__ so abstractmethod / wraps /
+// inspect can introspect a decorated classmethod the way CPython does.
+//
+// CPython: Objects/funcobject.c:1504 cm_memberlist
+// CPython: Objects/funcobject.c:1551 cm_getsetlist
+func TestClassMethodGetSetGates(t *testing.T) {
+	fn := NewBuiltinFunction("f", func(args []Object, _ map[string]Object) (Object, error) {
+		return None(), nil
+	})
+	cm := NewClassMethod(fn)
+
+	got, err := GetAttr(cm, NewStr("__func__"))
+	if err != nil || got != fn {
+		t.Fatalf("__func__ = %v, %v; want %v, nil", got, err, fn)
+	}
+	got, err = GetAttr(cm, NewStr("__wrapped__"))
+	if err != nil || got != fn {
+		t.Fatalf("__wrapped__ = %v, %v; want %v, nil", got, err, fn)
+	}
+	isAbs, err := GetAttr(cm, NewStr("__isabstractmethod__"))
+	if err != nil {
+		t.Fatalf("__isabstractmethod__ error: %v", err)
+	}
+	if isAbs != False() {
+		t.Errorf("__isabstractmethod__ = %v, want False", isAbs)
+	}
+}
+
+// classmethod's repr matches CPython's <classmethod(REPR)> shape so
+// debugging a decorated callable shows the wrapped function, not just
+// "<classmethod object>".
+//
+// CPython: Objects/funcobject.c:1565 cm_repr
+func TestClassMethodReprShowsCallable(t *testing.T) {
+	fn := NewBuiltinFunction("inner", func(_ []Object, _ map[string]Object) (Object, error) {
+		return None(), nil
+	})
+	cm := NewClassMethod(fn)
+	r, err := Repr(cm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<classmethod(<built-in function inner>)>"
+	if r != want {
+		t.Errorf("repr = %q, want %q", r, want)
+	}
+}
+
 func TestStaticMethodReturnsCallable(t *testing.T) {
 	fn := NewBuiltinFunction("noop", func(args []Object, _ map[string]Object) (Object, error) {
 		return None(), nil
