@@ -1,0 +1,62 @@
+---
+title: Lib/re/__init__.py
+description: "re module public API: compile, match, search, sub, split, findall, and the compiled Pattern cache that avoids recompiling the same pattern repeatedly."
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/re/__init__.py" />
+
+`Lib/re/__init__.py` is the public API for Python's regular expressions. It delegates all actual regex operations to the `_sre` C extension (via the `re._compiler` and `re._parser` modules) and adds a pattern cache to avoid recompiling the same regex string repeatedly.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | imports, `__all__` | Flag constants; public name list |
+| 51-150 | `compile`, `_compile` | Pattern compilation; LRU cache |
+| 151-250 | `match`, `search`, `fullmatch`, `findall`, `finditer` | Convenience functions |
+| 251-330 | `sub`, `subn`, `split` | Substitution and splitting |
+| 331-400 | `escape`, `purge`, `error` | Utility functions |
+
+## Reading
+
+### Pattern cache
+
+`_compile(pattern, flags)` checks a module-level `_cache` dict keyed on `(pattern, flags, type(pattern))`. If the pattern is already compiled, the cached `Pattern` object is returned directly. The cache is capped at `_MAXCACHE` (512) entries; `purge()` clears it.
+
+```python
+# CPython: Lib/re/__init__.py:51 _compile
+def _compile(pattern, flags):
+    if isinstance(flags, RegexFlag):
+        flags = flags.value
+    try:
+        return _cache[type(pattern), pattern, flags]
+    except KeyError:
+        pass
+    p = _compiler.compile(pattern, flags)
+    _cache[type(pattern), pattern, flags] = p
+    return p
+```
+
+### Convenience functions
+
+Each top-level function like `re.match(pattern, string)` calls `_compile(pattern, 0).match(string)`. The pattern compilation is the expensive step; since the result is cached, repeated calls with the same pattern are nearly free.
+
+```python
+# CPython: Lib/re/__init__.py:151 match
+def match(pattern, string, flags=0):
+    return _compile(pattern, flags).match(string)
+```
+
+### Flags
+
+`re.IGNORECASE` (alias `re.I`), `re.MULTILINE` (`re.M`), `re.DOTALL` (`re.S`), `re.VERBOSE` (`re.X`) etc. are `RegexFlag` enum members. They can be combined with `|`. The `re.UNICODE` flag is the default in Python 3; `re.ASCII` restricts `\w`, `\d`, `\s` to ASCII ranges.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/re/`. Go's `regexp` package uses RE2 semantics (no backreferences, no lookaheads) while CPython's `_sre` uses a backtracking NFA. A faithful port would require either embedding a Python-compatible regex engine or documenting the semantic differences.

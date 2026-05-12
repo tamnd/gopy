@@ -1,0 +1,89 @@
+---
+title: Modules/_sre.c
+description: "SRE regex engine C core: backtracking NFA over compiled opcode bytecode, the match/search/findall dispatch, and the group/span capture mechanism."
+cpython_path: Modules/_sre.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sre.c" />
+
+`Modules/_sre.c` is the C engine that executes compiled regular expressions. The `re` module's `_compiler.py` translates Python regex patterns into SRE opcode bytecode; this file interprets that bytecode using a backtracking NFA. The main dispatch loop is in `sre_match`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `SRE_STATE`, `SRE_PATTERN` | Match state struct; compiled pattern object |
+| 201-500 | `sre_match` | Main recursive backtracking match loop |
+| 501-900 | `sre_search` | Anchoring scan over the string |
+| 901-1300 | opcodes | `SRE_OP_LITERAL`, `SRE_OP_ANY`, `SRE_OP_BRANCH`, `SRE_OP_REPEAT` dispatch |
+| 1301-1800 | group capture, backreferences | `SRE_OP_MARK`, group extraction |
+| 1801-2500 | `Pattern_match`, `Pattern_search`, `Pattern_findall` | Python-visible methods |
+| 2501-3000 | `Match` object | `group()`, `span()`, `groupdict()`, `expand()` |
+
+## Reading
+
+### SRE_STATE and mark array
+
+`SRE_STATE` holds the input string bounds, the current position, a stack of backtrack points, and a `mark[]` array. Each group occupies two consecutive mark entries (start and end position). `SRE_OP_MARK n` sets `state->mark[n] = ptr`.
+
+```c
+// Modules/_sre.c:1 SRE_STATE
+typedef struct {
+    void *beginning, *start, *end;  /* string bounds */
+    Py_ssize_t *mark;               /* group captures */
+    SRE_REPEAT *repeat;             /* current repeat context */
+    Py_ssize_t lastmark, lastindex;
+    ...
+} SRE_STATE;
+```
+
+### Backtracking dispatch
+
+`sre_match` is a large `switch` loop over opcodes. Branches (`SRE_OP_BRANCH`) push backtrack entries; on failure the engine pops the stack and tries the next alternative. `SRE_OP_REPEAT` and `SRE_OP_MAX_REPEAT` handle greedy and non-greedy quantifiers.
+
+```c
+// Modules/_sre.c:201 sre_match (excerpt)
+static Py_ssize_t
+sre_match(SRE_STATE *state, SRE_CODE *pattern)
+{
+    for (;;) {
+        switch (*pattern++) {
+        case SRE_OP_LITERAL:
+            if (ptr >= end || *ptr != pattern[0]) goto failure;
+            ptr++; pattern++;
+            break;
+        case SRE_OP_BRANCH:
+            /* push backtrack; try first branch */
+            ...
+        }
+    }
+failure:
+    /* pop backtrack stack */
+    ...
+}
+```
+
+### Match object group extraction
+
+`Match.group(index)` reads `state.mark[2*index]` and `state.mark[2*index + 1]` to get the start and end positions of the captured group, then slices the original string.
+
+```c
+// Modules/_sre.c:2501 match_getslice
+static PyObject *
+match_getslice(MatchObject *self, PyObject *index, PyObject *def)
+{
+    Py_ssize_t i = match_getindex(self, index);
+    if (self->mark[i] < 0) return Py_NewRef(def);
+    return PySequence_GetSlice(self->string,
+                               self->mark[i], self->mark[i+1]);
+}
+```
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/re/`. A faithful port of the SRE opcode interpreter in Go would require the same backtracking loop and mark array. Alternatively, Go's `regexp` (RE2) package could be used with documented differences in supported syntax.
