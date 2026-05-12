@@ -1,0 +1,84 @@
+---
+title: Python/ceval.c (part 93)
+description: "Python/ceval.c part 93: MAKE_FUNCTION, SET_FUNCTION_ATTRIBUTE, CLOSURE, function objects."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers function creation opcodes. See `python_ceval92_detail` for subscript and slice opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `MAKE_FUNCTION` | Create a `PyFunctionObject` from a code object |
+| 81-160 | `SET_FUNCTION_ATTRIBUTE` | Attach defaults, annotations, closure |
+| 161-240 | Function object layout | `func_code`, `func_defaults`, `func_closure` |
+| 241-340 | `CLOSURE` / `COPY_FREE_VARS` | How closures are assembled |
+| 341-400 | Default argument evaluation | When are default values computed |
+
+## Reading
+
+### `MAKE_FUNCTION`
+
+```c
+// CPython: Python/ceval.c:5880 MAKE_FUNCTION
+inst(MAKE_FUNCTION, (codeobj -- func)) {
+    PyObject *qualname = PEEK(1);
+    PyFunctionObject *f = (PyFunctionObject *)PyFunction_New(codeobj, GLOBALS());
+    f->func_qualname = Py_NewRef(qualname);
+    Py_DECREF(qualname);
+    func = (PyObject *)f;
+}
+```
+
+`MAKE_FUNCTION` creates a function object from a code object. The globals dict is taken from the current frame. The qualname (e.g., `"MyClass.method"`) is popped from the stack.
+
+### `SET_FUNCTION_ATTRIBUTE`
+
+```c
+// CPython: Python/ceval.c:5920 SET_FUNCTION_ATTRIBUTE
+inst(SET_FUNCTION_ATTRIBUTE, (attr, func -- func)) {
+    /* oparg flags:
+       0x01 = MAKE_FUNCTION_DEFAULTS (positional defaults tuple)
+       0x02 = MAKE_FUNCTION_KWDEFAULTS (keyword-only defaults dict)
+       0x04 = MAKE_FUNCTION_ANNOTATIONS (annotations dict)
+       0x08 = MAKE_FUNCTION_CLOSURE (freevars tuple)
+    */
+    PyFunctionObject *f = (PyFunctionObject *)func;
+    switch (oparg) {
+        case 0x01: f->func_defaults = Py_NewRef(attr); break;
+        case 0x02: f->func_kwdefaults = Py_NewRef(attr); break;
+        case 0x04: f->func_annotations = Py_NewRef(attr); break;
+        case 0x08: f->func_closure = Py_NewRef(attr); break;
+    }
+    Py_DECREF(attr);
+}
+```
+
+`SET_FUNCTION_ATTRIBUTE` is emitted once per non-None attribute. Default values are evaluated at `def` time (not call time); this is why `def f(x=[])` shares one list across all calls.
+
+### Default argument evaluation
+
+```
+def f(x=1+1, y=[]):
+→
+LOAD_CONST    2          # 1+1 evaluated at definition
+BUILD_LIST    0          # [] created at definition
+BUILD_TUPLE   2          # pack into defaults tuple
+LOAD_CONST    f_code
+MAKE_FUNCTION
+SET_FUNCTION_ATTRIBUTE 0x01  # attach defaults
+```
+
+Default argument expressions are evaluated once when `def` executes. The resulting values are stored in `func_defaults`.
+
+## gopy notes
+
+`MAKE_FUNCTION` is in `vm/eval_simple.go` and calls `objects.NewFunction(code, globals)`. `SET_FUNCTION_ATTRIBUTE` sets `Function.Defaults`, `Function.KwDefaults`, `Function.Annotations`, `Function.Closure`. Default evaluation happens at the `def` statement, not at the call site.

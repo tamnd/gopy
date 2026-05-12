@@ -1,0 +1,100 @@
+---
+title: Objects/bytearrayobject.c (part 6)
+description: "Objects/bytearrayobject.c part 6: bytearray.extend, bytearray.insert, bytearray.pop, bytearray.remove."
+cpython_path: Objects/bytearrayobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytearrayobject.c" />
+
+This annotation covers the mutable sequence methods of `bytearray`. See `objects_bytearrayobject5_detail` for `bytearray.__init__`, `append`, `replace`, and `find`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `bytearray.extend` | Append all bytes from an iterable |
+| 61-140 | `bytearray.insert` | Insert a byte at a given index |
+| 141-220 | `bytearray.pop` | Remove and return a byte |
+| 221-300 | `bytearray.remove` | Remove the first occurrence of a value |
+| 301-400 | `bytearray.reverse` | Reverse the buffer in place |
+
+## Reading
+
+### `bytearray.extend`
+
+```c
+// CPython: Objects/bytearrayobject.c:1320 bytearray_extend
+static PyObject *
+bytearray_extend(PyByteArrayObject *self, PyObject *iterable_of_ints)
+{
+    if (PyByteArray_Check(iterable_of_ints) ||
+        PyBytes_Check(iterable_of_ints)) {
+        /* Fast path: buffer copy */
+        Py_ssize_t n = Py_SIZE(iterable_of_ints);
+        Py_ssize_t old_size = PyByteArray_GET_SIZE(self);
+        if (PyByteArray_Resize((PyObject *)self, old_size + n) < 0) return NULL;
+        memcpy(PyByteArray_AS_STRING(self) + old_size,
+               PyByteArray_AS_STRING(iterable_of_ints), n);
+        Py_RETURN_NONE;
+    }
+    /* Slow path: iterate */
+    ...
+}
+```
+
+`extend` accepts any iterable of integers in `[0, 255]`. The fast path for `bytes` and `bytearray` uses `memcpy`. The slow path builds byte values from `PyLong_AsLong`, validating that each is in range.
+
+### `bytearray.insert`
+
+```c
+// CPython: Objects/bytearrayobject.c:1380 bytearray_insert
+static PyObject *
+bytearray_insert(PyByteArrayObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    Py_ssize_t where;
+    int item;
+    /* Parse index and value */
+    Py_ssize_t n = Py_SIZE(self);
+    if (where < 0) where += n;
+    if (where < 0) where = 0;
+    if (where > n) where = n;
+    if (PyByteArray_Resize((PyObject *)self, n + 1) < 0) return NULL;
+    char *buf = PyByteArray_AS_STRING(self);
+    memmove(buf + where + 1, buf + where, n - where);
+    buf[where] = item;
+    Py_RETURN_NONE;
+}
+```
+
+`insert(i, b)` shifts all bytes at and after `i` one position right via `memmove`, then writes the new byte. This is O(n) for insertions near the beginning.
+
+### `bytearray.pop`
+
+```c
+// CPython: Objects/bytearrayobject.c:1440 bytearray_pop
+static PyObject *
+bytearray_pop(PyByteArrayObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    Py_ssize_t where = -1;  /* default: last element */
+    if (nargs && !_PyArg_ParseStack(args, nargs, "n:pop", &where)) return NULL;
+    Py_ssize_t n = Py_SIZE(self);
+    if (n == 0) { PyErr_SetString(PyExc_IndexError, "pop from empty bytearray"); return NULL; }
+    if (where < 0) where += n;
+    if (where < 0 || where >= n) { PyErr_SetString(PyExc_IndexError, "index out of range"); return NULL; }
+    int value = PyByteArray_AS_STRING(self)[where];
+    memmove(buf + where, buf + where + 1, n - where - 1);
+    PyByteArray_Resize((PyObject *)self, n - 1);
+    return PyLong_FromLong(value);
+}
+```
+
+`pop()` (no argument) removes the last byte efficiently (just resizes). `pop(i)` uses `memmove` for O(n) removal from the middle.
+
+## gopy notes
+
+`bytearray.extend` is `objects.BytearrayExtend` in `objects/bytearray.go`. The fast path uses `copy()`. `insert` uses `copy` to shift with an intermediate buffer. `pop` reads the value, shifts remaining bytes, and resizes.

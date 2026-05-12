@@ -1,0 +1,84 @@
+---
+title: Lib/json/__init__.py (part 4)
+description: "json/__init__.py part 4: json.loads, json.load, json.dumps, json.dump — public API."
+cpython_path: Lib/json/__init__.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/json/__init__.py" />
+
+This annotation covers the top-level `json` module API. See `modules_json3_detail` for `JSONDecoder` internals and `scanstring`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `json.loads` | Decode a JSON string |
+| 81-160 | `json.load` | Decode JSON from a file |
+| 161-260 | `json.dumps` | Encode a Python object to a JSON string |
+| 261-400 | `json.dump` | Encode and write JSON to a file |
+
+## Reading
+
+### `json.loads`
+
+```python
+# CPython: Lib/json/__init__.py:340 loads
+def loads(s, *, cls=None, object_hook=None, parse_float=None,
+          parse_int=None, parse_constant=None, object_pairs_hook=None,
+          **kw):
+    if isinstance(s, str):
+        if s.startswith('﻿'):
+            raise JSONDecodeError("Unexpected UTF-8 BOM", s, 0)
+    else:
+        if not isinstance(s, (bytes, bytearray)):
+            raise TypeError(...)
+        s = s.decode(detect_encoding(s), 'surrogatepass')
+    if cls is None:
+        cls = JSONDecoder
+    if (object_hook is None and parse_float is None and
+            parse_int is None and parse_constant is None and
+            object_pairs_hook is None and not kw):
+        return cls().decode(s)
+    return cls(object_hook=object_hook, ...).decode(s)
+```
+
+`json.loads` auto-detects encoding for `bytes` input (UTF-8/16/32 via BOM detection). For `str`, a BOM is an error. The fast path skips instantiation overhead when all defaults are used.
+
+### `json.dumps`
+
+```python
+# CPython: Lib/json/__init__.py:230 dumps
+def dumps(obj, *, skipkeys=False, ensure_ascii=True, check_circular=True,
+          allow_nan=True, cls=None, indent=None, separators=None,
+          default=None, sort_keys=False, **kw):
+    if (cls is None and not skipkeys and ensure_ascii and
+            check_circular and allow_nan and
+            indent is None and separators is None and
+            default is None and not sort_keys and not kw):
+        return _default_encoder.encode(obj)
+    if cls is None:
+        cls = JSONEncoder
+    return cls(skipkeys=skipkeys, ensure_ascii=ensure_ascii, ...).encode(obj)
+```
+
+`json.dumps` reuses a module-level `_default_encoder = JSONEncoder()` instance for the common case, avoiding object creation on every call. `indent=None` produces compact output with no whitespace.
+
+### `json.dump`
+
+```python
+# CPython: Lib/json/__init__.py:260 dump
+def dump(obj, fp, *, skipkeys=False, ensure_ascii=True, ...):
+    for chunk in cls(**kw).iterencode(obj):
+        fp.write(chunk)
+```
+
+`json.dump` uses `iterencode` to stream chunks to the file, avoiding building the entire JSON string in memory first. For large objects this can significantly reduce peak memory usage.
+
+## gopy notes
+
+`json.loads` is `module/json.Loads` in `module/json/module.go`. It calls `module/json.NewDecoder().Decode(s)`. `json.dumps` is `module/json.Dumps`. The fast-path `_default_encoder` is cached as a module-level `*Encoder`. `json.dump` calls `encoder.IterEncode` and writes each chunk.

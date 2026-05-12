@@ -1,0 +1,98 @@
+---
+title: Modules/_posixsubprocess.c (part 7)
+description: "_posixsubprocess.c part 7: subprocess.Popen, _execute_child, _posixsubprocess.fork_exec, pipe/fd handling."
+cpython_path: Modules/_posixsubprocess.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_posixsubprocess.c" />
+
+This annotation covers the POSIX subprocess implementation. See `modules_subprocess6_detail` for `Popen.communicate`, `wait`, `stdin`/`stdout` pipe setup.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `fork_exec` C entry | The `_posixsubprocess.fork_exec` C function |
+| 81-180 | `child_exec` | Child-side: exec with environment and fd setup |
+| 181-280 | `fd_closing` | Close unwanted fds in the child |
+| 281-380 | `subprocess.Popen.__init__` | High-level pipe creation and fork |
+| 381-500 | Error pipe | Propagate exec errors from child to parent |
+
+## Reading
+
+### `fork_exec`
+
+```c
+// CPython: Modules/_posixsubprocess.c:720 subprocess_fork_exec
+static PyObject *
+subprocess_fork_exec(PyObject *self, PyObject *args)
+{
+    /* fork_exec(args, executable_list, close_fds, pass_fds,
+                 cwd, env, p2cread, p2cwrite, c2pread, c2pwrite,
+                 errread, errwrite, errpipe_read, errpipe_write,
+                 restore_signals, call_setsid, pgid_to_set,
+                 gid, extra_groups, uid, child_umask, preexec_fn,
+                 allow_vfork) */
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* child */
+        child_exec(exec_array, argv, envp, cwd, ...);
+        _exit(255);  /* unreachable if exec succeeds */
+    }
+    return PyLong_FromPid(pid);
+}
+```
+
+`fork_exec` is the single C function called by `Popen` on POSIX. It forks and the child sets up file descriptors before calling `execvpe`. The parent returns the child's PID.
+
+### `child_exec`
+
+```c
+// CPython: Modules/_posixsubprocess.c:400 child_exec
+static void
+child_exec(char *const exec_array[], char *const argv[],
+           char *const envp[], const char *cwd,
+           int p2cread, int c2pwrite, int errwrite,
+           int errpipe_write, ...)
+{
+    /* Set up stdin/stdout/stderr */
+    if (p2cread != -1)  { dup2(p2cread,  STDIN_FILENO);  close(p2cread); }
+    if (c2pwrite != -1) { dup2(c2pwrite, STDOUT_FILENO); close(c2pwrite); }
+    if (errwrite != -1) { dup2(errwrite, STDERR_FILENO); close(errwrite); }
+    /* Close all fds except pass_fds */
+    ...
+    /* chdir if cwd is set */
+    if (cwd) chdir(cwd);
+    /* exec */
+    execvpe(exec_array[0], argv, envp);
+    /* If exec fails, report via errpipe_write */
+    write(errpipe_write, &err, sizeof(err));
+}
+```
+
+`dup2` redirects stdin/stdout/stderr. All other fds are closed using `close_range` (Linux 5.9+) or a loop over `/proc/self/fd`. Exec errors are written to the error pipe so the parent can raise them.
+
+### Error pipe
+
+```python
+# CPython: Lib/subprocess.py:1820 Popen.__init__ (error pipe handling)
+errpipe_read, errpipe_write = os.pipe()
+# ... fork_exec(... errpipe_write=errpipe_write) ...
+os.close(errpipe_write)
+data = os.read(errpipe_read, 65536)
+if data:
+    # child reported an exec error
+    child_exception_type, err_msg = pickle.loads(data)
+    raise child_exception_type(err_msg)
+```
+
+The error pipe is a one-way channel from child to parent. If `exec` succeeds, the child's end is closed by the kernel at exec and the parent reads EOF. If `exec` fails, the child writes the pickled exception before `_exit(255)`.
+
+## gopy notes
+
+`fork_exec` is `module/subprocess.ForkExec` in `module/subprocess/module.go` using `syscall.ForkExec` on Unix. `child_exec` fd setup is done before `exec` via `syscall.Dup2`. The error pipe uses `os.Pipe()` and reads error data as a pickled exception.
