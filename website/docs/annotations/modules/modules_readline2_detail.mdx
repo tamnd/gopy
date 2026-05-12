@@ -1,0 +1,128 @@
+---
+title: Modules/readline.c (part 2)
+description: "readline.c part 2: readline.set_completer, readline.get_history_length, readline.read_history_file, write_history_file."
+cpython_path: Modules/readline.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/readline.c" />
+
+This annotation covers history management and tab completion. See `modules_readline1_detail` for the module init and `readline.readline`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `set_completer` | Register a Python callable as the tab-completer |
+| 81-160 | `get_history_length` / `set_history_length` | Control history list size |
+| 161-240 | `read_history_file` | Load history from a file |
+| 241-320 | `write_history_file` | Save history to a file |
+| 321-400 | `on_completion` | C-level completer that calls the Python callback |
+
+## Reading
+
+### `set_completer`
+
+```c
+// CPython: Modules/readline.c:320 set_completer
+static PyObject *
+set_completer(PyObject *self, PyObject *args)
+{
+    PyObject *function = NULL;
+    if (!PyArg_ParseTuple(args, "|O:set_completer", &function))
+        return NULL;
+    Py_XDECREF(completer);
+    if (function == Py_None) {
+        completer = NULL;
+        rl_attempted_completion_function = NULL;
+    } else {
+        completer = Py_NewRef(function);
+        rl_attempted_completion_function = flex_complete;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`rl_attempted_completion_function` is a GNU Readline hook. When set to `flex_complete`, Readline calls it with the current text and start/end positions. `flex_complete` calls the Python callable stored in `completer`.
+
+### `get_history_length` / `set_history_length`
+
+```c
+// CPython: Modules/readline.c:420 get_history_length
+static PyObject *
+get_history_length(PyObject *self, PyObject *noargs)
+{
+    return PyLong_FromLong(history_length);
+}
+
+// CPython: Modules/readline.c:432 set_history_length
+static PyObject *
+set_history_length(PyObject *self, PyObject *args)
+{
+    int length = history_length;
+    if (!PyArg_ParseTuple(args, "i:set_history_length", &length))
+        return NULL;
+    history_length = length;
+    Py_RETURN_NONE;
+}
+```
+
+`history_length` is the module-level variable that bounds how many entries are kept. `-1` means unlimited. `readline.write_history_file` truncates to this length via `history_truncate_file`.
+
+### `read_history_file`
+
+```c
+// CPython: Modules/readline.c:480 read_history_file
+static PyObject *
+read_history_file(PyObject *self, PyObject *args)
+{
+    PyObject *filename_obj = NULL;
+    if (!PyArg_ParseTuple(args, "|O&:read_history_file",
+                          PyUnicode_FSConverter, &filename_obj))
+        return NULL;
+    const char *filename = filename_obj ?
+        PyBytes_AS_STRING(filename_obj) : NULL;
+    errno = 0;
+    if (read_history(filename) != 0) {
+        if (errno != 0)
+            return PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, filename_obj);
+    }
+    Py_XDECREF(filename_obj);
+    Py_RETURN_NONE;
+}
+```
+
+`read_history(NULL)` reads `~/.history` (the default). `PyUnicode_FSConverter` converts a `str` path to `bytes` using the filesystem encoding, which handles non-ASCII paths on UTF-8 filesystems.
+
+### `on_completion`
+
+```c
+// CPython: Modules/readline.c:360 on_completion
+static char *
+on_completion(const char *text, int state)
+{
+    if (completer == NULL) return NULL;
+    PyObject *result = PyObject_CallFunction(completer, "si", text, state);
+    if (result == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    if (result == Py_None) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    char *s = strdup(PyUnicode_AsUTF8(result));
+    Py_DECREF(result);
+    return s;  /* readline frees this */
+}
+```
+
+`on_completion` is the C-level function Readline calls repeatedly with `state=0, 1, 2, ...` until `NULL` is returned. The Python completer follows the same protocol. Readline owns the returned `char *` and calls `free()` on it.
+
+## gopy notes
+
+`readline` is partially stubbed in gopy: `set_completer`, `read_history_file`, and `write_history_file` delegate to `liner` (a pure-Go readline library). `on_completion` is implemented as a Go function that calls back into the Python callable via `objects.CallFunction`.

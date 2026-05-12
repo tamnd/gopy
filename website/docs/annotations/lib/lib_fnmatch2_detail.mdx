@@ -1,0 +1,106 @@
+---
+title: Lib/fnmatch.py (part 2)
+description: "fnmatch.py part 2: fnmatch, fnmatchcase, translate, filter — Unix shell glob pattern matching."
+cpython_path: Lib/fnmatch.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/fnmatch.py" />
+
+This annotation covers the full `fnmatch` module. See `modules_fnmatch_detail` for the C-accelerated `_fnmatch` module that backs it.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `fnmatch` | Test a filename against a shell pattern |
+| 41-80 | `fnmatchcase` | Case-sensitive version |
+| 81-160 | `translate` | Convert a glob pattern to a regex string |
+| 161-200 | `filter` | Select matching names from a list |
+
+## Reading
+
+### `fnmatch` / `fnmatchcase`
+
+```python
+# CPython: Lib/fnmatch.py:20 fnmatch
+def fnmatch(name, pat):
+    name = os.path.normcase(name)
+    pat = os.path.normcase(pat)
+    return fnmatchcase(name, pat)
+
+# CPython: Lib/fnmatch.py:36 fnmatchcase
+@functools.lru_cache(maxsize=256)
+def _compile_pattern(pat, is_bytes=False):
+    if is_bytes:
+        pat_str = str(pat, 'ISO-8859-1')
+        res_str = translate(pat_str)
+        res = bytes(res_str, 'ISO-8859-1')
+    else:
+        res = translate(pat)
+    return re.compile(res).match
+
+def fnmatchcase(name, pat):
+    match = _compile_pattern(pat, isinstance(pat, bytes))
+    return match(name) is not None
+```
+
+`fnmatch` normalizes case via `os.path.normcase` (lowercases on Windows, no-op on Unix). The compiled pattern is cached with `lru_cache` so repeated tests against the same pattern are fast.
+
+### `translate`
+
+```python
+# CPython: Lib/fnmatch.py:74 translate
+def translate(pat):
+    """Translate a shell PATTERN to a regular expression.
+    * matches everything except /
+    ? matches any single character
+    [seq] matches any character in seq
+    [!seq] matches any character NOT in seq
+    """
+    res = ''
+    i, n = 0, len(pat)
+    while i < n:
+        c = pat[i]
+        i += 1
+        if c == '*':
+            # '**' matches everything including path separators
+            if i < n and pat[i] == '*':
+                res += '.*'
+                i += 1
+            else:
+                res += '[^/]*'  # single * does not cross directories
+        elif c == '?':
+            res += '[^/]'
+        elif c == '[':
+            ...  # character class
+        else:
+            res += re.escape(c)
+    return r'(?s:%s)\Z' % res
+```
+
+`*` in a glob matches everything except `/` (path separator). `**` matches across directories. `translate` builds the regex string; anchoring with `\Z` ensures the entire name must match, not just a prefix.
+
+### `filter`
+
+```python
+# CPython: Lib/fnmatch.py:165 filter
+def filter(names, pat):
+    result = []
+    pat = os.path.normcase(pat)
+    match = _compile_pattern(pat, isinstance(pat, bytes))
+    for name in names:
+        if match(os.path.normcase(name)):
+            result.append(name)
+    return result
+```
+
+`fnmatch.filter(['foo.py', 'bar.txt'], '*.py')` returns `['foo.py']`. It normalizes each name before matching, which matters on case-insensitive filesystems.
+
+## gopy notes
+
+`fnmatch` is `module/fnmatch.Fnmatch` in `module/fnmatch/module.go`. `translate` calls `regexp.QuoteMeta` for literal characters. The compiled pattern is cached in a Go `sync.Map`. `filter` iterates and calls the compiled regexp.

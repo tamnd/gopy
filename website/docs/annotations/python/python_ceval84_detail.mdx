@@ -1,0 +1,106 @@
+---
+title: Python/ceval.c (part 84)
+description: "Python/ceval.c part 84: YIELD_VALUE, RESUME, RETURN_GENERATOR, COPY_FREE_VARS, generator frame lifecycle."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers generator and coroutine opcodes. See `python_ceval83_detail` for `GET_ITER`, `FOR_ITER`, and `SEND`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `RETURN_GENERATOR` | Convert a function call into a generator object |
+| 81-160 | `COPY_FREE_VARS` | Copy free variables from the closure into the frame |
+| 161-260 | `RESUME` | Entry point guard — re-check for tracing/interrupts |
+| 261-360 | `YIELD_VALUE` | Suspend the generator and return a value |
+| 361-500 | Generator frame lifecycle | Suspension, resumption, and finalization |
+
+## Reading
+
+### `RETURN_GENERATOR`
+
+```c
+// CPython: Python/ceval.c:4020 RETURN_GENERATOR
+inst(RETURN_GENERATOR, (-- )) {
+    /* Called at entry to a generator function.
+       Creates a PyGenObject wrapping the current frame, then
+       returns it to the caller WITHOUT executing any further bytecode. */
+    PyGenObject *gen = _PyGen_NewWithQualName(frame, qualname, name);
+    frame->f_frame->owner = FRAME_OWNED_BY_GENERATOR;
+    _PyFrame_SetStackPointer(frame, stack_pointer);
+    /* Detach the frame from the eval loop */
+    tstate->current_frame = frame->previous;
+    Py_INCREF(gen);
+    return (PyObject *)gen;
+}
+```
+
+When a function containing `yield` is called, the interpreter runs `RETURN_GENERATOR` before any user code. It creates a generator object that owns the frame, transfers ownership, and returns the generator to the caller. No user code has run yet.
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:4060 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (--)) {
+    /* oparg = number of free variables */
+    PyObject *closure = ((PyFunctionObject *)frame->f_funcobj)->func_closure;
+    for (int i = 0; i < oparg; ++i) {
+        PyObject *o = PyTuple_GET_ITEM(closure, i);
+        frame->localsplus[frame->f_code->co_nlocalsplus - oparg + i] = Py_NewRef(o);
+    }
+}
+```
+
+`COPY_FREE_VARS` runs at the start of any function with a closure. It copies `PyCellObject` references from the function's `func_closure` tuple into the frame's `localsplus` array, where `LOAD_DEREF`/`STORE_DEREF` can find them.
+
+### `RESUME`
+
+```c
+// CPython: Python/ceval.c:4100 RESUME
+inst(RESUME, (--)) {
+    /* oparg:
+       0 = function entry
+       1 = yield
+       2 = yield from / await (send)
+       3 = yield from / await (throw)
+    */
+    _Py_CHECK_EMSCRIPTEN_SIGNALS_PERIODICALLY();
+    if (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) &&
+        oparg < 2) {
+        /* Check for signals, GIL drop requests, etc. */
+        if (_Py_HandlePending(tstate) != 0)
+            ERROR_IF(true, error);
+    }
+}
+```
+
+`RESUME` is the first instruction of every function and the re-entry point after a `yield`. It checks `eval_breaker` for pending signals, GIL drops, and tracing hooks. The `oparg` distinguishes first entry from generator resumption so that tracing callbacks fire correctly.
+
+### `YIELD_VALUE`
+
+```c
+// CPython: Python/ceval.c:4140 YIELD_VALUE
+inst(YIELD_VALUE, (retval -- )) {
+    /* Suspend: save stack pointer, return retval to the caller. */
+    assert(oparg == FRAME_SUSPENDED_YIELD_FROM || oparg == 0);
+    frame->f_frame->instr_ptr++;  /* advance past YIELD_VALUE */
+    _PyFrame_SetStackPointer(frame, stack_pointer);
+    tstate->current_frame = frame->previous;
+    frame->f_frame->owner = FRAME_SUSPENDED;
+    return retval;
+}
+```
+
+`YIELD_VALUE` stores the current stack pointer in the frame, marks the frame as `FRAME_SUSPENDED`, unlinks it from the thread state, and returns `retval` to whoever called `next()` or `send()`. The frame is preserved intact for the next resumption.
+
+## gopy notes
+
+`RETURN_GENERATOR` creates a `vm.Generator` in `vm/eval_gen.go`. `COPY_FREE_VARS` fills `frame.FreeVars` from `function.Closure`. `RESUME` checks `vm.evalBreaker`. `YIELD_VALUE` suspends the goroutine-backed generator by sending on a channel and blocking until the next `Send`.

@@ -1,0 +1,110 @@
+---
+title: Objects/frameobject.c (part 8)
+description: "Objects/frameobject.c part 8: PyFrame_GetLocals, frame_getlocals, fast_to_locals, locals_to_fast."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/frameobject.c" />
+
+This annotation covers the frame local variable snapshot. See `objects_frameobject7_detail` for frame creation, `f_locals`, and frame chaining.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyFrame_GetLocals` | Public API: get a dict of the frame's local variables |
+| 81-180 | `frame_getlocals` | Internal: snapshot localsplus into a dict |
+| 181-280 | `fast_to_locals` | Copy frame slots → `f_locals` dict |
+| 281-400 | `locals_to_fast` | Write back `f_locals` dict → frame slots |
+
+## Reading
+
+### `PyFrame_GetLocals`
+
+```c
+// CPython: Objects/frameobject.c:420 PyFrame_GetLocals
+PyObject *
+PyFrame_GetLocals(PyFrameObject *f)
+{
+    return _PyFrame_GetLocals(f->f_frame, 0);
+}
+```
+
+`frame.f_locals` in Python returns a snapshot dict. The snapshot is lazy: it is only built when accessed. Modifying the dict does not immediately affect the running frame unless `locals_to_fast` is called.
+
+### `fast_to_locals`
+
+```c
+// CPython: Objects/frameobject.c:240 _PyFrame_FastToLocalsWithError
+int
+_PyFrame_FastToLocalsWithError(_PyInterpreterFrame *frame)
+{
+    PyObject *locals = frame->f_locals;
+    if (locals == NULL) {
+        locals = frame->f_locals = PyDict_New();
+        if (locals == NULL) return -1;
+    }
+    PyCodeObject *co = frame->f_code;
+    for (int i = 0; i < co->co_nlocalsplus; i++) {
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        PyObject *value = frame->localsplus[i];
+        if (value == NULL) {
+            PyObject_DelItem(locals, name);
+        } else {
+            /* For cell/free vars, unwrap the cell */
+            _PyLocals_Kind kind = _PyLocals_GetKind(co->co_localspluskinds, i);
+            if (kind & CO_FAST_CELL)
+                value = PyCell_GET(value);
+            if (value == NULL)
+                PyObject_DelItem(locals, name);
+            else
+                PyDict_SetItem(locals, name, value);
+        }
+    }
+    return 0;
+}
+```
+
+`fast_to_locals` unwraps cell objects before inserting into the dict. Unbound locals (NULL slots) are removed from the dict so that `key in locals` returns `False` for them.
+
+### `locals_to_fast`
+
+```c
+// CPython: Objects/frameobject.c:300 _PyFrame_LocalsToFast
+void
+_PyFrame_LocalsToFast(_PyInterpreterFrame *frame, int clear)
+{
+    PyObject *locals = frame->f_locals;
+    if (locals == NULL) return;
+    PyCodeObject *co = frame->f_code;
+    for (int i = 0; i < co->co_nlocalsplus; i++) {
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        PyObject *value = PyObject_GetItem(locals, name);
+        if (value == NULL) {
+            PyErr_Clear();
+            if (clear) {
+                Py_CLEAR(frame->localsplus[i]);
+            }
+            continue;
+        }
+        _PyLocals_Kind kind = _PyLocals_GetKind(co->co_localspluskinds, i);
+        if (kind & CO_FAST_CELL) {
+            PyCell_SET(frame->localsplus[i], value);
+        } else {
+            Py_XDECREF(frame->localsplus[i]);
+            frame->localsplus[i] = value;
+        }
+    }
+}
+```
+
+`locals_to_fast` is the reverse of `fast_to_locals`. It is called after `exec` inside a function or after the debugger modifies `f_locals`. Cell variables are written back through `PyCell_SET` to keep the closure consistent.
+
+## gopy notes
+
+`PyFrame_GetLocals` is `objects.FrameGetLocals` in `objects/frame.go`. `fast_to_locals` builds a `map[string]objects.Object` by iterating `frame.Locals`. `locals_to_fast` writes back, unwrapping `objects.Cell` for cell variables.
