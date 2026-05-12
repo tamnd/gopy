@@ -1,0 +1,86 @@
+---
+title: Modules/_abc module
+description: "_abc C extension: ABCMeta machinery, register(), __subclasshook__, abstract method tracking, subclass cache."
+cpython_path: Modules/_abc.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_abc.c" />
+
+`_abc` is the C acceleration for `abc.ABCMeta`. The pure-Python fallback is in `Lib/_py_abc.py`. The C module provides the same interface but avoids Python-level attribute lookups in the hot `isinstance` path.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_ABCData` | Per-class state (registered subclasses, caches) |
+| 101-300 | `_abc_register` | Add a virtual subclass |
+| 301-450 | `_abc_subclasscheck` | `ABCMeta.__subclasscheck__` implementation |
+| 451-600 | `_abc_instancecheck`, cache management | `isinstance` fast path |
+
+## Reading
+
+### Per-class ABC data
+
+```c
+// CPython: Modules/_abc.c:42 _ABCData
+typedef struct {
+    PyObject *_abc_registry;      /* set of explicitly registered subclasses */
+    PyObject *_abc_cache;         /* set of positive subclass check results */
+    PyObject *_abc_negative_cache; /* set of negative results */
+    Py_ssize_t _abc_negative_cache_version;
+} _ABCData;
+```
+
+The two caches avoid repeated `__subclasshook__` calls. The negative cache is versioned so it is invalidated whenever `register()` is called.
+
+### `register`
+
+```c
+// CPython: Modules/_abc.c:155 _abc_register
+static PyObject *
+_abc_register(PyObject *self, PyObject *args)
+{
+    PyObject *subclass;
+    if (!PyArg_ParseTuple(args, "O!:register", &PyType_Type, &subclass))
+        return NULL;
+    _ABCData *impl = _get_impl(self);
+    if (PySet_Add(impl->_abc_registry, subclass) < 0)
+        return NULL;
+    /* Invalidate negative cache */
+    abc_invalidation_counter++;
+    impl->_abc_negative_cache_version = -1;
+    return Py_NewRef(subclass);   /* register returns the subclass */
+}
+```
+
+### `__subclasscheck__`
+
+```c
+// CPython: Modules/_abc.c:310 _abc_subclasscheck
+static int
+_abc_subclasscheck(PyObject *self, PyObject *subclass)
+{
+    /* 1. Check positive cache */
+    if (PySet_Contains(impl->_abc_cache, subclass))
+        return 1;
+    /* 2. Check negative cache (if version matches) */
+    ...
+    /* 3. Call __subclasshook__ */
+    PyObject *ok = PyObject_CallMethodOneArg(self, &_Py_ID(__subclasshook__), subclass);
+    if (ok == Py_True) { cache_positive; return 1; }
+    if (ok == Py_False) { cache_negative; return 0; }
+    /* 4. Check MRO and registry */
+    ...
+}
+```
+
+The caching means that `isinstance(obj, SomeABC)` is O(1) after the first call for a given subclass.
+
+## gopy notes
+
+`abc.ABCMeta` is used by `io`, `collections.abc`, `numbers`, and many other stdlib modules. In gopy `ABCMeta` is implemented in `module/abc/` and the `__subclasshook__` dispatch is handled in `objects/type.go`. The subclass registry is a Python set stored as a field on the ABC class object.

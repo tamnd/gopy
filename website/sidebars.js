@@ -912,6 +912,9 @@ const sidebars = {
         'annotations/modules/modules_io_detail',
         'annotations/modules/modules_operator_detail',
         'annotations/modules/modules_struct_detail',
+        'annotations/modules/modules_time_detail',
+        'annotations/modules/modules_collections_detail',
+        'annotations/modules/modules_abc_detail',
       ],
     },
     {
@@ -1406,6 +1409,8 @@ const sidebars = {
         'annotations/lib/lib_datetime_detail2',
         'annotations/lib/lib_collections_detail3',
         'annotations/lib/lib_itertools_detail2',
+        'annotations/lib/lib_tracemalloc_detail',
+        'annotations/lib/lib_linecache_detail',
       ],
     },
   ],

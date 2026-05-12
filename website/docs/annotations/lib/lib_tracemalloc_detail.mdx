@@ -1,0 +1,94 @@
+---
+title: Lib/tracemalloc.py
+description: "tracemalloc: memory allocation tracing, Snapshot, StatisticDiff, Filter, start/stop/take_snapshot, traceback frames."
+cpython_path: Lib/tracemalloc.py
+cpython_version: "3.14"
+lines: 550
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/tracemalloc.py" />
+
+`tracemalloc` traces Python memory allocations. It wraps the C-level `_tracemalloc` module, which hooks into CPython's memory allocator to record a traceback for every live allocation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Frame`, `Traceback` | Immutable allocation location objects |
+| 101-200 | `Statistic`, `StatisticDiff` | Per-file/line byte counts |
+| 201-350 | `Snapshot` | Point-in-time snapshot of all tracked allocations |
+| 351-450 | `Filter`, `DomainFilter` | Include/exclude rules for statistics |
+| 451-550 | `start`, `stop`, `take_snapshot`, `get_traced_memory` | Control API |
+
+## Reading
+
+### `start` and stack depth
+
+```python
+# CPython: Lib/tracemalloc.py:510 start
+def start(nframe: int = 1) -> None:
+    _tracemalloc.start(nframe)
+```
+
+`nframe` is the number of stack frames to record per allocation. More frames give richer tracebacks but consume more memory and slow allocation.
+
+### `take_snapshot`
+
+```python
+# CPython: Lib/tracemalloc.py:525 take_snapshot
+def take_snapshot() -> Snapshot:
+    if not is_tracing():
+        raise RuntimeError("the tracemalloc module must be tracing memory "
+                           "allocations to take a snapshot")
+    traces = _tracemalloc._get_traces()
+    traceback_limit = _tracemalloc.get_traceback_limit()
+    return Snapshot(traces, traceback_limit)
+```
+
+`_tracemalloc._get_traces()` returns a raw list of `(domain, size, traceback)` tuples from the C layer.
+
+### `Snapshot.compare_to`
+
+```python
+# CPython: Lib/tracemalloc.py:370 Snapshot.compare_to
+def compare_to(self, old_snapshot, key_type, cumulative=False):
+    new_stats = self.statistics(key_type, cumulative)
+    old_stats = old_snapshot.statistics(key_type, cumulative)
+    # Build {key: Statistic} dicts and compute diffs
+    old_dict = {stat.traceback: stat for stat in old_stats}
+    result = []
+    for new_stat in new_stats:
+        old_stat = old_dict.pop(new_stat.traceback, None)
+        diff = StatisticDiff(new_stat.traceback,
+                             new_stat.size - (old_stat.size if old_stat else 0),
+                             new_stat.count - (old_stat.count if old_stat else 0),
+                             new_stat.size,
+                             new_stat.count)
+        result.append(diff)
+    # Add entries that disappeared
+    for old_stat in old_dict.values():
+        result.append(StatisticDiff(old_stat.traceback, -old_stat.size, ...))
+    return sorted(result, key=lambda s: -abs(s.size_diff))
+```
+
+### `Filter`
+
+```python
+# CPython: Lib/tracemalloc.py:246 Filter
+class Filter:
+    def __init__(self, inclusive, filename_pattern,
+                 lineno=None, all_frames=False, domain=None):
+        self.inclusive = inclusive
+        self.filename_pattern = filename_pattern
+        self._filename_pattern = fnmatch.translate(filename_pattern)
+        ...
+```
+
+`inclusive=True` means "only include allocations from this file". Filters are applied in `Snapshot.statistics`.
+
+## gopy notes
+
+`tracemalloc` is rarely needed for the gopy port itself but is used by the CPython test suite (`Lib/test/`) to detect memory leaks. The `_tracemalloc` C extension hooks into `PyMem_Malloc`; gopy's Go allocator would need a parallel hook. For now, a stub that returns empty traces is sufficient to prevent import errors.

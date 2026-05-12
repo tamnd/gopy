@@ -1,0 +1,106 @@
+---
+title: Modules/time module
+description: "time module (Modules/timemodule.c): time(), time_ns(), monotonic(), perf_counter(), sleep(), struct_time, gmtime/localtime/mktime, strftime/strptime."
+cpython_path: Modules/timemodule.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/timemodule.c" />
+
+The `time` module wraps OS time APIs. Clock resolution and epoch differ by platform; CPython normalizes them through `_PyTime_t` (a 64-bit nanosecond counter).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `time_time`, `time_time_ns` | Wall clock in seconds / nanoseconds |
+| 201-400 | `time_monotonic`, `time_monotonic_ns` | Non-decreasing clock for intervals |
+| 401-600 | `time_perf_counter` | Highest-resolution clock for benchmarking |
+| 601-800 | `time_sleep` | Sleep with signal handling |
+| 801-1100 | `struct_time` | Named tuple for calendar time |
+| 1101-1400 | `time_gmtime`, `time_localtime`, `time_mktime` | Calendar conversions |
+| 1401-1800 | `time_strftime`, `time_strptime` | Format/parse time strings |
+
+## Reading
+
+### `time.time` and `_PyTime_t`
+
+```c
+// CPython: Modules/timemodule.c:115 time_time_impl
+static PyObject *
+time_time_impl(PyObject *module)
+{
+    _PyTime_t t;
+    if (_PyTime_GetSystemClock(&t) < 0)
+        return NULL;
+    return _PyFloat_FromPyTime(t);
+}
+```
+
+`_PyTime_t` is `int64_t` in nanoseconds. `_PyFloat_FromPyTime` converts to a `float` seconds value. `time_ns` skips the float conversion and returns an `int` directly.
+
+### `time.sleep`
+
+```c
+// CPython: Modules/timemodule.c:680 time_sleep_impl
+static PyObject *
+time_sleep_impl(PyObject *module, double secs)
+{
+    _PyTime_t timeout = _PyTime_FromSecondsDouble(secs, _PyTime_ROUND_CEILING);
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        int err = pysleep(timeout);
+        Py_END_ALLOW_THREADS
+        if (err == 0)
+            break;
+        /* EINTR: subtract elapsed and retry */
+        ...
+    } while (1);
+    Py_RETURN_NONE;
+}
+```
+
+`Py_BEGIN_ALLOW_THREADS` releases the GIL so other threads can run during the sleep. EINTR handling ensures signals deliver correctly on Unix.
+
+### `struct_time`
+
+```c
+// CPython: Modules/timemodule.c:920 tmtotuple
+static PyObject *
+tmtotuple(struct tm *p, ...)
+{
+    return PyStructSequence_New(&StructTimeType);
+    /* Fields: tm_year, tm_mon, tm_mday, tm_hour, tm_min, tm_sec,
+               tm_wday, tm_yday, tm_isdst, tm_zone, tm_gmtoff */
+}
+```
+
+`struct_time` is a `PyStructSequence` (a named tuple implemented in C). Fields are accessible by index or name.
+
+### `time.strftime`
+
+```c
+// CPython: Modules/timemodule.c:1490 time_strftime_impl
+static PyObject *
+time_strftime_impl(PyObject *module, const char *format,
+                   struct tm *tms)
+{
+    /* Call the OS strftime and handle buffer expansion */
+    size_t fmtlen = strlen(format);
+    size_t bufsize = fmtlen + 1024;
+    char *buf = PyMem_Malloc(bufsize);
+    while (strftime(buf, bufsize, format, tms) == 0 && bufsize < 256*1024)
+        bufsize *= 2;
+    ...
+}
+```
+
+`strptime` is implemented in pure Python (`Lib/_strptime.py`) and imported on first use.
+
+## gopy notes
+
+`time` is implemented in `module/time/` (spec 1664). `_PyTime_t` maps to Go's `time.Time` and `time.Duration`. `time.sleep` uses `time.Sleep()` which cooperates with Go's scheduler. `struct_time` is a named Python tuple in `objects/`.

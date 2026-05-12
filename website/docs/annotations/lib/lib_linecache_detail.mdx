@@ -1,0 +1,98 @@
+---
+title: Lib/linecache.py
+description: "linecache: getline(), getlines(), checkcache(), clearcache() — source line lookup for tracebacks and the debugger."
+cpython_path: Lib/linecache.py
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/linecache.py" />
+
+`linecache` caches Python source files line by line for traceback display and the `inspect` module. It also handles `<string>` (exec'd code) and zip-file sources.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | Module-level cache dict | `{filename: (size, mtime, lines, fullname)}` |
+| 41-80 | `getline` | Return a single line (1-based) |
+| 81-140 | `getlines`, `updatecache` | Read and cache a file |
+| 141-180 | `checkcache`, `clearcache`, `lazycache` | Cache management |
+
+## Reading
+
+### `getline`
+
+```python
+# CPython: Lib/linecache.py:26 getline
+def getline(filename, lineno, module_globals=None):
+    lines = getlines(filename, module_globals)
+    if 1 <= lineno <= len(lines):
+        return lines[lineno - 1]
+    return ''
+```
+
+Traceback formatting calls `getline(filename, lineno)` for every frame to display the source context.
+
+### `updatecache`
+
+```python
+# CPython: Lib/linecache.py:98 updatecache
+def updatecache(filename, module_globals=None):
+    # Try the filesystem first
+    try:
+        stat = os.stat(fullname)
+    except OSError:
+        pass
+    else:
+        size, mtime = stat.st_size, stat.st_mtime
+        with tokenize.open(fullname) as fp:
+            lines = fp.readlines()
+        cache[filename] = size, mtime, lines, fullname
+        return lines
+    # Fall back to linecache_loader hooks (for zip imports, frozen modules, etc.)
+    if module_globals and '__loader__' in module_globals:
+        loader = module_globals['__loader__']
+        ...
+        source = loader.get_source(module_globals['__name__'])
+        if source:
+            lines = source.splitlines(keepends=True)
+            cache[filename] = (len(source), None, lines, filename)
+            return lines
+    return []
+```
+
+The loader fallback handles `.pyc`-only distributions where the `.py` source is not on disk.
+
+### `checkcache`
+
+```python
+# CPython: Lib/linecache.py:68 checkcache
+def checkcache(filename=None):
+    if filename is None:
+        filenames = list(cache.keys())
+    else:
+        filenames = [filename]
+    for fn in filenames:
+        info = cache.get(fn)
+        if info and len(info) != 1:   # skip lazycache entries (len==1)
+            size, mtime, lines, fullname = info
+            if mtime is None:
+                continue   # dynamically loaded, can't check
+            try:
+                stat = os.stat(fullname)
+            except OSError:
+                cache.pop(fn, None)
+            else:
+                if size != stat.st_size or mtime != stat.st_mtime:
+                    cache.pop(fn, None)
+```
+
+Called by the interactive interpreter between commands so edited source files show up correctly in tracebacks.
+
+## gopy notes
+
+`linecache` is used by `traceback`, `inspect`, and `pdb`. In gopy it is needed for accurate traceback display. The module can be ported as-is since it only uses `os`, `tokenize`, and `sys`, all of which gopy implements. The loader-based fallback is important for frozen stdlib modules.

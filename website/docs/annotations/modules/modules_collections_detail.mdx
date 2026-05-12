@@ -1,0 +1,95 @@
+---
+title: Modules/_collections module
+description: "_collections C extension: deque (doubly-linked list of blocks), _count_elements, _tuplegetter for namedtuple."
+cpython_path: Modules/_collectionsmodule.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_collectionsmodule.c" />
+
+`_collections` is the C backend for `collections.deque` and a few helper objects. The high-level `collections` module (`Lib/collections/__init__.py`) imports from here.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `dequeblock` | Fixed-size block (64 items) in the deque ring |
+| 201-600 | `deque_append`, `deque_appendleft`, `deque_pop`, `deque_popleft` | O(1) ends operations |
+| 601-1000 | `deque_rotate`, `deque_extend`, `deque_extendleft` | Bulk operations |
+| 1001-1400 | `deque_getitem`, `deque_setitem` | O(n) random access |
+| 1401-1700 | `deque_iter`, `deque_reviter` | Forward and reverse iterators |
+| 1701-2000 | `_count_elements`, `_tuplegetter` | Helpers for Counter and namedtuple |
+
+## Reading
+
+### Block structure
+
+```c
+// CPython: Modules/_collectionsmodule.c:25 dequeblock
+#define BLOCKLEN 64
+typedef struct BLOCK {
+    struct BLOCK *leftlink;
+    PyObject *data[BLOCKLEN];
+    struct BLOCK *rightlink;
+} block;
+```
+
+A deque is a doubly-linked list of blocks. The left and right endpoints track which cells in the leftmost and rightmost blocks are in use. This gives O(1) appends/pops at both ends while keeping memory usage close to a list.
+
+### `appendleft` and `popleft`
+
+```c
+// CPython: Modules/_collectionsmodule.c:280 deque_appendleft
+static PyObject *
+deque_appendleft(dequeobject *deque, PyObject *item)
+{
+    deque->leftindex--;
+    if (deque->leftindex < 0) {
+        /* Allocate a new block on the left */
+        block *b = newblock();
+        b->rightlink = deque->leftblock;
+        deque->leftblock->leftlink = b;
+        deque->leftblock = b;
+        deque->leftindex = BLOCKLEN - 1;
+    }
+    Py_INCREF(item);
+    deque->leftblock->data[deque->leftindex] = item;
+    deque->len++;
+    Py_RETURN_NONE;
+}
+```
+
+The `maxlen` constraint is checked here too: if `deque->len == deque->maxlen`, the rightmost item is popped before appending on the left.
+
+### `_count_elements`
+
+```c
+// CPython: Modules/_collectionsmodule.c:1820 _count_elements
+static PyObject *
+_count_elements(PyObject *self, PyObject *args)
+{
+    /* Fast path for Counter(iterable): equivalent to
+       for elem in it: mapping[elem] = mapping.get(elem, 0) + 1 */
+    PyObject *it = PyObject_GetIter(iterable);
+    while ((key = PyIter_Next(it)) != NULL) {
+        val = PyObject_GetItem(mapping, key);
+        if (val == NULL) {
+            PyErr_Clear();
+            val = _PyLong_GetZero();
+        }
+        newval = PyNumber_Add(val, _PyLong_GetOne());
+        PyObject_SetItem(mapping, key, newval);
+        ...
+    }
+}
+```
+
+`_count_elements` is called by `Counter.__init__` for a speed boost over the pure-Python loop.
+
+## gopy notes
+
+`deque` is needed for the `collections` module and for any Python code using `from collections import deque`. In gopy it is implemented as a doubly-linked list of Go slices in `module/collections/`. The `maxlen` behavior (rolling window) must match CPython exactly. `_count_elements` is the hot path for `Counter`; inlining it avoids Python-level attribute lookups.
