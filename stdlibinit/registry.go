@@ -146,6 +146,13 @@ import (
 	// CPython: Modules/_csv.c:1423 _csv_exec
 	_ "github.com/tamnd/gopy/module/_csv"
 
+	// Built-in module: _string. Registers itself via
+	// module/_string/module.go init(). Exposes formatter_parser and
+	// formatter_field_name_split, the two low-level helpers consumed by
+	// Lib/string.py's Formatter class.
+	// CPython: Modules/_string.c:368 PyInit__string
+	_ "github.com/tamnd/gopy/module/_string"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
