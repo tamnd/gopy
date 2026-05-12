@@ -1,0 +1,101 @@
+---
+title: Lib/traceback.py (part 4)
+description: "traceback.py part 4: StackSummary, FrameSummary, extract_stack, format_stack, walk_stack."
+cpython_path: Lib/traceback.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/traceback.py" />
+
+This annotation covers the structured stack capture API. See `lib_traceback3_detail` for `TracebackException`, `format_exception`, and `print_exception`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `FrameSummary` | Snapshot of a single frame (file, line, name, locals) |
+| 61-160 | `StackSummary` | List subclass of `FrameSummary` objects |
+| 161-240 | `StackSummary.extract` | Build from an iterable of `(frame, lineno)` pairs |
+| 241-320 | `walk_stack` | Yield `(frame, lineno)` from the current call stack |
+| 321-400 | `extract_stack` / `format_stack` | Public helpers |
+
+## Reading
+
+### `FrameSummary`
+
+```python
+# CPython: Lib/traceback.py:320 FrameSummary
+class FrameSummary:
+    __slots__ = ('filename', 'lineno', 'name', '_line', 'locals')
+
+    def __init__(self, filename, lineno, name, *, lookup_line=True,
+                 locals=None, line=None):
+        self.filename = filename
+        self.lineno = lineno
+        self.name = name
+        self._line = line
+        if lookup_line:
+            self.line  # trigger linecache lookup
+        self.locals = {k: repr(v) for k, v in locals.items()} if locals else None
+```
+
+`FrameSummary` stores locals as `repr` strings immediately on capture so they stay accurate even after the frame is unwound. `lookup_line=False` delays the `linecache` hit for callers that only need the line number.
+
+### `StackSummary.extract`
+
+```python
+# CPython: Lib/traceback.py:380 StackSummary.extract
+@classmethod
+def extract(cls, frame_gen, *, limit=None, lookup_lines=True, capture_locals=False):
+    result = cls()
+    if limit is not None:
+        frame_gen = itertools.islice(frame_gen, limit)
+    for f, lineno in frame_gen:
+        co = f.f_code
+        filename = co.co_filename
+        name = co.co_name
+        locals = f.f_locals if capture_locals else None
+        result.append(FrameSummary(filename, lineno, name,
+                                   lookup_line=lookup_lines,
+                                   locals=locals))
+    return result
+```
+
+`capture_locals=True` snapshots `f_locals` at extraction time. This is expensive for large frames but essential for debugging. `limit` cuts off deep recursion stacks.
+
+### `walk_stack`
+
+```python
+# CPython: Lib/traceback.py:290 walk_stack
+def walk_stack(f):
+    if f is None:
+        f = sys._getframe().f_back   # skip walk_stack itself
+    while f is not None:
+        yield f, f.f_lineno
+        f = f.f_back
+```
+
+`walk_stack(None)` starts from the caller's frame. Combined with `StackSummary.extract`, this is how `traceback.extract_stack()` works.
+
+### `extract_stack` / `format_stack`
+
+```python
+# CPython: Lib/traceback.py:230 extract_stack
+def extract_stack(f=None, limit=None):
+    stack = StackSummary.extract(walk_stack(f), limit=limit)
+    stack.reverse()
+    return stack
+
+def format_stack(f=None, limit=None):
+    return format_list(extract_stack(f, limit=limit))
+```
+
+`extract_stack` reverses the walk so the innermost frame is last (matching `traceback.print_stack` output convention). `format_stack` is the string version, useful for logging.
+
+## gopy notes
+
+`FrameSummary` is `module/traceback.FrameSummary` in `module/traceback/module.go`. `walk_stack` calls `vm.CurrentFrame()` and walks `frame.Back`. `StackSummary.extract` uses `linecache.GetLine` for source lookup.

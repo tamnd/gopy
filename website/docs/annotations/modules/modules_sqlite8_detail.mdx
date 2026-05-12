@@ -1,0 +1,113 @@
+---
+title: Modules/_sqlite/connection.c (part 8)
+description: "_sqlite/connection.c part 8: Connection.execute, Connection.executemany, Connection.executescript, Connection.create_function."
+cpython_path: Modules/_sqlite/connection.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sqlite/connection.c" />
+
+This annotation covers the high-level `Connection` methods. See `modules_sqlite7_detail` for cursor creation, `connect`, and transaction management.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Connection.execute` | Shortcut: create cursor, execute, return cursor |
+| 81-160 | `Connection.executemany` | Shortcut: create cursor, executemany |
+| 161-240 | `Connection.executescript` | Execute multiple SQL statements at once |
+| 241-360 | `Connection.create_function` | Register a Python callable as a SQLite scalar UDF |
+| 361-500 | `Connection.create_aggregate` | Register a Python class as a SQLite aggregate UDF |
+
+## Reading
+
+### `Connection.execute`
+
+```c
+// CPython: Modules/_sqlite/connection.c:380 pysqlite_connection_execute
+static PyObject *
+pysqlite_connection_execute(pysqlite_Connection *self, PyObject *const *args,
+                            Py_ssize_t nargs)
+{
+    PyObject *cursor = pysqlite_connection_cursor(self, NULL, 0, NULL);
+    if (cursor == NULL) return NULL;
+    PyObject *result = pysqlite_cursor_execute(
+        (pysqlite_Cursor *)cursor, args, nargs);
+    if (result == NULL) {
+        Py_DECREF(cursor);
+        return NULL;
+    }
+    Py_DECREF(result);
+    return cursor;
+}
+```
+
+`conn.execute(sql, params)` is equivalent to `conn.cursor().execute(sql, params)` but returns the cursor. This is the idiomatic one-liner for queries that only need a single result set.
+
+### `Connection.executescript`
+
+```c
+// CPython: Modules/_sqlite/connection.c:440 pysqlite_connection_executescript
+static PyObject *
+pysqlite_connection_executescript(pysqlite_Connection *self, PyObject *script_obj)
+{
+    const char *script = PyUnicode_AsUTF8(script_obj);
+    /* Commit any pending transaction first */
+    if (self->begin_statement) {
+        sqlite3_exec(self->db, "COMMIT", NULL, NULL, NULL);
+    }
+    /* Execute each statement in the script */
+    int rc = sqlite3_exec(self->db, script, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        _pysqlite_seterror(self->state, self->db);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`executescript` bypasses the cursor layer and calls `sqlite3_exec` directly. It commits any open transaction first because `sqlite3_exec` cannot run inside an implicit transaction.
+
+### `Connection.create_function`
+
+```c
+// CPython: Modules/_sqlite/connection.c:520 pysqlite_connection_create_function
+static PyObject *
+pysqlite_connection_create_function(pysqlite_Connection *self,
+                                    PyObject *const *args, Py_ssize_t nargs,
+                                    PyObject *kwnames)
+{
+    const char *name;
+    int narg;
+    PyObject *func;
+    int deterministic = 0;
+    /* parse name, narg, func, deterministic */
+    int flags = SQLITE_UTF8 | (deterministic ? SQLITE_DETERMINISTIC : 0);
+    int rc = sqlite3_create_function_v2(self->db, name, narg, flags,
+                                        func_ctx, _pysqlite_func_callback,
+                                        NULL, NULL, _destructor);
+    ...
+}
+```
+
+`deterministic=True` enables `SQLITE_DETERMINISTIC`, allowing SQLite to cache the result when called with the same arguments. `_pysqlite_func_callback` converts SQLite values to Python objects, calls the callable, and converts the result back.
+
+### `Connection.create_aggregate`
+
+```c
+// CPython: Modules/_sqlite/connection.c:600 pysqlite_connection_create_aggregate
+/* Aggregate UDFs require three callbacks:
+   - step(value): called for each row
+   - finalize(): called at the end, returns the result
+   SQLite calls these via sqlite3_create_function_v2 with xStep/xFinal. */
+```
+
+`conn.create_aggregate("stdev", 1, StdevClass)` registers `StdevClass` as an aggregate. Each call to the aggregate creates a new instance; `step` is called per row, `finalize` is called once at the end.
+
+## gopy notes
+
+`Connection.execute` is `module/sqlite3.ConnectionExecute` in `module/sqlite3/connection.go`. `create_function` stores the Python callable and registers a C trampoline with `sqlite3_create_function_v2`. The trampoline calls back via `objects.CallFunction`.

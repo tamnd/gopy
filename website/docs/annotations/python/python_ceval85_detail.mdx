@@ -1,0 +1,112 @@
+---
+title: Python/ceval.c (part 85)
+description: "Python/ceval.c part 85: LOAD_ATTR, LOAD_ATTR_MODULE, LOAD_ATTR_SLOT, LOAD_ATTR_WITH_HINT, STORE_ATTR."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers attribute load/store opcodes and their specializations. See `python_ceval84_detail` for generator opcodes (`YIELD_VALUE`, `RESUME`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_ATTR` | Generic attribute lookup |
+| 81-160 | `LOAD_ATTR_MODULE` | Specialization for module attribute access |
+| 161-240 | `LOAD_ATTR_SLOT` | Specialization for slot-based types |
+| 241-340 | `LOAD_ATTR_WITH_HINT` | Specialization using a dict key hint |
+| 341-500 | `STORE_ATTR` / `STORE_ATTR_SLOT` | Generic and specialized attribute store |
+
+## Reading
+
+### `LOAD_ATTR`
+
+```c
+// CPython: Python/ceval.c:4200 LOAD_ATTR
+inst(LOAD_ATTR, (owner -- attr)) {
+    PyObject *name = GETITEM(names, oparg >> 1);
+    if (oparg & 1) {
+        /* Push NULL + method for METHOD_CALL optimization */
+        PyObject *self = NULL;
+        int meth = _PyObject_GetMethod(owner, name, &attr);
+        if (meth) {
+            self = owner;
+        } else {
+            Py_DECREF(owner);
+        }
+        PUSH(self);  /* NULL or owner */
+    } else {
+        attr = PyObject_GetAttr(owner, name);
+        ERROR_IF(attr == NULL, error);
+        Py_DECREF(owner);
+    }
+}
+```
+
+When `oparg & 1`, `LOAD_ATTR` uses `_PyObject_GetMethod` which, for methods defined in C types, returns the underlying function and pushes the `self` separately. This avoids creating a bound method object for `CALL_METHOD`.
+
+### `LOAD_ATTR_MODULE`
+
+```c
+// CPython: Python/ceval.c:4260 LOAD_ATTR_MODULE
+inst(LOAD_ATTR_MODULE, (owner -- attr)) {
+    assert(cframe.use_tracing == 0);
+    PyDictObject *dict = (PyDictObject *)((PyModuleObject *)owner)->md_dict;
+    assert(dict != NULL);
+    PyObject *res = _PyDict_LoadGlobal(dict, (PyObject *)dict->ma_keys,
+                                       name);
+    if (res == NULL) {
+        /* miss: deoptimize */
+        DEOPT_IF(true, LOAD_ATTR);
+    }
+    attr = Py_NewRef(res);
+    Py_DECREF(owner);
+}
+```
+
+Module attribute access is specialized to bypass the full `PyObject_GetAttr` path: it reads directly from the module's dict. The specialization is invalidated (deoptimized) if the dict key is missing.
+
+### `LOAD_ATTR_SLOT`
+
+```c
+// CPython: Python/ceval.c:4320 LOAD_ATTR_SLOT
+inst(LOAD_ATTR_SLOT, (owner -- attr)) {
+    /* cache[1].index = slot offset in the object */
+    Py_ssize_t index = read_u16(&next_instr[-1].cache[1].as_index);
+    PyObject **addr = (PyObject **)((char *)owner + index);
+    attr = *addr;
+    if (attr == NULL) {
+        /* Descriptor not set: AttributeError */
+        DEOPT_IF(true, LOAD_ATTR);
+    }
+    Py_INCREF(attr);
+    Py_DECREF(owner);
+}
+```
+
+`LOAD_ATTR_SLOT` reads a slot at a fixed offset in the object struct, bypassing all dict lookups. The offset is cached in the inline cache and validated against the type version tag.
+
+### `STORE_ATTR`
+
+```c
+// CPython: Python/ceval.c:4380 STORE_ATTR
+inst(STORE_ATTR, (owner, value --)) {
+    PyObject *name = GETITEM(names, oparg);
+    int err = PyObject_SetAttr(owner, name, value);
+    Py_DECREF(value);
+    Py_DECREF(owner);
+    ERROR_IF(err, error);
+}
+```
+
+Generic `STORE_ATTR` calls `PyObject_SetAttr` which goes through `tp_setattro`. Specializations (`STORE_ATTR_SLOT`, `STORE_ATTR_WITH_HINT`) write directly to the slot or dict to avoid the overhead.
+
+## gopy notes
+
+`LOAD_ATTR` is in `vm/eval_simple.go` and calls `objects.GetAttr`. `LOAD_ATTR_MODULE` reads from the module's `objects.Dict` directly. `LOAD_ATTR_SLOT` uses a field offset stored in the inline cache. `STORE_ATTR` calls `objects.SetAttr`.

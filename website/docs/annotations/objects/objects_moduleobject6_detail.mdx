@@ -1,0 +1,110 @@
+---
+title: Objects/moduleobject.c (part 6)
+description: "Objects/moduleobject.c part 6: PyModule_AddObject, PyModule_AddType, PyModule_AddIntConstant, PyModule_ExecDef."
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/moduleobject.c" />
+
+This annotation covers the module population API used by C extension authors. See `objects_moduleobject5_detail` for `PyModule_New`, `PyModule_GetDict`, and `PyModuleDef`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `PyModule_AddObject` | Add a reference to the module dict (steals ref) |
+| 61-120 | `PyModule_AddObjectRef` | Add without stealing the reference |
+| 121-180 | `PyModule_AddType` | Add a type and call `PyType_Ready` |
+| 181-260 | `PyModule_AddIntConstant` | Add a named integer constant |
+| 261-400 | `PyModule_ExecDef` | Run multi-phase init exec slots |
+
+## Reading
+
+### `PyModule_AddObject`
+
+```c
+// CPython: Objects/moduleobject.c:560 PyModule_AddObject
+int
+PyModule_AddObject(PyObject *mod, const char *name, PyObject *value)
+{
+    /* Steals a reference to value on success */
+    int ret = PyModule_AddObjectRef(mod, name, value);
+    if (ret == 0) {
+        Py_DECREF(value);  /* steal */
+    }
+    return ret;
+}
+```
+
+`PyModule_AddObject` is the classic API but its steal-on-success semantics are error-prone. If `AddObject` succeeds and the caller does not check the return value, an accidental double-free occurs if the caller also decrefs. The newer `PyModule_AddObjectRef` is preferred.
+
+### `PyModule_AddObjectRef`
+
+```c
+// CPython: Objects/moduleobject.c:540 PyModule_AddObjectRef
+int
+PyModule_AddObjectRef(PyObject *mod, const char *name, PyObject *value)
+{
+    if (!PyModule_Check(mod)) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    PyObject *dict = ((PyModuleObject *)mod)->md_dict;
+    return PyDict_SetItemString(dict, name, value);
+}
+```
+
+`PyModule_AddObjectRef` does not steal. It is equivalent to `mod.__dict__[name] = value`. The return value is `0` on success, `-1` on error.
+
+### `PyModule_AddType`
+
+```c
+// CPython: Objects/moduleobject.c:600 PyModule_AddType
+int
+PyModule_AddType(PyObject *module, PyTypeObject *type)
+{
+    if (PyType_Ready(type) < 0)
+        return -1;
+    const char *name = _PyType_Name(type);
+    assert(name != NULL);
+    return PyModule_AddObjectRef(module, name, (PyObject *)type);
+}
+```
+
+`PyModule_AddType` calls `PyType_Ready` (which fills in inherited slots, builds the MRO, etc.) before adding. The name is taken from `type->tp_name`, stripping any dotted prefix.
+
+### `PyModule_ExecDef`
+
+```c
+// CPython: Objects/moduleobject.c:660 _PyModule_ExecDef
+int
+_PyModule_ExecDef(PyObject *module, PyModuleDef *def)
+{
+    /* Run all m_slots entries of type Py_mod_exec */
+    if (def->m_slots == NULL) return 0;
+    for (PyModuleDef_Slot *cur_slot = def->m_slots;
+         cur_slot && cur_slot->slot;
+         cur_slot++) {
+        if (cur_slot->slot == Py_mod_exec) {
+            int (*exec_func)(PyObject *) = cur_slot->value;
+            if (exec_func(module) != 0) {
+                if (!PyErr_Occurred())
+                    PyErr_Format(PyExc_SystemError, ...);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+```
+
+Multi-phase init (`Py_mod_exec` slots) allows a module to be partially initialized before exec slots run. This is necessary for modules that need to be importable during their own exec phase (e.g., `_io`).
+
+## gopy notes
+
+`PyModule_AddObjectRef` is `objects.ModuleAddObject` in `objects/module.go`. `PyModule_AddType` calls `objects.TypeReady` then `ModuleAddObject`. `PyModule_ExecDef` runs exec slots from the `PyModuleDef` struct, translated as `module.ExecSlot` callbacks in `objects/module.go`.
