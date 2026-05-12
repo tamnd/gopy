@@ -1,0 +1,115 @@
+---
+title: Lib/pprint.py (part 2)
+description: "Lib/pprint.py part 2: PrettyPrinter._pprint_dict, _pprint_list, _pprint_tuple, _pprint_set, _pprint_dataclass, _format_items."
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pprint.py" />
+
+This annotation covers the per-type formatting methods. See `lib_pprint_detail` for `pprint`, `pformat`, `PrettyPrinter.__init__`, `_format`, and `_repr`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_pprint_dict` | Format a `dict` with sorted keys and indented values |
+| 81-180 | `_pprint_ordered_dict` | Format `OrderedDict` preserving insertion order |
+| 181-300 | `_pprint_list` / `_pprint_tuple` | Format list/tuple with per-element recursion |
+| 301-420 | `_pprint_set` / `_pprint_frozenset` | Format set/frozenset with sorted elements |
+| 421-560 | `_pprint_dataclass` | Format dataclass instances field by field |
+| 561-700 | `_format_items` | Shared helper for sequences and mappings |
+
+## Reading
+
+### `_pprint_dict`
+
+```python
+# CPython: Lib/pprint.py:280 _pprint_dict
+def _pprint_dict(self, object, stream, indent, allowance, context, level):
+    write = stream.write
+    write('{')
+    if self._sort_dicts:
+        items = sorted(object.items(), key=_safe_key)
+    else:
+        items = object.items()
+    self._format_dict_items(items, stream, indent, allowance + 1,
+                            context, level)
+    write('}')
+```
+
+When `sort_dicts=True` (the default), dict keys are sorted using a `_safe_key` wrapper that handles mixed-type keys without raising `TypeError`. Large dicts are split across lines with each key-value pair indented.
+
+### `_format_items`
+
+```python
+# CPython: Lib/pprint.py:560 _format_items
+def _format_items(self, items, stream, indent, allowance, context, level):
+    write = stream.write
+    indent += self._indent_per_level
+    delimnl = ',\n' + ' ' * indent
+    delim = ''
+    max_width1 = max_width = self._width - indent + 1
+    for item in items:
+        # Try to fit item on the current line
+        w = len(delim) + self._repr(item, context, level).width
+        if self._compact and w <= max_width:
+            write(delim)
+            self._repr(item, context, level).write(stream)
+            max_width -= w
+        else:
+            write(delim)
+            write('\n' + ' ' * indent)
+            self._format(item, stream, indent, allowance, context, level + 1)
+            max_width = max_width1
+        delim = ','
+```
+
+`_format_items` is the shared loop used by list, tuple, set, and frozenset formatters. `compact=True` packs items on the same line until the width limit is reached, then wraps.
+
+### `_pprint_dataclass`
+
+```python
+# CPython: Lib/pprint.py:430 _pprint_dataclass
+def _pprint_dataclass(self, object, stream, indent, allowance, context, level):
+    cls_name = object.__class__.__name__
+    indent += len(cls_name) + 1
+    items = [(f.name, getattr(object, f.name))
+             for f in dataclasses.fields(object)
+             if f.repr]
+    return self._format_namespace_items(items, stream, indent, allowance,
+                                        context, level)
+```
+
+Dataclass instances are formatted as `ClassName(field=value, ...)`. Only fields with `repr=True` (the default) are included.
+
+### `_pprint_set`
+
+```python
+# CPython: Lib/pprint.py:310 _pprint_set
+def _pprint_set(self, object, stream, indent, allowance, context, level):
+    if not object:
+        stream.write(repr(object))
+        return
+    typ = object.__class__
+    if typ is set:
+        stream.write('{')
+        endchar = '}'
+    else:
+        stream.write(typ.__name__ + '({')
+        endchar = '})'
+        indent += len(typ.__name__) + 1
+    object = sorted(object, key=_safe_key)
+    self._format_items(object, stream, indent, allowance, context, level)
+    stream.write(endchar)
+```
+
+Sets are sorted for deterministic output. Empty sets print as `set()` since `{}` would be an empty dict.
+
+## gopy notes
+
+`pprint` is pure Python. `PrettyPrinter` dispatch is via a `_dispatch` dict mapping `type.__repr__` to handler functions. `_pprint_dataclass` calls `dataclasses.fields` from `module/dataclasses`. `_safe_key` is a Go struct in `module/pprint/module.go` with a custom `Less` that catches panics from comparison.

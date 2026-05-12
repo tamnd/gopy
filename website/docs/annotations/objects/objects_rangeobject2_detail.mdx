@@ -1,0 +1,118 @@
+---
+title: Objects/rangeobject.c (part 2)
+description: "Objects/rangeobject.c part 2: range.__contains__, range.count, range.index, range.__reversed__, rangeiterobject."
+cpython_path: Objects/rangeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/rangeobject.c" />
+
+This annotation covers membership testing and iteration. See `objects_rangeobject_detail` for `range.__new__`, `__len__`, `__getitem__`, and slice handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `range_contains` | O(1) membership test using arithmetic |
+| 81-180 | `range_count` | Count occurrences of a value (0 or 1) |
+| 181-280 | `range_index` | Return the index of a value or raise `ValueError` |
+| 281-400 | `range___reversed__` | Return `range_iterator` in reverse order |
+| 401-600 | `rangeiterobject` | Fast iterator: counter + stop + step |
+
+## Reading
+
+### `range_contains`
+
+```c
+// CPython: Objects/rangeobject.c:368 range_contains
+static int
+range_contains(PyRangeObject *r, PyObject *ob)
+{
+    /* Optimize for integer arguments — O(1) test using step arithmetic.
+       Non-integers fall back to linear scan via PySequence_Contains. */
+    if (PyLong_CheckExact(ob) || PyBool_Check(ob)) {
+        return range_contains_long(r, ob);
+    }
+    return (int)_PySequence_IterSearch((PyObject*)r, ob, PY_ITERSEARCH_CONTAINS);
+}
+
+static int
+range_contains_long(PyRangeObject *r, PyObject *ob)
+{
+    /* True if (ob - start) % step == 0 and 0 <= (ob - start) // step < len */
+    PyObject *tmp = PyNumber_Subtract(ob, r->start);
+    if (!_PyLong_IsZero(r->step)) {
+        PyObject *mod = PyNumber_Remainder(tmp, r->step);
+        if (!_PyLong_IsZero(mod)) { Py_DECREF(mod); return 0; }
+        ...
+    }
+    ...
+}
+```
+
+`x in range(n)` is O(1) because membership is determined by arithmetic, not iteration. This is the canonical example of `__contains__` optimization for mathematical sequences.
+
+### `range_index`
+
+```c
+// CPython: Objects/rangeobject.c:420 range_index
+static PyObject *
+range_index(PyRangeObject *r, PyObject *ob)
+{
+    /* Return index i such that range[i] == ob, or raise ValueError. */
+    if (!range_contains_long(r, ob)) {
+        PyErr_Format(PyExc_ValueError, "%R is not in range", ob);
+        return NULL;
+    }
+    /* index = (ob - start) // step */
+    PyObject *diff = PyNumber_Subtract(ob, r->start);
+    PyObject *idx  = PyNumber_FloorDivide(diff, r->step);
+    Py_DECREF(diff);
+    return idx;
+}
+```
+
+`range(0, 100, 2).index(50)` returns `25` in O(1) via a single division.
+
+### `range___reversed__`
+
+```c
+// CPython: Objects/rangeobject.c:484 range___reversed__
+static PyObject *
+range___reversed__(PyRangeObject *r, PyObject *Py_UNUSED(ignored))
+{
+    /* Return a range_iterator starting at stop-step and going toward start. */
+    Py_ssize_t last = r->start + (r->length - 1) * r->step;
+    return rangeiter_new(&PyRangeIter_Type, last, r->length,
+                         -r->step);
+}
+```
+
+`reversed(range(10))` returns a new `range_iterator` with negated step, not a new `range` object. The compiler emits `GET_ITER` + `FOR_ITER_RANGE` for both forward and reversed range loops.
+
+### `rangeiterobject`
+
+```c
+// CPython: Objects/rangeobject.c:540 rangeiter_next
+static PyObject *
+rangeiter_next(PyRangeIterObject *r)
+{
+    if (r->len > 0) {
+        long result = r->start;
+        r->start = result + r->step;
+        r->len--;
+        return PyLong_FromLong(result);
+    }
+    return NULL;  /* exhausted */
+}
+```
+
+`rangeiterobject` stores `start`, `step`, and `len` (remaining count) as C `long`. For large ranges (beyond `sys.maxsize`), a `longrangeiterobject` variant uses `PyObject *` arithmetic.
+
+## gopy notes
+
+`range_contains` and `range_index` are O(1) integer arithmetic in `objects/range.go`. `rangeiterobject` is `objects.RangeIterator`. The `FOR_ITER_RANGE` specialization in `vm/eval_specialize.go` accesses `RangeIterator.Start`/`Step`/`Len` directly, bypassing the Python `__next__` call.

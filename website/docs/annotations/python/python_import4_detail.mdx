@@ -1,0 +1,113 @@
+---
+title: Python/import.c (part 4)
+description: "Python/import.c part 4: _PyImport_FindExtensionObject, _PyImport_LoadDynamicModuleWithSpec, import lock, _bootstrap._find_and_load."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+This annotation covers extension module loading, the import lock, and the `_bootstrap` fast-path. See `python_import_detail` for `PyImport_ImportModuleLevelObject`, `python_import2_detail` for the `sys.modules` cache and path finders, and `python_import3_detail` for `_PyImport_FixupExtensionObject`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Import lock | Per-interpreter reentrant lock protecting `sys.modules` |
+| 101-280 | `_PyImport_FindExtensionObject` | Look up a previously loaded C extension by filename |
+| 281-450 | `_PyImport_LoadDynamicModuleWithSpec` | `dlopen`/`LoadLibrary` + call `PyInit_*` |
+| 451-620 | `_bootstrap._find_and_load` | Python-level entry point used by `IMPORT_NAME` |
+| 621-800 | `_PyImport_GetModuleAttr` | Helper for `from module import name` |
+
+## Reading
+
+### Import lock
+
+```c
+// CPython: Python/import.c:280 _PyImport_AcquireLock
+void
+_PyImport_AcquireLock(PyInterpreterState *interp)
+{
+    /* Reentrant lock: the same thread can re-acquire it (for circular imports).
+       Uses the thread's id to track owner. */
+    PyThread_acquire_lock(interp->imports.lock, 1);
+    interp->imports.lock_thread_id = PyThread_get_thread_ident();
+    interp->imports.lock_level++;
+}
+```
+
+The import lock prevents two threads from simultaneously importing the same module. It is reentrant so that `import A` can `import B` which imports `A` again without deadlocking.
+
+### `_PyImport_FindExtensionObject`
+
+```c
+// CPython: Python/import.c:420 _PyImport_FindExtensionObject
+PyObject *
+_PyImport_FindExtensionObject(PyObject *name, PyObject *filename)
+{
+    /* Check the extensions cache (a dict mapping (name, filename) -> module).
+       If found, call Py_InitializeEx equivalent to reinitialize the module. */
+    PyObject *key = PyTuple_Pack(2, name, filename);
+    PyObject *mod = PyDict_GetItemWithError(interp->imports.extensions, key);
+    if (mod != NULL) {
+        /* Re-initialize: call m_base.m_init() or use cached m_copy */
+        ...
+    }
+    Py_DECREF(key);
+    return mod;
+}
+```
+
+C extensions loaded from a `.so`/`.pyd` are cached so `dlopen` is called only once per interpreter. Re-importing calls the module's `m_init` function again or restores from `m_copy`.
+
+### `_PyImport_LoadDynamicModuleWithSpec`
+
+```c
+// CPython: Python/import.c:560 _PyImport_LoadDynamicModuleWithSpec
+PyObject *
+_PyImport_LoadDynamicModuleWithSpec(PyObject *spec, FILE *fp)
+{
+    /* Load a .so/.pyd: dlopen the file, find PyInit_<name>, call it. */
+    void *handle = _Py_dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (handle == NULL) {
+        PyErr_SetString(PyExc_ImportError, dlerror());
+        return NULL;
+    }
+    PyObject *(*p_init)(void) = dlsym(handle, "PyInit_" + name);
+    if (p_init == NULL) {
+        PyErr_Format(PyExc_ImportError,
+            "dynamic module does not define module export function PyInit_%s",
+            name);
+        return NULL;
+    }
+    return (*p_init)();
+}
+```
+
+The `PyInit_<name>` function returns a `PyModuleDef *` (multi-phase init) or a `PyObject *` module (single-phase). Multi-phase init allows the module to be used in sub-interpreters.
+
+### `_bootstrap._find_and_load`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1244 _find_and_load
+def _find_and_load(name, import_):
+    """Find and load a module, updating sys.modules."""
+    module = sys.modules.get(name, _NEEDS_LOADING)
+    if module is _NEEDS_LOADING:
+        return _find_and_load_unlocked(name, import_)
+    if module is None:
+        raise ModuleNotFoundError(f"import of {name!r} halted; "
+                                  "None in sys.modules")
+    _lock_unlock_module(name)
+    return module
+```
+
+`_find_and_load` is the Python-level entry point called by the `IMPORT_NAME` opcode via `PyImport_ImportModuleLevelObject`. It short-circuits on `sys.modules` hits and delegates to `_find_and_load_unlocked` for new imports.
+
+## gopy notes
+
+The import lock is `vm.importLock` (a `sync.Mutex` with reentrancy counter). `_PyImport_FindExtensionObject` checks `vm.extensionsCache`. `_PyImport_LoadDynamicModuleWithSpec` is `vm.LoadDynamicModule` using `plugin.Open`. `_find_and_load` is bootstrapped from `stdlib/importlib/_bootstrap.py`.

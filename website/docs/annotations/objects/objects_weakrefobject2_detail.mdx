@@ -1,0 +1,128 @@
+---
+title: Objects/weakrefobject.c (part 2)
+description: "Objects/weakrefobject.c part 2: PyWeakref_GetObject, _PyWeakref_ClearRef, finalization callbacks, weakref lists on tp_weaklistoffset."
+cpython_path: Objects/weakrefobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/weakrefobject.c" />
+
+This annotation covers reference clearing and the finalization callback mechanism. See `objects_weakrefobject_detail` for `PyWeakref_NewRef`, `PyWeakref_NewProxy`, `PyWeakRefObject` layout, and `_PyWeakref_GetWeakrefCount`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyWeakref_GetObject` | Return the referent or `None` if dead |
+| 81-200 | `_PyWeakref_ClearRef` | Called by GC when referent is collected |
+| 201-360 | `handle_callback` | Invoke the callback when a weakref dies |
+| 361-500 | `tp_weaklistoffset` | How objects expose their weakref list |
+| 501-600 | `PyObject_ClearWeakRefs` | Called during `tp_dealloc` to clear all weakrefs |
+
+## Reading
+
+### `PyWeakref_GetObject`
+
+```c
+// CPython: Objects/weakrefobject.c:98 PyWeakref_GetObject
+PyObject *
+PyWeakref_GetObject(PyObject *ref)
+{
+    if (ref == NULL || !PyWeakref_Check(ref)) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    return PyWeakref_GET_OBJECT(ref);
+}
+
+#define PyWeakref_GET_OBJECT(ref) \
+    (((PyWeakReference *)(ref))->wr_object)
+```
+
+`PyWeakref_GET_OBJECT` returns the referent directly. If the object has been finalized, `wr_object` was set to `Py_None` by `_PyWeakref_ClearRef`. Callers must check for `Py_None` before use.
+
+### `_PyWeakref_ClearRef`
+
+```c
+// CPython: Objects/weakrefobject.c:180 _PyWeakref_ClearRef
+void
+_PyWeakref_ClearRef(PyWeakReference *self)
+{
+    PyObject *callback = self->wr_callback;
+    /* Unlink from the referent's weakref list */
+    PyObject **list = GET_WEAKREFS_LISTPTR(self->wr_object);
+    PyWeakref_RemoveFromList(list, self);
+    /* Mark as dead */
+    self->wr_object = Py_None;   /* not Py_DECREF: already collected */
+    self->wr_callback = NULL;
+    Py_XDECREF(callback);
+}
+```
+
+`_PyWeakref_ClearRef` is called by the garbage collector or `tp_dealloc` of the referent. After this, `PyWeakref_GET_OBJECT` returns `Py_None` (a sentinel, not a real reference).
+
+### `handle_callback`
+
+```c
+// CPython: Objects/weakrefobject.c:220 handle_callback
+static void
+handle_callback(PyWeakReference *ref, PyObject *callback)
+{
+    /* Call callback(ref). The referent is already dead at this point. */
+    PyObject *cbresult = PyObject_CallOneArg(callback, (PyObject *)ref);
+    if (cbresult == NULL)
+        PyErr_WriteUnraisable(callback);
+    else
+        Py_DECREF(cbresult);
+}
+```
+
+Callbacks are invoked from `PyObject_ClearWeakRefs` during garbage collection. They receive the dead weakref object (not the referent). Errors in callbacks are swallowed via `PyErr_WriteUnraisable` to avoid corrupting GC state.
+
+### `PyObject_ClearWeakRefs`
+
+```c
+// CPython: Objects/weakrefobject.c:540 PyObject_ClearWeakRefs
+void
+PyObject_ClearWeakRefs(PyObject *object)
+{
+    /* Called from tp_dealloc. Walk the weakref list and:
+       1. Set wr_object = Py_None on each ref.
+       2. Collect callbacks.
+       3. Invoke callbacks after the list is fully cleared. */
+    PyWeakReference **list = GET_WEAKREFS_LISTPTR(object);
+    ...
+    while (*list != NULL) {
+        PyWeakReference *ref = *list;
+        _PyWeakref_ClearRef(ref);
+        /* collect callbacks to invoke after clearing */
+        if (ref->wr_callback != NULL)
+            append_callback(ref, ref->wr_callback);
+    }
+    /* Invoke all callbacks */
+    for each callback: handle_callback(...);
+}
+```
+
+All callbacks are collected first, then invoked. This ensures that if a callback resurrects the object via another reference, the weakref list is already empty.
+
+### `tp_weaklistoffset`
+
+```c
+/* Objects that support weak references set tp_weaklistoffset to the
+   byte offset of a PyObject* field in the struct that holds the
+   weakref list head.  The GC uses this to walk the list.
+
+   Example (PyListObject):
+     tp_weaklistoffset = offsetof(PyListObject, list_weakreflist)
+   Objects without weak reference support have tp_weaklistoffset = -1.
+*/
+```
+
+## gopy notes
+
+`PyWeakref_GetObject` is `objects.WeakRefGetObject` in `objects/weakref.go`. `_PyWeakref_ClearRef` is called by `objects.GC.ClearWeakRefs`. `PyObject_ClearWeakRefs` is `objects.ClearWeakRefs`, invoked from `objects.Object.Dealloc`. Callbacks are queued and fired in order after the list is cleared.

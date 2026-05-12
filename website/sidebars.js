@@ -345,6 +345,8 @@ const sidebars = {
         'annotations/python/python_ceval11_detail',
         'annotations/python/python_errors4_detail',
         'annotations/python/python_ceval12_detail',
+        'annotations/python/python_import4_detail',
+        'annotations/python/python_pythonrun2_detail',
       ],
     },
     {
@@ -558,6 +560,8 @@ const sidebars = {
         'annotations/objects/objects_listobject5_detail',
         'annotations/objects/objects_exceptions2_detail',
         'annotations/objects/objects_genobject2_detail',
+        'annotations/objects/objects_rangeobject2_detail',
+        'annotations/objects/objects_weakrefobject2_detail',
       ],
     },
     {
@@ -808,6 +812,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_hamt_h_detail',
         'annotations/include/include_internal_pycore_context_h_detail',
         'annotations/include/include_internal_pycore_traceback_h_detail',
+        'annotations/include/include_internal_pycore_hamt_h_detail2',
       ],
     },
     {
@@ -1063,6 +1068,7 @@ const sidebars = {
         'annotations/modules/modules_codeop_detail',
         'annotations/modules/modules_hashlib2_detail',
         'annotations/modules/modules_sqlite_detail',
+        'annotations/modules/modules_zlib2_detail',
       ],
     },
     {
@@ -1608,6 +1614,9 @@ const sidebars = {
         'annotations/lib/lib_difflib2_detail',
         'annotations/lib/lib_ftplib2_detail',
         'annotations/lib/lib_zipimport2_detail',
+        'annotations/lib/lib_shelve2_detail',
+        'annotations/lib/lib_pprint2_detail',
+        'annotations/lib/lib_threading2_detail',
       ],
     },
   ],

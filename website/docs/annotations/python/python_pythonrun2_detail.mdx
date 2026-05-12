@@ -1,0 +1,129 @@
+---
+title: Python/pythonrun.c (part 2)
+description: "Python/pythonrun.c part 2: run_pyc_file, PyRun_InteractiveLoopObject, handle_system_exit, print_exception."
+cpython_path: Python/pythonrun.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/pythonrun.c" />
+
+This annotation covers bytecode file execution, the interactive REPL loop, and exception display. See `pythonrun_runstring_detail` for `PyRun_StringFlags` and `PyRun_FileExFlags`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `run_pyc_file` | Read a `.pyc` file, unmarshal, and exec the code object |
+| 101-250 | `PyRun_InteractiveLoopObject` | The interactive REPL loop (reads one statement at a time) |
+| 251-400 | `handle_system_exit` | Translate `SystemExit` into a process exit code |
+| 401-580 | `print_exception` | Display `Traceback (most recent call last):` and exception |
+| 581-700 | `_PyErr_Display` | Low-level exception printer used by `sys.excepthook` |
+
+## Reading
+
+### `run_pyc_file`
+
+```c
+// CPython: Python/pythonrun.c:480 run_pyc_file
+static PyObject *
+run_pyc_file(FILE *fp, PyObject *globals, PyObject *locals,
+             PyCompilerFlags *flags)
+{
+    /* Read and validate the .pyc header */
+    unsigned long magic = PyMarshal_ReadLongFromFile(fp);
+    if (magic != PyImport_GetMagicNumber()) {
+        PyErr_SetString(PyExc_RuntimeError, "Bad magic number in .pyc file");
+        return NULL;
+    }
+    /* Skip flags, mtime, source size */
+    (void)PyMarshal_ReadLongFromFile(fp);  /* bit field */
+    (void)PyMarshal_ReadLongFromFile(fp);  /* mtime */
+    (void)PyMarshal_ReadLongFromFile(fp);  /* source size */
+    /* Unmarshal the code object */
+    PyObject *co = PyMarshal_ReadLastObjectFromFile(fp);
+    if (!PyCode_Check(co)) {
+        PyErr_SetString(PyExc_RuntimeError, ".pyc file does not contain code object");
+        return NULL;
+    }
+    return PyEval_EvalCode(co, globals, locals);
+}
+```
+
+The `.pyc` header is 16 bytes: 4-byte magic number, 4-byte bit-field (hash-based vs timestamp-based), 4-byte mtime or source hash, 4-byte source file size.
+
+### `PyRun_InteractiveLoopObject`
+
+```c
+// CPython: Python/pythonrun.c:180 PyRun_InteractiveLoopObject
+int
+PyRun_InteractiveLoopObject(FILE *fp, PyObject *filename, PyCompilerFlags *flags)
+{
+    PyObject *v;
+    int ret = 0;
+    do {
+        ret = PyRun_InteractiveOneObjectEx(fp, filename, flags);
+        /* ret > 0: error; ret == -1: EOF; ret == 0: success */
+        if (ret == E_EOF) { ret = 0; break; }
+        if (ret == E_NOMEM) break;
+    } while (ret != E_EOF);
+    return ret;
+}
+```
+
+The loop calls `codeop.compile_command` (via `PyRun_InteractiveOneObjectEx`) to collect a complete statement, then executes it. `sys.ps1`/`sys.ps2` are used as prompts.
+
+### `handle_system_exit`
+
+```c
+// CPython: Python/pythonrun.c:340 handle_system_exit
+static void
+handle_system_exit(void)
+{
+    PyObject *exc = tstate->current_exception;
+    PyObject *code = ((PySystemExitObject *)exc)->code;
+    if (code == NULL || code == Py_None)
+        Py_Exit(0);
+    if (PyLong_Check(code))
+        Py_Exit((int)PyLong_AsLong(code));
+    /* Non-integer: print to stderr, exit with code 1 */
+    PyObject_Print(code, stderr, Py_PRINT_RAW);
+    Py_Exit(1);
+}
+```
+
+`SystemExit(0)` exits cleanly. `SystemExit("message")` prints the message to stderr and exits with code 1. `SystemExit(42)` exits with code 42.
+
+### `print_exception`
+
+```c
+// CPython: Python/pythonrun.c:560 print_exception
+static void
+print_exception(PyObject *f, PyObject *value)
+{
+    /* Print "ExcType: message" to f.
+       If value has __notes__, print each note after. */
+    ...
+    PyObject *type = PyObject_Type(value);
+    const char *dot = strrchr(PyUnicode_AsUTF8(modname), '.');
+    ...
+    PyFile_WriteObject(type_str, f, Py_PRINT_RAW);
+    PyFile_WriteString(": ", f);
+    PyFile_WriteObject(value, f, Py_PRINT_RAW);
+    ...
+    /* Print __notes__ (PEP 678) */
+    PyObject *notes = PyObject_GetAttr(value, &_Py_ID(__notes__));
+    if (notes != NULL) {
+        for each note: PyFile_WriteObject(note, f, Py_PRINT_RAW);
+    }
+}
+```
+
+`__notes__` (added in Python 3.11, PEP 678) are extra strings attached to an exception after raising. `e.add_note("hint")` appends to `e.__notes__`.
+
+## gopy notes
+
+`run_pyc_file` is `pythonrun.RunPycFile` in `pythonrun/runpyc.go`. `PyRun_InteractiveLoopObject` is `pythonrun.RunInteractiveLoop`. `handle_system_exit` is `vm.HandleSystemExit`. `print_exception` is `pythonrun.PrintException`, which uses `objects.WriteObject`.

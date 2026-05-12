@@ -1,0 +1,122 @@
+---
+title: Modules/zlibmodule.c (part 2)
+description: "Modules/zlibmodule.c part 2: Compress/Decompress objects, zlib.compressobj, zlib.decompressobj, flush, copy, Z_SYNC_FLUSH."
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/zlibmodule.c" />
+
+This annotation covers the stateful compressor/decompressor objects. See `modules_zlib_detail` for `zlib.compress`, `zlib.decompress`, `adler32`, and `crc32`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `zlib.compressobj` | Create a stateful `Compress` object |
+| 101-280 | `Compress.compress` | Feed data, return compressed bytes so far |
+| 281-420 | `Compress.flush` | Finish the stream; return remaining compressed bytes |
+| 421-600 | `zlib.decompressobj` | Create a stateful `Decompress` object |
+| 601-780 | `Decompress.decompress` | Feed compressed data, return decompressed bytes |
+| 781-900 | `Decompress.flush` / `Compress.copy` | Flush decompressor; clone compressor state |
+
+## Reading
+
+### `zlib.compressobj`
+
+```c
+// CPython: Modules/zlibmodule.c:340 zlib_compressobj_impl
+static PyObject *
+zlib_compressobj_impl(PyObject *module, int level, int method, int wbits,
+                      int memLevel, int strategy, Py_buffer *zdict)
+{
+    /* Wraps deflateInit2(). wbits controls format:
+       8..15 = zlib (.compress/.decompress),
+       24..31 = gzip,
+       -8..-15 = raw deflate (no header). */
+    compobject *self = newcompobject(&Comptype);
+    int err = deflateInit2(&self->zst, level, method, wbits, memLevel, strategy);
+    if (zdict->len > 0)
+        deflateSetDictionary(&self->zst, zdict->buf, zdict->len);
+    return (PyObject *)self;
+}
+```
+
+`wbits=15` (default) produces zlib-wrapped deflate. `wbits=31` produces gzip. `wbits=-15` produces raw deflate with no wrapper (used by `zipfile`).
+
+### `Compress.compress`
+
+```c
+// CPython: Modules/zlibmodule.c:480 zlib_Compress_compress_impl
+static PyObject *
+zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
+{
+    /* Feed data into the compressor; may produce no output (buffered internally). */
+    self->zst.next_in  = data->buf;
+    self->zst.avail_in = data->len;
+    do {
+        self->zst.next_out  = obuf;
+        self->zst.avail_out = DEFAULTALLOC;
+        err = deflate(&self->zst, Z_NO_FLUSH);
+        /* append obuf to result */
+    } while (self->zst.avail_out == 0);  /* more output available */
+    return result;
+}
+```
+
+`deflate` with `Z_NO_FLUSH` may buffer data internally. Output is only guaranteed after `Z_SYNC_FLUSH` or `Z_FINISH`.
+
+### `Compress.flush`
+
+```c
+// CPython: Modules/zlibmodule.c:560 zlib_Compress_flush_impl
+static PyObject *
+zlib_Compress_flush_impl(compobject *self, int mode)
+{
+    /* mode: Z_SYNC_FLUSH (flush pending), Z_FULL_FLUSH (reset history),
+             Z_FINISH (end stream). */
+    do {
+        err = deflate(&self->zst, mode);
+        /* append output */
+    } while (err == Z_OK && self->zst.avail_out == 0);
+    if (mode == Z_FINISH) {
+        err = deflateEnd(&self->zst);
+        self->is_initialised = 0;
+    }
+    return result;
+}
+```
+
+`flush(Z_SYNC_FLUSH)` forces all pending input to be output without ending the stream. Used in streaming protocols (HTTP chunked transfer, WebSocket).
+
+### `Decompress.decompress`
+
+```c
+// CPython: Modules/zlibmodule.c:680 zlib_Decompress_decompress_impl
+static PyObject *
+zlib_Decompress_decompress_impl(compobject *self, Py_buffer *data,
+                                Py_ssize_t max_length)
+{
+    self->zst.next_in  = data->buf;
+    self->zst.avail_in = data->len;
+    do {
+        self->zst.next_out  = obuf;
+        self->zst.avail_out = DEFAULTALLOC;
+        err = inflate(&self->zst, Z_SYNC_FLUSH);
+        /* append output; stop if max_length reached */
+    } while (err == Z_OK && self->zst.avail_out == 0);
+    if (err == Z_STREAM_END)
+        self->eof = 1;
+    return result;
+}
+```
+
+`max_length` limits the output buffer to avoid unbounded memory use on adversarial inputs. Unprocessed input is stored in `self->unused_data`.
+
+## gopy notes
+
+`zlib.compressobj`/`decompressobj` are in `module/zlib/module.go` using Go's `compress/zlib`, `compress/gzip`, and `compress/flate` packages. `Compress.compress` calls `flate.Writer.Write`. `Compress.flush` calls `flate.Writer.Flush` or `Close`. `Compress.copy` uses `deflateCopy` semantics by re-serializing the stream state.

@@ -1,0 +1,116 @@
+---
+title: Include/internal/pycore_hamt.h (part 2)
+description: "pycore_hamt.h part 2: _PyHamt_Assoc, _PyHamt_Without, _PyHamt_Find, bitmap node internals, collision node."
+cpython_path: Include/internal/pycore_hamt.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_hamt.h" />
+
+This annotation covers the mutation and lookup API and node internals. See `include_internal_pycore_hamt_h_detail` for `PyHamtObject` layout, `_PyHamt_New`, and iterator creation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `_PyHamt_Assoc` | Return a new HAMT with key associated to value |
+| 51-100 | `_PyHamt_Without` | Return a new HAMT with key removed |
+| 101-150 | `_PyHamt_Find` | Look up a key; return value or NULL |
+| 151-200 | Bitmap node / collision node layout | Internal node structures |
+
+## Reading
+
+### `_PyHamt_Assoc`
+
+```c
+// CPython: Include/internal/pycore_hamt.h:68 _PyHamt_Assoc
+PyAPI_FUNC(PyObject *) _PyHamt_Assoc(PyObject *o, PyObject *key, PyObject *val);
+```
+
+```c
+// CPython: Python/hamt.c:1420 hamt_assoc
+static PyObject *
+hamt_assoc(PyHamtObject *o, PyObject *key, PyObject *val)
+{
+    /* Hash key, walk the trie, return a new root node with the association.
+       If key already maps to val (by identity), return the same trie (no copy). */
+    int32_t key_hash;
+    if (PyObject_Hash(key) == -1) return NULL;
+    key_hash = (int32_t)PyObject_Hash(key);
+    int added_leaf = 0;
+    PyHamtNode *new_root = hamt_node_assoc(
+        (PyHamtNode *)o->h_root, 0, key_hash, key, val, &added_leaf);
+    ...
+    PyHamtObject *new_hamt = _PyHamt_New();
+    new_hamt->h_root = (PyObject *)new_root;
+    new_hamt->h_count = o->h_count + added_leaf;
+    return (PyObject *)new_hamt;
+}
+```
+
+Every `assoc` returns a new `PyHamtObject` sharing unchanged nodes with the original. The trie depth is at most 7 levels for 32-bit hashes (5 bits per level: `2^(5*7) > 2^32`).
+
+### `_PyHamt_Without`
+
+```c
+// CPython: Include/internal/pycore_hamt.h:80 _PyHamt_Without
+PyAPI_FUNC(PyObject *) _PyHamt_Without(PyObject *o, PyObject *key);
+```
+
+Returns a new HAMT without the given key. If the key is not present, returns the same HAMT (no copy). Internal bitmap nodes are compacted when they become single-child.
+
+### `_PyHamt_Find`
+
+```c
+// CPython: Include/internal/pycore_hamt.h:90 _PyHamt_Find
+PyAPI_FUNC(int) _PyHamt_Find(PyObject *o, PyObject *key, PyObject **val);
+/* Returns: 1 (found, *val set), 0 (not found), -1 (error) */
+```
+
+```c
+// CPython: Python/hamt.c:1320 hamt_find
+static int
+hamt_find(PyHamtObject *o, PyObject *key, PyObject **val)
+{
+    int32_t hash = (int32_t)PyObject_Hash(key);
+    return hamt_node_find((PyHamtNode *)o->h_root, 0, hash, key, val);
+}
+```
+
+`_PyHamt_Find` walks the trie using 5 bits of the hash at each level. At a bitmap node, it checks whether the bit for this hash slice is set, then recurses into the child at the compressed index.
+
+### Bitmap node layout
+
+```c
+// CPython: Python/hamt.c:120 PyHamtNode_Bitmap
+typedef struct {
+    PyObject_HEAD
+    uint32_t b_bitmap;   /* bitmask of occupied children (5-bit slices of hash) */
+    uint32_t b_size;     /* number of entries (keys + values or subnodes) */
+    PyObject *b_array[1]; /* variable: key0, val0, key1, val1, ... or node ref */
+} PyHamtNode_Bitmap;
+```
+
+The bitmap node uses a 32-bit bitmap where each set bit indicates an occupied slot. The popcount of lower bits gives the index into the packed `b_array`. `key == NULL` in a slot means the entry is a subnode pointer rather than a key-value pair.
+
+### Collision node
+
+```c
+// CPython: Python/hamt.c:160 PyHamtNode_Collision
+typedef struct {
+    PyObject_HEAD
+    int32_t c_hash;     /* all keys in this node share this hash */
+    Py_ssize_t c_count; /* number of key-value pairs */
+    PyObject *c_array[1]; /* key0, val0, key1, val1, ... */
+} PyHamtNode_Collision;
+```
+
+Collision nodes hold multiple key-value pairs that map to identical 32-bit hashes. Lookup scans the array linearly using `PyObject_RichCompareBool(key, k, Py_EQ)`.
+
+## gopy notes
+
+`_PyHamt_Assoc`, `_PyHamt_Without`, `_PyHamt_Find` are in `objects/hamt.go`. Bitmap and collision node types are `objects.BitmapNode` and `objects.CollisionNode`. The trie walk uses 5-bit shifts: `(hash >> (shift * 5)) & 0x1f`.
