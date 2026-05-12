@@ -1,0 +1,80 @@
+---
+title: Lib/ftplib.py
+description: "ftplib: FTP client. FTP and FTP_TLS classes. connect/login/quit, retrbinary/retrlines, storbinary/storlines, nlst/mlsd/mlst, mkd/rmd, size/mdtm."
+cpython_path: Lib/ftplib.py
+cpython_version: "3.14"
+lines: 870
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/ftplib.py" />
+
+`ftplib` implements the FTP protocol (RFC 959) client. It handles control connections, data connections (both active and passive mode), and the full command set. `FTP_TLS` adds explicit TLS via the `AUTH TLS` command.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Constants, `Error*` exceptions | FTP exception hierarchy |
+| 81-250 | `FTP.__init__`, `connect`, `login`, `quit` | Session management |
+| 251-450 | `sendcmd`, `getresp`, `getmultiline` | Command/response exchange |
+| 451-650 | `retrbinary`, `retrlines`, `storbinary`, `storlines` | Data transfers |
+| 651-750 | `nlst`, `mlsd`, `mlst`, `dir`, `rename`, `delete`, `mkd`, `rmd`, `cwd`, `pwd` | File system commands |
+| 751-870 | `FTP_TLS`, `FTP.set_pasv` | TLS support; passive mode |
+
+## Reading
+
+### Control connection and response parsing
+
+```python
+# CPython: Lib/ftplib.py:194 FTP.getresp
+def getresp(self):
+    resp = self.getmultiline()
+    ...
+    c = resp[:1]
+    if c in {'1', '2', '3'}:
+        return resp
+    if c == '4':
+        raise error_temp(resp)
+    if c == '5':
+        raise error_perm(resp)
+    raise error_proto(resp)
+```
+
+FTP response codes: 1xx = positive preliminary, 2xx = positive completion, 3xx = positive intermediate, 4xx = transient negative, 5xx = permanent negative.
+
+### Passive mode data connection
+
+```python
+# CPython: Lib/ftplib.py:386 FTP.makeport (active mode)
+# CPython: Lib/ftplib.py:400 FTP.makepasv (passive mode)
+def makepasv(self):
+    host, port = parse227(self.sendcmd('PASV'))
+    return host, port
+```
+
+Passive mode (`PASV`) is the default; the server opens a port and the client connects to it. Active mode (`PORT`) requires the server to connect back to the client, which is blocked by most firewalls.
+
+### `retrbinary`
+
+```python
+# CPython: Lib/ftplib.py:470 FTP.retrbinary
+def retrbinary(self, cmd, callback, blocksize=8192, rest=None):
+    ...
+    conn = self.transfercmd(cmd, rest)
+    with conn:
+        while 1:
+            data = conn.recv(blocksize)
+            if not data:
+                break
+            callback(data)
+    return self.voidresp()
+```
+
+Issues a `RETR` command, opens the data connection, and calls `callback(data)` for each received chunk. The caller accumulates the data.
+
+## gopy notes
+
+Status: not yet ported. Low priority; FTP is mostly legacy. Go's `github.com/jlaffaye/ftp` provides a compatible client if needed. A gopy port would use `net.Dial` for the control connection and a separate `net.Dial` for each data transfer.

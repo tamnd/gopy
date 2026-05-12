@@ -1,0 +1,94 @@
+---
+title: Lib/smtplib.py
+description: "smtplib: SMTP and SMTP_SSL clients. sendmail, send_message, login, starttls, ehlo/helo. ESMTP extensions: AUTH, STARTTLS, SIZE, 8BITMIME."
+cpython_path: Lib/smtplib.py
+cpython_version: "3.14"
+lines: 1060
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/smtplib.py" />
+
+`smtplib` provides an SMTP client that speaks RFC 5321. `SMTP` manages the TCP connection, EHLO/HELO negotiation, AUTH, STARTTLS, and `MAIL FROM`/`RCPT TO`/`DATA` commands. `SMTP_SSL` connects with TLS from the start.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Constants, exceptions | `SMTPException` hierarchy, port constants |
+| 81-300 | `SMTP.__init__`, `connect`, `ehlo`, `helo` | Connection and greeting |
+| 301-500 | `starttls`, `login`, `auth` | TLS upgrade and authentication |
+| 501-700 | `sendmail`, `send_message` | Message sending pipeline |
+| 701-850 | `SMTP.quit`, `SMTP.close`, `SMTP.noop` | Session management |
+| 851-1060 | `SMTP_SSL`, `LMTP` | SSL and LMTP variants |
+
+## Reading
+
+### Connection and EHLO
+
+```python
+# CPython: Lib/smtplib.py:316 SMTP.connect
+def connect(self, host='localhost', port=0, source_address=None):
+    ...
+    self.sock = self._get_socket(host, port, self.timeout)
+    ...
+    (code, msg) = self.getreply()
+    ...
+    (code, msg) = self.ehlo_or_helo_if_needed()
+    return (code, msg)
+```
+
+After connecting, `SMTP` reads the greeting, then issues `EHLO` to discover server extensions. The response populates `self.esmtp_features`.
+
+### `sendmail`
+
+```python
+# CPython: Lib/smtplib.py:826 SMTP.sendmail
+def sendmail(self, from_addr, to_addrs, msg, mail_options=(),
+             rcpt_options=()):
+    ...
+    (code, resp) = self.mail(from_addr, mail_options)
+    ...
+    senderrs = {}
+    if isinstance(to_addrs, str):
+        to_addrs = [to_addrs]
+    for each_addr in to_addrs:
+        (code, resp) = self.rcpt(each_addr, rcpt_options)
+        if (code != 250) and (code != 251):
+            senderrs[each_addr] = (code, resp)
+    ...
+    (code, resp) = self.data(msg)
+    ...
+    return senderrs
+```
+
+Issues `MAIL FROM`, one `RCPT TO` per address, then `DATA`. Returns a dict of failed addresses.
+
+### `STARTTLS`
+
+```python
+# CPython: Lib/smtplib.py:570 SMTP.starttls
+def starttls(self, *, context=None):
+    ...
+    (resp, reply) = self.docmd("STARTTLS")
+    if resp == 220:
+        if context is None:
+            context = ssl._create_unverified_context()
+        self.sock = context.wrap_socket(self.sock, server_hostname=self._host)
+        ...
+        self.ehlo_resp = self.esmtp_features = {}
+        (code, resp) = self.ehlo()
+    return (resp, reply)
+```
+
+After STARTTLS succeeds, the EHLO state is reset because the server may advertise different capabilities over TLS.
+
+### `login` and AUTH
+
+`login` tries AUTH mechanisms in order: `LOGIN`, `PLAIN`, `CRAM-MD5`. The mechanism is selected based on what the server advertised in `esmtp_features['auth']`.
+
+## gopy notes
+
+Status: not yet ported. `smtplib` depends on `socket`, `ssl`, `email.message`, and `base64`. The protocol logic is straightforward command/response pairs. A Go port would use `net.Conn` and `crypto/tls`.

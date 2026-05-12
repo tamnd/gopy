@@ -1,0 +1,53 @@
+---
+title: Lib/email/__init__.py
+description: "email package entry point. message_from_string, message_from_bytes, message_from_file, message_from_binary_file. Deferred imports to avoid circular dependencies."
+cpython_path: Lib/email/__init__.py
+cpython_version: "3.14"
+lines: 61
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/__init__.py" />
+
+The `email` package entry point defines four convenience functions for parsing raw text or bytes into a `Message` object. No parsing logic lives here; the file delegates to `email.parser`. See also the more detailed annotations for `email.policy`, `email.message`, and `email.headerregistry`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-5 | Module header | Copyright, author |
+| 7-25 | `__all__` | Public re-exports from the package |
+| 31-37 | `message_from_string` | Parse a `str`; delegates to `Parser.parsestr` |
+| 39-45 | `message_from_bytes` | Parse `bytes`; delegates to `BytesParser.parsebytes` |
+| 47-53 | `message_from_file` | Parse an open text file; delegates to `Parser.parse` |
+| 55-61 | `message_from_binary_file` | Parse an open binary file; delegates to `BytesParser.parse` |
+
+## Reading
+
+### Deferred imports
+
+Each function imports its parser class inside the function body to prevent circular imports. `email/__init__.py` is the package root; `email.parser` imports `email.message` which imports `email.policy`. Deferring the import avoids the cycle at no runtime cost once modules are cached.
+
+```python
+# CPython: Lib/email/__init__.py:31 message_from_string
+def message_from_string(s, *args, **kws):
+    from email.parser import Parser
+    return Parser(*args, **kws).parsestr(s)
+```
+
+```python
+# CPython: Lib/email/__init__.py:39 message_from_bytes
+def message_from_bytes(s, *args, **kws):
+    from email.parser import BytesParser
+    return BytesParser(*args, **kws).parsebytes(s)
+```
+
+### Policy parameter
+
+The `_class` and `policy` parameters in `*args`/`**kws` are forwarded to the `Parser` constructor. Passing `policy=email.policy.default` selects `EmailMessage` (modern API); the default `compat32` policy returns the legacy `Message` object.
+
+## gopy notes
+
+Status: not yet ported. The planned package path is `module/email/`. The four entry-point functions are each a one-liner once `email.parser` is available. The larger dependency is the `email.policy` subsystem.

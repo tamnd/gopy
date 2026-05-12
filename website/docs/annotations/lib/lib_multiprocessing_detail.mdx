@@ -1,0 +1,81 @@
+---
+title: Lib/multiprocessing/__init__.py
+description: "multiprocessing: Process, Pool, Queue, Pipe, Value, Array. Spawn, fork, and forkserver start methods. Shared memory via mmap. Process-based parallelism bypassing the GIL."
+cpython_path: Lib/multiprocessing/__init__.py
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/multiprocessing/__init__.py" />
+
+`multiprocessing` provides process-based parallelism as an API analogous to `threading`. Processes run in separate address spaces, bypassing the GIL. Communication uses `Queue`, `Pipe`, `Value`/`Array` (shared memory), or `Manager` (proxy objects).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | Imports, `__all__` | Re-exports from submodules |
+| 31-80 | `cpu_count`, `current_process`, `active_children`, `freeze_support` | Top-level utilities |
+
+Key submodules:
+
+| Submodule | Role |
+|-----------|------|
+| `multiprocessing.process` | `Process` class |
+| `multiprocessing.pool` | `Pool` (map/apply workers) |
+| `multiprocessing.queues` | `Queue`, `SimpleQueue`, `JoinableQueue` |
+| `multiprocessing.connection` | `Pipe`, `Client`, `Listener` |
+| `multiprocessing.sharedctypes` | `Value`, `Array` over shared memory |
+| `multiprocessing.managers` | `Manager` proxy objects |
+| `multiprocessing.context` | Start method (`spawn`/`fork`/`forkserver`) |
+
+## Reading
+
+### Start methods
+
+`multiprocessing` supports three process creation strategies:
+
+- **`fork`** (default on Linux/macOS before 3.12): `os.fork()` duplicates the parent process. Fast but unsafe with multi-threaded parents (lock state is copied, can deadlock).
+- **`spawn`** (default on Windows and macOS 3.12+): Starts a fresh Python interpreter that imports the target function. Safe but slower.
+- **`forkserver`**: A long-running server process that forks on demand. Avoids fork's thread-safety issues.
+
+```python
+# CPython: Lib/multiprocessing/context.py:215 BaseContext.set_start_method
+def set_start_method(self, method, force=False):
+    ...
+    self._start_method = method
+```
+
+### `Process`
+
+```python
+# CPython: Lib/multiprocessing/process.py:75 BaseProcess.start
+def start(self):
+    ...
+    self._popen = self._Popen(self)
+    self._sentinel = self._popen.sentinel
+    ...
+```
+
+`_Popen` is the context-specific process spawner. For `fork`, it calls `os.fork()`. For `spawn`, it calls `subprocess.Popen` with the `--multiprocessing-fork` flag.
+
+### `Queue` and `Pipe`
+
+`Queue` uses a `socket` pair plus a background feeder thread to move pickled objects between processes. `Pipe` returns a pair of `Connection` objects backed by a socket pair (or Windows named pipe).
+
+### `Pool.map`
+
+```python
+# CPython: Lib/multiprocessing/pool.py:364 Pool.map
+def map(self, func, iterable, chunksize=None):
+    return list(self.imap(func, iterable, chunksize))
+```
+
+Distributes chunks of `iterable` to worker processes, collects results in order. Workers are persistent processes that receive tasks via a shared `Queue`.
+
+## gopy notes
+
+Status: not yet ported. `multiprocessing` requires `os.fork` or `subprocess`-based process spawning and pickle-based IPC. In gopy, the goroutine + channel model is the natural replacement. A limited `multiprocessing.Pool.map` could be implemented using goroutines with channel-based result collection, but cross-process semantics require a separate gopy process communication layer.

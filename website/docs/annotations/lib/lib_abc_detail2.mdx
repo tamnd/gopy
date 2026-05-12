@@ -1,0 +1,73 @@
+---
+title: Lib/abc.py (supplemental)
+description: "abc supplemental: ABCMeta.__new__, register(), __subclasshook__, abstractmethod/property/classmethod/staticmethod. The _abc C extension for cached subclass checks."
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/abc.py" />
+
+This annotation supplements `lib_abc_detail` with deeper coverage of `ABCMeta.__new__`, the `_abc` C extension caching layer, and the abstract decorator family.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-20 | `_abc` C extension import | `_abc.ABCMeta`, `_abc._check_methods` |
+| 21-80 | `ABCMeta` | Metatype for ABCs |
+| 81-130 | `ABC` | Convenience base class using `ABCMeta` as metatype |
+| 131-180 | `abstractmethod`, `abstractclassmethod`, `abstractstaticmethod`, `abstractproperty` | Decorators marking abstract methods |
+
+## Reading
+
+### `ABCMeta.__new__` and `__abstractmethods__`
+
+When `ABCMeta` creates a class, it scans the class namespace for any callables with `__isabstractmethod__ = True` (set by `@abstractmethod`) and stores their names in `cls.__abstractmethods__` (a `frozenset`). A class with non-empty `__abstractmethods__` cannot be instantiated.
+
+```python
+# CPython: Lib/abc.py:65 ABCMeta.__new__
+class ABCMeta(type):
+    def __new__(mcls, name, bases, namespace, /, **kwargs):
+        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        _abc_init(cls)  # calls _abc C extension
+        return cls
+```
+
+### `_abc` C extension
+
+`Modules/_abc.c` provides:
+- `_abc_init(cls)`: sets up `_abc_data` (the negative/positive cache) on the class
+- `ABCMeta.register(cls, subclass)`: registers `subclass` as a virtual subclass
+- `ABCMeta.__subclasshook__` dispatch: checks the subclass hook before scanning the MRO
+- Cache: positive and negative `isinstance` results are cached per ABC to avoid repeated MRO scans
+
+### `abstractmethod`
+
+```python
+# CPython: Lib/abc.py:129 abstractmethod
+def abstractmethod(funcobj):
+    funcobj.__isabstractmethod__ = True
+    return funcobj
+```
+
+Simply sets the `__isabstractmethod__` attribute. `ABCMeta.__new__` collects all such attributes from the class body and inherited bases.
+
+### `__subclasshook__`
+
+A class method that can short-circuit `isinstance`/`issubclass` checks. Return `True` to force a positive result, `False` to force negative, `NotImplemented` to fall back to the standard check.
+
+```python
+# CPython: Lib/abc.py:93 ABCMeta.__subclasscheck__
+def __subclasscheck__(cls, subclass):
+    return _abc_subclasscheck(cls, subclass)
+```
+
+`_abc_subclasscheck` (C extension) first tries `cls.__subclasshook__(subclass)`, then checks the registered virtual subclasses, then does a standard MRO scan.
+
+## gopy notes
+
+`ABCMeta` and `abstractmethod` are ported in `objects/type.go`. The `_abc` caching layer is approximated by storing a `map[*Type]bool` in the `Type` struct for the positive/negative cache. `__abstractmethods__` is a `frozenset` stored in the type's `__dict__`.

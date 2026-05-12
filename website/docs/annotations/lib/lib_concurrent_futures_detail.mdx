@@ -1,0 +1,94 @@
+---
+title: Lib/concurrent/futures/__init__.py
+description: "concurrent.futures: Future, Executor, ThreadPoolExecutor, ProcessPoolExecutor. submit, map, as_completed, wait, FIRST_COMPLETED/ALL_COMPLETED."
+cpython_path: Lib/concurrent/futures/__init__.py
+cpython_version: "3.14"
+lines: 30
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/concurrent/futures/__init__.py" />
+
+`concurrent.futures` (PEP 3148) provides a high-level interface for asynchronous execution via threads or processes. `ThreadPoolExecutor` and `ProcessPoolExecutor` share the same `Executor` API; results are wrapped in `Future` objects.
+
+## Map
+
+Key submodules:
+
+| Submodule | Role |
+|-----------|------|
+| `concurrent.futures._base` | `Future`, `Executor`, `as_completed`, `wait` |
+| `concurrent.futures.thread` | `ThreadPoolExecutor` |
+| `concurrent.futures.process` | `ProcessPoolExecutor` |
+
+## Reading
+
+### `Future`
+
+`Future` represents the result of an asynchronous computation. Key methods:
+
+- `result(timeout=None)`: block until done; raise the exception if one occurred
+- `exception()`: return the exception without re-raising
+- `add_done_callback(fn)`: call `fn(future)` when done
+- `cancel()`: attempt to cancel (only possible if not started)
+
+```python
+# CPython: Lib/concurrent/futures/_base.py:182 Future.result
+def result(self, timeout=None):
+    with self._condition:
+        if self._state in [CANCELLED, CANCELLED_AND_NOTIFIED]:
+            raise CancelledError()
+        elif self._state == FINISHED:
+            return self.__get_result()
+        self._condition.wait(timeout)
+        ...
+```
+
+### `ThreadPoolExecutor`
+
+```python
+# CPython: Lib/concurrent/futures/thread.py:195 ThreadPoolExecutor.submit
+def submit(self, fn, /, *args, **kwargs):
+    with self._shutdown_lock:
+        ...
+        f = _base.Future()
+        w = _WorkItem(f, fn, args, kwargs)
+        self._work_queue.put(w)
+        self._adjust_thread_count()
+        return f
+```
+
+Work items are put on a `queue.SimpleQueue`; worker threads pull from it and call `fn(*args, **kwargs)`, storing the result in the `Future`.
+
+### `as_completed`
+
+```python
+# CPython: Lib/concurrent/futures/_base.py:205 as_completed
+def as_completed(fs, timeout=None):
+    ...
+    done = set()
+    not_done = set(fs)
+    with _AcquireFutures(fs):
+        done = {f for f in fs if f._state in [CANCELLED, FINISHED]}
+        not_done -= done
+    ...
+    with waiter.event:
+        for future in done:
+            yield future
+        while not_done:
+            waiter.event.wait(...)
+            for future in waiter.finished_futures:
+                yield future
+```
+
+Uses a `_AsCompletedWaiter` that registers as a done callback on every future, unblocking the generator as each completes.
+
+### `ProcessPoolExecutor`
+
+Uses `multiprocessing.Process` workers communicating via `multiprocessing.Queue`. Workers serialize calls and results with `pickle`. Since Python 3.9, the process pool uses a `ThreadPoolExecutor` for the result-collection side to avoid a GIL-holding loop.
+
+## gopy notes
+
+Status: not yet ported. `ThreadPoolExecutor` maps naturally to Go goroutines with a channel-based work queue. `Future.result()` maps to waiting on a channel. `as_completed` maps to `select` over multiple channels. `ProcessPoolExecutor` requires multiprocessing infrastructure.

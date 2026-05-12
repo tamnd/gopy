@@ -1,0 +1,77 @@
+---
+title: Lib/_pyio.py
+description: "_pyio: pure-Python fallback for the io module. RawIOBase, BufferedIOBase, TextIOBase, FileIO, BufferedReader/Writer/Random, BytesIO, StringIO, TextIOWrapper."
+cpython_path: Lib/_pyio.py
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/_pyio.py" />
+
+`Lib/_pyio.py` is the pure-Python reference implementation of the `io` module. The production code uses the C extension (`Modules/_io/`); `_pyio` serves as documentation and a testing reference. The class hierarchy mirrors the C implementation exactly.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | ABC bases: `IOBase`, `RawIOBase`, `BufferedIOBase`, `TextIOBase` | Abstract I/O protocol |
+| 101-300 | `IOBase` | `close`, `flush`, `readable/writable/seekable`, `tell`, `seek`, iterator |
+| 301-600 | `RawIOBase` | `read`, `readall`, `readinto`, `write` |
+| 601-900 | `FileIO` | Raw file I/O via `os.open`/`os.read`/`os.write` |
+| 901-1200 | `BufferedIOBase`, `BufferedReader`, `BufferedWriter`, `BufferedRandom` | Buffered layer |
+| 1201-1500 | `BytesIO` | In-memory byte stream |
+| 1501-1800 | `TextIOBase`, `TextIOWrapper` | Text decoding/encoding layer |
+| 1801-2200 | `StringIO`, `IncrementalNewlineDecoder` | In-memory text stream |
+
+## Reading
+
+### I/O layer stack
+
+Python I/O uses a three-layer stack:
+
+1. **Raw I/O** (`RawIOBase`): `os.read`/`os.write` syscalls; no buffering
+2. **Buffered I/O** (`BufferedIOBase`): 8 KB read/write buffer; `flush` triggers write-through
+3. **Text I/O** (`TextIOBase`): codec (UTF-8 etc.) + universal newline translation
+
+`open()` constructs the stack: `FileIO` -> `BufferedReader`/`Writer` -> `TextIOWrapper`.
+
+### `BufferedReader.read`
+
+```python
+# CPython: Lib/_pyio.py:1165 BufferedReader.read
+def read(self, size=None):
+    ...
+    if size == 0:
+        return b""
+    with self._read_lock:
+        return self._read_unlocked(size)
+
+def _read_unlocked(self, n=None):
+    nodata_val = b""
+    empty_values = (b"", None)
+    buf = self._read_buf
+    pos = self._read_pos
+    ...
+    if n <= len(buf) - pos:  # fast path
+        result = buf[pos:pos+n]
+        self._read_pos = pos + n
+        return result
+    ...
+```
+
+Data is served from the internal buffer (`_read_buf`); only when the buffer is exhausted does it call `self.raw.read(self.buffer_size)`.
+
+### `TextIOWrapper`
+
+Wraps a `BufferedIOBase` with an `IncrementalDecoder` (from `codecs`). On `read()`, it calls `self.buffer.read()`, decodes the bytes, applies universal newline translation (`\r\n` and `\r` -> `\n`), and returns the decoded string.
+
+### `BytesIO` and `StringIO`
+
+In-memory streams backed by a `bytearray` or `str`. `BytesIO.getvalue()` returns all bytes; `StringIO.getvalue()` returns the full string. Both support `read`/`write`/`seek`/`tell`.
+
+## gopy notes
+
+The gopy equivalent is the `objects/` I/O types. `FileIO` maps to `objects/fileio.go` wrapping `os.File`. `BufferedReader` maps to `bufio.Reader`. `TextIOWrapper` maps to a Go `bufio.Reader` + codec translation layer. `BytesIO` is `bytes.Buffer`; `StringIO` is `strings.Builder`.

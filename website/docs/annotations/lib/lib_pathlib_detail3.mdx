@@ -1,0 +1,81 @@
+---
+title: Lib/pathlib/_abc.py
+description: "pathlib._abc: PurePath and Path base classes for pathlib. Path operations without OS coupling: parts, parent, name, suffix, stem, relative_to, match, with_name, with_suffix."
+cpython_path: Lib/pathlib/_abc.py
+cpython_version: "3.14"
+lines: 580
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pathlib/_abc.py" />
+
+`pathlib._abc` (extracted in Python 3.12) defines the abstract base classes for `PurePath` and `Path`. The concrete classes (`PurePosixPath`, `PureWindowsPath`, `PosixPath`, `WindowsPath`) are in `pathlib/_local.py`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PurePath.__new__`, `_str_normcase_cached`, `_hash` | Construction and caching |
+| 81-200 | `PurePath` properties | `parts`, `drive`, `root`, `anchor`, `parent`, `parents`, `name`, `suffix`, `suffixes`, `stem` |
+| 201-350 | `PurePath` methods | `relative_to`, `is_relative_to`, `match`, `with_name`, `with_stem`, `with_suffix`, `with_segments`, `joinpath`, `/` operator |
+| 351-480 | `Path` abstract I/O methods | `stat`, `open`, `read_bytes`, `read_text`, `write_bytes`, `write_text`, `iterdir`, `glob`, `rglob` |
+| 481-580 | `Path.mkdir`, `Path.rename`, `Path.unlink`, `Path.symlink_to`, `Path.hardlink_to` | Filesystem mutation |
+
+## Reading
+
+### `PurePath` construction and parsing
+
+`PurePath.__new__` splits the path string into drive, root, and parts using the flavor-specific parser (`_PosixFlavour` or `_WindowsFlavour`).
+
+```python
+# CPython: Lib/pathlib/_abc.py:200 PurePath.__new__
+def __new__(cls, *args, **kwargs):
+    ...
+    obj = object.__new__(cls)
+    obj._raw_paths = args
+    return obj
+
+@property
+def _str_normcase(self):
+    ...
+    return self._flavour.casefold(str(self))
+```
+
+Parsing is deferred until properties are first accessed, cached in `_parts_normcase_cached`.
+
+### `relative_to`
+
+```python
+# CPython: Lib/pathlib/_abc.py:338 PurePath.relative_to
+def relative_to(self, other, /, *_deprecated, walk_up=False):
+    other = other if isinstance(other, PurePath) else self.with_segments(other)
+    for step, path in enumerate([other] + list(other.parents)):
+        if self.is_relative_to(path):
+            break
+    else:
+        raise ValueError(f"{str(self)!r} is not relative to {str(other)!r}")
+    parts = ['..'] * step + list(self.parts[len(path.parts):])
+    return self.with_segments(*parts)
+```
+
+`walk_up=True` (Python 3.12) allows `relative_to` to generate `..` components when the two paths share only a common ancestor.
+
+### `glob` and `rglob`
+
+`Path.glob(pattern)` returns an iterator of matching paths. For patterns with `**`, it recurses via `os.scandir`. The implementation handles filesystem case sensitivity based on the OS.
+
+### `Path.open`
+
+```python
+# CPython: Lib/pathlib/_abc.py:430 Path.open
+def open(self, mode='r', buffering=-1, encoding=None, errors=None, newline=None):
+    return self._accessor.open(self, mode, buffering, encoding, errors, newline)
+```
+
+Delegates to the OS accessor, which calls `io.open(str(self), ...)`.
+
+## gopy notes
+
+The gopy equivalent is `module/pathlib/`. `PurePath` string manipulation maps to Go's `path/filepath` functions. The concrete `Path` type wraps `os.Open`, `os.Stat`, `os.ReadDir`, etc. The `glob` implementation needs a `filepath.WalkDir`-based recursive matcher.
