@@ -350,6 +350,7 @@ const sidebars = {
         'annotations/python/python_ceval13_detail',
         'annotations/python/python_gc3_detail',
         'annotations/python/python_peephole2_detail',
+        'annotations/python/python_ceval14_detail',
       ],
     },
     {
@@ -567,6 +568,8 @@ const sidebars = {
         'annotations/objects/objects_weakrefobject2_detail',
         'annotations/objects/objects_bytearrayobject3_detail',
         'annotations/objects/objects_descrobject5_detail',
+        'annotations/objects/objects_typeobject3_detail',
+        'annotations/objects/objects_longobject8_detail',
       ],
     },
     {
@@ -818,6 +821,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_context_h_detail',
         'annotations/include/include_internal_pycore_traceback_h_detail',
         'annotations/include/include_internal_pycore_hamt_h_detail2',
+        'annotations/include/include_internal_pycore_unicodeobject_h_detail',
       ],
     },
     {
@@ -1074,6 +1078,7 @@ const sidebars = {
         'annotations/modules/modules_hashlib2_detail',
         'annotations/modules/modules_sqlite_detail',
         'annotations/modules/modules_zlib2_detail',
+        'annotations/modules/modules_subprocess_detail',
       ],
     },
     {
@@ -1625,6 +1630,8 @@ const sidebars = {
         'annotations/lib/lib_xmlrpc2_detail',
         'annotations/lib/lib_sysconfig2_detail',
         'annotations/lib/lib_imaplib2_detail',
+        'annotations/lib/lib_http2_detail',
+        'annotations/lib/lib_asyncio2_detail',
       ],
     },
   ],

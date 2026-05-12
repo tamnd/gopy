@@ -1,0 +1,112 @@
+---
+title: Include/internal/pycore_unicodeobject.h
+description: "Include/internal/pycore_unicodeobject.h: PyASCIIObject, PyCompactUnicodeObject, PyUnicodeObject layouts, _PyUnicode_KIND macros."
+cpython_path: Include/internal/pycore_unicodeobject.h
+cpython_version: "3.14"
+lines: 280
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_unicodeobject.h" />
+
+`pycore_unicodeobject.h` exposes the three string representations used internally by CPython and the macros to access them without a virtual call.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `PyASCIIObject` | Pure-ASCII strings: data immediately follows the header |
+| 61-120 | `PyCompactUnicodeObject` | Latin-1 or UCS-2/UCS-4: single data block after the header |
+| 121-180 | `PyUnicodeObject` | Legacy: separately allocated `wchar_t *` buffer |
+| 181-240 | `_PyUnicode_KIND` macros | Extract 1/2/4-byte code unit width without branching |
+| 241-280 | `_PyUnicode_DATA` | Pointer to the code-unit array |
+
+## Reading
+
+### `PyASCIIObject`
+
+```c
+// CPython: Include/internal/pycore_unicodeobject.h:38 PyASCIIObject
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t length;    /* number of code points */
+    Py_hash_t  hash;      /* cached hash, -1 = uncached */
+    struct {
+        unsigned int interned : 2;   /* 0=not, 1=mortal, 2=immortal */
+        unsigned int kind     : 3;   /* PyUnicode_1BYTE_KIND = 1, 2, 4 */
+        unsigned int compact  : 1;   /* data immediately follows? */
+        unsigned int ascii    : 1;   /* all code points < 128? */
+        unsigned int ready    : 1;   /* legacy: always 1 */
+    } state;
+    wchar_t *wstr;         /* deprecated wchar_t representation */
+} PyASCIIObject;
+/* For ASCII strings, the char data starts at (PyASCIIObject *)s + 1 */
+```
+
+`PyASCIIObject` is the header of every string. For ASCII compact strings the character array follows immediately in memory. Accessing it avoids an indirection: `(char *)((PyASCIIObject *)s + 1)`.
+
+### `PyCompactUnicodeObject`
+
+```c
+// CPython: Include/internal/pycore_unicodeobject.h:70 PyCompactUnicodeObject
+typedef struct {
+    PyASCIIObject _base;
+    Py_ssize_t utf8_length;   /* length of cached UTF-8 encoding */
+    char *utf8;               /* cached UTF-8 encoding or NULL */
+    Py_ssize_t wstr_length;   /* deprecated */
+} PyCompactUnicodeObject;
+/* For non-ASCII compact strings, data starts at
+   (PyCompactUnicodeObject *)s + 1 */
+```
+
+`PyCompactUnicodeObject` adds optional UTF-8 caching. Most strings created from Python source code are compact. The data array may be UCS-1 (Latin-1), UCS-2, or UCS-4 depending on the `kind` field.
+
+### `_PyUnicode_KIND` macros
+
+```c
+// CPython: Include/internal/pycore_unicodeobject.h:195 _PyUnicode_KIND
+#define PyUnicode_1BYTE_KIND  1  /* Latin-1, code points 0-255 */
+#define PyUnicode_2BYTE_KIND  2  /* UCS-2, code points 0-65535 */
+#define PyUnicode_4BYTE_KIND  4  /* UCS-4, full Unicode range */
+
+#define PyUnicode_KIND(op)    \
+    (assert(PyUnicode_Check(op)), \
+     ((PyASCIIObject *)(op))->state.kind)
+
+#define PyUnicode_GET_LENGTH(op) \
+    (assert(PyUnicode_Check(op)), \
+     ((PyASCIIObject *)(op))->length)
+
+#define PyUnicode_READ(kind, data, index) \
+    ((Py_UCS4)(kind == PyUnicode_1BYTE_KIND ? \
+        ((Py_UCS1 *)(data))[(index)] : \
+        (kind == PyUnicode_2BYTE_KIND ? \
+            ((Py_UCS2 *)(data))[(index)] : \
+            ((Py_UCS4 *)(data))[(index)])))
+```
+
+`PyUnicode_READ` is used in hot loops over string characters. The `kind` dispatch compiles to a branch that the CPU branch predictor handles well for homogeneous strings.
+
+### `_PyUnicode_DATA`
+
+```c
+// CPython: Include/internal/pycore_unicodeobject.h:220 _PyUnicode_DATA
+#define PyUnicode_DATA(op) \
+    (assert(PyUnicode_Check(op)), \
+     PyUnicode_IS_COMPACT(op) ? \
+       _PyUnicode_COMPACT_DATA(op) : \
+       ((PyUnicodeObject *)(op))->data.any)
+
+#define _PyUnicode_COMPACT_DATA(op)  \
+    (PyUnicode_IS_ASCII(op) ? \
+        (void *)((PyASCIIObject *)(op) + 1) : \
+        (void *)((PyCompactUnicodeObject *)(op) + 1))
+```
+
+`PyUnicode_DATA` returns a `void *` pointer to the first code unit. Combined with `PyUnicode_KIND` and `PyUnicode_READ`, this is the standard triple for iterating string contents.
+
+## gopy notes
+
+`objects.Str` in `objects/str.go` stores its content as a Go `string` (UTF-8). `PyUnicode_KIND` and `PyUnicode_DATA` are not exposed in gopy; instead, `objects.StrGetItem(s, i)` returns the i-th Unicode code point. Compact ASCII optimization is not needed since Go strings are already compact.

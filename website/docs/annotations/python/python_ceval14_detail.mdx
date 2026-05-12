@@ -1,0 +1,137 @@
+---
+title: Python/ceval.c (part 14)
+description: "Python/ceval.c part 14: MATCH_CLASS, MATCH_MAPPING, MATCH_SEQUENCE, MATCH_KEYS — structural pattern matching opcodes."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers the pattern matching opcodes added in Python 3.10 (PEP 634). See `python_ceval13_detail` for import and collection-building opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `MATCH_CLASS` | Match a class pattern: `case Point(x, y):` |
+| 81-180 | `MATCH_MAPPING` | Match a mapping pattern: `case {'key': value}:` |
+| 181-280 | `MATCH_SEQUENCE` | Match a sequence pattern: `case [first, *rest]:` |
+| 281-380 | `MATCH_KEYS` | Extract keys from a mapping match |
+| 381-500 | `GET_LEN` / `COPY` / `POP_JUMP_IF_NOT_NONE` | Helpers for pattern matching |
+
+## Reading
+
+### `MATCH_CLASS`
+
+```c
+// CPython: Python/ceval.c:4820 MATCH_CLASS
+inst(MATCH_CLASS, (subject, type, names -- attrs)) {
+    /* match subject against a class pattern with keyword patterns.
+       names is a tuple of attribute names to extract.
+       Result: tuple of attribute values, or None if no match. */
+    attrs = match_class(tstate, subject, type,
+                        oparg,   /* number of positional patterns */
+                        names);
+    ERROR_IF(attrs == NULL, error);
+}
+
+static PyObject *
+match_class(PyThreadState *tstate, PyObject *subject, PyObject *type,
+            Py_ssize_t nargs, PyObject *kwargs)
+{
+    /* Check isinstance(subject, type) */
+    if (!PyObject_IsInstance(subject, type)) {
+        Py_RETURN_NONE;
+    }
+    /* Extract positional attributes via __match_args__ */
+    PyObject *match_args = PyObject_GetAttr(type, &_Py_ID(__match_args__));
+    PyObject *attrs = PyTuple_New(nargs + PyTuple_GET_SIZE(kwargs));
+    for (int i = 0; i < nargs; i++) {
+        PyObject *name = PyTuple_GET_ITEM(match_args, i);
+        PyObject *val  = PyObject_GetAttr(subject, name);
+        PyTuple_SET_ITEM(attrs, i, val);
+    }
+    /* Extract keyword attributes */
+    for (int i = 0; i < PyTuple_GET_SIZE(kwargs); i++) {
+        PyObject *name = PyTuple_GET_ITEM(kwargs, i);
+        PyObject *val  = PyObject_GetAttr(subject, name);
+        PyTuple_SET_ITEM(attrs, nargs + i, val);
+    }
+    return attrs;
+}
+```
+
+`case Point(x=px, y=py):` compiles to `MATCH_CLASS` with `kwargs=('x', 'y')`. `__match_args__` maps positional pattern slots to attribute names.
+
+### `MATCH_MAPPING`
+
+```c
+// CPython: Python/ceval.c:4880 MATCH_MAPPING
+inst(MATCH_MAPPING, (subject -- subject, res)) {
+    /* True if subject has tp_as_mapping->mp_subscript AND
+       does NOT have Py_TPFLAGS_SEQUENCE set. */
+    int match = PyType_HasFeature(Py_TYPE(subject), Py_TPFLAGS_MAPPING);
+    res = match ? Py_True : Py_False;
+    Py_INCREF(res);
+}
+```
+
+`Py_TPFLAGS_MAPPING` is set on `dict` and custom mapping types. `Py_TPFLAGS_SEQUENCE` is set on `list`, `tuple`, etc. These flags disambiguate patterns: `case {'a': x}:` requires a mapping.
+
+### `MATCH_SEQUENCE`
+
+```c
+// CPython: Python/ceval.c:4920 MATCH_SEQUENCE
+inst(MATCH_SEQUENCE, (subject -- subject, res)) {
+    /* True if subject is a sequence but not str/bytes/bytearray.
+       Uses Py_TPFLAGS_SEQUENCE. */
+    int match = (PyType_HasFeature(Py_TYPE(subject), Py_TPFLAGS_SEQUENCE) &&
+                 !PyUnicode_Check(subject) &&
+                 !PyBytes_Check(subject) &&
+                 !PyByteArray_Check(subject));
+    res = match ? Py_True : Py_False;
+    Py_INCREF(res);
+}
+```
+
+Strings are explicitly excluded so that `case ['h', 'i']:` does not match the string `'hi'`.
+
+### `MATCH_KEYS`
+
+```c
+// CPython: Python/ceval.c:4960 MATCH_KEYS
+inst(MATCH_KEYS, (subject, keys -- subject, keys, values_or_none)) {
+    /* Extract the values for 'keys' from 'subject'.
+       Returns a tuple of values, or None if any key is missing. */
+    values_or_none = match_keys(tstate, subject, keys);
+    ERROR_IF(values_or_none == NULL, error);
+}
+
+static PyObject *
+match_keys(PyThreadState *tstate, PyObject *map, PyObject *keys)
+{
+    Py_ssize_t nkeys = PyTuple_GET_SIZE(keys);
+    PyObject *values = PyTuple_New(nkeys);
+    for (Py_ssize_t i = 0; i < nkeys; i++) {
+        PyObject *key = PyTuple_GET_ITEM(keys, i);
+        PyObject *val = PyObject_GetItem(map, key);
+        if (val == NULL) {
+            /* Key not present */
+            Py_DECREF(values);
+            Py_RETURN_NONE;
+        }
+        PyTuple_SET_ITEM(values, i, val);
+    }
+    return values;
+}
+```
+
+`MATCH_KEYS` is used after `MATCH_MAPPING` to extract specific keys. If any key is absent, it returns `None` and the match fails.
+
+## gopy notes
+
+`MATCH_CLASS` is `vm.MatchClass` in `vm/eval_gen.go`. `MATCH_MAPPING` and `MATCH_SEQUENCE` test `Py_TPFLAGS_MAPPING`/`Py_TPFLAGS_SEQUENCE` via `objects.Type.Flags`. `MATCH_KEYS` is `vm.MatchKeys`. Pattern matching was added in gopy alongside the Python 3.10 opcode set.

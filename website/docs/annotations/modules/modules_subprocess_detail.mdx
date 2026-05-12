@@ -1,0 +1,124 @@
+---
+title: Lib/subprocess.py
+description: "Lib/subprocess.py: Popen, run, check_output, check_call, communicate, pipe handling, PIPE, DEVNULL, STDOUT."
+cpython_path: Lib/subprocess.py
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/subprocess.py" />
+
+`subprocess` launches child processes and communicates with them via pipes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `subprocess.run` | High-level entry point: run, capture, check return code |
+| 121-280 | `subprocess.check_output` / `check_call` | Convenience wrappers raising `CalledProcessError` |
+| 281-500 | `Popen.__init__` | Fork/exec on POSIX, `CreateProcess` on Windows |
+| 501-700 | `Popen.communicate` | Send stdin + collect stdout/stderr with deadlock prevention |
+| 701-900 | `Popen.wait` / `poll` | Wait for or check process completion |
+| 901-1200 | POSIX `_execute_child` | `fork`, `execve`, pipe setup, `close_fds` |
+| 1201-2000 | Windows `_execute_child` | `CreateProcess`, handle inheritance, job objects |
+
+## Reading
+
+### `subprocess.run`
+
+```python
+# CPython: Lib/subprocess.py:548 run
+def run(*popenargs, input=None, capture_output=False, timeout=None,
+        check=False, **kwargs):
+    """Run command, wait for it to complete, return CompletedProcess."""
+    if capture_output:
+        if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+            raise ValueError(...)
+        kwargs['stdout'] = PIPE
+        kwargs['stderr'] = PIPE
+    with Popen(*popenargs, **kwargs) as process:
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except TimeoutExpired as exc:
+            process.kill()
+            exc.stdout, exc.stderr = process.communicate()
+            raise
+        except:
+            process.kill()
+            raise
+    retcode = process.poll()
+    if check and retcode:
+        raise CalledProcessError(retcode, process.args, stdout, stderr)
+    return CompletedProcess(process.args, retcode, stdout, stderr)
+```
+
+`subprocess.run(['ls', '-l'], capture_output=True, text=True)` is the canonical modern API. `capture_output=True` is shorthand for `stdout=PIPE, stderr=PIPE`.
+
+### `Popen.communicate`
+
+```python
+# CPython: Lib/subprocess.py:1120 communicate
+def communicate(self, input=None, timeout=None):
+    """Interact with process: send input; capture stdout/stderr; wait."""
+    if self._communication_started and input:
+        raise ValueError(...)
+    # On POSIX with pipes: use select/poll to avoid deadlock.
+    # Both stdout and stderr are read in parallel.
+    if timeout is not None:
+        endtime = _time() + timeout
+    try:
+        stdout, stderr = self._communicate(input, endtime, timeout)
+    except:
+        self.wait()
+        raise
+    else:
+        self.wait(timeout=self._remaining_time(endtime))
+    return stdout, stderr
+```
+
+Naive pipe reading (read stdout to EOF, then stderr) deadlocks when the child fills its stderr pipe while the parent is blocking on stdout. `_communicate` uses `threading` (or `select.select` on POSIX) to drain both pipes concurrently.
+
+### POSIX `_execute_child`
+
+```python
+# CPython: Lib/subprocess.py:1740 _execute_child (POSIX)
+def _execute_child(self, args, executable, preexec_fn, close_fds,
+                   pass_fds, cwd, env, ...):
+    """Fork and exec the child process."""
+    self.pid = os.fork()
+    if self.pid == 0:
+        # Child
+        try:
+            if cwd is not None:
+                os.chdir(cwd)
+            if close_fds:
+                _close_fds_but_keep(keep_fds)
+            os.execve(executable, args, env or os.environ)
+        except:
+            # Write errno to the error pipe and exit
+            child_exception_type = type(sys.exc_info()[1])
+            os.write(errpipe_write, pickle.dumps(child_exception_type))
+            os._exit(255)
+    # Parent: close the child end of all pipes
+    ...
+```
+
+The error pipe is used to propagate `OSError` from `execve` (e.g., file not found) back to the parent. After `fork`, if `execve` fails, the child pickles the exception type and writes it to the pipe; the parent unpickles and re-raises it.
+
+### `PIPE` / `DEVNULL` / `STDOUT`
+
+```python
+# CPython: Lib/subprocess.py:118 constants
+PIPE    = -1   # Create a new pipe
+STDOUT  = -2   # Redirect stderr to stdout (only for stderr= argument)
+DEVNULL = -3   # Redirect to /dev/null
+```
+
+These sentinel integers are compared in `Popen.__init__` to decide how to set up file descriptors. `PIPE` causes `os.pipe()` to be called; `DEVNULL` opens `/dev/null` (or `NUL` on Windows).
+
+## gopy notes
+
+`subprocess.run` and `Popen` are in `module/subprocess/module.go`. `_execute_child` on POSIX uses `os.ForkExec` (via `syscall.ForkExec`). `communicate` uses `io.Pipe` and goroutines to drain stdout/stderr concurrently. `PIPE`/`DEVNULL`/`STDOUT` are exported constants.
