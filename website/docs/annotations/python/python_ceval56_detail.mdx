@@ -1,0 +1,92 @@
+---
+title: Python/ceval.c (part 56)
+description: "Python/ceval.c part 56: MAKE_FUNCTION, SET_FUNCTION_ATTRIBUTE, COPY_FREE_VARS, closure creation."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers function object creation and closure capture. See `python_ceval55_detail` for intrinsic calls and f-string opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `MAKE_FUNCTION` | Create a function object from a code object |
+| 81-160 | `SET_FUNCTION_ATTRIBUTE` | Attach defaults, closure, annotations |
+| 161-240 | `COPY_FREE_VARS` | Copy closure cells from enclosing frame |
+| 241-360 | `RETURN_CONST` | Return a constant (optimized `LOAD_CONST` + `RETURN_VALUE`) |
+| 361-500 | `CLEANUP_THROW` | Handle exceptions thrown into generators |
+
+## Reading
+
+### `MAKE_FUNCTION`
+
+```c
+// CPython: Python/ceval.c:5620 MAKE_FUNCTION
+inst(MAKE_FUNCTION, (codeobj -- func)) {
+    PyFunctionObject *func_obj = (PyFunctionObject *)PyFunction_New(codeobj, GLOBALS());
+    func = (PyObject *)func_obj;
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+`MAKE_FUNCTION` creates a new function from the code object on top of stack and the current globals dict. No defaults or closure are set yet; those come from `SET_FUNCTION_ATTRIBUTE`.
+
+### `SET_FUNCTION_ATTRIBUTE`
+
+```c
+// CPython: Python/ceval.c:5660 SET_FUNCTION_ATTRIBUTE
+inst(SET_FUNCTION_ATTRIBUTE, (attr, func -- func)) {
+    /* oparg selects which attribute to set:
+       MAKE_FUNCTION_DEFAULTS (1): func.__defaults__
+       MAKE_FUNCTION_KWDEFAULTS (2): func.__kwdefaults__
+       MAKE_FUNCTION_ANNOTATIONS (4): func.__annotations__
+       MAKE_FUNCTION_CLOSURE (8): func.__closure__ */
+    PyFunctionObject *func_obj = (PyFunctionObject *)func;
+    switch (oparg) {
+        case MAKE_FUNCTION_DEFAULTS:
+            func_obj->func_defaults = Py_NewRef(attr);
+            break;
+        ...
+        case MAKE_FUNCTION_CLOSURE:
+            func_obj->func_closure = Py_NewRef(attr);
+            break;
+    }
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+The compiler emits `SET_FUNCTION_ATTRIBUTE` for each optional component. A function with no defaults, no closures, and no annotations only gets `MAKE_FUNCTION`.
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:5740 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (-- )) {
+    /* oparg = number of free variables to copy
+       At function entry, copy cells from the enclosing frame into the
+       current frame's localsplus (the free variable slots) */
+    PyCodeObject *co = frame->f_code;
+    PyObject *closure = frame->f_func->func_closure;
+    int offset = co->co_nlocalsplus - oparg;
+    for (int i = 0; i < oparg; i++) {
+        PyObject *o = PyTuple_GET_ITEM(closure, i);
+        frame->localsplus[offset + i] = Py_NewRef(o);
+    }
+    DISPATCH();
+}
+```
+
+`COPY_FREE_VARS` runs at function entry for closures. It copies cell references from `func.__closure__` into the current frame's free variable slots, making them accessible via `LOAD_DEREF`.
+
+## gopy notes
+
+`MAKE_FUNCTION` is in `vm/eval_simple.go`. It calls `objects.NewFunction(code, frame.Globals)`. `SET_FUNCTION_ATTRIBUTE` sets fields on the `objects.Function` struct. `COPY_FREE_VARS` copies from `function.Closure` (a `[]*objects.Cell` tuple) into `frame.Locals[freeVarOffset:]`.

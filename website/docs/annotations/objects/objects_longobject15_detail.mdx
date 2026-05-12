@@ -1,0 +1,84 @@
+---
+title: Objects/longobject.c (part 15)
+description: "Objects/longobject.c part 15: int.__new__ from string, number bases, _PyLong_FromByteArray, compact representation."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers integer parsing and the compact integer representation. See `objects_longobject14_detail` for `bit_length`, `to_bytes`, `from_bytes`, and `as_integer_ratio`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Compact integer representation | Single-digit fast path |
+| 81-180 | `int.__new__` from string | `int('0xff', 16)` |
+| 181-280 | `PyLong_FromString` | C-level string-to-int |
+| 281-360 | `_PyLong_FromByteArray` | Deserialize bytes as integer |
+| 361-500 | Small int free list | Cache `[-5, 256]` |
+
+## Reading
+
+### Compact integer representation
+
+```c
+// CPython: Objects/longobject.c:60 compact integer
+/* Python 3.12+ uses a compact representation for small integers.
+   Integers that fit in a single Py_ssize_t word use:
+   - ob_digit[0] stores the value
+   - ob_size encodes sign: 1 = positive, -1 = negative, 0 = zero
+   
+   _PyLong_IsCompact: returns true if |value| < 2^(SHIFT)
+   _PyLong_CompactValue: returns the value as a C Py_ssize_t
+*/
+```
+
+Compact integers avoid the overhead of the full multi-digit representation. The fast path in arithmetic checks `_PyLong_IsCompact` on both operands and uses direct C arithmetic, falling back to the general case for large numbers.
+
+### `PyLong_FromString`
+
+```c
+// CPython: Objects/longobject.c:2480 PyLong_FromString
+PyObject *
+PyLong_FromString(const char *str, char **pend, int base)
+{
+    /* Parse str as an integer in the given base (0 = auto-detect from prefix) */
+    if (base == 0) {
+        /* Auto-detect: 0x for hex, 0o for octal, 0b for binary, else decimal */
+        if (str[0] == '0') {
+            if (tolower(str[1]) == 'x') base = 16;
+            else if (tolower(str[1]) == 'o') base = 8;
+            else if (tolower(str[1]) == 'b') base = 2;
+            else base = 10;
+        } else base = 10;
+    }
+    ...
+    /* Accumulate digits using Knuth's "grade school" algorithm in base 2^SHIFT */
+}
+```
+
+`int('0xff', 0)` uses base 0 to auto-detect. `int('ff', 16)` uses explicit base 16. The accumulation converts from the input base to `PyLong`'s internal base (`2^30` on 64-bit).
+
+### Small int free list
+
+```c
+// CPython: Objects/longobject.c:180 small int cache
+/* Integers in [-5, 256] are pre-allocated singletons:
+   NSMALLNEGINTS = 5, NSMALLPOSINTS = 257 */
+static PyLongObject small_ints[NSMALLNEGINTS + NSMALLPOSINTS];
+
+static inline PyObject *
+_PyLong_GetZero(void) { return (PyObject *)(&_PyLong_SMALL_INTS[5 + 0]); }
+```
+
+`x = 1 + 1` and `y = 2` both give the same object (the singleton `2`). `x is y` is `True` for integers in this range. Singletons are stored in a static array, never allocated or freed.
+
+## gopy notes
+
+Compact integer representation maps to Go's `int64` fast path in `objects/int.go`. When the value fits in `int64`, `objects.Int.compact = true` and arithmetic uses native Go integers. The small int cache is `objects.SmallIntCache [262]*objects.Int` initialized at package init. `PyLong_FromString` is `objects.IntFromString` using `strconv.ParseInt` or `big.Int.SetString`.

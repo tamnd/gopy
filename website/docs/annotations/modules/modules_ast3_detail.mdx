@@ -1,0 +1,90 @@
+---
+title: Python/Python-ast.c (part 3)
+description: "Python-ast.c part 3: AST node constructors, ast.parse, ast.unparse, AST visitor pattern."
+cpython_path: Python/Python-ast.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/Python-ast.c" />
+
+This annotation covers AST node creation and traversal. See `modules_ast2_detail` for `ast.dump`, `ast.fix_missing_locations`, and `ast.NodeVisitor`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | AST node constructors | `ast.BinOp(...)`, `ast.Call(...)` etc. |
+| 81-180 | `ast.parse` | Parse source to AST |
+| 181-280 | `ast.unparse` | Convert AST back to source string |
+| 281-380 | `ast.NodeTransformer` | Mutating tree visitor |
+| 381-500 | `ast.literal_eval` | Safely evaluate a literal expression |
+
+## Reading
+
+### `ast.parse`
+
+```python
+# CPython: Lib/ast.py:60 parse
+def parse(source, filename='<unknown>', mode='exec', *,
+          type_comments=False, feature_version=None, optimize=-1):
+    """Parse source into an AST node.
+    mode: 'exec' (module), 'eval' (expression), 'single' (interactive)."""
+    flags = ast.PyCF_ONLY_AST
+    if type_comments:
+        flags |= ast.PyCF_TYPE_COMMENTS
+    return compile(source, filename, mode, flags, optimize=optimize)
+```
+
+`ast.parse` is a thin wrapper around `compile` with `PyCF_ONLY_AST` set. The compiler's parser stage returns the AST instead of proceeding to bytecode generation.
+
+### `ast.unparse`
+
+```python
+# CPython: Lib/ast.py:480 unparse
+def unparse(ast_obj):
+    """Unparse an AST object and generate a string with code
+    that would produce an equivalent ast.AST object if parsed back."""
+    unparser = _Unparser()
+    return unparser.visit(ast_obj)
+
+class _Unparser(NodeVisitor):
+    def visit_BinOp(self, node):
+        self.traverse(node.left)
+        self.write(f' {_bin_ops[type(node.op)]} ')
+        self.traverse(node.right)
+```
+
+`ast.unparse` reconstructs Python source from an AST. It is not guaranteed to be identical to the original source (whitespace, comments are lost) but round-trips correctly: `ast.parse(ast.unparse(tree))` gives an equivalent AST.
+
+### `ast.literal_eval`
+
+```python
+# CPython: Lib/ast.py:60 literal_eval
+def literal_eval(node_or_string):
+    """Safely evaluate an expression containing only literals:
+    strings, bytes, numbers, tuples, lists, dicts, sets, booleans, None.
+    Raises ValueError for anything else."""
+    if isinstance(node_or_string, str):
+        node_or_string = parse(node_or_string, mode='eval')
+    ...
+    def _convert(node):
+        if isinstance(node, Constant):
+            return node.value
+        elif isinstance(node, Tuple):
+            return tuple(map(_convert, node.elts))
+        elif isinstance(node, List):
+            return list(map(_convert, node.elts))
+        ...
+        raise ValueError('malformed node or string')
+    return _convert(node_or_string.body)
+```
+
+`ast.literal_eval` evaluates without calling `eval`. It is safe to use on untrusted input because it only handles literals. `eval` executes arbitrary code.
+
+## gopy notes
+
+`ast.parse` is `module/ast.Parse` in `module/ast/module.go`. It calls `compile.ParseModule` or `compile.ParseExpression`. `ast.unparse` is `module/ast.Unparse` using a recursive visitor. `ast.literal_eval` is `module/ast.LiteralEval` walking the AST recursively with a type check at each node.

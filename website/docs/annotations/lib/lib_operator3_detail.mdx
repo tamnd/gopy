@@ -1,0 +1,98 @@
+---
+title: Lib/operator.py / Modules/_operator.c (part 3)
+description: "operator part 3: attrgetter, itemgetter, methodcaller, operator.length_hint."
+cpython_path: Modules/_operator.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_operator.c" />
+
+This annotation covers the higher-order operator helpers. See `modules_operator2_detail` for `operator.add`, `operator.mul`, `operator.truth`, and comparison operators.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `operator.attrgetter` | Fast attribute accessor for `key=` functions |
+| 81-160 | `operator.itemgetter` | Fast subscript accessor |
+| 161-240 | `operator.methodcaller` | Call a named method with fixed args |
+| 241-400 | `operator.length_hint` | `__length_hint__` fallback for iterators |
+
+## Reading
+
+### `attrgetter`
+
+```c
+// CPython: Modules/_operator.c:580 attrgetter_new
+static PyObject *
+attrgetter_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    /* attrgetter('x') returns a callable f where f(obj) == obj.x
+       attrgetter('x.y.z') chains: f(obj) == obj.x.y.z */
+    attrgetterobject *ag = PyObject_GC_New(attrgetterobject, type);
+    Py_ssize_t nattrs = PyTuple_GET_SIZE(args);
+    ag->attr = ...; /* tuple of (split) attribute names */
+    ...
+}
+
+static PyObject *
+attrgetter_call(attrgetterobject *ag, PyObject *args, PyObject *kw)
+{
+    PyObject *obj = PyTuple_GET_ITEM(args, 0);
+    /* For each dotted name, call getattr in sequence */
+    for (int i = 0; i < nattrs; i++) {
+        PyObject *name = ag->attr[i];
+        obj = PyObject_GetAttr(obj, name);
+    }
+    return obj;
+}
+```
+
+`sorted(records, key=attrgetter('name'))` is faster than `lambda r: r.name` because `attrgetter` avoids building a new Python frame for each call. `attrgetter('a.b.c')` is split at construction time, not on each call.
+
+### `itemgetter`
+
+```c
+// CPython: Modules/_operator.c:680 itemgetter_call
+static PyObject *
+itemgetter_call(itemgetterobject *ig, PyObject *args, PyObject *kw)
+{
+    PyObject *obj = PyTuple_GET_ITEM(args, 0);
+    if (ig->nitems == 1) {
+        return PyObject_GetItem(obj, ig->item);
+    }
+    /* Multiple items: return a tuple */
+    PyObject *result = PyTuple_New(ig->nitems);
+    for (int i = 0; i < ig->nitems; i++) {
+        PyTuple_SET_ITEM(result, i, PyObject_GetItem(obj, ig->items[i]));
+    }
+    return result;
+}
+```
+
+`sorted(data, key=itemgetter(2))` sorts by the third element. `itemgetter(1, 3)` returns a tuple of elements at indices 1 and 3, useful for multi-key sorting.
+
+### `operator.length_hint`
+
+```c
+// CPython: Modules/_operator.c:880 op_length_hint
+static PyObject *
+op_length_hint(PyObject *module, PyObject *args)
+{
+    /* Return len(obj) if defined, else obj.__length_hint__() if defined,
+       else the default value. */
+    PyObject *obj, *default_value;
+    Py_ssize_t hint = PyObject_LengthHint(obj, default_value);
+    return PyLong_FromSsize_t(hint);
+}
+```
+
+`__length_hint__` is an optimization hint for iterators: `list(it)` pre-allocates based on `length_hint` to avoid repeated reallocs. The hint may be wrong; it is never trusted for correctness.
+
+## gopy notes
+
+`attrgetter` is `module/operator.AttrGetter` in `module/operator/module.go`. Dotted names are split at construction into `[]string` and each `__call__` chains `objects.GetAttr`. `itemgetter` calls `objects.GetItem`. `length_hint` calls `objects.LengthHint` which checks `__len__` then `__length_hint__`.
