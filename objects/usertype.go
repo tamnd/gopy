@@ -256,6 +256,17 @@ func fixupSlotDispatchers(t *Type) {
 	if lookupDunderCallable(t, "__contains__") {
 		ensureSequenceMethods(t).Contains = slotSqContains
 	}
+	// Descriptor protocol slots: wire DescrGet when __get__ exists,
+	// DescrSet when __set__ or __delete__ exists.
+	//
+	// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
+	//   (slotdefs entries for tp_descr_get / tp_descr_set)
+	if lookupDunderCallable(t, "__get__") {
+		t.DescrGet = slotTpDescrGet
+	}
+	if lookupDunderCallable(t, "__set__") || lookupDunderCallable(t, "__delete__") {
+		t.DescrSet = slotTpDescrSet
+	}
 }
 
 // hasAnyDunder reports whether t exposes any of the named dunders as a
@@ -564,6 +575,55 @@ func slotSqSetItem(o Object, idx int, value Object) error {
 		return slotMpSubscriptDel(o, key)
 	}
 	return slotMpSubscriptSet(o, key, value)
+}
+
+// slotTpDescrGet dispatches __get__(self, obj, type). obj is None when
+// the descriptor is accessed through the class rather than an instance.
+//
+// CPython: Objects/typeobject.c:8444 slot_tp_descr_get
+func slotTpDescrGet(descr Object, obj Object, tp *Type) (Object, error) {
+	fn, err := GetAttr(descr, NewStr("__get__"))
+	if err != nil {
+		return nil, err
+	}
+	var objArg Object
+	if obj == nil {
+		objArg = None()
+	} else {
+		objArg = obj
+	}
+	var typeArg Object
+	if tp == nil {
+		typeArg = None()
+	} else {
+		typeArg = tp
+	}
+	return Call(fn, NewTuple([]Object{objArg, typeArg}), nil)
+}
+
+// slotTpDescrSet dispatches __set__(self, obj, value) or
+// __delete__(self, obj) when value is nil.
+//
+// CPython: Objects/typeobject.c:8456 slot_tp_descr_set
+func slotTpDescrSet(descr Object, obj Object, value Object) error {
+	var fn Object
+	var args []Object
+	var err error
+	if value == nil {
+		fn, err = GetAttr(descr, NewStr("__delete__"))
+		if err != nil {
+			return err
+		}
+		args = []Object{obj}
+	} else {
+		fn, err = GetAttr(descr, NewStr("__set__"))
+		if err != nil {
+			return err
+		}
+		args = []Object{obj, value}
+	}
+	_, err = Call(fn, NewTuple(args), nil)
+	return err
 }
 
 // slotSqContains dispatches __contains__.
