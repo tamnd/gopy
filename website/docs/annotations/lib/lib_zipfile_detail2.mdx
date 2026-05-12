@@ -1,0 +1,112 @@
+---
+title: Lib/zipfile/__init__.py (part 2)
+description: "zipfile part 2: ZipFile.write/writestr, compression (stored/deflated/bz2/lzma), ZipInfo, namelist/infolist, extractall, ZIP64 extension."
+cpython_path: Lib/zipfile/__init__.py
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/zipfile/__init__.py" />
+
+This annotation covers writing and extracting from ZIP archives. See `lib_zipfile_detail` (if it exists) for ZipFile construction and reading.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `ZipInfo` | Archive entry metadata: filename, date_time, compress_type, CRC |
+| 201-500 | `ZipFile.write` | Add a file to the archive |
+| 501-800 | `ZipFile.writestr` | Add bytes/str data directly |
+| 801-1100 | `ZipFile.open` | Return a file-like object for reading an entry |
+| 1101-1400 | `ZipFile.extract`, `ZipFile.extractall` | Extract to filesystem |
+| 1401-1700 | `_ZipWriteFile` | Internal write file wrapper with compression |
+| 1701-2000 | Central directory | Write end-of-central-directory record |
+| 2001-2400 | ZIP64 | Extra field for large files and many entries |
+| 2401-2800 | Compression dispatch | `zlib.compress`, `bz2.compress`, `lzma.compress` |
+
+## Reading
+
+### `ZipInfo`
+
+```python
+# CPython: Lib/zipfile/__init__.py:190 ZipInfo
+class ZipInfo:
+    """Class with attributes describing each file in the ZIP archive."""
+    __slots__ = (
+        'orig_filename', 'filename', 'date_time', 'compress_type',
+        'comment', 'extra', 'create_system', 'create_version',
+        'extract_version', 'reserved', 'flag_bits', 'volume',
+        'internal_attr', 'external_attr', 'compress_size',
+        'file_size', '_raw_time', 'CRC', '_compressor', 'header_offset',
+        '_end_offset',
+    )
+```
+
+### `ZipFile.write`
+
+```python
+# CPython: Lib/zipfile/__init__.py:440 ZipFile.write
+def write(self, filename, arcname=None, compress_type=None,
+          compresslevel=None):
+    """Put a file into the archive."""
+    fname, arcname = self._get_codecs_name(filename, arcname)
+    zinfo = ZipInfo.from_file(fname, arcname, strict_timestamps=self._strict_timestamps)
+    if compress_type is not None:
+        zinfo.compress_type = compress_type
+    with open(fname, 'rb') as f:
+        self._open_to_write(zinfo, force_zip64=False)
+        while True:
+            buf = f.read(1024 * 8)
+            if not buf: break
+            self._fileobj.write(buf)
+```
+
+### `_ZipWriteFile`
+
+```python
+# CPython: Lib/zipfile/__init__.py:1580 _ZipWriteFile.write
+def write(self, data):
+    nbytes = len(data)
+    self._crc = crc32(data, self._crc)
+    if self._compressor:
+        data = self._compressor.compress(data)
+    self._file_size += nbytes
+    self._compress_size += len(data)
+    self._fileobj.write(data)
+```
+
+CRC32 is computed incrementally as data is written.
+
+### Central directory
+
+```python
+# CPython: Lib/zipfile/__init__.py:1820 ZipFile._write_end_record
+def _write_end_record(self):
+    """Write the central directory and end-of-central-directory record."""
+    # Central directory entries
+    for zinfo in self.filelist:
+        self.fp.write(zinfo.FileHeader(zip64=...))
+    # End-of-central-directory record
+    centdir = struct.pack(structEndArchive, stringEndArchive,
+                          0, 0, centcount, centcount, centsize, centoffset, 0)
+    self.fp.write(centdir)
+```
+
+### ZIP64 extension
+
+```python
+# CPython: Lib/zipfile/__init__.py:2050 ZIP64
+# Required when:
+#   file_size    > 0xFFFFFFFF (4 GiB)
+#   compress_size > 0xFFFFFFFF
+#   header_offset > 0xFFFFFFFF
+#   total entries > 0xFFFF
+# Uses Zip64 extra field (tag 0x0001) with 64-bit values
+```
+
+## gopy notes
+
+`zipfile` is pure Python and importable when `zlib`, `bz2`, `lzma`, `struct`, `io`, `os`, `time`, and `binascii` work. The compression types map to `compress/zlib`, `compress/bzip2`, and `compress/lzma` in Go. CRC32 uses `hash/crc32.ChecksumIEEE`.

@@ -1,0 +1,101 @@
+---
+title: Modules/termios.c
+description: "Modules/termios.c: POSIX terminal control — tcgetattr, tcsetattr, tcdrain, tcflush, tcflow. Exposes the termios struct as a Python list."
+cpython_path: Modules/termios.c
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/termios.c" />
+
+`termios` provides low-level control over terminal I/O. It is used by `readline`, `tty`, and interactive prompts.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `termios_tcgetattr` | Read terminal attributes into a 7-element list |
+| 81-180 | `termios_tcsetattr` | Write terminal attributes from a 7-element list |
+| 181-220 | `termios_tcsendbreak` | Send a break condition |
+| 221-260 | `termios_tcdrain` | Wait until all output has been transmitted |
+| 261-300 | `termios_tcflush` | Discard pending input or output |
+| 301-350 | Constants | `TCSANOW`, `TCSADRAIN`, `TCSAFLUSH`, `ICANON`, `ECHO`, etc. |
+
+## Reading
+
+### `tcgetattr`
+
+```c
+// CPython: Modules/termios.c:62 termios_tcgetattr
+static PyObject *
+termios_tcgetattr(PyObject *self, PyObject *args)
+{
+    int fd;
+    PyArg_ParseTuple(args, "O&:tcgetattr", conv_descriptor, &fd);
+    struct termios mode;
+    tcgetattr(fd, &mode);
+    /* Return a list of 7 elements:
+     * [iflag, oflag, cflag, lflag, ispeed, ospeed, cc]
+     * cc is a list of control characters (c_cc array as bytes) */
+    PyObject *v = PyList_New(7);
+    PyList_SetItem(v, 0, PyLong_FromLong((long)mode.c_iflag));
+    PyList_SetItem(v, 1, PyLong_FromLong((long)mode.c_oflag));
+    PyList_SetItem(v, 2, PyLong_FromLong((long)mode.c_cflag));
+    PyList_SetItem(v, 3, PyLong_FromLong((long)mode.c_lflag));
+    PyList_SetItem(v, 4, PyLong_FromLong((long)cfgetispeed(&mode)));
+    PyList_SetItem(v, 5, PyLong_FromLong((long)cfgetospeed(&mode)));
+    /* cc: NCCS bytes */
+    PyObject *cc = PyList_New(NCCS);
+    for (int i = 0; i < NCCS; i++)
+        PyList_SetItem(cc, i, PyBytes_FromStringAndSize((char *)&mode.c_cc[i], 1));
+    PyList_SetItem(v, 6, cc);
+    return v;
+}
+```
+
+### `tcsetattr`
+
+```c
+// CPython: Modules/termios.c:128 termios_tcsetattr
+static PyObject *
+termios_tcsetattr(PyObject *self, PyObject *args)
+{
+    int fd, when;
+    PyObject *term;
+    PyArg_ParseTuple(args, "O&iO:tcsetattr", conv_descriptor, &fd, &when, &term);
+    struct termios mode;
+    tcgetattr(fd, &mode);  /* read current to fill unspecified fields */
+    mode.c_iflag = (tcflag_t)PyLong_AsLong(PyList_GetItem(term, 0));
+    mode.c_oflag = (tcflag_t)PyLong_AsLong(PyList_GetItem(term, 1));
+    mode.c_cflag = (tcflag_t)PyLong_AsLong(PyList_GetItem(term, 2));
+    mode.c_lflag = (tcflag_t)PyLong_AsLong(PyList_GetItem(term, 3));
+    cfsetispeed(&mode, (speed_t)PyLong_AsLong(PyList_GetItem(term, 4)));
+    cfsetospeed(&mode, (speed_t)PyLong_AsLong(PyList_GetItem(term, 5)));
+    /* Fill cc array */
+    ...
+    tcsetattr(fd, when, &mode);
+    Py_RETURN_NONE;
+}
+```
+
+`when=TCSANOW` applies immediately; `TCSADRAIN` waits for output to drain; `TCSAFLUSH` also discards pending input.
+
+### Common use: raw mode
+
+```python
+# CPython: Lib/tty.py:12 setraw
+def setraw(fd, when=termios.TCSAFLUSH):
+    """Put terminal into a raw mode."""
+    mode = termios.tcgetattr(fd)
+    mode[3] = mode[3] & ~(termios.ECHO | termios.ICANON)
+    termios.tcsetattr(fd, when, mode)
+```
+
+Disabling `ICANON` turns off line buffering (reads return immediately). Disabling `ECHO` hides typed characters.
+
+## gopy notes
+
+`termios` is in `module/termios/`. `tcgetattr` calls `syscall.IoctlTermios` (macOS) or `unix.IoctlTermios` (Linux). The 7-element list is constructed from the `syscall.Termios` struct fields. `tcsetattr` reconstructs the struct from the Python list and calls the corresponding ioctl.

@@ -1,0 +1,121 @@
+---
+title: Python/traceback.c
+description: "Python/traceback.c: PyTraceBack_Print — format and display tracebacks. tb_lineno, tb_frame chain, source line extraction, exception groups (3.11+)."
+cpython_path: Python/traceback.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/traceback.c" />
+
+`traceback.c` formats and prints tracebacks to `sys.stderr`. It is called by `sys.excepthook` and by the REPL on unhandled exceptions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyTraceBack_Here` | Create a new traceback entry from the current frame |
+| 101-300 | `PyTraceBack_Print` | Print full traceback chain to a file |
+| 301-500 | `tb_print_line` | Print one frame's filename/lineno/code context |
+| 501-700 | `tb_print_exception` | Format `ExceptionType: message` line |
+| 701-900 | Exception groups | Print `ExceptionGroup` trees (3.11+) |
+| 901-1000 | `PyTraceBack_Limit` | `sys.tracebacklimit` enforcement |
+
+## Reading
+
+### `PyTraceBack_Here`
+
+```c
+// CPython: Python/traceback.c:55 PyTraceBack_Here
+int
+PyTraceBack_Here(PyFrameObject *frame)
+{
+    PyObject *exc = tstate->exc_info->exc_value;
+    PyTracebackObject *newtb = PyObject_GC_New(PyTracebackObject, &PyTraceBack_Type);
+    newtb->tb_next   = (PyTracebackObject *)PyException_GetTraceback(exc);
+    newtb->tb_frame  = (PyFrameObject *)Py_NewRef(frame);
+    newtb->tb_lasti  = frame->f_lasti;
+    newtb->tb_lineno = PyFrame_GetLineNumber(frame);
+    PyException_SetTraceback(exc, (PyObject *)newtb);
+    return 0;
+}
+```
+
+Called every time an exception propagates through a frame boundary. Builds a linked list of `PyTracebackObject`.
+
+### `PyTraceBack_Print`
+
+```c
+// CPython: Python/traceback.c:155 PyTraceBack_Print
+int
+PyTraceBack_Print(PyObject *v, PyObject *f)
+{
+    if (v == NULL) return 0;
+    /* Limit depth */
+    int limit = -1;
+    PyObject *limitv = PySys_GetObject("tracebacklimit");
+    if (limitv && PyLong_Check(limitv))
+        limit = PyLong_AsLong(limitv);
+    /* Count depth first, then print from limit backwards */
+    int depth = 0;
+    PyObject *tb = v;
+    while (tb != Py_None && tb != NULL) {
+        depth++;
+        tb = ((PyTracebackObject *)tb)->tb_next;
+    }
+    /* Print "Traceback (most recent call last):" */
+    PyFile_WriteString("Traceback (most recent call last):\n", f);
+    tb_printinternal(v, f, limit, depth);
+    return 0;
+}
+```
+
+### Frame line printing
+
+```c
+// CPython: Python/traceback.c:320 tb_print_line
+static int
+tb_print_line(PyObject *f, PyObject *filename, int lineno, PyObject *name)
+{
+    /* Print: '  File "path", line N, in name\n' */
+    PyFile_WriteString("  File \"", f);
+    PyFile_WriteObject(filename, f, Py_PRINT_RAW);
+    PyFile_WriteString("\", line ", f);
+    PyObject *lineno_obj = PyLong_FromLong(lineno);
+    PyFile_WriteObject(lineno_obj, f, Py_PRINT_RAW);
+    PyFile_WriteString(", in ", f);
+    PyFile_WriteObject(name, f, Py_PRINT_RAW);
+    PyFile_WriteString("\n", f);
+    /* Try to print the source line */
+    PyObject *line = _Py_DisplaySourceLine(f, filename, lineno, 4);
+    ...
+}
+```
+
+### Exception group printing (3.11+)
+
+```c
+// CPython: Python/traceback.c:740 print_exception_group
+static int
+print_exception_group(PyObject *f, PyObject *value, int indent, int limit)
+{
+    /* Print the group header, then each sub-exception with indentation */
+    /* Format:
+     *   + Exception Group Traceback (most recent call last):
+     *   |   File "...", line N, in ...
+     *   | ExceptionGroup: message (N sub-exceptions)
+     *   +-+---------------- 1 ----------------
+     *     | Traceback ...
+     *     | SubError: message
+     *     +------------------------------------
+     */
+    ...
+}
+```
+
+## gopy notes
+
+`PyTraceBack_Here` is called by `vm.Frame.propagateException` as the exception unwinds. `PyTracebackObject` maps to `objects.Traceback` with `Next`, `Frame`, `Lineno` fields. `PyTraceBack_Print` calls `module/sys/module.go`'s stderr writer. `_Py_DisplaySourceLine` reads source via `linecache`.

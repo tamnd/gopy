@@ -1,0 +1,110 @@
+---
+title: Objects/descrobject.c (part 3)
+description: "descrobject.c part 3: classmethod, staticmethod descriptors. __get__ for classmethod returns a bound method with the class; staticmethod returns the raw function."
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/descrobject.c" />
+
+This annotation covers `classmethod` and `staticmethod` — the two built-in non-data descriptors that modify how methods bind to classes vs instances. See `objects_descrobject_detail` for slot wrappers and `objects_descrobject2_detail` for property and `__set_name__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `classmethod.__new__` | Wrap a callable; store as `cm_callable` |
+| 101-250 | `classmethod.__get__` | On class access: bind to class; on instance: bind to `type(instance)` |
+| 251-400 | `classmethod.__init_subclass__` | Called on class creation |
+| 401-500 | `staticmethod.__new__` | Wrap a callable; store as `sm_callable` |
+| 501-600 | `staticmethod.__get__` | Return `sm_callable` unchanged (no binding) |
+| 601-800 | `classmethod_descriptor` | Built-in classmethod slots (`type.__dict__['mro']`) |
+| 801-1000 | Chaining | `@classmethod @property` and similar stacking |
+| 1001-1400 | `__wrapped__` | Introspection — access the wrapped callable |
+
+## Reading
+
+### `classmethod.__get__`
+
+```c
+// CPython: Objects/descrobject.c:160 cm_descr_get
+static PyObject *
+cm_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    classmethod *cm = (classmethod *)self;
+    if (type == NULL) {
+        if (obj == NULL) {
+            PyErr_SetString(PyExc_TypeError, "descriptor needs an object or type");
+            return NULL;
+        }
+        type = (PyObject *)(Py_TYPE(obj));
+    }
+    /* Bind the callable to 'type' (the class), not to 'obj' (the instance) */
+    if (Py_TYPE(cm->cm_callable)->tp_descr_get != NULL) {
+        /* Support chaining: @classmethod @property */
+        return Py_TYPE(cm->cm_callable)->tp_descr_get(
+            cm->cm_callable, type, (PyObject *)(Py_TYPE(type)));
+    }
+    return PyMethod_New(cm->cm_callable, type);
+}
+```
+
+`C.method()` and `c_instance.method()` both bind to `C` (not `c_instance`).
+
+### `staticmethod.__get__`
+
+```c
+// CPython: Objects/descrobject.c:480 sm_descr_get
+static PyObject *
+sm_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    staticmethod *sm = (staticmethod *)self;
+    if (sm->sm_callable == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "uninitialized staticmethod object");
+        return NULL;
+    }
+    /* No binding: return the callable as-is */
+    if (Py_TYPE(sm->sm_callable)->tp_descr_get != NULL) {
+        /* Support chaining: @staticmethod @property */
+        return Py_TYPE(sm->sm_callable)->tp_descr_get(
+            sm->sm_callable, NULL, type);
+    }
+    return Py_NewRef(sm->sm_callable);
+}
+```
+
+`C.method()` and `c_instance.method()` both return the unwrapped callable with no implicit argument.
+
+### `classmethod` with `__init_subclass__`
+
+```c
+// CPython: Objects/descrobject.c:300 classmethod_get_doc
+/* classmethod wraps __init_subclass__ which is always a classmethod:
+ * when a subclass is created, Python calls:
+ *   type.__init_subclass__(cls, **kwargs)
+ * via the classmethod descriptor on the base class.
+ */
+```
+
+`@classmethod` is the standard way to implement factory methods: `MyClass.from_json(data)` receives `cls=MyClass`.
+
+### `__wrapped__`
+
+```c
+// CPython: Objects/descrobject.c:1050 classmethod_get_wrapped
+static PyObject *
+classmethod_get_wrapped(classmethod *cm, void *Py_UNUSED(ignored))
+{
+    return Py_NewRef(cm->cm_callable);
+}
+```
+
+`@classmethod` exposes `__wrapped__` so `inspect.unwrap` and `functools.wraps` can access the original function.
+
+## gopy notes
+
+`classmethod` and `staticmethod` are in `objects/descr.go`. `classmethod.__get__` creates a `objects.BoundMethod` with `self=type` (the class object). `staticmethod.__get__` returns the underlying callable directly. Both support `__wrapped__` for introspection.

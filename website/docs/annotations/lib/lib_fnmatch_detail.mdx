@@ -1,0 +1,110 @@
+---
+title: Lib/fnmatch.py
+description: "Lib/fnmatch.py: Unix shell-style filename pattern matching — fnmatch(), fnmatchcase(), translate(), filter(). Translates globs to regex."
+cpython_path: Lib/fnmatch.py
+cpython_version: "3.14"
+lines: 130
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/fnmatch.py" />
+
+`fnmatch` matches filenames against Unix shell-style glob patterns. It is used by `pathlib`, `glob`, `shutil`, and `tarfile`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `fnmatch` | Case-insensitive on Windows, case-sensitive on POSIX |
+| 31-60 | `fnmatchcase` | Always case-sensitive |
+| 61-100 | `translate` | Convert glob pattern to a regex string |
+| 101-130 | `filter` | `[name for name in names if fnmatch(name, pat)]` |
+
+## Reading
+
+### `fnmatch`
+
+```python
+# CPython: Lib/fnmatch.py:28 fnmatch
+def fnmatch(name, pat):
+    """Test whether NAME matches PAT.
+    Pattern language:
+      *      — matches everything (not path separators in most contexts)
+      ?      — matches any single character
+      [seq]  — matches any character in seq
+      [!seq] — matches any character not in seq
+    """
+    name = os.path.normcase(name)
+    pat  = os.path.normcase(pat)
+    return fnmatchcase(name, pat)
+```
+
+`os.path.normcase` lowercases on Windows; is a no-op on POSIX.
+
+### `translate`
+
+```python
+# CPython: Lib/fnmatch.py:65 translate
+def translate(pat):
+    """Translate a shell PATTERN to a regular expression.
+    There is no way to quote meta-characters.
+    """
+    i, n = 0, len(pat)
+    res = ''
+    while i < n:
+        c = pat[i]
+        i += 1
+        if c == '*':
+            res += '.*'
+        elif c == '?':
+            res += '.'
+        elif c == '[':
+            # Character class — find matching ']'
+            j = i
+            if j < n and pat[j] == '!': j += 1
+            if j < n and pat[j] == ']': j += 1
+            while j < n and pat[j] != ']': j += 1
+            if j >= n:
+                res += r'\['
+            else:
+                stuff = pat[i:j].replace('\\', '\\\\')
+                i = j + 1
+                if stuff[0] == '!':
+                    stuff = '^' + stuff[1:]
+                elif stuff[0] == '^':
+                    stuff = '\\' + stuff
+                res += '[' + stuff + ']'
+        else:
+            res += re.escape(c)
+    return r'(?s:%s)\Z' % res
+```
+
+`fnmatch.translate('*.py')` → `'(?s:.*\\.py)\\Z'`. The `(?s:...)` flag makes `.` match newlines.
+
+### `filter`
+
+```python
+# CPython: Lib/fnmatch.py:115 filter
+def filter(names, pat):
+    """Construct a list of all names matching pat."""
+    result = []
+    pat = os.path.normcase(pat)
+    match = _compile_pattern(pat)
+    if os.path is posixpath:
+        for name in names:
+            if match(name):
+                result.append(name)
+    else:
+        for name in names:
+            if match(os.path.normcase(name)):
+                result.append(name)
+    return result
+```
+
+`_compile_pattern` caches compiled regexes using `functools.lru_cache`.
+
+## gopy notes
+
+`fnmatch` is pure Python and importable when `re`, `os`, and `functools` work. The `translate` function's regex output is used directly by `pathlib.Path.glob()` via `fnmatch.translate`. The LRU cache for compiled patterns avoids re-compilation on repeated use with the same pattern.

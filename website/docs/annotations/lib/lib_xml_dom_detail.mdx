@@ -1,0 +1,112 @@
+---
+title: Lib/xml/dom/minidom.py
+description: "Lib/xml/dom/minidom.py: DOM Level 2 — Document, Element, Text, Attr nodes. parse(), parseString(), toprettyxml(), toxml()."
+cpython_path: Lib/xml/dom/minidom.py
+cpython_version: "3.14"
+lines: 1900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/xml/dom/minidom.py" />
+
+`xml.dom.minidom` is a lightweight DOM (Document Object Model) implementation. It is primarily used for generating and modifying XML documents.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Node` | Base class: `nodeType`, `parentNode`, `childNodes`, `firstChild` |
+| 101-300 | `Document` | Root node: `documentElement`, `createElement`, `createTextNode` |
+| 301-600 | `Element` | `tagName`, `getAttribute`, `setAttribute`, `appendChild` |
+| 601-800 | `Text`, `Comment`, `CDATA` | Leaf node types |
+| 801-1000 | `Attr` | Attribute node: `name`, `value` |
+| 1001-1300 | `parse`, `parseString` | SAX-driven parsing into DOM tree |
+| 1301-1600 | `toxml`, `toprettyxml` | Serialize DOM back to XML string |
+| 1601-1900 | Namespace support | `createElementNS`, `createAttributeNS` |
+
+## Reading
+
+### Node tree
+
+```python
+# CPython: Lib/xml/dom/minidom.py:55 Node
+class Node(xml.dom.Node):
+    namespaceURI = None
+    parentNode = None
+    ownerDocument = None
+    nextSibling = None
+    previousSibling = None
+
+    def insertBefore(self, newChild, refChild):
+        ...
+        if refChild is None:
+            return self.appendChild(newChild)
+        ...
+```
+
+### `parse` and `parseString`
+
+```python
+# CPython: Lib/xml/dom/minidom.py:1040 parse
+def parse(file, parser=None, bufsize=None):
+    """Return a Document from the given input.
+    Uses expat via xml.sax under the hood.
+    """
+    if isinstance(file, str):
+        with open(file, 'rb') as fp:
+            return _do_pulldom_parse(fp.read(), parser)
+    return _do_pulldom_parse(file.read(), parser)
+
+def parseString(string, parser=None):
+    return _do_pulldom_parse(string, parser)
+```
+
+Both functions use `xml.dom.pulldom` which drives a SAX parser and builds the DOM lazily.
+
+### `Element.getAttribute`
+
+```python
+# CPython: Lib/xml/dom/minidom.py:480 getAttribute
+def getAttribute(self, attname):
+    try:
+        return self._attrs[attname].value
+    except KeyError:
+        return ""
+```
+
+Attributes are stored in `_attrs = {}` (a dict mapping name to `Attr` nodes). Missing attributes return `""` per DOM spec.
+
+### `toxml`
+
+```python
+# CPython: Lib/xml/dom/minidom.py:1350 toxml
+def toxml(self, encoding=None, standalone=None):
+    """Return the XML as a string.
+    If encoding is given, return bytes; otherwise return str.
+    """
+    writer = io.StringIO()
+    if self.nodeType == Node.DOCUMENT_NODE:
+        self.writexml(writer, encoding=encoding, standalone=standalone)
+    else:
+        self.writexml(writer)
+    return writer.getvalue()
+```
+
+### `toprettyxml`
+
+```python
+# CPython: Lib/xml/dom/minidom.py:1395 toprettyxml
+def toprettyxml(self, indent="\t", newl="\n", encoding=None, standalone=None):
+    """Return indented XML.
+    Adds whitespace-only text nodes to simulate indentation.
+    """
+    ...
+```
+
+`toprettyxml` adds whitespace text nodes, which can cause issues if the original document used mixed content (text + elements). For pure structured data it works well.
+
+## gopy notes
+
+`xml.dom.minidom` is pure Python and importable when `xml.sax`, `xml.dom`, `io`, and `codecs` work. The DOM tree is plain Python objects with no C acceleration. For high-performance XML, `xml.etree.ElementTree` (`Modules/_elementtree.c`) is preferred.

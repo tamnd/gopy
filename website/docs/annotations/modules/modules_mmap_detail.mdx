@@ -1,0 +1,121 @@
+---
+title: Modules/mmapmodule.c
+description: "Modules/mmapmodule.c: mmap.mmap — memory-mapped files. mmap(), read/write/seek, find/rfind, flush, resize, buffer protocol."
+cpython_path: Modules/mmapmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mmapmodule.c" />
+
+`mmap` maps a file (or anonymous memory) into the process address space. Read and write operations go directly to/from the mapped region without `read()`/`write()` syscalls.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `mmap_new` | `mmap(fileno, length, tagname, access, offset)` |
+| 151-300 | `mmap_read_method` | `mmap.read(n)` — copy from mapped memory |
+| 301-450 | `mmap_write_method` | `mmap.write(data)` — copy to mapped memory |
+| 451-600 | `mmap_seek_method` | Move internal position pointer |
+| 601-750 | `mmap_find_method` | Byte pattern search (Boyer-Moore-Horspool) |
+| 751-900 | `mmap_flush_method` | `msync()` — flush to disk |
+| 901-1000 | `mmap_resize_method` | `ftruncate()` + `mremap()` |
+| 1001-1100 | `mmap_getitem`, `mmap_setitem` | `mv[i]` → byte; `mv[i:j]` → bytes slice |
+| 1101-1200 | Buffer protocol | Expose mapping as a writable buffer |
+| 1201-1400 | Access flags | `ACCESS_READ`, `ACCESS_WRITE`, `ACCESS_COPY` |
+
+## Reading
+
+### `mmap_new`
+
+```c
+// CPython: Modules/mmapmodule.c:88 mmap_new
+static PyObject *
+mmap_new(PyTypeObject *type, PyObject *args, PyObject *kwdict)
+{
+    int fileno = -1;
+    Py_ssize_t map_size;
+    int prot  = PROT_WRITE | PROT_READ;
+    int flags = MAP_SHARED;
+    off_t offset = 0;
+    /* anonymous: fileno=-1 or 0 → MAP_ANONYMOUS */
+    void *data = mmap(NULL, map_size, prot, flags, fileno, offset);
+    if (data == MAP_FAILED) return PyErr_SetFromErrno(PyExc_OSError);
+    m_obj->data     = data;
+    m_obj->size     = map_size;
+    m_obj->pos      = 0;
+    m_obj->exports  = 0;
+    m_obj->access   = access;
+    return (PyObject *)m_obj;
+}
+```
+
+### `read`
+
+```c
+// CPython: Modules/mmapmodule.c:185 mmap_read_method
+static PyObject *
+mmap_read_method(mmap_object *self, PyObject *args)
+{
+    Py_ssize_t num_bytes = -1;
+    if (num_bytes < 0 || num_bytes > (Py_ssize_t)(self->size - self->pos))
+        num_bytes = self->size - self->pos;
+    PyObject *result = PyBytes_FromStringAndSize(self->data + self->pos, num_bytes);
+    self->pos += num_bytes;
+    return result;
+}
+```
+
+Reads from the memory-mapped region with a `memcpy` — no syscall.
+
+### `flush`
+
+```c
+// CPython: Modules/mmapmodule.c:810 mmap_flush_method
+static PyObject *
+mmap_flush_method(mmap_object *self, PyObject *args)
+{
+    Py_ssize_t offset = 0, size = self->size;
+    PyArg_ParseTuple(args, "|nn:flush", &offset, &size);
+    /* msync: ensure dirty pages are written to the underlying file */
+    if (msync(self->data + offset, size, MS_SYNC) != 0)
+        return PyErr_SetFromErrno(PyExc_OSError);
+    Py_RETURN_NONE;
+}
+```
+
+`flush()` calls `msync(MS_SYNC)` which blocks until pages are written to disk.
+
+### Access modes
+
+```c
+// CPython: Modules/mmapmodule.c:1280 access flags
+/* ACCESS_READ  → PROT_READ | MAP_SHARED      (read-only) */
+/* ACCESS_WRITE → PROT_READ|WRITE | MAP_SHARED (read-write, changes visible to others) */
+/* ACCESS_COPY  → PROT_READ|WRITE | MAP_PRIVATE (copy-on-write, changes private) */
+```
+
+### Buffer protocol
+
+```c
+// CPython: Modules/mmapmodule.c:1140 mmap_buffer_getbuf
+static int
+mmap_buffer_getbuf(mmap_object *self, Py_buffer *view, int flags)
+{
+    if (self->exports == 0 && self->access == ACCESS_READ)
+        return PyBuffer_FillInfo(view, (PyObject *)self,
+                                 self->data, self->size, 1 /* readonly */, flags);
+    return PyBuffer_FillInfo(view, (PyObject *)self,
+                             self->data, self->size, 0 /* writable */, flags);
+}
+```
+
+`re.search(pattern, mmap_obj)` searches the mmap directly without copying to bytes.
+
+## gopy notes
+
+`mmap` is in `module/mmap/`. The mapping uses `syscall.Mmap` on POSIX or `windows.MapViewOfFile` on Windows. `flush` uses `syscall.Msync`. The buffer protocol exposes the mapped `[]byte` slice. Resize uses `syscall.Ftruncate` to grow the file then `syscall.Mremap` (Linux) to grow the mapping.

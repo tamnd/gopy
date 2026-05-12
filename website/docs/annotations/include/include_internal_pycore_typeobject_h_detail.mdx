@@ -1,0 +1,82 @@
+---
+title: "Include/internal/pycore_typeobject.h"
+description: "pycore_typeobject.h: type internals — PyTypeObject layout extension, tp_version_tag, method caches, type watchers, MRO slot update machinery."
+cpython_path: Include/internal/pycore_typeobject.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_typeobject.h" />
+
+`pycore_typeobject.h` extends `PyTypeObject` with internal fields for the method cache, type versioning, and the watcher mechanism used by the specializing optimizer.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `_PyType_CAST` | Safe downcast from `PyObject *` to `PyTypeObject *` |
+| 51-100 | `tp_version_tag` | Monotonic version incremented on type modification |
+| 101-140 | Method cache | `_PyType_Lookup` result cache per (type, name) pair |
+| 141-170 | Type watchers | Register callbacks on type modification |
+| 171-200 | `_PyTypes_InitSlotDefs` | Initialize the slot-to-method mapping table |
+
+## Reading
+
+### `tp_version_tag`
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:62 tp_version_tag
+/* Assigned by _PyType_Lookup on first specialization of a call site */
+/* Incremented whenever the type's method resolution changes */
+/* Used by LOAD_ATTR_METHOD_WITH_VALUES and similar specialized opcodes */
+/* to invalidate the specialization cache */
+unsigned int tp_version_tag;  /* field in PyTypeObject */
+```
+
+Every time a type's `__dict__` is modified, `tp_version_tag` is incremented. Specializing opcodes cache the version tag and check it at runtime; a mismatch means the type changed and the cache is stale.
+
+### Method cache
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:112 _PyType_Lookup
+/* _PyType_Lookup searches the MRO for a name.
+ * The result is cached in a per-interpreter method cache keyed by
+ * (type, name, tp_version_tag).
+ * Cache entries are invalidated when tp_version_tag changes.
+ */
+PyObject *_PyType_Lookup(PyTypeObject *type, PyObject *name);
+PyObject *_PyType_LookupRef(PyTypeObject *type, PyObject *name);  /* borrowed ref */
+```
+
+The method cache avoids MRO traversal on every attribute access. A cache hit is an O(1) lookup instead of O(MRO depth).
+
+### Type watchers
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:148 type watchers
+typedef int (*PyType_WatchCallback)(PyTypeObject *);
+int PyType_Watch(int watcher_id, PyTypeObject *type);
+int PyType_Unwatch(int watcher_id, PyTypeObject *type);
+/* Up to 8 watchers (TYPE_MAX_WATCHERS) can be registered */
+/* Called whenever the type is modified */
+```
+
+The JIT/specializing optimizer (tier 2) uses watchers to invalidate inline caches when a class is modified.
+
+### Slot definitions
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:178 _PyTypes_InitSlotDefs
+/* Maps C slot names (tp_hash, tp_str, etc.) to Python dunder names (__hash__, __str__) */
+/* Initialized once at interpreter startup */
+void _PyTypes_InitSlotDefs(void);
+```
+
+`tp_hash` ↔ `__hash__`, `tp_str` ↔ `__str__`, etc. When a type's `__dict__` gets `__hash__` set, the slot mapping is used to update `tp_hash`.
+
+## gopy notes
+
+`tp_version_tag` maps to `objects.Type.version uint32` incremented on every `__setattr__` to the type. The method cache is `objects.TypeMethodCache` — a map from `(type, name)` to `(value, version)` pairs, invalidated on version mismatch. Type watchers are registered via `objects.TypeAddWatcher(cb)` and stored in a per-type callback slice.
