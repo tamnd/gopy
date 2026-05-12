@@ -1,0 +1,90 @@
+---
+title: Python/compile.c (part 12)
+description: "Python/compile.c part 12: comprehension compilation, implicit nested scope, .0 argument, async comprehensions."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers comprehension code generation. See `python_compile11_detail` for lambda compilation, default arguments, and decorator handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `compiler_comprehension` | Entry: create implicit nested function, set up `.0` arg |
+| 81-180 | `compiler_listcomp` / `compiler_setcomp` / `compiler_dictcomp` | Build-specific wrappers |
+| 181-300 | `compiler_comprehension_generator` | Loop + filter clause code generation |
+| 301-420 | Async comprehension | `async for` inside comprehension body |
+| 421-600 | Inline optimization | `_Py_COMP_USE_INLINED_COMPREHENSIONS` fast path |
+
+## Reading
+
+### `compiler_comprehension`
+
+```python
+# CPython: Python/compile.c:5240 compiler_comprehension
+def compiler_comprehension(c, e, type, name, generators, elt, val):
+    # Create an implicit code object with a single parameter '.0'
+    # (the outermost iterable is passed from the enclosing scope)
+    co = compiler_enter_scope(c, name, COMPILER_SCOPE_COMPREHENSION, e, ...)
+    # Emit: MAKE_FUNCTION, call with GET_ITER on outermost iterable
+    compiler_comprehension_generator(c, generators, 0, 0, elt, val, type)
+    # Emit: RETURN_VALUE
+    compiler_exit_scope(c)
+    # In enclosing scope: evaluate outermost iterable, call the comprehension function
+```
+
+The outermost `for` clause's iterable is evaluated in the enclosing scope. The comprehension function receives it as `.0` (parameter index 0). Inner `for` clauses run inside the comprehension scope, so they can access enclosing variables.
+
+### `compiler_comprehension_generator`
+
+```c
+// CPython: Python/compile.c:5310 compiler_comprehension_generator
+static int
+compiler_comprehension_generator(struct compiler *c, asdl_comprehension_seq *generators,
+                                  int gen_index, int depth, expr_ty elt, expr_ty val, int type)
+{
+    comprehension_ty gen = asdl_seq_GET(generators, gen_index);
+    /* Emit: GET_ITER on gen->iter (or GET_AITER for async) */
+    /* Loop top: FOR_ITER */
+    compiler_visit_expr(c, gen->iter);
+    ADDOP(c, GET_ITER);
+    /* top: */ ADDOP(c, FOR_ITER);  /* jump to end on exhaustion */
+    compiler_visit_expr(c, gen->target);  /* STORE_FAST */
+    /* Emit filter conditions */
+    for each if_clause:
+        compiler_visit_expr(c, if_clause);
+        ADDOP_JUMP(c, POP_JUMP_IF_FALSE, top);
+    /* Recurse for inner generators, or emit the output expression */
+    if (gen_index + 1 < n_generators)
+        compiler_comprehension_generator(c, generators, gen_index + 1, ...);
+    else
+        emit_output(c, type, elt, val);  /* LIST_APPEND / SET_ADD / MAP_ADD */
+    ADDOP_JUMP(c, JUMP_BACKWARD, top);
+    /* end: */
+}
+```
+
+Each `for` clause generates a `GET_ITER` / `FOR_ITER` / `JUMP_BACKWARD` loop. Filter `if` clauses become `POP_JUMP_IF_FALSE`. The innermost clause emits `LIST_APPEND` (list comp), `SET_ADD` (set comp), or `MAP_ADD` (dict comp).
+
+### Inline optimization
+
+```c
+// CPython: Python/compile.c:5200 COMPREHENSION_USE_INLINED
+#ifdef _Py_COMP_USE_INLINED_COMPREHENSIONS
+    /* Skip the function creation: emit comprehension code directly
+       in the enclosing frame. Uses a temporary fast local for the
+       accumulator. Much faster for tight loops. */
+```
+
+In CPython 3.12+, simple comprehensions that don't close over outer variables are inlined: no implicit function is created. The accumulator (list/set/dict) lives in a fast local of the enclosing frame, eliminating the call overhead.
+
+## gopy notes
+
+`compiler_comprehension` is in `compile/codegen_expr.go`. The implicit `.0` argument is emitted as a synthetic parameter. `compiler_comprehension_generator` emits `FOR_ITER` / `JUMP_BACKWARD` via `compile.Flowgraph`. The inline optimization is not yet implemented in gopy; all comprehensions use the nested function path.

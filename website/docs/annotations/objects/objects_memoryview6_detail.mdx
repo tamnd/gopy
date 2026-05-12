@@ -1,0 +1,109 @@
+---
+title: Objects/memoryview.c (part 6)
+description: "Objects/memoryview.c part 6: memoryview.cast, memoryview.tolist, memoryview.tobytes, contiguity checks."
+cpython_path: Objects/memoryview.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/memoryview.c" />
+
+This annotation covers memoryview data extraction and reshaping. See `objects_memoryview5_detail` for `memoryview.__new__`, `__getitem__`, `__setitem__`, and slicing.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `memoryview.cast` | Reinterpret the buffer as a different format/shape |
+| 81-160 | `memoryview.tobytes` | Copy buffer data to a new bytes object |
+| 161-240 | `memoryview.tolist` | Recursively convert to nested Python lists |
+| 241-340 | `memoryview.toreadonly` | Return a read-only view of the same buffer |
+| 341-600 | Contiguity | C-contiguous, F-contiguous, strides validation |
+
+## Reading
+
+### `memoryview.cast`
+
+```c
+// CPython: Objects/memoryview.c:2340 memoryview_cast_impl
+static PyObject *
+memoryview_cast_impl(PyMemoryViewObject *self, PyObject *format, PyObject *shape)
+{
+    Py_buffer *src = &self->view;
+    /* Validate: src must be contiguous */
+    if (!PyBuffer_IsContiguous(src, 'C') && !PyBuffer_IsContiguous(src, 'F')) {
+        PyErr_SetString(PyExc_TypeError, "memoryview: underlying buffer is not contiguous");
+        return NULL;
+    }
+    /* Compute new itemsize from format */
+    Py_ssize_t itemsize = get_native_fmtchar(&fmtchar, fmt);
+    /* Total byte size must match */
+    if (src->len % itemsize != 0) {
+        PyErr_SetString(PyExc_TypeError, "memoryview.cast(): ...");
+        return NULL;
+    }
+    ...
+}
+```
+
+`mv.cast('I')` reinterprets a bytes view as unsigned 32-bit integers. The total byte size must be divisible by the new item size. Cast produces a new 1-D view over the same buffer; no data is copied.
+
+### `memoryview.tobytes`
+
+```c
+// CPython: Objects/memoryview.c:2440 memoryview_tobytes_impl
+static PyObject *
+memoryview_tobytes_impl(PyMemoryViewObject *self, const char *order)
+{
+    Py_buffer *src = &self->view;
+    if (PyBuffer_IsContiguous(src, order[0])) {
+        /* Fast path: direct copy */
+        return PyBytes_FromStringAndSize(src->buf, src->len);
+    }
+    /* Slow path: pack non-contiguous data */
+    PyObject *bytes = PyBytes_FromStringAndSize(NULL, src->len);
+    Py_buffer dest;
+    PyObject_GetBuffer(bytes, &dest, PyBUF_SIMPLE);
+    if (PyBuffer_ToContiguous(dest.buf, src, src->len, order[0]) < 0) {
+        ...
+    }
+    return bytes;
+}
+```
+
+`mv.tobytes()` defaults to C order. For non-contiguous views (e.g., after slicing with a step), `PyBuffer_ToContiguous` packs the scattered data into a flat bytes object using the stride information.
+
+### `memoryview.tolist`
+
+```c
+// CPython: Objects/memoryview.c:2520 tolist_rec
+static PyObject *
+tolist_rec(const char *ptr, Py_ssize_t ndim,
+           const Py_ssize_t *shape, const Py_ssize_t *strides,
+           const Py_ssize_t *suboffsets, const char *fmt)
+{
+    if (ndim == 0) {
+        return unpack_single(ptr, fmt);
+    }
+    PyObject *lst = PyList_New(shape[0]);
+    for (Py_ssize_t i = 0; i < shape[0]; i++) {
+        const char *item_ptr = ptr + i * strides[0];
+        if (suboffsets && suboffsets[0] >= 0)
+            item_ptr = *(char **)item_ptr + suboffsets[0];
+        PyObject *item = tolist_rec(item_ptr, ndim - 1,
+                                    shape + 1, strides + 1,
+                                    suboffsets ? suboffsets + 1 : NULL, fmt);
+        PyList_SET_ITEM(lst, i, item);
+    }
+    return lst;
+}
+```
+
+`tolist` recursively builds nested Python lists matching the memoryview's shape. For a 2-D view of shape `(3, 4)`, it returns a list of 3 lists of 4 elements. `unpack_single` converts the raw bytes at each element position to a Python object.
+
+## gopy notes
+
+`memoryview.cast` is `objects.MemoryViewCast` in `objects/memoryview.go`. It validates contiguity and creates a new `objects.MemoryView` with updated format and strides. `tobytes` copies via `make([]byte, len)`. `tolist` recursively builds `objects.List` objects.

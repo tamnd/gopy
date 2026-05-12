@@ -1,0 +1,108 @@
+---
+title: Lib/argparse.py (part 3)
+description: "argparse.py part 3: ArgumentParser.parse_args, _parse_known_args, type conversion, error handling."
+cpython_path: Lib/argparse.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/argparse.py" />
+
+This annotation covers the parsing pass. See `lib_argparse2_detail` for `add_argument`, action objects, and `Namespace`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `parse_args` | Entry point; calls `_parse_known_args`, raises on unknowns |
+| 81-200 | `_parse_known_args` | Main loop: classify tokens, consume positionals and optionals |
+| 201-320 | `_get_values` | Convert strings to typed values using `type=` |
+| 321-420 | `_check_value` | Validate against `choices=` |
+| 421-500 | `error` / `exit` | Print usage + message, call `sys.exit(2)` |
+
+## Reading
+
+### `_parse_known_args`
+
+```python
+# CPython: Lib/argparse.py:2340 ArgumentParser._parse_known_args
+def _parse_known_args(self, arg_strings, namespace):
+    # Map optionals: --foo -> action, -f -> action
+    option_string_indices = {}
+    arg_string_pattern_parts = []
+    for i, arg_string in enumerate(arg_strings):
+        if arg_string == '--':
+            # Everything after '--' is positional
+            arg_string_pattern_parts.append('-')
+            for arg_string in arg_strings[i+1:]:
+                arg_string_pattern_parts.append('A')
+            break
+        elif arg_string[0:2] == '--' or (arg_string[0] in self.prefix_chars):
+            option_string_indices[i] = arg_string
+            arg_string_pattern_parts.append('O')
+        else:
+            arg_string_pattern_parts.append('A')
+    # Pattern: 'AOAOA...' for optionals/positionals
+    arg_string_pattern = ''.join(arg_string_pattern_parts)
+    ...
+```
+
+The parser first classifies each token as `O` (optional) or `A` (positional). The resulting pattern string is used with regex to find groups of positionals that can be consumed by each positional action's `nargs`.
+
+### `_get_values`
+
+```python
+# CPython: Lib/argparse.py:2560 ArgumentParser._get_values
+def _get_values(self, action, arg_strings):
+    if not arg_strings and action.nargs == OPTIONAL:
+        value = action.const if action.option_strings else action.default
+        return self._get_value(action, value)
+    elif not arg_strings and action.nargs == ZERO_OR_MORE:
+        if action.option_strings:
+            value = action.const or action.default
+        else:
+            value = action.default
+        ...
+    value = [self._get_value(action, v) for v in arg_strings]
+    for v in value:
+        self._check_value(action, v)
+    ...
+    return value
+
+def _get_value(self, action, arg_string):
+    type_func = self._registry_get('type', action.type, action.type)
+    try:
+        result = type_func(arg_string)
+    except (ArgumentTypeError, TypeError, ValueError) as err:
+        name = getattr(action.type, '__name__', repr(action.type))
+        args = {'type': name, 'value': arg_string}
+        msg = str(err)
+        raise ArgumentError(action, msg)
+    return result
+```
+
+`type=int` means `int(arg_string)` is called. Any `ValueError` or `TypeError` is caught and re-raised as an `ArgumentError` with a useful message. `type=argparse.FileType('r')` is a callable that opens the file.
+
+### Error handling
+
+```python
+# CPython: Lib/argparse.py:2740 ArgumentParser.error
+def error(self, message):
+    self.print_usage(sys.stderr)
+    args = {'prog': self.prog, 'message': message}
+    self.exit(2, _('%(prog)s: error: %(message)s\n') % args)
+
+def exit(self, status=0, message=None):
+    if message:
+        self._print_message(message, _sys.stderr)
+    _sys.exit(status)
+```
+
+`error` always exits with status 2 (the Unix convention for command-line usage errors). The usage is printed to stderr before the message. Overriding `error` to raise instead of exit is the standard way to use argparse as a library component.
+
+## gopy notes
+
+`ArgumentParser` is in `module/argparse/module.go`. `_parse_known_args` builds the token pattern using a Go `strings.Builder`. `_get_value` calls the type function via `objects.CallOneArg`. `error` calls `os.Exit(2)` after writing to stderr.

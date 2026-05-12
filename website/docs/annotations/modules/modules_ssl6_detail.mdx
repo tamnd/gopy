@@ -1,0 +1,95 @@
+---
+title: Modules/_ssl.c (part 6)
+description: "_ssl.c part 6: SSLSocket.read, SSLSocket.write, handshake, shutdown, certificate verification."
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ssl.c" />
+
+This annotation covers SSL I/O and session lifecycle. See `modules_ssl5_detail` for `SSLContext`, certificate loading, and protocol negotiation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SSLSocket.do_handshake` | Complete the TLS handshake |
+| 81-180 | `SSLSocket.read` | Read decrypted data from the SSL connection |
+| 181-280 | `SSLSocket.write` | Encrypt and send data |
+| 281-380 | `SSLSocket.shutdown` | Send TLS close_notify alert |
+| 381-600 | Certificate verification | `SSL_get_peer_certificate`, `match_hostname` |
+
+## Reading
+
+### `SSLSocket.do_handshake`
+
+```c
+// CPython: Modules/_ssl.c:2480 _ssl__SSLObject_do_handshake_impl
+static PyObject *
+_ssl__SSLObject_do_handshake_impl(PySSLObject *self)
+{
+    int ret;
+    do {
+        PySSL_BEGIN_ALLOW_THREADS
+        ret = SSL_do_handshake(self->ssl);
+        PySSL_END_ALLOW_THREADS
+        err = _PySSL_errno(ret <= 0, self->ssl, ret);
+    } while (err.ssl == SSL_ERROR_WANT_READ || err.ssl == SSL_ERROR_WANT_WRITE);
+    if (ret < 1) return PySSL_SetError(self, ret, __FILE__, __LINE__);
+    Py_RETURN_NONE;
+}
+```
+
+The handshake loop retries on `WANT_READ`/`WANT_WRITE`, which occur when the underlying socket needs to exchange more data. For non-blocking sockets, the caller must handle `ssl.SSLWantReadError` and retry after the socket is readable.
+
+### `SSLSocket.read`
+
+```c
+// CPython: Modules/_ssl.c:2540 _ssl__SSLObject_read_impl
+static PyObject *
+_ssl__SSLObject_read_impl(PySSLObject *self, Py_ssize_t len, ...)
+{
+    PyObject *dest = PyBytes_FromStringAndSize(NULL, len);
+    char *mem = PyBytes_AS_STRING(dest);
+    do {
+        PySSL_BEGIN_ALLOW_THREADS
+        count = SSL_read(self->ssl, mem, len);
+        PySSL_END_ALLOW_THREADS
+        err = _PySSL_errno(count <= 0, self->ssl, count);
+    } while (err.ssl == SSL_ERROR_WANT_READ || err.ssl == SSL_ERROR_WANT_WRITE);
+    if (count <= 0) {
+        Py_DECREF(dest);
+        return PySSL_SetError(self, count, __FILE__, __LINE__);
+    }
+    if (count != len && _PyBytes_Resize(&dest, count) < 0) return NULL;
+    return dest;
+}
+```
+
+`SSL_read` may return fewer bytes than requested. The pre-allocated buffer is resized to the actual count. The GIL is released during the OpenSSL call, allowing other threads to run while waiting for data.
+
+### Certificate verification
+
+```c
+// CPython: Modules/_ssl.c:1640 _ssl__SSLObject_getpeercert_impl
+static PyObject *
+_ssl__SSLObject_getpeercert_impl(PySSLObject *self, int binary_mode)
+{
+    X509 *certificate = SSL_get_peer_certificate(self->ssl);
+    if (certificate == NULL) Py_RETURN_NONE;
+    if (binary_mode) {
+        return _certificate_to_der(certificate);
+    }
+    return _decode_certificate(certificate);
+}
+```
+
+`getpeercert()` returns a dict with `subject`, `issuer`, `notBefore`, `notAfter`, `subjectAltName`, and `serialNumber` parsed from the X.509 certificate. `binary_mode=True` returns the raw DER bytes. After `do_handshake`, CPython automatically calls `match_hostname` if `check_hostname=True` on the context.
+
+## gopy notes
+
+`SSLSocket.do_handshake` is in `module/ssl/module.go` using Go's `crypto/tls` package. `read` calls `tls.Conn.Read`. `write` calls `tls.Conn.Write`. Certificate parsing uses Go's `x509.Certificate` and is converted to a Python dict via `objects.NewDict`.
