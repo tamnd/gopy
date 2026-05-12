@@ -1,0 +1,127 @@
+---
+title: Objects/setobject.c (part 10)
+description: "Objects/setobject.c part 10: set.union, set.intersection, set.difference, set.symmetric_difference."
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/setobject.c" />
+
+This annotation covers set algebra operations. See `objects_setobject9_detail` for `set.add`, `set.discard`, `set.pop`, and the hash table internals.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `set.union` / `\|` | Return a new set with elements from both |
+| 81-160 | `set.intersection` / `&` | Return a new set with common elements |
+| 161-240 | `set.difference` / `-` | Return elements in self but not other |
+| 241-320 | `set.symmetric_difference` / `^` | Elements in exactly one of the two sets |
+| 321-500 | Update variants | `update`, `intersection_update`, `difference_update` |
+
+## Reading
+
+### `set.union`
+
+```c
+// CPython: Objects/setobject.c:1280 set_union
+static PyObject *
+set_union(PySetObject *so, PyObject *args)
+{
+    PySetObject *result = (PySetObject *)PySet_New((PyObject *)so);
+    for each other in args:
+        if (set_update_internal(result, other) < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+    return (PyObject *)result;
+}
+```
+
+`set.union(a, b, c)` creates a copy of `self` and updates it with each argument. The `|` operator calls `set_or` which calls `set_union` with one argument.
+
+### `set.intersection`
+
+```c
+// CPython: Objects/setobject.c:1340 set_intersection
+static PyObject *
+set_intersection(PySetObject *so, PyObject *other)
+{
+    /* Iterate the smaller set; test membership in the larger */
+    PySetObject *tmp;
+    if (PySet_GET_SIZE(so) > PyAnySet_GET_SIZE(other)) {
+        tmp = so; so = (PySetObject *)other; other = (PyObject *)tmp;
+    }
+    PySetObject *result = (PySetObject *)PySet_New(NULL);
+    PyObject *key;
+    while (set_next(so, &pos, &entry)) {
+        key = entry->key;
+        int rv = set_contains_key(other, key);
+        if (rv > 0) set_add_key(result, key);
+    }
+    return (PyObject *)result;
+}
+```
+
+Intersection iterates the smaller set and tests membership in the larger one. This is O(min(|A|, |B|)) lookup operations.
+
+### `set.difference`
+
+```c
+// CPython: Objects/setobject.c:1420 set_difference
+static PyObject *
+set_difference(PySetObject *so, PyObject *other)
+{
+    PySetObject *result = (PySetObject *)PySet_New((PyObject *)so);
+    if (PySet_GET_SIZE(other) == 0)
+        return (PyObject *)result;
+    /* Iterate result; remove elements that appear in other */
+    PyObject *key;
+    while (set_next(result, &pos, &entry)) {
+        key = entry->key;
+        if (set_contains_key(other, key)) {
+            set_discard_key(result, key);
+        }
+    }
+    return (PyObject *)result;
+}
+```
+
+`A - B` copies `A` then removes elements found in `B`. Iterating the copy while removing from it is safe because `set_discard_key` does not resize the table during iteration.
+
+### `set.symmetric_difference`
+
+```c
+// CPython: Objects/setobject.c:1480 set_symmetric_difference
+static PyObject *
+set_symmetric_difference(PySetObject *so, PyObject *other)
+{
+    /* result = (A | B) - (A & B) = A.copy(); result ^= B */
+    PySetObject *result = (PySetObject *)PySet_New((PyObject *)so);
+    set_symmetric_difference_update(result, other);
+    return (PyObject *)result;
+}
+
+static PyObject *
+set_symmetric_difference_update(PySetObject *so, PyObject *other)
+{
+    /* For each item in other: toggle membership in so */
+    PyObject *key;
+    while (iterable_next):
+        if (set_contains_key(so, key))
+            set_discard_key(so, key);
+        else
+            set_add_key(so, key);
+    return Py_None;
+}
+```
+
+Symmetric difference toggles membership: elements already in `so` are removed; elements not in `so` are added.
+
+## gopy notes
+
+`set.union` is `objects.SetUnion` in `objects/set.go`. `set.intersection` iterates the smaller set and calls `objects.SetContains`. `set.difference` and `set.symmetric_difference` are `objects.SetDifference` and `objects.SetSymmetricDifference`. Update variants modify in-place.

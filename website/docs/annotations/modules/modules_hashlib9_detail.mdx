@@ -1,0 +1,107 @@
+---
+title: Modules/_hashopenssl.c (part 9)
+description: "_hashopenssl.c part 9: hashlib.new, HASH.update, HASH.digest, HASH.hexdigest, HASH.copy."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+This annotation covers the OpenSSL-backed hash object API. See `modules_hashlib8_detail` for `hashlib.sha256`, `hashlib.md5`, and the algorithm registry.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `hashlib.new` | Create a hash object by algorithm name |
+| 81-160 | `HASH.update` | Feed data into the hash context |
+| 161-240 | `HASH.digest` | Return the digest as bytes |
+| 241-320 | `HASH.hexdigest` | Return the digest as a hex string |
+| 321-500 | `HASH.copy` | Clone the hash state |
+
+## Reading
+
+### `hashlib.new`
+
+```c
+// CPython: Modules/_hashopenssl.c:480 _hashlib_new_impl
+static PyObject *
+_hashlib_new_impl(PyObject *module, PyObject *name_obj, PyObject *data,
+                  int usedforsecurity)
+{
+    const EVP_MD *digest = py_digest_by_name(module, name_obj, Py_hash_type_all);
+    if (digest == NULL) {
+        /* OpenSSL doesn't know it; try _hashlib's builtin table */
+        ...
+    }
+    return EVPnew(module, digest, data, Py_SIZE(data_buf), usedforsecurity);
+}
+```
+
+`hashlib.new('sha3_256')` looks up the algorithm via `EVP_get_digestbyname`. `usedforsecurity=False` allows MD5 and SHA1 even when OpenSSL is in FIPS mode.
+
+### `HASH.update`
+
+```c
+// CPython: Modules/_hashopenssl.c:640 _hashlib_HASH_update_impl
+static PyObject *
+_hashlib_HASH_update_impl(EVPobject *self, PyObject *obj)
+{
+    Py_buffer view;
+    PyObject_GetBuffer(obj, &view, PyBUF_SIMPLE);
+    Py_BEGIN_ALLOW_THREADS
+    int result = EVP_DigestUpdate(self->ctx, view.buf, view.len);
+    Py_END_ALLOW_THREADS
+    PyBuffer_Release(&view);
+    if (result == 0) {
+        _setException(PyExc_ValueError, "EVP_DigestUpdate() failed");
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`update` accepts any buffer-protocol object. The GIL is released for the `EVP_DigestUpdate` call, allowing parallel hashing in multi-threaded programs.
+
+### `HASH.digest`
+
+```c
+// CPython: Modules/_hashopenssl.c:700 _hashlib_HASH_digest_impl
+static PyObject *
+_hashlib_HASH_digest_impl(EVPobject *self)
+{
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_size;
+    /* Clone context to avoid consuming it */
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_MD_CTX_copy_ex(ctx, self->ctx);
+    EVP_DigestFinal_ex(ctx, digest, &digest_size);
+    EVP_MD_CTX_free(ctx);
+    return PyBytes_FromStringAndSize((const char *)digest, digest_size);
+}
+```
+
+`digest()` clones the EVP context so the hash object remains usable after the call. `EVP_DigestFinal_ex` on the clone does not modify the original context.
+
+### `HASH.copy`
+
+```c
+// CPython: Modules/_hashopenssl.c:760 _hashlib_HASH_copy_impl
+static PyObject *
+_hashlib_HASH_copy_impl(EVPobject *self)
+{
+    EVPobject *newobj = newEVPobject(module);
+    EVP_MD_CTX_copy_ex(newobj->ctx, self->ctx);
+    return (PyObject *)newobj;
+}
+```
+
+`hash.copy()` forks the hash state. The copy can be updated independently: useful for computing the hash of a stream at multiple checkpoints.
+
+## gopy notes
+
+`hashlib.new` is `module/hashlib.New` in `module/hashlib/module.go` using Go's `crypto` package. `update` calls the `hash.Hash.Write` method. `digest` calls `hash.Sum(nil)`. `copy` clones by re-hashing the accumulated input (Go's hash interface lacks a clone method for most algorithms; SHA-256 uses a workaround).

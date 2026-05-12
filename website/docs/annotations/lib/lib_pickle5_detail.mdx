@@ -1,0 +1,110 @@
+---
+title: Lib/pickle.py (part 5)
+description: "pickle.py part 5: Pickler.dump_reduce, load_reduce, persistent_id, dispatch_table, copyreg."
+cpython_path: Lib/pickle.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pickle.py" />
+
+This annotation covers the `__reduce__` protocol and customization hooks. See `lib_pickle4_detail` for `save_list`, `save_dict`, `save_bytes`, and protocol 5.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Pickler.save_reduce` | Serialize an object using `__reduce__` or `__reduce_ex__` |
+| 81-160 | `Unpickler.load_reduce` | Execute `REDUCE` opcode: call `callable(*args)` |
+| 161-240 | `Pickler.persistent_id` | Hook for persistent external references |
+| 241-320 | `dispatch_table` | Per-pickler copyreg-style type→reduce mapping |
+| 321-500 | `copyreg.pickle` / `copyreg.dispatch_table` | Global type registration |
+
+## Reading
+
+### `Pickler.save_reduce`
+
+```python
+# CPython: Lib/pickle.py:420 Pickler.save_reduce
+def save_reduce(self, func, args, state=None, listitems=None,
+                dictitems=None, state_setter=None, obj=None):
+    save = self.save
+    write = self.write
+    if self.proto >= 2:
+        code = _extension_registry.get((func.__module__, func.__qualname__))
+        if code:
+            ...
+            write(EXT1 + pack('<B', code))
+            return
+    save(func)
+    save(args)
+    write(REDUCE)
+    if obj is not None:
+        self.memoize(obj)
+    if state is not None:
+        save(state)
+        write(BUILD)
+    if listitems is not None:
+        self._batch_appends(listitems)
+    if dictitems is not None:
+        self._batch_setitems(dictitems)
+```
+
+`save_reduce` serializes `func` and `args`, then emits `REDUCE`. On load, `REDUCE` calls `func(*args)`. `state` is applied via `__setstate__` (through `BUILD`). `listitems`/`dictitems` are used for list and dict subclasses.
+
+### `Unpickler.load_reduce`
+
+```python
+# CPython: Lib/pickle.py:1240 Unpickler.load_reduce
+def load_reduce(self):
+    stack = self.stack
+    args = stack.pop()
+    func = stack[-1]
+    stack[-1] = func(*args)
+dispatch[REDUCE[0]] = load_reduce
+```
+
+`REDUCE` pops the args tuple and calls the callable at TOS. The result replaces the callable on the stack. For simple classes, `func` is the class itself and `args` is the constructor arguments.
+
+### `Pickler.persistent_id`
+
+```python
+# CPython: Lib/pickle.py:280 Pickler.save
+def save(self, obj, save_persistent_id=True):
+    ...
+    if save_persistent_id:
+        pid = self.persistent_id(obj)
+        if pid is not None:
+            self.save_pers(pid)
+            return
+    ...
+```
+
+`persistent_id(obj)` returns a non-None value to serialize the object as an external reference rather than by value. The `Unpickler.persistent_load` hook reconstructs it. Used for database rows, file handles, etc.
+
+### `dispatch_table`
+
+```python
+# CPython: Lib/pickle.py:220 Pickler.save (dispatch_table lookup)
+t = type(obj)
+reduce = getattr(self, 'dispatch_table', None)
+if reduce is not None:
+    reduce = reduce.get(t)
+if reduce is None:
+    reduce = copyreg.dispatch_table.get(t)
+if reduce is not None:
+    rv = reduce(obj)
+else:
+    reduce = getattr(obj, '__reduce_ex__', None)
+    if reduce is not None:
+        rv = reduce(self.proto)
+```
+
+`dispatch_table` is checked before `__reduce_ex__`. A per-pickler `dispatch_table` overrides the global `copyreg.dispatch_table`. This allows customizing pickling for third-party types without modifying the types themselves.
+
+## gopy notes
+
+`save_reduce` is `module/pickle.SaveReduce` in `module/pickle/module.go`. `load_reduce` pops args and calls `objects.CallObject`. `persistent_id` calls back into the Python hook via `objects.CallOneArg`. `dispatch_table` is a `map[objects.Type]objects.Object`.

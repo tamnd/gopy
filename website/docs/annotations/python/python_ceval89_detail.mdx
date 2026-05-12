@@ -1,0 +1,111 @@
+---
+title: Python/ceval.c (part 89)
+description: "Python/ceval.c part 89: BUILD_STRING, FORMAT_VALUE, FORMAT_SIMPLE, JOIN_STR — f-string compilation."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers f-string opcodes. See `python_ceval88_detail` for import opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `FORMAT_SIMPLE` | Format a value with no format spec |
+| 81-160 | `FORMAT_WITH_SPEC` | Format a value with a format spec |
+| 161-240 | `CONVERT_VALUE` | Apply `!r`, `!s`, or `!a` conversion |
+| 241-320 | `BUILD_STRING` | Concatenate N strings on the stack |
+| 321-400 | F-string compilation | How `f"x={x!r:>10}"` compiles |
+
+## Reading
+
+### `FORMAT_SIMPLE`
+
+```c
+// CPython: Python/ceval.c:5100 FORMAT_SIMPLE
+inst(FORMAT_SIMPLE, (value -- res)) {
+    /* __format__(value, '') — the common case */
+    if (!PyUnicode_CheckExact(value)) {
+        res = PyObject_Format(value, NULL);
+        Py_DECREF(value);
+        ERROR_IF(res == NULL, error);
+    } else {
+        res = value;  /* strings are already formatted */
+    }
+}
+```
+
+`FORMAT_SIMPLE` skips `__format__` for plain `str` values, since `str.__format__(s, '')` just returns `s`. For all other types, it calls `PyObject_Format(value, empty_string)`.
+
+### `FORMAT_WITH_SPEC`
+
+```c
+// CPython: Python/ceval.c:5130 FORMAT_WITH_SPEC
+inst(FORMAT_WITH_SPEC, (value, fmt_spec -- res)) {
+    res = PyObject_Format(value, fmt_spec);
+    Py_DECREF(value);
+    Py_DECREF(fmt_spec);
+    ERROR_IF(res == NULL, error);
+}
+```
+
+`FORMAT_WITH_SPEC` passes the format spec string to `__format__`. The spec may itself be an f-string expression, in which case it was already evaluated before this opcode runs.
+
+### `CONVERT_VALUE`
+
+```c
+// CPython: Python/ceval.c:5160 CONVERT_VALUE
+inst(CONVERT_VALUE, (value -- result)) {
+    /* oparg: 1=str, 2=repr, 3=ascii */
+    switch (oparg) {
+        case 1: result = PyObject_Str(value); break;
+        case 2: result = PyObject_Repr(value); break;
+        case 3: result = PyObject_ASCII(value); break;
+    }
+    Py_DECREF(value);
+    ERROR_IF(result == NULL, error);
+}
+```
+
+`f"{x!r}"` compiles to `LOAD x`, `CONVERT_VALUE 2` (repr), `FORMAT_SIMPLE`. The conversion is applied before formatting.
+
+### `BUILD_STRING`
+
+```c
+// CPython: Python/ceval.c:5200 BUILD_STRING
+inst(BUILD_STRING, (pieces[oparg] -- str)) {
+    str = _PyUnicode_JoinArray(&_Py_STR(empty), pieces, oparg);
+    for (int i = 0; i < oparg; i++) Py_DECREF(pieces[i]);
+    ERROR_IF(str == NULL, error);
+}
+```
+
+`BUILD_STRING` concatenates `oparg` string pieces from the stack. `_PyUnicode_JoinArray` is more efficient than repeated concatenation since it pre-allocates the result buffer.
+
+### F-string compilation
+
+```
+f"hello {name!r:>10}, count={count}"
+→
+LOAD_CONST    'hello '
+LOAD_FAST     name
+CONVERT_VALUE 2             # !r
+LOAD_CONST    '>10'
+FORMAT_WITH_SPEC            # :>10
+LOAD_CONST    ', count='
+LOAD_FAST     count
+FORMAT_SIMPLE
+BUILD_STRING  4
+```
+
+The static parts are `LOAD_CONST` strings. Dynamic parts go through `CONVERT_VALUE` + `FORMAT_SIMPLE` or `FORMAT_WITH_SPEC`. `BUILD_STRING` assembles the final string.
+
+## gopy notes
+
+`FORMAT_SIMPLE` calls `objects.Format` with an empty string, short-circuiting for `objects.Str` instances. `FORMAT_WITH_SPEC` calls `objects.Format(value, spec)`. `CONVERT_VALUE` calls `objects.Str`, `objects.Repr`, or `objects.ASCII`. `BUILD_STRING` uses `strings.Builder`.
