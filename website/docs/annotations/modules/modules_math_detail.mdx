@@ -1,0 +1,92 @@
+---
+title: Modules/mathmodule.c
+description: "Modules/mathmodule.c: math module. floor/ceil/trunc, pow/sqrt/exp/log, trig functions, factorial, gcd, lcm, fsum, isnan/isinf/isclose, hypot (n-dimensional), comb, perm."
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 3100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mathmodule.c" />
+
+`Modules/mathmodule.c` implements the `math` module. Most functions are thin wrappers around the C `<math.h>` functions with Python error handling layered on top. Key additions over plain C: `fsum` (exact float summation), `n-dimensional hypot`, `comb`/`perm` (exact integer combinatorics), and `gcd`/`lcm` (arbitrary number of arguments since Python 3.9).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `FUNC1`, `FUNC2` macros | Boilerplate for single/double-arg C math wrappers |
+| 201-600 | Trig: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `degrees`, `radians` | Trigonometric functions |
+| 601-900 | `pow`, `sqrt`, `exp`, `log`, `log2`, `log10`, `expm1`, `log1p` | Exponential and logarithm |
+| 901-1100 | `floor`, `ceil`, `trunc`, `fabs`, `modf`, `frexp`, `ldexp`, `copysign` | Integer-related and decomposition |
+| 1101-1400 | `fsum` | Exact floating-point summation |
+| 1401-1700 | `isnan`, `isinf`, `isfinite`, `isclose` | Float predicates |
+| 1701-2000 | `hypot` (variadic), `dist` | Distance functions |
+| 2001-2400 | `factorial`, `gcd`, `lcm`, `comb`, `perm` | Integer combinatorics |
+| 2401-3100 | `erf`, `erfc`, `gamma`, `lgamma`, constants (`pi`, `e`, `tau`, `inf`, `nan`) | Special functions and constants |
+
+## Reading
+
+### `FUNC1` macro pattern
+
+```c
+// CPython: Modules/mathmodule.c:70 FUNC1
+#define FUNC1(funcname, func, ...) \
+static PyObject * math_##funcname(PyObject *module, PyObject *arg) { \
+    double x = PyFloat_AsDouble(arg); \
+    if (x == -1.0 && PyErr_Occurred()) return NULL; \
+    errno = 0; \
+    double r = func(x); \
+    if (Py_IS_NAN(r) && !Py_IS_NAN(x)) { \
+        PyErr_SetString(PyExc_ValueError, "math domain error"); \
+        return NULL; \
+    } \
+    if (Py_IS_INFINITY(r) && Py_IS_FINITE(x)) { \
+        PyErr_SetString(PyExc_OverflowError, "math range error"); \
+        return NULL; \
+    } \
+    return PyFloat_FromDouble(r); \
+}
+```
+
+Generates a Python-visible function from a C `double->double` math function, with domain/range error translation.
+
+### `fsum`: exact summation
+
+`math.fsum(iterable)` returns an exact float sum using Shewchuk's algorithm, accumulating partial sums to avoid cancellation error. It maintains a list of non-overlapping partials.
+
+```c
+// CPython: Modules/mathmodule.c:1128 math_fsum_impl
+static PyObject *
+math_fsum_impl(PyObject *module, PyObject *seq)
+{
+    ...
+    /* Shewchuk's partial-sums approach */
+    for each x in seq:
+        for each partial p:
+            if |x| < |p|: swap x, p
+            p_new = x + p   /* hi */
+            p_err = p - (p_new - x)  /* lo */
+            if p_err != 0: save it
+            x = p_new
+    ...
+}
+```
+
+### `hypot` variadic (Python 3.8+)
+
+`math.hypot(*coordinates)` computes the Euclidean norm of an n-dimensional vector. It uses a numerically stable algorithm: scale by the maximum absolute value, then sum the squares, then scale back.
+
+```c
+// CPython: Modules/mathmodule.c:2270 math_hypot_impl
+```
+
+### `comb` and `perm`
+
+`math.comb(n, k)` and `math.perm(n, k)` return exact integer results using `math.factorial` internally but with a faster O(k) direct loop instead of computing three full factorials.
+
+## gopy notes
+
+Status: partially ported. Go's `math` package provides most functions directly. `fsum` requires a Go port of Shewchuk's algorithm. `comb`/`perm` with large integers require `math/big`. `gcd`/`lcm` are in Go 1.21+ as `math/big.GCD`.

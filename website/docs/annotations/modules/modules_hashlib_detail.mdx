@@ -1,0 +1,89 @@
+---
+title: Modules/_hashopenssl.c
+description: "Modules/_hashopenssl.c: OpenSSL-backed hashlib. EVPobject wrapping EVP_MD_CTX, md5/sha1/sha256/sha512 constructors, blake2, new(name), pbkdf2_hmac."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+`Modules/_hashopenssl.c` implements the `_hashlib` C extension, which backs `hashlib` using OpenSSL's EVP (envelope) API. A second implementation (`Modules/md5module.c`, `sha1module.c`, etc.) provides fallback pure-C implementations for platforms without OpenSSL.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `EVPobject` struct, `EVPnew` | Hash object wrapping `EVP_MD_CTX*` |
+| 201-500 | `EVP_update`, `EVP_digest`, `EVP_hexdigest` | Core update/finalize |
+| 501-800 | `EVP_copy` | Clone a hash state |
+| 801-1100 | `openssl_md5`, `openssl_sha1`, ..., `openssl_sha3_256` | Named constructors |
+| 1101-1500 | `hashlib_new` | `hashlib.new(name)` dispatch |
+| 1501-1800 | `pbkdf2_hmac` | PBKDF2-HMAC key derivation |
+| 1801-2200 | `hmac_new`, `hmac_digest` | HMAC via OpenSSL |
+
+## Reading
+
+### `EVPobject`
+
+Each `hashlib.md5()` / `hashlib.sha256()` / etc. call creates an `EVPobject` that wraps an OpenSSL `EVP_MD_CTX*`.
+
+```c
+// CPython: Modules/_hashopenssl.c:166 EVPobject
+typedef struct {
+    PyObject_HEAD
+    PyThread_type_lock lock;  /* for thread-safe updates */
+    EVP_MD_CTX *ctx;          /* OpenSSL context */
+    int usedforsecurity;
+} EVPobject;
+```
+
+### `EVP_update`
+
+```c
+// CPython: Modules/_hashopenssl.c:342 EVP_update
+static PyObject *
+EVP_update(EVPobject *self, PyObject *args)
+{
+    Py_buffer view;
+    if (!PyArg_ParseTuple(args, "y*:update", &view))
+        return NULL;
+    if (self->lock == NULL && view.len >= HASHXOF_LOCK_THRESHOLD)
+        self->lock = PyThread_allocate_lock();
+    if (self->lock != NULL)
+        PyThread_acquire_lock(self->lock, 1);
+    EVP_DigestUpdate(self->ctx, view.buf, view.len);
+    if (self->lock != NULL)
+        PyThread_release_lock(self->lock);
+    PyBuffer_Release(&view);
+    Py_RETURN_NONE;
+}
+```
+
+Thread safety: `update()` acquires a per-object lock for large inputs. Short updates are unprotected (CPython GIL provides safety for those cases).
+
+### `pbkdf2_hmac`
+
+Calls OpenSSL's `PKCS5_PBKDF2_HMAC` directly, which is significantly faster than a pure-Python PBKDF2 loop.
+
+```c
+// CPython: Modules/_hashopenssl.c:1620 _hashlib_pbkdf2_hmac_impl
+static PyObject *
+_hashlib_pbkdf2_hmac_impl(PyObject *module, const char *hash_name,
+                           Py_buffer *password, Py_buffer *salt,
+                           int iterations, Py_ssize_t dklen)
+{
+    ...
+    PKCS5_PBKDF2_HMAC(password->buf, password->len,
+                      salt->buf, salt->len,
+                      iterations, digest, dklen, dk);
+    ...
+}
+```
+
+## gopy notes
+
+Status: not yet ported. Go's `crypto/md5`, `crypto/sha1`, `crypto/sha256`, `crypto/sha512`, `golang.org/x/crypto/sha3` cover the standard hash algorithms. `pbkdf2_hmac` maps to `golang.org/x/crypto/pbkdf2`. The `hashlib.new(name)` dispatch requires a registry mapping algorithm name strings to Go hash constructors. Thread safety is handled by Go's memory model without explicit locks.

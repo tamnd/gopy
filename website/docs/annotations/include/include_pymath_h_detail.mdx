@@ -1,0 +1,66 @@
+---
+title: Include/pymath.h
+description: "Include/pymath.h: IEEE 754 float helpers. Py_IS_NAN, Py_IS_INFINITY, Py_IS_FINITE, Py_HUGE_VAL, _Py_dg_strtod, _Py_dg_dtoa, and platform-consistent float macros."
+cpython_path: Include/pymath.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/pymath.h" />
+
+`pymath.h` defines portable macros for IEEE 754 float classification and special values. It also declares `_Py_dg_strtod` and `_Py_dg_dtoa`, the David Gay float-to-string and string-to-float routines used for round-trip float formatting.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `Py_IS_NAN`, `Py_IS_INFINITY`, `Py_IS_FINITE` | IEEE 754 classification |
+| 31-50 | `Py_HUGE_VAL`, `Py_NAN` | Special float constants |
+| 51-80 | `_Py_dg_strtod`, `_Py_dg_dtoa` | Round-trip float I/O |
+
+## Reading
+
+### `Py_IS_NAN`, `Py_IS_INFINITY`, `Py_IS_FINITE`
+
+```c
+// CPython: Include/pymath.h:28
+#define Py_IS_NAN(X)      isnan(X)
+#define Py_IS_INFINITY(X) isinf(X)
+#define Py_IS_FINITE(X)   isfinite(X)
+```
+
+Wrappers around the C99 macros from `<math.h>`. Prior to C99 these required compiler-specific tricks; the wrappers hide that history.
+
+### `_Py_dg_strtod` and `_Py_dg_dtoa`
+
+David Gay's `strtod`/`dtoa` library (`Python/dtoa.c`) provides correctly-rounded float parsing and formatting. These functions are used by `float.__repr__` and `float(string)` to ensure round-trip fidelity: `float(repr(x)) == x` for all finite floats.
+
+```c
+// CPython: Include/pymath.h:62
+extern double _Py_dg_strtod(const char *s, char **spe);
+extern char *_Py_dg_dtoa(double dd, int mode, int ndigits,
+                         int *decpt, int *sign, char **rve);
+```
+
+`_Py_dg_dtoa` with `mode=0` returns the shortest decimal string that round-trips back to the same double; this is what `repr(1.1)` uses to produce `'1.1'` rather than `'1.1000000000000001'`.
+
+### `Py_HUGE_VAL` and `Py_NAN`
+
+```c
+// CPython: Include/pymath.h:40
+#define Py_HUGE_VAL HUGE_VAL
+#ifdef __has_builtin
+#  if __has_builtin(__builtin_nan)
+#    define Py_NAN __builtin_nan("")
+#  endif
+#endif
+```
+
+`Py_NAN` is the standard IEEE 754 quiet NaN. Used to initialize `math.nan` and `float('nan')`.
+
+## gopy notes
+
+`Py_IS_NAN` / `Py_IS_INFINITY` / `Py_IS_FINITE` map to `math.IsNaN`, `math.IsInf`, and `!math.IsNaN(x) && !math.IsInf(x, 0)` in Go. Round-trip float formatting uses `strconv.FormatFloat(x, 'r', -1, 64)` in Go 1.15+, which produces the shortest round-trip representation equivalent to David Gay's `mode=0`.

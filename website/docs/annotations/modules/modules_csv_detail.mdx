@@ -1,0 +1,82 @@
+---
+title: Modules/_csv.c
+description: "Modules/_csv.c: CSV reader and writer. Dialect class, reader iterates rows as lists, writer.writerow/writerows. Quoting modes: QUOTE_ALL, QUOTE_MINIMAL, QUOTE_NONNUMERIC, QUOTE_NONE."
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_csv.c" />
+
+`Modules/_csv.c` is a C implementation of CSV parsing and writing. It backs `Lib/csv.py` which is mostly a thin import wrapper. The C engine handles quoting, escaping, and the multi-state line parser.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `DialectObj`, dialect validation | Dialect: delimiter, quotechar, escapechar, quoting, lineterminator |
+| 201-500 | `Reader` object, `Reader_iternext` | Parse one CSV row per `next()` call |
+| 501-800 | CSV parser state machine | States: `START_FIELD`, `IN_FIELD`, `IN_QUOTED_FIELD`, `ESCAPED_CHAR`, etc. |
+| 801-1100 | `Writer` object, `csv_writerow`, `csv_writerows` | Format and write rows |
+| 1101-1500 | `register_dialect`, `unregister_dialect`, `get_dialect`, `list_dialects` | Dialect registry |
+
+## Reading
+
+### Dialect options
+
+| Attribute | Default | Meaning |
+|-----------|---------|---------|
+| `delimiter` | `','` | Field separator |
+| `quotechar` | `'"'` | Quote character |
+| `escapechar` | `None` | Escape character |
+| `doublequote` | `True` | Double the quotechar to escape it |
+| `skipinitialspace` | `False` | Skip space after delimiter |
+| `lineterminator` | `'\r\n'` | Row terminator |
+| `quoting` | `QUOTE_MINIMAL` | When to quote fields |
+| `strict` | `False` | Raise on bad CSV |
+
+### Parser state machine
+
+```c
+// CPython: Modules/_csv.c:580 csv_process_char (simplified)
+switch (self->state) {
+case START_RECORD:
+    if (c == '\0') return;
+    self->state = START_FIELD;
+    /* fall through */
+case START_FIELD:
+    if (c == '\n' || c == '\r' || c == '\0') {
+        /* save empty field */
+        self->state = (c == '\0') ? START_RECORD : EAT_CRNL;
+    } else if (c == dialect->quotechar && dialect->quoting != QUOTE_NONE) {
+        self->state = IN_QUOTED_FIELD;
+    } else {
+        /* regular character */
+        self->state = IN_FIELD;
+        append_char(self, c);
+    }
+    break;
+case IN_QUOTED_FIELD:
+    if (c == dialect->quotechar) {
+        if (dialect->doublequote)
+            self->state = QUOTE_IN_QUOTED_FIELD;
+        else
+            self->state = IN_FIELD;
+    }
+    ...
+```
+
+### Writer quoting decisions
+
+For `QUOTE_MINIMAL`, the writer quotes a field if it contains the delimiter, quotechar, or a line terminator. For `QUOTE_NONNUMERIC`, it quotes all non-numeric fields. For `QUOTE_ALL`, it quotes every field.
+
+### Registered dialects
+
+`csv.excel` (the default), `csv.excel_tab`, and `csv.unix_dialect` are registered at module init. Custom dialects can be registered with `csv.register_dialect(name, **kwargs)`.
+
+## gopy notes
+
+Status: not yet ported. The gopy port should implement the `Reader` state machine in Go with the dialect struct. The parser is about 200 lines of pure logic. Go's `encoding/csv` provides a compatible reader/writer but with a slightly different API (returns `[]string` per row); wrapping it to match Python's `csv.reader` protocol is the fastest path.

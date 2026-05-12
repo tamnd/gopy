@@ -1,0 +1,81 @@
+---
+title: Modules/_sre.c
+description: "Modules/_sre.c: SRE regex engine. Pattern object, match/search/findall/sub, group capture, backreferences, SRE opcodes, and the bytecode VM loop."
+cpython_path: Modules/_sre.c
+cpython_version: "3.14"
+lines: 4200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sre.c" />
+
+`Modules/_sre.c` implements the SRE (Simple Regular Expression) engine that backs Python's `re` module. `re` compiles patterns in Python (`Lib/re/`) into an SRE bytecode, and `_sre.c` executes that bytecode. The C engine handles matching; group capture, backtracking, and lookahead are all in this file.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | SRE opcode definitions, `SRE_STATE` | Match state struct |
+| 201-800 | `sre_match`, `sre_search` | Core match and search entry points |
+| 801-1500 | `SRE_MATCH` bytecode VM | Per-opcode dispatch loop |
+| 1501-2000 | Backtracking stack | `SRE_REPEAT`, `SRE_BRANCH`, `SRE_AT` |
+| 2001-2800 | Group capture: `SRE_GROUP`, `SRE_GROUPREF` | Group recording and backreferences |
+| 2801-3500 | `Pattern_match`, `Pattern_search`, `Pattern_findall`, `Pattern_sub` | Python-visible methods |
+| 3501-4200 | `Match` object, `match.group`, `match.span`, `match.groups` | Match result object |
+
+## Reading
+
+### SRE state machine
+
+The `SRE_STATE` struct holds the match context: the string buffer, current position, pattern program counter, group capture array, and backtracking stack.
+
+```c
+// CPython: Modules/_sre.c:120 SRE_STATE
+typedef struct SRE_STATE {
+    void* ptr;           /* current position */
+    void* beginning;
+    void* end;
+    void* string;
+    Py_ssize_t string_offset;
+    Py_ssize_t pos;
+    Py_ssize_t endpos;
+    Py_ssize_t lastindex;
+    Py_ssize_t lastmark;
+    ...
+    SRE_MARK mark[SRE_MARK_SIZE];  /* group capture array */
+    ...
+} SRE_STATE;
+```
+
+### Core dispatch loop
+
+The bytecode VM dispatches on opcode integers. Key opcodes:
+
+| Opcode | Meaning |
+|--------|---------|
+| `SRE_OP_SUCCESS` | Match succeeded |
+| `SRE_OP_FAILURE` | Backtrack |
+| `SRE_OP_LITERAL` | Match a single character |
+| `SRE_OP_NOT_LITERAL` | Match any char except |
+| `SRE_OP_AT` | Anchor (start, end, word boundary) |
+| `SRE_OP_CATEGORY` | Character class (\d, \w, \s) |
+| `SRE_OP_ANY` | `.` — match any non-newline |
+| `SRE_OP_BRANCH` | Try alternative (`|`) |
+| `SRE_OP_REPEAT` | Greedy/lazy repetition (`*`, `+`, `?`) |
+| `SRE_OP_MARK` | Record group start/end position |
+| `SRE_OP_GROUPREF` | Back-reference to a group |
+| `SRE_OP_SUBPATTERN` | Named/numbered group |
+
+### Group capture
+
+Each `(...)` group occupies two `mark` slots: the start and end positions. After a successful match, `match.group(n)` slices the original string from `mark[2*n]` to `mark[2*n+1]`.
+
+### `Pattern_sub` and replacement
+
+`re.sub(pattern, repl, string)` calls `Pattern_sub`, which iterates over all matches and calls a C-level replacement function. If `repl` is a string, `\1`/`\g<name>` references are expanded; if it is a callable, it is called with the `Match` object.
+
+## gopy notes
+
+Status: the `re` module is not yet ported. The SRE engine is complex enough that the recommended approach is to compile the existing `_sre.c` as a Go CGo module or to use Go's `regexp/syntax` package and translate the Python regex AST to a Go regexp. Go's `regexp` package uses RE2 semantics (no backtracking, no backreferences), which is not fully compatible with Python's `re`. A compatibility shim using `github.com/dlclark/regexp2` is one option for Python-compatible semantics.

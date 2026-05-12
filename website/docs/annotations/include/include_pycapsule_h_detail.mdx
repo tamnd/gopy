@@ -1,0 +1,63 @@
+---
+title: Include/pycapsule.h
+description: "Include/pycapsule.h: PyCapsule API. Wrap an opaque C pointer as a Python object. PyCapsule_New, PyCapsule_GetPointer, PyCapsule_SetDestructor, PyCapsule_Import."
+cpython_path: Include/pycapsule.h
+cpython_version: "3.14"
+lines: 55
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/pycapsule.h" />
+
+`PyCapsule` is a Python object that wraps an opaque C pointer. It is the standard mechanism for C extension modules to pass C-level pointers (struct pointers, function pointers, resources) to other C extensions or to store them in Python data structures.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-20 | `PyCapsule_Type` | Type declaration |
+| 21-55 | `PyCapsule_New`, `PyCapsule_GetPointer`, `PyCapsule_GetName`, `PyCapsule_SetDestructor`, `PyCapsule_Import` | Public API |
+
+## Reading
+
+### `PyCapsule_New`
+
+```c
+// CPython: Include/pycapsule.h:30 PyCapsule_New
+PyAPI_FUNC(PyObject *) PyCapsule_New(
+    void *pointer,
+    const char *name,
+    PyCapsule_Destructor destructor);
+```
+
+Creates a capsule containing `pointer`. The `name` is a string identifier (usually `"module.symbol"`) used to verify the capsule type on extraction. `destructor` is called when the capsule is garbage collected.
+
+### `PyCapsule_GetPointer`
+
+```c
+// CPython: Include/pycapsule.h:35 PyCapsule_GetPointer
+PyAPI_FUNC(void *) PyCapsule_GetPointer(PyObject *capsule, const char *name);
+```
+
+Extracts the pointer. If `name` does not match the capsule's name, raises `PyCapsuleError` and returns `NULL`. This prevents accidentally passing a capsule from one module to another that expects a different type.
+
+### `PyCapsule_Import`
+
+```c
+// CPython: Include/pycapsule.h:55 PyCapsule_Import
+PyAPI_FUNC(void *) PyCapsule_Import(
+    const char *name,
+    int no_block);
+```
+
+Looks up a capsule by dotted name: imports the module `name.split('.')[0]`, then retrieves `sys.modules[module].attribute`. Used by NumPy and other C extensions to share C-level APIs via the "capsule import" pattern.
+
+### Use case: sharing C APIs
+
+NumPy exports its C API as a capsule at `numpy.core.multiarray._ARRAY_API`. Other C extensions import that capsule to call NumPy C functions directly without going through `PyObject_Call`.
+
+## gopy notes
+
+`PyCapsule` is not yet implemented in gopy. It is needed for C extension interoperability (cgo-based extensions). A gopy `CapsuleObject` would store a `unsafe.Pointer` and a name string, with a Go finalizer as the destructor callback.

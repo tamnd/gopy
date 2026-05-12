@@ -1,0 +1,93 @@
+---
+title: Modules/_json.c
+description: "Modules/_json.c: C accelerator for json.encoder and json.decoder. encode_string, scanstring, encode_dict/list, PyObject-to-JSON serialization."
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_json.c" />
+
+`Modules/_json.c` provides a C acceleration for the two performance-critical parts of `json`: string scanning (decoder) and string encoding (encoder). `Lib/json/decoder.py` and `Lib/json/encoder.py` import `scanstring` and `encode_basestring`/`encode_basestring_ascii` from `_json` when the C extension is available.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Encoder` object, `encode_string` | JSON string output |
+| 101-400 | `scanstring_impl` | JSON string input (scanner) |
+| 401-800 | `encoder_encode_dict`, `encoder_encode_list` | Recursive object serialization |
+| 801-1100 | `encoder_listencode_obj` | Type dispatch: int, float, str, list, dict |
+| 1101-1500 | `Encoder_call` | `__call__` for the `JSONEncoder` C type |
+| 1501-1800 | `PyModuleDef`, type definitions | Module and type registration |
+
+## Reading
+
+### `scanstring_impl`: JSON string decoder
+
+The C decoder scans a JSON string literal, handling escape sequences (`\n`, `\t`, `\uXXXX`). It is significantly faster than the Python equivalent for large strings because it avoids per-character Python overhead.
+
+```c
+// CPython: Modules/_json.c:235 scanstring_impl
+static PyObject *
+scanstring_impl(PyObject *pystr, Py_ssize_t end, int strict)
+{
+    ...
+    while (1) {
+        /* Fast path: scan for the next special character */
+        Py_ssize_t i = next_special(buf, end, len);
+        if (buf[i] == '"') {
+            /* end of string */
+            break;
+        }
+        else if (buf[i] == '\\') {
+            /* escape sequence */
+            char c = buf[i+1];
+            switch (c) {
+            case '"': ...
+            case '\\': ...
+            case 'n': chunks.append('\n'); ...
+            case 'u': /* \uXXXX */ ...
+            }
+        }
+    }
+    ...
+}
+```
+
+### `encode_basestring` and `encode_basestring_ascii`
+
+`encode_basestring(s)` produces a JSON string literal from a Python `str`, escaping only the required characters (`"`, `\`, control chars). `encode_basestring_ascii` also escapes non-ASCII characters as `\uXXXX`.
+
+### `encoder_encode_dict`
+
+Recursively encodes a Python `dict` as a JSON object. It iterates `dict.items()`, encodes each key (must be a string) and value, and joins them with `,`. The `sort_keys` option sorts the keys before encoding.
+
+```c
+// CPython: Modules/_json.c:650 encoder_encode_dict
+static int
+encoder_encode_dict(PyEncoderObject *s, _PyUnicodeWriter *writer,
+                    PyObject *dct, Py_ssize_t indent_level)
+{
+    ...
+    if (s->sort_keys) {
+        items = PyMapping_Items(dct);
+        PyList_Sort(items);
+    } else {
+        items = PyMapping_Items(dct);
+    }
+    ...
+    for each (key, value) in items:
+        encode_key(key);
+        writer->write(": ");
+        encoder_listencode_obj(value);
+        ...
+}
+```
+
+## gopy notes
+
+Status: `json` is a high-priority port. The Go standard library `encoding/json` is available but not Python-compatible (different type mapping, no `ensure_ascii`, different `default` hook protocol). The gopy port should implement `json.dumps`/`json.loads` as pure Go with a Python-compatible type dispatch: `None->null`, `True/False->true/false`, `int->number`, `float->number`, `str->string`, `list->array`, `dict->object`.

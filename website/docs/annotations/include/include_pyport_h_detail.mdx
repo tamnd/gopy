@@ -1,0 +1,76 @@
+---
+title: Include/pyport.h
+description: "Include/pyport.h: portability typedefs and macros. Py_ssize_t, Py_hash_t, Py_LOCAL, PY_FORMAT_SIZE_T, PY_LITTLE_ENDIAN, and integer overflow helpers."
+cpython_path: Include/pyport.h
+cpython_version: "3.14"
+lines: 280
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/pyport.h" />
+
+`pyport.h` defines the core portability layer: the type aliases and macros that abstract over compiler/platform differences so the rest of CPython can use consistent names. Every `Python.h` include pulls this in immediately after `pyconfig.h`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `Py_ssize_t`, `Py_hash_t` | Signed size and hash types |
+| 61-120 | `PY_FORMAT_SIZE_T`, `PY_FORMAT_LONG_LONG` | printf format strings |
+| 121-180 | Endianness: `PY_BIG_ENDIAN`, `PY_LITTLE_ENDIAN` | Byte order detection |
+| 181-220 | `Py_LOCAL`, `Py_DECL_THREAD` | Linkage and TLS attributes |
+| 221-280 | `_Py_CAST`, `_Py_SIZE_MAX`, integer overflow | Overflow-safe arithmetic |
+
+## Reading
+
+### `Py_ssize_t`
+
+```c
+// CPython: Include/pyport.h:67 Py_ssize_t
+#ifdef HAVE_SSIZE_T
+typedef ssize_t         Py_ssize_t;
+#elif SIZEOF_VOID_P == SIZEOF_SIZE_T
+typedef Py_intptr_t     Py_ssize_t;
+#else
+# error "unable to define Py_ssize_t"
+#endif
+#define PY_SSIZE_T_MAX ((Py_ssize_t)(((size_t)-1)>>1))
+#define PY_SSIZE_T_MIN (-PY_SSIZE_T_MAX-1)
+```
+
+Used everywhere a signed count or index is needed. Prevents mixing signed/unsigned comparisons in container code.
+
+### `Py_hash_t`
+
+```c
+// CPython: Include/pyport.h:95 Py_hash_t
+typedef Py_ssize_t Py_hash_t;
+typedef size_t Py_uhash_t;
+```
+
+Hashes are signed `ssize_t`. The value `-1` is reserved as an error indicator (functions returning `Py_hash_t` return `-1` on error with an exception set, or `-2` if the hash happens to be `-1`).
+
+### Endianness macros
+
+```c
+// CPython: Include/pyport.h:147
+#if defined(WORDS_BIGENDIAN)
+#  define PY_BIG_ENDIAN 1
+#  define PY_LITTLE_ENDIAN 0
+#else
+#  define PY_BIG_ENDIAN 0
+#  define PY_LITTLE_ENDIAN 1
+#endif
+```
+
+Used by `marshal`, `struct`, and the unicode codec when reading/writing binary data.
+
+### `_Py_SET_53BIT_PRECISION_*` (x87 FPU)
+
+On some 32-bit x86 targets, the x87 FPU uses 80-bit extended precision internally. `_Py_SET_53BIT_PRECISION_START` / `_Py_SET_53BIT_PRECISION_END` macros force 53-bit (double) precision around floating-point operations that must match IEEE 754 double semantics exactly.
+
+## gopy notes
+
+`pyport.h` has no direct counterpart in gopy. Go's `int` is always pointer-sized; there is no need for `Py_ssize_t`. `Py_hash_t` maps to `int` in gopy (used as `Py_ssize_t` which is pointer-sized). The endianness macros map to `runtime.GOARCH` checks or the `encoding/binary.ByteOrder` interface.

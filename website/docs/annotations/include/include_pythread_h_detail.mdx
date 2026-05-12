@@ -1,0 +1,75 @@
+---
+title: Include/pythread.h
+description: "Include/pythread.h: CPython thread abstraction. PyThread_type_lock, PyThread_allocate_lock, acquire/release, thread-local storage (TLS/TSS), PyThread_start_new_thread."
+cpython_path: Include/pythread.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/pythread.h" />
+
+`pythread.h` declares CPython's portable thread abstraction layer. It wraps pthreads (POSIX) or Windows threads behind a consistent API. This layer is used by the GIL implementation, `threading.Lock`, per-object hash locks, and any C extension that needs a mutex.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `PyThread_type_lock`, `PyLockStatus` | Opaque lock type and result enum |
+| 31-60 | `PyThread_allocate_lock`, `PyThread_free_lock`, `PyThread_acquire_lock`, `PyThread_release_lock` | Mutex operations |
+| 61-80 | `PyThread_start_new_thread` | Create an OS thread |
+| 81-100 | `Py_tss_t`, `PyThread_tss_*` | Thread-specific storage (TSS, the new API replacing TLS) |
+
+## Reading
+
+### `PyThread_type_lock`
+
+Opaque pointer to the platform-specific mutex:
+
+```c
+// CPython: Include/pythread.h:18 PyThread_type_lock
+typedef void *PyThread_type_lock;
+```
+
+On pthreads: `pthread_mutex_t*`. On Windows: `CRITICAL_SECTION*`.
+
+### Acquire and release
+
+```c
+// CPython: Include/pythread.h:42 PyThread_acquire_lock
+PyAPI_FUNC(int) PyThread_acquire_lock(PyThread_type_lock, int /* waitflag */);
+PyAPI_FUNC(void) PyThread_release_lock(PyThread_type_lock);
+```
+
+`waitflag=WAIT_LOCK` (1) blocks until the lock is available; `NOWAIT_LOCK` (0) returns immediately with a status code.
+
+### `Py_tss_t`: thread-specific storage
+
+PEP 539 (Python 3.7) introduced `Py_tss_t` as a replacement for `PyThread_GetKey`/`PyThread_SetKey`. Each `Py_tss_t` variable is initialized with `PyThread_tss_create` and holds a per-thread value set with `PyThread_tss_set` / retrieved with `PyThread_tss_get`.
+
+```c
+// CPython: Include/pythread.h:88 Py_tss_t usage
+static Py_tss_t _ts_key = Py_tss_NEEDS_INIT;
+PyThread_tss_create(&_ts_key);
+PyThread_tss_set(&_ts_key, my_value);
+void *v = PyThread_tss_get(&_ts_key);
+PyThread_tss_delete(&_ts_key);
+```
+
+Used for the current thread state (`_PyRuntime.gilstate.tstate_current`).
+
+### `PyThread_start_new_thread`
+
+```c
+// CPython: Include/pythread.h:68 PyThread_start_new_thread
+PyAPI_FUNC(unsigned long) PyThread_start_new_thread(
+    void (*func)(void *), void *arg);
+```
+
+Called by `threading.Thread.start()` to create a new OS thread. The `func` receives `arg` and is expected to call `PyEval_SaveThread`/`PyEval_RestoreThread` to manage the GIL around its work.
+
+## gopy notes
+
+`pythread.h` has no direct counterpart. gopy uses `sync.Mutex` for `PyThread_type_lock`, `goroutine` for `PyThread_start_new_thread`, and `sync.Map` or goroutine-local context for TSS. The GIL is absent in gopy; concurrent access is managed by Go's memory model.

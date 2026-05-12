@@ -1,0 +1,79 @@
+---
+title: Modules/posixmodule.c
+description: "Modules/posixmodule.c: os module implementation. stat, open, read, write, listdir, mkdir, unlink, rename, fork, exec, waitpid, getpid, environ, path operations."
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 17000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/posixmodule.c" />
+
+`Modules/posixmodule.c` is the C implementation of the `os` module on POSIX systems (and the `nt` module on Windows). At ~17,000 lines it is the largest module file in CPython. It wraps every POSIX syscall that Python exposes via `os`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-600 | Includes, platform conditionals | OS detection, `_Py_stat_struct` |
+| 601-1500 | `os.stat`, `os.lstat`, `os.fstat` | stat family; `stat_result` object |
+| 1501-2500 | `os.open`, `os.read`, `os.write`, `os.close`, `os.dup` | Low-level file I/O |
+| 2501-3500 | `os.listdir`, `os.scandir`, `ScandirIter` | Directory listing |
+| 3501-4500 | `os.mkdir`, `os.makedirs`, `os.rmdir`, `os.removedirs` | Directory creation/removal |
+| 4501-5500 | `os.unlink`, `os.rename`, `os.replace`, `os.link`, `os.symlink` | File operations |
+| 5501-7000 | `os.getcwd`, `os.chdir`, `os.chmod`, `os.chown` | Working dir and permissions |
+| 7001-9000 | `os.fork`, `os.exec*`, `os.waitpid`, `os.kill`, `os.getpid` | Process management |
+| 9001-11000 | `os.environ`, `os.getenv`, `os.putenv`, `os.unsetenv` | Environment variables |
+| 11001-17000 | `os.path`, xattrs, ioctls, sched, misc POSIX | Remaining functions |
+
+## Reading
+
+### `stat_result`
+
+`os.stat()` returns a `stat_result` named tuple with `st_mode`, `st_ino`, `st_dev`, `st_nlink`, `st_uid`, `st_gid`, `st_size`, `st_atime`, `st_mtime`, `st_ctime`, plus extended fields on some platforms (`st_blksize`, `st_blocks`, `st_flags`).
+
+```c
+// CPython: Modules/posixmodule.c:2430 posix_stat_impl
+static PyObject *
+posix_stat_impl(PyObject *module, path_t *path, int dir_fd, int follow_symlinks)
+{
+    struct stat st;
+    ...
+    result = stat(path->narrow, &st);
+    ...
+    return _pystat_fromstructstat(module, &st);
+}
+```
+
+### `os.scandir`
+
+`scandir(path)` returns an iterator of `DirEntry` objects. Unlike `listdir`, `DirEntry` caches the file type from `readdir`'s `d_type` field (on Linux), avoiding a `stat` call per entry for the common case.
+
+```c
+// CPython: Modules/posixmodule.c:14520 ScandirIter_iternext
+static PyObject *
+ScandirIter_iternext(ScandirIterator *iterator)
+{
+    ...
+    errno = 0;
+    dirent = readdir(iterator->dirp);
+    if (!dirent) { ... }
+    entry = DirEntry_from_posix_info(iterator->module, path, dirent->d_name,
+                                     dirent->d_ino, dirent->d_type);
+    ...
+}
+```
+
+### `os.fork` and `os.exec*`
+
+`os.fork()` wraps `fork(2)`. After fork, CPython reinitializes internal state (lock counts, cached file descriptors) in the child via `_PyOS_AfterFork_Child`. The `exec*` family (`execv`, `execve`, `execvp`) wraps the corresponding POSIX calls after converting Python argument lists to `char**`.
+
+### `os.environ`
+
+`os.environ` is a `_Environ` object (a `MutableMapping` subclass) backed by the process environment. Reads call `getenv`; writes call `putenv`. It is populated lazily from `environ` at first access.
+
+## gopy notes
+
+Status: partially ported via `module/sys/module.go` and direct Go `os` package calls. The gopy `os` module wraps Go's `os.Stat`, `os.ReadDir`, `os.Mkdir`, `os.Remove`, `os.Rename`, `os.Getwd`, and `os.Chdir`. Process-management functions (`fork`, `exec`, `waitpid`) are low-priority due to the GIL-free goroutine model.
