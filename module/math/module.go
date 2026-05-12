@@ -552,7 +552,7 @@ func mathLog(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 		if base <= 0 {
 			return nil, fmt.Errorf("ValueError: math domain error")
 		}
-		r = r / gomath.Log(base)
+		r /= gomath.Log(base)
 	}
 	return objects.NewFloat(r), nil
 }

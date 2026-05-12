@@ -5,6 +5,7 @@ package os
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -118,13 +119,21 @@ func TestEnviron(t *testing.T) {
 	if !ok {
 		t.Fatalf("environ is %T, want *Dict", env)
 	}
-	v, err := envDict.GetItem(objects.NewStr("PATH"))
+	pathKey := "PATH"
+	if runtime.GOOS == "windows" {
+		pathKey = "Path"
+		if _, err2 := envDict.GetItem(objects.NewStr("PATH")); err2 != nil {
+			pathKey = "PATH"
+		}
+	}
+	v, err := envDict.GetItem(objects.NewStr(pathKey))
 	if err != nil {
-		t.Fatalf("environ['PATH']: %v", err)
+		t.Fatalf("environ[%q]: %v", pathKey, err)
 	}
 	got, _ := objects.Str(v)
-	if !strings.Contains(got, "/") {
-		t.Errorf("PATH looks wrong: %q", got)
+	sep := string(os.PathListSeparator)
+	if !strings.Contains(got, sep) && len(got) == 0 {
+		t.Errorf("PATH/Path looks wrong: %q", got)
 	}
 }
 

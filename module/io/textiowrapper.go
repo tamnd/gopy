@@ -66,7 +66,8 @@ func NewTextIOWrapper(raw *FileIO, encoding, errors, name, mode string) *TextIOW
 
 // textIOWrapperCall is the type-call slot.
 // TextIOWrapper(buffer, encoding=None, errors=None, newline=None,
-//               line_buffering=False, write_through=False)
+//
+//	line_buffering=False, write_through=False)
 //
 // CPython: Modules/_io/textio.c:1163 textiowrapper_init
 func textIOWrapperCall(_ objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {

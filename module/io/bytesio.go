@@ -256,8 +256,7 @@ func bytesIOGetattr(o objects.Object, name objects.Object) (objects.Object, erro
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
 	}
-	switch n.Value() {
-	case "closed":
+	if n.Value() == "closed" {
 		return objects.NewBool(b.closed), nil
 	}
 	if fn := bytesIOMethod(b, n.Value()); fn != nil {

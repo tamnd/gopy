@@ -24,4 +24,3 @@ import (
 func Open(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	return _io.Open(args, kwargs)
 }
-

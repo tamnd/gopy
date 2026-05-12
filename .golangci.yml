@@ -329,6 +329,29 @@ linters:
         linters:
           - gocritic
           - errorlint
+      # The _io module dispatch methods (bytesIOMethod, fileIOMethod,
+      # textIOWrapperMethod) mirror _io.c's tp_methods dispatch table:
+      # one big attribute-name switch is the parity unit with CPython.
+      - path: module/io/
+        linters:
+          - gocognit
+          - gocyclo
+          - gocritic
+      # fileIOModeFlags mirrors the mode-parsing switch in
+      # Modules/_io/fileio.c; collapsing it would diverge from CPython.
+      - path: module/io/fileio\.go
+        linters:
+          - gocyclo
+      # statSysFields returns the 7-field Stat_t breakdown matching
+      # CPython's posixmodule.c stat result tuple fields.
+      - path: module/os/stat_
+        linters:
+          - gocritic
+      # os.module.go mirrors posixmodule.c's large dispatch table.
+      - path: module/os/module\.go
+        linters:
+          - gocognit
+          - gocyclo
 
 formatters:
   enable:

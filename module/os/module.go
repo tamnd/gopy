@@ -439,7 +439,6 @@ func getpid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	return objects.NewInt(int64(goos.Getpid())), nil
 }
 
-
 // CPython: Lib/os.py:211 makedirs (pure Python wrapper around os.mkdir)
 func makedirs(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) == 0 {
