@@ -151,7 +151,16 @@ func eliminateDeadCodeAfterTerminator(seq *Sequence) int {
 		if labelTargets[i] {
 			dead = false
 		}
-		if dead && seq.Instrs[i].Op != NOP {
+		// POP_BLOCK must survive into labelExceptionTargets (PASS 2b),
+		// which converts it to NOP while tracking exception-frame depth.
+		// Zeroing it here corrupts the handler stack for all instructions
+		// that follow in the same scope (the outer SETUP_X frame never
+		// gets popped, so it bleeds past the except block into module-
+		// level code). CPython avoids this via CFG: dead blocks are
+		// unreachable but their b_exceptstack is still propagated before
+		// removal. The flat-sequence port preserves POP_BLOCK so the
+		// same invariant holds.
+		if dead && seq.Instrs[i].Op != NOP && seq.Instrs[i].Op != POP_BLOCK {
 			seq.Instrs[i].Op = NOP
 			seq.Instrs[i].Oparg = 0
 			dropped++
