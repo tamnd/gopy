@@ -1,0 +1,96 @@
+---
+title: Lib/threading.py (part 5)
+description: "threading.py part 5: Barrier, BoundedSemaphore, Event, local() thread-local storage."
+cpython_path: Lib/threading.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/threading.py" />
+
+This annotation covers the higher-level threading synchronization primitives. See `module_threading4_detail` for `Thread`, `Lock`, `RLock`, and `Condition`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `threading.Barrier` | Synchronize N threads at a rendezvous point |
+| 81-160 | `threading.BoundedSemaphore` | Semaphore that raises on over-release |
+| 161-240 | `threading.Event` | Boolean flag with wait |
+| 241-360 | `threading.local` | Thread-local storage |
+| 361-500 | `threading.Timer` | Run a function after a delay |
+
+## Reading
+
+### `Barrier`
+
+```python
+# CPython: Lib/threading.py:580 Barrier
+class Barrier:
+    """Implement a Barrier: block until N threads have called wait()."""
+    def __init__(self, parties, action=None, timeout=None):
+        self._cond = Condition(Lock())
+        self._action = action
+        self._parties = parties
+        self._count = 0
+        self._state = 0  # 0=filling, 1=draining, -1=broken
+
+    def wait(self, timeout=None):
+        with self._cond:
+            self._enter()  # raises BrokenBarrierError if broken
+            index = self._count
+            self._count += 1
+            if self._count == self._parties:
+                self._release()
+            else:
+                self._wait(timeout)
+            return index
+```
+
+All `parties` threads call `wait()` and all block until the last one arrives. The last thread calls the optional `action` callback (once, while others wait) then releases all. Returns the thread's arrival index (0 to parties-1).
+
+### `threading.Event`
+
+```python
+# CPython: Lib/threading.py:520 Event
+class Event:
+    """A flag object. One thread signals; others wait."""
+    def __init__(self):
+        self._cond = Condition(Lock())
+        self._flag = False
+
+    def wait(self, timeout=None):
+        with self._cond:
+            if not self._flag:
+                self._cond.wait(timeout)
+            return self._flag
+
+    def set(self):
+        with self._cond:
+            self._flag = True
+            self._cond.notify_all()
+```
+
+`event.wait()` blocks until `event.set()` is called. If already set, `wait` returns immediately. `event.clear()` resets the flag. Used for start signals, shutdown notifications, and one-time initialization gates.
+
+### `threading.local`
+
+```python
+# CPython: Lib/threading.py:60 local
+class local:
+    """Thread-local storage.
+    
+    Attributes set on a local() instance are private to each thread.
+    Other threads see a separate copy initialized from __init_subclass__.
+    """
+    __slots__ = '_local__impl', '__dict__'
+```
+
+`threading.local()` uses `__dict__` to store per-thread values: `t._local__impl` maps each thread's ident to its own `__dict__`. Getting an attribute looks up the current thread's dict.
+
+## gopy notes
+
+`threading.Barrier` is `module/threading.Barrier` in `module/threading/module.go`, implemented using a `sync.WaitGroup` plus a `sync.Mutex` for the draining phase. `threading.Event` uses a `sync.Cond`. `threading.local` stores values in a `sync.Map[goroutineID]map[string]interface{}`.

@@ -1,0 +1,105 @@
+---
+title: Objects/setobject.c (part 7)
+description: "Objects/setobject.c part 7: frozenset, set.intersection_update, set.difference_update, set.__ior__, set.isdisjoint."
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/setobject.c" />
+
+This annotation covers in-place set operations and frozenset. See `objects_setobject6_detail` for `set.add`, `set.discard`, `set.__contains__`, and the hash table layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `frozenset` | Immutable set: hashable, no mutation methods |
+| 81-160 | `set.intersection_update` | `s &= other` |
+| 161-240 | `set.difference_update` | `s -= other` |
+| 241-320 | `set.symmetric_difference_update` | `s ^= other` |
+| 321-500 | `set.isdisjoint` | True if no elements in common |
+
+## Reading
+
+### `frozenset`
+
+```c
+// CPython: Objects/setobject.c:2180 frozenset_new
+static PyObject *
+frozenset_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    /* frozenset is identical to set but immutable and hashable */
+    if (PyTuple_GET_SIZE(args) == 1) {
+        PyObject *tmp = PyTuple_GET_ITEM(args, 0);
+        if (PyFrozenSet_CheckExact(tmp)) {
+            Py_INCREF(tmp);
+            return tmp;  /* Return the same object if already a frozenset */
+        }
+    }
+    PyObject *result = make_new_set(type, args);
+    return result;
+}
+
+static Py_hash_t
+frozenset_hash(PyObject *self)
+{
+    /* XOR-based hash of all element hashes */
+    ...
+}
+```
+
+`frozenset(frozenset([1,2]))` returns the same object (identity optimization). `frozenset` is hashable because its elements are immutable once created. `frozenset({frozenset({1,2}), frozenset({3})})` is valid.
+
+### `set.intersection_update`
+
+```c
+// CPython: Objects/setobject.c:1480 set_intersection_update
+static PyObject *
+set_intersection_update(PySetObject *so, PyObject *other)
+{
+    /* Remove all elements not in other */
+    PyObject *tmp = set_intersection(so, other);  /* Compute new set */
+    if (tmp == NULL) return NULL;
+    set_swap_bodies(so, (PySetObject *)tmp);  /* Swap the hash tables */
+    Py_DECREF(tmp);
+    Py_RETURN_NONE;
+}
+```
+
+`set_swap_bodies` swaps the internal hash tables of two set objects in O(1). This makes in-place updates efficient: compute the new set, then swap, without copying.
+
+### `set.isdisjoint`
+
+```c
+// CPython: Objects/setobject.c:1640 set_isdisjoint
+static PyObject *
+set_isdisjoint(PySetObject *so, PyObject *other)
+{
+    /* True if so and other have no elements in common */
+    PyObject *key;
+    Py_hash_t hash;
+    Py_ssize_t pos = 0;
+    /* Iterate the smaller set and check membership in the larger */
+    PySetObject *a = so, *b;
+    if (PyAnySet_Check(other) && PySet_GET_SIZE(other) < PySet_GET_SIZE(so)) {
+        a = (PySetObject *)other;
+        b = so;
+    } else {
+        b = (PySetObject *)other;
+    }
+    while (set_next(a, &pos, &key, &hash)) {
+        if (set_contains_entry(b, key, hash)) return Py_False;
+    }
+    return Py_True;
+}
+```
+
+Optimized to iterate the smaller set and check against the larger. Average O(min(len(a), len(b))) for hash sets.
+
+## gopy notes
+
+`frozenset` is `objects.FrozenSet` in `objects/set.go`, sharing the same hash table implementation as `set` but with mutation methods removed. `intersection_update` calls `objects.SetIntersection` then `objects.SetSwapBodies`. `isdisjoint` iterates the smaller set and calls `objects.SetContainsHash`.
