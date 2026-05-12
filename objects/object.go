@@ -244,24 +244,33 @@ func objectInitDescr(args []Object, kwargs map[string]Object) (Object, error) {
 	return None(), nil
 }
 
-// objectReprDescr is the slot wrapper for tp_repr.
+// objectReprDescr is the slot wrapper for object.__repr__. It must
+// call into objectRepr directly: routing through Repr() would
+// re-enter slotTpRepr, which looks up __repr__ via the MRO and lands
+// right back here, blowing the stack. CPython's object_repr is
+// likewise a direct PyUnicode_FromFormat.
+//
+// CPython: Objects/typeobject.c:6911 object_repr
 func objectReprDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
 	}
-	s, err := Repr(args[0])
+	s, err := objectRepr(args[0])
 	if err != nil {
 		return nil, err
 	}
 	return NewStr(s), nil
 }
 
-// objectStrDescr is the slot wrapper for tp_str.
+// objectStrDescr is the slot wrapper for object.__str__. Same
+// recursion concern as objectReprDescr: go straight to objectStr.
+//
+// CPython: Objects/typeobject.c:6938 object_str
 func objectStrDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
 	}
-	s, err := Str(args[0])
+	s, err := objectStr(args[0])
 	if err != nil {
 		return nil, err
 	}

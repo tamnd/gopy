@@ -34,6 +34,19 @@ func init() {
 	BoundMethodType.Vectorcall = boundMethodVectorcall
 	BoundMethodType.TpTraverse = boundMethodTraverse
 	BoundMethodType.Getattro = boundMethodGetattro
+	// method_richcompare: == / != compare (im_func, im_self) pairs.
+	// All other ops return NotImplemented so that comparing a bound
+	// method against, say, an int gives the regular TypeError instead
+	// of a spurious False.
+	//
+	// CPython: Objects/classobject.c:206 method_richcompare
+	BoundMethodType.RichCmp = boundMethodRichCompare
+	// method_hash: pointer hash of im_self XOR hash(im_func). The
+	// pointer half lets every distinct binding hash differently even
+	// when the function and self compare equal in some weird way.
+	//
+	// CPython: Objects/classobject.c:230 method_hash
+	BoundMethodType.Hash = boundMethodHash
 	SetTypeDescr(BoundMethodType, "__func__", NewGetSetDescr("__func__",
 		func(o Object) (Object, error) { return o.(*BoundMethod).imFunc, nil },
 		nil))
@@ -92,9 +105,105 @@ func (m *BoundMethod) Func() Object { return m.imFunc }
 // Self returns the bound instance.
 func (m *BoundMethod) Self() Object { return m.imSelf }
 
+// boundMethodRepr matches CPython's
+// `<bound method QUALNAME_OR_NAME of REPR_OF_SELF>`. The qualname
+// preference (over name) is what makes nested class methods print as
+// `Outer.Inner.f` instead of just `f`.
+//
+// CPython: Objects/classobject.c:280 method_repr
 func boundMethodRepr(o Object) (string, error) {
 	m := o.(*BoundMethod)
-	return fmt.Sprintf("<bound method of %s>", m.imSelf.Type().Name), nil
+	name := boundMethodFuncName(m.imFunc)
+	selfRepr, err := Repr(m.imSelf)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("<bound method %s of %s>", name, selfRepr), nil
+}
+
+// boundMethodFuncName fetches __qualname__ off the wrapped function,
+// falling back to __name__, falling back to "?" the way CPython's
+// method_repr does. AttributeError is swallowed because builtins
+// frequently omit one or both.
+//
+// CPython: Objects/classobject.c:280 method_repr
+func boundMethodFuncName(fn Object) string {
+	if fn == nil {
+		return "?"
+	}
+	if v, err := GetAttr(fn, NewStr("__qualname__")); err == nil {
+		if s, ok := v.(*Unicode); ok {
+			return s.Value()
+		}
+	}
+	if v, err := GetAttr(fn, NewStr("__name__")); err == nil {
+		if s, ok := v.(*Unicode); ok {
+			return s.Value()
+		}
+	}
+	return "?"
+}
+
+// boundMethodRichCompare ports method_richcompare. Only == and !=
+// are meaningful; everything else returns NotImplemented so the
+// regular protocol fallback kicks in. Equality holds when both the
+// wrapped function and the bound self compare equal pairwise.
+//
+// CPython: Objects/classobject.c:206 method_richcompare
+func boundMethodRichCompare(a, b Object, op CompareOp) (Object, error) {
+	if op != CompareEQ && op != CompareNE {
+		return NotImplemented(), nil
+	}
+	ma, ok := a.(*BoundMethod)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	mb, ok := b.(*BoundMethod)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	eq, err := RichCmpBool(ma.imFunc, mb.imFunc, CompareEQ)
+	if err != nil {
+		return nil, err
+	}
+	if eq {
+		switch {
+		case ma.imSelf == nil || mb.imSelf == nil:
+			eq = ma.imSelf == mb.imSelf
+		default:
+			eq, err = RichCmpBool(ma.imSelf, mb.imSelf, CompareEQ)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	if op == CompareNE {
+		eq = !eq
+	}
+	return NewBool(eq), nil
+}
+
+// boundMethodHash mirrors method_hash. Identity hash of im_self
+// (because two methods bound off different instances should land in
+// different buckets even when those instances compare equal) XORed
+// with the function's own hash.
+//
+// CPython: Objects/classobject.c:230 method_hash
+func boundMethodHash(o Object) (int64, error) {
+	m := o.(*BoundMethod)
+	x, err := identityHash(m.imSelf)
+	if err != nil {
+		return 0, err
+	}
+	y, err := Hash(m.imFunc)
+	if err != nil {
+		return 0, err
+	}
+	x ^= y
+	if x == -1 {
+		x = -2
+	}
+	return x, nil
 }
 
 // boundMethodVectorcall prepends self to the positional args, then

@@ -43,7 +43,7 @@ otherwise. Final gate closes #544.
 | 2 | D `funcobject.c` | PyClassMethod_Type (all `cm_*` functions) | - | done |
 | 3 | D `funcobject.c` | PyStaticMethod_Type (all `sm_*` functions) | - | done |
 | 4 | D `funcobject.c` | PyFunction_Type (all `func_*` functions) | - | done |
-| 5 | C `classobject.c` | PyMethod_Type (all `method_*` functions) | - | partial |
+| 5 | C `classobject.c` | PyMethod_Type (all `method_*` functions) | - | done |
 | 6 | B `typeobject.c` | `type_new` pipeline (`type_new_*` functions) | 1,2,3,4,5 | partial |
 | 7 | B `typeobject.c` | `inherit_slots` (every slot edge) | 6 | partial |
 | 8 | E `ceval.c` | STORE_NAME / LOAD_NAME / DELETE_NAME | - | partial |
@@ -243,26 +243,26 @@ implementations earlier in the file. Every row must land.
 | C function | Surface | Status |
 |------------|---------|--------|
 | `PyMethod_New` | constructor | done |
-| `method_repr` | `<bound method ClassName.fn of <obj>>` | partial (wrong text) |
+| `method_repr` | `<bound method QUALNAME of REPR>` | done |
 | `method_call` / `method_vectorcall` | call with self prepended | done |
 | `method_getattro` | attribute forward through to `im_func` | done |
 | `method_traverse` | GC visit `im_func` and `im_self` | done |
-| `method_richcompare` | `__eq__` / `__ne__` over (func, self) | pending |
-| `method_hash` | hash combining `im_func` + `im_self` | pending |
+| `method_richcompare` | `__eq__` / `__ne__` over (func, self) | done |
+| `method_hash` | hash combining `im_func` + `im_self` | done |
 | `method_memberlist` | `__func__` / `__self__` members | done (via getset) |
-| `method_getset` | `__doc__`, `__name__`, `__module__`, `__qualname__`, `__self_class__` | pending |
-| `method___reduce__` | pickle hook | pending |
+| `method_getset` | `__doc__`, `__name__`, `__module__`, `__qualname__` | done (forwarded via method_getattro) |
+| `method___reduce__` | pickle hook | n/a (gopy has no pickle yet; will land with copyreg port) |
 | `PyMethod_Function` / `PyMethod_Self` | C API accessors | done (as Go methods) |
 
 ### Gates
 
-| Gate | Command | Expected |
-|------|---------|----------|
-| 5.1 | `gopy -c 'class C:\n def f(self): pass\nc = C()\nprint(c.f == c.f)'` | `True` |
-| 5.2 | `gopy -c 'class C:\n def f(self): pass\nprint(C().f != C().f)'` | `True` |
-| 5.3 | `gopy -c 'class C:\n def f(self): pass\nprint({C().f, C().f})'` | set with 2 entries |
-| 5.4 | `gopy -c 'class C:\n def f(self): pass\nprint(C().f.__name__)'` | `f` |
-| 5.5 | `gopy -c 'class C:\n def f(self): pass\nprint(repr(C().f).startswith("<bound method C.f of"))'` | `True` |
+| Gate | Command | Expected | Status |
+|------|---------|----------|--------|
+| 5.1 | `gopy -c 'class C:\n def f(self): pass\nc = C()\nprint(c.f == c.f)'` | `True` | pass |
+| 5.2 | `gopy -c 'class C:\n def f(self): pass\nprint(C().f != C().f)'` | `True` | pass |
+| 5.3 | `gopy -c 'class C:\n def f(self): pass\nprint({C().f, C().f})'` | set with 2 entries | pass |
+| 5.4 | `gopy -c 'class C:\n def f(self): pass\nprint(C().f.__name__)'` | `f` | pass |
+| 5.5 | `gopy -c 'class C:\n def f(self): pass\nprint(repr(C().f).startswith("<bound method C.f of"))'` | `True` | pass |
 
 ### CPython citations
 
@@ -276,6 +276,15 @@ implementations earlier in the file. Every row must land.
 | 6 | `Objects/classobject.c:262` `method_traverse` |
 | 7 | `Objects/classobject.c:268` `PyMethod_Type` |
 | 8 | `Objects/classobject.c:280` `method_repr` |
+
+### Side fixes
+
+- `object.__repr__` / `object.__str__` slot wrappers were re-entering
+  `Repr` / `Str` from inside the wrapper, which bounced back through
+  `slot_tp_repr` for user types and blew the stack. The wrappers now
+  delegate straight to `objectRepr` / `objectStr`, matching CPython's
+  direct `PyUnicode_FromFormat` path. This was a pre-existing latent
+  bug surfaced once `method_repr` started calling `Repr(self)`.
 
 ## Phase 6 - `Objects/typeobject.c` type_new pipeline
 
