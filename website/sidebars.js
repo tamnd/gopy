@@ -279,6 +279,7 @@ const sidebars = {
         'annotations/python/python_symtable_c_detail',
         'annotations/python/python_python_ast_c_detail',
         'annotations/python/python_ceval_c_detail',
+        'annotations/python/python_compile_c_detail',
       ],
     },
     {
@@ -417,6 +418,7 @@ const sidebars = {
         'annotations/objects/enumobject_c_detail',
         'annotations/objects/filterobject_c_detail',
         'annotations/objects/objects_weakrefobject_c_detail',
+        'annotations/objects/objects_longobject_detail',
       ],
     },
     {
@@ -620,6 +622,7 @@ const sidebars = {
         'annotations/include/include_cpython_dictobject_h_detail',
         'annotations/include/include_pycore_runtime_h_detail',
         'annotations/include/include_cpython_unicodeobject_h_detail',
+        'annotations/include/include_object_h_detail',
       ],
     },
     {
@@ -1203,6 +1206,8 @@ const sidebars = {
         'annotations/lib/urllib_error_detail',
         'annotations/lib/lib_hashlib_detail',
         'annotations/lib/lib_hmac_detail',
+        'annotations/lib/lib_socket_detail',
+        'annotations/lib/lib_ssl_detail',
       ],
     },
   ],

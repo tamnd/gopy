@@ -1,0 +1,78 @@
+---
+title: Objects/longobject.c
+description: "Python int implementation: arbitrary-precision integer using 30-bit digit arrays, fast paths for small ints, and arithmetic algorithms for add/sub/mul/div."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+`Objects/longobject.c` implements Python's arbitrary-precision `int` type. Integers are stored as arrays of 30-bit digits (on 64-bit platforms) in little-endian order. The file provides the full arithmetic suite, conversion to/from C types, string parsing and formatting, and the small-integer free list.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | struct, small int cache | `PyLongObject` layout; `_PyLong_SMALL_INT` cache `[-5, 256]` |
+| 201-600 | `PyLong_FromLong`, `PyLong_AsLong` | Conversion to/from C `long` |
+| 601-1200 | `PyLong_FromString`, `PyLong_Format` | String parsing and base conversion |
+| 1201-2500 | `long_add`, `long_sub`, `long_mul` | Grade-school addition, subtraction, Karatsuba multiply |
+| 2501-3500 | `long_divrem`, `long_div`, `long_mod` | Knuth Algorithm D division |
+| 3501-4500 | `long_pow` | Left-to-right binary exponentiation; modular pow |
+| 4501-6000 | bitwise ops, comparisons, misc | `long_and`, `long_or`, `long_xor`, `long_richcompare` |
+
+## Reading
+
+### Digit array layout
+
+`PyLongObject` stores digits in a `digit ob_digit[]` flexible array, with the sign encoded in `ob_size` (negative = negative number). Each digit is 30 bits (mask `PyLong_MASK = 0x3fffffff`) on 64-bit platforms.
+
+```c
+// Objects/longobject.c:1 PyLongObject layout
+struct _longobject {
+    PyObject_VAR_HEAD        /* ob_size = digit count, signed */
+    digit ob_digit[1];       /* digits in little-endian order */
+};
+/* digit = uint32_t, PyLong_SHIFT = 30, PyLong_MASK = 0x3fffffff */
+```
+
+### Small integer cache
+
+Integers in `[-5, 256]` are pre-allocated singletons. `_PyLong_FromSmall` returns the cached object. This avoids allocation for the most common integer values (loop counters, small indices, boolean-like flags).
+
+```c
+// Objects/longobject.c:201 _PyLong_FromSmall
+static inline PyObject *
+_PyLong_FromSmall(int ival) {
+    assert(-_PY_NSMALLNEGINTS <= ival && ival < _PY_NSMALLPOSINTS);
+    return (PyObject *)&_PyRuntime.cached_objects.small_ints[
+        ival + _PY_NSMALLNEGINTS];
+}
+```
+
+### Karatsuba multiplication
+
+For large integers, `long_mul` uses Karatsuba's O(n^1.585) algorithm. The threshold is approximately 70 digits; below that, grade-school O(n^2) `x_mul` is faster due to lower constant factors.
+
+```c
+// Objects/longobject.c:2100 k_mul (Karatsuba)
+static PyLongObject *
+k_mul(PyLongObject *a, PyLongObject *b)
+{
+    /* split a into ah*W + al, b into bh*W + bl */
+    /* result = (ah+al)*(bh+bl)*W - ah*bh*W^2 - al*bl + al*bl */
+    ...
+}
+```
+
+### Division: Knuth Algorithm D
+
+`long_divrem` implements Knuth's Algorithm D for multi-digit division. It normalizes the divisor to have its top bit set, performs the trial digit loop, and denormalizes the remainder.
+
+## gopy notes
+
+The gopy integer type is in `objects/object.go` (using Go's `*big.Int` for arbitrary precision). The small-int cache maps to a `[262]PyObject` array initialized at startup. Karatsuba and Algorithm D are provided by Go's `math/big` package internally.
