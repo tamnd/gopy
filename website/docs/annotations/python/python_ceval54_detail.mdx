@@ -1,0 +1,85 @@
+---
+title: Python/ceval.c (part 54)
+description: "Python/ceval.c part 54: STORE_ATTR specializations — STORE_ATTR_SLOT, STORE_ATTR_WITH_HINT, STORE_ATTR_INSTANCE_VALUE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `STORE_ATTR` specializations for instance attribute writes. See `python_ceval53_detail` for `COMPARE_OP` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `STORE_ATTR_SLOT` | Write to a fixed-offset C slot |
+| 81-160 | `STORE_ATTR_WITH_HINT` | Instance dict write with cached index |
+| 161-260 | `STORE_ATTR_INSTANCE_VALUE` | Inline values dict (Python 3.12+ split dict) |
+| 261-360 | `STORE_ATTR` (generic) | Fallback: `__setattr__` dispatch |
+| 361-500 | `DELETE_ATTR` | Remove an attribute |
+
+## Reading
+
+### `STORE_ATTR_SLOT`
+
+```c
+// CPython: Python/ceval.c:5080 STORE_ATTR_SLOT
+inst(STORE_ATTR_SLOT, (unused/2, owner, value --)) {
+    DEOPT_IF(!PyObject_TypeHasFeature(Py_TYPE(owner), Py_TPFLAGS_HEAPTYPE));
+    Py_ssize_t offset = cache->index;
+    PyObject *old_value = *(PyObject **)((char *)owner + offset);
+    *(PyObject **)((char *)owner + offset) = Py_NewRef(value);
+    Py_XDECREF(old_value);
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+For `__slots__` attributes and C extension members: write directly to a byte offset in the object struct. No dict involved.
+
+### `STORE_ATTR_WITH_HINT`
+
+```c
+// CPython: Python/ceval.c:5140 STORE_ATTR_WITH_HINT
+inst(STORE_ATTR_WITH_HINT, (unused/2, owner, value --)) {
+    DEOPT_IF(!PyObject_TypeHasFeature(Py_TYPE(owner), Py_TPFLAGS_MANAGED_DICT));
+    PyDictObject *dict = _PyObject_GetManagedDict(owner);
+    DEOPT_IF(dict == NULL);
+    DEOPT_IF(dict->ma_version_tag != cache->version);
+    Py_ssize_t hint = cache->index;
+    PyObject *name = GETITEM(FRAME_CO_NAMES, cache->name_or_flag);
+    if (_PyDict_SetItemHint(dict, name, hint, value) != hint) {
+        DEOPT_IF(true);
+    }
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+The hint is the expected index in the instance dict. If the dict version matches, the write goes directly to the expected slot without hashing. Common for `self.x = val` patterns.
+
+### `STORE_ATTR_INSTANCE_VALUE`
+
+```c
+// CPython: Python/ceval.c:5200 STORE_ATTR_INSTANCE_VALUE
+inst(STORE_ATTR_INSTANCE_VALUE, (unused/2, owner, value --)) {
+    /* Python 3.12+ inline values: small number of instance attrs stored
+       directly in the object, not in a separate dict */
+    DEOPT_IF(!PyObject_TypeHasFeature(Py_TYPE(owner), Py_TPFLAGS_MANAGED_DICT));
+    _PyObjectDict_SetItem(Py_TYPE(owner), _PyObject_ManagedDictPointer(owner),
+                          cache->index, value);
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+Python 3.12 introduced inline values: the first few instance attributes are stored directly in the object alongside the type pointer, avoiding a dict allocation for simple classes.
+
+## gopy notes
+
+`STORE_ATTR_SLOT` writes via `unsafe.Pointer` arithmetic to a cached byte offset in `vm/eval_simple.go`. `STORE_ATTR_WITH_HINT` calls `objects.DictSetHint`. `STORE_ATTR_INSTANCE_VALUE` uses `objects.InstanceSetInline` which writes to `instance.InlineValues[index]`, a small pre-allocated slice on each instance.

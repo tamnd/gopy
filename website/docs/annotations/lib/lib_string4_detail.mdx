@@ -1,0 +1,87 @@
+---
+title: Lib/string.py (part 4)
+description: "string.py part 4: Formatter.vformat, field_name parsing, format_spec mini-language, conversion flags."
+cpython_path: Lib/string.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/string.py" />
+
+This annotation covers the `str.format` engine internals. See `module_string3_detail` for `Template`, `string.ascii_letters`, and `capwords`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Formatter.vformat` | Top-level format with positional/keyword args |
+| 81-160 | `Formatter.get_field` | Resolve dotted / indexed field names |
+| 161-260 | `Formatter.format_field` | Apply format spec to a value |
+| 261-360 | Format spec mini-language | `[[fill]align][sign][z][#][0][width][grouping][.precision][type]` |
+| 361-500 | Conversion flags | `!r` `!s` `!a` |
+
+## Reading
+
+### `Formatter.vformat`
+
+```python
+# CPython: Lib/string.py:180 vformat
+def vformat(self, format_string, args, kwargs):
+    """Format string using positional args and keyword kwargs."""
+    result, _ = self._vformat(format_string, args, kwargs, set(), 2)
+    return result
+
+def _vformat(self, format_string, args, kwargs, used_args, recursion_depth):
+    if recursion_depth < 0:
+        raise ValueError('Max string formatting recursion exceeded')
+    result = []
+    for literal_text, field_name, format_spec, conversion in \
+            self.parse(format_string):
+        if literal_text:
+            result.append(literal_text)
+        if field_name is not None:
+            obj, arg_used = self.get_field(field_name, args, kwargs)
+            used_args.add(arg_used)
+            obj = self.convert_field(obj, conversion)
+            format_spec, _ = self._vformat(format_spec, args, kwargs, used_args,
+                                           recursion_depth - 1)
+            result.append(self.format_field(obj, format_spec))
+    return ''.join(result), used_args
+```
+
+`_vformat` is recursive because format specs can themselves contain format fields: `'{:{width}.{prec}f}'.format(3.14, width=10, prec=4)`. The recursion depth limit prevents infinite loops.
+
+### `Formatter.get_field`
+
+```python
+# CPython: Lib/string.py:260 get_field
+def get_field(self, field_name, args, kwargs):
+    """Resolve field_name: 'x', 'x.attr', 'x[0]', 'x.attr[0]'."""
+    first, rest = _string.formatter_field_name_split(field_name)
+    obj = self.get_value(first, args, kwargs)
+    for is_attr, i in rest:
+        if is_attr:
+            obj = getattr(obj, i)
+        else:
+            obj = obj[i]
+    return obj, first
+```
+
+`'{0.real}'.format(3+4j)` parses as field `'0'` with attribute `'real'`. `'{obj[key]}'.format(obj={'key': 'val'})` parses as field `'obj'` with integer/string subscript.
+
+### Format spec mini-language
+
+```python
+# CPython: Lib/string.py:320 format_field
+def format_field(self, value, format_spec):
+    return format(value, format_spec)
+```
+
+`format(3.14159, '.3f')` calls `float.__format__` with spec `'.3f'`. The mini-language is parsed in `Objects/typeobject.c` for built-in types. Custom types can define `__format__` to handle arbitrary spec strings.
+
+## gopy notes
+
+`Formatter.vformat` is `module/string.FormatterVFormat` in `module/string/module.go`. The format string parser calls `_string.formatter_field_name_split` which is `objects.FormatterFieldNameSplit`. `format_field` calls `objects.Format(value, spec)` which dispatches to `__format__`. Recursion depth is tracked in a counter on the call stack.

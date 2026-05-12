@@ -1,0 +1,94 @@
+---
+title: Modules/mathmodule.c (part 6)
+description: "mathmodule.c part 6: math.prod, math.perm, math.comb, math.isqrt, math.nextafter."
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mathmodule.c" />
+
+This annotation covers combinatorial and number-theoretic math functions. See `modules_math5_detail` for `math.sin`, `math.log`, `math.floor`, `math.ceil`, and `math.gcd`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `math.prod` | Product of an iterable |
+| 81-160 | `math.perm` | Permutations P(n, k) |
+| 161-240 | `math.comb` | Combinations C(n, k) |
+| 241-320 | `math.isqrt` | Integer square root |
+| 321-500 | `math.nextafter` / `math.ulp` | IEEE 754 adjacent float operations |
+
+## Reading
+
+### `math.prod`
+
+```c
+// CPython: Modules/mathmodule.c:2820 math_prod_impl
+static PyObject *
+math_prod_impl(PyObject *module, PyObject *iterable, PyObject *start)
+{
+    PyObject *result = start ? Py_NewRef(start) : PyLong_FromLong(1);
+    PyObject *it = PyObject_GetIter(iterable);
+    PyObject *item;
+    while ((item = PyIter_Next(it)) != NULL) {
+        PyObject *new_result = PyNumber_Multiply(result, item);
+        Py_DECREF(result);
+        Py_DECREF(item);
+        result = new_result;
+    }
+    ...
+    return result;
+}
+```
+
+`math.prod([2, 3, 4])` returns `24`. `math.prod([], start=1)` returns `1`. The `start` parameter allows combining products: `math.prod(rows, start=math.prod(cols))`.
+
+### `math.comb`
+
+```c
+// CPython: Modules/mathmodule.c:2920 math_comb_impl
+static PyObject *
+math_comb_impl(PyObject *module, PyObject *n, PyObject *k)
+{
+    /* C(n, k) = n! / (k! * (n-k)!) = n*(n-1)*...*(n-k+1) / k! */
+    /* Use the multiplicative formula to avoid huge factorials */
+    if (k > n - k) k = n - k;  /* C(n, k) == C(n, n-k); use smaller k */
+    PyObject *result = PyLong_FromLong(1);
+    for (long i = 0; i < k; i++) {
+        result = result * (n - i) / (i + 1);
+    }
+    return result;
+}
+```
+
+`math.comb(10, 3)` returns `120`. The multiplicative formula computes exact integer values incrementally without intermediate factorials. Using `min(k, n-k)` halves the iterations.
+
+### `math.isqrt`
+
+```c
+// CPython: Modules/mathmodule.c:3040 math_isqrt_impl
+static PyObject *
+math_isqrt_impl(PyObject *module, PyObject *n)
+{
+    /* Integer square root: largest m such that m*m <= n.
+       Uses Newton's method on big integers. */
+    if (_PyLong_IsNonNegativeCompact((PyLongObject *)n)) {
+        /* Fast path for small n */
+        unsigned long c = PyLong_AsUnsignedLong(n);
+        return PyLong_FromUnsignedLong((unsigned long)sqrt((double)c));
+    }
+    /* Newton's method: x_{n+1} = (x_n + n/x_n) / 2 */
+    ...
+}
+```
+
+`math.isqrt(17)` returns `4` (since `4*4=16 <= 17 < 25=5*5`). Newton's method converges quadratically. The final result is verified with an exact integer comparison.
+
+## gopy notes
+
+`math.prod` is `module/math.Prod` in `module/math/module.go`. It uses `objects.NumberMultiply` in a loop. `math.comb` uses `big.Int` arithmetic for the multiplicative formula. `math.isqrt` uses `big.Int.Sqrt`. `math.nextafter` and `math.ulp` use `math.Nextafter` and `math.Float64frombits` from Go's standard library.

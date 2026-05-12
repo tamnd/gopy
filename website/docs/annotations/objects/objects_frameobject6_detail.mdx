@@ -1,0 +1,97 @@
+---
+title: Objects/frameobject.c (part 6)
+description: "Objects/frameobject.c part 6: frame.f_locals, frame.f_lineno, frame_getlocals, frame fast-to-slow conversion."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/frameobject.c" />
+
+This annotation covers the Python-visible frame object and locals management. See `objects_frameobject5_detail` for `_PyInterpreterFrame`, frame creation, and stack unwinding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyFrameObject` wrapper | The Python-visible frame object wrapping `_PyInterpreterFrame` |
+| 81-160 | `frame.f_locals` | Materialize locals dict from the fast locals array |
+| 161-260 | `frame.f_lineno` | Current line number from the instruction offset |
+| 261-360 | Fast-to-slow conversion | When frames escape (debugging, `locals()`) |
+| 361-500 | `frame_getlocals` | Implementation of `locals()` builtin |
+
+## Reading
+
+### `frame.f_locals`
+
+```c
+// CPython: Objects/frameobject.c:380 frame_getlocals
+static PyObject *
+frame_getlocals(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    /* Convert the fast locals array to a dict.
+       Called when a frame object is accessed via sys._getframe() or debugger. */
+    if (PyFrame_FastToLocalsWithError(f) < 0) return NULL;
+    PyObject *locals = f->f_frame->f_locals;
+    if (locals == NULL) {
+        locals = f->f_frame->f_locals = PyDict_New();
+    }
+    return Py_NewRef(locals);
+}
+```
+
+Normally, local variables live in the `localsplus` array for performance (direct index access, no hash). When `f_locals` is accessed, `PyFrame_FastToLocals` copies from the array to a dict. Modifications to `f_locals` do NOT affect the running frame unless `PyFrame_LocalsToFast` is called.
+
+### `frame.f_lineno`
+
+```c
+// CPython: Objects/frameobject.c:440 frame_getlineno
+static PyObject *
+frame_getlineno(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    /* Decode the current instruction offset to a source line number */
+    int lineno = PyFrame_GetLineNumber(f);
+    return PyLong_FromLong(lineno);
+}
+
+int
+PyFrame_GetLineNumber(PyFrameObject *f)
+{
+    if (f->f_lineno != 0) return f->f_lineno;  /* Explicit override (e.g., tracing) */
+    return _PyCode_InitAddressRange(f->f_frame->f_code,
+                                    _PyInterpreterFrame_LASTI(f->f_frame));
+}
+```
+
+Line numbers are stored in `co_linetable` as a compressed mapping from byte offset to line number delta. `_PyCode_InitAddressRange` decodes this at access time.
+
+### Fast-to-slow conversion
+
+```c
+// CPython: Objects/frameobject.c:520 PyFrame_FastToLocalsWithError
+int
+PyFrame_FastToLocalsWithError(PyFrameObject *f)
+{
+    /* For each local variable (by index in co_varnames):
+       If the slot is filled, copy it to f_locals dict.
+       If the slot is empty (uninitialized local), skip it. */
+    PyCodeObject *co = f->f_frame->f_code;
+    PyObject *locals = f->f_frame->f_locals;
+    for (int i = 0; i < co->co_nlocalsplus; i++) {
+        PyObject *v = f->f_frame->localsplus[i];
+        if (v == NULL) continue;
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        PyDict_SetItem(locals, name, v);
+    }
+    return 0;
+}
+```
+
+`locals()` calls this function. The result is a snapshot; future changes to local variables won't be reflected unless `locals()` is called again.
+
+## gopy notes
+
+`PyFrameObject` is `objects.Frame` in `objects/frame.go`. `f_locals` triggers `vm.FrameFastToLocals` which copies from `frame.Locals` slice to a `objects.Dict`. `f_lineno` calls `objects.CodeGetLineNumber` which decodes the linetable. `frame_getlocals` is the implementation of the `locals()` builtin in `vm/eval_gen.go`.
