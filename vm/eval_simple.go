@@ -1618,18 +1618,19 @@ func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool) {
 	if scope == nil {
 		return nil, false
 	}
-	if d, ok := scope.(*objects.Dict); ok {
+	// Exact-dict fast path. A dict subclass (e.g. enum.EnumDict, or any
+	// class returned by a metaclass __prepare__) has to go through the
+	// mapping protocol so an overridden __getitem__ fires.
+	//
+	// CPython: Python/bytecodes.c LOAD_NAME (PyMapping_GetOptionalItem
+	// on locals)
+	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
 		v, err := d.GetItem(key)
 		if err != nil {
-			// Missing key is the not-found signal for name lookup.
 			return nil, false
 		}
 		return v, true
 	}
-	// Non-Dict scope (e.g. EnumDict, a user subclass of dict). Use the
-	// mapping protocol: __getitem__, treating KeyError as a miss.
-	//
-	// CPython: Python/ceval.c LOAD_NAME uses PyObject_GetItem on locals
 	v, err := objects.GetItem(scope, key)
 	if err != nil {
 		return nil, false
@@ -2079,8 +2080,14 @@ func deleteIn(scope objects.Object, key objects.Object, name string) error {
 	if scope == nil {
 		return fmt.Errorf("vm: NameError: name '%s' is not defined", name)
 	}
-	if d, ok := scope.(*objects.Dict); ok {
+	// Exact-dict fast path. Dict subclasses (and any non-Dict mapping
+	// returned by a metaclass __prepare__) need to route through the
+	// mapping protocol so an overridden __delitem__ fires.
+	//
+	// CPython: Python/bytecodes.c DELETE_NAME (PyObject_DelItem on
+	// locals)
+	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
 		return d.DelItem(key)
 	}
-	return fmt.Errorf("vm: delete against unsupported scope type %T", scope)
+	return objects.DelItem(scope, key)
 }

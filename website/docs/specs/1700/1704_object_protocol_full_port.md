@@ -25,7 +25,7 @@ files for a missing slot.
 | B | `Objects/typeobject.c` | ~12,000 | `objects/type.go` + `objects/usertype.go` + `objects/type_call.go` + `objects/type_inherit.go` | partial |
 | C | `Objects/classobject.c` | ~620 | `objects/method.go` (BoundMethod block) | partial |
 | D | `Objects/funcobject.c` | ~1,260 | `objects/function.go` + `objects/method.go` (classmethod, staticmethod blocks) | partial |
-| E | `Python/ceval.c` name ops | ~80 | `vm/eval_simple.go` (storeIn / lookupIn / deleteIn) | partial |
+| E | `Python/ceval.c` name ops | ~80 | `vm/eval_simple.go` (storeIn / lookupIn / deleteIn) | done |
 | F | `Include/cpython/classobject.h` | 30 | `objects/method.go` struct decl | done |
 | G | `Include/cpython/funcobject.h` | various | `objects/function.go` + `objects/method.go` struct decls | done |
 
@@ -46,7 +46,7 @@ otherwise. Final gate closes #544.
 | 5 | C `classobject.c` | PyMethod_Type (all `method_*` functions) | - | done |
 | 6 | B `typeobject.c` | `type_new` pipeline (`type_new_*` functions) | 1,2,3,4,5 | done |
 | 7 | B `typeobject.c` | `inherit_slots` (every slot edge) | 6 | done |
-| 8 | E `ceval.c` | STORE_NAME / LOAD_NAME / DELETE_NAME | - | partial |
+| 8 | E `ceval.c` | STORE_NAME / LOAD_NAME / DELETE_NAME | - | done |
 | Gate | - | enum + re + fnmatch smoke | all | pending |
 
 ## Phase 1 - `Objects/object.c` full port
@@ -411,17 +411,40 @@ fixup writes never mutate the base.
 | Opcode | gopy hook | CPython semantics | Status |
 |--------|-----------|-------------------|--------|
 | `STORE_NAME` | `storeIn` | `PyObject_SetItem(locals, name, v)`; fast-path when locals is exact dict | done |
-| `LOAD_NAME` | `lookupIn` | `PyMapping_GetOptionalItem(locals, name)`, then globals, then builtins | partial (exact-dict fast path bypasses subclass __getitem__) |
-| `DELETE_NAME` | `deleteIn` | `PyObject_DelItem(locals, name)` | partial (panics on non-Dict) |
-| `LOAD_CLASSDEREF` (in class scope) | `lookupClassDeref` | same protocol as LOAD_NAME for the class namespace | verify |
+| `LOAD_NAME` | `lookupIn` | `PyMapping_GetOptionalItem(locals, name)`, then globals, then builtins | done (exact-dict guard gates the fast path so subclass __getitem__ fires) |
+| `DELETE_NAME` | `deleteIn` | `PyObject_DelItem(locals, name)` | done (exact-dict guard plus `objects.DelItem` fallback for subclasses) |
+| `LOAD_CLASSDEREF` (in class scope) | `lookupClassDeref` | same protocol as LOAD_NAME for the class namespace | done (reuses the widened `lookupIn` exact-dict guard) |
 
 ### Gates
 
-| Gate | Command | Expected |
-|------|---------|----------|
-| 8.1 | `gopy -c 'class D(dict):\n def __setitem__(self,k,v): super().__setitem__(k,v*2)\nclass M(type):\n @classmethod\n def __prepare__(mcs,n,b): return D()\nclass C(metaclass=M): x=10\nprint(C.x)'` | `20` |
-| 8.2 | `gopy -c 'class D(dict):\n def __getitem__(self,k): return super().__getitem__(k)+1\nclass M(type):\n @classmethod\n def __prepare__(mcs,n,b): return D()\nclass C(metaclass=M):\n x=10\n y=x\nprint(C.y)'` | `11` |
-| 8.3 | `gopy -c 'class D(dict):\n def __delitem__(self,k): super().__delitem__(k)\nclass M(type):\n @classmethod\n def __prepare__(mcs,n,b): return D()\nclass C(metaclass=M):\n x=10\n del x\nprint(hasattr(C,"x"))'` | `False` |
+Each gate exercises one of LOAD_NAME / STORE_NAME / DELETE_NAME inside a
+class body whose namespace is a `dict` subclass returned by a metaclass
+`__prepare__`. Tracing get/set/del lets the gate watch the slot fire.
+
+| Gate | Opcode | Expected | Status |
+|------|--------|----------|--------|
+| 8.1 | LOAD_NAME routes through subclass `__getitem__` | log records the `X` lookup; class attribute computed from override-decorated read | pass |
+| 8.2 | STORE_NAME routes through subclass `__setitem__` | log records every name binding inside the class body | pass |
+| 8.3 | DELETE_NAME routes through subclass `__delitem__` | log records the `del`, and the attribute is gone from the class | pass |
+
+Pinned form: `stdlibinit/name_ops_dict_subclass_test.go` (one Go test
+per gate, each running the Python script under `pythonrun.RunString`
+and asserting on stdout).
+
+### Side fixes shipped under Phase 8
+
+- `lookupIn` (LOAD_NAME) gates its `*objects.Dict` fast path on
+  `scope.Type() == objects.DictType`. Dict subclasses fall through to
+  `objects.GetItem`, which honours the subclass `__getitem__` slot.
+  The previous type assertion succeeded on subclasses too, silently
+  bypassing the override.
+- `deleteIn` (DELETE_NAME) does the same exact-type gate, then falls
+  back to `objects.DelItem` instead of returning the old
+  `"unsupported scope type"` error. That branch used to panic when the
+  class body's namespace was anything but a plain Dict.
+- `storeIn` (STORE_NAME) already routed through `objects.SetItem` for
+  non-Dict scopes; Phase 8 leaves the fast path in place but documents
+  the symmetric exact-type guard so the three opcodes track each other.
 
 ### CPython citations
 
