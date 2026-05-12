@@ -1,0 +1,108 @@
+---
+title: Objects/listobject.c (part 10)
+description: "Objects/listobject.c part 10: list.sort timsort, merge_at, gallop_right, gallop_left, run detection."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+This annotation covers list.sort and Python's timsort. See `objects_listobject9_detail` for `list.__new__`, `append`, `insert`, `pop`, and `reverse`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `list.sort` entry | `key=`, `reverse=`, stability guarantee |
+| 81-180 | `count_run` | Find natural ascending/descending runs |
+| 181-280 | `merge_at` | Merge two adjacent runs |
+| 281-380 | `gallop_right` / `gallop_left` | Binary search with exponential probe |
+| 381-600 | `merge_force_collapse` | Final merge of the run stack |
+
+## Reading
+
+### `list.sort` entry
+
+```c
+// CPython: Objects/listobject.c:2280 list_sort_impl
+static PyObject *
+list_sort_impl(PyListObject *self, PyObject *keyfunc, int reverse)
+{
+    /* Use key wrappers if keyfunc is provided */
+    if (keyfunc != Py_None) {
+        /* Wrap each element: (key(elem), elem) */
+        for (i = 0; i < n; i++) {
+            PyObject *key = PyObject_CallOneArg(keyfunc, v[i]);
+            keys[i] = key;
+        }
+    }
+    /* Sort keys (and mirror moves to values) */
+    listsort(ms, keys, n);
+    /* Unwrap */
+    if (keyfunc != Py_None) {
+        for (i = 0; i < n; i++) self->ob_item[i] = /* from key wrapper */;
+    }
+    if (reverse) list_reverse_slice(self->ob_item, n);
+    return Py_None;
+}
+```
+
+`key=` creates a parallel array of keys. The sort works on keys; when elements are swapped, both the key and value arrays are updated in tandem. After sorting, the values are written back. `reverse=True` reverses the final result rather than sorting descending.
+
+### `count_run`
+
+```c
+// CPython: Objects/listobject.c:2180 count_run
+static Py_ssize_t
+count_run(MergeState *ms, PyObject **lo, PyObject **hi, int *descending)
+{
+    *descending = 0;
+    PyObject **p = lo + 1;
+    if (ISLT(*p, *lo, compare)) {
+        *descending = 1;
+        for (p = lo + 1; p < hi && ISLT(*p, *(p-1), compare); p++);
+    } else {
+        for (p = lo + 1; p < hi && !ISLT(*p, *(p-1), compare); p++);
+    }
+    /* Reverse descending runs to make them ascending */
+    if (*descending) reverse_slice(lo, p);
+    return p - lo;
+}
+```
+
+Timsort exploits natural runs (pre-sorted subsequences). Ascending runs are used directly; descending runs are reversed. If a run is too short, it's extended to `MIN_GALLOP` (typically 64) using binary insertion sort.
+
+### `gallop_right`
+
+```c
+// CPython: Objects/listobject.c:2040 gallop_right
+static Py_ssize_t
+gallop_right(MergeState *ms, PyObject *key, PyObject **a, Py_ssize_t n, Py_ssize_t hint)
+{
+    /* Find rightmost position in a[0:n] where key can be inserted.
+       Start at `hint`, then exponentially probe: 1, 3, 7, 15, ... */
+    Py_ssize_t ofs = 1, lastofs = 0;
+    if (ISLT(key, a[hint], compare)) {
+        /* key < a[hint]: gallop left */
+        ...
+    } else {
+        /* key >= a[hint]: gallop right */
+        while (ofs < n && !ISLT(key, a[hint + ofs], compare)) {
+            lastofs = ofs;
+            ofs = (ofs << 1) + 1;
+        }
+        /* Binary search in [hint+lastofs, hint+ofs] */
+        ...
+    }
+}
+```
+
+Galloping is the key optimization for merging runs of very different sizes. If one run is much shorter than the other, the exponential probe quickly reaches the end of the longer run, reducing comparisons from O(n) to O(log n).
+
+## gopy notes
+
+`list.sort` is `objects.ListSort` in `objects/list.go`. Timsort is implemented in Go following CPython's algorithm. `count_run` returns the natural run length. `merge_at` uses `gallop_left`/`gallop_right` for the merge. The sort is stable (equal elements preserve their relative order).

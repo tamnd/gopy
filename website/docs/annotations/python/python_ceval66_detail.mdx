@@ -1,0 +1,84 @@
+---
+title: Python/ceval.c (part 66)
+description: "Python/ceval.c part 66: BINARY_OP specializations, BINARY_OP_ADD_INT, BINARY_OP_ADD_FLOAT, BINARY_OP_INPLACE_ADD_UNICODE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `BINARY_OP` specializations. See `python_ceval65_detail` for `STORE_ATTR` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_OP` baseline | Generic binary operation via `nb_*` slots |
+| 81-160 | `BINARY_OP_ADD_INT` | Fast path: compact integer addition |
+| 161-240 | `BINARY_OP_ADD_FLOAT` | Fast path: `double` addition |
+| 241-320 | `BINARY_OP_ADD_UNICODE` | Fast path: string concatenation |
+| 321-500 | `BINARY_OP_INPLACE_ADD_UNICODE` | `+=` fast path for strings |
+
+## Reading
+
+### `BINARY_OP_ADD_INT`
+
+```c
+// CPython: Python/ceval.c:2200 BINARY_OP_ADD_INT
+inst(BINARY_OP_ADD_INT, (left, right -- res)) {
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)left), BINARY_OP);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)right), BINARY_OP);
+    assert(_PyLong_BothAreCompact((PyLongObject *)left, (PyLongObject *)right));
+    res = _PyLong_Add((PyLongObject *)left, (PyLongObject *)right);
+    ERROR_IF(res == NULL, error);
+    DECREF_INPUTS_AND_REUSE_FLOAT(left, right, EMPTY, res);
+}
+```
+
+`BINARY_OP_ADD_INT` only handles compact integers (fitting in one 30-bit digit). `_PyLong_Add` checks if the result fits in a compact int too; if so, it's allocation-free using the free list. For larger integers, it deoptimizes to `BINARY_OP`.
+
+### `BINARY_OP_ADD_FLOAT`
+
+```c
+// CPython: Python/ceval.c:2260 BINARY_OP_ADD_FLOAT
+inst(BINARY_OP_ADD_FLOAT, (left, right -- res)) {
+    DEOPT_IF(!PyFloat_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyFloat_CheckExact(right), BINARY_OP);
+    double dres = ((PyFloatObject *)left)->ob_fval +
+                  ((PyFloatObject *)right)->ob_fval;
+    DECREF_INPUTS_AND_REUSE_FLOAT(left, right, dres, res);
+}
+```
+
+`DECREF_INPUTS_AND_REUSE_FLOAT` attempts to reuse one of the input float objects instead of allocating a new one. If `left`'s reference count is 1 (only the stack holds it), its `ob_fval` is updated in place. This eliminates an allocation for the common `a + b + c` case.
+
+### `BINARY_OP_INPLACE_ADD_UNICODE`
+
+```c
+// CPython: Python/ceval.c:2320 BINARY_OP_INPLACE_ADD_UNICODE
+inst(BINARY_OP_INPLACE_ADD_UNICODE, (left, right -- res)) {
+    DEOPT_IF(!PyUnicode_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyUnicode_CheckExact(right), BINARY_OP);
+    /* Check left is the only reference (in a local var) */
+    PyObject **var = _LOCALS_PLUS_CAST(frame, ...) ;
+    DEOPT_IF(*var != left, BINARY_OP);
+    DEOPT_IF(Py_REFCNT(left) != 2, BINARY_OP);  /* stack + local */
+    /* In-place resize the string */
+    if (unicode_resize_and_append(left, right) < 0) {
+        ERROR_IF(true, error);
+    }
+    res = left;
+    Py_INCREF(res);
+    Py_DECREF(right);
+}
+```
+
+`s += "x"` in a tight loop is optimized to in-place string resize if `s` has exactly 2 references (stack slot + local variable). `unicode_resize_and_append` extends the string's buffer, turning O(n²) string concatenation into O(n).
+
+## gopy notes
+
+`BINARY_OP_ADD_INT` is in `vm/eval_simple.go`. Compact int fast path uses `objects.LongAddCompact`. `BINARY_OP_ADD_FLOAT` reuses the float via `objects.FloatFreeList`. `BINARY_OP_INPLACE_ADD_UNICODE` calls `objects.UnicodeAppendInplace` which uses `strings.Builder` resizing.

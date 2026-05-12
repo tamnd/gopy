@@ -1,0 +1,84 @@
+---
+title: Lib/json/__init__.py (part 3)
+description: "json/__init__.py part 3: json.load, json.dump, JSONEncoder.default, sort_keys, ensure_ascii."
+cpython_path: Lib/json/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/json/__init__.py" />
+
+This annotation covers the top-level json API. See `modules_json4_detail` for `JSONDecoder`, `scanstring`, and the C-level decode fast path.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `json.dumps` | Serialize object to JSON string |
+| 81-160 | `json.loads` | Deserialize JSON string to object |
+| 161-240 | `json.dump` / `json.load` | File-based serialize/deserialize |
+| 241-340 | `JSONEncoder.default` | Override for custom type serialization |
+| 341-500 | `JSONEncoder.encode` | Full encoding with `ensure_ascii`, `sort_keys` |
+
+## Reading
+
+### `json.dumps`
+
+```python
+# CPython: Lib/json/__init__.py:230 dumps
+def dumps(obj, *, skipkeys=False, ensure_ascii=True, check_circular=True,
+          allow_nan=True, cls=None, indent=None, separators=None,
+          default=None, sort_keys=False, **kw):
+    if cls is None:
+        cls = JSONEncoder
+    return cls(
+        skipkeys=skipkeys, ensure_ascii=ensure_ascii,
+        check_circular=check_circular, allow_nan=allow_nan, indent=indent,
+        separators=separators, default=default, sort_keys=sort_keys,
+        **kw).encode(obj)
+```
+
+`json.dumps` creates a `JSONEncoder` and calls `encode`. `ensure_ascii=True` escapes non-ASCII characters as `\uXXXX`. `indent` enables pretty-printing. `separators=(',', ':')` produces compact JSON. `sort_keys` sorts dict keys for deterministic output.
+
+### `JSONEncoder.default`
+
+```python
+# CPython: Lib/json/encoder.py:170 JSONEncoder.default
+def default(self, o):
+    raise TypeError(f'Object of type {type(o).__name__} '
+                    f'is not JSON serializable')
+```
+
+`default` is called for non-serializable objects. Subclass and override to add support for `datetime`, `Decimal`, `UUID`, etc.:
+```python
+class DateEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        return super().default(obj)
+```
+
+### `JSONEncoder.encode`
+
+```python
+# CPython: Lib/json/encoder.py:196 JSONEncoder.encode
+def encode(self, o):
+    if isinstance(o, str):
+        if self.ensure_ascii:
+            return encode_basestring_ascii(o)
+        else:
+            return encode_basestring(o)
+    chunks = self.iterencode(o, _one_shot=True)
+    if not isinstance(chunks, (list, tuple)):
+        chunks = list(chunks)
+    return ''.join(chunks)
+```
+
+`iterencode` generates the JSON string lazily. For simple string inputs, the fast path uses `encode_basestring_ascii` (C implementation). The `_one_shot=True` flag enables an optimized single-pass encoder in the C extension.
+
+## gopy notes
+
+`json.dumps` is `module/json.Dumps` in `module/json/module.go`. `JSONEncoder.encode` uses a recursive Go function. `ensure_ascii` is applied per-character using `unicode.IsPrint`. `JSONEncoder.default` calls `objects.CallMethod` on the encoder.

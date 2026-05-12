@@ -1,0 +1,88 @@
+---
+title: Modules/binascii.c (part 7)
+description: "binascii.c part 7: base64 encode/decode, hex encode/decode, uu encode/decode, crc_hqx."
+cpython_path: Modules/binascii.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/binascii.c" />
+
+This annotation covers binary-to-ASCII encoding. See `modules_binascii6_detail` for `b2a_base64`, `a2b_base64`, `b2a_hex`, `a2b_hex`, and the encode table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `b2a_base64` | Encode bytes to base64 with optional newline |
+| 81-160 | `a2b_base64` | Decode base64 to bytes; skip whitespace |
+| 161-240 | `b2a_hex` / `a2b_hex` | Hexadecimal encoding/decoding |
+| 241-340 | `b2a_uu` / `a2b_uu` | Unix-to-Unix encoding (uuencode) |
+| 341-600 | `crc_hqx` / `crc32` | CRC checksums |
+
+## Reading
+
+### `b2a_base64`
+
+```c
+// CPython: Modules/binascii.c:640 binascii_b2a_base64_impl
+static PyObject *
+binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline)
+{
+    Py_ssize_t datalength = data->len;
+    /* Output length: ceil(n/3)*4 + newline */
+    Py_ssize_t ngroups = (datalength + 2) / 3;
+    Py_ssize_t out_len = ngroups * 4 + newline;
+    PyObject *rv = PyBytes_FromStringAndSize(NULL, out_len);
+    unsigned char *p = (unsigned char *)PyBytes_AS_STRING(rv);
+    unsigned char *bin_data = data->buf;
+    for (Py_ssize_t i = 0; i < ngroups; i++) {
+        /* Encode 3 bytes -> 4 base64 characters */
+        unsigned int t = bin_data[0] << 16 | bin_data[1] << 8 | bin_data[2];
+        *p++ = table_b2a_base64[(t >> 18) & 0x3f];
+        *p++ = table_b2a_base64[(t >> 12) & 0x3f];
+        *p++ = table_b2a_base64[(t >>  6) & 0x3f];
+        *p++ = table_b2a_base64[(t      ) & 0x3f];
+        bin_data += 3;
+    }
+    if (newline) *p++ = '\n';
+    return rv;
+}
+```
+
+Base64 encodes 3 input bytes as 4 ASCII characters. The lookup table `table_b2a_base64` maps 6-bit values to `A-Z`, `a-z`, `0-9`, `+`, `/`. Padding `=` is added when `len(data) % 3 != 0`.
+
+### `a2b_hex`
+
+```c
+// CPython: Modules/binascii.c:340 binascii_a2b_hex_impl
+static PyObject *
+binascii_a2b_hex_impl(PyObject *module, Py_buffer *hexstr)
+{
+    if (hexstr->len % 2 != 0) {
+        PyErr_SetString(PyExc_ValueError, "Odd-length string");
+        return NULL;
+    }
+    PyObject *rv = PyBytes_FromStringAndSize(NULL, hexstr->len / 2);
+    unsigned char *p = (unsigned char *)PyBytes_AS_STRING(rv);
+    const unsigned char *s = hexstr->buf;
+    for (Py_ssize_t i = 0; i < hexstr->len; i += 2) {
+        int top = table_hex[s[i]], bot = table_hex[s[i+1]];
+        if (top == -1 || bot == -1) {
+            PyErr_SetString(PyExc_ValueError, "Non-hexadecimal digit found");
+            return NULL;
+        }
+        *p++ = (top << 4) | bot;
+    }
+    return rv;
+}
+```
+
+`binascii.unhexlify('deadbeef')` converts hex pairs to bytes. `table_hex` maps ASCII hex digits to 4-bit values; invalid characters map to `-1`.
+
+## gopy notes
+
+`b2a_base64` is `module/binascii.B2ABase64` in `module/binascii/module.go`. It uses Go's `encoding/base64`. `a2b_hex` uses `encoding/hex.DecodeString`. `crc_hqx` is a polynomial CRC table lookup; `crc32` uses `hash/crc32.ChecksumIEEE`.
