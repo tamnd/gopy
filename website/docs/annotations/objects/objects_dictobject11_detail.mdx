@@ -1,0 +1,124 @@
+---
+title: Objects/dictobject.c (part 11)
+description: "dictobject.c part 11: dict.fromkeys, dict.__reversed__, dict.keys views, dict.values views."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers dict construction helpers and view objects. See `objects_dictobject10_detail` for `dict.__or__`, `dict.update`, `dict.__ior__`, and compact dict internals.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dict.fromkeys` | Build a dict from an iterable of keys |
+| 81-160 | `dict.__reversed__` | Iterate keys in insertion-reverse order |
+| 161-240 | `dict_keys` view | Live view of keys |
+| 241-360 | `dict_values` view | Live view of values |
+| 361-500 | `dict_items` view | Live view of `(key, value)` pairs |
+
+## Reading
+
+### `dict.fromkeys`
+
+```c
+// CPython: Objects/dictobject.c:3280 dict_fromkeys
+static PyObject *
+dict_fromkeys(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *seq = args[0];
+    PyObject *value = nargs >= 2 ? args[1] : Py_None;
+    PyObject *d = type->tp_new(type, NULL, NULL);
+    PyObject *it = PyObject_GetIter(seq);
+    PyObject *key;
+    while ((key = PyIter_Next(it)) != NULL) {
+        PyDict_SetItem(d, key, value);
+        Py_DECREF(key);
+    }
+    Py_DECREF(it);
+    return d;
+}
+```
+
+`dict.fromkeys(['a', 'b', 'c'], 0)` creates `{'a': 0, 'b': 0, 'c': 0}`. All keys map to the **same** value object (not copies). Mutating `value` after calling `fromkeys` with a mutable default affects all entries.
+
+### `dict.__reversed__`
+
+```c
+// CPython: Objects/dictobject.c:3360 dictreviter_new
+static PyObject *
+dictreviter_new(PyDictObject *dict, PyObject *Py_UNUSED(ignored))
+{
+    dictiterobject *di = PyObject_GC_New(dictiterobject, &PyDictRevIterKey_Type);
+    di->dv_dict = dict;
+    Py_INCREF(dict);
+    di->di_pos = dict->ma_used - 1;  /* start from last */
+    di->len = dict->ma_used;
+    return (PyObject *)di;
+}
+```
+
+`reversed(d)` iterates keys from the last-inserted to the first. Since Python 3.8 `dict` is insertion-ordered. The reverse iterator starts at `ma_used - 1` and steps backward through the compact entries.
+
+### `dict_keys` view
+
+```c
+// CPython: Objects/dictobject.c:3480 dictkeys_iter
+static PyObject *
+dictkeys_iter(dictviewobject *dv)
+{
+    /* Return a new dict_keyiterator */
+    return dictiter_new(dv->dv_dict, &PyDictIterKey_Type);
+}
+
+static PyObject *
+dictkeys_contains(dictviewobject *dv, PyObject *key)
+{
+    return PyBool_FromLong(PyDict_Contains(dv->dv_dict, key));
+}
+```
+
+`d.keys()` returns a `dict_keys` view object that does not copy the keys. It supports `len`, `in`, and iteration. Because it is live, iterating after modification raises `RuntimeError: dictionary changed size during iteration`.
+
+### `dict_values` view
+
+```c
+// CPython: Objects/dictobject.c:3540 dictvalues_iter
+static PyObject *
+dictvalues_iter(dictviewobject *dv)
+{
+    return dictiter_new(dv->dv_dict, &PyDictIterValue_Type);
+}
+```
+
+`d.values()` is a live view of values. Unlike `d.keys()`, `dict_values` does not support `__contains__` or set operations because values are not unique or hashable.
+
+### `dict_items` view
+
+```c
+// CPython: Objects/dictobject.c:3600 dictitems_contains
+static int
+dictitems_contains(dictviewobject *dv, PyObject *obj)
+{
+    PyObject *key, *value, *found;
+    if (!PyTuple_Check(obj) || PyTuple_GET_SIZE(obj) != 2)
+        return 0;
+    key = PyTuple_GET_ITEM(obj, 0);
+    value = PyTuple_GET_ITEM(obj, 1);
+    found = PyDict_GetItemWithError(dv->dv_dict, key);
+    if (found == NULL) return 0;
+    return PyObject_RichCompareBool(found, value, Py_EQ);
+}
+```
+
+`(key, value) in d.items()` checks both the key and value. `dict_items` supports set operations (`&`, `|`, `-`) because each `(k, v)` pair is unique if values are hashable.
+
+## gopy notes
+
+`dict.fromkeys` is `objects.DictFromKeys` in `objects/dict.go`. `__reversed__` returns `objects.DictRevKeyIter`. `dict.keys()` returns `objects.DictKeysView`. `dict.values()` returns `objects.DictValuesView`. `dict.items()` returns `objects.DictItemsView`. All views hold a reference to the dict.

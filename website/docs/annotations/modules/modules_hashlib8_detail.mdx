@@ -1,0 +1,119 @@
+---
+title: Modules/_hashopenssl.c (part 8)
+description: "_hashopenssl.c part 8: hashlib.sha256, hashlib.blake2b, hashlib.scrypt, HMAC."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+This annotation covers hashlib digest algorithms. See `modules_hashlib7_detail` for `hashlib.new`, `Hash.update`, `Hash.digest`, `Hash.hexdigest`, and the hash object lifecycle.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `hashlib.sha256` | Create a SHA-256 hash object |
+| 81-180 | `hashlib.blake2b` | BLAKE2b with key and personalization |
+| 181-280 | `hashlib.sha3_256` | SHA-3 (Keccak-based) |
+| 281-380 | `hashlib.scrypt` | Memory-hard password hashing |
+| 381-600 | `hashlib.pbkdf2_hmac` | PBKDF2 with HMAC |
+
+## Reading
+
+### `hashlib.sha256`
+
+```c
+// CPython: Modules/_hashopenssl.c:540 EVP_new
+static PyObject *
+_hashlib_HASH_new_impl(PyObject *module, const char *name,
+                       PyObject *data, int usedforsecurity)
+{
+    const EVP_MD *digest = EVP_get_digestbyname(name);
+    if (digest == NULL) {
+        PyErr_Format(PyExc_ValueError, "unsupported hash type %s", name);
+        return NULL;
+    }
+    EVPobject *self = newHASHobject(module);
+    self->ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(self->ctx, digest, NULL);
+    if (data != NULL && data != Py_None) {
+        EVP_DigestUpdate(self->ctx, ...);
+    }
+    return (PyObject *)self;
+}
+```
+
+`hashlib.sha256(b'hello')` calls `EVP_get_digestbyname("sha256")` to get the OpenSSL digest algorithm, initializes a context, and optionally feeds initial data. The GIL is released for large inputs.
+
+### `hashlib.blake2b`
+
+```c
+// CPython: Modules/_blake2/blake2module.c:80 py_blake2b_new
+static PyObject *
+py_blake2b_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    /* Parameters: data, digest_size, key, salt, person, fanout, depth, ... */
+    BLAKE2b_state state;
+    BLAKE2b_param params;
+    memset(&params, 0, sizeof(params));
+    params.digest_length = digest_size;
+    if (key_len) memcpy(params.key, key_buf, key_len);
+    if (salt_len) memcpy(params.salt, salt_buf, salt_len);
+    if (person_len) memcpy(params.personal, person_buf, person_len);
+    BLAKE2b_init_param(&state, &params);
+    ...
+}
+```
+
+`hashlib.blake2b(b'data', key=b'secret', digest_size=32)` creates a keyed BLAKE2b hash. BLAKE2b supports up to 64-byte digests. The `person` parameter enables domain separation (different hashes for different purposes with the same key).
+
+### `hashlib.scrypt`
+
+```c
+// CPython: Modules/_hashopenssl.c:820 _hashlib_scrypt
+static PyObject *
+_hashlib_scrypt_impl(PyObject *module, Py_buffer *password,
+                     Py_buffer *salt, PyObject *n_obj, PyObject *r_obj,
+                     PyObject *p_obj, Py_ssize_t maxmem, Py_ssize_t dklen)
+{
+    /* n: CPU/memory cost, r: block size, p: parallelism */
+    Py_BEGIN_ALLOW_THREADS
+    int rc = EVP_PBE_scrypt(password->buf, password->len,
+                             salt->buf, salt->len,
+                             n, r, p, maxmem,
+                             dk, dklen);
+    Py_END_ALLOW_THREADS
+    ...
+}
+```
+
+`hashlib.scrypt(password, salt=b'...', n=16384, r=8, p=1)` is a memory-hard KDF. `n` is the memory cost (must be a power of 2); larger `n` requires more RAM. `maxmem` prevents accidental DoS from huge parameters.
+
+### `hashlib.pbkdf2_hmac`
+
+```c
+// CPython: Modules/_hashopenssl.c:760 pbkdf2_hmac
+static PyObject *
+_hashlib_pbkdf2_hmac_impl(PyObject *module, const char *hash_name,
+                           Py_buffer *password, Py_buffer *salt,
+                           long iterations, PyObject *dklen_obj)
+{
+    Py_BEGIN_ALLOW_THREADS
+    int rc = PKCS5_PBKDF2_HMAC(password->buf, password->len,
+                                 salt->buf, salt->len,
+                                 iterations, digest, dklen, dk);
+    Py_END_ALLOW_THREADS
+    ...
+}
+```
+
+`hashlib.pbkdf2_hmac('sha256', password, salt, 100000)` derives a key using PBKDF2-HMAC-SHA256 with 100,000 iterations. The GIL is released for the full iteration count.
+
+## gopy notes
+
+`hashlib.sha256` is `module/hashlib.SHA256` in `module/hashlib/module.go`. It uses Go's `crypto/sha256.New()`. `blake2b` uses `golang.org/x/crypto/blake2b`. `scrypt` uses `golang.org/x/crypto/scrypt`. `pbkdf2_hmac` uses `golang.org/x/crypto/pbkdf2`.

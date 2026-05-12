@@ -1,0 +1,128 @@
+---
+title: Lib/enum.py (part 4)
+description: "enum.py part 4: IntEnum, StrEnum, Flag, auto(), _generate_next_value_."
+cpython_path: Lib/enum.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/enum.py" />
+
+This annotation covers mixin enum types and the `Flag` class. See `lib_enum3_detail` for `EnumType.__new__`, `Enum.__new__`, and `_EnumDict`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `IntEnum` | Enum whose members are also `int` values |
+| 81-160 | `StrEnum` | Enum whose members are also `str` values |
+| 161-240 | `auto()` / `_generate_next_value_` | Automatic value generation |
+| 241-360 | `Flag` | Enum with bitwise combination support |
+| 361-500 | `Flag.__or__` / `__and__` / `__xor__` | Bitwise operations on flags |
+
+## Reading
+
+### `IntEnum`
+
+```python
+# CPython: Lib/enum.py:1620 IntEnum
+class IntEnum(int, ReprEnum):
+    """Enum where members are also ints and int operations apply."""
+```
+
+`IntEnum` inherits from both `int` and `ReprEnum`. Members are true `int` values: `Color.RED + 1` works without explicit casting. `ReprEnum` (not `Enum`) means `str(Color.RED)` returns `'1'`, not `'Color.RED'`.
+
+### `StrEnum`
+
+```python
+# CPython: Lib/enum.py:1660 StrEnum
+class StrEnum(str, ReprEnum):
+    """Enum where members are also strs."""
+
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        return name.lower()
+```
+
+`StrEnum` members are strings. `_generate_next_value_` defaults to `name.lower()` so `auto()` generates lowercase member names: `class Color(StrEnum): RED = auto()` gives `Color.RED == 'red'`.
+
+### `auto()` / `_generate_next_value_`
+
+```python
+# CPython: Lib/enum.py:220 auto
+class auto(int):
+    _value_ = EJECT
+    def __new__(cls):
+        obj = int.__new__(cls, 0)
+        obj._auto_ = True
+        return obj
+
+# CPython: Lib/enum.py:180 _generate_next_value_ (default)
+@staticmethod
+def _generate_next_value_(name, start, count, last_values):
+    for last_value in reversed(last_values):
+        try:
+            return last_value + 1
+        except TypeError:
+            pass
+    return start
+```
+
+`auto()` creates a placeholder; `_EnumDict.__setitem__` detects it and calls `_generate_next_value_`. The default increments the last numeric value. `StrEnum` overrides to use the lowercased name.
+
+### `Flag`
+
+```python
+# CPython: Lib/enum.py:940 Flag
+class Flag(Enum):
+    @classmethod
+    def _missing_(cls, value):
+        # For compound values not in the enum, create a pseudo-member
+        result = cls._create_pseudo_member_(value)
+        return result
+
+    @classmethod
+    def _create_pseudo_member_(cls, value):
+        # Build a new member from the decomposition of value into defined flags
+        pseudo_member = cls._value2member_map_.get(value)
+        if pseudo_member is None:
+            need_to_create = [value]
+            # Decompose into power-of-2 components
+            ...
+        return pseudo_member
+```
+
+`Flag` allows combining members with `|`: `Perm.R | Perm.W` creates a new pseudo-member. `_missing_` decomposes unknown values into their constituent defined flags.
+
+### `Flag.__or__`
+
+```python
+# CPython: Lib/enum.py:1020 Flag.__or__
+def __or__(self, other):
+    if not isinstance(other, self.__class__):
+        return NotImplemented
+    return self.__class__(self._value_ | other._value_)
+
+def __and__(self, other):
+    if not isinstance(other, self.__class__):
+        return NotImplemented
+    return self.__class__(self._value_ & other._value_)
+
+def __xor__(self, other):
+    ...
+    return self.__class__(self._value_ ^ other._value_)
+
+def __invert__(self):
+    # Invert within the defined mask of all flags
+    result = self._value_ ^ self.__class__._flag_mask_
+    return self.__class__(result)
+```
+
+`Perm.R | Perm.W` returns a new `Perm` with `value = R._value_ | W._value_`. `~Perm.R` returns all defined flags except `R`. The `_flag_mask_` is the OR of all defined member values.
+
+## gopy notes
+
+`IntEnum` is `module/enum.IntEnum` in `module/enum/module.go`, with Go's `int` as the backing type. `StrEnum` uses `string`. `Flag.__or__` creates a new member via `objects.EnumType.NewPseudoMember(value)`. `auto()` is detected in `_EnumDict.setItem` and resolved by calling `_generate_next_value_`.
