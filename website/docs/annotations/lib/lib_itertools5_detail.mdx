@@ -1,0 +1,99 @@
+---
+title: Lib/itertools.py / Modules/itertoolsmodule.c (part 5)
+description: "itertools part 5: chain.from_iterable, compress, dropwhile, filterfalse, groupby."
+cpython_path: Modules/itertoolsmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/itertoolsmodule.c" />
+
+This annotation covers filtering and grouping itertools. See `module_itertools4_detail` for `islice`, `takewhile`, `zip_longest`, `pairwise`, and `batched`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `chain.from_iterable` | Flatten a lazy sequence of iterables |
+| 81-160 | `compress` | Filter by a boolean selector iterable |
+| 161-240 | `dropwhile` | Skip items while predicate is true |
+| 241-320 | `filterfalse` | Yield items where predicate is false |
+| 321-500 | `groupby` | Group consecutive equal (or key-equal) items |
+
+## Reading
+
+### `chain.from_iterable`
+
+```c
+// CPython: Modules/itertoolsmodule.c:420 chain_from_iterable
+static PyObject *
+chain_from_iterable(PyTypeObject *type, PyObject *it)
+{
+    /* chain.from_iterable([[1,2],[3,4]]) == chain([1,2],[3,4]) */
+    chainobject *lz = (chainobject *)chain_new_internal(type, it);
+    if (!lz) return NULL;
+    lz->source = PyObject_GetIter(it);
+    lz->active = NULL;  /* Will fetch first sub-iterable on next() */
+    return (PyObject *)lz;
+}
+```
+
+`chain.from_iterable(it)` is lazy: it does not advance `it` until the first `next()`. This differs from `chain(*it)` which evaluates `it` eagerly to unpack the arguments.
+
+### `compress`
+
+```c
+// CPython: Modules/itertoolsmodule.c:680 compress_next
+static PyObject *
+compress_next(compressobject *lz)
+{
+    /* Yield data[i] when selectors[i] is truthy */
+    while (1) {
+        PyObject *data = (*Py_TYPE(lz->data)->tp_iternext)(lz->data);
+        if (data == NULL) return NULL;
+        PyObject *sel = (*Py_TYPE(lz->selectors)->tp_iternext)(lz->selectors);
+        if (sel == NULL) { Py_DECREF(data); return NULL; }
+        int ok = PyObject_IsTrue(sel);
+        Py_DECREF(sel);
+        if (ok > 0) return data;
+        Py_DECREF(data);
+    }
+}
+```
+
+`compress('ABCDE', [1,0,1,0,1])` yields `A`, `C`, `E`. Both iterables are advanced in lockstep; stops when the shorter one is exhausted.
+
+### `groupby`
+
+```c
+// CPython: Modules/itertoolsmodule.c:1080 groupby_next
+static PyObject *
+groupby_next(groupbyobject *lz)
+{
+    /* Advance past items in the previous group */
+    while (lz->currkey != NULL) {
+        PyObject *newval = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
+        if (newval == NULL) return NULL;
+        Py_XDECREF(lz->currvalue);
+        lz->currvalue = newval;
+        PyObject *newkey = PyObject_CallOneArg(lz->keyfunc, newval);
+        if (PyObject_RichCompareBool(newkey, lz->currkey, Py_EQ)) {
+            Py_DECREF(newkey);
+        } else {
+            Py_SETREF(lz->currkey, newkey);
+            break;
+        }
+    }
+    /* Return (key, group_iterator) */
+    ...
+}
+```
+
+`groupby` only groups consecutive equal items. `sorted` first if you want all same-key items together. The group iterator shares the underlying iterator with the `groupby` object, so iterating the next group exhausts the previous one.
+
+## gopy notes
+
+`chain.from_iterable` is `module/itertools.ChainFromIterable` in `module/itertools/module.go`. `compress` is `module/itertools.Compress`. `groupby` is `module/itertools.GroupBy`; it stores the current key and value, advancing the source iterator lazily when the outer iterator is advanced.

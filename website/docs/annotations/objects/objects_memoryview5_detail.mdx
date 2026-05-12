@@ -1,0 +1,94 @@
+---
+title: Objects/memoryobject.c (part 5)
+description: "Objects/memoryobject.c part 5: memoryview.cast, memoryview.tolist, memoryview.tobytes, multi-dimensional buffers."
+cpython_path: Objects/memoryobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/memoryobject.c" />
+
+This annotation covers memoryview conversion and casting. See `objects_memoryview4_detail` for `memoryview.__new__`, slicing, and `__getitem__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `memoryview.cast` | Reinterpret buffer as a different type |
+| 81-180 | `memoryview.tolist` | Convert to nested Python list |
+| 181-260 | `memoryview.tobytes` | Copy contents to a new `bytes` object |
+| 261-360 | Multi-dimensional buffers | C-order and Fortran-order strides |
+| 361-500 | `memoryview.__eq__` | Byte-by-byte comparison |
+
+## Reading
+
+### `memoryview.cast`
+
+```c
+// CPython: Objects/memoryobject.c:1380 memoryview_cast_impl
+static PyObject *
+memoryview_cast_impl(PyMemoryViewObject *self, PyObject *format,
+                     PyObject *shape)
+{
+    /* Reinterpret the buffer as a different element type */
+    /* Constraints: contiguous, element size divides total size */
+    const char *fmt = PyUnicode_AsUTF8(format);
+    Py_ssize_t itemsize = /* size of new format */;
+    if (self->view.len % itemsize != 0) {
+        PyErr_SetString(PyExc_TypeError,
+            "memoryview: cast must be to a type of the same or larger size");
+        return NULL;
+    }
+    /* Create a new memoryview with the new format and shape */
+    ...
+}
+```
+
+`mv.cast('B')` reinterprets any buffer as bytes. `mv.cast('I')` reinterprets as 4-byte unsigned ints. No copy is made: the underlying memory is shared. Useful for zero-copy type punning.
+
+### `memoryview.tolist`
+
+```c
+// CPython: Objects/memoryobject.c:1480 tolist_rec
+static PyObject *
+tolist_rec(const char *mem, Py_ssize_t ndim,
+           const Py_ssize_t *shape, const Py_ssize_t *strides,
+           const Py_ssize_t *suboffsets, const char *fmt)
+{
+    if (ndim == 0) {
+        /* Scalar: unpack one element */
+        return unpack_single(mem, fmt);
+    }
+    PyObject *lst = PyList_New(shape[0]);
+    for (Py_ssize_t i = 0; i < shape[0]; i++) {
+        PyObject *item = tolist_rec(mem + i * strides[0], ndim - 1,
+                                    shape + 1, strides + 1, suboffsets + 1, fmt);
+        PyList_SET_ITEM(lst, i, item);
+    }
+    return lst;
+}
+```
+
+`tolist` recursively unpacks each element according to the format string. For a 2D buffer it returns a list of lists. The format codes match `struct` module codes.
+
+### Multi-dimensional strides
+
+```c
+// CPython: Objects/memoryobject.c:240 init_strides
+/*
+ * C-contiguous (row-major): strides[-1] = itemsize, strides[i] = shape[i+1]*strides[i+1]
+ * Fortran-contiguous (column-major): strides[0] = itemsize, strides[i] = shape[i-1]*strides[i-1]
+ *
+ * memoryview(np_array) uses the array's existing strides.
+ * Non-contiguous memoryviews cannot be cast or exported as bytes directly.
+ */
+```
+
+Strides allow memoryview to represent non-contiguous arrays (e.g., every other row of a matrix) without copying. `memoryview.contiguous` is `True` when the strides match C or Fortran order.
+
+## gopy notes
+
+`memoryview.cast` is `objects.MemoryViewCast` in `objects/memoryview.go`. It validates the size constraint and creates a new `MemoryView` with updated `Format` and `Shape`. `tolist` uses `objects.UnpackSingle` dispatching on format char. Multi-dimensional support stores `Shape`, `Strides`, and `Suboffsets` as `[]int64` slices.

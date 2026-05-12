@@ -1,0 +1,96 @@
+---
+title: Python/ceval.c (part 49)
+description: "Python/ceval.c part 49: SEND, YIELD_VALUE, RESUME, async for, SEND specializations."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers generator send/yield and async iteration. See `python_ceval48_detail` for CALL specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `YIELD_VALUE` | Suspend generator and return value to caller |
+| 81-160 | `SEND` | Resume generator / coroutine with a value |
+| 161-260 | `RESUME` | Entry/re-entry point for generators and coroutines |
+| 261-360 | `GET_AITER` / `GET_ANEXT` | Async iterator protocol |
+| 361-500 | `SEND_GEN` specialization | Fast path for generator send |
+
+## Reading
+
+### `YIELD_VALUE`
+
+```c
+// CPython: Python/ceval.c:3820 YIELD_VALUE
+inst(YIELD_VALUE, (retval -- unused)) {
+    /* Suspend the generator and return retval to the caller */
+    assert(oparg == RESUME_AFTER_YIELD_1 || oparg == RESUME_AFTER_YIELD_2);
+    PyGenObject *gen = _PyFrame_GetGenerator(frame);
+    gen->gi_frame_state = FRAME_SUSPENDED;
+    _PyFrame_SetStackPointer(frame, stack_pointer - 1);
+    assert(EMPTY());
+    /* Hand retval back to the caller's SEND or FOR_ITER */
+    tstate->current_frame = frame->previous;
+    frame->previous = NULL;
+    DISPATCH_INLINED(...);  /* Actually: return retval to caller */
+}
+```
+
+`YIELD_VALUE` saves the frame state (`FRAME_SUSPENDED`) so it can be resumed later. The generator's frame is not freed. The value is returned to whoever called `next()` or `send()`.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:3860 SEND
+inst(SEND, (receiver, v -- receiver, retval)) {
+    /* gen.send(v) — advance receiver and get its next yielded value */
+    assert(oparg >= 1);
+    if (tstate->c_tracefunc == NULL && PyGen_CheckExact(receiver)) {
+        /* Fast path: inline generator send */
+        ...
+        DISPATCH_INLINED(gen_frame);
+    }
+    /* Slow path: __send__ dispatch */
+    PyObject *retval;
+    if (v == Py_None) {
+        retval = PyIter_Next(receiver);
+    } else {
+        retval = _PyObject_CallMethodIdOneArg(receiver, &PyId_send, v);
+    }
+    ...
+}
+```
+
+`SEND` is the opcode for both `yield from expr` (in generators) and `await expr` (in coroutines). The jump target (`oparg`) is the `RESUME` point after the sub-iterator is exhausted.
+
+### `GET_ANEXT`
+
+```c
+// CPython: Python/ceval.c:3960 GET_ANEXT
+inst(GET_ANEXT, (aiter -- aiter, awaitable)) {
+    unaryfunc getter = Py_TYPE(aiter)->tp_as_async ?
+                       Py_TYPE(aiter)->tp_as_async->am_anext : NULL;
+    if (getter == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                     "'async for' requires an object with __anext__ method, got %.100s",
+                     Py_TYPE(aiter)->tp_name);
+        ERROR_IF(true, error);
+    }
+    awaitable = (*getter)(aiter);
+    ERROR_IF(awaitable == NULL, error);
+    DISPATCH();
+}
+```
+
+`async for x in aiter` calls `aiter.__anext__()` each iteration. `__anext__` returns an awaitable which is then `await`ed. `StopAsyncIteration` raised by `__anext__` terminates the loop.
+
+## gopy notes
+
+`YIELD_VALUE` is in `vm/eval_simple.go`. It sets `frame.State = FRAME_SUSPENDED` and returns the value through `vm.evalGen`. `SEND` is in `vm/eval_call.go`; the fast path calls `vm.evalGen` inline. `GET_ANEXT` calls `objects.ANext` which invokes `tp_as_async.am_anext` via the Go interface.

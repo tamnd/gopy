@@ -1,0 +1,101 @@
+---
+title: Modules/_io/bufferedio.c (part 6)
+description: "_io bufferedio.c part 6: BufferedWriter.write, flush, _adjust_position, BufferedRandom."
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/bufferedio.c" />
+
+This annotation covers the buffered writer internals. See `module_io5_detail` for `BufferedReader.read`, `peek`, `readline`, and the `BufferedIOBase` ABC.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BufferedWriter.__init__` | Set up write buffer |
+| 81-180 | `BufferedWriter.write` | Buffer data, flush when buffer fills |
+| 181-280 | `BufferedWriter.flush` | Write buffered data to raw stream |
+| 281-360 | `_adjust_position` | Handle seek on a buffered writer |
+| 361-500 | `BufferedRandom` | Bidirectional buffered I/O |
+
+## Reading
+
+### `BufferedWriter.write`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1680 bufferedwriter_write
+static PyObject *
+bufferedwriter_write(buffered *self, PyObject *args)
+{
+    Py_buffer data;
+    PyArg_ParseTuple(args, "y*", &data);
+    
+    /* If data fits in remaining buffer space, copy it in */
+    if (data.len <= self->buffer_size - self->write_pos) {
+        memcpy(self->buffer + self->write_pos, data.buf, data.len);
+        self->write_pos += data.len;
+    } else {
+        /* Flush existing buffer first, then handle large writes */
+        bufferedwriter_flush_locked(self);
+        if (data.len >= self->buffer_size) {
+            /* Large write: bypass buffer entirely */
+            return rawio_write(self, data.buf, data.len);
+        }
+        memcpy(self->buffer, data.buf, data.len);
+        self->write_pos = data.len;
+    }
+    PyBuffer_Release(&data);
+    return PyLong_FromSsize_t(data.len);
+}
+```
+
+The write buffer accumulates small writes. When the buffer fills, it is flushed to the raw stream. Very large writes bypass the buffer entirely, going directly to the raw I/O object. This avoids double-copying large data.
+
+### `BufferedWriter.flush`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1760 bufferedwriter_flush_locked
+static int
+bufferedwriter_flush_locked(buffered *self)
+{
+    Py_ssize_t written = 0;
+    while (written < self->write_pos) {
+        Py_ssize_t n = rawio_write_into(self,
+            self->buffer + written,
+            self->write_pos - written);
+        if (n < 0) return -1;
+        written += n;
+    }
+    self->write_pos = 0;
+    return 0;
+}
+```
+
+`flush` loops until all buffered bytes are written. The raw write may do a short write, so the loop is necessary. After flush, `write_pos` is reset to 0.
+
+### `BufferedRandom`
+
+```c
+// CPython: Modules/_io/bufferedio.c:2080 bufferedrandom_seek
+static PyObject *
+bufferedrandom_seek(buffered *self, PyObject *args)
+{
+    /* On seek: flush write buffer, discard read buffer, then seek raw */
+    if (self->write_pos > 0) {
+        bufferedwriter_flush_locked(self);
+    }
+    self->read_pos = self->read_end = 0;
+    return rawio_seek(self, cookie, whence);
+}
+```
+
+`BufferedRandom` combines read and write buffering. On `seek`, both buffers are invalidated to maintain consistency. The underlying raw stream's position is the authoritative source of truth after a seek.
+
+## gopy notes
+
+`BufferedWriter.write` is `module/io.BufferedWriterWrite` in `module/io/module.go`. The write buffer is a `[]byte` slice. The flush loop calls `rawWriter.Write` in a loop until all bytes are consumed. `BufferedRandom` embeds both `bufio.Reader` and `bufio.Writer` and resets both on `Seek`.
