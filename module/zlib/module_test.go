@@ -97,7 +97,9 @@ func TestCRC32Update(t *testing.T) {
 	}
 	got, _ := res2.(*objects.Int).Int64()
 
-	full := append(part1, part2...)
+	full := make([]byte, 0, len(part1)+len(part2))
+	full = append(full, part1...)
+	full = append(full, part2...)
 	resAll, _ := zlibCRC32([]objects.Object{objects.NewBytes(full)}, nil)
 	want, _ := resAll.(*objects.Int).Int64()
 
@@ -157,9 +159,11 @@ func TestCompressobjRoundtrip(t *testing.T) {
 	}
 
 	// Concatenate all output chunks to form the complete compressed stream.
-	var compressed []byte
-	compressed = append(compressed, chunk1.(*objects.Bytes).Bytes()...)
-	compressed = append(compressed, chunk2.(*objects.Bytes).Bytes()...)
+	c1 := chunk1.(*objects.Bytes).Bytes()
+	c2 := chunk2.(*objects.Bytes).Bytes()
+	compressed := make([]byte, 0, len(c1)+len(c2))
+	compressed = append(compressed, c1...)
+	compressed = append(compressed, c2...)
 
 	decompressed, err := zlibDecompress([]objects.Object{objects.NewBytes(compressed)}, nil)
 	if err != nil {

@@ -358,6 +358,16 @@ linters:
           - gocognit
           - gocyclo
           - gosec
+      # zlib.module.go mirrors zlibmodule.c's compress/decompress/checksum
+      # dispatch. io.ReadCloser.Close calls after ReadAll are cleanup-only.
+      # Error strings mirror CPython's zlib.error format strings verbatim.
+      - path: module/zlib/module\.go
+        linters:
+          - errcheck
+          - errorlint
+          - gocritic
+          - gocognit
+          - gocyclo
 
 formatters:
   enable:
