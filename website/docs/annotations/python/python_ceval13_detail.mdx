@@ -1,0 +1,135 @@
+---
+title: Python/ceval.c (part 13)
+description: "Python/ceval.c part 13: IMPORT_NAME, IMPORT_FROM, IMPORT_STAR, BUILD_MAP, BUILD_SET, DICT_UPDATE, SET_UPDATE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers import opcodes and collection building. See `python_ceval12_detail` for closure opcodes, and `python_ceval_detail` for the eval loop.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `IMPORT_NAME` | Execute `import foo` — calls `__import__` |
+| 101-200 | `IMPORT_FROM` | Execute `from foo import bar` — `getattr(module, 'bar')` |
+| 201-280 | `IMPORT_STAR` | Execute `from foo import *` — copy `__all__` or all public names |
+| 281-380 | `BUILD_MAP` | Build a `dict` from N key-value pairs on the stack |
+| 381-460 | `BUILD_SET` | Build a `set` from N items on the stack |
+| 461-600 | `DICT_UPDATE` / `SET_UPDATE` | Merge an iterable/mapping into an existing dict/set |
+
+## Reading
+
+### `IMPORT_NAME`
+
+```c
+// CPython: Python/ceval.c:3280 IMPORT_NAME
+inst(IMPORT_NAME, (level, fromlist -- res)) {
+    PyObject *name = GETITEM(frame->f_code->co_names, oparg);
+    res = import_name(tstate, frame, name, fromlist, level);
+    ERROR_IF(res == NULL, error);
+}
+
+static PyObject *
+import_name(PyThreadState *tstate, _PyInterpreterFrame *frame,
+            PyObject *name, PyObject *fromlist, PyObject *level)
+{
+    /* Call builtins.__import__(name, globals, locals, fromlist, level) */
+    PyObject *import_func = _PyDict_GetItemWithError(
+        frame->f_builtins, &_Py_ID(__import__));
+    return PyObject_Call(import_func,
+        PyTuple_Pack(5, name, globals, locals, fromlist, level), NULL);
+}
+```
+
+`import foo.bar` pushes `level=0`, `fromlist=None`, then `IMPORT_NAME` calls `builtins.__import__`. The returned module is the top-level package (`foo`), not `foo.bar`.
+
+### `IMPORT_FROM`
+
+```c
+// CPython: Python/ceval.c:3340 IMPORT_FROM
+inst(IMPORT_FROM, (from -- from, res)) {
+    PyObject *name = GETITEM(frame->f_code->co_names, oparg);
+    res = import_from(tstate, from, name);
+    ERROR_IF(res == NULL, error);
+}
+
+static PyObject *
+import_from(PyThreadState *tstate, PyObject *v, PyObject *name)
+{
+    /* Try v.name, then v.__path__ sub-import */
+    PyObject *x = PyObject_GetAttr(v, name);
+    if (x == NULL && _PyErr_ExceptionMatches(tstate, PyExc_AttributeError)) {
+        /* Package: try importing v.name as a submodule */
+        PyObject *fullmodname = PyUnicode_FromFormat("%U.%U",
+            PyObject_GetAttrString(v, "__name__"), name);
+        x = PyDict_GetItemWithError(tstate->interp->modules, fullmodname);
+    }
+    return x;
+}
+```
+
+`from foo import bar` — if `foo.bar` is not an attribute of `foo`, try looking it up in `sys.modules` as a sub-module.
+
+### `IMPORT_STAR`
+
+```c
+// CPython: Python/ceval.c:3380 IMPORT_STAR
+inst(IMPORT_STAR, (from --)) {
+    /* Copy all names from 'from' into the current local namespace.
+       If __all__ is defined, use it; otherwise copy all non-_ names. */
+    PyObject *all = PyObject_GetAttr(from, &_Py_ID(__all__));
+    if (all != NULL) {
+        for each name in all: STORE_NAME(name, getattr(from, name));
+    } else {
+        for each name in dir(from):
+            if (!name.startswith('_')):
+                STORE_NAME(name, getattr(from, name));
+    }
+}
+```
+
+`from foo import *` is only valid at module scope. The compiler raises a `SyntaxWarning` if used inside a function (because it would corrupt `co_varnames`).
+
+### `BUILD_MAP`
+
+```c
+// CPython: Python/ceval.c:3480 BUILD_MAP
+inst(BUILD_MAP, (values[oparg*2] -- map)) {
+    map = _PyDict_FromItems(values, 2, values+1, 2, oparg);
+    ERROR_IF(map == NULL, error);
+    DECREF_INPUTS();
+}
+```
+
+`{k1: v1, k2: v2}` is compiled to LOAD k1, LOAD v1, LOAD k2, LOAD v2, `BUILD_MAP 2`. The interleaved key-value pairs are collected from the stack.
+
+### `DICT_UPDATE`
+
+```c
+// CPython: Python/ceval.c:3560 DICT_UPDATE
+inst(DICT_UPDATE, (update --)) {
+    /* dict_to_update |= update, used for {**d1, **d2} */
+    PyObject *dict = PEEK(oparg + 1);
+    if (PyDict_Update(dict, update) < 0) {
+        if (_PyErr_ExceptionMatches(tstate, PyExc_AttributeError)) {
+            _PyErr_Format(tstate, PyExc_TypeError,
+                "'%.200s' object is not a mapping",
+                Py_TYPE(update)->tp_name);
+        }
+        ERROR_IF(true, error);
+    }
+}
+```
+
+`{**d1, **d2}` compiles to `BUILD_MAP 0`, `DICT_UPDATE 1` (for d1), `DICT_UPDATE 1` (for d2). The `oparg` is the stack depth of the target dict.
+
+## gopy notes
+
+`IMPORT_NAME` calls `vm.ImportName` which invokes `builtins.__import__` via `objects.Call`. `IMPORT_FROM` is `vm.ImportFrom`. `BUILD_MAP` is `vm.BuildMap` using `objects.NewDictFromItems`. `DICT_UPDATE` uses `objects.DictUpdate`. `SET_UPDATE` uses `objects.SetUpdate`.

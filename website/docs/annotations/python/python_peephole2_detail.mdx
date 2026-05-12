@@ -1,0 +1,128 @@
+---
+title: Python/flowgraph.c / compile/peephole (part 2)
+description: "Peephole optimizer part 2: LOAD_CONST folding, jump threading, dead-code elimination, NOP removal, RETURN_CONST."
+cpython_path: Python/flowgraph.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/flowgraph.c" />
+
+This annotation covers constant folding and control-flow optimizations. See `compile_flowgraph_detail` for the overall flowgraph structure, and `python_peephole_detail` for BINARY_OP constant folding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `LOAD_CONST` folding | Merge consecutive `LOAD_CONST` + `BUILD_TUPLE` into one constant |
+| 101-220 | Jump threading | Replace `JUMP_FORWARD label; label: JUMP_*` with a single jump |
+| 221-360 | Dead-code elimination | Remove unreachable instructions after unconditional jumps |
+| 361-480 | NOP removal | Compact instruction arrays by removing `NOP` instructions |
+| 481-600 | `RETURN_CONST` | Merge `LOAD_CONST x; RETURN_VALUE` into `RETURN_CONST x` |
+
+## Reading
+
+### `LOAD_CONST` + `BUILD_TUPLE` folding
+
+```c
+// CPython: Python/flowgraph.c:1280 fold_tuple_on_constants
+static int
+fold_tuple_on_constants(PyObject *const_cache, cfg_instr *inst, int n)
+{
+    /* If the n instructions before BUILD_TUPLE n are all LOAD_CONST,
+       replace them + BUILD_TUPLE with a single LOAD_CONST of the tuple. */
+    PyObject *newconst = PyTuple_New(n);
+    for (int i = 0; i < n; i++) {
+        cfg_instr *ci = inst - n + i;
+        assert(ci->i_opcode == LOAD_CONST);
+        PyObject *v = PyTuple_GET_ITEM(consts, ci->i_oparg);
+        PyTuple_SET_ITEM(newconst, i, Py_NewRef(v));
+        ci->i_opcode = NOP;
+    }
+    inst->i_opcode = LOAD_CONST;
+    inst->i_oparg  = add_const(const_cache, newconst);
+    return 0;
+}
+```
+
+`(1, 2, 3)` at module level becomes a single `LOAD_CONST (1, 2, 3)`. This also applies to `frozenset({1, 2, 3})`.
+
+### Jump threading
+
+```c
+// CPython: Python/flowgraph.c:1420 jump_thread
+static int
+jump_thread(cfg_instr *inst, cfg_instr *target)
+{
+    /* If inst jumps to a target that is itself an unconditional jump,
+       point inst directly at the final destination. */
+    while (target->i_opcode == JUMP_FORWARD ||
+           target->i_opcode == JUMP_BACKWARD) {
+        target = cfg_instr_target(target);
+    }
+    inst->i_target = target;
+    return 0;
+}
+```
+
+Jump threading eliminates chains like `JUMP_FORWARD L1; L1: JUMP_FORWARD L2` by pointing the first jump directly to L2. This is O(n) per jump but run iteratively until stable.
+
+### Dead-code elimination
+
+```c
+// CPython: Python/flowgraph.c:1520 eliminate_dead_code
+static int
+eliminate_dead_code(cfg_builder *g)
+{
+    /* Mark all reachable basic blocks starting from the entry block.
+       Unreachable blocks are cleared (all instructions set to NOP). */
+    /* DFS from entry */
+    mark_reachable(g);
+    /* Clear unreachable */
+    for each block b in g->g_blocks:
+        if !b->b_reachable:
+            for each instr in b: instr->i_opcode = NOP;
+    return 0;
+}
+```
+
+Code after `return`, `raise`, `break`, or `continue` is unreachable and eliminated. This also removes code after `while True: pass` that can never execute.
+
+### `RETURN_CONST`
+
+```c
+// CPython: Python/flowgraph.c:1680 insert_superinstructions
+/* LOAD_CONST x; RETURN_VALUE => RETURN_CONST x
+   Saves one opcode in every trivial return-value function. */
+```
+
+`RETURN_CONST` is a combined instruction that both loads a constant and returns. Used for `return None`, `return True`, `return 0`, etc. — extremely common in property getters and simple functions.
+
+### NOP removal
+
+```c
+// CPython: Python/flowgraph.c:1600 remove_redundant_nops
+static int
+remove_redundant_nops(basicblock *bb)
+{
+    /* Compact the instruction array by skipping NOP instructions.
+       Update all jump targets that previously pointed to the NOP positions. */
+    int new_end = 0;
+    for (int i = 0; i < bb->b_iused; i++) {
+        if (bb->b_instr[i].i_opcode != NOP) {
+            bb->b_instr[new_end++] = bb->b_instr[i];
+        }
+    }
+    bb->b_iused = new_end;
+    return 0;
+}
+```
+
+NOPs are inserted by earlier passes (constant folding, dead-code elimination) and removed in a final compaction pass.
+
+## gopy notes
+
+These passes run in `compile/flowgraph_passes.go`. `fold_tuple_on_constants` is `flowgraph.FoldTupleOnConstants`. Jump threading is `flowgraph.ThreadJumps`. Dead-code elimination is `flowgraph.EliminateDeadCode`. `RETURN_CONST` is emitted in `compile/codegen_stmt.go` when the peephole detects `LOAD_CONST` followed by `RETURN_VALUE`.

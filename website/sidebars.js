@@ -347,6 +347,9 @@ const sidebars = {
         'annotations/python/python_ceval12_detail',
         'annotations/python/python_import4_detail',
         'annotations/python/python_pythonrun2_detail',
+        'annotations/python/python_ceval13_detail',
+        'annotations/python/python_gc3_detail',
+        'annotations/python/python_peephole2_detail',
       ],
     },
     {
@@ -562,6 +565,8 @@ const sidebars = {
         'annotations/objects/objects_genobject2_detail',
         'annotations/objects/objects_rangeobject2_detail',
         'annotations/objects/objects_weakrefobject2_detail',
+        'annotations/objects/objects_bytearrayobject3_detail',
+        'annotations/objects/objects_descrobject5_detail',
       ],
     },
     {
@@ -1617,6 +1622,9 @@ const sidebars = {
         'annotations/lib/lib_shelve2_detail',
         'annotations/lib/lib_pprint2_detail',
         'annotations/lib/lib_threading2_detail',
+        'annotations/lib/lib_xmlrpc2_detail',
+        'annotations/lib/lib_sysconfig2_detail',
+        'annotations/lib/lib_imaplib2_detail',
       ],
     },
   ],

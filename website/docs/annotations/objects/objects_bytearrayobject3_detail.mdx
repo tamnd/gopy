@@ -1,0 +1,126 @@
+---
+title: Objects/bytearrayobject.c (part 3)
+description: "Objects/bytearrayobject.c part 3: bytearray.extend, bytearray.insert, bytearray.remove, bytearray.pop, bytearray.reverse, buffer protocol."
+cpython_path: Objects/bytearrayobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytearrayobject.c" />
+
+This annotation covers mutation methods and the buffer protocol. See `objects_bytearrayobject_detail` for `bytearray.__new__`, `__getitem__`, `__setitem__`, and `objects_bytearrayobject2_detail` for `append`, `decode`, `replace`, `split`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bytearray.extend` | Append all bytes from an iterable |
+| 81-180 | `bytearray.insert` | Insert a single byte at an index |
+| 181-280 | `bytearray.remove` | Remove first occurrence of a byte value |
+| 281-380 | `bytearray.pop` | Remove and return the byte at an index |
+| 381-480 | `bytearray.reverse` | Reverse in place |
+| 481-700 | Buffer protocol (`bf_getbuffer`) | Export a writable `Py_buffer` for zero-copy I/O |
+| 701-800 | `bytearray.copy` / `bytearray.clear` | Shallow copy and truncate |
+
+## Reading
+
+### `bytearray.extend`
+
+```c
+// CPython: Objects/bytearrayobject.c:820 bytearray_extend
+static PyObject *
+bytearray_extend(PyByteArrayObject *self, PyObject *iterable_of_ints)
+{
+    /* Fast path for bytes/bytearray */
+    if (PyBytes_CheckExact(iterable_of_ints)) {
+        return bytearray_iconcat(self, iterable_of_ints);
+    }
+    if (PyByteArray_CheckExact(iterable_of_ints)) {
+        return bytearray_iconcat(self, iterable_of_ints);
+    }
+    /* General: iterate and append each int */
+    PyObject *it = PyObject_GetIter(iterable_of_ints);
+    while ((item = PyIter_Next(it)) != NULL) {
+        int val = PyNumber_AsSsize_t(item, PyExc_ValueError);
+        if (val < 0 || val > 255) {
+            PyErr_SetString(PyExc_ValueError, "byte must be in range(0, 256)");
+            ...
+        }
+        bytearray_append_byte(self, (unsigned char)val);
+    }
+    ...
+}
+```
+
+### `bytearray.insert`
+
+```c
+// CPython: Objects/bytearrayobject.c:900 bytearray_insert
+static PyObject *
+bytearray_insert(PyByteArrayObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    int item;
+    Py_ssize_t where;
+    /* Clamp where to valid range */
+    if (where < 0) where += Py_SIZE(self);
+    if (where < 0) where = 0;
+    if (where > Py_SIZE(self)) where = Py_SIZE(self);
+    /* Resize and shift */
+    if (PyByteArray_Resize((PyObject *)self, Py_SIZE(self) + 1) < 0) return NULL;
+    memmove(self->ob_bytes + where + 1, self->ob_bytes + where,
+            Py_SIZE(self) - where - 1);
+    self->ob_bytes[where] = item;
+    Py_RETURN_NONE;
+}
+```
+
+`bytearray.insert(i, v)` shifts elements right by one position using `memmove`, then writes the new byte. Same complexity and semantics as `list.insert`.
+
+### Buffer protocol
+
+```c
+// CPython: Objects/bytearrayobject.c:1480 bytearray_getbuffer
+static int
+bytearray_getbuffer(PyByteArrayObject *obj, Py_buffer *view, int flags)
+{
+    /* Export a writable buffer view over the bytearray storage.
+       While exported, the bytearray cannot be resized. */
+    if (obj->ob_exports > 0 && (flags & PyBUF_WRITABLE)) {
+        /* Allow multiple writable exports only if no resize has occurred */
+    }
+    return PyBuffer_FillInfo(view, (PyObject *)obj,
+                             obj->ob_bytes, Py_SIZE(obj),
+                             0,   /* not readonly */
+                             flags);
+}
+```
+
+`bytearray` implements the buffer protocol so that code like `socket.recv_into(ba)` or `struct.pack_into(fmt, ba, 0, ...)` can write directly into its storage without copying. While a buffer view is exported, resizing raises `BufferError`.
+
+### `bytearray.reverse`
+
+```c
+// CPython: Objects/bytearrayobject.c:1050 bytearray_reverse
+static PyObject *
+bytearray_reverse(PyByteArrayObject *self)
+{
+    Py_ssize_t n = Py_SIZE(self);
+    unsigned char *lo = self->ob_bytes;
+    unsigned char *hi = lo + n - 1;
+    while (lo < hi) {
+        unsigned char tmp = *lo;
+        *lo++ = *hi;
+        *hi-- = tmp;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+In-place reversal using two-pointer swap. O(n) time, O(1) extra space.
+
+## gopy notes
+
+`bytearray.extend` is `objects.ByteArrayExtend` in `objects/bytearray.go`. `bytearray.insert` is `objects.ByteArrayInsert`. The buffer protocol is implemented via `objects.ByteArray.GetBuffer` which returns a `objects.Buffer` struct with a pointer to the underlying `[]byte`. Resize prevention while exported is tracked with an `exports` counter.

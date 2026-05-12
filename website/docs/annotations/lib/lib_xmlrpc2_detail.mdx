@@ -1,0 +1,110 @@
+---
+title: Lib/xmlrpc/ (part 2)
+description: "Lib/xmlrpc/ part 2: xmlrpc.server.SimpleXMLRPCServer, MultiPathXMLRPCServer, CGIXMLRPCRequestHandler, introspection API."
+cpython_path: Lib/xmlrpc/server.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/xmlrpc/server.py" />
+
+This annotation covers the server side. See `lib_xmlrpc_detail` for `xmlrpc.client.ServerProxy`, `Fault`, `MultiCall`, marshaling, and the XML encoding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `SimpleXMLRPCDispatcher` | Base class: method registry, dispatch, `_dispatch` |
+| 101-280 | `SimpleXMLRPCServer` | `TCPServer` + dispatcher; handles one request at a time |
+| 281-420 | `MultiPathXMLRPCServer` | Route requests to different dispatchers by URL path |
+| 421-560 | `CGIXMLRPCRequestHandler` | Handle XML-RPC via CGI stdin/stdout |
+| 561-700 | Introspection (`system.*`) | `system.listMethods`, `system.methodHelp`, `system.methodSignature` |
+| 701-800 | `resolve_dotted_attribute` | Safely traverse attribute chains for method dispatch |
+
+## Reading
+
+### `SimpleXMLRPCDispatcher`
+
+```python
+# CPython: Lib/xmlrpc/server.py:120 SimpleXMLRPCDispatcher
+class SimpleXMLRPCDispatcher:
+    def register_function(self, function, name=None):
+        """Register a function to respond to XML-RPC requests.
+
+        name -- the XML-RPC name (default: function.__name__)
+        """
+        if name is None:
+            name = function.__name__
+        self.funcs[name] = function
+
+    def register_instance(self, instance, allow_dotted_names=False):
+        """Register an object as the handler for all methods not in self.funcs."""
+        self.instance = instance
+        self.allow_dotted_names = allow_dotted_names
+```
+
+`register_function` maps XML-RPC method names to Python callables. `register_instance` provides a fallback object whose methods are looked up by name. `allow_dotted_names=True` enables `obj.subobj.method` dispatch (a security risk if untrusted clients can call arbitrary attributes).
+
+### `_dispatch`
+
+```python
+# CPython: Lib/xmlrpc/server.py:220 _dispatch
+def _dispatch(self, method, params):
+    """Dispatch an XML-RPC call to the appropriate Python function."""
+    func = self.funcs.get(method)
+    if func is None and self.instance is not None:
+        if self.allow_dotted_names:
+            func = resolve_dotted_attribute(self.instance, method)
+        elif hasattr(self.instance, '_dispatch'):
+            return self.instance._dispatch(method, params)
+        else:
+            func = getattr(self.instance, method, None)
+    if func is None:
+        raise Exception(f'method "{method}" is not supported')
+    return func(*params)
+```
+
+### `resolve_dotted_attribute`
+
+```python
+# CPython: Lib/xmlrpc/server.py:740 resolve_dotted_attribute
+def resolve_dotted_attribute(obj, attr, allow_dotted_names=True):
+    """Resolve a dotted attribute chain like 'a.b.c' on obj."""
+    attrs = attr.split('.')
+    for i in attrs:
+        if i.startswith('_'):  # never resolve private/dunder attrs
+            raise AttributeError(f'attempt to access private attribute "{i}"')
+        obj = getattr(obj, i)
+    return obj
+```
+
+Private attributes (starting with `_`) are blocked to prevent clients from calling `__class__.__mro__[0].__subclasses__()` style attacks.
+
+### Introspection methods
+
+```python
+# CPython: Lib/xmlrpc/server.py:565 register_introspection_functions
+def register_introspection_functions(self):
+    self.funcs.update({
+        'system.listMethods':     self.system_listMethods,
+        'system.methodSignature': self.system_methodSignature,
+        'system.methodHelp':      self.system_methodHelp,
+    })
+
+def system_listMethods(self):
+    """Return a list of all callable method names."""
+    methods = set(self.funcs.keys())
+    if self.instance is not None:
+        methods |= set(m for m in dir(self.instance)
+                       if not m.startswith('_'))
+    return sorted(methods)
+```
+
+`system.listMethods` is the XML-RPC introspection API. Clients like `xmlrpc.client.ServerProxy` can call it to discover available methods.
+
+## gopy notes
+
+`xmlrpc.server` is pure Python. `SimpleXMLRPCServer` extends `http.server.HTTPServer` which uses `module/http/server`. `_dispatch` resolution uses `objects.GetAttr`. The XML encoding/decoding delegates to `Lib/xmlrpc/client.py` which is annotated in `lib_xmlrpc_detail`.

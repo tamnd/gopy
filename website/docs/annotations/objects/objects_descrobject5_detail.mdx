@@ -1,0 +1,113 @@
+---
+title: Objects/descrobject.c (part 5)
+description: "Objects/descrobject.c part 5: slot_tp_descr_get, slot_tp_descr_set, classmethod_get, staticmethod_get, member_get/set."
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/descrobject.c" />
+
+This annotation covers slot-based descriptor dispatch and member descriptors. See `objects_descrobject4_detail` for `PyWrapperDescrObject`, `slot_tp_call`, `slot_tp_repr`, and `slot_tp_hash`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `slot_tp_descr_get` | Call `__get__` from a type's slot |
+| 101-200 | `slot_tp_descr_set` | Call `__set__` / `__delete__` from a type's slot |
+| 201-340 | `classmethod_get` | `classmethod.__get__` — bind to the class, not the instance |
+| 341-480 | `staticmethod_get` | `staticmethod.__get__` — return the raw function |
+| 481-600 | `member_get` / `member_set` | `PyMemberDef`-based descriptor for C struct fields |
+| 601-700 | `PyMember_GetOne` / `PyMember_SetOne` | Read/write a C struct field by type code |
+
+## Reading
+
+### `slot_tp_descr_get`
+
+```c
+// CPython: Objects/descrobject.c:180 slot_tp_descr_get
+static PyObject *
+slot_tp_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    /* Call self.__get__(obj, type) */
+    PyObject *stack[2] = {obj, type};
+    return vectorcall_maybe(tstate, &_Py_ID(__get__), self,
+                            stack, 2 | PY_VECTORCALL_ARGUMENTS_OFFSET);
+}
+```
+
+`slot_tp_descr_get` is installed as `tp_descr_get` when a class defines `__get__`. The descriptor protocol: `obj.attr` calls `type(attr).__get__(attr, obj, type(obj))`.
+
+### `classmethod_get`
+
+```c
+// CPython: Objects/descrobject.c:220 cm_descr_get
+static PyObject *
+cm_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    PyClassMethodObject *cm = (PyClassMethodObject *)self;
+    if (type == NULL) {
+        if (obj != NULL)
+            type = (PyObject *)(Py_TYPE(obj));
+        else {
+            /* Neither obj nor type: return unbound */
+            Py_INCREF(self);
+            return self;
+        }
+    }
+    /* Return a bound method: cm.func bound to type */
+    return PyMethod_New(cm->cm_callable, type);
+}
+```
+
+`@classmethod` installs `cm_descr_get` as `tp_descr_get`. Accessing `MyClass.method` or `instance.method` both return a bound method where the first argument is the class, not the instance.
+
+### `staticmethod_get`
+
+```c
+// CPython: Objects/descrobject.c:300 sm_descr_get
+static PyObject *
+sm_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    PyStaticMethodObject *sm = (PyStaticMethodObject *)self;
+    /* Return the raw callable, not a bound method */
+    Py_INCREF(sm->sm_callable);
+    return sm->sm_callable;
+}
+```
+
+`@staticmethod` simply returns the wrapped function regardless of how it is accessed. No `self` or `cls` is prepended.
+
+### `PyMember_GetOne`
+
+```c
+// CPython: Objects/descrobject.c:620 PyMember_GetOne
+PyObject *
+PyMember_GetOne(const char *addr, PyMemberDef *l)
+{
+    /* Read a C struct field of the type described by l->type.
+       Type codes: T_INT, T_DOUBLE, T_STRING, T_OBJECT, T_BOOL, etc. */
+    switch (l->type) {
+    case T_BOOL:
+        return PyBool_FromLong(*(char *)(addr + l->offset));
+    case T_INT:
+        return PyLong_FromLong(*(int *)(addr + l->offset));
+    case T_DOUBLE:
+        return PyFloat_FromDouble(*(double *)(addr + l->offset));
+    case T_OBJECT:
+        v = *(PyObject **)(addr + l->offset);
+        return Py_XNewRef(v);
+    ...
+    }
+}
+```
+
+`PyMemberDef` descriptors give Python classes access to C struct fields. `__slots__` is implemented using these member descriptors — each slot maps to a `T_OBJECT` field at a known offset in the instance struct.
+
+## gopy notes
+
+`slot_tp_descr_get` is `objects.SlotDescGet` in `objects/descr.go`. `classmethod_get` is `objects.ClassMethodGet`. `staticmethod_get` is `objects.StaticMethodGet`. `PyMember_GetOne`/`SetOne` read from Go struct fields using `unsafe.Pointer` arithmetic in `objects/member.go`.

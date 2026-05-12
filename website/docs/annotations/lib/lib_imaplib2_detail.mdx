@@ -1,0 +1,116 @@
+---
+title: Lib/imaplib.py (part 2)
+description: "Lib/imaplib.py part 2: IMAP4.fetch, IMAP4.store, IMAP4.search, IMAP4.uid, IMAP4_SSL, IMAP4_stream."
+cpython_path: Lib/imaplib.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/imaplib.py" />
+
+This annotation covers message retrieval and manipulation commands. See `lib_imaplib_detail` for `IMAP4.__init__`, `login`, `select`, `logout`, the response parser, and the continuation command mechanism.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `IMAP4.fetch` | Retrieve message data (headers, body, flags) |
+| 81-200 | `IMAP4.store` | Change flags on messages (`+FLAGS`, `-FLAGS`, `FLAGS`) |
+| 201-320 | `IMAP4.search` | Search messages by criteria (FROM, SUBJECT, SINCE, etc.) |
+| 321-440 | `IMAP4.uid` | Execute a command using UIDs instead of sequence numbers |
+| 441-580 | `IMAP4.copy` / `IMAP4.move` | Copy/move messages to another mailbox |
+| 581-700 | `IMAP4_SSL` | TLS subclass wrapping the socket |
+| 701-800 | `IMAP4_stream` | Subclass using a subprocess stdin/stdout as transport |
+
+## Reading
+
+### `IMAP4.fetch`
+
+```python
+# CPython: Lib/imaplib.py:520 fetch
+def fetch(self, message_set, message_parts):
+    """Fetch (retrieve) parts of messages.
+
+    (typ, [data]) = <instance>.fetch(message_set, message_parts)
+
+    message_set   -- '1', '1:5', '1,3,5', '*' (last message)
+    message_parts -- '(FLAGS)', '(RFC822)', '(BODY[TEXT])', etc.
+    """
+    name = 'FETCH'
+    typ, dat = self._simple_command(name, message_set, message_parts)
+    return self._untagged_response(typ, dat, name)
+```
+
+`fetch('1:10', '(RFC822)')` retrieves the full RFC-822 message text for messages 1 through 10. `(BODY.PEEK[HEADER])` retrieves headers without marking messages as seen.
+
+### `IMAP4.search`
+
+```python
+# CPython: Lib/imaplib.py:620 search
+def search(self, charset, *criteria):
+    """Search mailbox for matching messages.
+
+    (typ, [data]) = <instance>.search(charset, criterion, ...)
+    data is a list of space-separated message numbers as bytes.
+
+    charset -- e.g. 'UTF-8', or None for ASCII
+    criteria -- search keys like 'UNSEEN', 'FROM "user@example.com"'
+    """
+    name = 'SEARCH'
+    if charset:
+        typ, dat = self._simple_command(name, 'CHARSET', charset, *criteria)
+    else:
+        typ, dat = self._simple_command(name, *criteria)
+    return self._untagged_response(typ, dat, name)
+```
+
+`search(None, 'UNSEEN')` returns `('OK', [b'1 3 5'])` — message numbers of all unread messages. The caller splits the bytes string by space to get individual sequence numbers.
+
+### `IMAP4.uid`
+
+```python
+# CPython: Lib/imaplib.py:740 uid
+def uid(self, command, *args):
+    """Execute a command using UIDs (permanent message identifiers).
+
+    UID FETCH, UID STORE, UID SEARCH, UID COPY, UID MOVE.
+    UIDs are stable across reconnections; sequence numbers are not.
+    """
+    name = 'UID'
+    typ, dat = self._simple_command(name, command, *args)
+    if command in ('SEARCH', 'SORT'):
+        name = command
+    return self._untagged_response(typ, dat, name)
+```
+
+`uid('FETCH', '1234', '(RFC822)')` retrieves message with UID 1234. UIDs persist until the mailbox is `EXPUNGE`d; sequence numbers shift when messages are deleted.
+
+### `IMAP4_SSL`
+
+```python
+# CPython: Lib/imaplib.py:910 IMAP4_SSL
+class IMAP4_SSL(IMAP4):
+    """IMAP4 over TLS/SSL (port 993 by default)."""
+
+    def __init__(self, host='', port=IMAP4_SSL_PORT, *,
+                 ssl_context=None, timeout=None):
+        if ssl_context is None:
+            ssl_context = ssl.create_default_context()
+        self.ssl_context = ssl_context
+        IMAP4.__init__(self, host, port, timeout=timeout)
+
+    def open(self, host='', port=IMAP4_SSL_PORT, timeout=None):
+        self.sock = socket.create_connection((host, port), timeout)
+        self.sock = self.ssl_context.wrap_socket(self.sock,
+                                                 server_hostname=host)
+        self.file = self.sock.makefile('rb')
+```
+
+`IMAP4_SSL` wraps the raw socket with TLS before the IMAP greeting is received. The `ssl_context` can be customized to add client certificates or disable hostname verification.
+
+## gopy notes
+
+`imaplib` is pure Python. `IMAP4._simple_command` and `_untagged_response` build on `objects.Socket` via `module/socket`. `IMAP4_SSL` uses `module/ssl.SSLContext.WrapSocket`. The IMAP response parser is a pure Python state machine in `module/imaplib/module.go`.

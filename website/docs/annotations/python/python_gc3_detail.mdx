@@ -1,0 +1,114 @@
+---
+title: Python/gc.c (part 3)
+description: "Python/gc.c part 3: gc.collect, generational thresholds, gc.get_count, gc.get_stats, gc.freeze/unfreeze."
+cpython_path: Python/gc.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/gc.c" />
+
+This annotation covers the public GC API and generational tuning. See `python_gc_detail` for the mark-and-sweep algorithm, and `python_gc2_detail` for finalization and `tp_finalize`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `gc.collect` | Trigger a collection of one or all generations |
+| 101-220 | Generational thresholds | `gc.get_threshold`, `gc.set_threshold`, automatic triggering |
+| 221-360 | `gc.get_count` / `gc.get_stats` | Query current object counts and collection statistics |
+| 361-500 | `gc.is_tracked` / `gc.is_finalized` | Per-object GC state queries |
+| 501-700 | `gc.freeze` / `gc.unfreeze` | Move generation 2 objects to a permanent "frozen" set |
+
+## Reading
+
+### `gc.collect`
+
+```c
+// CPython: Python/gc.c:1820 gc_collect_impl
+static Py_ssize_t
+gc_collect_impl(PyObject *module, int generation)
+{
+    /* Collect the given generation (0=young, 1=middle, 2=old).
+       Collecting generation N also collects all younger generations. */
+    GCState *gcstate = &tstate->interp->gc;
+    Py_ssize_t n = 0;
+    for (int i = 0; i <= generation; i++) {
+        n += gc_collect_main(tstate, i, &gcstate->stats[i]);
+    }
+    return n;
+}
+```
+
+`gc.collect()` triggers a full collection (all 3 generations). `gc.collect(0)` collects only generation 0. Returns the number of unreachable objects found.
+
+### Generational thresholds
+
+```c
+// CPython: Python/gc.c:1700 gc_set_threshold_impl
+static PyObject *
+gc_set_threshold_impl(PyObject *module, int threshold0, int threshold1,
+                      int threshold2)
+{
+    /* Collect generation N when objects in that generation exceed threshold_N.
+       Defaults: threshold0=700, threshold1=10, threshold2=10 */
+    GCState *gcstate = &tstate->interp->gc;
+    gcstate->generations[0].threshold = threshold0;
+    gcstate->generations[1].threshold = threshold1;
+    gcstate->generations[2].threshold = threshold2;
+    Py_RETURN_NONE;
+}
+```
+
+Each allocation increments the generation-0 count. When it reaches `threshold0` (default 700), a generation-0 collection runs. After `threshold1` (default 10) generation-0 collections, a generation-1 collection also runs. After `threshold2` (default 10) generation-1 collections, generation 2 is collected too.
+
+### `gc.get_stats`
+
+```c
+// CPython: Python/gc.c:1750 gc_get_stats_impl
+static PyObject *
+gc_get_stats_impl(PyObject *module)
+{
+    /* Return a list of dicts, one per generation:
+       {'collections': N, 'collected': M, 'uncollectable': K} */
+    PyObject *result = PyList_New(NUM_GENERATIONS);
+    for (int i = 0; i < NUM_GENERATIONS; i++) {
+        GCGenStats *stats = &gcstate->stats[i];
+        PyObject *d = PyDict_New();
+        PyDict_SetItemString(d, "collections",   PyLong_FromSsize_t(stats->collections));
+        PyDict_SetItemString(d, "collected",     PyLong_FromSsize_t(stats->collected));
+        PyDict_SetItemString(d, "uncollectable", PyLong_FromSsize_t(stats->uncollectable));
+        PyList_SET_ITEM(result, i, d);
+    }
+    return result;
+}
+```
+
+`uncollectable` counts objects put in `gc.garbage` (objects with `__del__` methods that are part of reference cycles — these cannot be automatically finalized in Python 2; in Python 3 they are handled but still counted if `gc.callbacks` report them uncollectable).
+
+### `gc.freeze`
+
+```c
+// CPython: Python/gc.c:1900 gc_freeze_impl
+static PyObject *
+gc_freeze_impl(PyObject *module)
+{
+    /* Move all objects currently in generation 2 to a 'permanent' set
+       that is never collected. Used after importing all standard library
+       modules to avoid re-scanning them on every full GC. */
+    GCState *gcstate = &tstate->interp->gc;
+    PyGC_Head *gen2 = &gcstate->generations[2].head;
+    gc_list_merge(gen2, &gcstate->permanent_generation.head);
+    gcstate->generations[2].count = 0;
+    Py_RETURN_NONE;
+}
+```
+
+`gc.freeze()` is called by Python's startup code after importing the standard library. Frozen objects are never scanned for cycles, reducing per-collection work significantly for long-running applications.
+
+## gopy notes
+
+`gc.collect` is `vm.GCCollect` in `vm/gc.go`. Generational thresholds are `vm.GCState.Thresholds`. `gc.freeze`/`unfreeze` move objects between the `gen2` list and `permanentGen` list. `gc.get_stats` returns a `[]objects.Dict` with the collection statistics.
