@@ -1,0 +1,124 @@
+---
+title: Lib/argparse.py (part 5)
+description: "argparse.py part 5: ArgumentParser.parse_known_args, _parse_known_args, _match_argument, _match_arguments_partial."
+cpython_path: Lib/argparse.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/argparse.py" />
+
+This annotation covers the core argument parsing algorithm. See `lib_argparse4_detail` for `add_argument`, `_get_optional_kwargs`, and action classes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `parse_known_args` | Public entry; separates known from unknown |
+| 81-180 | `_parse_known_args` | Main loop: classify tokens, dispatch |
+| 181-280 | `_match_argument` | Check nargs pattern against available tokens |
+| 281-380 | `_match_arguments_partial` | Greedy positional matching with backtracking |
+| 381-500 | `_parse_optional` | Detect `-x`/`--xx`/`--xx=val` tokens |
+
+## Reading
+
+### `parse_known_args`
+
+```python
+# CPython: Lib/argparse.py:1860 ArgumentParser.parse_known_args
+def parse_known_args(self, args=None, namespace=None):
+    if args is None:
+        args = _sys.argv[1:]
+    else:
+        args = list(args)
+    if namespace is None:
+        namespace = Namespace()
+    # add defaults
+    for action in self._actions:
+        if action.dest is not SUPPRESS:
+            if not hasattr(namespace, action.dest):
+                if action.default is not SUPPRESS:
+                    setattr(namespace, action.dest, action.default)
+    # parse
+    namespace, extras = self._parse_known_args(args, namespace)
+    return namespace, extras
+```
+
+`parse_args` calls `parse_known_args` then errors if `extras` is non-empty. The namespace is pre-populated with defaults before parsing begins; actions that see their dest already set can check whether the user actually provided a value.
+
+### `_parse_known_args`
+
+```python
+# CPython: Lib/argparse.py:1920 ArgumentParser._parse_known_args
+def _parse_known_args(self, arg_strings, namespace):
+    # separate '--' from the rest
+    # classify each token as optional or positional
+    arg_string_pattern_parts = []
+    for arg_string in arg_strings:
+        if arg_string == '--':
+            arg_string_pattern_parts.append('-')
+            break
+        elif arg_string[0] in self.prefix_chars:
+            arg_string_pattern_parts.append('O')   # optional
+        else:
+            arg_string_pattern_parts.append('A')   # argument (positional)
+    arg_strings_pattern = ''.join(arg_string_pattern_parts)
+    # consume optionals and positionals interleaved
+    ...
+```
+
+Tokens are reduced to a pattern string of `'O'` (optional) and `'A'` (positional). Regex matching on this pattern string drives how many positional tokens each positional action consumes.
+
+### `_match_argument`
+
+```python
+# CPython: Lib/argparse.py:2100 ArgumentParser._match_argument
+def _match_argument(self, action, arg_strings_pattern):
+    nargs_pattern = self._get_nargs_pattern(action)
+    match = _re.match(nargs_pattern, arg_strings_pattern)
+    if match is None:
+        nargs_errors = {
+            None:  _('expected one argument'),
+            OPTIONAL: _('expected at most one argument'),
+            ONE_OR_MORE: _('expected at least one argument'),
+        }
+        msg = nargs_errors.get(action.nargs)
+        if msg is None:
+            msg = ngettext('expected %s argument',
+                           'expected %s arguments',
+                           action.nargs) % action.nargs
+        raise ArgumentError(action, msg)
+    return len(match.group(1))
+```
+
+`_get_nargs_pattern` converts `nargs=2` to `(-*A-*A-*)`, `nargs='?'` to `(-*A?-*)`, `nargs='*'` to `(-*[A-]*)`. The regex match on the token pattern determines how many tokens to hand to the action.
+
+### `_parse_optional`
+
+```python
+# CPython: Lib/argparse.py:1820 ArgumentParser._parse_optional
+def _parse_optional(self, arg_string):
+    if not arg_string[0] in self.prefix_chars:
+        return None
+    if arg_string in self._option_string_actions:
+        return self._option_string_actions[arg_string], arg_string, None
+    if len(arg_string) == 1:
+        return None
+    # '--key=value' split
+    if '=' in arg_string:
+        option_string, explicit_arg = arg_string.split('=', 1)
+        if option_string in self._option_string_actions:
+            return self._option_string_actions[option_string], option_string, explicit_arg
+    # prefix matching
+    ...
+    return None
+```
+
+`--output=foo` splits into `--output` (the option string) and `foo` (the explicit arg). Prefix matching allows `--out` to resolve to `--output` when unambiguous. The returned 3-tuple is `(action, option_string, explicit_arg)`.
+
+## gopy notes
+
+`ArgumentParser.parse_known_args` is `module/argparse.ParseKnownArgs` in `module/argparse/module.go`. Token classification uses a `strings.Builder` to construct the pattern string. `_match_argument` calls `regexp.MatchString` on the nargs pattern. `_parse_optional` does a direct map lookup then falls back to prefix scanning.

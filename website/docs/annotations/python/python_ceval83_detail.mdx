@@ -1,0 +1,133 @@
+---
+title: Python/ceval.c (part 83)
+description: "Python/ceval.c part 83: GET_ITER, FOR_ITER, FOR_ITER_LIST, FOR_ITER_RANGE, SEND."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers iteration opcodes. See `python_ceval82_detail` for comparison opcodes (`COMPARE_OP`, `IS_OP`, `CONTAINS_OP`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `GET_ITER` | Call `iter()` on TOS, push the iterator |
+| 81-180 | `FOR_ITER` | Advance iterator; jump on `StopIteration` |
+| 181-260 | `FOR_ITER_LIST` | Specialization for list iterators |
+| 261-340 | `FOR_ITER_RANGE` | Specialization for `range` iterators |
+| 341-500 | `SEND` | `yield from` / `await` — send a value into a subgenerator |
+
+## Reading
+
+### `GET_ITER`
+
+```c
+// CPython: Python/ceval.c:3780 GET_ITER
+inst(GET_ITER, (iterable -- iter)) {
+    iter = PyObject_GetIter(iterable);
+    ERROR_IF(iter == NULL, error);
+    Py_DECREF(iterable);
+}
+```
+
+`GET_ITER` calls `tp_iter` on the object. For sequences without `__iter__`, CPython falls back to a `PySeqIter` that calls `__getitem__` with increasing indices. The resulting iterator is left on the stack.
+
+### `FOR_ITER`
+
+```c
+// CPython: Python/ceval.c:3820 FOR_ITER
+inst(FOR_ITER, (iter -- iter, next)) {
+    /* oparg = jump offset past the loop body */
+    next = (*Py_TYPE(iter)->tp_iternext)(iter);
+    if (next == NULL) {
+        if (_PyErr_Occurred(tstate)) {
+            if (!_PyErr_ExceptionMatches(tstate, PyExc_StopIteration))
+                ERROR_IF(true, error);
+            _PyErr_Clear(tstate);
+        }
+        /* iterator exhausted: jump past the loop */
+        JUMPBY(oparg);
+        DISPATCH();
+    }
+}
+```
+
+`FOR_ITER` calls `tp_iternext` directly. When the iterator raises `StopIteration`, the exception is cleared and the interpreter jumps to `oparg` bytes forward (past the loop body and `JUMP_BACKWARD`). Other exceptions propagate normally.
+
+### `FOR_ITER_LIST`
+
+```c
+// CPython: Python/ceval.c:3860 FOR_ITER_LIST
+inst(FOR_ITER_LIST, (iter -- iter, next)) {
+    PyListIterObject *it = (PyListIterObject *)iter;
+    assert(Py_TYPE(iter) == &PyListIter_Type);
+    if (it->it_index < PyList_GET_SIZE(it->it_seq)) {
+        next = Py_NewRef(PyList_GET_ITEM(it->it_seq, it->it_index++));
+    } else {
+        /* exhausted */
+        Py_CLEAR(it->it_seq);
+        JUMPBY(oparg);
+        DISPATCH();
+    }
+}
+```
+
+The specialization avoids the virtual `tp_iternext` call by reading `it_index` and `it_seq` directly from `PyListIterObject`. It also skips the `StopIteration` exception path entirely.
+
+### `FOR_ITER_RANGE`
+
+```c
+// CPython: Python/ceval.c:3900 FOR_ITER_RANGE
+inst(FOR_ITER_RANGE, (iter -- iter, next)) {
+    _PyRangeIterObject *r = (_PyRangeIterObject *)iter;
+    assert(Py_TYPE(iter) == &PyRangeIter_Type);
+    if (r->len <= 0) {
+        JUMPBY(oparg);
+        DISPATCH();
+    }
+    long value = r->start;
+    r->start = value + r->step;
+    r->len--;
+    next = PyLong_FromLong(value);
+    ERROR_IF(next == NULL, error);
+}
+```
+
+`range` iteration avoids boxing the integer in the common case by reading `start`/`step`/`len` directly. `PyLong_FromLong` is the only allocation; for small integers the free list makes it nearly free.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:3960 SEND
+inst(SEND, (receiver, v -- receiver, retval)) {
+    /* yield from / await */
+    assert(oparg >= 0);
+    if (tstate->c_tracefunc == NULL) {
+        retval = PyIter_Send(receiver, v);
+    } else {
+        retval = _PyEval_EvalFrameDefault(tstate, ...);
+    }
+    if (retval == NULL) {
+        if (_PyErr_ExceptionMatches(tstate, PyExc_StopIteration)) {
+            /* subgenerator finished: extract value, fall through */
+            ...
+            JUMPBY(oparg);
+        }
+        ERROR_IF(true, error);
+    }
+    /* still running: loop back */
+    DISPATCH_GOTO(YIELD_VALUE);
+}
+```
+
+`SEND` drives `yield from` and `await`. It calls `PyIter_Send` which calls `tp_iternext` or `send` on the subgenerator. When `StopIteration` is raised the value is extracted and execution continues past the `SEND` instruction.
+
+## gopy notes
+
+`GET_ITER` is in `vm/eval_simple.go` and calls `objects.GetIter`. `FOR_ITER` is the generic path; `FOR_ITER_LIST` and `FOR_ITER_RANGE` are specializations triggered by `SPECIALIZE`. `SEND` drives `yield from` in `vm/eval_gen.go` via `objects.IterSend`.

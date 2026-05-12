@@ -1,0 +1,121 @@
+---
+title: Modules/_heapqmodule.c (part 3)
+description: "_heapqmodule.c part 3: heapify, _siftdown, _siftup, nlargest, nsmallest."
+cpython_path: Modules/_heapqmodule.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_heapqmodule.c" />
+
+This annotation covers heap construction and the sift operations. See `modules_heapq2_detail` for `heappush` and `heappop`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `heapify` | Convert a list into a heap in-place, O(n) |
+| 81-180 | `_siftdown` | Restore heap after inserting at the end |
+| 181-280 | `_siftup` | Restore heap after removing the root |
+| 281-400 | `nlargest` / `nsmallest` | Efficient k-largest/smallest algorithms |
+
+## Reading
+
+### `heapify`
+
+```c
+// CPython: Modules/_heapqmodule.c:260 heapify
+static PyObject *
+heapify(PyObject *module, PyObject *heap)
+{
+    Py_ssize_t n = PyList_GET_SIZE(heap);
+    /* Start from the last parent and sift down each subtree root */
+    for (Py_ssize_t i = n / 2 - 1; i >= 0; i--) {
+        if (_siftup((PyListObject *)heap, i) < 0)
+            return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`heapify` is O(n) because lower nodes are cheaper to sift. A naive O(n log n) approach would push each element one by one. The bottom-up pass makes each of the n/2 parent nodes a valid heap root, at amortized cost of O(1) per node.
+
+### `_siftdown`
+
+```c
+// CPython: Modules/_heapqmodule.c:80 _siftdown
+static int
+_siftdown(PyListObject *heap, Py_ssize_t startpos, Py_ssize_t pos)
+{
+    PyObject *newitem = PyList_GET_ITEM(heap, pos);
+    while (pos > startpos) {
+        Py_ssize_t parentpos = (pos - 1) >> 1;
+        PyObject *parent = PyList_GET_ITEM(heap, parentpos);
+        int cmp = PyObject_RichCompareBool(newitem, parent, Py_LT);
+        if (cmp < 0) return -1;
+        if (!cmp) break;   /* parent <= newitem: heap property restored */
+        PyList_SET_ITEM(heap, pos, Py_NewRef(parent));
+        Py_DECREF(PyList_GET_ITEM(heap, pos));  /* old ref now overwritten */
+        pos = parentpos;
+    }
+    PyList_SET_ITEM(heap, pos, Py_NewRef(newitem));
+    Py_DECREF(newitem);
+    return 0;
+}
+```
+
+`_siftdown` moves a newly inserted element up towards the root until the heap invariant holds. `(pos - 1) >> 1` is the parent index in a 0-based binary heap.
+
+### `_siftup`
+
+```c
+// CPython: Modules/_heapqmodule.c:160 _siftup
+static int
+_siftup(PyListObject *heap, Py_ssize_t pos)
+{
+    Py_ssize_t endpos = PyList_GET_SIZE(heap);
+    Py_ssize_t startpos = pos;
+    PyObject *newitem = PyList_GET_ITEM(heap, pos);
+    /* Bubble up the smaller child until we reach a leaf */
+    Py_ssize_t childpos = 2 * pos + 1;  /* left child */
+    while (childpos < endpos) {
+        Py_ssize_t rightpos = childpos + 1;
+        if (rightpos < endpos) {
+            int cmp = PyObject_RichCompareBool(
+                PyList_GET_ITEM(heap, rightpos),
+                PyList_GET_ITEM(heap, childpos), Py_LT);
+            if (cmp < 0) return -1;
+            if (cmp) childpos = rightpos;
+        }
+        PyList_SET_ITEM(heap, pos, Py_NewRef(PyList_GET_ITEM(heap, childpos)));
+        pos = childpos;
+        childpos = 2 * pos + 1;
+    }
+    PyList_SET_ITEM(heap, pos, Py_NewRef(newitem));
+    return _siftdown(heap, startpos, pos);
+}
+```
+
+`_siftup` fills the gap left by removing the root by pushing the smaller child up, then calls `_siftdown` to place the displaced last element. This two-phase approach is CPython's strategy for `heappop`.
+
+### `nlargest` / `nsmallest`
+
+```c
+// CPython: Modules/_heapqmodule.c:340 nlargest (Python-level fallback)
+/* For small n vs large iterable:
+     nlargest(k, it) uses a min-heap of size k:
+     - Push first k elements.
+     - For each remaining element: if > heap[0], replace and siftup.
+   For k close to len(it): sort and slice.
+   For k == 1: use max().
+*/
+```
+
+`nlargest(k, iterable)` keeps a min-heap of size `k`. Elements smaller than the current minimum are discarded without a heap operation. This gives O(n log k) complexity. For `k >= n // 2`, sorting is cheaper.
+
+## gopy notes
+
+`heapify` is `module/heapq.Heapify` in `module/heapq/module.go`. `_siftdown` and `_siftup` are unexported helpers. `nlargest`/`nsmallest` threshold logic is replicated in Go with the same `k >= n/2` cutoff.

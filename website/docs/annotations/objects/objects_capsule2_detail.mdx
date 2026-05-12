@@ -1,0 +1,93 @@
+---
+title: Objects/capsule.c (part 2)
+description: "Objects/capsule.c part 2: PyCapsule_New, PyCapsule_GetPointer, PyCapsule_SetDestructor, PyCapsule_Import."
+cpython_path: Objects/capsule.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/capsule.c" />
+
+This annotation covers the full capsule API. Capsules are the mechanism C extensions use to share C-level pointers across module boundaries.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `PyCapsule_New` | Create a capsule wrapping a C pointer |
+| 61-140 | `PyCapsule_GetPointer` | Retrieve the pointer, validating the name |
+| 141-200 | `PyCapsule_SetDestructor` | Register a cleanup function |
+| 201-300 | `PyCapsule_Import` | Fetch a capsule from another module's attribute |
+
+## Reading
+
+### `PyCapsule_New`
+
+```c
+// CPython: Objects/capsule.c:60 PyCapsule_New
+PyObject *
+PyCapsule_New(void *pointer, const char *name, PyCapsule_Destructor destructor)
+{
+    PyCapsuleObject *capsule;
+    if (!pointer) {
+        PyErr_SetString(PyExc_ValueError, "PyCapsule_New called with null pointer");
+        return NULL;
+    }
+    capsule = PyObject_New(PyCapsuleObject, &PyCapsule_Type);
+    capsule->pointer = pointer;
+    capsule->name = name;
+    capsule->context = NULL;
+    capsule->destructor = destructor;
+    return (PyObject *)capsule;
+}
+```
+
+The `name` is a C string literal (typically `"module.attribute"`) used to validate that the pointer came from the right module. The `destructor` is called from `tp_dealloc` when the capsule is garbage collected.
+
+### `PyCapsule_GetPointer`
+
+```c
+// CPython: Objects/capsule.c:100 PyCapsule_GetPointer
+void *
+PyCapsule_GetPointer(PyObject *o, const char *name)
+{
+    PyCapsuleObject *capsule = (PyCapsuleObject *)o;
+    if (!PyCapsule_IsValid(o, name)) {
+        /* name mismatch: most likely a version skew or wrong capsule */
+        PyErr_Format(PyExc_ValueError,
+            "PyCapsule_GetPointer called with incorrect name");
+        return NULL;
+    }
+    return capsule->pointer;
+}
+```
+
+`PyCapsule_IsValid` checks both that `o` is a capsule and that its `name` matches. The name check prevents accidentally using a capsule from a different module that happens to expose the same attribute name.
+
+### `PyCapsule_Import`
+
+```c
+// CPython: Objects/capsule.c:220 PyCapsule_Import
+void *
+PyCapsule_Import(const char *name, int no_block)
+{
+    /* name = "package.module.attribute" */
+    /* Import "package.module", then getattr("attribute") */
+    char *p = strrchr(name, '.');
+    /* module_name = name[0..p-1] */
+    PyObject *module = PyImport_ImportModule(module_name);
+    PyObject *object = PyObject_GetAttrString(module, p + 1);
+    void *result = PyCapsule_GetPointer(object, name);
+    ...
+    return result;
+}
+```
+
+`PyCapsule_Import("numpy.core._multiarray_umath._ARRAY_API", 0)` imports `numpy.core._multiarray_umath` and fetches `_ARRAY_API`. The name passed to `GetPointer` must match the name the capsule was created with, providing a safe cross-module pointer exchange.
+
+## gopy notes
+
+`PyCapsule_New` is `objects.NewCapsule` in `objects/capsule.go`. The pointer is stored as `unsafe.Pointer`. `PyCapsule_GetPointer` validates the name before returning. `PyCapsule_Import` calls `objects.Import` then `objects.GetAttr`.
