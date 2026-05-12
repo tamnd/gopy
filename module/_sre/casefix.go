@@ -1,0 +1,65 @@
+package _sre
+
+// extraCases maps the code of a lowercased character to codes of
+// different lowercased characters that share the same uppercase.
+// Used by the engine's IGNORECASE / UNICODE path to widen literal
+// and charset matches across the Greek / Cyrillic / Latin-extension
+// case-fold equivalences Unicode's `tolower` table misses.
+//
+// The table is auto-generated upstream by
+// Tools/build/generate_re_casefix.py from Unicode case-folding data.
+// Each gopy release pulls the table verbatim from CPython 3.14.
+//
+// CPython: Lib/re/_casefix.py:5 _EXTRA_CASES
+var extraCases = map[rune][]rune{
+	0x0069: {0x0131},         // LATIN SMALL LETTER I -> LATIN SMALL LETTER DOTLESS I
+	0x0073: {0x017f},         // LATIN SMALL LETTER S -> LATIN SMALL LETTER LONG S
+	0x00b5: {0x03bc},         // MICRO SIGN -> GREEK SMALL LETTER MU
+	0x0131: {0x0069},         // LATIN SMALL LETTER DOTLESS I -> LATIN SMALL LETTER I
+	0x017f: {0x0073},         // LATIN SMALL LETTER LONG S -> LATIN SMALL LETTER S
+	0x0345: {0x03b9, 0x1fbe}, // COMBINING GREEK YPOGEGRAMMENI -> IOTA + PROSGEGRAMMENI
+	0x0390: {0x1fd3},         // GREEK IOTA + DIALYTIKA + TONOS -> + OXIA
+	0x03b0: {0x1fe3},         // GREEK UPSILON + DIALYTIKA + TONOS -> + OXIA
+	0x03b2: {0x03d0},         // GREEK SMALL LETTER BETA -> GREEK BETA SYMBOL
+	0x03b5: {0x03f5},         // GREEK SMALL LETTER EPSILON -> GREEK LUNATE EPSILON SYMBOL
+	0x03b8: {0x03d1},         // GREEK SMALL LETTER THETA -> GREEK THETA SYMBOL
+	0x03b9: {0x0345, 0x1fbe}, // GREEK SMALL LETTER IOTA -> YPOGEGRAMMENI + PROSGEGRAMMENI
+	0x03ba: {0x03f0},         // GREEK SMALL LETTER KAPPA -> GREEK KAPPA SYMBOL
+	0x03bc: {0x00b5},         // GREEK SMALL LETTER MU -> MICRO SIGN
+	0x03c0: {0x03d6},         // GREEK SMALL LETTER PI -> GREEK PI SYMBOL
+	0x03c1: {0x03f1},         // GREEK SMALL LETTER RHO -> GREEK RHO SYMBOL
+	0x03c2: {0x03c3},         // GREEK SMALL LETTER FINAL SIGMA -> SIGMA
+	0x03c3: {0x03c2},         // GREEK SMALL LETTER SIGMA -> FINAL SIGMA
+	0x03c6: {0x03d5},         // GREEK SMALL LETTER PHI -> GREEK PHI SYMBOL
+	0x03d0: {0x03b2},         // GREEK BETA SYMBOL -> GREEK SMALL LETTER BETA
+	0x03d1: {0x03b8},         // GREEK THETA SYMBOL -> GREEK SMALL LETTER THETA
+	0x03d5: {0x03c6},         // GREEK PHI SYMBOL -> GREEK SMALL LETTER PHI
+	0x03d6: {0x03c0},         // GREEK PI SYMBOL -> GREEK SMALL LETTER PI
+	0x03f0: {0x03ba},         // GREEK KAPPA SYMBOL -> GREEK SMALL LETTER KAPPA
+	0x03f1: {0x03c1},         // GREEK RHO SYMBOL -> GREEK SMALL LETTER RHO
+	0x03f5: {0x03b5},         // GREEK LUNATE EPSILON SYMBOL -> GREEK SMALL LETTER EPSILON
+	0x0432: {0x1c80},         // CYRILLIC SMALL LETTER VE -> ROUNDED VE
+	0x0434: {0x1c81},         // CYRILLIC SMALL LETTER DE -> LONG-LEGGED DE
+	0x043e: {0x1c82},         // CYRILLIC SMALL LETTER O -> NARROW O
+	0x0441: {0x1c83},         // CYRILLIC SMALL LETTER ES -> WIDE ES
+	0x0442: {0x1c84, 0x1c85}, // CYRILLIC SMALL LETTER TE -> TALL TE, THREE-LEGGED TE
+	0x044a: {0x1c86},         // CYRILLIC SMALL LETTER HARD SIGN -> TALL HARD SIGN
+	0x0463: {0x1c87},         // CYRILLIC SMALL LETTER YAT -> TALL YAT
+	0x1c80: {0x0432},         // CYRILLIC SMALL LETTER ROUNDED VE -> VE
+	0x1c81: {0x0434},         // CYRILLIC SMALL LETTER LONG-LEGGED DE -> DE
+	0x1c82: {0x043e},         // CYRILLIC SMALL LETTER NARROW O -> O
+	0x1c83: {0x0441},         // CYRILLIC SMALL LETTER WIDE ES -> ES
+	0x1c84: {0x0442, 0x1c85}, // CYRILLIC SMALL LETTER TALL TE -> TE, THREE-LEGGED TE
+	0x1c85: {0x0442, 0x1c84}, // CYRILLIC SMALL LETTER THREE-LEGGED TE -> TE, TALL TE
+	0x1c86: {0x044a},         // CYRILLIC SMALL LETTER TALL HARD SIGN -> HARD SIGN
+	0x1c87: {0x0463},         // CYRILLIC SMALL LETTER TALL YAT -> YAT
+	0x1c88: {0xa64b},         // CYRILLIC SMALL LETTER UNBLENDED UK -> MONOGRAPH UK
+	0x1e61: {0x1e9b},         // LATIN SMALL LETTER S WITH DOT ABOVE -> LONG S WITH DOT ABOVE
+	0x1e9b: {0x1e61},         // LATIN SMALL LETTER LONG S WITH DOT ABOVE -> S WITH DOT ABOVE
+	0x1fbe: {0x0345, 0x03b9}, // GREEK PROSGEGRAMMENI -> YPOGEGRAMMENI, IOTA
+	0x1fd3: {0x0390},         // GREEK IOTA + DIALYTIKA + OXIA -> + TONOS
+	0x1fe3: {0x03b0},         // GREEK UPSILON + DIALYTIKA + OXIA -> + TONOS
+	0xa64b: {0x1c88},         // CYRILLIC SMALL LETTER MONOGRAPH UK -> UNBLENDED UK
+	0xfb05: {0xfb06},         // LATIN SMALL LIGATURE LONG S T -> ST
+	0xfb06: {0xfb05},         // LATIN SMALL LIGATURE ST -> LONG S T
+}
