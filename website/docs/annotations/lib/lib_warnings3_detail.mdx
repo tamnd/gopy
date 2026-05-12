@@ -1,0 +1,105 @@
+---
+title: Lib/warnings.py (part 3)
+description: "warnings.py part 3: warn, warn_explicit, catch_warnings context manager, simplefilter, filterwarnings."
+cpython_path: Lib/warnings.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/warnings.py" />
+
+This annotation covers the filter and dispatch mechanism. See `lib_warnings2_detail` for the `WarningMessage` class, `showwarning`, and `formatwarning`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `warn` | Issue a warning from calling code |
+| 81-160 | `warn_explicit` | Issue a warning with full control over location |
+| 161-240 | `filterwarnings` | Add a filter rule |
+| 241-320 | `simplefilter` | Simplified filter adding |
+| 321-400 | `catch_warnings` | Context manager to save/restore filter state |
+
+## Reading
+
+### `warn`
+
+```python
+# CPython: Lib/warnings.py:200 warn
+def warn(message, category=UserWarning, stacklevel=1, source=None):
+    # Get caller's frame
+    try:
+        if stacklevel <= 0 or _is_internal_frame(sys._getframe(1)):
+            while stacklevel > 1 and _is_internal_frame(sys._getframe(stacklevel)):
+                stacklevel += 1
+        try:
+            caller = sys._getframe(stacklevel)
+        except ValueError:
+            ...
+    ...
+    warn_explicit(message, category, filename, lineno,
+                  module, registry, module_globals, source)
+```
+
+`stacklevel` controls which frame is reported as the warning origin. `stacklevel=2` makes the warning appear to come from the caller's caller, useful for library wrappers.
+
+### `warn_explicit`
+
+```python
+# CPython: Lib/warnings.py:260 warn_explicit
+def warn_explicit(message, category, filename, lineno,
+                  module=None, registry=None, module_globals=None, source=None):
+    # Check registry for previously seen (message, category, lineno)
+    key = (text, category, lineno)
+    if registry.get(key):
+        return
+    # Apply filters
+    for item in filters:
+        action, msg, cat, mod, ln = item
+        if ((msg is None or msg.match(text)) and
+            issubclass(category, cat) and
+            (mod is None or mod.match(module)) and
+            (ln == 0 or ln == lineno)):
+            break
+    else:
+        action = defaultaction
+    # Dispatch action
+    if action == "ignore": return
+    if action == "error": raise category(message)
+    if action in ("always", "all", "default", "module", "once"):
+        ...
+        showwarning(message, category, filename, lineno, file, line)
+```
+
+The filter list is searched linearly for the first matching rule. Matching uses `re.match` on the message text and module name. The `registry` dict (per-module) suppresses duplicate warnings.
+
+### `catch_warnings`
+
+```python
+# CPython: Lib/warnings.py:440 catch_warnings
+class catch_warnings:
+    def __enter__(self):
+        self._module = sys.modules['warnings']
+        self._filters = self._module.filters
+        self._module.filters = self._filters[:]  # copy
+        if self._record:
+            log = []
+            self._module._filters_mutated()
+            self._module.showwarning = log.append
+            ...
+            return log
+        return None
+
+    def __exit__(self, *exc_info):
+        self._module.filters = self._filters  # restore
+        ...
+```
+
+`with warnings.catch_warnings(record=True) as w:` captures all warnings into the list `w`. The original filter list and `showwarning` function are restored on exit.
+
+## gopy notes
+
+`warn` is `module/warnings.Warn` in `module/warnings/module.go`. `warn_explicit` checks the registry (`map[string]bool`) and applies filters. `catch_warnings` saves and restores `module/warnings.filters` and `showwarning` using a stack.

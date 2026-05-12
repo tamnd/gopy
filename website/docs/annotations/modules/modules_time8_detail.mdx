@@ -1,0 +1,98 @@
+---
+title: Modules/timemodule.c (part 8)
+description: "timemodule.c part 8: time.sleep, time.monotonic, time.perf_counter, time.process_time, clock_gettime."
+cpython_path: Modules/timemodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/timemodule.c" />
+
+This annotation covers high-resolution timers and `time.sleep`. See `modules_time7_detail` for `time.time`, `time.gmtime`, `time.localtime`, and `time.strftime`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `time.sleep` | Sleep for a fractional number of seconds |
+| 81-160 | `time.monotonic` | Monotonically increasing clock |
+| 161-240 | `time.perf_counter` | Highest resolution timer for benchmarking |
+| 241-320 | `time.process_time` | CPU time consumed by the current process |
+| 321-500 | `_PyTime_t` internals | Internal nanosecond representation |
+
+## Reading
+
+### `time.sleep`
+
+```c
+// CPython: Modules/timemodule.c:420 time_sleep
+static PyObject *
+time_sleep(PyObject *module, PyObject *obj)
+{
+    _PyTime_t timeout;
+    if (_PyTime_FromSecondsObject(&timeout, obj, _PyTime_ROUND_TIMEOUT) < 0)
+        return NULL;
+    if (timeout < 0) {
+        PyErr_SetString(PyExc_ValueError, "sleep length must be non-negative");
+        return NULL;
+    }
+    if (pysleep(timeout) != 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+```
+
+`time.sleep(0.001)` sleeps for 1 ms. On Unix, `pysleep` calls `select` or `clock_nanosleep`; on Windows it calls `WaitForSingleObjectEx`. The sleep is interruptible by signals (which set `errno = EINTR`).
+
+### `time.monotonic`
+
+```c
+// CPython: Modules/timemodule.c:560 time_monotonic
+static PyObject *
+time_monotonic(PyObject *module, PyObject *unused)
+{
+    _PyTime_t t;
+    if (_PyTime_GetMonotonicClock(&t) < 0)
+        return NULL;
+    return _PyFloat_FromTime_t(t);
+}
+```
+
+`time.monotonic()` uses `CLOCK_MONOTONIC` on Linux/macOS and `QueryPerformanceCounter` on Windows. It never goes backward and is not affected by system clock adjustments. Use it for measuring elapsed time.
+
+### `time.perf_counter`
+
+```c
+// CPython: Modules/timemodule.c:600 time_perf_counter
+static PyObject *
+time_perf_counter(PyObject *module, PyObject *unused)
+{
+    _PyTime_t t;
+    if (_PyTime_GetPerfCounter(&t) < 0)
+        return NULL;
+    return _PyFloat_FromTime_t(t);
+}
+```
+
+`time.perf_counter()` uses the highest-resolution timer available. On most platforms this is the same as `monotonic`. The reference point is undefined; only differences are meaningful.
+
+### `_PyTime_t` internals
+
+```c
+// CPython: Modules/timemodule.c:80 (comment)
+/* _PyTime_t is a signed 64-bit integer counting nanoseconds.
+   Range: about ±292 years.
+   Conversion:
+     seconds   → _PyTime_t: multiply by 10^9
+     _PyTime_t → float:     divide by 10^9 (may lose precision)
+   _PyTime_ROUND_FLOOR, _CEILING, _HALF_EVEN, _TIMEOUT control rounding. */
+```
+
+All internal time values are nanoseconds in a `int64_t`. Floating-point seconds are converted at the API boundary. `_PyTime_ROUND_TIMEOUT` rounds up so that `sleep(0.001)` sleeps at least 1 ms.
+
+## gopy notes
+
+`time.sleep` is `module/time.Sleep` in `module/time/module.go` using `time.Sleep(d)` from Go's `time` package. `time.monotonic` uses `time.Now().UnixNano()` with a baseline. `time.perf_counter` uses `runtime.nanotime()` via `time.Now()`. `_PyTime_t` maps to Go's `int64` nanoseconds.

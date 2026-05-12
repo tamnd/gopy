@@ -1,0 +1,124 @@
+---
+title: Python/compile.c (part 14)
+description: "Python/compile.c part 14: compiler_try_except, compiler_try_star_except, compiler_with, compiler_assert."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers exception handler and context manager compilation. See `compile13_detail` for `compiler_if`, `compiler_for`, and `compiler_while`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `compiler_try_except` | Compile `try/except` blocks |
+| 81-180 | `compiler_try_star_except` | Compile `try/except*` (exception groups, 3.11+) |
+| 181-260 | `compiler_with` | Compile `with` statement using `BEFORE_WITH`/`WITH_EXCEPT_START` |
+| 261-340 | `compiler_assert` | Compile `assert` statements |
+| 341-500 | Exception table emission | Write handler ranges to `co_exceptiontable` |
+
+## Reading
+
+### `compiler_try_except`
+
+```c
+// CPython: Python/compile.c:3120 compiler_try_except
+static int
+compiler_try_except(struct compiler *c, stmt_ty s)
+{
+    /*
+      try:            SETUP (handled via exception table)
+          body
+      except E1 as e:
+          handler1
+      except E2:
+          handler2
+      else:
+          orelse
+    */
+    NEW_JUMP_TARGET_LABEL(c, except);
+    NEW_JUMP_TARGET_LABEL(c, orelse);
+    NEW_JUMP_TARGET_LABEL(c, end);
+
+    /* Exception table: body → except */
+    ADDOP_JUMP(c, SETUP_FINALLY, except);  /* recorded in exception table */
+    VISIT_SEQ(c, stmt, s->v.Try.body);
+    ADDOP(c, POP_BLOCK);
+    ADDOP_JUMP(c, JUMP_FORWARD, orelse);
+    /* emit handlers */
+    for each handler:
+        USE_LABEL(c, handler_label);
+        ADDOP(c, PUSH_EXC_INFO);
+        if (handler->type) ADDOP(c, CHECK_EXC_MATCH);
+        ...
+    /* orelse and end */
+}
+```
+
+Each `except` clause compiles to a `CHECK_EXC_MATCH` (tests `isinstance(exc, type)`) followed by `POP_EXCEPT` at the end of the handler. The exception table records the byte range covered by `try:` and the handler offset.
+
+### `compiler_with`
+
+```c
+// CPython: Python/compile.c:3360 compiler_with
+static int
+compiler_with(struct compiler *c, stmt_ty s, int pos)
+{
+    /* with E as V: body  compiles to:
+         <E>
+         BEFORE_WITH          # calls __enter__, pushes exit and value
+         <V = TOS>
+         <body>
+         WITH_EXCEPT_START    # on exception: call __exit__(exc_info)
+         ...
+    */
+    VISIT(c, expr, s->v.With.items[pos]->context_expr);
+    ADDOP(c, BEFORE_WITH);        /* pushes __exit__ and __enter__() result */
+    ...
+    VISIT_SEQ(c, stmt, s->v.With.body);
+    ADDOP(c, POP_BLOCK);
+    ADDOP(c, LOAD_CONST, Py_None);
+    ADDOP(c, LOAD_CONST, Py_None);
+    ADDOP(c, LOAD_CONST, Py_None);
+    ADDOP(c, CALL, 3);  /* __exit__(None, None, None) */
+    ...
+}
+```
+
+`BEFORE_WITH` calls `__enter__` and leaves `__exit__` on the stack below the result. On exception, `WITH_EXCEPT_START` calls `__exit__` with the exception info.
+
+### `compiler_assert`
+
+```c
+// CPython: Python/compile.c:2840 compiler_assert
+static int
+compiler_assert(struct compiler *c, stmt_ty s)
+{
+    /* assert test, msg  -->
+         if __debug__:
+             if not test:
+                 raise AssertionError(msg)
+    */
+    if (c->c_optimize) return SUCCESS;  /* -O strips asserts */
+    ADDOP_JUMP(c, POP_JUMP_IF_TRUE, end);
+    ADDOP(c, LOAD_ASSERTION_ERROR);
+    if (s->v.Assert.msg) {
+        VISIT(c, expr, s->v.Assert.msg);
+        ADDOP_I(c, CALL, 1);
+    }
+    ADDOP_I(c, RAISE_VARARGS, 1);
+    USE_LABEL(c, end);
+}
+```
+
+`assert` is compiled away when `__debug__` is `False` (i.e., when run with `-O`). `LOAD_ASSERTION_ERROR` pushes the `AssertionError` class; `RAISE_VARARGS 1` raises it with the optional message.
+
+## gopy notes
+
+`compiler_try_except` is `compile.compilerTryExcept` in `compile/codegen_stmt_control.go`. Exception table entries are emitted by `compile.emitExceptionTableEntry`. `compiler_with` emits `BEFORE_WITH`; the opcode is handled in `vm/eval_simple.go`. `compiler_assert` is `compile.compilerAssert`.

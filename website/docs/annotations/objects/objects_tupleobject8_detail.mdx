@@ -1,0 +1,114 @@
+---
+title: Objects/tupleobject.c (part 8)
+description: "Objects/tupleobject.c part 8: tuple free list, tuple_new, tuple_dealloc, tuple hash, PyTuple_Pack."
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/tupleobject.c" />
+
+This annotation covers tuple allocation, deallocation, and the free list. See `objects_tupleobject7_detail` for `tuple.__getitem__`, slicing, and `tuple_richcompare`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Tuple free list | Reuse small tuples to avoid malloc overhead |
+| 81-160 | `tuple_new` | Allocate a new tuple |
+| 161-240 | `tuple_dealloc` | Return tuple to free list or free it |
+| 241-320 | `tuple_hash` | Compute tuple hash from element hashes |
+| 321-400 | `PyTuple_Pack` | Variadic C API to create a tuple |
+
+## Reading
+
+### Tuple free list
+
+```c
+// CPython: Objects/tupleobject.c:20  free list
+/* Tuples of size 0..PyTuple_MAXSAVESIZE-1 are cached.
+   For each size, up to PyTuple_MAXFREELIST tuples are kept. */
+#define PyTuple_MAXSAVESIZE 20
+#define PyTuple_MAXFREELIST 2000
+static PyTupleObject *free_list[PyTuple_MAXSAVESIZE];
+static int numfree[PyTuple_MAXSAVESIZE];
+```
+
+Tuple creation is extremely common in CPython (every function call builds an args tuple; every attribute access can create temporaries). The free list avoids going to the allocator for small tuples.
+
+### `tuple_new`
+
+```c
+// CPython: Objects/tupleobject.c:80 PyTuple_New
+PyObject *
+PyTuple_New(Py_ssize_t size)
+{
+    if (size == 0 && _Py_SINGLETON(tuple_empty) != NULL)
+        return Py_NewRef(_Py_SINGLETON(tuple_empty));
+    if (size < PyTuple_MAXSAVESIZE && numfree[size] > 0) {
+        PyTupleObject *op = free_list[size];
+        free_list[size] = (PyTupleObject *)op->ob_item[0];
+        numfree[size]--;
+        _PyObject_InitVar((PyVarObject *)op, &PyTuple_Type, size);
+        return (PyObject *)op;
+    }
+    /* allocate new */
+    PyTupleObject *op = PyObject_GC_NewVar(PyTupleObject, &PyTuple_Type, size);
+    ...
+    return (PyObject *)op;
+}
+```
+
+The empty tuple `()` is a singleton stored in `_Py_SINGLETON`. Non-empty tuples of sizes 1–19 are recycled through the free list.
+
+### `tuple_hash`
+
+```c
+// CPython: Objects/tupleobject.c:280 tuplehash
+static Py_hash_t
+tuplehash(PyTupleObject *v)
+{
+    Py_uhash_t acc = _PyHASH_XXPRIME_5;
+    for (Py_ssize_t i = 0; i < Py_SIZE(v); i++) {
+        Py_uhash_t lane = PyObject_Hash(v->ob_item[i]);
+        if (lane == (Py_uhash_t)-1) return -1;
+        acc += lane * _PyHASH_XXPRIME_2;
+        acc = _PyHASH_XXROTATE(acc);
+        acc *= _PyHASH_XXPRIME_1;
+    }
+    acc += Py_SIZE(v) ^ (_PyHASH_XXPRIME_5 ^ 3527539UL);
+    if (acc == (Py_uhash_t)-1) return 1546275796;
+    return acc;
+}
+```
+
+Tuple hash uses xxHash-inspired mixing. The length is mixed into the final hash so `(1,)` and `(1, )` with different internal structure still differ.
+
+### `PyTuple_Pack`
+
+```c
+// CPython: Objects/tupleobject.c:360 PyTuple_Pack
+PyObject *
+PyTuple_Pack(Py_ssize_t n, ...)
+{
+    va_list vargs;
+    va_start(vargs, n);
+    PyObject *result = PyTuple_New(n);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *o = va_arg(vargs, PyObject *);
+        Py_INCREF(o);
+        PyTuple_SET_ITEM(result, i, o);
+    }
+    va_end(vargs);
+    return result;
+}
+```
+
+`PyTuple_Pack(2, a, b)` is the C-level equivalent of `(a, b)`. It increments each item's refcount and is used extensively in the CPython core.
+
+## gopy notes
+
+Tuple allocation is `objects.NewTuple` in `objects/tuple.go`. The free list is approximated with Go's GC; small tuples are not specially recycled. `tuple_hash` uses the same xxHash constants. `PyTuple_Pack` is `objects.TuplePack`.
