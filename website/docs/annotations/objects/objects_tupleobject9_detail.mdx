@@ -1,0 +1,109 @@
+---
+title: Objects/tupleobject.c (part 9)
+description: "Objects/tupleobject.c part 9: tuple.__add__, tuple.__mul__, tuple free list, tuple.__getnewargs__."
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/tupleobject.c" />
+
+This annotation covers tuple operations and the free list. See `objects_tupleobject8_detail` for `tuple.__new__`, `tuple.__hash__`, and `tuple.__contains__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `tuple.__add__` | Concatenation |
+| 81-160 | `tuple.__mul__` | Repetition |
+| 161-240 | Free list | `tuplefreelist` and `PyTuple_New` fast path |
+| 241-400 | `tuple.__getnewargs__` | Pickle support |
+
+## Reading
+
+### `tuple.__add__`
+
+```c
+// CPython: Objects/tupleobject.c:380 tupleconcat
+static PyObject *
+tupleconcat(PyTupleObject *a, PyObject *bb)
+{
+    if (!PyTuple_Check(bb)) {
+        PyErr_Format(PyExc_TypeError,
+                     "can only concatenate tuple (not \"%.200s\") to tuple",
+                     Py_TYPE(bb)->tp_name);
+        return NULL;
+    }
+    PyTupleObject *b = (PyTupleObject *)bb;
+    Py_ssize_t size = Py_SIZE(a) + Py_SIZE(b);
+    if (size == 0) return PyTuple_New(0);  /* reuse empty tuple singleton */
+    PyTupleObject *np = (PyTupleObject *)PyTuple_New(size);
+    for (Py_ssize_t i = 0; i < Py_SIZE(a); i++)
+        np->ob_item[i] = Py_NewRef(a->ob_item[i]);
+    for (Py_ssize_t i = 0; i < Py_SIZE(b); i++)
+        np->ob_item[Py_SIZE(a) + i] = Py_NewRef(b->ob_item[i]);
+    return (PyObject *)np;
+}
+```
+
+`(1, 2) + (3, 4)` allocates a new tuple and copies item pointers (with `Py_INCREF`). Tuple concatenation is always O(n) — there is no optimization for single-element tuples.
+
+### `tuple.__mul__`
+
+```c
+// CPython: Objects/tupleobject.c:410 tuplerepeat
+static PyObject *
+tuplerepeat(PyTupleObject *a, Py_ssize_t n)
+{
+    if (n < 0) n = 0;
+    if (Py_SIZE(a) == 0 || n == 1) {
+        if (PyTuple_CheckExact(a)) return Py_NewRef(a);  /* immutable: safe to share */
+    }
+    Py_ssize_t size = Py_SIZE(a) * n;
+    PyTupleObject *np = (PyTupleObject *)PyTuple_New(size);
+    PyObject **p = np->ob_item;
+    for (Py_ssize_t i = 0; i < n; i++)
+        for (Py_ssize_t j = 0; j < Py_SIZE(a); j++)
+            *p++ = Py_NewRef(a->ob_item[j]);
+    return (PyObject *)np;
+}
+```
+
+`(1, 2) * 3` returns `(1, 2, 1, 2, 1, 2)`. `n == 1` returns the original tuple (shared reference) since tuples are immutable. `n <= 0` returns the empty tuple singleton.
+
+### Tuple free list
+
+```c
+// CPython: Objects/tupleobject.c:100 PyTuple_New
+PyObject *
+PyTuple_New(Py_ssize_t size)
+{
+    PyTupleObject *op;
+    if (size == 0) {
+        /* Singleton empty tuple */
+        return Py_NewRef(EMPTY_TUPLE(interp));
+    }
+    if (size < PyTuple_MAXSAVESIZE) {
+        /* Check free list */
+        op = state->free_list[size];
+        if (op != NULL) {
+            state->free_list[size] = (PyTupleObject *) op->ob_item[0];
+            state->numfree[size]--;
+            _Py_NewReference((PyObject *)op);
+            return (PyObject *)op;
+        }
+    }
+    /* Allocate new */
+    op = PyObject_GC_NewVar(PyTupleObject, &PyTuple_Type, size);
+    return (PyObject *)op;
+}
+```
+
+CPython maintains a per-interpreter free list of up to `PyTuple_MAXSAVESIZE` (20) slots, each holding a linked list of `size`-length tuples. `tupledealloc` pushes small tuples onto the free list instead of freeing them. This avoids repeated `malloc`/`free` for common sizes like 1, 2, and 3.
+
+## gopy notes
+
+`tuple.__add__` is `objects.TupleConcat` in `objects/tupleobject.go`; creates a new `objects.Tuple` and copies refs. `tuple.__mul__` is `objects.TupleRepeat`. The free list is replaced by Go's GC — no explicit free list is maintained. The empty tuple singleton is `objects.EmptyTuple`.

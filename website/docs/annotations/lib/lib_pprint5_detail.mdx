@@ -1,0 +1,104 @@
+---
+title: Lib/pprint.py (part 5)
+description: "Lib/pprint.py part 5: PrettyPrinter._pprint_list, _pprint_dict, _pprint_dataclass, compact mode."
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pprint.py" />
+
+This annotation covers collection-specific formatting. See `lib_pprint4_detail` for `PrettyPrinter.pformat`, `_repr`, and depth control.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_pprint_list` | Format a list with wrapping |
+| 81-160 | `_pprint_dict` | Format a dict in sorted key order |
+| 161-240 | `_pprint_dataclass` | Format a dataclass (3.10+) |
+| 241-340 | `_pprint_tuple` | Format a tuple |
+| 341-400 | Compact mode | Fit multiple items per line |
+
+## Reading
+
+### `_pprint_list`
+
+```python
+# CPython: Lib/pprint.py:282 _pprint_list
+def _pprint_list(self, object, stream, indent, allowance, context, level):
+    stream.write('[')
+    self._format_items(object, stream, indent + 1, allowance + 1, context, level)
+    stream.write(']')
+```
+
+List formatting delegates to `_format_items` which tries to fit items on one line first. If the representation exceeds `self._width`, it falls back to one item per line. The `allowance` accounts for the closing `]`.
+
+### `_pprint_dict`
+
+```python
+# CPython: Lib/pprint.py:310 _pprint_dict
+def _pprint_dict(self, object, stream, indent, allowance, context, level):
+    write = stream.write
+    write('{')
+    if self._indent_per_level > 1:
+        write((self._indent_per_level - 1) * ' ')
+    length = len(object)
+    if length:
+        self._format_dict_items(object.items() if self._sort_dicts
+                                else object.items(),
+                                stream, indent, allowance, context, level)
+    write('}')
+```
+
+`pprint.pprint({'b': 2, 'a': 1})` sorts keys by default (`sort_dicts=True`). `sort_dicts=False` (added in 3.8) preserves insertion order. Each key-value pair is formatted with `key: value`, with long values wrapped onto the next line at the value's indentation.
+
+### `_pprint_dataclass`
+
+```python
+# CPython: Lib/pprint.py:340 _pprint_dataclass
+def _pprint_dataclass(self, object, stream, indent, allowance, context, level):
+    cls_name = object.__class__.__name__
+    stream.write(cls_name + '(')
+    indent += len(cls_name) + 1
+    items = [(f.name, getattr(object, f.name))
+             for f in dataclasses.fields(object) if f.repr]
+    self._format_namespace_items(items, stream, indent, allowance, context, level)
+    stream.write(')')
+```
+
+`pprint.pprint(Point(x=1, y=2))` prints `Point(x=1, y=2)` for small objects or a multi-line form for complex nested dataclasses. Only fields with `repr=True` (the default) are included.
+
+### Compact mode
+
+```python
+# CPython: Lib/pprint.py:420 _format_items (compact excerpt)
+def _format_items(self, items, stream, indent, allowance, context, level):
+    write = stream.write
+    indent += self._indent_per_level
+    delimnl = ',\n' + ' ' * indent
+    delim = ''
+    max_width = self._width - indent + 1
+    width = max_width
+    for item in items:
+        ...
+        if self._compact:
+            rep = self._repr(item, context, level)
+            if width >= len(rep) + 2:
+                # Fits on current line
+                write(delim + rep)
+                width -= len(rep) + 2
+                delim = ', '
+                continue
+        write(delim + '\n' + ' ' * indent)
+        ...
+```
+
+`compact=True` (added in 3.8) packs multiple items onto the same line until the width limit is reached. Compact mode is useful for dense output of large collections where the default one-item-per-line is too verbose.
+
+## gopy notes
+
+`pprint` is a pure-Python module; gopy runs it directly. `_pprint_list`, `_pprint_dict`, and `_pprint_dataclass` are registered in `_dispatch` at module initialization. `_pprint_dataclass` uses `dataclasses.fields` which routes to `module/dataclasses.Fields`. All output goes to a `io.StringIO` or `sys.stdout` via `objects.FileWrite`.

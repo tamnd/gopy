@@ -1,0 +1,110 @@
+---
+title: Python/import.c (part 12)
+description: "Python/import.c part 12: _find_and_load, _find_spec, sys.meta_path finders."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+This annotation covers the import finder machinery. See `python_import11_detail` for `importlib._bootstrap` and `PyImport_ImportModuleLevelObject`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_find_and_load` | Top-level import entry: check sys.modules then find |
+| 81-180 | `_find_and_load_unlocked` | Core find-and-load logic |
+| 181-280 | `_find_spec` | Ask each meta_path finder for a spec |
+| 281-380 | `_load_unlocked` | Execute a module spec |
+| 381-500 | `sys.meta_path` finders | `BuiltinImporter`, `FrozenImporter`, `PathFinder` |
+
+## Reading
+
+### `_find_and_load`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1240 _find_and_load
+def _find_and_load(name, import_):
+    module = sys.modules.get(name, _NEEDS_LOADING)
+    if module is _NEEDS_LOADING:
+        return _find_and_load_unlocked(name, import_)
+    if module is None:
+        raise ModuleNotFoundError(f'import of {name} halted; use of sys.modules is forbidden during cleanup', name=name)
+    _lock_unlock_module(name)
+    return module
+```
+
+The first step is a `sys.modules` cache lookup. If found, the cached module is returned immediately without touching the filesystem. `None` in `sys.modules[name]` means the module was previously deleted — this prevents re-importing it.
+
+### `_find_and_load_unlocked`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1209 _find_and_load_unlocked
+def _find_and_load_unlocked(name, import_):
+    path = None
+    parent = name.rpartition('.')[0]
+    if parent:
+        if parent not in sys.modules:
+            _call_with_frames_removed(import_, parent)
+        if spec := _find_spec(name, path, target):
+            module = module_from_spec(spec)
+            sys.modules[name] = module  # register BEFORE exec
+            try:
+                spec.loader.exec_module(module)
+            except BaseException:
+                del sys.modules[name]
+                raise
+            return sys.modules[name]
+    raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+```
+
+The parent package is imported first (e.g., `import a.b.c` imports `a`, then `a.b`, then `a.b.c`). The module is registered in `sys.modules` before `exec_module` to handle circular imports — a half-initialized module is better than infinite recursion.
+
+### `_find_spec`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1080 _find_spec
+def _find_spec(name, path, target=None):
+    meta_path = sys.meta_path
+    for finder in meta_path:
+        try:
+            find_spec = finder.find_spec
+        except AttributeError:
+            continue
+        spec = find_spec(name, path, target)
+        if spec is not None:
+            return spec
+    return None
+```
+
+`sys.meta_path` is a list of finders tried in order: `BuiltinImporter` (for built-in modules like `sys`), `FrozenImporter` (for frozen modules), and `PathFinder` (for files on `sys.path`). The first finder that returns a non-`None` spec wins.
+
+### `BuiltinImporter` and `FrozenImporter`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:180 BuiltinImporter.find_spec
+class BuiltinImporter:
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        if _imp.is_builtin(fullname):
+            return spec_from_loader(fullname, cls, origin='built-in')
+        return None
+
+class FrozenImporter:
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        if _imp.is_frozen(fullname):
+            return spec_from_loader(fullname, cls, origin='frozen')
+        return None
+```
+
+Built-in modules (`_io`, `_thread`, etc.) are compiled into the interpreter. Frozen modules (`_frozen_importlib` itself) are marshaled bytecode embedded in the binary. Both are identified by `_imp.is_builtin`/`is_frozen` which check a table compiled into the interpreter.
+
+## gopy notes
+
+`_find_and_load` is `vm.FindAndLoad` in `vm/eval_import.go`. `sys.meta_path` is a `objects.List` populated in `vm/init.go`. `BuiltinImporter.find_spec` checks `module.IsBuiltin`. `FrozenImporter` checks `stdlibinit.Registry`. `PathFinder` calls `module/importlib.PathFinder` which searches `sys.path` using Go's `os.Stat`.

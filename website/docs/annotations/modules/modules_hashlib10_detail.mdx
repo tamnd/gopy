@@ -1,0 +1,114 @@
+---
+title: Modules/_hashopenssl.c / _sha2module.c (part 10)
+description: "hashlib part 10: hashlib.new, hashlib.sha256, hashlib.blake2b, PBKDF2HMAC."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+This annotation covers the hash object API and key derivation. See `modules_hashlib9_detail` for `hashlib.md5`, `hashlib.sha1`, and the EVP digest interface.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `hashlib.new` | Create a hash object by name |
+| 81-180 | `EVPobject.update` | Feed data into the hash |
+| 181-280 | `EVPobject.digest` / `hexdigest` | Finalize and return the hash |
+| 281-380 | `hashlib.blake2b` | BLAKE2b initialization |
+| 381-500 | `hashlib.pbkdf2_hmac` | Password-based key derivation |
+
+## Reading
+
+### `hashlib.new`
+
+```c
+// CPython: Modules/_hashopenssl.c:820 _hashlib_new_impl
+static PyObject *
+_hashlib_new_impl(PyObject *module, const char *name, PyObject *data,
+                   int usedforsecurity)
+{
+    const EVP_MD *digest = EVP_get_digestbyname(name);
+    if (digest == NULL) {
+        /* Try SHA-3 / BLAKE2 names */
+        return _Py_hashlib_new_impl(module, name, data, usedforsecurity);
+    }
+    return EVP_new(module, digest, data, usedforsecurity);
+}
+```
+
+`hashlib.new('sha256', b'data')` dispatches through OpenSSL's `EVP_get_digestbyname`. Non-EVP algorithms (BLAKE2, SHA-3 in some builds) fall back to a separate dispatcher. The `usedforsecurity` flag (added in 3.9) allows code to opt out of FIPS restrictions for non-security uses like checksums.
+
+### `EVPobject.update`
+
+```c
+// CPython: Modules/_hashopenssl.c:420 EVP_update
+static PyObject *
+EVP_update(EVPobject *self, PyObject *args)
+{
+    Py_buffer view;
+    if (!PyArg_ParseTuple(args, "y*:update", &view)) return NULL;
+    if (self->lock) {
+        Py_BEGIN_ALLOW_THREADS
+        EVP_DigestUpdate(self->ctx, view.buf, view.len);
+        Py_END_ALLOW_THREADS
+    } else {
+        EVP_DigestUpdate(self->ctx, view.buf, view.len);
+    }
+    PyBuffer_Release(&view);
+    Py_RETURN_NONE;
+}
+```
+
+`h.update(data)` feeds data into the hash context. For large data, the GIL is released during `EVP_DigestUpdate`. The `lock` field indicates whether the context is shared (copied) — single-threaded contexts skip the lock.
+
+### `EVPobject.digest`
+
+```c
+// CPython: Modules/_hashopenssl.c:480 EVP_digest
+static PyObject *
+EVP_digest(EVPobject *self, PyObject *args)
+{
+    /* Copy the context so we can finalize without consuming it */
+    EVP_MD_CTX *temp_ctx = EVP_MD_CTX_new();
+    EVP_MD_CTX_copy_ex(temp_ctx, self->ctx);
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_size;
+    EVP_DigestFinal_ex(temp_ctx, digest, &digest_size);
+    EVP_MD_CTX_free(temp_ctx);
+    return PyBytes_FromStringAndSize((const char *)digest, digest_size);
+}
+```
+
+`h.digest()` copies the context before finalizing so that `update` can continue to be called. `h.hexdigest()` is the same but encodes the result as a hex string.
+
+### `hashlib.pbkdf2_hmac`
+
+```c
+// CPython: Modules/_hashopenssl.c:960 pbkdf2_hmac
+static PyObject *
+pbkdf2_hmac(PyObject *self, PyObject *args, PyObject *kwdict)
+{
+    /* PBKDF2-HMAC-<hash>(password, salt, iterations, dklen) */
+    Py_buffer password, salt;
+    int iterations, dklen;
+    unsigned char *key = PyMem_Malloc(dklen);
+    Py_BEGIN_ALLOW_THREADS
+    PKCS5_PBKDF2_HMAC(password.buf, password.len,
+                      salt.buf, salt.len,
+                      iterations, digest, dklen, key);
+    Py_END_ALLOW_THREADS
+    return PyBytes_FromStringAndSize((const char *)key, dklen);
+}
+```
+
+`hashlib.pbkdf2_hmac('sha256', b'password', b'salt', 100000)` applies PBKDF2 with 100k iterations. The GIL is released for the entire computation. OpenSSL's `PKCS5_PBKDF2_HMAC` is used rather than a Python loop for performance.
+
+## gopy notes
+
+`hashlib.new` is `module/hashlib.New` in `module/hashlib/module.go`; uses Go's `crypto/sha256`, `crypto/sha512`, etc. `EVPobject.update` is `module/hashlib.HashUpdate`; writes to the Go `hash.Hash`. `digest` is `module/hashlib.HashDigest`; uses `hash.Sum(nil)`. `pbkdf2_hmac` is `module/hashlib.PBKDF2HMAC`; uses `golang.org/x/crypto/pbkdf2`.
