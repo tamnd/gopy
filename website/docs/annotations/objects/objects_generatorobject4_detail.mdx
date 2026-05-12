@@ -1,0 +1,128 @@
+---
+title: Objects/genobject.c (part 4)
+description: "Objects/genobject.c part 4: async generator — PyAsyncGen, aclose, athrow, async iteration protocol."
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genobject.c" />
+
+This annotation covers async generators. See `objects_generatorobject3_detail` for `PyGenObject`, `gen.send`, `gen.throw`, `gen.close`, and coroutines.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyAsyncGen` structure | Fields beyond PyGenObject: finalizer hook, running flag |
+| 81-180 | `PyAsyncGen_New` | Create an async generator from a frame |
+| 181-300 | `async_gen_asend` | Implement `__anext__()` — return `AsyncGenANextAwaitable` |
+| 301-420 | `async_gen_athrow` | Implement `athrow(exc)` — deliver exception to the gen |
+| 421-600 | Finalization hook | Detect abandoned async generators; call `sys.set_asyncgen_finalizer` |
+
+## Reading
+
+### `PyAsyncGen` structure
+
+```c
+// CPython: Objects/genobject.c:640 PyAsyncGenObject
+typedef struct {
+    _PyGenObject_HEAD(ag)
+    PyObject *ag_origin_or_finalizer;  /* frame origin or finalizer callback */
+    char ag_closed;          /* set after aclose() */
+    char ag_running_async;   /* prevents concurrent iteration */
+} PyAsyncGenObject;
+```
+
+`PyAsyncGenObject` extends `PyGenObject` with two extra fields. `ag_running_async` prevents `RuntimeError: asynchronous generator already running` when the event loop tries to advance a generator that is already suspended in an `await`.
+
+### `async_gen_asend`
+
+```c
+// CPython: Objects/genobject.c:720 async_gen_asend
+static PyObject *
+async_gen_asend(PyAsyncGenObject *o, PyObject *arg)
+{
+    if (o->ag_closed) {
+        PyErr_SetNone(PyExc_StopAsyncIteration);
+        return NULL;
+    }
+    /* Return an AsyncGenASend awaitable wrapping (gen, value) */
+    return async_gen_asend_new(o, arg);
+}
+```
+
+`__anext__()` does not directly resume the generator — it returns an awaitable (`AsyncGenASend` object). The event loop calls `send(None)` on this awaitable to resume the generator. This indirection allows the event loop to schedule the resumption.
+
+### `AsyncGenASend.__iternext__`
+
+```c
+// CPython: Objects/genobject.c:780 async_gen_asend_iternext
+static PyObject *
+async_gen_asend_iternext(PyAsyncGenASendObject *o)
+{
+    PyObject *result = gen_send_ex((PyGenObject *)o->ags_gen,
+                                   o->ags_sendval, 0, 0);
+    if (result != NULL) {
+        /* The generator yielded — wrap the value in AsyncGenValueWrapper */
+        if (PyAsyncGenValueWrapper_CheckExact(result)) {
+            PyObject *val = ((PyAsyncGenValueWrapperObject *)result)->agvw_val;
+            o->ags_gen->ag_running_async = 0;
+            return val;
+        }
+        /* The generator awaited — return the awaitable as-is */
+        return result;
+    }
+    /* StopIteration: the generator is done */
+    if (_PyErr_ExceptionMatches(tstate, PyExc_StopIteration)) {
+        ...
+        PyErr_SetNone(PyExc_StopAsyncIteration);
+    }
+    return NULL;
+}
+```
+
+`ASYNC_GEN_ASEND` wraps `yield` values in `AsyncGenValueWrapper`. The unwrapping here distinguishes yielded values (from `yield x`) from awaited values (from `await something`): the former are real values to deliver to the caller; the latter are awaitables to drive further.
+
+### `async_gen_athrow`
+
+```c
+// CPython: Objects/genobject.c:860 async_gen_athrow
+static PyObject *
+async_gen_athrow(PyAsyncGenObject *o, PyObject *args)
+{
+    /* athrow(type[, value[, tb]]) returns an AsyncGenAThrow awaitable.
+       When sent None, it delivers the exception to the generator. */
+    return async_gen_athrow_new(o, args);
+}
+```
+
+`agen.athrow(exc)` is used by `async with` (via `__aexit__`) and by `agen.aclose()`. The returned awaitable, when driven, injects the exception at the generator's current suspension point.
+
+### Finalization hook
+
+```c
+// CPython: Objects/genobject.c:940 async_gen_dealloc
+static void
+async_gen_dealloc(PyAsyncGenObject *gen)
+{
+    if (gen->ag_origin_or_finalizer != NULL &&
+        !gen->ag_closed) {
+        /* Generator was GC'd without being closed:
+           call sys.get_asyncgen_finalizer() hook */
+        PyObject *finalizer = gen->ag_origin_or_finalizer;
+        PyObject *res = PyObject_CallOneArg(finalizer, (PyObject *)gen);
+        ...
+    }
+    gen_dealloc((PyGenObject *)gen);
+}
+```
+
+`sys.set_asyncgen_finalizer(hook)` installs a callback that is invoked when an async generator is GC'd without being properly closed. `asyncio` uses this to schedule `aclose()` coroutines on the event loop, preventing `RuntimeError: async generator was garbage collected while still running`.
+
+## gopy notes
+
+`PyAsyncGenObject` is `objects.AsyncGen` in `objects/async_gen.go`. `async_gen_asend` returns `objects.AsyncGenASend`. `AsyncGenASend.__iternext__` calls `objects.GenSend` and checks for `AsyncGenValueWrapper`. `async_gen_athrow` returns `objects.AsyncGenAThrow`. The finalization hook is set via `vm.SetAsyncGenFinalizer`.

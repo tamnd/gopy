@@ -1,0 +1,113 @@
+---
+title: Python/symtable.c (part 5)
+description: "Python/symtable.c part 5: scope analysis — GLOBAL, NONLOCAL, free variable detection, implicit globals."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers scope resolution and the `global`/`nonlocal` statement effects. See `python_symtable4_detail` for the symbol table structure, `analyze_block`, and annotation flags.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_Py_Mangle` | Name mangling for `__private` attributes |
+| 81-180 | `symtable_visit_stmt` for `Global` | Record names as globally bound |
+| 181-280 | `symtable_visit_stmt` for `Nonlocal` | Record names as free variables in enclosing scope |
+| 281-400 | `analyze_cells` | Determine which variables need cell objects |
+| 401-600 | `update_symbols` | Propagate free variables up to the enclosing scope |
+
+## Reading
+
+### `_Py_Mangle`
+
+```c
+// CPython: Python/symtable.c:120 _Py_Mangle
+PyObject *
+_Py_Mangle(PyObject *privateobj, PyObject *ident)
+{
+    /* Name mangling: __name (two leading underscores, at most one trailing)
+       becomes _ClassName__name. */
+    if (privateobj == NULL || !PyUnicode_Check(privateobj)) return ident;
+    const char *p = PyUnicode_AsUTF8(ident);
+    if (p[0] != '_' || p[1] != '_') return ident;      /* Not private */
+    while (*p == '_') p++;
+    if (*p == '\0') return ident;  /* Only underscores */
+    ...
+    return PyUnicode_FromFormat("_%U%s", privateobj, p - 1);
+}
+```
+
+`class Foo: def __bar(self): pass` stores the method as `_Foo__bar`. This makes unintentional override in subclasses harder. `_Py_Mangle` is called for every name in a class body during AST walking.
+
+### `global` statement effect
+
+```c
+// CPython: Python/symtable.c:680 symtable_visit_stmt for Global
+case Global_kind:
+    for (int i = 0; i < asdl_seq_LEN(s->v.Global.names); i++) {
+        PyObject *name = asdl_seq_GET(s->v.Global.names, i);
+        long cur = _PyST_GetSymbol(st->st_cur, name);
+        if (cur & (DEF_LOCAL | USE)) {
+            if (cur & DEF_LOCAL) {
+                PyErr_Format(PyExc_SyntaxError,
+                    "name '%U' is assigned to before global declaration", name);
+            }
+        }
+        SET_SCOPE(st->st_cur, name, GLOBAL_EXPLICIT);
+    }
+    break;
+```
+
+`global x` marks `x` as `GLOBAL_EXPLICIT` in the current scope's symbol table. The compiler emits `LOAD_GLOBAL`/`STORE_GLOBAL` instead of `LOAD_FAST`/`STORE_FAST`. Using a name before declaring it global is a `SyntaxError`.
+
+### `nonlocal` statement effect
+
+```c
+// CPython: Python/symtable.c:710 symtable_visit_stmt for Nonlocal
+case Nonlocal_kind:
+    for (int i = 0; i < asdl_seq_LEN(s->v.Nonlocal.names); i++) {
+        PyObject *name = asdl_seq_GET(s->v.Nonlocal.names, i);
+        SET_SCOPE(st->st_cur, name, FREE);
+        st->st_cur->ste_free = 1;  /* This scope has free variables */
+    }
+    break;
+```
+
+`nonlocal x` marks `x` as `FREE` in the current scope. `update_symbols` then walks up the enclosing scopes to find where `x` is bound and marks it as `CELL` there. The compiler emits `LOAD_DEREF`/`STORE_DEREF` for both sides.
+
+### `analyze_cells`
+
+```c
+// CPython: Python/symtable.c:820 analyze_cells
+static int
+analyze_cells(PySTEntryObject *entry, PyObject *scopes, PyObject *bound)
+{
+    /* A variable is a CELL if it is defined in this scope AND
+       referenced from an inner scope (i.e., it appears in 'bound'
+       of a nested scope). */
+    PyObject *name;
+    Py_ssize_t i = 0;
+    while (PyDict_Next(entry->ste_symbols, &i, &name, NULL)) {
+        long flags = _PyST_GetSymbol(entry, name);
+        if (!(flags & DEF_LOCAL)) continue;
+        if (!(flags & DEF_FREE_CLASS || PySet_Contains(bound, name)))
+            continue;
+        /* Mark as CELL */
+        SET_SCOPE(entry, name, CELL);
+    }
+    return 1;
+}
+```
+
+A variable becomes a `CELL` when it is defined in the current scope and referenced from a nested scope. The cell wrapper allows the inner scope to reference the variable even after the outer function returns (closures).
+
+## gopy notes
+
+`_Py_Mangle` is `compile.Mangle` in `compile/compiler.go`. `symtable_visit_stmt` for `Global`/`Nonlocal` sets flags in `compile.SymbolScope`. `analyze_cells` is `compile.analyzeCells`. `update_symbols` is `compile.updateSymbols`. The resulting scope information drives `LOAD_FAST` vs `LOAD_GLOBAL` vs `LOAD_DEREF` emission.

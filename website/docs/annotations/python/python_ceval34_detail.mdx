@@ -1,0 +1,110 @@
+---
+title: Python/ceval.c (part 34)
+description: "Python/ceval.c part 34: CALL specializations — CALL_PY_EXACT_ARGS, CALL_BOUND_METHOD_EXACT_ARGS, CALL_BUILTIN_FAST."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers call specializations. See `python_ceval33_detail` for `STORE_ATTR` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `CALL_PY_EXACT_ARGS` | Call a Python function with exact positional args |
+| 81-180 | `CALL_BOUND_METHOD_EXACT_ARGS` | Call a bound method (unwrap self + call inner function) |
+| 181-280 | `CALL_BUILTIN_FAST` | Call a C builtin with vectorcall |
+| 281-380 | `CALL_BUILTIN_CLASS` | Construct a built-in type (int, str, list, etc.) |
+| 381-500 | `CALL_METHOD_DESCRIPTOR_FAST` | Call a method descriptor (e.g. `str.upper(s)`) |
+
+## Reading
+
+### `CALL_PY_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:3120 CALL_PY_EXACT_ARGS
+inst(CALL_PY_EXACT_ARGS, (callable, self_or_null, args[oparg] -- res)) {
+    /* Cache: func_version tag */
+    DEOPT_IF(!PyFunction_Check(callable), CALL);
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    DEOPT_IF(func->func_version != cache->func_version, CALL);
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    DEOPT_IF(code->co_argcount != oparg + (self_or_null != NULL), CALL);
+    /* No defaults, no *args, no **kwargs: push a new frame directly */
+    _PyInterpreterFrame *new_frame = _PyFrame_PushUnchecked(tstate, func, oparg);
+    for (int i = 0; i < oparg; i++) {
+        new_frame->localsplus[i] = args[i];
+    }
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+`CALL_PY_EXACT_ARGS` is the hot path for `f(a, b, c)` where `f` is a Python function with exactly the right number of positional arguments. It bypasses `_PyObject_Vectorcall` entirely and pushes a new frame directly, saving a substantial amount of work.
+
+### `CALL_BOUND_METHOD_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:3180 CALL_BOUND_METHOD_EXACT_ARGS
+inst(CALL_BOUND_METHOD_EXACT_ARGS, (callable, unused, args[oparg] -- res)) {
+    /* Unwrap bound method: callable is a PyMethodObject */
+    DEOPT_IF(!PyMethod_Check(callable), CALL);
+    PyObject *self = PyMethod_GET_SELF(callable);
+    PyObject *func = PyMethod_GET_FUNCTION(callable);
+    DEOPT_IF(!PyFunction_Check(func), CALL);
+    DEOPT_IF(((PyFunctionObject *)func)->func_version != cache->func_version, CALL);
+    /* Push self as the first argument */
+    PEEK(oparg + 1) = self;  /* self replaces NULL slot */
+    Py_INCREF(self);
+    /* Continue as CALL_PY_EXACT_ARGS with self prepended */
+    ...
+}
+```
+
+`obj.method(a, b)` compiles to `LOAD_METHOD` + `CALL`. `CALL_BOUND_METHOD_EXACT_ARGS` handles the case where `LOAD_METHOD` found a bound method: it unwraps `self` and redirects to the function's frame.
+
+### `CALL_BUILTIN_FAST`
+
+```c
+// CPython: Python/ceval.c:3260 CALL_BUILTIN_FAST
+inst(CALL_BUILTIN_FAST, (callable, self_or_null, args[oparg] -- res)) {
+    /* For C functions with METH_FASTCALL | METH_KEYWORDS */
+    DEOPT_IF(!PyCFunction_CheckExact(callable), CALL);
+    int flags = ((PyCFunctionObject *)callable)->m_ml->ml_flags;
+    DEOPT_IF(!(flags & METH_FASTCALL), CALL);
+    PyCFunction cfunc = ((PyCFunctionObject *)callable)->m_ml->ml_meth;
+    res = cfunc(((PyCFunctionObject *)callable)->m_self,
+                (PyObject * const *)(args - (self_or_null != NULL)),
+                oparg + (self_or_null != NULL));
+    ...
+}
+```
+
+`METH_FASTCALL` C functions receive a `PyObject **` array and count directly, without building a tuple. `len([1,2,3])`, `isinstance(x, int)`, `hasattr(obj, 'x')` all use this path.
+
+### `CALL_BUILTIN_CLASS`
+
+```c
+// CPython: Python/ceval.c:3340 CALL_BUILTIN_CLASS
+inst(CALL_BUILTIN_CLASS, (callable, self_or_null, args[oparg] -- res)) {
+    /* For type objects (int, str, list, dict, etc.) */
+    DEOPT_IF(!PyType_Check(callable), CALL);
+    DEOPT_IF(((PyTypeObject *)callable)->tp_new == NULL, CALL);
+    res = _PyObject_Vectorcall(callable,
+                               (PyObject * const *)(args - (self_or_null != NULL)),
+                               oparg + (self_or_null != NULL) | PY_VECTORCALL_ARGUMENTS_OFFSET,
+                               NULL);
+    ...
+}
+```
+
+`int(x)`, `str(y)`, `list(it)` all go through `CALL_BUILTIN_CLASS`. The `PY_VECTORCALL_ARGUMENTS_OFFSET` flag signals that the caller has reserved a slot before `args[0]` that the callee can use as `self`.
+
+## gopy notes
+
+`CALL_PY_EXACT_ARGS` is in `vm/eval_call.go` and calls `vm.pushFrame`. `CALL_BOUND_METHOD_EXACT_ARGS` unwraps `objects.BoundMethod`. `CALL_BUILTIN_FAST` calls the Go function stored in `objects.CFunction.FastCall`. `CALL_BUILTIN_CLASS` calls `objects.TypeCall` which dispatches to `tp_new` then `tp_init`.

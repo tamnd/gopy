@@ -1,0 +1,121 @@
+---
+title: Lib/pathlib/ (part 4)
+description: "Lib/pathlib/ part 4: Path.open, Path.read_text, Path.write_text, Path.glob, Path.walk."
+cpython_path: Lib/pathlib/_local.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pathlib/_local.py" />
+
+This annotation covers file I/O and directory traversal. See `lib_pathlib3_detail` for `Path.__new__`, path parsing, `stat`, `mkdir`, and `rename`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Path.open` | Open a file returning a file object |
+| 81-160 | `Path.read_text` / `Path.write_text` | Convenience one-shot read/write |
+| 161-280 | `Path.glob` | Pattern matching; uses `fnmatch` and `_RecursiveWildcardSelector` |
+| 281-400 | `Path.rglob` | Recursive glob (prepends `**/`) |
+| 401-600 | `Path.walk` | `os.walk`-like depth-first directory traversal |
+
+## Reading
+
+### `Path.open`
+
+```python
+# CPython: Lib/pathlib/_local.py:880 Path.open
+def open(self, mode='r', buffering=-1, encoding=None,
+         errors=None, newline=None):
+    """Open the file pointed by this path and return a file object."""
+    if "b" not in mode:
+        encoding = io.text_encoding(encoding)
+    return self._accessor.open(self, flags=os.O_RDONLY, mode=mode,
+                               buffering=buffering, encoding=encoding,
+                               errors=errors, newline=newline)
+```
+
+`Path.open()` is a thin wrapper around the built-in `open()`. `io.text_encoding` (added in 3.10) warns when `encoding=None` and `PYTHONWARNDEFAULTENCODING` is set, encouraging explicit UTF-8 usage.
+
+### `Path.read_text`
+
+```python
+# CPython: Lib/pathlib/_local.py:912 Path.read_text
+def read_text(self, encoding=None, errors=None, newline=None):
+    """Return the decoded contents of the pointed-to file as a string."""
+    encoding = io.text_encoding(encoding)
+    with self.open(mode='r', encoding=encoding, errors=errors,
+                   newline=newline) as f:
+        return f.read()
+```
+
+`Path.read_text()` opens, reads, and closes in one call. The `newline=None` default enables universal newlines (all newline variants normalized to `\n`). `newline=''` disables newline translation.
+
+### `Path.glob`
+
+```python
+# CPython: Lib/pathlib/_local.py:1020 Path.glob
+def glob(self, pattern, *, case_sensitive=None, recurse_symlinks=False):
+    """Iterate over all matching files (of any kind)."""
+    if not pattern:
+        raise ValueError("Unacceptable pattern: {!r}".format(pattern))
+    drv, root, pattern_parts = self._flavour.parse_parts((pattern,))
+    if drv or root:
+        raise NotImplementedError("Non-relative patterns are unsupported")
+    selector = _make_selector(tuple(pattern_parts), self._flavour,
+                              case_sensitive=case_sensitive,
+                              recurse_symlinks=recurse_symlinks)
+    for p in selector.select_from(self):
+        yield p
+```
+
+`path.glob('**/*.py')` uses `_RecursiveWildcardSelector` which calls `os.scandir` recursively. `case_sensitive=False` on Linux enables case-insensitive matching. `recurse_symlinks=True` follows symlinks during `**` expansion (default is False to avoid cycles).
+
+### `Path.walk`
+
+```python
+# CPython: Lib/pathlib/_local.py:1120 Path.walk
+def walk(self, top_down=True, on_error=None, follow_symlinks=False):
+    """Walk directory tree, yielding (dirpath, dirnames, filenames)."""
+    sys_audit('pathlib.Path.walk', self, top_down, follow_symlinks)
+    paths = [self]
+    while paths:
+        path = paths.pop()
+        if isinstance(path, tuple):
+            yield path
+            continue
+        try:
+            scandir_it = os.scandir(path)
+        except OSError as e:
+            if on_error is not None:
+                on_error(e)
+            continue
+        with scandir_it:
+            dirnames = []
+            filenames = []
+            for entry in scandir_it:
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=follow_symlinks)
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    dirnames.append(entry.name)
+                else:
+                    filenames.append(entry.name)
+        if top_down:
+            yield path, dirnames, filenames
+            paths += [path / d for d in reversed(dirnames)]
+        else:
+            paths += [(path, dirnames, filenames)]
+            paths += [path / d for d in reversed(dirnames)]
+```
+
+`Path.walk` (added in 3.12) is the `pathlib` analog of `os.walk`. The iterative (stack-based) implementation avoids Python recursion depth limits for deeply nested directories. Modifying `dirnames` in-place during `top_down=True` iteration prunes subdirectories.
+
+## gopy notes
+
+`Path.open` is `module/pathlib.PathOpen` in `module/pathlib/module.go`. `read_text`/`write_text` use `os.ReadFile`/`os.WriteFile`. `glob` uses `filepath.Glob` extended with `**` support and `fnmatch` patterns. `walk` wraps `filepath.WalkDir`.

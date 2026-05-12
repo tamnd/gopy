@@ -1,0 +1,128 @@
+---
+title: Objects/frameobject.c (part 4)
+description: "Objects/frameobject.c part 4: frame locals, co_varnames, COPY_FREE_VARS, _PyFrame_FastToLocals, _PyFrame_LocalsToFast."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/frameobject.c" />
+
+This annotation covers the frame locals mechanism. See `objects_frameobject3_detail` for `PyFrameObject` layout, `f_locals`, `f_lineno`, and the frame iterator.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyFrame_FastToLocals` | Materialize fast locals into `f_locals` dict |
+| 81-180 | `_PyFrame_LocalsToFast` | Write `f_locals` dict back into the fast array |
+| 181-300 | `COPY_FREE_VARS` | Copy closure cells into the fast locals array |
+| 301-420 | `frame.clear` | Zero out all local variables (used by generator close) |
+| 421-600 | `_PyFrame_GetFrameObject` | Materialize a `PyFrameObject` from an internal frame |
+
+## Reading
+
+### `_PyFrame_FastToLocals`
+
+```c
+// CPython: Objects/frameobject.c:180 _PyFrame_FastToLocals
+void
+_PyFrame_FastToLocals(PyFrameObject *f, int clear)
+{
+    /* Copy fast locals (the array at f->localsplus) into f->f_locals dict.
+       Also includes cell and free variables (they live after the fast locals). */
+    PyCodeObject *co = _PyFrame_GetCode(f->f_frame);
+    PyObject *locals = f->f_locals;
+    if (locals == NULL) {
+        f->f_locals = locals = PyDict_New();
+    }
+    for (int i = 0; i < co->co_nlocalsplus; i++) {
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        PyObject *value = f->f_frame->localsplus[i];
+        if (value == NULL) {
+            if (clear) PyDict_DelItem(locals, name);
+        } else {
+            /* For cell/free variables, unwrap the cell */
+            if (co->co_localspluskinds[i] & CO_FAST_CELL) {
+                value = PyCell_GET(value);
+            }
+            PyDict_SetItem(locals, name, value);
+        }
+    }
+}
+```
+
+`_PyFrame_FastToLocals` is called when `frame.f_locals` is accessed from Python. The fast locals array (`localsplus`) is the authoritative store; `f_locals` is a snapshot. Modifying `f_locals` after this call does not affect the running function — call `_PyFrame_LocalsToFast` to write back.
+
+### `_PyFrame_LocalsToFast`
+
+```c
+// CPython: Objects/frameobject.c:240 _PyFrame_LocalsToFast
+void
+_PyFrame_LocalsToFast(PyFrameObject *f, int clear)
+{
+    /* Write f_locals back into the fast locals array.
+       Used by debuggers that want to modify local variables. */
+    PyCodeObject *co = _PyFrame_GetCode(f->f_frame);
+    for (int i = 0; i < co->co_nlocalsplus; i++) {
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        PyObject *value = PyDict_GetItemWithError(f->f_locals, name);
+        if (co->co_localspluskinds[i] & CO_FAST_CELL) {
+            /* Update the cell */
+            PyCell_SET(f->f_frame->localsplus[i], value);
+        } else {
+            Py_XDECREF(f->f_frame->localsplus[i]);
+            f->f_frame->localsplus[i] = Py_XNewRef(value);
+        }
+    }
+}
+```
+
+`_PyFrame_LocalsToFast` is used by `exec()` when called with `locals` (modifying enclosing scope locals), and by debuggers via `ctypes.pythonapi`. Changes to `f_locals` from Python code are NOT automatically propagated — you must call `ctypes.pythonapi.PyFrame_LocalsToFast(frame, 0)`.
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Objects/frameobject.c:380 COPY_FREE_VARS opcode handler
+inst(COPY_FREE_VARS, (--)) {
+    /* Copy the free variables from the function object's closure
+       into the fast locals array (the "freevars" section of localsplus). */
+    PyFunctionObject *func = GLOBALS();  /* actually the function */
+    PyCodeObject *co = frame->f_code;
+    PyObject *closure = func->func_closure;
+    int offset = co->co_nlocals + co->co_nplaincellvars;
+    for (int i = 0; i < co->co_nfreevars; i++) {
+        PyObject *o = PyTuple_GET_ITEM(closure, i);
+        frame->localsplus[offset + i] = Py_NewRef(o);
+    }
+}
+```
+
+`COPY_FREE_VARS` is the first opcode in any function that closes over variables from an enclosing scope. It copies the cell references from `func.__closure__` into the frame's `localsplus` array so that subsequent `LOAD_DEREF`/`STORE_DEREF` have O(1) access.
+
+### `frame.clear`
+
+```c
+// CPython: Objects/frameobject.c:480 frameobj_clear
+static PyObject *
+frameobj_clear(PyFrameObject *f, PyObject *Py_UNUSED(ignored))
+{
+    /* Zero all local variables and the value stack.
+       Called by generator.close() / generator.throw(GeneratorExit). */
+    if (_PyFrameHasCompleted(f->f_frame)) return Py_None;
+    for (int i = 0; i < f->f_frame->f_code->co_nlocalsplus; i++) {
+        Py_CLEAR(f->f_frame->localsplus[i]);
+    }
+    _PyFrame_SetStackPointer(f->f_frame, f->f_frame->localsplus);
+    return Py_None;
+}
+```
+
+`frame.clear()` is called on suspended generator frames when the generator is garbage collected. It breaks reference cycles in the frame and allows GC to reclaim objects referenced by the local variables.
+
+## gopy notes
+
+`_PyFrame_FastToLocals` is `objects.FrameFastToLocals` in `objects/frame.go`. The fast array is `objects.Frame.Locals []objects.Object`. `_PyFrame_LocalsToFast` is `objects.FrameLocalsToFast`. `COPY_FREE_VARS` is in `vm/eval_gen.go`. `frame.clear` is `objects.FrameClear`.
