@@ -295,6 +295,7 @@ func classMethodGetIsAbstract(o Object) (Object, error) {
 	cm := o.(*ClassMethod)
 	v, err := GetAttr(cm.cmCallable, NewStr("__isabstractmethod__"))
 	if err != nil {
+		//nolint:nilerr // missing __isabstractmethod__ is False, per _PyObject_IsAbstract
 		return False(), nil
 	}
 	t, err := IsTruthy(v)
@@ -373,7 +374,7 @@ func descriptorSetWrappedAttribute(owner Object, name string, value Object, type
 // genericGetInstanceDict returns the per-instance __dict__ for
 // objects that store it on a dedicated field. classmethod and
 // staticmethod both keep theirs in cmDict / smDict; this helper
-// centralises the lookup so descriptor_get_wrapped_attribute works
+// centralizes the lookup so descriptor_get_wrapped_attribute works
 // for both.
 //
 // CPython: Objects/object.c PyObject_GenericGetDict
@@ -396,11 +397,16 @@ func genericGetInstanceDict(o Object) (*Dict, error) {
 // functoolsWraps copies the wrapper attributes from src onto dst.
 // Same set CPython hardcodes in functools_wraps: any missing source
 // attribute is silently skipped so wrapping a builtin (which has no
-// __module__) is not an error.
+// __module__) is not an error. dst must be an object whose dict is
+// reachable through genericGetInstanceDict.
 //
 // CPython: Objects/funcobject.c:1316 functools_wraps
-func functoolsWraps(dst *ClassMethod, src Object) {
+func functoolsWraps(dst Object, src Object) {
 	if src == nil {
+		return
+	}
+	dict, err := genericGetInstanceDict(dst)
+	if err != nil {
 		return
 	}
 	for _, attr := range [...]string{"__module__", "__name__", "__qualname__", "__doc__"} {
@@ -408,10 +414,7 @@ func functoolsWraps(dst *ClassMethod, src Object) {
 		if err != nil || v == nil {
 			continue
 		}
-		if dst.cmDict == nil {
-			dst.cmDict = NewDict()
-		}
-		_ = dst.cmDict.SetItem(NewStr(attr), v)
+		_ = dict.SetItem(NewStr(attr), v)
 	}
 }
 
@@ -419,7 +422,7 @@ func functoolsWraps(dst *ClassMethod, src Object) {
 // off a function: __get__ just returns the wrapped callable, so
 // calling it through an instance does not prepend self.
 //
-// CPython: Include/cpython/funcobject.h StaticMethod (analog)
+// CPython: Objects/funcobject.c:1666 staticmethod struct
 type StaticMethod struct {
 	Header
 	smCallable Object
@@ -428,7 +431,7 @@ type StaticMethod struct {
 
 // StaticMethodType is the type singleton for staticmethod.
 //
-// CPython: Objects/funcobject.c:1233 PyStaticMethod_Type
+// CPython: Objects/funcobject.c:1842 PyStaticMethod_Type
 var StaticMethodType = NewType("staticmethod", []*Type{objectType})
 
 func init() {
@@ -436,39 +439,186 @@ func init() {
 	StaticMethodType.Str = staticMethodRepr
 	StaticMethodType.DescrGet = staticMethodDescrGet
 	StaticMethodType.TpTraverse = staticMethodTraverse
+	StaticMethodType.Getattro = staticMethodGetattro
+	// sm_call: calling a staticmethod directly forwards to the
+	// wrapped callable. CPython 3.10 added this so the @staticmethod
+	// descriptor itself is callable, not just the bound result.
+	//
+	// CPython: Objects/funcobject.c:1749 sm_call
+	StaticMethodType.Call = staticMethodCall
+
+	// sm_memberlist + sm_getsetlist + sm_methodlist, mirroring the
+	// classmethod surface.
+	//
+	// CPython: Objects/funcobject.c:1755 sm_memberlist
+	// CPython: Objects/funcobject.c:1801 sm_getsetlist
+	// CPython: Objects/funcobject.c:1809 sm_methodlist
+	SetTypeDescr(StaticMethodType, "__func__", NewGetSetDescr("__func__", staticMethodGetFunc, nil))
+	SetTypeDescr(StaticMethodType, "__wrapped__", NewGetSetDescr("__wrapped__", staticMethodGetFunc, nil))
+	SetTypeDescr(StaticMethodType, "__isabstractmethod__", NewGetSetDescr(
+		"__isabstractmethod__", staticMethodGetIsAbstract, nil))
+	SetTypeDescr(StaticMethodType, "__dict__", NewGetSetDescr(
+		"__dict__", staticMethodGetDict, staticMethodSetDict))
+	SetTypeDescr(StaticMethodType, "__annotations__", NewGetSetDescr(
+		"__annotations__",
+		func(o Object) (Object, error) {
+			return descriptorGetWrappedAttribute(o.(*StaticMethod).smCallable, o, "__annotations__")
+		},
+		func(o Object, v Object) error {
+			return descriptorSetWrappedAttribute(o, "__annotations__", v, "staticmethod")
+		}))
+	SetTypeDescr(StaticMethodType, "__annotate__", NewGetSetDescr(
+		"__annotate__",
+		func(o Object) (Object, error) {
+			return descriptorGetWrappedAttribute(o.(*StaticMethod).smCallable, o, "__annotate__")
+		},
+		func(o Object, v Object) error {
+			return descriptorSetWrappedAttribute(o, "__annotate__", v, "staticmethod")
+		}))
+	bindClassGetitem(StaticMethodType)
 }
 
-// staticMethodTraverse visits the wrapped callable. Mirrors sm_traverse.
+// staticMethodTraverse visits the wrapped callable and instance dict.
 //
-// CPython: Objects/funcobject.c:1220 sm_traverse
+// CPython: Objects/funcobject.c:1687 sm_traverse
 func staticMethodTraverse(o Object, visit Visitor) error {
 	sm := o.(*StaticMethod)
-	if sm.smCallable == nil {
-		return nil
+	if sm.smCallable != nil {
+		if err := visit(sm.smCallable); err != nil {
+			return err
+		}
 	}
-	return visit(sm.smCallable)
+	if sm.smDict != nil {
+		return visit(sm.smDict)
+	}
+	return nil
 }
 
 // NewStaticMethod wraps fn so attribute access on an instance returns
-// the callable directly without binding self.
+// the callable directly without binding self. Like classmethod, the
+// constructor also runs functools_wraps so __module__ / __name__ /
+// __qualname__ / __doc__ propagate from the wrapped callable.
 //
-// CPython: Objects/funcobject.c:1184 sm_init
+// CPython: Objects/funcobject.c:1731 sm_init
 func NewStaticMethod(fn Object) *StaticMethod {
 	sm := &StaticMethod{smCallable: fn}
 	sm.init(StaticMethodType)
+	functoolsWraps(sm, fn)
 	return sm
 }
 
 // Func returns the wrapped callable.
 func (sm *StaticMethod) Func() Object { return sm.smCallable }
 
+// staticMethodRepr matches CPython's <staticmethod(REPR_OF_CALLABLE)>.
+//
+// CPython: Objects/funcobject.c:1815 sm_repr
 func staticMethodRepr(o Object) (string, error) {
-	return "<staticmethod object>", nil
+	sm := o.(*StaticMethod)
+	inner, err := Repr(sm.smCallable)
+	if err != nil {
+		return "", err
+	}
+	return "<staticmethod(" + inner + ")>", nil
 }
 
 // staticMethodDescrGet just hands back the wrapped callable.
 //
-// CPython: Objects/funcobject.c:1167 sm_descr_get
+// CPython: Objects/funcobject.c:1705 sm_descr_get
 func staticMethodDescrGet(descr Object, _ Object, _ *Type) (Object, error) {
 	return descr.(*StaticMethod).smCallable, nil
+}
+
+// staticMethodCall forwards a direct call on a staticmethod object to
+// the wrapped callable. CPython 3.10 made staticmethod instances
+// callable so `staticmethod(fn)(args)` works without going through
+// __get__ first.
+//
+// CPython: Objects/funcobject.c:1749 sm_call
+func staticMethodCall(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
+	sm := callable.(*StaticMethod)
+	if sm.smCallable == nil {
+		return nil, fmt.Errorf("RuntimeError: uninitialized staticmethod object")
+	}
+	tup := NewTuple(args)
+	var kw *Dict
+	if len(kwargs) > 0 {
+		kw = NewDict()
+		for k, v := range kwargs {
+			if err := kw.SetItem(NewStr(k), v); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return Call(sm.smCallable, tup, kw)
+}
+
+// staticMethodGetattro mirrors classMethodGetattro: layer the
+// per-instance __dict__ (populated by functools_wraps) on top of
+// GenericGetAttr so __name__, __module__, etc. flow through without a
+// dedicated getset for each.
+//
+// CPython: Objects/object.c:1932 PyObject_GenericGetAttr (dict arm)
+func staticMethodGetattro(o Object, name Object) (Object, error) {
+	sm := o.(*StaticMethod)
+	if name != nil && name.Type() == strType {
+		key := attrNameStr(name)
+		descr, _ := LookupDescriptor(o.Type(), key)
+		if descr != nil {
+			dt := descr.Type()
+			if dt.DescrSet != nil && dt.DescrGet != nil {
+				return dt.DescrGet(descr, o, o.Type())
+			}
+		}
+		if sm.smDict != nil {
+			if v, _ := sm.smDict.GetItem(name); v != nil {
+				return v, nil
+			}
+		}
+	}
+	return GenericGetAttr(o, name)
+}
+
+func staticMethodGetFunc(o Object) (Object, error) {
+	return o.(*StaticMethod).smCallable, nil
+}
+
+// staticMethodGetIsAbstract mirrors classMethodGetIsAbstract but
+// reads off the staticmethod's wrapped callable.
+//
+// CPython: Objects/funcobject.c:1762 sm_get___isabstractmethod__
+func staticMethodGetIsAbstract(o Object) (Object, error) {
+	sm := o.(*StaticMethod)
+	v, err := GetAttr(sm.smCallable, NewStr("__isabstractmethod__"))
+	if err != nil {
+		//nolint:nilerr // missing __isabstractmethod__ is False, per _PyObject_IsAbstract
+		return False(), nil
+	}
+	t, err := IsTruthy(v)
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(t), nil
+}
+
+func staticMethodGetDict(o Object) (Object, error) {
+	sm := o.(*StaticMethod)
+	if sm.smDict == nil {
+		sm.smDict = NewDict()
+	}
+	return sm.smDict, nil
+}
+
+func staticMethodSetDict(o Object, v Object) error {
+	sm := o.(*StaticMethod)
+	if v == nil {
+		sm.smDict = nil
+		return nil
+	}
+	d, ok := v.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: __dict__ must be set to a dict object")
+	}
+	sm.smDict = d
+	return nil
 }

@@ -41,7 +41,7 @@ otherwise. Final gate closes #544.
 |-------|------|-------|--------|--------|
 | 1 | A `object.c` | `object_methods` + `object_getsets` + `object_*` impls | - | done |
 | 2 | D `funcobject.c` | PyClassMethod_Type (all `cm_*` functions) | - | done |
-| 3 | D `funcobject.c` | PyStaticMethod_Type (all `sm_*` functions) | - | partial |
+| 3 | D `funcobject.c` | PyStaticMethod_Type (all `sm_*` functions) | - | done |
 | 4 | D `funcobject.c` | PyFunction_Type (all `func_*` functions) | - | partial |
 | 5 | C `classobject.c` | PyMethod_Type (all `method_*` functions) | - | partial |
 | 6 | B `typeobject.c` | `type_new` pipeline (`type_new_*` functions) | 1,2,3,4,5 | partial |
@@ -157,34 +157,41 @@ implementations earlier in the file. Every row must land.
 
 | C function | Surface | Status |
 |------------|---------|--------|
-| `sm_init` | `staticmethod(fn)` constructor | done |
+| `sm_init` | `staticmethod(fn)` constructor + `functools_wraps` | done |
 | `sm_descr_get` | `__get__(obj, type)` returns wrapped fn | done |
-| `sm_traverse` | GC visit `sm_callable` and `sm_dict` | done (callable only) |
+| `sm_traverse` | GC visit `sm_callable` and `sm_dict` | done |
 | `sm_dealloc` / `sm_clear` | (Go GC, no-op) | n/a |
-| `sm_repr` | `<staticmethod object>` text | done |
-| `sm_call` | direct call forwards to wrapped fn (CPython 3.10+) | pending |
-| `sm_memberlist` | `__func__` member | pending |
-| `sm_getsetlist` | `__wrapped__`, `__isabstractmethod__`, `__dict__`, `__name__`, `__qualname__`, `__module__` | pending |
-| `__set_name__` forwarding | forward to wrapped fn | pending |
+| `sm_repr` | `<staticmethod(REPR_OF_CALLABLE)>` text | done |
+| `sm_call` | direct call forwards to wrapped fn (CPython 3.10+) | done |
+| `sm_memberlist` | `__func__`, `__wrapped__` getsets | done |
+| `sm_getsetlist` | `__isabstractmethod__`, `__dict__`, `__annotations__`, `__annotate__` | done |
+| `sm_methodlist` | `__class_getitem__` (classmethod via Py_GenericAlias) | done |
+| `__set_name__` forwarding | forward to wrapped fn | n/a (CPython 3.14 staticmethod has no `__set_name__` slot either) |
 
 ### Gates
 
-| Gate | Command | Expected |
-|------|---------|----------|
-| 3.1 | `gopy -c 'class C:\n @staticmethod\n def f(): return 1\nprint(C.__dict__["f"].__func__())'` | `1` |
-| 3.2 | `gopy -c 'sm = staticmethod(lambda: 7); print(sm())'` | `7` (sm_call) |
-| 3.3 | `gopy -c 'class C:\n @staticmethod\n def f(): pass\nprint(C.__dict__["f"].__name__)'` | `f` |
+| Gate | Command | Expected | Status |
+|------|---------|----------|--------|
+| 3.1 | `gopy -c 'class C:\n @staticmethod\n def f(): return 1\nprint(C.__dict__["f"].__func__())'` | `1` | pass |
+| 3.2 | `gopy -c 'sm = staticmethod(lambda: 7); print(sm())'` | `7` (sm_call) | pass |
+| 3.3 | `gopy -c 'class C:\n @staticmethod\n def f(): pass\nprint(C.__dict__["f"].__name__)'` | `f` | pass |
 
 ### CPython citations
 
 | # | Reference |
 |---|-----------|
-| 1 | `Objects/funcobject.c:1184` `sm_init` |
-| 2 | `Objects/funcobject.c:1167` `sm_descr_get` |
-| 3 | `Objects/funcobject.c:1148` `sm_call` |
-| 4 | `Objects/funcobject.c:1211` `sm_memberlist` |
-| 5 | `Objects/funcobject.c:1220` `sm_traverse` |
-| 6 | `Objects/funcobject.c:1233` `PyStaticMethod_Type` |
+| 1 | `Objects/funcobject.c:1731` `sm_init` |
+| 2 | `Objects/funcobject.c:1705` `sm_descr_get` |
+| 3 | `Objects/funcobject.c:1749` `sm_call` |
+| 4 | `Objects/funcobject.c:1687` `sm_traverse` |
+| 5 | `Objects/funcobject.c:1755` `sm_memberlist` |
+| 6 | `Objects/funcobject.c:1762` `sm_get___isabstractmethod__` |
+| 7 | `Objects/funcobject.c:1776` `sm_get___annotations__` / `sm_set___annotations__` |
+| 8 | `Objects/funcobject.c:1789` `sm_get___annotate__` / `sm_set___annotate__` |
+| 9 | `Objects/funcobject.c:1801` `sm_getsetlist` |
+| 10 | `Objects/funcobject.c:1809` `sm_methodlist` |
+| 11 | `Objects/funcobject.c:1815` `sm_repr` |
+| 12 | `Objects/funcobject.c:1842` `PyStaticMethod_Type` |
 
 ## Phase 4 - `Objects/funcobject.c` PyFunction_Type block
 

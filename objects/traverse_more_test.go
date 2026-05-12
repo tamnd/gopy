@@ -49,9 +49,11 @@ func TestClassMethodTraverseVisitsCallable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("traverse: %v", err)
 	}
-	if len(got) != 1 || got[0] != fn {
-		t.Fatalf("classmethod traverse = %v, want [%v]", got, fn)
+	if len(got) == 0 || got[0] != fn {
+		t.Fatalf("classmethod traverse = %v, want callable first", got)
 	}
+	// CPython visits cm_dict too once functools_wraps allocates it; we
+	// only assert the callable lands as the first visit.
 }
 
 func TestStaticMethodTraverseVisitsCallable(t *testing.T) {
@@ -61,8 +63,8 @@ func TestStaticMethodTraverseVisitsCallable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("traverse: %v", err)
 	}
-	if len(got) != 1 || got[0] != fn {
-		t.Fatalf("staticmethod traverse = %v, want [%v]", got, fn)
+	if len(got) == 0 || got[0] != fn {
+		t.Fatalf("staticmethod traverse = %v, want callable first", got)
 	}
 }
 
