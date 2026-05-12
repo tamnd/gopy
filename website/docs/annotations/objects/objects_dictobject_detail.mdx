@@ -1,0 +1,84 @@
+---
+title: Objects/dictobject.c
+description: "dict implementation: compact hash table with split vs combined tables, open addressing with DKIX_DUMMY for deleted entries, and the version tag for fast staleness detection."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 5000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+`Objects/dictobject.c` implements Python's `dict` type. The current layout uses compact hash tables introduced in Python 3.6: keys and values are stored in insertion order in two parallel arrays, and a separate indices array maps hash buckets to array positions. The file also implements the split-dict optimization for instance `__dict__` sharing, and a version tag that increments on every mutation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `PyDictObject`, `PyDictKeysObject` | Struct definitions; split vs combined table |
+| 201-600 | `dictkeys_new`, `dict_new_presized` | Allocators; growth policy |
+| 601-1000 | `insertdict`, `_Py_dict_lookup` | Hash probe and insert |
+| 1001-1500 | `dict_merge`, `PyDict_SetItem`, `PyDict_DelItem` | Mutation API |
+| 1501-2000 | `PyDict_GetItem`, `PyDict_GetItemWithError` | Lookup API |
+| 2001-3000 | `dict_keys`, `dict_values`, `dict_items` | View objects |
+| 3001-4000 | `dict_tp_richcompare`, `dict_equal` | Equality comparison |
+| 4001-5000 | Version tag, watchers, type wiring | `ma_version_tag`, `PyDict_Watch`, `PyDict_Type` |
+
+## Reading
+
+### Compact layout: keys object
+
+`PyDictKeysObject` holds the indices array (compact int entries whose width depends on table size), the hash/key/value arrays, and metadata. The `ma_values` pointer on `PyDictObject` is NULL for combined tables and points to a separate values array for split tables (used by class instances sharing keys).
+
+```c
+// Objects/dictobject.c:1 PyDictObject
+struct _Py_dict_state {
+    /* free list for dict objects */
+};
+
+struct PyDictObject {
+    PyObject_HEAD
+    Py_ssize_t    ma_used;          /* number of items */
+    uint64_t      ma_version_tag;   /* incremented on mutation */
+    PyDictKeysObject *ma_keys;
+    PyObject    **ma_values;        /* NULL for combined tables */
+};
+```
+
+### Probe sequence
+
+`_Py_dict_lookup` uses open addressing with the probe sequence `i = (5*i + perturb + 1) % size` where `perturb` shifts right until it reaches zero. `DKIX_EMPTY` (-1) terminates the probe; `DKIX_DUMMY` (-2) marks a deleted slot that must be probed past.
+
+```c
+// Objects/dictobject.c:601 _Py_dict_lookup
+Py_ssize_t
+_Py_dict_lookup(PyDictObject *mp, PyObject *key, Py_hash_t hash,
+                PyObject **value_addr)
+{
+    Py_ssize_t ix;
+    size_t perturb = (size_t)hash;
+    size_t mask = DK_MASK(mp->ma_keys);
+    size_t i = (size_t)hash & mask;
+    for (;;) {
+        ix = dictkeys_get_index(mp->ma_keys, i);
+        if (ix == DKIX_EMPTY) break;
+        if (ix >= 0) {
+            PyObject *startkey = DK_UNICODE_ENTRIES(mp->ma_keys)[ix].me_key;
+            if (startkey == key || (hash == ... && eq)) { *value_addr = ...; return ix; }
+        }
+        perturb >>= PERTURB_SHIFT;
+        i = (i * 5 + perturb + 1) & mask;
+    }
+    return DKIX_EMPTY;
+}
+```
+
+### Version tag and watchers
+
+`ma_version_tag` is incremented on every `__setitem__`, `__delitem__`, and `update`. This allows the specializing adaptive interpreter to detect dict staleness in O(1) without re-checking keys. The watcher API (`PyDict_AddWatcher`, `PyDict_Watch`) lets the tier-2 optimizer subscribe to specific dict mutation events.
+
+## gopy notes
+
+The gopy dict is in `objects/dict.go`, `objects/dict_mutate.go`, and `objects/dict_iter.go`. The compact table layout is replicated: `DictKeys` struct with an indices slice and a key/value slice in insertion order. The version tag is a `uint64` field on `Dict` that mirrors `ma_version_tag`.
