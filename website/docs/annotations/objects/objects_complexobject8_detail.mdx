@@ -1,0 +1,110 @@
+---
+title: Objects/complexobject.c (part 8)
+description: "Objects/complexobject.c part 8: complex.__new__, complex.conjugate, complex.__abs__, c_pow, Py_complex arithmetic."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers complex number construction and arithmetic helpers. See `objects_complexobject7_detail` for `__repr__`, `__hash__`, `__eq__`, and complex-from-string.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Py_complex` C struct | Low-level real/imag pair |
+| 81-160 | `c_pow` | Complex exponentiation |
+| 161-240 | `complex.__new__` | Parse `complex(real, imag)` |
+| 241-320 | `complex.conjugate` | Return `real - imag*j` |
+| 321-500 | `complex.__abs__` / `__bool__` | Magnitude and truthiness |
+
+## Reading
+
+### `Py_complex` operations
+
+```c
+// CPython: Objects/complexobject.c:80 c_prod
+Py_complex
+c_prod(Py_complex a, Py_complex b)
+{
+    /* (a+bj)(c+dj) = (ac-bd) + (ad+bc)j */
+    Py_complex r;
+    r.real = a.real * b.real - a.imag * b.imag;
+    r.imag = a.real * b.imag + a.imag * b.real;
+    return r;
+}
+```
+
+`Py_complex` is a plain C struct `{double real; double imag;}`. Arithmetic on it is done with these helper functions before boxing into a `PyComplexObject`.
+
+### `c_pow`
+
+```c
+// CPython: Objects/complexobject.c:120 c_pow
+Py_complex
+c_pow(Py_complex a, Py_complex b)
+{
+    /* a**b = exp(b * log(a)) */
+    if (b.real == 0.0 && b.imag == 0.0) return c_1;  /* x**0 = 1 */
+    if (a.real == 0.0 && a.imag == 0.0) {
+        if (b.real < 0.0) /* 0**negative: divide by zero */ ...;
+        return c_0;  /* 0**positive = 0 */
+    }
+    double abs_a = hypot(a.real, a.imag);
+    double arg_a = atan2(a.imag, a.real);
+    double len = pow(abs_a, b.real) * exp(-b.imag * arg_a);
+    double phase = b.real * arg_a + b.imag * log(abs_a);
+    return (Py_complex){len * cos(phase), len * sin(phase)};
+}
+```
+
+Complex power uses the polar form: `r*e^(i*theta)` raised to a complex exponent. Special cases avoid domain errors from `log(0)`.
+
+### `complex.__new__`
+
+```c
+// CPython: Objects/complexobject.c:680 complex_new_impl
+static PyObject *
+complex_new_impl(PyTypeObject *type, PyObject *r, PyObject *i)
+{
+    /* complex(real=0, imag=0) */
+    Py_complex cr = {0.0, 0.0}, ci = {0.0, 0.0};
+    if (r != NULL) {
+        /* If r is already a complex, extract real/imag */
+        if (PyComplex_Check(r)) {
+            cr = PyComplex_AsCComplex(r);
+        } else {
+            cr.real = PyFloat_AsDouble(r);
+        }
+    }
+    ...
+    return PyComplex_FromCComplex(
+        (Py_complex){cr.real - ci.imag, cr.imag + ci.real});
+}
+```
+
+`complex(3+4j, 1j)` passes an existing complex as `real`, so both parts contribute: result is `(3+4j) + j*(1j) = (3-1) + (4+0)j = 2+4j`. This matches the formula `complex(r, i) = r + i*1j`.
+
+### `complex.conjugate`
+
+```c
+// CPython: Objects/complexobject.c:780 complex_conjugate
+static PyObject *
+complex_conjugate(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    Py_complex c = PyComplex_AsCComplex(self);
+    c.imag = -c.imag;
+    return PyComplex_FromCComplex(c);
+}
+```
+
+`(3+4j).conjugate()` returns `3-4j`. The conjugate is its own inverse: `z.conjugate().conjugate() == z`. Used in signal processing and linear algebra.
+
+## gopy notes
+
+`Py_complex` maps to `complex128` in Go. `c_pow` is `objects.CPow` using `cmplx.Pow`. `complex.__new__` is `objects.ComplexNew` in `objects/complex.go`. `complex.conjugate` uses `cmplx.Conj`. `complex.__abs__` uses `cmplx.Abs`.

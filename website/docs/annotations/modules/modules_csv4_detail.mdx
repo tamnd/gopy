@@ -1,0 +1,100 @@
+---
+title: Modules/_csv.c (part 4)
+description: "_csv.c part 4: csv.writer, csv.DictWriter, quoting modes, dialect registration."
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_csv.c" />
+
+This annotation covers CSV writing and dialect management. See `modules_csv3_detail` for `csv.reader`, `csv.DictReader`, and field parsing.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `csv_writerow` | Write one row as a CSV line |
+| 81-160 | Quoting logic | `QUOTE_ALL`, `QUOTE_MINIMAL`, `QUOTE_NONNUMERIC`, `QUOTE_NONE` |
+| 161-260 | `csv.DictWriter.writerow` | Write from a dict using fieldnames |
+| 261-360 | Dialect registration | `csv.register_dialect`, `csv.unregister_dialect` |
+| 361-500 | Dialect lookup | `csv.get_dialect`, `csv.list_dialects` |
+
+## Reading
+
+### `csv_writerow`
+
+```c
+// CPython: Modules/_csv.c:820 csv_writerow
+static PyObject *
+csv_writerow(WriterObj *self, PyObject *seq)
+{
+    DialectObj *dialect = self->dialect;
+    Py_ssize_t len = PySequence_Length(seq);
+    for (Py_ssize_t field_num = 0; field_num < len; field_num++) {
+        PyObject *field = PySequence_GetItem(seq, field_num);
+        int append_ok = csv_join_append(self, field, field_num == len - 1);
+        ...
+    }
+    /* Write accumulated row to the underlying writer */
+    PyObject *line = join_finalize(self);
+    return PyObject_CallOneArg(self->writeline, line);
+}
+```
+
+Each field is processed by `csv_join_append` which applies quoting/escaping rules. The final line (without trailing newline) is passed to the writer object's callable (typically `file.write`).
+
+### Quoting modes
+
+```c
+// CPython: Modules/_csv.c:740 csv_join_append
+static int
+csv_join_append(WriterObj *self, PyObject *field, int quoted)
+{
+    /* QUOTE_ALL: always quote
+       QUOTE_MINIMAL: quote only if field contains delimiter, quotechar, or lineterminator
+       QUOTE_NONNUMERIC: quote non-numeric fields
+       QUOTE_NONE: never quote, escape special chars */
+    switch (self->dialect->quoting) {
+        case QUOTE_ALL: quoted = 1; break;
+        case QUOTE_NONNUMERIC:
+            if (!PyFloat_Check(field) && !PyLong_Check(field)) quoted = 1;
+            break;
+        case QUOTE_MINIMAL:
+            /* Check if field contains special characters */
+            ...
+            break;
+        case QUOTE_NONE:
+            /* Use escapechar instead of quotechar */
+            ...
+            break;
+    }
+    ...
+}
+```
+
+`QUOTE_NONNUMERIC` on reading converts all unquoted fields to `float`. This is a useful round-trip convention: write with `QUOTE_NONNUMERIC`, read with `QUOTE_NONNUMERIC` and all numbers come back as floats.
+
+### Dialect registration
+
+```c
+// CPython: Modules/_csv.c:1080 csv_register_dialect
+static PyObject *
+csv_register_dialect(PyObject *module, PyObject *args, PyObject *kwargs)
+{
+    PyObject *name, *dialect_obj = NULL;
+    /* ... parse args: name [, dialect] [, **fmtparams] */
+    DialectObj *dialect = (DialectObj *)_call_dialect(dialect_obj, kwargs);
+    PyDict_SetItem(module_state->dialects, name, (PyObject *)dialect);
+    Py_RETURN_NONE;
+}
+```
+
+`csv.register_dialect('pipes', delimiter='|')` saves a named dialect in the module's dialect dict. `csv.reader(f, 'pipes')` then looks up the dialect by name. The built-in dialects `'excel'`, `'excel-tab'`, and `'unix'` are registered at module init.
+
+## gopy notes
+
+`csv_writerow` is `module/csv.WriterWriteRow` in `module/csv/module.go`. The quoting logic is a Go switch on `dialect.Quoting`. Dialect registration stores `*csvDialect` objects in a `map[string]*csvDialect` in module state. `DictWriter.writerow` maps fieldnames via `objects.DictGetItem`.

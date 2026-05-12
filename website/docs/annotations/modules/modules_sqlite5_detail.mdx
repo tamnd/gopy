@@ -1,0 +1,96 @@
+---
+title: Modules/_sqlite/connection.c (part 5)
+description: "sqlite3 connection.c part 5: Connection.execute, executemany, executescript, backup, set_authorizer."
+cpython_path: Modules/_sqlite/connection.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sqlite/connection.c" />
+
+This annotation covers bulk execution and administrative connection methods. See `modules_sqlite4_detail` for `Connection.__init__`, `connect`, `cursor`, and transaction control.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Connection.execute` | Shortcut: create cursor + execute |
+| 81-160 | `Connection.executemany` | Execute one statement with multiple parameter sets |
+| 161-260 | `Connection.executescript` | Execute a script of SQL statements |
+| 261-360 | `Connection.backup` | Copy database to another connection |
+| 361-500 | `Connection.set_authorizer` | Register a callback that approves SQL operations |
+
+## Reading
+
+### `Connection.execute`
+
+```c
+// CPython: Modules/_sqlite/connection.c:820 pysqlite_connection_execute
+static PyObject *
+pysqlite_connection_execute(pysqlite_Connection *self, PyObject *args)
+{
+    /* Convenience shortcut: conn.execute(sql) == conn.cursor().execute(sql) */
+    PyObject *cursor = pysqlite_connection_cursor_imethod(self, NULL);
+    if (cursor == NULL) return NULL;
+    PyObject *result = pysqlite_cursor_execute(
+        (pysqlite_Cursor *)cursor, args);
+    if (result == NULL) { Py_DECREF(cursor); return NULL; }
+    Py_DECREF(result);
+    return cursor;
+}
+```
+
+`conn.execute(sql)` is sugar for `conn.cursor().execute(sql)`. Returns the cursor so you can chain: `conn.execute("SELECT ...").fetchall()`.
+
+### `Connection.executescript`
+
+```c
+// CPython: Modules/_sqlite/connection.c:920 pysqlite_connection_executescript
+static PyObject *
+pysqlite_connection_executescript(pysqlite_Connection *self, PyObject *script_obj)
+{
+    /* Commit any pending transaction, then execute each statement */
+    if (self->begin_statement) {
+        sqlite3_exec(self->db, "COMMIT", NULL, NULL, NULL);
+    }
+    const char *script = PyUnicode_AsUTF8(script_obj);
+    int rc = sqlite3_exec(self->db, script, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        _pysqlite_seterror(self->state, self->db);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`executescript` runs multiple statements separated by semicolons. It always commits the current transaction first. No parameter substitution is supported (use `execute` in a loop for parameterized statements).
+
+### `Connection.backup`
+
+```c
+// CPython: Modules/_sqlite/connection.c:1020 pysqlite_connection_backup
+static PyObject *
+pysqlite_connection_backup(pysqlite_Connection *self, PyObject *args, PyObject *kwargs)
+{
+    /* Online backup via sqlite3_backup_init / sqlite3_backup_step */
+    pysqlite_Connection *target;
+    int pages = -1; /* -1 = copy all at once */
+    sqlite3_backup *bck = sqlite3_backup_init(
+        target->db, "main", self->db, "main");
+    do {
+        rc = sqlite3_backup_step(bck, pages);
+        if (progress != Py_None) PyObject_CallFunction(progress, ...);
+    } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+    sqlite3_backup_finish(bck);
+    ...
+}
+```
+
+`conn.backup(dst)` uses SQLite's online backup API. The source database remains readable during the copy. `pages` controls how many pages are copied per step; `-1` copies everything in one step.
+
+## gopy notes
+
+`Connection.execute` is `module/sqlite3.ConnectionExecute` in `module/sqlite3/module.go`. It delegates to `module/sqlite3.CursorExecute`. `executescript` calls `sqlite3.Exec` directly on the `*sql.DB`. `backup` uses `database/sql/driver` hooks or a pure-Go SQLite backup implementation.

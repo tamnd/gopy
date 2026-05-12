@@ -1,0 +1,117 @@
+---
+title: Python/errors.c (part 10)
+description: "Python/errors.c part 10: PyErr_FormatV, _PyErr_ChainExceptions, PyErr_WriteUnraisable, _PyErr_Display."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers exception chaining, formatting, and final display. See `python_errors9_detail` for `PyErr_SetString`, `PyErr_Occurred`, `PyErr_Clear`, and `PyErr_Fetch`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyErr_FormatV` | Format an exception message with printf-style args |
+| 81-160 | `_PyErr_ChainExceptions` | Set `__cause__` / `__context__` on the current exception |
+| 161-260 | `PyErr_WriteUnraisable` | Report an exception that cannot be propagated |
+| 261-380 | `_PyErr_Display` | Print a traceback to stderr |
+| 381-500 | `PyErr_SyntaxLocationObject` | Attach source location to `SyntaxError` |
+
+## Reading
+
+### `PyErr_FormatV`
+
+```c
+// CPython: Python/errors.c:820 PyErr_FormatV
+PyObject *
+PyErr_FormatV(PyObject *exception, const char *format, va_list vargs)
+{
+    PyObject *string = PyUnicode_FromFormatV(format, vargs);
+    if (string != NULL) {
+        PyErr_SetObject(exception, string);
+        Py_DECREF(string);
+    }
+    return NULL;
+}
+```
+
+`PyErr_Format(PyExc_TypeError, "expected %s, got %s", ...)` is the C equivalent of `raise TypeError(f"expected {a}, got {b}")`. Always returns `NULL` so callers can write `return PyErr_Format(...)`.
+
+### `_PyErr_ChainExceptions`
+
+```c
+// CPython: Python/errors.c:940 _PyErr_ChainExceptions1
+void
+_PyErr_ChainExceptions1(PyObject *exc)
+{
+    /* Attach exc as __context__ of the current exception */
+    PyObject *cur_exc = PyErr_GetRaisedException();
+    if (cur_exc == NULL) {
+        PyErr_SetRaisedException(exc);
+        return;
+    }
+    /* Walk the __context__ chain to avoid creating a cycle */
+    PyObject *context = cur_exc;
+    while (PyException_GetContext(context) != NULL) {
+        context = PyException_GetContext(context);
+    }
+    PyException_SetContext(context, Py_NewRef(exc));
+    PyErr_SetRaisedException(cur_exc);
+}
+```
+
+`raise B from A` sets `__cause__ = A` and `__suppress_context__ = True`. Implicit chaining (`except: raise B`) sets `__context__ = A` with `__suppress_context__ = False`. `_PyErr_ChainExceptions1` implements the implicit case.
+
+### `PyErr_WriteUnraisable`
+
+```c
+// CPython: Python/errors.c:1080 PyErr_WriteUnraisable
+void
+PyErr_WriteUnraisable(PyObject *obj)
+{
+    /* Called when an exception cannot be propagated:
+       e.g., in __del__, in a signal handler, in a thread's target after it exits */
+    PyObject *exc = PyErr_GetRaisedException();
+    if (exc == NULL) return;
+    /* Call sys.unraisablehook(UnraisableHookArgs(...)) */
+    ...
+    /* Fallback: write to sys.stderr */
+    PyObject *f = PySys_GetObject("stderr");
+    PyFile_WriteString("Exception ignored in: ", f);
+    ...
+}
+```
+
+`PyErr_WriteUnraisable` is the safety valve for exceptions in contexts where propagation is impossible. `sys.unraisablehook` can be replaced to log these differently (e.g., to capture them in tests).
+
+### `_PyErr_Display`
+
+```c
+// CPython: Python/errors.c:1180 _PyErr_Display
+void
+_PyErr_Display(PyObject *file, PyObject *exception, PyObject *value,
+               PyObject *tb)
+{
+    /* Write traceback + exception to file (usually sys.stderr) */
+    if (tb != NULL && tb != Py_None)
+        PyTraceBack_Print(tb, file);
+    ...
+    /* Print exception class + message */
+    PyFile_WriteObject(exception, file, Py_PRINT_RAW);
+    PyFile_WriteString(": ", file);
+    PyFile_WriteObject(value, file, Py_PRINT_RAW);
+    PyFile_WriteString("\n", file);
+}
+```
+
+`_PyErr_Display` is what Python's default exception handler calls at interpreter exit (or when an unhandled exception would terminate a thread). `sys.excepthook` is called first; `_PyErr_Display` is the fallback.
+
+## gopy notes
+
+`PyErr_FormatV` is `errors.FormatV` in `pythonrun/errors.go`. `_PyErr_ChainExceptions1` is `errors.ChainExceptions` which sets `exception.Context`. `PyErr_WriteUnraisable` calls `vm.CallUnraisableHook`. `_PyErr_Display` calls `objects.TracebackPrint` then writes to the stderr file object.
