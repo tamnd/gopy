@@ -145,7 +145,11 @@ func dictGetMethod(args []Object, _ map[string]Object) (Object, error) {
 	return None(), nil
 }
 
-// dictContainsMethod backs dict.__contains__.
+// dictContainsMethod backs dict.__contains__. CPython's dict_contains
+// returns 0/1/-1: missing keys produce 0, not a raised KeyError. The
+// equivalent here is to swallow the errKeyNotFound sentinel and report
+// False; anything else (e.g. a TypeError from an unhashable key) bubbles
+// up.
 //
 // CPython: Objects/dictobject.c:3735 dict_contains
 func dictContainsMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -155,6 +159,9 @@ func dictContainsMethod(args []Object, _ map[string]Object) (Object, error) {
 	d := args[0].(*Dict)
 	v, err := d.GetItem(args[1])
 	if err != nil {
+		if errors.Is(err, errKeyNotFound) {
+			return NewBool(false), nil
+		}
 		return nil, err
 	}
 	return NewBool(v != nil), nil
