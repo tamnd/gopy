@@ -154,6 +154,27 @@ func init() {
 	WeakrefType.Hash = weakrefHash
 	WeakrefType.Call = weakrefCall
 	WeakrefType.RichCmp = weakrefRichCompare
+	// weakref_ref_new: ref(object[, callback])
+	// CPython: Objects/weakrefobject.c weakref_ref_new
+	WeakrefType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		var referent, callback Object
+		if len(args) >= 1 {
+			referent = args[0]
+		}
+		if v, ok := kwargs["object"]; ok && referent == nil {
+			referent = v
+		}
+		if len(args) >= 2 {
+			callback = args[1]
+		}
+		if v, ok := kwargs["callback"]; ok && callback == nil {
+			callback = v
+		}
+		if referent == nil {
+			return nil, errors.New("TypeError: ref() requires an object argument")
+		}
+		return PyWeakref_NewRef(referent, callback)
+	}
 }
 
 // NewWeakref builds a fresh weakref pointing at referent. callback
