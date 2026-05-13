@@ -126,6 +126,7 @@ func buildOS() (*objects.Module, error) {
 		{"rename", objects.NewBuiltinFunction("rename", rename)},
 		{"rmdir", objects.NewBuiltinFunction("rmdir", rmdir)},
 		{"walk", objects.NewBuiltinFunction("walk", walk)},
+		{"fspath", objects.NewBuiltinFunction("fspath", fspath)},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
@@ -357,6 +358,31 @@ func expanduser(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	}
 	home, _ := goos.UserHomeDir()
 	return objects.NewStr(home + s[1:]), nil
+}
+
+// CPython: Modules/posixmodule.c:6293 os_fspath_impl
+func fspath(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: fspath() takes exactly one argument (%d given)", len(args))
+	}
+	o := args[0]
+	switch o.Type() {
+	case objects.StrType(), objects.BytesType:
+		return o, nil
+	}
+	m, err := objects.GetAttr(o, objects.NewStr("__fspath__"))
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: expected str, bytes or os.PathLike object, not %s", o.Type().Name)
+	}
+	r, err := objects.Call(m, objects.NewTuple(nil), nil)
+	if err != nil {
+		return nil, err
+	}
+	switch r.Type() {
+	case objects.StrType(), objects.BytesType:
+		return r, nil
+	}
+	return nil, fmt.Errorf("TypeError: expected __fspath__ to return str or bytes, not %s", r.Type().Name)
 }
 
 // CPython: Modules/posixmodule.c:4324 os_getcwd_impl

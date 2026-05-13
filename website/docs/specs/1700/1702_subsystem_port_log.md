@@ -327,7 +327,7 @@ constants, errno bridge).
 | B | `Lib/os.py` | ~1,100 | `stdlib/os.py` | pending |
 | C | `Lib/posixpath.py` | ~600 | `stdlib/posixpath.py` | pending |
 | D | `Lib/ntpath.py` | ~900 | `stdlib/ntpath.py` | pending |
-| E | `Lib/genericpath.py` | ~170 | `stdlib/genericpath.py` | pending |
+| E | `Lib/genericpath.py` | ~170 | `stdlib/genericpath.py` | done |
 
 **Functions to port (A).** Minimum slice for unittest enablement.
 
