@@ -77,8 +77,8 @@ surface.
 | 2 | B `codegen.c` | `codegen_annassign` rewritten to record-only (no eager STORE_SUBSCR) | 1 | pending |
 | 3 | B `codegen.c` | `codegen_process_deferred_annotations`, `codegen_deferred_annotations_body`, `codegen_setup_annotations_scope`, `codegen_leave_annotations_scope` | 2 | pending |
 | 4 | B `codegen.c` | `_PyCodegen_Module` / `codegen_body` hooks that emit the per-scope `__annotate__` install | 3 | pending |
-| 5 | C `typeobject.c` | type `__annotate__` / `__annotations__` getset | 4 | pending |
-| 6 | D `funcobject.c` | function `__annotate__` / `__annotations__` getset | 4 | pending |
+| 5 | C `typeobject.c` | type `__annotate__` / `__annotations__` getset | 4 | done |
+| 6 | D `funcobject.c` | function `__annotate__` / `__annotations__` getset | 4 | done |
 | 7 | E `moduleobject.c` | module `__annotate__` / `__annotations__` getset | 4 | pending |
 | 8 | F `annotationlib.py` | vendor the Lib file, wire `Format` / `get_annotations` | 5,6,7 | pending |
 | Gate | - | `class Foo:  x: ClassVar[int]` succeeds without `typing` in scope; `import _colorize`, `import traceback`, `import dataclasses` all green; `Foo.__annotations__["x"]` returns the live `ClassVar[int]` value when `typing` is imported, and a `ForwardRef('ClassVar[int]')` when called with `format=STRING` | 1-8 | pending |
@@ -195,11 +195,11 @@ into `__annotations__` (legacy path).
 
 | C function | gopy hook | Status |
 |------------|-----------|--------|
-| `type_get_annotate` | `objects/type_annotations.go` `typeGetAnnotate` | pending |
-| `type_set_annotate` | `typeSetAnnotate` | pending |
-| `type_get_annotations` | `typeGetAnnotations` | pending |
-| `type_set_annotations` | `typeSetAnnotations` | pending |
-| getset registration on `objects.Type` | `objects/usertype.go` init | pending |
+| `type_get_annotate` | direct attribute lookup via `typeDescrTable` (no separate getter needed: `__annotate__` is stored straight in the class descr table by `type_new` once codegen emits it) | done (no-op) |
+| `type_set_annotate` | `typeSetAttr` already accepts arbitrary attribute writes on user types | done (no-op) |
+| `type_get_annotations` | `objects/type_attr.go:typeGetAttr` lazy branch | done (`type_attr.go`) |
+| `type_set_annotations` | `typeSetAttr` (writes go to the descr table; cache invalidation is automatic via `InvalidateVersionTag`) | done (no-op) |
+| getset registration on `objects.Type` | inlined into `typeGetAttr` rather than a separate getset, since the type machinery routes all attribute access through the `tp_getattro` slot | done |
 
 ### Behavior
 
@@ -326,8 +326,8 @@ Same eight-step cadence as 1702, 1704, 1705:
 - [ ] Phase 2: `codegen.c` `codegen_annassign` rewrite to record-only
 - [ ] Phase 3: `codegen.c` `__annotate__` function build pipeline
 - [ ] Phase 4: `codegen.c` body hook + future-flag short-circuit
-- [ ] Phase 5: `typeobject.c` `__annotate__` / `__annotations__` getset
-- [ ] Phase 6: `funcobject.c` `__annotate__` / `__annotations__` getset
+- [x] Phase 5: `typeobject.c` `__annotate__` / `__annotations__` getset (lazy branch in `objects/type_attr.go:typeGetAttr`; dormant until Phase 2-4 produces `__annotate__`)
+- [x] Phase 6: `funcobject.c` `__annotate__` / `__annotations__` getset (already shipped via `Function.Annotate` + `func_get_annotation_dict`)
 - [ ] Phase 7: `moduleobject.c` `__annotate__` / `__annotations__` getset
 - [ ] Phase 8: vendor `Lib/annotationlib.py`
 - [ ] Gate: `import _colorize`, `import traceback`, `import dataclasses` all green; `class Foo:  x: ClassVar[int]` succeeds without `typing` in scope

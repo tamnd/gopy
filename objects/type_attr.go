@@ -62,6 +62,28 @@ func typeGetAttr(o Object, name Object) (Object, error) {
 		return attr, nil
 	}
 
+	// PEP 649 lazy __annotations__: if the type was built with a
+	// deferred __annotate__ function (codegen emits MAKE_FUNCTION +
+	// STORE_NAME __annotate__ at end of class body when the body had
+	// annotations), invoking it with format=VALUE materializes the
+	// dict on first read and caches it as __annotations__.
+	//
+	// CPython: Objects/typeobject.c:1437 type_get_annotations
+	if nameStr == "__annotations__" {
+		if ann, _ := LookupDescriptor(tp, "__annotate__"); ann != nil {
+			out, err := Call(ann, NewTuple([]Object{NewInt(1)}), nil)
+			if err != nil {
+				return nil, err
+			}
+			d, ok := out.(*Dict)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __annotate__ returned non-dict of type '%s'", out.Type().Name)
+			}
+			SetTypeDescr(tp, "__annotations__", d)
+			return d, nil
+		}
+	}
+
 	if metaAttr != nil {
 		mt := metaAttr.Type()
 		if mt.DescrGet != nil {
