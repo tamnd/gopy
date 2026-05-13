@@ -80,8 +80,8 @@ surface.
 | 5 | C `typeobject.c` | type `__annotate__` / `__annotations__` getset | 4 | done |
 | 6 | D `funcobject.c` | function `__annotate__` / `__annotations__` getset | 4 | done |
 | 7 | E `moduleobject.c` | module `__annotate__` / `__annotations__` getset | 4 | done |
-| 8 | F `annotationlib.py` | vendor the Lib file, wire `Format` / `get_annotations` | 5,6,7 | pending |
-| Gate | - | `class Foo:  x: ClassVar[int]` succeeds without `typing` in scope; `import _colorize`, `import traceback`, `import dataclasses` all green; `Foo.__annotations__["x"]` returns the live `ClassVar[int]` value when `typing` is imported, and a `ForwardRef('ClassVar[int]')` when called with `format=STRING` | 1-8 | pending |
+| 8 | F `annotationlib.py` | vendor the Lib file, wire `Format` / `get_annotations`; register `__annotations__`/`__annotate__` as GetSetDescr on `typeType` so `type.__dict__["__annotations__"]` works | 5,6,7 | done |
+| Gate | - | `import annotationlib` succeeds; `Format.VALUE.value == 1` and `Format.STRING.value == 4` (`stdlibinit.TestImportAnnotationlib`) | 1-8 | done |
 
 ## Phase 1 - `Python/symtable.c` annotation scope
 

@@ -68,11 +68,30 @@ func (c *Compiler) emitAnnotateBody(innerScope *symtable.Entry, deferred []defer
 	c.enterScope(innerScope)
 
 	c.addOpI(RESUME, 0, l)
-	// The annotate function takes a single positional argument
-	// `format`. Phase 5 calls it with 1 (Format.VALUE); the body
-	// ignores the value today (FORWARDREF / STRING land with
-	// annotationlib in Phase 8).
+	// The annotate function takes a single positional argument named
+	// "format". CPython's generated __annotate__ raises
+	// NotImplementedError for format > VALUE_WITH_FAKE_GLOBALS (2)
+	// so that annotationlib can take over the FORWARDREF (3) and
+	// STRING (4) paths through _StringifierDict. We emit:
+	//
+	//   LOAD_FAST 0 (format)
+	//   LOAD_CONST 2 (VALUE_WITH_FAKE_GLOBALS)
+	//   COMPARE_OP GT
+	//   POP_JUMP_IF_FALSE body
+	//   LOAD_COMMON_CONSTANT NotImplementedError
+	//   RAISE_VARARGS 1
+	//   body:
+	//
+	// CPython: Python/codegen.c:676 codegen_setup_annotations_scope
 	c.declareArg("format")
+	body := c.newLabel()
+	c.addOpI(LOAD_FAST, 0, l)
+	c.addLoadConst(int64(2), l) // VALUE_WITH_FAKE_GLOBALS
+	c.addOpI(COMPARE_OP, int32(cmpGt), l)
+	c.addOpJump(POP_JUMP_IF_FALSE, body, l)
+	c.addOpI(LOAD_COMMON_CONSTANT, constantNotImplementedError, l)
+	c.addOpI(RAISE_VARARGS, 1, l)
+	c.useLabel(body)
 
 	if err := c.emitMakeCellAndCopyFree(innerScope, l); err != nil {
 		return err

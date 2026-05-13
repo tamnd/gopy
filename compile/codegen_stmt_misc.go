@@ -240,6 +240,11 @@ func (c *Compiler) visitAssert(s *ast.Assert) error {
 // Include/internal/pycore_opcode_utils.h CONSTANT_ASSERTIONERROR.
 const constantAssertionError = 0
 
+// constantNotImplementedError is the index passed to LOAD_COMMON_CONSTANT
+// for the NotImplementedError class. CPython:
+// Include/internal/pycore_opcode_utils.h CONSTANT_NOTIMPLEMENTEDERROR.
+const constantNotImplementedError = 1
+
 // visitImport handles `import a.b.c` and `import a.b.c as x`.
 //
 // CPython: Python/codegen.c:L2835 codegen_import

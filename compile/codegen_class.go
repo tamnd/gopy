@@ -208,6 +208,21 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 		body = body[1:]
 	}
 
+	// PEP 649 conditional-annotations prologue: when an annotation
+	// lives inside a conditional branch (if / for / while / try), the
+	// symtable analyzer flags the class entry with
+	// HasConditionalAnnotations. The body opens an empty set under
+	// __conditional_annotations__ that the conditional emitter inside
+	// visitAnnAssign tracks names against, so __annotate__ can report
+	// which annotations were actually evaluated.
+	//
+	// CPython: Python/codegen.c:860 codegen_class_body (BUILD_SET 0 +
+	// STORE_NAME __conditional_annotations__)
+	if innerScope.HasConditionalAnnotations {
+		c.addOpI(BUILD_SET, 0, loc(s))
+		c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", loc(s))
+	}
+
 	// PEP 649: class-body annotations are deferred. visitAnnAssign
 	// records each annotation into the unit's DeferredAnnotations
 	// slice instead of emitting an eager STORE_SUBSCR, and we synth

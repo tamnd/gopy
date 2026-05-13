@@ -67,6 +67,7 @@ func TestAnnAssignWithValueAssigns(t *testing.T) {
 	}
 	u := compileMod(t, module(a))
 	want := []string{
+		"BUILD_SET", "STORE_NAME",
 		"LOAD_CONST", "STORE_NAME",
 		"LOAD_CONST", "MAKE_FUNCTION", "STORE_NAME",
 		"LOAD_CONST", "RETURN_VALUE",
@@ -89,6 +90,7 @@ func TestAnnAssignNoValueRecordsAnnotationOnly(t *testing.T) {
 	}
 	u := compileMod(t, module(a))
 	want := []string{
+		"BUILD_SET", "STORE_NAME",
 		"LOAD_CONST", "MAKE_FUNCTION", "STORE_NAME",
 		"LOAD_CONST", "RETURN_VALUE",
 	}

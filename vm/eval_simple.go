@@ -847,6 +847,14 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(s)
 		return e.advance(), nil, nil, false, true, nil
 
+	case compile.BUILD_TEMPLATE:
+		// PEP 750 t-string literal. Stack: [strings_tuple, interpolations_tuple].
+		// CPython: Python/bytecodes.c:1977 BUILD_TEMPLATE
+		interpolations := e.popObject()
+		strings := e.popObject()
+		e.pushObject(objects.NewTemplateStr(strings, interpolations))
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.SET_ADD:
 		// Stack: ..., set, ..., value (oparg slots above set). Pops value,
 		// adds to the set at depth oparg.

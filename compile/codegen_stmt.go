@@ -20,6 +20,19 @@ import (
 // _PyCodegen_Module
 func (c *Compiler) visitModule(m *ast.Module) error {
 	body := c.consumeDocstring(m.Body)
+	// PEP 649 conditional-annotations prologue. Same shape as the
+	// class body emitter: when a top-level annotation hides behind a
+	// conditional, the analyzer flips HasConditionalAnnotations and
+	// we open a tracking set so __annotate__ knows which names made
+	// it through the body.
+	//
+	// CPython: Python/codegen.c:860 codegen_body (BUILD_SET 0 +
+	// STORE_NAME __conditional_annotations__)
+	if c.scope != nil && c.scope.HasConditionalAnnotations {
+		pool := poolNames
+		c.addOpI(BUILD_SET, 0, ast.Pos{Lineno: 1})
+		c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", ast.Pos{Lineno: 1})
+	}
 	// PEP 649: module annotations are deferred. visitAnnAssign records
 	// each annotation into the unit's DeferredAnnotations slice, and
 	// emitDeferredAnnotations after the body emits a synthetic

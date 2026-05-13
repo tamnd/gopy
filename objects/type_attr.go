@@ -12,6 +12,47 @@ import "fmt"
 func init() {
 	typeType.Getattro = typeGetAttr
 	typeType.Setattro = typeSetAttr
+
+	// Register __annotations__ and __annotate__ as GetSetDescr entries on
+	// typeType so they appear in type.__dict__. CPython exposes these as
+	// PyGetSetDescr_Type entries in type's tp_getset table; gopy mirrors
+	// that by installing them here so annotationlib can do:
+	//   _BASE_GET_ANNOTATIONS = type.__dict__["__annotations__"].__get__
+	//
+	// CPython: Objects/typeobject.c:2069 type_get_annotations (getset entry)
+	// CPython: Objects/typeobject.c:1990 type_get_annotate (getset entry)
+	SetTypeDescr(typeType, "__annotations__", NewGetSetDescr("__annotations__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__annotations__' requires 'type' object")
+			}
+			return typeGetAnnotations(tp)
+		},
+		func(o Object, v Object) error {
+			tp, ok := o.(*Type)
+			if !ok {
+				return fmt.Errorf("TypeError: descriptor '__annotations__' requires 'type' object")
+			}
+			return typeSetAnnotations(tp, v)
+		},
+	))
+	SetTypeDescr(typeType, "__annotate__", NewGetSetDescr("__annotate__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__annotate__' requires 'type' object")
+			}
+			return typeGetAnnotate(tp)
+		},
+		func(o Object, v Object) error {
+			tp, ok := o.(*Type)
+			if !ok {
+				return fmt.Errorf("TypeError: descriptor '__annotate__' requires 'type' object")
+			}
+			return typeSetAnnotate(tp, v)
+		},
+	))
 }
 
 // typeGetAttr is the tp_getattro slot for typeType. The receiver is a
