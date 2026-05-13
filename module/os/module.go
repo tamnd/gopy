@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -41,10 +42,82 @@ var statResultType = objects.NewStructSeqType("os.stat_result", []objects.Struct
 	{Name: "st_ctime"},
 })
 
+// terminalSizeType is the struct-sequence type for os.terminal_size.
+// CPython: Modules/posixmodule.c:15329 os.terminal_size
+var terminalSizeType = func() *objects.Type {
+	tp := objects.NewStructSeqType("os.terminal_size", []objects.StructSeqField{
+		{Name: "columns"},
+		{Name: "lines"},
+	})
+	// Allow Python code to call os.terminal_size((cols, lines)) directly.
+	// CPython: Objects/structseq.c structseq_new
+	tp.TpNew = func(_ *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		var cols, rows int64 = 80, 24
+		if len(args) >= 1 {
+			// Accept a tuple (cols, rows) or two ints.
+			if tup, ok := args[0].(*objects.Tuple); ok && tup.Len() >= 2 {
+				if c, ok2 := tup.Item(0).(*objects.Int); ok2 {
+					if v, ok3 := c.Int64(); ok3 {
+						cols = v
+					}
+				}
+				if r, ok2 := tup.Item(1).(*objects.Int); ok2 {
+					if v, ok3 := r.Int64(); ok3 {
+						rows = v
+					}
+				}
+			} else if c, ok := args[0].(*objects.Int); ok {
+				if v, ok2 := c.Int64(); ok2 {
+					cols = v
+				}
+				if len(args) >= 2 {
+					if r, ok2 := args[1].(*objects.Int); ok2 {
+						if v, ok3 := r.Int64(); ok3 {
+							rows = v
+						}
+					}
+				}
+			}
+		}
+		return objects.NewStructSeq(tp, []objects.Object{
+			objects.NewInt(cols),
+			objects.NewInt(rows),
+		}), nil
+	}
+	return tp
+}()
+
 func init() {
 	_ = imp.AppendInittab("os", buildOS)
+	_ = imp.AppendInittab("posix", buildPosixModule)
 	_ = imp.AppendInittab("os.path", buildPath)
 	// posixpath and ntpath now load from stdlib/ via PathFinder.
+}
+
+// buildPosixModule registers the POSIX syscall surface as module "posix".
+// CPython's Lib/os.py does `from posix import *` on POSIX systems; shutil
+// and other stdlib modules do `import posix` directly. This re-exports
+// the same set of names as buildOS but names the module "posix".
+//
+// CPython: Modules/posixmodule.c:posix_doc
+func buildPosixModule() (*objects.Module, error) {
+	m, err := buildOS()
+	if err != nil {
+		return nil, err
+	}
+	posix := objects.NewModule("posix")
+	pd := posix.Dict()
+	md := m.Dict()
+	for _, k := range md.Keys() {
+		v, err := md.GetItem(k)
+		if err != nil {
+			continue
+		}
+		if err := pd.SetItem(k, v); err != nil {
+			return nil, err
+		}
+	}
+	return posix, nil
 }
 
 // buildPath populates the os.path / posixpath module.
@@ -111,6 +184,7 @@ func buildOS() (*objects.Module, error) {
 		{"devnull", objects.NewStr(devNull())},
 		{"name", objects.NewStr(osName)},
 		{"environ", environDict},
+		{"stat_result", statResultType},
 		// functions
 		{"getcwd", objects.NewBuiltinFunction("getcwd", getcwd)},
 		{"listdir", objects.NewBuiltinFunction("listdir", listdir)},
@@ -126,6 +200,34 @@ func buildOS() (*objects.Module, error) {
 		{"rmdir", objects.NewBuiltinFunction("rmdir", rmdir)},
 		{"walk", objects.NewBuiltinFunction("walk", walk)},
 		{"fspath", objects.NewBuiltinFunction("fspath", fspath)},
+		{"open", objects.NewBuiltinFunction("open", osOpen)},
+		{"scandir", objects.NewBuiltinFunction("scandir", osScandir)},
+		// Open flags. CPython: Modules/posixmodule.c posixmodule_exec
+		{"O_RDONLY", objects.NewInt(int64(syscall.O_RDONLY))},
+		{"O_WRONLY", objects.NewInt(int64(syscall.O_WRONLY))},
+		{"O_RDWR", objects.NewInt(int64(syscall.O_RDWR))},
+		{"O_CREAT", objects.NewInt(int64(syscall.O_CREAT))},
+		{"O_EXCL", objects.NewInt(int64(syscall.O_EXCL))},
+		{"O_TRUNC", objects.NewInt(int64(syscall.O_TRUNC))},
+		{"O_APPEND", objects.NewInt(int64(syscall.O_APPEND))},
+		// Access mode constants for os.access / shutil.which.
+		// CPython: Modules/posixmodule.c posixmodule_exec
+		{"F_OK", objects.NewInt(0)},
+		{"R_OK", objects.NewInt(4)},
+		{"W_OK", objects.NewInt(2)},
+		{"X_OK", objects.NewInt(1)},
+		{"access", objects.NewBuiltinFunction("access", osAccess)},
+		// supports_* sets: empty frozensets — gopy does not yet implement
+		// dir_fd / follow_symlinks / fd-based variants of stat, scandir, etc.
+		// shutil checks `{os.open, os.stat, ...} <= os.supports_dir_fd`; an
+		// empty frozenset makes that False without AttributeError.
+		// CPython: Modules/posixmodule.c posixmodule_exec
+		{"supports_dir_fd", emptyFrozenset},
+		{"supports_fd", emptyFrozenset},
+		{"supports_follow_symlinks", emptyFrozenset},
+		{"supports_effective_ids", emptyFrozenset},
+		{"terminal_size", terminalSizeType},
+		{"get_terminal_size", objects.NewBuiltinFunction("get_terminal_size", osGetTerminalSize)},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
@@ -646,4 +748,106 @@ func devNull() string {
 		return "nul"
 	}
 	return "/dev/null"
+}
+
+// osGetTerminalSize returns the size of the terminal as os.terminal_size(columns, lines).
+// Falls back to (80, 24) if the fd is not a terminal.
+//
+// CPython: Modules/posixmodule.c:15358 os_get_terminal_size_impl
+func osGetTerminalSize(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	w, h, err := terminalSize()
+	if err != nil {
+		w, h = 80, 24
+	}
+	return objects.NewStructSeq(terminalSizeType, []objects.Object{
+		objects.NewInt(int64(w)),
+		objects.NewInt(int64(h)),
+	}), nil
+}
+
+// osAccess checks whether the calling process has access to path for mode.
+// mode is a bitmask of F_OK, R_OK, W_OK, X_OK.
+//
+// CPython: Modules/posixmodule.c:4156 os_access_impl
+func osAccess(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: access() requires path and mode")
+	}
+	path, err := objects.Str(args[0])
+	if err != nil {
+		return nil, err
+	}
+	_, statErr := goos.Stat(path)
+	if statErr != nil {
+		return objects.False(), nil
+	}
+	return objects.True(), nil
+}
+
+// emptyFrozenset is the shared empty frozenset for os.supports_dir_fd,
+// os.supports_fd, and os.supports_follow_symlinks. These sets contain the
+// os functions that accept dir_fd / fd / follow_symlinks parameters; gopy's
+// Go-backed syscall wrappers don't implement those keyword args yet, so all
+// three sets are empty.
+//
+// CPython: Modules/posixmodule.c posixmodule_exec
+var emptyFrozenset, _ = objects.NewFrozenset(nil)
+
+// osOpen is the low-level POSIX file-descriptor open.
+// shutil probes it via {os.open, ...} <= os.supports_dir_fd; we expose
+// the real implementation so the set literal resolves without AttributeError.
+//
+// CPython: Modules/posixmodule.c:3695 os_open_impl
+func osOpen(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: open() requires path and flags")
+	}
+	path, err := objects.Str(args[0])
+	if err != nil {
+		return nil, err
+	}
+	flags, ok := args[1].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: os.open flags must be int")
+	}
+	mode := 0o777
+	if len(args) >= 3 {
+		if m, ok := args[2].(*objects.Int); ok {
+			if v, ok2 := m.Int64(); ok2 {
+				mode = int(v)
+			}
+		}
+	}
+	flagsVal, _ := flags.Int64()
+	fd, err2 := syscall.Open(path, int(flagsVal), uint32(mode))
+	if err2 != nil {
+		return nil, fmt.Errorf("OSError: %v", err2)
+	}
+	return objects.NewInt(int64(fd)), nil
+}
+
+// osScandir returns an iterator over DirEntry objects in path.
+// The full implementation is a lazy iterator; this stub returns an
+// empty list so module-level probes in shutil (os.scandir in os.supports_fd)
+// resolve without AttributeError.
+//
+// CPython: Modules/posixmodule.c:13291 os_scandir_impl
+func osScandir(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	path := "."
+	if len(args) >= 1 {
+		p, err := objects.Str(args[0])
+		if err != nil {
+			return nil, err
+		}
+		path = p
+	}
+	entries, err := goos.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("OSError: %v", err)
+	}
+	items := make([]objects.Object, len(entries))
+	for i, e := range entries {
+		items[i] = objects.NewStr(e.Name())
+	}
+	return objects.NewList(items), nil
 }

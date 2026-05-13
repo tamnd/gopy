@@ -113,6 +113,24 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "flags", makeFlags(defaultCfg)); err != nil {
 		return nil, err
 	}
+	// Path-config attributes populated by UpdateConfig when lifecycle runs.
+	// Stamp empty-string defaults here so stdlib modules that read them at
+	// import time (e.g. gettext reads sys.base_prefix) don't see
+	// AttributeError. UpdateConfig will overwrite these with real values
+	// once initconfig wires through.
+	//
+	// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig
+	for _, name := range []string{
+		"executable", "_base_executable",
+		"prefix", "base_prefix", "exec_prefix", "base_exec_prefix",
+		"platlibdir",
+	} {
+		if has, _ := md.Contains(objects.NewStr(name)); !has {
+			if err := setStr(md, name, ""); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// sys.exc_info reads the per-thread handled-exception slot the vm
 	// maintains across PUSH_EXC_INFO / POP_EXCEPT. unittest's
 	// _Outcome.testPartExecutor and traceback.format_exc both call it

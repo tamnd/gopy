@@ -451,10 +451,10 @@ Status legend:
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | pending | `Lib/difflib.py` | `stdlib/difflib.py` | I | Big |
 | io / _io | #514 | pending | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | `StringIO` already exists; need `TextIOWrapper`, `BufferedReader`, `FileIO` |
-| argparse | #515 | pending | `Lib/argparse.py` | `stdlib/argparse.py` | I | Very large; needed by unittest's `__main__` |
-| signal / _signal | #516 | pending | `Modules/signalmodule.c` | `module/_signal/` | I | |
-| weakref / _weakref | #517 | pending | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` + `module/_weakref/` | I | |
-| os + posixpath + ntpath | #518 | pending | `Lib/os.py`, `Lib/posixpath.py`, `Lib/ntpath.py`, `Modules/posixmodule.c` slice | `stdlib/` + `module/posix/` | I | |
+| argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
+| signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
+| weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
+| os + posixpath + ntpath | #518 | partial | `Lib/os.py`, `Lib/posixpath.py`, `Lib/ntpath.py`, `Modules/posixmodule.c` slice | `stdlib/` + `module/os/` | I | posixpath.py, ntpath.py, genericpath.py vendored. Added `posix` inittab alias, `stat_result`, `open`/`access`/`scandir`, O_* flags, F_OK/R_OK/W_OK/X_OK, `supports_*` frozensets, `terminal_size` type with TpNew, `get_terminal_size`. os.py full vendor still pending. |
 | VM / compile audit | #521 | pending | `Python/ceval.c`, `Python/bytecodes.c`, `Python/compile.c` | (in-tree) | A | Sweep after built-ins land; record findings as additional rows here |
 
 Wave column: `1` = first parallel batch, `2` = second batch
