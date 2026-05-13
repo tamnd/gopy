@@ -326,7 +326,7 @@ constants, errno bridge).
 | A | `Modules/posixmodule.c` (slice) | ~15,000 | `module/posix/` | pending |
 | B | `Lib/os.py` | ~1,100 | `stdlib/os.py` | pending |
 | C | `Lib/posixpath.py` | ~600 | `stdlib/posixpath.py` | done (commonpath blocked on listcomp cell-binding bug, tracked under VM audit) |
-| D | `Lib/ntpath.py` | ~900 | `stdlib/ntpath.py` | pending |
+| D | `Lib/ntpath.py` | ~900 | `stdlib/ntpath.py` | blocked (task #589: `\x` escape in str literal corrupts subsequent NAME lookup; ntpath line 307 hits it) |
 | E | `Lib/genericpath.py` | ~170 | `stdlib/genericpath.py` | done |
 
 **Functions to port (A).** Minimum slice for unittest enablement.
