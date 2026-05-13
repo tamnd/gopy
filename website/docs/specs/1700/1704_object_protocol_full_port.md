@@ -47,7 +47,7 @@ otherwise. Final gate closes #544.
 | 6 | B `typeobject.c` | `type_new` pipeline (`type_new_*` functions) | 1,2,3,4,5 | done |
 | 7 | B `typeobject.c` | `inherit_slots` (every slot edge) | 6 | done |
 | 8 | E `ceval.c` | STORE_NAME / LOAD_NAME / DELETE_NAME | - | done |
-| Gate | - | enum + re + fnmatch smoke | all | pending |
+| Gate | - | enum + re + fnmatch smoke | all | partial (enum + fnmatch pass; bare `import re` pinned; `re.match` blocked on bytes/bytearray methodlist full port) |
 
 ## Phase 1 - `Objects/object.c` full port
 
