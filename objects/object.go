@@ -130,8 +130,15 @@ func objectNew(cls *Type, args []Object, kwargs map[string]Object) (Object, erro
 			return nil, fmt.Errorf("TypeError: %s() takes no arguments", cls.Name)
 		}
 	}
-	// Py_TPFLAGS_IS_ABSTRACT check deferred: abc.ABCMeta has not yet
-	// landed the flag plumbing in gopy.
+	// Abstract instantiation guard: refuse if __abstractmethods__ is
+	// non-empty. gopy does not yet carry the Py_TPFLAGS_IS_ABSTRACT
+	// bit, so the lookup-based version is the equivalent path.
+	//
+	// CPython: Objects/typeobject.c:6854 object_new (the
+	// Py_TPFLAGS_IS_ABSTRACT branch)
+	if err := checkNotAbstract(cls); err != nil {
+		return nil, err
+	}
 	return NewInstance(cls), nil
 }
 
@@ -244,36 +251,49 @@ func objectInitDescr(args []Object, kwargs map[string]Object) (Object, error) {
 	return None(), nil
 }
 
-// objectReprDescr is the slot wrapper for tp_repr.
+// objectReprDescr is the slot wrapper for object.__repr__. It must
+// call into objectRepr directly: routing through Repr() would
+// re-enter slotTpRepr, which looks up __repr__ via the MRO and lands
+// right back here, blowing the stack. CPython's object_repr is
+// likewise a direct PyUnicode_FromFormat.
+//
+// CPython: Objects/typeobject.c:6911 object_repr
 func objectReprDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
 	}
-	s, err := Repr(args[0])
+	s, err := objectRepr(args[0])
 	if err != nil {
 		return nil, err
 	}
 	return NewStr(s), nil
 }
 
-// objectStrDescr is the slot wrapper for tp_str.
+// objectStrDescr is the slot wrapper for object.__str__. Same
+// recursion concern as objectReprDescr: go straight to objectStr.
+//
+// CPython: Objects/typeobject.c:6938 object_str
 func objectStrDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
 	}
-	s, err := Str(args[0])
+	s, err := objectStr(args[0])
 	if err != nil {
 		return nil, err
 	}
 	return NewStr(s), nil
 }
 
-// objectHashDescr is the slot wrapper for tp_hash.
+// objectHashDescr is the slot wrapper for tp_hash. Goes straight to
+// the identity hash so the descriptor cannot loop back through Hash()
+// when it is installed as the inherited __hash__ on a user metaclass.
+//
+// CPython: Objects/typeobject.c:6986 object___hash__
 func objectHashDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
 	}
-	h, err := Hash(args[0])
+	h, err := identityHash(args[0])
 	if err != nil {
 		return nil, err
 	}

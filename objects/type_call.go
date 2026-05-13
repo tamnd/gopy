@@ -236,11 +236,13 @@ func typeNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
 		}
 		bases = append(bases, t)
 	}
-	t := NewUserType(nameObj.v, bases, ns)
-	// Stamp the metaclass: the new class's type is mcls, not the
-	// default typeType. This mirrors CPython's PyType_Ready setting
-	// Py_TYPE(type) to metatype.
-	t.Init(meta)
+	// NewUserTypeMeta stamps Py_TYPE(t) = meta before the namespace
+	// copy and __set_name__ pass, so PEP 487 hooks that resolve
+	// metaclass-defined methods via cls.<method> see the right
+	// metatype.
+	//
+	// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
+	t := NewUserTypeMeta(nameObj.v, bases, ns, kwargs, meta)
 	return t, nil
 }
 
@@ -274,7 +276,42 @@ func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 		}
 		bases = append(bases, t)
 	}
-	return NewUserType(nameObj.v, bases, ns), nil
+	// type(name, bases, ns, **kw) might be invoked directly while one of
+	// the bases carries a richer metaclass (e.g. enum.EnumType). CPython
+	// recalculates the winning metaclass from the bases and re-dispatches
+	// to that metaclass's tp_new so the kwargs flow to the override that
+	// knows how to consume them. Without this, kwargs like `boundary=`
+	// fall through to object.__init_subclass__ and crash.
+	//
+	// CPython: Objects/typeobject.c:4728 type_new (winner = _PyType_CalculateMetaclass)
+	winner, err := calculateMetaclass(typeType, bases)
+	if err != nil {
+		return nil, err
+	}
+	if winner != typeType {
+		return typeMetaclassCall(winner, args, kwargs)
+	}
+	return NewUserTypeKwargs(nameObj.v, bases, ns, kwargs), nil
+}
+
+// calculateMetaclass picks the most derived metaclass among metatype
+// and the types of bases, returning a TypeError on metaclass conflict.
+//
+// CPython: Objects/typeobject.c:3921 _PyType_CalculateMetaclass
+func calculateMetaclass(metatype *Type, bases []*Type) (*Type, error) {
+	winner := metatype
+	for _, b := range bases {
+		bt := b.Type()
+		if IsSubtype(winner, bt) {
+			continue
+		}
+		if IsSubtype(bt, winner) {
+			winner = bt
+			continue
+		}
+		return nil, fmt.Errorf("TypeError: metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases")
+	}
+	return winner, nil
 }
 
 // bindDescr applies the descriptor protocol to descr if its type

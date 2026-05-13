@@ -32,6 +32,7 @@ func init() {
 	GetSetDescrType.Str = getsetDescrRepr
 	GetSetDescrType.DescrGet = getsetDescrGet
 	GetSetDescrType.DescrSet = getsetDescrSet
+	addDescriptorSlotWrappers(GetSetDescrType)
 }
 
 // NewGetSetDescr builds a getset descriptor that exposes name on the

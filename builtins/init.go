@@ -11,6 +11,7 @@
 package builtins
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -196,8 +197,10 @@ func typeSingletons() []struct {
 // CPython: Objects/longobject.c:6438 PyLong_Type (tp_new = long_new, tp_call NULL)
 func wireTypeCalls() {
 	wireOnce.Do(func() {
-		bindCtor(objects.StrType(), StrOf)
-		bindCtor(objects.IntType, IntCtor)
+		objects.SetStrTpNewBase(StrOf)
+		bindCtorDescr(objects.StrType(), StrOf)
+		objects.SetIntTpNewBase(IntCtor)
+		bindCtorDescr(objects.IntType, IntCtor)
 		bindCtor(objects.FloatType, FloatCtor)
 		bindCtor(objects.BoolType, BoolCtor)
 		bindCtor(objects.ListType, ListCtor)
@@ -217,10 +220,39 @@ func wireTypeCalls() {
 	})
 }
 
+// bindCtor wires the type's tp_new slot to fn and exposes the matching
+// __new__ descriptor in the type's own __dict__. CPython's
+// add_tp_new_wrapper does the latter automatically for every type whose
+// tp_new is non-NULL, which is how `'__new__' in int.__dict__` is True
+// and how enum's `_find_data_type_` distinguishes data-bearing mixins.
+//
+// CPython: Objects/typeobject.c:9952 tp_new_wrapper + add_tp_new_wrapper
 func bindCtor(t *objects.Type, fn func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)) {
 	t.TpNew = func(_ *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 		return fn(args, kwargs)
 	}
+	bindCtorDescr(t, fn)
+}
+
+// bindCtorDescr installs the __new__ descriptor without touching
+// TpNew. Used when a type already wired a subtype-aware TpNew (e.g.
+// str via SetStrTpNewBase) and only the descriptor exposure is left.
+func bindCtorDescr(t *objects.Type, fn func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)) {
+	wrapperName := t.Name + ".__new__"
+	objects.SetTypeDescr(t, "__new__", objects.NewBuiltinFunction(wrapperName,
+		func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+			if len(args) < 1 {
+				return nil, fmt.Errorf("TypeError: %s(): not enough arguments", wrapperName)
+			}
+			cls, ok := args[0].(*objects.Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: %s(X): X is not a type object", wrapperName)
+			}
+			if tn := t.TpNew; tn != nil {
+				return tn(cls, args[1:], kwargs)
+			}
+			return fn(args[1:], kwargs)
+		}))
 }
 
 // exceptionSingletons returns the exception-class names CPython

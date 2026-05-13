@@ -33,6 +33,7 @@ func init() {
 	PropertyType.DescrGet = propertyDescrGet
 	PropertyType.DescrSet = propertyDescrSet
 	PropertyType.TpNew = propertyNew
+	addDescriptorSlotWrappers(PropertyType)
 }
 
 // propertyNew is the tp_new slot. property([fget[, fset[, fdel[, doc]]]])

@@ -44,6 +44,12 @@ type Unicode struct {
 	ascii  bool   // all code points < 0x80
 	ready  bool   // CPython's "interned/canonicalized" flag
 	hash   int64  // -1 if not yet computed
+	// attrs holds instance attributes for str subclass objects. Nil for
+	// plain str instances; allocated by strSubclassSetAttr when first
+	// written. Mirrors CPython's tp_dictoffset on str subclasses (which
+	// CPython sets via type_new_descriptors when the subclass picks up
+	// __dict__ from object).
+	attrs *Dict
 }
 
 // strType is the type singleton for str.
@@ -51,12 +57,151 @@ type Unicode struct {
 // CPython: Objects/unicodeobject.c:L15188 PyUnicode_Type
 var strType = NewType("str", []*Type{objectType})
 
+// strTpNew is the type-aware tp_new for str. When cls is strType itself,
+// callers go through the builtin str() factory wired by bindStrCtor. When
+// cls is a strict subclass (e.g. enum.StrEnum), allocate a *Unicode
+// tagged with cls so isinstance(obj, MyStr) holds and the subclass's
+// __dict__ slot (attrs field) is reachable.
+//
+// CPython: Objects/unicodeobject.c:13993 unicode_subtype_new
+var strTpNew func(cls *Type, args []Object, kwargs map[string]Object) (Object, error)
+
+// SetStrTpNewBase is called from package builtins to wire the value-side
+// constructor (str(obj, [encoding], [errors])). The subtype path here
+// runs the same constructor, then re-tags the *Unicode with cls.
+func SetStrTpNewBase(fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+	strTpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		out, err := fn(args, kwargs)
+		if err != nil {
+			return nil, err
+		}
+		if cls == nil || cls == strType {
+			return out, nil
+		}
+		// Subclass: re-wrap so the instance's type is cls (and its
+		// attrs slot is available).
+		u, ok := out.(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: str.__new__ expected str result, got %s", out.Type().Name)
+		}
+		return newStrAs(u.v, cls), nil
+	}
+	strType.TpNew = strTpNew
+}
+
+// unicodeReprDescr backs str.__dict__["__repr__"]. CPython installs a
+// slot wrapper for tp_repr; subclasses look it up in str's __dict__ to
+// avoid inheriting object.__repr__'s `<addr object>` format. Without
+// this, fixupCallReprStr finds object's __repr__ via MRO and binds the
+// generic dispatcher, so MyStr("hello") prints as `<MyStr object at
+// 0x...>` instead of 'hello'.
+//
+// CPython: Objects/typeobject.c slotdefs (TPSLOT __repr__ +
+// PyUnicode_Type.tp_repr)
+func unicodeReprDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
+	}
+	s, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'str' object")
+	}
+	out, err := unicodeRepr(s)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(out), nil
+}
+
+func unicodeStrDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
+	}
+	s, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__str__' requires a 'str' object")
+	}
+	if s.Type() == strType {
+		return s, nil
+	}
+	return NewStr(s.v), nil
+}
+
+// unicodeHashDescr backs str.__dict__["__hash__"]. Mirrors CPython's
+// slot wrapper, so str subclasses inherit unicode_hash rather than
+// object.__hash__ (which returns id(obj)).
+//
+// CPython: Objects/typeobject.c slotdefs (TPSLOT __hash__ +
+// PyUnicode_Type.tp_hash)
+func unicodeHashDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
+	}
+	s, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__hash__' requires a 'str' object")
+	}
+	h, err := unicodeHash(s)
+	if err != nil {
+		return nil, err
+	}
+	return NewInt(h), nil
+}
+
+// unicodeEqDescr backs str.__dict__["__eq__"]. Without an entry here,
+// fixupRichCmpAndBool finds object.__eq__ in the MRO and routes
+// comparison through identity, so MyStr("x") == "x" is False.
+//
+// CPython: Objects/typeobject.c slotdefs (RICHCMP slot map for tp_richcompare)
+func unicodeEqDescr(args []Object, _ map[string]Object) (Object, error) {
+	return unicodeRichCmpDescr(args, CompareEQ)
+}
+
+func unicodeNeDescr(args []Object, _ map[string]Object) (Object, error) {
+	return unicodeRichCmpDescr(args, CompareNE)
+}
+
+func unicodeLtDescr(args []Object, _ map[string]Object) (Object, error) {
+	return unicodeRichCmpDescr(args, CompareLT)
+}
+
+func unicodeLeDescr(args []Object, _ map[string]Object) (Object, error) {
+	return unicodeRichCmpDescr(args, CompareLE)
+}
+
+func unicodeGtDescr(args []Object, _ map[string]Object) (Object, error) {
+	return unicodeRichCmpDescr(args, CompareGT)
+}
+
+func unicodeGeDescr(args []Object, _ map[string]Object) (Object, error) {
+	return unicodeRichCmpDescr(args, CompareGE)
+}
+
+func unicodeRichCmpDescr(args []Object, op CompareOp) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: expected 2 arguments, got %d", len(args))
+	}
+	if _, ok := args[0].(*Unicode); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor requires a 'str' object")
+	}
+	return unicodeRichCmp(args[0], args[1], op)
+}
+
 func init() {
 	strType.Repr = unicodeRepr
 	strType.Str = unicodeStr
 	strType.Hash = unicodeHash
 	strType.RichCmp = unicodeRichCmp
 	strType.Getattro = GenericGetAttr
+	SetTypeDescr(strType, "__repr__", NewMethodDescr(strType, "__repr__", unicodeReprDescr))
+	SetTypeDescr(strType, "__str__", NewMethodDescr(strType, "__str__", unicodeStrDescr))
+	SetTypeDescr(strType, "__hash__", NewMethodDescr(strType, "__hash__", unicodeHashDescr))
+	SetTypeDescr(strType, "__eq__", NewMethodDescr(strType, "__eq__", unicodeEqDescr))
+	SetTypeDescr(strType, "__ne__", NewMethodDescr(strType, "__ne__", unicodeNeDescr))
+	SetTypeDescr(strType, "__lt__", NewMethodDescr(strType, "__lt__", unicodeLtDescr))
+	SetTypeDescr(strType, "__le__", NewMethodDescr(strType, "__le__", unicodeLeDescr))
+	SetTypeDescr(strType, "__gt__", NewMethodDescr(strType, "__gt__", unicodeGtDescr))
+	SetTypeDescr(strType, "__ge__", NewMethodDescr(strType, "__ge__", unicodeGeDescr))
 	// Sequence.Repeat: 'ab' * 3 == 'ababab'.
 	//
 	// CPython: Objects/unicodeobject.c:11556 unicode_repeat
@@ -248,6 +393,84 @@ func unicodeRichCmp(a, b Object, op CompareOp) (Object, error) {
 //
 // CPython: Objects/unicodeobject.c:L15188 PyUnicode_Type
 func StrType() *Type { return strType }
+
+// newStrAs is NewStr but tagged with t instead of strType. Used by the
+// str subtype path so a class like `class MyStr(str): pass` yields
+// instances whose Type() is MyStr.
+//
+// CPython: Objects/unicodeobject.c:13993 unicode_subtype_new
+func newStrAs(s string, t *Type) *Unicode {
+	o := &Unicode{
+		v:    s,
+		hash: -1,
+	}
+	o.classify()
+	o.init(t)
+	return o
+}
+
+// strSubclassGetAttr is the tp_getattro slot for user-defined str
+// subclasses. Instance attributes from u.attrs win over non-data
+// descriptors; data descriptors on the type still take priority.
+//
+// CPython: Objects/typeobject.c:5165 slot_tp_getattr_hook (str path)
+func strSubclassGetAttr(o Object, name Object) (Object, error) {
+	u, ok := o.(*Unicode)
+	if !ok {
+		return GenericGetAttr(o, name)
+	}
+	tp := u.Type()
+	nameStr := attrNameStr(name)
+	descr, _ := LookupDescriptor(tp, nameStr)
+	if descr != nil {
+		if dget := descr.Type().DescrGet; dget != nil {
+			if descr.Type().DescrSet != nil {
+				return dget(descr, o, tp)
+			}
+		}
+	}
+	if u.attrs != nil {
+		if v, err := u.attrs.GetItem(name); err == nil {
+			return v, nil
+		}
+	}
+	if descr != nil {
+		if dget := descr.Type().DescrGet; dget != nil {
+			return dget(descr, o, tp)
+		}
+		return descr, nil
+	}
+	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, nameStr)
+}
+
+// strSubclassSetAttr is the tp_setattro slot for user-defined str
+// subclasses. Instance attributes land in u.attrs.
+//
+// CPython: Objects/object.c:2040 PyObject_GenericSetAttr (str-subclass path)
+func strSubclassSetAttr(o Object, name Object, value Object) error {
+	u, ok := o.(*Unicode)
+	if !ok {
+		return GenericSetAttr(o, name, value)
+	}
+	tp := u.Type()
+	nameStr := attrNameStr(name)
+	descr, _ := LookupDescriptor(tp, nameStr)
+	if descr != nil {
+		if dset := descr.Type().DescrSet; dset != nil {
+			return dset(descr, o, value)
+		}
+	}
+	if u.attrs == nil {
+		u.attrs = NewDict()
+	}
+	if value == nil {
+		if _, err := u.attrs.GetItem(name); err != nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, nameStr)
+		}
+		return u.attrs.DelItem(name)
+	}
+	return u.attrs.SetItem(name, value)
+}
 
 // unicodeGetItem returns the Nth code point of a string as a single-char
 // string. Supports negative indexing.

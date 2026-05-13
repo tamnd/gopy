@@ -69,6 +69,14 @@ func init() {
 	FunctionType.DescrGet = functionDescrGet
 	FunctionType.Getattro = funcGetAttr
 	FunctionType.Setattro = funcSetAttr
+	// func_traverse visits every reachable Object slot so the cycle
+	// collector can walk the function's reference graph. CPython
+	// visits the PyObject form of every PyFunctionObject slot; we
+	// skip Name and Qualname here because gopy stores them as Go
+	// strings, not PyUnicode.
+	//
+	// CPython: Objects/funcobject.c:1093 func_traverse
+	FunctionType.TpTraverse = functionTraverse
 	// Identity hash. Functions inherit tp_hash from object in CPython
 	// and are routinely stuffed into sets (e.g. enum's _find_new_).
 	//
@@ -76,21 +84,85 @@ func init() {
 	// override, so object_hash is inherited)
 	FunctionType.Hash = identityHash
 	registerFunctionGetSets()
+	// function.__new__: clinic-generated wrapper that accepts (code,
+	// globals, name=None, argdefs=None, closure=None, kwdefaults=None)
+	// and validates each argument before assembling the function.
+	//
+	// CPython: Objects/funcobject.c:1030 func_new_impl
+	FunctionType.TpNew = funcTpNew
 	// FunctionType.Call is wired by the vm package on init since the
 	// call needs to push a frame and drive Eval; doing that from
 	// objects would be a circular import.
+	addDescriptorSlotWrappers(FunctionType)
+}
+
+// functionTraverse mirrors func_traverse. Visit order matches CPython
+// so any future GC consumer sees the same reachability profile.
+//
+// CPython: Objects/funcobject.c:1093 func_traverse
+func functionTraverse(o Object, visit Visitor) error {
+	f := o.(*Function)
+	visits := [...]Object{
+		codeAsObject(f.Code),
+		f.Globals,
+		f.Module,
+		tupleAsObject(f.Defaults),
+		dictAsObject(f.KwDefaults),
+		f.Doc,
+		dictAsObject(f.Dict),
+		tupleAsObject(f.Closure),
+		dictAsObject(f.Annotations),
+		f.Annotate,
+		tupleAsObject(f.Typeparams),
+		f.Builtins,
+	}
+	for _, v := range visits {
+		if v == nil {
+			continue
+		}
+		if err := visit(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// codeAsObject promotes *Code to Object only when non-nil; the visit
+// loop relies on a nil result to skip missing slots without growing a
+// per-field guard.
+func codeAsObject(c *Code) Object {
+	if c == nil {
+		return nil
+	}
+	return c
+}
+
+func tupleAsObject(t *Tuple) Object {
+	if t == nil {
+		return nil
+	}
+	return t
+}
+
+func dictAsObject(d *Dict) Object {
+	if d == nil {
+		return nil
+	}
+	return d
 }
 
 // registerFunctionGetSets exposes the introspection attributes
-// CPython publishes on function objects. The setters that exist on
-// the function struct (SetCode, SetDefaults, SetKwDefaults,
-// SetClosure, SetAnnotations) become write-through; the remaining
-// names are read-only.
+// CPython publishes on function objects. Mirrors func_getsetlist
+// plus the func_memberlist surface (__doc__, __module__, __globals__,
+// __builtins__, __closure__).
 //
-// CPython: Objects/funcobject.c:806 func_getsetlist
+// CPython: Objects/funcobject.c:987 func_getsetlist
+// CPython: Objects/funcobject.c:633 func_memberlist
 func registerFunctionGetSets() {
 	registerFunctionIdentityGetSets()
 	registerFunctionReadOnlyGetSets()
+	registerFunctionMutableGetSets()
+	registerFunctionAnnotateGetSets()
 	registerFunctionTypeParamsGetSet()
 	registerFunctionDictGetSets()
 }
@@ -135,28 +207,13 @@ func registerFunctionIdentityGetSets() {
 		func(o Object, v Object) error { o.(*Function).Module = v; return nil }))
 }
 
-// registerFunctionReadOnlyGetSets installs the read-only attribute
-// surface: defaults, kwdefaults, closure, code, globals, builtins,
-// annotations.
+// registerFunctionReadOnlyGetSets installs the read-only surface from
+// func_memberlist: __closure__, __globals__, __builtins__. CPython
+// keeps these strictly read-only on the Python side; assignment
+// raises AttributeError.
+//
+// CPython: Objects/funcobject.c:633 func_memberlist
 func registerFunctionReadOnlyGetSets() {
-	SetTypeDescr(FunctionType, "__defaults__", NewGetSetDescr("__defaults__",
-		func(o Object) (Object, error) {
-			f := o.(*Function)
-			if f.Defaults == nil {
-				return None(), nil
-			}
-			return f.Defaults, nil
-		},
-		nil))
-	SetTypeDescr(FunctionType, "__kwdefaults__", NewGetSetDescr("__kwdefaults__",
-		func(o Object) (Object, error) {
-			f := o.(*Function)
-			if f.KwDefaults == nil {
-				return None(), nil
-			}
-			return f.KwDefaults, nil
-		},
-		nil))
 	SetTypeDescr(FunctionType, "__closure__", NewGetSetDescr("__closure__",
 		func(o Object) (Object, error) {
 			f := o.(*Function)
@@ -166,6 +223,24 @@ func registerFunctionReadOnlyGetSets() {
 			return f.Closure, nil
 		},
 		nil))
+	SetTypeDescr(FunctionType, "__globals__", NewGetSetDescr("__globals__",
+		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Globals), nil },
+		nil))
+	SetTypeDescr(FunctionType, "__builtins__", NewGetSetDescr("__builtins__",
+		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Builtins), nil },
+		nil))
+}
+
+// registerFunctionMutableGetSets installs the mutable surface from
+// func_getsetlist: __code__, __defaults__, __kwdefaults__,
+// __annotations__. Each setter mirrors the CPython type check and
+// clears Version so the specializer's inline caches invalidate.
+//
+// CPython: Objects/funcobject.c:660 func_set_code
+// CPython: Objects/funcobject.c:766 func_set_defaults
+// CPython: Objects/funcobject.c:809 func_set_kwdefaults
+// CPython: Objects/funcobject.c:916 function___annotations___set_impl
+func registerFunctionMutableGetSets() {
 	SetTypeDescr(FunctionType, "__code__", NewGetSetDescr("__code__",
 		func(o Object) (Object, error) {
 			c := o.(*Function).Code
@@ -174,25 +249,257 @@ func registerFunctionReadOnlyGetSets() {
 			}
 			return c, nil
 		},
-		nil))
-	SetTypeDescr(FunctionType, "__globals__", NewGetSetDescr("__globals__",
-		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Globals), nil },
-		nil))
-	SetTypeDescr(FunctionType, "__builtins__", NewGetSetDescr("__builtins__",
-		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Builtins), nil },
-		nil))
-	SetTypeDescr(FunctionType, "__annotations__", NewGetSetDescr("__annotations__",
+		funcSetCodeAttr))
+	SetTypeDescr(FunctionType, "__defaults__", NewGetSetDescr("__defaults__",
 		func(o Object) (Object, error) {
-			d, err := o.(*Function).GetAnnotations()
-			if err != nil {
-				return nil, err
+			f := o.(*Function)
+			if f.Defaults == nil {
+				return None(), nil
 			}
-			if d == nil {
-				return NewDict(), nil
-			}
-			return d, nil
+			return f.Defaults, nil
 		},
-		nil))
+		funcSetDefaultsAttr))
+	SetTypeDescr(FunctionType, "__kwdefaults__", NewGetSetDescr("__kwdefaults__",
+		func(o Object) (Object, error) {
+			f := o.(*Function)
+			if f.KwDefaults == nil {
+				return None(), nil
+			}
+			return f.KwDefaults, nil
+		},
+		funcSetKwDefaultsAttr))
+	SetTypeDescr(FunctionType, "__annotations__", NewGetSetDescr("__annotations__",
+		funcGetAnnotationsAttr,
+		funcSetAnnotationsAttr))
+}
+
+// registerFunctionAnnotateGetSets installs __annotate__: the callable
+// that lazily builds the function's annotation dict. Setting it to a
+// callable clears any cached __annotations__ so the next read
+// re-runs the annotator.
+//
+// CPython: Objects/funcobject.c:846 function___annotate___get_impl
+// CPython: Objects/funcobject.c:862 function___annotate___set_impl
+func registerFunctionAnnotateGetSets() {
+	SetTypeDescr(FunctionType, "__annotate__", NewGetSetDescr("__annotate__",
+		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Annotate), nil },
+		funcSetAnnotateAttr))
+}
+
+// funcSetCodeAttr is the __code__ setter. Mirrors func_set_code: the
+// new value must be a code object, the free-var count must match the
+// captured closure size, and Version resets so the specializer
+// invalidates anything keyed on the old code identity.
+//
+// CPython: Objects/funcobject.c:660 func_set_code
+func funcSetCodeAttr(o Object, v Object) error {
+	if v == nil {
+		return fmt.Errorf("TypeError: __code__ must be set to a code object")
+	}
+	c, ok := v.(*Code)
+	if !ok {
+		return fmt.Errorf("TypeError: __code__ must be set to a code object")
+	}
+	return o.(*Function).SetCode(c)
+}
+
+// funcSetDefaultsAttr is the __defaults__ setter. None clears the
+// tuple; anything other than None or tuple raises TypeError.
+//
+// CPython: Objects/funcobject.c:766 func_set_defaults
+func funcSetDefaultsAttr(o Object, v Object) error {
+	f := o.(*Function)
+	if v == nil || v == None() {
+		f.SetDefaults(nil)
+		return nil
+	}
+	t, ok := v.(*Tuple)
+	if !ok {
+		return fmt.Errorf("TypeError: __defaults__ must be set to a tuple object")
+	}
+	f.SetDefaults(t)
+	return nil
+}
+
+// funcSetKwDefaultsAttr is the __kwdefaults__ setter. None clears the
+// dict; anything other than None or dict raises TypeError.
+//
+// CPython: Objects/funcobject.c:809 func_set_kwdefaults
+func funcSetKwDefaultsAttr(o Object, v Object) error {
+	f := o.(*Function)
+	if v == nil || v == None() {
+		f.SetKwDefaults(nil)
+		return nil
+	}
+	d, ok := v.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: __kwdefaults__ must be set to a dict object")
+	}
+	f.SetKwDefaults(d)
+	return nil
+}
+
+// funcGetAnnotationsAttr lazily materializes the annotations dict.
+// If neither annotations nor a callable __annotate__ is available, a
+// fresh empty dict is created and stored so subsequent reads see the
+// same identity (matching CPython's `func_annotations = PyDict_New()`
+// shortcut in function___annotations___get_impl).
+//
+// CPython: Objects/funcobject.c:895 function___annotations___get_impl
+func funcGetAnnotationsAttr(o Object) (Object, error) {
+	f := o.(*Function)
+	if f.Annotations == nil && f.Annotate == nil {
+		f.Annotations = NewDict()
+	}
+	d, err := f.GetAnnotations()
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return NewDict(), nil
+	}
+	return d, nil
+}
+
+// funcSetAnnotationsAttr is the __annotations__ setter. None clears
+// the dict; anything other than None or dict raises TypeError.
+// Assigning also drops any pending Annotate so the new value is
+// authoritative.
+//
+// CPython: Objects/funcobject.c:916 function___annotations___set_impl
+func funcSetAnnotationsAttr(o Object, v Object) error {
+	f := o.(*Function)
+	if v == nil || v == None() {
+		f.SetAnnotations(nil)
+		return nil
+	}
+	d, ok := v.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: __annotations__ must be set to a dict object")
+	}
+	f.SetAnnotations(d)
+	return nil
+}
+
+// funcSetAnnotateAttr is the __annotate__ setter. Deletion (value
+// nil) raises TypeError; None clears the annotator; a callable swaps
+// it in and clears any cached __annotations__ so the next read
+// re-runs the annotator.
+//
+// CPython: Objects/funcobject.c:862 function___annotate___set_impl
+func funcSetAnnotateAttr(o Object, v Object) error {
+	f := o.(*Function)
+	if v == nil {
+		return fmt.Errorf("TypeError: __annotate__ cannot be deleted")
+	}
+	if v == None() {
+		f.Annotate = None()
+		return nil
+	}
+	if !Callable(v) {
+		return fmt.Errorf("TypeError: __annotate__ must be callable or None")
+	}
+	f.Annotate = v
+	f.Annotations = nil
+	return nil
+}
+
+// funcTpNew is function.__new__. Mirrors func_new_impl:
+// (code, globals, name=None, defaults=None, closure=None,
+// kwdefaults=None). Each argument has a typed check; the closure
+// must match the code's free-var count exactly and every element must
+// be a cell.
+//
+// CPython: Objects/funcobject.c:1030 func_new_impl
+func funcTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	pos := append([]Object(nil), args...)
+	if v, ok := kwargs["code"]; ok && len(pos) < 1 {
+		pos = append(pos, v)
+	}
+	if v, ok := kwargs["globals"]; ok && len(pos) < 2 {
+		pos = append(pos, v)
+	}
+	for _, name := range []string{"name", "argdefs", "closure", "kwdefaults"} {
+		if v, ok := kwargs[name]; ok {
+			pos = append(pos, v)
+		}
+	}
+	for len(pos) < 6 {
+		pos = append(pos, None())
+	}
+	if len(pos) < 2 || len(pos) > 6 {
+		return nil, fmt.Errorf("TypeError: function expected 2 to 6 arguments, got %d", len(args))
+	}
+	code, ok := pos[0].(*Code)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: arg 1 (code) must be code, not %s", pos[0].Type().Name)
+	}
+	if _, ok := pos[1].(*Dict); !ok {
+		return nil, fmt.Errorf("TypeError: arg 2 (globals) must be dict, not %s", pos[1].Type().Name)
+	}
+	name := pos[2]
+	defaults := pos[3]
+	closure := pos[4]
+	kwdefaults := pos[5]
+
+	if name != None() {
+		if _, ok := name.(*Unicode); !ok {
+			return nil, fmt.Errorf("TypeError: arg 3 (name) must be None or string")
+		}
+	}
+	if defaults != None() {
+		if _, ok := defaults.(*Tuple); !ok {
+			return nil, fmt.Errorf("TypeError: arg 4 (defaults) must be None or tuple")
+		}
+	}
+	if _, ok := closure.(*Tuple); !ok {
+		if len(code.Freevars) > 0 && closure == None() {
+			return nil, fmt.Errorf("TypeError: arg 5 (closure) must be tuple")
+		}
+		if closure != None() {
+			return nil, fmt.Errorf("TypeError: arg 5 (closure) must be None or tuple")
+		}
+	}
+	if kwdefaults != None() {
+		if _, ok := kwdefaults.(*Dict); !ok {
+			return nil, fmt.Errorf("TypeError: arg 6 (kwdefaults) must be None or dict")
+		}
+	}
+
+	nclosure := 0
+	if t, ok := closure.(*Tuple); ok {
+		nclosure = t.Len()
+	}
+	if len(code.Freevars) != nclosure {
+		return nil, fmt.Errorf("ValueError: %s requires closure of length %d, not %d",
+			code.Name, len(code.Freevars), nclosure)
+	}
+	if t, ok := closure.(*Tuple); ok {
+		for i := 0; i < t.Len(); i++ {
+			if _, isCell := t.Item(i).(*Cell); !isCell {
+				return nil, fmt.Errorf("TypeError: arg 5 (closure) expected cell, found %s",
+					t.Item(i).Type().Name)
+			}
+		}
+	}
+
+	f, err := newFunction(code.Name, code, pos[1], "")
+	if err != nil {
+		return nil, err
+	}
+	if n, ok := name.(*Unicode); ok {
+		f.Name = n.Value()
+	}
+	if t, ok := defaults.(*Tuple); ok {
+		f.Defaults = t
+	}
+	if t, ok := closure.(*Tuple); ok {
+		f.Closure = t
+	}
+	if d, ok := kwdefaults.(*Dict); ok {
+		f.KwDefaults = d
+	}
+	return f, nil
 }
 
 // registerFunctionTypeParamsGetSet installs __type_params__, which is
@@ -357,9 +664,19 @@ func functionDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	return NewBoundMethod(descr, owner), nil
 }
 
+// functionRepr matches CPython's `<function QUALNAME at 0xPTR>`. The
+// pointer suffix is what `inspect.getsource` and traceback formatting
+// key off when two functions share a qualname (lambdas, dynamically
+// generated wrappers).
+//
+// CPython: Objects/funcobject.c:920 func_repr
 func functionRepr(o Object) (string, error) {
 	f := o.(*Function)
-	return "<function " + f.Name + ">", nil
+	name := f.Qualname
+	if name == "" {
+		name = f.Name
+	}
+	return fmt.Sprintf("<function %s at %p>", name, f), nil
 }
 
 // NewFunction is the no-qualname form of NewFunctionWithQualName.

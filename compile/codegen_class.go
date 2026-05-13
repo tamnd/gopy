@@ -105,6 +105,34 @@ func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
 	return c.nameOpStore(s.Name, loc(s))
 }
 
+// extractDocstring returns the bare string literal that opens a body,
+// matching consumeDocstring's recognition rule but without mutating
+// the per-unit const pool. The class-body emitter needs the value as a
+// fresh const after the qualname has already taken slot 0; pinning the
+// docstring at slot 0 the way consumeDocstring does would shift the
+// qualname and confuse downstream consts indexing.
+//
+// CPython: Python/codegen.c codegen_body (the docstring sniff before
+// the body loop)
+func extractDocstring(body ast.Seq[ast.Stmt]) (string, bool) {
+	if len(body) == 0 {
+		return "", false
+	}
+	es, ok := body[0].(*ast.ExprStmt)
+	if !ok {
+		return "", false
+	}
+	con, ok := es.Value.(*ast.Constant)
+	if !ok {
+		return "", false
+	}
+	s, ok := con.Value.(string)
+	if !ok {
+		return "", false
+	}
+	return s, true
+}
+
 // emitInnerClassCode pushes a fresh unit, emits the class body, then
 // pops. The inner code object is left on the outer stack as a *Unit
 // const; the assembler translates it to a real PyCodeObject.
@@ -134,12 +162,33 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	c.addOpName(LOAD_NAME, &pool, "__name__", loc(s))
 	c.addOpName(STORE_NAME, &pool, "__module__", loc(s))
 
-	// __qualname__: the dotted path to the class. For top-level
-	// classes this is just the class name; nested classes get a path
-	// like "Outer.Inner". Full qualname resolution is pending; for now
-	// the bare name is correct for the unnested case.
-	c.addLoadConst(s.Name, loc(s))
+	// __qualname__: the dotted path to the class. buildQualname has
+	// already composed the dotted form when we enterScope'd into the
+	// inner class, so the current unit's Qualname is "Outer.Inner"
+	// (or "<locals>"-laced when nested inside a function). Stamp that
+	// directly so C.D.__qualname__ == "C.D" instead of "D".
+	//
+	// CPython: Python/codegen.c codegen_class_body (LOAD_CONST qualname)
+	qualname := s.Name
+	if u := c.unit(); u != nil && u.Qualname != "" {
+		qualname = u.Qualname
+	}
+	c.addLoadConst(qualname, loc(s))
 	c.addOpName(STORE_NAME, &pool, "__qualname__", loc(s))
+
+	// Docstring: if body[0] is a bare string literal, pin it at
+	// consts[0], stamp CoHasDocstring, and store it under __doc__ in
+	// the class namespace. Mirrors CPython's class-body docstring
+	// handling, which routes through codegen_body's docstring branch
+	// before the rest of the body runs.
+	//
+	// CPython: Python/codegen.c codegen_class_body (docstring branch)
+	body := s.Body
+	if doc, ok := extractDocstring(body); ok {
+		c.addLoadConst(doc, loc(s))
+		c.addOpName(STORE_NAME, &pool, "__doc__", loc(s))
+		body = body[1:]
+	}
 
 	// SETUP_ANNOTATIONS makes __annotations__ an empty dict in the
 	// class namespace when the body carries annotated assignments.
@@ -148,11 +197,11 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	//
 	// CPython: Python/codegen.c codegen_class_body (the
 	// ste_annotations_used check before visiting the body)
-	if bodyHasAnnotations(s.Body) {
+	if bodyHasAnnotations(body) {
 		c.addOp(SETUP_ANNOTATIONS, loc(s))
 	}
 
-	if err := c.visitStmts(s.Body); err != nil {
+	if err := c.visitStmts(body); err != nil {
 		return err
 	}
 

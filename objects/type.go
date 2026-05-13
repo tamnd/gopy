@@ -37,6 +37,15 @@ type Type struct {
 	Header
 
 	Name string
+	// Qualname mirrors __qualname__ on a type. Empty means "fall back
+	// to Name", which is the right shape for built-ins and any user
+	// class whose body did not stamp __qualname__ explicitly. The
+	// __build_class__ path copies the namespace's __qualname__ here so
+	// nested classes report their dotted path ("Outer.Inner") instead
+	// of just the bare "Inner".
+	//
+	// CPython: Objects/typeobject.c:984 type_qualname
+	Qualname string
 	// Module mirrors __module__ on a type. Empty (treated as
 	// "builtins") for the built-in types ported in objects/.
 	//

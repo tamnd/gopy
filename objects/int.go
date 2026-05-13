@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"fmt"
 	"math/big"
 )
 
@@ -13,6 +14,12 @@ import (
 type Int struct {
 	Header
 	v big.Int
+	// attrs holds instance attributes for int subclass objects. Nil for
+	// plain int instances; allocated by intSubclassSetAttr when first
+	// written. Mirrors CPython's tp_dictoffset on int subclasses (which
+	// CPython sets via type_new_descriptors when the subclass picks up
+	// __dict__ from object).
+	attrs *Dict
 }
 
 // IntType is the type singleton for int. Mirrors PyLong_Type. Slots
@@ -94,4 +101,108 @@ func (i *Int) Int64() (val int64, ok bool) {
 // BigInt returns a copy of the underlying big.Int.
 func (i *Int) BigInt() *big.Int {
 	return new(big.Int).Set(&i.v)
+}
+
+// newIntAs builds an int tagged with t instead of IntType. Used by the
+// int subtype path so a class like `class MyInt(int): pass` yields
+// instances whose Type() is MyInt.
+//
+// CPython: Objects/longobject.c:3514 long_subtype_new
+func newIntAs(b *big.Int, t *Type) *Int {
+	o := &Int{}
+	o.v.Set(b)
+	o.init(t)
+	return o
+}
+
+// intTpNew is the type-aware tp_new for int. When cls is IntType itself
+// the value-side IntCtor runs. When cls is a strict subclass (e.g.
+// re._constants._NamedIntConstant), the result is re-tagged so the
+// instance's Type() is cls.
+//
+// CPython: Objects/longobject.c:3389 long_new + long_subtype_new
+var intTpNew func(cls *Type, args []Object, kwargs map[string]Object) (Object, error)
+
+// intSubclassGetAttr is the tp_getattro slot for user-defined int
+// subclasses. Instance attributes from i.attrs win over non-data
+// descriptors; data descriptors on the type still take priority.
+//
+// CPython: Objects/typeobject.c:5165 slot_tp_getattr_hook (int path)
+func intSubclassGetAttr(o Object, name Object) (Object, error) {
+	i, ok := o.(*Int)
+	if !ok {
+		return GenericGetAttr(o, name)
+	}
+	tp := i.Type()
+	nameStr := attrNameStr(name)
+	descr, _ := LookupDescriptor(tp, nameStr)
+	if descr != nil {
+		if dget := descr.Type().DescrGet; dget != nil {
+			if descr.Type().DescrSet != nil {
+				return dget(descr, o, tp)
+			}
+		}
+	}
+	if i.attrs != nil {
+		if v, err := i.attrs.GetItem(name); err == nil {
+			return v, nil
+		}
+	}
+	if descr != nil {
+		if dget := descr.Type().DescrGet; dget != nil {
+			return dget(descr, o, tp)
+		}
+		return descr, nil
+	}
+	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, nameStr)
+}
+
+// intSubclassSetAttr is the tp_setattro slot for user-defined int
+// subclasses. Instance attributes land in i.attrs.
+//
+// CPython: Objects/object.c:2040 PyObject_GenericSetAttr (int-subclass path)
+func intSubclassSetAttr(o Object, name Object, value Object) error {
+	i, ok := o.(*Int)
+	if !ok {
+		return GenericSetAttr(o, name, value)
+	}
+	tp := i.Type()
+	nameStr := attrNameStr(name)
+	descr, _ := LookupDescriptor(tp, nameStr)
+	if descr != nil {
+		if dset := descr.Type().DescrSet; dset != nil {
+			return dset(descr, o, value)
+		}
+	}
+	if i.attrs == nil {
+		i.attrs = NewDict()
+	}
+	if value == nil {
+		if _, err := i.attrs.GetItem(name); err != nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, nameStr)
+		}
+		return i.attrs.DelItem(name)
+	}
+	return i.attrs.SetItem(name, value)
+}
+
+// SetIntTpNewBase wires the value-side constructor (int(value, [base])).
+// The subtype path here runs the same constructor, then re-tags the
+// *Int with cls. Mirrors the SetStrTpNewBase wiring in str.go.
+func SetIntTpNewBase(fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+	intTpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		out, err := fn(args, kwargs)
+		if err != nil {
+			return nil, err
+		}
+		if cls == nil || cls == IntType {
+			return out, nil
+		}
+		i, ok := out.(*Int)
+		if !ok {
+			return out, nil
+		}
+		return newIntAs(&i.v, cls), nil
+	}
+	IntType.TpNew = intTpNew
 }

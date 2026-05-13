@@ -110,6 +110,79 @@ func TestClassDecoratorAppliesCalls(t *testing.T) {
 	}
 }
 
+// TestClassBodyStoresDocstring covers the spec 1704 phase-6 gate: a
+// leading bare-string in the body emits LOAD_CONST <docstring> /
+// STORE_NAME __doc__ right after the qualname store, so user classes
+// surface a `__doc__` attribute the way CPython does.
+//
+// CPython: Python/codegen.c codegen_class_body (docstring branch)
+func TestClassBodyStoresDocstring(t *testing.T) {
+	cd := &ast.ClassDef{
+		Name: "C",
+		Body: []ast.Stmt{
+			&ast.ExprStmt{Value: cnst("hello doc")},
+		},
+	}
+	u := compileMod(t, module(cd))
+	inner := findInnerUnit(t, u)
+	got := opNames(inner)
+	want := []string{
+		"RESUME",
+		"LOAD_NAME",  // __name__
+		"STORE_NAME", // __module__
+		"LOAD_CONST", // "C" qualname
+		"STORE_NAME", // __qualname__
+		"LOAD_CONST", // "hello doc"
+		"STORE_NAME", // __doc__
+		"LOAD_CONST", // implicit None
+		"RETURN_VALUE",
+	}
+	if !equalStrings(got, want) {
+		t.Fatalf("inner ops = %v, want %v", got, want)
+	}
+	if !slices.Contains(inner.Names, "__doc__") {
+		t.Errorf("inner.Names %v missing __doc__", inner.Names)
+	}
+	// The docstring lands as a const (deduped with the qualname const
+	// in the per-unit cache only if they happen to match).
+	hasDocConst := false
+	for _, c := range inner.Consts {
+		if s, ok := c.(string); ok && s == "hello doc" {
+			hasDocConst = true
+		}
+	}
+	if !hasDocConst {
+		t.Errorf("inner.Consts %v missing docstring", inner.Consts)
+	}
+}
+
+// TestNestedClassQualname covers the spec 1704 phase-6 gate: an inner
+// class declared inside another class emits its qualified name
+// ("Outer.Inner") as the __qualname__ const, not the bare "Inner".
+//
+// CPython: Python/compile.c:644 compiler_set_qualname
+func TestNestedClassQualname(t *testing.T) {
+	cd := &ast.ClassDef{
+		Name: "Outer",
+		Body: []ast.Stmt{&ast.ClassDef{
+			Name: "Inner",
+			Body: []ast.Stmt{&ast.Pass{}},
+		}},
+	}
+	u := compileMod(t, module(cd))
+	outer := findInnerUnit(t, u)
+	if outer.Qualname != "Outer" {
+		t.Errorf("outer.Qualname = %q, want Outer", outer.Qualname)
+	}
+	inner := findInnerUnit(t, outer)
+	if inner.Qualname != "Outer.Inner" {
+		t.Errorf("inner.Qualname = %q, want Outer.Inner", inner.Qualname)
+	}
+	if !slices.Contains(inner.Consts, "Outer.Inner") {
+		t.Errorf("inner.Consts %v missing dotted qualname", inner.Consts)
+	}
+}
+
 // TestClassBodyStoresModuleAndQualname verifies the inner class code
 // object opens with LOAD_NAME __name__ / STORE_NAME __module__ /
 // LOAD_CONST <name> / STORE_NAME __qualname__.

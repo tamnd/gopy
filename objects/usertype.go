@@ -26,11 +26,40 @@ import "fmt"
 //
 // CPython: Objects/typeobject.c:4153 type_new
 func NewUserType(name string, bases []*Type, ns *Dict) *Type {
+	return NewUserTypeKwargs(name, bases, ns, nil)
+}
+
+// NewUserTypeKwargs is the kwargs-aware variant of NewUserType. The
+// extra kwargs (metaclass-strip already done by the caller) flow
+// through to __init_subclass__ so PEP 487 hooks see them.
+//
+// CPython: Objects/typeobject.c:4153 type_new (the mkw kwargs path)
+func NewUserTypeKwargs(name string, bases []*Type, ns *Dict, kwargs map[string]Object) *Type {
+	return NewUserTypeMeta(name, bases, ns, kwargs, nil)
+}
+
+// NewUserTypeMeta is the full-form constructor used by type.__new__.
+// meta is the metaclass to stamp on the new type; nil means inherit
+// the default typeType. Stamping happens before typeSetNames so PEP
+// 487 hooks that call cls.<metaclass_method>(...) resolve through the
+// real metatype, not the placeholder.
+//
+// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
+func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Object, meta *Type) *Type {
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
 	t := NewType(name, bases)
 	t.IsUser = true
+	// Stamp the metaclass first so the upcoming namespace pass and
+	// __set_name__ hooks see Py_TYPE(t) == meta, matching CPython where
+	// type_new sets the metatype as part of allocation. Skip a nil or
+	// typeType meta (NewType already wires the default).
+	//
+	// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
+	if meta != nil && meta != typeType {
+		t.Init(meta)
+	}
 	// Metaclasses (subtypes of type) must use typeGetAttr/typeSetAttr so
 	// that attribute access on their instances (which are *Type objects
 	// like `class Foo(metaclass=ABCMeta)`) goes through the correct path.
@@ -49,6 +78,19 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 		// Inherit DictType.TpNew so instances are *Dict, not *Instance.
 		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
 		t.TpNew = DictType.TpNew
+	case IsSubtype(t, strType):
+		t.Getattro = strSubclassGetAttr
+		t.Setattro = strSubclassSetAttr
+		// Inherit strType.TpNew so instances are *Unicode (tagged with
+		// the subclass), not *Instance.
+		t.TpNew = strType.TpNew
+	case IsSubtype(t, IntType):
+		t.Getattro = intSubclassGetAttr
+		t.Setattro = intSubclassSetAttr
+		// Inherit IntType.TpNew so instances are *Int (tagged with the
+		// subclass), not *Instance. The cls-aware intTpNew handles the
+		// subclass re-tag.
+		t.TpNew = IntType.TpNew
 	default:
 		t.Getattro = instanceGetAttr
 		t.Setattro = instanceSetAttr
@@ -109,7 +151,7 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 	if err := typeSetNames(t, ns); err != nil {
 		panic(err)
 	}
-	if err := typeInitSubclass(t); err != nil {
+	if err := typeInitSubclass(t, kwargs); err != nil {
 		panic(err)
 	}
 	return t
@@ -141,6 +183,14 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 			if u, ok := v.(*Unicode); ok {
 				t.Module = u.v
 			}
+		case "__qualname__":
+			if u, ok := v.(*Unicode); ok {
+				t.Qualname = u.v
+			}
+			// __qualname__ is also stored on the type via the getset
+			// path (typeSetQualname), so do not also stash a raw descr
+			// for it: the descr table would shadow the getset.
+			continue
 		}
 		SetTypeDescr(t, s.v, v)
 	}
@@ -193,10 +243,12 @@ func typeSetNames(t *Type, ns *Dict) error {
 // freshly built subclass. CPython runs this from type_new after the
 // type is fully constructed; it walks the MRO starting one position
 // past `t` (via super(t, t)) so the subclass's own override does not
-// recursively reapply.
+// recursively reapply. kwargs is the leftover class-creation kwargs
+// after the metaclass has been pulled out, so subclass hooks see
+// `class C(Base, foo=1):` as init_subclass(cls, foo=1).
 //
 // CPython: Objects/typeobject.c:4595 type_init_subclass
-func typeInitSubclass(t *Type) error {
+func typeInitSubclass(t *Type, kwargs map[string]Object) error {
 	for i := 1; i < len(t.MRO); i++ {
 		base := t.MRO[i]
 		descr, _ := lookupOnType(base, "__init_subclass__")
@@ -214,7 +266,16 @@ func typeInitSubclass(t *Type) error {
 		} else {
 			callable = descr
 		}
-		_, err := Call(callable, NewTuple(nil), nil)
+		var kwd *Dict
+		if len(kwargs) > 0 {
+			kwd = NewDict()
+			for k, v := range kwargs {
+				if err := kwd.SetItem(NewStr(k), v); err != nil {
+					return err
+				}
+			}
+		}
+		_, err := Call(callable, NewTuple(nil), kwd)
 		if err != nil {
 			return err
 		}
@@ -242,14 +303,36 @@ func lookupOnType(t *Type, name string) (Object, bool) {
 // pass, `class C: def __call__(self): ...` instances would raise
 // TypeError on call because the type's Call slot would stay nil.
 //
+// Order matters: inherit_slots runs first so the subclass picks up the
+// base's slot table, then the fixup steps override individual slots
+// when the user namespace supplies an overriding dunder. Mirrors the
+// PyType_Ready -> inherit_slots -> fixup_slot_dispatchers order in
+// CPython.
+//
 // CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
 func fixupSlotDispatchers(t *Type) {
-	fixupCallReprStr(t)
 	inheritSlotsFromBases(t)
+	fixupCallReprStr(t)
 	fixupHashAndIter(t)
 	fixupRichCmpAndBool(t)
 	fixupSubscriptSlots(t)
 	fixupDescriptorSlots(t)
+	fixupTpNew(t)
+}
+
+// fixupTpNew installs slotTpNew when the class body defines its own
+// __new__. Without this, typeCallViaTpNew would call the inherited
+// C-level tp_new (e.g. int's intTpNew) directly and skip the user's
+// Python __new__, so super().__new__(cls, value) shapes are never
+// reached.
+//
+// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
+//
+//	(slotdefs entry for tp_new)
+func fixupTpNew(t *Type) {
+	if lookupTypeMember(t, "__new__") != nil {
+		t.TpNew = slotTpNew
+	}
 }
 
 // fixupCallReprStr wires tp_call, tp_repr, and tp_str.
@@ -268,26 +351,85 @@ func fixupCallReprStr(t *Type) {
 	}
 }
 
-// inheritSlotsFromBases pulls C-level slots from base types when they
-// are not overridden by a Python-level dunder. Matters for metaclass
-// hierarchies where `class ABCMeta(type)` should inherit type.Repr,
-// type.Call, etc.
+// inheritSlotsFromBases pulls C-level slots from base types when the
+// subclass leaves them nil. CPython's inherit_slots walks the primary
+// base and copies every slot that is not already set on the subclass.
+// The fixup pass that runs after this can still override individual
+// slots when the user namespace supplies a matching dunder.
+//
+// gopy keeps the Getattro / Setattro choice in NewUserType because the
+// dispatcher depends on the concrete instance shape (*Instance versus
+// *Dict versus *Type); the rest of the slot table is straight pointer
+// inheritance.
 //
 // CPython: Objects/typeobject.c:9770 inherit_slots
 func inheritSlotsFromBases(t *Type) {
 	for _, base := range t.Bases {
-		if t.Repr == nil && base.Repr != nil {
-			t.Repr = base.Repr
-		}
-		if t.Str == nil && base.Str != nil {
-			t.Str = base.Str
-		}
-		if t.Call == nil && base.Call != nil {
-			t.Call = base.Call
-		}
-		if t.Hash == nil && base.Hash != nil {
-			t.Hash = base.Hash
-		}
+		inheritBasicSlots(t, base)
+		inheritProtocolTables(t, base)
+	}
+}
+
+// inheritBasicSlots copies the scalar slot pointers from base to t for
+// every slot t does not already define.
+func inheritBasicSlots(t, base *Type) {
+	if t.Repr == nil {
+		t.Repr = base.Repr
+	}
+	if t.Str == nil {
+		t.Str = base.Str
+	}
+	if t.Call == nil {
+		t.Call = base.Call
+	}
+	if t.Hash == nil {
+		t.Hash = base.Hash
+	}
+	if t.TpNew == nil {
+		t.TpNew = base.TpNew
+	}
+	if t.Iter == nil {
+		t.Iter = base.Iter
+	}
+	if t.IterNext == nil {
+		t.IterNext = base.IterNext
+	}
+	if t.RichCmp == nil {
+		t.RichCmp = base.RichCmp
+	}
+	if t.DescrGet == nil {
+		t.DescrGet = base.DescrGet
+	}
+	if t.DescrSet == nil {
+		t.DescrSet = base.DescrSet
+	}
+	if t.Format == nil {
+		t.Format = base.Format
+	}
+	if t.TpTraverse == nil {
+		t.TpTraverse = base.TpTraverse
+	}
+}
+
+// inheritProtocolTables copies the Number / Sequence / Mapping / Async
+// tables as deep copies so per-subclass fixup writes never mutate the
+// base type's struct.
+func inheritProtocolTables(t, base *Type) {
+	if t.Number == nil && base.Number != nil {
+		cp := *base.Number
+		t.Number = &cp
+	}
+	if t.Sequence == nil && base.Sequence != nil {
+		cp := *base.Sequence
+		t.Sequence = &cp
+	}
+	if t.Mapping == nil && base.Mapping != nil {
+		cp := *base.Mapping
+		t.Mapping = &cp
+	}
+	if t.Async == nil && base.Async != nil {
+		cp := *base.Async
+		t.Async = &cp
 	}
 }
 
@@ -410,12 +552,33 @@ func lookupDunderCallable(t *Type, name string) bool {
 	return true
 }
 
+// lookupMethodOnSelf finds name on type(o)'s MRO and applies descr_get
+// with o as the bound instance. Mirrors CPython's lookup_maybe_method:
+// slot dispatchers must look up via the *type* of self (not via self's
+// own attribute path) so that, for example, hash(C) on a class C finds
+// the metaclass's __hash__ entry rather than treating C as if it were
+// an instance of itself. GetAttr returns the descriptor unbound when
+// the receiver is a class, which breaks the no-arg call shape every
+// slot dispatcher relies on.
+//
+// CPython: Objects/typeobject.c:2255 lookup_maybe_method
+func lookupMethodOnSelf(o Object, name string) (Object, error) {
+	descr, _ := LookupDescriptor(o.Type(), name)
+	if descr == nil {
+		return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", o.Type().Name, name)
+	}
+	if dg := descr.Type().DescrGet; dg != nil {
+		return dg(descr, o, o.Type())
+	}
+	return descr, nil
+}
+
 // slotTpCall is the generic tp_call dispatcher: look up __call__ via
 // the descriptor protocol (so the instance is bound) and call it.
 //
 // CPython: Objects/typeobject.c:8174 slot_tp_call
 func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
-	fn, err := GetAttr(callable, NewStr("__call__"))
+	fn, err := lookupMethodOnSelf(callable, "__call__")
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +598,7 @@ func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Objec
 //
 // CPython: Objects/typeobject.c:8235 slot_tp_repr
 func slotTpRepr(o Object) (string, error) {
-	fn, err := GetAttr(o, NewStr("__repr__"))
+	fn, err := lookupMethodOnSelf(o, "__repr__")
 	if err != nil {
 		return "", err
 	}
@@ -454,7 +617,7 @@ func slotTpRepr(o Object) (string, error) {
 //
 // CPython: Objects/typeobject.c:8252 slot_tp_str
 func slotTpStr(o Object) (string, error) {
-	fn, err := GetAttr(o, NewStr("__str__"))
+	fn, err := lookupMethodOnSelf(o, "__str__")
 	if err != nil {
 		return "", err
 	}
@@ -474,7 +637,7 @@ func slotTpStr(o Object) (string, error) {
 //
 // CPython: Objects/typeobject.c:8266 slot_tp_hash
 func slotTpHash(o Object) (int64, error) {
-	fn, err := GetAttr(o, NewStr("__hash__"))
+	fn, err := lookupMethodOnSelf(o, "__hash__")
 	if err != nil {
 		return 0, err
 	}
@@ -494,7 +657,7 @@ func slotTpHash(o Object) (int64, error) {
 //
 // CPython: Objects/typeobject.c:8400 slot_tp_iter
 func slotTpIter(o Object) (Object, error) {
-	fn, err := GetAttr(o, NewStr("__iter__"))
+	fn, err := lookupMethodOnSelf(o, "__iter__")
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +668,7 @@ func slotTpIter(o Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8421 slot_tp_iternext
 func slotTpIterNext(o Object) (Object, error) {
-	fn, err := GetAttr(o, NewStr("__next__"))
+	fn, err := lookupMethodOnSelf(o, "__next__")
 	if err != nil {
 		return nil, err
 	}
@@ -519,11 +682,10 @@ func slotTpIterNext(o Object) (Object, error) {
 // CPython: Objects/typeobject.c:8347 slot_tp_richcompare
 func slotTpRichCompare(a, b Object, op CompareOp) (Object, error) {
 	name := richCompareDunderName(op)
-	d, _ := LookupDescriptor(a.Type(), name)
-	if d == nil {
+	if d, _ := LookupDescriptor(a.Type(), name); d == nil {
 		return notImplemented(), nil
 	}
-	fn, err := GetAttr(a, NewStr(name))
+	fn, err := lookupMethodOnSelf(a, name)
 	if err != nil {
 		return nil, err
 	}
@@ -553,7 +715,7 @@ func richCompareDunderName(op CompareOp) string {
 //
 // CPython: Objects/typeobject.c:7869 slot_nb_bool
 func slotNbBool(o Object) (bool, error) {
-	fn, err := GetAttr(o, NewStr("__bool__"))
+	fn, err := lookupMethodOnSelf(o, "__bool__")
 	if err != nil {
 		return false, err
 	}
@@ -585,7 +747,7 @@ func slotNbBoolFromLen(o Object) (bool, error) {
 //
 // CPython: Objects/typeobject.c:7948 slot_mp_length / slot_sq_length
 func slotMpLength(o Object) (int, error) {
-	fn, err := GetAttr(o, NewStr("__len__"))
+	fn, err := lookupMethodOnSelf(o, "__len__")
 	if err != nil {
 		return 0, err
 	}
@@ -608,7 +770,7 @@ func slotMpLength(o Object) (int, error) {
 //
 // CPython: Objects/typeobject.c:7989 slot_mp_subscript
 func slotMpSubscript(o Object, key Object) (Object, error) {
-	fn, err := GetAttr(o, NewStr("__getitem__"))
+	fn, err := lookupMethodOnSelf(o, "__getitem__")
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +783,7 @@ func slotMpSubscript(o Object, key Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:7964 slot_sq_item
 func slotSqGetItem(o Object, idx int) (Object, error) {
-	fn, err := GetAttr(o, NewStr("__getitem__"))
+	fn, err := lookupMethodOnSelf(o, "__getitem__")
 	if err != nil {
 		return nil, err
 	}
@@ -632,7 +794,7 @@ func slotSqGetItem(o Object, idx int) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8004 slot_mp_ass_subscript (set branch)
 func slotMpSubscriptSet(o, key, value Object) error {
-	fn, err := GetAttr(o, NewStr("__setitem__"))
+	fn, err := lookupMethodOnSelf(o, "__setitem__")
 	if err != nil {
 		return err
 	}
@@ -644,7 +806,7 @@ func slotMpSubscriptSet(o, key, value Object) error {
 //
 // CPython: Objects/typeobject.c:8004 slot_mp_ass_subscript (del branch)
 func slotMpSubscriptDel(o, key Object) error {
-	fn, err := GetAttr(o, NewStr("__delitem__"))
+	fn, err := lookupMethodOnSelf(o, "__delitem__")
 	if err != nil {
 		return err
 	}
@@ -664,12 +826,40 @@ func slotSqSetItem(o Object, idx int, value Object) error {
 	return slotMpSubscriptSet(o, key, value)
 }
 
+// slotTpNew dispatches tp_new for Python-defined classes. Looks up
+// __new__ via MRO, unwraps the implicit staticmethod, prepends cls to
+// the positional args, and calls the underlying function. Mirrors
+// CPython's slot_tp_new: the dispatcher is installed by
+// fixup_slot_dispatchers whenever a class body defines __new__.
+//
+// CPython: Objects/typeobject.c:9395 slot_tp_new
+func slotTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	newFn, _ := LookupDescriptor(cls, "__new__")
+	if newFn == nil {
+		return nil, fmt.Errorf("TypeError: object.__new__: cannot find __new__ for '%s'", cls.Name)
+	}
+	if sm, ok := newFn.(*StaticMethod); ok {
+		newFn = sm.smCallable
+	}
+	posArgs := make([]Object, 0, len(args)+1)
+	posArgs = append(posArgs, cls)
+	posArgs = append(posArgs, args...)
+	var kwDict *Dict
+	if len(kwargs) > 0 {
+		kwDict = NewDict()
+		for k, v := range kwargs {
+			_ = kwDict.SetItem(NewStr(k), v)
+		}
+	}
+	return Call(newFn, NewTuple(posArgs), kwDict)
+}
+
 // slotTpDescrGet dispatches __get__(self, obj, type). obj is None when
 // the descriptor is accessed through the class rather than an instance.
 //
 // CPython: Objects/typeobject.c:8444 slot_tp_descr_get
 func slotTpDescrGet(descr Object, obj Object, tp *Type) (Object, error) {
-	fn, err := GetAttr(descr, NewStr("__get__"))
+	fn, err := lookupMethodOnSelf(descr, "__get__")
 	if err != nil {
 		return nil, err
 	}
@@ -697,13 +887,13 @@ func slotTpDescrSet(descr Object, obj Object, value Object) error {
 	var args []Object
 	var err error
 	if value == nil {
-		fn, err = GetAttr(descr, NewStr("__delete__"))
+		fn, err = lookupMethodOnSelf(descr, "__delete__")
 		if err != nil {
 			return err
 		}
 		args = []Object{obj}
 	} else {
-		fn, err = GetAttr(descr, NewStr("__set__"))
+		fn, err = lookupMethodOnSelf(descr, "__set__")
 		if err != nil {
 			return err
 		}
@@ -717,7 +907,7 @@ func slotTpDescrSet(descr Object, obj Object, value Object) error {
 //
 // CPython: Objects/typeobject.c:8064 slot_sq_contains
 func slotSqContains(o Object, key Object) (bool, error) {
-	fn, err := GetAttr(o, NewStr("__contains__"))
+	fn, err := lookupMethodOnSelf(o, "__contains__")
 	if err != nil {
 		return false, err
 	}

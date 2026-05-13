@@ -34,6 +34,17 @@ func init() {
 		InPlaceConcat: listInPlaceConcat,
 		InPlaceRepeat: listInPlaceRepeat,
 	}
+	// Mapping protocol entries for list mirror CPython's
+	// list_subscript / list_ass_subscript, which is what handles
+	// list[a:b] and del list[a:b] alongside the integer cases.
+	//
+	// CPython: Objects/listobject.c:3216 list_as_mapping
+	ListType.Mapping = &MappingMethods{
+		Length:  listLen,
+		GetItem: listMappingGet,
+		SetItem: listMappingSet,
+		DelItem: listMappingDel,
+	}
 	ListType.TpTraverse = listTraverse
 }
 
@@ -205,6 +216,200 @@ func listSetItem(o Object, i int, v Object) error {
 	}
 	l.items[i] = v
 	return nil
+}
+
+// listMappingGet ports list_subscript: integer keys go through
+// listGetItem, slice keys return a fresh list slice.
+//
+// CPython: Objects/listobject.c:3162 list_subscript
+func listMappingGet(o, key Object) (Object, error) {
+	if s, ok := key.(*Slice); ok {
+		return listGetSlice(o.(*List), s)
+	}
+	idx, err := indexValueAsInt(key, "list")
+	if err != nil {
+		return nil, err
+	}
+	return listGetItem(o, idx)
+}
+
+// listMappingSet ports list_ass_subscript: integer assignment goes
+// through listSetItem; slice assignment replaces the slice region in
+// place. value==nil means delete (the path used by mp_ass_subscript
+// for both `del list[i]` and `del list[a:b]`).
+//
+// CPython: Objects/listobject.c:3198 list_ass_subscript
+func listMappingSet(o, key, v Object) error {
+	l := o.(*List)
+	if s, ok := key.(*Slice); ok {
+		if v == nil {
+			return listDelSlice(l, s)
+		}
+		return listSetSlice(l, s, v)
+	}
+	idx, err := indexValueAsInt(key, "list")
+	if err != nil {
+		return err
+	}
+	if v == nil {
+		return listDelIndex(l, idx)
+	}
+	return listSetItem(o, idx, v)
+}
+
+// listMappingDel is the standalone delitem entry. CPython routes
+// `del obj[key]` through mp_ass_subscript with NULL value; gopy's vm
+// calls mp.DelItem instead, so dispatch here delegates to the same
+// shared helper.
+//
+// CPython: Objects/listobject.c:3198 list_ass_subscript (NULL v arm)
+func listMappingDel(o, key Object) error {
+	return listMappingSet(o, key, nil)
+}
+
+// listDelIndex removes l.items[i]. Mirrors list_ass_item with v=NULL.
+//
+// CPython: Objects/listobject.c:3041 list_ass_item
+func listDelIndex(l *List, i int) error {
+	if i < 0 {
+		i += len(l.items)
+	}
+	if i < 0 || i >= len(l.items) {
+		return errIndexOutOfRange
+	}
+	l.items = append(l.items[:i], l.items[i+1:]...)
+	l.size = int64(len(l.items))
+	return nil
+}
+
+// listGetSlice returns a fresh list containing the slice region.
+//
+// CPython: Objects/listobject.c:482 list_slice
+func listGetSlice(l *List, s *Slice) (Object, error) {
+	start, _, step, slicelen, err := s.GetIndices(len(l.items))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Object, slicelen)
+	for i, idx := 0, start; i < slicelen; i, idx = i+1, idx+step {
+		out[i] = l.items[idx]
+	}
+	return NewList(out), nil
+}
+
+// listSetSlice replaces l[start:stop:step] with the values produced by
+// iterating v. Step==1 supports differing lengths (grow / shrink);
+// extended steps require matching lengths.
+//
+// CPython: Objects/listobject.c:806 list_ass_slice + extended-slice arm
+// of list_ass_subscript
+func listSetSlice(l *List, s *Slice, v Object) error {
+	start, stop, step, slicelen, err := s.GetIndices(len(l.items))
+	if err != nil {
+		return err
+	}
+	src, err := drainIterableForSlice(v)
+	if err != nil {
+		return err
+	}
+	if step == 1 {
+		newLen := start + len(src) + (len(l.items) - stop)
+		out := make([]Object, 0, newLen)
+		out = append(out, l.items[:start]...)
+		out = append(out, src...)
+		out = append(out, l.items[stop:]...)
+		l.items = out
+		l.size = int64(len(l.items))
+		return nil
+	}
+	if len(src) != slicelen {
+		return fmt.Errorf("ValueError: attempt to assign sequence of size %d to extended slice of size %d", len(src), slicelen)
+	}
+	for i, idx := 0, start; i < slicelen; i, idx = i+1, idx+step {
+		l.items[idx] = src[i]
+	}
+	return nil
+}
+
+// listDelSlice removes l[start:stop:step] in place.
+//
+// CPython: Objects/listobject.c:806 list_ass_slice (NULL v) +
+// extended-slice arm of list_ass_subscript
+func listDelSlice(l *List, s *Slice) error {
+	start, stop, step, slicelen, err := s.GetIndices(len(l.items))
+	if err != nil {
+		return err
+	}
+	if slicelen == 0 {
+		return nil
+	}
+	if step == 1 {
+		l.items = append(l.items[:start], l.items[stop:]...)
+		l.size = int64(len(l.items))
+		return nil
+	}
+	drop := make(map[int]bool, slicelen)
+	for i, idx := 0, start; i < slicelen; i, idx = i+1, idx+step {
+		drop[idx] = true
+	}
+	out := l.items[:0]
+	for i, v := range l.items {
+		if drop[i] {
+			continue
+		}
+		out = append(out, v)
+	}
+	l.items = out
+	l.size = int64(len(l.items))
+	return nil
+}
+
+// indexValueAsInt coerces an integer-shaped object to a Go int for
+// container subscript dispatch. Mirrors PyNumber_AsSsize_t through the
+// __index__ slot, with the type name used in error messages.
+//
+// CPython: Objects/abstract.c PyNumber_AsSsize_t
+func indexValueAsInt(key Object, typeName string) (int, error) {
+	if i, ok := key.(*Int); ok {
+		n, _ := i.Int64()
+		return int(n), nil
+	}
+	if b, ok := key.(*Bool); ok {
+		if b == True() {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	return 0, fmt.Errorf("TypeError: %s indices must be integers or slices, not %s", typeName, key.Type().Name)
+}
+
+// drainIterableForSlice materializes an iterable into a slice for the
+// slice-assignment path. Defined here (rather than reusing drainIterable
+// in builtins/) to keep objects/ self-contained.
+func drainIterableForSlice(o Object) ([]Object, error) {
+	t := o.Type()
+	if t.Iter == nil {
+		return nil, fmt.Errorf("TypeError: can only assign an iterable")
+	}
+	it, err := t.Iter(o)
+	if err != nil {
+		return nil, err
+	}
+	itT := it.Type()
+	if itT.IterNext == nil {
+		return nil, fmt.Errorf("TypeError: iter() returned non-iterator of type '%s'", itT.Name)
+	}
+	var out []Object
+	for {
+		v, err := itT.IterNext(it)
+		if errors.Is(err, ErrStopIteration) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
 }
 
 func listRepr(o Object) (string, error) {

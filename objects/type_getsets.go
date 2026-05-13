@@ -14,7 +14,7 @@ func init() {
 		SetTypeDescr(typeType, name, NewGetSetDescr(name, get, set))
 	}
 	register("__name__", typeGetName, typeSetName)
-	register("__qualname__", typeGetName, typeSetName)
+	register("__qualname__", typeGetQualname, typeSetQualname)
 	register("__module__", typeGetModule, typeSetModule)
 	register("__bases__", typeGetBases, nil)
 	register("__mro__", typeGetMRO, nil)
@@ -51,6 +51,46 @@ func typeSetName(o Object, v Object) error {
 		return fmt.Errorf("TypeError: can only assign string to %s.__name__, not '%s'", t.Name, typeNameOf(v))
 	}
 	t.Name = s.v
+	t.InvalidateVersionTag()
+	return nil
+}
+
+// typeGetQualname returns t.Qualname, falling back to t.Name when the
+// type was never stamped with a qualified name (built-ins, plain
+// top-level classes).
+//
+// CPython: Objects/typeobject.c:984 type_qualname
+func typeGetQualname(o Object) (Object, error) {
+	t, ok := o.(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__qualname__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if t.Qualname != "" {
+		return NewStr(t.Qualname), nil
+	}
+	return NewStr(t.Name), nil
+}
+
+// typeSetQualname writes t.Qualname. Only allowed on heap (user) types,
+// matching CPython's check against Py_TPFLAGS_HEAPTYPE.
+//
+// CPython: Objects/typeobject.c:1003 type_set_qualname
+func typeSetQualname(o Object, v Object) error {
+	t, ok := o.(*Type)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__qualname__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if !t.IsUser {
+		return fmt.Errorf("TypeError: cannot set '__qualname__' attribute of immutable type '%s'", t.Name)
+	}
+	if v == nil {
+		return fmt.Errorf("TypeError: cannot delete '__qualname__' attribute")
+	}
+	s, ok := v.(*Unicode)
+	if !ok {
+		return fmt.Errorf("TypeError: can only assign string to %s.__qualname__, not '%s'", t.Name, typeNameOf(v))
+	}
+	t.Qualname = s.v
 	t.InvalidateVersionTag()
 	return nil
 }

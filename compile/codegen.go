@@ -83,6 +83,13 @@ type Unit struct {
 	CellVars            []string
 	FastHidden          map[string]bool
 	DeferredAnnotations []deferredAnnotation
+	// Private is the enclosing class name used for PEP 8 private name
+	// mangling. Set when entering a class scope and inherited by nested
+	// function / comprehension scopes so `self.__x` inside a method
+	// resolves the same attribute as `self._ClassName__x`.
+	//
+	// CPython: Python/compile.c compiler_unit.u_private
+	Private string
 }
 
 // deferredAnnotation records one PEP 649 annotation pending emission
@@ -188,6 +195,17 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 		FirstLineno: sc.Loc.Lineno,
 		Seq:         &Sequence{},
 		FastHidden:  map[string]bool{},
+	}
+	// Inherit u_private from the parent unit. Class scopes override
+	// this below so a class body's private name is its own class name.
+	// Mirrors compiler_enter_scope's private-parameter threading.
+	//
+	// CPython: Python/compile.c compiler_enter_scope (u_private init)
+	if len(c.units) > 0 {
+		u.Private = c.units[len(c.units)-1].Private
+	}
+	if sc.Type == symtable.ClassBlock {
+		u.Private = sc.Name
 	}
 	switch sc.Type {
 	case symtable.ModuleBlock:

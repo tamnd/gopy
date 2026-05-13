@@ -38,6 +38,7 @@ func init() {
 	SuperType.Getattro = superGetAttr
 	SuperType.DescrGet = superDescrGet
 	SuperType.Call = superCall
+	addDescriptorSlotWrappers(SuperType)
 }
 
 // NewSuper builds a Super tied to (typ, obj). obj==nil produces an

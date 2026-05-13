@@ -45,7 +45,8 @@ Status legend:
 | dataclasses | #522 | partial | `Lib/dataclasses.py` | `module/dataclasses/` (Go port, option B) | 3 | `_colorize` shim still wins: vendor blocked by missing `collections.abc`, subscriptable `Mapping[str, str]`, zero-arg `super()`. `make_dataclass`, `__hash__` gen, `order=True`, `slots=True`, recursive `asdict`/`astuple`, `InitVar` integration all deferred. |
 | GenericAlias + UnionType | #523 | done | `Objects/genericaliasobject.c` + `Objects/unionobject.c` | `objects/generic_alias.go` + `objects/union_type.go` + `objects/class_getitem.go` | 3 | Clears `unittest.case` `types.GenericAlias` gate. `TypeVar` / `ParamSpec` substitution deferred (needs `typing` C accelerator). |
 | time | #500 | pending | `Modules/timemodule.c` | `module/time/` | I | |
-| re / _sre | #510 | pending | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Big |
+| re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
+| enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | pending | `Lib/difflib.py` | `stdlib/difflib.py` | I | Big |
 | io / _io | #514 | pending | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | `StringIO` already exists; need `TextIOWrapper`, `BufferedReader`, `FileIO` |
 | argparse | #515 | pending | `Lib/argparse.py` | `stdlib/argparse.py` | I | Very large; needed by unittest's `__main__` |

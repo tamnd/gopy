@@ -22,9 +22,9 @@ known follow-up; `pending` not started.
 | 4 | done | Pattern type: real `_sre.compile` honouring the bytecode argument, `match` / `fullmatch` / `search` / `scanner`. |
 | 5 | done | Match type: `group` / `groups` / `groupdict` / `span` / `expand` / `regs` plus `string` / `re` / `pos` / `endpos` / `lastindex` / `lastgroup`. |
 | 6 | done | Pattern higher-level methods: `findall`, `finditer`, `split`, `sub`, `subn`. |
-| 7 | partial | Engine drives the bytecode `_compiler.py` emits for the three Phase 7 gate patterns (Go-side gate in `module/_sre/phase7_test.go`). Full CLI gate `gopy -c 'import re; ...'` blocked on `enum` import (unrelated to spec 1703). |
-| 8 | partial | RE2 wrapper retired in Phase 4 (commit 79bc384). fnmatch option-A migration deferred: depends on the vendored `re` package importing, which is blocked on `enum`. |
-| Final gate | pending | `gopy -c 'import re; print(re.match(r"(\d+)-(\d+)", "12-34").groups())'` prints `('12', '34')`; `TestImportTokenize` flips from Skip to Pass; spec 1702 `re / _sre` row marks done. |
+| 7 | done | Engine drives the bytecode `_compiler.py` emits for the three Phase 7 gate patterns (Go-side gate in `module/_sre/phase7_test.go`) and the CLI gate runs end-to-end (pinned: `stdlibinit/re_match_smoke_test.go`). |
+| 8 | done | RE2 wrapper retired in Phase 4 (commit 79bc384). fnmatch option-A migration shipped: the vendored `fnmatch` delegates to `re.compile(translate(pat))` (pinned: `stdlibinit/fnmatch_smoke_import_test.go`). |
+| Final gate | done | `gopy -c 'import re; print(re.match(r"(\d+)-(\d+)", "12-34").groups())'` prints `('12', '34')` (pinned: `stdlibinit/re_match_smoke_test.go`). |
 
 ## Goal
 
