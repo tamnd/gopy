@@ -127,9 +127,9 @@ implementations earlier in the file. Every row must land.
 
 | Gate | Command | Expected | Status |
 |------|---------|----------|--------|
-| 2.1 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__func__.__name__)'` | `f` | pass |
-| 2.2 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__wrapped__ is C.__dict__["f"].__func__)'` | `True` | pass |
-| 2.3 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__isabstractmethod__)'` | `False` | pass |
+| 2.1 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__func__.__name__)'` | `f` | pass (pinned: `objects/method_test.go` `TestClassMethodGetSetGates`) |
+| 2.2 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__wrapped__ is C.__dict__["f"].__func__)'` | `True` | pass (pinned: `objects/method_test.go` `TestClassMethodGetSetGates`) |
+| 2.3 | `gopy -c 'class C:\n @classmethod\n def f(cls): pass\nprint(C.__dict__["f"].__isabstractmethod__)'` | `False` | pass (pinned: `objects/method_test.go` `TestClassMethodGetSetGates`) |
 
 ### CPython citations
 
