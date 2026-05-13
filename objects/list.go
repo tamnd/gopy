@@ -384,16 +384,26 @@ func indexValueAsInt(key Object, typeName string) (int, error) {
 }
 
 // drainIterableForSlice materializes an iterable into a slice for the
-// slice-assignment path. Defined here (rather than reusing drainIterable
-// in builtins/) to keep objects/ self-contained.
+// slice-assignment path. Mirrors PySequence_Fast: route through the
+// general Iter() (which falls back to the __getitem__-driven SeqIter
+// when an object has no __iter__) so anything CPython treats as an
+// iterable here works the same way.
+//
+// CPython: Objects/abstract.c:1846 PySequence_Fast
 func drainIterableForSlice(o Object) ([]Object, error) {
-	t := o.Type()
-	if t.Iter == nil {
-		return nil, fmt.Errorf("TypeError: can only assign an iterable")
+	if l, ok := o.(*List); ok {
+		out := make([]Object, len(l.items))
+		copy(out, l.items)
+		return out, nil
 	}
-	it, err := t.Iter(o)
+	if t, ok := o.(*Tuple); ok {
+		out := make([]Object, len(t.items))
+		copy(out, t.items)
+		return out, nil
+	}
+	it, err := Iter(o)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("TypeError: can only assign an iterable")
 	}
 	itT := it.Type()
 	if itT.IterNext == nil {

@@ -68,7 +68,8 @@ through `textwrap`, `traceback`, and `ntpath` without raising."
 | 3 | C `listobject.c` | `list_richcompare` (all six op branches) | - | done |
 | 4 | C `listobject.c` | `list_ass_slice` + `list_ass_subscript` (slice assignment, deletion, slice-step) | - | pending |
 | 5 | D `setobject.c` | `set_add_entry` (insert resizes before place) + `set_insert_clean` (rehash) | - | done |
-| Gate | - | `import textwrap`, `import traceback`, `import ntpath` all green | 1,2,3,4,5 | partial (`import ntpath` green; `import textwrap`/`import traceback` block on Phase 4 slice-assign) |
+| 4a | C `listobject.c` | `drainIterableForSlice` routed through `PyObject_GetIter` (SeqIter fallback) so `__getitem__`-only iterables work for slice-assign | - | done |
+| Gate | - | `import textwrap`, `import traceback`, `import ntpath` all green | 1,2,3,4,5 | partial (`import ntpath` green; `import textwrap`/`import traceback` block on a separate listcomp cell-binding bug in `re/_compiler.py`, already tracked under 1702 VM audit tasks #586/#587/#588) |
 
 ## Phase 1 - `Objects/unicodeobject.c` escape decoder
 
@@ -123,6 +124,14 @@ matches CPython 1:1.
 
 Blocks: `import textwrap`, which the `traceback` row in spec 1702
 depends on.
+
+Sub-phase 4a (done): `drainIterableForSlice` previously gated on
+`tp_iter` alone, which rejected objects (like `re._parser.SubPattern`)
+that expose only `__getitem__`. Route through `Iter()`
+(PyObject_GetIter) so the SeqIter fallback fires the same way it
+does for `for x in obj`, matching CPython `PySequence_Fast`. The
+remaining `list_ass_slice` / `list_ass_subscript` audit is still
+pending under Phase 4.
 
 ## Phase 5 - `Objects/setobject.c` add/insert path
 
