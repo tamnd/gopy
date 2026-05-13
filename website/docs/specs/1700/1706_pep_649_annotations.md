@@ -73,7 +73,7 @@ surface.
 
 | Phase | File | Block | Blocks | Status |
 |-------|------|-------|--------|--------|
-| 1 | A `symtable.c` | annotation-block creation and flag tracking | - | pending |
+| 1 | A `symtable.c` | annotation-block creation and flag tracking | - | done |
 | 2 | B `codegen.c` | `codegen_annassign` rewritten to record-only (no eager STORE_SUBSCR) | 1 | pending |
 | 3 | B `codegen.c` | `codegen_process_deferred_annotations`, `codegen_deferred_annotations_body`, `codegen_setup_annotations_scope`, `codegen_leave_annotations_scope` | 2 | pending |
 | 4 | B `codegen.c` | `_PyCodegen_Module` / `codegen_body` hooks that emit the per-scope `__annotate__` install | 3 | pending |
@@ -89,13 +89,13 @@ surface.
 
 | C function / field | gopy hook | Status |
 |--------------------|-----------|--------|
-| `ste_annotations_used` (field on PySTEntryObject) | `Entry.AnnotationsUsed bool` | pending |
-| `ste_has_conditional_annotations` (field) | `Entry.HasConditionalAnnotations bool` | pending |
-| `ste_annotation_block` (field, pointer to child STE) | `Entry.AnnotationBlock *Entry` | pending |
-| AnnAssign visitor branch that calls `symtable_add_def(__annotations__)` + flips `ste_annotations_used` | `symtable/visit_stmt.go` AnnAssign case | pending |
-| Conditional-context tracking (if / try / while / for blocks set `ste_has_conditional_annotations`) | `symtable/visit_stmt.go` conditional-tracking helper | pending |
-| `symtable_enter_existing_block` reuse for the annotation block | `symtable/annotations.go` `enterAnnotationBlock` | pending |
-| FunctionDef + ClassDef visitor flips that propagate annotation-block creation upward | `symtable/visit_stmt.go` FunctionDef / ClassDef cases | pending |
+| `ste_annotations_used` (field on PySTEntryObject) | `Entry.AnnotationsUsed bool` | done (`symtable/entry.go:74`) |
+| `ste_has_conditional_annotations` (field) | `Entry.HasConditionalAnnotations bool` | done (`symtable/entry.go:121`) |
+| `ste_annotation_block` (field, pointer to child STE) | `Entry.AnnotationBlock *Entry` | done (`symtable/entry.go`) |
+| AnnAssign visitor branch that calls `symtable_add_def(__annotations__)` + flips `ste_annotations_used` | `symtable/build_visit.go:389` `visitAnnAssign` | done |
+| Conditional-context tracking (if / try / while / for blocks set `ste_has_conditional_annotations`) | `symtable/build_visit.go` conditional-tracking helpers (lines 439-561) | done |
+| `symtable_enter_existing_block` reuse for the annotation block | `symtable/build_helpers.go:130` `enterBlock("__annotate__", AnnotationBlock, ...)` | done |
+| FunctionDef + ClassDef visitor flips that propagate annotation-block creation upward | `symtable/build_helpers.go:73` `visitAnnotations` | done |
 
 ### What was wrong before this phase
 
@@ -322,7 +322,7 @@ Same eight-step cadence as 1702, 1704, 1705:
 
 ## Checklist
 
-- [ ] Phase 1: `symtable.c` annotation-block plumbing
+- [x] Phase 1: `symtable.c` annotation-block plumbing (audit found all fields, visitors, and conditional tracking already shipped)
 - [ ] Phase 2: `codegen.c` `codegen_annassign` rewrite to record-only
 - [ ] Phase 3: `codegen.c` `__annotate__` function build pipeline
 - [ ] Phase 4: `codegen.c` body hook + future-flag short-circuit
