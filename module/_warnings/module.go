@@ -16,6 +16,7 @@ import (
 
 	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/module/contextvars"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -130,10 +131,16 @@ func initState(st *warningsState) {
 	if st.defaultAction == nil {
 		st.defaultAction = objects.NewStr("default")
 	}
-	// PEP 567 ContextVar is not exposed from builtin context yet, so
-	// the slot is left nil. Lib/warnings.py treats a missing
-	// _warnings_context as "no context filters", which matches the C
-	// path through get_warnings_context returning None.
+	if st.context == nil {
+		// _warnings_context is a PEP 567 ContextVar; warnings.py reads
+		// it through .get(None) to discover the per-context filter
+		// list and pulls the C path's _warnings_context attribute by
+		// the same name. CPython constructs the var with no default,
+		// so Get() raises LookupError when nothing has been set.
+		//
+		// CPython: Python/_warnings.c:161 _PyWarnings_InitState
+		st.context = contextvars.NewContextVar("_warnings_context", nil, false)
+	}
 	st.filtersVersion = 0
 }
 
