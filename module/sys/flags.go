@@ -5,16 +5,43 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// makeFlags returns sys.flags as a tuple in the field order CPython's
-// flags_desc declares. Each element is the int (or bool) the
-// corresponding -X / -E / PYTHON* knob computes from PyConfig. The
-// struct-sequence wrapper that exposes named attributes lands with
-// 1651-sys-C2; v0.7 ships the positional tuple so consumers that
-// iterate sys.flags see the canonical order.
+// flagsType is the struct-sequence type backing sys.flags. CPython
+// builds it from PyStructSequence_Desc flags_desc; gopy declares the
+// same field list in the same order so positional iteration and
+// named attribute access both match.
 //
-// CPython: Python/sysmodule.c:3519 set_flags_from_config
-func makeFlags(cfg *initconfig.PyConfig) *objects.Tuple {
-	return objects.NewTuple([]objects.Object{
+// CPython: Python/sysmodule.c:3388 flags_fields
+var flagsType = objects.NewStructSeqType("sys.flags", []objects.StructSeqField{
+	{Name: "debug"},
+	{Name: "inspect"},
+	{Name: "interactive"},
+	{Name: "optimize"},
+	{Name: "dont_write_bytecode"},
+	{Name: "no_user_site"},
+	{Name: "no_site"},
+	{Name: "ignore_environment"},
+	{Name: "verbose"},
+	{Name: "bytes_warning"},
+	{Name: "quiet"},
+	{Name: "hash_randomization"},
+	{Name: "isolated"},
+	{Name: "dev_mode"},
+	{Name: "utf8_mode"},
+	{Name: "warn_default_encoding"},
+	{Name: "safe_path"},
+	{Name: "int_max_str_digits"},
+	{Name: "gil"},
+	{Name: "thread_inherit_context"},
+	{Name: "context_aware_warnings"},
+})
+
+// makeFlags returns sys.flags as a struct-sequence in the field order
+// CPython's flags_desc declares. Each element is the int (or bool)
+// the corresponding -X / -E / PYTHON* knob computes from PyConfig.
+//
+// CPython: Python/sysmodule.c:3478 set_flags_from_config
+func makeFlags(cfg *initconfig.PyConfig) objects.Object {
+	return objects.NewStructSeq(flagsType, []objects.Object{
 		intFlag(cfg.ParserDebug),
 		intFlag(cfg.Inspect),
 		intFlag(cfg.Interactive),
@@ -33,6 +60,16 @@ func makeFlags(cfg *initconfig.PyConfig) *objects.Tuple {
 		intFlag(cfg.WarnDefaultEncoding),
 		boolFlag(cfg.SafePath),
 		intFlag(cfg.IntMaxStrDigits),
+		// gil: 1 == default (with-GIL build). Free-threaded builds set
+		// it to 0; gopy is single-runtime so report 1.
+		// CPython: Python/sysmodule.c:3505 SetFlag(config->enable_gil)
+		objects.NewInt(1),
+		// thread_inherit_context: defaults to 1 in 3.14 (PEP 768).
+		// CPython: Python/sysmodule.c:3510 SetFlag(config->thread_inherit_context)
+		objects.NewInt(1),
+		// context_aware_warnings: defaults to 1 in 3.14 (PEP 768).
+		// CPython: Python/sysmodule.c:3511 SetFlag(config->context_aware_warnings)
+		objects.NewInt(1),
 	})
 }
 

@@ -67,6 +67,13 @@ func buildModule() (*objects.Module, error) {
 	if err := d.SetItem(objects.NewStr("lock"), LockType); err != nil {
 		return nil, err
 	}
+	// RLock is the recursive lock type used by threading.RLock and
+	// (via _py_warnings) by warnings._lock.
+	//
+	// CPython: Modules/_threadmodule.c:2691 _thread_module addtype RLock
+	if err := d.SetItem(objects.NewStr("RLock"), RLockType); err != nil {
+		return nil, err
+	}
 	// _local is the thread-local storage type; provide a minimal stub.
 	if err := d.SetItem(objects.NewStr("_local"), localType); err != nil {
 		return nil, err
@@ -156,6 +163,38 @@ func init() {
 	LockType.Repr = lockRepr
 	LockType.Str = lockRepr
 	LockType.Getattro = lockGetattr
+	// `with lock:` uses LOAD_SPECIAL which walks the type MRO; expose
+	// __enter__/__exit__ as type-level descriptors so the context
+	// manager protocol works.
+	//
+	// CPython: Modules/_threadmodule.c:907 lock_methods
+	objects.SetTypeDescr(LockType, "__enter__", objects.NewBuiltinFunction("__enter__", lockEnterDescr))
+	objects.SetTypeDescr(LockType, "__exit__", objects.NewBuiltinFunction("__exit__", lockExitDescr))
+}
+
+func lockEnterDescr(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __enter__() missing self argument")
+	}
+	lk, ok := args[0].(*lockObject)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __enter__() expected lock self")
+	}
+	return lockAcquire(lk, nil, nil)
+}
+
+func lockExitDescr(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __exit__() missing self argument")
+	}
+	lk, ok := args[0].(*lockObject)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __exit__() expected lock self")
+	}
+	if _, err := lockRelease(lk, nil, nil); err != nil {
+		return nil, err
+	}
+	return objects.None(), nil
 }
 
 // newLockObject allocates a new, unlocked lock.

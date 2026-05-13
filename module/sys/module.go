@@ -14,6 +14,7 @@ import (
 	"os"
 
 	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/initconfig"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -97,6 +98,18 @@ func buildModule() (*objects.Module, error) {
 	//
 	// CPython: Python/sysmodule.c:3818 _PySys_InitMain (sys.modules = interp->modules)
 	if err := setItem(md, "modules", imp.SysModules()); err != nil {
+		return nil, err
+	}
+	// sys.flags is the struct-sequence warnings, traceback, and any
+	// PEP 587 tooling reads. UpdateConfig also stamps this once
+	// initconfig wires through; until then the inittab build hands a
+	// default-config flags so `import warnings` sees flags.dev_mode,
+	// flags.safe_path, flags.context_aware_warnings.
+	//
+	// CPython: Python/sysmodule.c:3478 set_flags_from_config
+	defaultCfg := &initconfig.PyConfig{}
+	defaultCfg.InitPythonConfig()
+	if err := setItem(md, "flags", makeFlags(defaultCfg)); err != nil {
 		return nil, err
 	}
 	// sys.exc_info reads the per-thread handled-exception slot the vm

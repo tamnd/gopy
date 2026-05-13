@@ -7,11 +7,9 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// TestUpdateConfigFlagsTupleShape pins sys.flags as an 18-tuple
-// (CPython's flags_desc.n_in_sequence). The struct-sequence fields
-// beyond 18 (gil, thread_inherit_context, context_aware_warnings)
-// land with the named-attribute facade; v0.7 ships the positional
-// tuple only.
+// TestUpdateConfigFlagsTupleShape pins sys.flags as a struct-sequence
+// matching CPython's flags_desc (21 fields in 3.14: 18 historical
+// slots plus gil / thread_inherit_context / context_aware_warnings).
 func TestUpdateConfigFlagsTupleShape(t *testing.T) {
 	d, err := Init()
 	if err != nil {
@@ -23,12 +21,12 @@ func TestUpdateConfigFlagsTupleShape(t *testing.T) {
 		t.Fatalf("UpdateConfig: %v", uerr)
 	}
 	v, _ := d.GetItem(objects.NewStr("flags"))
-	tup, ok := v.(*objects.Tuple)
+	ss, ok := v.(*objects.StructSeq)
 	if !ok {
-		t.Fatalf("flags is %T, want *Tuple", v)
+		t.Fatalf("flags is %T, want *StructSeq", v)
 	}
-	if tup.Len() != 18 {
-		t.Errorf("len(sys.flags) = %d, want 18", tup.Len())
+	if got := len(ss.Items()); got != 21 {
+		t.Errorf("len(sys.flags) = %d, want 21", got)
 	}
 }
 
@@ -46,8 +44,7 @@ func TestUpdateConfigFlagsDefaultsMatchPython(t *testing.T) {
 	if uerr := UpdateConfig(d, cfg); uerr != nil {
 		t.Fatalf("UpdateConfig: %v", uerr)
 	}
-	v, _ := d.GetItem(objects.NewStr("flags"))
-	tup := v.(*objects.Tuple)
+	ss := mustFlags(t, d)
 
 	cases := []struct {
 		idx  int
@@ -64,8 +61,9 @@ func TestUpdateConfigFlagsDefaultsMatchPython(t *testing.T) {
 		{15, "warn_default_encoding", 0},
 		{17, "int_max_str_digits", 0},
 	}
+	items := ss.Items()
 	for _, tc := range cases {
-		got, _ := tup.Item(tc.idx).(*objects.Int).Int64()
+		got, _ := items[tc.idx].(*objects.Int).Int64()
 		if got != tc.want {
 			t.Errorf("flags[%d] (%s) = %d, want %d", tc.idx, tc.name, got, tc.want)
 		}
@@ -87,13 +85,13 @@ func TestUpdateConfigFlagsDevModeAndSafePathAreBool(t *testing.T) {
 	if uerr := UpdateConfig(d, cfg); uerr != nil {
 		t.Fatalf("UpdateConfig: %v", uerr)
 	}
-	tup := mustFlags(t, d)
+	items := mustFlags(t, d).Items()
 
-	if tup.Item(13) != objects.True() {
-		t.Errorf("flags[13] (dev_mode) = %v, want True", tup.Item(13))
+	if items[13] != objects.True() {
+		t.Errorf("flags[13] (dev_mode) = %v, want True", items[13])
 	}
-	if tup.Item(16) != objects.True() {
-		t.Errorf("flags[16] (safe_path) = %v, want True", tup.Item(16))
+	if items[16] != objects.True() {
+		t.Errorf("flags[16] (safe_path) = %v, want True", items[16])
 	}
 }
 
@@ -123,8 +121,8 @@ func TestUpdateConfigFlagsHashRandomization(t *testing.T) {
 			if uerr := UpdateConfig(d, cfg); uerr != nil {
 				t.Fatal(uerr)
 			}
-			tup := mustFlags(t, d)
-			got, _ := tup.Item(11).(*objects.Int).Int64()
+			items := mustFlags(t, d).Items()
+			got, _ := items[11].(*objects.Int).Int64()
 			if got != tc.want {
 				t.Errorf("flags[11] (hash_randomization) = %d, want %d", got, tc.want)
 			}
@@ -146,22 +144,22 @@ func TestUpdateConfigFlagsNegationFromWriteBytecode(t *testing.T) {
 	if uerr := UpdateConfig(d, cfg); uerr != nil {
 		t.Fatal(uerr)
 	}
-	tup := mustFlags(t, d)
-	got, _ := tup.Item(4).(*objects.Int).Int64()
+	items := mustFlags(t, d).Items()
+	got, _ := items[4].(*objects.Int).Int64()
 	if got != 1 {
 		t.Errorf("flags[4] (dont_write_bytecode) = %d, want 1 when WriteBytecode==0", got)
 	}
 }
 
-func mustFlags(t *testing.T, d *objects.Dict) *objects.Tuple {
+func mustFlags(t *testing.T, d *objects.Dict) *objects.StructSeq {
 	t.Helper()
 	v, err := d.GetItem(objects.NewStr("flags"))
 	if err != nil {
 		t.Fatalf("GetItem(flags): %v", err)
 	}
-	tup, ok := v.(*objects.Tuple)
+	ss, ok := v.(*objects.StructSeq)
 	if !ok {
-		t.Fatalf("flags is %T, want *Tuple", v)
+		t.Fatalf("flags is %T, want *StructSeq", v)
 	}
-	return tup
+	return ss
 }
