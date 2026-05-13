@@ -40,6 +40,61 @@ func init() {
 		Contains: mappingProxyContains,
 	}
 	MappingProxyType.TpNew = mappingProxyNew
+
+	SetTypeDescr(MappingProxyType, "get", NewMethodDescr(MappingProxyType, "get", mappingProxyGetMethod))
+	SetTypeDescr(MappingProxyType, "keys", NewMethodDescr(MappingProxyType, "keys", mappingProxyForwardNoArgs("keys")))
+	SetTypeDescr(MappingProxyType, "values", NewMethodDescr(MappingProxyType, "values", mappingProxyForwardNoArgs("values")))
+	SetTypeDescr(MappingProxyType, "items", NewMethodDescr(MappingProxyType, "items", mappingProxyForwardNoArgs("items")))
+	SetTypeDescr(MappingProxyType, "copy", NewMethodDescr(MappingProxyType, "copy", mappingProxyForwardNoArgs("copy")))
+	SetTypeDescr(MappingProxyType, "__reversed__", NewMethodDescr(MappingProxyType, "__reversed__", mappingProxyForwardNoArgs("__reversed__")))
+}
+
+// mappingProxyForwardNoArgs returns a closure that forwards a no-arg
+// method call to the wrapped mapping. CPython's mappingproxy_keys /
+// values / items / copy / __reversed__ all share this shape.
+//
+// CPython: Objects/descrobject.c:1131 mappingproxy_keys (and friends)
+func mappingProxyForwardNoArgs(method string) func(args []Object, _ map[string]Object) (Object, error) {
+	return func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: %s() takes no arguments (%d given)", method, len(args)-1)
+		}
+		mp, ok := args[0].(*MappingProxy)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: descriptor '%s' requires a 'mappingproxy' object but received a '%s'",
+				method, args[0].Type().Name)
+		}
+		fn, err := GetAttr(mp.mapping, NewStr(method))
+		if err != nil {
+			return nil, err
+		}
+		return Call(fn, NewTuple(nil), nil)
+	}
+}
+
+// mappingProxyGetMethod backs mappingproxy.get(key, default=None).
+//
+// CPython: Objects/descrobject.c:1112 mappingproxy_get
+func mappingProxyGetMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: get expected 1 to 2 arguments, got %d", len(args)-1)
+	}
+	mp, ok := args[0].(*MappingProxy)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'get' requires a 'mappingproxy' object but received a '%s'",
+			args[0].Type().Name)
+	}
+	fn, err := GetAttr(mp.mapping, NewStr("get"))
+	if err != nil {
+		return nil, err
+	}
+	callArgs := []Object{args[1]}
+	if len(args) == 3 {
+		callArgs = append(callArgs, args[2])
+	} else {
+		callArgs = append(callArgs, None())
+	}
+	return Call(fn, NewTuple(callArgs), nil)
 }
 
 // NewMappingProxy wraps mapping in a read-only proxy. CPython's

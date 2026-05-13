@@ -40,3 +40,4 @@ func TestImportEnum(t *testing.T) {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
+

@@ -506,13 +506,8 @@ func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	}
 	d := args[0].(*Dict)
 	if len(args) == 2 {
-		if src, ok := args[1].(*Dict); ok {
-			for _, k := range src.Keys() {
-				v, _ := src.GetItem(k)
-				if err := d.SetItem(k, v); err != nil {
-					return nil, err
-				}
-			}
+		if err := dictMergeFromArg(d, args[1]); err != nil {
+			return nil, err
 		}
 	}
 	for k, v := range kwargs {
@@ -521,6 +516,77 @@ func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
 		}
 	}
 	return None(), nil
+}
+
+// dictMergeFromArg merges src into dst following CPython's three-step
+// fallback: fast path for *Dict, then anything with a keys() method
+// (mappingproxy, custom mapping), then iterable-of-pairs.
+//
+// CPython: Objects/dictobject.c:2873 PyDict_Merge
+func dictMergeFromArg(dst *Dict, src Object) error {
+	if d, ok := src.(*Dict); ok {
+		for _, k := range d.Keys() {
+			v, err := d.GetItem(k)
+			if err != nil {
+				return err
+			}
+			if err := dst.SetItem(k, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if keysAttr, err := GetAttr(src, NewStr("keys")); err == nil {
+		keysObj, err := Call(keysAttr, NewTuple(nil), nil)
+		if err != nil {
+			return err
+		}
+		it, err := Iter(keysObj)
+		if err != nil {
+			return err
+		}
+		for {
+			k, err := IterNext(it)
+			if err != nil {
+				if err == ErrStopIteration {
+					return nil
+				}
+				return err
+			}
+			v, err := GetItem(src, k)
+			if err != nil {
+				return err
+			}
+			if err := dst.SetItem(k, v); err != nil {
+				return err
+			}
+		}
+	}
+	it, err := Iter(src)
+	if err != nil {
+		return err
+	}
+	i := 0
+	for {
+		v, err := IterNext(it)
+		if err != nil {
+			if errors.Is(err, ErrStopIteration) {
+				return nil
+			}
+			return err
+		}
+		pair, err := IterToSlice(v)
+		if err != nil {
+			return err
+		}
+		if len(pair) != 2 {
+			return fmt.Errorf("ValueError: dictionary update sequence element #%d has length %d; 2 is required", i, len(pair))
+		}
+		if err := dst.SetItem(pair[0], pair[1]); err != nil {
+			return err
+		}
+		i++
+	}
 }
 
 // dictCopyMethod backs dict.copy().
