@@ -240,3 +240,198 @@ func TestStaticMethodReturnsCallable(t *testing.T) {
 		t.Errorf("staticmethod returned %v, want wrapped callable", got)
 	}
 }
+
+// method.__doc__ proxies to the wrapped function so introspection
+// sees the target's docstring rather than the method type's.
+//
+// CPython: Objects/classobject.c:127 method_get_doc
+func TestBoundMethodDocProxies(t *testing.T) {
+	code := NewCode()
+	code.Name = "echo"
+	fn := NewFunction("echo", code, NewDict())
+	if err := SetAttr(fn, NewStr("__doc__"), NewStr("the docstring")); err != nil {
+		t.Fatal(err)
+	}
+	bm := NewBoundMethod(fn, NewInt(1))
+	got, err := GetAttr(bm, NewStr("__doc__"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, ok := got.(*Unicode); !ok || s.Value() != "the docstring" {
+		t.Errorf("__doc__ = %v, want 'the docstring'", got)
+	}
+}
+
+// method.__reduce__ returns (getattr, (self, funcname)) so pickle can
+// reconstitute the binding off the instance.
+//
+// CPython: Objects/classobject.c:90 method___reduce___impl
+func TestBoundMethodReduce(t *testing.T) {
+	code := NewCode()
+	code.Name = "speak"
+	fn := NewFunction("speak", code, NewDict())
+	self := NewStr("S")
+	bm := NewBoundMethod(fn, self)
+
+	got, err := GetAttr(bm, NewStr("__reduce__"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Call(got, NewTuple(nil), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tup, ok := out.(*Tuple)
+	if !ok || tup.Len() != 2 {
+		t.Fatalf("reduce result = %v, want 2-tuple", out)
+	}
+	if tup.Item(0) != builtinGetattrCallable {
+		t.Errorf("reduce[0] = %v, want getattr callable", tup.Item(0))
+	}
+	args, ok := tup.Item(1).(*Tuple)
+	if !ok || args.Len() != 2 {
+		t.Fatalf("reduce[1] = %v, want (self, name)", tup.Item(1))
+	}
+	if args.Item(0) != self {
+		t.Errorf("reduce[1][0] = %v, want %v", args.Item(0), self)
+	}
+	if s, ok := args.Item(1).(*Unicode); !ok || s.Value() != "speak" {
+		t.Errorf("reduce[1][1] = %v, want 'speak'", args.Item(1))
+	}
+}
+
+// method.__get__(obj, cls) returns the bound method as-is. Looking up
+// an already-bound method on a class attribute does not re-wrap it.
+//
+// CPython: Objects/classobject.c:292 method_descr_get
+func TestBoundMethodDescrGetReturnsSelf(t *testing.T) {
+	fn := NewBuiltinFunction("noop", func(_ []Object, _ map[string]Object) (Object, error) {
+		return None(), nil
+	})
+	bm := NewBoundMethod(fn, NewInt(1))
+	got, err := boundMethodDescrGet(bm, NewInt(2), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != bm {
+		t.Errorf("descr_get returned %v, want self", got)
+	}
+}
+
+// method() constructor rejects non-callables and None instances.
+//
+// CPython: Objects/classobject.c:180 method_new_impl
+func TestBoundMethodTpNewValidates(t *testing.T) {
+	fn := NewBuiltinFunction("f", func(_ []Object, _ map[string]Object) (Object, error) {
+		return None(), nil
+	})
+	if _, err := boundMethodTpNew(BoundMethodType, []Object{NewInt(1), NewInt(2)}, nil); err == nil {
+		t.Error("expected TypeError for non-callable")
+	}
+	if _, err := boundMethodTpNew(BoundMethodType, []Object{fn, None()}, nil); err == nil {
+		t.Error("expected TypeError for None instance")
+	}
+	out, err := boundMethodTpNew(BoundMethodType, []Object{fn, NewInt(1)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out.(*BoundMethod); !ok {
+		t.Errorf("got %T, want *BoundMethod", out)
+	}
+}
+
+// instancemethod wraps a callable and binds it through __get__.
+//
+// CPython: Objects/classobject.c:418 instancemethod_descr_get
+func TestInstanceMethodDescrGetBinds(t *testing.T) {
+	fn := NewBuiltinFunction("noop", func(args []Object, _ map[string]Object) (Object, error) {
+		return NewTuple(args), nil
+	})
+	im := NewInstanceMethod(fn)
+	// Without an instance, __get__ returns the wrapped callable.
+	got, err := instanceMethodDescrGet(im, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != fn {
+		t.Errorf("descr_get(nil) = %v, want wrapped callable", got)
+	}
+	// With an instance, __get__ binds to it.
+	got, err = instanceMethodDescrGet(im, NewInt(42), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bm, ok := got.(*BoundMethod)
+	if !ok {
+		t.Fatalf("descr_get(obj) = %T, want *BoundMethod", got)
+	}
+	self, _ := bm.Self().(*Int).Int64()
+	if bm.Func() != fn || self != 42 {
+		t.Errorf("bound method has wrong func/self: %v", bm)
+	}
+}
+
+// Calling an instancemethod directly forwards to the wrapped callable.
+//
+// CPython: Objects/classobject.c:412 instancemethod_call
+func TestInstanceMethodCallForwards(t *testing.T) {
+	fn := NewBuiltinFunction("echo", func(args []Object, _ map[string]Object) (Object, error) {
+		return NewTuple(args), nil
+	})
+	im := NewInstanceMethod(fn)
+	got, err := CallOneArg(im, NewInt(7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tup := got.(*Tuple)
+	if tup.Len() != 1 {
+		t.Fatalf("len = %d, want 1", tup.Len())
+	}
+	v, _ := tup.Item(0).(*Int).Int64()
+	if v != 7 {
+		t.Errorf("arg = %d, want 7", v)
+	}
+}
+
+// instancemethod compares by wrapped callable; identity holds and
+// distinct wrappers around the same callable compare equal.
+//
+// CPython: Objects/classobject.c:428 instancemethod_richcompare
+func TestInstanceMethodEqByFunc(t *testing.T) {
+	fn := NewBuiltinFunction("f", func(_ []Object, _ map[string]Object) (Object, error) {
+		return None(), nil
+	})
+	other := NewBuiltinFunction("g", func(_ []Object, _ map[string]Object) (Object, error) {
+		return None(), nil
+	})
+	a := NewInstanceMethod(fn)
+	b := NewInstanceMethod(fn)
+	c := NewInstanceMethod(other)
+	eq, err := RichCmpBool(a, b, CompareEQ)
+	if err != nil || !eq {
+		t.Errorf("a == b should be True, got %v / %v", eq, err)
+	}
+	ne, err := RichCmpBool(a, c, CompareNE)
+	if err != nil || !ne {
+		t.Errorf("a != c should be True, got %v / %v", ne, err)
+	}
+}
+
+// instancemethod() __new__ rejects a non-callable first argument.
+//
+// CPython: Objects/classobject.c:488 instancemethod_new_impl
+func TestInstanceMethodTpNewValidates(t *testing.T) {
+	if _, err := instanceMethodTpNew(InstanceMethodType, []Object{NewInt(1)}, nil); err == nil {
+		t.Error("expected TypeError for non-callable")
+	}
+	fn := NewBuiltinFunction("f", func(_ []Object, _ map[string]Object) (Object, error) {
+		return None(), nil
+	})
+	out, err := instanceMethodTpNew(InstanceMethodType, []Object{fn}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out.(*InstanceMethod); !ok {
+		t.Errorf("got %T, want *InstanceMethod", out)
+	}
+}

@@ -1,12 +1,14 @@
-// Bound methods, classmethod, and staticmethod. Each one is a
-// descriptor whose __get__ rewires the call to put the right
+// Bound methods, instancemethod, classmethod, and staticmethod. Each
+// one is a descriptor whose __get__ rewires the call to put the right
 // argument in front:
 //
-//   method:        f.__get__(obj, type) → bound(f, obj)
-//   classmethod:   f.__get__(obj, type) → bound(f, type)
-//   staticmethod:  f.__get__(obj, type) → f
+//   method:         f.__get__(obj, type) returns self (already bound)
+//   instancemethod: f.__get__(obj, type) returns bound(func, obj)
+//   classmethod:    f.__get__(obj, type) returns bound(func, type)
+//   staticmethod:   f.__get__(obj, type) returns func
 //
-// CPython: Objects/classobject.c:75 method_getattro
+// CPython: Objects/classobject.c:140 method_getattro
+// CPython: Objects/classobject.c:373 instancemethod_getattro
 
 package objects
 
@@ -34,25 +36,54 @@ func init() {
 	BoundMethodType.Vectorcall = boundMethodVectorcall
 	BoundMethodType.TpTraverse = boundMethodTraverse
 	BoundMethodType.Getattro = boundMethodGetattro
+	BoundMethodType.Setattro = GenericSetAttr
+	// method_descr_get just returns self with an extra reference:
+	// looking up a bound method on a class returns the binding as-is
+	// rather than re-wrapping it.
+	//
+	// CPython: Objects/classobject.c:292 method_descr_get
+	BoundMethodType.DescrGet = boundMethodDescrGet
 	// method_richcompare: == / != compare (im_func, im_self) pairs.
 	// All other ops return NotImplemented so that comparing a bound
 	// method against, say, an int gives the regular TypeError instead
 	// of a spurious False.
 	//
-	// CPython: Objects/classobject.c:206 method_richcompare
+	// CPython: Objects/classobject.c:210 method_richcompare
 	BoundMethodType.RichCmp = boundMethodRichCompare
 	// method_hash: pointer hash of im_self XOR hash(im_func). The
 	// pointer half lets every distinct binding hash differently even
 	// when the function and self compare equal in some weird way.
 	//
-	// CPython: Objects/classobject.c:230 method_hash
+	// CPython: Objects/classobject.c:266 method_hash
 	BoundMethodType.Hash = boundMethodHash
+	// method.__new__: clinic-generated wrapper that validates the
+	// (function, instance) pair before delegating to PyMethod_New.
+	//
+	// CPython: Objects/classobject.c:180 method_new_impl
+	BoundMethodType.TpNew = boundMethodTpNew
+	// method_memberlist: __func__ and __self__ are exposed as readonly
+	// member descriptors with CPython's docstrings.
+	//
+	// CPython: Objects/classobject.c:114 method_memberlist
 	SetTypeDescr(BoundMethodType, "__func__", NewGetSetDescr("__func__",
 		func(o Object) (Object, error) { return o.(*BoundMethod).imFunc, nil },
 		nil))
 	SetTypeDescr(BoundMethodType, "__self__", NewGetSetDescr("__self__",
 		func(o Object) (Object, error) { return o.(*BoundMethod).imSelf, nil },
 		nil))
+	// method_getset: __doc__ proxies to the wrapped function so a
+	// bound method shows its target's docstring.
+	//
+	// CPython: Objects/classobject.c:134 method_getset
+	SetTypeDescr(BoundMethodType, "__doc__", NewGetSetDescr("__doc__",
+		boundMethodGetDoc, nil))
+	// method_methods: __reduce__ returns (getattr, (self, funcname))
+	// so pickle can rebuild the bound method by re-fetching the
+	// attribute off the instance.
+	//
+	// CPython: Objects/classobject.c:103 method_methods
+	SetTypeDescr(BoundMethodType, "__reduce__",
+		NewMethodDescr(BoundMethodType, "__reduce__", boundMethodReduceMethod))
 }
 
 // boundMethodGetattro looks for name on the method type first (so
@@ -206,11 +237,97 @@ func boundMethodHash(o Object) (int64, error) {
 	return x, nil
 }
 
+// boundMethodDescrGet returns the bound method as-is, mirroring the
+// `Py_NewRef(meth)` in CPython's method_descr_get. Looking up a bound
+// method as a class attribute on the wrapped self's type does not
+// re-bind: the descriptor protocol short-circuits.
+//
+// CPython: Objects/classobject.c:292 method_descr_get
+func boundMethodDescrGet(descr Object, _ Object, _ *Type) (Object, error) {
+	return descr, nil
+}
+
+// boundMethodGetDoc proxies to the wrapped function's __doc__. The
+// docstring of a bound method is always the wrapped function's, never
+// the method type's, so introspecting `bm.__doc__` mirrors what
+// `bm.__func__.__doc__` would return.
+//
+// CPython: Objects/classobject.c:127 method_get_doc
+func boundMethodGetDoc(o Object) (Object, error) {
+	m := o.(*BoundMethod)
+	return GetAttr(m.imFunc, NewStr("__doc__"))
+}
+
+// boundMethodTpNew validates the (function, instance) pair and
+// delegates to NewBoundMethod. Mirrors method_new_impl: the function
+// has to be callable and the instance has to be neither nil nor None,
+// otherwise CPython raises TypeError.
+//
+// CPython: Objects/classobject.c:180 method_new_impl
+func boundMethodTpNew(_ *Type, args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: method expected 2 arguments, got %d", len(args))
+	}
+	fn, instance := args[0], args[1]
+	if fn == nil || fn.Type().Call == nil && fn.Type().Vectorcall == nil {
+		return nil, fmt.Errorf("TypeError: first argument must be callable")
+	}
+	if instance == nil || instance == None() {
+		return nil, fmt.Errorf("TypeError: instance must not be None")
+	}
+	return NewBoundMethod(fn, instance), nil
+}
+
+// boundMethodReduceMethod is method.__reduce__(): returns
+// (builtin getattr, (self, funcname)) so pickle can reconstitute the
+// binding by re-resolving the attribute on the instance.
+//
+// CPython: Objects/classobject.c:90 method___reduce___impl
+func boundMethodReduceMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	m, ok := args[0].(*BoundMethod)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'method' object")
+	}
+	funcname, err := GetAttr(m.imFunc, NewStr("__name__"))
+	if err != nil {
+		return nil, err
+	}
+	return NewTuple([]Object{
+		builtinGetattrCallable,
+		NewTuple([]Object{m.imSelf, funcname}),
+	}), nil
+}
+
+// builtinGetattrCallable is the reducer's first element: a callable
+// pickle can dump and load that, when called with (self, name),
+// returns whatever the attribute lookup yields. Mirrors
+// _PyEval_GetBuiltin(&_Py_ID(getattr)) on the CPython side. Kept here
+// instead of in builtins/ so the objects package has no import cycle.
+//
+// CPython: Python/bltinmodule.c:1228 builtin_getattr
+var builtinGetattrCallable = NewBuiltinFunction("getattr",
+	func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 2 || len(args) > 3 {
+			return nil, fmt.Errorf("TypeError: getattr expected 2 or 3 arguments, got %d", len(args))
+		}
+		v, err := GetAttr(args[0], args[1])
+		if err == nil {
+			return v, nil
+		}
+		if len(args) == 3 {
+			return args[2], nil
+		}
+		return nil, err
+	})
+
 // boundMethodVectorcall prepends self to the positional args, then
 // hands control to the wrapped function. Mirrors the inline logic in
 // CPython's method_vectorcall.
 //
-// CPython: Objects/classobject.c:51 method_vectorcall
+// CPython: Objects/classobject.c:46 method_vectorcall
 func boundMethodVectorcall(callable Object, args []Object, nargsf uint, kwnames *Tuple) (Object, error) {
 	m := callable.(*BoundMethod)
 	nargs := VectorcallNargs(nargsf)
@@ -732,4 +849,188 @@ func staticMethodSetDict(o Object, v Object) error {
 	}
 	sm.smDict = d
 	return nil
+}
+
+// InstanceMethod is a callable wrapper around a function where, when
+// fetched off an instance, __get__ binds the function into a regular
+// PyMethod. CPython exposes it as `types.InstanceMethodType`; tools
+// like `inspect` use it as a lightweight descriptor that defers to the
+// normal function machinery once bound.
+//
+// CPython: Include/cpython/classobject.h:30 PyInstanceMethodObject
+type InstanceMethod struct {
+	Header
+	function Object
+}
+
+// InstanceMethodType is the type singleton for instancemethod.
+//
+// CPython: Objects/classobject.c:501 PyInstanceMethod_Type
+var InstanceMethodType = NewType("instancemethod", []*Type{objectType})
+
+func init() {
+	InstanceMethodType.Repr = instanceMethodRepr
+	InstanceMethodType.Str = instanceMethodRepr
+	InstanceMethodType.Call = instanceMethodCall
+	InstanceMethodType.Getattro = instanceMethodGetattro
+	InstanceMethodType.Setattro = GenericSetAttr
+	InstanceMethodType.TpTraverse = instanceMethodTraverse
+	InstanceMethodType.RichCmp = instanceMethodRichCompare
+	InstanceMethodType.DescrGet = instanceMethodDescrGet
+	InstanceMethodType.TpNew = instanceMethodTpNew
+
+	// instancemethod_memberlist: __func__ exposes the wrapped
+	// callable as a readonly member.
+	//
+	// CPython: Objects/classobject.c:354 instancemethod_memberlist
+	SetTypeDescr(InstanceMethodType, "__func__", NewGetSetDescr("__func__",
+		func(o Object) (Object, error) { return o.(*InstanceMethod).function, nil },
+		nil))
+	// instancemethod_getset: __doc__ proxies to the wrapped callable.
+	//
+	// CPython: Objects/classobject.c:367 instancemethod_getset
+	SetTypeDescr(InstanceMethodType, "__doc__", NewGetSetDescr("__doc__",
+		instanceMethodGetDoc, nil))
+}
+
+// NewInstanceMethod wraps fn so attribute access through an instance
+// binds the callable into a regular method. Used by `types` and the
+// abc machinery.
+//
+// CPython: Objects/classobject.c:332 PyInstanceMethod_New
+func NewInstanceMethod(fn Object) *InstanceMethod {
+	im := &InstanceMethod{function: fn}
+	im.init(InstanceMethodType)
+	return im
+}
+
+// Func returns the wrapped callable.
+//
+// CPython: Objects/classobject.c:342 PyInstanceMethod_Function
+func (im *InstanceMethod) Func() Object { return im.function }
+
+// instanceMethodRepr matches CPython's `<instancemethod NAME at PTR>`.
+// CPython falls back to "?" when the wrapped callable has no __name__,
+// mirroring instancemethod_repr.
+//
+// CPython: Objects/classobject.c:453 instancemethod_repr
+func instanceMethodRepr(o Object) (string, error) {
+	im := o.(*InstanceMethod)
+	name := boundMethodFuncName(im.function)
+	return fmt.Sprintf("<instancemethod %s at %p>", name, im), nil
+}
+
+// instanceMethodCall forwards a direct call to the wrapped callable.
+// Calling an instancemethod that has not been bound first is identical
+// to calling its underlying function.
+//
+// CPython: Objects/classobject.c:412 instancemethod_call
+func instanceMethodCall(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
+	im := callable.(*InstanceMethod)
+	if im.function == nil {
+		return nil, fmt.Errorf("RuntimeError: uninitialized instancemethod object")
+	}
+	tup := NewTuple(args)
+	var kw *Dict
+	if len(kwargs) > 0 {
+		kw = NewDict()
+		for k, v := range kwargs {
+			if err := kw.SetItem(NewStr(k), v); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return Call(im.function, tup, kw)
+}
+
+// instanceMethodGetattro looks for name on the instancemethod type
+// first (so __func__ / __doc__ resolve through their getset
+// descriptors), then falls through to GetAttr on the wrapped callable.
+//
+// CPython: Objects/classobject.c:373 instancemethod_getattro
+func instanceMethodGetattro(o Object, name Object) (Object, error) {
+	im := o.(*InstanceMethod)
+	descr, _ := LookupDescriptor(o.Type(), attrNameStr(name))
+	if descr != nil {
+		if dg := descr.Type().DescrGet; dg != nil {
+			return dg(descr, o, o.Type())
+		}
+		return descr, nil
+	}
+	return GetAttr(im.function, name)
+}
+
+// instanceMethodTraverse visits the wrapped callable.
+//
+// CPython: Objects/classobject.c:406 instancemethod_traverse
+func instanceMethodTraverse(o Object, visit Visitor) error {
+	im := o.(*InstanceMethod)
+	if im.function != nil {
+		return visit(im.function)
+	}
+	return nil
+}
+
+// instanceMethodRichCompare ports instancemethod_richcompare. Only ==
+// and != are meaningful; CPython compares wrapped callables and folds
+// the result into a bool.
+//
+// CPython: Objects/classobject.c:428 instancemethod_richcompare
+func instanceMethodRichCompare(a, b Object, op CompareOp) (Object, error) {
+	if op != CompareEQ && op != CompareNE {
+		return NotImplemented(), nil
+	}
+	ima, ok := a.(*InstanceMethod)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	imb, ok := b.(*InstanceMethod)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	eq, err := RichCmpBool(ima.function, imb.function, CompareEQ)
+	if err != nil {
+		return nil, err
+	}
+	if op == CompareNE {
+		eq = !eq
+	}
+	return NewBool(eq), nil
+}
+
+// instanceMethodDescrGet binds the wrapped callable to obj. With
+// obj=nil (class-level access) the instancemethod hands back the
+// underlying callable. Otherwise it returns a freshly minted bound
+// method, exactly like CPython's instancemethod_descr_get.
+//
+// CPython: Objects/classobject.c:418 instancemethod_descr_get
+func instanceMethodDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
+	im := descr.(*InstanceMethod)
+	if owner == nil {
+		return im.function, nil
+	}
+	return NewBoundMethod(im.function, owner), nil
+}
+
+// instanceMethodGetDoc proxies __doc__ to the wrapped callable.
+//
+// CPython: Objects/classobject.c:360 instancemethod_get_doc
+func instanceMethodGetDoc(o Object) (Object, error) {
+	im := o.(*InstanceMethod)
+	return GetAttr(im.function, NewStr("__doc__"))
+}
+
+// instanceMethodTpNew is the clinic-generated __new__: validate the
+// callable then construct the wrapper.
+//
+// CPython: Objects/classobject.c:488 instancemethod_new_impl
+func instanceMethodTpNew(_ *Type, args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: instancemethod expected 1 argument, got %d", len(args))
+	}
+	fn := args[0]
+	if fn == nil || fn.Type().Call == nil && fn.Type().Vectorcall == nil {
+		return nil, fmt.Errorf("TypeError: first argument must be callable")
+	}
+	return NewInstanceMethod(fn), nil
 }

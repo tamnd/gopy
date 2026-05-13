@@ -317,3 +317,239 @@ func TestFunctionTraverseSkipsNilSlots(t *testing.T) {
 		}
 	}
 }
+
+// __code__ setter goes through SetAttr; the descriptor must reject
+// non-code values with TypeError and accept matching freevar counts.
+//
+// CPython: Objects/funcobject.c:597 func_set_code
+func TestFuncCodeAttrSetter(t *testing.T) {
+	fn := NewFunction("f", NewCode(), NewDict())
+	other := NewCode()
+	other.Name = "g"
+	if err := SetAttr(fn, NewStr("__code__"), other); err != nil {
+		t.Fatalf("SetAttr __code__: %v", err)
+	}
+	if fn.Code != other {
+		t.Error("__code__ setter should rebind Code")
+	}
+	if err := SetAttr(fn, NewStr("__code__"), NewInt(5)); err == nil {
+		t.Error("__code__ setter should reject non-code")
+	}
+}
+
+// __defaults__ setter: None clears, tuple binds, anything else errors.
+//
+// CPython: Objects/funcobject.c:766 func_set_defaults
+func TestFuncDefaultsAttrSetter(t *testing.T) {
+	fn := NewFunction("f", NewCode(), NewDict())
+	tup := NewTuple([]Object{NewInt(1)})
+	if err := SetAttr(fn, NewStr("__defaults__"), tup); err != nil {
+		t.Fatalf("SetAttr __defaults__: %v", err)
+	}
+	if fn.Defaults != tup {
+		t.Error("__defaults__ setter should rebind Defaults")
+	}
+	if err := SetAttr(fn, NewStr("__defaults__"), None()); err != nil {
+		t.Fatalf("SetAttr __defaults__ = None: %v", err)
+	}
+	if fn.Defaults != nil {
+		t.Error("__defaults__ = None should clear Defaults")
+	}
+	if err := SetAttr(fn, NewStr("__defaults__"), NewInt(5)); err == nil {
+		t.Error("__defaults__ setter should reject non-tuple")
+	}
+}
+
+// __kwdefaults__ setter: None clears, dict binds, anything else errors.
+//
+// CPython: Objects/funcobject.c:809 func_set_kwdefaults
+func TestFuncKwDefaultsAttrSetter(t *testing.T) {
+	fn := NewFunction("f", NewCode(), NewDict())
+	d := NewDict()
+	if err := SetAttr(fn, NewStr("__kwdefaults__"), d); err != nil {
+		t.Fatalf("SetAttr __kwdefaults__: %v", err)
+	}
+	if fn.KwDefaults != d {
+		t.Error("__kwdefaults__ setter should rebind KwDefaults")
+	}
+	if err := SetAttr(fn, NewStr("__kwdefaults__"), None()); err != nil {
+		t.Fatalf("SetAttr __kwdefaults__ = None: %v", err)
+	}
+	if fn.KwDefaults != nil {
+		t.Error("__kwdefaults__ = None should clear KwDefaults")
+	}
+	if err := SetAttr(fn, NewStr("__kwdefaults__"), NewInt(5)); err == nil {
+		t.Error("__kwdefaults__ setter should reject non-dict")
+	}
+}
+
+// __annotations__ getter lazily materializes an empty dict.
+//
+// CPython: Objects/funcobject.c:895 function___annotations___get_impl
+func TestFuncAnnotationsAttrGetterMaterializes(t *testing.T) {
+	fn := NewFunction("f", NewCode(), NewDict())
+	v, err := GetAttr(fn, NewStr("__annotations__"))
+	if err != nil {
+		t.Fatalf("GetAttr __annotations__: %v", err)
+	}
+	if _, ok := v.(*Dict); !ok {
+		t.Fatalf("__annotations__ = %v, want empty dict", v)
+	}
+	v2, err := GetAttr(fn, NewStr("__annotations__"))
+	if err != nil {
+		t.Fatalf("GetAttr __annotations__ (2nd): %v", err)
+	}
+	if v != v2 {
+		t.Error("__annotations__ second read should return cached identity")
+	}
+}
+
+// __annotations__ setter: None clears, dict binds, anything else errors.
+//
+// CPython: Objects/funcobject.c:916 function___annotations___set_impl
+func TestFuncAnnotationsAttrSetter(t *testing.T) {
+	fn := NewFunction("f", NewCode(), NewDict())
+	d := NewDict()
+	if err := SetAttr(fn, NewStr("__annotations__"), d); err != nil {
+		t.Fatalf("SetAttr __annotations__: %v", err)
+	}
+	if fn.Annotations != d {
+		t.Error("__annotations__ setter should rebind Annotations")
+	}
+	if err := SetAttr(fn, NewStr("__annotations__"), None()); err != nil {
+		t.Fatalf("SetAttr __annotations__ = None: %v", err)
+	}
+	if fn.Annotations != nil {
+		t.Error("__annotations__ = None should clear Annotations")
+	}
+	if err := SetAttr(fn, NewStr("__annotations__"), NewInt(5)); err == nil {
+		t.Error("__annotations__ setter should reject non-dict")
+	}
+}
+
+// __annotate__ setter: callable swaps and clears the cached
+// annotations dict so the next read re-runs the annotator.
+//
+// CPython: Objects/funcobject.c:862 function___annotate___set_impl
+func TestFuncAnnotateAttrSetter(t *testing.T) {
+	fn := NewFunction("f", NewCode(), NewDict())
+	fn.Annotations = NewDict()
+	annotator := NewBuiltinFunction("annotate", func(_ []Object, _ map[string]Object) (Object, error) {
+		return NewDict(), nil
+	})
+	if err := SetAttr(fn, NewStr("__annotate__"), annotator); err != nil {
+		t.Fatalf("SetAttr __annotate__: %v", err)
+	}
+	if fn.Annotate != annotator {
+		t.Error("__annotate__ setter should rebind Annotate")
+	}
+	if fn.Annotations != nil {
+		t.Error("__annotate__ setter should clear cached Annotations")
+	}
+	if err := SetAttr(fn, NewStr("__annotate__"), NewInt(5)); err == nil {
+		t.Error("__annotate__ setter should reject non-callable")
+	}
+}
+
+// function.__new__(code, globals) — the minimal two-argument form
+// returns a fresh function bound to the supplied code and globals.
+//
+// CPython: Objects/funcobject.c:432 func_new_impl
+func TestFuncTpNewMinimalArgs(t *testing.T) {
+	code := NewCode()
+	code.Name = "f"
+	g := NewDict()
+	obj, err := FunctionType.TpNew(FunctionType, []Object{code, g}, nil)
+	if err != nil {
+		t.Fatalf("function.__new__: %v", err)
+	}
+	fn, ok := obj.(*Function)
+	if !ok {
+		t.Fatalf("function.__new__ returned %T, want *Function", obj)
+	}
+	if fn.Code != code {
+		t.Error("function.__new__ should bind Code")
+	}
+	if fn.Globals != Object(g) {
+		t.Error("function.__new__ should bind Globals")
+	}
+}
+
+// function.__new__ enforces typed validation on each positional
+// argument, mirroring func_new_impl's parsing block.
+//
+// CPython: Objects/funcobject.c:432 func_new_impl
+func TestFuncTpNewValidates(t *testing.T) {
+	code := NewCode()
+	code.Name = "f"
+	g := NewDict()
+	cases := []struct {
+		name string
+		args []Object
+	}{
+		{"code-not-code", []Object{NewInt(1), g}},
+		{"globals-not-dict", []Object{code, NewInt(1)}},
+		{"name-not-str", []Object{code, g, NewInt(1)}},
+		{"defaults-not-tuple", []Object{code, g, None(), NewInt(1)}},
+		{"closure-not-tuple", []Object{code, g, None(), None(), NewInt(1)}},
+		{"kwdefaults-not-dict", []Object{code, g, None(), None(), None(), NewInt(1)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := FunctionType.TpNew(FunctionType, tc.args, nil); err == nil {
+				t.Errorf("function.__new__(%s) should error", tc.name)
+			}
+		})
+	}
+}
+
+// function.__new__ rejects closures whose length does not match the
+// code object's freevar count.
+//
+// CPython: Objects/funcobject.c:432 func_new_impl
+func TestFuncTpNewRejectsBadClosureSize(t *testing.T) {
+	code := NewCode()
+	code.Name = "f"
+	code.Freevars = []string{"a", "b"}
+	tup := NewTuple([]Object{NewCell(nil)})
+	_, err := FunctionType.TpNew(FunctionType, []Object{code, NewDict(), None(), None(), tup}, nil)
+	if err == nil {
+		t.Error("function.__new__ should reject mismatched closure length")
+	}
+}
+
+// function.__new__ requires every closure entry to be a Cell.
+//
+// CPython: Objects/funcobject.c:432 func_new_impl
+func TestFuncTpNewRejectsNonCellClosureEntry(t *testing.T) {
+	code := NewCode()
+	code.Name = "f"
+	code.Freevars = []string{"a"}
+	tup := NewTuple([]Object{NewInt(1)})
+	_, err := FunctionType.TpNew(FunctionType, []Object{code, NewDict(), None(), None(), tup}, nil)
+	if err == nil {
+		t.Error("function.__new__ should reject non-cell closure entry")
+	}
+}
+
+// function.__new__ accepts kwargs for code/globals/name/argdefs/
+// closure/kwdefaults, matching the clinic-generated keyword names.
+//
+// CPython: Objects/funcobject.c:432 func_new_impl
+func TestFuncTpNewAcceptsKwargs(t *testing.T) {
+	code := NewCode()
+	code.Name = "f"
+	g := NewDict()
+	obj, err := FunctionType.TpNew(FunctionType, nil, map[string]Object{
+		"code":    code,
+		"globals": g,
+		"name":    NewStr("renamed"),
+	})
+	if err != nil {
+		t.Fatalf("function.__new__ kwargs: %v", err)
+	}
+	fn := obj.(*Function)
+	if fn.Name != "renamed" {
+		t.Errorf("Name = %q, want %q", fn.Name, "renamed")
+	}
+}
