@@ -44,8 +44,7 @@ var statResultType = objects.NewStructSeqType("os.stat_result", []objects.Struct
 func init() {
 	_ = imp.AppendInittab("os", buildOS)
 	_ = imp.AppendInittab("os.path", buildPath)
-	_ = imp.AppendInittab("posixpath", buildPath)
-	_ = imp.AppendInittab("ntpath", buildPath)
+	// posixpath and ntpath now load from stdlib/ via PathFinder.
 }
 
 // buildPath populates the os.path / posixpath module.
