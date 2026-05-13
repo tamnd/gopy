@@ -16,6 +16,86 @@ paragraph in the detail section. If a paragraph and the code ever
 disagree, the code wins and both must be reconciled in the same
 commit that fixes the drift.
 
+## Rule
+
+Every CPython source file backing a pending or partial subsystem
+below is ported **in full**. No function in those files may be
+left unported. The deliverable for each subsystem is a Go file
+whose function list 1:1 covers the C / Python function list and
+whose public names match CPython 3.14. Identity-shim placeholders
+are not acceptable: once a subsystem lands under this spec we do
+not come back to it for a missing function. This is the same rule
+1704 applies to the object protocol; 1702 extends it to the
+unittest enablement subsystems.
+
+## Files-in-scope (pending subsystems)
+
+One Files-in-scope table per pending subsystem, modeled on 1704.
+Every row in every table must land before the subsystem is marked
+done. Sources of truth live under `/Users/apple/cpython-314/`.
+
+### collections (#497)
+
+| # | CPython file | Lines | gopy target | Status |
+|---|--------------|------:|-------------|--------|
+| A | `Modules/_collectionsmodule.c` | ~3,000 | `module/_collections/` | pending |
+| B | `Lib/collections/__init__.py` | ~1,500 | `stdlib/collections/__init__.py` | pending |
+
+### traceback (#496)
+
+| # | CPython file | Lines | gopy target | Status |
+|---|--------------|------:|-------------|--------|
+| A | `Lib/traceback.py` | ~1,300 | `stdlib/traceback.py` + `module/traceback/` | pending |
+
+### io / _io (#514)
+
+| # | CPython file | Lines | gopy target | Status |
+|---|--------------|------:|-------------|--------|
+| A | `Modules/_io/_iomodule.c` | ~700 | `module/_io/module.go` | pending |
+| B | `Modules/_io/iobase.c` | ~900 | `module/_io/iobase.go` | pending |
+| C | `Modules/_io/fileio.c` | ~1,200 | `module/_io/fileio.go` | pending |
+| D | `Modules/_io/bufferedio.c` | ~2,500 | `module/_io/bufferedio.go` | pending |
+| E | `Modules/_io/textio.c` | ~3,400 | `module/_io/textio.go` | pending |
+| F | `Modules/_io/stringio.c` | ~1,100 | `module/_io/stringio.go` (verify, may already exist) | partial |
+| G | `Modules/_io/bytesio.c` | ~1,100 | `module/_io/bytesio.go` | pending |
+| H | `Lib/io.py` | ~100 | `stdlib/io.py` | pending |
+
+### argparse (#515)
+
+| # | CPython file | Lines | gopy target | Status |
+|---|--------------|------:|-------------|--------|
+| A | `Lib/argparse.py` | ~2,700 | `stdlib/argparse.py` | pending |
+
+### signal / _signal (#516)
+
+| # | CPython file | Lines | gopy target | Status |
+|---|--------------|------:|-------------|--------|
+| A | `Modules/signalmodule.c` | ~2,000 | `module/_signal/` | pending |
+| B | `Lib/signal.py` | ~120 | `stdlib/signal.py` | pending |
+
+### os + posixpath + ntpath (#518)
+
+| # | CPython file | Lines | gopy target | Status |
+|---|--------------|------:|-------------|--------|
+| A | `Modules/posixmodule.c` | ~15,000 (slice) | `module/posix/` | pending |
+| B | `Lib/os.py` | ~1,100 | `stdlib/os.py` | pending |
+| C | `Lib/posixpath.py` | ~600 | `stdlib/posixpath.py` | pending |
+| D | `Lib/ntpath.py` | ~900 | `stdlib/ntpath.py` | pending |
+| E | `Lib/genericpath.py` | ~170 | `stdlib/genericpath.py` | pending |
+
+### VM / compile audit (#521)
+
+| # | CPython file | Lines | gopy target | Status |
+|---|--------------|------:|-------------|--------|
+| A | `Python/ceval.c` (remaining ops) | varies | `vm/` (existing) | pending |
+| B | `Python/bytecodes.c` (remaining ops) | varies | `vm/` (existing) | pending |
+| C | `Python/compile.c` (audit) | ~7,000 | `compile/` (existing) | pending |
+
+When an audit reveals a missing function or opcode, a new row is
+added to the corresponding table above and the function lands
+before the row flips to done.
+
+
 Status legend:
 
 | Symbol | Meaning |
