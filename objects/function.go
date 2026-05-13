@@ -396,25 +396,12 @@ func funcSetAnnotateAttr(o Object, v Object) error {
 		f.Annotate = None()
 		return nil
 	}
-	if !isCallable(v) {
+	if !Callable(v) {
 		return fmt.Errorf("TypeError: __annotate__ must be callable or None")
 	}
 	f.Annotate = v
 	f.Annotations = nil
 	return nil
-}
-
-// isCallable mirrors PyCallable_Check: an object is callable when its
-// type defines tp_call or tp_vectorcall. Kept narrow on purpose so
-// the function-setter validation matches CPython.
-//
-// CPython: Objects/call.c:240 PyCallable_Check
-func isCallable(o Object) bool {
-	if o == nil {
-		return false
-	}
-	t := o.Type()
-	return t != nil && (t.Call != nil || t.Vectorcall != nil)
 }
 
 // funcTpNew is function.__new__. Mirrors func_new_impl:
