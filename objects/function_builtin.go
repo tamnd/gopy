@@ -29,6 +29,39 @@ func init() {
 	// CPython: Objects/methodobject.c:357 PyCFunction_Type (tp_hash slot
 	// inherited from object_hash)
 	BuiltinFunctionType.Hash = identityHash
+
+	// meth_getsets: __doc__, __name__, __qualname__, __self__, __module__
+	// CPython: Objects/methodobject.c:286 meth_getsets
+	SetTypeDescr(BuiltinFunctionType, "__doc__", NewGetSetDescr("__doc__",
+		func(o Object) (Object, error) { return None(), nil },
+		nil,
+	))
+	SetTypeDescr(BuiltinFunctionType, "__name__", NewGetSetDescr("__name__",
+		func(o Object) (Object, error) {
+			if bf, ok := o.(*BuiltinFunction); ok {
+				return NewStr(bf.Name), nil
+			}
+			return None(), nil
+		},
+		nil,
+	))
+	SetTypeDescr(BuiltinFunctionType, "__qualname__", NewGetSetDescr("__qualname__",
+		func(o Object) (Object, error) {
+			if bf, ok := o.(*BuiltinFunction); ok {
+				return NewStr(bf.Name), nil
+			}
+			return None(), nil
+		},
+		nil,
+	))
+	SetTypeDescr(BuiltinFunctionType, "__self__", NewGetSetDescr("__self__",
+		func(o Object) (Object, error) { return None(), nil },
+		nil,
+	))
+	SetTypeDescr(BuiltinFunctionType, "__module__", NewGetSetDescr("__module__",
+		func(o Object) (Object, error) { return NewStr(""), nil },
+		nil,
+	))
 }
 
 // NewBuiltinFunction wraps fn under name.
