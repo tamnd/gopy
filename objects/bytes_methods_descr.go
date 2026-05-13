@@ -14,6 +14,7 @@
 package objects
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -182,7 +183,7 @@ func findMethod(name string, reverse, raiseOnMiss bool) methodFn {
 			return nil, err
 		}
 		lo, hi := clampBytesSlice(len(v), start, end)
-		idx := -1
+		var idx int
 		if reverse {
 			idx = lastIndex(v[lo:hi], sub)
 		} else {
@@ -914,7 +915,7 @@ func hexMethod() methodFn {
 				if s, ok := args[1].(*Unicode); ok {
 					val := s.Value()
 					if len(val) != 1 {
-						return nil, fmt.Errorf("ValueError: sep must be length 1.")
+						return nil, fmt.Errorf("ValueError: sep must be length 1")
 					}
 					sep = val[0]
 				} else {
@@ -922,7 +923,7 @@ func hexMethod() methodFn {
 				}
 			} else {
 				if len(buf) != 1 {
-					return nil, fmt.Errorf("ValueError: sep must be length 1.")
+					return nil, fmt.Errorf("ValueError: sep must be length 1")
 				}
 				sep = buf[0]
 			}
@@ -1067,7 +1068,7 @@ func IterToSlice(o Object) ([]Object, error) {
 	for {
 		v, err := IterNext(it)
 		if err != nil {
-			if err == ErrStopIteration {
+			if errors.Is(err, ErrStopIteration) {
 				return out, nil
 			}
 			return nil, err

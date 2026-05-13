@@ -32,7 +32,7 @@ func wireBytesLikeMethods(t *Type) {
 
 	SetTypeDescr(t, "isalpha", NewMethodDescr(t, "isalpha", classifierMethod("isalpha", bytesIsAlpha)))
 	SetTypeDescr(t, "isalnum", NewMethodDescr(t, "isalnum", classifierMethod("isalnum", bytesIsAlnum)))
-	SetTypeDescr(t, "isascii", NewMethodDescr(t, "isascii", classifierMethod("isascii", bytesIsAscii)))
+	SetTypeDescr(t, "isascii", NewMethodDescr(t, "isascii", classifierMethod("isascii", bytesIsASCII)))
 	SetTypeDescr(t, "isdigit", NewMethodDescr(t, "isdigit", classifierMethod("isdigit", bytesIsDigit)))
 	SetTypeDescr(t, "islower", NewMethodDescr(t, "islower", classifierMethod("islower", bytesIsLower)))
 	SetTypeDescr(t, "isspace", NewMethodDescr(t, "isspace", classifierMethod("isspace", bytesIsSpace)))

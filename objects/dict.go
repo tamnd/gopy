@@ -525,43 +525,55 @@ func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
 // CPython: Objects/dictobject.c:2873 PyDict_Merge
 func dictMergeFromArg(dst *Dict, src Object) error {
 	if d, ok := src.(*Dict); ok {
-		for _, k := range d.Keys() {
-			v, err := d.GetItem(k)
-			if err != nil {
-				return err
-			}
-			if err := dst.SetItem(k, v); err != nil {
-				return err
-			}
-		}
-		return nil
+		return dictMergeFromDict(dst, d)
 	}
 	if keysAttr, err := GetAttr(src, NewStr("keys")); err == nil {
-		keysObj, err := Call(keysAttr, NewTuple(nil), nil)
+		return dictMergeFromKeys(dst, src, keysAttr)
+	}
+	return dictMergeFromPairs(dst, src)
+}
+
+func dictMergeFromDict(dst, src *Dict) error {
+	for _, k := range src.Keys() {
+		v, err := src.GetItem(k)
 		if err != nil {
 			return err
 		}
-		it, err := Iter(keysObj)
-		if err != nil {
+		if err := dst.SetItem(k, v); err != nil {
 			return err
-		}
-		for {
-			k, err := IterNext(it)
-			if err != nil {
-				if err == ErrStopIteration {
-					return nil
-				}
-				return err
-			}
-			v, err := GetItem(src, k)
-			if err != nil {
-				return err
-			}
-			if err := dst.SetItem(k, v); err != nil {
-				return err
-			}
 		}
 	}
+	return nil
+}
+
+func dictMergeFromKeys(dst *Dict, src Object, keysAttr Object) error {
+	keysObj, err := Call(keysAttr, NewTuple(nil), nil)
+	if err != nil {
+		return err
+	}
+	it, err := Iter(keysObj)
+	if err != nil {
+		return err
+	}
+	for {
+		k, err := IterNext(it)
+		if err != nil {
+			if errors.Is(err, ErrStopIteration) {
+				return nil
+			}
+			return err
+		}
+		v, err := GetItem(src, k)
+		if err != nil {
+			return err
+		}
+		if err := dst.SetItem(k, v); err != nil {
+			return err
+		}
+	}
+}
+
+func dictMergeFromPairs(dst *Dict, src Object) error {
 	it, err := Iter(src)
 	if err != nil {
 		return err

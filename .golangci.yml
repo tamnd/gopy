@@ -244,6 +244,13 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # translateMethod and hexMethod mirror bytes_translate_impl and
+      # bytes_hex_impl from Objects/bytesobject.c branch-for-branch; the
+      # nested option/sep parsing and per-byte loop are the parity unit.
+      - path: objects/bytes_methods_descr\.go
+        linters:
+          - gocognit
+          - gocyclo
       # PyUnicode_Format dispatches one big switch on the conversion
       # character; that's the upstream shape.
       - path: objects/str_modulo\.go

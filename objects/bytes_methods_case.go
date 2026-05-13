@@ -121,7 +121,7 @@ func bytesIsDigit(v []byte) bool {
 // classifier that does, matching CPython 3.14).
 //
 // CPython: Objects/bytes_methods.c:731 _Py_bytes_isascii
-func bytesIsAscii(v []byte) bool {
+func bytesIsASCII(v []byte) bool {
 	for _, c := range v {
 		if c >= 0x80 {
 			return false
