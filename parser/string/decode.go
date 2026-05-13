@@ -59,16 +59,20 @@ func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) 
 		case 'v':
 			out = append(out, 0x0b)
 		case '0', '1', '2', '3', '4', '5', '6', '7':
+			// CPython: Objects/unicodeobject.c:6713 octal escape.
+			// Octal value is a Unicode ordinal: emit as a codepoint,
+			// not as a raw byte (raw bytes >=0x80 corrupt UTF-8).
+			// Values > 0o377 are reported as invalid escapes, but
+			// the codepoint is still emitted.
 			val := int(c - '0')
 			for k := 0; k < 2 && i < len(s) && s[i] >= '0' && s[i] <= '7'; k++ {
 				val = val*8 + int(s[i]-'0')
 				i++
 			}
-			if val < 0x100 {
-				out = append(out, byte(val))
-			} else {
-				out = utf8.AppendRune(out, rune(val))
+			if val > 0o377 {
+				warns = append(warns, fmt.Sprintf("invalid octal escape sequence '\\%o'", val))
 			}
+			out = utf8.AppendRune(out, rune(val))
 		case 'x':
 			if i+2 > len(s) {
 				return "", nil, fmt.Errorf("truncated \\xXX escape")
@@ -77,7 +81,7 @@ func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) 
 			if err != nil {
 				return "", nil, err
 			}
-			out = append(out, byte(v))
+			out = utf8.AppendRune(out, rune(v))
 			i += 2
 		case 'u':
 			if i+4 > len(s) {

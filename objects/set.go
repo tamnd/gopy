@@ -171,9 +171,6 @@ func (s *Set) add(key Object) error {
 	if err != nil {
 		return err
 	}
-	if s.used*3 >= len(s.entries)*2 {
-		s.grow()
-	}
 	s.insert(h, key)
 	return nil
 }
@@ -247,12 +244,31 @@ func (s *Set) lookup(h int64, key Object) (idx int, found bool, err error) {
 	}
 }
 
+// insert places (h, key) into the table, growing first if the
+// fill ratio crosses 2/3. Mirrors CPython's set_add_entry which
+// resizes before placing the new element.
+//
+// CPython: Objects/setobject.c:220 set_add_entry
 func (s *Set) insert(h int64, key Object) {
+	if (s.used+1)*3 >= len(s.entries)*2 {
+		s.grow()
+	}
 	idx, ok, _ := s.lookup(h, key)
 	s.entries[idx] = setEntry{hash: h, key: key, used: true}
 	if !ok {
 		s.used++
 	}
+}
+
+// insertClean places (h, key) without checking fill ratio. Only used
+// during grow's rehash, where the destination is guaranteed to have
+// room. Matches CPython's set_insert_clean.
+//
+// CPython: Objects/setobject.c:266 set_insert_clean
+func (s *Set) insertClean(h int64, key Object) {
+	idx, _, _ := s.lookup(h, key)
+	s.entries[idx] = setEntry{hash: h, key: key, used: true}
+	s.used++
 }
 
 func (s *Set) grow() {
@@ -261,7 +277,7 @@ func (s *Set) grow() {
 	s.used = 0
 	for _, e := range old {
 		if e.used {
-			s.insert(e.hash, e.key)
+			s.insertClean(e.hash, e.key)
 		}
 	}
 }
