@@ -11,6 +11,7 @@
 package sys
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/tamnd/gopy/imp"
@@ -121,6 +122,15 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "exc_info", objects.NewBuiltinFunction("exc_info", excInfo)); err != nil {
 		return nil, err
 	}
+	// sys.intern interns a str object. The dedicated unicodeobject port
+	// will route through the global interned table; for now the helper
+	// returns the input unchanged so collections.namedtuple's typename /
+	// field-name pipeline sees round-trip semantics.
+	//
+	// CPython: Python/sysmodule.c:1004 sys_intern_impl
+	if err := setItem(md, "intern", objects.NewBuiltinFunction("intern", internShim)); err != nil {
+		return nil, err
+	}
 	// sys._getframe([depth]) returns the frame depth levels up the call
 	// stack. depth=0 is the immediate caller's frame.
 	//
@@ -153,6 +163,30 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// internShim is the inittab-time form of sys.intern. The thread-aware
+// variant in helpers.go drops a PyExc_TypeError on the thread; the
+// inittab path has no thread handle, so the shim relies on the Go
+// error to carry the same TypeError message back to the VM.
+//
+// CPython: Python/sysmodule.c:1004 sys_intern_impl
+func internShim(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, errInternArity(len(args))
+	}
+	if args[0].Type() != objects.StrType() {
+		return nil, errInternType(args[0].Type().Name)
+	}
+	return args[0], nil
+}
+
+func errInternArity(n int) error {
+	return fmt.Errorf("TypeError: intern() takes exactly one argument (%d given)", n)
+}
+
+func errInternType(name string) error {
+	return fmt.Errorf("TypeError: can't intern %s", name)
 }
 
 // strListAsList returns the path entries as a list (mutable, so user

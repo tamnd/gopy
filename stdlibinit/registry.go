@@ -82,6 +82,13 @@ import (
 	// CPython: Modules/config.c.in:51 {"_warnings", _PyWarnings_Init}
 	_ "github.com/tamnd/gopy/module/_warnings"
 
+	// Built-in module: _tokenize. Placeholder port; the TokenizerIter
+	// constructor raises NotImplementedError until Parser/tokenizer.c
+	// lands. Registering it is enough to satisfy `import tokenize` at
+	// module load (only _tokenize.TokenizerIter() is called lazily).
+	// CPython: Modules/config.c.in {"_tokenize", PyInit__tokenize}
+	_ "github.com/tamnd/gopy/module/_tokenize"
+
 	// Built-in module: time. Registers itself via
 	// module/_time/module.go init(). The Go directory name carries an
 	// underscore prefix to avoid colliding with Go's stdlib `time`

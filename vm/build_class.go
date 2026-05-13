@@ -52,6 +52,17 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	rawBases := args[2:]
 	bases := make([]*objects.Type, 0, len(rawBases))
 	for _, b := range rawBases {
+		// PEP 585 / typing: class Foo(list[int]) is legal; the
+		// runtime base is the alias' __origin__ while the alias
+		// itself becomes part of __orig_bases__. CPython's
+		// type_new_get_bases unwraps these via _Py_subclass_check_mro.
+		// CPython: Objects/typeobject.c:3568 type_new_get_bases
+		if ga, ok := b.(*objects.GenericAlias); ok {
+			if t, ok := ga.Origin().(*objects.Type); ok {
+				bases = append(bases, t)
+				continue
+			}
+		}
 		t, ok := b.(*objects.Type)
 		if !ok {
 			return nil, fmt.Errorf("TypeError: __build_class__: base is not a type, got %s", b.Type().Name)

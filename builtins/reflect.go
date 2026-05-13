@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"unsafe"
 
+	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -158,20 +159,83 @@ func Repr(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 }
 
 // StrOf ports the str(obj) factory shape. Single-argument form
-// returns PyObject_Str; multi-argument form (encoding, errors) lands
-// once the bytes type carries decode().
+// returns PyObject_Str; multi-argument form str(buffer, encoding,
+// errors) decodes a bytes-like buffer through the codec registry,
+// the way Objects/unicodeobject.c routes bytes inputs.
 //
 // CPython: Objects/unicodeobject.c:14112 unicode_new
-func StrOf(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) == 0 {
+func StrOf(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 && len(kwargs) == 0 {
 		return objects.NewStr(""), nil
 	}
-	if len(args) > 1 {
-		return nil, fmt.Errorf("TypeError: str() with encoding/errors argument needs bytes, lands with the bytes port")
+	if len(args) > 1 || len(kwargs) > 0 {
+		buf, encoding, errs, err := strOfDecodeArgs(args, kwargs)
+		if err != nil {
+			return nil, err
+		}
+		out, _, derr := codecs.Decode(buf, encoding, errs)
+		if derr != nil {
+			return nil, derr
+		}
+		return objects.NewStr(out), nil
 	}
 	s, err := objects.Str(args[0])
 	if err != nil {
 		return nil, err
 	}
 	return objects.NewStr(s), nil
+}
+
+// strOfDecodeArgs pulls the (object, encoding, errors) triple out of
+// str()'s call signature. encoding defaults to "utf-8", errors to
+// "strict", matching Objects/unicodeobject.c:unicode_new.
+func strOfDecodeArgs(args []objects.Object, kwargs map[string]objects.Object) ([]byte, string, string, error) {
+	if len(args) == 0 {
+		return nil, "", "", fmt.Errorf("TypeError: str() missing positional argument")
+	}
+	encoding := "utf-8"
+	errs := "strict"
+	if len(args) >= 2 {
+		s, ok := args[1].(*objects.Unicode)
+		if !ok {
+			return nil, "", "", fmt.Errorf("TypeError: str() argument 'encoding' must be str")
+		}
+		encoding = s.Value()
+	}
+	if len(args) >= 3 {
+		s, ok := args[2].(*objects.Unicode)
+		if !ok {
+			return nil, "", "", fmt.Errorf("TypeError: str() argument 'errors' must be str")
+		}
+		errs = s.Value()
+	}
+	if v, ok := kwargs["encoding"]; ok {
+		s, ok := v.(*objects.Unicode)
+		if !ok {
+			return nil, "", "", fmt.Errorf("TypeError: str() argument 'encoding' must be str")
+		}
+		encoding = s.Value()
+	}
+	if v, ok := kwargs["errors"]; ok {
+		s, ok := v.(*objects.Unicode)
+		if !ok {
+			return nil, "", "", fmt.Errorf("TypeError: str() argument 'errors' must be str")
+		}
+		errs = s.Value()
+	}
+	buf, ok := bytesLike(args[0])
+	if !ok {
+		return nil, "", "", fmt.Errorf("TypeError: decoding to str: need a bytes-like object, %s found", args[0].Type().Name)
+	}
+	return buf, encoding, errs, nil
+}
+
+func bytesLike(o objects.Object) ([]byte, bool) {
+	switch x := o.(type) {
+	case *objects.Bytes:
+		return x.Bytes(), true
+	case *objects.ByteArray:
+		return x.Bytes(), true
+	}
+	return nil, false
 }
