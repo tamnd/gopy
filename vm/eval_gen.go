@@ -516,6 +516,15 @@ func (e *evalState) execWithExceptStart() (genResult, error) {
 	// exit_fn is 4 below TOS in CPython's layout for the 5-element WITH block.
 	exitFnRef := e.peek(4)
 	exitFn := exitFnRef.AsObject()
+	// exit_self lives one slot above exit_fn; when the LOAD_SPECIAL that
+	// produced the pair pushed an unbound descriptor (no DescrGet, the
+	// builtin-function case), this slot holds the owner and must be
+	// prepended to the positional args so the call sees self.
+	exitSelfRef := e.peek(3)
+	var exitSelf objects.Object
+	if !exitSelfRef.IsNull() {
+		exitSelf = exitSelfRef.AsObject()
+	}
 
 	// Call exit_fn(type, val, traceback). v0.9 passes (type(exc), exc, None)
 	// because we don't have traceback objects yet.
@@ -523,7 +532,13 @@ func (e *evalState) execWithExceptStart() (genResult, error) {
 	if excVal != objects.None() {
 		excType = excVal.Type()
 	}
-	result, cerr := objects.Call(exitFn, objects.NewTuple([]objects.Object{excType, excVal, objects.None()}), nil)
+	var callArgs []objects.Object
+	if exitSelf != nil {
+		callArgs = []objects.Object{exitSelf, excType, excVal, objects.None()}
+	} else {
+		callArgs = []objects.Object{excType, excVal, objects.None()}
+	}
+	result, cerr := objects.Call(exitFn, objects.NewTuple(callArgs), nil)
 	if cerr != nil {
 		return genResult{ok: true}, cerr
 	}

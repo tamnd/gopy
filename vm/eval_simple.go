@@ -966,7 +966,16 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			lasti := e.peek(int(oparg) - 1).AsObject()
 			if li, ok := lasti.(*objects.Int); ok {
 				v, _ := li.Int64()
-				e.f.InstrPtr = int(v) * 2
+				// Record the original raising site for traceback only.
+				// We must NOT touch InstrPtr: handleException looks the
+				// exception table up by InstrPtr, and rewinding it to the
+				// raise site would re-enter the same SETUP_WITH handler
+				// that just ran __exit__, looping forever.
+				//
+				// CPython: Python/bytecodes.c RERAISE (SET_LASTI for
+				// frame->prev_instr) - we mirror that by stamping
+				// PrevInstr, not InstrPtr.
+				e.f.PrevInstr = int(v) * 2
 			}
 		}
 		if pyExc, ok := exc.(*pyerrors.Exception); ok {
