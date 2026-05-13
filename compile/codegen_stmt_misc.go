@@ -168,12 +168,23 @@ func (c *Compiler) visitAnnAssign(s *ast.AnnAssign) error {
 		// CPython skips the annotation-dict update for them too.
 		return nil
 	}
-	// Record the deferred annotation for any future PEP 649 hookup,
-	// then emit the eager store: __annotations__[name] = annotation.
+	// Record the deferred annotation. PEP 649 record-only at class
+	// scope: the class body emits a synthetic `__annotate__` function
+	// after visitStmts (compile/codegen_annotations.go) instead of
+	// evaluating the annotation expression eagerly here. typeGetAttr
+	// (objects/type_attr.go) lazily calls that function the first time
+	// `cls.__annotations__` is read. Module / interactive scope still
+	// uses the legacy eager path: SETUP_ANNOTATIONS creates the dict at
+	// body entry and we store directly into it.
+	//
+	// CPython: Python/codegen.c:5476 codegen_annassign
 	c.unit().DeferredAnnotations = append(
 		c.unit().DeferredAnnotations,
 		deferredAnnotation{Name: name.Id, Value: s.Annotation, Loc: loc(s)},
 	)
+	if c.scope.Type == symtable.ClassBlock {
+		return nil
+	}
 	if err := c.visitExpr(s.Annotation); err != nil {
 		return err
 	}

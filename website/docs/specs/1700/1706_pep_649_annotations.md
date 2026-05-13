@@ -74,9 +74,9 @@ surface.
 | Phase | File | Block | Blocks | Status |
 |-------|------|-------|--------|--------|
 | 1 | A `symtable.c` | annotation-block creation and flag tracking | - | done |
-| 2 | B `codegen.c` | `codegen_annassign` rewritten to record-only (no eager STORE_SUBSCR) | 1 | pending |
-| 3 | B `codegen.c` | `codegen_process_deferred_annotations`, `codegen_deferred_annotations_body`, `codegen_setup_annotations_scope`, `codegen_leave_annotations_scope` | 2 | pending |
-| 4 | B `codegen.c` | `_PyCodegen_Module` / `codegen_body` hooks that emit the per-scope `__annotate__` install | 3 | pending |
+| 2 | B `codegen.c` | `codegen_annassign` rewritten to record-only (no eager STORE_SUBSCR) | 1 | done |
+| 3 | B `codegen.c` | `codegen_process_deferred_annotations`, `codegen_deferred_annotations_body`, `codegen_setup_annotations_scope`, `codegen_leave_annotations_scope` | 2 | done |
+| 4 | B `codegen.c` | `_PyCodegen_Module` / `codegen_body` hooks that emit the per-scope `__annotate__` install | 3 | done |
 | 5 | C `typeobject.c` | type `__annotate__` / `__annotations__` getset | 4 | done |
 | 6 | D `funcobject.c` | function `__annotate__` / `__annotations__` getset | 4 | done |
 | 7 | E `moduleobject.c` | module `__annotate__` / `__annotations__` getset | 4 | pending |
@@ -120,8 +120,8 @@ block; a function body with `x: T = 1` does *not* flip the flag
 
 | C function | gopy hook | Status |
 |------------|-----------|--------|
-| `codegen_annassign` (PEP 649 form: record into deferred list, emit value-store only) | `compile/codegen_stmt_misc.go` `visitAnnAssign` | pending |
-| `_PyCompile_DeferredAnnotations` reader | `compile.(*Unit).DrainDeferredAnnotations` | pending |
+| `codegen_annassign` (PEP 649 form: record into deferred list, emit value-store only) | `compile/codegen_stmt_misc.go` `visitAnnAssign` | done |
+| `_PyCompile_DeferredAnnotations` reader | `compile.(*Unit).DeferredAnnotations` (field, drained by `emitDeferredAnnotations`) | done |
 
 ### What was wrong before this phase
 
@@ -147,11 +147,11 @@ list, which Phase 3 picks up.
 
 | C function | gopy hook | Status |
 |------------|-----------|--------|
-| `codegen_process_deferred_annotations` | `compile/codegen_annotations.go` `processDeferred` | pending |
-| `codegen_deferred_annotations_body` | `compile/codegen_annotations.go` `deferredBody` | pending |
-| `codegen_setup_annotations_scope` | `compile/codegen_annotations.go` `setupScope` | pending |
-| `codegen_leave_annotations_scope` | `compile/codegen_annotations.go` `leaveScope` | pending |
-| `codegen_annotations_in_scope` (function-annotation arm) | `compile/codegen_annotations.go` `inScope` | pending |
+| `codegen_process_deferred_annotations` | `compile/codegen_annotations.go` `emitDeferredAnnotations` | done |
+| `codegen_deferred_annotations_body` | `compile/codegen_annotations.go` `emitAnnotateBody` | done |
+| `codegen_setup_annotations_scope` | `compile/codegen.go` `enterScope` (AnnotationBlock branch with CoOptimized|CoNewLocals) | done |
+| `codegen_leave_annotations_scope` | `compile/codegen.go` `leaveScope` (shared with all units) | done |
+| `codegen_annotations_in_scope` (function-annotation arm) | function annotations remain eager (shipped earlier); class arm via `emitDeferredAnnotations` | done |
 
 ### What was wrong before this phase
 
@@ -177,9 +177,9 @@ objects: the class body itself (no annotation ops), and a separate
 
 | C function | gopy hook | Status |
 |------------|-----------|--------|
-| `codegen_body` (annotation processing call) | `compile/codegen_stmt.go` body visit | pending |
-| `_PyCodegen_Module` (conditional-annotation BUILD_SET prologue) | `compile/codegen_module.go` | pending |
-| FUTURE_FEATURES `CO_FUTURE_ANNOTATIONS` short-circuit | `compile/flags.go` | pending |
+| `codegen_body` (annotation processing call) | `compile/codegen_class.go` `emitInnerClassCode` (calls `emitDeferredAnnotations` after `visitStmts`) | done |
+| `_PyCodegen_Module` (conditional-annotation BUILD_SET prologue) | module scope still uses legacy SETUP_ANNOTATIONS + eager store; PEP 649 lazy form pending for module scope | pending |
+| FUTURE_FEATURES `CO_FUTURE_ANNOTATIONS` short-circuit | not needed: PEP 563 stringification path lands with Phase 8 annotationlib | pending |
 
 ### Gate
 
