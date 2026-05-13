@@ -90,6 +90,18 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 	if key == "__dict__" {
 		return m.dict, nil
 	}
+	// PEP 649: __annotations__ on a module is lazy when the body
+	// installed __annotate__. __annotate__ defaults to None when
+	// missing, matching CPython's module_get_annotate behavior.
+	//
+	// CPython: Objects/moduleobject.c:1288 module_get_annotations
+	// CPython: Objects/moduleobject.c:1233 module_get_annotate
+	if key == "__annotations__" {
+		return moduleGetAnnotations(m)
+	}
+	if key == "__annotate__" {
+		return moduleGetAnnotate(m)
+	}
 	v, err := m.dict.GetItem(name)
 	if err == nil {
 		return v, nil
@@ -116,6 +128,13 @@ func callOneArg(fn, arg Object) (Object, error) {
 // CPython: Objects/moduleobject.c:209 module_setattro
 func moduleSetattr(o Object, name, value Object) error {
 	m := o.(*Module)
+	key := attrNameStr(name)
+	if key == "__annotate__" {
+		return moduleSetAnnotate(m, value)
+	}
+	if key == "__annotations__" {
+		return moduleSetAnnotations(m, value)
+	}
 	if value == nil {
 		return m.dict.DelItem(name)
 	}

@@ -57,8 +57,9 @@ func TestAugAssignNameEmitsLoadInPlaceStore(t *testing.T) {
 // AnnAssign ----------------------------------------------------------
 
 func TestAnnAssignWithValueAssigns(t *testing.T) {
-	// x: int = 1 — value lands in the local namespace, annotation is
-	// evaluated and pushed to __annotations__["x"].
+	// x: int = 1 — value lands in the local namespace; PEP 649 records
+	// the annotation into the deferred list and the module body emits
+	// MAKE_FUNCTION + STORE_NAME __annotate__ after visitStmts.
 	a := &ast.AnnAssign{
 		Target:     nameStore("x"),
 		Annotation: nameLoad("int"),
@@ -66,9 +67,8 @@ func TestAnnAssignWithValueAssigns(t *testing.T) {
 	}
 	u := compileMod(t, module(a))
 	want := []string{
-		"SETUP_ANNOTATIONS",
 		"LOAD_CONST", "STORE_NAME",
-		"LOAD_NAME", "LOAD_NAME", "LOAD_CONST", "STORE_SUBSCR",
+		"LOAD_CONST", "MAKE_FUNCTION", "STORE_NAME",
 		"LOAD_CONST", "RETURN_VALUE",
 	}
 	if got := opNames(u); !equalStrings(got, want) {
@@ -80,16 +80,16 @@ func TestAnnAssignWithValueAssigns(t *testing.T) {
 }
 
 func TestAnnAssignNoValueRecordsAnnotationOnly(t *testing.T) {
-	// x: int — no store of x, but the annotation still lands in
-	// __annotations__.
+	// x: int — no store of x. The annotation lands in
+	// DeferredAnnotations and the module body's __annotate__ install
+	// follows.
 	a := &ast.AnnAssign{
 		Target:     nameStore("x"),
 		Annotation: nameLoad("int"),
 	}
 	u := compileMod(t, module(a))
 	want := []string{
-		"SETUP_ANNOTATIONS",
-		"LOAD_NAME", "LOAD_NAME", "LOAD_CONST", "STORE_SUBSCR",
+		"LOAD_CONST", "MAKE_FUNCTION", "STORE_NAME",
 		"LOAD_CONST", "RETURN_VALUE",
 	}
 	if got := opNames(u); !equalStrings(got, want) {

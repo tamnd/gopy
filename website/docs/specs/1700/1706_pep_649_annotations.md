@@ -79,7 +79,7 @@ surface.
 | 4 | B `codegen.c` | `_PyCodegen_Module` / `codegen_body` hooks that emit the per-scope `__annotate__` install | 3 | done |
 | 5 | C `typeobject.c` | type `__annotate__` / `__annotations__` getset | 4 | done |
 | 6 | D `funcobject.c` | function `__annotate__` / `__annotations__` getset | 4 | done |
-| 7 | E `moduleobject.c` | module `__annotate__` / `__annotations__` getset | 4 | pending |
+| 7 | E `moduleobject.c` | module `__annotate__` / `__annotations__` getset | 4 | done |
 | 8 | F `annotationlib.py` | vendor the Lib file, wire `Format` / `get_annotations` | 5,6,7 | pending |
 | Gate | - | `class Foo:  x: ClassVar[int]` succeeds without `typing` in scope; `import _colorize`, `import traceback`, `import dataclasses` all green; `Foo.__annotations__["x"]` returns the live `ClassVar[int]` value when `typing` is imported, and a `ForwardRef('ClassVar[int]')` when called with `format=STRING` | 1-8 | pending |
 

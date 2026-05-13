@@ -62,26 +62,20 @@ func typeGetAttr(o Object, name Object) (Object, error) {
 		return attr, nil
 	}
 
-	// PEP 649 lazy __annotations__: if the type was built with a
-	// deferred __annotate__ function (codegen emits MAKE_FUNCTION +
-	// STORE_NAME __annotate__ at end of class body when the body had
-	// annotations), invoking it with format=VALUE materializes the
-	// dict on first read and caches it as __annotations__.
+	// PEP 649 lazy __annotations__ / __annotate__. The getters in
+	// objects/type_annotations.go own the full slot semantics
+	// (HEAPTYPE check, None fallback for __annotate__, cache on first
+	// read for __annotations__). Routing through them here keeps the
+	// observable behavior consistent whether the caller goes via
+	// typeGetAttr or via type.__annotate__ on a metatype descriptor.
 	//
-	// CPython: Objects/typeobject.c:1437 type_get_annotations
+	// CPython: Objects/typeobject.c:2069 type_get_annotations
+	// CPython: Objects/typeobject.c:1990 type_get_annotate
 	if nameStr == "__annotations__" {
-		if ann, _ := LookupDescriptor(tp, "__annotate__"); ann != nil {
-			out, err := Call(ann, NewTuple([]Object{NewInt(1)}), nil)
-			if err != nil {
-				return nil, err
-			}
-			d, ok := out.(*Dict)
-			if !ok {
-				return nil, fmt.Errorf("TypeError: __annotate__ returned non-dict of type '%s'", out.Type().Name)
-			}
-			SetTypeDescr(tp, "__annotations__", d)
-			return d, nil
-		}
+		return typeGetAnnotations(tp)
+	}
+	if nameStr == "__annotate__" {
+		return typeGetAnnotate(tp)
 	}
 
 	if metaAttr != nil {
@@ -119,6 +113,18 @@ func typeSetAttr(o Object, name Object, value Object) error {
 		}
 	}
 	nameStr := attrNameStr(name)
+	// PEP 649 setters carry side effects: writing __annotate__ drops
+	// the cached __annotations__, and writing __annotations__ drops
+	// __annotate__. Built-in types reject both.
+	//
+	// CPython: Objects/typeobject.c:2030 type_set_annotate
+	// CPython: Objects/typeobject.c:2139 type_set_annotations
+	if nameStr == "__annotate__" {
+		return typeSetAnnotate(tp, value)
+	}
+	if nameStr == "__annotations__" {
+		return typeSetAnnotations(tp, value)
+	}
 	if value == nil {
 		m, ok := typeDescrTable[tp]
 		if !ok {
