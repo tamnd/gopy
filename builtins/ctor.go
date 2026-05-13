@@ -37,10 +37,20 @@ func IntCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 		return numberToInt(args[0])
 	}
 	if len(args) == 2 {
-		if args[0].Type() != objects.StrType() {
-			return nil, fmt.Errorf("TypeError: int() can't convert non-string with explicit base")
+		// CPython: Objects/longobject.c:5904 long_new_impl accepts
+		// str, bytes, or bytearray when a base is given.
+		var s string
+		switch v := args[0].(type) {
+		case *objects.Bytes:
+			s = string(v.Bytes())
+		case *objects.ByteArray:
+			s = string(v.Bytes())
+		default:
+			if args[0].Type() != objects.StrType() {
+				return nil, fmt.Errorf("TypeError: int() can't convert non-string with explicit base")
+			}
+			s, _ = objects.Str(args[0])
 		}
-		s, _ := objects.Str(args[0])
 		baseInt, ok := args[1].(*objects.Int)
 		if !ok {
 			return nil, fmt.Errorf("TypeError: int() base must be an integer")

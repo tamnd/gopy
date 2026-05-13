@@ -37,7 +37,49 @@ func init() {
 		GetItem:  bytesGetItem,
 		Contains: bytesContains,
 	}
+	// Mapping slot covers the int / slice subscript dispatch that
+	// CPython routes through bytes_subscript. Without it, slice keys
+	// fall back to a generic sliceSequence helper that rewraps the
+	// result as a list.
+	//
+	// CPython: Objects/bytesobject.c:1635 bytes_subscript
+	BytesType.Mapping = &MappingMethods{
+		Length:  bytesLen,
+		GetItem: bytesSubscript,
+	}
 	BytesType.Iter = bytesIter
+}
+
+// bytesSubscript ports bytes_subscript: integer keys return the byte
+// value as an int, slice keys return a fresh bytes object. The slice
+// path honours step and skips a copy when the slice covers the whole
+// buffer at step 1.
+//
+// CPython: Objects/bytesobject.c:1635 bytes_subscript
+func bytesSubscript(o, key Object) (Object, error) {
+	b := o.(*Bytes)
+	if sl, ok := key.(*Slice); ok {
+		start, _, step, slicelen, err := sl.GetIndices(len(b.v))
+		if err != nil {
+			return nil, err
+		}
+		if slicelen <= 0 {
+			return emptyBytes, nil
+		}
+		if step == 1 {
+			return NewBytes(b.v[start : start+slicelen]), nil
+		}
+		out := make([]byte, slicelen)
+		for i, cur := 0, start; i < slicelen; i, cur = i+1, cur+step {
+			out[i] = b.v[cur]
+		}
+		return NewBytes(out), nil
+	}
+	idx, err := indexValueAsInt(key, "byte")
+	if err != nil {
+		return nil, err
+	}
+	return bytesGetItem(o, idx)
 }
 
 // bytesIterator yields the byte values of a bytes object as ints.

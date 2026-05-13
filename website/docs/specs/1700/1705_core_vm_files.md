@@ -51,6 +51,7 @@ rather than spot-patching the case we tripped on.
 | B | `Objects/bytesobject.c` (escape-decode slice: `_PyBytes_DecodeEscape`) | ~140 | `parser/string/decode.go` (`decodeBytesEscapes`) | pending |
 | C | `Objects/listobject.c` (`list_richcompare` + slice-assign helpers `list_ass_slice`, `list_ass_subscript`, `list_extend`) | ~400 | `objects/list_misc.go`, `objects/list.go` | partial (richcompare done; slice-assign plumbing pending) |
 | D | `Objects/setobject.c` (add/insert path: `set_add_entry`, `set_insert_clean`, `set_table_resize`; binary ops `set_or`, `set_and`, `set_sub`, `set_xor`) | ~400 | `objects/set.go` | partial (insert now grows-before-place; resize/binary-op functions cited but full audit of remaining members pending) |
+| E | `Objects/bytesobject.c` (`bytes_subscript`) and `Objects/bytearrayobject.c` (`bytearray_subscript_lock_held`) | ~80 | `objects/bytes.go`, `objects/bytearray.go` | done |
 
 Sources of truth live under `/Users/apple/cpython-314/`.
 
@@ -69,7 +70,8 @@ through `textwrap`, `traceback`, and `ntpath` without raising."
 | 4 | C `listobject.c` | `list_ass_slice` + `list_ass_subscript` (slice assignment, deletion, slice-step) | - | pending |
 | 5 | D `setobject.c` | `set_add_entry` (insert resizes before place) + `set_insert_clean` (rehash) | - | done |
 | 4a | C `listobject.c` | `drainIterableForSlice` routed through `PyObject_GetIter` (SeqIter fallback) so `__getitem__`-only iterables work for slice-assign | - | done |
-| Gate | - | `import textwrap`, `import traceback`, `import ntpath` all green | 1,2,3,4,5 | partial (`import ntpath` green; `import textwrap`/`import traceback` block on a separate listcomp cell-binding bug in `re/_compiler.py`, already tracked under 1702 VM audit tasks #586/#587/#588) |
+| 6 | E `bytesobject.c` + `bytearrayobject.c` | `bytes_subscript` + `bytearray_subscript_lock_held` wired as Mapping.GetItem so slice keys return bytes/bytearray (not list) | - | done |
+| Gate | - | `import textwrap`, `import traceback`, `import ntpath` all green | 1,2,3,4,5,6 | partial (`import ntpath`, `import textwrap` green; `import traceback` blocks on `warnings` -> `_py_warnings` -> `_thread.RLock`, tracked under 1702 task #569) |
 
 ## Phase 1 - `Objects/unicodeobject.c` escape decoder
 
@@ -132,6 +134,42 @@ that expose only `__getitem__`. Route through `Iter()`
 does for `for x in obj`, matching CPython `PySequence_Fast`. The
 remaining `list_ass_slice` / `list_ass_subscript` audit is still
 pending under Phase 4.
+
+## Phase 6 - `Objects/bytesobject.c` + `Objects/bytearrayobject.c` subscript
+
+### What was wrong before this phase
+
+Both `bytes` and `bytearray` exposed only the Sequence protocol. The
+generic `sliceSequence` helper that handles `BINARY_SUBSCR obj[slice]`
+walks the int-indexed Sequence.GetItem slot and then rewraps the
+result based on `container.(type)`. The switch only knew about
+`*List`, `*Tuple`, `*Unicode`, so bytes and bytearray fell through to
+`NewList(items)`. As a result `b'hello'[0:3]` returned `[104, 101,
+108]` instead of `b'hel'`.
+
+This surfaced during the textwrap import chain. `re/_compiler.py`'s
+`_mk_bitmap` does `s = bits.translate(_BITS_TRANS)[::-1]; int(s[i -
+_CODEBITS: i], 2)`. `bits` is a `bytearray`, so `s` should stay a
+`bytearray` through the slice, and `int(bytearray, 2)` is the
+documented form. Returning a list broke the `int()` call with
+"can't convert non-string with explicit base".
+
+### Functions ported
+
+| C function | gopy hook | Status |
+|------------|-----------|--------|
+| `bytes_subscript` | `bytesSubscript` wired as `BytesType.Mapping.GetItem` | done |
+| `bytearray_subscript_lock_held` | `byteArraySubscript` wired as `ByteArrayType.Mapping.GetItem` | done |
+
+Both follow CPython 1:1: integer keys return the byte value as an
+`int`, slice keys allocate a fresh bytes/bytearray, the step==1 case
+takes a contiguous copy, and the step!=1 case walks the indices into
+a buffer of length `slicelength`.
+
+### Gate
+
+`b'hello'[0:3] == b'hel'` and `bytearray(b'hello')[0:3] ==
+bytearray(b'hel')`. `import textwrap` runs to end-of-module.
 
 ## Phase 5 - `Objects/setobject.c` add/insert path
 
