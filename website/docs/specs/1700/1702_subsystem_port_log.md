@@ -28,26 +28,121 @@ not come back to it for a missing function. This is the same rule
 1704 applies to the object protocol; 1702 extends it to the
 unittest enablement subsystems.
 
-## Files-in-scope (pending subsystems)
+## Pending subsystem deep dives
 
-One Files-in-scope table per pending subsystem, modeled on 1704.
-Every row in every table must land before the subsystem is marked
-done. Sources of truth live under `/Users/apple/cpython-314/`.
+Each section below covers one pending subsystem with the structure
+1704 uses for its in-scope files: an overview paragraph that frames
+what we are porting and why, a Files-in-scope table, a
+Functions-to-port table per file naming every C / Python entity
+that must land, a Gate paragraph with the exact acceptance script,
+and a Deferred / Notes paragraph capturing dependencies and
+acknowledged shortcuts. When a port lands, flip the row's status
+in the per-file table and in the master Status table near the top
+of the file; both must agree.
+
+Sources of truth live under `/Users/apple/cpython-314/`. Every Go
+function ported under this spec carries a
+`// CPython: <path>:<line> <name>` citation pointing at the exact
+upstream line that motivated it.
 
 ### collections (#497)
+
+**Overview.** The `collections` subsystem ships six recurring data
+structures the unittest stack assumes are present:
+`deque`, `OrderedDict`, `defaultdict`, `Counter`, `ChainMap`, and
+the `namedtuple` factory. The runtime-level containers
+(`deque`, `OrderedDict`, `defaultdict`) live in the C extension
+`Modules/_collectionsmodule.c` because they need C-speed
+operations and inline struct layout; the pure-Python adapters
+(`Counter`, `ChainMap`, `namedtuple`, `UserDict`, `UserList`,
+`UserString`) and the `__init__.py` re-exports live in
+`Lib/collections/__init__.py`. Both files must land before
+`unittest.mock`, which is the next-up consumer.
+
+**Files in scope.**
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
 | A | `Modules/_collectionsmodule.c` | ~3,000 | `module/_collections/` | pending |
 | B | `Lib/collections/__init__.py` | ~1,500 | `stdlib/collections/__init__.py` | pending |
 
+**Functions to port (A: `_collectionsmodule.c`).** Every C struct
+type below lands as a Go `*Type` with a backing Go struct.
+
+| C type / function | Exposed as | gopy hook | Status |
+|-------------------|-----------|-----------|--------|
+| `deque_type` (`deque_new`, `deque_init`, `deque_dealloc`, `deque_traverse`, `deque_clear`, `deque_methods` table) | `_collections.deque` | `module/_collections/deque.go` | pending |
+| `deque_append`, `deque_appendleft`, `deque_pop`, `deque_popleft`, `deque_extend`, `deque_extendleft`, `deque_rotate`, `deque_reverse`, `deque_remove`, `deque_count`, `deque_index`, `deque_insert`, `deque_copy`, `deque_clearmethod` | `deque.<method>` | descriptors on `deque_type` | pending |
+| `deque_richcompare`, `deque_iter`, `deque_reduce`, `deque_repr`, `deque_concat`, `deque_inplace_concat`, `deque_contains`, `deque_len`, `deque_getitem`, `deque_setitem` | dunder + sequence slots on `deque_type` | slot fields | pending |
+| `defdict_type` (`defdict_init`, `defdict_missing`, `defdict_copy`, `defdict_reduce`, `defdict_repr`, `defdict_or`, `defdict_ror`) | `_collections.defaultdict` | `module/_collections/defaultdict.go` | pending |
+| `odictobject` (`odict_new`, `odict_init`, `odict_dealloc`, `odict_traverse`, `odict_clear`, `odict_iter`, `odict_repr`, `odict_richcompare`, `odict_eq`, `odict_reduce`, `odict_copy`, `odict_setitem`, `odict_delitem`, `odict_popitem`, `odict_move_to_end`, `odict_keys`, `odict_values`, `odict_items`, `OrderedDict_*Iterator`) | `_collections.OrderedDict` | reuse / extend existing `objects/odict.go` | partial |
+| `tuplegetter_type` (`tuplegetter_new`, `tuplegetter_descr_get`, `tuplegetter_descr_set`, `tuplegetter_reduce`) | `_collections._tuplegetter` (named-tuple helper) | `module/_collections/tuplegetter.go` | pending |
+| module-level init (`_collectionsmodule_exec`, type ready) | `import _collections` | `module/_collections/module.go` + `stdlibinit/registry.go` blank-import | pending |
+
+**Functions to port (B: `collections/__init__.py`).** Vendor
+byte-equal once A is in. Public surface:
+
+| Python entity | Source span | Status |
+|---------------|-------------|--------|
+| `__all__` re-export list | top of file | pending |
+| `Counter` (init, `most_common`, `subtract`, `__add__`, `__sub__`, `__or__`, `__and__`, `__pos__`, `__neg__`, `total`) | `Lib/collections/__init__.py:600-870` | pending |
+| `ChainMap` (init, `new_child`, `parents`, `maps`, the MutableMapping methods, `__missing__`, `__contains__`, `__bool__`, `__or__`, `__ror__`, `__ior__`) | `Lib/collections/__init__.py:912-1090` | pending |
+| `namedtuple(typename, field_names, ...)` factory and the `_*` helper module | `Lib/collections/__init__.py:381-595` | pending |
+| `UserDict`, `UserList`, `UserString` | `Lib/collections/__init__.py:1100-1530` | pending |
+
+**Gate.** `gopy -c "from collections import deque, defaultdict, OrderedDict, Counter, ChainMap, namedtuple; d=deque([1,2,3]); d.appendleft(0); print(list(d)); print(Counter('abracadabra').most_common(2)); P=namedtuple('P','x y'); print(P(1,2).x)"` prints `[0, 1, 2, 3]`, `[('a', 5), ('b', 2)]`, `1`.
+
+**Deferred.** None planned; the rule is full port. If any C
+function is intentionally skipped the row stays `pending` and the
+reason lives in a new "Deferred" sub-section under this one.
+
 ### traceback (#496)
+
+**Overview.** `traceback` is what every Python exception printer
+calls. It is consumed directly by `unittest.TestResult` (via
+`unittest._textresult._exc_info_to_string`) and indirectly by the
+default `sys.excepthook`. Vendor byte-equal and add only the Go
+helpers needed to back names the vendor cannot supply (frame
+introspection, `linecache` integration, the `_colorize` hook).
+
+**Files in scope.**
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
 | A | `Lib/traceback.py` | ~1,300 | `stdlib/traceback.py` + `module/traceback/` | pending |
 
+**Functions to port (A: `traceback.py`).**
+
+| Python entity | Source span | Status |
+|---------------|-------------|--------|
+| Module-level helpers `print_tb`, `format_tb`, `print_exception`, `format_exception`, `print_exc`, `format_exc`, `print_last`, `print_stack`, `format_stack`, `extract_tb`, `extract_stack`, `clear_frames`, `walk_tb`, `walk_stack` | `Lib/traceback.py:30-260` | pending |
+| `FrameSummary` (init, `__repr__`, `__eq__`, `line`) | `Lib/traceback.py:270-360` | pending |
+| `StackSummary` (init, `extract`, `from_list`, `format`, `format_frame_summary`) | `Lib/traceback.py:370-540` | pending |
+| `TracebackException` (init, `from_exception`, `format`, `format_exception_only`, `_format_final_exc_line`, `__eq__`, `__str__`, exception chain `__cause__` / `__context__` formatting) | `Lib/traceback.py:550-1050` | pending |
+| `_Sentinel`, `_safe_string`, `_some_str`, `_format_traceback_exception_list`, `_walk_tb_with_full_positions`, `_extract_caret_anchors_from_line_segment`, the syntax-error caret renderer | `Lib/traceback.py:1060-1300` | pending |
+
+**Runtime support.** Adds: a `frame.f_code.co_filename` /
+`f_lineno` introspection path in `objects/frame.go` (verify
+already there), a `linecache.getline(filename, lineno)` helper
+backed by gopy's file reader, and `sys.exc_info()` returning a
+3-tuple matching CPython.
+
+**Gate.** `gopy -c "import traceback; print(traceback.format_exception(ValueError, ValueError('boom'), None))"` prints the conventional `['ValueError: boom\n']`-shape list and `try: 1/0\nexcept: traceback.print_exc()` writes the canonical frame trace to stderr.
+
+**Deferred.** None planned. Coloured output (`_colorize`) is
+already shipped; the `traceback` vendor will exercise it.
+
 ### io / _io (#514)
+
+**Overview.** The `io` stack is the entire byte / text streaming
+surface: open() routes through here, every file-like wrapper that
+`unittest`, `logging`, `argparse`, and the runner use sits on
+top. CPython splits the C extension across seven files
+(`Modules/_io/`); each defines one class. The pure-Python `Lib/io.py`
+is a thin re-export shim that the vendor will replace once the C
+side is real.
+
+**Files in scope.**
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
@@ -60,40 +155,267 @@ done. Sources of truth live under `/Users/apple/cpython-314/`.
 | G | `Modules/_io/bytesio.c` | ~1,100 | `module/_io/bytesio.go` | pending |
 | H | `Lib/io.py` | ~100 | `stdlib/io.py` | pending |
 
+**Functions to port (A: `_iomodule.c`).**
+
+| C function | Exposed as | Status |
+|------------|-----------|--------|
+| `_io_open_impl` (the `open()` builtin's real implementation) | `_io.open` (and re-exported as `builtins.open`) | pending |
+| `_io_open_code_impl`, `_io_text_encoding_impl` | `_io.open_code`, `_io.text_encoding` | pending |
+| `_io_UnsupportedOperation` class init | `_io.UnsupportedOperation` (subclass of OSError + ValueError) | pending |
+| `_io_BlockingIOError` definition | `_io.BlockingIOError` | pending |
+| Module-level `_iomodule_exec` (type ready, exception ready, constant install) | `import _io` | pending |
+
+**Functions to port (B: `iobase.c`).**
+
+| C function | Exposed as | Status |
+|------------|-----------|--------|
+| `iobase_seek`, `iobase_tell`, `iobase_truncate`, `iobase_flush`, `iobase_close`, `iobase_closed`, `iobase_readable`, `iobase_writable`, `iobase_seekable` | `IOBase.<method>` | pending |
+| `iobase_iter`, `iobase_iternext`, `iobase_readline`, `iobase_readlines`, `iobase_writelines`, `iobase_check_closed`, `iobase_unsupported`, `iobase_finalize`, `iobase_dealloc` | dunder + helpers on IOBase | pending |
+| `rawiobase_read`, `rawiobase_readall` | `RawIOBase` | pending |
+| `bufferediobase_read`, `bufferediobase_read1`, `bufferediobase_detach`, `bufferediobase_readinto`, `bufferediobase_readinto1`, `bufferediobase_write` | `BufferedIOBase` | pending |
+| `textiobase_read`, `textiobase_readline`, `textiobase_write`, `textiobase_detach`, `textiobase_encoding`, `textiobase_newlines`, `textiobase_errors` | `TextIOBase` | pending |
+
+**Functions to port (C: `fileio.c`).**
+
+| C function | Exposed as | Status |
+|------------|-----------|--------|
+| `fileio_init`, `fileio_dealloc`, `fileio_close`, `fileio_closefd`, `fileio_fileno`, `fileio_isatty`, `fileio_readable`, `fileio_writable`, `fileio_seekable`, `fileio_mode_repr`, `fileio_name` | `FileIO.<method>` | pending |
+| `fileio_read`, `fileio_readall`, `fileio_readinto`, `fileio_write`, `fileio_seek`, `fileio_tell`, `fileio_truncate`, `fileio_repr` | core I/O ops | pending |
+| Open-flag resolution (`fileio_check_closed`, `mode_to_flags`, `_PyFileIO_closefd`) | helpers | pending |
+
+**Functions to port (D: `bufferedio.c`).**
+
+| C class | Public methods | Status |
+|---------|---------------|--------|
+| `BufferedReader` | `read`, `read1`, `peek`, `readline`, `readinto`, `readinto1`, `seek`, `tell`, `close`, `flush`, `__init__`, `raw`, `mode`, `name`, `closed` | pending |
+| `BufferedWriter` | `write`, `flush`, `close`, `seek`, `tell`, `truncate`, `detach`, `__init__` | pending |
+| `BufferedRandom` | union of Reader + Writer behaviours | pending |
+| `BufferedRWPair` | `read`, `write`, `peek`, `readinto`, `close`, `flush`, `readable`, `writable` | pending |
+| Shared internals (`_bufferedreader_raw_read`, `_bufferedwriter_flush_unlocked`, `_PyIO_State`) | helpers | pending |
+
+**Functions to port (E: `textio.c`).**
+
+| C class | Public methods | Status |
+|---------|---------------|--------|
+| `IncrementalNewlineDecoder` | `decode`, `getstate`, `setstate`, `reset`, `newlines` | pending |
+| `TextIOWrapper` | `__init__`, `read`, `readline`, `readlines`, `write`, `seek`, `tell`, `truncate`, `flush`, `close`, `detach`, `reconfigure`, `buffer`, `encoding`, `errors`, `newlines`, `line_buffering`, `write_through`, `name`, `mode`, `closed`, `__iter__`, `__next__` | pending |
+| Internals (`_textiowrapper_decoder_setstate`, `_textiowrapper_encoder_setstate`, `_textiowrapper_writeflush`) | helpers | pending |
+
+**Functions to port (F: `stringio.c`).** Audit pass: gopy already
+has a StringIO. The audit must confirm every C function below is
+covered by the existing Go implementation, and add any missing
+piece in the same PR.
+
+| C function | gopy equivalent | Status |
+|------------|----------------|--------|
+| `stringio_new`, `stringio_init`, `stringio_dealloc` | constructor + init | verify |
+| `stringio_read`, `stringio_readline`, `stringio_write`, `stringio_seek`, `stringio_tell`, `stringio_truncate`, `stringio_close`, `stringio_getvalue`, `stringio_iternext`, `stringio_readable`, `stringio_writable`, `stringio_seekable`, `stringio_closed` | corresponding methods | verify |
+| `_stringio_writebuffer`, `_stringio_seek_internal` | helpers | verify |
+
+**Functions to port (G: `bytesio.c`).**
+
+| C function | Exposed as | Status |
+|------------|-----------|--------|
+| `bytesio_new`, `bytesio_init`, `bytesio_dealloc`, `bytesio_getstate`, `bytesio_setstate` | constructor + pickle hooks | pending |
+| `bytesio_read`, `bytesio_read1`, `bytesio_readline`, `bytesio_readlines`, `bytesio_readinto`, `bytesio_write`, `bytesio_writelines`, `bytesio_seek`, `bytesio_tell`, `bytesio_truncate`, `bytesio_getvalue`, `bytesio_getbuffer`, `bytesio_close`, `bytesio_closed`, `bytesio_iternext` | `BytesIO.<method>` | pending |
+
+**Functions to port (H: `io.py`).** Byte-equal vendor that does
+`from _io import *` plus the conventional re-binds. Gate is the
+import of every name in `io.__all__`.
+
+**Gate.** `gopy -c "import io; b=io.BytesIO(); b.write(b'hello'); print(b.getvalue()); t=io.TextIOWrapper(io.BytesIO(b'caf\xc3\xa9'), encoding='utf-8'); print(t.read()); f=open('/tmp/iogate.txt','w'); f.write('ok'); f.close(); print(open('/tmp/iogate.txt').read())"` prints `b'hello'`, `café`, `ok`.
+
+**Deferred.** Async I/O (`asyncio`-driven `aiofiles`) is out of
+scope and tracked separately. Memory-mapped file integration
+(`mmap`) is its own port.
+
 ### argparse (#515)
+
+**Overview.** `argparse` is what `unittest.__main__` drives: the
+test runner's command-line parser is one of the deepest argparse
+users in the stdlib (subparsers, mutually exclusive groups,
+typed arguments, custom actions). Vendor byte-equal. The file is
+self-contained Python; the only runtime support it needs from
+gopy is `gettext`-style identity (`_` returning its argument when
+no translation is installed) and `os.path` for help-formatting.
+
+**Files in scope.**
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
 | A | `Lib/argparse.py` | ~2,700 | `stdlib/argparse.py` | pending |
 
+**Functions / classes to port (A).** All public; vendor byte-equal.
+
+| Class | Span | Status |
+|-------|------|--------|
+| `HelpFormatter` and its subclasses `RawDescriptionHelpFormatter`, `RawTextHelpFormatter`, `ArgumentDefaultsHelpFormatter`, `MetavarTypeHelpFormatter` | `Lib/argparse.py:200-690` | pending |
+| `ArgumentError`, `ArgumentTypeError`, `_AttributeHolder`, `Namespace` | `Lib/argparse.py:730-870` | pending |
+| `Action` hierarchy (`Action`, `BooleanOptionalAction`, `_StoreAction`, `_StoreConstAction`, `_StoreTrueAction`, `_StoreFalseAction`, `_AppendAction`, `_AppendConstAction`, `_CountAction`, `_HelpAction`, `_VersionAction`, `_SubParsersAction`, `_ExtendAction`) | `Lib/argparse.py:880-1380` | pending |
+| `FileType` | `Lib/argparse.py:1390-1430` | pending |
+| `_ActionsContainer`, `_ArgumentGroup`, `_MutuallyExclusiveGroup`, `_SubParsersAction.add_parser` | `Lib/argparse.py:1450-1860` | pending |
+| `ArgumentParser` (init, `parse_args`, `parse_known_args`, `_parse_known_args`, `_get_optional_kwargs`, `_get_positional_kwargs`, `format_help`, `format_usage`, `exit`, `error`, the env / file-prefix reader) | `Lib/argparse.py:1870-2710` | pending |
+
+**Gate.** `gopy -c "import argparse; p=argparse.ArgumentParser(); p.add_argument('--name'); p.add_argument('-v', action='count', default=0); ns=p.parse_args(['--name','x','-vv']); print(ns.name, ns.v)"` prints `x 2`; `p.parse_args(['--help'])` prints the conventional help block and exits 0.
+
+**Deferred.** Translations (`_(...)` calls) keep the identity
+fallback gopy already uses for `gettext`.
+
 ### signal / _signal (#516)
+
+**Overview.** `signal` is small in surface but lives at the
+runtime boundary: every signal arrives through OS facilities and
+the C extension owns the handler dispatch. `unittest` uses
+`signal.SIGINT` and `signal.SIGALRM` to time out hung tests; the
+gopy port must wire the same kqueue / signalfd paths Go already
+provides through `os/signal`. Pure-Python `Lib/signal.py` is a
+thin re-export.
+
+**Files in scope.**
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
 | A | `Modules/signalmodule.c` | ~2,000 | `module/_signal/` | pending |
 | B | `Lib/signal.py` | ~120 | `stdlib/signal.py` | pending |
 
+**Functions to port (A).**
+
+| C function | Exposed as | Status |
+|------------|-----------|--------|
+| `signal_signal_impl` | `_signal.signal(signum, handler)` | pending |
+| `signal_getsignal_impl` | `_signal.getsignal` | pending |
+| `signal_raise_signal_impl` | `_signal.raise_signal` | pending |
+| `signal_strsignal_impl` | `_signal.strsignal` | pending |
+| `signal_default_int_handler` | `_signal.default_int_handler` | pending |
+| `signal_alarm_impl`, `signal_pause_impl`, `signal_setitimer_impl`, `signal_getitimer_impl` | itimer family (POSIX) | pending |
+| `signal_pthread_kill_impl`, `signal_pthread_sigmask_impl`, `signal_sigpending_impl`, `signal_sigwait_impl`, `signal_sigwaitinfo_impl`, `signal_sigtimedwait_impl`, `signal_valid_signals_impl` | POSIX threading hooks | pending |
+| `signal_set_wakeup_fd_impl`, `signal_siginterrupt_impl` | wakeup-fd machinery | pending |
+| Constant install (`SIGINT`, `SIGTERM`, `SIGKILL`, `SIG_DFL`, `SIG_IGN`, `ITIMER_REAL`, etc.) | module attrs | pending |
+
+**Functions to port (B).** Byte-equal vendor `Lib/signal.py`:
+`Signals` IntEnum (and `Handlers`, `Sigmasks`), the
+`default_int_handler` re-bind, `__all__` re-export, the
+`getsignal` Enum decoration.
+
+**Gate.** `gopy -c "import signal; print(int(signal.SIGINT)); print(signal.strsignal(signal.SIGTERM))"` prints `2` (Linux/Darwin) and the platform-conventional `"Terminated"`.
+
+**Deferred.** Real handler invocation from arbitrary signal
+delivery is wired through Go's `os/signal.Notify`; CPython's
+direct-from-handler `PyErr_CheckSignals` path is approximated
+because Go does not let arbitrary code run inside a signal
+handler. Pin behaviour to "handler runs on next bytecode
+boundary" matching CPython's pending-call shape.
+
 ### os + posixpath + ntpath (#518)
+
+**Overview.** `os` is the largest pure-Python module in the
+stdlib once you count its companion `os.path`. The C side
+(`Modules/posixmodule.c`) supplies the syscall wrappers; the
+pure-Python `Lib/os.py` decides which platform module to import
+and re-exports. The four path modules (`posixpath.py`,
+`ntpath.py`, `genericpath.py`) split the path-manipulation code
+by platform plus a shared base. Vendor byte-equal for the four
+Python files; port the syscall wrappers `unittest` and
+`argparse` use (open, stat, listdir, environ, getcwd, sep
+constants, errno bridge).
+
+**Files in scope.**
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Modules/posixmodule.c` | ~15,000 (slice) | `module/posix/` | pending |
+| A | `Modules/posixmodule.c` (slice) | ~15,000 | `module/posix/` | pending |
 | B | `Lib/os.py` | ~1,100 | `stdlib/os.py` | pending |
 | C | `Lib/posixpath.py` | ~600 | `stdlib/posixpath.py` | pending |
 | D | `Lib/ntpath.py` | ~900 | `stdlib/ntpath.py` | pending |
 | E | `Lib/genericpath.py` | ~170 | `stdlib/genericpath.py` | pending |
 
+**Functions to port (A).** Minimum slice for unittest enablement.
+
+| C function | Exposed as | Status |
+|------------|-----------|--------|
+| `os_getcwd_impl`, `os_getcwdb_impl`, `os_chdir_impl` | `posix.getcwd`, `posix.chdir` | pending |
+| `os_listdir_impl`, `os_scandir_impl`, `DirEntry` type | directory iteration | pending |
+| `os_stat_impl`, `os_lstat_impl`, `os_fstat_impl`, the `stat_result` named-tuple-ish struct | metadata | pending |
+| `os_open_impl`, `os_close_impl`, `os_read_impl`, `os_write_impl`, `os_lseek_impl`, `os_dup_impl`, `os_pipe_impl` | low-level fd ops | pending |
+| `os_unlink_impl`, `os_remove_impl`, `os_rename_impl`, `os_replace_impl`, `os_mkdir_impl`, `os_rmdir_impl`, `os_makedirs` helper | mutation | pending |
+| `os_getenv_impl` + environ dict population | `posix.environ` | pending |
+| `os_getpid_impl`, `os_getppid_impl`, `os_kill_impl`, `os_waitpid_impl` | process ops | pending |
+| Path-like / fspath helpers (`os_fspath_impl`, `path_converter`) | `posix.fspath` | pending |
+| Constant install (O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_APPEND, O_TRUNC, O_EXCL, F_OK, R_OK, W_OK, X_OK, sep, pathsep, linesep, defpath, devnull) | module attrs | pending |
+
+**Functions to port (B-E).** Byte-equal vendors. The os.py
+top-level chooses between `posixpath` and `ntpath` based on
+`sys.platform`. The four files together define `walk`, `fwalk`,
+`makedirs`, `removedirs`, `renames`, `chmod`-equivalent helpers
+that ride on top of the C surface.
+
+**Gate.** `gopy -c "import os, os.path; print(os.getcwd()); print(os.listdir('.')[:1]); print(os.path.join('a','b','c.py')); print(os.path.split('/tmp/x.py'))"` prints a real cwd, a non-empty listing, `a/b/c.py` (or `a\b\c.py` on nt), and `('/tmp', 'x.py')`.
+
+**Deferred.** File-descriptor inheritance flags
+(`os.set_inheritable`), `os.fork` / `os.exec*` family, scandir's
+extended attribute access on non-POSIX systems. Each stays
+pending and lands in a follow-up row when a consumer needs it.
+
 ### VM / compile audit (#521)
+
+**Overview.** This is the audit sweep that closes 1702. With the
+six subsystems above landed, the unittest run will reach the VM
+in shapes the rest of the spec did not exercise. The audit walks
+`Python/ceval.c` and `Python/bytecodes.c` opcode by opcode,
+comparing CPython's implementation against `vm/`, and walks
+`Python/compile.c` function by function comparing against
+`compile/`. Each missing opcode or compiler step gets a new row
+in the table below and lands in the same PR.
+
+**Files in scope.**
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Python/ceval.c` (remaining ops) | varies | `vm/` (existing) | pending |
-| B | `Python/bytecodes.c` (remaining ops) | varies | `vm/` (existing) | pending |
-| C | `Python/compile.c` (audit) | ~7,000 | `compile/` (existing) | pending |
+| A | `Python/ceval.c` (remaining opcode handlers) | varies | `vm/` (existing) | pending |
+| B | `Python/bytecodes.c` (remaining opcode bodies) | varies | `vm/` (existing) | pending |
+| C | `Python/compile.c` (remaining codegen) | ~7,000 | `compile/` (existing) | pending |
 
-When an audit reveals a missing function or opcode, a new row is
-added to the corresponding table above and the function lands
-before the row flips to done.
+**Audit method.** For each file, walk the upstream definition
+list (the `TARGET(...)` macros in `bytecodes.c`, the
+`compiler_visit_*` functions in `compile.c`), confirm gopy has a
+matching entry, and add it if not. Every added function carries a
+`// CPython:` citation pointing at its upstream line; every gate
+is the smallest Python snippet that exercises the new behaviour.
+
+**Gate.** The audit is done when `gopy -m unittest discover -s
+test/regrtest -p 'test_*.py'` runs every vendored unittest test
+without raising a missing-opcode or compiler-internal error.
+Intermediate gates are recorded as new rows here as they appear.
+
+**Deferred.** Adaptive specializer additions discovered during
+the audit go into a separate follow-up under spec 1693, not 1702,
+because they are tier-2 optimizations rather than correctness
+gaps.
+
+## Workflow per port
+
+Every per-file row above lands the same way. The cadence matches
+1704 file A / B / C / D:
+
+1. Pick the row. Set its task to in-progress.
+2. Read the CPython source end-to-end so the function list is in
+   your head before you write Go.
+3. Port every function in the row to its gopy target with
+   `// CPython:` citations. No identity shims.
+4. Write the row's Gate test as a Go test (or a `gopy -c '...'`
+   integration check) and confirm it passes.
+5. Flip the row's Status to done in the per-subsystem table
+   **and** in the master Status table.
+6. Run `go test ./...` and `golangci-lint run ./...`. Both must
+   be green before pushing.
+7. Push the commit and leave a human-style note on PR #27
+   summarising what changed, what the gate now proves, and what
+   was deferred (if anything).
+8. Mark the task completed.
+
+If a row reveals a downstream dependency mid-port, add a new row
+above it, port the dependency first, and continue. Never leave a
+half-finished row.
 
 
 Status legend:
