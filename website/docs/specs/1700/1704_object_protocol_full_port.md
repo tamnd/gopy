@@ -460,12 +460,12 @@ and asserting on stdout).
 |---|---------|----------|--------|
 | F.0a | `hash(C)` where `C` has a user metaclass terminates | runs, returns int | done (pinned: `stdlibinit/slot_method_lookup_test.go`) |
 | F.0b | `hash(C)` is stable across calls | `True` | done (pinned: `stdlibinit/slot_method_lookup_test.go`) |
-| F.1 | `gopy -c 'import enum; print(enum.FlagBoundary.STRICT)'` | `FlagBoundary.STRICT` | pending |
-| F.2 | `gopy -c 'import enum; print(list(enum.FlagBoundary))'` | `[STRICT, CONFORM, EJECT, KEEP]` (or members in spec order) | pending |
-| F.3 | `gopy -c 'import re; print(re.match(r"(\d+)-(\d+)", "12-34").groups())'` | `('12', '34')` | pending |
-| F.4 | `gopy -c 'import fnmatch; print(fnmatch.fnmatch("foo.py", "*.py"))'` | `True` | pending |
-| F.5 | spec 1703 phase 7 row | flips to `done` | pending |
-| F.6 | spec 1702 `enum` row | flips to `done` | pending |
+| F.1 | `gopy -c 'import enum; print(enum.FlagBoundary.STRICT)'` | `strict` (StrEnum value matches CPython 3.14) | pass (pinned: `stdlibinit/enum_import_test.go`) |
+| F.2 | `gopy -c 'import enum; print(list(enum.FlagBoundary))'` | `[<FlagBoundary.STRICT: 'strict'>, <FlagBoundary.CONFORM: 'conform'>, <FlagBoundary.EJECT: 'eject'>, <FlagBoundary.KEEP: 'keep'>]` | pass (pinned: `stdlibinit/enum_import_test.go`) |
+| F.3 | `gopy -c 'import re; print(re.match(r"(\d+)-(\d+)", "12-34").groups())'` | `('12', '34')` | partial. Bare `import re` passes (pinned: `stdlibinit/re_smoke_import_test.go`). `re.match` is blocked on the bytearray methodlist full port (Objects/bytearrayobject.c bytearray_methods table); `_compiler.py` reaches `charmap.find(1, q)` and trips `AttributeError`. |
+| F.4 | `gopy -c 'import fnmatch; print(fnmatch.fnmatch("foo.py", "*.py"))'` | `True` | pass (pinned: `stdlibinit/fnmatch_smoke_import_test.go` plus manual `fnmatch.fnmatch` returns `True`) |
+| F.5 | spec 1703 phase 7 row | flips to `done` | pending (verification re-runs against the Python layer; blocked behind F.3 functional gate landing) |
+| F.6 | spec 1702 `enum` row | flips to `done` | pending (spec 1702's status table has no `enum` row yet; entry needs to be added when the row lands) |
 
 ### Side fixes shipped while debugging enum import
 

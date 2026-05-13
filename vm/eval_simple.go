@@ -363,11 +363,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 
 	case compile.GET_ITER:
 		obj := e.popObject()
-		t := obj.Type()
-		if t.Iter == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: TypeError: '%s' object is not iterable", t.Name)
-		}
-		it, ierr := t.Iter(obj)
+		it, ierr := objects.Iter(obj)
 		if ierr != nil {
 			return 0, nil, nil, false, true, ierr
 		}
