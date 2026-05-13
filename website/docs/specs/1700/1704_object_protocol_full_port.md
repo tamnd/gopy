@@ -111,17 +111,17 @@ implementations earlier in the file. Every row must land.
 
 | C function | Surface | Status |
 |------------|---------|--------|
-| `cm_init` | `classmethod(fn)` constructor + `functools_wraps` | done |
-| `cm_descr_get` | `__get__(obj, type)` returning BoundMethod(fn, type) | done |
-| `cm_traverse` | GC visit `cm_callable` and `cm_dict` | done |
+| `cm_init` | `classmethod(fn)` constructor + `functools_wraps` | done (pinned: `objects/method_test.go` `TestClassMethodBindsType`) |
+| `cm_descr_get` | `__get__(obj, type)` returning BoundMethod(fn, type) | done (pinned: `objects/method_test.go` `TestClassMethodBindsType`) |
+| `cm_traverse` | GC visit `cm_callable` and `cm_dict` | done (Go GC; no manual visit needed) |
 | `cm_dealloc` | (Go has GC, no-op) | n/a |
 | `cm_clear` | (Go has GC, no-op) | n/a |
-| `cm_repr` | `<classmethod(REPR_OF_CALLABLE)>` text | done |
-| `cm_memberlist` | `__func__`, `__wrapped__` getsets | done (gopy exposes the two CPython `T_OBJECT` members as read-only getsets) |
-| `cm_getsetlist` | `__isabstractmethod__`, `__dict__`, `__annotations__`, `__annotate__` | done |
-| `cm_methodlist` | `__class_getitem__` (classmethod via Py_GenericAlias) | done |
-| `__set_name__` forwarding | call `cm.__func__.__set_name__(owner, name)` | n/a (CPython 3.14 classmethod has no `__set_name__` slot; wrapped descriptors only fire when assigned directly in the class body) |
-| PEP 487 forwarding | classmethod inherits PEP 487 hooks from wrapped fn | done (the descriptor protocol on `cm` already binds the class as first argument, so `__init_subclass__`/`__class_getitem__` keep working when wrapped) |
+| `cm_repr` | `<classmethod(REPR_OF_CALLABLE)>` text | done (pinned: `objects/method_test.go` `TestClassMethodReprShowsCallable`) |
+| `cm_memberlist` | `__func__`, `__wrapped__` getsets | done (pinned: `objects/method_test.go` `TestClassMethodGetSetGates`; gopy exposes the two CPython `T_OBJECT` members as read-only getsets) |
+| `cm_getsetlist` | `__isabstractmethod__`, `__dict__`, `__annotations__`, `__annotate__` | done (pinned: `objects/method_test.go` `TestClassMethodGetSetGates`; `__dict__` mutation verified at runtime via `cm.__dict__["x"] = 1`) |
+| `cm_methodlist` | `__class_getitem__` (classmethod via Py_GenericAlias) | done (`__class_getitem__` wired through `SetTypeDescr` + `NewClassMethod` on `classmethodType`) |
+| `__set_name__` forwarding | call `cm.__func__.__set_name__(owner, name)` | n/a (CPython 3.14 classmethod has no `__set_name__` slot; wrapped descriptors only fire when assigned directly in the class body; verified via direct-body `Probe.__set_name__` call vs. silent no-op when wrapped in `classmethod(Probe())`) |
+| PEP 487 forwarding | classmethod inherits PEP 487 hooks from wrapped fn | done (verified via `@classmethod __init_subclass__(cls, **kw)` firing on subclass with `cls` bound by the descriptor protocol; no extra forwarding needed) |
 
 ### Gates
 
