@@ -575,7 +575,7 @@ func (b *Buffered) readAll() (objects.Object, error) {
 	for {
 		chunk, err := bufRead(b.raw, b.bufSize)
 		if err != nil {
-			break
+			return nil, err
 		}
 		if len(chunk) == 0 {
 			break
@@ -609,7 +609,7 @@ func (b *Buffered) readN(n int) (objects.Object, error) {
 		b.resetReadBuf()
 		filled, err := b.fillReadBuf()
 		if err != nil {
-			break
+			return nil, err
 		}
 		if filled == 0 {
 			break
@@ -667,7 +667,7 @@ func (b *Buffered) bufferedRead1(args []objects.Object) (objects.Object, error) 
 	b.resetReadBuf()
 	chunk, err := bufRead(b.raw, n)
 	if err != nil {
-		return objects.NewBytes(nil), nil
+		return nil, err
 	}
 	return objects.NewBytes(chunk), nil
 }
@@ -790,13 +790,17 @@ func (b *Buffered) bufferedReadinto(args []objects.Object, readinto1 bool) (obje
 		written += take
 		b.readStart += take
 	}
-	return objects.NewInt(int64(written)), nil
+	// CPython: Modules/_io/bufferedio.c:1082 _buffered_readinto_generic
+	// returns the partial written count even when the underlying raw read
+	// fails mid-loop, so the nilerr swallow here is intentional.
+	return objects.NewInt(int64(written)), nil //nolint:nilerr // matches CPython partial-read contract
 }
 
 // bufferedPeek returns buffered data without advancing the position.
+// CPython documents the size argument as unused.
 //
 // CPython: Modules/_io/bufferedio.c:950 _io__Buffered_peek_impl
-func (b *Buffered) bufferedPeek(args []objects.Object) (objects.Object, error) {
+func (b *Buffered) bufferedPeek(_ []objects.Object) (objects.Object, error) {
 	if err := b.checkInitialized(); err != nil {
 		return nil, err
 	}
@@ -813,7 +817,10 @@ func (b *Buffered) bufferedPeek(args []objects.Object) (objects.Object, error) {
 	}
 	b.resetReadBuf()
 	n, err := b.fillReadBuf()
-	if err != nil || n == 0 {
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
 		return objects.NewBytes(nil), nil
 	}
 	b.readStart = 0

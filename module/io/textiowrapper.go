@@ -534,8 +534,11 @@ func textIOWrapperGetattr(o objects.Object, name objects.Object) (objects.Object
 		if t.name != "" {
 			return objects.NewStr(t.name), nil
 		}
+		// CPython: Modules/_io/textio.c:3240 textiowrapper_name_get
+		// catches AttributeError on the underlying buffer and falls back
+		// to None; we treat any GetAttr failure as that case for now.
 		nameAttr, err := objects.GetAttr(t.buf, objects.NewStr("name"))
-		if err != nil {
+		if err != nil { //nolint:nilerr // matches CPython AttributeError fallback
 			return objects.None(), nil
 		}
 		return nameAttr, nil
@@ -756,37 +759,28 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 			return t, nil
 		})
 	case "readable":
+		// CPython: Modules/_io/textio.c:2997 _io_TextIOWrapper_readable_impl
 		return objects.NewBuiltinFunction("readable", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if t.detached || t.closed {
 				return objects.False(), nil
 			}
-			r, err := bufCall(t.buf, "readable", nil)
-			if err != nil {
-				return objects.False(), nil
-			}
-			return r, nil
+			return bufCall(t.buf, "readable", nil)
 		})
 	case "writable":
+		// CPython: Modules/_io/textio.c:3009 _io_TextIOWrapper_writable_impl
 		return objects.NewBuiltinFunction("writable", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if t.detached || t.closed {
 				return objects.False(), nil
 			}
-			r, err := bufCall(t.buf, "writable", nil)
-			if err != nil {
-				return objects.False(), nil
-			}
-			return r, nil
+			return bufCall(t.buf, "writable", nil)
 		})
 	case "seekable":
+		// CPython: Modules/_io/textio.c:3033 _io_TextIOWrapper_seekable_impl
 		return objects.NewBuiltinFunction("seekable", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if t.detached || t.closed {
 				return objects.False(), nil
 			}
-			r, err := bufCall(t.buf, "seekable", nil)
-			if err != nil {
-				return objects.NewBool(!t.closed), nil
-			}
-			return r, nil
+			return bufCall(t.buf, "seekable", nil)
 		})
 	case "isatty":
 		return objects.NewBuiltinFunction("isatty", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
