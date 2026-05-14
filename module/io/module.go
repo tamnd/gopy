@@ -86,7 +86,7 @@ func buildModule() (*objects.Module, error) {
 		{"BufferedRWPair", stubType("_io.BufferedRWPair")},
 		{"BufferedRandom", stubType("_io.BufferedRandom")},
 
-		{"IncrementalNewlineDecoder", stubType("_io.IncrementalNewlineDecoder")},
+		{"IncrementalNewlineDecoder", IncrementalNewlineDecoderType},
 		// ABC hierarchy: ported in iobase.go.
 		// CPython: Modules/_io/_iomodule.c:683 (type registration order)
 		{"_IOBase", IOBaseType},

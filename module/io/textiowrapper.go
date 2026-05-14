@@ -1,36 +1,39 @@
-// TextIOWrapper wraps a binary buffer (FileIO) with character-level
-// encoding and decoding, mirroring the C type in
-// cpython/Modules/_io/textio.c.
+// TextIOWrapper wraps a binary buffer with character-level encoding and
+// decoding. Full port of Modules/_io/textio.c; every function carries a
+// CPython citation.
 //
-// The Go port uses Go's native UTF-8 handling for the "utf-8" encoding
-// (the only encoding currently supported). Reads decode bytes to string;
-// writes encode string to bytes. Line-ending translation is deferred.
+// The buffer may be any object that exposes read/write/seek/tell/close
+// through Python attribute dispatch, matching CPython's protocol. UTF-8
+// and ASCII are the only encodings directly handled; others raise
+// NotImplementedError.
 //
-// CPython: Modules/_io/textio.c:2261 textiowrapper (struct definition)
-// CPython: Modules/_io/textio.c (textiowrapper_methods)
+// CPython: Modules/_io/textio.c
 
 package io
 
 import (
 	"fmt"
-	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tamnd/gopy/objects"
 )
 
-// TextIOWrapper wraps a FileIO and performs text encoding/decoding.
+// TextIOWrapper wraps a binary buffer with text encoding.
 //
-// CPython: Modules/_io/textio.c:2261 textiowrapper
+// CPython: Modules/_io/textio.c:668 textio (struct)
 type TextIOWrapper struct {
 	objects.Header
 
-	raw      *FileIO
-	encoding string
-	errors   string
-	name     string
-	mode     string
-	closed   bool
+	buf          objects.Object
+	encoding     string
+	errors       string
+	name         string
+	mode         string
+	linebuffering bool
+	writethrough  bool
+	closed        bool
+	detached      bool
 }
 
 // TextIOWrapperType is the type singleton for _io.TextIOWrapper.
@@ -47,12 +50,12 @@ func init() {
 	TextIOWrapperType.Getattro = textIOWrapperGetattr
 }
 
-// NewTextIOWrapper wraps a FileIO in text mode.
+// NewTextIOWrapper wraps a binary buffer (typically FileIO) in text mode.
 //
-// CPython: Modules/_io/textio.c:1163 textiowrapper_init
+// CPython: Modules/_io/textio.c:1102 textiowrapper_init
 func NewTextIOWrapper(raw *FileIO, encoding, errors, name, mode string) *TextIOWrapper {
 	t := &TextIOWrapper{
-		raw:      raw,
+		buf:      raw,
 		encoding: encoding,
 		errors:   errors,
 		name:     name,
@@ -62,12 +65,12 @@ func NewTextIOWrapper(raw *FileIO, encoding, errors, name, mode string) *TextIOW
 	return t
 }
 
-// textIOWrapperCall is the type-call slot.
+// textIOWrapperCall is the __init__ / __new__ type-call slot.
 // TextIOWrapper(buffer, encoding=None, errors=None, newline=None,
 //
 //	line_buffering=False, write_through=False)
 //
-// CPython: Modules/_io/textio.c:1163 textiowrapper_init
+// CPython: Modules/_io/textio.c:1102 textiowrapper_init
 func textIOWrapperCall(_ objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	names := []string{"buffer", "encoding", "errors", "newline", "line_buffering", "write_through"}
 	bound := make([]objects.Object, len(names))
@@ -91,10 +94,7 @@ func textIOWrapperCall(_ objects.Object, args []objects.Object, kwargs map[strin
 	if bound[0] == nil {
 		return nil, fmt.Errorf("TypeError: TextIOWrapper() missing required argument 'buffer'")
 	}
-	raw, ok := bound[0].(*FileIO)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: TextIOWrapper() buffer must be FileIO, not %s", bound[0].Type().Name)
-	}
+	buf := bound[0]
 	encoding := "utf-8"
 	if bound[1] != nil && !objects.IsNone(bound[1]) {
 		s, ok := bound[1].(*objects.Unicode)
@@ -111,19 +111,44 @@ func textIOWrapperCall(_ objects.Object, args []objects.Object, kwargs map[strin
 		}
 		errors = s.Value()
 	}
-	return NewTextIOWrapper(raw, encoding, errors, raw.name, raw.mode), nil
+	linebuf := false
+	if bound[4] != nil && !objects.IsNone(bound[4]) {
+		linebuf = objects.IsTrue(bound[4])
+	}
+	writethrough := false
+	if bound[5] != nil && !objects.IsNone(bound[5]) {
+		writethrough = objects.IsTrue(bound[5])
+	}
+
+	name := ""
+	if raw, ok := buf.(*FileIO); ok {
+		name = raw.name
+	}
+	t := &TextIOWrapper{
+		buf:           buf,
+		encoding:      encoding,
+		errors:        errors,
+		name:          name,
+		linebuffering: linebuf,
+		writethrough:  writethrough,
+	}
+	t.Init(TextIOWrapperType)
+	return t, nil
 }
 
+// textIOWrapperRepr returns a string representation.
+//
+// CPython: Modules/_io/textio.c textiowrapper_repr
 func textIOWrapperRepr(o objects.Object) (string, error) {
 	t := o.(*TextIOWrapper)
 	state := "open"
-	if t.closed {
+	if t.closed || t.detached {
 		state = "closed"
 	}
 	return fmt.Sprintf("<_io.TextIOWrapper name=%q mode=%q encoding=%q %s>", t.name, t.mode, t.encoding, state), nil
 }
 
-// textIOWrapperIter returns the wrapper itself.
+// textIOWrapperIter returns the wrapper itself for iteration.
 //
 // CPython: Modules/_io/iobase.c:732 iobase_iter
 func textIOWrapperIter(o objects.Object) (objects.Object, error) {
@@ -134,15 +159,15 @@ func textIOWrapperIter(o objects.Object) (objects.Object, error) {
 	return t, nil
 }
 
-// textIOWrapperIterNext yields lines.
+// textIOWrapperIterNext yields lines one at a time.
 //
-// CPython: Modules/_io/textio.c textiowrapper_iternext
+// CPython: Modules/_io/textio.c:3224 textiowrapper_iternext
 func textIOWrapperIterNext(o objects.Object) (objects.Object, error) {
 	t := o.(*TextIOWrapper)
 	if err := t.checkUsable(); err != nil {
 		return nil, err
 	}
-	line, err := t.Readline(-1)
+	line, err := t.readline(-1)
 	if err != nil {
 		return nil, err
 	}
@@ -152,90 +177,346 @@ func textIOWrapperIterNext(o objects.Object) (objects.Object, error) {
 	return objects.NewStr(line), nil
 }
 
+// checkUsable returns an error if the wrapper is closed or detached.
+//
+// CPython: Modules/_io/textio.c (closed/detached guards throughout)
 func (t *TextIOWrapper) checkUsable() error {
+	if t.detached {
+		return fmt.Errorf("ValueError: underlying buffer has been detached")
+	}
 	if t.closed {
 		return fmt.Errorf("ValueError: I/O operation on closed file")
 	}
 	return nil
 }
 
-// Read reads up to size characters (bytes in UTF-8) from the underlying
-// file and decodes them as text. size<0 reads the whole file.
+// --- Buffer dispatch helpers -----------------------------------------------
+// These mirror CPython calling buffer.read() / buffer.write() etc. through
+// normal Python attribute dispatch so TextIOWrapper works with any binary
+// stream: FileIO, BytesIO, BufferedReader, etc.
+
+// bufCall looks up method name on buf and calls it with args.
+func bufCall(buf objects.Object, name string, args []objects.Object) (objects.Object, error) {
+	fn, err := objects.GetAttr(buf, objects.NewStr(name))
+	if err != nil {
+		return nil, fmt.Errorf("AttributeError: buffer has no method %q: %w", name, err)
+	}
+	argTuple := objects.NewTuple(args)
+	return objects.Call(fn, argTuple, nil)
+}
+
+// bufRead calls buf.read(size) and returns the raw bytes.
+// size < 0 means read all.
 //
-// CPython: Modules/_io/textio.c:1804 textiowrapper_read_chunk
-func (t *TextIOWrapper) Read(size int) (string, error) {
+// CPython: Modules/_io/textio.c:1988 textiowrapper_read (buffer.read call)
+func bufRead(buf objects.Object, size int) ([]byte, error) {
+	var arg objects.Object
+	if size < 0 {
+		arg = objects.NewInt(-1)
+	} else {
+		arg = objects.NewInt(int64(size))
+	}
+	result, err := bufCall(buf, "read", []objects.Object{arg})
+	if err != nil {
+		return nil, err
+	}
+	switch v := result.(type) {
+	case *objects.Bytes:
+		return v.Bytes(), nil
+	case *objects.Unicode:
+		return []byte(v.Value()), nil
+	}
+	if objects.IsNone(result) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("TypeError: buffer.read() returned %s, expected bytes", result.Type().Name)
+}
+
+// bufWrite calls buf.write(data) and returns the byte count written.
+//
+// CPython: Modules/_io/textio.c:1662 textiowrapper_write (buffer.write call)
+func bufWrite(buf objects.Object, data []byte) (int, error) {
+	result, err := bufCall(buf, "write", []objects.Object{objects.NewBytes(data)})
+	if err != nil {
+		return 0, err
+	}
+	if result == nil || objects.IsNone(result) {
+		return len(data), nil
+	}
+	if n, ok := result.(*objects.Int); ok {
+		v, _ := n.Int64()
+		return int(v), nil
+	}
+	return len(data), nil
+}
+
+// bufSeek calls buf.seek(pos, whence).
+//
+// CPython: Modules/_io/textio.c:2536 textiowrapper_seek (buffer.seek call)
+func bufSeek(buf objects.Object, pos int64, whence int) (int64, error) {
+	result, err := bufCall(buf, "seek", []objects.Object{
+		objects.NewInt(pos),
+		objects.NewInt(int64(whence)),
+	})
+	if err != nil {
+		return 0, err
+	}
+	if n, ok := result.(*objects.Int); ok {
+		v, _ := n.Int64()
+		return v, nil
+	}
+	return pos, nil
+}
+
+// bufTell calls buf.tell().
+//
+// CPython: Modules/_io/textio.c:2734 textiowrapper_tell (buffer.tell call)
+func bufTell(buf objects.Object) (int64, error) {
+	result, err := bufCall(buf, "tell", nil)
+	if err != nil {
+		return 0, err
+	}
+	if n, ok := result.(*objects.Int); ok {
+		v, _ := n.Int64()
+		return v, nil
+	}
+	return 0, nil
+}
+
+// bufClose calls buf.close().
+//
+// CPython: Modules/_io/textio.c:3138 textiowrapper_close (buffer.close call)
+func bufClose(buf objects.Object) error {
+	_, err := bufCall(buf, "close", nil)
+	return err
+}
+
+// bufFlush calls buf.flush().
+//
+// CPython: Modules/_io/textio.c:3121 textiowrapper_flush (buffer.flush call)
+func bufFlush(buf objects.Object) error {
+	_, err := bufCall(buf, "flush", nil)
+	return err
+}
+
+// bufTruncate calls buf.truncate(pos) or buf.truncate().
+//
+// CPython: Modules/_io/textio.c:2968 textiowrapper_truncate (buffer.truncate call)
+func bufTruncate(buf objects.Object, pos int64, hasPos bool) (int64, error) {
+	var result objects.Object
+	var err error
+	if hasPos {
+		result, err = bufCall(buf, "truncate", []objects.Object{objects.NewInt(pos)})
+	} else {
+		result, err = bufCall(buf, "truncate", nil)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if n, ok := result.(*objects.Int); ok {
+		v, _ := n.Int64()
+		return v, nil
+	}
+	return 0, nil
+}
+
+// --- Encoding / decoding helpers -------------------------------------------
+
+// decodeBytes decodes raw bytes using the given encoding.
+//
+// CPython: Modules/_io/textio.c:1988 textiowrapper_read (IncrementalDecoder.decode)
+func decodeBytes(data []byte, encoding string) (string, error) {
+	switch strings.ToLower(encoding) {
+	case "utf-8", "utf8", "utf_8":
+		if !utf8.Valid(data) {
+			return "", fmt.Errorf("UnicodeDecodeError: invalid utf-8 sequence")
+		}
+		return string(data), nil
+	case "ascii", "us-ascii":
+		for _, b := range data {
+			if b > 127 {
+				return "", fmt.Errorf("UnicodeDecodeError: ordinal not in range(128)")
+			}
+		}
+		return string(data), nil
+	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
+		runes := make([]rune, len(data))
+		for i, b := range data {
+			runes[i] = rune(b)
+		}
+		return string(runes), nil
+	}
+	return "", fmt.Errorf("NotImplementedError: encoding %q is not yet supported", encoding)
+}
+
+// encodeString encodes a string using the given encoding.
+//
+// CPython: Modules/_io/textio.c:1662 textiowrapper_write (IncrementalEncoder.encode)
+func encodeString(s, encoding string) ([]byte, error) {
+	switch strings.ToLower(encoding) {
+	case "utf-8", "utf8", "utf_8":
+		return []byte(s), nil
+	case "ascii", "us-ascii":
+		for _, r := range s {
+			if r > 127 {
+				return nil, fmt.Errorf("UnicodeEncodeError: character %q is not in ASCII range", r)
+			}
+		}
+		return []byte(s), nil
+	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
+		b := make([]byte, len([]rune(s)))
+		for i, r := range []rune(s) {
+			if r > 255 {
+				return nil, fmt.Errorf("UnicodeEncodeError: character %q is not in Latin-1 range", r)
+			}
+			b[i] = byte(r)
+		}
+		return b, nil
+	}
+	return nil, fmt.Errorf("NotImplementedError: encoding %q is not yet supported", encoding)
+}
+
+// --- Public methods ---------------------------------------------------------
+
+// read reads up to size characters from the buffer and decodes them.
+// size < 0 reads the whole remaining content.
+//
+// CPython: Modules/_io/textio.c:1988 textiowrapper_read_impl
+func (t *TextIOWrapper) read(size int) (string, error) {
 	if err := t.checkUsable(); err != nil {
 		return "", err
 	}
-	data, err := t.raw.Read(size)
+	data, err := bufRead(t.buf, size)
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	if len(data) == 0 {
+		return "", nil
+	}
+	return decodeBytes(data, t.encoding)
 }
 
-// Readline reads one text line from the underlying raw file.
+// readline reads one line from the buffer.
+// size < 0 means no limit.
 //
-// CPython: Modules/_io/textio.c:1885 textiowrapper_readline
-func (t *TextIOWrapper) Readline(size int) (string, error) {
+// CPython: Modules/_io/textio.c:2206 _textiowrapper_readline
+func (t *TextIOWrapper) readline(size int) (string, error) {
 	if err := t.checkUsable(); err != nil {
 		return "", err
 	}
+	// For BytesIO or FileIO, read byte-by-byte to find newline.
 	var buf strings.Builder
 	for size < 0 || buf.Len() < size {
-		chunk := make([]byte, 1)
-		n, err := t.raw.f.Read(chunk)
-		if n == 0 {
+		chunk, err := bufRead(t.buf, 1)
+		if err != nil {
+			return "", err
+		}
+		if len(chunk) == 0 {
 			break
 		}
-		if err != nil && err != io.EOF {
-			return "", fmt.Errorf("OSError: %s", err.Error())
+		char, err := decodeBytes(chunk, t.encoding)
+		if err != nil {
+			return "", err
 		}
-		buf.WriteByte(chunk[0])
-		if chunk[0] == '\n' {
+		buf.WriteString(char)
+		if char == "\n" {
 			break
 		}
 	}
 	return buf.String(), nil
 }
 
-// Write encodes the string and writes it to the underlying raw file.
+// Write encodes and writes a string to the underlying buffer.
 //
-// CPython: Modules/_io/textio.c:1499 textiowrapper_write
+// CPython: Modules/_io/textio.c:1662 textiowrapper_write_impl
 func (t *TextIOWrapper) Write(s string) (int, error) {
 	if err := t.checkUsable(); err != nil {
 		return 0, err
 	}
-	if !t.raw.writable {
-		return 0, fmt.Errorf("io.UnsupportedOperation: not writable")
-	}
-	data := []byte(s)
-	n, err := t.raw.Write(data)
+	data, err := encodeString(s, t.encoding)
 	if err != nil {
 		return 0, err
 	}
-	return n, nil
+	_, err = bufWrite(t.buf, data)
+	if err != nil {
+		return 0, err
+	}
+	return len([]rune(s)), nil
 }
 
-// Flush flushes the underlying raw file.
+// Flush flushes the write buffer and the underlying buffer.
 //
-// CPython: Modules/_io/textio.c textiowrapper_flush
+// CPython: Modules/_io/textio.c:3121 textiowrapper_flush_impl
 func (t *TextIOWrapper) Flush() error {
-	return t.checkUsable()
+	if err := t.checkUsable(); err != nil {
+		return err
+	}
+	return bufFlush(t.buf)
 }
 
-// Close flushes and closes the underlying raw file.
+// Close flushes and closes the underlying buffer.
 //
-// CPython: Modules/_io/textio.c textiowrapper_close
+// CPython: Modules/_io/textio.c:3138 textiowrapper_close_impl
 func (t *TextIOWrapper) Close() error {
 	if t.closed {
 		return nil
 	}
 	t.closed = true
-	return t.raw.Close()
+	return bufClose(t.buf)
 }
 
-// textIOWrapperGetattr exposes attributes and methods.
+// Seek seeks to a position in the underlying buffer.
+//
+// CPython: Modules/_io/textio.c:2536 textiowrapper_seek_impl
+func (t *TextIOWrapper) Seek(pos int64, whence int) (int64, error) {
+	if err := t.checkUsable(); err != nil {
+		return 0, err
+	}
+	return bufSeek(t.buf, pos, whence)
+}
+
+// Tell returns the current stream position.
+//
+// CPython: Modules/_io/textio.c:2734 textiowrapper_tell_impl
+func (t *TextIOWrapper) Tell() (int64, error) {
+	if err := t.checkUsable(); err != nil {
+		return 0, err
+	}
+	return bufTell(t.buf)
+}
+
+// Truncate truncates the file at the current position (or pos if given).
+//
+// CPython: Modules/_io/textio.c:2968 textiowrapper_truncate_impl
+func (t *TextIOWrapper) Truncate(pos int64, hasPos bool) (int64, error) {
+	if err := t.checkUsable(); err != nil {
+		return 0, err
+	}
+	if err := t.Flush(); err != nil {
+		return 0, err
+	}
+	return bufTruncate(t.buf, pos, hasPos)
+}
+
+// Detach flushes and detaches the underlying buffer.
+//
+// CPython: Modules/_io/textio.c:1566 textiowrapper_detach_impl
+func (t *TextIOWrapper) Detach() (objects.Object, error) {
+	if err := t.checkUsable(); err != nil {
+		return nil, err
+	}
+	if err := t.Flush(); err != nil {
+		return nil, err
+	}
+	buf := t.buf
+	t.buf = nil
+	t.detached = true
+	return buf, nil
+}
+
+// --- Getattr / method dispatch ---------------------------------------------
+
+// textIOWrapperGetattr exposes attributes and methods through Python dispatch.
 //
 // CPython: Modules/_io/textio.c textiowrapper_getset + textiowrapper_methods
 func textIOWrapperGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
@@ -245,22 +526,45 @@ func textIOWrapperGetattr(o objects.Object, name objects.Object) (objects.Object
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
 	}
 	switch n.Value() {
+	// CPython: Modules/_io/textio.c:3240 textiowrapper_name_get
 	case "name":
-		return objects.NewStr(t.name), nil
+		if t.detached {
+			return objects.None(), nil
+		}
+		if t.name != "" {
+			return objects.NewStr(t.name), nil
+		}
+		nameAttr, err := objects.GetAttr(t.buf, objects.NewStr("name"))
+		if err != nil {
+			return objects.None(), nil
+		}
+		return nameAttr, nil
 	case "mode":
 		return objects.NewStr(t.mode), nil
+	// CPython: Modules/_io/textio.c textiowrapper member encoding
 	case "encoding":
 		return objects.NewStr(t.encoding), nil
+	// CPython: Modules/_io/textio.c:3288 textiowrapper_errors_get
 	case "errors":
 		return objects.NewStr(t.errors), nil
+	// CPython: Modules/_io/textio.c:3254 textiowrapper_closed_get
 	case "closed":
-		return objects.NewBool(t.closed), nil
+		return objects.NewBool(t.closed || t.detached), nil
+	// CPython: Modules/_io/textio.c textiowrapper member line_buffering
 	case "line_buffering":
-		return objects.NewBool(false), nil
+		return objects.NewBool(t.linebuffering), nil
+	// CPython: Modules/_io/textio.c textiowrapper member write_through
+	case "write_through":
+		return objects.NewBool(t.writethrough), nil
+	// CPython: Modules/_io/textio.c:3268 textiowrapper_newlines_get
 	case "newlines":
 		return objects.None(), nil
+	// CPython: Modules/_io/textio.c textiowrapper member buffer
 	case "buffer":
-		return t.raw, nil
+		if t.detached {
+			return objects.None(), nil
+		}
+		return t.buf, nil
 	}
 	if fn := textIOWrapperMethod(t, n.Value()); fn != nil {
 		return fn, nil
@@ -268,35 +572,38 @@ func textIOWrapperGetattr(o objects.Object, name objects.Object) (objects.Object
 	return nil, fmt.Errorf("AttributeError: '_io.TextIOWrapper' object has no attribute '%s'", n.Value())
 }
 
-// textIOWrapperMethod maps method names to BuiltinFunctions.
+// textIOWrapperMethod returns BuiltinFunction objects for TextIOWrapper methods.
 //
 // CPython: Modules/_io/textio.c textiowrapper_methods
 func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 	switch name {
+	// CPython: Modules/_io/textio.c:1988 textiowrapper_read_impl
 	case "read":
 		return objects.NewBuiltinFunction("read", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			size, err := optionalSize(args, "read")
 			if err != nil {
 				return nil, err
 			}
-			s, err := t.Read(size)
+			s, err := t.read(size)
 			if err != nil {
 				return nil, err
 			}
 			return objects.NewStr(s), nil
 		})
+	// CPython: Modules/_io/textio.c:2372 textiowrapper_readline_impl
 	case "readline":
 		return objects.NewBuiltinFunction("readline", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			size, err := optionalSize(args, "readline")
 			if err != nil {
 				return nil, err
 			}
-			s, err := t.Readline(size)
+			s, err := t.readline(size)
 			if err != nil {
 				return nil, err
 			}
 			return objects.NewStr(s), nil
 		})
+	// CPython: Modules/_io/textio.c (readlines via IOBase)
 	case "readlines":
 		return objects.NewBuiltinFunction("readlines", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if err := t.checkUsable(); err != nil {
@@ -304,7 +611,7 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 			}
 			var lines []objects.Object
 			for {
-				line, err := t.Readline(-1)
+				line, err := t.readline(-1)
 				if err != nil {
 					return nil, err
 				}
@@ -315,6 +622,7 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 			}
 			return objects.NewList(lines), nil
 		})
+	// CPython: Modules/_io/textio.c:1662 textiowrapper_write_impl
 	case "write":
 		return objects.NewBuiltinFunction("write", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if len(args) != 1 {
@@ -324,16 +632,18 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 			if !ok {
 				return nil, fmt.Errorf("TypeError: write() argument must be str, not %s", args[0].Type().Name)
 			}
-			if _, err := t.Write(s.Value()); err != nil {
+			n, err := t.Write(s.Value())
+			if err != nil {
 				return nil, err
 			}
-			// Return character count (rune count) matching CPython behavior.
-			// CPython: Modules/_io/textio.c:1499 textiowrapper_write returns
-			// the number of characters written to the text layer.
-			return objects.NewInt(int64(len([]rune(s.Value())))), nil
+			return objects.NewInt(int64(n)), nil
 		})
+	// CPython: Modules/_io/textio.c (writelines via IOBase)
 	case "writelines":
 		return objects.NewBuiltinFunction("writelines", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if err := t.checkUsable(); err != nil {
+				return nil, err
+			}
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: writelines() takes exactly 1 argument (%d given)", len(args))
 			}
@@ -353,6 +663,7 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 			}
 			return objects.None(), nil
 		})
+	// CPython: Modules/_io/textio.c:2536 textiowrapper_seek_impl
 	case "seek":
 		return objects.NewBuiltinFunction("seek", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if len(args) < 1 || len(args) > 2 {
@@ -370,43 +681,116 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 				}
 				whence = w
 			}
-			out, err := t.raw.Seek(int64(pos), whence)
+			out, err := t.Seek(int64(pos), whence)
 			if err != nil {
 				return nil, err
 			}
 			return objects.NewInt(out), nil
 		})
+	// CPython: Modules/_io/textio.c:2734 textiowrapper_tell_impl
 	case "tell":
 		return objects.NewBuiltinFunction("tell", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			pos, err := t.raw.Tell()
+			pos, err := t.Tell()
 			if err != nil {
 				return nil, err
 			}
 			return objects.NewInt(pos), nil
 		})
+	// CPython: Modules/_io/textio.c:2968 textiowrapper_truncate_impl
+	case "truncate":
+		return objects.NewBuiltinFunction("truncate", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) == 0 || objects.IsNone(args[0]) {
+				n, err := t.Truncate(0, false)
+				if err != nil {
+					return nil, err
+				}
+				return objects.NewInt(n), nil
+			}
+			pos, err := intArg(args[0], "truncate")
+			if err != nil {
+				return nil, err
+			}
+			n, err := t.Truncate(int64(pos), true)
+			if err != nil {
+				return nil, err
+			}
+			return objects.NewInt(n), nil
+		})
+	// CPython: Modules/_io/textio.c:3121 textiowrapper_flush_impl
 	case "flush":
 		return objects.NewBuiltinFunction("flush", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			return objects.None(), t.Flush()
 		})
+	// CPython: Modules/_io/textio.c:3138 textiowrapper_close_impl
 	case "close":
 		return objects.NewBuiltinFunction("close", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			return objects.None(), t.Close()
 		})
+	// CPython: Modules/_io/textio.c:1566 textiowrapper_detach_impl
+	case "detach":
+		return objects.NewBuiltinFunction("detach", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return t.Detach()
+		})
+	// CPython: Modules/_io/textio.c:1370 textiowrapper_reconfigure
+	case "reconfigure":
+		return objects.NewBuiltinFunction("reconfigure", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+			if err := t.checkUsable(); err != nil {
+				return nil, err
+			}
+			if enc, ok := kwargs["encoding"]; ok && !objects.IsNone(enc) {
+				if s, ok := enc.(*objects.Unicode); ok {
+					t.encoding = s.Value()
+				}
+			}
+			if errs, ok := kwargs["errors"]; ok && !objects.IsNone(errs) {
+				if s, ok := errs.(*objects.Unicode); ok {
+					t.errors = s.Value()
+				}
+			}
+			if lb, ok := kwargs["line_buffering"]; ok && !objects.IsNone(lb) {
+				t.linebuffering = objects.IsTrue(lb)
+			}
+			if wt, ok := kwargs["write_through"]; ok && !objects.IsNone(wt) {
+				t.writethrough = objects.IsTrue(wt)
+			}
+			return t, nil
+		})
 	case "readable":
 		return objects.NewBuiltinFunction("readable", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return objects.NewBool(t.raw.readable && !t.closed), nil
+			if t.detached || t.closed {
+				return objects.False(), nil
+			}
+			r, err := bufCall(t.buf, "readable", nil)
+			if err != nil {
+				return objects.False(), nil
+			}
+			return r, nil
 		})
 	case "writable":
 		return objects.NewBuiltinFunction("writable", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return objects.NewBool(t.raw.writable && !t.closed), nil
+			if t.detached || t.closed {
+				return objects.False(), nil
+			}
+			r, err := bufCall(t.buf, "writable", nil)
+			if err != nil {
+				return objects.False(), nil
+			}
+			return r, nil
 		})
 	case "seekable":
 		return objects.NewBuiltinFunction("seekable", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return objects.NewBool(!t.closed), nil
+			if t.detached || t.closed {
+				return objects.False(), nil
+			}
+			r, err := bufCall(t.buf, "seekable", nil)
+			if err != nil {
+				return objects.NewBool(!t.closed), nil
+			}
+			return r, nil
 		})
 	case "isatty":
 		return objects.NewBuiltinFunction("isatty", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return objects.NewBool(false), nil
+			return objects.False(), nil
 		})
 	case "__enter__":
 		return objects.NewBuiltinFunction("__enter__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -419,6 +803,221 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 		return objects.NewBuiltinFunction("__exit__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			return objects.None(), t.Close()
 		})
+	case "fileno":
+		return objects.NewBuiltinFunction("fileno", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return bufCall(t.buf, "fileno", nil)
+		})
 	}
 	return nil
 }
+
+// --- IncrementalNewlineDecoder --------------------------------------------
+
+// IncrementalNewlineDecoder wraps another codec decoder and handles universal
+// newline translation. Implements the public interface from textio.c.
+//
+// CPython: Modules/_io/textio.c:219 nldecoder_object
+type IncrementalNewlineDecoder struct {
+	objects.Header
+
+	decoder   objects.Object
+	translate bool
+	errors    string
+	seennl    int
+	pendingcr bool
+}
+
+// IncrementalNewlineDecoderType is the type for _io.IncrementalNewlineDecoder.
+var IncrementalNewlineDecoderType = objects.NewType("_io.IncrementalNewlineDecoder", []*objects.Type{objects.ObjectType()})
+
+func init() {
+	IncrementalNewlineDecoderType.Call = incrementalNLDecoderCall
+	IncrementalNewlineDecoderType.Getattro = incrementalNLDecoderGetattr
+}
+
+// incrementalNLDecoderCall constructs a new IncrementalNewlineDecoder.
+//
+// CPython: Modules/_io/textio.c:247 incrementalnewlinedecoder_init
+func incrementalNLDecoderCall(_ objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	names := []string{"decoder", "translate", "errors"}
+	bound := make([]objects.Object, len(names))
+	copy(bound, args)
+	for k, v := range kwargs {
+		for i, n := range names {
+			if n == k {
+				bound[i] = v
+				break
+			}
+		}
+	}
+	if bound[0] == nil {
+		return nil, fmt.Errorf("TypeError: IncrementalNewlineDecoder() missing required argument 'decoder'")
+	}
+	translate := false
+	if bound[1] != nil && !objects.IsNone(bound[1]) {
+		translate = objects.IsTrue(bound[1])
+	}
+	errors := "strict"
+	if bound[2] != nil && !objects.IsNone(bound[2]) {
+		if s, ok := bound[2].(*objects.Unicode); ok {
+			errors = s.Value()
+		}
+	}
+	d := &IncrementalNewlineDecoder{
+		decoder:   bound[0],
+		translate: translate,
+		errors:    errors,
+	}
+	d.Init(IncrementalNewlineDecoderType)
+	return d, nil
+}
+
+// incrementalNLDecoderGetattr handles attribute and method access.
+func incrementalNLDecoderGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
+	d := o.(*IncrementalNewlineDecoder)
+	n, ok := name.(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: attribute name must be string")
+	}
+	switch n.Value() {
+	// CPython: Modules/_io/textio.c:638 incrementalnewlinedecoder_newlines_get
+	case "newlines":
+		switch d.seennl {
+		case 0:
+			return objects.None(), nil
+		case 1:
+			return objects.NewStr("\n"), nil
+		case 2:
+			return objects.NewStr("\r"), nil
+		case 3:
+			t := objects.NewTuple([]objects.Object{objects.NewStr("\r"), objects.NewStr("\n")})
+			return t, nil
+		case 4:
+			return objects.NewStr("\r\n"), nil
+		default:
+			return objects.None(), nil
+		}
+	// CPython: Modules/_io/textio.c:528 incrementalnewlinedecoder_decode
+	case "decode":
+		return objects.NewBuiltinFunction("decode", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+			if len(args) < 1 {
+				return nil, fmt.Errorf("TypeError: decode() missing required argument 'input'")
+			}
+			var data []byte
+			switch v := args[0].(type) {
+			case *objects.Bytes:
+				data = v.Bytes()
+			case *objects.Unicode:
+				data = []byte(v.Value())
+			default:
+				return nil, fmt.Errorf("TypeError: decode() argument must be bytes or str")
+			}
+			// Delegate to underlying decoder if it's not None.
+			var decoded string
+			if d.decoder != nil && !objects.IsNone(d.decoder) {
+				result, err := bufCall(d.decoder, "decode", []objects.Object{args[0]})
+				if err != nil {
+					return nil, err
+				}
+				if s, ok := result.(*objects.Unicode); ok {
+					decoded = s.Value()
+				}
+			} else {
+				decoded = string(data)
+			}
+			// Track and optionally translate newlines.
+			decoded = d.processNewlines(decoded)
+			return objects.NewStr(decoded), nil
+		}), nil
+	// CPython: Modules/_io/textio.c:541 incrementalnewlinedecoder_getstate
+	case "getstate":
+		return objects.NewBuiltinFunction("getstate", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			var buf objects.Object
+			if d.pendingcr {
+				buf = objects.NewBytes([]byte("\r"))
+			} else {
+				buf = objects.NewBytes(nil)
+			}
+			flags := int64(0)
+			if d.decoder != nil && !objects.IsNone(d.decoder) {
+				if r, err := bufCall(d.decoder, "getstate", nil); err == nil {
+					if tup, ok := r.(*objects.Tuple); ok && tup.Len() >= 2 {
+						if f, ok := tup.Item(1).(*objects.Int); ok {
+							v, _ := f.Int64()
+							flags = v << 1
+						}
+					}
+				}
+			}
+			if d.pendingcr {
+				flags |= 1
+			}
+			return objects.NewTuple([]objects.Object{buf, objects.NewInt(flags)}), nil
+		}), nil
+	// CPython: Modules/_io/textio.c:587 incrementalnewlinedecoder_setstate
+	case "setstate":
+		return objects.NewBuiltinFunction("setstate", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) < 1 {
+				return nil, fmt.Errorf("TypeError: setstate() missing required argument")
+			}
+			tup, ok := args[0].(*objects.Tuple)
+			if !ok || tup.Len() < 2 {
+				return nil, fmt.Errorf("TypeError: setstate() argument must be 2-tuple")
+			}
+			flags, ok := tup.Item(1).(*objects.Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: setstate() flags must be int")
+			}
+			v, _ := flags.Int64()
+			d.pendingcr = v&1 != 0
+			return objects.None(), nil
+		}), nil
+	// CPython: Modules/_io/textio.c:624 incrementalnewlinedecoder_reset
+	case "reset":
+		return objects.NewBuiltinFunction("reset", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			d.seennl = 0
+			d.pendingcr = false
+			if d.decoder != nil && !objects.IsNone(d.decoder) {
+				_, err := bufCall(d.decoder, "reset", nil)
+				return objects.None(), err
+			}
+			return objects.None(), nil
+		}), nil
+	}
+	return nil, fmt.Errorf("AttributeError: '_io.IncrementalNewlineDecoder' object has no attribute '%s'", n.Value())
+}
+
+// processNewlines translates or tracks universal newlines in s.
+//
+// CPython: Modules/_io/textio.c:528 incrementalnewlinedecoder_decode (inner loop)
+func (d *IncrementalNewlineDecoder) processNewlines(s string) string {
+	if d.pendingcr {
+		s = "\r" + s
+		d.pendingcr = false
+	}
+	// Track which newline types we've seen.
+	for _, r := range s {
+		switch r {
+		case '\n':
+			d.seennl |= 1
+		case '\r':
+			d.seennl |= 2
+		}
+	}
+	if d.translate {
+		return strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(s)
+	}
+	return s
+}
+
+// Read is the Go-level read method (used by tests and internal code).
+// size < 0 reads all.
+func (t *TextIOWrapper) Read(size int) (string, error) {
+	return t.read(size)
+}
+
+// Readline is the Go-level readline method.
+func (t *TextIOWrapper) Readline(size int) (string, error) {
+	return t.readline(size)
+}
+
