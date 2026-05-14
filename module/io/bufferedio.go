@@ -156,9 +156,14 @@ func (b *Buffered) flushWrite() error {
 // --- _BufferedIOBase abstract methods ----------------------------------------
 
 // bufferedIOBaseGetattr dispatches attribute lookups on _BufferedIOBase.
+// CPython gives read/read1/detach/write as abstract slots that raise
+// UnsupportedOperation, while readinto/readinto1 ship a concrete fallback
+// that calls self.read(len(b)) and memcpy's the result into the buffer.
 //
+// CPython: Modules/_io/bufferedio.c:50 _bufferediobase_readinto_generic
+// CPython: Modules/_io/bufferedio.c:113 bufferediobase_unsupported
 // CPython: Modules/_io/bufferedio.c:2521 bufferediobase_slots
-func bufferedIOBaseGetattr(_ objects.Object, nameObj objects.Object) (objects.Object, error) {
+func bufferedIOBaseGetattr(self objects.Object, nameObj objects.Object) (objects.Object, error) {
 	name, ok := nameObj.(*objects.Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
@@ -177,12 +182,12 @@ func bufferedIOBaseGetattr(_ objects.Object, nameObj objects.Object) (objects.Ob
 			return nil, fmt.Errorf("UnsupportedOperation: read1")
 		}), nil
 	case "readinto":
-		return objects.NewBuiltinFunction("readinto", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return nil, fmt.Errorf("UnsupportedOperation: readinto")
+		return objects.NewBuiltinFunction("readinto", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return bufferedIOBaseReadintoGeneric(self, args, false)
 		}), nil
 	case "readinto1":
-		return objects.NewBuiltinFunction("readinto1", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return nil, fmt.Errorf("UnsupportedOperation: readinto1")
+		return objects.NewBuiltinFunction("readinto1", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return bufferedIOBaseReadintoGeneric(self, args, true)
 		}), nil
 	case "write":
 		return objects.NewBuiltinFunction("write", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -190,6 +195,54 @@ func bufferedIOBaseGetattr(_ objects.Object, nameObj objects.Object) (objects.Ob
 		}), nil
 	}
 	return nil, fmt.Errorf("AttributeError: '_io._BufferedIOBase' object has no attribute '%s'", name.Value())
+}
+
+// bufferedIOBaseReadintoGeneric is the shared body of _BufferedIOBase.readinto
+// and readinto1: dispatch to self.read(len(b)) (or self.read1) and memcpy the
+// returned bytes into the writable buffer argument.
+//
+// CPython: Modules/_io/bufferedio.c:50 _bufferediobase_readinto_generic
+func bufferedIOBaseReadintoGeneric(self objects.Object, args []objects.Object, readinto1 bool) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: readinto() takes exactly 1 argument (%d given)", len(args))
+	}
+	dst, dstLen, err := writableBuffer(args[0])
+	if err != nil {
+		return nil, err
+	}
+	methodName := "read"
+	if readinto1 {
+		methodName = "read1"
+	}
+	fn, err := objects.GetAttr(self, objects.NewStr(methodName))
+	if err != nil {
+		return nil, err
+	}
+	res, err := objects.Call(fn, objects.NewTuple([]objects.Object{objects.NewInt(int64(dstLen))}), nil)
+	if err != nil {
+		return nil, err
+	}
+	bobj, ok := res.(*objects.Bytes)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: read() should return bytes")
+	}
+	src := bobj.Bytes()
+	if len(src) > dstLen {
+		return nil, fmt.Errorf("ValueError: read() returned too much data: %d bytes requested, %d returned", dstLen, len(src))
+	}
+	copy(dst, src)
+	return objects.NewInt(int64(len(src))), nil
+}
+
+// writableBuffer extracts a writable byte slice from a bytearray or memoryview.
+// Plain bytes objects are immutable and are rejected here.
+func writableBuffer(o objects.Object) ([]byte, int, error) {
+	switch v := o.(type) {
+	case *objects.ByteArray:
+		b := v.Bytes()
+		return b, len(b), nil
+	}
+	return nil, 0, fmt.Errorf("TypeError: a writable bytes-like object is required, not '%s'", o.Type().Name)
 }
 
 func init() {
