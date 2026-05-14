@@ -277,6 +277,12 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # sys.buildModule wires every sys attribute into the dict; the
+      # size mirrors the surface (Python/sysmodule.c), not complexity.
+      - path: module/sys/module\.go
+        linters:
+          - gocognit
+          - gocyclo
       # Pegen scaffolding has many helpers held for the generated
       # parser table; flagging them as unused now would force ugly
       # nolint stamps everywhere. Re-enabled once parser_gen lands.

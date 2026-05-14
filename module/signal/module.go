@@ -82,7 +82,7 @@ var sigNotify = map[int]chan goos.Signal{}
 
 func init() {
 	_ = imp.AppendInittab("_signal", buildModule)
-	// Initialise prevHandler table: SIG_DFL (0) for all signals.
+	// Initialize prevHandler table: SIG_DFL (0) for all signals.
 	// CPython: Modules/signalmodule.c:1579 signal_get_set_handlers
 	for i := range prevHandler {
 		prevHandler[i] = objects.NewInt(0) // SIG_DFL
@@ -289,11 +289,8 @@ func strsignalFn(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 	if v < 1 || v >= sigNSIG {
 		return nil, fmt.Errorf("ValueError: signal number out of range")
 	}
-	s := syscall.Signal(v).String()
-	if strings.HasPrefix(s, "signal ") {
-		s = s[len("signal "):]
-	}
-	if len(s) > 0 {
+	s := strings.TrimPrefix(syscall.Signal(v).String(), "signal ")
+	if s != "" {
 		s = strings.ToUpper(s[:1]) + s[1:]
 	}
 	return objects.NewStr(s), nil
@@ -309,7 +306,7 @@ func raiseSignalFn(args []objects.Object, _ map[string]objects.Object) (objects.
 	}
 	pid := syscall.Getpid()
 	if err := syscall.Kill(pid, syscall.Signal(signum)); err != nil {
-		return nil, fmt.Errorf("OSError: %v", err)
+		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.None(), nil
 }
@@ -333,7 +330,7 @@ func alarmFn(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		uintptr(itimerReal),
 		uintptr(unsafe.Pointer(&newv)),
 		uintptr(unsafe.Pointer(&oldv))); errno != 0 {
-		return nil, fmt.Errorf("OSError: %v", errno)
+		return nil, fmt.Errorf("OSError: %w", errno)
 	}
 	remaining := oldv.Value.Sec
 	if oldv.Value.Usec > 0 {
@@ -384,7 +381,7 @@ func siginterruptFn(args []objects.Object, _ map[string]objects.Object) (objects
 		uintptr(signum),
 		0,
 		uintptr(unsafe.Pointer(&act))); errno != 0 {
-		return nil, fmt.Errorf("OSError: %v", errno)
+		return nil, fmt.Errorf("OSError: %w", errno)
 	}
 	// Modify SA_RESTART flag.
 	if flag != 0 {
@@ -396,7 +393,7 @@ func siginterruptFn(args []objects.Object, _ map[string]objects.Object) (objects
 		uintptr(signum),
 		uintptr(unsafe.Pointer(&act)),
 		0); errno != 0 {
-		return nil, fmt.Errorf("OSError: %v", errno)
+		return nil, fmt.Errorf("OSError: %w", errno)
 	}
 	return objects.None(), nil
 }
@@ -438,7 +435,7 @@ func setitimerFn(args []objects.Object, kwargs map[string]objects.Object) (objec
 		uintptr(which),
 		uintptr(unsafe.Pointer(&newv)),
 		uintptr(unsafe.Pointer(&oldv))); errno != 0 {
-		return nil, fmt.Errorf("ItimerError: [Errno %d] %v", errno, errno)
+		return nil, fmt.Errorf("ItimerError: [Errno %d] %w", int(errno), errno)
 	}
 	return itimervalToTuple(&oldv), nil
 }
@@ -456,7 +453,7 @@ func getitimerFn(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 		uintptr(which),
 		uintptr(unsafe.Pointer(&oldv)),
 		0); errno != 0 {
-		return nil, fmt.Errorf("ItimerError: [Errno %d] %v", errno, errno)
+		return nil, fmt.Errorf("ItimerError: [Errno %d] %w", int(errno), errno)
 	}
 	return itimervalToTuple(&oldv), nil
 }
@@ -478,7 +475,7 @@ func pthreadSigmaskFn(args []objects.Object, _ map[string]objects.Object) (objec
 		uintptr(how),
 		uintptr(unsafe.Pointer(&mask)),
 		uintptr(unsafe.Pointer(&prev))); errno != 0 {
-		return nil, fmt.Errorf("OSError: %v", errno)
+		return nil, fmt.Errorf("OSError: %w", errno)
 	}
 	return sigsetToSet(prev), nil
 }
@@ -491,7 +488,7 @@ func sigpendingFn(_ []objects.Object, _ map[string]objects.Object) (objects.Obje
 	if _, _, errno := syscall.Syscall(syscall.SYS_SIGPENDING,
 		uintptr(unsafe.Pointer(&mask)),
 		0, 0); errno != 0 {
-		return nil, fmt.Errorf("OSError: %v", errno)
+		return nil, fmt.Errorf("OSError: %w", errno)
 	}
 	return sigsetToSet(mask), nil
 }
@@ -509,7 +506,7 @@ func sigwaitFn(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 		uintptr(unsafe.Pointer(&mask)),
 		uintptr(unsafe.Pointer(&sig)),
 		0); errno != 0 {
-		return nil, fmt.Errorf("OSError: %v", errno)
+		return nil, fmt.Errorf("OSError: %w", errno)
 	}
 	return objects.NewInt(int64(sig)), nil
 }
@@ -545,7 +542,7 @@ func pthreadKillFn(args []objects.Object, _ map[string]objects.Object) (objects.
 		uintptr(tid),
 		uintptr(signum),
 		0); errno != 0 {
-		return nil, fmt.Errorf("OSError: %v", errno)
+		return nil, fmt.Errorf("OSError: %w", errno)
 	}
 	return objects.None(), nil
 }

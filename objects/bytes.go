@@ -52,7 +52,7 @@ func init() {
 
 // bytesSubscript ports bytes_subscript: integer keys return the byte
 // value as an int, slice keys return a fresh bytes object. The slice
-// path honours step and skips a copy when the slice covers the whole
+// path honors step and skips a copy when the slice covers the whole
 // buffer at step 1.
 //
 // CPython: Objects/bytesobject.c:1635 bytes_subscript

@@ -40,7 +40,7 @@ type TemplateStr struct {
 // CPython: Objects/templateobject.c _PyTemplate_Build
 func NewTemplateStr(strings, interpolations Object) *TemplateStr {
 	ts := &TemplateStr{strings: strings, interpolations: interpolations}
-	ts.Header.init(TemplateStrType)
+	ts.init(TemplateStrType)
 	return ts
 }
 

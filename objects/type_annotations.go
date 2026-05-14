@@ -101,10 +101,8 @@ func typeSetAnnotations(tp *Type, value Object) error {
 	}
 	if value != nil {
 		SetTypeDescr(tp, "__annotations__", value)
-	} else {
-		if !DelTypeDescr(tp, "__annotations__") {
-			return fmt.Errorf("AttributeError: __annotations__")
-		}
+	} else if !DelTypeDescr(tp, "__annotations__") {
+		return fmt.Errorf("AttributeError: __annotations__")
 	}
 	DelTypeDescr(tp, "__annotate__")
 	tp.InvalidateVersionTag()

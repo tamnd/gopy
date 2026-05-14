@@ -778,10 +778,10 @@ func osAccess(args []objects.Object, kwargs map[string]objects.Object) (objects.
 		return nil, err
 	}
 	_, statErr := goos.Stat(path)
-	if statErr != nil {
-		return objects.False(), nil
+	if statErr == nil {
+		return objects.True(), nil
 	}
-	return objects.True(), nil
+	return objects.False(), nil
 }
 
 // emptyFrozenset is the shared empty frozenset for os.supports_dir_fd,
@@ -821,7 +821,7 @@ func osOpen(args []objects.Object, kwargs map[string]objects.Object) (objects.Ob
 	flagsVal, _ := flags.Int64()
 	fd, err2 := syscall.Open(path, int(flagsVal), uint32(mode))
 	if err2 != nil {
-		return nil, fmt.Errorf("OSError: %v", err2)
+		return nil, fmt.Errorf("OSError: %w", err2)
 	}
 	return objects.NewInt(int64(fd)), nil
 }
@@ -843,7 +843,7 @@ func osScandir(args []objects.Object, kwargs map[string]objects.Object) (objects
 	}
 	entries, err := goos.ReadDir(path)
 	if err != nil {
-		return nil, fmt.Errorf("OSError: %v", err)
+		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	items := make([]objects.Object, len(entries))
 	for i, e := range entries {

@@ -109,4 +109,3 @@ func moduleSetAnnotations(m *Module, value Object) error {
 	_ = m.dict.DelItem(NewStr("__annotate__"))
 	return nil
 }
-
