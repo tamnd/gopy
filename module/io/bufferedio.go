@@ -47,8 +47,8 @@ type Buffered struct {
 	readEnd   int // -1 means invalid
 
 	// write buffer
-	writeBuf  []byte
-	writeEnd  int // -1 means invalid
+	writeBuf []byte
+	writeEnd int // -1 means invalid
 
 	absPos int64
 }

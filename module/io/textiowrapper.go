@@ -25,11 +25,11 @@ import (
 type TextIOWrapper struct {
 	objects.Header
 
-	buf          objects.Object
-	encoding     string
-	errors       string
-	name         string
-	mode         string
+	buf           objects.Object
+	encoding      string
+	errors        string
+	name          string
+	mode          string
 	linebuffering bool
 	writethrough  bool
 	closed        bool
@@ -1073,4 +1073,3 @@ func textIOBaseGetattr(_ objects.Object, nameObj objects.Object) (objects.Object
 func init() {
 	TextIOBaseType.Getattro = textIOBaseGetattr
 }
-
