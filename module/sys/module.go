@@ -140,6 +140,13 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "exc_info", objects.NewBuiltinFunction("exc_info", excInfo)); err != nil {
 		return nil, err
 	}
+	// sys.exception() is the Python 3.11+ replacement for sys.exc_info()[1].
+	// Returns the currently handled exception, or None.
+	//
+	// CPython: Python/sysmodule.c:573 sys_exception_impl
+	if err := setItem(md, "exception", objects.NewBuiltinFunction("exception", sysException)); err != nil {
+		return nil, err
+	}
 	// sys.intern interns a str object. The dedicated unicodeobject port
 	// will route through the global interned table; for now the helper
 	// returns the input unchanged so collections.namedtuple's typename /
