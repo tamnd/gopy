@@ -334,8 +334,8 @@ func TestFileIONotReadableError(t *testing.T) {
 	fi := NewFileIO(f, path, "w", false, true)
 	defer fi.Close()
 	_, err = fi.Read(1)
-	if err == nil || !strings.Contains(err.Error(), "not readable") {
-		t.Fatalf("err = %v, want not-readable", err)
+	if err == nil || !strings.Contains(err.Error(), "not open for reading") {
+		t.Fatalf("err = %v, want not-open-for-reading", err)
 	}
 }
 
