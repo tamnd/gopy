@@ -170,7 +170,7 @@ side is real.
 | `iobase_fileno`, `iobase_isatty` | `_IOBase.fileno`, `_IOBase.isatty` | done |
 | `rawiobase_read`, `rawiobase_readall`, `rawiobase_readinto`, `rawiobase_write` | `_RawIOBase` | done |
 | `bufferediobase_*` | `_BufferedIOBase` (in bufferedio.c, not iobase.c) | pending |
-| `textiobase_*` | `_TextIOBase` (in textio.c, not iobase.c) | pending |
+| `textiobase_*` | `_TextIOBase` (in textio.c, not iobase.c) | done |
 
 **Functions to port (C: `fileio.c`).**
 
@@ -321,7 +321,7 @@ constants, errno bridge).
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Modules/posixmodule.c` (slice) | ~15,000 | `module/os/module.go` | partial |
+| A | `Modules/posixmodule.c` (slice) | ~15,000 | `module/os/module.go` | done |
 | B | `Lib/os.py` | ~1,100 | `stdlib/os.py` | done |
 | C | `Lib/posixpath.py` | ~600 | `stdlib/posixpath.py` | done (commonpath blocked on listcomp cell-binding bug, tracked under VM audit) |
 | D | `Lib/ntpath.py` | ~900 | `stdlib/ntpath.py` | done (unblocked by spec 1705 phases 1 + 5: `\x` codepoint emission and set-union grow-before-place; `import ntpath` is green) |
