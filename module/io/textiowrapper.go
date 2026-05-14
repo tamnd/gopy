@@ -598,20 +598,44 @@ func (t *TextIOWrapper) Close() error {
 
 // Seek seeks to a position in the underlying buffer.
 //
+// Seeking invalidates any decoded characters buffered ahead of the
+// caller and resets the newline decoder so that the post-seek decode
+// stream behaves like a fresh open.
+//
 // CPython: Modules/_io/textio.c:2536 textiowrapper_seek_impl
 func (t *TextIOWrapper) Seek(pos int64, whence int) (int64, error) {
 	if err := t.checkUsable(); err != nil {
 		return 0, err
 	}
-	return bufSeek(t.buf, pos, whence)
+	if err := t.Flush(); err != nil {
+		return 0, err
+	}
+	out, err := bufSeek(t.buf, pos, whence)
+	if err != nil {
+		return 0, err
+	}
+	t.decodedBuf = ""
+	if t.nlDecoder != nil {
+		t.nlDecoder.pendingcr = false
+		t.nlDecoder.seennl = 0
+	}
+	return out, nil
 }
 
 // Tell returns the current stream position.
+//
+// When buffered decoded characters or a pending CR are held in the
+// newline decoder, the buffer's tell does not match the logical text
+// position. CPython encodes a multi-field cookie; gopy does not yet
+// support that, so we raise OSError to flag the unsupported case.
 //
 // CPython: Modules/_io/textio.c:2734 textiowrapper_tell_impl
 func (t *TextIOWrapper) Tell() (int64, error) {
 	if err := t.checkUsable(); err != nil {
 		return 0, err
+	}
+	if t.decodedBuf != "" || (t.nlDecoder != nil && t.nlDecoder.pendingcr) {
+		return 0, fmt.Errorf("OSError: telling position disabled by next() call")
 	}
 	return bufTell(t.buf)
 }
