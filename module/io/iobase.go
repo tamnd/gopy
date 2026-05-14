@@ -167,6 +167,15 @@ func rawiobaseGetattro(o objects.Object, name objects.Object) (objects.Object, e
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
 	}
+	// Instance dict shadows the type methods so subclasses (and tests) can
+	// override read / readall / readinto / write via setattr, mirroring
+	// CPython's PyObject_GenericGetAttr where the instance __dict__ wins
+	// over non-data descriptors on the type.
+	if d := iobaseGetDict(o); d != nil {
+		if v, err := d.GetItem(objects.NewStr(n.Value())); err == nil {
+			return v, nil
+		}
+	}
 	if fn := rawiobaseMethod(o.(*RawIOBase), n.Value()); fn != nil {
 		return fn, nil
 	}
