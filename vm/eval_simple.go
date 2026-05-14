@@ -367,6 +367,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		if ierr != nil {
 			return 0, nil, nil, false, true, ierr
 		}
+		if it == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("vm: GET_ITER: Iter returned nil for %T", obj)
+		}
 		e.pushObject(it)
 		return e.advance(), nil, nil, false, true, nil
 
@@ -375,6 +378,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// directly to avoid the dup but the FOR_ITER arm in 3.14 keeps
 		// the iterator on the stack across iterations.
 		it := e.peek(0).AsObject()
+		if it == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("vm: TypeError: FOR_ITER on nil object")
+		}
 		t := it.Type()
 		if t.IterNext == nil {
 			return 0, nil, nil, false, true, fmt.Errorf("vm: TypeError: '%s' object is not an iterator", t.Name)

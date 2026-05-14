@@ -245,9 +245,15 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 // execSend ports the SEND opcode: sends a value into the generator or
 // iterator on TOS1 and dispatches on the result.
 //
-// Stack before: [..., receiver, v]
-// Normal yield: [..., receiver, yielded_val], advance
-// StopIteration: [...], jump past END_SEND by oparg
+// Stack before:      [..., receiver, v]
+// Normal yield:      [..., receiver, yielded_val], re-execute SEND
+// StopIteration:     [..., receiver, retval], jump to END_SEND
+//
+// The StopIteration path leaves receiver on the stack so END_SEND
+// can pop it together with retval in one place, matching CPython's
+// stack discipline. The previous code popped receiver here, which
+// caused END_SEND to underflow the stack and corrupt the outer
+// for-loop's iterator.
 //
 // CPython: Python/bytecodes.c:1297 _SEND
 func (e *evalState) execSend(oparg uint32) (genResult, error) {
@@ -259,9 +265,12 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 	case *objects.Generator:
 		val, serr := r.Send(v)
 		if errors.Is(serr, objects.ErrStopIteration) {
-			// Pop exhausted generator; jump past END_SEND.
-			ref := e.pop()
-			ref.Close()
+			// Leave receiver on stack; push the StopIteration return
+			// value (None for generators without an explicit return).
+			// END_SEND will pop both receiver and retval.
+			//
+			// CPython: Python/bytecodes.c _SEND (StopIteration path)
+			e.pushObject(objects.None())
 			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if serr != nil {
@@ -288,8 +297,10 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 			val, nerr = objects.Call(sendAttr, objects.NewTuple([]objects.Object{v}), nil)
 		}
 		if errors.Is(nerr, objects.ErrStopIteration) {
-			ref := e.pop()
-			ref.Close()
+			// Same discipline as the Generator path above.
+			//
+			// CPython: Python/bytecodes.c _SEND (StopIteration path)
+			e.pushObject(objects.None())
 			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if nerr != nil {
