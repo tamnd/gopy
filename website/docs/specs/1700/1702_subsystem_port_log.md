@@ -144,7 +144,7 @@ side is real.
 | A | `Modules/_io/_iomodule.c` | ~700 | `module/io/module.go` | done |
 | B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | done |
 | C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | done |
-| D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | pending |
+| D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | done |
 | E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | done |
 | F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | done |
 | G | `Modules/_io/bytesio.c` | ~1,100 | `module/io/bytesio.go` | done |
@@ -184,11 +184,11 @@ side is real.
 
 | C class | Public methods | Status |
 |---------|---------------|--------|
-| `BufferedReader` | `read`, `read1`, `peek`, `readline`, `readinto`, `readinto1`, `seek`, `tell`, `close`, `flush`, `__init__`, `raw`, `mode`, `name`, `closed` | pending |
-| `BufferedWriter` | `write`, `flush`, `close`, `seek`, `tell`, `truncate`, `detach`, `__init__` | pending |
-| `BufferedRandom` | union of Reader + Writer behaviours | pending |
-| `BufferedRWPair` | `read`, `write`, `peek`, `readinto`, `close`, `flush`, `readable`, `writable` | pending |
-| Shared internals (`_bufferedreader_raw_read`, `_bufferedwriter_flush_unlocked`, `_PyIO_State`) | helpers | pending |
+| `BufferedReader` | `read`, `read1`, `peek`, `readline`, `readinto`, `readinto1`, `seek`, `tell`, `close`, `flush`, `__init__`, `raw`, `mode`, `name`, `closed` | done |
+| `BufferedWriter` | `write`, `flush`, `close`, `seek`, `tell`, `truncate`, `detach`, `__init__` | done |
+| `BufferedRandom` | union of Reader + Writer behaviours | done |
+| `BufferedRWPair` | `read`, `write`, `peek`, `readinto`, `close`, `flush`, `readable`, `writable` | done |
+| Shared internals (`_bufferedreader_raw_read`, `_bufferedwriter_flush_unlocked`, `_PyIO_State`) | helpers | done |
 
 **Functions to port (E: `textio.c`).**
 
@@ -455,7 +455,7 @@ Status legend:
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | done | `Lib/difflib.py` | `stdlib/difflib.py` | I | Vendored byte-equal (2064 lines). Loads via PathFinder. |
-| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | `_iomodule.c`, `iobase.c`, `fileio.c`, `bytesio.c`, `stringio.c`, `textio.c` all ported. `IncrementalNewlineDecoder` ported in full. `TextIOWrapper` accepts any binary buffer via protocol dispatch; all methods done. `stdlib/io.py` vendored byte-equal; `TestImportIO` green. BufferedReader/Writer/Random/RWPair (`bufferedio.c`) still pending (io D). |
+| io / _io | #514 | done | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All C files ported: `_iomodule.c`, `iobase.c`, `fileio.c`, `bytesio.c`, `stringio.c`, `textio.c`, `bufferedio.c`. `IncrementalNewlineDecoder`, `TextIOWrapper`, `BufferedReader`, `BufferedWriter`, `BufferedRandom`, `BufferedRWPair` all done. `stdlib/io.py` vendored byte-equal; `TestImportIO` green. |
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
