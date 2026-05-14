@@ -17,8 +17,8 @@ import (
 )
 
 // osChmod changes the mode of path. The dir_fd / follow_symlinks
-// keyword arguments are accepted but the underlying Go API only honours
-// the default behaviour (follow symlinks).
+// keyword arguments are accepted but the underlying Go API only honors
+// the default behavior (follow symlinks).
 //
 // CPython: Modules/posixmodule.c os_chmod_impl
 func osChmod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
