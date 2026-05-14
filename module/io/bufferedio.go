@@ -387,8 +387,95 @@ func bufferedGetattr(self objects.Object, nameObj objects.Object) (objects.Objec
 			return nil, fmt.Errorf("ValueError: raw stream has been detached")
 		}
 		return objects.GetAttr(b.raw, objects.NewStr("mode"))
+	case "closefd":
+		// CPython: Modules/_io/bufferedio.c:1545 buffered_get_closefd via raw
+		if b.raw == nil {
+			return objects.NewBool(false), nil
+		}
+		v, err := objects.GetAttr(b.raw, objects.NewStr("closefd"))
+		if err != nil {
+			return objects.NewBool(true), nil //nolint:nilerr // raw without closefd attr defaults to True
+		}
+		return v, nil
+	case "__enter__":
+		// CPython: Modules/_io/iobase.c iobase___enter___impl
+		return objects.NewBuiltinFunction("__enter__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if err := b.checkInitialized(); err != nil {
+				return nil, err
+			}
+			if b.closed {
+				return nil, fmt.Errorf("ValueError: I/O operation on closed file")
+			}
+			return b, nil
+		}), nil
+	case "__exit__":
+		// CPython: Modules/_io/iobase.c iobase___exit___impl
+		return objects.NewBuiltinFunction("__exit__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			_, err := b.bufferedClose()
+			if err != nil {
+				return nil, err
+			}
+			return objects.None(), nil
+		}), nil
+	case "__iter__":
+		// CPython: Modules/_io/iobase.c iobase_iter
+		return objects.NewBuiltinFunction("__iter__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if err := b.checkInitialized(); err != nil {
+				return nil, err
+			}
+			if b.closed {
+				return nil, fmt.Errorf("ValueError: I/O operation on closed file")
+			}
+			return b, nil
+		}), nil
+	case "__next__":
+		// CPython: Modules/_io/bufferedio.c:1486 buffered_iternext
+		return objects.NewBuiltinFunction("__next__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			line, err := b.bufferedReadline(nil)
+			if err != nil {
+				return nil, err
+			}
+			lb, ok := line.(*objects.Bytes)
+			if !ok || len(lb.Bytes()) == 0 {
+				return nil, objects.ErrStopIteration
+			}
+			return line, nil
+		}), nil
+	case "__repr__":
+		return objects.NewBuiltinFunction("__repr__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			s, err := bufferedRepr(b)
+			if err != nil {
+				return nil, err
+			}
+			return objects.NewStr(s), nil
+		}), nil
 	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", typeName, name.Value())
+}
+
+// bufferedRepr formats a Buffered object as `<_io.BufferedReader name='x'>`
+// when the raw stream has a name, or `<_io.BufferedReader>` otherwise.
+// CPython swallows ValueError raised by the `name` lookup on a detached
+// stream and falls back to the type-only form; we do the same.
+//
+// CPython: Modules/_io/bufferedio.c:1527 buffered_repr
+func bufferedRepr(b *Buffered) (string, error) {
+	typeName := b.Type().Name
+	if b.raw == nil {
+		return fmt.Sprintf("<%s>", typeName), nil
+	}
+	nameObj, err := objects.GetAttr(b.raw, objects.NewStr("name"))
+	if err != nil || nameObj == nil {
+		return fmt.Sprintf("<%s>", typeName), nil //nolint:nilerr // raw without name → repr without name (matches CPython)
+	}
+	if s, ok := nameObj.(*objects.Unicode); ok {
+		return fmt.Sprintf("<%s name='%s'>", typeName, s.Value()), nil
+	}
+	if i, ok := nameObj.(*objects.Int); ok {
+		n, _ := i.Int64()
+		return fmt.Sprintf("<%s name=%d>", typeName, n), nil
+	}
+	return fmt.Sprintf("<%s>", typeName), nil
 }
 
 // --- BufferedReader ----------------------------------------------------------
@@ -434,6 +521,19 @@ func bufferedReaderCall(_ objects.Object, args []objects.Object, _ map[string]ob
 func init() {
 	BufferedReaderType.Call = bufferedReaderCall
 	BufferedReaderType.Getattro = bufferedGetattr
+	BufferedReaderType.Repr = bufferedTypeRepr
+	BufferedReaderType.Str = bufferedTypeRepr
+}
+
+// bufferedTypeRepr is the Repr slot installed on every Buffered type.
+//
+// CPython: Modules/_io/bufferedio.c:1527 buffered_repr
+func bufferedTypeRepr(o objects.Object) (string, error) {
+	b, ok := o.(*Buffered)
+	if !ok {
+		return "", fmt.Errorf("TypeError: not a Buffered object")
+	}
+	return bufferedRepr(b)
 }
 
 // --- BufferedWriter ----------------------------------------------------------
@@ -479,6 +579,8 @@ func bufferedWriterCall(_ objects.Object, args []objects.Object, _ map[string]ob
 func init() {
 	BufferedWriterType.Call = bufferedWriterCall
 	BufferedWriterType.Getattro = bufferedGetattr
+	BufferedWriterType.Repr = bufferedTypeRepr
+	BufferedWriterType.Str = bufferedTypeRepr
 }
 
 // --- BufferedRandom ----------------------------------------------------------
@@ -526,6 +628,8 @@ func bufferedRandomCall(_ objects.Object, args []objects.Object, _ map[string]ob
 func init() {
 	BufferedRandomType.Call = bufferedRandomCall
 	BufferedRandomType.Getattro = bufferedGetattr
+	BufferedRandomType.Repr = bufferedTypeRepr
+	BufferedRandomType.Str = bufferedTypeRepr
 }
 
 // --- shared Buffered method implementations ----------------------------------
@@ -848,6 +952,18 @@ func (b *Buffered) bufferedWrite(args []objects.Object) (objects.Object, error) 
 		data = v.Bytes()
 	default:
 		return nil, fmt.Errorf("TypeError: a bytes-like object is required, not %s", args[0].Type().Name)
+	}
+	// On a read+write stream a pending read buffer must be discarded
+	// before writing, otherwise the next read would return stale bytes
+	// that no longer match the raw stream position.
+	//
+	// CPython: Modules/_io/bufferedio.c:2089 _io_BufferedWriter_write_impl
+	// (the unified-buffer model handles this by tracking write_pos within
+	// the same slab; we approximate by invalidating the read cache and
+	// rewinding the raw stream by the unread amount.)
+	if b.readable && b.readAhead() > 0 {
+		_, _ = b.rawSeek(int64(-b.readAhead()), 1)
+		b.resetReadBuf()
 	}
 	if b.writeBuf == nil {
 		b.writeBuf = make([]byte, b.bufSize)

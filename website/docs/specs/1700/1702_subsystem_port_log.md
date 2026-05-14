@@ -232,27 +232,37 @@ callable is still ignored; `_isatty_open_only` and
 | `BufferedRWPair` | `read`, `write`, `peek`, `readinto`, `close`, `flush`, `readable`, `writable` | partial |
 | Shared internals (`_bufferedreader_raw_read`, `_bufferedwriter_flush_unlocked`, `_PyIO_State`) | helpers | partial |
 
-**Missing (D audit 2026-05-14).** The current 1133-line port is
-41% of `bufferedio.c` (2773 lines) and diverges from CPython on
-the *buffer model itself*: gopy stores a separate `readBuf` and
-`writeBuf`, while CPython's `buffered` struct (line 222) has a
-single `buffer` slab with `pos`, `raw_pos`, `read_end`,
-`write_pos`, `write_end` pointers so a `BufferedRandom` can
-interleave reads and writes without losing position. Specific
-gaps: `_io__Buffered___sizeof___impl` returns `bufSize` instead
-of `tp_basicsize + bufSize`; `_io__Buffered_closed_get_impl`
-reads a local Go flag instead of `self.raw.closed`, so a raw
-stream closed by something else leaves the buffered wrapper
-appearing open; `_buffered_init` does not validate that the raw
-of a `BufferedRandom` is seekable; `buffered_flush_and_rewind_unlocked`,
+**Improved (D, 2026-05-14, PR #TBD).** Added `buffered_repr`
+(`<_io.BufferedReader name='...'>` form), `buffered_iternext`
+(so `for line in bf:` raises `StopIteration` correctly), the
+context-manager dunder pair (`__enter__` / `__exit__`), `__iter__`,
+and the `closefd` attribute forwarding to the raw stream. Wired
+`Repr` / `Str` slots on `BufferedReaderType`, `BufferedWriterType`,
+and `BufferedRandomType`. `bufferedWrite` now invalidates the
+read buffer (seeking the raw stream back by the unread amount)
+before issuing a write on a `BufferedRandom`, which addresses
+the most user-visible read→write transition bug.
+
+**Still missing (D audit 2026-05-14).** Even after the additions
+above, the port remains a partial port of `bufferedio.c` (2773
+lines) and still diverges from CPython on the *buffer model
+itself*: gopy stores a separate `readBuf` and `writeBuf`, while
+CPython's `buffered` struct (line 222) has a single `buffer`
+slab with `pos`, `raw_pos`, `read_end`, `write_pos`, `write_end`
+pointers so a `BufferedRandom` can interleave reads and writes
+without losing position. Specific gaps that remain:
+`_io__Buffered___sizeof___impl` returns `bufSize` instead of
+`tp_basicsize + bufSize`; `_io__Buffered_closed_get_impl` reads
+a local Go flag instead of `self.raw.closed`, so a raw stream
+closed by something else leaves the buffered wrapper appearing
+open; `_buffered_init` does not validate that the raw of a
+`BufferedRandom` is seekable; `buffered_flush_and_rewind_unlocked`,
 `_bufferedreader_raw_read`, `_bufferedreader_read_fast`,
-`_bufferedwriter_raw_write`, `_io__Buffered__dealloc_warn_impl`,
-`buffered_iternext` (so `for line in bf:` falls back to the
-generic IOBase iterator), `buffered_repr`, and the
-`__init__`-as-real-method path are absent. No thread lock /
-owner reentrancy guard. `bufferedTell` does not subtract the
-write-buffer offset. Several `bufRead` error returns are
-swallowed (the nilerr lints flag this).
+`_bufferedwriter_raw_write`, and `_io__Buffered__dealloc_warn_impl`
+are absent. No thread lock / owner reentrancy guard.
+`bufferedTell` does not subtract the write-buffer offset.
+Flipping row D to "done" requires the unified-slab rewrite,
+which is its own PR.
 
 **Functions to port (E: `textio.c`).**
 
