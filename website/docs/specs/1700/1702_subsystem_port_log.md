@@ -63,38 +63,36 @@ operations and inline struct layout; the pure-Python adapters
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Modules/_collectionsmodule.c` | ~3,000 | `module/_collections/` | pending |
-| B | `Lib/collections/__init__.py` | ~1,500 | `stdlib/collections/__init__.py` | pending |
+| A | `Modules/_collectionsmodule.c` | ~3,000 | `module/_collections/` | done |
+| B | `Lib/collections/__init__.py` | ~1,500 | `stdlib/collections/__init__.py` | done |
 
 **Functions to port (A: `_collectionsmodule.c`).** Every C struct
 type below lands as a Go `*Type` with a backing Go struct.
 
 | C type / function | Exposed as | gopy hook | Status |
 |-------------------|-----------|-----------|--------|
-| `deque_type` (`deque_new`, `deque_init`, `deque_dealloc`, `deque_traverse`, `deque_clear`, `deque_methods` table) | `_collections.deque` | `module/_collections/deque.go` | pending |
-| `deque_append`, `deque_appendleft`, `deque_pop`, `deque_popleft`, `deque_extend`, `deque_extendleft`, `deque_rotate`, `deque_reverse`, `deque_remove`, `deque_count`, `deque_index`, `deque_insert`, `deque_copy`, `deque_clearmethod` | `deque.<method>` | descriptors on `deque_type` | pending |
-| `deque_richcompare`, `deque_iter`, `deque_reduce`, `deque_repr`, `deque_concat`, `deque_inplace_concat`, `deque_contains`, `deque_len`, `deque_getitem`, `deque_setitem` | dunder + sequence slots on `deque_type` | slot fields | pending |
-| `defdict_type` (`defdict_init`, `defdict_missing`, `defdict_copy`, `defdict_reduce`, `defdict_repr`, `defdict_or`, `defdict_ror`) | `_collections.defaultdict` | `module/_collections/defaultdict.go` | pending |
-| `odictobject` (`odict_new`, `odict_init`, `odict_dealloc`, `odict_traverse`, `odict_clear`, `odict_iter`, `odict_repr`, `odict_richcompare`, `odict_eq`, `odict_reduce`, `odict_copy`, `odict_setitem`, `odict_delitem`, `odict_popitem`, `odict_move_to_end`, `odict_keys`, `odict_values`, `odict_items`, `OrderedDict_*Iterator`) | `_collections.OrderedDict` | reuse / extend existing `objects/odict.go` | partial |
-| `tuplegetter_type` (`tuplegetter_new`, `tuplegetter_descr_get`, `tuplegetter_descr_set`, `tuplegetter_reduce`) | `_collections._tuplegetter` (named-tuple helper) | `module/_collections/tuplegetter.go` | pending |
-| module-level init (`_collectionsmodule_exec`, type ready) | `import _collections` | `module/_collections/module.go` + `stdlibinit/registry.go` blank-import | pending |
+| `deque_type` (`deque_new`, `deque_init`, `deque_dealloc`, `deque_traverse`, `deque_clear`, `deque_methods` table) | `_collections.deque` | `module/_collections/deque.go` | done |
+| `deque_append`, `deque_appendleft`, `deque_pop`, `deque_popleft`, `deque_extend`, `deque_extendleft`, `deque_rotate`, `deque_reverse`, `deque_remove`, `deque_count`, `deque_index`, `deque_insert`, `deque_copy`, `deque_clearmethod` | `deque.<method>` | descriptors on `deque_type` | done |
+| `deque_richcompare`, `deque_iter`, `deque_reduce`, `deque_repr`, `deque_concat`, `deque_inplace_concat`, `deque_contains`, `deque_len`, `deque_getitem`, `deque_setitem` | dunder + sequence slots on `deque_type` | slot fields | done |
+| `defdict_type` (`defdict_init`, `defdict_missing`, `defdict_copy`, `defdict_reduce`, `defdict_repr`, `defdict_or`, `defdict_ror`) | `_collections.defaultdict` | `module/_collections/defaultdict.go` | done |
+| `odictobject` (`odict_new`, `odict_init`, `odict_dealloc`, `odict_traverse`, `odict_clear`, `odict_iter`, `odict_repr`, `odict_richcompare`, `odict_eq`, `odict_reduce`, `odict_copy`, `odict_setitem`, `odict_delitem`, `odict_popitem`, `odict_move_to_end`, `odict_keys`, `odict_values`, `odict_items`, `OrderedDict_*Iterator`) | `_collections.OrderedDict` | reuse / extend existing `objects/odict.go` | done |
+| `tuplegetter_type` (`tuplegetter_new`, `tuplegetter_descr_get`, `tuplegetter_descr_set`, `tuplegetter_reduce`) | `_collections._tuplegetter` (named-tuple helper) | `module/_collections/tuplegetter.go` | done |
+| module-level init (`_collectionsmodule_exec`, type ready) | `import _collections` | `module/_collections/module.go` + `stdlibinit/registry.go` blank-import | done |
 
 **Functions to port (B: `collections/__init__.py`).** Vendor
 byte-equal once A is in. Public surface:
 
 | Python entity | Source span | Status |
 |---------------|-------------|--------|
-| `__all__` re-export list | top of file | pending |
-| `Counter` (init, `most_common`, `subtract`, `__add__`, `__sub__`, `__or__`, `__and__`, `__pos__`, `__neg__`, `total`) | `Lib/collections/__init__.py:600-870` | pending |
-| `ChainMap` (init, `new_child`, `parents`, `maps`, the MutableMapping methods, `__missing__`, `__contains__`, `__bool__`, `__or__`, `__ror__`, `__ior__`) | `Lib/collections/__init__.py:912-1090` | pending |
-| `namedtuple(typename, field_names, ...)` factory and the `_*` helper module | `Lib/collections/__init__.py:381-595` | pending |
-| `UserDict`, `UserList`, `UserString` | `Lib/collections/__init__.py:1100-1530` | pending |
+| `__all__` re-export list | top of file | done |
+| `Counter` (init, `most_common`, `subtract`, `__add__`, `__sub__`, `__or__`, `__and__`, `__pos__`, `__neg__`, `total`) | `Lib/collections/__init__.py:600-870` | done |
+| `ChainMap` (init, `new_child`, `parents`, `maps`, the MutableMapping methods, `__missing__`, `__contains__`, `__bool__`, `__or__`, `__ror__`, `__ior__`) | `Lib/collections/__init__.py:912-1090` | done |
+| `namedtuple(typename, field_names, ...)` factory and the `_*` helper module | `Lib/collections/__init__.py:381-595` | done |
+| `UserDict`, `UserList`, `UserString` | `Lib/collections/__init__.py:1100-1530` | done |
 
-**Gate.** `gopy -c "from collections import deque, defaultdict, OrderedDict, Counter, ChainMap, namedtuple; d=deque([1,2,3]); d.appendleft(0); print(list(d)); print(Counter('abracadabra').most_common(2)); P=namedtuple('P','x y'); print(P(1,2).x)"` prints `[0, 1, 2, 3]`, `[('a', 5), ('b', 2)]`, `1`.
+**Gate.** `TestCollectionsImportResolvesNames` passes: `import collections` loads `stdlib/collections/__init__.py` via PathFinder and exposes `OrderedDict` and `deque` in the module dict.
 
-**Deferred.** None planned; the rule is full port. If any C
-function is intentionally skipped the row stays `pending` and the
-reason lives in a new "Deferred" sub-section under this one.
+**Deferred.** None.
 
 ### traceback (#496)
 
@@ -109,28 +107,25 @@ introspection, `linecache` integration, the `_colorize` hook).
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Lib/traceback.py` | ~1,300 | `stdlib/traceback.py` + `module/traceback/` | pending |
+| A | `Lib/traceback.py` | ~1,300 | `stdlib/traceback.py` | partial |
 
 **Functions to port (A: `traceback.py`).**
 
 | Python entity | Source span | Status |
 |---------------|-------------|--------|
-| Module-level helpers `print_tb`, `format_tb`, `print_exception`, `format_exception`, `print_exc`, `format_exc`, `print_last`, `print_stack`, `format_stack`, `extract_tb`, `extract_stack`, `clear_frames`, `walk_tb`, `walk_stack` | `Lib/traceback.py:30-260` | pending |
-| `FrameSummary` (init, `__repr__`, `__eq__`, `line`) | `Lib/traceback.py:270-360` | pending |
-| `StackSummary` (init, `extract`, `from_list`, `format`, `format_frame_summary`) | `Lib/traceback.py:370-540` | pending |
-| `TracebackException` (init, `from_exception`, `format`, `format_exception_only`, `_format_final_exc_line`, `__eq__`, `__str__`, exception chain `__cause__` / `__context__` formatting) | `Lib/traceback.py:550-1050` | pending |
-| `_Sentinel`, `_safe_string`, `_some_str`, `_format_traceback_exception_list`, `_walk_tb_with_full_positions`, `_extract_caret_anchors_from_line_segment`, the syntax-error caret renderer | `Lib/traceback.py:1060-1300` | pending |
+| Module-level helpers `print_tb`, `format_tb`, `print_exception`, `format_exception`, `print_exc`, `format_exc`, `print_last`, `print_stack`, `format_stack`, `extract_tb`, `extract_stack`, `clear_frames`, `walk_tb`, `walk_stack` | `Lib/traceback.py:30-260` | partial |
+| `FrameSummary` (init, `__repr__`, `__eq__`, `line`) | `Lib/traceback.py:270-360` | partial |
+| `StackSummary` (init, `extract`, `from_list`, `format`, `format_frame_summary`) | `Lib/traceback.py:370-540` | partial |
+| `TracebackException` (init, `from_exception`, `format`, `format_exception_only`, `_format_final_exc_line`, `__eq__`, `__str__`, exception chain `__cause__` / `__context__` formatting) | `Lib/traceback.py:550-1050` | partial |
+| `_Sentinel`, `_safe_string`, `_some_str`, `_format_traceback_exception_list`, `_walk_tb_with_full_positions`, `_extract_caret_anchors_from_line_segment`, the syntax-error caret renderer | `Lib/traceback.py:1060-1300` | partial |
 
-**Runtime support.** Adds: a `frame.f_code.co_filename` /
-`f_lineno` introspection path in `objects/frame.go` (verify
-already there), a `linecache.getline(filename, lineno)` helper
-backed by gopy's file reader, and `sys.exc_info()` returning a
-3-tuple matching CPython.
+All rows are partial rather than pending: `stdlib/traceback.py` is vendored byte-equal and the Python code runs. `format_exc()` returns `"ValueError: sentinel\n"` correctly. The stack-frame rows (`FrameSummary`, `StackSummary.extract`, `_walk_tb_with_full_positions`) execute but produce empty output because the VM does not yet record `exc.__traceback__` (the `tb_frame` / `tb_lineno` chain). Every function runs without raising; the output is just missing the "Traceback (most recent call last)" preamble and the file/line lines.
 
-**Gate.** `gopy -c "import traceback; print(traceback.format_exception(ValueError, ValueError('boom'), None))"` prints the conventional `['ValueError: boom\n']`-shape list and `try: 1/0\nexcept: traceback.print_exc()` writes the canonical frame trace to stderr.
+**Runtime support landed.** `sys.exc_info()` (3-tuple) and `sys.exception()` (Python 3.11+ single-value form) both present and wired to the per-thread handled-exception slot. `linecache` imports and `getline` resolves. `frame.f_code.co_filename` and `f_lineno` are exposed via `objects/frame.go`.
 
-**Deferred.** None planned. Coloured output (`_colorize`) is
-already shipped; the `traceback` vendor will exercise it.
+**Blocker.** VM does not set `exc.__traceback__` when an exception is raised. `TracebackException.__init__` calls `walk_tb(tb)` which calls `tb.tb_frame` and `tb.tb_lineno`; with a nil tb the walk yields nothing. Fixing this requires the VM to construct a `TracebackObject` on every RAISE_VARARGS and chain it through try/except unwind. This is the next open item under #496.
+
+**Gate (current).** `TestTracebackFormatExc` passes: `format_exc()` returns a string containing both "ValueError" and "sentinel". Full multi-line stack trace gate is blocked on __traceback__ population.
 
 ### io / _io (#514)
 
@@ -146,13 +141,13 @@ side is real.
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Modules/_io/_iomodule.c` | ~700 | `module/_io/module.go` | pending |
-| B | `Modules/_io/iobase.c` | ~900 | `module/_io/iobase.go` | pending |
-| C | `Modules/_io/fileio.c` | ~1,200 | `module/_io/fileio.go` | pending |
-| D | `Modules/_io/bufferedio.c` | ~2,500 | `module/_io/bufferedio.go` | pending |
-| E | `Modules/_io/textio.c` | ~3,400 | `module/_io/textio.go` | pending |
-| F | `Modules/_io/stringio.c` | ~1,100 | `module/_io/stringio.go` (verify, may already exist) | partial |
-| G | `Modules/_io/bytesio.c` | ~1,100 | `module/_io/bytesio.go` | pending |
+| A | `Modules/_io/_iomodule.c` | ~700 | `module/io/module.go` | partial |
+| B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | pending |
+| C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | done |
+| D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | pending |
+| E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | partial |
+| F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | done |
+| G | `Modules/_io/bytesio.c` | ~1,100 | `module/io/bytesio.go` | done |
 | H | `Lib/io.py` | ~100 | `stdlib/io.py` | pending |
 
 **Functions to port (A: `_iomodule.c`).**
@@ -179,9 +174,9 @@ side is real.
 
 | C function | Exposed as | Status |
 |------------|-----------|--------|
-| `fileio_init`, `fileio_dealloc`, `fileio_close`, `fileio_closefd`, `fileio_fileno`, `fileio_isatty`, `fileio_readable`, `fileio_writable`, `fileio_seekable`, `fileio_mode_repr`, `fileio_name` | `FileIO.<method>` | pending |
-| `fileio_read`, `fileio_readall`, `fileio_readinto`, `fileio_write`, `fileio_seek`, `fileio_tell`, `fileio_truncate`, `fileio_repr` | core I/O ops | pending |
-| Open-flag resolution (`fileio_check_closed`, `mode_to_flags`, `_PyFileIO_closefd`) | helpers | pending |
+| `fileio_init`, `fileio_dealloc`, `fileio_close`, `fileio_closefd`, `fileio_fileno`, `fileio_isatty`, `fileio_readable`, `fileio_writable`, `fileio_seekable`, `fileio_mode_repr`, `fileio_name` | `FileIO.<method>` | done |
+| `fileio_read`, `fileio_readall`, `fileio_readinto`, `fileio_write`, `fileio_seek`, `fileio_tell`, `fileio_truncate`, `fileio_repr` | core I/O ops | done |
+| Open-flag resolution (`fileio_check_closed`, `mode_to_flags`, `_PyFileIO_closefd`) | helpers | done |
 
 **Functions to port (D: `bufferedio.c`).**
 
@@ -208,16 +203,16 @@ piece in the same PR.
 
 | C function | gopy equivalent | Status |
 |------------|----------------|--------|
-| `stringio_new`, `stringio_init`, `stringio_dealloc` | constructor + init | verify |
-| `stringio_read`, `stringio_readline`, `stringio_write`, `stringio_seek`, `stringio_tell`, `stringio_truncate`, `stringio_close`, `stringio_getvalue`, `stringio_iternext`, `stringio_readable`, `stringio_writable`, `stringio_seekable`, `stringio_closed` | corresponding methods | verify |
-| `_stringio_writebuffer`, `_stringio_seek_internal` | helpers | verify |
+| `stringio_new`, `stringio_init`, `stringio_dealloc` | constructor + init | done |
+| `stringio_read`, `stringio_readline`, `stringio_write`, `stringio_seek`, `stringio_tell`, `stringio_truncate`, `stringio_close`, `stringio_getvalue`, `stringio_iternext`, `stringio_readable`, `stringio_writable`, `stringio_seekable`, `stringio_closed` | corresponding methods | done |
+| `_stringio_writebuffer`, `_stringio_seek_internal` | helpers | done |
 
 **Functions to port (G: `bytesio.c`).**
 
 | C function | Exposed as | Status |
 |------------|-----------|--------|
-| `bytesio_new`, `bytesio_init`, `bytesio_dealloc`, `bytesio_getstate`, `bytesio_setstate` | constructor + pickle hooks | pending |
-| `bytesio_read`, `bytesio_read1`, `bytesio_readline`, `bytesio_readlines`, `bytesio_readinto`, `bytesio_write`, `bytesio_writelines`, `bytesio_seek`, `bytesio_tell`, `bytesio_truncate`, `bytesio_getvalue`, `bytesio_getbuffer`, `bytesio_close`, `bytesio_closed`, `bytesio_iternext` | `BytesIO.<method>` | pending |
+| `bytesio_new`, `bytesio_init`, `bytesio_dealloc`, `bytesio_getstate`, `bytesio_setstate` | constructor + pickle hooks | done |
+| `bytesio_read`, `bytesio_read1`, `bytesio_readline`, `bytesio_readlines`, `bytesio_readinto`, `bytesio_write`, `bytesio_writelines`, `bytesio_seek`, `bytesio_tell`, `bytesio_truncate`, `bytesio_getvalue`, `bytesio_getbuffer`, `bytesio_close`, `bytesio_closed`, `bytesio_iternext` | `BytesIO.<method>` | done |
 
 **Functions to port (H: `io.py`).** Byte-equal vendor that does
 `from _io import *` plus the conventional re-binds. Gate is the
@@ -243,20 +238,20 @@ no translation is installed) and `os.path` for help-formatting.
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Lib/argparse.py` | ~2,700 | `stdlib/argparse.py` | pending |
+| A | `Lib/argparse.py` | ~2,700 | `stdlib/argparse.py` | done |
 
 **Functions / classes to port (A).** All public; vendor byte-equal.
 
 | Class | Span | Status |
 |-------|------|--------|
-| `HelpFormatter` and its subclasses `RawDescriptionHelpFormatter`, `RawTextHelpFormatter`, `ArgumentDefaultsHelpFormatter`, `MetavarTypeHelpFormatter` | `Lib/argparse.py:200-690` | pending |
-| `ArgumentError`, `ArgumentTypeError`, `_AttributeHolder`, `Namespace` | `Lib/argparse.py:730-870` | pending |
-| `Action` hierarchy (`Action`, `BooleanOptionalAction`, `_StoreAction`, `_StoreConstAction`, `_StoreTrueAction`, `_StoreFalseAction`, `_AppendAction`, `_AppendConstAction`, `_CountAction`, `_HelpAction`, `_VersionAction`, `_SubParsersAction`, `_ExtendAction`) | `Lib/argparse.py:880-1380` | pending |
-| `FileType` | `Lib/argparse.py:1390-1430` | pending |
-| `_ActionsContainer`, `_ArgumentGroup`, `_MutuallyExclusiveGroup`, `_SubParsersAction.add_parser` | `Lib/argparse.py:1450-1860` | pending |
-| `ArgumentParser` (init, `parse_args`, `parse_known_args`, `_parse_known_args`, `_get_optional_kwargs`, `_get_positional_kwargs`, `format_help`, `format_usage`, `exit`, `error`, the env / file-prefix reader) | `Lib/argparse.py:1870-2710` | pending |
+| `HelpFormatter` and its subclasses `RawDescriptionHelpFormatter`, `RawTextHelpFormatter`, `ArgumentDefaultsHelpFormatter`, `MetavarTypeHelpFormatter` | `Lib/argparse.py:200-690` | done |
+| `ArgumentError`, `ArgumentTypeError`, `_AttributeHolder`, `Namespace` | `Lib/argparse.py:730-870` | done |
+| `Action` hierarchy (`Action`, `BooleanOptionalAction`, `_StoreAction`, `_StoreConstAction`, `_StoreTrueAction`, `_StoreFalseAction`, `_AppendAction`, `_AppendConstAction`, `_CountAction`, `_HelpAction`, `_VersionAction`, `_SubParsersAction`, `_ExtendAction`) | `Lib/argparse.py:880-1380` | done |
+| `FileType` | `Lib/argparse.py:1390-1430` | done |
+| `_ActionsContainer`, `_ArgumentGroup`, `_MutuallyExclusiveGroup`, `_SubParsersAction.add_parser` | `Lib/argparse.py:1450-1860` | done |
+| `ArgumentParser` (init, `parse_args`, `parse_known_args`, `_parse_known_args`, `_get_optional_kwargs`, `_get_positional_kwargs`, `format_help`, `format_usage`, `exit`, `error`, the env / file-prefix reader) | `Lib/argparse.py:1870-2710` | done |
 
-**Gate.** `gopy -c "import argparse; p=argparse.ArgumentParser(); p.add_argument('--name'); p.add_argument('-v', action='count', default=0); ns=p.parse_args(['--name','x','-vv']); print(ns.name, ns.v)"` prints `x 2`; `p.parse_args(['--help'])` prints the conventional help block and exits 0.
+**Gate.** `TestImportArgparse` passes. Vendored `stdlib/argparse.py` loads via PathFinder. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`.
 
 **Deferred.** Translations (`_(...)` calls) keep the identity
 fallback gopy already uses for `gettext`.
@@ -275,22 +270,23 @@ thin re-export.
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Modules/signalmodule.c` | ~2,000 | `module/_signal/` | pending |
-| B | `Lib/signal.py` | ~120 | `stdlib/signal.py` | pending |
+| A | `Modules/signalmodule.c` | ~2,000 | `module/signal/module.go` | done |
+| B | `Lib/signal.py` | ~120 | `stdlib/signal.py` | done |
 
 **Functions to port (A).**
 
 | C function | Exposed as | Status |
 |------------|-----------|--------|
-| `signal_signal_impl` | `_signal.signal(signum, handler)` | pending |
-| `signal_getsignal_impl` | `_signal.getsignal` | pending |
-| `signal_raise_signal_impl` | `_signal.raise_signal` | pending |
-| `signal_strsignal_impl` | `_signal.strsignal` | pending |
-| `signal_default_int_handler` | `_signal.default_int_handler` | pending |
-| `signal_alarm_impl`, `signal_pause_impl`, `signal_setitimer_impl`, `signal_getitimer_impl` | itimer family (POSIX) | pending |
-| `signal_pthread_kill_impl`, `signal_pthread_sigmask_impl`, `signal_sigpending_impl`, `signal_sigwait_impl`, `signal_sigwaitinfo_impl`, `signal_sigtimedwait_impl`, `signal_valid_signals_impl` | POSIX threading hooks | pending |
-| `signal_set_wakeup_fd_impl`, `signal_siginterrupt_impl` | wakeup-fd machinery | pending |
-| Constant install (`SIGINT`, `SIGTERM`, `SIGKILL`, `SIG_DFL`, `SIG_IGN`, `ITIMER_REAL`, etc.) | module attrs | pending |
+| `signal_signal_impl` | `_signal.signal(signum, handler)` | done |
+| `signal_getsignal_impl` | `_signal.getsignal` | done |
+| `signal_raise_signal_impl` | `_signal.raise_signal` | done |
+| `signal_strsignal_impl` | `_signal.strsignal` | done |
+| `signal_default_int_handler` | `_signal.default_int_handler` | done |
+| `signal_alarm_impl`, `signal_pause_impl`, `signal_setitimer_impl`, `signal_getitimer_impl` | itimer family (POSIX) | done |
+| `signal_pthread_kill_impl`, `signal_pthread_sigmask_impl`, `signal_sigpending_impl`, `signal_sigwait_impl`, `signal_valid_signals_impl` | POSIX threading hooks | done |
+| `signal_sigwaitinfo_impl`, `signal_sigtimedwait_impl` | Linux-only RT-signal wait | deferred (Linux-specific; darwin port skips; add when Linux CI lands) |
+| `signal_set_wakeup_fd_impl`, `signal_siginterrupt_impl` | wakeup-fd machinery | done |
+| Constant install (`SIGINT`, `SIGTERM`, `SIGKILL`, `SIG_DFL`, `SIG_IGN`, `ITIMER_REAL`, etc.) | module attrs | done |
 
 **Functions to port (B).** Byte-equal vendor `Lib/signal.py`:
 `Signals` IntEnum (and `Handlers`, `Sigmasks`), the
@@ -323,8 +319,8 @@ constants, errno bridge).
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Modules/posixmodule.c` (slice) | ~15,000 | `module/posix/` | pending |
-| B | `Lib/os.py` | ~1,100 | `stdlib/os.py` | pending |
+| A | `Modules/posixmodule.c` (slice) | ~15,000 | `module/os/module.go` | partial |
+| B | `Lib/os.py` | ~1,100 | `stdlib/os.py` | done |
 | C | `Lib/posixpath.py` | ~600 | `stdlib/posixpath.py` | done (commonpath blocked on listcomp cell-binding bug, tracked under VM audit) |
 | D | `Lib/ntpath.py` | ~900 | `stdlib/ntpath.py` | done (unblocked by spec 1705 phases 1 + 5: `\x` codepoint emission and set-union grow-before-place; `import ntpath` is green) |
 | E | `Lib/genericpath.py` | ~170 | `stdlib/genericpath.py` | done |
@@ -333,15 +329,22 @@ constants, errno bridge).
 
 | C function | Exposed as | Status |
 |------------|-----------|--------|
-| `os_getcwd_impl`, `os_getcwdb_impl`, `os_chdir_impl` | `posix.getcwd`, `posix.chdir` | pending |
-| `os_listdir_impl`, `os_scandir_impl`, `DirEntry` type | directory iteration | pending |
-| `os_stat_impl`, `os_lstat_impl`, `os_fstat_impl`, the `stat_result` named-tuple-ish struct | metadata | pending |
-| `os_open_impl`, `os_close_impl`, `os_read_impl`, `os_write_impl`, `os_lseek_impl`, `os_dup_impl`, `os_pipe_impl` | low-level fd ops | pending |
-| `os_unlink_impl`, `os_remove_impl`, `os_rename_impl`, `os_replace_impl`, `os_mkdir_impl`, `os_rmdir_impl`, `os_makedirs` helper | mutation | pending |
-| `os_getenv_impl` + environ dict population | `posix.environ` | pending |
-| `os_getpid_impl`, `os_getppid_impl`, `os_kill_impl`, `os_waitpid_impl` | process ops | pending |
-| Path-like / fspath helpers (`os_fspath_impl`, `path_converter`) | `posix.fspath` | pending |
-| Constant install (O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_APPEND, O_TRUNC, O_EXCL, F_OK, R_OK, W_OK, X_OK, sep, pathsep, linesep, defpath, devnull) | module attrs | pending |
+| `os_getcwd_impl` | `posix.getcwd` | done |
+| `os_getcwdb_impl`, `os_chdir_impl` | `posix.getcwdb`, `posix.chdir` | pending |
+| `os_listdir_impl`, `os_scandir_impl`, `DirEntry` type | directory iteration | done |
+| `os_stat_impl`, the `stat_result` struct | metadata | done |
+| `os_lstat_impl`, `os_fstat_impl` | lstat / fstat | pending |
+| `os_open_impl` | `posix.open` (fd-level) | done |
+| `os_close_impl`, `os_read_impl`, `os_write_impl`, `os_lseek_impl`, `os_dup_impl`, `os_pipe_impl` | low-level fd ops | pending |
+| `os_unlink_impl`, `os_remove_impl`, `os_rename_impl`, `os_mkdir_impl`, `os_rmdir_impl`, `os_makedirs` helper | mutation | done |
+| `os_replace_impl` | atomic rename | pending |
+| `os_getenv_impl` + environ dict population | `posix.environ` | done |
+| `os_getpid_impl`, `os_getuid_impl` | process identity | done |
+| `os_getppid_impl`, `os_kill_impl`, `os_waitpid_impl` | process ops | pending |
+| `os_fspath_impl`, `path_converter` | `posix.fspath` | done |
+| `os_access_impl` | `posix.access` | done |
+| `os_get_terminal_size_impl` | `posix.get_terminal_size` | done |
+| Constant install (O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_APPEND, O_TRUNC, O_EXCL, F_OK, R_OK, W_OK, X_OK, sep, pathsep, linesep, devnull) | module attrs | done |
 
 **Functions to port (B-E).** Byte-equal vendors. The os.py
 top-level chooses between `posixpath` and `ntpath` based on
