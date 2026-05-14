@@ -73,7 +73,15 @@ func currentImporter(name, pkgname string, level int, _ []string) (objects.Objec
 	if ts == nil {
 		ts = state.NewThread()
 	}
-	exec := &vmExecutor{ts: ts}
+	// Inherit builtins from the running frame so imported modules see
+	// __build_class__ without a separate propagation step.
+	//
+	// CPython: Python/import.c:1759 import_name reads interp->builtins_module.
+	var b objects.Object
+	if f := frameStackFor(ts).Top(); f != nil {
+		b = callerBuiltins(f)
+	}
+	exec := &vmExecutor{ts: ts, builtins: b}
 	mod, err := imp.ImportModuleLevel(exec, name, pkgname, level)
 	if err != nil {
 		return nil, err

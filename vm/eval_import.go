@@ -56,8 +56,22 @@ type vmExecutor struct {
 // CPython: Python/ceval.c:L753 _PyEval_EvalCode (simplified)
 // CPython: Python/import.c:L657 module_init_dunder_attrs
 func (e *vmExecutor) ExecCode(code *objects.Code, mod *objects.Module) (objects.Object, error) {
-	if e.builtins != nil {
-		if err := mod.Dict().SetItem(objects.NewStr("__builtins__"), e.builtins); err != nil {
+	b := e.builtins
+	if b == nil {
+		// No builtins were inherited from the importing frame (e.g. the
+		// top-level -c entry point where globals IS the builtins dict).
+		// Fall back to the "builtins" module that was registered by
+		// builtins.Init so that class definitions in imported modules can
+		// resolve __build_class__.
+		//
+		// CPython: Python/import.c:L657 module_init_dunder_attrs always
+		// sets __builtins__ via interp->builtins_module.
+		if bm, ok := imp.GetModule("builtins"); ok {
+			b = bm.Dict()
+		}
+	}
+	if b != nil {
+		if err := mod.Dict().SetItem(objects.NewStr("__builtins__"), b); err != nil {
 			return nil, err
 		}
 	}
@@ -103,11 +117,21 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 			return 0, true, ierr
 		}
 
-		// For submodule imports (fromlist non-empty), return the top-level.
-		// For "from x import y", fromlist=("y",) but we push the module and
-		// let IMPORT_FROM extract the attribute.
-		_ = fromlistObj
-		e.pushObject(mod)
+		// CPython semantics: when fromlist is None/empty (plain `import
+		// a.b.c`), push the TOP-LEVEL package so the name `a` is bound.
+		// When fromlist is non-empty (`from a.b import c`), push the
+		// deepest module so IMPORT_FROM can extract attributes.
+		//
+		// CPython: Python/bytecodes.c IMPORT_NAME comment "return the
+		// head of the dotted name" when fromlist is empty.
+		result := objects.Object(mod)
+		if isEmptyFromlist(fromlistObj) && strings.Contains(modname, ".") {
+			top := strings.SplitN(modname, ".", 2)[0]
+			if tm, ok := imp.GetModule(top); ok {
+				result = tm
+			}
+		}
+		e.pushObject(result)
 		return e.advance(), true, nil
 
 	case compile.IMPORT_FROM:
@@ -196,6 +220,24 @@ func (e *evalState) importStar(from objects.Object) error {
 		}
 	}
 	return nil
+}
+
+// isEmptyFromlist reports whether fromlist is None, the empty tuple, or
+// the empty list. This mirrors CPython's check in import_name:
+// "if fromlist is NULL or fromlist is empty tuple, head is returned".
+//
+// CPython: Python/bytecodes.c IMPORT_NAME (fromlist emptiness check)
+func isEmptyFromlist(o objects.Object) bool {
+	if o == nil || objects.IsNone(o) {
+		return true
+	}
+	if t, ok := o.(*objects.Tuple); ok {
+		return t.Len() == 0
+	}
+	if l, ok := o.(*objects.List); ok {
+		return l.Len() == 0
+	}
+	return false
 }
 
 // importLevel extracts the integer import level from a Python int object.
