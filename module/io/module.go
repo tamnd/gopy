@@ -402,9 +402,11 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 	if errHandler == "" {
 		errHandler = "strict"
 	}
-	newlineArg := objects.Object(objects.None())
+	var newlineArg objects.Object
 	if a.hasNewline {
 		newlineArg = objects.NewStr(a.newline)
+	} else {
+		newlineArg = objects.None()
 	}
 	wrapper, err := textIOWrapperCall(nil, []objects.Object{
 		buffered,
