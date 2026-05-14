@@ -90,6 +90,12 @@ var terminalSizeType = func() *objects.Type {
 func init() {
 	_ = imp.AppendInittab("os", buildOS)
 	_ = imp.AppendInittab("posix", buildPosixModule)
+	// On Windows, Lib/os.py does `from nt import *`; register the same
+	// syscall surface under the "nt" name so `import nt` resolves.
+	// CPython: Modules/posixmodule.c posixmodule_init (registers as "nt" on Windows)
+	if runtime.GOOS == "windows" {
+		_ = imp.AppendInittab("nt", buildPosixModule)
+	}
 	_ = imp.AppendInittab("os.path", buildPath)
 	// posixpath and ntpath now load from stdlib/ via PathFinder.
 }
