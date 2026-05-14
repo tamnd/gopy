@@ -866,6 +866,15 @@ func incrementalNLDecoderCall(_ objects.Object, args []objects.Object, kwargs ma
 	return d, nil
 }
 
+// Newline-bitset flags, CPython: Modules/_io/textio.c (anonymous enum
+// inside _PyIncrementalNewlineDecoder_decode).
+const (
+	seenCR   = 1
+	seenLF   = 2
+	seenCRLF = 4
+	seenAll  = seenCR | seenLF | seenCRLF
+)
+
 // incrementalNLDecoderGetattr handles attribute and method access.
 func incrementalNLDecoderGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
 	d := o.(*IncrementalNewlineDecoder)
@@ -874,42 +883,47 @@ func incrementalNLDecoderGetattr(o objects.Object, name objects.Object) (objects
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
 	}
 	switch n.Value() {
-	// CPython: Modules/_io/textio.c:638 incrementalnewlinedecoder_newlines_get
+	// CPython: Modules/_io/textio.c:637 incrementalnewlinedecoder_newlines_get
 	case "newlines":
 		switch d.seennl {
-		case 0:
-			return objects.None(), nil
-		case 1:
-			return objects.NewStr("\n"), nil
-		case 2:
+		case seenCR:
 			return objects.NewStr("\r"), nil
-		case 3:
-			t := objects.NewTuple([]objects.Object{objects.NewStr("\r"), objects.NewStr("\n")})
-			return t, nil
-		case 4:
+		case seenLF:
+			return objects.NewStr("\n"), nil
+		case seenCRLF:
 			return objects.NewStr("\r\n"), nil
+		case seenCR | seenLF:
+			return objects.NewTuple([]objects.Object{objects.NewStr("\r"), objects.NewStr("\n")}), nil
+		case seenCR | seenCRLF:
+			return objects.NewTuple([]objects.Object{objects.NewStr("\r"), objects.NewStr("\r\n")}), nil
+		case seenLF | seenCRLF:
+			return objects.NewTuple([]objects.Object{objects.NewStr("\n"), objects.NewStr("\r\n")}), nil
+		case seenCR | seenLF | seenCRLF:
+			return objects.NewTuple([]objects.Object{objects.NewStr("\r"), objects.NewStr("\n"), objects.NewStr("\r\n")}), nil
 		default:
 			return objects.None(), nil
 		}
-	// CPython: Modules/_io/textio.c:528 incrementalnewlinedecoder_decode
+	// CPython: Modules/_io/textio.c:326 _PyIncrementalNewlineDecoder_decode
 	case "decode":
 		return objects.NewBuiltinFunction("decode", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 			if len(args) < 1 {
 				return nil, fmt.Errorf("TypeError: decode() missing required argument 'input'")
 			}
-			var data []byte
-			switch v := args[0].(type) {
-			case *objects.Bytes:
-				data = v.Bytes()
-			case *objects.Unicode:
-				data = []byte(v.Value())
-			default:
-				return nil, fmt.Errorf("TypeError: decode() argument must be bytes or str")
+			final := false
+			if len(args) >= 2 {
+				final = objects.IsTrue(args[1])
 			}
-			// Delegate to underlying decoder if it's not None.
+			if v, ok := kwargs["final"]; ok {
+				final = objects.IsTrue(v)
+			}
+			// Step 1: pass through the underlying decoder if present.
 			var decoded string
 			if d.decoder != nil && !objects.IsNone(d.decoder) {
-				result, err := bufCall(d.decoder, "decode", []objects.Object{args[0]})
+				finalArg := objects.False()
+				if final {
+					finalArg = objects.True()
+				}
+				result, err := bufCall(d.decoder, "decode", []objects.Object{args[0], finalArg})
 				if err != nil {
 					return nil, err
 				}
@@ -917,11 +931,16 @@ func incrementalNLDecoderGetattr(o objects.Object, name objects.Object) (objects
 					decoded = s.Value()
 				}
 			} else {
-				decoded = string(data)
+				switch v := args[0].(type) {
+				case *objects.Bytes:
+					decoded = string(v.Bytes())
+				case *objects.Unicode:
+					decoded = v.Value()
+				default:
+					return nil, fmt.Errorf("TypeError: decode() argument must be bytes or str")
+				}
 			}
-			// Track and optionally translate newlines.
-			decoded = d.processNewlines(decoded)
-			return objects.NewStr(decoded), nil
+			return objects.NewStr(d.translateNewlines(decoded, final)), nil
 		}), nil
 	// CPython: Modules/_io/textio.c:541 incrementalnewlinedecoder_getstate
 	case "getstate":
@@ -981,27 +1000,83 @@ func incrementalNLDecoderGetattr(o objects.Object, name objects.Object) (objects
 	return nil, fmt.Errorf("AttributeError: '_io.IncrementalNewlineDecoder' object has no attribute '%s'", n.Value())
 }
 
-// processNewlines translates or tracks universal newlines in s.
+// translateNewlines applies universal newline tracking and (optionally)
+// translation to s. It mirrors the inner loop of CPython's
+// _PyIncrementalNewlineDecoder_decode: pendingcr is prefixed onto the
+// next chunk when there is content (or when final), a trailing \r in a
+// non-final chunk is held back as pendingcr, and the seennl bitset
+// distinguishes \r, \n, and \r\n separately.
 //
-// CPython: Modules/_io/textio.c:528 incrementalnewlinedecoder_decode (inner loop)
-func (d *IncrementalNewlineDecoder) processNewlines(s string) string {
-	if d.pendingcr {
+// CPython: Modules/_io/textio.c:326 _PyIncrementalNewlineDecoder_decode.
+func (d *IncrementalNewlineDecoder) translateNewlines(s string, final bool) string {
+	if d.pendingcr && (final || len(s) > 0) {
 		s = "\r" + s
 		d.pendingcr = false
 	}
-	// Track which newline types we've seen.
-	for _, r := range s {
-		switch r {
+	if !final && len(s) > 0 && s[len(s)-1] == '\r' {
+		s = s[:len(s)-1]
+		d.pendingcr = true
+	}
+	if len(s) == 0 {
+		return s
+	}
+
+	seen := d.seennl
+	// Fast path: if we've only seen LF so far (or nothing) and there is
+	// no \r in s, just check whether there is a \n and we're done.
+	if (seen == seenLF || seen == 0) && !strings.ContainsRune(s, '\r') {
+		if seen == 0 && strings.ContainsRune(s, '\n') {
+			seen |= seenLF
+		}
+		d.seennl = seen
+		return s
+	}
+
+	if !d.translate {
+		// Scan: track \n, \r, \r\n without modifying s.
+		i := 0
+		for i < len(s) && seen != seenAll {
+			c := s[i]
+			i++
+			switch c {
+			case '\n':
+				seen |= seenLF
+			case '\r':
+				if i < len(s) && s[i] == '\n' {
+					seen |= seenCRLF
+					i++
+				} else {
+					seen |= seenCR
+				}
+			}
+		}
+		d.seennl = seen
+		return s
+	}
+
+	// Translate path: copy into a new buffer, mapping \r and \r\n to \n.
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		i++
+		switch c {
 		case '\n':
-			d.seennl |= 1
+			out = append(out, '\n')
+			seen |= seenLF
 		case '\r':
-			d.seennl |= 2
+			if i < len(s) && s[i] == '\n' {
+				i++
+				seen |= seenCRLF
+			} else {
+				seen |= seenCR
+			}
+			out = append(out, '\n')
+		default:
+			out = append(out, c)
 		}
 	}
-	if d.translate {
-		return strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(s)
-	}
-	return s
+	d.seennl = seen
+	return string(out)
 }
 
 // Read is the Go-level read method (used by tests and internal code).
