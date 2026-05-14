@@ -264,13 +264,24 @@ func TestIOOpenReturnTypes(t *testing.T) {
 	}
 	closeObj(t, out)
 
-	// binary mode -> FileIO
+	// binary mode -> BufferedReader (which wraps FileIO).
+	// CPython: Modules/_io/_iomodule.c:392 buffered selection.
 	out2, err := _io.Open([]objects.Object{objects.NewStr(path), objects.NewStr("rb")}, nil)
 	if err != nil {
 		t.Fatalf("open binary: %v", err)
 	}
-	if _, ok := out2.(*_io.FileIO); !ok {
-		t.Fatalf("binary open returned %T, want *_io.FileIO", out2)
+	if out2.Type().Name != "_io.BufferedReader" {
+		t.Fatalf("binary open returned %T (%s), want _io.BufferedReader", out2, out2.Type().Name)
 	}
 	closeObj(t, out2)
+
+	// buffering=0 binary mode -> raw FileIO.
+	out3, err := _io.Open([]objects.Object{objects.NewStr(path), objects.NewStr("rb"), objects.NewInt(0)}, nil)
+	if err != nil {
+		t.Fatalf("open binary unbuffered: %v", err)
+	}
+	if _, ok := out3.(*_io.FileIO); !ok {
+		t.Fatalf("buffering=0 returned %T, want *_io.FileIO", out3)
+	}
+	closeObj(t, out3)
 }

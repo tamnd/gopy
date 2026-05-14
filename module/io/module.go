@@ -110,8 +110,8 @@ func buildModule() (*objects.Module, error) {
 		// CPython: Modules/_io/_iomodule.c:432 _io_open_code_impl
 		// CPython: Modules/_io/_iomodule.c:475 _io_text_encoding_impl
 		{"open", objects.NewBuiltinFunction("open", Open)},
-		{"open_code", objects.NewBuiltinFunction("open_code", openCodeStub)},
-		{"text_encoding", objects.NewBuiltinFunction("text_encoding", textEncodingStub)},
+		{"open_code", objects.NewBuiltinFunction("open_code", openCode)},
+		{"text_encoding", objects.NewBuiltinFunction("text_encoding", textEncoding)},
 	}
 
 	for _, e := range entries {
@@ -137,12 +137,16 @@ func Open(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 }
 
 // ioOpenArgs holds the decoded parameters for _io.open.
+//
+// CPython: Modules/_io/_iomodule.c:199 _io_open_impl signature.
 type ioOpenArgs struct {
 	file      string
 	mode      string
+	buffering int
 	encoding  string
 	errors    string
 	newline   string
+	closefd   bool
 	creating  bool
 	reading   bool
 	writing   bool
@@ -150,6 +154,9 @@ type ioOpenArgs struct {
 	updating  bool
 	text      bool
 	binary    bool
+
+	hasBuffering bool
+	hasNewline   bool
 }
 
 // bindIOOpenArgs parses the argument list for _io.open.
@@ -192,8 +199,25 @@ func bindIOOpenArgs(args []objects.Object, kwargs map[string]objects.Object) (*i
 	if a.errors, err = ioOptStrArg(bound[4], "errors"); err != nil {
 		return nil, err
 	}
+	if bound[5] != nil && !objects.IsNone(bound[5]) {
+		a.hasNewline = true
+	}
 	if a.newline, err = ioOptStrArg(bound[5], "newline"); err != nil {
 		return nil, err
+	}
+	a.buffering = -1
+	a.closefd = true
+	if bound[2] != nil && !objects.IsNone(bound[2]) {
+		n, ok := bound[2].(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: buffering must be an int")
+		}
+		v, _ := n.Int64()
+		a.buffering = int(v)
+		a.hasBuffering = true
+	}
+	if bound[6] != nil && !objects.IsNone(bound[6]) {
+		a.closefd = objects.IsTrue(bound[6])
 	}
 	if err := ioParseMode(a); err != nil {
 		return nil, err
@@ -317,9 +341,11 @@ func ioOpenFlags(a *ioOpenArgs) (flag int, readable, writable bool) {
 	return flag, readable, writable
 }
 
-// ioOpen creates the appropriate stream object for the mode.
+// ioOpen creates the appropriate stream object for the mode, mirroring
+// CPython's open() chain: raw FileIO -> Buffered{Reader,Writer,Random}
+// -> optional TextIOWrapper.
 //
-// CPython: Modules/_io/_iomodule.c:319 (raw creation) through :440 (wrapper)
+// CPython: Modules/_io/_iomodule.c:319 raw creation through :440 wrapper
 func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 	flag, readable, writable := ioOpenFlags(a)
 	f, err := os.OpenFile(a.file, flag, 0o600)
@@ -329,14 +355,45 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 	rawMode := a.mode
 	raw := NewFileIO(f, a.file, rawMode, readable, writable)
 
+	buffering := a.buffering
+	lineBuffering := false
+	if a.text && buffering == 1 {
+		lineBuffering = true
+		buffering = -1
+	}
+	if buffering < 0 {
+		buffering = DefaultBufferSize
+	}
+	// CPython: Modules/_io/_iomodule.c:330 buffering=0 only valid in binary mode.
+	if buffering == 0 {
+		if a.binary {
+			return raw, nil
+		}
+		return nil, fmt.Errorf("ValueError: can't have unbuffered text I/O")
+	}
+
+	// Choose buffered class by readable/writable.
+	// CPython: Modules/_io/_iomodule.c:392 buffered selection.
+	var buffered objects.Object
+	switch {
+	case readable && writable:
+		buffered, err = bufferedRandomCall(nil, []objects.Object{raw, objects.NewInt(int64(buffering))}, nil)
+	case readable:
+		buffered, err = bufferedReaderCall(nil, []objects.Object{raw, objects.NewInt(int64(buffering))}, nil)
+	case writable:
+		buffered, err = bufferedWriterCall(nil, []objects.Object{raw, objects.NewInt(int64(buffering))}, nil)
+	default:
+		return nil, fmt.Errorf("ValueError: unknown mode: %q", a.mode)
+	}
+	if err != nil {
+		return nil, err
+	}
 	if a.binary {
-		// Binary mode: return raw FileIO directly (no buffered layer yet).
-		// CPython: Modules/_io/_iomodule.c:421 (binary returns buffer)
-		return raw, nil
+		return buffered, nil
 	}
 
 	// Text mode: wrap in TextIOWrapper.
-	// CPython: Modules/_io/_iomodule.c:427 (TextIOWrapper construction)
+	// CPython: Modules/_io/_iomodule.c:427 TextIOWrapper construction.
 	enc := a.encoding
 	if enc == "" {
 		enc = "utf-8"
@@ -345,29 +402,67 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 	if errHandler == "" {
 		errHandler = "strict"
 	}
-	wrapper := NewTextIOWrapper(raw, enc, errHandler, a.file, a.mode)
+	newlineArg := objects.Object(objects.None())
+	if a.hasNewline {
+		newlineArg = objects.NewStr(a.newline)
+	}
+	wrapper, err := textIOWrapperCall(nil, []objects.Object{
+		buffered,
+		objects.NewStr(enc),
+		objects.NewStr(errHandler),
+		newlineArg,
+		objects.NewBool(lineBuffering),
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
 	return wrapper, nil
 }
 
-// openCodeStub is the placeholder for _io.open_code.
+// openCode implements _io.open_code(path). CPython routes through
+// PyFile_OpenCodeObject which by default just calls open(path, 'rb');
+// gopy follows that default.
 //
-// CPython: Modules/_io/_iomodule.c:432 _io_open_code_impl
-func openCodeStub(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) < 1 {
+// CPython: Modules/_io/_iomodule.c:513 _io_open_code_impl
+func openCode(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	path := firstArg(args, kwargs, "path")
+	if path == nil {
 		return nil, fmt.Errorf("TypeError: open_code() missing required argument 'path'")
 	}
-	// Delegate to regular open in read-binary mode.
-	return Open([]objects.Object{args[0], objects.NewStr("rb")}, nil)
+	if _, ok := path.(*objects.Unicode); !ok {
+		return nil, fmt.Errorf("TypeError: open_code() argument 'path' must be str, not %s", path.Type().Name)
+	}
+	return Open([]objects.Object{path, objects.NewStr("rb")}, nil)
 }
 
-// textEncodingStub is the placeholder for _io.text_encoding. Defaults
-// to "utf-8" when called with None to keep API users moving until the
-// real flag-driven resolver lands.
+// textEncoding implements _io.text_encoding(encoding, stacklevel=2). It
+// returns the encoding unchanged when explicitly given. When None,
+// returns "locale" so callers can pass the sentinel to open() (gopy's
+// open then maps the missing encoding to utf-8).
 //
-// CPython: Modules/_io/_iomodule.c:475 _io_text_encoding_impl
-func textEncodingStub(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) >= 1 && !objects.IsNone(args[0]) {
-		return args[0], nil
+// CPython: Modules/_io/_iomodule.c:476 _io_text_encoding_impl
+func textEncoding(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	enc := firstArg(args, kwargs, "encoding")
+	if enc == nil {
+		return nil, fmt.Errorf("TypeError: text_encoding() missing required argument 'encoding'")
 	}
-	return objects.NewStr("utf-8"), nil
+	if objects.IsNone(enc) {
+		return objects.NewStr("locale"), nil
+	}
+	if _, ok := enc.(*objects.Unicode); !ok {
+		return nil, fmt.Errorf("TypeError: text_encoding() argument 'encoding' must be str or None, not %s", enc.Type().Name)
+	}
+	return enc, nil
+}
+
+// firstArg returns the first positional argument, falling back to the
+// keyword of the given name.
+func firstArg(args []objects.Object, kwargs map[string]objects.Object, name string) objects.Object {
+	if len(args) >= 1 {
+		return args[0]
+	}
+	if v, ok := kwargs[name]; ok {
+		return v
+	}
+	return nil
 }
