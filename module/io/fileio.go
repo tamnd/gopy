@@ -118,8 +118,13 @@ func (fi *FileIO) populateStat() {
 		return
 	}
 	fi.statSize = info.Size()
-	fi.statBlksize = statBlksizeOf(info)
 	fi.statValid = true
+	// st_blksize is not portable across Go's per-platform syscall.Stat_t
+	// (int32 on darwin, int64 on linux, absent on windows), so we leave
+	// statBlksize at zero and let the _blksize getter fall back to
+	// DEFAULT_BUFFER_SIZE.
+	//
+	// CPython: Modules/_io/fileio.c:1292 fileio_get_blksize
 }
 
 // fileIOCall is the type-call slot.
