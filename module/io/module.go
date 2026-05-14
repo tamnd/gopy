@@ -80,18 +80,18 @@ func buildModule() (*objects.Module, error) {
 		// TextIOWrapper: ported in textiowrapper.go.
 		{"TextIOWrapper", TextIOWrapperType},
 
-		// Buffered layer: stubs until the buffered I/O port lands.
-		{"BufferedReader", stubType("_io.BufferedReader")},
-		{"BufferedWriter", stubType("_io.BufferedWriter")},
-		{"BufferedRWPair", stubType("_io.BufferedRWPair")},
-		{"BufferedRandom", stubType("_io.BufferedRandom")},
+		// Buffered layer: ported in bufferedio.go.
+		{"BufferedReader", BufferedReaderType},
+		{"BufferedWriter", BufferedWriterType},
+		{"BufferedRWPair", BufferedRWPairType},
+		{"BufferedRandom", BufferedRandomType},
 
 		{"IncrementalNewlineDecoder", IncrementalNewlineDecoderType},
 		// ABC hierarchy: ported in iobase.go.
 		// CPython: Modules/_io/_iomodule.c:683 (type registration order)
 		{"_IOBase", IOBaseType},
 		{"_RawIOBase", RawIOBaseType},
-		{"_BufferedIOBase", stubType("_io._BufferedIOBase")},
+		{"_BufferedIOBase", BufferedIOBaseType},
 		{"_TextIOBase", stubType("_io._TextIOBase")},
 
 		{"UnsupportedOperation", unsupportedOpType},
