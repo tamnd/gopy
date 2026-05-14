@@ -17,9 +17,16 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
+
+// ItimerError is signal.ItimerError, raised on failures in setitimer /
+// getitimer. CPython treats this as a subclass of OSError.
+//
+// CPython: Modules/signalmodule.c:1281 (state->itimer_error)
+var ItimerError = objects.NewType("signal.ItimerError", []*objects.Type{errors.PyExc_OSError})
 
 // POSIX constants not exported by Go's syscall package on darwin.
 const (
@@ -160,6 +167,9 @@ func buildModule() (*objects.Module, error) {
 		{"ITIMER_REAL", objects.NewInt(itimerReal)},
 		{"ITIMER_VIRTUAL", objects.NewInt(itimerVirtual)},
 		{"ITIMER_PROF", objects.NewInt(itimerProf)},
+		// ItimerError: exception raised on setitimer/getitimer failure.
+		// CPython: Modules/signalmodule.c:1281 state->itimer_error
+		{"ItimerError", ItimerError},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
