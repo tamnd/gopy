@@ -147,7 +147,7 @@ side is real.
 | D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | partial |
 | E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | partial |
 | F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | partial |
-| G | `Modules/_io/bytesio.c` | ~1,100 | `module/io/bytesio.go` | partial |
+| G | `Modules/_io/bytesio.c` | ~1,100 | `module/io/bytesio.go` | done |
 | H | `Lib/io.py` | ~100 | `stdlib/io.py` | done |
 
 **Audit (2026-05-14).** A re-audit on 2026-05-14 found the
@@ -306,15 +306,18 @@ match CPython.
 
 | C function | Exposed as | Status |
 |------------|-----------|--------|
-| `bytesio_new`, `bytesio_init`, `bytesio_dealloc`, `bytesio_getstate`, `bytesio_setstate` | constructor + pickle hooks | partial |
-| `bytesio_read`, `bytesio_read1`, `bytesio_readline`, `bytesio_readlines`, `bytesio_readinto`, `bytesio_write`, `bytesio_writelines`, `bytesio_seek`, `bytesio_tell`, `bytesio_truncate`, `bytesio_getvalue`, `bytesio_getbuffer`, `bytesio_close`, `bytesio_closed`, `bytesio_iternext` | `BytesIO.<method>` | partial |
+| `bytesio_new`, `bytesio_init`, `bytesio_dealloc`, `bytesio_getstate`, `bytesio_setstate` | constructor + pickle hooks | done |
+| `bytesio_read`, `bytesio_read1`, `bytesio_readline`, `bytesio_readlines`, `bytesio_readinto`, `bytesio_write`, `bytesio_writelines`, `bytesio_seek`, `bytesio_tell`, `bytesio_truncate`, `bytesio_getvalue`, `bytesio_getbuffer`, `bytesio_close`, `bytesio_closed`, `bytesio_iternext` | `BytesIO.<method>` | done |
 
-**Missing (G audit 2026-05-14).** `_io_BytesIO_getbuffer_impl`
-(returns a memoryview over the internal slab) not ported.
-`_io_BytesIO___getstate___impl` / `__setstate___impl` not
-exposed. `_io_BytesIO_readinto_impl` is partly there but does
-not handle bytearray vs memoryview arguments uniformly.
-`bytesio_traverse`/`bytesio_clear` (gc slots) absent.
+**Status (G, 2026-05-14, PR #28).** Full port landed.
+`string_size` is tracked separately from the underlying slab,
+`exports` guards resize while a memoryview is live,
+`write_bytes_lock_held` zero-pads over-seek gaps, `seek` clamps
+negative results for whence=1/2, `writelines` iterates any
+iterable, and `getbuffer` / `__getstate__` / `__setstate__` /
+`__sizeof__` / `readinto` are all wired up. `bytesio_traverse` /
+`bytesio_clear` (gc slots) remain out of scope: gopy has no
+cyclic-gc protocol yet.
 
 **Functions to port (H: `io.py`).** Byte-equal vendor that does
 `from _io import *` plus the conventional re-binds. Gate is the
@@ -555,7 +558,7 @@ Status legend:
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | done | `Lib/difflib.py` | `stdlib/difflib.py` | I | Vendored byte-equal (2064 lines). Loads via PathFinder. |
-| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place but only `_iomodule.c` and `iobase.c` (modulo `_RawIOBase.readinto`/`write` and the `__del__` finalizer) are full ports. The other five files were flipped to **done** on 2026-05-13 but a 2026-05-14 re-audit found 31–55% line coverage with missing methods (FileIO.readinto, BytesIO.getbuffer, StringIO pickle hooks), missing helpers (`_bufferedreader_raw_read`, `_textiowrapper_writeflush`), and an incorrect buffer model in `Buffered` (separate read/write slabs instead of CPython's unified slab with raw_pos/write_pos pointers). See the per-file "Missing" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
+| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` are full ports; the other four (fileio, bufferedio, textio, stringio) were flipped to **done** on 2026-05-13 but a 2026-05-14 re-audit found 31–55% line coverage with missing methods (FileIO.readinto, StringIO pickle hooks), missing helpers (`_bufferedreader_raw_read`, `_textiowrapper_writeflush`), and an incorrect buffer model in `Buffered` (separate read/write slabs instead of CPython's unified slab with raw_pos/write_pos pointers). See the per-file "Missing" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
