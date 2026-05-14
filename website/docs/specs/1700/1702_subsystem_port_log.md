@@ -142,7 +142,7 @@ side is real.
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
 | A | `Modules/_io/_iomodule.c` | ~700 | `module/io/module.go` | done |
-| B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | partial |
+| B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | done |
 | C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | done |
 | D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | done |
 | E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | partial |
@@ -182,23 +182,30 @@ functions in full.
 | `iobase_iter`, `iobase_iternext`, `iobase_readline`, `iobase_readlines`, `iobase_writelines`, `_checkClosed`, `_checkSeekable`, `_checkReadable`, `_checkWritable` | dunder + check helpers on `_IOBase` | done |
 | `iobase_enter`, `iobase_exit` | `__enter__`, `__exit__` context manager | done |
 | `iobase_fileno`, `iobase_isatty` | `_IOBase.fileno`, `_IOBase.isatty` | done |
-| `rawiobase_read`, `rawiobase_readall`, `rawiobase_readinto`, `rawiobase_write` | `_RawIOBase` | partial |
+| `rawiobase_read`, `rawiobase_readall`, `rawiobase_readinto`, `rawiobase_write` | `_RawIOBase` | done |
 | `bufferediobase_*` | `_BufferedIOBase` (in bufferedio.c, not iobase.c) | partial |
 | `textiobase_*` | `_TextIOBase` (in textio.c, not iobase.c) | done |
 
-**Missing (B audit 2026-05-14).** `_RawIOBase.readinto` and
-`_RawIOBase.write` are stubs that raise `NotImplementedError`
-rather than the CPython `UnsupportedOperation` from
-`rawiobase_readinto`/`rawiobase_write`; the abstract bodies need
-to call `PyErr_SetString(io.UnsupportedOperation, ...)`.
-`_BufferedIOBase` is a Go-side shim with method bodies that
-return `UnsupportedOperation` for `read`/`read1`/`readinto`/
-`readinto1`/`write`/`detach` but does **not** ship the abstract
-fallback `BufferedIOBase.readinto`/`readinto1` (which CPython
-implements by calling `self.read(len(b))` and copying); see
-`Modules/_io/bufferedio.c:74-130`. `_IOBase.__del__` (the
-finalizer that auto-flushes) and `_PyIOBase_finalize` are not
-ported.
+**Status (B, 2026-05-14, post-port).** Full re-port of
+`Modules/_io/iobase.c` against 3.14.5. The Go port now mirrors
+CPython function-for-function with citations: `iobase_unsupported`
+is centralized; `iobase_check_closed` defers to the derived
+`closed` attribute (matching `PyObject_GetOptionalAttr`);
+`readline` uses the `peek` fast path when the subclass provides
+one; `readlines` matches CPython's `line_length > hint - length`
+break-after-append rule; `close` chains the flush exception in
+the same order as `_PyErr_ChainExceptions1`; and
+`_PyIOBase_cannot_pickle` is exported as `IOBaseCannotPickle` so
+sibling modules can install it as `__getstate__`/`__reduce__`.
+
+**Not ported (intentional).** `iobase_finalize` /
+`_PyIOBase_finalize` / `iobase_dealloc` / `iobase_traverse` /
+`iobase_clear` have no counterpart: Go's GC owns instance
+lifetime, there is no `tp_finalize` hook, and the
+warn-if-not-closed ResourceWarning machinery has no equivalent
+in the gopy runtime. `__weaklistoffset__` / `__dictoffset__`
+members are not exposed because the gopy object model does not
+surface them.
 
 **Functions to port (C: `fileio.c`).**
 
@@ -580,7 +587,7 @@ Status legend:
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | done | `Lib/difflib.py` | `stdlib/difflib.py` | I | Vendored byte-equal (2064 lines). Loads via PathFinder. |
-| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` / `fileio.c` / `bufferedio.c` are now full ports (bufferedio re-port 2026-05-14 replaces the split readBuf/writeBuf model with CPython's unified slab + pos/raw_pos/read_end/write_pos/write_end offsets so BufferedRandom interleaves reads and writes correctly). Still partial: `textio.c` (write-flush helper). See the per-file "Status" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
+| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` / `fileio.c` / `bufferedio.c` are now full ports (bufferedio re-port 2026-05-14 replaces the split readBuf/writeBuf model with CPython's unified slab + pos/raw_pos/read_end/write_pos/write_end offsets so BufferedRandom interleaves reads and writes correctly; iobase re-port 2026-05-14 adds the readline peek fast path, fixes the readlines hint-break rule, centralizes `iobase_unsupported`, and exports `IOBaseCannotPickle`). Still partial: `textio.c` (write-flush helper). See the per-file "Status" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
