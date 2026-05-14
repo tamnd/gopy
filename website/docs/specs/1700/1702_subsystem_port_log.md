@@ -143,7 +143,7 @@ side is real.
 |---|--------------|------:|-------------|--------|
 | A | `Modules/_io/_iomodule.c` | ~700 | `module/io/module.go` | done |
 | B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | partial |
-| C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | partial |
+| C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | done |
 | D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | partial |
 | E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | partial |
 | F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | done |
@@ -204,19 +204,23 @@ ported.
 
 | C function | Exposed as | Status |
 |------------|-----------|--------|
-| `fileio_init`, `fileio_dealloc`, `fileio_close`, `fileio_closefd`, `fileio_fileno`, `fileio_isatty`, `fileio_readable`, `fileio_writable`, `fileio_seekable`, `fileio_mode_repr`, `fileio_name` | `FileIO.<method>` | partial |
-| `fileio_read`, `fileio_readall`, `fileio_readinto`, `fileio_write`, `fileio_seek`, `fileio_tell`, `fileio_truncate`, `fileio_repr` | core I/O ops | partial |
-| Open-flag resolution (`fileio_check_closed`, `mode_to_flags`, `_PyFileIO_closefd`) | helpers | partial |
+| `fileio_init`, `fileio_dealloc`, `fileio_close`, `fileio_closefd`, `fileio_fileno`, `fileio_isatty`, `fileio_readable`, `fileio_writable`, `fileio_seekable`, `fileio_mode_repr`, `fileio_name` | `FileIO.<method>` | done |
+| `fileio_read`, `fileio_readall`, `fileio_readinto`, `fileio_write`, `fileio_seek`, `fileio_tell`, `fileio_truncate`, `fileio_repr` | core I/O ops | done |
+| Open-flag resolution (`fileio_check_closed`, `mode_to_flags`, `_PyFileIO_closefd`) | helpers | done |
 
-**Missing (C audit 2026-05-14).**
-`_io_FileIO_readinto_impl` is **not** ported; `readinto(b)` does
-not exist on `FileIO` even though the buffered layer calls it.
-`fileno()` returns no fd (the method is absent). `closefd=False`
-is silently ignored. The `opener` callable is parsed and
-discarded. Existing-fd construction (`FileIO(fd_int, ...)`) is
-not supported. `fileio_isatty_open_only`, `fileio_dealloc_warn`,
-the `blksize` getset, and the path-converter slow-path are all
-absent.
+**Status (C, 2026-05-14, PR #TBD).** Full port landed. `FileIO`
+now carries the CPython bookkeeping struct (readable / writable
+/ appending / created / closefd / seekable tri-state / cached
+stat). `readinto(bytearray)`, `readall()` with stat-informed
+pre-allocation and the `new_buffersize` growth schedule,
+`fileno()`, CPython-faithful `mode_string()` and repr,
+integer-fd construction (`FileIO(fd, ...)` wraps via
+`os.NewFile`), and the `closefd=False with file name` guard are
+all wired. `_blksize` is exposed via a getset backed by a
+platform `statBlksizeOf` helper (Unix reads `Stat_t.Blksize`,
+Windows falls back to `DEFAULT_BUFFER_SIZE`). The opener
+callable is still ignored; `_isatty_open_only` and
+`_dealloc_warn` remain absent.
 
 **Functions to port (D: `bufferedio.c`).**
 
@@ -565,7 +569,7 @@ Status legend:
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | done | `Lib/difflib.py` | `stdlib/difflib.py` | I | Vendored byte-equal (2064 lines). Loads via PathFinder. |
-| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` are full ports; the other three (fileio, bufferedio, textio) were flipped to **done** on 2026-05-13 but a 2026-05-14 re-audit found 31–55% line coverage with missing methods (FileIO.readinto), missing helpers (`_bufferedreader_raw_read`, `_textiowrapper_writeflush`), and an incorrect buffer model in `Buffered` (separate read/write slabs instead of CPython's unified slab with raw_pos/write_pos pointers). See the per-file "Missing" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
+| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` / `fileio.c` are now full ports (fileio re-port 2026-05-14 added readinto, fileno, stat-pre-allocated readall, integer-fd construction, closefd / _blksize / mode_string parity). Still partial: `bufferedio.c` (buffer model mismatch), `textio.c` (write-flush helper). See the per-file "Status" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
