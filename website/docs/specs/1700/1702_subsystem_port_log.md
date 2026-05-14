@@ -142,7 +142,7 @@ side is real.
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
 | A | `Modules/_io/_iomodule.c` | ~700 | `module/io/module.go` | partial |
-| B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | pending |
+| B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | done |
 | C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | done |
 | D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | pending |
 | E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | partial |
@@ -164,11 +164,13 @@ side is real.
 
 | C function | Exposed as | Status |
 |------------|-----------|--------|
-| `iobase_seek`, `iobase_tell`, `iobase_truncate`, `iobase_flush`, `iobase_close`, `iobase_closed`, `iobase_readable`, `iobase_writable`, `iobase_seekable` | `IOBase.<method>` | pending |
-| `iobase_iter`, `iobase_iternext`, `iobase_readline`, `iobase_readlines`, `iobase_writelines`, `iobase_check_closed`, `iobase_unsupported`, `iobase_finalize`, `iobase_dealloc` | dunder + helpers on IOBase | pending |
-| `rawiobase_read`, `rawiobase_readall` | `RawIOBase` | pending |
-| `bufferediobase_read`, `bufferediobase_read1`, `bufferediobase_detach`, `bufferediobase_readinto`, `bufferediobase_readinto1`, `bufferediobase_write` | `BufferedIOBase` | pending |
-| `textiobase_read`, `textiobase_readline`, `textiobase_write`, `textiobase_detach`, `textiobase_encoding`, `textiobase_newlines`, `textiobase_errors` | `TextIOBase` | pending |
+| `iobase_seek`, `iobase_tell`, `iobase_truncate`, `iobase_flush`, `iobase_close`, `iobase_closed` getset, `iobase_readable`, `iobase_writable`, `iobase_seekable` | `_IOBase.<method>` | done |
+| `iobase_iter`, `iobase_iternext`, `iobase_readline`, `iobase_readlines`, `iobase_writelines`, `_checkClosed`, `_checkSeekable`, `_checkReadable`, `_checkWritable` | dunder + check helpers on `_IOBase` | done |
+| `iobase_enter`, `iobase_exit` | `__enter__`, `__exit__` context manager | done |
+| `iobase_fileno`, `iobase_isatty` | `_IOBase.fileno`, `_IOBase.isatty` | done |
+| `rawiobase_read`, `rawiobase_readall`, `rawiobase_readinto`, `rawiobase_write` | `_RawIOBase` | done |
+| `bufferediobase_*` | `_BufferedIOBase` (in bufferedio.c, not iobase.c) | pending |
+| `textiobase_*` | `_TextIOBase` (in textio.c, not iobase.c) | pending |
 
 **Functions to port (C: `fileio.c`).**
 
