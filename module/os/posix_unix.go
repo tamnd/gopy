@@ -118,6 +118,59 @@ func osLseek(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	return objects.NewInt(off), nil
 }
 
+// osGeteuid returns the current process's effective user ID.
+//
+// CPython: Modules/posixmodule.c os_geteuid_impl
+func osGeteuid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewInt(int64(syscall.Geteuid())), nil
+}
+
+// osGetegid returns the current process's effective group ID.
+//
+// CPython: Modules/posixmodule.c os_getegid_impl
+func osGetegid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewInt(int64(syscall.Getegid())), nil
+}
+
+// osGetgid returns the current process's real group ID.
+//
+// CPython: Modules/posixmodule.c os_getgid_impl
+func osGetgid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewInt(int64(syscall.Getgid())), nil
+}
+
+// osGetgroups returns the supplementary group IDs of the current process.
+//
+// CPython: Modules/posixmodule.c os_getgroups_impl
+func osGetgroups(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	gids, err := syscall.Getgroups()
+	if err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	items := make([]objects.Object, len(gids))
+	for i, g := range gids {
+		items[i] = objects.NewInt(int64(g))
+	}
+	return objects.NewList(items), nil
+}
+
+// osUmask sets the process file mode creation mask to mask and returns the
+// previous value.
+//
+// CPython: Modules/posixmodule.c os_umask_impl
+func osUmask(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: umask() missing mask")
+	}
+	m, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: umask() mask must be int")
+	}
+	v, _ := m.Int64()
+	prev := syscall.Umask(int(v))
+	return objects.NewInt(int64(prev)), nil
+}
+
 // osDup duplicates file descriptor fd.
 //
 // CPython: Modules/posixmodule.c:7965 os_dup_impl
