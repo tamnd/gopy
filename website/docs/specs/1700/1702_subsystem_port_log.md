@@ -144,7 +144,7 @@ side is real.
 | A | `Modules/_io/_iomodule.c` | ~700 | `module/io/module.go` | done |
 | B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | partial |
 | C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | done |
-| D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | partial |
+| D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | done |
 | E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | partial |
 | F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | done |
 | G | `Modules/_io/bytesio.c` | ~1,100 | `module/io/bytesio.go` | done |
@@ -226,33 +226,44 @@ callable is still ignored; `_isatty_open_only` and
 
 | C class | Public methods | Status |
 |---------|---------------|--------|
-| `BufferedReader` | `read`, `read1`, `peek`, `readline`, `readinto`, `readinto1`, `seek`, `tell`, `close`, `flush`, `__init__`, `raw`, `mode`, `name`, `closed` | partial |
-| `BufferedWriter` | `write`, `flush`, `close`, `seek`, `tell`, `truncate`, `detach`, `__init__` | partial |
-| `BufferedRandom` | union of Reader + Writer behaviours | partial |
-| `BufferedRWPair` | `read`, `write`, `peek`, `readinto`, `close`, `flush`, `readable`, `writable` | partial |
-| Shared internals (`_bufferedreader_raw_read`, `_bufferedwriter_flush_unlocked`, `_PyIO_State`) | helpers | partial |
+| `BufferedReader` | `read`, `read1`, `peek`, `readline`, `readinto`, `readinto1`, `seek`, `tell`, `close`, `flush`, `__init__`, `raw`, `mode`, `name`, `closed` | done |
+| `BufferedWriter` | `write`, `flush`, `close`, `seek`, `tell`, `truncate`, `detach`, `__init__` | done |
+| `BufferedRandom` | union of Reader + Writer behaviours | done |
+| `BufferedRWPair` | `read`, `write`, `peek`, `readinto`, `close`, `flush`, `readable`, `writable` | done |
+| Shared internals (`_bufferedreader_raw_read`, `_bufferedwriter_flush_unlocked`, `_PyIO_State`) | helpers | done |
 
-**Missing (D audit 2026-05-14).** The current 1133-line port is
-41% of `bufferedio.c` (2773 lines) and diverges from CPython on
-the *buffer model itself*: gopy stores a separate `readBuf` and
-`writeBuf`, while CPython's `buffered` struct (line 222) has a
-single `buffer` slab with `pos`, `raw_pos`, `read_end`,
-`write_pos`, `write_end` pointers so a `BufferedRandom` can
-interleave reads and writes without losing position. Specific
-gaps: `_io__Buffered___sizeof___impl` returns `bufSize` instead
-of `tp_basicsize + bufSize`; `_io__Buffered_closed_get_impl`
-reads a local Go flag instead of `self.raw.closed`, so a raw
-stream closed by something else leaves the buffered wrapper
-appearing open; `_buffered_init` does not validate that the raw
-of a `BufferedRandom` is seekable; `buffered_flush_and_rewind_unlocked`,
-`_bufferedreader_raw_read`, `_bufferedreader_read_fast`,
-`_bufferedwriter_raw_write`, `_io__Buffered__dealloc_warn_impl`,
-`buffered_iternext` (so `for line in bf:` falls back to the
-generic IOBase iterator), `buffered_repr`, and the
-`__init__`-as-real-method path are absent. No thread lock /
-owner reentrancy guard. `bufferedTell` does not subtract the
-write-buffer offset. Several `bufRead` error returns are
-swallowed (the nilerr lints flag this).
+**Status (D, 2026-05-14, PR #31).** Full port. The Buffered
+struct now mirrors CPython's `buffered` field-for-field: one
+shared `buffer` slab plus `pos` / `raw_pos` / `read_end` /
+`write_pos` / `write_end` / `abs_pos` / `buffer_mask` offsets,
+so BufferedRandom can interleave reads and writes without losing
+position (`ADJUST_POSITION`, `RAW_OFFSET`, `READAHEAD`,
+`MINUS_LAST_BLOCK` ported as Buffered methods). The helper
+trio `_bufferedreader_raw_read`, `_bufferedreader_fill_buffer`,
+`_bufferedwriter_raw_write`, plus `_bufferedwriter_flush_unlocked`,
+`buffered_flush_and_rewind_unlocked`, `_bufferedreader_read_all`,
+`_bufferedreader_read_fast`, `_bufferedreader_read_generic`, and
+`_bufferedreader_peek_unlocked` are all ported with citations.
+`_io__Buffered_closed_get_impl` now reads `self.raw.closed`.
+`_io_BufferedRandom___init___impl` validates the raw stream is
+seekable. `_io__Buffered___sizeof___impl` returns
+`tp_basicsize + buffer_size`. `_io__Buffered_seek_impl` includes
+the intra-buffer fast path (SEEK_SET/SEEK_CUR returns immediately
+when the target lies inside the current view).
+`_io__Buffered__dealloc_warn_impl` forwards to the raw stream's
+`_dealloc_warn`. `buffered_iternext`, `buffered_repr`, and the
+context-manager / iter dunders are wired through the type slots.
+
+**Not ported (intentional).** Per-instance thread lock and owner
+reentrancy guard (`ENTER_BUFFERED`/`LEAVE_BUFFERED`): Go's
+goroutine concurrency model is different from CPython's
+GIL+per-buffer lock, and `runtime.lockOSThread`-style guards
+would not match user expectations. `_PyIO_trap_eintr` retries
+on EINTR: the gopy bufXxx helpers go through `objects.Call`,
+which never surfaces a raw EINTR. `fast_closed_checks` (the
+`Py_IS_TYPE` shortcut that skips `getattr(raw, "closed")`): gopy
+already calls the Go method directly, so the optimization is
+moot.
 
 **Functions to port (E: `textio.c`).**
 
@@ -569,7 +580,7 @@ Status legend:
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | done | `Lib/difflib.py` | `stdlib/difflib.py` | I | Vendored byte-equal (2064 lines). Loads via PathFinder. |
-| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` / `fileio.c` are now full ports (fileio re-port 2026-05-14 added readinto, fileno, stat-pre-allocated readall, integer-fd construction, closefd / _blksize / mode_string parity). Still partial: `bufferedio.c` (buffer model mismatch), `textio.c` (write-flush helper). See the per-file "Status" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
+| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` / `fileio.c` / `bufferedio.c` are now full ports (bufferedio re-port 2026-05-14 replaces the split readBuf/writeBuf model with CPython's unified slab + pos/raw_pos/read_end/write_pos/write_end offsets so BufferedRandom interleaves reads and writes correctly). Still partial: `textio.c` (write-flush helper). See the per-file "Status" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
