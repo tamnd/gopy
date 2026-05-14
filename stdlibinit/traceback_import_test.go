@@ -1,33 +1,16 @@
+// End-to-end import gate for the traceback stdlib module.
+//
+// CPython: Lib/traceback.py
 package stdlibinit
 
-import (
-	"errors"
-	"strings"
-	"testing"
+import "testing"
 
-	"github.com/tamnd/gopy/imp"
-	"github.com/tamnd/gopy/objects"
-	"github.com/tamnd/gopy/state"
-	"github.com/tamnd/gopy/vm"
-)
-
-// threadExecutor adapts a *state.Thread to the imp.Executor interface
-// so that imp.ImportModule can drive Python source modules via the eval
-// loop.
-type threadExecutor struct{ ts *state.Thread }
-
-func (e *threadExecutor) ExecCode(code *objects.Code, mod *objects.Module) (objects.Object, error) {
-	return vm.EvalCode(e.ts, code, mod.Dict(), nil)
-}
-
+// TestImportTraceback verifies that `import traceback` succeeds
+// end-to-end through the real PathFinder + VM pipeline.
 func TestImportTraceback(t *testing.T) {
-	ts := state.NewThread()
-	exec := &threadExecutor{ts: ts}
-	_, err := imp.ImportModule(exec, "traceback")
+	_, err := importStdlib(t, "traceback")
 	if err != nil {
-		if errors.Is(err, imp.ErrModuleNotFound) || strings.Contains(err.Error(), "No module named") {
-			t.Skipf("blocked on missing transitive import: %v", err)
-		}
+		skipIfMissingDep(t, err, "traceback")
 		t.Fatalf("import traceback: %v", err)
 	}
 }
