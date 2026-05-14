@@ -142,13 +142,27 @@ side is real.
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
 | A | `Modules/_io/_iomodule.c` | ~700 | `module/io/module.go` | done |
-| B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | done |
-| C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | done |
-| D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | done |
-| E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | done |
-| F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | done |
-| G | `Modules/_io/bytesio.c` | ~1,100 | `module/io/bytesio.go` | done |
+| B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | partial |
+| C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | partial |
+| D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | partial |
+| E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | partial |
+| F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | partial |
+| G | `Modules/_io/bytesio.c` | ~1,100 | `module/io/bytesio.go` | partial |
 | H | `Lib/io.py` | ~100 | `stdlib/io.py` | done |
+
+**Audit (2026-05-14).** A re-audit on 2026-05-14 found the
+2026-05-13 commits that flipped D and E to **done** ("io D: full
+port of Modules/_io/bufferedio.c", "io E: full port of
+Modules/_io/textio.c") shipped ports that are 31–41% of the
+upstream line count with major functional gaps. The same audit
+shows B, C, F, G ship 35–55% of upstream and miss whole methods
+(`readinto` on FileIO, `getbuffer` on BytesIO, the
+`__getstate__/__setstate__` pickle pair on StringIO). The status
+above and the per-function tables below have been flipped back
+from **done** to the truth. Outstanding work is captured in the
+"Missing" notes after each function table; #571–#576 are
+re-opened and a follow-up commit will port the remaining
+functions in full.
 
 **Functions to port (A: `_iomodule.c`).**
 
@@ -168,35 +182,106 @@ side is real.
 | `iobase_iter`, `iobase_iternext`, `iobase_readline`, `iobase_readlines`, `iobase_writelines`, `_checkClosed`, `_checkSeekable`, `_checkReadable`, `_checkWritable` | dunder + check helpers on `_IOBase` | done |
 | `iobase_enter`, `iobase_exit` | `__enter__`, `__exit__` context manager | done |
 | `iobase_fileno`, `iobase_isatty` | `_IOBase.fileno`, `_IOBase.isatty` | done |
-| `rawiobase_read`, `rawiobase_readall`, `rawiobase_readinto`, `rawiobase_write` | `_RawIOBase` | done |
-| `bufferediobase_*` | `_BufferedIOBase` (in bufferedio.c, not iobase.c) | pending |
+| `rawiobase_read`, `rawiobase_readall`, `rawiobase_readinto`, `rawiobase_write` | `_RawIOBase` | partial |
+| `bufferediobase_*` | `_BufferedIOBase` (in bufferedio.c, not iobase.c) | partial |
 | `textiobase_*` | `_TextIOBase` (in textio.c, not iobase.c) | done |
+
+**Missing (B audit 2026-05-14).** `_RawIOBase.readinto` and
+`_RawIOBase.write` are stubs that raise `NotImplementedError`
+rather than the CPython `UnsupportedOperation` from
+`rawiobase_readinto`/`rawiobase_write`; the abstract bodies need
+to call `PyErr_SetString(io.UnsupportedOperation, ...)`.
+`_BufferedIOBase` is a Go-side shim with method bodies that
+return `UnsupportedOperation` for `read`/`read1`/`readinto`/
+`readinto1`/`write`/`detach` but does **not** ship the abstract
+fallback `BufferedIOBase.readinto`/`readinto1` (which CPython
+implements by calling `self.read(len(b))` and copying); see
+`Modules/_io/bufferedio.c:74-130`. `_IOBase.__del__` (the
+finalizer that auto-flushes) and `_PyIOBase_finalize` are not
+ported.
 
 **Functions to port (C: `fileio.c`).**
 
 | C function | Exposed as | Status |
 |------------|-----------|--------|
-| `fileio_init`, `fileio_dealloc`, `fileio_close`, `fileio_closefd`, `fileio_fileno`, `fileio_isatty`, `fileio_readable`, `fileio_writable`, `fileio_seekable`, `fileio_mode_repr`, `fileio_name` | `FileIO.<method>` | done |
-| `fileio_read`, `fileio_readall`, `fileio_readinto`, `fileio_write`, `fileio_seek`, `fileio_tell`, `fileio_truncate`, `fileio_repr` | core I/O ops | done |
-| Open-flag resolution (`fileio_check_closed`, `mode_to_flags`, `_PyFileIO_closefd`) | helpers | done |
+| `fileio_init`, `fileio_dealloc`, `fileio_close`, `fileio_closefd`, `fileio_fileno`, `fileio_isatty`, `fileio_readable`, `fileio_writable`, `fileio_seekable`, `fileio_mode_repr`, `fileio_name` | `FileIO.<method>` | partial |
+| `fileio_read`, `fileio_readall`, `fileio_readinto`, `fileio_write`, `fileio_seek`, `fileio_tell`, `fileio_truncate`, `fileio_repr` | core I/O ops | partial |
+| Open-flag resolution (`fileio_check_closed`, `mode_to_flags`, `_PyFileIO_closefd`) | helpers | partial |
+
+**Missing (C audit 2026-05-14).**
+`_io_FileIO_readinto_impl` is **not** ported; `readinto(b)` does
+not exist on `FileIO` even though the buffered layer calls it.
+`fileno()` returns no fd (the method is absent). `closefd=False`
+is silently ignored. The `opener` callable is parsed and
+discarded. Existing-fd construction (`FileIO(fd_int, ...)`) is
+not supported. `fileio_isatty_open_only`, `fileio_dealloc_warn`,
+the `blksize` getset, and the path-converter slow-path are all
+absent.
 
 **Functions to port (D: `bufferedio.c`).**
 
 | C class | Public methods | Status |
 |---------|---------------|--------|
-| `BufferedReader` | `read`, `read1`, `peek`, `readline`, `readinto`, `readinto1`, `seek`, `tell`, `close`, `flush`, `__init__`, `raw`, `mode`, `name`, `closed` | done |
-| `BufferedWriter` | `write`, `flush`, `close`, `seek`, `tell`, `truncate`, `detach`, `__init__` | done |
-| `BufferedRandom` | union of Reader + Writer behaviours | done |
-| `BufferedRWPair` | `read`, `write`, `peek`, `readinto`, `close`, `flush`, `readable`, `writable` | done |
-| Shared internals (`_bufferedreader_raw_read`, `_bufferedwriter_flush_unlocked`, `_PyIO_State`) | helpers | done |
+| `BufferedReader` | `read`, `read1`, `peek`, `readline`, `readinto`, `readinto1`, `seek`, `tell`, `close`, `flush`, `__init__`, `raw`, `mode`, `name`, `closed` | partial |
+| `BufferedWriter` | `write`, `flush`, `close`, `seek`, `tell`, `truncate`, `detach`, `__init__` | partial |
+| `BufferedRandom` | union of Reader + Writer behaviours | partial |
+| `BufferedRWPair` | `read`, `write`, `peek`, `readinto`, `close`, `flush`, `readable`, `writable` | partial |
+| Shared internals (`_bufferedreader_raw_read`, `_bufferedwriter_flush_unlocked`, `_PyIO_State`) | helpers | partial |
+
+**Missing (D audit 2026-05-14).** The current 1133-line port is
+41% of `bufferedio.c` (2773 lines) and diverges from CPython on
+the *buffer model itself*: gopy stores a separate `readBuf` and
+`writeBuf`, while CPython's `buffered` struct (line 222) has a
+single `buffer` slab with `pos`, `raw_pos`, `read_end`,
+`write_pos`, `write_end` pointers so a `BufferedRandom` can
+interleave reads and writes without losing position. Specific
+gaps: `_io__Buffered___sizeof___impl` returns `bufSize` instead
+of `tp_basicsize + bufSize`; `_io__Buffered_closed_get_impl`
+reads a local Go flag instead of `self.raw.closed`, so a raw
+stream closed by something else leaves the buffered wrapper
+appearing open; `_buffered_init` does not validate that the raw
+of a `BufferedRandom` is seekable; `buffered_flush_and_rewind_unlocked`,
+`_bufferedreader_raw_read`, `_bufferedreader_read_fast`,
+`_bufferedwriter_raw_write`, `_io__Buffered__dealloc_warn_impl`,
+`buffered_iternext` (so `for line in bf:` falls back to the
+generic IOBase iterator), `buffered_repr`, and the
+`__init__`-as-real-method path are absent. No thread lock /
+owner reentrancy guard. `bufferedTell` does not subtract the
+write-buffer offset. Several `bufRead` error returns are
+swallowed (the nilerr lints flag this).
 
 **Functions to port (E: `textio.c`).**
 
 | C class | Public methods | Status |
 |---------|---------------|--------|
-| `IncrementalNewlineDecoder` | `decode`, `getstate`, `setstate`, `reset`, `newlines` | done |
-| `TextIOWrapper` | `__init__`, `read`, `readline`, `readlines`, `write`, `seek`, `tell`, `truncate`, `flush`, `close`, `detach`, `reconfigure`, `buffer`, `encoding`, `errors`, `newlines`, `line_buffering`, `write_through`, `name`, `mode`, `closed`, `__iter__`, `__next__` | done |
-| Internals (`_textiowrapper_decoder_setstate`, `_textiowrapper_encoder_setstate`, `_textiowrapper_writeflush`) | helpers | done |
+| `IncrementalNewlineDecoder` | `decode`, `getstate`, `setstate`, `reset`, `newlines` | partial |
+| `TextIOWrapper` | `__init__`, `read`, `readline`, `readlines`, `write`, `seek`, `tell`, `truncate`, `flush`, `close`, `detach`, `reconfigure`, `buffer`, `encoding`, `errors`, `newlines`, `line_buffering`, `write_through`, `name`, `mode`, `closed`, `__iter__`, `__next__` | partial |
+| Internals (`_textiowrapper_decoder_setstate`, `_textiowrapper_encoder_setstate`, `_textiowrapper_writeflush`) | helpers | partial |
+
+**Missing (E audit 2026-05-14).** The 1075-line port is 31% of
+`textio.c` (3433 lines). Specific gaps: codec resolution
+hardcodes utf-8/ascii/latin-1 in `decodeBytes`/`encodeString`
+instead of routing through `codecs.lookup(encoding)`, so most
+real encodings raise `NotImplementedError`. `read()` and
+`readline()` read the whole underlying buffer at once and decode
+in one shot; CPython's `textiowrapper_read_chunk` reads
+`CHUNK_SIZE` bytes, decodes incrementally via
+`IncrementalDecoder`, and tracks a `dec_flags` "snapshot" cookie
+so `tell()` returns a position the next `seek()` can replay.
+`IncrementalNewlineDecoder.decode` does not honor `final=False`
+boundary: if a chunk ends in `\r` it must stay `pendingcr` for
+the next call (gopy's `processNewlines` always consumes the `\r`
+via `strings.NewReplacer`, so a `\r\n` split across chunks
+decodes wrong). Universal-newline translation in TextIOWrapper
+read path is absent (the wrapper hands strings through verbatim).
+Line buffering and write-through in the write path are recorded
+but not acted on. The `newline=` constructor argument is
+accepted but ignored. `_textiowrapper_decoder_setstate`,
+`_textiowrapper_encoder_setstate`, `_textiowrapper_writeflush`,
+`textiowrapper_change_encoding` are not ported.
+`textiowrapper_tell_impl` / `textiowrapper_seek_impl` do not
+encode/decode the CPython cookie format and just delegate the
+raw position to the buffer.
 
 **Functions to port (F: `stringio.c`).** Audit pass: gopy already
 has a StringIO. The audit must confirm every C function below is
@@ -205,16 +290,31 @@ piece in the same PR.
 
 | C function | gopy equivalent | Status |
 |------------|----------------|--------|
-| `stringio_new`, `stringio_init`, `stringio_dealloc` | constructor + init | done |
-| `stringio_read`, `stringio_readline`, `stringio_write`, `stringio_seek`, `stringio_tell`, `stringio_truncate`, `stringio_close`, `stringio_getvalue`, `stringio_iternext`, `stringio_readable`, `stringio_writable`, `stringio_seekable`, `stringio_closed` | corresponding methods | done |
-| `_stringio_writebuffer`, `_stringio_seek_internal` | helpers | done |
+| `stringio_new`, `stringio_init`, `stringio_dealloc` | constructor + init | partial |
+| `stringio_read`, `stringio_readline`, `stringio_write`, `stringio_seek`, `stringio_tell`, `stringio_truncate`, `stringio_close`, `stringio_getvalue`, `stringio_iternext`, `stringio_readable`, `stringio_writable`, `stringio_seekable`, `stringio_closed` | corresponding methods | partial |
+| `_stringio_writebuffer`, `_stringio_seek_internal` | helpers | partial |
+
+**Missing (F audit 2026-05-14).** `_io_StringIO___getstate___impl`
+and `_io_StringIO___setstate___impl` (pickle hooks) absent.
+`_io_StringIO_line_buffering_get_impl` and the `newlines` getset
+not exposed. `__sizeof__` returns a placeholder. `newline=`
+constructor argument is recorded but the `\n` / `\r\n` / `""`
+translation behaviour in `write()` and `readline()` does not
+match CPython.
 
 **Functions to port (G: `bytesio.c`).**
 
 | C function | Exposed as | Status |
 |------------|-----------|--------|
-| `bytesio_new`, `bytesio_init`, `bytesio_dealloc`, `bytesio_getstate`, `bytesio_setstate` | constructor + pickle hooks | done |
-| `bytesio_read`, `bytesio_read1`, `bytesio_readline`, `bytesio_readlines`, `bytesio_readinto`, `bytesio_write`, `bytesio_writelines`, `bytesio_seek`, `bytesio_tell`, `bytesio_truncate`, `bytesio_getvalue`, `bytesio_getbuffer`, `bytesio_close`, `bytesio_closed`, `bytesio_iternext` | `BytesIO.<method>` | done |
+| `bytesio_new`, `bytesio_init`, `bytesio_dealloc`, `bytesio_getstate`, `bytesio_setstate` | constructor + pickle hooks | partial |
+| `bytesio_read`, `bytesio_read1`, `bytesio_readline`, `bytesio_readlines`, `bytesio_readinto`, `bytesio_write`, `bytesio_writelines`, `bytesio_seek`, `bytesio_tell`, `bytesio_truncate`, `bytesio_getvalue`, `bytesio_getbuffer`, `bytesio_close`, `bytesio_closed`, `bytesio_iternext` | `BytesIO.<method>` | partial |
+
+**Missing (G audit 2026-05-14).** `_io_BytesIO_getbuffer_impl`
+(returns a memoryview over the internal slab) not ported.
+`_io_BytesIO___getstate___impl` / `__setstate___impl` not
+exposed. `_io_BytesIO_readinto_impl` is partly there but does
+not handle bytearray vs memoryview arguments uniformly.
+`bytesio_traverse`/`bytesio_clear` (gc slots) absent.
 
 **Functions to port (H: `io.py`).** Byte-equal vendor that does
 `from _io import *` plus the conventional re-binds. Gate is the
@@ -455,7 +555,7 @@ Status legend:
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | done | `Lib/difflib.py` | `stdlib/difflib.py` | I | Vendored byte-equal (2064 lines). Loads via PathFinder. |
-| io / _io | #514 | done | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All C files ported: `_iomodule.c`, `iobase.c`, `fileio.c`, `bytesio.c`, `stringio.c`, `textio.c`, `bufferedio.c`. `IncrementalNewlineDecoder`, `TextIOWrapper`, `BufferedReader`, `BufferedWriter`, `BufferedRandom`, `BufferedRWPair` all done. `stdlib/io.py` vendored byte-equal; `TestImportIO` green. |
+| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place but only `_iomodule.c` and `iobase.c` (modulo `_RawIOBase.readinto`/`write` and the `__del__` finalizer) are full ports. The other five files were flipped to **done** on 2026-05-13 but a 2026-05-14 re-audit found 31–55% line coverage with missing methods (FileIO.readinto, BytesIO.getbuffer, StringIO pickle hooks), missing helpers (`_bufferedreader_raw_read`, `_textiowrapper_writeflush`), and an incorrect buffer model in `Buffered` (separate read/write slabs instead of CPython's unified slab with raw_pos/write_pos pointers). See the per-file "Missing" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
