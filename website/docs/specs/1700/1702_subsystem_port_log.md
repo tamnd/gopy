@@ -332,17 +332,17 @@ constants, errno bridge).
 | C function | Exposed as | Status |
 |------------|-----------|--------|
 | `os_getcwd_impl` | `posix.getcwd` | done |
-| `os_getcwdb_impl`, `os_chdir_impl` | `posix.getcwdb`, `posix.chdir` | pending |
+| `os_getcwdb_impl`, `os_chdir_impl` | `posix.getcwdb`, `posix.chdir` | done |
 | `os_listdir_impl`, `os_scandir_impl`, `DirEntry` type | directory iteration | done |
 | `os_stat_impl`, the `stat_result` struct | metadata | done |
-| `os_lstat_impl`, `os_fstat_impl` | lstat / fstat | pending |
+| `os_lstat_impl`, `os_fstat_impl` | lstat / fstat | done |
 | `os_open_impl` | `posix.open` (fd-level) | done |
-| `os_close_impl`, `os_read_impl`, `os_write_impl`, `os_lseek_impl`, `os_dup_impl`, `os_pipe_impl` | low-level fd ops | pending |
+| `os_close_impl`, `os_read_impl`, `os_write_impl`, `os_lseek_impl`, `os_dup_impl`, `os_pipe_impl` | low-level fd ops | done |
 | `os_unlink_impl`, `os_remove_impl`, `os_rename_impl`, `os_mkdir_impl`, `os_rmdir_impl`, `os_makedirs` helper | mutation | done |
-| `os_replace_impl` | atomic rename | pending |
+| `os_replace_impl` | atomic rename | done |
 | `os_getenv_impl` + environ dict population | `posix.environ` | done |
 | `os_getpid_impl`, `os_getuid_impl` | process identity | done |
-| `os_getppid_impl`, `os_kill_impl`, `os_waitpid_impl` | process ops | pending |
+| `os_getppid_impl`, `os_kill_impl`, `os_waitpid_impl` | process ops | done |
 | `os_fspath_impl`, `path_converter` | `posix.fspath` | done |
 | `os_access_impl` | `posix.access` | done |
 | `os_get_terminal_size_impl` | `posix.get_terminal_size` | done |
@@ -459,7 +459,7 @@ Status legend:
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
-| os + posixpath + ntpath | #518 | partial | `Lib/os.py`, `Lib/posixpath.py`, `Lib/ntpath.py`, `Modules/posixmodule.c` slice | `stdlib/` + `module/os/` | I | posixpath.py, ntpath.py, genericpath.py vendored. Added `posix` inittab alias, `stat_result`, `open`/`access`/`scandir`, O_* flags, F_OK/R_OK/W_OK/X_OK, `supports_*` frozensets, `terminal_size` type with TpNew, `get_terminal_size`. os.py full vendor still pending. |
+| os + posixpath + ntpath | #518 | done | `Lib/os.py`, `Lib/posixpath.py`, `Lib/ntpath.py`, `Modules/posixmodule.c` slice | `stdlib/` + `module/os/` | I | All posixmodule.c slice functions done: getcwd, getcwdb, chdir, listdir, scandir, stat, lstat, fstat, open, close, read, write, lseek, dup, pipe, unlink/remove/rename/mkdir/rmdir/makedirs/replace, getenv/environ, getpid/getuid/getppid, kill, waitpid, fspath, access, get_terminal_size, O_*/F_*/SEEK_* constants. os.py, posixpath.py, ntpath.py, genericpath.py vendored byte-equal. |
 | VM / compile audit | #521 | pending | `Python/ceval.c`, `Python/bytecodes.c`, `Python/compile.c` | (in-tree) | A | Sweep after built-ins land; record findings as additional rows here |
 
 Wave column: `1` = first parallel batch, `2` = second batch

@@ -223,6 +223,25 @@ func buildOS() (*objects.Module, error) {
 		{"W_OK", objects.NewInt(2)},
 		{"X_OK", objects.NewInt(1)},
 		{"access", objects.NewBuiltinFunction("access", osAccess)},
+		{"getcwdb", objects.NewBuiltinFunction("getcwdb", getcwdb)},
+		{"chdir", objects.NewBuiltinFunction("chdir", osChdir)},
+		{"lstat", objects.NewBuiltinFunction("lstat", osLstat)},
+		{"fstat", objects.NewBuiltinFunction("fstat", osFstat)},
+		{"close", objects.NewBuiltinFunction("close", osClose)},
+		{"read", objects.NewBuiltinFunction("read", osRead)},
+		{"write", objects.NewBuiltinFunction("write", osWrite)},
+		{"lseek", objects.NewBuiltinFunction("lseek", osLseek)},
+		{"dup", objects.NewBuiltinFunction("dup", osDup)},
+		{"replace", objects.NewBuiltinFunction("replace", osReplace)},
+		{"pipe", objects.NewBuiltinFunction("pipe", osPipe)},
+		{"getppid", objects.NewBuiltinFunction("getppid", osGetppid)},
+		{"kill", objects.NewBuiltinFunction("kill", osKill)},
+		{"waitpid", objects.NewBuiltinFunction("waitpid", osWaitpid)},
+		// SEEK_* constants.
+		// CPython: Modules/posixmodule.c posixmodule_exec
+		{"SEEK_SET", objects.NewInt(0)},
+		{"SEEK_CUR", objects.NewInt(1)},
+		{"SEEK_END", objects.NewInt(2)},
 		// supports_* sets: empty frozensets — gopy does not yet implement
 		// dir_fd / follow_symlinks / fd-based variants of stat, scandir, etc.
 		// shutil checks `{os.open, os.stat, ...} <= os.supports_dir_fd`; an
@@ -830,6 +849,117 @@ func osOpen(args []objects.Object, kwargs map[string]objects.Object) (objects.Ob
 		return nil, fmt.Errorf("OSError: %w", err2)
 	}
 	return objects.NewInt(int64(fd)), nil
+}
+
+// getcwdb returns the current working directory as a bytes object.
+//
+// CPython: Modules/posixmodule.c:4345 os_getcwdb_impl
+func getcwdb(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	cwd, err := goos.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	return objects.NewBytes([]byte(cwd)), nil
+}
+
+// osChdir changes the current working directory to path.
+//
+// CPython: Modules/posixmodule.c:4271 os_chdir_impl
+func osChdir(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	path, err := argString(args)
+	if err != nil {
+		return nil, err
+	}
+	if err := goos.Chdir(path); err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	return objects.None(), nil
+}
+
+// osLstat returns stat for path without following symlinks.
+//
+// CPython: Modules/posixmodule.c:3381 os_lstat_impl
+func osLstat(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	path, err := argString(args)
+	if err != nil {
+		return nil, err
+	}
+	info, serr := goos.Lstat(path)
+	if serr != nil {
+		return nil, fmt.Errorf("OSError: %w", serr)
+	}
+	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
+	mtime := info.ModTime().Unix()
+	return objects.NewStructSeq(statResultType, []objects.Object{
+		objects.NewInt(int64(info.Mode())),
+		objects.NewInt(int64(ino)),
+		objects.NewInt(int64(dev)),
+		objects.NewInt(int64(nlink)),
+		objects.NewInt(int64(uid)),
+		objects.NewInt(int64(gid)),
+		objects.NewInt(info.Size()),
+		objects.NewFloat(float64(atime)),
+		objects.NewFloat(float64(mtime)),
+		objects.NewFloat(float64(ctime)),
+	}), nil
+}
+
+// osFstat returns the stat of an open file descriptor.
+// The underlying fd is not closed; runtime.SetFinalizer is cleared on
+// the temporary os.File wrapper so the GC never closes it.
+//
+// CPython: Modules/posixmodule.c:3399 os_fstat_impl
+func osFstat(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: fstat() missing required argument: 'fd'")
+	}
+	fdObj, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required")
+	}
+	fdVal, _ := fdObj.Int64()
+	f := goos.NewFile(uintptr(fdVal), "")
+	runtime.SetFinalizer(f, nil)
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
+	mtime := info.ModTime().Unix()
+	return objects.NewStructSeq(statResultType, []objects.Object{
+		objects.NewInt(int64(info.Mode())),
+		objects.NewInt(int64(ino)),
+		objects.NewInt(int64(dev)),
+		objects.NewInt(int64(nlink)),
+		objects.NewInt(int64(uid)),
+		objects.NewInt(int64(gid)),
+		objects.NewInt(info.Size()),
+		objects.NewFloat(float64(atime)),
+		objects.NewFloat(float64(mtime)),
+		objects.NewFloat(float64(ctime)),
+	}), nil
+}
+
+// osReplace atomically renames src to dst, replacing dst if it exists.
+// On POSIX, os.rename and os.replace are the same underlying rename(2) call.
+//
+// CPython: Modules/posixmodule.c:5986 os_replace_impl
+func osReplace(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: replace() requires src and dst")
+	}
+	src, err := objects.Str(args[0])
+	if err != nil {
+		return nil, err
+	}
+	dst, err := objects.Str(args[1])
+	if err != nil {
+		return nil, err
+	}
+	if rerr := goos.Rename(src, dst); rerr != nil {
+		return nil, fmt.Errorf("OSError: %w", rerr)
+	}
+	return objects.None(), nil
 }
 
 // osScandir returns an iterator over DirEntry objects in path.
