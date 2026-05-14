@@ -5,6 +5,7 @@
 package os
 
 import (
+	"fmt"
 	goos "os"
 
 	"github.com/tamnd/gopy/objects"
@@ -21,4 +22,22 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 // CPython: Modules/posixmodule.c:9635 os_getuid_impl
 func getuid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	return objects.NewInt(0), nil
+}
+
+// osPipe, osGetppid, osKill, osWaitpid: stubs for unsupported platforms.
+// CPython: Modules/posixmodule.c:8024, 9148, 9162, 9208
+func osPipe(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return nil, fmt.Errorf("NotImplementedError: pipe is not supported on this platform")
+}
+
+func osGetppid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return nil, fmt.Errorf("NotImplementedError: getppid is not supported on this platform")
+}
+
+func osKill(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return nil, fmt.Errorf("NotImplementedError: kill is not supported on this platform")
+}
+
+func osWaitpid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return nil, fmt.Errorf("NotImplementedError: waitpid is not supported on this platform")
 }

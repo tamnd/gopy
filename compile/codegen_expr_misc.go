@@ -82,6 +82,42 @@ func (c *Compiler) visitAwait(e *ast.Await) error {
 	return nil
 }
 
+// visitTemplateStr lowers a t-string (PEP 750). Values alternate between
+// Constant string parts and Interpolation nodes. The compiler pushes a
+// strings tuple and an interpolations tuple then emits BUILD_TEMPLATE.
+// Interpolations are not yet supported; attempting them returns an error.
+//
+// CPython: Python/codegen.c codegen_templatestr
+func (c *Compiler) visitTemplateStr(e *ast.TemplateStr) error {
+	var strParts []any
+	var interps []any
+	for i := 0; i < e.Values.Len(); i++ {
+		v := e.Values.Get(i)
+		switch n := v.(type) {
+		case *ast.Constant:
+			if s, ok := n.Value.(string); ok {
+				strParts = append(strParts, s)
+			}
+		case *ast.Interpolation:
+			_ = n
+			if len(strParts) == len(interps) {
+				strParts = append(strParts, "")
+			}
+			interps = append(interps, nil)
+		}
+	}
+	if len(strParts) == len(interps) {
+		strParts = append(strParts, "")
+	}
+	if len(interps) > 0 {
+		return fmt.Errorf("compile: t-string interpolations not yet supported")
+	}
+	c.addLoadConst(tupleOf(strParts), loc(e))
+	c.addLoadConst(tupleOf(interps), loc(e))
+	c.addOp(BUILD_TEMPLATE, loc(e))
+	return nil
+}
+
 // visitJoinedStr lowers an f-string. Each Value is either a string
 // literal (Constant) emitted as LOAD_CONST or a FormattedValue node
 // emitted via visitFormattedValue. After the parts are stacked,

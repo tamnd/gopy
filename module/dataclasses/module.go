@@ -593,7 +593,16 @@ func collectFields(cls *objects.Type, flags dataclassFlags) []*fieldInfo {
 	// only carries a value for names that had an "= default" clause.
 	ownFieldNames := []string{}
 	ownFieldDefaults := map[string]objects.Object{}
-	if annObj, ok := own["__annotations__"]; ok {
+	var annObj objects.Object
+	if v, ok := own["__annotations__"]; ok {
+		annObj = v
+	} else if v, err := objects.GetAttr(cls, objects.NewStr("__annotations__")); err == nil {
+		// PEP 649: class annotations live behind __annotate__. typeGetAttr
+		// materializes the dict on first read and caches it back on the
+		// type, so subsequent collectFields calls hit the own[] branch.
+		annObj = v
+	}
+	if annObj != nil {
 		if annDict, ok := annObj.(*objects.Dict); ok {
 			for _, key := range annDict.Keys() {
 				nameStr, ok := key.(*objects.Unicode)

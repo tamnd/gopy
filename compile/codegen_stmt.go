@@ -20,10 +20,32 @@ import (
 // _PyCodegen_Module
 func (c *Compiler) visitModule(m *ast.Module) error {
 	body := c.consumeDocstring(m.Body)
-	if bodyHasAnnotations(body) {
-		c.addOp(SETUP_ANNOTATIONS, ast.Pos{Lineno: 1})
+	// PEP 649 conditional-annotations prologue. Same shape as the
+	// class body emitter: when a top-level annotation hides behind a
+	// conditional, the analyzer flips HasConditionalAnnotations and
+	// we open a tracking set so __annotate__ knows which names made
+	// it through the body.
+	//
+	// CPython: Python/codegen.c:860 codegen_body (BUILD_SET 0 +
+	// STORE_NAME __conditional_annotations__)
+	if c.scope != nil && c.scope.HasConditionalAnnotations {
+		pool := poolNames
+		c.addOpI(BUILD_SET, 0, ast.Pos{Lineno: 1})
+		c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", ast.Pos{Lineno: 1})
 	}
+	// PEP 649: module annotations are deferred. visitAnnAssign records
+	// each annotation into the unit's DeferredAnnotations slice, and
+	// emitDeferredAnnotations after the body emits a synthetic
+	// `__annotate__` function. moduleGetAnnotations
+	// (objects/module_annotations.go) invokes that function the first
+	// time `__annotations__` is read off the module.
+	//
+	// CPython: Python/codegen.c codegen_body (the
+	// codegen_process_deferred_annotations call after the body loop)
 	if err := c.visitStmts(body); err != nil {
+		return err
+	}
+	if err := c.emitDeferredAnnotations(ast.Pos{Lineno: 1}); err != nil {
 		return err
 	}
 	c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})
@@ -80,26 +102,6 @@ func (c *Compiler) visitStmts(stmts ast.Seq[ast.Stmt]) error {
 		}
 	}
 	return nil
-}
-
-// bodyHasAnnotations reports whether body contains an AnnAssign whose
-// target is a bare Name. SETUP_ANNOTATIONS is only worth emitting when
-// at least one such assignment will populate __annotations__. Module
-// and class bodies don't recurse into nested defs / classes (those have
-// their own scope and __annotations__), so a shallow scan over the
-// top-level statements matches CPython's ste_annotations_used flag.
-//
-// CPython: Python/symtable.c sets ste_annotations_used when an
-// AnnAssign with a Name target is visited at module / class scope.
-func bodyHasAnnotations(body ast.Seq[ast.Stmt]) bool {
-	for _, s := range body {
-		if a, ok := s.(*ast.AnnAssign); ok {
-			if _, ok := a.Target.(*ast.Name); ok {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // consumeDocstring inspects body[0] for a bare string literal. When

@@ -203,10 +203,10 @@ func TestBoundMethodReprFallsBackOnUnnamedFunc(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// BuiltinFunction has neither __qualname__ nor __name__ as
-	// attributes yet, so the "?" fallback applies.
-	if got != "<bound method ? of 'self'>" {
-		t.Errorf("Repr = %q, want fallback", got)
+	// BuiltinFunction now exposes __qualname__ via getset (methodobject.c:231),
+	// so the repr uses the function name.
+	if got != "<bound method unused of 'self'>" {
+		t.Errorf("Repr = %q, want bound method repr with name", got)
 	}
 }
 

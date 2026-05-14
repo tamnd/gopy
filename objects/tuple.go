@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -33,6 +34,8 @@ func init() {
 	TupleType.Sequence = &SequenceMethods{
 		Length:  tupleLen,
 		GetItem: tupleGetItem,
+		Concat:  tupleConcat,
+		Repeat:  tupleRepeat,
 	}
 	TupleType.TpTraverse = tupleTraverse
 	emptyTuple = &Tuple{}
@@ -187,6 +190,36 @@ func tupleEq(a, b *Tuple) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// tupleConcat is sq_concat for tuple: a + b builds a new tuple.
+//
+// CPython: Objects/tupleobject.c:L625 tupleconcat
+func tupleConcat(a, b Object) (Object, error) {
+	at := a.(*Tuple)
+	bt, ok := b.(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: can only concatenate tuple (not %q) to tuple", typeNameOf(b))
+	}
+	out := make([]Object, 0, len(at.items)+len(bt.items))
+	out = append(out, at.items...)
+	out = append(out, bt.items...)
+	return NewTuple(out), nil
+}
+
+// tupleRepeat is sq_repeat for tuple: t * n builds a new tuple.
+//
+// CPython: Objects/tupleobject.c:L641 tuplerepeat
+func tupleRepeat(o Object, n int) (Object, error) {
+	t := o.(*Tuple)
+	if n <= 0 || len(t.items) == 0 {
+		return emptyTuple, nil
+	}
+	out := make([]Object, 0, len(t.items)*n)
+	for i := 0; i < n; i++ {
+		out = append(out, t.items...)
+	}
+	return NewTuple(out), nil
 }
 
 // tupleIterator is the iterator returned by iter(tuple).

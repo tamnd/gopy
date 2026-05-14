@@ -227,6 +227,16 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 		}
 	case symtable.ClassBlock:
 		u.Flags = 0
+	case symtable.AnnotationBlock:
+		// PEP 649 __annotate__ runs as a regular function: optimized
+		// fast locals, fresh f_locals. Without these flags the inner
+		// code object lacks the CO_NEWLOCALS contract, so its single
+		// `format` parameter never lands in LOCALS[0] and the first
+		// LOAD_FAST inside the body trips on an unbound slot.
+		//
+		// CPython: Python/codegen.c codegen_setup_annotations_scope
+		// (the SCOPE_TYPE_FUNCTION flags it asks for)
+		u.Flags = CoOptimized | CoNewLocals
 	}
 	// CoNested: any scope nested inside a non-module scope. Mirrors
 	// CPython's compute_code_flags COMPILER_FLAGS_NESTED check.

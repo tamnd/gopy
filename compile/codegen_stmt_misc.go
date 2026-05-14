@@ -168,19 +168,17 @@ func (c *Compiler) visitAnnAssign(s *ast.AnnAssign) error {
 		// CPython skips the annotation-dict update for them too.
 		return nil
 	}
-	// Record the deferred annotation for any future PEP 649 hookup,
-	// then emit the eager store: __annotations__[name] = annotation.
+	// PEP 649 record-only at class and module scope. The body's emit
+	// path (codegen_class.go for class, codegen_stmt.go for module)
+	// drains DeferredAnnotations after visitStmts and synthesizes the
+	// `__annotate__` function. typeGetAttr / moduleGetAnnotations call
+	// it lazily on first `__annotations__` access.
+	//
+	// CPython: Python/codegen.c:5476 codegen_annassign
 	c.unit().DeferredAnnotations = append(
 		c.unit().DeferredAnnotations,
 		deferredAnnotation{Name: name.Id, Value: s.Annotation, Loc: loc(s)},
 	)
-	if err := c.visitExpr(s.Annotation); err != nil {
-		return err
-	}
-	pool := poolNames
-	c.addOpName(LOAD_NAME, &pool, "__annotations__", loc(s))
-	c.addLoadConst(name.Id, loc(s))
-	c.addOp(STORE_SUBSCR, loc(s))
 	return nil
 }
 
@@ -241,6 +239,11 @@ func (c *Compiler) visitAssert(s *ast.Assert) error {
 // for the AssertionError class. CPython:
 // Include/internal/pycore_opcode_utils.h CONSTANT_ASSERTIONERROR.
 const constantAssertionError = 0
+
+// constantNotImplementedError is the index passed to LOAD_COMMON_CONSTANT
+// for the NotImplementedError class. CPython:
+// Include/internal/pycore_opcode_utils.h CONSTANT_NOTIMPLEMENTEDERROR.
+const constantNotImplementedError = 1
 
 // visitImport handles `import a.b.c` and `import a.b.c as x`.
 //

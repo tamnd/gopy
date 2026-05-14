@@ -53,14 +53,6 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: str
-	case compile.BUILD_TEMPLATE:
-		interpolations := e.pop()
-		_ = interpolations
-		strings := e.pop()
-		_ = strings
-		// body bail: outputs not yet handled by action translator
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
-		// outputs: template
 	case compile.BUILD_TUPLE:
 		// sized input values, size=oparg
 		for i := 0; i < int(oparg); i++ { _ = e.pop() }

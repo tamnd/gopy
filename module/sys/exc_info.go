@@ -12,6 +12,25 @@ import (
 // import vm. Returns nil when no goroutine-bound thread is active.
 var CurrentThreadHook func() *state.Thread
 
+// sysException ports sys.exception(): returns the currently handled exception
+// or None. This is the Python 3.11+ replacement for sys.exc_info()[1].
+//
+// CPython: Python/sysmodule.c:573 sys_exception_impl
+func sysException(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if CurrentThreadHook == nil {
+		return objects.None(), nil
+	}
+	ts := CurrentThreadHook()
+	if ts == nil {
+		return objects.None(), nil
+	}
+	exc := errors.Handled(ts)
+	if exc == nil {
+		return objects.None(), nil
+	}
+	return exc, nil
+}
+
 // excInfo ports sys.exc_info(): when an exception is being handled,
 // returns the (type, value, traceback) tuple; otherwise returns
 // (None, None, None). The handled exception comes from the thread

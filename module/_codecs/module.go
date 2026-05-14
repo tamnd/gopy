@@ -70,7 +70,7 @@ var (
 
 func init() {
 	// Seed the well-known names so lookup_error returns them.
-	for _, name := range []string{"strict", "ignore", "replace"} {
+	for _, name := range []string{"strict", "ignore", "replace", "xmlcharrefreplace", "backslashreplace", "namereplace", "surrogatepass", "surrogateescape"} {
 		n := name // capture
 		codecs.RegisterError(n, func(enc string, input []byte, start, end int) (string, int, error) {
 			h, err := codecs.LookupError(n)

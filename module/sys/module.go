@@ -11,9 +11,11 @@
 package sys
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/initconfig"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -99,6 +101,36 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "modules", imp.SysModules()); err != nil {
 		return nil, err
 	}
+	// sys.flags is the struct-sequence warnings, traceback, and any
+	// PEP 587 tooling reads. UpdateConfig also stamps this once
+	// initconfig wires through; until then the inittab build hands a
+	// default-config flags so `import warnings` sees flags.dev_mode,
+	// flags.safe_path, flags.context_aware_warnings.
+	//
+	// CPython: Python/sysmodule.c:3478 set_flags_from_config
+	defaultCfg := &initconfig.PyConfig{}
+	defaultCfg.InitPythonConfig()
+	if err := setItem(md, "flags", makeFlags(defaultCfg)); err != nil {
+		return nil, err
+	}
+	// Path-config attributes populated by UpdateConfig when lifecycle runs.
+	// Stamp empty-string defaults here so stdlib modules that read them at
+	// import time (e.g. gettext reads sys.base_prefix) don't see
+	// AttributeError. UpdateConfig will overwrite these with real values
+	// once initconfig wires through.
+	//
+	// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig
+	for _, name := range []string{
+		"executable", "_base_executable",
+		"prefix", "base_prefix", "exec_prefix", "base_exec_prefix",
+		"platlibdir",
+	} {
+		if has, _ := md.Contains(objects.NewStr(name)); !has {
+			if err := setStr(md, name, ""); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// sys.exc_info reads the per-thread handled-exception slot the vm
 	// maintains across PUSH_EXC_INFO / POP_EXCEPT. unittest's
 	// _Outcome.testPartExecutor and traceback.format_exc both call it
@@ -106,6 +138,22 @@ func buildModule() (*objects.Module, error) {
 	//
 	// CPython: Python/sysmodule.c:558 sys_exc_info_impl
 	if err := setItem(md, "exc_info", objects.NewBuiltinFunction("exc_info", excInfo)); err != nil {
+		return nil, err
+	}
+	// sys.exception() is the Python 3.11+ replacement for sys.exc_info()[1].
+	// Returns the currently handled exception, or None.
+	//
+	// CPython: Python/sysmodule.c:573 sys_exception_impl
+	if err := setItem(md, "exception", objects.NewBuiltinFunction("exception", sysException)); err != nil {
+		return nil, err
+	}
+	// sys.intern interns a str object. The dedicated unicodeobject port
+	// will route through the global interned table; for now the helper
+	// returns the input unchanged so collections.namedtuple's typename /
+	// field-name pipeline sees round-trip semantics.
+	//
+	// CPython: Python/sysmodule.c:1004 sys_intern_impl
+	if err := setItem(md, "intern", objects.NewBuiltinFunction("intern", internShim)); err != nil {
 		return nil, err
 	}
 	// sys._getframe([depth]) returns the frame depth levels up the call
@@ -140,6 +188,30 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// internShim is the inittab-time form of sys.intern. The thread-aware
+// variant in helpers.go drops a PyExc_TypeError on the thread; the
+// inittab path has no thread handle, so the shim relies on the Go
+// error to carry the same TypeError message back to the VM.
+//
+// CPython: Python/sysmodule.c:1004 sys_intern_impl
+func internShim(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, errInternArity(len(args))
+	}
+	if args[0].Type() != objects.StrType() {
+		return nil, errInternType(args[0].Type().Name)
+	}
+	return args[0], nil
+}
+
+func errInternArity(n int) error {
+	return fmt.Errorf("TypeError: intern() takes exactly one argument (%d given)", n)
+}
+
+func errInternType(name string) error {
+	return fmt.Errorf("TypeError: can't intern %s", name)
 }
 
 // strListAsList returns the path entries as a list (mutable, so user

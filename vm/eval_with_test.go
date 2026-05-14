@@ -33,17 +33,20 @@ func TestEvalWithExceptStartDispatchesExitFn(t *testing.T) {
 
 	excVal := objects.NewStr("boom")
 	ts := state.NewThread()
+	// exit_self slot is PUSH_NULL: LOAD_SPECIAL's bound-descriptor path
+	// puts a stackref.Null there, and WITH_EXCEPT_START only prepends
+	// self when that slot is a real object.
 	co := &objects.Code{
 		Code: concat(
 			instr(compile.LOAD_CONST, 0), // exit_fn
-			instr(compile.LOAD_CONST, 1), // exit_self
-			instr(compile.LOAD_CONST, 2), // lasti
-			instr(compile.LOAD_CONST, 1), // unused
+			instr(compile.PUSH_NULL, 0),  // exit_self = Null sentinel
+			instr(compile.LOAD_CONST, 1), // lasti
+			instr(compile.LOAD_CONST, 2), // unused (None)
 			instr(compile.LOAD_CONST, 3), // exc_val (TOS)
 			instr(compile.WITH_EXCEPT_START, 0),
 			instr(compile.RETURN_VALUE, 0),
 		),
-		Consts:    []any{exitFn, nil, int64(0), excVal},
+		Consts:    []any{exitFn, int64(0), nil, excVal},
 		Stacksize: 8,
 	}
 

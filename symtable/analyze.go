@@ -124,7 +124,17 @@ func analyzeChildren(t *Table, ste *Entry, classEntry *Entry, scopes map[string]
 ) error {
 	for _, child := range ste.Children {
 		newClassEntry := pickClassEntry(ste, child, classEntry)
-		inlineComp := child.Comprehension != NoComprehension && !child.Generator && !ste.CanSeeClassScope
+		// CPython 3.12 (PEP 709) inlines non-generator comprehensions
+		// into their parent scope; the symtable side records that with
+		// child.CompInlined. gopy's codegen still emits a separate code
+		// object for the comp body (real inlining is spec 1696), so the
+		// inline path leaves Free vars in the comp pointing at no cell.
+		// Until codegen actually inlines, treat every comp as a normal
+		// nested scope so analyzeCells promotes captured outer locals
+		// to Cell and the closure tuple is built.
+		//
+		// CPython: Python/symtable.c:1265 inline_comprehension branch
+		inlineComp := false
 
 		childFree, err := analyzeChildBlock(t, child, newbound, newfree, newglobal, typeParams, newClassEntry)
 		if err != nil {

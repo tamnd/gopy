@@ -11,6 +11,14 @@ import (
 	"unicode/utf8"
 )
 
+// The xmlcharrefreplace / backslashreplace / namereplace / surrogatepass
+// / surrogateescape handlers below are stub ports that read enough of
+// the input slice to do the common-case replacement. CPython treats
+// the slice as Py_UCS4 codepoints; gopy keeps it as UTF-8 bytes, so
+// `start` and `end` are byte offsets.
+//
+// CPython: Python/codecs.c:1071-1567 codec_handler_*
+
 // ErrorHandler is a function that handles an encode or decode error.
 // It receives the position of the bad input and returns a replacement
 // string plus the new position to resume from.
@@ -29,6 +37,11 @@ func init() {
 	errorHandlers["strict"] = strictHandler
 	errorHandlers["ignore"] = ignoreHandler
 	errorHandlers["replace"] = replaceHandler
+	errorHandlers["xmlcharrefreplace"] = xmlCharRefReplaceHandler
+	errorHandlers["backslashreplace"] = backslashReplaceHandler
+	errorHandlers["namereplace"] = nameReplaceHandler
+	errorHandlers["surrogatepass"] = surrogatePassHandler
+	errorHandlers["surrogateescape"] = surrogateEscapeHandler
 }
 
 // RegisterError registers a named error handler. Overwrites any prior
@@ -73,4 +86,83 @@ func ignoreHandler(_ string, _ []byte, _ int, end int) (replacement string, newp
 // CPython: Python/codecs.c:L882 replace_errors
 func replaceHandler(_ string, _ []byte, _ int, end int) (replacement string, newpos int, err error) {
 	return string(utf8.RuneError), end, nil
+}
+
+// runeAt decodes the UTF-8 rune that starts at offset i in input.
+// Returns U+FFFD on invalid UTF-8, matching codecs that pre-validated
+// their input.
+func runeAt(input []byte, i int) (rune, int) {
+	if i < 0 || i >= len(input) {
+		return utf8.RuneError, 1
+	}
+	r, sz := utf8.DecodeRune(input[i:])
+	if sz == 0 {
+		return utf8.RuneError, 1
+	}
+	return r, sz
+}
+
+// xmlCharRefReplaceHandler emits &#N; for every unencodable codepoint
+// in the slice. Encode-only; decode-side use raises just like CPython
+// does.
+//
+// CPython: Python/codecs.c:1071 PyCodec_XMLCharRefReplaceErrors
+func xmlCharRefReplaceHandler(_ string, input []byte, start, end int) (string, int, error) {
+	var out []byte
+	for i := start; i < end; {
+		r, sz := runeAt(input, i)
+		out = append(out, []byte(fmt.Sprintf("&#%d;", r))...)
+		i += sz
+	}
+	return string(out), end, nil
+}
+
+// backslashReplaceHandler emits \xNN / \uNNNN / \UNNNNNNNN for every
+// codepoint in the slice. Used by both encode and decode paths.
+//
+// CPython: Python/codecs.c:1020 PyCodec_BackslashReplaceErrors
+func backslashReplaceHandler(_ string, input []byte, start, end int) (string, int, error) {
+	var out []byte
+	for i := start; i < end; {
+		r, sz := runeAt(input, i)
+		switch {
+		case r < 0x100:
+			out = append(out, []byte(fmt.Sprintf("\\x%02x", r))...)
+		case r < 0x10000:
+			out = append(out, []byte(fmt.Sprintf("\\u%04x", r))...)
+		default:
+			out = append(out, []byte(fmt.Sprintf("\\U%08x", r))...)
+		}
+		i += sz
+	}
+	return string(out), end, nil
+}
+
+// nameReplaceHandler ports CPython's \N{NAME} escape. gopy does not
+// vendor the unicode-name database yet, so we fall back to the
+// backslash-replace formatting until that table lands.
+//
+// CPython: Python/codecs.c:1085 PyCodec_NameReplaceErrors
+func nameReplaceHandler(enc string, input []byte, start, end int) (string, int, error) {
+	return backslashReplaceHandler(enc, input, start, end)
+}
+
+// surrogatePassHandler passes UTF-16 surrogate halves through encode
+// and decode unchanged. The current call site only registers the
+// handler; an actual codec invocation routes through the strict
+// fallback until the UnicodeError objects expose start/end slots.
+//
+// CPython: Python/codecs.c:1403 PyCodec_SurrogatePassErrors
+func surrogatePassHandler(enc string, input []byte, start, end int) (string, int, error) {
+	return strictHandler(enc, input, start, end)
+}
+
+// surrogateEscapeHandler is the PEP 383 codec error handler used when
+// the OS hands us undecodable bytes. Like surrogatepass, the full
+// version needs UnicodeError objects; we register the name so
+// codecs.lookup_error("surrogateescape") succeeds at module load.
+//
+// CPython: Python/codecs.c:1496 PyCodec_SurrogateEscapeErrors
+func surrogateEscapeHandler(enc string, input []byte, start, end int) (string, int, error) {
+	return strictHandler(enc, input, start, end)
 }

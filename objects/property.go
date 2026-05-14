@@ -34,6 +34,86 @@ func init() {
 	PropertyType.DescrSet = propertyDescrSet
 	PropertyType.TpNew = propertyNew
 	addDescriptorSlotWrappers(PropertyType)
+
+	// property_methods: .getter / .setter / .deleter decorators.
+	// Each returns a copy of the property with one field replaced.
+	// CPython: Objects/descrobject.c:1683 property_getter / _setter / _deleter
+	SetTypeDescr(PropertyType, "getter", NewMethodDescr(PropertyType, "getter", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, errors.New("TypeError: getter() requires self and fget")
+		}
+		p, ok := args[0].(*Property)
+		if !ok {
+			return nil, errors.New("TypeError: descriptor 'getter' requires a 'property' object")
+		}
+		return p.Getter(args[1]), nil
+	}))
+	SetTypeDescr(PropertyType, "setter", NewMethodDescr(PropertyType, "setter", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, errors.New("TypeError: setter() requires self and fset")
+		}
+		p, ok := args[0].(*Property)
+		if !ok {
+			return nil, errors.New("TypeError: descriptor 'setter' requires a 'property' object")
+		}
+		return p.Setter(args[1]), nil
+	}))
+	SetTypeDescr(PropertyType, "deleter", NewMethodDescr(PropertyType, "deleter", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, errors.New("TypeError: deleter() requires self and fdel")
+		}
+		p, ok := args[0].(*Property)
+		if !ok {
+			return nil, errors.New("TypeError: descriptor 'deleter' requires a 'property' object")
+		}
+		return p.Deleter(args[1]), nil
+	}))
+	// property_getset: __doc__, fget, fset, fdel
+	// CPython: Objects/descrobject.c:1795 property_getset
+	SetTypeDescr(PropertyType, "__doc__", NewGetSetDescr("__doc__",
+		func(o Object) (Object, error) {
+			p := o.(*Property)
+			if p.doc != nil {
+				return p.doc, nil
+			}
+			return None(), nil
+		},
+		func(o Object, v Object) error {
+			p := o.(*Property)
+			p.doc = v
+			return nil
+		},
+	))
+	SetTypeDescr(PropertyType, "fget", NewGetSetDescr("fget",
+		func(o Object) (Object, error) {
+			p := o.(*Property)
+			if p.fget != nil {
+				return p.fget, nil
+			}
+			return None(), nil
+		},
+		nil,
+	))
+	SetTypeDescr(PropertyType, "fset", NewGetSetDescr("fset",
+		func(o Object) (Object, error) {
+			p := o.(*Property)
+			if p.fset != nil {
+				return p.fset, nil
+			}
+			return None(), nil
+		},
+		nil,
+	))
+	SetTypeDescr(PropertyType, "fdel", NewGetSetDescr("fdel",
+		func(o Object) (Object, error) {
+			p := o.(*Property)
+			if p.fdel != nil {
+				return p.fdel, nil
+			}
+			return None(), nil
+		},
+		nil,
+	))
 }
 
 // propertyNew is the tp_new slot. property([fget[, fset[, fdel[, doc]]]])

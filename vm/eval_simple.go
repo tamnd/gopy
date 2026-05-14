@@ -367,6 +367,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		if ierr != nil {
 			return 0, nil, nil, false, true, ierr
 		}
+		if it == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("vm: GET_ITER: Iter returned nil for %T", obj)
+		}
 		e.pushObject(it)
 		return e.advance(), nil, nil, false, true, nil
 
@@ -375,6 +378,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// directly to avoid the dup but the FOR_ITER arm in 3.14 keeps
 		// the iterator on the stack across iterations.
 		it := e.peek(0).AsObject()
+		if it == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("vm: TypeError: FOR_ITER on nil object")
+		}
 		t := it.Type()
 		if t.IterNext == nil {
 			return 0, nil, nil, false, true, fmt.Errorf("vm: TypeError: '%s' object is not an iterator", t.Name)
@@ -847,6 +853,14 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(s)
 		return e.advance(), nil, nil, false, true, nil
 
+	case compile.BUILD_TEMPLATE:
+		// PEP 750 t-string literal. Stack: [strings_tuple, interpolations_tuple].
+		// CPython: Python/bytecodes.c:1977 BUILD_TEMPLATE
+		interpolations := e.popObject()
+		strings := e.popObject()
+		e.pushObject(objects.NewTemplateStr(strings, interpolations))
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.SET_ADD:
 		// Stack: ..., set, ..., value (oparg slots above set). Pops value,
 		// adds to the set at depth oparg.
@@ -966,7 +980,16 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			lasti := e.peek(int(oparg) - 1).AsObject()
 			if li, ok := lasti.(*objects.Int); ok {
 				v, _ := li.Int64()
-				e.f.InstrPtr = int(v) * 2
+				// Record the original raising site for traceback only.
+				// We must NOT touch InstrPtr: handleException looks the
+				// exception table up by InstrPtr, and rewinding it to the
+				// raise site would re-enter the same SETUP_WITH handler
+				// that just ran __exit__, looping forever.
+				//
+				// CPython: Python/bytecodes.c RERAISE (SET_LASTI for
+				// frame->prev_instr) - we mirror that by stamping
+				// PrevInstr, not InstrPtr.
+				e.f.PrevInstr = int(v) * 2
 			}
 		}
 		if pyExc, ok := exc.(*pyerrors.Exception); ok {

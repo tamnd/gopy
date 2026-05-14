@@ -36,6 +36,46 @@ func init() {
 		SetItem:  byteArraySetItem,
 		Contains: byteArrayContains,
 	}
+	// Mapping slot covers int / slice subscript dispatch. CPython
+	// routes b[k] through bytearray_subscript; without a Mapping slot
+	// slice keys would fall back to the generic sliceSequence helper
+	// that rewraps results as a list.
+	//
+	// CPython: Objects/bytearrayobject.c:478 bytearray_subscript_lock_held
+	ByteArrayType.Mapping = &MappingMethods{
+		Length:  byteArrayLen,
+		GetItem: byteArraySubscript,
+	}
+}
+
+// byteArraySubscript ports bytearray_subscript: int keys return the
+// byte value as an int, slice keys return a fresh bytearray.
+//
+// CPython: Objects/bytearrayobject.c:478 bytearray_subscript_lock_held
+func byteArraySubscript(o, key Object) (Object, error) {
+	b := o.(*ByteArray)
+	if sl, ok := key.(*Slice); ok {
+		start, _, step, slicelen, err := sl.GetIndices(len(b.v))
+		if err != nil {
+			return nil, err
+		}
+		if slicelen <= 0 {
+			return NewByteArray(nil), nil
+		}
+		if step == 1 {
+			return NewByteArray(b.v[start : start+slicelen]), nil
+		}
+		out := make([]byte, slicelen)
+		for i, cur := 0, start; i < slicelen; i, cur = i+1, cur+step {
+			out[i] = b.v[cur]
+		}
+		return NewByteArray(out), nil
+	}
+	idx, err := indexValueAsInt(key, "bytearray")
+	if err != nil {
+		return nil, err
+	}
+	return byteArrayGetItem(o, idx)
 }
 
 // NewByteArray wraps a copy of buf in a ByteArray.

@@ -90,6 +90,8 @@ func (c *Compiler) visitExprMisc(e ast.Expr) (bool, error) {
 		return true, c.visitYieldFrom(n)
 	case *ast.Await:
 		return true, c.visitAwait(n)
+	case *ast.TemplateStr:
+		return true, c.visitTemplateStr(n)
 	case *ast.JoinedStr:
 		return true, c.visitJoinedStr(n)
 	case *ast.FormattedValue:

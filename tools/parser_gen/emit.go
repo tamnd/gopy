@@ -896,6 +896,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenJoinedStr":                true,
 		"actionPgenInterpolation":            true,
 		"actionPgenConcatenateStrings":       true,
+		"actionPgenTemplateStr":              true,
 		"actionPgenConcatenateTstrings":      true,
 		"actionPgenCheckFstringConversion":   true,
 		"actionPgenAddTypeCommentToArg":      true,

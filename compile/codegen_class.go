@@ -155,6 +155,24 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 		c.addOpI(MAKE_CELL, int32(idx), loc(s))
 	}
 
+	// PEP 649 __classdict__: the synthetic __annotate__ function closes
+	// over the class body's f_locals via this cell so annotation
+	// expressions can look up sibling annotations defined on the same
+	// class. The symtable analyzer flips NeedsClassDict whenever a
+	// nested AnnotationBlock declares __classdict__ as Use; we stamp
+	// the cell here and seed it with LOAD_LOCALS so a later LOAD_DEREF
+	// inside the annotate body sees the class namespace.
+	//
+	// CPython: Python/compile.c compiler_classdef (LOAD_LOCALS +
+	// STORE_FAST __classdict__ block)
+	if innerScope.NeedsClassDict {
+		cellPool := poolCellVars
+		idx := c.poolIndex(&cellPool, "__classdict__")
+		c.addOpI(MAKE_CELL, int32(idx), loc(s))
+		c.addOp(LOAD_LOCALS, loc(s))
+		c.addOpI(STORE_DEREF, int32(idx), loc(s))
+	}
+
 	// __name__ -> __module__: the class body sees the enclosing
 	// module's __name__ via the surrounding namespace (LOAD_NAME) and
 	// stores it as the class's __module__ attribute.
@@ -190,18 +208,35 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 		body = body[1:]
 	}
 
-	// SETUP_ANNOTATIONS makes __annotations__ an empty dict in the
-	// class namespace when the body carries annotated assignments.
-	// AnnAssign stores into that dict so dataclasses / typing reflect
-	// on cls.__annotations__.
+	// PEP 649 conditional-annotations prologue: when an annotation
+	// lives inside a conditional branch (if / for / while / try), the
+	// symtable analyzer flags the class entry with
+	// HasConditionalAnnotations. The body opens an empty set under
+	// __conditional_annotations__ that the conditional emitter inside
+	// visitAnnAssign tracks names against, so __annotate__ can report
+	// which annotations were actually evaluated.
 	//
-	// CPython: Python/codegen.c codegen_class_body (the
-	// ste_annotations_used check before visiting the body)
-	if bodyHasAnnotations(body) {
-		c.addOp(SETUP_ANNOTATIONS, loc(s))
+	// CPython: Python/codegen.c:860 codegen_class_body (BUILD_SET 0 +
+	// STORE_NAME __conditional_annotations__)
+	if innerScope.HasConditionalAnnotations {
+		c.addOpI(BUILD_SET, 0, loc(s))
+		c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", loc(s))
 	}
 
+	// PEP 649: class-body annotations are deferred. visitAnnAssign
+	// records each annotation into the unit's DeferredAnnotations
+	// slice instead of emitting an eager STORE_SUBSCR, and we synth
+	// the `__annotate__` function after visitStmts. The lazy
+	// `__annotations__` getset (objects/type_attr.go:typeGetAttr)
+	// invokes that function on first read. Skip SETUP_ANNOTATIONS
+	// entirely; nothing in the body writes to __annotations__ now.
+	//
+	// CPython: Python/codegen.c codegen_class_body (the
+	// codegen_process_deferred_annotations call after the body loop)
 	if err := c.visitStmts(body); err != nil {
+		return err
+	}
+	if err := c.emitDeferredAnnotations(loc(s)); err != nil {
 		return err
 	}
 

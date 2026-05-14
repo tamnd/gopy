@@ -146,9 +146,10 @@ func (l *List) Copy() *List {
 	return NewList(l.items)
 }
 
-// listRichCmp implements the rich-compare slot for lists. Only EQ/NE
-// are wired today; the abstract layer asks the other side for the
-// ordered operators by returning NotImplemented.
+// listRichCmp implements the rich-compare slot for lists. EQ/NE
+// short-circuit on length; the ordered ops walk pairwise until the
+// first non-equal pair and defer to that pair's comparison, falling
+// back to length when one list is a prefix of the other.
 //
 // CPython: Objects/listobject.c:2999 list_richcompare
 func listRichCmp(a, b Object, op CompareOp) (Object, error) {
@@ -180,5 +181,29 @@ func listRichCmp(a, b Object, op CompareOp) (Object, error) {
 		}
 		return NewBool(eq), nil
 	}
-	return notImplemented(), nil
+	// Ordered: find first differing index, then compare those items.
+	n := min(len(al.items), len(bl.items))
+	for i := range n {
+		eq, err := RichCmpBool(al.items[i], bl.items[i], CompareEQ)
+		if err != nil {
+			return nil, err
+		}
+		if !eq {
+			return RichCmp(al.items[i], bl.items[i], op)
+		}
+	}
+	// All shared items equal: decide by length.
+	la, lb := len(al.items), len(bl.items)
+	var r bool
+	switch op {
+	case CompareLT:
+		r = la < lb
+	case CompareLE:
+		r = la <= lb
+	case CompareGT:
+		r = la > lb
+	case CompareGE:
+		r = la >= lb
+	}
+	return NewBool(r), nil
 }

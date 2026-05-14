@@ -176,8 +176,14 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		f.SetLocal(kwSlot, stackref.FromObject(kwDict))
 	}
 	// Keyword bind: scan the positional + kw-only window for a name
-	// match. Names not found land in **kwargs (or error if absent).
+	// match. With *args, the varargs slot sits at index npos so the
+	// kw-only slots shift to [npos+1 .. npos+1+nkwonly).
+	//
+	// CPython: Objects/call.c:_PyEval_BindArguments keyword loop
 	kwWindow := npos + nkwonly
+	if hasVarargs {
+		kwWindow++
+	}
 	for k, v := range kwargs {
 		idx := -1
 		for i := 0; i < kwWindow; i++ {
