@@ -500,32 +500,42 @@ func TestIOOpenBinaryRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rb.bin")
 
-	// Write via _io.Open binary mode.
+	call := func(o objects.Object, name string, args []objects.Object) (objects.Object, error) {
+		fn, err := objects.GetAttr(o, objects.NewStr(name))
+		if err != nil {
+			return nil, err
+		}
+		return objects.Call(fn, objects.NewTuple(args), nil)
+	}
+
+	// Write via _io.Open binary mode (returns a BufferedWriter wrapping FileIO).
 	wobj, err := Open([]objects.Object{objects.NewStr(path), objects.NewStr("wb")}, nil)
 	if err != nil {
 		t.Fatalf("open(wb): %v", err)
 	}
-	fi := wobj.(*FileIO)
-	if _, err := fi.Write([]byte{1, 2, 3}); err != nil {
+	if _, err := call(wobj, "write", []objects.Object{objects.NewBytes([]byte{1, 2, 3})}); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if err := fi.Close(); err != nil {
+	if _, err := call(wobj, "close", nil); err != nil {
 		t.Fatalf("Close(wb): %v", err)
 	}
 
-	// Read it back.
+	// Read it back (returns a BufferedReader).
 	robj, err := Open([]objects.Object{objects.NewStr(path), objects.NewStr("rb")}, nil)
 	if err != nil {
 		t.Fatalf("open(rb): %v", err)
 	}
-	rfi := robj.(*FileIO)
-	defer rfi.Close()
-	data, err := rfi.Read(-1)
+	defer call(robj, "close", nil)
+	got, err := call(robj, "read", []objects.Object{objects.NewInt(-1)})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if string(data) != "\x01\x02\x03" {
-		t.Fatalf("Read = %q, want %q", data, "\x01\x02\x03")
+	b, ok := got.(*objects.Bytes)
+	if !ok {
+		t.Fatalf("read returned %T, want bytes", got)
+	}
+	if string(b.Bytes()) != "\x01\x02\x03" {
+		t.Fatalf("Read = %q, want %q", b.Bytes(), "\x01\x02\x03")
 	}
 }
 
