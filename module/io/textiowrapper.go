@@ -1021,3 +1021,56 @@ func (t *TextIOWrapper) Readline(size int) (string, error) {
 	return t.readline(size)
 }
 
+// --- _TextIOBase abstract base -----------------------------------------------
+
+// TextIOBaseType is the type singleton for _io._TextIOBase.
+//
+// CPython: Modules/_io/textio.c:202 textiobase_slots / textiobase_spec
+var TextIOBaseType = objects.NewType("_io._TextIOBase", []*objects.Type{IOBaseType})
+
+// textIOBaseGetattr dispatches attribute lookups on _TextIOBase instances.
+//
+// CPython: Modules/_io/textio.c:187 textiobase_methods + textiobase_getset
+func textIOBaseGetattr(_ objects.Object, nameObj objects.Object) (objects.Object, error) {
+	name, ok := nameObj.(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: attribute name must be string")
+	}
+	switch name.Value() {
+	case "detach":
+		// CPython: Modules/_io/textio.c:66 _io__TextIOBase_detach_impl
+		return objects.NewBuiltinFunction("detach", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return nil, fmt.Errorf("UnsupportedOperation: detach")
+		}), nil
+	case "read":
+		// CPython: Modules/_io/textio.c:86 _io__TextIOBase_read_impl
+		return objects.NewBuiltinFunction("read", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return nil, fmt.Errorf("UnsupportedOperation: read")
+		}), nil
+	case "readline":
+		// CPython: Modules/_io/textio.c:107 _io__TextIOBase_readline_impl
+		return objects.NewBuiltinFunction("readline", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return nil, fmt.Errorf("UnsupportedOperation: readline")
+		}), nil
+	case "write":
+		// CPython: Modules/_io/textio.c:128 _io__TextIOBase_write_impl
+		return objects.NewBuiltinFunction("write", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return nil, fmt.Errorf("UnsupportedOperation: write")
+		}), nil
+	case "encoding":
+		// CPython: Modules/_io/textio.c:146 _io__TextIOBase_encoding_get_impl
+		return objects.None(), nil
+	case "newlines":
+		// CPython: Modules/_io/textio.c:164 _io__TextIOBase_newlines_get_impl
+		return objects.None(), nil
+	case "errors":
+		// CPython: Modules/_io/textio.c:180 _io__TextIOBase_errors_get_impl
+		return objects.None(), nil
+	}
+	return nil, fmt.Errorf("AttributeError: '_io._TextIOBase' object has no attribute '%s'", name.Value())
+}
+
+func init() {
+	TextIOBaseType.Getattro = textIOBaseGetattr
+}
+

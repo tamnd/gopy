@@ -92,7 +92,7 @@ func buildModule() (*objects.Module, error) {
 		{"_IOBase", IOBaseType},
 		{"_RawIOBase", RawIOBaseType},
 		{"_BufferedIOBase", BufferedIOBaseType},
-		{"_TextIOBase", stubType("_io._TextIOBase")},
+		{"_TextIOBase", TextIOBaseType},
 
 		{"UnsupportedOperation", unsupportedOpType},
 
