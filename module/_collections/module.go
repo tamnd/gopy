@@ -88,7 +88,10 @@ func newDequeType() *objects.Type {
 			d := o.(*dequeObject)
 			return dequeContains(d, v)
 		},
+		Concat:        dequeSeqConcat,
+		Repeat:        dequeSeqRepeat,
 		InPlaceConcat: dequeSeqInPlaceConcat,
+		InPlaceRepeat: dequeSeqInPlaceRepeat,
 	}
 	objects.SetTypeDescr(t, "maxlen", &maxlenDescr{})
 	objects.SetTypeDescr(t, "append", objects.NewMethodDescr(t, "append", dequeAppendMethod))
@@ -108,6 +111,8 @@ func newDequeType() *objects.Type {
 	objects.SetTypeDescr(t, "__copy__", objects.NewMethodDescr(t, "__copy__", dequeCopyMethod))
 	objects.SetTypeDescr(t, "__reversed__", objects.NewMethodDescr(t, "__reversed__", dequeReversedMethod))
 	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", dequeInitMethod))
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", dequeReduceMethod))
+	objects.SetTypeDescr(t, "__sizeof__", objects.NewMethodDescr(t, "__sizeof__", dequeSizeofMethod))
 	return t
 }
 
@@ -692,6 +697,112 @@ func dequeReversedMethod(args []objects.Object, _ map[string]objects.Object) (ob
 	return newDequeRevIter(d), nil
 }
 
+// dequeReduceMethod implements deque.__reduce__.
+//
+// CPython: Modules/_collectionsmodule.c:1600 deque___reduce___impl
+func dequeReduceMethod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	d := args[0].(*dequeObject)
+	src := d.items[d.head:d.tail]
+	listItems := make([]objects.Object, len(src))
+	copy(listItems, src)
+	it, err := objects.Iter(objects.NewList(listItems))
+	if err != nil {
+		return nil, err
+	}
+	emptyArgs := objects.NewTuple(nil)
+	state := objects.None()
+	if d.maxlen < 0 {
+		return objects.NewTuple([]objects.Object{
+			d.Type(),
+			emptyArgs,
+			state,
+			it,
+		}), nil
+	}
+	argsTup := objects.NewTuple([]objects.Object{
+		objects.NewTuple(nil),
+		objects.NewInt(d.maxlen),
+	})
+	return objects.NewTuple([]objects.Object{
+		d.Type(),
+		argsTup,
+		state,
+		it,
+	}), nil
+}
+
+// dequeSizeofMethod implements deque.__sizeof__. The CPython value reflects
+// block layout; here we return a plausible total based on capacity, matching
+// the behavioral contract (a positive int proportional to length).
+//
+// CPython: Modules/_collectionsmodule.c:1785 deque___sizeof___impl
+func dequeSizeofMethod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	d := args[0].(*dequeObject)
+	const headerSize = 64
+	return objects.NewInt(int64(headerSize + cap(d.items)*8)), nil
+}
+
+// dequeSeqConcat implements deque + other (sq_concat).
+//
+// CPython: Modules/_collectionsmodule.c:675 deque_concat_lock_held
+func dequeSeqConcat(a, b objects.Object) (objects.Object, error) {
+	d := a.(*dequeObject)
+	if _, ok := b.(*dequeObject); !ok {
+		return nil, fmt.Errorf("TypeError: can only concatenate deque (not \"%s\") to deque", b.Type().Name)
+	}
+	cp, err := dequeCopyMethod([]objects.Object{d}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := dequeSeqInPlaceConcat(cp, b); err != nil {
+		return nil, err
+	}
+	return cp, nil
+}
+
+// dequeSeqRepeat implements deque * n (sq_repeat).
+//
+// CPython: Modules/_collectionsmodule.c:908 deque_repeat
+func dequeSeqRepeat(o objects.Object, n int) (objects.Object, error) {
+	d := o.(*dequeObject)
+	cp, err := dequeCopyMethod([]objects.Object{d}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := dequeSeqInPlaceRepeat(cp, n); err != nil {
+		return nil, err
+	}
+	return cp, nil
+}
+
+// dequeSeqInPlaceRepeat implements deque *= n (sq_inplace_repeat).
+//
+// CPython: Modules/_collectionsmodule.c:820 deque_inplace_repeat_lock_held
+func dequeSeqInPlaceRepeat(o objects.Object, n int) (objects.Object, error) {
+	d := o.(*dequeObject)
+	size := dequeLen(d)
+	if size == 0 || n == 1 {
+		return d, nil
+	}
+	if n <= 0 {
+		for i := d.head; i < d.tail; i++ {
+			d.items[i] = nil
+		}
+		d.head = 0
+		d.tail = 0
+		d.state++
+		return d, nil
+	}
+	src := make([]objects.Object, size)
+	copy(src, d.items[d.head:d.tail])
+	for i := 0; i < n-1; i++ {
+		for _, v := range src {
+			dequeAppendRight(d, v)
+		}
+	}
+	return d, nil
+}
+
 // dequeSeqLen is the sq_length slot.
 //
 // CPython: Modules/_collectionsmodule.c:1236 deque_len
@@ -1031,6 +1142,14 @@ func newDefaultDictType() *objects.Type {
 	objects.SetTypeDescr(t, "items", objects.NewMethodDescr(t, "items", defaultDictItems))
 	objects.SetTypeDescr(t, "get", objects.NewMethodDescr(t, "get", defaultDictGet))
 	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", defaultDictInitMethod))
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", defaultDictReduceMethod))
+	objects.SetTypeDescr(t, "__or__", objects.NewMethodDescr(t, "__or__", defaultDictOrMethod))
+	objects.SetTypeDescr(t, "__ror__", objects.NewMethodDescr(t, "__ror__", defaultDictRorMethod))
+	objects.SetTypeDescr(t, "__ior__", objects.NewMethodDescr(t, "__ior__", defaultDictIorMethod))
+	t.Number = &objects.NumberMethods{
+		Or:        defaultDictOr,
+		InPlaceOr: defaultDictIor,
+	}
 	return t
 }
 
@@ -1123,6 +1242,9 @@ func defaultDictSetup(dd *DefaultDictObject, args []objects.Object, kwargs map[s
 
 	// Populate from remaining positional args (treated as dict init).
 	for _, kv := range args {
+		if err := mergeIntoDict(dd.Dict, kv); err == nil {
+			continue
+		}
 		it, err := objects.Iter(kv)
 		if err != nil {
 			return nil, err
@@ -1275,6 +1397,139 @@ func defaultDictCopy(args []objects.Object, _ map[string]objects.Object) (object
 		}
 	}
 	return nd, nil
+}
+
+// defaultDictReduceMethod implements defaultdict.__reduce__.
+//
+// CPython: Modules/_collectionsmodule.c:2274 defdict_reduce
+func defaultDictReduceMethod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	dd := args[0].(*DefaultDictObject)
+	var factoryArgs *objects.Tuple
+	if dd.DefaultFactory == nil || objects.IsNone(dd.DefaultFactory) {
+		factoryArgs = objects.NewTuple(nil)
+	} else {
+		factoryArgs = objects.NewTuple([]objects.Object{dd.DefaultFactory})
+	}
+	itemsRes, err := defaultDictItems([]objects.Object{dd}, nil)
+	if err != nil {
+		return nil, err
+	}
+	it, err := objects.Iter(itemsRes)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewTuple([]objects.Object{
+		dd.Type(),
+		factoryArgs,
+		objects.None(),
+		objects.None(),
+		it,
+	}), nil
+}
+
+// defaultDictOr implements defaultdict | other via nb_or.
+//
+// CPython: Modules/_collectionsmodule.c:2402 defdict_or
+func defaultDictOr(a, b objects.Object) (objects.Object, error) {
+	left, lok := a.(*DefaultDictObject)
+	right, rok := b.(*DefaultDictObject)
+	var self *DefaultDictObject
+	switch {
+	case lok:
+		self = left
+	case rok:
+		self = right
+	default:
+		return objects.NotImplemented(), nil
+	}
+	if _, isDict := b.(*objects.Dict); !isDict {
+		if _, isDD := b.(*DefaultDictObject); !isDD {
+			if _, isDict := a.(*objects.Dict); !isDict {
+				if _, isDD := a.(*DefaultDictObject); !isDD {
+					return objects.NotImplemented(), nil
+				}
+			}
+		}
+	}
+	// Build a new defaultdict seeded from `a`.
+	newDD := &DefaultDictObject{
+		Dict:           objects.NewDict(),
+		DefaultFactory: self.DefaultFactory,
+	}
+	newDD.Init(self.Type())
+	if err := mergeIntoDict(newDD.Dict, a); err != nil {
+		return nil, err
+	}
+	if err := mergeIntoDict(newDD.Dict, b); err != nil {
+		return nil, err
+	}
+	return newDD, nil
+}
+
+// defaultDictIor implements defaultdict |= other via nb_inplace_or.
+//
+// CPython: Modules/_collectionsmodule.c uses dict's tp_as_number->nb_inplace_or
+// by inheritance; defaultdict reuses dict's update semantics in-place.
+func defaultDictIor(a, b objects.Object) (objects.Object, error) {
+	dd, ok := a.(*DefaultDictObject)
+	if !ok {
+		return objects.NotImplemented(), nil
+	}
+	if err := mergeIntoDict(dd.Dict, b); err != nil {
+		return nil, err
+	}
+	return dd, nil
+}
+
+func defaultDictOrMethod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: __or__ requires self and other")
+	}
+	return defaultDictOr(args[0], args[1])
+}
+
+func defaultDictRorMethod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: __ror__ requires self and other")
+	}
+	return defaultDictOr(args[1], args[0])
+}
+
+func defaultDictIorMethod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: __ior__ requires self and other")
+	}
+	return defaultDictIor(args[0], args[1])
+}
+
+// mergeIntoDict copies key/value pairs from src into dst. src may be a dict
+// or defaultdict.
+func mergeIntoDict(dst *objects.Dict, src objects.Object) error {
+	switch s := src.(type) {
+	case *objects.Dict:
+		for _, k := range s.Keys() {
+			v, err := s.GetItem(k)
+			if err != nil {
+				return err
+			}
+			if err := dst.SetItem(k, v); err != nil {
+				return err
+			}
+		}
+	case *DefaultDictObject:
+		for _, k := range s.Dict.Keys() {
+			v, err := s.Dict.GetItem(k)
+			if err != nil {
+				return err
+			}
+			if err := dst.SetItem(k, v); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("TypeError: unsupported operand for | with '%s'", src.Type().Name)
+	}
+	return nil
 }
 
 // defaultDictRepr renders defaultdict(factory, {...}).
