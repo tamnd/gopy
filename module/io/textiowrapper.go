@@ -34,6 +34,28 @@ type TextIOWrapper struct {
 	writethrough  bool
 	closed        bool
 	detached      bool
+
+	// Newline policy fields, set by __init__ from the newline= option.
+	// CPython: Modules/_io/textio.c:1101 _textiowrapper_set_newline
+	//   readnl         original newline argument ("", "\n", "\r", "\r\n", or
+	//                  None encoded as a sentinel below).
+	//   readuniversal  true when newline is None or "" (decoder tracks \r/\n/\r\n).
+	//   readtranslate  true when newline is None (decoder folds to "\n").
+	//   writenl        sequence to emit for "\n" on write ("" means no translate).
+	readnl        string
+	hasReadnl     bool
+	readuniversal bool
+	readtranslate bool
+	writenl       string
+
+	// Decoder for the read path: lazily built on the first read once we
+	// know readuniversal / readtranslate.
+	nlDecoder *IncrementalNewlineDecoder
+
+	// decodedBuf holds decoded characters that have been read from the
+	// underlying buffer but not yet consumed by read / readline.
+	// CPython: Modules/_io/textio.c "decoded_chars" field.
+	decodedBuf string
 }
 
 // TextIOWrapperType is the type singleton for _io.TextIOWrapper.
@@ -132,8 +154,51 @@ func textIOWrapperCall(_ objects.Object, args []objects.Object, kwargs map[strin
 		linebuffering: linebuf,
 		writethrough:  writethrough,
 	}
+	if err := t.setNewline(bound[3]); err != nil {
+		return nil, err
+	}
 	t.Init(TextIOWrapperType)
 	return t, nil
+}
+
+// setNewline parses the `newline` argument and configures the read/write
+// translation policy.
+//
+// newline accepts None / "" / "\n" / "\r" / "\r\n":
+//   - None: universal newlines + translate to "\n" on read; "\n" -> os.linesep
+//     on write (Windows; on Unix-like systems no translation).
+//   - "":   universal newlines, no translation on read; no translation on write.
+//   - "\n" / "\r" / "\r\n": preserve the chosen terminator; readlines do not
+//     translate; on write any "\n" is replaced with the chosen terminator
+//     except when the choice is "\n" itself.
+//
+// CPython: Modules/_io/textio.c:1101 _textiowrapper_set_newline.
+func (t *TextIOWrapper) setNewline(arg objects.Object) error {
+	if arg == nil || objects.IsNone(arg) {
+		t.readuniversal = true
+		t.readtranslate = true
+		t.writenl = ""
+		return nil
+	}
+	s, ok := arg.(*objects.Unicode)
+	if !ok {
+		return fmt.Errorf("TypeError: illegal newline type: %s", arg.Type().Name)
+	}
+	switch s.Value() {
+	case "":
+		t.readuniversal = true
+	case "\n":
+		// no translation in either direction
+	case "\r":
+		t.writenl = "\r"
+	case "\r\n":
+		t.writenl = "\r\n"
+	default:
+		return fmt.Errorf("ValueError: illegal newline value: %q", s.Value())
+	}
+	t.readnl = s.Value()
+	t.hasReadnl = true
+	return nil
 }
 
 // textIOWrapperRepr returns a string representation.
@@ -378,6 +443,33 @@ func encodeString(s, encoding string) ([]byte, error) {
 
 // --- Public methods ---------------------------------------------------------
 
+// ensureNLDecoder lazily builds the IncrementalNewlineDecoder used by
+// read / readline. It honors the readuniversal / readtranslate fields
+// set by setNewline. When the wrapper is in pass-through mode
+// (newline= "\n" / "\r" / "\r\n") the decoder is bypassed.
+func (t *TextIOWrapper) ensureNLDecoder() {
+	if t.nlDecoder != nil || !t.readuniversal {
+		return
+	}
+	t.nlDecoder = &IncrementalNewlineDecoder{translate: t.readtranslate}
+	t.nlDecoder.Init(IncrementalNewlineDecoderType)
+}
+
+// decodeForRead decodes raw bytes and runs them through the universal
+// newline pipeline when readuniversal is set. final=true triggers the
+// final-flush of any pendingcr held by the decoder.
+func (t *TextIOWrapper) decodeForRead(data []byte, final bool) (string, error) {
+	s, err := decodeBytes(data, t.encoding)
+	if err != nil {
+		return "", err
+	}
+	if !t.readuniversal {
+		return s, nil
+	}
+	t.ensureNLDecoder()
+	return t.nlDecoder.translateNewlines(s, final), nil
+}
+
 // read reads up to size characters from the buffer and decodes them.
 // size < 0 reads the whole remaining content.
 //
@@ -390,10 +482,17 @@ func (t *TextIOWrapper) read(size int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(data) == 0 {
-		return "", nil
+	final := size < 0 || len(data) == 0
+	dec, err := t.decodeForRead(data, final)
+	if err != nil {
+		return "", err
 	}
-	return decodeBytes(data, t.encoding)
+	if t.decodedBuf == "" {
+		return dec, nil
+	}
+	out := t.decodedBuf + dec
+	t.decodedBuf = ""
+	return out, nil
 }
 
 // readline reads one line from the buffer.
@@ -404,26 +503,49 @@ func (t *TextIOWrapper) readline(size int) (string, error) {
 	if err := t.checkUsable(); err != nil {
 		return "", err
 	}
-	// For BytesIO or FileIO, read byte-by-byte to find newline.
-	var buf strings.Builder
-	for size < 0 || buf.Len() < size {
+	// Decode incrementally, byte at a time, until a newline appears in
+	// the decoded buffer or the source is exhausted. Anything past the
+	// newline is stashed in decodedBuf for the next readline / read.
+	for {
+		if idx := strings.IndexByte(t.decodedBuf, '\n'); idx >= 0 {
+			line := t.decodedBuf[:idx+1]
+			t.decodedBuf = t.decodedBuf[idx+1:]
+			if size >= 0 && len(line) > size {
+				t.decodedBuf = line[size:] + t.decodedBuf
+				line = line[:size]
+			}
+			return line, nil
+		}
+		if size >= 0 && len(t.decodedBuf) >= size {
+			line := t.decodedBuf[:size]
+			t.decodedBuf = t.decodedBuf[size:]
+			return line, nil
+		}
 		chunk, err := bufRead(t.buf, 1)
 		if err != nil {
 			return "", err
 		}
 		if len(chunk) == 0 {
-			break
+			// Final flush so any pending \r is emitted.
+			extra, err := t.decodeForRead(nil, true)
+			if err != nil {
+				return "", err
+			}
+			t.decodedBuf += extra
+			line := t.decodedBuf
+			t.decodedBuf = ""
+			if size >= 0 && len(line) > size {
+				t.decodedBuf = line[size:]
+				line = line[:size]
+			}
+			return line, nil
 		}
-		char, err := decodeBytes(chunk, t.encoding)
+		dec, err := t.decodeForRead(chunk, false)
 		if err != nil {
 			return "", err
 		}
-		buf.WriteString(char)
-		if char == "\n" {
-			break
-		}
+		t.decodedBuf += dec
 	}
-	return buf.String(), nil
 }
 
 // Write encodes and writes a string to the underlying buffer.
@@ -433,13 +555,22 @@ func (t *TextIOWrapper) Write(s string) (int, error) {
 	if err := t.checkUsable(); err != nil {
 		return 0, err
 	}
-	data, err := encodeString(s, t.encoding)
+	out := s
+	if t.writenl != "" {
+		out = strings.ReplaceAll(out, "\n", t.writenl)
+	}
+	data, err := encodeString(out, t.encoding)
 	if err != nil {
 		return 0, err
 	}
 	_, err = bufWrite(t.buf, data)
 	if err != nil {
 		return 0, err
+	}
+	if t.linebuffering && (strings.Contains(s, "\n") || strings.Contains(s, "\r")) {
+		if err := bufFlush(t.buf); err != nil {
+			return 0, err
+		}
 	}
 	return len([]rune(s)), nil
 }

@@ -26,6 +26,16 @@ func TestGateTextIOWrapperWriteRead(t *testing.T) {
 	gate.Compare(t, cpy, gopy, loadScript(t, "textiowrapper_write_read.py"), path)
 }
 
+func TestGateTextIOWrapperNewline(t *testing.T) {
+	cpy := gate.FindCPython(t)
+	if cpy == "" {
+		t.Skip("CPython 3.14 not on PATH")
+	}
+	gopy := gate.BuildGopy(t)
+	path := filepath.Join(t.TempDir(), "tnl.bin")
+	gate.Compare(t, cpy, gopy, loadScript(t, "textiowrapper_newline.py"), path)
+}
+
 func TestGateTextIOWrapperReadlines(t *testing.T) {
 	cpy := gate.FindCPython(t)
 	if cpy == "" {
