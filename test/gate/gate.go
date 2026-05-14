@@ -122,6 +122,10 @@ func Compare(t *testing.T, cpythonBin, gopyBin, script string, args ...string) {
 		t.Fatalf("gopy run: %v", gRes.Err)
 	}
 
+	// Normalize CRLF -> LF: Windows CPython writes \r\n, gopy writes \n.
+	cRes.Stdout = strings.ReplaceAll(cRes.Stdout, "\r\n", "\n")
+	gRes.Stdout = strings.ReplaceAll(gRes.Stdout, "\r\n", "\n")
+
 	if cRes.ExitCode != gRes.ExitCode {
 		t.Errorf("exit code mismatch: cpython=%d gopy=%d\n--- script ---\n%s\n--- cpython stdout ---\n%s\n--- gopy stdout ---\n%s\n--- cpython stderr ---\n%s\n--- gopy stderr ---\n%s",
 			cRes.ExitCode, gRes.ExitCode, script, cRes.Stdout, gRes.Stdout, cRes.Stderr, gRes.Stderr)
