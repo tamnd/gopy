@@ -146,7 +146,7 @@ side is real.
 | C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | partial |
 | D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | partial |
 | E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | partial |
-| F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | partial |
+| F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | done |
 | G | `Modules/_io/bytesio.c` | ~1,100 | `module/io/bytesio.go` | done |
 | H | `Lib/io.py` | ~100 | `stdlib/io.py` | done |
 
@@ -290,17 +290,24 @@ piece in the same PR.
 
 | C function | gopy equivalent | Status |
 |------------|----------------|--------|
-| `stringio_new`, `stringio_init`, `stringio_dealloc` | constructor + init | partial |
-| `stringio_read`, `stringio_readline`, `stringio_write`, `stringio_seek`, `stringio_tell`, `stringio_truncate`, `stringio_close`, `stringio_getvalue`, `stringio_iternext`, `stringio_readable`, `stringio_writable`, `stringio_seekable`, `stringio_closed` | corresponding methods | partial |
-| `_stringio_writebuffer`, `_stringio_seek_internal` | helpers | partial |
+| `stringio_new`, `stringio_init`, `stringio_dealloc` | constructor + init | done |
+| `stringio_read`, `stringio_readline`, `stringio_write`, `stringio_seek`, `stringio_tell`, `stringio_truncate`, `stringio_close`, `stringio_getvalue`, `stringio_iternext`, `stringio_readable`, `stringio_writable`, `stringio_seekable`, `stringio_closed` | corresponding methods | done |
+| `_stringio_writebuffer`, `_stringio_seek_internal` | helpers | done |
 
-**Missing (F audit 2026-05-14).** `_io_StringIO___getstate___impl`
-and `_io_StringIO___setstate___impl` (pickle hooks) absent.
-`_io_StringIO_line_buffering_get_impl` and the `newlines` getset
-not exposed. `__sizeof__` returns a placeholder. `newline=`
-constructor argument is recorded but the `\n` / `\r\n` / `""`
-translation behaviour in `write()` and `readline()` does not
-match CPython.
+**Status (F, 2026-05-14, PR #29).** Full port landed.
+`string_size` is tracked separately from `len(buf)`, over-seek
+zero-pads on write, `__getstate__` / `__setstate__` exchange the
+4-tuple `(initial_value, readnl, pos, dict)`, `newlines` reports
+the set of terminators observed during reads, and
+`line_buffering` is exposed. Newline modes: `newline=None`
+translates `\r\n` and `\r` to `\n` on write; `newline=""` does
+universal newline detection on read; `newline="\r"` / `"\r\n"`
+translates `\n` to that sequence on write. `readlines` honours
+its hint and `writelines` iterates any iterable.
+`stringio_traverse` / `stringio_clear` (gc slots) stay out of
+scope until gopy has a cyclic-gc protocol. The accumulating
+writer optimisation is omitted: the buffer is the rune slab from
+the start, with no behavioural difference at the public surface.
 
 **Functions to port (G: `bytesio.c`).**
 
@@ -558,7 +565,7 @@ Status legend:
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | done | `Lib/difflib.py` | `stdlib/difflib.py` | I | Vendored byte-equal (2064 lines). Loads via PathFinder. |
-| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` are full ports; the other four (fileio, bufferedio, textio, stringio) were flipped to **done** on 2026-05-13 but a 2026-05-14 re-audit found 31–55% line coverage with missing methods (FileIO.readinto, StringIO pickle hooks), missing helpers (`_bufferedreader_raw_read`, `_textiowrapper_writeflush`), and an incorrect buffer model in `Buffered` (separate read/write slabs instead of CPython's unified slab with raw_pos/write_pos pointers). See the per-file "Missing" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
+| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` are full ports; the other three (fileio, bufferedio, textio) were flipped to **done** on 2026-05-13 but a 2026-05-14 re-audit found 31–55% line coverage with missing methods (FileIO.readinto), missing helpers (`_bufferedreader_raw_read`, `_textiowrapper_writeflush`), and an incorrect buffer model in `Buffered` (separate read/write slabs instead of CPython's unified slab with raw_pos/write_pos pointers). See the per-file "Missing" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |

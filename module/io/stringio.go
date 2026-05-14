@@ -1,49 +1,52 @@
 // StringIO is the in-memory text stream the io module exposes as
-// io.StringIO. Mirrors the C type defined in
-// cpython/Modules/_io/stringio.c: a UCS-4 buffer plus a cursor that
-// read / write / seek / truncate / getvalue all index into.
-//
-// The CPython source carries an "accumulating vs realized" split that
-// lets writes go through a PyUnicodeWriter until the first read so
-// repeated str concatenation stays cheap. The Go port keeps it
-// simpler: the buffer is a single []rune, every operation works on
-// it directly, and getvalue copies the live slice into a new str.
-// The behavior the user-visible methods publish is the same; only
-// the internal optimisation differs.
+// io.StringIO. Faithful port of cpython/Modules/_io/stringio.c:
+// rune buffer with a separate string_size cursor, newline translation
+// on write (read-translate / write-translate modes), universal newline
+// detection on read, and the 4-tuple pickle contract.
 //
 // CPython: Modules/_io/stringio.c:20 stringio (struct definition)
-// CPython: Modules/_io/stringio.c:1073 stringio_slots (type slots)
 
 package io
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/tamnd/gopy/objects"
 )
 
-// StringIO carries the rune buffer, the read/write cursor (in
-// characters, not bytes), and the closed flag. readNL stores the
-// `newline` argument from the constructor so future read paths can
-// reflect translation rules; the current port defers newline
-// translation but tracks the value so the constructor type-checks
-// match CPython.
+// StringIO mirrors the C struct, minus the accumulating-writer
+// optimisation (we always work directly against the rune slab).
+//
+// readTranslate (newline is None): writes have \r\n / \r converted to
+// \n, reads return lines terminated by \n.
+//
+// readUniversal (newline in {None, ""}): readline accepts \r / \n /
+// \r\n as terminators.
+//
+// readNL is the configured newline; writeNL is set when newline is
+// "\r" or "\r\n" so writes translate \n to that sequence.
 //
 // CPython: Modules/_io/stringio.c:20 stringio
 type StringIO struct {
 	objects.Header
 
-	buf    []rune
-	pos    int
-	closed bool
+	buf        []rune
+	pos        int
+	stringSize int
+	closed     bool
 
-	readNL    string
-	hasReadNL bool
+	readNL        string
+	hasReadNL     bool
+	writeNL       string
+	readUniversal bool
+	readTranslate bool
+
+	newlinesSeen uint8 // bit 0: \n, bit 1: \r, bit 2: \r\n
 }
 
-// StringIOType is the type singleton for _io.StringIO. Bases is just
-// objects.ObjectType for now; the io.py shim re-registers it as a
-// virtual subclass of TextIOBase once that lands.
+// StringIOType is the type singleton for _io.StringIO.
 //
 // CPython: Modules/_io/stringio.c:1073 stringio_slots
 var StringIOType = objects.NewType("_io.StringIO", []*objects.Type{objects.ObjectType()})
@@ -57,21 +60,23 @@ func init() {
 	StringIOType.Getattro = stringIOGetattr
 }
 
-// NewStringIO mirrors PyStringIO_New: an empty buffer, cursor at 0,
-// not closed. Caller code populates the initial value through the
+// NewStringIO returns an empty StringIO in default-newline mode
+// (newline="\n"). Callers populate the initial value through the
 // constructor path.
 //
 // CPython: Modules/_io/stringio.c:637 stringio_new
 func NewStringIO() *StringIO {
 	s := &StringIO{}
 	s.Init(StringIOType)
+	s.readNL = "\n"
+	s.hasReadNL = true
 	return s
 }
 
-// stringIOCall is the type-call slot. Mirrors the Clinic-generated
+// stringIOCall is the type-call slot, mirroring the Clinic-generated
 // _io_StringIO___init___impl: parse `initial_value` and `newline`,
-// reject non-str / non-None types, accept the canonical newline
-// values "" / "\n" / "\r" / "\r\n" / None.
+// reject non-str / non-None types, accept "" / "\n" / "\r" / "\r\n" /
+// None.
 //
 // CPython: Modules/_io/stringio.c:670 _io_StringIO___init___impl
 func stringIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
@@ -105,7 +110,6 @@ func stringIOCall(_ objects.Object, args []objects.Object, kwargs map[string]obj
 		}
 	}
 	if nlSet && nlIsStr {
-		// CPython: Modules/_io/stringio.c:696 illegal newline check.
 		switch nlVal {
 		case "", "\n", "\r", "\r\n":
 		default:
@@ -113,17 +117,45 @@ func stringIOCall(_ objects.Object, args []objects.Object, kwargs map[string]obj
 		}
 	}
 	s := NewStringIO()
-	if nlSet && nlIsStr {
-		s.readNL = nlVal
-		s.hasReadNL = true
-	} else if !nlSet {
-		s.readNL = "\n"
-		s.hasReadNL = true
-	}
+	s.applyNewline(nlSet, nlIsStr, nlVal)
 	if initial != "" {
-		s.buf = []rune(initial)
+		s.Write(initial)
+		s.pos = 0
 	}
 	return s, nil
+}
+
+// applyNewline mirrors the newline-mode bookkeeping inside __init__.
+// nlSet=false means default (newline="\n"). nlSet=true && !nlIsStr
+// means newline=None.
+//
+// CPython: Modules/_io/stringio.c:721 (init newline branch)
+func (s *StringIO) applyNewline(nlSet, nlIsStr bool, nlVal string) {
+	if !nlSet {
+		s.readNL = "\n"
+		s.hasReadNL = true
+		s.readUniversal = false
+		s.readTranslate = false
+		s.writeNL = ""
+		return
+	}
+	if !nlIsStr {
+		s.readNL = ""
+		s.hasReadNL = false
+		s.readUniversal = true
+		s.readTranslate = true
+		s.writeNL = ""
+		return
+	}
+	s.readNL = nlVal
+	s.hasReadNL = true
+	s.readUniversal = nlVal == ""
+	s.readTranslate = false
+	if len(nlVal) > 0 && nlVal[0] == '\r' {
+		s.writeNL = nlVal
+	} else {
+		s.writeNL = ""
+	}
 }
 
 func positional(args []objects.Object, i int) objects.Object {
@@ -134,7 +166,7 @@ func positional(args []objects.Object, i int) objects.Object {
 }
 
 // strOrNone validates that v is None or a str. Returns the underlying
-// Go string (empty if None or unset). Used by `initial_value`.
+// Go string (empty if None or unset).
 func strOrNone(v objects.Object, name string) (string, error) {
 	if v == nil || objects.IsNone(v) {
 		return "", nil
@@ -146,14 +178,10 @@ func strOrNone(v objects.Object, name string) (string, error) {
 	return s.Value(), nil
 }
 
-// newlineArg unpacks the `newline` argument: nil means "not supplied",
-// None means "supplied as None" (no translation), str is the raw value
-// to be range-checked by the caller.
+// newlineArg unpacks the `newline` argument. Returns (value, isStr,
+// err): isStr=false means caller passed None (or nothing).
 func newlineArg(v objects.Object) (val string, isStr bool, err error) {
-	if v == nil {
-		return "", false, nil
-	}
-	if objects.IsNone(v) {
+	if v == nil || objects.IsNone(v) {
 		return "", false, nil
 	}
 	s, ok := v.(*objects.Unicode)
@@ -167,7 +195,7 @@ func stringIORepr(_ objects.Object) (string, error) {
 	return "<_io.StringIO object>", nil
 }
 
-// stringIOIter returns the StringIO itself, matching IOBase.__iter__.
+// stringIOIter returns the StringIO itself.
 //
 // CPython: Modules/_io/iobase.c:732 iobase_iter
 func stringIOIter(o objects.Object) (objects.Object, error) {
@@ -178,8 +206,7 @@ func stringIOIter(o objects.Object) (objects.Object, error) {
 	return s, nil
 }
 
-// stringIOIterNext yields the next line, signaling EOF with
-// ErrStopIteration. Mirrors stringio_iternext.
+// stringIOIterNext yields the next line. Empty line means EOF.
 //
 // CPython: Modules/_io/stringio.c:407 stringio_iternext
 func stringIOIterNext(o objects.Object) (objects.Object, error) {
@@ -194,13 +221,20 @@ func stringIOIterNext(o objects.Object) (objects.Object, error) {
 	return objects.NewStr(line), nil
 }
 
-// Write appends s to the buffer at the current cursor, overwriting
-// existing characters and extending the buffer as needed. Returns
-// the number of characters written.
+// Write appends s to the buffer at the current cursor, applying
+// newline translation per the constructor's newline mode and
+// zero-padding any over-seek gap. Returns the number of characters
+// written (post-translation length).
 //
-// CPython: Modules/_io/stringio.c:189 write_str (the buffer side)
-// CPython: Modules/_io/stringio.c:547 _io_StringIO_write_impl (the wrapper)
+// CPython: Modules/_io/stringio.c:189 write_str
 func (s *StringIO) Write(text string) int {
+	if s.readTranslate {
+		text = strings.ReplaceAll(text, "\r\n", "\n")
+		text = strings.ReplaceAll(text, "\r", "\n")
+	}
+	if s.writeNL != "" {
+		text = strings.ReplaceAll(text, "\n", s.writeNL)
+	}
 	r := []rune(text)
 	n := len(r)
 	if n == 0 {
@@ -208,28 +242,31 @@ func (s *StringIO) Write(text string) int {
 	}
 	end := s.pos + n
 	if end > len(s.buf) {
-		// Extend with NULs (matches CPython's resize_buffer + memset
-		// path for an over-seek write).
 		grow := make([]rune, end)
 		copy(grow, s.buf)
 		s.buf = grow
 	}
+	if s.pos > s.stringSize {
+		for i := s.stringSize; i < s.pos; i++ {
+			s.buf[i] = 0
+		}
+	}
 	copy(s.buf[s.pos:end], r)
 	s.pos = end
+	if s.stringSize < end {
+		s.stringSize = end
+	}
 	return n
 }
 
 // Read returns up to size characters starting at the cursor; size<0
-// reads until end-of-buffer.
+// reads until end of stream.
 //
 // CPython: Modules/_io/stringio.c:324 _io_StringIO_read_impl
 func (s *StringIO) Read(size int) string {
-	remaining := len(s.buf) - s.pos
-	if remaining < 0 {
-		remaining = 0
-	}
-	if size < 0 || size > remaining {
-		size = remaining
+	n := s.stringSize - s.pos
+	if size < 0 || size > n {
+		size = max(n, 0)
 	}
 	if size <= 0 {
 		return ""
@@ -239,31 +276,75 @@ func (s *StringIO) Read(size int) string {
 	return out
 }
 
-// readline returns one line including the trailing '\n' if present.
-// Returns the empty string at end-of-buffer.
+// readline returns one line. In translate mode the buffer already
+// holds only \n terminators; in universal mode any of \n / \r / \r\n
+// counts; in fixed-newline mode the configured readnl is used.
+// Updates newlinesSeen so the .newlines getter can report what's been
+// observed.
 //
 // CPython: Modules/_io/stringio.c:357 _stringio_readline
+//
+//	Modules/_io/textio.c:2120 _PyIO_find_line_ending
 func (s *StringIO) readline(limit int) string {
-	if s.pos >= len(s.buf) {
+	if s.pos >= s.stringSize {
 		return ""
 	}
-	end := len(s.buf)
+	end := s.stringSize
 	if limit >= 0 && s.pos+limit < end {
 		end = s.pos + limit
 	}
-	for i := s.pos; i < end; i++ {
-		if s.buf[i] == '\n' {
-			out := string(s.buf[s.pos : i+1])
-			s.pos = i + 1
-			return out
-		}
-	}
-	out := string(s.buf[s.pos:end])
-	s.pos = end
+	n := s.findLineEnding(s.pos, end)
+	out := string(s.buf[s.pos : s.pos+n])
+	s.pos += n
 	return out
 }
 
-// Seek changes the cursor position.
+func (s *StringIO) findLineEnding(start, end int) int {
+	if s.readTranslate {
+		for i := start; i < end; i++ {
+			if s.buf[i] == '\n' {
+				s.newlinesSeen |= 1
+				return i - start + 1
+			}
+		}
+		return end - start
+	}
+	if s.readUniversal {
+		for i := start; i < end; i++ {
+			ch := s.buf[i]
+			if ch == '\n' {
+				s.newlinesSeen |= 1
+				return i - start + 1
+			}
+			if ch == '\r' {
+				if i+1 < end && s.buf[i+1] == '\n' {
+					s.newlinesSeen |= 4
+					return i - start + 2
+				}
+				s.newlinesSeen |= 2
+				return i - start + 1
+			}
+		}
+		return end - start
+	}
+	nl := []rune(s.readNL)
+	for i := start; i+len(nl) <= end; i++ {
+		match := true
+		for k, c := range nl {
+			if s.buf[i+k] != c {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i - start + len(nl)
+		}
+	}
+	return end - start
+}
+
+// Seek changes the cursor position. whence=1/2 require pos==0 (matches
+// CPython). whence=0 with pos<0 raises ValueError.
 //
 // CPython: Modules/_io/stringio.c:497 _io_StringIO_seek_impl
 func (s *StringIO) Seek(pos, whence int) (int, error) {
@@ -281,7 +362,7 @@ func (s *StringIO) Seek(pos, whence int) (int, error) {
 		if pos != 0 {
 			return 0, fmt.Errorf("OSError: Can't do nonzero end-relative seeks")
 		}
-		s.pos = len(s.buf)
+		s.pos = s.stringSize
 	default:
 		return 0, fmt.Errorf("ValueError: Invalid whence (%d, should be 0, 1 or 2)", whence)
 	}
@@ -293,27 +374,25 @@ func (s *StringIO) Seek(pos, whence int) (int, error) {
 // CPython: Modules/_io/stringio.c:303 _io_StringIO_tell_impl
 func (s *StringIO) Tell() int { return s.pos }
 
-// Truncate cuts the buffer down to size characters, leaving the
-// cursor unchanged. size<0 is rejected; size>=current length is a
-// no-op. Returns the new buffer length.
+// Truncate cuts the logical length to size characters; the underlying
+// rune slab is shrunk to match. The cursor is unchanged.
 //
 // CPython: Modules/_io/stringio.c:458 _io_StringIO_truncate_impl
 func (s *StringIO) Truncate(size int) (int, error) {
 	if size < 0 {
 		return 0, fmt.Errorf("ValueError: Negative size value %d", size)
 	}
-	if size < len(s.buf) {
+	if size < s.stringSize {
+		s.stringSize = size
 		s.buf = s.buf[:size]
 	}
 	return size, nil
 }
 
-// GetValue returns the entire buffer as a Go string. Allocates fresh,
-// matching the immutability guarantee CPython makes for the returned
-// PyUnicode object.
+// GetValue returns the logical contents as a Go string.
 //
 // CPython: Modules/_io/stringio.c:284 _io_StringIO_getvalue_impl
-func (s *StringIO) GetValue() string { return string(s.buf) }
+func (s *StringIO) GetValue() string { return string(s.buf[:s.stringSize]) }
 
 // Close marks the StringIO as closed and drops the buffer.
 //
@@ -321,17 +400,17 @@ func (s *StringIO) GetValue() string { return string(s.buf) }
 func (s *StringIO) Close() {
 	s.closed = true
 	s.buf = nil
+	s.stringSize = 0
 }
 
 // Closed reports whether the StringIO has been closed.
 func (s *StringIO) Closed() bool { return s.closed }
 
-// checkUsable maps the CHECK_INITIALIZED + CHECK_CLOSED preamble
-// every public StringIO method runs. The Go port does not separate
-// "initialized" from "open" because tp_alloc + the constructor are
-// fused; only the closed flag survives.
+// checkUsable maps the CHECK_INITIALIZED + CHECK_CLOSED preamble every
+// public method runs. The Go port fuses tp_alloc + __init__ so only
+// the closed flag survives.
 //
-// CPython: Modules/_io/stringio.c:57 CHECK_INITIALIZED / 64 CHECK_CLOSED
+// CPython: Modules/_io/stringio.c:57 CHECK_INITIALIZED / :64 CHECK_CLOSED
 func (s *StringIO) checkUsable() error {
 	if s.closed {
 		return fmt.Errorf("ValueError: I/O operation on closed file")
@@ -339,12 +418,108 @@ func (s *StringIO) checkUsable() error {
 	return nil
 }
 
-// stringIOGetattr exposes properties (closed, newlines, line_buffering)
-// and methods as bound builtin functions. Same approach File.go uses
-// while a real method-descriptor surface is pending.
+// newlinesObj returns the value of the .newlines getter: None if no
+// terminator has been seen, a single str if exactly one kind, a tuple
+// of strs if several.
 //
-// CPython: Modules/_io/stringio.c:1035 stringio_methods +
-// CPython: Modules/_io/stringio.c:1054 stringio_getset
+// CPython: Modules/_io/stringio.c:1023 _io_StringIO_newlines_get_impl
+//
+//	(delegates to IncrementalNewlineDecoder.newlines)
+func (s *StringIO) newlinesObj() objects.Object {
+	if !s.readTranslate && !s.readUniversal {
+		return objects.None()
+	}
+	if s.newlinesSeen == 0 {
+		return objects.None()
+	}
+	var seen []string
+	if s.newlinesSeen&2 != 0 {
+		seen = append(seen, "\r")
+	}
+	if s.newlinesSeen&1 != 0 {
+		seen = append(seen, "\n")
+	}
+	if s.newlinesSeen&4 != 0 {
+		seen = append(seen, "\r\n")
+	}
+	if len(seen) == 1 {
+		return objects.NewStr(seen[0])
+	}
+	items := make([]objects.Object, len(seen))
+	for i, v := range seen {
+		items[i] = objects.NewStr(v)
+	}
+	return objects.NewTuple(items)
+}
+
+// getState returns the 4-tuple (initial_value, readnl, pos, dict)
+// used by pickle protocol 2.
+//
+// CPython: Modules/_io/stringio.c:849 _io_StringIO___getstate___impl
+func (s *StringIO) getState() (objects.Object, error) {
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	nl := objects.None()
+	if s.hasReadNL {
+		nl = objects.NewStr(s.readNL)
+	}
+	return objects.NewTuple([]objects.Object{
+		objects.NewStr(s.GetValue()),
+		nl,
+		objects.NewInt(int64(s.pos)),
+		objects.None(),
+	}), nil
+}
+
+// setState rehydrates from a 4-tuple. Resets the buffer, replays
+// __init__ with (initial_value, newline), then restores pos and merges
+// the dict.
+//
+// CPython: Modules/_io/stringio.c:885 _io_StringIO___setstate___impl
+func (s *StringIO) setState(state objects.Object) error {
+	if err := s.checkUsable(); err != nil {
+		return err
+	}
+	t, ok := state.(*objects.Tuple)
+	if !ok || t.Len() < 4 {
+		return fmt.Errorf("TypeError: _io.StringIO.__setstate__ argument should be 4-tuple, got %s", state.Type().Name)
+	}
+	initVal := ""
+	if v, ok := t.Item(0).(*objects.Unicode); ok {
+		initVal = v.Value()
+	} else if !objects.IsNone(t.Item(0)) {
+		return fmt.Errorf("TypeError: first item of state must be str or None, got %s", t.Item(0).Type().Name)
+	}
+	nlVal, nlIsStr, err := newlineArg(t.Item(1))
+	if err != nil {
+		return err
+	}
+	s.buf = nil
+	s.stringSize = 0
+	s.pos = 0
+	s.newlinesSeen = 0
+	s.applyNewline(true, nlIsStr, nlVal)
+	if initVal != "" {
+		s.buf = []rune(initVal)
+		s.stringSize = len(s.buf)
+	}
+	posObj, ok := t.Item(2).(*objects.Int)
+	if !ok {
+		return fmt.Errorf("TypeError: third item of state must be an integer, got %s", t.Item(2).Type().Name)
+	}
+	pos, _ := posObj.Int64()
+	if pos < 0 {
+		return fmt.Errorf("ValueError: position value cannot be negative")
+	}
+	s.pos = int(pos)
+	return nil
+}
+
+// stringIOGetattr exposes properties (closed, newlines, line_buffering)
+// and methods as bound builtin functions.
+//
+// CPython: Modules/_io/stringio.c:1035 stringio_methods + :1054 stringio_getset
 func stringIOGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
 	s := o.(*StringIO)
 	n, ok := name.(*objects.Unicode)
@@ -355,11 +530,14 @@ func stringIOGetattr(o objects.Object, name objects.Object) (objects.Object, err
 	case "closed":
 		return objects.NewBool(s.closed), nil
 	case "newlines":
-		// Until newline tracking lands in read(), report None: CPython
-		// fills this from the IncrementalNewlineDecoder, which the
-		// port has not wired yet.
-		return objects.None(), nil
+		if err := s.checkUsable(); err != nil {
+			return nil, err
+		}
+		return s.newlinesObj(), nil
 	case "line_buffering":
+		if err := s.checkUsable(); err != nil {
+			return nil, err
+		}
 		return objects.NewBool(false), nil
 	}
 	if fn := stringIOMethod(s, n.Value()); fn != nil {
@@ -368,10 +546,8 @@ func stringIOGetattr(o objects.Object, name objects.Object) (objects.Object, err
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", StringIOType.Name, n.Value())
 }
 
-// stringIOMethod returns the built-in function backing the named
-// method. Mirrors the row pick CPython does in stringio_methods at
-// stringio_member_descriptor lookup time. Split into two halves so
-// each side stays under the cyclomatic threshold.
+// stringIOMethod maps method names to BuiltinFunctions. Split in two
+// to keep each half under the cyclomatic threshold.
 //
 // CPython: Modules/_io/stringio.c:1035 stringio_methods
 func stringIOMethod(s *StringIO, name string) objects.Object {
@@ -381,8 +557,7 @@ func stringIOMethod(s *StringIO, name string) objects.Object {
 	return stringIOCapMethod(s, name)
 }
 
-// stringIOIOMethod returns the I/O-active methods that touch the
-// buffer or cursor.
+// stringIOIOMethod returns the I/O-active methods.
 func stringIOIOMethod(s *StringIO, name string) objects.Object {
 	switch name {
 	case "write":
@@ -396,6 +571,14 @@ func stringIOIOMethod(s *StringIO, name string) objects.Object {
 	case "readline":
 		return objects.NewBuiltinFunction("readline", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			return stringIOReadlineCall(s, args)
+		})
+	case "readlines":
+		return objects.NewBuiltinFunction("readlines", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return stringIOReadlinesCall(s, args)
+		})
+	case "writelines":
+		return objects.NewBuiltinFunction("writelines", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return stringIOWritelinesCall(s, args)
 		})
 	case "seek":
 		return objects.NewBuiltinFunction("seek", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -435,9 +618,7 @@ func stringIOIOMethod(s *StringIO, name string) objects.Object {
 	return nil
 }
 
-// stringIOCapMethod returns the capability/protocol methods: the
-// readable / writable / seekable / isatty trio plus the context-
-// manager hooks.
+// stringIOCapMethod returns the capability/protocol methods.
 func stringIOCapMethod(s *StringIO, name string) objects.Object {
 	switch name {
 	case "readable":
@@ -468,6 +649,24 @@ func stringIOCapMethod(s *StringIO, name string) objects.Object {
 			}
 			return objects.NewBool(false), nil
 		})
+	case "__getstate__":
+		return objects.NewBuiltinFunction("__getstate__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return s.getState()
+		})
+	case "__setstate__":
+		return objects.NewBuiltinFunction("__setstate__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly 1 argument (%d given)", len(args))
+			}
+			if err := s.setState(args[0]); err != nil {
+				return nil, err
+			}
+			return objects.None(), nil
+		})
+	case "__sizeof__":
+		return objects.NewBuiltinFunction("__sizeof__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return objects.NewInt(int64(len(s.buf) * 4)), nil
+		})
 	case "__enter__":
 		return objects.NewBuiltinFunction("__enter__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if err := s.checkUsable(); err != nil {
@@ -495,7 +694,9 @@ func stringIOWrite(s *StringIO, args []objects.Object) (objects.Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: string argument expected, got '%s'", args[0].Type().Name)
 	}
-	n := s.Write(u.Value())
+	// CPython returns the *input* length, not the post-translation length.
+	n := len([]rune(u.Value()))
+	s.Write(u.Value())
 	return objects.NewInt(int64(n)), nil
 }
 
@@ -519,6 +720,69 @@ func stringIOReadlineCall(s *StringIO, args []objects.Object) (objects.Object, e
 		return nil, err
 	}
 	return objects.NewStr(s.readline(size)), nil
+}
+
+// stringIOReadlinesCall implements readlines(hint=-1).
+//
+// CPython: Modules/_io/iobase.c:849 _io__IOBase_readlines_impl
+func stringIOReadlinesCall(s *StringIO, args []objects.Object) (objects.Object, error) {
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	hint := -1
+	if len(args) >= 1 && !objects.IsNone(args[0]) {
+		v, err := intArg(args[0], "readlines")
+		if err != nil {
+			return nil, err
+		}
+		hint = v
+	}
+	var lines []objects.Object
+	total := 0
+	for {
+		line := s.readline(-1)
+		if line == "" {
+			break
+		}
+		lines = append(lines, objects.NewStr(line))
+		total += len([]rune(line))
+		if hint > 0 && total >= hint {
+			break
+		}
+	}
+	return objects.NewList(lines), nil
+}
+
+// stringIOWritelinesCall iterates any iterable, calling write() per
+// element.
+//
+// CPython: Modules/_io/iobase.c:863 _io__IOBase_writelines
+func stringIOWritelinesCall(s *StringIO, args []objects.Object) (objects.Object, error) {
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: writelines() takes exactly 1 argument (%d given)", len(args))
+	}
+	it, err := objects.Iter(args[0])
+	if err != nil {
+		return nil, err
+	}
+	for {
+		item, err := objects.IterNext(it)
+		if errors.Is(err, objects.ErrStopIteration) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		u, ok := item.(*objects.Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: string argument expected, got '%s'", item.Type().Name)
+		}
+		s.Write(u.Value())
+	}
+	return objects.None(), nil
 }
 
 func stringIOSeekCall(s *StringIO, args []objects.Object) (objects.Object, error) {
@@ -551,16 +815,16 @@ func stringIOTruncateCall(s *StringIO, args []objects.Object) (objects.Object, e
 	if err := s.checkUsable(); err != nil {
 		return nil, err
 	}
+	if len(args) > 1 {
+		return nil, fmt.Errorf("TypeError: truncate() takes at most 1 argument (%d given)", len(args))
+	}
 	size := s.pos
-	if len(args) >= 1 && !objects.IsNone(args[0]) {
+	if len(args) == 1 && !objects.IsNone(args[0]) {
 		v, err := intArg(args[0], "truncate")
 		if err != nil {
 			return nil, err
 		}
 		size = v
-	}
-	if len(args) > 1 {
-		return nil, fmt.Errorf("TypeError: truncate() takes at most 1 argument (%d given)", len(args))
 	}
 	out, err := s.Truncate(size)
 	if err != nil {
@@ -570,8 +834,7 @@ func stringIOTruncateCall(s *StringIO, args []objects.Object) (objects.Object, e
 }
 
 // optionalSize unpacks a single int / None argument into a Go int.
-// Missing or None means -1 (read everything). Mirrors the size handler
-// CPython generates for the read / readline clinic specs.
+// Missing or None means -1. Mirrors the Clinic size handler.
 func optionalSize(args []objects.Object, fn string) (int, error) {
 	switch len(args) {
 	case 0:
