@@ -215,3 +215,29 @@ func osWaitpid(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 		objects.NewInt(int64(exitCode)),
 	}), nil
 }
+
+// osGeteuid is not available on Windows; returns 0 to match CPython where
+// posix_geteuid is gated on HAVE_GETEUID.
+func osGeteuid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewInt(0), nil
+}
+
+func osGetegid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewInt(0), nil
+}
+
+func osGetgid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewInt(0), nil
+}
+
+func osGetgroups(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewList(nil), nil
+}
+
+// osUmask returns 0; Windows has no umask equivalent.
+func osUmask(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: umask() missing mask")
+	}
+	return objects.NewInt(0), nil
+}

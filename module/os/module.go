@@ -253,6 +253,20 @@ func buildOS() (*objects.Module, error) {
 		{"supports_effective_ids", emptyFrozenset},
 		{"terminal_size", terminalSizeType},
 		{"get_terminal_size", objects.NewBuiltinFunction("get_terminal_size", osGetTerminalSize)},
+		// Cross-platform additions to round out the posixmodule.c surface.
+		{"chmod", objects.NewBuiltinFunction("chmod", osChmod)},
+		{"symlink", objects.NewBuiltinFunction("symlink", osSymlink)},
+		{"readlink", objects.NewBuiltinFunction("readlink", osReadlink)},
+		{"link", objects.NewBuiltinFunction("link", osLink)},
+		{"_exit", objects.NewBuiltinFunction("_exit", osExit)},
+		{"urandom", objects.NewBuiltinFunction("urandom", osUrandom)},
+		{"cpu_count", objects.NewBuiltinFunction("cpu_count", osCPUCount)},
+		// POSIX identity + umask. Windows stubs return 0 / empty list.
+		{"geteuid", objects.NewBuiltinFunction("geteuid", osGeteuid)},
+		{"getegid", objects.NewBuiltinFunction("getegid", osGetegid)},
+		{"getgid", objects.NewBuiltinFunction("getgid", osGetgid)},
+		{"getgroups", objects.NewBuiltinFunction("getgroups", osGetgroups)},
+		{"umask", objects.NewBuiltinFunction("umask", osUmask)},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
