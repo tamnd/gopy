@@ -12,7 +12,11 @@ we did, and where it lives in the code.
 
 ## Latest
 
-- [**v0.12.2** (May 12, 2026)](v0.12.2.md). The stdlib import
+- [**v0.12.3** (May 15, 2026)](v0.12.3.md). The io subsystem and
+  deferred annotations drop. `Modules/_io/*` ports in full from
+  CPython, PEP 649 / 749 lazy annotations land end to end, and the
+  object protocol full port closes phases 2 through 8.
+- [v0.12.2 (May 12, 2026)](v0.12.2.md). The stdlib import
   chain drop. Thirty modules vendor real CPython sources, a real
   regex engine replaces the RE2 shim, and Phase 1 of the object
   protocol full port lands.
@@ -29,6 +33,7 @@ we did, and where it lives in the code.
 
 | Version | Date | Theme |
 |---------|------|-------|
+| [v0.12.3](v0.12.3.md) | 2026-05-15 | io subsystem + deferred annotations |
 | [v0.12.2](v0.12.2.md) | 2026-05-12 | Stdlib import chain |
 | [v0.12.0](v0.12.0.md) | 2026-05-08 | Tier-2 optimizer |
 | [v0.11.0](v0.11.0.md) | 2026-05-07 | Specialization + monitoring |
