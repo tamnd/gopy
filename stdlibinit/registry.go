@@ -194,6 +194,14 @@ import (
 	// CPython: Modules/_stat.c:290 stat_exec
 	_ "github.com/tamnd/gopy/module/_stat"
 
+	// Built-in module: _opcode. Registers itself via
+	// module/_opcode/module.go init(). Ports Modules/_opcode.c: the
+	// has_* predicates over the opcode metadata flag table, the
+	// intrinsic/special-method name tables, and the binary-op symbol
+	// list consumed by Lib/opcode.py + Lib/dis.py.
+	// CPython: Modules/_opcode.c:422 _opcode_exec
+	_ "github.com/tamnd/gopy/module/_opcode"
+
 	// Pure-Python shim modules backed by stdlib vendored .py files.
 	// Each registers itself via an init() that calls imp.AppendInittab.
 	_ "github.com/tamnd/gopy/module/argparse"
