@@ -269,12 +269,14 @@ func buildOS() (*objects.Module, error) {
 	// appending the entries on POSIX builds.
 	//
 	// CPython: Modules/posixmodule.c HAVE_GETEUID block
-	for _, e := range posixIdentityEntries() {
-		entries = append(entries, e)
-	}
-	for _, e := range entries {
-		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
-			return nil, err
+	for _, group := range [][]struct {
+		name string
+		val  objects.Object
+	}{entries, posixIdentityEntries()} {
+		for _, e := range group {
+			if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return m, nil

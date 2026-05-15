@@ -107,22 +107,22 @@ func decodeUTF16(data []byte, variant string) (string, error) {
 // little-endian, matching CPython on x86.
 //
 // CPython: Modules/_codecs/utf_16.c PyUnicode_EncodeUTF16
-func encodeUTF16(s, variant string) ([]byte, error) {
+func encodeUTF16(s, variant string) []byte {
 	var bo binary.ByteOrder = binary.LittleEndian
-	var out []byte
+	out := make([]byte, 0, 2*len(s)+2)
 	switch variant {
 	case "le":
 	case "be":
 		bo = binary.BigEndian
 	case "":
-		out = []byte{0xFF, 0xFE}
+		out = append(out, 0xFF, 0xFE)
 	}
 	units := utf16.Encode([]rune(s))
 	buf := make([]byte, 2*len(units))
 	for i, u := range units {
 		bo.PutUint16(buf[2*i:], u)
 	}
-	return append(out, buf...), nil
+	return append(out, buf...)
 }
 
 // --- UTF-32 ----------------------------------------------------------------
@@ -150,7 +150,7 @@ func decodeUTF32(data []byte, variant string) (string, error) {
 		}
 	}
 	if len(data)%4 != 0 {
-		return "", fmt.Errorf("UnicodeDecodeError: utf-32 truncated (length %% 4 != 0)", )
+		return "", fmt.Errorf("UnicodeDecodeError: utf-32 truncated (length %% 4 != 0)")
 	}
 	runes := make([]rune, 0, len(data)/4)
 	for i := 0; i < len(data); i += 4 {
@@ -166,22 +166,22 @@ func decodeUTF32(data []byte, variant string) (string, error) {
 // encodeUTF32 encodes s as UTF-32.
 //
 // CPython: Modules/_codecs/utf_32.c PyUnicode_EncodeUTF32
-func encodeUTF32(s, variant string) ([]byte, error) {
+func encodeUTF32(s, variant string) []byte {
 	var bo binary.ByteOrder = binary.LittleEndian
-	var out []byte
+	out := make([]byte, 0, 4*len(s)+4)
 	switch variant {
 	case "le":
 	case "be":
 		bo = binary.BigEndian
 	case "":
-		out = []byte{0xFF, 0xFE, 0x00, 0x00}
+		out = append(out, 0xFF, 0xFE, 0x00, 0x00)
 	}
 	runes := []rune(s)
 	buf := make([]byte, 4*len(runes))
 	for i, r := range runes {
 		bo.PutUint32(buf[4*i:], uint32(r))
 	}
-	return append(out, buf...), nil
+	return append(out, buf...)
 }
 
 // --- 8-bit code pages -------------------------------------------------------
@@ -220,9 +220,9 @@ func charmapEncode(s string, inverse map[rune]byte, name string) ([]byte, error)
 
 // codepageTable holds a decode table and its precomputed inverse.
 type codepageTable struct {
-	decode  [256]rune
-	encode  map[rune]byte
-	name    string
+	decode [256]rune
+	encode map[rune]byte
+	name   string
 }
 
 func newCodepage(name string, mapping [128]rune) *codepageTable {
@@ -388,23 +388,17 @@ func codecDecode(data []byte, encoding string) (string, bool, error) {
 func codecEncode(s, encoding string) ([]byte, bool, error) {
 	switch normalizeCodec(encoding) {
 	case "utf-16":
-		b, err := encodeUTF16(s, "")
-		return b, true, err
+		return encodeUTF16(s, ""), true, nil
 	case "utf-16-le":
-		b, err := encodeUTF16(s, "le")
-		return b, true, err
+		return encodeUTF16(s, "le"), true, nil
 	case "utf-16-be":
-		b, err := encodeUTF16(s, "be")
-		return b, true, err
+		return encodeUTF16(s, "be"), true, nil
 	case "utf-32":
-		b, err := encodeUTF32(s, "")
-		return b, true, err
+		return encodeUTF32(s, ""), true, nil
 	case "utf-32-le":
-		b, err := encodeUTF32(s, "le")
-		return b, true, err
+		return encodeUTF32(s, "le"), true, nil
 	case "utf-32-be":
-		b, err := encodeUTF32(s, "be")
-		return b, true, err
+		return encodeUTF32(s, "be"), true, nil
 	case "cp1252":
 		b, err := charmapEncode(s, cp1252Table.encode, "cp1252")
 		return b, true, err
