@@ -411,7 +411,10 @@ func decodeBytes(data []byte, encoding string) (string, error) {
 		}
 		return string(runes), nil
 	}
-	return "", fmt.Errorf("NotImplementedError: encoding %q is not yet supported", encoding)
+	if s, ok, err := codecDecode(data, encoding); ok {
+		return s, err
+	}
+	return "", fmt.Errorf("LookupError: unknown encoding: %s", encoding)
 }
 
 // encodeString encodes a string using the given encoding.
@@ -438,7 +441,10 @@ func encodeString(s, encoding string) ([]byte, error) {
 		}
 		return b, nil
 	}
-	return nil, fmt.Errorf("NotImplementedError: encoding %q is not yet supported", encoding)
+	if b, ok, err := codecEncode(s, encoding); ok {
+		return b, err
+	}
+	return nil, fmt.Errorf("LookupError: unknown encoding: %s", encoding)
 }
 
 // --- Public methods ---------------------------------------------------------
