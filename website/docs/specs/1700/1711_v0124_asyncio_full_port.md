@@ -127,15 +127,15 @@ non-trivial code at import time.
 
 | # | Task | File | Surface | Status | Commit |
 |---|------|------|---------|--------|--------|
-| 1 | P1.1 | `log.py` | `logger = logging.getLogger("asyncio")` (vendored; lazy-bound — `logging` still blocked on threading/itertools) | WIP | _pending_ |
-| 2 | P1.2 | `constants.py` | numeric/string constants used across the package | DONE | _pending_ |
-| 3 | P1.3 | `exceptions.py` | `CancelledError`, `InvalidStateError`, `TimeoutError`, `IncompleteReadError`, `LimitOverrunError`, `SendfileNotAvailableError`, `BrokenBarrierError` | DONE | _pending_ |
-| 4 | P1.4 | `mixins.py` | `_LoopBoundMixin` (vendored; lazy-bound — pulls `threading`) | WIP | _pending_ |
-| 5 | P1.5 | `format_helpers.py` | repr helpers | DONE | _pending_ |
-| 6 | P1.6 | `base_futures.py` | shared future state constants + `_format_callbacks` | DONE | _pending_ |
-| 7 | P1.7 | `base_tasks.py` | shared task helpers (vendored; lazy-bound — pulls `coroutines` which Phase 2 ships) | WIP | _pending_ |
-| 8 | P1.8 | `__init__.py` (stub) | placeholder package marker; eagerly binds the leaves that import without runtime deps | DONE | _pending_ |
-| 9 | P1.9 | `_thread` (3.14 lifecycle handle) | `_thread.start_joinable_thread`, `_thread._ThreadHandle`, `_thread._make_thread_handle`, `_thread.daemon_threads_allowed`, `_thread._shutdown`, `_thread._get_main_thread_ident`, `_thread._is_main_interpreter`, `_thread.LockType` attribute. Required because `asyncio.log` imports `logging` imports `threading`. | DONE | _pending_ |
+| 1 | P1.1 | `log.py` | `logger = logging.getLogger("asyncio")` (vendored; lazy-bound — `logging` still blocked on threading/itertools) | WIP | 12621ea |
+| 2 | P1.2 | `constants.py` | numeric/string constants used across the package | DONE | 12621ea |
+| 3 | P1.3 | `exceptions.py` | `CancelledError`, `InvalidStateError`, `TimeoutError`, `IncompleteReadError`, `LimitOverrunError`, `SendfileNotAvailableError`, `BrokenBarrierError` | DONE | 12621ea |
+| 4 | P1.4 | `mixins.py` | `_LoopBoundMixin` (vendored; lazy-bound — pulls `threading`) | WIP | 12621ea |
+| 5 | P1.5 | `format_helpers.py` | repr helpers | DONE | 12621ea |
+| 6 | P1.6 | `base_futures.py` | shared future state constants + `_format_callbacks` | DONE | 12621ea |
+| 7 | P1.7 | `base_tasks.py` | shared task helpers (vendored; lazy-bound — pulls `coroutines` which Phase 2 ships) | WIP | 12621ea |
+| 8 | P1.8 | `__init__.py` (stub) | placeholder package marker; eagerly binds the leaves that import without runtime deps | DONE | 12621ea |
+| 9 | P1.9 | `_thread` (3.14 lifecycle handle) | `_thread.start_joinable_thread`, `_thread._ThreadHandle`, `_thread._make_thread_handle`, `_thread.daemon_threads_allowed`, `_thread._shutdown`, `_thread._get_main_thread_ident`, `_thread._is_main_interpreter`, `_thread.LockType` attribute. Required because `asyncio.log` imports `logging` imports `threading`. | DONE | 12621ea |
 
 ### Phase 2: coroutines + `_is_coroutine` sentinel
 
