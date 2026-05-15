@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/tamnd/gopy/codecs"
 )
 
 func init() {
@@ -521,12 +523,54 @@ func strLenMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewInt(int64(len(runeSlice(s)))), nil
 }
 
-func strEncodeMethod(args []Object, _ map[string]Object) (Object, error) {
+// strEncodeMethod ports str.encode(encoding="utf-8", errors="strict").
+// Routes through codecs.Encode so non-utf-8 encodings (latin-1, ascii,
+// the multi-byte codecs the io textio port registers) produce the
+// right bytes; the original implementation returned the raw utf-8
+// backing slice for every encoding.
+//
+// CPython: Objects/unicodeobject.c:L13262 unicode_encode_impl
+func strEncodeMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	s, err := selfStr(args, "encode")
 	if err != nil {
 		return nil, err
 	}
-	return NewBytes([]byte(s)), nil
+	encoding := "utf-8"
+	errorsName := "strict"
+	rest := args[1:]
+	if len(rest) > 0 {
+		u, ok := rest[0].(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: encode() argument 'encoding' must be str, not %s", rest[0].Type().Name)
+		}
+		encoding = u.Value()
+	}
+	if len(rest) > 1 {
+		u, ok := rest[1].(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: encode() argument 'errors' must be str, not %s", rest[1].Type().Name)
+		}
+		errorsName = u.Value()
+	}
+	if v, ok := kwargs["encoding"]; ok {
+		u, isStr := v.(*Unicode)
+		if !isStr {
+			return nil, fmt.Errorf("TypeError: encode() argument 'encoding' must be str, not %s", v.Type().Name)
+		}
+		encoding = u.Value()
+	}
+	if v, ok := kwargs["errors"]; ok {
+		u, isStr := v.(*Unicode)
+		if !isStr {
+			return nil, fmt.Errorf("TypeError: encode() argument 'errors' must be str, not %s", v.Type().Name)
+		}
+		errorsName = u.Value()
+	}
+	out, _, encErr := codecs.Encode(s, encoding, errorsName)
+	if encErr != nil {
+		return nil, encErr
+	}
+	return NewBytes(out), nil
 }
 
 func strFormatMethod(args []Object, kwargs map[string]Object) (Object, error) {

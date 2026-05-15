@@ -48,6 +48,19 @@ func ParseString(src, filename string, mode Mode) (ast.Mod, error) {
 	return runParse(st, mode)
 }
 
+// ParseBytes is the bytes-input form: src is run through
+// lexer.FromBytes, which honors the PEP 263 coding cookie before
+// handing decoded source to the tokenizer. compile() with a bytes
+// argument routes through here.
+//
+// CPython: Python/bltinmodule.c:771 builtin_compile_impl (bytes branch
+// via _Py_SourceAsString)
+func ParseBytes(src []byte, filename string, mode Mode) (ast.Mod, error) {
+	st := lexer.FromBytes(src, lexerMode(mode))
+	st.SetFilename(filename)
+	return runParse(st, mode)
+}
+
 // Parse reads from r. Useful for tokenize.tokenize() over file
 // input where buffered IO is preferable.
 //
