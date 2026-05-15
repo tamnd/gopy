@@ -353,3 +353,50 @@ func (s *State) recordError(msg string) {
 		Message: msg,
 	}
 }
+
+// freeFStringExpressions clears the per-mode last_expr_buffer slots.
+// CPython has to free them by hand because PyMem_Malloc owns the
+// memory; in gopy the GC reclaims the slice once we drop the
+// reference, so the body just nils the fields out so a debugger sees
+// a clean state.
+//
+// CPython: Parser/lexer/state.c:25 free_fstring_expressions
+func (s *State) freeFStringExpressions() {
+	for i := s.tokModeStackIndex; i >= 0; i-- {
+		m := &s.tokModeStack[i]
+		m.lastExprBuffer = nil
+		m.lastExprSize = 0
+		m.lastExprEnd = -1
+		m.inFormatSpec = false
+	}
+}
+
+// Free releases the tokenizer state. In CPython this hand-frees
+// encoding / buf / input / interactive_src_start / fstring history;
+// gopy uses the Go GC so the body just clears slices to break
+// reference cycles and calls freeFStringExpressions for parity.
+//
+// CPython: Parser/lexer/state.c:43 _PyTokenizer_Free
+func (s *State) Free() {
+	s.encoding = ""
+	s.buf = nil
+	s.filename = ""
+	s.freeFStringExpressions()
+}
+
+// TokenInit zeroes a Tok value. CPython's _PyToken_Init sets the
+// metadata pointer to NULL; Tok values are zero-initialised in Go so
+// this is purely a citation anchor for parity.
+//
+// CPython: Parser/lexer/state.c:67 _PyToken_Init
+func TokenInit(t *Tok) {
+	if t != nil {
+		*t = Tok{}
+	}
+}
+
+// TokenFree releases a Tok. CPython drops the metadata reference;
+// gopy lets the GC handle it. Kept as a citation anchor.
+//
+// CPython: Parser/lexer/state.c:63 _PyToken_Free
+func TokenFree(_ *Tok) {}
