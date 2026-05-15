@@ -42,6 +42,7 @@ func (*FunctionType) isMod() {}
 type Stmt interface {
 	isStmt()
 	Position() Pos
+	SetPos(Pos)
 }
 
 // FunctionDef is the asdl `FunctionDef` node.
@@ -61,6 +62,9 @@ func (*FunctionDef) isStmt() {}
 // Position returns the source location.
 func (n *FunctionDef) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *FunctionDef) SetPos(p Pos) { n.Pos = p }
+
 // AsyncFunctionDef is the asdl `AsyncFunctionDef` node.
 type AsyncFunctionDef struct {
 	Name          string
@@ -78,6 +82,9 @@ func (*AsyncFunctionDef) isStmt() {}
 // Position returns the source location.
 func (n *AsyncFunctionDef) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *AsyncFunctionDef) SetPos(p Pos) { n.Pos = p }
+
 // ClassDef is the asdl `ClassDef` node.
 type ClassDef struct {
 	Name          string
@@ -94,6 +101,9 @@ func (*ClassDef) isStmt() {}
 // Position returns the source location.
 func (n *ClassDef) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *ClassDef) SetPos(p Pos) { n.Pos = p }
+
 // Return is the asdl `Return` node.
 type Return struct {
 	Value Expr
@@ -105,6 +115,9 @@ func (*Return) isStmt() {}
 // Position returns the source location.
 func (n *Return) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Return) SetPos(p Pos) { n.Pos = p }
+
 // Delete is the asdl `Delete` node.
 type Delete struct {
 	Targets Seq[Expr]
@@ -115,6 +128,9 @@ func (*Delete) isStmt() {}
 
 // Position returns the source location.
 func (n *Delete) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Delete) SetPos(p Pos) { n.Pos = p }
 
 // Assign is the asdl `Assign` node.
 type Assign struct {
@@ -129,6 +145,9 @@ func (*Assign) isStmt() {}
 // Position returns the source location.
 func (n *Assign) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Assign) SetPos(p Pos) { n.Pos = p }
+
 // TypeAlias is the asdl `TypeAlias` node.
 type TypeAlias struct {
 	Name       Expr
@@ -141,6 +160,9 @@ func (*TypeAlias) isStmt() {}
 
 // Position returns the source location.
 func (n *TypeAlias) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *TypeAlias) SetPos(p Pos) { n.Pos = p }
 
 // AugAssign is the asdl `AugAssign` node.
 type AugAssign struct {
@@ -155,6 +177,9 @@ func (*AugAssign) isStmt() {}
 // Position returns the source location.
 func (n *AugAssign) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *AugAssign) SetPos(p Pos) { n.Pos = p }
+
 // AnnAssign is the asdl `AnnAssign` node.
 type AnnAssign struct {
 	Target     Expr
@@ -168,6 +193,9 @@ func (*AnnAssign) isStmt() {}
 
 // Position returns the source location.
 func (n *AnnAssign) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *AnnAssign) SetPos(p Pos) { n.Pos = p }
 
 // For is the asdl `For` node.
 type For struct {
@@ -184,6 +212,9 @@ func (*For) isStmt() {}
 // Position returns the source location.
 func (n *For) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *For) SetPos(p Pos) { n.Pos = p }
+
 // AsyncFor is the asdl `AsyncFor` node.
 type AsyncFor struct {
 	Target      Expr
@@ -199,6 +230,9 @@ func (*AsyncFor) isStmt() {}
 // Position returns the source location.
 func (n *AsyncFor) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *AsyncFor) SetPos(p Pos) { n.Pos = p }
+
 // While is the asdl `While` node.
 type While struct {
 	Test   Expr
@@ -211,6 +245,9 @@ func (*While) isStmt() {}
 
 // Position returns the source location.
 func (n *While) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *While) SetPos(p Pos) { n.Pos = p }
 
 // If is the asdl `If` node.
 type If struct {
@@ -225,6 +262,9 @@ func (*If) isStmt() {}
 // Position returns the source location.
 func (n *If) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *If) SetPos(p Pos) { n.Pos = p }
+
 // With is the asdl `With` node.
 type With struct {
 	Items       Seq[*Withitem]
@@ -237,6 +277,9 @@ func (*With) isStmt() {}
 
 // Position returns the source location.
 func (n *With) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *With) SetPos(p Pos) { n.Pos = p }
 
 // AsyncWith is the asdl `AsyncWith` node.
 type AsyncWith struct {
@@ -251,6 +294,9 @@ func (*AsyncWith) isStmt() {}
 // Position returns the source location.
 func (n *AsyncWith) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *AsyncWith) SetPos(p Pos) { n.Pos = p }
+
 // Match is the asdl `Match` node.
 type Match struct {
 	Subject Expr
@@ -263,6 +309,9 @@ func (*Match) isStmt() {}
 // Position returns the source location.
 func (n *Match) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Match) SetPos(p Pos) { n.Pos = p }
+
 // Raise is the asdl `Raise` node.
 type Raise struct {
 	Exc   Expr
@@ -274,6 +323,9 @@ func (*Raise) isStmt() {}
 
 // Position returns the source location.
 func (n *Raise) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Raise) SetPos(p Pos) { n.Pos = p }
 
 // Try is the asdl `Try` node.
 type Try struct {
@@ -289,6 +341,9 @@ func (*Try) isStmt() {}
 // Position returns the source location.
 func (n *Try) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Try) SetPos(p Pos) { n.Pos = p }
+
 // TryStar is the asdl `TryStar` node.
 type TryStar struct {
 	Body      Seq[Stmt]
@@ -303,6 +358,9 @@ func (*TryStar) isStmt() {}
 // Position returns the source location.
 func (n *TryStar) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *TryStar) SetPos(p Pos) { n.Pos = p }
+
 // Assert is the asdl `Assert` node.
 type Assert struct {
 	Test Expr
@@ -315,6 +373,9 @@ func (*Assert) isStmt() {}
 // Position returns the source location.
 func (n *Assert) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Assert) SetPos(p Pos) { n.Pos = p }
+
 // Import is the asdl `Import` node.
 type Import struct {
 	Names Seq[*Alias]
@@ -325,6 +386,9 @@ func (*Import) isStmt() {}
 
 // Position returns the source location.
 func (n *Import) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Import) SetPos(p Pos) { n.Pos = p }
 
 // ImportFrom is the asdl `ImportFrom` node.
 type ImportFrom struct {
@@ -339,6 +403,9 @@ func (*ImportFrom) isStmt() {}
 // Position returns the source location.
 func (n *ImportFrom) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *ImportFrom) SetPos(p Pos) { n.Pos = p }
+
 // Global is the asdl `Global` node.
 type Global struct {
 	Names Seq[string]
@@ -349,6 +416,9 @@ func (*Global) isStmt() {}
 
 // Position returns the source location.
 func (n *Global) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Global) SetPos(p Pos) { n.Pos = p }
 
 // Nonlocal is the asdl `Nonlocal` node.
 type Nonlocal struct {
@@ -361,6 +431,9 @@ func (*Nonlocal) isStmt() {}
 // Position returns the source location.
 func (n *Nonlocal) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Nonlocal) SetPos(p Pos) { n.Pos = p }
+
 // ExprStmt is the asdl `ExprStmt` node.
 type ExprStmt struct {
 	Value Expr
@@ -372,6 +445,9 @@ func (*ExprStmt) isStmt() {}
 // Position returns the source location.
 func (n *ExprStmt) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *ExprStmt) SetPos(p Pos) { n.Pos = p }
+
 // Pass is the asdl `Pass` node.
 type Pass struct {
 	Pos Pos
@@ -381,6 +457,9 @@ func (*Pass) isStmt() {}
 
 // Position returns the source location.
 func (n *Pass) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Pass) SetPos(p Pos) { n.Pos = p }
 
 // Break is the asdl `Break` node.
 type Break struct {
@@ -392,6 +471,9 @@ func (*Break) isStmt() {}
 // Position returns the source location.
 func (n *Break) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Break) SetPos(p Pos) { n.Pos = p }
+
 // Continue is the asdl `Continue` node.
 type Continue struct {
 	Pos Pos
@@ -402,10 +484,14 @@ func (*Continue) isStmt() {}
 // Position returns the source location.
 func (n *Continue) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Continue) SetPos(p Pos) { n.Pos = p }
+
 // Expr is the asdl `expr` sum.
 type Expr interface {
 	isExpr()
 	Position() Pos
+	SetPos(Pos)
 }
 
 // BoolOp is the asdl `BoolOp` node.
@@ -420,6 +506,9 @@ func (*BoolOp) isExpr() {}
 // Position returns the source location.
 func (n *BoolOp) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *BoolOp) SetPos(p Pos) { n.Pos = p }
+
 // NamedExpr is the asdl `NamedExpr` node.
 type NamedExpr struct {
 	Target Expr
@@ -431,6 +520,9 @@ func (*NamedExpr) isExpr() {}
 
 // Position returns the source location.
 func (n *NamedExpr) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *NamedExpr) SetPos(p Pos) { n.Pos = p }
 
 // BinOp is the asdl `BinOp` node.
 type BinOp struct {
@@ -445,6 +537,9 @@ func (*BinOp) isExpr() {}
 // Position returns the source location.
 func (n *BinOp) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *BinOp) SetPos(p Pos) { n.Pos = p }
+
 // UnaryOp is the asdl `UnaryOp` node.
 type UnaryOp struct {
 	Op      Unaryop
@@ -457,6 +552,9 @@ func (*UnaryOp) isExpr() {}
 // Position returns the source location.
 func (n *UnaryOp) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *UnaryOp) SetPos(p Pos) { n.Pos = p }
+
 // Lambda is the asdl `Lambda` node.
 type Lambda struct {
 	Args *Arguments
@@ -468,6 +566,9 @@ func (*Lambda) isExpr() {}
 
 // Position returns the source location.
 func (n *Lambda) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Lambda) SetPos(p Pos) { n.Pos = p }
 
 // IfExp is the asdl `IfExp` node.
 type IfExp struct {
@@ -482,6 +583,9 @@ func (*IfExp) isExpr() {}
 // Position returns the source location.
 func (n *IfExp) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *IfExp) SetPos(p Pos) { n.Pos = p }
+
 // Dict is the asdl `Dict` node.
 type Dict struct {
 	Keys   Seq[Expr]
@@ -494,6 +598,9 @@ func (*Dict) isExpr() {}
 // Position returns the source location.
 func (n *Dict) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Dict) SetPos(p Pos) { n.Pos = p }
+
 // Set is the asdl `Set` node.
 type Set struct {
 	Elts Seq[Expr]
@@ -504,6 +611,9 @@ func (*Set) isExpr() {}
 
 // Position returns the source location.
 func (n *Set) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Set) SetPos(p Pos) { n.Pos = p }
 
 // ListComp is the asdl `ListComp` node.
 type ListComp struct {
@@ -517,6 +627,9 @@ func (*ListComp) isExpr() {}
 // Position returns the source location.
 func (n *ListComp) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *ListComp) SetPos(p Pos) { n.Pos = p }
+
 // SetComp is the asdl `SetComp` node.
 type SetComp struct {
 	Elt        Expr
@@ -528,6 +641,9 @@ func (*SetComp) isExpr() {}
 
 // Position returns the source location.
 func (n *SetComp) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *SetComp) SetPos(p Pos) { n.Pos = p }
 
 // DictComp is the asdl `DictComp` node.
 type DictComp struct {
@@ -542,6 +658,9 @@ func (*DictComp) isExpr() {}
 // Position returns the source location.
 func (n *DictComp) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *DictComp) SetPos(p Pos) { n.Pos = p }
+
 // GeneratorExp is the asdl `GeneratorExp` node.
 type GeneratorExp struct {
 	Elt        Expr
@@ -554,6 +673,9 @@ func (*GeneratorExp) isExpr() {}
 // Position returns the source location.
 func (n *GeneratorExp) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *GeneratorExp) SetPos(p Pos) { n.Pos = p }
+
 // Await is the asdl `Await` node.
 type Await struct {
 	Value Expr
@@ -564,6 +686,9 @@ func (*Await) isExpr() {}
 
 // Position returns the source location.
 func (n *Await) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Await) SetPos(p Pos) { n.Pos = p }
 
 // Yield is the asdl `Yield` node.
 type Yield struct {
@@ -576,6 +701,9 @@ func (*Yield) isExpr() {}
 // Position returns the source location.
 func (n *Yield) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Yield) SetPos(p Pos) { n.Pos = p }
+
 // YieldFrom is the asdl `YieldFrom` node.
 type YieldFrom struct {
 	Value Expr
@@ -586,6 +714,9 @@ func (*YieldFrom) isExpr() {}
 
 // Position returns the source location.
 func (n *YieldFrom) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *YieldFrom) SetPos(p Pos) { n.Pos = p }
 
 // Compare is the asdl `Compare` node.
 type Compare struct {
@@ -600,6 +731,9 @@ func (*Compare) isExpr() {}
 // Position returns the source location.
 func (n *Compare) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Compare) SetPos(p Pos) { n.Pos = p }
+
 // Call is the asdl `Call` node.
 type Call struct {
 	Func     Expr
@@ -613,6 +747,9 @@ func (*Call) isExpr() {}
 // Position returns the source location.
 func (n *Call) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Call) SetPos(p Pos) { n.Pos = p }
+
 // FormattedValue is the asdl `FormattedValue` node.
 type FormattedValue struct {
 	Value      Expr
@@ -625,6 +762,9 @@ func (*FormattedValue) isExpr() {}
 
 // Position returns the source location.
 func (n *FormattedValue) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *FormattedValue) SetPos(p Pos) { n.Pos = p }
 
 // Interpolation is the asdl `Interpolation` node.
 type Interpolation struct {
@@ -640,6 +780,9 @@ func (*Interpolation) isExpr() {}
 // Position returns the source location.
 func (n *Interpolation) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Interpolation) SetPos(p Pos) { n.Pos = p }
+
 // JoinedStr is the asdl `JoinedStr` node.
 type JoinedStr struct {
 	Values Seq[Expr]
@@ -650,6 +793,9 @@ func (*JoinedStr) isExpr() {}
 
 // Position returns the source location.
 func (n *JoinedStr) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *JoinedStr) SetPos(p Pos) { n.Pos = p }
 
 // TemplateStr is the asdl `TemplateStr` node.
 type TemplateStr struct {
@@ -662,6 +808,9 @@ func (*TemplateStr) isExpr() {}
 // Position returns the source location.
 func (n *TemplateStr) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *TemplateStr) SetPos(p Pos) { n.Pos = p }
+
 // Constant is the asdl `Constant` node.
 type Constant struct {
 	Value any
@@ -673,6 +822,9 @@ func (*Constant) isExpr() {}
 
 // Position returns the source location.
 func (n *Constant) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Constant) SetPos(p Pos) { n.Pos = p }
 
 // Attribute is the asdl `Attribute` node.
 type Attribute struct {
@@ -687,6 +839,9 @@ func (*Attribute) isExpr() {}
 // Position returns the source location.
 func (n *Attribute) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Attribute) SetPos(p Pos) { n.Pos = p }
+
 // Subscript is the asdl `Subscript` node.
 type Subscript struct {
 	Value Expr
@@ -700,6 +855,9 @@ func (*Subscript) isExpr() {}
 // Position returns the source location.
 func (n *Subscript) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Subscript) SetPos(p Pos) { n.Pos = p }
+
 // Starred is the asdl `Starred` node.
 type Starred struct {
 	Value Expr
@@ -711,6 +869,9 @@ func (*Starred) isExpr() {}
 
 // Position returns the source location.
 func (n *Starred) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Starred) SetPos(p Pos) { n.Pos = p }
 
 // Name is the asdl `Name` node.
 type Name struct {
@@ -724,6 +885,9 @@ func (*Name) isExpr() {}
 // Position returns the source location.
 func (n *Name) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Name) SetPos(p Pos) { n.Pos = p }
+
 // List is the asdl `List` node.
 type List struct {
 	Elts Seq[Expr]
@@ -735,6 +899,9 @@ func (*List) isExpr() {}
 
 // Position returns the source location.
 func (n *List) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *List) SetPos(p Pos) { n.Pos = p }
 
 // Tuple is the asdl `Tuple` node.
 type Tuple struct {
@@ -748,6 +915,9 @@ func (*Tuple) isExpr() {}
 // Position returns the source location.
 func (n *Tuple) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Tuple) SetPos(p Pos) { n.Pos = p }
+
 // Slice is the asdl `Slice` node.
 type Slice struct {
 	Lower Expr
@@ -760,6 +930,9 @@ func (*Slice) isExpr() {}
 
 // Position returns the source location.
 func (n *Slice) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Slice) SetPos(p Pos) { n.Pos = p }
 
 // ExprContext is the asdl `expr_context` enum.
 type ExprContext int
@@ -934,6 +1107,7 @@ type Comprehension struct {
 type Excepthandler interface {
 	isExcepthandler()
 	Position() Pos
+	SetPos(Pos)
 }
 
 // ExceptHandler is the asdl `ExceptHandler` node.
@@ -948,6 +1122,9 @@ func (*ExceptHandler) isExcepthandler() {}
 
 // Position returns the source location.
 func (n *ExceptHandler) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *ExceptHandler) SetPos(p Pos) { n.Pos = p }
 
 // Arguments is the asdl `arguments` node.
 type Arguments struct {
@@ -971,6 +1148,9 @@ type Arg struct {
 // Position returns the source location.
 func (n *Arg) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Arg) SetPos(p Pos) { n.Pos = p }
+
 // Keyword is the asdl `keyword` node.
 type Keyword struct {
 	Arg   *string
@@ -981,6 +1161,9 @@ type Keyword struct {
 // Position returns the source location.
 func (n *Keyword) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *Keyword) SetPos(p Pos) { n.Pos = p }
+
 // Alias is the asdl `alias` node.
 type Alias struct {
 	Name   string
@@ -990,6 +1173,9 @@ type Alias struct {
 
 // Position returns the source location.
 func (n *Alias) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *Alias) SetPos(p Pos) { n.Pos = p }
 
 // Withitem is the asdl `withitem` node.
 type Withitem struct {
@@ -1008,6 +1194,7 @@ type MatchCase struct {
 type Pattern interface {
 	isPattern()
 	Position() Pos
+	SetPos(Pos)
 }
 
 // MatchValue is the asdl `MatchValue` node.
@@ -1021,6 +1208,9 @@ func (*MatchValue) isPattern() {}
 // Position returns the source location.
 func (n *MatchValue) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *MatchValue) SetPos(p Pos) { n.Pos = p }
+
 // MatchSingleton is the asdl `MatchSingleton` node.
 type MatchSingleton struct {
 	Value any
@@ -1032,6 +1222,9 @@ func (*MatchSingleton) isPattern() {}
 // Position returns the source location.
 func (n *MatchSingleton) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *MatchSingleton) SetPos(p Pos) { n.Pos = p }
+
 // MatchSequence is the asdl `MatchSequence` node.
 type MatchSequence struct {
 	Patterns Seq[Pattern]
@@ -1042,6 +1235,9 @@ func (*MatchSequence) isPattern() {}
 
 // Position returns the source location.
 func (n *MatchSequence) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *MatchSequence) SetPos(p Pos) { n.Pos = p }
 
 // MatchMapping is the asdl `MatchMapping` node.
 type MatchMapping struct {
@@ -1055,6 +1251,9 @@ func (*MatchMapping) isPattern() {}
 
 // Position returns the source location.
 func (n *MatchMapping) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *MatchMapping) SetPos(p Pos) { n.Pos = p }
 
 // MatchClass is the asdl `MatchClass` node.
 type MatchClass struct {
@@ -1070,6 +1269,9 @@ func (*MatchClass) isPattern() {}
 // Position returns the source location.
 func (n *MatchClass) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *MatchClass) SetPos(p Pos) { n.Pos = p }
+
 // MatchStar is the asdl `MatchStar` node.
 type MatchStar struct {
 	Name *string
@@ -1080,6 +1282,9 @@ func (*MatchStar) isPattern() {}
 
 // Position returns the source location.
 func (n *MatchStar) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *MatchStar) SetPos(p Pos) { n.Pos = p }
 
 // MatchAs is the asdl `MatchAs` node.
 type MatchAs struct {
@@ -1093,6 +1298,9 @@ func (*MatchAs) isPattern() {}
 // Position returns the source location.
 func (n *MatchAs) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *MatchAs) SetPos(p Pos) { n.Pos = p }
+
 // MatchOr is the asdl `MatchOr` node.
 type MatchOr struct {
 	Patterns Seq[Pattern]
@@ -1103,6 +1311,9 @@ func (*MatchOr) isPattern() {}
 
 // Position returns the source location.
 func (n *MatchOr) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *MatchOr) SetPos(p Pos) { n.Pos = p }
 
 // TypeIgnore is the asdl `type_ignore` sum.
 type TypeIgnore interface {
@@ -1121,6 +1332,7 @@ func (*TypeIgnoreNode) isTypeIgnore() {}
 type TypeParam interface {
 	isTypeParam()
 	Position() Pos
+	SetPos(Pos)
 }
 
 // TypeVar is the asdl `TypeVar` node.
@@ -1136,6 +1348,9 @@ func (*TypeVar) isTypeParam() {}
 // Position returns the source location.
 func (n *TypeVar) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *TypeVar) SetPos(p Pos) { n.Pos = p }
+
 // ParamSpec is the asdl `ParamSpec` node.
 type ParamSpec struct {
 	Name         string
@@ -1148,6 +1363,9 @@ func (*ParamSpec) isTypeParam() {}
 // Position returns the source location.
 func (n *ParamSpec) Position() Pos { return n.Pos }
 
+// SetPos installs the source location.
+func (n *ParamSpec) SetPos(p Pos) { n.Pos = p }
+
 // TypeVarTuple is the asdl `TypeVarTuple` node.
 type TypeVarTuple struct {
 	Name         string
@@ -1159,3 +1377,6 @@ func (*TypeVarTuple) isTypeParam() {}
 
 // Position returns the source location.
 func (n *TypeVarTuple) Position() Pos { return n.Pos }
+
+// SetPos installs the source location.
+func (n *TypeVarTuple) SetPos(p Pos) { n.Pos = p }

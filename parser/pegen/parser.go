@@ -13,6 +13,7 @@
 package pegen
 
 import (
+	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/build"
 	perrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/parser/lexer"
@@ -232,6 +233,35 @@ var opTokenType = map[string]token.Type{
 //
 // CPython: Parser/pegen.c:43 _PyPegen_seek
 func (p *Parser) Mark() int { return p.mark }
+
+// Span returns the source location covering tokens [startMark, mark).
+// The end mark is the parser's current position; the last consumed
+// token is p.tokens[mark-1]. Returns ast.NoPos when startMark is
+// out of range or the run is empty.
+//
+// CPython: Tools/peg_generator/pegen/c_generator.py EXTRA macro
+// (start_lineno / start_col_offset / end_lineno / end_col_offset
+// captured from the parser's mark/end_mark).
+func (p *Parser) Span(startMark int) ast.Pos {
+	if startMark < 0 || startMark >= len(p.tokens) {
+		return ast.NoPos
+	}
+	end := p.mark - 1
+	if end < startMark {
+		end = startMark
+	}
+	if end >= len(p.tokens) {
+		end = len(p.tokens) - 1
+	}
+	st := p.tokens[startMark]
+	et := p.tokens[end]
+	return ast.Pos{
+		Lineno:       st.Lineno,
+		ColOffset:    st.ColOff,
+		EndLineno:    et.EndLine,
+		EndColOffset: et.EndCol,
+	}
+}
 
 // Reset rewinds the parse to a previously-taken Mark.
 func (p *Parser) Reset(m int) { p.mark = m }

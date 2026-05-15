@@ -54,18 +54,42 @@ the correct line on the first hit.
 
 ## Files in scope
 
-Exploration on 2026-05-15 confirmed the per-instruction location
-plumbing (`Instr.Loc` in `compile/instrseq.go:62-67`) is already in
-place and the writer/driver in `compile/assemble_locations.go` already
-coalesces and picks the minimal form. The bug surfaced by task #608 is
-upstream: codegen emits most ops with an empty `Loc`, so the assembler
-faithfully encodes "no location" for the bytecodes that follow the
-first op of each source line. File C below is therefore the
-load-bearing one, not files A/B.
+Diagnosis on 2026-05-15 narrowed the real gap. With a debug dump
+(`GOPY_DUMP_LOCS=inner`) on `def inner(): raise ValueError('boom')`
+only one of six ops carried a real location:
+
+```
+[LOC] inner [0] op=RESUME       loc={-1 -1 -1 -1}
+[LOC] inner [1] op=LOAD_GLOBAL  loc={2 10 2 20}
+[LOC] inner [2] op=PUSH_NULL    loc={-1 -1 -1 -1}
+[LOC] inner [3] op=LOAD_CONST   loc={-1 -1 -1 -1}
+[LOC] inner [4] op=CALL         loc={-1 -1 -1 -1}
+[LOC] inner [5] op=RAISE_VARARGS loc={-1 -1 -1 -1}
+```
+
+The codegen visitors call `loc(node)` on every emit. They are not the
+bug: a follow-up probe against the parsed AST confirmed the nodes
+themselves carry `NoPos`:
+
+```
+FunctionDef pos: {-1 -1 -1 -1}
+Raise       pos: {-1 -1 -1 -1}
+Call        pos: {-1 -1 -1 -1}
+Call.Func   pos: {2 10 2 20}  (*ast.Name)
+Call.Args[0] pos: {-1 -1 -1 -1}  (*ast.Constant)
+```
+
+Only `Name` (built from a single token) gets a real position. Every
+compound node returned from a PEG action carries
+`Pos: ast.NoPos`, because `parser/pegen/action_helpers_gen.go` stamps
+the literal `ast.NoPos` into every `actionAst*` constructor and
+`tools/parser_gen/emit.go` does not wrap action calls with CPython's
+`EXTRA` macro (start/end token spans). That's the real Phase 1 work.
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| C | `Python/compile.c` + `Python/codegen.c` (every emit site: `compiler_addop_*`, `ADDOP*` macros, anything that builds a `location` struct from an `expr_ty`/`stmt_ty`. Every call must pass a real source location, not a default-zero `ast.Pos`) | varies | `compile/codegen.go` and friends | pending audit (this is where the gap is) |
+| D | `Parser/pegen.c` + `Parser/action_helpers.c` + the PEG generator's `EXTRA` wrapping (`Tools/peg_generator/pegen/c_generator.py` — every action call needs `EXTRA`, every `actionAst*` helper needs to consume a `Location`) | varies | `parser/pegen/action_helpers_gen.go`, `parser/pegen/parser_gen.go`, `tools/parser_gen/emit.go` | pending (load-bearing — the bug is here) |
+| C | `Python/compile.c` + `Python/codegen.c` (every emit site: `compiler_addop_*`, `ADDOP*` macros, anything that builds a `location` struct from an `expr_ty`/`stmt_ty`) | varies | `compile/codegen.go` and friends | structurally fine — passes `loc(node)` on every emit. Becomes correct automatically once D lands. |
 | B | `Python/instruction_sequence.c` (per-instruction location storage: `_PyInstructionSequence_AddLocation`, `_PyInstructionSequence_Insert`, the `i_loc` field) | ~120 | `compile/instrseq.go` | done structurally; needs a 1:1 function audit pass |
 | A | `Python/assemble.c` (location-emission slice: `write_location_info_entry`, `write_location_info_short_form`, `write_location_info_oneline_form`, `write_location_info_long_form`, `write_location_info_no_column`, `write_location_info_none`, `assemble_emit_location`, `assemble_location_info`) | ~240 | `compile/assemble_locations.go` | done structurally (already coalesces + picks minimal form); needs a 1:1 function rename + citation pass to match CPython exactly |
 
@@ -80,10 +104,10 @@ has one in CPython."
 
 | Phase | File | Block | Blocks | Status |
 |-------|------|-------|--------|--------|
-| 1 | C `codegen.go` | Emit-site audit: every `Addop` / `Insert` call must pass a real `ast.Pos`. Catch the silent default-zero `ast.Pos{}` cases that produce "no location" entries today. | - | pending |
-| 2 | B `instrseq.go` | 1:1 audit against `Python/instruction_sequence.c`. Confirm every function has a citation, every insertion path propagates `Loc`. | - | pending |
-| 3 | A `assemble_locations.go` | 1:1 audit against `Python/assemble.c`. Rename helpers to match (`writeLocationInfoEntry`, `writeLocationInfoShortForm`, etc.) and add file:line citations. Reproduce CPython's coalescing rules exactly. | - | pending |
-| Gate | - | Decoded position table has `Line > 0` for every non-synthetic codeunit; `lineForOffset` shim deleted; `attachFrameTraceback` calls `CoAddr2Location` directly; existing `TestTracebackFormatExc` still green; new round-trip test asserts one PositionEntry per codeunit for a known multi-line function. | 1,2,3 | pending |
+| 1 | D `pegen/action_helpers_gen.go` + `tools/parser_gen/emit.go` | Port CPython's `EXTRA`: capture start mark before every alt, compute the end span after every action, pass the resulting `Location` into every `actionAst*` helper. Update all ~68 helpers to write that location into the constructed node's `Pos`. Regenerate `parser_gen.go`. | - | done |
+| 2 | B `instrseq.go` | 1:1 audit against `Python/instruction_sequence.c`. Confirm every function has a citation, every insertion path propagates `Loc`. | 1 | done |
+| 3 | A `assemble_locations.go` | 1:1 audit against `Python/assemble.c`. Rename helpers to match (`writeLocationInfoEntry`, `writeLocationInfoShortForm`, etc.) and add file:line citations. Reproduce CPython's coalescing rules exactly. | 1 | done |
+| Gate | - | Decoded position table has `Line > 0` for every non-synthetic codeunit; `lineForOffset` shim deleted; `attachFrameTraceback` calls `CoAddr2Location` directly; existing `TestTracebackFormatExc` still green; round-trip test (`vm.TestLineTableParityAcrossFixtures`) asserts one PositionEntry per coalesced run for curated multi-line fixtures. | 1,2,3 | done |
 
 ## Phase 1 - `Python/assemble.c` per-instruction writers
 
@@ -151,7 +175,8 @@ After all four phases land:
 
 ## Checklist
 
-- [ ] Phase 1: codegen emit-site audit, every Addop/Insert passes a real ast.Pos
-- [ ] Phase 2: `instrseq.go` 1:1 against `instruction_sequence.c` with citations
-- [ ] Phase 3: `assemble_locations.go` 1:1 against `assemble.c` with citations
-- [ ] Gate: shim deleted, unwind back to direct lookup, round-trip test added, all tests green
+- [x] Phase 1: PEG generator threads EXTRA span into every action; SetPos on every AST node
+- [x] Gate sub-step: `lineForOffset` shim deleted, `attachFrameTraceback` calls `CoAddr2Location` directly, `TestTracebackFormatExc` green
+- [x] Phase 2: `instrseq.go` 1:1 against `instruction_sequence.c` with citations
+- [x] Phase 3: `assemble_locations.go` 1:1 against `assemble.c` with citations
+- [x] Gate: round-trip test (`vm.TestLineTableParityAcrossFixtures`) covers short / oneline / long / no-column / none / split-long-span / mixed-run fixtures

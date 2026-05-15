@@ -55,7 +55,7 @@ func Assemble(seq *Sequence, info *Info, unit *Unit, filename string) (*Code, er
 		}
 		a.emitInstr(&ins)
 	}
-	a.LineTable = assembleLineTable(seq, unit.FirstLineno)
+	a.LineTable = assembleLocationInfo(seq, unit.FirstLineno)
 	a.ExceptionTable = assembleExceptionTable(seq)
 	flags := finalizeFlags(unit)
 	qualname := unit.Qualname

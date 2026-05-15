@@ -544,10 +544,10 @@ func (e *emitter) writeAltReturn(a *Alt, names []string) {
 		// composite expressions take their nil at face value: nil
 		// means the action genuinely failed.
 		if bound[strings.TrimSpace(expr)] {
-			e.printf("\t\t\treturn matchedOr(%s)\n", expr)
+			e.printf("\t\t\treturn withSpan(p, mark, matchedOr(%s))\n", expr)
 			return
 		}
-		e.printf("\t\t\treturn %s\n", expr)
+		e.printf("\t\t\treturn withSpan(p, mark, %s)\n", expr)
 		return
 	}
 	if len(names) == 0 {
@@ -555,7 +555,7 @@ func (e *emitter) writeAltReturn(a *Alt, names []string) {
 		return
 	}
 	if len(names) == 1 {
-		e.printf("\t\t\treturn matchedOr(%s)\n", names[0])
+		e.printf("\t\t\treturn withSpan(p, mark, matchedOr(%s))\n", names[0])
 		return
 	}
 	out.WriteString("\t\t\treturn []any{")

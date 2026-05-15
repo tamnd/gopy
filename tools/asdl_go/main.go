@@ -400,6 +400,7 @@ func emitSum(buf *bytes.Buffer, d *def, sumKind map[string]bool) {
 	fmt.Fprintf(buf, "\tis%s()\n", iface)
 	if hasPos {
 		fmt.Fprintln(buf, "\tPosition() Pos")
+		fmt.Fprintln(buf, "\tSetPos(Pos)")
 	}
 	fmt.Fprintln(buf, "}")
 	fmt.Fprintln(buf, "")
@@ -409,6 +410,8 @@ func emitSum(buf *bytes.Buffer, d *def, sumKind map[string]bool) {
 		if hasPos {
 			fmt.Fprintf(buf, "// Position returns the source location.\n")
 			fmt.Fprintf(buf, "func (n *%s) Position() Pos { return n.Pos }\n", goName(c.Name))
+			fmt.Fprintf(buf, "// SetPos installs the source location.\n")
+			fmt.Fprintf(buf, "func (n *%s) SetPos(p Pos) { n.Pos = p }\n", goName(c.Name))
 		}
 		fmt.Fprintln(buf, "")
 	}
@@ -419,6 +422,8 @@ func emitProduct(buf *bytes.Buffer, d *def, sumKind map[string]bool) {
 	if hasPosition(d.Attrs) {
 		fmt.Fprintf(buf, "// Position returns the source location.\n")
 		fmt.Fprintf(buf, "func (n *%s) Position() Pos { return n.Pos }\n", goName(d.Name))
+		fmt.Fprintf(buf, "// SetPos installs the source location.\n")
+		fmt.Fprintf(buf, "func (n *%s) SetPos(p Pos) { n.Pos = p }\n", goName(d.Name))
 	}
 	fmt.Fprintln(buf, "")
 }

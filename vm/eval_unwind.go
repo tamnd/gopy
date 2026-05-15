@@ -13,7 +13,6 @@ import (
 
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/gil"
-	"github.com/tamnd/gopy/monitor"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/traceback"
 )
@@ -139,37 +138,6 @@ func (e *evalState) handleException(err error) bool {
 	return true
 }
 
-// lineForOffset returns the source line associated with bytecode byte
-// offset off.
-//
-// TEMPORARY SHIM. Spec 1708 / task #609 (Python/assemble.c
-// location-emission full port) replaces this with a faithful location table where every
-// instruction carries its own entry. Until that lands the gopy
-// assembler only emits one entry per source line and pads the rest as
-// `locNone`, so a direct `PyCode_Addr2Location` lookup can return -1
-// for an op that does belong to a real source line. As a stop-gap, we
-// walk the table in order and remember the last positive line whose
-// entry starts at or before off. This is wrong under PEP 657
-// (artificially carries a line forward across regions that CPython
-// would mark as "no source line"), but it is enough to make traceback
-// rendering work today.
-//
-// CPython: Python/assemble.c:419 write_location_info_entry (this is
-// the function we need to port; the gopy assembler is missing the
-// per-instruction emission loop around it).
-func lineForOffset(co *objects.Code, off int) int {
-	line := -1
-	for _, p := range objects.CoPositions(co) {
-		if p.Start > off {
-			break
-		}
-		if p.Line > 0 {
-			line = p.Line
-		}
-	}
-	return line
-}
-
 // attachFrameTraceback prepends a traceback entry for the current
 // frame onto the live exception's TB chain. Mirrors PyTraceBack_Here,
 // which the CPython unwind invokes for every frame on the way up.
@@ -203,9 +171,9 @@ func (e *evalState) attachFrameTraceback() {
 	if off < 0 {
 		off = e.f.InstrPtr
 	}
-	line := lineForOffset(co, off)
-	if line < 0 {
-		line = monitor.LineForOffset(co, off/2)
+	line := -1
+	if entry, ok := objects.CoAddr2Location(co, off); ok {
+		line = entry.Line
 	}
 	if line < 0 && co.Firstlineno > 0 {
 		line = co.Firstlineno

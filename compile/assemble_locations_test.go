@@ -10,7 +10,7 @@ import (
 // TestWriteLocShort: single-line span, columns under 80, span under
 // 16 produces a 2-byte short-form record.
 func TestWriteLocShort(t *testing.T) {
-	got := writeLocShort(nil, 1, 5, 12)
+	got := writeLocationInfoShortForm(nil, 1, 5, 12)
 	// entry start: 0x80 | (0<<3) | 0 = 0x80
 	// payload: ((5&7)<<4) | (12-5) = (5<<4)|7 = 0x57
 	want := []byte{0x80, 0x57}
@@ -22,7 +22,7 @@ func TestWriteLocShort(t *testing.T) {
 // TestWriteLocOneline: line delta 1, columns 10..20 picks the oneline
 // form (3 bytes).
 func TestWriteLocOneline(t *testing.T) {
-	got := writeLocOneline(nil, 2, 1, 10, 20)
+	got := writeLocationInfoOnelineForm(nil, 2, 1, 10, 20)
 	// entry start: 0x80 | ((10+1)<<3) | (2-1) = 0x80 | 0x58 | 1 = 0xd9
 	want := []byte{0xd9, 10, 20}
 	if !bytes.Equal(got, want) {
@@ -32,7 +32,7 @@ func TestWriteLocOneline(t *testing.T) {
 
 // TestWriteLocNone: produces a 1-byte entry with code 15 set.
 func TestWriteLocNone(t *testing.T) {
-	got := writeLocNone(nil, 1)
+	got := writeLocationInfoNone(nil, 1)
 	// 0x80 | (15<<3) | 0 = 0x80 | 0x78 = 0xf8
 	want := []byte{0xf8}
 	if !bytes.Equal(got, want) {
@@ -42,7 +42,7 @@ func TestWriteLocNone(t *testing.T) {
 
 // TestWriteLocNoColumn: code 13 plus signed varint line delta.
 func TestWriteLocNoColumn(t *testing.T) {
-	got := writeLocNoColumn(nil, 1, 2)
+	got := writeLocationInfoNoColumn(nil, 1, 2)
 	// 0x80 | (13<<3) | 0 = 0x80 | 0x68 = 0xe8
 	// signed varint zigzag(2) = 4 -> 0x04
 	want := []byte{0xe8, 4}
@@ -54,7 +54,7 @@ func TestWriteLocNoColumn(t *testing.T) {
 // TestWriteLocLong: full 4-varint long form for a multi-line span.
 func TestWriteLocLong(t *testing.T) {
 	loc := ast.Pos{Lineno: 5, ColOffset: 0, EndLineno: 6, EndColOffset: 8}
-	got := writeLocLong(nil, loc, 4, 1)
+	got := writeLocationInfoLongForm(nil, loc, 4, 1)
 	// entry start 0x80 | (14<<3) | 0 = 0xf0
 	// signed line-delta zigzag(1) = 2
 	// end-line delta = 1
@@ -82,7 +82,7 @@ func TestWriteLocEntryDispatch(t *testing.T) {
 		{"long", ast.Pos{Lineno: 5, EndLineno: 7, ColOffset: 0, EndColOffset: 4}, 5, 0xf0},
 	}
 	for _, c := range cases {
-		got, _ := writeLocEntry(nil, c.loc, c.cursor, 1)
+		got, _ := writeLocationInfoEntry(nil, c.loc, c.cursor, 1)
 		if got[0] != c.wantFirst {
 			t.Errorf("%s: first byte = %#x, want %#x (full=% x)", c.name, got[0], c.wantFirst, got)
 		}
@@ -94,7 +94,7 @@ func TestWriteLocEntryDispatch(t *testing.T) {
 // bits.
 func TestEmitLocationSplitsLongSpans(t *testing.T) {
 	loc := ast.Pos{Lineno: 1, EndLineno: 1, ColOffset: 0, EndColOffset: 4}
-	got, _ := emitLocation(nil, loc, 1, 20)
+	got, _ := assembleEmitLocation(nil, loc, 1, 20)
 	// 20 = 8 + 8 + 4 -> three entries, each starts with bit 7 set.
 	starts := 0
 	for _, b := range got {
@@ -110,7 +110,7 @@ func TestEmitLocationSplitsLongSpans(t *testing.T) {
 // TestAssembleLineTableEmpty: empty sequence produces an empty table.
 func TestAssembleLineTableEmpty(t *testing.T) {
 	seq := &Sequence{}
-	got := assembleLineTable(seq, 1)
+	got := assembleLocationInfo(seq, 1)
 	if len(got) != 0 {
 		t.Errorf("empty seq line table = % x, want empty", got)
 	}
@@ -125,7 +125,7 @@ func TestAssembleLineTableCoalesces(t *testing.T) {
 		{Op: NOP, Loc: loc},
 		{Op: NOP, Loc: loc},
 	}}
-	got := assembleLineTable(seq, 1)
+	got := assembleLocationInfo(seq, 1)
 	starts := 0
 	for _, b := range got {
 		if b&0x80 != 0 {
