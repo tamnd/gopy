@@ -158,11 +158,26 @@ func surrogatePassHandler(enc string, input []byte, start, end int) (string, int
 }
 
 // surrogateEscapeHandler is the PEP 383 codec error handler used when
-// the OS hands us undecodable bytes. Like surrogatepass, the full
-// version needs UnicodeError objects; we register the name so
-// codecs.lookup_error("surrogateescape") succeeds at module load.
+// the OS hands us undecodable bytes. On decode each byte in 0x80..0xFF
+// maps to U+DC80..U+DCFF so the round-trip through encode (which
+// reverses the mapping) reproduces the original bytes. ASCII bytes
+// (<0x80) are not eligible and raise like strict.
 //
 // CPython: Python/codecs.c:1496 PyCodec_SurrogateEscapeErrors
 func surrogateEscapeHandler(enc string, input []byte, start, end int) (string, int, error) {
-	return strictHandler(enc, input, start, end)
+	if start < 0 || end > len(input) || start >= end {
+		return strictHandler(enc, input, start, end)
+	}
+	var b []byte
+	for i := start; i < end; i++ {
+		c := input[i]
+		if c < 0x80 {
+			return strictHandler(enc, input, start, end)
+		}
+		r := rune(0xDC00) + rune(c)
+		var buf [4]byte
+		n := utf8.EncodeRune(buf[:], r)
+		b = append(b, buf[:n]...)
+	}
+	return string(b), end, nil
 }

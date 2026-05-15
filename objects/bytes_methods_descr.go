@@ -1049,7 +1049,20 @@ func decodeMethod() methodFn {
 				encoding = s.Value()
 			}
 		}
-		s, _, err := codecs.Decode(v, encoding, "strict")
+		errHandler := "strict"
+		if len(args) >= 3 && args[2] != nil && args[2] != None() {
+			s, ok := args[2].(*Unicode)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: decode() argument 'errors' must be str, not %s", args[2].Type().Name)
+			}
+			errHandler = s.Value()
+		}
+		if v, ok := kwargs["errors"]; ok {
+			if s, ok := v.(*Unicode); ok {
+				errHandler = s.Value()
+			}
+		}
+		s, _, err := codecs.Decode(v, encoding, errHandler)
 		if err != nil {
 			return nil, err
 		}
