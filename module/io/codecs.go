@@ -68,40 +68,6 @@ func normalizeCodec(name string) string {
 
 // --- UTF-16 ----------------------------------------------------------------
 
-// decodeUTF16 decodes data as UTF-16. variant is "le", "be", or ""
-// (auto, which sniffs the BOM and falls back to little-endian to match
-// CPython on x86).
-//
-// CPython: Modules/_codecs/utf_16.c PyUnicode_DecodeUTF16Stateful
-func decodeUTF16(data []byte, variant string) (string, error) {
-	var bo binary.ByteOrder = binary.LittleEndian
-	switch variant {
-	case "le":
-		bo = binary.LittleEndian
-	case "be":
-		bo = binary.BigEndian
-	case "":
-		if len(data) >= 2 {
-			switch {
-			case data[0] == 0xFF && data[1] == 0xFE:
-				bo = binary.LittleEndian
-				data = data[2:]
-			case data[0] == 0xFE && data[1] == 0xFF:
-				bo = binary.BigEndian
-				data = data[2:]
-			}
-		}
-	}
-	if len(data)%2 != 0 {
-		return "", fmt.Errorf("UnicodeDecodeError: utf-16 truncated (odd byte count)")
-	}
-	units := make([]uint16, len(data)/2)
-	for i := range units {
-		units[i] = bo.Uint16(data[2*i:])
-	}
-	return string(utf16.Decode(units)), nil
-}
-
 // encodeUTF16 encodes s as UTF-16. variant "le" / "be" emit raw code
 // units without a BOM; variant "" emits a BOM followed by
 // little-endian, matching CPython on x86.
@@ -126,42 +92,6 @@ func encodeUTF16(s, variant string) []byte {
 }
 
 // --- UTF-32 ----------------------------------------------------------------
-
-// decodeUTF32 decodes data as UTF-32.
-//
-// CPython: Modules/_codecs/utf_32.c PyUnicode_DecodeUTF32Stateful
-func decodeUTF32(data []byte, variant string) (string, error) {
-	var bo binary.ByteOrder = binary.LittleEndian
-	switch variant {
-	case "le":
-		bo = binary.LittleEndian
-	case "be":
-		bo = binary.BigEndian
-	case "":
-		if len(data) >= 4 {
-			switch {
-			case data[0] == 0xFF && data[1] == 0xFE && data[2] == 0 && data[3] == 0:
-				bo = binary.LittleEndian
-				data = data[4:]
-			case data[0] == 0 && data[1] == 0 && data[2] == 0xFE && data[3] == 0xFF:
-				bo = binary.BigEndian
-				data = data[4:]
-			}
-		}
-	}
-	if len(data)%4 != 0 {
-		return "", fmt.Errorf("UnicodeDecodeError: utf-32 truncated (length %% 4 != 0)")
-	}
-	runes := make([]rune, 0, len(data)/4)
-	for i := 0; i < len(data); i += 4 {
-		cp := bo.Uint32(data[i:])
-		if cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) {
-			return "", fmt.Errorf("UnicodeDecodeError: invalid utf-32 codepoint U+%X", cp)
-		}
-		runes = append(runes, rune(cp))
-	}
-	return string(runes), nil
-}
 
 // encodeUTF32 encodes s as UTF-32.
 //
@@ -341,79 +271,3 @@ var macRomanTable = newCodepage("mac-roman", [128]rune{
 	0xF8FF, 0x00D2, 0x00DA, 0x00DB, 0x00D9, 0x0131, 0x02C6, 0x02DC,
 	0x00AF, 0x02D8, 0x02D9, 0x02DA, 0x00B8, 0x02DD, 0x02DB, 0x02C7,
 })
-
-// codecDecode is the dispatch entry used by decodeBytes for the
-// non-inline codecs. Returns (decoded, true) on hit, (..., false) when
-// the encoding is unknown.
-func codecDecode(data []byte, encoding string) (string, bool, error) {
-	switch normalizeCodec(encoding) {
-	case "utf-16":
-		s, err := decodeUTF16(data, "")
-		return s, true, err
-	case "utf-16-le":
-		s, err := decodeUTF16(data, "le")
-		return s, true, err
-	case "utf-16-be":
-		s, err := decodeUTF16(data, "be")
-		return s, true, err
-	case "utf-32":
-		s, err := decodeUTF32(data, "")
-		return s, true, err
-	case "utf-32-le":
-		s, err := decodeUTF32(data, "le")
-		return s, true, err
-	case "utf-32-be":
-		s, err := decodeUTF32(data, "be")
-		return s, true, err
-	case "cp1252":
-		s, err := charmapDecode(data, &cp1252Table.decode, "cp1252")
-		return s, true, err
-	case "cp1250":
-		s, err := charmapDecode(data, &cp1250Table.decode, "cp1250")
-		return s, true, err
-	case "cp1251":
-		s, err := charmapDecode(data, &cp1251Table.decode, "cp1251")
-		return s, true, err
-	case "cp437":
-		s, err := charmapDecode(data, &cp437Table.decode, "cp437")
-		return s, true, err
-	case "mac-roman":
-		s, err := charmapDecode(data, &macRomanTable.decode, "mac-roman")
-		return s, true, err
-	}
-	return "", false, nil
-}
-
-// codecEncode is the dispatch entry used by encodeString.
-func codecEncode(s, encoding string) ([]byte, bool, error) {
-	switch normalizeCodec(encoding) {
-	case "utf-16":
-		return encodeUTF16(s, ""), true, nil
-	case "utf-16-le":
-		return encodeUTF16(s, "le"), true, nil
-	case "utf-16-be":
-		return encodeUTF16(s, "be"), true, nil
-	case "utf-32":
-		return encodeUTF32(s, ""), true, nil
-	case "utf-32-le":
-		return encodeUTF32(s, "le"), true, nil
-	case "utf-32-be":
-		return encodeUTF32(s, "be"), true, nil
-	case "cp1252":
-		b, err := charmapEncode(s, cp1252Table.encode, "cp1252")
-		return b, true, err
-	case "cp1250":
-		b, err := charmapEncode(s, cp1250Table.encode, "cp1250")
-		return b, true, err
-	case "cp1251":
-		b, err := charmapEncode(s, cp1251Table.encode, "cp1251")
-		return b, true, err
-	case "cp437":
-		b, err := charmapEncode(s, cp437Table.encode, "cp437")
-		return b, true, err
-	case "mac-roman":
-		b, err := charmapEncode(s, macRomanTable.encode, "mac-roman")
-		return b, true, err
-	}
-	return nil, false, nil
-}

@@ -84,6 +84,19 @@ func synthesizeException(err error) *pyerrors.Exception {
 // CPython: Python/ceval.c:L1815 get_exception_handler + exception_unwind
 func (e *evalState) handleException(err error) bool {
 	co := e.f.Code
+	// Make sure an Exception object lives on the thread state before
+	// attaching the traceback. Bare Go errors (e.g. "ZeroDivisionError:
+	// integer division or modulo by zero") returned by dispatch arms
+	// never installed one, so attachFrameTraceback would have nothing to
+	// hang the frame entry off of. Synthesize once at the bottom frame
+	// and let it propagate up, picking up one TB entry per frame.
+	if pyerrors.Occurred(e.ts) == nil {
+		// Restore (not Raise) so we skip __context__ chaining: this
+		// exception is being born here, it has no causal predecessor
+		// in the currently-handled chain.
+		exc := synthesizeException(err)
+		pyerrors.Restore(e.ts, exc.ExcType, exc, nil)
+	}
 	// Prepend a traceback entry for this frame before considering
 	// handlers. CPython does the same in exception_unwind so an
 	// exception that propagates up through several frames carries one
@@ -99,13 +112,7 @@ func (e *evalState) handleException(err error) bool {
 		return false
 	}
 
-	// Pull the live exception off the thread state. raiseValue / the
-	// abstract layer installed it there before returning the Go
-	// sentinel; the handler block expects it on the value stack.
 	exc := pyerrors.Occurred(e.ts)
-	if exc == nil {
-		exc = synthesizeException(err)
-	}
 	pyerrors.Clear(e.ts)
 
 	// Unconditionally restore the stack depth to the value recorded in

@@ -13,8 +13,8 @@ package io
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -52,10 +52,42 @@ type TextIOWrapper struct {
 	// know readuniversal / readtranslate.
 	nlDecoder *IncrementalNewlineDecoder
 
+	// Stateful codec layer. The decoder is the "incremental codec" that
+	// sits below the newline decoder; the encoder is the symmetric write
+	// side. Both are lazily built so reads through the legacy one-shot
+	// helpers stay zero-cost until a stateful operation forces a build.
+	//
+	// CPython: Modules/_io/textio.c:706 textio.encoder / textio.decoder
+	decoder IncrementalDecoder
+	encoder IncrementalEncoder
+
 	// decodedBuf holds decoded characters that have been read from the
 	// underlying buffer but not yet consumed by read / readline.
 	// CPython: Modules/_io/textio.c "decoded_chars" field.
 	decodedBuf string
+
+	// b2cratio tracks the moving bytes-to-chars ratio used by the
+	// adaptive sizing in _textiowrapper_read_chunk. Starts at 0.0; CPython
+	// blends the new ratio in at 0.625/0.375 weights per chunk.
+	//
+	// CPython: Modules/_io/textio.c:706 b2cratio
+	b2cratio float64
+
+	// Per-chunk snapshot for tell/seek round-trip. Captured by readChunk
+	// right before bytes are fed to the decoder so that a later seek can
+	// reposition the buffer, install the same decoder state, then replay
+	// snapshotBytesFed bytes and skip (snapshotChunkLen - len(decodedBuf))
+	// chars to land where tell was called.
+	//
+	// CPython: Modules/_io/textio.c:706 snapshot tuple
+	snapshotValid    bool
+	snapshotStartPos int64
+	snapshotDecBuf   []byte
+	snapshotDecFlags int64
+	snapshotBytesFed int
+	snapshotChunkLen int
+	snapshotNLPendCR bool
+	snapshotNLSeenNL int
 
 	// Write-side batching. CPython holds encoded chunks in
 	// `pending_bytes` (PyBytes | PyUnicode | list) and drains via
@@ -454,68 +486,6 @@ func bufTruncate(buf objects.Object, pos int64, hasPos bool) (int64, error) {
 	return 0, nil
 }
 
-// --- Encoding / decoding helpers -------------------------------------------
-
-// decodeBytes decodes raw bytes using the given encoding.
-//
-// CPython: Modules/_io/textio.c:1988 textiowrapper_read (IncrementalDecoder.decode)
-func decodeBytes(data []byte, encoding string) (string, error) {
-	switch strings.ToLower(encoding) {
-	case "utf-8", "utf8", "utf_8":
-		if !utf8.Valid(data) {
-			return "", fmt.Errorf("UnicodeDecodeError: invalid utf-8 sequence")
-		}
-		return string(data), nil
-	case "ascii", "us-ascii":
-		for _, b := range data {
-			if b > 127 {
-				return "", fmt.Errorf("UnicodeDecodeError: ordinal not in range(128)")
-			}
-		}
-		return string(data), nil
-	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
-		runes := make([]rune, len(data))
-		for i, b := range data {
-			runes[i] = rune(b)
-		}
-		return string(runes), nil
-	}
-	if s, ok, err := codecDecode(data, encoding); ok {
-		return s, err
-	}
-	return "", fmt.Errorf("LookupError: unknown encoding: %s", encoding)
-}
-
-// encodeString encodes a string using the given encoding.
-//
-// CPython: Modules/_io/textio.c:1662 textiowrapper_write (IncrementalEncoder.encode)
-func encodeString(s, encoding string) ([]byte, error) {
-	switch strings.ToLower(encoding) {
-	case "utf-8", "utf8", "utf_8":
-		return []byte(s), nil
-	case "ascii", "us-ascii":
-		for _, r := range s {
-			if r > 127 {
-				return nil, fmt.Errorf("UnicodeEncodeError: character %q is not in ASCII range", r)
-			}
-		}
-		return []byte(s), nil
-	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
-		b := make([]byte, len([]rune(s)))
-		for i, r := range []rune(s) {
-			if r > 255 {
-				return nil, fmt.Errorf("UnicodeEncodeError: character %q is not in Latin-1 range", r)
-			}
-			b[i] = byte(r)
-		}
-		return b, nil
-	}
-	if b, ok, err := codecEncode(s, encoding); ok {
-		return b, err
-	}
-	return nil, fmt.Errorf("LookupError: unknown encoding: %s", encoding)
-}
-
 // --- Public methods ---------------------------------------------------------
 
 // ensureNLDecoder lazily builds the IncrementalNewlineDecoder used by
@@ -530,21 +500,6 @@ func (t *TextIOWrapper) ensureNLDecoder() {
 	t.nlDecoder.Init(IncrementalNewlineDecoderType)
 }
 
-// decodeForRead decodes raw bytes and runs them through the universal
-// newline pipeline when readuniversal is set. final=true triggers the
-// final-flush of any pendingcr held by the decoder.
-func (t *TextIOWrapper) decodeForRead(data []byte, final bool) (string, error) {
-	s, err := decodeBytes(data, t.encoding)
-	if err != nil {
-		return "", err
-	}
-	if !t.readuniversal {
-		return s, nil
-	}
-	t.ensureNLDecoder()
-	return t.nlDecoder.translateNewlines(s, final), nil
-}
-
 // read reads up to size characters from the buffer and decodes them.
 // size < 0 reads the whole remaining content.
 //
@@ -553,21 +508,10 @@ func (t *TextIOWrapper) read(size int) (string, error) {
 	if err := t.checkUsable(); err != nil {
 		return "", err
 	}
-	data, err := bufRead(t.buf, size)
-	if err != nil {
-		return "", err
+	if size < 0 {
+		return t.drainAll()
 	}
-	final := size < 0 || len(data) == 0
-	dec, err := t.decodeForRead(data, final)
-	if err != nil {
-		return "", err
-	}
-	if t.decodedBuf == "" {
-		return dec, nil
-	}
-	out := t.decodedBuf + dec
-	t.decodedBuf = ""
-	return out, nil
+	return t.drainN(size)
 }
 
 // readline reads one line from the buffer.
@@ -578,49 +522,7 @@ func (t *TextIOWrapper) readline(size int) (string, error) {
 	if err := t.checkUsable(); err != nil {
 		return "", err
 	}
-	// Decode incrementally, byte at a time, until a newline appears in
-	// the decoded buffer or the source is exhausted. Anything past the
-	// newline is stashed in decodedBuf for the next readline / read.
-	for {
-		if idx := strings.IndexByte(t.decodedBuf, '\n'); idx >= 0 {
-			line := t.decodedBuf[:idx+1]
-			t.decodedBuf = t.decodedBuf[idx+1:]
-			if size >= 0 && len(line) > size {
-				t.decodedBuf = line[size:] + t.decodedBuf
-				line = line[:size]
-			}
-			return line, nil
-		}
-		if size >= 0 && len(t.decodedBuf) >= size {
-			line := t.decodedBuf[:size]
-			t.decodedBuf = t.decodedBuf[size:]
-			return line, nil
-		}
-		chunk, err := bufRead(t.buf, 1)
-		if err != nil {
-			return "", err
-		}
-		if len(chunk) == 0 {
-			// Final flush so any pending \r is emitted.
-			extra, err := t.decodeForRead(nil, true)
-			if err != nil {
-				return "", err
-			}
-			t.decodedBuf += extra
-			line := t.decodedBuf
-			t.decodedBuf = ""
-			if size >= 0 && len(line) > size {
-				t.decodedBuf = line[size:]
-				line = line[:size]
-			}
-			return line, nil
-		}
-		dec, err := t.decodeForRead(chunk, false)
-		if err != nil {
-			return "", err
-		}
-		t.decodedBuf += dec
-	}
+	return t.drainLine(size)
 }
 
 // Write encodes and writes a string to the underlying buffer.
@@ -635,7 +537,10 @@ func (t *TextIOWrapper) Write(s string) (int, error) {
 	if haslf && t.writenl != "" {
 		out = strings.ReplaceAll(out, "\n", t.writenl)
 	}
-	data, err := encodeString(out, t.encoding)
+	if err := t.ensureCodecs(); err != nil {
+		return 0, err
+	}
+	data, err := t.encoder.Encode(out, false)
 	if err != nil {
 		return 0, err
 	}
@@ -717,48 +622,233 @@ func (t *TextIOWrapper) Close() error {
 	return bufClose(t.buf)
 }
 
-// Seek seeks to a position in the underlying buffer.
+// reconfigure changes encoding, errors, newline, line_buffering, and
+// write_through on a live wrapper. CPython rejects any change to the
+// codec / newline arguments once the stream has been read from or
+// written to (anything in pending_bytes or the decoded buffer); we
+// match that check, then rebuild the codecs.
 //
-// Seeking invalidates any decoded characters buffered ahead of the
-// caller and resets the newline decoder so that the post-seek decode
-// stream behaves like a fresh open.
-//
-// CPython: Modules/_io/textio.c:2536 textiowrapper_seek_impl
-func (t *TextIOWrapper) Seek(pos int64, whence int) (int64, error) {
+// CPython: Modules/_io/textio.c:1370 _io_TextIOWrapper_reconfigure_impl
+func (t *TextIOWrapper) reconfigure(kwargs map[string]objects.Object) error {
 	if err := t.checkUsable(); err != nil {
-		return 0, err
+		return err
 	}
-	if err := t.Flush(); err != nil {
-		return 0, err
+	encObj, hasEnc := kwargs["encoding"]
+	errsObj, hasErrs := kwargs["errors"]
+	nlObj, hasNL := kwargs["newline"]
+	codecChange := (hasEnc && !objects.IsNone(encObj)) ||
+		(hasErrs && !objects.IsNone(errsObj)) ||
+		hasNL
+	if codecChange {
+		// CPython raises "It is not possible to set the encoding or
+		// newline of stream after the first read" when read-ahead or
+		// write-ahead is buffered.
+		if t.decodedBuf != "" || (t.nlDecoder != nil && t.nlDecoder.pendingcr) || t.pendingCount > 0 {
+			return fmt.Errorf("ValueError: It is not possible to set the encoding or newline of stream after the first read")
+		}
 	}
-	out, err := bufSeek(t.buf, pos, whence)
-	if err != nil {
-		return 0, err
+	if hasEnc && !objects.IsNone(encObj) {
+		s, ok := encObj.(*objects.Unicode)
+		if !ok {
+			return fmt.Errorf("TypeError: invalid encoding: %s", encObj.Type().Name)
+		}
+		t.encoding = s.Value()
 	}
+	if hasErrs && !objects.IsNone(errsObj) {
+		s, ok := errsObj.(*objects.Unicode)
+		if !ok {
+			return fmt.Errorf("TypeError: invalid errors: %s", errsObj.Type().Name)
+		}
+		t.errors = s.Value()
+	}
+	if hasNL {
+		t.readuniversal = false
+		t.readtranslate = false
+		t.readnl = ""
+		t.hasReadnl = false
+		t.writenl = ""
+		if err := t.setNewline(nlObj); err != nil {
+			return err
+		}
+	}
+	if lb, ok := kwargs["line_buffering"]; ok && !objects.IsNone(lb) {
+		t.linebuffering = objects.IsTrue(lb)
+	}
+	if wt, ok := kwargs["write_through"]; ok && !objects.IsNone(wt) {
+		t.writethrough = objects.IsTrue(wt)
+	}
+	if codecChange {
+		t.decoder = nil
+		t.encoder = nil
+		t.nlDecoder = nil
+		t.snapshotValid = false
+		t.b2cratio = 0
+	}
+	return nil
+}
+
+// resetDecodeState wipes all derived decode state so the post-seek (or
+// post-reconfigure) stream behaves like a fresh open.
+func (t *TextIOWrapper) resetDecodeState() {
 	t.decodedBuf = ""
 	if t.nlDecoder != nil {
 		t.nlDecoder.pendingcr = false
 		t.nlDecoder.seennl = 0
 	}
-	return out, nil
+	if t.decoder != nil {
+		t.decoder.Reset()
+	}
+	if t.encoder != nil {
+		t.encoder.Reset()
+	}
+	t.b2cratio = 0
+	t.snapshotValid = false
 }
 
-// Tell returns the current stream position.
+// SeekCookie parses a cookie produced by Tell and reconstructs the
+// decode state at that point. Whence must be 0 (SEEK_SET) when the
+// cookie carries a non-zero replay payload, matching CPython which
+// rejects whence!=0 unless the value is 0/EOF.
 //
-// When buffered decoded characters or a pending CR are held in the
-// newline decoder, the buffer's tell does not match the logical text
-// position. CPython encodes a multi-field cookie; gopy does not yet
-// support that, so we raise OSError to flag the unsupported case.
-//
-// CPython: Modules/_io/textio.c:2734 textiowrapper_tell_impl
-func (t *TextIOWrapper) Tell() (int64, error) {
+// CPython: Modules/_io/textio.c:2536 textiowrapper_seek_impl
+func (t *TextIOWrapper) SeekCookie(cookieInt *big.Int, whence int) (*big.Int, error) {
 	if err := t.checkUsable(); err != nil {
+		return nil, err
+	}
+	if err := t.Flush(); err != nil {
+		return nil, err
+	}
+	if whence != 0 {
+		// SEEK_CUR / SEEK_END only legal when cookieInt is zero (CPython
+		// matches this with cookie==0 for SEEK_END, _ for SEEK_CUR).
+		if cookieInt.Sign() != 0 {
+			return nil, fmt.Errorf("ValueError: can't do nonzero %s-relative seeks", whenceName(whence))
+		}
+		newPos, err := bufSeek(t.buf, 0, whence)
+		if err != nil {
+			return nil, err
+		}
+		t.resetDecodeState()
+		return new(big.Int).SetInt64(newPos), nil
+	}
+
+	c, err := parseCookie(cookieInt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := bufSeek(t.buf, c.StartPos, 0); err != nil {
+		return nil, err
+	}
+	t.resetDecodeState()
+	if t.encoder != nil {
+		t.encoder.Reset()
+	}
+	if c.BytesToFeed == 0 && c.CharsToSkip == 0 && !c.NeedEOF {
+		return cookieInt, nil
+	}
+	if err := t.ensureCodecs(); err != nil {
+		return nil, err
+	}
+	if c.DecFlags != 0 {
+		if err := t.decoder.SetState(nil, int64(c.DecFlags)); err != nil {
+			return nil, err
+		}
+	}
+	if c.BytesToFeed > 0 {
+		raw, rerr := readOneChunk(t.buf, int(c.BytesToFeed))
+		if rerr != nil {
+			return nil, rerr
+		}
+		if len(raw) < int(c.BytesToFeed) {
+			return nil, fmt.Errorf("OSError: can't restore logical file position")
+		}
+		decoded, derr := t.decoder.Decode(raw, c.NeedEOF)
+		if derr != nil {
+			return nil, derr
+		}
+		if t.readuniversal {
+			t.ensureNLDecoder()
+			decoded = t.nlDecoder.translateNewlines(decoded, c.NeedEOF)
+		}
+		if int(c.CharsToSkip) > len(decoded) {
+			return nil, fmt.Errorf("OSError: can't restore logical file position")
+		}
+		t.decodedBuf = decoded[c.CharsToSkip:]
+	}
+	return cookieInt, nil
+}
+
+func whenceName(w int) string {
+	switch w {
+	case 1:
+		return "SEEK_CUR"
+	case 2:
+		return "SEEK_END"
+	}
+	return "SEEK"
+}
+
+// Seek is the int64 convenience wrapper used by callers that do not
+// care about cookies (e.g. test code seeking to byte 0).
+//
+// CPython: Modules/_io/textio.c:2536 textiowrapper_seek_impl
+func (t *TextIOWrapper) Seek(pos int64, whence int) (int64, error) {
+	b, err := t.SeekCookie(new(big.Int).SetInt64(pos), whence)
+	if err != nil {
 		return 0, err
 	}
-	if t.decodedBuf != "" || (t.nlDecoder != nil && t.nlDecoder.pendingcr) {
-		return 0, fmt.Errorf("OSError: telling position disabled by next() call")
+	if b.IsInt64() {
+		return b.Int64(), nil
 	}
-	return bufTell(t.buf)
+	return 0, nil
+}
+
+// TellCookie returns the current stream position as a cookie integer.
+// When decoded characters are buffered ahead of the caller, the cookie
+// carries the snapshot state needed to round-trip via SeekCookie.
+//
+// CPython: Modules/_io/textio.c:2734 textiowrapper_tell_impl
+func (t *TextIOWrapper) TellCookie() (*big.Int, error) {
+	if err := t.checkUsable(); err != nil {
+		return nil, err
+	}
+	if err := t.writeflush(); err != nil {
+		return nil, err
+	}
+	if t.decodedBuf == "" && (t.nlDecoder == nil || !t.nlDecoder.pendingcr) {
+		pos, err := bufTell(t.buf)
+		if err != nil {
+			return nil, err
+		}
+		return new(big.Int).SetInt64(pos), nil
+	}
+	if !t.snapshotValid {
+		return nil, fmt.Errorf("OSError: telling position disabled by next() call")
+	}
+	consumed := t.snapshotChunkLen - len(t.decodedBuf)
+	if consumed < 0 || consumed > t.snapshotChunkLen {
+		return nil, fmt.Errorf("OSError: telling position disabled by next() call")
+	}
+	c := cookie{
+		StartPos:    t.snapshotStartPos,
+		DecFlags:    int32(t.snapshotDecFlags),
+		BytesToFeed: int32(t.snapshotBytesFed),
+		CharsToSkip: int32(consumed),
+	}
+	return packCookie(c), nil
+}
+
+// Tell returns the current stream position as an int64 for callers
+// that do not need the full cookie shape.
+func (t *TextIOWrapper) Tell() (int64, error) {
+	b, err := t.TellCookie()
+	if err != nil {
+		return 0, err
+	}
+	if b.IsInt64() {
+		return b.Int64(), nil
+	}
+	return 0, nil
 }
 
 // Truncate truncates the file at the current position (or pos if given).
@@ -1021,9 +1111,9 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 			if len(args) < 1 || len(args) > 2 {
 				return nil, fmt.Errorf("TypeError: seek() takes 1 or 2 arguments (%d given)", len(args))
 			}
-			pos, err := intArg(args[0], "seek")
-			if err != nil {
-				return nil, err
+			posInt, ok := args[0].(*objects.Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: seek() argument 1 must be int")
 			}
 			whence := 0
 			if len(args) == 2 {
@@ -1033,20 +1123,20 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 				}
 				whence = w
 			}
-			out, err := t.Seek(int64(pos), whence)
+			out, err := t.SeekCookie(posInt.BigInt(), whence)
 			if err != nil {
 				return nil, err
 			}
-			return objects.NewInt(out), nil
+			return objects.NewIntFromBig(out), nil
 		})
 	// CPython: Modules/_io/textio.c:2734 textiowrapper_tell_impl
 	case "tell":
 		return objects.NewBuiltinFunction("tell", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			pos, err := t.Tell()
+			pos, err := t.TellCookie()
 			if err != nil {
 				return nil, err
 			}
-			return objects.NewInt(pos), nil
+			return objects.NewIntFromBig(pos), nil
 		})
 	// CPython: Modules/_io/textio.c:2968 textiowrapper_truncate_impl
 	case "truncate":
@@ -1086,24 +1176,8 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 	// CPython: Modules/_io/textio.c:1370 textiowrapper_reconfigure
 	case "reconfigure":
 		return objects.NewBuiltinFunction("reconfigure", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-			if err := t.checkUsable(); err != nil {
+			if err := t.reconfigure(kwargs); err != nil {
 				return nil, err
-			}
-			if enc, ok := kwargs["encoding"]; ok && !objects.IsNone(enc) {
-				if s, ok := enc.(*objects.Unicode); ok {
-					t.encoding = s.Value()
-				}
-			}
-			if errs, ok := kwargs["errors"]; ok && !objects.IsNone(errs) {
-				if s, ok := errs.(*objects.Unicode); ok {
-					t.errors = s.Value()
-				}
-			}
-			if lb, ok := kwargs["line_buffering"]; ok && !objects.IsNone(lb) {
-				t.linebuffering = objects.IsTrue(lb)
-			}
-			if wt, ok := kwargs["write_through"]; ok && !objects.IsNone(wt) {
-				t.writethrough = objects.IsTrue(wt)
 			}
 			return t, nil
 		})

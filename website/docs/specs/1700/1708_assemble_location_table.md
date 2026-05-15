@@ -117,12 +117,12 @@ the running cursor.
 
 | C function | gopy hook | Status |
 |------------|-----------|--------|
-| `write_location_info_entry` | new dispatcher in `compile/assemble.go` | pending |
-| `write_location_info_short_form` | helper | pending |
-| `write_location_info_oneline_form` | helper | pending |
-| `write_location_info_long_form` | helper | pending |
-| `write_location_info_no_column` | helper | pending |
-| `write_location_info_none` | helper | pending |
+| `write_location_info_entry` | dispatcher in `compile/assemble_locations.go` | done |
+| `write_location_info_short_form` | `writeLocationInfoShortForm` | done |
+| `write_location_info_oneline_form` | `writeLocationInfoOnelineForm` | done |
+| `write_location_info_long_form` | `writeLocationInfoLongForm` | done |
+| `write_location_info_no_column` | `writeLocationInfoNoColumn` | done |
+| `write_location_info_none` | `writeLocationInfoNone` | done |
 
 ### Gate
 

@@ -635,7 +635,7 @@ view.
 - [x] pprint (#511) — inittab stub deleted 2026-05-15; PathFinder serves byte-equal `stdlib/pprint.py`
 - [x] time (#500) — dead `module/time/` stub deleted 2026-05-15; real port is `module/_time/` (1074 lines)
 
-- [x] traceback (#496) — `stdlib/traceback.py` vendored byte-equal; multi-frame walk, chain rendering, bare-raise re-raise all green after PR #54. PR #55 closed the linecache on-disk source-context lookup by adding TextIOWrapper's instance `__dict__` slot and type-level `__enter__` / `__exit__` descriptors
+- [x] traceback (#496) — `stdlib/traceback.py` vendored byte-equal; multi-frame walk, chain rendering, bare-raise re-raise all green after PR #54. PR #55 closed the linecache on-disk source-context lookup by adding TextIOWrapper's instance `__dict__` slot and type-level `__enter__` / `__exit__` descriptors. 2026-05-15 (task #608): `handleException` now synthesizes-and-installs on the thread state at the bottom unwind frame so bare Go errors (`1/0`, `IndexError:` prefix, etc.) pick up one TB entry per frame on the way up, matching the typed-raise path. `FOR_ITER` mirrors CPython `iter_iternext` and clears the absorbed `IndexError`/`StopIteration` off the thread state. Gate: `stdlibinit/traceback_bare_err_test.go` (three-frame `1/0` chain renders end-to-end through `traceback.format_exception`).
 
 **Partial (vendor in place, behaviour still gated):** none.
 
