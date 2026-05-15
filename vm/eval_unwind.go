@@ -13,7 +13,9 @@ import (
 
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/gil"
+	"github.com/tamnd/gopy/monitor"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/traceback"
 )
 
 // errorPrefixToType maps the "TypeError: ..." style messages large
@@ -83,6 +85,13 @@ func synthesizeException(err error) *pyerrors.Exception {
 // CPython: Python/ceval.c:L1815 get_exception_handler + exception_unwind
 func (e *evalState) handleException(err error) bool {
 	co := e.f.Code
+	// Prepend a traceback entry for this frame before considering
+	// handlers. CPython does the same in exception_unwind so an
+	// exception that propagates up through several frames carries one
+	// entry per frame regardless of whether any of them caught it.
+	//
+	// CPython: Python/ceval.c exception_unwind (PyTraceBack_Here call)
+	e.attachFrameTraceback()
 	if co == nil || len(co.ExceptionTable) == 0 {
 		return false
 	}
@@ -128,6 +137,97 @@ func (e *evalState) handleException(err error) bool {
 	e.f.InstrPtr = entry.target
 	e.f.PrevInstr = entry.target
 	return true
+}
+
+// lineForOffset returns the source line associated with bytecode byte
+// offset off.
+//
+// TEMPORARY SHIM. Spec 1708 / task #609 (Python/assemble.c
+// location-emission full port) replaces this with a faithful location table where every
+// instruction carries its own entry. Until that lands the gopy
+// assembler only emits one entry per source line and pads the rest as
+// `locNone`, so a direct `PyCode_Addr2Location` lookup can return -1
+// for an op that does belong to a real source line. As a stop-gap, we
+// walk the table in order and remember the last positive line whose
+// entry starts at or before off. This is wrong under PEP 657
+// (artificially carries a line forward across regions that CPython
+// would mark as "no source line"), but it is enough to make traceback
+// rendering work today.
+//
+// CPython: Python/assemble.c:419 write_location_info_entry (this is
+// the function we need to port; the gopy assembler is missing the
+// per-instruction emission loop around it).
+func lineForOffset(co *objects.Code, off int) int {
+	line := -1
+	for _, p := range objects.CoPositions(co) {
+		if p.Start > off {
+			break
+		}
+		if p.Line > 0 {
+			line = p.Line
+		}
+	}
+	return line
+}
+
+// attachFrameTraceback prepends a traceback entry for the current
+// frame onto the live exception's TB chain. Mirrors PyTraceBack_Here,
+// which the CPython unwind invokes for every frame on the way up.
+//
+// Only attaches when an exception is already on the thread state.
+// Bare Go errors that the runtime synthesizes into a typed exception
+// downstream (synthesizeException) are not raised here, so they have
+// no associated frame data worth recording at this layer.
+//
+// TbFrame wraps the live interpreter frame so traceback.py can walk
+// f.f_code / f.f_globals. TbLasti=-1 makes _get_code_position return
+// (None,)*4 so traceback.py skips the co_positions lookup (which the
+// gopy Code object does not expose yet).
+//
+// CPython: Python/traceback.c:154 PyTraceBack_Here
+func (e *evalState) attachFrameTraceback() {
+	exc := pyerrors.Occurred(e.ts)
+	if exc == nil {
+		return
+	}
+	co := e.f.Code
+	if co == nil {
+		return
+	}
+	// CPython resolves the traceback line from the *previous* dispatched
+	// instruction's offset, since InstrPtr already points at whatever
+	// follows the raising op.
+	//
+	// CPython: Python/traceback.c:154 PyTraceBack_Here (frame->f_lasti)
+	off := e.f.PrevInstr
+	if off < 0 {
+		off = e.f.InstrPtr
+	}
+	line := lineForOffset(co, off)
+	if line < 0 {
+		line = monitor.LineForOffset(co, off/2)
+	}
+	if line < 0 && co.Firstlineno > 0 {
+		line = co.Firstlineno
+	}
+	name := co.Name
+	if co.Qualname != "" {
+		name = co.Qualname
+	}
+	entry := traceback.Entry{File: co.Filename, Line: line, Name: name}
+	// Snapshot the live activation record so tb.tb_frame.f_code stays
+	// readable after the frame returns and its chunk-arena slot gets
+	// recycled. CPython does not need this because PyFrameObject is
+	// reference-counted; gopy reuses interpreter-frame storage.
+	snap := objects.SnapshotFrame(e.f)
+	tb := &traceback.Traceback{
+		Entry:   entry,
+		Next:    exc.TB,
+		TbFrame: objects.NewFrame(snap),
+		TbLasti: -1,
+	}
+	tb.Init(traceback.Type)
+	exc.TB = tb
 }
 
 // unwind is invoked when the eval-breaker handler errors. It pops

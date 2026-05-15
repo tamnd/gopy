@@ -220,6 +220,41 @@ func ListCtor(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	return objects.NewList(items), nil
 }
 
+// bindListCtor wires list's constructor as separate TpNew (allocate) and
+// __init__ (populate). bindCtor would conflate them, so subclasses like
+// `class S(list): pass` would lose their type because TpNew always
+// returned a plain *List instead of binding the requested cls.
+//
+// CPython: Objects/listobject.c:3380 PyList_Type (tp_new = list_new, tp_init = list___init__)
+func bindListCtor(t *objects.Type) {
+	// TpNew is set in objects/list.go to allocate a bare *List bound to
+	// the requested class. __init__ clears it, then drains an optional
+	// iterable into it.
+	//
+	// CPython: Objects/listobject.c:2716 list___init___impl
+	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 || len(args) > 2 {
+			return nil, fmt.Errorf("TypeError: list expected at most 1 argument, got %d", len(args)-1)
+		}
+		l, ok := args[0].(*objects.List)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: descriptor '__init__' requires a 'list' object but received a '%s'", args[0].Type().Name)
+		}
+		l.Clear()
+		if len(args) == 2 {
+			items, err := drainIterable(args[1])
+			if err != nil {
+				return nil, err
+			}
+			for _, v := range items {
+				l.Append(v)
+			}
+		}
+		return objects.None(), nil
+	}))
+	bindCtorDescr(t, ListCtor)
+}
+
 // TupleCtor ports tuple_new. 0 args returns the empty tuple; one
 // positional drains the iterable into a tuple.
 //

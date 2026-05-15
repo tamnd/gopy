@@ -2391,6 +2391,7 @@ const sidebars = {
         'specs/1700/1705_core_vm_files',
         'specs/1700/1706_pep_649_annotations',
         'specs/1700/1707_cpython_3145_sync',
+        'specs/1700/1708_assemble_location_table',
       ],
     },
   ],
