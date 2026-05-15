@@ -116,5 +116,18 @@ func writerFromObject(o objects.Object) (io.Writer, error) {
 	if w, ok := o.(io.Writer); ok {
 		return w, nil
 	}
+	if f, ok := o.(*objects.File); ok {
+		return &fileWriter{f: f}, nil
+	}
 	return nil, fmt.Errorf("TypeError: %s object has no write() method", o.Type().Name)
+}
+
+// fileWriter adapts an objects.File to io.Writer by funneling raw byte
+// chunks through File.Write as a str payload. print() only writes UTF-8
+// strings (separators, formatted args, and the terminating newline), so
+// reconstructing a Unicode argument here is exact.
+type fileWriter struct{ f *objects.File }
+
+func (w *fileWriter) Write(p []byte) (int, error) {
+	return w.f.Write(objects.NewStr(string(p)))
 }
