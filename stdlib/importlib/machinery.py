@@ -25,6 +25,17 @@ def all_suffixes():
     return SOURCE_SUFFIXES + BYTECODE_SUFFIXES + EXTENSION_SUFFIXES
 
 
+class FileFinder:
+    """Stub: gopy's import system is Go-side; pkgutil registers an
+    iterator against FileFinder but it's only consulted when the
+    user walks a package, which the spec 1711 test path doesn't.
+    """
+
+    def __init__(self, path, *loader_details):
+        self.path = path
+        self._loaders = loader_details
+
+
 class ModuleSpec:
     """Minimal stand-in for importlib.machinery.ModuleSpec."""
 

@@ -626,9 +626,48 @@ func strFormatField(field string, args []Object, kwargs map[string]Object, auto 
 	if colon := strings.IndexByte(field, ':'); colon >= 0 {
 		name, spec = field[:colon], field[colon+1:]
 	}
+	// Conversion suffix: name!s / name!r / name!a runs the result
+	// through str/repr/ascii before applying the format spec.
+	//
+	// CPython: Objects/stringlib/unicode_format.h:702 parse_field
+	conversion := byte(0)
+	if bang := strings.IndexByte(name, '!'); bang >= 0 {
+		if bang+1 >= len(name) {
+			return "", fmt.Errorf("ValueError: end of format while looking for conversion specifier")
+		}
+		conversion = name[bang+1]
+		if len(name) > bang+2 {
+			return "", fmt.Errorf("ValueError: expected ':' after conversion specifier")
+		}
+		name = name[:bang]
+	}
 	v, err := strFormatLookup(name, args, kwargs, auto)
 	if err != nil {
 		return "", err
+	}
+	switch conversion {
+	case 0:
+		// no conversion
+	case 's':
+		sv, sErr := Str(v)
+		if sErr != nil {
+			return "", sErr
+		}
+		v = NewStr(sv)
+	case 'r':
+		rv, rErr := Repr(v)
+		if rErr != nil {
+			return "", rErr
+		}
+		v = NewStr(rv)
+	case 'a':
+		rv, rErr := Repr(v)
+		if rErr != nil {
+			return "", rErr
+		}
+		v = NewStr(rv)
+	default:
+		return "", fmt.Errorf("ValueError: Unknown conversion specifier %c", conversion)
 	}
 	// Dispatch through PyObject_Format so each replacement uses the
 	// argument's own __format__ slot. Routing unconditionally through

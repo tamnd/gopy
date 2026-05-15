@@ -10,7 +10,23 @@ import (
 // CPython: Include/cpython/tupleobject.h:L8 PyTupleObject
 type Tuple struct {
 	VarHeader
-	items []Object
+	items    []Object
+	attrDict *Dict
+}
+
+// AttrDict returns the per-instance attribute dict, or nil if no
+// attribute has been set yet. Only meaningful for tuple subclasses;
+// plain tuple does not advertise HasDict so this is never consulted.
+//
+// CPython: Objects/tupleobject.c subtype dict (managed via tp_dictoffset)
+func (t *Tuple) AttrDict() *Dict { return t.attrDict }
+
+// EnsureAttrDict allocates the per-instance dict on first store.
+func (t *Tuple) EnsureAttrDict() *Dict {
+	if t.attrDict == nil {
+		t.attrDict = NewDict()
+	}
+	return t.attrDict
 }
 
 // TupleType is the type singleton for tuple. Mirrors PyTuple_Type.
@@ -38,6 +54,31 @@ func init() {
 		Repeat:  tupleRepeat,
 	}
 	TupleType.TpTraverse = tupleTraverse
+	// TpNew honors cls so `class T(tuple): pass; T((1,2))` returns a T
+	// instance instead of a plain tuple. tuple is immutable, so unlike
+	// list we populate items here rather than deferring to __init__.
+	//
+	// CPython: Objects/tupleobject.c:778 tuple_new_impl
+	TupleType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) > 1 {
+			return nil, fmt.Errorf("TypeError: tuple expected at most 1 argument, got %d", len(args))
+		}
+		var items []Object
+		if len(args) == 1 {
+			drained, err := drainIterableForSlice(args[0])
+			if err != nil {
+				return nil, err
+			}
+			items = drained
+		}
+		if cls == TupleType && len(items) == 0 {
+			return emptyTuple, nil
+		}
+		t := &Tuple{items: items}
+		t.init(cls)
+		t.size = int64(len(items))
+		return t, nil
+	}
 	emptyTuple = &Tuple{}
 	emptyTuple.init(TupleType)
 }
