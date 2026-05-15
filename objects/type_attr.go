@@ -37,6 +37,31 @@ func init() {
 			return typeSetAnnotations(tp, v)
 		},
 	))
+	// type.__dict__ getset. inspect.py grabs this at module load via
+	//   _get_dunder_dict_of_class = type.__dict__["__dict__"].__get__
+	// and later calls it on a class to materialise the class's namespace.
+	// CPython exposes the descriptor through type_getsets so it shows up
+	// in type.__dict__; the gopy port mirrors that here.
+	//
+	// CPython: Objects/typeobject.c:1057 type_dict (getset entry)
+	SetTypeDescr(typeType, "__dict__", NewGetSetDescr("__dict__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__dict__' requires 'type' object")
+			}
+			d := NewDict()
+			if descrs, ok2 := typeDescrTable[tp]; ok2 {
+				for k, v := range descrs {
+					if err := d.SetItem(NewStr(k), v); err != nil {
+						return nil, err
+					}
+				}
+			}
+			return d, nil
+		},
+		nil,
+	))
 	SetTypeDescr(typeType, "__annotate__", NewGetSetDescr("__annotate__",
 		func(o Object) (Object, error) {
 			tp, ok := o.(*Type)

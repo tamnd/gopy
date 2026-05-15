@@ -68,6 +68,24 @@ func buildModule() (*objects.Module, error) {
 		{"MethodDescriptorType", objects.MethodDescrType},
 		// CPython: Modules/_typesmodule.c:40 MethodType
 		{"MethodType", objects.BoundMethodType},
+		// gopy collapses wrapper_descriptor into method_descriptor (no
+		// separate slot-wrapper descriptor type yet), so the alias here
+		// keeps `isinstance(object.__init__, types.WrapperDescriptorType)`
+		// observable for inspect.py and friends.
+		//
+		// CPython: Modules/_typesmodule.c WrapperDescriptorType (PyWrapperDescr_Type)
+		{"WrapperDescriptorType", objects.MethodDescrType},
+		// Same collapse for method-wrapper: bound slot wrappers fall
+		// through to BoundMethodType in gopy.
+		//
+		// CPython: Modules/_typesmodule.c MethodWrapperType (_PyMethodWrapper_Type)
+		{"MethodWrapperType", objects.BoundMethodType},
+		// classmethod_descriptor isn't a distinct type in gopy; the
+		// classmethod object itself is what dict.__dict__['fromkeys']
+		// returns. Alias keeps types.ClassMethodDescriptorType resolvable.
+		//
+		// CPython: Modules/_typesmodule.c ClassMethodDescriptorType (PyClassMethodDescr_Type)
+		{"ClassMethodDescriptorType", objects.ClassMethodType},
 		// CPython: Modules/_typesmodule.c:42 ModuleType
 		{"ModuleType", objects.ModuleType},
 		// CPython: Modules/_typesmodule.c:43 NoneType
