@@ -200,6 +200,16 @@ func finishType(t *objects.Type, next func(objects.Object) (objects.Object, erro
 	t.Iter = selfIter
 	t.IterNext = next
 	t.Getattro = objects.GenericGetAttr
+	// Expose __next__ as a bound method so consumers can stash
+	// `iterator.__next__` and call it directly. CPython surfaces this
+	// through tp_iternext via slot wrappers; gopy installs a method
+	// descriptor that forwards to the IterNext slot.
+	//
+	// CPython: Objects/typeobject.c slot_tp_iternext
+	objects.SetTypeDescr(t, "__next__", objects.NewMethodDescr(t, "__next__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return next(args[0])
+		}))
 }
 
 // ---------------------------------------------------------------------------
