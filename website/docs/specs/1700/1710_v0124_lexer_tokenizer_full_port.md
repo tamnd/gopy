@@ -140,13 +140,15 @@ green.
    `AttrDictHolder` interface in `objects`; `_random.RandomObject`
    implements it; `GenericGetAttr` / `GenericSetAttr` consult it.
 3. After T1.5, `import random` is clean and `import tempfile` reaches
-   `tempfile.gettempdir()`, which calls `os.fsdecode` — not yet bound
+   `tempfile.gettempdir()`, which calls `os.fsdecode`, not yet bound
    in `module/os`. **Sub-system: `os.fsdecode` + `os.fsencode`.**
-   Task T1.6.
-4. Vendor `Lib/bisect.py` (pure-Python with optional `_bisect`
-   accelerator; vendor as-is). Sub-system: stdlib vendor. T1.7.
-5. After bisect lands, retry tempfile end-to-end; recurse on whatever
-   surfaces next until the test_tokenize gate runs green.
+   Task T1.6. DONE (commit 9bd4675).
+4. Vendor `Lib/bisect.py` and `Lib/tempfile.py` byte-equal under
+   `stdlib/`. T1.7. DONE (commit 4350edf).
+5. After T1.7, `import tempfile` is clean. `test_tokenize.py` next
+   blocks on `import asyncio` (via `unittest.mock`). Asyncio is a
+   large sub-system; same blocker as test_tabnanny (T6). Tracked as
+   its own spec; 1710 leaves the gate pending on T6.
 
 ### test_utf8source.py — chain
 
