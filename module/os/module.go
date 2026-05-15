@@ -262,6 +262,7 @@ func buildOS() (*objects.Module, error) {
 		{"urandom", objects.NewBuiltinFunction("urandom", osUrandom)},
 		{"cpu_count", objects.NewBuiltinFunction("cpu_count", osCPUCount)},
 		{"umask", objects.NewBuiltinFunction("umask", osUmask)},
+		{"_get_exports_list", objects.NewBuiltinFunction("_get_exports_list", osGetExportsList)},
 	}
 	// geteuid / getegid / getgid / getgroups: posixmodule.c gates these
 	// on HAVE_GETEUID. On Windows the C build does not register them, so
@@ -1006,4 +1007,40 @@ func osScandir(args []objects.Object, kwargs map[string]objects.Object) (objects
 		items[i] = objects.NewStr(e.Name())
 	}
 	return objects.NewList(items), nil
+}
+
+// osGetExportsList returns module.__all__ when present, or all public
+// names from dir(module). socket.py uses this to extend its __all__
+// with the names exported by the low-level _socket module.
+//
+// CPython: Lib/os.py:44 _get_exports_list
+func osGetExportsList(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: _get_exports_list() takes exactly one argument (%d given)", len(args))
+	}
+	mod, ok := args[0].(*objects.Module)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: _get_exports_list() argument must be a module")
+	}
+	d := mod.Dict()
+	if v, err := d.GetItem(objects.NewStr("__all__")); err == nil && v != nil {
+		lst, lerr := objects.SequenceList(v)
+		if lerr != nil {
+			return nil, lerr
+		}
+		return lst, nil
+	}
+	keys := d.Keys()
+	out := make([]objects.Object, 0, len(keys))
+	for _, k := range keys {
+		s, err := objects.Str(k)
+		if err != nil {
+			continue
+		}
+		if s == "" || s[0] == '_' {
+			continue
+		}
+		out = append(out, objects.NewStr(s))
+	}
+	return objects.NewList(out), nil
 }

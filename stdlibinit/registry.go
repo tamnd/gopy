@@ -203,6 +203,7 @@ import (
 	_ "github.com/tamnd/gopy/module/functools"
 	_ "github.com/tamnd/gopy/module/os"
 	_ "github.com/tamnd/gopy/module/signal"
+	_ "github.com/tamnd/gopy/module/socket"
 	_ "github.com/tamnd/gopy/module/weakref"
 
 	// Built-in module: math. Registers itself via module/math/module.go init().
