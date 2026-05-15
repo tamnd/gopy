@@ -390,6 +390,12 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		v, nerr := t.IterNext(it)
 		if nerr != nil {
 			if errors.Is(nerr, objects.ErrStopIteration) {
+				// CPython iter_iternext clears the IndexError /
+				// StopIteration on the thread state when it absorbs it
+				// (Objects/iterobject.c:62). Gopy's seqIterNext folds
+				// the IndexError absorb into ErrStopIteration before
+				// returning, so we mirror the clear here.
+				pyerrors.Clear(e.ts)
 				// Skip past the loop body; oparg is the jump distance to
 				// END_FOR (in code units, not instruction words).
 				return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
