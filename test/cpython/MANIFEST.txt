@@ -22,11 +22,11 @@
 # Whenever a row's status changes, update the spec too.
 
 # ---- Lexer / tokenizer ---------------------------------------------
-test_keyword	ready	v0.5.5	keyword module is a generated table
-test_source_encoding	ready	v0.5.5	parser/lexer encoding detection
-test_tabnanny	ready	v0.9.0	rides on tokenize.Iter
-test_tokenize	ready	v0.9.0	tokenize.Iter graduated to real lexer in v0.9
-test_utf8source	ready	v0.5.5	parser/lexer utf-8 default
+test_keyword	ready	v0.5.5	keyword module is a generated table; 10/11 green, compile-in-single-mode parser gap on the eleventh
+test_source_encoding	pending	v0.5.5	blocked on inspect (stdlib not yet vendored)
+test_tabnanny	pending	v0.9.0	blocked on asyncio (stdlib not yet vendored, via unittest.mock)
+test_tokenize	pending	v0.9.0	blocked on tempfile (stdlib not yet vendored)
+test_utf8source	pending	v0.5.5	blocked on _io.File.fileno() (io subsystem gap surfaced by unittest stdout)
 
 # ---- Parser / grammar / AST ----------------------------------------
 test_annotationlib	ready	v0.10.1	annotation lazy resolver

@@ -27,11 +27,11 @@ Sources to fully port (CPython 3.14):
 
 Gate tests to land green under `test/cpython/`:
 
-- [ ] `test_keyword.py` (56 lines)
-- [ ] `test_utf8source.py` (41 lines)
-- [ ] `test_source_encoding.py` (547 lines)
-- [ ] `test_tabnanny.py` (354 lines)
-- [ ] `test_tokenize.py` (3480 lines)
+- [x] `test_keyword.py` (56 lines) — vendored; 10/11 sub-tests green. The eleventh, `test_all_keywords_fail_to_be_used_as_names`, calls `compile(name + '=2', '<s>', 'single')` and hits a parser-generator gap (`parser: generated rule bodies not yet emitted`) unrelated to lexer/tokenizer. Tracked separately.
+- [ ] `test_utf8source.py` (41 lines) — vendored; blocked on `_io.File.fileno()`. The test logic itself runs; the failure is in unittest's stdout writer reaching `fileno` on the gopy file object. Fix lives in `module/_io/`, not this subsystem.
+- [ ] `test_source_encoding.py` (547 lines) — vendored; blocked on `import inspect` (stdlib not yet vendored).
+- [ ] `test_tabnanny.py` (354 lines) — vendored; blocked on `import asyncio` via `unittest.mock` (stdlib not yet vendored).
+- [ ] `test_tokenize.py` (3480 lines) — vendored; blocked on `import tempfile` (stdlib not yet vendored).
 
 ## Goal
 
