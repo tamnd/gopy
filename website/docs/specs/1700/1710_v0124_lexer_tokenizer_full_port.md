@@ -24,7 +24,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | `Parser/tokenizer/readline_tokenizer.c` | 134 | `parser/lexer/driver_readline.go` | 50 | DONE | 268c8f8 |
 | `Parser/tokenizer/string_tokenizer.c` | 148 | `parser/lexer/driver_string.go` | 112 | DONE | 268c8f8 |
 | `Parser/tokenizer/utf8_tokenizer.c` | 55 | `parser/lexer/driver_string.go` (utf-8 path) | (shared) | DONE | 268c8f8 |
-| `Python/Python-tokenize.c` | 445 | `module/_tokenize/module.go` | 352 | WIP | — |
+| `Python/Python-tokenize.c` | 445 | `module/_tokenize/module.go` | 366 | DONE | 4d3b1e8 |
 | `Lib/keyword.py` | 64 | `stdlib/keyword.py` | 64 | DONE | byte-equal vendor |
 | `Lib/tokenize.py` | 598 | `stdlib/tokenize.py` | 598 | DONE | byte-equal vendor |
 | `Lib/tabnanny.py` | 338 | `stdlib/tabnanny.py` | 338 | DONE | byte-equal vendor |
