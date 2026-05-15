@@ -189,3 +189,22 @@ func osDup(args []objects.Object, _ map[string]objects.Object) (objects.Object, 
 	}
 	return objects.NewInt(int64(newfd)), nil
 }
+
+// posixIdentityEntries returns the geteuid / getegid / getgid /
+// getgroups bindings. These exist only on builds with HAVE_GETEUID.
+//
+// CPython: Modules/posixmodule.c HAVE_GETEUID block
+func posixIdentityEntries() []struct {
+	name string
+	val  objects.Object
+} {
+	return []struct {
+		name string
+		val  objects.Object
+	}{
+		{"geteuid", objects.NewBuiltinFunction("geteuid", osGeteuid)},
+		{"getegid", objects.NewBuiltinFunction("getegid", osGetegid)},
+		{"getgid", objects.NewBuiltinFunction("getgid", osGetgid)},
+		{"getgroups", objects.NewBuiltinFunction("getgroups", osGetgroups)},
+	}
+}
