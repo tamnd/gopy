@@ -11,19 +11,33 @@ package objects
 
 import "fmt"
 
+// AttrDictHolder is implemented by objects that carry their own
+// per-instance attribute dict. The generic attr machinery consults it
+// for objects that are not plain *Instance so a Python subclass of a
+// C-port type (e.g. random.Random subclassing _random.Random) can store
+// attributes set in its __init__ without each type needing its own
+// getattro/setattro slot.
+//
+// AttrDict returns the current dict (nil if no attribute has been
+// stored yet); EnsureAttrDict allocates on first call and returns it.
+//
+// CPython: Include/object.h MANAGED_DICT flag + _PyObject_GetDictPtr
+type AttrDictHolder interface {
+	AttrDict() *Dict
+	EnsureAttrDict() *Dict
+}
+
 // GenericGetAttr is the default Getattro slot. It looks up name in
 // the type's MRO and:
 //   - calls DescrGet if the descriptor is a data descriptor (has both
 //     DescrGet and DescrSet);
+//   - falls through to the instance __dict__ when the object exposes
+//     one via AttrDictHolder or is an *Instance;
 //   - calls DescrGet if it is a non-data descriptor (has only
 //     DescrGet);
 //   - returns the descriptor itself if it has neither slot (a plain
 //     class attribute);
 //   - raises AttributeError when nothing is found.
-//
-// Instance __dict__ lookup is not yet implemented; data descriptors
-// always win and missing attributes always raise AttributeError, which
-// matches CPython's behavior for types without Py_TPFLAGS_MANAGED_DICT.
 //
 // CPython: Objects/object.c:1932 PyObject_GenericGetAttr
 func GenericGetAttr(o Object, name Object) (Object, error) {
@@ -32,6 +46,17 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 	}
 	tp := o.Type()
 	descr, _ := LookupDescriptor(tp, attrNameStr(name))
+	if descr != nil {
+		dt := descr.Type()
+		if dt.DescrGet != nil && dt.DescrSet != nil {
+			return dt.DescrGet(descr, o, tp)
+		}
+	}
+	if d := instanceAttrDict(o); d != nil {
+		if v, err := d.GetItem(name); err == nil {
+			return v, nil
+		}
+	}
 	if descr != nil {
 		dt := descr.Type()
 		if dt.DescrGet != nil {
@@ -44,8 +69,8 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 
 // GenericSetAttr is the default Setattro slot. It looks up name in the
 // type's MRO and calls DescrSet when the descriptor implements it,
-// raising AttributeError otherwise. value==nil signals a delete and is
-// passed through to DescrSet (descriptors handle the dispatch).
+// otherwise stores in the instance __dict__ (from *Instance.dict or an
+// AttrDictHolder). value==nil signals a delete.
 //
 // CPython: Objects/object.c:2040 PyObject_GenericSetAttr
 func GenericSetAttr(o Object, name Object, value Object) error {
@@ -58,13 +83,6 @@ func GenericSetAttr(o Object, name Object, value Object) error {
 		if dset := descr.Type().DescrSet; dset != nil {
 			return dset(descr, o, value)
 		}
-		// Non-data descriptor (no __set__): a store on the instance is
-		// allowed and shadows the descriptor in the instance dict. Only
-		// fail here when the type has no instance dict to fall back on.
-		//
-		// CPython: Objects/object.c:2040 PyObject_GenericSetAttr
-		// (the "if (f != NULL) ... else PyObject_GenericSetAttr stores
-		// in dict" arm)
 	}
 	if inst, ok := o.(*Instance); ok && inst.dict != nil {
 		if value == nil {
@@ -75,8 +93,35 @@ func GenericSetAttr(o Object, name Object, value Object) error {
 		}
 		return inst.dict.SetItem(name, value)
 	}
+	if h, ok := o.(AttrDictHolder); ok && tp.HasDict {
+		if value == nil {
+			d := h.AttrDict()
+			if d == nil {
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+			}
+			if _, err := d.GetItem(name); err != nil {
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+			}
+			return d.DelItem(name)
+		}
+		return h.EnsureAttrDict().SetItem(name, value)
+	}
 	if value == nil {
 		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 	}
 	return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.Name, attrNameStr(name))
+}
+
+// instanceAttrDict returns the per-instance attribute dict for o (an
+// *Instance's dict or an AttrDictHolder's AttrDict). Returns nil when
+// the object has no per-instance dict slot or has not allocated one
+// yet.
+func instanceAttrDict(o Object) *Dict {
+	switch v := o.(type) {
+	case *Instance:
+		return v.dict
+	case AttrDictHolder:
+		return v.AttrDict()
+	}
+	return nil
 }
