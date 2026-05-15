@@ -146,6 +146,28 @@ func TestImportTokenize(t *testing.T) {
 	}
 }
 
+// TestImportKeyword pins the vendored Lib/keyword.py.
+// CPython: Lib/keyword.py is a generated table; importing it must
+// expose kwlist and softkwlist with the 3.14 contents.
+func TestImportKeyword(t *testing.T) {
+	_, err := importStdlib(t, "keyword")
+	if err != nil {
+		skipIfMissingDep(t, err, "keyword")
+		t.Fatalf("import keyword: %v", err)
+	}
+}
+
+// TestImportTabnanny pins the vendored Lib/tabnanny.py.
+// tabnanny rides on tokenize, so a green import here also exercises
+// the tokenize backend chain.
+func TestImportTabnanny(t *testing.T) {
+	_, err := importStdlib(t, "tabnanny")
+	if err != nil {
+		skipIfMissingDep(t, err, "tabnanny")
+		t.Fatalf("import tabnanny: %v", err)
+	}
+}
+
 // TestImportTextwrap checks that textwrap can be imported end-to-end.
 func TestImportTextwrap(t *testing.T) {
 	_, err := importStdlib(t, "textwrap")

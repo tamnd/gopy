@@ -80,6 +80,58 @@ func TestRunScriptFile(t *testing.T) {
 	}
 }
 
+// TestLexerTokenizerStdlibImports gates the v0.12.4 lexer/tokenizer
+// subsystem vendoring. The three modules (keyword, tokenize, tabnanny)
+// live byte-equal under stdlib/ and must import cleanly through the
+// full CLI surface (which wires __build_class__ and friends, unlike
+// the bare stdlibinit-only harness). Each line below prints a small
+// witness that proves the module loaded and its top-level dict is
+// populated.
+//
+// CPython: Lib/keyword.py, Lib/tokenize.py, Lib/tabnanny.py.
+// Spec: 1710.
+func TestLexerTokenizerStdlibImports(t *testing.T) {
+	cases := []struct {
+		name    string
+		code    string
+		wantSub string
+	}{
+		{
+			name:    "keyword",
+			code:    "import keyword; print('kw', 'False' in keyword.kwlist, 'match' in keyword.softkwlist)",
+			wantSub: "kw True True",
+		},
+		{
+			name:    "tokenize",
+			code:    "import tokenize; print('tk', tokenize.NEWLINE, hasattr(tokenize, 'tokenize'))",
+			wantSub: "tk 4 True",
+		},
+		{
+			name:    "tabnanny",
+			code:    "import tabnanny; print('tn', hasattr(tabnanny, 'check'), tabnanny.filename_only)",
+			wantSub: "tn True 0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, cleanupOut := captureFile(t)
+			defer cleanupOut()
+			stderr, cleanupErr := captureFile(t)
+			defer cleanupErr()
+
+			rc := run([]string{"-c", tc.code}, stdout, stderr)
+			out := readFile(t, stdout)
+			errOut := readFile(t, stderr)
+			if rc != 0 {
+				t.Fatalf("rc=%d stdout=%q stderr=%q", rc, out, errOut)
+			}
+			if !strings.Contains(out, tc.wantSub) {
+				t.Fatalf("stdout=%q stderr=%q: want substring %q", out, errOut, tc.wantSub)
+			}
+		})
+	}
+}
+
 func TestRunUnknownFlag(t *testing.T) {
 	stdout, cleanupOut := captureFile(t)
 	defer cleanupOut()
