@@ -10,6 +10,7 @@ package builtins
 import (
 	"fmt"
 
+	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
@@ -28,7 +29,12 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 	if err != nil {
 		return nil, err
 	}
-	mod, err := parser.ParseString(parsed.source, parsed.filename, parsed.mode)
+	var mod ast.Mod
+	if parsed.sourceBytes != nil {
+		mod, err = parser.ParseBytes(parsed.sourceBytes, parsed.filename, parsed.mode)
+	} else {
+		mod, err = parser.ParseString(parsed.source, parsed.filename, parsed.mode)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -40,11 +46,12 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 }
 
 type compileArgs struct {
-	source   string
-	filename string
-	mode     parser.Mode
-	flags    int
-	optimize int
+	source      string
+	sourceBytes []byte
+	filename    string
+	mode        parser.Mode
+	flags       int
+	optimize    int
 }
 
 // parseCompileArgs binds the positional and keyword arguments to the
@@ -60,9 +67,9 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return compileArgs{}, err
 	}
-	source, err := stringArg(bound[0], "source")
+	source, sourceBytes, err := compileSourceArg(bound[0])
 	if err != nil {
-		return compileArgs{}, fmt.Errorf("TypeError: compile() arg 1 must be a string, bytes or AST object")
+		return compileArgs{}, err
 	}
 	filename, err := stringArg(bound[1], "filename")
 	if err != nil {
@@ -88,12 +95,37 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 		return compileArgs{}, err
 	}
 	return compileArgs{
-		source:   source,
-		filename: filename,
-		mode:     mode,
-		flags:    flags,
-		optimize: optimize,
+		source:      source,
+		sourceBytes: sourceBytes,
+		filename:    filename,
+		mode:        mode,
+		flags:       flags,
+		optimize:    optimize,
 	}, nil
+}
+
+// compileSourceArg accepts the first positional argument to compile().
+// str routes through ParseString. bytes / bytearray route through
+// ParseBytes so the PEP 263 coding cookie controls the decode. AST
+// input is rejected until gopy ships Python-side AST objects.
+//
+// CPython: Python/bltinmodule.c:771 builtin_compile_impl source decode
+func compileSourceArg(o objects.Object) (string, []byte, error) {
+	switch v := o.(type) {
+	case *objects.Unicode:
+		return v.Value(), nil, nil
+	case *objects.Bytes:
+		b := v.Bytes()
+		dup := make([]byte, len(b))
+		copy(dup, b)
+		return "", dup, nil
+	case *objects.ByteArray:
+		b := v.Bytes()
+		dup := make([]byte, len(b))
+		copy(dup, b)
+		return "", dup, nil
+	}
+	return "", nil, fmt.Errorf("TypeError: compile() arg 1 must be a string, bytes or AST object")
 }
 
 // bindCompileArgs maps the positional + keyword args onto the
