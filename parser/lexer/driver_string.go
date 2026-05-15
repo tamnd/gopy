@@ -7,7 +7,26 @@
 
 package lexer
 
-import "github.com/tamnd/gopy/codecs"
+import (
+	"fmt"
+
+	"github.com/tamnd/gopy/codecs"
+)
+
+// nonUTF8ErrorMessage renders the SyntaxError text CPython emits when
+// a non-utf-8 byte appears in source that has no PEP 263 cookie. The
+// test_utf8source gate only checks 'utf-8' (lowercased) is present;
+// the rest of the wording mirrors CPython so users see a familiar
+// message.
+//
+// CPython: Parser/tokenizer/helpers.c:332 ensure_utf8 error_ret arm
+func nonUTF8ErrorMessage(bad byte) string {
+	return fmt.Sprintf(
+		"Non-UTF-8 code starting with '\\x%02x' but no encoding declared; "+
+			"see https://peps.python.org/pep-0263/ for details",
+		bad,
+	)
+}
 
 // FromString builds a State that tokenises the given source. The
 // driver loads the whole buffer up front; underflow returns false on
@@ -39,7 +58,19 @@ func FromBytes(src []byte, mode Mode) *State {
 		s.encoding = "utf-8"
 		hadBOM = true
 	}
-	if name := DetectEncodingCookie(src); name != "" {
+	cookie := DetectEncodingCookie(src)
+	if cookie == "" && !hadBOM {
+		// No encoding declaration and no BOM: source defaults to UTF-8.
+		// CPython raises SyntaxError at the offending byte naming the
+		// 'utf-8' default so the user knows to add a coding cookie.
+		// CPython: Parser/tokenizer/helpers.c:332 ensure_utf8
+		if line, bad, ok := ValidateUTF8(src); !ok {
+			s.lineno = line
+			s.recordError(nonUTF8ErrorMessage(bad))
+			s.done = eEncoding
+		}
+	}
+	if name := cookie; name != "" {
 		// CPython: Parser/tokenizer/helpers.c:425 BOM vs cookie mismatch
 		if hadBOM && !isUTF8Name(name) {
 			s.recordError("encoding declaration in Unicode string")

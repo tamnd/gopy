@@ -28,7 +28,7 @@ Sources to fully port (CPython 3.14):
 Gate tests to land green under `test/cpython/`:
 
 - [x] `test_keyword.py` (56 lines) — vendored; 10/11 sub-tests green. The eleventh, `test_all_keywords_fail_to_be_used_as_names`, calls `compile(name + '=2', '<s>', 'single')` and hits a parser-generator gap (`parser: generated rule bodies not yet emitted`) unrelated to lexer/tokenizer. Tracked separately. Also vendored at `stdtest/test_keyword.py` and gated via `TestStdtestCorpus`.
-- [ ] `test_utf8source.py` (41 lines) — vendored; suite now runs end-to-end after `_io.File.fileno()` / `_io.File.isatty()` / `os.isatty()` landed. 1/3 sub-tests green. The other two fail in unrelated subsystems: `compile()` rejecting `bytes` (compile panel) and a missing `test.tokenizedata.badsyntax_pep3120` fixture (test corpus). Both tracked separately.
+- [x] `test_utf8source.py` (41 lines) — vendored; 3/3 sub-tests green. Mirrored at `stdtest/test_utf8source.py`.
 - [ ] `test_source_encoding.py` (547 lines) — vendored; blocked on `import inspect` (stdlib not yet vendored).
 - [ ] `test_tabnanny.py` (354 lines) — vendored; blocked on `import asyncio` via `unittest.mock` (stdlib not yet vendored).
 - [ ] `test_tokenize.py` (3480 lines) — vendored; blocked on `import tempfile` (stdlib not yet vendored).
@@ -148,7 +148,7 @@ unrelated sub-systems:
 | 1 | T2 | builtin `compile()` + `str.encode` | accept `bytes` / `bytearray` (route through `lexer.FromBytes`); `str.encode` honors its encoding arg via `codecs.Encode` | DONE | 9d03f23 |
 | 2 | T3 | test fixtures | vendor `Lib/test/tokenizedata/` (bad_coding*, badsyntax_*, coding20731, tokenize_tests-*) under `stdlib/test/tokenizedata/` | DONE | 0c3da66 |
 | 3 | T4 | `module/sys` | bind `sys.exit` + `setrecursionlimit` + `getrecursionlimit` + `getrefcount` on the inittab sys module via `CurrentThreadHook` | DONE | 7e5bc6d |
-| 4 | T3.1 | lexer non-utf-8 check | port `check_coding_spec` + `check_bom` invalid-byte path so `badsyntax_pep3120` raises SyntaxError at import time (still 1/3 sub-tests red because import succeeds silently) | TODO | — |
+| 4 | T3.1 | lexer non-utf-8 check | `lexer.ValidateUTF8` flags the first non-utf-8 byte and the parser surfaces a SyntaxError so `badsyntax_pep3120` raises at import. Also added a `Sequence.Contains` slot for str so the test's `'utf-8' in msg.lower()` substring check works. | DONE | (pending commit) |
 
 ### test_source_encoding.py chain
 

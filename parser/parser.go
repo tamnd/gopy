@@ -72,6 +72,13 @@ func Parse(r io.Reader, filename string, mode Mode) (ast.Mod, error) {
 }
 
 func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
+	// Lexer-recorded errors (PEP 263 cookie / BOM conflicts, non-utf-8
+	// source) trump anything pegen would surface: the parser cannot
+	// progress past a broken decode.
+	// CPython: Parser/peg_api.c:73 _PyParser_ASTFromString tok->done check
+	if e := st.Err(); e != nil {
+		return nil, fmt.Errorf("SyntaxError: %s", e.Message)
+	}
 	p := pegen.New(st, pegenStartRule(mode), 0)
 	node, err := pegen.Dispatch(p, pegenStartRule(mode))
 	if errors.Is(err, pegen.ErrParserNotImplemented) {
