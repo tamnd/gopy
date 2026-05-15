@@ -154,7 +154,15 @@ unrelated sub-systems:
 
 | # | Task | Sub-system | Surface | Status | Commit |
 |---|------|------------|---------|--------|--------|
-| 1 | T5 | stdlib vendor | vendor `Lib/inspect.py` (3409 lines) verbatim plus any new deps | TODO | — |
+| 1 | T5.1 | stdlib vendor | vendor `Lib/opcode.py` (122 lines) plus C-port the `_opcode` and `_opcode_metadata` inittab modules (`stack_effect`, opmap, specialization tables) | TODO | — |
+| 2 | T5.2 | stdlib vendor | vendor `Lib/dis.py` (1157 lines) verbatim, depends on T5.1 | TODO | — |
+| 3 | T5.3 | stdlib vendor | vendor `Lib/importlib/__init__.py` + `Lib/importlib/machinery.py` (re-exports of the gopy import internals) | TODO | — |
+| 4 | T5.4 | stdlib vendor | vendor `Lib/inspect.py` (3409 lines) verbatim, depends on T5.1–T5.3 | TODO | — |
+
+DFS note: T5 was originally one row but `inspect` pulls in `dis` →
+`opcode` → `_opcode` (C module) → `_opcode_metadata` (generated C
+module), plus `importlib.machinery`. The four-step breakdown above
+matches the actual port order.
 
 ### test_tabnanny.py chain
 
@@ -163,7 +171,7 @@ unrelated sub-systems:
 | 1 | T6 | asyncio | port the asyncio package (event loop, transports, protocols, futures, tasks, streams, subprocess, queues, locks) as its own spec | BLOCKED | — |
 
 DFS execution order, smallest fix first: T1 → T1.5 → T1.6 → T1.7 → T4
-→ T2 → T3 → T5 → T6. Each task gets its own commit and an entry in
+→ T2 → T3 → T3.1 → T5.1 → T5.2 → T5.3 → T5.4 → T6. Each task gets its own commit and an entry in
 `stdtest/MANIFEST.txt` when the gate it unblocks lands green.
 
 ## Out of scope
