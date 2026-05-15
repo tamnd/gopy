@@ -156,6 +156,29 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "intern", objects.NewBuiltinFunction("intern", internShim)); err != nil {
 		return nil, err
 	}
+	// sys.exit, sys.setrecursionlimit, sys.getrecursionlimit, and
+	// sys.getrefcount are wired here. helpers.Bind installs the
+	// thread-aware forms when lifecycle constructs the module; the
+	// inittab path reaches sys.exit via the CurrentThreadHook bridge
+	// instead. unittest's tear-down path calls sys.exit, so any gate
+	// that goes through unittest.main needs this row.
+	//
+	// CPython: Python/sysmodule.c:915 sys_exit_impl,
+	// Python/sysmodule.c:1352 sys_setrecursionlimit_impl,
+	// Python/sysmodule.c:1612 sys_getrecursionlimit_impl,
+	// Python/sysmodule.c:2022 sys_getrefcount_impl
+	if err := setItem(md, "exit", objects.NewBuiltinFunction("exit", exitShim)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "setrecursionlimit", objects.NewBuiltinFunction("setrecursionlimit", setRecursionLimitShim)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "getrecursionlimit", objects.NewBuiltinFunction("getrecursionlimit", getRecursionLimit)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "getrefcount", objects.NewBuiltinFunction("getrefcount", getRefcount)); err != nil {
+		return nil, err
+	}
 	// sys._getframe([depth]) returns the frame depth levels up the call
 	// stack. depth=0 is the immediate caller's frame.
 	//
