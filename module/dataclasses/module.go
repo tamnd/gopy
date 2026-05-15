@@ -1129,13 +1129,237 @@ func kwargsAsDict(kwargs map[string]objects.Object) *objects.Dict {
 	return d
 }
 
-// makeDataclassBuiltin is not yet supported. We surface a clear error
-// so consumers (mock, others) get a deterministic failure instead of
-// silently wrong behavior.
+// makeDataclassBuiltin dynamically constructs a dataclass from a name,
+// a field list, and the same flag kwargs accepted by @dataclass(). The
+// fields argument is iterable of (name) | (name, type) | (name, type,
+// Field()) items; bare-name entries get the string 'typing.Any' as the
+// annotation. Class body is composed from the optional namespace dict
+// plus the per-field defaults, the __annotations__ dict is built in
+// field order, and an optional module kwarg sets __module__ for
+// pickling. The resulting class is then run through the normal
+// dataclass decorator with the remaining flag kwargs.
 //
 // CPython: Lib/dataclasses.py:1635 make_dataclass
-func makeDataclassBuiltin(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return nil, fmt.Errorf("NotImplementedError: dataclasses.make_dataclass is not yet supported in gopy")
+func makeDataclassBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: make_dataclass() missing required arguments: 'cls_name' and 'fields'")
+	}
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: make_dataclass() takes 2 positional arguments but %d were given", len(args))
+	}
+	nameObj, ok := args[0].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: make_dataclass() cls_name must be str, not %s", args[0].Type().Name)
+	}
+	clsName := nameObj.Value()
+
+	// Pull non-dataclass kwargs out before forwarding the rest to the
+	// decorator. Order matches CPython's signature.
+	bases, err := makeDataclassBases(kwargs)
+	if err != nil {
+		return nil, err
+	}
+	userNS, err := makeDataclassNamespace(kwargs)
+	if err != nil {
+		return nil, err
+	}
+	moduleName, hasModule, err := makeDataclassModule(kwargs)
+	if err != nil {
+		return nil, err
+	}
+	decorator, hasDecorator := kwargs["decorator"]
+	delete(kwargs, "decorator")
+
+	entries, err := makeDataclassParseFields(args[1])
+	if err != nil {
+		return nil, err
+	}
+
+	ns, err := makeDataclassBuildNS(userNS, entries, moduleName, hasModule)
+	if err != nil {
+		return nil, err
+	}
+	cls := objects.NewUserTypeKwargs(clsName, bases, ns, nil)
+	if hasDecorator && !objects.IsNone(decorator) {
+		return objects.Call(decorator, objects.NewTuple([]objects.Object{cls}), kwargsAsDict(kwargs))
+	}
+	return dataclassBuiltin([]objects.Object{cls}, kwargs)
+}
+
+func makeDataclassBuildNS(userNS *objects.Dict, entries []makeDataclassField, moduleName string, hasModule bool) (*objects.Dict, error) {
+	ns := objects.NewDict()
+	if userNS != nil {
+		for _, k := range userNS.Keys() {
+			v, err := userNS.GetItem(k)
+			if err != nil {
+				return nil, err
+			}
+			if err := ns.SetItem(k, v); err != nil {
+				return nil, err
+			}
+		}
+	}
+	annotations := objects.NewDict()
+	for _, e := range entries {
+		if err := annotations.SetItem(objects.NewStr(e.name), e.tp); err != nil {
+			return nil, err
+		}
+		if e.hasDef {
+			if err := ns.SetItem(objects.NewStr(e.name), e.defVal); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := ns.SetItem(objects.NewStr("__annotations__"), annotations); err != nil {
+		return nil, err
+	}
+	if hasModule {
+		if err := ns.SetItem(objects.NewStr("__module__"), objects.NewStr(moduleName)); err != nil {
+			return nil, err
+		}
+	}
+	return ns, nil
+}
+
+type makeDataclassField struct {
+	name   string
+	tp     objects.Object
+	hasDef bool
+	defVal objects.Object
+}
+
+func makeDataclassBases(kwargs map[string]objects.Object) ([]*objects.Type, error) {
+	v, ok := kwargs["bases"]
+	if !ok {
+		return nil, nil
+	}
+	delete(kwargs, "bases")
+	tup, ok := v.(*objects.Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: make_dataclass() bases must be tuple, not %s", v.Type().Name)
+	}
+	out := make([]*objects.Type, 0, tup.Len())
+	for i := 0; i < tup.Len(); i++ {
+		bt, ok := tup.Item(i).(*objects.Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: make_dataclass() bases must be a tuple of types")
+		}
+		out = append(out, bt)
+	}
+	return out, nil
+}
+
+func makeDataclassNamespace(kwargs map[string]objects.Object) (*objects.Dict, error) {
+	v, ok := kwargs["namespace"]
+	if !ok {
+		return nil, nil
+	}
+	delete(kwargs, "namespace")
+	if objects.IsNone(v) {
+		return nil, nil
+	}
+	d, ok := v.(*objects.Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: make_dataclass() namespace must be dict, not %s", v.Type().Name)
+	}
+	return d, nil
+}
+
+func makeDataclassModule(kwargs map[string]objects.Object) (string, bool, error) {
+	v, ok := kwargs["module"]
+	if !ok {
+		return "", false, nil
+	}
+	delete(kwargs, "module")
+	if objects.IsNone(v) {
+		return "", false, nil
+	}
+	s, ok := v.(*objects.Unicode)
+	if !ok {
+		return "", false, fmt.Errorf("TypeError: make_dataclass() module must be str, not %s", v.Type().Name)
+	}
+	return s.Value(), true, nil
+}
+
+func makeDataclassParseFields(seq objects.Object) ([]makeDataclassField, error) {
+	items, err := objects.SequenceList(seq)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]makeDataclassField, 0, items.Len())
+	seen := map[string]bool{}
+	for i := 0; i < items.Len(); i++ {
+		entry, err := makeDataclassParseOne(items.Item(i))
+		if err != nil {
+			return nil, err
+		}
+		if !objects.StrIsIdentifier(entry.name) {
+			return nil, fmt.Errorf("TypeError: Field names must be valid identifiers: %q", entry.name)
+		}
+		if isPythonKeyword(entry.name) {
+			return nil, fmt.Errorf("TypeError: Field names must not be keywords: %q", entry.name)
+		}
+		if seen[entry.name] {
+			return nil, fmt.Errorf("TypeError: Field name duplicated: %q", entry.name)
+		}
+		seen[entry.name] = true
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+func makeDataclassParseOne(item objects.Object) (makeDataclassField, error) {
+	if s, ok := item.(*objects.Unicode); ok {
+		return makeDataclassField{name: s.Value(), tp: objects.NewStr("typing.Any")}, nil
+	}
+	tup, ok := item.(*objects.Tuple)
+	if !ok {
+		if list, isList := item.(*objects.List); isList {
+			coll := make([]objects.Object, 0, list.Len())
+			for j := 0; j < list.Len(); j++ {
+				coll = append(coll, list.Item(j))
+			}
+			tup = objects.NewTuple(coll)
+		} else {
+			return makeDataclassField{}, fmt.Errorf("TypeError: Invalid field: %s", item.Type().Name)
+		}
+	}
+	switch tup.Len() {
+	case 2:
+		ns, ok := tup.Item(0).(*objects.Unicode)
+		if !ok {
+			return makeDataclassField{}, fmt.Errorf("TypeError: Field names must be valid identifiers: %s", tup.Item(0).Type().Name)
+		}
+		return makeDataclassField{name: ns.Value(), tp: tup.Item(1)}, nil
+	case 3:
+		ns, ok := tup.Item(0).(*objects.Unicode)
+		if !ok {
+			return makeDataclassField{}, fmt.Errorf("TypeError: Field names must be valid identifiers: %s", tup.Item(0).Type().Name)
+		}
+		return makeDataclassField{name: ns.Value(), tp: tup.Item(1), hasDef: true, defVal: tup.Item(2)}, nil
+	default:
+		return makeDataclassField{}, fmt.Errorf("TypeError: Invalid field tuple length: %d", tup.Len())
+	}
+}
+
+// isPythonKeyword matches keyword.iskeyword for the Python keyword set
+// (Lib/keyword.py kwlist). CPython rejects keywords as dataclass field
+// names because they would be syntactically invalid as identifiers in
+// the generated __init__ signature.
+//
+// CPython: Lib/keyword.py kwlist (regenerated from Grammar/python.gram)
+func isPythonKeyword(name string) bool {
+	switch name {
+	case "False", "None", "True",
+		"and", "as", "assert", "async", "await",
+		"break", "class", "continue", "def", "del",
+		"elif", "else", "except", "finally", "for", "from",
+		"global", "if", "import", "in", "is",
+		"lambda", "nonlocal", "not", "or", "pass",
+		"raise", "return", "try", "while", "with", "yield":
+		return true
+	}
+	return false
 }
 
 func init() {

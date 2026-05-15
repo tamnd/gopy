@@ -28,7 +28,7 @@ func TestLex_RealBytecodesC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tokenize bytecodes.c: %v", err)
 	}
-	const wantTokens = 31570 // captured from Python lexer.py
+	const wantTokens = 31547 // captured from Python lexer.py against CPython 3.14.5
 	if len(tokens) != wantTokens {
 		t.Errorf("got %d tokens, want %d (Python parity)", len(tokens), wantTokens)
 	}
