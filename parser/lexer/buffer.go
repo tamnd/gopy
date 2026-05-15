@@ -10,24 +10,33 @@ package lexer
 
 // reserveBuf ensures buf has room for size more bytes past inp.
 //
+// Mirrors CPython's growth policy: newsize = oldsize + max(size,
+// oldsize/2). The pointer remember/restore dance disappears because
+// gopy stores offsets, so growing the slice does not invalidate
+// anything saved on the f-string mode stack.
+//
 // CPython: Parser/lexer/buffer.c:50 _PyLexer_tok_reserve_buf
-func (s *State) reserveBuf(size int) {
-	have := s.end - s.inp
-	if have >= size {
-		return
+func (s *State) reserveBuf(size int) bool {
+	oldsize := s.inp
+	grow := oldsize >> 1
+	if size > grow {
+		grow = size
 	}
-	need := s.inp + size
-	if grow := s.inp + (s.inp >> 1); grow > need {
-		need = grow
+	newsize := oldsize + grow
+	if newsize <= s.end {
+		return true
 	}
-	if cap(s.buf) >= need {
-		s.buf = s.buf[:need]
+	s.rememberFStringBuffers()
+	if cap(s.buf) >= newsize {
+		s.buf = s.buf[:newsize]
 	} else {
-		nb := make([]byte, need)
+		nb := make([]byte, newsize)
 		copy(nb, s.buf[:s.inp])
 		s.buf = nb
 	}
-	s.end = need
+	s.end = newsize
+	s.restoreFStringBuffers()
+	return true
 }
 
 // rememberFStringBuffers is a no-op in gopy since the f-string mode
