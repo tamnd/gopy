@@ -206,6 +206,8 @@ func buildOS() (*objects.Module, error) {
 		{"rmdir", objects.NewBuiltinFunction("rmdir", rmdir)},
 		{"walk", objects.NewBuiltinFunction("walk", walk)},
 		{"fspath", objects.NewBuiltinFunction("fspath", fspath)},
+		{"fsdecode", objects.NewBuiltinFunction("fsdecode", osFsdecode)},
+		{"fsencode", objects.NewBuiltinFunction("fsencode", osFsencode)},
 		{"open", objects.NewBuiltinFunction("open", osOpen)},
 		{"scandir", objects.NewBuiltinFunction("scandir", osScandir)},
 		// Open flags. CPython: Modules/posixmodule.c posixmodule_exec

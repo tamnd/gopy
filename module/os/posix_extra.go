@@ -177,3 +177,51 @@ func osIsatty(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	}
 	return objects.NewBool((info.Mode() & goos.ModeCharDevice) != 0), nil
 }
+
+// osFsdecode decodes filename from the filesystem encoding (utf-8 on
+// gopy's posix targets) into a str. str inputs pass through unchanged;
+// bytes are decoded directly; anything else goes through __fspath__.
+//
+// CPython does this through _Py_DecodeLocaleEx with the
+// surrogateescape error handler, which gopy doesn't implement yet.
+// Plain utf-8 decode is enough for the file paths the gates touch.
+//
+// CPython: Lib/os.py:863 fsdecode
+func osFsdecode(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: fsdecode() takes exactly one argument (%d given)", len(args))
+	}
+	o, err := fspath(args, nil)
+	if err != nil {
+		return nil, err
+	}
+	switch v := o.(type) {
+	case *objects.Unicode:
+		return v, nil
+	case *objects.Bytes:
+		return objects.NewStr(string(v.Bytes())), nil
+	}
+	return nil, fmt.Errorf("TypeError: fsdecode() argument must be str, bytes, or os.PathLike, not %s", o.Type().Name)
+}
+
+// osFsencode encodes filename to the filesystem encoding. bytes pass
+// through; str is encoded as utf-8; path-likes route through fspath
+// first.
+//
+// CPython: Lib/os.py:851 fsencode
+func osFsencode(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: fsencode() takes exactly one argument (%d given)", len(args))
+	}
+	o, err := fspath(args, nil)
+	if err != nil {
+		return nil, err
+	}
+	switch v := o.(type) {
+	case *objects.Bytes:
+		return v, nil
+	case *objects.Unicode:
+		return objects.NewBytes([]byte(v.Value())), nil
+	}
+	return nil, fmt.Errorf("TypeError: fsencode() argument must be str, bytes, or os.PathLike, not %s", o.Type().Name)
+}
