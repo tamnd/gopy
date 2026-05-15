@@ -46,6 +46,18 @@ func init() {
 		DelItem: listMappingDel,
 	}
 	ListType.TpTraverse = listTraverse
+	// TpNew allocates a bare *List bound to the requested class so
+	// `class S(list): pass; S()` returns an S instance rather than a
+	// plain list. Population happens in __init__ (wired in
+	// builtins/ctor.go via bindListCtor), matching CPython's split of
+	// list_new (allocate) and list___init___impl (populate).
+	//
+	// CPython: Objects/listobject.c:2855 list_new
+	ListType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		l := &List{}
+		l.init(cls)
+		return l, nil
+	}
 }
 
 // listTraverse visits every item. Mirrors list_traverse.

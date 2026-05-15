@@ -203,7 +203,7 @@ func wireTypeCalls() {
 		bindCtorDescr(objects.IntType, IntCtor)
 		bindCtor(objects.FloatType, FloatCtor)
 		bindCtor(objects.BoolType, BoolCtor)
-		bindCtor(objects.ListType, ListCtor)
+		bindListCtor(objects.ListType)
 		bindCtor(objects.TupleType, TupleCtor)
 		bindDictCtor(objects.DictType)
 		bindCtor(objects.SetType, SetCtor)

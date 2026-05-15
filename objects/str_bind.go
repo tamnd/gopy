@@ -586,7 +586,13 @@ func strFormatField(field string, args []Object, kwargs map[string]Object, auto 
 	if err != nil {
 		return "", err
 	}
-	return unicodeFormat(v, spec)
+	// Dispatch through PyObject_Format so each replacement uses the
+	// argument's own __format__ slot. Routing unconditionally through
+	// unicodeFormat rejects ints and every other non-str type, which
+	// breaks even `'{}'.format(1)`.
+	//
+	// CPython: Objects/stringlib/unicode_format.h:1024 output_markup
+	return Format(v, spec)
 }
 
 func strFormatLookup(name string, args []Object, kwargs map[string]Object, auto *int) (Object, error) {

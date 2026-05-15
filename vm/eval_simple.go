@@ -28,7 +28,7 @@ import (
 // reached through a parent's Consts slot. Nested defs / lambdas /
 // class bodies all surface here.
 func liftNestedCode(c *compile.Code) *objects.Code {
-	return &objects.Code{
+	out := &objects.Code{
 		Argcount:        c.Argcount,
 		PosonlyArgcount: c.PosOnlyArgCount,
 		KwonlyArgcount:  c.KwOnlyArgCount,
@@ -47,6 +47,8 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 		Linetable:       c.Linetable,
 		ExceptionTable:  c.ExceptionTable,
 	}
+	out.Init(objects.CodeType)
+	return out
 }
 
 // wrapConst converts a raw compile-time constant value into an Object.
