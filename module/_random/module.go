@@ -192,8 +192,23 @@ var RandomType = newRandomType()
 // CPython: Modules/_randommodule.c:104 RandomObject
 type RandomObject struct {
 	objects.Header
-	src *mtSource
-	rnd *rand.Rand
+	src   *mtSource
+	rnd   *rand.Rand
+	attrs *objects.Dict
+}
+
+// AttrDict satisfies objects.AttrDictHolder so a Python subclass of
+// _random.Random (the random.Random class in Lib/random.py) can store
+// per-instance attributes through GenericSetAttr.
+func (o *RandomObject) AttrDict() *objects.Dict { return o.attrs }
+
+// EnsureAttrDict allocates the per-instance attribute dict on first
+// write.
+func (o *RandomObject) EnsureAttrDict() *objects.Dict {
+	if o.attrs == nil {
+		o.attrs = objects.NewDict()
+	}
+	return o.attrs
 }
 
 func newRandomType() *objects.Type {
