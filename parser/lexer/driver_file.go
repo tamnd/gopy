@@ -1,11 +1,22 @@
 // CPython: Parser/tokenizer/file_tokenizer.c. File-backed driver.
-// gopy uses io.Reader plus a bufio scan to feed lines on demand.
+//
+// Function map (file_tokenizer.c → gopy):
+//
+//	fp_getc                              → bufio.Reader.ReadByte (in underflow)
+//	fp_ungetc                            → bufio.Reader.UnreadByte
+//	tok_underflow_file                   → State.underflow closure
+//	tok_readline_recode                  → readEncodingHead + codecs.Decode
+//	check_bom                            → source.go CheckBOMCookieConflict
+//	check_coding_spec                    → source.go DetectEncodingCookie
+//	_PyTokenizer_FromFile                → FromReader
+//	_PyTokenizer_FindEncodingFilename    → FindEncodingFilename
 
 package lexer
 
 import (
 	"bufio"
 	"io"
+	"os"
 )
 
 // FromReader builds a State that reads source incrementally from r.
@@ -80,4 +91,29 @@ func readEncodingHead(br *bufio.Reader) ([]byte, bool) {
 	head := make([]byte, len(peek))
 	n, _ := io.ReadFull(br, head)
 	return head[:n], true
+}
+
+// FindEncodingFilename reads filename's first two physical lines and
+// reports the PEP 263 source encoding. Mirrors the C entry point that
+// powers `python -m tokenize -e`: read up to two newline-terminated
+// segments, run them through check_bom + check_coding_spec, return
+// "utf-8" by default. The function does not consume the file beyond
+// the cookie window.
+//
+// CPython: Parser/tokenizer/file_tokenizer.c:449 _PyTokenizer_FindEncodingFilename
+func FindEncodingFilename(name string) (string, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	br := bufio.NewReader(f)
+	peek, _ := br.Peek(2 * codingCookieMax)
+	if conflict := CheckBOMCookieConflict(peek); conflict != "" {
+		return "", &SyntaxError{Message: conflict}
+	}
+	if name := DetectEncodingCookie(peek); name != "" {
+		return name, nil
+	}
+	return "utf-8", nil
 }

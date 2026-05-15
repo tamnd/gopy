@@ -1,6 +1,12 @@
 // CPython: Parser/tokenizer/readline_tokenizer.c. REPL driver. The C
 // source pulls lines from a Python callable (sys.stdin.readline by
 // default); gopy takes a Go callback with the same shape.
+//
+// Function map (readline_tokenizer.c → gopy):
+//
+//	tok_readline_string      → ReadlineFunc invocation in underflow
+//	tok_underflow_readline   → State.underflow closure inside FromReadline
+//	_PyTokenizer_FromReadline → FromReadline
 
 package lexer
 
