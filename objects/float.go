@@ -41,6 +41,7 @@ func init() {
 		Absolute:    floatAbs,
 		Bool:        floatBool,
 		Float:       func(o Object) (Object, error) { return o, nil },
+		Power:       floatPower,
 	}
 }
 
@@ -327,6 +328,29 @@ func floatMod(a, b Object) (Object, error) {
 
 func floatBool(o Object) (bool, error) {
 	return o.(*Float).v != 0, nil
+}
+
+// floatPower implements `pow(a, b)` and `pow(a, b, mod)` for floats.
+// CPython rejects the three-argument form with a TypeError.
+//
+// CPython: Objects/floatobject.c float_pow
+func floatPower(a, b, mod Object) (Object, error) {
+	if mod != nil && mod != None() {
+		return nil, errors.New("TypeError: pow() 3rd argument not allowed unless all arguments are integers")
+	}
+	af, bf, ok := floatPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if af == 0 && bf < 0 {
+		return nil, errors.New("ZeroDivisionError: 0.0 cannot be raised to a negative power")
+	}
+	if af < 0 && bf != math.Trunc(bf) {
+		// CPython returns a complex here only via complex.__pow__.
+		// At the float-slot level it raises ValueError (math domain).
+		return nil, errors.New("ValueError: negative number cannot be raised to a fractional power")
+	}
+	return NewFloat(math.Pow(af, bf)), nil
 }
 
 // intToFloat promotes an Int operand to float64. Loses precision for

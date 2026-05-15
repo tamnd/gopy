@@ -10,6 +10,7 @@ package objects
 
 import (
 	"errors"
+	"math"
 	"math/big"
 )
 
@@ -120,11 +121,11 @@ func intDivmod(a, b Object) (Object, error) {
 	return NewTuple([]Object{q, r}), nil
 }
 
-// intPower implements `pow(a, b)` and `pow(a, b, mod)` for ints. A
-// negative exponent without a modulus falls through to a float
-// promotion via NotImplemented; the abstract layer would normally
-// retry against float's slot (no Power yet on Float, so the caller
-// gets a TypeError until it lands).
+// intPower implements `pow(a, b)` and `pow(a, b, mod)` for ints.
+// CPython promotes `int ** neg_int` (no modulus) to a float, so we do
+// the same here via math.Pow on float64. The three-argument case with
+// a negative exponent is the modular-inverse path; for now we leave it
+// as NotImplemented since random.py and friends don't take it.
 //
 // CPython: Objects/longobject.c:3837 long_pow
 func intPower(a, b, mod Object) (Object, error) {
@@ -133,7 +134,12 @@ func intPower(a, b, mod Object) (Object, error) {
 		return notImplemented(), nil
 	}
 	if bi.v.Sign() < 0 {
-		return notImplemented(), nil
+		if mod != nil && mod != None() {
+			return notImplemented(), nil
+		}
+		af, _ := new(big.Float).SetInt(&ai.v).Float64()
+		bf, _ := new(big.Float).SetInt(&bi.v).Float64()
+		return NewFloat(math.Pow(af, bf)), nil
 	}
 	var m *big.Int
 	if mod != nil && mod != None() {
