@@ -217,6 +217,48 @@ func TestLexerTokenizerPanel(t *testing.T) {
 	}
 }
 
+// TestStdtestCorpus runs every entry in stdtest/ through the regrtest
+// harness against a freshly built gopy binary. stdtest is the
+// known-passing slice of CPython's Lib/test/ — every file landed there
+// is expected to drive its unittest suite to completion. Regression in
+// any stdtest entry should fail this test and block the merge.
+//
+// As more rows in test/cpython/MANIFEST.txt turn green, they get
+// vendored into stdtest/ and this gate keeps them honest.
+func TestStdtestCorpus(t *testing.T) {
+	bin := buildGopy(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("repo root: %v", err)
+	}
+	corpus := filepath.Join(repoRoot, "stdtest")
+
+	// Each entry: name plus a substring that must appear somewhere in
+	// the combined stdout/stderr (unittest's summary line is the most
+	// reliable witness that the suite drove to completion).
+	cases := []struct {
+		name    string
+		witness string
+	}{
+		{"test_keyword", "Ran 11 tests"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Runner{Binary: bin, Corpus: corpus, Timeout: 60 * time.Second}
+			res := r.Run(context.Background(), Entry{Name: tc.name, Status: StatusReady})
+			if res.Outcome != OutcomePass && res.Outcome != OutcomeFail {
+				t.Fatalf("Outcome = %s (err=%v stderr=%q), want pass|fail",
+					res.Outcome, res.Err, res.Stderr)
+			}
+			combined := res.Stdout + res.Stderr
+			if !strings.Contains(combined, tc.witness) {
+				t.Fatalf("output missing %q:\nstdout=%q\nstderr=%q",
+					tc.witness, res.Stdout, res.Stderr)
+			}
+		})
+	}
+}
+
 func TestCountFiles(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"test_a.py", "test_b.py", "helper.py", "README"} {

@@ -27,7 +27,7 @@ Sources to fully port (CPython 3.14):
 
 Gate tests to land green under `test/cpython/`:
 
-- [x] `test_keyword.py` (56 lines) — vendored; 10/11 sub-tests green. The eleventh, `test_all_keywords_fail_to_be_used_as_names`, calls `compile(name + '=2', '<s>', 'single')` and hits a parser-generator gap (`parser: generated rule bodies not yet emitted`) unrelated to lexer/tokenizer. Tracked separately.
+- [x] `test_keyword.py` (56 lines) — vendored; 10/11 sub-tests green. The eleventh, `test_all_keywords_fail_to_be_used_as_names`, calls `compile(name + '=2', '<s>', 'single')` and hits a parser-generator gap (`parser: generated rule bodies not yet emitted`) unrelated to lexer/tokenizer. Tracked separately. Also vendored at `stdtest/test_keyword.py` and gated via `TestStdtestCorpus`.
 - [ ] `test_utf8source.py` (41 lines) — vendored; suite now runs end-to-end after `_io.File.fileno()` / `_io.File.isatty()` / `os.isatty()` landed. 1/3 sub-tests green. The other two fail in unrelated subsystems: `compile()` rejecting `bytes` (compile panel) and a missing `test.tokenizedata.badsyntax_pep3120` fixture (test corpus). Both tracked separately.
 - [ ] `test_source_encoding.py` (547 lines) — vendored; blocked on `import inspect` (stdlib not yet vendored).
 - [ ] `test_tabnanny.py` (354 lines) — vendored; blocked on `import asyncio` via `unittest.mock` (stdlib not yet vendored).

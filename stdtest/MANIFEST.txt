@@ -1,0 +1,16 @@
+# gopy known-passing CPython test corpus
+#
+# Mirror of CPython 3.14 Lib/test/ for tests that gopy already runs to
+# completion. Files here are byte-equal copies of the upstream source.
+# The contract is one-way: a test only joins this directory once the
+# regrtest harness drives it green on main. Regression in a stdtest
+# entry blocks the merge that caused it.
+#
+# This is the counterpart to test/cpython/, which tracks the *full*
+# Lib/test/ surface with most entries still pending. Once a row in
+# test/cpython/MANIFEST.txt turns green, the file moves (or is copied
+# byte-equal) into stdtest/ and gets its row here.
+#
+# Format:
+#   name<TAB>note (optional)
+test_keyword	10/11 sub-tests green; the eleventh fails on a compile-in-single-mode parser gap unrelated to lexer/tokenizer
