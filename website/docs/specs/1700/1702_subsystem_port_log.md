@@ -508,9 +508,9 @@ in the table below and lands in the same PR.
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Python/ceval.c` (remaining opcode handlers) | varies | `vm/` (existing) | pending |
-| B | `Python/bytecodes.c` (remaining opcode bodies) | varies | `vm/` (existing) | pending |
-| C | `Python/compile.c` (remaining codegen) | ~7,000 | `compile/` (existing) | pending |
+| A | `Python/ceval.c` (remaining opcode handlers) | varies | `vm/` (existing) | done (#586) |
+| B | `Python/bytecodes.c` (remaining opcode bodies) | varies | `vm/` (existing) | done (#587) |
+| C | `Python/compile.c` (remaining codegen) | ~7,000 | `compile/` (existing) | done (#588) |
 
 **Audit method.** For each file, walk the upstream definition
 list (the `TARGET(...)` macros in `bytecodes.c`, the
@@ -571,8 +571,8 @@ Status legend:
 | errno | #499 | done | `Modules/errnomodule.c` | `module/errno/` | 1 | C-extension; inittab is the final mechanism |
 | _colorize | #520 | partial | `Lib/_colorize.py` | `stdlib/_colorize.py` + `module/colorize/` shim | 1 | Vendored; inittab shim still wins; blocked on `dataclasses` |
 | fnmatch | #519 | done | `Lib/fnmatch.py` | `module/fnmatch/module.go` | 1 | Option B (Go port); vendor blocked on `itertools`, `posixpath`, `os.path.normcase`, `re` gaps |
-| functools | #498 | partial | `Lib/functools.py` + `Modules/_functoolsmodule.c` | `stdlib/functools.py` + `module/functools/` + `module/_functools/` | 1 | `cmp_to_key` gate cleared. Vendor `.py` shadowed by inittab until `abc`, `operator`, `reprlib`, `_thread` land. `total_ordering` and `singledispatch` are partial. |
-| types | #509 | partial | `Lib/types.py` + `Modules/_typesmodule.c` | `stdlib/types.py` + `module/types/` (registered as `_types`) | 1 | Vendored + `_types` builtin shipped; missing `ClassMethodDescriptorType`, `MethodWrapperType`, `WrapperDescriptorType`, `GenericAlias`, `UnionType` (no runtime equivalents yet) |
+| functools | #498 | partial | `Lib/functools.py` + `Modules/_functoolsmodule.c` | `stdlib/functools.py` + `module/functools/` + `module/_functools/` | 1 | `cmp_to_key` gate cleared. `abc`, `operator`, `reprlib`, `_thread._local` all now land (PR #45), so the vendor preconditions are satisfied; inittab shim still wins. `total_ordering` / `singledispatch` partial in the Go module. |
+| types | #509 | done | `Lib/types.py` + `Modules/_typesmodule.c` | `stdlib/types.py` + `module/types/` (registered as `_types`) | 1 | Vendored + `_types` builtin shipped. `ClassMethodDescriptorType`, `MethodWrapperType`, `WrapperDescriptorType`, `GenericAlias`, `UnionType` all resolve via `type(...)` introspection at module load (`stdlib/types.py:50-67`). |
 | collections | #497 | done | `Lib/collections/__init__.py` + `Modules/_collectionsmodule.c` | `stdlib/collections/` + `module/_collections/` | 2 | `_collections` fully ported (deque, defaultdict, _tuplegetter, _count_elements); `collections/__init__.py` vendored byte-equal. Gate: `TestCollectionsImportResolvesNames` green. |
 | contextlib | #508 | done | `Lib/contextlib.py` | `stdlib/contextlib.py` | 2 | Vendored byte-equal; loads via PathFinder; gate cleared in PR #21 |
 | abc | #533 | done | `Lib/abc.py` + `Modules/_abc.c` | `stdlib/abc.py` + `module/_abc/` | 2 | `_abc` fully ported (702 lines, all six step check + invalidation counter). Gate: `TestAbcImportResolvesNames` and `TestAbcAbstractMethodEnforced` green. |
@@ -581,7 +581,7 @@ Status legend:
 | warnings | #513 | done | `Lib/warnings.py` + `Python/_warnings.c` | `stdlib/warnings.py` + `module/_warnings/` | 2 | `_warnings` fully ported (1089 lines): filter registry, PyErr_WarnEx/Explicit/Format family, lock plumbing. `stdlib/warnings.py` vendored. |
 | pprint | #511 | partial | `Lib/pprint.py` | `module/pprint/module.go` | 2 | Minimal stub (67 lines) forwarding `pformat` to `repr`; enough for `unittest.case` assertion repr. Full PrettyPrinter class not ported. |
 | traceback | #496 | partial | `Lib/traceback.py` | `stdlib/traceback.py` | 3 | Vendored byte-equal; `format_exc()` works end-to-end (TestTracebackFormatExc green). Exception message + class printed. Full stack frames missing: `exc.TB` (__traceback__ chain) not yet populated by the VM, so `StackSummary.extract` sees an empty tb and emits only the "ValueError: sentinel" line. |
-| dataclasses | #522 | partial | `Lib/dataclasses.py` | `module/dataclasses/` (Go port, option B) | 3 | `_colorize` shim still wins: vendor blocked by missing `collections.abc`, subscriptable `Mapping[str, str]`, zero-arg `super()`. `make_dataclass`, `__hash__` gen, `order=True`, `slots=True`, recursive `asdict`/`astuple`, `InitVar` integration all deferred. |
+| dataclasses | #522 | done | `Lib/dataclasses.py` | `module/dataclasses/` (Go port, option B) | 3 | Go port at `module/dataclasses/module.go` (1,626 lines). `make_dataclass` shipped in PR #47 (`module.go:1142`). `order=True`, `slots=True`, `__hash__` generation, recursive `asdict`/`astuple`, `InitVar` all present. Vendor `Lib/dataclasses.py` still optional. |
 | GenericAlias + UnionType | #523 | done | `Objects/genericaliasobject.c` + `Objects/unionobject.c` | `objects/generic_alias.go` + `objects/union_type.go` + `objects/class_getitem.go` | 3 | Clears `unittest.case` `types.GenericAlias` gate. `TypeVar` / `ParamSpec` substitution deferred (needs `typing` C accelerator). |
 | time | #500 | partial | `Modules/timemodule.c` | `module/time/` | I | Minimal stub (74 lines): `time`, `monotonic`, `perf_counter`, `sleep` wired to Go. Full timemodule.c port (gmtime, strftime, struct_time, timezone) pending. |
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
@@ -592,12 +592,51 @@ Status legend:
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
 | os + posixpath + ntpath | #518 | done | `Lib/os.py`, `Lib/posixpath.py`, `Lib/ntpath.py`, `Modules/posixmodule.c` slice | `stdlib/` + `module/os/` | I | All posixmodule.c slice functions done: getcwd, getcwdb, chdir, listdir, scandir, stat, lstat, fstat, open, close, read, write, lseek, dup, pipe, unlink/remove/rename/mkdir/rmdir/makedirs/replace, getenv/environ, getpid/getuid/getppid, kill, waitpid, fspath, access, get_terminal_size, O_*/F_*/SEEK_* constants. os.py, posixpath.py, ntpath.py, genericpath.py vendored byte-equal. |
-| VM / compile audit | #521 | pending | `Python/ceval.c`, `Python/bytecodes.c`, `Python/compile.c` | (in-tree) | A | Sweep after built-ins land; record findings as additional rows here |
+| VM / compile audit | #521 | done | `Python/ceval.c`, `Python/bytecodes.c`, `Python/compile.c` | (in-tree) | A | All three sweeps closed: ceval.c handlers (#586), bytecodes.c op bodies (#587), compile.c codegen (#588). Findings folded into VM bug fix tasks (#589-#591). |
+| socket | #606 | done | `Lib/socket.py` + `Modules/socketmodule.c` | `stdlib/socket.py` + `module/socket/` shim + `module/_socket/` | I | `Lib/socket.py` vendored byte-equal (992 lines); PathFinder serves it on top of full `_socket` port (#601). `AF_*` / `SOCK_*` promoted to `AddressFamily` / `SocketKind` IntEnums. Gate: `stdlibinit/socket_import_test.go`. |
 
 Wave column: `1` = first parallel batch, `2` = second batch
 (queued after wave 1 merges), `3` = depends on earlier waves,
 `I` = independent infrastructure (any order),
 `A` = audit pass.
+
+## Checklist
+
+Snapshot of where 1702 stands (last updated 2026-05-15). The
+status column is the source of truth; this is the at-a-glance
+view.
+
+**Done (full port landed):**
+- [x] errno (#499)
+- [x] fnmatch (#519)
+- [x] types (#509) — all five descriptor types resolve via `type(...)` in `stdlib/types.py`
+- [x] collections (#497)
+- [x] contextlib (#508)
+- [x] abc (#533)
+- [x] collections.abc (#531)
+- [x] operator (#532)
+- [x] warnings (#513)
+- [x] GenericAlias + UnionType (#523)
+- [x] re / _sre (#510)
+- [x] enum (#544)
+- [x] difflib (#512)
+- [x] argparse (#515)
+- [x] signal / _signal (#516)
+- [x] weakref / _weakref (#517)
+- [x] os + posixpath + ntpath (#518)
+- [x] dataclasses (#522) — `make_dataclass`, `order`, `slots`, `InitVar` all in `module/dataclasses/`
+- [x] VM / compile audit (#521) — three sweeps closed (#586/#587/#588)
+- [x] socket (#606) — `Lib/socket.py` vendored on top of full `_socket` (#601)
+- [x] io / _io (#514) — all seven `_io` C files fully ported; codecs in `module/io/codecs.go` shipped PR #44
+
+**Partial (vendor in place, behaviour still gated):**
+- [ ] _colorize (#520) — vendored; `module/colorize/` shim still wins
+- [ ] functools (#498) — vendor preconditions satisfied; inittab shim still shadows; `total_ordering` and `singledispatch` partial
+- [ ] pprint (#511) — 67-line stub by design; full `PrettyPrinter` deferred (not needed by unittest)
+- [ ] time (#500) — 74-line stub; full `timemodule.c` (gmtime/strftime/struct_time/timezone) deferred
+- [ ] traceback (#496) — `stdlib/traceback.py` vendored byte-equal; blocked on VM populating `exc.__traceback__`. Module-level code is 100%; the blocker is the VM, not the port
+
+**Pending:** none. All rows in the status table now sit in done or partial.
 
 ## Detail format
 
