@@ -152,8 +152,8 @@ and the test loads.
 
 | # | Task | Sub-system | Surface | Status | Commit |
 |---|------|------------|---------|--------|--------|
-| 1 | P2.1 | stdlib vendor | `stdlib/asyncio/coroutines.py` (byte-equal) | TODO | — |
-| 2 | P2.2 | inspect | verify `inspect.iscoroutinefunction` returns True for `async def` over gopy's `CoroutineType` (relies on spec 1710 T5.4) | TODO | — |
+| 1 | P2.1 | stdlib vendor | `stdlib/asyncio/coroutines.py` (byte-equal) | DONE | 8c6d539 |
+| 2 | P2.2 | inspect | verify `inspect.iscoroutinefunction` returns True for `async def` over gopy's `CoroutineType` (relies on spec 1710 T5.4); fixed CO_COROUTINE bit value in compile/codegen.go | DONE | 8c6d539 |
 | 3 | P2.3 | itertools | gopy `itertools.count` exposes `__next__`; required transitively by `threading.py:853` (`_counter = _count(1).__next__`). Bundle: `_thread._ThreadHandle()` + `lock()` TpNew, `sys.excepthook`, `os.path.normcase`. | DONE | d77a030 |
 
 ### Phase 3: futures + events + protocols + transports
