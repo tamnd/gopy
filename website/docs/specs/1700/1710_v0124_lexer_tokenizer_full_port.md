@@ -125,62 +125,44 @@ panel") to done and update the 1700 checklist row.
 The four pending gate rows each depend on a chain of sub-system gaps
 outside the lexer/tokenizer scope. Closing 1710 means walking each
 chain depth-first and porting whatever's missing until the gate runs
-green.
+green. Status legend: DONE = landed and verified, WIP = in progress,
+TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 
-### test_tokenize.py — chain
+### test_tokenize.py chain
 
-1. `import tempfile` → `import random` (vendored) → blocks on
-   `2 ** -BPF` at random.py:98. **Sub-system: numbers/long, op
-   `int.__pow__(int, neg_int)` should return float.** Task T1 — DONE
-   (commit 5d9c85d). Float `__pow__` slot also wired.
-2. After T1, random.py:125 `self.gauss_next = None` raises because
-   `_random.Random` subclass instances have no per-instance __dict__.
-   **Sub-system: VM attr machinery must let C-port subclasses store
-   instance attributes.** Task T1.5 — DONE (commit 7d9e729). Added
-   `AttrDictHolder` interface in `objects`; `_random.RandomObject`
-   implements it; `GenericGetAttr` / `GenericSetAttr` consult it.
-3. After T1.5, `import random` is clean and `import tempfile` reaches
-   `tempfile.gettempdir()`, which calls `os.fsdecode`, not yet bound
-   in `module/os`. **Sub-system: `os.fsdecode` + `os.fsencode`.**
-   Task T1.6. DONE (commit 9bd4675).
-4. Vendor `Lib/bisect.py` and `Lib/tempfile.py` byte-equal under
-   `stdlib/`. T1.7. DONE (commit 4350edf).
-5. After T1.7, `import tempfile` is clean. `test_tokenize.py` next
-   blocks on `import asyncio` (via `unittest.mock`). Asyncio is a
-   large sub-system; same blocker as test_tabnanny (T6). Tracked as
-   its own spec; 1710 leaves the gate pending on T6.
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | T1 | numbers/long | `int.__pow__(int, neg_int)` returns float; float `__pow__` slot wired | DONE | 5d9c85d |
+| 2 | T1.5 | VM attr machinery | `AttrDictHolder` lets C-port subclasses carry an instance __dict__; `_random.RandomObject` opts in | DONE | 7d9e729 |
+| 3 | T1.6 | `module/os` | bind `os.fsdecode` + `os.fsencode` on the inittab module | DONE | 9bd4675 |
+| 4 | T1.7 | stdlib vendor | byte-equal `Lib/bisect.py` and `Lib/tempfile.py` under `stdlib/` | DONE | 4350edf |
+| 5 | T6 | asyncio | `unittest.mock` imports `asyncio`; large sub-system, its own spec | BLOCKED | — |
 
-### test_utf8source.py — chain
+### test_utf8source.py chain
 
-Suite already runs end-to-end. Two of three sub-tests fail in unrelated
-sub-systems:
+Suite runs end-to-end; 1/3 sub-tests green. The remaining two fail in
+unrelated sub-systems:
 
-1. `test_latin1` calls `compile(bytes_source, ...)`. gopy's
-   `compile()` rejects `bytes`. **Sub-system: builtin compile() must
-   accept `bytes | bytearray | str | AST`.** Task T2.
-2. `test_badsyntax` imports `test.tokenizedata.badsyntax_pep3120`.
-   Sub-system: vendor `Lib/test/tokenizedata/` fixtures referenced by
-   the panel tests. Task T3.
-3. `sys.exit` is missing on the unittest tear-down path. Sub-system:
-   `module/sys` must bind `exit`. Task T4.
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | T2 | builtin `compile()` | accept `bytes` / `bytearray` / `str` / AST instead of rejecting bytes | TODO | — |
+| 2 | T3 | test fixtures | vendor `Lib/test/tokenizedata/` fixtures the panel tests reference (e.g. `badsyntax_pep3120`) | TODO | — |
+| 3 | T4 | `module/sys` | bind `sys.exit` on the inittab sys module (Bind helpers run only under lifecycle today) | WIP | — |
 
-### test_source_encoding.py — chain
+### test_source_encoding.py chain
 
-1. `import inspect` — `Lib/inspect.py` (3409 lines) not yet vendored.
-   Vendor verbatim along with its deps already in `stdlib/`. Task T5.
-2. Retry; recurse.
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | T5 | stdlib vendor | vendor `Lib/inspect.py` (3409 lines) verbatim plus any new deps | TODO | — |
 
-### test_tabnanny.py — chain
+### test_tabnanny.py chain
 
-1. `unittest.mock` imports `asyncio`. asyncio is a large sub-system
-   (events loop, transports, protocols, futures, tasks, streams,
-   subprocess, queues, locks). **Sub-system: asyncio package, gated as
-   its own spec when reached.** Task T6.
-2. Retry; recurse.
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | T6 | asyncio | port the asyncio package (event loop, transports, protocols, futures, tasks, streams, subprocess, queues, locks) as its own spec | BLOCKED | — |
 
-The DFS executes T1 → T1.5 → T1.6 → T1.7 → T4 → T2 → T3 → T5 → T6 in
-roughly that order (smallest fix first, escalating into larger
-sub-system ports). Each task gets its own commit and an entry in
+DFS execution order, smallest fix first: T1 → T1.5 → T1.6 → T1.7 → T4
+→ T2 → T3 → T5 → T6. Each task gets its own commit and an entry in
 `stdtest/MANIFEST.txt` when the gate it unblocks lands green.
 
 ## Out of scope
