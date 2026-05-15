@@ -142,6 +142,46 @@ func TestSummaryAndRunAll(t *testing.T) {
 	}
 }
 
+// TestRunSmokeTest is the regrtest end-to-end smoke: build a real gopy
+// binary, drop a mixed-status manifest into a temp corpus, and verify
+// RunAll classifies every outcome the runner can produce (pass, fail,
+// skip, missing) in one sweep. Catches breakage in the manifest -> exec
+// -> Summary pipeline before any real corpus entry is bisected.
+func TestRunSmokeTest(t *testing.T) {
+	bin := buildGopy(t)
+	corpus := t.TempDir()
+	if err := os.WriteFile(filepath.Join(corpus, "test_ok.py"), []byte(`print("ok")`+"\n"), 0o644); err != nil {
+		t.Fatalf("write test_ok.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(corpus, "test_boom.py"), []byte(`raise SystemExit(7)`+"\n"), 0o644); err != nil {
+		t.Fatalf("write test_boom.py: %v", err)
+	}
+
+	m := &Manifest{Entries: []Entry{
+		{Name: "test_ok", Status: StatusReady},
+		{Name: "test_boom", Status: StatusReady},
+		{Name: "test_absent", Status: StatusReady},
+		{Name: "test_skip", Status: StatusDeferred},
+	}}
+	r := &Runner{Binary: bin, Corpus: corpus, Manifest: m, Timeout: 30 * time.Second}
+	results := r.RunAll(context.Background())
+	if len(results) != 4 {
+		t.Fatalf("len(results) = %d, want 4", len(results))
+	}
+	got := Summary(results)
+	want := map[Outcome]int{
+		OutcomePass:    1,
+		OutcomeFail:    1,
+		OutcomeMissing: 1,
+		OutcomeSkip:    1,
+	}
+	for outcome, n := range want {
+		if got[outcome] != n {
+			t.Errorf("Summary[%s] = %d, want %d", outcome, got[outcome], n)
+		}
+	}
+}
+
 func TestCountFiles(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"test_a.py", "test_b.py", "helper.py", "README"} {
