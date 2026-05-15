@@ -5,6 +5,20 @@
 // vendored Lib/tokenize.py drives this iterator directly via
 // _generate_tokens_from_c_tokenizer.
 //
+// Function map (Python-tokenize.c -> gopy):
+//
+//	tokenizeriterobject               -> tokenizerIter
+//	get_tokenize_state                -> (obsolete; gopy uses package state)
+//	tokenizeriter_new_impl            -> tokenizerIterNew
+//	_tokenizer_error                  -> tokenizerError
+//	_get_current_line                 -> inlined in tokenizerIterNext (lineAt + lastLine cache)
+//	_get_col_offsets                  -> inlined in tokenizerIterNext (byteToCharCol)
+//	tokenizeriter_next                -> tokenizerIterNext
+//	tokenizeriter_dealloc             -> (Go GC, no-op)
+//	tokenizemodule_exec               -> buildModule
+//	tokenizemodule_traverse/clear/free-> (Go GC, no-op)
+//	PyInit__tokenize                  -> init() AppendInittab
+//
 // CPython: Python/Python-tokenize.c
 
 package _tokenize
