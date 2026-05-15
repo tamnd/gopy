@@ -147,7 +147,7 @@ unrelated sub-systems:
 |---|------|------------|---------|--------|--------|
 | 1 | T2 | builtin `compile()` | accept `bytes` / `bytearray` / `str` / AST instead of rejecting bytes | TODO | — |
 | 2 | T3 | test fixtures | vendor `Lib/test/tokenizedata/` fixtures the panel tests reference (e.g. `badsyntax_pep3120`) | TODO | — |
-| 3 | T4 | `module/sys` | bind `sys.exit` on the inittab sys module (Bind helpers run only under lifecycle today) | WIP | — |
+| 3 | T4 | `module/sys` | bind `sys.exit` + `setrecursionlimit` + `getrecursionlimit` + `getrefcount` on the inittab sys module via `CurrentThreadHook` | DONE | 7e5bc6d |
 
 ### test_source_encoding.py chain
 
