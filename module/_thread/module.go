@@ -42,6 +42,12 @@ func buildModule() (*objects.Module, error) {
 		{"allocate_lock", threadAllocateLock},
 		{"start_new_thread", threadStartNewThread},
 		{"start_new", threadStartNewThread},
+		{"start_joinable_thread", threadStartJoinableThread},
+		{"_make_thread_handle", threadMakeThreadHandle},
+		{"_get_main_thread_ident", threadGetMainThreadIdent},
+		{"daemon_threads_allowed", threadDaemonThreadsAllowed},
+		{"_shutdown", threadShutdown},
+		{"_is_main_interpreter", threadIsMainInterpreter},
 		{"stack_size", threadStackSize},
 		{"_count", threadCount},
 	}
@@ -72,6 +78,18 @@ func buildModule() (*objects.Module, error) {
 	//
 	// CPython: Modules/_threadmodule.c:2691 _thread_module addtype RLock
 	if err := d.SetItem(objects.NewStr("RLock"), RLockType); err != nil {
+		return nil, err
+	}
+	// _ThreadHandle: 3.14 thread-lifecycle handle type.
+	//
+	// CPython: Modules/_threadmodule.c:2661 PyDict_SetItemString "_ThreadHandle"
+	if err := d.SetItem(objects.NewStr("_ThreadHandle"), ThreadHandleType); err != nil {
+		return nil, err
+	}
+	// LockType: attribute alias exposed for threading.py module load.
+	//
+	// CPython: Modules/_threadmodule.c PyModule_AddType(module, lock_type)
+	if err := d.SetItem(objects.NewStr("LockType"), LockType); err != nil {
 		return nil, err
 	}
 	// _local is the thread-local storage type; provide a minimal stub.
