@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -487,68 +486,6 @@ func bufTruncate(buf objects.Object, pos int64, hasPos bool) (int64, error) {
 	return 0, nil
 }
 
-// --- Encoding / decoding helpers -------------------------------------------
-
-// decodeBytes decodes raw bytes using the given encoding.
-//
-// CPython: Modules/_io/textio.c:1988 textiowrapper_read (IncrementalDecoder.decode)
-func decodeBytes(data []byte, encoding string) (string, error) {
-	switch strings.ToLower(encoding) {
-	case "utf-8", "utf8", "utf_8":
-		if !utf8.Valid(data) {
-			return "", fmt.Errorf("UnicodeDecodeError: invalid utf-8 sequence")
-		}
-		return string(data), nil
-	case "ascii", "us-ascii":
-		for _, b := range data {
-			if b > 127 {
-				return "", fmt.Errorf("UnicodeDecodeError: ordinal not in range(128)")
-			}
-		}
-		return string(data), nil
-	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
-		runes := make([]rune, len(data))
-		for i, b := range data {
-			runes[i] = rune(b)
-		}
-		return string(runes), nil
-	}
-	if s, ok, err := codecDecode(data, encoding); ok {
-		return s, err
-	}
-	return "", fmt.Errorf("LookupError: unknown encoding: %s", encoding)
-}
-
-// encodeString encodes a string using the given encoding.
-//
-// CPython: Modules/_io/textio.c:1662 textiowrapper_write (IncrementalEncoder.encode)
-func encodeString(s, encoding string) ([]byte, error) {
-	switch strings.ToLower(encoding) {
-	case "utf-8", "utf8", "utf_8":
-		return []byte(s), nil
-	case "ascii", "us-ascii":
-		for _, r := range s {
-			if r > 127 {
-				return nil, fmt.Errorf("UnicodeEncodeError: character %q is not in ASCII range", r)
-			}
-		}
-		return []byte(s), nil
-	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
-		b := make([]byte, len([]rune(s)))
-		for i, r := range []rune(s) {
-			if r > 255 {
-				return nil, fmt.Errorf("UnicodeEncodeError: character %q is not in Latin-1 range", r)
-			}
-			b[i] = byte(r)
-		}
-		return b, nil
-	}
-	if b, ok, err := codecEncode(s, encoding); ok {
-		return b, err
-	}
-	return nil, fmt.Errorf("LookupError: unknown encoding: %s", encoding)
-}
-
 // --- Public methods ---------------------------------------------------------
 
 // ensureNLDecoder lazily builds the IncrementalNewlineDecoder used by
@@ -683,6 +620,70 @@ func (t *TextIOWrapper) Close() error {
 	}
 	t.closed = true
 	return bufClose(t.buf)
+}
+
+// reconfigure changes encoding, errors, newline, line_buffering, and
+// write_through on a live wrapper. CPython rejects any change to the
+// codec / newline arguments once the stream has been read from or
+// written to (anything in pending_bytes or the decoded buffer); we
+// match that check, then rebuild the codecs.
+//
+// CPython: Modules/_io/textio.c:1370 _io_TextIOWrapper_reconfigure_impl
+func (t *TextIOWrapper) reconfigure(kwargs map[string]objects.Object) error {
+	if err := t.checkUsable(); err != nil {
+		return err
+	}
+	encObj, hasEnc := kwargs["encoding"]
+	errsObj, hasErrs := kwargs["errors"]
+	nlObj, hasNL := kwargs["newline"]
+	codecChange := (hasEnc && !objects.IsNone(encObj)) ||
+		(hasErrs && !objects.IsNone(errsObj)) ||
+		hasNL
+	if codecChange {
+		// CPython raises "It is not possible to set the encoding or
+		// newline of stream after the first read" when read-ahead or
+		// write-ahead is buffered.
+		if t.decodedBuf != "" || (t.nlDecoder != nil && t.nlDecoder.pendingcr) || t.pendingCount > 0 {
+			return fmt.Errorf("ValueError: It is not possible to set the encoding or newline of stream after the first read")
+		}
+	}
+	if hasEnc && !objects.IsNone(encObj) {
+		s, ok := encObj.(*objects.Unicode)
+		if !ok {
+			return fmt.Errorf("TypeError: invalid encoding: %s", encObj.Type().Name)
+		}
+		t.encoding = s.Value()
+	}
+	if hasErrs && !objects.IsNone(errsObj) {
+		s, ok := errsObj.(*objects.Unicode); if !ok {
+			return fmt.Errorf("TypeError: invalid errors: %s", errsObj.Type().Name)
+		}
+		t.errors = s.Value()
+	}
+	if hasNL {
+		t.readuniversal = false
+		t.readtranslate = false
+		t.readnl = ""
+		t.hasReadnl = false
+		t.writenl = ""
+		if err := t.setNewline(nlObj); err != nil {
+			return err
+		}
+	}
+	if lb, ok := kwargs["line_buffering"]; ok && !objects.IsNone(lb) {
+		t.linebuffering = objects.IsTrue(lb)
+	}
+	if wt, ok := kwargs["write_through"]; ok && !objects.IsNone(wt) {
+		t.writethrough = objects.IsTrue(wt)
+	}
+	if codecChange {
+		t.decoder = nil
+		t.encoder = nil
+		t.nlDecoder = nil
+		t.snapshotValid = false
+		t.b2cratio = 0
+	}
+	return nil
 }
 
 // resetDecodeState wipes all derived decode state so the post-seek (or
@@ -1174,24 +1175,8 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 	// CPython: Modules/_io/textio.c:1370 textiowrapper_reconfigure
 	case "reconfigure":
 		return objects.NewBuiltinFunction("reconfigure", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-			if err := t.checkUsable(); err != nil {
+			if err := t.reconfigure(kwargs); err != nil {
 				return nil, err
-			}
-			if enc, ok := kwargs["encoding"]; ok && !objects.IsNone(enc) {
-				if s, ok := enc.(*objects.Unicode); ok {
-					t.encoding = s.Value()
-				}
-			}
-			if errs, ok := kwargs["errors"]; ok && !objects.IsNone(errs) {
-				if s, ok := errs.(*objects.Unicode); ok {
-					t.errors = s.Value()
-				}
-			}
-			if lb, ok := kwargs["line_buffering"]; ok && !objects.IsNone(lb) {
-				t.linebuffering = objects.IsTrue(lb)
-			}
-			if wt, ok := kwargs["write_through"]; ok && !objects.IsNone(wt) {
-				t.writethrough = objects.IsTrue(wt)
 			}
 			return t, nil
 		})

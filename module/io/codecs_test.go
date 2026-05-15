@@ -5,6 +5,26 @@ import (
 	"testing"
 )
 
+// codecDecodeOnce / codecEncodeOnce wrap the incremental codec layer
+// with a single-call API so the table-driven round-trip tests below
+// stay short. Mirrors the legacy decodeBytes / encodeString shape
+// these tests previously called.
+func codecDecodeOnce(data []byte, encoding string) (string, error) {
+	d, err := getIncrementalDecoder(encoding, "strict")
+	if err != nil {
+		return "", err
+	}
+	return d.Decode(data, true)
+}
+
+func codecEncodeOnce(s, encoding string) ([]byte, error) {
+	e, err := getIncrementalEncoder(encoding, "strict")
+	if err != nil {
+		return nil, err
+	}
+	return e.Encode(s, true)
+}
+
 // CPython reference vectors generated with:
 //   python3 -c "import sys; sys.stdout.buffer.write('Hello, World! αβγ'.encode('utf-16'))"
 //
@@ -30,11 +50,11 @@ func TestCodecsRoundtrip(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.encoding, func(t *testing.T) {
-			b, err := encodeString(c.input, c.encoding)
+			b, err := codecEncodeOnce(c.input, c.encoding)
 			if err != nil {
 				t.Fatalf("encode: %v", err)
 			}
-			got, err := decodeBytes(b, c.encoding)
+			got, err := codecDecodeOnce(b, c.encoding)
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -50,7 +70,7 @@ func TestUTF16BOM(t *testing.T) {
 	le := []byte{0xFF, 0xFE, 'A', 0, 'B', 0}
 	be := []byte{0xFE, 0xFF, 0, 'A', 0, 'B'}
 	for _, data := range [][]byte{le, be} {
-		s, err := decodeBytes(data, "utf-16")
+		s, err := codecDecodeOnce(data, "utf-16")
 		if err != nil {
 			t.Fatalf("decode: %v", err)
 		}
@@ -65,7 +85,7 @@ func TestUTF32BOM(t *testing.T) {
 	le := []byte{0xFF, 0xFE, 0, 0, 'A', 0, 0, 0}
 	be := []byte{0, 0, 0xFE, 0xFF, 0, 0, 0, 'A'}
 	for _, data := range [][]byte{le, be} {
-		s, err := decodeBytes(data, "utf-32")
+		s, err := codecDecodeOnce(data, "utf-32")
 		if err != nil {
 			t.Fatalf("decode: %v", err)
 		}
@@ -77,7 +97,7 @@ func TestUTF32BOM(t *testing.T) {
 
 // TestCP1252EuroSign pins the cp1252 byte for U+20AC.
 func TestCP1252EuroSign(t *testing.T) {
-	b, err := encodeString("€", "cp1252")
+	b, err := codecEncodeOnce("€", "cp1252")
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -89,7 +109,7 @@ func TestCP1252EuroSign(t *testing.T) {
 // TestUnknownCodecReturnsLookup verifies unknown encodings surface a
 // LookupError-shaped message rather than NotImplementedError.
 func TestUnknownCodecReturnsLookup(t *testing.T) {
-	_, err := decodeBytes([]byte("hello"), "nope-fake-encoding")
+	_, err := codecDecodeOnce([]byte("hello"), "nope-fake-encoding")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -101,7 +121,7 @@ func TestUnknownCodecReturnsLookup(t *testing.T) {
 // TestUTF8Decode keeps the inline utf-8 path working after the wiring
 // change.
 func TestUTF8Decode(t *testing.T) {
-	s, err := decodeBytes([]byte("héllo"), "utf-8")
+	s, err := codecDecodeOnce([]byte("héllo"), "utf-8")
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}

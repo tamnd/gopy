@@ -223,8 +223,8 @@ After all four phases land:
 
 ## Checklist
 
-- [ ] Phase 1: IncrementalDecoder / IncrementalEncoder layer in `module/io/textio_codec.go`; utf-16 BOM split across chunks works
-- [ ] Phase 2: `_textiowrapper_read_chunk` ported; `read` / `readline` go through it; `decodeBytes` deleted
-- [ ] Phase 3: cookie pack/unpack in `module/io/textio_cookie.go`; `Tell` builds a real cookie; `Seek(cookie, 0)` round-trips
-- [ ] Phase 4: `reconfigure` rebuilds decoder / encoder; rejects mid-stream encoding swap
-- [ ] Final gate: `decodeBytes` / `encodeString` deleted, utf-16 tell/seek round-trip green, all tests pass
+- [x] Phase 1: IncrementalDecoder / IncrementalEncoder layer in `module/io/textio_codec.go`; utf-16 BOM split across chunks works
+- [x] Phase 2: `_textiowrapper_read_chunk` ported; `read` / `readline` go through it; `decodeBytes` deleted
+- [x] Phase 3: cookie pack/unpack in `module/io/textio_cookie.go`; `Tell` builds a real cookie; `Seek(cookie, 0)` round-trips
+- [x] Phase 4: `reconfigure` rebuilds decoder / encoder; rejects mid-stream encoding swap
+- [x] Final gate: `decodeBytes` / `encodeString` deleted, utf-16 tell/seek round-trip green, all tests pass
