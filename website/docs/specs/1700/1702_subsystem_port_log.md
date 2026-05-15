@@ -107,25 +107,25 @@ introspection, `linecache` integration, the `_colorize` hook).
 
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Lib/traceback.py` | ~1,300 | `stdlib/traceback.py` | partial |
+| A | `Lib/traceback.py` | ~1,300 | `stdlib/traceback.py` | done |
 
 **Functions to port (A: `traceback.py`).**
 
 | Python entity | Source span | Status |
 |---------------|-------------|--------|
-| Module-level helpers `print_tb`, `format_tb`, `print_exception`, `format_exception`, `print_exc`, `format_exc`, `print_last`, `print_stack`, `format_stack`, `extract_tb`, `extract_stack`, `clear_frames`, `walk_tb`, `walk_stack` | `Lib/traceback.py:30-260` | partial |
-| `FrameSummary` (init, `__repr__`, `__eq__`, `line`) | `Lib/traceback.py:270-360` | partial |
-| `StackSummary` (init, `extract`, `from_list`, `format`, `format_frame_summary`) | `Lib/traceback.py:370-540` | partial |
-| `TracebackException` (init, `from_exception`, `format`, `format_exception_only`, `_format_final_exc_line`, `__eq__`, `__str__`, exception chain `__cause__` / `__context__` formatting) | `Lib/traceback.py:550-1050` | partial |
-| `_Sentinel`, `_safe_string`, `_some_str`, `_format_traceback_exception_list`, `_walk_tb_with_full_positions`, `_extract_caret_anchors_from_line_segment`, the syntax-error caret renderer | `Lib/traceback.py:1060-1300` | partial |
+| Module-level helpers `print_tb`, `format_tb`, `print_exception`, `format_exception`, `print_exc`, `format_exc`, `print_last`, `print_stack`, `format_stack`, `extract_tb`, `extract_stack`, `clear_frames`, `walk_tb`, `walk_stack` | `Lib/traceback.py:30-260` | done |
+| `FrameSummary` (init, `__repr__`, `__eq__`, `line`) | `Lib/traceback.py:270-360` | done |
+| `StackSummary` (init, `extract`, `from_list`, `format`, `format_frame_summary`) | `Lib/traceback.py:370-540` | done |
+| `TracebackException` (init, `from_exception`, `format`, `format_exception_only`, `_format_final_exc_line`, `__eq__`, `__str__`, exception chain `__cause__` / `__context__` formatting) | `Lib/traceback.py:550-1050` | done |
+| `_Sentinel`, `_safe_string`, `_some_str`, `_format_traceback_exception_list`, `_walk_tb_with_full_positions`, `_extract_caret_anchors_from_line_segment`, the syntax-error caret renderer | `Lib/traceback.py:1060-1300` | done |
 
-All rows are partial rather than pending: `stdlib/traceback.py` is vendored byte-equal and the Python code runs. `format_exc()` returns `"ValueError: sentinel\n"` correctly. The stack-frame rows (`FrameSummary`, `StackSummary.extract`, `_walk_tb_with_full_positions`) execute but produce empty output because the VM does not yet record `exc.__traceback__` (the `tb_frame` / `tb_lineno` chain). Every function runs without raising; the output is just missing the "Traceback (most recent call last)" preamble and the file/line lines.
+`stdlib/traceback.py` is vendored byte-equal and walks the exception chain end-to-end. Multi-frame tracebacks render with the right `co_qualname` per frame, `__cause__` / `__context__` get the correct separators, and bare `raise` in an except clause re-raises the handled exception with its chain intact.
 
-**Runtime support landed.** `sys.exc_info()` (3-tuple) and `sys.exception()` (Python 3.11+ single-value form) both present and wired to the per-thread handled-exception slot. `linecache` imports and `getline` resolves. `frame.f_code.co_filename` and `f_lineno` are exposed via `objects/frame.go`.
+**Runtime support landed.** `sys.exc_info()` (3-tuple) and `sys.exception()` (Python 3.11+ single-value form) both wired to the per-thread handled-exception slot. `linecache` imports and `getline` resolves. `frame.f_code.co_filename`, `co_qualname`, `f_lineno` are exposed via `objects/frame.go`. PR #52 populated `exc.__traceback__` on every unwind; PR #54 closed the remaining gaps: codegen emits `<module>` for module-scope `co_name`/`co_qualname`, `print(file=...)` accepts a Python file object, bare `raise` reads the handled-exception slot, and `Raise()` chains `__context__` off the handled exception when no live exception is set.
 
-**Blocker.** VM does not set `exc.__traceback__` when an exception is raised. `TracebackException.__init__` calls `walk_tb(tb)` which calls `tb.tb_frame` and `tb.tb_lineno`; with a nil tb the walk yields nothing. Fixing this requires the VM to construct a `TracebackObject` on every RAISE_VARARGS and chain it through try/except unwind. This is the next open item under #496.
+**Gates.** `TestTracebackFormatExc`, `TestTracebackFormatExceptionMultiFrame`, `TestBareRaiseReraisesHandled`, `TestTracebackFormatExceptionCauseChain`, `TestTracebackFormatExceptionContextChain` all green.
 
-**Gate (current).** `TestTracebackFormatExc` passes: `format_exc()` returns a string containing both "ValueError" and "sentinel". Full multi-line stack trace gate is blocked on __traceback__ population.
+**Known limitation (not blocking 1702).** `linecache.getline` calls `tokenize.open`, which assigns `text.mode = 'r'` on the returned `_io.TextIOWrapper`. The wrapper does not yet have an instance `__dict__` / settable attribute slot, so source-context lookup for tracebacks pointing at on-disk files raises `TypeError: '_io.TextIOWrapper' object has only read-only attributes`. Tracebacks for `<...>`-style filenames work (linecache short-circuits those via `_source_unavailable`). Tracked under the io subsystem follow-ups.
 
 ### io / _io (#514)
 
@@ -580,7 +580,7 @@ Status legend:
 | operator | #532 | done | `Lib/operator.py` + `Modules/_operator.c` | `stdlib/operator.py` + `module/_operator/` | 2 | `_operator` fully ported (1095 lines): binary/unary arithmetic, rich comparisons, itemgetter, attrgetter, methodcaller, length_hint. `stdlib/operator.py` vendored. |
 | warnings | #513 | done | `Lib/warnings.py` + `Python/_warnings.c` | `stdlib/warnings.py` + `module/_warnings/` | 2 | `_warnings` fully ported (1089 lines): filter registry, PyErr_WarnEx/Explicit/Format family, lock plumbing. `stdlib/warnings.py` vendored. |
 | pprint | #511 | done | `Lib/pprint.py` | `stdlib/pprint.py` (via PathFinder) | 2 | Inittab stub removed 2026-05-15: `module/pprint/` deleted, PathFinder serves the byte-equal 675-line vendor. Full `PrettyPrinter` class now resolves end-to-end. |
-| traceback | #496 | partial | `Lib/traceback.py` | `stdlib/traceback.py` | 3 | Vendored byte-equal; `format_exc()` works end-to-end (TestTracebackFormatExc green). Exception message + class printed. Full stack frames missing: `exc.TB` (__traceback__ chain) not yet populated by the VM, so `StackSummary.extract` sees an empty tb and emits only the "ValueError: sentinel" line. |
+| traceback | #496 | done | `Lib/traceback.py` | `stdlib/traceback.py` | 3 | Vendored byte-equal; multi-frame traceback, `__cause__` / `__context__` chains, bare `raise` re-raise all green. Five gate tests in `stdlibinit/`. Linecache source-context lookup for on-disk files is gated on TextIOWrapper instance attributes (separate io follow-up); `<...>`-style filenames work. |
 | dataclasses | #522 | done | `Lib/dataclasses.py` | `module/dataclasses/` (Go port, option B) | 3 | Go port at `module/dataclasses/module.go` (1,626 lines). `make_dataclass` shipped in PR #47 (`module.go:1142`). `order=True`, `slots=True`, `__hash__` generation, recursive `asdict`/`astuple`, `InitVar` all present. Vendor `Lib/dataclasses.py` still optional. |
 | GenericAlias + UnionType | #523 | done | `Objects/genericaliasobject.c` + `Objects/unionobject.c` | `objects/generic_alias.go` + `objects/union_type.go` + `objects/class_getitem.go` | 3 | Clears `unittest.case` `types.GenericAlias` gate. `TypeVar` / `ParamSpec` substitution deferred (needs `typing` C accelerator). |
 | time | #500 | done | `Modules/timemodule.c` | `module/_time/` | I | Dead `module/time/` stub deleted 2026-05-15. The real port lives in `module/_time/module.go` (1074 lines, registered as `time` via inittab): `gmtime`, `localtime`, `asctime`, `ctime`, `mktime`, `strftime`, `strptime`, `get_clock_info`, `tzset`, `clock_gettime`/`settime`/`getres`, `process_time`, `thread_time`, `_ns` variants, and the `struct_time` named tuple all present. |
@@ -633,10 +633,11 @@ view.
 - [x] pprint (#511) — inittab stub deleted 2026-05-15; PathFinder serves byte-equal `stdlib/pprint.py`
 - [x] time (#500) — dead `module/time/` stub deleted 2026-05-15; real port is `module/_time/` (1074 lines)
 
-**Partial (vendor in place, behaviour still gated):**
-- [ ] traceback (#496) — `stdlib/traceback.py` vendored byte-equal; blocked on VM populating `exc.__traceback__`. Module-level code is 100%; the blocker is the VM, not the port
+- [x] traceback (#496) — `stdlib/traceback.py` vendored byte-equal; multi-frame walk, chain rendering, bare-raise re-raise all green after PR #54. Linecache on-disk source-context lookup is the only remaining gap and tracks under the io subsystem
 
-**Pending:** none. All rows in the status table now sit in done or partial.
+**Partial (vendor in place, behaviour still gated):** none.
+
+**Pending:** none. All rows in the status table now sit in done.
 
 ## Detail format
 

@@ -188,9 +188,18 @@ func (c *Compiler) Codegen(sc *symtable.Entry, mod ast.Mod) (*Unit, error) {
 //
 // CPython: Python/codegen.c:L648 codegen_enter_scope
 func (c *Compiler) enterScope(sc *symtable.Entry) {
+	name := sc.Name
+	// Symtable uses "top" as the internal name for the module-level
+	// entry; CPython's codegen replaces it with "<module>" before
+	// stamping it into the toplevel Code object.
+	//
+	// CPython: Python/codegen.c:917 _PyCodegen_EnterAnonymousScope
+	if sc.Type == symtable.ModuleBlock {
+		name = "<module>"
+	}
 	u := &Unit{
-		Name:        sc.Name,
-		Qualname:    buildQualname(c.units, sc),
+		Name:        name,
+		Qualname:    buildQualname(c.units, name),
 		ScopeType:   sc.Type,
 		FirstLineno: sc.Loc.Lineno,
 		Seq:         &Sequence{},
@@ -277,18 +286,18 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 // compiler_set_qualname.
 //
 // CPython: Python/compile.c:L644 compiler_set_qualname
-func buildQualname(stack []*Unit, sc *symtable.Entry) string {
+func buildQualname(stack []*Unit, name string) string {
 	if len(stack) == 0 {
-		return sc.Name
+		return name
 	}
 	parent := stack[len(stack)-1]
 	if parent.ScopeType == symtable.ModuleBlock {
-		return sc.Name
+		return name
 	}
 	if parent.ScopeType == symtable.ClassBlock {
-		return parent.Qualname + "." + sc.Name
+		return parent.Qualname + "." + name
 	}
-	return parent.Qualname + ".<locals>." + sc.Name
+	return parent.Qualname + ".<locals>." + name
 }
 
 // leaveScope pops the top unit. The unit is still reachable through

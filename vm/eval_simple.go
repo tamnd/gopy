@@ -499,7 +499,20 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// CPython: Python/bytecodes.c:1648 RAISE_VARARGS
 		switch oparg {
 		case 0:
-			return 0, nil, nil, false, true, errors.New("RuntimeError: No active exception to re-raise")
+			// Bare `raise` re-raises the currently-handled exception
+			// (PUSH_EXC_INFO stashed it on entry to the except block).
+			// CPython: Python/bytecodes.c:1648 RAISE_VARARGS oparg==0
+			// reads tstate->exc_info->exc_value via _PyErr_GetRaisedException.
+			handled := e.ts.HandledException()
+			if handled == nil {
+				return 0, nil, nil, false, true, errors.New("RuntimeError: No active exception to re-raise")
+			}
+			exc, ok := handled.(*pyerrors.Exception)
+			if !ok {
+				return 0, nil, nil, false, true, errors.New("RuntimeError: No active exception to re-raise")
+			}
+			pyerrors.Raise(e.ts, exc)
+			return 0, nil, nil, false, true, excSentinel(exc)
 		case 1:
 			val := e.popObject()
 			exc := raiseValue(e.ts, val, nil)

@@ -120,7 +120,15 @@ func Raise(ts *state.Thread, exc *Exception) {
 		ts.SetException(nil)
 		return
 	}
+	// CPython _PyErr_SetObject reads _PyErr_GetTopmostException, which
+	// walks tstate->exc_info: first the live exception, then the
+	// currently-handled one if no exception is set. That second branch
+	// is the one that turns `raise NewError` inside an except clause
+	// into NewError.__context__ = caught_exception.
 	prev := Occurred(ts)
+	if prev == nil {
+		prev = Handled(ts)
+	}
 	if prev != nil && prev != exc && exc.Context == nil {
 		exc.Context = prev
 	}
