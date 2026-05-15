@@ -17,7 +17,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | CPython source | C LOC | gopy destination | Go LOC | Status | Commit |
 |---|---:|---|---:|---|---|
 | `Parser/lexer/buffer.c` | 76 | `parser/lexer/buffer.go` | 56 | DONE | 5374e84 |
-| `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` | 633 | TODO | — |
+| `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` (+ `fstring.go`) | 633 + 240 | WIP | function-map landed, gaps tracked under #612 (verify_*), #613 (check_coding_spec), #617 (maybe_raise_syntax_error_for_string_prefixes), #618 (update_ftstring_expr) |
 | `Parser/lexer/state.c` | 151 | `parser/lexer/state.go` | 402 | DONE | d157189 |
 | `Parser/tokenizer/helpers.c` | 581 | `parser/lexer/helpers.go` (+ encoding subset in `parser/lexer/source.go`) | 176 + 238 | DONE | de537e1 |
 | `Parser/tokenizer/file_tokenizer.c` | 493 | `parser/lexer/driver_file.go` | 120 | DONE | 268c8f8 |

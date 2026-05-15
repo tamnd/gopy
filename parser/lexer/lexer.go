@@ -5,6 +5,23 @@
 // Parser/lexer/lexer.c:501; the helpers nextC / backup / lineCont track
 // position and refill, and the ASCII char-class predicates mirror the
 // is_potential_identifier_* macros at the top of lexer.c.
+//
+// Function map (lexer.c -> gopy):
+//
+//	TOK_GET_MODE / TOK_NEXT_MODE                  -> State.curMode / State.nextMode (state.go)
+//	contains_null_bytes                           -> inline byte check at nextC refill
+//	tok_nextc                                     -> State.nextC
+//	tok_backup                                    -> State.backup
+//	set_ftstring_expr                             -> setFTStringExpr (fstring.go) [task #618]
+//	lookahead                                     -> inline at call sites in tokGetNormalMode
+//	verify_end_of_number                          -> [task #612, pending]
+//	verify_identifier                             -> [task #612, pending]
+//	tok_decimal_tail                              -> inlined in scanNumber
+//	tok_continuation_line                         -> inlined in nextC line-continuation branch
+//	maybe_raise_syntax_error_for_string_prefixes  -> [task #617, pending]
+//	tok_get_normal_mode                           -> State.tokGetNormalMode
+//	tok_get_fstring_mode                          -> State.tokGetFStringMode (fstring.go)
+//	tok_get                                       -> State.Get (state.go)
 
 package lexer
 
