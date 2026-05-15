@@ -148,7 +148,7 @@ unrelated sub-systems:
 | 1 | T2 | builtin `compile()` + `str.encode` | accept `bytes` / `bytearray` (route through `lexer.FromBytes`); `str.encode` honors its encoding arg via `codecs.Encode` | DONE | 9d03f23 |
 | 2 | T3 | test fixtures | vendor `Lib/test/tokenizedata/` (bad_coding*, badsyntax_*, coding20731, tokenize_tests-*) under `stdlib/test/tokenizedata/` | DONE | 0c3da66 |
 | 3 | T4 | `module/sys` | bind `sys.exit` + `setrecursionlimit` + `getrecursionlimit` + `getrefcount` on the inittab sys module via `CurrentThreadHook` | DONE | 7e5bc6d |
-| 4 | T3.1 | lexer non-utf-8 check | `lexer.ValidateUTF8` flags the first non-utf-8 byte and the parser surfaces a SyntaxError so `badsyntax_pep3120` raises at import. Also added a `Sequence.Contains` slot for str so the test's `'utf-8' in msg.lower()` substring check works. | DONE | (pending commit) |
+| 4 | T3.1 | lexer non-utf-8 check | `lexer.ValidateUTF8` flags the first non-utf-8 byte and the parser surfaces a SyntaxError so `badsyntax_pep3120` raises at import. Also added a `Sequence.Contains` slot for str so the test's `'utf-8' in msg.lower()` substring check works. | DONE | 6db8913 |
 
 ### test_source_encoding.py chain
 
