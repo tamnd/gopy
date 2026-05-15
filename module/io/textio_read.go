@@ -39,15 +39,6 @@ func (t *TextIOWrapper) ensureCodecs() error {
 	return nil
 }
 
-// resetCodecs drops the lazy codecs so the next read or write rebuilds
-// them. Used by seek/reconfigure when stream identity changes.
-//
-// CPython: Modules/_io/textio.c:1483 textiowrapper_seek_impl (codec rebuild)
-func (t *TextIOWrapper) resetCodecs() {
-	t.decoder = nil
-	t.encoder = nil
-}
-
 // readChunk drives one read1/decode cycle: pull a chunk from the
 // underlying buffer, push it through the incremental decoder, then run
 // the result through the newline decoder. Returns true while data may

@@ -68,40 +68,6 @@ func normalizeCodec(name string) string {
 
 // --- UTF-16 ----------------------------------------------------------------
 
-// decodeUTF16 decodes data as UTF-16. variant is "le", "be", or ""
-// (auto, which sniffs the BOM and falls back to little-endian to match
-// CPython on x86).
-//
-// CPython: Modules/_codecs/utf_16.c PyUnicode_DecodeUTF16Stateful
-func decodeUTF16(data []byte, variant string) (string, error) {
-	var bo binary.ByteOrder = binary.LittleEndian
-	switch variant {
-	case "le":
-		bo = binary.LittleEndian
-	case "be":
-		bo = binary.BigEndian
-	case "":
-		if len(data) >= 2 {
-			switch {
-			case data[0] == 0xFF && data[1] == 0xFE:
-				bo = binary.LittleEndian
-				data = data[2:]
-			case data[0] == 0xFE && data[1] == 0xFF:
-				bo = binary.BigEndian
-				data = data[2:]
-			}
-		}
-	}
-	if len(data)%2 != 0 {
-		return "", fmt.Errorf("UnicodeDecodeError: utf-16 truncated (odd byte count)")
-	}
-	units := make([]uint16, len(data)/2)
-	for i := range units {
-		units[i] = bo.Uint16(data[2*i:])
-	}
-	return string(utf16.Decode(units)), nil
-}
-
 // encodeUTF16 encodes s as UTF-16. variant "le" / "be" emit raw code
 // units without a BOM; variant "" emits a BOM followed by
 // little-endian, matching CPython on x86.
@@ -126,42 +92,6 @@ func encodeUTF16(s, variant string) []byte {
 }
 
 // --- UTF-32 ----------------------------------------------------------------
-
-// decodeUTF32 decodes data as UTF-32.
-//
-// CPython: Modules/_codecs/utf_32.c PyUnicode_DecodeUTF32Stateful
-func decodeUTF32(data []byte, variant string) (string, error) {
-	var bo binary.ByteOrder = binary.LittleEndian
-	switch variant {
-	case "le":
-		bo = binary.LittleEndian
-	case "be":
-		bo = binary.BigEndian
-	case "":
-		if len(data) >= 4 {
-			switch {
-			case data[0] == 0xFF && data[1] == 0xFE && data[2] == 0 && data[3] == 0:
-				bo = binary.LittleEndian
-				data = data[4:]
-			case data[0] == 0 && data[1] == 0 && data[2] == 0xFE && data[3] == 0xFF:
-				bo = binary.BigEndian
-				data = data[4:]
-			}
-		}
-	}
-	if len(data)%4 != 0 {
-		return "", fmt.Errorf("UnicodeDecodeError: utf-32 truncated (length %% 4 != 0)")
-	}
-	runes := make([]rune, 0, len(data)/4)
-	for i := 0; i < len(data); i += 4 {
-		cp := bo.Uint32(data[i:])
-		if cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) {
-			return "", fmt.Errorf("UnicodeDecodeError: invalid utf-32 codepoint U+%X", cp)
-		}
-		runes = append(runes, rune(cp))
-	}
-	return string(runes), nil
-}
 
 // encodeUTF32 encodes s as UTF-32.
 //
@@ -341,4 +271,3 @@ var macRomanTable = newCodepage("mac-roman", [128]rune{
 	0xF8FF, 0x00D2, 0x00DA, 0x00DB, 0x00D9, 0x0131, 0x02C6, 0x02DC,
 	0x00AF, 0x02D8, 0x02D9, 0x02DA, 0x00B8, 0x02DD, 0x02DB, 0x02C7,
 })
-

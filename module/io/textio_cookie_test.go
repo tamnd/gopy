@@ -39,7 +39,8 @@ func TestParseCookieNegative(t *testing.T) {
 func TestTextIOTellSeekRoundTripUTF16(t *testing.T) {
 	body := "abcdef"
 	units := utf16.Encode([]rune(body))
-	raw := []byte{0xFF, 0xFE}
+	raw := make([]byte, 0, 2+2*len(units))
+	raw = append(raw, 0xFF, 0xFE)
 	for _, u := range units {
 		raw = append(raw, byte(u), byte(u>>8))
 	}

@@ -186,7 +186,7 @@ func (asciiDecoder) Decode(input []byte, _ bool) (string, error) {
 	}
 	return string(input), nil
 }
-func (asciiDecoder) GetState() ([]byte, int64)   { return nil, 0 }
+func (asciiDecoder) GetState() ([]byte, int64)    { return nil, 0 }
 func (asciiDecoder) SetState([]byte, int64) error { return nil }
 func (asciiDecoder) Reset()                       {}
 
@@ -208,7 +208,7 @@ func (latin1Decoder) Decode(input []byte, _ bool) (string, error) {
 	}
 	return string(runes), nil
 }
-func (latin1Decoder) GetState() ([]byte, int64)   { return nil, 0 }
+func (latin1Decoder) GetState() ([]byte, int64)    { return nil, 0 }
 func (latin1Decoder) SetState([]byte, int64) error { return nil }
 func (latin1Decoder) Reset()                       {}
 
@@ -300,11 +300,13 @@ func (d *utf16Decoder) Decode(input []byte, final bool) (string, error) {
 func (d *utf16Decoder) GetState() ([]byte, int64) {
 	return append([]byte{}, d.buf...), d.flags
 }
+
 func (d *utf16Decoder) SetState(buffer []byte, flags int64) error {
 	d.buf = append(d.buf[:0], buffer...)
 	d.flags = flags
 	return nil
 }
+
 func (d *utf16Decoder) Reset() {
 	d.buf = d.buf[:0]
 	d.flags = 0
@@ -380,11 +382,13 @@ func (d *utf32Decoder) Decode(input []byte, final bool) (string, error) {
 func (d *utf32Decoder) GetState() ([]byte, int64) {
 	return append([]byte{}, d.buf...), d.flags
 }
+
 func (d *utf32Decoder) SetState(buffer []byte, flags int64) error {
 	d.buf = append(d.buf[:0], buffer...)
 	d.flags = flags
 	return nil
 }
+
 func (d *utf32Decoder) Reset() {
 	d.buf = d.buf[:0]
 	d.flags = 0
@@ -400,7 +404,7 @@ type charmapDecoder struct {
 func (d *charmapDecoder) Decode(input []byte, _ bool) (string, error) {
 	return charmapDecode(input, d.table, d.name)
 }
-func (d *charmapDecoder) GetState() ([]byte, int64)   { return nil, 0 }
+func (d *charmapDecoder) GetState() ([]byte, int64)    { return nil, 0 }
 func (d *charmapDecoder) SetState([]byte, int64) error { return nil }
 func (d *charmapDecoder) Reset()                       {}
 
@@ -411,9 +415,9 @@ type statelessEncoder struct {
 }
 
 func (e *statelessEncoder) Encode(input string, _ bool) ([]byte, error) { return e.enc(input) }
-func (e *statelessEncoder) GetState() int64                              { return 0 }
-func (e *statelessEncoder) SetState(int64) error                         { return nil }
-func (e *statelessEncoder) Reset()                                       {}
+func (e *statelessEncoder) GetState() int64                             { return 0 }
+func (e *statelessEncoder) SetState(int64) error                        { return nil }
+func (e *statelessEncoder) Reset()                                      {}
 
 // --- BOM-emitting encoder --------------------------------------------------
 

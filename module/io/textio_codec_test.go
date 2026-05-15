@@ -45,7 +45,8 @@ func TestUTF16AutoBOMSplit(t *testing.T) {
 	}
 	want := "héllo"
 	units := utf16.Encode([]rune(want))
-	full := []byte{0xFF, 0xFE}
+	full := make([]byte, 0, 2+2*len(units))
+	full = append(full, 0xFF, 0xFE)
 	for _, u := range units {
 		full = append(full, byte(u), byte(u>>8))
 	}
@@ -73,7 +74,8 @@ func TestUTF16AutoBOMSplit(t *testing.T) {
 func TestUTF16DecoderGetStateRoundTrip(t *testing.T) {
 	want := "abcdef"
 	units := utf16.Encode([]rune(want))
-	full := []byte{0xFF, 0xFE}
+	full := make([]byte, 0, 2+2*len(units))
+	full = append(full, 0xFF, 0xFE)
 	for _, u := range units {
 		full = append(full, byte(u), byte(u>>8))
 	}

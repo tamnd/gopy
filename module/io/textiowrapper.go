@@ -655,7 +655,8 @@ func (t *TextIOWrapper) reconfigure(kwargs map[string]objects.Object) error {
 		t.encoding = s.Value()
 	}
 	if hasErrs && !objects.IsNone(errsObj) {
-		s, ok := errsObj.(*objects.Unicode); if !ok {
+		s, ok := errsObj.(*objects.Unicode)
+		if !ok {
 			return fmt.Errorf("TypeError: invalid errors: %s", errsObj.Type().Name)
 		}
 		t.errors = s.Value()
