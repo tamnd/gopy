@@ -69,6 +69,15 @@ type TextIOWrapper struct {
 	chunkSize    int
 	pendingBytes [][]byte
 	pendingCount int
+
+	// dict is the per-instance attribute dict, the analog of CPython's
+	// textio.dict slot. CPython sets tp_dictoffset on the type so user
+	// code can do `text.mode = 'r'` (tokenize.open relies on this) and
+	// generic getattr falls back to the dict for any name that is not a
+	// data descriptor on the type.
+	//
+	// CPython: Modules/_io/textio.c:724 textio.dict + members entry at :3400
+	dict *objects.Dict
 }
 
 // TextIOWrapperType is the type singleton for _io.TextIOWrapper.
@@ -83,6 +92,49 @@ func init() {
 	TextIOWrapperType.Iter = textIOWrapperIter
 	TextIOWrapperType.IterNext = textIOWrapperIterNext
 	TextIOWrapperType.Getattro = textIOWrapperGetattr
+	TextIOWrapperType.Setattro = textIOWrapperSetattr
+	// LOAD_SPECIAL walks the type MRO for __enter__ / __exit__ rather
+	// than going through instance Getattro, so `with text:` needs
+	// type-level descriptors. The instance Getattr still resolves these
+	// names too, matching CPython's IOBase mixin behavior.
+	//
+	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
+	objects.SetTypeDescr(TextIOWrapperType, "__enter__", objects.NewBuiltinFunction("__enter__", textIOWrapperEnterDescr))
+	objects.SetTypeDescr(TextIOWrapperType, "__exit__", objects.NewBuiltinFunction("__exit__", textIOWrapperExitDescr))
+}
+
+// textIOWrapperEnterDescr is the type-level __enter__ binding for
+// `with text:`. LOAD_SPECIAL pushes (descr, self), so args[0] is the
+// TextIOWrapper instance.
+//
+// CPython: Modules/_io/iobase.c:391 iobase_enter
+func textIOWrapperEnterDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __enter__() missing self argument")
+	}
+	t, ok := args[0].(*TextIOWrapper)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __enter__() expected _io.TextIOWrapper self")
+	}
+	if err := t.checkUsable(); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// textIOWrapperExitDescr is the type-level __exit__ binding. CPython's
+// IOBase __exit__ calls self.close() and ignores its exc_* arguments.
+//
+// CPython: Modules/_io/iobase.c:409 iobase_exit
+func textIOWrapperExitDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __exit__() missing self argument")
+	}
+	t, ok := args[0].(*TextIOWrapper)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __exit__() expected _io.TextIOWrapper self")
+	}
+	return objects.None(), t.Close()
 }
 
 // NewTextIOWrapper wraps a binary buffer (typically FileIO) in text mode.
@@ -96,6 +148,7 @@ func NewTextIOWrapper(raw *FileIO, encoding, errors, name, mode string) *TextIOW
 		name:      name,
 		mode:      mode,
 		chunkSize: 8192,
+		dict:      objects.NewDict(),
 	}
 	t.Init(TextIOWrapperType)
 	return t
@@ -168,6 +221,7 @@ func textIOWrapperCall(_ objects.Object, args []objects.Object, kwargs map[strin
 		linebuffering: linebuf,
 		writethrough:  writethrough,
 		chunkSize:     8192,
+		dict:          objects.NewDict(),
 	}
 	if err := t.setNewline(bound[3]); err != nil {
 		return nil, err
@@ -765,7 +819,22 @@ func textIOWrapperGetattr(o objects.Object, name objects.Object) (objects.Object
 		}
 		return nameAttr, nil
 	case "mode":
-		return objects.NewStr(t.mode), nil
+		// `mode` is not a built-in TextIOWrapper getset in CPython, so it
+		// resolves through the instance dict. tokenize.open writes
+		// `text.mode = 'r'` and reads it back later. Fall back to the
+		// struct field only when the dict is empty so Go-side
+		// NewTextIOWrapper(mode=...) callers still see a value.
+		//
+		// CPython: Lib/tokenize.py:open `text.mode = 'r'`
+		if t.dict != nil {
+			if v, err := t.dict.GetItem(objects.NewStr("mode")); err == nil && v != nil {
+				return v, nil
+			}
+		}
+		if t.mode != "" {
+			return objects.NewStr(t.mode), nil
+		}
+		return nil, fmt.Errorf("AttributeError: '_io.TextIOWrapper' object has no attribute 'mode'")
 	// CPython: Modules/_io/textio.c textiowrapper member encoding
 	case "encoding":
 		return objects.NewStr(t.encoding), nil
@@ -794,7 +863,65 @@ func textIOWrapperGetattr(o objects.Object, name objects.Object) (objects.Object
 	if fn := textIOWrapperMethod(t, n.Value()); fn != nil {
 		return fn, nil
 	}
+	// Instance dict fallback: anything not resolved by a data descriptor
+	// above or a method below routes through __dict__. PyObject_GenericGetAttr
+	// performs the same fallback after the type's mro miss.
+	//
+	// CPython: Objects/object.c:1450 _PyObject_GenericGetAttrWithDict
+	if t.dict != nil {
+		if v, err := t.dict.GetItem(objects.NewStr(n.Value())); err == nil && v != nil {
+			return v, nil
+		}
+	}
 	return nil, fmt.Errorf("AttributeError: '_io.TextIOWrapper' object has no attribute '%s'", n.Value())
+}
+
+// textIOWrapperReadonlyAttrs are the C-level data descriptors that block
+// instance-dict writes. CPython's tp_setattro returns AttributeError when
+// the descriptor on the type lacks a setter. Mirrors textiowrapper_members
+// (all Py_READONLY) plus the read-only entries in textiowrapper_getset.
+//
+// CPython: Modules/_io/textio.c:3393 textiowrapper_members,
+// Modules/_io/textio.c:3404 textiowrapper_getset
+var textIOWrapperReadonlyAttrs = map[string]bool{
+	"encoding":       true,
+	"buffer":         true,
+	"line_buffering": true,
+	"write_through":  true,
+	"closed":         true,
+	"newlines":       true,
+	"errors":         true,
+	"name":           true,
+}
+
+// textIOWrapperSetattr stores an attribute on the instance __dict__,
+// matching CPython's PyObject_GenericSetAttr fallback. Read-only data
+// descriptors raise AttributeError; everything else lands in the dict so
+// `text.mode = 'r'` (tokenize.open) and `text.foo = bar` (user code) both
+// work the same way they do in CPython.
+//
+// CPython: Modules/_io/textio.c PyTextIOWrapper_Type tp_setattro slot
+// (inherited via tp_dictoffset + PyObject_GenericSetAttr)
+func textIOWrapperSetattr(o, name, value objects.Object) error {
+	t, ok := o.(*TextIOWrapper)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor for '_io.TextIOWrapper' requires a '_io.TextIOWrapper' object")
+	}
+	n, ok := name.(*objects.Unicode)
+	if !ok {
+		return fmt.Errorf("TypeError: attribute name must be string")
+	}
+	key := n.Value()
+	if textIOWrapperReadonlyAttrs[key] {
+		return fmt.Errorf("AttributeError: attribute '%s' of '_io.TextIOWrapper' objects is not writable", key)
+	}
+	if t.dict == nil {
+		t.dict = objects.NewDict()
+	}
+	if value == nil {
+		return t.dict.DelItem(objects.NewStr(key))
+	}
+	return t.dict.SetItem(objects.NewStr(key), value)
 }
 
 // textIOWrapperMethod returns BuiltinFunction objects for TextIOWrapper methods.

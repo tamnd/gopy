@@ -68,3 +68,22 @@ func TestGateTextIOWrapperCodecs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tcd.bin")
 	gate.Compare(t, cpy, gopy, loadScript(t, "textiowrapper_codecs.py"), path)
 }
+
+// TestGateTextIOWrapperDict covers tp_dictoffset semantics: tokenize.open
+// writes `text.mode = 'r'` and arbitrary attributes route through the
+// instance dict, while textiowrapper_members entries (encoding, buffer,
+// closed, etc.) remain read-only. Also exercises the type-level
+// __enter__ / __exit__ slot the `with` statement looks up via
+// LOAD_SPECIAL.
+//
+// CPython: Modules/_io/textio.c:3393 textiowrapper_members,
+// Modules/_io/textio.c:724 textio.dict
+func TestGateTextIOWrapperDict(t *testing.T) {
+	cpy := gate.FindCPython(t)
+	if cpy == "" {
+		t.Skip("CPython 3.14 not on PATH")
+	}
+	gopy := gate.BuildGopy(t)
+	path := filepath.Join(t.TempDir(), "tdc.txt")
+	gate.Compare(t, cpy, gopy, loadScript(t, "textiowrapper_dict.py"), path)
+}

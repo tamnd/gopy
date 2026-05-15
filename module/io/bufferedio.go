@@ -1463,6 +1463,52 @@ func init() {
 	BufferedReaderType.Getattro = bufferedGetattr
 	BufferedReaderType.Repr = bufferedTypeRepr
 	BufferedReaderType.Str = bufferedTypeRepr
+	registerBufferedContextManager(BufferedReaderType)
+}
+
+// registerBufferedContextManager installs type-level __enter__ /
+// __exit__ descriptors so LOAD_SPECIAL (which walks the type MRO, not
+// the instance) can resolve `with buf:`.
+//
+// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
+func registerBufferedContextManager(t *objects.Type) {
+	objects.SetTypeDescr(t, "__enter__", objects.NewBuiltinFunction("__enter__", bufferedEnterDescr))
+	objects.SetTypeDescr(t, "__exit__", objects.NewBuiltinFunction("__exit__", bufferedExitDescr))
+}
+
+func bufferedEnterDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __enter__() missing self argument")
+	}
+	b, ok := args[0].(*Buffered)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __enter__() expected buffered object")
+	}
+	if err := b.checkInitialized(); err != nil {
+		return nil, err
+	}
+	closed, err := b.isClosed()
+	if err != nil {
+		return nil, err
+	}
+	if closed {
+		return nil, fmt.Errorf("ValueError: I/O operation on closed file")
+	}
+	return b, nil
+}
+
+func bufferedExitDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __exit__() missing self argument")
+	}
+	b, ok := args[0].(*Buffered)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __exit__() expected buffered object")
+	}
+	if _, err := b.bufferedClose(); err != nil {
+		return nil, err
+	}
+	return objects.None(), nil
 }
 
 // BufferedWriterType is the type singleton for _io.BufferedWriter.
@@ -1509,6 +1555,7 @@ func init() {
 	BufferedWriterType.Getattro = bufferedGetattr
 	BufferedWriterType.Repr = bufferedTypeRepr
 	BufferedWriterType.Str = bufferedTypeRepr
+	registerBufferedContextManager(BufferedWriterType)
 }
 
 // BufferedRandomType is the type singleton for _io.BufferedRandom.
@@ -1564,6 +1611,7 @@ func init() {
 	BufferedRandomType.Getattro = bufferedGetattr
 	BufferedRandomType.Repr = bufferedTypeRepr
 	BufferedRandomType.Str = bufferedTypeRepr
+	registerBufferedContextManager(BufferedRandomType)
 }
 
 // --- BufferedRWPair ----------------------------------------------------------
