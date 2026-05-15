@@ -52,10 +52,26 @@ type TextIOWrapper struct {
 	// know readuniversal / readtranslate.
 	nlDecoder *IncrementalNewlineDecoder
 
+	// Stateful codec layer. The decoder is the "incremental codec" that
+	// sits below the newline decoder; the encoder is the symmetric write
+	// side. Both are lazily built so reads through the legacy one-shot
+	// helpers stay zero-cost until a stateful operation forces a build.
+	//
+	// CPython: Modules/_io/textio.c:706 textio.encoder / textio.decoder
+	decoder IncrementalDecoder
+	encoder IncrementalEncoder
+
 	// decodedBuf holds decoded characters that have been read from the
 	// underlying buffer but not yet consumed by read / readline.
 	// CPython: Modules/_io/textio.c "decoded_chars" field.
 	decodedBuf string
+
+	// b2cratio tracks the moving bytes-to-chars ratio used by the
+	// adaptive sizing in _textiowrapper_read_chunk. Starts at 0.0; CPython
+	// blends the new ratio in at 0.625/0.375 weights per chunk.
+	//
+	// CPython: Modules/_io/textio.c:706 b2cratio
+	b2cratio float64
 
 	// Write-side batching. CPython holds encoded chunks in
 	// `pending_bytes` (PyBytes | PyUnicode | list) and drains via
@@ -530,21 +546,6 @@ func (t *TextIOWrapper) ensureNLDecoder() {
 	t.nlDecoder.Init(IncrementalNewlineDecoderType)
 }
 
-// decodeForRead decodes raw bytes and runs them through the universal
-// newline pipeline when readuniversal is set. final=true triggers the
-// final-flush of any pendingcr held by the decoder.
-func (t *TextIOWrapper) decodeForRead(data []byte, final bool) (string, error) {
-	s, err := decodeBytes(data, t.encoding)
-	if err != nil {
-		return "", err
-	}
-	if !t.readuniversal {
-		return s, nil
-	}
-	t.ensureNLDecoder()
-	return t.nlDecoder.translateNewlines(s, final), nil
-}
-
 // read reads up to size characters from the buffer and decodes them.
 // size < 0 reads the whole remaining content.
 //
@@ -553,21 +554,10 @@ func (t *TextIOWrapper) read(size int) (string, error) {
 	if err := t.checkUsable(); err != nil {
 		return "", err
 	}
-	data, err := bufRead(t.buf, size)
-	if err != nil {
-		return "", err
+	if size < 0 {
+		return t.drainAll()
 	}
-	final := size < 0 || len(data) == 0
-	dec, err := t.decodeForRead(data, final)
-	if err != nil {
-		return "", err
-	}
-	if t.decodedBuf == "" {
-		return dec, nil
-	}
-	out := t.decodedBuf + dec
-	t.decodedBuf = ""
-	return out, nil
+	return t.drainN(size)
 }
 
 // readline reads one line from the buffer.
@@ -578,49 +568,7 @@ func (t *TextIOWrapper) readline(size int) (string, error) {
 	if err := t.checkUsable(); err != nil {
 		return "", err
 	}
-	// Decode incrementally, byte at a time, until a newline appears in
-	// the decoded buffer or the source is exhausted. Anything past the
-	// newline is stashed in decodedBuf for the next readline / read.
-	for {
-		if idx := strings.IndexByte(t.decodedBuf, '\n'); idx >= 0 {
-			line := t.decodedBuf[:idx+1]
-			t.decodedBuf = t.decodedBuf[idx+1:]
-			if size >= 0 && len(line) > size {
-				t.decodedBuf = line[size:] + t.decodedBuf
-				line = line[:size]
-			}
-			return line, nil
-		}
-		if size >= 0 && len(t.decodedBuf) >= size {
-			line := t.decodedBuf[:size]
-			t.decodedBuf = t.decodedBuf[size:]
-			return line, nil
-		}
-		chunk, err := bufRead(t.buf, 1)
-		if err != nil {
-			return "", err
-		}
-		if len(chunk) == 0 {
-			// Final flush so any pending \r is emitted.
-			extra, err := t.decodeForRead(nil, true)
-			if err != nil {
-				return "", err
-			}
-			t.decodedBuf += extra
-			line := t.decodedBuf
-			t.decodedBuf = ""
-			if size >= 0 && len(line) > size {
-				t.decodedBuf = line[size:]
-				line = line[:size]
-			}
-			return line, nil
-		}
-		dec, err := t.decodeForRead(chunk, false)
-		if err != nil {
-			return "", err
-		}
-		t.decodedBuf += dec
-	}
+	return t.drainLine(size)
 }
 
 // Write encodes and writes a string to the underlying buffer.
@@ -635,7 +583,10 @@ func (t *TextIOWrapper) Write(s string) (int, error) {
 	if haslf && t.writenl != "" {
 		out = strings.ReplaceAll(out, "\n", t.writenl)
 	}
-	data, err := encodeString(out, t.encoding)
+	if err := t.ensureCodecs(); err != nil {
+		return 0, err
+	}
+	data, err := t.encoder.Encode(out, false)
 	if err != nil {
 		return 0, err
 	}
@@ -740,6 +691,13 @@ func (t *TextIOWrapper) Seek(pos int64, whence int) (int64, error) {
 		t.nlDecoder.pendingcr = false
 		t.nlDecoder.seennl = 0
 	}
+	if t.decoder != nil {
+		t.decoder.Reset()
+	}
+	if t.encoder != nil {
+		t.encoder.Reset()
+	}
+	t.b2cratio = 0
 	return out, nil
 }
 
