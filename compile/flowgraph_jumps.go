@@ -204,28 +204,6 @@ func resolveUnconditionalJumps(instrs *Sequence) {
 	}
 }
 
-// instrSize matches CPython's instr_size: 1 code unit for the opcode,
-// plus one extended-arg prefix per non-zero high byte of the oparg.
-// gopy does not yet attach inline caches, so the `caches` term is
-// always zero.
-//
-// CPython: Python/assemble.c:38 instr_size
-func instrSize(op Opcode, oparg int32) int {
-	_ = op
-	arg := uint32(oparg)
-	extended := 0
-	if 0xFFFFFF < arg {
-		extended++
-	}
-	if 0xFFFF < arg {
-		extended++
-	}
-	if 0xFF < arg {
-		extended++
-	}
-	return extended + 1
-}
-
 // endSendOffset is the code-unit distance from a SEND to its matching
 // END_SEND inside the `yield from` lowering. CPython names this
 // END_SEND_OFFSET and uses it to bias the END_ASYNC_FOR jump back to
@@ -259,13 +237,13 @@ func resolveJumpOffsets(instrs *Sequence) {
 		for i := range instrs.Instrs {
 			ins := &instrs.Instrs[i]
 			offset[i] = totsize
-			totsize += instrSize(ins.Op, ins.Oparg)
+			totsize += instrSize(ins)
 		}
 		extendedArgRecompile := false
 		curOffset := 0
 		for i := range instrs.Instrs {
 			ins := &instrs.Instrs[i]
-			isize := instrSize(ins.Op, ins.Oparg)
+			isize := instrSize(ins)
 			// jump offsets are computed relative to the instruction
 			// pointer after fetching the jump instruction.
 			curOffset += isize
@@ -291,7 +269,7 @@ func resolveJumpOffsets(instrs *Sequence) {
 			default:
 				ins.Oparg = int32(int(ins.Oparg) - curOffset)
 			}
-			if instrSize(ins.Op, ins.Oparg) != isize {
+			if instrSize(ins) != isize {
 				extendedArgRecompile = true
 			}
 		}

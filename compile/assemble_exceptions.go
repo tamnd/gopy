@@ -79,7 +79,7 @@ func assembleExceptionTable(seq *Sequence) []byte {
 	off := 0
 	for i := range seq.Instrs {
 		offsets[i] = off
-		off += instrCodeunits(&seq.Instrs[i]) * 2
+		off += instrSize(&seq.Instrs[i]) * 2
 	}
 	totalBytes := off
 

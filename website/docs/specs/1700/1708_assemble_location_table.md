@@ -106,8 +106,8 @@ has one in CPython."
 |-------|------|-------|--------|--------|
 | 1 | D `pegen/action_helpers_gen.go` + `tools/parser_gen/emit.go` | Port CPython's `EXTRA`: capture start mark before every alt, compute the end span after every action, pass the resulting `Location` into every `actionAst*` helper. Update all ~68 helpers to write that location into the constructed node's `Pos`. Regenerate `parser_gen.go`. | - | done |
 | 2 | B `instrseq.go` | 1:1 audit against `Python/instruction_sequence.c`. Confirm every function has a citation, every insertion path propagates `Loc`. | 1 | done |
-| 3 | A `assemble_locations.go` | 1:1 audit against `Python/assemble.c`. Rename helpers to match (`writeLocationInfoEntry`, `writeLocationInfoShortForm`, etc.) and add file:line citations. Reproduce CPython's coalescing rules exactly. | 1 | in progress |
-| Gate | - | Decoded position table has `Line > 0` for every non-synthetic codeunit; `lineForOffset` shim deleted; `attachFrameTraceback` calls `CoAddr2Location` directly; existing `TestTracebackFormatExc` still green; new round-trip test asserts one PositionEntry per codeunit for a known multi-line function. | 1,2,3 | pending |
+| 3 | A `assemble_locations.go` | 1:1 audit against `Python/assemble.c`. Rename helpers to match (`writeLocationInfoEntry`, `writeLocationInfoShortForm`, etc.) and add file:line citations. Reproduce CPython's coalescing rules exactly. | 1 | done |
+| Gate | - | Decoded position table has `Line > 0` for every non-synthetic codeunit; `lineForOffset` shim deleted; `attachFrameTraceback` calls `CoAddr2Location` directly; existing `TestTracebackFormatExc` still green; round-trip test (`vm.TestLineTableParityAcrossFixtures`) asserts one PositionEntry per coalesced run for curated multi-line fixtures. | 1,2,3 | done |
 
 ## Phase 1 - `Python/assemble.c` per-instruction writers
 
@@ -178,5 +178,5 @@ After all four phases land:
 - [x] Phase 1: PEG generator threads EXTRA span into every action; SetPos on every AST node
 - [x] Gate sub-step: `lineForOffset` shim deleted, `attachFrameTraceback` calls `CoAddr2Location` directly, `TestTracebackFormatExc` green
 - [x] Phase 2: `instrseq.go` 1:1 against `instruction_sequence.c` with citations
-- [ ] Phase 3: `assemble_locations.go` 1:1 against `assemble.c` with citations
-- [ ] Gate: round-trip test asserts one PositionEntry per codeunit for a known multi-line function
+- [x] Phase 3: `assemble_locations.go` 1:1 against `assemble.c` with citations
+- [x] Gate: round-trip test (`vm.TestLineTableParityAcrossFixtures`) covers short / oneline / long / no-column / none / split-long-span / mixed-run fixtures
