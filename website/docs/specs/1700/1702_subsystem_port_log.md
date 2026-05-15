@@ -125,7 +125,7 @@ introspection, `linecache` integration, the `_colorize` hook).
 
 **Gates.** `TestTracebackFormatExc`, `TestTracebackFormatExceptionMultiFrame`, `TestBareRaiseReraisesHandled`, `TestTracebackFormatExceptionCauseChain`, `TestTracebackFormatExceptionContextChain` all green.
 
-**Known limitation (not blocking 1702).** `linecache.getline` calls `tokenize.open`, which assigns `text.mode = 'r'` on the returned `_io.TextIOWrapper`. The wrapper does not yet have an instance `__dict__` / settable attribute slot, so source-context lookup for tracebacks pointing at on-disk files raises `TypeError: '_io.TextIOWrapper' object has only read-only attributes`. Tracebacks for `<...>`-style filenames work (linecache short-circuits those via `_source_unavailable`). Tracked under the io subsystem follow-ups.
+**Linecache on-disk path closed 2026-05-15 (PR #55).** TextIOWrapper now carries an instance `__dict__` slot plus a `Setattro` that mirrors `PyObject_GenericSetAttr`: read-only C-level members (encoding, buffer, closed, errors, name, newlines, line_buffering, write_through) keep raising AttributeError, but `text.mode = 'r'` from `tokenize.open` lands in the dict and feeds back to `linecache.updatecache`. The same PR wires type-level `__enter__` / `__exit__` descriptors on TextIOWrapper / FileIO / Buffered{Reader,Writer,Random} / StringIO / BytesIO so `with open(path) as fp:` resolves through `LOAD_SPECIAL` instead of failing the type-MRO lookup. Tracebacks pointing at on-disk files now render source lines.
 
 ### io / _io (#514)
 
@@ -279,6 +279,8 @@ moot.
 | `IncrementalNewlineDecoder` | `decode`, `getstate`, `setstate`, `reset`, `newlines` | partial |
 | `TextIOWrapper` | `__init__`, `read`, `readline`, `readlines`, `write`, `seek`, `tell`, `truncate`, `flush`, `close`, `detach`, `reconfigure`, `buffer`, `encoding`, `errors`, `newlines`, `line_buffering`, `write_through`, `name`, `mode`, `closed`, `__iter__`, `__next__` | partial |
 | Internals (`_textiowrapper_decoder_setstate`, `_textiowrapper_encoder_setstate`, `_textiowrapper_writeflush`) | helpers | `_textiowrapper_writeflush` done 2026-05-15; remaining helpers partial |
+| `tp_dictoffset` + generic getattr/setattr fallback | per-instance `__dict__` so `tokenize.open` can write `text.mode = 'r'` | done (PR #55) |
+| Type-level `__enter__` / `__exit__` (LOAD_SPECIAL via type MRO) | context-manager dunder slots | done (PR #55) |
 
 **Missing (E audit 2026-05-14).** The 1075-line port is 31% of
 `textio.c` (3433 lines). Specific gaps: codec resolution
@@ -580,7 +582,7 @@ Status legend:
 | operator | #532 | done | `Lib/operator.py` + `Modules/_operator.c` | `stdlib/operator.py` + `module/_operator/` | 2 | `_operator` fully ported (1095 lines): binary/unary arithmetic, rich comparisons, itemgetter, attrgetter, methodcaller, length_hint. `stdlib/operator.py` vendored. |
 | warnings | #513 | done | `Lib/warnings.py` + `Python/_warnings.c` | `stdlib/warnings.py` + `module/_warnings/` | 2 | `_warnings` fully ported (1089 lines): filter registry, PyErr_WarnEx/Explicit/Format family, lock plumbing. `stdlib/warnings.py` vendored. |
 | pprint | #511 | done | `Lib/pprint.py` | `stdlib/pprint.py` (via PathFinder) | 2 | Inittab stub removed 2026-05-15: `module/pprint/` deleted, PathFinder serves the byte-equal 675-line vendor. Full `PrettyPrinter` class now resolves end-to-end. |
-| traceback | #496 | done | `Lib/traceback.py` | `stdlib/traceback.py` | 3 | Vendored byte-equal; multi-frame traceback, `__cause__` / `__context__` chains, bare `raise` re-raise all green. Five gate tests in `stdlibinit/`. Linecache source-context lookup for on-disk files is gated on TextIOWrapper instance attributes (separate io follow-up); `<...>`-style filenames work. |
+| traceback | #496 | done | `Lib/traceback.py` | `stdlib/traceback.py` | 3 | Vendored byte-equal; multi-frame traceback, `__cause__` / `__context__` chains, bare `raise` re-raise all green. Five gate tests in `stdlibinit/`. PR #55 closed the linecache on-disk path by giving TextIOWrapper an instance `__dict__` and wiring type-level `__enter__` / `__exit__` descriptors, so source-context lookup now feeds `tokenize.open` end-to-end. |
 | dataclasses | #522 | done | `Lib/dataclasses.py` | `module/dataclasses/` (Go port, option B) | 3 | Go port at `module/dataclasses/module.go` (1,626 lines). `make_dataclass` shipped in PR #47 (`module.go:1142`). `order=True`, `slots=True`, `__hash__` generation, recursive `asdict`/`astuple`, `InitVar` all present. Vendor `Lib/dataclasses.py` still optional. |
 | GenericAlias + UnionType | #523 | done | `Objects/genericaliasobject.c` + `Objects/unionobject.c` | `objects/generic_alias.go` + `objects/union_type.go` + `objects/class_getitem.go` | 3 | Clears `unittest.case` `types.GenericAlias` gate. `TypeVar` / `ParamSpec` substitution deferred (needs `typing` C accelerator). |
 | time | #500 | done | `Modules/timemodule.c` | `module/_time/` | I | Dead `module/time/` stub deleted 2026-05-15. The real port lives in `module/_time/module.go` (1074 lines, registered as `time` via inittab): `gmtime`, `localtime`, `asctime`, `ctime`, `mktime`, `strftime`, `strptime`, `get_clock_info`, `tzset`, `clock_gettime`/`settime`/`getres`, `process_time`, `thread_time`, `_ns` variants, and the `struct_time` named tuple all present. |
@@ -633,7 +635,7 @@ view.
 - [x] pprint (#511) — inittab stub deleted 2026-05-15; PathFinder serves byte-equal `stdlib/pprint.py`
 - [x] time (#500) — dead `module/time/` stub deleted 2026-05-15; real port is `module/_time/` (1074 lines)
 
-- [x] traceback (#496) — `stdlib/traceback.py` vendored byte-equal; multi-frame walk, chain rendering, bare-raise re-raise all green after PR #54. Linecache on-disk source-context lookup is the only remaining gap and tracks under the io subsystem
+- [x] traceback (#496) — `stdlib/traceback.py` vendored byte-equal; multi-frame walk, chain rendering, bare-raise re-raise all green after PR #54. PR #55 closed the linecache on-disk source-context lookup by adding TextIOWrapper's instance `__dict__` slot and type-level `__enter__` / `__exit__` descriptors
 
 **Partial (vendor in place, behaviour still gated):** none.
 
