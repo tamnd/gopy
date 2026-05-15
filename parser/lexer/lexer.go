@@ -491,7 +491,7 @@ func (s *State) scanOperator(c int) Tok {
 		if s.insideFString() {
 			s.curMode().curlyBracketDepth++
 		}
-		return s.tokenSetup(token.OP, s.start, s.cur)
+		return s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	case ')', ']', '}':
 		s.popParen(byte(c))
 		// Inside an f-string expression, after popping, a `}` that
@@ -512,29 +512,39 @@ func (s *State) scanOperator(c int) Tok {
 				m.inDebug = false
 			}
 		}
-		return s.tokenSetup(token.OP, s.start, s.cur)
+		return s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	case '*', '/', '<', '>', '=', '!':
+		c2, c3 := 0, 0
 		if s.peek() == '=' {
+			c2 = s.peek()
 			s.nextC()
 		} else if (c == '*' || c == '/' || c == '<' || c == '>') && s.peek() == c {
+			c2 = s.peek()
 			s.nextC()
 			if s.peek() == '=' {
+				c3 = s.peek()
 				s.nextC()
 			}
 		}
-		return s.tokenSetup(token.OP, s.start, s.cur)
+		return s.tokenSetup(classifyOp(c, c2, c3), s.start, s.cur)
 	case '+', '%', '&', '|', '^', '@':
+		c2 := 0
 		if s.peek() == '=' {
+			c2 = s.peek()
 			s.nextC()
 		}
-		return s.tokenSetup(token.OP, s.start, s.cur)
+		return s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
 	case '-':
+		c2 := 0
 		if s.peek() == '=' || s.peek() == '>' {
+			c2 = s.peek()
 			s.nextC()
 		}
-		return s.tokenSetup(token.OP, s.start, s.cur)
+		return s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
 	case ':':
+		c2 := 0
 		if s.peek() == '=' {
+			c2 = s.peek()
 			s.nextC()
 		}
 		// Inside an f-string interpolation `{expr:fmt}`, a `:` at the
@@ -551,7 +561,7 @@ func (s *State) scanOperator(c int) Tok {
 				m.inFormatSpec = true
 			}
 		}
-		return s.tokenSetup(token.OP, s.start, s.cur)
+		return s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
 	case '.':
 		// `...` is the only multi-dot operator; `..` is two separate
 		// DOTs. CPython's lexer mirrors that: peek twice and only
@@ -562,15 +572,15 @@ func (s *State) scanOperator(c int) Tok {
 			s.nextC()
 			if s.peek() == '.' {
 				s.nextC()
-				return s.tokenSetup(token.OP, s.start, s.cur)
+				return s.tokenSetup(threeCharOp('.', '.', '.'), s.start, s.cur)
 			}
 			s.backup('.')
 		} else if d := s.peek(); d >= '0' && d <= '9' {
 			return s.scanNumber('.')
 		}
-		return s.tokenSetup(token.OP, s.start, s.cur)
+		return s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	case ',', ';', '~':
-		return s.tokenSetup(token.OP, s.start, s.cur)
+		return s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	}
 	s.done = eToken
 	s.recordError("invalid character")

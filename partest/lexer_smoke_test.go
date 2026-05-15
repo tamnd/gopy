@@ -63,7 +63,7 @@ func TestLexerCorpus(t *testing.T) {
 			"simple_assign",
 			"x = 1\n",
 			[]token.Type{
-				token.NAME, token.OP, token.NUMBER,
+				token.NAME, token.EQUAL, token.NUMBER,
 				token.NEWLINE, token.ENDMARKER,
 			},
 		},
@@ -71,8 +71,8 @@ func TestLexerCorpus(t *testing.T) {
 			"def",
 			"def f():\n    return 1\n",
 			[]token.Type{
-				token.NAME, token.NAME, token.OP, token.OP,
-				token.OP, token.NEWLINE, token.INDENT,
+				token.NAME, token.NAME, token.LPAR, token.RPAR,
+				token.COLON, token.NEWLINE, token.INDENT,
 				token.NAME, token.NUMBER, token.NEWLINE,
 				token.DEDENT, token.ENDMARKER,
 			},
@@ -144,7 +144,7 @@ func TestLexerCorpusKindNames(t *testing.T) {
 		names = append(names, tk.Kind.String())
 	}
 	got := strings.Join(names, " ")
-	want := "NAME OP NUMBER NEWLINE ENDMARKER"
+	want := "NAME EQUAL NUMBER NEWLINE ENDMARKER"
 	if got != want {
 		t.Errorf("kind names = %q want %q", got, want)
 	}
