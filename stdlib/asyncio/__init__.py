@@ -21,5 +21,9 @@ from . import format_helpers
 from . import base_futures
 from . import log
 from . import coroutines
-# mixins/base_tasks/__main__ pull events which Phase 3 ships; they're
-# imported transitively then.
+from . import protocols
+from . import transports
+from . import trsock
+# futures + events ship in Phase 3 once subprocess and selectors are
+# vendored; their .py files sit alongside but aren't auto-bound here
+# yet so the leaf import chain stays green.
