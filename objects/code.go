@@ -111,6 +111,46 @@ func init() {
 	CodeType.Str = codeRepr
 	CodeType.Hash = codeHash
 	CodeType.RichCmp = codeRichCompare
+	CodeType.Getattro = codeGetAttr
+}
+
+// codeGetAttr exposes the read-only co_* fields the traceback
+// renderer and pdb consult: co_filename, co_name, co_qualname,
+// co_firstlineno, co_argcount, co_posonlyargcount, co_kwonlyargcount,
+// co_stacksize, co_flags.
+//
+// CPython: Objects/codeobject.c:2960 code_memberlist
+func codeGetAttr(o Object, name Object) (Object, error) {
+	c := o.(*Code)
+	n, ok := name.(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
+	}
+	switch n.v {
+	case "co_filename":
+		return NewStr(c.Filename), nil
+	case "co_name":
+		return NewStr(c.Name), nil
+	case "co_qualname":
+		q := c.Qualname
+		if q == "" {
+			q = c.Name
+		}
+		return NewStr(q), nil
+	case "co_firstlineno":
+		return NewInt(int64(c.Firstlineno)), nil
+	case "co_argcount":
+		return NewInt(int64(c.Argcount)), nil
+	case "co_posonlyargcount":
+		return NewInt(int64(c.PosonlyArgcount)), nil
+	case "co_kwonlyargcount":
+		return NewInt(int64(c.KwonlyArgcount)), nil
+	case "co_stacksize":
+		return NewInt(int64(c.Stacksize)), nil
+	case "co_flags":
+		return NewInt(int64(c.Flags)), nil
+	}
+	return GenericGetAttr(o, name)
 }
 
 // NewCode returns a Code with its header bound to CodeType.

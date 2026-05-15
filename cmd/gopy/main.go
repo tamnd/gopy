@@ -217,7 +217,7 @@ func gopyCompile(src, filename string) (*objects.Code, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &objects.Code{
+	out := &objects.Code{
 		Argcount:        cco.Argcount,
 		PosonlyArgcount: cco.PosOnlyArgCount,
 		KwonlyArgcount:  cco.KwOnlyArgCount,
@@ -235,7 +235,9 @@ func gopyCompile(src, filename string) (*objects.Code, error) {
 		Firstlineno:     cco.Firstlineno,
 		Linetable:       cco.Linetable,
 		ExceptionTable:  cco.ExceptionTable,
-	}, nil
+	}
+	out.Init(objects.CodeType)
+	return out, nil
 }
 
 // runSource is the gopy -c entry. It dispatches to

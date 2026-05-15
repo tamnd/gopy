@@ -98,7 +98,7 @@ func printRunError(ts *state.Thread, err error, w io.Writer) int {
 // liftCode adapts compile.Code into objects.Code. The two structs
 // will collapse once spec 1687 retires compile.Code.
 func liftCode(c *compile.Code) *objects.Code {
-	return &objects.Code{
+	out := &objects.Code{
 		Argcount:        c.Argcount,
 		PosonlyArgcount: c.PosOnlyArgCount,
 		KwonlyArgcount:  c.KwOnlyArgCount,
@@ -117,4 +117,6 @@ func liftCode(c *compile.Code) *objects.Code {
 		Linetable:       c.Linetable,
 		ExceptionTable:  c.ExceptionTable,
 	}
+	out.Init(objects.CodeType)
+	return out
 }
