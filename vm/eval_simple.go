@@ -594,22 +594,21 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.FORMAT_WITH_SPEC:
-		// Stack: [value, spec]. v0.6 has no PyObject_Format protocol
-		// yet, so an empty spec routes through Str and a non-empty spec
-		// is reported as unsupported. Ports of __format__ + format()
-		// land with the abstract layer.
+		// Stack: [value, spec]. Dispatch through objects.Format
+		// (PyObject_Format), which routes to the value's __format__
+		// slot. An empty spec falls back to Str inside Format.
+		//
+		// CPython: Python/bytecodes.c FORMAT_WITH_SPEC
+		// CPython: Objects/object.c:803 PyObject_Format
 		spec := e.popObject()
 		v := e.popObject()
 		specStr, serr := objects.Str(spec)
 		if serr != nil {
 			return 0, nil, nil, false, true, serr
 		}
-		if specStr != "" {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: FORMAT_WITH_SPEC: non-empty spec %q not supported in v0.6", specStr)
-		}
-		s, serr2 := objects.Str(v)
-		if serr2 != nil {
-			return 0, nil, nil, false, true, serr2
+		s, ferr := objects.Format(v, specStr)
+		if ferr != nil {
+			return 0, nil, nil, false, true, ferr
 		}
 		e.pushObject(objects.NewStr(s))
 		return e.advance(), nil, nil, false, true, nil
