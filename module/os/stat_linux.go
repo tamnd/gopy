@@ -23,9 +23,9 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	if !ok || sys == nil {
 		return
 	}
-	ino = sys.Ino
-	dev = sys.Dev
-	nlink = sys.Nlink
+	ino = uint64(sys.Ino)
+	dev = uint64(sys.Dev)
+	nlink = uint64(sys.Nlink)
 	uid = sys.Uid
 	gid = sys.Gid
 	atime = sys.Atim.Sec
