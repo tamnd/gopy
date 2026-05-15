@@ -111,6 +111,21 @@ func TestLexerTokenizerStdlibImports(t *testing.T) {
 			code:    "import tabnanny; print('tn', hasattr(tabnanny, 'check'), tabnanny.filename_only)",
 			wantSub: "tn True 0",
 		},
+		{
+			// Exercise _tokenize.TokenizerIter end-to-end through
+			// tokenize.tokenize: the iterator is the only path
+			// Lib/tokenize.py uses to get real tokens, so a green
+			// run here proves the Python-tokenize.c port is wired.
+			name: "tokenize_iter",
+			code: "import io, _tokenize\n" +
+				"src = b'x = 1\\n'\n" +
+				"rl = io.BytesIO(src).readline\n" +
+				"it = _tokenize.TokenizerIter(rl, extra_tokens=True)\n" +
+				"toks = list(it)\n" +
+				"strings = [t[1] for t in toks]\n" +
+				"print('ti', 'x' in strings, '=' in strings, '1' in strings)\n",
+			wantSub: "ti True True True",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

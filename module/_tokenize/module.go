@@ -1,42 +1,347 @@
-// Package _tokenize is a placeholder port of CPython's
-// Modules/_tokenize.c. The full module exposes a TokenizerIter type
-// backed by Parser/tokenizer.c; vendoring that lives behind its own
-// spec row. For now the module registers itself in the inittab and
-// exposes a TokenizerIter constructor that raises NotImplementedError
-// when invoked, so `import tokenize` (and the chain `import
-// codeop` -> `import traceback`) can complete at module load.
+// Package _tokenize ports CPython's Python/Python-tokenize.c. It
+// exposes a single type, TokenizerIter, that drives the C lexer (here:
+// the Go port under parser/lexer) and yields 5-tuples of the shape
+// (type, str, (start_lineno, col), (end_lineno, col), line). The
+// vendored Lib/tokenize.py drives this iterator directly via
+// _generate_tokens_from_c_tokenizer.
 //
-// CPython: Modules/_tokenize.c
+// CPython: Python/Python-tokenize.c
 
 package _tokenize
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"unicode/utf8"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/parser/lexer"
+	"github.com/tamnd/gopy/token"
 )
 
 func init() {
 	_ = imp.AppendInittab("_tokenize", buildModule)
 }
 
-// tokenizerIterType is a stub TokenizerIter that raises when called.
-// CPython exposes the full iterator via tp_iter / tp_next; that work
-// lives in the dedicated _tokenize port.
+// tokenizerIter is the Python TokenizerIter instance. Mirrors the
+// tokenizeriterobject struct in CPython.
 //
-// CPython: Modules/_tokenize.c:53 TokenizerIter_Type
-var tokenizerIterType = objects.NewType("TokenizerIter", []*objects.Type{objects.ObjectType()})
+// CPython: Python/Python-tokenize.c:32 tokenizeriterobject
+type tokenizerIter struct {
+	objects.Header
 
-func init() {
-	tokenizerIterType.Call = func(_ objects.Object, _ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-		return nil, fmt.Errorf("NotImplementedError: _tokenize.TokenizerIter is not yet ported; tokenize() needs Parser/tokenizer.c")
+	tok         *lexer.State
+	done        bool
+	extraTokens bool
+	encoding    string
+
+	lastLineno    int
+	lastEndLineno int
+	lastLine      objects.Object // *Unicode cache for the current line
+	byteColDiff   int
+
+	// linesByOneBased holds the source split into lines, indexed
+	// 1..N. linesByOneBased[0] is an empty placeholder so lineno-1
+	// indexing matches CPython's 1-based line numbers.
+	linesByOneBased []string
+}
+
+// Type returns the tokenizer iterator's type.
+func (t *tokenizerIter) Type() *objects.Type { return tokenizerIterType }
+
+// tokenizerIterType is the public Python type _tokenize.TokenizerIter.
+//
+// CPython: Python/Python-tokenize.c:371 tokenizeriter_spec
+var tokenizerIterType = newTokenizerIterType()
+
+func newTokenizerIterType() *objects.Type {
+	t := objects.NewType("TokenizerIter", []*objects.Type{objects.ObjectType()})
+	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
+	t.IterNext = tokenizerIterNext
+	t.TpNew = tokenizerIterNew
+	return t
+}
+
+// tokenizerIterNew is the tp_new slot.
+//
+// CPython: Python/Python-tokenize.c:55 tokenizeriter_new_impl
+func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: TokenizerIter() takes exactly one positional argument (%d given)", len(args))
 	}
+	readline := args[0]
+
+	extraTokens := false
+	encoding := ""
+	for k, v := range kwargs {
+		switch k {
+		case "extra_tokens":
+			extraTokens = objects.IsTrue(v)
+		case "encoding":
+			if v == objects.None() {
+				encoding = ""
+			} else if s, ok := v.(*objects.Unicode); ok {
+				encoding = s.Value()
+			} else {
+				return nil, fmt.Errorf("TypeError: encoding must be str or None")
+			}
+		default:
+			return nil, fmt.Errorf("TypeError: TokenizerIter() got an unexpected keyword argument %q", k)
+		}
+	}
+
+	source, lines, err := drainReadline(readline, encoding != "")
+	if err != nil {
+		return nil, err
+	}
+
+	st := lexer.FromBytes(source, lexer.ModeFile)
+	st.SetFilename("<string>")
+	if extraTokens {
+		st.SetExtraTokens(true)
+	}
+
+	it := &tokenizerIter{
+		tok:             st,
+		extraTokens:     extraTokens,
+		encoding:        encoding,
+		linesByOneBased: lines,
+	}
+	return it, nil
+}
+
+// drainReadline pulls every line out of the readline callable up
+// front and returns the concatenated bytes plus a 1-based line index.
+// CPython does this incrementally via tok->underflow; gopy collapses
+// it because the lexer is not yet wired for streaming refill and the
+// gate tests all hand fixed-size inputs.
+//
+// stringSource selects whether readline returns str (encoding kwarg
+// supplied) or bytes (the default tokenize.tokenize() path).
+func drainReadline(readline objects.Object, stringSource bool) ([]byte, []string, error) {
+	var buf []byte
+	var lines []string
+	lines = append(lines, "") // 1-based padding
+	for {
+		res, err := objects.Call(readline, objects.NewTuple(nil), nil)
+		if err != nil {
+			if errors.Is(err, objects.ErrStopIteration) {
+				break
+			}
+			return nil, nil, err
+		}
+		var line []byte
+		switch v := res.(type) {
+		case *objects.Bytes:
+			line = append([]byte(nil), v.Bytes()...)
+		case *objects.ByteArray:
+			line = append([]byte(nil), v.Bytes()...)
+		case *objects.Unicode:
+			if !stringSource {
+				// CPython would raise here too; the bytes-path
+				// expects bytes from readline.
+				return nil, nil, fmt.Errorf("TypeError: source readline must return bytes when encoding is unset")
+			}
+			line = []byte(v.Value())
+		default:
+			if res == objects.None() {
+				break
+			}
+			return nil, nil, fmt.Errorf("TypeError: readline returned %s, expected bytes/str", res.Type().Name)
+		}
+		if len(line) == 0 {
+			break
+		}
+		buf = append(buf, line...)
+		// Track the per-line view (without the trailing newline) so we
+		// can emit the `line` field of each token tuple.
+		end := len(line)
+		if end > 0 && line[end-1] == '\n' {
+			end--
+			if end > 0 && line[end-1] == '\r' {
+				end--
+			}
+		}
+		lines = append(lines, string(line[:end]))
+		if errors.Is(err, io.EOF) {
+			break
+		}
+	}
+	// CPython's tokenizer requires the buffer end with '\n'.
+	if len(buf) == 0 || buf[len(buf)-1] != '\n' {
+		buf = append(buf, '\n')
+	}
+	return buf, lines, nil
+}
+
+// tokenizerIterNext is the tp_iternext slot. It produces a 5-tuple
+// per token until ENDMARKER is reached.
+//
+// CPython: Python/Python-tokenize.c:241 tokenizeriter_next
+func tokenizerIterNext(o objects.Object) (objects.Object, error) {
+	it, ok := o.(*tokenizerIter)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: expected TokenizerIter")
+	}
+	if it.done {
+		return nil, objects.ErrStopIteration
+	}
+
+	tok := it.tok.Get()
+	kind := tok.Kind
+
+	if kind == token.ERRORTOKEN {
+		return nil, tokenizerError(it.tok)
+	}
+
+	str := string(tok.Bytes)
+
+	isTrailing := false
+	if kind == token.ENDMARKER {
+		isTrailing = true
+		it.done = true
+	}
+
+	startLine := tok.Start.Line
+	startCol := tok.Start.Col
+	endLine := tok.End.Line
+	endCol := tok.End.Col
+	if startCol < 0 {
+		startCol = 0
+	}
+	if endCol < 0 {
+		endCol = 0
+	}
+
+	// Convert byte offsets to character offsets for col positions on
+	// multi-byte source. CPython does this through
+	// _PyPegen_byte_offset_to_character_offset.
+	startCol = byteToCharCol(it.lineAt(startLine), startCol)
+	if startLine == endLine {
+		endCol = startCol + utf8.RuneCountInString(string(tok.Bytes))
+	} else {
+		endCol = byteToCharCol(it.lineAt(endLine), endCol)
+	}
+
+	var lineStr objects.Object = objects.NewStr("")
+	if !(it.extraTokens && isTrailing) {
+		// Use the cached line (with a CPython-style "\n appended"
+		// shape) when the lineno matches the last token's lineno.
+		line := it.lineAt(startLine)
+		if startLine != it.lastLineno {
+			it.lastLine = objects.NewStr(line)
+		}
+		lineStr = it.lastLine
+		it.lastLineno = startLine
+		it.lastEndLineno = endLine
+	}
+
+	if it.extraTokens {
+		if isTrailing {
+			startLine = startLine + 1
+			endLine = startLine
+			startCol = 0
+			endCol = 0
+		}
+		// CPython collapses every operator/punctuation token in the
+		// extra_tokens stream to the umbrella OP type, matching the
+		// shape Lib/tokenize.py expects from the legacy pure-Python
+		// tokenizer.
+		if kind > token.DEDENT && kind < token.OP {
+			kind = token.OP
+		}
+		if kind == token.NEWLINE {
+			if str == "" {
+				str = "\n"
+			}
+			endCol++
+		}
+	}
+
+	return objects.NewTuple([]objects.Object{
+		objects.NewInt(int64(kind)),
+		objects.NewStr(str),
+		objects.NewTuple([]objects.Object{
+			objects.NewInt(int64(startLine)),
+			objects.NewInt(int64(startCol)),
+		}),
+		objects.NewTuple([]objects.Object{
+			objects.NewInt(int64(endLine)),
+			objects.NewInt(int64(endCol)),
+		}),
+		lineStr,
+	}), nil
+}
+
+// lineAt returns the source line for 1-based lineno, or "" if out of
+// range.
+func (it *tokenizerIter) lineAt(lineno int) string {
+	if lineno <= 0 || lineno >= len(it.linesByOneBased) {
+		return ""
+	}
+	return it.linesByOneBased[lineno]
+}
+
+// byteToCharCol converts a byte column offset into a character (rune)
+// column offset within line. Mirrors
+// _PyPegen_byte_offset_to_character_offset_line.
+//
+// CPython: Parser/pegen.c byte_offset_to_character_offset
+func byteToCharCol(line string, byteCol int) int {
+	if byteCol <= 0 {
+		return 0
+	}
+	if byteCol > len(line) {
+		byteCol = len(line)
+	}
+	return utf8.RuneCountInString(line[:byteCol])
+}
+
+// tokenizerError lifts a lexer error code into the matching Python
+// exception. Mirrors CPython's _tokenizer_error.
+//
+// CPython: Python/Python-tokenize.c:87 _tokenizer_error
+func tokenizerError(st *lexer.State) error {
+	// Pull the recorded message and position from the lexer; the
+	// exact errCode is internal, so we route the canonical messages
+	// from the stored *SyntaxError.
+	se := st.Err()
+	if se == nil {
+		return fmt.Errorf("SyntaxError: invalid token")
+	}
+	msg := se.Message
+	if msg == "" {
+		msg = "invalid token"
+	}
+	// Route TabError / IndentationError when the message hints at
+	// the underlying class. The lexer doesn't tag the error category
+	// directly, so we match on canonical strings the C source emits.
+	switch {
+	case containsAny(msg, "tabs and spaces"):
+		return fmt.Errorf("TabError: %s", msg)
+	case containsAny(msg, "unindent", "indentation", "indent"):
+		return fmt.Errorf("IndentationError: %s", msg)
+	default:
+		return fmt.Errorf("SyntaxError: %s", msg)
+	}
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildModule materializes the _tokenize module dict.
 //
-// CPython: Modules/_tokenize.c:281 _tokenize_module
+// CPython: Python/Python-tokenize.c:378 tokenizemodule_exec
 func buildModule() (*objects.Module, error) {
 	m := objects.NewModule("_tokenize")
 	d := m.Dict()
