@@ -83,6 +83,27 @@ func Init() (*objects.Dict, error) {
 	if err := setItem(d, "_jit", jitInfo()); err != nil {
 		return nil, err
 	}
+	// Filesystem encoding helpers. CPython picks the value at startup
+	// from PyConfig.filesystem_encoding (utf-8 on every modern target).
+	// gopy hardcodes utf-8 / surrogateescape until PyConfig lands.
+	//
+	// CPython: Python/sysmodule.c sys_getfilesystemencoding_impl
+	if err := setItem(d, "getfilesystemencoding", objects.NewBuiltinFunction("getfilesystemencoding", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.NewStr("utf-8"), nil
+	})); err != nil {
+		return nil, err
+	}
+	if err := setItem(d, "getfilesystemencodeerrors", objects.NewBuiltinFunction("getfilesystemencodeerrors", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.NewStr("surrogateescape"), nil
+	})); err != nil {
+		return nil, err
+	}
+	if err := setStr(d, "filesystemencoding", "utf-8"); err != nil {
+		return nil, err
+	}
+	if err := setStr(d, "filesystemencodeerrors", "surrogateescape"); err != nil {
+		return nil, err
+	}
 
 	return d, nil
 }

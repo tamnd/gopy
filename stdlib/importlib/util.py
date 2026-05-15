@@ -21,6 +21,25 @@ import types
 MAGIC_NUMBER = b'\x74\x0e\r\n'
 
 
+def source_from_cache(path):
+    """Strip the .pyc tail and return the .py path. CPython resolves
+    __pycache__/name.cpython-NN.pyc; gopy doesn't write caches yet so
+    the simple inverse is enough for test.support's script_helper.
+
+    CPython: Lib/importlib/_bootstrap_external.py source_from_cache
+    """
+    if not path.endswith('.pyc'):
+        raise ValueError(f'{path!r} is not a .pyc path')
+    return path[:-1]
+
+
+def cache_from_source(path, debug_override=None, *, optimization=None):
+    """Inverse of source_from_cache."""
+    if not path.endswith('.py'):
+        raise ValueError(f'{path!r} is not a .py path')
+    return path + 'c'
+
+
 def find_spec(name, package=None):
     """Stub: gopy's PathFinder doesn't expose ModuleSpec yet."""
     raise NotImplementedError("importlib.util.find_spec is unavailable in gopy")
