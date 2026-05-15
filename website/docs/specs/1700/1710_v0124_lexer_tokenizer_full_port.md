@@ -10,28 +10,34 @@ description: "Port every CPython 3.14 lexer/tokenizer source file (Parser/lexer/
 
 ## Checklist
 
-Sources to fully port (CPython 3.14):
+### Sources to fully port (CPython 3.14)
 
-- [ ] `Parser/lexer/buffer.c` (76 lines) → `parser/lexer/buffer.go`
-- [ ] `Parser/lexer/lexer.c` (1635 lines) → `parser/lexer/lexer.go`
-- [ ] `Parser/lexer/state.c` (151 lines) → `parser/lexer/state.go`
-- [ ] `Parser/tokenizer/helpers.c` (581 lines) → `parser/lexer/helpers.go`
-- [ ] `Parser/tokenizer/file_tokenizer.c` (493 lines) → `parser/lexer/driver_file.go`
-- [ ] `Parser/tokenizer/readline_tokenizer.c` (134 lines) → `parser/lexer/driver_readline.go`
-- [ ] `Parser/tokenizer/string_tokenizer.c` (148 lines) → `parser/lexer/driver_string.go`
-- [ ] `Parser/tokenizer/utf8_tokenizer.c` (55 lines) → `parser/lexer/driver_string.go` (utf-8 path)
-- [ ] `Python/Python-tokenize.c` → `module/_tokenize/` (replaces the stub `TokenizerIter`)
-- [ ] `Lib/keyword.py` (64 lines) → `module/keyword/` (vendor verbatim)
-- [ ] `Lib/tokenize.py` (598 lines) → `module/tokenize/` (vendor verbatim)
-- [ ] `Lib/tabnanny.py` (338 lines) → `module/tabnanny/` (vendor verbatim)
+Status legend: DONE = ported in full and verified, WIP = port underway, TODO = not started.
 
-Gate tests to land green under `test/cpython/`:
+| CPython source | C LOC | gopy destination | Go LOC | Status | Commit |
+|---|---:|---|---:|---|---|
+| `Parser/lexer/buffer.c` | 76 | `parser/lexer/buffer.go` | 56 | DONE | pending |
+| `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` | 633 | TODO | — |
+| `Parser/lexer/state.c` | 151 | `parser/lexer/state.go` | 355 | WIP | — |
+| `Parser/tokenizer/helpers.c` | 581 | `parser/lexer/helpers.go` | 64 | TODO | — |
+| `Parser/tokenizer/file_tokenizer.c` | 493 | `parser/lexer/driver_file.go` | 83 | TODO | — |
+| `Parser/tokenizer/readline_tokenizer.c` | 134 | `parser/lexer/driver_readline.go` | 44 | TODO | — |
+| `Parser/tokenizer/string_tokenizer.c` | 148 | `parser/lexer/driver_string.go` | 103 | TODO | — |
+| `Parser/tokenizer/utf8_tokenizer.c` | 55 | `parser/lexer/driver_string.go` (utf-8 path) | — | TODO | — |
+| `Python/Python-tokenize.c` | 445 | `module/_tokenize/module.go` | 352 | WIP | — |
+| `Lib/keyword.py` | 64 | `stdlib/keyword.py` | 64 | DONE | byte-equal vendor |
+| `Lib/tokenize.py` | 598 | `stdlib/tokenize.py` | 598 | DONE | byte-equal vendor |
+| `Lib/tabnanny.py` | 338 | `stdlib/tabnanny.py` | 338 | DONE | byte-equal vendor |
 
-- [x] `test_keyword.py` (56 lines) — vendored; 10/11 sub-tests green. The eleventh, `test_all_keywords_fail_to_be_used_as_names`, calls `compile(name + '=2', '<s>', 'single')` and hits a parser-generator gap (`parser: generated rule bodies not yet emitted`) unrelated to lexer/tokenizer. Tracked separately. Also vendored at `stdtest/test_keyword.py` and gated via `TestStdtestCorpus`.
-- [x] `test_utf8source.py` (41 lines) — vendored; 3/3 sub-tests green. Mirrored at `stdtest/test_utf8source.py`.
-- [ ] `test_source_encoding.py` (547 lines) — vendored; blocked on `import inspect` (stdlib not yet vendored).
-- [ ] `test_tabnanny.py` (354 lines) — vendored; blocked on `import asyncio` via `unittest.mock` (stdlib not yet vendored).
-- [ ] `test_tokenize.py` (3480 lines) — vendored; blocked on `import tempfile` (stdlib not yet vendored).
+### Gate tests to land green under `test/cpython/`
+
+| Test | LOC | Status | Commit |
+|---|---:|---|---|
+| `test_keyword.py` | 56 | DONE (10/11 sub-tests green; the eleventh hits a parser-generator gap unrelated to lexer/tokenizer, `parser: generated rule bodies not yet emitted`. Also mirrored at `stdtest/test_keyword.py` and gated via `TestStdtestCorpus`.) | — |
+| `test_utf8source.py` | 41 | DONE (3/3 sub-tests green; mirrored at `stdtest/test_utf8source.py`) | — |
+| `test_tabnanny.py` | 354 | DONE (exits 0 after typed `UnicodeDecodeError` + `surrogateescape` decode fix) | 3066fe3 |
+| `test_source_encoding.py` | 547 | TODO (blocked on `import inspect`, stdlib not yet vendored) | — |
+| `test_tokenize.py` | 3480 | TODO (blocked on `import tempfile`, stdlib not yet vendored) | — |
 
 ## Goal
 
