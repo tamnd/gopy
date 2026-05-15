@@ -145,9 +145,10 @@ unrelated sub-systems:
 
 | # | Task | Sub-system | Surface | Status | Commit |
 |---|------|------------|---------|--------|--------|
-| 1 | T2 | builtin `compile()` | accept `bytes` / `bytearray` / `str` / AST instead of rejecting bytes | TODO | — |
-| 2 | T3 | test fixtures | vendor `Lib/test/tokenizedata/` fixtures the panel tests reference (e.g. `badsyntax_pep3120`) | TODO | — |
+| 1 | T2 | builtin `compile()` + `str.encode` | accept `bytes` / `bytearray` (route through `lexer.FromBytes`); `str.encode` honors its encoding arg via `codecs.Encode` | DONE | 9d03f23 |
+| 2 | T3 | test fixtures | vendor `Lib/test/tokenizedata/` (bad_coding*, badsyntax_*, coding20731, tokenize_tests-*) under `stdlib/test/tokenizedata/` | DONE | 0c3da66 |
 | 3 | T4 | `module/sys` | bind `sys.exit` + `setrecursionlimit` + `getrecursionlimit` + `getrefcount` on the inittab sys module via `CurrentThreadHook` | DONE | 7e5bc6d |
+| 4 | T3.1 | lexer non-utf-8 check | port `check_coding_spec` + `check_bom` invalid-byte path so `badsyntax_pep3120` raises SyntaxError at import time (still 1/3 sub-tests red because import succeeds silently) | TODO | — |
 
 ### test_source_encoding.py chain
 
