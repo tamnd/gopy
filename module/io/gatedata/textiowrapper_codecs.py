@@ -1,6 +1,14 @@
 import io
 import sys
 
+# Force stdout to UTF-8 so non-ASCII chars in repr() do not blow up
+# under Windows' default cp1252 console codepage. Both interpreters
+# need the same stdout encoding for the gate diff to be meaningful.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
+
 # Round-trip a small known-tricky sample across each codec the
 # TextIOWrapper port now supports. Compare bytes-on-disk and the
 # decoded string side by side so any drift in the encode/decode tables
