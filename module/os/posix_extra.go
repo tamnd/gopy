@@ -151,3 +151,29 @@ func osCPUCount(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	}
 	return objects.NewInt(int64(n)), nil
 }
+
+// osIsatty returns True if fd is a tty. The implementation Stats the
+// fd through the goos package and tests the char-device bit, which
+// matches what `isatty(3)` reports for the common cases _colorize
+// cares about.
+//
+// CPython: Modules/posixmodule.c:11947 os_isatty_impl
+func osIsatty(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: isatty() missing required argument: 'fd'")
+	}
+	fdObj, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required")
+	}
+	fdVal, _ := fdObj.Int64()
+	f := goos.NewFile(uintptr(fdVal), "")
+	if f == nil {
+		return objects.NewBool(false), nil
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return objects.NewBool(false), nil
+	}
+	return objects.NewBool((info.Mode() & goos.ModeCharDevice) != 0), nil
+}

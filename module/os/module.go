@@ -261,6 +261,7 @@ func buildOS() (*objects.Module, error) {
 		{"_exit", objects.NewBuiltinFunction("_exit", osExit)},
 		{"urandom", objects.NewBuiltinFunction("urandom", osUrandom)},
 		{"cpu_count", objects.NewBuiltinFunction("cpu_count", osCPUCount)},
+		{"isatty", objects.NewBuiltinFunction("isatty", osIsatty)},
 		{"umask", objects.NewBuiltinFunction("umask", osUmask)},
 		{"_get_exports_list", objects.NewBuiltinFunction("_get_exports_list", osGetExportsList)},
 	}

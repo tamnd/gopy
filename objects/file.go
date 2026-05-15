@@ -412,6 +412,26 @@ func fileMethod(fi *File, name string) Object {
 		return NewBuiltinFunction("writable", func(_ []Object, _ map[string]Object) (Object, error) {
 			return NewBool(fi.wr != nil && !fi.closed), nil
 		})
+	case "fileno":
+		// CPython: Modules/_io/fileio.c:1043 _io_FileIO_fileno_impl
+		return NewBuiltinFunction("fileno", func(_ []Object, _ map[string]Object) (Object, error) {
+			if fi.closed || fi.f == nil {
+				return nil, errClosed()
+			}
+			return NewInt(int64(fi.f.Fd())), nil
+		})
+	case "isatty":
+		// CPython: Modules/_io/fileio.c:1124 _io_FileIO_isatty_impl
+		return NewBuiltinFunction("isatty", func(_ []Object, _ map[string]Object) (Object, error) {
+			if fi.closed || fi.f == nil {
+				return nil, errClosed()
+			}
+			info, err := fi.f.Stat()
+			if err != nil {
+				return nil, ioErr(err)
+			}
+			return NewBool((info.Mode() & os.ModeCharDevice) != 0), nil
+		})
 	}
 	return nil
 }
