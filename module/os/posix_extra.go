@@ -225,3 +225,99 @@ func osFsencode(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	}
 	return nil, fmt.Errorf("TypeError: fsencode() argument must be str, bytes, or os.PathLike, not %s", o.Type().Name)
 }
+
+// osWaitstatusToExitcode converts a wait status returned by waitpid
+// into a meaningful exit code. Mirrors WIFEXITED / WIFSIGNALED parity:
+// non-negative for normal exit, negative for signal exit. gopy does
+// not host child processes yet; subprocess.py imports the symbol at
+// module top level so the stub keeps that import alive.
+//
+// CPython: Modules/posixmodule.c os_waitstatus_to_exitcode_impl
+func osWaitstatusToExitcode(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	var arg objects.Object
+	if len(args) == 1 {
+		arg = args[0]
+	} else if s, ok := kwargs["status"]; ok {
+		arg = s
+	} else {
+		return nil, fmt.Errorf("TypeError: waitstatus_to_exitcode() requires one argument")
+	}
+	status, ok := arg.(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: waitstatus_to_exitcode() argument must be int, not %s", arg.Type().Name)
+	}
+	v, _ := status.Int64()
+	if v&0x7f == 0 {
+		return objects.NewInt((v >> 8) & 0xff), nil
+	}
+	return objects.NewInt(-(v & 0x7f)), nil
+}
+
+// waitStatusArg unwraps the single-int wait status argument the W*
+// helpers all share.
+func waitStatusArg(args []objects.Object, name string) (int64, error) {
+	if len(args) != 1 {
+		return 0, fmt.Errorf("TypeError: %s() takes exactly one argument (%d given)", name, len(args))
+	}
+	i, ok := args[0].(*objects.Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: %s() argument must be int, not %s", name, args[0].Type().Name)
+	}
+	v, _ := i.Int64()
+	return v, nil
+}
+
+// CPython: Modules/posixmodule.c os_WIFSTOPPED_impl
+func osWifstopped(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	v, err := waitStatusArg(args, "WIFSTOPPED")
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewBool(v&0xff == 0x7f), nil
+}
+
+// CPython: Modules/posixmodule.c os_WIFEXITED_impl
+func osWifexited(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	v, err := waitStatusArg(args, "WIFEXITED")
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewBool(v&0x7f == 0), nil
+}
+
+// CPython: Modules/posixmodule.c os_WIFSIGNALED_impl
+func osWifsignaled(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	v, err := waitStatusArg(args, "WIFSIGNALED")
+	if err != nil {
+		return nil, err
+	}
+	sig := v & 0x7f
+	return objects.NewBool(sig != 0 && sig != 0x7f), nil
+}
+
+// CPython: Modules/posixmodule.c os_WEXITSTATUS_impl
+func osWexitstatus(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	v, err := waitStatusArg(args, "WEXITSTATUS")
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewInt((v >> 8) & 0xff), nil
+}
+
+// CPython: Modules/posixmodule.c os_WTERMSIG_impl
+func osWtermsig(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	v, err := waitStatusArg(args, "WTERMSIG")
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewInt(v & 0x7f), nil
+}
+
+// CPython: Modules/posixmodule.c os_WSTOPSIG_impl
+func osWstopsig(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	v, err := waitStatusArg(args, "WSTOPSIG")
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewInt((v >> 8) & 0xff), nil
+}

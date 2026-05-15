@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unsafe"
 )
 
 // Float is the Python float, an IEEE-754 double.
@@ -43,6 +44,45 @@ func init() {
 		Float:       func(o Object) (Object, error) { return o, nil },
 		Power:       floatPower,
 	}
+	// float.__getformat__(typestr) is a classmethod that returns the
+	// memory layout for "float"/"double". gopy targets Go which uses
+	// IEEE-754; we report the host endianness. test.support's
+	// requires_IEEE_754 decorator checks this at module load.
+	//
+	// CPython: Objects/floatobject.c:1748 float___getformat___impl
+	SetTypeDescr(FloatType, "__getformat__", NewClassMethod(
+		NewBuiltinFunction("__getformat__", floatGetFormat)))
+}
+
+// floatGetFormat backs float.__getformat__. args[0] is the type
+// (classmethod binding), args[1] is "float" or "double".
+//
+// CPython: Objects/floatobject.c:1748 float___getformat___impl
+func floatGetFormat(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __getformat__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	typestr, ok := args[1].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __getformat__() argument must be str, not %s", args[1].Type().Name)
+	}
+	switch typestr.v {
+	case "float", "double":
+	default:
+		return nil, fmt.Errorf("ValueError: __getformat__() argument 1 must be 'double' or 'float'")
+	}
+	// gopy runs on host architectures where Go float64 is IEEE-754.
+	// Detect endianness at runtime via unsafe to stay portable.
+	if hostIsLittleEndian() {
+		return NewStr("IEEE, little-endian"), nil
+	}
+	return NewStr("IEEE, big-endian"), nil
+}
+
+func hostIsLittleEndian() bool {
+	var x uint16 = 1
+	b := (*[2]byte)(unsafe.Pointer(&x))
+	return b[0] == 1
 }
 
 // NewFloat builds a float.

@@ -65,13 +65,14 @@ func TestInitImplementationName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetItem(implementation): %v", err)
 	}
-	tup, ok := v.(*objects.Tuple)
+	ns, ok := v.(*objects.Namespace)
 	if !ok {
-		t.Fatalf("implementation is %T, want *Tuple", v)
+		t.Fatalf("implementation is %T, want *Namespace", v)
 	}
-	name, nerr := objects.Str(tup.Item(0))
+	nameVal, _ := ns.Dict().GetItem(objects.NewStr("name"))
+	name, nerr := objects.Str(nameVal)
 	if nerr != nil || name != "gopy" {
-		t.Errorf("implementation[0] = %q (err=%v), want \"gopy\"", name, nerr)
+		t.Errorf("implementation.name = %q (err=%v), want \"gopy\"", name, nerr)
 	}
 }
 

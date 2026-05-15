@@ -15,8 +15,9 @@ func TestImplementationNameIsGopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, _ := d.GetItem(objects.NewStr("implementation"))
-	tup := v.(*objects.Tuple)
-	name, _ := objects.Str(tup.Item(0))
+	ns := v.(*objects.Namespace)
+	nameVal, _ := ns.Dict().GetItem(objects.NewStr("name"))
+	name, _ := objects.Str(nameVal)
 	if name != "gopy" {
 		t.Errorf("implementation.name = %q, want \"gopy\"", name)
 	}
@@ -35,8 +36,9 @@ func TestImplementationCacheTagIsGopy3140(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, _ := d.GetItem(objects.NewStr("implementation"))
-	tup := v.(*objects.Tuple)
-	cache, _ := objects.Str(tup.Item(3))
+	ns := v.(*objects.Namespace)
+	cacheVal, _ := ns.Dict().GetItem(objects.NewStr("cache_tag"))
+	cache, _ := objects.Str(cacheVal)
 	if cache != "gopy-3140" {
 		t.Errorf("implementation.cache_tag = %q, want \"gopy-3140\"", cache)
 	}

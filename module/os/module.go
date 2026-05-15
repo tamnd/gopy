@@ -239,6 +239,20 @@ func buildOS() (*objects.Module, error) {
 		{"getppid", objects.NewBuiltinFunction("getppid", osGetppid)},
 		{"kill", objects.NewBuiltinFunction("kill", osKill)},
 		{"waitpid", objects.NewBuiltinFunction("waitpid", osWaitpid)},
+		{"waitstatus_to_exitcode", objects.NewBuiltinFunction("waitstatus_to_exitcode", osWaitstatusToExitcode)},
+		// Wait-status macros used by subprocess.py at module top level.
+		// CPython exposes them as functions that inspect the WIFSTOPPED /
+		// WIFEXITED / WIFSIGNALED bit patterns produced by waitpid.
+		//
+		// CPython: Modules/posixmodule.c os_WIFSTOPPED_impl
+		{"WIFSTOPPED", objects.NewBuiltinFunction("WIFSTOPPED", osWifstopped)},
+		{"WIFEXITED", objects.NewBuiltinFunction("WIFEXITED", osWifexited)},
+		{"WIFSIGNALED", objects.NewBuiltinFunction("WIFSIGNALED", osWifsignaled)},
+		{"WEXITSTATUS", objects.NewBuiltinFunction("WEXITSTATUS", osWexitstatus)},
+		{"WTERMSIG", objects.NewBuiltinFunction("WTERMSIG", osWtermsig)},
+		{"WSTOPSIG", objects.NewBuiltinFunction("WSTOPSIG", osWstopsig)},
+		{"WNOHANG", objects.NewInt(1)},
+		{"WUNTRACED", objects.NewInt(2)},
 		// SEEK_* constants.
 		// CPython: Modules/posixmodule.c posixmodule_exec
 		{"SEEK_SET", objects.NewInt(0)},
