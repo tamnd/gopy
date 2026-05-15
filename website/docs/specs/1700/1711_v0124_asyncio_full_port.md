@@ -166,11 +166,11 @@ calls at import time.
 
 | # | Task | Sub-system | Surface | Status | Commit |
 |---|------|------------|---------|--------|--------|
-| 1 | P3.1 | stdlib vendor | `stdlib/asyncio/futures.py` (byte-equal) | TODO | — |
-| 2 | P3.2 | stdlib vendor | `stdlib/asyncio/events.py` (byte-equal) | TODO | — |
-| 3 | P3.3 | stdlib vendor | `stdlib/asyncio/protocols.py` (byte-equal) | TODO | — |
-| 4 | P3.4 | stdlib vendor | `stdlib/asyncio/transports.py` (byte-equal) | TODO | — |
-| 5 | P3.5 | stdlib vendor | `stdlib/asyncio/trsock.py` (byte-equal) | TODO | — |
+| 1 | P3.1 | stdlib vendor | `stdlib/asyncio/futures.py` (byte-equal) — staged; not bound in `__init__` until `concurrent.futures` ships real executors | WIP | 576b021 |
+| 2 | P3.2 | stdlib vendor | `stdlib/asyncio/events.py` (byte-equal) — staged; blocked on `subprocess` import (needs `os.waitstatus_to_exitcode`) | WIP | 576b021 |
+| 3 | P3.3 | stdlib vendor | `stdlib/asyncio/protocols.py` (byte-equal) | DONE | 576b021 |
+| 4 | P3.4 | stdlib vendor | `stdlib/asyncio/transports.py` (byte-equal) | DONE | 576b021 |
+| 5 | P3.5 | stdlib vendor | `stdlib/asyncio/trsock.py` (byte-equal) | DONE | 576b021 |
 | 6 | P3.6 | contextvars | `Context.run(callable, *args, **kw)` returns the callable's return value, swapping the active context for the duration | TODO | — |
 | 7 | P3.7 | weakref | `WeakSet`, `WeakValueDictionary` resolvable via `weakref` (audit, not new code) | TODO | — |
 
