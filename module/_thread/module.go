@@ -457,60 +457,171 @@ func threadCount(args []objects.Object, kwargs map[string]objects.Object) (objec
 }
 
 // ---------------------------------------------------------------------------
-// _local stub (thread-local storage type).
+// _thread._local — per-thread (here per-goroutine) attribute storage.
+// CPython tracks one __dict__ per thread under a single PyObject; subclass
+// __init__ reruns automatically the first time a thread touches the
+// instance. We mirror that behavior using a sync.Map keyed by goroutine
+// id, but drop CPython's localdummy/weakref dance. Go's GC takes care
+// of lifetime for us.
+//
+// CPython: Modules/_threadmodule.c:1396 localobject
+// CPython: Modules/_threadmodule.c:1452 local_new
+// CPython: Modules/_threadmodule.c:1639 _ldict
+// CPython: Modules/_threadmodule.c:1691 local_setattro
+// CPython: Modules/_threadmodule.c:1752 local_getattro
 // ---------------------------------------------------------------------------
 
-// localType is a minimal stub for _thread._local. The full
-// implementation stores per-thread instance dicts; this version is
-// enough for `import threading` to complete without crashing.
-//
-// CPython: Modules/_threadmodule.c:1174 localtype
-var localType = objects.NewType("_local", []*objects.Type{objects.ObjectType()})
+var localType = objects.NewType("_thread._local", []*objects.Type{objects.ObjectType()})
 
 func init() {
-	localType.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-		lc := &localObj{}
-		lc.Init(localType)
-		return lc, nil
-	}
+	localType.TpNew = localNew
 	localType.Getattro = localGetattr
 	localType.Setattro = localSetattr
 }
 
 type localObj struct {
 	objects.Header
-	mu   sync.Mutex
-	data sync.Map // map[int64]*objects.Dict per goroutine
+	args *objects.Tuple            // ctor args replayed on each new thread
+	kw   map[string]objects.Object // ctor kwargs replayed on each new thread
+	mu   sync.Mutex                // serializes new-thread dict creation
+	data sync.Map                  // goid -> *objects.Dict
 }
 
+// initInherited reports whether cls inherits __init__ straight from
+// object. Mirrors objects.initInheritedFromObject (unexported there).
+//
+// CPython: Modules/_threadmodule.c:1454 local_new (tp_init == PyBaseObject_Type.tp_init)
+func initInherited(cls *objects.Type) bool {
+	descr, _ := objects.LookupDescriptor(cls, "__init__")
+	if descr == nil {
+		return true
+	}
+	stored, _ := objects.LookupDescriptor(objects.ObjectType(), "__init__")
+	return descr == stored
+}
+
+// localNew allocates a _local. With the default __init__, CPython
+// rejects any constructor arguments; otherwise it stashes (args, kw)
+// for per-thread replay.
+//
+// CPython: Modules/_threadmodule.c:1452 local_new
+func localNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if (len(args) > 0 || len(kwargs) > 0) && initInherited(cls) {
+		return nil, fmt.Errorf("TypeError: Initialization arguments are not supported")
+	}
+	lc := &localObj{}
+	lc.Init(cls)
+	if len(args) > 0 {
+		lc.args = objects.NewTuple(append([]objects.Object(nil), args...))
+	}
+	if len(kwargs) > 0 {
+		lc.kw = make(map[string]objects.Object, len(kwargs))
+		for k, v := range kwargs {
+			lc.kw[k] = v
+		}
+	}
+	// Pre-seed the construction thread's dict so __init__ (run by
+	// type_call after we return) does not double-fire from ldict.
+	//
+	// CPython: Modules/_threadmodule.c:1497 create_localsdict
+	lc.data.Store(goid(), objects.NewDict())
+	return lc, nil
+}
+
+// ldict returns the dict for the current goroutine, creating it on
+// first access and replaying subclass __init__ for new threads.
+//
+// CPython: Modules/_threadmodule.c:1639 _ldict
+func (lc *localObj) ldict() (*objects.Dict, error) {
+	id := goid()
+	if v, ok := lc.data.Load(id); ok {
+		return v.(*objects.Dict), nil
+	}
+	lc.mu.Lock()
+	if v, ok := lc.data.Load(id); ok {
+		lc.mu.Unlock()
+		return v.(*objects.Dict), nil
+	}
+	d := objects.NewDict()
+	lc.data.Store(id, d)
+	lc.mu.Unlock()
+
+	// Run subclass __init__ for this thread. The construction thread
+	// already ran it via type_call and gets short-circuited above.
+	//
+	// CPython: Modules/_threadmodule.c:1664 _ldict (Py_TYPE(self)->tp_init)
+	if !initInherited(lc.Type()) {
+		initDescr, _ := objects.LookupDescriptor(lc.Type(), "__init__")
+		if initDescr != nil {
+			callArgs := []objects.Object{lc}
+			if lc.args != nil {
+				for i := 0; i < lc.args.Len(); i++ {
+					callArgs = append(callArgs, lc.args.Item(i))
+				}
+			}
+			var kw *objects.Dict
+			if len(lc.kw) > 0 {
+				kw = objects.NewDict()
+				for k, v := range lc.kw {
+					_ = kw.SetItem(objects.NewStr(k), v)
+				}
+			}
+			if _, err := objects.Call(initDescr, objects.NewTuple(callArgs), kw); err != nil {
+				// Drop the half-built dict so the next access retries.
+				//
+				// CPython: Modules/_threadmodule.c:1670 PyDict_DelItem
+				lc.data.Delete(id)
+				return nil, err
+			}
+		}
+	}
+	return d, nil
+}
+
+// localGetattr exposes __dict__ as the per-thread dict, looks attrs up
+// in it first, and falls back to the type MRO for class attributes.
+//
+// CPython: Modules/_threadmodule.c:1752 local_getattro
 func localGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
 	lc := o.(*localObj)
-	id := goid()
-	lc.mu.Lock()
-	var d *objects.Dict
-	if v, ok := lc.data.Load(id); ok {
-		d = v.(*objects.Dict)
-	} else {
-		d = objects.NewDict()
-		lc.data.Store(id, d)
+	d, err := lc.ldict()
+	if err != nil {
+		return nil, err
 	}
-	lc.mu.Unlock()
-	return d.GetItem(name)
+	n, ok := name.(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: attribute name must be string")
+	}
+	if n.Value() == "__dict__" {
+		return d, nil
+	}
+	if v, gerr := d.GetItem(name); gerr == nil {
+		return v, nil
+	}
+	return objects.GenericGetAttr(o, name)
 }
 
+// localSetattr stores into the per-thread dict. __dict__ itself is
+// read-only, matching CPython.
+//
+// CPython: Modules/_threadmodule.c:1691 local_setattro
 func localSetattr(o objects.Object, name objects.Object, value objects.Object) error {
 	lc := o.(*localObj)
-	id := goid()
-	lc.mu.Lock()
-	var d *objects.Dict
-	if v, ok := lc.data.Load(id); ok {
-		d = v.(*objects.Dict)
-	} else {
-		d = objects.NewDict()
-		lc.data.Store(id, d)
+	n, ok := name.(*objects.Unicode)
+	if !ok {
+		return fmt.Errorf("TypeError: attribute name must be string")
 	}
-	lc.mu.Unlock()
+	if n.Value() == "__dict__" {
+		return fmt.Errorf("AttributeError: '%s' object attribute '__dict__' is read-only", lc.Type().Name)
+	}
+	d, err := lc.ldict()
+	if err != nil {
+		return err
+	}
 	if value == nil {
+		if _, gerr := d.GetItem(name); gerr != nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", lc.Type().Name, n.Value())
+		}
 		return d.DelItem(name)
 	}
 	return d.SetItem(name, value)
