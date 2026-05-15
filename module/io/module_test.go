@@ -416,6 +416,52 @@ func TestTextIOWrapperWrite(t *testing.T) {
 	}
 }
 
+// TestTextIOWrapperWriteflushBatching pins the pending_bytes batching
+// behaviour ported from CPython textio.c _textiowrapper_writeflush.
+// Many sub-chunkSize writes must coalesce: the on-disk size stays at 0
+// until either Flush, Close, or the pending_bytes_count crosses
+// chunk_size. line_buffering off and write_through off here so neither
+// fast-path forces an early drain.
+//
+// CPython: Modules/_io/textio.c:1583 _textiowrapper_writeflush
+func TestTextIOWrapperWriteflushBatching(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "twb.txt")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi := NewFileIO(f, path, "w", false, true)
+	tw := NewTextIOWrapper(fi, "utf-8", "strict", path, "w")
+
+	for range 10 {
+		if _, err := tw.Write("abc"); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	// FileIO writes straight to the OS file. The pending_bytes slab is
+	// still held inside tw, so nothing has hit the file yet.
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if info.Size() != 0 {
+		t.Fatalf("pre-flush size = %d, want 0 (data should be batched)", info.Size())
+	}
+
+	if err := tw.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(disk) != "abcabcabcabcabcabcabcabcabcabc" {
+		t.Fatalf("on disk = %q, want 30 bytes of repeated 'abc'", disk)
+	}
+}
+
 func TestTextIOWrapperGetattr(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tga.txt")

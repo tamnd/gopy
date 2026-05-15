@@ -56,6 +56,19 @@ type TextIOWrapper struct {
 	// underlying buffer but not yet consumed by read / readline.
 	// CPython: Modules/_io/textio.c "decoded_chars" field.
 	decodedBuf string
+
+	// Write-side batching. CPython holds encoded chunks in
+	// `pending_bytes` (PyBytes | PyUnicode | list) and drains via
+	// `_textiowrapper_writeflush` when the running total crosses
+	// chunk_size or when a flush is forced by line buffering /
+	// write_through. The Go port collapses CPython's three-shape
+	// pending_bytes into a slice of byte slices.
+	//
+	// CPython: Modules/_io/textio.c:706 pending_bytes /
+	// pending_bytes_count, :673 chunk_size.
+	chunkSize    int
+	pendingBytes [][]byte
+	pendingCount int
 }
 
 // TextIOWrapperType is the type singleton for _io.TextIOWrapper.
@@ -77,11 +90,12 @@ func init() {
 // CPython: Modules/_io/textio.c:1102 textiowrapper_init
 func NewTextIOWrapper(raw *FileIO, encoding, errors, name, mode string) *TextIOWrapper {
 	t := &TextIOWrapper{
-		buf:      raw,
-		encoding: encoding,
-		errors:   errors,
-		name:     name,
-		mode:     mode,
+		buf:       raw,
+		encoding:  encoding,
+		errors:    errors,
+		name:      name,
+		mode:      mode,
+		chunkSize: 8192,
 	}
 	t.Init(TextIOWrapperType)
 	return t
@@ -153,6 +167,7 @@ func textIOWrapperCall(_ objects.Object, args []objects.Object, kwargs map[strin
 		name:          name,
 		linebuffering: linebuf,
 		writethrough:  writethrough,
+		chunkSize:     8192,
 	}
 	if err := t.setNewline(bound[3]); err != nil {
 		return nil, err
@@ -562,18 +577,38 @@ func (t *TextIOWrapper) Write(s string) (int, error) {
 		return 0, err
 	}
 	out := s
-	if t.writenl != "" {
+	haslf := (t.writenl != "" || t.linebuffering) && strings.IndexByte(s, '\n') >= 0
+	if haslf && t.writenl != "" {
 		out = strings.ReplaceAll(out, "\n", t.writenl)
 	}
 	data, err := encodeString(out, t.encoding)
 	if err != nil {
 		return 0, err
 	}
-	_, err = bufWrite(t.buf, data)
-	if err != nil {
-		return 0, err
+
+	needflush := false
+	if t.linebuffering && (haslf || strings.IndexByte(s, '\r') >= 0) {
+		needflush = true
 	}
-	if t.linebuffering && (strings.Contains(s, "\n") || strings.Contains(s, "\r")) {
+
+	// Drain pending before queuing a large chunk so the queued slab
+	// never grows beyond ~chunk_size before being handed to the
+	// underlying buffer. CPython: textio.c:1741.
+	if len(data) >= t.chunkSize {
+		if err := t.writeflush(); err != nil {
+			return 0, err
+		}
+	}
+
+	t.pendingBytes = append(t.pendingBytes, data)
+	t.pendingCount += len(data)
+
+	if t.pendingCount >= t.chunkSize || needflush || t.writethrough {
+		if err := t.writeflush(); err != nil {
+			return 0, err
+		}
+	}
+	if needflush {
 		if err := bufFlush(t.buf); err != nil {
 			return 0, err
 		}
@@ -581,11 +616,37 @@ func (t *TextIOWrapper) Write(s string) (int, error) {
 	return len([]rune(s)), nil
 }
 
+// writeflush coalesces the pending_bytes slabs into one buffer and
+// hands them to the underlying binary buffer's write().
+//
+// CPython: Modules/_io/textio.c:1583 _textiowrapper_writeflush
+func (t *TextIOWrapper) writeflush() error {
+	if len(t.pendingBytes) == 0 {
+		return nil
+	}
+	var b []byte
+	if len(t.pendingBytes) == 1 {
+		b = t.pendingBytes[0]
+	} else {
+		b = make([]byte, 0, t.pendingCount)
+		for _, p := range t.pendingBytes {
+			b = append(b, p...)
+		}
+	}
+	t.pendingBytes = nil
+	t.pendingCount = 0
+	_, err := bufWrite(t.buf, b)
+	return err
+}
+
 // Flush flushes the write buffer and the underlying buffer.
 //
 // CPython: Modules/_io/textio.c:3121 textiowrapper_flush_impl
 func (t *TextIOWrapper) Flush() error {
 	if err := t.checkUsable(); err != nil {
+		return err
+	}
+	if err := t.writeflush(); err != nil {
 		return err
 	}
 	return bufFlush(t.buf)
@@ -597,6 +658,9 @@ func (t *TextIOWrapper) Flush() error {
 func (t *TextIOWrapper) Close() error {
 	if t.closed {
 		return nil
+	}
+	if err := t.writeflush(); err != nil {
+		return err
 	}
 	t.closed = true
 	return bufClose(t.buf)

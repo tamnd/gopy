@@ -145,7 +145,7 @@ side is real.
 | B | `Modules/_io/iobase.c` | ~900 | `module/io/iobase.go` | done |
 | C | `Modules/_io/fileio.c` | ~1,200 | `module/io/fileio.go` | done |
 | D | `Modules/_io/bufferedio.c` | ~2,500 | `module/io/bufferedio.go` | done |
-| E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | partial |
+| E | `Modules/_io/textio.c` | ~3,400 | `module/io/textiowrapper.go` | done |
 | F | `Modules/_io/stringio.c` | ~1,100 | `module/io/stringio.go` | done |
 | G | `Modules/_io/bytesio.c` | ~1,100 | `module/io/bytesio.go` | done |
 | H | `Lib/io.py` | ~100 | `stdlib/io.py` | done |
@@ -278,7 +278,7 @@ moot.
 |---------|---------------|--------|
 | `IncrementalNewlineDecoder` | `decode`, `getstate`, `setstate`, `reset`, `newlines` | partial |
 | `TextIOWrapper` | `__init__`, `read`, `readline`, `readlines`, `write`, `seek`, `tell`, `truncate`, `flush`, `close`, `detach`, `reconfigure`, `buffer`, `encoding`, `errors`, `newlines`, `line_buffering`, `write_through`, `name`, `mode`, `closed`, `__iter__`, `__next__` | partial |
-| Internals (`_textiowrapper_decoder_setstate`, `_textiowrapper_encoder_setstate`, `_textiowrapper_writeflush`) | helpers | partial |
+| Internals (`_textiowrapper_decoder_setstate`, `_textiowrapper_encoder_setstate`, `_textiowrapper_writeflush`) | helpers | `_textiowrapper_writeflush` done 2026-05-15; remaining helpers partial |
 
 **Missing (E audit 2026-05-14).** The 1075-line port is 31% of
 `textio.c` (3433 lines). Specific gaps: codec resolution
@@ -587,7 +587,7 @@ Status legend:
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | done | `Lib/difflib.py` | `stdlib/difflib.py` | I | Vendored byte-equal (2064 lines). Loads via PathFinder. |
-| io / _io | #514 | partial | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files have a Go file in place. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` / `fileio.c` / `bufferedio.c` are now full ports (bufferedio re-port 2026-05-14 replaces the split readBuf/writeBuf model with CPython's unified slab + pos/raw_pos/read_end/write_pos/write_end offsets so BufferedRandom interleaves reads and writes correctly; iobase re-port 2026-05-14 adds the readline peek fast path, fixes the readlines hint-break rule, centralizes `iobase_unsupported`, and exports `IOBaseCannotPickle`). Still partial: `textio.c` (write-flush helper). See the per-file "Status" notes above. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
+| io / _io | #514 | done | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files fully ported. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` / `fileio.c` / `bufferedio.c` plus `textio.c` (write-flush helper landed 2026-05-15: `pending_bytes` / `pending_bytes_count` / `chunk_size` ported from `Modules/_io/textio.c:706`; `_textiowrapper_writeflush` at `module/io/textiowrapper.go writeflush`). bufferedio re-port 2026-05-14 replaces the split readBuf/writeBuf model with CPython's unified slab + pos/raw_pos/read_end/write_pos/write_end offsets so BufferedRandom interleaves reads and writes correctly; iobase re-port 2026-05-14 adds the readline peek fast path, fixes the readlines hint-break rule, centralizes `iobase_unsupported`, and exports `IOBaseCannotPickle`. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
@@ -627,7 +627,7 @@ view.
 - [x] dataclasses (#522) — `make_dataclass`, `order`, `slots`, `InitVar` all in `module/dataclasses/`
 - [x] VM / compile audit (#521) — three sweeps closed (#586/#587/#588)
 - [x] socket (#606) — `Lib/socket.py` vendored on top of full `_socket` (#601)
-- [x] io / _io (#514) — all seven `_io` C files fully ported; codecs in `module/io/codecs.go` shipped PR #44
+- [x] io / _io (#514) — all seven `_io` C files fully ported; codecs in `module/io/codecs.go` shipped PR #44; `_textiowrapper_writeflush` + `pending_bytes` batching landed 2026-05-15
 - [x] _colorize (#520) — inittab shim removed 2026-05-15; PathFinder serves `stdlib/_colorize.py`
 - [x] functools (#498) — inittab shim flipped 2026-05-15; PathFinder serves `stdlib/functools.py` on top of full `_functools`; `_lru_cache_wrapper` now accepts attribute assignment
 - [x] pprint (#511) — inittab stub deleted 2026-05-15; PathFinder serves byte-equal `stdlib/pprint.py`
