@@ -37,7 +37,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | `test_utf8source.py` | 41 | DONE (3/3 sub-tests green; mirrored at `stdtest/test_utf8source.py`) | — |
 | `test_tabnanny.py` | 354 | DONE (exits 0 after typed `UnicodeDecodeError` + `surrogateescape` decode fix) | 3066fe3 |
 | `test_source_encoding.py` | 547 | TODO (imports clear; first hang is `BytesSourceEncodingTest.test_crcrcrlf`, which is `exec(bytes)` inside `captured_stdout`; the underlying gap is the VM's `exec(bytes)` path, not lexer/tokenizer). | — |
-| `test_tokenize.py` | 3480 | WIP (the `_generate_tokens_from_c_tokenizer(str_readline)` path now works, after a backwards encoding check in `module/_tokenize/module.go:drainReadline` was flipped to match `Parser/tokenizer/readline_tokenizer.c:34` — commit 538ab52. Next blocker is the test's own `stringify_tokens_from_source` helper, which uses f-string format specs the v0.6 compiler doesn't lower yet.) | 538ab52 |
+| `test_tokenize.py` | 3480 | WIP. Three of the four blockers cleared: (a) `drainReadline` encoding inversion fixed in 538ab52; (b) `FORMAT_WITH_SPEC` now routes through `objects.Format` in 5bd8455 so f-string format specs like `f"{n:10}"` actually format; (c) `scanOperator` now emits the specific operator token type (EQUAL/PLUS/...) via the new `_PyToken_OneChar`/`TwoChars`/`ThreeChars` port in 669c11f, matching what `Python/Python-tokenize.c` surfaces. Last remaining blocker is an `re._parser.Tokenizer.__next` IndexError that fires while importing test_tokenize.py at top level (a regex compile failure unrelated to lexer scope). | 538ab52, 5bd8455, 669c11f |
 
 ## Goal
 
