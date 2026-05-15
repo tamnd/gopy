@@ -181,6 +181,7 @@ func init() {
 	LockType.Repr = lockRepr
 	LockType.Str = lockRepr
 	LockType.Getattro = lockGetattr
+	LockType.TpNew = lockNew
 	// `with lock:` uses LOAD_SPECIAL which walks the type MRO; expose
 	// __enter__/__exit__ as type-level descriptors so the context
 	// manager protocol works.
@@ -356,6 +357,18 @@ func lockRelease(lk *lockObject, _ []objects.Object, _ map[string]objects.Object
 // CPython: Modules/_threadmodule.c:893 lock_locked_lock
 func lockLocked(lk *lockObject, _ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	return objects.NewBool(atomic.LoadInt32(&lk.locked) != 0), nil
+}
+
+// lockNew is the tp_new slot. threading.Lock() (alias for
+// _thread.LockType()) calls this; CPython 3.14 added direct
+// instantiation alongside allocate_lock().
+//
+// CPython: Modules/_threadmodule.c lock_new
+func lockNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 0 || len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: lock() takes no arguments")
+	}
+	return newLockObject(), nil
 }
 
 // threadAllocateLock implements _thread.allocate_lock().

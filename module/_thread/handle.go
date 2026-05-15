@@ -46,6 +46,7 @@ func init() {
 
 	ThreadHandleType.Repr = threadHandleRepr
 	ThreadHandleType.Str = threadHandleRepr
+	ThreadHandleType.TpNew = threadHandleNew
 	objects.SetTypeDescr(ThreadHandleType, "ident",
 		objects.NewGetSetDescr("ident", threadHandleGetIdent, nil))
 	objects.SetTypeDescr(ThreadHandleType, "join",
@@ -65,6 +66,18 @@ type threadHandleObject struct {
 	ident int64
 	done  chan struct{}
 	once  sync.Once
+}
+
+// threadHandleNew constructs a fresh _ThreadHandle with ident 0.
+// threading.Thread.__init__ allocates one this way and later swaps
+// in the real ident via start_joinable_thread(handle=...).
+//
+// CPython: Modules/_threadmodule.c ThreadHandle_new
+func threadHandleNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 0 || len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: _ThreadHandle() takes no arguments")
+	}
+	return newThreadHandle(0), nil
 }
 
 func newThreadHandle(ident int64) *threadHandleObject {

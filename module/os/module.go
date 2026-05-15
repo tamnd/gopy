@@ -312,7 +312,22 @@ func pathEntries() []struct {
 		{"commonprefix", objects.NewBuiltinFunction("commonprefix", commonprefix)},
 		{"expanduser", objects.NewBuiltinFunction("expanduser", expanduser)},
 		{"realpath", objects.NewBuiltinFunction("realpath", abspath)},
+		// normcase is the identity on POSIX (Lib/posixpath.py normcase).
+		// CPython: Lib/posixpath.py:53 normcase
+		{"normcase", objects.NewBuiltinFunction("normcase", normcasePosix)},
 	}
+}
+
+// normcasePosix returns the path unchanged after a fspath coercion,
+// matching Lib/posixpath.py's POSIX implementation.
+//
+// CPython: Lib/posixpath.py:53 normcase
+func normcasePosix(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, err := argString(args)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewStr(s), nil
 }
 
 func argString(args []objects.Object) (string, error) {

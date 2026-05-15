@@ -167,6 +167,20 @@ func buildModule() (*objects.Module, error) {
 	// Python/sysmodule.c:1352 sys_setrecursionlimit_impl,
 	// Python/sysmodule.c:1612 sys_getrecursionlimit_impl,
 	// Python/sysmodule.c:2022 sys_getrefcount_impl
+	// sys.excepthook is invoked by the interpreter on an unhandled
+	// exception; threading.py captures it at module load and threads
+	// use it to print uncaught exceptions raised in their target. The
+	// default mirrors CPython's PyErr_Display: print "Traceback ..."
+	// followed by the exception repr to sys.stderr.
+	//
+	// CPython: Python/sysmodule.c sys_excepthook_impl
+	excepthookFn := objects.NewBuiltinFunction("excepthook", excepthookShim)
+	if err := setItem(md, "excepthook", excepthookFn); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "__excepthook__", excepthookFn); err != nil {
+		return nil, err
+	}
 	if err := setItem(md, "exit", objects.NewBuiltinFunction("exit", exitShim)); err != nil {
 		return nil, err
 	}
