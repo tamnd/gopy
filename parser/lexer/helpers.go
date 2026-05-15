@@ -1,15 +1,31 @@
 // CPython: Parser/tokenizer/helpers.c.
 //
-// The C source's helpers split into two camps. The first camp formats
-// errors using the live tokenizer state. The gopy port keeps that
-// shape in syntaxError and indentError. The second camp deals with
-// PEP 263 source decoding, which is handled in the file driver and so
-// lives there rather than here.
+// Function map (helpers.c → gopy):
+//
+//	_syntaxerror_range                       → syntaxError (inlined)
+//	_PyTokenizer_syntaxerror                 → syntaxError
+//	_PyTokenizer_syntaxerror_known_range     → syntaxErrorKnownRange
+//	_PyTokenizer_indenterror                 → indentError
+//	_PyTokenizer_error_ret                   → errorRet
+//	_PyTokenizer_warn_invalid_escape_sequence→ warnInvalidEscape
+//	_PyTokenizer_parser_warn                 → parserWarn
+//	_PyTokenizer_new_string                  → newString
+//	_PyTokenizer_translate_into_utf8         → translateIntoUTF8
+//	_PyTokenizer_translate_newlines          → source.go NormalizeNewlines
+//	_PyTokenizer_check_bom                   → source.go CheckBOMCookieConflict
+//	get_normal_name                          → source.go normalizeEncodingName
+//	get_coding_spec                          → source.go matchCodingCookie
+//	_PyTokenizer_check_coding_spec           → source.go DetectEncodingCookie
+//	valid_utf8                               → source.go ValidateUTF8 (predicate)
+//	_PyTokenizer_ensure_utf8                 → source.go ValidateUTF8
+//	_PyTokenizer_print_escape                → printEscape (debug)
+//	_PyTokenizer_tok_dump                    → tokDump (debug)
 
 package lexer
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/tamnd/gopy/token"
 )
@@ -61,4 +77,95 @@ func (s *State) warnInvalidEscape(c byte) {
 	}
 	// Held for the action_helpers port to surface as a SyntaxWarning.
 	_ = c
+}
+
+// errorRet returns the canonical ERRORTOKEN value the C lexer hands
+// back when something has gone wrong. CPython tags `tok->cur = tok->inp`
+// before returning so the dispatch loop stops; gopy does the same.
+//
+// CPython: Parser/tokenizer/helpers.c:97 _PyTokenizer_error_ret
+func (s *State) errorRet() Tok {
+	s.cur = s.inp
+	if s.done == eOK {
+		s.done = eSyntax
+	}
+	return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
+}
+
+// parserWarn records a SyntaxWarning-class diagnostic. CPython routes
+// this through PyErr_WarnExplicitObject so the warnings module can
+// classify it; gopy doesn't yet expose the warnings filter to the
+// tokenizer, so we file it under recordError tagged with a [warn]
+// marker until the warnings plumbing lands.
+//
+// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
+func (s *State) parserWarn(category, format string, args ...any) {
+	if !s.reportWarnings {
+		return
+	}
+	_ = category
+	s.recordError("[warn] " + fmt.Sprintf(format, args...))
+}
+
+// newString duplicates a byte range into an owned string. CPython
+// allocates with PyMem_Malloc and copies; in Go the conversion does
+// both in one step.
+//
+// CPython: Parser/tokenizer/helpers.c:191 _PyTokenizer_new_string
+func newString(src []byte) string {
+	return string(src)
+}
+
+// translateIntoUTF8 recodes a string from src encoding into UTF-8.
+// CPython delegates to PyUnicode_AsEncodedString. gopy currently only
+// supports utf-8 source so the function is a pass-through; non-utf-8
+// inputs are rejected earlier by check_coding_spec.
+//
+// CPython: Parser/tokenizer/helpers.c:204 _PyTokenizer_translate_into_utf8
+func translateIntoUTF8(src, enc string) (string, error) {
+	if enc == "" || strings.EqualFold(enc, "utf-8") || strings.EqualFold(enc, "utf8") {
+		return src, nil
+	}
+	return "", fmt.Errorf("unsupported source encoding: %s", enc)
+}
+
+// printEscape writes a debug rendering of src to a string. CPython
+// targets a FILE*; we return the formatted string so callers can
+// route it however they please. Used only by tokDump.
+//
+// CPython: Parser/tokenizer/helpers.c:548 _PyTokenizer_print_escape
+func printEscape(src []byte) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, c := range src {
+		switch c {
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		default:
+			if c < 0x20 || c >= 0x7f {
+				fmt.Fprintf(&b, `\x%02x`, c)
+			} else {
+				b.WriteByte(c)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// tokDump returns the debug one-liner describing a token kind +
+// payload, matching the format CPython emits when TOKENIZER_DUMP is
+// enabled. Pure debug helper.
+//
+// CPython: Parser/tokenizer/helpers.c:575 _PyTokenizer_tok_dump
+func tokDump(kind token.Type, payload []byte) string {
+	return fmt.Sprintf("%-10s %s", kind.String(), printEscape(payload))
 }
