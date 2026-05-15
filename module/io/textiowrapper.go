@@ -13,6 +13,7 @@ package io
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 	"unicode/utf8"
 
@@ -72,6 +73,22 @@ type TextIOWrapper struct {
 	//
 	// CPython: Modules/_io/textio.c:706 b2cratio
 	b2cratio float64
+
+	// Per-chunk snapshot for tell/seek round-trip. Captured by readChunk
+	// right before bytes are fed to the decoder so that a later seek can
+	// reposition the buffer, install the same decoder state, then replay
+	// snapshotBytesFed bytes and skip (snapshotChunkLen - len(decodedBuf))
+	// chars to land where tell was called.
+	//
+	// CPython: Modules/_io/textio.c:706 snapshot tuple
+	snapshotValid    bool
+	snapshotStartPos int64
+	snapshotDecBuf   []byte
+	snapshotDecFlags int64
+	snapshotBytesFed int
+	snapshotChunkLen int
+	snapshotNLPendCR bool
+	snapshotNLSeenNL int
 
 	// Write-side batching. CPython holds encoded chunks in
 	// `pending_bytes` (PyBytes | PyUnicode | list) and drains via
@@ -668,24 +685,9 @@ func (t *TextIOWrapper) Close() error {
 	return bufClose(t.buf)
 }
 
-// Seek seeks to a position in the underlying buffer.
-//
-// Seeking invalidates any decoded characters buffered ahead of the
-// caller and resets the newline decoder so that the post-seek decode
-// stream behaves like a fresh open.
-//
-// CPython: Modules/_io/textio.c:2536 textiowrapper_seek_impl
-func (t *TextIOWrapper) Seek(pos int64, whence int) (int64, error) {
-	if err := t.checkUsable(); err != nil {
-		return 0, err
-	}
-	if err := t.Flush(); err != nil {
-		return 0, err
-	}
-	out, err := bufSeek(t.buf, pos, whence)
-	if err != nil {
-		return 0, err
-	}
+// resetDecodeState wipes all derived decode state so the post-seek (or
+// post-reconfigure) stream behaves like a fresh open.
+func (t *TextIOWrapper) resetDecodeState() {
 	t.decodedBuf = ""
 	if t.nlDecoder != nil {
 		t.nlDecoder.pendingcr = false
@@ -698,25 +700,153 @@ func (t *TextIOWrapper) Seek(pos int64, whence int) (int64, error) {
 		t.encoder.Reset()
 	}
 	t.b2cratio = 0
-	return out, nil
+	t.snapshotValid = false
 }
 
-// Tell returns the current stream position.
+// SeekCookie parses a cookie produced by Tell and reconstructs the
+// decode state at that point. Whence must be 0 (SEEK_SET) when the
+// cookie carries a non-zero replay payload, matching CPython which
+// rejects whence!=0 unless the value is 0/EOF.
 //
-// When buffered decoded characters or a pending CR are held in the
-// newline decoder, the buffer's tell does not match the logical text
-// position. CPython encodes a multi-field cookie; gopy does not yet
-// support that, so we raise OSError to flag the unsupported case.
-//
-// CPython: Modules/_io/textio.c:2734 textiowrapper_tell_impl
-func (t *TextIOWrapper) Tell() (int64, error) {
+// CPython: Modules/_io/textio.c:2536 textiowrapper_seek_impl
+func (t *TextIOWrapper) SeekCookie(cookieInt *big.Int, whence int) (*big.Int, error) {
 	if err := t.checkUsable(); err != nil {
+		return nil, err
+	}
+	if err := t.Flush(); err != nil {
+		return nil, err
+	}
+	if whence != 0 {
+		// SEEK_CUR / SEEK_END only legal when cookieInt is zero (CPython
+		// matches this with cookie==0 for SEEK_END, _ for SEEK_CUR).
+		if cookieInt.Sign() != 0 {
+			return nil, fmt.Errorf("ValueError: can't do nonzero %s-relative seeks", whenceName(whence))
+		}
+		newPos, err := bufSeek(t.buf, 0, whence)
+		if err != nil {
+			return nil, err
+		}
+		t.resetDecodeState()
+		return new(big.Int).SetInt64(newPos), nil
+	}
+
+	c, err := parseCookie(cookieInt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := bufSeek(t.buf, c.StartPos, 0); err != nil {
+		return nil, err
+	}
+	t.resetDecodeState()
+	if t.encoder != nil {
+		t.encoder.Reset()
+	}
+	if c.BytesToFeed == 0 && c.CharsToSkip == 0 && !c.NeedEOF {
+		return cookieInt, nil
+	}
+	if err := t.ensureCodecs(); err != nil {
+		return nil, err
+	}
+	if c.DecFlags != 0 {
+		if err := t.decoder.SetState(nil, int64(c.DecFlags)); err != nil {
+			return nil, err
+		}
+	}
+	if c.BytesToFeed > 0 {
+		raw, rerr := readOneChunk(t.buf, int(c.BytesToFeed))
+		if rerr != nil {
+			return nil, rerr
+		}
+		if len(raw) < int(c.BytesToFeed) {
+			return nil, fmt.Errorf("OSError: can't restore logical file position")
+		}
+		decoded, derr := t.decoder.Decode(raw, c.NeedEOF)
+		if derr != nil {
+			return nil, derr
+		}
+		if t.readuniversal {
+			t.ensureNLDecoder()
+			decoded = t.nlDecoder.translateNewlines(decoded, c.NeedEOF)
+		}
+		if int(c.CharsToSkip) > len(decoded) {
+			return nil, fmt.Errorf("OSError: can't restore logical file position")
+		}
+		t.decodedBuf = decoded[c.CharsToSkip:]
+	}
+	return cookieInt, nil
+}
+
+func whenceName(w int) string {
+	switch w {
+	case 1:
+		return "SEEK_CUR"
+	case 2:
+		return "SEEK_END"
+	}
+	return "SEEK"
+}
+
+// Seek is the int64 convenience wrapper used by callers that do not
+// care about cookies (e.g. test code seeking to byte 0).
+//
+// CPython: Modules/_io/textio.c:2536 textiowrapper_seek_impl
+func (t *TextIOWrapper) Seek(pos int64, whence int) (int64, error) {
+	b, err := t.SeekCookie(new(big.Int).SetInt64(pos), whence)
+	if err != nil {
 		return 0, err
 	}
-	if t.decodedBuf != "" || (t.nlDecoder != nil && t.nlDecoder.pendingcr) {
-		return 0, fmt.Errorf("OSError: telling position disabled by next() call")
+	if b.IsInt64() {
+		return b.Int64(), nil
 	}
-	return bufTell(t.buf)
+	return 0, nil
+}
+
+// TellCookie returns the current stream position as a cookie integer.
+// When decoded characters are buffered ahead of the caller, the cookie
+// carries the snapshot state needed to round-trip via SeekCookie.
+//
+// CPython: Modules/_io/textio.c:2734 textiowrapper_tell_impl
+func (t *TextIOWrapper) TellCookie() (*big.Int, error) {
+	if err := t.checkUsable(); err != nil {
+		return nil, err
+	}
+	if err := t.writeflush(); err != nil {
+		return nil, err
+	}
+	if t.decodedBuf == "" && (t.nlDecoder == nil || !t.nlDecoder.pendingcr) {
+		pos, err := bufTell(t.buf)
+		if err != nil {
+			return nil, err
+		}
+		return new(big.Int).SetInt64(pos), nil
+	}
+	if !t.snapshotValid {
+		return nil, fmt.Errorf("OSError: telling position disabled by next() call")
+	}
+	consumed := t.snapshotChunkLen - len(t.decodedBuf)
+	if consumed < 0 || consumed > t.snapshotChunkLen {
+		return nil, fmt.Errorf("OSError: telling position disabled by next() call")
+	}
+	c := cookie{
+		StartPos:    t.snapshotStartPos,
+		DecFlags:    int32(t.snapshotDecFlags),
+		BytesToFeed: int32(t.snapshotBytesFed),
+		CharsToSkip: int32(consumed),
+	}
+	return packCookie(c), nil
+}
+
+// Tell returns the current stream position as an int64 for callers
+// that do not need the full cookie shape.
+func (t *TextIOWrapper) Tell() (int64, error) {
+	b, err := t.TellCookie()
+	if err != nil {
+		return 0, err
+	}
+	if b.IsInt64() {
+		return b.Int64(), nil
+	}
+	return 0, nil
 }
 
 // Truncate truncates the file at the current position (or pos if given).
@@ -979,9 +1109,9 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 			if len(args) < 1 || len(args) > 2 {
 				return nil, fmt.Errorf("TypeError: seek() takes 1 or 2 arguments (%d given)", len(args))
 			}
-			pos, err := intArg(args[0], "seek")
-			if err != nil {
-				return nil, err
+			posInt, ok := args[0].(*objects.Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: seek() argument 1 must be int")
 			}
 			whence := 0
 			if len(args) == 2 {
@@ -991,20 +1121,20 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 				}
 				whence = w
 			}
-			out, err := t.Seek(int64(pos), whence)
+			out, err := t.SeekCookie(posInt.BigInt(), whence)
 			if err != nil {
 				return nil, err
 			}
-			return objects.NewInt(out), nil
+			return objects.NewIntFromBig(out), nil
 		})
 	// CPython: Modules/_io/textio.c:2734 textiowrapper_tell_impl
 	case "tell":
 		return objects.NewBuiltinFunction("tell", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			pos, err := t.Tell()
+			pos, err := t.TellCookie()
 			if err != nil {
 				return nil, err
 			}
-			return objects.NewInt(pos), nil
+			return objects.NewIntFromBig(pos), nil
 		})
 	// CPython: Modules/_io/textio.c:2968 textiowrapper_truncate_impl
 	case "truncate":

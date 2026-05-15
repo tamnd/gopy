@@ -74,6 +74,21 @@ func (t *TextIOWrapper) readChunk(sizeHint int) (bool, error) {
 		want = int(scaled)
 	}
 
+	// Snapshot the decoder state and buffer position before the read so
+	// a later tell can build a cookie that round-trips.
+	preBuf, preFlags := t.decoder.GetState()
+	preCopy := append([]byte(nil), preBuf...)
+	startPos, posErr := bufTell(t.buf)
+	if posErr != nil {
+		startPos = 0
+	}
+	preNLPendCR := false
+	preNLSeenNL := 0
+	if t.nlDecoder != nil {
+		preNLPendCR = t.nlDecoder.pendingcr
+		preNLSeenNL = t.nlDecoder.seennl
+	}
+
 	raw, err := readOneChunk(t.buf, want)
 	if err != nil {
 		return false, err
@@ -87,6 +102,21 @@ func (t *TextIOWrapper) readChunk(sizeHint int) (bool, error) {
 	if t.readuniversal {
 		t.ensureNLDecoder()
 		decoded = t.nlDecoder.translateNewlines(decoded, eof)
+	}
+	// The snapshot only describes the current chunk; if leftover from a
+	// prior chunk is still in decodedBuf, a future tell cannot rebuild
+	// state from a single replay, so invalidate.
+	if len(t.decodedBuf) > 0 {
+		t.snapshotValid = false
+	} else {
+		t.snapshotValid = true
+		t.snapshotStartPos = startPos
+		t.snapshotDecBuf = preCopy
+		t.snapshotDecFlags = preFlags
+		t.snapshotBytesFed = len(raw)
+		t.snapshotChunkLen = len(decoded)
+		t.snapshotNLPendCR = preNLPendCR
+		t.snapshotNLSeenNL = preNLSeenNL
 	}
 	if decoded != "" {
 		t.decodedBuf += decoded
