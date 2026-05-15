@@ -15,7 +15,7 @@ import "syscall"
 //
 // CPython: Modules/errnomodule.c:88 errno_exec (Darwin slice)
 func errnoEntries() []errnoEntry {
-	return []errnoEntry{
+	entries := []errnoEntry{
 		{"EPERM", int(syscall.EPERM)},
 		{"ENOENT", int(syscall.ENOENT)},
 		{"ESRCH", int(syscall.ESRCH)},
@@ -121,7 +121,7 @@ func errnoEntries() []errnoEntry {
 		{"ENOPOLICY", int(syscall.ENOPOLICY)},
 		{"ENOTRECOVERABLE", int(syscall.ENOTRECOVERABLE)},
 		{"EOWNERDEAD", int(syscall.EOWNERDEAD)},
-		{"EQFULL", int(syscall.EQFULL)},
 		{"ENOTSUP", int(syscall.ENOTSUP)},
 	}
+	return append(entries, darwinArchEntries()...)
 }
