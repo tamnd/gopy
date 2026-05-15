@@ -19,6 +19,7 @@ from . import exceptions
 from . import constants
 from . import format_helpers
 from . import base_futures
-# log/mixins/base_tasks/coroutines/__main__ are imported transitively as
-# their dependencies (threading, logging, itertools.count.__next__) come
-# online in later phases of spec 1711.
+from . import log
+from . import coroutines
+# mixins/base_tasks/__main__ pull events which Phase 3 ships; they're
+# imported transitively then.

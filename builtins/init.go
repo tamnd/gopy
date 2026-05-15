@@ -204,7 +204,10 @@ func wireTypeCalls() {
 		bindCtor(objects.FloatType, FloatCtor)
 		bindCtor(objects.BoolType, BoolCtor)
 		bindListCtor(objects.ListType)
-		bindCtor(objects.TupleType, TupleCtor)
+		// tuple's TpNew is set in objects/tuple.go (subtype-aware,
+		// populates items inline because tuple is immutable). Only the
+		// __new__ descriptor needs binding here.
+		bindCtorDescr(objects.TupleType, TupleCtor)
 		bindDictCtor(objects.DictType)
 		bindCtor(objects.SetType, SetCtor)
 		bindCtor(objects.FrozensetType, FrozensetCtor)
