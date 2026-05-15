@@ -80,8 +80,32 @@ func Init() (*objects.Dict, error) {
 	if err := setItem(d, "hash_info", hashInfo()); err != nil {
 		return nil, err
 	}
+	if err := setItem(d, "_jit", jitInfo()); err != nil {
+		return nil, err
+	}
 
 	return d, nil
+}
+
+// jitInfo returns sys._jit. gopy has no JIT; is_available /
+// is_enabled / is_active all answer False so test.support's
+// requires_jit_enabled gates skip cleanly.
+//
+// CPython: Python/sysmodule.c:4064 _jit module
+func jitInfo() *objects.Namespace {
+	n := objects.NewNamespace()
+	d := n.Dict()
+	falseFn := objects.NewBuiltinFunction("is_enabled", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.NewBool(false), nil
+	})
+	_ = d.SetItem(objects.NewStr("is_enabled"), falseFn)
+	_ = d.SetItem(objects.NewStr("is_available"), objects.NewBuiltinFunction("is_available", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.NewBool(false), nil
+	}))
+	_ = d.SetItem(objects.NewStr("is_active"), objects.NewBuiltinFunction("is_active", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.NewBool(false), nil
+	}))
+	return n
 }
 
 // apiVersion is CPython's PYTHON_API_VERSION (Include/patchlevel.h).
@@ -165,18 +189,21 @@ const ImplementationName = "gopy"
 var CacheTag = "gopy-" + strconv.Itoa(build.PythonMajorVersion) +
 	strconv.Itoa(build.PythonMinorVersion) + "0"
 
-// implementation returns sys.implementation as a 4-element tuple
-// (name, version, hexversion, cache_tag). CPython uses a SimpleNamespace
-// here; the named-attribute facade lands once SimpleNamespace does.
+// implementation returns sys.implementation as a SimpleNamespace
+// carrying name / version / hexversion / cache_tag. CPython's
+// make_impl_info populates the same fields on a namespace so
+// test.support can do `sys.implementation.name`.
 //
 // CPython: Python/sysmodule.c:3889 make_impl_info
-func implementation() *objects.Tuple {
-	return objects.NewTuple([]objects.Object{
-		objects.NewStr(ImplementationName),
-		versionInfo(),
-		objects.NewInt(hexVersion()),
-		objects.NewStr(CacheTag),
-	})
+func implementation() *objects.Namespace {
+	n := objects.NewNamespace()
+	d := n.Dict()
+	_ = d.SetItem(objects.NewStr("name"), objects.NewStr(ImplementationName))
+	_ = d.SetItem(objects.NewStr("version"), versionInfo())
+	_ = d.SetItem(objects.NewStr("hexversion"), objects.NewInt(hexVersion()))
+	_ = d.SetItem(objects.NewStr("cache_tag"), objects.NewStr(CacheTag))
+	_ = d.SetItem(objects.NewStr("_multiarch"), objects.NewStr(""))
+	return n
 }
 
 // builtinModuleNames returns the tuple of module names that are
@@ -192,24 +219,25 @@ func builtinModuleNames() *objects.Tuple {
 	})
 }
 
-// hashInfo is sys.hash_info as a tuple. The field order matches
-// CPython's Hash_InfoType; the struct-sequence wrapper lands with
-// 1651-sys-C.
+// hashInfo is sys.hash_info as a SimpleNamespace. The field order
+// matches CPython's Hash_InfoType (width, modulus, inf, nan, imag,
+// algorithm, hash_bits, seed_bits, cutoff). The named attributes let
+// test.support do `sys.hash_info.width`.
 //
 // CPython: Python/sysmodule.c:hash_info_desc
-func hashInfo() *objects.Tuple {
-	algo := "siphash13"
-	return objects.NewTuple([]objects.Object{
-		objects.NewInt(64),
-		objects.NewInt(0),
-		objects.NewInt(0),
-		objects.NewInt(0),
-		objects.NewInt(0),
-		objects.NewStr(algo),
-		objects.NewInt(128),
-		objects.NewInt(64),
-		objects.NewInt(0),
-	})
+func hashInfo() *objects.Namespace {
+	n := objects.NewNamespace()
+	d := n.Dict()
+	_ = d.SetItem(objects.NewStr("width"), objects.NewInt(64))
+	_ = d.SetItem(objects.NewStr("modulus"), objects.NewInt(0))
+	_ = d.SetItem(objects.NewStr("inf"), objects.NewInt(0))
+	_ = d.SetItem(objects.NewStr("nan"), objects.NewInt(0))
+	_ = d.SetItem(objects.NewStr("imag"), objects.NewInt(0))
+	_ = d.SetItem(objects.NewStr("algorithm"), objects.NewStr("siphash13"))
+	_ = d.SetItem(objects.NewStr("hash_bits"), objects.NewInt(128))
+	_ = d.SetItem(objects.NewStr("seed_bits"), objects.NewInt(64))
+	_ = d.SetItem(objects.NewStr("cutoff"), objects.NewInt(0))
+	return n
 }
 
 func setStr(d *objects.Dict, name, value string) error {

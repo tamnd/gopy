@@ -112,6 +112,104 @@ func init() {
 	CodeType.Hash = codeHash
 	CodeType.RichCmp = codeRichCompare
 	CodeType.Getattro = codeGetAttr
+	// code.replace(**kwargs) returns a new code object with the named
+	// fields overridden. types.coroutine and test.support both reach
+	// for this.
+	//
+	// CPython: Objects/codeobject.c:2858 code_replace_impl
+	SetTypeDescr(CodeType, "replace", NewMethodDescr(CodeType, "replace", codeReplaceMethod))
+}
+
+// codeReplaceMethod backs code.replace. The first positional argument
+// is the receiver; everything else comes via kwargs and maps onto the
+// CodeReplace struct.
+//
+// CPython: Objects/codeobject.c:2858 code_replace_impl
+func codeReplaceMethod(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: code.replace() takes no positional arguments (%d given)", len(args)-1)
+	}
+	c := args[0].(*Code)
+	r := CodeReplace{}
+	intPtr := func(o Object) (*int, error) {
+		i, ok := o.(*Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: replace() argument must be int, not %s", o.Type().Name)
+		}
+		iv, _ := i.Int64()
+		v := int(iv)
+		return &v, nil
+	}
+	strPtr := func(o Object) (*string, error) {
+		s, ok := o.(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: replace() argument must be str, not %s", o.Type().Name)
+		}
+		v := s.v
+		return &v, nil
+	}
+	for k, v := range kwargs {
+		switch k {
+		case "co_argcount":
+			p, err := intPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.Argcount = p
+		case "co_posonlyargcount":
+			p, err := intPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.PosonlyArgcount = p
+		case "co_kwonlyargcount":
+			p, err := intPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.KwonlyArgcount = p
+		case "co_stacksize":
+			p, err := intPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.Stacksize = p
+		case "co_flags":
+			p, err := intPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.Flags = p
+		case "co_firstlineno":
+			p, err := intPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.Firstlineno = p
+		case "co_filename":
+			p, err := strPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.Filename = p
+		case "co_name":
+			p, err := strPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.Name = p
+		case "co_qualname":
+			p, err := strPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.Qualname = p
+		default:
+			// Silently ignore unknown kwargs; the field surface grows
+			// with the bytecode/specializer ports.
+		}
+	}
+	return c.Replace(r)
 }
 
 // codeGetAttr exposes the read-only co_* fields the traceback
