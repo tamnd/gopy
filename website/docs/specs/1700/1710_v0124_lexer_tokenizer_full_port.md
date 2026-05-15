@@ -120,6 +120,67 @@ For each of the five tests:
 Once every gate is green, flip task #484 ("test e2e v0.5.5 — lexer
 panel") to done and update the 1700 checklist row.
 
+## Sub-system blockers (DFS)
+
+The four pending gate rows each depend on a chain of sub-system gaps
+outside the lexer/tokenizer scope. Closing 1710 means walking each
+chain depth-first and porting whatever's missing until the gate runs
+green.
+
+### test_tokenize.py — chain
+
+1. `import tempfile` → `import random` (vendored) → blocks on
+   `2 ** -BPF` at random.py:98. **Sub-system: numbers/long, op
+   `int.__pow__(int, neg_int)` should return float.** Task T1 — DONE
+   (commit 5d9c85d). Float `__pow__` slot also wired.
+2. After T1, random.py:125 `self.gauss_next = None` raises because
+   `_random.Random` subclass instances have no per-instance __dict__.
+   **Sub-system: VM attr machinery must let C-port subclasses store
+   instance attributes.** Task T1.5 — DONE (commit 7d9e729). Added
+   `AttrDictHolder` interface in `objects`; `_random.RandomObject`
+   implements it; `GenericGetAttr` / `GenericSetAttr` consult it.
+3. After T1.5, `import random` is clean and `import tempfile` reaches
+   `tempfile.gettempdir()`, which calls `os.fsdecode` — not yet bound
+   in `module/os`. **Sub-system: `os.fsdecode` + `os.fsencode`.**
+   Task T1.6.
+4. Vendor `Lib/bisect.py` (pure-Python with optional `_bisect`
+   accelerator; vendor as-is). Sub-system: stdlib vendor. T1.7.
+5. After bisect lands, retry tempfile end-to-end; recurse on whatever
+   surfaces next until the test_tokenize gate runs green.
+
+### test_utf8source.py — chain
+
+Suite already runs end-to-end. Two of three sub-tests fail in unrelated
+sub-systems:
+
+1. `test_latin1` calls `compile(bytes_source, ...)`. gopy's
+   `compile()` rejects `bytes`. **Sub-system: builtin compile() must
+   accept `bytes | bytearray | str | AST`.** Task T2.
+2. `test_badsyntax` imports `test.tokenizedata.badsyntax_pep3120`.
+   Sub-system: vendor `Lib/test/tokenizedata/` fixtures referenced by
+   the panel tests. Task T3.
+3. `sys.exit` is missing on the unittest tear-down path. Sub-system:
+   `module/sys` must bind `exit`. Task T4.
+
+### test_source_encoding.py — chain
+
+1. `import inspect` — `Lib/inspect.py` (3409 lines) not yet vendored.
+   Vendor verbatim along with its deps already in `stdlib/`. Task T5.
+2. Retry; recurse.
+
+### test_tabnanny.py — chain
+
+1. `unittest.mock` imports `asyncio`. asyncio is a large sub-system
+   (events loop, transports, protocols, futures, tasks, streams,
+   subprocess, queues, locks). **Sub-system: asyncio package, gated as
+   its own spec when reached.** Task T6.
+2. Retry; recurse.
+
+The DFS executes T1 → T1.5 → T1.6 → T1.7 → T4 → T2 → T3 → T5 → T6 in
+roughly that order (smallest fix first, escalating into larger
+sub-system ports). Each task gets its own commit and an entry in
+`stdtest/MANIFEST.txt` when the gate it unblocks lands green.
+
 ## Out of scope
 
 - `tokenizedata/` test fixtures under `Lib/test/tokenizedata/` are
