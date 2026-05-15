@@ -4,6 +4,15 @@
 // 263 encoding detection (decoding to UTF-8 in place) while
 // utf8_tokenizer trusts the caller. gopy collapses the two into one
 // driver because Go strings are already UTF-8.
+//
+// Function map (string_tokenizer.c → gopy):
+//
+//	tok_underflow_string         → FromBytes underflow returning false
+//	_PyTokenizer_FromString      → FromString / FromBytes (encoding path)
+//
+// Function map (utf8_tokenizer.c → gopy):
+//
+//	_PyTokenizer_FromUTF8        → FromString / FromBytes (utf-8 fast path)
 
 package lexer
 
