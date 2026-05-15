@@ -2065,6 +2065,40 @@ func matchedOr(v any) any {
 	return v
 }
 
+// posSetter is implemented by every AST node that carries a source
+// location (ast/nodes_gen.go SetPos). The pegen layer assigns the
+// span covered by an alt to the constructed node so PEP 657 location
+// emission has a real position to encode.
+type posSetter interface {
+	Position() ast.Pos
+	SetPos(ast.Pos)
+}
+
+// withSpan stamps the source span covering tokens [startMark, p.mark)
+// onto v if v is an AST node whose Pos is still NoPos. The action
+// helpers themselves still construct nodes with Pos: ast.NoPos; this
+// wrapper is the gopy equivalent of CPython's EXTRA macro applied at
+// every alt's action-call site.
+//
+// Leaf helpers (nameFromToken, numberToken) already write the token
+// span into Pos. withSpan leaves those alone.
+//
+// CPython: Tools/peg_generator/pegen/c_generator.py EXTRA
+func withSpan(p *Parser, startMark int, v any) any {
+	if v == nil || v == placeholderMatched {
+		return v
+	}
+	n, ok := v.(posSetter)
+	if !ok {
+		return v
+	}
+	if n.Position() != ast.NoPos {
+		return v
+	}
+	n.SetPos(p.Span(startMark))
+	return v
+}
+
 // truthy is the C-style truthiness check the action-body translator
 // emits for ternary conditions. Mirrors the implicit `!= 0` /
 // `!= NULL` check that C uses on pointers, ints, and bool-like
