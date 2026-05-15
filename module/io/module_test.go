@@ -417,7 +417,7 @@ func TestTextIOWrapperWrite(t *testing.T) {
 }
 
 // TestTextIOWrapperWriteflushBatching pins the pending_bytes batching
-// behaviour ported from CPython textio.c _textiowrapper_writeflush.
+// behavior ported from CPython textio.c _textiowrapper_writeflush.
 // Many sub-chunkSize writes must coalesce: the on-disk size stays at 0
 // until either Flush, Close, or the pending_bytes_count crosses
 // chunk_size. line_buffering off and write_through off here so neither

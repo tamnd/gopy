@@ -586,10 +586,7 @@ func (t *TextIOWrapper) Write(s string) (int, error) {
 		return 0, err
 	}
 
-	needflush := false
-	if t.linebuffering && (haslf || strings.IndexByte(s, '\r') >= 0) {
-		needflush = true
-	}
+	needflush := t.linebuffering && (haslf || strings.IndexByte(s, '\r') >= 0)
 
 	// Drain pending before queuing a large chunk so the queued slab
 	// never grows beyond ~chunk_size before being handed to the
