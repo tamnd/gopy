@@ -1630,6 +1630,7 @@ func newTupleGetterType() *objects.Type {
 	t.DescrGet = tupleGetterDescrGet
 	t.DescrSet = tupleGetterDescrSet
 	t.Getattro = tupleGetterGetattr
+	t.Setattro = tupleGetterSetattr
 	return t
 }
 
@@ -1692,6 +1693,29 @@ func tupleGetterRepr(o objects.Object) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("_tuplegetter(%d, %s)", tg.Index, docRepr), nil
+}
+
+// tupleGetterSetattr supports __doc__ assignment. CPython's
+// tuplegetter_members marks __doc__ as a writable member, so the
+// namedtuple __init__ machinery and downstream code (e.g. dis.py
+// rebinding Instruction field docstrings) can replace it post-hoc.
+//
+// CPython: Modules/_collectionsmodule.c:2768 tuplegetter_members
+func tupleGetterSetattr(o objects.Object, name objects.Object, value objects.Object) error {
+	tg := o.(*TupleGetterObject)
+	n, err := objects.Str(name)
+	if err != nil {
+		return err
+	}
+	if n == "__doc__" {
+		if value == nil {
+			tg.Doc = objects.None()
+		} else {
+			tg.Doc = value
+		}
+		return nil
+	}
+	return objects.GenericSetAttr(o, name, value)
 }
 
 // tupleGetterGetattr exposes __doc__ and other attrs.
