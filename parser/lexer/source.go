@@ -154,6 +154,66 @@ func normalizeEncodingName(name string) string {
 	return string(out)
 }
 
+// ValidateUTF8 walks src and returns the 1-based line number and
+// offending byte at the first non-UTF-8 sequence, plus ok=false.
+// When src is valid UTF-8 ok is true. The line count tracks \n, \r,
+// and \r\n the same way the lexer does so the reported line matches
+// the source the user sees in their editor.
+//
+// CPython: Parser/tokenizer/helpers.c:332 ensure_utf8 (the tok_check_bom
+// / decoding_fgets pair raises a SyntaxError on the first non-UTF-8
+// byte when no PEP 263 cookie names a different encoding).
+func ValidateUTF8(src []byte) (line int, bad byte, ok bool) {
+	line = 1
+	i := 0
+	for i < len(src) {
+		c := src[i]
+		if c < 0x80 {
+			if c == '\n' {
+				line++
+				i++
+				continue
+			}
+			if c == '\r' {
+				line++
+				i++
+				if i < len(src) && src[i] == '\n' {
+					i++
+				}
+				continue
+			}
+			i++
+			continue
+		}
+		size := utf8Size(c)
+		if size == 0 || i+size > len(src) {
+			return line, c, false
+		}
+		for k := 1; k < size; k++ {
+			if src[i+k]&0xc0 != 0x80 {
+				return line, c, false
+			}
+		}
+		i += size
+	}
+	return 0, 0, true
+}
+
+// utf8Size returns the length of a UTF-8 sequence whose leading byte
+// is c, or 0 if c is not a valid leading byte. CPython's stb_lookup
+// table; we keep the masks inline because there are only four cases.
+func utf8Size(c byte) int {
+	switch {
+	case c&0xe0 == 0xc0:
+		return 2
+	case c&0xf0 == 0xe0:
+		return 3
+	case c&0xf8 == 0xf0:
+		return 4
+	}
+	return 0
+}
+
 // NormalizeNewlines folds \r\n and bare \r into \n so the FSM can
 // treat newline as a single byte. CPython does the same fold in
 // the file driver before handing lines to the scanner.

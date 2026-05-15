@@ -26,7 +26,7 @@ test_keyword	ready	v0.5.5	keyword module is a generated table; 10/11 green, comp
 test_source_encoding	pending	v0.5.5	blocked on inspect (stdlib not yet vendored)
 test_tabnanny	pending	v0.9.0	blocked on asyncio (stdlib not yet vendored, via unittest.mock)
 test_tokenize	pending	v0.9.0	blocked on tempfile (stdlib not yet vendored)
-test_utf8source	pending	v0.5.5	suite runs end-to-end; 1/3 green. Remaining errors are compile() rejecting bytes and missing test.tokenizedata.badsyntax_pep3120 fixture, both outside lexer/tokenizer scope
+test_utf8source	ready	v0.5.5	3/3 green after compile(bytes), str.encode latin-1, sys.exit, and lexer non-UTF-8 byte check landed
 
 # ---- Parser / grammar / AST ----------------------------------------
 test_annotationlib	ready	v0.10.1	annotation lazy resolver

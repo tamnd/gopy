@@ -19,7 +19,10 @@
 
 package objects
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // PEP 393 kind values. Match CPython's PyUnicode_Kind enum.
 //
@@ -230,6 +233,22 @@ func init() {
 				return nil, fmt.Errorf("TypeError: can only concatenate str to str")
 			}
 			return NewStr(sa.v + sb.v), nil
+		},
+		// `needle in haystack` for str is substring containment, not the
+		// generic item-by-item walk PySequence_Contains falls back to.
+		// CPython routes through unicode_contains which calls
+		// PyUnicode_Contains; that's a memmem-style search.
+		// CPython: Objects/unicodeobject.c:11192 unicode_contains
+		Contains: func(haystack, needle Object) (bool, error) {
+			hs, ok := haystack.(*Unicode)
+			if !ok {
+				return false, fmt.Errorf("TypeError: 'in <string>' requires str as left operand, not %s", haystack.Type().Name)
+			}
+			ns, ok := needle.(*Unicode)
+			if !ok {
+				return false, fmt.Errorf("TypeError: 'in <string>' requires str as left operand, not %s", needle.Type().Name)
+			}
+			return strings.Contains(hs.v, ns.v), nil
 		},
 	}
 }

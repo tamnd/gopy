@@ -53,6 +53,8 @@ var errorPrefixToType = map[string]*objects.Type{
 	"EOFError:":            pyerrors.PyExc_EOFError,
 	"ImportError:":         pyerrors.PyExc_ImportError,
 	"ModuleNotFoundError:": pyerrors.PyExc_ModuleNotFoundError,
+	"SyntaxError:":         pyerrors.PyExc_SyntaxError,
+	"IndentationError:":    pyerrors.PyExc_IndentationError,
 }
 
 // synthesizeException promotes an unmatched Go error into the closest
@@ -69,6 +71,18 @@ func synthesizeException(err error) *pyerrors.Exception {
 		if strings.HasPrefix(msg, prefix) {
 			return pyerrors.New(typ, objects.NewTuple([]objects.Object{
 				objects.NewStr(strings.TrimSpace(msg[len(prefix):])),
+			}))
+		}
+	}
+	// Fallback: scan for a typed prefix anywhere in the message. The
+	// import loader wraps compile() errors in `imp: loadAsModule ...:
+	// compile: <inner>` envelopes, so a SyntaxError from the parser
+	// arrives without the prefix at byte 0. Pick the earliest match so
+	// callers can still `except SyntaxError`.
+	for prefix, typ := range errorPrefixToType {
+		if i := strings.Index(msg, prefix); i >= 0 {
+			return pyerrors.New(typ, objects.NewTuple([]objects.Object{
+				objects.NewStr(strings.TrimSpace(msg[i+len(prefix):])),
 			}))
 		}
 	}
