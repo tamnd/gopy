@@ -638,6 +638,10 @@ type LruCacheWrapper struct {
 	CacheInfoType objects.Object
 	Hits          int64
 	Misses        int64
+	// Per-instance attribute dict for user assignments like
+	// `wrapper.cache_parameters = lambda ...` that lru_cache() makes.
+	// Lazily allocated.
+	Dict *objects.Dict
 	// Doubly-linked list of cache entries in LRU order. root is a
 	// dummy node so the list is never empty.
 	root *lruListNode
@@ -656,7 +660,8 @@ type lruListNode struct {
 func newLruCacheWrapperType() *objects.Type {
 	t := objects.NewType("functools._lru_cache_wrapper", []*objects.Type{objects.ObjectType()})
 	t.HasDict = true
-	t.Getattro = objects.GenericGetAttr
+	t.Getattro = lruCacheGetattr
+	t.Setattro = lruCacheSetattr
 	t.Call = lruCacheCall
 	t.TpNew = lruCacheNew
 	t.DescrGet = lruCacheDescrGet
@@ -988,4 +993,50 @@ func lruCacheDescrGet(descr objects.Object, owner objects.Object, _ *objects.Typ
 		return descr, nil
 	}
 	return objects.NewBoundMethod(descr, owner), nil
+}
+
+// lruCacheGetattr serves attribute reads on _lru_cache_wrapper
+// instances. The per-instance __dict__ holds names set from Python
+// land (e.g. wrapper.cache_parameters = lambda ... in lru_cache()),
+// so we consult it before falling through to the type's descriptors.
+//
+// CPython: Objects/object.c:1932 PyObject_GenericGetAttr
+func lruCacheGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
+	w := o.(*LruCacheWrapper)
+	n, err := objects.Str(name)
+	if err != nil {
+		return nil, err
+	}
+	if n == "__dict__" {
+		if w.Dict == nil {
+			w.Dict = objects.NewDict()
+		}
+		return w.Dict, nil
+	}
+	if n == "__wrapped__" {
+		return w.Func, nil
+	}
+	if w.Dict != nil {
+		if v, err := w.Dict.GetItem(name); err == nil {
+			return v, nil
+		}
+	}
+	return objects.GenericGetAttr(o, name)
+}
+
+// lruCacheSetattr routes attribute stores to the per-instance dict
+// (lazily allocated), so functools.lru_cache() can stash
+// cache_parameters and similar metadata directly on the wrapper.
+// value==nil signals delete.
+//
+// CPython: Objects/object.c:2024 PyObject_GenericSetAttr
+func lruCacheSetattr(o objects.Object, name objects.Object, value objects.Object) error {
+	w := o.(*LruCacheWrapper)
+	if w.Dict == nil {
+		w.Dict = objects.NewDict()
+	}
+	if value == nil {
+		return w.Dict.DelItem(name)
+	}
+	return w.Dict.SetItem(name, value)
 }
