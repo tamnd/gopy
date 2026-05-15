@@ -261,12 +261,16 @@ func buildOS() (*objects.Module, error) {
 		{"_exit", objects.NewBuiltinFunction("_exit", osExit)},
 		{"urandom", objects.NewBuiltinFunction("urandom", osUrandom)},
 		{"cpu_count", objects.NewBuiltinFunction("cpu_count", osCPUCount)},
-		// POSIX identity + umask. Windows stubs return 0 / empty list.
-		{"geteuid", objects.NewBuiltinFunction("geteuid", osGeteuid)},
-		{"getegid", objects.NewBuiltinFunction("getegid", osGetegid)},
-		{"getgid", objects.NewBuiltinFunction("getgid", osGetgid)},
-		{"getgroups", objects.NewBuiltinFunction("getgroups", osGetgroups)},
 		{"umask", objects.NewBuiltinFunction("umask", osUmask)},
+	}
+	// geteuid / getegid / getgid / getgroups: posixmodule.c gates these
+	// on HAVE_GETEUID. On Windows the C build does not register them, so
+	// CPython raises AttributeError. Match that behavior by only
+	// appending the entries on POSIX builds.
+	//
+	// CPython: Modules/posixmodule.c HAVE_GETEUID block
+	for _, e := range posixIdentityEntries() {
+		entries = append(entries, e)
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {

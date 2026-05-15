@@ -216,22 +216,16 @@ func osWaitpid(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	}), nil
 }
 
-// osGeteuid is not available on Windows; returns 0 to match CPython where
-// posix_geteuid is gated on HAVE_GETEUID.
-func osGeteuid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return objects.NewInt(0), nil
-}
-
-func osGetegid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return objects.NewInt(0), nil
-}
-
-func osGetgid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return objects.NewInt(0), nil
-}
-
-func osGetgroups(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return objects.NewList(nil), nil
+// posixIdentityEntries returns no entries on Windows: CPython's
+// posixmodule.c omits geteuid / getegid / getgid / getgroups when the
+// platform lacks HAVE_GETEUID, so `os.geteuid` raises AttributeError.
+//
+// CPython: Modules/posixmodule.c HAVE_GETEUID block
+func posixIdentityEntries() []struct {
+	name string
+	val  objects.Object
+} {
+	return nil
 }
 
 // osUmask returns 0; Windows has no umask equivalent.

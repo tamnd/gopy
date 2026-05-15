@@ -1,8 +1,8 @@
-//go:build !windows
-
 // Package _socket is the gopy port of CPython's _socket C module.
-// It backs Lib/socket.py with the low-level socket API using Go's
-// syscall package for fd-based operations that mirror the C code 1:1.
+// It backs Lib/socket.py with the low-level socket API. The fd type
+// is socketFd, defined per-platform in fd_unix.go / fd_windows.go,
+// so the same code runs on POSIX file descriptors and Winsock
+// SOCKET handles.
 //
 // CPython: Modules/socketmodule.c
 
@@ -11,13 +11,13 @@ package _socket
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -58,7 +58,7 @@ func init() {
 // CPython: Modules/socketmodule.c:256 PySocketSockObject
 type sockObj struct {
 	objects.Header
-	fd      int
+	fd      socketFd
 	family  int
 	typ     int
 	proto   int
@@ -139,7 +139,17 @@ func sockGetattr(o objects.Object, name objects.Object) (objects.Object, error) 
 func sockRepr(o objects.Object) (string, error) {
 	s := o.(*sockObj)
 	return fmt.Sprintf("<socket object, fd=%d, family=%d, type=%d, proto=%d>",
-		s.fd, s.family, s.typ, s.proto), nil
+		socketFdInt(s.fd), s.family, s.typ, s.proto), nil
+}
+
+// osError formats an OS error as Python's "OSError: [Errno N] msg".
+// Wraps the syscall.Errno cast safely.
+func osError(err error) error {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return fmt.Errorf("OSError: [Errno %d] %s", int(errno), errno.Error())
+	}
+	return fmt.Errorf("OSError: %s", err.Error())
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +184,6 @@ func tupleToSockaddr(family int, addr objects.Object) (syscall.Sockaddr, error) 
 	case syscall.AF_INET:
 		ip := net.ParseIP(host)
 		if ip == nil {
-			// Try resolving.
 			addrs, err2 := net.LookupHost(host)
 			if err2 != nil || len(addrs) == 0 {
 				return nil, fmt.Errorf("OSError: [Errno 11001] getaddrinfo failed: %s", host)
@@ -281,7 +290,7 @@ func sockConnect(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := syscall.Connect(s.fd, sa); err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	return objects.None(), nil
 }
@@ -304,7 +313,7 @@ func sockBind(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := syscall.Bind(s.fd, sa); err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	return objects.None(), nil
 }
@@ -334,7 +343,7 @@ func sockListen(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := syscall.Listen(s.fd, backlog); err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	return objects.None(), nil
 }
@@ -354,7 +363,7 @@ func sockAccept(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	nfd, sa, err := syscall.Accept(s.fd)
 	s.mu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	newSock := &sockObj{
 		fd:      nfd,
@@ -367,7 +376,7 @@ func sockAccept(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 
 	addrTup, err2 := sockaddrToTuple(sa)
 	if err2 != nil {
-		_ = syscall.Close(nfd)
+		_ = closeFd(nfd)
 		return nil, err2
 	}
 	return objects.NewTuple([]objects.Object{newSock, addrTup}), nil
@@ -386,9 +395,9 @@ func sockClose(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.fd >= 0 {
-		_ = syscall.Close(s.fd)
-		s.fd = -1
+	if socketFdValid(s.fd) {
+		_ = closeFd(s.fd)
+		s.fd = invalidFd
 	}
 	return objects.None(), nil
 }
@@ -419,22 +428,21 @@ func sockRecv(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 		}
 	}
 
+	if flags != 0 {
+		buf := make([]byte, bufsize)
+		n, _, err := syscall.Recvfrom(s.fd, buf, flags)
+		if err != nil {
+			return nil, osError(err)
+		}
+		return objects.NewBytes(buf[:n]), nil
+	}
+
 	buf := make([]byte, bufsize)
 	s.mu.Lock()
-	n, err := syscall.Read(s.fd, buf)
-	if err == nil && flags != 0 {
-		// For non-zero flags use Recvfrom with no address.
-		s.mu.Unlock()
-		buf2 := make([]byte, bufsize)
-		n2, _, err2 := syscall.Recvfrom(s.fd, buf2, flags)
-		if err2 != nil {
-			return nil, fmt.Errorf("OSError: [Errno %d] %s", err2.(syscall.Errno), err2.Error())
-		}
-		return objects.NewBytes(buf2[:n2]), nil
-	}
+	n, err := readFd(s.fd, buf)
 	s.mu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	return objects.NewBytes(buf[:n]), nil
 }
@@ -467,7 +475,7 @@ func sockRecvfrom(args []objects.Object, _ map[string]objects.Object) (objects.O
 	buf := make([]byte, int(bufsize64))
 	n, sa, err := syscall.Recvfrom(s.fd, buf, flags)
 	if err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	addrTup, err2 := sockaddrToTuple(sa)
 	if err2 != nil {
@@ -504,14 +512,14 @@ func sockSend(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	var n int
 	if flags == 0 {
 		s.mu.Lock()
-		n, err = syscall.Write(s.fd, data)
+		n, err = writeFd(s.fd, data)
 		s.mu.Unlock()
 	} else {
 		err = syscall.Sendto(s.fd, data, flags, nil)
 		n = len(data)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	return objects.NewInt(int64(n)), nil
 }
@@ -535,11 +543,9 @@ func sockSendto(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	var flags int
 	var addrArg objects.Object
 	if len(args) == 3 {
-		// sendto(data, address)
 		flags = 0
 		addrArg = args[2]
 	} else {
-		// sendto(data, flags, address)
 		fObj, ok3 := args[2].(*objects.Int)
 		if !ok3 {
 			return nil, fmt.Errorf("TypeError: sendto() argument 2 must be int")
@@ -553,12 +559,13 @@ func sockSendto(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 		return nil, err2
 	}
 	if err3 := syscall.Sendto(s.fd, data, flags, sa); err3 != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err3.(syscall.Errno), err3.Error())
+		return nil, osError(err3)
 	}
 	return objects.NewInt(int64(len(data))), nil
 }
 
 // sockSetsockopt implements socket.setsockopt(level, optname, value).
+// value may be int (passed as 4-byte native-endian int) or bytes.
 //
 // CPython: Modules/socketmodule.c:3370 sock_setsockopt
 func sockSetsockopt(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -582,42 +589,21 @@ func sockSetsockopt(args []objects.Object, _ map[string]objects.Object) (objects
 	level := int(l64)
 	optname := int(o64)
 
-	// Value can be int or bytes.
-	var buf []byte
 	switch v := args[3].(type) {
 	case *objects.Int:
 		val32, _ := v.Int64()
-		buf = make([]byte, 4)
-		binary.NativeEndian.PutUint32(buf, uint32(val32))
+		if err := syscall.SetsockoptInt(s.fd, level, optname, int(val32)); err != nil {
+			return nil, osError(err)
+		}
 	case *objects.Bytes:
-		buf = v.Bytes()
+		buf := v.Bytes()
+		if err := setsockoptBytes(s.fd, level, optname, buf); err != nil {
+			return nil, osError(err)
+		}
 	default:
 		return nil, fmt.Errorf("TypeError: setsockopt() argument 3 must be int or bytes")
 	}
-	if err := syscall.SetsockoptByte(s.fd, level, optname, buf[0]); err != nil {
-		// Fall back to generic setsockopt via unsafe.
-		if err2 := setsockoptBytes(s.fd, level, optname, buf); err2 != nil {
-			return nil, fmt.Errorf("OSError: [Errno %d] %s", err2.(syscall.Errno), err2.Error())
-		}
-	}
 	return objects.None(), nil
-}
-
-// setsockoptBytes calls setsockopt(2) with an arbitrary byte slice.
-func setsockoptBytes(fd, level, opt int, buf []byte) error {
-	_, _, errno := syscall.Syscall6(
-		syscall.SYS_SETSOCKOPT,
-		uintptr(fd),
-		uintptr(level),
-		uintptr(opt),
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(len(buf)),
-		0,
-	)
-	if errno != 0 {
-		return errno
-	}
-	return nil
 }
 
 // sockGetsockopt implements socket.getsockopt(level, optname[, buffersize]).
@@ -651,29 +637,17 @@ func sockGetsockopt(args []objects.Object, _ map[string]objects.Object) (objects
 	}
 
 	if buflen == 0 {
-		// Return an int.
 		val, err := syscall.GetsockoptInt(s.fd, int(l64), int(o64))
 		if err != nil {
-			return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+			return nil, osError(err)
 		}
 		return objects.NewInt(int64(val)), nil
 	}
-	// Return bytes.
-	buf := make([]byte, buflen)
-	bufSize := uint32(buflen)
-	_, _, errno := syscall.Syscall6(
-		syscall.SYS_GETSOCKOPT,
-		uintptr(s.fd),
-		uintptr(l64),
-		uintptr(o64),
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(unsafe.Pointer(&bufSize)),
-		0,
-	)
-	if errno != 0 {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", errno, errno.Error())
+	buf, err := getsockoptBytes(s.fd, int(l64), int(o64), buflen)
+	if err != nil {
+		return nil, osError(err)
 	}
-	return objects.NewBytes(buf[:bufSize]), nil
+	return objects.NewBytes(buf), nil
 }
 
 // sockGetsockname implements socket.getsockname().
@@ -689,7 +663,7 @@ func sockGetsockname(args []objects.Object, _ map[string]objects.Object) (object
 	}
 	sa, err := syscall.Getsockname(s.fd)
 	if err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	return sockaddrToTuple(sa)
 }
@@ -707,12 +681,14 @@ func sockGetpeername(args []objects.Object, _ map[string]objects.Object) (object
 	}
 	sa, err := syscall.Getpeername(s.fd)
 	if err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	return sockaddrToTuple(sa)
 }
 
-// sockFileno implements socket.fileno(). Returns the underlying fd.
+// sockFileno implements socket.fileno(). Returns the underlying fd as
+// an int. On Windows the SOCKET handle is exposed directly, matching
+// CPython's behavior on _WIN32.
 //
 // CPython: Modules/socketmodule.c:3783 fileno_doc
 func sockFileno(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -723,11 +699,10 @@ func sockFileno(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'fileno' requires a 'socket' object")
 	}
-	return objects.NewInt(int64(s.fd)), nil
+	return objects.NewInt(int64(socketFdInt(s.fd))), nil
 }
 
 // sockSetblocking implements socket.setblocking(flag).
-// False -> non-blocking (timeout=0), True -> blocking (timeout=None/-1).
 //
 // CPython: Modules/socketmodule.c:3170 setblocking_doc
 func sockSetblocking(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -751,7 +726,6 @@ func sockSetblocking(args []objects.Object, _ map[string]objects.Object) (object
 }
 
 // sockSettimeout implements socket.settimeout(timeout).
-// None -> blocking, 0 -> non-blocking, float -> timed.
 //
 // CPython: Modules/socketmodule.c:3245 sock_settimeout
 func sockSettimeout(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -785,8 +759,7 @@ func sockSettimeout(args []objects.Object, _ map[string]objects.Object) (objects
 	return objects.None(), nil
 }
 
-// sockGettimeout implements socket.gettimeout(). Returns None (blocking),
-// 0.0 (non-blocking) or a float (timed).
+// sockGettimeout implements socket.gettimeout().
 //
 // CPython: Modules/socketmodule.c:3245 sock_gettimeout
 func sockGettimeout(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -804,7 +777,6 @@ func sockGettimeout(args []objects.Object, _ map[string]objects.Object) (objects
 }
 
 // sockShutdown implements socket.shutdown(how).
-// how: SHUT_RD=0, SHUT_WR=1, SHUT_RDWR=2.
 //
 // CPython: Modules/socketmodule.c:5293 shutdown_doc
 func sockShutdown(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -821,7 +793,7 @@ func sockShutdown(args []objects.Object, _ map[string]objects.Object) (objects.O
 	}
 	how64, _ := howObj.Int64()
 	if err := syscall.Shutdown(s.fd, int(how64)); err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 	return objects.None(), nil
 }
@@ -839,8 +811,7 @@ func sockMakefile(args []objects.Object, _ map[string]objects.Object) (objects.O
 // Module-level functions.
 // ---------------------------------------------------------------------------
 
-// socketSocket implements _socket.socket(family, type, proto). Creates a
-// new socket and returns the sockObj.
+// socketSocket implements _socket.socket(family, type, proto).
 //
 // CPython: Modules/socketmodule.c:3453 sock_initobj
 func socketSocket(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -875,10 +846,9 @@ func socketSocket(args []objects.Object, _ map[string]objects.Object) (objects.O
 
 	fd, err := syscall.Socket(family, typ, proto)
 	if err != nil {
-		return nil, fmt.Errorf("OSError: [Errno %d] %s", err.(syscall.Errno), err.Error())
+		return nil, osError(err)
 	}
 
-	// Inherit default timeout.
 	defaultTimeoutMu.Lock()
 	timeout := defaultTimeoutVal
 	defaultTimeoutMu.Unlock()
@@ -931,15 +901,13 @@ func socketGethostbyname(args []objects.Object, _ map[string]objects.Object) (ob
 }
 
 // socketGetaddrinfo implements _socket.getaddrinfo(host, port[, family, type, proto, flags]).
-// Returns a list of (family, type, proto, canonname, sockaddr) 5-tuples.
 //
 // CPython: Modules/socketmodule.c:6898 socket_getaddrinfo
-func socketGetaddrinfo(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+func socketGetaddrinfo(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: getaddrinfo() takes 2 to 6 arguments")
 	}
 
-	// host
 	var hostStr string
 	if args[0] == objects.None() {
 		hostStr = ""
@@ -951,7 +919,6 @@ func socketGetaddrinfo(args []objects.Object, kwargs map[string]objects.Object) 
 		hostStr = h
 	}
 
-	// port: can be int or str or None
 	var portStr string
 	switch p := args[1].(type) {
 	case *objects.Int:
@@ -968,17 +935,7 @@ func socketGetaddrinfo(args []objects.Object, kwargs map[string]objects.Object) 
 		}
 	}
 
-	hints := &net.Resolver{}
-	_ = hints
-
-	var network string
 	sockType := 0
-	if len(args) >= 3 {
-		if tObj, ok := args[2].(*objects.Int); ok {
-			t64, _ := tObj.Int64()
-			_ = t64
-		}
-	}
 	if len(args) >= 4 {
 		if tObj, ok := args[3].(*objects.Int); ok {
 			t64, _ := tObj.Int64()
@@ -986,14 +943,6 @@ func socketGetaddrinfo(args []objects.Object, kwargs map[string]objects.Object) 
 		}
 	}
 
-	switch sockType {
-	case syscall.SOCK_DGRAM:
-		network = "udp"
-	default:
-		network = "tcp"
-	}
-
-	// Use net.DefaultResolver.
 	var addrs []net.IPAddr
 	if hostStr == "" {
 		addrs = []net.IPAddr{{IP: net.IPv4(0, 0, 0, 0)}}
@@ -1009,14 +958,8 @@ func socketGetaddrinfo(args []objects.Object, kwargs map[string]objects.Object) 
 	for _, addr := range addrs {
 		var portInt int
 		if portStr != "" {
-			_, portI, err := net.SplitHostPort(net.JoinHostPort(addr.IP.String(), portStr))
-			if err == nil {
-				fmt.Sscanf(portI, "%d", &portInt)
-			} else {
-				fmt.Sscanf(portStr, "%d", &portInt)
-			}
+			fmt.Sscanf(portStr, "%d", &portInt)
 		}
-		_ = network
 
 		var family int
 		var sockaddr objects.Object
@@ -1031,8 +974,8 @@ func socketGetaddrinfo(args []objects.Object, kwargs map[string]objects.Object) 
 			sockaddr = objects.NewTuple([]objects.Object{
 				objects.NewStr(addr.IP.String()),
 				objects.NewInt(int64(portInt)),
-				objects.NewInt(0), // flowinfo
-				objects.NewInt(0), // scope_id
+				objects.NewInt(0),
+				objects.NewInt(0),
 			})
 		}
 
@@ -1048,7 +991,7 @@ func socketGetaddrinfo(args []objects.Object, kwargs map[string]objects.Object) 
 			objects.NewInt(int64(family)),
 			objects.NewInt(int64(sockType)),
 			objects.NewInt(int64(proto)),
-			objects.NewStr(""), // canonname
+			objects.NewStr(""),
 			sockaddr,
 		})
 		results = append(results, result)
@@ -1128,7 +1071,6 @@ func socketGetdefaulttimeout(args []objects.Object, _ map[string]objects.Object)
 }
 
 // socketInetAton implements _socket.inet_aton(string).
-// Converts an IPv4 dotted-decimal string to a 4-byte big-endian bytes object.
 //
 // CPython: Modules/socketmodule.c:6687 _socket_inet_aton_impl
 func socketInetAton(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -1151,7 +1093,6 @@ func socketInetAton(args []objects.Object, _ map[string]objects.Object) (objects
 }
 
 // socketInetNtoa implements _socket.inet_ntoa(packed_ip).
-// Converts a 4-byte packed binary IPv4 address to dotted-decimal string.
 //
 // CPython: Modules/socketmodule.c:6760 _socket_inet_ntoa_impl
 func socketInetNtoa(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -1257,7 +1198,6 @@ func buildModule() (*objects.Module, error) {
 		return objects.NewBuiltinFunction(name, f)
 	}
 
-	// Functions.
 	funcs := []struct {
 		name string
 		fn   func([]objects.Object, map[string]objects.Object) (objects.Object, error)
@@ -1282,38 +1222,30 @@ func buildModule() (*objects.Module, error) {
 		}
 	}
 
-	// The socket type itself.
 	if err := set("socket", SocketType); err != nil {
 		return nil, err
 	}
 
-	// Constants - use syscall package values for platform correctness.
-	// CPython: Modules/socketmodule.c:7462 (module constant table)
 	constants := []struct {
 		name string
 		val  int
 	}{
-		// Address families.
 		{"AF_UNSPEC", syscall.AF_UNSPEC},
 		{"AF_INET", syscall.AF_INET},
 		{"AF_INET6", syscall.AF_INET6},
 		{"AF_UNIX", syscall.AF_UNIX},
 
-		// Socket types.
 		{"SOCK_STREAM", syscall.SOCK_STREAM},
 		{"SOCK_DGRAM", syscall.SOCK_DGRAM},
 		{"SOCK_RAW", syscall.SOCK_RAW},
 
-		// Socket options.
 		{"SOL_SOCKET", syscall.SOL_SOCKET},
 		{"SO_REUSEADDR", syscall.SO_REUSEADDR},
 		{"SO_KEEPALIVE", syscall.SO_KEEPALIVE},
 
-		// IP protocols.
 		{"IPPROTO_TCP", syscall.IPPROTO_TCP},
 		{"IPPROTO_UDP", syscall.IPPROTO_UDP},
 
-		// Shutdown directions.
 		{"SHUT_RD", syscall.SHUT_RD},
 		{"SHUT_WR", syscall.SHUT_WR},
 		{"SHUT_RDWR", syscall.SHUT_RDWR},
@@ -1324,11 +1256,12 @@ func buildModule() (*objects.Module, error) {
 		}
 	}
 
-	// Expose the default timeout helper as a module attribute.
-	// Python code reads _socket.setdefaulttimeout/-getdefaulttimeout directly.
-
 	return m, nil
 }
 
-// Silence unused import warnings for time (used in timeout logic documentation).
-var _ = time.Second
+// Silence unused-import warnings for binary and time which are kept for
+// future htonll / timeout-driven branches.
+var (
+	_ = binary.NativeEndian
+	_ = time.Second
+)

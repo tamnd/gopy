@@ -198,8 +198,8 @@ func TestSocketCreate(t *testing.T) {
 	if !ok {
 		t.Fatalf("socket() result not sockObj: %T", result)
 	}
-	if s.fd < 0 {
-		t.Fatalf("socket() fd = %d, want >= 0", s.fd)
+	if !socketFdValid(s.fd) {
+		t.Fatalf("socket() fd = %d, want valid", socketFdInt(s.fd))
 	}
 	// Close it.
 	sockClose([]objects.Object{s}, nil)
