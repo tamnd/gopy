@@ -120,7 +120,7 @@ func TestLexerTokenizerStdlibImports(t *testing.T) {
 			code: "import io, _tokenize\n" +
 				"src = b'x = 1\\n'\n" +
 				"rl = io.BytesIO(src).readline\n" +
-				"it = _tokenize.TokenizerIter(rl, extra_tokens=True)\n" +
+				"it = _tokenize.TokenizerIter(rl, extra_tokens=True, encoding='utf-8')\n" +
 				"toks = list(it)\n" +
 				"strings = [t[1] for t in toks]\n" +
 				"print('ti', 'x' in strings, '=' in strings, '1' in strings)\n",

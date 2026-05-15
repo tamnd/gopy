@@ -31,7 +31,7 @@ func TestEndmarkerThenEOF(t *testing.T) {
 // this just verifies the wiring reaches the lexer.
 func TestSimpleAssignment(t *testing.T) {
 	it := New("x = 1\n", false)
-	want := []token.Type{token.NAME, token.OP, token.NUMBER, token.NEWLINE}
+	want := []token.Type{token.NAME, token.EQUAL, token.NUMBER, token.NEWLINE}
 	for i, w := range want {
 		tok, err := it.Next()
 		if err != nil {

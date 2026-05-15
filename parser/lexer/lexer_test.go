@@ -33,7 +33,7 @@ func kinds(toks []Tok) []token.Type {
 func TestSimpleAssignment(t *testing.T) {
 	got := kinds(tokenize_(t, "x = 1\n"))
 	want := []token.Type{
-		token.NAME, token.OP, token.NUMBER, token.NEWLINE, token.ENDMARKER,
+		token.NAME, token.EQUAL, token.NUMBER, token.NEWLINE, token.ENDMARKER,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -93,7 +93,7 @@ func TestCommentExtraTokens(t *testing.T) {
 func TestStringLiteral(t *testing.T) {
 	got := kinds(tokenize_(t, `"hello" + 'world'`+"\n"))
 	want := []token.Type{
-		token.STRING, token.OP, token.STRING, token.NEWLINE, token.ENDMARKER,
+		token.STRING, token.PLUS, token.STRING, token.NEWLINE, token.ENDMARKER,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -128,7 +128,7 @@ func TestIndentDedent(t *testing.T) {
 func TestLineContinuation(t *testing.T) {
 	got := kinds(tokenize_(t, "a + \\\n  b\n"))
 	want := []token.Type{
-		token.NAME, token.OP, token.NAME, token.NEWLINE, token.ENDMARKER,
+		token.NAME, token.PLUS, token.NAME, token.NEWLINE, token.ENDMARKER,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -148,8 +148,8 @@ func TestParenContinuation(t *testing.T) {
 	// pins below.
 	got := kinds(tokenize_(t, "(a +\n b)\n"))
 	want := []token.Type{
-		token.OP, token.NAME, token.OP,
-		token.NAME, token.OP, token.NEWLINE, token.ENDMARKER,
+		token.LPAR, token.NAME, token.PLUS,
+		token.NAME, token.RPAR, token.NEWLINE, token.ENDMARKER,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -173,8 +173,8 @@ func TestParenContinuationExtraTokens(t *testing.T) {
 		}
 	}
 	want := []token.Type{
-		token.OP, token.NAME, token.OP, token.NL,
-		token.NAME, token.OP, token.NEWLINE, token.ENDMARKER,
+		token.LPAR, token.NAME, token.PLUS, token.NL,
+		token.NAME, token.RPAR, token.NEWLINE, token.ENDMARKER,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -190,7 +190,7 @@ func TestFStringSimple(t *testing.T) {
 	got := kinds(tokenize_(t, `f"hi {name}!"`+"\n"))
 	want := []token.Type{
 		token.FSTRING_START, token.FSTRING_MIDDLE,
-		token.OP, token.NAME, token.OP,
+		token.LBRACE, token.NAME, token.RBRACE,
 		token.FSTRING_MIDDLE, token.FSTRING_END,
 		token.NEWLINE, token.ENDMARKER,
 	}
@@ -271,7 +271,7 @@ func TestReaderDriver(t *testing.T) {
 func TestBOMStripped(t *testing.T) {
 	src := "\xef\xbb\xbfx = 1\n"
 	got := kinds(tokenize_(t, src))
-	want := []token.Type{token.NAME, token.OP, token.NUMBER, token.NEWLINE, token.ENDMARKER}
+	want := []token.Type{token.NAME, token.EQUAL, token.NUMBER, token.NEWLINE, token.ENDMARKER}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
