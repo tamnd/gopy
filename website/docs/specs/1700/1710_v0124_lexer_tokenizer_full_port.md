@@ -16,14 +16,14 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 
 | CPython source | C LOC | gopy destination | Go LOC | Status | Commit |
 |---|---:|---|---:|---|---|
-| `Parser/lexer/buffer.c` | 76 | `parser/lexer/buffer.go` | 56 | DONE | pending |
+| `Parser/lexer/buffer.c` | 76 | `parser/lexer/buffer.go` | 56 | DONE | 5374e84 |
 | `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` | 633 | TODO | — |
-| `Parser/lexer/state.c` | 151 | `parser/lexer/state.go` | 355 | WIP | — |
-| `Parser/tokenizer/helpers.c` | 581 | `parser/lexer/helpers.go` | 64 | TODO | — |
-| `Parser/tokenizer/file_tokenizer.c` | 493 | `parser/lexer/driver_file.go` | 83 | TODO | — |
-| `Parser/tokenizer/readline_tokenizer.c` | 134 | `parser/lexer/driver_readline.go` | 44 | TODO | — |
-| `Parser/tokenizer/string_tokenizer.c` | 148 | `parser/lexer/driver_string.go` | 103 | TODO | — |
-| `Parser/tokenizer/utf8_tokenizer.c` | 55 | `parser/lexer/driver_string.go` (utf-8 path) | — | TODO | — |
+| `Parser/lexer/state.c` | 151 | `parser/lexer/state.go` | 402 | DONE | d157189 |
+| `Parser/tokenizer/helpers.c` | 581 | `parser/lexer/helpers.go` (+ encoding subset in `parser/lexer/source.go`) | 176 + 238 | DONE | de537e1 |
+| `Parser/tokenizer/file_tokenizer.c` | 493 | `parser/lexer/driver_file.go` | 120 | DONE | 268c8f8 |
+| `Parser/tokenizer/readline_tokenizer.c` | 134 | `parser/lexer/driver_readline.go` | 50 | DONE | 268c8f8 |
+| `Parser/tokenizer/string_tokenizer.c` | 148 | `parser/lexer/driver_string.go` | 112 | DONE | 268c8f8 |
+| `Parser/tokenizer/utf8_tokenizer.c` | 55 | `parser/lexer/driver_string.go` (utf-8 path) | (shared) | DONE | 268c8f8 |
 | `Python/Python-tokenize.c` | 445 | `module/_tokenize/module.go` | 352 | WIP | — |
 | `Lib/keyword.py` | 64 | `stdlib/keyword.py` | 64 | DONE | byte-equal vendor |
 | `Lib/tokenize.py` | 598 | `stdlib/tokenize.py` | 598 | DONE | byte-equal vendor |
