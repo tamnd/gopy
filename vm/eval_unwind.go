@@ -175,7 +175,7 @@ func lineForOffset(co *objects.Code, off int) int {
 // which the CPython unwind invokes for every frame on the way up.
 //
 // Only attaches when an exception is already on the thread state.
-// Bare Go errors that the runtime synthesises into a typed exception
+// Bare Go errors that the runtime synthesizes into a typed exception
 // downstream (synthesizeException) are not raised here, so they have
 // no associated frame data worth recording at this layer.
 //

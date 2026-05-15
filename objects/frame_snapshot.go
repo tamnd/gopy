@@ -48,21 +48,21 @@ func SnapshotFrame(src InterpreterFrame) *FrameSnapshot {
 	}
 }
 
-func (s *FrameSnapshot) FrameCode() *Code           { return s.Code }
-func (s *FrameSnapshot) FrameGlobals() Object       { return s.Globals }
-func (s *FrameSnapshot) FrameBuiltins() Object      { return s.Builtins }
-func (s *FrameSnapshot) FrameLocals() Object        { return s.Locals }
-func (s *FrameSnapshot) FrameFunc() Object          { return s.Func }
-func (s *FrameSnapshot) FrameLasti() int            { return s.Lasti }
+func (s *FrameSnapshot) FrameCode() *Code      { return s.Code }
+func (s *FrameSnapshot) FrameGlobals() Object  { return s.Globals }
+func (s *FrameSnapshot) FrameBuiltins() Object { return s.Builtins }
+func (s *FrameSnapshot) FrameLocals() Object   { return s.Locals }
+func (s *FrameSnapshot) FrameFunc() Object     { return s.Func }
+func (s *FrameSnapshot) FrameLasti() int       { return s.Lasti }
 func (s *FrameSnapshot) FrameBack() InterpreterFrame {
 	if s.Back == nil {
 		return nil
 	}
 	return s.Back
 }
-func (s *FrameSnapshot) FrameNumLocals() int            { return 0 }
-func (s *FrameSnapshot) FrameFastLocal(int) Object      { return nil }
-func (s *FrameSnapshot) FrameNumCells() int             { return 0 }
-func (s *FrameSnapshot) FrameCellLocal(int) Object      { return nil }
-func (s *FrameSnapshot) FrameNumFrees() int             { return 0 }
-func (s *FrameSnapshot) FrameFreeLocal(int) Object      { return nil }
+func (s *FrameSnapshot) FrameNumLocals() int       { return 0 }
+func (s *FrameSnapshot) FrameFastLocal(int) Object { return nil }
+func (s *FrameSnapshot) FrameNumCells() int        { return 0 }
+func (s *FrameSnapshot) FrameCellLocal(int) Object { return nil }
+func (s *FrameSnapshot) FrameNumFrees() int        { return 0 }
+func (s *FrameSnapshot) FrameFreeLocal(int) Object { return nil }
