@@ -31,10 +31,14 @@ func init() {
 	ByteArrayType.Hash = byteArrayHash
 	ByteArrayType.RichCmp = byteArrayRichCmp
 	ByteArrayType.Sequence = &SequenceMethods{
-		Length:   byteArrayLen,
-		GetItem:  byteArrayGetItem,
-		SetItem:  byteArraySetItem,
-		Contains: byteArrayContains,
+		Length:        byteArrayLen,
+		GetItem:       byteArrayGetItem,
+		SetItem:       byteArraySetItem,
+		Contains:      byteArrayContains,
+		Concat:        byteArrayConcat,
+		Repeat:        byteArrayRepeat,
+		InPlaceConcat: byteArrayIConcat,
+		InPlaceRepeat: byteArrayIRepeat,
 	}
 	// Mapping slot covers int / slice subscript dispatch. CPython
 	// routes b[k] through bytearray_subscript; without a Mapping slot
@@ -280,6 +284,101 @@ func byteArraySetItem(o Object, i int, v Object) error {
 	}
 	b.v[i] = byte(n)
 	return nil
+}
+
+// bytesLikeBuf returns the byte view of a bytes-like operand for
+// sq_concat / sq_inplace_concat. Mirrors PyObject_GetBuffer(PyBUF_SIMPLE)
+// gating: only bytes and bytearray pass; everything else raises the
+// CPython TypeError that bytearray_iconcat_lock_held would format.
+//
+// CPython: Objects/bytearrayobject.c:354 bytearray_iconcat_lock_held
+// (PyObject_GetBuffer call)
+func bytesLikeBuf(o Object) ([]byte, bool) {
+	switch v := o.(type) {
+	case *Bytes:
+		return v.Bytes(), true
+	case *ByteArray:
+		return v.v, true
+	}
+	return nil, false
+}
+
+// byteArrayConcat ports PyByteArray_Concat: returns a fresh bytearray
+// holding a ++ b. Both arguments must satisfy the buffer protocol; in
+// this slice we accept bytes/bytearray.
+//
+// CPython: Objects/bytearrayobject.c:303 PyByteArray_Concat
+func byteArrayConcat(a, b Object) (Object, error) {
+	va, ok := bytesLikeBuf(a)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: can't concat %s to %s", b.Type().Name, a.Type().Name)
+	}
+	vb, ok := bytesLikeBuf(b)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: can't concat %s to %s", b.Type().Name, a.Type().Name)
+	}
+	out := make([]byte, 0, len(va)+len(vb))
+	out = append(out, va...)
+	out = append(out, vb...)
+	return NewByteArray(out), nil
+}
+
+// byteArrayIConcat ports bytearray_iconcat: appends other's bytes to
+// self in place and returns self.
+//
+// CPython: Objects/bytearrayobject.c:348 bytearray_iconcat_lock_held
+func byteArrayIConcat(a, b Object) (Object, error) {
+	self, ok := a.(*ByteArray)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: bytearray.__iadd__ requires bytearray, got %s", a.Type().Name)
+	}
+	vb, ok := bytesLikeBuf(b)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: can't concat %s to %s", b.Type().Name, a.Type().Name)
+	}
+	self.v = append(self.v, vb...)
+	self.size = int64(len(self.v))
+	return self, nil
+}
+
+// byteArrayRepeat ports bytearray_repeat: returns a fresh bytearray
+// holding self repeated n times. Negative n returns empty.
+//
+// CPython: Objects/bytearrayobject.c:387 bytearray_repeat_lock_held
+func byteArrayRepeat(o Object, n int) (Object, error) {
+	self := o.(*ByteArray)
+	if n < 0 {
+		n = 0
+	}
+	size := len(self.v) * n
+	out := make([]byte, size)
+	for i := 0; i < n; i++ {
+		copy(out[i*len(self.v):], self.v)
+	}
+	return NewByteArray(out), nil
+}
+
+// byteArrayIRepeat ports bytearray_irepeat: grows self in place to
+// hold n copies of its current bytes. n==1 is a no-op.
+//
+// CPython: Objects/bytearrayobject.c:419 bytearray_irepeat_lock_held
+func byteArrayIRepeat(o Object, n int) (Object, error) {
+	self := o.(*ByteArray)
+	if n < 0 {
+		n = 0
+	}
+	if n == 1 {
+		return self, nil
+	}
+	mysize := len(self.v)
+	size := mysize * n
+	out := make([]byte, size)
+	for i := 0; i < n; i++ {
+		copy(out[i*mysize:], self.v)
+	}
+	self.v = out
+	self.size = int64(len(self.v))
+	return self, nil
 }
 
 func byteArrayContains(o, v Object) (bool, error) {

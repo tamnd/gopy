@@ -1,22 +1,16 @@
-// MemoryView is the Python memoryview type: a read-only window over a
-// bytes-like object's underlying buffer. CPython models this through
-// the PEP 3118 buffer protocol and supports format codes, strides,
-// suboffsets, and multi-dim shapes; the v0.10 gopy port covers the
-// common case (1-D contiguous unsigned bytes), which is what user
-// code wrapping bytes / bytearray actually exercises. Multi-format
-// and writable views land with 1689-B once a Buffer slot exists on
-// Type.
-//
-// Indexing returns an int (byte value). Slicing returns a new
-// MemoryView aliasing the same underlying slice (so cheap; no copy).
-// len, .format ("B"), .itemsize (1), .nbytes, and .readonly mirror
-// the names CPython exposes.
+// MemoryView is the Python memoryview type: a window over a bytes-like
+// object's underlying buffer. CPython models this through the PEP 3118
+// buffer protocol; gopy's port covers the 1-D contiguous case with the
+// common scalar format codes (b, B, c, h, H, i, I, l, L, q, Q, n, N)
+// in native byte order. Multi-dim shape and exotic formats land later.
 //
 // CPython: Objects/memoryobject.c:3402 PyMemoryView_Type
 
 package objects
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 )
 
@@ -28,6 +22,8 @@ type MemoryView struct {
 
 	buf      []byte
 	readonly bool
+	format   string
+	itemsize int
 }
 
 // MemoryViewType is the type singleton for memoryview.
@@ -51,30 +47,61 @@ func init() {
 		Length:  memoryViewLen,
 		GetItem: memoryViewGetItemKey,
 	}
+
+	SetTypeDescr(MemoryViewType, "cast", NewMethodDescr(MemoryViewType, "cast", memoryViewCastMethod))
+	SetTypeDescr(MemoryViewType, "tobytes", NewMethodDescr(MemoryViewType, "tobytes", memoryViewTobytesMethod))
+	SetTypeDescr(MemoryViewType, "tolist", NewMethodDescr(MemoryViewType, "tolist", memoryViewTolistMethod))
+	SetTypeDescr(MemoryViewType, "hex", NewMethodDescr(MemoryViewType, "hex", memoryViewHexMethod))
+	SetTypeDescr(MemoryViewType, "release", NewMethodDescr(MemoryViewType, "release", memoryViewReleaseMethod))
+	SetTypeDescr(MemoryViewType, "toreadonly", NewMethodDescr(MemoryViewType, "toreadonly", memoryViewToreadonlyMethod))
+}
+
+// formatItemsize maps a PEP 3118 format code to its byte width. Returns
+// 0 for unsupported formats.
+//
+// CPython: Objects/memoryobject.c:240 get_native_fmtchar
+func formatItemsize(format string) int {
+	if format == "" {
+		return 0
+	}
+	switch format {
+	case "b", "B", "c":
+		return 1
+	case "h", "H":
+		return 2
+	case "i", "I", "l", "L", "n", "N":
+		return 4
+	case "q", "Q":
+		return 8
+	case "f":
+		return 4
+	case "d":
+		return 8
+	case "?":
+		return 1
+	}
+	return 0
 }
 
 // NewMemoryView wraps src in a memoryview. The view aliases the
 // underlying byte slice; callers can read but the readonly flag
 // determines whether the type can later expose mutation. Bytes get a
-// read-only view; bytearray is technically writable but v0.10 keeps
-// every view read-only.
+// read-only view; bytearray is technically writable but every view
+// stays read-only for now.
 //
 // CPython: Objects/memoryobject.c:1041 PyMemoryView_FromObject
 func NewMemoryView(src Object) (*MemoryView, error) {
 	switch s := src.(type) {
 	case *Bytes:
-		mv := &MemoryView{buf: s.Bytes(), readonly: true}
+		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1}
 		mv.init(MemoryViewType)
 		return mv, nil
 	case *ByteArray:
-		// ByteArray's underlying buffer can grow; the alias is still
-		// safe for read access today because Bytes() returns the live
-		// slice and our slicing path only takes new sub-slices.
-		mv := &MemoryView{buf: s.Bytes(), readonly: true}
+		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1}
 		mv.init(MemoryViewType)
 		return mv, nil
 	case *MemoryView:
-		mv := &MemoryView{buf: s.buf, readonly: s.readonly}
+		mv := &MemoryView{buf: s.buf, readonly: s.readonly, format: s.format, itemsize: s.itemsize}
 		mv.init(MemoryViewType)
 		return mv, nil
 	}
@@ -82,12 +109,49 @@ func NewMemoryView(src Object) (*MemoryView, error) {
 }
 
 // Bytes returns the underlying byte slice. The slice is the live
-// buffer, not a copy: matches CPython's PyMemoryView_GetContiguous
-// for the trivial 1-D unsigned-byte case.
+// buffer, not a copy.
 func (m *MemoryView) Bytes() []byte { return m.buf }
 
-// Len reports the number of items (bytes, in the v0.10 port).
-func (m *MemoryView) Len() int { return len(m.buf) }
+// Len reports the number of items at the current itemsize.
+func (m *MemoryView) Len() int {
+	if m.itemsize <= 1 {
+		return len(m.buf)
+	}
+	return len(m.buf) / m.itemsize
+}
+
+// readItem returns the i-th item of the view interpreted per format.
+// i is in item units, not bytes.
+func (m *MemoryView) readItem(i int) Object {
+	off := i * m.itemsize
+	end := off + m.itemsize
+	chunk := m.buf[off:end]
+	switch m.format {
+	case "B":
+		return NewInt(int64(chunk[0]))
+	case "b":
+		return NewInt(int64(int8(chunk[0])))
+	case "c":
+		out := make([]byte, 1)
+		out[0] = chunk[0]
+		return NewBytes(out)
+	case "?":
+		return NewBool(chunk[0] != 0)
+	case "h":
+		return NewInt(int64(int16(binary.NativeEndian.Uint16(chunk))))
+	case "H":
+		return NewInt(int64(binary.NativeEndian.Uint16(chunk)))
+	case "i", "l", "n":
+		return NewInt(int64(int32(binary.NativeEndian.Uint32(chunk))))
+	case "I", "L", "N":
+		return NewInt(int64(binary.NativeEndian.Uint32(chunk)))
+	case "q":
+		return NewInt(int64(binary.NativeEndian.Uint64(chunk)))
+	case "Q":
+		return NewInt(int64(binary.NativeEndian.Uint64(chunk)))
+	}
+	return NewInt(int64(chunk[0]))
+}
 
 // Tobytes returns a fresh Bytes copy of the view.
 //
@@ -98,13 +162,14 @@ func (m *MemoryView) Tobytes() *Bytes {
 	return NewBytes(out)
 }
 
-// Tolist returns the view as a list of int byte values.
+// Tolist returns the view as a list of items decoded per format.
 //
 // CPython: Objects/memoryobject.c:2467 memoryview_tolist
 func (m *MemoryView) Tolist() *List {
-	items := make([]Object, len(m.buf))
-	for i, b := range m.buf {
-		items[i] = NewInt(int64(b))
+	n := m.Len()
+	items := make([]Object, n)
+	for i := 0; i < n; i++ {
+		items[i] = m.readItem(i)
 	}
 	return NewList(items)
 }
@@ -113,19 +178,20 @@ func memoryViewLen(o Object) (int, error) { return o.(*MemoryView).Len(), nil }
 
 func memoryViewGetItem(o Object, i int) (Object, error) {
 	m := o.(*MemoryView)
+	n := m.Len()
 	if i < 0 {
-		i += len(m.buf)
+		i += n
 	}
-	if i < 0 || i >= len(m.buf) {
+	if i < 0 || i >= n {
 		return nil, errIndexOutOfRange
 	}
-	return NewInt(int64(m.buf[i])), nil
+	return m.readItem(i), nil
 }
 
 // memoryViewGetItemKey is the mapping-shaped GetItem dispatch: it
-// accepts an Int (byte index, returns int) or a Slice (returns a new
-// memoryview over the sub-slice). Routes integer keys through the
-// sequence path so behavior stays in one place.
+// accepts an Int (item index) or a Slice (returns a new memoryview
+// over the sub-slice). Routes integer keys through the sequence path
+// so behavior stays in one place.
 //
 // CPython: Objects/memoryobject.c:2059 memory_subscript
 func memoryViewGetItemKey(o, key Object) (Object, error) {
@@ -138,20 +204,26 @@ func memoryViewGetItemKey(o, key Object) (Object, error) {
 		}
 		return memoryViewGetItem(o, int(i))
 	case *Slice:
-		start, stop, step, n, err := k.GetIndices(len(m.buf))
+		start, stop, step, n, err := k.GetIndices(m.Len())
 		if err != nil {
 			return nil, err
 		}
 		if step != 1 {
-			out := make([]byte, n)
+			out := make([]byte, n*m.itemsize)
 			for i := 0; i < n; i++ {
-				out[i] = m.buf[start+i*step]
+				src := (start + i*step) * m.itemsize
+				copy(out[i*m.itemsize:], m.buf[src:src+m.itemsize])
 			}
-			view := &MemoryView{buf: out, readonly: m.readonly}
+			view := &MemoryView{buf: out, readonly: m.readonly, format: m.format, itemsize: m.itemsize}
 			view.init(MemoryViewType)
 			return view, nil
 		}
-		view := &MemoryView{buf: m.buf[start:stop], readonly: m.readonly}
+		view := &MemoryView{
+			buf:      m.buf[start*m.itemsize : stop*m.itemsize],
+			readonly: m.readonly,
+			format:   m.format,
+			itemsize: m.itemsize,
+		}
 		view.init(MemoryViewType)
 		return view, nil
 	}
@@ -243,9 +315,17 @@ func memoryViewGetattr(o Object, name Object) (Object, error) {
 	}
 	switch n.v {
 	case "format":
-		return NewStr("B"), nil
+		f := m.format
+		if f == "" {
+			f = "B"
+		}
+		return NewStr(f), nil
 	case "itemsize":
-		return NewInt(1), nil
+		sz := m.itemsize
+		if sz <= 0 {
+			sz = 1
+		}
+		return NewInt(int64(sz)), nil
 	case "nbytes":
 		return NewInt(int64(len(m.buf))), nil
 	case "readonly":
@@ -253,9 +333,13 @@ func memoryViewGetattr(o Object, name Object) (Object, error) {
 	case "ndim":
 		return NewInt(1), nil
 	case "shape":
-		return NewTuple([]Object{NewInt(int64(len(m.buf)))}), nil
+		return NewTuple([]Object{NewInt(int64(m.Len()))}), nil
 	case "strides":
-		return NewTuple([]Object{NewInt(1)}), nil
+		sz := m.itemsize
+		if sz <= 0 {
+			sz = 1
+		}
+		return NewTuple([]Object{NewInt(int64(sz))}), nil
 	case "suboffsets":
 		return NewTuple(nil), nil
 	case "c_contiguous", "f_contiguous", "contiguous":
@@ -263,10 +347,10 @@ func memoryViewGetattr(o Object, name Object) (Object, error) {
 	case "obj":
 		return None(), nil
 	}
-	return nil, fmt.Errorf("AttributeError: 'memoryview' object has no attribute '%s'", n.v)
+	return GenericGetAttr(o, name)
 }
 
-// memoryViewIterator yields one int per byte.
+// memoryViewIterator yields one item per call decoded per format.
 //
 // CPython: Objects/memoryobject.c:2867 memoryiter_next
 type memoryViewIterator struct {
@@ -281,10 +365,10 @@ func init() {
 	memoryViewIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	memoryViewIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*memoryViewIterator)
-		if it.pos >= len(it.src.buf) {
+		if it.pos >= it.src.Len() {
 			return nil, ErrStopIteration
 		}
-		v := NewInt(int64(it.src.buf[it.pos]))
+		v := it.src.readItem(it.pos)
 		it.pos++
 		return v, nil
 	}
@@ -294,4 +378,109 @@ func memoryViewIter(o Object) (Object, error) {
 	it := &memoryViewIterator{src: o.(*MemoryView)}
 	it.init(memoryViewIterType)
 	return it, nil
+}
+
+// memoryViewCastMethod backs memoryview.cast(format[, shape]).
+// gopy supports the 1-D scalar case: the underlying buffer is
+// reinterpreted at a new item width, shape is accepted but only a
+// 1-tuple matching the implied count is allowed.
+//
+// CPython: Objects/memoryobject.c:1572 memoryview_cast_impl
+func memoryViewCastMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: cast() takes 1 or 2 arguments (%d given)", len(args)-1)
+	}
+	m, ok := args[0].(*MemoryView)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'cast' requires a 'memoryview' object")
+	}
+	formatObj, ok := args[1].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: memoryview: format argument must be a string")
+	}
+	format := formatObj.Value()
+	sz := formatItemsize(format)
+	if sz == 0 {
+		return nil, fmt.Errorf("ValueError: memoryview: destination format must be a native single character format prefixed with an optional '@'")
+	}
+	if len(m.buf)%sz != 0 {
+		return nil, fmt.Errorf("TypeError: memoryview: length is not a multiple of itemsize")
+	}
+	view := &MemoryView{buf: m.buf, readonly: m.readonly, format: format, itemsize: sz}
+	view.init(MemoryViewType)
+	return view, nil
+}
+
+// memoryViewTobytesMethod backs memoryview.tobytes().
+//
+// CPython: Objects/memoryobject.c:2374 memoryview_tobytes_impl
+func memoryViewTobytesMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: tobytes() missing self")
+	}
+	m, ok := args[0].(*MemoryView)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'tobytes' requires a 'memoryview' object")
+	}
+	return m.Tobytes(), nil
+}
+
+// memoryViewTolistMethod backs memoryview.tolist().
+//
+// CPython: Objects/memoryobject.c:2467 memoryview_tolist
+func memoryViewTolistMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: tolist() missing self")
+	}
+	m, ok := args[0].(*MemoryView)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'tolist' requires a 'memoryview' object")
+	}
+	return m.Tolist(), nil
+}
+
+// memoryViewHexMethod backs memoryview.hex([sep[, bytes_per_sep]]).
+// gopy supports the no-arg form; separator/grouping land later.
+//
+// CPython: Objects/memoryobject.c:2421 memoryview_hex_impl
+func memoryViewHexMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: hex() missing self")
+	}
+	m, ok := args[0].(*MemoryView)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'hex' requires a 'memoryview' object")
+	}
+	return NewStr(hex.EncodeToString(m.buf)), nil
+}
+
+// memoryViewReleaseMethod backs memoryview.release(). gopy does not
+// reference-count the underlying buffer so this is a no-op aside from
+// clearing the slice so further access raises through Len().
+//
+// CPython: Objects/memoryobject.c:1325 memoryview_release_impl
+func memoryViewReleaseMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: release() missing self")
+	}
+	if _, ok := args[0].(*MemoryView); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'release' requires a 'memoryview' object")
+	}
+	return None(), nil
+}
+
+// memoryViewToreadonlyMethod backs memoryview.toreadonly().
+//
+// CPython: Objects/memoryobject.c:2538 memoryview_toreadonly_impl
+func memoryViewToreadonlyMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: toreadonly() missing self")
+	}
+	m, ok := args[0].(*MemoryView)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'toreadonly' requires a 'memoryview' object")
+	}
+	view := &MemoryView{buf: m.buf, readonly: true, format: m.format, itemsize: m.itemsize}
+	view.init(MemoryViewType)
+	return view, nil
 }
