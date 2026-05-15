@@ -45,6 +45,37 @@ func init() {
 	BytesIOType.Iter = bytesIOIter
 	BytesIOType.IterNext = bytesIOIterNext
 	BytesIOType.Getattro = bytesIOGetattr
+	// LOAD_SPECIAL walks the type MRO for __enter__ / __exit__.
+	//
+	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
+	objects.SetTypeDescr(BytesIOType, "__enter__", objects.NewBuiltinFunction("__enter__", bytesIOEnterDescr))
+	objects.SetTypeDescr(BytesIOType, "__exit__", objects.NewBuiltinFunction("__exit__", bytesIOExitDescr))
+}
+
+func bytesIOEnterDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __enter__() missing self argument")
+	}
+	b, ok := args[0].(*BytesIO)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __enter__() expected _io.BytesIO self")
+	}
+	if err := b.checkUsable(); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func bytesIOExitDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __exit__() missing self argument")
+	}
+	b, ok := args[0].(*BytesIO)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __exit__() expected _io.BytesIO self")
+	}
+	_ = b.Close()
+	return objects.None(), nil
 }
 
 // NewBytesIO creates an empty BytesIO. Caller may provide initial bytes.

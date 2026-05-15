@@ -71,6 +71,41 @@ func init() {
 	FileIOType.Repr = fileIORepr
 	FileIOType.Str = fileIORepr
 	FileIOType.Getattro = fileIOGetattr
+	// LOAD_SPECIAL walks the type MRO for __enter__ / __exit__ rather
+	// than going through instance Getattro, so `with f:` needs type-level
+	// descriptors.
+	//
+	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
+	objects.SetTypeDescr(FileIOType, "__enter__", objects.NewBuiltinFunction("__enter__", fileIOEnterDescr))
+	objects.SetTypeDescr(FileIOType, "__exit__", objects.NewBuiltinFunction("__exit__", fileIOExitDescr))
+}
+
+func fileIOEnterDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __enter__() missing self argument")
+	}
+	fi, ok := args[0].(*FileIO)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __enter__() expected _io.FileIO self")
+	}
+	if err := fi.checkClosed(); err != nil {
+		return nil, err
+	}
+	return fi, nil
+}
+
+func fileIOExitDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __exit__() missing self argument")
+	}
+	fi, ok := args[0].(*FileIO)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __exit__() expected _io.FileIO self")
+	}
+	if err := fi.Close(); err != nil {
+		return nil, err
+	}
+	return objects.None(), nil
 }
 
 // NewFileIO wraps an already-open *stdos.File. closefd defaults to true.

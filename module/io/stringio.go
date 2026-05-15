@@ -58,6 +58,37 @@ func init() {
 	StringIOType.Iter = stringIOIter
 	StringIOType.IterNext = stringIOIterNext
 	StringIOType.Getattro = stringIOGetattr
+	// LOAD_SPECIAL walks the type MRO for __enter__ / __exit__.
+	//
+	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
+	objects.SetTypeDescr(StringIOType, "__enter__", objects.NewBuiltinFunction("__enter__", stringIOEnterDescr))
+	objects.SetTypeDescr(StringIOType, "__exit__", objects.NewBuiltinFunction("__exit__", stringIOExitDescr))
+}
+
+func stringIOEnterDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __enter__() missing self argument")
+	}
+	s, ok := args[0].(*StringIO)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __enter__() expected _io.StringIO self")
+	}
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func stringIOExitDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: __exit__() missing self argument")
+	}
+	s, ok := args[0].(*StringIO)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __exit__() expected _io.StringIO self")
+	}
+	s.Close()
+	return objects.None(), nil
 }
 
 // NewStringIO returns an empty StringIO in default-newline mode
