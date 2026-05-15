@@ -327,6 +327,11 @@ func (s *State) scanName(_ int) Tok {
 	}
 	s.backup(c)
 	// CPython: Parser/lexer/lexer.c:364 verify_identifier
+	// The full check needs the XID_Start / XID_Continue Unicode tables
+	// generated from the same Unicode version CPython ships. gopy's
+	// objects.IsXIDStartRune is itself approximate, so wiring it here
+	// would just propagate that approximation. Pending tasks #612 +
+	// unicodedata XID table port.
 	if !s.verifyIdentifier() {
 		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
@@ -689,10 +694,12 @@ func (s *State) lookahead(test string) bool {
 
 // verifyEndOfNumber inspects the byte that terminated a numeric literal
 // and either accepts it (returning true) or records a SyntaxError. The
-// C source emits a deprecation warning when the literal abuts a keyword
-// (`1and`, `1or`, ...); the warnings plumbing isn't wired through the
-// tokenizer yet, so we accept those cases without warning. When the
-// trailing byte starts a fresh identifier (`1foo`), we surface
+// `1and` / `1or` keyword-abutting branch in CPython emits a
+// SyntaxWarning before accepting; gopy's tokenizer doesn't reach the
+// warnings module yet, so the warning is currently dropped (the literal
+// is still accepted, matching CPython's accept-with-warning outcome
+// when warnings are at their default disposition). When the trailing
+// byte starts a fresh identifier (`1foo`), we surface
 // "invalid <kind> literal" the same way CPython does.
 //
 // CPython: Parser/lexer/lexer.c:305 verify_end_of_number
@@ -734,11 +741,15 @@ func (s *State) verifyEndOfNumber(c int, kind string) bool {
 }
 
 // verifyIdentifier checks that the bytes between s.start and s.cur form
-// a valid PEP 3131 identifier. The C source rejects identifiers whose
-// first invalid code point is non-conforming (NFKC / XID class). gopy
-// validates UTF-8 + checks each rune against Go's unicode tables; the
-// XID test is approximated by IsLetter || IsDigit || == '_'. ASCII-only
-// identifiers (the common case) short-circuit.
+// a valid PEP 3131 identifier. CPython runs _PyUnicode_ScanIdentifier
+// against the Unicode XID_Start / XID_Continue tables. gopy doesn't yet
+// vendor those tables (objects.IsXIDStartRune is itself approximated
+// via unicode.IsLetter, which can disagree on a handful of codepoints
+// at Unicode-version boundaries). Until the unicodedata XID tables
+// land, this routine only enforces UTF-8 validity. That's permissive:
+// it accepts a few identifiers CPython would reject. The function is
+// wired into scanName so the entry point is in place; tightening it
+// is one swap away once the tables exist. Gap tracked under #612.
 //
 // CPython: Parser/lexer/lexer.c:364 verify_identifier
 func (s *State) verifyIdentifier() bool {
@@ -756,9 +767,7 @@ func (s *State) verifyIdentifier() bool {
 	if asciiOnly {
 		return true
 	}
-	if line, bad, ok := ValidateUTF8(bs); !ok {
-		_ = line
-		_ = bad
+	if _, _, ok := ValidateUTF8(bs); !ok {
 		s.done = eDecode
 		s.recordError("invalid character in identifier")
 		return false
