@@ -5,7 +5,7 @@ title: "1711. v0.12.4 asyncio full port"
 sidebar_label: "1711. v0.12.4 asyncio"
 sidebar_position: 1711
 slug: /specs/1711-v0124-asyncio
-description: "Port the CPython 3.14 asyncio package (Lib/asyncio/*.py + Modules/_asynciomodule.c) into gopy under module/asyncio + module/_asyncio so import asyncio, asyncio.coroutines._is_coroutine, and asyncio.Runner work end-to-end. Closes the T6 BLOCKED row in spec 1710 and unblocks test_tabnanny.py."
+description: "Port the CPython 3.14 asyncio package (Lib/asyncio/*.py + Modules/_asynciomodule.c) into gopy under stdlib/asyncio + module/_asyncio so import asyncio, asyncio.coroutines._is_coroutine, and asyncio.Runner work end-to-end. Closes the T6 BLOCKED row in spec 1710 and unblocks test_tabnanny.py."
 ---
 
 ## Why this spec exists
@@ -32,57 +32,70 @@ even though only a sliver is exercised on day one.
 
 ## Checklist
 
-Python sources to vendor / port (CPython 3.14, `Lib/asyncio/`):
+Status legend: DONE = landed and verified, WIP = in progress,
+TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 
-- [ ] `__init__.py` (74 lines) → `stdlib/asyncio/__init__.py`
-- [ ] `base_events.py` (2082 lines) → `stdlib/asyncio/base_events.py`
-- [ ] `base_futures.py` (67 lines) → `stdlib/asyncio/base_futures.py`
-- [ ] `base_subprocess.py` (319 lines) → `stdlib/asyncio/base_subprocess.py`
-- [ ] `base_tasks.py` (94 lines) → `stdlib/asyncio/base_tasks.py`
-- [ ] `constants.py` (41 lines) → `stdlib/asyncio/constants.py`
-- [ ] `coroutines.py` (118 lines) → `stdlib/asyncio/coroutines.py`
-- [ ] `events.py` (878 lines) → `stdlib/asyncio/events.py`
-- [ ] `exceptions.py` (62 lines) → `stdlib/asyncio/exceptions.py`
-- [ ] `format_helpers.py` (84 lines) → `stdlib/asyncio/format_helpers.py`
-- [ ] `futures.py` (481 lines) → `stdlib/asyncio/futures.py`
-- [ ] `graph.py` (276 lines) → `stdlib/asyncio/graph.py`
-- [ ] `locks.py` (617 lines) → `stdlib/asyncio/locks.py`
-- [ ] `log.py` (7 lines) → `stdlib/asyncio/log.py`
-- [ ] `mixins.py` (21 lines) → `stdlib/asyncio/mixins.py`
-- [ ] `proactor_events.py` (896 lines) → `stdlib/asyncio/proactor_events.py`
-- [ ] `protocols.py` (216 lines) → `stdlib/asyncio/protocols.py`
-- [ ] `queues.py` (307 lines) → `stdlib/asyncio/queues.py`
-- [ ] `runners.py` (225 lines) → `stdlib/asyncio/runners.py`
-- [ ] `selector_events.py` (1326 lines) → `stdlib/asyncio/selector_events.py`
-- [ ] `sslproto.py` (929 lines) → `stdlib/asyncio/sslproto.py`
-- [ ] `staggered.py` (179 lines) → `stdlib/asyncio/staggered.py`
-- [ ] `streams.py` (787 lines) → `stdlib/asyncio/streams.py`
-- [ ] `subprocess.py` (229 lines) → `stdlib/asyncio/subprocess.py`
-- [ ] `taskgroups.py` (286 lines) → `stdlib/asyncio/taskgroups.py`
-- [ ] `tasks.py` (1141 lines) → `stdlib/asyncio/tasks.py`
-- [ ] `threads.py` (24 lines) → `stdlib/asyncio/threads.py`
-- [ ] `timeouts.py` (174 lines) → `stdlib/asyncio/timeouts.py`
-- [ ] `tools.py` (291 lines) → `stdlib/asyncio/tools.py`
-- [ ] `transports.py` (337 lines) → `stdlib/asyncio/transports.py`
-- [ ] `trsock.py` (98 lines) → `stdlib/asyncio/trsock.py`
-- [ ] `unix_events.py` (972 lines) → `stdlib/asyncio/unix_events.py`
-- [ ] `windows_events.py` (903 lines) → `stdlib/asyncio/windows_events.py`
-- [ ] `windows_utils.py` (181 lines) → `stdlib/asyncio/windows_utils.py`
-- [ ] `__main__.py` (245 lines) → `stdlib/asyncio/__main__.py`
+### Sources to fully port (CPython 3.14)
 
-C sources to port (CPython 3.14):
+Python layer (`Lib/asyncio/`):
 
-- [ ] `Modules/_asynciomodule.c` (4429 lines) → `module/_asyncio/module.go`
+| File | Lines | gopy destination | Status | Commit |
+|------|------:|------------------|--------|--------|
+| `__init__.py` | 74 | `stdlib/asyncio/__init__.py` | TODO | — |
+| `base_events.py` | 2082 | `stdlib/asyncio/base_events.py` | TODO | — |
+| `base_futures.py` | 67 | `stdlib/asyncio/base_futures.py` | TODO | — |
+| `base_subprocess.py` | 319 | `stdlib/asyncio/base_subprocess.py` | TODO | — |
+| `base_tasks.py` | 94 | `stdlib/asyncio/base_tasks.py` | TODO | — |
+| `constants.py` | 41 | `stdlib/asyncio/constants.py` | TODO | — |
+| `coroutines.py` | 118 | `stdlib/asyncio/coroutines.py` | TODO | — |
+| `events.py` | 878 | `stdlib/asyncio/events.py` | TODO | — |
+| `exceptions.py` | 62 | `stdlib/asyncio/exceptions.py` | TODO | — |
+| `format_helpers.py` | 84 | `stdlib/asyncio/format_helpers.py` | TODO | — |
+| `futures.py` | 481 | `stdlib/asyncio/futures.py` | TODO | — |
+| `graph.py` | 276 | `stdlib/asyncio/graph.py` | TODO | — |
+| `locks.py` | 617 | `stdlib/asyncio/locks.py` | TODO | — |
+| `log.py` | 7 | `stdlib/asyncio/log.py` | TODO | — |
+| `mixins.py` | 21 | `stdlib/asyncio/mixins.py` | TODO | — |
+| `proactor_events.py` | 896 | `stdlib/asyncio/proactor_events.py` | TODO | — |
+| `protocols.py` | 216 | `stdlib/asyncio/protocols.py` | TODO | — |
+| `queues.py` | 307 | `stdlib/asyncio/queues.py` | TODO | — |
+| `runners.py` | 225 | `stdlib/asyncio/runners.py` | TODO | — |
+| `selector_events.py` | 1326 | `stdlib/asyncio/selector_events.py` | TODO | — |
+| `sslproto.py` | 929 | `stdlib/asyncio/sslproto.py` | TODO | — |
+| `staggered.py` | 179 | `stdlib/asyncio/staggered.py` | TODO | — |
+| `streams.py` | 787 | `stdlib/asyncio/streams.py` | TODO | — |
+| `subprocess.py` | 229 | `stdlib/asyncio/subprocess.py` | TODO | — |
+| `taskgroups.py` | 286 | `stdlib/asyncio/taskgroups.py` | TODO | — |
+| `tasks.py` | 1141 | `stdlib/asyncio/tasks.py` | TODO | — |
+| `threads.py` | 24 | `stdlib/asyncio/threads.py` | TODO | — |
+| `timeouts.py` | 174 | `stdlib/asyncio/timeouts.py` | TODO | — |
+| `tools.py` | 291 | `stdlib/asyncio/tools.py` | TODO | — |
+| `transports.py` | 337 | `stdlib/asyncio/transports.py` | TODO | — |
+| `trsock.py` | 98 | `stdlib/asyncio/trsock.py` | TODO | — |
+| `unix_events.py` | 972 | `stdlib/asyncio/unix_events.py` | TODO | — |
+| `windows_events.py` | 903 | `stdlib/asyncio/windows_events.py` | TODO | — |
+| `windows_utils.py` | 181 | `stdlib/asyncio/windows_utils.py` | TODO | — |
+| `__main__.py` | 245 | `stdlib/asyncio/__main__.py` | TODO | — |
 
-Gate tests:
+C layer (`Modules/`):
 
-- [ ] `test_tabnanny.py` — vendored under `test/cpython/test_tabnanny.py`, unblocked once `import asyncio` succeeds (the `unittest.mock` → `asyncio.coroutines._is_coroutine` path is the only asyncio surface this test touches).
-- [ ] `test_asyncio/` directory (41 files) — not in scope for 1711; the v0.12.4 asyncio panel is `test_tabnanny.py` only. A future spec stands up the full `test_asyncio/` corpus.
+| File | Lines | gopy destination | Status | Commit |
+|------|------:|------------------|--------|--------|
+| `_asynciomodule.c` | 4429 | `module/_asyncio/module.go` | TODO | — |
 
-Downstream consumers that unlock when 1711 lands:
+### Gate tests
 
-- [ ] `stdlib/unittest/mock.py:284` — `mock._is_coroutine = asyncio.coroutines._is_coroutine`
-- [ ] `stdlib/unittest/async_case.py:137` — `asyncio.Runner(debug=True, loop_factory=self.loop_factory)`
+| Test | Lines | Status | Commit | Notes |
+|------|------:|--------|--------|-------|
+| `test_tabnanny.py` | 354 | TODO | — | Unblocked once `import asyncio` succeeds; the `unittest.mock` → `asyncio.coroutines._is_coroutine` path is the only asyncio surface this test touches. |
+| `test_asyncio/` (41 files) | n/a | OUT OF SCOPE | — | Full asyncio test corpus is a separate panel. |
+
+### Downstream consumers unlocked
+
+| Consumer | Surface | Status |
+|----------|---------|--------|
+| `stdlib/unittest/mock.py:284` | `mock._is_coroutine = asyncio.coroutines._is_coroutine` | TODO |
+| `stdlib/unittest/async_case.py:137` | `asyncio.Runner(debug=True, loop_factory=self.loop_factory)` | TODO |
 
 ## Goal
 
@@ -98,111 +111,84 @@ The success criterion is `test_tabnanny.py` running green under
 `test/regrtest`. The wider `test_asyncio/` corpus (41 files) is a
 separate panel and not gated here.
 
-## Sources of truth
-
-Python sources (3.14):
-
-| CPython file | Lines | gopy destination |
-|--------------|------:|------------------|
-| Lib/asyncio/__init__.py | 74 | stdlib/asyncio/__init__.py |
-| Lib/asyncio/base_events.py | 2082 | stdlib/asyncio/base_events.py |
-| Lib/asyncio/base_futures.py | 67 | stdlib/asyncio/base_futures.py |
-| Lib/asyncio/base_subprocess.py | 319 | stdlib/asyncio/base_subprocess.py |
-| Lib/asyncio/base_tasks.py | 94 | stdlib/asyncio/base_tasks.py |
-| Lib/asyncio/constants.py | 41 | stdlib/asyncio/constants.py |
-| Lib/asyncio/coroutines.py | 118 | stdlib/asyncio/coroutines.py |
-| Lib/asyncio/events.py | 878 | stdlib/asyncio/events.py |
-| Lib/asyncio/exceptions.py | 62 | stdlib/asyncio/exceptions.py |
-| Lib/asyncio/format_helpers.py | 84 | stdlib/asyncio/format_helpers.py |
-| Lib/asyncio/futures.py | 481 | stdlib/asyncio/futures.py |
-| Lib/asyncio/graph.py | 276 | stdlib/asyncio/graph.py |
-| Lib/asyncio/locks.py | 617 | stdlib/asyncio/locks.py |
-| Lib/asyncio/log.py | 7 | stdlib/asyncio/log.py |
-| Lib/asyncio/mixins.py | 21 | stdlib/asyncio/mixins.py |
-| Lib/asyncio/proactor_events.py | 896 | stdlib/asyncio/proactor_events.py |
-| Lib/asyncio/protocols.py | 216 | stdlib/asyncio/protocols.py |
-| Lib/asyncio/queues.py | 307 | stdlib/asyncio/queues.py |
-| Lib/asyncio/runners.py | 225 | stdlib/asyncio/runners.py |
-| Lib/asyncio/selector_events.py | 1326 | stdlib/asyncio/selector_events.py |
-| Lib/asyncio/sslproto.py | 929 | stdlib/asyncio/sslproto.py |
-| Lib/asyncio/staggered.py | 179 | stdlib/asyncio/staggered.py |
-| Lib/asyncio/streams.py | 787 | stdlib/asyncio/streams.py |
-| Lib/asyncio/subprocess.py | 229 | stdlib/asyncio/subprocess.py |
-| Lib/asyncio/taskgroups.py | 286 | stdlib/asyncio/taskgroups.py |
-| Lib/asyncio/tasks.py | 1141 | stdlib/asyncio/tasks.py |
-| Lib/asyncio/threads.py | 24 | stdlib/asyncio/threads.py |
-| Lib/asyncio/timeouts.py | 174 | stdlib/asyncio/timeouts.py |
-| Lib/asyncio/tools.py | 291 | stdlib/asyncio/tools.py |
-| Lib/asyncio/transports.py | 337 | stdlib/asyncio/transports.py |
-| Lib/asyncio/trsock.py | 98 | stdlib/asyncio/trsock.py |
-| Lib/asyncio/unix_events.py | 972 | stdlib/asyncio/unix_events.py |
-| Lib/asyncio/windows_events.py | 903 | stdlib/asyncio/windows_events.py |
-| Lib/asyncio/windows_utils.py | 181 | stdlib/asyncio/windows_utils.py |
-| Lib/asyncio/__main__.py | 245 | stdlib/asyncio/__main__.py |
-
-C sources (3.14):
-
-| CPython file | Lines | gopy destination |
-|--------------|------:|------------------|
-| Modules/_asynciomodule.c | 4429 | module/_asyncio/module.go |
-
-Gate test lives at `~/github/python/cpython/Lib/test/test_tabnanny.py`.
-
 ## Workflow
 
 The spec follows the durable port-not-patch / full-subsystem rule.
 Phases below are ordered smallest-fix-first so the very first commit
 flips the immediate gate (`test_tabnanny.py`) and subsequent phases
-fill out the surface the rest of asyncio needs.
+fill out the surface the rest of asyncio needs. Every phase carries
+its own tracking table; tick rows off as work lands.
 
-### Phase 1: bottom-of-the-package vendor (zero-runtime files)
+### Phase 1: leaf files (zero-runtime vendor)
 
-Vendor the leaf files that have no runtime dependencies and define
-the package's constants and exception types. None of these execute
-non-trivial code at import time, so they land as byte-equal copies.
+Byte-equal vendor of the leaf files that have no runtime dependencies
+and define the package's constants and exception types. None execute
+non-trivial code at import time.
 
-| File | Surface |
-|------|---------|
-| `log.py` | `logger = logging.getLogger("asyncio")` |
-| `constants.py` | numeric/string constants used across the package |
-| `exceptions.py` | `CancelledError`, `InvalidStateError`, `TimeoutError`, `IncompleteReadError`, `LimitOverrunError`, `SendfileNotAvailableError`, `BrokenBarrierError` |
-| `mixins.py` | `_LoopBoundMixin` |
-| `format_helpers.py` | repr helpers |
-| `base_futures.py` | shared future state constants + `_format_callbacks` |
-| `base_tasks.py` | shared task helpers |
+| # | Task | File | Surface | Status | Commit |
+|---|------|------|---------|--------|--------|
+| 1 | P1.1 | `log.py` | `logger = logging.getLogger("asyncio")` (vendored; lazy-bound — `logging` still blocked on threading/itertools) | WIP | _pending_ |
+| 2 | P1.2 | `constants.py` | numeric/string constants used across the package | DONE | _pending_ |
+| 3 | P1.3 | `exceptions.py` | `CancelledError`, `InvalidStateError`, `TimeoutError`, `IncompleteReadError`, `LimitOverrunError`, `SendfileNotAvailableError`, `BrokenBarrierError` | DONE | _pending_ |
+| 4 | P1.4 | `mixins.py` | `_LoopBoundMixin` (vendored; lazy-bound — pulls `threading`) | WIP | _pending_ |
+| 5 | P1.5 | `format_helpers.py` | repr helpers | DONE | _pending_ |
+| 6 | P1.6 | `base_futures.py` | shared future state constants + `_format_callbacks` | DONE | _pending_ |
+| 7 | P1.7 | `base_tasks.py` | shared task helpers (vendored; lazy-bound — pulls `coroutines` which Phase 2 ships) | WIP | _pending_ |
+| 8 | P1.8 | `__init__.py` (stub) | placeholder package marker; eagerly binds the leaves that import without runtime deps | DONE | _pending_ |
+| 9 | P1.9 | `_thread` (3.14 lifecycle handle) | `_thread.start_joinable_thread`, `_thread._ThreadHandle`, `_thread._make_thread_handle`, `_thread.daemon_threads_allowed`, `_thread._shutdown`, `_thread._get_main_thread_ident`, `_thread._is_main_interpreter`, `_thread.LockType` attribute. Required because `asyncio.log` imports `logging` imports `threading`. | DONE | _pending_ |
 
 ### Phase 2: coroutines + `_is_coroutine` sentinel
 
 Vendor `coroutines.py` byte-equal. The single observable surface
 `unittest.mock` requires is the module-level sentinel
 `_is_coroutine = object()`. Audit that gopy's `inspect.iscoroutinefunction`
-(already vendored by spec 1710 T5.4) works against gopy's
-`CoroutineType` so `_iscoroutinefunction` returns the expected answer.
+(vendored in spec 1710 T5.4) works against gopy's `CoroutineType`
+so `_iscoroutinefunction` returns the expected answer.
 
-This is the milestone that turns `test_tabnanny.py` green: once
-`import asyncio` reaches the end of `__init__.py` without raising,
-`unittest.mock` import succeeds, and the test loads.
+This is the milestone that turns `test_tabnanny.py` green once
+`__init__.py` (Phase 9) lands: `import asyncio` reaches the end of
+the package init without raising, `unittest.mock` import succeeds,
+and the test loads.
+
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P2.1 | stdlib vendor | `stdlib/asyncio/coroutines.py` (byte-equal) | TODO | — |
+| 2 | P2.2 | inspect | verify `inspect.iscoroutinefunction` returns True for `async def` over gopy's `CoroutineType` (relies on spec 1710 T5.4) | TODO | — |
+| 3 | P2.3 | itertools | gopy `itertools.count` exposes `__next__`; required transitively by `threading.py:853` (`_counter = _count(1).__next__`) | TODO | — |
 
 ### Phase 3: futures + events + protocols + transports
 
 Vendor `futures.py`, `events.py`, `protocols.py`, `transports.py`,
-`trsock.py`. These define the abstract interfaces (`AbstractEventLoop`,
-`BaseProtocol`, `BaseTransport`) and `Future` semantics that the rest
-of the package builds on. Pure Python, no OS calls at import time.
+`trsock.py`. These define the abstract interfaces
+(`AbstractEventLoop`, `BaseProtocol`, `BaseTransport`) and `Future`
+semantics that the rest of the package builds on. Pure Python, no OS
+calls at import time.
 
-Runtime gaps to expect:
-- `contextvars.copy_context()` — verify gopy `contextvars` returns a
-  `Context` with `.run(callable, ...)` semantics.
-- `threading.get_ident()` — already exposed by `_thread`.
-- `weakref.WeakSet` — already in `stdlib/_weakrefset.py`.
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P3.1 | stdlib vendor | `stdlib/asyncio/futures.py` (byte-equal) | TODO | — |
+| 2 | P3.2 | stdlib vendor | `stdlib/asyncio/events.py` (byte-equal) | TODO | — |
+| 3 | P3.3 | stdlib vendor | `stdlib/asyncio/protocols.py` (byte-equal) | TODO | — |
+| 4 | P3.4 | stdlib vendor | `stdlib/asyncio/transports.py` (byte-equal) | TODO | — |
+| 5 | P3.5 | stdlib vendor | `stdlib/asyncio/trsock.py` (byte-equal) | TODO | — |
+| 6 | P3.6 | contextvars | `Context.run(callable, *args, **kw)` returns the callable's return value, swapping the active context for the duration | TODO | — |
+| 7 | P3.7 | weakref | `WeakSet`, `WeakValueDictionary` resolvable via `weakref` (audit, not new code) | TODO | — |
 
 ### Phase 4: locks + queues + streams
 
-Vendor `locks.py`, `queues.py`, `streams.py`, `staggered.py`.
-These build on the futures/events surface and don't reach into
-selectors or sockets. `streams.py` does reference `socket.socket`
-indirectly through `connect`/`open_connection`, but that path only
-fires when the loop is actually used; import is safe.
+Vendor `locks.py`, `queues.py`, `streams.py`, `staggered.py`. These
+build on the futures/events surface and don't reach into selectors or
+sockets. `streams.py` references `socket.socket` indirectly through
+`connect`/`open_connection`, but that path only fires when the loop is
+used; import is safe.
+
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P4.1 | stdlib vendor | `stdlib/asyncio/locks.py` (byte-equal) | TODO | — |
+| 2 | P4.2 | stdlib vendor | `stdlib/asyncio/queues.py` (byte-equal) | TODO | — |
+| 3 | P4.3 | stdlib vendor | `stdlib/asyncio/streams.py` (byte-equal) | TODO | — |
+| 4 | P4.4 | stdlib vendor | `stdlib/asyncio/staggered.py` (byte-equal) | TODO | — |
+| 5 | P4.5 | collections | `collections.deque.appendleft` / `popleft` present (audit) | TODO | — |
 
 ### Phase 5: tasks + taskgroups + timeouts + runners
 
@@ -213,44 +199,74 @@ Vendor `tasks.py`, `taskgroups.py`, `timeouts.py`, `runners.py`,
 that do not touch I/O — drive scheduling via the gopy port of
 `tasks._step` plus the base_events ready-queue (Phase 7).
 
-### Phase 6: graph + tools
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P5.1 | stdlib vendor | `stdlib/asyncio/tasks.py` (byte-equal) | TODO | — |
+| 2 | P5.2 | stdlib vendor | `stdlib/asyncio/taskgroups.py` (byte-equal) | TODO | — |
+| 3 | P5.3 | stdlib vendor | `stdlib/asyncio/timeouts.py` (byte-equal) | TODO | — |
+| 4 | P5.4 | stdlib vendor | `stdlib/asyncio/runners.py` (byte-equal) | TODO | — |
+| 5 | P5.5 | stdlib vendor | `stdlib/asyncio/threads.py` (byte-equal) | TODO | — |
+| 6 | P5.6 | VM | coroutine `.send()` / `.throw()` / `.close()` slot wiring through to `genobject.c` semantics | TODO | — |
+
+### Phase 6: graph + tools + subprocess
 
 Vendor `graph.py`, `tools.py`, `subprocess.py`, `base_subprocess.py`.
 These layer on top of tasks and have no fresh OS surface beyond
 subprocess (which fails fast and clean on gopy until the subprocess
 port lands separately).
 
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P6.1 | stdlib vendor | `stdlib/asyncio/graph.py` (byte-equal) | TODO | — |
+| 2 | P6.2 | stdlib vendor | `stdlib/asyncio/tools.py` (byte-equal) | TODO | — |
+| 3 | P6.3 | stdlib vendor | `stdlib/asyncio/subprocess.py` (byte-equal) | TODO | — |
+| 4 | P6.4 | stdlib vendor | `stdlib/asyncio/base_subprocess.py` (byte-equal) | TODO | — |
+
 ### Phase 7: base_events (event loop core)
 
 Vendor `base_events.py`. This is the largest file (2082 lines) and
 defines `BaseEventLoop`, the canonical scheduler. The port is verbatim
-Python; the runtime surface it depends on is:
+Python; the runtime surface it depends on is large.
 
-- `selectors.DefaultSelector` — gopy already ships `stdlib/selectors.py`,
-  audit that `KqueueSelector` / `EpollSelector` / `PollSelector` resolve.
-- `socket` module — gopy ships `module/_socket` + `stdlib/socket.py`.
-- `signal.set_wakeup_fd` — needs verification on gopy `module/_signal`.
-- `threading.Event` — already wired.
-
-Document any runtime gap that surfaces in this phase as a follow-up
-task on this spec.
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P7.1 | stdlib vendor | `stdlib/asyncio/base_events.py` (byte-equal) | TODO | — |
+| 2 | P7.2 | selectors | `selectors.DefaultSelector` resolves on darwin/linux/windows | TODO | — |
+| 3 | P7.3 | signal | `signal.set_wakeup_fd`, `signal.valid_signals` on `module/_signal` | TODO | — |
+| 4 | P7.4 | socket | `socket.socket` resolvable; `module/_socket` covers the surface base_events uses | TODO | — |
+| 5 | P7.5 | threading | `threading.Event` wired (audit) | TODO | — |
 
 ### Phase 8: selector_events + proactor_events + sslproto
 
-Vendor `selector_events.py`, `proactor_events.py`, `sslproto.py`.
-These implement the concrete loops and the SSL handshake state
+Vendor the concrete loop implementations and the SSL handshake state
 machine. Imports execute cleanly; the actual `loop.run_forever()`
-path is what exercises them and is tested in `test_asyncio/`
-(out of scope for 1711).
+path is what exercises them and is tested in `test_asyncio/` (out of
+scope for 1711).
 
-### Phase 9: platform loops
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P8.1 | stdlib vendor | `stdlib/asyncio/selector_events.py` (byte-equal) | TODO | — |
+| 2 | P8.2 | stdlib vendor | `stdlib/asyncio/proactor_events.py` (byte-equal) | TODO | — |
+| 3 | P8.3 | stdlib vendor | `stdlib/asyncio/sslproto.py` (byte-equal) | TODO | — |
+| 4 | P8.4 | ssl | `ssl.MemoryBIO` exists or `sslproto` import is guarded; verify on gopy `_ssl` | TODO | — |
 
-Vendor `unix_events.py` plus `windows_events.py` and
-`windows_utils.py`. `__init__.py:44` does
-`if sys.platform == 'win32': from .windows_events import *
-else: from .unix_events import *`, so one of them executes on every
-import. Verify both build cleanly even on the opposite platform
-(unimported branches must still parse).
+### Phase 9: platform loops + full `__init__.py`
+
+Vendor `unix_events.py`, `windows_events.py`, `windows_utils.py`, and
+swap the Phase 1 stub `__init__.py` for the byte-equal CPython copy
+that imports every submodule. `__init__.py:44` does
+`if sys.platform == 'win32': from .windows_events import * else: from
+.unix_events import *`, so one of them executes on every import.
+Verify both build cleanly even on the opposite platform (unimported
+branches must still parse).
+
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P9.1 | stdlib vendor | `stdlib/asyncio/unix_events.py` (byte-equal) | TODO | — |
+| 2 | P9.2 | stdlib vendor | `stdlib/asyncio/windows_events.py` (byte-equal) | TODO | — |
+| 3 | P9.3 | stdlib vendor | `stdlib/asyncio/windows_utils.py` (byte-equal) | TODO | — |
+| 4 | P9.4 | stdlib vendor | replace Phase 1 stub `__init__.py` with the byte-equal CPython copy | TODO | — |
+| 5 | P9.5 | stdlib vendor | `stdlib/asyncio/__main__.py` (byte-equal) | TODO | — |
 
 ### Phase 10: C-level `_asyncio` module
 
@@ -258,115 +274,48 @@ Port `Modules/_asynciomodule.c` (4429 lines) into
 `module/_asyncio/module.go`. The Python layer falls back to pure-Python
 implementations when `_asyncio` is missing (see e.g. `futures.py`'s
 `try: import _asyncio` blocks), so the full port can be staged after
-Phase 9. The surface to cover:
+Phase 9. Until this phase lands the Python fallback paths are
+exercised; that is the correct behaviour, not a divergence.
 
-- `Future` C type (fast path for `Future`)
-- `Task` C type and the `_PyAsyncioState` task-context plumbing
-- `_swap_current_task` / `_register_task` / `_unregister_task`
-- `_enter_task` / `_leave_task`
-- `_get_event_loop` C-side fast path
-- The `_set_event_loop` / `set_running_loop` accessors
-- Module-level constants exposed back to Python
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P10.1 | module port | `Future` C type (fast path for `Future`) | TODO | — |
+| 2 | P10.2 | module port | `Task` C type and `_PyAsyncioState` task-context plumbing | TODO | — |
+| 3 | P10.3 | module port | `_swap_current_task`, `_register_task`, `_unregister_task`, `_enter_task`, `_leave_task` | TODO | — |
+| 4 | P10.4 | module port | `_get_event_loop` C-side fast path, `_set_event_loop` / `set_running_loop` accessors | TODO | — |
+| 5 | P10.5 | module port | module-level constants exposed back to Python | TODO | — |
 
-Until this phase lands, the Python fallback paths are exercised; that
-is the correct behaviour, not a divergence.
-
-### Phase 11: register on the inittab + path-finder
+### Phase 11: inittab + path-finder wiring
 
 `module/_asyncio/module.go` calls
 `imp.AppendInittab("_asyncio", buildModule)` in its `init()`, and the
 blank import lands in `stdlibinit/registry.go` next to `_opcode`. The
 Python package at `stdlib/asyncio/` is picked up automatically by the
-existing `PathFinder` walk; no extra wiring is needed.
+existing `PathFinder` walk; no extra wiring is needed beyond a smoke
+test.
+
+| # | Task | Sub-system | Surface | Status | Commit |
+|---|------|------------|---------|--------|--------|
+| 1 | P11.1 | inittab | bind `_asyncio` in `stdlibinit/registry.go` | TODO | — |
+| 2 | P11.2 | smoke | `import asyncio; asyncio.Runner` resolves; `import _asyncio; _asyncio.Future` resolves | TODO | — |
 
 ### Phase 12: land the `test_tabnanny.py` gate
 
 Run `test/regrtest test_tabnanny.py`. Fix any divergence in the
 vendored Python files or the gopy runtime; never edit the test.
-Flip the 1710 T6 row to DONE with this commit's SHA. Mirror the
-test into `stdtest/` and extend `TestStdtestCorpus`.
-
-## Sub-system blockers (DFS)
-
-Each phase has its own runtime-gap surface; the table below records
-the ones we already know will trip the port before the work starts.
-New entries get added here as the DFS surfaces them.
-
-### Phase 2 chain (coroutines)
+`test/cpython/` is the canonical gate location.
 
 | # | Task | Sub-system | Surface | Status | Commit |
 |---|------|------------|---------|--------|--------|
-| 1 | A1 | stdlib vendor | `stdlib/asyncio/coroutines.py` (byte-equal) | TODO | — |
-| 2 | A2 | inspect | verify `inspect.iscoroutinefunction` returns True for `async def` over gopy's CoroutineType (relies on spec 1710 T5.4) | TODO | — |
-
-### Phase 3 chain (futures + events)
-
-| # | Task | Sub-system | Surface | Status | Commit |
-|---|------|------------|---------|--------|--------|
-| 1 | A3 | contextvars | `Context.run(callable, *args, **kw)` returns the callable's return value, swapping the active context for the duration | TODO | — |
-| 2 | A4 | stdlib vendor | `futures.py`, `events.py`, `protocols.py`, `transports.py`, `trsock.py` (all byte-equal) | TODO | — |
-| 3 | A5 | weakref | `WeakSet`, `WeakValueDictionary` resolvable via `weakref` (audit, not new code) | TODO | — |
-
-### Phase 4 chain (locks/queues/streams)
-
-| # | Task | Sub-system | Surface | Status | Commit |
-|---|------|------------|---------|--------|--------|
-| 1 | A6 | stdlib vendor | `locks.py`, `queues.py`, `streams.py`, `staggered.py` (byte-equal) | TODO | — |
-| 2 | A7 | collections | `collections.deque.appendleft` / `popleft` already present (audit) | TODO | — |
-
-### Phase 5 chain (tasks/runners)
-
-| # | Task | Sub-system | Surface | Status | Commit |
-|---|------|------------|---------|--------|--------|
-| 1 | A8 | stdlib vendor | `tasks.py`, `taskgroups.py`, `timeouts.py`, `runners.py`, `threads.py` (byte-equal) | TODO | — |
-| 2 | A9 | VM | coroutine `.send()` / `.throw()` / `.close()` slot wiring through to `genobject.c` semantics | TODO | — |
-
-### Phase 6 chain (graph/tools/subprocess)
-
-| # | Task | Sub-system | Surface | Status | Commit |
-|---|------|------------|---------|--------|--------|
-| 1 | A10 | stdlib vendor | `graph.py`, `tools.py`, `subprocess.py`, `base_subprocess.py` (byte-equal) | TODO | — |
-
-### Phase 7 chain (base_events)
-
-| # | Task | Sub-system | Surface | Status | Commit |
-|---|------|------------|---------|--------|--------|
-| 1 | A11 | selectors | `selectors.DefaultSelector` resolves on darwin/linux/windows | TODO | — |
-| 2 | A12 | signal | `signal.set_wakeup_fd`, `signal.valid_signals` on `module/_signal` | TODO | — |
-| 3 | A13 | stdlib vendor | `base_events.py` (byte-equal) | TODO | — |
-
-### Phase 8 chain (selector/proactor/ssl)
-
-| # | Task | Sub-system | Surface | Status | Commit |
-|---|------|------------|---------|--------|--------|
-| 1 | A14 | stdlib vendor | `selector_events.py`, `proactor_events.py`, `sslproto.py` (byte-equal) | TODO | — |
-| 2 | A15 | ssl | `ssl.MemoryBIO` exists or `sslproto` import is guarded; verify on gopy `_ssl` | TODO | — |
-
-### Phase 9 chain (platform loops)
-
-| # | Task | Sub-system | Surface | Status | Commit |
-|---|------|------------|---------|--------|--------|
-| 1 | A16 | stdlib vendor | `unix_events.py`, `windows_events.py`, `windows_utils.py` (byte-equal) | TODO | — |
-
-### Phase 10 chain (_asyncio C module)
-
-| # | Task | Sub-system | Surface | Status | Commit |
-|---|------|------------|---------|--------|--------|
-| 1 | A17 | module port | `module/_asyncio/module.go` — `Future`, `Task`, `_swap_current_task`, `_register_task`, `_unregister_task`, `_enter_task`, `_leave_task`, `_get_event_loop` | TODO | — |
-| 2 | A18 | inittab | bind `_asyncio` in `stdlibinit/registry.go` | TODO | — |
-
-### Phase 12 chain (gate)
-
-| # | Task | Sub-system | Surface | Status | Commit |
-|---|------|------------|---------|--------|--------|
-| 1 | A19 | gate test | `test/cpython/test_tabnanny.py` green under `test/regrtest`; also mirrored at `stdtest/test_tabnanny.py` and added to `TestStdtestCorpus` | TODO | — |
-| 2 | A20 | spec 1710 | flip 1710 T6 rows in both `test_tabnanny.py` and `test_tokenize.py` chains to DONE with this spec's tip commit | TODO | — |
+| 1 | P12.1 | gate test | `test/cpython/test_tabnanny.py` green under `test/regrtest` | TODO | — |
+| 2 | P12.2 | spec 1710 | flip 1710 T6 rows in both `test_tabnanny.py` and `test_tokenize.py` chains to DONE with this spec's tip commit | TODO | — |
 
 DFS execution order: Phase 1 → Phase 2 (closes the immediate
-`unittest.mock` import gap) → Phase 12 short-circuit to flip the gate
-→ Phases 3–11 fill the rest of the surface. Each phase ships as a
-self-contained commit; large phases (Phase 7, Phase 8, Phase 10) may
-need to split further.
+`unittest.mock` import gap) → short-circuit to Phase 12 to flip the
+gate as soon as it goes green → Phases 3–11 fill the rest of the
+surface. Each row in each phase ships as its own commit; large rows
+(P7.1, P8.1, P8.2, P10.1, P10.2) may split further as runtime gaps
+surface.
 
 ## Out of scope
 
