@@ -106,7 +106,7 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 		}
 	}
 
-	source, lines, err := drainReadline(readline, encoding != "")
+	source, lines, err := drainReadline(readline, encoding)
 	if err != nil {
 		return nil, err
 	}
@@ -132,9 +132,13 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 // it because the lexer is not yet wired for streaming refill and the
 // gate tests all hand fixed-size inputs.
 //
-// stringSource selects whether readline returns str (encoding kwarg
-// supplied) or bytes (the default tokenize.tokenize() path).
-func drainReadline(readline objects.Object, stringSource bool) ([]byte, []string, error) {
+// encoding mirrors tok->encoding in CPython's readline_tokenizer.c:
+// when empty, readline must return str (the default
+// _generate_tokens_from_c_tokenizer path); when set, readline must
+// return bytes that the named encoding decodes.
+//
+// CPython: Parser/tokenizer/readline_tokenizer.c:10 tok_readline_string
+func drainReadline(readline objects.Object, encoding string) ([]byte, []string, error) {
 	var buf []byte
 	var lines []string
 	lines = append(lines, "") // 1-based padding
@@ -149,14 +153,18 @@ func drainReadline(readline objects.Object, stringSource bool) ([]byte, []string
 		var line []byte
 		switch v := res.(type) {
 		case *objects.Bytes:
+			if encoding == "" {
+				return nil, nil, fmt.Errorf("TypeError: readline() returned a non-string object")
+			}
 			line = append([]byte(nil), v.Bytes()...)
 		case *objects.ByteArray:
+			if encoding == "" {
+				return nil, nil, fmt.Errorf("TypeError: readline() returned a non-string object")
+			}
 			line = append([]byte(nil), v.Bytes()...)
 		case *objects.Unicode:
-			if !stringSource {
-				// CPython would raise here too; the bytes-path
-				// expects bytes from readline.
-				return nil, nil, fmt.Errorf("TypeError: source readline must return bytes when encoding is unset")
+			if encoding != "" {
+				return nil, nil, fmt.Errorf("TypeError: readline() returned a non-bytes object")
 			}
 			line = []byte(v.Value())
 		default:
