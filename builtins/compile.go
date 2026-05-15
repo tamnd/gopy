@@ -222,7 +222,7 @@ func signedIntArg(o objects.Object, label string) (int, error) {
 // helper pythonrun keeps for the same purpose; both go away once spec
 // 1687 retires compile.Code in favor of objects.Code directly.
 func liftCompileCode(c *compile.Code) *objects.Code {
-	return &objects.Code{
+	out := &objects.Code{
 		Argcount:        c.Argcount,
 		PosonlyArgcount: c.PosOnlyArgCount,
 		KwonlyArgcount:  c.KwOnlyArgCount,
@@ -241,4 +241,6 @@ func liftCompileCode(c *compile.Code) *objects.Code {
 		Linetable:       c.Linetable,
 		ExceptionTable:  c.ExceptionTable,
 	}
+	out.Init(objects.CodeType)
+	return out
 }
