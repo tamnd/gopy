@@ -58,3 +58,13 @@ func TestGateTextIOWrapperReadlines(t *testing.T) {
 	}
 	gate.Compare(t, cpy, gopy, loadScript(t, "textiowrapper_readlines.py"), path)
 }
+
+func TestGateTextIOWrapperCodecs(t *testing.T) {
+	cpy := gate.FindCPython(t)
+	if cpy == "" {
+		t.Skip("CPython 3.14 not on PATH")
+	}
+	gopy := gate.BuildGopy(t)
+	path := filepath.Join(t.TempDir(), "tcd.bin")
+	gate.Compare(t, cpy, gopy, loadScript(t, "textiowrapper_codecs.py"), path)
+}
