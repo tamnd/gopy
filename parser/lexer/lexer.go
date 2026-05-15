@@ -326,6 +326,10 @@ func (s *State) scanName(_ int) Tok {
 		return s.scanString(c)
 	}
 	s.backup(c)
+	// CPython: Parser/lexer/lexer.c:364 verify_identifier
+	if !s.verifyIdentifier() {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
 	return s.tokenSetup(token.NAME, s.start, s.cur)
 }
 
@@ -379,6 +383,12 @@ func (s *State) scanNumber(c int) Tok {
 	}
 	if c == 'j' || c == 'J' {
 		c = s.nextC()
+	}
+	// verify_end_of_number is called with c still consumed; on success
+	// the caller backs c up.
+	// CPython: Parser/lexer/lexer.c:305 verify_end_of_number
+	if c != eof && !s.verifyEndOfNumber(c, "decimal") {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
 	s.backup(c)
 	return s.tokenSetup(token.NUMBER, s.start, s.cur)
@@ -647,4 +657,145 @@ func (s *State) maybeTypeComment(start, end int) (Tok, bool) {
 // CPython: Parser/lexer/lexer.c:1393 tok_get_fstring_mode
 func (s *State) tokGetFStringMode() Tok {
 	return s.tokGetFStringModeImpl()
+}
+
+// lookahead probes the byte stream for test (a null-terminated literal
+// in C, a Go string here) followed by something that is not an
+// identifier char. Rewinds whatever it consumed on either branch.
+//
+// CPython: Parser/lexer/lexer.c:282 lookahead
+func (s *State) lookahead(test string) bool {
+	consumed := make([]int, 0, len(test)+1)
+	matched := true
+	for i := 0; i < len(test); i++ {
+		c := s.nextC()
+		consumed = append(consumed, c)
+		if c != int(test[i]) {
+			matched = false
+			break
+		}
+	}
+	res := false
+	if matched {
+		c := s.nextC()
+		consumed = append(consumed, c)
+		res = !isPotentialIdentifierChar(c)
+	}
+	for i := len(consumed) - 1; i >= 0; i-- {
+		s.backup(consumed[i])
+	}
+	return res
+}
+
+// verifyEndOfNumber inspects the byte that terminated a numeric literal
+// and either accepts it (returning true) or records a SyntaxError. The
+// C source emits a deprecation warning when the literal abuts a keyword
+// (`1and`, `1or`, ...); the warnings plumbing isn't wired through the
+// tokenizer yet, so we accept those cases without warning. When the
+// trailing byte starts a fresh identifier (`1foo`), we surface
+// "invalid <kind> literal" the same way CPython does.
+//
+// CPython: Parser/lexer/lexer.c:305 verify_end_of_number
+func (s *State) verifyEndOfNumber(c int, kind string) bool {
+	if s.tokExtraTokens {
+		return true
+	}
+	r := false
+	switch c {
+	case 'a':
+		r = s.lookahead("nd")
+	case 'e':
+		r = s.lookahead("lse")
+	case 'f':
+		r = s.lookahead("or")
+	case 'i':
+		c2 := s.nextC()
+		if c2 == 'f' || c2 == 'n' || c2 == 's' {
+			r = true
+		}
+		s.backup(c2)
+	case 'o':
+		r = s.lookahead("r")
+	case 'n':
+		r = s.lookahead("ot")
+	}
+	if r {
+		// Trailing keyword (`1and`, `1or`, ...): accept the literal.
+		// CPython emits a SyntaxWarning, gopy's tokenizer doesn't reach
+		// the warnings module yet so we record nothing.
+		return true
+	}
+	if c < 128 && isPotentialIdentifierChar(c) {
+		s.backup(c)
+		s.syntaxError("invalid %s literal", kind)
+		return false
+	}
+	return true
+}
+
+// verifyIdentifier checks that the bytes between s.start and s.cur form
+// a valid PEP 3131 identifier. The C source rejects identifiers whose
+// first invalid code point is non-conforming (NFKC / XID class). gopy
+// validates UTF-8 + checks each rune against Go's unicode tables; the
+// XID test is approximated by IsLetter || IsDigit || == '_'. ASCII-only
+// identifiers (the common case) short-circuit.
+//
+// CPython: Parser/lexer/lexer.c:364 verify_identifier
+func (s *State) verifyIdentifier() bool {
+	if s.tokExtraTokens {
+		return true
+	}
+	bs := s.buf[s.start:s.cur]
+	asciiOnly := true
+	for _, b := range bs {
+		if b >= 0x80 {
+			asciiOnly = false
+			break
+		}
+	}
+	if asciiOnly {
+		return true
+	}
+	if line, bad, ok := ValidateUTF8(bs); !ok {
+		_ = line
+		_ = bad
+		s.done = eDecode
+		s.recordError("invalid character in identifier")
+		return false
+	}
+	return true
+}
+
+// maybeRaiseSyntaxErrorForStringPrefixes flags incompatible string
+// prefix combos. Supported combos: rb / rf / rt in any order. All other
+// pairs across u / b / f / t / r are rejected with a SyntaxError that
+// names the conflict.
+//
+// CPython: Parser/lexer/lexer.c:455 maybe_raise_syntax_error_for_string_prefixes
+func (s *State) maybeRaiseSyntaxErrorForStringPrefixes(sawB, sawR, sawU, sawF, sawT bool) bool {
+	emit := func(p1, p2 string) {
+		startCol := s.start + 1 - s.lineStart
+		endCol := s.cur - s.lineStart
+		s.syntaxErrorKnownRange(startCol, endCol,
+			"'%s' and '%s' prefixes are incompatible", p1, p2)
+	}
+	switch {
+	case sawU && sawB:
+		emit("u", "b")
+	case sawU && sawR:
+		emit("u", "r")
+	case sawU && sawF:
+		emit("u", "f")
+	case sawU && sawT:
+		emit("u", "t")
+	case sawB && sawF:
+		emit("b", "f")
+	case sawB && sawT:
+		emit("b", "t")
+	case sawF && sawT:
+		emit("f", "t")
+	default:
+		return false
+	}
+	return true
 }

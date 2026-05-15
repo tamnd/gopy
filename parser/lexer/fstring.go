@@ -19,7 +19,7 @@ func (s *State) detectStringPrefix(start, end int) (raw bool, kind stringKind, i
 	if end-start > 2 {
 		return false, kindFString, false
 	}
-	sawF, sawT, sawR := false, false, false
+	sawF, sawT, sawR, sawB, sawU := false, false, false, false, false
 	for i := start; i < end; i++ {
 		switch s.buf[i] {
 		case 'f', 'F':
@@ -28,11 +28,17 @@ func (s *State) detectStringPrefix(start, end int) (raw bool, kind stringKind, i
 			sawT = true
 		case 'r', 'R':
 			sawR = true
-		case 'b', 'B', 'u', 'U':
-			// Plain string prefix; not f/t.
+		case 'b', 'B':
+			sawB = true
+		case 'u', 'U':
+			sawU = true
 		default:
 			return false, kindFString, false
 		}
+	}
+	// CPython: Parser/lexer/lexer.c:455 maybe_raise_syntax_error_for_string_prefixes
+	if s.maybeRaiseSyntaxErrorForStringPrefixes(sawB, sawR, sawU, sawF, sawT) {
+		return false, kindFString, false
 	}
 	if !sawF && !sawT {
 		return false, kindFString, false
