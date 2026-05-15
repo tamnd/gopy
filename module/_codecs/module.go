@@ -44,6 +44,7 @@ func buildModule() (*objects.Module, error) {
 		{"latin_1_decode", latin1Decode},
 		{"charmap_encode", charmapEncode},
 		{"charmap_decode", charmapDecode},
+		{"charmap_build", charmapBuild},
 		{"register", codecsRegister},
 		{"register_error", codecsRegisterError},
 		{"lookup_error", codecsLookupError},
@@ -68,19 +69,12 @@ var (
 	pyErrHandlers = map[string]objects.Object{}
 )
 
-func init() {
-	// Seed the well-known names so lookup_error returns them.
-	for _, name := range []string{"strict", "ignore", "replace", "xmlcharrefreplace", "backslashreplace", "namereplace", "surrogatepass", "surrogateescape"} {
-		n := name // capture
-		codecs.RegisterError(n, func(enc string, input []byte, start, end int) (string, int, error) {
-			h, err := codecs.LookupError(n)
-			if err != nil {
-				return "", 0, err
-			}
-			return h(enc, input, start, end)
-		})
-	}
-}
+// The well-known error handler names (strict, ignore, replace,
+// xmlcharrefreplace, backslashreplace, namereplace, surrogatepass,
+// surrogateescape) are already seeded by the codecs package's init,
+// so we no longer wrap them here. A previous version of this file
+// re-registered each name with a wrapper that called LookupError,
+// which simply returned the wrapper itself and recursed forever.
 
 // ---------------------------------------------------------------------------
 // lookup(encoding) -> (encoder, decoder, stream_reader, stream_writer)
@@ -345,17 +339,399 @@ func latin1Decode(args []objects.Object, kwargs map[string]objects.Object) (obje
 }
 
 // ---------------------------------------------------------------------------
-// charmap_encode / charmap_decode — stubs
+// charmap_encode(str, errors=None, mapping=None) -> (bytes, length)
+// charmap_decode(data, errors=None, mapping=None) -> (str, length)
+// charmap_build(map) -> dict
 //
-// CPython: Modules/_codecsmodule.c:427 _codecs_charmap_encode_impl
+// CPython: Modules/_codecsmodule.c:883 _codecs_charmap_encode_impl
+// CPython: Modules/_codecsmodule.c:571 _codecs_charmap_decode_impl
+// CPython: Modules/_codecsmodule.c:901 _codecs_charmap_build_impl
+// CPython: Objects/unicodeobject.c:8618 PyUnicode_DecodeCharmap
+// CPython: Objects/unicodeobject.c:9114 _PyUnicode_EncodeCharmap
+// CPython: Objects/unicodeobject.c:8694 PyUnicode_BuildEncodingMap
 // ---------------------------------------------------------------------------
 
-func charmapEncode(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	return nil, fmt.Errorf("NotImplementedError: charmap_encode is not supported")
+// charmapErrors normalises the errors argument: missing or None -> "strict".
+func charmapErrors(args []objects.Object, idx int) (string, error) {
+	if idx >= len(args) {
+		return "strict", nil
+	}
+	a := args[idx]
+	if objects.IsNone(a) {
+		return "strict", nil
+	}
+	s, ok := a.(*objects.Unicode)
+	if !ok {
+		return "", fmt.Errorf("TypeError: errors must be str or None, not %s", a.Type().Name)
+	}
+	return s.Value(), nil
+}
+
+// charmapMapping pulls the optional mapping arg. None or missing -> nil
+// (meaning: fall back to latin-1).
+func charmapMapping(args []objects.Object, idx int) objects.Object {
+	if idx >= len(args) {
+		return nil
+	}
+	if objects.IsNone(args[idx]) {
+		return nil
+	}
+	return args[idx]
 }
 
 func charmapDecode(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	return nil, fmt.Errorf("NotImplementedError: charmap_decode is not supported")
+	if len(args) < 1 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: charmap_decode() takes 1 to 3 arguments (%d given)", len(args))
+	}
+	data, err := toBytes(args[0], "charmap_decode", 1)
+	if err != nil {
+		return nil, err
+	}
+	errs, err := charmapErrors(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	mapping := charmapMapping(args, 2)
+	out, err := charmapDecodeImpl(data, errs, mapping)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewTuple([]objects.Object{objects.NewStr(out), objects.NewInt(int64(len(data)))}), nil
+}
+
+func charmapEncode(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: charmap_encode() takes 1 to 3 arguments (%d given)", len(args))
+	}
+	str, ok := args[0].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: charmap_encode() argument 1 must be str, not %s", args[0].Type().Name)
+	}
+	errs, err := charmapErrors(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	mapping := charmapMapping(args, 2)
+	out, n, err := charmapEncodeImpl(str.Value(), errs, mapping)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewTuple([]objects.Object{objects.NewBytes(out), objects.NewInt(int64(n))}), nil
+}
+
+func charmapBuild(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: charmap_build() takes exactly 1 argument (%d given)", len(args))
+	}
+	s, ok := args[0].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: charmap_build() argument must be str, not %s", args[0].Type().Name)
+	}
+	return charmapBuildImpl(s.Value())
+}
+
+// charmapDecodeImpl mirrors PyUnicode_DecodeCharmap. When mapping is a
+// Unicode string it is treated as a 256-char table indexed by the input
+// byte; 0xFFFE entries are "undefined" and routed through the error
+// handler. Mapping objects (dicts) map int->int/str/None.
+//
+// CPython: Objects/unicodeobject.c:8618 PyUnicode_DecodeCharmap
+func charmapDecodeImpl(data []byte, errors string, mapping objects.Object) (string, error) {
+	if mapping == nil {
+		// Default to Latin-1.
+		out, _, err := codecs.Decode(data, "latin-1", errors)
+		return out, err
+	}
+	switch m := mapping.(type) {
+	case *objects.Unicode:
+		return charmapDecodeFromString(data, errors, []rune(m.Value()))
+	case *objects.Dict:
+		return charmapDecodeFromMapping(data, errors, m)
+	default:
+		return "", fmt.Errorf("TypeError: charmap_decode() mapping must be str or mapping, not %s", mapping.Type().Name)
+	}
+}
+
+func charmapDecodeFromString(data []byte, errors string, table []rune) (string, error) {
+	var b []rune
+	i := 0
+	for i < len(data) {
+		ch := data[i]
+		var x rune = 0xFFFE
+		if int(ch) < len(table) {
+			x = table[ch]
+		}
+		if x == 0xFFFE {
+			rep, newpos, err := callDecodeErrorHandler("charmap", data, i, i+1, errors)
+			if err != nil {
+				return "", err
+			}
+			b = append(b, []rune(rep)...)
+			i = newpos
+			continue
+		}
+		b = append(b, x)
+		i++
+	}
+	return string(b), nil
+}
+
+func charmapDecodeFromMapping(data []byte, errors string, mapping *objects.Dict) (string, error) {
+	var b []rune
+	i := 0
+	for i < len(data) {
+		ch := data[i]
+		key := objects.NewInt(int64(ch))
+		item, err := mapping.GetItem(key)
+		if err != nil || item == nil || objects.IsNone(item) {
+			rep, newpos, herr := callDecodeErrorHandler("charmap", data, i, i+1, errors)
+			if herr != nil {
+				return "", herr
+			}
+			b = append(b, []rune(rep)...)
+			i = newpos
+			continue
+		}
+		switch v := item.(type) {
+		case *objects.Int:
+			val, ok := v.Int64()
+			if !ok || val < 0 || val > 0x10FFFF {
+				return "", fmt.Errorf("TypeError: character mapping must be in range(0x110000)")
+			}
+			if val == 0xFFFE {
+				rep, newpos, herr := callDecodeErrorHandler("charmap", data, i, i+1, errors)
+				if herr != nil {
+					return "", herr
+				}
+				b = append(b, []rune(rep)...)
+				i = newpos
+				continue
+			}
+			b = append(b, rune(val))
+		case *objects.Unicode:
+			b = append(b, []rune(v.Value())...)
+		default:
+			return "", fmt.Errorf("TypeError: character mapping must return integer, None or str")
+		}
+		i++
+	}
+	return string(b), nil
+}
+
+// charmapEncodeImpl mirrors _PyUnicode_EncodeCharmap. When mapping is
+// nil falls back to latin-1. When mapping is a Unicode string we use
+// the inverse table built on the fly (codepoint -> byte index). When
+// mapping is a Dict it is used directly: int(codepoint) -> int|bytes|None.
+//
+// CPython: Objects/unicodeobject.c:9114 _PyUnicode_EncodeCharmap
+func charmapEncodeImpl(s, errors string, mapping objects.Object) ([]byte, int, error) {
+	runes := []rune(s)
+	if mapping == nil {
+		// Default to Latin-1.
+		out, _, err := codecs.Encode(s, "latin-1", errors)
+		return out, len(runes), err
+	}
+	var inv map[rune]byte
+	if u, ok := mapping.(*objects.Unicode); ok {
+		inv = invertTable([]rune(u.Value()))
+	}
+	var out []byte
+	i := 0
+	for i < len(runes) {
+		r := runes[i]
+		mapped, ok, err := charmapEncodeLookup(r, mapping, inv)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !ok {
+			more, newpos, herr := charmapEncodeError(runes, i, mapping, inv, errors, s)
+			if herr != nil {
+				return nil, 0, herr
+			}
+			out = append(out, more...)
+			i = newpos
+			continue
+		}
+		out = append(out, mapped...)
+		i++
+	}
+	return out, len(runes), nil
+}
+
+// charmapEncodeError mirrors CPython's charmap_encoding_error: collect
+// the run of consecutive unencodable chars, dispatch on the named error
+// handler, and return the bytes to append plus the input position to
+// resume from.
+//
+// CPython: Objects/unicodeobject.c:8972 charmap_encoding_error
+func charmapEncodeError(runes []rune, i int, mapping objects.Object, inv map[rune]byte, errors, source string) ([]byte, int, error) {
+	start := i
+	end := i + 1
+	for end < len(runes) {
+		_, ok, err := charmapEncodeLookup(runes[end], mapping, inv)
+		if err != nil {
+			return nil, 0, err
+		}
+		if ok {
+			break
+		}
+		end++
+	}
+	switch errors {
+	case "strict":
+		return nil, 0, fmt.Errorf("UnicodeEncodeError: 'charmap' codec can't encode character %q in position %d: character maps to <undefined>", runes[start], start)
+	case "ignore":
+		return nil, end, nil
+	case "replace":
+		buf, _, err := encodeReplaceRun(end-start, '?', mapping, inv)
+		return buf, end, err
+	case "xmlcharrefreplace":
+		buf, _, err := encodeXMLCharRefRun(runes[start:end], mapping, inv)
+		return buf, end, err
+	}
+	rep, newpos, herr := callEncodeErrorHandler("charmap", source, start, end, errors)
+	if herr != nil {
+		return nil, 0, herr
+	}
+	var out []byte
+	for _, rr := range rep {
+		m2, ok2, err := charmapEncodeLookup(rr, mapping, inv)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !ok2 {
+			return nil, 0, fmt.Errorf("UnicodeEncodeError: 'charmap' codec can't encode character %q in position %d: character maps to <undefined>", rr, start)
+		}
+		out = append(out, m2...)
+	}
+	return out, newpos, nil
+}
+
+func encodeReplaceRun(n int, ch rune, mapping objects.Object, inv map[rune]byte) ([]byte, int, error) {
+	m2, ok, err := charmapEncodeLookup(ch, mapping, inv)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !ok {
+		return nil, 0, fmt.Errorf("UnicodeEncodeError: 'charmap' codec can't encode character %q (replacement)", ch)
+	}
+	var out []byte
+	for j := 0; j < n; j++ {
+		out = append(out, m2...)
+	}
+	return out, 0, nil // newpos handled by caller via len(out) is unused here; caller advances by end
+}
+
+func encodeXMLCharRefRun(runes []rune, mapping objects.Object, inv map[rune]byte) ([]byte, int, error) {
+	var out []byte
+	for _, r := range runes {
+		for _, b := range []byte(fmt.Sprintf("&#%d;", r)) {
+			m2, ok, err := charmapEncodeLookup(rune(b), mapping, inv)
+			if err != nil {
+				return nil, 0, err
+			}
+			if !ok {
+				return nil, 0, fmt.Errorf("UnicodeEncodeError: 'charmap' codec can't encode character %q (xml escape)", rune(b))
+			}
+			out = append(out, m2...)
+		}
+	}
+	return out, 0, nil
+}
+
+// charmapEncodeLookup resolves a single codepoint against the mapping.
+// Returns (bytes, found, err).
+func charmapEncodeLookup(r rune, mapping objects.Object, inv map[rune]byte) ([]byte, bool, error) {
+	if inv != nil {
+		b, ok := inv[r]
+		return []byte{b}, ok, nil
+	}
+	d, ok := mapping.(*objects.Dict)
+	if !ok {
+		return nil, false, fmt.Errorf("TypeError: charmap_encode() mapping must be str or mapping, not %s", mapping.Type().Name)
+	}
+	item, lookupErr := d.GetItem(objects.NewInt(int64(r)))
+	_ = lookupErr // key-not-found is "unmapped"; surface only the type-error paths below
+	if item == nil || objects.IsNone(item) {
+		return nil, false, nil
+	}
+	switch v := item.(type) {
+	case *objects.Int:
+		val, ok := v.Int64()
+		if !ok || val < 0 || val > 255 {
+			return nil, false, fmt.Errorf("TypeError: character mapping must be in range(256)")
+		}
+		return []byte{byte(val)}, true, nil
+	case *objects.Bytes:
+		return v.Bytes(), true, nil
+	default:
+		return nil, false, fmt.Errorf("TypeError: character mapping must return integer, bytes or None, not %s", item.Type().Name)
+	}
+}
+
+// invertTable builds a reverse lookup (codepoint -> byte) from a 256
+// char decoding table. 0xFFFE entries are skipped (unmapped).
+func invertTable(table []rune) map[rune]byte {
+	m := make(map[rune]byte, len(table))
+	for i, r := range table {
+		if i >= 256 {
+			break
+		}
+		if r == 0xFFFE {
+			continue
+		}
+		if _, dup := m[r]; dup {
+			continue
+		}
+		m[r] = byte(i)
+	}
+	return m
+}
+
+// charmapBuildImpl mirrors PyUnicode_BuildEncodingMap's dict path:
+// map codepoint -> byte index for each char in the input string. CPython
+// also has a tighter trie format, but it is purely an internal storage
+// optimisation; the dict path is functionally identical and is what
+// CPython falls back to whenever the trie can't represent the table.
+//
+// CPython: Objects/unicodeobject.c:8694 PyUnicode_BuildEncodingMap
+func charmapBuildImpl(s string) (objects.Object, error) {
+	if s == "" {
+		return nil, fmt.Errorf("TypeError: bad argument type for built-in operation")
+	}
+	d := objects.NewDict()
+	i := 0
+	for _, r := range s {
+		if i >= 256 {
+			break
+		}
+		if err := d.SetItem(objects.NewInt(int64(r)), objects.NewInt(int64(i))); err != nil {
+			return nil, err
+		}
+		i++
+	}
+	return d, nil
+}
+
+// callDecodeErrorHandler invokes the named error handler for a decode
+// error and returns (replacement, new_position).
+func callDecodeErrorHandler(enc string, input []byte, start, end int, errors string) (string, int, error) {
+	h, err := codecs.LookupError(errors)
+	if err != nil {
+		return "", 0, err
+	}
+	return h(enc, input, start, end)
+}
+
+// callEncodeErrorHandler invokes the named error handler for an encode
+// error. The input is supplied as a string; we pass its UTF-8 bytes
+// since the handler signature is byte-oriented.
+func callEncodeErrorHandler(enc, input string, start, end int, errors string) (string, int, error) {
+	h, err := codecs.LookupError(errors)
+	if err != nil {
+		return "", 0, err
+	}
+	return h(enc, []byte(input), start, end)
 }
 
 // ---------------------------------------------------------------------------
