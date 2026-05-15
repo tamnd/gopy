@@ -36,8 +36,8 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | `test_keyword.py` | 56 | DONE (10/11 sub-tests green; the eleventh hits a parser-generator gap unrelated to lexer/tokenizer, `parser: generated rule bodies not yet emitted`. Also mirrored at `stdtest/test_keyword.py` and gated via `TestStdtestCorpus`.) | — |
 | `test_utf8source.py` | 41 | DONE (3/3 sub-tests green; mirrored at `stdtest/test_utf8source.py`) | — |
 | `test_tabnanny.py` | 354 | DONE (exits 0 after typed `UnicodeDecodeError` + `surrogateescape` decode fix) | 3066fe3 |
-| `test_source_encoding.py` | 547 | TODO (blocked on `import inspect`, stdlib not yet vendored) | — |
-| `test_tokenize.py` | 3480 | TODO (blocked on `import tempfile`, stdlib not yet vendored) | — |
+| `test_source_encoding.py` | 547 | TODO (imports clear; first hang is `BytesSourceEncodingTest.test_crcrcrlf`, which is `exec(bytes)` inside `captured_stdout`; the underlying gap is the VM's `exec(bytes)` path, not lexer/tokenizer). | — |
+| `test_tokenize.py` | 3480 | WIP (the `_generate_tokens_from_c_tokenizer(str_readline)` path now works, after a backwards encoding check in `module/_tokenize/module.go:drainReadline` was flipped to match `Parser/tokenizer/readline_tokenizer.c:34` — commit 538ab52. Next blocker is the test's own `stringify_tokens_from_source` helper, which uses f-string format specs the v0.6 compiler doesn't lower yet.) | 538ab52 |
 
 ## Goal
 
