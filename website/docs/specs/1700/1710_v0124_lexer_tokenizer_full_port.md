@@ -1,0 +1,131 @@
+---
+format: md
+id: 1710_v0124_lexer_tokenizer_full_port
+title: "1710. v0.12.4 lexer/tokenizer full port"
+sidebar_label: "1710. v0.12.4 lexer/tokenizer"
+sidebar_position: 1710
+slug: /specs/1710-v0124-lexer-tokenizer
+description: "Port every CPython 3.14 lexer/tokenizer source file (Parser/lexer/, Parser/tokenizer/, Python/Python-tokenize.c, Lib/{tokenize,keyword,tabnanny}.py) into gopy, then gate on the five Lib/test/test_* files the 1700 spec assigns to this subsystem."
+---
+
+## Checklist
+
+Sources to fully port (CPython 3.14):
+
+- [ ] `Parser/lexer/buffer.c` (76 lines) → `parser/lexer/buffer.go`
+- [ ] `Parser/lexer/lexer.c` (1635 lines) → `parser/lexer/lexer.go`
+- [ ] `Parser/lexer/state.c` (151 lines) → `parser/lexer/state.go`
+- [ ] `Parser/tokenizer/helpers.c` (581 lines) → `parser/lexer/helpers.go`
+- [ ] `Parser/tokenizer/file_tokenizer.c` (493 lines) → `parser/lexer/driver_file.go`
+- [ ] `Parser/tokenizer/readline_tokenizer.c` (134 lines) → `parser/lexer/driver_readline.go`
+- [ ] `Parser/tokenizer/string_tokenizer.c` (148 lines) → `parser/lexer/driver_string.go`
+- [ ] `Parser/tokenizer/utf8_tokenizer.c` (55 lines) → `parser/lexer/driver_string.go` (utf-8 path)
+- [ ] `Python/Python-tokenize.c` → `module/_tokenize/` (replaces the stub `TokenizerIter`)
+- [ ] `Lib/keyword.py` (64 lines) → `module/keyword/` (vendor verbatim)
+- [ ] `Lib/tokenize.py` (598 lines) → `module/tokenize/` (vendor verbatim)
+- [ ] `Lib/tabnanny.py` (338 lines) → `module/tabnanny/` (vendor verbatim)
+
+Gate tests to land green under `test/cpython/`:
+
+- [ ] `test_keyword.py` (56 lines)
+- [ ] `test_utf8source.py` (41 lines)
+- [ ] `test_source_encoding.py` (547 lines)
+- [ ] `test_tabnanny.py` (354 lines)
+- [ ] `test_tokenize.py` (3480 lines)
+
+## Goal
+
+Replace the partial lexer/tokenizer port that grew up alongside the
+v0.5.5 parser work with a one-to-one translation of every CPython 3.14
+source file in the subsystem, then pin the result with the five
+`Lib/test/test_*` files the 1700 spec already assigned to this panel.
+
+Today `parser/lexer/lexer.go` is 633 lines against CPython's 1635-line
+`Parser/lexer/lexer.c`. The delta is the gap this spec closes. The
+v0.12.4 series treats every subsystem the same way: port full, then
+gate on the upstream tests.
+
+## Sources of truth
+
+Lexer / tokenizer C sources (3.14):
+
+| CPython file | Lines | gopy destination |
+|--------------|------:|------------------|
+| Parser/lexer/buffer.c | 76 | parser/lexer/buffer.go |
+| Parser/lexer/lexer.c | 1635 | parser/lexer/lexer.go |
+| Parser/lexer/state.c | 151 | parser/lexer/state.go |
+| Parser/tokenizer/helpers.c | 581 | parser/lexer/helpers.go |
+| Parser/tokenizer/file_tokenizer.c | 493 | parser/lexer/driver_file.go |
+| Parser/tokenizer/readline_tokenizer.c | 134 | parser/lexer/driver_readline.go |
+| Parser/tokenizer/string_tokenizer.c | 148 | parser/lexer/driver_string.go |
+| Parser/tokenizer/utf8_tokenizer.c | 55 | parser/lexer/driver_string.go |
+| Python/Python-tokenize.c | (see file) | module/_tokenize/ |
+
+Python sources (3.14):
+
+| CPython file | Lines | gopy destination |
+|--------------|------:|------------------|
+| Lib/keyword.py | 64 | module/keyword/ |
+| Lib/tokenize.py | 598 | module/tokenize/ |
+| Lib/tabnanny.py | 338 | module/tabnanny/ |
+
+Gate tests live at `~/github/python/cpython/Lib/test/`:
+`test_keyword.py`, `test_utf8source.py`, `test_source_encoding.py`,
+`test_tabnanny.py`, `test_tokenize.py`.
+
+## Workflow
+
+The spec follows the durable port-not-patch / full-subsystem rule.
+The work is broken into the phases below; each phase is one or more
+PRs.
+
+### Phase 1: audit + fill the C-tokenizer port
+
+For every `Parser/lexer/*.c` and `Parser/tokenizer/*.c` function, find
+the Go counterpart in `parser/lexer/`. Where a function is missing,
+port it with a `// CPython: <file>:<line> <function>` citation. Where
+a function is present but diverges from CPython, rewrite it to match.
+The deliverable is parser/lexer Go LOC roughly matching the upstream C
+LOC, with every CPython function accounted for.
+
+### Phase 2: replace the `_tokenize` stub
+
+`module/_tokenize/module.go` raises NotImplementedError on every call.
+Port `Python/Python-tokenize.c` end-to-end: `TokenizerIter_Type`,
+`tokenizeriter_new`, `tokenizeriter_next`, the helpers that materialize
+`TokenInfo` tuples, and the readline / encoding plumbing.
+`module/tokenize/` (next phase) drives this iterator directly.
+
+### Phase 3: vendor `Lib/keyword.py`, `Lib/tokenize.py`, `Lib/tabnanny.py`
+
+The Python layer is a verbatim vendoring under `module/keyword/`,
+`module/tokenize/`, `module/tabnanny/` (following the standing rule:
+"module ports under `module/`, name = CPython public name minus the
+`py` prefix"). The Python files stay byte-equal to upstream so future
+3.14.x point releases rebase via `git diff`.
+
+### Phase 4: land the gate tests
+
+For each of the five tests:
+
+1. Copy the test file from `~/github/python/cpython/Lib/test/` into
+   `test/cpython/` verbatim.
+2. Run it through `test/regrtest`.
+3. If green, mark the 1700 panel row done and move to the next.
+4. If red, fix the divergence in `parser/lexer/`, `module/_tokenize/`,
+   or the vendored Python file. Never edit the test.
+
+### Phase 5: flip 1700
+
+Once every gate is green, flip task #484 ("test e2e v0.5.5 — lexer
+panel") to done and update the 1700 checklist row.
+
+## Out of scope
+
+- `tokenizedata/` test fixtures under `Lib/test/tokenizedata/` are
+  in scope only as far as the five gate tests reference them.
+- IDLE's tokenizer fork (`Lib/idlelib/`) stays out of scope; IDLE is
+  on the 1700 deferred list.
+- The PEG parser layer that consumes tokens (`Parser/parser.c` and
+  friends) is a separate subsystem and gets its own v0.12.4 spec
+  when its turn comes.
