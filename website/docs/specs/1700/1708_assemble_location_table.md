@@ -54,11 +54,20 @@ the correct line on the first hit.
 
 ## Files in scope
 
+Exploration on 2026-05-15 confirmed the per-instruction location
+plumbing (`Instr.Loc` in `compile/instrseq.go:62-67`) is already in
+place and the writer/driver in `compile/assemble_locations.go` already
+coalesces and picks the minimal form. The bug surfaced by task #608 is
+upstream: codegen emits most ops with an empty `Loc`, so the assembler
+faithfully encodes "no location" for the bytecodes that follow the
+first op of each source line. File C below is therefore the
+load-bearing one, not files A/B.
+
 | # | CPython file | Lines | gopy target | Status |
 |---|--------------|------:|-------------|--------|
-| A | `Python/assemble.c` (location-emission slice: `write_location_info_entry`, `write_location_info_short_form`, `write_location_info_oneline_form`, `write_location_info_long_form`, `write_location_info_no_column`, `write_location_info_none`, plus the loop in `assemble_location_info` that drives them) | ~240 | `compile/assemble.go` (or a new `compile/assemble_location.go` if cleaner) | pending |
-| B | `Python/instruction_sequence.c` (per-instruction location storage that feeds A: `_PyInstructionSequence_AddLocation`, `_PyInstructionSequence_Insert`, the `i_loc` field on `instr`) | ~120 | `compile/instruction_sequence.go` | pending audit (some plumbing already exists; needs a one-to-one function audit) |
-| C | `Python/compile.c` (the call sites that feed locations into B: `compiler_addop_*`, `_PyCompile_InstrSize`, anything that builds a `location` struct from an `expr_ty`/`stmt_ty`) | varies | `compile/codegen.go` and friends | partial (locations are computed; need to audit every emit site against CPython for "did we drop a location anywhere") |
+| C | `Python/compile.c` + `Python/codegen.c` (every emit site: `compiler_addop_*`, `ADDOP*` macros, anything that builds a `location` struct from an `expr_ty`/`stmt_ty`. Every call must pass a real source location, not a default-zero `ast.Pos`) | varies | `compile/codegen.go` and friends | pending audit (this is where the gap is) |
+| B | `Python/instruction_sequence.c` (per-instruction location storage: `_PyInstructionSequence_AddLocation`, `_PyInstructionSequence_Insert`, the `i_loc` field) | ~120 | `compile/instrseq.go` | done structurally; needs a 1:1 function audit pass |
+| A | `Python/assemble.c` (location-emission slice: `write_location_info_entry`, `write_location_info_short_form`, `write_location_info_oneline_form`, `write_location_info_long_form`, `write_location_info_no_column`, `write_location_info_none`, `assemble_emit_location`, `assemble_location_info`) | ~240 | `compile/assemble_locations.go` | done structurally (already coalesces + picks minimal form); needs a 1:1 function rename + citation pass to match CPython exactly |
 
 Sources of truth live under `/Users/apple/cpython-314/`.
 
@@ -71,11 +80,10 @@ has one in CPython."
 
 | Phase | File | Block | Blocks | Status |
 |-------|------|-------|--------|--------|
-| 1 | A `assemble.c` | `write_location_info_entry` and the five form-specific writers | - | pending |
-| 2 | A `assemble.c` | `assemble_location_info` driver loop (one entry per instruction, with run-length compression matching CPython's short-form rules) | 1 | pending |
-| 3 | B `instruction_sequence.c` | audit + finish: every instruction carries an `i_loc` and every insertion path propagates it | - | pending |
-| 4 | C `compile.c` | audit emit sites: every `addop_*` call must take a `location`; no synthesized op may default to "unknown" silently | - | pending |
-| Gate | - | Decoded position table has `Line > 0` for every non-synthetic codeunit; `lineForOffset` shim deleted; `attachFrameTraceback` calls `CoAddr2Location` directly; existing `TestTracebackFormatExc` still green | 1,2,3,4 | pending |
+| 1 | C `codegen.go` | Emit-site audit: every `Addop` / `Insert` call must pass a real `ast.Pos`. Catch the silent default-zero `ast.Pos{}` cases that produce "no location" entries today. | - | pending |
+| 2 | B `instrseq.go` | 1:1 audit against `Python/instruction_sequence.c`. Confirm every function has a citation, every insertion path propagates `Loc`. | - | pending |
+| 3 | A `assemble_locations.go` | 1:1 audit against `Python/assemble.c`. Rename helpers to match (`writeLocationInfoEntry`, `writeLocationInfoShortForm`, etc.) and add file:line citations. Reproduce CPython's coalescing rules exactly. | - | pending |
+| Gate | - | Decoded position table has `Line > 0` for every non-synthetic codeunit; `lineForOffset` shim deleted; `attachFrameTraceback` calls `CoAddr2Location` directly; existing `TestTracebackFormatExc` still green; new round-trip test asserts one PositionEntry per codeunit for a known multi-line function. | 1,2,3 | pending |
 
 ## Phase 1 - `Python/assemble.c` per-instruction writers
 
@@ -143,8 +151,7 @@ After all four phases land:
 
 ## Checklist
 
-- [ ] Phase 1: per-instruction location writers ported with citations
-- [ ] Phase 2: `assemble_location_info` driver ported
-- [ ] Phase 3: `instruction_sequence.c` audit complete, `i_loc` propagated end to end
-- [ ] Phase 4: `compile.c` emit sites audited, every op carries a location
-- [ ] Gate: shim deleted, unwind back to direct lookup, all tests green
+- [ ] Phase 1: codegen emit-site audit, every Addop/Insert passes a real ast.Pos
+- [ ] Phase 2: `instrseq.go` 1:1 against `instruction_sequence.c` with citations
+- [ ] Phase 3: `assemble_locations.go` 1:1 against `assemble.c` with citations
+- [ ] Gate: shim deleted, unwind back to direct lookup, round-trip test added, all tests green
