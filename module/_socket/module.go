@@ -90,7 +90,6 @@ func newSocketType() *objects.Type {
 	objects.SetTypeDescr(t, "settimeout", objects.NewMethodDescr(t, "settimeout", sockSettimeout))
 	objects.SetTypeDescr(t, "gettimeout", objects.NewMethodDescr(t, "gettimeout", sockGettimeout))
 	objects.SetTypeDescr(t, "shutdown", objects.NewMethodDescr(t, "shutdown", sockShutdown))
-	objects.SetTypeDescr(t, "makefile", objects.NewMethodDescr(t, "makefile", sockMakefile))
 
 	objects.SetTypeDescr(t, "family", objects.NewGetSetDescr(
 		"family",
@@ -796,15 +795,6 @@ func sockShutdown(args []objects.Object, _ map[string]objects.Object) (objects.O
 		return nil, osError(err)
 	}
 	return objects.None(), nil
-}
-
-// sockMakefile is a stub. CPython's full implementation creates a buffered
-// file-like wrapper; here we raise NotImplementedError to keep the port
-// honest until the io layer is ready.
-//
-// CPython: Modules/socketmodule.c (makefile is implemented in Lib/socket.py)
-func sockMakefile(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return nil, fmt.Errorf("NotImplementedError: socket.makefile() is not yet implemented")
 }
 
 // ---------------------------------------------------------------------------
