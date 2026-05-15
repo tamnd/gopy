@@ -7,12 +7,12 @@ import "github.com/tamnd/gopy/ast"
 
 // MaxOpcode mirrors MAX_OPCODE in instruction_sequence.c.
 //
-// CPython: Python/instruction_sequence.c:L113 MAX_OPCODE
+// CPython: Python/instruction_sequence.c:113 MAX_OPCODE
 const MaxOpcode = 511
 
-// MaxOparg is 1<<30. CPython asserts oparg < (1<<30).
+// MaxOparg is 1<<30. CPython asserts oparg < (1<<30) inside Addop.
 //
-// CPython: Python/instruction_sequence.c:L122
+// CPython: Python/instruction_sequence.c:122 _PyInstructionSequence_Addop
 const MaxOparg = 1 << 30
 
 // MIN_SPECIALIZED_OPCODE is the lowest opcode value reserved for a
@@ -86,13 +86,13 @@ type Sequence struct {
 // instruction_sequence.c (left in s_labelmap for unbound slots until
 // UseLabel binds them).
 //
-// CPython: Python/instruction_sequence.c:L80
+// CPython: Python/instruction_sequence.c:80 _PyInstructionSequence_UseLabel
 const labelUnbound = -111
 
 // NewLabel allocates a fresh label id (1-based, matching CPython's
 // post-increment of s_next_free_label).
 //
-// CPython: Python/instruction_sequence.c:L57 _PyInstructionSequence_NewLabel
+// CPython: Python/instruction_sequence.c:58 _PyInstructionSequence_NewLabel
 func (s *Sequence) NewLabel() JumpTargetLabel {
 	s.nextFreeLabel++
 	return JumpTargetLabel{id: s.nextFreeLabel}
@@ -102,7 +102,7 @@ func (s *Sequence) NewLabel() JumpTargetLabel {
 // appended. Calling UseLabel with the same label twice rebinds it
 // (mirrors CPython, which simply overwrites s_labelmap[lbl]).
 //
-// CPython: Python/instruction_sequence.c:L64 _PyInstructionSequence_UseLabel
+// CPython: Python/instruction_sequence.c:65 _PyInstructionSequence_UseLabel
 func (s *Sequence) UseLabel(lbl JumpTargetLabel) {
 	s.ensureLabelmap(lbl.id)
 	s.labelmap[lbl.id] = len(s.Instrs)
@@ -111,8 +111,8 @@ func (s *Sequence) UseLabel(lbl JumpTargetLabel) {
 // ensureLabelmap grows s.labelmap so that lbl is a valid index. New
 // slots are filled with labelUnbound. Index 0 is reserved.
 //
-// CPython: Python/instruction_sequence.c labelmap resize in
-// _PyInstructionSequence_UseLabel
+// CPython: Python/instruction_sequence.c:65 _PyInstructionSequence_UseLabel
+// (the s_labelmap grow loop inside).
 func (s *Sequence) ensureLabelmap(lbl int) {
 	for len(s.labelmap) <= lbl {
 		s.labelmap = append(s.labelmap, labelUnbound)
@@ -124,7 +124,7 @@ func (s *Sequence) ensureLabelmap(lbl int) {
 // asserts these; here a panic via slice growth would mask the bug,
 // so we panic explicitly to match the assertion semantics.
 //
-// CPython: Python/instruction_sequence.c:L115 _PyInstructionSequence_Addop
+// CPython: Python/instruction_sequence.c:116 _PyInstructionSequence_Addop
 func (s *Sequence) Addop(op Opcode, oparg int32, loc ast.Pos) {
 	if op < 0 || op > MaxOpcode {
 		panic("compile: opcode out of range")
@@ -144,7 +144,7 @@ func (s *Sequence) Addop(op Opcode, oparg int32, loc ast.Pos) {
 // Any previously-bound label that pointed at pos or later is bumped
 // up by one to preserve its target.
 //
-// CPython: Python/instruction_sequence.c:L133 _PyInstructionSequence_InsertInstruction
+// CPython: Python/instruction_sequence.c:134 _PyInstructionSequence_InsertInstruction
 func (s *Sequence) Insert(pos int, op Opcode, oparg int32, loc ast.Pos) {
 	if pos < 0 || pos > len(s.Instrs) {
 		panic("compile: insert position out of range")
@@ -172,7 +172,7 @@ func (s *Sequence) Insert(pos int, op Opcode, oparg int32, loc ast.Pos) {
 // scope: a function or class definition emits its own Sequence and
 // hangs it off the parent here).
 //
-// CPython: Python/instruction_sequence.c:L166 _PyInstructionSequence_AddNested
+// CPython: Python/instruction_sequence.c:167 _PyInstructionSequence_AddNested
 func (s *Sequence) AddNested(child *Sequence) {
 	s.Nested = append(s.Nested, child)
 }
@@ -180,7 +180,7 @@ func (s *Sequence) AddNested(child *Sequence) {
 // SetAnnotationsCode mirrors _PyInstructionSequence_SetAnnotationsCode.
 // CPython asserts s_annotations_code is unset; we do the same.
 //
-// CPython: Python/instruction_sequence.c:L157
+// CPython: Python/instruction_sequence.c:158 _PyInstructionSequence_SetAnnotationsCode
 func (s *Sequence) SetAnnotationsCode(annot *Sequence) {
 	if s.AnnoCode != nil {
 		panic("compile: annotations code already set")
@@ -197,7 +197,7 @@ func (s *Sequence) SetAnnotationsCode(annot *Sequence) {
 // Idempotent: a second call is a no-op (s.labelmap == nil). The
 // per-instruction ExceptHandlerInfo.Label is also resolved.
 //
-// CPython: Python/instruction_sequence.c:L86 _PyInstructionSequence_ApplyLabelMap
+// CPython: Python/instruction_sequence.c:87 _PyInstructionSequence_ApplyLabelMap
 func (s *Sequence) ApplyLabelMap(hasTarget func(Opcode) bool) {
 	if s.labelmap == nil {
 		return
