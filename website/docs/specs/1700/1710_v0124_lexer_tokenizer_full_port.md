@@ -136,7 +136,7 @@ TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 | 2 | T1.5 | VM attr machinery | `AttrDictHolder` lets C-port subclasses carry an instance __dict__; `_random.RandomObject` opts in | DONE | 7d9e729 |
 | 3 | T1.6 | `module/os` | bind `os.fsdecode` + `os.fsencode` on the inittab module | DONE | 9bd4675 |
 | 4 | T1.7 | stdlib vendor | byte-equal `Lib/bisect.py` and `Lib/tempfile.py` under `stdlib/` | DONE | 4350edf |
-| 5 | T6 | asyncio | `unittest.mock` imports `asyncio`; large sub-system, its own spec | BLOCKED | — |
+| 5 | T6 | asyncio | `unittest.mock` imports `asyncio`; full port tracked in [spec 1711](./1711_v0124_asyncio_full_port.md) | BLOCKED | — |
 
 ### test_utf8source.py chain
 
