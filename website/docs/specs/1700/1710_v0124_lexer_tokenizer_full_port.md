@@ -155,8 +155,8 @@ unrelated sub-systems:
 | # | Task | Sub-system | Surface | Status | Commit |
 |---|------|------------|---------|--------|--------|
 | 1 | T5.1 | stdlib vendor | vendor `Lib/opcode.py` (122 lines) plus C-port the `_opcode` inittab module (has_arg/has_const/has_name/has_jump/has_free/has_local/has_exc, get_nb_ops, intrinsic + special-method name lists). `_opcode_metadata.py` lands as a verbatim vendor since it's pure-Python data. `stack_effect` / `get_executor` ship as documented stubs (they're never called during opcode.py or dis.py import). | DONE | 2512db3 |
-| 2 | T5.2 | stdlib vendor | vendor `Lib/dis.py` (1157 lines) verbatim, depends on T5.1 | TODO | — |
-| 3 | T5.3 | stdlib vendor | vendor `Lib/importlib/__init__.py` + `Lib/importlib/machinery.py` (re-exports of the gopy import internals) | TODO | — |
+| 2 | T5.2 | stdlib vendor | vendor `Lib/dis.py` (1157 lines) verbatim, depends on T5.1. Also widens `module/_collections` `_tuplegetter` so `__doc__` is writable (matches CPython `tuplegetter_members` `PyMemberDef` `flags=0`), which `dis.py:314` exercises. | DONE | 7f352c2 |
+| 3 | T5.3 | stdlib vendor | minimal-shim `stdlib/importlib/__init__.py` + `stdlib/importlib/machinery.py`. Only `SOURCE_SUFFIXES`, `BYTECODE_SUFFIXES`, `EXTENSION_SUFFIXES`, `all_suffixes()`, and `ModuleSpec` are observable from `inspect.py`; the full bootstrap port is deferred. | DONE | _pending_ |
 | 4 | T5.4 | stdlib vendor | vendor `Lib/inspect.py` (3409 lines) verbatim, depends on T5.1–T5.3 | TODO | — |
 
 DFS note: T5 was originally one row but `inspect` pulls in `dis` →
