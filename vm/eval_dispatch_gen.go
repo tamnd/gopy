@@ -177,7 +177,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = last_sent_val
 		exc_value_st := e.peek(0)
 		_ = exc_value_st
-		// body bail: int matches rhs: unexpected token "PyExc_StopIteration" in expression
+		// body bail: if then: output assign "value": unexpected token "PyStopIterationObject" in expression
 		// outputs: none value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CONVERT_VALUE:
@@ -292,9 +292,25 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = dict
 		update := e.peek(0)
 		_ = update
-		// body bail: if then: int matches rhs: unexpected token "_PyErr_ExceptionMatches" in expression
-		// outputs: dict* _out1[oparg - 1]*
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		dict_o := dict.AsObject()
+		_ = dict_o
+		update_o := update.AsObject()
+		_ = update_o
+		err := e.dictUpdate(dict_o, update_o)
+		_ = err
+		if err < 0 {
+			matches := e.errExceptionMatches(nil)
+			_ = matches
+			if matches {
+				e.setPendingErr("_PyErr_Format")
+			}
+			update.Close()
+			return 0, nil, nil, false, e.error("error")
+		}
+		update.Close()
+		e.setPeek(int(oparg-1)+1, dict)
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.END_FOR:
 		value := e.peek(0)
 		_ = value
@@ -586,7 +602,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = list_st
 		iterable_st := e.peek(0)
 		_ = iterable_st
-		// body bail: if then: int matches rhs: unexpected token "_PyErr_ExceptionMatches" in expression
+		// body bail: if then: if cond: expected ')' to close subexpression
 		// outputs: list_st* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_BUILD_CLASS:

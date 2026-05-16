@@ -482,6 +482,12 @@ func rhsIsBool(expr string) bool {
 	if strings.HasPrefix(expr, "objects.Is") {
 		return true
 	}
+	// Predicate helpers on the eval state. Each returns Go bool.
+	for _, s := range []string{"e.errOccurred(", "e.errExceptionMatches("} {
+		if strings.HasPrefix(expr, s) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -912,6 +918,13 @@ func (p *exprParser) parsePrimary() (string, error) {
 		if p.locals[tk] {
 			return goLocalName(tk), nil
 		}
+		// CPython exception-type constants: PyExc_TypeError, PyExc_AttributeError,
+		// etc. gopy carries pending exceptions as Go errors rather than type
+		// objects, so the surface only needs a placeholder that the matcher
+		// helper ignores. Surface a nil objects.Object via the helper sentinel.
+		if strings.HasPrefix(tk, "PyExc_") {
+			return "nil", nil
+		}
 	}
 	return "", fmt.Errorf("unexpected token %q in expression", tk)
 }
@@ -1047,6 +1060,13 @@ var helperCalls = map[string]helperCall{
 	//
 	// CPython: Python/errors.c _PyErr_Occurred.
 	"_PyErr_Occurred": {goExpr: "e.errOccurred", arity: 0, dropFirst: 1},
+	// _PyErr_ExceptionMatches(tstate, PyExc_X) reports whether the
+	// running exception is of the named type. gopy holds the pending
+	// exception as a Go error string, so the wrapper does a substring
+	// match against the type-name placeholder.
+	//
+	// CPython: Python/errors.c _PyErr_ExceptionMatches.
+	"_PyErr_ExceptionMatches": {goExpr: "e.errExceptionMatches", arity: 1, dropFirst: 1},
 	// Dict / list / set mutation helpers. These all return a C int err
 	// (0 ok, nonzero error) and stash the cause on pendingErr.
 	"PyDict_Pop":           {goExpr: "e.dictPop", arity: 3},
