@@ -567,15 +567,27 @@ func (p *exprParser) parseGetItemCall() (string, error) {
 		return "", fmt.Errorf("expected ',' after GETITEM table")
 	}
 	p.pos++
-	idx, err := p.parsePrimary()
-	if err != nil {
-		return "", fmt.Errorf("GETITEM index: %w", err)
+	// The index is often `oparg`, but CPython also writes
+	// `oparg >> 2` (LOAD_SUPER_ATTR) and similar. Collect every
+	// token up to the matching ')', then render them verbatim:
+	// C's bitshift / mask operators all spell the same in Go.
+	depth := 1
+	start := p.pos
+	for p.pos < len(p.toks) && depth > 0 {
+		switch p.toks[p.pos] {
+		case "(":
+			depth++
+		case ")":
+			depth--
+			if depth == 0 {
+				idx := strings.Join(p.toks[start:p.pos], " ")
+				p.pos++
+				return fmt.Sprintf("%s(int(%s))", helper, idx), nil
+			}
+		}
+		p.pos++
 	}
-	if p.pos >= len(p.toks) || p.toks[p.pos] != ")" {
-		return "", fmt.Errorf("expected ')' to close GETITEM")
-	}
-	p.pos++
-	return fmt.Sprintf("%s(int(%s))", helper, idx), nil
+	return "", fmt.Errorf("unterminated GETITEM call")
 }
 
 // parseCallArg consumes ( <expr> ) and returns the rendered inner
