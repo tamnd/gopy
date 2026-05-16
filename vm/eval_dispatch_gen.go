@@ -369,8 +369,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: b
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.JUMP_BACKWARD_NO_INTERRUPT:
-		// body bail: JUMPBY arg "- oparg" is not the bare 'oparg' identifier
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return e.jumpBy(-int(oparg) + 1), nil, nil, false, nil
 	case compile.JUMP_FORWARD:
 		return e.jumpBy(int(oparg) + 1), nil, nil, false, nil
 	case compile.LIST_APPEND:
@@ -668,9 +667,14 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.UNARY_NOT:
 		value := e.pop()
 		_ = value
-		// body bail: output assign "res": unexpected token "PyStackRef_IsFalse" in expression
-		// outputs: res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		if value.IsFalse() {
+			res = stackref.True
+		} else {
+			res = stackref.False
+		}
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.UNPACK_EX:
 		seq := e.pop()
 		_ = seq
