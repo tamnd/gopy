@@ -1,0 +1,218 @@
+---
+title: Optimizer
+description: Tier-2. Trace projection, the uop interpreter, the optimisation passes, the JIT. PEP 744.
+---
+
+# Optimizer
+
+Tier-2 is CPython's second-level optimiser. Where Tier-1 (the
+specializer) rewrites individual opcodes in place, Tier-2 takes
+a *trace*. a linear sequence of micro-operations spanning many
+bytecode instructions. and runs an optimisation pipeline on it
+before either interpreting the resulting *uop trace* or
+JIT-compiling it to machine code. PEP 744 is the design document.
+
+## Where the code lives
+
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/optimizer.c`                       | Trace projection. `_PyOptimizer_Optimize`. The uop interpreter.   |
+| `Python/optimizer_analysis.c`              | Abstract interpretation, type propagation.                        |
+| `Python/optimizer_bytecodes.c`             | Per-uop optimisation rules (DSL, parallel to `bytecodes.c`).      |
+| `Python/executor_cases.c.h` (generated)    | Tier-2 case bodies emitted from `bytecodes.c`.                    |
+| `Python/jit.c`                             | The copy-and-patch JIT (PEP 744).                                 |
+| `Tools/cases_generator/tier2_generator.py` | Generator for `executor_cases.c.h`.                               |
+| `Tools/jit/`                               | The JIT toolchain: builds stencils from LLVM at CPython build time. |
+
+The Tier-2 entry from the eval loop is `JUMP_BACKWARD`:
+
+```c
+TARGET(JUMP_BACKWARD):
+    if (--counter == 0) {
+        _PyExecutorObject *exec = _PyOptimizer_Optimize(frame, next_instr, ...);
+        if (exec != NULL) {
+            GOTO_TIER_TWO(exec);
+        }
+    }
+    DISPATCH();
+```
+
+## Trace projection
+
+`_PyOptimizer_Optimize` walks bytecode forward from the loop
+header, expanding each (specialised) opcode into the uops it
+decomposes into. The walk stops at:
+
+* A loop or function boundary the projector cannot follow.
+* An unspecialisable site (specialiser has not run, or the site
+  is generic).
+* A maximum trace length.
+
+The expansion is driven by the same `bytecodes.c` DSL the eval
+loop reads. An opcode declares its uop decomposition with a
+`macro` clause:
+
+```
+macro(LOAD_FAST_LOAD_FAST) = _LOAD_FAST + _LOAD_FAST;
+macro(BINARY_OP_ADD_INT) = _GUARD_BOTH_INT + _BINARY_OP_ADD_INT + _POP_TWO;
+```
+
+Tier-2 sees the uops; Tier-1 sees the fused opcode. Guards
+(`_GUARD_BOTH_INT`) become explicit operations in the trace.
+
+## The uop format
+
+A trace is an array of `_PyUOpInstruction`:
+
+```c
+/* Include/internal/pycore_uop_ids.h _PyUOpInstruction */
+typedef struct {
+    uint16_t opcode;        /* _LOAD_FAST, _BINARY_OP_ADD_INT, ... */
+    uint16_t oparg;
+    uint16_t target;        /* index back into bytecode for deopt */
+    uint64_t operand;       /* inline constant (type, cache, ...) */
+} _PyUOpInstruction;
+```
+
+`target` lets a uop deopt back to the matching bytecode offset.
+`operand` carries an embedded constant; the optimiser uses it to
+bake the cached type version, descriptor pointer, or constant
+value into the trace.
+
+## The optimisation pipeline
+
+`optimizer_analysis.c` runs after projection. It walks the trace
+forward, modelling values with an abstract domain (concrete
+constants, known types, unknown). The passes:
+
+* **Type propagation.** Guards establish facts (`_GUARD_BOTH_INT`
+  means both operands are `int`); subsequent uops that need that
+  fact (`_BINARY_OP_ADD_INT`) consume it. Once a fact is
+  established, redundant guards are removed.
+* **Constant folding.** Operations on known constants are
+  evaluated at trace-build time; the result becomes a literal in
+  `operand`.
+* **Dead store elimination.** Stack pushes followed by pops with
+  no intervening use collapse.
+* **Reference-count pruning.** Adjacent `INCREF`/`DECREF` of the
+  same object cancel.
+
+The rules are written in `optimizer_bytecodes.c` in a DSL parallel
+to `bytecodes.c`; the cases generator emits the analysis code
+from them.
+
+## The executor
+
+A successful trace produces a `_PyExecutorObject`:
+
+```c
+/* Include/internal/pycore_optimizer.h _PyExecutorObject */
+typedef struct _PyExecutorObject {
+    PyObject_HEAD
+    int32_t exits;                 /* number of side exits */
+    int32_t code_size;             /* uops or machine bytes */
+    uint16_t vm_data_size;
+    uint64_t execute;              /* function pointer or trampoline */
+    _PyUOpInstruction trace[1];    /* uops; or NULL if JIT-only */
+} _PyExecutorObject;
+```
+
+If the JIT is enabled, `trace` is replaced (or supplemented) by a
+block of machine code stitched together from precompiled stencils.
+
+## The uop interpreter
+
+When the JIT is off, the executor is run by an interpreter loop
+over `trace`:
+
+```c
+/* Python/optimizer.c (sketch) uop_dispatch */
+for (;;) {
+    _PyUOpInstruction inst = *next_uop++;
+    switch (inst.opcode) {
+        #include "executor_cases.c.h"
+    }
+}
+```
+
+`executor_cases.c.h` is generated alongside `generated_cases.c.h`
+from `bytecodes.c`; the uop body and the Tier-1 body come from
+the same source. The uop loop is slower than the Tier-1 loop on
+its own (smaller operations, more dispatch) but the optimisation
+pipeline more than compensates.
+
+## Side exits
+
+A uop trace is a *superblock*: linear, with side exits for guards
+that fail. Each `DEOPT_IF` in a uop body unwinds to the
+corresponding bytecode offset (`inst.target`) and resumes Tier-1.
+Side exits are cheap because the trace's compiled prologue
+captured the stack state at the matching bytecode instruction.
+
+A hot side exit is itself a candidate for Tier-2; the optimiser
+can chain a follow-on trace starting from the exit point.
+
+## The JIT (PEP 744)
+
+The JIT is *copy-and-patch*. At CPython build time, the JIT
+toolchain (`Tools/jit/`) compiles each uop body to a tiny LLVM
+object, extracts the machine bytes, and stores them as a
+*stencil*. At runtime, `Python/jit.c` builds machine code for a
+trace by:
+
+1. Concatenating the stencils for each uop in the trace.
+2. Patching in the per-uop operands (the embedded constants).
+3. Patching in the jump targets that link the stencils.
+
+The result is a buffer of machine code that runs the trace
+without the dispatch overhead of the uop interpreter. Calling it
+is a single jump; returning is a normal return or a side-exit
+trampoline.
+
+Stencils are pre-built for every supported target (x86-64,
+aarch64, on Linux, macOS, Windows). The JIT itself is small. it
+is little more than a stencil concatenator. but it relies on the
+build-time LLVM toolchain to do the heavy lifting.
+
+## Counters and policy
+
+Tier-2 only fires when Tier-1 has already specialised the
+relevant sites. The chain is:
+
+1. Generic opcodes warm up; the specializer rewrites them.
+2. Backward jumps decrement a counter on each iteration.
+3. Counter hits zero; Tier-2 tries to project a trace.
+4. If projection succeeds, the executor is attached at the loop
+   header; subsequent iterations enter Tier-2 directly.
+5. Side exits add their own counters; hot side exits get their
+   own follow-on traces.
+
+If projection fails (because the site is unspecialisable, or the
+trace would be too long, or the projector hits a control-flow
+form it cannot follow), the counter is reset with backoff.
+
+## CPython 3.14 changes
+
+* **Tier-2 default-on.** The Tier-2 interpreter is no longer
+  hidden behind `--enable-experimental` in 3.14; it runs in stock
+  builds.
+* **JIT opt-in.** The JIT remains behind `--enable-experimental-jit`
+  in 3.14. The interpreter half of Tier-2 is what regular users
+  see.
+* **More uops.** The uop set expanded notably across 3.13 and
+  3.14, especially for the call family.
+* **Better trace coverage.** The projector follows more
+  control-flow shapes than 3.13 did.
+
+## PEP touchpoints
+
+* **PEP 659.** Specializer; Tier-2 reads specialised opcodes.
+* **PEP 744.** Copy-and-patch JIT for CPython.
+
+## Reference
+
+* `Python/optimizer.c`, `Python/optimizer_analysis.c`,
+  `Python/optimizer_bytecodes.c`, `Python/jit.c`,
+  `Tools/cases_generator/tier2_generator.py`, `Tools/jit/`.
+* PEP 744. JIT compilation.
+* Kjeldgaard Pedersen and Shannon. *Copy-and-Patch Compilation*.

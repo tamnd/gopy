@@ -1,124 +1,195 @@
 ---
 title: sys.monitoring
-description: PEP 669 monitoring. How CPython instruments bytecode in place to fire profiling events.
+description: PEP 669. Per-event callbacks, the INSTRUMENTED_* opcode mirror, and the per-instruction tooling array.
 ---
 
-# `sys.monitoring`
+# sys.monitoring
 
-PEP 669 introduces a uniform monitoring API. It replaces the
-historical `sys.settrace` / `sys.setprofile` pair with a faster,
-more granular system that instruments bytecode in place.
+`sys.monitoring` (PEP 669) is the low-overhead instrumentation
+API. Tools register callbacks for *events* (call, line, branch,
+exception, ...); the runtime fires them by swapping the relevant
+bytecodes to `INSTRUMENTED_*` variants and stashing per-event
+state in side tables on the code object. Cold code pays nothing;
+hot code with no registered events pays only the cost of the
+event check (typically a single load and branch).
 
-## Source map
+## Where the code lives
 
-| File                                       | Role                                             |
-| ------------------------------------------ | ------------------------------------------------ |
-| `Python/instrumentation.c`                 | Shadow-walk, instrumented opcode rewrites.       |
-| `Python/legacy_tracing.c`                  | Bridge from `sys.settrace` to `sys.monitoring`.  |
-| `Modules/sysmodule.c`                      | The Python-visible API.                          |
-| `Include/internal/pycore_instruments.h`    | Tool slots and event flags.                      |
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/instrumentation.c`                 | The whole subsystem.                                              |
+| `Include/internal/pycore_instruments.h`    | Event ids, per-code instrumentation data.                         |
+| `Include/cpython/monitoring.h`             | Public `PyMonitoring_*` entry points (C extensions).              |
+| `Lib/sys.py`, `Python/sysmodule.c`         | The `sys.monitoring` Python API.                                  |
+| `Python/bytecodes.c`                       | `INSTRUMENTED_*` opcode bodies and DISPATCH hooks.                |
 
-## Mental model
+## Events
 
-`sys.monitoring` exposes:
+PEP 669 defines a fixed set of events:
 
-* **Tools.** A tool is a registered profiler. Up to 8 tools can be
-  active at once, identified by integers 0 through 7. CPython
-  reserves IDs 5 (debugger), 6 (coverage), and 7 (profiler).
-* **Events.** A fixed enumeration of 19 event kinds: PY_START,
-  PY_RESUME, PY_RETURN, PY_YIELD, CALL, C_CALL, C_RETURN,
-  C_RAISE, LINE, INSTRUCTION, JUMP, BRANCH, STOP_ITERATION,
-  EXCEPTION_HANDLED, RAISE, RERAISE, PY_UNWIND, PY_THROW,
-  PY_ABORT.
-* **Callbacks.** A tool registers a Python function for an
-  (event, code object) pair. The function is called when the
-  event fires inside that code object.
+```
+PY_START, PY_RESUME, PY_RETURN, PY_YIELD, PY_THROW, PY_UNWIND
+CALL, C_RETURN, C_RAISE
+RAISE, RERAISE, EXCEPTION_HANDLED, STOP_ITERATION
+LINE, INSTRUCTION, JUMP, BRANCH_LEFT, BRANCH_RIGHT
+```
 
-## How firing works
+Each event has a numeric id. Tools register a callback per
+`(tool_id, event_id)` pair. Up to six tools can be active at
+once (debuggers, coverage, profilers, ...); each gets its own
+ids so they do not collide.
 
-Without monitoring, the eval loop runs the Tier-1 opcodes
-directly. When a code object's instrumentation is enabled,
-`_Py_Instrument` walks its bytecode and rewrites each opcode that
-could fire an event into its `INSTRUMENTED_*` shadow variant.
-Examples:
+## Tools and event sets
 
-* `RESUME` -> `INSTRUMENTED_RESUME`.
-* `RETURN_VALUE` -> `INSTRUMENTED_RETURN_VALUE`.
-* `JUMP_BACKWARD` -> `INSTRUMENTED_JUMP_BACKWARD`.
-* `FOR_ITER` -> `INSTRUMENTED_FOR_ITER`.
-* `LINE` itself is a synthetic event fired on line transitions
-  detected at runtime by walking `co_linetable`.
+```c
+/* Include/internal/pycore_instruments.h _PyMonitoringEventSet */
+typedef uint32_t _PyMonitoringEventSet;
 
-The shadow variant runs the same logic plus a call into
-`_Py_call_instrumentation`, which looks up the per-tool callbacks
-for the firing event and dispatches them.
+/* Tools registered with the runtime */
+typedef struct {
+    PyObject *callbacks[PY_MONITORING_EVENTS];
+} _Py_GlobalMonitors;
+```
 
-## Per-code tool slots
+The interpreter keeps three layers of event sets:
 
-Each `PyCodeObject` has a `_co_monitoring` substructure with:
+* **Global.** Events enabled for everything.
+* **Per code object.** Events enabled for a specific function.
+* **Local (per-instruction).** Events enabled for one bytecode
+  offset (for `LINE` and `INSTRUCTION`, which need finer
+  control).
 
-* A bitset of active tools.
-* A per-event bitset of active tools for that event.
-* A pointer to the original (non-instrumented) bytecode, so the
-  shadow walk can be undone.
+The effective set at an instruction is the union of the three;
+the instrumentation pass uses it to decide which opcodes to swap.
 
-`use_tool_id` reserves a tool slot for a (code, event) pair;
-`free_tool_id` releases it. The slot bitset is read on every
-shadow-opcode dispatch.
+## The INSTRUMENTED opcode mirror
 
-## The shadow walk
+Every event-emitting opcode has an `INSTRUMENTED_*` sibling
+generated from the same `bytecodes.c` DSL. Examples:
 
-`_Py_Instrument` walks the bytecode once per change. For each
-position whose opcode kind matches one of the events the tools
-care about, it:
+```
+CALL                  -> INSTRUMENTED_CALL
+RETURN_VALUE          -> INSTRUMENTED_RETURN_VALUE
+RESUME                -> INSTRUMENTED_RESUME
+JUMP_BACKWARD         -> INSTRUMENTED_JUMP_BACKWARD
+LOAD_SUPER_ATTR       -> INSTRUMENTED_LOAD_SUPER_ATTR
+END_FOR               -> INSTRUMENTED_END_FOR
+```
 
-1. Looks up the matching `INSTRUMENTED_*` opcode in
-   `instrumented_opcodes[]`.
-2. Writes that opcode in place of the original.
-3. Stores the original in `_co_monitoring->original_opcodes` so
-   that a later "disable" can restore it.
+The body of an `INSTRUMENTED_X` does what `X` does and, before
+or after, calls into the instrumentation dispatcher to fire any
+registered callbacks. When monitoring is enabled for an event
+on a code object, the runtime *rewrites* the opcode byte from
+`X` to `INSTRUMENTED_X` in `co_code`; when it is disabled, it
+flips back. The flip is in place; no recompilation.
 
-Because the shadow variant has the same operand layout as the
-original, the inline caches survive the rewrite.
+For `LINE` and `INSTRUCTION`, where the event fires at *every*
+instruction, the runtime inserts a single
+`INSTRUMENTED_LINE` / `INSTRUMENTED_INSTRUCTION` at the
+relevant offsets; the opcode body checks the per-instruction
+tooling array and fires only if the local event is enabled.
 
-## Line and branch events
+## Side tables on the code object
 
-Line events fire on every line transition. The shadow opcode is
-`INSTRUMENTED_LINE`; its body walks the location table from the
-previous `lasti` to the current `lasti` and fires `LINE` once for
-each line crossed.
+Instrumentation does not change `co_code` shape. it changes the
+opcode bytes plus a few side tables:
 
-Branch events fire on every conditional jump. `BRANCH_LEFT` and
-`BRANCH_RIGHT` flavours distinguish the taken arm from the
-fall-through arm.
+```c
+/* Include/internal/pycore_code.h _PyCoMonitoringData */
+typedef struct _PyCoMonitoringData {
+    _PyMonitoringEventSet local_events;
+    uint8_t *per_instruction_opcodes;   /* original opcodes before flip */
+    uint8_t *per_instruction_tools;     /* bitmask: which tools want LINE here */
+    /* ... */
+} _PyCoMonitoringData;
+```
 
-## Legacy tracing bridge
+`co->_co_monitoring` is `NULL` for uninstrumented code (the
+common case, no overhead). When monitoring activates on a code
+object, the runtime allocates the struct lazily.
 
-`sys.settrace(fn)` and `sys.setprofile(fn)` are still supported.
-The bridge in `legacy_tracing.c` registers a synthetic tool that
-forwards each fired event to the registered trace / profile
-function with the call shape the legacy API expects (frame, event
-name, arg).
+* `per_instruction_opcodes` remembers the pre-flip opcode so the
+  runtime can restore on deactivation.
+* `per_instruction_tools` is a per-offset bitmask: bit *i* set
+  means tool *i* wants `LINE` (or `INSTRUCTION`) at this offset.
+  The `INSTRUMENTED_LINE` body checks the bitmask.
 
-This means the new instrumentation pays for the legacy contract
-too: when `sys.settrace` is on, every line transition fires a
-LINE event that the bridge turns into a `('line', frame, None)`
-call.
+## Firing a callback
 
-## Cost
+When `INSTRUMENTED_CALL` fires the `CALL` event, the dispatcher
+walks the registered tools in id order and calls each one whose
+event bit is set in `local_events`:
 
-When no tool is registered, `_co_monitoring` is `NULL`, no shadow
-walk has been done, and the eval loop dispatches the original
-opcodes. The cost is one pointer load per code object on
-allocation and nothing else.
+```c
+/* Python/instrumentation.c (sketch) */
+for (int tool = 0; tool < PY_MONITORING_TOOL_IDS; tool++) {
+    if (!(local_events & (1 << tool))) continue;
+    PyObject *cb = tstate->interp->monitors.tools[tool].callbacks[event];
+    if (cb == NULL) continue;
+    PyObject *res = PyObject_CallOneArg(cb, args);
+    if (res == DISABLE) {
+        /* turn this event off at this site permanently */
+    }
+}
+```
 
-When a tool is registered, the cost is one branch per shadow
-opcode plus one Python-level call per fire. The branch is
-predicted very accurately by modern CPUs because the per-event
-slot is 0 most of the time.
+A callback can return the sentinel `sys.monitoring.DISABLE` to
+turn its event off at this code location for the rest of the
+process; the rewrite logic flips the offending bytecodes back
+to their uninstrumented form. This is how a coverage tool can
+mark a line as covered and never pay again.
 
-## Reading order
+## Interaction with the specializer
 
-[GIL](gil) covers the lock-and-yield protocol the monitor relies
-on, in the case where one thread instruments while another is
-running.
+Specialised opcodes can be instrumented. The flow:
+
+* The site starts generic.
+* The specializer rewrites it.
+* Monitoring is enabled; the rewrite flips the specialised
+  opcode to `INSTRUMENTED_<specialised>`.
+* If monitoring is disabled, the byte flips back to the
+  specialised opcode.
+
+The cases generator emits `INSTRUMENTED_*` variants for every
+opcode that needs them, including the specialised ones; the
+metadata header records the mapping.
+
+## Interaction with Tier-2
+
+Tier-2 cannot project through `INSTRUMENTED_*` opcodes. an
+instrumented site forces the trace projector to stop. This
+means heavily instrumented code stays in Tier-1; uninstrumented
+loops with the same shape still get traced.
+
+## Legacy tracing
+
+`sys.settrace` and `sys.setprofile` still work; they are
+implemented on top of the same machinery. The legacy API is
+thinner: one callback, all events, no `DISABLE`. The new API
+should be preferred for new tooling because it can be selective.
+
+## CPython 3.14 changes
+
+* **`BRANCH_LEFT` and `BRANCH_RIGHT` events** (replacing the
+  earlier `BRANCH` event) distinguish which side of a
+  conditional jump was taken, which matters for branch coverage
+  tools.
+* **`STOP_ITERATION` event** added so coverage tools can see
+  generator and iterator termination without instrumenting every
+  `for`.
+* **Per-instruction events** were rationalised; the
+  `INSTRUCTION` event now fires after the instruction, not
+  before, which lines up better with how debuggers expect step
+  semantics.
+
+## PEP touchpoints
+
+* **PEP 669.** Low-impact monitoring for CPython.
+* **PEP 626.** Location table; `LINE` events depend on it.
+
+## Reference
+
+* `Python/instrumentation.c`, `Include/internal/pycore_instruments.h`,
+  `Include/cpython/monitoring.h`.
+* PEP 669. Low impact monitoring.
+* `Doc/library/sys.monitoring.rst`.

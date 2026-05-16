@@ -1,0 +1,231 @@
+---
+title: Frame
+description: _PyInterpreterFrame, the localsplus array, the value stack, the frame chain. How CPython packs a call into one contiguous slab.
+---
+
+# Frame
+
+A frame is the eval loop's context: which code object is running,
+where in its bytecode, what the local variables are, what is on
+the operand stack. CPython packs all of that into a single
+contiguous struct, `_PyInterpreterFrame`, allocated out of a
+per-thread chunked stack rather than out of the general heap. The
+shape and the allocator are co-designed: a Python-to-Python call
+costs roughly a pointer bump on the data stack plus the eval-loop
+re-entry, with no malloc on the hot path.
+
+## Where the code lives
+
+| File                                            | Role                                                              |
+| ----------------------------------------------- | ----------------------------------------------------------------- |
+| `Include/internal/pycore_interpframe_structs.h` | `_PyInterpreterFrame` layout.                                     |
+| `Include/internal/pycore_frame.h`               | Frame helpers: stack push/pop, conversion to/from `PyFrameObject`. |
+| `Python/frame.c`                                | `_PyFrame_New_NoTrack`, `_PyFrame_MakeAndSetFrameObject`.         |
+| `Objects/frameobject.c`                         | `PyFrameObject` (the heap wrapper), fast-locals proxy.            |
+| `Include/internal/pycore_stackref.h`            | `_PyStackRef` tagged pointer used on the value stack.             |
+
+## The struct
+
+```c
+/* Include/internal/pycore_interpframe_structs.h:30 _PyInterpreterFrame */
+typedef struct _PyInterpreterFrame {
+    PyObject *f_executable;            /* code or other (for entry frames) */
+    struct _PyInterpreterFrame *previous;
+    PyObject *f_funcobj;               /* may be NULL for shim frames */
+    PyObject *f_globals;
+    PyObject *f_builtins;
+    PyObject *f_locals;                /* lazy locals dict (NULL until needed) */
+    PyFrameObject *frame_obj;          /* lazy heap wrapper (NULL until needed) */
+    _Py_CODEUNIT *instr_ptr;           /* current bytecode position */
+    _PyStackRef *stackpointer;         /* top of the value stack */
+    uint16_t return_offset;            /* offset back into caller */
+    char owner;                        /* FRAME_OWNED_BY_THREAD / GENERATOR / ... */
+    char visited;                      /* for cycle traversal */
+    _PyStackRef localsplus[1];         /* fast locals + cells + value stack */
+} _PyInterpreterFrame;
+```
+
+The trailing `localsplus` flex array is the load-bearing part.
+Three contiguous regions live inside it:
+
+* **Fast locals.** `co->co_nlocals` slots; addressed by
+  `LOAD_FAST(oparg)` and friends.
+* **Cell and free variables.** `co->co_ncellvars + co->co_nfreevars`
+  slots; `LOAD_DEREF` reads them.
+* **Value stack.** The remaining slots, up to `co->co_stacksize`.
+  `stackpointer` points at the first free slot.
+
+The total size of `localsplus` is fixed at frame allocation:
+`co_nlocalsplus + co_stacksize`. The eval loop never needs to
+resize a frame.
+
+## Allocation
+
+Frames live on a per-thread *data stack*, a singly-linked list of
+fixed-size chunks (`_PyStackChunk`). Pushing a frame is:
+
+```c
+/* Python/frame.c:40 _PyFrame_New_NoTrack */
+_PyInterpreterFrame *_PyFrame_New_NoTrack(PyCodeObject *code) {
+    int size = code->co_framesize;
+    _PyInterpreterFrame *f = tstate->datastack_top;
+    if (tstate->datastack_top + size > tstate->datastack_limit) {
+        f = _PyThreadState_PushFrame(tstate, size);
+    } else {
+        tstate->datastack_top += size;
+    }
+    /* init fields */
+    return f;
+}
+```
+
+The common case is the pointer bump; only when a chunk runs out
+does the allocator chain a new one. Popping is the symmetric
+pointer decrement.
+
+The `owner` field tags who is responsible for freeing the slab:
+
+```
+FRAME_OWNED_BY_THREAD       /* normal Python call; on the data stack */
+FRAME_OWNED_BY_GENERATOR    /* embedded inside a PyGenObject */
+FRAME_OWNED_BY_FRAME_OBJECT /* heap-allocated as part of a PyFrameObject */
+FRAME_OWNED_BY_CSTACK       /* shim frame on the C stack for entry/exit */
+```
+
+Generator frames are not on the data stack because they outlive
+the call that created them. They are embedded directly in the
+`PyGenObject` allocation; when the generator suspends, the frame
+stays put. See [generators](generators).
+
+## The PyFrameObject wrapper
+
+`_PyInterpreterFrame` is the eval-loop's view; `PyFrameObject` is
+the Python-visible view. The wrapper is allocated *lazily*: only
+when something reaches for `sys._getframe`, raises a traceback,
+or otherwise observes the frame. The lazy path:
+
+```c
+/* Python/frame.c _PyFrame_MakeAndSetFrameObject */
+PyFrameObject *_PyFrame_MakeAndSetFrameObject(_PyInterpreterFrame *f);
+```
+
+The wrapper holds a back-pointer to the interpreter frame. If the
+interpreter frame is on the data stack and the call returns, the
+wrapper is *materialised*: the contents of the interpreter frame
+are copied into the wrapper, and the wrapper's `owner` is flipped
+to `FRAME_OWNED_BY_FRAME_OBJECT`. After that, the wrapper is
+self-contained and can outlive the call.
+
+This split is one of the bigger wins of the 3.11 frame redesign:
+calls that never observe the frame never pay for the heap object
+or the back-pointer chain.
+
+## The value stack
+
+The value stack lives inside the frame, starting after the locals
+and cells. Each slot is a `_PyStackRef`, a tagged pointer:
+
+```c
+/* Include/internal/pycore_stackref.h:19 _PyStackRef */
+typedef union _PyStackRef {
+    uintptr_t bits;
+} _PyStackRef;
+```
+
+The low bit distinguishes a *strong* reference (owns one
+refcount) from a *deferred* reference (does not own a refcount,
+relies on the object being kept alive elsewhere). The deferred
+case is the fast path: for immortal singletons (`None`, small
+ints, interned strings) the eval loop can push and pop without
+touching `ob_refcnt`. Helpers:
+
+```c
+PyStackRef_DUP(ref)            /* INCREF if strong, no-op if deferred */
+PyStackRef_CLOSE(ref)          /* DECREF if strong, no-op if deferred */
+PyStackRef_AsPyObjectBorrow(ref)
+PyStackRef_FromPyObjectSteal(obj)
+```
+
+Under PEP 703 (free-threaded build) the deferred path becomes
+much more important: a refcount touch is a write that contends
+with other threads, so eliminating it from the hot opcodes is a
+direct throughput win.
+
+## Fast locals proxy (PEP 558)
+
+`frame.f_locals` historically returned a fresh dict on every read
+and silently discarded writes. PEP 558 replaced it with a *proxy*
+object that is a live view onto the frame's fast locals: writes to
+the proxy update the slots; reads return current values.
+
+```c
+/* Objects/frameobject.c _PyFrame_GetLocals */
+PyObject *_PyFrame_GetLocals(_PyInterpreterFrame *f);
+```
+
+The proxy implementation is in `Objects/frameobject.c` under the
+`framelocalsproxy_*` functions. It overrides `__getitem__` /
+`__setitem__` to read or write the corresponding fast-local slot,
+falling back to the lazy locals dict for names that are not fast
+locals (used by `exec`, `eval`, and class bodies).
+
+## The frame chain
+
+`previous` threads frames into a linked list per thread. The list
+is the Python call stack:
+
+```c
+tstate->current_frame -> [callee]
+                          .previous -> [caller]
+                                        .previous -> ...
+                                                      .previous = NULL
+```
+
+When `CALL` pushes a frame it sets `new->previous = current` and
+`tstate->current_frame = new`. `RETURN_VALUE` does the reverse.
+Tracebacks walk the chain through `previous`.
+
+## Free-threaded specifics
+
+In `Py_GIL_DISABLED` builds, the frame carries an extra field for
+*thread-local bytecode*:
+
+```c
+/* (Py_GIL_DISABLED only) */
+int tlbc_index;
+```
+
+The specializer rewrites bytecode in place; in a free-threaded
+build that would be a data race across threads. PEP 703's
+solution is to give each thread its own copy of the bytecode, and
+the frame records which copy via `tlbc_index`. The dispatch
+machinery uses the per-thread copy through `_PyFrame_GetBytecode`.
+
+## CPython 3.14 changes
+
+* **Generator frame embedding.** The generator object embeds the
+  frame inline, so suspending and resuming a generator is two
+  pointer updates, no copy.
+* **Entry frames.** Each Python-to-C-to-Python boundary pushes a
+  *shim* frame marked `FRAME_OWNED_BY_CSTACK`. The shim carries
+  no code; it exists to let the unwinder distinguish boundaries
+  cleanly.
+* **`_PyStackRef`** is the standard slot type across the eval
+  loop, the Tier-2 interpreter, and the JIT trampolines.
+
+## PEP touchpoints
+
+* **PEP 558.** Fast-locals proxy for `frame.f_locals`.
+* **PEP 657.** End-line and end-column in the location table;
+  reached through the frame's `instr_ptr`.
+* **PEP 703.** Free-threaded build; `tlbc_index` and deferred
+  refcounting on the value stack.
+
+## Reference
+
+* `Include/internal/pycore_interpframe_structs.h`,
+  `Include/internal/pycore_frame.h`,
+  `Include/internal/pycore_stackref.h`.
+* `Python/frame.c`, `Objects/frameobject.c`.
+* PEP 558. Defined semantics for locals().
+* PEP 703. Free threading.

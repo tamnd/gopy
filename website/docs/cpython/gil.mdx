@@ -1,111 +1,178 @@
 ---
 title: GIL
-description: The global interpreter lock. Acquire and release, the eval breaker, the free-threading build.
+description: The global interpreter lock. Acquire and release, the eval breaker, per-interpreter GIL (PEP 684), and the free-threaded build (PEP 703).
 ---
 
 # GIL
 
-The global interpreter lock serialises Python-level execution on
-the CPython VM. Only one OS thread can run Python bytecode at a
-time; threads release the lock when they make a syscall or
-explicitly yield, and other threads can pick it up.
+The GIL is a per-interpreter mutex that one thread holds while
+executing Python bytecode. It exists because most C-level state
+in CPython (refcounts, the small-int free list, dict resize,
+specializer rewrites) is not thread-safe; the GIL is the cheapest
+correctness-preserving option for those. PEP 684 made the GIL
+*per interpreter* rather than process-wide, so two
+subinterpreters can run Python code in parallel. PEP 703 added a
+*free-threaded* build that removes the GIL entirely at the cost
+of more expensive primitives elsewhere.
 
-## Source map
+## Where the code lives
 
-| File                                  | Role                                          |
-| ------------------------------------- | --------------------------------------------- |
-| `Python/ceval_gil.c`                  | The lock implementation.                      |
-| `Python/ceval.c`                      | The eval-breaker drainer.                     |
-| `Include/internal/pycore_ceval.h`     | The internal hooks.                           |
-| `Python/pystate.c`                    | Thread state and interpreter state.           |
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/ceval_gil.c`                       | The GIL itself. Acquire, release, drop-request signalling.        |
+| `Include/internal/pycore_gil.h`            | `_gil_runtime_state` layout.                                      |
+| `Python/ceval.c`                           | Eval-loop integration. Drop-checks in the eval breaker.           |
+| `Include/internal/pycore_ceval.h`          | Eval-breaker bits.                                                |
 
-## What the lock protects
-
-The lock protects "the eval loop is running on this thread's
-frame". Concretely, the GIL holder is the only thread allowed to:
-
-* Mutate reference counts of objects shared between threads.
-* Run Python bytecode.
-* Touch the global per-interpreter mutable state (sys.modules,
-  the GC's tracking lists, etc.).
-
-C extensions that want to release the lock around a blocking call
-use the `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` macros.
-Between those macros, the lock is held by no one and other
-threads can run.
-
-## Acquire and release
-
-`take_gil(tstate)` does roughly:
+## The lock
 
 ```c
-while (gil_locked && current_holder != tstate) {
-    wait_on_gil_condition(tstate);
+/* Include/internal/pycore_gil.h _gil_runtime_state */
+struct _gil_runtime_state {
+    unsigned long interval;             /* switch interval, microseconds */
+    PyThreadState *last_holder;         /* last thread to hold the GIL */
+    _Py_atomic_int locked;              /* 0 or 1 */
+    unsigned long switch_number;
+    PyCOND_T cond;                      /* condition variable */
+    PyMUTEX_T mutex;
+    PyCOND_T switch_cond;
+    PyMUTEX_T switch_mutex;
+    int enabled;                        /* per-interpreter (PEP 684) */
+};
+```
+
+The GIL is a condition variable plus a mutex. Acquire:
+
+```c
+/* Python/ceval_gil.c take_gil */
+static void take_gil(PyThreadState *tstate) {
+    if (!_Py_atomic_load_int_relaxed(&gil->locked)) {
+        _Py_atomic_store_int(&gil->locked, 1);
+        return;
+    }
+    /* contended: wait on cond, possibly request the holder to drop */
 }
-gil_locked = 1;
-current_holder = tstate;
 ```
 
-Where `wait_on_gil_condition` is a `pthread_cond_wait` on POSIX
-or a `WaitForSingleObject` on Windows. The condition is signalled
-by `drop_gil`.
+Release just clears `locked` and signals `cond`. The contended
+path uses a timed wait: a waiter that does not get the GIL within
+`interval` microseconds sets the *drop request* bit on the
+holder's eval breaker, causing the holder to drop at the next
+safe point.
 
-`drop_gil(tstate)` does the inverse:
+## The switch interval
 
-```c
-current_holder = NULL;
-gil_locked = 0;
-signal_one_waiter();
-```
+`sys.setswitchinterval` controls how often the GIL is yielded:
+default 5 ms. The holder polls the eval breaker on every backward
+branch and every function call; if a drop request is set, it
+calls `_PyEval_DropGil`, which releases the GIL, briefly waits,
+and reacquires.
 
-The "switch interval" controls how aggressively the running
-thread yields to a waiter. By default it is 5 ms. When the eval
-breaker bit `_PY_GIL_DROP_REQUESTED_BIT` is set, the eval loop
-will call `drop_gil` then `take_gil` on its next dispatch, giving
-other threads a chance to run.
+The 5 ms default trades latency (lower => more responsive, more
+overhead) against throughput. Workloads dominated by short
+threads with frequent I/O do not see this code path because they
+release the GIL voluntarily during the I/O.
 
 ## The eval breaker
 
-The eval breaker is a per-interpreter bitfield checked on every
-back-edge of the eval loop. Bits:
+The eval breaker is a per-thread atomic bitfield:
 
-| Bit                              | Meaning                                       |
-| -------------------------------- | --------------------------------------------- |
-| `_PY_GIL_DROP_REQUESTED_BIT`     | Another thread wants the lock.                |
-| `_PY_SIGNALS_PENDING_BIT`        | A signal handler is waiting to run.           |
-| `_PY_PENDING_CALLS_BIT`          | A pending call (e.g., `Py_AddPendingCall`) is queued. |
-| `_PY_GC_SCHEDULED_BIT`           | The cyclic GC asked to run.                   |
-| `_PY_ASYNC_EXCEPTION_BIT`        | Another thread requested an async exception.  |
-| `_PY_PROFILE_BIT`                | The profiler should fire.                     |
-| `_PY_EVAL_PLEASE_STOP_BIT`       | The interpreter is shutting down.             |
+```c
+/* Include/internal/pycore_ceval.h */
+#define _PY_GIL_DROP_REQUEST_BIT     0
+#define _PY_SIGNALS_PENDING_BIT      1
+#define _PY_CALLS_TO_DO_BIT          2
+#define _PY_ASYNC_EXCEPTION_BIT      3
+#define _PY_GC_SCHEDULED_BIT         4
+#define _PY_EVAL_PLEASE_STOP_BIT     5
+```
 
-`eval_frame_handle_pending` walks the bitfield in priority order
-on each yield and services each set bit.
+The eval loop tests `tstate->eval_breaker` on backward branches
+and function entry; if any bit is set, it calls
+`_Py_HandlePending`, which drains the bits in order. The GIL bit
+is just one of them.
 
-## Free-threading (PEP 703)
+## Releasing the GIL voluntarily
 
-CPython 3.13 ships an optional **free-threading** build
-(`--disable-gil`). In that build, the GIL is replaced with per-object
-synchronisation (mostly biased reference counts and dict-level
-mutexes) and the eval loop runs concurrently on all threads.
+C extensions that block (I/O, sleep, compute-heavy native code)
+release the GIL so other threads can run:
 
-The free-threading build is selectable at compile time and is
-incompatible with C extensions that assume the GIL is held. The
-language semantics are unchanged: the same program produces the
-same result.
+```c
+Py_BEGIN_ALLOW_THREADS
+   /* blocking call, no Python objects touched */
+Py_END_ALLOW_THREADS
+```
+
+The macros call `PyEval_SaveThread` and `PyEval_RestoreThread`,
+which release and reacquire respectively. The contract is that
+no Python C API may be touched between them; the GIL is what
+protects most of the C API.
 
 ## Per-interpreter GIL (PEP 684)
 
-CPython 3.12 introduced sub-interpreters with their own GIL. Each
-`PyInterpreterState` has its own lock. Two threads in different
-sub-interpreters can run Python at the same time even on the
-GIL-equipped build.
+Subinterpreters were always part of CPython, but until 3.12 they
+shared the GIL with the main interpreter, which limited their
+usefulness for parallelism. PEP 684 split the GIL: each
+interpreter has its own `_gil_runtime_state`, and two
+interpreters can run code simultaneously on different threads.
 
-The lock state lives on `PyInterpreterState.ceval.gil`. Thread
-states migrate between interpreters by `PyThreadState_Swap`.
+Sharing data between subinterpreters now requires the `interpreters`
+stdlib module's channels (which serialise across the boundary)
+or shared memory; you cannot pass a `PyObject *` directly because
+the receiving interpreter does not own that object.
 
-## Reading order
+A handful of singletons (interned strings, `None`, small ints)
+are immortal and shared across interpreters (PEP 683); that is
+safe because they cannot be mutated.
 
-[Exceptions](exceptions) is the next piece of the runtime puzzle.
-For the side table that drives the eval breaker on the monitoring
-side, see [Monitor](monitor).
+## Free-threaded build (PEP 703)
+
+`./configure --disable-gil` builds an interpreter with no GIL at
+all. The cost of removing the GIL is paid elsewhere:
+
+* **Atomic refcounts.** `ob_refcnt` becomes a split counter (one
+  local field per thread plus a shared one). The split avoids
+  cache-line bouncing on the common single-thread-writes case.
+* **Deferred refcounting.** The eval loop's value stack uses
+  `_PyStackRef` with a deferred-reference bit, so pushing and
+  popping common objects does not touch the refcount.
+* **Per-thread bytecode.** The specializer rewrites bytecode; in
+  the free-threaded build each thread carries its own copy so
+  rewrites do not race.
+* **Per-object locks.** Containers (dict, list, set) gain an
+  internal mutex used during structural mutation.
+* **Lock-free reads.** Hot paths (dict lookups, type slot
+  resolution) use sequence locks or hazard pointers to read
+  without taking the per-object mutex when possible.
+
+The free-threaded build ships in 3.14 as a supported,
+non-default build. Extensions must opt in by declaring support
+via the `Py_mod_gil` slot; legacy extensions without the slot
+force a GIL re-enable at import time.
+
+## CPython 3.14 changes
+
+* **Free-threaded interpreter promoted.** No longer
+  experimental; supported under PEP 703 with full extension-
+  module opt-in.
+* **Eval-breaker storage** moved from a single global to a
+  per-thread field (`tstate->eval_breaker`); the GIL-drop bit is
+  still set cross-thread, but every other bit is local.
+* **Single-threaded fast path.** If only one thread is active in
+  an interpreter, `take_gil` is essentially a no-op; the lock
+  state is recorded but the condition variable is never touched.
+
+## PEP touchpoints
+
+* **PEP 684.** Per-interpreter GIL.
+* **PEP 703.** No-GIL build.
+* **PEP 683.** Immortal objects (shared safely across
+  interpreters).
+
+## Reference
+
+* `Python/ceval_gil.c`, `Include/internal/pycore_gil.h`.
+* PEP 684. A per-interpreter GIL.
+* PEP 703. Making the GIL optional.
+* PEP 554. Multiple interpreters in the stdlib (the consumer of
+  per-interpreter GIL).

@@ -1,152 +1,308 @@
 ---
 title: VM
-description: The eval loop. How CPython runs bytecode one instruction at a time.
+description: The eval loop. _PyEval_EvalFrameDefault, computed-goto dispatch, the bytecodes.c DSL, and the cases_generator pipeline.
 ---
 
 # VM
 
-The Virtual Machine is a register-light, stack-heavy interpreter.
-Each frame carries a value stack; each opcode pops, computes, and
-pushes. The dispatch loop runs in `Python/ceval.c`.
+The VM is the eval loop. It is a single function,
+`_PyEval_EvalFrameDefault`, that pulls one code unit from the
+current frame's bytecode, dispatches on the opcode, executes the
+case, and advances. The function is the longest in CPython and
+also the one most aggressively shaped for the C compiler: the
+dispatch uses computed gotos where the compiler allows; the per-
+opcode bodies are generated from a DSL that lets a single source
+of truth drive the Tier-1 eval loop, the Tier-2 uop interpreter,
+the specializer's metadata, and the JIT.
 
-## Source map
+## Where the code lives
 
-| File                                    | Role                                            |
-| --------------------------------------- | ----------------------------------------------- |
-| `Python/ceval.c`                        | The dispatch loop and the entry points.         |
-| `Python/bytecodes.c`                    | The opcode definitions (DSL form).              |
-| `Python/generated_cases.c.h`            | C generated from `bytecodes.c`.                 |
-| `Python/ceval_macros.h`                 | Dispatch macros.                                |
-| `Python/ceval_gil.c`                    | The GIL handshake.                              |
-| `Include/internal/pycore_frame.h`       | Frame layout.                                   |
+| File                                       | Role                                                                  |
+| ------------------------------------------ | --------------------------------------------------------------------- |
+| `Python/ceval.c`                           | The eval loop. `_PyEval_EvalFrameDefault`, helper functions, breaker. |
+| `Python/ceval_macros.h`                    | `DISPATCH`, `NEXTOPARG`, `TARGET`, `PREDICT`. The dispatch core.      |
+| `Python/bytecodes.c`                       | The DSL source. One C-flavoured definition per opcode and per micro-op. |
+| `Python/generated_cases.c.h` (generated)   | The Tier-1 case bodies emitted by `Tools/cases_generator/tier1_generator.py`. Included by `ceval.c`. |
+| `Python/executor_cases.c.h` (generated)    | The Tier-2 uop case bodies. Included by `optimizer.c`.                |
+| `Python/opcode_targets.h` (generated)      | The opcode-to-label table for computed-goto dispatch.                 |
+| `Include/internal/pycore_opcode_metadata.h` (generated) | Per-opcode metadata: cache size, family, stack effect, flags. |
+| `Tools/cases_generator/`                   | The DSL generator. Python scripts that produce the `.c.h` files.      |
 
-## Entry points
-
-The eval loop is invoked through a public entry point:
+## The eval loop
 
 ```c
+/* Python/ceval.c:1145 _PyEval_EvalFrameDefault */
 PyObject *
-_PyEval_EvalFrameDefault(PyThreadState *tstate,
-                         _PyInterpreterFrame *frame,
+_PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame,
                          int throwflag);
 ```
 
-`tstate` is the calling thread's state. `frame` is a freshly
-allocated frame pointing at the code object to run. `throwflag`
-tells the loop to immediately throw an exception inside the frame
-(used to resume a generator that received `throw`).
+The signature names the three inputs: the current thread state
+(holds the GIL, the eval breaker, the recursion limit), the frame
+to execute (holds the bytecode, the value stack, the locals), and
+a flag indicating whether to enter at the top or rethrow a pending
+exception (used to resume a generator that was thrown into).
 
-Higher-level wrappers call this: `PyEval_EvalCode`, `PyObject_Call`
-when the callable is a Python function, and the generator / async
-machinery on `send` / `__next__`.
-
-## The dispatch loop
-
-The loop body in `ceval.c` looks, in spirit, like:
+The body is a single loop:
 
 ```c
-for (;;) {
-    NEXTOPARG();          // read opcode and oparg
-    PRE_DISPATCH_GOTO();  // tracing / eval-breaker checks
-    switch (opcode) {
-        TARGET(LOAD_FAST):  { ... DISPATCH(); }
-        TARGET(STORE_FAST): { ... DISPATCH(); }
-        // ...
-    }
+/* Python/ceval.c (sketch) */
+DISPATCH_GOTO();
+
+TARGET(LOAD_FAST):
+    /* body */
+    DISPATCH();
+
+TARGET(LOAD_CONST):
+    /* body */
+    DISPATCH();
+
+/* ... 250 more cases ... */
+```
+
+`TARGET(NAME)` is a label that the dispatch macro jumps to.
+`DISPATCH()` advances `next_instr` past the cache slots for the
+current opcode, reads the next code unit, and jumps to the
+matching `TARGET`.
+
+## Dispatch
+
+Dispatch is the hot path of the entire interpreter. CPython
+supports four implementations:
+
+* **Computed gotos.** A GCC extension that allows `goto *ptr`
+  where `ptr` is a label address. The dispatcher computes
+  `opcode_targets[opcode]` and jumps. One indirect branch per
+  instruction, predicted well by modern CPUs because each opcode's
+  return-from-dispatch is a separate branch with its own history.
+* **Tail-calling threaded dispatch.** Each `TARGET` is a separate
+  function annotated `[[clang::musttail]]`; dispatch becomes a
+  forced tail call into the next function. Available on clang and
+  recent GCC. Lets each opcode have its own function and its own
+  branch-history slot, with no per-call overhead.
+* **Switch fallback.** A plain `switch (opcode)`. The slowest
+  option; used on compilers that support neither computed gotos
+  nor `musttail`.
+
+The selection is at compile time. The fast paths are documented in
+`Python/ceval_macros.h`:
+
+```c
+/* Python/ceval_macros.h:91 */
+#define Py_MUSTTAIL [[clang::musttail]]
+
+/* Python/ceval_macros.h:118 */
+#define DISPATCH_GOTO() \
+    goto *opcode_targets[opcode];
+
+/* Python/ceval_macros.h:164 */
+#define NEXTOPARG() \
+    do { \
+        _Py_CODEUNIT word = {.cache = FT_ATOMIC_LOAD_UINT16_RELAXED(*(uint16_t*)next_instr)}; \
+        opcode = word.op.code; \
+        oparg = word.op.arg; \
+    } while (0)
+```
+
+Each code unit is 16 bits packed as 8-bit opcode plus 8-bit oparg.
+`FT_ATOMIC_LOAD_UINT16_RELAXED` is a relaxed atomic load; on the
+non-free-threaded build it compiles to a plain load.
+
+## The bytecodes.c DSL
+
+`Python/bytecodes.c` is a pseudo-C file. The Python toolchain
+parses it; the C compiler never sees it. The DSL describes each
+opcode's body, its inputs and outputs on the value stack, the
+inline cache layout, and the family relationships used by the
+specializer.
+
+A simple instruction:
+
+```
+inst(LOAD_FAST, (-- value)) {
+    value = GETLOCAL(oparg);
+    Py_INCREF(value);
 }
 ```
 
-`DISPATCH` is a macro that, on platforms that support it, expands
-to a computed goto (`goto *opcode_targets[NEXTOP()]`). The
-computed-goto path replaces the `switch` with a jump table and
-spreads the indirect branch across all dispatch sites, which is
-faster on modern branch predictors. On platforms without GCC
-extensions, it falls back to a `switch` inside the `for`.
+`inst(NAME, (inputs -- outputs))` declares the stack effect: the
+items before `--` are popped, the items after are pushed. The body
+runs with the inputs already bound to C variables and the outputs
+expected to be assigned before the case ends. The generator
+synthesises the pops and pushes from the signature.
 
-The opcode bodies are generated from `bytecodes.c` by the tool in
-`Tools/cases_generator/`. That DSL spells out each opcode with its
-inputs, outputs, side effects, and inline cache shape; the
-generator emits the C body, the stack-effect table, the
-specializer hook, and the metadata table.
+A specialised instruction with a cache slot:
 
-## Frame layout
+```
+inst(LOAD_GLOBAL_MODULE, (unused/1, unused/1, version/1, index/1 -- res, null if (oparg & 1))) {
+    PyDictObject *dict = (PyDictObject *)GLOBALS();
+    DEOPT_IF(dict->ma_keys->dk_version != version, LOAD_GLOBAL);
+    /* ... */
+}
+```
 
-`_PyInterpreterFrame` lives at the bottom of the value stack. It
-holds:
+The `version/1` and `index/1` declare cache slots of one code unit
+each, named for use in the body. `DEOPT_IF(cond, op)` is the
+escape hatch that falls back to the unspecialised opcode when the
+cache no longer matches.
 
-* `f_code` -- the `PyCodeObject` being executed.
-* `f_executable` -- the executor pointer for Tier-2 (see
-  [Tier-2](tier2)).
-* `f_func_obj` -- the calling function, when the frame is a
-  function call frame.
-* `f_globals`, `f_builtins`, `f_locals` -- name dictionaries.
-* `prev_instr` -- the next instruction to fetch (it points one
-  word **before** the next op, hence "prev").
-* `localsplus[]` -- the fast-locals slab, immediately followed by
-  the cell variables, the free variables, and finally the value
-  stack.
+A family declaration ties a generic opcode to its specialisations:
 
-Frames are allocated on a per-thread frame chunk allocator. New
-frames slot into the next aligned chunk slot; pops decrement the
-chunk pointer. The allocator avoids `malloc` on every call.
+```
+family(LOAD_GLOBAL, INLINE_CACHE_ENTRIES_LOAD_GLOBAL) = {
+    LOAD_GLOBAL_MODULE,
+    LOAD_GLOBAL_BUILTIN,
+};
+```
 
-## Opcode taxonomy
+The generator emits the family table the specializer reads, the
+metadata header the assembler reads (to know how much cache to
+reserve), and the case bodies the eval loop runs.
 
-| Group            | Examples                                              |
-| ---------------- | ----------------------------------------------------- |
-| Stack            | `NOP`, `POP_TOP`, `COPY`, `SWAP`, `PUSH_NULL`.        |
-| Constants        | `LOAD_CONST`, `RETURN_CONST`.                         |
-| Locals           | `LOAD_FAST`, `STORE_FAST`, `DELETE_FAST`.             |
-| Cells            | `LOAD_DEREF`, `STORE_DEREF`, `LOAD_CLASSDEREF`.       |
-| Globals          | `LOAD_GLOBAL`, `STORE_GLOBAL`, `DELETE_GLOBAL`.       |
-| Names            | `LOAD_NAME`, `STORE_NAME`, `DELETE_NAME`.             |
-| Numeric          | `BINARY_OP`, `UNARY_NEGATIVE`, `UNARY_NOT`.            |
-| Comparison       | `COMPARE_OP`, `IS_OP`, `CONTAINS_OP`.                 |
-| Container build  | `BUILD_LIST`, `BUILD_TUPLE`, `BUILD_MAP`, `BUILD_SET`. |
-| Container access | `BINARY_SUBSCR`, `STORE_SUBSCR`, `DELETE_SUBSCR`.     |
-| Attributes       | `LOAD_ATTR`, `STORE_ATTR`, `DELETE_ATTR`.             |
-| Calls            | `CALL`, `CALL_KW`, `CALL_FUNCTION_EX`.                |
-| Control flow     | `JUMP_FORWARD`, `JUMP_BACKWARD`, `POP_JUMP_IF_*`.     |
-| Exceptions       | `RAISE_VARARGS`, `RERAISE`, `CHECK_EXC_MATCH`, `CLEANUP_THROW`. |
-| Frames           | `RESUME`, `RETURN_VALUE`, `RETURN_GENERATOR`, `YIELD_VALUE`. |
-| Imports          | `IMPORT_NAME`, `IMPORT_FROM`, `IMPORT_STAR`.          |
-| Iteration        | `GET_ITER`, `FOR_ITER`, `END_FOR`.                    |
-| Generators       | `SEND`, `END_SEND`, `GET_YIELD_FROM_ITER`.            |
-| Instrumentation  | `INSTRUMENTED_*` shadow variants.                     |
+A super-instruction fuses two opcodes:
+
+```
+super(LOAD_FAST_LOAD_FAST) = LOAD_FAST + LOAD_FAST;
+```
+
+The optimiser pass in `Python/flowgraph.c` rewrites a `LOAD_FAST a;
+LOAD_FAST b` pair into the fused super-instruction. The generator
+emits the fused case body as the concatenation of the two
+component bodies.
+
+## The cases generator
+
+`Tools/cases_generator/` is a small compiler that reads
+`bytecodes.c` and produces multiple outputs. The pipeline:
+
+* **`parsing.py`** tokenises the DSL.
+* **`analyzer.py`** builds the graph of instructions, families,
+  macros, and super-instructions; computes per-instruction
+  metadata (stack effect, error effect, cache size).
+* **`tier1_generator.py`** emits `generated_cases.c.h` for the
+  Tier-1 eval loop in `ceval.c`.
+* **`tier2_generator.py`** emits `executor_cases.c.h` for the
+  Tier-2 uop interpreter in `optimizer.c`.
+* **`opcode_metadata_generator.py`** emits the metadata header.
+* **`jit_generator.py`** emits the JIT template tables.
+
+The generator is what makes the DSL practical. Without it, every
+edit to an opcode would need to be made in four places (Tier 1,
+Tier 2, metadata, JIT) and kept in sync by convention. With it,
+one edit propagates.
+
+## Inline caches
+
+Specialisable opcodes reserve cache slots immediately after the
+opcode in `co_code`. The eval loop skips them at dispatch
+(`next_instr += INLINE_CACHE_ENTRIES_*`) and reads them
+explicitly in the body. The cache layout is described in
+`Include/internal/pycore_code.h`:
+
+```c
+/* Include/internal/pycore_code.h _PyAttrCache */
+typedef struct {
+    uint16_t counter;        /* backoff counter for specialisation */
+    uint16_t version[2];     /* 32-bit type version split into two u16 */
+    uint16_t index;          /* descriptor index or dict offset */
+} _PyAttrCache;
+```
+
+The first slot of every specialisable instruction is the
+*backoff counter*, which controls when the specializer next looks
+at this site. See [specializer](specializer).
 
 ## The eval breaker
 
-On every back-edge (any `JUMP_BACKWARD`, plus `RESUME`) the loop
-checks the **eval breaker**: a bitmask of pending events. Bits
-include "a signal arrived", "another thread wants the GIL", "a
-pending call is queued", "the gc is asking to run", "a profile
-hook should fire". The loop services the bits in priority order
-and re-enters dispatch.
+The eval loop checks a per-thread bitfield, the *eval breaker*, on
+every backward branch and every function entry:
 
-This is also where the GIL is released and re-acquired on the
-"yield to other threads" pattern. See [GIL](gil) for the lock
-protocol.
+```c
+/* Include/internal/pycore_ceval.h */
+#define _PY_GIL_DROP_REQUEST_BIT     0
+#define _PY_SIGNALS_PENDING_BIT      1
+#define _PY_CALLS_TO_DO_BIT          2
+#define _PY_ASYNC_EXCEPTION_BIT      3
+#define _PY_GC_SCHEDULED_BIT         4
+#define _PY_EVAL_PLEASE_STOP_BIT     5
+```
 
-## Errors
+Bits are set by other threads (signal handlers, GIL contention,
+pending-call scheduling). The eval loop polls
+`tstate->eval_breaker`; if non-zero it calls
+`_Py_HandlePending`, which drains the bits in order. See
+[gil](gil) for the bits the GIL uses and how it cooperates with
+this machinery.
 
-A C function that fails sets the per-thread exception state and
-returns a sentinel (`NULL` for `PyObject *`, `-1` for `int`). The
-opcode body checks the sentinel and jumps to `error`. The `error`
-label runs the unwind protocol:
+## Frame transitions
 
-1. Look up the bytecode offset of the failing instruction in
-   `co_exceptiontable`.
-2. If a handler is found, drop the value stack to the handler's
-   recorded depth, push the exception object, jump to the
-   handler's target offset, and continue dispatch.
-3. If no handler is found, pop the frame, propagate the exception
-   to the caller frame, and repeat.
+Function calls, returns, and generator suspends are not separate
+opcodes; they are flow transitions in the loop. `CALL` dispatches
+into a helper that pushes a new `_PyInterpreterFrame` and either
+re-enters the eval loop or hands off to a C function. `RETURN_VALUE`
+pops the frame, pushes the result on the caller's stack, and
+continues with the caller's `next_instr`. The fact that frame
+transitions stay in the loop avoids the cost of recursing the C
+stack on every Python call. See [frame](frame).
 
-See [Exceptions](exceptions) for the full protocol.
+## The Tier-2 path
 
-## Reading order
+When a backward branch hits its threshold, the eval loop hands off
+to the Tier-2 optimiser to project a trace and (optionally) JIT-
+compile it. The handoff:
 
-The specializer ([Specializer](specializer)) rewrites Tier-1
-opcodes into variants. The Tier-2 trace projector ([Tier-2](tier2))
-collects hot loops into uop traces. Both layer on top of this
-dispatch loop without changing its shape.
+```c
+/* Python/ceval.c (sketch) */
+TARGET(JUMP_BACKWARD):
+    if (--counter == 0) {
+        executor = _PyOptimizer_Optimize(frame, next_instr, ...);
+        if (executor) {
+            ENTER_EXECUTOR(executor);
+        }
+    }
+    DISPATCH();
+```
+
+`ENTER_EXECUTOR` either jumps into JIT-compiled machine code or
+runs the uop trace through `executor_cases.c.h`. See
+[optimizer](optimizer).
+
+## CPython 3.14 changes
+
+* **Tail-calling dispatch.** The `[[clang::musttail]]` path is
+  promoted to a first-class option in 3.14, with per-target
+  branch prediction noticeably better than computed gotos on
+  modern CPUs.
+* **Tier-2 default enablement.** Tier 2 is no longer behind a
+  build flag; it is on by default in 3.14, with the JIT (PEP 744)
+  remaining opt-in via `--enable-experimental-jit`.
+* **`Py_TIER2` build.** A small build matrix; the interpreter
+  picks the right code at compile time.
+* **Free-threaded interpreter (PEP 703).** A separate build
+  (`./configure --disable-gil`) replaces several macros and adds
+  per-thread bytecode copies. The eval loop's structure is
+  unchanged but the dispatch macros expand differently.
+
+## PEP touchpoints
+
+* **PEP 626.** The eval loop reads the location table; the
+  traceback machinery uses it.
+* **PEP 659.** The specializer rewrites opcodes in place; the
+  loop dispatches the specialised variants.
+* **PEP 669.** Instrumentation rewrites individual opcodes to
+  their `INSTRUMENTED_*` siblings.
+* **PEP 703.** Free-threaded build uses atomic loads in
+  `NEXTOPARG` and per-thread bytecode copies.
+* **PEP 744.** Tier-2 entry from `JUMP_BACKWARD` and the JIT.
+
+## Reference
+
+* `Python/ceval.c`, `Python/ceval_macros.h`,
+  `Python/bytecodes.c`, `Tools/cases_generator/`.
+* `Include/internal/pycore_opcode_metadata.h` (generated).
+* PEP 659. Specializing adaptive interpreter.
+* PEP 669. Low impact monitoring.
+* PEP 703. Free threading.
+* PEP 744. JIT compilation.
+* Shannon, Mark. *Faster CPython* design notes,
+  github.com/markshannon/faster-cpython.

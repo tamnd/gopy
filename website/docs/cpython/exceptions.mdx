@@ -1,130 +1,224 @@
 ---
 title: Exceptions
-description: How CPython raises, catches, chains, and groups exceptions.
+description: Zero-cost try, the exception table, unwinding, chaining, groups (PEP 654), and fine-grained tracebacks (PEP 657).
 ---
 
 # Exceptions
 
-Exceptions in CPython are ordinary objects. They are raised by
-setting per-thread state, propagated by the eval loop's unwind
-protocol, and caught by the exception table baked into each code
-object.
+CPython exceptions cost nothing on the success path. There is no
+`SETUP_FINALLY` opcode, no per-`try` push; entering a `try` block
+emits no instructions at all. Instead the compiler emits an
+*exception table*: a side table on the code object that maps
+bytecode-offset ranges to handler offsets. When an exception is
+raised, the runtime walks the frame chain, consulting each
+frame's exception table to find a handler. Raising is slow;
+not raising is free.
 
-## Source map
+## Where the code lives
 
-| File                                | Role                                              |
-| ----------------------------------- | ------------------------------------------------- |
-| `Python/errors.c`                   | `PyErr_SetString`, `PyErr_Format`, fetch/restore. |
-| `Python/ceval.c`                    | The `error` label and unwind loop.                |
-| `Objects/exceptions.c`              | Built-in exception classes.                       |
-| `Modules/_codecsmodule.c`           | Codec errors.                                     |
-| `Lib/traceback.py`                  | Python-side formatting.                           |
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/errors.c`                          | `PyErr_Set*`, `PyErr_Fetch`, `PyErr_NormalizeException`.          |
+| `Python/ceval.c`                           | The unwind code path in the eval loop; exception-table lookup.    |
+| `Python/assemble.c`                        | Exception-table encoding.                                         |
+| `Objects/exceptions.c`                     | `BaseException`, `ExceptionGroup`, the standard hierarchy.        |
+| `Python/traceback.c`                       | `PyTraceBack_*`, traceback printing.                              |
+| `Include/internal/pycore_pyerrors.h`       | Thread-state exception fields.                                    |
 
-## Raising
+## The exception table
 
-A C function raises by calling `PyErr_SetString(type, msg)` or
-`PyErr_Format(type, "...", args)`. Both write three slots on the
-current thread state:
-
-* `curexc_type` -- the class of the exception.
-* `curexc_value` -- the exception instance (allocated if it was
-  not given as an instance).
-* `curexc_traceback` -- the traceback object, attached as the
-  exception's `__traceback__`.
-
-Then the C function returns its failure sentinel. The eval loop
-sees the sentinel, looks at the thread state, and jumps to the
-`error` label.
-
-From Python, `raise X` compiles to `RAISE_VARARGS 1`. The opcode
-pops the exception, stores it in the thread state, and jumps to
-the `error` label.
-
-## Unwind protocol
-
-`error:` runs the following loop:
-
-```c
-for (;;) {
-    int handler = lookup_exception_handler(frame, lasti);
-    if (handler >= 0) {
-        truncate_value_stack(frame, handler.depth);
-        push_exception(frame, exc);
-        frame->prev_instr = code + handler.target;
-        goto resume_dispatch;
-    }
-    pop_frame();
-    if (no_more_frames) {
-        raise_unhandled(exc);
-        return NULL;
-    }
-}
+```
+co_exceptiontable: sequence of variable-length records
+each record: (start_offset, end_offset, target_offset, depth, lasti)
 ```
 
-`lookup_exception_handler` binary-searches `co_exceptiontable`
-for an entry whose `[start, end)` byte range covers the current
-`lasti`. The entry tells the loop where to jump and what to leave
-on the stack.
+A `try: ... except: H` compiles to:
 
-`truncate_value_stack` drops everything down to the recorded
-depth. `push_exception` puts the exception object back on top so
-the handler can bind it.
+```
+[try body bytecode]                # offsets [start, end)
+JUMP past_handler
+H:                                  # target_offset
+[handler bytecode]
+past_handler:
+```
+
+Plus an entry `(start, end, H, depth_at_H, lasti)` in the
+exception table. The eval loop never executes a setup opcode;
+the try region is just plain bytecode. On a raise, the unwinder
+linearly scans the table for the deepest entry containing the
+current `instr_ptr` and jumps to its `target_offset` with the
+value stack truncated to `depth`.
+
+The encoding is variable-length integers tuned for compact
+representation; the format is documented in `Objects/exception_handling_notes.txt`.
+
+## Raise
+
+`raise X` compiles to `RAISE_VARARGS`. The opcode body:
+
+1. Calls `do_raise`, which normalises the exception (constructs
+   an instance if a class was raised, validates the value).
+2. Sets `tstate->current_exception` to the instance.
+3. Falls through to the *exception-unwind* path in the eval loop.
+
+The unwind path:
+
+```c
+/* Python/ceval.c (sketch) */
+exception_unwind:
+    handler = _PyCode_LookupException(co, instr_ptr - first_instr);
+    if (handler == NULL) {
+        /* no handler in this frame: pop frame, retry in caller */
+        propagate_to_caller();
+    }
+    /* truncate stack to handler.depth; push the exception; jump */
+```
+
+The lookup is O(log N) over the table (the table is sorted by
+range start) or O(N) for small tables. The cost is paid only on
+raise; the success path never touches it.
+
+## Exception state on the thread
+
+```c
+/* Include/internal/pycore_pyerrors.h _PyErr_StackItem */
+typedef struct _err_stackitem {
+    PyObject *exc_value;             /* current exception value */
+    struct _err_stackitem *previous_item;
+} _PyErr_StackItem;
+```
+
+Each frame that catches an exception pushes a new `_PyErr_StackItem`
+so the catching code can re-raise the original via `raise`. The
+chain is also the basis of *implicit chaining*: a new exception
+raised while another is being handled has its `__context__`
+automatically set to the previous one.
 
 ## Chaining
 
-When an exception is raised inside an `except` arm or a `finally`
-clause, the original exception is preserved as `__context__` on
-the new exception. The eval loop wires this up at the
-`CHECK_EXC_MATCH` step (it stashes the in-flight exception in a
-hidden slot, then later threads it into `__context__` on a new
-raise).
+Three kinds:
 
-`raise X from Y` sets `__cause__` instead of (or in addition to)
-`__context__`.
+* **`__context__`.** Implicit. Set when a new exception is
+  raised inside an `except` block; preserves the chain so the
+  traceback shows "during handling of the above another
+  exception occurred".
+* **`__cause__`.** Explicit. Set by `raise X from Y`.
+* **`__suppress_context__`.** Boolean; set by `raise X from
+  None` to hide the implicit `__context__` chain.
 
-## Exception groups (PEP 654)
+The opcode `RAISE_VARARGS` and its helpers in `Python/errors.c`
+manage these fields; the traceback printer in
+`Python/traceback.c` walks them.
 
-`ExceptionGroup` lets a handler catch a tree of exceptions and
-selectively re-raise the part it does not handle.
+## ExceptionGroup (PEP 654)
 
-The `except*` syntax compiles to `CHECK_EG_MATCH`, which
-partitions an `ExceptionGroup` into the matched leaves and the
-unmatched leaves. The matched leaves are passed to the handler;
-the unmatched leaves are re-raised as a new (smaller) group.
+PEP 654 added a *group* exception type and the `except*` syntax:
 
-This is implemented in `_PyExc_PrepReraiseStar` in
-`Python/errors.c`. The opcode `CLEANUP_THROW` finalises the
-group state on exit.
+```python
+try:
+    ...
+except* TypeError as eg:
+    ...   # eg is an ExceptionGroup of TypeErrors
+except* ValueError as eg:
+    ...
+```
 
-## Re-raising
+`except*` compiles into a different shape than `except`: the
+handler receives a *split* of the group matching its type, and
+the unmatched part propagates. The matching uses
+`BaseExceptionGroup.split`:
 
-`raise` with no operand compiles to `RERAISE`, which reads the
-currently-bound exception from the value stack (left there by the
-handler's entry) and jumps back into the unwind loop. The
-exception's traceback is extended with the line where `RERAISE`
-ran.
+```c
+/* Objects/exceptions.c */
+static PyObject *exceptiongroup_split(PyObject *self, PyObject *match);
+```
 
-## Traceback objects
+`split(matcher)` returns a `(matched, rest)` pair; the eval loop
+constructs the handler's view and re-raises `rest` if non-None.
 
-A `PyTracebackObject` is a linked list of `(frame, lasti)` pairs.
-Each unwind step prepends one entry. `traceback.format_exc()`
-walks the chain and renders it; `traceback.print_exception()` adds
-the chained `__context__` / `__cause__` chains.
+The group hierarchy is:
 
-## Suppressing exceptions
+```
+BaseException
+  BaseExceptionGroup
+    ExceptionGroup   (when all members are Exception subclasses)
+```
 
-Setting `__suppress_context__ = True` on an exception makes the
-chained context invisible in tracebacks. The `from None` form of
-`raise` sets that flag automatically.
+`BaseExceptionGroup.__new__` switches the returned class to
+`ExceptionGroup` automatically when all members qualify, so most
+user code only ever sees `ExceptionGroup`.
 
-## Exit codes
+## Tracebacks (PEP 657)
 
-When an exception escapes the top frame, the interpreter prints
-the traceback via `sys.excepthook` and exits with code 1 (or the
-code given to `sys.exit`).
+A traceback is a linked list of `PyTracebackObject`:
 
-## Reading order
+```c
+/* Include/cpython/traceback.h PyTracebackObject */
+typedef struct _traceback {
+    PyObject_HEAD
+    struct _traceback *tb_next;
+    PyFrameObject *tb_frame;
+    int tb_lasti;       /* bytecode offset where exception occurred */
+    int tb_lineno;
+} PyTracebackObject;
+```
 
-[Generators](generators) is the next page. Generators tunnel
-exceptions through `gen.throw`, which uses the same unwind
-protocol with `throwflag = 1`.
+Each entry remembers the frame and the bytecode offset. PEP 657
+made the *display* of tracebacks fine-grained: instead of just
+the line, the printer reads the `(col_offset, end_col_offset)`
+for `tb_lasti` from the code object's location table and
+underlines the exact expression:
+
+```
+File "x.py", line 3, in <module>
+    return foo() + bar()
+                   ~~~~~^
+```
+
+The rendering lives in `Lib/traceback.py`; the data is in the
+location table (`co_linetable`, see [compile](compile)).
+
+## Bare raise
+
+`raise` with no operand re-raises the currently active
+exception. It compiles to `RERAISE`, which:
+
+1. Looks up the topmost `_PyErr_StackItem`.
+2. Sets `tstate->current_exception` to its value.
+3. Enters the unwind path.
+
+If no exception is active, `RERAISE` raises `RuntimeError("No
+active exception to re-raise")`.
+
+## try-finally
+
+`finally` compiles into two copies of its body: one in the
+success path (executed before falling off the `try`), one as a
+handler entry (executed before propagating). The handler entry
+re-raises after the body runs. PEP 765 warns at compile time
+if a `return` or `break` inside `finally` would silently
+discard a pending exception.
+
+## CPython 3.14 changes
+
+* **PEP 765 warnings.** `return` and `break` inside `finally`
+  raise `SyntaxWarning` at compile time because they silently
+  cancel any propagating exception, which is almost always a
+  bug.
+* **Exception group display.** Group rendering picked up the
+  PEP 657 underlines for the *cause* expression of each leaf
+  exception.
+
+## PEP touchpoints
+
+* **PEP 654.** Exception groups and `except*`.
+* **PEP 657.** Fine-grained error locations in tracebacks.
+* **PEP 678.** `add_note` and `__notes__` on exceptions.
+* **PEP 765.** Disallow control flow in `finally`.
+
+## Reference
+
+* `Python/errors.c`, `Python/ceval.c`, `Python/assemble.c`,
+  `Objects/exceptions.c`, `Python/traceback.c`.
+* `Objects/exception_handling_notes.txt`. Exception-table format.
+* PEP 654, PEP 657, PEP 678, PEP 765.

@@ -1,149 +1,198 @@
 ---
 title: Specializer
-description: PEP 659 adaptive specialization. How CPython rewrites hot bytecode in place.
+description: PEP 659 adaptive specialisation. The backoff counter, the cache layout, the rewrite, the deopt.
 ---
 
 # Specializer
 
-PEP 659 is the in-place adaptive specializer. The idea is small:
-keep generic opcodes for the cold path, swap them for fast variants
-once a call site warms up, and deopt back to generic if the
-assumption breaks. Specialization is the single biggest win in
-CPython 3.11+ performance.
+The specializer is the Tier-1 optimiser. It watches generic
+opcodes such as `LOAD_ATTR`, `BINARY_OP`, `CALL`, and `LOAD_GLOBAL`
+and, when one of them is executed often enough at a stable type,
+rewrites it in place to a *specialised* variant that skips the
+generic dispatch. If the assumption later breaks, the specialised
+opcode *deopts* back to the generic form. The mechanism is
+described by PEP 659.
 
-## Source map
+## Where the code lives
 
-| File                                      | Role                                              |
-| ----------------------------------------- | ------------------------------------------------- |
-| `Python/specialize.c`                     | The specializer.                                  |
-| `Python/bytecodes.c`                      | Adaptive families declared with `family` / `specializing op`. |
-| `Include/internal/pycore_code.h`          | Inline cache layouts.                             |
-| `Include/internal/pycore_opcode_metadata.h` | Adaptive metadata, deopt counters.             |
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/specialize.c`                      | The specialisation logic, one function per family.                |
+| `Include/internal/pycore_code.h`           | Cache structs (`_PyAttrCache`, `_PyLoadGlobalCache`, ...).        |
+| `Include/internal/pycore_opcode_metadata.h` (generated) | `INLINE_CACHE_ENTRIES_*` per opcode.                |
+| `Python/bytecodes.c`                       | DSL: family declarations, `DEOPT_IF`, cache reads.                |
 
-## The mental model
-
-For each "family" of opcodes there is one generic opcode (e.g.
-`LOAD_ATTR`) and several specialized variants
-(`LOAD_ATTR_INSTANCE_VALUE`, `LOAD_ATTR_SLOT`, `LOAD_ATTR_CLASS`,
-`LOAD_ATTR_METHOD_WITH_VALUES`, ...).
-
-Each generic opcode has a small **counter** attached to it via the
-inline cache slot. The counter starts at a high "warmup" value
-and decrements on every hit. When it reaches zero, the
-**specializing** branch runs: the specializer looks at the actual
-operand types, picks the best variant, and rewrites the opcode in
-place. From the next iteration on, the cheap variant runs without
-type checks; the counter resets to a high "miss" budget. On a
-miss the variant deopts back to the generic opcode and the
-counter is decremented; on the second miss, the slot is marked
-adaptive-disabled and `LOAD_ATTR` stays generic.
-
-## Adaptive families in 3.14
-
-| Family               | Specialized variants                                |
-| -------------------- | --------------------------------------------------- |
-| `LOAD_ATTR`          | INSTANCE_VALUE, SLOT, CLASS, MODULE, PROPERTY, METHOD_WITH_VALUES, METHOD_NO_DICT, METHOD_LAZY_DICT, GETATTRIBUTE_OVERRIDDEN, ... |
-| `STORE_ATTR`         | INSTANCE_VALUE, SLOT, WITH_HINT.                    |
-| `LOAD_GLOBAL`        | MODULE, BUILTIN.                                    |
-| `LOAD_SUPER_ATTR`    | ATTR, METHOD.                                       |
-| `BINARY_OP`          | ADD_INT, ADD_FLOAT, ADD_UNICODE, MULTIPLY_INT, MULTIPLY_FLOAT, SUBTRACT_INT, SUBTRACT_FLOAT, INPLACE_ADD_UNICODE. |
-| `COMPARE_OP`         | INT, FLOAT, STR.                                    |
-| `CONTAINS_OP`        | DICT, SET.                                          |
-| `TO_BOOL`            | INT, BOOL, NONE, STR, LIST, ALWAYS_TRUE.            |
-| `STORE_SUBSCR`       | LIST_INT, DICT.                                     |
-| `UNPACK_SEQUENCE`    | TWO_TUPLE, TUPLE, LIST.                             |
-| `FOR_ITER`           | LIST, TUPLE, RANGE, GEN.                            |
-| `SEND`               | GEN.                                                |
-| `CALL`               | BOUND_METHOD_EXACT_ARGS, PY_EXACT_ARGS, BUILTIN_O, BUILTIN_FAST, BUILTIN_CLASS, BUILTIN_FAST_WITH_KEYWORDS, METHOD_DESCRIPTOR_*, LEN, ISINSTANCE, STR_1, TUPLE_1, ... |
-| `CALL_KW`            | BOUND_METHOD, PY, NON_PY.                           |
-
-## Quickening
-
-`_PyCode_Quicken` is called the first time a code object is
-executed. It scans the bytecode, replaces every generic opcode in
-an adaptive family with its `_ADAPTIVE` variant, and primes the
-counter cache. The result is a copy that lives in
-`co_executors`-adjacent storage; the original is preserved for
-deopt.
-
-In CPython 3.12+ quickening is done lazily on the original
-bytecode rather than on a copy: the eval loop is the only reader
-and writer, so in-place mutation is safe under the GIL.
-
-## Inline caches
-
-Each adaptive opcode is followed by `_PyOpcode_Caches[op]` cache
-words. The cache holds:
-
-* The counter (always present, two bytes).
-* Type version tag(s) the variant guards against.
-* For `LOAD_ATTR` variants, the descriptor's index or method
-  pointer.
-* For `LOAD_GLOBAL_*`, the dict keys version of `globals` and
-  `builtins`.
-* For `BINARY_OP_*`, the result type version.
-
-When a specialised variant runs, it reads the cache, compares the
-guard fields against the actual operand state, and either takes
-the fast path or jumps to deopt.
-
-## Watchers
-
-The specializer relies on two **watchers** to invalidate caches
-on the spot:
-
-* The **type watcher** observes `tp_version_tag` bumps. Any
-  attribute change on a class (set, delete, mutating MRO) bumps
-  the tag. Variants that compared against the old tag deopt on
-  next use.
-* The **dict watcher** observes `dk_version` bumps on dict keys
-  objects. Adds, deletes, and rehashes bump the version.
-  `LOAD_GLOBAL_MODULE` deopts if `__main__.__dict__`'s keys
-  version moves.
-
-Watchers are O(1) per observed object; they live as flags on
-`PyTypeObject` and `PyDictKeysObject`.
-
-## Deopt
-
-When a variant's guard fails, the opcode is rewritten back to its
-generic form and the per-instruction deopt counter is
-decremented. If the counter reaches zero, adaptive specialization
-is disabled for that slot. The eval loop continues with the
-generic opcode.
-
-The counter has a logarithmic backoff so that a slot with one bad
-type does not waste cycles re-specializing repeatedly.
-
-## Putting it together
+The specializer entry point is one function per family:
 
 ```c
-// Python/bytecodes.c (DSL)
-family(load_attr, INLINE_CACHE_ENTRIES_LOAD_ATTR) = {
-    LOAD_ATTR,
-    LOAD_ATTR_INSTANCE_VALUE,
-    LOAD_ATTR_SLOT,
-    LOAD_ATTR_CLASS,
-    ...
-};
+/* Python/specialize.c _Py_Specialize_LoadAttr */
+void _Py_Specialize_LoadAttr(_PyStackRef owner, _Py_CODEUNIT *instr,
+                             PyObject *name);
+```
 
-specializing op(_SPECIALIZE_LOAD_ATTR, (counter/1, owner -- owner)) {
-    if (ADAPTIVE_COUNTER_IS_ZERO(counter)) {
-        next_instr = this_instr;
-        _Py_Specialize_LoadAttr(owner, next_instr, name);
-        DISPATCH_SAME_OPARG();
-    }
-    OPCODE_DEFERRED_INC(LOAD_ATTR);
-    ADVANCE_ADAPTIVE_COUNTER(counter);
+The eval loop calls it from the generic opcode when the backoff
+counter hits zero. The function inspects the runtime types and
+either rewrites the opcode plus its inline cache or marks the
+site as *unspecialisable* (and arranges to look at it less often).
+
+## The cache
+
+Every specialisable opcode reserves a fixed number of cache slots
+right after itself in `co_code`. The count is per family and is
+emitted into the metadata header by the cases generator:
+
+```c
+/* Include/internal/pycore_opcode_metadata.h (generated) */
+#define INLINE_CACHE_ENTRIES_LOAD_ATTR 9
+#define INLINE_CACHE_ENTRIES_BINARY_OP 5
+#define INLINE_CACHE_ENTRIES_CALL 3
+/* ... */
+```
+
+The eval loop's `DISPATCH()` macro skips past the cache after each
+instruction. The opcode body reads cache slots explicitly. The
+first slot is always the *backoff counter*:
+
+```c
+/* Include/internal/pycore_code.h _PyAttrCache */
+typedef struct {
+    uint16_t counter;        /* backoff */
+    uint16_t version[2];     /* 32-bit type version, split */
+    uint16_t index;          /* descriptor index or dict offset */
+} _PyAttrCache;
+```
+
+`version[2]` is a 32-bit type version tag split across two code
+units; reading it reassembles the 32-bit value. The version is
+incremented on every type modification (`__class__` assignment,
+`__set_name__`, monkey-patch); a cached entry compares its
+captured version against the current one to decide whether the
+specialisation still applies.
+
+## The backoff counter
+
+Counter values are interpreted with two bits of state in the low
+bits and the rest as a saturating count. The state machine:
+
+* Counter hits zero: call the specialiser.
+* Specialiser succeeds: rewrite the opcode; reset counter for
+  cache invalidation tracking.
+* Specialiser fails: bump the *backoff power*; reset the counter
+  to `2^power - 1` so we try again later, but rarer.
+* After several failures the site is marked `LOAD_ATTR_ADAPTIVE`
+  with maximum backoff; it effectively stops trying.
+
+The exponential backoff is what makes specialisation cheap in
+aggregate: sites that will never specialise stop being checked,
+while hot sites converge quickly.
+
+## The rewrite
+
+When `_Py_Specialize_LoadAttr` sees a stable type, it:
+
+1. Picks a specialised opcode (`LOAD_ATTR_INSTANCE_VALUE`,
+   `LOAD_ATTR_SLOT`, `LOAD_ATTR_METHOD`, ...).
+2. Fills the cache: the type version, the descriptor offset or
+   dict offset, anything else the specialised body needs.
+3. Replaces the opcode byte in `co_code` with the specialised
+   opcode.
+
+The write is a plain store; in the free-threaded build the eval
+loop reads the opcode through `FT_ATOMIC_LOAD_UINT16_RELAXED`,
+which matches a relaxed atomic store. The per-thread bytecode
+copy (PEP 703) avoids contention between threads writing
+different specialisations for the same site.
+
+## The body and the deopt
+
+Each specialised opcode body checks the assumptions cheaply,
+then takes the fast path:
+
+```
+inst(LOAD_ATTR_INSTANCE_VALUE, (unused/1, type_version/2, index/1,
+                                unused/5, owner -- attr, null if (oparg & 1))) {
+    PyTypeObject *tp = Py_TYPE(owner);
+    DEOPT_IF(tp->tp_version_tag != type_version, LOAD_ATTR);
+    PyDictValues *values = _PyObject_InlineValues(owner);
+    DEOPT_IF(!values->valid, LOAD_ATTR);
+    attr = values->values[index];
+    DEOPT_IF(attr == NULL, LOAD_ATTR);
+    Py_INCREF(attr);
 }
 ```
 
-The generator produces the matching C code in `generated_cases.c.h`,
-emits the family table into `pycore_opcode_metadata.h`, and emits
-the specializer entry point `_Py_Specialize_LoadAttr` into
-`specialize.c`.
+`DEOPT_IF(cond, opname)` is the deopt macro. If the condition
+fires, the eval loop:
 
-## Reading order
+1. Restores the opcode byte to the generic family member.
+2. Re-dispatches to the now-generic opcode, which executes the
+   slow path *and* updates the cache for next time.
 
-Tier-2 ([Tier-2](tier2)) runs on top of the specializer. The
-specializer's families are exactly the seed for Tier-2 traces.
+Deopt is cheap because the cache slots are still there with
+useful data; the next specialisation attempt has warm context.
+
+## Families
+
+The opcodes touched by the specializer in 3.14:
+
+| Family                | Variants (selected)                              |
+| --------------------- | ------------------------------------------------ |
+| `LOAD_ATTR`           | `INSTANCE_VALUE`, `SLOT`, `MODULE`, `METHOD`, `CLASS`, ... |
+| `STORE_ATTR`          | `INSTANCE_VALUE`, `SLOT`, `WITH_HINT`            |
+| `LOAD_GLOBAL`         | `MODULE`, `BUILTIN`                              |
+| `BINARY_OP`           | `ADD_INT`, `ADD_FLOAT`, `ADD_UNICODE`, `SUBTRACT_INT`, ... |
+| `BINARY_SUBSCR`       | `LIST_INT`, `TUPLE_INT`, `DICT`, `GETITEM`       |
+| `STORE_SUBSCR`        | `LIST_INT`, `DICT`                               |
+| `CALL`                | `PY_EXACT_ARGS`, `BOUND_METHOD`, `BUILTIN_O`, `LIST_APPEND`, ... |
+| `COMPARE_OP`          | `INT`, `FLOAT`, `STR`                            |
+| `FOR_ITER`            | `LIST`, `TUPLE`, `RANGE`, `GEN`                  |
+| `SEND`                | `GEN`                                            |
+| `UNPACK_SEQUENCE`     | `TWO_TUPLE`, `LIST`, `TUPLE`                     |
+| `TO_BOOL`             | `BOOL`, `INT`, `LIST`, `NONE`, `STR`, `ALWAYS_TRUE` |
+
+The list grows over releases. The authoritative source is
+`Python/bytecodes.c` plus the family declarations there.
+
+## Specialisation statistics
+
+CPython can be built with `--enable-pystats` to gather
+specialisation hit/miss/deopt rates per opcode. The collected data
+is what drives further additions to the specializer; the in-tree
+`Tools/scripts/summarize_stats.py` renders a digest.
+
+## Free-threaded considerations
+
+The specializer's atomicity contract in the free-threaded build:
+
+* Reads of the opcode and the cache use `FT_ATOMIC_LOAD_*_RELAXED`.
+* Writes are made through the per-thread bytecode copy, so two
+  threads do not contend on the same memory.
+* Type-version invalidation uses the type's atomic version tag; a
+  bumped version makes every cached entry stale on next read.
+
+## CPython 3.14 changes
+
+* **More specialised forms.** 3.14 added several new specialised
+  variants, notably extending `CALL` and `BINARY_OP`.
+* **Reduced cache size.** Some families had their cache size
+  trimmed; the net effect of more variants with smaller caches is
+  modestly higher specialisation coverage with similar code-size
+  cost.
+* **Tier-2 cooperation.** Tier-2 trace projection reads the
+  specialised opcodes (it cannot project through a generic one).
+  See [optimizer](optimizer).
+
+## PEP touchpoints
+
+* **PEP 659.** Specializing adaptive interpreter (the design
+  document).
+* **PEP 703.** Free threading; per-thread bytecode and atomic
+  reads.
+
+## Reference
+
+* `Python/specialize.c`, `Python/bytecodes.c`,
+  `Include/internal/pycore_code.h`,
+  `Include/internal/pycore_opcode_metadata.h`.
+* PEP 659. Specializing adaptive interpreter.
+* Shannon, Mark. *Faster CPython* design notes.
