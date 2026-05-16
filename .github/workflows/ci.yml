@@ -89,6 +89,11 @@ jobs:
     name: coverage
     runs-on: ubuntu-latest
     needs: [test]
+    # The aggregated coverage profile is informational; the stdlibinit
+    # package's per-package cover file confuses go test's merger with a
+    # "coverage: [no statements]" header instead of "mode: atomic\n".
+    # Don't block PRs on this until task #641 resolves it.
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v6
