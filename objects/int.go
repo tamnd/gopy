@@ -103,6 +103,13 @@ func (i *Int) BigInt() *big.Int {
 	return new(big.Int).Set(&i.v)
 }
 
+// Sign returns -1, 0, or +1 mirroring big.Int.Sign without copying.
+//
+// CPython: Objects/longobject.c _PyLong_Sign
+func (i *Int) Sign() int {
+	return i.v.Sign()
+}
+
 // newIntAs builds an int tagged with t instead of IntType. Used by the
 // int subtype path so a class like `class MyInt(int): pass` yields
 // instances whose Type() is MyInt.

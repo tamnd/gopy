@@ -20,6 +20,7 @@ import (
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/specialize"
 	"github.com/tamnd/gopy/stackref"
 	"github.com/tamnd/gopy/state"
 )
@@ -48,6 +49,7 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 		ExceptionTable:  c.ExceptionTable,
 	}
 	out.Init(objects.CodeType)
+	specialize.Enable(out)
 	return out
 }
 

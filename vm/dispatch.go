@@ -45,16 +45,27 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 	if base, rewritten := baseForInstrumented(op); rewritten {
 		op = base
 	}
-	// On Quickened code, fold any specialized variant back to its
-	// adaptive parent so the generic body runs (gopy doesn't have
-	// fast-path arms for the specialized opcodes yet) and tick the
+	// On Quickened code, give specialized variants a chance at their
+	// fast-path arm first. trySpecialized returns ok=true only when
+	// the guards held and the dispatch was taken; otherwise we fall
+	// through to the deopt path that rewrites the bytecode back to
+	// the adaptive parent and runs the generic body.
+	if next, ok, err := e.trySpecialized(op, oparg); ok {
+		return next, nil, nil, false, err
+	}
+	// On Quickened code, fold any remaining specialized variant back
+	// to its adaptive parent so the generic body runs, and tick the
 	// adaptive counter so a hot site eventually re-specializes.
 	if base, deopted := e.maybeDeopt(op); deopted {
 		op = base
 	} else if e.adaptiveTick(op, oparg) {
 		// adaptiveTick rewrote the opcode in place; pick up the
-		// fresh op so the generic body still runs this tick.
+		// fresh op and give the fast-path arm a shot before
+		// falling back to the generic body.
 		op = compile.Opcode(e.f.Code.Code[e.f.InstrPtr])
+		if next, ok, err := e.trySpecialized(op, oparg); ok {
+			return next, nil, nil, false, err
+		}
 		if base2, deopted2 := e.maybeDeopt(op); deopted2 {
 			op = base2
 		}

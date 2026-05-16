@@ -104,6 +104,12 @@ func (l *List) Append(v Object) {
 // CPython: Objects/listobject.c:L308 PyList_GetItem
 func (l *List) Item(i int) Object { return l.items[i] }
 
+// SetItem stores v at index i. The caller is responsible for bounds
+// checking; out-of-range indices panic.
+//
+// CPython: Objects/listobject.c:271 PyList_SET_ITEM
+func (l *List) SetItem(i int, v Object) { l.items[i] = v }
+
 // SetSlice replaces items[start:stop] with values. CPython implements
 // this through PyList_SetSlice; the gopy port keeps the contract
 // (start and stop already clamped/normalized by the caller).
