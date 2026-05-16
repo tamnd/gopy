@@ -39,7 +39,7 @@ func init() {
 	))
 	// type.__dict__ getset. inspect.py grabs this at module load via
 	//   _get_dunder_dict_of_class = type.__dict__["__dict__"].__get__
-	// and later calls it on a class to materialise the class's namespace.
+	// and later calls it on a class to materialize the class's namespace.
 	// CPython exposes the descriptor through type_getsets so it shows up
 	// in type.__dict__; the gopy port mirrors that here.
 	//
