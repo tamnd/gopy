@@ -1,28 +1,190 @@
 ---
-title: gopy internals
-description: How gopy is structured. The Go mirror of CPython 3.14.
+title: Internals
+description: How gopy is built. A function-by-function port of CPython 3.14 to Go, organised by subsystem.
 ---
 
-# gopy internals
+# Internals
 
-gopy is a from-scratch reimplementation of CPython 3.14 in Go. The goal
-is behavioural compatibility: same bytecode, same objects, same error
-messages. The implementation follows CPython page for page, so each
-page in this section has a direct counterpart in the
-[CPython](../cpython/) pillar.
+gopy is a from-scratch reimplementation of CPython 3.14 in Go. The
+goal is behavioural compatibility: the same bytecode, the same
+object model, the same error messages, the same `dis` output for
+the same source. The implementation follows CPython page for page,
+not architecture sketch for architecture sketch. Where the CPython
+tree has `Python/compile.c`, gopy has `compile/compiler.go`; where
+the CPython tree has `Objects/typeobject.c`, gopy has
+`objects/type.go`. The pages in this section describe how each
+subsystem actually works in the Go port, with citations into both
+trees so a reader can keep one window open on each.
+
+## What the pillar covers
+
+The internals pillar is about the interpreter. It does not cover
+how to install gopy, how to run a script, or what Python features
+gopy supports. Those questions belong to the manual. It also does
+not document the standard library; module-level documentation
+lives in its own pillar. The split is the same one CPython makes
+between the *Internals* notes in `Doc/internals/` and the language
+reference in `Doc/reference/`.
+
+A reader who has never read the CPython source before can start
+here. A reader who has read CPython but never read gopy will find
+this pillar most useful read in parallel with the corresponding
+CPython file: the source maps at the top of each page name the C
+file the Go file mirrors, with line numbers.
 
 ## Layout
 
-Flat packages at the module root, no `internal/` directory.
+The Go packages live as a flat namespace at the module root. There
+is no `internal/` directory and no deep package nesting. The
+choice is deliberate: it keeps the package-to-file correspondence
+with CPython visible, and it lets a reader navigate by `cd`
+without losing their place.
 
-| Area      | Packages                                          |
-| --------- | ------------------------------------------------- |
-| Pipeline  | `parser/`, `compile/`, `ast/`                     |
-| Execution | `vm/`, `pythonrun/`                               |
-| Runtime   | `objects/`, `module/`, `stdlib/`                  |
+| Pillar     | Packages                                                              |
+| ---------- | --------------------------------------------------------------------- |
+| Pipeline   | `token/`, `tokenize/`, `parser/`, `parser_gen/`, `arena/`, `ast/`, `future/`, `symtable/`, `compile/` |
+| Execution  | `vm/`, `stackref/`, `intrinsics/`, `frame/`, `state/`, `specialize/`, `optimizer/`, `monitor/`, `gil/`, `pythread/`, `pysync/`, `errors/`, `traceback/`, `warnings/` |
+| Objects    | `objects/`, `abstract/`, `builtins/`, `gc/` (via `module/gc/`), `weakref/`, `brc/`, `hamt/`, `hash/`, `hashtable/` |
+| Runtime    | `lifecycle/`, `initconfig/`, `pathconfig/`, `pythonrun/`, `getopt/`, `myreadline/`, `imp/`, `marshal/`, `codecs/`, `format/`, `pystrconv/`, `pymath/`, `pytime/` |
+
+The pillars are an editorial grouping, not a build-time one; every
+package compiles independently. The grouping reflects how the
+pages in this section are organised and how a tour of the
+interpreter most naturally unfolds.
 
 ## Reading order
 
-Start with [pipeline](pipeline) for an end-to-end tour of how a `.py`
-file becomes running bytecode. Then follow the same per-subsystem pages
-as the CPython pillar.
+The pillar is built to be read in order, top to bottom, but each
+page is self-contained. The recommended path is:
+
+1. Start with [pipeline](pipeline). It traces a single line of
+   Python from the source string to a running opcode and names
+   every subsystem the line passes through.
+2. Read down the *Pipeline* sidebar group: `parser`, `ast`,
+   `symtable`, `compile`. By the end of `compile` you know what
+   a code object is and how it is shaped.
+3. Cross to *Execution*. Read `vm` first; everything else in the
+   group is a refinement of the dispatch loop. `frame` explains
+   the runtime stack `vm` walks. `specializer` and `optimizer`
+   explain the two tiers that rewrite the code `vm` executes.
+   `monitor` explains how `sys.monitoring` injects instrumentation
+   on top of all of that. `gil` and `exceptions` close out the
+   chapter.
+4. Read *Objects* for the object model. `objects` is the entry
+   point; `types` is the per-type catalogue.
+5. Read *Runtime* for everything that happens before and after
+   user code runs: process startup, the import machinery, codecs,
+   numbers, time.
+
+A reader chasing a specific subsystem can skip directly. The pages
+cross-reference each other generously.
+
+## Conventions
+
+Every page in the pillar follows a fixed shape so that scanning
+between pages is cheap. The shape is:
+
+* A one-paragraph **lede** that names the subsystem in plain
+  English.
+* A **source map** table with three columns: the gopy path, the
+  CPython source it mirrors, and the role each file plays.
+* The **body**, organised into noun-phrase sections, each
+  explaining one mechanism. Sections are typically two to six
+  paragraphs and contain at least one concrete listing or one
+  citation pair.
+* A **Differences from CPython** list when the divergence carries
+  meaning for the page.
+* A **Reference** list of PEPs, CPython issues, papers, and
+  related gopy pages.
+
+Citations are inline. A gopy citation reads
+`` `compile/compiler.go:L34 Compile` ``; a CPython citation reads
+`` `Python/compile.c:L353 _PyAST_Compile` ``. Line numbers will
+drift over time. Treat them as anchors for the version of the
+tree the page was written against, not as long-lived stable IDs.
+
+Code listings carry a language tag (`go`, `c`, `python`) and are
+real code, not paraphrased. Go listings are copied from the gopy
+tree, C listings from the CPython tree, Python samples from an
+interactive session. A listing too long to inline gets trimmed
+with `// ...` rather than reflowed.
+
+## What gopy keeps and what gopy drops
+
+The CPython 3.14 implementation rests on three load-bearing C
+idioms that Go does not give for free, and the gopy port handles
+each one explicitly:
+
+* **Reference counting.** Every `PyObject*` in CPython carries an
+  `ob_refcnt` field; every function that produces an object
+  documents whether it returns a new reference or a borrowed one.
+  gopy delegates this to Go's tracing garbage collector. There is
+  no `Py_INCREF`, no `Py_DECREF`, no `Py_NewRef`. Functions that
+  in CPython return new references simply return values in Go.
+  The semantic consequence (most user-visible reference-counted
+  finalisation timing) is preserved by holding strong references
+  on the value stack for as long as CPython would, plus an
+  explicit cyclic-finaliser pass for `__del__` and weakref
+  observability. See [gc](gc).
+* **Thread state.** CPython uses thread-local storage and explicit
+  GIL acquire/release. gopy uses a `*ThreadState` argument
+  threaded through every entry point that needs one, plus a
+  central goroutine-aware GIL implementation. See [gil](gil).
+* **Macro-heavy dispatch.** The CPython eval loop is generated
+  from `Python/bytecodes.c` via `Tools/cases_generator`. gopy
+  generates Go from the same DSL; the generated file lives at
+  `vm/generated_cases.go`. See [vm](vm).
+
+What gopy holds invariant from CPython:
+
+* **Bytecode.** The opcode numbering, the inline cache layout,
+  the exception table format, the location table format, and the
+  marshal serialisation of a code object all match CPython 3.14
+  byte for byte. A `.pyc` produced by CPython 3.14 loads in gopy
+  and vice versa.
+* **Error messages.** A `TypeError` raised by a built-in carries
+  the same English string as CPython, down to punctuation, so
+  that test suite assertions about `str(exc)` pass without
+  modification.
+* **Sort and hash.** Timsort behaviour, `hash(x) == hash(y)`
+  whenever `x == y`, the SipHash-13 seed handling, and dictionary
+  ordering all match.
+* **PEP semantics.** PEP 657 location information, PEP 659
+  specialization, PEP 669 instrumentation, PEP 654 exception
+  groups, PEP 695 generic syntax. The page for each subsystem
+  states which PEPs it targets and which clauses are presently
+  implemented.
+
+## Status disclosure
+
+Several subsystems are partial. Where that is the case, the page
+says so in prose with a list of what is in and what is out, rather
+than hiding the gap behind a placeholder. The Tier-2 optimizer
+ports 14 of roughly 285 uops; the specializer covers the most
+common opcode families and falls through to the adaptive opcode
+for the rest; the free-threading work (PEP 703) is scaffolded in
+`brc/` but inert. None of these gaps prevent the interpreter from
+running real Python; the pages explain what they cost in
+performance and behaviour.
+
+## Cross-pillar references
+
+The internals pillar links forward and backward within itself.
+It does not link to the modules pillar except where a built-in
+module is itself an internals subsystem (`gc`, `sys`, `_thread`,
+`_warnings`). It does not link to the specs pillar; the port
+specs under `website/docs/specs/1700/` are the function-by-function
+manifest used to drive the port, and they are catalogued there for
+contributors, not for a casual reader.
+
+## Reference
+
+* PEP 626. Precise line numbers for debugging.
+* PEP 657. Including fine-grained location information in
+  tracebacks.
+* PEP 659. Specializing adaptive interpreter.
+* PEP 669. Low impact monitoring for CPython.
+* PEP 703. Making the global interpreter lock optional in CPython.
+* PEP 744. JIT compilation.
+* CPython 3.14 source tree. `https://github.com/python/cpython`
+  at the matching tag.
