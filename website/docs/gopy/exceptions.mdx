@@ -1,37 +1,317 @@
 ---
-title: uexceptions
-description: gopy's exceptions subsystem. Mirrors CPython's design.
+title: Exceptions
+description: Raising, propagating, catching. The exception table, the unwind path, traceback chains, exception groups, and the warnings filter.
 ---
 
-# uexceptions
+# Exceptions
 
-This page describes how gopy implements **exceptions**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/exceptions`](../cpython/exceptions).
+Exception handling is the unwinding control-flow mechanism. A
+`raise` statement creates an exception object and hands it to the
+runtime; the runtime walks the call stack, asks each frame whether
+it has a handler that catches the exception, and either jumps to
+the handler or pops the frame and continues walking. The dance
+happens through the *exception table* in the code object, the
+unwind path in the eval loop, and the traceback chain that records
+where the exception passed through.
 
-## Source map
+CPython exception handling lives in `Python/ceval.c` (the unwind),
+`Objects/exceptions.c` (the exception type hierarchy),
+`Python/traceback.c` (the traceback object), and `Python/_warnings.c`
+(the filter machinery). The gopy ports are in `exceptions/`,
+`traceback/`, and (for the warnings module) `module/warnings/`.
 
-The Go code lives at the module root in flat packages.
+## Where the code lives
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+| File                                | Role                                                                       | CPython counterpart                  |
+| ----------------------------------- | -------------------------------------------------------------------------- | ------------------------------------ |
+| `exceptions/base.go`                | `BaseException` and the exception type hierarchy.                          | `Objects/exceptions.c` BaseException |
+| `exceptions/types.go`               | Concrete exception types: `ValueError`, `TypeError`, `LookupError`, ...    | `Objects/exceptions.c` types         |
+| `exceptions/group.go`               | `ExceptionGroup` and `BaseExceptionGroup`.                                  | `Objects/exceptions.c` group         |
+| `exceptions/chain.go`               | `__cause__`, `__context__`, `__suppress_context__`, `__traceback__` wiring. | `Python/errors.c chain`              |
+| `exceptions/raise.go`               | `Raise`, `RaiseFrom`, `RaiseValue`, normalised exception construction.     | `Python/errors.c PyErr_*`            |
+| `exceptions/match.go`               | `isinstance`-style matching against a handler tuple.                       | `Python/ceval.c` `match_class` etc.  |
+| `vm/eval_unwind.go`                 | The walk: look up handler in exception table, jump or pop.                  | `Python/ceval.c` exception table walk |
+| `traceback/traceback.go`            | The `Traceback` object and the linked-list chain.                          | `Python/traceback.c`                 |
 
-## Differences from CPython
+The split is deliberate. The eval loop owns the *walk* (it knows
+the instruction pointer and the frame). The exceptions package owns
+the *objects* (the type hierarchy, the chain pointers, the
+constructors). The traceback package owns the *trace* (the
+file/line/name list).
+
+## The exception hierarchy
+
+Python's exception types form a fixed hierarchy rooted at
+`BaseException`.
 
 ```
-Notes on places where gopy intentionally diverges from CPython.
+BaseException
+ +-- BaseExceptionGroup
+ +-- KeyboardInterrupt
+ +-- SystemExit
+ +-- GeneratorExit
+ +-- Exception
+      +-- ExceptionGroup
+      +-- ArithmeticError
+      |    +-- FloatingPointError
+      |    +-- OverflowError
+      |    +-- ZeroDivisionError
+      +-- AssertionError
+      +-- AttributeError
+      +-- BufferError
+      +-- EOFError
+      +-- ImportError
+      |    +-- ModuleNotFoundError
+      +-- LookupError
+      |    +-- IndexError
+      |    +-- KeyError
+      +-- MemoryError
+      +-- NameError
+      |    +-- UnboundLocalError
+      +-- OSError
+      |    +-- BlockingIOError, ChildProcessError, ConnectionError, ...
+      +-- RuntimeError
+      |    +-- NotImplementedError, RecursionError, ...
+      +-- StopIteration
+      +-- StopAsyncIteration
+      +-- SyntaxError
+      |    +-- IndentationError
+      +-- SystemError
+      +-- TypeError
+      +-- ValueError
+      |    +-- UnicodeError
+      +-- Warning
+           +-- DeprecationWarning, UserWarning, ...
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+`Exception` is the root for ordinary errors; `BaseException`
+includes `SystemExit` and `KeyboardInterrupt`, which programs
+generally should not catch indiscriminately.
+
+The hierarchy is constructed at runtime by `exceptions.Init`. The
+types live as static objects in `exceptions/types.go`; the
+constructors and slots are wired during interpreter init.
+
+## The exception table
+
+The compiler emits an *exception table* in every code object's
+`co_exceptiontable`. The table is a sequence of records, each one
+describing one `try/except` (or `try/finally`, or `with`) range.
+
+A record has five fields, all stored as varints:
+
+- `start`: first instruction in the protected range,
+- `end`: one past the last instruction,
+- `handler`: instruction offset of the handler entry,
+- `depth`: value-stack depth on entry to the handler,
+- `lasti`: a flag bit indicating whether the handler should push
+  the originating instruction offset onto the stack (used by `try`
+  with multiple `except` clauses).
+
+The encoding is space-efficient: the runtime parses one record at a
+time and matches it against the current instruction pointer. The
+format is documented in PEP 626 and implemented by [Compile](./compile).
+
+## The unwind path
+
+When a handler raises (or a uop deopts with a pending exception),
+the eval loop calls `unwind`.
+
+```go
+// vm/eval_unwind.go (*evalState).unwind
+func (e *evalState) unwind(err error) (status, error)
+```
+
+`unwind` does:
+
+1. Read the current exception off the thread.
+2. Look up `InstrPtr` in the frame's exception table. If a
+   matching range is found:
+   - Truncate the value stack to `depth`.
+   - If `lasti` is set, push the originating instruction offset.
+   - Push the exception object.
+   - Jump to `handler`.
+   - Return `ok` so the loop continues.
+3. If no matching range is found, the frame does not handle this
+   exception. Append the frame to the traceback chain, pop the
+   frame, and re-call `unwind` on the caller frame.
+4. If the caller is nil, return the error to whoever called `Eval`.
+
+The walk is linear in the number of frames on the stack but is
+rarely the hot path; exceptions are slow, and the slowness is
+acceptable.
+
+## Raising
+
+`Raise` is the runtime entry for `raise X` and `raise X from Y`.
+
+```go
+// exceptions/raise.go Raise
+func Raise(t *state.Thread, exc objects.Object) error
+
+// exceptions/raise.go RaiseFrom
+func RaiseFrom(t *state.Thread, exc, cause objects.Object) error
+```
+
+`Raise` normalises the argument: if `exc` is a class, it
+instantiates it; if it is an instance, it uses it directly; if it
+is neither, it raises `TypeError`. The normalised exception is
+stored on the thread's current-exception slot, and the function
+returns an error sentinel that the eval loop uses to enter `unwind`.
+
+The implicit exception context (`__context__`) is set if there is a
+currently-handled exception when `Raise` runs. The explicit cause
+(`__cause__`) is set only by `raise X from Y`. The
+`__suppress_context__` flag is set by `raise X from Y` and by `from
+None`.
+
+## Match
+
+`except X` and `except (X, Y)` use `Match` to check whether the
+current exception is caught.
+
+```go
+// exceptions/match.go Match
+func Match(exc, classes objects.Object) (bool, error)
+```
+
+`Match` walks the class (or tuple of classes), and for each class
+calls `isinstance(exc, cls)`. The result is true if any class
+matches. A `TypeError` is raised if `classes` contains anything
+that is not a class.
+
+## Exception groups
+
+PEP 654 added `ExceptionGroup` and `except*`. An exception group
+wraps a list of exceptions; `except*` matches the group's members,
+splits the group into a caught part and a re-raise part, and runs
+the handler on the caught part.
+
+```go
+// exceptions/group.go BaseExceptionGroup
+type BaseExceptionGroup struct {
+    Message string
+    Excs    []objects.Object
+}
+
+// exceptions/group.go (*BaseExceptionGroup).Split
+func (g *BaseExceptionGroup) Split(cond func(objects.Object) bool) (matched, rest objects.Object)
+
+// exceptions/group.go (*BaseExceptionGroup).Subgroup
+func (g *BaseExceptionGroup) Subgroup(cond func(objects.Object) bool) objects.Object
+```
+
+`Split` partitions the group; `Subgroup` returns the matching part
+without the rest. The eval loop has dedicated arms for
+`CHECK_EG_MATCH` and `PUSH_EXC_INFO` that drive `except*`.
+
+## Tracebacks
+
+A traceback is a singly-linked list of records, each one describing
+one frame on the unwind path.
+
+```go
+// traceback/traceback.go:L18 Entry
+type Entry struct {
+    File string
+    Line int
+    Name string
+}
+
+// traceback/traceback.go:L36 Traceback
+type Traceback struct {
+    Entry
+    Next     *Traceback
+    TbFrame  objects.Object  // the actual Frame, when available
+    TbLasti  int             // last instruction index in the frame
+}
+```
+
+Each `unwind` step that pops a frame extends the traceback chain
+with the popped frame's entry. The chain is attached to the
+exception via `__traceback__`. The Python-level `tb_frame`,
+`tb_lasti`, `tb_lineno`, and `tb_next` attributes read off this
+structure.
+
+The `Line` field is computed lazily from the frame's location table
+(PEP 626) on first access; the table is a varint stream that maps
+instruction offset to source position, packed for cache friendliness.
+
+## The chain
+
+Three pointers describe the exception chain:
+
+- `__cause__`: explicit cause, set by `raise X from Y`.
+- `__context__`: implicit context, set when an exception occurs
+  during the handling of another.
+- `__suppress_context__`: when true, the formatter prints only the
+  cause, not the context.
+
+The chain is built by `Raise` and walked by the formatter in
+`traceback.format_exception`. Cycles are detected and broken.
+
+## The warnings filter
+
+`warnings.warn` is a soft-raise: it goes through a filter that
+decides whether to print the warning, raise it as an exception,
+print it once and remember, or ignore. The filter is a list of
+(action, category, module, line) tuples; the first match wins.
+
+```go
+// module/warnings/filter.go Apply
+func Apply(t *state.Thread, msg objects.Object, category objects.Object,
+    stacklevel int, source objects.Object) error
+```
+
+Actions: `default`, `error`, `ignore`, `always`, `once`, `module`.
+The filter list is populated by `-W` command-line options,
+`PYTHONWARNINGS`, `warnings.filterwarnings`, and code-internal
+calls to `warnings.simplefilter`.
+
+`error` is the interesting one: it turns the warning into a real
+raise. The warning category becomes the exception type.
+
+## Interaction with monitoring
+
+[Monitor](./monitor) fires `EventRaise` when `Raise` runs and
+`EventExceptionHandled` when a handler runs. `EventPyUnwind` fires
+once per frame popped during unwind. The events let debuggers and
+profilers observe exception flow without instrumenting every `try`
+block.
+
+The fire path is on the cold side; exception flow is not the hot
+case for monitoring overhead, and the events are useful for
+debugging the warm one.
+
+## Interaction with the optimiser
+
+Tier-2 traces avoid raising. When a uop would raise, it deopts to
+tier-1 and the tier-1 unwind takes over. The deopt path translates
+the trace's current uop index back to a tier-1 instruction offset;
+the tier-1 unwind reads the exception off the thread and proceeds
+normally.
+
+Side-exit metadata in [Optimizer](./optimizer) encodes both
+fall-through exits and exception-driven exits with the same
+mechanism: a bytecode offset to deopt to.
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+The exception type hierarchy is complete. `Raise`, `RaiseFrom`,
+`Match`, the chain wiring, the basic traceback object, and the
+unwind path are ported. Exception groups and `except*` are wired
+but exercised by relatively few tests until [Compile](./compile)
+emits the full `CHECK_EG_MATCH` family. The traceback formatter
+(the `traceback` module) renders into the standard form; some
+PEP 657 fine-grained column annotations are simplified pending the
+location-table port.
 
-## Cross reference
+## Reference
 
-* CPython companion: [cpython/exceptions](../cpython/exceptions).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+- Port source: `exceptions/`, `traceback/`, `module/warnings/`.
+- CPython source: `Objects/exceptions.c`, `Python/errors.c`,
+  `Python/traceback.c`, `Python/_warnings.c`.
+- PEP 3134, *Exception Chaining and Embedded Tracebacks*.
+- PEP 626, *Precise line numbers for debugging*.
+- PEP 654, *Exception Groups and except\**.
+- PEP 657, *Include Fine-Grained Error Locations in Tracebacks*.

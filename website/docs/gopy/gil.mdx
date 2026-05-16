@@ -1,37 +1,271 @@
 ---
-title: ugil
-description: gopy's gil subsystem. Mirrors CPython's design.
+title: GIL
+description: The Global Interpreter Lock and the eval breaker. Cooperative scheduling, signal delivery, and the bitfield the loop polls every instruction.
 ---
 
-# ugil
+# GIL
 
-This page describes how gopy implements **gil**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/gil`](../cpython/gil).
+The Global Interpreter Lock serialises Python bytecode across
+threads. Only the thread that holds the GIL may execute Python; all
+other threads block until the holder releases. The lock has been
+part of CPython since the beginning and exists because the
+reference-counting garbage collector and most of the C API are not
+thread-safe.
 
-## Source map
+PEP 703 added an opt-in *free-threaded* build that removes the GIL.
+gopy's runtime is GIL-less by construction (goroutines schedule
+through Go's scheduler, Go's GC handles memory) but the *visible*
+behaviour to Python code is gated by an interpreter-level flag so
+that programs which rely on the GIL's serialisation continue to
+work. This page describes the GIL as gopy exposes it and the
+*eval breaker*, the bitfield that the eval loop polls on every
+iteration.
 
-The Go code lives at the module root in flat packages.
+The package is `gil/`.
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+## Where the code lives
 
-## Differences from CPython
+| File                | Role                                                                            | CPython counterpart                          |
+| ------------------- | ------------------------------------------------------------------------------- | -------------------------------------------- |
+| `gil/gil.go`        | The `GIL` struct. Acquire, release, drop request, switch interval.              | `Python/ceval_gil.c`                         |
+| `gil/breaker.go`    | The `Breaker` bitfield. Set, clear, load.                                       | `Include/internal/pycore_ceval.h` `eval_breaker` |
+| `gil/bits.go`       | Breaker bit constants: pending exceptions, signals, GIL drop, async finalisers. | `Include/internal/pycore_ceval.h` bit flags  |
+| `gil/signals.go`    | Signal delivery from the OS to a Python-visible handler.                        | `Modules/signalmodule.c` signal trampolines  |
+| `gil/pending.go`    | The pending-calls queue.                                                        | `Python/ceval.c _PyEval_AddPendingCall`      |
 
+## The GIL
+
+```go
+// gil/gil.go:L22 GIL
+type GIL struct {
+    mu          sync.Mutex
+    cond        *sync.Cond
+    locked      bool
+    holder      holderID
+    requestDrop atomic.Bool
+    interval    atomic.Int64  // switch interval, nanoseconds
+}
 ```
-Notes on places where gopy intentionally diverges from CPython.
+
+The lock is a mutex with a condition variable. A thread acquires by
+locking the mutex and setting `locked = true`; another thread that
+wants the lock blocks on the condvar until `Release` clears
+`locked` and broadcasts.
+
+```go
+// gil/gil.go:L43 (*GIL).Acquire
+func (g *GIL) Acquire(holder holderID) error
+
+// gil/gil.go:L58 (*GIL).Release
+func (g *GIL) Release()
+
+// gil/gil.go:L75 (*GIL).RequestDrop
+func (g *GIL) RequestDrop()
+
+// gil/gil.go:L81 (*GIL).DropRequested
+func (g *GIL) DropRequested() bool
+
+// gil/gil.go:L96 (*GIL).SetSwitchInterval
+func (g *GIL) SetSwitchInterval(ns int64)
+
+// gil/gil.go (*GIL).SwitchInterval
+func (g *GIL) SwitchInterval() int64
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+The switch interval is the maximum number of nanoseconds one thread
+may hold the GIL before another thread asks for it via
+`RequestDrop`. The holder polls `DropRequested` periodically; on
+true, it releases the lock and re-acquires it after a fair-scheduling
+wait, giving the requester a chance.
+
+CPython implements the same algorithm with a different primitive
+(a semaphore plus a timeout). Go's mutex-plus-condvar is more
+natural in goroutine code and has the same correctness properties.
+
+## The eval breaker
+
+The breaker is a single atomic 32-bit word with one bit per pending
+condition the eval loop needs to handle.
+
+```go
+// gil/breaker.go:L13 Breaker
+type Breaker struct {
+    bits atomic.Uint32
+}
+
+func (b *Breaker) Set(bit uint32)
+func (b *Breaker) Clear(bit uint32)
+func (b *Breaker) Load() uint32
+func (b *Breaker) IsSet(bit uint32) bool
+```
+
+The eval loop polls `Load() != 0` on every iteration. When the
+result is non-zero, the loop calls `handleEvalBreaker`, which walks
+the set bits and handles each one before resuming dispatch.
+
+```go
+// in vm/eval.go:L109 the poll
+if e.breaker != nil && e.breaker.Load() != 0 {
+    if err := e.handleEvalBreaker(); err != nil {
+        return nil, err
+    }
+}
+```
+
+The point of the breaker is to avoid checking each condition
+separately. Without it, the loop would need to check the pending
+exception, the signal queue, the GIL drop request, and the
+async-generator finaliser list each iteration. With it, the cost is
+one atomic load and one branch; the work only happens when a bit is
+set.
+
+## The bits
+
+```go
+// gil/bits.go bit constants
+const (
+    BitEvalBreakException     uint32 = 1 << 0  // pending exception
+    BitEvalBreakSignal        uint32 = 1 << 1  // signal arrived
+    BitEvalBreakDropGil       uint32 = 1 << 2  // another thread wants the GIL
+    BitEvalBreakPending       uint32 = 1 << 3  // pending Py_AddPendingCall queued
+    BitEvalBreakAsyncFinalizer uint32 = 1 << 4 // an async generator needs finalising
+    BitEvalBreakProfile       uint32 = 1 << 5  // a profile/trace callback wants to run
+)
+```
+
+Each bit is set by an external event:
+
+- `BitEvalBreakException`: a `KeyboardInterrupt` or other async
+  exception was queued from a signal handler.
+- `BitEvalBreakSignal`: the OS delivered a signal that has a
+  Python-visible handler.
+- `BitEvalBreakDropGil`: another thread called `RequestDrop`.
+- `BitEvalBreakPending`: a C-level callback was queued via
+  `_PyEval_AddPendingCall`.
+- `BitEvalBreakAsyncFinalizer`: an async generator has gone
+  unreachable and needs `__aclose__`.
+- `BitEvalBreakProfile`: a `sys.setprofile` callback wants to fire.
+
+Each bit has a handler in `handleEvalBreaker`. The handler clears
+its bit, runs the work, and returns. If the work raises, the error
+propagates out and the eval loop unwinds.
+
+## Signal delivery
+
+OS signals do not arrive in the Python thread directly. A small Go
+signal handler captures the signal, records it in a per-interpreter
+buffer, sets `BitEvalBreakSignal` on every thread's breaker, and
+returns. The eval loop notices the bit on its next iteration, calls
+into the Python-visible signal handler (registered via
+`signal.signal`), and returns to bytecode.
+
+```go
+// gil/signals.go DeliverSignal
+func DeliverSignal(interp *state.Interpreter, sig int)
+```
+
+The asynchrony matters. Signal handlers run *between* bytecode
+instructions, never *during* one. The instruction boundary is the
+only safe point: the operand stack is consistent, no half-finished
+attribute lookup is in progress, the GC has nothing pending.
+
+`KeyboardInterrupt` is a special case: the signal handler raises a
+`KeyboardInterrupt` exception into the current frame on its next
+breaker poll. The exception then propagates through the normal
+unwind machinery; it does not bypass `try/except`.
+
+## Pending calls
+
+`_PyEval_AddPendingCall` is the C API entry that schedules work to
+run on the main eval thread between instructions. gopy mirrors the
+API:
+
+```go
+// gil/pending.go AddPendingCall
+func AddPendingCall(interp *state.Interpreter, fn func() error)
+```
+
+The function is appended to a per-interpreter queue. The breaker
+bit is set. The eval loop drains the queue on the next poll.
+
+The mechanism is used by `signal.set_wakeup_fd`, by some C
+extensions, and by the runtime itself for tasks that need to happen
+on the main thread (finalisation of objects with `__del__`, mostly).
+
+## Holding the lock
+
+In CPython, every thread that runs Python code holds the GIL while
+running. In gopy, the GIL is *advisory* by default: goroutines may
+run Python concurrently because the runtime is thread-safe at the
+object level. The GIL still serialises *visible* state from Python
+code's perspective (the order of execution of bytecode across
+threads), but it does not gate goroutine scheduling.
+
+A program may opt into stricter GIL semantics for compatibility:
+
+```python
+# In Python
+import sys
+sys.setrecursionlimit(...)  # no GIL implication
+sys.set_int_max_str_digits(...)  # no GIL implication
+
+# Optional gopy extension (subject to API design)
+# sys.gopy_enable_strict_gil()
+```
+
+The default is permissive because the gopy use cases (embedding Go
+into Python, running Python tooling on a Go runtime) benefit from
+goroutine concurrency. Programs that ported assumptions from the
+GIL'd CPython are still correct as long as they were correct on
+free-threaded CPython.
+
+## Switch interval
+
+`SetSwitchInterval` controls how often a thread checks for a GIL
+drop request. The default is five milliseconds.
+
+```go
+// gil/gil.go:L96
+func (g *GIL) SetSwitchInterval(ns int64)
+```
+
+The interval is enforced cooperatively. The holder samples the
+high-resolution clock on each `JUMP_BACKWARD` (loop back-edge) and
+compares against its last release. When the gap exceeds the
+interval, the holder yields by releasing and re-acquiring.
+
+The cooperative scheme has the same property CPython relies on: a
+thread that does not execute Python bytecode (it is blocked in a C
+extension, say) does not yield. C extensions are expected to call
+`PyEval_SaveThread` (release the GIL) before blocking and
+`PyEval_RestoreThread` (re-acquire) afterwards. gopy provides the
+same entry points.
+
+## Async generators and finalisation
+
+Async generators that are garbage-collected without being fully
+consumed need their `__aclose__` to run. The collection happens
+during Go GC, which is not the right context to run Python; instead,
+the GC adapter queues the generator into a per-interpreter
+finalisation list and sets `BitEvalBreakAsyncFinalizer`. The eval
+loop drains the list on the next poll.
+
+The same mechanism handles weakref callbacks; see [GC](./gc).
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+The GIL implementation is complete. The breaker is complete. Bit
+handlers for exceptions, signals, drop requests, and pending calls
+are complete. The async-generator finaliser path is wired but
+exercises few code paths until more generator tests come online.
+Profile-callback firing through the breaker is partial; the
+`sys.setprofile` path lands when monitoring's profile event covers
+the same surface (see [Monitor](./monitor)).
 
-## Cross reference
+## Reference
 
-* CPython companion: [cpython/gil](../cpython/gil).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+- Port source: `gil/`.
+- CPython source: `Python/ceval_gil.c`,
+  `Include/internal/pycore_ceval.h`, `Modules/signalmodule.c`.
+- PEP 703, *Making the Global Interpreter Lock Optional in CPython*.
+- PEP 311, *Simplified Global Interpreter Lock Acquisition for Extensions*.

@@ -1,37 +1,335 @@
 ---
-title: uvm
-description: gopy's vm subsystem. Mirrors CPython's design.
+title: VM
+description: The bytecode dispatch loop. How a Code object becomes work, one instruction at a time.
 ---
 
-# uvm
+# VM
 
-This page describes how gopy implements **vm**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/vm`](../cpython/vm).
+The virtual machine is the engine. Everything earlier in the
+pipeline exists to feed it a `Code` object; everything later in the
+runtime exists to support what it does. The VM walks the
+instruction stream, mutates the operand stack, calls into
+specialisers and the optimiser, and hands control to the exception
+table when something goes wrong. CPython's analogue is
+`_PyEval_EvalFrameDefault` in `Python/ceval.c`, the largest function
+in the interpreter and the place most performance work lands. The
+gopy port lives in `vm/`.
 
-## Source map
+This page describes the dispatch loop itself. The per-instruction
+state it touches is documented elsewhere: see [Frame](./frame) for
+the activation record, [Specializer](./specializer) for tier-1
+inline caches, [Optimizer](./optimizer) for tier-2 traces,
+[Monitor](./monitor) for sys.monitoring callbacks,
+[Exceptions](./exceptions) for the unwind path, [Generators](./generators)
+for the suspend/resume protocol, and [GIL](./gil) for the eval-breaker
+poll.
 
-The Go code lives at the module root in flat packages.
+## Where the code lives
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+| File                     | Role                                                                                      | CPython counterpart                                  |
+| ------------------------ | ----------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `vm/eval.go`             | Top-level entry points and the run loop. `Eval` and `EvalCode`.                           | `Python/ceval.c` `_PyEval_EvalFrameDefault`          |
+| `vm/dispatch.go`         | The opcode switch. Routes each instruction to its handler.                                | `Python/ceval.c` dispatch and `Python/bytecodes.c`   |
+| `vm/eval_simple.go`      | Hand-written tier-1 arms: `RESUME`, `LOAD_CONST`, `LOAD_FAST`, `BUILD_LIST`, `CALL`, ...  | `Python/bytecodes.c` per-op bodies                   |
+| `vm/eval_call.go`        | Call instruction family: `CALL`, `CALL_KW`, `CALL_FUNCTION_EX`, `LOAD_BUILD_CLASS`.       | `Python/bytecodes.c` CALL section                    |
+| `vm/eval_gen.go`         | Generator and coroutine arms: `YIELD_VALUE`, `RETURN_GENERATOR`, `SEND`.                  | `Python/bytecodes.c` generator section               |
+| `vm/eval_unwind.go`      | Exception table walk and frame unwind.                                                    | `Python/ceval.c` `_Py_HandlePending` and table walk  |
+| `vm/eval_resume.go`      | `RESUME` semantics on function entry and generator resume.                                | `Python/bytecodes.c` RESUME                          |
+| `vm/eval_match.go`       | Structural pattern matching arms: `MATCH_SEQUENCE`, `MATCH_MAPPING`, ...                  | `Python/bytecodes.c` MATCH section                   |
+| `vm/eval_import.go`      | Import-statement arms: `IMPORT_NAME`, `IMPORT_FROM`.                                      | `Python/bytecodes.c` IMPORT section                  |
+| `vm/adaptive.go`         | Deopt path: shape mismatch reverts a specialised opcode to its adaptive parent.           | `Python/ceval.c` DEOPT_IF and `specialize.c`         |
+| `vm/tier2.go`            | Tier-2 warmup hook on `JUMP_BACKWARD`, executor entry via `ENTER_EXECUTOR`.               | `Python/ceval.c` `enter_tier_two`                    |
+| `vm/threadstate.go`      | Plumbs the eval state to the current thread.                                              | `Python/pystate.c` thread bookkeeping                |
 
-## Differences from CPython
+The package is deliberately split by concern. The hot path lives in
+`eval.go`, `dispatch.go`, and `eval_simple.go`. The cold paths
+(unwind, tier-2 entry, import) sit in their own files so they do not
+pollute instruction-cache locality on the hot side.
+
+## The entry points
+
+`Eval` is the public entry. It takes a `*frame.Frame` that has
+already been pushed onto the thread's frame stack, and returns the
+final value the frame produced.
+
+```go
+// vm/eval.go:L56 Eval
+func Eval(t *state.Thread, f *frame.Frame) (objects.Object, error)
+```
+
+`EvalCode` is a convenience that builds a frame from a `*objects.Code`,
+globals, and locals, pushes it, runs it, and pops it. It is the
+function the REPL, `exec`, and `compile()...exec` paths call into.
+
+```go
+// vm/eval.go:L68 EvalCode
+func EvalCode(t *state.Thread, co *objects.Code, globals, locals objects.Object) (objects.Object, error)
+```
+
+Both functions construct an `evalState` and call its `run` method.
+The `evalState` is intentionally a small struct that lives on the
+goroutine stack for the duration of the call. It shadows fields the
+loop touches every iteration, so the hot path never has to chase
+pointers into thread state or frame state.
+
+## The dispatch loop
+
+The loop is structured the way CPython structures it: fetch, poll,
+dispatch, advance.
 
 ```
-Notes on places where gopy intentionally diverges from CPython.
+loop:
+    poll the eval breaker
+    fetch opcode and oparg
+    dispatch to the handler
+    if handler returned ok, advance the instruction pointer
+    if handler returned err, walk the exception table
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+The Go implementation lives in `vm/eval.go:L104 (*evalState).run`.
+The loop is a `for` with no exit condition; control leaves through
+`return` statements inside the handlers (RETURN_VALUE, RETURN_GENERATOR)
+or via the unwind path when the exception table is exhausted.
+
+### Fetch
+
+The fetch step pulls the next instruction out of `co_code` at
+`InstrPtr` and decodes it.
+
+```go
+// vm/eval.go:L142 (*evalState).fetch
+func (e *evalState) fetch() (op uint8, oparg uint32)
+```
+
+`EXTENDED_ARG` is folded inline. When the lexer sees three
+`EXTENDED_ARG` instructions followed by a real opcode, the high 24
+bits of the oparg are accumulated across the four words and the
+combined value is delivered with the real opcode. The combining is
+identical to CPython; the only difference is that gopy reads
+instructions as Go `uint16` words instead of C `_Py_CODEUNIT`.
+
+### Dispatch
+
+`dispatch` is the central switch. It takes the opcode and routes to
+the handler.
+
+```go
+// vm/dispatch.go:L29 (*evalState).dispatch
+func (e *evalState) dispatch(op uint8, oparg uint32) status
+```
+
+The dispatch is implemented as a Go `switch`. Go does not expose
+computed-goto, so the dispatch cannot match the threaded code in
+CPython. Profile data on real workloads shows the difference matters
+less than expected once tier-1 specialisation reduces the
+indirect-branch count and tier-2 lifts hot loops out of the dispatch
+entirely. The handler functions are inlinable; the Go compiler
+already inlines the small ones (`LOAD_FAST`, `LOAD_CONST`,
+`POP_TOP`) at -O2.
+
+### Advance
+
+After a successful handler the loop advances `InstrPtr` past the
+instruction and its inline cache. Inline-cache size is computed from
+the opcode and the spec table; specialised opcodes carry the same
+cache footprint as their adaptive parents so deopt does not need to
+re-align the stream.
+
+### Poll
+
+Before every iteration the loop polls the eval breaker. The breaker
+is a `uint32` bitfield that signals: pending exceptions, signal
+delivery, GIL drop requests, async-generator finalisers, profile
+callbacks. The shadow lives on `evalState`, so the poll is one
+atomic load and a comparison against zero.
+
+```go
+// vm/eval.go:L109 poll
+if e.breaker != nil && e.breaker.Load() != 0 {
+    if err := e.handleEvalBreaker(); err != nil { ... }
+}
+```
+
+The breaker bits and the routines that set them live in [GIL](./gil).
+The poll point is here because the cost of the check has to be paid
+on every iteration; moving it deeper into individual handlers would
+let unbounded loops escape the safepoint.
+
+## Per-instruction handlers
+
+CPython 3.14 has roughly 285 distinct opcodes once you count the
+specialised forms. gopy ports them in two waves: hand-written arms
+in `eval_simple.go` and friends, and generated stubs for the rest.
+
+The hand-written set covers what is needed to run a useful program:
+
+- Stack pushes and pops: `LOAD_CONST`, `LOAD_FAST`, `LOAD_FAST_BORROW`,
+  `STORE_FAST`, `COPY`, `SWAP`, `POP_TOP`, `PUSH_NULL`.
+- Function entry: `RESUME`, `MAKE_FUNCTION`, `SET_FUNCTION_ATTRIBUTE`.
+- Control flow: `JUMP_FORWARD`, `JUMP_BACKWARD`, `POP_JUMP_IF_TRUE`,
+  `POP_JUMP_IF_FALSE`, `RETURN_VALUE`, `RETURN_CONST`.
+- Containers: `BUILD_LIST`, `BUILD_TUPLE`, `BUILD_MAP`, `BUILD_SET`,
+  `LIST_APPEND`, `SET_ADD`, `MAP_ADD`.
+- Attribute and item: `LOAD_ATTR`, `STORE_ATTR`, `BINARY_SUBSCR`,
+  `STORE_SUBSCR`.
+- Calls: `CALL`, `CALL_KW`, `CALL_FUNCTION_EX`.
+- Comparisons: `COMPARE_OP`, `CONTAINS_OP`, `IS_OP`, `TO_BOOL`.
+
+Each hand-written arm is a method on `*evalState`. The arm reads
+operands off the stack, executes the semantics, pushes results, and
+returns one of three statuses: `ok`, `err`, or `yielded`. The
+yielded status exists for the generator path.
+
+Anything not hand-written falls into a generated stub that returns
+`statusUnimplemented`, which deopts to a slow path that reads the
+CPython spec table and either runs a tier-0 reference handler or
+raises a `NotImplementedError` with the opcode name. The stub
+catalogue exists so tests can detect at runtime which opcodes a
+given gate exercises; it is not the long-term shape.
+
+## Adaptive deopt
+
+Specialised opcodes (`LOAD_ATTR_INSTANCE_VALUE`,
+`CALL_PY_EXACT_ARGS`, `BINARY_OP_ADD_INT`, ...) are stamped over
+their adaptive parents during the quicken pass and on cache hits.
+When a specialised handler detects a shape mismatch (the cached type
+no longer matches, the dict version has changed, an argument count
+is off), it calls into the deopt path.
+
+```go
+// vm/adaptive.go (*evalState).maybeDeopt
+func (e *evalState) maybeDeopt(op uint8, parent uint8) status
+```
+
+`maybeDeopt` rewrites the opcode back to its adaptive parent and
+restarts the backoff counter on the cache. The next dispatch of the
+same instruction goes through the parent's slow path, which either
+re-specialises with the new shape or stays generic if the counter
+has been exhausted. Backoff counters use a 12-bit value and a 4-bit
+exponential shift, identical to CPython's `_Py_BackoffCounter`.
+
+The specialisers themselves live in `specialize/` and run on cache
+hits inside the slow handlers. They are documented in [Specializer](./specializer).
+
+## Tier-2 entry
+
+On `JUMP_BACKWARD` the loop checks whether the backwards branch has
+warmed up enough to invite the trace optimiser.
+
+```go
+// vm/tier2.go:L33 tryWarmupTier2
+func (e *evalState) tryWarmupTier2(target uint32) error
+```
+
+If the warmup counter says yes, `optimizer.Optimize` is invoked with
+the current code, current instruction pointer, and a fresh
+`UOPInstruction` buffer. It returns either a compiled `Executor`
+that gets installed into the side table for this code object, or
+nothing if the trace was rejected (too short, too many side exits,
+analysis failure).
+
+`ENTER_EXECUTOR` is the opcode the optimiser stamps over a
+`JUMP_BACKWARD` once a trace is installed. When the dispatch loop
+sees it, control transfers to `enterExecutor`.
+
+```go
+// vm/tier2.go:L56 enterExecutor
+func (e *evalState) enterExecutor(execID uint16) (status, error)
+```
+
+`enterExecutor` reads the executor out of the side table, copies the
+relevant fields into a `Tier2State`, and calls `RunExecutor`. When
+the trace exits (clean exit, side exit, deopt), `enterExecutor`
+returns to the tier-1 loop with the instruction pointer pointing at
+the next tier-1 instruction the trace would have executed. The
+tier-2 dispatch loop and the executor lifecycle are in [Optimizer](./optimizer).
+
+## Frame entry and exit
+
+The VM does not allocate frames. Frames are allocated by the call
+site (the `CALL` handler, the generator machinery, `EvalCode`) and
+pushed onto the thread's frame stack before `Eval` is invoked. The
+loop reads the current frame off the thread.
+
+```go
+// frame/chunk.go:L43 (*FrameStack).Push
+func (s *FrameStack) Push(size uintptr) *Frame
+
+// frame/chunk.go:L58 (*FrameStack).Pop
+func (s *FrameStack) Pop()
+```
+
+When `RETURN_VALUE` runs, the handler reads the return value off the
+top of the stack, calls `Pop`, and returns. The caller's `Eval` is
+then responsible for pushing the return value onto the caller's
+stack. This split keeps the loop reentrant: the same `evalState`
+type is used for nested calls because the loop is restarted at every
+call boundary.
+
+Generator frames are an exception. When a generator yields the
+frame is *detached* from the frame stack, not popped, and ownership
+transfers to the generator object. When the generator is resumed the
+frame is *attached* again at a new chunk slot. [Generators](./generators)
+covers the details.
+
+## Exception handling
+
+When a handler returns the error status the loop reads the current
+exception off the thread, looks up the instruction pointer in the
+frame's exception table, and either jumps to the handler offset or
+unwinds the frame.
+
+```go
+// vm/eval_unwind.go (*evalState).unwind
+func (e *evalState) unwind(err error) (status, error)
+```
+
+The exception table is the format described in PEP 626 and PEP 657:
+a sequence of (start, end, handler, depth, lasti?) tuples encoded
+with a varint scheme. The walk is a linear scan; the table is small
+and locality is good. Once a handler is found the loop pushes the
+current exception onto the stack and jumps to the handler offset.
+If no handler is found the loop pops the frame and returns the error
+to the caller, which repeats the walk on the parent frame.
+
+The exception machinery itself is in [Exceptions](./exceptions).
+
+## Monitoring
+
+Each tier-1 instruction has an instrumented variant
+(`INSTRUMENTED_RESUME`, `INSTRUMENTED_CALL`, ...) that the
+instrumentation pass stamps in when a tool registers callbacks for
+an event. The dispatch loop has no special case for these; the
+generated dispatch handles them. The instrumented arm fires the
+event before delegating to the regular arm.
+
+```go
+// monitor/fire.go (*Interp).Fire
+func (m *InterpState) Fire(t *state.Thread, code *objects.Code, ev Event, ...) error
+```
+
+[Monitor](./monitor) covers the event taxonomy, tool registration,
+and the difference between local and global events.
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+The dispatch loop is complete and behaves correctly on every opcode
+that has a hand-written arm. The unimplemented stubs trip at
+`statusUnimplemented` and surface as `NotImplementedError` at
+runtime. The plan for the rest of the opcodes is to port them in
+batches grouped by category, so each batch can be gated by a vendored
+CPython test that exercises the category. Tier-2 dispatch is wired
+end-to-end but only fourteen uops are hand-ported; the rest deopt to
+tier-1 on the first dispatch. Monitoring instrumentation arms are
+scaffolded but not all events fire yet.
 
-## Cross reference
+## Reference
 
-* CPython companion: [cpython/vm](../cpython/vm).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+- Port source: `vm/`.
+- CPython source: `Python/ceval.c`, `Python/bytecodes.c`,
+  `Python/generated_cases.c.h`.
+- PEP 659, *Specializing Adaptive Interpreter*.
+- PEP 744, *JIT Compilation*.
+- PEP 626, *Precise line numbers for debugging*.
+- PEP 657, *Include Fine-Grained Error Locations in Tracebacks*.
+- PEP 669, *Low Impact Monitoring for CPython*.

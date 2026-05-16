@@ -1,37 +1,346 @@
 ---
-title: uspecializer
-description: gopy's specializer subsystem. Mirrors CPython's design.
+title: Specializer
+description: PEP 659 adaptive specialisation. Inline caches, backoff counters, and the quicken pass that rewrites generic opcodes into shape-specific ones.
 ---
 
-# uspecializer
+# Specializer
 
-This page describes how gopy implements **specializer**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/specializer`](../cpython/specializer).
+PEP 659 introduced adaptive specialisation to CPython. The idea is
+simple: a generic opcode like `LOAD_ATTR` works for every object,
+but most of the time it is reading a fixed field off an instance of
+a fixed class. If the loop *remembers* the shape it saw last time,
+the next dispatch can skip type lookup, slot resolution, and
+descriptor protocol entirely and read the field directly. The
+remembering is per-instruction-site, lives in inline caches, and is
+self-correcting through a backoff counter.
 
-## Source map
+gopy ports the mechanism intact. The package is `specialize/`.
 
-The Go code lives at the module root in flat packages.
+This page describes the framework: where caches live, how counters
+back off, how the quicken pass writes them in. The actual
+specialisers (one per opcode family) are catalogued at the end.
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+## Where the code lives
 
-## Differences from CPython
+| File                          | Role                                                                      | CPython counterpart                       |
+| ----------------------------- | ------------------------------------------------------------------------- | ----------------------------------------- |
+| `specialize/doc.go`           | Package documentation.                                                    | -                                         |
+| `specialize/core.go`          | Cache cell read/write helpers, opcode rewrite, specialise/unspecialise.   | `Python/specialize.c` opcode_helpers      |
+| `specialize/backoff.go`       | 16-bit backoff counter: 12 bits of value, 4 bits of shift.                | `Include/internal/pycore_backoff.h`       |
+| `specialize/quicken.go`       | Initial pass over a fresh code object that arms warmup counters.          | `Python/specialize.c _PyCode_Quicken`     |
+| `specialize/deopt.go`         | Maps each specialised opcode back to its adaptive parent.                 | `Python/specialize.c` deoptimize table    |
+| `specialize/cache.go`         | Per-opcode inline-cache layout helpers.                                   | `Include/internal/pycore_code.h`          |
+| `specialize/call.go`          | `CALL` family specialiser.                                                | `Python/specialize.c specialize_call`     |
+| `specialize/binary_op.go`     | `BINARY_OP` family specialiser.                                           | `specialize.c specialize_binary_op`       |
+| `specialize/load_attr.go`     | `LOAD_ATTR` family specialiser.                                           | `specialize.c specialize_load_attr`       |
+| `specialize/load_global.go`   | `LOAD_GLOBAL` family specialiser.                                         | `specialize.c specialize_load_global`     |
+| `specialize/store_attr.go`    | `STORE_ATTR` family specialiser.                                          | `specialize.c specialize_store_attr`      |
+| `specialize/load_super_attr.go` | `LOAD_SUPER_ATTR` family specialiser.                                   | `specialize.c specialize_load_super`      |
+| `specialize/for_iter.go`      | `FOR_ITER` family specialiser.                                            | `specialize.c specialize_for_iter`        |
+| `specialize/compare_op.go`    | `COMPARE_OP` family specialiser.                                          | `specialize.c specialize_compare_op`      |
+| `specialize/contains_op.go`   | `CONTAINS_OP` family specialiser.                                         | `specialize.c specialize_contains_op`     |
+| `specialize/to_bool.go`       | `TO_BOOL` family specialiser.                                             | `specialize.c specialize_to_bool`         |
+| `specialize/send.go`          | `SEND` family specialiser.                                                | `specialize.c specialize_send`            |
+| `specialize/store_subscr.go`  | `STORE_SUBSCR` family specialiser.                                        | `specialize.c specialize_store_subscr`    |
+| `specialize/unpack_sequence.go` | `UNPACK_SEQUENCE` family specialiser.                                   | `specialize.c specialize_unpack_sequence` |
+| `specialize/call_kw.go`       | `CALL_KW` family specialiser.                                             | `specialize.c specialize_call_kw`         |
+
+## The cache model
+
+Every adaptive opcode is followed by a fixed number of cache
+half-words in the bytecode stream. The first half-word is always
+the backoff counter; the rest is the per-opcode payload. For
+example, `LOAD_ATTR` has five cache words: counter, version (two
+half-words), keys, descriptor.
 
 ```
-Notes on places where gopy intentionally diverges from CPython.
+[op | arg] [counter] [version_lo] [version_hi] [keys] [descr]
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+The eval loop fetches the opcode at `InstrPtr` and the cache cells
+at `InstrPtr + 1 ... InstrPtr + n_cache`. Cache reads and writes go
+through helpers so that the bit packing is centralised.
+
+```go
+// specialize/core.go:L48 LoadCounter
+func LoadCounter(co *objects.Code, ip uint32) BackoffCounter
+
+// specialize/core.go:L56 StoreCounter
+func StoreCounter(co *objects.Code, ip uint32, c BackoffCounter)
+
+// specialize/core.go:L75 SetCacheU32
+func SetCacheU32(co *objects.Code, ip uint32, slot int, v uint32)
+
+// specialize/core.go:L81 CacheU32
+func CacheU32(co *objects.Code, ip uint32, slot int) uint32
+
+// specialize/core.go:L63 CacheCell
+func CacheCell(co *objects.Code, ip uint32, slot int) uint16
+
+// specialize/core.go:L68 SetCacheCell
+func SetCacheCell(co *objects.Code, ip uint32, slot int, v uint16)
+```
+
+The `slot` argument is the per-opcode cache offset; the layout for
+each opcode is documented in `specialize/cache.go`.
+
+## Backoff counters
+
+A backoff counter is a 16-bit packed integer with 12 bits of value
+and 4 bits of exponential shift.
+
+```go
+// specialize/backoff.go:L29 BackoffCounter
+type BackoffCounter uint16
+```
+
+The counter ticks down by one on every dispatch of its instruction.
+When it reaches zero, the slow path runs. The slow path is one of
+two things: a specialiser (if the opcode is adaptive and not yet
+specialised) or an unspecialise (if the opcode is specialised and
+the cache misses).
+
+After the slow path runs, the counter is reset, but with a *larger*
+initial value than last time. The shift bits encode how many times
+the counter has rearmed; each rearm doubles the next interval, up
+to a cap. The mechanism prevents pathological cases (a polymorphic
+call site) from burning cycles in the specialiser every few
+instructions.
+
+```go
+// specialize/backoff.go:L37 MakeBackoffCounter
+func MakeBackoffCounter(value, shift uint8) BackoffCounter
+
+// specialize/backoff.go:L51 ForgeBackoffCounter
+func ForgeBackoffCounter(value, shift uint8) BackoffCounter
+
+// specialize/backoff.go:L59 IsUnreachable
+func (c BackoffCounter) IsUnreachable() bool
+
+// specialize/backoff.go:L68 RestartBackoffCounter
+func RestartBackoffCounter(c BackoffCounter) BackoffCounter
+```
+
+A counter with the all-ones value is *unreachable*: it disables
+further specialisation attempts on this site entirely. Sites get
+marked unreachable when the specialiser has tried and failed enough
+times that further attempts are wasted.
+
+## The quicken pass
+
+`Quicken` runs once per code object the first time it is executed.
+It walks the bytecode, finds every adaptive opcode, and writes an
+initial warmup counter into its first cache cell.
+
+```go
+// specialize/quicken.go _PyCode_Quicken
+func Quicken(co *objects.Code)
+```
+
+The initial value is small (sixteen, in CPython). On the first
+sixteen dispatches the adaptive opcode runs the *generic* handler;
+on the sixteenth dispatch the counter hits zero and the specialiser
+runs. The point of the warmup is to filter out one-shot code:
+imports, module-level statements, top-level scripts that run once
+and exit. Specialising those would be wasted work because they will
+not run again.
+
+Adaptive opcodes are identified by a flag in the opcode metadata
+table. The flag list is generated from CPython's `Tools/cases_generator/`
+output and lives in the bytecode module.
+
+## Specialise
+
+When an adaptive opcode's counter hits zero, the generic handler
+inspects the operand types, dispatches to the family's specialiser,
+and the specialiser rewrites the opcode and fills the cache.
+
+```go
+// specialize/core.go:L93 Specialize
+func Specialize(co *objects.Code, ip uint32, newOp uint8, cache ...uint32)
+```
+
+`Specialize` writes the new opcode in place and stores the cache
+payload. The next dispatch of the same instruction will dispatch to
+the specialised handler. The handler reads the cache, checks the
+shape against the cached version (one-word compare against the
+type's version tag, or against the dict's version), and either
+executes the fast path or deopts.
+
+## Unspecialise
+
+Deopt is the opposite of specialise. When a specialised handler
+detects that the cached shape no longer matches, it rewrites the
+opcode back to its adaptive parent and restarts the counter.
+
+```go
+// specialize/core.go:L105 Unspecialize
+func Unspecialize(co *objects.Code, ip uint32, parentOp uint8)
+
+// specialize/deopt.go DeoptParent
+func DeoptParent(op uint8) uint8
+```
+
+`DeoptParent` is a lookup table mapping each specialised opcode to
+its adaptive parent. The table is generated from the same metadata
+the dispatch generator uses, so the relationship between parent and
+child stays consistent.
+
+After `Unspecialize` runs, the next dispatch goes through the
+parent's slow path. The slow path re-runs the specialiser, which
+may pick a different child opcode (the shape changed) or may mark
+the site unreachable (the counter has been rearmed too many times).
+
+## The specialisers
+
+Each opcode family has its own specialiser. The family is the
+adaptive parent; the children are the shape-specific forms.
+
+### `BINARY_OP`
+
+```go
+// specialize/binary_op.go:L27 BinaryOp
+func BinaryOp(co *objects.Code, ip uint32, lhs, rhs objects.Object, op uint8)
+```
+
+`BINARY_OP` specialises into one of:
+
+- `BINARY_OP_ADD_INT`, `BINARY_OP_SUBTRACT_INT`, `BINARY_OP_MULTIPLY_INT`,
+- `BINARY_OP_ADD_FLOAT`, `BINARY_OP_SUBTRACT_FLOAT`, `BINARY_OP_MULTIPLY_FLOAT`,
+- `BINARY_OP_ADD_UNICODE`,
+- generic `BINARY_OP` if no shape matches.
+
+The integer cases are further specialised when the result is small
+enough to use the singleton small-int table.
+
+### `CALL` and `CALL_KW`
+
+```go
+// specialize/call.go Call
+func Call(co *objects.Code, ip uint32, callable objects.Object, nargs int)
+```
+
+Calls specialise into:
+
+- `CALL_PY_EXACT_ARGS` (Python function, no defaults touched, no kwargs),
+- `CALL_PY_GENERAL` (Python function, but slow-path argument shuffling),
+- `CALL_TYPE_1` (one-arg call to `type`),
+- `CALL_STR_1`, `CALL_TUPLE_1`,
+- `CALL_BUILTIN_O`, `CALL_BUILTIN_FAST`, `CALL_BUILTIN_FAST_WITH_KEYWORDS`,
+- `CALL_METHOD_DESCRIPTOR_*`,
+- `CALL_BOUND_METHOD_EXACT_ARGS`, `CALL_BOUND_METHOD_GENERAL`,
+- `CALL_ALLOC_AND_ENTER_INIT`.
+
+Each variant uses a slightly different cache layout and a different
+fast path.
+
+### `LOAD_ATTR`
+
+```go
+// specialize/load_attr.go LoadAttr
+func LoadAttr(co *objects.Code, ip uint32, owner objects.Object, name objects.Object)
+```
+
+Attribute loads are the most varied family:
+
+- `LOAD_ATTR_INSTANCE_VALUE` reads from the instance's value array,
+- `LOAD_ATTR_WITH_HINT` uses a dict-keys hint to skip the lookup,
+- `LOAD_ATTR_SLOT` reads from a slot descriptor,
+- `LOAD_ATTR_CLASS` reads a class attribute,
+- `LOAD_ATTR_METHOD_*` returns a bound-method shortcut,
+- `LOAD_ATTR_PROPERTY` calls a property's getter,
+- `LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN` falls back when `__getattribute__`
+  is overridden,
+- generic `LOAD_ATTR` if no shape matches.
+
+### `LOAD_GLOBAL`
+
+```go
+// specialize/load_global.go LoadGlobal
+func LoadGlobal(co *objects.Code, ip uint32, globals, builtins objects.Object, name objects.Object)
+```
+
+Globals specialise into:
+
+- `LOAD_GLOBAL_MODULE` reads from the module's dict via a keys index,
+- `LOAD_GLOBAL_BUILTIN` reads from the builtins dict via a keys index,
+- generic `LOAD_GLOBAL` if no shape matches.
+
+The version word in the cache is the dict version of *both* globals
+and builtins; if either changes the cache invalidates.
+
+### `STORE_ATTR`
+
+`STORE_ATTR_INSTANCE_VALUE`, `STORE_ATTR_WITH_HINT`,
+`STORE_ATTR_SLOT`. Same shape detection as `LOAD_ATTR` but for the
+write path.
+
+### `LOAD_SUPER_ATTR`
+
+`LOAD_SUPER_ATTR_ATTR`, `LOAD_SUPER_ATTR_METHOD`. Detects whether
+`super().x` is a data attribute or a method shortcut.
+
+### `FOR_ITER`
+
+`FOR_ITER_LIST`, `FOR_ITER_TUPLE`, `FOR_ITER_RANGE`, `FOR_ITER_GEN`.
+Each variant inlines the iterator's `__next__` for the specific
+container type.
+
+### `COMPARE_OP` and `CONTAINS_OP`
+
+`COMPARE_OP_INT`, `COMPARE_OP_FLOAT`, `COMPARE_OP_STR`. The op
+argument carries the comparison kind (less, equal, ...); the
+specialised handler bakes the type into its compare and the op
+argument decides the branch.
+
+### `TO_BOOL`
+
+`TO_BOOL_BOOL`, `TO_BOOL_INT`, `TO_BOOL_LIST`, `TO_BOOL_NONE`,
+`TO_BOOL_STR`, `TO_BOOL_ALWAYS_TRUE`.
+
+### `SEND`
+
+`SEND_GEN`. Inlines the generator-`send` slow path.
+
+### `STORE_SUBSCR`
+
+`STORE_SUBSCR_LIST_INT`, `STORE_SUBSCR_DICT`.
+
+### `UNPACK_SEQUENCE`
+
+`UNPACK_SEQUENCE_TUPLE`, `UNPACK_SEQUENCE_LIST`,
+`UNPACK_SEQUENCE_TWO_TUPLE`.
+
+## Type versions
+
+Most specialisers key on a *type version*. Every Python type has a
+`tp_version_tag` that increments any time the type is mutated:
+methods replaced, MRO changed, attributes added. When a specialiser
+caches a type, it records the version. When the specialised handler
+runs, it compares the current version against the cached one. A
+mismatch deopts.
+
+The version mechanism is what lets specialisation be sound under
+mutation. The cost is one comparison and one branch on every
+specialised dispatch; the gain is everything else the slow path
+would have done.
+
+Dict watchers and type watchers (in [Optimizer](./optimizer))
+piggy-back on the same versioning to invalidate tier-2 traces.
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+All listed specialisers exist and produce correct results. The
+hand-written specialisation rules track CPython's logic in
+`specialize.c` but are not auto-generated from the cases generator
+input; a future pass will move to generated code when the metadata
+table format stabilises. Backoff counters, quicken, and deopt are
+fully ported.
 
-## Cross reference
+## Reference
 
-* CPython companion: [cpython/specializer](../cpython/specializer).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+- Port source: `specialize/`.
+- CPython source: `Python/specialize.c`,
+  `Include/internal/pycore_backoff.h`, `Include/internal/pycore_code.h`.
+- PEP 659, *Specializing Adaptive Interpreter*.
+- *PEP 659 implementation* talk by Mark Shannon, PyCon US 2022.

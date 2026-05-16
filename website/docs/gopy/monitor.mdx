@@ -1,37 +1,327 @@
 ---
-title: umonitor
-description: gopy's monitor subsystem. Mirrors CPython's design.
+title: Monitor
+description: PEP 669 sys.monitoring. Event taxonomy, tool registration, per-code instrumentation, and the fire path that drives debugger and profiler callbacks.
 ---
 
-# umonitor
+# Monitor
 
-This page describes how gopy implements **monitor**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/monitor`](../cpython/monitor).
+PEP 669 replaced the legacy `sys.settrace` and `sys.setprofile`
+hooks with a single low-overhead event-monitoring API. Tools (a
+debugger, a profiler, a coverage reporter) register for the events
+they care about, and the interpreter only pays the dispatch cost for
+events that have a registered tool. The mechanism is precise (every
+event has well-defined semantics), composable (up to six tools may
+be active at once), and cheap (events with no listeners cost
+nothing).
 
-## Source map
+The gopy port is in `monitor/`.
 
-The Go code lives at the module root in flat packages.
+## Where the code lives
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+| File                    | Role                                                                          | CPython counterpart                              |
+| ----------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------ |
+| `monitor/events.go`     | The `Event` enum and the `EventSet` bitmask.                                  | `Include/cpython/monitoring.h`                   |
+| `monitor/tables.go`     | Tool registry tables and event-to-tool bitmaps.                               | `Python/instrumentation.c` global tables         |
+| `monitor/tools.go`      | Tool-ID constants and tool-vs-tool composition rules.                         | `Include/internal/pycore_instruments.h`          |
+| `monitor/install.go`    | Tool registration. Stamps instrumented opcodes into code objects.             | `Python/instrumentation.c install_instrumentation` |
+| `monitor/state.go`      | Per-code and per-interpreter monitoring state.                                | `Python/instrumentation.c monitoring state`      |
+| `monitor/local.go`      | Local-event tables on `CoMonitoringData`.                                     | `Include/internal/pycore_code.h`                 |
+| `monitor/line.go`       | Line-event tracking and `INSTRUMENTED_LINE` handling.                         | `Python/instrumentation.c line events`           |
+| `monitor/fire.go`       | The `Fire*` entry points called from instrumented arms in the VM.             | `Python/instrumentation.c PyMonitoring_Fire*`    |
+| `monitor/interp.go`     | Per-interpreter `InterpState` allocator and accessor.                         | `Python/instrumentation.c`                       |
+| `monitor/sysmonitoring.go` | Glue for the `sys.monitoring` Python module.                              | `Python/sysmodule.c sys.monitoring`              |
+| `monitor/sentinel.go`   | The `DISABLE` sentinel and tool-disable bookkeeping.                          | `Python/instrumentation.c sentinel`              |
 
-## Differences from CPython
+## The event taxonomy
+
+PEP 669 defines nineteen events. The first eleven are *local*: they
+fire from a specific bytecode in a specific code object. The next
+five fire on exception flow. The last three fire on C-level
+transitions.
+
+```go
+// monitor/events.go:L21 Event
+type Event uint8
+
+const (
+    EventPyStart Event = iota  // function entry
+    EventPyResume              // function resume after a yield
+    EventPyReturn              // function return
+    EventPyYield               // function yield
+    EventCall                  // any callable invocation
+    EventLine                  // a new line is executed
+    EventInstruction           // any instruction (high overhead)
+    EventJump                  // a conditional or unconditional jump
+    EventBranchLeft            // taken branch
+    EventBranchRight           // not-taken branch
+    EventStopIteration         // StopIteration raised
+    // ungrouped events
+    EventRaise                 // exception raised
+    EventExceptionHandled      // exception caught
+    EventPyUnwind              // frame unwound by exception
+    EventPyThrow               // generator.throw entry
+    EventReraise               // re-raise from a bare raise
+    // C-level events
+    EventCReturn               // C function return
+    EventCRaise                // C function raise
+    EventBranch                // deprecated combined branch event
+)
+
+const (
+    LocalEvents      = 11
+    UngroupedEvents  = 16
+    Events           = 19
+)
+```
+
+The `LocalEvents` boundary matters: only the first eleven events
+get per-instruction bitmaps on the code object. The other events
+have no per-instruction state because they fire from runtime
+transitions, not from instrumented bytecode.
+
+## EventSet
+
+An `EventSet` is a packed bitmask of events. Tools combine the
+events they want with bitwise-or; the interpreter checks whether the
+current event is in a tool's set with bitwise-and.
+
+```go
+// monitor/events.go:L86 EventSet
+type EventSet uint32
+
+func (s EventSet) Has(ev Event) bool
+func (s EventSet) With(ev Event) EventSet
+func (s EventSet) Without(ev Event) EventSet
+```
+
+`EventSet` is `uint32`; nineteen events fit comfortably.
+
+## Tools
+
+Up to six tools may be active concurrently. Each tool is identified
+by an integer in `[0, 6)`. The tool registers a callback for each
+event it cares about; callbacks may return the `DISABLE` sentinel
+to suppress the tool from firing on the same code location again.
+
+```go
+// monitor/tools.go ToolID
+type ToolID uint8
+
+const (
+    DebuggerTool  ToolID = 0
+    CoverageTool  ToolID = 1
+    ProfilerTool  ToolID = 2
+    BranchTool    ToolID = 3
+    OptDebugTool  ToolID = 4
+    UserTool      ToolID = 5
+)
+```
+
+The IDs are documented for convention, not enforced; a tool may use
+any free slot. CPython reserves IDs 0 through 4 for known tools and
+leaves 5 for user code.
+
+## Tool composition
+
+Multiple tools may listen to the same event. The interpreter fires
+the event for each registered tool in turn. The order is fixed (by
+tool ID, lowest first) so that behaviour is deterministic.
+
+A callback may return `DISABLE` to opt out of further callbacks
+*for that specific code location*. The DISABLE map is per-tool and
+per-code; it does not unregister the tool globally.
+
+```go
+// monitor/sentinel.go DisableSentinel
+var DisableSentinel objects.Object
+```
+
+## State
+
+Each interpreter has a `monitor.InterpState`. Each code object has
+a `CoMonitoringData` once instrumentation has touched it.
+
+```go
+// monitor/state.go:L26 LocalMonitors
+type LocalMonitors struct {
+    Tools [LocalEvents]uint8  // tool bitmap per local event
+}
+
+// monitor/state.go:L36 GlobalMonitors
+type GlobalMonitors struct {
+    Tools [UngroupedEvents]uint8
+}
+
+// monitor/state.go:L72 CoMonitoringData
+type CoMonitoringData struct {
+    LocalMonitors        LocalMonitors
+    ActiveMonitors       LocalMonitors
+    Tools                []uint8  // per-instruction tool bitmap
+    ToolVersions         []uint32
+    Lines                []int32
+    LineTools            []uint8
+    PerInstructionOpcodes []uint8
+    PerInstructionTools  []uint8
+}
+```
+
+`LocalMonitors` holds the per-event tool bitmap the user registered.
+`ActiveMonitors` holds the bitmap that is currently *instrumented*
+into the code; it may lag behind `LocalMonitors` until the next
+quicken pass propagates the change.
+
+`Tools` is a per-instruction tool bitmap: the bits set say which
+tools are listening for any event at that instruction. The eval
+loop reads the bitmap during instruction fetch; if any bit is set
+for an instrumented opcode, the instrumented arm runs.
+
+`Lines` and `LineTools` are the line-event tables. They map
+instruction offsets to line numbers and to the tool bitmap for the
+`EventLine` event.
+
+`PerInstructionOpcodes` saves the original opcodes that were
+replaced by `INSTRUMENTED_*` variants, so deinstrumentation can put
+them back.
+
+## Installing instrumentation
+
+When a tool registers for an event, `Install` walks the affected
+code objects and replaces the relevant opcodes with their
+instrumented variants. The replacement is opcode-by-opcode: every
+`CALL` becomes `INSTRUMENTED_CALL` when any tool listens for
+`EventCall`; every line boundary gets an `INSTRUMENTED_LINE`
+prologue when any tool listens for `EventLine`.
+
+```go
+// monitor/install.go Install
+func Install(interp *state.Interpreter, tool ToolID, ev Event, callback objects.Object) error
+```
+
+The installation pass touches every code object the interpreter can
+reach: modules, classes, functions, frames currently on the stack.
+The pass is cheap once cold code is identified, but it is not free;
+PEP 669 bounds the cost by amortising it over the number of
+instrumented sites.
+
+## The fire path
+
+Instrumented arms in the VM call into `Fire` to dispatch the event
+through registered callbacks.
+
+```go
+// monitor/fire.go (*InterpState).Fire
+func (m *InterpState) Fire(t *state.Thread, code *objects.Code, ev Event,
+    ip uint32, args ...objects.Object) error
+```
+
+`Fire` iterates over the tools registered for `ev`, calls each
+callback with the standard argument layout (code, offset, plus
+event-specific extras), and respects the `DISABLE` sentinel.
+
+The argument layout per event:
+
+- `EventPyStart`, `EventPyResume`: `(code, offset)`.
+- `EventPyReturn`, `EventPyYield`: `(code, offset, return_value)`.
+- `EventCall`: `(code, offset, callable, arg0_or_self)`.
+- `EventLine`: `(code, line)`.
+- `EventInstruction`: `(code, offset)`.
+- `EventJump`, `EventBranchLeft`, `EventBranchRight`: `(code, offset, target_offset)`.
+- `EventStopIteration`: `(code, offset, exception)`.
+- `EventRaise`, `EventReraise`, `EventExceptionHandled`, `EventPyUnwind`,
+  `EventPyThrow`: `(code, offset, exception)`.
+- `EventCReturn`, `EventCRaise`: `(code, offset, callable, return_or_exc)`.
+
+## Line events
+
+Line events are the trickiest. A line in the source can correspond
+to several instructions; the instrumentation only wants to fire
+*once* per line, on the first instruction of that line. The line
+table (built by the compiler, see [Compile](./compile)) is the
+source of truth.
+
+The instrumentation pre-computes a per-instruction `LineTools`
+bitmap. Each instruction records the tool bitmap for the *first*
+instruction of its source line, or zero for instructions that are
+not first-on-line. `INSTRUMENTED_LINE` fires based on this bitmap.
+
+The pre-computation runs once per code object; line-event firing is
+a bitmap test and a function call.
+
+## Tool versions
+
+Each tool has a per-event *version* that increments any time the
+tool changes its callback or its event mask. The version is stamped
+into the per-instruction tool bitmap so that stale instrumentation
+gets noticed: when the bitmap version does not match the tool
+version, the instrumentation is recomputed.
+
+The mechanism is the same idea as the type version in
+[Specializer](./specializer): a cheap sanity check that catches
+mutations between the install pass and the fire pass.
+
+## Interaction with the VM
+
+The eval loop has one branch in the instruction fetch:
 
 ```
-Notes on places where gopy intentionally diverges from CPython.
+op := code[ip]
+if isInstrumented(op) {
+    fireInstrumentedEvents(...)
+    op = code[ip] // re-fetch, since fireInstrumented may have rewritten
+}
+dispatch(op, oparg)
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+`isInstrumented` is a cheap range check (instrumented opcodes have a
+contiguous opcode range). When the check is false the dispatch
+proceeds normally and the cost of monitoring is zero. When true,
+the instrumented arm fires events, then re-fetches the opcode so
+that any rewrite (a callback that installed new instrumentation, or
+a DISABLE that deinstrumented this site) is honoured.
+
+## Interaction with the optimiser
+
+Tier-2 traces are *not* instrumented. When a tool registers for an
+event that would affect bytecode that is currently in a trace, the
+optimiser invalidates the trace. The next tier-1 dispatch will run
+the (now instrumented) bytecode directly; tier-2 may re-project the
+trace later if it warms up again, but the projection will skip the
+instrumented opcodes.
+
+The invalidation goes through the watcher mechanism described in
+[Optimizer](./optimizer).
+
+## sys.monitoring
+
+The user-facing API is `sys.monitoring`. The implementation is in
+`monitor/sysmonitoring.go`; it exports the functions and constants
+PEP 669 specifies:
+
+- `sys.monitoring.use_tool_id(tool_id, name)`,
+- `sys.monitoring.free_tool_id(tool_id)`,
+- `sys.monitoring.register_callback(tool_id, event, callback)`,
+- `sys.monitoring.set_events(tool_id, event_mask)`,
+- `sys.monitoring.set_local_events(tool_id, code, event_mask)`,
+- `sys.monitoring.get_events(tool_id)`,
+- `sys.monitoring.restart_events()`,
+- `sys.monitoring.events.PY_START`, ..., `sys.monitoring.events.NO_EVENTS`,
+- `sys.monitoring.DISABLE`,
+- `sys.monitoring.MISSING`.
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+The state structures and the event taxonomy are ported in full.
+Tool registration, install, and DISABLE bookkeeping are in place.
+The fire path is wired for the common events and stubbed for the
+rarer ones; full coverage tracks `Lib/test/test_monitoring.py` as
+the gate. Line events compile but the line-table integration uses a
+simplified path until [Compile](./compile)'s assembler emits the
+fully-PEP-657-compliant tables.
 
-## Cross reference
+## Reference
 
-* CPython companion: [cpython/monitor](../cpython/monitor).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+- Port source: `monitor/`.
+- CPython source: `Python/instrumentation.c`, `Python/sysmodule.c`
+  (sys.monitoring), `Include/cpython/monitoring.h`,
+  `Include/internal/pycore_instruments.h`.
+- PEP 669, *Low Impact Monitoring for CPython*.

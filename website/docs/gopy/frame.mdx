@@ -1,0 +1,313 @@
+---
+title: Frame
+description: Activation records. The packed locals-plus stack, the frame chunk allocator, and the suspend/resume protocol for generators.
+---
+
+# Frame
+
+A frame is the run-time state of one Python call. It holds the
+code object being executed, the operand stack, the fast locals, the
+cell and free variables, the instruction pointer, and a link to the
+caller. Frames are pushed when a call begins and popped when a call
+returns. The VM does not allocate them; it reads them off the
+thread's frame stack and walks the bytecode they point at. The
+gopy port lives in `frame/`.
+
+CPython packs all of this into `_PyInterpreterFrame`, defined in
+`Include/internal/pycore_frame.h`. The packing is aggressive: fast
+locals, cell variables, free variables, and the value stack share a
+single contiguous block called `localsplus`. gopy keeps the same
+layout for the same reasons: locality, easy `sizeof` computation,
+and direct compatibility with the cell-variable indexing the
+compiler emits.
+
+## Where the code lives
+
+| File              | Role                                                                                | CPython counterpart                            |
+| ----------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `frame/frame.go`  | The `Frame` struct, layout helpers, push/pop of the value stack, suspend/resume.    | `Include/internal/pycore_frame.h`, `Python/frame.c` |
+| `frame/chunk.go`  | The frame stack: a linked list of fixed-size chunks. Push and pop interpreter frames. | `Include/internal/pycore_pystate.h _PyStackChunk`, `Python/frame.c _PyThreadState_PushFrame` |
+
+The split mirrors CPython: the frame is the leaf object, the chunk
+is the arena. Both live in one Go package because they are
+inseparable.
+
+## The frame struct
+
+```go
+// frame/frame.go:L39 Frame
+type Frame struct {
+    Code       *objects.Code     // code object being executed
+    Globals    objects.Object    // function globals
+    Builtins   objects.Object    // builtins dict resolved at call time
+    Locals     objects.Object    // explicit locals dict, or nil for fast frames
+    Func       objects.Object    // the function object, or nil for module frames
+    Previous   *Frame            // caller frame; nil at module top
+    InstrPtr   uint32            // current instruction offset
+    PrevInstr  uint32            // last instruction offset, for traceback/lasti
+    StackTop   uint32            // index into LocalsPlus of the next free stack slot
+    LocalsPlus []stackref.Ref    // packed fast locals, cells, frees, value stack
+    Owner      OwnerKind         // who is responsible for freeing this frame
+}
+```
+
+The fields fall into three groups: bindings (code, globals,
+builtins, locals, func), bookkeeping (previous, instrptr, prevInstr),
+and storage (stacktop, localsplus). The first group is the
+*environment* the frame runs in; the second group is the *state* the
+loop mutates; the third is the *storage* the bytecode reads and
+writes.
+
+`stackref.Ref` is a wrapper type that lets gopy distinguish strong
+references (the stack owns the object) from borrows (the stack reads
+through a borrow that the caller holds). On CPython this distinction
+shows up as PEP 703's deferred refcount mechanism; on gopy it is a
+hint to the optimiser and the GC.
+
+## The localsplus layout
+
+`LocalsPlus` is a single slice. The compiler arranges all locals,
+cells, frees, and stack slots in a known order so the slice can be
+indexed directly by opcode operands.
+
+```
+[ 0                       .. nlocals                 )  fast locals
+[ nlocals                 .. nlocals + ncells        )  cell variables
+[ nlocals + ncells        .. nlocalsplus             )  free variables
+[ nlocalsplus             .. nlocalsplus + co_stacksize )  value stack
+```
+
+The boundaries are computed from the code object's `co_nlocals`,
+`co_ncellvars`, and `co_nfreevars`. The total size is fixed at
+compile time; `SizeFor` returns it.
+
+```go
+// frame/frame.go SizeFor
+func SizeFor(co *objects.Code) int
+```
+
+Fast-locals access is a direct slice index:
+
+```go
+// LOAD_FAST i
+e.push(f.LocalsPlus[i])
+
+// STORE_FAST i
+f.LocalsPlus[i] = e.pop()
+```
+
+Cell variables are *indirect*. Each cell slot in `LocalsPlus` holds
+a cell object; the cell object holds the value. `LOAD_DEREF` reads
+the cell, dereferences it, and pushes the inner value. `STORE_DEREF`
+mutates the cell in place. This is how closures share state between
+nested functions.
+
+Free variables are the same shape as cells, but they are copies of
+the enclosing scope's cell objects, not freshly allocated. They are
+populated by `MAKE_FUNCTION` when a function literal captures
+something from an enclosing scope.
+
+The value stack starts where the locals end. `StackTop` is the
+index of the next free slot, so `push` writes at
+`LocalsPlus[StackTop]` and increments, and `pop` decrements and
+reads. The bytecode is verified at compile time to never overflow
+`co_stacksize`, so the loop does not need to check.
+
+## The frame stack
+
+Frames are not heap-allocated individually. They live in fixed-size
+chunks that hang off the thread state.
+
+```go
+// frame/chunk.go:L28 FrameStack
+type FrameStack struct {
+    Current *Chunk           // chunk we are currently allocating from
+    Top     uintptr          // bump pointer into Current
+    chunks  []Chunk          // ring of allocated chunks
+}
+
+const ChunkSize = 32 // frames per chunk
+```
+
+Pushing a frame is a bump. If the bump pointer would walk off the
+end of `Current`, a new chunk is linked in.
+
+```go
+// frame/chunk.go:L43 (*FrameStack).Push
+func (s *FrameStack) Push(size uintptr) *Frame
+
+// frame/chunk.go:L58 (*FrameStack).Pop
+func (s *FrameStack) Pop()
+```
+
+`Push` returns a `*Frame` pointing into the chunk. The frame is not
+zeroed; the caller is expected to call `Init` immediately. `Pop`
+clears the strong references in the frame so the GC can collect them
+and walks the bump pointer back. If the bump would leave the
+current chunk empty, the previous chunk becomes current and the
+empty one is held for reuse.
+
+The arena strategy matches CPython's `_PyThreadState_AllocateFrame`
+and `_PyThreadState_PopFrame`. The Go implementation does not pool
+chunks across threads because Go's GC handles the per-goroutine case
+adequately; once a goroutine exits its chunks are reclaimed.
+
+## Frame initialisation
+
+`Init` sets the frame's fields from a code object, a function (or
+nil for module frames), and a parent frame. It does not populate
+fast locals; those are written by the call convention before
+`InstrPtr` advances past the prelude.
+
+```go
+// frame/frame.go:L159 (*Frame).Init
+func (f *Frame) Init(co *objects.Code, fn objects.Object, prev *Frame)
+```
+
+The `Owner` field is set during `Init` to one of:
+
+- `OwnedByEval`. Standard call. The eval loop will pop the frame
+  when `RETURN_VALUE` runs.
+- `OwnedByGenerator`. The frame is part of a generator object. The
+  loop suspends instead of popping.
+- `OwnedByThread`. The frame is the top of a thread. Used by the
+  REPL and module initialisation.
+- `OwnedByFrameObj`. A Python-level frame object (`f.frame` from
+  `sys._getframe`) keeps the underlying frame alive even after the
+  call returns. The frame is copied out to its own allocation and
+  the ownership transfers.
+- `OwnedByCstack`. Reserved for C extension entry frames.
+
+The owner kind drives the suspend/resume path and the GC root set.
+
+## Suspend and resume
+
+Generators and coroutines need to walk away from a frame mid-call
+and come back later. The mechanism is *detach* and *attach*, not
+push and pop.
+
+```go
+// frame/frame.go:L241 (*Frame).Suspend
+func (f *Frame) Suspend()
+
+// frame/frame.go:L247 (*Frame).Resume
+func (f *Frame) Resume(prev *Frame)
+```
+
+`Suspend` unlinks the frame from its parent and changes its owner to
+`OwnedByGenerator`. The generator object holds the frame pointer.
+`Resume` re-links the frame to the new caller (which is the
+generator's `__next__` or `send`'s eval frame, not the frame that
+originally created the generator) and resets the owner.
+
+The instruction pointer is *not* reset; it points at the instruction
+after the `YIELD_VALUE` that suspended the frame. The value stack
+is *not* cleared either; the operands the next instruction expects
+are still there. Suspend is cheap: an owner change and a pointer
+update.
+
+## Cells and closures
+
+The compiler decides at compile time which names need cells. A name
+needs a cell if (a) it is bound in this scope and (b) read from a
+nested scope. The compiler emits `MAKE_CELL` instructions in the
+function prelude to allocate cells for those names, and the function
+literal is built with a tuple of cell pointers for its free
+variables.
+
+`MAKE_CELL i` reads the value at `LocalsPlus[i]`, wraps it in a new
+cell, and stores the cell back at `LocalsPlus[i]`. From this point
+on, `LOAD_DEREF i` and `STORE_DEREF i` go through the cell.
+
+Free variables are populated from the function's `__closure__`
+tuple. When a nested function reads a free variable, the compiler
+emitted `LOAD_DEREF k` where `k` is the index into the free section
+of `LocalsPlus`. The cell at that index is the same cell object the
+enclosing scope wrote to, so the read sees the latest value.
+
+## The value stack
+
+The value stack is implicit in `LocalsPlus`, but the eval loop sees
+it through helpers:
+
+```go
+// vm/eval.go (*evalState).push
+func (e *evalState) push(r stackref.Ref)
+
+// vm/eval.go (*evalState).pop
+func (e *evalState) pop() stackref.Ref
+
+// vm/eval.go (*evalState).peek
+func (e *evalState) peek(depth int) stackref.Ref
+```
+
+`push` writes at `LocalsPlus[StackTop]` and increments; `pop`
+decrements and reads. `peek(0)` returns the top of stack;
+`peek(1)` returns the value below. The bytecode is verified at
+compile time to never underflow or overflow.
+
+The value stack is *not* cleared on suspend. When a generator
+yields it leaves the value stack in the state the next instruction
+expects on resume.
+
+## Thread state and frame state
+
+Each `*state.Thread` owns one `FrameStack`. The current frame is
+the top of the stack. `Eval` reads the current frame off the thread
+at entry, runs the loop, and writes the current frame back at exit
+(either pushed forward by a call or popped on return).
+
+```go
+// state/state.go:L117 Thread
+type Thread struct {
+    interp   *Interpreter
+    exc      atomic.Value
+    handled  atomic.Value
+    id       int
+    ctx      any
+    ctxVersion uint64
+    Frames   *FrameStack
+    ...
+}
+```
+
+The split between thread and frame stack exists so that GC-style
+scanning is possible: roots into Python objects can be enumerated by
+walking the chunks linked off `Thread.Frames`. The actual scanning
+is done by Go's runtime, but the layout makes it possible for the
+gopy GC adapter (when free-threading is enabled and biased reference
+counting is in scope) to walk the same lists.
+
+## Frame objects in Python
+
+Python code can introspect frames via `sys._getframe`,
+`inspect.currentframe`, and the `f.frame` attribute of generators
+and traceback objects. These return a *frame object*, a `PyObject`
+wrapper around the underlying frame. The wrapper is allocated
+lazily and shares storage with the underlying frame until the
+underlying frame would be reclaimed, at which point the wrapper
+copies the state it needs to stay alive.
+
+The Python type for frames is defined in `objects/frame_obj.go`
+(part of the [Objects](./objects) pillar). The wiring between a
+runtime frame and its Python-visible frame object lives in
+`frame/frame.go` as `FrameObj()` and is documented there.
+
+## Status
+
+Frame layout, push/pop, locals access, value stack operations,
+suspend/resume, and the frame stack arena are fully ported. The
+cell/free machinery is wired but exercised by relatively few tests
+until tier-1 specialisation lands more closure-using opcodes. The
+Python-visible frame object exists as a stub; `f.f_locals` returns
+a fresh snapshot on each access, `f.f_back` walks the linked list,
+and `f.f_lineno` reads the location table.
+
+## Reference
+
+- Port source: `frame/`.
+- CPython source: `Include/internal/pycore_frame.h`, `Python/frame.c`.
+- PEP 626, *Precise line numbers for debugging*.
+- PEP 657, *Include Fine-Grained Error Locations in Tracebacks*.
+- PEP 703, *Making the Global Interpreter Lock Optional in CPython* (for
+  the deferred-refcount layer that motivates `stackref.Ref`).

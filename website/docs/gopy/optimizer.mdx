@@ -1,0 +1,368 @@
+---
+title: Optimizer
+description: PEP 744 tier-2. Trace projection, abstract interpretation, the uop dispatcher, executor lifecycle, and the watcher-driven invalidation network.
+---
+
+# Optimizer
+
+Tier-1 specialisation rewrites individual opcodes in place. Tier-2
+goes further: it lifts hot loops out of the bytecode entirely,
+projects them into a linear trace of *microoperations*, runs the
+trace through abstract interpretation to eliminate redundant guards
+and unbox known integers, compiles the result into an `Executor`,
+and installs the executor in a side table next to the code object.
+The eval loop notices the installed executor on the next dispatch
+of the loop's back-edge and jumps into the executor instead of
+walking the bytecode.
+
+PEP 744 describes the design. The CPython implementation lives in
+`Python/optimizer.c` and `Python/optimizer_analysis.c`. The gopy
+port is in `optimizer/`.
+
+## Where the code lives
+
+| File                              | Role                                                                                | CPython counterpart                                  |
+| --------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `optimizer/optimize.go`           | Entry point. `Optimize` runs projection, analysis, and installation.                | `Python/optimizer.c _PyOptimizer_Optimize`           |
+| `optimizer/trace.go`              | Projects bytecode into a `[]UOPInstruction` trace.                                  | `Python/optimizer.c translate_bytecode_to_trace`     |
+| `optimizer/analysis.go`           | Abstract interpreter that simplifies the trace.                                     | `Python/optimizer_analysis.c`                        |
+| `optimizer/types.go`              | Trace, executor, and uop instruction structs.                                       | `Include/internal/pycore_optimizer.h`                |
+| `optimizer/executor.go`           | Executor lifecycle: allocate, link, sweep.                                          | `optimizer.c make_executor_from_uops`, related       |
+| `optimizer/uops.go`               | Tier-2 dispatch driver. The uop interpreter.                                        | `Python/ceval.c enter_tier_two`                      |
+| `optimizer/uops_impl.go`          | Hand-ported uop bodies.                                                             | `Python/executor_cases.c.h`                          |
+| `optimizer/uops_stubs_gen.go`     | Auto-generated stubs that deopt for un-ported uops.                                 | generated                                            |
+| `optimizer/uops_dispatch_gen.go`  | Auto-generated dispatch switch.                                                     | generated                                            |
+| `optimizer/uop_ids_gen.go`        | Auto-generated uop ID constants.                                                    | generated                                            |
+| `optimizer/uop_meta_gen.go`       | Auto-generated uop metadata (stack effect, side-exit flags).                        | generated                                            |
+| `optimizer/side_table.go`         | Per-code map from instruction offset to executor.                                   | `Include/cpython/code.h` `co_executors`              |
+| `optimizer/invalidate.go`         | Invalidate executors when a dependency mutates.                                     | `optimizer.c invalidate_executors`                   |
+| `optimizer/watcher.go`            | Dict and type watchers that fire invalidation.                                      | `Python/optimizer.c watchers`                        |
+| `optimizer/bloom.go`              | Bloom filter of trace dependencies.                                                 | `optimizer.c bloom_filter`                           |
+| `optimizer/pyobject.go`           | Glue to expose executors as Python objects.                                         | `optimizer.c executor_object`                        |
+
+The generated files (`*_gen.go`) come from the same case-generator
+input CPython uses. Regeneration is part of the gopy build, not a
+hand-edit.
+
+## The optimisation pipeline
+
+`Optimize` is the entry point. The VM calls it on `JUMP_BACKWARD`
+once the back-edge has accumulated enough hits.
+
+```go
+// optimizer/optimize.go:L30 Optimize
+func Optimize(interp *state.Interpreter, t *state.Thread, f *frame.Frame, target uint32) (*Executor, error)
+```
+
+The function runs three stages:
+
+1. **Project.** Walk forward from `target` through the bytecode,
+   converting each tier-1 opcode into one or more uops. Follow
+   straight-line control flow; on a branch, choose the most-likely
+   side based on profile data and emit a *side exit* for the other
+   side. Stop on `RETURN_VALUE`, on an unsupported opcode, when the
+   trace exceeds `UOPMaxTraceLength`, or when the trace would loop
+   back on itself (re-emit the trace head as a jump-to-top).
+
+2. **Analyse.** Run the trace through an abstract interpreter. The
+   interpreter tracks a symbolic type for each stack slot. When a
+   guard's input is known to satisfy the guard already, the guard is
+   removed. When an int-add's operands are known small ints, the
+   uop is rewritten to a no-overflow variant. Dead stores are
+   removed. Constant folding lifts immediate values into the trace.
+
+3. **Install.** Allocate an `Executor`, copy in the optimised
+   trace, link it into the per-code side table at the target
+   offset, and stamp the tier-1 opcode at the target to
+   `ENTER_EXECUTOR`. The executor's bloom filter is populated from
+   the trace's dependencies (types, dicts, functions, code objects);
+   any watcher that fires for one of those dependencies will
+   invalidate the executor.
+
+If any stage fails (trace too short, projection found an
+unsupported opcode, analysis decided the result is not worth the
+work), `Optimize` returns nil and the tier-1 opcode is left alone.
+The next call site will retry after the warmup counter rearms.
+
+## Trace projection
+
+`TranslateBytecodeToTrace` walks bytecode and emits uops.
+
+```go
+// optimizer/trace.go TranslateBytecodeToTrace
+func TranslateBytecodeToTrace(co *objects.Code, start uint32, dst []UOPInstruction) (n int, err error)
+```
+
+Each tier-1 opcode maps to a fixed sequence of uops. The mapping is
+metadata-driven, lifted from the same case-generator output. For
+example, `LOAD_ATTR_INSTANCE_VALUE` translates to:
+
+```
+_GUARD_TYPE_VERSION  version
+_CHECK_MANAGED_OBJECT_HAS_VALUES
+_LOAD_ATTR_INSTANCE_VALUE  offset
+```
+
+A `LOAD_FAST i` is one uop:
+
+```
+_LOAD_FAST  i
+```
+
+A `JUMP_BACKWARD` to the trace head is:
+
+```
+_JUMP_TO_TOP
+```
+
+Side exits are explicit. A `POP_JUMP_IF_FALSE` becomes:
+
+```
+_GUARD_IS_TRUE   side_exit=K
+```
+
+Where `side_exit=K` records the bytecode offset to deopt to if the
+guard fires. The side exits are stored in the executor's `Exits`
+array; the uop has a small index into it.
+
+The projection respects loop boundaries. When the projector sees a
+backward jump to a target it has already emitted, it emits
+`_JUMP_TO_TOP` and finishes. The trace is a closed loop in this
+case; the executor will execute it repeatedly until a side exit
+fires.
+
+## Abstract analysis
+
+`Analyse` is an abstract interpreter over the uop instruction set.
+It maintains a stack of *symbolic values*; each symbolic value is a
+type, a constant, or an unknown. The interpreter steps through the
+trace once, updating the stack as each uop fires.
+
+```go
+// optimizer/analysis.go Analyse
+func Analyse(trace []UOPInstruction) (n int, err error)
+```
+
+The analysis does:
+
+- **Type propagation.** A `_LOAD_FAST` of a slot last written by a
+  uop whose result type is known propagates the type forward.
+- **Guard elimination.** A `_GUARD_TYPE_VERSION` for a type the
+  analyser already knows is redundant, and the uop is rewritten to
+  `_NOP`.
+- **Constant folding.** A `_LOAD_CONST_INLINE` followed by uops
+  whose operands are all immediate values is folded into a single
+  immediate uop.
+- **Unboxing.** Integer additions where both operands are guaranteed
+  small ints become `_BINARY_OP_ADD_INT_UNBOXED`, skipping the
+  overflow check.
+
+The point of the analysis is to delete work that the trace would
+have done at runtime, not to invent new code. The trace shape
+(linear, with explicit side exits) is preserved.
+
+## The uop instruction
+
+```go
+// optimizer/types.go:L111 UOPInstruction
+type UOPInstruction struct {
+    OpcodeAndFormat uint16  // 15-bit opcode, 1-bit format flag
+    Oparg           uint16  // immediate
+    Target          uint32  // tier-1 bytecode offset or jump target
+    Operand0        uint64  // wide cache word
+    Operand1        uint64  // second wide cache word
+}
+```
+
+The opcode is one of the values in `uop_ids_gen.go`. The metadata
+for each opcode (stack effect, whether it has a side exit, whether
+it touches the eval breaker) lives in `uop_meta_gen.go` and is read
+by the dispatcher and the analyser.
+
+Constants for size and chain depth:
+
+```go
+// optimizer/types.go:L22
+const UOPMaxTraceLength = 800
+
+// optimizer/types.go:L52
+const MaxChainDepth = 4
+
+// optimizer/types.go:L65
+const ExecutorDeleteListMax = 100
+```
+
+`UOPMaxTraceLength` is a hard cap on trace size. `MaxChainDepth` is
+the maximum number of side-exits-to-side-exits before the next
+side-exit must lead to forward progress (a different trace head,
+not a re-entry into one already in the chain). `ExecutorDeleteListMax`
+is the cap on pending-deletion executors before a sweep is forced.
+
+## The executor
+
+```go
+// optimizer/types.go:L242 Executor
+type Executor struct {
+    Trace      []UOPInstruction
+    Exits      []ExitData
+    CodeSize   uint32
+    ExitCount  uint16
+    VMData     ExecutorVMData
+}
+```
+
+The trace is the optimised uop sequence. The exits are an indexed
+array of side-exit metadata: tier-1 bytecode offset to deopt to,
+side-exit counter, and the executor (if any) that the side exit
+should chain into. `VMData` holds the linking bookkeeping: bloom
+filter of dependencies, validity bit, chain depth, predecessor
+executor.
+
+The executor is allocated by `AllocateExecutor` and initialised by
+`ExecutorInit`. It is linked into the side table by `linkExecutor`.
+
+```go
+// optimizer/executor.go:L50 AllocateExecutor
+func AllocateExecutor(traceLen, exitCount int) *Executor
+
+// optimizer/executor.go:L65 ExecutorInit
+func ExecutorInit(e *Executor, trace []UOPInstruction, exits []ExitData)
+
+// optimizer/executor.go:L77 linkExecutor
+func linkExecutor(interp *state.Interpreter, e *Executor)
+```
+
+Linking adds the executor to the interpreter's list of live
+executors. Unlinking happens on invalidation; the unlinked executor
+is moved to the deletion list and freed during the next sweep.
+
+## The side table
+
+The side table is a per-code array indexed by instruction offset.
+Most slots are empty; the slots at trace heads hold pointers to
+executors.
+
+```go
+// optimizer/types.go:L264 ExecutorArray
+type ExecutorArray struct {
+    co        *objects.Code
+    executors []*Executor
+}
+```
+
+When tier-1 reaches an `ENTER_EXECUTOR` opcode the offset is decoded
+into a side-table index, the executor is read out, and tier-2
+dispatch begins.
+
+## The uop dispatcher
+
+`RunExecutor` is the tier-2 entry point.
+
+```go
+// optimizer/uops.go:L50 Tier2State
+type Tier2State struct {
+    Interp   *state.Interpreter
+    Thread   *state.Thread
+    Frame    *frame.Frame
+    Executor *Executor
+    NextUop  uint32
+    Oparg    uint32
+}
+
+// optimizer/uops.go:L70 (*Tier2State).Run
+func (s *Tier2State) Run() (status, error)
+```
+
+The dispatch loop is structurally the same as tier-1 (fetch,
+dispatch, advance) but the instruction stream is the trace, not the
+bytecode. The handlers are uop bodies, not opcode bodies. Each uop
+returns one of: ok (continue), exit-trace (clean exit to tier-1),
+side-exit (deopt to the indicated bytecode offset), deopt (back to
+tier-1 entirely, the executor is invalid).
+
+The dispatch is generated. The generator produces a Go `switch`
+that maps `OpcodeAndFormat & 0x7FFF` to the appropriate uop method.
+
+## Hand-ported uops
+
+Fourteen uops are hand-ported today, covering the trace plumbing and
+the locals/stack primitives:
+
+- Control: `_NOP`, `_START_EXECUTOR`, `_EXIT_TRACE`, `_JUMP_TO_TOP`,
+  `_SET_IP`, `_CHECK_VALIDITY`.
+- Stack: `_POP_TOP`, `_PUSH_NULL`, `_COPY`, `_SWAP`.
+- Locals: `_LOAD_FAST`, `_LOAD_FAST_BORROW`, `_STORE_FAST`.
+- Warming: `_MAKE_WARM`.
+
+Everything else is a generated stub that returns `StatusDeopt`. The
+deopt path translates the current trace position back to a tier-1
+bytecode offset and resumes the tier-1 loop at that offset. This
+keeps the system correct end-to-end even with a sparse uop catalogue.
+
+## Watchers and invalidation
+
+Most uops depend on assumptions: type X has version Y, dict Z has
+version W, function F's code object has not been replaced. The
+optimiser records these assumptions in a bloom filter on the
+executor.
+
+When a runtime event would break one of those assumptions (a type
+mutation, a global rebinding, a `__code__` swap), the corresponding
+watcher fires. The watcher walks the live executors, checks the
+bloom filter against the broken assumption, and invalidates the
+executors that may have depended on it.
+
+```go
+// optimizer/invalidate.go InvalidateExecutorsTouchingType
+func InvalidateExecutorsTouchingType(interp *state.Interpreter, typeID uintptr)
+
+// optimizer/invalidate.go InvalidateExecutorsTouchingDict
+func InvalidateExecutorsTouchingDict(interp *state.Interpreter, dict objects.Object)
+```
+
+Invalidated executors are not freed immediately. Their validity bit
+is cleared; the next tier-2 dispatch through them notices and exits
+the trace. They are then moved to a pending-deletion list and freed
+in a sweep after the next eval-breaker poll.
+
+The bloom filter is intentionally lossy. A spurious invalidation
+(the filter says yes but the trace did not actually depend on the
+broken assumption) is correct, just wasteful. Tuning the filter is
+a separate optimisation knob.
+
+## Chain depth and side exits
+
+When a side exit fires, the trace ends and tier-1 resumes. If the
+target of the side exit is itself a hot trace head, the tier-1 loop
+will eventually enter another executor at that offset. The chain
+length is tracked on the executor; once `MaxChainDepth` is reached,
+further side exits must lead to forward progress (a target that is
+*not* already in the chain) or the chain unwinds.
+
+The mechanism prevents pathological loops in chained traces from
+ping-ponging between two executors forever.
+
+## Status
+
+The optimiser pipeline is wired end-to-end: projection, analysis,
+executor allocation, side-table installation, dispatch, invalidation.
+Only fourteen uops are hand-ported, so most traces deopt within a
+handful of uops. The pipeline being complete means the rest of the
+work is mechanical: porting more uops one at a time, gated by
+behavioural tests. The PEP 744 design holds without further
+plumbing changes.
+
+The optimiser is disabled by default in some test gates because a
+sparse uop catalogue exercises the deopt path much more than a
+mature one would; the deopt path itself is correct but slower than
+running tier-1 directly when most uops deopt immediately. Once the
+catalogue covers the hot opcodes the gate flips on.
+
+## Reference
+
+- Port source: `optimizer/`.
+- CPython source: `Python/optimizer.c`, `Python/optimizer_analysis.c`,
+  `Python/executor_cases.c.h`, `Include/internal/pycore_optimizer.h`.
+- PEP 744, *JIT Compilation*.
+- PEP 659, *Specializing Adaptive Interpreter* (the substrate tier-2
+  builds on).

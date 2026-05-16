@@ -58,12 +58,13 @@ const sidebars = {
       collapsed: false,
       items: [
         'gopy/vm',
-        'gopy/frames',
+        'gopy/frame',
         'gopy/specializer',
-        'gopy/tier2',
+        'gopy/optimizer',
         'gopy/monitor',
         'gopy/gil',
         'gopy/exceptions',
+        'gopy/generators',
       ],
     },
     {
@@ -76,7 +77,6 @@ const sidebars = {
         'gopy/types',
         'gopy/gc',
         'gopy/imports',
-        'gopy/generators',
       ],
     },
   ],

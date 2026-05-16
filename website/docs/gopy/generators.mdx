@@ -1,37 +1,291 @@
 ---
-title: ugenerators
-description: gopy's generators subsystem. Mirrors CPython's design.
+title: Generators
+description: Suspend and resume. Generators, coroutines, async generators, and the YIELD_VALUE / RESUME / SEND / THROW protocol that ties them together.
 ---
 
-# ugenerators
+# Generators
 
-This page describes how gopy implements **generators**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/generators`](../cpython/generators).
+A generator is a function whose execution can be paused and
+resumed. The first call to `gen()` does not run the body; it
+constructs a generator object. Each call to `next(gen)` runs the
+body until it hits `yield`, returns the yielded value, and parks
+the frame. The next `next(gen)` resumes the frame on the
+instruction after `yield`.
 
-## Source map
+The mechanism extends to coroutines (`async def`) and async
+generators (`async def` with `yield`). All three share the same
+implementation: a frame whose owner is the generator object, and a
+set of opcodes (`YIELD_VALUE`, `RESUME`, `SEND`, `RETURN_GENERATOR`,
+`THROW`) that move control across the suspend boundary.
 
-The Go code lives at the module root in flat packages.
+CPython's generator machinery lives in `Objects/genobject.c`. The
+gopy ports live in `objects/generator.go`, `objects/coroutine.go`,
+and `objects/async_generator.go`. The eval-loop arms are in
+`vm/eval_gen.go`. The frame-side support is in [Frame](./frame).
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+## Where the code lives
 
-## Differences from CPython
+| File                            | Role                                                                            | CPython counterpart                          |
+| ------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------- |
+| `objects/generator.go`          | `Generator` type. send, throw, close, __iter__, __next__.                       | `Objects/genobject.c gen_*`                  |
+| `objects/coroutine.go`          | `Coroutine` type. send, throw, close, __await__.                                | `Objects/genobject.c coro_*`                 |
+| `objects/async_generator.go`    | `AsyncGenerator` type. asend, athrow, aclose, __aiter__, __anext__.             | `Objects/genobject.c async_gen_*`            |
+| `vm/eval_gen.go`                | `YIELD_VALUE`, `RETURN_GENERATOR`, `SEND`, `THROW`, `RESUME` arms.              | `Python/bytecodes.c generator section`       |
+| `frame/frame.go`                | `Suspend` and `Resume` on the frame.                                            | `Python/frame.c gen frames`                  |
+
+## RETURN_GENERATOR
+
+When the compiler sees a function with a `yield`, it emits the
+following on entry:
 
 ```
-Notes on places where gopy intentionally diverges from CPython.
+RETURN_GENERATOR
+RESUME 1
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+`RETURN_GENERATOR` is the first instruction the function runs. Its
+job is:
+
+1. Allocate a `Generator` object.
+2. Move the current frame from the eval frame stack into the
+   generator's frame slot.
+3. Set the frame's `Owner` to `OwnedByGenerator`.
+4. Return the generator object to the caller.
+
+```go
+// vm/eval_gen.go (*evalState).handleReturnGenerator
+func (e *evalState) handleReturnGenerator() (status, error)
+```
+
+After `RETURN_GENERATOR` the caller's frame holds the new generator
+object. The generator's frame is dormant: instruction pointer
+points at the `RESUME 1` that comes next, value stack is empty, no
+work has run yet.
+
+## RESUME
+
+`RESUME` is the function-entry instruction. The oparg indicates
+*why* the resume is happening:
+
+- `0`: regular function entry. Just polls the eval breaker.
+- `1`: generator entry. Polls the breaker; on first `send`, accepts
+  the sent value.
+- `2`: coroutine entry. Same as 1 but for coroutines.
+- `3`: async generator entry. Same as 1 but for async generators.
+
+```go
+// vm/eval_resume.go (*evalState).handleResume
+func (e *evalState) handleResume(oparg uint32) (status, error)
+```
+
+For generator entry, `RESUME` also pops the sent value (or
+`None` on the first iteration) and pushes it onto the value stack
+for `YIELD_VALUE`'s return to consume.
+
+## YIELD_VALUE
+
+`YIELD_VALUE` is the suspend opcode. It does:
+
+1. Pop the value to yield off the stack.
+2. Save the value to the generator object's `sent_or_yielded` slot.
+3. Detach the current frame from the eval stack (`Suspend`).
+4. Set the generator's state to `Suspended`.
+5. Return `statusYielded` to the eval loop, which returns the
+   yielded value to the caller.
+
+```go
+// vm/eval_gen.go (*evalState).handleYield
+func (e *evalState) handleYield() (status, error)
+```
+
+When the generator resumes (on the next `send`), execution picks up
+on the instruction after `YIELD_VALUE`. The value stack is exactly
+as it was at suspend; the receive value is on top.
+
+The receive value comes from the next `gen.send(x)`. `x` is pushed
+onto the value stack before the loop resumes; on the resume, the
+instruction after `YIELD_VALUE` reads it.
+
+## SEND
+
+`SEND` is the opcode emitted for `yield from` and `await`. It
+drives a sub-generator or awaitable: each value yielded by the
+sub-generator is yielded by the outer generator; the value sent to
+the outer generator is sent to the sub-generator.
+
+```go
+// vm/eval_gen.go (*evalState).handleSend
+func (e *evalState) handleSend(jump uint32) (status, error)
+```
+
+The arm pops the sub-iterator and the value to send off the stack,
+calls `send` on the sub-iterator, and either:
+
+- Pushes the yielded value and `yield`s it (continues at the
+  instruction after `SEND`); or
+- The sub-iterator raised `StopIteration`: push the
+  `StopIteration.value` and jump past the `yield from`/`await`.
+
+The jump offset is the second oparg form; CPython encodes it as a
+relative jump target the assembler computes.
+
+## THROW
+
+`THROW` injects an exception into a suspended generator. The
+generator's frame is resumed, but instead of `RESUME` pushing the
+sent value, it raises the injected exception immediately.
+
+```go
+// objects/generator.go (*Generator).Throw
+func (g *Generator) Throw(t *state.Thread, exc objects.Object) (objects.Object, error)
+```
+
+The semantics: the exception is raised at the point where the
+generator was suspended. The generator's `try/except` machinery
+sees it normally and can catch it or let it propagate.
+
+## CLOSE
+
+`close()` throws `GeneratorExit` into the generator. If the
+generator catches and re-yields, `close` raises `RuntimeError`. If
+the generator catches and returns (or simply unwinds), `close`
+returns `None`.
+
+```go
+// objects/generator.go (*Generator).Close
+func (g *Generator) Close(t *state.Thread) error
+```
+
+`GeneratorExit` is a subclass of `BaseException`, not `Exception`,
+so a bare `except:` does *not* catch it by default. Generators are
+expected to clean up `try/finally` blocks on `close`.
+
+## Coroutines
+
+A coroutine is a generator that uses `await` instead of `yield`.
+The two are nearly identical at the bytecode level: `await x`
+compiles to `SEND(x.__await__())`, which behaves like
+`yield from x.__await__()`. The difference is mostly typing:
+`coroutine.send` and `coroutine.throw` work, but
+`for v in coroutine` does not, and `gen.__await__()` returns the
+generator only if the generator is decorated with
+`types.coroutine`.
+
+```go
+// objects/coroutine.go Coroutine
+type Coroutine struct {
+    Generator  // embeds; identical structure
+    awaiter    objects.Object  // for `cr_await`
+}
+```
+
+The dedicated `Coroutine` type exists for the type-system distinction.
+The bytecode is the same. Coroutines are produced by `async def`
+functions; `RETURN_GENERATOR` allocates a `Coroutine` when the code
+object's `CO_COROUTINE` flag is set.
+
+## Async generators
+
+Async generators are `async def` functions that also have `yield`.
+They combine the generator suspend/resume protocol with the
+coroutine async dispatch. `asend(x)` returns a coroutine that, when
+awaited, sends `x` to the async generator and returns the next
+yielded value.
+
+```go
+// objects/async_generator.go AsyncGenerator
+type AsyncGenerator struct {
+    Generator
+    finalizer objects.Object  // for sys.set_asyncgen_hooks
+}
+
+// objects/async_generator.go (*AsyncGenerator).ASend
+func (a *AsyncGenerator) ASend(t *state.Thread, value objects.Object) (objects.Object, error)
+
+// objects/async_generator.go (*AsyncGenerator).AThrow
+func (a *AsyncGenerator) AThrow(t *state.Thread, exc objects.Object) (objects.Object, error)
+
+// objects/async_generator.go (*AsyncGenerator).AClose
+func (a *AsyncGenerator) AClose(t *state.Thread) (objects.Object, error)
+```
+
+The finaliser hook (`sys.set_asyncgen_hooks`) lets event loops
+schedule `aclose` for async generators that are garbage-collected
+without being fully consumed. When the GC reclaims an async
+generator, the finaliser is called with the generator; the event
+loop arranges to run `aclose` and then drops the reference.
+
+## Frame detach and attach
+
+The frame moves between the eval stack and the generator object on
+every suspend/resume. The mechanism is the `Suspend`/`Resume` pair
+on `frame.Frame`.
+
+```go
+// frame/frame.go:L241 (*Frame).Suspend
+func (f *Frame) Suspend()
+
+// frame/frame.go:L247 (*Frame).Resume
+func (f *Frame) Resume(prev *Frame)
+```
+
+`Suspend` clears the frame's `Previous` link (it no longer has a
+caller in the eval sense), changes the owner to
+`OwnedByGenerator`, and leaves the instruction pointer, value
+stack, and locals untouched. `Resume` re-links to a new caller (the
+generator's send/throw context) and changes the owner back to
+`OwnedByEval`.
+
+The frame is *not* heap-allocated; it stays in the same chunk it
+was first allocated in. The chunk is held alive by the generator
+object's reference to the frame, so the chunk does not get
+recycled while the generator is reachable.
+
+## Interaction with the optimiser
+
+Tier-2 traces do not cross `YIELD_VALUE`. Projection stops at
+`YIELD_VALUE` because the resumption context is not statically
+predictable: the trace's assumed type for the sent value depends on
+the caller. The trace exits to tier-1, which runs the yield and
+the next resume normally.
+
+`RESUME 1`, `RESUME 2`, `RESUME 3` are similarly opaque to the
+optimiser; they are trace starts but not crossable trace
+transitions.
+
+## Interaction with monitoring
+
+Each of `EventPyResume`, `EventPyYield`, `EventPyThrow`,
+`EventStopIteration` fires from the generator path:
+
+- `EventPyResume` fires when `RESUME` runs at the start of an
+  iteration of the generator.
+- `EventPyYield` fires when `YIELD_VALUE` runs.
+- `EventPyThrow` fires when `gen.throw` is called.
+- `EventStopIteration` fires when a generator returns (raising
+  `StopIteration` with the return value attached).
+
+See [Monitor](./monitor) for the dispatch model.
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+Generator, coroutine, and async generator types are wired with
+correct shapes. Send/throw/close all work for ordinary generators.
+The async generator finaliser path is partial; full coverage tracks
+`Lib/test/test_asyncgen.py`. `yield from`'s
+`StopIteration.value`-propagation works; some edge cases around
+`yield from` over awaitables that are not generators land with the
+later coroutine work.
 
-## Cross reference
+## Reference
 
-* CPython companion: [cpython/generators](../cpython/generators).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+- Port source: `objects/generator.go`, `objects/coroutine.go`,
+  `objects/async_generator.go`, `vm/eval_gen.go`.
+- CPython source: `Objects/genobject.c`, `Python/bytecodes.c`
+  (generator section).
+- PEP 255, *Simple Generators*.
+- PEP 342, *Coroutines via Enhanced Generators*.
+- PEP 380, *Syntax for Delegating to a Subgenerator*.
+- PEP 492, *Coroutines with async and await syntax*.
+- PEP 525, *Asynchronous Generators*.
+- PEP 530, *Asynchronous Comprehensions*.
