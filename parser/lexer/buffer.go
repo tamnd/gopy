@@ -16,7 +16,7 @@ package lexer
 // anything saved on the f-string mode stack.
 //
 // CPython: Parser/lexer/buffer.c:50 _PyLexer_tok_reserve_buf
-func (s *State) reserveBuf(size int) bool {
+func (s *State) reserveBuf(size int) {
 	oldsize := s.inp
 	grow := oldsize >> 1
 	if size > grow {
@@ -24,7 +24,7 @@ func (s *State) reserveBuf(size int) bool {
 	}
 	newsize := oldsize + grow
 	if newsize <= s.end {
-		return true
+		return
 	}
 	s.rememberFStringBuffers()
 	if cap(s.buf) >= newsize {
@@ -36,7 +36,6 @@ func (s *State) reserveBuf(size int) bool {
 	}
 	s.end = newsize
 	s.restoreFStringBuffers()
-	return true
 }
 
 // rememberFStringBuffers is a no-op in gopy since the f-string mode

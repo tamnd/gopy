@@ -295,11 +295,9 @@ loop:
 			if contLineCol == 0 {
 				contLineCol = col
 			}
-			nc, ok := s.continuationLine()
-			if !ok {
+			if _, ok := s.continuationLine(); !ok {
 				return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur), true
 			}
-			c = nc
 		default:
 			s.backup(c)
 			break loop
