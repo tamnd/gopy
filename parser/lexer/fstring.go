@@ -10,14 +10,16 @@ package lexer
 
 import "github.com/tamnd/gopy/token"
 
-// detectStringPrefix returns the (rawFlag, kind, ok) triple for a name
-// already scanned at start..s.cur followed by a quote at s.cur. Empty
-// prefix returns false.
+// detectStringPrefix returns the (rawFlag, kind, isFTString, ok)
+// triple for a name already scanned at start..s.cur followed by a
+// quote at s.cur. `ok` is false when the prefix combo is incompatible
+// (s.err is populated and s.done is set to eSyntax) or when the
+// identifier is not a string prefix at all.
 //
 // CPython: Parser/lexer/lexer.c:457 maybe_raise_syntax_error_for_string_prefixes
-func (s *State) detectStringPrefix(start, end int) (raw bool, kind stringKind, isFTString bool) {
+func (s *State) detectStringPrefix(start, end int) (raw bool, kind stringKind, isFTString, ok bool) {
 	if end-start > 2 {
-		return false, kindFString, false
+		return false, kindFString, false, true
 	}
 	sawF, sawT, sawR, sawB, sawU := false, false, false, false, false
 	for i := start; i < end; i++ {
@@ -33,20 +35,20 @@ func (s *State) detectStringPrefix(start, end int) (raw bool, kind stringKind, i
 		case 'u', 'U':
 			sawU = true
 		default:
-			return false, kindFString, false
+			return false, kindFString, false, true
 		}
 	}
 	// CPython: Parser/lexer/lexer.c:455 maybe_raise_syntax_error_for_string_prefixes
 	if s.maybeRaiseSyntaxErrorForStringPrefixes(sawB, sawR, sawU, sawF, sawT) {
-		return false, kindFString, false
+		return false, kindFString, false, false
 	}
 	if !sawF && !sawT {
-		return false, kindFString, false
+		return false, kindFString, false, true
 	}
 	if sawT {
-		return sawR, kindTString, true
+		return sawR, kindTString, true, true
 	}
-	return sawR, kindFString, true
+	return sawR, kindFString, true, true
 }
 
 // startFString is invoked by scanName when the identifier is a string
@@ -55,8 +57,11 @@ func (s *State) detectStringPrefix(start, end int) (raw bool, kind stringKind, i
 //
 // CPython: Parser/lexer/lexer.c:1051 f_string_quote
 func (s *State) startFString(prefixStart, prefixEnd int, quote int) Tok {
-	raw, kind, ok := s.detectStringPrefix(prefixStart, prefixEnd)
+	raw, kind, isFT, ok := s.detectStringPrefix(prefixStart, prefixEnd)
 	if !ok {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
+	if !isFT {
 		return s.syntaxError("invalid string prefix")
 	}
 	if s.tokModeStackIndex+1 >= maxFstringLevel {

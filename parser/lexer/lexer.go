@@ -404,8 +404,16 @@ func (s *State) scanName(_ int) Tok {
 		}
 	}
 	// String-prefix detection: f", t", rf", rt", fr", tr", b", u", r".
+	//
+	// CPython: Parser/lexer/lexer.c:743 (identifier-followed-by-quote
+	// branch). The validation fires before either of the two follow-up
+	// branches (f-string entry vs plain string entry).
 	if c == '"' || c == '\'' {
-		if _, _, ok := s.detectStringPrefix(s.start, s.cur-1); ok {
+		_, _, isFT, ok := s.detectStringPrefix(s.start, s.cur-1)
+		if !ok {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+		if isFT {
 			return s.startFString(s.start, s.cur-1, c)
 		}
 		// Plain b/u/r prefix: rewind the quote and let scanString do it.
