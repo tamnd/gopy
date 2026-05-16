@@ -266,12 +266,15 @@ func (s *State) tokGetNormalMode() Tok {
 // (tok, true) if a token should be emitted now, (zero, false) to fall
 // through to normal scanning.
 //
-// CPython: Parser/lexer/lexer.c:501 tok_get_normal_mode (atbol branch)
+// CPython: Parser/lexer/lexer.c:515 tok_get_normal_mode (atbol branch)
 func (s *State) indentNL() (Tok, bool) {
 	col := 0
 	altcol := 0
+	contLineCol := 0
+	var c int
+loop:
 	for {
-		c := s.nextC()
+		c = s.nextC()
 		switch c {
 		case ' ':
 			col++
@@ -282,12 +285,26 @@ func (s *State) indentNL() (Tok, bool) {
 		case '\014':
 			col = 0
 			altcol = 0
+		case '\\':
+			// Indentation cannot be split over multiple physical
+			// lines using backslashes. The first `\` we see pins the
+			// indentation level for whatever follows the
+			// continuation.
+			//
+			// CPython: Parser/lexer/lexer.c:532
+			if contLineCol == 0 {
+				contLineCol = col
+			}
+			nc, ok := s.continuationLine()
+			if !ok {
+				return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur), true
+			}
+			c = nc
 		default:
 			s.backup(c)
-			goto done
+			break loop
 		}
 	}
-done:
 
 	// Blank line, comment-only line, or in-paren continuation: do not
 	// adjust indent stack.
@@ -296,12 +313,23 @@ done:
 	// indent loop lands on '#', '\n', or '\r'. The '\n' branch later
 	// uses blankline to drop the newline via `goto nextline` so blank
 	// and comment-only lines don't reach the parser as NEWLINE tokens.
-	c := s.peek()
+	c = s.peek()
 	if c == '#' || c == '\n' || c == eof {
 		s.blankline = true
 	}
 	if c == '#' || c == '\n' || c == eof || s.level > 0 {
 		return Tok{}, false
+	}
+
+	// CPython preserves the column captured before the first `\\`
+	// (cont_line_col) so that backslash-continued indentation reports
+	// at the original whitespace count rather than at the column on
+	// the post-continuation physical line.
+	//
+	// CPython: Parser/lexer/lexer.c:572
+	if contLineCol != 0 {
+		col = contLineCol
+		altcol = contLineCol
 	}
 
 	if col == s.indstack[s.indent] {
@@ -330,6 +358,38 @@ done:
 		return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur), true
 	}
 	return Tok{}, false
+}
+
+// continuationLine consumes the `\n` that follows a backslash inside
+// the indent loop, advances tokenizer state to the next physical
+// line, and returns the peeked first byte of that line (or eof). The
+// returned ok=false signals an E_LINECONT / E_EOF style abort.
+//
+// CPython: Parser/lexer/lexer.c:435 tok_continuation_line
+func (s *State) continuationLine() (int, bool) {
+	c := s.nextC()
+	if c == '\r' {
+		c = s.nextC()
+	}
+	if c != '\n' {
+		s.done = eErrLine
+		s.recordError("unexpected character after line continuation character")
+		return c, false
+	}
+	// The `\n` was consumed: advance to the next physical line. The
+	// preloaded buffer model defers the lineno bump until nextC
+	// returns the first byte of the new line.
+	s.pendingLineno++
+	s.col = 0
+	s.lineStart = s.cur
+	s.contLine = true
+	c = s.nextC()
+	if c == eof {
+		s.done = eEOF
+		return c, false
+	}
+	s.backup(c)
+	return c, true
 }
 
 // scanName scans an identifier starting at the byte already consumed
@@ -451,6 +511,12 @@ func isBinDigitOrUnderscore(c int) bool {
 //
 // CPython: Parser/lexer/lexer.c:900 (string branch in tok_get_normal_mode)
 func (s *State) scanString(quote int) Tok {
+	// Pin firstLine at the opening quote so multi-line strings report
+	// the start line (CPython tok->first_lineno; ISSTRINGLIT branch in
+	// _PyLexer_token_setup reads it).
+	//
+	// CPython: Parser/lexer/lexer.c:906 tok->first_lineno = tok->lineno
+	s.firstLine = s.lineno
 	// Detect triple quote.
 	triple := false
 	if s.peek() == quote {
