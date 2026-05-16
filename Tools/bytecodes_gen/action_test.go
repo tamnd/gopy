@@ -276,6 +276,33 @@ func TestTranslateBodyJumpByNegativeOparg(t *testing.T) {
 	}
 }
 
+func TestTranslateBodyVoidCast(t *testing.T) {
+	// `(void)this_instr;` is a no-op cast CPython uses to silence
+	// unused-variable warnings (e.g. INSTRUMENTED_NOT_TAKEN). The
+	// translator should consume it and emit nothing.
+	body := tokLine("(void)this_instr;")
+	got, _, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if got != "" {
+		t.Errorf("expected empty body for (void)cast, got:\n%s", got)
+	}
+}
+
+func TestTranslateBodyVoidCastFollowedByCall(t *testing.T) {
+	// After the cast the rest of the body should still translate.
+	// Use ERROR_IF since it has a known shape.
+	body := tokLine("(void)x; ERROR_IF(cond);")
+	got, _, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "if cond") || !strings.Contains(got, `e.error("error")`) {
+		t.Errorf("expected ERROR_IF body after cast, got:\n%s", got)
+	}
+}
+
 func TestSplitTopLevelComma(t *testing.T) {
 	a, b, ok := splitTopLevelComma("res == NULL, error")
 	if !ok || strings.TrimSpace(a) != "res == NULL" || strings.TrimSpace(b) != "error" {

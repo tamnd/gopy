@@ -149,6 +149,12 @@ func (t *actionTranslator) translateStmt() error {
 		// rvalue (handled in expression parsing) and lvalue (handled
 		// here). The lvalue case translates to e.setLocal.
 		return t.translateGetlocalAssign()
+	case "(":
+		// `(void)expr;` cast-to-void noop. CPython sprinkles these to
+		// silence unused-variable warnings (e.g. `(void)this_instr;`
+		// in INSTRUMENTED_NOT_TAKEN). In Go we already mark every
+		// declared local with `_ = name`, so the cast has no analogue.
+		return t.translateVoidCast()
 	case "_PyStackRef":
 		// `_PyStackRef name = expr;` — C-local declaration. The Go
 		// equivalent is `name := expr`; we track the name so later
@@ -603,6 +609,28 @@ func (t *actionTranslator) translateNullary(stmt string) error {
 
 // skipParenthesised drops a `MACRO(...)` plus optional `;`. Used for
 // statistics macros that have no runtime effect.
+// translateVoidCast consumes `(void)expr;` and emits nothing. The
+// rest of the body still has to translate; this just keeps the
+// statement walker moving past a CPython C-ism that has no Go
+// counterpart.
+func (t *actionTranslator) translateVoidCast() error {
+	// Match `( void ) <ident-or-expr> ;` exactly. If the shape
+	// doesn't fit we bail rather than silently swallow a real
+	// expression statement.
+	if t.pos+2 >= len(t.toks) ||
+		t.toks[t.pos].Text != "(" ||
+		t.toks[t.pos+1].Text != "void" ||
+		t.toks[t.pos+2].Text != ")" {
+		return fmt.Errorf("unexpected token %q in expression", t.toks[t.pos].Text)
+	}
+	t.pos += 3 // consume `( void )`
+	for t.pos < len(t.toks) && t.toks[t.pos].Text != ";" {
+		t.pos++
+	}
+	t.acceptSemi()
+	return nil
+}
+
 func (t *actionTranslator) skipParenthesised() error {
 	t.pos++
 	if _, err := t.takeParenthesised(); err != nil {
