@@ -635,6 +635,31 @@ body, so the body never reaches for raw codeunits.
 | `vm/eval_dispatch_gen.go` covers every unspecialized opcode (skeleton; bodies pending Phase 8) | PARTIAL (107 arms, bodies stubbed) | this commit |
 | `vm/eval_simple.go` shrinks to evalLoop scaffolding only (frame setup, exit handling) | PARTIAL (NOP, POP_TOP routed) | this commit |
 | `go test ./vm` green | DONE | this commit |
+| CPython-parity harness (`Tools/bytecodes_gen/cpython_parity_test.go`) lifts `Lib/test/test_generated_cases.py` fixtures and prints rolling coverage | DONE (3 / 6 fixtures translate today) | `f97a926` |
+
+### CPython-parity gate
+
+`Tools/bytecodes_gen/cpython_parity_test.go` is the spec's authority
+on action-translator faithfulness. Each fixture is a verbatim copy
+of an `(input, output)` pair from
+`Lib/test/test_generated_cases.py`, wrapped in BEGIN/END markers and
+fed through `ParseBytecodes → AnalyzeInst → TranslateBody`. Each
+row carries:
+
+- `bail=true` while the translator falls back to a panic-stub. The
+  harness asserts the fallback note's prefix stays stable so a
+  drift in error wording shows up as a test failure rather than a
+  silent regression.
+- `want=[...substr...]` once the translator handles the shape. The
+  harness asserts the rendered Go body contains every substring.
+
+`TestCPythonParityFixtures` logs `coverage: PASS / N fixtures
+translate (bail=B)` so the porting auto-flow can read progress
+without parsing test output structure. Coverage growth is
+monotonic: a fixture never moves from `bail=false` back to
+`bail=true`. Rows are never removed; when CPython retires a test
+we mirror the deletion in a separate commit so blame stays
+honest.
 
 ### Migration progress
 
