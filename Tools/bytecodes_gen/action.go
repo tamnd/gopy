@@ -294,6 +294,35 @@ func (t *actionTranslator) translateTypedDecl() error {
 		t.pos++
 	}
 	t.acceptSemi()
+	// Ternary RHS expands the same way as in translateOutputAssign: Go
+	// has no ?: operator, so emit a zero-valued declaration and an
+	// if/else write-back. CPython sprinkles ternaries in typed decls
+	// (BUILD_SLICE's `oparg == 3 ? ... : NULL`, RAISE_VARARGS's
+	// `oparg == 2 ? ... : NULL`).
+	if condToks, aToks, bToks, isTern := splitTopLevelTernary(rhs); isTern {
+		condExpr, err := t.translateExpr(condToks)
+		if err != nil {
+			return fmt.Errorf("%s %s ternary cond: %w", prefix, name, err)
+		}
+		if len(condToks) == 1 && t.intLocals[condToks[0]] {
+			condExpr = condExpr + " != 0"
+		}
+		aExpr, err := t.translateExpr(aToks)
+		if err != nil {
+			return fmt.Errorf("%s %s ternary then: %w", prefix, name, err)
+		}
+		bExpr, err := t.translateExpr(bToks)
+		if err != nil {
+			return fmt.Errorf("%s %s ternary else: %w", prefix, name, err)
+		}
+		t.locals[name] = true
+		goType := goTypeForPrefix(prefix)
+		fmt.Fprintf(t.writer, "var %s %s\n", goLocalName(name), goType)
+		fmt.Fprintf(t.writer, "if %s { %s = %s } else { %s = %s }\n",
+			condExpr, goLocalName(name), aExpr, goLocalName(name), bExpr)
+		fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(name))
+		return nil
+	}
 	rhsExpr, err := t.translateExpr(rhs)
 	if err != nil {
 		return fmt.Errorf("%s %s rhs: %w", prefix, name, err)
