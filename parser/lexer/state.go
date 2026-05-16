@@ -155,14 +155,14 @@ type State struct {
 	done errCode
 	err  *SyntaxError
 
-	mode      Mode
-	tabSize   int
-	indent    int
-	indstack  [maxIndent]int
-	altstack  [maxIndent]int
-	atbol     bool
-	pendin    int // >0 indents pending, <0 dedents pending
-	lineno    int
+	mode     Mode
+	tabSize  int
+	indent   int
+	indstack [maxIndent]int
+	altstack [maxIndent]int
+	atbol    bool
+	pendin   int // >0 indents pending, <0 dedents pending
+	lineno   int
 	// pendingLineno defers the post-'\n' line bump until the next
 	// non-EOF byte is actually consumed. CPython's tok_underflow_*
 	// callbacks call ADVANCE_LINENO when they successfully fetch the
