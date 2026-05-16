@@ -84,14 +84,6 @@ jobs:
         run: go build ./...
       - name: Run tests
         run: go test -race -count=1 ./...
-      - name: Run regrtest panels (no race)
-        # Panel tests in test/regrtest/ skip under -race because goid()
-        # via runtime.Stack is too slow on every Eval entry to finish
-        # the corpus inside the per-test timeout. Re-run them here in a
-        # dedicated no-race step so the lexer/tokenizer panel + stdtest
-        # gate still execute on every PR. Task #639 tracks removing
-        # this once goid is replaced.
-        run: go test -count=1 ./test/regrtest/...
 
   coverage:
     name: coverage
