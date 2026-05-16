@@ -303,9 +303,23 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.FORMAT_SIMPLE:
 		value := e.peek(0)
 		_ = value
-		// body bail: if cond: unexpected token "PyUnicode_CheckExact" in expression
-		// outputs: res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		value_o := value.AsObject()
+		_ = value_o
+		if !objects.IsExactStr(value_o) {
+			res_o := e.objectFormat(value_o, nil)
+			_ = res_o
+			value.Close()
+			if res_o == nil {
+				return 0, nil, nil, false, e.error("error")
+			}
+			res = stackref.FromObject(res_o)
+		} else {
+			res = value
+		}
+		e.drop(1)
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.FORMAT_WITH_SPEC:
 		value := e.peek(1)
 		_ = value
@@ -382,7 +396,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.GET_YIELD_FROM_ITER:
 		iterable := e.peek(0)
 		_ = iterable
-		// body bail: if cond: unexpected token "PyCoro_CheckExact" in expression
+		// body bail: if then: if cond: unexpected token "_PyFrame_GetCode" in expression
 		// outputs: iter
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.IMPORT_FROM:
@@ -431,7 +445,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = receiver
 		value := e.peek(0)
 		_ = value
-		// body bail: if cond: unexpected token "PyGen_Check" in expression
+		// body bail: if then: int err rhs: unexpected token "monitor_stop_iteration" in expression
 		// outputs: val
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_FOR_ITER:
@@ -532,15 +546,20 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = list
 		v := e.peek(0)
 		_ = v
-		// body bail: int err rhs: unexpected token "PyListObject" in expression
-		// outputs: list* _out1[oparg - 1]*
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		err := e.listAppendTakeRef(list.AsObject(), v.AsObject())
+		_ = err
+		if err < 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		e.setPeek(int(oparg-1)+1, list)
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.LIST_EXTEND:
 		list_st := e.peek(int(oparg-1) + 1)
 		_ = list_st
 		iterable_st := e.peek(0)
 		_ = iterable_st
-		// body bail: PyObject none_val rhs: unexpected token "PyListObject" in expression
+		// body bail: if then: int matches rhs: unexpected token "_PyErr_ExceptionMatches" in expression
 		// outputs: list_st* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_BUILD_CLASS:
@@ -675,9 +694,16 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = key
 		value := e.peek(0)
 		_ = value
-		// body bail: int err rhs: unexpected token "PyDictObject" in expression
-		// outputs: dict_st* _out1[oparg - 1]*
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		dict := dict_st.AsObject()
+		_ = dict
+		err := e.dictSetItem(dict, key.AsObject(), value.AsObject())
+		_ = err
+		if err != 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		e.setPeek(int(oparg-1)+1+1, dict_st)
+		e.drop(1 + 1)
+		return e.advance(), nil, nil, false, nil
 	case compile.MATCH_CLASS:
 		subject := e.peek(1 + 1)
 		_ = subject
@@ -773,9 +799,14 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = set
 		v := e.peek(0)
 		_ = v
-		// body bail: int err rhs: unexpected token "PySetObject" in expression
-		// outputs: set* _out1[oparg - 1]*
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		err := e.setAddTakeRef(set.AsObject(), v.AsObject())
+		_ = err
+		if err != 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		e.setPeek(int(oparg-1)+1, set)
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.SET_FUNCTION_ATTRIBUTE:
 		attr_st := e.peek(1)
 		_ = attr_st
@@ -851,7 +882,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_NAME:
 		v := e.peek(0)
 		_ = v
-		// body bail: if cond: unexpected token "PyDict_CheckExact" in expression
+		// body bail: if then: unrecognized token at action body start: "err"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SWAP:
 		bottom := e.peek(int(oparg-2) + 1)

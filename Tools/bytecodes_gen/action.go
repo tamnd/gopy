@@ -226,6 +226,14 @@ var cTypeDecls = map[string]bool{
 	"PyFunctionObject": true,
 	"PyCodeObject":     true,
 	"PyCellObject":     true,
+	"PyListObject":    true,
+	"PyDictObject":    true,
+	"PySetObject":     true,
+	"PyGenObject":     true,
+	"PyCoroObject":    true,
+	"PyLongObject":    true,
+	"PyUnicodeObject": true,
+	"PyTupleObject":   true,
 	"PyInterpreterState": true,
 	"_PyErr_StackItem": true,
 	"conversion_func":  true,
@@ -342,6 +350,12 @@ func rhsIsBool(expr string) bool {
 		}
 	}
 	if strings.HasPrefix(expr, "!") {
+		return true
+	}
+	// objects.IsExact* and friends are bool-returning helpers, wired
+	// in helperCallRegistry. Any helper whose Go expression starts
+	// with `objects.Is` returns bool.
+	if strings.HasPrefix(expr, "objects.Is") {
 		return true
 	}
 	return false
@@ -943,6 +957,22 @@ var helperCalls = map[string]helperCall{
 	"_PyDict_SetItem_Take2": {goExpr: "e.dictSetItem", arity: 3},
 	// _PyTemplate_Build(strings, interpolations) returns a t-string.
 	"_PyTemplate_Build": {goExpr: "e.templateBuild", arity: 2},
+	// Exact-type predicates. Each takes a borrowed PyObject* and returns
+	// a C int (0 or 1); gopy mirrors them as bool-returning Go calls and
+	// the int-vs-bool detection in translateTypedDecl keeps `int x = ...`
+	// from getting an `!= 0` fixup against a bool RHS.
+	"PyUnicode_CheckExact": {goExpr: "objects.IsExactStr", arity: 1},
+	"PyLong_CheckExact":    {goExpr: "objects.IsExactInt", arity: 1},
+	"PyFloat_CheckExact":   {goExpr: "objects.IsExactFloat", arity: 1},
+	"PyList_CheckExact":    {goExpr: "objects.IsExactList", arity: 1},
+	"PyTuple_CheckExact":   {goExpr: "objects.IsExactTuple", arity: 1},
+	"PyDict_CheckExact":    {goExpr: "objects.IsExactDict", arity: 1},
+	"PySet_CheckExact":     {goExpr: "objects.IsExactSet", arity: 1},
+	"PyBool_Check":         {goExpr: "objects.IsExactBool", arity: 1},
+	"PySlice_Check":        {goExpr: "objects.IsExactSlice", arity: 1},
+	"PyCoro_CheckExact":    {goExpr: "objects.IsCoroutine", arity: 1},
+	"PyGen_Check":          {goExpr: "objects.IsGenerator", arity: 1},
+	"PyGen_CheckExact":     {goExpr: "objects.IsGenerator", arity: 1},
 }
 
 // parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.
