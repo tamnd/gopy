@@ -390,6 +390,11 @@ func tokenize(src string) ([]dslTok, error) {
 					rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "#if"))
 					if strings.HasPrefix(rest, "defined(") {
 						flag = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(rest, "defined("), ")"))
+					} else if isBareCIdent(rest) {
+						// Bare `#if FLAG` form (no defined(...)). CPython
+						// uses this for `#if ENABLE_SPECIALIZATION_FT` and
+						// similar build-time toggles.
+						flag = rest
 					}
 				}
 				if skipFlags[flag] {
@@ -552,4 +557,23 @@ var opKinds = map[string]tokKind{
 
 func isLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+// isBareCIdent reports whether s is a single C identifier (letters,
+// digits, underscores; not starting with a digit). Used by the
+// #if FLAG elider to recognize bare-flag conditionals.
+func isBareCIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	if !isLetter(s[0]) {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if !isLetter(c) && !(c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
 }

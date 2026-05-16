@@ -692,9 +692,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.push(value)
 		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_CONST:
-		// body bail: if cond: unexpected token "this_instr" in expression
-		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var value stackref.Ref
+		obj := e.constAt(int(oparg))
+		_ = obj
+		value = stackref.FromObject(obj)
+		e.push(value)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_DEREF:
 		var value stackref.Ref
 		cell := e.localAt(int(oparg)).AsObject()
