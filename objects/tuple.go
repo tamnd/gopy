@@ -62,6 +62,13 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
 	SetTypeDescr(TupleType, "__repr__", NewMethodDescr(TupleType, "__repr__", tupleReprMethod))
+	// __getitem__ / __len__ slot wrappers. Until add_operators is
+	// ported wholesale (task #647) callers like dis.py that grab
+	// `tuple.__getitem__` directly need this exposed by hand.
+	//
+	// CPython: Objects/typeobject.c add_operators slot wrapper for sq_item / sq_length
+	SetTypeDescr(TupleType, "__getitem__", NewMethodDescr(TupleType, "__getitem__", tupleGetItemMethod))
+	SetTypeDescr(TupleType, "__len__", NewMethodDescr(TupleType, "__len__", tupleLenMethod))
 	// TpNew honors cls so `class T(tuple): pass; T((1,2))` returns a T
 	// instance instead of a plain tuple. tuple is immutable, so unlike
 	// list we populate items here rather than deferring to __init__.
@@ -145,6 +152,28 @@ func tupleGetItem(o Object, i int) (Object, error) {
 		return nil, errIndexOutOfRange
 	}
 	return t.items[i], nil
+}
+
+func tupleGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	t, ok := args[0].(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getitem__' requires a 'tuple' object")
+	}
+	return GetItem(t, args[1])
+}
+
+func tupleLenMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __len__() takes no arguments (%d given)", len(args)-1)
+	}
+	t, ok := args[0].(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__len__' requires a 'tuple' object")
+	}
+	return NewInt(int64(t.Len())), nil
 }
 
 func tupleReprMethod(args []Object, _ map[string]Object) (Object, error) {
