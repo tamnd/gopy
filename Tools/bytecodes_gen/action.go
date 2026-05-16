@@ -767,6 +767,29 @@ var helperCalls = map[string]helperCall{
 	// PyErr_GivenExceptionMatches: 1 if exc is an instance of (or
 	// matches) the target type, else 0.
 	"PyErr_GivenExceptionMatches": {goExpr: "e.exceptionMatches", arity: 2},
+	// Dict / list / set mutation helpers. These all return a C int err
+	// (0 ok, nonzero error) and stash the cause on pendingErr.
+	"PyDict_Pop":           {goExpr: "e.dictPop", arity: 3},
+	"_PyDict_MergeEx":      {goExpr: "e.dictMergeEx", arity: 3},
+	"_PyList_Extend":       {goExpr: "e.listExtend", arity: 2},
+	"_PyList_AppendTakeRef": {goExpr: "e.listAppendTakeRef", arity: 2},
+	"_PySet_AddTakeRef":    {goExpr: "e.setAddTakeRef", arity: 2},
+	"_PySet_Update":        {goExpr: "e.setUpdate", arity: 2},
+	// PyObject_Length returns Py_ssize_t (-1 on error).
+	"PyObject_Length": {goExpr: "e.objectLength", arity: 1},
+	// PySet_New(iterable) builds a fresh set; iterable may be NULL.
+	"PySet_New": {goExpr: "e.setNew", arity: 1},
+	// Cell helpers.
+	"PyCell_New":         {goExpr: "e.cellNew", arity: 1},
+	"PyCell_SwapTakeRef": {goExpr: "e.cellSwapTakeRef", arity: 2},
+	// Async-iter next.
+	"_PyEval_GetANext": {goExpr: "e.getANext", arity: 1},
+	// Stack-ref tuple/list builders (used by BUILD_TUPLE / BUILD_LIST).
+	// The first arg is the input scratch array name, second is its length.
+	"_PyTuple_FromStackRefStealOnSuccess": {goExpr: "e.tupleFromStackRef", arity: 2},
+	"_PyList_FromStackRefStealOnSuccess":  {goExpr: "e.listFromStackRef", arity: 2},
+	// PyObject_Format(obj, spec) used by FORMAT_WITH_SPEC. spec may be NULL.
+	"PyObject_Format": {goExpr: "e.objectFormat", arity: 2},
 }
 
 // parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.

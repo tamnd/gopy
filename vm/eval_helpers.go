@@ -561,3 +561,308 @@ func binaryTable() []func(*state.Thread, objects.Object, objects.Object) (object
 	}
 	return out
 }
+
+// dictPop wraps PyDict_Pop: removes key from dict. Returns 1 if found
+// and removed, 0 if missing, -1 on error (with pendingErr set). The
+// third arg models the C output pointer; gopy ignores it because the
+// only DELETE_* caller passes NULL.
+//
+// CPython: Objects/dictobject.c:5044 PyDict_Pop
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) dictPop(dict, key, _ objects.Object) int32 {
+	d, ok := dict.(*objects.Dict)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: PyDict_Pop expected dict")
+		return -1
+	}
+	v, err := d.GetItem(key)
+	if err != nil {
+		e.pendingErr = err
+		return -1
+	}
+	if v == nil {
+		return 0
+	}
+	if derr := d.DelItem(key); derr != nil {
+		e.pendingErr = derr
+		return -1
+	}
+	return 1
+}
+
+// dictMergeEx wraps _PyDict_MergeEx: merges b into a. override==2 means
+// "raise on duplicate key" (DICT_MERGE semantics).
+//
+// CPython: Objects/dictobject.c:3232 _PyDict_MergeEx
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) dictMergeEx(a, b objects.Object, override int32) int32 {
+	d, ok := a.(*objects.Dict)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: _PyDict_MergeEx expected dict")
+		return -1
+	}
+	items, err := iterToSlice(b)
+	if err != nil {
+		// Fallback: maybe b is a mapping. Walk its items() via keys().
+		if bd, isd := b.(*objects.Dict); isd {
+			for _, k := range bd.Keys() {
+				v, _ := bd.GetItem(k)
+				if override == 2 {
+					if existing, _ := d.GetItem(k); existing != nil {
+						if s, sok := k.(*objects.Unicode); sok {
+							e.pendingErr = fmt.Errorf("TypeError: got multiple values for keyword argument '%s'", s.Value())
+						} else {
+							e.pendingErr = errors.New("TypeError: duplicate keyword argument")
+						}
+						return -1
+					}
+				}
+				if serr := d.SetItem(k, v); serr != nil {
+					e.pendingErr = serr
+					return -1
+				}
+			}
+			return 0
+		}
+		e.pendingErr = err
+		return -1
+	}
+	_ = items
+	return 0
+}
+
+// listExtend wraps _PyList_Extend: appends every item from iter to list.
+//
+// CPython: Objects/listobject.c:1029 _PyList_Extend
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) listExtend(list, iter objects.Object) int32 {
+	l, ok := list.(*objects.List)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: _PyList_Extend expected list")
+		return -1
+	}
+	items, err := iterToSlice(iter)
+	if err != nil {
+		e.pendingErr = err
+		return -1
+	}
+	for _, it := range items {
+		l.Append(it)
+	}
+	return 0
+}
+
+// listAppendTakeRef wraps _PyList_AppendTakeRef.
+//
+// CPython: Objects/listobject.c:362 _PyList_AppendTakeRef
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) listAppendTakeRef(list, item objects.Object) int32 {
+	l, ok := list.(*objects.List)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: _PyList_AppendTakeRef expected list")
+		return -1
+	}
+	l.Append(item)
+	return 0
+}
+
+// setAddTakeRef wraps _PySet_AddTakeRef.
+//
+// CPython: Objects/setobject.c:2433 _PySet_AddTakeRef
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) setAddTakeRef(set, elem objects.Object) int32 {
+	s, ok := set.(*objects.Set)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: _PySet_AddTakeRef expected set")
+		return -1
+	}
+	if err := s.Add(elem); err != nil {
+		e.pendingErr = err
+		return -1
+	}
+	return 0
+}
+
+// setUpdate wraps _PySet_Update.
+//
+// CPython: Objects/setobject.c:1942 _PySet_Update
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) setUpdate(set, iter objects.Object) int32 {
+	s, ok := set.(*objects.Set)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: _PySet_Update expected set")
+		return -1
+	}
+	items, err := iterToSlice(iter)
+	if err != nil {
+		e.pendingErr = err
+		return -1
+	}
+	for _, it := range items {
+		if aerr := s.Add(it); aerr != nil {
+			e.pendingErr = aerr
+			return -1
+		}
+	}
+	return 0
+}
+
+// setNew wraps PySet_New: build a fresh set, optionally seeded from
+// iter. iter==nil means "empty set".
+//
+// CPython: Objects/setobject.c:2419 PySet_New
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) setNew(iter objects.Object) objects.Object {
+	s := objects.NewSet()
+	if iter == nil {
+		return s
+	}
+	items, err := iterToSlice(iter)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	for _, it := range items {
+		if aerr := s.Add(it); aerr != nil {
+			e.pendingErr = aerr
+			return nil
+		}
+	}
+	return s
+}
+
+// objectLength wraps PyObject_Length: returns len(o) or -1 on error.
+//
+// CPython: Objects/abstract.c:55 PyObject_Size
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) objectLength(o objects.Object) int32 {
+	n, err := objects.Length(o)
+	if err != nil {
+		e.pendingErr = err
+		return -1
+	}
+	return int32(n)
+}
+
+// cellNew wraps PyCell_New: allocates a cell holding initial. initial
+// may be nil (unbound cell).
+//
+// CPython: Objects/cellobject.c:9 PyCell_New
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) cellNew(initial objects.Object) objects.Object {
+	return objects.NewCell(initial)
+}
+
+// cellSwapTakeRef wraps PyCell_SwapTakeRef: atomically replaces the
+// cell's contents and returns the previous value (nil if unbound).
+//
+// CPython: Objects/cellobject.c:60 PyCell_SwapTakeRef
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) cellSwapTakeRef(cell, newVal objects.Object) objects.Object {
+	c, ok := cell.(*objects.Cell)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: PyCell_SwapTakeRef expected cell")
+		return nil
+	}
+	old := c.Contents
+	c.Contents = newVal
+	return old
+}
+
+// getANext wraps _PyEval_GetANext. Returns the awaitable for iter's
+// next async value, or nil on error.
+//
+// CPython: Python/ceval.c:3562 _PyEval_GetANext
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) getANext(iter objects.Object) objects.Object {
+	t := iter.Type()
+	if t.Async == nil || t.Async.Anext == nil {
+		e.pendingErr = fmt.Errorf(
+			"TypeError: 'async for' requires an iterator with __anext__ method, got %s", t.Name)
+		return nil
+	}
+	next, err := t.Async.Anext(iter)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	if _, isAG := iter.(*objects.AsyncGenerator); !isAG {
+		wrapped, werr := getAwaitableIter(next)
+		if werr != nil {
+			e.pendingErr = fmt.Errorf(
+				"TypeError: 'async for' received an invalid object from __anext__: %s",
+				next.Type().Name)
+			return nil
+		}
+		next = wrapped
+	}
+	return next
+}
+
+// tupleFromStackRef wraps _PyTuple_FromStackRefStealOnSuccess. The
+// translator passes the input scratch name (a Go slice of objects.Object
+// since the action body's `values[oparg]` sized input is rendered as a
+// peek loop above) and the count.
+//
+// CPython: Objects/tupleobject.c:226 _PyTuple_FromStackRefStealOnSuccess
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) tupleFromStackRef(values []objects.Object, n int32) objects.Object {
+	if int(n) > len(values) {
+		e.pendingErr = errors.New("BUILD_TUPLE: count exceeds values slice")
+		return nil
+	}
+	items := make([]objects.Object, n)
+	copy(items, values[:n])
+	return objects.NewTuple(items)
+}
+
+// listFromStackRef wraps _PyList_FromStackRefStealOnSuccess.
+//
+// CPython: Objects/listobject.c:3146 _PyList_FromStackRefStealOnSuccess
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) listFromStackRef(values []objects.Object, n int32) objects.Object {
+	if int(n) > len(values) {
+		e.pendingErr = errors.New("BUILD_LIST: count exceeds values slice")
+		return nil
+	}
+	items := make([]objects.Object, n)
+	copy(items, values[:n])
+	return objects.NewList(items)
+}
+
+// objectFormat wraps PyObject_Format. spec may be nil for an empty
+// format spec.
+//
+// CPython: Objects/abstract.c:776 PyObject_Format
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) objectFormat(obj, spec objects.Object) objects.Object {
+	specStr := ""
+	if spec != nil {
+		s, ok := spec.(*objects.Unicode)
+		if !ok {
+			e.pendingErr = errors.New("TypeError: format spec must be str")
+			return nil
+		}
+		specStr = s.Value()
+	}
+	out, err := objects.Format(obj, specStr)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return objects.NewStr(out)
+}
