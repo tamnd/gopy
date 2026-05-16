@@ -125,6 +125,9 @@ var gopyGenerators = []generator{
 	{name: "gopy_opcode_id_generator.py", out: "compile/opcode_ids_gen.go",
 		inputs:  []string{"Python/bytecodes.c"},
 		comment: "//"},
+	{name: "gopy_opcode_metadata_generator.py", out: "compile/opcode_metadata_gen.go",
+		inputs:  []string{"Python/bytecodes.c"},
+		comment: "//"},
 }
 
 func main() {
