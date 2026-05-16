@@ -636,7 +636,7 @@ body, so the body never reaches for raw codeunits.
 | `vm/eval_simple.go` shrinks to evalLoop scaffolding only (frame setup, exit handling) | PARTIAL (NOP, POP_TOP routed) | this commit |
 | `go test ./vm` green | DONE | this commit |
 | CPython-parity harness (`Tools/bytecodes_gen/cpython_parity_test.go`) lifts `Lib/test/test_generated_cases.py` fixtures and prints rolling coverage | DONE (5 / 10 fixtures translate today) | `f97a926` |
-| Bytecodes.c coverage gauge (`Tools/bytecodes_gen/cpython_coverage_test.go`) walks every `inst()` in CPython 3.14.5's `Python/bytecodes.c` and reports the bail histogram | DONE (12 / 118 inst() bodies translate today) | `a93336d` |
+| Bytecodes.c coverage gauge (`Tools/bytecodes_gen/cpython_coverage_test.go`) walks every `inst()` in CPython 3.14.5's `Python/bytecodes.c` and reports the bail histogram | DONE (14 / 118 inst() bodies translate today) | `a93336d` |
 
 ### CPython-parity gate
 
