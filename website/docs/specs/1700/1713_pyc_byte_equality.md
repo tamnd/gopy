@@ -126,7 +126,7 @@ Checklist at the bottom of this spec, mirrored per row here.
 
 | Phase | Block | Gate | Status |
 |-------|-------|------|--------|
-| 1 | Magic bump + marshal audit prep. Update `MagicNumber` to 3627. Add `marshal/parity_test.go` round-trip: marshal → unmarshal in gopy gives back an equal Code. | round-trip | TODO |
+| 1 | Magic bump + marshal audit prep. Update `MagicNumber` to 3627. Add `marshal/parity_test.go` round-trip: marshal → unmarshal in gopy gives back an equal Code. | round-trip | done (5dbfac9) |
 | 2 | Disassembly format alignment. Port `Lib/dis.py` 1:1 into `compile/dis.go`. Output must match `python3.14 -m dis` for a 30-fixture corpus. | dis-stream parity gate | TODO |
 | 3 | Codegen / flowgraph audit. Walk every CPython codegen.c + flowgraph.c function; ensure gopy has a 1:1 port with citations. Fix every divergence the dis-stream gate surfaces. | dis-stream parity green on full `test/cpython/Lib/` corpus | TODO |
 | 4 | Code-object field audit. Port `_PyCode_New`, `intern_strings`, `intern_constants`, `_PyCode_ConstantKey` from `Objects/codeobject.c` and the `*_inorder` helpers from `Python/compile.c`. Gate: every field on `objects.Code` matches CPython's for the corpus. | field-parity gate | TODO |
@@ -137,134 +137,152 @@ Checklist at the bottom of this spec, mirrored per row here.
 
 ## Phase 1 — magic + marshal round-trip
 
-Two changes, both small, both load-bearing:
+Two changes, both small, both load-bearing. First, `marshal/pyc.go`
+bumps `MagicNumber` from 3620 to 3627 to match
+`Include/internal/pycore_magic_number.h:295`, with a citation on
+the constant so future bumps don't drift. Second,
+`marshal/parity_test.go` round-trips a curated fixture through
+Dump/Load and asserts `reflect.DeepEqual` on every observable
+field of `objects.Code` (with a `(*big.Int).Cmp` shim for the
+big-int slot). The fixture covers short and long ints, floats,
+strings with duplicates for TYPE_REF reuse, bools, None, plus the
+Linetable and ExceptionTable blobs. Phase 1 is the safety net:
+every later phase reuses this round-trip to catch regressions
+within gopy before any cross-interpreter compare.
 
-1. `marshal/pyc.go`: bump `MagicNumber` from 3620 to 3627 to match
-   `Include/internal/pycore_magic_number.h:295`. Add a comment
-   citing the CPython header so future bumps don't drift.
-2. `marshal/parity_test.go`: for a curated fixture list, marshal
-   a compiled code object through gopy, unmarshal it, assert
-   `reflect.DeepEqual` on every field except line-table internals
-   (those are covered by 1708 + Phase 5).
-
-Phase 1 is the safety net: every later phase reuses this
-round-trip to catch regressions within gopy before comparing
-across interpreters.
+| Step | Status | Commit |
+|------|--------|--------|
+| `MagicNumber` bumped 3620 → 3627 with CPython citation | done | 5dbfac9 |
+| `marshal/parity_test.go` round-trip fixture green | done | 5dbfac9 |
 
 ## Phase 2 — disassembly-stream parity
 
-The gate runs:
-
-```bash
-gopy        -m dis foo.py > gopy.dis
-python3.14  -m dis foo.py > cpy.dis
-diff gopy.dis cpy.dis
-```
-
-For every fixture in `test/gate/disdata/`. Initial corpus is 30
-small fixtures (one per language feature: defs, classes,
-generators, async, comprehensions, match, exception groups, PEP
-695, walrus, f-strings, etc). Once each is green the gate scales
-to the full vendored corpus.
-
-The reason this gate goes first: every diff is human-readable. A
-missing peephole pass shows up as "CPython removed the redundant
-JUMP, gopy didn't". An interning order bug shows up as
-"co_consts[3] is 'foo' in CPython, () in gopy". A flowgraph bug
-shows up as "block ordering swapped, jump targets differ by
-N bytes". None of that is visible in marshal output.
-
-`compile/dis.go` is hand-written and does not currently match the
-CPython format. Phase 2 ports `Lib/dis.py`'s
+The gate runs `gopy -m dis foo.py` and `python3.14 -m dis foo.py`
+for every fixture in `test/gate/disdata/` and diffs the two
+streams. Initial corpus is 30 small fixtures (one per language
+feature: defs, classes, generators, async, comprehensions, match,
+exception groups, PEP 695, walrus, f-strings, etc); once each is
+green the gate scales to the full vendored corpus. This gate runs
+*first* because every diff is human-readable. A missing peephole
+pass surfaces as "CPython dropped the redundant JUMP, gopy
+didn't"; an interning order bug surfaces as "co_consts[3] is 'foo'
+in CPython, () in gopy"; a flowgraph bug surfaces as "block
+ordering swapped, jump targets differ by N bytes". None of that is
+visible in marshal output. `compile/dis.go` (76 lines, hand-written)
+gets replaced by a 1:1 port of `Lib/dis.py`'s
 `_disassemble_recursive`, `_get_instructions_bytes`, and
-`Instruction.__str__` exactly. Once the formatter matches, every
+`Instruction.__str__`. Once the formatter matches CPython, every
 remaining diff is a real codegen / flowgraph bug for Phase 3.
+
+| Step | Status | Commit |
+|------|--------|--------|
+| Port `Lib/dis.py` `_unpack_opargs` + `_get_instructions_bytes` 1:1 into `compile/dis.go` | TODO | - |
+| Port `Instruction` + `Formatter` + `ArgResolver` (the rendering trio) | TODO | - |
+| Port `_disassemble_recursive` + `_format_code_info` + `pretty_flags` | TODO | - |
+| `cmd/gopy` `-m dis` entry mirroring `Lib/dis.py:main` | TODO | - |
+| `test/gate/disdata/` fixture corpus (30 small files, one per feature) | TODO | - |
+| `test/gate/dis_parity_test.go` green on the 30-fixture corpus | TODO | - |
 
 ## Phase 3 — codegen / flowgraph audit
 
 Driven entirely by Phase 2 diffs. For each diff, identify the
 CPython function that produced the CPython side and confirm gopy
-has a 1:1 port with citations. Add the port if missing. Fix the
-behavior if present.
+has a 1:1 port with citations. Add the port if missing; fix the
+behavior if present. The expected long tail is flowgraph
+optimization passes: gopy has the structural framework
+(`compile/flowgraph*.go`) but the audit will find missing passes
+(likely candidates: redundant-NOP removal, more aggressive peephole
+rewrites, conditional jump inversion when the fall-through is
+shorter). Phase 3 ends when the dis-stream gate is green across the
+full `test/cpython/Lib/` corpus, not just the 30-fixture starter.
 
-The expected long tail here: flowgraph optimization passes. gopy
-has the structural framework (`compile/flowgraph*.go`) but the
-audit will find missing passes (likely candidates: redundant-NOP
-removal, more aggressive peephole rewrites, conditional jump
-inversion when the fall-through is shorter).
-
-Phase 3 ends when the dis-stream gate is green across the full
-`test/cpython/Lib/` corpus, not just the 30-fixture starter.
+| Step | Status | Commit |
+|------|--------|--------|
+| 1:1 audit of `Python/codegen.c` against `compile/codegen*.go` (citation pass) | TODO | - |
+| 1:1 audit of `Python/flowgraph.c` against `compile/flowgraph*.go` (citation pass) | TODO | - |
+| Port every missing flowgraph optimization pass surfaced by Phase 2 diffs | TODO | - |
+| Dis-stream gate green on full `test/cpython/Lib/` corpus | TODO | - |
 
 ## Phase 4 — code-object field audit
 
-With dis-stream parity, the instruction stream matches. What's
-left is the *container*. `co_consts`, `co_names`,
-`co_varnames`, `co_freevars`, `co_cellvars`, and `co_qualname` are
-populated by `_PyCode_New` (`Objects/codeobject.c`) and the
-`dict_keys_inorder` / `consts_dict_keys_inorder` helpers in
-`Python/compile.c`. Order matters: marshal writes these as
-tuples and `TYPE_REF` reuses earlier positions.
+With dis-stream parity, the instruction stream matches. What's left
+is the *container*. `co_consts`, `co_names`, `co_varnames`,
+`co_freevars`, `co_cellvars`, and `co_qualname` are populated by
+`_PyCode_New` (`Objects/codeobject.c`) and the `dict_keys_inorder`
+/ `consts_dict_keys_inorder` helpers in `Python/compile.c`. Order
+matters: marshal writes these as tuples and `TYPE_REF` reuses
+earlier positions, so any ordering drift cascades into marshal
+output. The field-parity gate compiles each fixture through both
+interpreters, writes each field via `repr` plus a stable type-tag,
+and diffs.
 
-The audit:
-
-- Port `_PyCode_New` 1:1. Citations.
-- Port `intern_strings` / `intern_constants` / `_PyCode_ConstantKey`.
-  These decide which strings get interned and how constants
-  compare for dedup. Both feed into marshal's TYPE_REF behavior.
-- Port the `*_inorder` helpers in `Python/compile.c`.
-- Add a field-parity gate: for each fixture, compile through
-  both interpreters, write each field via `repr` plus a stable
-  type-tag, diff.
+| Step | Status | Commit |
+|------|--------|--------|
+| Port `_PyCode_New` 1:1 into `objects/code.go` with citations | TODO | - |
+| Port `intern_strings` + `intern_constants` + `_PyCode_ConstantKey` | TODO | - |
+| Port `dict_keys_inorder` + `consts_dict_keys_inorder` from `Python/compile.c` | TODO | - |
+| `test/gate/field_parity_test.go` green on the 30-fixture corpus | TODO | - |
+| Field-parity gate green on full `test/cpython/Lib/` corpus | TODO | - |
 
 ## Phase 5 — assemble audit (non-location)
 
-1708 covered location emission. This phase finishes the rest of
-`Python/assemble.c`:
+1708 covered location emission. Phase 5 finishes the rest of
+`Python/assemble.c`. `assemble_exception_table` is already
+structurally ported in `compile/assemble_exceptions.go` but needs
+a byte-identical varint emission audit against
+`_PyCompile_AssembleExceptionTable`. `compute_code_flags` has to
+set every flag (CO_OPTIMIZED, CO_NEWLOCALS, CO_VARARGS,
+CO_VARKEYWORDS, CO_NESTED, CO_GENERATOR, CO_COROUTINE,
+CO_ITERABLE_COROUTINE, CO_ASYNC_GENERATOR, CO_FUTURE_*) under the
+same conditions as CPython. `assemble_emit`'s stacksize computation
+must match `_PyCompile_OptimizeAndAssemble`'s output exactly.
 
-- `assemble_exception_table` — already structurally ported in
-  `compile/assemble_exceptions.go`. Audit for byte-identical
-  varint emission against `_PyCompile_AssembleExceptionTable`.
-- `compute_code_flags` — ensure every flag (CO_OPTIMIZED,
-  CO_NEWLOCALS, CO_VARARGS, CO_VARKEYWORDS, CO_NESTED, CO_GENERATOR,
-  CO_COROUTINE, CO_ITERABLE_COROUTINE, CO_ASYNC_GENERATOR,
-  CO_FUTURE_*) is set under the same conditions as CPython.
-- `assemble_emit` — stacksize computation must match
-  `_PyCompile_OptimizeAndAssemble`'s output exactly.
+| Step | Status | Commit |
+|------|--------|--------|
+| `assemble_exception_table` byte-identical varint audit | TODO | - |
+| `compute_code_flags` covers every CO_* flag under the same conditions as CPython | TODO | - |
+| `assemble_emit` stacksize matches `_PyCompile_OptimizeAndAssemble` byte-for-byte | TODO | - |
+| Field-parity gate green on full corpus | TODO | - |
 
 ## Phase 6 — marshal port
 
-`Python/marshal.c` is one source file, ~1800 lines, very
-mechanical. The port is a function-by-function transcription with
-citations. Key risks:
+`Python/marshal.c` is one source file, ~1800 lines, very mechanical.
+The port is a function-by-function transcription with citations. The
+load-bearing risks are: TYPE_REF reuse (CPython tracks a `refs` dict
+keyed by identity, not value, so gopy must use the same identity
+semantics for the reuse positions to match); short vs long int
+encoding (TYPE_INT covers `-2^31..2^31-1`, TYPE_LONG covers the
+rest); float encoding (TYPE_BINARY_FLOAT, 8 bytes IEEE 754, is what
+CPython 3.14 uses by default; confirm gopy isn't writing the legacy
+TYPE_FLOAT ASCII form); and interned vs non-interned strings
+(TYPE_INTERNED vs TYPE_UNICODE, decided by the string's
+`state.interned` flag that Phase 4 sets via `intern_strings`).
 
-- **TYPE_REF reuse**: CPython tracks a `refs` dict keyed by
-  identity, not value. gopy must use the same identity semantics
-  so the reuse positions match.
-- **Short vs long int encoding**: TYPE_INT covers `-2^31..2^31-1`,
-  TYPE_LONG covers the rest. gopy's existing split must match
-  exactly.
-- **Float encoding**: TYPE_BINARY_FLOAT (8 bytes, IEEE 754) is
-  what CPython 3.14 uses by default. Confirm gopy isn't writing
-  TYPE_FLOAT (legacy ASCII).
-- **Interned vs non-interned strings**: TYPE_INTERNED vs
-  TYPE_UNICODE. Decided by the string's `state.interned` flag,
-  which Phase 4 sets via `intern_strings`.
-
-Gate: byte-equality on the 30-fixture corpus from Phase 2.
+| Step | Status | Commit |
+|------|--------|--------|
+| 1:1 audit of `marshal/marshal.go` against `Python/marshal.c` writer side | TODO | - |
+| 1:1 audit of `marshal/marshal.go` against `Python/marshal.c` reader side | TODO | - |
+| TYPE_REF identity-keyed reuse table matches CPython exactly | TODO | - |
+| Int / float / string encoding paths confirmed byte-identical | TODO | - |
+| Byte-equality gate green on Phase 2's 30-fixture corpus | TODO | - |
 
 ## Phase 7 — pyc header + importlib writer
 
-The 16-byte header is small but still part of the gate. Port:
+The 16-byte header is small but still part of the gate.
+`MAGIC_NUMBER` itself is already covered in Phase 1; Phase 7 ports
+the writer / reader slice of `Lib/importlib/_bootstrap_external.py`
+that drives the header layout: `_code_to_timestamp_pyc` (default
+timestamp-based cache), `_code_to_hash_pyc` (hash-based caches used
+by `--check-hash-based-pycs`), and `_classify_pyc` (reader,
+needed for round-trip). After Phase 7 the byte-equality gate runs
+across the full `test/cpython/Lib/` corpus.
 
-- `MAGIC_NUMBER` — already covered in Phase 1.
-- `_code_to_timestamp_pyc` — header layout for the default
-  (timestamp-based) cache file.
-- `_code_to_hash_pyc` — header layout for hash-based caches
-  (used by `--check-hash-based-pycs`).
-- `_classify_pyc` — header reader, needed for round-trip.
-
-Gate: byte-equality on the full `test/cpython/Lib/` corpus.
+| Step | Status | Commit |
+|------|--------|--------|
+| Port `_code_to_timestamp_pyc` writer | TODO | - |
+| Port `_code_to_hash_pyc` writer | TODO | - |
+| Port `_classify_pyc` reader | TODO | - |
+| `test/gate/pyc_parity_test.go` green on full `test/cpython/Lib/` corpus | TODO | - |
 
 ## Gate
 
@@ -283,7 +301,7 @@ After all seven phases:
 
 ## Checklist
 
-- [ ] Phase 1: `MagicNumber` bumped to 3627; `marshal/parity_test.go` round-trip green
+- [x] Phase 1: `MagicNumber` bumped to 3627; `marshal/parity_test.go` round-trip green (5dbfac9)
 - [ ] Phase 2: `compile/dis.go` 1:1 against `Lib/dis.py`; dis-stream gate green on 30-fixture corpus
 - [ ] Phase 3: dis-stream gate green on full `test/cpython/Lib/` corpus; every codegen.c + flowgraph.c function has a 1:1 gopy port with citations
 - [ ] Phase 4: `_PyCode_New` + interning helpers ported; field-parity gate green on 30-fixture corpus
