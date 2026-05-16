@@ -189,7 +189,7 @@ runs the Python module.
 | Wire `cmd/gopy -m mod` to call `runpy._run_module_as_main(mod)` | done | 554dfca |
 | Expose Python-facing `co_code` / `co_consts` / `co_names` / `co_varnames` / `co_*` attrs on `objects.Code` so `hasattr(co, 'co_code')` succeeds | done | 08b0d9d |
 | Plumb builtin `compile(src, fn, mode)` through the parser + compiler (`_try_compile` in `Lib/dis.py:80` calls this) | TODO | - |
-| Fix `importlib.util` attribute access path so `importlib.util.find_spec` resolves | TODO | - |
+| Fix `importlib.util` attribute access path so `importlib.util.find_spec` resolves | done | d009fd9 |
 | `gopy -m dis foo.py` runs end to end on a hello-world fixture | TODO | - |
 | `test/gate/disdata/` corpus (30 small files, one per feature) | TODO | - |
 | `test/gate/dis_parity_test.go` green on the 30-fixture corpus | TODO | - |
