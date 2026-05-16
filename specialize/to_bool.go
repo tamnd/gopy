@@ -55,7 +55,7 @@ func ToBool(value objects.Object, code []byte, instr int) {
 			Unspecialize(code, instr)
 			return
 		}
-		SetCacheU32(code, instr, 2, version)
+		toBoolCacheAt(code, instr).setVersion(version)
 		Specialize(code, instr, compile.TO_BOOL_ALWAYS_TRUE)
 		return
 	}

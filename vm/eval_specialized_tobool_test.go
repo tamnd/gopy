@@ -92,7 +92,7 @@ func TestFastToBoolAlwaysTrue(t *testing.T) {
 	inst := objects.NewInstance(cls)
 	version := cls.VersionTag()
 	got := runToBool(t, compile.TO_BOOL_ALWAYS_TRUE, inst, func(co *objects.Code, idx int) {
-		specialize.SetCacheU32(co.Code, idx, 2, version)
+		specialize.SetToBoolVersion(co.Code, idx, version)
 	})
 	if got != objects.True() {
 		t.Errorf("user instance: got %v want True", got)

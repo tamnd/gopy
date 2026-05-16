@@ -55,8 +55,9 @@ func StoreAttr(owner objects.Object, name *objects.Unicode, code []byte, instr i
 				Unspecialize(code, instr)
 				return
 			}
-			SetCacheU32(code, instr, 2, version)
-			SetCacheCell(code, instr, 4, uint16(idx))
+			c := attrCacheAt(code, instr)
+			c.setVersion(version)
+			c.setIndex(uint16(idx))
 			Specialize(code, instr, compile.STORE_ATTR_SLOT)
 			return
 		}
@@ -79,9 +80,10 @@ func StoreAttr(owner objects.Object, name *objects.Unicode, code []byte, instr i
 		Unspecialize(code, instr)
 		return
 	}
-	SetCacheU32(code, instr, 2, version)
+	c := attrCacheAt(code, instr)
+	c.setVersion(version)
 	if idx == objects.DictKeyAbsent {
-		SetCacheCell(code, instr, 4, 0)
+		c.setIndex(0)
 		Specialize(code, instr, compile.STORE_ATTR_WITH_HINT)
 		return
 	}
@@ -89,6 +91,6 @@ func StoreAttr(owner objects.Object, name *objects.Unicode, code []byte, instr i
 		Unspecialize(code, instr)
 		return
 	}
-	SetCacheCell(code, instr, 4, uint16(idx))
+	c.setIndex(uint16(idx))
 	Specialize(code, instr, compile.STORE_ATTR_INSTANCE_VALUE)
 }

@@ -80,7 +80,7 @@ func specializePyCall(fn *objects.Function, code []byte, instr int, nargs int32,
 	if version == 0 {
 		return false
 	}
-	SetCacheU32(code, instr, 2, version)
+	callCacheAt(code, instr).setFuncVersion(version)
 	exact := int32(fn.Code.Argcount) == nargs+boolToInt32(boundMethod)
 	switch {
 	case exact && boundMethod:

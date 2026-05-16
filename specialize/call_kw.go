@@ -64,7 +64,7 @@ func specializePyCallKw(fn *objects.Function, code []byte, instr int, boundMetho
 	if version == 0 {
 		return false
 	}
-	SetCacheU32(code, instr, 2, version)
+	callCacheAt(code, instr).setFuncVersion(version)
 	if boundMethod {
 		Specialize(code, instr, compile.CALL_KW_BOUND_METHOD)
 	} else {

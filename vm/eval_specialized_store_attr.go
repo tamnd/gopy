@@ -36,12 +36,12 @@ func (e *evalState) fastStoreAttrSlot(_ uint32) (int, bool) {
 	tp := inst.Type()
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := specialize.CacheU32(code, idx, 2)
+	cachedVer := specialize.AttrCacheVersion(code, idx)
 	curVer := tp.VersionTag()
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false
 	}
-	slot := int(specialize.CacheCell(code, idx, 4))
+	slot := int(specialize.AttrCacheIndex(code, idx))
 	value := e.peek(1).AsObject()
 	if !inst.SetSlotAt(slot, value) {
 		return 0, false

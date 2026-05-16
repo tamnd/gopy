@@ -153,12 +153,12 @@ func (e *evalState) fastLoadAttrModule(oparg uint32) (int, bool) {
 	}
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := specialize.CacheU32(code, idx, 2)
+	cachedVer := specialize.AttrCacheVersion(code, idx)
 	curVer := d.GetKeysVersion()
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false
 	}
-	slot := int(specialize.CacheCell(code, idx, 4))
+	slot := int(specialize.AttrCacheIndex(code, idx))
 	_, value, found := d.EntryAt(slot)
 	if !found || value == nil {
 		return 0, false
@@ -180,12 +180,12 @@ func (e *evalState) fastLoadAttrSlot(oparg uint32) (int, bool) {
 	}
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := specialize.CacheU32(code, idx, 2)
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
 	curVer := inst.Type().VersionTag()
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false
 	}
-	slot := int(specialize.CacheCell(code, idx, 4))
+	slot := int(specialize.AttrCacheIndex(code, idx))
 	value := inst.SlotAt(slot)
 	if value == nil {
 		return 0, false
@@ -207,7 +207,7 @@ func (e *evalState) fastLoadAttrClass(oparg uint32) (int, bool) {
 	}
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := specialize.CacheU32(code, idx, 2)
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
 	curVer := cls.VersionTag()
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false
@@ -233,7 +233,7 @@ func (e *evalState) fastLoadAttrClassWithMetaclassCheck(oparg uint32) (int, bool
 	}
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := specialize.CacheU32(code, idx, 2)
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
 	curVer := cls.VersionTag()
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false
@@ -242,7 +242,7 @@ func (e *evalState) fastLoadAttrClassWithMetaclassCheck(oparg uint32) (int, bool
 	if meta == nil {
 		return 0, false
 	}
-	cachedMeta := specialize.CacheU32(code, idx, 4)
+	cachedMeta := specialize.LoadMethodMetaVersion(code, idx)
 	curMeta := meta.VersionTag()
 	if curMeta == 0 || curMeta != cachedMeta {
 		return 0, false
@@ -278,7 +278,7 @@ func (e *evalState) fastLoadAttrMethodNoDict(oparg uint32) (int, bool) {
 	}
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := specialize.CacheU32(code, idx, 2)
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
 	curVer := tp.VersionTag()
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false
@@ -313,7 +313,7 @@ func (e *evalState) fastLoadAttrNondescriptorNoDict(oparg uint32) (int, bool) {
 	}
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := specialize.CacheU32(code, idx, 2)
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
 	curVer := tp.VersionTag()
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false
@@ -343,7 +343,7 @@ func (e *evalState) fastLoadAttrInstanceValue(oparg uint32) (int, bool) {
 	tp := inst.Type()
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := specialize.CacheU32(code, idx, 2)
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
 	if curVer := tp.VersionTag(); curVer == 0 || curVer != cachedVer {
 		return 0, false
 	}
@@ -351,11 +351,11 @@ func (e *evalState) fastLoadAttrInstanceValue(oparg uint32) (int, bool) {
 	if d == nil {
 		return 0, false
 	}
-	cachedKeys := specialize.CacheU32(code, idx, 4)
+	cachedKeys := specialize.LoadMethodKeysVersion(code, idx)
 	if curKeys := d.GetKeysVersion(); curKeys == 0 || curKeys != cachedKeys {
 		return 0, false
 	}
-	slot := int(specialize.CacheCell(code, idx, 6))
+	slot := int(specialize.LoadAttrInstanceValueSlot(code, idx))
 	_, value, found := d.EntryAt(slot)
 	if !found || value == nil {
 		return 0, false
@@ -383,7 +383,7 @@ func (e *evalState) fastLoadAttrProperty(oparg uint32) (int, bool, error) {
 	}
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := specialize.CacheU32(code, idx, 2)
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
 	curVer := tp.VersionTag()
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false, nil

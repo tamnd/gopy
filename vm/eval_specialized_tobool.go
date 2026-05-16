@@ -105,7 +105,7 @@ func (e *evalState) fastToBoolAlwaysTrue() (int, bool) {
 		return 0, false
 	}
 	idx := e.instrIdx()
-	cachedVer := specialize.CacheU32(e.f.Code.Code, idx, 2)
+	cachedVer := specialize.ToBoolVersion(e.f.Code.Code, idx)
 	if curVer := tp.VersionTag(); curVer == 0 || curVer != cachedVer {
 		return 0, false
 	}

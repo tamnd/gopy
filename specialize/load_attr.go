@@ -74,8 +74,9 @@ func specializeModuleLoadAttr(m *objects.Module, name *objects.Unicode, code []b
 	if version == 0 {
 		return false
 	}
-	SetCacheU32(code, instr, 2, version)
-	SetCacheCell(code, instr, 4, uint16(idx))
+	c := attrCacheAt(code, instr)
+	c.setVersion(version)
+	c.setIndex(uint16(idx))
 	Specialize(code, instr, compile.LOAD_ATTR_MODULE)
 	return true
 }
@@ -116,13 +117,14 @@ func specializeClassLoadAttr(cls *objects.Type, name *objects.Unicode, co *objec
 		if metaVersion == 0 {
 			return false
 		}
-		SetCacheU32(code, instr, 2, version)
-		SetCacheU32(code, instr, 4, metaVersion)
+		lm := loadMethodCacheAt(code, instr)
+		lm.setTypeVersion(version)
+		lm.setMetaVersion(metaVersion)
 		SetCacheObject(co.CacheObjects, instr, descr)
 		Specialize(code, instr, compile.LOAD_ATTR_CLASS_WITH_METACLASS_CHECK)
 		return true
 	}
-	SetCacheU32(code, instr, 2, version)
+	loadMethodCacheAt(code, instr).setTypeVersion(version)
 	SetCacheObject(co.CacheObjects, instr, descr)
 	Specialize(code, instr, compile.LOAD_ATTR_CLASS)
 	return true
@@ -160,8 +162,9 @@ func specializeInstanceLoadAttr(inst *objects.Instance, name *objects.Unicode, c
 		if idx < 0 || idx > 0xFFFF {
 			return false
 		}
-		SetCacheU32(code, instr, 2, version)
-		SetCacheCell(code, instr, 4, uint16(idx))
+		c := attrCacheAt(code, instr)
+		c.setVersion(version)
+		c.setIndex(uint16(idx))
 		Specialize(code, instr, compile.LOAD_ATTR_SLOT)
 		return true
 	case KindProperty:
@@ -174,7 +177,7 @@ func specializeInstanceLoadAttr(inst *objects.Instance, name *objects.Unicode, c
 		if p.Fget() == nil {
 			return false
 		}
-		SetCacheU32(code, instr, 2, version)
+		loadMethodCacheAt(code, instr).setTypeVersion(version)
 		SetCacheObject(co.CacheObjects, instr, p.Fget())
 		Specialize(code, instr, compile.LOAD_ATTR_PROPERTY)
 		return true
@@ -186,7 +189,7 @@ func specializeInstanceLoadAttr(inst *objects.Instance, name *objects.Unicode, c
 		if tp.HasDict {
 			return false
 		}
-		SetCacheU32(code, instr, 2, version)
+		loadMethodCacheAt(code, instr).setTypeVersion(version)
 		SetCacheObject(co.CacheObjects, instr, descr)
 		Specialize(code, instr, compile.LOAD_ATTR_METHOD_NO_DICT)
 		return true
@@ -197,7 +200,7 @@ func specializeInstanceLoadAttr(inst *objects.Instance, name *objects.Unicode, c
 		if tp.HasDict {
 			return false
 		}
-		SetCacheU32(code, instr, 2, version)
+		loadMethodCacheAt(code, instr).setTypeVersion(version)
 		SetCacheObject(co.CacheObjects, instr, descr)
 		Specialize(code, instr, compile.LOAD_ATTR_NONDESCRIPTOR_NO_DICT)
 		return true
@@ -236,9 +239,10 @@ func specializeInstanceLoadAttr(inst *objects.Instance, name *objects.Unicode, c
 	if keysVer == 0 {
 		return false
 	}
-	SetCacheU32(code, instr, 2, version)
-	SetCacheU32(code, instr, 4, keysVer)
-	SetCacheCell(code, instr, 6, uint16(idx))
+	lm := loadMethodCacheAt(code, instr)
+	lm.setTypeVersion(version)
+	lm.setKeysVersion(keysVer)
+	writeCell(code, instr, 6, uint16(idx)) // slot index lives in the descr quadword
 	Specialize(code, instr, compile.LOAD_ATTR_INSTANCE_VALUE)
 	return true
 }

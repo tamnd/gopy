@@ -20,7 +20,7 @@ func TestCallKwPy(t *testing.T) {
 	if got := compile.Opcode(buf[0]); got != compile.CALL_KW_PY {
 		t.Fatalf("opcode: got %s want CALL_KW_PY", got.Name())
 	}
-	if v := CacheU32(buf, 0, 2); v != f.Version {
+	if v := CallFuncVersion(buf, 0); v != f.Version {
 		t.Fatalf("func_version: got %d want %d", v, f.Version)
 	}
 }

@@ -26,7 +26,7 @@ func TestLoadAttrModule(t *testing.T) {
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_ATTR_MODULE {
 		t.Fatalf("opcode: got %s want LOAD_ATTR_MODULE", got.Name())
 	}
-	if v := CacheU32(co.Code, 0, 2); v == 0 {
+	if v := LoadMethodTypeVersion(co.Code, 0); v == 0 {
 		t.Fatalf("keys_version cache empty")
 	}
 }

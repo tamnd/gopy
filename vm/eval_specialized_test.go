@@ -16,8 +16,8 @@ import (
 func stampLoadAttrCache(co *objects.Code, instr int, op compile.Opcode, version uint32, idx uint16) {
 	specialize.SetOpcode(co.Code, instr, op)
 	specialize.StoreCounter(co.Code, instr, specialize.AdaptiveCounterCooldown())
-	specialize.SetCacheU32(co.Code, instr, 2, version)
-	specialize.SetCacheCell(co.Code, instr, 4, idx)
+	specialize.SetAttrCacheVersion(co.Code, instr, version)
+	specialize.SetAttrCacheIndex(co.Code, instr, idx)
 }
 
 // TestFastLoadAttrModule drives LOAD_ATTR_MODULE end-to-end: the
@@ -207,8 +207,8 @@ func TestFastLoadAttrClassWithMetaclassCheck(t *testing.T) {
 	specialize.Enable(co)
 	specialize.SetOpcode(co.Code, 1, compile.LOAD_ATTR_CLASS_WITH_METACLASS_CHECK)
 	specialize.StoreCounter(co.Code, 1, specialize.AdaptiveCounterCooldown())
-	specialize.SetCacheU32(co.Code, 1, 2, version)
-	specialize.SetCacheU32(co.Code, 1, 4, metaVersion)
+	specialize.SetLoadMethodTypeVersion(co.Code, 1, version)
+	specialize.SetLoadMethodMetaVersion(co.Code, 1, metaVersion)
 	specialize.SetCacheObject(co.CacheObjects, 1, value)
 
 	v, err := EvalCode(ts, co, nil, nil)
@@ -252,7 +252,7 @@ func TestFastLoadAttrMethodNoDict(t *testing.T) {
 	specialize.Enable(co)
 	specialize.SetOpcode(co.Code, 1, compile.LOAD_ATTR_METHOD_NO_DICT)
 	specialize.StoreCounter(co.Code, 1, specialize.AdaptiveCounterCooldown())
-	specialize.SetCacheU32(co.Code, 1, 2, version)
+	specialize.SetLoadMethodTypeVersion(co.Code, 1, version)
 	specialize.SetCacheObject(co.CacheObjects, 1, meth)
 
 	v, err := EvalCode(ts, co, nil, nil)
@@ -294,7 +294,7 @@ func TestFastLoadAttrNondescriptorNoDict(t *testing.T) {
 	specialize.Enable(co)
 	specialize.SetOpcode(co.Code, 1, compile.LOAD_ATTR_NONDESCRIPTOR_NO_DICT)
 	specialize.StoreCounter(co.Code, 1, specialize.AdaptiveCounterCooldown())
-	specialize.SetCacheU32(co.Code, 1, 2, version)
+	specialize.SetLoadMethodTypeVersion(co.Code, 1, version)
 	specialize.SetCacheObject(co.CacheObjects, 1, value)
 
 	v, err := EvalCode(ts, co, nil, nil)
@@ -335,7 +335,7 @@ func TestFastLoadAttrProperty(t *testing.T) {
 	specialize.Enable(co)
 	specialize.SetOpcode(co.Code, 1, compile.LOAD_ATTR_PROPERTY)
 	specialize.StoreCounter(co.Code, 1, specialize.AdaptiveCounterCooldown())
-	specialize.SetCacheU32(co.Code, 1, 2, version)
+	specialize.SetLoadMethodTypeVersion(co.Code, 1, version)
 	specialize.SetCacheObject(co.CacheObjects, 1, fget)
 
 	v, err := EvalCode(ts, co, nil, nil)
