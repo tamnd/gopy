@@ -107,6 +107,10 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		return e.fastBinaryOpSubscrDict()
 	case compile.BINARY_OP_SUBSCR_LIST_SLICE:
 		return e.fastBinaryOpSubscrListSlice()
+	case compile.LOAD_GLOBAL_MODULE:
+		next, ok = e.fastLoadGlobalModule(oparg)
+	case compile.LOAD_GLOBAL_BUILTIN:
+		next, ok = e.fastLoadGlobalBuiltin(oparg)
 	}
 	return next, ok, nil
 }
