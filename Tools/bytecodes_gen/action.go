@@ -754,8 +754,19 @@ var helperCalls = map[string]helperCall{
 	// Dict / object mutation. These return a C int err (0 on success,
 	// nonzero on failure); the surrounding `int err = ...; ERROR_IF(err);`
 	// pattern handles the dispatch.
-	"PyDict_SetItem":  {goExpr: "e.dictSetItem", arity: 3},
+	"PyDict_SetItem":   {goExpr: "e.dictSetItem", arity: 3},
 	"PyObject_DelItem": {goExpr: "e.objectDelItem", arity: 2},
+	"PyObject_DelAttr": {goExpr: "e.objectDelAttr", arity: 2},
+	// Pattern-matching helpers from Python/ceval.c.
+	"_PyEval_MatchKeys":  {goExpr: "e.matchKeys", arity: 2, dropFirst: 1},
+	"_PyEval_MatchClass": {goExpr: "e.matchClass", arity: 4, dropFirst: 1},
+	// Exception-type validation. Both return int err (0 ok, -1 bad
+	// type with an exception set); pendingErr carries the cause.
+	"_PyEval_CheckExceptTypeValid":     {goExpr: "e.checkExceptTypeValid", arity: 1, dropFirst: 1},
+	"_PyEval_CheckExceptStarTypeValid": {goExpr: "e.checkExceptStarTypeValid", arity: 1, dropFirst: 1},
+	// PyErr_GivenExceptionMatches: 1 if exc is an instance of (or
+	// matches) the target type, else 0.
+	"PyErr_GivenExceptionMatches": {goExpr: "e.exceptionMatches", arity: 2},
 }
 
 // parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.

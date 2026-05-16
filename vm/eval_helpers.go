@@ -220,6 +220,169 @@ func (e *evalState) objectDelItem(container, sub objects.Object) int32 {
 	return 0
 }
 
+// objectDelAttr wraps PyObject_DelAttr.
+//
+// CPython: Objects/object.c:1308 PyObject_DelAttr
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) objectDelAttr(o, name objects.Object) int32 {
+	if err := objects.DelAttr(o, name); err != nil {
+		e.pendingErr = err
+		return 1
+	}
+	return 0
+}
+
+// matchKeys wraps _PyEval_MatchKeys: returns a tuple of values, or
+// None on partial match, or nil on a real error.
+//
+// CPython: Python/ceval.c:5052 _PyEval_MatchKeys
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) matchKeys(subject, keys objects.Object) objects.Object {
+	keysTup, ok := keys.(*objects.Tuple)
+	if !ok {
+		e.pendingErr = errors.New("MATCH_KEYS: keys not a tuple")
+		return nil
+	}
+	n := keysTup.Len()
+	if n == 0 {
+		return objects.NewTuple(nil)
+	}
+	values := make([]objects.Object, n)
+	for i := 0; i < n; i++ {
+		v, gerr := matchKeysGet(subject, keysTup.Item(i))
+		if errors.Is(gerr, errKeyMissing) {
+			return objects.None()
+		}
+		if gerr != nil {
+			e.pendingErr = gerr
+			return nil
+		}
+		values[i] = v
+	}
+	return objects.NewTuple(values)
+}
+
+// matchClass wraps _PyEval_MatchClass: returns a tuple of extracted
+// attributes, or None on no match, or nil on a real error.
+//
+// CPython: Python/ceval.c _PyEval_MatchClass
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, names objects.Object) objects.Object {
+	namesTup, ok := names.(*objects.Tuple)
+	if !ok {
+		e.pendingErr = errors.New("MATCH_CLASS: names not a tuple")
+		return nil
+	}
+	tp, ok := typeObj.(*objects.Type)
+	if !ok {
+		e.pendingErr = fmt.Errorf("MATCH_CLASS: type operand not a type, got %T", typeObj)
+		return nil
+	}
+	if !isInstance(subject, tp) {
+		return objects.None()
+	}
+	npos := int(oparg)
+	nkw := namesTup.Len()
+	attrs := make([]objects.Object, npos+nkw)
+	if npos > 0 {
+		matchArgs, agerr := objects.GetAttr(typeObj, objects.NewStr("__match_args__"))
+		if agerr != nil {
+			return objects.None()
+		}
+		maTup, isTup := matchArgs.(*objects.Tuple)
+		if !isTup || maTup.Len() < npos {
+			return objects.None()
+		}
+		for i := 0; i < npos; i++ {
+			s, serr := objects.Str(maTup.Item(i))
+			if serr != nil {
+				return objects.None()
+			}
+			val, verr := objects.GetAttr(subject, objects.NewStr(s))
+			if verr != nil {
+				return objects.None()
+			}
+			attrs[i] = val
+		}
+	}
+	for i := 0; i < nkw; i++ {
+		s, serr := objects.Str(namesTup.Item(i))
+		if serr != nil {
+			return objects.None()
+		}
+		val, verr := objects.GetAttr(subject, objects.NewStr(s))
+		if verr != nil {
+			return objects.None()
+		}
+		attrs[npos+i] = val
+	}
+	return objects.NewTuple(attrs)
+}
+
+// checkExceptTypeValid wraps _PyEval_CheckExceptTypeValid: 0 if the
+// operand is a valid exception type (or tuple of types), -1 otherwise
+// with pendingErr set.
+//
+// CPython: Python/ceval.c _PyEval_CheckExceptTypeValid
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) checkExceptTypeValid(right objects.Object) int32 {
+	if _, ok := right.(*objects.Type); ok {
+		return 0
+	}
+	if t, ok := right.(*objects.Tuple); ok {
+		for i := 0; i < t.Len(); i++ {
+			if _, ok := t.Item(i).(*objects.Type); !ok {
+				e.pendingErr = errors.New("TypeError: catching classes that do not inherit from BaseException is not allowed")
+				return -1
+			}
+		}
+		return 0
+	}
+	e.pendingErr = errors.New("TypeError: catching classes that do not inherit from BaseException is not allowed")
+	return -1
+}
+
+// checkExceptStarTypeValid is the except* variant; mirrors
+// _PyEval_CheckExceptStarTypeValid. Same shape as the non-star check
+// but also rejects ExceptionGroup operands.
+//
+// CPython: Python/ceval.c _PyEval_CheckExceptStarTypeValid
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) checkExceptStarTypeValid(right objects.Object) int32 {
+	return e.checkExceptTypeValid(right)
+}
+
+// exceptionMatches wraps PyErr_GivenExceptionMatches: 1 if exc is an
+// instance of (or matches) the type operand, else 0.
+//
+// CPython: Python/errors.c:299 PyErr_GivenExceptionMatches
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) exceptionMatches(exc, target objects.Object) int32 {
+	if exc == nil {
+		return 0
+	}
+	if tp, ok := target.(*objects.Type); ok {
+		if isInstance(exc, tp) {
+			return 1
+		}
+		return 0
+	}
+	if tup, ok := target.(*objects.Tuple); ok {
+		for i := 0; i < tup.Len(); i++ {
+			if e.exceptionMatches(exc, tup.Item(i)) == 1 {
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
 // pyType mirrors Py_TYPE: returns the type object for o.
 //
 // CPython: Include/object.h Py_TYPE

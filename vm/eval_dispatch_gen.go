@@ -79,7 +79,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = exc_value_st
 		match_type_st := e.peek(0)
 		_ = match_type_st
-		// body bail: int err rhs: unexpected token "_PyEval_CheckExceptStarTypeValid" in expression
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: rest match
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CHECK_EXC_MATCH:
@@ -87,7 +87,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = left
 		right := e.peek(0)
 		_ = right
-		// body bail: int err rhs: unexpected token "_PyEval_CheckExceptTypeValid" in expression
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: left* b
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CLEANUP_THROW:
@@ -97,7 +97,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = last_sent_val
 		exc_value_st := e.peek(0)
 		_ = exc_value_st
-		// body bail: int matches rhs: unexpected token "PyErr_GivenExceptionMatches" in expression
+		// body bail: int matches rhs: unexpected token "PyExc_StopIteration" in expression
 		// outputs: none value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CONVERT_VALUE:
@@ -120,8 +120,16 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.DELETE_ATTR:
 		owner := e.peek(0)
 		_ = owner
-		// body bail: int err rhs: unexpected token "PyObject_DelAttr" in expression
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		name := e.nameAt(int(oparg))
+		_ = name
+		err := e.objectDelAttr(owner.AsObject(), name)
+		_ = err
+		owner.Close()
+		if err != 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.DELETE_DEREF:
 		// body bail: PyObject oldobj rhs: unexpected token "PyCell_SwapTakeRef" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
@@ -499,7 +507,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = type_v
 		names := e.peek(0)
 		_ = names
-		// body bail: PyObject attrs_o rhs: unexpected token "_PyEval_MatchClass" in expression
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: attrs
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MATCH_KEYS:
@@ -507,9 +515,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = subject
 		keys := e.peek(0)
 		_ = keys
-		// body bail: PyObject values_or_none_o rhs: unexpected token "_PyEval_MatchKeys" in expression
-		// outputs: subject* keys* values_or_none
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var values_or_none stackref.Ref
+		values_or_none_o := e.matchKeys(subject.AsObject(), keys.AsObject())
+		_ = values_or_none_o
+		if values_or_none_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		values_or_none = stackref.FromObject(values_or_none_o)
+		e.setPeek(1, subject)
+		e.setPeek(0, keys)
+		e.push(values_or_none)
+		return e.advance(), nil, nil, false, nil
 	case compile.MATCH_MAPPING:
 		subject := e.peek(0)
 		_ = subject
