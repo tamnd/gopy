@@ -78,13 +78,13 @@ func buildModule() (*objects.Module, error) {
 	if argv == nil {
 		argv = []string{""}
 	}
-	if err := setItem(md, "argv", strList(argv)); err != nil {
+	if err := setItem(md, "argv", strListAsList(argv)); err != nil {
 		return nil, err
 	}
-	if err := setItem(md, "orig_argv", strList(argv)); err != nil {
+	if err := setItem(md, "orig_argv", strListAsList(argv)); err != nil {
 		return nil, err
 	}
-	if err := setItem(md, "warnoptions", strList(nil)); err != nil {
+	if err := setItem(md, "warnoptions", strListAsList(nil)); err != nil {
 		return nil, err
 	}
 	if err := setItem(md, "_xoptions", objects.NewDict()); err != nil {
