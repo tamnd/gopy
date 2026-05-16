@@ -1,0 +1,297 @@
+---
+title: Numbers
+description: int, float, complex, bool. Arbitrary-precision integers, IEEE-754 doubles, complex pairs, and the number protocol that dispatches between them.
+---
+
+# Numbers
+
+Python has four built-in number types: `int`, `float`, `complex`,
+and `bool` (a subtype of `int`). Each one supports the standard
+arithmetic operations and a long list of dunder methods. Mixing
+types in an expression promotes through a fixed lattice:
+`int` ⊆ `float` ⊆ `complex`, with `bool` collapsing to `int`.
+
+The implementations live alongside the rest of the object types in
+`objects/`. This page documents how each type is stored, how the
+operations dispatch, and how the *number protocol* glues them
+together.
+
+## Where the code lives
+
+| File                          | Role                                                            | CPython counterpart                       |
+| ----------------------------- | --------------------------------------------------------------- | ----------------------------------------- |
+| `objects/int.go`              | The `Int` struct (arbitrary precision via `math/big`).          | `Include/cpython/longintrepr.h`           |
+| `objects/long_arith.go`       | Addition, subtraction, multiplication, division.                | `Objects/longobject.c long_add` etc.      |
+| `objects/long_bitwise.go`     | Bitwise ops: and, or, xor, shifts, invert.                      | `Objects/longobject.c long_and` etc.      |
+| `objects/long_cache.go`       | Small-int cache for `-5..256`.                                  | `Objects/longobject.c` small int cache    |
+| `objects/long_parse.go`       | `int(str, base)` parsing.                                       | `Objects/longobject.c PyLong_FromString`  |
+| `objects/long_misc.go`        | Conversion helpers, repr, hash, comparison.                     | `Objects/longobject.c`                    |
+| `objects/int_bind.go`         | Slot table installation for `int`.                              | `Objects/longobject.c PyLong_Type`        |
+| `objects/float.go`            | The `Float` struct (IEEE-754 double).                           | `Include/cpython/floatobject.h`           |
+| `objects/float_parse.go`      | `float(str)` parsing.                                           | `Objects/floatobject.c float_new`         |
+| `objects/complex.go`          | The `Complex` struct.                                           | `Include/cpython/complexobject.h`         |
+| `objects/bool.go`             | The `Bool` type, `True` and `False` singletons.                 | `Objects/boolobject.c`                    |
+| `objects/abstract_number.go`  | The number protocol dispatch (Add, Subtract, ...).               | `Objects/abstract.c PyNumber_*`           |
+
+## int
+
+```go
+// objects/int.go Int
+type Int struct {
+    VarHeader
+    value big.Int  // math/big arbitrary precision
+}
+```
+
+The integer storage uses Go's `math/big.Int`. The `VarHeader.size`
+records the bit length sign-encoded the same way CPython encodes
+`ob_size` on `PyLongObject`: positive for non-negative numbers
+(magnitude is the limb count), negative for negative numbers.
+
+A small-int cache (`long_cache.go`) keeps singletons for
+`-5..256`. Operations that produce a result in that range return
+the cached singleton instead of allocating. The cache is built at
+interpreter init.
+
+```go
+// objects/long_cache.go SmallInt
+func SmallInt(n int) *Int
+
+// objects/int.go FromInt64
+func FromInt64(n int64) *Int
+
+// objects/int.go ToInt64
+func ToInt64(o *Int) (int64, error)
+```
+
+### Arithmetic
+
+`Add`, `Sub`, `Mul`, `Div`, `FloorDiv`, `Mod`, `Pow`, `Neg`, `Abs`,
+and the in-place variants live in `long_arith.go`. Each operation:
+
+1. Coerces the right operand to `Int` if it is a small enough type
+   (otherwise returns `NotImplemented`, which makes the dispatcher
+   try the other side or promote).
+2. Performs the operation on the `big.Int`.
+3. Allocates a result, except when the result is in the small-int
+   cache.
+
+Power is special: `pow(a, b, m)` (three-argument power) computes
+`a**b mod m` more efficiently than the two-argument form followed
+by a modulo. The implementation uses `big.Int.Exp`.
+
+True division (`a / b`) returns a `Float`. Floor division and
+modulo return an `Int`. The dispatch is centralised so the type
+promotion rule is in one place.
+
+### Bitwise
+
+`And`, `Or`, `Xor`, `Lshift`, `Rshift`, `Invert` work on the
+two's-complement view of the integers. Python's integers are
+unbounded in size; the bitwise operations treat negative numbers as
+if they had infinitely many leading 1 bits. The implementation
+synthesises the negative view by negating, applying the operation,
+and re-negating as appropriate.
+
+### Hash and compare
+
+`Int.__hash__` is defined by the formula in CPython's
+`Include/cpython/pyhash.h`: the integer is reduced modulo
+`PyHASH_MODULUS` (a Mersenne prime, `2**61 - 1`), the result is
+mapped into a 64-bit hash, and the value `-1` is remapped to `-2`
+because `-1` is reserved as an error sentinel.
+
+`Int.__eq__` against another `Int` compares the `big.Int` values
+directly. Against a `Float`, the integer is compared by value
+(treating the float's mantissa exactly, so `2**60 == float(2**60)`
+is true; `2**60 + 1 == float(2**60 + 1)` is false because the
+float cannot represent the right side exactly).
+
+### Parsing
+
+`int("...")` and `int("...", base)` parse the string into a
+`big.Int`. The parser accepts the same syntax CPython accepts:
+optional sign, optional underscore separators, optional base
+prefix (`0x`, `0o`, `0b`). The maximum string-to-int conversion
+length is capped (the `PYTHONINTMAXSTRDIGITS` limit, default
+4300) to defend against quadratic parsing on adversarial inputs.
+
+## float
+
+```go
+// objects/float.go Float
+type Float struct {
+    Header
+    value float64
+}
+```
+
+The `value` is an IEEE-754 double. The arithmetic and comparison
+ops dispatch through `Type.Number`, falling back to Go's
+operators for the actual computation.
+
+`float("inf")`, `float("-inf")`, and `float("nan")` are recognised
+during parsing. `NaN` is not equal to itself; the comparison
+operators return the IEEE-754 result, and the hash of `nan` is
+`0`.
+
+`float.is_integer()` returns True for values whose fractional part
+is zero, with the standard IEEE caveat for very large numbers.
+
+`float.as_integer_ratio()` returns the exact rational form of the
+float (numerator, denominator). The implementation extracts the
+mantissa and exponent from the IEEE bits and constructs the ratio
+in `big.Int`.
+
+## complex
+
+```go
+// objects/complex.go Complex
+type Complex struct {
+    Header
+    re, im float64
+}
+```
+
+A complex number is a pair of doubles: `re` and `im`. Operations
+follow the standard rules for complex arithmetic. The hash is
+defined as `hash(re) + 1000003 * hash(im)` reduced modulo the
+hash modulus, matching CPython exactly so that
+`hash(complex(0, 0)) == hash(0)`.
+
+`abs(complex(a, b))` computes `math.hypot(a, b)`, the
+overflow-resistant magnitude.
+
+The parser for `complex("1+2j")` lives in `complex.go`. The format
+accepts an optional real part, a sign, an imaginary part with `j`
+suffix, and optional whitespace. The error messages match CPython's
+to the character.
+
+## bool
+
+```go
+// objects/bool.go Bool
+type Bool struct {
+    Int
+}
+```
+
+`Bool` subclasses `Int`. The two singletons `True` and `False`
+wrap the integer values 1 and 0. Most arithmetic on bools
+promotes to `int`: `True + True` is `int(2)`, not `Bool`.
+
+The bitwise operations preserve the bool type:
+`True & True` is `True`, not `int(1)`. This is the only place
+where `bool` "wins" over `int` in the promotion lattice; the
+behaviour matches CPython.
+
+`bool(x)` is defined for every object: it calls `x.__bool__()`
+if defined, otherwise `len(x) != 0`, otherwise `True`. The
+default is `True` because most objects are truthy.
+
+## The number protocol
+
+`abstract_number.go` is the dispatch layer that turns Python-level
+operators into slot calls.
+
+```go
+// objects/abstract_number.go Add
+func Add(a, b Object) (Object, error)
+
+// objects/abstract_number.go Subtract
+func Subtract(a, b Object) (Object, error)
+
+// objects/abstract_number.go Multiply
+func Multiply(a, b Object) (Object, error)
+
+// ... TrueDivide, FloorDivide, Remainder, Power, ...
+```
+
+Each dispatch follows the standard sequence:
+
+1. Try `type(a).Number.Op(a, b)`.
+2. If it returns `NotImplemented`, try `type(b).Number.ROp(a, b)`.
+3. If both decline, raise `TypeError`.
+
+There are two subtleties:
+
+- **Subtype precedence.** If `type(b)` is a strict subtype of
+  `type(a)` and `type(b)` overrides the reverse op, the reverse op
+  is tried *first*. This lets subclasses cooperate with their
+  parents.
+- **In-place variants.** `IAdd`, `ISub`, `IMul`, ... try the
+  in-place slot first. If it returns `NotImplemented`, the
+  dispatcher falls through to the regular add. The compiler
+  emits the in-place form for augmented assignments (`a += b`).
+
+`PyNumber_Index` is the conversion that subscript operations use:
+it returns an `int` (via `__index__`) without doing implicit
+conversion from floats. This is what protects `list[1.5]` from
+silently converting to `list[1]`.
+
+## Power and modular exponentiation
+
+`pow(a, b)` and `pow(a, b, m)` go through the number protocol's
+ternary slot. For integers, the three-arg form uses Go's
+`big.Int.Exp`, which is much faster than the two-arg form followed
+by a modulo for large exponents. For floats, the three-arg form
+raises `TypeError` (modular exponentiation is undefined for
+floats).
+
+`Pow` of a negative integer to a non-integer exponent returns a
+`Complex` (matching CPython). `Pow` of zero to a negative exponent
+raises `ZeroDivisionError`.
+
+## Specialisation
+
+`BINARY_OP_ADD_INT`, `BINARY_OP_ADD_FLOAT`,
+`BINARY_OP_MULTIPLY_INT`, ... are specialised opcodes that skip
+the protocol dispatch when both operands are known to be of the
+specialised type. The shape check is one comparison against the
+cached type version. The fast path goes directly to the type's
+`Number.Add` slot, bypassing the `NotImplemented` round trip.
+
+For small ints in a known range, the specialised handler can also
+skip the allocation by hitting the small-int cache directly. See
+[Specializer](./specializer) for the cache layout.
+
+## Formatting
+
+`format(n, spec)` and `f"{n:spec}"` route through the type's
+`Format` slot. The slot parses the spec (see [Format](./format))
+and produces a string:
+
+- For `int`, supported types are `b`, `c`, `d`, `o`, `x`, `X`,
+  `n`, `e`, `E`, `f`, `F`, `g`, `G`, `%`.
+- For `float`, supported types are `e`, `E`, `f`, `F`, `g`, `G`,
+  `n`, `%`.
+- For `complex`, the spec is parsed but the actual rendering
+  formats real and imaginary parts independently.
+
+## Status
+
+Integer arithmetic (including bigint), float arithmetic, complex
+arithmetic, and bool semantics all work. The small-int cache is
+in place. Parsing matches CPython's accepted input and error
+messages. Hashes match the formulas in `pyhash.h`. The number
+protocol dispatches correctly through the `NotImplemented` chain.
+Specialised opcodes for `int`/`float` arithmetic are wired through
+[Specializer](./specializer).
+
+The places where work continues are mostly in `complex` (some
+formatting edge cases) and in the `decimal`-style precision
+controls for float (`sys.float_info`, `__float_format__`, ...),
+both of which are tracked by their respective test gates.
+
+## Reference
+
+- Port source: `objects/int.go`, `objects/long_*.go`,
+  `objects/float.go`, `objects/complex.go`, `objects/bool.go`,
+  `objects/abstract_number.go`.
+- CPython source: `Objects/longobject.c`, `Objects/floatobject.c`,
+  `Objects/complexobject.c`, `Objects/boolobject.c`,
+  `Objects/abstract.c`.
+- PEP 3141, *A Type Hierarchy for Numbers*.
+- PEP 237, *Unifying Long Integers and Integers*.
+- PEP 238, *Changing the Division Operator*.
+- PEP 754, *IEEE 754 Floating Point Special Values*.

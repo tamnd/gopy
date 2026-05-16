@@ -1,0 +1,311 @@
+---
+title: Lifecycle
+description: Start to finish. Preconfig, config, initialization, the main entry, the REPL, the run-file path, and finalization.
+---
+
+# Lifecycle
+
+An interpreter has a beginning, a middle, and an end. The
+beginning reads configuration from the environment and the command
+line, builds the runtime, registers builtins, and loads the
+bootstrap importlib. The middle runs user code: a script, a
+module, the REPL, an `-c` string. The end runs `atexit`
+handlers, flushes streams, releases interpreter state, and exits
+the process.
+
+The CPython reference is `Python/initconfig.c` (config),
+`Python/pylifecycle.c` (init/finalize), and `Modules/main.c`
+(main entry). The gopy ports are split across `initconfig/`,
+`lifecycle/`, and `pythonrun/`.
+
+## Where the code lives
+
+| Package           | Files                                           | Role                                                    | CPython counterpart                  |
+| ----------------- | ----------------------------------------------- | ------------------------------------------------------- | ------------------------------------ |
+| `initconfig/`     | `preconfig.go`                                  | The pre-configuration: locale, hash randomisation flag, ... | `Python/initconfig.c PyPreConfig` |
+| `initconfig/`     | `config.go`, `config_cli.go`, `config_env.go`, `config_read.go`, `config_copy.go` | Full config: parses argv, environment, defaults. | `Python/initconfig.c PyConfig`     |
+| `initconfig/`     | `env.go`, `getopt.go`                            | Environment helpers and the option parser.              | `Python/initconfig.c` argv parsing   |
+| `initconfig/`     | `status.go`                                      | The `Status` return type (success / exit / error).      | `Python/initconfig.c PyStatus`       |
+| `lifecycle/`      | `init.go`                                        | Builds the runtime, the interpreter, and the thread.    | `Python/pylifecycle.c Py_InitializeFromConfig` |
+| `lifecycle/`      | `finalize.go`                                    | Shuts the interpreter down, runs atexit.                | `Python/pylifecycle.c Py_Finalize`   |
+| `lifecycle/`      | `main.go`                                        | The `Main` entry: parse, init, run, finalize.            | `Modules/main.c Py_Main`             |
+| `pythonrun/`      | `repl.go`                                        | The interactive REPL.                                   | `Python/pythonrun.c PyRun_InteractiveLoop` |
+| `pythonrun/`      | `runfile.go`                                     | Runs a Python source file.                              | `Python/pythonrun.c PyRun_SimpleFileExFlags` |
+| `pythonrun/`      | `runstring.go`                                   | Runs a Python source string (`-c`).                     | `Python/pythonrun.c PyRun_SimpleStringFlags` |
+
+## Preconfig
+
+The preconfig is the small subset of configuration that has to be
+known before anything else. The most important fields:
+
+- **Allocator.** Which malloc backend to use. (Informational on
+  gopy; the Go GC handles allocation.)
+- **Configure locale.** Whether to call `setlocale(LC_ALL, "")` at
+  startup.
+- **Coerce C locale.** PEP 538: if the locale is `C` or `POSIX`,
+  attempt to coerce to a UTF-8 locale.
+- **UTF-8 mode.** PEP 540: force UTF-8 for filesystem and stream
+  encodings regardless of the locale.
+- **Hash seed.** The `PYTHONHASHSEED` value.
+
+```go
+// initconfig/preconfig.go PreConfig
+type PreConfig struct {
+    ParseArgv      int
+    UseEnvironment int
+    ConfigureLocale int
+    CoerceCLocale  int
+    Utf8Mode       int
+    DevMode        int
+    Allocator      int
+    HashSeed       uint64
+    UseHashSeed    int
+}
+```
+
+The fields are tri-state: `-1` means "compute from defaults",
+`0` means false, `1` means true. The CPython convention is
+preserved so that command-line flag handling matches.
+
+## Config
+
+The full config has dozens of fields. The interesting ones:
+
+- **`Argv`**: the list of command-line arguments, after option
+  parsing.
+- **`ExecutableName`**: the path to the interpreter binary.
+- **`PythonPath`**, **`PrefixDir`**, **`ExecPrefixDir`**: the paths
+  used to derive `sys.path`.
+- **`ModuleSearchPaths`**: `sys.path` itself.
+- **`ProgramName`**: the program name (typically `python` or
+  `python3`).
+- **`InteractiveMode`**, **`InspectMode`**: REPL flags.
+- **`Optimization`**: -O / -OO levels.
+- **`WarningOptions`**: -W filters.
+- **`XOptions`**: -X options.
+
+The config is read in stages:
+
+1. **Defaults.** Hardcoded values for unset fields.
+2. **Environment.** `PYTHONPATH`, `PYTHONHOME`, `PYTHONIOENCODING`,
+   `PYTHONWARNINGS`, `PYTHONHASHSEED`, ...
+3. **CLI.** The arguments to `gopy` (or whatever the binary is
+   named). The `-` and `--` conventions are honoured;
+   anything after a non-option arg becomes the script's argv.
+
+```go
+// initconfig/config.go Config
+type Config struct {
+    Preconfig PreConfig
+    Argv       []string
+    ProgramName string
+    ExecutableName string
+    PythonPath string
+    PrefixDir  string
+    ExecPrefixDir string
+    ModuleSearchPaths []string
+    InteractiveMode bool
+    InspectMode bool
+    Optimization int
+    WarningOptions []string
+    XOptions []string
+    // ...
+}
+```
+
+```go
+// initconfig/config_read.go Read
+func Read(argv []string, env map[string]string) (*Config, Status)
+```
+
+`Read` returns either a complete `Config` and a success status, or
+a partial `Config` and an error/exit status (when the command line
+contained `--help` or `--version`, or an invalid argument).
+
+## Status
+
+`Status` is a tagged union used as a return value across the init
+path. Three kinds:
+
+- `StatusOk` is success.
+- `StatusExit` carries an exit code; the caller should exit with
+  that code without further work.
+- `StatusError` carries an error message and a function name; the
+  caller should report and exit nonzero.
+
+```go
+// initconfig/status.go Status
+type Status struct {
+    Kind     StatusKind
+    Func     string
+    ErrorMsg string
+    ExitCode int
+}
+```
+
+The shape mirrors CPython's `PyStatus`. The caller pattern is
+"check status; on non-OK, exit with the appropriate code and
+message."
+
+## Initialization
+
+`lifecycle.Init` builds the runtime from a `Config`.
+
+```go
+// lifecycle/init.go Init
+func Init(cfg *Config) (*state.Runtime, Status)
+```
+
+The sequence:
+
+1. Create the `Runtime` singleton.
+2. Create the main `Interpreter`.
+3. Create the main `Thread`.
+4. Install the small-int cache, the singletons (`None`,
+   `NotImplemented`, `Ellipsis`), and the basic type hierarchy.
+5. Initialise the `builtins` module.
+6. Initialise `sys`. Wire `sys.argv`, `sys.path`, `sys.executable`,
+   `sys.platform`, `sys.flags`, `sys.version`, `sys.implementation`.
+7. Register the builtin importer and the frozen importer with
+   `sys.meta_path`.
+8. Run the importlib bootstrap (frozen importlib loads itself, then
+   loads the path-based finder).
+9. Install warnings filters from `-W` and `PYTHONWARNINGS`.
+10. Initialise codecs and the codec registry. Register the built-in
+    codecs.
+11. Initialise the `signal` module if signals are wanted.
+12. Initialise `gc`, `weakref`, and the other "always on" modules.
+13. Set up the `__main__` module.
+14. Return the populated runtime.
+
+If anything raises during init, the status is `StatusError` with
+the failing step named.
+
+## Main
+
+`lifecycle.Main` is the entry point a `cmd/gopy` binary calls.
+
+```go
+// lifecycle/main.go Main
+func Main(argv []string) int
+```
+
+The sequence:
+
+1. Pre-configure: read env, read preconfig CLI flags.
+2. Read the full config.
+3. On `StatusExit`, return the exit code.
+4. On `StatusError`, print the error message and return 1.
+5. Initialise the runtime.
+6. Dispatch to the chosen run mode:
+   - `-c "code"`: `pythonrun.RunString`.
+   - `-m module`: `pythonrun.RunModule`.
+   - `script.py`: `pythonrun.RunFile`.
+   - No script: `pythonrun.RunRepl`.
+7. Capture the dispatcher's exit code.
+8. Finalize the runtime.
+9. Return the exit code.
+
+Errors raised during the run propagate as `SystemExit` to set the
+exit code. Uncaught exceptions in the run print a traceback and
+return 1.
+
+## RunFile, RunString, RunModule, RunRepl
+
+`pythonrun/runfile.go`, `pythonrun/runstring.go`, `pythonrun/repl.go`
+each implement one entry. They share a pattern:
+
+1. Compile the source (string, file, or REPL line) to a code
+   object via the [Compile](./compile) pipeline.
+2. Build a `__main__` module if one does not exist yet.
+3. Execute the code object with `__main__.__dict__` as globals.
+4. Return the result (typically `None`) or propagate the exception.
+
+The REPL has additional concerns: read a line, decide whether it
+is complete (a single-line expression, the start of a compound
+statement, an in-progress multi-line input), accumulate input
+until complete, then compile and run.
+
+The REPL uses the standard library's `code.InteractiveConsole`
+behaviour, dispatching readline through the platform's GNU
+readline or a fallback line editor.
+
+## Finalization
+
+`lifecycle.Finalize` runs at the end of `Main` (or in response to
+an explicit `Py_Finalize` C API call).
+
+```go
+// lifecycle/finalize.go Finalize
+func Finalize(rt *state.Runtime) error
+```
+
+The sequence:
+
+1. Run `atexit` callbacks in registration order.
+2. Close any open stdio streams (`sys.stdout`, `sys.stderr`,
+   `sys.stdin`).
+3. Run finalisers for any pending `__del__` callbacks queued on
+   the breaker.
+4. Drain the async-generator finaliser queue.
+5. Run the `__atexit__` of each loaded module that has one.
+6. Clear `sys.modules`.
+7. Tear down the interpreter state.
+8. Tear down the runtime state.
+
+Finalisation is *cooperative*: a misbehaving `atexit` callback (one
+that hangs or raises) can prevent the rest of the sequence from
+running. The implementation logs and continues on raise; on
+hangs, there is no special timeout.
+
+Finalisation does *not* try to free every object; the Go GC will
+handle that on its own when the process exits. The job is to
+flush, persist, and report.
+
+## atexit
+
+`atexit.register(func)` adds a callback to a per-runtime queue.
+The queue runs in reverse registration order during
+`Finalize`. The implementation lives in `module/atexit/` and is
+a thin wrapper around a list maintained on the runtime.
+
+## Subinterpreters
+
+PEP 684 introduces a per-interpreter GIL and clean isolation
+between sub-interpreters. CPython 3.14 lays the groundwork.
+
+The gopy port:
+- `state.Runtime` may host multiple `state.Interpreter` instances.
+- Each interpreter has its own `__main__`, its own `sys.modules`,
+  its own builtins.
+- `lifecycle.Init` creates the main interpreter; further
+  interpreters are created on demand.
+- The GIL (when strict GIL mode is enabled) is per-interpreter.
+
+The subinterpreter surface is wired but the user-facing API
+(`interpreters.create()`, `interpreters.run_string()`) lives in the
+`interpreters` module, which is partial in gopy at the time of
+writing.
+
+## Status
+
+The whole lifecycle is end-to-end: read config, init runtime, run
+script or REPL or `-c`, finalize, exit with the right code. CLI
+parsing matches CPython for all standard options. Environment
+variables are read. `sys.argv`, `sys.path`, `sys.flags`,
+`sys.implementation`, `sys.version` are populated. The REPL is
+functional. `atexit` runs.
+
+Some edge cases continue to land: the `-X frozen_modules=off` flag,
+some interactions between `PYTHONSTARTUP` and the REPL, and parts
+of the subinterpreters surface.
+
+## Reference
+
+- Port source: `initconfig/`, `lifecycle/`, `pythonrun/`.
+- CPython source: `Python/initconfig.c`, `Python/pylifecycle.c`,
+  `Modules/main.c`, `Python/pythonrun.c`.
+- PEP 540, *Add a new UTF-8 Mode*.
+- PEP 587, *Python Initialization Configuration*.
+- PEP 538, *Coercing the legacy C locale to a UTF-8 based locale*.
+- PEP 684, *A Per-Interpreter GIL*.

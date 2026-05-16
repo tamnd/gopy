@@ -1,0 +1,202 @@
+---
+title: Format
+description: The format-spec mini-language. Parsing [[fill]align][sign][#][0][width][,][.precision][type] and dispatching to per-type renderers.
+---
+
+# Format
+
+`format(value, spec)`, `f"{value:spec}"`, and `"{:spec}".format(value)`
+all route to the same machinery: parse the spec string into a
+structured spec, dispatch to the value's `__format__`, render the
+result.
+
+The spec is a tiny mini-language documented in
+[the Format Specification Mini-Language section of the Library
+Reference](https://docs.python.org/3/library/string.html#formatspec).
+The grammar is:
+
+```
+[[fill]align][sign][z][#][0][width][grouping][.precision][type]
+```
+
+Each field is optional. Most uses set only width and type
+(`{x:8d}`, `{y:.2f}`).
+
+CPython's parser lives in `Python/formatter_unicode.c`. The gopy
+port is in `format/`.
+
+## Where the code lives
+
+| File              | Role                                                            | CPython counterpart                  |
+| ----------------- | --------------------------------------------------------------- | ------------------------------------ |
+| `format/format.go`| `Spec` struct and `ParseSpec`. The mini-language parser.        | `Python/formatter_unicode.c parse_internal_render_format_spec` |
+
+The parser is one file. The renderers live on the value types
+themselves (in `objects/str_format.go`, `objects/float.go`, etc.),
+because each type's renderer needs intimate knowledge of the
+value's representation.
+
+## The Spec struct
+
+```go
+// format/format.go Spec
+type Spec struct {
+    Fill        rune     // padding character
+    Align       byte     // '<', '>', '=', '^', or 0 for default
+    Sign        byte     // '+', '-', ' ', or 0 for default
+    Z           bool     // 'z': coerce negative zero to positive
+    Hash        bool     // '#': alternate form (0x, 0o, 0b, etc.)
+    Zero        bool     // '0': pad with leading zeros
+    Width       int      // -1 if absent
+    Grouping    byte     // ',', '_', or 0
+    Precision   int      // -1 if absent
+    Type        byte     // 'b', 'c', 'd', 'e', 'f', 'g', 'o', 's', 'x', 'X', ...
+}
+```
+
+Every field is optional. Defaults are zero values (false for
+booleans, -1 for width and precision, 0 for `Type`).
+
+## The parser
+
+```go
+// format/format.go ParseSpec
+func ParseSpec(s string) (Spec, error)
+```
+
+The parser walks the string once. The grammar is unambiguous
+because each field has a distinctive lookahead:
+
+1. **Fill and align.** If `s[1]` is one of `<>=^`, then `s[0]` is
+   the fill character and `s[1]` is the alignment. Otherwise, if
+   `s[0]` is one of `<>=^`, then alignment is `s[0]` and fill is
+   the default for the alignment.
+2. **Sign.** One of `+-`, or space.
+3. **`z` flag.** PEP 682 added this for "coerce negative zero".
+4. **`#` flag.** Alternate form.
+5. **`0` flag.** Zero-padding. Implies alignment `=` and fill `0`
+   unless explicit.
+6. **Width.** A decimal integer.
+7. **Grouping.** Either `,` (every three digits) or `_` (every
+   three digits with underscores).
+8. **Precision.** A decimal integer preceded by `.`.
+9. **Type.** A single letter.
+
+Any prefix may be empty. A spec of `""` is the default for the
+type.
+
+## Dispatch
+
+`format(value, spec)` calls `type(value).Format(value, spec)`.
+The slot:
+
+```go
+// objects/type.go Type
+type Type struct {
+    // ...
+    Format func(self Object, spec string) (Object, error)
+}
+```
+
+Built-in types fill the slot with type-specific renderers. The
+renderers parse the spec themselves (using `format.ParseSpec`) and
+then produce a string.
+
+User-defined types can override `__format__`. The default
+implementation (on `object`) accepts only the empty spec and falls
+back to `__str__(self)`; any non-empty spec raises `TypeError`.
+User overrides may handle arbitrary specs.
+
+## Renderers
+
+The per-type renderers live next to the values:
+
+- **`str.__format__`**: in `objects/str_format.go`. Supports the
+  empty type (just string formatting), the `s` type (same), and the
+  alignment/fill/width fields.
+- **`int.__format__`**: in `objects/long_misc.go`. Supports
+  `b`, `c`, `d`, `o`, `x`, `X`, `n` (locale-aware decimal), and the
+  float types (`e`, `E`, `f`, `F`, `g`, `G`, `%`) which convert the
+  int to a float first.
+- **`float.__format__`**: in `objects/float.go`. Supports
+  `e`, `E`, `f`, `F`, `g`, `G`, `n`, `%`. The `g` type chooses
+  between `e` and `f` based on the magnitude.
+- **`complex.__format__`**: in `objects/complex.go`. Format the
+  real and imaginary parts with the spec, joined by `+`.
+
+The renderers share helpers for: zero-padding, grouping insertion,
+width padding, sign placement, alternate-form prefixes.
+
+## The string slots
+
+Three string-related dunders sit next to `__format__`:
+
+- **`__str__`**: returns a human-readable string.
+- **`__repr__`**: returns a string that, ideally, when passed to
+  `eval`, reproduces the value.
+- **`__bytes__`**: returns a `bytes` form (for the `bytes()`
+  constructor).
+
+These are not driven by the spec; they have their own slots and
+are called directly. The format machinery only routes through
+`__format__`.
+
+## f-strings
+
+f-strings (PEP 498) compile each interpolation into a call sequence:
+
+```
+LOAD_FAST    x
+FORMAT_VALUE 0          # FVC_NONE: no conversion
+BUILD_STRING n
+```
+
+Or with conversion and spec:
+
+```
+LOAD_FAST       x
+FORMAT_VALUE    2       # FVC_REPR: call repr(x) first
+LOAD_CONST      "x>5"
+FORMAT_VALUE    4       # FVC_HAVE_SPEC: spec follows
+BUILD_STRING    n
+```
+
+`FORMAT_VALUE`'s oparg encodes the conversion (none, `!s`, `!r`,
+`!a`) and whether a spec follows. The handler in `vm/eval_simple.go`
+applies the conversion, calls `__format__`, and pushes the result.
+
+`BUILD_STRING` concatenates `n` strings off the stack.
+
+## Locale-aware formatting
+
+The `n` type in numeric formatting uses the C library's
+locale-dependent grouping and decimal separator. gopy reads the
+locale through `module/locale/`. The default is `C` (no grouping,
+`.` as the decimal); programs that set their locale via
+`locale.setlocale` get locale-specific output for `n`.
+
+The `,` and `_` grouping flags do *not* consult the locale; they
+always use comma or underscore. This matches CPython.
+
+## Status
+
+The spec parser is complete. The string formatter is complete.
+The integer formatter is complete for all standard types. The
+float formatter covers all standard types but has edge cases
+around very large precisions where the difference between CPython
+and gopy's `strconv.FormatFloat` requires more polish. The complex
+formatter is functional but defers some corner cases. f-string
+compilation works end-to-end.
+
+## Reference
+
+- Port source: `format/`,
+  `objects/str_format.go`, `objects/long_misc.go`,
+  `objects/float.go`, `objects/complex.go`.
+- CPython source: `Python/formatter_unicode.c`,
+  `Objects/stringlib/unicode_format.h`.
+- PEP 3101, *Advanced String Formatting*.
+- PEP 378, *Format Specifier for Thousands Separator*.
+- PEP 498, *Literal String Interpolation* (f-strings).
+- PEP 515, *Underscores in Numeric Literals*.
+- PEP 682, *Format Specifier for Signed Zero*.

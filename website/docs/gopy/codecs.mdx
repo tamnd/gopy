@@ -1,0 +1,253 @@
+---
+title: Codecs
+description: The codec registry. How encodings get looked up, how str.encode and bytes.decode dispatch, and how error handlers compose.
+---
+
+# Codecs
+
+A codec is a pair of functions: an encoder that turns text into
+bytes, and a decoder that turns bytes into text. CPython exposes
+codecs through `str.encode`, `bytes.decode`, and the high-level
+`codecs` module. The codec for a given name (`utf-8`, `latin-1`,
+`shift_jis`, ...) is found through a registry of *search functions*;
+each search function takes a normalised name and returns a
+`CodecInfo` describing the codec, or `None` to mean "I don't know
+about this one".
+
+The package is `codecs/`. CPython's reference is `Python/codecs.c`.
+
+## Where the code lives
+
+| File                | Role                                                           | CPython counterpart            |
+| ------------------- | -------------------------------------------------------------- | ------------------------------ |
+| `codecs/registry.go`| `SearchFunc`, `CodecInfo`, `Register`, `Lookup`, `NormalizeName`. | `Python/codecs.c PyCodec_Register`, `_PyCodec_Lookup` |
+| `codecs/errors.go`  | Error handler dispatch: strict, ignore, replace, xmlcharrefreplace, backslashreplace, namereplace. | `Python/codecs.c` error handlers |
+| `codecs/builtin.go` | Builtin codec registration (UTF-8, ASCII, Latin-1, ...).        | `Modules/_codecsmodule.c`      |
+
+The `module/codecs/` directory exposes the Python-level surface
+(the `codecs` module). It is mostly a thin wrapper over the
+`codecs/` package.
+
+## The registry
+
+The registry is a list of search functions. `Lookup(name)` walks
+the list in order; the first function that returns a non-nil
+`CodecInfo` wins.
+
+```go
+// codecs/registry.go SearchFunc
+type SearchFunc func(name string) *CodecInfo
+
+// codecs/registry.go CodecInfo
+type CodecInfo struct {
+    Name           string
+    Encode         func(input Object, errors string) (Object, int, error)
+    Decode         func(input Object, errors string) (Object, int, error)
+    StreamReader   *Type
+    StreamWriter   *Type
+    IncrementalEnc *Type
+    IncrementalDec *Type
+}
+
+// codecs/registry.go Register
+func Register(fn SearchFunc)
+
+// codecs/registry.go Lookup
+func Lookup(name string) (*CodecInfo, error)
+```
+
+`Encode` and `Decode` are the workhorses. They return the encoded
+(or decoded) result, the number of input units consumed, and an
+error (or nil). The split between result and consumed-count matters
+for streaming: a streaming decoder may return part of the output
+and leave the rest of the input for the next call.
+
+`StreamReader`, `StreamWriter`, `IncrementalEnc`, `IncrementalDec`
+are types for the higher-level interfaces. They wrap `Encode` /
+`Decode` with buffering and incremental decode logic.
+
+## Name normalisation
+
+Encoding names come from users in inconsistent forms: `UTF-8`,
+`utf_8`, `utf 8`, `UTF8`. The registry normalises before lookup.
+
+```go
+// codecs/registry.go NormalizeName
+func NormalizeName(name string) string
+```
+
+The rules: lowercase the string; replace any hyphen, space, or
+period with an underscore; strip leading and trailing underscores.
+`UTF-8` and `utf_8` both normalise to `utf_8`, which is what the
+registered search functions see.
+
+The cache is keyed on the normalised name, so a second lookup with
+a different spelling returns the cached codec without re-walking
+the search functions.
+
+## Builtin codecs
+
+`codecs/builtin.go` registers a search function that knows about
+the codecs implemented in Go: `utf-8`, `utf-16`, `utf-16-le`,
+`utf-16-be`, `utf-32`, `utf-32-le`, `utf-32-be`, `ascii`,
+`latin-1`, `utf-7`, `unicode-escape`, `raw_unicode_escape`,
+`utf-8-sig`, plus the IDN and codepoint codecs.
+
+The other codecs Python supports (Shift_JIS, EUC-KR, ...) live in
+`encodings/` in the standard library and are loaded by the
+`encodings.search_function`. They are registered through the same
+mechanism: a search function added to the registry.
+
+## Encoding and decoding
+
+`str.encode(encoding, errors)` and `bytes.decode(encoding, errors)`
+look up the codec and call the encoder or decoder.
+
+```go
+// objects/str.go (*Str).Encode
+func (s *Str) Encode(encoding, errors string) (*Bytes, error)
+
+// objects/bytes.go (*Bytes).Decode
+func (b *Bytes) Decode(encoding, errors string) (*Str, error)
+```
+
+Both methods accept default encoding (`utf-8`) and default error
+handler (`strict`) when called with no arguments.
+
+For UTF-8 specifically, the path is short-circuited: there is a
+direct call into a hand-tuned encoder/decoder that does not go
+through the registry. UTF-8 is the overwhelmingly common case and
+saving the lookup is worth the special case.
+
+## Error handlers
+
+When an encoder cannot represent a codepoint (or a decoder hits a
+malformed byte), it raises. The error handler decides what
+"raises" means: do we propagate, substitute a placeholder, drop
+the bad bytes, or insert an escape sequence?
+
+```go
+// codecs/errors.go Apply
+func Apply(name string, exc objects.Object) (objects.Object, int, error)
+```
+
+Built-in handlers:
+
+- **`strict`** (default): raise `UnicodeError`.
+- **`ignore`**: skip the offending sequence; emit nothing.
+- **`replace`**: emit `?` (encoder) or `U+FFFD` (decoder).
+- **`xmlcharrefreplace`** (encoder only): emit `&#NNNN;` for each
+  unencodable codepoint.
+- **`backslashreplace`**: emit `\xNN`, `\uNNNN`, or `\UNNNNNNNN`
+  escapes.
+- **`namereplace`** (encoder only): emit `\N{NAME}` if the Unicode
+  name table has an entry for the codepoint, else fall back to
+  `backslashreplace`.
+- **`surrogateescape`**: bidirectional handler that escapes
+  unencodable bytes as low surrogates (U+DC80..U+DCFF). Decoders
+  recover the original bytes on a round trip; encoders emit them
+  back.
+- **`surrogatepass`** (encoder only): permit otherwise-illegal
+  surrogate codepoints (used by `utf-8-sig` and some XML
+  use cases).
+
+User code can register additional handlers via
+`codecs.register_error(name, callback)`. The callback gets the
+`UnicodeError` instance and returns `(replacement, position)`.
+
+## Stream codecs
+
+A `StreamReader` wraps a file-like object and exposes decoded text.
+A `StreamWriter` wraps a file-like object and accepts text to
+encode. Both buffer at the byte boundary so that multi-byte
+sequences split across read calls are reassembled correctly.
+
+```python
+# Python-level usage
+import codecs
+with codecs.open("file.txt", "r", "utf-8") as f:
+    for line in f:
+        process(line)
+```
+
+The gopy implementation defers to the codec's `StreamReader` /
+`StreamWriter` type, which is built on top of the codec's
+`IncrementalDecoder` / `IncrementalEncoder`. The incremental
+versions maintain state across calls: how much of the previous
+multi-byte sequence was consumed, what trailing bytes are waiting
+for the next chunk.
+
+## Incremental decoders
+
+```go
+// codecs/registry.go IncrementalDecoder interface
+type IncrementalDecoder interface {
+    Decode(input []byte, final bool) (Object, error)
+    Reset()
+    GetState() (Object, error)
+    SetState(state Object) error
+}
+```
+
+The `final` flag indicates whether `input` is the last chunk;
+non-final chunks may end mid-sequence, and the decoder is expected
+to buffer the partial bytes until the next call. The
+`GetState` / `SetState` pair lets callers checkpoint and restart
+the decoder, used by `io.TextIOWrapper` for seek operations.
+
+## The codecs module
+
+`module/codecs/` exposes the standard-library `codecs` module. The
+surface includes:
+
+- `codecs.encode(obj, encoding, errors)` and
+  `codecs.decode(obj, encoding, errors)`.
+- `codecs.lookup(encoding)` returns the `CodecInfo`.
+- `codecs.lookup_error(name)` returns the error handler.
+- `codecs.register(search_function)` adds a search function.
+- `codecs.register_error(name, handler)` adds an error handler.
+- `codecs.open(filename, mode, encoding, errors, buffering)` opens
+  a file with codec wrapping.
+- `codecs.iterencode(iterator, encoding, errors)` and the matching
+  `iterdecode`.
+- Constants: BOM markers (`BOM_UTF8`, `BOM_UTF16`, ...).
+
+The implementations delegate to the `codecs/` package; the module
+file is mostly type-definition boilerplate.
+
+## Why not just use Go's encoding/utf8
+
+Go's standard library has excellent UTF-8 support but lacks the
+broader codec ecosystem Python ships with. gopy uses Go's
+`encoding/utf8` for the UTF-8 fast path and implements the other
+codecs directly, because importing `golang.org/x/text` would pull
+in a much larger dependency tree than the spec port requires.
+
+The plan is to keep the codec set self-contained. The UTF-* family,
+ASCII, Latin-1, and the IDN codecs cover the vast majority of
+real-world workloads.
+
+## Status
+
+The registry, the name normaliser, the error handler dispatch,
+and the UTF-8 fast path all work. UTF-16 and UTF-32 (LE/BE/system)
+work. ASCII, Latin-1, `unicode-escape`, `raw_unicode_escape`, and
+`utf-8-sig` work. The incremental and stream wrappers are wired
+but exercised mostly by the file-I/O paths; they need more test
+coverage from `Lib/test/test_codecs.py`.
+
+The non-UTF, non-Latin codecs (Shift_JIS, EUC-*, GBK, Big5, ...)
+are not yet implemented; programs that need them currently fall
+back to a `LookupError`.
+
+## Reference
+
+- Port source: `codecs/`, `module/codecs/`.
+- CPython source: `Python/codecs.c`, `Modules/_codecsmodule.c`,
+  `Lib/codecs.py`, `Lib/encodings/`.
+- PEP 100, *Python Unicode Integration*.
+- PEP 263, *Defining Python Source Code Encodings*.
+- PEP 383, *Non-decodable Bytes in System Character Interfaces*
+  (the `surrogateescape` handler).
+- PEP 528, *Change Windows console encoding to UTF-8*.
+- RFC 3629, *UTF-8, a transformation format of ISO 10646*.

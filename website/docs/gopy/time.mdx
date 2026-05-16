@@ -1,0 +1,250 @@
+---
+title: Time
+description: Clocks. Wall-clock and monotonic time, perf counters, and the per-platform clock info reported by sys and the time module.
+---
+
+# Time
+
+Python's standard library has three time concepts:
+
+- **Wall-clock time.** "What time is it?". Subject to clock
+  adjustments (NTP, daylight savings, manual changes).
+- **Monotonic time.** "How much time has passed since some
+  arbitrary moment?". Never goes backwards. Resolution is typically
+  nanoseconds on modern platforms.
+- **Performance counter.** "How much time has passed at the finest
+  resolution the platform offers?". On most platforms, aliased to
+  monotonic.
+
+Each of these has a `time.Xxx()` function in Python, with a
+matching `time.get_clock_info("xxx")` that reports the
+implementation, the resolution, and whether the clock is
+monotonic and adjustable.
+
+The package is `pytime/`. CPython's reference is `Python/pytime.c`.
+
+## Where the code lives
+
+| File                       | Role                                                                 | CPython counterpart                          |
+| -------------------------- | -------------------------------------------------------------------- | -------------------------------------------- |
+| `pytime/pytime.go`         | The `Time` type, the `ClockInfo` struct, public entry points.        | `Include/cpython/pytime.h`, `Python/pytime.c`|
+| `pytime/clocks.go`         | The clock backends. `Time_`, `Monotonic`, `PerfCounter`.             | `Python/pytime.c py_get_*_clock`             |
+| `pytime/info_darwin.go`    | macOS clock info: `mach_absolute_time()`, `gettimeofday()`.          | `Python/pytime.c` macOS branch               |
+| `pytime/info_linux.go`     | Linux/FreeBSD clock info: `clock_gettime(CLOCK_MONOTONIC)`, ...      | `Python/pytime.c` Linux branch               |
+| `pytime/info_windows.go`   | Windows clock info: `QueryPerformanceCounter()`, ...                 | `Python/pytime.c` Windows branch             |
+
+The clock backends use Go's `time.Now()`. On every supported
+platform, Go's runtime calls the same underlying syscall CPython
+uses: `clock_gettime` on Linux and FreeBSD,
+`mach_absolute_time` on macOS, `QueryPerformanceCounter` on Windows.
+Saying "Go's time.Now()" and saying "the syscall CPython calls" is
+the same thing in practice.
+
+## The Time type
+
+```go
+// pytime/pytime.go Time
+type Time int64
+```
+
+`Time` is nanoseconds in an int64. The encoding can represent any
+moment from roughly the year 1677 to 2262, which is enough for the
+millennia humans tend to think about.
+
+The choice mirrors CPython's `_PyTime_t`. Doing arithmetic in
+nanoseconds and converting to seconds (a `float64`) at the
+boundary keeps precision at the source.
+
+## Wall-clock time
+
+```go
+// pytime/clocks.go Time_
+func Time_(out *Time) error
+```
+
+Writes the current Unix time (nanoseconds since 1970-01-01 UTC)
+into `*out`. Implementation reads `time.Now().UnixNano()`. The
+trailing underscore on the function name avoids colliding with the
+type name.
+
+The wall-clock is *adjustable*: NTP, manual changes, or
+daylight-saving transitions can move it forward or backward.
+Programs that need elapsed-time semantics should use
+`Monotonic` instead.
+
+## Monotonic time
+
+```go
+// pytime/clocks.go Monotonic
+func Monotonic(out *Time) error
+```
+
+Writes nanoseconds since process start into `*out`. The epoch
+(`processStart`) is captured at package init time using
+`time.Now()`. Subsequent calls compute `time.Since(processStart)`.
+
+Monotonic time never decreases on a single machine. Across
+suspend/resume the behaviour matches the platform: macOS
+preserves monotonicity across sleep,
+`CLOCK_MONOTONIC` on Linux is unaffected by NTP but may pause
+across suspend (`CLOCK_BOOTTIME` would not, but neither CPython
+nor gopy uses it by default).
+
+## Performance counter
+
+```go
+// pytime/clocks.go PerfCounter
+func PerfCounter(out *Time) error
+```
+
+Aliased to `Monotonic` on every supported platform. CPython does
+the same alias; the perf counter is a separate concept on no
+modern OS that Python supports.
+
+## Clock info
+
+```go
+// pytime/pytime.go ClockInfo
+type ClockInfo struct {
+    Implementation string  // e.g. "clock_gettime(CLOCK_MONOTONIC)"
+    Monotonic      bool
+    Adjustable     bool
+    Resolution     float64 // seconds
+}
+```
+
+The per-platform info files (`info_darwin.go`,
+`info_linux.go`, `info_windows.go`) fill the struct based on what
+the underlying syscall does. The fields are surfaced to Python via
+`time.get_clock_info(name)`.
+
+For example, on Linux:
+
+```go
+// pytime/info_linux.go fillMonotonicInfo
+func fillMonotonicInfo(info *ClockInfo) {
+    info.Implementation = "clock_gettime(CLOCK_MONOTONIC)"
+    info.Monotonic = true
+    info.Adjustable = false
+    info.Resolution = 1e-9  // 1 nanosecond
+}
+```
+
+The resolution is the *granularity* of the clock, not the
+*precision*. A clock that reports nanoseconds but only ticks every
+microsecond has a resolution of 1e-6.
+
+## The time module
+
+`module/time/` exposes the Python-level `time` API. The hot
+entries route to `pytime/`:
+
+- `time.time()` → `Time_`.
+- `time.monotonic()` → `Monotonic`.
+- `time.perf_counter()` → `PerfCounter`.
+- `time.time_ns()` → `Time_`, returned as int (ns directly).
+- `time.monotonic_ns()` → `Monotonic`, returned as int.
+- `time.perf_counter_ns()` → `PerfCounter`, returned as int.
+- `time.get_clock_info(name)` → `ClockInfo` via `info_*.go`.
+
+The non-clock entries (`time.sleep`, `time.strftime`,
+`time.strptime`, `time.gmtime`, `time.localtime`, `time.struct_time`)
+live in `module/time/` and use Go's `time.Sleep`, `time.Format`,
+and `time.Parse` for the actual work, wrapped to match Python's
+API shape and error messages.
+
+## time.sleep
+
+```python
+time.sleep(n)
+```
+
+Sleeps for `n` seconds. The implementation calls
+`time.Sleep(time.Duration(n * float64(time.Second)))`. On signals,
+the sleep is interrupted; the signal handler runs (via the
+[GIL](./gil) breaker) and the sleep returns early.
+
+The Python contract: `sleep(0)` yields the GIL but does not block.
+In gopy's GIL-less default, `sleep(0)` is a `runtime.Gosched()`
+call that yields to other goroutines.
+
+## struct_time
+
+`time.localtime()`, `time.gmtime()`, and `time.strptime()` return
+a `struct_time`. The Python type is a named tuple with nine
+fields. The Go implementation is in `objects/structseq.go` (the
+`StructSeq` machinery) wrapping a fixed-shape tuple.
+
+The fields:
+
+```
+tm_year   int
+tm_mon    int  (1..12)
+tm_mday   int  (1..31)
+tm_hour   int  (0..23)
+tm_min    int  (0..59)
+tm_sec    int  (0..61)
+tm_wday   int  (0..6, Monday is 0)
+tm_yday   int  (1..366)
+tm_isdst  int  (0 or 1, -1 if unknown)
+```
+
+The conversions (`gmtime`, `localtime`, `mktime`) use Go's
+`time.Time.UTC()` and `time.Time.Local()`.
+
+## strftime and strptime
+
+`strftime(format, t)` formats a `struct_time` with a C-style format
+string. The mapping from `strftime` placeholders to Go format
+strings is not direct, so the implementation has its own walk
+over the format string. The placeholders supported are the
+union of CPython's documented set; locale-aware placeholders
+(`%c`, `%x`, `%X`) consult the C library's locale through
+`module/locale/`.
+
+`strptime(s, format)` parses a string with the same format
+language. The Go implementation is a state machine; the
+particularly tricky case is mixed `%Z` (timezone name) handling,
+which requires looking up the timezone in the platform's database.
+
+## perf_ns and the monotonic monotonic
+
+When code needs high-resolution timing for benchmarks,
+`time.perf_counter_ns()` returns nanoseconds since an arbitrary
+moment. The implementation is identical to `time.monotonic_ns()`;
+the API distinction exists for historical reasons in CPython and
+gopy keeps the same shape.
+
+The relation:
+```
+perf_counter()       == perf_counter_ns() * 1e-9
+monotonic()          == monotonic_ns() * 1e-9
+time()               == time_ns() * 1e-9
+```
+
+The `_ns` variants are preferred for new code because they avoid
+the float precision loss that `* 1e-9` introduces for large
+nanosecond values.
+
+## Status
+
+Wall-clock, monotonic, and perf counter all work on Linux, macOS,
+and Windows with the correct platform-specific implementation and
+metadata. `time.sleep` interrupts on signals.
+`time.strftime` and `time.strptime` cover the common placeholders.
+`time.struct_time` is a `StructSeq`. Locale-aware placeholders
+work when a locale has been set; the default `C` locale produces
+ASCII-only output.
+
+The places where work continues are around `time.tzset` and the
+zoneinfo database integration (which the `zoneinfo` module
+handles separately).
+
+## Reference
+
+- Port source: `pytime/`, `module/time/`.
+- CPython source: `Python/pytime.c`, `Modules/timemodule.c`,
+  `Include/cpython/pytime.h`.
+- PEP 418, *Add monotonic time, performance counter, and process
+  time functions*.
+- PEP 564, *Add new time functions with nanosecond resolution*.

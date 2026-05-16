@@ -79,6 +79,21 @@ const sidebars = {
         'gopy/imports',
       ],
     },
+    {
+      label: 'Foundations',
+      type: 'category',
+      className: 'sidebar-heading',
+      collapsed: false,
+      items: [
+        'gopy/numbers',
+        'gopy/hamt',
+        'gopy/hashing',
+        'gopy/format',
+        'gopy/codecs',
+        'gopy/time',
+        'gopy/lifecycle',
+      ],
+    },
   ],
 
   cpythonInternalsSidebar: [

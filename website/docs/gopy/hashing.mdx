@@ -1,0 +1,262 @@
+---
+title: Hashing
+description: SipHash-1-3, the per-process hash secret, and the rules every built-in type follows for __hash__.
+---
+
+# Hashing
+
+Hashing turns an object into an integer that two equal objects
+share. The integer feeds dicts, sets, frozensets, and any
+algorithm built on hash-based dispatch. Python's hash rules are
+specific: equal objects must hash to the same value; the hash must
+be stable for the lifetime of the object; user-defined `__hash__`
+implementations must satisfy both invariants or get
+"unhashable" errors at use sites.
+
+CPython implements hashing with SipHash-1-3 for variable-length
+inputs (bytes, str, memoryview), the integer-shaping formula for
+numeric types, and identity hashing for objects without a custom
+`__hash__`. The per-process *hash secret* randomises the inputs so
+that adversarial collisions cannot be precomputed across runs.
+
+gopy implements the same. The package is `hash/`.
+
+## Where the code lives
+
+| File              | Role                                                                 | CPython counterpart            |
+| ----------------- | -------------------------------------------------------------------- | ------------------------------ |
+| `hash/hash.go`    | Public API: `Buffer`, `BufferFNV`. Constants. `FuncDef`/`GetFuncDef`.| `Python/pyhash.c`              |
+| `hash/siphash.go` | SipHash-1-3 implementation.                                          | `Python/pyhash.c siphash13`    |
+| `hash/secret.go`  | The per-process 16-byte hash secret.                                 | `Python/pyhash.c PyHash_State` |
+| `hash/fnv.go`     | FNV-1a fallback (rarely used in practice).                           | `Python/pyhash.c fnv`          |
+
+## The constants
+
+```go
+// hash/hash.go constants
+const (
+    HashBits      = 61                // Mersenne prime exponent
+    HashModulus   = (1 << HashBits) - 1
+    HashInf       = 314159
+    HashImag      = 1000003
+    HashAlgorithm = "siphash13"
+)
+```
+
+The hash modulus is a Mersenne prime. Reducing modulo a prime
+distributes hash values evenly across the integer range and
+preserves the property that `hash(-1) != -1` (which would collide
+with the error sentinel).
+
+`HashInf` is the canonical hash of `float('inf')`. `HashImag` is
+the multiplier used in `Complex.__hash__`.
+
+`HashAlgorithm` is reported by `sys.hash_info.algorithm`.
+
+## The variable-length hash
+
+`Buffer(src []byte) int64` is the primary entry point. It hashes a
+byte slice and returns a 64-bit signed integer reduced to the
+positive range (with `-1` remapped to `-2`).
+
+```go
+// hash/hash.go Buffer
+func Buffer(src []byte) int64
+```
+
+Implementation: SipHash-1-3 with the per-process secret as the
+key. The output is a 64-bit unsigned value; conversion to signed
+preserves the bit pattern; the `-1`-to-`-2` remap follows.
+
+`BufferFNV` is the FNV-1a alternative. CPython supports both at
+build time; gopy supports both at run time. `BufferFNV` is the
+fallback if `Buffer` ever needs to be swapped at startup.
+
+```go
+// hash/hash.go BufferFNV
+func BufferFNV(src []byte) int64
+```
+
+## SipHash-1-3
+
+```go
+// hash/siphash.go siphash13
+func siphash13(k0, k1 uint64, src []byte) uint64
+```
+
+SipHash is a keyed pseudo-random function designed by
+Aumasson and Bernstein. The "1-3" variant uses one compression
+round per block and three finalisation rounds, the same
+configuration CPython uses. The 1-3 variant is fast and resists
+hash-flooding attacks for typical workloads.
+
+The implementation is straight Go translated from the canonical C
+reference. Block processing reads 64-bit words from `src` in
+little-endian order; the final partial block packs the remaining
+bytes into a tagged word that includes the message length.
+
+## The hash secret
+
+The secret is 16 bytes. The first 8 bytes are `k0`; the next 8
+are `k1`.
+
+```go
+// hash/secret.go HashSecret
+var HashSecret [16]byte
+```
+
+The secret is initialised at program start. The source is one of:
+
+- `crypto/rand` (the default; reads from the OS entropy source).
+- The `PYTHONHASHSEED` environment variable, parsed as an integer.
+  The interpreter expands the integer to 16 bytes deterministically
+  for reproducible runs (debugging, fuzzing).
+- The literal value zero, when `PYTHONHASHSEED=0`. This disables
+  hash randomisation entirely. Programs that depend on stable hash
+  output across runs (rare, and discouraged) can use this.
+
+The secret is shared across goroutines because it does not change
+during the program's lifetime. Reads are unsynchronised.
+
+```go
+// hash/secret.go siphashKeys
+func siphashKeys() (uint64, uint64)
+
+// hash/secret.go fnvKeys
+func fnvKeys() (uint64, uint64)
+```
+
+The `siphashKeys` accessor returns `k0`/`k1` from the secret. The
+`fnvKeys` accessor returns the per-process FNV offsets.
+
+## Numeric hashing
+
+Numeric types follow a different scheme. The hash must satisfy:
+
+- `hash(int(x)) == hash(float(x))` when both produce the same
+  mathematical value.
+- `hash(complex(x, 0)) == hash(x)`.
+- `hash(rational) == hash(equivalent int/float)`.
+
+The unifying formula is in `Include/cpython/pyhash.h`:
+
+```
+For rational p/q (gcd(p, q) == 1):
+    h = pow(q, HashModulus - 2, HashModulus)    # modular inverse of q
+    h = (|p| * h) % HashModulus
+    if p < 0: h = -h
+    if h == -1: h = -2
+    return h
+```
+
+For integers, `q = 1`, so the formula reduces to `|p| mod
+HashModulus`. For floats, the value is decomposed into mantissa
+and exponent, the exponent is scaled into the modular ring, and
+the mantissa is combined.
+
+The `Int.Hash`, `Float.Hash`, `Complex.Hash`, and `Bool.Hash`
+methods all route through this single formula. The implementations
+are spread across `objects/int.go`, `objects/float.go`,
+`objects/complex.go`, and `objects/bool.go`, but the algorithm is
+shared.
+
+## String and bytes hashing
+
+`str.Hash` first encodes the codepoints to bytes (UTF-8) and then
+calls `Buffer`. The bytes are not cached at the codepoint level;
+the encoded form is computed once per hash call.
+
+`bytes.Hash` calls `Buffer` directly on the byte slice.
+
+The hash is cached on the object after the first computation;
+subsequent hashes return the cached value without recomputing.
+The cache lives in a header field on `Bytes` and `Str` for exactly
+this reason.
+
+## Tuple and frozenset hashing
+
+`tuple.Hash` combines the hashes of its elements with the same
+formula CPython uses (a multiplicative-additive mix with a specific
+seed). The formula is in `Objects/tupleobject.c tuplehash`.
+
+```go
+// objects/tuple.go (*Tuple).Hash
+func (t *Tuple) Hash() (int64, error)
+```
+
+`frozenset.Hash` is order-independent: the elements are hashed
+individually, then combined with XOR plus a length-dependent salt.
+The formula in `Objects/setobject.c frozenset_hash` is the one
+gopy implements.
+
+`set.__hash__` is `None` (mutable sets are unhashable).
+
+## Identity hashing
+
+For objects with no custom `__hash__`, the default is the identity
+hash: the object's address, mixed with the hash secret to make it
+unpredictable across runs.
+
+```go
+// objects/identity.go IdentityHash
+func IdentityHash(o Object) int64
+```
+
+The identity is the Go pointer interpreted as a `uintptr`. The mix
+is one SipHash invocation over the pointer bytes; the result is the
+hash. Two objects with the same address (impossible while both are
+alive) would hash the same; this is the precise invariant the
+default `__eq__` (identity-comparison) requires.
+
+## Unhashable
+
+A type with `__hash__ = None` is unhashable. Attempting to use it
+as a dict key or set member raises `TypeError`. The check is in
+the dict and set implementations:
+
+```go
+// objects/dict.go SetItem
+func (d *Dict) SetItem(key, value Object) error {
+    h, err := Hash(key)
+    if err != nil { return err }
+    // ...
+}
+```
+
+`Hash(key)` returns an error if the type's `Hash` slot is nil.
+The error is the standard `TypeError("unhashable type: ...")`.
+
+User code can also explicitly mark a type unhashable by setting
+`__hash__ = None` in its class body; the type constructor honours
+this and leaves the slot nil.
+
+## Hash and equality
+
+The hash and equality invariant: if `a == b` then `hash(a) ==
+hash(b)`. Violating this leads to dicts that lose keys and sets
+that behave inconsistently.
+
+The reverse is *not* required: `hash(a) == hash(b)` does not imply
+`a == b`. Collisions are expected and handled by the dict and set
+implementations.
+
+Programs that define `__eq__` should also define `__hash__` (or
+explicitly mark the type unhashable). The type constructor enforces
+this by defaulting `__hash__` to `None` when `__eq__` is defined
+without `__hash__`.
+
+## Status
+
+SipHash-1-3, FNV-1a, the secret, the numeric formula, the
+tuple/frozenset combiners, and the identity hash all work. The
+`-1`-to-`-2` remap is in place. `PYTHONHASHSEED` is honoured.
+`sys.hash_info` reports the right values.
+
+## Reference
+
+- Port source: `hash/`.
+- CPython source: `Python/pyhash.c`,
+  `Include/cpython/pyhash.h`.
+- *SipHash: a fast short-input PRF*, Aumasson and Bernstein, 2012.
+- CVE-2011-4885 (the hash-flooding vulnerability that motivated
+  hash randomisation in Python and other languages).

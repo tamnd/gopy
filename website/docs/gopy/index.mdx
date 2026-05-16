@@ -40,12 +40,12 @@ choice is deliberate: it keeps the package-to-file correspondence
 with CPython visible, and it lets a reader navigate by `cd`
 without losing their place.
 
-| Pillar     | Packages                                                              |
-| ---------- | --------------------------------------------------------------------- |
-| Pipeline   | `token/`, `tokenize/`, `parser/`, `parser_gen/`, `arena/`, `ast/`, `future/`, `symtable/`, `compile/` |
-| Execution  | `vm/`, `stackref/`, `intrinsics/`, `frame/`, `state/`, `specialize/`, `optimizer/`, `monitor/`, `gil/`, `pythread/`, `pysync/`, `errors/`, `traceback/`, `warnings/` |
-| Objects    | `objects/`, `abstract/`, `builtins/`, `gc/` (via `module/gc/`), `weakref/`, `brc/`, `hamt/`, `hash/`, `hashtable/` |
-| Runtime    | `lifecycle/`, `initconfig/`, `pathconfig/`, `pythonrun/`, `getopt/`, `myreadline/`, `imp/`, `marshal/`, `codecs/`, `format/`, `pystrconv/`, `pymath/`, `pytime/` |
+| Pillar      | Packages                                                              |
+| ----------- | --------------------------------------------------------------------- |
+| Pipeline    | `token/`, `tokenize/`, `parser/`, `parser_gen/`, `arena/`, `ast/`, `future/`, `symtable/`, `compile/` |
+| Execution   | `vm/`, `stackref/`, `intrinsics/`, `frame/`, `state/`, `specialize/`, `optimizer/`, `monitor/`, `gil/`, `pythread/`, `pysync/`, `errors/`, `traceback/`, `warnings/` |
+| Runtime     | `objects/`, `abstract/`, `builtins/`, `gc/` (via `module/gc/`), `weakref/`, `brc/`, `imp/`, `marshal/`, `pathconfig/` |
+| Foundations | `hamt/`, `hash/`, `hashtable/`, `codecs/`, `format/`, `pystrconv/`, `pymath/`, `pytime/`, `lifecycle/`, `initconfig/`, `pythonrun/`, `getopt/`, `myreadline/` |
 
 The pillars are an editorial grouping, not a build-time one; every
 package compiles independently. The grouping reflects how the

@@ -1,0 +1,215 @@
+---
+title: HAMT
+description: The hash array mapped trie. Persistent immutable map used by contextvars and a handful of other places that need cheap structural sharing.
+---
+
+# HAMT
+
+A hash array mapped trie is a persistent immutable map. Insert and
+delete return a new map that shares most of its structure with the
+old one. The shared structure makes both operations O(log n) in
+time and space; the immutability lets a single map be safely shared
+across goroutines without coordination.
+
+Python uses HAMTs for `contextvars.Context`. The `Context` is a
+copy-on-write map from `ContextVar` to value; entering a new
+context (via `Context.run` or by running an async task with its
+own context) snapshots the map by cloning the root pointer, not by
+copying every entry. The HAMT makes the snapshot cheap.
+
+The package is `hamt/`. CPython's reference is `Python/hamt.c`.
+
+## Where the code lives
+
+| File           | Role                                                                                   | CPython counterpart                |
+| -------------- | -------------------------------------------------------------------------------------- | ---------------------------------- |
+| `hamt/hamt.go` | The trie structure: bitmap nodes, array nodes, collision nodes. Insert and delete.     | `Python/hamt.c` core               |
+| `hamt/api.go`  | Public `HAMT` type and `New`, `Assoc`, `Without`, `Find`.                              | `Python/hamt.c PyHamt_*`           |
+| `hamt/iter.go` | The iterator that walks the trie in insertion order.                                   | `Python/hamt.c PyHamt_Iter*`       |
+| `hamt/types.go`| Node interface and helpers.                                                            | `Include/internal/pycore_hamt.h`   |
+
+## The trie
+
+A HAMT branches on five bits of the key's hash per level. Each
+node has up to 32 children (2^5). Most nodes are sparse, so a
+*bitmap node* stores only the populated children plus a 32-bit
+mask that says which slots are used. When a node has too many
+children (more than 16), it is promoted to a *dense array node*
+that stores all 32 slots directly.
+
+Three node kinds:
+
+- **Bitmap node.** Up to 16 children. Stores a 32-bit `bitmap`
+  and a contiguous `children` slice. Index into `children` by
+  counting set bits below the slot.
+- **Array node.** 32 children, indexed directly. Faster lookup but
+  more memory; used when more than 16 children would otherwise be
+  packed into a bitmap.
+- **Collision node.** Holds keys with the same 32-bit hash. Linear
+  scan; rare in practice.
+
+```go
+// hamt/types.go node interface
+type node interface {
+    assoc(shift uint, hash uint32, key, val Object) node
+    without(shift uint, hash uint32, key Object) (node, bool)
+    find(shift uint, hash uint32, key Object) (Object, bool)
+}
+
+// hamt/hamt.go bitmapNode
+type bitmapNode struct {
+    bitmap   uint32
+    children []nodeOrEntry  // alternates keys/values for leaf entries
+}
+
+// hamt/hamt.go arrayNode
+type arrayNode struct {
+    children [32]nodeOrEntry
+    count    int
+}
+
+// hamt/hamt.go collisionNode
+type collisionNode struct {
+    hash uint32
+    keys []Object
+    vals []Object
+}
+```
+
+A `nodeOrEntry` is a tagged union: either a child node, or a
+(key, value) pair stored inline at the leaf level.
+
+## Insertion
+
+`Assoc(key, value)` walks the trie from the root. At each level,
+it takes five bits of the key's hash and looks up the child at
+that slot.
+
+- If the slot is empty, the function returns a new node with an
+  entry inserted at that slot.
+- If the slot holds a child node, recurse into it.
+- If the slot holds an entry whose key matches the new key, return
+  a new node with the entry's value replaced.
+- If the slot holds an entry whose key does not match, create a
+  new child node holding both entries (promoting to a collision
+  node if their hashes are equal beyond the 32-bit prefix).
+
+Each step allocates a new node *for the path from the root to the
+modified leaf*. The rest of the trie is shared with the original.
+Insertion is O(log n) time, O(log n) space.
+
+```go
+// hamt/api.go (*HAMT).Assoc
+func (h HAMT) Assoc(key, val Object) HAMT
+```
+
+The result is a new `HAMT` value. The original is unchanged.
+
+## Deletion
+
+`Without(key)` is the reverse: walk to the leaf, remove the entry,
+and walk back up collapsing nodes that have only one remaining
+child. The collapse keeps the tree as shallow as possible.
+
+```go
+// hamt/api.go (*HAMT).Without
+func (h HAMT) Without(key Object) (HAMT, bool)
+```
+
+The bool is true if the key was present and removed. False is the
+"no-op" case (the key was not in the map).
+
+## Lookup
+
+`Find(key)` is a straight walk down the trie. Five bits per level,
+up to seven levels (because 5 × 7 = 35 > 32, so the trie depth is
+capped at seven before falling into a collision node).
+
+```go
+// hamt/api.go (*HAMT).Find
+func (h HAMT) Find(key Object) (Object, bool)
+```
+
+Lookup is O(log n) in the worst case, but the constant is small:
+each level is a bitmask test, a popcount, and a slice index.
+
+## Iteration
+
+The iterator walks the trie depth-first, yielding (key, value)
+pairs.
+
+```go
+// hamt/iter.go Iterator
+type Iterator struct {
+    stack []frame  // per-level frame: node + index
+}
+
+// hamt/iter.go (*Iterator).Next
+func (it *Iterator) Next() (key, val Object, ok bool)
+```
+
+The iteration order is not insertion order; it is hash order. For
+`contextvars.Context`, the order matters only for the rare
+`copy()` and `keys()` use cases.
+
+## Hashing keys
+
+The HAMT keys its lookup on the Python-level hash of the key, via
+`hash(key)`. For `ContextVar`, the hash is the identity hash (each
+`ContextVar` is a distinct object), so collisions are extremely
+rare. For other use cases (any custom HAMT user) the standard
+hashing rules apply, including the per-process hash secret.
+
+The 32-bit hash used for branching is the low 32 bits of the
+64-bit Python hash, treated as unsigned. Collision nodes handle
+the case where two distinct keys collide in 32 bits.
+
+## Why immutable
+
+The use case is contextvars. Async tasks each run in their own
+context; a task that calls `var.set(value)` wants to mutate *its
+own* view of the context without affecting the parent's view, and
+without copying the entire context map.
+
+The HAMT solves this exactly: `Assoc` returns a new map; the new
+map shares structure with the old; the old map is unaffected. The
+parent task continues to see the old map; the child task uses the
+new one.
+
+Coroutines and async tasks rely on this property to be safe under
+concurrent execution. The Go scheduler may run two tasks on two
+goroutines simultaneously; each task's contextvar reads are
+goroutine-local because they go through the task's own HAMT
+pointer.
+
+## Memory cost
+
+A HAMT with N entries uses roughly N + (N / 16) words of memory:
+the leaves plus the internal nodes. Bitmap nodes amortise the
+overhead because most nodes are sparse and only carry the
+populated children. Array nodes are used only when density makes
+direct indexing worth the constant overhead.
+
+The memory cost is competitive with a hash table; the advantage is
+the persistence, not the memory. For a map that is mostly
+read-only after construction, a HAMT and a dict cost roughly the
+same; for a map that is constantly forking (the contextvars case),
+the HAMT is a clear win because the dict would have to copy on
+every fork.
+
+## Status
+
+The full HAMT is ported: bitmap nodes, array nodes, collision
+nodes, the promotion threshold at 16 children, recursive assoc and
+without, lookup, and iteration. The `Context` use case in the
+[contextvars module](https://docs.python.org/3/library/contextvars.html)
+is wired through.
+
+## Reference
+
+- Port source: `hamt/`.
+- CPython source: `Python/hamt.c`, `Include/internal/pycore_hamt.h`.
+- *Ideal Hash Trees*, Phil Bagwell, 2001.
+- *Optimizing Hash-Array Mapped Tries for Fast and Lean Immutable
+  JVM Collections*, Steindorfer and Vinju, OOPSLA 2015.
+- PEP 567, *Context Variables*.
