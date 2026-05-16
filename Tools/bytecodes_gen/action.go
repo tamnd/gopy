@@ -201,8 +201,12 @@ func (t *actionTranslator) translateStmt() error {
 	if cTypeDecls[tk.Text] {
 		return t.translateTypedDecl()
 	}
-	// Output assignment: `name = expr ;` where name is a bound output.
-	if isBareIdent(tk.Text) && t.bound[tk.Text] == "out" {
+	// Assignment to a bound slot. Outputs need this for the obvious
+	// `result = something;` pattern; passthrough inputs need it for
+	// in-place rewrites like SWAP's `bottom = top;`. The Go-level
+	// write-back is the same in both cases (`name = expr`); the arm
+	// epilogue handles the setPeek commit for passthroughs.
+	if isBareIdent(tk.Text) && t.bound[tk.Text] != "" {
 		return t.translateOutputAssign(tk.Text)
 	}
 	return fmt.Errorf("unrecognized token at action body start: %q", tk.Text)
@@ -780,7 +784,7 @@ func (p *exprParser) parsePrimary() (string, error) {
 		return stripIntSuffix(tk), nil
 	}
 	if isBareIdent(tk) {
-		if dir, ok := p.bound[tk]; ok && dir == "in" {
+		if _, ok := p.bound[tk]; ok {
 			return goLocalName(tk), nil
 		}
 		if p.locals[tk] {

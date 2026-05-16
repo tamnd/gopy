@@ -902,13 +902,16 @@ func (e *evalState) longFromSsizeT(n int32) objects.Object {
 // CPython: Include/cpython/cellobject.h _PyCell_GetStackRef
 //
 //nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
-func (e *evalState) cellGetStackRef(cell objects.Object) objects.Object {
+func (e *evalState) cellGetStackRef(cell objects.Object) stackref.Ref {
 	c, ok := cell.(*objects.Cell)
 	if !ok {
 		e.pendingErr = errors.New("TypeError: _PyCell_GetStackRef expected cell")
-		return nil
+		return stackref.Null
 	}
-	return c.Contents
+	if c.Contents == nil {
+		return stackref.Null
+	}
+	return stackref.FromObject(c.Contents)
 }
 
 // getAwaitable wraps _PyEval_GetAwaitable. opcode is a hint CPython uses

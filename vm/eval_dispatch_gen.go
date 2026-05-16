@@ -575,9 +575,16 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_DEREF:
-		// body bail: if cond: unexpected token "value" in expression
-		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var value stackref.Ref
+		cell := e.localAt(int(oparg)).AsObject()
+		_ = cell
+		value = e.cellGetStackRef(cell)
+		if value.IsNull() {
+			e.setPendingErr("_PyEval_FormatExcUnbound")
+			return 0, nil, nil, false, e.error("error")
+		}
+		e.push(value)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_FAST:
 		var value stackref.Ref
 		value = e.localAt(int(oparg)).Dup()
@@ -889,9 +896,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = bottom
 		top := e.peek(0)
 		_ = top
-		// body bail: unrecognized token at action body start: "bottom"
-		// outputs: bottom* _out1[oparg - 2]* top*
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		temp := bottom
+		_ = temp
+		bottom = top
+		top = temp
+		e.setPeek(int(oparg-2)+1, bottom)
+		e.setPeek(0, top)
+		return e.advance(), nil, nil, false, nil
 	case compile.UNARY_INVERT:
 		value := e.peek(0)
 		_ = value
