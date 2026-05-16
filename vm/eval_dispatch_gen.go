@@ -87,7 +87,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = left
 		right := e.peek(0)
 		_ = right
-		// body bail: PyObject left_o rhs: unexpected token "left" in expression
+		// body bail: int err rhs: unexpected token "_PyEval_CheckExceptTypeValid" in expression
 		// outputs: left* b
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CLEANUP_THROW:
@@ -109,9 +109,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.COPY:
 		bottom := e.peek(int(oparg - 1))
 		_ = bottom
-		// body bail: output assign "top": unexpected token "bottom" in expression
-		// outputs: bottom* _out1[oparg - 1]* top
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var top stackref.Ref
+		top = bottom.Dup()
+		e.setPeek(int(oparg-1), bottom)
+		e.push(top)
+		return e.advance(), nil, nil, false, nil
 	case compile.COPY_FREE_VARS:
 		// body bail: PyCodeObject co rhs: unexpected token "_PyFrame_GetCode" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
@@ -130,15 +132,21 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// body bail: int err rhs: unexpected token "PyDict_Pop" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_NAME:
-		// body bail: PyObject ns rhs: unexpected token "LOCALS" in expression
+		// body bail: expected '=' after int err
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_SUBSCR:
 		container := e.peek(1)
 		_ = container
 		sub := e.peek(0)
 		_ = sub
-		// body bail: int err rhs: unexpected token "PyObject_DelItem" in expression
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		err := e.objectDelItem(container.AsObject(), sub.AsObject())
+		_ = err
+		e.decrefInputs(2)
+		if err != 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		e.drop(1 + 1)
+		return e.advance(), nil, nil, false, nil
 	case compile.DICT_MERGE:
 		callable := e.peek(1 + 1 + 1 + int(oparg-1) + 1)
 		_ = callable
@@ -146,7 +154,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = dict
 		update := e.peek(0)
 		_ = update
-		// body bail: PyObject callable_o rhs: unexpected token "callable" in expression
+		// body bail: int err rhs: unexpected token "_PyDict_MergeEx" in expression
 		// outputs: callable* _out1* _out2* dict* _out4[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DICT_UPDATE:
@@ -154,7 +162,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = dict
 		update := e.peek(0)
 		_ = update
-		// body bail: PyObject dict_o rhs: unexpected token "dict" in expression
+		// body bail: int err rhs: unexpected token "PyDict_Update" in expression
 		// outputs: dict* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.END_FOR:
@@ -238,17 +246,36 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.IMPORT_FROM:
 		from := e.peek(0)
 		_ = from
-		// body bail: PyObject res_o rhs: unexpected token "_PyEval_ImportFrom" in expression
-		// outputs: from* res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		name := e.nameAt(int(oparg))
+		_ = name
+		res_o := e.importFrom(from.AsObject(), name)
+		_ = res_o
+		if res_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		res = stackref.FromObject(res_o)
+		e.setPeek(0, from)
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.IMPORT_NAME:
 		level := e.peek(1)
 		_ = level
 		fromlist := e.peek(0)
 		_ = fromlist
-		// body bail: PyObject res_o rhs: unexpected token "_PyEval_ImportName" in expression
-		// outputs: res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		name := e.nameAt(int(oparg))
+		_ = name
+		res_o := e.importName(name, fromlist.AsObject(), level.AsObject())
+		_ = res_o
+		e.decrefInputs(2)
+		if res_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		res = stackref.FromObject(res_o)
+		e.drop(1 + 1)
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_END_FOR:
 		receiver := e.peek(1)
 		_ = receiver
@@ -269,7 +296,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		iter := e.peek(0)
 		_ = iter
 		// cache "unused" size=1 offset=0
-		// body bail: PyObject iter_o rhs: unexpected token "iter" in expression
+		// body bail: unrecognized token at action body start: "iternextfunc"
 		// outputs: iter* next
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_INSTRUCTION:
@@ -351,7 +378,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = list_st
 		iterable_st := e.peek(0)
 		_ = iterable_st
-		// body bail: PyObject list rhs: unexpected token "list_st" in expression
+		// body bail: PyObject none_val rhs: unexpected token "_PyList_Extend" in expression
 		// outputs: list_st* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_BUILD_CLASS:
@@ -359,7 +386,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: bc
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_COMMON_CONSTANT:
-		// body bail: output assign "value": unexpected token "tstate" in expression
+		// body bail: output assign "value": expected ')' to close call
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_CONST:
@@ -427,13 +454,21 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_LOCALS:
-		// body bail: PyObject l rhs: unexpected token "LOCALS" in expression
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: locals
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_NAME:
-		// body bail: PyObject v_o rhs: unexpected token "_PyEval_LoadName" in expression
-		// outputs: v
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var v stackref.Ref
+		name := e.nameAt(int(oparg))
+		_ = name
+		v_o := e.loadName(name)
+		_ = v_o
+		if v_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		v = stackref.FromObject(v_o)
+		e.push(v)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_SMALL_INT:
 		// body bail: PyObject obj rhs: unexpected token "PyObject" in expression
 		// outputs: value
@@ -454,7 +489,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = key
 		value := e.peek(0)
 		_ = value
-		// body bail: PyObject dict rhs: unexpected token "dict_st" in expression
+		// body bail: int err rhs: unexpected token "_PyDict_SetItem_Take2" in expression
 		// outputs: dict_st* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MATCH_CLASS:
@@ -492,7 +527,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.POP_EXCEPT:
 		exc_value := e.peek(0)
 		_ = exc_value
-		// body bail: _PyErr_StackItem exc_info rhs: unexpected token "tstate" in expression
+		// body bail: _PyErr_StackItem exc_info rhs: trailing tokens after expression: "-> exc_info"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.POP_TOP:
 		value := e.peek(0)
@@ -503,7 +538,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.PUSH_EXC_INFO:
 		exc := e.peek(0)
 		_ = exc
-		// body bail: _PyErr_StackItem exc_info rhs: unexpected token "tstate" in expression
+		// body bail: _PyErr_StackItem exc_info rhs: trailing tokens after expression: "-> exc_info"
 		// outputs: prev_exc new_exc
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.PUSH_NULL:
@@ -600,19 +635,27 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_GLOBAL:
 		v := e.peek(0)
 		_ = v
-		// body bail: int err rhs: unexpected token "PyDict_SetItem" in expression
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		name := e.nameAt(int(oparg))
+		_ = name
+		err := e.dictSetItem(e.globals(), name, v.AsObject())
+		_ = err
+		v.Close()
+		if err != 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.STORE_NAME:
 		v := e.peek(0)
 		_ = v
-		// body bail: PyObject ns rhs: unexpected token "LOCALS" in expression
+		// body bail: expected '=' after int err
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SWAP:
 		bottom := e.peek(int(oparg-2) + 1)
 		_ = bottom
 		top := e.peek(0)
 		_ = top
-		// body bail: _PyStackRef temp rhs: unexpected token "bottom" in expression
+		// body bail: unrecognized token at action body start: "bottom"
 		// outputs: bottom* _out1[oparg - 2]* top*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.UNARY_INVERT:

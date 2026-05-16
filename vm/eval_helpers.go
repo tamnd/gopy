@@ -118,6 +118,108 @@ func (e *evalState) pyIs(a, b objects.Object) uint32 {
 	return 0
 }
 
+// globals / builtinsDict / localsDict expose the frame-namespace
+// macros from Python/ceval_macros.h (GLOBALS / BUILTINS / LOCALS) as
+// evalState accessors so the translator can emit them verbatim.
+//
+// CPython: Python/ceval_macros.h GLOBALS / BUILTINS / LOCALS
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) globals() objects.Object { return e.f.Globals }
+
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) builtinsDict() objects.Object { return e.f.Builtins }
+
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) localsDict() objects.Object { return e.f.Locals }
+
+// loadName wraps CPython's _PyEval_LoadName: scan locals, then globals,
+// then builtins for `name`. Returns nil-on-failure with pendingErr set,
+// mirroring the NULL-on-failure convention the translator expects.
+//
+// CPython: Python/ceval.c:2789 _PyEval_LoadName
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) loadName(name objects.Object) objects.Object {
+	if v, ok := lookupIn(e.f.Locals, name); ok {
+		return v
+	}
+	if v, ok := lookupIn(e.f.Globals, name); ok {
+		return v
+	}
+	if v, ok := lookupIn(e.f.Builtins, name); ok {
+		return v
+	}
+	if s, ok := name.(*objects.Unicode); ok {
+		e.pendingErr = fmt.Errorf("vm: NameError: name '%s' is not defined", s.Value())
+	} else {
+		e.pendingErr = errors.New("vm: NameError")
+	}
+	return nil
+}
+
+// importName wraps _PyEval_ImportName. The signature mirrors CPython's:
+// (name, fromlist, level). Failure surfaces through pendingErr.
+//
+// CPython: Python/ceval.c:3043 _PyEval_ImportName
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) importName(name, fromlist, level objects.Object) objects.Object {
+	e.pendingErr = errors.New("vm: importName helper not wired (spec 1714 A6 pending)")
+	_ = name
+	_ = fromlist
+	_ = level
+	return nil
+}
+
+// importFrom wraps _PyEval_ImportFrom: fetch `name` as an attribute of
+// the already-imported module `from`.
+//
+// CPython: Python/ceval.c:3154 _PyEval_ImportFrom
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) importFrom(from objects.Object, name objects.Object) objects.Object {
+	s, ok := name.(*objects.Unicode)
+	if !ok {
+		e.pendingErr = errors.New("vm: importFrom: name not a string")
+		return nil
+	}
+	v, err := evalImportFrom(e, from, s.Value())
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return v
+}
+
+// dictSetItem wraps PyDict_SetItem: stash key=value on the dict-like
+// scope. Returns 0 on success and 1 on failure (with pendingErr set),
+// matching the C int err convention.
+//
+// CPython: Objects/dictobject.c:2240 PyDict_SetItem
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) dictSetItem(scope, key, value objects.Object) int32 {
+	if err := storeIn(scope, key, value); err != nil {
+		e.pendingErr = err
+		return 1
+	}
+	return 0
+}
+
+// objectDelItem wraps PyObject_DelItem: del container[sub].
+//
+// CPython: Objects/abstract.c:191 PyObject_DelItem
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) objectDelItem(container, sub objects.Object) int32 {
+	if err := objects.DelItem(container, sub); err != nil {
+		e.pendingErr = err
+		return 1
+	}
+	return 0
+}
+
 // pyType mirrors Py_TYPE: returns the type object for o.
 //
 // CPython: Include/object.h Py_TYPE

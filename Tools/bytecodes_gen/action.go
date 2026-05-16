@@ -564,6 +564,26 @@ func (p *exprParser) parsePrimary() (string, error) {
 		//
 		// CPython: Python/ceval_macros.h GETITEM.
 		return p.parseGetItemCall()
+	case "GLOBALS", "BUILTINS", "LOCALS":
+		// Zero-arg frame-namespace macros from Python/ceval_macros.h.
+		// They expand to f_globals / f_builtins / f_locals; gopy mirrors
+		// each as a one-line evalState accessor.
+		if p.pos >= len(p.toks) || p.toks[p.pos] != "(" {
+			return "", fmt.Errorf("expected '(' after %s", tk)
+		}
+		p.pos++
+		if p.pos >= len(p.toks) || p.toks[p.pos] != ")" {
+			return "", fmt.Errorf("expected ')' to close %s()", tk)
+		}
+		p.pos++
+		switch tk {
+		case "GLOBALS":
+			return "e.globals()", nil
+		case "BUILTINS":
+			return "e.builtinsDict()", nil
+		default:
+			return "e.localsDict()", nil
+		}
 	}
 	// Helper-call vocabulary. Each entry maps a CPython helper name to
 	// a Go expression template and an argument arity. The translator
@@ -600,6 +620,12 @@ func (p *exprParser) parsePrimary() (string, error) {
 		return "nil", nil
 	}
 	if tk == "true" || tk == "false" {
+		return tk, nil
+	}
+	// CPython helpers carry tstate / frame as the first one or two args.
+	// The helperCall translation drops them via dropFirst, but the parse
+	// still needs to consume the tokens, so pass them through verbatim.
+	if tk == "tstate" || tk == "frame" {
 		return tk, nil
 	}
 	if isNumericLiteral(tk) {
@@ -719,6 +745,17 @@ var helperCalls = map[string]helperCall{
 	"PyNumber_Invert":   {goExpr: "e.pyNumberInvert", arity: 1},
 	"PyNumber_Positive": {goExpr: "e.pyNumberPositive", arity: 1},
 	"PyNumber_Absolute": {goExpr: "e.pyNumberAbsolute", arity: 1},
+	// Name / import family. The first one or two C args carry the
+	// implicit tstate / frame receivers; drop those so the call lines
+	// up with the gopy evalState method.
+	"_PyEval_LoadName":   {goExpr: "e.loadName", arity: 1, dropFirst: 2},
+	"_PyEval_ImportName": {goExpr: "e.importName", arity: 3, dropFirst: 2},
+	"_PyEval_ImportFrom": {goExpr: "e.importFrom", arity: 2, dropFirst: 1},
+	// Dict / object mutation. These return a C int err (0 on success,
+	// nonzero on failure); the surrounding `int err = ...; ERROR_IF(err);`
+	// pattern handles the dispatch.
+	"PyDict_SetItem":  {goExpr: "e.dictSetItem", arity: 3},
+	"PyObject_DelItem": {goExpr: "e.objectDelItem", arity: 2},
 }
 
 // parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.
@@ -850,7 +887,7 @@ func (t *actionTranslator) translateErrorIf() error {
 	// Token-level rewrites for the handful of C idioms that show up
 	// inside ERROR_IF: NULL is the only nil sentinel the translator
 	// emits today, and helper wrappers all return nil-on-error.
-	cond = rewriteCCondToGo(cond)
+	cond = rewriteCCondToGo(cond, t.intLocals)
 	fmt.Fprintf(t.writer, "if %s { return 0, nil, nil, false, e.error(\"error\") }\n", cond)
 	return nil
 }
@@ -860,17 +897,23 @@ func (t *actionTranslator) translateErrorIf() error {
 // verbatim so unknown C identifiers (member access, helper variables)
 // pass through unchanged; the surrounding Go compile catches anything
 // that wouldn't parse.
-func rewriteCCondToGo(s string) string {
-	// Word-boundary replace of NULL with nil. The condition string is
-	// a token slice joined by single spaces, so a plain substring
-	// replace works without breaking identifiers that contain NULL.
+//
+// intLocals tracks Go-int locals introduced by typed-decl translation;
+// when the entire condition is a bare int identifier (the `int err = ...;
+// ERROR_IF(err);` idiom) we expand it to `err != 0` so Go's stricter
+// boolean typing is satisfied.
+func rewriteCCondToGo(s string, intLocals map[string]bool) string {
 	parts := strings.Fields(s)
 	for i, p := range parts {
 		if p == "NULL" {
 			parts[i] = "nil"
 		}
 	}
-	return strings.Join(parts, " ")
+	out := strings.Join(parts, " ")
+	if len(parts) == 1 && intLocals[parts[0]] {
+		out = out + " != 0"
+	}
+	return out
 }
 
 // translateUnaryCall handles `MACRO(arg);` where arg is a single bound
@@ -1016,6 +1059,12 @@ func bindNames(sig *SignatureAnalysis) map[string]string {
 	}
 	for _, b := range sig.Outputs {
 		if b.Name == "" || b.Name == "unused" {
+			continue
+		}
+		// Slots that appear in both inputs and outputs (e.g. IMPORT_FROM's
+		// `from` which is preserved and re-pushed) keep their "in"
+		// direction so the body's reads still resolve.
+		if _, ok := out[b.Name]; ok {
 			continue
 		}
 		out[b.Name] = "out"
