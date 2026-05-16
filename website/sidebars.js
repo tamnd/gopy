@@ -25,13 +25,27 @@ const sidebars = {
       ],
     },
     {
+      label: 'Recipes',
+      type: 'category',
+      className: 'sidebar-heading',
+      collapsed: false,
+      items: [
+        'manual/modules',
+        'manual/recipes',
+        'manual/debugging',
+      ],
+    },
+    {
       label: 'Project',
       type: 'category',
       className: 'sidebar-heading',
       collapsed: false,
       items: [
         'manual/status',
+        'manual/performance',
         'manual/parity',
+        'manual/comparison',
+        'manual/faq',
       ],
     },
   ],

@@ -1,0 +1,292 @@
+---
+title: Recipes
+description: Worked code patterns. Capture stdout, share state between Go and Python, evaluate user expressions, hot-reload scripts, run a worker pool.
+---
+
+# Recipes
+
+A cookbook of patterns the embedding surface supports. Each
+recipe is a runnable snippet plus the rationale.
+
+## Capture stdout
+
+```go
+package main
+
+import (
+	"bytes"
+	"fmt"
+
+	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/pythonrun"
+	"github.com/tamnd/gopy/state"
+	_ "github.com/tamnd/gopy/stdlibinit"
+)
+
+func main() {
+	ts := state.NewThread()
+	var buf bytes.Buffer
+	src := `for i in range(3): print(i, i*i)`
+	if err := pythonrun.RunSimpleString(ts, src, objects.NewDict(), &buf); err != nil {
+		panic(err)
+	}
+	fmt.Print(buf.String())
+}
+```
+
+Pass any `io.Writer` as the fourth argument. `io.Discard` to
+silence; `os.Stdout` to pass through; a `bytes.Buffer` to
+capture; a custom `io.Writer` that trims or transforms.
+
+## Pre-populate globals from Go
+
+```go
+globals := objects.NewDict()
+globals.SetItemString("user_id", objects.NewInt(42))
+globals.SetItemString("flags", objects.NewList())
+src := `
+print(f"user {user_id}")
+flags.append("seen")
+`
+pythonrun.RunSimpleString(ts, src, globals, os.Stdout)
+// flags now contains the appended value, observable from Go.
+```
+
+The dict you pass *is* the module's globals. Anything you store
+in it is visible to the script; anything the script assigns at
+module scope (a function, a class, a variable) lands back in
+the same dict. This is the cleanest channel between Go and
+Python.
+
+## Evaluate a single expression
+
+```go
+src := `2 ** 64 - 1`
+mod, _ := parser.ParseString(src, "<expr>", parser.ModeEval)
+code, _ := compile.Compile(mod, "<expr>", 0)
+result, _ := pythonrun.RunCode(ts, code, globals)
+fmt.Println(result)   // 18446744073709551615
+```
+
+`ModeEval` parses a single expression and produces a code
+object whose result is the expression's value. Useful for
+calculators, rule evaluators, or anywhere a user supplies a
+formula.
+
+## Compile once, call many
+
+```go
+src := `
+def score(items):
+    return sum(x * x for x in items)
+`
+mod, _ := parser.ParseString(src, "lib", parser.ModeFile)
+code, _ := compile.Compile(mod, "lib", 0)
+
+globals := objects.NewDict()
+pythonrun.RunCode(ts, code, globals)
+scoreFn, _ := globals.GetItemString("score")
+
+// Call many times.
+for _, batch := range batches {
+    args := []objects.Object{toPyList(batch)}
+    result, _ := scoreFn.Call(ts, args, nil)
+    fmt.Println(result)
+}
+```
+
+Parsing and compiling Python is the slow part of the pipeline.
+Once you have a code object, hand it to the VM as many times
+as you need.
+
+## Run user code with a curated set of built-ins
+
+```go
+// Build a sandbox builtins dict.
+safeBuiltins := objects.NewDict()
+for _, name := range []string{"abs", "len", "max", "min", "range", "sum", "print"} {
+    if fn, _ := imp.GetBuiltin(name); fn != nil {
+        safeBuiltins.SetItemString(name, fn)
+    }
+}
+globals := objects.NewDict()
+globals.SetItemString("__builtins__", safeBuiltins)
+
+userSrc := `print(sum(range(10)))`
+err := pythonrun.RunSimpleString(ts, userSrc, globals, &output)
+```
+
+The script can call `abs`, `len`, `max`, `min`, `range`, `sum`,
+and `print`. It cannot `import`, cannot `open`, cannot reach
+the host's environment. See
+[Embedding -> Sandboxing](embedding#sandboxing-user-supplied-python)
+for the full pattern.
+
+## Time-bound execution
+
+```go
+done := make(chan error, 1)
+go func() {
+    done <- pythonrun.RunSimpleString(ts, userSrc, globals, &output)
+}()
+select {
+case err := <-done:
+    return err
+case <-time.After(500 * time.Millisecond):
+    ts.RequestStop()  // sets the eval-breaker bit
+    return errors.New("user code timed out")
+}
+```
+
+`ts.RequestStop()` flips the per-thread eval-breaker bit; the VM
+notices on the next backward branch or function call and raises
+`KeyboardInterrupt`. The pattern is what production sandboxes
+use to bound user compute.
+
+## Hot reload a script
+
+```go
+// Watch a file, recompile on change.
+fsnotifier := fsnotify.NewWatcher()
+fsnotifier.Add("rules.py")
+
+var current *objects.Object
+recompile := func() {
+    src, _ := os.ReadFile("rules.py")
+    mod, _ := parser.ParseString(string(src), "rules.py", parser.ModeFile)
+    code, _ := compile.Compile(mod, "rules.py", 0)
+    g := objects.NewDict()
+    pythonrun.RunCode(ts, code, g)
+    fn, _ := g.GetItemString("evaluate")
+    current = &fn
+}
+recompile()
+
+for ev := range fsnotifier.Events {
+    if ev.Op&fsnotify.Write != 0 {
+        recompile()
+    }
+}
+```
+
+Compile inside the watcher callback; swap the function pointer
+under a lock; serve traffic from the current pointer.
+
+## Goroutines and Threads
+
+Each goroutine that calls into the VM needs its own
+`state.Thread`. The GIL takes care of serialisation:
+
+```go
+var wg sync.WaitGroup
+for i := 0; i < 8; i++ {
+    wg.Add(1)
+    go func(i int) {
+        defer wg.Done()
+        ts := state.NewThread()
+        src := fmt.Sprintf(`print("worker %d done")`, i)
+        pythonrun.RunSimpleString(ts, src, objects.NewDict(), os.Stdout)
+    }(i)
+}
+wg.Wait()
+```
+
+For true parallel Python, the per-interpreter GIL (PEP 684)
+plumbing is on the roadmap. Today the workers share a GIL and
+take turns.
+
+## Round-trip JSON between Go and Python
+
+```go
+// Go -> Python via JSON.
+payload, _ := json.Marshal(map[string]any{"users": []string{"a", "b"}})
+src := fmt.Sprintf(`
+import _json
+data = _json.loads(%q)
+print(data["users"])
+`, string(payload))
+pythonrun.RunSimpleString(ts, src, objects.NewDict(), &output)
+
+// Python -> Go via JSON.
+globals := objects.NewDict()
+pythonrun.RunSimpleString(ts, `
+import _json
+result = _json.dumps({"answer": 42})
+`, globals, io.Discard)
+resultObj, _ := globals.GetItemString("result")
+var decoded any
+json.Unmarshal([]byte(resultObj.(*objects.Str).String()), &decoded)
+```
+
+JSON is the lowest-effort bridge when both sides have heterogeneous
+data and you do not want to write a custom marshaller.
+
+## Add a Go function to the Python world
+
+```go
+func sqrt(args []objects.Object, kwargs *objects.Dict) (objects.Object, error) {
+    if len(args) != 1 {
+        return nil, objects.TypeError("sqrt() takes 1 argument")
+    }
+    f, _ := args[0].(*objects.Float).Float64()
+    return objects.NewFloat(math.Sqrt(f)), nil
+}
+
+globals := objects.NewDict()
+globals.SetItemString("sqrt", objects.NewBuiltinFunction("sqrt", sqrt))
+pythonrun.RunSimpleString(ts, `print(sqrt(2.0))`, globals, os.Stdout)
+```
+
+`objects.NewBuiltinFunction` wraps a Go function with the
+calling convention the VM expects. Put it in `globals` and
+the script can call it like any other Python function.
+
+For a *module* of Go-provided functions, use
+[`imp.AppendInittab`](embedding#registering-a-built-in-module)
+instead.
+
+## Reuse a Thread across requests
+
+```go
+type Service struct {
+    ts      *state.Thread
+    code    *compile.Code
+    globals *objects.Dict
+}
+
+func New(src string) (*Service, error) {
+    mod, err := parser.ParseString(src, "service", parser.ModeFile)
+    if err != nil { return nil, err }
+    code, err := compile.Compile(mod, "service", 0)
+    if err != nil { return nil, err }
+    s := &Service{
+        ts:      state.NewThread(),
+        code:    code,
+        globals: objects.NewDict(),
+    }
+    if _, err := pythonrun.Run(s.ts, code, os.Stderr); err != nil {
+        return nil, err
+    }
+    return s, nil
+}
+
+func (s *Service) Handle(input string) (string, error) {
+    fn, _ := s.globals.GetItemString("handle")
+    args := []objects.Object{objects.NewStr(input)}
+    result, err := fn.Call(s.ts, args, nil)
+    if err != nil { return "", err }
+    return result.(*objects.Str).String(), nil
+}
+```
+
+One service instance, one thread, one set of globals, one
+compiled code object. The specializer warms up; subsequent calls
+hit the fast path. This is the canonical shape for a long-lived
+server.
+
+## Reference
+
+* [Embedding](embedding) for the surface these recipes use.
+* [Modules](modules) for what `import` resolves to.
+* [Debugging](debugging) for the inspection knobs that help
+  when a recipe misbehaves.

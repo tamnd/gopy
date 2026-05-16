@@ -1,0 +1,105 @@
+---
+title: Comparison
+description: How gopy compares to other ways to run Python from Go, and to CPython itself.
+---
+
+# Comparison
+
+There are several ways to get Python behaviour into a Go program.
+The right choice depends on what you value: parity, performance,
+embedability, or operational simplicity.
+
+## gopy vs CPython via `os/exec`
+
+The default move: shell out to `python3` and parse its output.
+
+| Aspect              | `os/exec` to CPython              | gopy                                  |
+| ------------------- | --------------------------------- | ------------------------------------- |
+| Behavioural parity  | Perfect (it *is* CPython)         | Tracking 3.14, parity bugs do happen  |
+| Performance         | Fast per-instruction, slow startup | Slow per-instruction, fast startup    |
+| Deployment          | Needs a Python install on the host | Static Go binary                      |
+| Sandbox control     | Whatever CPython gives you        | A Go-side `globals` dict you own      |
+| State between calls | Lost between processes            | Held in `state.Thread` and `globals`  |
+| Failure mode        | Subprocess errors, parse stdout   | Go `error` returns                    |
+
+Pick `os/exec` if you already require CPython on the host and you
+mostly batch large jobs.  Pick gopy if you want the Python
+behaviour inside the same process with no extra runtime.
+
+## gopy vs cgo + libpython
+
+Embed CPython via cgo, link against `libpython3.14.so`, and call the
+C API.
+
+| Aspect              | cgo + libpython                    | gopy                                  |
+| ------------------- | ---------------------------------- | ------------------------------------- |
+| Behavioural parity  | Perfect                            | Tracking, with bugs                   |
+| Build               | Needs CPython headers + linker     | `go build`                            |
+| Cross-compile       | Painful (per-target Python)        | Easy (pure Go)                        |
+| GIL handling        | Manual `PyGILState_Ensure`         | A `state.Thread` per goroutine        |
+| Memory model        | Two GCs side by side (Go and CPy)  | One Go GC over Go-allocated objects   |
+| API surface         | C API, error-prone                 | Typed Go API                          |
+
+cgo wins on parity. gopy wins on every other deployment axis. If
+your team has the C-API expertise and you cannot tolerate parity
+bugs, cgo is the better choice today.
+
+## gopy vs go-python/gpython
+
+[gpython](https://github.com/go-python/gpython) is a Python
+implementation in pure Go, also free of cgo.
+
+| Aspect              | gpython                            | gopy                                  |
+| ------------------- | ---------------------------------- | ------------------------------------- |
+| Python target       | 3.4 surface, no specializer        | 3.14, PEP 659 / 657 / 669 implemented |
+| Approach            | Independent reimplementation       | Function-by-function port of CPython  |
+| Standard library    | Small set                          | ~50 modules registered                |
+| Performance         | Similar order of magnitude         | Tier-2 trace path adds headroom       |
+
+gpython has been around longer and is stable. gopy is younger, but
+its target (3.14 byte-equivalent) is more ambitious.
+
+## gopy vs grumpy
+
+[grumpy](https://github.com/google/grumpy) is Google's Python-to-Go
+transpiler. The project is archived.
+
+The compile model differs fundamentally: grumpy emits Go source
+that you build, while gopy interprets Python at runtime. Grumpy
+was tied to Python 2.7 and is not a candidate for new work.
+
+## gopy vs RustPython
+
+[RustPython](https://github.com/RustPython/RustPython) is the
+closest equivalent in spirit, in Rust. Mature, embeds in WASM, and
+also tracks CPython behaviourally.
+
+| Aspect              | RustPython                         | gopy                                  |
+| ------------------- | ---------------------------------- | ------------------------------------- |
+| Host language       | Rust                               | Go                                    |
+| Python target       | 3.13                               | 3.14                                  |
+| WASM                | First-class                        | Not a target today                    |
+| Maturity            | Years ahead                        | Active development                    |
+
+If your host is Rust, RustPython is the obvious choice. The
+projects compare notes on parity strategy.
+
+## Choosing between them
+
+A rough decision tree:
+
+* **You need exact CPython behaviour and the host has CPython:**
+  shell out, or use cgo + libpython.
+* **You ship a static binary, latency matters more than throughput,
+  and your Python is bounded in scope:** gopy.
+* **You ship a static binary and you are okay with a smaller Python
+  surface:** gpython.
+* **Your host is Rust:** RustPython.
+* **You need WASM:** RustPython today; gopy compiles to WASM but
+  the embedding ergonomics are not a project goal yet.
+
+## Reference
+
+* [Embedding](embedding) for the gopy surface.
+* [Status](status) for what is wired today.
+* [Performance](performance) for measured cost.

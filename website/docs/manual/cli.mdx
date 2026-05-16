@@ -1,6 +1,6 @@
 ---
 title: Command line interface
-description: Every flag gopy accepts, with notes on how it maps to CPython.
+description: Every flag gopy parses, what is wired today, and which environment variables it honours.
 ---
 
 # Command line interface
@@ -9,68 +9,128 @@ description: Every flag gopy accepts, with notes on how it maps to CPython.
 gopy [options] [-c cmd | -m mod | file | -] [arg ...]
 ```
 
-Every option below matches the CPython option of the same name.
-The argument parser lives in `getopt/` and mirrors
-`Modules/getpath.c` and `Modules/main.c`.
+The argument parser lives in `getopt/getopt.go` and follows
+CPython's `Modules/main.c` and `Modules/getpath.c`. gopy parses
+the full CPython short-option set; not all of them have effect
+yet. This page is honest about which is which.
 
-## Quick reference
+## Wired flags
 
-| Option | Meaning                                                       |
-| ------ | ------------------------------------------------------------- |
-| `-c cmd`  | Run `cmd` as a single statement. Following arguments go to `sys.argv`. |
-| `-m mod`  | Import `mod` and run it as `__main__`.                       |
-| `-`       | Read the program from stdin.                                 |
-| `-i`      | Drop into the REPL after the script runs.                    |
-| `-q`      | Suppress the startup banner in the REPL.                     |
-| `-u`      | Force unbuffered binary stdout / stderr.                     |
-| `-v`      | Verbose import tracing. Repeat for more detail.              |
-| `-O`      | Strip assertions. `__debug__` becomes false.                 |
-| `-OO`     | Like `-O` but also strip docstrings.                         |
-| `-S`      | Skip implicit `import site` on startup.                      |
-| `-E`      | Ignore `PYTHON*` environment variables.                      |
-| `-I`      | Isolated mode: `-E -s -P` and friends combined.              |
-| `-s`      | Don't add the user site directory to `sys.path`.             |
-| `-d`      | Print the disassembly of the program and exit.               |
-| `-X opt`  | Set an implementation option; see the table below.           |
-| `--version` | Print version and exit.                                    |
-| `--help`  | Print this list and exit.                                    |
+These flags work today.
 
-## `-X` options
+| Option       | Effect                                                                        |
+| ------------ | ----------------------------------------------------------------------------- |
+| `-c cmd`     | Run `cmd` as a single statement; remaining args become `sys.argv`.            |
+| `file`       | Execute `file` as `__main__`. `sys.argv[0]` is the filename.                  |
+| `-`          | Read the program from stdin (also the default when stdin is not a TTY).       |
+| `-V`, `--version` | Print version and exit.                                                  |
+| `-h`, `--help`, `-?` | Print usage and exit.                                                 |
+| (no args)    | Enter the interactive REPL.                                                   |
 
-Forwarded to `sys._xoptions`. The names below have observable
-behaviour in gopy today.
+## Parsed but not yet wired
 
-| Name                | Effect                                                |
-| ------------------- | ----------------------------------------------------- |
-| `dev`               | Enable runtime checks (PEP 690 dev mode).             |
-| `tracemalloc=N`     | Allocate N frames of malloc traceback per object.     |
-| `pycache_prefix=P`  | Write `__pycache__` under prefix `P`.                 |
-| `int_max_str_digits=N` | Cap the digit count for int-to-str conversions.   |
-| `gil=1`             | Use the global-interpreter-lock build (default).      |
+These flags are accepted (you will not get a parse error) but
+have no effect yet. They are listed here so you can recognise
+gaps when you compare against CPython.
+
+| Option       | What it should do (per CPython)                                               |
+| ------------ | ----------------------------------------------------------------------------- |
+| `-m mod`     | Import `mod` and run it as `__main__`.                                        |
+| `-i`         | Drop into the REPL after the script.                                          |
+| `-q`         | Suppress the REPL banner.                                                     |
+| `-u`         | Force unbuffered stdout/stderr.                                               |
+| `-v`         | Verbose import tracing.                                                       |
+| `-O`, `-OO`  | Optimise; strip assertions / docstrings.                                      |
+| `-S`         | Skip implicit `import site`.                                                  |
+| `-E`         | Ignore `PYTHON*` environment variables.                                       |
+| `-I`         | Isolated mode (`-E -s -P` combined).                                          |
+| `-s`         | Don't add the user site directory to `sys.path`.                              |
+| `-P`         | Don't prepend script directory to `sys.path`.                                 |
+| `-b`, `-bb`  | Warn / error on `bytes`/`str` mixing.                                         |
+| `-B`         | Don't write `.pyc` files.                                                     |
+| `-d`         | Debug mode (CPython prints parser debug; gopy treats this as a no-op).        |
+| `-R`         | Already-default hash randomisation (kept for compatibility).                  |
+| `-t`         | Removed in CPython 3; accepted for back-compat.                               |
+| `-W arg`     | Add a warning filter.                                                         |
+| `-X opt`     | Set an implementation option in `sys._xoptions`.                              |
+| `-x`         | Skip the first source line (shebang in scripts started by other interpreters). |
+
+The wiring lands one section at a time as the underlying
+subsystems mature. See [Status](status) for the current state.
 
 ## Environment variables
 
-| Variable                  | Effect                                                |
-| ------------------------- | ----------------------------------------------------- |
-| `PYTHONPATH`              | Prepended to `sys.path`.                              |
-| `PYTHONHOME`              | Override the default install root.                    |
-| `PYTHONSTARTUP`           | File evaluated before the REPL.                       |
-| `PYTHONDONTWRITEBYTECODE` | Disable `.pyc` writing.                               |
-| `PYTHONUNBUFFERED`        | Equivalent to `-u`.                                   |
-| `PYTHONVERBOSE`           | Equivalent to `-v`.                                   |
-| `PYTHONOPTIMIZE`          | Set the same level `-O` would.                        |
-| `PYTHONHASHSEED`          | Seed `str` / `bytes` hashing.                         |
-| `PYTHONIOENCODING`        | Force encoding of standard streams.                   |
-| `PYTHONUTF8`              | Force UTF-8 mode for filesystem and standard streams. |
+gopy reads two environment variables at startup today:
 
-## gopy-only switches
+| Variable        | Effect                                                                 |
+| --------------- | ---------------------------------------------------------------------- |
+| `PYTHONPATH`    | Prepended to `sys.path`. Colon-separated on POSIX, semicolon on Windows. |
+| `GOPY_STDLIB`   | Override the directory gopy walks for bundled `.py` resources.         |
 
-These flags do not exist in CPython. Each is a runtime knob for the
-gopy implementation itself, not a language extension.
+The full CPython environment surface (`PYTHONHOME`,
+`PYTHONSTARTUP`, `PYTHONHASHSEED`, `PYTHONOPTIMIZE`,
+`PYTHONUNBUFFERED`, `PYTHONUTF8`, ...) is not yet honoured; the
+plumbing arrives with `initconfig.c` port.
 
-| Flag                          | Effect                                          |
-| ----------------------------- | ----------------------------------------------- |
-| `GOPY_TRACE_SPECIALIZER=1`    | Log every specializer hit / miss / deopt.       |
-| `GOPY_TRACE_TIER2=1`          | Log Tier-2 trace projection and execution.      |
-| `GOPY_TRACE_MONITOR=1`        | Log every `sys.monitoring` fire.                |
-| `GOPY_DUMP_CODE=1`            | Dump every compiled `Code` object.              |
+## Exit codes
+
+| Code | Meaning                                            |
+| ---- | -------------------------------------------------- |
+| 0    | The interpreter terminated cleanly.                |
+| 1    | An unhandled exception escaped the top frame.      |
+| 2    | A bad command-line argument or a missing file.     |
+| *n*  | `sys.exit(n)` exited with code *n*.                |
+| 130  | The interpreter was interrupted by `SIGINT`.       |
+
+These follow `Modules/main.c`. Implementation is in
+`cmd/gopy/main.go`.
+
+## Examples
+
+Run a script with arguments:
+
+```bash
+gopy script.py --flag value
+# inside the script: sys.argv == ["script.py", "--flag", "value"]
+```
+
+Evaluate an expression:
+
+```bash
+gopy -c 'import sys; print(sys.version_info)'
+```
+
+Pipe a script:
+
+```bash
+cat <<'PY' | gopy
+import json
+print(json.dumps({"hello": "gopy"}, indent=2))
+PY
+```
+
+Run a one-liner under timing:
+
+```bash
+time gopy -c 'sum(i*i for i in range(1_000_000))'
+```
+
+## Compatibility checklist
+
+When porting a CPython invocation, the failure modes you may hit
+today are:
+
+* `-m some.module` is silently ignored; pass a path instead.
+* `-O` does not strip asserts. Don't rely on `__debug__ == False`.
+* `PYTHONPATH` works; `PYTHONHASHSEED` and the rest do not.
+* `python -X dev` does nothing (no `sys._xoptions` plumbing yet).
+
+For anything that does not fit, file an issue on the
+[tracker](https://github.com/tamnd/gopy/issues) with the
+invocation and the expected behaviour.
+
+## See also
+
+* [REPL](repl) for the interactive prompt.
+* [Embedding](embedding) when you want to skip the CLI.
+* [Debugging](debugging) for the introspection tools gopy ships.

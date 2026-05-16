@@ -1,0 +1,192 @@
+---
+title: Debugging
+description: The introspection surface gopy ships today. Tracebacks, code object inspection, Tier-2 uop traces, and where to fall back to CPython tooling.
+---
+
+# Debugging
+
+gopy is still building out its inspection toolkit. The fast path is
+to lean on the surfaces that are wired today and use CPython for the
+rest. Because gopy's bytecode is byte-equivalent with CPython 3.14,
+CPython's own `dis`, `inspect`, and `ast` tooling answers most
+"what is the interpreter seeing?" questions.
+
+## Reading a traceback
+
+Unhandled exceptions print a CPython-shaped traceback to stderr:
+
+```text
+Traceback (most recent call last):
+  File "demo.py", line 4, in <module>
+    raise ValueError("bad input")
+ValueError: bad input
+```
+
+The file/line/column information comes from PEP 657 location tables
+emitted by the assembler. Lines under `^^^` highlight the exact
+sub-expression that raised, just like CPython.
+
+From a Go embedding caller, the error returned by `pythonrun` is a
+`*errors.PyError`. Unwrap it for the same data:
+
+```go
+import "github.com/tamnd/gopy/errors"
+
+if err := pythonrun.RunSimpleString(ts, src, globals, &buf); err != nil {
+    var pyErr *errors.PyError
+    if errors.As(err, &pyErr) {
+        fmt.Println("type:", pyErr.Type)
+        fmt.Println("msg:", pyErr.Value)
+        for _, frame := range pyErr.Traceback {
+            fmt.Printf("  %s:%d in %s\n", frame.Filename, frame.Lineno, frame.Name)
+        }
+    }
+}
+```
+
+## Disassembling bytecode
+
+gopy does not currently ship a Python-level `dis` module. The
+recommended workflow is to disassemble under CPython 3.14: gopy's
+bytecode matches byte-for-byte, so what CPython prints is what gopy
+runs.
+
+```bash
+python3 -m dis demo.py
+```
+
+From Go, the compiled code object is available directly:
+
+```go
+mod, _ := parser.ParseString(src, "<inline>", parser.ModeFile)
+code, _ := compile.Compile(mod, "<inline>", 0)
+fmt.Printf("co_name:     %s\n", code.Name)
+fmt.Printf("co_argcount: %d\n", code.Argcount)
+fmt.Printf("co_varnames: %v\n", code.Varnames)
+fmt.Printf("co_consts:   %v\n", code.Consts)
+fmt.Printf("co_code len: %d bytes\n", len(code.Code))
+```
+
+The fields mirror CPython's `PyCodeObject`. See `compile/code.go`
+for the full struct.
+
+## Inspecting the parser and AST
+
+To see what the parser produced:
+
+```go
+mod, _ := parser.ParseString(src, "<inline>", parser.ModeFile)
+ast.Dump(os.Stdout, mod)
+```
+
+`ast.Dump` formats the tree the same way CPython's `ast.dump` does.
+The two outputs are diffed in `parser/parity_test.go`; if they
+differ that is a parity bug, not a debugging tip.
+
+For the token stream:
+
+```go
+toks, _ := tokenize.Tokenize(strings.NewReader(src), "<inline>")
+for _, t := range toks {
+    fmt.Printf("%-10s %q  @%d:%d\n", t.Type, t.Value, t.Start.Line, t.Start.Col)
+}
+```
+
+## Tier-2 trace introspection
+
+The Tier-2 projector records uop sequences when a hot loop trips its
+threshold. The executor exposes them for inspection:
+
+```go
+import "github.com/tamnd/gopy/optimizer"
+
+// After running code that hits the trace threshold.
+for _, exec := range optimizer.AllExecutors(ts) {
+    fmt.Println("trace:", exec.Code.Name, "len:", exec.TraceLen())
+    for i := 0; i < exec.TraceLen(); i++ {
+        op, oparg := exec.UopAt(i)
+        fmt.Printf("  %3d  %-30s %d\n", i, op, oparg)
+    }
+}
+```
+
+Per-uop bodies are still being ported. A trace whose uops are all
+`_NOP` or `_EXIT_TRACE` means the projector saw the shape but the
+executor has not yet been wired for those opcodes; the interpreter
+quietly falls back to Tier-1 dispatch.
+
+## Specializer state
+
+PEP 659 specialization records per-instruction caches. To see the
+specialized form of a call site:
+
+```go
+for i, instr := range code.Instructions() {
+    if instr.IsSpecialized() {
+        fmt.Printf("%d: %s -> %s (hits=%d)\n",
+            i, instr.BaseOp(), instr.SpecializedOp(), instr.HitCount())
+    }
+}
+```
+
+Cache layouts live in `specialize/`. Each `_ADAPTIVE` opcode has a
+matching specialised form (`LOAD_ATTR_INSTANCE_VALUE`,
+`CALL_PY_EXACT_ARGS`, etc.) once the heuristics fire.
+
+## `sys.monitoring`
+
+The PEP 669 monitoring API is fully wired. To trace every function
+call from inside a script:
+
+```python
+import sys
+events = sys.monitoring.events
+tool = 0
+sys.monitoring.use_tool_id(tool, "tracer")
+sys.monitoring.set_events(tool, events.PY_START | events.PY_RETURN)
+
+def on_start(code, offset):
+    print("enter", code.co_qualname)
+
+sys.monitoring.register_callback(tool, events.PY_START, on_start)
+```
+
+The full event set: `PY_START`, `PY_RESUME`, `PY_RETURN`, `PY_YIELD`,
+`CALL`, `LINE`, `INSTRUCTION`, `JUMP`, `BRANCH`, `STOP_ITERATION`,
+`RAISE`, `EXCEPTION_HANDLED`, `PY_UNWIND`, `PY_THROW`, `RERAISE`.
+
+## Legacy tracing
+
+`sys.settrace` is also wired and produces the events CPython
+documents. It is slower than `sys.monitoring`; prefer the new API
+unless you are running a debugger that has not been updated.
+
+## Logging from a script
+
+The `print` builtin works. The full `logging` module is not yet
+ported. For embedded callers, capture stdout (see
+[Recipes -> Capture stdout](recipes#capture-stdout)) and pipe it
+into your Go logger.
+
+## When to reach for CPython
+
+For anything not on the list above, run the same source under
+CPython 3.14:
+
+| Question                       | Tool                      |
+| ------------------------------ | ------------------------- |
+| Bytecode for a function        | `python3 -m dis file.py`  |
+| AST                            | `python3 -c "import ast; print(ast.dump(ast.parse(open('file.py').read())))"` |
+| Token stream                   | `python3 -m tokenize file.py` |
+| `.pyc` cache layout            | CPython 3.14's `dis.dis(open('cache.pyc', 'rb').read())` |
+| `gc` debug output              | CPython's `gc.set_debug(...)` |
+
+When the gopy answer differs from CPython's, that is a parity bug.
+File it via [Parity -> Reporting a parity bug](parity#reporting-a-parity-bug).
+
+## Reference
+
+* `errors/pyerror.go`. The Go-side error type.
+* `optimizer/executor.go`. Tier-2 introspection.
+* `specialize/`. Per-opcode cache layouts.
+* `monitor/`. PEP 669 implementation.

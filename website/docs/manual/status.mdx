@@ -1,54 +1,113 @@
 ---
 title: Status
-description: What works today in gopy, what is partial, and what is on the roadmap.
+description: What works today in gopy, what is partial, and what is on the near-term roadmap.
 ---
 
 # Status
 
-gopy is in active development. The roadmap targets behavioural
-parity with CPython 3.14. The table below tracks the major
-subsystems with their current state.
+gopy is in active development. The target is behavioural parity
+with CPython 3.14. The tables below describe the current state
+as of v0.12.x.
 
 ## Subsystem readiness
 
-| Subsystem           | State    | Notes                                              |
-| ------------------- | -------- | -------------------------------------------------- |
-| Tokenizer           | Complete | Indentation stack, f-strings, soft keywords.       |
-| PEG parser          | Complete | Full grammar including `match`.                    |
-| AST                 | Complete | Generated from `Python.asdl`.                      |
-| Symbol table        | Complete | Two-pass resolver including `__class__` cells.     |
-| Codegen             | Complete | Every statement and expression form.               |
-| Flow graph          | Partial  | Jump threading, constant folding, dead code, stack depth, exception tables. |
-| Assembler           | Complete | PEP 657 location tables, exception tables, pools.  |
-| `.pyc` marshal      | Complete | Wire-compatible with CPython 3.14.                 |
-| VM dispatch         | Complete | Every Tier-1 opcode wired.                         |
-| Specializer         | Complete | All 14 PEP 659 families.                           |
-| Tier-2 trace        | Partial  | Projector and executor lifecycle. 14 of ~285 uops ported. |
-| `sys.monitoring`    | Complete | 19 fire events, shadow walk, tool slots.           |
-| Legacy tracing      | Complete | `sys.settrace` bridge.                             |
-| GIL                 | Complete | Acquire / release, eval breaker.                   |
-| Memory model        | Complete | Refcount + generational cycle collector.           |
-| Generators / async  | Complete | `RESUME`, `YIELD_VALUE`, `RETURN_GENERATOR`, `SEND`. |
-| Import system       | Complete | Bootstrap, path finder, frozen modules, inittab.   |
-| Exception machinery | Complete | PEP 654 groups, `except*`.                         |
-| `int` / `float`     | Complete | Big-int via `objects/long.go`.                     |
-| `str`               | Complete | UCS-1 / UCS-2 / UCS-4 kinded storage.              |
-| `dict`              | Complete | Combined / split layout, version tag.              |
-| Other containers    | Complete | `list`, `tuple`, `set`, `frozenset`, `bytes`, `bytearray`. |
-| Built-in modules    | Partial  | `sys`, `io`, `os`, `functools`, `collections`, `dataclasses`, `contextlib`, `traceback`, `weakref`, `types`. More land per release. |
+| Subsystem           | State    | Notes                                                       |
+| ------------------- | -------- | ----------------------------------------------------------- |
+| Tokenizer           | Complete | Indentation stack, f-strings, soft keywords, t-strings (PEP 750). |
+| PEG parser          | Complete | Full grammar including `match`.                             |
+| AST                 | Complete | Generated from `Python.asdl`.                               |
+| Symbol table        | Complete | Two-pass resolver including `__class__` cells, PEP 695.     |
+| Codegen             | Complete | Every statement and expression form.                        |
+| Flow graph          | Partial  | Jump threading, constant folding, dead-code removal, stack depth, exception tables. |
+| Assembler           | Complete | PEP 657 location tables, exception tables, const pools.     |
+| `.pyc` marshal      | Partial  | Wire format implemented; uses gopy magic number (not CPython-interoperable yet). |
+| VM dispatch         | Complete | Every Tier-1 opcode wired.                                  |
+| Specializer         | Complete | All PEP 659 families.                                       |
+| Tier-2 trace        | Partial  | Projector and executor lifecycle in place; per-uop bodies being ported. |
+| `sys.monitoring`    | Complete | All PEP 669 events.                                         |
+| Legacy tracing      | Complete | `sys.settrace` bridge.                                      |
+| GIL                 | Complete | Acquire / release, eval breaker.                            |
+| Memory model        | Complete | Refcount + generational cycle collector.                    |
+| Generators / async  | Complete | `RESUME`, `YIELD_VALUE`, `RETURN_GENERATOR`, `SEND`.        |
+| Import system       | Complete | Bootstrap, path finder, inittab. Frozen modules via stdlibinit. |
+| Exception machinery | Complete | PEP 654 groups, `except*`, PEP 657 tracebacks.              |
+| `int` / `float`     | Complete | Big-int via `objects/long.go`.                              |
+| `str`               | Complete | UCS-1 / UCS-2 / UCS-4 kinded storage (PEP 393).             |
+| `dict`              | Complete | Combined / split layout, version tag.                       |
+| Other containers    | Complete | `list`, `tuple`, `set`, `frozenset`, `bytes`, `bytearray`.  |
 
-## Version mapping
+## Modules
 
-| gopy version | CPython baseline | Highlights                                |
-| ------------ | ---------------- | ----------------------------------------- |
-| v0.10        | 3.14             | First end-to-end run of `hello.py`.       |
-| v0.11        | 3.14             | PEP 659 adaptive specializer.             |
-| v0.12        | 3.14             | Tier-2 trace projector and executor.      |
+53 built-in module slots registered in `stdlibinit`. See
+[Modules](modules) for the full catalogue with per-module state.
+
+## Standard-library coverage
+
+| Category                | Available                                                       |
+| ----------------------- | --------------------------------------------------------------- |
+| Built-ins and core      | `builtins`, `sys`, `_io`, `io`, `errno`, `signal`, `gc`         |
+| Numeric                 | `math`                                                          |
+| Functional              | `_functools`, `functools`, `_operator`                          |
+| Containers              | `collections`, `_heapq` (partial), `_bisect` (partial)          |
+| Text                    | `re`, `_sre`, `_codecs`, `difflib`, `fnmatch`, `_string` (partial) |
+| Data                    | `_json`, `_csv`, `_hashlib`                                     |
+| OS / I/O                | `os`, `socket`, `_socket`, `_stat` (partial)                    |
+| Concurrency             | `_thread` (partial), `contextvars`                              |
+| Compression / encoding  | `zlib`                                                          |
+| Date / time             | `_time` (partial), `_datetime` (partial)                        |
+| Introspection           | `traceback`, `types`, `warnings`, `_warnings`                   |
+| Weakrefs                | `_weakref`, `weakref`                                           |
+| Class machinery         | `_abc` (partial), `dataclasses`, `contextlib`                   |
+| Tooling                 | `argparse`, `_tokenize`, `_opcode` (partial)                    |
+
+What is not here yet (and commonly missed): `asyncio`, `multiprocessing`,
+`ssl`, `subprocess`, `threading` (the full module), `urllib`,
+`http`, `email`, `pathlib`, `sqlite3`. Open an issue if your
+use-case needs one of these and we will prioritise.
+
+## Version map
+
+| gopy      | CPython baseline | Headline change                          |
+| --------- | ---------------- | ---------------------------------------- |
+| v0.10     | 3.14             | First end-to-end Python program runs.    |
+| v0.11     | 3.14             | PEP 659 adaptive specializer.            |
+| v0.12     | 3.14             | Tier-2 trace projector and uop executor. |
+| v0.12.1   | 3.14             | CPython test vendor; spec 1700 gate.     |
+| v0.12.3   | 3.14             | `re`, `fnmatch` ports.                   |
+| v0.12.4   | 3.14             | Lexer/tokenizer parity sweep.            |
+
+Full release notes live in the [changelog](/docs/changelog/).
+
+## Active work
+
+* **Tier-2 uop coverage.** ~14 of ~285 uops ported. The
+  optimisation pipeline is in place; the bottleneck is the
+  per-uop body translation.
+* **Tokenizer parity.** v0.12.4 is closing the last gaps
+  surfaced by the CPython `test_tokenize` suite.
+* **Standard-library port queue.** `re` and `fnmatch` shipped
+  in v0.12.3; next up are the parts of `os` and `pathlib`
+  needed for stdlib tests to compile.
+* **`.pyc` interoperability.** The marshal format works but
+  uses gopy's own magic number. CPython-interoperable `.pyc`
+  is on the roadmap.
 
 ## Non-goals
 
-* No alternative semantics. Anywhere gopy diverges from CPython,
-  the divergence is a bug.
-* No CPython C extension ABI. `.so` and `.pyd` modules are out of
-  scope. Native modules are reimplemented in Go on demand.
-* No Python 2.
+* **No alternative semantics.** Anywhere gopy diverges from
+  CPython, the divergence is a bug.
+* **No CPython C extension ABI.** `.so` and `.pyd` modules are
+  out of scope. Native modules are reimplemented in Go on
+  demand.
+* **No Python 2.**
+* **No bytecode stability across gopy versions** until v1.0.
+
+## How to help
+
+* File issues on the
+  [tracker](https://github.com/tamnd/gopy/issues) for parity
+  bugs. Minimal repro plus expected behaviour is the most
+  useful shape.
+* Pick a module from the partial list and translate one
+  function at a time; see the contributor guide in `CONTRIBUTING.md`.
+* Run the [benchmark suite](performance) and report regressions.

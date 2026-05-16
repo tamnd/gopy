@@ -1,0 +1,105 @@
+---
+title: Performance
+description: How fast gopy is today, why it is slower than CPython, and where the headroom lives.
+---
+
+# Performance
+
+The short version. gopy is slower than CPython 3.14 on every
+benchmark we run. The geometric mean on the small benchmark set is
+in the low hundreds of times slower. The gap is closing, mostly via
+Tier-2 uop coverage and continued specialization work.
+
+## How to read this page
+
+* "Slower than CPython" means wall-time per benchmark, measured
+  in process, single-threaded.
+* "Speedup" numbers are CPython time divided by gopy time. A
+  speedup of 0.01 means gopy is 100x slower than CPython.
+* gopy uses the same algorithms as CPython by design. The
+  difference is implementation overhead, not algorithmic.
+
+## Where the time goes
+
+The eval loop dominates. gopy's switch-based dispatch is in Go;
+CPython's is in tuned C with computed gotos. Until the Tier-2
+optimizer covers more uops, hot loops stay in the slow path.
+
+Secondary costs, in rough order of impact:
+
+1. **Interface dispatch on every object operation.** Go's interface
+   calls are more expensive than CPython's slot table lookups.
+2. **Reference counting via atomic ops in some paths.** CPython
+   uses non-atomic counters in single-threaded code.
+3. **`map[string]Object` for dict storage** instead of CPython's
+   hand-tuned hash table with combined / split layouts.
+4. **Boxed integers and floats.** Small-int caching helps but
+   doesn't eliminate allocation.
+
+None of these are fundamental. They are engineering work, listed
+roughly in the order we expect to attack them.
+
+## Running the benchmarks yourself
+
+The repo ships a small benchmark harness:
+
+```bash
+make bench
+```
+
+This runs a curated set of Python programs under both gopy and
+CPython 3.14, then writes a comparison table to `bench/results.md`.
+Source for each benchmark lives in `bench/programs/`.
+
+The benchmarks cover:
+
+* **Microbenchmarks.** Empty loop, attribute access, integer
+  arithmetic, list comprehension, dict access.
+* **Algorithmic.** N-queens, Fannkuch, Sieve of Eratosthenes,
+  binary trees, deltablue.
+* **Stdlib-heavy.** JSON encode/decode, regex match, string
+  formatting.
+
+## What is improving
+
+* **Tier-2 uop bodies.** As more uops are hand-ported from
+  `Python/executor_cases.c.h`, hot loops escape Tier-1 dispatch.
+  Coverage is roughly 14 of 285 uops today.
+* **Specializer tuning.** PEP 659 is wired but the heuristics that
+  pick specialised forms have not been retuned for gopy's cost
+  model.
+* **Dict layout.** A combined / split hashtable replacing the
+  `map[string]Object` is on the roadmap.
+
+## What will not change
+
+* **No JIT compilation to native code.** gopy is and will remain
+  an interpreter (with Tier-2 traces, which stay in the
+  interpreter).
+* **No goroutine-level parallelism within one interpreter.** PEP
+  684 (per-interpreter GIL) is on the roadmap, but the GIL stays
+  for single-interpreter workloads.
+
+## When the gap matters and when it doesn't
+
+The gap matters for CPU-bound numerical or string-crunching
+workloads. There gopy is the wrong tool. Use CPython, or rewrite
+the hot path in Go and call it from Python via
+[a built-in module](embedding#registering-a-built-in-module).
+
+The gap rarely matters for:
+
+* **Configuration evaluation.** A few hundred microseconds of parse
+  + compile + run is invisible inside a request that already does
+  database I/O.
+* **DSL-style rule engines.** The rules typically run a few hundred
+  ops total; even 100x slowdown is still under a millisecond.
+* **Code generation and templating.** I/O dominates.
+
+## Reference
+
+* `bench/`. The benchmark harness.
+* [Status -> Active work](status#active-work) for what is being
+  optimised right now.
+* The CPython 3.14 [What's New](https://docs.python.org/3.14/whatsnew/3.14.html)
+  for the baseline gopy targets.

@@ -1,48 +1,62 @@
 ---
 title: Install
-description: Install gopy with go install, a prebuilt binary, or build it from source.
+description: Install gopy with go install, a prebuilt binary, or from source. Toolchain requirements, verification, troubleshooting.
 ---
 
 # Install
 
 gopy is a single static Go binary. There is no C extension ABI,
-no dynamic library, and no Python runtime to install alongside it.
-Pick the path that matches your environment.
+no dynamic library, and no Python runtime to install alongside
+it. Pick the path that matches your environment.
+
+## Prerequisites
+
+* **Go 1.26 or newer** for source builds and `go install`.
+  Check with `go version`. If you only need the prebuilt binary,
+  no toolchain is required.
+* **A POSIX-like shell** (bash, zsh, fish) for the snippets
+  below. The Windows PowerShell equivalents are noted where
+  they differ.
 
 ## With `go install`
-
-Requires Go 1.26 or newer.
 
 ```bash
 go install github.com/tamnd/gopy/cmd/gopy@latest
 ```
 
 The binary lands in `$GOPATH/bin/gopy` (or `$HOME/go/bin/gopy`
-under the default Go layout). Add that directory to your `$PATH`.
-
-Confirm the install:
+under the default Go layout). Add that directory to your `$PATH`:
 
 ```bash
-$ gopy --version
-gopy 0.12.0 (3.14.0+) [go1.26 darwin/arm64]
+export PATH="$HOME/go/bin:$PATH"   # bash / zsh
+fish_add_path $HOME/go/bin         # fish
+```
+
+To pin a specific release, replace `latest` with a tag:
+
+```bash
+go install github.com/tamnd/gopy/cmd/gopy@v0.12.1
 ```
 
 ## Prebuilt binary
 
-Releases ship as a tar archive per platform on the
+Releases ship as tar archives per platform on the
 [releases page](https://github.com/tamnd/gopy/releases). Each
-archive contains a single executable.
+archive contains one executable.
 
 ```bash
+ARCH=$(uname -m)              # arm64 / x86_64
+OS=$(uname -s | tr A-Z a-z)   # darwin / linux
 curl -L -o gopy.tar.gz \
-  https://github.com/tamnd/gopy/releases/latest/download/gopy-$(uname -s)-$(uname -m).tar.gz
+  "https://github.com/tamnd/gopy/releases/latest/download/gopy-${OS}-${ARCH}.tar.gz"
 tar xzf gopy.tar.gz
 sudo install -m 0755 gopy /usr/local/bin/gopy
 ```
 
-## From source
+Windows: download the `.zip` from the same page; place
+`gopy.exe` on `%PATH%`.
 
-Clone the repository and build with the bundled Makefile.
+## From source
 
 ```bash
 git clone https://github.com/tamnd/gopy
@@ -51,25 +65,96 @@ make build
 ./bin/gopy --version
 ```
 
-Common developer targets:
+Useful developer targets in the Makefile:
 
 | Target       | What it does                                      |
 | ------------ | ------------------------------------------------- |
-| `make build` | Build the `gopy` binary into `./bin/gopy`         |
-| `make test`  | Run the unit tests with the race detector         |
-| `make cover` | Produce `coverage.txt` and print total coverage   |
-| `make vet`   | Run `go vet`                                      |
-| `make lint`  | Run `golangci-lint`                               |
-| `make tidy`  | Run `go mod tidy`                                 |
+| `make build` | Build the binary into `./bin/gopy`.               |
+| `make test`  | Run unit tests with the race detector.            |
+| `make cover` | Produce `coverage.txt` and print total coverage.  |
+| `make vet`   | Run `go vet`.                                     |
+| `make lint`  | Run `golangci-lint`.                              |
+| `make tidy`  | Run `go mod tidy`.                                |
+| `make bench` | Run the pyperformance gate (slow).                |
 
-## What gets installed
+## Verification
 
-Just one binary. There are no companion files, no `site-packages`
-directory, no shebang trampolines. gopy reads `.py` source from
-disk, compiles it in process, and runs it on its own VM. The
-standard library that gopy serves comes from the Go packages under
-`module/`, not from the Python files that CPython ships in `Lib/`.
+```bash
+$ gopy --version
+gopy 0.12.x (3.14.0+) [go1.26 darwin/arm64]
+```
 
-The pyc-format implementation under `marshal/` is wire-compatible
-with CPython: a `.pyc` produced by gopy loads in CPython 3.14 and
-vice versa. That property is exercised by the parity test suite.
+The bracketed string reports the Go toolchain and the target
+platform. The `(3.14.0+)` is the CPython baseline gopy tracks.
+
+A second smoke test, end to end:
+
+```bash
+$ echo 'print(sum(range(100)))' | gopy
+4950
+```
+
+If the smoke test fails, jump to [Troubleshooting](#troubleshooting).
+
+## What does and does not get installed
+
+* **Installed.** One executable: `gopy`. There are no companion
+  files, no `site-packages` directory, no shebang trampolines.
+* **Not installed.** No Python interpreter, no `python3`
+  symlink, no CPython standard library. gopy's stdlib is the set
+  of [Go-implemented modules](modules); the on-disk `.py` files
+  CPython ships in `Lib/` are *not* read by gopy.
+
+## Coexisting with CPython
+
+`gopy` does not interfere with `python3`. They are separate
+binaries. They do not share `.pyc` caches: gopy's marshal format
+uses its own magic number and is not wire-compatible with CPython
+3.14 today. A `.pyc` produced by one will not be loaded by the
+other.
+
+## Troubleshooting
+
+**`go install` reports `module ... requires Go 1.26`.**
+
+Upgrade Go. Pre-1.26 toolchains will refuse to build the
+current `main` branch.
+
+**The binary exists but `gopy` is not found.**
+
+`$GOPATH/bin` is not on your `PATH`. Either prepend it (see the
+snippet above) or copy `gopy` somewhere already on `PATH`:
+
+```bash
+sudo install -m 0755 "$(go env GOPATH)/bin/gopy" /usr/local/bin/
+```
+
+**`gopy --version` reports an old version after `go install`.**
+
+Go caches modules; force a refresh:
+
+```bash
+GOFLAGS=-modcacherw go install -a github.com/tamnd/gopy/cmd/gopy@latest
+```
+
+**Smoke test prints nothing.**
+
+Check whether you are piping into a `gopy` from your shell PATH
+or from `which gopy`. A stale build elsewhere on `PATH` is the
+usual culprit.
+
+**Tab completion in the REPL is missing.**
+
+The bare `myreadline` build has no completion. Linking against
+GNU readline (a future build tag) is on the roadmap; for now,
+pipe into `rlwrap`:
+
+```bash
+rlwrap gopy
+```
+
+## Next
+
+* Run your first program in [Run a file](run).
+* See every flag in the [CLI reference](cli).
+* Embed gopy in a Go program in [Embedding](embedding).

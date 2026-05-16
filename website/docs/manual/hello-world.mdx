@@ -35,7 +35,10 @@ Hello, gopy
 
 ## Disassembly
 
-`gopy -d hello.py` prints the bytecode the compiler produced.
+The compiler emits the bytecode below. The `-d` flag is parsed
+but not yet wired in gopy; for now, the easiest way to inspect
+gopy's output is to run `python3 -m dis hello.py` under CPython
+3.14. gopy's bytecode is identical:
 
 ```text
   0           0 RESUME                   0
@@ -48,7 +51,8 @@ Hello, gopy
              18 RETURN_CONST             1 (None)
 ```
 
-This is byte-for-byte identical to what CPython 3.14 produces.
+See [Debugging](debugging) for the introspection surface that
+gopy does ship today.
 
 ## Where to go from here
 

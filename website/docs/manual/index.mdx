@@ -1,45 +1,40 @@
 ---
 title: Manual
-description: A short, runnable tour of gopy. Install, run a file, and read the disassembly.
+description: A practical guide for developers using gopy. Install, embed, troubleshoot, and ship.
 ---
 
 # Manual
 
 gopy is a behavioural twin of CPython 3.14 written in Go. The
 interpreter parses, compiles, and runs Python source the same way
-CPython does. The result is the same bytecode, the same objects,
-the same error messages.
+CPython does. The result is the same bytecode shape, the same
+objects, the same error messages.
 
-This manual is the user-facing slice of the site. It does not cover
-implementation. For that, see the [CPython](/docs/cpython/) and
-[gopy](/docs/gopy/) pillars.
+This manual is for developers who want to *use* gopy: run a
+script, embed the VM in a Go program, register a custom built-in
+module, or figure out which standard-library names are wired
+today. For implementation internals, jump to the
+[CPython](/docs/cpython/) and [gopy](/docs/gopy/) pillars.
 
-## What is in this manual
+## Sections
 
-| Page                                | What it covers                                |
-| ----------------------------------- | --------------------------------------------- |
-| [Install](install)                  | `go install` and prebuilt binaries.           |
-| [Run a file](run)                   | `gopy hello.py`, exit codes, stdin scripts.   |
-| [Hello, gopy](hello-world)          | The smallest runnable program.                |
-| [CLI](cli)                          | Every flag the binary accepts.                |
-| [REPL](repl)                        | The interactive prompt.                       |
-| [Embedding](embedding)              | Calling the gopy VM from Go.                  |
-| [Status](status)                    | Which Python features are wired today.        |
-| [Parity](parity)                    | How gopy is held to CPython behaviour.        |
+| Section            | What you will find                                                        |
+| ------------------ | ------------------------------------------------------------------------- |
+| **Get started**    | Install, run a file, the smallest runnable program.                       |
+| **Using gopy**     | Every CLI flag, the REPL's behaviour, and the Go embedding surface.       |
+| **Recipes**        | Catalogue of available modules, working code patterns, debugging knobs.   |
+| **Project**        | Subsystem status, benchmark numbers, parity policy, FAQ, peers.           |
 
-## A 30 second tour
+## A 30-second tour
 
 ```python title="hello.py"
 def fizzbuzz(n):
     for i in range(1, n + 1):
-        if i % 15 == 0:
-            print("FizzBuzz")
-        elif i % 3 == 0:
-            print("Fizz")
-        elif i % 5 == 0:
-            print("Buzz")
-        else:
-            print(i)
+        match (i % 3, i % 5):
+            case (0, 0): print("FizzBuzz")
+            case (0, _): print("Fizz")
+            case (_, 0): print("Buzz")
+            case _:      print(i)
 
 fizzbuzz(15)
 ```
@@ -63,6 +58,36 @@ Fizz
 FizzBuzz
 ```
 
-Pipe `gopy -d hello.py` to print the bytecode listing, or
-`GOPY_TRACE_SPECIALIZER=1 gopy hello.py` to watch the adaptive
-specializer in action.
+## When gopy is the right choice
+
+* **Embedding Python in a Go service** without an `os/exec`
+  subprocess, without CGo, without a Python install on the host.
+  One static binary.
+* **Sandboxed evaluation of user-supplied Python.** No
+  `subprocess`, no `ctypes`, no file-system access unless you
+  wire it; built-in modules are opt-in via
+  [`imp.AppendInittab`](embedding#registering-a-built-in-module).
+* **Scripting hook in a Go application.** Ship a tool that lets
+  users write rules, plugins, or filters in Python; the Go host
+  controls what they can call.
+
+## When CPython is the right choice
+
+* **Performance.** Today gopy runs roughly two orders of magnitude
+  slower than CPython on pyperformance; see [Performance](performance)
+  for the current numbers and the active work.
+* **C extensions.** `numpy`, `pandas`, `cryptography`, `Pillow`,
+  `lxml`. anything depending on the CPython ABI is out of scope.
+* **The standard library you need is not yet ported.** Check
+  [Modules](modules) before you commit.
+
+## Versions
+
+| gopy      | CPython baseline | Highlight                                |
+| --------- | ---------------- | ---------------------------------------- |
+| v0.10     | 3.14             | First end-to-end Python program runs.    |
+| v0.11     | 3.14             | PEP 659 adaptive specializer.            |
+| v0.12     | 3.14             | Tier-2 trace projector and uop executor. |
+| v0.12.4   | 3.14             | Lexer/tokenizer parity sweep.            |
+
+Track release notes in the [changelog](/docs/changelog/).

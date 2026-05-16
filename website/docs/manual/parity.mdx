@@ -68,3 +68,37 @@ The only carve-out is the surface API style. Go callers see Go
 idioms (interface satisfaction over duck-typing, `error` returns,
 package layout that follows the Go standard library). The
 Python-visible behaviour is unaffected.
+
+## Reporting a parity bug
+
+A useful bug report has three parts:
+
+1. **Source.** Minimal Python that reproduces the mismatch.
+2. **CPython output.** What `python3` (3.14.x) produces.
+3. **gopy output.** What `gopy` produces from the same source.
+
+Open the issue at
+[github.com/tamnd/gopy/issues](https://github.com/tamnd/gopy/issues)
+with all three. Tracebacks, return values, exception messages,
+and bytecode diffs all qualify.
+
+## How a parity port lands
+
+The typical flow for porting a CPython subsystem to gopy:
+
+1. **Pin the CPython source.** The work targets a specific
+   3.14.x tag in a local `~/cpython-314` mirror.
+2. **Function-by-function translation.** Each Go function gets
+   a `// CPython: file.c:Lnn FuncName` citation. No invented
+   shims.
+3. **Golden corpus.** A test corpus is generated from CPython
+   and frozen as the expected output.
+4. **Spec entry.** The work has an entry under
+   [website/docs/specs](/docs/specs/) tracking the checklist
+   of functions ported, tests passing, and remaining gaps.
+5. **CI gate.** The spec's checklist promotes from "in
+   progress" to "shipped" only when the gate test passes
+   against the golden corpus.
+
+This is slower than freehand reimplementation, but it is the
+only way to keep behaviour aligned across hundreds of files.

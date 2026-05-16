@@ -65,3 +65,48 @@ way to customise how repr-style output is rendered.
 `KeyboardInterrupt` at the current prompt and clears the
 in-progress buffer. `exit()` and `quit()` are real functions that
 raise `SystemExit`.
+
+## Line editing
+
+gopy's line editor is `myreadline/`. By default it runs the bare
+`StdioReadline` mode: prompt is drawn, input is read to newline.
+There is no in-place editing, no history navigation, and no tab
+completion in that mode.
+
+To get a full-featured terminal experience today, pipe through
+`rlwrap`:
+
+```bash
+rlwrap gopy
+```
+
+A future build tag will link in `peterh/liner` or GNU readline.
+
+## Plugging in a custom reader
+
+A Go host that embeds the REPL can supply its own line reader
+via `myreadline.SetReader`. The function receives stdin / stdout
+plus the prompt and returns the user's line.
+
+```go
+import "github.com/tamnd/gopy/myreadline"
+
+myreadline.SetReader(func(stdin io.Reader, stdout io.Writer, prompt string) (string, error) {
+    // Run your own line editor here.
+})
+```
+
+This is what an embedder would use to integrate a TUI library
+or a network shell.
+
+## Quirks worth knowing
+
+* Multi-line input ends on a blank line, not on dedent. Pasting
+  blocks copied with the leading prompt characters (`>>> `,
+  `... `) does not work yet; strip them first.
+* The displayhook only fires in `mode="single"`. Inside a `def`
+  body, expression statements at the inner level are evaluated
+  but their values are not printed.
+* `_` holds the value of the last expression printed at the
+  prompt. Re-binding `_` (a common idiom in i18n code) breaks
+  this; the REPL never restores the binding.

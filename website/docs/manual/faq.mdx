@@ -1,0 +1,176 @@
+---
+title: FAQ
+description: Honest answers to questions developers ask before adopting gopy.
+---
+
+# FAQ
+
+## Is gopy production-ready?
+
+For embedded use cases where the Python surface is bounded and you
+control the scripts: yes, with caveats. The interpreter is
+behaviourally faithful to CPython 3.14 across the language core,
+and parity bugs are tracked as bugs.
+
+For drop-in replacement of `python3` as a general-purpose
+interpreter: not yet. Several common stdlib modules (`asyncio`,
+`subprocess`, `ssl`, `urllib`, `sqlite3`) are not ported. See
+[Status](status) for the honest picture.
+
+## How is this different from CPython?
+
+It is not, by design. gopy aims for byte-equivalent output:
+same bytecode, same exception messages, same column-accurate
+tracebacks. Anywhere gopy diverges from CPython,
+[that is a bug](parity).
+
+The differences that *are* by design live in the surface API for Go
+embedders. Go callers see Go errors and Go types, not a C API.
+
+## Why Go and not Rust or C++?
+
+The author writes Go. The runtime semantics of Go (garbage
+collected, goroutines, interface dispatch, no manual memory) are a
+reasonable match for hosting a dynamically typed interpreter.
+
+If you want the same shape of project in Rust, see
+[RustPython](comparison#gopy-vs-rustpython).
+
+## Can I run my existing Python codebase on gopy?
+
+If your codebase is pure Python and uses only stdlib modules from
+the [supported list](modules), yes. If it depends on `numpy`,
+`pandas`, `requests`, or any module backed by a C extension, no.
+gopy does not implement the CPython C extension ABI and that is a
+[non-goal](status#non-goals).
+
+## Does gopy support C extensions?
+
+No. `.so` and `.pyd` modules are out of scope. Replacements are
+written in Go and registered via
+[`imp.AppendInittab`](embedding#registering-a-built-in-module).
+
+## What Python version does gopy target?
+
+3.14. The reference clone lives at `~/cpython-314` and every
+`// CPython:` citation points into that tree at a specific line.
+The version bumps when the upstream tag bumps.
+
+## Is `.pyc` cached output compatible with CPython?
+
+Not yet. gopy reads and writes `.pyc` files using its own magic
+number, so cached files round-trip within gopy but cannot be
+consumed by CPython (or vice versa). CPython-interoperable `.pyc`
+is on the roadmap, see [Status](status#active-work).
+
+## How does gopy handle the GIL?
+
+It has one. Acquire/release happens around any operation that
+mutates Python state. Goroutines that want to run Python each get
+their own `state.Thread`, but only one of them runs at a time
+within a single interpreter.
+
+The per-interpreter GIL (PEP 684) plumbing exists but is not yet a
+supported configuration.
+
+## Can two goroutines call into gopy at the same time?
+
+Yes, with one `state.Thread` per goroutine. They serialise on the
+GIL, so this gives you cooperative concurrency, not parallelism.
+See [Recipes -> Goroutines and Threads](recipes#goroutines-and-threads).
+
+## How do I expose a Go function to Python?
+
+Two ways:
+
+* **One function in scope.** Put `objects.NewBuiltinFunction(name, fn)`
+  into the `globals` dict. See
+  [Recipes -> Add a Go function](recipes#add-a-go-function-to-the-python-world).
+* **A whole module.** Register a factory via `imp.AppendInittab`
+  and let `import name` resolve it. See
+  [Embedding -> Registering a built-in module](embedding#registering-a-built-in-module).
+
+## How do I sandbox user-supplied code?
+
+Replace `__builtins__` in the script's globals with a curated dict
+containing only the names you trust. The script then literally
+cannot reach `open`, `import`, `eval`, or any other name you do not
+expose. See [Recipes -> Run user code with curated built-ins](recipes#run-user-code-with-a-curated-set-of-built-ins).
+
+This is the same defence-in-depth model CPython uses internally.
+Like all defence-in-depth, it is not a security boundary against a
+determined attacker: combine it with OS-level isolation if you are
+running untrusted code.
+
+## How fast is gopy?
+
+Slower than CPython 3.14 across the board. Geomean on the small
+benchmark set is a couple of hundred times slower. The gap is
+closing as Tier-2 uop coverage grows. See [Performance](performance)
+for the honest numbers.
+
+## What happens if a script runs forever?
+
+Two answers.
+
+In CLI use, hit Ctrl-C. SIGINT raises `KeyboardInterrupt` from the
+next bytecode dispatch, exactly as CPython does.
+
+From embedded code, call `ts.RequestStop()`. The eval breaker bit
+flips and the VM raises `KeyboardInterrupt` on the next backward
+branch or function call. See
+[Recipes -> Time-bound execution](recipes#time-bound-execution).
+
+## Why is my exception message slightly different?
+
+It is a parity bug. Open an issue with the reproducer; messages
+are tested byte-equal against CPython and any drift is in scope to
+fix.
+
+## Can I run Jupyter / IPython / Django / Flask on gopy?
+
+Not today. Each of these depends on modules that are not yet
+ported (Jupyter and IPython use `prompt_toolkit` and `tornado`;
+Django and Flask use `socket` deeply plus assorted C extensions
+via SQL drivers and `cryptography`).
+
+The path to running them is the same as for any large Python
+project: fill in the stdlib coverage. Issues that mention a
+specific framework get prioritised.
+
+## How do I report a parity bug?
+
+Three pieces of information: a minimal Python source, what CPython
+3.14 produces, what gopy produces. File at
+[github.com/tamnd/gopy/issues](https://github.com/tamnd/gopy/issues).
+See [Parity -> Reporting a parity bug](parity#reporting-a-parity-bug).
+
+## Is gopy a fork of CPython?
+
+No. It is a function-by-function reimplementation in Go. Every Go
+function carries a `// CPython:` citation pointing at the C
+function it ports. The build does not link against any CPython
+artefact.
+
+## What's the license?
+
+MIT, matching the [project repository](https://github.com/tamnd/gopy).
+CPython source consulted during the port is under the
+Python Software Foundation License; the Go port itself is original
+code, not a derivative work in the copyright sense.
+
+## How do I contribute?
+
+* Pick a partial-status module from [Modules](modules) and port a
+  function.
+* Fix a parity bug from the issue tracker.
+* Run the benchmark suite and report regressions.
+* Improve these docs.
+
+See `CONTRIBUTING.md` in the repo for the workflow.
+
+## Where do I ask a question that isn't here?
+
+Open a discussion at
+[github.com/tamnd/gopy/discussions](https://github.com/tamnd/gopy/discussions),
+or an issue if it is bug-shaped.

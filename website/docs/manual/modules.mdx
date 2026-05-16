@@ -1,0 +1,155 @@
+---
+title: Modules
+description: Every built-in module gopy ships today, with its state and source location.
+---
+
+# Modules
+
+This page is the catalogue. Every name you can `import` in gopy
+today is listed below, with a note on how complete the port is
+and where the source lives. The wiring lives in
+`stdlibinit/registry.go`; each module's `init()` block calls
+`imp.AppendInittab(name, factory)` to register its name.
+
+## Status legend
+
+* **Complete.** Every public API is wired and behaves like
+  CPython 3.14.
+* **Partial.** The module imports and the common path works, but
+  some functions raise `NotImplementedError` or are missing.
+* **Stub.** The name is registered so `import` succeeds; most
+  attributes are unimplemented.
+
+## Catalogue
+
+### Core and built-ins
+
+| Module       | State    | Source              | Notes                                       |
+| ------------ | -------- | ------------------- | ------------------------------------------- |
+| `builtins`   | Complete | `module/builtins/`  | `print`, `len`, `range`, exception types, etc. |
+| `sys`        | Complete | `module/sys/`       | `argv`, `path`, `modules`, `version_info`.  |
+| `_io`        | Complete | `module/_io/`       | C-level I/O classes; backs `io`.            |
+| `io`         | Complete | `module/io/`        | Text/binary I/O wrappers.                   |
+| `errno`      | Complete | `module/errno/`     | Errno constants.                            |
+| `signal`     | Complete | `module/signal/`    | Signal handlers and constants.              |
+| `gc`         | Complete | `module/gc/`        | `gc.collect`, generation thresholds.        |
+| `_warnings`  | Complete | `module/_warnings/` | The C side of `warnings`.                   |
+| `warnings`   | Complete | `module/warnings/`  | Filter management.                          |
+
+### Numeric and functional
+
+| Module        | State    | Source                | Notes                                  |
+| ------------- | -------- | --------------------- | -------------------------------------- |
+| `math`        | Complete | `module/math/`        | Trig, log, gamma, isqrt, isfinite.     |
+| `_functools`  | Complete | `module/_functools/`  | C side of `functools`.                 |
+| `functools`   | Complete | `module/functools/`   | `reduce`, `partial`, `lru_cache`, ...  |
+| `_operator`   | Complete | `module/_operator/`   | `itemgetter`, `attrgetter`, ops.       |
+
+### Containers and algorithms
+
+| Module          | State    | Source                  | Notes                                          |
+| --------------- | -------- | ----------------------- | ---------------------------------------------- |
+| `collections`   | Complete | `module/_collections/`  | `deque`, `OrderedDict`, `Counter`, `ChainMap`. |
+| `_heapq`        | Partial  | `module/_heapq/`        | Core heap ops; some helpers pending.           |
+| `_bisect`       | Partial  | `module/_bisect/`       | `bisect_left`, `bisect_right`.                 |
+| `_itertools`    | Partial  | `module/_itertools/`    | Several iterators pending.                     |
+
+### Text and pattern matching
+
+| Module        | State    | Source                | Notes                                       |
+| ------------- | -------- | --------------------- | ------------------------------------------- |
+| `re`          | Complete | `module/re/`          | Full `re` API.                              |
+| `_sre`        | Complete | `module/_sre/`        | Pattern engine; see spec 1703 for details.  |
+| `_codecs`     | Complete | `module/_codecs/`     | UTF-8 / 16 / 32, latin-1, ASCII.            |
+| `_string`     | Partial  | `module/_string/`     | The C helpers behind `string.Formatter`.    |
+| `difflib`     | Complete | `module/difflib/`     | `SequenceMatcher`, `unified_diff`.          |
+| `fnmatch`     | Complete | `module/fnmatch/`     | Shell-style wildcards.                      |
+| `_tokenize`   | Complete | `module/_tokenize/`   | Tokeniser exposed to Python.                |
+
+### Data formats
+
+| Module      | State    | Source              | Notes                                       |
+| ----------- | -------- | ------------------- | ------------------------------------------- |
+| `_json`     | Complete | `module/_json/`     | `loads`, `dumps`, the encoder/decoder.      |
+| `_csv`      | Complete | `module/_csv/`      | Reader / writer / dialect.                  |
+| `_hashlib`  | Complete | `module/_hashlib/`  | MD5, SHA-1, SHA-256, etc.                   |
+| `zlib`      | Complete | `module/zlib/`      | Deflate / inflate.                          |
+
+### OS, I/O, network
+
+| Module           | State    | Source                  | Notes                                  |
+| ---------------- | -------- | ----------------------- | -------------------------------------- |
+| `os`             | Complete | `module/os/`            | `path`, `environ`, `getcwd`, etc.      |
+| `_socket`        | Complete | `module/_socket/`       | Low-level sockets.                     |
+| `socket`         | Complete | `module/socket/`        | High-level wrappers.                   |
+| `_stat`          | Partial  | `module/_stat/`         | `S_ISDIR`, mode bits.                  |
+| `_posixsubprocess` | Stub   | `module/_posixsubprocess/` | Registered; runtime not yet usable.  |
+
+### Concurrency and contexts
+
+| Module         | State    | Source                | Notes                                  |
+| -------------- | -------- | --------------------- | -------------------------------------- |
+| `_thread`      | Partial  | `module/_thread/`     | Lock, `start_new_thread`, ident.       |
+| `contextvars`  | Complete | `module/contextvars/` | `ContextVar`, `copy_context`.          |
+| `contextlib`   | Complete | `module/contextlib/`  | `contextmanager`, `suppress`, `ExitStack`. |
+
+### Date and time
+
+| Module       | State    | Source              | Notes                                  |
+| ------------ | -------- | ------------------- | -------------------------------------- |
+| `_time`      | Partial  | `module/_time/`     | `time`, `monotonic`, `sleep`. Pieces pending. |
+| `_datetime`  | Partial  | `module/_datetime/` | `date`, `datetime`, `timedelta`. timezones partial. |
+
+### Introspection, types, weakrefs
+
+| Module        | State    | Source                | Notes                                  |
+| ------------- | -------- | --------------------- | -------------------------------------- |
+| `traceback`   | Complete | `module/traceback/`   | `format_exc`, `extract_stack`.         |
+| `types`       | Complete | `module/types/`       | `FunctionType`, `MappingProxyType`.    |
+| `_weakref`    | Complete | `module/_weakref/`    | The C side of weakref.                 |
+| `weakref`     | Complete | `module/weakref/`     | `ref`, `WeakValueDictionary`, ...      |
+
+### Class machinery
+
+| Module        | State    | Source                | Notes                                  |
+| ------------- | -------- | --------------------- | -------------------------------------- |
+| `_abc`        | Partial  | `module/_abc/`        | `ABCMeta` core; subclass cache partial. |
+| `dataclasses` | Complete | `module/dataclasses/` | `@dataclass`, `field`, `replace`.      |
+
+### Tooling
+
+| Module        | State    | Source                | Notes                                  |
+| ------------- | -------- | --------------------- | -------------------------------------- |
+| `argparse`    | Complete | `module/argparse/`    | Subset matching CPython output.        |
+| `_opcode`     | Partial  | `module/_opcode/`     | Used by `dis` and the compiler.        |
+| `_random`     | Stub     | `module/_random/`     | Registered; Mersenne Twister pending.  |
+| `_uuid`       | Stub     | `module/_uuid/`       | Registered; native UUID pending.       |
+
+## What is not here yet
+
+The following commonly used modules are *not* in gopy today.
+Track [the project issues](https://github.com/tamnd/gopy/issues)
+for status. If your service needs one, file a request: it helps
+us prioritise.
+
+* `asyncio`, `selectors`
+* `multiprocessing`, the full `threading` module
+* `ssl`, `hashlib` (the high-level wrapper)
+* `subprocess`
+* `urllib.*`, `http.*`, `email`
+* `pathlib`
+* `sqlite3`, `dbm`
+* `logging` (the full module; bare `print` works)
+* `unittest`, `pytest`
+
+## Adding your own
+
+A Go author can register a new module in their own package with
+`imp.AppendInittab`. See [Embedding](embedding#registering-a-built-in-module)
+for the pattern.
+
+## Reference
+
+* `stdlibinit/stdlibinit.go`. The blank-import wiring.
+* `stdlibinit/registry.go`. The per-module init manifest.
+* `imp/inittab.go`. The registration API.

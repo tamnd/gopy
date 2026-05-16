@@ -41,9 +41,9 @@ statements to print their value implicitly.
 gopy -m http.server 8000
 ```
 
-`-m` defers to the import machinery. gopy looks up the module on
-`sys.path`, imports it, and runs it as `__main__`. The module sees
-`sys.argv[0]` set to its own `__spec__.origin`, matching CPython.
+`-m` is parsed but not yet wired in gopy. The intended behaviour
+matches CPython: import the module from `sys.path` and run it as
+`__main__`. Until the flag lands, pass the source path directly.
 
 ## Stdin
 
@@ -66,3 +66,32 @@ to EOF and treats the contents as a script.
 
 These numeric codes are the ones CPython documents in
 `Modules/main.c`. gopy emits them from `cmd/gopy/main.go`.
+
+## How long it takes
+
+A trivial script like the one in the [hello-world](hello-world)
+page completes in a few milliseconds. Most of that is the
+process start. Once the interpreter is up, parsing and compiling
+add a few hundred microseconds for short modules; the eval loop
+itself is where the [performance gap](performance) with CPython
+lives.
+
+For latency-sensitive work, [embed](embedding) the interpreter
+once and reuse a compiled `Code` object across calls. Starting a
+fresh `gopy` process on every request pays start-up cost you can
+amortise.
+
+## What gopy reads from disk
+
+| Path                          | Read when                              |
+| ----------------------------- | -------------------------------------- |
+| The script file               | Always.                                |
+| Imported `.py` files          | On `import name`.                      |
+| Imported `.pyc` files         | On `import name`, if a cache is found. |
+| `$GOPY_STDLIB` directory      | At startup, to seed `sys.path`.        |
+| `$PYTHONPATH` directories     | At startup, prepended to `sys.path`.   |
+
+gopy does *not* read the system Python install. It does not pick
+up `/usr/lib/python3.14/`, virtualenvs, conda environments, or
+`site-packages`. To make a third-party `.py` module available to
+gopy, place it on `PYTHONPATH` or co-locate it with your script.

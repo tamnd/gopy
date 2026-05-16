@@ -1,14 +1,21 @@
 ---
 title: Embedding
-description: Calling the gopy VM from a Go program.
+description: Running Python from a Go program. The package surface, registering built-ins, exchanging values, sandboxing, and concurrency.
 ---
 
 # Embedding
 
-gopy is a Go module. A host Go program can compile and run Python
-source without spawning a subprocess. The surface is small.
+gopy is a Go module. A host Go program can compile and run
+Python source without spawning a subprocess, without CGo, and
+without a Python install on the machine. The interpreter is one
+import away.
 
-## A complete example
+This page walks through the embedding surface: minimal run,
+package map, registering a built-in module, exchanging values
+between Go and Python, sandboxing user-supplied code, and the
+concurrency model.
+
+## A minimal embed
 
 ```go title="main.go"
 package main
@@ -22,13 +29,16 @@ import (
 	"github.com/tamnd/gopy/parser"
 	"github.com/tamnd/gopy/pythonrun"
 	"github.com/tamnd/gopy/state"
+
+	// Blank import to wire the stdlib modules gopy ships.
+	_ "github.com/tamnd/gopy/stdlibinit"
 )
 
 func main() {
 	src := `name = "world"
 print(f"hello, {name}")
 `
-	mod, err := parser.ParseString(src, "<embedded>", parser.ModeExec)
+	mod, err := parser.ParseString(src, "<embedded>", parser.ModeFile)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -36,7 +46,7 @@ print(f"hello, {name}")
 	if err != nil {
 		log.Fatal(err)
 	}
-	ts := state.NewThreadState()
+	ts := state.NewThread()
 	if _, err := pythonrun.Run(ts, code, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -45,28 +55,64 @@ print(f"hello, {name}")
 ```
 
 ```bash
-$ go run main.go
+$ go run .
 hello, world
 ```
 
-## What the surface gives you
+The blank `_ "github.com/tamnd/gopy/stdlibinit"` import is how
+the standard modules (`sys`, `io`, `math`, `re`, ...) register
+themselves with the import machinery. Drop it and you get a
+minimal interpreter with only built-in names; useful when you
+want to control exactly what user code can reach.
 
-| Package | Role                                                        |
-| ------- | ----------------------------------------------------------- |
-| `parser` | Tokenize and parse Python source into an AST.              |
-| `compile` | Compile an AST into a `Code` object.                      |
-| `pythonrun` | Run a `Code` object on the VM.                          |
-| `state` | Per-thread interpreter state.                              |
-| `objects` | The runtime value model: `Object`, `Type`, slot tables.  |
-| `errors` | Exception types and the bridge to Go errors.              |
-| `imp` | The import machinery, if you want to register modules.      |
+## A shorter `RunSimpleString`
 
-## Adding a built-in module
-
-A host can register a built-in module the same way the gopy stdlib
-modules do, by calling `imp.AppendInittab` from an `init()` block.
+If you do not need to keep the compiled `Code` object around, the
+one-shot helper composes the three calls above:
 
 ```go
+ts := state.NewThread()
+globals := objects.NewDict()
+err := pythonrun.RunSimpleString(ts, src, globals, os.Stderr)
+```
+
+`globals` is the module dict the code runs in. Anything the
+script assigns at module scope ends up in it; anything you want
+the script to see (functions, configuration, host data) you put
+in before the call.
+
+## Package surface
+
+The embedding surface is small. These are the packages you will
+import from a host program:
+
+| Package           | Role                                                            |
+| ----------------- | --------------------------------------------------------------- |
+| `parser`          | Tokenise and parse Python source into an AST.                   |
+| `compile`         | Compile an AST into a `Code` object.                            |
+| `pythonrun`       | Run a `Code` object on the VM; one-shot helpers.                |
+| `state`           | Per-thread interpreter state.                                   |
+| `objects`         | The value model: `Object`, `Type`, `Dict`, `Str`, `Int`, ...    |
+| `errors`          | Exception types and the bridge to Go `error`.                   |
+| `imp`             | The import machinery (`AppendInittab`, `ImportModule`).         |
+| `stdlibinit`      | Blank-import to wire every shipped stdlib module.               |
+
+| Source path                                | Entry points                                                  |
+| ------------------------------------------ | ------------------------------------------------------------- |
+| `parser/parser.go`                         | `ParseString`, `ParseFile`, `ModeFile`, `ModeEval`, `ModeSingle` |
+| `compile/compile.go`                       | `Compile(mod, filename, flags) (*Code, error)`                |
+| `pythonrun/pythonrun.go`                   | `RunSimpleString`, `RunAnyFile`, `Run`, `InteractiveLoop`     |
+| `state/state.go`                           | `NewThread`, `Thread.*`                                       |
+| `objects/`                                 | `NewDict`, `NewInt`, `NewStr`, `NewList`, `NewTuple`, ...     |
+| `imp/inittab.go`                           | `AppendInittab`, `ExtendInittab`, `FindInitFunc`              |
+
+## Registering a built-in module
+
+A host can add a Python-callable module by registering it with
+the import system. The pattern matches how every shipped stdlib
+module wires itself up.
+
+```go title="mybuiltin/init.go"
 package mybuiltin
 
 import (
@@ -81,17 +127,223 @@ func init() {
 func initModule() (*objects.Module, error) {
 	m := objects.NewModule("mybuiltin")
 	m.SetAttr("answer", objects.NewInt(42))
+	m.SetAttr("greet", objects.NewBuiltinFunction("greet", greet))
 	return m, nil
+}
+
+func greet(args []objects.Object, kwargs *objects.Dict) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, objects.TypeError("greet() takes exactly one argument")
+	}
+	name, ok := args[0].(*objects.Str)
+	if !ok {
+		return nil, objects.TypeError("greet() argument must be str")
+	}
+	return objects.NewStr("hello, " + name.String()), nil
 }
 ```
 
-Blank-import the package from your `main` and `import mybuiltin`
-becomes available in Python.
+Blank-import it from `main`:
+
+```go
+import _ "example.com/yourapp/mybuiltin"
+```
+
+```python
+>>> import mybuiltin
+>>> mybuiltin.answer
+42
+>>> mybuiltin.greet("gopy")
+'hello, gopy'
+```
+
+The `init()` block runs at process start; `AppendInittab` is
+thread-safe (guarded by a `sync.RWMutex` in `imp/inittab.go`).
+Names registered later override earlier ones with the same key.
+
+## Exchanging values
+
+Every Python value gopy sees is an `objects.Object`. The
+constructors and accessors look like this:
+
+```go
+// Go -> Python
+i := objects.NewInt(42)
+s := objects.NewStr("hi")
+b := objects.NewBool(true)
+n := objects.None
+lst := objects.NewList()
+lst.Append(i)
+lst.Append(s)
+dict := objects.NewDict()
+dict.SetItemString("key", lst)
+```
+
+```go
+// Python -> Go
+switch v := value.(type) {
+case *objects.Int:
+    n, _ := v.Int64()
+    fmt.Println("got int:", n)
+case *objects.Str:
+    fmt.Println("got str:", v.String())
+case *objects.List:
+    for i := 0; i < v.Len(); i++ {
+        fmt.Println("item:", v.GetItem(i))
+    }
+}
+```
+
+For complex shapes the cleanest pattern is a thin Go struct on
+either side of the bridge and a marshal helper that walks fields.
+For ad-hoc data, JSON via the `_json` module is usually the
+shortest path: the Python side `json.dumps`, the Go side
+`encoding/json` against the resulting bytes.
+
+## Calling a Python function from Go
+
+```go
+// Pre-compile once.
+src := `def add(a, b): return a + b`
+mod, _ := parser.ParseString(src, "lib", parser.ModeFile)
+code, _ := compile.Compile(mod, "lib", 0)
+
+ts := state.NewThread()
+globals := objects.NewDict()
+if _, err := pythonrun.Run(ts, code, os.Stderr); err != nil {
+    log.Fatal(err)
+}
+
+// Look up the function and call it many times.
+addFn, _ := globals.GetItemString("add")
+result, err := addFn.Call(ts, []objects.Object{
+    objects.NewInt(2),
+    objects.NewInt(3),
+}, nil)
+```
+
+`globals` is what `pythonrun.Run` populated; any module-scope
+definition (`def`, `class`, top-level assignment) is now a key
+in it.
+
+## Capturing stdout
+
+```go
+var buf bytes.Buffer
+ts := state.NewThread()
+pythonrun.RunSimpleString(ts, `print("captured")`, objects.NewDict(), &buf)
+fmt.Println(buf.String())   // "captured\n"
+```
+
+The third argument to `pythonrun.RunSimpleString` is the
+`io.Writer` `sys.stdout` writes to. Pass `io.Discard` to silence
+output; pass a `bytes.Buffer` to capture; pass `os.Stdout` to
+forward to the terminal.
+
+## Sandboxing user-supplied Python
+
+gopy is a strong sandbox by default: there is no `subprocess`,
+no `ctypes`, no `os.system`, and `open()` only sees the host's
+filesystem because the `_io`/`os` modules are wired by
+`stdlibinit`. To run untrusted Python:
+
+1. **Skip `stdlibinit`.** Don't import it. Register only the
+   modules you trust.
+2. **Strip dangerous builtins.** `del globals["__builtins__"].__import__`
+   prevents arbitrary module loading once `globals` is populated.
+   Or replace `__builtins__` with a curated dict before
+   `pythonrun.Run`.
+3. **Wrap I/O.** Replace `sys.stdout`/`sys.stderr` with writers
+   that enforce size limits. Use `io.LimitReader` on inputs.
+4. **Time-bound execution.** Run on a goroutine with a
+   `context.Context`; check the eval-breaker bit from a
+   watchdog. The hooks live in `state/breaker.go`.
+
+A worked sandbox example:
+
+```go
+ts := state.NewThread()
+globals := objects.NewDict()
+builtins := objects.NewDict()
+for _, name := range []string{"len", "range", "print", "abs", "min", "max"} {
+    if fn, _ := imp.GetBuiltin(name); fn != nil {
+        builtins.SetItemString(name, fn)
+    }
+}
+globals.SetItemString("__builtins__", builtins)
+err := pythonrun.RunSimpleString(ts, userSource, globals, &output)
+```
+
+The script can call `len`, `range`, `print`, `abs`, `min`, `max`.
+It cannot import, cannot open files, cannot escape.
+
+## Errors
+
+A Python exception comes back as a Go `error` whose dynamic type
+is `*errors.PyError`:
+
+```go
+_, err := pythonrun.Run(ts, code, os.Stderr)
+if err != nil {
+    var pyErr *errors.PyError
+    if errors.As(err, &pyErr) {
+        fmt.Println("exception class:", pyErr.Type().Name())
+        fmt.Println("message:", pyErr.Value().String())
+        // pyErr.Traceback() yields the Python-level frames.
+    }
+}
+```
+
+Returning errors from a Go-implemented built-in works the other
+way: return `objects.TypeError(msg)`, `objects.ValueError(msg)`,
+or any other constructor in `errors/`. The runtime raises the
+matching Python exception in the calling Python frame.
 
 ## Concurrency
 
-A `ThreadState` is the unit of execution. Each goroutine that calls
-into the VM needs its own `ThreadState`. The GIL lives in the
-`gil/` package and is acquired automatically when the VM enters a
-frame. Multiple `ThreadState`s in the same interpreter take turns
-holding it, exactly as CPython does.
+A `state.Thread` is the unit of execution. Each goroutine that
+calls into the VM needs its own `Thread`:
+
+```go
+ts := state.NewThread()        // main goroutine
+go func() {
+    ts2 := state.NewThread()   // separate goroutine
+    pythonrun.RunSimpleString(ts2, src, globals, os.Stderr)
+}()
+```
+
+The GIL lives in `gil/`. It is acquired automatically when the
+VM enters a frame and released around blocking native calls
+(`time.sleep`, network I/O). Multiple `Thread`s in the same
+interpreter take turns holding it. cooperative multitasking, the
+same way CPython 3.14 behaves on the GIL build.
+
+For true parallelism, create multiple interpreters; the
+per-interpreter GIL (PEP 684) plumbing is on the roadmap. Today
+the recommendation is one interpreter, multiple threads, with
+the GIL released during compute-heavy Go work.
+
+## Performance considerations
+
+* **Compile once, call many.** A `Code` object can be re-run on
+  fresh globals; parsing and compiling on every call dwarfs the
+  execution cost.
+* **Reuse `Thread`.** `state.NewThread()` is not free; keep a
+  pool if your service handles short calls at high rate.
+* **Avoid the GIL for hot Go work.** Wrap Go-side compute in
+  `gil.Release()`/`gil.Acquire()` to let other Python threads
+  run.
+* **Watch the specializer.** A warm code object is much faster
+  than a cold one; if you spin up new interpreters for every
+  request, you pay the cold-start tax every time. Embedding
+  services that share an interpreter benefit from warm sites.
+
+See [Performance](performance) for current absolute numbers.
+
+## Reference
+
+* `cmd/gopy/main.go`. The canonical wiring. Read it once.
+* `pythonrun/pythonrun.go`. The one-shot helpers.
+* `imp/inittab.go`. Module registration.
+* `objects/`. The full value-model surface.
+* [Recipes](recipes) for worked patterns.
