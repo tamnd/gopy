@@ -14,8 +14,8 @@ func TestEmitTier1ArmFixed(t *testing.T) {
 	out := EmitTier1Arm(a)
 	for _, want := range []string{
 		"case compile.BINARY_ADD:",
-		"b := e.pop()",
-		"a := e.pop()",
+		"a := e.peek(1)",
+		"b := e.peek(0)",
 		"body pending (B6)",
 		"// outputs: c",
 	} {
@@ -36,8 +36,17 @@ func TestEmitTier1ArmVariadic(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := EmitTier1Arm(a)
-	if !strings.Contains(out, "for i := 0; i < int(oparg); i++") {
-		t.Errorf("variadic pop missing:\n%s", out)
+	// BUILD_LIST has an empty body in the helper, so the translator
+	// bails. The arm still has to render the bail stub correctly,
+	// including the variadic stack note in the outputs comment.
+	for _, want := range []string{
+		"case compile.BUILD_LIST:",
+		"// outputs: lst",
+		"opcodeNotImplemented(op)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("variadic arm missing %q:\n%s", want, out)
+		}
 	}
 }
 

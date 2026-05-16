@@ -21,6 +21,14 @@ type StackBinding struct {
 	Sized     bool
 	SizeExpr  string // textual size expression for variadic slots
 	Type      string // optional :type annotation
+	// Passthrough is set when the binding has a matching peer in the
+	// other direction at the same source index with the same Sized /
+	// SizeExpr. The emitter then reuses one Go local for both sides
+	// (no separate pop/push for the slot), which is how
+	// `(list, unused[oparg-1], v -- list, unused[oparg-1])` keeps the
+	// underlying stack region in place instead of round-tripping it
+	// through a temporary buffer.
+	Passthrough bool
 }
 
 // CacheBinding is one inline-cache slot. Offset is the position in
@@ -110,7 +118,29 @@ func AnalyzeInst(inst *InstDef) (*SignatureAnalysis, error) {
 		seen[b.Name] = "out"
 		a.Outputs = append(a.Outputs, b)
 	}
+	markPassthrough(a)
 	return a, nil
+}
+
+// markPassthrough flips Passthrough on each input/output pair that
+// shares an index, a Sized flag, and a SizeExpr. Names line up too
+// (either identical, or both "unused" for sized padding). This lets
+// the emitter keep the slot in place on the value stack instead of
+// popping and re-pushing it.
+func markPassthrough(a *SignatureAnalysis) {
+	n := min(len(a.Inputs), len(a.Outputs))
+	for i := range n {
+		in := &a.Inputs[i]
+		out := &a.Outputs[i]
+		if in.Sized != out.Sized || in.SizeExpr != out.SizeExpr {
+			continue
+		}
+		if in.Name != out.Name {
+			continue
+		}
+		in.Passthrough = true
+		out.Passthrough = true
+	}
 }
 
 // AnalyzeAll walks defs and returns one SignatureAnalysis per `inst`

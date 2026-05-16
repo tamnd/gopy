@@ -200,6 +200,15 @@ func (e *evalState) pop() stackref.Ref { return e.f.PopStack() }
 // peek returns the value at depth from the top (0 = top).
 func (e *evalState) peek(depth int) stackref.Ref { return e.f.PeekStack(depth) }
 
+// setPeek writes r at depth from the top. Mirrors CPython's POKE,
+// used by generated dispatch arms to commit a value back to a
+// passthrough slot before STACK_SHRINK runs.
+func (e *evalState) setPeek(depth int, r stackref.Ref) { e.f.SetPeekStack(depth, r) }
+
+// drop pops n stack entries without binding them to locals; mirrors
+// CPython's STACK_SHRINK(n).
+func (e *evalState) drop(n int) { e.f.DropStack(n) }
+
 // pushObject is a shortcut for push(stackref.FromObject(o)).
 func (e *evalState) pushObject(o objects.Object) {
 	e.push(stackref.FromObject(o))

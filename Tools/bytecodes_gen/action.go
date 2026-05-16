@@ -32,8 +32,14 @@ func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, termina
 	// annotation need the typed helper layer; we only translate the
 	// simple stack-ref outputs today.
 	for _, o := range sig.Outputs {
-		if o.Sized {
-			return "", false, false, "sized output not yet handled by action translator"
+		// A sized output that aliases a sized input (same name, same
+		// SizeExpr, same index) is handled by the emitter: the slot
+		// rides through on the input's backing slice and the body
+		// never names it. A non-passthrough sized output (e.g.
+		// UNPACK_EX's `unused[oparg & 0xFF]`) still needs a typed
+		// helper that we have not written yet.
+		if o.Sized && !o.Passthrough {
+			return "", false, false, "non-passthrough sized output not yet handled by action translator"
 		}
 		if o.Type != "" {
 			return "", false, false, fmt.Sprintf("typed output %q not yet handled by action translator", o.Type)
