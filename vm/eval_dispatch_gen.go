@@ -192,8 +192,16 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.drop(1)
 		return e.advance(), nil, nil, false, nil
 	case compile.DELETE_DEREF:
-		// body bail: unrecognized token at action body start: "Py_DECREF"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		cell := e.localAt(int(oparg)).AsObject()
+		_ = cell
+		oldobj := e.cellSwapTakeRef(cell, nil)
+		_ = oldobj
+		if oldobj == nil {
+			e.setPendingErr("_PyEval_FormatExcUnbound")
+			return 0, nil, nil, false, e.error("error")
+		}
+		// Py_DECREF: no-op under GC
+		return e.advance(), nil, nil, false, nil
 	case compile.DELETE_FAST:
 		v := e.localAt(int(oparg))
 		_ = v
@@ -839,8 +847,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_DEREF:
 		v := e.peek(0)
 		_ = v
-		// body bail: unrecognized token at action body start: "PyCell_SetTakeRef"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		cell := e.localAt(int(oparg)).AsObject()
+		_ = cell
+		e.cellSetTakeRef(cell, v.AsObject())
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.STORE_FAST:
 		value := e.peek(0)
 		_ = value

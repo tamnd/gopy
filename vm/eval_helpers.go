@@ -818,6 +818,21 @@ func (e *evalState) cellSwapTakeRef(cell, newVal objects.Object) objects.Object 
 	return old
 }
 
+// cellSetTakeRef wraps PyCell_SetTakeRef: writes a value into a cell,
+// stealing the caller's reference. Used by STORE_DEREF.
+//
+// CPython: Objects/cellobject.c PyCell_SetTakeRef
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) cellSetTakeRef(cell, newVal objects.Object) {
+	c, ok := cell.(*objects.Cell)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: PyCell_SetTakeRef expected cell")
+		return
+	}
+	c.Contents = newVal
+}
+
 // getANext wraps _PyEval_GetANext. Returns the awaitable for iter's
 // next async value, or nil on error.
 //

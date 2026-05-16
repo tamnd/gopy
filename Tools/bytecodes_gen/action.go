@@ -193,6 +193,12 @@ func (t *actionTranslator) translateStmt() error {
 	if stmtErrSetters[tk.Text] {
 		return t.translateStmtErrSetter(tk.Text)
 	}
+	if stmtNoopCalls[tk.Text] {
+		return t.translateStmtNoop(tk.Text)
+	}
+	if h, ok := stmtCallHelpers[tk.Text]; ok {
+		return t.translateStmtCall(tk.Text, h)
+	}
 	// Generic C-local declaration: `<type-prefix> name = expr;` or
 	// `<type-prefix> * name = expr;`. The set of accepted prefixes lives
 	// in cTypeDecls below. Go infers the type from the rhs so we drop
@@ -342,6 +348,87 @@ func (t *actionTranslator) translateStmtErrSetter(name string) error {
 	}
 	fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", name)
 	return nil
+}
+
+// stmtNoopCalls is the set of CPython statement-form macros that are
+// refcount-only side effects. Under the GC-backed Go runtime they have
+// no analogue. Consume `NAME(args...);` and emit nothing.
+//
+// CPython: Include/refcount.h Py_INCREF / Py_DECREF / Py_XINCREF /
+// Py_XDECREF.
+var stmtNoopCalls = map[string]bool{
+	"Py_INCREF":  true,
+	"Py_DECREF":  true,
+	"Py_XINCREF": true,
+	"Py_XDECREF": true,
+}
+
+func (t *actionTranslator) translateStmtNoop(name string) error {
+	t.pos++ // helper name
+	if _, err := t.takeParenthesised(); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	t.acceptSemi()
+	fmt.Fprintf(t.writer, "// %s: no-op under GC\n", name)
+	return nil
+}
+
+// stmtCallHelpers wires CPython statement-form helpers that DO have a
+// matching Go side effect. The arity check and argument rendering reuses
+// the expression helper-call machinery (helperCall struct).
+var stmtCallHelpers = map[string]helperCall{
+	// PyCell_SetTakeRef(cell, value): write a value into a cell,
+	// stealing the caller's reference. Maps to a thin evalState method
+	// that handles the cell type-check.
+	//
+	// CPython: Objects/cellobject.c PyCell_SetTakeRef.
+	"PyCell_SetTakeRef": {goExpr: "e.cellSetTakeRef", arity: 2},
+}
+
+func (t *actionTranslator) translateStmtCall(name string, h helperCall) error {
+	t.pos++ // helper name
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "(" {
+		return fmt.Errorf("%s: expected '('", name)
+	}
+	// Reuse the expression-side parser: collect tokens up to the
+	// matching ')', then route through translateExpr by prepending the
+	// helper name so parsePrimary picks it up as a helper call.
+	argToks, err := t.takeParenTokens()
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	t.acceptSemi()
+	// Reconstruct `NAME(args...)` and translate as an expression. The
+	// helperCall registry resolves it to the Go form; statement context
+	// just emits the resulting expression as a bare call.
+	reconstructed := []string{name, "("}
+	reconstructed = append(reconstructed, argToks...)
+	reconstructed = append(reconstructed, ")")
+	// Register a temporary expression-side entry so parsePrimary finds
+	// it. To avoid mutating the global map mid-parse, build the parser
+	// with a per-call helper.
+	expr, err := t.translateExprWithHelper(reconstructed, name, h)
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	fmt.Fprintf(t.writer, "%s\n", expr)
+	return nil
+}
+
+// translateExprWithHelper translates an expression with a single extra
+// helper-call entry registered. Used by translateStmtCall to fall through
+// the existing expression infrastructure without polluting the global
+// helperCalls map.
+func (t *actionTranslator) translateExprWithHelper(toks []string, name string, h helperCall) (string, error) {
+	// helperCalls is keyed by name, and parsePrimary looks it up
+	// directly. Since the map is package-global, temporarily add the
+	// entry, parse, then remove it. The translator runs single-threaded
+	// per generation pass, so the mutation is safe.
+	if _, exists := helperCalls[name]; !exists {
+		helperCalls[name] = h
+		defer delete(helperCalls, name)
+	}
+	return t.translateExpr(toks)
 }
 
 // rhsIsBool returns true when the translated Go RHS resolves to a bool
