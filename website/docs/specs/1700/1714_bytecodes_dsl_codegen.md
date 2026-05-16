@@ -720,6 +720,8 @@ panel.
 | `LOAD_FAST_BORROW` | generated | `b842a4a` | same body as LOAD_FAST | borrow collapses under Go GC |
 | `LOAD_FAST_AND_CLEAR` | generated | `b842a4a` | LOAD_FAST plus `GETLOCAL(oparg) = PyStackRef_NULL` | GETLOCAL lvalue |
 | `STORE_FAST` | generated | `b842a4a` | `_PyStackRef tmp = GETLOCAL(oparg); GETLOCAL(oparg) = value; PyStackRef_XCLOSE(tmp)` | C-local decl + lvalue |
+| `JUMP_BACKWARD_NO_INTERRUPT` | generated | `337d126` | `JUMPBY(-oparg)` | shares JUMPBY body with JUMP_FORWARD; `JUMP_BACKWARD` proper stays handwritten for breaker poll |
+| `END_SEND` | generated | this commit | `val = value; DEAD(value); PyStackRef_CLOSE(receiver)` | bit-equivalent to handwritten body in eval_simple.go |
 
 #### Hand-written staging (`dispatchHandwritten`)
 
