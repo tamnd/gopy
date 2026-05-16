@@ -37,6 +37,41 @@ func (s *State) tokenSetup(kind token.Type, start, end int) Tok {
 	return t
 }
 
+// newlineTokenSetup builds a NEWLINE/NL token with positions taken
+// from the byte offsets relative to s.lineStart, matching CPython's
+// behavior where _PyLexer_token_setup computes col_offset as
+// (start - line_start) and end_col_offset as (end - line_start).
+//
+// tokenSetup defers to live s.lineno/s.col, which goes wrong for
+// newline tokens because the caller has to bump line state right
+// after emission. The newline branch builds its Tok before bumping,
+// but the row/col fields still need a stable reference, so we
+// compute them from offsets here.
+//
+// CPython: Parser/lexer/state.c:131 _PyLexer_token_setup
+func (s *State) newlineTokenSetup(kind token.Type, start, end int) Tok {
+	t := Tok{
+		Kind:        kind,
+		Level:       s.level,
+		StartOffset: start,
+		EndOffset:   end,
+	}
+	if start >= 0 && end >= start && end <= len(s.buf) {
+		t.Bytes = s.buf[start:end]
+	}
+	t.Start.Line = s.lineno
+	t.End.Line = s.lineno
+	t.Start.Col = -1
+	t.End.Col = -1
+	if start >= s.lineStart {
+		t.Start.Col = start - s.lineStart
+	}
+	if end >= s.lineStart {
+		t.End.Col = end - s.lineStart
+	}
+	return t
+}
+
 // typeCommentTokenSetup mirrors the type-comment variant: same boundary
 // fields, but col offsets come in directly from the caller because the
 // scanner needs to span the # ... newline range explicitly.
