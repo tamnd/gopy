@@ -93,6 +93,33 @@ var parityFixtures = []parityFixture{
 	`,
 		want: []string{"if cond {", `e.error(`},
 	},
+	{
+		// Comments inside the body must not break the translator;
+		// stripWhitespace drops tokComment before the statement walker
+		// runs.
+		name:    "error_if_plain_with_comment",
+		cpyLine: 442,
+		input: `
+		inst(OP, (--)) {
+			ERROR_IF(cond);  // Comment is ok
+		}
+	`,
+		want: []string{"if cond {", `e.error(`},
+	},
+	{
+		// Passthrough output: when an output name matches an input
+		// name, the input ref flows into the output slot. CPython's
+		// analyzer marks the output as pre-assigned; we mirror by
+		// seeding actionTranslator.assigned[name] = true.
+		name:    "passthrough_value",
+		cpyLine: 0, // synthetic but mirrors TO_BOOL_BOOL shape
+		input: `
+		inst(OP, (value -- value)) {
+			DEAD(value);
+		}
+	`,
+		want: []string{}, // body collapses to nothing; just must not bail
+	},
 	// LOAD_FAST family, real-world equivalents that already flipped.
 	{
 		name:    "load_fast_real",

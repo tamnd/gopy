@@ -47,6 +47,24 @@ func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, termina
 		assigned: map[string]bool{},
 		locals:   map[string]bool{},
 	}
+	// Passthrough outputs: when an output reuses an input name, CPython's
+	// analyzer treats the slot as already populated (the input ref flows
+	// to the output position). Mark those names as pre-assigned so the
+	// "never assigned" guard below doesn't fire on idiomatic shapes like
+	// `inst(TO_BOOL_BOOL, (unused/1, unused/2, value -- value))`.
+	//
+	// CPython: Tools/cases_generator/analyzer.py Instruction.is_passthrough.
+	inputNames := map[string]bool{}
+	for _, in := range sig.Inputs {
+		if in.Name != "" && in.Name != "unused" {
+			inputNames[in.Name] = true
+		}
+	}
+	for _, o := range sig.Outputs {
+		if inputNames[o.Name] {
+			t.assigned[o.Name] = true
+		}
+	}
 	if err := t.run(); err != nil {
 		return "", false, false, err.Error()
 	}
