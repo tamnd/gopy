@@ -21,3 +21,4 @@ coverage.html
 TECHNICAL_BRIEF.md
 /parser_gen
 /tools/parser_gen/parser_gen
+/compare-baseline
