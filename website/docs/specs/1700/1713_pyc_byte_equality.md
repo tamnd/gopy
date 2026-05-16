@@ -168,19 +168,30 @@ pass surfaces as "CPython dropped the redundant JUMP, gopy
 didn't"; an interning order bug surfaces as "co_consts[3] is 'foo'
 in CPython, () in gopy"; a flowgraph bug surfaces as "block
 ordering swapped, jump targets differ by N bytes". None of that is
-visible in marshal output. `compile/dis.go` (76 lines, hand-written)
-gets replaced by a 1:1 port of `Lib/dis.py`'s
-`_disassemble_recursive`, `_get_instructions_bytes`, and
-`Instruction.__str__`. Once the formatter matches CPython, every
-remaining diff is a real codegen / flowgraph bug for Phase 3.
+visible in marshal output.
+
+The original draft framed this phase as "port `Lib/dis.py` 1:1 into
+`compile/dis.go`". That was wrong: `stdlib/dis.py` already vendors
+all 1157 lines of `Lib/dis.py`. The full-file rule says *vendor*
+CPython sources, not rewrite them in Go. The actual port work to
+make `gopy -m dis foo.py` produce CPython-byte-equal output is to
+vendor `Lib/runpy.py`, wire `cmd/gopy -m` to call
+`runpy._run_module_as_main` (exactly what
+`Modules/main.c:pymain_run_module` does in CPython), and then fix
+every VM / compile bug the dis-stream gate surfaces when the gopy
+interpreter runs the vendored dis.py against itself. The Go-side
+`compile/dis.go` stays as a debug helper for Go callers; the gate
+runs the Python module.
 
 | Step | Status | Commit |
 |------|--------|--------|
-| Port `Lib/dis.py` `_unpack_opargs` + `_get_instructions_bytes` 1:1 into `compile/dis.go` | TODO | - |
-| Port `Instruction` + `Formatter` + `ArgResolver` (the rendering trio) | TODO | - |
-| Port `_disassemble_recursive` + `_format_code_info` + `pretty_flags` | TODO | - |
-| `cmd/gopy` `-m dis` entry mirroring `Lib/dis.py:main` | TODO | - |
-| `test/gate/disdata/` fixture corpus (30 small files, one per feature) | TODO | - |
+| Vendor `Lib/runpy.py` 1:1 into `stdlib/runpy.py` | done | 554dfca |
+| Wire `cmd/gopy -m mod` to call `runpy._run_module_as_main(mod)` | done | 554dfca |
+| Expose Python-facing `co_code` / `co_consts` / `co_names` / `co_varnames` / `co_*` attrs on `objects.Code` so `hasattr(co, 'co_code')` succeeds | TODO | - |
+| Plumb builtin `compile(src, fn, mode)` through the parser + compiler (`_try_compile` in `Lib/dis.py:80` calls this) | TODO | - |
+| Fix `importlib.util` attribute access path so `importlib.util.find_spec` resolves | TODO | - |
+| `gopy -m dis foo.py` runs end to end on a hello-world fixture | TODO | - |
+| `test/gate/disdata/` corpus (30 small files, one per feature) | TODO | - |
 | `test/gate/dis_parity_test.go` green on the 30-fixture corpus | TODO | - |
 
 ## Phase 3 — codegen / flowgraph audit
