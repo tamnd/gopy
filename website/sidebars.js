@@ -1,3 +1,30 @@
+const fs = require('fs');
+const path = require('path');
+
+// Auto-discover every spec under docs/specs/<group>/ and return its
+// docId (e.g. "specs/1700/1709_textio_internals_full_port") sorted
+// by filename so we can present newest-first.
+function discoverSpecs() {
+  const root = path.join(__dirname, 'docs', 'specs');
+  const groups = fs
+    .readdirSync(root, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
+  const ids = [];
+  for (const group of groups) {
+    const dir = path.join(root, group);
+    for (const entry of fs.readdirSync(dir)) {
+      if (!entry.endsWith('.md') && !entry.endsWith('.mdx')) continue;
+      const base = entry.replace(/\.mdx?$/, '');
+      ids.push(`specs/${group}/${base}`);
+    }
+  }
+  // Filename starts with the numeric id so a descending string sort
+  // is equivalent to newest-first.
+  ids.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+  return ids;
+}
+
 /** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */
 const sidebars = {
   manualSidebar: [
@@ -2452,167 +2479,7 @@ const sidebars = {
     },
   ],
 
-  specsSidebar: [
-    'specs/index',
-    {
-      label: '1600. Foundations',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: false,
-      items: [
-        'specs/1600/1600_gopy_overview',
-        'specs/1600/1601_gopy_naming',
-        'specs/1600/1602_gopy_filemap',
-        'specs/1600/1603_gopy_roadmap',
-      ],
-    },
-    {
-      label: '1600. Runtime infrastructure',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: true,
-      items: [
-        'specs/1600/1604_gopy_arena',
-        'specs/1600/1605_gopy_pythread',
-        'specs/1600/1606_gopy_pysync',
-        'specs/1600/1607_gopy_hashsecret',
-        'specs/1600/1611_gopy_errors',
-        'specs/1600/1613_gopy_gc',
-        'specs/1600/1668_gopy_runtime_helpers',
-      ],
-    },
-    {
-      label: '1600. Compile pipeline',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: true,
-      items: [
-        'specs/1600/1620_gopy_compile_pipeline',
-        'specs/1600/1621_gopy_bytecodes_dsl',
-        'specs/1600/1622_gopy_lifecycle',
-        'specs/1600/1624_gopy_pythonrun',
-        'specs/1600/1625_gopy_compile_testing',
-        'specs/1600/1626_gopy_codegen',
-        'specs/1600/1627_gopy_flowgraph',
-        'specs/1600/1628_gopy_assemble',
-        'specs/1600/1629_gopy_compile_goldens',
-      ],
-    },
-    {
-      label: '1600. Virtual machine',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: true,
-      items: [
-        'specs/1600/1630_gopy_vm_overview',
-        'specs/1600/1635_gopy_intrinsics',
-        'specs/1600/1636_gopy_eval_loop',
-        'specs/1600/1637_gopy_frame',
-        'specs/1600/1638_gopy_stackref',
-        'specs/1600/1639_gopy_eval_gil',
-        'specs/1600/1693_gopy_vm_remaining',
-      ],
-    },
-    {
-      label: '1600. Parser',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: true,
-      items: [
-        'specs/1600/1640_gopy_parser_overview',
-        'specs/1600/1641_gopy_lexer_tokenizer',
-        'specs/1600/1642_gopy_pegen',
-        'specs/1600/1643_gopy_parser_errors',
-        'specs/1600/1644_gopy_string_parser',
-        'specs/1600/1645_gopy_myreadline',
-        'specs/1600/1665_gopy_tokenize',
-      ],
-    },
-    {
-      label: '1600. Strings, numbers, hashing',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: true,
-      items: [
-        'specs/1600/1660_gopy_strings_numbers',
-        'specs/1600/1661_gopy_hash',
-        'specs/1600/1662_gopy_hamt',
-        'specs/1600/1663_gopy_context',
-        'specs/1600/1664_gopy_time',
-      ],
-    },
-    {
-      label: '1600. Objects',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: true,
-      items: [
-        'specs/1600/1670_gopy_objects_overview',
-        'specs/1600/1671_gopy_object_protocol',
-        'specs/1600/1672_gopy_type',
-        'specs/1600/1673_gopy_long',
-        'specs/1600/1674_gopy_float_complex',
-        'specs/1600/1675_gopy_bool_none',
-        'specs/1600/1676_gopy_bytes',
-        'specs/1600/1677_gopy_unicode',
-        'specs/1600/1678_gopy_tuple',
-        'specs/1600/1679_gopy_list',
-        'specs/1600/1680_gopy_dict',
-        'specs/1600/1681_gopy_set',
-        'specs/1600/1682_gopy_slice_range',
-        'specs/1600/1683_gopy_abstract',
-        'specs/1600/1684_gopy_call',
-        'specs/1600/1685_gopy_descr_method',
-        'specs/1600/1686_gopy_exceptions',
-        'specs/1600/1687_gopy_code_frame_gen',
-        'specs/1600/1688_gopy_module_misc',
-        'specs/1600/1689_gopy_obj_misc',
-      ],
-    },
-    {
-      label: '1600. Imports, marshalling, codecs',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: true,
-      items: [
-        'specs/1600/1651_gopy_modules',
-        'specs/1600/1690_gopy_marshal',
-        'specs/1600/1691_gopy_import',
-        'specs/1600/1692_gopy_codecs',
-      ],
-    },
-    {
-      label: '1600. Optimizer and instrumentation',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: true,
-      items: [
-        'specs/1600/1694_gopy_specialize',
-        'specs/1600/1695_gopy_instrumentation',
-        'specs/1600/1696_gopy_legacy_tracing',
-        'specs/1600/1697_gopy_optimizer_overview',
-        'specs/1600/1698_gopy_optimizer_uops',
-        'specs/1600/1699_gopy_optimizer_analysis',
-      ],
-    },
-    {
-      label: '1700. Test gate and porting workflow',
-      type: 'category',
-      className: 'sidebar-heading',
-      collapsed: false,
-      items: [
-        'specs/1700/1700_gopy_test_e2e',
-        'specs/1700/1701_unittest_enablement',
-        'specs/1700/1702_subsystem_port_log',
-        'specs/1700/1703_re_sre_full_port',
-        'specs/1700/1704_object_protocol_full_port',
-        'specs/1700/1705_core_vm_files',
-        'specs/1700/1706_pep_649_annotations',
-        'specs/1700/1707_cpython_3145_sync',
-        'specs/1700/1708_assemble_location_table',
-      ],
-    },
-  ],
+  specsSidebar: ['specs/index', ...discoverSpecs()],
 
   changelogSidebar: [
     'changelog/index',
