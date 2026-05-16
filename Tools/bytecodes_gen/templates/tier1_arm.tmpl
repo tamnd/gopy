@@ -9,6 +9,10 @@
 		{{.Name}} := e.peek({{.DepthExpr}})
 		_ = {{.Name}}
 {{- end}}
+{{- range .SizedPeeks}}
+		{{.Name}} := e.peekSliceBottomFirst({{.TopOffset}}, int({{.SizeExpr}}))
+		_ = {{.Name}}
+{{- end}}
 {{- range .Caches}}
 		// cache "{{.Name}}" size={{.Size}} offset={{.Offset}}
 {{- end}}

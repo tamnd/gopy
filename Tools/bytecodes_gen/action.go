@@ -562,6 +562,22 @@ func (p *exprParser) parseExpr(minPrec int) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Postfix `[index]` subscripts. CPython uses these to read elements
+	// of sized inputs (`args[0]`) or fixed arrays; in Go the same
+	// syntax indexes a slice, so we pass the index through as a Go
+	// expression of its own.
+	for p.pos < len(p.toks) && p.toks[p.pos] == "[" {
+		p.pos++
+		idx, err := p.parseExpr(0)
+		if err != nil {
+			return "", err
+		}
+		if p.pos >= len(p.toks) || p.toks[p.pos] != "]" {
+			return "", fmt.Errorf("expected ']' to close subscript")
+		}
+		p.pos++
+		lhs = lhs + "[" + idx + "]"
+	}
 	for p.pos < len(p.toks) {
 		op := p.toks[p.pos]
 		prec, ok := binOpPrec[op]
@@ -649,6 +665,7 @@ func (p *exprParser) parsePrimary() (string, error) {
 		}
 		return arg + ".AsObject()", nil
 	case "PyStackRef_FromPyObjectSteal",
+		"PyStackRef_FromPyObjectStealMortal",
 		"PyStackRef_FromPyObjectNew",
 		"PyStackRef_FromPyObjectNewMortal",
 		"PyStackRef_FromPyObjectImmortal",

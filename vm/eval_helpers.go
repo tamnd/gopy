@@ -10,6 +10,7 @@ import (
 
 	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/stackref"
 	"github.com/tamnd/gopy/state"
 )
 
@@ -24,6 +25,29 @@ import (
 //nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) decrefInputs(n int) {
 	_ = n
+}
+
+// peekSliceBottomFirst returns the n stack slots that sit between
+// depth `topOffset` and `topOffset+n-1` from TOS, ordered bottom-first
+// so the result reads like a CPython sized-input region: index 0 is the
+// stack-bottom slot (the first input the bytecode compiler pushed),
+// index n-1 is the slot closest to TOS.
+//
+// Used by translated arms whose body indexes a sized input like
+// `args[oparg]`. The slice is a copy; mutating an entry does not affect
+// the underlying stack.
+//
+// CPython: Tools/cases_generator/stack.py Local.from_memory_effect —
+// sized inputs bind to a stack_pointer slice without copying, but the
+// gopy refcount-only path doesn't need the aliasing.
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) peekSliceBottomFirst(topOffset, n int) []stackref.Ref {
+	out := make([]stackref.Ref, n)
+	for i := 0; i < n; i++ {
+		out[i] = e.peek(topOffset + n - 1 - i)
+	}
+	return out
 }
 
 // setPendingErr stashes a generic synthetic exception on pendingErr,
@@ -833,13 +857,15 @@ func (e *evalState) getANext(iter objects.Object) objects.Object {
 // CPython: Objects/tupleobject.c:226 _PyTuple_FromStackRefStealOnSuccess
 //
 //nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
-func (e *evalState) tupleFromStackRef(values []objects.Object, n int32) objects.Object {
+func (e *evalState) tupleFromStackRef(values []stackref.Ref, n uint32) objects.Object {
 	if int(n) > len(values) {
 		e.pendingErr = errors.New("BUILD_TUPLE: count exceeds values slice")
 		return nil
 	}
 	items := make([]objects.Object, n)
-	copy(items, values[:n])
+	for i := range items {
+		items[i] = values[i].AsObject()
+	}
 	return objects.NewTuple(items)
 }
 
@@ -848,13 +874,15 @@ func (e *evalState) tupleFromStackRef(values []objects.Object, n int32) objects.
 // CPython: Objects/listobject.c:3146 _PyList_FromStackRefStealOnSuccess
 //
 //nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
-func (e *evalState) listFromStackRef(values []objects.Object, n int32) objects.Object {
+func (e *evalState) listFromStackRef(values []stackref.Ref, n uint32) objects.Object {
 	if int(n) > len(values) {
 		e.pendingErr = errors.New("BUILD_LIST: count exceeds values slice")
 		return nil
 	}
 	items := make([]objects.Object, n)
-	copy(items, values[:n])
+	for i := range items {
+		items[i] = values[i].AsObject()
+	}
 	return objects.NewList(items)
 }
 

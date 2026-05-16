@@ -48,6 +48,7 @@ func mustParseTemplate(name string) *template.Template {
 type armView struct {
 	Name        string
 	Peeks       []peekStmt   // peek-and-bind for named scalar inputs
+	SizedPeeks  []sizedPeek  // slice-bind for named sized inputs
 	Caches      []cacheView  // cache slots
 	Bail        bool         // body translator bailed; emit panic-stub
 	Note        string       // bail explanation
@@ -65,6 +66,15 @@ type armView struct {
 type peekStmt struct {
 	Name      string
 	DepthExpr string
+}
+
+// sizedPeek binds a sized input (e.g. `args[oparg]`) to a Go slice.
+// The slice is ordered bottom-first to match CPython's
+// `_PyStackRef *args` semantics: index 0 is the deepest stack slot.
+type sizedPeek struct {
+	Name      string
+	TopOffset string // depth-from-TOS of the topmost slot of this region
+	SizeExpr  string // C size expression, used as the slice length
 }
 
 // outputDecl declares a local for a non-passthrough output before the
@@ -108,10 +118,15 @@ func EmitTier1Arm(a *SignatureAnalysis) string {
 	// same way CPython leaves the underlying stack_pointer slice
 	// untouched for slots the body never reads.
 	for i, in := range a.Inputs {
-		if in.Sized {
+		if in.Name == "" || in.Name == "unused" {
 			continue
 		}
-		if in.Name == "" || in.Name == "unused" {
+		if in.Sized {
+			v.SizedPeeks = append(v.SizedPeeks, sizedPeek{
+				Name:      bindName(in.Name, "in", in.Index),
+				TopOffset: stackDepthExpr(a.Inputs, i),
+				SizeExpr:  in.SizeExpr,
+			})
 			continue
 		}
 		v.Peeks = append(v.Peeks, peekStmt{

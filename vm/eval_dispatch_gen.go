@@ -22,26 +22,46 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value
 		str := e.peek(int(oparg & 1))
 		_ = str
+		format := e.peekSliceBottomFirst(0, int(oparg&1))
+		_ = format
 		// body bail: if then: unrecognized token at action body start: "format_o"
 		// outputs: interpolation
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_LIST:
-		// body bail: output assign "list": unexpected token "PyStackRef_FromPyObjectStealMortal" in expression
-		// outputs: list
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		values := e.peekSliceBottomFirst(0, int(oparg))
+		_ = values
+		var list stackref.Ref
+		list_o := e.listFromStackRef(values, oparg)
+		_ = list_o
+		if list_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		// INPUTS_DEAD: no-op in refcount-only path
+		list = stackref.FromObject(list_o)
+		e.drop(int(oparg))
+		e.push(list)
+		return e.advance(), nil, nil, false, nil
 	case compile.BUILD_MAP:
+		values := e.peekSliceBottomFirst(0, int(oparg*2))
+		_ = values
 		// body bail: unrecognized token at action body start: "STACKREFS_TO_PYOBJECTS"
 		// outputs: map_v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_SET:
+		values := e.peekSliceBottomFirst(0, int(oparg))
+		_ = values
 		// body bail: unrecognized token at action body start: "for"
 		// outputs: set
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_SLICE:
+		args := e.peekSliceBottomFirst(0, int(oparg))
+		_ = args
 		// body bail: PyObject start_o rhs: expected ')' to close call
 		// outputs: slice
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_STRING:
+		pieces := e.peekSliceBottomFirst(0, int(oparg))
+		_ = pieces
 		// body bail: unrecognized token at action body start: "STACKREFS_TO_PYOBJECTS"
 		// outputs: str
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
@@ -67,9 +87,19 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.push(template)
 		return e.advance(), nil, nil, false, nil
 	case compile.BUILD_TUPLE:
-		// body bail: output assign "tup": unexpected token "PyStackRef_FromPyObjectStealMortal" in expression
-		// outputs: tup
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		values := e.peekSliceBottomFirst(0, int(oparg))
+		_ = values
+		var tup stackref.Ref
+		tup_o := e.tupleFromStackRef(values, oparg)
+		_ = tup_o
+		if tup_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		// INPUTS_DEAD: no-op in refcount-only path
+		tup = stackref.FromObject(tup_o)
+		e.drop(int(oparg))
+		e.push(tup)
+		return e.advance(), nil, nil, false, nil
 	case compile.CACHE:
 		panic("vm: Py_FatalError")
 	case compile.CALL_INTRINSIC_1:
@@ -711,11 +741,15 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.push(res)
 		return e.advance(), nil, nil, false, nil
 	case compile.RAISE_VARARGS:
+		args := e.peekSliceBottomFirst(0, int(oparg))
+		_ = args
 		// body bail: PyObject cause rhs: trailing tokens after expression: "? PyStackRef_AsPyObjectSteal ( args [ 1 ] ) : NULL"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RERAISE:
 		exc_st := e.peek(0)
 		_ = exc_st
+		values := e.peekSliceBottomFirst(1, int(oparg))
+		_ = values
 		// body bail: if then: unrecognized token at action body start: "frame"
 		// outputs: values[oparg]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
