@@ -8,6 +8,7 @@
 package builtins
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/ast"
@@ -36,6 +37,15 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 		mod, err = parser.ParseString(parsed.source, parsed.filename, parsed.mode)
 	}
 	if err != nil {
+		// Parser-incomplete sentinel surfaces as SyntaxError to Python
+		// so callers like dis._try_compile that fall back from eval to
+		// exec can catch and retry. CPython only ever raises
+		// SyntaxError out of compile()'s parser stage.
+		//
+		// CPython: Python/bltinmodule.c:771 builtin_compile_impl
+		if errors.Is(err, parser.ErrParserNotImplemented) {
+			return nil, fmt.Errorf("SyntaxError: invalid syntax")
+		}
 		return nil, err
 	}
 	cco, err := compile.Compile(mod, parsed.filename, parsed.optimize)
