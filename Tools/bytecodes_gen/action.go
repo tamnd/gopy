@@ -402,23 +402,28 @@ func (t *actionTranslator) translateControlIf(action string) error {
 	return nil
 }
 
-// translateErrorIf handles `ERROR_IF(cond, label);` by routing through
-// the eval loop's labeled-error helper. The label is preserved as a
-// string for the error message.
+// translateErrorIf handles `ERROR_IF(cond);` by routing through the
+// eval loop's error helper. CPython 3.14 dropped the label argument;
+// the macro always jumps to the per-instruction `error` label, so we
+// always emit the same `e.error("error")` return.
+//
+// CPython: Tools/cases_generator/generators_common.py error_if.
 func (t *actionTranslator) translateErrorIf() error {
 	t.pos++ // ERROR_IF
-	args, err := t.takeParenthesised()
+	cond, err := t.takeParenthesised()
 	if err != nil {
 		return err
 	}
 	t.acceptSemi()
-	// args: "cond, label". Split on the first comma at paren-depth 0.
-	cond, label, ok := splitTopLevelComma(args)
-	if !ok {
-		return fmt.Errorf("ERROR_IF: missing label argument in %q", args)
+	cond = strings.TrimSpace(cond)
+	if cond == "true" {
+		// Unconditional error path. CPython skips the `if` and emits
+		// the jump straight; we mirror that.
+		fmt.Fprintln(t.writer, `return 0, e.error("error")`)
+		t.terminates = true
+		return nil
 	}
-	fmt.Fprintf(t.writer, "if %s { return 0, e.error(%q) }\n",
-		strings.TrimSpace(cond), strings.TrimSpace(label))
+	fmt.Fprintf(t.writer, "if %s { return 0, e.error(\"error\") }\n", cond)
 	return nil
 }
 

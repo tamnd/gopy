@@ -25,13 +25,29 @@ func TestTranslateBodyDeoptIf(t *testing.T) {
 }
 
 func TestTranslateBodyErrorIf(t *testing.T) {
-	body := tokLine("ERROR_IF(res == NULL, error);")
+	// CPython 3.14 ERROR_IF takes only the condition; the label is
+	// implicitly `error`.
+	body := tokLine("ERROR_IF(res == NULL);")
 	got, _, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
 	if !strings.Contains(got, "res") || !strings.Contains(got, "NULL") || !strings.Contains(got, `e.error("error")`) {
 		t.Errorf("unexpected output:\n%s", got)
+	}
+}
+
+func TestTranslateBodyErrorIfTrueIsUnconditional(t *testing.T) {
+	body := tokLine("ERROR_IF(true);")
+	got, _, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if strings.Contains(got, "if ") {
+		t.Errorf("ERROR_IF(true) must be unconditional, got:\n%s", got)
+	}
+	if !strings.Contains(got, `e.error("error")`) {
+		t.Errorf("missing return, got:\n%s", got)
 	}
 }
 
