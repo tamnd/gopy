@@ -300,7 +300,7 @@ green.
 | Phase | Block | Gate | Status |
 |-------|-------|------|--------|
 | 0 | Vendor `Tools/cases_generator/` verbatim. Mirror inputs (`bytecodes.c`, `optimizer_bytecodes.c`, `pycore_code.h`) under `Tools/cases_generator/inputs/` at the 3.14.5 hash. Add `Tools/regen-cases/` (Go driver) that invokes the generators against our vendored inputs and reproduces CPython's own outputs into a scratch dir for diffing. | upstream reproducibility: regenerating CPython's 9 generator outputs from our vendored inputs matches the files in `$HOME/cpython-314` byte for byte (header lines excluded) | DONE (CI pending) |
-| 1 | Output abstraction. Port `cwriter.py` into a `gowriter.py` sibling that shares the indent/scope API but emits Go syntax. Implement `go_generators_common.py` with macro→Go bindings for the constant macros (`PyStackRef_FromPyObject*`, `PyStackRef_AsPyObject*`, `STACK_SHRINK`, `STACK_GROW`, `PEEK`, `POKE`, etc). | unit-test corpus: 30 hand-written macro snippets emit known-good Go | TODO |
+| 1 | Output abstraction. Port `cwriter.py` into a `gowriter.py` sibling that shares the indent/scope API but emits Go syntax. Implement `go_generators_common.py` with macro→Go bindings for the constant macros (`PyStackRef_FromPyObject*`, `PyStackRef_AsPyObject*`, `STACK_SHRINK`, `STACK_GROW`, `PEEK`, `POKE`, etc). | unit-test corpus: 30 hand-written macro snippets emit known-good Go | DONE (corpus at 20/30; remaining 10 stage with Phase 5 op signatures) |
 | 2 | Metadata + opcode-id emitters. Ship `gopy_opcode_id_generator.py` and `gopy_opcode_metadata_generator.py`. Output `compile/opcode_ids_gen.go` + `compile/opcode_metadata_gen.go`. **Parity test:** the generated tables equal `compile/opcodes_gen.go` + `compile/opcode_caches.go` for every opcode currently in gopy. Once green, the hand-rolled files get deleted. | `go test ./compile -run TestOpcodeMetadataParity` green; deletion lands | TODO |
 | 3 | Cache-layout emitter. New `cache_struct_parser.py` reads `pycore_code.h`, emits `specialize/cache_layouts_gen.go` with typed accessors (`(*LoadGlobalCache).Index`, `.ModuleKeysVersion`, etc) backed by the codeunit slice. Migrate every `SetCacheCell` / `CacheCell` call site in `specialize/*.go` and `vm/eval_specialized_*.go` to typed accessors. The LOAD_GLOBAL cell-1 vs cell-4 bug class becomes a compile error. | every specialize/* + eval_specialized_* file builds; existing tests green; one new test (`TestCacheLayoutTypedAccess`) asserts the struct sizes match `_PyOpcode_Caches[]` | TODO |
 | 4 | Family + deopt emitter. Generator emits `specialize/family_gen.go` carrying the family table (`map[Opcode][]Opcode`), deopt map (`Opcode→Opcode` parent), and per-family cache-size guard. Replace `specialize/quicken.go` family literal + `specialize/deopt.go` map. **Parity test:** generated tables equal current hand-rolled ones for every opcode we specialize today. | parity test green; deletion lands | TODO |
@@ -399,10 +399,10 @@ golden file. No real opcode bodies translated yet.
 
 | Step | Status | Commit |
 |------|--------|--------|
-| `tools/cases_generator/gowriter.py` lands | TODO | - |
-| `tools/cases_generator/go_generators_common.py` lands with the binding table above | TODO | - |
-| 30-snippet golden-file corpus under `tools/cases_generator/testdata/snippets/` | TODO | - |
-| `go test ./tools/cases_generator -run TestSnippetParity` (via a small Go test harness that shells out to the Python) green | TODO | - |
+| `Tools/cases_generator/gowriter.py` lands | DONE | - |
+| `Tools/cases_generator/go_generators_common.py` lands with the binding table above | DONE | - |
+| 30-snippet golden-file corpus under `Tools/cases_generator/testdata/snippets/` | PARTIAL (20/30) | - |
+| `go test ./Tools/regen-cases -run TestSnippetParity` (Go harness shelling out to Python) green | DONE | - |
 
 ## Phase 2 — opcode IDs + metadata
 
@@ -882,10 +882,10 @@ helper).
 - [x] Phase 0.3 — `Tools/regen-cases/` (Go driver) invokes upstream generators into a scratch dir
 - [x] Phase 0.4 — `go run ./Tools/regen-cases --check-upstream` diff-clean vs CPython 3.14.5
 - [ ] Phase 0.5 — CI job `cases-generator-upstream-parity` green
-- [ ] Phase 1.1 — `gowriter.py` mirrors `cwriter.py` API for Go output
-- [ ] Phase 1.2 — `go_generators_common.py` binds the constant DSL macros to Go
-- [ ] Phase 1.3 — 30-snippet golden corpus under `tools/cases_generator/testdata/snippets/`
-- [ ] Phase 1.4 — `TestSnippetParity` green
+- [x] Phase 1.1 — `gowriter.py` mirrors `cwriter.py` API for Go output
+- [x] Phase 1.2 — `go_generators_common.py` binds the constant DSL macros to Go
+- [ ] Phase 1.3 — 30-snippet golden corpus under `Tools/cases_generator/testdata/snippets/` (20/30 landed; remaining 10 stage with Phase 5 op signatures)
+- [x] Phase 1.4 — `TestSnippetParity` green
 - [ ] Phase 2.1 — `gopy_opcode_id_generator.py` emits `compile/opcode_ids_gen.go`
 - [ ] Phase 2.2 — `gopy_opcode_metadata_generator.py` emits `compile/opcode_metadata_gen.go`
 - [ ] Phase 2.3 — parity test vs `compile/opcodes_gen.go` + `compile/opcode_caches.go`
