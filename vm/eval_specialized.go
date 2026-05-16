@@ -28,6 +28,8 @@ import (
 // the arm took the dispatch (caller forwards next as the new PC).
 // ok=false means guard miss or unsupported variant; the caller must
 // continue through maybeDeopt so the adaptive parent body runs.
+//
+//nolint:gocyclo // one arm per specialized opcode; collapsing them defeats the point of the fast-path table.
 func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, ok bool, err error) {
 	if !e.f.Code.Quickened {
 		return 0, false, nil

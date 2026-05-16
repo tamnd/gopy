@@ -47,10 +47,10 @@ func runCompareOp(t *testing.T, op compile.Opcode, lhs, rhs objects.Object, opar
 
 func TestFastCompareOpInt(t *testing.T) {
 	cases := []struct {
-		name   string
-		l, r   int64
-		oparg  byte
-		want   objects.Object
+		name  string
+		l, r  int64
+		oparg byte
+		want  objects.Object
 	}{
 		{"3<7", 3, 7, cmpopLt, objects.True()},
 		{"7<3", 7, 3, cmpopLt, objects.False()},
@@ -71,10 +71,10 @@ func TestFastCompareOpInt(t *testing.T) {
 
 func TestFastCompareOpFloat(t *testing.T) {
 	cases := []struct {
-		name   string
-		l, r   float64
-		oparg  byte
-		want   objects.Object
+		name  string
+		l, r  float64
+		oparg byte
+		want  objects.Object
 	}{
 		{"1.5<2.5", 1.5, 2.5, cmpopLt, objects.True()},
 		{"2.5<=2.5", 2.5, 2.5, cmpopLtE, objects.True()},

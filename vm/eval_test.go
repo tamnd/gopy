@@ -20,8 +20,10 @@ func codeWithBytecode(bc []byte) *objects.Code {
 // in compile/assemble.go:emitInstr; hand-crafted test bytecode has to
 // do the same so advance() and jumpBy() compute correct offsets.
 func instr(op compile.Opcode, arg byte) []byte {
-	out := []byte{byte(op), arg}
-	for range compile.CacheCount(op) {
+	caches := compile.CacheCount(op)
+	out := make([]byte, 0, 2+2*caches)
+	out = append(out, byte(op), arg)
+	for range caches {
 		out = append(out, 0, 0)
 	}
 	return out

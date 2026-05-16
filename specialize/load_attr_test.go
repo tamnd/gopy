@@ -16,7 +16,8 @@ func loadAttrCode() *objects.Code {
 }
 
 func TestLoadAttrModule(t *testing.T) {
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	m := objects.NewModule("m")
 	if err := m.Dict().SetItem(objects.NewStr("x"), objects.NewInt(1)); err != nil {
 		t.Fatalf("SetItem: %v", err)
@@ -31,7 +32,8 @@ func TestLoadAttrModule(t *testing.T) {
 }
 
 func TestLoadAttrModuleWithGetattrFallsBack(t *testing.T) {
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	m := objects.NewModule("m")
 	if err := m.Dict().SetItem(objects.NewStr("__getattr__"), objects.NewInt(1)); err != nil {
 		t.Fatalf("SetItem: %v", err)
@@ -49,7 +51,8 @@ func TestLoadAttrClass(t *testing.T) {
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
 	objects.SetTypeDescr(cls, "x", objects.NewInt(7))
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	LoadAttr(cls, newAttrName("x"), co, 0)
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_ATTR_CLASS {
 		t.Fatalf("opcode: got %s want LOAD_ATTR_CLASS", got.Name())
@@ -62,7 +65,8 @@ func TestLoadAttrSlot(t *testing.T) {
 	cls.Slots = []string{"s"}
 	objects.SetTypeDescr(cls, "s", objects.NewMemberDescr("s", 0))
 	inst := objects.NewInstance(cls)
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	LoadAttr(inst, newAttrName("s"), co, 0)
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_ATTR_SLOT {
 		t.Fatalf("opcode: got %s want LOAD_ATTR_SLOT", got.Name())
@@ -77,7 +81,8 @@ func TestLoadAttrInstanceValue(t *testing.T) {
 	if err := inst.Dict().SetItem(objects.NewStr("v"), objects.NewInt(1)); err != nil {
 		t.Fatalf("SetItem: %v", err)
 	}
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	LoadAttr(inst, newAttrName("v"), co, 0)
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_ATTR_INSTANCE_VALUE {
 		t.Fatalf("opcode: got %s want LOAD_ATTR_INSTANCE_VALUE", got.Name())
@@ -112,7 +117,8 @@ func TestLoadAttrProperty(t *testing.T) {
 	prop := objects.NewProperty(getter, nil, nil, nil)
 	objects.SetTypeDescr(cls, "n", prop)
 	inst := objects.NewInstance(cls)
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	LoadAttr(inst, newAttrName("n"), co, 0)
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_ATTR_PROPERTY {
 		t.Fatalf("opcode: got %s want LOAD_ATTR_PROPERTY", got.Name())
@@ -128,7 +134,8 @@ func TestLoadAttrMethodNoDict(t *testing.T) {
 	})
 	objects.SetTypeDescr(cls, "m", meth)
 	inst := objects.NewInstance(cls)
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	LoadAttr(inst, newAttrName("m"), co, 0)
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_ATTR_METHOD_NO_DICT {
 		t.Fatalf("opcode: got %s want LOAD_ATTR_METHOD_NO_DICT", got.Name())
@@ -141,7 +148,8 @@ func TestLoadAttrNondescriptorNoDict(t *testing.T) {
 	// Plain class attribute (int) — not a descriptor.
 	objects.SetTypeDescr(cls, "k", objects.NewInt(42))
 	inst := objects.NewInstance(cls)
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	LoadAttr(inst, newAttrName("k"), co, 0)
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_ATTR_NONDESCRIPTOR_NO_DICT {
 		t.Fatalf("opcode: got %s want LOAD_ATTR_NONDESCRIPTOR_NO_DICT", got.Name())
@@ -156,9 +164,10 @@ func TestLoadAttrClassWithMetaclassCheck(t *testing.T) {
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
 	// Re-Init binds cls.ob_type to the custom metaclass.
-	cls.Header.Init(meta)
+	cls.Init(meta)
 	objects.SetTypeDescr(cls, "x", objects.NewInt(1))
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	LoadAttr(cls, newAttrName("x"), co, 0)
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_ATTR_CLASS_WITH_METACLASS_CHECK {
 		t.Fatalf("opcode: got %s want LOAD_ATTR_CLASS_WITH_METACLASS_CHECK", got.Name())
@@ -166,7 +175,8 @@ func TestLoadAttrClassWithMetaclassCheck(t *testing.T) {
 }
 
 func TestLoadAttrUnspecializeOther(t *testing.T) {
-	co := loadAttrCode(); buf := co.Code
+	co := loadAttrCode()
+	buf := co.Code
 	LoadAttr(objects.NewInt(1), newAttrName("x"), co, 0)
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_ATTR {
 		t.Fatalf("opcode: got %s want LOAD_ATTR", got.Name())

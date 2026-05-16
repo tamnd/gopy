@@ -188,7 +188,7 @@ func TestFastLoadAttrClassWithMetaclassCheck(t *testing.T) {
 	meta.IsUser = true
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
-	cls.Header.Init(meta)
+	cls.Init(meta)
 	value := objects.NewInt(77)
 	objects.SetTypeDescr(cls, "k", value)
 	version := cls.VersionTag()

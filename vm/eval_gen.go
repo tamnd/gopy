@@ -242,7 +242,8 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 		//
 		// CPython: Objects/genobject.c:586 _gen_throw (PyErr_Restore
 		// before gen_send_ex)
-		if re, ok := msg.Err.(*objects.RaisedError); ok {
+		var re *objects.RaisedError
+		if errors.As(msg.Err, &re) {
 			if exc, ok2 := re.Exc.(*pyerrors.Exception); ok2 {
 				pyerrors.Raise(e.ts, exc)
 			}

@@ -17,7 +17,7 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// pushContainsResult finalises the stack shape for a CONTAINS_OP fast
+// pushContainsResult finalizes the stack shape for a CONTAINS_OP fast
 // path hit: pop both operands and push True/False per `res ^ oparg`.
 func (e *evalState) pushContainsResult(res bool, oparg uint32) {
 	e.pop()

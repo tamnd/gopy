@@ -10,8 +10,10 @@ import (
 )
 
 // runStoreSubscr drives:
-//   LOAD_CONST value; LOAD_CONST container; LOAD_CONST key;
-//   STORE_SUBSCR; LOAD_CONST container; RETURN_VALUE.
+//
+//	LOAD_CONST value; LOAD_CONST container; LOAD_CONST key;
+//	STORE_SUBSCR; LOAD_CONST container; RETURN_VALUE.
+//
 // Returns the (mutated) container.
 func runStoreSubscr(t *testing.T, op compile.Opcode, value, container, key objects.Object) objects.Object {
 	t.Helper()

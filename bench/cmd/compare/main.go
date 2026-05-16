@@ -54,7 +54,7 @@ type pyperfFile struct {
 }
 
 func loadRun(path string) (*runFile, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // CLI tool reads paths supplied on argv.
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +120,7 @@ func geomean(vals []float64) float64 {
 	return math.Exp(sumLog / float64(len(vals)))
 }
 
+//nolint:gocyclo // glue script: argument parsing + report assembly fan out by design.
 func main() {
 	cpy := flag.String("cpy", "", "cpython JSON")
 	pypy := flag.String("pypy", "", "pypy JSON")
@@ -205,8 +206,8 @@ func main() {
 		safe(rcpy.Version), safe(rpypy.Version), safe(rgopy.Version))
 
 	if *out == "" {
-		os.Stdout.WriteString(b.String())
-	} else if err := os.WriteFile(*out, []byte(b.String()), 0o644); err != nil {
+		_, _ = os.Stdout.WriteString(b.String())
+	} else if err := os.WriteFile(*out, []byte(b.String()), 0o644); err != nil { //nolint:gosec // CLI emits a human-readable report.
 		die(err)
 	}
 }

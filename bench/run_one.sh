@@ -32,7 +32,11 @@ BASELINE_JSON="${BASELINE_JSON:-}"
 TARGET_WALL_MS="${TARGET_WALL_MS:-30000}"
 EST_SLOWDOWN="${EST_SLOWDOWN:-300}"
 
-if [ ! -x "$INTERP" ]; then
+if [ -x "$INTERP" ]; then
+    : # absolute or relative path, ok
+elif command -v "$INTERP" >/dev/null 2>&1; then
+    INTERP="$(command -v "$INTERP")"
+else
     echo "Interpreter $INTERP not executable" >&2
     exit 1
 fi

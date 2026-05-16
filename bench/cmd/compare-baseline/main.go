@@ -35,7 +35,7 @@ type file struct {
 }
 
 func load(path string) (*file, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // CLI tool reads paths supplied on argv.
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +49,7 @@ func load(path string) (*file, error) {
 	return &f, nil
 }
 
+//nolint:gocyclo // CLI tool: bench enumeration + per-row comparison fans out by design.
 func main() {
 	current := flag.String("current", "bench/raw_gopy.json", "current run JSON")
 	baseline := flag.String("baseline", "bench/baseline_v0124.json", "frozen baseline JSON")

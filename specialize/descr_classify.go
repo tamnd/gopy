@@ -26,18 +26,18 @@ import "github.com/tamnd/gopy/objects"
 type DescrKind int
 
 const (
-	KindAbsent          DescrKind = iota // no descriptor on the type
-	KindOverriding                       // has __get__ AND (__set__ OR __delete__) and is not slot/property
-	KindMethod                           // bound-method-style: function / builtin / METHOD_DESCRIPTOR
-	KindProperty                         // property object with a getter
-	KindObjectSlot                       // MemberDescr that stores PyObject*
-	KindOtherSlot                        // MemberDescr that stores non-object (int, double, ...)
-	KindNonOverriding                    // has __get__ only, immutable class
-	KindBuiltinClassmethod               // classmethod_descriptor (C-level @classmethod)
-	KindPythonClassmethod                // Python classmethod(func)
-	KindNonDescriptor                    // plain class attribute (int / str / list / ...)
-	KindMutable                          // descriptor of a user-defined (mutable) class
-	KindGetsetOverridden                 // __getattribute__/__setattr__ overridden
+	KindAbsent             DescrKind = iota // no descriptor on the type
+	KindOverriding                          // has __get__ AND (__set__ OR __delete__) and is not slot/property
+	KindMethod                              // bound-method-style: function / builtin / METHOD_DESCRIPTOR
+	KindProperty                            // property object with a getter
+	KindObjectSlot                          // MemberDescr that stores PyObject*
+	KindOtherSlot                           // MemberDescr that stores non-object (int, double, ...)
+	KindNonOverriding                       // has __get__ only, immutable class
+	KindBuiltinClassmethod                  // classmethod_descriptor (C-level @classmethod)
+	KindPythonClassmethod                   // Python classmethod(func)
+	KindNonDescriptor                       // plain class attribute (int / str / list / ...)
+	KindMutable                             // descriptor of a user-defined (mutable) class
+	KindGetsetOverridden                    // __getattribute__/__setattr__ overridden
 )
 
 // ClassifyDescriptor maps a resolved type attribute to a DescrKind.
