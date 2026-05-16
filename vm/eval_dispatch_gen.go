@@ -156,7 +156,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_FAST:
-		// body bail: unrecognized token at action body start: "_PyStackRef"
+		// body bail: unrecognized token at action body start: "if"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_GLOBAL:
 		// body bail: unrecognized token at action body start: "PyObject"
@@ -211,9 +211,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value
 		receiver := e.pop()
 		_ = receiver
-		// body bail: output assign "val": unrecognized expression "value"
-		// outputs: val
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var val stackref.Ref
+		val = value
+		receiver.Close()
+		e.push(val)
+		return e.advance(), nil, nil, false, nil
 	case compile.ENTER_EXECUTOR:
 		// body bail: unrecognized token at action body start: "PyCodeObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
@@ -400,7 +402,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: bc
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_COMMON_CONSTANT:
-		// body bail: output assign "value": unrecognized expression "PyStackRef_FromPyObjectNew ( tstate -> interp -> common_consts [ oparg ] )"
+		// body bail: output assign "value": unexpected token "PyStackRef_FromPyObjectNew" in expression
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_CONST:
@@ -412,23 +414,27 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_FAST:
-		// body bail: output assign "value": unrecognized expression "PyStackRef_DUP ( GETLOCAL ( oparg ) )"
-		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var value stackref.Ref
+		value = e.localAt(int(oparg)).Dup()
+		e.push(value)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_FAST_AND_CLEAR:
-		// body bail: output assign "value": unrecognized expression "GETLOCAL ( oparg )"
-		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var value stackref.Ref
+		value = e.localAt(int(oparg))
+		e.setLocal(int(oparg), stackref.Null)
+		e.push(value)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_FAST_BORROW:
-		// body bail: output assign "value": unrecognized expression "PyStackRef_Borrow ( GETLOCAL ( oparg ) )"
-		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var value stackref.Ref
+		value = e.localAt(int(oparg)).Dup()
+		e.push(value)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:
 		// body bail: unrecognized token at action body start: "uint32_t"
 		// outputs: value1 value2
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_FAST_CHECK:
-		// body bail: unrecognized token at action body start: "_PyStackRef"
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_FAST_LOAD_FAST:
@@ -562,7 +568,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.RETURN_VALUE:
 		retval := e.pop()
 		_ = retval
-		// body bail: unrecognized token at action body start: "_PyStackRef"
+		// body bail: _PyStackRef temp rhs: unexpected token "PyStackRef_MakeHeapSafe" in expression
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SETUP_ANNOTATIONS:
@@ -608,8 +614,10 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_FAST:
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "_PyStackRef"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		tmp := e.localAt(int(oparg))
+		e.setLocal(int(oparg), value)
+		tmp.Close()
+		return e.advance(), nil, nil, false, nil
 	case compile.STORE_FAST_LOAD_FAST:
 		value1 := e.pop()
 		_ = value1
@@ -660,7 +668,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.UNARY_NOT:
 		value := e.pop()
 		_ = value
-		// body bail: output assign "res": unrecognized expression "PyStackRef_IsFalse ( value ) ? PyStackRef_True : PyStackRef_False"
+		// body bail: output assign "res": unexpected token "PyStackRef_IsFalse" in expression
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.UNPACK_EX:

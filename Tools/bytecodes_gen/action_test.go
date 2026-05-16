@@ -131,6 +131,99 @@ func TestTranslateBodyJumpBy(t *testing.T) {
 	}
 }
 
+func TestTranslateBodyOutputAssignPyStackRefNull(t *testing.T) {
+	body := tokLine("res = PyStackRef_NULL;")
+	sig := &SignatureAnalysis{Name: "PUSH_NULL", Outputs: []StackBinding{{Name: "res"}}}
+	got, _, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "res = stackref.Null") {
+		t.Errorf("expected res = stackref.Null, got:\n%s", got)
+	}
+}
+
+func TestTranslateBodyOutputAssignLoadFast(t *testing.T) {
+	body := tokLine("value = PyStackRef_DUP(GETLOCAL(oparg));")
+	sig := &SignatureAnalysis{Name: "LOAD_FAST", Outputs: []StackBinding{{Name: "value"}}}
+	got, _, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "value = e.localAt(int(oparg)).Dup()") {
+		t.Errorf("expected dup-of-local, got:\n%s", got)
+	}
+}
+
+func TestTranslateBodyOutputUnassignedBails(t *testing.T) {
+	// Output declared but body never assigns it; translator must bail.
+	body := tokLine("assert(true);")
+	sig := &SignatureAnalysis{Name: "X", Outputs: []StackBinding{{Name: "out"}}}
+	_, _, ok, note := TranslateBody(body, sig)
+	if ok {
+		t.Errorf("expected bail when output left unassigned")
+	}
+	if note == "" {
+		t.Errorf("expected explanatory note")
+	}
+}
+
+func TestTranslateBodyOutputAssignTrueFalse(t *testing.T) {
+	body := tokLine("b = PyStackRef_True;")
+	sig := &SignatureAnalysis{Name: "X", Outputs: []StackBinding{{Name: "b"}}}
+	got, _, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "b = stackref.True") {
+		t.Errorf("expected stackref.True, got:\n%s", got)
+	}
+}
+
+func TestTranslateBodyGetlocalLvalue(t *testing.T) {
+	body := tokLine("GETLOCAL(oparg) = PyStackRef_NULL;")
+	got, _, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "e.setLocal(int(oparg), stackref.Null)") {
+		t.Errorf("expected setLocal, got:\n%s", got)
+	}
+}
+
+func TestTranslateBodyLoadFastAndClear(t *testing.T) {
+	body := tokLine("value = GETLOCAL(oparg); GETLOCAL(oparg) = PyStackRef_NULL;")
+	sig := &SignatureAnalysis{Name: "LOAD_FAST_AND_CLEAR", Outputs: []StackBinding{{Name: "value"}}}
+	got, _, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "value = e.localAt(int(oparg))") {
+		t.Errorf("missing value = local, got:\n%s", got)
+	}
+	if !strings.Contains(got, "e.setLocal(int(oparg), stackref.Null)") {
+		t.Errorf("missing setLocal, got:\n%s", got)
+	}
+}
+
+func TestTranslateBodyStoreFast(t *testing.T) {
+	body := tokLine(`_PyStackRef tmp = GETLOCAL(oparg); GETLOCAL(oparg) = value; DEAD(value); PyStackRef_XCLOSE(tmp);`)
+	sig := &SignatureAnalysis{Name: "STORE_FAST", Inputs: []StackBinding{{Name: "value"}}}
+	got, _, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	for _, want := range []string{
+		"tmp := e.localAt(int(oparg))",
+		"e.setLocal(int(oparg), value)",
+		"tmp.Close()",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestSplitTopLevelComma(t *testing.T) {
 	a, b, ok := splitTopLevelComma("res == NULL, error")
 	if !ok || strings.TrimSpace(a) != "res == NULL" || strings.TrimSpace(b) != "error" {

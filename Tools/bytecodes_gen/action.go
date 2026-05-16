@@ -45,6 +45,7 @@ func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, termina
 		toks:     stripWhitespace(body),
 		writer:   &strings.Builder{},
 		assigned: map[string]bool{},
+		locals:   map[string]bool{},
 	}
 	if err := t.run(); err != nil {
 		return "", false, false, err.Error()
@@ -70,6 +71,7 @@ type actionTranslator struct {
 	writer     *strings.Builder
 	terminates bool            // body emits its own dispatch return
 	assigned   map[string]bool // output names that got assigned
+	locals     map[string]bool // C-locals declared in the body
 }
 
 func (t *actionTranslator) run() error {
@@ -124,12 +126,120 @@ func (t *actionTranslator) translateStmt() error {
 		// XCLOSE tolerates null. Both map to .Close() on the popped
 		// local, since stackref.Ref's Close already null-checks.
 		return t.translateUnaryCall(".Close()")
+	case "GETLOCAL":
+		// `GETLOCAL(oparg) = expr;` — CPython uses GETLOCAL as both
+		// rvalue (handled in expression parsing) and lvalue (handled
+		// here). The lvalue case translates to e.setLocal.
+		return t.translateGetlocalAssign()
+	case "_PyStackRef":
+		// `_PyStackRef name = expr;` — C-local declaration. The Go
+		// equivalent is `name := expr`; we track the name so later
+		// statements that reference it (e.g. PyStackRef_CLOSE(name))
+		// can find it.
+		return t.translateLocalDecl()
 	}
 	// Output assignment: `name = expr ;` where name is a bound output.
 	if isBareIdent(tk.Text) && t.bound[tk.Text] == "out" {
 		return t.translateOutputAssign(tk.Text)
 	}
 	return fmt.Errorf("unrecognized token at action body start: %q", tk.Text)
+}
+
+// translateLocalDecl handles `_PyStackRef NAME = EXPR;`. The Go output
+// is `NAME := <go-expr>`; the name is recorded as a declared C-local
+// so unary-call helpers (e.g. PyStackRef_CLOSE(NAME)) can resolve it.
+func (t *actionTranslator) translateLocalDecl() error {
+	t.pos++ // _PyStackRef
+	if t.pos >= len(t.toks) {
+		return fmt.Errorf("expected name after _PyStackRef")
+	}
+	name := t.toks[t.pos].Text
+	if !isBareIdent(name) {
+		return fmt.Errorf("expected identifier after _PyStackRef, got %q", name)
+	}
+	t.pos++
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "=" {
+		return fmt.Errorf("expected '=' after _PyStackRef %s", name)
+	}
+	t.pos++
+	rhs := []string{}
+	for t.pos < len(t.toks) && t.toks[t.pos].Text != ";" {
+		rhs = append(rhs, t.toks[t.pos].Text)
+		t.pos++
+	}
+	t.acceptSemi()
+	rhsExpr, err := t.translateExpr(rhs)
+	if err != nil {
+		return fmt.Errorf("_PyStackRef %s rhs: %w", name, err)
+	}
+	t.locals[name] = true
+	fmt.Fprintf(t.writer, "%s := %s\n", goLocalName(name), rhsExpr)
+	return nil
+}
+
+// translateGetlocalAssign handles `GETLOCAL(<idx>) = <expr>;`. The
+// LHS macro doubles as an lvalue in CPython; we route it through the
+// e.setLocal helper which already handles closing the previous slot.
+func (t *actionTranslator) translateGetlocalAssign() error {
+	t.pos++ // GETLOCAL
+	idxToks, err := t.takeParenTokens()
+	if err != nil {
+		return err
+	}
+	idxExpr, err := t.translateExprFromStrings(idxToks)
+	if err != nil {
+		return fmt.Errorf("GETLOCAL lvalue index: %w", err)
+	}
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "=" {
+		return fmt.Errorf("expected '=' after GETLOCAL(...) lvalue")
+	}
+	t.pos++
+	rhs := []string{}
+	for t.pos < len(t.toks) && t.toks[t.pos].Text != ";" {
+		rhs = append(rhs, t.toks[t.pos].Text)
+		t.pos++
+	}
+	t.acceptSemi()
+	rhsExpr, err := t.translateExpr(rhs)
+	if err != nil {
+		return fmt.Errorf("GETLOCAL lvalue rhs: %w", err)
+	}
+	fmt.Fprintf(t.writer, "e.setLocal(int(%s), %s)\n", idxExpr, rhsExpr)
+	return nil
+}
+
+// takeParenTokens is the token-slice analogue of takeParenthesised:
+// returns the raw inner tokens (still as text) so they can be fed back
+// into translateExpr without losing structure.
+func (t *actionTranslator) takeParenTokens() ([]string, error) {
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "(" {
+		return nil, fmt.Errorf("expected '(' at position %d", t.pos)
+	}
+	t.pos++
+	depth := 1
+	out := []string{}
+	for t.pos < len(t.toks) && depth > 0 {
+		tk := t.toks[t.pos]
+		switch tk.Text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+			if depth == 0 {
+				t.pos++
+				return out, nil
+			}
+		}
+		out = append(out, tk.Text)
+		t.pos++
+	}
+	return nil, fmt.Errorf("unterminated '(' at position %d", t.pos)
+}
+
+// translateExprFromStrings is the version of translateExpr that takes
+// raw token strings (already split by the caller).
+func (t *actionTranslator) translateExprFromStrings(toks []string) (string, error) {
+	return t.translateExpr(toks)
 }
 
 // translateOutputAssign handles `name = expr ;` where name is a
@@ -159,12 +269,101 @@ func (t *actionTranslator) translateOutputAssign(name string) error {
 }
 
 // translateExpr renders a small CPython expression vocabulary into Go.
-// The vocabulary grows as more opcode bodies migrate.
+// The vocabulary grows as more opcode bodies migrate. The parser is a
+// tiny recursive-descent walker over the token stream.
 func (t *actionTranslator) translateExpr(toks []string) (string, error) {
-	if len(toks) == 1 && toks[0] == "PyStackRef_NULL" {
-		return "stackref.Null", nil
+	p := &exprParser{toks: toks, bound: t.bound, locals: t.locals}
+	out, err := p.parse()
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("unrecognized expression %q", strings.Join(toks, " "))
+	if p.pos != len(toks) {
+		return "", fmt.Errorf("trailing tokens after expression: %q", strings.Join(toks[p.pos:], " "))
+	}
+	return out, nil
+}
+
+// exprParser walks a flat token slice and produces a Go expression.
+// It only understands the CPython idioms that have been ported so
+// far; unknown shapes bail with an error so the emitter falls back to
+// a panic-stub.
+type exprParser struct {
+	toks   []string
+	pos    int
+	bound  map[string]string
+	locals map[string]bool
+}
+
+func (p *exprParser) parse() (string, error) {
+	return p.parsePrimary()
+}
+
+func (p *exprParser) parsePrimary() (string, error) {
+	if p.pos >= len(p.toks) {
+		return "", fmt.Errorf("unexpected end of expression")
+	}
+	tk := p.toks[p.pos]
+	p.pos++
+	switch tk {
+	case "PyStackRef_NULL":
+		return "stackref.Null", nil
+	case "PyStackRef_True":
+		return "stackref.True", nil
+	case "PyStackRef_False":
+		return "stackref.False", nil
+	case "PyStackRef_DUP", "PyStackRef_Borrow":
+		// CPython distinguishes owned (DUP) from borrowed (Borrow) refs;
+		// under Go's GC the distinction collapses, so both render the
+		// same way.
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		return arg + ".Dup()", nil
+	case "PyStackRef_IsNull":
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		return arg + ".IsNull()", nil
+	case "GETLOCAL":
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("e.localAt(int(%s))", arg), nil
+	}
+	if tk == "oparg" {
+		return "oparg", nil
+	}
+	if isBareIdent(tk) {
+		if dir, ok := p.bound[tk]; ok && dir == "in" {
+			return goLocalName(tk), nil
+		}
+		if p.locals[tk] {
+			return goLocalName(tk), nil
+		}
+	}
+	return "", fmt.Errorf("unexpected token %q in expression", tk)
+}
+
+// parseCallArg consumes ( <expr> ) and returns the rendered inner
+// expression. Single-arg callees only for now; multi-arg can layer on
+// when an opcode needs it.
+func (p *exprParser) parseCallArg() (string, error) {
+	if p.pos >= len(p.toks) || p.toks[p.pos] != "(" {
+		return "", fmt.Errorf("expected '(' after function name")
+	}
+	p.pos++
+	inner, err := p.parsePrimary()
+	if err != nil {
+		return "", err
+	}
+	if p.pos >= len(p.toks) || p.toks[p.pos] != ")" {
+		return "", fmt.Errorf("expected ')' to close call")
+	}
+	p.pos++
+	return inner, nil
 }
 
 // translateJumpBy emits the dispatch return for `JUMPBY(<expr>);`.
@@ -238,8 +437,10 @@ func (t *actionTranslator) translateUnaryCall(suffix string) error {
 	if !isBareIdent(arg) {
 		return fmt.Errorf("unary call arg %q is not a bare identifier", arg)
 	}
-	if _, ok := t.bound[arg]; !ok {
-		return fmt.Errorf("unary call arg %q is not a bound stack slot", arg)
+	if _, isBound := t.bound[arg]; !isBound {
+		if !t.locals[arg] {
+			return fmt.Errorf("unary call arg %q is not a bound stack slot or local", arg)
+		}
 	}
 	fmt.Fprintf(t.writer, "%s%s\n", goLocalName(arg), suffix)
 	return nil

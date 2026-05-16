@@ -31,17 +31,8 @@ func (e *evalState) dispatchHandwritten(op compile.Opcode, oparg uint32) (next i
 	switch op {
 	case compile.LOAD_CONST:
 		return e.opLOAD_CONST(oparg)
-	case compile.LOAD_FAST, compile.LOAD_FAST_BORROW:
-		// LOAD_FAST_BORROW (3.13+) is the same observable shape as
-		// LOAD_FAST under our model: Go's GC handles the lifetime, so
-		// the borrow-vs-own distinction collapses to one body.
-		return e.opLOAD_FAST(oparg)
 	case compile.LOAD_FAST_CHECK:
 		return e.opLOAD_FAST_CHECK(oparg)
-	case compile.LOAD_FAST_AND_CLEAR:
-		return e.opLOAD_FAST_AND_CLEAR(oparg)
-	case compile.STORE_FAST:
-		return e.opSTORE_FAST(oparg)
 	case compile.DELETE_FAST:
 		return e.opDELETE_FAST(oparg)
 	case compile.RETURN_VALUE:
@@ -83,16 +74,6 @@ func (e *evalState) opLOAD_CONST(oparg uint32) (next int, retVal objects.Object,
 	return e.advance(), nil, nil, false, true, nil
 }
 
-// CPython: Python/bytecodes.c LOAD_FAST / LOAD_FAST_BORROW.
-func (e *evalState) opLOAD_FAST(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	ref := e.localAt(int(oparg))
-	if ref.IsNull() {
-		return 0, nil, nil, false, true, fmt.Errorf("vm: LOAD_FAST: local %d unbound", oparg)
-	}
-	e.push(ref.Dup())
-	return e.advance(), nil, nil, false, true, nil
-}
-
 // CPython: Python/bytecodes.c LOAD_FAST_CHECK: same observable shape; the check is
 // already covered by LOAD_FAST's IsNull guard, so the body coincides.
 func (e *evalState) opLOAD_FAST_CHECK(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
@@ -101,23 +82,6 @@ func (e *evalState) opLOAD_FAST_CHECK(oparg uint32) (next int, retVal objects.Ob
 		return 0, nil, nil, false, true, fmt.Errorf("vm: LOAD_FAST_CHECK: local %d unbound", oparg)
 	}
 	e.push(ref.Dup())
-	return e.advance(), nil, nil, false, true, nil
-}
-
-// CPython: Python/bytecodes.c LOAD_FAST_AND_CLEAR: pushes local, then nulls it.
-func (e *evalState) opLOAD_FAST_AND_CLEAR(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	ref := e.localAt(int(oparg))
-	e.setLocal(int(oparg), stackref.Null)
-	e.push(ref)
-	return e.advance(), nil, nil, false, true, nil
-}
-
-// CPython: Python/bytecodes.c STORE_FAST: (value --) writes oparg.
-func (e *evalState) opSTORE_FAST(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	ref := e.pop()
-	old := e.localAt(int(oparg))
-	old.Close()
-	e.setLocal(int(oparg), ref)
 	return e.advance(), nil, nil, false, true, nil
 }
 
