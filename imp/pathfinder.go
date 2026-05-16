@@ -105,16 +105,44 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		pkgDir := filepath.Join(dir, tail)
 		pkgInit := filepath.Join(pkgDir, "__init__.py")
 		if isFile(pkgInit) {
-			return loadAsPackage(exec, p.Compiler, pkgInit, pkgDir, name)
+			mod, err := loadAsPackage(exec, p.Compiler, pkgInit, pkgDir, name)
+			if err != nil {
+				return nil, err
+			}
+			bindOnParent(parent, tail, mod)
+			return mod, nil
 		}
 		// Module case: <dir>/<tail>.py.
 		// CPython: Lib/importlib/_bootstrap_external.py:1391 suffix loop
 		modFile := filepath.Join(dir, tail+".py")
 		if isFile(modFile) {
-			return loadAsModule(exec, p.Compiler, modFile, name, parent)
+			mod, err := loadAsModule(exec, p.Compiler, modFile, name, parent)
+			if err != nil {
+				return nil, err
+			}
+			bindOnParent(parent, tail, mod)
+			return mod, nil
 		}
 	}
 	return nil, fmt.Errorf("%w: %s", errFinderMiss, name)
+}
+
+// bindOnParent installs child as an attribute on the parent package's
+// module dict. Mirrors the setattr step _find_and_load_unlocked runs
+// after a successful submodule load so `import a.b` makes `a.b`
+// resolve as an attribute on `a`. Errors are swallowed to match
+// CPython, which also catches AttributeError around the setattr.
+//
+// CPython: Lib/importlib/_bootstrap.py:1234 setattr(parent_module, child, module)
+func bindOnParent(parent, tail string, child *objects.Module) {
+	if parent == "" {
+		return
+	}
+	pm, ok := GetModule(parent)
+	if !ok {
+		return
+	}
+	_ = pm.Dict().SetItem(objects.NewStr(tail), child)
 }
 
 // splitParent splits a dotted module name into (parent, tail).
