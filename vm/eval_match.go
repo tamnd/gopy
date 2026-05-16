@@ -5,6 +5,9 @@
 
 package vm
 
+// DEPRECATED (spec 1714): Spec 1714 phase 5: MATCH_* bodies migrate to typed op<NAME> functions invoked from vm/eval_dispatch_gen.go.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"errors"
 	"fmt"

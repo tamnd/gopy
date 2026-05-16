@@ -10,6 +10,9 @@
 
 package specialize
 
+// DEPRECATED (spec 1714): Hand-rolled family literal is removed in spec 1714 phase 4; this file shrinks to specialize-policy helpers only.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"encoding/binary"
 

@@ -14,6 +14,9 @@
 
 package specialize
 
+// DEPRECATED (spec 1714): Hand-rolled deopt map is removed in spec 1714 phase 4; this file shrinks to deopt-action helpers only.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import "github.com/tamnd/gopy/compile"
 
 // CacheCount returns the number of trailing codeunits reserved as

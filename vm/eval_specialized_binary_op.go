@@ -21,6 +21,9 @@
 
 package vm
 
+// DEPRECATED (spec 1714): Spec 1714 phase 6: BINARY_OP_* arms migrate to typed op<NAME> bodies; cache decode/deopt/advance live in the generated harness.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"math"
 	"math/bits"

@@ -13,6 +13,9 @@
 
 package specialize
 
+// DEPRECATED (spec 1714): Spec 1714 phases 3+4: raw cache writes migrate to typed accessors; family/deopt literals move to specialize/family_gen.go. File shrinks to specialize-policy.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
@@ -91,11 +94,13 @@ func specializeLoadGlobalLockHeld(globals, builtins objects.Object, code []byte,
 }
 
 // writeLoadGlobalCache stamps the LOAD_GLOBAL inline cache. The
-// cache layout is { counter, module_keys_version, builtin_keys_version,
-// index } per pycore_code.h:_PyLoadGlobalCache; counter is rewritten
-// by Specialize, so we only fill the trailing three cells here.
+// cache layout is { counter, index, module_keys_version,
+// builtin_keys_version } per pycore_code.h:_PyLoadGlobalCache;
+// counter is rewritten by Specialize, so we only fill the trailing
+// three cells here. Writing past cell 3 overlaps the next
+// instruction, so the slot index lives in cell 1, not cell 4.
 func writeLoadGlobalCache(code []byte, instr int, idx, moduleKeys, builtinKeys uint16) {
+	SetCacheCell(code, instr, 1, idx)
 	SetCacheCell(code, instr, 2, moduleKeys)
 	SetCacheCell(code, instr, 3, builtinKeys)
-	SetCacheCell(code, instr, 4, idx)
 }

@@ -12,6 +12,9 @@
 
 package vm
 
+// DEPRECATED (spec 1714): Spec 1714 phase 6: TO_BOOL_* arms migrate to typed op<NAME> bodies; cache decode/deopt/advance live in the generated harness.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"

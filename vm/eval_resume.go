@@ -7,6 +7,9 @@
 // CPython: Python/ceval.c RESUME
 package vm
 
+// DEPRECATED (spec 1714): Spec 1714 phases 5+6: RESUME family bodies migrate to typed op<NAME> functions invoked from vm/eval_dispatch_gen.go.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import "github.com/tamnd/gopy/compile"
 
 // handleResume is the hand-written RESUME arm. CPython distinguishes

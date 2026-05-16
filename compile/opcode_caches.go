@@ -15,6 +15,9 @@
 
 package compile
 
+// DEPRECATED (spec 1714): Fully deleted in spec 1714 phase 2; replaced by compile/opcode_metadata_gen.go.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 // opcodeCaches indexes by Opcode and returns the cache width in
 // codeunits. Zero means the opcode has no cache.
 //

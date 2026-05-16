@@ -3,6 +3,9 @@
 
 package optimizer
 
+// DEPRECATED (spec 1714): Spec 1714 phase 7: content fully regenerated through tools/cases_generator (currently produced by a separate hand-rolled script).
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 // UopFlag is the flag bitmask the analysis pass reads to learn how a
 // uop affects program state. Bit positions match the order in
 // pycore_uop_metadata.h's HAS_*_FLAG enum.

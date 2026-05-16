@@ -8,6 +8,9 @@
 
 package vm
 
+// DEPRECATED (spec 1714): Spec 1714 phase 5: tier-1 dispatch switch is generated into vm/eval_dispatch_gen.go from Python/bytecodes.c via tools/cases_generator. This file shrinks to evalLoop scaffolding.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"errors"
 	"fmt"

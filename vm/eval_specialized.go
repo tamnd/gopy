@@ -17,6 +17,9 @@
 
 package vm
 
+// DEPRECATED (spec 1714): Spec 1714 phase 6: fully deleted; specialized-arm dispatch moves into vm/eval_dispatch_gen.go.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"

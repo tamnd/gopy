@@ -20,6 +20,9 @@
 
 package optimizer
 
+// DEPRECATED (spec 1714): Spec 1714 phase 7: abstract-interpreter cases move to compile/optimizer_cases_gen.go generated from Python/optimizer_bytecodes.c. This file shrinks to analysis-driver scaffolding.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"unsafe"
 

@@ -10,6 +10,9 @@
 
 package specialize
 
+// DEPRECATED (spec 1714): Fully deleted in spec 1714 phase 3; raw SetCacheCell/CacheCell access is replaced by typed accessors in specialize/cache_layouts_gen.go.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import "unsafe"
 
 // LoadGlobalCache backs LOAD_GLOBAL. CACHE_ENTRIES = 4.

@@ -7,14 +7,17 @@
 // entry table without walking the names array.
 //
 // Cache layout (4 codeunits per pycore_code.h _PyLoadGlobalCache):
-//   cell 0..1: counter (managed by Specialize/Unspecialize)
-//   cell 2:    module (globals) keys_version
-//   cell 3:    builtin keys_version (BUILTIN variant only)
-//   cell 4:    slot index in the matching dict
+//   cell 0: counter (managed by Specialize/Unspecialize)
+//   cell 1: slot index in the matching dict
+//   cell 2: module (globals) keys_version
+//   cell 3: builtin keys_version (BUILTIN variant only)
 //
 // CPython: Python/bytecodes.c LOAD_GLOBAL_MODULE, LOAD_GLOBAL_BUILTIN
 
 package vm
+
+// DEPRECATED (spec 1714): Spec 1714 phase 6: LOAD_GLOBAL_* arms migrate to typed op<NAME> bodies; cache decode/deopt/advance live in the generated harness.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
 
 import (
 	"github.com/tamnd/gopy/compile"
@@ -51,7 +54,7 @@ func (e *evalState) fastLoadGlobalModule(oparg uint32) (int, bool) {
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false
 	}
-	slot := int(specialize.CacheCell(code, idx, 4))
+	slot := int(specialize.CacheCell(code, idx, 1))
 	_, value, found := gd.EntryAt(slot)
 	if !found || value == nil {
 		return 0, false
@@ -85,7 +88,7 @@ func (e *evalState) fastLoadGlobalBuiltin(oparg uint32) (int, bool) {
 	if curBV := bd.GetKeysVersion(); curBV == 0 || curBV != cachedBV {
 		return 0, false
 	}
-	slot := int(specialize.CacheCell(code, idx, 4))
+	slot := int(specialize.CacheCell(code, idx, 1))
 	_, value, found := bd.EntryAt(slot)
 	if !found || value == nil {
 		return 0, false
