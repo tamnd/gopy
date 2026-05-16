@@ -133,6 +133,30 @@ var parityFixtures = []parityFixture{
 		want: []string{"value = e.localAt(int(oparg)).Dup()"},
 	},
 	{
+		name:    "inst_one_push_one_pop",
+		cpyLine: 202,
+		input: `
+		inst(OP, (value -- res)) {
+			res = SPAM(value);
+			DEAD(value);
+		}
+	`,
+		bail:       true,
+		bailReason: `output assign "res": unexpected token "SPAM"`,
+	},
+	{
+		name:    "binary_op_unknown_callee",
+		cpyLine: 228,
+		input: `
+		inst(OP, (left, right -- res)) {
+			res = SPAM(left, right);
+			INPUTS_DEAD();
+		}
+	`,
+		bail:       true,
+		bailReason: `output assign "res": unexpected token "SPAM"`,
+	},
+	{
 		name:    "store_fast_real",
 		cpyLine: 1839, // Python/bytecodes.c STORE_FAST itself
 		input: `
