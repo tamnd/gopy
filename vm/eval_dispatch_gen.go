@@ -701,7 +701,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		class_dict_st := e.peek(0)
 		_ = class_dict_st
-		// body bail: local assign "name": unexpected token "PyTuple_GET_ITEM" in expression
+		// body bail: local assign "name": unexpected token "_PyFrame_GetCode" in expression
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:

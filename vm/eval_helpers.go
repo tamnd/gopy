@@ -972,6 +972,27 @@ func (e *evalState) getANext(iter objects.Object) objects.Object {
 	return next
 }
 
+// tupleGetItem mirrors CPython's PyTuple_GET_ITEM macro: borrowed
+// reference into a tuple's items array. The macro is unchecked in C,
+// but the translator turns invariants into pendingErr fail paths so a
+// mis-shaped opcode body surfaces an IndexError instead of a panic.
+//
+// CPython: Include/cpython/tupleobject.h PyTuple_GET_ITEM
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) tupleGetItem(o objects.Object, i uint32) objects.Object {
+	t, ok := o.(*objects.Tuple)
+	if !ok {
+		e.pendingErr = fmt.Errorf("TypeError: PyTuple_GET_ITEM expected tuple, got %T", o)
+		return nil
+	}
+	if int(i) >= t.Len() {
+		e.pendingErr = fmt.Errorf("IndexError: tuple index %d out of range (len %d)", i, t.Len())
+		return nil
+	}
+	return t.Item(int(i))
+}
+
 // tupleFromStackRef wraps _PyTuple_FromStackRefStealOnSuccess. The
 // translator passes the input scratch name (a Go slice of objects.Object
 // since the action body's `values[oparg]` sized input is rendered as a

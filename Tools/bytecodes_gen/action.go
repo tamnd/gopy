@@ -1204,6 +1204,12 @@ var helperCalls = map[string]helperCall{
 	"PyFloat_CheckExact":   {goExpr: "objects.IsExactFloat", arity: 1},
 	"PyList_CheckExact":    {goExpr: "objects.IsExactList", arity: 1},
 	"PyTuple_CheckExact":   {goExpr: "objects.IsExactTuple", arity: 1},
+	// Borrowed-ref tuple subscript. CPython exposes it as a macro; gopy
+	// goes through a helper that bounds-checks and reports a typed
+	// IndexError via pendingErr instead of segfaulting.
+	//
+	// CPython: Include/cpython/tupleobject.h PyTuple_GET_ITEM
+	"PyTuple_GET_ITEM": {goExpr: "e.tupleGetItem", arity: 2},
 	"PyDict_CheckExact":    {goExpr: "objects.IsExactDict", arity: 1},
 	"PySet_CheckExact":     {goExpr: "objects.IsExactSet", arity: 1},
 	"PyBool_Check":         {goExpr: "objects.IsExactBool", arity: 1},
