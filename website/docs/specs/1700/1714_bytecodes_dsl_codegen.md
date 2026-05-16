@@ -653,16 +653,23 @@ action translator. The whitelist in
 actually consults; an opcode lands here only after its generated
 body has been audited byte-equivalent to the prior arm.
 
-| Opcode | Translator shape | Notes |
-|--------|------------------|-------|
-| `NOP` | empty body | trivial |
-| `POP_TOP` | `PyStackRef_CLOSE(value)` | exercises stack-ref close |
-| `JUMP_FORWARD` | `JUMPBY(oparg)` | body-driven terminator |
-| `PUSH_NULL` | output `= PyStackRef_NULL` | output-assignment statement |
-| `LOAD_FAST` | output `= PyStackRef_DUP(GETLOCAL(oparg))` | GETLOCAL rvalue + Dup |
-| `LOAD_FAST_BORROW` | same body as LOAD_FAST | borrow collapses under Go GC |
-| `LOAD_FAST_AND_CLEAR` | LOAD_FAST plus `GETLOCAL(oparg) = PyStackRef_NULL` | GETLOCAL lvalue |
-| `STORE_FAST` | `_PyStackRef tmp = GETLOCAL(oparg); GETLOCAL(oparg) = value; PyStackRef_XCLOSE(tmp)` | C-local decl + lvalue |
+Each row carries a **Status** (`generated` once it lands in
+`dispatchGen` and the whitelist; `staging` while still in
+`dispatchHandwritten`; `legacy` while still in `trySimple` and
+friends) and a **Commit** stamp so the porting auto-flow can
+diff the tables against the tree without re-reading every
+panel.
+
+| Opcode | Status | Commit | Translator shape | Notes |
+|--------|--------|--------|------------------|-------|
+| `NOP` | generated | `71b1fd1` | empty body | trivial |
+| `POP_TOP` | generated | `71b1fd1` | `PyStackRef_CLOSE(value)` | exercises stack-ref close |
+| `JUMP_FORWARD` | generated | `0d54073` | `JUMPBY(oparg)` | body-driven terminator |
+| `PUSH_NULL` | generated | `0d47064` | output `= PyStackRef_NULL` | output-assignment statement |
+| `LOAD_FAST` | generated | `b842a4a` | output `= PyStackRef_DUP(GETLOCAL(oparg))` | GETLOCAL rvalue + Dup |
+| `LOAD_FAST_BORROW` | generated | `b842a4a` | same body as LOAD_FAST | borrow collapses under Go GC |
+| `LOAD_FAST_AND_CLEAR` | generated | `b842a4a` | LOAD_FAST plus `GETLOCAL(oparg) = PyStackRef_NULL` | GETLOCAL lvalue |
+| `STORE_FAST` | generated | `b842a4a` | `_PyStackRef tmp = GETLOCAL(oparg); GETLOCAL(oparg) = value; PyStackRef_XCLOSE(tmp)` | C-local decl + lvalue |
 
 #### Hand-written staging (`dispatchHandwritten`)
 
@@ -670,26 +677,29 @@ Bodies live in `vm/eval_dispatch_handwritten.go` under the
 typed `op<NAME>(oparg) -> (next, retVal, retErr, retDone, ok,
 err)` signature. Each row leaves this table once the action
 translator can render an equivalent generated body and the
-whitelist accepts it.
+whitelist accepts it. **Status** flips to `generated` and the
+row migrates up to the previous table once that happens; the
+**Commit** column stamps the flip (or the staging landing
+commit, while still here) so we can audit the chain.
 
-| Opcode | Notes |
-|--------|-------|
-| `LOAD_CONST` | needs `co_consts[oparg]` indexing in translator |
-| `LOAD_FAST_CHECK` | adds null-guard error path; CPython body calls `_PyEval_FormatExcCheckArg` |
-| `DELETE_FAST` | STORE_FAST plus unbound error; same `_PyEval_FormatExcCheckArg` call |
-| `RETURN_VALUE` | terminator that returns TOS |
-| `INTERPRETER_EXIT` | same body as RETURN_VALUE today |
-| `COPY` | `stack[-oparg]` peek + dup |
-| `SWAP` | `stack[-oparg] <-> stack[-1]` |
-| `IS_OP` | identity compare + bool push |
-| `BUILD_LIST` | sized pop + list constructor |
-| `BUILD_TUPLE` | sized pop + tuple constructor |
-| `BUILD_SLICE` | 2/3-arg slice constructor |
-| `GET_ITER` | `objects.Iter` call |
-| `POP_JUMP_IF_TRUE` | shared body with the other three |
-| `POP_JUMP_IF_FALSE` | shared body |
-| `POP_JUMP_IF_NONE` | shared body, identity check |
-| `POP_JUMP_IF_NOT_NONE` | shared body, identity check |
+| Opcode | Status | Commit | Blocker | Notes |
+|--------|--------|--------|---------|-------|
+| `LOAD_CONST` | staging | - | needs `co_consts[oparg]` indexing in translator | hand-written body wraps via `wrapConst` |
+| `LOAD_FAST_CHECK` | staging | - | `_PyEval_FormatExcCheckArg` helper port | adds null-guard error path |
+| `DELETE_FAST` | staging | - | same as LOAD_FAST_CHECK | STORE_FAST plus unbound error |
+| `RETURN_VALUE` | staging | - | frame unlinking / `SAVE_STACK` | terminator that returns TOS |
+| `INTERPRETER_EXIT` | staging | - | `tstate->current_frame` machinery | same body as RETURN_VALUE today |
+| `COPY` | staging | - | sized-input `unused[oparg-1]` peek | `stack[-oparg]` peek + dup |
+| `SWAP` | staging | - | sized-input `unused[oparg-2]` peek | `stack[-oparg] <-> stack[-1]` |
+| `IS_OP` | staging | - | `Py_Is` + `PyStackRef_AsPyObjectBorrow` + ternary + C-int local | identity compare + bool push |
+| `BUILD_LIST` | staging | - | sized inputs + `objects.NewList` constructor | sized pop + list constructor |
+| `BUILD_TUPLE` | staging | - | sized inputs + `objects.NewTuple` constructor | sized pop + tuple constructor |
+| `BUILD_SLICE` | staging | - | conditional 2-vs-3 arg constructor | 2/3-arg slice constructor |
+| `GET_ITER` | staging | - | `PyObject_GetIter` → `objects.Iter` with `ERROR_IF(NULL)` | hand-written body checks nil return |
+| `POP_JUMP_IF_TRUE` | staging | - | `JUMPBY(flag ? oparg : NOT_TAKEN)` ternary + `PyStackRef_IsFalse` | shared body with the other three |
+| `POP_JUMP_IF_FALSE` | staging | - | same as POP_JUMP_IF_TRUE | shared body |
+| `POP_JUMP_IF_NONE` | staging | - | macro composition (`_IS_NONE + _POP_JUMP_IF_TRUE`) | shared body, identity check |
+| `POP_JUMP_IF_NOT_NONE` | staging | - | macro composition (`_IS_NONE + _POP_JUMP_IF_FALSE`) | shared body, identity check |
 
 #### Legacy (`trySimple` and friends)
 
