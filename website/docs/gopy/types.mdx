@@ -1,37 +1,339 @@
 ---
-title: utypes
-description: gopy's types subsystem. Mirrors CPython's design.
+title: Types
+description: The type system. Metaclasses, MRO, descriptors, slot wrappers, user-defined classes, and generics.
 ---
 
-# utypes
+# Types
 
-This page describes how gopy implements **types**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/types`](../cpython/types).
+A type is an object whose role is to describe other objects. In
+Python the type system is reflective: every value has a type, every
+type *is* itself a value, and the class statement is an expression
+that produces a type at run time. The implementation lives in
+`objects/`, alongside the value types it manages, but it is large
+enough and central enough to deserve its own page.
 
-## Source map
+CPython's reference is `Objects/typeobject.c`, roughly ten thousand
+lines of C that handle class construction, the C3 linearisation,
+descriptor protocol, slot wrappers, and the dunder dispatch that
+backs every operator in the language.
 
-The Go code lives at the module root in flat packages.
+## Where the code lives
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+| File                              | Role                                                           | CPython counterpart                          |
+| --------------------------------- | -------------------------------------------------------------- | -------------------------------------------- |
+| `objects/type.go`                 | The `Type` struct. Slot tables and the meta-type.              | `Objects/typeobject.c` `PyType_Type`         |
+| `objects/usertype.go`             | User-defined class construction. `type(name, bases, ns)`.      | `Objects/typeobject.c type_new`              |
+| `objects/mro.go`                  | C3 linearisation.                                              | `Objects/typeobject.c mro_invoke`            |
+| `objects/type_attr.go`            | `Type.__getattribute__`, descriptor handling on the class.     | `Objects/typeobject.c type_getattro`         |
+| `objects/type_call.go`            | `Type.__call__`. Calls `__new__` and `__init__`.               | `Objects/typeobject.c type_call`             |
+| `objects/type_getsets.go`         | `__name__`, `__qualname__`, `__module__`, `__bases__`, ...    | `Objects/typeobject.c` getsets               |
+| `objects/type_proto.go`           | Built-in protocol method synthesis.                            | `Objects/typeobject.c add_operators`         |
+| `objects/type_repr.go`            | `Type.__repr__`.                                               | `Objects/typeobject.c type_repr`             |
+| `objects/type_specialize.go`      | Type version bump on mutation.                                 | `Objects/typeobject.c` `type_modified`       |
+| `objects/instance.go`             | User-defined instance attribute lookup.                        | `Objects/object.c` `_PyObject_GenericGetAttr` |
+| `objects/descr.go`                | Descriptor protocol (`__get__`, `__set__`, `__delete__`).      | `Objects/descrobject.c`                      |
+| `objects/property.go`             | The `property` descriptor.                                     | `Objects/descrobject.c property_*`           |
+| `objects/super.go`                | The `super()` proxy.                                           | `Objects/typeobject.c super_*`               |
+| `objects/slots.go`                | Slot wrapping. Synthesises slot wrappers from method names.    | `Objects/typeobject.c` slot defs             |
+| `objects/slot_wrap_descr.go`      | The `slot wrapper` descriptor type itself.                     | `Objects/descrobject.c slot wrappers`        |
+| `objects/method_descr.go`         | Method descriptors (built-in unbound methods).                 | `Objects/descrobject.c method_descr`         |
+| `objects/member.go`               | Member descriptors (direct field access).                      | `Objects/descrobject.c member_descr`         |
+| `objects/generic_alias.go`        | PEP 585 generics (`list[int]`).                                | `Objects/genericaliasobject.c`               |
+| `objects/union_type.go`           | PEP 604 unions (`int \| str`).                                 | `Objects/unionobject.c`                      |
+| `objects/type_annotations.go`     | Lazy annotation evaluation (PEP 649).                          | `Objects/typeobject.c annotations`           |
 
-## Differences from CPython
+## What a type is
+
+A type is an instance of `Type`. `Type` itself is an instance of
+`Type`. The chain bottoms out at the same object: `type(type) is
+type`. Built-in types are instances of `type`; user-defined classes
+are typically instances of `type` too, unless they override
+`__metaclass__` (or pass `metaclass=` to the class statement).
+
+The `Type` struct is the slot table. Every operator, every protocol
+method, every lifecycle hook is a field on it. See [Objects](./objects)
+for the full layout.
 
 ```
-Notes on places where gopy intentionally diverges from CPython.
+isinstance(42, int)      ->  42's type is int
+type(int)                ->  type
+type(type)               ->  type
+type.__bases__           ->  (object,)
+object.__bases__         ->  ()
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+`object` is the root of the inheritance tree. Every type has
+`object` in its MRO. `Type` (the meta-type) inherits from `object`,
+because the meta-type *is* a type and types are objects.
+
+## The MRO
+
+The method resolution order is the linearisation of a class's
+ancestors. Python uses the C3 algorithm: a deterministic merge that
+respects local precedence (a class's `__bases__` order) and
+monotonicity (a class always appears after its subclasses).
+
+```go
+// objects/mro.go ComputeMRO
+func ComputeMRO(cls *Type, bases []*Type) ([]*Type, error)
+```
+
+The algorithm:
+
+1. Start with `[cls]`.
+2. For each base, recursively compute its MRO.
+3. Merge: at each step, find a head (the first class in some list)
+   that is *not* in the tail of any other list. Pick the first such
+   head; emit it; remove it from the heads of all lists.
+4. If no head qualifies, the hierarchy is inconsistent and the
+   class statement raises `TypeError`.
+5. The result is the linearised MRO.
+
+The merge produces a sequence that, for any two classes A and B
+where A comes before B in some base's MRO, places A before B in the
+merged result. The deterministic outcome is what makes multiple
+inheritance behave predictably.
+
+## Class construction
+
+`type(name, bases, namespace)` constructs a class. The three-arg
+form is the dynamic equivalent of the `class` statement; the
+`class` statement compiles to a call to it.
+
+```go
+// objects/usertype.go NewClass
+func NewClass(meta *Type, name string, bases *Tuple, namespace *Dict) (*Type, error)
+```
+
+The work `NewClass` does:
+
+1. Validate the metaclass. If `meta` is not `type` or a subtype,
+   `__init_subclass__` and `__set_name__` may be called with
+   different semantics.
+2. Compute the MRO from `bases`.
+3. Determine the C-level instance size by inspecting `__slots__`
+   and any base's instance layout.
+4. Allocate a fresh `Type` struct.
+5. Copy slot pointers from the bases. Each slot is inherited from
+   the first base in MRO order that defines it.
+6. Walk the namespace; for each entry, install a descriptor or
+   wrap a Python function into a slot wrapper.
+7. Run `__init_subclass__` on the first base that defines it.
+8. Run `__set_name__` on each descriptor in the namespace.
+9. Bump every base's version (their subclass set just grew, so
+   inline caches keyed on shape are invalid).
+10. Return the new type.
+
+The result is a type that behaves identically to a built-in: its
+slots are filled, its descriptors are wired, its MRO is computed.
+
+## Instance attribute lookup
+
+`obj.x` is a slot call. The default implementation in `instance.go`
+follows the standard sequence:
+
+1. Look up `x` in `type(obj).__mro__`, walking each class's `__dict__`.
+2. If the result is a *data descriptor* (has both `__get__` and
+   `__set__`), call its `__get__` with `obj` and `type(obj)` and
+   return the result.
+3. Look up `x` in `obj.__dict__` (the instance dict). If found,
+   return it.
+4. If the MRO lookup found a non-data descriptor (has only
+   `__get__`), call its `__get__`.
+5. If the MRO lookup found a non-descriptor, return it.
+6. Otherwise, fall through to `__getattr__` if the class defines
+   one.
+7. Raise `AttributeError`.
+
+The sequence is what makes `@property` work (it's a data
+descriptor, so it shadows the instance dict), makes regular methods
+bind correctly (functions are non-data descriptors), and lets
+`__getattr__` act as a fallback only when the normal mechanism
+fails.
+
+The fast path is specialised in [Specializer](./specializer). The
+generic version in `instance.go` is the fallback when no
+specialisation is applicable.
+
+## Descriptors
+
+A descriptor is anything whose type has `DescrGet`. Three kinds
+matter:
+
+- **Data descriptor**: has both `DescrGet` and `DescrSet`. Examples:
+  `property`, slot descriptors, member descriptors. Wins over
+  instance dict.
+- **Non-data descriptor**: has only `DescrGet`. Examples: functions
+  (which become bound methods on access), `classmethod`,
+  `staticmethod`. Loses to instance dict.
+- **Class attribute**: not a descriptor at all. Returned as-is.
+
+The protocol is implemented in `descr.go` and is used by every
+attribute lookup. User-defined descriptors are first-class: any
+class with `__get__` (and optionally `__set__`) participates.
+
+## Slot wrappers
+
+When a class defines `__add__`, the type constructor needs to wire
+that Python function into the slot table so that
+`a + b` (which compiles to a slot call) finds it. The mechanism is
+*slot wrapping*: the constructor generates a small wrapper function
+that calls the Python `__add__` and stores the wrapper into
+`Type.Number.Add`.
+
+```go
+// objects/slots.go installOperators
+func installOperators(t *Type)
+```
+
+The wrapper is generated per type at construction time. It pays one
+indirection (a function-pointer call) compared to a hand-written
+slot, but the wrapper is monomorphic per type, so the JIT-friendly
+inlining in [Optimizer](./optimizer) flattens the cost on hot
+paths.
+
+The reverse machinery exists too: when C code installs a slot, a
+*slot wrapper descriptor* is generated and put in the class's dict
+so that Python code can call `obj.__add__(...)` directly. The
+descriptor lives in `slot_wrap_descr.go`.
+
+## Method descriptors
+
+Built-in methods (`list.append`, `dict.get`, ...) are *method
+descriptors*. The type's dict carries a `MethodDescr` for each
+built-in method; attribute access on an instance retrieves the
+descriptor and binds it.
+
+```go
+// objects/method_descr.go MethodDescr
+type MethodDescr struct {
+    Header
+    typ  *Type
+    name string
+    meth func(self Object, args, kwds Object) (Object, error)
+}
+```
+
+`MethodDescr` implements `DescrGet` to return a bound version of
+itself. The bound form is created lazily; built-in method calls
+that go through specialisation skip the binding entirely (see
+`CALL_METHOD_DESCRIPTOR_*` in [Specializer](./specializer)).
+
+## super()
+
+`super()` returns a proxy that delegates attribute lookup to the
+class *after* the current one in the MRO.
+
+```go
+// objects/super.go Super
+type Super struct {
+    Header
+    typ  *Type
+    self Object
+    obj  Object
+}
+```
+
+The proxy implements `__getattribute__` to walk MRO starting from
+the position *after* `typ`, and binds the result to `obj`. The
+two-arg form (`super(C, self)`) is explicit; the zero-arg form
+(`super()` inside a method body) is rewritten by the compiler to
+the explicit form using the special `__class__` cell.
+
+## Type version
+
+Every type carries a `Version` field that increments on any
+structural change: adding or removing a method, changing `__bases__`,
+mutating `__dict__`. The specialiser caches the version with each
+specialised opcode; on a version mismatch the opcode deopts.
+
+```go
+// objects/type_specialize.go BumpVersion
+func BumpVersion(t *Type)
+```
+
+The bump is triggered by `__dict__` mutation, `__bases__`
+assignment, and the addition of subclasses. Subclass mutation also
+ripples up through `MRO` because a parent's slot inheritance may
+have changed. The watchers in [Optimizer](./optimizer) hook the same
+mutations to invalidate tier-2 traces.
+
+## Generic types
+
+PEP 585 lets built-in types act as generics: `list[int]`,
+`dict[str, int]`. The subscript on a built-in type returns a
+`GenericAlias`, an immutable record of `(origin, args)`.
+
+```go
+// objects/generic_alias.go GenericAlias
+type GenericAlias struct {
+    Header
+    Origin Object
+    Args   *Tuple
+}
+```
+
+`GenericAlias` is callable; calling it falls through to the origin.
+Its `__class_getitem__` returns the same shape parameterised by
+nested args. The subscript is the canonical type-hint expression
+for the standard library.
+
+## Union types
+
+PEP 604 adds `X | Y` as a way to write `Union[X, Y]`. The
+`|` operator on types returns a `UnionType` object.
+
+```go
+// objects/union_type.go UnionType
+type UnionType struct {
+    Header
+    Args *Tuple
+}
+```
+
+`UnionType` is canonicalised on construction: nested unions are
+flattened, duplicates are removed, and the result is a stable
+tuple.
+
+## Annotations
+
+PEP 649 lays out lazy annotation evaluation. Annotations are
+stored as a code object that is evaluated on demand. The
+implementation in `type_annotations.go` defers the evaluation
+until the annotations are read; if they reference names that are
+not yet defined (forward references), the lookup raises
+`NameError`, mirroring the eager-evaluation behaviour but on
+access rather than on class construction.
+
+The compiler in [Compile](./compile) emits the annotation code
+object as part of the class body's bytecode.
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+The type machinery is complete in its architecture. The MRO,
+descriptor protocol, slot wrappers, method descriptors, `super`,
+and version-bump are all in place. User-defined classes work
+end-to-end. `__init_subclass__`, `__set_name__`, and
+`__class_getitem__` are wired. Generic types and union types are
+ported.
 
-## Cross reference
+The places where work continues:
 
-* CPython companion: [cpython/types](../cpython/types).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+- Slot wrapper synthesis for some less-common slots (e.g.,
+  `__rmul__` against C extensions that override only `__mul__`).
+- Annotation deferral matches PEP 649 for `from __future__ import annotations`
+  but the broader PEP 649 rollout in 3.14 has more surface; the
+  full PEP 649 path is gated by the `__future__` flag.
+
+## Reference
+
+- Port source: `objects/` (type-related files).
+- CPython source: `Objects/typeobject.c`, `Objects/descrobject.c`,
+  `Objects/genericaliasobject.c`, `Objects/unionobject.c`.
+- PEP 252, *Making Types Look More Like Classes*.
+- PEP 253, *Subtyping Built-in Types*.
+- PEP 487, *Simpler customisation of class creation*.
+- PEP 585, *Type Hinting Generics In Standard Collections*.
+- PEP 604, *Allow writing union types as X | Y*.
+- PEP 649, *Deferred Evaluation Of Annotations Using Descriptors*.
+- *C3 linearization*, Barrett et al., OOPSLA 1996.

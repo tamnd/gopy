@@ -1,37 +1,309 @@
 ---
-title: uimports
-description: gopy's imports subsystem. Mirrors CPython's design.
+title: Imports
+description: The import system. Finders, loaders, frozen modules, builtin modules, the bootstrap of importlib, and how the import statement compiles down.
 ---
 
-# uimports
+# Imports
 
-This page describes how gopy implements **imports**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/imports`](../cpython/imports).
+`import` is one statement, but it sets in motion a layered machine.
+The statement compiles to a call into the runtime; the runtime
+parses the module name, consults a cache, walks a chain of
+*finders*, hands the chosen *spec* to a *loader*, runs the
+loader's `exec_module`, and returns the populated module object to
+the caller. Most of the work is implemented in Python (in
+`importlib`) bootstrapped on top of a small native layer in C; the
+gopy port keeps the same layering, with the native layer in Go.
 
-## Source map
+CPython's references are `Python/import.c` (the native layer) and
+`Lib/importlib/` (the Python side). gopy's native code lives in
+`imp/`.
 
-The Go code lives at the module root in flat packages.
+## Where the code lives
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+| File                          | Role                                                                        | CPython counterpart                  |
+| ----------------------------- | --------------------------------------------------------------------------- | ------------------------------------ |
+| `imp/import.go`               | The top-level entry: `ImportModule`, `ImportModuleLevel`.                    | `Python/import.c` `PyImport_ImportModuleLevelObject` |
+| `imp/bootstrap.go`            | The importlib bootstrap sequence.                                            | `Python/import.c` `init_importlib`   |
+| `imp/frozen.go`               | The frozen-module table and lookup.                                          | `Python/import.c frozen modules`     |
+| `imp/frozen_bootstrap.go`     | The pre-compiled importlib frozen module.                                    | `Python/importlib.h`                 |
+| `imp/inittab.go`              | The builtin-module init table.                                               | `PC/config.c` / `Modules/config.c`   |
+| `imp/loader.go`               | The file-based module loader.                                                | `Lib/importlib/_bootstrap_external.py` |
+| `imp/pathfinder.go`           | The path-based finder.                                                       | `Lib/importlib/_bootstrap_external.py` PathFinder |
+| `imp/sysmodules.go`           | `sys.modules` accessors.                                                     | `Python/import.c` sys.modules ops    |
+| `imp/exec.go`                 | Executes a module's code into its namespace.                                 | `Python/import.c` exec_code_in_module |
+| `imp/reload.go`               | Implements `importlib.reload`.                                               | `Lib/importlib/_bootstrap.py reload` |
 
-## Differences from CPython
+## The import statement
+
+`import foo`, `from foo import bar`, and `import foo.bar.baz` all
+compile to bytecode that calls a single runtime entry. The
+compiler emits:
 
 ```
-Notes on places where gopy intentionally diverges from CPython.
+IMPORT_NAME    "foo"
+STORE_NAME     foo
+
+IMPORT_NAME    "foo"
+IMPORT_FROM    "bar"
+STORE_NAME     bar
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+`IMPORT_NAME` reads the `__import__` builtin (from the current
+frame's builtins) and calls it with the module name, globals,
+locals, the fromlist (if any), and the level (zero for absolute
+imports, positive for relative). The result is the top-level
+module of the dotted path.
+
+`IMPORT_FROM` then walks the dotted path: given the top-level
+module returned by `IMPORT_NAME`, it pulls out the named
+attribute. The result is the actual binding that gets stored.
+
+The default `__import__` is bound to gopy's
+`imp.ImportModuleLevel`:
+
+```go
+// imp/import.go:L? ImportModuleLevel
+func ImportModuleLevel(exec *state.Thread, name string, globals, locals Object, fromlist []string, level int) (Object, error)
+```
+
+The C-API entry preserves the CPython contract; the Python-level
+hook `builtins.__import__` is wired to it through the builtins
+module.
+
+## Relative imports
+
+`from .siblings import x` and `from .. import y` use the `level`
+argument. The runtime resolves the absolute name by walking the
+current package's name up `level` levels.
+
+```go
+// imp/import.go resolveAbsName
+func resolveAbsName(globals Object, name string, level int) (string, error)
+```
+
+The current package name comes from `globals['__package__']`,
+which the loader sets when it executes a package's `__init__.py`.
+If the package is not set (a top-level script, say), relative
+import raises `ImportError`.
+
+## The cache
+
+Imports are cached in `sys.modules`. The cache is consulted
+*first*, before any finder runs. If the cache holds an entry for
+the requested name, that entry is returned. The entry may be a
+module being initialised (a partial module); circular imports rely
+on this behaviour.
+
+```go
+// imp/sysmodules.go GetModule, AddModule, RemoveModule
+func GetModule(exec *state.Thread, name string) (Object, bool)
+func AddModule(exec *state.Thread, name string, m Object)
+func RemoveModule(exec *state.Thread, name string)
+```
+
+Inserting a partial module into the cache before running its body
+is the standard way to allow `a` to `import b` while `b` is
+already importing `a`: when `b` runs `import a`, the partial `a`
+is returned, and `b` can read attributes that `a` has already
+bound. Anything not yet bound raises `AttributeError`.
+
+## Finders
+
+A finder maps a module name to a *spec*. The spec carries enough
+information for a loader to load the module. `sys.meta_path` is
+the list of meta-finders the runtime tries in order; the default
+list contains:
+
+1. `BuiltinImporter` (consults `imp/inittab.go`).
+2. `FrozenImporter` (consults `imp/frozen.go`).
+3. `PathFinder` (walks `sys.path` and consults `sys.path_hooks`).
+
+A finder returns either a spec or `None`. `None` means "I don't
+know about this name; try the next finder". If every finder
+returns `None`, the runtime raises `ModuleNotFoundError`.
+
+## Loaders
+
+The spec carries a loader. The runtime calls
+`spec.loader.exec_module(module)` to execute the module's code
+into the module object's namespace.
+
+```go
+// imp/exec.go ExecCodeModule
+func ExecCodeModule(exec *state.Thread, code *Code, module Object) error
+```
+
+`ExecCodeModule` builds a frame with the module's `__dict__` as
+both globals and locals and runs the module's code object through
+the eval loop. The module is populated with whatever names the
+module body binds.
+
+If the module body raises, `RemoveModule` undoes the cache entry
+(so the next import retries) and the exception propagates.
+
+## The path finder
+
+The path finder is the most common case. It walks `sys.path`,
+looking for one of:
+
+- A directory named `foo` containing `__init__.py`: a regular
+  package.
+- A file named `foo.py`: a module.
+- A directory named `foo` containing no `__init__.py`: a namespace
+  package (PEP 420). Namespace packages are merged across all
+  matching `sys.path` entries.
+- A `foo.pyc` file: a pre-compiled module (the loader uses it if
+  the corresponding `.py` is missing or older).
+
+For each entry, the finder calls into a `path_hook` callable that
+returns a finder *for that path*. The default path hook returns a
+`FileFinder` rooted at the path. The chain lets users register
+custom path hooks (for zip imports, network imports, ...).
+
+The implementation lives in `imp/pathfinder.go` and `imp/loader.go`.
+
+## Frozen modules
+
+A frozen module is a Python module compiled into the interpreter at
+build time. The bytecode lives in a Go variable; loading a frozen
+module is a memory read and an `ExecCodeModule` call. Frozen
+modules are used for the importlib bootstrap (importlib itself is
+frozen so that it can be loaded before any path finder is wired
+up) and for some core modules whose source is fixed at build time.
+
+```go
+// imp/frozen.go LookupFrozen
+func LookupFrozen(name string) (*FrozenModule, bool)
+```
+
+The frozen table is populated by `imp/frozen_bootstrap.go` for the
+importlib bootstrap and by a generated file for the user-frozen
+modules (the `--freeze` build flag, if used).
+
+## Builtin modules
+
+A builtin module is a module implemented in Go (or C, in CPython)
+and linked into the interpreter. The `inittab` table maps module
+names to Go initialisation functions; the builtin importer looks
+up the name and calls the init function to construct the module.
+
+```go
+// imp/inittab.go InitFunc
+type InitFunc func(exec *state.Thread) (Object, error)
+
+// imp/inittab.go Inittab
+var Inittab = map[string]InitFunc{
+    "sys":      sys.Init,
+    "builtins": builtins.Init,
+    "_io":      _io.Init,
+    // ...
+}
+```
+
+The standard-library modules that have a Go port (`module/sys/`,
+`module/builtins/`, `module/itertools/`, ...) all register here.
+Loading a builtin module is one map lookup and one call.
+
+## The bootstrap
+
+The interpreter cannot use the full import system before
+`importlib` is loaded, but `importlib` is itself a Python module
+that needs to be imported. The chicken-and-egg is resolved by
+bootstrapping in three phases:
+
+1. **Phase 0.** The interpreter is started. `sys.modules` is an
+   empty dict. `imp/bootstrap.go` registers the builtin importer
+   and the frozen importer manually.
+2. **Phase 1.** The frozen importlib is loaded by reading its
+   bytecode directly from `imp/frozen_bootstrap.go` and executing
+   it. The result is `importlib._bootstrap`, which understands the
+   builtin and frozen finders.
+3. **Phase 2.** The frozen `importlib._bootstrap_external` is
+   loaded the same way. It contains the path-based finder and the
+   file loader. With it installed, `sys.meta_path` has its full
+   default contents and the runtime can import arbitrary modules.
+
+```go
+// imp/bootstrap.go BootstrapImportlib
+func BootstrapImportlib(exec *state.Thread) error
+```
+
+After bootstrap, the C-level import path goes through the
+Python-level importlib for everything that is not a builtin or
+frozen module. The native layer's job for non-trivial imports is
+just to call into the Python side.
+
+## Package versus module
+
+A package is a module whose source is a directory (with
+`__init__.py`). A package has a `__path__` attribute; the
+`PathFinder` consults `__path__` to find submodules. Importing
+`foo.bar` first imports `foo`, then looks for `bar` in `foo.__path__`.
+
+Subpackages cascade: `import foo.bar.baz` imports `foo`, then
+imports `foo.bar` using `foo.__path__`, then imports `foo.bar.baz`
+using `foo.bar.__path__`.
+
+Namespace packages (PEP 420) are packages without `__init__.py`.
+They are computed dynamically: every `sys.path` entry that
+contains a directory with the package name contributes to the
+package's `__path__`. Adding a new entry to `sys.path` adds to the
+namespace package's `__path__`.
+
+## Reload
+
+`importlib.reload(module)` re-executes a module's code in the
+existing module object's namespace. The original module object is
+preserved (other references to it keep working), but its
+attributes are reset by the new execution.
+
+```go
+// imp/reload.go Reload
+func Reload(exec *state.Thread, module Object) (Object, error)
+```
+
+Reload is tricky in the presence of inheritance: instances of a
+class defined in the module continue to reference the old class;
+re-imports get the new class. The semantics are CPython's; gopy
+preserves them.
+
+## Lazy and meta-finder hooks
+
+`sys.meta_path` is user-mutable. Tools (test frameworks, hot
+reloaders, sandboxing libraries) prepend their own finders. The
+runtime walks `sys.meta_path` on every import that misses the
+cache, so a finder inserted at runtime is consulted from that
+point on.
+
+`sys.path_hooks` is also user-mutable. Tools that want to support
+new path forms (zip files, archive formats, remote URLs) add path
+hooks that return finders for their paths.
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+The import system runs the standard tests for builtin and frozen
+imports. The path finder, the file loader, and the bootstrap of
+importlib all work; standard programs that do `import json` and
+`import os` succeed. Namespace packages work. Cached `.pyc`
+loading works for the simple case (a `.pyc` next to the `.py`);
+`__pycache__/` directory layout follows PEP 3147.
 
-## Cross reference
+The places where work continues:
 
-* CPython companion: [cpython/imports](../cpython/imports).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+- Some import hooks (zip imports, encoded-source imports) are
+  stubbed; the standard tests for them gate the rest of the port.
+- The cache invalidation around `importlib.reload` for packages
+  whose submodules have been imported is correct but slow for
+  large packages.
+
+## Reference
+
+- Port source: `imp/`.
+- CPython source: `Python/import.c`, `Lib/importlib/`,
+  `PC/config.c` (inittab).
+- PEP 328, *Imports: Multi-Line and Absolute/Relative*.
+- PEP 366, *Main module explicit relative imports*.
+- PEP 420, *Implicit Namespace Packages*.
+- PEP 451, *A ModuleSpec Type for the Import System*.
+- PEP 552, *Deterministic pycs*.
+- PEP 3147, *PYC Repository Directories*.

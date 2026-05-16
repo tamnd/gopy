@@ -1,37 +1,309 @@
 ---
-title: ugc
-description: gopy's gc subsystem. Mirrors CPython's design.
+title: GC
+description: Memory management. The Go GC is the heap; this page documents the Python-visible shape: weakrefs, finalisers, the gc module, and async-generator cleanup.
 ---
 
-# ugc
+# GC
 
-This page describes how gopy implements **gc**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/gc`](../cpython/gc).
+CPython manages memory with reference counting plus a cycle
+collector. Every object carries `ob_refcnt`; assignments and
+function calls increment and decrement it; when the count hits
+zero the object is freed. A separate generational collector
+runs occasionally to break reference cycles that prevent the
+refcount from ever reaching zero.
 
-## Source map
+gopy runs on Go. The Go garbage collector reclaims unreachable
+memory automatically, including memory referenced through cycles.
+The CPython collector is not needed for correctness. What is
+needed is the *visible* shape: the `gc` module, weak references,
+`__del__` finalisers, async-generator cleanup, and the hooks that
+the standard library and user code expect.
 
-The Go code lives at the module root in flat packages.
+This page documents that surface and where it lives in the gopy
+runtime.
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+## Where the code lives
 
-## Differences from CPython
+| File                              | Role                                                                            | CPython counterpart                  |
+| --------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------ |
+| `objects/refcount.go`             | `Incref`/`Decref` no-ops, the C-API parity layer.                               | `Include/cpython/object.h`           |
+| `objects/header.go`               | The per-object weakref slot.                                                    | `Include/cpython/object.h` weakref   |
+| `objects/weakref.go`              | The `Weakref` type and the weakref list.                                        | `Objects/weakrefobject.c`            |
+| `objects/weakref_proxy.go`        | `WeakProxy`, the proxy that forwards method calls to a weakly-held referent.    | `Objects/weakrefobject.c proxy`      |
+| `weakref/`                        | The high-level WeakSet, WeakValueDictionary, WeakKeyDictionary.                  | `Lib/_weakrefset.py`, `Lib/weakref.py` |
+| `module/gc/`                      | The `gc` module: `collect`, `enable`, `disable`, `get_objects`, ...             | `Modules/gcmodule.c`                 |
+| `module/weakref/`                 | The `weakref` module's public surface.                                          | `Lib/weakref.py`                     |
+| `objects/async_gen.go`            | Async-generator finalisation hooks.                                             | `Objects/genobject.c async_gen_*`    |
+| `gil/pending.go`                  | Pending-call queue used to schedule finalisers between bytecodes.               | `Python/ceval.c pending calls`       |
 
+## The Go GC as substrate
+
+Go uses a concurrent, tri-colour mark-and-sweep collector. The
+collector runs in the background, mutates references safely with
+write barriers, and reclaims memory without stopping the program
+for long pauses. Cycles are not a problem; the collector handles
+them naturally.
+
+For gopy this means:
+
+- An object becomes unreachable when no live Go reference points
+  to it. The Go GC notices and frees the memory.
+- A reference cycle in Python code is a reference cycle in Go
+  references. The Go GC reclaims it.
+- There is no separate generational collector to tune.
+- Allocation is fast (bump-pointer in the young generation).
+- Free is asynchronous; the program does not pause at the moment
+  the last reference disappears.
+
+The asynchrony has consequences for visible behaviour. In CPython,
+`del obj` on the last reference frees the object *now*, which runs
+`__del__` immediately. In gopy, the object is unreachable but the
+GC has not necessarily run yet, so `__del__` runs whenever the GC
+gets around to it. Programs that rely on prompt cleanup (closing
+files, releasing locks) should use context managers, not `__del__`.
+This is the same advice that CPython gives once you account for
+the cycle collector and free-threading, so the practical guidance
+matches.
+
+## Reference counting
+
+The refcount field on `Header` is updated by `Incref` and `Decref`.
+On the GC path, neither call changes liveness. They exist for:
+
+- **C API parity.** Extensions ported from CPython call these
+  helpers. The no-op semantics is consistent (the object stays
+  alive, which is what the caller wanted).
+- **Introspection.** `sys.getrefcount(obj)` reads the field. It
+  reports the count that `Incref`/`Decref` have produced, which is
+  not the same as Go-level reachability but is the best answer
+  gopy can give.
+
+```go
+// objects/refcount.go Incref
+func Incref(o Object)
+
+// objects/refcount.go Decref
+func Decref(o Object)
 ```
-Notes on places where gopy intentionally diverges from CPython.
+
+The atomicity is preserved so that concurrent calls from multiple
+goroutines produce a consistent count.
+
+## Weak references
+
+A weak reference does not prevent its referent from being collected.
+When the referent is collected, the weakref's value becomes `None`
+and any registered callback runs.
+
+```go
+// objects/weakref.go Weakref
+type Weakref struct {
+    Header
+    referent Object        // weak pointer to the target
+    callback Object        // optional callback
+    next     *Weakref      // next weakref to the same target
+    prev     *Weakref      // previous weakref to the same target
+}
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+Every object that can be weakly referenced carries a head pointer
+to its weakref list. The list is doubly linked so removal is O(1).
+The pointer lives in the `Header`.
+
+When the Go GC determines the referent is unreachable but the
+weakref is reachable, a *finaliser* attached to the referent runs,
+walks the weakref list, sets each weakref's `referent` to `None`,
+and queues the callbacks. The mechanism uses Go's
+`runtime.SetFinalizer`.
+
+The runtime restriction: cycles that include a finaliser are not
+guaranteed to be collected, because the finaliser may resurrect the
+object. The CPython collector has the same restriction
+(`gc.garbage` accumulates such cycles). On gopy, programs that
+create cycles through `__del__`-bearing objects should expect the
+same caveat.
+
+## The weakref proxy
+
+A weakref proxy is callable, subscriptable, and supports attribute
+access; the operations forward to the referent. When the referent
+disappears, every operation raises `ReferenceError`.
+
+```go
+// objects/weakref_proxy.go WeakProxy
+type WeakProxy struct {
+    Header
+    ref *Weakref
+}
+```
+
+Proxies are the building block for `weakref.proxy`. They are common
+in caches and dispatchers that want to hold a reference but not
+extend the referent's lifetime.
+
+## High-level weak collections
+
+The `weakref/` package implements `WeakSet`, `WeakValueDictionary`,
+and `WeakKeyDictionary`. Each is a Go-native data structure that
+hooks weakref callbacks to remove entries when the value (or key)
+is collected.
+
+```go
+// weakref/weakvaluedict.go WeakValueDict
+type WeakValueDict struct {
+    data map[Object]*Weakref
+}
+```
+
+The implementation is a Go map keyed by the strong key, valued by
+the weakref. On callback the entry is removed. Lookup creates the
+weakref lazily; iteration filters out entries whose weakref has
+become `None`.
+
+The Python-level shape matches CPython exactly. User code that
+imports `weakref.WeakSet` and uses it polymorphically with a Python
+set does not notice the Go implementation.
+
+## Finalisers (\_\_del\_\_)
+
+A Python class may define `__del__`. CPython calls it when the
+refcount drops to zero, or during cycle collection (with the
+caveat that the cycle is preserved in `gc.garbage` if it cannot be
+broken). gopy calls it from a *finaliser* registered on the Go GC.
+
+The finaliser is hooked at object construction:
+
+```go
+// objects/instance.go finalize hook
+runtime.SetFinalizer(obj, func(obj *Instance) {
+    queueDelCall(obj)
+})
+```
+
+`queueDelCall` does not run `__del__` directly. It adds the object
+to a per-interpreter list and sets the breaker bit
+`BitEvalBreakPending`. On the next eval-loop poll, the loop drains
+the list and runs each `__del__` in the normal Python context.
+
+This indirection is essential. Go's finaliser runs on a system
+goroutine that does not hold any Python state; running Python code
+from it would race with the eval loop. The breaker hand-off makes
+finaliser semantics safe.
+
+## Async-generator finalisation
+
+Async generators are special. When an async generator is
+garbage-collected without being explicitly closed, the runtime
+needs to run its `__aclose__`, which is an async operation that
+needs a running event loop.
+
+PEP 525 specifies a per-thread *finaliser hook* that
+`asyncio.run` (and any other event loop) registers. The hook is
+called when an async generator is collected; the hook schedules
+`aclose` and waits for it.
+
+```go
+// objects/async_gen.go AsyncGenFinalize
+func AsyncGenFinalize(g *AsyncGenerator)
+
+// objects/async_gen.go SetFirstIterHook, SetFinalizerHook (sys.set_asyncgen_hooks)
+func SetFinalizerHook(t *state.Thread, hook Object)
+func SetFirstIterHook(t *state.Thread, hook Object)
+```
+
+Without an event loop, the hook is `None` and a warning is issued.
+The warning is the runtime telling the user that their async
+generator was leaked.
+
+## The gc module
+
+`module/gc/` exposes the user-facing `gc` API.
+
+| Python API                  | Meaning in gopy                                              |
+| --------------------------- | ------------------------------------------------------------ |
+| `gc.collect()`              | Calls `runtime.GC()`. Returns 0 (no cycles to collect).      |
+| `gc.enable()` / `disable()` | Toggles a Go-side flag. Currently informational.             |
+| `gc.isenabled()`            | Returns the flag's state.                                    |
+| `gc.set_debug(flags)`       | Stores flags. `DEBUG_STATS` triggers logging at next collect. |
+| `gc.set_threshold(...)`     | Stores thresholds. Informational; Go GC has its own pacing.  |
+| `gc.get_threshold()`        | Returns stored thresholds.                                   |
+| `gc.get_objects()`          | Walks the Go heap for objects of `Object` type.              |
+| `gc.get_referrers(obj)`     | Best-effort; not exhaustive.                                 |
+| `gc.get_referents(obj)`     | Uses each type's `TpTraverse` to enumerate references.       |
+| `gc.is_tracked(obj)`        | Returns True (all reference types are tracked by Go GC).     |
+| `gc.garbage`                | List of objects with `__del__` in cycles. Usually empty.     |
+| `gc.freeze()` / `unfreeze()`/`get_freeze_count()` | Informational. |
+| `gc.callbacks`              | List of functions to call before/after collect.              |
+
+The intent: programs that import `gc` for diagnostics or
+introspection get the answers they expect. Programs that import
+`gc` to *tune* memory behaviour get a polite no-op; the Go GC's
+pacing is not user-tunable from Python in the gopy model.
+
+## Object traversal
+
+`TpTraverse` is the slot every container type implements. The slot
+visits each outgoing reference of an object. The visit function may
+return an error to terminate traversal early.
+
+```go
+// objects/protocol.go TpTraverse signature
+type traverse = func(o Object, visit func(Object) error) error
+```
+
+`TpTraverse` is what `gc.get_referents` calls. It is also what the
+GC-aware reachability checks use when, for example, the optimiser
+needs to determine whether a closure cell points at a particular
+object.
+
+Each built-in type implements its own traverse: `list` visits
+elements, `dict` visits keys and values, `tuple` visits elements,
+function objects visit globals, defaults, closure, annotations,
+and so on.
+
+## Generational view
+
+CPython exposes `gc.get_count()` (counts per generation) and
+`gc.get_stats()` (collection statistics per generation). gopy
+reports a single generation (`(N, 0, 0)`) because the Go GC does
+not expose its internal generational pacing in a directly
+compatible form. The `get_stats` call returns the totals from
+the Go GC's last cycle scaled to the format the documentation
+expects.
+
+The shape is informative but not authoritative. Programs that read
+the values for diagnostics see plausible answers; programs that
+*depend* on the values are misusing the API on either runtime.
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+The Python-visible surface is wired. Reference counting is no-op
+for liveness but supported for `sys.getrefcount`. Weakrefs and
+weak collections work; the callback dispatch hits the breaker. The
+`__del__` deferral is in place. Async-generator finalisation works
+when an event loop has registered the hook; without a hook, a
+warning is issued.
 
-## Cross reference
+The places where work continues:
 
-* CPython companion: [cpython/gc](../cpython/gc).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+- `gc.get_referrers` is best-effort; a full walker would scan every
+  live Go heap object, which is expensive.
+- `gc.garbage` is rarely populated because the Go GC handles most
+  cycles; populating it requires detecting which cycles contain a
+  `__del__`-bearing object and refusing to collect them, work that
+  is on the roadmap behind the rest of free-threading enablement.
+- PEP 703's biased reference counting hooks (the
+  `_Py_brc_*` machinery) are documented stubs; the Go runtime does
+  not need them, but the C-API parity layer recognises them so
+  ported extensions compile.
+
+## Reference
+
+- Port source: `objects/refcount.go`, `objects/weakref*.go`,
+  `weakref/`, `module/gc/`, `module/weakref/`, `objects/async_gen.go`.
+- CPython source: `Modules/gcmodule.c`, `Objects/weakrefobject.c`,
+  `Objects/genobject.c` (async gen), `Lib/weakref.py`,
+  `Lib/_weakrefset.py`.
+- PEP 442, *Safe object finalization*.
+- PEP 525, *Asynchronous Generators*.
+- PEP 703, *Making the Global Interpreter Lock Optional in CPython*.

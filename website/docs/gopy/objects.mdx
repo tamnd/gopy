@@ -1,37 +1,442 @@
 ---
-title: uobjects
-description: gopy's objects subsystem. Mirrors CPython's design.
+title: Objects
+description: The object model. Header layout, the Object interface, slot tables, and the concrete built-in types that everything else builds on.
 ---
 
-# uobjects
+# Objects
 
-This page describes how gopy implements **objects**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/objects`](../cpython/objects).
+Every Python value is an object. Every object has a type. Every
+type is itself an object. This circularity is the foundation of the
+object model; the implementation is the runtime that makes it work.
 
-## Source map
+The package `objects/` holds the concrete built-in types and the
+machinery they share: the header that sits in front of every value,
+the `Object` interface every Go type implements, the slot tables
+that drive operator dispatch, and the reference helpers the GC sees
+through. CPython's analogue is `Include/cpython/object.h` for the
+header and `Objects/` for the per-type implementations.
 
-The Go code lives at the module root in flat packages.
+This page describes the architecture. The specific built-in types
+(`int`, `float`, `complex`, `str`, `bytes`, `list`, `dict`, `tuple`,
+`set`) and the type system itself are covered in [Numbers](./numbers)
+and [Types](./types) respectively. Frames, code objects, functions,
+and generators have their own pages: [Frame](./frame), [Compile](./compile)
+for code, [Generators](./generators).
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+## Where the code lives
 
-## Differences from CPython
+The package has over a hundred files. The architectural core is a
+small subset; the rest is per-type code.
 
+| File                       | Role                                                                    | CPython counterpart                          |
+| -------------------------- | ----------------------------------------------------------------------- | -------------------------------------------- |
+| `objects/header.go`        | The `Header` struct that prefixes every Python value.                   | `Include/object.h` `_object`                 |
+| `objects/object.go`        | The root `object` type. Default `__new__`, `__init__`, slot wrappers.   | `Objects/typeobject.c PyBaseObject_Type`     |
+| `objects/type.go`          | The `Type` meta-type. Slot table for every operator and protocol.       | `Include/cpython/typeobject.h _typeobject`   |
+| `objects/protocol.go`      | The `Object` interface every concrete type implements.                  | (Go-specific; CPython uses C unions)         |
+| `objects/abstract_*.go`    | Abstract dispatch: number, sequence, mapping protocols.                 | `Objects/abstract.c`                         |
+| `objects/refcount.go`      | Reference-counting helpers (no-op on Go GC; documented for parity).     | `Include/cpython/object.h` `Py_INCREF/DECREF` |
+| `objects/slots.go`         | Slot wrapping: synthesises `__add__`, `__getitem__`, etc. from C slots. | `Objects/typeobject.c` slot wrappers         |
+| `objects/descr.go`         | Descriptor protocol (`__get__`, `__set__`, `__delete__`).               | `Objects/descrobject.c`                      |
+| `objects/instance.go`      | User-defined class instances. Attribute storage, slot lookup.           | `Objects/object.c` generic getattr           |
+| `objects/usertype.go`      | User-defined classes. MRO computation, type construction.               | `Objects/typeobject.c type_new`              |
+| `objects/identity.go`      | Identity-based hashing and equality (the default for `object`).         | `Objects/object.c default hash`              |
+| `objects/none.go`          | The `None` singleton.                                                   | `Objects/object.c _Py_NoneStruct`            |
+| `objects/notimpl.go`       | The `NotImplemented` singleton.                                         | `Objects/object.c _Py_NotImplementedStruct`  |
+| `objects/ellipsis.go`      | The `Ellipsis` (`...`) singleton.                                       | `Objects/object.c _Py_EllipsisObject`        |
+| `objects/cell.go`          | The cell type used by closures.                                         | `Objects/cellobject.c`                       |
+| `objects/code.go`          | The code-object type.                                                   | `Include/internal/pycore_code.h`             |
+| `objects/function.go`      | The function type.                                                      | `Objects/funcobject.c`                       |
+| `objects/method.go`        | Bound methods.                                                          | `Objects/classobject.c`                      |
+| `objects/property.go`      | The `property` descriptor.                                              | `Objects/descrobject.c property`             |
+| `objects/super.go`         | `super()` proxy.                                                        | `Objects/typeobject.c super_*`               |
+| `objects/module.go`        | The module type.                                                        | `Objects/moduleobject.c`                     |
+| `objects/memoryview.go`    | Buffer-protocol view over bytes/bytearray/array.                        | `Objects/memoryobject.c`                     |
+| `objects/capsule.go`       | Opaque pointer wrapper (the C-API capsule).                             | `Objects/capsule.c`                          |
+
+Per-type code (one large file plus several `_xxx.go` adjuncts) sits
+next to the architecture files. The pattern is the same per type:
+the struct, the constructor, the methods, and the slot table.
+
+## The header
+
+Every Python object starts with a header.
+
+```go
+// objects/header.go Header
+type Header struct {
+    typ         *Type           // ob_type
+    refcount    atomic.Int64    // ob_refcnt (advisory on gopy)
+    weakreflist *Weakref        // chain of weak references to this object
+}
 ```
-Notes on places where gopy intentionally diverges from CPython.
+
+The header is exactly two pointer-sized fields plus a pointer to the
+weakref list. CPython aligns the same shape: `ob_refcnt`,
+`ob_type`, and a per-object weakref slot. gopy carries the
+refcount because the C API surface (extensions written against
+`Py_INCREF`/`Py_DECREF`) expects it; Go's GC ignores it and reclaims
+objects independently.
+
+Variable-length objects (`int`, `tuple`, `bytes`, `str`) extend the
+header with a length field:
+
+```go
+// objects/header.go VarHeader
+type VarHeader struct {
+    Header
+    size int64  // ob_size
+}
 ```
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+The shape mirrors `PyVarObject`. The size is interpreted per type:
+for `int` it is the number of limbs (positive sign, negative for
+negative numbers), for `str` it is the codepoint count, for `tuple`
+it is the element count.
+
+## The Object interface
+
+Go does not have multiple inheritance, so the object model needs an
+interface to glue concrete types together.
+
+```go
+// objects/protocol.go Object
+type Object interface {
+    Type() *Type
+}
+```
+
+The interface is intentionally minimal. Everything else (operator
+dispatch, attribute access, hashing) goes through the type's slot
+table, not through the interface. The reason is that Go interfaces
+add an indirection on every call, and the runtime hits these slots
+millions of times per second. Reading the type pointer once and
+dispatching through its slots is one fewer interface-method-table
+lookup.
+
+The convention: every concrete type embeds `Header`, implements
+`Type()` to return its meta-type, and stores its meta-type as a
+package-level `*Type` variable so the address is stable.
+
+## The type struct
+
+`Type` is the centrepiece. It holds the slot table.
+
+```go
+// objects/type.go Type
+type Type struct {
+    Header
+    Name     string
+    Qualname string
+    Doc      string
+    Bases    *Tuple
+    MRO      *Tuple
+    Dict     *Dict
+    Slots    []string
+    Flags    TypeFlags
+    Version  uint32
+
+    // Special methods, one per operator.
+    Repr       func(Object) (Object, error)
+    Str        func(Object) (Object, error)
+    Hash       func(Object) (int64, error)
+    RichCmp    func(self, other Object, op CompareOp) (Object, error)
+    Format     func(self Object, spec string) (Object, error)
+    Iter       func(Object) (Object, error)
+    IterNext   func(Object) (Object, error)
+    Call       func(callable Object, args, kwds Object) (Object, error)
+    Vectorcall func(callable Object, args []Object, kwds Object) (Object, error)
+
+    // Attribute access.
+    Getattro  func(self Object, name Object) (Object, error)
+    Setattro  func(self Object, name, value Object) error
+
+    // Descriptor protocol.
+    DescrGet  func(self, obj, typ Object) (Object, error)
+    DescrSet  func(self, obj, value Object) error
+
+    // Lifecycle.
+    TpNew     func(typ *Type, args, kwds Object) (Object, error)
+    Dealloc   func(Object)
+    Finalize  func(Object)
+
+    // GC.
+    TpTraverse func(Object, func(Object) error) error
+
+    // Protocols.
+    Number   *NumberMethods
+    Sequence *SequenceMethods
+    Mapping  *MappingMethods
+    Async    *AsyncMethods
+}
+```
+
+Every C-level slot in CPython has a Go counterpart. The protocols
+(`Number`, `Sequence`, `Mapping`, `Async`) are nested structs whose
+fields are themselves function pointers; they correspond to
+CPython's `tp_as_number`, `tp_as_sequence`, `tp_as_mapping`, and
+`tp_as_async`. A type that does not implement a protocol leaves the
+pointer nil.
+
+`Version` is the *type version tag* the specialiser caches. Any
+type mutation (adding a method, changing `__bases__`) increments
+`Version`; specialised opcodes compare the cached version against
+the current one and deopt on mismatch. See [Specializer](./specializer)
+for how the version is used.
+
+## Slot dispatch
+
+The fast path for an operator goes through the slot directly:
+
+```go
+// objects/abstract_number.go Add
+func Add(a, b Object) (Object, error) {
+    ta := a.Type()
+    if ta.Number != nil && ta.Number.Add != nil {
+        r, err := ta.Number.Add(a, b)
+        if err != nil { return nil, err }
+        if r != NotImplemented { return r, nil }
+    }
+    if b.Type() != ta {
+        tb := b.Type()
+        if tb.Number != nil && tb.Number.Add != nil {
+            r, err := tb.Number.Add(a, b)
+            if err != nil { return nil, err }
+            if r != NotImplemented { return r, nil }
+        }
+    }
+    return nil, TypeError("unsupported operand types for +: %s and %s", ta.Name, b.Type().Name)
+}
+```
+
+The pattern is identical to CPython's binary-op machinery: try the
+left operand's slot; if it returns `NotImplemented`, try the right
+operand's slot; if both decline, raise `TypeError`. The right
+operand may also be tried first when it is a subclass of the left
+operand's type, matching CPython's precedence rules.
+
+Slot wrappers handle the Python-side. When a user-defined class
+defines `__add__`, the type construction in `usertype.go` wires
+`__add__` into `Type.Number.Add` via a wrapper that calls the
+Python function. Slot wrappers are the bridge between
+Python-level methods and C-level slots; they let user types behave
+indistinguishably from built-in types at the slot level.
+
+## Reference counting
+
+`refcount.go` exposes:
+
+```go
+// objects/refcount.go Incref / Decref
+func Incref(o Object)
+func Decref(o Object)
+```
+
+On gopy these are no-ops on the GC side; Go's mark-and-sweep
+reclaims unreachable objects without any explicit hint from the
+runtime. They exist for C-API parity: extensions that call them in
+their porting code do not need to change.
+
+The refcount field in `Header` is updated atomically when something
+does call these helpers, so introspection (`sys.getrefcount`) gives
+a value, but that value is not authoritative for liveness.
+
+The `TpTraverse` slot lets the gopy GC adapter (when free-threading
+is enabled) walk an object's outgoing references. Most built-in
+types implement it; user-defined types inherit a synthesised
+implementation that visits all `Object`-typed instance attributes.
+
+## Identity and default hashing
+
+The root `object` type's `__hash__` returns the object's identity
+(its pointer interpretation) divided by alignment. The result is
+mixed with the per-process hash secret so that two interpreter runs
+do not see the same hash for the same address.
+
+```go
+// objects/identity.go IdentityHash
+func IdentityHash(o Object) int64
+```
+
+A type with a custom `__eq__` must also provide `__hash__` or
+explicitly set it to `None` (unhashable). The pairing is enforced by
+the type constructor: setting `__eq__` without `__hash__` triggers
+the `__hash__ = None` default.
+
+## The singletons
+
+Three singletons exist for every interpreter:
+
+- `None` is the absence of a value. Its type is `NoneType`.
+- `NotImplemented` is the sentinel a slot returns to say "I don't
+  handle this operand". The dispatcher tries the other side; if
+  both return `NotImplemented`, the operation raises `TypeError`.
+- `Ellipsis` (`...`) is a literal used in subscript expressions and
+  type stubs.
+
+The singletons are package-level pointers:
+
+```go
+// objects/none.go None
+var None Object = &noneObject{}
+
+// objects/notimpl.go NotImplemented
+var NotImplemented Object = &notImplObject{}
+
+// objects/ellipsis.go Ellipsis
+var Ellipsis Object = &ellipsisObject{}
+```
+
+Identity comparison against these is the canonical test.
+
+## Cell objects
+
+Cells are the storage backing closure variables.
+
+```go
+// objects/cell.go Cell
+type Cell struct {
+    Header
+    Value Object
+}
+```
+
+A cell wraps one Python object; `LOAD_DEREF` reads the wrapped
+value, `STORE_DEREF` writes a new value. Multiple frames may hold
+references to the same cell, which is how a nested function reads
+the latest value of a name bound in an enclosing scope. See
+[Frame](./frame) for how cells are laid out in `LocalsPlus`.
+
+## Code, function, method
+
+These three are the executable side of the object model:
+
+- **Code object** (`code.go`). The compiled output of the
+  [Compile](./compile) stage. Carries bytecode, constants, name
+  tables, the line table, the exception table, and the side tables
+  the optimiser and the monitor maintain.
+- **Function object** (`function.go`). A code object plus the
+  bindings the code object needs to run: globals, defaults,
+  closure, annotations.
+- **Method object** (`method.go`). A function bound to an instance.
+  Created by descriptor binding when an attribute lookup on an
+  instance retrieves a function from the class.
+
+The function struct:
+
+```go
+// objects/function.go Function
+type Function struct {
+    Header
+    Code        *Code
+    Globals     Object
+    Builtins    Object
+    Defaults    *Tuple
+    KwDefaults  *Dict
+    Closure     *Tuple
+    Annotations Object
+    Typeparams  *Tuple
+    Dict        *Dict
+    Name        string
+    Qualname    string
+    Module      Object
+}
+```
+
+`Closure` is the tuple of cells that the function reads through
+`LOAD_DEREF`. The cells were captured at function-creation time by
+`MAKE_FUNCTION`.
+
+## Property and descriptors
+
+A descriptor is any object whose type has `DescrGet`. When an
+instance attribute lookup finds a descriptor on the class, the
+descriptor's `__get__` is called with the instance and class, and
+the result is returned in place of the descriptor.
+
+`property` is the canonical descriptor:
+
+```go
+// objects/property.go Property
+type Property struct {
+    Header
+    fget Object
+    fset Object
+    fdel Object
+    doc  Object
+}
+```
+
+`fget` is called on read, `fset` on assignment, `fdel` on `del`.
+Properties are how `@property` works. They are the also the
+mechanism used by built-in computed attributes (`type.__dict__`,
+`bytes.decode`, ...) when the implementation is simpler as a
+descriptor than a method.
+
+## Buffer protocol
+
+`memoryview` provides typed read/write access to the bytes of
+other objects. The implementation lives in `memoryview.go` and
+calls into a `BufferProtocol` interface that exporting types
+implement:
+
+```go
+// objects/protocol.go BufferProtocol
+type BufferProtocol interface {
+    GetBuffer(flags int) (*Buffer, error)
+    ReleaseBuffer(*Buffer)
+}
+```
+
+`bytes`, `bytearray`, and `array.array` are the canonical
+exporters. The interface mirrors `Py_buffer` from
+`Include/cpython/object.h`.
+
+## The capsule
+
+`Capsule` is a typed opaque pointer for the C API. Extensions use
+capsules to pass C-level handles through the Python object model.
+On gopy, capsules wrap a `uintptr` plus a name and an optional
+destructor.
+
+```go
+// objects/capsule.go Capsule
+type Capsule struct {
+    Header
+    Pointer    uintptr
+    Name       string
+    Destructor func(*Capsule)
+    Context    uintptr
+}
+```
+
+The capsule type is mostly stable across CPython versions; its
+existence here is for compatibility with C extensions that pass
+opaque handles between Python and Go.
 
 ## Status
 
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+The header, the type struct, the slot dispatch model, the
+descriptor protocol, the singletons, cells, code objects, function
+objects, methods, properties, super, and memoryview are all in
+place. The per-type built-in implementations live next to these
+architecture pieces and are covered in [Numbers](./numbers),
+[Types](./types), and the comprehensive [Source map](#where-the-code-lives)
+above.
 
-## Cross reference
+Anywhere `Object` interface dispatch is on the hot path,
+specialisation in [Specializer](./specializer) and trace projection
+in [Optimizer](./optimizer) replace the indirect call with a direct
+one. The model is layered so that the high-level dispatch is
+correct and the low-level shortcuts are sound.
 
-* CPython companion: [cpython/objects](../cpython/objects).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+## Reference
+
+- Port source: `objects/`.
+- CPython source: `Include/cpython/object.h`,
+  `Include/cpython/typeobject.h`, `Objects/object.c`,
+  `Objects/typeobject.c`, `Objects/abstract.c`,
+  `Objects/descrobject.c`.
+- PEP 3119, *Introducing Abstract Base Classes*.
+- PEP 252, *Making Types Look More Like Classes*.
+- PEP 3155, *Qualified name for classes and functions*.
