@@ -83,6 +83,30 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		next, ok = e.fastStoreSubscrListInt(oparg)
 	case compile.STORE_SUBSCR_DICT:
 		return e.fastStoreSubscrDict(oparg)
+	case compile.BINARY_OP_ADD_INT:
+		next, ok = e.fastBinaryOpAddInt()
+	case compile.BINARY_OP_SUBTRACT_INT:
+		next, ok = e.fastBinaryOpSubtractInt()
+	case compile.BINARY_OP_MULTIPLY_INT:
+		next, ok = e.fastBinaryOpMultiplyInt()
+	case compile.BINARY_OP_ADD_FLOAT:
+		next, ok = e.fastBinaryOpAddFloat()
+	case compile.BINARY_OP_SUBTRACT_FLOAT:
+		next, ok = e.fastBinaryOpSubtractFloat()
+	case compile.BINARY_OP_MULTIPLY_FLOAT:
+		next, ok = e.fastBinaryOpMultiplyFloat()
+	case compile.BINARY_OP_ADD_UNICODE, compile.BINARY_OP_INPLACE_ADD_UNICODE:
+		next, ok = e.fastBinaryOpAddUnicode()
+	case compile.BINARY_OP_SUBSCR_LIST_INT:
+		next, ok = e.fastBinaryOpSubscrListInt()
+	case compile.BINARY_OP_SUBSCR_TUPLE_INT:
+		next, ok = e.fastBinaryOpSubscrTupleInt()
+	case compile.BINARY_OP_SUBSCR_STR_INT:
+		next, ok = e.fastBinaryOpSubscrStrInt()
+	case compile.BINARY_OP_SUBSCR_DICT:
+		return e.fastBinaryOpSubscrDict()
+	case compile.BINARY_OP_SUBSCR_LIST_SLICE:
+		return e.fastBinaryOpSubscrListSlice()
 	}
 	return next, ok, nil
 }

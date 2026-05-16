@@ -32,3 +32,12 @@ func TestGateSpecPropertyAndMethod(t *testing.T) {
 	gopy := gate.BuildGopy(t)
 	gate.Compare(t, cpy, gopy, loadScript(t, "spec_property.py"))
 }
+
+func TestGateSpecBinaryOp(t *testing.T) {
+	cpy := gate.FindCPython(t)
+	if cpy == "" {
+		t.Skip("CPython 3.14 not on PATH")
+	}
+	gopy := gate.BuildGopy(t)
+	gate.Compare(t, cpy, gopy, loadScript(t, "spec_binary_op.py"))
+}
