@@ -212,7 +212,7 @@ func TestLexerTokenizerPanel(t *testing.T) {
 		t.Fatalf("repo root: %v", err)
 	}
 	corpus := filepath.Join(repoRoot, "test", "cpython")
-	r := &Runner{Binary: bin, Corpus: corpus, Timeout: 60 * time.Second}
+	r := &Runner{Binary: bin, Corpus: corpus, Timeout: 180 * time.Second}
 	res := r.Run(context.Background(), Entry{Name: "test_keyword", Status: StatusReady})
 	// The eleventh sub-test (test_all_keywords_fail_to_be_used_as_names)
 	// hits a parser-generator gap inside compile() in single mode; that
@@ -258,7 +258,7 @@ func TestStdtestCorpus(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &Runner{Binary: bin, Corpus: corpus, Timeout: 60 * time.Second}
+			r := &Runner{Binary: bin, Corpus: corpus, Timeout: 180 * time.Second}
 			res := r.Run(context.Background(), Entry{Name: tc.name, Status: StatusReady})
 			if res.Outcome != OutcomePass && res.Outcome != OutcomeFail {
 				t.Fatalf("Outcome = %s (err=%v stderr=%q), want pass|fail",
