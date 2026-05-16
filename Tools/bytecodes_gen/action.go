@@ -168,19 +168,14 @@ func (t *actionTranslator) translateStmt() error {
 		// in INSTRUMENTED_NOT_TAKEN). In Go we already mark every
 		// declared local with `_ = name`, so the cast has no analogue.
 		return t.translateVoidCast()
-	case "_PyStackRef":
-		// `_PyStackRef name = expr;` — C-local declaration. The Go
-		// equivalent is `name := expr`; we track the name so later
-		// statements that reference it (e.g. PyStackRef_CLOSE(name))
-		// can find it.
-		return t.translateLocalDecl()
-	case "PyObject":
-		// `PyObject *name = expr;` — C-local PyObject pointer
-		// declaration. Renders the same as `_PyStackRef` since
-		// `objects.Object` is the Go type returned by AsObject; the
-		// `*` is part of CPython's pointer syntax and gets consumed
-		// here. Tracked as a local so later references resolve.
-		return t.translatePyObjectDecl()
+	}
+	// Generic C-local declaration: `<type-prefix> name = expr;` or
+	// `<type-prefix> * name = expr;`. The set of accepted prefixes lives
+	// in cTypeDecls below. Go infers the type from the rhs so we drop
+	// the prefix entirely; the only thing we need is the name and the
+	// expression.
+	if cTypeDecls[tk.Text] {
+		return t.translateTypedDecl()
 	}
 	// Output assignment: `name = expr ;` where name is a bound output.
 	if isBareIdent(tk.Text) && t.bound[tk.Text] == "out" {
@@ -189,58 +184,53 @@ func (t *actionTranslator) translateStmt() error {
 	return fmt.Errorf("unrecognized token at action body start: %q", tk.Text)
 }
 
-// translatePyObjectDecl handles `PyObject * NAME = EXPR;`. The Go
-// output is `NAME := <go-expr>`; the value is an `objects.Object`,
-// which is what `Ref.AsObject()` (the usual rhs) already returns.
-// We do not emit a type annotation because Go's `:=` infers it.
-func (t *actionTranslator) translatePyObjectDecl() error {
-	t.pos++ // PyObject
-	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "*" {
-		return fmt.Errorf("expected '*' after PyObject")
-	}
-	t.pos++ // *
-	if t.pos >= len(t.toks) {
-		return fmt.Errorf("expected name after PyObject *")
-	}
-	name := t.toks[t.pos].Text
-	if !isBareIdent(name) {
-		return fmt.Errorf("expected identifier after PyObject *, got %q", name)
-	}
-	t.pos++
-	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "=" {
-		return fmt.Errorf("expected '=' after PyObject *%s", name)
-	}
-	t.pos++
-	rhs := []string{}
-	for t.pos < len(t.toks) && t.toks[t.pos].Text != ";" {
-		rhs = append(rhs, t.toks[t.pos].Text)
-		t.pos++
-	}
-	t.acceptSemi()
-	rhsExpr, err := t.translateExpr(rhs)
-	if err != nil {
-		return fmt.Errorf("PyObject *%s rhs: %w", name, err)
-	}
-	t.locals[name] = true
-	fmt.Fprintf(t.writer, "%s := %s\n", goLocalName(name), rhsExpr)
-	return nil
+// cTypeDecls is the set of C type-name tokens we accept as the start of
+// a `<type> [*] name = expr;` declaration. Go's `:=` infers the actual
+// type from the rhs so we drop the prefix; the only thing we need is
+// the name. Buckets A2 (int / bool), A5 (uint32_t), A7 (typed pointers
+// like PyFunctionObject *) all funnel through here.
+var cTypeDecls = map[string]bool{
+	"_PyStackRef":      true,
+	"PyObject":         true,
+	"int":              true,
+	"uint8_t":          true,
+	"uint32_t":         true,
+	"size_t":           true,
+	"Py_ssize_t":       true,
+	"Py_hash_t":        true,
+	"PyTypeObject":     true,
+	"PyFunctionObject": true,
+	"PyCodeObject":     true,
+	"PyCellObject":     true,
+	"PyInterpreterState": true,
+	"_PyErr_StackItem": true,
+	"conversion_func":  true,
+	"unaryfunc":        true,
+	"opcode":           true,
+	"tstate":           true,
 }
 
-// translateLocalDecl handles `_PyStackRef NAME = EXPR;`. The Go output
-// is `NAME := <go-expr>`; the name is recorded as a declared C-local
-// so unary-call helpers (e.g. PyStackRef_CLOSE(NAME)) can resolve it.
-func (t *actionTranslator) translateLocalDecl() error {
-	t.pos++ // _PyStackRef
+// translateTypedDecl handles `<C-type> [*] NAME = EXPR;`. Go infers the
+// resulting variable's type from the rhs, so we drop the prefix and emit
+// `NAME := <go-expr>`. The name is recorded as a declared local so later
+// references resolve.
+func (t *actionTranslator) translateTypedDecl() error {
+	prefix := t.toks[t.pos].Text
+	t.pos++
+	// Optional pointer star: `PyObject *name` and friends.
+	if t.pos < len(t.toks) && t.toks[t.pos].Text == "*" {
+		t.pos++
+	}
 	if t.pos >= len(t.toks) {
-		return fmt.Errorf("expected name after _PyStackRef")
+		return fmt.Errorf("expected name after %s", prefix)
 	}
 	name := t.toks[t.pos].Text
 	if !isBareIdent(name) {
-		return fmt.Errorf("expected identifier after _PyStackRef, got %q", name)
+		return fmt.Errorf("expected identifier after %s, got %q", prefix, name)
 	}
 	t.pos++
 	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "=" {
-		return fmt.Errorf("expected '=' after _PyStackRef %s", name)
+		return fmt.Errorf("expected '=' after %s %s", prefix, name)
 	}
 	t.pos++
 	rhs := []string{}
@@ -251,7 +241,7 @@ func (t *actionTranslator) translateLocalDecl() error {
 	t.acceptSemi()
 	rhsExpr, err := t.translateExpr(rhs)
 	if err != nil {
-		return fmt.Errorf("_PyStackRef %s rhs: %w", name, err)
+		return fmt.Errorf("%s %s rhs: %w", prefix, name, err)
 	}
 	t.locals[name] = true
 	fmt.Fprintf(t.writer, "%s := %s\n", goLocalName(name), rhsExpr)
@@ -441,7 +431,48 @@ type exprParser struct {
 }
 
 func (p *exprParser) parse() (string, error) {
-	return p.parsePrimary()
+	return p.parseExpr(0)
+}
+
+// parseExpr is a Pratt-style binary operator parser. precedence levels
+// follow C's: || (1) || (2) && (3) | (4) ^ (5) & (6) == != (7)
+// < <= > >= (8) << >> (9) + - (10) * / % (11). Unary - and ! are
+// handled inside parsePrimary; precedence 0 is the entry point.
+func (p *exprParser) parseExpr(minPrec int) (string, error) {
+	lhs, err := p.parsePrimary()
+	if err != nil {
+		return "", err
+	}
+	for p.pos < len(p.toks) {
+		op := p.toks[p.pos]
+		prec, ok := binOpPrec[op]
+		if !ok || prec < minPrec {
+			break
+		}
+		p.pos++
+		rhs, err := p.parseExpr(prec + 1)
+		if err != nil {
+			return "", err
+		}
+		lhs = lhs + " " + op + " " + rhs
+	}
+	return lhs, nil
+}
+
+// binOpPrec lists the C binary operators we accept verbatim. All of
+// these spell the same in Go, so the renderer just sandwiches them
+// between the rendered operands.
+var binOpPrec = map[string]int{
+	"||": 1,
+	"&&": 3,
+	"|":  4,
+	"^":  5,
+	"&":  6,
+	"==": 7, "!=": 7,
+	"<": 8, "<=": 8, ">": 8, ">=": 8,
+	"<<": 9, ">>": 9,
+	"+": 10, "-": 10,
+	"*": 11, "/": 11, "%": 11,
 }
 
 func (p *exprParser) parsePrimary() (string, error) {
@@ -525,8 +556,31 @@ func (p *exprParser) parsePrimary() (string, error) {
 		// CPython: Python/ceval_macros.h GETITEM.
 		return p.parseGetItemCall()
 	}
+	// Parenthesised subexpression.
+	if tk == "(" {
+		inner, err := p.parseExpr(0)
+		if err != nil {
+			return "", err
+		}
+		if p.pos >= len(p.toks) || p.toks[p.pos] != ")" {
+			return "", fmt.Errorf("expected ')' to close subexpression")
+		}
+		p.pos++
+		return "(" + inner + ")", nil
+	}
+	// Unary operators. ! and ~ keep the same Go spelling; unary - too.
+	if tk == "-" || tk == "!" || tk == "~" {
+		operand, err := p.parsePrimary()
+		if err != nil {
+			return "", err
+		}
+		return tk + operand, nil
+	}
 	if tk == "oparg" {
 		return "oparg", nil
+	}
+	if isNumericLiteral(tk) {
+		return stripIntSuffix(tk), nil
 	}
 	if isBareIdent(tk) {
 		if dir, ok := p.bound[tk]; ok && dir == "in" {
@@ -537,6 +591,37 @@ func (p *exprParser) parsePrimary() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unexpected token %q in expression", tk)
+}
+
+// isNumericLiteral matches C integer literals (decimal only; we strip
+// trailing u/U/l/L). Float literals don't appear in opcode bodies.
+func isNumericLiteral(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case 'u', 'U', 'l', 'L', 'x', 'X', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', 'F':
+			continue
+		}
+		return false
+	}
+	return s[0] >= '0' && s[0] <= '9'
+}
+
+func stripIntSuffix(s string) string {
+	for len(s) > 0 {
+		last := s[len(s)-1]
+		if last == 'u' || last == 'U' || last == 'l' || last == 'L' {
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
+	return s
 }
 
 // parseGetItemCall consumes `( FRAME_CO_CONSTS | FRAME_CO_NAMES , <idx> )`
