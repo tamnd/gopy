@@ -1,10 +1,306 @@
 ---
-title: uopcodes
-description: Reference tables for opcodes.
+title: Opcodes
+description: Every Tier-1 bytecode in Python 3.14, its oparg encoding, stack effect, and runtime semantics.
 ---
 
-# uopcodes
+# Opcodes
 
-Reference tables for opcodes. Generated and curated against CPython 3.14.
+A code object's `co_code` is a sequence of 2-byte instructions. Each
+instruction is `(opcode, oparg)`. Larger opargs are produced by
+prepending one to three `EXTENDED_ARG` instructions.
 
-(Tables in progress. See [manual/status](../manual/status) for coverage.)
+Source-of-record: `Python/bytecodes.c`, `Include/opcode_ids.h`,
+`Python/specialize.c`,
+[CPython bytecode documentation](https://docs.python.org/3.14/library/dis.html).
+
+## Encoding
+
+| Field        | Bits  | Meaning                                |
+| ------------ | ----- | -------------------------------------- |
+| Opcode       | 8     | Operation.                             |
+| Oparg        | 8     | Operand.                               |
+| EXTENDED_ARG | 16    | Shift oparg left by 8 and prepend bits. |
+
+`EXTENDED_ARG` may be chained up to three times, producing a 32-bit
+oparg.
+
+### Inline caches
+
+Most specialised opcodes carry inline cache words immediately after
+the instruction. The `co_code` reads `(instruction, cache0,
+cache1, ...)`. Cache words are not executed; the dispatcher skips
+over them by adding `_PyOpcode_Caches[op]` to the program counter.
+
+## Opcode categories
+
+### Stack manipulation
+
+| Opcode        | Stack effect | Description                              |
+| ------------- | ------------ | ---------------------------------------- |
+| `NOP`         | 0            | No operation.                            |
+| `POP_TOP`     | -1           | Remove TOS.                              |
+| `PUSH_NULL`   | +1           | Push NULL marker.                        |
+| `COPY <i>`    | +1           | Push TOS[-i].                            |
+| `SWAP <i>`    | 0            | Swap TOS and TOS[-i+1].                  |
+| `END_FOR`     | -1           | Discard for-loop iterator state.         |
+| `END_SEND`    | -1           | Discard send-target.                     |
+
+### Unary operators
+
+| Opcode             | Stack effect | Effect                          |
+| ------------------ | ------------ | ------------------------------- |
+| `UNARY_NEGATIVE`   | 0            | TOS = -TOS                      |
+| `UNARY_NOT`        | 0            | TOS = not TOS                   |
+| `UNARY_INVERT`     | 0            | TOS = ~TOS                      |
+| `TO_BOOL`          | 0            | TOS = bool(TOS)                 |
+| `GET_LEN`          | +1           | Push len(TOS).                  |
+
+### Binary operators
+
+| Opcode                | Stack effect | Effect                                |
+| --------------------- | ------------ | ------------------------------------- |
+| `BINARY_OP <kind>`    | -1           | TOS = TOS1 op TOS (kind selects op).  |
+| `BINARY_SUBSCR`       | -1           | TOS = TOS1[TOS].                      |
+| `BINARY_SLICE`        | -2           | TOS = TOS3[TOS1:TOS].                 |
+| `STORE_SUBSCR`        | -3           | TOS2[TOS] = TOS3.                     |
+| `STORE_SLICE`         | -4           | TOS3[TOS1:TOS] = TOS4.                |
+| `DELETE_SUBSCR`       | -2           | del TOS1[TOS].                        |
+
+`BINARY_OP <kind>` covers `+ - * / // % ** @ << >> & | ^` and their
+in-place variants. The kind byte selects the operator.
+
+### Constants and names
+
+| Opcode                  | Effect                                              |
+| ----------------------- | --------------------------------------------------- |
+| `LOAD_CONST <i>`        | Push `co_consts[i]`.                                |
+| `LOAD_NAME <i>`         | Push name from locals, globals, builtins.           |
+| `STORE_NAME <i>`        | Pop and store in locals.                            |
+| `DELETE_NAME <i>`       | Delete from locals.                                 |
+| `LOAD_GLOBAL <i>`       | Push globals or builtins by name.                   |
+| `STORE_GLOBAL <i>`      | Pop into globals.                                   |
+| `DELETE_GLOBAL <i>`     | Delete from globals.                                |
+| `LOAD_FAST <i>`         | Push `co_varnames[i]` from frame locals.            |
+| `LOAD_FAST_LOAD_FAST`   | Two LOAD_FAST in one instruction.                   |
+| `LOAD_FAST_AND_CLEAR`   | LOAD_FAST followed by clearing the slot.            |
+| `LOAD_FAST_CHECK`       | LOAD_FAST that raises UnboundLocalError if unbound. |
+| `LOAD_FAST_BORROW`      | LOAD_FAST without incrementing refcount.            |
+| `STORE_FAST <i>`        | Store into local slot.                              |
+| `STORE_FAST_LOAD_FAST`  | STORE_FAST + LOAD_FAST.                             |
+| `STORE_FAST_STORE_FAST` | Two STORE_FAST in one instruction.                  |
+| `DELETE_FAST <i>`       | Clear local slot.                                   |
+| `LOAD_CLOSURE <i>`      | Push cell object.                                   |
+| `LOAD_DEREF <i>`        | Push value from cell.                               |
+| `STORE_DEREF <i>`       | Store into cell.                                    |
+| `DELETE_DEREF <i>`      | Clear cell.                                         |
+| `MAKE_CELL <i>`         | Promote local to cell.                              |
+| `COPY_FREE_VARS <n>`    | Copy `n` free variables into new frame.             |
+
+### Attribute and method access
+
+| Opcode                 | Effect                                                 |
+| ---------------------- | ------------------------------------------------------ |
+| `LOAD_ATTR <i>`        | TOS = TOS.<name>.                                      |
+| `STORE_ATTR <i>`       | TOS1.<name> = TOS.                                     |
+| `DELETE_ATTR <i>`      | del TOS.<name>.                                        |
+| `LOAD_SUPER_ATTR <i>`  | super().attr load (3.12+).                             |
+| `LOAD_METHOD` (folded into LOAD_ATTR with low bit) | Push bound method or NULL+function. |
+
+### Building containers
+
+| Opcode               | Stack effect | Effect                                    |
+| -------------------- | ------------ | ----------------------------------------- |
+| `BUILD_LIST <n>`     | -n+1         | Pop `n` items into a list.                |
+| `BUILD_TUPLE <n>`    | -n+1         | Pop `n` items into a tuple.               |
+| `BUILD_SET <n>`      | -n+1         | Pop `n` items into a set.                 |
+| `BUILD_MAP <n>`      | -2n+1        | Pop `n` `(k,v)` pairs into a dict.        |
+| `BUILD_CONST_KEY_MAP <n>` | -n        | Pop values; keys is a tuple constant on TOS. |
+| `BUILD_STRING <n>`   | -n+1         | Concatenate `n` strings.                  |
+| `BUILD_SLICE <n>`    | varies       | Construct slice (n=2 or 3).               |
+| `LIST_EXTEND <i>`    | -1           | list.extend.                              |
+| `LIST_APPEND <i>`    | -1           | list.append.                              |
+| `LIST_TO_TUPLE`      | 0            | Convert list to tuple.                    |
+| `SET_ADD <i>`        | -1           | set.add.                                  |
+| `SET_UPDATE <i>`     | -1           | set.update.                               |
+| `MAP_ADD <i>`        | -2           | dict.__setitem__.                         |
+| `DICT_UPDATE <i>`    | -1           | dict.update.                              |
+| `DICT_MERGE <i>`     | -1           | Merge with duplicate-key check.           |
+
+### Comparison and identity
+
+| Opcode             | Effect                                                     |
+| ------------------ | ---------------------------------------------------------- |
+| `COMPARE_OP <op>`  | TOS = TOS1 op TOS, where op is `<,<=,==,!=,>,>=`.          |
+| `IS_OP <invert>`   | TOS = (TOS1 is TOS) XOR invert.                            |
+| `CONTAINS_OP <invert>` | TOS = (TOS in TOS1) XOR invert.                        |
+| `CHECK_EXC_MATCH`  | exception-match check used by `except`.                    |
+| `CHECK_EG_MATCH`   | exception-group match used by `except*`.                   |
+
+### Control flow
+
+| Opcode                 | Effect                                                   |
+| ---------------------- | -------------------------------------------------------- |
+| `JUMP_FORWARD <delta>` | Jump relative forward.                                   |
+| `JUMP_BACKWARD <delta>` | Jump relative backward; ticks the eval breaker.         |
+| `JUMP_BACKWARD_NO_INTERRUPT` | Backward jump without breaker check.                |
+| `POP_JUMP_IF_TRUE <delta>` | Pop; jump if truthy.                                 |
+| `POP_JUMP_IF_FALSE <delta>` | Pop; jump if falsy.                                 |
+| `POP_JUMP_IF_NONE <delta>` | Pop; jump if `is None`.                              |
+| `POP_JUMP_IF_NOT_NONE <delta>` | Pop; jump if `is not None`.                      |
+| `FOR_ITER <delta>`     | Call `__next__`; on StopIteration jump.                  |
+| `END_FOR`              | Drop the iterator after the loop.                        |
+
+### Function call
+
+| Opcode                  | Effect                                                  |
+| ----------------------- | ------------------------------------------------------- |
+| `CALL <argc>`           | Call TOS with `argc` positional args (NULL + fn frame). |
+| `CALL_KW <argc>`        | Same with keyword args on top.                          |
+| `CALL_FUNCTION_EX <flags>` | Call with `*args` (and `**kwargs` if flag set).      |
+| `KW_NAMES <i>`          | Set keyword-name tuple for the next CALL.               |
+| `MAKE_FUNCTION <flags>` | Build a function from a code object.                    |
+| `SET_FUNCTION_ATTRIBUTE <flag>` | Set `__defaults__`, `__kwdefaults__`, `__annotations__`, `__closure__`. |
+| `RETURN_VALUE`          | Pop and return.                                         |
+| `RETURN_CONST <i>`      | Return `co_consts[i]`.                                  |
+| `RETURN_GENERATOR`      | Convert frame into a generator object.                  |
+| `RESUME <where>`        | Generator/coroutine resume point.                       |
+| `YIELD_VALUE`           | Yield TOS; suspend frame.                               |
+| `SEND <delta>`          | Generator.send wrapper; jumps on exhausted.             |
+
+### Imports
+
+| Opcode               | Effect                                                |
+| -------------------- | ----------------------------------------------------- |
+| `IMPORT_NAME <i>`    | Call `__import__` with name, fromlist, level.         |
+| `IMPORT_FROM <i>`    | Read submodule attribute.                             |
+| `IMPORT_STAR`        | Bind every name from a module.                        |
+
+### Exceptions
+
+| Opcode                  | Effect                                              |
+| ----------------------- | --------------------------------------------------- |
+| `PUSH_EXC_INFO`         | Save and rotate the current exception.              |
+| `POP_EXCEPT`            | Restore prior exception state.                      |
+| `RERAISE <oparg>`       | Re-raise stacked exception.                         |
+| `RAISE_VARARGS <n>`     | Raise with 0, 1, or 2 args.                         |
+| `CLEANUP_THROW`         | Convert StopIteration->RuntimeError per PEP 479.    |
+| `LOAD_ASSERTION_ERROR`  | Push the `AssertionError` class.                    |
+| `WITH_EXCEPT_START`     | Call `__exit__(type, val, tb)`.                     |
+
+### With and context managers
+
+| Opcode                | Effect                                                |
+| --------------------- | ----------------------------------------------------- |
+| `BEFORE_WITH`         | Set up `__enter__`.                                   |
+| `BEFORE_ASYNC_WITH`   | Set up `__aenter__`.                                  |
+| `WITH_EXCEPT_START`   | On exception, push args for `__exit__`.               |
+
+### Async support
+
+| Opcode                | Effect                                                |
+| --------------------- | ----------------------------------------------------- |
+| `GET_AWAITABLE <flags>` | Convert to awaitable.                               |
+| `GET_AITER`           | `__aiter__`.                                          |
+| `GET_ANEXT`           | `__anext__`.                                          |
+| `END_ASYNC_FOR`       | Cleanly end async for after StopAsyncIteration.       |
+
+### Class machinery
+
+| Opcode                  | Effect                                              |
+| ----------------------- | --------------------------------------------------- |
+| `LOAD_BUILD_CLASS`      | Push `builtins.__build_class__`.                    |
+| `LOAD_LOCALS`           | Push frame locals dict.                             |
+| `LOAD_FROM_DICT_OR_GLOBALS <i>` | Class-body name lookup.                     |
+| `LOAD_FROM_DICT_OR_DEREF <i>` | Class-body free-var lookup.                   |
+
+### Pattern matching
+
+| Opcode                 | Effect                                                |
+| ---------------------- | ----------------------------------------------------- |
+| `MATCH_MAPPING`        | Push bool: is TOS a mapping?                          |
+| `MATCH_SEQUENCE`       | Push bool: is TOS a sequence (not str/bytes)?         |
+| `MATCH_KEYS`           | Match keys for a mapping pattern.                     |
+| `MATCH_CLASS <count>`  | Match class pattern.                                  |
+
+### Specialised forms
+
+For every adaptive opcode (`LOAD_ATTR`, `LOAD_GLOBAL`, `BINARY_OP`,
+`CALL`, `COMPARE_OP`, `STORE_ATTR`, `STORE_SUBSCR`, `UNPACK_SEQUENCE`,
+`SEND`, `FOR_ITER`, `TO_BOOL`), PEP 659 emits specialised variants
+once the heuristics fire:
+
+| Adaptive          | Specialised forms                                     |
+| ----------------- | ----------------------------------------------------- |
+| `LOAD_ATTR`       | `LOAD_ATTR_INSTANCE_VALUE`, `LOAD_ATTR_MODULE`, `LOAD_ATTR_WITH_HINT`, `LOAD_ATTR_SLOT`, `LOAD_ATTR_CLASS`, `LOAD_ATTR_PROPERTY`, `LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN`, `LOAD_ATTR_METHOD_*` |
+| `LOAD_GLOBAL`     | `LOAD_GLOBAL_MODULE`, `LOAD_GLOBAL_BUILTIN`           |
+| `BINARY_OP`       | `BINARY_OP_ADD_INT`, `BINARY_OP_SUBTRACT_INT`, `BINARY_OP_MULTIPLY_INT`, `..._FLOAT`, `..._UNICODE` |
+| `CALL`            | `CALL_PY_EXACT_ARGS`, `CALL_PY_WITH_DEFAULTS`, `CALL_TYPE_1`, `CALL_STR_1`, `CALL_TUPLE_1`, `CALL_BOUND_METHOD_EXACT_ARGS`, `CALL_BUILTIN_*`, `CALL_LEN`, `CALL_ISINSTANCE`, `CALL_METHOD_DESCRIPTOR_*`, `CALL_CLASS_*`, `CALL_ALLOC_AND_ENTER_INIT`, `CALL_KW_BOUND_METHOD`, `CALL_KW_PY` |
+| `COMPARE_OP`      | `COMPARE_OP_INT`, `COMPARE_OP_FLOAT`, `COMPARE_OP_STR` |
+| `STORE_ATTR`      | `STORE_ATTR_INSTANCE_VALUE`, `STORE_ATTR_SLOT`, `STORE_ATTR_WITH_HINT` |
+| `STORE_SUBSCR`    | `STORE_SUBSCR_LIST_INT`, `STORE_SUBSCR_DICT`          |
+| `UNPACK_SEQUENCE` | `UNPACK_SEQUENCE_TWO_TUPLE`, `UNPACK_SEQUENCE_TUPLE`, `UNPACK_SEQUENCE_LIST` |
+| `SEND`            | `SEND_GEN`                                            |
+| `FOR_ITER`        | `FOR_ITER_LIST`, `FOR_ITER_TUPLE`, `FOR_ITER_RANGE`, `FOR_ITER_GEN` |
+| `TO_BOOL`         | `TO_BOOL_BOOL`, `TO_BOOL_INT`, `TO_BOOL_LIST`, `TO_BOOL_NONE`, `TO_BOOL_STR`, `TO_BOOL_ALWAYS_TRUE` |
+
+Each specialised form has a fixed cache layout. On miss it
+"deoptimises" back to the adaptive form by replacing itself in the
+instruction stream.
+
+### Intrinsics
+
+`CALL_INTRINSIC_1 <id>` and `CALL_INTRINSIC_2 <id>` invoke
+compiler-defined helpers that do not warrant their own opcode:
+
+| ID                          | Purpose                                       |
+| --------------------------- | --------------------------------------------- |
+| `INTRINSIC_1_INVALID`       | Reserved.                                     |
+| `INTRINSIC_PRINT`           | Implementation of REPL displayhook.           |
+| `INTRINSIC_IMPORT_STAR`     | Helper for `IMPORT_STAR`.                     |
+| `INTRINSIC_STOPITERATION_ERROR` | PEP 479 conversion.                       |
+| `INTRINSIC_ASYNC_GEN_WRAP`  | Wrap async-gen yielded value.                 |
+| `INTRINSIC_UNARY_POSITIVE`  | `+x` fallback.                                |
+| `INTRINSIC_LIST_TO_TUPLE`   | Convert list -> tuple.                        |
+| `INTRINSIC_TYPEVAR`         | PEP 695 typevar creation.                     |
+| `INTRINSIC_PARAMSPEC`       | PEP 695 paramspec.                            |
+| `INTRINSIC_TYPEVARTUPLE`    | PEP 695 typevartuple.                         |
+| `INTRINSIC_SUBSCRIPT_GENERIC` | `Generic[...]` evaluation.                  |
+| `INTRINSIC_TYPEALIAS`       | `type` statement.                             |
+
+## Exception table
+
+The `co_exceptiontable` is a variable-length byte string describing
+ranges of bytecode and where to jump on exception. PEP 657 format:
+
+```
+entry := startoffset, endoffset, target, depth+lasti, mode
+```
+
+The runtime walks the table on raise; if no entry covers the
+current `lasti`, the frame unwinds.
+
+## Location table
+
+`co_linetable` encodes per-instruction source location (start
+line, end line, start col, end col) using a variable-length
+compression. The decode algorithm lives in
+[CPython internals -> Compile](/docs/cpython/compile).
+
+## Gopy status
+
+| Opcode group                         | State                                  |
+| ------------------------------------ | -------------------------------------- |
+| All Tier-1 opcodes listed above      | Complete.                              |
+| All specialised variants             | Complete.                              |
+| Intrinsics                           | Complete.                              |
+| Exception table format               | Complete.                              |
+| Location table format                | Complete.                              |
+| Tier-2 uops                          | Partial (about 14 of 285 ported).      |
+
+## Reference
+
+* CPython 3.14: [dis module](https://docs.python.org/3.14/library/dis.html).
+* `Python/bytecodes.c`. Canonical semantics.
+* `Python/specialize.c`. The specialiser.
+* `vm/`. gopy's evaluator.
+* [Tier-2 trace projector](/docs/cpython/optimizer).

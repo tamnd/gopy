@@ -1,0 +1,237 @@
+---
+title: Import system
+description: Packages, search path, finders, loaders, namespace packages, the full importlib protocol.
+---
+
+# Import system
+
+`import` is a high-level statement backed by `__import__`, which is
+itself a thin wrapper over `importlib._bootstrap._find_and_load`.
+This page documents the protocol from statement through bytecode
+through finder/loader machinery.
+
+Source-of-record:
+[CPython import system](https://docs.python.org/3.14/reference/import.html),
+`Lib/importlib/`, `Python/import.c`.
+
+## The `import` statement
+
+### Forms
+
+| Form                                | Result                                              |
+| ----------------------------------- | --------------------------------------------------- |
+| `import a`                          | Binds `a` to the top-level module.                  |
+| `import a.b.c`                      | Imports `a`, `a.b`, `a.b.c`; binds `a`.             |
+| `import a as x`                     | Binds `x` to module `a`.                            |
+| `import a.b.c as x`                 | Binds `x` to module `a.b.c`.                        |
+| `from a import b`                   | Binds `b` from module `a` (attribute or submodule). |
+| `from a import b as x`              | As above, bound as `x`.                             |
+| `from a import b, c`                | Multiple bindings.                                  |
+| `from a import *`                   | Binds every public name (per `__all__`).            |
+| `from . import b`                   | Relative import, current package.                   |
+| `from .. import b`                  | Relative import, parent package.                    |
+| `from ..a.b import c`               | Relative import, deeper path.                       |
+
+Relative imports require the current module to have a `__package__`
+attribute.
+
+### Bytecode emission
+
+| Source                  | Approximate bytecode                                 |
+| ----------------------- | ---------------------------------------------------- |
+| `import a`              | `LOAD_CONST None; LOAD_CONST None; IMPORT_NAME 'a'; STORE_NAME 'a'`. |
+| `import a.b`            | `IMPORT_NAME 'a.b'; STORE_NAME 'a'`.                 |
+| `from a import b`       | `IMPORT_NAME 'a'; IMPORT_FROM 'b'; STORE_NAME 'b'`.  |
+| `from a import *`       | `IMPORT_NAME 'a'; IMPORT_STAR`.                      |
+
+`IMPORT_NAME` consumes a level (negative for relative) and a fromlist
+tuple from the stack.
+
+## Module resolution
+
+The high-level algorithm:
+
+1. **Cache lookup.** Check `sys.modules[name]`. If present and not
+   `None`, return it.
+2. **Parent.** If `name` has dots, recursively import the parent.
+3. **Finder loop.** Iterate `sys.meta_path`; for each finder call
+   `find_spec(name, path)`.
+4. **Spec.** The first non-None spec is used. If no finder returns,
+   raise `ModuleNotFoundError`.
+5. **Load.** Use the spec's loader to create and execute the module.
+6. **Cache.** Store the module in `sys.modules`.
+7. **Bind.** If the parent is a package, bind the submodule as an
+   attribute of the parent.
+
+## Finders
+
+A *finder* is an object with `find_spec(name, path, target=None)`.
+
+### Built-in meta-path finders
+
+In order:
+
+| Finder                                      | Role                                          |
+| ------------------------------------------- | --------------------------------------------- |
+| `BuiltinImporter`                           | C-implemented modules in the interpreter's inittab. |
+| `FrozenImporter`                            | Modules frozen into the interpreter binary.   |
+| `PathFinder`                                | Searches `sys.path` using `sys.path_hooks`.   |
+
+### Path-based finders
+
+`PathFinder` walks `sys.path`. For each entry it consults
+`sys.path_importer_cache`, falling back to `sys.path_hooks` to
+construct a path entry finder.
+
+Default path entry finders:
+
+| Finder                          | Handles                                       |
+| ------------------------------- | --------------------------------------------- |
+| `FileFinder` with `SourceFileLoader` | `.py` source files.                      |
+| `FileFinder` with `SourcelessFileLoader` | `.pyc` cached bytecode.              |
+| `FileFinder` with `ExtensionFileLoader` | `.so` / `.pyd` extension modules (CPython only). |
+
+## Loaders
+
+A *loader* is an object that creates and executes the module.
+
+### Loader protocol
+
+| Method                              | Role                                                |
+| ----------------------------------- | --------------------------------------------------- |
+| `create_module(spec)`               | Construct the module object. Return `None` for default. |
+| `exec_module(module)`               | Populate the module's namespace by executing its code. |
+| `get_code(name)`                    | Optional; return a code object. Used by `runpy`.     |
+| `get_source(name)`                  | Optional; return source text.                       |
+| `is_package(name)`                  | Optional; True if the loader treats the name as a package. |
+| `get_filename(name)`                | Optional; the file path backing the module.         |
+| `get_data(path)`                    | Optional; raw bytes at a relative path.             |
+
+### Common loaders
+
+| Loader                  | What it loads                                  |
+| ----------------------- | ---------------------------------------------- |
+| `SourceFileLoader`      | `.py`, with `.pyc` caching.                    |
+| `SourcelessFileLoader`  | `.pyc` without source.                         |
+| `ExtensionFileLoader`   | C extensions (not in gopy).                    |
+| `_LoaderBasics`         | Base class for namespace packages.             |
+| `BuiltinImporter`       | Built-in modules registered via inittab.       |
+| `FrozenImporter`        | Modules frozen via `freeze_module`.            |
+
+## Module specs
+
+`ModuleSpec(name, loader, origin=None, ...)` carries everything
+needed to load a module:
+
+| Field                | Meaning                                          |
+| -------------------- | ------------------------------------------------ |
+| `name`               | Fully qualified import name.                     |
+| `loader`             | The loader instance.                             |
+| `origin`             | Source location string.                          |
+| `submodule_search_locations` | List of paths if this is a package; `None` otherwise. |
+| `loader_state`       | Loader-private data.                             |
+| `cached`             | Path to `.pyc`, if any.                          |
+| `parent`             | Parent package name.                             |
+| `has_location`       | `bool(origin)`.                                  |
+
+## Packages
+
+A *package* is a module whose `__path__` attribute is set. There
+are two kinds:
+
+| Kind                | Trigger                                                  |
+| ------------------- | -------------------------------------------------------- |
+| Regular package     | Contains `__init__.py`.                                  |
+| Namespace package   | Has no `__init__.py`; produced by `PathFinder` merging multiple matching path entries (PEP 420). |
+
+### `__path__`
+
+For regular packages, `__path__` is a one-element list containing
+the directory. For namespace packages, it is a list of all
+contributing directories.
+
+### `__init__.py`
+
+When importing a regular package, the runtime imports the package
+and executes `__init__.py` in the package's namespace. Submodules
+are imported lazily (`from a import b` is a normal submodule
+import).
+
+## `sys` module hooks
+
+| Attribute                | Used for                                            |
+| ------------------------ | --------------------------------------------------- |
+| `sys.modules`            | Module cache, `{name: module}`.                     |
+| `sys.path`               | Search path for `PathFinder`.                       |
+| `sys.path_hooks`         | Callables that build path entry finders.            |
+| `sys.path_importer_cache` | `{path: finder}` cache.                            |
+| `sys.meta_path`          | List of meta-path finders.                          |
+| `sys.builtin_module_names` | Names of built-in (inittab) modules.              |
+
+## `.pyc` caching
+
+| Concept                  | Meaning                                                |
+| ------------------------ | ------------------------------------------------------ |
+| `__pycache__/<name>.cpython-314.pyc` | Cache location.                            |
+| Magic number             | 32-bit version tag. CPython differs from gopy here.   |
+| Hash-based               | `--check-hash-based-pycs always`/`default`/`never`.   |
+| Source timestamp         | Default invalidation: source mtime + size.             |
+
+The `.pyc` file layout (16-byte header + marshalled code):
+
+| Offset | Size | Meaning                                       |
+| ------ | ---- | --------------------------------------------- |
+| 0      | 4    | Magic number.                                 |
+| 4      | 4    | Source mtime (or hash) flags.                 |
+| 8      | 4    | Source mtime or hash bytes (1).               |
+| 12     | 4    | Source size or hash bytes (2).                |
+| 16     | -    | Marshalled `code` object.                     |
+
+See [Marshal format](marshal) for the body.
+
+## `importlib` API surface
+
+| Function                              | Role                                            |
+| ------------------------------------- | ----------------------------------------------- |
+| `importlib.import_module(name, pkg)`  | Programmatic equivalent of the `import` statement. |
+| `importlib.invalidate_caches()`       | Clear path-finder caches.                       |
+| `importlib.reload(module)`            | Re-execute a module in place.                   |
+| `importlib.resources.*`               | Resource access via the loader.                 |
+| `importlib.util.spec_from_*`          | Build specs from a file, location, or loader.   |
+| `importlib.machinery.*`               | Concrete finder/loader classes.                 |
+| `importlib.abc.*`                     | Abstract base classes for finders/loaders.      |
+
+## `__main__`
+
+The top-level script runs in a module named `__main__`. Three ways
+to enter it:
+
+| Invocation                  | `__main__` content                                  |
+| --------------------------- | --------------------------------------------------- |
+| `python3 script.py`         | The script.                                         |
+| `python3 -m pkg`            | `pkg/__main__.py` from inside the package.          |
+| `python3 -c "code"`         | The string passed to `-c`.                          |
+
+Inside an interactive REPL, `__main__` is also the active module.
+
+## Gopy status
+
+| Area                                 | State                                              |
+| ------------------------------------ | -------------------------------------------------- |
+| `import` statement and `from`        | Complete.                                          |
+| Meta-path finder protocol            | Complete.                                          |
+| Path-based finders                   | Complete for `.py` and `.pyc`.                     |
+| Namespace packages (PEP 420)         | Complete.                                          |
+| Built-in modules via `imp.AppendInittab` | Complete; see [Embedding](/docs/manual/embedding#registering-a-built-in-module). |
+| Frozen modules                       | Stdlib only, via `stdlibinit`.                     |
+| `.pyc` reading and writing           | Complete; uses gopy magic number, not CPython-interoperable. |
+| `importlib` Python surface           | Complete.                                          |
+| C extension loading                  | Out of scope.                                      |
+
+## Reference
+
+* CPython 3.14: [Import system](https://docs.python.org/3.14/reference/import.html).
+* `Lib/importlib/_bootstrap.py`. The bootstrap implementation.
+* `Python/import.c`. The C runtime side.
+* [Internals -> Imports](/docs/cpython/imports).
+* [Marshal format](marshal).

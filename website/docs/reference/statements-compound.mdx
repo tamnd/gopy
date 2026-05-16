@@ -1,0 +1,338 @@
+---
+title: Compound statements
+description: if, while, for, try, with, match, def, class, async — every compound statement with its semantics and bytecode shape.
+---
+
+# Compound statements
+
+Compound statements span multiple logical lines and contain other
+statements. Each has a header line ending in `:` and one or more
+clauses, each with its own header and indented suite.
+
+Source-of-record:
+[CPython compound statements](https://docs.python.org/3.14/reference/compound_stmts.html),
+`Python/compile.c`, `Python/bytecodes.c`.
+
+## `if`
+
+```
+if test:
+    suite
+elif test:
+    suite
+else:
+    suite
+```
+
+Evaluates each `test` in order; the first truthy one's suite runs.
+The `else` clause runs if no test was truthy.
+
+Bytecode: `POP_JUMP_IF_FALSE` chains with `JUMP_FORWARD` at the end
+of each suite.
+
+## `while`
+
+```
+while test:
+    suite
+else:
+    suite
+```
+
+| Step                                                           |
+| -------------------------------------------------------------- |
+| Evaluate `test`. If falsy, skip to the `else` clause (if any). |
+| Run the suite.                                                 |
+| `break` exits without running `else`.                          |
+| `continue` jumps back to the test.                             |
+
+## `for`
+
+```
+for target in iterable:
+    suite
+else:
+    suite
+```
+
+| Step                                                            |
+| --------------------------------------------------------------- |
+| Get iterator: `iter(iterable)`.                                 |
+| Each iteration: `next(it)`; assign to `target`; run suite.      |
+| `StopIteration` ends the loop; `else` runs.                     |
+| `break` exits without running `else`.                           |
+| `continue` jumps to the next iteration.                         |
+
+Bytecode: `GET_ITER` once, `FOR_ITER` per iteration, `END_FOR`
+on normal exhaustion. PEP 669 produces `JUMP_BACKWARD` after the
+suite.
+
+## `try`
+
+### Forms
+
+```
+try:
+    suite
+except ExcType:
+    suite
+except (T1, T2) as e:
+    suite
+except:
+    suite                # bare except
+else:
+    suite                # runs if no exception
+finally:
+    suite                # always runs
+```
+
+### Semantics
+
+| Step                                                                 |
+| -------------------------------------------------------------------- |
+| Run the `try` suite.                                                 |
+| If an exception is raised, scan `except` clauses in order; the first matching type's suite runs. |
+| If no `except` matches, propagate.                                   |
+| If no exception, run the `else` suite (if any).                      |
+| Run the `finally` suite unconditionally; its bindings are not new exceptions unless they raise. |
+
+Inside a handler, the active exception is `sys.exc_info()`. The
+`as` binding is deleted at the end of the handler (`SyntaxError`
+in 3.11+ if you assign to it after).
+
+### `except*` (PEP 654)
+
+```
+try:
+    suite
+except* ExcType:
+    suite
+```
+
+The exception is expected to be an `ExceptionGroup`. `except*`
+clauses filter and split the group; multiple `except*` handlers may
+run for one group. Exceptions not matched re-raise in a residual
+group.
+
+You cannot mix `except` and `except*` in the same `try`.
+
+## `with`
+
+```
+with manager:
+    suite
+
+with manager as name:
+    suite
+
+with manager1 as n1, manager2 as n2:
+    suite
+
+with (
+    manager1 as n1,
+    manager2 as n2,
+):
+    suite
+```
+
+| Step                                                              |
+| ----------------------------------------------------------------- |
+| Evaluate `manager`. Call `manager.__enter__()`. Bind `name`.      |
+| Run suite.                                                        |
+| On normal exit: `manager.__exit__(None, None, None)`.             |
+| On exception: `manager.__exit__(type, value, tb)`. If it returns truthy, the exception is suppressed. |
+
+Parenthesised multi-item `with` (PEP 617) allows trailing commas
+and multi-line layout.
+
+## `match` (PEP 634)
+
+```
+match subject:
+    case pattern_a:
+        suite
+    case pattern_b if guard:
+        suite
+    case _:
+        suite
+```
+
+The subject is evaluated once. Each case's pattern is tested in
+order; the first that matches (and whose guard passes) runs.
+Patterns bind names as described in [Grammar -> Patterns](grammar#patterns-match).
+
+| Pattern         | Matches                                                |
+| --------------- | ------------------------------------------------------ |
+| `x` (capture)   | Anything; binds `x`.                                   |
+| `_`             | Anything; no binding.                                  |
+| `1`, `"s"`      | Literal equality.                                      |
+| `True`/`False`/`None` | Singletons; identity match.                      |
+| `[a, b, c]`     | Sequence of length 3.                                  |
+| `[a, *rest]`    | Sequence of length >= 1.                               |
+| `{1: x}`        | Mapping with key 1; binds value to `x`.                |
+| `Point(x, y=0)` | Class pattern using `__match_args__`.                  |
+| `pat1 \| pat2`  | OR.                                                    |
+| `pat as name`   | Match `pat` and bind to `name`.                        |
+| `dotted.name`   | Value pattern (constant lookup).                       |
+
+## Function definition
+
+```
+@decorator1
+@decorator2(arg)
+def name[T1, T2](params) -> return_annotation:
+    suite
+```
+
+| Element                | Effect                                                   |
+| ---------------------- | -------------------------------------------------------- |
+| `@decorator`           | Apply: `name = decorator(name)`. Stacks bottom-up.       |
+| `[T1, T2]`             | PEP 695 type parameters; creates `TypeVar`s.             |
+| Parameters             | See below.                                               |
+| `-> annotation`        | Return annotation (lazy in 3.14).                        |
+| Body                   | Code object built and bound to `name` in current scope.  |
+
+### Parameter syntax
+
+```
+def f(
+    pos_only_a, pos_only_b, /,
+    pos_or_kw, *args,
+    kw_only,
+    **kwargs,
+):
+```
+
+| Form                  | Kind                                                |
+| --------------------- | --------------------------------------------------- |
+| `name`                | Positional-or-keyword.                              |
+| `name=default`        | Same, with default.                                 |
+| `*args`               | Variadic positional.                                |
+| `*` (alone)           | Marks subsequent parameters as keyword-only.        |
+| `name`, after `*` or `*args` | Keyword-only.                                |
+| `/` (alone)           | Marks all previous parameters as positional-only.   |
+| `**kwargs`            | Variadic keyword.                                   |
+
+### Generators, coroutines, async generators
+
+| Function form                                  | Body contains                | Result of call                          |
+| ---------------------------------------------- | ---------------------------- | --------------------------------------- |
+| `def f(...)`                                   | normal code                  | Return value.                           |
+| `def f(...)`                                   | `yield` / `yield from`       | Generator object.                       |
+| `async def f(...)`                             | `await` / normal code        | Coroutine object.                       |
+| `async def f(...)`                             | `yield`                      | Async generator object.                 |
+
+## Class definition
+
+```
+@decorator
+class Name[T](base1, base2, metaclass=Meta, **kwds):
+    suite
+```
+
+| Step                                                                 |
+| -------------------------------------------------------------------- |
+| Evaluate decorators (deferred to after class creation).              |
+| Resolve type parameters (PEP 695).                                   |
+| Evaluate bases and keyword arguments.                                |
+| Pick a metaclass (explicit or most-derived).                         |
+| Call `metaclass.__prepare__(name, bases, **kwds)` if defined; get namespace mapping. |
+| Execute the class body in the namespace.                             |
+| Call `metaclass(name, bases, namespace, **kwds)`.                    |
+| Apply decorators in reverse order.                                   |
+| Bind the result to `Name`.                                           |
+
+### Body execution
+
+A class body sees the enclosing module/function scope for *reads*,
+but bindings inside the class body bind into the namespace mapping
+(eventually the class's `__dict__`). Methods inside cannot see class
+bodies as part of their scope chain.
+
+## `async def`
+
+```
+async def f(...):
+    suite
+
+async with manager as name:
+    suite
+
+async for target in async_iterable:
+    suite
+```
+
+Inside an `async def`:
+
+| Statement       | Effect                                                |
+| --------------- | ----------------------------------------------------- |
+| `await expr`    | Suspend until `expr` resolves; resume with its result. |
+| `async for`     | Iterate over an async iterable.                       |
+| `async with`    | Context manager with `__aenter__` / `__aexit__`.      |
+| `yield`         | Makes the function an *async generator*.              |
+| `return value`  | Ends the coroutine; `value` becomes the awaiter's result. |
+
+`await` outside an `async def` is a `SyntaxError`. `async for` and
+`async with` are also restricted to async contexts, with one
+exception: top-level `await` is allowed in `compile(..., mode='eval')`
+with `PyCF_ALLOW_TOP_LEVEL_AWAIT`.
+
+## Suite layout
+
+```
+header:
+    statement
+    statement
+
+header: statement; statement
+
+header:
+    statement1
+    statement2
+header:
+    statement3
+```
+
+A suite can be one of:
+
+| Form                                        | Notes                                  |
+| ------------------------------------------- | -------------------------------------- |
+| Simple statement on the same line as header | `if x: pass`.                          |
+| Multiple simple statements on the same line | `if x: pass; print(1)`.                |
+| NEWLINE + INDENT block                      | Standard form.                         |
+
+## Decorator order
+
+`@a` and `@b` on the same definition compose as `b(a(...))` would
+in Python:
+
+```python
+@a
+@b
+def f(): ...
+# equivalent to: f = a(b(f))
+```
+
+Decorator expressions can be any valid expression in 3.9+. They are
+evaluated *before* the decorated definition runs, but applied after.
+
+## Gopy status
+
+| Area                                | State                                          |
+| ----------------------------------- | ---------------------------------------------- |
+| `if`/`elif`/`else`                  | Complete.                                      |
+| `while`/`for` with `else`           | Complete.                                      |
+| `try`/`except`/`else`/`finally`     | Complete.                                      |
+| `except*` and exception groups      | Complete.                                      |
+| `with` (parenthesised, multi-item)  | Complete.                                      |
+| `match`/`case`                      | Complete.                                      |
+| `def`/`async def`/decorators        | Complete.                                      |
+| `class`/`__prepare__`/metaclasses   | Complete.                                      |
+| PEP 695 type params                 | Complete.                                      |
+
+## Reference
+
+* CPython 3.14: [Compound statements](https://docs.python.org/3.14/reference/compound_stmts.html).
+* `Python/compile.c`. The lowering.
+* [Simple statements](statements-simple).
+* [Opcodes](opcodes).

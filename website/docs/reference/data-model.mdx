@@ -1,0 +1,352 @@
+---
+title: Data model
+description: Objects, values, types, the standard type hierarchy, attribute lookup, descriptor protocol, and method resolution order as Python 3.14 defines them.
+---
+
+# Data model
+
+Every Python value is an object. Every object has identity, type,
+and value. Identity is the address-like handle that `id()` returns;
+type is a `type` instance that determines what operations the
+object supports; value may or may not be mutable.
+
+Source-of-record: `Objects/object.c`, `Objects/typeobject.c`,
+[the CPython data model chapter](https://docs.python.org/3.14/reference/datamodel.html).
+
+## Object identity, type, and value
+
+| Property  | Mutability     | Accessor    | Notes                                |
+| --------- | -------------- | ----------- | ------------------------------------ |
+| Identity  | Fixed for life | `id(x)`     | Two objects with the same lifetime can share an id. |
+| Type      | Fixed for life | `type(x)`   | Exception: `__class__` reassignment for HEAPTYPEs of the same layout. |
+| Value     | Per type       | `x` itself  | Immutable for `int`, `float`, `complex`, `bool`, `str`, `bytes`, `tuple`, `frozenset`, `range`, `slice`, function, class. |
+
+## Object lifecycle
+
+1. **Allocation.** `tp_alloc` returns memory of `tp_basicsize` plus
+   `tp_itemsize * nitems`.
+2. **Initialisation.** `tp_new` populates the object; `tp_init`
+   optionally runs after.
+3. **Reference counting.** Every reference increments `ob_refcnt`;
+   every drop decrements. When the count hits zero, `tp_dealloc`
+   runs.
+4. **Cyclic collection.** Objects whose type sets `Py_TPFLAGS_HAVE_GC`
+   participate in cycle collection (see [Memory model](#memory-model)).
+5. **Deallocation.** `tp_dealloc` frees member references and then
+   the object itself via `tp_free`.
+
+## The standard type hierarchy
+
+### None
+
+A single immutable singleton. Type is `<class 'NoneType'>`. Truth
+value is false.
+
+### NotImplemented
+
+Singleton returned by binary methods to indicate "ask the other
+operand". Truth value: deprecated since 3.9; raises if you try.
+
+### Ellipsis
+
+Singleton `...`. Used in slicing and stub definitions.
+
+### numbers.Number
+
+#### `int`
+
+Arbitrary precision integers. Internally a sign-magnitude
+representation as an array of digits.
+
+| Field        | Source                            |
+| ------------ | --------------------------------- |
+| Storage      | `Include/cpython/longintrepr.h`   |
+| Operations   | `Objects/longobject.c`            |
+| Small ints   | `[-5, 256]` are cached singletons. |
+
+#### `bool`
+
+Subclass of `int`. Singletons `True == 1` and `False == 0`.
+
+#### `float`
+
+IEEE 754 double precision. NaN comparisons follow IEEE rules
+(`NaN != NaN`).
+
+#### `complex`
+
+Pair of `double` for real and imaginary parts.
+
+### Sequences
+
+#### Immutable sequences
+
+| Type        | Element type      | Notes                                  |
+| ----------- | ----------------- | -------------------------------------- |
+| `str`       | code points       | PEP 393 kind storage (1/2/4 bytes).    |
+| `tuple`     | any               | Fixed length.                          |
+| `bytes`     | unsigned bytes    | Immutable.                             |
+| `range`     | integers          | Lazy.                                  |
+
+#### Mutable sequences
+
+| Type        | Element type | Notes                                  |
+| ----------- | ------------ | -------------------------------------- |
+| `list`      | any          | Resizable array of references.         |
+| `bytearray` | unsigned bytes | Mutable bytes.                       |
+| `memoryview`| varies       | View over a buffer-supporting object.  |
+| `array.array` | numeric    | Stdlib `array` module.                 |
+
+### Set types
+
+| Type        | Mutability | Element constraint           |
+| ----------- | ---------- | ----------------------------- |
+| `set`       | mutable    | Hashable.                     |
+| `frozenset` | immutable  | Hashable. Hashable itself.    |
+
+### Mappings
+
+| Type        | Mutability | Notes                                 |
+| ----------- | ---------- | ------------------------------------- |
+| `dict`      | mutable    | Insertion-ordered. Combined or split layout. |
+| `mappingproxy` | read-only | View over a dict.                    |
+| `types.MappingProxyType` | read-only | Public alias of the above. |
+
+### Callable types
+
+| Form                     | Examples                                    |
+| ------------------------ | ------------------------------------------- |
+| User-defined function    | `def f(...)`                                |
+| User-defined coroutine   | `async def f(...)`                          |
+| Generator function       | `def f(...): yield ...`                     |
+| Async generator function | `async def f(...): yield ...`               |
+| Built-in function        | `len`, `print`. C-implemented.              |
+| Built-in method          | `[].append`. Bound built-in.                |
+| Method                   | `obj.method`. Bound user method.            |
+| Class                    | `type(...)`. Calling constructs an instance. |
+| Class instance with `__call__` | Anything implementing call.           |
+| `functools.partial`      | Partial application.                        |
+
+### Modules
+
+`module` objects carry an `__name__`, `__dict__` (their namespace),
+`__doc__`, `__file__`, `__loader__`, `__spec__`, and
+`__package__`. Setting an attribute on a module assigns into its
+`__dict__`.
+
+### Custom classes
+
+Class objects carry:
+
+| Attribute          | Meaning                                  |
+| ------------------ | ---------------------------------------- |
+| `__name__`         | Short name.                              |
+| `__qualname__`     | Qualified name path.                     |
+| `__module__`       | Defining module.                         |
+| `__doc__`          | Docstring.                               |
+| `__bases__`        | Direct bases.                            |
+| `__mro__`          | Method resolution order.                 |
+| `__dict__`         | Class namespace.                         |
+| `__class__`        | Metaclass (default `type`).              |
+| `__subclasses__()` | Direct subclasses.                       |
+| `__type_params__`  | PEP 695 type parameters.                 |
+| `__annotations__`  | Annotation dict (lazy in 3.14).          |
+
+### Class instances
+
+| Attribute     | Meaning                                           |
+| ------------- | ------------------------------------------------- |
+| `__class__`   | The class (reassignable for same-layout types).   |
+| `__dict__`    | Instance attribute dict (absent for `__slots__`). |
+| `__weakref__` | Optional weakref support.                         |
+
+### Code objects
+
+Compiled bytecode plus all the metadata the VM needs to run it.
+See [Bytecode -> Opcodes](opcodes) and the `Code` struct in
+`compile/code.go`.
+
+| Field             | Meaning                                       |
+| ----------------- | --------------------------------------------- |
+| `co_code`         | Bytecode bytes.                               |
+| `co_consts`       | Tuple of literal constants.                   |
+| `co_names`        | Global names referenced.                      |
+| `co_varnames`     | Local variable names.                         |
+| `co_freevars`     | Free variable names (closure inputs).         |
+| `co_cellvars`     | Cell variable names (created for nested).     |
+| `co_argcount`     | Number of positional args.                    |
+| `co_posonlyargcount` | Number of positional-only args.            |
+| `co_kwonlyargcount`  | Number of keyword-only args.                |
+| `co_stacksize`    | Maximum stack depth.                          |
+| `co_flags`        | Bitfield: generator, coroutine, varargs, etc. |
+| `co_firstlineno`  | Source line of `def`.                         |
+| `co_linetable`    | PEP 657 location table.                       |
+| `co_exceptiontable` | Exception handler ranges.                   |
+| `co_qualname`     | Qualified name.                               |
+
+### Frame objects
+
+| Field                | Meaning                                  |
+| -------------------- | ---------------------------------------- |
+| `f_back`             | Previous frame in the stack.             |
+| `f_code`             | Code object being executed.              |
+| `f_locals`           | Local namespace (lazy).                  |
+| `f_globals`          | Module globals.                          |
+| `f_builtins`         | Builtins namespace.                      |
+| `f_lasti`            | Index of the last completed instruction. |
+| `f_lineno`           | Current line.                            |
+| `f_trace`            | Per-frame trace function.                |
+
+### Traceback objects
+
+A linked list of frame snapshots. `tb_next` chains toward the
+innermost frame; `tb_frame`, `tb_lineno`, `tb_lasti` describe the
+record.
+
+### Generator, coroutine, async generator
+
+State machine objects produced by calling a generator function,
+coroutine function, or async generator function. Backed by a
+suspended frame. See [Compound statements -> `def`](statements-compound).
+
+### Internal types
+
+| Type                | Purpose                                                    |
+| ------------------- | ---------------------------------------------------------- |
+| `cell`              | Closure cell holding a free variable.                      |
+| `slot wrapper`      | Slot exposed as a method (`object.__str__`).               |
+| `method-wrapper`    | Bound slot.                                                |
+| `wrapper_descriptor`| Unbound slot.                                              |
+| `member_descriptor` | C-level `tp_members` entry.                                |
+| `getset_descriptor` | C-level `tp_getset` entry.                                 |
+| `function`          | User function.                                             |
+| `method`            | Bound user method.                                         |
+| `builtin_function_or_method` | C-level callable.                                  |
+| `staticmethod` / `classmethod` | Descriptor wrappers.                             |
+
+## Attribute lookup
+
+`x.name` goes through `type(x).__getattribute__(x, 'name')`. The
+default implementation does:
+
+1. Locate `name` in `type(x).__mro__`. If found and the descriptor
+   is a *data descriptor* (has `__set__` or `__delete__`), invoke
+   `__get__` and return.
+2. Otherwise look in `x.__dict__`. If present, return.
+3. Otherwise return the non-data descriptor or class attribute
+   found in step 1.
+4. If still nothing, call `type(x).__getattr__(x, 'name')` if
+   defined.
+5. Otherwise raise `AttributeError`.
+
+`__setattr__` and `__delattr__` go through analogous slot
+machinery.
+
+## Descriptor protocol
+
+A *descriptor* is any object whose type defines at least one of:
+
+| Slot               | Method           | Role                                |
+| ------------------ | ---------------- | ----------------------------------- |
+| `tp_descr_get`     | `__get__`        | Read access.                        |
+| `tp_descr_set`     | `__set__`        | Assignment.                         |
+| `tp_descr_set`     | `__delete__`     | Deletion (shares the slot).         |
+
+Adding `__set__` or `__delete__` makes the descriptor a *data
+descriptor*, which has priority over instance dict (see attribute
+lookup above).
+
+The canonical examples are `property`, `staticmethod`,
+`classmethod`, and `member_descriptor`.
+
+## Method resolution order
+
+The MRO is computed by the C3 linearisation algorithm.
+
+```python
+C.__mro__ == c3(C, [c.__mro__ for c in C.__bases__], C.__bases__)
+```
+
+Where `c3` is defined as merging head-of-list candidates while
+preserving the relative order in every input. A linearisation is
+rejected (raising `TypeError`) if no consistent order exists.
+
+## Metaclasses
+
+A *metaclass* is the class of a class. `type(C)` returns its
+metaclass. The metaclass controls class creation:
+
+1. The `class` statement collects the class body in a namespace.
+2. The metaclass is determined: explicit `metaclass=` argument, or
+   the most-derived metaclass of any base, or `type`.
+3. `metaclass.__prepare__(name, bases, **kwds)` (if defined)
+   returns the namespace mapping.
+4. The class body executes in that namespace.
+5. `metaclass(name, bases, namespace, **kwds)` constructs the class.
+
+## `__slots__`
+
+A class with `__slots__` does not get an instance `__dict__`. Each
+slot becomes a member descriptor.
+
+| Property                                       | Rule                            |
+| ---------------------------------------------- | ------------------------------- |
+| Instances do not have `__dict__`.              | Unless `__dict__` is in slots.  |
+| Instances do not support weak refs.            | Unless `__weakref__` is in slots. |
+| Slots inherit, but only one base may have non-empty `__slots__`. |  |
+| Slots cannot be redefined in a subclass.       |                                 |
+
+## Reference equality and hashing
+
+| Operation     | Default                                            |
+| ------------- | -------------------------------------------------- |
+| `x == y`      | `id(x) == id(y)` for `object`; types override.     |
+| `hash(x)`     | Hash that respects equality. Mutable containers raise. |
+| `x is y`      | Identity, not method-overridable.                  |
+
+If `__eq__` is overridden and `__hash__` is not, the type's
+`__hash__` is set to `None`, making instances unhashable.
+
+## Subclassing built-in types
+
+Allowed in general. Restrictions:
+
+| Type             | Restriction                                        |
+| ---------------- | -------------------------------------------------- |
+| `bool`           | Cannot be subclassed.                              |
+| `NoneType` / `NotImplementedType` / `EllipsisType` | Cannot be subclassed. |
+| `slice` (3.12+)  | Subclassable.                                      |
+| `range`          | Cannot be subclassed.                              |
+
+When subclassing immutable built-in types, override `__new__`,
+not `__init__`; the slots that produce the object are part of
+construction.
+
+## Memory model
+
+| Property             | gopy                                                    |
+| -------------------- | ------------------------------------------------------- |
+| Refcounting          | `objects.Object` carries a count; cooperatively maintained by interface methods. |
+| Cycle collection     | Generational, triggered by allocation thresholds; mirrors CPython's three-generation collector. |
+| Object identity      | Stable for the object's lifetime.                       |
+| Finalisation         | `__del__` runs once when refcount reaches zero, or as part of GC if it is part of an unreachable cycle. |
+
+## Gopy status
+
+| Area                                | State                                          |
+| ----------------------------------- | ---------------------------------------------- |
+| Standard type hierarchy             | Complete.                                      |
+| MRO (C3)                            | Complete.                                      |
+| Descriptor protocol                 | Complete.                                      |
+| `__slots__`                         | Complete.                                      |
+| Metaclasses                         | Complete including `__prepare__`.              |
+| Weak references                     | Complete.                                      |
+| Lazy `__annotations__` (PEP 649)    | Complete.                                      |
+
+## Reference
+
+* [Special methods](dunders). Every `__dunder__` slot.
+* [Built-in types](types). Per-type method tables.
+* [CPython internals -> Objects](/docs/cpython/objects).
+* [CPython internals -> Types](/docs/cpython/types).
+* CPython 3.14: [Data model](https://docs.python.org/3.14/reference/datamodel.html).

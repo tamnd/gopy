@@ -1,14 +1,76 @@
 ---
 title: Reference
-description: Reference tables. Opcodes, types, builtins, errors.
+description: The complete Python 3.14 language reference, exactly as gopy implements it.
 ---
 
 # Reference
 
-Quick-lookup tables for the Python surface exposed by gopy. Each table
-matches CPython 3.14.
+This pillar is the language reference. It describes the Python that
+gopy implements, top to bottom, with no narrative. If you want to
+know exactly what a token, expression, statement, builtin, or
+bytecode does, this is the place to look. The text is held against
+[CPython 3.14](https://docs.python.org/3.14/reference/) and
+divergence is a parity bug.
 
-* [Opcodes](opcodes). The full bytecode table with stack effect and oparg shape.
-* [Types](types). Built-in types and their slot tables.
-* [Builtins](builtins). The `builtins` module.
-* [Errors](errors). Exception hierarchy and where each one is raised.
+## Sections
+
+### Language
+
+| Page                                     | Covers                                                                          |
+| ---------------------------------------- | ------------------------------------------------------------------------------- |
+| [Lexical analysis](lexical)              | Source encoding, line structure, identifiers, keywords, literals, operators.    |
+| [Grammar](grammar)                       | The full PEG grammar, terminals, and soft keywords.                             |
+| [Data model](data-model)                 | Objects, values, types, the standard type hierarchy.                            |
+| [Special methods](dunders)               | Every `__dunder__` slot, its signature, and when the VM calls it.               |
+| [Execution model](execution-model)       | Naming, binding, scopes, exception propagation.                                 |
+| [Import system](import-system)           | Packages, search path, finders, loaders, namespace packages.                    |
+| [Expressions](expressions)               | Atoms, primaries, operators, precedence, comprehensions, f-strings.             |
+| [Simple statements](statements-simple)   | Assignment, `del`, `return`, `yield`, `raise`, `import`, `type`, ...            |
+| [Compound statements](statements-compound) | `if`, `while`, `for`, `try`, `with`, `match`, `def`, `class`, `async`.        |
+| [Top-level components](top-level)        | Modules, interactive sessions, expression input.                                |
+
+### Built-ins
+
+| Page                       | Covers                                            |
+| -------------------------- | ------------------------------------------------- |
+| [Built-in types](types)    | Every type in the standard hierarchy, all methods. |
+| [Built-in functions](builtins) | `abs`, `len`, `print`, etc.; constants; classes. |
+| [Built-in exceptions](errors) | The full exception hierarchy with rationale.    |
+
+### Bytecode
+
+| Page                  | Covers                                            |
+| --------------------- | ------------------------------------------------- |
+| [Opcodes](opcodes)    | Every Tier-1 opcode with stack effect and oparg.  |
+
+## How to read these pages
+
+* **Page layout.** A short introductory paragraph, then dense tables.
+  Tables index a feature by name and point to the source-of-record
+  in CPython 3.14.
+* **Source citations.** `Parser/lexer/lexer.c:1234 funcname` style.
+  Look those up in [the CPython mirror](https://github.com/python/cpython/tree/3.14).
+* **Gopy status.** Where gopy's implementation diverges or is partial,
+  the diverging row is called out. See [Manual -> Status](/docs/manual/status)
+  for the subsystem-level picture.
+
+## Conventions
+
+* Bytecode names match CPython exactly. Where this page lists
+  `LOAD_FAST_BORROW`, the same byte appears in gopy's compiled
+  output.
+* Dunder names are written `__name__`. Slot names use CPython's
+  `tp_` / `nb_` / `sq_` / `mp_` / `am_` prefixes.
+* "Implementation defined" means the language spec gives latitude.
+  Where gopy and CPython differ in implementation-defined behaviour,
+  gopy still matches CPython byte-for-byte unless explicitly noted.
+
+## What is not in this pillar
+
+* **How the implementation works.** That lives under
+  [CPython internals](/docs/cpython/) and
+  [gopy internals](/docs/gopy/).
+* **Per-module API.** Module-by-module references live under
+  [Modules](/docs/modules/).
+* **Worked examples and recipes.** Those live under
+  [Manual -> Recipes](/docs/manual/recipes).

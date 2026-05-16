@@ -1,10 +1,425 @@
 ---
-title: utypes
-description: Reference tables for types.
+title: Built-in types
+description: Every built-in type in Python 3.14, its methods, attributes, slot layout, and runtime semantics.
 ---
 
-# utypes
+# Built-in types
 
-Reference tables for types. Generated and curated against CPython 3.14.
+This page enumerates every type that the interpreter defines and
+exposes through the `builtins` module or the runtime. For each, the
+public methods, the slots they fill, and any non-obvious rules.
 
-(Tables in progress. See [manual/status](../manual/status) for coverage.)
+Source-of-record: `Objects/`, `Lib/`,
+[the standard type hierarchy](https://docs.python.org/3.14/library/stdtypes.html).
+
+## Truth-value testing
+
+Every type can be tested in a boolean context. The default rule:
+
+| Returns false                                                |
+| ------------------------------------------------------------ |
+| `None`, `False`                                              |
+| Zero of any numeric type: `0`, `0.0`, `0j`, `Decimal(0)`     |
+| Empty containers: `''`, `()`, `[]`, `{}`, `set()`, `range(0)` |
+| Objects whose `__bool__` returns `False`                     |
+| Objects whose `__len__` returns `0` (when `__bool__` absent) |
+
+## `NoneType`
+
+| Property                  | Value                          |
+| ------------------------- | ------------------------------ |
+| Single instance           | `None`                         |
+| Truthy                    | No                             |
+| Subclassable              | No                             |
+| `__repr__`                | `'None'`                       |
+
+## `NotImplementedType`
+
+| Property                  | Value                          |
+| ------------------------- | ------------------------------ |
+| Single instance           | `NotImplemented`               |
+| Returned from             | Binary operators that decline to handle. |
+| Truthy                    | Raises `DeprecationWarning` since 3.9. |
+
+## `EllipsisType`
+
+| Property                  | Value                          |
+| ------------------------- | ------------------------------ |
+| Single instance           | `Ellipsis` (`...`)             |
+| Truthy                    | Yes                            |
+
+## Numeric types
+
+### `int`
+
+Arbitrary-precision integers. `bool` is a subclass.
+
+#### Constructors
+
+| Form                          | Result                                          |
+| ----------------------------- | ----------------------------------------------- |
+| `int()`                       | `0`                                             |
+| `int(x)`                      | Truncate `x` (uses `__int__` or `__index__`).   |
+| `int("42")`                   | Parse decimal.                                  |
+| `int("ff", 16)`               | Parse with explicit base 2-36.                  |
+| `int("0xff", 0)`              | Infer base from prefix.                         |
+
+#### Methods
+
+| Method                          | Returns                              |
+| ------------------------------- | ------------------------------------ |
+| `bit_length()`                  | Number of bits to represent abs(self). |
+| `bit_count()`                   | Number of 1 bits (popcount).         |
+| `to_bytes(length, byteorder, *, signed=False)` | Big/little-endian byte string. |
+| `from_bytes(bytes, byteorder, *, signed=False)` | Class method.   |
+| `as_integer_ratio()`            | `(self, 1)`.                         |
+| `is_integer()`                  | Always `True`.                       |
+| `__floor__`, `__ceil__`, `__round__` | Self.                           |
+| `__index__`                     | Self.                                |
+| `numerator`, `denominator`      | `self`, `1`.                         |
+| `real`, `imag`                  | `self`, `0`.                         |
+| `conjugate()`                   | Self.                                |
+
+### `bool`
+
+Subclass of `int`. Singletons `True == 1`, `False == 0`.
+
+| Constructor       | Result                                  |
+| ----------------- | --------------------------------------- |
+| `bool()`          | `False`                                 |
+| `bool(x)`         | `True` if `x` is truthy, else `False`.  |
+
+`bool` cannot be subclassed.
+
+### `float`
+
+IEEE 754 double.
+
+#### Constructors
+
+| Form              | Result                                 |
+| ----------------- | -------------------------------------- |
+| `float()`         | `0.0`                                  |
+| `float(x)`        | Numeric coerce.                        |
+| `float("1.5")`    | Parse text.                            |
+| `float("inf")`    | Positive infinity.                     |
+| `float("nan")`    | NaN.                                   |
+
+#### Methods
+
+| Method                       | Returns                                  |
+| ---------------------------- | ---------------------------------------- |
+| `as_integer_ratio()`         | Exact `(numerator, denominator)`.        |
+| `is_integer()`               | True if integral.                        |
+| `hex()`                      | Hex string representation.               |
+| `fromhex(s)`                 | Class method; inverse of `hex`.          |
+| `__round__(ndigits=None)`    | Banker's rounding.                       |
+| `real`, `imag`, `conjugate()` | Self, `0.0`, self.                      |
+
+### `complex`
+
+Pair of `double`. Constructors: `complex()`, `complex(real, imag=0)`,
+`complex("1+2j")`.
+
+| Attribute / method   | Returns                                   |
+| -------------------- | ----------------------------------------- |
+| `.real`              | Real part.                                |
+| `.imag`              | Imaginary part.                           |
+| `.conjugate()`       | Reflection over the real axis.            |
+
+## Iterator types
+
+A type is an *iterator* if it implements `__iter__` (returning self
+is conventional) and `__next__`. Calling `__next__` returns the
+next value or raises `StopIteration`.
+
+| Iterator                            | Source                                |
+| ----------------------------------- | ------------------------------------- |
+| `iter(seq)`                         | Built-in.                             |
+| `iter(callable, sentinel)`          | Calls `callable` until it returns `sentinel`. |
+| Generator                           | `yield`-containing function.          |
+| `map`, `filter`, `zip`              | Lazy iterators over their arguments.  |
+| `range_iterator`                    | `iter(range(...))`.                   |
+| `enumerate`, `reversed`             | Built-ins.                            |
+
+## Sequence types
+
+### Common operations (immutable)
+
+| Op                                | Returns                              |
+| --------------------------------- | ------------------------------------ |
+| `x in s`, `x not in s`            | bool                                  |
+| `s + t`                           | Concatenation.                        |
+| `s * n`, `n * s`                  | Repetition.                           |
+| `s[i]`                            | Element.                              |
+| `s[i:j]`, `s[i:j:k]`              | Slice.                                |
+| `len(s)`                          | Length.                               |
+| `min(s)`, `max(s)`                | Extremes.                             |
+| `s.index(x[, i[, j]])`            | Index of first occurrence.            |
+| `s.count(x)`                      | Number of occurrences.                |
+
+### Common operations (mutable)
+
+| Op                                  | Effect                                          |
+| ----------------------------------- | ----------------------------------------------- |
+| `s[i] = x`                          | Assign element.                                 |
+| `s[i:j] = t`                        | Slice replacement.                              |
+| `del s[i]`, `del s[i:j]`            | Delete.                                         |
+| `s.append(x)`                       | Append.                                         |
+| `s.extend(t)` / `s += t`            | Extend.                                         |
+| `s.insert(i, x)`                    | Insert at index.                                |
+| `s.pop([i])`                        | Remove and return.                              |
+| `s.remove(x)`                       | Remove first occurrence.                        |
+| `s.reverse()`                       | In-place reverse.                               |
+| `s.clear()`                         | Empty.                                          |
+| `s.copy()`                          | Shallow copy.                                   |
+| `s *= n`                            | Repeat in place.                                |
+
+### `list`
+
+Mutable sequence of references. Resized geometrically. `list.sort`
+is stable Timsort:
+
+| Method                                  | Effect                                       |
+| --------------------------------------- | -------------------------------------------- |
+| `list.sort(*, key=None, reverse=False)` | In-place sort.                               |
+| `list.copy()`                           | Shallow copy.                                |
+
+### `tuple`
+
+Immutable fixed-size sequence. Methods are only `.count` and
+`.index`. Named tuples (`collections.namedtuple`,
+`typing.NamedTuple`) are subclasses adding named field access.
+
+### `range`
+
+Lazy arithmetic progression `range(start, stop, step)`. Hashable
+(`__hash__` based on the produced sequence).
+
+| Property         | Description                                  |
+| ---------------- | -------------------------------------------- |
+| `.start`         | Start value.                                 |
+| `.stop`          | Exclusive endpoint.                          |
+| `.step`          | Step.                                        |
+
+### `str`
+
+Sequence of Unicode code points. PEP 393 kinded storage: UCS-1,
+UCS-2, or UCS-4 depending on the maximum code point.
+
+Methods (selected):
+
+| Method                                     | Returns                                |
+| ------------------------------------------ | -------------------------------------- |
+| `capitalize`, `casefold`, `lower`, `upper`, `swapcase`, `title` | Cased copy. |
+| `count`, `index`, `rindex`, `find`, `rfind` | Substring search.                     |
+| `startswith`, `endswith`                   | Prefix/suffix test.                    |
+| `lstrip`, `rstrip`, `strip`                | Strip whitespace or given chars.       |
+| `center`, `ljust`, `rjust`, `zfill`        | Padding.                               |
+| `split`, `rsplit`, `splitlines`            | Split into list.                       |
+| `partition`, `rpartition`                  | Three-way split at separator.          |
+| `replace`, `translate`, `maketrans`        | Replacement.                           |
+| `join`                                     | Join an iterable of strings.           |
+| `encode(encoding='utf-8', errors='strict')` | Encode to bytes.                      |
+| `format`, `format_map`                     | `str.format` machinery.                |
+| `isalnum`, `isalpha`, `isascii`, `isdecimal`, `isdigit`, `isidentifier`, `islower`, `isnumeric`, `isprintable`, `isspace`, `istitle`, `isupper` | Predicates. |
+| `removeprefix`, `removesuffix`             | Prefix/suffix removal.                 |
+| `expandtabs(tabsize=8)`                    | Tab expansion.                         |
+
+### `bytes`
+
+Immutable byte sequence. Constructors: `bytes()`, `bytes(int)`,
+`bytes(iterable)`, `bytes(string, encoding)`, `bytes.fromhex(s)`.
+
+Methods mirror `str` (decode, hex, split, replace, etc.) but
+operate on bytes. Element access yields `int`, not a length-1
+bytes.
+
+### `bytearray`
+
+Mutable counterpart of `bytes`. Adds `append`, `extend`, `insert`,
+`pop`, `remove`, `reverse`, `clear`, `copy`, `+=`, `*=`.
+
+### `memoryview`
+
+View over a buffer-supporting object. Has `.tobytes()`,
+`.tolist()`, `.cast(format[, shape])`, `.release()`, plus
+attributes `format`, `itemsize`, `ndim`, `shape`, `strides`,
+`readonly`, `c_contiguous`, `f_contiguous`, `contiguous`, `nbytes`,
+`obj`.
+
+## Set types
+
+### `set` / `frozenset`
+
+| Operation                      | set | frozenset | Returns                          |
+| ------------------------------ | --- | --------- | -------------------------------- |
+| `len(s)`                       | Y   | Y         | int                              |
+| `x in s`                       | Y   | Y         | bool                             |
+| `s.isdisjoint(other)`          | Y   | Y         | bool                             |
+| `s.issubset(other)` / `<=`     | Y   | Y         | bool                             |
+| `s.issuperset(other)` / `>=`   | Y   | Y         | bool                             |
+| `s.union(*others)` / `\|`      | Y   | Y         | new set                          |
+| `s.intersection(*others)` / `&`| Y   | Y         | new set                          |
+| `s.difference(*others)` / `-`  | Y   | Y         | new set                          |
+| `s.symmetric_difference(o)` / `^` | Y | Y       | new set                          |
+| `s.add(x)`                     | Y   | -         | -                                |
+| `s.remove(x)`                  | Y   | -         | -                                |
+| `s.discard(x)`                 | Y   | -         | -                                |
+| `s.pop()`                      | Y   | -         | element                          |
+| `s.clear()`                    | Y   | -         | -                                |
+| Augmented update `\|=`, `&=`, `-=`, `^=` | Y | -    | self                             |
+
+## Mapping types
+
+### `dict`
+
+Insertion-ordered. Two internal layouts: combined (key+value
+contiguous) and split (keys shared between instances of the same
+type for `__slots__`-free classes).
+
+| Operation                         | Returns                                  |
+| --------------------------------- | ---------------------------------------- |
+| `len(d)`                          | int                                      |
+| `d[k]`                            | value or `__missing__` or `KeyError`     |
+| `d[k] = v`                        | -                                        |
+| `del d[k]`                        | -                                        |
+| `k in d`                          | bool                                     |
+| `iter(d)`                         | key iterator                             |
+| `d.copy()`                        | shallow copy                             |
+| `d.clear()`                       | -                                        |
+| `d.get(k[, default])`             | value or default                         |
+| `d.setdefault(k[, default])`      | value, inserting default if absent       |
+| `d.pop(k[, default])`             | value                                    |
+| `d.popitem()`                     | `(k, v)` LIFO                            |
+| `d.update(other)` / `d \|= other` | merge                                    |
+| `d \| other`                      | new merged dict                          |
+| `d.keys()`, `d.values()`, `d.items()` | view objects                         |
+| `dict.fromkeys(iter[, value])`    | classmethod                              |
+
+### Dict views
+
+`d.keys()`, `d.values()`, `d.items()` return view objects.
+
+| View          | Implements                                        |
+| ------------- | ------------------------------------------------- |
+| `dict_keys`   | Set-like operations, iteration, length.           |
+| `dict_values` | Iteration, length. Not set-like.                  |
+| `dict_items`  | Set-like (when values are hashable), iteration, length. |
+
+Mutating the dict during view iteration raises `RuntimeError`.
+
+### `mappingproxy`
+
+Read-only view of a dict. Used for class `__dict__`.
+
+## Function and method types
+
+| Type                                  | Description                                  |
+| ------------------------------------- | -------------------------------------------- |
+| `function`                            | User-defined Python function.                |
+| `method`                              | Bound user method.                           |
+| `builtin_function_or_method`          | Built-in or C-level callable.                |
+| `method-wrapper`                      | Bound C-level slot method.                   |
+| `wrapper_descriptor`                  | Unbound C-level slot method.                 |
+| `staticmethod`                        | Descriptor: bypass `self`.                   |
+| `classmethod`                         | Descriptor: bind to class.                   |
+| `functools.partial`                   | Partial application.                         |
+
+### Function attributes
+
+| Attribute            | Meaning                                  |
+| -------------------- | ---------------------------------------- |
+| `__name__`           | Short name.                              |
+| `__qualname__`       | Qualified name.                          |
+| `__module__`         | Defining module.                         |
+| `__doc__`            | Docstring.                               |
+| `__code__`           | Code object.                             |
+| `__globals__`        | Globals dict.                            |
+| `__defaults__`       | Tuple of positional defaults.            |
+| `__kwdefaults__`     | Dict of keyword-only defaults.           |
+| `__closure__`        | Tuple of cell objects (or `None`).       |
+| `__dict__`           | Attribute storage.                       |
+| `__annotations__`    | Annotation dict (lazy).                  |
+| `__type_params__`    | PEP 695 type params.                     |
+| `__wrapped__`        | Set by `functools.wraps`.                |
+
+## `type` metaobject
+
+`type` is the default metaclass. Attributes:
+
+| Attribute            | Meaning                                  |
+| -------------------- | ---------------------------------------- |
+| `type.__name__`      | Short name.                              |
+| `type.__bases__`     | Base classes.                            |
+| `type.__mro__`       | C3 linearisation.                        |
+| `type.__subclasses__()` | Direct subclasses.                    |
+| `type.__instancecheck__` | `isinstance` hook.                   |
+| `type.__subclasscheck__` | `issubclass` hook.                   |
+
+`type(name, bases, dict)` constructs a new class dynamically.
+
+## Module type
+
+A module object has:
+
+| Attribute          | Meaning                                  |
+| ------------------ | ---------------------------------------- |
+| `__name__`         | Module name.                             |
+| `__doc__`          | Module docstring.                        |
+| `__file__`         | Source file (if any).                    |
+| `__loader__`       | Loader instance.                         |
+| `__spec__`         | `ModuleSpec`.                            |
+| `__package__`      | Package name.                            |
+| `__path__`         | Search path (packages only).             |
+| `__dict__`         | Namespace.                               |
+| `__builtins__`     | Builtins reference.                      |
+| `__annotations__`  | Module-level annotations.                |
+
+## `slice`
+
+`slice(stop)`, `slice(start, stop)`, `slice(start, stop, step)`.
+Attributes: `.start`, `.stop`, `.step`. Method `.indices(length)`
+returns a tuple of three ints clamped to the sequence length.
+
+## Generic alias and union types
+
+`list[int]` and friends create `types.GenericAlias` instances. They
+forward `__call__` and `__getattr__` to their origin. `int | str`
+creates a `types.UnionType` instance.
+
+## `types` module aliases
+
+| Name                       | Description                              |
+| -------------------------- | ---------------------------------------- |
+| `types.FunctionType`       | Same as `function`.                      |
+| `types.MethodType`         | Same as `method`.                        |
+| `types.GeneratorType`      | Generator object type.                   |
+| `types.CoroutineType`      | Coroutine object type.                   |
+| `types.AsyncGeneratorType` | Async generator object type.             |
+| `types.MappingProxyType`   | Read-only dict view.                     |
+| `types.SimpleNamespace`    | Attribute-based namespace.               |
+| `types.ModuleType`         | Module type constructor.                 |
+| `types.TracebackType`      | Traceback object type.                   |
+| `types.FrameType`          | Frame object type.                       |
+| `types.CodeType`           | Code object type.                        |
+| `types.CellType`           | Closure cell type.                       |
+
+## Gopy status
+
+| Type                                | State                                          |
+| ----------------------------------- | ---------------------------------------------- |
+| All numeric, sequence, mapping, set types | Complete.                                |
+| `bytearray`, `memoryview`           | Complete.                                      |
+| Function / method types             | Complete.                                      |
+| `type` and metaclass machinery      | Complete.                                      |
+| `slice`, generic alias, union type  | Complete.                                      |
+| Modules                             | Complete.                                      |
+| Buffer protocol                     | Complete for built-in types.                   |
+
+## Reference
+
+* CPython 3.14: [Built-in types](https://docs.python.org/3.14/library/stdtypes.html).
+* `objects/`. gopy's per-type source.
+* [Data model](data-model).
+* [Special methods](dunders).

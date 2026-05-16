@@ -1,0 +1,194 @@
+---
+title: Codec registry
+description: The codec system: encoders, decoders, error handlers, incremental codecs, and the standard codec catalogue.
+---
+
+# Codec registry
+
+Codecs convert between sequences of bytes and sequences of code
+points. Python's codec system is centralised in `Lib/codecs.py` and
+`Lib/encodings/`; a Python runtime must reproduce both the API and
+the byte-equal behaviour of every codec.
+
+Source-of-record: `Lib/codecs.py`, `Lib/encodings/`,
+`Python/codecs.c`,
+[codecs module docs](https://docs.python.org/3.14/library/codecs.html).
+
+## Codec functions
+
+The public functions in `codecs`:
+
+| Function                                             | Returns                                              |
+| ---------------------------------------------------- | ---------------------------------------------------- |
+| `codecs.encode(obj, encoding='utf-8', errors='strict')` | Encoded `bytes`.                                  |
+| `codecs.decode(obj, encoding='utf-8', errors='strict')` | Decoded `str`.                                    |
+| `codecs.lookup(encoding)`                            | `CodecInfo` named tuple.                             |
+| `codecs.lookup_error(name)`                          | Error handler.                                       |
+| `codecs.register(search_function)`                   | Add a codec search function.                         |
+| `codecs.register_error(name, fn)`                    | Register error handler.                              |
+| `codecs.open(filename, mode='r', encoding=None, errors='strict', buffering=-1)` | File opener using a codec. |
+| `codecs.iterencode(iter, encoding, errors='strict')` | Streaming encode.                                    |
+| `codecs.iterdecode(iter, encoding, errors='strict')` | Streaming decode.                                    |
+| `codecs.EncodedFile(file, data_encoding, file_encoding=None, errors='strict')` | Transparent transcoder. |
+
+## `CodecInfo`
+
+`codecs.lookup(name)` returns:
+
+```python
+CodecInfo(encode, decode, streamreader, streamwriter,
+          incrementalencoder, incrementaldecoder,
+          name)
+```
+
+| Field                | Signature                                                |
+| -------------------- | -------------------------------------------------------- |
+| `encode`             | `(str, errors='strict') -> (bytes, length_consumed)`.    |
+| `decode`             | `(bytes, errors='strict') -> (str, length_consumed)`.    |
+| `streamreader`       | `Reader(stream, errors='strict')` class.                  |
+| `streamwriter`       | `Writer(stream, errors='strict')` class.                  |
+| `incrementalencoder` | `IncrementalEncoder(errors='strict')` class.              |
+| `incrementaldecoder` | `IncrementalDecoder(errors='strict')` class.              |
+
+## Error handlers
+
+| Name                  | Behaviour                                                   |
+| --------------------- | ----------------------------------------------------------- |
+| `'strict'`            | Raise `UnicodeError` (default).                             |
+| `'ignore'`            | Skip the offending sequence.                                |
+| `'replace'`           | Replace with U+FFFD (decode) or `?` (encode).               |
+| `'xmlcharrefreplace'` | Encode: `&#NNNN;`.                                          |
+| `'backslashreplace'`  | Encode: `\xNN`, `\uNNNN`, `\UNNNNNNNN`. Decode: `\xNN`.    |
+| `'surrogateescape'`   | Encode/decode: round-trip bytes 0x80-0xFF through U+DC80-U+DCFF. |
+| `'surrogatepass'`     | UTF codecs: allow lone surrogates.                          |
+| `'namereplace'`       | Encode: `\N{NAME}`.                                         |
+
+A custom handler is a callable
+`fn(exc: UnicodeError) -> (replacement_str_or_bytes, new_index)`.
+
+## Standard codecs
+
+### Unicode codecs
+
+| Name                       | Aliases                                | Description                                    |
+| -------------------------- | -------------------------------------- | ---------------------------------------------- |
+| `utf-8`                    | `U8`, `UTF`, `utf8`                    | UTF-8.                                         |
+| `utf-8-sig`                | -                                      | UTF-8 with BOM.                                |
+| `utf-16`                   | `U16`, `utf16`                         | UTF-16 with BOM.                               |
+| `utf-16-be` / `utf-16-le`  | -                                      | UTF-16 explicit endian, no BOM.                |
+| `utf-32`                   | `U32`, `utf32`                         | UTF-32 with BOM.                               |
+| `utf-32-be` / `utf-32-le`  | -                                      | UTF-32 explicit endian, no BOM.                |
+| `utf-7`                    | -                                      | UTF-7.                                         |
+| `ascii`                    | `646`, `us-ascii`                      | ASCII.                                         |
+| `latin-1`                  | `iso-8859-1`, `8859`, `cp819`          | Latin-1.                                       |
+| `unicode-escape`           | -                                      | Python source unicode escapes.                  |
+| `raw-unicode-escape`       | -                                      | Same minus `\u`/`\U`.                          |
+
+### Byte-string codecs
+
+| Name              | Description                                  |
+| ----------------- | -------------------------------------------- |
+| `idna`            | RFC 3490 internationalised domain names.     |
+| `mbcs`            | Windows ANSI codepage.                       |
+| `oem`             | Windows OEM codepage.                        |
+
+### Codepage codecs
+
+The `cp*` family is large; selected entries:
+
+| Name           | Description                          |
+| -------------- | ------------------------------------ |
+| `cp037`        | EBCDIC US.                           |
+| `cp437`        | DOS US.                              |
+| `cp720`        | Arabic.                              |
+| `cp737`        | Greek.                               |
+| `cp775`        | Baltic.                              |
+| `cp850` / `cp852` / `cp855` / `cp857` / `cp858` / `cp860` / `cp861` / `cp862` / `cp863` / `cp864` / `cp865` / `cp866` / `cp869` | Various DOS code pages. |
+| `cp874`        | Thai.                                |
+| `cp932`        | Japanese Shift-JIS.                  |
+| `cp949`        | Korean.                              |
+| `cp950`        | Traditional Chinese.                 |
+| `cp1140` / `cp1250` ... `cp1258` | Windows codepages. |
+
+### Asian codecs
+
+| Name                       | Description                                  |
+| -------------------------- | -------------------------------------------- |
+| `big5`, `big5hkscs`        | Traditional Chinese.                         |
+| `gb2312`, `gbk`, `gb18030` | Simplified Chinese.                          |
+| `euc-jp`, `euc-jis-2004`, `euc-jisx0213` | EUC-JP family.                |
+| `euc-kr`                   | EUC-KR.                                      |
+| `iso-2022-jp`, `iso-2022-jp-1`, `iso-2022-jp-2`, `iso-2022-jp-2004`, `iso-2022-jp-3`, `iso-2022-jp-ext` | ISO-2022-JP variants. |
+| `iso-2022-kr`              | ISO-2022-KR.                                 |
+| `shift-jis`, `shift-jisx0213`, `shift-jis-2004` | Shift-JIS variants.       |
+
+### Special non-text codecs
+
+| Name              | Function                                  |
+| ----------------- | ----------------------------------------- |
+| `base64_codec`    | RFC 3548 base64.                          |
+| `bz2_codec`       | bzip2.                                    |
+| `hex_codec`       | Hex.                                      |
+| `quopri_codec`    | Quoted-printable.                         |
+| `rot_13`          | ROT-13 (str -> str).                      |
+| `uu_codec`        | UUEncode.                                 |
+| `zlib_codec`      | zlib.                                     |
+
+These are accessible via `codecs.encode(b, 'hex_codec')` etc.; they
+do not roundtrip through `str.encode`/`bytes.decode` because they
+do not convert between bytes and str.
+
+## Incremental codecs
+
+`IncrementalEncoder` and `IncrementalDecoder` classes provide
+state for streaming:
+
+| Method                         | Role                              |
+| ------------------------------ | --------------------------------- |
+| `encode(input, final=False)`   | Process a chunk; buffer state.    |
+| `decode(input, final=False)`   | Same for decoding.                |
+| `reset()`                      | Drop buffered state.              |
+| `getstate()` / `setstate(state)` | Serialise buffer.               |
+
+`final=True` flushes any buffered state.
+
+## Stream classes
+
+`StreamReader` and `StreamWriter` wrap a binary stream:
+
+| Method                          | Role                                |
+| ------------------------------- | ----------------------------------- |
+| `read(size=-1)`                 | Decode `size` characters.           |
+| `readline(size=-1)`             | Read one decoded line.              |
+| `readlines(sizehint=-1)`        | Decode all.                         |
+| `write(str)`                    | Encode and write.                   |
+| `writelines(strings)`           | Same for many.                      |
+| `seek` / `tell`                 | Forwarded to underlying stream.     |
+
+## Codec search
+
+A search function takes a normalised encoding name (lowercase,
+hyphens replaced) and returns a `CodecInfo` or `None`. Search
+functions are tried in registration order. Built-in lookup loads
+from `encodings.<name>` via the import system.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `codecs` module surface               | Complete.                                          |
+| Built-in unicode codecs (UTF-8/16/32, ASCII, Latin-1) | Complete.                          |
+| Codepage codecs                       | Complete for the common subset; rare codepages may fall back. |
+| Asian codecs                          | Partial.                                           |
+| Non-text codecs (`hex`, `base64`, `zlib`) | Complete.                                      |
+| Error handler protocol                | Complete.                                          |
+| Incremental codecs                    | Complete.                                          |
+| Stream classes                        | Complete.                                          |
+| `surrogateescape` and `surrogatepass` | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [codecs module](https://docs.python.org/3.14/library/codecs.html).
+* `Lib/codecs.py`, `Lib/encodings/`. Python side.
+* `Python/codecs.c`. C runtime side.
+* `codecs/`, `module/_codecs/`. gopy's port.

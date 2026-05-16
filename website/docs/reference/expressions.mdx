@@ -1,0 +1,267 @@
+---
+title: Expressions
+description: Atoms, primaries, operators, operator precedence, evaluation order, comprehensions, f-strings, and conditional expressions.
+---
+
+# Expressions
+
+An expression produces a value. This page enumerates every
+expression form, the rules that govern evaluation order, and the
+operator precedence that determines parse tree shape.
+
+Source-of-record:
+[CPython expressions](https://docs.python.org/3.14/reference/expressions.html),
+`Python/compile.c` (codegen), `Python/bytecodes.c` (semantics).
+
+## Atoms
+
+| Atom                  | Produces                                  |
+| --------------------- | ----------------------------------------- |
+| `NAME`                | Result of name lookup (see [Execution model](execution-model#resolution-order-legb)). |
+| `NUMBER`              | `int`, `float`, or `complex`.             |
+| `STRING`              | `str`, `bytes`, f-string result, or `t""` template. |
+| `True` / `False` / `None` | The singletons.                       |
+| `...` (`Ellipsis`)    | The singleton.                            |
+| `(...)`               | Grouped expression or tuple.              |
+| `[...]`               | List display or list comprehension.       |
+| `{...}`               | Set, set comprehension, dict, or dict comprehension. |
+
+### Tuple displays
+
+| Form                  | Result                                    |
+| --------------------- | ----------------------------------------- |
+| `()`                  | Empty tuple.                              |
+| `(x,)`                | One-element tuple.                        |
+| `(x, y)`              | Tuple `(x, y)`.                           |
+| `(x)`                 | Just `x` (grouping, not a tuple).         |
+
+### List, set, dict displays
+
+| Form                            | Type                |
+| ------------------------------- | ------------------- |
+| `[a, b, c]`                     | `list`.             |
+| `{a, b, c}`                     | `set`.              |
+| `{a: b, c: d}`                  | `dict`.             |
+| `{}`                            | Empty `dict`.       |
+| `set()`                         | Empty `set` (no literal). |
+| `[a for a in x]`                | List comprehension. |
+| `{a for a in x}`                | Set comprehension.  |
+| `{a: b for a in x}`             | Dict comprehension. |
+| `(a for a in x)`                | Generator expression. |
+
+### Generator expressions
+
+Generator expressions evaluate the leftmost `for` clause's iterator
+eagerly; everything else is lazy. The generator function's frame
+suspends at each `yield`.
+
+## Primaries
+
+Primaries follow an atom and apply operations to it.
+
+| Primary         | Form           | Source slot/operation                  |
+| --------------- | -------------- | -------------------------------------- |
+| Attribute       | `x.name`       | `__getattribute__` / `__getattr__`.    |
+| Subscription    | `x[key]`       | `__getitem__`.                         |
+| Slicing         | `x[a:b:c]`     | `__getitem__(slice(a, b, c))`.         |
+| Call            | `x(args)`      | `__call__` via `tp_call`.              |
+
+Slicing is sugar for constructing a `slice` object and passing it
+to `__getitem__`. Extended slicing `x[a:b, c:d]` builds a tuple of
+slice objects.
+
+## Operator precedence
+
+From lowest to highest binding:
+
+| Precedence | Operator                                          | Associativity |
+| ---------- | ------------------------------------------------- | ------------- |
+| 1          | `lambda`                                          | -             |
+| 2          | `if`–`else` conditional                           | right         |
+| 3          | `or`                                              | left          |
+| 4          | `and`                                             | left          |
+| 5          | `not x`                                           | -             |
+| 6          | `in`, `not in`, `is`, `is not`, `<`, `<=`, `>`, `>=`, `!=`, `==` | left   |
+| 7          | `|`                                               | left          |
+| 8          | `^`                                               | left          |
+| 9          | `&`                                               | left          |
+| 10         | `<<`, `>>`                                        | left          |
+| 11         | `+`, `-`                                          | left          |
+| 12         | `*`, `@`, `/`, `//`, `%`                          | left          |
+| 13         | `+x`, `-x`, `~x` (unary)                          | -             |
+| 14         | `**`                                              | right         |
+| 15         | `await x`                                         | -             |
+| 16         | `x[i]`, `x.attr`, `x(...)`                        | left          |
+| 17         | `(...)`, `[...]`, `{...}`, atom                   | -             |
+
+The walrus `:=` lives outside this table; it is allowed only in
+specific syntactic positions, never at statement top level.
+
+## Boolean operations
+
+Short-circuit:
+
+| Expression | Returns                                             |
+| ---------- | --------------------------------------------------- |
+| `x or y`   | `x` if `bool(x)` else `y`. Does *not* coerce to bool. |
+| `x and y`  | `x` if `not bool(x)` else `y`.                      |
+| `not x`    | `False` if `bool(x)` else `True`. Always a `bool`.  |
+
+## Comparisons
+
+Comparison expressions can be chained: `a < b < c` desugars to
+`a < b and b < c`, but `b` is evaluated only once.
+
+| Operator   | Method                       | Notes                                  |
+| ---------- | ---------------------------- | -------------------------------------- |
+| `<`        | `__lt__`, reflected `__gt__` |                                        |
+| `<=`       | `__le__`, reflected `__ge__` |                                        |
+| `==`       | `__eq__`, reflected `__eq__` | Default: identity.                     |
+| `!=`       | `__ne__`, reflected `__ne__` | Default: `not (x == y)`.               |
+| `>`        | `__gt__`, reflected `__lt__` |                                        |
+| `>=`       | `__ge__`, reflected `__le__` |                                        |
+| `is` / `is not` | -                       | Identity. Not method-overridable.      |
+| `in` / `not in` | `__contains__`         | Falls back to iteration.               |
+
+For numeric comparison, mixed types are coerced according to the
+numeric tower: `int` < `float` < `complex`. Equality across types
+that are not numerically related returns `False`.
+
+## Arithmetic and bitwise operators
+
+All arithmetic and bitwise operators go through forward and reflected
+dunder lookup as described in [Special methods](dunders#binary-arithmetic).
+
+### Numeric semantics
+
+| Operator | Integer behaviour                | Float behaviour              |
+| -------- | -------------------------------- | ---------------------------- |
+| `+`, `-` | Exact arbitrary precision        | IEEE 754                     |
+| `*`      | Exact                            | IEEE 754                     |
+| `/`      | True division -> float            | IEEE 754                     |
+| `//`     | Floor division                   | `math.floor` of true division |
+| `%`      | Floor modulo: sign of divisor    | IEEE remainder for floats    |
+| `**`     | Exact for non-negative exponent  | IEEE 754, special cases per math.pow |
+| `divmod` | `(a // b, a % b)`                | Same                          |
+
+### Bitwise semantics
+
+`int` is treated as two's complement of infinite width. `x & y`,
+`x | y`, `x ^ y` operate bitwise. `x << n` raises `ValueError` for
+negative `n`. `~x` is `-(x + 1)`.
+
+## Sequence and mapping operations
+
+| Operation                | Sequences                       | Mappings                  |
+| ------------------------ | ------------------------------- | ------------------------- |
+| `x[i]`                   | Element at index `i`.           | Value for key `i`.        |
+| `x[i:j]` / `x[i:j:k]`    | Slice.                          | -                         |
+| `len(x)`                 | Length.                         | Number of items.          |
+| `x + y`                  | Concatenation.                  | -                         |
+| `x * n`                  | Repetition.                     | -                         |
+| `y in x`                 | Containment (linear scan).      | Key membership.           |
+
+## Conditional expression
+
+```
+x if c else y
+```
+
+Evaluates `c`. If truthy, evaluates and returns `x`. Else
+evaluates and returns `y`. The unselected branch is not evaluated.
+
+## Lambda
+
+```
+lambda params: expression
+```
+
+A `lambda` is an unnamed function expression. Body is a single
+expression (no statements). Same parameter syntax as `def`.
+
+## Yield expressions
+
+| Form                 | Effect                                          |
+| -------------------- | ----------------------------------------------- |
+| `yield`              | Yields `None`. Returns the value sent or `None`. |
+| `yield value`        | Yields `value`. Returns the value sent.         |
+| `yield from iter`    | Delegates to a sub-iterator.                    |
+
+`yield from g` is roughly equivalent to:
+
+```python
+for x in g:
+    yield x
+```
+
+but it also forwards `send`, `throw`, and `close`.
+
+`await expr` is a related coroutine-only form; see
+[Compound statements -> async](statements-compound#async).
+
+## Assignment expression (walrus)
+
+```
+x := value
+```
+
+Binds `value` to `x` in the *enclosing* scope (or the comprehension's
+hidden scope if used inside one). Allowed positions:
+
+| Allowed in                              | Not allowed in                          |
+| --------------------------------------- | --------------------------------------- |
+| `if`/`while` condition                  | Top-level expression statement          |
+| Comprehension `if` and outer iterable   | `lambda` parameter default              |
+| Function-call argument                  | Function-def parameter default          |
+| Subscript                               | Augmented assignment target             |
+
+## Starred expression
+
+`*expr` and `**expr` appear in:
+
+| Context                  | Meaning                                  |
+| ------------------------ | ---------------------------------------- |
+| Function call            | Splat into positional / keyword.         |
+| Function def params      | Variadic positional / variadic keyword.  |
+| Tuple/list display       | Unpack iterable into the display.        |
+| Dict display             | Unpack mapping into the display.         |
+| Assignment target        | Collect remaining elements into a list (PEP 3132). |
+
+## Comprehension scoping
+
+A comprehension creates its own scope. The leftmost iterable is
+evaluated in the enclosing scope; everything else is in the
+comprehension's scope. The walrus `:=` inside a comprehension
+writes to the enclosing scope, not the comprehension scope.
+
+## F-string expressions
+
+| Element                           | Meaning                                   |
+| --------------------------------- | ----------------------------------------- |
+| `{expr}`                          | `format(expr, '')`.                       |
+| `{expr!r}` / `{expr!s}` / `{expr!a}` | Apply `repr` / `str` / `ascii` first.  |
+| `{expr:format_spec}`              | Pass `format_spec` to `__format__`.       |
+| `{expr=}`                         | Emit `expr=<repr>` for debugging.         |
+| `{{` / `}}`                       | Literal brace.                            |
+
+Any expression is allowed inside `{...}` since PEP 701, including
+backslashes, line breaks, and nested f-strings.
+
+## Evaluation order
+
+Python evaluates operands left to right with these exceptions:
+
+| Construct                  | Order                                            |
+| -------------------------- | ------------------------------------------------ |
+| Assignment `lhs = rhs`     | `rhs` first, then `lhs` targets.                 |
+| Comparison chain `a < b < c` | `a`, `b`, then `b < c`. `b` evaluated once.    |
+| `x if c else y`            | `c` first, then `x` or `y`.                      |
+| `x or y` / `x and y`       | `x` first, then `y` only if needed.              |
+| Function call `f(x, y, z)` | `f`, then `x`, `y`, `z` in order; keyword args after positional. |
+
+## Reference
+
+* CPython 3.14: [Expressions](https://docs.python.org/3.14/reference/expressions.html).
+* `Python/bytecodes.c`. Operator semantics.
+* [Special methods](dunders). The slot reference.
+* [Opcodes](opcodes). The bytecodes emitted for each expression.

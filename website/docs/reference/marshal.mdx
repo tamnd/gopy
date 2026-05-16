@@ -1,0 +1,190 @@
+---
+title: Marshal and .pyc format
+description: The on-disk format of compiled Python: marshal type codes, the .pyc header, hash-based and timestamp-based invalidation.
+---
+
+# Marshal and .pyc format
+
+Compiled Python is stored as a *marshalled* code object preceded
+by a fixed-size header. This page describes both the wire format
+(needed to read a CPython `.pyc`) and the invalidation rules.
+
+Source-of-record: `Python/marshal.c`,
+[the marshal module docs](https://docs.python.org/3.14/library/marshal.html),
+PEP 552 (hash-based pycs).
+
+## `.pyc` file layout
+
+| Offset | Size | Field              | Description                                   |
+| ------ | ---- | ------------------ | --------------------------------------------- |
+| 0      | 4    | magic              | Version-keyed magic number.                   |
+| 4      | 4    | flags              | Bit 0 = hash-based; bit 1 = check source.     |
+| 8      | 4    | timestamp / hash[0:4] | Source mtime (timestamp-based) or low 32 bits of source hash. |
+| 12     | 4    | size / hash[4:8]   | Source size (timestamp-based) or high 32 bits of source hash. |
+| 16     | -    | body               | Marshalled code object.                       |
+
+The header is always 16 bytes. For hash-based `.pyc` (flag bit 0
+set), bytes 8-15 are the 8-byte SipHash of the source file. The
+hash is computed with the SipHash key derived from `PYTHONHASHSEED`.
+
+### Flags
+
+| Bit | Name         | Meaning                                                  |
+| --- | ------------ | -------------------------------------------------------- |
+| 0   | hash-based   | Use hash invalidation instead of mtime.                  |
+| 1   | checked      | If hash-based, re-check source on import.                |
+
+For hash-based unchecked pycs, the source file is *not* read on
+import even when present.
+
+### Magic number
+
+The magic number changes with every CPython release whose bytecode
+is incompatible. The number is little-endian followed by `\r\n` so
+that a `.pyc` viewed in a text mode shows up as garbled.
+
+CPython 3.14 magic: `3650` (the underlying value).
+
+Gopy uses a different magic number. Its `.pyc` cannot currently be
+read by CPython, and vice versa.
+
+## Marshal wire format
+
+A marshalled value is `(type_byte, payload)`. The high bit of the
+type byte (`FLAG_REF`, `0x80`) signals "remember this object for
+back-references".
+
+### Type codes
+
+| Code  | Char | Type                                  |
+| ----- | ---- | ------------------------------------- |
+| `0x30` | `'0'` | `NULL` (used internally).            |
+| `0x4e` | `'N'` | `None`.                              |
+| `0x46` | `'F'` | `False`.                             |
+| `0x54` | `'T'` | `True`.                              |
+| `0x53` | `'S'` | `StopIteration` (sentinel).          |
+| `0x2e` | `'.'` | `Ellipsis`.                          |
+| `0x69` | `'i'` | int (32-bit).                        |
+| `0x6c` | `'l'` | int (long, sign-magnitude).          |
+| `0x66` | `'f'` | float (text representation, legacy). |
+| `0x67` | `'g'` | float (binary, 8 bytes).             |
+| `0x78` | `'x'` | complex (text, legacy).              |
+| `0x79` | `'y'` | complex (binary, 16 bytes).          |
+| `0x73` | `'s'` | string (bytes).                      |
+| `0x74` | `'t'` | interned str.                        |
+| `0x75` | `'u'` | unicode str (UTF-8).                 |
+| `0x72` | `'r'` | back reference.                      |
+| `0x28` | `'('` | tuple.                               |
+| `0x5b` | `'['` | list.                                |
+| `0x7b` | `'{'` | dict (legacy; `0` terminator).       |
+| `0x3c` | `'<'` | set.                                 |
+| `0x3e` | `'>'` | frozenset.                           |
+| `0x63` | `'c'` | code object.                         |
+| `0x29` | `')'` | small tuple (oparg = length).        |
+| `0x7a` | `'z'` | short ascii.                         |
+| `0x5a` | `'Z'` | short ascii interned.                |
+| `0xe1` | -    | small tuple with refs (and analogs)  |
+
+### Integer encoding
+
+| Code | Encoding                                                    |
+| ---- | ----------------------------------------------------------- |
+| `'i'`| 32-bit signed little-endian.                                |
+| `'l'`| 32-bit signed digit count, then absolute value as little-endian 15-bit digits. Negative count means negative number. |
+
+### Float encoding
+
+| Code | Encoding                                                    |
+| ---- | ----------------------------------------------------------- |
+| `'f'`| 1 byte length, then ASCII repr. Legacy.                    |
+| `'g'`| 8-byte IEEE 754 little-endian.                              |
+
+### String encoding
+
+| Code | Encoding                                                    |
+| ---- | ----------------------------------------------------------- |
+| `'s'`| 32-bit length, then raw bytes.                             |
+| `'t'`| 32-bit length, then UTF-8 bytes. Interned in `sys.intern` table at unmarshal. |
+| `'u'`| 32-bit length, then UTF-8 bytes.                            |
+| `'z'`| 8-bit length, then ASCII bytes.                            |
+| `'Z'`| 8-bit length, then ASCII bytes, interned.                  |
+
+### Sequence encoding
+
+| Code | Encoding                                                    |
+| ---- | ----------------------------------------------------------- |
+| `'('`| 32-bit length, then `length` marshalled elements.          |
+| `')'`| 8-bit length, then `length` marshalled elements.           |
+| `'['`| 32-bit length, then `length` marshalled elements.          |
+| `'<'`| 32-bit length, then `length` marshalled elements.          |
+| `'>'`| 32-bit length, then `length` marshalled elements.          |
+
+### Back-reference
+
+Setting `FLAG_REF` (`0x80`) on a type byte appends the object to
+an internal table indexed from 0. The `'r'` type with a 32-bit
+oparg dereferences the table. The unmarshaller uses this to
+share strings, tuples, code objects, and other values.
+
+### Code object encoding
+
+A code object marshals as:
+
+| Field              | Type                                |
+| ------------------ | ----------------------------------- |
+| `co_argcount`      | int.                                |
+| `co_posonlyargcount` | int.                              |
+| `co_kwonlyargcount` | int.                               |
+| `co_stacksize`     | int.                                |
+| `co_flags`         | int.                                |
+| `co_code`          | bytes.                              |
+| `co_consts`        | tuple.                              |
+| `co_names`         | tuple.                              |
+| `co_localsplusnames` | tuple.                            |
+| `co_localspluskinds` | bytes (per-name kind flag).       |
+| `co_filename`      | str.                                |
+| `co_name`          | str.                                |
+| `co_qualname`      | str.                                |
+| `co_firstlineno`   | int.                                |
+| `co_linetable`     | bytes.                              |
+| `co_exceptiontable` | bytes.                             |
+
+## Loading and validation
+
+| Step                                                                   |
+| ---------------------------------------------------------------------- |
+| Read 16-byte header.                                                   |
+| Compare magic against compiled-in expected magic; mismatch -> recompile. |
+| If timestamp-based, compare mtime and size against the source file.    |
+| If hash-based and checked, recompute hash and compare.                 |
+| If hash-based and unchecked, skip source check.                        |
+| Unmarshal the body and produce the code object.                        |
+
+## Writing
+
+| Step                                                                   |
+| ---------------------------------------------------------------------- |
+| Compile source to a code object.                                       |
+| Optionally fsync source to capture mtime.                              |
+| Write 16-byte header.                                                  |
+| Marshal the code object body.                                          |
+| Rename atomically into `__pycache__`.                                  |
+
+## Gopy status
+
+| Area                      | State                                                   |
+| ------------------------- | ------------------------------------------------------- |
+| Marshal wire format       | Complete for every type code listed above.              |
+| Header layout             | Complete.                                               |
+| Timestamp invalidation    | Complete.                                               |
+| Hash-based invalidation   | Complete.                                               |
+| Magic number              | Gopy-specific; not byte-equal with CPython's, so files do not round-trip across the two. |
+| Tier-2 / executor state in marshal | Not applicable: traces are runtime-only.       |
+
+## Reference
+
+* `Python/marshal.c`. Canonical implementation.
+* `Lib/importlib/_bootstrap_external.py`. The header read/write.
+* `marshal/`. gopy's port.
+* PEP 552 (hash-based pycs).
+* [Import system -> .pyc caching](import-system#pyc-caching).

@@ -1,10 +1,311 @@
 ---
-title: uerrors
-description: Reference tables for errors.
+title: Built-in exceptions
+description: The complete Python 3.14 exception hierarchy, what each exception means, where it is raised, and the attributes it carries.
 ---
 
-# uerrors
+# Built-in exceptions
 
-Reference tables for errors. Generated and curated against CPython 3.14.
+Every exception in Python is an instance of `BaseException` or a
+subclass. This page is the canonical hierarchy, with descriptions
+of where each one is raised. Indentation reflects subclass
+relationships.
 
-(Tables in progress. See [manual/status](../manual/status) for coverage.)
+Source-of-record: `Objects/exceptions.c`,
+[the exception hierarchy](https://docs.python.org/3.14/library/exceptions.html).
+
+## Base attributes
+
+All exceptions carry:
+
+| Attribute           | Meaning                                                      |
+| ------------------- | ------------------------------------------------------------ |
+| `args`              | Tuple of arguments passed to the constructor.                |
+| `__cause__`         | Set by `raise ... from ...`.                                 |
+| `__context__`       | Implicit context set when raising during handling.           |
+| `__traceback__`     | Traceback object (may be set later via `with_traceback`).    |
+| `__suppress_context__` | `True` after `raise ... from None`.                       |
+| `__notes__`         | List of strings added via `add_note(s)` (PEP 678).           |
+
+## Hierarchy
+
+```
+BaseException
+ +-- BaseExceptionGroup
+ +-- GeneratorExit
+ +-- KeyboardInterrupt
+ +-- SystemExit
+ +-- Exception
+      +-- ArithmeticError
+      |    +-- FloatingPointError
+      |    +-- OverflowError
+      |    +-- ZeroDivisionError
+      +-- AssertionError
+      +-- AttributeError
+      +-- BufferError
+      +-- EOFError
+      +-- ExceptionGroup
+      +-- ImportError
+      |    +-- ModuleNotFoundError
+      +-- LookupError
+      |    +-- IndexError
+      |    +-- KeyError
+      +-- MemoryError
+      +-- NameError
+      |    +-- UnboundLocalError
+      +-- OSError
+      |    +-- BlockingIOError
+      |    +-- ChildProcessError
+      |    +-- ConnectionError
+      |    |    +-- BrokenPipeError
+      |    |    +-- ConnectionAbortedError
+      |    |    +-- ConnectionRefusedError
+      |    |    +-- ConnectionResetError
+      |    +-- FileExistsError
+      |    +-- FileNotFoundError
+      |    +-- InterruptedError
+      |    +-- IsADirectoryError
+      |    +-- NotADirectoryError
+      |    +-- PermissionError
+      |    +-- ProcessLookupError
+      |    +-- TimeoutError
+      +-- ReferenceError
+      +-- RuntimeError
+      |    +-- NotImplementedError
+      |    +-- PythonFinalizationError
+      |    +-- RecursionError
+      +-- StopAsyncIteration
+      +-- StopIteration
+      +-- SyntaxError
+      |    +-- IndentationError
+      |         +-- TabError
+      +-- SystemError
+      +-- TypeError
+      +-- ValueError
+      |    +-- UnicodeError
+      |         +-- UnicodeDecodeError
+      |         +-- UnicodeEncodeError
+      |         +-- UnicodeTranslateError
+      +-- Warning
+           +-- BytesWarning
+           +-- DeprecationWarning
+           +-- EncodingWarning
+           +-- FutureWarning
+           +-- ImportWarning
+           +-- PendingDeprecationWarning
+           +-- ResourceWarning
+           +-- RuntimeWarning
+           +-- SyntaxWarning
+           +-- UnicodeWarning
+           +-- UserWarning
+```
+
+## `BaseException`
+
+The common ancestor. User code should not raise or catch
+`BaseException`; it intentionally also catches `KeyboardInterrupt`,
+`SystemExit`, and `GeneratorExit`.
+
+## Direct subclasses of `BaseException`
+
+### `BaseExceptionGroup`
+
+Wraps multiple unrelated exceptions. Constructed as
+`BaseExceptionGroup(message, [exc1, exc2, ...])`. Becomes
+`ExceptionGroup` if all wrapped exceptions are `Exception`
+subclasses.
+
+| Method                            | Returns                                              |
+| --------------------------------- | ---------------------------------------------------- |
+| `.exceptions`                     | Tuple of wrapped exceptions.                         |
+| `.message`                        | Message string.                                      |
+| `.subgroup(condition)`            | New group with matching exceptions only.             |
+| `.split(condition)`               | `(matching_group, rest_group)`; either may be `None`. |
+
+### `GeneratorExit`
+
+Raised by `close()` on a generator or coroutine. Allows `finally`
+to run. Catching and swallowing it is a `RuntimeError`.
+
+### `KeyboardInterrupt`
+
+Raised on SIGINT (Ctrl-C). Default handler is `signal.default_int_handler`.
+
+### `SystemExit`
+
+Raised by `sys.exit()`. The interpreter catches it at the top and
+exits. Carries `.code` (the int passed in).
+
+## `Exception` direct subclasses
+
+### `ArithmeticError`
+
+Base for `OverflowError`, `ZeroDivisionError`, `FloatingPointError`.
+
+### `AssertionError`
+
+Raised by `assert` when the expression is false.
+
+### `AttributeError`
+
+Raised when attribute lookup fails on a non-mapping (`getattr`
+returns or `__getattribute__` raises). Carries `.name` and
+`.obj`.
+
+### `BufferError`
+
+Raised when a buffer-related operation cannot be done.
+
+### `EOFError`
+
+Raised by `input()` at end of file.
+
+### `ExceptionGroup`
+
+Subclass of `BaseExceptionGroup` whose elements are all `Exception`.
+
+### `ImportError`
+
+Raised when `import` fails. Carries `.name` and `.path`.
+`ModuleNotFoundError` subclasses it for the specific case of the
+module not being found.
+
+### `LookupError`
+
+Base for `IndexError`, `KeyError`. Also raised by some codec lookups.
+
+### `MemoryError`
+
+Raised when memory allocation fails.
+
+### `NameError`
+
+Raised when a free or global name is unresolved. Carries `.name`.
+`UnboundLocalError` subclasses it for locals.
+
+### `OSError`
+
+Wraps every OS-level error. Carries `.errno`, `.strerror`,
+`.filename`, `.filename2`, `.winerror`. The errno-specific
+subclasses below are mapped automatically.
+
+| Subclass                  | errno                                |
+| ------------------------- | ------------------------------------ |
+| `BlockingIOError`         | `EAGAIN`, `EWOULDBLOCK`, `EINPROGRESS` |
+| `ChildProcessError`       | `ECHILD`                             |
+| `ConnectionAbortedError`  | `ECONNABORTED`                       |
+| `ConnectionRefusedError`  | `ECONNREFUSED`                       |
+| `ConnectionResetError`    | `ECONNRESET`                         |
+| `BrokenPipeError`         | `EPIPE`, `ESHUTDOWN`                 |
+| `FileExistsError`         | `EEXIST`                             |
+| `FileNotFoundError`       | `ENOENT`                             |
+| `InterruptedError`        | `EINTR`                              |
+| `IsADirectoryError`       | `EISDIR`                             |
+| `NotADirectoryError`      | `ENOTDIR`                            |
+| `PermissionError`         | `EACCES`, `EPERM`                    |
+| `ProcessLookupError`      | `ESRCH`                              |
+| `TimeoutError`            | `ETIMEDOUT`                          |
+
+### `ReferenceError`
+
+Raised when a weak reference proxy is used after the referent is
+garbage-collected.
+
+### `RuntimeError`
+
+Generic runtime problem. Subclasses:
+
+| Subclass                    | Raised when                                        |
+| --------------------------- | -------------------------------------------------- |
+| `NotImplementedError`       | A method is intentionally not implemented.         |
+| `RecursionError`            | The recursion limit is exceeded.                   |
+| `PythonFinalizationError`   | Operation attempted after interpreter teardown began. |
+
+### `StopIteration`
+
+Raised by `__next__` to signal end of iteration. Carries `.value`
+(the return value of the generator, when relevant).
+
+### `StopAsyncIteration`
+
+The async equivalent.
+
+### `SyntaxError`
+
+Raised during compilation. Carries `.msg`, `.filename`, `.lineno`,
+`.offset`, `.text`, `.end_lineno`, `.end_offset`.
+
+| Subclass            | Raised when                                       |
+| ------------------- | ------------------------------------------------- |
+| `IndentationError`  | Indentation is malformed.                         |
+| `TabError`          | Inconsistent tabs and spaces.                     |
+
+### `SystemError`
+
+Internal interpreter error. Should never happen in user code.
+
+### `TypeError`
+
+Raised when an operation is applied to an object of inappropriate
+type.
+
+### `ValueError`
+
+Raised when an operation receives a value of correct type but
+inappropriate value.
+
+| Subclass                  | Raised when                                       |
+| ------------------------- | ------------------------------------------------- |
+| `UnicodeError`            | Unicode-related encoding/decoding error.          |
+| `UnicodeDecodeError`      | Decode failure. Has `.encoding`, `.object`, `.start`, `.end`, `.reason`. |
+| `UnicodeEncodeError`      | Encode failure. Same attributes.                  |
+| `UnicodeTranslateError`   | Translate failure.                                |
+
+### `Warning`
+
+Base for warning categories. Categorisation drives filtering via the
+`warnings` module.
+
+| Subclass                  | Use                                               |
+| ------------------------- | ------------------------------------------------- |
+| `BytesWarning`            | Bytes/str confusion.                              |
+| `DeprecationWarning`      | Feature being removed.                            |
+| `EncodingWarning`         | Implicit `'locale'` encoding.                     |
+| `FutureWarning`           | Behaviour will change.                            |
+| `ImportWarning`           | Probable import mistake.                          |
+| `PendingDeprecationWarning` | Long-horizon deprecation.                       |
+| `ResourceWarning`         | Resource not explicitly closed.                   |
+| `RuntimeWarning`          | Runtime behaviour suspicious.                     |
+| `SyntaxWarning`           | Suspicious syntax that compiles.                  |
+| `UnicodeWarning`          | Unicode-related warning.                          |
+| `UserWarning`             | Generic user warning. Default category.           |
+
+## PEP 678 notes
+
+Every exception supports `.add_note(s)` to attach a string. Notes
+are accessible via `.__notes__` and rendered in tracebacks.
+
+## Exception groups quirks
+
+| Property                                                                     |
+| ---------------------------------------------------------------------------- |
+| `BaseExceptionGroup(...)` returns an `ExceptionGroup` if all elements are `Exception`. |
+| `except*` must use a non-group exception type; matching the group itself raises `TypeError`. |
+| `subgroup` and `split` preserve `__cause__`, `__context__`, and `__notes__`. |
+
+## Gopy status
+
+| Class group                            | State                          |
+| -------------------------------------- | ------------------------------ |
+| All `BaseException` subclasses         | Complete.                      |
+| OS errno mapping                       | Complete.                      |
+| Exception groups (`BaseExceptionGroup`, `ExceptionGroup`) | Complete. |
+| `__notes__` (PEP 678)                  | Complete.                      |
+| Implicit `__context__`                 | Complete.                      |
+
+## Reference
+
+* CPython 3.14: [Built-in exceptions](https://docs.python.org/3.14/library/exceptions.html).
+* `Objects/exceptions.c`. The C side.
+* `errors/`. gopy's port.
+* [Execution model -> Exception flow](execution-model#exception-flow).
+* [Compound statements -> try](statements-compound#try).

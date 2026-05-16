@@ -2237,10 +2237,56 @@ const sidebars = {
 
   referenceSidebar: [
     'reference/index',
-    'reference/opcodes',
-    'reference/types',
-    'reference/builtins',
-    'reference/errors',
+    {
+      type: 'category',
+      label: 'Language',
+      collapsed: false,
+      items: [
+        'reference/lexical',
+        'reference/grammar',
+        'reference/expressions',
+        'reference/statements-simple',
+        'reference/statements-compound',
+        'reference/top-level',
+        'reference/format-spec',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Data model',
+      collapsed: false,
+      items: [
+        'reference/data-model',
+        'reference/dunders',
+        'reference/protocols',
+        'reference/types',
+        'reference/typing',
+        'reference/errors',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Execution',
+      collapsed: false,
+      items: [
+        'reference/execution-model',
+        'reference/import-system',
+        'reference/memory-model',
+        'reference/builtins',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Compiler and runtime',
+      collapsed: false,
+      items: [
+        'reference/ast',
+        'reference/opcodes',
+        'reference/abi',
+        'reference/marshal',
+        'reference/codecs',
+      ],
+    },
   ],
 
   modulesSidebar: [

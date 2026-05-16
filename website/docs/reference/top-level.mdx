@@ -1,0 +1,145 @@
+---
+title: Top-level components
+description: How modules, interactive sessions, and expression input differ at the top level, and how each is compiled and executed.
+---
+
+# Top-level components
+
+A *top-level component* is a complete input unit submitted to the
+interpreter. There are five kinds; each has its own grammar entry
+point and execution behaviour.
+
+Source-of-record:
+[CPython top-level components](https://docs.python.org/3.14/reference/toplevel_components.html),
+`Python/pythonrun.c`.
+
+## Kinds of top-level input
+
+| Kind                | Compiled with mode | Source entry point             | Used by                            |
+| ------------------- | ------------------ | ------------------------------ | ---------------------------------- |
+| File input          | `exec`             | `file` grammar rule            | `python3 file.py`, `import`, `exec()`. |
+| Interactive input   | `single`           | `interactive` rule             | REPL, `python3 -c "..."`.           |
+| Expression input    | `eval`             | `eval` rule                    | `eval()`, expressions in `compile`. |
+| Function type input | `func_type`        | `func_type` rule               | `typing.get_type_hints` for stub-style annotations. |
+
+## File input
+
+```
+file: [statements] ENDMARKER
+```
+
+| Property                                                            |
+| ------------------------------------------------------------------- |
+| Any sequence of statements is allowed.                              |
+| Bound names land in the module's `__dict__`.                        |
+| Trailing expressions do *not* print; their values are discarded.    |
+| `from x import *` is allowed (only here).                           |
+| `await` outside an `async def` is an error (unless `PyCF_ALLOW_TOP_LEVEL_AWAIT`). |
+
+## Interactive input
+
+```
+interactive: statement_newline
+```
+
+Each newline-terminated input is one compile unit.
+
+| Property                                                            |
+| ------------------------------------------------------------------- |
+| Bound names land in `__main__.__dict__`.                            |
+| The result of a top-level expression statement is sent to `sys.displayhook`. |
+| `displayhook` rebinds `builtins._` to the value if it is not `None`. |
+| Multi-line input requires a blank line to terminate.                |
+
+## Expression input
+
+```
+eval: expressions [NEWLINE]* ENDMARKER
+```
+
+| Property                                                                  |
+| ------------------------------------------------------------------------- |
+| Exactly one expression.                                                   |
+| Statements (assignment, `import`, ...) are syntax errors.                |
+| Result is returned by `eval()`.                                           |
+| Trailing newlines are tolerated.                                          |
+
+## Function type input
+
+```
+func_type: '(' [type_expressions] ')' '->' expression
+```
+
+Used for parsing function signatures embedded in stub files or
+type-comment strings. Returns an `ast.FunctionType` node.
+
+## Compile flags
+
+Both `compile()` and the lower-level entry points accept flag
+bits that change parsing:
+
+| Flag                          | Effect                                                  |
+| ----------------------------- | ------------------------------------------------------- |
+| `PyCF_TYPE_COMMENTS`          | Recognise `# type: ...` comments.                       |
+| `PyCF_ONLY_AST`               | Return an AST node instead of a code object.            |
+| `PyCF_ALLOW_TOP_LEVEL_AWAIT`  | Permit `await` and `async` constructs at the top level. |
+| `PyCF_OPTIMIZED_AST`          | Apply constant folding to the returned AST.             |
+| `PyCF_DONT_IMPLY_DEDENT`      | Used by interactive input to defer dedents.             |
+
+## `__main__` and `__name__`
+
+Every module has `__name__`. For the entry-point module this is
+`'__main__'`. The idiom
+
+```python
+if __name__ == "__main__":
+    main()
+```
+
+distinguishes "I was imported" from "I am the script".
+
+| Invocation                              | `__name__`     |
+| --------------------------------------- | -------------- |
+| `python3 script.py`                     | `'__main__'`   |
+| `python3 -m pkg.module`                 | `'__main__'`   |
+| `import pkg.module`                     | `'pkg.module'` |
+| `python3 -c "code"`                     | `'__main__'`   |
+| Interactive REPL                        | `'__main__'`   |
+
+## Encoding declarations
+
+A source file's encoding is determined from:
+
+1. **BOM.** UTF-8 BOM forces UTF-8.
+2. **Coding cookie.** A `# coding: name` comment on the first or
+   second line.
+3. **Default.** UTF-8 if neither is present.
+
+The cookie regex: `coding[=:]\s*([-\w.]+)`. A BOM combined with a
+non-UTF-8 cookie is a `SyntaxError`.
+
+## Bytecode caching
+
+When a file is imported, the compiler can cache the produced
+bytecode as a `.pyc` file under `__pycache__`. See
+[Import system -> .pyc caching](import-system#pyc-caching) and
+[Marshal format](marshal).
+
+## Gopy entry points
+
+Embedders use these directly:
+
+| Go function                              | CPython analogue                              |
+| ---------------------------------------- | --------------------------------------------- |
+| `pythonrun.RunSimpleString(ts, src, g, w)` | `PyRun_SimpleStringFlags`.                  |
+| `pythonrun.Run(ts, code, w)`             | `PyEval_EvalCode`.                            |
+| `pythonrun.RunCode(ts, code, g)`         | `PyEval_EvalCode` with explicit globals.      |
+| `pythonrun.InteractiveLoop(ts, ...)`     | `PyRun_InteractiveLoopFlags`.                 |
+| `parser.ParseString(src, fn, mode)`      | `PyParser_SimpleParseString`.                 |
+| `compile.Compile(mod, fn, opt)`          | `_PyAST_Compile`.                             |
+
+## Reference
+
+* CPython 3.14: [Top-level components](https://docs.python.org/3.14/reference/toplevel_components.html).
+* `Python/pythonrun.c`. The runtime entry points.
+* [Manual -> Embedding](/docs/manual/embedding) for Go-side use.

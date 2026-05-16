@@ -1,0 +1,245 @@
+---
+title: Lexical analysis
+description: Source encoding, line structure, indentation, identifiers, keywords, literals, operators, and delimiters in Python 3.14.
+---
+
+# Lexical analysis
+
+A Python program is a sequence of logical lines. The lexer converts
+the raw byte stream into a token stream that the parser consumes.
+This page documents every token kind, every literal form, and the
+rules that govern how characters become tokens.
+
+Source-of-record: `Parser/tokenizer/`, `Parser/lexer/lexer.c`,
+and the [CPython lexical analysis chapter](https://docs.python.org/3.14/reference/lexical_analysis.html).
+
+## Source encoding
+
+By default a source file is UTF-8. A different encoding can be
+declared on the first or second line:
+
+```python
+# -*- coding: latin-1 -*-
+```
+
+The encoding declaration matches the regex
+`coding[=:]\s*([-\w.]+)`. A file with a BOM is treated as UTF-8;
+combining a BOM with a non-UTF-8 declaration is an error.
+
+## Line structure
+
+| Concept            | Definition                                                                  |
+| ------------------ | --------------------------------------------------------------------------- |
+| Logical line       | One or more physical lines joined by implicit or explicit continuation.     |
+| Physical line      | A sequence of characters terminated by a line break.                        |
+| Line break         | `\n`, `\r\n`, or `\r`. Normalised to `\n` internally.                       |
+| Blank line         | Contains only spaces, tabs, formfeeds, or a comment.                        |
+| Comment            | `#` to end-of-line.                                                         |
+| Explicit join      | A line ending with a non-string-quoted `\` joins to the next.               |
+| Implicit join      | Lines inside `()`, `[]`, or `{}` join automatically.                        |
+
+## Indentation
+
+Indentation produces `INDENT` and `DEDENT` tokens. The lexer keeps a
+stack; the first non-whitespace token on a line is compared against
+the top of the stack.
+
+| Rule                                                              |
+| ----------------------------------------------------------------- |
+| Tabs are replaced as if they advanced to the next multiple of 8.  |
+| Mixing tabs and spaces that produce ambiguous depth is an error.  |
+| Indentation only matters at the start of a logical line.          |
+| Blank and comment-only lines do not affect the indent stack.      |
+
+## Whitespace between tokens
+
+Spaces, tabs, and formfeed characters separate tokens but produce
+no token of their own. They are required where two adjacent tokens
+would otherwise merge (`if x` vs `ifx`).
+
+## Identifiers
+
+Identifiers follow Unicode UAX-31. The full pattern is
+`xid_start xid_continue*`, with the additions Python documents:
+
+| Group                | Characters                                                |
+| -------------------- | --------------------------------------------------------- |
+| `xid_start`          | ASCII letters, `_`, and Unicode letters with `XID_Start`. |
+| `xid_continue`       | `xid_start`, ASCII digits, Unicode digits, marks.         |
+
+Identifiers are NFKC-normalised before comparison. `Python` and
+`Python` (full-width) compare equal.
+
+### Reserved classes
+
+| Class                 | Form              | Notes                                       |
+| --------------------- | ----------------- | ------------------------------------------- |
+| Public                | `name`            | Unrestricted use.                           |
+| Soft private          | `_name`           | Convention: not exported by `from x import *`. |
+| Class private         | `__name`          | Name-mangled inside a class body.           |
+| Dunder                | `__name__`        | Reserved by the interpreter and stdlib.     |
+
+## Keywords
+
+Hard keywords. The lexer rejects these as identifiers in every
+context:
+
+```
+False      None       True       and        as         assert
+async      await      break      class      continue   def
+del        elif       else       except     finally    for
+from       global     if         import     in         is
+lambda     nonlocal   not        or         pass       raise
+return     try        while      with       yield
+```
+
+### Soft keywords
+
+Soft keywords are reserved only in specific syntactic positions:
+
+| Soft keyword | Reserved in                                          |
+| ------------ | ---------------------------------------------------- |
+| `match`      | The head of a `match` statement.                     |
+| `case`       | The head of a `case` clause inside `match`.          |
+| `type`       | The `type` statement (PEP 695 type alias).           |
+| `_`          | A wildcard pattern in `case _:`.                     |
+
+Soft keywords remain usable as identifiers elsewhere.
+
+## Literals
+
+### String and bytes prefixes
+
+| Prefix                          | Kind                  | Allows escapes | Notes                            |
+| ------------------------------- | --------------------- | -------------- | -------------------------------- |
+| `''` / `""`                     | `str`                 | yes            |                                  |
+| `r''` / `R""`                   | raw `str`             | no             | Backslashes are literal.         |
+| `b''` / `B""`                   | `bytes`               | yes            | ASCII-only payload.              |
+| `rb''` / `Rb''` / `bR''` / `BR''` | raw `bytes`        | no             |                                  |
+| `f''` / `F""`                   | f-string              | yes            | Interpolation with `{expr}`.     |
+| `rf''` / `fr''` / `Rf''` / `fR''` | raw f-string       | no             |                                  |
+| `t''` / `T""`                   | t-string (PEP 750)    | yes            | Template literal.                |
+| `rt''` / `tr''` / `Rt''` / `tR''` | raw t-string       | no             |                                  |
+| `u''` / `U""`                   | `str`                 | yes            | Tolerated for 2-to-3 holdover.   |
+
+Adjacent string literals concatenate at compile time:
+`"foo" "bar" == "foobar"`. The two literals must agree on kind
+(both `str` or both `bytes`).
+
+### String quote forms
+
+| Form                     | Notes                                          |
+| ------------------------ | ---------------------------------------------- |
+| `'...'`                  | Single-line, single-quoted.                    |
+| `"..."`                  | Single-line, double-quoted.                    |
+| `'''...'''`              | Multi-line, single-quoted.                     |
+| `"""..."""`              | Multi-line, double-quoted.                     |
+
+### Escape sequences
+
+Within `str` and `bytes` (without `r` prefix):
+
+| Escape       | Meaning                                            |
+| ------------ | -------------------------------------------------- |
+| `\<newline>` | Line continuation.                                 |
+| `\\`         | Backslash.                                         |
+| `\'`         | Single quote.                                      |
+| `\"`         | Double quote.                                      |
+| `\a`         | Bell.                                              |
+| `\b`         | Backspace.                                         |
+| `\f`         | Formfeed.                                          |
+| `\n`         | Linefeed.                                          |
+| `\r`         | Carriage return.                                   |
+| `\t`         | Horizontal tab.                                    |
+| `\v`         | Vertical tab.                                      |
+| `\0` ... `\777` | Octal byte (one to three digits).               |
+| `\xhh`       | Hex byte (exactly two hex digits).                 |
+| `\uxxxx`     | 4-digit Unicode escape. `str` only.                |
+| `\Uxxxxxxxx` | 8-digit Unicode escape. `str` only.                |
+| `\N{NAME}`   | Unicode by name. `str` only.                       |
+| `\<other>`   | Unrecognized; emitted as `DeprecationWarning`.     |
+
+### f-string interpolation
+
+Within `f''`:
+
+| Form                            | Meaning                                       |
+| ------------------------------- | --------------------------------------------- |
+| `{expr}`                        | Format `expr` via `format(expr, '')`.         |
+| `{expr!r}` / `!s` / `!a`        | Apply `repr` / `str` / `ascii` first.         |
+| `{expr:spec}`                   | Pass `spec` to `__format__`.                  |
+| `{expr=}`                       | Emit `expr=<value>` for debugging.            |
+| `{{` / `}}`                     | Literal `{` / `}`.                            |
+
+The contents of `{...}` may contain nearly any expression including
+nested f-strings (PEP 701). Backslashes inside `{...}` are allowed
+in 3.12+.
+
+### t-string interpolation (PEP 750)
+
+`t''` produces a `Template` object whose `.values` holds the
+interpolated expressions and whose `.strings` holds the literal
+parts. The format specifiers inside `{...}` are *not* evaluated
+eagerly; they are part of the template metadata.
+
+### Numeric literals
+
+| Form                  | Type      | Examples                            |
+| --------------------- | --------- | ----------------------------------- |
+| Decimal integer       | `int`     | `0`, `42`, `1_000_000`              |
+| Binary integer        | `int`     | `0b1010`, `0B1_0_1_0`               |
+| Octal integer         | `int`     | `0o755`, `0O755`                    |
+| Hex integer           | `int`     | `0xff`, `0XFF`                      |
+| Float                 | `float`   | `1.5`, `.5`, `1.`, `1e10`, `1.5e-2` |
+| Imaginary             | `complex` | `1j`, `1J`, `1.5j`                  |
+
+Underscore digit separators are allowed anywhere between digits.
+Leading zeros on decimal integers (`010`) are a syntax error.
+
+## Operators and delimiters
+
+| Group           | Tokens                                                   |
+| --------------- | -------------------------------------------------------- |
+| Arithmetic      | `+`, `-`, `*`, `/`, `//`, `%`, `**`, `@`                 |
+| Comparison      | `==`, `!=`, `<`, `>`, `<=`, `>=`                         |
+| Bitwise         | `&`, `|`, `^`, `~`, `<<`, `>>`                           |
+| Assignment      | `=`, `:=`, `+=`, `-=`, `*=`, `/=`, `//=`, `%=`, `**=`, `@=`, `&=`, `|=`, `^=`, `<<=`, `>>=` |
+| Punctuation     | `(`, `)`, `[`, `]`, `{`, `}`, `,`, `:`, `.`, `;`, `->`, `...`, `@`, `=` |
+| Star / DStar    | `*`, `**`                                                |
+
+The walrus `:=` is allowed only inside subexpressions and parens;
+the parser rejects it at statement top-level.
+
+## End-of-line and end-of-file tokens
+
+| Token       | Emitted when                                              |
+| ----------- | --------------------------------------------------------- |
+| `NEWLINE`   | The end of a logical line.                                |
+| `NL`        | The end of a physical line that is not a logical break.   |
+| `INDENT`    | The first token on a more-indented logical line.          |
+| `DEDENT`    | The first token on a less-indented logical line.          |
+| `ENDMARKER` | One past the last token in the file.                      |
+
+`NL` is needed by `tokenize` consumers; the parser ignores it.
+
+## Gopy status
+
+| Area                                | State                                          |
+| ----------------------------------- | ---------------------------------------------- |
+| Encoding declarations               | Complete.                                      |
+| UTF-8, latin-1, ASCII source        | Complete.                                      |
+| Identifiers (UAX-31 + NFKC)         | Complete.                                      |
+| All hard and soft keywords          | Complete.                                      |
+| All string prefixes including `t""` | Complete.                                      |
+| All escape forms including `\N{...}`| Complete.                                      |
+| f-string nesting (PEP 701)          | Complete.                                      |
+| `_tokenize` parity with CPython     | Complete as of v0.12.4.                        |
+
+Source lives under `tokenize/`, `token/`, and `parser/lexer/`.
+
+## Reference
+
+* CPython 3.14: [Lexical analysis](https://docs.python.org/3.14/reference/lexical_analysis.html).
+* `Parser/lexer/lexer.c`. The canonical tokenizer.
+* `tokenize/`. gopy's port.
+* [Modules -> `_tokenize`](/docs/manual/modules#text-and-pattern-matching) for the Python-visible API.

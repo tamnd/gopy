@@ -1,0 +1,189 @@
+---
+title: Format spec mini-language
+description: The grammar of format specifiers for str.format, f-strings, and __format__.
+---
+
+# Format spec mini-language
+
+A *format spec* customises the string produced by `format(x, spec)`.
+The same mini-language drives `str.format`, f-strings, and any
+type's `__format__`. This page is the complete grammar and per-type
+semantics.
+
+Source-of-record: `Python/formatter_unicode.c`,
+[format spec docs](https://docs.python.org/3.14/library/string.html#format-specification-mini-language).
+
+## Grammar
+
+```
+format_spec     ::= [[fill]align][sign]["z"]["#"]["0"][width]
+                    [grouping_option]["." precision][type]
+fill            ::=  <any character>
+align           ::=  "<" | ">" | "=" | "^"
+sign            ::=  "+" | "-" | " "
+width           ::=  digit+
+grouping_option ::=  "_" | ","
+precision       ::=  digit+
+type            ::=  "b" | "c" | "d" | "e" | "E" | "f" | "F" | "g" | "G"
+                  |  "n" | "o" | "s" | "x" | "X" | "%"
+```
+
+## Components
+
+### Fill and align
+
+| Char | Meaning                                                |
+| ---- | ------------------------------------------------------ |
+| `<`  | Left-align (default for non-numeric).                  |
+| `>`  | Right-align (default for numeric).                     |
+| `^`  | Centre.                                                |
+| `=`  | Pad between sign and digits. Numeric types only.       |
+
+Fill is any character preceding the align character. Cannot be `{`
+or `}` directly (use repetition `{{`).
+
+### Sign
+
+| Char    | Effect                                                 |
+| ------- | ------------------------------------------------------ |
+| `+`     | Sign on all numbers.                                   |
+| `-`     | Sign only on negatives (default).                      |
+| ` `     | Leading space on positives, `-` on negatives.          |
+
+### `z` flag
+
+Available since 3.11. For floats, coerces negative zero to positive
+zero before formatting.
+
+### `#` (alt form)
+
+| Effect for `b`/`o`/`x`/`X`                                          |
+| ------------------------------------------------------------------- |
+| Prefix with `0b`, `0o`, `0x`, `0X` respectively.                   |
+| For `e`, `f`, `g`: always include a decimal point.                 |
+| For `g`: do not strip trailing zeros.                              |
+
+### Width and zero pad
+
+* `width` is a minimum field width.
+* Prefix `0` enables zero-padding (numeric only) and implies `=` align.
+
+### Grouping
+
+| Char | Effect                                                  |
+| ---- | ------------------------------------------------------- |
+| `,`  | Use `,` as thousands separator.                         |
+| `_`  | Use `_` as thousands separator. Also groups every 4 hex digits for `b`, `o`, `x`, `X`. |
+
+Both options are exclusive.
+
+### Precision
+
+| Type                | Meaning of precision                                          |
+| ------------------- | ------------------------------------------------------------- |
+| Float `f`, `e`, `E` | Digits after the decimal point.                              |
+| Float `g`, `G`      | Significant digits.                                          |
+| Float `%`           | Digits after the decimal point of the percentage.            |
+| `s`                 | Maximum number of characters from the string.                |
+| Other               | Not allowed.                                                 |
+
+Default precision for floats is 6.
+
+### Type
+
+#### Integer types
+
+| Char | Output                                                  |
+| ---- | ------------------------------------------------------- |
+| `b`  | Binary.                                                 |
+| `c`  | Character (Unicode code point).                         |
+| `d`  | Decimal.                                                |
+| `o`  | Octal.                                                  |
+| `x`  | Hex lowercase.                                          |
+| `X`  | Hex uppercase.                                          |
+| `n`  | Locale-aware decimal.                                   |
+
+#### Float types
+
+| Char | Output                                                  |
+| ---- | ------------------------------------------------------- |
+| `e`  | Scientific, lowercase.                                  |
+| `E`  | Scientific, uppercase.                                  |
+| `f`  | Fixed-point.                                            |
+| `F`  | Fixed-point, uppercase for `inf`/`nan`.                 |
+| `g`  | General; choose `e` or `f` based on magnitude.          |
+| `G`  | Same, uppercase variants.                               |
+| `n`  | Locale-aware general format.                            |
+| `%`  | Multiply by 100; append `%`.                            |
+
+#### String type
+
+| Char | Output                                                  |
+| ---- | ------------------------------------------------------- |
+| `s`  | String form.                                            |
+
+If no type is specified, the default is `d` for `int`, `g` for
+`float`, `s` for `str`.
+
+## Per-type `__format__`
+
+| Type        | Default spec | Notes                                                |
+| ----------- | ------------ | ---------------------------------------------------- |
+| `int`       | `d`          | Empty spec equivalent to `str(x)`.                   |
+| `float`     | empty        | Empty spec equivalent to `str(x)`. Spec `''` is *not* the same as `'g'`. |
+| `complex`   | empty        | Format real and imag parts; no separate spec per side. |
+| `str`       | `s`          | Width and precision honoured.                         |
+| `bytes`     | none         | Has no `__format__`; falls back to `object.__format__`. |
+| `datetime`  | strftime fmt | Format spec is passed to `strftime`.                  |
+| `date` / `time` | strftime fmt | Same.                                             |
+| `Decimal`   | similar to float | Supports all numeric specs.                       |
+| `enum.Enum` | empty        | Default is `str(member)`.                             |
+
+## Conversion vs format
+
+`f"{x!r:>10}"` first applies the conversion (`!r` -> `repr(x)`,
+`!s` -> `str(x)`, `!a` -> `ascii(x)`), then formats the resulting
+string with the spec.
+
+## Width specified as a field
+
+In `str.format` and f-strings, `width` and `precision` can be
+parametrised:
+
+```python
+f"{value:{width}.{precision}f}"
+"{0:{1}}".format("x", 10)
+```
+
+The values inside braces must produce integers.
+
+## Default `object.__format__`
+
+If the type defines no `__format__`, `object.__format__` is used.
+It accepts only an empty spec and returns `str(self)`. Passing a
+non-empty spec to a type that does not understand it raises
+`TypeError`.
+
+## `str.format` extras
+
+`"{0.attr}"`, `"{0[key]}"`, `"{name}"`, and combinations are
+allowed. The `Formatter` class (`string.Formatter`) exposes
+extension points: `get_value`, `format_field`, `convert_field`,
+`vformat`.
+
+## Gopy status
+
+| Feature                                       | State          |
+| --------------------------------------------- | -------------- |
+| Every spec component                          | Complete.      |
+| `z` zero-suppress flag                        | Complete.      |
+| Width and precision via nested braces         | Complete.      |
+| `string.Formatter` extension API              | Complete.      |
+| Per-type `__format__` (numeric, str)          | Complete.      |
+| Locale-aware `n` formatting                   | Complete.      |
+
+## Reference
+
+* CPython 3.14: [format spec](https://docs.python.org/3.14/library/string.html#format-specification-mini-language).
+* `Python/formatter_unicode.c`. Implementation.
+* `format/`. gopy's port.

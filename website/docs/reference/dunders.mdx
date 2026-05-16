@@ -1,0 +1,260 @@
+---
+title: Special methods
+description: Every dunder method, its signature, the slot it fills, and the operation that invokes it.
+---
+
+# Special methods
+
+Special methods are the protocol that the interpreter uses to
+implement built-in operations. A type implements an operation by
+defining a dunder method; the VM dispatches to that method through
+a slot on the type. This page is the complete table.
+
+Source-of-record: `Objects/typeobject.c` (slot setup), the
+`Objects/abstract.c` abstract API, and
+[the special method names index](https://docs.python.org/3.14/reference/datamodel.html#special-method-names).
+
+## Slot tables
+
+Every type has a flat C struct of "slot" function pointers. A
+Python dunder method on the class populates the matching slot; the
+VM calls the slot, never reads `__dict__` directly. The five major
+slot tables are:
+
+| Table          | Prefix | Holds                                       |
+| -------------- | ------ | ------------------------------------------- |
+| Type slots     | `tp_`  | General lifecycle, attribute, repr, etc.    |
+| Number methods | `nb_`  | `+`, `-`, `*`, `/`, integer protocols.      |
+| Sequence methods | `sq_` | `len`, `getitem`, `contains`, etc.         |
+| Mapping methods | `mp_` | `len`, `getitem`, `setitem` for mappings.   |
+| Async methods  | `am_`  | `__await__`, `__aiter__`, `__anext__`.      |
+| Buffer methods | `bf_`  | `__buffer__`, `__release_buffer__`.         |
+
+## Construction and destruction
+
+| Method                  | Slot             | When invoked                              |
+| ----------------------- | ---------------- | ----------------------------------------- |
+| `__new__(cls, *a, **k)` | `tp_new`         | Construct a new instance. Class method.   |
+| `__init__(self, *a, **k)` | `tp_init`      | Initialise the instance.                  |
+| `__del__(self)`         | `tp_finalize`    | Finalisation, before deallocation.        |
+| `__init_subclass__(cls, **kw)` | -          | Called when a class is subclassed.        |
+| `__set_name__(self, owner, name)` | -      | Called on descriptors during class creation. |
+
+## Representation
+
+| Method                | Slot          | Operation                                |
+| --------------------- | ------------- | ---------------------------------------- |
+| `__repr__(self)`      | `tp_repr`     | `repr(x)`, fallback for `str(x)`.        |
+| `__str__(self)`       | `tp_str`      | `str(x)`, `print(x)`.                    |
+| `__bytes__(self)`     | -             | `bytes(x)`.                              |
+| `__format__(self, spec)` | -          | `format(x, spec)`, `f"{x:spec}"`.        |
+| `__fspath__(self)`    | -             | `os.fspath(x)`.                          |
+
+## Comparison
+
+| Method            | Slot          | Operator |
+| ----------------- | ------------- | -------- |
+| `__lt__`          | `tp_richcompare` (Py_LT) | `<`     |
+| `__le__`          | `tp_richcompare` (Py_LE) | `<=`    |
+| `__eq__`          | `tp_richcompare` (Py_EQ) | `==`    |
+| `__ne__`          | `tp_richcompare` (Py_NE) | `!=`    |
+| `__gt__`          | `tp_richcompare` (Py_GT) | `>`     |
+| `__ge__`          | `tp_richcompare` (Py_GE) | `>=`    |
+| `__hash__(self)`  | `tp_hash`     | `hash(x)`. Mutable containers set this to `None`. |
+| `__bool__(self)`  | `nb_bool`     | `bool(x)`. Falls back to `__len__`.       |
+
+Returning `NotImplemented` from a reflected comparison method tells
+the VM to try the other side.
+
+## Attribute access
+
+| Method                                | Slot              | Used for                              |
+| ------------------------------------- | ----------------- | ------------------------------------- |
+| `__getattr__(self, name)`             | -                 | Fallback when normal lookup fails.    |
+| `__getattribute__(self, name)`        | `tp_getattro`     | Always invoked for `x.name`.          |
+| `__setattr__(self, name, value)`      | `tp_setattro`     | `x.name = value`.                     |
+| `__delattr__(self, name)`             | `tp_setattro`     | `del x.name`.                         |
+| `__dir__(self)`                       | -                 | `dir(x)`.                             |
+
+## Descriptors
+
+| Method                                | Slot               | Role                                 |
+| ------------------------------------- | ------------------ | ------------------------------------ |
+| `__get__(self, obj, objtype=None)`    | `tp_descr_get`     | Attribute read.                      |
+| `__set__(self, obj, value)`           | `tp_descr_set`     | Attribute write.                     |
+| `__delete__(self, obj)`               | `tp_descr_set`     | Attribute delete.                    |
+
+Defining `__set__` or `__delete__` makes the descriptor a *data
+descriptor* and gives it priority over instance `__dict__`.
+
+## Container protocols
+
+### Length
+
+| Method            | Slot         | Operation                                 |
+| ----------------- | ------------ | ----------------------------------------- |
+| `__len__(self)`   | `sq_length` / `mp_length` | `len(x)`. Result must be `>=0`. |
+| `__length_hint__(self)` | -      | `operator.length_hint(x)` for iterator sizing. |
+
+### Item access
+
+| Method                                | Slot         | Operation                                  |
+| ------------------------------------- | ------------ | ------------------------------------------ |
+| `__getitem__(self, key)`              | `mp_subscript` / `sq_item` | `x[key]`                  |
+| `__setitem__(self, key, value)`       | `mp_ass_subscript` / `sq_ass_item` | `x[key] = value` |
+| `__delitem__(self, key)`              | `mp_ass_subscript` / `sq_ass_item` | `del x[key]`     |
+| `__missing__(self, key)`              | -            | `dict.__getitem__` fallback for missing keys. |
+
+### Iteration
+
+| Method                         | Slot         | Operation                              |
+| ------------------------------ | ------------ | -------------------------------------- |
+| `__iter__(self)`               | `tp_iter`    | `iter(x)`, `for x in obj`.             |
+| `__next__(self)`               | `tp_iternext` | `next(iter)`. Raises `StopIteration`. |
+| `__reversed__(self)`           | -            | `reversed(x)`.                         |
+| `__contains__(self, item)`     | `sq_contains` | `item in x`.                          |
+
+## Numeric protocols
+
+### Binary arithmetic
+
+Each binary op has a forward, reflected, and in-place form:
+
+| Operator | Forward         | Reflected       | In-place        |
+| -------- | --------------- | --------------- | --------------- |
+| `+`      | `__add__`       | `__radd__`      | `__iadd__`      |
+| `-`      | `__sub__`       | `__rsub__`      | `__isub__`      |
+| `*`      | `__mul__`       | `__rmul__`      | `__imul__`      |
+| `/`      | `__truediv__`   | `__rtruediv__`  | `__itruediv__`  |
+| `//`     | `__floordiv__`  | `__rfloordiv__` | `__ifloordiv__` |
+| `%`      | `__mod__`       | `__rmod__`      | `__imod__`      |
+| `**`     | `__pow__`       | `__rpow__`      | `__ipow__`      |
+| `@`      | `__matmul__`    | `__rmatmul__`   | `__imatmul__`   |
+| `<<`     | `__lshift__`    | `__rlshift__`   | `__ilshift__`   |
+| `>>`     | `__rshift__`    | `__rrshift__`   | `__irshift__`   |
+| `&`      | `__and__`       | `__rand__`      | `__iand__`      |
+| `|`      | `__or__`        | `__ror__`       | `__ior__`       |
+| `^`      | `__xor__`       | `__rxor__`      | `__ixor__`      |
+| `divmod` | `__divmod__`    | `__rdivmod__`   | -               |
+
+`__pow__` accepts a third modulus argument for `pow(a, b, c)`.
+
+### Unary arithmetic and conversion
+
+| Method            | Slot        | Operation                               |
+| ----------------- | ----------- | --------------------------------------- |
+| `__neg__(self)`   | `nb_negative` | `-x`                                  |
+| `__pos__(self)`   | `nb_positive` | `+x`                                  |
+| `__abs__(self)`   | `nb_absolute` | `abs(x)`                              |
+| `__invert__(self)` | `nb_invert`  | `~x`                                 |
+| `__complex__(self)` | -          | `complex(x)`.                           |
+| `__int__(self)`   | `nb_int`    | `int(x)`.                               |
+| `__float__(self)` | `nb_float`  | `float(x)`.                             |
+| `__index__(self)` | `nb_index`  | `operator.index(x)`. Required for slice indices, `hex()`, etc. |
+| `__round__(self, ndigits=None)` | - | `round(x, ndigits)`.                  |
+| `__trunc__(self)` | -           | `math.trunc(x)`.                        |
+| `__floor__(self)` | -           | `math.floor(x)`.                        |
+| `__ceil__(self)`  | -           | `math.ceil(x)`.                         |
+
+## Coroutines and async
+
+| Method                             | Slot         | Operation                            |
+| ---------------------------------- | ------------ | ------------------------------------ |
+| `__await__(self)`                  | `am_await`   | `await x`. Returns an iterator.      |
+| `__aiter__(self)`                  | `am_aiter`   | `async for x in obj`. Returns async iterator. |
+| `__anext__(self)`                  | `am_anext`   | Next async-iteration value.          |
+| `__aenter__(self)`                 | -            | `async with` enter.                  |
+| `__aexit__(self, et, ev, tb)`      | -            | `async with` exit.                   |
+
+## Context managers
+
+| Method                             | Operation                  |
+| ---------------------------------- | -------------------------- |
+| `__enter__(self)`                  | `with x as y:` enter.      |
+| `__exit__(self, exc_type, exc_val, exc_tb)` | `with` exit.       |
+
+## Generator and coroutine flow
+
+| Method                             | Operation                                |
+| ---------------------------------- | ---------------------------------------- |
+| `send(self, value)`                | Resume a generator and send a value.     |
+| `throw(self, type[, value[, tb]])` | Raise an exception inside the generator. |
+| `close(self)`                      | Raise `GeneratorExit`.                   |
+
+## Pattern matching (PEP 634)
+
+| Attribute / method | Role                                          |
+| ------------------ | --------------------------------------------- |
+| `__match_args__`   | Tuple of attribute names for positional class patterns. |
+| `__instancecheck__(cls, instance)` | `isinstance(instance, cls)`.  |
+| `__subclasscheck__(cls, subclass)` | `issubclass(subclass, cls)`.  |
+
+## Reflection support
+
+| Method                             | Operation                              |
+| ---------------------------------- | -------------------------------------- |
+| `__sizeof__(self)`                 | `sys.getsizeof(x)`.                    |
+| `__dir__(self)`                    | `dir(x)`.                              |
+| `__class_getitem__(cls, item)`     | `cls[item]`. Class-level subscript (e.g. `list[int]`). |
+| `__instancecheck__(cls, obj)`      | Custom `isinstance`.                   |
+| `__subclasscheck__(cls, sub)`      | Custom `issubclass`.                   |
+| `__init_subclass__(cls, **kw)`     | Customise subclass creation.           |
+
+## Class creation
+
+| Method                             | Operation                              |
+| ---------------------------------- | -------------------------------------- |
+| `__prepare__(cls, name, bases, **kw)` | Returns the namespace mapping. Metaclass method. |
+| `__init_subclass__(cls, **kw)`     | Run when a subclass is defined.        |
+| `__set_name__(self, owner, name)`  | Called on descriptors at class creation. |
+| `__class_getitem__(cls, item)`     | Supports `list[int]`.                  |
+| `__mro_entries__(self, bases)`     | Hook to replace a base in `__bases__`. |
+
+## Copying
+
+The C-level slots do not implement copying; the protocol lives in
+`copy.py`:
+
+| Method                  | Used by                       |
+| ----------------------- | ----------------------------- |
+| `__copy__(self)`        | `copy.copy`.                  |
+| `__deepcopy__(self, memo)` | `copy.deepcopy`.           |
+| `__reduce__(self)`      | Pickling fallback.            |
+| `__reduce_ex__(self, p)` | Versioned pickling hook.     |
+| `__getstate__(self)`    | Pickling state extraction.    |
+| `__setstate__(self, s)` | Pickling state restoration.   |
+| `__getnewargs__(self)`  | Pickling `__new__` args.      |
+| `__getnewargs_ex__(self)` | Pickling `__new__` args with kwargs. |
+
+## Buffer protocol
+
+| Method                         | Slot                | Role                          |
+| ------------------------------ | ------------------- | ----------------------------- |
+| `__buffer__(self, flags)`      | `bf_getbuffer`      | Return a memoryview.          |
+| `__release_buffer__(self, mv)` | `bf_releasebuffer`  | Release acquired buffer.      |
+
+## Call
+
+| Method                         | Slot         | Operation                          |
+| ------------------------------ | ------------ | ---------------------------------- |
+| `__call__(self, *args, **kwargs)` | `tp_call` | `x(...)`.                          |
+
+## Type-parameter protocols (PEP 695)
+
+| Attribute            | Meaning                                            |
+| -------------------- | -------------------------------------------------- |
+| `__type_params__`    | Tuple of `TypeVar`, `TypeVarTuple`, `ParamSpec`.    |
+| `__typing_subst__`   | Used by `Generic` during substitution.             |
+
+## Gopy status
+
+Every dunder in CPython 3.14 dispatches to the same slot in gopy.
+The list above is exhaustive; if a method is reachable from CPython
+it is reachable from gopy unless flagged in [Status](/docs/manual/status).
+
+## Reference
+
+* `Objects/typeobject.c`. The slot-method wiring.
+* `objects/typeobject.go`. gopy's port.
+* [Data model](data-model) for the lookup rules.
+* [Built-in types](types) for which slots each type implements.

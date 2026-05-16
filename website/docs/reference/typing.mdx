@@ -1,0 +1,226 @@
+---
+title: Typing
+description: The typing module, PEP 484 et al. annotations, generics, protocols, and PEP 695 syntax.
+---
+
+# Typing
+
+Type annotations are syntactic at runtime: the interpreter records
+them but does not enforce them. The `typing` module supplies the
+machinery to build, inspect, and compose annotations; static type
+checkers (`mypy`, `pyright`, etc.) consume them.
+
+Source-of-record: `Lib/typing.py`,
+[typing docs](https://docs.python.org/3.14/library/typing.html),
+PEP 484 onward.
+
+## Annotation syntax
+
+| Form                                      | Where allowed                              |
+| ----------------------------------------- | ------------------------------------------ |
+| `name: type`                              | Function parameter, variable.              |
+| `name: type = default`                    | Function parameter, variable, attribute.   |
+| `def f(...) -> ret:`                      | Function return.                           |
+| `var: type` (no value)                    | Module / class scope.                      |
+| `class C[T, *Ts, **P]:`                   | PEP 695 type parameters.                   |
+| `def f[T](x: T) -> T:`                    | PEP 695 type parameters.                   |
+| `type Alias = expression`                 | PEP 695 type alias.                        |
+
+### PEP 649 / 749 lazy annotations
+
+In 3.14, annotations are stored as code on `__annotate__` and only
+evaluated when accessed:
+
+| Access                              | Effect                                            |
+| ----------------------------------- | ------------------------------------------------- |
+| `obj.__annotations__`               | Evaluates `__annotate__` once, caches the dict.   |
+| `inspect.get_annotations(obj)`      | Preferred public API.                             |
+| `from __future__ import annotations` | (PEP 563) Deprecated since 3.14; lazy is the default. |
+
+## Generic primitives
+
+### `TypeVar`
+
+```python
+T = TypeVar("T", bound=Bound, default=Default, contravariant=False, covariant=False)
+```
+
+### `TypeVarTuple`
+
+```python
+Ts = TypeVarTuple("Ts", default=DefaultTuple)
+```
+
+Represents a variadic generic; used with `*Ts`.
+
+### `ParamSpec`
+
+```python
+P = ParamSpec("P", default=DefaultParams)
+```
+
+Used for callables that pass through `*args` and `**kwargs`.
+
+### `Generic`
+
+```python
+class Box(Generic[T]):
+    ...
+```
+
+`Generic[T]` registers `T` as a class parameter. PEP 695 lets you
+write `class Box[T]:` and skip `Generic` entirely.
+
+### `Protocol`
+
+```python
+class SupportsClose(Protocol):
+    def close(self) -> None: ...
+```
+
+Structural typing. Mark with `@runtime_checkable` to enable
+`isinstance` checks against the protocol.
+
+## Type forms
+
+### Containers and origins
+
+| Form                | Equivalent                            |
+| ------------------- | ------------------------------------- |
+| `list[int]`         | `typing.List[int]`                    |
+| `dict[str, int]`    | `typing.Dict[str, int]`               |
+| `tuple[int, ...]`   | `typing.Tuple[int, ...]`              |
+| `set[int]`          | `typing.Set[int]`                     |
+| `frozenset[int]`    | `typing.FrozenSet[int]`               |
+
+PEP 585 makes built-in types subscriptable; the `typing` aliases
+are deprecated for new code.
+
+### Special forms
+
+| Form                          | Meaning                                            |
+| ----------------------------- | -------------------------------------------------- |
+| `Any`                         | Top type; assignable both directions.              |
+| `Never` / `NoReturn`          | Bottom type; function never returns normally.      |
+| `None`                        | Standalone or in unions, means `type(None)`.       |
+| `Optional[X]`                 | `X \| None`.                                       |
+| `Union[A, B, ...]` / `A \| B` | Sum type.                                          |
+| `Literal[a, b, ...]`          | Exact value type.                                  |
+| `Final[T]`                    | Cannot be reassigned.                              |
+| `ClassVar[T]`                 | Class-level attribute, not instance.               |
+| `Annotated[T, x, y]`          | Attach metadata.                                   |
+| `Callable[[A, B], R]`         | Callable taking `A, B`, returning `R`.             |
+| `Callable[..., R]`            | Callable with any signature.                       |
+| `Self`                        | The enclosing type itself.                         |
+| `LiteralString`               | Any literal string or concat thereof.              |
+| `Required[T]` / `NotRequired[T]` | TypedDict field markers.                       |
+| `TypeGuard[T]`                | Narrowing return for type guards.                  |
+| `TypeIs[T]`                   | Stricter type guard (PEP 742).                     |
+| `Concatenate[A, B, P]`        | Prepend args to a ParamSpec.                       |
+| `Unpack[Ts]`                  | Unpack a TypeVarTuple.                             |
+
+### `TypedDict`
+
+```python
+class Movie(TypedDict, total=False):
+    title: str
+    year: NotRequired[int]
+```
+
+| Mark            | Effect                                       |
+| --------------- | -------------------------------------------- |
+| `total=True`    | All keys required (default).                 |
+| `total=False`   | All keys optional.                           |
+| `Required[T]`   | Make a key required despite `total=False`.   |
+| `NotRequired[T]`| Make a key optional despite `total=True`.    |
+
+### `NamedTuple`
+
+```python
+class Point(NamedTuple):
+    x: int
+    y: int = 0
+```
+
+Subclass of `tuple` with named fields and defaults.
+
+## Runtime introspection
+
+| Function                                            | Returns                                             |
+| --------------------------------------------------- | --------------------------------------------------- |
+| `typing.get_type_hints(obj, globalns=None, localns=None, include_extras=False)` | Resolved annotation dict. |
+| `typing.get_args(tp)`                               | Args of a generic.                                  |
+| `typing.get_origin(tp)`                             | Origin type of a generic.                           |
+| `typing.is_typeddict(tp)`                           | Predicate.                                          |
+| `typing.is_protocol(tp)`                            | Predicate.                                          |
+| `typing.assert_type(value, expected)`               | No-op at runtime; informs type checkers.            |
+| `typing.assert_never(value)`                        | Exhaustiveness check.                               |
+| `typing.cast(typ, value)`                           | No-op at runtime; reshapes the static type.         |
+| `typing.reveal_type(value)`                         | Print at runtime; informs type checkers.            |
+| `typing.no_type_check(fn_or_cls)`                   | Suppress type checking.                             |
+| `typing.no_type_check_decorator(decorator)`         | Decorator factory.                                  |
+
+## ABCs in typing
+
+`typing.Iterable`, `typing.Iterator`, `typing.Mapping`, etc. are
+generic versions of the ABCs in `collections.abc`. New code should
+prefer the `collections.abc` versions, which are subscriptable
+since PEP 585.
+
+## Forward references
+
+A type that names a class not yet defined uses a string literal:
+`"Tree"`. `typing.get_type_hints` resolves forward references
+using the module's globals.
+
+`ForwardRef` is the wrapper class; it carries the unresolved string
+and any module/locals context needed for resolution.
+
+## PEP 695 type alias
+
+```python
+type Vector[T] = list[T]
+```
+
+| Property                                                            |
+| ------------------------------------------------------------------- |
+| Creates a `typing.TypeAliasType` instance.                          |
+| The right side is evaluated lazily via `__value__`.                 |
+| Type parameters scope to the alias body only.                       |
+
+## Decorators
+
+| Decorator                          | Effect                                            |
+| ---------------------------------- | ------------------------------------------------- |
+| `@overload`                        | Mark a sig as overload; runtime stub.             |
+| `@final`                           | Mark a class or method as not subclassable/overridable. |
+| `@runtime_checkable`               | Enable `isinstance` on a `Protocol`.              |
+| `@dataclass_transform(...)`        | Hint to type checkers that a decorator emulates dataclass behaviour. |
+| `@type_check_only`                 | Mark a runtime artefact as visible only to type checkers. |
+
+## Common deprecations in 3.14
+
+| Form                          | Replacement                                       |
+| ----------------------------- | ------------------------------------------------- |
+| `typing.List`, `Dict`, ...    | Built-ins `list`, `dict`, ...                     |
+| `from __future__ import annotations` | Native lazy (PEP 649).                     |
+| `typing.NewType(name, type)`  | Same; functional only.                            |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Annotation syntax (PEP 526, 591, etc.) | Complete.                                         |
+| PEP 695 type params and `type` alias  | Complete.                                          |
+| PEP 649 lazy annotations              | Complete.                                          |
+| `typing` module surface               | Complete enough for stdlib tests.                  |
+| `Protocol` runtime checks             | Complete.                                          |
+| `TypedDict` and `NamedTuple`          | Complete.                                          |
+| `get_type_hints` resolution           | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [typing module](https://docs.python.org/3.14/library/typing.html).
+* `Lib/typing.py`. Python side.
+* PEP 484, 526, 544, 561, 585, 586, 591, 593, 604, 612, 646, 649, 673, 675, 681, 692, 695, 742, 750.
+* [Grammar -> Type parameters](grammar#type-parameters-pep-695).

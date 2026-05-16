@@ -1,0 +1,219 @@
+---
+title: Memory model
+description: Reference counting, generational cycle collection, weak references, finalisation order, and the rules a Python runtime must preserve.
+---
+
+# Memory model
+
+Python's memory model is reference counting augmented by a
+generational cycle collector. Implementations must preserve the
+observable behaviour: prompt finalisation when refcount drops to
+zero, deferred cycle collection, weakref clearing before
+finalisation, and stable object identity.
+
+Source-of-record: `Objects/object.c`, `Modules/gcmodule.c`,
+`Objects/weakrefobject.c`,
+[the gc module docs](https://docs.python.org/3.14/library/gc.html).
+
+## Reference counting
+
+Every object carries `ob_refcnt`, an integer count of strong
+references. Mutating operations follow strict rules:
+
+| Operation                  | Refcount change                                |
+| -------------------------- | ---------------------------------------------- |
+| `Py_INCREF(obj)`           | +1                                             |
+| `Py_DECREF(obj)`           | -1; if hits 0, call `tp_dealloc`.              |
+| `Py_XINCREF(obj)`          | +1 if `obj != NULL`.                           |
+| `Py_XDECREF(obj)`          | -1 if `obj != NULL`.                           |
+| `Py_NewRef(obj)`           | +1; returns `obj`.                             |
+| `Py_Clear(obj_ref)`        | DECREF and set to `NULL` atomically.           |
+
+### Reference semantics
+
+| Term            | Meaning                                                |
+| --------------- | ------------------------------------------------------ |
+| Strong reference | Counted; caller is responsible for releasing.         |
+| Borrowed reference | Not counted; caller must not outlive the source.    |
+| Stolen reference | Function takes ownership; caller no longer DECREFs.   |
+| Returned reference | The reference returned by a function is strong unless documented otherwise. |
+
+### Singletons
+
+`None`, `True`, `False`, `Ellipsis`, `NotImplemented`, and small
+ints in `[-5, 256]` are immortal singletons. Their refcounts are
+incremented but never observed to reach zero. In 3.12+ they are
+*immortal*: their refcount is pinned at a sentinel value
+(`_Py_IMMORTAL_REFCNT`) and INCREF/DECREF are no-ops.
+
+## Cycle collector
+
+The cycle collector runs over objects whose type sets
+`Py_TPFLAGS_HAVE_GC`. It uses three generations.
+
+| Generation | Threshold (default) | Promoted to                  |
+| ---------- | ------------------- | ---------------------------- |
+| 0          | 700 allocations     | Generation 1.                |
+| 1          | 10 collections of gen 0 | Generation 2.            |
+| 2          | 10 collections of gen 1 | Stays.                   |
+
+### Algorithm sketch
+
+| Phase                                                                |
+| -------------------------------------------------------------------- |
+| Mark every GC-tracked object with its current refcount as `gc_refs`. |
+| Visit each object's references; decrement `gc_refs` on internal references. |
+| Objects with `gc_refs > 0` have external references; mark them reachable. |
+| Reachable set spreads via reference visit.                           |
+| Anything unreachable is collectable.                                 |
+| Run finalisers; weakrefs cleared first.                              |
+| Re-scan: if a resurrected object becomes reachable, keep it.         |
+| Free the rest.                                                       |
+
+### `gc` module
+
+| Function                       | Effect                                          |
+| ------------------------------ | ----------------------------------------------- |
+| `gc.collect(generation=2)`     | Force collection up to generation.              |
+| `gc.disable()` / `gc.enable()` | Pause/resume the automatic collector.           |
+| `gc.isenabled()`               | Predicate.                                      |
+| `gc.set_threshold(t0, t1, t2)` | Configure thresholds.                           |
+| `gc.get_threshold()`           | Current thresholds.                             |
+| `gc.get_count()`               | Generation counters.                            |
+| `gc.get_objects(generation=None)` | All tracked objects.                         |
+| `gc.get_referents(*objs)`      | What objs reference.                            |
+| `gc.get_referrers(*objs)`      | What references objs.                           |
+| `gc.set_debug(flags)`          | Debug flags: `DEBUG_STATS`, `DEBUG_COLLECTABLE`, etc. |
+| `gc.callbacks`                 | List of `(phase, info)` callbacks per cycle.    |
+| `gc.freeze()` / `gc.unfreeze()` | Move tracked objects into a permanent gen 3.   |
+
+## Finalisation
+
+### `__del__`
+
+Runs once when an object's refcount hits zero (or as part of cycle
+collection for unreachable cycles).
+
+| Rule                                                                  |
+| --------------------------------------------------------------------- |
+| Inside `__del__`, exceptions are caught and logged to stderr, not propagated. |
+| `__del__` runs in the thread that drops the last refcount.            |
+| For cyclic garbage, `__del__` runs in undefined order; cycles with multiple `__del__` definitions are collectable but the runtime warns. |
+| Resurrection (binding the object somewhere) is supported once; subsequent finalisations do not re-trigger `__del__`. |
+
+### Order of operations
+
+| Step                                                                   |
+| ---------------------------------------------------------------------- |
+| Cycle collector identifies unreachable set.                            |
+| Weak references whose referent is unreachable are cleared and their callbacks queued. |
+| `tp_finalize` (`__del__`) runs on each unreachable object.             |
+| Weakref callbacks run.                                                 |
+| If any object was resurrected, re-scan; otherwise free the rest.       |
+
+## Weak references
+
+| Type / function                | Purpose                                       |
+| ------------------------------ | --------------------------------------------- |
+| `weakref.ref(obj[, callback])` | Weak reference object; call to retrieve obj.  |
+| `weakref.proxy(obj[, callback])` | Transparent proxy.                          |
+| `weakref.WeakSet`              | Set of weakrefs.                              |
+| `weakref.WeakValueDictionary`  | Dict with weak values.                        |
+| `weakref.WeakKeyDictionary`    | Dict with weak keys.                          |
+| `weakref.finalize(obj, fn, *a, **kw)` | Run `fn(*a, **kw)` when `obj` is collected. |
+| `weakref.getweakrefs(obj)`     | All live weakrefs to obj.                     |
+| `weakref.getweakrefcount(obj)` | Number of live weakrefs to obj.               |
+
+Weakref support requires the type to set `Py_TPFLAGS_HAVE_GC` (or
+to have a `tp_weaklistoffset`).
+
+## Memory layout
+
+### Object header
+
+| Field           | Type            | Description                              |
+| --------------- | --------------- | ---------------------------------------- |
+| `ob_refcnt`     | `Py_ssize_t`    | Reference count.                         |
+| `ob_type`       | `PyTypeObject*` | Type pointer.                            |
+| `ob_size`       | `Py_ssize_t`    | (Variable-length objects only) length.   |
+
+### Type object
+
+A `PyTypeObject` is a `PyObject` extended with the slots described
+in [Special methods](dunders).
+
+### GC header
+
+GC-tracked objects have an extra `PyGC_Head` immediately before
+the `PyObject` header:
+
+| Field                  | Meaning                                       |
+| ---------------------- | --------------------------------------------- |
+| `_gc_next`             | Linked-list pointer.                          |
+| `_gc_prev`             | Linked-list pointer; low bit holds GC flags.  |
+
+## Allocation
+
+| Allocator                      | Used for                                |
+| ------------------------------ | --------------------------------------- |
+| `PyMem_Malloc` family          | Raw memory.                             |
+| `PyObject_Malloc` family       | Object memory (`pymalloc` arenas).      |
+| `_PyObject_GC_New`             | GC-tracked object.                      |
+| Type-specific free lists       | Small frequently-allocated types (frames, list iterators, tuples up to size 20, ints up to a cap). |
+
+### `pymalloc` arenas
+
+| Term       | Size              | Notes                                    |
+| ---------- | ----------------- | ---------------------------------------- |
+| Arena      | 1 MB              | Allocated via `mmap`.                    |
+| Pool       | 4 KB              | Within an arena.                         |
+| Block      | 8 to 512 bytes    | Within a pool; size class fixed per pool. |
+
+Anything larger than 512 bytes goes to the system allocator.
+
+## Identity guarantees
+
+| Rule                                                              |
+| ----------------------------------------------------------------- |
+| `id(x)` is constant for the object's lifetime.                    |
+| Two objects with disjoint lifetimes may share an id.              |
+| `id(x) == id(y)` implies `x is y` while both objects are alive.   |
+
+## Concurrency
+
+| Rule                                                              |
+| ----------------------------------------------------------------- |
+| The GIL protects refcount updates; without it, every INCREF/DECREF would need atomics. |
+| The cycle collector runs only with the GIL held.                  |
+| PEP 703 (no-GIL) introduces deferred refcounting and biased reference counting; not yet the default. |
+
+## Threading and `__del__`
+
+| Rule                                                                |
+| ------------------------------------------------------------------- |
+| `__del__` can run in any thread.                                    |
+| `__del__` may resurrect the object once; subsequent finalisations skip `__del__`. |
+| `Py_TPFLAGS_HAVE_GC` is required for `__del__` to be honoured by the cycle collector. |
+
+## Gopy status
+
+| Area                                    | State                                |
+| --------------------------------------- | ------------------------------------ |
+| Reference counting on every object      | Complete.                            |
+| Three-generation cycle collector        | Complete.                            |
+| Weak references and finalisers          | Complete.                            |
+| `__del__` ordering and resurrection     | Complete.                            |
+| `gc` module surface                     | Complete.                            |
+| Immortal singletons                     | Complete.                            |
+| Free lists                              | Used selectively where they fit Go's allocator. |
+| `pymalloc` arenas                       | N/A; Go's runtime allocator handles object memory. |
+
+## Reference
+
+* `Objects/object.c`. Refcount API.
+* `Modules/gcmodule.c`. Cycle collector.
+* `Objects/weakrefobject.c`. Weakrefs.
+* `objects/`. gopy's port.
+* [Internals -> GC](/docs/cpython/gc).
+* PEP 442 (safe object finalisation).
+* PEP 703 (no-GIL).

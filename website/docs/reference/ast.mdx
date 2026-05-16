@@ -1,0 +1,270 @@
+---
+title: Abstract syntax tree
+description: Every AST node type in Python 3.14, its fields, and the ASDL grammar that produces it.
+---
+
+# Abstract syntax tree
+
+The AST is the second compiler stage: the PEG parser builds a CST,
+which is immediately lowered to an AST whose nodes are defined by
+`Parser/Python.asdl`. The compiler operates on AST nodes; the
+public `ast` module exposes the same hierarchy to Python.
+
+Source-of-record: `Parser/Python.asdl`, `Python/Python-ast.c`
+(generated), `Lib/ast.py`.
+
+## ASDL grammar
+
+The AST is defined in ASDL (Zephyr Abstract Syntax Definition
+Language). The top level:
+
+```asdl
+module Python
+{
+    mod = Module(stmt* body, type_ignore* type_ignores)
+        | Interactive(stmt* body)
+        | Expression(expr body)
+        | FunctionType(expr* argtypes, expr returns)
+}
+```
+
+The four `mod` productions correspond to the four compile modes
+(see [Top-level components](top-level)).
+
+## Statement nodes
+
+| Node                | Fields                                                       |
+| ------------------- | ------------------------------------------------------------ |
+| `FunctionDef`       | `name`, `args`, `body`, `decorator_list`, `returns`, `type_comment`, `type_params` |
+| `AsyncFunctionDef`  | Same as `FunctionDef`.                                       |
+| `ClassDef`          | `name`, `bases`, `keywords`, `body`, `decorator_list`, `type_params` |
+| `Return`            | `value`                                                      |
+| `Delete`            | `targets`                                                    |
+| `Assign`            | `targets`, `value`, `type_comment`                           |
+| `TypeAlias`         | `name`, `type_params`, `value`                               |
+| `AugAssign`         | `target`, `op`, `value`                                      |
+| `AnnAssign`         | `target`, `annotation`, `value`, `simple`                    |
+| `For`               | `target`, `iter`, `body`, `orelse`, `type_comment`           |
+| `AsyncFor`          | Same as `For`.                                               |
+| `While`             | `test`, `body`, `orelse`                                     |
+| `If`                | `test`, `body`, `orelse`                                     |
+| `With`              | `items`, `body`, `type_comment`                              |
+| `AsyncWith`         | Same as `With`.                                              |
+| `Match`             | `subject`, `cases`                                           |
+| `Raise`             | `exc`, `cause`                                               |
+| `Try`               | `body`, `handlers`, `orelse`, `finalbody`                    |
+| `TryStar`           | Same as `Try`. (PEP 654)                                     |
+| `Assert`            | `test`, `msg`                                                |
+| `Import`            | `names`                                                      |
+| `ImportFrom`        | `module`, `names`, `level`                                   |
+| `Global`            | `names`                                                      |
+| `Nonlocal`          | `names`                                                      |
+| `Expr`              | `value`                                                      |
+| `Pass` / `Break` / `Continue` | (no fields)                                        |
+
+## Expression nodes
+
+| Node              | Fields                                                       |
+| ----------------- | ------------------------------------------------------------ |
+| `BoolOp`          | `op`, `values`                                               |
+| `NamedExpr`       | `target`, `value` (walrus)                                   |
+| `BinOp`           | `left`, `op`, `right`                                        |
+| `UnaryOp`         | `op`, `operand`                                              |
+| `Lambda`          | `args`, `body`                                               |
+| `IfExp`           | `test`, `body`, `orelse`                                     |
+| `Dict`            | `keys`, `values`                                             |
+| `Set`             | `elts`                                                       |
+| `ListComp`        | `elt`, `generators`                                          |
+| `SetComp`         | `elt`, `generators`                                          |
+| `DictComp`        | `key`, `value`, `generators`                                 |
+| `GeneratorExp`    | `elt`, `generators`                                          |
+| `Await`           | `value`                                                      |
+| `Yield`           | `value`                                                      |
+| `YieldFrom`       | `value`                                                      |
+| `Compare`         | `left`, `ops`, `comparators`                                 |
+| `Call`            | `func`, `args`, `keywords`                                   |
+| `FormattedValue`  | `value`, `conversion`, `format_spec`                         |
+| `JoinedStr`       | `values` (used for f-strings)                                |
+| `Interpolation`   | `value`, `str`, `conversion`, `format_spec` (PEP 750 t-string) |
+| `TemplateStr`     | `values` (PEP 750 t-string outer)                            |
+| `Constant`        | `value`, `kind`                                              |
+| `Attribute`       | `value`, `attr`, `ctx`                                       |
+| `Subscript`       | `value`, `slice`, `ctx`                                      |
+| `Starred`         | `value`, `ctx`                                               |
+| `Name`            | `id`, `ctx`                                                  |
+| `List`            | `elts`, `ctx`                                                |
+| `Tuple`           | `elts`, `ctx`                                                |
+| `Slice`           | `lower`, `upper`, `step`                                     |
+
+## Context kinds (`expr_context`)
+
+| Kind     | When                              |
+| -------- | --------------------------------- |
+| `Load`   | Read context.                     |
+| `Store`  | Assignment target.                |
+| `Del`    | `del` target.                     |
+
+## Operator nodes
+
+### `boolop`
+
+`And`, `Or`.
+
+### `operator` (binary)
+
+`Add`, `Sub`, `Mult`, `MatMult`, `Div`, `Mod`, `Pow`, `LShift`,
+`RShift`, `BitOr`, `BitXor`, `BitAnd`, `FloorDiv`.
+
+### `unaryop`
+
+`Invert`, `Not`, `UAdd`, `USub`.
+
+### `cmpop`
+
+`Eq`, `NotEq`, `Lt`, `LtE`, `Gt`, `GtE`, `Is`, `IsNot`, `In`, `NotIn`.
+
+## Comprehension nodes
+
+```asdl
+comprehension = (expr target, expr iter, expr* ifs, int is_async)
+```
+
+## Exception handler
+
+```asdl
+excepthandler = ExceptHandler(expr? type, identifier? name, stmt* body)
+```
+
+Same node for `except` and `except*`; the parent `Try` vs `TryStar`
+distinguishes.
+
+## Function definitions
+
+### `arguments`
+
+```asdl
+arguments = (arg* posonlyargs, arg* args, arg? vararg,
+             arg* kwonlyargs, expr* kw_defaults, arg? kwarg,
+             expr* defaults)
+```
+
+### `arg`
+
+```asdl
+arg = (identifier arg, expr? annotation, string? type_comment)
+```
+
+### `keyword`
+
+```asdl
+keyword = (identifier? arg, expr value)
+```
+
+`arg` is `None` for `**kwargs` unpacking.
+
+## With items
+
+```asdl
+withitem = (expr context_expr, expr? optional_vars)
+```
+
+## Match nodes
+
+### `match_case`
+
+```asdl
+match_case = (pattern pattern, expr? guard, stmt* body)
+```
+
+### Patterns (`pattern`)
+
+| Node                 | Fields                                                |
+| -------------------- | ----------------------------------------------------- |
+| `MatchValue`         | `value`                                               |
+| `MatchSingleton`     | `value`                                               |
+| `MatchSequence`      | `patterns`                                            |
+| `MatchMapping`       | `keys`, `patterns`, `rest`                            |
+| `MatchClass`         | `cls`, `patterns`, `kwd_attrs`, `kwd_patterns`        |
+| `MatchStar`          | `name`                                                |
+| `MatchAs`            | `pattern`, `name`                                     |
+| `MatchOr`            | `patterns`                                            |
+
+## Type parameter nodes (PEP 695)
+
+| Node           | Fields                                                   |
+| -------------- | -------------------------------------------------------- |
+| `TypeVar`      | `name`, `bound`, `default_value`                         |
+| `ParamSpec`    | `name`, `default_value`                                  |
+| `TypeVarTuple` | `name`, `default_value`                                  |
+
+## Aliases
+
+```asdl
+alias = (identifier name, identifier? asname)
+```
+
+Used by `Import` and `ImportFrom`.
+
+## Type ignore
+
+```asdl
+type_ignore = TypeIgnore(int lineno, string tag)
+```
+
+## Per-node attributes
+
+Every node carries:
+
+| Attribute    | Meaning                                       |
+| ------------ | --------------------------------------------- |
+| `lineno`     | First source line (1-based).                  |
+| `col_offset` | Column on `lineno`.                           |
+| `end_lineno` | Last source line.                             |
+| `end_col_offset` | Column on `end_lineno`.                   |
+
+## `ast` module API
+
+| Function                                                             | Role                                  |
+| -------------------------------------------------------------------- | ------------------------------------- |
+| `ast.parse(source, filename='<unknown>', mode='exec', type_comments=False, feature_version=None)` | Source -> AST. |
+| `ast.unparse(node)`                                                  | AST -> source.                        |
+| `ast.dump(node, annotate_fields=True, include_attributes=False, indent=None)` | Repr.            |
+| `ast.literal_eval(node_or_string)`                                   | Safe literal evaluation.              |
+| `ast.walk(node)`                                                     | Iterate over descendants.             |
+| `ast.iter_fields(node)`                                              | Iterate `(name, value)` pairs.        |
+| `ast.iter_child_nodes(node)`                                         | Direct child nodes.                   |
+| `ast.NodeVisitor`                                                    | Visitor base class.                   |
+| `ast.NodeTransformer`                                                | In-place transformer.                 |
+| `ast.fix_missing_locations(node)`                                    | Copy lineno/col from parent.          |
+| `ast.copy_location(new_node, old_node)`                              | Copy location attributes.             |
+| `ast.increment_lineno(node, n=1)`                                    | Shift line numbers.                   |
+| `ast.get_docstring(node, clean=True)`                                | Extract docstring from a module/function/class. |
+
+## AST optimisations
+
+Before reaching codegen, the AST passes through optimisation steps:
+
+| Pass                            | Effect                                              |
+| ------------------------------- | --------------------------------------------------- |
+| Constant folding                | Fold `BinOp`, `UnaryOp`, `BoolOp` over constants.   |
+| String concatenation            | Adjacent string literals merge.                     |
+| Negative-literal materialisation | `UnaryOp(USub, Constant(n))` -> `Constant(-n)` for ints. |
+| Optimised `if` / `while`        | Conditional constants short-circuit.                |
+| Doctring detection              | First statement of a function/class/module that is a `Constant` str is moved to `co_consts[0]`. |
+
+## Gopy status
+
+| Area                                  | State                                       |
+| ------------------------------------- | ------------------------------------------- |
+| Every AST node                        | Generated from `Python.asdl`.               |
+| `ast` module surface                  | Complete.                                   |
+| `ast.dump`/`ast.unparse` parity       | Complete; byte-equivalent to CPython.       |
+| AST optimisations                     | Complete.                                   |
+
+## Reference
+
+* `Parser/Python.asdl`. Canonical grammar.
+* `Python/Python-ast.c`. Generated node implementations.
+* `Lib/ast.py`. Python-facing API.
+* `ast/`. gopy's port.
+* [Grammar](grammar) for the surface syntax this AST encodes.

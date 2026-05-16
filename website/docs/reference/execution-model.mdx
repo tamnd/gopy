@@ -1,0 +1,222 @@
+---
+title: Execution model
+description: Naming, binding, scopes, code blocks, exception propagation, and the runtime semantics that govern a running Python program.
+---
+
+# Execution model
+
+A Python program is a sequence of code blocks executed in textual
+order. Each block runs in a namespace; namespaces nest; references
+are resolved by walking the scope chain. This page describes the
+rules that govern naming, binding, scope, and exception flow.
+
+Source-of-record:
+[CPython execution model](https://docs.python.org/3.14/reference/executionmodel.html),
+`Python/symtable.c`, `Python/compile.c`, `Python/ceval.c`.
+
+## Program structure
+
+A Python program is structured into code blocks. A code block is a
+piece of code executed as a unit. Each kind of code block has its
+own kind of namespace.
+
+| Block             | Namespace        | Created by                            |
+| ----------------- | ---------------- | ------------------------------------- |
+| Module            | Module globals   | `import`, top-level script run.       |
+| Function body     | Local locals     | Calling the function.                 |
+| Class body        | Class namespace  | `class` statement execution.          |
+| Comprehension     | Hidden local     | List/set/dict/gen comprehension.      |
+| Lambda            | Local locals     | Calling the lambda.                   |
+| `exec` / `eval`   | Per-call locals  | Calling `exec` or `eval`.             |
+| Interactive line  | Module globals   | One REPL line.                        |
+
+## Naming and binding
+
+### What creates a binding
+
+Any of the following binds a name in the *current* block:
+
+| Form                                              | Notes                              |
+| ------------------------------------------------- | ---------------------------------- |
+| `x = ...` (assignment)                            | Including augmented.               |
+| `def x` / `class x`                               | Function and class definitions.    |
+| `import x`                                        | Binds `x`.                         |
+| `import a.b`                                      | Binds `a`.                         |
+| `from x import y`                                 | Binds `y`.                         |
+| `from x import y as z`                            | Binds `z`.                         |
+| `for x in ...`                                    | Loop variable.                     |
+| `as` clause: `with ... as x`, `except ... as x`   | Local binding.                     |
+| Function parameter                                | Local in the function.             |
+| `:=` (walrus)                                     | Binds in the *enclosing* block.    |
+| Pattern capture in `match`                        | Binds the captured name.           |
+| Comprehension target                              | Local in the hidden comp scope.    |
+
+### Scope classes
+
+Every binding sits in one scope class:
+
+| Class       | Where                                                       |
+| ----------- | ----------------------------------------------------------- |
+| Local       | A name bound in the current function/lambda/class/comp.     |
+| Enclosing   | A name bound in an enclosing function and read here.        |
+| Global      | A name in the module namespace.                             |
+| Builtin     | A name in the `builtins` module.                            |
+| Class       | A name in a class body. Visible to methods only via `self.` and the special `__class__` cell. |
+| Free        | A reference that points outside the current scope.          |
+| Cell        | A local that is closed over by a nested function.           |
+
+### Resolution order (LEGB)
+
+For a name `x` referenced in a function:
+
+1. **Local.** The function's own locals.
+2. **Enclosing.** Closure cells, walking outward through enclosing
+   functions.
+3. **Global.** Module globals.
+4. **Builtin.** The `builtins` module.
+
+If no binding is found, raise `NameError`. If the binding exists
+but is not yet assigned, raise `UnboundLocalError` (locals) or
+`NameError` (globals/closures).
+
+### `global` and `nonlocal`
+
+| Statement              | Effect                                                    |
+| ---------------------- | --------------------------------------------------------- |
+| `global x`             | Bindings of `x` in this block write to module globals.    |
+| `nonlocal x`           | Bindings of `x` in this block write to the nearest enclosing function scope where `x` is bound. |
+
+Either declaration must precede any use of the name. Combining
+`global` and `nonlocal` for the same name in the same block is a
+`SyntaxError`.
+
+### Class body quirks
+
+A class body's namespace is not visible to methods defined inside
+it. A class body cannot see its own name during execution
+(`class C: ref = C` raises). The special name `__class__` is bound
+in any method that references it; calling `super()` without
+arguments uses this cell.
+
+## Code execution
+
+Execution of a code block happens in two phases:
+
+1. **Compile.** Source -> AST -> control-flow graph -> bytecode.
+2. **Evaluate.** The VM runs the bytecode in a fresh frame.
+
+The compile phase produces a `code` object. The evaluate phase
+needs a `code` object plus a globals dict (and optionally locals
+and closure cells). See [Bytecode -> Opcodes](opcodes).
+
+## Built-in scope
+
+The builtin scope is the `builtins` module. Each module has a
+reference to it as `__builtins__`. The module is normally a
+shortcut: `__builtins__.__dict__` (or `__builtins__` itself in
+the main module) is consulted for lookup.
+
+If a module is given a different `__builtins__` (e.g. a curated
+dict for sandboxing), name resolution uses that dict instead of
+the real `builtins` module. See
+[Manual -> Sandboxing](/docs/manual/embedding#sandboxing-user-supplied-python).
+
+## Exception flow
+
+### Raising
+
+| Form                          | Effect                                             |
+| ----------------------------- | -------------------------------------------------- |
+| `raise`                       | Re-raise the active exception.                     |
+| `raise ExcType`               | Construct `ExcType()` and raise.                   |
+| `raise ExcType(args)`         | Raise the constructed exception.                   |
+| `raise exc from cause`        | Set `exc.__cause__ = cause`, `__suppress_context__ = True`. |
+| `raise exc from None`         | Suppress implicit context.                         |
+
+### Implicit chaining
+
+If an exception is raised while another is being handled, the new
+exception's `__context__` is set to the active exception
+automatically. `__cause__` is set only by `raise ... from ...`.
+
+### Handler search
+
+When an exception propagates, the VM walks the active exception
+table for the running frame. If a handler is found, control jumps
+to it. Otherwise the frame unwinds and the exception propagates to
+the caller.
+
+### Exception groups (PEP 654)
+
+`ExceptionGroup` is a subclass of `Exception` that wraps multiple
+exceptions. Two new syntactic forms:
+
+| Form                                | Meaning                                          |
+| ----------------------------------- | ------------------------------------------------ |
+| `except* T as e:`                   | Match any exception in the group whose type matches `T`. |
+| `BaseExceptionGroup(message, excs)` | Wrap a sequence of exceptions.                   |
+
+`except*` handlers may run multiple times for a single group.
+Exceptions not matched are re-raised in a residual group.
+
+## Finalisation
+
+When a function returns, raises, or yields, its locals become
+unreachable unless they are captured by a closure or held by a
+returned object. Reference counting reclaims them immediately if
+their refcount hits zero; otherwise the cycle collector handles
+them.
+
+`__del__` runs at finalisation time. The runtime guarantees it
+runs at most once; subsequent resurrections do not retrigger it.
+
+## Module execution
+
+Importing a module runs its top-level code in a fresh namespace,
+which becomes the module's `__dict__`. Re-importing returns the
+cached module from `sys.modules` (see
+[Import system](import-system)).
+
+A module being imported is partially initialised: it exists in
+`sys.modules` but its top-level code is still running. Circular
+imports that reach a name not yet bound raise `ImportError` or
+`AttributeError`.
+
+## Concurrency model
+
+Python's concurrency story has three layers:
+
+| Layer         | Provides                                              |
+| ------------- | ----------------------------------------------------- |
+| GIL           | One Python instruction at a time per interpreter.     |
+| Threads       | `_thread.start_new_thread`; releases GIL on blocking I/O. |
+| Coroutines    | Cooperative scheduling via `async def` / `await`.     |
+
+The GIL is per-interpreter. PEP 684 introduces per-interpreter
+GILs, allowing multiple interpreters in one process to run Python
+in parallel.
+
+## Tracing and monitoring
+
+| Hook                    | Triggers on                                            |
+| ----------------------- | ------------------------------------------------------ |
+| `sys.settrace(fn)`      | Function call, line, return, exception (legacy).       |
+| `sys.setprofile(fn)`    | Function call, return.                                 |
+| `sys.monitoring`        | PEP 669 events; see [Manual -> Debugging](/docs/manual/debugging). |
+
+## Garbage collection interactions
+
+| Behaviour                                                | Source                          |
+| -------------------------------------------------------- | ------------------------------- |
+| Reference cycles between user types are collected.       | `Modules/gcmodule.c`            |
+| `gc.disable()` pauses cycle collection.                  | `gc` module.                    |
+| `gc.collect()` forces a full sweep.                      | `gc` module.                    |
+| Weak references are cleared before object finalisation.  | `Objects/weakrefobject.c`       |
+
+## Reference
+
+* CPython 3.14: [Execution model](https://docs.python.org/3.14/reference/executionmodel.html).
+* `Python/symtable.c`. Scope assignment.
+* `Python/ceval.c`. The eval loop.
+* [Symbol table](/docs/cpython/symtable). Internal view.
+* [VM](/docs/cpython/vm). Internal view.

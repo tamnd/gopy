@@ -1,0 +1,233 @@
+---
+title: Grammar
+description: The complete Python 3.14 PEG grammar, terminals, and parser productions as gopy implements them.
+---
+
+# Grammar
+
+Python's grammar is a PEG (Parsing Expression Grammar) since 3.9.
+The canonical definition lives in `Grammar/python.gram`. This page
+indexes every non-terminal, gives the entry points, and explains
+the lookahead conventions.
+
+## Entry points
+
+| Mode             | Start symbol      | Used by                            |
+| ---------------- | ----------------- | ---------------------------------- |
+| `exec` / file    | `file`            | `pythonrun.RunSimpleString`, `.py` files. |
+| `eval`           | `eval`            | `parser.ModeEval`, `eval()`.       |
+| `single` / REPL  | `interactive`     | `parser.ModeSingle`, `gopy -c`.    |
+| Function type    | `func_type`       | `typing.get_type_hints`.           |
+
+The start symbol consumes input until `ENDMARKER`. Anything left
+over is a `SyntaxError`.
+
+## Top-level structure
+
+```
+file:           [statements] ENDMARKER
+interactive:    statement_newline
+eval:           expressions [NEWLINE]* ENDMARKER
+func_type:      '(' [type_expressions] ')' '->' expression [NEWLINE]* ENDMARKER
+```
+
+## Statement classes
+
+| Non-terminal           | Covers                                                  |
+| ---------------------- | ------------------------------------------------------- |
+| `statements`           | One or more `statement`.                                |
+| `statement`            | A compound or a simple-statement sequence.              |
+| `statement_newline`    | Statement followed by `NEWLINE` (interactive).          |
+| `simple_stmts`         | `;`-separated `simple_stmt`s, terminated by `NEWLINE`.  |
+| `simple_stmt`          | One of the simple statements (see below).               |
+| `compound_stmt`        | `if`, `while`, `for`, `try`, `with`, `match`, `function_def`, `class_def`, `async_stmt`. |
+
+### Simple statement productions
+
+| Production               | Syntax                                              |
+| ------------------------ | --------------------------------------------------- |
+| `assignment`             | Targets, augmented, annotated.                      |
+| `type_alias`             | `type Name = expression`                            |
+| `star_expressions`       | Bare expression statement (top-level).              |
+| `return_stmt`            | `'return' [star_expressions]`                       |
+| `import_stmt`            | `import_name` or `import_from`.                     |
+| `raise_stmt`             | `'raise' [expression ['from' expression]]`          |
+| `pass_stmt`              | `'pass'`                                            |
+| `del_stmt`               | `'del' del_targets`                                 |
+| `yield_stmt`             | `yield_expr`                                        |
+| `assert_stmt`            | `'assert' expression [',' expression]`              |
+| `break_stmt`             | `'break'`                                           |
+| `continue_stmt`          | `'continue'`                                        |
+| `global_stmt`            | `'global' NAME (',' NAME)*`                         |
+| `nonlocal_stmt`          | `'nonlocal' NAME (',' NAME)*`                       |
+
+### Compound statement productions
+
+| Production       | Heads                                              |
+| ---------------- | -------------------------------------------------- |
+| `function_def`   | `def`, `async def`, with `@decorator` stack.       |
+| `class_def`      | `class`, with decorators and PEP 695 type params.  |
+| `if_stmt`        | `if`, `elif`, `else`.                              |
+| `while_stmt`     | `while`, optional `else`.                          |
+| `for_stmt`       | `for` / `async for`, optional `else`.              |
+| `with_stmt`      | `with` / `async with`, parenthesised items.        |
+| `try_stmt`       | `try` with any of `except`, `except*`, `else`, `finally`. |
+| `match_stmt`     | `match` with one or more `case` clauses.           |
+| `async_stmt`     | `async def`, `async for`, `async with`.            |
+
+## Expressions
+
+### Expression hierarchy
+
+The grammar is layered by precedence. The list below runs from
+loosest binding to tightest:
+
+```
+expressions     -> expression (',' expression)*
+expression      -> conditional | lambdef
+conditional     -> disjunction ['if' disjunction 'else' expression]
+disjunction     -> conjunction ('or' conjunction)*
+conjunction     -> inversion ('and' inversion)*
+inversion       -> 'not' inversion | comparison
+comparison      -> bitwise_or (comp_op bitwise_or)*
+bitwise_or      -> bitwise_xor ('|' bitwise_xor)*
+bitwise_xor     -> bitwise_and ('^' bitwise_and)*
+bitwise_and     -> shift_expr ('&' shift_expr)*
+shift_expr      -> sum (('<<' | '>>') sum)*
+sum             -> term (('+' | '-') term)*
+term            -> factor (('*'|'/'|'//'|'%'|'@') factor)*
+factor          -> ('+'|'-'|'~') factor | power
+power           -> await_primary ['**' factor]
+await_primary   -> 'await' primary | primary
+primary         -> atom (call_suffix | subscript | attribute_ref | ...)*
+atom            -> NAME | literal | group | list | dict | set | gen | comprehension
+```
+
+### Atoms
+
+| Form                  | Meaning                                          |
+| --------------------- | ------------------------------------------------ |
+| `NAME`                | Name reference.                                  |
+| `True` / `False` / `None` | Singletons.                                  |
+| `...` (`Ellipsis`)    | Singleton.                                       |
+| `NUMBER`              | Numeric literal.                                 |
+| `strings`             | String/bytes/f-string/t-string literal.          |
+| `'(' yield_expr ')'`  | Parenthesised yield.                             |
+| `'(' tuple ')'`       | Parenthesised tuple or grouping.                 |
+| `'[' list ']'`        | List display or comprehension.                   |
+| `'{' set ']'`         | Set display or comprehension.                    |
+| `'{' dict '}'`        | Dict display or comprehension.                   |
+
+### Comprehensions
+
+Comprehension syntax:
+```
+comp_for -> 'async'? 'for' targets 'in' disjunction ('if' disjunction)*
+```
+Each subsequent `for` and `if` clause is appended to the previous.
+Comprehensions create their own scope; their iteration variable does
+not leak into the enclosing namespace.
+
+### Call syntax
+
+```
+call -> primary '(' [arguments] ')'
+arguments -> args [',' kwargs] | kwargs
+args -> (starred_expression | (assignment_expression | expression !':=') !'=') (',' ...)*
+kwargs -> kwarg_or_starred (',' ...)*
+kwarg_or_starred -> NAME '=' expression | '**' expression
+```
+
+This expresses: positional first, then keyword. `*expr` splats an
+iterable into positional; `**expr` splats a mapping into keyword.
+The walrus operator is allowed in positional context.
+
+## Patterns (`match`)
+
+| Pattern              | Form                                                    |
+| -------------------- | ------------------------------------------------------- |
+| Capture              | `name` (a single NAME that is not a value pattern).     |
+| Wildcard             | `_`                                                     |
+| Value                | `dotted.name` (constant lookup).                        |
+| Literal              | numeric, string, `True`, `False`, `None`.               |
+| Group                | `'(' pattern ')'`                                       |
+| Sequence             | `'[' [pattern (',' pattern)*] ']'` or with `()`.        |
+| Mapping              | `'{' [mapping_items] '}'`                               |
+| Class                | `dotted.name '(' [pattern_args] ')'`                    |
+| `*`-rest             | `*name` in sequence patterns.                           |
+| `**`-rest            | `**name` in mapping patterns.                           |
+| OR                   | `pattern ('|' pattern)+`                                |
+| AS                   | `pattern 'as' NAME`                                     |
+
+A class pattern with `__match_args__` binds positional arguments
+to the listed attribute names.
+
+## Type parameters (PEP 695)
+
+Generic syntax:
+```
+type_params -> '[' type_param (',' type_param)* ']'
+type_param  -> NAME [':' bound] ['=' default]
+             | '*' NAME ['=' default]
+             | '**' NAME ['=' default]
+```
+
+`def f[T](x: T) -> T: ...` and `class C[T]: ...` desugar into hidden
+`TypeVar` / `TypeVarTuple` / `ParamSpec` creation at runtime.
+
+## Annotations
+
+```
+annotation -> expression
+```
+Annotations are always lazy at the module/class top level in 3.14
+(PEP 649 / 749). They are stored as code objects on `__annotate__`
+and only evaluated on demand.
+
+## Terminals
+
+| Terminal     | Definition                                              |
+| ------------ | ------------------------------------------------------- |
+| `NAME`       | Identifier (see [Lexical](lexical#identifiers)).        |
+| `NUMBER`     | Numeric literal.                                        |
+| `STRING`     | String literal (any prefix/quote form).                 |
+| `FSTRING_*`  | Composite f-string tokens emitted by the lexer.         |
+| `NEWLINE`    | Logical line break.                                     |
+| `INDENT`     | Increase in indent depth.                               |
+| `DEDENT`     | Decrease in indent depth.                               |
+| `ENDMARKER`  | End of input.                                           |
+| `OP`         | Operator/delimiter token (the parser narrows by text).  |
+
+## PEG features used
+
+| Feature        | Meaning                                                   |
+| -------------- | --------------------------------------------------------- |
+| `e?`           | Optional.                                                 |
+| `e*` / `e+`    | Zero/more or one/more.                                    |
+| `&e`           | Positive lookahead (consume nothing, require `e`).        |
+| `!e`           | Negative lookahead.                                       |
+| `~`            | Commit: backtracking before this point is forbidden.      |
+| `e1 \| e2`     | Ordered choice (left wins).                               |
+| `[ ... ]`      | Optional with packrat memoization in the canonical grammar. |
+| `RULE [name]`  | Capture group.                                            |
+
+The parser memoizes results per `(rule, position)`. A failed rule at
+a position is also memoized to skip rework.
+
+## Gopy status
+
+| Area                              | State                                          |
+| --------------------------------- | ---------------------------------------------- |
+| Whole grammar                     | Complete. Generated from `Grammar/python.gram`. |
+| Error recovery and friendly errors | Complete; matches CPython messages.          |
+| Tokeniser-parser feedback         | Complete.                                      |
+| PEG memoization                   | Complete.                                      |
+| `match` statement                 | Complete.                                      |
+| PEP 695 type params               | Complete.                                      |
+
+## Reference
+
+* `Grammar/python.gram`. The canonical grammar.
+* `parser/`. gopy's port.
+* [CPython internals -> Parser](/docs/cpython/parser).
+* [Gopy internals -> Parser](/docs/gopy/parser).

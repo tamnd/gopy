@@ -1,0 +1,221 @@
+---
+title: ABI and calling conventions
+description: Vectorcall, fastcall, METH_* flags, frame layout, and the calling conventions the VM and built-in functions use.
+---
+
+# ABI and calling conventions
+
+This page describes the calling conventions the interpreter uses
+internally. Implementing a Python runtime requires reproducing
+these exactly: a built-in function declared with `METH_FASTCALL`
+must be called with the fastcall shape, never the tuple/dict shape.
+
+Source-of-record: `Include/cpython/methodobject.h`,
+`Include/cpython/abstract.h`, `Objects/call.c`,
+`Objects/methodobject.c`.
+
+## Method calling-convention flags
+
+A `PyMethodDef` declares a built-in function. The `ml_flags` field
+chooses the calling convention.
+
+| Flag                                 | Argument shape                                       |
+| ------------------------------------ | ---------------------------------------------------- |
+| `METH_VARARGS`                       | `(self, args_tuple)`.                                |
+| `METH_VARARGS | METH_KEYWORDS`       | `(self, args_tuple, kwargs_dict)`.                   |
+| `METH_FASTCALL`                      | `(self, args_array, nargs)`.                         |
+| `METH_FASTCALL | METH_KEYWORDS`      | `(self, args_array, nargs, kwnames_tuple)`.          |
+| `METH_NOARGS`                        | `(self, NULL)`. Args ignored.                        |
+| `METH_O`                             | `(self, arg)`. Single positional.                    |
+| `METH_CLASS`                         | Marker: function is a class method.                  |
+| `METH_STATIC`                        | Marker: function is a static method.                 |
+| `METH_COEXIST`                       | Allow coexistence with a slot of the same name.      |
+| `METH_METHOD`                        | The fastcall variant takes a defining-class argument. |
+
+### Fastcall details
+
+`METH_FASTCALL` passes arguments as a C array rather than packing
+them into a tuple. The signature is:
+
+```c
+PyObject* func(PyObject *self,
+               PyObject *const *args,
+               Py_ssize_t nargs);
+```
+
+`METH_FASTCALL | METH_KEYWORDS`:
+
+```c
+PyObject* func(PyObject *self,
+               PyObject *const *args,
+               Py_ssize_t nargs,
+               PyObject *kwnames);
+```
+
+`kwnames` is a tuple of keyword argument names corresponding to the
+last `len(kwnames)` entries of `args`. `args[nargs - len(kwnames)]`
+is the first keyword value.
+
+## Vectorcall (PEP 590)
+
+Vectorcall extends fastcall to callable objects in general, not
+just methods. A type with `Py_TPFLAGS_HAVE_VECTORCALL` has a
+function pointer at `vectorcall_offset` bytes into the instance.
+
+```c
+typedef PyObject* (*vectorcallfunc)(PyObject *callable,
+                                    PyObject *const *args,
+                                    size_t nargsf,
+                                    PyObject *kwnames);
+```
+
+| Component              | Meaning                                              |
+| ---------------------- | ---------------------------------------------------- |
+| `callable`             | The callable itself.                                 |
+| `args`                 | Argument array.                                      |
+| `nargsf`               | Number of positional args, OR-ed with `PY_VECTORCALL_ARGUMENTS_OFFSET`. |
+| `kwnames`              | Tuple of keyword names; trailing entries in `args` correspond. |
+
+`PY_VECTORCALL_ARGUMENTS_OFFSET` indicates the caller reserved one
+slot before `args` so the callee can prepend `self` without
+copying. This is how bound methods avoid a copy.
+
+## Argument parsing
+
+Most built-in functions use one of the helpers:
+
+| Helper                                                | Purpose                            |
+| ----------------------------------------------------- | ---------------------------------- |
+| `PyArg_ParseTuple(args, format, ...)`                 | Parse positional tuple.            |
+| `PyArg_ParseTupleAndKeywords(args, kwargs, format, kwlist, ...)` | Tuple + dict.        |
+| `_PyArg_ParseStack(args, nargs, format, ...)`         | Parse fastcall positional.         |
+| `_PyArg_ParseStackAndKeywords(args, nargs, kwnames, parser, ...)` | Fastcall + kwnames. |
+| `Argument Clinic`                                     | Compile-time generator producing optimal parsers. |
+
+### Format characters
+
+| Char | C type             | Python type                            |
+| ---- | ------------------ | -------------------------------------- |
+| `s`  | `const char *`     | `str` (UTF-8, no embedded null).       |
+| `s*` | `Py_buffer`        | `str` or buffer.                       |
+| `s#` | `const char *, Py_ssize_t` | `str` with length.             |
+| `z`  | `const char *`     | `str` or `None`.                       |
+| `y`  | `const char *`     | `bytes`.                               |
+| `y*` | `Py_buffer`        | bytes-like (read-only).                |
+| `y#` | `const char *, Py_ssize_t` | bytes with length.             |
+| `S`  | `PyObject *`       | `bytes`.                               |
+| `Y`  | `PyObject *`       | `bytearray`.                           |
+| `u`  | `Py_UCS4 *`        | str (deprecated).                      |
+| `U`  | `PyObject *`       | `str`.                                 |
+| `b`  | `unsigned char`    | int.                                   |
+| `B`  | `unsigned char`    | int (truncating).                      |
+| `h`  | `short`            | int.                                   |
+| `H`  | `unsigned short`   | int.                                   |
+| `i`  | `int`              | int.                                   |
+| `I`  | `unsigned int`     | int.                                   |
+| `l`  | `long`             | int.                                   |
+| `k`  | `unsigned long`    | int.                                   |
+| `L`  | `long long`        | int.                                   |
+| `K`  | `unsigned long long` | int.                                 |
+| `n`  | `Py_ssize_t`       | int.                                   |
+| `c`  | `char`             | length-1 bytes.                        |
+| `C`  | `int`              | length-1 str (Py_UCS4 code point).     |
+| `f`  | `float`            | float.                                 |
+| `d`  | `double`           | float.                                 |
+| `D`  | `Py_complex`       | complex.                               |
+| `O`  | `PyObject *`       | any object.                            |
+| `O!` | `PyTypeObject *, PyObject *` | object of exact type.        |
+| `O&` | `converter, void *` | object passed through converter.      |
+| `p`  | `int`              | bool (predicate).                      |
+| `(...)` | nested            | Tuple.                              |
+| `\|` | -                  | Following arguments are optional.      |
+| `$`  | -                  | Following arguments are keyword-only.  |
+| `:`  | -                  | Function name prefix.                  |
+| `;`  | -                  | Error message prefix.                  |
+
+## Frame layout
+
+A `_PyInterpreterFrame` is laid out:
+
+| Field                       | Description                                       |
+| --------------------------- | ------------------------------------------------- |
+| `previous`                  | Pointer to the previous frame.                    |
+| `executable` / `f_executable` | Code object or executor.                        |
+| `instr_ptr`                 | Next instruction.                                 |
+| `stacktop`                  | Stack pointer offset.                             |
+| `f_globals`, `f_builtins`, `f_locals` | Namespace references.                   |
+| `f_frame_obj`               | Lazy Python-level frame proxy.                    |
+| `localsplus[]`              | Inline storage for locals, cells, free vars, eval stack. |
+
+`localsplus[]` is laid out: locals first, then cells, then free
+variables, then the eval stack. `co_nlocals`, `co_ncellvars`,
+`co_nfreevars`, and `co_stacksize` give the offsets.
+
+## Eval stack
+
+The eval stack is part of the frame's `localsplus[]`. A Python
+function's `co_stacksize` is the maximum depth statically computed
+by `Python/flowgraph.c`. Each `PyObject*` slot on the stack is a
+strong reference.
+
+## Reference counting on the stack
+
+| Operation                                                 |
+| --------------------------------------------------------- |
+| Pushing a value: caller transfers ownership of one strong ref. |
+| Popping a value: callee receives ownership.               |
+| Borrowed semantics: special opcodes like `LOAD_FAST_BORROW` push *non-owning* refs that must not outlive the local. |
+
+Reference counting on the stack is invariant-preserving even when
+exceptions unwind: each unwind step pops and DECREFs the stack down
+to a known good depth from the exception table.
+
+## Internal calling helpers
+
+| Helper                          | Used for                                          |
+| ------------------------------- | ------------------------------------------------- |
+| `PyObject_CallOneArg(c, a)`     | One positional argument.                          |
+| `PyObject_CallNoArgs(c)`        | No arguments.                                     |
+| `PyObject_CallMethodObjArgs`    | Bound method, var args.                           |
+| `PyObject_Vectorcall(callable, args, nargsf, kwnames)` | Vectorcall fast path. |
+| `_PyObject_FastCallDict(c, args, n, kw)`               | Build-and-call when caller has a dict. |
+
+## Cross-interpreter ABI (PEP 554)
+
+Multiple interpreters in one process require careful ABI separation:
+
+| Rule                                                            |
+| --------------------------------------------------------------- |
+| Static types may be shared.                                     |
+| Heap types must not cross interpreter boundaries.               |
+| Cross-interpreter calls go via `_xxsubinterpreters` or `interpreters.queues`. |
+| Per-interpreter state lives in `PyInterpreterState`.            |
+
+## Stable ABI
+
+CPython exposes a *limited API* (`Py_LIMITED_API`) for compiled
+extensions that need to work across minor versions. The stable ABI
+omits anything internal-by-design (frame internals, type slot
+layout, GC structures, vectorcall offset).
+
+gopy does not implement the C extension ABI at all (see
+[Status -> Non-goals](/docs/manual/status#non-goals)).
+
+## Gopy status
+
+| Convention                          | State                                       |
+| ----------------------------------- | ------------------------------------------- |
+| `METH_VARARGS` / `METH_KEYWORDS`    | Built-ins use the Go-side `objects.BuiltinFunction` shape; semantics match. |
+| `METH_FASTCALL`                     | Implemented through the same Go shape; the VM does not pack arguments into a tuple. |
+| Vectorcall                          | Internal fast path for built-in callables. |
+| `PyArg_ParseTuple` format strings   | Gopy uses Go-style argument parsing; format-string parity is N/A. |
+| Frame layout                        | Mirrors CPython's localsplus[] design.     |
+| Eval stack semantics                | Identical.                                  |
+
+## Reference
+
+* `Include/cpython/methodobject.h`. Method flag definitions.
+* `Objects/call.c`. The dispatch logic.
+* PEP 590 (Vectorcall).
+* [VM internals](/docs/cpython/vm).
+* [Frame internals](/docs/cpython/frame).

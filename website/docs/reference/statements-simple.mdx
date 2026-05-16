@@ -1,0 +1,253 @@
+---
+title: Simple statements
+description: Every simple statement form, the bytecode it produces, and its runtime semantics.
+---
+
+# Simple statements
+
+A simple statement is one statement on one logical line (possibly
+combined with others using `;`). This page enumerates every form.
+
+Source-of-record:
+[CPython simple statements](https://docs.python.org/3.14/reference/simple_stmts.html),
+`Python/compile.c`.
+
+## Expression statement
+
+Any expression used as a statement evaluates the expression and
+discards the result. In `single`-mode compilation (REPL), the
+result is also passed to `sys.displayhook`.
+
+| Source        | Bytecode                                |
+| ------------- | --------------------------------------- |
+| `f(x)`        | `LOAD_NAME f; LOAD_NAME x; CALL 1; POP_TOP`. |
+| `1 + 2`       | `LOAD_CONST 1; LOAD_CONST 2; BINARY_OP add; POP_TOP`. |
+
+## Assignment
+
+### Simple assignment
+
+```
+target_list = expression
+target_list = target_list = ...
+```
+
+The right side is evaluated once; then each target is assigned, in
+left-to-right order.
+
+Targets can be:
+
+| Target                       | Action                                    |
+| ---------------------------- | ----------------------------------------- |
+| `NAME`                       | Bind in the current scope.                |
+| `attribute`                  | `setattr(obj, name, value)`.              |
+| `subscription`               | `__setitem__`.                            |
+| `slicing`                    | `__setitem__(slice(...), value)`.         |
+| `*target` (in a list/tuple)  | Collect remaining into a list.            |
+| `(t1, t2, ...)` / `[t1, t2, ...]` | Iterable unpacking.                  |
+
+### Iterable unpacking
+
+```
+a, b, c = iterable
+a, *b, c = iterable
+```
+
+The right side must be iterable. With a `*target`, exactly one
+starred target is allowed; non-starred targets are filled first
+from the iterable's ends, and the starred target receives the
+middle as a `list`.
+
+### Augmented assignment
+
+```
+target op= value     # +=, -=, *=, /=, //=, %=, **=, @=, &=, |=, ^=, <<=, >>=
+```
+
+| Step | Action                                                          |
+| ---- | --------------------------------------------------------------- |
+| 1    | Evaluate the target once (for attribute or subscript reads).    |
+| 2    | Evaluate `value`.                                               |
+| 3    | Try the in-place dunder (`__iadd__` etc.). If it returns `NotImplemented`, fall back to the normal binary dunder. |
+| 4    | Assign the result back to the target.                           |
+
+### Annotated assignment
+
+```
+target: annotation = value   # value optional
+```
+
+| Form                       | Effect                                         |
+| -------------------------- | ---------------------------------------------- |
+| `x: int = 0`               | Bind `x` and record annotation lazily.         |
+| `x: int`                   | Record annotation; do *not* bind `x` at runtime. |
+| `self.x: int = 0`          | Equivalent to `self.x = 0`; annotation ignored. |
+
+Annotations are evaluated lazily in 3.14 (PEP 649/749). Inspecting
+them goes through `inspect.get_annotations(obj)`.
+
+## `pass`
+
+```
+pass
+```
+
+Does nothing. Emitted bytecode is empty; the statement exists so
+that blocks can be syntactically non-empty.
+
+## `del`
+
+```
+del target_list
+```
+
+For each target:
+
+| Target                  | Action                                       |
+| ----------------------- | -------------------------------------------- |
+| `NAME`                  | Unbind in the current scope.                 |
+| `attribute`             | `delattr(obj, name)`.                        |
+| `subscription`          | `__delitem__`.                               |
+| `slicing`               | `__delitem__(slice(...))`.                   |
+
+## `return`
+
+```
+return                # equivalent to return None
+return expression
+return e1, e2, e3     # returns the tuple
+```
+
+A `return` outside a function body is a `SyntaxError`. A `return`
+inside a generator function ends iteration; the value (if any) is
+attached to the resulting `StopIteration.value`.
+
+## `yield`
+
+```
+yield                 # yields None
+yield expression
+yield from iterable
+```
+
+A `yield` statement makes the enclosing function a generator
+function. See [Expressions -> yield](expressions#yield-expressions)
+for the protocol; this entry covers `yield` used as a statement
+(the result is discarded).
+
+## `raise`
+
+```
+raise                  # re-raise active exception
+raise EXC              # raise EXC()
+raise EXC(args)
+raise EXC from CAUSE   # set __cause__
+raise EXC from None    # suppress implicit context
+```
+
+| Behaviour                  | Source                                       |
+| -------------------------- | -------------------------------------------- |
+| Implicit context           | Set automatically by the interpreter.        |
+| Explicit cause             | Set by `from`.                               |
+| Traceback                  | Set when the exception is raised.            |
+
+## `break`
+
+```
+break
+```
+
+Exits the innermost enclosing `for` or `while` loop. If the loop
+has an `else` clause, it is skipped.
+
+A `break` outside a loop is a `SyntaxError`.
+
+## `continue`
+
+```
+continue
+```
+
+Continues with the next iteration of the innermost enclosing loop.
+A `continue` outside a loop is a `SyntaxError`.
+
+## `import`
+
+See [Import system](import-system) for the protocol. The statement
+forms:
+
+| Form                          | Bytecode                                            |
+| ----------------------------- | --------------------------------------------------- |
+| `import a`                    | `IMPORT_NAME 'a'; STORE_NAME 'a'`.                  |
+| `import a as x`               | `IMPORT_NAME 'a'; STORE_NAME 'x'`.                  |
+| `import a.b`                  | `IMPORT_NAME 'a.b'; STORE_NAME 'a'`.                |
+| `import a.b as x`             | `IMPORT_NAME 'a.b'; IMPORT_FROM 'b'; STORE_NAME 'x'; POP_TOP`. |
+| `from a import b`             | `IMPORT_NAME 'a'; IMPORT_FROM 'b'; STORE_NAME 'b'; POP_TOP`. |
+| `from a import *`             | `IMPORT_NAME 'a'; IMPORT_STAR`.                     |
+| `from .a import b`            | Level encoded in `IMPORT_NAME`.                     |
+
+`from x import *` is only legal at module scope.
+
+## `global`
+
+```
+global NAME [, NAME ...]
+```
+
+Declares that any binding of `NAME` in the current block writes to
+the module globals. Must precede any use of the name. Combining
+with a parameter default `def f(x=1): global x` is a `SyntaxError`.
+
+## `nonlocal`
+
+```
+nonlocal NAME [, NAME ...]
+```
+
+Declares that any binding of `NAME` writes to the nearest enclosing
+function scope where `NAME` is bound. Must precede any use. Must
+find a binding; otherwise `SyntaxError`.
+
+## `assert`
+
+```
+assert expression
+assert expression, message
+```
+
+If `__debug__` is true (the default), evaluates `expression`. If
+falsy, raises `AssertionError(message)`. Running with `-O` strips
+asserts at compile time.
+
+## `type` (PEP 695)
+
+```
+type Name = expression
+type Name[T] = expression
+```
+
+Creates a `TypeAliasType` object bound to `Name`. The right-hand
+side is evaluated lazily, accessible as `Name.__value__`.
+
+## Multiple statements on one line
+
+```
+x = 1; y = 2; z = 3
+```
+
+Semicolons join simple statements on one logical line. Compound
+statements cannot appear in such a sequence.
+
+## Gopy status
+
+Every simple statement listed is wired and lowered to the
+matching bytecode form. The bytecode emitted is byte-equivalent
+with CPython 3.14.
+
+## Reference
+
+* CPython 3.14: [Simple statements](https://docs.python.org/3.14/reference/simple_stmts.html).
+* `compile/`. gopy's compiler emitting the bytecode.
+* [Compound statements](statements-compound). The rest of the
+  statement surface.
+* [Opcodes](opcodes). The full bytecode reference.

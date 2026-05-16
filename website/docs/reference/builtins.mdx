@@ -1,10 +1,193 @@
 ---
-title: ubuiltins
-description: Reference tables for builtins.
+title: Built-in functions
+description: Every function, constant, and class in the builtins module of Python 3.14.
 ---
 
-# ubuiltins
+# Built-in functions
 
-Reference tables for builtins. Generated and curated against CPython 3.14.
+The `builtins` module is the implicit base of every name lookup. It
+holds the always-available functions, constants, and exception
+classes. This page is the complete catalogue.
 
-(Tables in progress. See [manual/status](../manual/status) for coverage.)
+Source-of-record: `Python/bltinmodule.c`,
+[the built-in functions reference](https://docs.python.org/3.14/library/functions.html).
+
+## Functions
+
+### Object inspection and construction
+
+| Function                                           | Behaviour                                                |
+| -------------------------------------------------- | -------------------------------------------------------- |
+| `type(object)` / `type(name, bases, dict)`         | Get type, or construct a class.                          |
+| `isinstance(obj, type_or_tuple)`                   | Type test.                                               |
+| `issubclass(cls, type_or_tuple)`                   | Subtype test.                                            |
+| `id(obj)`                                          | Identity number.                                         |
+| `hash(obj)`                                        | Compute hash.                                            |
+| `repr(obj)`                                        | Canonical string.                                        |
+| `ascii(obj)`                                       | `repr` with non-ASCII escaped.                           |
+| `dir([obj])`                                       | Attribute listing.                                       |
+| `vars([obj])`                                      | `__dict__` of obj.                                       |
+| `callable(obj)`                                    | True if `tp_call` is set.                                |
+| `hasattr(obj, name)`                               | True if `getattr` would succeed.                         |
+| `getattr(obj, name[, default])`                    | Attribute lookup.                                        |
+| `setattr(obj, name, value)`                        | Attribute set.                                           |
+| `delattr(obj, name)`                               | Attribute delete.                                        |
+| `object()`                                         | Bare object.                                             |
+
+### Numeric
+
+| Function                                            | Behaviour                                                |
+| --------------------------------------------------- | -------------------------------------------------------- |
+| `abs(x)`                                            | Absolute value (`__abs__`).                              |
+| `divmod(a, b)`                                      | `(a // b, a % b)`.                                       |
+| `pow(base, exp[, mod])`                             | `base ** exp` or modular exponentiation.                 |
+| `round(number[, ndigits])`                          | Banker's rounding.                                       |
+| `min(iter, *, key=None, default=...)` / `min(*args)`| Minimum.                                                 |
+| `max(iter, *, key=None, default=...)` / `max(*args)`| Maximum.                                                 |
+| `sum(iter[, start])`                                | Sum elements.                                            |
+| `bool([x])`                                         | Convert to bool.                                         |
+| `int([x[, base]])`                                  | Convert to int.                                          |
+| `float([x])`                                        | Convert to float.                                        |
+| `complex([real[, imag]])`                           | Construct complex.                                       |
+| `bin(x)` / `oct(x)` / `hex(x)`                      | Integer representation strings.                          |
+
+### Sequence and iteration
+
+| Function                                            | Behaviour                                                |
+| --------------------------------------------------- | -------------------------------------------------------- |
+| `len(s)`                                            | `__len__`.                                               |
+| `iter(obj[, sentinel])`                             | Get iterator.                                            |
+| `next(it[, default])`                               | Advance iterator.                                        |
+| `reversed(seq)`                                     | Reverse iterator.                                        |
+| `sorted(iter, *, key=None, reverse=False)`          | New sorted list.                                         |
+| `enumerate(iter, start=0)`                          | `(index, value)` pairs.                                  |
+| `zip(*iters, strict=False)`                         | Tuples from each iterable.                               |
+| `map(fn, *iters)`                                   | Apply `fn` lazily.                                       |
+| `filter(fn, iter)`                                  | Keep truthy results.                                     |
+| `range([start,] stop[, step])`                      | Lazy arithmetic progression.                             |
+| `slice([start,] stop[, step])`                      | Construct slice object.                                  |
+| `tuple([iter])`                                     | Tuple from iterable.                                     |
+| `list([iter])`                                      | List from iterable.                                      |
+| `dict([mapping_or_iter], **kwargs)`                 | Dict construction.                                       |
+| `set([iter])`                                       | Set from iterable.                                       |
+| `frozenset([iter])`                                 | Frozenset from iterable.                                 |
+| `bytes([source[, encoding[, errors]]])`             | Bytes from iterable/str/int.                             |
+| `bytearray([source[, encoding[, errors]]])`         | Mutable bytes.                                           |
+| `memoryview(obj)`                                   | Buffer view.                                             |
+| `str([object[, encoding[, errors]]])`               | Convert to str.                                          |
+| `any(iter)`                                         | Short-circuit truthy.                                    |
+| `all(iter)`                                         | Short-circuit falsy.                                     |
+
+### I/O and execution
+
+| Function                                                                     | Behaviour                                  |
+| ---------------------------------------------------------------------------- | ------------------------------------------ |
+| `print(*objects, sep=' ', end='\n', file=sys.stdout, flush=False)`           | Print.                                     |
+| `input([prompt])`                                                            | Read a line.                               |
+| `open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None)` | Open a file. |
+| `exec(source, globals=None, locals=None, *, closure=None)`                   | Compile and run.                           |
+| `eval(source, globals=None, locals=None)`                                    | Evaluate expression.                       |
+| `compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1)`  | Produce a code object.                     |
+| `__import__(name, globals=None, locals=None, fromlist=(), level=0)`          | Backend of `import`.                       |
+
+### Class machinery
+
+| Function                                  | Behaviour                                                |
+| ----------------------------------------- | -------------------------------------------------------- |
+| `classmethod(fn)`                         | Descriptor: bind to class.                               |
+| `staticmethod(fn)`                        | Descriptor: bypass `self`.                               |
+| `property(fget=None, fset=None, fdel=None, doc=None)` | Managed attribute.                            |
+| `super([type[, object_or_type]])`         | Cooperative method lookup.                               |
+| `__build_class__(func, name, *bases, **kwds)` | Implementation of `class` statement.                 |
+
+### Formatting
+
+| Function                                  | Behaviour                                                |
+| ----------------------------------------- | -------------------------------------------------------- |
+| `format(value, format_spec='')`           | Call `__format__`.                                       |
+| `repr(obj)`                               | Canonical string.                                        |
+| `chr(int)`                                | Code point -> character.                                 |
+| `ord(char)`                               | Character -> code point.                                 |
+
+### Hashing and identity
+
+| Function                          | Behaviour                                       |
+| --------------------------------- | ----------------------------------------------- |
+| `hash(obj)`                       | Compute hash via `__hash__`.                    |
+| `id(obj)`                         | Identity number.                                |
+| `globals()`                       | Module-level namespace.                         |
+| `locals()`                        | Active local namespace.                         |
+| `breakpoint(*args, **kwargs)`     | Call `sys.breakpointhook`.                      |
+
+## Constants
+
+| Name                  | Value                                            |
+| --------------------- | ------------------------------------------------ |
+| `True`                | The truthy singleton.                            |
+| `False`               | The falsy singleton.                             |
+| `None`                | The unit singleton.                              |
+| `NotImplemented`      | Sentinel returned by binary operators.           |
+| `Ellipsis` (`...`)    | Singleton.                                       |
+| `__debug__`           | `True` unless run under `-O`.                    |
+| `__name__`            | `'__main__'` in script context.                  |
+| `__doc__`             | Module docstring.                                |
+| `__package__`         | Containing package name.                         |
+| `__spec__`            | Module spec.                                     |
+| `__loader__`          | Loader instance.                                 |
+| `__file__`            | Source file path.                                |
+| `__builtins__`        | Builtins reference inside other modules.         |
+| `copyright` / `credits` / `license` / `help` / `exit` / `quit` | Interactive helpers installed by `site.py`. |
+
+## Classes exposed via `builtins`
+
+The classes corresponding to every built-in type are also available
+by name from `builtins`:
+
+```
+bool, bytearray, bytes, complex, dict, ellipsis, enumerate, filter,
+float, frozenset, int, list, map, memoryview, object, property,
+range, reversed, set, slice, staticmethod, str, super, tuple, type,
+zip, classmethod
+```
+
+Plus the exception hierarchy (see [Built-in exceptions](errors)).
+
+## Argument-clinic-style signatures
+
+Many builtins are written with positional-only and keyword-only
+markers. The full signatures are documented in
+`Python/clinic/bltinmodule.c.h`. Examples:
+
+```
+abs($module, x, /)
+print($module, /, *args, sep=' ', end='\n', file=None, flush=False)
+sorted($module, iterable, /, *, key=None, reverse=False)
+zip($module, /, *iterables, strict=False)
+min($module, /, *args, default=<unrepresentable>, key=None)
+```
+
+The leading `$module` is the implicit module argument. `/` marks
+positional-only; `*` marks the start of keyword-only.
+
+## Exception classes
+
+Every exception class listed in [Built-in exceptions](errors) is
+available from `builtins`.
+
+## Gopy status
+
+| Function or constant group              | State                                  |
+| --------------------------------------- | -------------------------------------- |
+| All built-in functions listed above     | Complete.                              |
+| All constants                           | Complete.                              |
+| All built-in classes                    | Complete.                              |
+| All exception classes                   | Complete.                              |
+| `input` line editing                    | Falls back to bare reads when stdin is not a TTY; rlwrap recommended. |
+
+## Reference
+
+* CPython 3.14: [Built-in functions](https://docs.python.org/3.14/library/functions.html).
+* `Python/bltinmodule.c`. The implementations.
+* `module/builtins/`. gopy's port.
+* [Built-in types](types).
+* [Built-in exceptions](errors).
