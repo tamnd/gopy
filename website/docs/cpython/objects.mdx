@@ -1,147 +1,238 @@
 ---
 title: Objects
-description: The CPython object model. PyObject, PyTypeObject, slots, and reference counts.
+description: PyObject, refcounting, the type slot vector, the small built-in containers, and PEP 683 immortal objects.
 ---
 
 # Objects
 
-Every value in Python is a `PyObject *`. The pointer is to a
-struct whose first field is a "head" that all objects share. The
-head holds a reference count and a pointer to the type. The type
-points to a struct of function pointers that defines what the
-object can do.
+Every value in CPython is a `PyObject`. Every `PyObject` carries
+its type and its reference count; everything else is per-type
+storage that lives past the common header. Behaviour is reached
+through *type slots*. function pointers on `PyTypeObject` that
+the runtime calls instead of switching on the type. The dance
+between objects, types, and slots is the substrate the rest of
+the interpreter (eval loop, GC, importer) stands on.
 
-## Source map
+## Where the code lives
 
-| File                            | Role                                           |
-| ------------------------------- | ---------------------------------------------- |
-| `Include/object.h`              | `PyObject`, `PyTypeObject`, public macros.     |
-| `Objects/object.c`              | Generic object operations.                     |
-| `Objects/typeobject.c`          | The metaclass `type`. The slot inheritance.    |
-| `Objects/abstract.c`            | Number / sequence / mapping protocols.         |
+| File                                | Role                                                                |
+| ----------------------------------- | ------------------------------------------------------------------- |
+| `Include/object.h`                  | `PyObject`, `PyVarObject`, the basic macros.                        |
+| `Include/cpython/object.h`          | `PyTypeObject` and the slot signatures.                             |
+| `Objects/object.c`                  | `Py_INCREF` / `Py_DECREF`, `_Py_Dealloc`, `PyObject_Repr`.          |
+| `Objects/typeobject.c`              | Type-creation, slot wiring, MRO.                                    |
+| `Objects/longobject.c`, `dictobject.c`, ... | Per-type implementations.                                 |
+| `Include/internal/pycore_object.h`  | Internal helpers; immortal-refcount sentinels.                      |
 
-## The two heads
+## The header
 
 ```c
-typedef struct _object {
+/* Include/object.h PyObject */
+struct _object {
+#if defined(Py_GIL_DISABLED)
+    uintptr_t ob_tid;            /* owning thread id (free-threaded) */
+    uint16_t ob_flags;
+    PyMutex ob_mutex;
+    uint8_t ob_gc_bits;
+    uint32_t ob_ref_local;       /* per-thread refcount */
+    Py_ssize_t ob_ref_shared;    /* cross-thread refcount + state */
+#else
     Py_ssize_t ob_refcnt;
+#endif
     PyTypeObject *ob_type;
-} PyObject;
-
-typedef struct {
-    PyObject ob_base;
-    Py_ssize_t ob_size;
-} PyVarObject;
+};
 ```
 
-`PyObject` is for fixed-shape objects: `int` (small ints
-notwithstanding), `float`, `bool`, `NoneType` instances.
-`PyVarObject` is for variable-length objects: `tuple`, `str`,
-`bytes`, `list` (the base, not the storage array).
+`PyObject` is the prefix; concrete types extend it. `PyVarObject`
+adds `ob_size` for variable-length types (`tuple`, `bytes`,
+`int`). Every allocation begins with this header so that polymorphic
+code can read `ob_type` from any object pointer.
 
-`ob_refcnt` is the reference count. `Py_INCREF` adds, `Py_DECREF`
-subtracts and runs `tp_dealloc` when the count hits zero.
+## Reference counting
 
-## `PyTypeObject`
+```c
+Py_INCREF(o);   /* o->ob_refcnt++ */
+Py_DECREF(o);   /* if (--o->ob_refcnt == 0) _Py_Dealloc(o); */
+```
 
-A `PyTypeObject` is the metaclass instance for a type. It is
-itself a `PyObject` whose type is `&PyType_Type`. It carries a
-big struct of function pointers called **slots**.
+`_Py_Dealloc` looks up `tp_dealloc` on the type and calls it; the
+dealloc function frees per-type state, then frees the object
+allocation itself. Cycles among refcounted objects would leak;
+CPython's cyclic GC (see [gc](gc)) is what cleans them up.
 
-Some important slots:
+The macros are hot enough that almost everything inlines them.
+The free-threaded build replaces them with the split-counter
+machinery described in [gil](gil).
 
-| Slot                | Purpose                                            |
-| ------------------- | -------------------------------------------------- |
-| `tp_name`           | The type's qualified name.                         |
-| `tp_basicsize`      | Per-instance byte size.                            |
-| `tp_itemsize`       | Per-extra-item size (for `PyVarObject` types).     |
-| `tp_dealloc`        | Called when `ob_refcnt` reaches zero.              |
-| `tp_repr`           | `repr(x)`.                                         |
-| `tp_str`            | `str(x)`.                                          |
-| `tp_hash`           | `hash(x)`.                                         |
-| `tp_call`           | `x(...)`.                                          |
-| `tp_getattro`       | `x.attr` (full attribute resolution).              |
-| `tp_setattro`       | `x.attr = v`.                                      |
-| `tp_richcompare`    | `x < y`, `x == y`, etc.                            |
-| `tp_iter`           | `iter(x)`.                                         |
-| `tp_iternext`       | `next(iter)`.                                      |
-| `tp_descr_get`      | The data-descriptor `__get__`.                     |
-| `tp_descr_set`      | The data-descriptor `__set__`.                     |
-| `tp_new`            | Allocate an instance.                              |
-| `tp_init`           | Initialise an instance.                            |
-| `tp_alloc`          | Raw allocator (default: `PyObject_GC_New`).        |
-| `tp_free`           | Raw deallocator.                                   |
-| `tp_traverse`       | The GC's "walk references" hook.                   |
-| `tp_clear`          | The GC's "drop references" hook.                   |
-| `tp_as_number`      | Pointer to the number-protocol substruct.          |
-| `tp_as_sequence`    | Pointer to the sequence-protocol substruct.        |
-| `tp_as_mapping`     | Pointer to the mapping-protocol substruct.         |
-| `tp_as_async`       | Pointer to the async-protocol substruct.           |
-| `tp_version_tag`    | Bumped when the class's attributes change.         |
+## Immortal objects (PEP 683)
 
-The protocol substructs are themselves tables of function pointers.
-`tp_as_number` has `nb_add`, `nb_subtract`, `nb_multiply`, etc.
+A small set of objects is *immortal*: their refcount is fixed at
+a sentinel that `Py_INCREF` and `Py_DECREF` recognise and skip.
 
-## Slot inheritance
+```c
+/* Include/internal/pycore_object.h */
+#define _Py_IMMORTAL_REFCNT _Py_CAST(Py_ssize_t, UINT_MAX)
+```
 
-When a type is created (`PyType_Ready`), CPython walks the MRO and
-fills each unset slot from the closest ancestor that defined it.
-This is why a subclass that only defines `__eq__` still has a
-working `__hash__` slot (because `object.__hash__` is inherited)
-unless the subclass sets `__hash__ = None`.
+`Py_INCREF` checks for the sentinel and bails; same for
+`Py_DECREF`. Singletons (`None`, `True`, `False`, the small int
+cache, `Py_Ellipsis`) plus interned strings the interpreter
+relies on are immortal. The benefit:
 
-## Protocol dispatch
+* No write to the refcount field, so no cache-line bouncing
+  across threads.
+* Safe sharing across subinterpreters; the GIL split (PEP 684)
+  depends on this.
 
-`Objects/abstract.c` exposes the high-level operations that the
-eval loop uses. They look up the right slot and dispatch:
+## The type
 
-* `PyNumber_Add(a, b)` consults `a->ob_type->tp_as_number->nb_add`,
-  then `b->ob_type->tp_as_number->nb_add` for the reflected case.
-* `PySequence_GetItem(a, i)` consults
-  `a->ob_type->tp_as_sequence->sq_item`.
-* `PyMapping_GetItemString(a, k)` consults
-  `a->ob_type->tp_as_mapping->mp_subscript`.
+```c
+/* Include/cpython/object.h PyTypeObject (excerpt) */
+typedef struct _typeobject {
+    PyObject_VAR_HEAD
+    const char *tp_name;
+    Py_ssize_t tp_basicsize, tp_itemsize;
+    destructor tp_dealloc;
+    Py_ssize_t tp_vectorcall_offset;
+    /* ... */
+    reprfunc tp_repr;
+    PyNumberMethods *tp_as_number;
+    PySequenceMethods *tp_as_sequence;
+    PyMappingMethods *tp_as_mapping;
+    hashfunc tp_hash;
+    ternaryfunc tp_call;
+    /* ... */
+    PyObject *tp_dict;
+    descrgetfunc tp_descr_get;
+    descrsetfunc tp_descr_set;
+    Py_ssize_t tp_dictoffset, tp_weaklistoffset;
+    PyObject *tp_bases, *tp_mro;
+    /* ... */
+} PyTypeObject;
+```
 
-The eval loop calls these directly: `BINARY_OP +` is a call to
-`PyNumber_Add`, `BINARY_SUBSCR` calls `PyObject_GetItem`.
+The slot vector is the dispatch table for the type. Reading
+`obj.attr` calls `tp_getattro(obj, name)`; calling `obj(...)`
+calls `tp_call(obj, args, kwargs)`; converting to bool calls
+`tp_as_number->nb_bool`. See [types](types) for the full slot
+inventory and how subclasses inherit slots.
 
-## Descriptors
+## Slots versus dunders
 
-Attribute access has three layers. For `x.attr`, in order:
+A user-defined `__hash__` and the C-level `tp_hash` are two
+views of the same thing. When a class defines `__hash__`,
+`type.__init__` installs a thunk in `tp_hash` that calls the
+dunder; conversely, the type's MRO is searched for `__hash__`
+through the `tp_dict` chain at attribute-read time. The wiring
+lives in `Objects/typeobject.c::slot_*` functions and the
+`slotdefs` table.
 
-1. Look up `attr` on the type's MRO. If found and it is a data
-   descriptor (`tp_descr_set != NULL`), call its `tp_descr_get`
-   with `x` as `self`.
-2. Look up `attr` on the instance's `__dict__`. If found, return
-   it.
-3. If the MRO lookup found a non-data descriptor (`tp_descr_get
-   != NULL` but `tp_descr_set == NULL`), call `tp_descr_get`.
-4. If the MRO lookup found a plain attribute, return it.
-5. Otherwise call `tp_getattr_hook` (`__getattr__`).
-6. Otherwise raise `AttributeError`.
+## Object lifecycle
 
-Methods are non-data descriptors. `instance.method` triggers step 3,
-which builds a bound method.
+```
+   ┌───────────────┐
+   │  tp_new       │ allocate and initialise the C-level fields
+   └───────┬───────┘
+           │
+   ┌───────▼───────┐
+   │  tp_init      │ run __init__
+   └───────┬───────┘
+           │
+        live; refcounted; visited by GC if HAVE_GC
+           │
+   ┌───────▼───────┐
+   │  tp_dealloc   │ release per-type state, free
+   └───────────────┘
+```
 
-## Reference counts
+`tp_new` returns a fully formed object (typically by calling
+`PyObject_Malloc`/`PyObject_GC_New`). `tp_init` is the per-call
+initialiser the user sees as `__init__`. `tp_dealloc` is the
+inverse.
 
-Refcount discipline is the most pervasive thing about the C API.
+## The built-in objects
 
-* "Return a new reference" -- the caller owns the result and is
-  expected to `Py_DECREF` it when done.
-* "Return a borrowed reference" -- the caller does not own the
-  result; the result is alive only as long as some other owner
-  keeps it.
-* "Steals a reference" -- the function takes ownership of an
-  argument and the caller must not `Py_DECREF` it.
+A few load-bearing concrete types and where they live:
 
-The eval loop is careful to maintain refcount invariants across
-exception unwind. Most opcodes use `Py_DECREF` on pops and
-`Py_INCREF` on duplicates; the generator records this and elides
-the increments when ownership transfer is obvious.
+| Type        | File                          | Notes                                             |
+| ----------- | ----------------------------- | ------------------------------------------------- |
+| `int`       | `Objects/longobject.c`        | Arbitrary precision; small-int cache (-5..256).   |
+| `float`     | `Objects/floatobject.c`       | IEEE-754 double; free-list.                       |
+| `str`       | `Objects/unicodeobject.c`     | PEP 393 compact format; interning.                |
+| `bytes`     | `Objects/bytesobject.c`       | Immutable; one-byte cache for `bytes([n])`.       |
+| `tuple`     | `Objects/tupleobject.c`       | Variable-size; per-size free-list.                |
+| `list`      | `Objects/listobject.c`        | Growable array; PEP 703 internal mutex.           |
+| `dict`      | `Objects/dictobject.c`        | Open-addressed hash with split keys/values.       |
+| `set`       | `Objects/setobject.c`         | Open-addressed hash with dummy markers.           |
+| `function`  | `Objects/funcobject.c`        | Holds code, defaults, closure.                    |
+| `method`    | `Objects/classobject.c`       | Bound method; specialised in `LOAD_ATTR_METHOD`.  |
 
-## Reading order
+The page [types](types) covers how user-defined classes and the
+built-in types meet at `PyType_Type`.
 
-[Types](types) is the catalogue of built-in types. [GC](gc) is
-the cycle collector that complements refcounts. [Generators](generators)
-walks the lifecycle of generator objects.
+## Free lists and arenas
+
+Several types keep tiny free lists to avoid hitting `malloc` on
+the hot path:
+
+* `int` keeps a cache for small values (-5 to 256).
+* `float`, `tuple`, `list`, `dict` keep size-bounded free lists.
+* `frame` keeps a per-thread free list.
+
+The free lists are bounded so they do not retain unbounded
+memory; PEP 683's immortal singletons further reduce traffic for
+the most common values.
+
+## Object protocols
+
+The slot vector is grouped into protocols, each a
+`Py<Name>Methods` struct on the type:
+
+* `tp_as_number` (`PyNumberMethods`): arithmetic and conversion.
+* `tp_as_sequence` (`PySequenceMethods`): indexed access.
+* `tp_as_mapping` (`PyMappingMethods`): keyed access.
+* `tp_as_async` (`PyAsyncMethods`): `__await__`, `__aiter__`,
+  `__anext__`.
+* `tp_as_buffer` (`PyBufferProcs`): memoryview interop.
+
+A type can implement any combination. `list` implements
+`tp_as_sequence` and `tp_as_mapping` (because of slicing); `dict`
+implements `tp_as_mapping` only. `int` implements
+`tp_as_number`.
+
+## Hash and equality
+
+`hash(o)` calls `tp_hash`. The result is reduced from
+`Py_hash_t` (signed 64-bit) for use as a dict key. Hash randomisation
+(PEP 456) salts string hashes per process via `PYTHONHASHSEED`;
+internally CPython uses SipHash-1-3 for short keys and
+SipHash-1-3 with a longer key for longer ones. See [hashing](hashing).
+
+`PyObject_RichCompare(a, b, op)` dispatches to `tp_richcompare`.
+Each type implements the six comparison ops by `op` argument.
+
+## CPython 3.14 changes
+
+* **PEP 703 split refcount** is the default representation in
+  free-threaded builds; the field layout changes accordingly.
+* **More immortal singletons.** Small-int range, the empty
+  tuple, the empty frozenset, and a handful of others are
+  immortal in 3.14.
+* **`__class_getitem__` defaults** for builtin generic types
+  (`list`, `dict`, `tuple`, ...) live in `tp_dict` rather than
+  on each class, reducing the per-type cost.
+
+## PEP touchpoints
+
+* **PEP 683.** Immortal objects.
+* **PEP 703.** Free-threaded refcount.
+* **PEP 393.** Compact `str`.
+* **PEP 3118.** Buffer protocol.
+
+## Reference
+
+* `Include/object.h`, `Include/cpython/object.h`,
+  `Include/internal/pycore_object.h`,
+  `Objects/object.c`, `Objects/typeobject.c`.
+* PEP 683. Immortal objects.
+* PEP 393. Flexible string representation.

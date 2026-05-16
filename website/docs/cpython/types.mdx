@@ -1,125 +1,249 @@
 ---
 title: Types
-description: Catalogue of built-in types and their layouts.
+description: PyType_Type, slot wiring, MRO, descriptors, metaclasses. How a `class` statement becomes a callable type.
 ---
 
 # Types
 
-Every built-in type has a dedicated file under `Objects/`. The
-files share a structure: struct definition, allocator, slot
-implementations, method table, type object.
+A *type* in CPython is a `PyTypeObject` (which is itself a
+`PyObject`). The runtime treats user-defined classes and built-in
+types uniformly: both go through `PyType_Type` (the metaclass);
+both fill the same slot vector; both participate in the same MRO
+algorithm. The difference is administrative. built-in types are
+statically allocated, user types are heap allocated. but the
+dispatch path is identical.
 
-## The catalogue
+## Where the code lives
 
-| Type        | File                          | Notes                                            |
-| ----------- | ----------------------------- | ------------------------------------------------ |
-| `int`       | `Objects/longobject.c`        | Arbitrary precision. Small int cache for -5..256. |
-| `float`     | `Objects/floatobject.c`       | IEEE-754 binary64. Free-list backed.             |
-| `bool`      | `Objects/boolobject.c`        | Singletons. Subclass of `int`.                   |
-| `complex`   | `Objects/complexobject.c`     | Pair of doubles.                                 |
-| `str`       | `Objects/unicodeobject.c`     | UCS-1 / UCS-2 / UCS-4 kinded storage (PEP 393).  |
-| `bytes`     | `Objects/bytesobject.c`       | Immutable byte string. Free-list backed.         |
-| `bytearray` | `Objects/bytearrayobject.c`   | Mutable, exposes the buffer protocol.            |
-| `tuple`     | `Objects/tupleobject.c`       | Immutable, hashable. Free list for short tuples. |
-| `list`      | `Objects/listobject.c`        | Growable, over-allocates on append.              |
-| `dict`      | `Objects/dictobject.c`        | Open-addressed, combined / split layout.         |
-| `set`       | `Objects/setobject.c`         | Open-addressed.                                  |
-| `frozenset` | `Objects/setobject.c`         | Immutable variant of `set`.                      |
-| `range`     | `Objects/rangeobject.c`       | Lazy integer iteration.                          |
-| `slice`     | `Objects/sliceobject.c`       | `start`, `stop`, `step`.                         |
-| `enumerate` | `Objects/enumobject.c`        | Iterator wrapper.                                |
-| `zip`       | `Objects/iterobject.c`        | Iterator wrapper.                                |
-| `map`       | `Objects/iterobject.c`        | Iterator wrapper.                                |
-| `filter`    | `Objects/iterobject.c`        | Iterator wrapper.                                |
-| `function`  | `Objects/funcobject.c`        | A code object plus globals plus defaults.        |
-| `method`    | `Objects/classobject.c`       | A function bound to an instance.                 |
-| `module`    | `Objects/moduleobject.c`      | A namespace plus a `__name__`, `__file__`, ...   |
-| `cell`      | `Objects/cellobject.c`        | Closure cell. Holds one `PyObject *`.            |
-| `code`      | `Objects/codeobject.c`        | Compiled bytecode plus pools.                    |
-| `generator` | `Objects/genobject.c`         | Suspendable frame.                               |
-| `coroutine` | `Objects/genobject.c`         | Awaitable suspendable frame.                     |
-| `async_gen` | `Objects/genobject.c`         | Async generator.                                 |
-| `type`      | `Objects/typeobject.c`        | Metaclass. Builds new classes.                   |
-| `super`     | `Objects/typeobject.c`        | MRO-aware proxy.                                 |
-| `MappingProxy` | `Objects/descrobject.c`    | Read-only view over a dict.                      |
-| `staticmethod` / `classmethod` | `Objects/funcobject.c` | Descriptors.                       |
-| `property`  | `Objects/descrobject.c`       | Data descriptor with `fget`, `fset`, `fdel`.     |
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Objects/typeobject.c`                     | Type creation, slot wiring, descriptor lookup, MRO.               |
+| `Include/cpython/object.h`                 | `PyTypeObject`, slot signatures.                                  |
+| `Include/internal/pycore_typeobject.h`     | Internal helpers; the `slotdefs` table.                           |
+| `Objects/descrobject.c`                    | Method, member, and getset descriptors.                           |
 
-## Highlights
+## PyType_Type
 
-### `str`
+`PyType_Type` is `type`'s C representation. It is statically
+declared in `Objects/typeobject.c`:
 
-PEP 393 packs a string into the narrowest kind that fits all of
-its code points. ASCII goes into one byte each; Latin-1 also fits;
-BMP fits two-byte; full Unicode fits four-byte. A string can also
-be "compact", meaning the body is inlined right after the header
-without an external buffer.
+```c
+PyTypeObject PyType_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    "type",
+    sizeof(PyHeapTypeObject) - sizeof(PyMemberDef),  /* tp_basicsize */
+    sizeof(PyMemberDef),                              /* tp_itemsize */
+    /* tp_dealloc, tp_repr, ... */
+    type_call,                                        /* tp_call */
+    /* ... */
+    type_new,                                         /* tp_new */
+};
+```
 
-Concatenation that fits the same kind reuses the kind; widening
-forces a copy.
+`PyType_Type.tp_call` is what runs when you write `MyClass(x)`:
+it calls `MyClass->tp_new(MyClass, args)` and then
+`MyClass->tp_init(instance, args)`. The metaclass mechanism is
+the same in reverse: writing `class Foo(metaclass=Meta)` makes
+`Meta.tp_call` build the new class, which goes through
+`Meta.tp_new` (typically `type_new`).
 
-### `int`
+## Built-in versus heap types
 
-Stored as a vector of 30-bit digits (`PyLong_BASE = 2^30`).
-Small ints from `-5` to `256` are cached at startup; every Python
-program shares the same `int(0)` object. Big ints go through a
-schoolbook multiplication up to a threshold, then switch to
-Karatsuba.
+* **Static types.** Defined at C compile time. Their
+  `PyTypeObject` is in `.data`/`.rodata`; the type itself does
+  not get freed. Examples: `int`, `str`, every built-in
+  collection.
+* **Heap types** (`PyHeapTypeObject`). Created at runtime by
+  `type()` or by `class`. The struct has extra trailing fields
+  for the slot tables, the name, the qualname, the documentation,
+  and the descriptor cache. Heap types are reference-counted like
+  any other object.
 
-### `dict`
+The eval loop does not care which kind a type is; the metaclass
+hides the distinction.
 
-Two physical layouts share the same Python type:
+## Slot dispatch
 
-* **Combined.** A single `PyDictKeysObject` with `(key, value)`
-  pairs interleaved with a hash-probe sequence. The default for
-  most dicts.
-* **Split.** The keys live in a shared `PyDictKeysObject` and each
-  instance has its own values array. Used for instance
-  dictionaries when every instance has the same key set
-  (typical of `__init__`-shaped classes).
+Slot fields on `PyTypeObject` are function pointers. The runtime
+calls them by indirect call:
 
-Both layouts carry a `dk_version` that the watcher mechanism
-keys off.
+```c
+PyObject *result = type->tp_call(callable, args, kwargs);
+```
 
-### `list`
+There is no virtual table walk; the slot is at a known offset on
+the type. The cost is a load and an indirect call.
 
-Stored as a struct with `ob_item` (the data pointer) and
-`allocated` (the capacity). Append over-allocates by roughly
-`size + (size >> 3)`, giving an amortised O(1) append.
+Slot inheritance: when a subclass leaves a slot NULL, type
+creation walks the MRO at class-build time and copies the first
+non-NULL ancestor's slot in. The copy means the dispatch always
+finds the slot on the immediate type. no MRO walk at call time.
 
-### `tuple`
+## The slotdefs table
 
-Hashable. Short tuples (length 1 through 20) come from a per-size
-free list to avoid malloc on common cases.
+Python dunders such as `__hash__` live in `tp_dict`; the C slot
+`tp_hash` is the implementation. The `slotdefs` table in
+`Objects/typeobject.c` is what bridges them:
 
-### `set` / `frozenset`
+```c
+static slotdef slotdefs[] = {
+    SLOT_OFFSET("__getitem__", tp_as_mapping, mp_subscript, slot_mp_subscript, ...),
+    SLOT_OFFSET("__hash__",    tp_hash,                       slot_tp_hash, ...),
+    /* ~150 entries */
+};
+```
 
-Open-addressed hash sets, probed with the same linear-then-perturb
-sequence as `dict`. They share `PyHashTable` infrastructure.
+`type.__init__` walks `slotdefs` and, for each entry whose dunder
+is defined on the class, installs a `slot_*` adapter into the
+slot. The adapter looks up the dunder via the descriptor protocol
+and calls it. Conversely, when a user reads `MyClass.__hash__`,
+attribute lookup finds the slot's `slot_tp_hash` adapter and
+returns a method object that calls it.
 
-### `function`
+The two-way wiring is what makes the rule "always go through
+slots" hold: writing a class in Python or in C lands on the same
+fast path.
 
-A `PyFunctionObject` is the runtime callable that wraps a code
-object. It holds:
+## MRO
 
-* `func_code` -- the code object.
-* `func_globals` -- the module's `__dict__`.
-* `func_defaults` -- the tuple of positional defaults.
-* `func_kwdefaults` -- the dict of keyword-only defaults.
-* `func_closure` -- the tuple of cells for free variables.
-* `func_doc`, `func_name`, `func_qualname`, `func_module`.
+Method resolution order is computed once at type-creation time by
+the C3 linearisation algorithm:
 
-`function.__get__` builds a bound method. Calls go through
-`function_call` which sets up a frame and enters the eval loop.
+```c
+/* Objects/typeobject.c mro_implementation */
+static PyObject *mro_implementation(PyTypeObject *type);
+```
 
-### `type`
+The result is stored in `tp_mro` as a tuple. Slot inheritance,
+attribute lookup, and `super()` all read from it.
 
-`type` is its own metaclass. `type.__call__` allocates an instance,
-calls `__new__`, then `__init__`. Subclassing in Python compiles
-to `LOAD_BUILD_CLASS` followed by `CALL`, where `__build_class__`
-sets up the class body and calls the metaclass.
+Diamond inheritance is resolved deterministically: C3 picks a
+linearisation that respects each base's order and the local
+declaration order, raising `TypeError` if no consistent order
+exists.
 
-## Reading order
+## Attribute lookup
 
-[GC](gc) is next: how the cycle collector handles the types whose
-slots can form reference cycles.
+`getattr(obj, name)` calls `tp_getattro`, which defaults to
+`PyObject_GenericGetAttr`:
+
+```c
+/* Objects/object.c (sketch) PyObject_GenericGetAttr */
+descr = _PyType_Lookup(Py_TYPE(obj), name);   /* walk MRO */
+if (descr && Py_TYPE(descr)->tp_descr_get) {
+    /* data descriptor wins over instance dict */
+    if (Py_TYPE(descr)->tp_descr_set != NULL) {
+        return Py_TYPE(descr)->tp_descr_get(descr, obj, type);
+    }
+}
+if (instance has dict and name in it) {
+    return dict[name];
+}
+if (descr) {
+    if (Py_TYPE(descr)->tp_descr_get) return ...->tp_descr_get(...);
+    return descr;
+}
+raise AttributeError;
+```
+
+The rule: data descriptors (those with `tp_descr_set`) win over
+instance dicts; non-data descriptors lose to them; everything
+loses to a data descriptor. Properties, slot wrappers, and member
+descriptors are data descriptors; methods are non-data
+descriptors.
+
+The specializer (see [specializer](specializer)) caches the
+result of this lookup per call site so subsequent reads at the
+same site at the same type skip the MRO walk.
+
+## Descriptors
+
+Three flavours:
+
+* **Method descriptor.** A function found in a class. Reading
+  `instance.method` runs `tp_descr_get`, which constructs a
+  bound method.
+* **Slot descriptor.** A C-level field exposed through a member
+  descriptor (`PyMemberDef`). Reads and writes touch the
+  `Py_T_*` field at a known offset.
+* **Getset descriptor.** A C-level property; reads run a getter,
+  writes run a setter.
+
+User-defined descriptors are anything implementing
+`__get__`/`__set__`/`__delete__`; `property`, `staticmethod`,
+`classmethod`, and `functools.cached_property` are the visible
+examples.
+
+## __slots__
+
+A class with `__slots__` does *not* allocate an instance dict.
+Instead the slot names become member descriptors and the
+instance allocation reserves one field per slot at fixed offsets.
+This saves memory (no per-instance dict) and time (no hash
+lookup for attribute access) at the cost of inflexibility (no
+new attributes).
+
+The implementation lives in `type_new_impl`:
+`__slots__` are turned into `PyMemberDef` entries on the type,
+and `tp_basicsize` is grown to accommodate the slot storage.
+
+## Metaclasses
+
+`class Foo(metaclass=Meta): ...` calls `Meta(name, bases, ns)`.
+`Meta` may inherit from `type` and override `__init__` /
+`__new__` to customise class construction. ABCs (PEP 3119) and
+enum classes (PEP 435) are the canonical users.
+
+## Type instantiation
+
+```python
+x = list((1, 2, 3))
+```
+
+1. `LOAD_GLOBAL list` returns `PyList_Type`.
+2. `CALL` dispatches to `PyList_Type.tp_call`, which is
+   `type_call`.
+3. `type_call` runs `list.__new__(list, (1, 2, 3))`, then
+   `list.__init__(x, (1, 2, 3))`.
+4. The instance is returned.
+
+The specializer rewrites step 2 to `CALL_BUILTIN_O` for many
+common types, skipping the generic dispatch.
+
+## Generic types (PEP 695)
+
+PEP 695 added `class Container[T]:` syntax. The compiler
+introduces a `TypeParametersBlock` that holds the parameter as a
+local; the class body runs as a child scope where the parameter
+is visible. At runtime, the parameter object (`TypeVar`,
+`TypeVarTuple`, `ParamSpec`) lives in `type.__type_params__`.
+
+The class itself becomes generic via the
+`__class_getitem__` protocol; `Container[int]` returns a
+`types.GenericAlias`.
+
+## CPython 3.14 changes
+
+* **PEP 695 fully wired** through `tp_dict`, `__type_params__`,
+  and the AST `type_param` nodes.
+* **Specialised `tp_call` paths.** Many built-in types gained
+  fast-path call dispatch; the specializer reaches them via
+  `CALL_TYPE_1`, `CALL_BUILTIN_O`, and similar.
+* **`__static_attributes__`.** A new tuple summarising the
+  attribute names a class assigns in its body. used by the
+  inspector module and for documentation tooling.
+
+## PEP touchpoints
+
+* **PEP 3115.** Metaclass syntax.
+* **PEP 487.** `__init_subclass__` and `__set_name__`.
+* **PEP 526, 591, 695.** Type annotations and parameters.
+* **PEP 615, 689.** Static immortal types.
+
+## Reference
+
+* `Objects/typeobject.c`, `Objects/descrobject.c`,
+  `Include/cpython/object.h`,
+  `Include/internal/pycore_typeobject.h`.
+* PEP 487. Simpler customisation of class creation.
+* PEP 695. Type parameter syntax.

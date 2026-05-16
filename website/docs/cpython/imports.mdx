@@ -1,129 +1,216 @@
 ---
 title: Imports
-description: How CPython resolves, loads, and caches modules. The frozen importlib bootstrap.
+description: Finders, loaders, the meta-path, sys.modules, the frozen importlib bootstrap, and lazy imports.
 ---
 
 # Imports
 
-`import x` runs a chain that takes a name and produces a module
-object. The chain is mostly Python code (`importlib._bootstrap`)
-that runs against a small C bootstrap.
+`import` is a Python protocol implemented mostly in Python.
+`importlib` does the work; the C side is a thin entry that boots
+`importlib` from a frozen module and exposes a handful of hooks.
+The protocol is built around two abstractions. *finders* locate
+a module by name; *loaders* turn the found module into a
+populated `ModuleType`. The whole stack is configurable.
 
-## Source map
+## Where the code lives
 
-| File                                            | Role                                          |
-| ----------------------------------------------- | --------------------------------------------- |
-| `Python/import.c`                               | The C bootstrap. Frozen `importlib` loader.   |
-| `Lib/importlib/_bootstrap.py`                   | The pure-Python core of the import system.    |
-| `Lib/importlib/_bootstrap_external.py`          | Filesystem-based finders and loaders.         |
-| `Lib/importlib/__init__.py`                     | The public API.                               |
-| `Modules/_importlib_external.c`                 | Generated frozen bytes of the external bootstrap. |
-| `Python/frozen.c`                               | The frozen module registry.                   |
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/import.c`                          | C-level entry points; `sys.modules`; the frozen importlib boot.   |
+| `Lib/importlib/_bootstrap.py`              | Core import machinery. Frozen.                                    |
+| `Lib/importlib/_bootstrap_external.py`     | Filesystem-backed finders and loaders. Frozen.                    |
+| `Python/frozen_modules/`                   | Pre-compiled `.pyc` images of bootstrap modules.                  |
+| `Modules/_importlib.h` (generated)         | The frozen `_bootstrap` and `_bootstrap_external` bytecode.       |
 
-## The frozen bootstrap
+## The protocol
 
-CPython cannot import any Python module before `importlib` itself
-is loaded. To break the chicken-and-egg loop, `importlib._bootstrap`
-and `importlib._bootstrap_external` are **frozen**: their bytecode
-is compiled at build time and linked into the interpreter. The
-first thing the runtime does on startup is unmarshal those frozen
-modules and install them as `sys.modules['importlib._bootstrap']`
-and friends.
+The Python-level entry is `importlib.__import__`. Its job, given
+a fully qualified name:
 
-After that, the rest of the import system runs in Python.
+1. Check `sys.modules`. If the name is present (and not None),
+   return that.
+2. Walk `sys.meta_path`. Ask each meta-path finder
+   `find_spec(name, path, target)`. The first non-None result
+   wins.
+3. The returned `ModuleSpec` carries a loader. Call
+   `loader.create_module(spec)` (often returns None, meaning
+   "default new module"), then `loader.exec_module(module)`,
+   which runs the module's code in the module's namespace.
+4. Install the module in `sys.modules` *before* executing its
+   body so circular imports see a partially populated object.
 
-## High-level shape
+`sys.modules` is the canonical cache; nothing else needs to be
+consulted on a hit.
+
+## Finders
 
 ```
-import x  ->  __import__('x', globals, locals, fromlist, level)
-   │
-   ▼ importlib._bootstrap._find_and_load
-look up sys.modules['x']                    found? return it.
-   │
-   ▼ for finder in sys.meta_path:
-       spec = finder.find_spec('x', ...)
-   │
-   ▼ if spec is None: raise ModuleNotFoundError
-   │
-   ▼ module = importlib.util.module_from_spec(spec)
-   │
-   ▼ sys.modules['x'] = module
-   │
-   ▼ spec.loader.exec_module(module)
-   │
-   ▼ return module
+sys.meta_path = [
+    BuiltinImporter,   # built-in modules linked into the binary
+    FrozenImporter,    # frozen modules (importlib boot, stdlib subset)
+    PathFinder,        # filesystem and other path-based locations
+]
 ```
 
-The bytecode opcode `IMPORT_NAME` builds the argument tuple and
-calls `__import__`. `IMPORT_FROM` plucks an attribute off the
-result. `IMPORT_STAR` copies all of the module's public names
-into the calling frame's locals (allowed only at module level).
+Each is a class with `find_spec(name, path, target)`.
 
-## Meta path
+* `BuiltinImporter` checks the static table of built-in modules
+  compiled into the interpreter (`_io`, `sys`, `builtins`, ...).
+* `FrozenImporter` checks the frozen-module table (everything in
+  `Python/frozen_modules/`).
+* `PathFinder` walks `sys.path` (for top-level imports) or the
+  parent package's `__path__` (for submodules). It consults
+  `sys.path_hooks` to find a *path entry finder* for each path.
 
-`sys.meta_path` is the list of objects that know how to find
-modules. The default list:
+`PathFinder` plus the default `FileFinder` is what handles 99%
+of imports.
 
-1. `BuiltinImporter` -- handles modules in `inittab`.
-2. `FrozenImporter` -- handles modules frozen into the binary.
-3. `PathFinder` -- handles modules located via `sys.path`.
+## Loaders
 
-Each finder's `find_spec` returns either a `ModuleSpec` (knows
-how to load the module) or `None` (doesn't know this name; try
-the next finder).
+A loader is anything implementing `exec_module(module)` (and
+optionally `create_module`). The standard set:
 
-## Path finder
+| Loader                  | Source                                |
+| ----------------------- | ------------------------------------- |
+| `SourceFileLoader`      | `.py` files (with `.pyc` caching).    |
+| `SourcelessFileLoader`  | `.pyc` files only.                    |
+| `ExtensionFileLoader`   | `.so` / `.pyd` extension modules.     |
+| `BuiltinImporter`       | Built-in modules.                     |
+| `FrozenImporter`        | Frozen modules.                       |
 
-`PathFinder` walks `sys.path` and asks each entry for a finder.
-For directory entries the answer is a `FileFinder` configured
-with the loaders registered for source files (`.py`), bytecode
-files (`.pyc`), and extension modules. For zip entries it's a
-`zipimport.zipimporter`.
+`SourceFileLoader.exec_module` does:
 
-`FileFinder` caches its directory listing. On a cache miss it
-re-stats the directory and rebuilds.
+1. Read the `.py` source (or load `.pyc` cache if fresh).
+2. Compile to bytecode if no fresh `.pyc` exists.
+3. Execute the bytecode in `module.__dict__`.
 
-## Source and bytecode
+The `.pyc` cache is keyed on a header (`magic`, `flags`, source
+mtime or hash, source size). A mismatch triggers a recompile.
 
-A `.py` import looks like:
+## The bootstrap problem
 
-1. Find the source file at `path/x.py`.
-2. Find the cached bytecode at `path/__pycache__/x.cpython-NN.pyc`.
-3. If the bytecode is up to date (the source mtime matches the
-   stored mtime, or the source hash matches), unmarshal and run
-   its code object.
-4. Otherwise compile the source, write a fresh `.pyc`, and run.
+`importlib._bootstrap` is itself a Python module. It cannot be
+imported by the import system before the import system is
+running. The solution is *frozen modules*: at CPython build time,
+`Tools/build/freeze_modules.py` compiles a fixed set of Python
+modules to bytecode and embeds the result in the binary as C
+arrays. At startup:
 
-The pyc format is defined in `Lib/importlib/_bootstrap_external.py`
-under `_validate_timestamp_pyc` / `_validate_hash_pyc`. The first
-16 bytes are a magic, a flags word, and either the source mtime
-+ size or the source hash, depending on the invalidation mode.
+1. `Python/import.c::_PyImport_BootstrapImp` reads the embedded
+   bytecode for `_bootstrap`.
+2. The frozen `_bootstrap` module is executed, defining
+   `__import__`, `ModuleSpec`, `BuiltinImporter`,
+   `FrozenImporter`.
+3. `_bootstrap_external` (also frozen) is loaded similarly to
+   install `PathFinder` and the file-based loaders.
+4. From this point, `import` is fully functional and the C side
+   delegates to Python.
 
-## Inittab
+The frozen subset includes the stdlib modules `os`, `posixpath`,
+`io`, `zipimport`, and a handful of others, because they are
+needed during startup before `PathFinder` can load anything from
+disk.
 
-The C-level **inittab** is a static array of `(name, init_fn)`
-pairs. Each entry says "if someone imports this name and no
-Python-level finder claims it first, call this C function to get
-a module". `BuiltinImporter` searches the inittab.
+## sys.modules
 
-`PyImport_AppendInittab` lets a host program register additional
-entries before `Py_Initialize` runs.
+A dict mapping fully qualified names to module objects. The
+import system reads it first, populates it during a load, and
+removes failed entries on `exec_module` failure. Setting
+`sys.modules[name] = None` is the standard way to mark a name as
+deliberately unimportable.
 
-## Import lock
+## Packages
 
-A per-module lock prevents two threads from running a module's
-top-level code at the same time. The lock lives on the module's
-spec; `_find_and_load` acquires it before running `exec_module`
-and releases it on success or error.
+A package is a module whose `__path__` is a sequence of
+directories. Submodules are imported by `PathFinder` walking
+`parent.__path__`. There are two flavours:
 
-Circular imports work because the partially-initialised module is
-installed in `sys.modules` before `exec_module` runs. A circular
-re-import sees the partial module rather than re-entering
-initialisation.
+* **Regular packages.** A directory containing `__init__.py`.
+  The init module runs when the package is first imported.
+* **Namespace packages** (PEP 420). A directory without
+  `__init__.py`. Multiple directories can contribute submodules
+  to the same package name; `__path__` is a special
+  `_NamespacePath` that updates as more locations are added to
+  `sys.path`.
 
-## Reading order
+## ModuleType and ModuleSpec
 
-[Generators](generators) covers suspend / resume of frames, the
-last big runtime piece. [Exceptions](exceptions) is the
-companion page for failure paths in imports (`ImportError`,
-`ModuleNotFoundError`).
+```c
+/* Objects/moduleobject.c */
+typedef struct {
+    PyObject_HEAD
+    PyObject *md_dict;            /* __dict__ */
+    struct PyModuleDef *md_def;   /* PyModuleDef for C extensions */
+    void *md_state;               /* per-module state for C extensions */
+    PyObject *md_weaklist;
+    PyObject *md_name;
+} PyModuleObject;
+```
+
+`ModuleSpec` (Python-level) carries the metadata needed to load
+the module: name, loader, origin, parent, submodule search
+locations. After loading, the spec is attached to the module as
+`module.__spec__`.
+
+## Extension modules
+
+C extensions can be *single-phase* or *multi-phase*:
+
+* **Single-phase init.** The traditional API. `PyInit_foo()`
+  returns a fully populated `PyModuleObject`. Limitation: the
+  module is shared across subinterpreters and cannot be safely
+  reloaded.
+* **Multi-phase init (PEP 489).** `PyInit_foo()` returns a
+  `PyModuleDef` with slots; the import system calls the slots in
+  order to create and execute the module. Multi-phase modules
+  can be loaded into per-interpreter state cleanly.
+
+PEP 489 modules are the right path for subinterpreter support
+(PEP 684) and for free-threaded extensions (PEP 703).
+
+## Path-based finder caches
+
+`sys.path_importer_cache` caches the (`PathFinder`-chosen) entry
+finder for each `sys.path` element. Repeated imports walk the
+cache, not the filesystem.
+
+When `sys.path` or a package's `__path__` changes, the affected
+cache entries become stale; the cache is invalidated lazily on
+import miss.
+
+## Hooks
+
+* `sys.path_hooks`: callables that turn a path-string into a
+  path-entry finder.
+* `sys.audit("import", ...)`: PEP 578 audit hook; fired on every
+  import.
+* `sys.modules` is itself observable: assigning into it
+  short-circuits future imports of that name.
+
+## CPython 3.14 changes
+
+* **Lazy imports.** A new opt-in mode (PEP 690 was withdrawn;
+  3.14 implements a narrower facility) defers execution of
+  module bodies until first attribute access. The compiler emits
+  marker opcodes; the import machinery installs a thunk module.
+* **Frozen-module table** expanded to cover more of the stdlib
+  hot path, shaving startup time.
+* **Multi-phase init mandatory for free-threaded extensions.**
+  Single-phase extensions force re-enable of the GIL on import
+  unless they declare `Py_mod_gil = Py_MOD_GIL_NOT_USED`.
+
+## PEP touchpoints
+
+* **PEP 328.** Absolute and relative imports.
+* **PEP 420.** Namespace packages.
+* **PEP 489.** Multi-phase extension module init.
+* **PEP 552.** Hash-based `.pyc` files.
+* **PEP 578.** Runtime audit hooks (`sys.audit`).
+* **PEP 703.** `Py_mod_gil` opt-in for free-threaded compatibility.
+
+## Reference
+
+* `Python/import.c`, `Lib/importlib/_bootstrap.py`,
+  `Lib/importlib/_bootstrap_external.py`,
+  `Python/frozen_modules/`.
+* PEP 328, 420, 489, 552, 578.

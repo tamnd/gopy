@@ -1,126 +1,202 @@
 ---
 title: Garbage collection
-description: Reference counts plus a generational cycle collector.
+description: Refcounting plus a generational cycle collector. Tracked objects, generations, the unreachable detection, finalisation.
 ---
 
 # Garbage collection
 
-CPython uses two mechanisms together. **Reference counting** runs
-on every refcount change and reclaims acyclic garbage immediately.
-A **generational cycle collector** runs periodically to break
-reference cycles that refcounting alone cannot reach.
+CPython's primary memory reclamation is refcounting: when a
+refcount drops to zero, the object is freed immediately. Cycles
+defeat refcounting, so CPython adds a *cycle collector*. a
+generational, stop-the-world tracing pass that runs periodically
+to collect garbage cycles. The cycle collector is what lets
+Python programs cheerfully build doubly linked structures, parent
+pointers, and observer registrations without leaking.
 
-## Source map
+## Where the code lives
 
-| File                                       | Role                                           |
-| ------------------------------------------ | ---------------------------------------------- |
-| `Modules/gcmodule.c`                       | The cycle collector.                           |
-| `Include/internal/pycore_gc.h`             | Per-object GC head, generation lists.          |
-| `Include/object.h`                         | `Py_INCREF`, `Py_DECREF`, refcount macros.     |
-| `Objects/typeobject.c`                     | `tp_traverse`, `tp_clear`.                     |
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/gc.c`                              | The cycle collector. Generations, traversal, finalisation.        |
+| `Python/gc_free_threading.c`               | The free-threaded variant.                                        |
+| `Include/internal/pycore_gc.h`             | `PyGC_Head`, generation thresholds, flags.                        |
+| `Modules/gcmodule.c`                       | The `gc` module: `gc.collect`, callbacks, debugging knobs.        |
 
-## Reference counts
+## Tracked objects
 
-Every `PyObject` has an `ob_refcnt`. `Py_INCREF(x)` adds one;
-`Py_DECREF(x)` subtracts one and, when the count reaches zero,
-calls `_Py_Dealloc(x)` which dispatches to `x->ob_type->tp_dealloc`.
+Only objects whose type sets `Py_TPFLAGS_HAVE_GC` participate in
+cycle collection. Containers (`list`, `dict`, `tuple`, `set`,
+class instances) are tracked; immutable leaves (`int`, `str`,
+`float`, `bytes`) are not, because they cannot form cycles.
 
-This handles most garbage in CPython. The cost is one increment
-or decrement at every pop / push / dup / store.
+Each tracked object carries a `PyGC_Head` *before* its `PyObject`:
 
-## The cycle problem
-
-```python
-a = []
-b = []
-a.append(b)
-b.append(a)
-del a, b
+```c
+/* Include/internal/pycore_gc.h PyGC_Head */
+typedef struct {
+    uintptr_t _gc_next;    /* next in generation list (LSB: tracked bit) */
+    uintptr_t _gc_prev;    /* prev in generation list (and refcount copy) */
+} PyGC_Head;
 ```
 
-After `del`, the two lists still reference each other. Refcounts
-stay at 1. Refcounting alone never frees them.
+Allocation uses `_PyObject_GC_New` / `_PyObject_GC_NewVar`, which
+prepend the header and link the object into a generation. The
+linked list is doubly linked so the collector can splice nodes in
+and out.
 
-## The collector
+`Py_TRASHCAN_BEGIN`/`Py_TRASHCAN_END` in `tp_dealloc`
+implementations break long chains of recursive deallocation that
+would otherwise blow the C stack; they reschedule the dealloc to
+run after the current one finishes.
 
-GC tracks objects whose types declare `tp_traverse`. The set of
-tracked objects is partitioned into **generations**: gen0 for
-newborns, gen1 for survivors of a gen0 sweep, gen2 for survivors
-of a gen1 sweep. Younger generations are scanned more often.
+## Generations
 
-A scan of generation `g` proceeds:
+Three generations: young (0), middle (1), old (2). Newly
+allocated tracked objects go into generation 0. After a
+collection, surviving objects are promoted to the next generation.
 
-1. **Discover.** Move every gen-`g` object into a working list.
-   Also move all younger generations into the same list.
-2. **Subtract internal references.** For each object in the
-   working list, call `tp_traverse` to enumerate the objects it
-   points to. For each pointer that lands inside the working list,
-   subtract one from a per-object "gc refs" tally that started
-   equal to the live refcount.
-3. **Find roots.** Any object with gc refs > 0 is reachable from
-   outside the working list. Mark it and everything it traverses
-   to as reachable.
-4. **Collect the unreachable.** What remains is a set of objects
-   that only reference each other. Move them to a "finalisers"
-   list, run any `__del__` methods (which may resurrect objects),
-   then call `tp_clear` on the still-unreachable objects to break
-   their references. Refcounting then takes over and frees them.
+Thresholds control when each generation is collected:
 
-This is the classic "trial deletion" cycle collector described in
-Bacon-Rajan.
+```python
+gc.get_threshold()   # (700, 10, 10)
+```
 
-## Generations and thresholds
+* Generation 0 is collected when its allocation count minus
+  deallocation count exceeds 700.
+* Generation 1 is collected after generation 0 is collected 10
+  times.
+* Generation 2 is collected after generation 1 is collected 10
+  times.
 
-The thresholds are `(700, 10, 10)` by default. A gen0 collection
-runs when `gen0` has 700 more allocations than deallocations.
-After 10 gen0 collections, gen1 is collected. After 10 gen1
-collections, gen2 is collected.
+The defaults reflect the generational hypothesis: most cycles are
+young, so collecting young objects often is cheap and catches
+most garbage; old objects rarely become collectable.
 
-These thresholds are tunable through `gc.set_threshold`.
+## The algorithm
 
-## `tp_traverse` and `tp_clear`
+To find unreachable cycles in a generation, the collector runs
+*subtract refcounts*:
 
-A type that can participate in a cycle declares both slots. Pure
-"leaf" types (`int`, `float`, `str`, `bytes`) do not declare them
-and are never tracked.
+1. Copy each tracked object's refcount into a scratch field
+   (`_gc_prev`).
+2. For each tracked object, call `tp_traverse(obj, decref_cb)`;
+   for every referent that is *also tracked in this generation*,
+   decrement its scratch refcount. After this pass, the scratch
+   refcount equals the number of references from *outside* the
+   generation.
+3. Any object whose scratch refcount is zero is reachable only
+   from inside the generation, but it might still be reachable
+   from a cycle that has an external reference. Walk the graph
+   marking transitively-reachable objects starting from those
+   with non-zero scratch refcount.
+4. The unreached set is garbage.
 
-* `tp_traverse(self, visit, arg)` enumerates the object's strong
-  references by calling `visit(child, arg)` for each one. The
-  callback returns 0 to continue or non-zero to stop.
-* `tp_clear(self)` drops every strong reference held by the
-  object, replacing slots with `NULL` (and decref-ing the old
-  values). The object is left as an empty husk that refcounting
-  will then free.
+```c
+/* Python/gc.c (sketch) */
+static Py_ssize_t collect_with_callback(int generation) {
+    /* update refs, subtract refs, move unreachable, finalise */
+}
+```
 
-## Finalisers
+## Finalisation
 
-`__del__` is a Python-level finaliser. If GC discovers an
-unreachable object whose type has `__del__`, it splits those
-objects out and runs their finalisers first. A finaliser can
-resurrect the object by stashing a strong reference somewhere
-visible. Resurrected objects are returned to the live set and the
-collector re-walks.
+Before reclaiming the unreached set, the collector runs each
+object's `tp_finalize` (the C-level `__del__`). PEP 442 made
+this safe: a resurrected object (one that became reachable again
+during finalisation) is detected and not freed.
 
-To avoid the finaliser-order-dependence trap that haunted Python 2,
-each unreachable cycle's finalisers run at most once. If the cycle
-becomes unreachable again, the finaliser does not run a second
-time.
+After finalisation:
 
-## Weak references
+* Weak references with callbacks are queued.
+* The unreached list is broken (each `tp_clear` is called),
+  which lets refcounting cascade reclaim the objects.
 
-`weakref` is a separate mechanism. A weak reference points to an
-object without bumping its refcount. When the referent dies, the
-weakref is cleared and any associated callback is queued to run.
-Weak references are pre-cleared during GC so callbacks never see
-half-dead objects.
+The final reclamation goes through normal `Py_DECREF` paths;
+the collector itself just breaks the cycle.
 
-## Free threading
+## tp_traverse and tp_clear
 
-In the `--disable-gil` build, refcounts are **biased**: the owning
-thread's refcount increments are cheap, while cross-thread
-increments go through a small atomic CAS. The cycle collector
-acquires a "stop the world" barrier to scan.
+Every GC-tracked type implements two slots:
 
-## Reading order
+```c
+typedef int (*traverseproc)(PyObject *, visitproc, void *);
+typedef int (*inquiry)(PyObject *);
+```
 
-[Imports](imports) is next.
+* `tp_traverse(self, visit, arg)` calls `visit(referent, arg)`
+  for each Python-object reference the type holds. The collector
+  passes a callback that updates scratch refcounts.
+* `tp_clear(self)` releases the references that participate in
+  cycles. Implementations clear container slots to NULL so the
+  refcount drops trigger cleanly.
+
+A common pattern:
+
+```c
+static int my_traverse(MyObject *self, visitproc visit, void *arg) {
+    Py_VISIT(self->referent);
+    return 0;
+}
+static int my_clear(MyObject *self) {
+    Py_CLEAR(self->referent);
+    return 0;
+}
+```
+
+## Permanent generation
+
+`gc.freeze()` moves every tracked object into a *permanent*
+generation that is never collected. This is useful at the end of
+process startup: most of the imported module graph will live for
+the life of the process, so excluding it from cycle scans makes
+later collections faster. `gc.unfreeze()` restores normal
+generations.
+
+## Callbacks
+
+`gc.callbacks` is a list of callables invoked before and after
+each collection. The garbage collector's instrumentation hook is
+how `tracemalloc`, `objgraph`, and similar tools attach. The
+callback receives `("start"|"stop", info)` with collection stats.
+
+## Free-threaded variant
+
+`Python/gc_free_threading.c` is the no-GIL collector. The major
+changes:
+
+* The collector still stops the world, but does so by signalling
+  every thread to pause at a safe point.
+* Refcounts use the split-counter representation (`ob_ref_local`
+  + `ob_ref_shared`); the subtract-refcounts pass adds across
+  both fields.
+* Allocation is per-thread (separate freelists, separate
+  generation lists), reducing contention.
+
+Cycle collection cost in the free-threaded build is higher per
+collection (more bookkeeping) but happens less often because
+the allocator is per-thread.
+
+## CPython 3.14 changes
+
+* **Incremental collection** of the oldest generation. Long-pause
+  collections are split across multiple collection events;
+  pauses stay short even when many old objects need to be
+  scanned.
+* **`gc.callbacks` info** now includes counts of objects per
+  generation and the number of permanent-generation entries.
+* **Free-threaded GC** is no longer experimental.
+
+## PEP touchpoints
+
+* **PEP 442.** Safe object finalisation; cycles with `__del__`
+  are now collectable.
+* **PEP 683.** Immortal objects (not tracked).
+* **PEP 703.** Free-threaded collector.
+
+## Reference
+
+* `Python/gc.c`, `Python/gc_free_threading.c`,
+  `Include/internal/pycore_gc.h`, `Modules/gcmodule.c`.
+* PEP 442. Safe object finalization.
+* Jones, Hosking, Moss. *The Garbage Collection Handbook.*
+  Generational collection.
