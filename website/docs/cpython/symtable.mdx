@@ -1,120 +1,265 @@
 ---
 title: Symbol table
-description: Two-pass name resolution that the compiler relies on to choose name-handling opcodes.
+description: Two-pass name resolution. The collect pass walks the AST; the analyse pass classifies every name as local, free, cell, or global.
 ---
 
 # Symbol table
 
-Before the code generator can emit `LOAD_FAST` versus `LOAD_NAME`
-versus `LOAD_GLOBAL`, it needs to know which scope each name
-belongs to. That is the job of the symbol table.
+Before the compiler can emit a single opcode for a name, it has to
+know what kind of name it is. `LOAD_FAST` for a local;
+`LOAD_DEREF` for a closure cell or free variable; `LOAD_GLOBAL`
+for a module global; `LOAD_NAME` for the ambiguous case in
+class bodies and the REPL. The symbol table is the answer to "what
+kind". Each scope (module, function, class, lambda, comprehension,
+PEP 695 type-parameter scope) becomes one `PySTEntryObject` and
+every name that appears in the source is classified.
 
-## Source map
+## Where the code lives
 
-| File                                      | Role                                      |
-| ----------------------------------------- | ----------------------------------------- |
-| `Python/symtable.c`                       | The builder and the resolver.             |
-| `Include/internal/pycore_symtable.h`      | Struct definitions for `symtable`, `_symtable_entry`. |
-| `Lib/symtable.py`                         | The Python-side wrapper module.           |
+| File                                       | Role                                                               | Entry points                                       |
+| ------------------------------------------ | ------------------------------------------------------------------ | -------------------------------------------------- |
+| `Python/symtable.c`                        | The whole symbol table. Two passes: collect, then analyse.         | `_PySymtable_Build`, `symtable_analyze`            |
+| `Include/internal/pycore_symtable.h`       | `symtable`, `PySTEntryObject`, scope and symbol flags.             | `struct symtable`, `PySTEntryObject`               |
 
-## Output shape
+The driver:
 
-The output of `PySymtable_Build` is a `struct symtable *` that
-holds a tree of `_symtable_entry` records. The root is the module
-scope. Each entry tracks:
+```c
+/* Python/symtable.c:413 _PySymtable_Build */
+struct symtable *
+_PySymtable_Build(mod_ty mod, PyObject *filename, _PyFutureFeatures *future);
+```
 
-* The scope's kind: module, function, class, lambda, comprehension,
-  annotation.
-* The set of names referenced in that scope.
-* Per-name flags: assigned, parameter, global, nonlocal, used,
-  free, cell, comprehension iteration variable.
-* The set of child scopes nested inside it.
+`_PySymtable_Build` allocates the table, runs the collect pass, runs
+the analyse pass, and returns the populated `struct symtable`. The
+compiler reads from it once per scope through
+`compiler_enter_scope`.
 
-## Two passes
+## The two passes
 
-### Pass 1: discover scopes and uses
+The collect pass walks the AST top-down. For each scope it pushes
+a fresh `PySTEntryObject` and recurses into the body. Each name
+the scope mentions gets a bitmask of *uses* recorded in
+`ste->ste_symbols`. A name on the left of `=` gets `DEF_LOCAL`; a
+`global x` statement adds `DEF_GLOBAL`; a `nonlocal x` adds
+`DEF_NONLOCAL`; an `import x` adds `DEF_IMPORT`; reading a name
+adds `USE`.
 
-`symtable_visit_*` walks the AST. Each scope-introducing node
-(`FunctionDef`, `AsyncFunctionDef`, `ClassDef`, `Lambda`,
-`ListComp`, `SetComp`, `DictComp`, `GeneratorExp`) pushes a new
-entry onto a stack. Every `Name` reference, every `Assign` target,
-every `global` / `nonlocal` declaration, every parameter list adds
-a flag to the entry at the top of the stack.
+```c
+/* Python/symtable.c symtable_visit_stmt */
+static int symtable_visit_stmt(struct symtable *st, stmt_ty s);
+static int symtable_visit_expr(struct symtable *st, expr_ty e);
+```
 
-At the end of pass 1 the tree of scopes is built but names are not
-yet resolved. The flags say "x is used somewhere" and "x is bound
-somewhere" but they do not say what `x` refers to.
+The collect pass does *not* resolve names. It only records which
+names appear where and how each one is referenced.
 
-### Pass 2: analyse and resolve
+The analyse pass runs after collection:
 
-`symtable_analyze` walks the tree and resolves each name to a
-**binding kind**. CPython distinguishes:
+```c
+/* Python/symtable.c:1369 symtable_analyze */
+static int symtable_analyze(struct symtable *st);
+```
 
-| Kind     | Meaning                                                |
-| -------- | ------------------------------------------------------ |
-| LOCAL    | Bound in the current function scope. Use `LOAD_FAST`. |
-| CELL     | Bound here and captured by a nested function. Use `LOAD_DEREF` to read. |
-| FREE     | Captured from an enclosing function. Use `LOAD_DEREF`. |
-| GLOBAL_EXPLICIT | Declared `global`. Use `LOAD_GLOBAL`.           |
-| GLOBAL_IMPLICIT | Not bound here, not in any enclosing function. Use `LOAD_GLOBAL`. |
-| FREE_CLASS | A class-scope free that bridges to an enclosing function. |
+Analyse walks the scope tree from the outside in. For each scope
+it determines, for every recorded name, whether the name is local
+(defined here), free (used here but defined in an enclosing
+function), cell (defined here and used by an inner function),
+explicit global, or implicit global. The classification is encoded
+in the upper bits of the symbol value:
 
-`symtable_analyze_block` propagates free-variable sets upward. A
-name that is free in a nested function "exports" itself to the
-enclosing scope. If the enclosing scope binds it, the enclosing
-scope's entry is marked CELL. If it does not, the name continues
-to bubble until either a function binding catches it (CELL) or it
-reaches the module scope (GLOBAL_IMPLICIT).
+```
+symbol bits 0..11: DEF_* flags from the collect pass
+symbol bits 12..15: scope (LOCAL, GLOBAL_EXPLICIT, GLOBAL_IMPLICIT, FREE, CELL)
+```
+
+`SYMBOL_TO_SCOPE(symbol)` extracts the scope; `_PyST_GetScope` is
+the convenience entry point.
+
+## The entry object
+
+```c
+/* Include/internal/pycore_symtable.h:88 PySTEntryObject */
+typedef struct _symtable_entry {
+    PyObject_HEAD
+    PyObject *ste_id;
+    PyObject *ste_symbols;       /* dict: name -> int(flags|scope) */
+    PyObject *ste_name;
+    PyObject *ste_varnames;      /* list: formal parameter names */
+    PyObject *ste_children;      /* list: child PySTEntryObjects */
+    _Py_block_ty ste_type;       /* ModuleBlock, FunctionBlock, ClassBlock, ... */
+    unsigned ste_generator : 1;
+    unsigned ste_coroutine : 1;
+    unsigned ste_nested : 1;
+    unsigned ste_comp_inlined : 1;
+    unsigned ste_method : 1;
+    unsigned ste_has_docstring : 1;
+    unsigned ste_returns_value : 1;
+    unsigned ste_varargs : 1;
+    unsigned ste_varkeywords : 1;
+    _Py_comprehension_ty ste_comprehension;
+    /* ... */
+} PySTEntryObject;
+```
+
+Each entry is itself a `PyObject` (refcounted, garbage-collected)
+because the compiler needs to keep them around per scope, and the
+parent-child relationships create cycles the GC must handle.
+
+## Symbol flags
+
+```c
+/* Include/internal/pycore_symtable.h:157 */
+#define DEF_GLOBAL          1
+#define DEF_LOCAL           2
+#define DEF_PARAM          (2<<1)
+#define DEF_NONLOCAL       (2<<2)
+#define USE                (2<<3)
+#define DEF_FREE_CLASS     (2<<5)
+#define DEF_IMPORT         (2<<6)
+#define DEF_ANNOT          (2<<7)
+#define DEF_COMP_ITER      (2<<8)
+#define DEF_TYPE_PARAM     (2<<9)
+#define DEF_COMP_CELL      (2<<10)
+```
+
+The flags compose. A name annotated and assigned in the same scope
+gets `DEF_LOCAL | DEF_ANNOT | USE`. The analyse pass uses these
+bits to choose a final scope: a name with `DEF_LOCAL` is a local
+unless `DEF_GLOBAL` or `DEF_NONLOCAL` is also set; a name with
+`USE` but no `DEF_*` is either free or implicit global, depending
+on what enclosing scopes do with it.
+
+## Block types
+
+```c
+/* Include/internal/pycore_symtable.h _Py_block_ty */
+typedef enum _block_type {
+    FunctionBlock,
+    ClassBlock,
+    ModuleBlock,
+    AnnotationBlock,
+    TypeVariableBlock,        /* PEP 695 */
+    TypeAliasBlock,           /* PEP 695 */
+    TypeParametersBlock,      /* PEP 695 */
+} _Py_block_ty;
+```
+
+Class blocks are the odd one out: a class scope is not a function,
+so a name defined in a class body is *not* visible to nested
+functions defined inside it. The analyse pass enforces this by
+treating class blocks as opaque for free-variable resolution; a
+name used in a method must be resolved against the enclosing
+module, not the enclosing class.
+
+Annotation blocks (PEP 649) and type-parameter blocks (PEP 695)
+are recent additions. Each gets its own analyse path because the
+visibility rules differ:
+
+* Annotation blocks see the *enclosing* scope at evaluation time;
+  they do not see other annotations in the same class body.
+* Type-parameter blocks introduce a fresh scope above the function
+  or class that holds the generic parameters as locals.
+
+## Resolution algorithm
+
+The analyse pass walks the scope tree. For each scope it builds a
+`comp_free` set (names used and not bound locally) and walks its
+children with that set, then walks the children themselves.
+
+The decision for a name `n` in scope `s` is roughly:
+
+```
+if DEF_GLOBAL in flags[n]:
+    scope = GLOBAL_EXPLICIT
+elif DEF_NONLOCAL in flags[n]:
+    require enclosing function with a local binding for n
+    scope = FREE
+elif DEF_LOCAL in flags[n]:
+    if n is used by some inner function:
+        scope = CELL
+    else:
+        scope = LOCAL
+elif USE in flags[n]:
+    walk outwards, skipping class scopes
+    if some enclosing function has a binding for n:
+        scope = FREE
+    else:
+        scope = GLOBAL_IMPLICIT
+```
+
+`comp_free` propagates upwards: when an inner function uses a name
+defined in an outer function, the outer function must mark the
+binding as a *cell* (so its enclosing-function reference is
+addressable via `LOAD_DEREF` from the inner). The analyse pass
+makes a second walk to upgrade `LOCAL` to `CELL` for any name
+whose definition is referenced by an inner free.
 
 ## Comprehensions
 
-In Python 3.12+ comprehensions run inline in the enclosing frame,
-not in a hidden function. But the symbol table still treats each
-comprehension as its own scope so that the iteration variable does
-not leak. The codegen pass inlines the comprehension body while
-respecting the scope boundary the symtable recorded.
+PEP 709 inlined comprehensions in 3.12. The symbol table still
+treats a comprehension as a nested scope for purposes of name
+resolution (so the iteration variable does not leak), but the
+compiler emits the body inline rather than as a nested code
+object. The `ste_comp_inlined` flag on the parent entry records
+whether a comprehension was inlined. Cells that the inlined
+comprehension would have closed over instead become cells in the
+parent, marked `DEF_COMP_CELL`.
 
-## Class scopes
+## PEP 695 type parameters
 
-Class bodies have their own scope, but it is not a function. Names
-bound in a class body are not visible to nested functions inside
-that body. CPython implements that by treating the class scope as
-"transparent" to the free-variable bubble: nested functions can
-see the enclosing module / function bindings, skipping over the
-class.
+PEP 695 added a new generic syntax:
 
-## The `__class__` cell
+```python
+def foo[T: int](x: T) -> T: ...
 
-When a method body uses `super()` with no arguments, CPython needs
-the class object at call time. The compiler synthesises a closure
-cell named `__class__` that holds the class, and the codegen pass
-emits a `LOAD_CLASSDEREF`. The symbol table is responsible for
-allocating this cell when it sees a `super` reference inside a
-method.
+class Container[T]:
+    items: list[T]
 
-## Type parameter scopes
-
-PEP 695 adds `class Foo[T]:` and `def f[T]():` syntax. The type
-parameter list introduces a hidden scope that contains the type
-variables. The symbol table builds this scope so that codegen can
-emit `LOAD_LOCAL` for type vars without leaking them into the
-function body.
-
-## API
-
-```c
-struct symtable *
-PySymtable_Build(mod_ty mod, PyObject *filename,
-                 PyFutureFeatures *ff);
-PySTEntryObject *
-PySymtable_Lookup(struct symtable *st, void *key);
+type Alias[T] = list[T]
 ```
 
-The `key` is the AST node pointer. The compiler keeps the
-`symtable *` alive for the duration of `compile` and looks up each
-scope it enters.
+Each generic introduces a `TypeParametersBlock`. The block holds
+the type parameter names as locals; the function or class body is
+a child block that sees the type parameters as free variables.
+`TypeVariableBlock` is a further nested scope used for the bound
+or constraint expressions on a type parameter, which need to see
+the type parameters declared earlier in the same list.
 
-## Reading order
+## Class-level free variables
 
-The compiler ([Compiler](compiler)) is the only consumer of the
-symbol table. Read that next.
+Free variables in class methods that reference the class itself
+(usually through `super()` or `__class__`) are handled with a
+special `__class__` cell. The class-body scope marks `__class__`
+as a cell at the end of the analyse pass; every method that uses
+`super()` becomes a free reference to that cell. This is the
+mechanism that makes argumentless `super()` work.
+
+## The compiler's view
+
+The compiler reads from the symbol table in two places:
+
+* **Scope selection.** `compile_lookup_arg` chooses the right
+  opcode for a name (`LOAD_FAST`, `LOAD_GLOBAL`, `LOAD_DEREF`,
+  `LOAD_NAME`, `LOAD_FROM_DICT_OR_DEREF`, `LOAD_FROM_DICT_OR_GLOBALS`).
+* **Slot layout.** The compiler reads the entry's `ste_varnames`
+  and the analysed scope information to determine how many fast
+  locals, cells, and free slots the code object needs. This drives
+  the `co_nlocalsplus` field on the `PyCodeObject`.
+
+## PEP touchpoints
+
+* **PEP 526.** Annotated assignments produce `DEF_ANNOT`.
+* **PEP 649.** Annotation blocks defer evaluation; the symbol
+  table introduces `AnnotationBlock` for the lazy wrapper.
+* **PEP 695.** `TypeVariableBlock`, `TypeAliasBlock`,
+  `TypeParametersBlock`.
+* **PEP 709.** Inlined comprehensions; `ste_comp_inlined` and
+  `DEF_COMP_CELL`.
+
+## Reference
+
+* `Python/symtable.c`, `Include/internal/pycore_symtable.h`.
+* PEP 227. Statically nested scopes.
+* PEP 3104. Access to names in outer scopes.
+* PEP 695. Type parameter syntax.
+* PEP 709. Inlined comprehensions.

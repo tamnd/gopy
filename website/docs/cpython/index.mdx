@@ -1,72 +1,156 @@
 ---
-title: CPython internals
-description: A complete, self-contained walk through how CPython 3.14 works internally.
+title: Internals
+description: A walk through the CPython 3.14 source tree by subsystem.
 ---
 
-# CPython internals
+# Internals
 
-These pages are a self-contained tour of CPython 3.14. They are
-written so that you can finish them with the CPython source tree
-open and understand what every important piece does, without ever
-opening the gopy source.
+CPython is the reference implementation of Python. The source tree
+on `github.com/python/cpython` at the 3.14 tag is the canonical
+answer to "what does Python do here?". These pages describe how
+the tree is laid out, what each subsystem is responsible for, and
+which functions to read first.
 
-CPython is the reference implementation of Python. It is a tree
-of C source under [`python/cpython`](https://github.com/python/cpython)
-plus a Python-side standard library under `Lib/`. The interpreter
-runs in four big phases.
+The goal is parity with the gopy internals pillar. Every page in
+the gopy pillar names a CPython file it mirrors; every page here
+goes deeper into the C than the Go port has room for. A reader can
+keep both windows open and treat them as paired references.
 
-## The four phases
+## What the pillar covers
 
-| Phase     | Input                          | Output                          | Source root      |
-| --------- | ------------------------------ | ------------------------------- | ---------------- |
-| Parse     | `.py` source bytes              | An AST.                          | `Parser/`        |
-| Compile   | An AST.                         | A `PyCodeObject` with bytecode.  | `Python/`        |
-| Run       | A `PyCodeObject` and arguments. | Program output, side effects.    | `Python/ceval.c` |
-| Garbage collect | Live objects.             | Released cycles, finalisers run. | `Modules/gcmodule.c` |
+The internals pillar is about the interpreter, not the language.
+Syntax, semantics, and the standard library reference live in the
+[Python documentation](https://docs.python.org/3.14/). What lives
+here is the C: the data structures, the dispatch loops, the
+optimisation passes, the memory model. PEPs that change the
+implementation surface (PEP 657, PEP 659, PEP 669, PEP 703, PEP
+744) get a section on the page they touch.
 
-The "Pipeline" sidebar covers Parse and Compile. The "Execution"
-sidebar covers Run. The "Runtime" sidebar covers the object model
-and the garbage collector. The pages are arranged so that reading
-them in order matches the order CPython executes them.
+A reader who has never opened the CPython source can start at the
+top of the pillar. A reader who has read the source but wants a
+pointer into a specific subsystem can skip to the page that names
+it. Every section is self-contained.
 
-## What to read
+## Layout
 
-If you are new to the source, read the pages in this order:
+The CPython source tree splits roughly five ways:
 
-1. [Pipeline overview](pipeline)
-2. [Parser](parser) -> [AST](ast) -> [Symbol table](symtable)
-3. [Compiler](compiler) -> [Flow graph](flowgraph) -> [Assembler](assembler)
-4. [VM](vm) -> [Frames](frames) -> [Specializer](specializer) -> [Tier-2](tier2)
-5. [Objects](objects) -> [Types](types) -> [GC](gc)
-6. [Imports](imports) -> [Generators](generators) -> [Exceptions](exceptions) -> [GIL](gil) -> [Monitor](monitor)
+| Directory   | Holds                                                              |
+| ----------- | ------------------------------------------------------------------ |
+| `Parser/`   | Tokenizer, PEG parser, ASDL generators, grammar.                   |
+| `Python/`   | The compile pipeline, the eval loop, the specializer, the optimizer, the runtime services. |
+| `Objects/`  | The built-in types: int, float, str, list, dict, tuple, set, type, function, code, frame. |
+| `Modules/`  | C-implemented standard-library modules. `gcmodule.c`, `signalmodule.c`, `_threadmodule.c`, etc. |
+| `Include/`  | Headers. `Include/` is the stable public API; `Include/cpython/` is unstable public; `Include/internal/` is private. |
 
-Every page cites C files with `file:line` triples that point at
-the current `main` branch of upstream CPython. No commit pins,
-because the lines slide as upstream refactors.
+The pillar groups these directories into four editorial pillars:
 
-## Reading the C
+| Pillar      | Subsystems                                                                              |
+| ----------- | --------------------------------------------------------------------------------------- |
+| Pipeline    | Tokenizer, parser, AST, symbol table, codegen, flowgraph, assembler.                   |
+| Execution   | Eval loop, frames, specializer, Tier-2 optimizer, monitoring, GIL, exceptions, generators. |
+| Runtime     | Object model, type system, garbage collector, import machinery.                         |
+| Foundations | Numbers, persistent hash maps, hashing, format spec, codecs, time, lifecycle.           |
 
-The CPython source uses a handful of conventions that are worth
-internalising before diving in.
+The pillars are an editorial grouping, not a build-time one; the
+CPython build is one shared library plus a thin entry binary.
 
-* **Naming.** Public C API functions start with `Py`, internal
-  ones start with `_Py`. Static helpers have no prefix. Types end
-  in `_type` if they are the `PyTypeObject`, e.g. `PyLong_Type`.
-* **Refcount discipline.** Every `PyObject *` carries a reference
-  count. Functions document whether they "steal" (transfer
-  ownership of) a reference, "borrow" (do not change it), or
-  "return a new reference" (the caller owns the result).
-* **The GIL.** The interpreter holds a single lock while running
-  Python code. Releasing it is done explicitly via
-  `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS`.
-* **`include/cpython/`.** This directory holds the public-but-not-stable
-  surface. `include/internal/` holds private headers. Files end in
-  `.h` for normal C and `.h` for declarations CPython itself ships;
-  generated headers end in `.h.in`.
+## Reading order
 
-## Bibliography
+The pillar is built to be read top to bottom. Each page is
+self-contained, but the recommended path is:
 
-* The [CPython developer guide](https://devguide.python.org).
-* Brandt Bucher's PEP 659 explainer.
-* Mark Shannon's PEP 744 trace projector notes.
-* The "Python under the hood" series on the Tenthousandmeters blog.
+1. Start with [pipeline](pipeline). It traces a `.py` file from
+   bytes to a `PyCodeObject` and names every C file involved.
+2. Read the Pipeline group end to end: `parser`, `ast`, `symtable`,
+   `compile`. By the end of `compile` you know the shape of a code
+   object and the layout of the exception table.
+3. Cross to Execution. Read `vm` first; everything else in the
+   group hangs off the dispatch loop. `frame` walks the runtime
+   stack. `specializer` and `optimizer` are the two adaptive
+   tiers. `monitor` is `sys.monitoring`. `gil`, `exceptions`, and
+   `generators` close the chapter.
+4. Read Runtime for the object model and the import machinery.
+5. Read Foundations for the low-level primitives the interpreter
+   rests on: numeric types, hashing, the format mini-language,
+   codecs, clocks, and the init/finalise dance.
+
+## Conventions
+
+Every page follows a fixed shape:
+
+* A one-paragraph **lede** that names the subsystem.
+* A **source map** table: file path, role, key entry points.
+* The **body**, organised into noun-phrase sections, each
+  describing one mechanism with at least one concrete listing or
+  citation.
+* A **PEP touchpoints** section for any PEP the subsystem
+  implements.
+* A **Reference** list of CPython files, PEPs, and external
+  papers.
+
+Citations are inline. A CPython citation reads
+`` `Python/ceval.c:1234 _PyEval_EvalFrameDefault` ``. Line numbers
+drift as upstream refactors; the file plus function name remain
+stable anchors. When the line number matters (when the page
+quotes a specific snippet), it is pinned to CPython 3.14.0; when
+the function is what matters, the line is a hint.
+
+Code listings are real C copied from the tree, not paraphrased.
+A listing too long to inline is trimmed with `/* ... */` rather
+than reflowed. Header listings include the surrounding
+`#ifdef` only when the conditional carries meaning.
+
+## CPython idioms to internalise
+
+Three idioms recur on almost every page:
+
+* **Reference counting.** Every `PyObject *` carries an
+  `ob_refcnt`. Functions document whether they "steal", "borrow",
+  or "return a new reference". `Py_INCREF` bumps the count;
+  `Py_DECREF` lowers it and may run finalisers. `Py_NewRef(x)`
+  returns `x` after bumping its count, useful for transferring
+  ownership. PEP 683 introduced immortal objects in 3.12 (refcount
+  pinned at `_Py_IMMORTAL_REFCNT`); singletons and small ints are
+  immortal.
+* **The GIL.** A single per-interpreter lock guards Python state.
+  C code that runs without the GIL uses
+  `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS`. The 3.13+
+  free-threaded build (PEP 703) optionally compiles the GIL out
+  and replaces it with finer-grained locks and biased reference
+  counting; the 3.14 default build still holds the GIL.
+* **Slot dispatch.** Every type is a `PyTypeObject` filled with
+  function pointers (`tp_call`, `tp_iter`, `nb_add`, ...).
+  Operations on values reach into the type for the slot. The
+  slots are populated either directly (for C types) or through
+  `fixup_slot_dispatchers` (for Python types that define dunder
+  methods).
+
+## Status disclosure
+
+CPython is the reference; "status" here means which PEPs the 3.14
+release shipped versus which remain in flight. The pages name the
+PEP-by-PEP status where it matters. Free threading is shipped as
+an optional build mode (PEP 703); the Tier-2 optimizer is enabled
+behind `PYTHON_UOPS=1` and the JIT behind `--enable-experimental-jit`
+(PEP 744); `sys.monitoring` is fully implemented (PEP 669).
+
+## Cross-pillar references
+
+The CPython internals pillar links forward and backward within
+itself. It links across to the gopy pillar where a Go port file
+mirrors the C function being discussed. It does not link to the
+specs pillar; the port specs are about gopy, not CPython.
+
+## Reference
+
+* [The CPython developer's guide.](https://devguide.python.org)
+* PEP 626. Precise line numbers for debugging.
+* PEP 657. Including fine-grained error locations in tracebacks.
+* PEP 659. Specializing adaptive interpreter.
+* PEP 669. Low impact monitoring for CPython.
+* PEP 683. Immortal objects, using a fixed refcount.
+* PEP 684. A per-interpreter GIL.
+* PEP 703. Making the global interpreter lock optional in CPython.
+* PEP 744. JIT compilation.
+* CPython 3.14 source tree at `https://github.com/python/cpython`.

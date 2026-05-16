@@ -1,131 +1,272 @@
 ---
 title: Parser
-description: The CPython tokenizer and PEG parser. From bytes to AST.
+description: The tokenizer and the PEG parser. Source bytes to a Token stream to a mod_ty AST.
 ---
 
 # Parser
 
-CPython's frontend has two pieces. The tokenizer turns source
-bytes into a flat stream of tokens. The parser turns that stream
-into an AST. Both pieces live under `Parser/` in the source tree.
+Parsing turns source bytes into a `mod_ty` AST. The work happens in
+two passes that are wired together but conceptually distinct: the
+tokenizer reads bytes and emits a `Token` stream; the parser
+consumes the token stream and builds the AST. Both stages live
+under `Parser/`. The parser is generated from a PEG grammar by a
+Python tool that runs at build time.
 
-## Source map
+## Where the code lives
 
-| File                                | Role                                                |
-| ----------------------------------- | --------------------------------------------------- |
-| `Parser/tokenizer.c`                | The hand-written tokenizer.                         |
-| `Parser/tokenizer.h`                | The `tok_state` struct.                             |
-| `Parser/lexer/lexer.c`              | The low-level character pump used by the tokenizer. |
-| `Parser/pegen.c`                    | The PEG parser core (memoization, packrat tables).  |
-| `Parser/parser.c`                   | Generated from `Grammar/python.gram`.               |
-| `Grammar/python.gram`               | The grammar source.                                 |
-| `Tools/peg_generator/`              | The PEG generator that builds `parser.c`.           |
+| File                                  | Role                                                              | Entry points                                       |
+| ------------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------- |
+| `Parser/lexer/lexer.c`                | The tokenizer state machine. Normal mode and f-string mode.       | `_PyTokenizer_Get`, `tok_get`, `tok_get_normal_mode`, `tok_get_fstring_mode` |
+| `Parser/lexer/state.h`                | `tok_state`, `tokenizer_mode`. Buffer pointers, indent stack, paren stack, f-string stack. | `struct tok_state`                |
+| `Parser/lexer/buffer.c`               | Buffer management: dynamic resize, CRLF normalisation, line tracking. | `_PyLexer_tok_underflow_string`, `tok_underflow_file` |
+| `Parser/pegen.c`                      | PEG runtime: memoisation, error recovery, AST node helpers.       | `_PyPegen_parse`, `_PyPegen_run_parser`, `_PyPegen_insert_memo` |
+| `Parser/parser.c` (generated)         | The grammar as a recursive-descent function per rule.             | `file_rule`, `expression_rule`, ...                |
+| `Parser/Python.gram`                  | The PEG grammar source.                                           | (input to `Tools/peg_generator`)                   |
+| `Tools/peg_generator/pegen/c_generator.py` | The grammar-to-C generator.                                 | `make regen-pegen`                                 |
+| `Parser/Python.asdl`                  | The AST definition.                                               | (input to `Parser/asdl_c.py`)                      |
 
-## Tokenizer
+The public entry points are:
 
-The tokenizer is a state machine. Each call to `tok_get` reads
-characters until it can return one token. The state includes the
-file position, the indentation stack, the f-string nesting stack,
-the encoding declaration, and a small pushback buffer.
+```c
+/* Include/internal/pycore_parser.h */
+mod_ty _PyParser_ASTFromString(const char *str, PyObject *filename,
+                               int mode, PyCompilerFlags *flags,
+                               PyArena *arena);
+mod_ty _PyParser_ASTFromFile(FILE *fp, PyObject *filename, const char *enc,
+                             int mode, ..., PyArena *arena);
+```
 
-The token kinds are listed in `Grammar/Tokens`. The big ones are
-`NAME`, `NUMBER`, `STRING`, `OP`, `NEWLINE`, `INDENT`, `DEDENT`,
-plus the soft-keyword variants like `ASYNC` and `AWAIT` that turn
-into `NAME` in some grammar positions.
+Both call `_PyPegen_run_parser` which owns the tokenizer and the
+`Parser` struct for the duration of the parse.
+
+## The tokenizer
+
+The tokenizer is a state machine keyed on a `tok_state` struct.
+The struct holds a sliding window into the source and a couple of
+explicit stacks:
+
+```c
+/* Parser/lexer/state.h:74 tok_state */
+struct tok_state {
+    char *buf;                       /* malloc'd input buffer */
+    char *cur;                       /* current read position */
+    char *inp;                       /* end of valid data in buf */
+    int indent;                      /* current indent level (in spaces) */
+    int indstack[MAXINDENT];         /* indent stack (max depth 100) */
+    int level;                       /* () [] {} nesting depth */
+    char parenstack[MAXLEVEL];       /* paren kind stack (max 200) */
+    tokenizer_mode tok_mode_stack[MAXFSTRINGLEVEL]; /* f-string stack */
+    int tok_mode_stack_index;
+    int lineno;
+    int col_offset;
+    int starting_col_offset;
+    int filename_lineno;
+    PyObject *filename;
+    /* ... */
+};
+```
+
+`buf` holds a chunk of the source. In file mode the buffer is
+refilled as the tokenizer advances; in string mode the whole
+source lives in `buf` once. CRLF is normalised to LF in the
+buffer, so the tokenizer itself sees only LF.
+
+The dispatcher `tok_get` (`Parser/lexer/lexer.c:1616`) checks the
+top of the mode stack and routes to either `tok_get_normal_mode` or
+`tok_get_fstring_mode`. The normal-mode tokenizer handles
+indentation, operators, keywords, numbers, ordinary strings, and
+the `NEWLINE` / `INDENT` / `DEDENT` synthetic tokens. The
+f-string-mode tokenizer is a separate state machine that tracks
+the f-string's quote style and the nesting of expression
+substitutions.
 
 ### Indentation
 
-CPython does not use whitespace insensitivity tricks. The
-tokenizer maintains an explicit stack of indentation widths. When
-a line's leading whitespace is wider than the top of the stack, it
-pushes and emits `INDENT`. When narrower, it pops and emits
-`DEDENT` for each level popped, raising `IndentationError` if the
-new width does not match any prior level.
+The indent stack tracks the column offsets of currently-open
+blocks. When a logical line begins (after a `NEWLINE` outside any
+brackets), the tokenizer measures the leading whitespace and
+compares against the stack:
+
+- Greater than the top: push the new column, emit `INDENT`.
+- Equal to the top: emit no indentation token.
+- Less than the top: pop entries from the stack until the
+  measurement matches one of them; emit one `DEDENT` per pop. If
+  no match is found, raise `IndentationError`.
+
+The bracketing depth `level` suppresses the indentation machinery:
+inside `(`, `[`, or `{`, line breaks emit `NL` (non-logical
+newline) rather than `NEWLINE`, and indentation is not measured.
 
 ### F-strings
 
-F-strings are tokenized as a separate sub-language. Inside an
-f-string, the tokenizer switches mode to emit `FSTRING_START`,
-`FSTRING_MIDDLE`, `FSTRING_END`, and `{` / `}` braces that mark
-embedded expressions. Each embedded expression is parsed with the
-regular grammar via a recursive call into `pegen_parse`.
+F-strings are tokenized through a separate mode because the body
+of an f-string interleaves literal chunks, replacement fields, and
+optional format specifications, each of which has its own
+tokenization rules:
 
-### Encoding
+```c
+/* Parser/lexer/state.h:48 tokenizer_mode */
+typedef struct {
+    int kind;                        /* TOK_REGULAR_MODE / TOK_FSTRING_MODE */
+    int curly_bracket_depth;         /* { } depth inside the f-string */
+    int curly_bracket_expr_start_depth; /* depth when expression started */
+    Py_UCS4 quote;                   /* ' " */
+    int quote_size;                  /* 1 or 3 */
+    int string_kind;                 /* FSTRING or TSTRING (3.14 t-strings) */
+    const char *start;
+    const char *multi_line_start;
+    int start_lineno;
+    int last_expr_size;
+    char *last_expr_buffer;
+    int f_string_debug;              /* {expr=} forms */
+} tokenizer_mode;
+```
 
-The tokenizer reads the encoding declaration in the first two
-lines of the file (PEP 263) and decodes bytes through that codec
-before tokenizing. The default is UTF-8.
+When `tok_get_fstring_mode` encounters `{` (not `{{`), it pushes a
+fresh regular-mode entry onto the stack and tokenizes the
+expression normally. The matching `}` pops back to the f-string
+mode. Format specifications introduce another nested mode. CPython
+3.14 also adds *t-strings* (template strings); the
+`string_kind` field distinguishes them from f-strings.
 
-## PEG parser
+## The PEG parser
 
-CPython moved to a PEG parser in PEP 617. The grammar lives in
-`Grammar/python.gram`. The PEG generator under `Tools/peg_generator/`
-emits `Parser/parser.c`.
+CPython has used a PEG parser since 3.9 (PEP 617). The grammar is
+written in a custom EBNF-like notation in `Parser/Python.gram` and
+compiled to C by `Tools/peg_generator/pegen/c_generator.py`. The
+generator emits one C function per rule into `Parser/parser.c`.
 
-### What "PEG" means here
+### The Parser struct
 
-A Parsing Expression Grammar matches input by ordered choice:
-alternatives are tried left to right and the first match wins.
-This removes ambiguity at the cost of making grammar rules
-order-sensitive. PEG is paired with **packrat memoization**: each
-rule, evaluated at each position, caches its result. That makes
-worst-case linear time achievable.
+```c
+/* Parser/pegen.h:54 Parser */
+typedef struct {
+    struct tok_state *tok;
+    Token **tokens;                  /* lookahead buffer */
+    int mark;                        /* current token index */
+    int fill, size;                  /* token buffer bookkeeping */
+    PyArena *arena;
+    int start_rule;                  /* file_rule, eval_rule, fstring_rule, ... */
+    Memo *memo;                      /* per-rule memo */
+    int error_indicator;
+    int flags;
+    int feature_version;
+    int level;                       /* recursion depth */
+    location last_stmt_location;
+} Parser;
+```
 
-### Memoization
+The token buffer grows as the tokenizer is asked for more lookahead.
+`mark` is the cursor; `mark` rewinds on backtrack. The parser
+never re-tokenizes; once a token is in the buffer it stays.
 
-`pegen.c` keeps a memo table indexed by `(rule, position)`. On
-re-entry it returns the cached result. The memo table is also how
-the parser detects and aborts left-recursive descents that would
-otherwise loop.
+### Rule functions
+
+Each rule generates a function shaped like this:
+
+```c
+/* Parser/parser.c (generated): expression_rule */
+static expr_ty expression_rule(Parser *p) {
+    int _start_mark = p->mark;
+    expr_ty _res = NULL;
+    if (_PyPegen_is_memoized(p, expression_rule, &_res)) return _res;
+    /* alternative 1: try; on success, memoise and return */
+    /* alternative 2: rewind p->mark; try */
+    /* ... */
+    _PyPegen_insert_memo(p, _start_mark, expression_rule, _res);
+    return _res;
+}
+```
+
+Memoisation makes the PEG parser linear in input size. Without it
+the same prefix could be re-tried at exponential cost when an
+alternative fails. The memo is keyed on `(rule, mark)`; the value
+is the result of the parse plus the resulting `mark`.
 
 ### Left recursion
 
-PEP 617 supports left-recursive rules through a fixed-point trick.
-A left-recursive rule is initially memoized as "fail". The parser
-then iteratively retries the rule, replacing the memo with the
-longest successful parse, until the result stabilises.
-
-### Actions
-
-Each grammar rule has an attached **action**, written in C inside
-curly braces. The action allocates AST nodes from the per-parse
-`PyArena`. The generator turns the action into a C function in
-`parser.c`. Helper macros like `RAISE_SYNTAX_ERROR`,
-`CHECK`, `CHECK_VERSION`, and `Constant` simplify the action
-bodies. The set of helpers is in `Parser/action_helpers.c`.
+The grammar uses left-recursive rules for left-associative binary
+operators. The generator handles them by seeding the memo with a
+failure, parsing as much as it can, then iteratively extending the
+result until the parse no longer grows. The algorithm is described
+in *Left Recursion in Parsing Expression Grammars* (Medeiros,
+Mascarenhas, Ierusalimschy, 2012);
+`Tools/peg_generator/pegen/grammar_visualizer.py` is a useful
+companion when reading the grammar.
 
 ### Error recovery
 
-When the parser fails, it does not stop at the first failure. It
-reruns the failed rule with an "invalid" branch enabled that
-matches almost anything and produces a tuned `SyntaxError`
-message. Examples are the suggestions you see for missing colons,
-unmatched brackets, and walrus operators in the wrong context.
+PEG parsers do not produce great error messages by default; a
+failed parse usually backtracks all the way to the start. CPython
+mitigates this with *invalid* alternatives in the grammar that
+match the most common malformed forms and raise targeted errors:
 
-## Arena allocation
-
-Every AST node and intermediate object is allocated in a `PyArena`.
-The arena is freed wholesale when parsing finishes. This keeps the
-parser pointer-stable and removes the need for per-node reference
-counting during construction.
-
-## Putting it together
-
-```c
-// Parser/peg_api.c
-mod_ty
-_PyParser_ASTFromString(const char *str, PyObject *filename,
-                        int mode, PyCompilerFlags *flags,
-                        PyArena *arena);
+```
+invalid_expression:
+    | !(NAME STRING) a=disjunction expression_without_invalid {
+        RAISE_SYNTAX_ERROR_KNOWN_LOCATION(a, ...) }
 ```
 
-That function spins up a tokenizer over `str`, calls the generated
-`file_rule` (or `eval_rule`, etc.) in `parser.c`, and returns a
-`mod_ty` AST. From there control passes to `Python/ast.c` for
-validation.
+The convention is that invalid rules run only on a failed primary
+parse, so the success path never pays the cost of invalid-rule
+matching.
 
-## Reading order
+## AST construction
 
-For the validator and the AST shape, continue to [AST](ast).
-For an end-to-end picture of how parse output feeds compile,
-return to [Pipeline overview](pipeline).
+Rule actions construct AST nodes via the generated constructors in
+`Python/Python-ast.c`. The constructors are thin wrappers around
+`_PyArena_Malloc` plus assignment of the per-node fields, including
+the source location quadruple (`lineno`, `col_offset`,
+`end_lineno`, `end_col_offset`). The arena lifetime owns every
+node; nothing is refcounted.
+
+The `mod_ty` returned by the top-level rule is the root of the
+tree. The four entry shapes are `Module` (top-level script),
+`Interactive` (one REPL statement), `Expression` (eval-mode), and
+`FunctionType` (PEP 484 function-type comments).
+
+## Build-time generation
+
+`Parser/parser.c` is generated. Edit `Parser/Python.gram` and run
+`make regen-pegen` to regenerate. The generator lives under
+`Tools/peg_generator/`; it is invoked during the CPython build and
+ships in source releases (the generated `.c` files ship
+checked-in to avoid a circular bootstrap).
+
+`Include/internal/pycore_ast.h` and `Python/Python-ast.c` are
+generated from `Parser/Python.asdl` by `Parser/asdl_c.py`. The
+ASDL file is the authoritative description of the AST shape; the
+generator emits the `mod_ty` / `stmt_ty` / `expr_ty` unions, the
+constructor helpers, and the visitor scaffolding the compiler
+uses. See [ast](ast) for the AST shape itself.
+
+## CPython 3.14 changes
+
+* **PEP 750.** Template strings (`t"..."`). A new
+  `tokenizer_mode.string_kind` value (`TSTRING`) distinguishes
+  them from f-strings. AST nodes `Interpolation` and `TemplateStr`
+  hold the resulting structure.
+* **Error message refinements.** `Parser/lexer/lexer.c` and the
+  `invalid_*` grammar rules have grown several targeted messages
+  in 3.14: invalid f-string conversions, missing `:` in inline
+  statements, and a clearer message for parenthesised context
+  managers.
+
+## PEP touchpoints
+
+* **PEP 617.** New PEG parser for CPython.
+* **PEP 526.** Variable annotations: parser produces `AnnAssign`.
+* **PEP 695.** Type parameter syntax: parser produces
+  `type_param` nodes.
+* **PEP 750.** Template strings.
+
+## Reference
+
+* `Parser/lexer/lexer.c`, `Parser/lexer/state.h`,
+  `Parser/pegen.c`, `Parser/pegen.h`,
+  `Parser/parser.c` (generated), `Parser/Python.gram`.
+* `Tools/peg_generator/`.
+* PEP 617. New PEG parser for CPython.
+* PEP 750. Template strings.
+* Medeiros, Mascarenhas, Ierusalimschy. *Left Recursion in
+  Parsing Expression Grammars*. 2012.

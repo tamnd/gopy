@@ -1,0 +1,410 @@
+---
+title: Compile
+description: Codegen, the control-flow graph, and the assembler. Three passes that together turn the AST into a PyCodeObject.
+---
+
+# Compile
+
+The compile stage takes a validated, preprocessed AST and produces
+a `PyCodeObject`. It runs in three sub-passes that historically
+lived in three files (`compile.c`, `flowgraph.c`, `assemble.c`) and
+still do, but they are tightly coupled enough that a reader is
+better served by thinking of them as one stage with three phases.
+This page describes the whole stage; the file layout reflects
+historical concerns more than current design boundaries.
+
+## Where the code lives
+
+| File                                       | Role                                                              | Entry points                                      |
+| ------------------------------------------ | ----------------------------------------------------------------- | ------------------------------------------------- |
+| `Python/compile.c`                         | The driver. Per-scope unit; const cache; pipeline orchestration.  | `_PyAST_Compile`, `compile_mod`, `compile_unit`   |
+| `Python/codegen.c`                         | The AST-to-pseudo-instruction visitor. The `ADDOP*` macros.       | `_PyCodegen_Module`, `_PyCodegen_Expression`      |
+| `Python/instruction_sequence.c`            | The growable array of pseudo-instructions per scope.              | `_PyInstructionSequence_Addop`, `_PyInstructionSequence_UseLabel` |
+| `Python/flowgraph.c`                       | Pseudo-ops to CFG. Optimisation passes. CFG back to instructions. | `_PyCfg_FromInstructionSequence`, `_PyCfg_OptimizeCodeUnit` |
+| `Python/assemble.c`                        | Linearise the optimised CFG; emit `co_code`, location table, exception table. | `_PyAssemble_MakeCodeObject`              |
+| `Include/internal/pycore_compile.h`        | `compiler_unit`, `_PyCompile_CodeUnitMetadata`, fblock types.     |                                                   |
+| `Include/internal/pycore_flowgraph.h`      | `basicblock`, `cfg_builder`, jump-target labels.                  |                                                   |
+
+The whole stage is driven from one function:
+
+```c
+/* Python/compile.c:1478 _PyAST_Compile */
+PyCodeObject *
+_PyAST_Compile(mod_ty mod, PyObject *filename, PyCompilerFlags *pflags,
+               int optimize, PyArena *arena)
+{
+    struct compiler *c = new_compiler(mod, filename, pflags, optimize, arena);
+    PyCodeObject *co = compiler_mod(c, mod);
+    compiler_free(c);
+    return co;
+}
+```
+
+`new_compiler` allocates the driver state and the symbol table.
+`compiler_mod` walks the AST, building one `compiler_unit` per
+scope. Each unit runs through codegen, then the flowgraph passes,
+then assembly; the result is one `PyCodeObject` per scope, with
+inner code objects referenced as `LOAD_CONST` constants in the
+outer ones.
+
+## The driver
+
+```c
+/* Python/compile.c:90 compiler */
+typedef struct _PyCompiler {
+    PyObject *c_filename;
+    struct symtable *c_st;
+    _PyFutureFeatures c_future;
+    PyCompilerFlags c_flags;
+    PyObject *c_const_cache;       /* dict: const -> index */
+    int c_interactive;
+    int c_optimize;                /* -O level: -1, 0, 1, 2 */
+    struct compiler_unit *u;       /* top of unit stack */
+    PyObject *c_stack;             /* list of capsules: enclosing units */
+} compiler;
+```
+
+`c_const_cache` is a single dict shared across all units; when the
+same constant is emitted twice (the integer `1`, the string `""`),
+it gets the same index. The codegen pass uses
+`compiler_add_const` to register a value and get its index.
+
+## The unit
+
+```c
+/* Include/internal/pycore_compile.h compiler_unit */
+struct compiler_unit {
+    PySTEntryObject *u_ste;
+    int u_scope_type;                       /* COMPILE_SCOPE_MODULE, ... */
+    instr_sequence *u_instr_sequence;
+    _PyCompile_CodeUnitMetadata u_metadata;
+    PyObject *u_deferred_annotations;       /* PEP 649 */
+    int u_nfblocks;
+    _PyCompile_FBlockInfo u_fblock[CO_MAXBLOCKS];
+};
+
+typedef struct {
+    PyObject *u_name, *u_qualname;
+    PyObject *u_consts, *u_names;
+    PyObject *u_varnames, *u_cellvars, *u_freevars;
+    PyObject *u_fasthidden;
+    Py_ssize_t u_argcount, u_posonlyargcount, u_kwonlyargcount;
+    int u_firstlineno;
+} _PyCompile_CodeUnitMetadata;
+```
+
+The unit owns:
+
+- The instruction sequence under construction.
+- The constant table, the name table, the variable tables.
+- The frame-block stack (for `try`/`except`/`finally`/`with` and
+  loops).
+- The deferred annotations list (PEP 649).
+- The scope type, which selects between `COMPILE_SCOPE_MODULE`,
+  `COMPILE_SCOPE_FUNCTION`, `COMPILE_SCOPE_CLASS`,
+  `COMPILE_SCOPE_LAMBDA`, `COMPILE_SCOPE_COMPREHENSION`,
+  `COMPILE_SCOPE_ASYNC_FUNCTION`, and the PEP 695 scopes.
+
+## Codegen
+
+`Python/codegen.c` is the AST visitor. It is mostly a wall of
+recursion: one function per AST constructor, each emitting the
+right sequence of pseudo-instructions and recursing into
+sub-expressions.
+
+```c
+/* Python/codegen.c _PyCodegen_Module */
+int _PyCodegen_Module(compiler *c, mod_ty mod);
+int compiler_visit_stmt(compiler *c, stmt_ty s);
+int compiler_visit_expr(compiler *c, expr_ty e);
+```
+
+The macros `ADDOP`, `ADDOP_I`, `ADDOP_N`, `ADDOP_LOAD_CONST` are
+the workhorses. `ADDOP(c, loc, op)` appends an opcode with no
+argument; `ADDOP_I(c, loc, op, i)` appends an opcode with an
+integer argument; `ADDOP_N(c, loc, op, name)` appends with a name
+that gets interned into `u_names`; `ADDOP_LOAD_CONST(c, loc, v)`
+adds the value to `u_consts` and emits `LOAD_CONST` with the
+resulting index. The `loc` argument is a `_Py_SourceLocation`
+quadruple threaded from the AST node.
+
+### Visitors
+
+A simple visitor:
+
+```c
+/* Python/codegen.c compiler_call (simplified) */
+static int compiler_call(compiler *c, expr_ty e) {
+    location loc = LOC(e);
+    VISIT(c, expr, e->v.Call.func);
+    VISIT_SEQ(c, expr, e->v.Call.args);
+    VISIT_SEQ(c, keyword, e->v.Call.keywords);
+    ADDOP_I(c, loc, CALL, asdl_seq_LEN(e->v.Call.args));
+    return SUCCESS;
+}
+```
+
+The `VISIT` macro dispatches on the kind tag; `VISIT_SEQ` walks an
+`asdl_*_seq`. For each visited subexpression the visitor emits
+instructions that leave a single value on the (logical) stack.
+`CALL` consumes the function and the arguments and pushes the
+result.
+
+### Pseudo-ops
+
+Codegen does not always emit final opcodes. Some instructions are
+pseudo-ops resolved later:
+
+* Jump targets are labels, not byte offsets. The codegen pass
+  creates labels with `_PyInstructionSequence_UseLabel` and
+  references them in jump opcodes; the flowgraph and assemble
+  passes resolve them.
+* `EXTENDED_ARG` is inserted by the assembler when an argument
+  overflows 8 bits, not by codegen.
+* Some opcodes have pseudo-op variants used during construction
+  and rewritten by the optimiser (for example, jump opcodes whose
+  direction is not yet known).
+
+### Frame blocks
+
+`try`, `except`, `finally`, `with`, `async with`, `for`, and
+`while` each push an entry on the unit's frame-block stack so that
+inner `return`, `break`, `continue`, and exception handling can
+emit the right cleanup:
+
+```c
+/* Include/internal/pycore_compile.h _PyCompile_FBlockInfo */
+typedef struct {
+    enum _PyCompile_FBlockType fb_type;
+    _PyJumpTargetLabel fb_block;
+    _Py_SourceLocation fb_loc;
+    _PyJumpTargetLabel fb_exit;
+    void *fb_datum;
+} _PyCompile_FBlockInfo;
+```
+
+`fb_type` distinguishes the seven flavours. `fb_block` is the
+label the cleanup jumps back to; `fb_exit` is the post-cleanup
+label.
+
+## Instruction sequence
+
+The codegen pass appends instructions to the unit's
+`instr_sequence`:
+
+```c
+/* Include/internal/pycore_instruction_sequence.h _PyInstruction */
+typedef struct {
+    int i_opcode;
+    int i_oparg;
+    _Py_SourceLocation i_loc;
+} _PyInstruction;
+```
+
+The sequence is a growable array. Labels are encoded as synthetic
+instructions; the flowgraph pass turns the sequence into a graph
+where labels become block boundaries.
+
+## Flowgraph
+
+After codegen, `_PyCfg_FromInstructionSequence` slices the
+instruction sequence into basic blocks:
+
+```c
+/* Include/internal/pycore_flowgraph.h basicblock */
+typedef struct _PyCfgBasicblock {
+    cfg_instr *b_instr;
+    int b_iused, b_ialloc;
+    struct _PyCfgBasicblock *b_next;        /* fallthrough successor */
+    _PyJumpTargetLabel b_label;
+    struct _PyCfgExceptStack *b_exceptstack;
+    uint64_t b_unsafe_locals_mask;
+    int b_startdepth;
+    unsigned b_cold : 1;
+    unsigned b_visited : 1;
+    unsigned b_preserve_lasti : 1;
+} basicblock;
+```
+
+`b_cold` is set for blocks that are exception handlers or
+otherwise off the hot path; the optimiser moves cold blocks to
+the end of the linearisation so the hot path stays dense.
+
+`_PyCfg_OptimizeCodeUnit` (`Python/flowgraph.c:3659`) runs the
+sequence of passes:
+
+```c
+/* Python/flowgraph.c:3659 _PyCfg_OptimizeCodeUnit */
+1. mark_except_handlers              /* tag handler-target blocks */
+2. translate_jump_labels_to_targets  /* labels -> basicblock pointers */
+3. optimize_cfg                      /* constant folding, dead-block removal */
+4. remove_unused_consts              /* shrink the const table */
+5. insert uninitialized-var checks   /* CHECK_UNBOUND, etc. */
+6. insert_superinstructions          /* RETURN_CONST and friends */
+7. push_cold_blocks_to_end           /* hot path density */
+8. resolve_lineno                    /* PEP 626 location fixup */
+```
+
+The optimisation passes are local and conservative. CPython does
+not perform escape analysis, alias analysis, or inlining at this
+layer; it leaves those to the [optimizer](optimizer) (Tier 2). The
+flowgraph optimisation is about killing dead blocks, simplifying
+jump chains, and fusing common opcode pairs into
+super-instructions.
+
+### Super-instructions
+
+A handful of common pseudo-op pairs collapse into a single opcode:
+
+| Before                    | After             |
+| ------------------------- | ----------------- |
+| `LOAD_CONST None RETURN_VALUE` | `RETURN_CONST None` |
+| `LOAD_FAST a LOAD_FAST b` | `LOAD_FAST_LOAD_FAST a, b` |
+| `LOAD_FAST a STORE_FAST b`| `STORE_FAST_LOAD_FAST a, b` |
+
+The fused opcode is one bytecode instruction with two arguments
+packed into the oparg. Each saved dispatch is a real win in the
+eval loop because instruction dispatch is the dominant cost for
+short opcodes.
+
+### Stack depth
+
+The flowgraph pass computes the maximum stack depth at any point
+in the function, walking each block and propagating the depth to
+its successors. The result is written to `co_stacksize` and
+determines how much space the eval loop must allocate for the
+frame.
+
+## Assembly
+
+Once the CFG is optimised, `_PyCfg_OptimizedCfgToInstructionSequence`
+linearises it back into a flat sequence, and
+`_PyAssemble_MakeCodeObject` produces the final
+`PyCodeObject`:
+
+```c
+/* Python/assemble.c:50 assembler */
+struct assembler {
+    PyObject *a_bytecode;
+    PyObject *a_linetable;
+    PyObject *a_except_table;
+    int a_offset;
+    int a_location_off;
+};
+```
+
+The assembler walks the linearised instructions and, for each one,
+emits two bytes into `a_bytecode` (opcode and oparg), one or more
+location-table entries into `a_linetable`, and zero or more
+exception-table entries into `a_except_table`.
+
+### Encoding rules
+
+* Each instruction is a 2-byte code unit: 8-bit opcode, 8-bit
+  oparg.
+* An oparg `>= 256` requires one or more `EXTENDED_ARG`
+  predecessor instructions, each holding the next 8 bits.
+* Cache slots reserved by an instruction (inline caches for
+  specialisation, see [specializer](specializer)) take up
+  additional 2-byte code units immediately after the instruction;
+  the eval loop knows to skip them.
+
+### The location table (PEP 626)
+
+The location table is a variable-length encoding of
+`(lineno, end_lineno, col_offset, end_col_offset)` per instruction.
+The format uses a small set of tags (`SHORT_FORM`, `ONE_LINE_FORM`,
+`LONG_FORM`, `NO_COLUMNS`, `NO_LOCATION`) chosen to minimise size
+while supporting precise tracebacks. The encoding is described in
+`Objects/locations.md` in the CPython tree.
+
+```c
+/* Python/assemble.c write_location_info_entry */
+static int
+write_location_info_entry(struct assembler *a, struct location loc, int isize);
+```
+
+Each entry covers `isize` code units. Decoding walks the table
+forward in lockstep with the bytecode.
+
+### The exception table (PEP 657)
+
+The exception table maps bytecode-offset ranges to handler-offset,
+stack-depth, and the `lasti` flag (which controls whether the
+handler receives the offset of the throwing instruction). The
+encoding is a sequence of variable-length records:
+
+```c
+/* Python/assemble.c:158 assemble_exception_table */
+static int
+assemble_exception_table(struct assembler *a, basicblock *entryblock);
+```
+
+Each record: start offset, end offset, target offset, depth (with
+the `lasti` flag in the low bit). All four are variable-length
+integers; the table is small even for functions with many
+handlers.
+
+### Final code object
+
+`makecode` (`Python/assemble.c`) builds the `PyCodeObject` and
+fills in:
+
+```
+co_code           bytecode bytes
+co_consts         tuple of constants
+co_names          tuple of name strings
+co_varnames       tuple of local names
+co_cellvars       tuple of cell variable names
+co_freevars       tuple of free variable names
+co_linetable      location table (PEP 626 / PEP 657)
+co_exceptiontable exception table (PEP 657)
+co_firstlineno    first lineno of the function definition
+co_argcount, co_posonlyargcount, co_kwonlyargcount
+co_stacksize
+co_flags          CO_* flags: generator, coroutine, varargs, ...
+co_qualname
+```
+
+The result is what the eval loop consumes. See [vm](vm) for what
+happens next.
+
+## CPython 3.14 changes
+
+* **PEP 626 plumbing.** The location table format has been the
+  default since 3.11. 3.14 sharpens its handling of compiler-
+  generated jumps (the `duplicate_exits_without_lineno` pass).
+* **PEP 695 type parameters.** Generic functions, classes, and
+  type aliases introduce extra scopes that the compiler walks
+  before the body, emitting code to construct the type parameter
+  objects at runtime.
+* **PEP 649 deferred annotations.** The compiler buffers
+  annotation expressions in `u_deferred_annotations` rather than
+  emitting them inline. The annotations are compiled into an
+  `__annotate__` function that the class or module exposes
+  lazily.
+* **Per-thread bytecode (PEP 703 build).** In the free-threaded
+  build, each thread keeps its own copy of the bytecode so that
+  specialisation does not contend across threads. The assembler
+  emits the same bytecode; the thread-local copies are made at
+  load time.
+
+## PEP touchpoints
+
+* **PEP 339.** Design of the CPython compiler.
+* **PEP 626.** Precise line numbers for debugging.
+* **PEP 657.** Fine-grained error locations in tracebacks.
+* **PEP 649.** Deferred evaluation of annotations using
+  descriptors.
+* **PEP 695.** Type parameter syntax.
+
+## Reference
+
+* `Python/compile.c`, `Python/codegen.c`,
+  `Python/instruction_sequence.c`, `Python/flowgraph.c`,
+  `Python/assemble.c`.
+* `Include/internal/pycore_compile.h`,
+  `Include/internal/pycore_flowgraph.h`,
+  `Include/internal/pycore_instruction_sequence.h`.
+* `Objects/locations.md`. The location-table encoding.
+* PEP 339, PEP 626, PEP 657, PEP 649, PEP 695.

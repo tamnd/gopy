@@ -1,149 +1,264 @@
 ---
 title: AST
-description: How the Python abstract syntax tree is defined, generated, validated, and walked.
+description: ASDL, the generated node types, validation, and the AST preprocess pass.
 ---
 
 # AST
 
-The Abstract Syntax Tree is the data structure the parser emits
-and the compiler consumes. It is defined formally in
-`Parser/Python.asdl` and generated into a set of C structs.
+The AST is the bridge between the parser and the compiler. The
+parser builds it; the validator rejects shapes the grammar accepts
+but the language does not; the preprocess pass folds constants and
+rewrites annotations; the compiler walks it to emit code. The
+shape of every node is described once, in
+`Parser/Python.asdl`, and a build-time tool generates the C
+declarations, constructors, and node visitors.
 
-## Source map
+## Where the code lives
 
-| File                              | Role                                              |
-| --------------------------------- | ------------------------------------------------- |
-| `Parser/Python.asdl`              | The grammar of the AST.                           |
-| `Parser/asdl_c.py`                | Generator that emits the C struct definitions.    |
-| `Include/internal/pycore_ast.h`   | The generated header. Defines `mod_ty`, `stmt_ty`, `expr_ty`, etc. |
-| `Python/Python-ast.c`             | Generated C: constructors, the `_ast` module.     |
-| `Python/ast.c`                    | The hand-written validator.                       |
-| `Python/ast_unparse.c`            | The unparser used for annotation string forms.    |
+| File                                | Role                                                                | Entry points                              |
+| ----------------------------------- | ------------------------------------------------------------------- | ----------------------------------------- |
+| `Parser/Python.asdl`                | The AST grammar (Abstract Syntax Definition Language).              | (input)                                   |
+| `Parser/asdl_c.py`                  | The ASDL-to-C generator. Run by `make regen-ast`.                   | `make regen-ast`                          |
+| `Include/internal/pycore_ast.h`     | Generated: typedefs and constructor declarations.                   | `mod_ty`, `stmt_ty`, `expr_ty`            |
+| `Python/Python-ast.c`               | Generated: constructor bodies, repr, copy-into-Python helpers.      | `_PyAST_Module`, `_PyAST_FunctionDef`, ... |
+| `Python/ast.c`                      | AST validation: rejects malformed shapes.                           | `_PyAST_Validate`                         |
+| `Python/ast_preprocess.c`           | Constant folding and PEP 649 annotation rewrites.                   | `_PyAST_Preprocess`                       |
+| `Python/pyarena.c`                  | The arena allocator that owns AST nodes.                            | `_PyArena_New`, `_PyArena_Malloc`         |
 
-## ASDL
+## The ASDL grammar
 
-The Zephyr Abstract Syntax Description Language (ASDL) is a tiny
-DSL for describing trees. `Python.asdl` looks like this:
+ASDL is a small DSL for describing recursive sum-of-product types.
+The Python AST is described in roughly 200 lines of `Python.asdl`
+that look like this:
 
-```text
-module Python
-{
+```asdl
+module Python {
     mod = Module(stmt* body, type_ignore* type_ignores)
         | Interactive(stmt* body)
         | Expression(expr body)
         | FunctionType(expr* argtypes, expr returns)
 
-    stmt = FunctionDef(identifier name, arguments args, stmt* body,
-                       expr* decorator_list, expr? returns, ...)
-         | AsyncFunctionDef(...)
-         | ClassDef(...)
+    stmt = FunctionDef(identifier name, arguments args,
+                       stmt* body, expr* decorator_list,
+                       expr? returns, string? type_comment,
+                       type_param* type_params)
+         | ClassDef(identifier name, expr* bases, keyword* keywords,
+                    stmt* body, expr* decorator_list, type_param* type_params)
          | Return(expr? value)
-         ...
-
-    expr = BoolOp(boolop op, expr* values)
-         | NamedExpr(expr target, expr value)
-         | BinOp(expr left, operator op, expr right)
-         | UnaryOp(unaryop op, expr operand)
-         | Lambda(arguments args, expr body)
-         ...
+         | ...
+        attributes (int lineno, int col_offset,
+                    int? end_lineno, int? end_col_offset)
 }
 ```
 
-The shapes mean:
+The asdl declarations name the *constructors* (each `|`
+alternative) and their fields. The `*` suffix is "zero or more"
+(generated as a `asdl_*_seq`), `?` is "zero or one" (generated as
+a pointer that may be NULL). The `attributes` clause adds fields
+to every constructor of the sum.
 
-* `T*` is a sequence of `T`.
-* `T?` is an optional `T`.
-* `field` is required.
+## The generated types
 
-Tagged unions (`mod`, `stmt`, `expr`) are sum types: a `stmt_ty`
-holds one of `FunctionDef`, `AsyncFunctionDef`, `ClassDef`, and
-so on. Each constructor has its own struct of fields. The
-generated C representation uses a discriminator field plus a union
-of payload structs.
-
-## Generated representation
-
-`pycore_ast.h` exposes typedefs like `mod_ty`, `stmt_ty`, `expr_ty`,
-each a pointer to a C struct with a `kind` field and a `v` union.
+`Parser/asdl_c.py` emits a discriminated union for each ASDL sum:
 
 ```c
+/* Include/internal/pycore_ast.h (generated): stmt_ty */
 struct _stmt {
     enum _stmt_kind kind;
     union {
-        struct { identifier name; arguments_ty args;
-                 asdl_stmt_seq *body;
-                 asdl_expr_seq *decorator_list;
-                 expr_ty returns;
-                 string type_comment;
-                 asdl_type_param_seq *type_params;
+        struct {
+            identifier name;
+            arguments_ty args;
+            asdl_stmt_seq *body;
+            asdl_expr_seq *decorator_list;
+            expr_ty returns;
+            string type_comment;
+            asdl_type_param_seq *type_params;
         } FunctionDef;
-        // ...
+        struct { /* ClassDef fields */ } ClassDef;
+        /* ... */
     } v;
     int lineno;
     int col_offset;
     int end_lineno;
     int end_col_offset;
 };
+typedef struct _stmt *stmt_ty;
 ```
 
-The four location fields carry the PEP 657 source location of the
-node. They flow downstream into `co_linetable` so tracebacks point
-to columns.
+Every constructor has a matching factory:
 
-## Constructors
+```c
+/* Python/Python-ast.c (generated): _PyAST_FunctionDef */
+stmt_ty _PyAST_FunctionDef(identifier name, arguments_ty args,
+                           asdl_stmt_seq *body, asdl_expr_seq *decorator_list,
+                           expr_ty returns, string type_comment,
+                           asdl_type_param_seq *type_params,
+                           int lineno, int col_offset,
+                           int end_lineno, int end_col_offset,
+                           PyArena *arena);
+```
 
-`Python-ast.c` exposes `_PyAST_FunctionDef`, `_PyAST_ClassDef`, etc.,
-one per constructor. Each takes the field values plus a `PyArena *`
-and returns a freshly allocated `*_ty`. The parser actions call
-these. The constructors do not validate the input.
+The factory allocates a `stmt_ty` from the arena, sets `kind` to
+`FunctionDef_kind`, fills in `v.FunctionDef`, and copies the four
+location fields. The factory is what the parser's grammar actions
+call.
 
-## Validation
+## Source locations
 
-`PyAST_Validate` in `Python/ast.c` is the second pass. It walks
-the tree and rejects shapes that the grammar accepts but the
-language disallows:
+Every node carries a *location quadruple*: the start line and
+column, plus the end line and column (PEP 626). The end location
+is what `traceback` uses for PEP 657 fine-grained error squiggles.
+Locations are stored as plain `int` fields; the parser fills them
+from the corresponding `Token` ranges, and the compiler threads
+them through to the location table on the final code object.
 
-* Augmented assignment with non-`Name` / `Attribute` / `Subscript`
-  targets.
-* `yield` / `yield from` / `await` outside the right scope.
-* Starred expressions outside assignment targets and unpacking.
-* `del` of a literal or call.
-* Bad `args` shape (default after a non-default in positional-only
-  args, for example).
-* Invalid decorator expressions on a pattern with parens.
+The column fields are *byte* offsets, not character offsets. This
+matters for tooling that consumes them: a column of 4 in a line
+that begins with a 2-byte UTF-8 character is two characters in,
+not four.
 
-If validation fails, a `SyntaxError` is raised with the offending
-node's location.
+## The arena
+
+AST nodes never live in the refcounted heap. They are allocated
+from a `PyArena`, a bump-allocator that lives for the duration of
+compilation:
+
+```c
+/* Python/pyarena.c */
+PyArena *_PyArena_New(void);
+void _PyArena_Free(PyArena *arena);
+void *_PyArena_Malloc(PyArena *arena, size_t size);
+int _PyArena_AddPyObject(PyArena *arena, PyObject *obj);
+```
+
+`_PyArena_AddPyObject` is the bridge for the few `PyObject *`
+values that live inside AST nodes (identifiers, strings, byte
+literals). The arena owns a reference; on free, the reference is
+released. The arena thus subsumes both raw memory and the
+refcounts of any objects it pins.
+
+The arena is the load-bearing reason CPython's parser can ignore
+refcount discipline: the alternative would be `Py_INCREF` /
+`Py_DECREF` for every node, every list, every literal, with the
+matching cleanup on every error path.
+
+## AST validation
+
+The parser produces ASTs the grammar accepts. The validator
+rejects ASTs that the language does not.
+
+```c
+/* Python/ast.c _PyAST_Validate */
+int _PyAST_Validate(mod_ty mod);
+```
+
+Examples of validator-only checks:
+
+- `await` outside `async def` (when the function is not flagged
+  `async`).
+- Starred expressions in invalid positions (the grammar allows
+  `*x` in many contexts that the language forbids).
+- `yield` in the top-level expression of a module.
+- Augmented assignment with a tuple, list, or starred target.
+- Duplicate keyword arguments in a call.
+
+Validation is a single pass; on failure it raises `SyntaxError`
+with the offending node's location.
+
+## The preprocess pass
+
+The validated AST passes through one more stage before codegen:
+
+```c
+/* Python/ast_preprocess.c:971 _PyAST_Preprocess */
+int _PyAST_Preprocess(mod_ty mod, PyArena *arena,
+                      PyObject *filename, int optimize, int features);
+```
+
+`_PyAST_Preprocess` runs three rewrites:
+
+* **Constant folding.** `1 + 2` becomes `Constant(3)`. The fold
+  runs on every binary operator, unary operator, subscript, and
+  conditional expression where every operand is a `Constant`.
+* **Deferred annotation rewriting.** With
+  `from __future__ import annotations` or PEP 649 active,
+  annotations are wrapped or stringified rather than evaluated at
+  function-definition time.
+* **PEP 765 control-flow warnings.** A `return` or `break` in a
+  `finally` block triggers a `SyntaxWarning` at compile time.
+
+The preprocess pass rewrites the AST in place; nodes can be
+replaced because the arena owns all of them.
 
 ## Walking the AST
 
-The compiler walks the tree explicitly. There is no visitor object
-in the C side: the codegen pass switches on `stmt->kind` /
-`expr->kind` and recurses. The Python side (`ast.NodeVisitor`) is
-implemented in `Lib/ast.py` for user code.
+The compiler walks the AST top-down once per scope. The walk uses
+visitor macros defined in `Python/codegen.c`:
 
-The `_ast` module exposes the AST to Python by allocating Python
-objects that mirror the C structs. Each `*_ty` becomes a Python
-class derived from `_ast.AST`.
+```c
+#define VISIT(C, TYPE, V) \
+    do { if (compiler_visit_ ## TYPE((C), (V)) == ERROR) return ERROR; } while (0)
+```
 
-## `ast.literal_eval`
+Generic visitors (`compiler_visit_stmt`, `compiler_visit_expr`)
+dispatch on `kind` and call the per-constructor visitor
+(`compiler_function`, `compiler_call`, ...). The visitor for each
+constructor reads the fields of `v.<Constructor>` and emits the
+corresponding pseudo-instructions. See [compile](compile) for the
+emit side.
 
-A safe expression evaluator. It accepts only `Constant`, `Tuple`,
-`List`, `Dict`, `Set`, `Name` (for `True`, `False`, `None`),
-`UnaryOp` (`UAdd`, `USub`), `BinOp` (numeric `+` / `-` for
-complex), and `Call(_PyAST_Constant(...))` of the special
-`set`/`frozenset`/`bytes` constructors. Anything else raises
-`ValueError`.
+## ASDL sequences
 
-## Unparsing
+`asdl_*_seq` is a small flat array type generated for each ASDL
+sum that is mentioned with `*` in the grammar:
 
-`ast.unparse` (Python) and `_PyAST_ExprAsUnicode` (C) round-trip
-an AST back into source. The C unparser is restricted to expression
-nodes and is used for annotation deferral and for the `repr` of
-unevaluated expressions.
+```c
+typedef struct {
+    Py_ssize_t size;
+    void *elements[1];
+} asdl_seq;
 
-## Reading order
+typedef struct {
+    Py_ssize_t size;
+    stmt_ty typed_elements[1];
+} asdl_stmt_seq;
+```
 
-The compiler ([Compiler](compiler)) takes the validated AST as
-input. The symbol table ([Symtable](symtable)) builds a parallel
-view of the same tree.
+The macros `asdl_seq_LEN`, `asdl_seq_GET`, `asdl_seq_SET` are the
+read/write API. Sequences are arena-allocated like nodes.
+
+## CPython 3.14 additions
+
+* **`TemplateStr` and `Interpolation` nodes.** Added for PEP 750
+  t-strings. The shape mirrors `JoinedStr` / `FormattedValue` but
+  carries the template machinery information through to codegen.
+* **`type_param` nodes for PEP 695.** `TypeVar`, `TypeVarTuple`,
+  and `ParamSpec` constructors live in the `type_param` sum and
+  appear on `FunctionDef`, `ClassDef`, and `TypeAlias`.
+* **`TypeAlias` statement.** The new `type X = Y` syntax produces
+  a `TypeAlias(name, type_params, value)` node.
+* **PEP 649 deferred annotations.** The preprocess pass now wraps
+  annotations into `__annotate__` functions instead of inlining
+  them; the AST shape is unchanged but the emitted code is
+  different.
+
+## PEP touchpoints
+
+* **PEP 484, 526, 591, 695.** Annotations and type parameters.
+* **PEP 617.** The PEG parser produces the AST shape consumed by
+  the rest of the pipeline.
+* **PEP 626.** Source locations are stored on every node.
+* **PEP 649.** Deferred annotation evaluation.
+* **PEP 657.** End line and end column locations.
+* **PEP 750.** Template strings.
+
+## Reference
+
+* `Parser/Python.asdl`, `Parser/asdl_c.py`,
+  `Include/internal/pycore_ast.h`,
+  `Python/Python-ast.c`, `Python/ast.c`,
+  `Python/ast_preprocess.c`, `Python/pyarena.c`.
+* Wang, D. C. *et al.* *The Zephyr Abstract Syntax Description
+  Language*. (The ASDL CPython uses descends from Zephyr ASDL.)
+* PEP 339. Design of the CPython compiler.

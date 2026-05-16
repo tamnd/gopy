@@ -1,114 +1,193 @@
 ---
-title: Pipeline overview
-description: How CPython turns a .py file into a callable PyCodeObject, end to end.
+title: Pipeline
+description: The end-to-end path from .py source to a PyCodeObject. Tokenize, parse, validate, build the symbol table, codegen, optimise, assemble.
 ---
 
-# Pipeline overview
+# Pipeline
 
-The compile pipeline takes a `.py` file and produces a
-`PyCodeObject`. The `PyCodeObject` is a callable container of
-bytecode that the eval loop runs.
+The compile pipeline turns a `.py` source file into a
+`PyCodeObject` and hands the result to the eval loop. The pipeline
+is five stages: tokenize, parse, build a symbol table, generate
+intermediate code, and assemble. Each stage has its own page in
+this group; this page is the high-level map a reader uses to find
+the right one.
 
-Five stages run in order. Each stage has its own page in the
-sidebar; this page is the high-level map.
+The interpreter never sees the source text directly. The eval loop
+walks `co_code` (a bytes object holding 16-bit code units) and
+consults `co_consts`, `co_names`, `co_varnames`, the exception
+table, and the location table. Everything in the pipeline exists
+to fill those fields.
 
-```
-source bytes
-   │
-   ▼ Parser/tokenizer.c, Parser/parser.c
-tokens, then AST
-   │
-   ▼ Python/ast.c
-validated AST
-   │
-   ▼ Python/symtable.c
-symbol table
-   │
-   ▼ Python/compile.c
-intermediate "instruction sequence" per scope
-   │
-   ▼ Python/flowgraph.c
-control-flow graph, optimised
-   │
-   ▼ Python/assemble.c
-PyCodeObject
-```
+## Where the code lives
 
-## Entry points
+| File                                   | Role                                                                 | Entry points                                                              |
+| -------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `Parser/lexer/lexer.c`, `lexer/state.h` | Tokenizer: byte stream to `Token` stream.                            | `_PyTokenizer_Get`, `tok_get`, `tok_get_normal_mode`, `tok_get_fstring_mode` |
+| `Parser/parser.c` (generated)          | PEG parser: tokens to `mod_ty` AST.                                  | `_PyParser_ASTFromString`, `_PyParser_ASTFromFile`                        |
+| `Python/Python-ast.c` (generated)      | AST node constructors. Generated from `Parser/Python.asdl`.          | `_PyAST_Module`, `_PyAST_FunctionDef`, ...                                |
+| `Python/ast.c`                         | AST validation. Rejects shapes the grammar allows but the language doesn't. | `_PyAST_Validate`                                                |
+| `Python/ast_preprocess.c`              | Constant folding and PEP 649 annotation rewrites on the AST.         | `_PyAST_Preprocess`                                                       |
+| `Python/symtable.c`                    | Two-pass symbol table: collect, then analyse.                        | `_PySymtable_Build`, `symtable_analyze`                                   |
+| `Python/compile.c`                     | The compiler driver. Owns the per-scope unit and the const cache.    | `_PyAST_Compile`, `compile_mod`, `compile_unit`                           |
+| `Python/codegen.c`                     | AST-to-pseudo-instruction walk. Macros for `ADDOP*`.                 | `_PyCodegen_Module`, `_PyCodegen_Expression`, `compiler_visit_stmt`       |
+| `Python/instruction_sequence.c`        | The growable array of pseudo-instructions per scope.                 | `_PyInstructionSequence_Addop`, `_PyInstructionSequence_UseLabel`         |
+| `Python/flowgraph.c`                   | Control-flow graph passes: jump threading, dead-block removal, stack-depth analysis. | `_PyCfg_FromInstructionSequence`, `_PyCfg_OptimizeCodeUnit`        |
+| `Python/assemble.c`                    | Linearise the CFG, emit `co_code`, the location table, the exception table. | `_PyAssemble_MakeCodeObject`                                         |
 
-The compiler is reached from three entry points. They all converge
-on `_PyAST_Compile`.
-
-| Function                          | Where called from                          |
-| --------------------------------- | ------------------------------------------ |
-| `Py_CompileStringFlags`           | The public C API.                          |
-| `PyRun_FileExFlags`               | `python file.py`.                          |
-| `builtin_compile`                 | `compile(...)` in Python.                  |
-
-All three call `_PyAST_Compile` in `Python/compile.c`, which is the
-canonical entry point.
+The pipeline is driven from a single function:
 
 ```c
-// Python/compile.c
+/* Python/compile.c:1478 _PyAST_Compile */
 PyCodeObject *
 _PyAST_Compile(mod_ty mod, PyObject *filename, PyCompilerFlags *flags,
                int optimize, PyArena *arena);
 ```
 
+Three public entry points converge on this function:
+`Py_CompileStringFlags` (`Python/pythonrun.c:1719`) for the C API;
+`PyRun_FileExFlags` (`Python/pythonrun.c:1306`) for `python file.py`;
+`builtin_compile` (`Python/bltinmodule.c:771`) for `compile()` at
+the Python level.
+
 ## What each stage produces
 
-### 1. Parse
+```
+source bytes
+   |
+   v  Parser/lexer/lexer.c  _PyTokenizer_Get
+Token *tokens
+   |
+   v  Parser/parser.c       _PyParser_ASTFromString
+mod_ty ast
+   |
+   v  Python/ast.c          _PyAST_Validate
+   v  Python/ast_preprocess.c _PyAST_Preprocess
+mod_ty (validated, folded)
+   |
+   v  Python/symtable.c     _PySymtable_Build
+struct symtable *st
+   |
+   v  Python/compile.c      compile_unit
+   v  Python/codegen.c      _PyCodegen_Module
+instr_sequence per scope
+   |
+   v  Python/flowgraph.c    _PyCfg_FromInstructionSequence
+   v                        _PyCfg_OptimizeCodeUnit
+cfg_builder (optimised)
+   |
+   v  Python/assemble.c     _PyAssemble_MakeCodeObject
+PyCodeObject *
+```
 
-The tokenizer in `Parser/tokenizer.c` turns source bytes into a
-stream of `Token` structs. The parser in `Parser/parser.c`
-consumes the token stream and produces a `mod_ty` AST. The AST is
-defined by `Parser/Python.asdl` and generated into
-`Include/internal/pycore_ast.h`.
+Each stage owns its data structure. The tokenizer owns
+`struct tok_state`; the parser owns `struct Parser`; the AST is a
+forest of `mod_ty`, `stmt_ty`, `expr_ty` nodes allocated in the
+shared `PyArena`; the symbol table owns `struct symtable` and a
+tree of `PySTEntryObject`; the compiler owns `compiler` and a
+stack of `struct compiler_unit`. Every allocation that does not
+end up on the final code object lives in the arena and is freed
+when compilation returns.
 
-### 2. AST validate
+## The arena
 
-`PyAST_Validate` in `Python/ast.c` walks the tree and rejects
-malformed shapes that the grammar accepts but the language
-disallows. Things like augmented assignment to a literal, `await`
-outside `async def`, and starred expressions in invalid positions.
+`Python/pyarena.c` provides `PyArena`, a bump-allocator used for
+the AST, intermediate strings, the symbol table, and the
+instruction sequences. The arena is one of the load-bearing
+shortcuts in CPython: it lets the compiler skip per-node refcount
+discipline and instead free everything in a single sweep at the
+end. The arena is passed through every entry point that needs to
+build AST nodes.
 
-### 3. Symbol table
+```c
+/* Include/internal/pycore_pyarena.h */
+PyArena *_PyArena_New(void);
+void _PyArena_Free(PyArena *arena);
+void *_PyArena_Malloc(PyArena *arena, size_t size);
+int _PyArena_AddPyObject(PyArena *arena, PyObject *obj);
+```
 
-`PySymtable_Build` in `Python/symtable.c` walks the AST and builds
-a tree of scopes. Each scope records every name it sees and
-classifies the name as local, free, cell, global, or implicit
-global. The compiler relies on this for every name-handling opcode
-choice.
+`_PyArena_AddPyObject` registers a `PyObject *` whose lifetime
+should match the arena; the arena holds a reference and drops it
+on free. This is how strings interned during parsing stay alive
+through compilation.
 
-### 4. Codegen
+## The compiler unit
 
-`compiler_codegen` in `Python/compile.c` walks the AST top-down
-once per scope. For each statement and expression form, the
-compiler emits a sequence of pseudo-instructions into the current
-"instruction sequence". A nested scope produces a nested
-sequence; the outer sequence references it through a constant
-that holds the inner code object.
+Each lexical scope (module, function, class, lambda, comprehension,
+PEP 695 type-parameter scope) compiles into a separate
+`PyCodeObject`. The compiler maintains a stack of `compiler_unit`
+structs to track the nested scopes:
 
-### 5. Flow graph
+```c
+/* Python/compile.c:55 compiler_unit */
+struct compiler_unit {
+    PySTEntryObject *u_ste;
+    int u_scope_type;                       /* COMPILE_SCOPE_MODULE, ... */
+    instr_sequence *u_instr_sequence;
+    _PyCompile_CodeUnitMetadata u_metadata; /* name, consts, vars */
+    PyObject *u_deferred_annotations;       /* PEP 649 */
+    int u_nfblocks;
+};
+```
 
-After codegen, the instruction sequence is broken into basic
-blocks in `Python/flowgraph.c`. The block graph runs several
-passes: jump threading, constant folding, dead-block removal,
-stack-depth analysis, exception-table construction.
+When the compiler enters a nested scope (a function body, say) it
+pushes a fresh `compiler_unit`, walks the body, assembles the
+inner `PyCodeObject`, then pops back and emits a `LOAD_CONST` of
+the inner code object in the outer unit's instruction sequence.
 
-### 6. Assemble
+## Pseudo-ops, real ops, the CFG
 
-`assemble` in `Python/assemble.c` linearises the block graph,
-resolves jump targets to byte offsets, encodes the exception table
-(PEP 657 column locations), packs the constant / name / variable
-pools, and emits a `PyCodeObject`.
+The codegen stage emits *pseudo-instructions* into the unit's
+`instr_sequence`. Pseudo-ops are real opcodes plus synthetic ones
+that the assembler resolves later: jump labels (not yet bound to
+offsets), inserted `EXTENDED_ARG` placeholders, and PEP 626
+location anchors. The flowgraph stage breaks the pseudo-op
+sequence into basic blocks and runs the optimisation passes. The
+assembler walks the optimised CFG, resolves labels to offsets,
+encodes the location and exception tables, and produces the
+bytecode bytes that go into `co_code`.
+
+The pseudo-op encoding is the same as the real one
+(`_PyInstruction` with an opcode and oparg), so a single
+representation walks every pass.
+
+## PEP touchpoints
+
+* **PEP 617.** A PEG parser replaced the LL(1) parser in 3.9. The
+  parser lives in `Parser/parser.c`, generated from
+  `Parser/Python.gram` by `Tools/peg_generator/`. See
+  [parser](parser).
+* **PEP 626.** Every reachable instruction carries a source
+  location. The location table is emitted in
+  `Python/assemble.c`. See [compile](compile).
+* **PEP 657.** The exception table maps bytecode ranges to
+  handlers, with stack depth and the `lasti` flag. Encoded in
+  `Python/assemble.c assemble_exception_table`. See
+  [compile](compile).
+* **PEP 695.** Generic type parameters introduce
+  `TypeParametersBlock` symbol-table scopes. See
+  [symtable](symtable).
+* **PEP 649.** Deferred annotations defer evaluation until
+  `__annotate__()` is called. The compiler buffers annotation
+  expressions in `u_deferred_annotations`. See [compile](compile).
 
 ## Reading order
 
-Read [Parser](parser) for stage 1, [AST](ast) for stage 2,
-[Symtable](symtable) for stage 3, [Compiler](compiler) for stage 4,
-[Flowgraph](flowgraph) for stage 5, and [Assembler](assembler) for
-stage 6.
+Read [parser](parser) for stage 1, [ast](ast) for stage 2,
+[symtable](symtable) for stage 3, [compile](compile) for stages 4
+through 6 (the codegen, the CFG passes, and the assembler all live
+together in modern CPython and are easier to learn as one unit).
+The output, a `PyCodeObject`, is the input to the
+[vm](vm).
 
-The output of stage 6, the `PyCodeObject`, is the input to the
-[VM](vm).
+## Reference
+
+* `Parser/lexer/lexer.c`, `Parser/parser.c`,
+  `Python/compile.c`, `Python/codegen.c`,
+  `Python/symtable.c`, `Python/flowgraph.c`,
+  `Python/assemble.c`.
+* PEP 617. New PEG parser for CPython.
+* PEP 626. Precise line numbers for debugging and other tools.
+* PEP 657. Including fine-grained error locations in tracebacks.
+* PEP 695. Type parameter syntax.
+* PEP 649. Deferred evaluation of annotations using descriptors.
