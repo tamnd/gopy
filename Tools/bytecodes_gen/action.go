@@ -1025,6 +1025,63 @@ func (p *exprParser) parsePrimary() (string, error) {
 		}
 		return "", fmt.Errorf("_Py_STR: unsupported singleton %q", arg)
 	}
+	// _PyIntrinsics_UnaryFunctions / _PyIntrinsics_BinaryFunctions: dispatch
+	// tables of function pointers indexed by oparg. The opcode bodies
+	// consume them as `_PyIntrinsics_UnaryFunctions[oparg].func(tstate, x)`
+	// and `_PyIntrinsics_BinaryFunctions[oparg].func(tstate, v2, v1)`. Both
+	// route through dedicated evalState helpers that own the actual
+	// dispatch via the intrinsics package tables.
+	//
+	// CPython: Python/intrinsics.c _PyIntrinsics_UnaryFunctions /
+	// _PyIntrinsics_BinaryFunctions
+	if tk == "_PyIntrinsics_UnaryFunctions" || tk == "_PyIntrinsics_BinaryFunctions" {
+		// Expect `[<idx>].func(tstate, arg [, arg])`.
+		if p.pos >= len(p.toks) || p.toks[p.pos] != "[" {
+			return "", fmt.Errorf("%s: expected '['", tk)
+		}
+		p.pos++
+		idx, err := p.parseExpr(0)
+		if err != nil {
+			return "", err
+		}
+		if p.pos+4 >= len(p.toks) || p.toks[p.pos] != "]" || p.toks[p.pos+1] != "." || p.toks[p.pos+2] != "func" || p.toks[p.pos+3] != "(" {
+			return "", fmt.Errorf("%s: expected '].func('", tk)
+		}
+		p.pos += 4
+		// First arg is `tstate`; the helper carries it implicitly via e.ts.
+		if p.pos < len(p.toks) && p.toks[p.pos] == "tstate" {
+			p.pos++
+			if p.pos < len(p.toks) && p.toks[p.pos] == "," {
+				p.pos++
+			}
+		}
+		var args []string
+		for {
+			if p.pos < len(p.toks) && p.toks[p.pos] == ")" {
+				p.pos++
+				break
+			}
+			a, err := p.parseExpr(0)
+			if err != nil {
+				return "", err
+			}
+			args = append(args, a)
+			if p.pos < len(p.toks) && p.toks[p.pos] == "," {
+				p.pos++
+				continue
+			}
+			if p.pos < len(p.toks) && p.toks[p.pos] == ")" {
+				p.pos++
+				break
+			}
+			return "", fmt.Errorf("%s: expected ',' or ')'", tk)
+		}
+		helper := "e.callIntrinsic1"
+		if tk == "_PyIntrinsics_BinaryFunctions" {
+			helper = "e.callIntrinsic2"
+		}
+		return fmt.Sprintf("%s(%s, %s)", helper, idx, strings.Join(args, ", ")), nil
+	}
 	// CPython's small-int singleton table. Used by LOAD_SMALL_INT as
 	// `(PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + oparg]`.
 	// Render the subscript as objects.SmallInt(offset).

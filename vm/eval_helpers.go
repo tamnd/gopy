@@ -724,6 +724,45 @@ func storeSlice(container, start, stop, value objects.Object) error {
 	return nil
 }
 
+// callIntrinsic1 dispatches `_PyIntrinsics_UnaryFunctions[oparg].func(tstate, x)`.
+// On error returns nil with pendingErr set; the translator's
+// ERROR_IF(res == NULL) pattern picks that up.
+//
+// CPython: Python/bytecodes.c CALL_INTRINSIC_1
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) callIntrinsic1(oparg uint32, value objects.Object) objects.Object {
+	if int(oparg) >= len(intrinsicsUnary) || intrinsicsUnary[oparg] == nil {
+		e.pendingErr = fmt.Errorf("CALL_INTRINSIC_1: unknown id %d", oparg)
+		return nil
+	}
+	res, err := intrinsicsUnary[oparg](e.ts, value)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return res
+}
+
+// callIntrinsic2 dispatches `_PyIntrinsics_BinaryFunctions[oparg].func(tstate, v2, v1)`.
+// Argument order matches the C body byte-for-byte.
+//
+// CPython: Python/bytecodes.c CALL_INTRINSIC_2
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) callIntrinsic2(oparg uint32, value2, value1 objects.Object) objects.Object {
+	if int(oparg) >= len(intrinsicsBinary) || intrinsicsBinary[oparg] == nil {
+		e.pendingErr = fmt.Errorf("CALL_INTRINSIC_2: unknown id %d", oparg)
+		return nil
+	}
+	res, err := intrinsicsBinary[oparg](e.ts, value2, value1)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return res
+}
+
 func unaryTable() []func(*state.Thread, objects.Object) (objects.Object, error) {
 	out := make([]func(*state.Thread, objects.Object) (objects.Object, error), len(intrinsics.UnaryTable))
 	for i, fn := range intrinsics.UnaryTable {

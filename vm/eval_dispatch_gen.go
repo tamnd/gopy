@@ -144,17 +144,37 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.CALL_INTRINSIC_1:
 		value := e.peek(0)
 		_ = value
-		// body bail: PyObject res_o rhs: unexpected token "_PyIntrinsics_UnaryFunctions" in expression
-		// outputs: res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		res_o := e.callIntrinsic1(oparg, value.AsObject())
+		_ = res_o
+		value.Close()
+		if res_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		res = stackref.FromObject(res_o)
+		e.drop(1)
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.CALL_INTRINSIC_2:
 		value2_st := e.peek(1)
 		_ = value2_st
 		value1_st := e.peek(0)
 		_ = value1_st
-		// body bail: PyObject res_o rhs: unexpected token "_PyIntrinsics_BinaryFunctions" in expression
-		// outputs: res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		value1 := value1_st.AsObject()
+		_ = value1
+		value2 := value2_st.AsObject()
+		_ = value2
+		res_o := e.callIntrinsic2(oparg, value2, value1)
+		_ = res_o
+		e.decrefInputs(2)
+		if res_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		res = stackref.FromObject(res_o)
+		e.drop(1 + 1)
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.CHECK_EG_MATCH:
 		exc_value_st := e.peek(1)
 		_ = exc_value_st
