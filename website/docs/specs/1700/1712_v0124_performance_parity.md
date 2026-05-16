@@ -8,6 +8,16 @@ slug: /specs/1712-v0124-performance
 description: "Stand up the pyperformance harness across cpython 3.14, PyPy 3.11, and gopy; audit every performance-critical subsystem already in tree (specializer, tier-2 uops, PyLong cache, dict split-keys, frame, slot dispatch); wire the ones that are idle; finish the ones that are stubs; add the subsystems still missing (float fast path, GC tracking, generator fast path, pickle/xml/sqlite native paths, string builder) so gopy clears pyperformance within 1.5x of cpython on geomean."
 ---
 
+## Ground rule
+
+Port full subsystems / files one by one. No partial slices, no
+name-only shims, no "patch the gate and move on". When a phase here
+touches a CPython source file, every function in that file lands in
+the corresponding gopy package with a `// CPython:` citation before
+the phase flips to DONE. The cost of revisiting a half-ported
+subsystem is always higher than the cost of finishing it the first
+time. This rule overrides any pressure to ship a row green early.
+
 ## Why this spec exists
 
 A 10-line `pyperformance` smoke ran on the v0.12.4 branch shows gopy
@@ -128,11 +138,11 @@ the table in "Current benchmark results" below.
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P0.1 | Automatic iteration scaler in `run_one.sh`: probe cpython wall time, then scale bench `iter_count` for gopy via `GOPY_BENCH_SCALE` env var so wall time stays under 30 s. | WIP | - |
-| P0.2 | Freeze `bench/baseline_v0124.json`. Add `bench/compare-baseline` subcommand: a >10% regression on the same host fails CI. | WIP | - |
-| P0.3 | Wire `bench/run_small.sh` into `.github/workflows/`. Run nightly + on every PR that touches `compile/`, `vm/`, `specialize/`, `optimizer/`, `objects/`. | WIP | - |
-| P0.4 | Extend `bench_sources/` to cover every primary-column bench in the coverage matrix that gopy can currently run. Target: 20 benches. | WIP | - |
-| P0.5 | `run_full.sh` against pyperformance's vendored sources via the existing shim; mark unsupported benches as `module_missing` rather than `N/A`. | WIP | - |
+| P0.1 | Automatic iteration scaler in `run_one.sh`: probe cpython wall time, then scale bench `iter_count` for gopy via `GOPY_BENCH_SCALE` env var so wall time stays under 30 s. Shipped: `BASELINE_JSON` + `TARGET_WALL_MS` + `EST_SLOWDOWN` drive `bench_scale()`, which sets `GOPY_BENCH_SCALE` per bench and scales measured wall time back up. | DONE | ca0bef1 |
+| P0.2 | Freeze `bench/baseline_v0124.json`. Add `bench/compare-baseline` subcommand: a >10% regression on the same host fails CI. Shipped: `bench/baseline_v0124.json` + `bench/cmd/compare-baseline/main.go` (tolerance flag, status-drop + regression gates, exits non-zero on either). | DONE | ca0bef1 |
+| P0.3 | Wire `bench/run_small.sh` into `.github/workflows/`. Run nightly + on every PR that touches `compile/`, `vm/`, `specialize/`, `optimizer/`, `objects/`. Shipped: `.github/workflows/bench.yml` (schedule + path-filtered pull_request + workflow_dispatch), uploads `results_small.md` and the raw JSONs as artifacts. | DONE | ca0bef1 |
+| P0.4 | Extend `bench_sources/` to cover every primary-column bench in the coverage matrix that gopy can currently run. Target: 20 benches. Shipped: 20 standalone scripts under `bench/bench_sources/` (call_method, chaos, comprehensions, deepcopy, fannkuch, float, go_bench, hexiom, json_dumps, logging_bench, nbody, nqueens, pidigits, pprint_bench, raytrace, regex_compile, richards, spectral_norm, typing_runtime, unpack_sequence). | DONE | ca0bef1 |
+| P0.5 | `run_full.sh` against pyperformance's vendored sources via the existing shim; mark unsupported benches as `module_missing` rather than `N/A`. Current `run_full.sh` walks `bench_sources/` only; vendored pyperformance corpus + `module_missing` classification still pending. | WIP | - |
 
 **Gate.** `bench/run_small.sh` exit 0 + table written to
 `bench/results_small.md`; CI re-runs and the regression check passes.
