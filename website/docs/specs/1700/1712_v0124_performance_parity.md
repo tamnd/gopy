@@ -224,9 +224,50 @@ Adjacent gaps surface once the above are closed:
 | P1.1 | Wire `specialize.Enable` into `pythonrun.liftCode`, `vm.liftNestedCode`, and `marshal.unmarshalCode`. Shipped: `pythonrun/runstring.go:122`, `vm/eval_simple.go:52`, `marshal/code.go:239` all call `specialize.Enable(out)`. `Quickened = true` + `CacheObjects []Object` slab (gopy's stand-in for CPython's pointer cache cells; Go can't pack GC pointers in `[]byte`). Full `go test ./...` green. | DONE | 67abc0a |
 | P1.2 | Audit `vm/eval.go` for missing specialized-opcode dispatch arms. Coverage achieved via `vm/adaptive.go:maybeDeopt`: every specialized variant rewrites back to its adaptive parent before dispatch, and the parent body runs. The full deopt table in `specialize/deopt.go` enumerates every CPython 3.14 specialized opcode. Correctness complete; per-variant fast paths land under P1.4. | DONE | 67abc0a |
 | P1.3 | Wire de-opt. `vm/adaptive.go:53 maybeDeopt` calls `specialize.Deopt` + `specialize.Unspecialize`, and `vm/adaptive.go:72 adaptiveTick` drives the counter and routes triggers into the per-family specializers. No panics, no re-walks. | DONE | 67abc0a |
-| P1.4a | Extend specializer emission coverage. Audit confirms CPython 3.14 ships 13 (not 32) tier-1 `LOAD_ATTR_*` opcodes. `specialize/load_attr.go` now emits 9 of them: `MODULE`, `CLASS`, `CLASS_WITH_METACLASS_CHECK` (new), `SLOT`, `INSTANCE_VALUE`, `WITH_HINT`, `PROPERTY` (new), `METHOD_NO_DICT` (new), `NONDESCRIPTOR_NO_DICT` (new). Faithful port of `classify_descriptor` lives at `specialize/descr_classify.go`. The remaining 4 (`METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`, `METHOD_LAZY_DICT`, `GETATTRIBUTE_OVERRIDDEN`) require `Py_TPFLAGS_INLINE_VALUES` / managed-dict-offset / `__getattribute__`-override modelling in `objects/type.go`. Other families: `STORE_ATTR` 3/3, `LOAD_GLOBAL` 2/2, `COMPARE_OP` 3/3, `CONTAINS_OP` 2/2, `FOR_ITER` 4/4, `LOAD_SUPER_ATTR` 2/2, `SEND` 1/1, `STORE_SUBSCR` 2/2, `TO_BOOL` 6/6, `UNPACK_SEQUENCE` 3/3, `BINARY_OP` 13/14 (`BINARY_OP_EXTEND` is JIT-only). `CALL` family gap: gopy emits 5 of 16 specialized variants; collapses 8 builtin variants (`CALL_BUILTIN_FAST`, `CALL_BUILTIN_O`, `CALL_METHOD_DESCRIPTOR_*`, `CALL_ISINSTANCE`, `CALL_LEN`, `CALL_LIST_APPEND`, `CALL_ALLOC_AND_ENTER_INIT`) into `CALL_NON_PY_GENERAL` — closing this needs METH_* calling-convention flags on `BuiltinFunction`. | WIP | - |
-| P1.4b | VM fast-path arms for each specialized opcode. Framework landed at `vm/eval_specialized.go:trySpecialized`, wired into `vm/dispatch.go` before `maybeDeopt` so hot sites take the fast path first and fall through to deopt on guard miss. Seven LOAD_ATTR arms ported faithfully (CPython parity, no re-lookup shims): `LOAD_ATTR_MODULE`, `LOAD_ATTR_SLOT`, `LOAD_ATTR_CLASS`, `LOAD_ATTR_CLASS_WITH_METACLASS_CHECK`, `LOAD_ATTR_METHOD_NO_DICT`, `LOAD_ATTR_NONDESCRIPTOR_NO_DICT`, `LOAD_ATTR_PROPERTY`. Prerequisite: `Code.CacheObjects []Object` parallel slab is gopy's stand-in for CPython's in-cache pointer slots (Go cannot stash GC-tracked pointers in a `[]byte`); `specialize.{Set,}CacheObject` stamp / read by codeunit index, validity gated by the same version cells. All seven covered by `vm/eval_specialized_test.go` and parity-gated against cpython 3.14 via `specialize/gatedata/spec_property.py` (driven from `specialize/gatedata_test.go:TestGateSpecPropertyAndMethod`, byte-equal stdout required) exercising property + method fast paths. Remaining LOAD_ATTR arms: `INSTANCE_VALUE` and `WITH_HINT` need the emission side to stamp `keys_version` so the dict hint stays sound across rehashes. BINARY_OP family ported in full at `vm/eval_specialized_binary_op.go` (13/13 non-JIT variants: `ADD_INT`, `SUBTRACT_INT`, `MULTIPLY_INT` with `math/bits` overflow checks; `ADD_FLOAT`, `SUBTRACT_FLOAT`, `MULTIPLY_FLOAT`; `ADD_UNICODE` shared with `INPLACE_ADD_UNICODE`; `SUBSCR_LIST_INT`, `SUBSCR_TUPLE_INT`, `SUBSCR_STR_INT` (ASCII fast path), `SUBSCR_DICT`, `SUBSCR_LIST_SLICE`). Parity-gated via `specialize/gatedata/spec_binary_op.py` (`TestGateSpecBinaryOp`) covering int/float arithmetic, str concat, and all four subscript shapes. Remaining family arms: CALL / FOR_ITER / LOAD_GLOBAL / STORE_ATTR / SEND / LOAD_SUPER_ATTR follow the same pattern. | WIP | - |
+| P1.4a | Extend specializer emission coverage. CPython 3.14 ships specialized opcode variants across 13 families; gopy's emission state per family is broken out in the P1.4a sub-table below. Faithful port of `classify_descriptor` lives at `specialize/descr_classify.go`. | WIP | 67abc0a |
+| P1.4b | VM fast-path arms for each specialized opcode. Framework landed at `vm/eval_specialized.go:trySpecialized`, wired into `vm/dispatch.go` before `maybeDeopt` so hot sites take the fast path first and fall through to deopt on guard miss. Prerequisite: `Code.CacheObjects []Object` parallel slab is gopy's stand-in for CPython's in-cache pointer slots (Go cannot stash GC-tracked pointers in a `[]byte`); `specialize.{Set,}CacheObject` stamp / read by codeunit index, validity gated by the same version cells. Per-family arm state in the P1.4b sub-table below. | WIP | 691c2d7, 71a9181, 6a8aace |
 | P1.5 | Bytecode cache persistence: `Code.Quickened` should survive `marshal.dumps`/`marshal.loads` so `.pyc` files retain specialization (CPython persists the warmed cache). | TODO | - |
+
+**P1.4a sub-table — specializer emission per family.** Numbers
+report shipped variants vs the CPython 3.14 variant count, then
+list the variants still missing. CPython 3.14 reference:
+`Python/specialize.c`.
+
+| Family | Coverage | Variants shipped | Missing | Status | Commit |
+|--------|----------|------------------|---------|--------|--------|
+| LOAD_ATTR | 9/13 | `MODULE`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `SLOT`, `INSTANCE_VALUE`, `WITH_HINT`, `PROPERTY`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT` | `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`, `METHOD_LAZY_DICT`, `GETATTRIBUTE_OVERRIDDEN` — need `Py_TPFLAGS_INLINE_VALUES` / managed-dict-offset / `__getattribute__`-override modelling in `objects/type.go` | WIP | 67abc0a |
+| STORE_ATTR | 3/3 | `INSTANCE_VALUE`, `SLOT`, `WITH_HINT` | — | DONE | 67abc0a |
+| LOAD_GLOBAL | 2/2 | `MODULE`, `BUILTIN` | — | DONE | 67abc0a |
+| COMPARE_OP | 3/3 | `INT`, `FLOAT`, `STR` | — | DONE | 67abc0a |
+| CONTAINS_OP | 2/2 | `DICT`, `SET` | — | DONE | 67abc0a |
+| FOR_ITER | 4/4 | `LIST`, `TUPLE`, `RANGE`, `GEN` | — | DONE | 67abc0a |
+| LOAD_SUPER_ATTR | 2/2 | `ATTR`, `METHOD` | — | DONE | 67abc0a |
+| SEND | 1/1 | `GEN` | — | DONE | 67abc0a |
+| STORE_SUBSCR | 2/2 | `LIST_INT`, `DICT` | — | DONE | 67abc0a |
+| TO_BOOL | 6/6 | `BOOL`, `INT`, `LIST`, `NONE`, `STR`, `ALWAYS_TRUE` | — | DONE | 67abc0a |
+| UNPACK_SEQUENCE | 3/3 | `TWO_TUPLE`, `TUPLE`, `LIST` | — | DONE | 67abc0a |
+| BINARY_OP | 13/14 | `ADD_INT`, `SUBTRACT_INT`, `MULTIPLY_INT`, `ADD_FLOAT`, `SUBTRACT_FLOAT`, `MULTIPLY_FLOAT`, `ADD_UNICODE`, `INPLACE_ADD_UNICODE`, `SUBSCR_LIST_INT`, `SUBSCR_TUPLE_INT`, `SUBSCR_STR_INT`, `SUBSCR_DICT`, `SUBSCR_LIST_SLICE` | `BINARY_OP_EXTEND` is JIT-only and intentionally skipped | DONE | 67abc0a |
+| CALL | 5/16 | `PY_EXACT_ARGS`, `PY_GENERAL`, `BOUND_METHOD_EXACT_ARGS`, `BOUND_METHOD_GENERAL`, `NON_PY_GENERAL` | 8 builtin variants (`CALL_BUILTIN_FAST`, `CALL_BUILTIN_O`, `CALL_METHOD_DESCRIPTOR_*`, `CALL_ISINSTANCE`, `CALL_LEN`, `CALL_LIST_APPEND`, `CALL_ALLOC_AND_ENTER_INIT`) collapse into `CALL_NON_PY_GENERAL` — needs METH_* calling-convention flags on `BuiltinFunction`. `CALL_TYPE_1`, `CALL_STR_1`, `CALL_TUPLE_1` also pending. | WIP | 67abc0a |
+
+**P1.4b sub-table — VM fast-path arms per family.** Each row tracks
+the arm count shipped in `vm/eval_specialized*.go` and the parity
+gate that backs it.
+
+| Family | Arms shipped | Source | Gate | Status | Commit |
+|--------|--------------|--------|------|--------|--------|
+| LOAD_ATTR | 7/9 emitted | `vm/eval_specialized.go` — `MODULE`, `SLOT`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `PROPERTY` | `specialize/gatedata/spec_property.py` (`TestGateSpecPropertyAndMethod`) | WIP — `INSTANCE_VALUE` and `WITH_HINT` need emission to stamp `keys_version` first | 691c2d7, 71a9181 |
+| TO_BOOL | 6/6 | `vm/eval_specialized.go` — `BOOL`, `INT`, `LIST`, `NONE`, `STR`, `ALWAYS_TRUE` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
+| COMPARE_OP | 3/3 | `vm/eval_specialized_compare.go` — `INT`, `FLOAT`, `STR` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
+| CONTAINS_OP | 2/2 | `vm/eval_specialized.go` — `DICT`, `SET` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
+| UNPACK_SEQUENCE | 3/3 | `vm/eval_specialized.go` — `TWO_TUPLE`, `TUPLE`, `LIST` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
+| STORE_SUBSCR | 2/2 | `vm/eval_specialized.go` — `LIST_INT`, `DICT` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
+| BINARY_OP | 13/13 non-JIT | `vm/eval_specialized_binary_op.go` — `ADD_INT`, `SUBTRACT_INT`, `MULTIPLY_INT` (math/bits overflow guard); `ADD_FLOAT`, `SUBTRACT_FLOAT`, `MULTIPLY_FLOAT`; `ADD_UNICODE` shared with `INPLACE_ADD_UNICODE`; `SUBSCR_LIST_INT`, `SUBSCR_TUPLE_INT`, `SUBSCR_STR_INT` (ASCII fast path), `SUBSCR_DICT`, `SUBSCR_LIST_SLICE` | `specialize/gatedata/spec_binary_op.py` (`TestGateSpecBinaryOp`) | DONE | 6a8aace |
+| FOR_ITER | 0/4 | — | — | TODO — needs typed `Next` helpers on `objects.{listIterator,tupleIterator,rangeIterator}` so the arm can skip the `IterNext` slot lookup | - |
+| LOAD_GLOBAL | 0/2 | — | — | TODO — mirror `LOAD_ATTR_MODULE` shape against `globals` then `builtins` dict | - |
+| STORE_ATTR | 0/3 | — | — | TODO | - |
+| SEND | 0/1 | — | — | TODO — depends on generator-frame plumbing | - |
+| LOAD_SUPER_ATTR | 0/2 | — | — | TODO | - |
+| CALL | 0/5 emitted | — | — | TODO — gated on closing P1.4a CALL gap first | - |
 
 **Gate.**
 
