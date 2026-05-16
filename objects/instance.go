@@ -64,6 +64,19 @@ func (i *Instance) SlotAt(idx int) Object {
 	return i.slots[idx]
 }
 
+// SetSlotAt writes value into slot idx. Returns false when the slot
+// index is out of range so the caller can fall back. Used by the
+// STORE_ATTR_SLOT fast-path arm to skip the descriptor protocol.
+//
+// CPython: Objects/descrobject.c:200 member_set (inline access path)
+func (i *Instance) SetSlotAt(idx int, value Object) bool {
+	if idx < 0 || idx >= len(i.slots) {
+		return false
+	}
+	i.slots[idx] = value
+	return true
+}
+
 // instanceGetAttr is the tp_getattro slot for user-defined types.
 // Lookup order matches CPython: type-level data descriptors win first,
 // then instance __dict__, then type-level non-data descriptors. When

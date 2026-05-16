@@ -111,6 +111,8 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		next, ok = e.fastLoadGlobalModule(oparg)
 	case compile.LOAD_GLOBAL_BUILTIN:
 		next, ok = e.fastLoadGlobalBuiltin(oparg)
+	case compile.STORE_ATTR_SLOT:
+		next, ok = e.fastStoreAttrSlot(oparg)
 	}
 	return next, ok, nil
 }

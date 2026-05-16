@@ -50,3 +50,12 @@ func TestGateSpecLoadGlobal(t *testing.T) {
 	gopy := gate.BuildGopy(t)
 	gate.Compare(t, cpy, gopy, loadScript(t, "spec_load_global.py"))
 }
+
+func TestGateSpecStoreAttr(t *testing.T) {
+	cpy := gate.FindCPython(t)
+	if cpy == "" {
+		t.Skip("CPython 3.14 not on PATH")
+	}
+	gopy := gate.BuildGopy(t)
+	gate.Compare(t, cpy, gopy, loadScript(t, "spec_store_attr.py"))
+}

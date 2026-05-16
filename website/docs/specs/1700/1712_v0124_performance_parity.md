@@ -264,7 +264,7 @@ gate that backs it.
 | BINARY_OP | 13/13 non-JIT | `vm/eval_specialized_binary_op.go` — `ADD_INT`, `SUBTRACT_INT`, `MULTIPLY_INT` (math/bits overflow guard); `ADD_FLOAT`, `SUBTRACT_FLOAT`, `MULTIPLY_FLOAT`; `ADD_UNICODE` shared with `INPLACE_ADD_UNICODE`; `SUBSCR_LIST_INT`, `SUBSCR_TUPLE_INT`, `SUBSCR_STR_INT` (ASCII fast path), `SUBSCR_DICT`, `SUBSCR_LIST_SLICE` | `specialize/gatedata/spec_binary_op.py` (`TestGateSpecBinaryOp`) | DONE | 6a8aace |
 | FOR_ITER | 0/4 | — | — | TODO — needs typed `Next` helpers on `objects.{listIterator,tupleIterator,rangeIterator}` so the arm can skip the `IterNext` slot lookup | - |
 | LOAD_GLOBAL | 2/2 | `vm/eval_specialized_load_global.go` — `MODULE`, `BUILTIN` | `specialize/gatedata/spec_load_global.py` (`TestGateSpecLoadGlobal`) | DONE | 2f1f603 |
-| STORE_ATTR | 0/3 | — | — | TODO | - |
+| STORE_ATTR | 1/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (faithful 1-1 port of CPython's macro: validate type_version, write to cached `Instance.slots[idx]`) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`) | WIP — `INSTANCE_VALUE` and `WITH_HINT` deliberately deferred; they need a `Dict.SetValueAt(slot, value)` primitive that writes the entry's value cell without re-hashing the key, plus the managed-dict-offset modelling listed in P1.4a. Shipping them before that lands forces a shim that re-runs `SetItem(name, value)`, which is exactly the ad-hoc patch the ground rule forbids. | 2f1f603 |
 | SEND | 0/1 | — | — | TODO — depends on generator-frame plumbing | - |
 | LOAD_SUPER_ATTR | 0/2 | — | — | TODO | - |
 | CALL | 0/5 emitted | — | — | TODO — gated on closing P1.4a CALL gap first | - |
