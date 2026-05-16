@@ -118,8 +118,8 @@ func wrapConstAttr(v any) Object {
 	return NewStr(fmt.Sprintf("%v", v))
 }
 
-// codeCoLinesMethod backs code.co_lines(). Returns a list of
-// (start, end, line) tuples, matching the public iterator shape.
+// codeCoLinesMethod backs code.co_lines(). Returns an iterator of
+// (start, end, line) tuples; dis.py drives it with next().
 //
 // CPython: Objects/codeobject.c:2817 code_linesiterator
 func codeCoLinesMethod(args []Object, kwargs map[string]Object) (Object, error) {
@@ -143,11 +143,11 @@ func codeCoLinesMethod(args []Object, kwargs map[string]Object) (Object, error) 
 			line,
 		})
 	}
-	return NewList(items), nil
+	return listIter(NewList(items))
 }
 
-// codeCoPositionsMethod backs code.co_positions(). Returns a list of
-// (line, end_line, col, end_col) tuples; None replaces a missing field.
+// codeCoPositionsMethod backs code.co_positions(). Returns an iterator
+// of (line, end_line, col, end_col) tuples; None replaces a missing field.
 //
 // CPython: Objects/codeobject.c:1554 code_positionsiterator
 func codeCoPositionsMethod(args []Object, kwargs map[string]Object) (Object, error) {
@@ -174,7 +174,7 @@ func codeCoPositionsMethod(args []Object, kwargs map[string]Object) (Object, err
 			posField(p.EndColumn),
 		})
 	}
-	return NewList(items), nil
+	return listIter(NewList(items))
 }
 
 // codeVarnameFromOpargMethod returns the local-variable name for the
