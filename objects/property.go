@@ -164,6 +164,13 @@ func NewProperty(fget, fset, fdel, doc Object) *Property {
 	return p
 }
 
+// Fget returns the property's getter function, or nil when the
+// property is write-only. Specializers use it to decide whether
+// LOAD_ATTR_PROPERTY is applicable.
+//
+// CPython: Include/cpython/descrobject.h propertyobject.prop_get
+func (p *Property) Fget() Object { return p.fget }
+
 // Getter returns a copy of p with fget replaced. Powers the
 // @prop.getter decorator.
 //

@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 
 	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/objects"
 )
 
 // SetOpcode rewrites the opcode at instr to op. Returns false when
@@ -82,6 +83,31 @@ func CacheU32(code []byte, instr, k int) uint32 {
 	lo := uint32(CacheCell(code, instr, k))
 	hi := uint32(CacheCell(code, instr, k+1))
 	return lo | hi<<16
+}
+
+// SetCacheObject stashes a Go pointer in the parallel CacheObjects
+// slab. CPython packs the same pointer into 4 codeunits of the inline
+// cache via write_obj; gopy keeps the slab side-by-side because the
+// runtime can't tuck GC-tracked pointers inside a []byte. The slot
+// index is the codeunit offset of the opcode itself, matching how the
+// per-instruction cache cells are addressed by `instr`.
+//
+// CPython: Include/internal/pycore_code.h:175 write_obj
+func SetCacheObject(cache []objects.Object, instr int, value objects.Object) {
+	if instr >= 0 && instr < len(cache) {
+		cache[instr] = value
+	}
+}
+
+// CacheObject reads the pointer slot at instr from the parallel slab.
+// Returns nil when the slot is out of range or unset.
+//
+// CPython: Include/internal/pycore_code.h:175 read_obj
+func CacheObject(cache []objects.Object, instr int) objects.Object {
+	if instr < 0 || instr >= len(cache) {
+		return nil
+	}
+	return cache[instr]
 }
 
 // Specialize rewrites the opcode at instr to specialized and stamps

@@ -16,38 +16,13 @@ package specialize
 
 import "github.com/tamnd/gopy/compile"
 
-// caches is the per-opcode cache width in codeunits. Index 256.
-//
-// CPython: Include/internal/pycore_opcode_metadata.h:1764 _PyOpcode_Caches
-var caches = [256]uint8{
-	compile.TO_BOOL:              3,
-	compile.STORE_SUBSCR:         1,
-	compile.SEND:                 1,
-	compile.UNPACK_SEQUENCE:      1,
-	compile.STORE_ATTR:           4,
-	compile.LOAD_GLOBAL:          4,
-	compile.LOAD_SUPER_ATTR:      1,
-	compile.LOAD_ATTR:            9,
-	compile.COMPARE_OP:           1,
-	compile.CONTAINS_OP:          1,
-	compile.JUMP_BACKWARD:        1,
-	compile.POP_JUMP_IF_TRUE:     1,
-	compile.POP_JUMP_IF_FALSE:    1,
-	compile.POP_JUMP_IF_NONE:     1,
-	compile.POP_JUMP_IF_NOT_NONE: 1,
-	compile.FOR_ITER:             1,
-	compile.CALL:                 3,
-	compile.CALL_KW:              3,
-	compile.BINARY_OP:            5,
-}
-
 // CacheCount returns the number of trailing codeunits reserved as
-// inline cache after op. Zero means op carries no cache.
+// inline cache after op. Zero means op carries no cache. Source of
+// truth lives in compile/opcode_caches.go; this wrapper exists so
+// callers inside the specialize package don't pay the import-cycle
+// awkwardness of taking compile directly at every site.
 func CacheCount(op compile.Opcode) int {
-	if op < 0 || int(op) >= len(caches) {
-		return 0
-	}
-	return int(caches[op])
+	return compile.CacheCount(op)
 }
 
 // deopt maps each specialized opcode to its adaptive parent. An

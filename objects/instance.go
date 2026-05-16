@@ -52,6 +52,18 @@ func NewInstance(t *Type) *Instance {
 // __dict__.
 func (i *Instance) Dict() *Dict { return i.dict }
 
+// SlotAt returns the value stored in slot idx, or nil when the slot
+// is out of range or unset. Used by the LOAD_ATTR_SLOT fast-path arm
+// to skip the descriptor protocol.
+//
+// CPython: Objects/descrobject.c:171 member_get (inline access path)
+func (i *Instance) SlotAt(idx int) Object {
+	if idx < 0 || idx >= len(i.slots) {
+		return nil
+	}
+	return i.slots[idx]
+}
+
 // instanceGetAttr is the tp_getattro slot for user-defined types.
 // Lookup order matches CPython: type-level data descriptors win first,
 // then instance __dict__, then type-level non-data descriptors. When

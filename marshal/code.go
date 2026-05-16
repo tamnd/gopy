@@ -14,6 +14,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/specialize"
 )
 
 // localspluskinds bit flags matching CPython's _PyLocalsKinds.
@@ -234,6 +235,8 @@ func unmarshalCode(d *decoder) (*objects.Code, error) {
 	if !ok {
 		return nil, fmt.Errorf("marshal: code.exceptiontable expected bytes, got %T", exctableObj)
 	}
+
+	specialize.Enable(c)
 
 	return c, nil
 }

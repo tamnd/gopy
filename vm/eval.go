@@ -167,19 +167,29 @@ func (e *evalState) fetch() (op compile.Opcode, oparg uint32, ok bool) {
 	}
 }
 
-// advance returns the instruction offset n instructions ahead of
-// f.InstrPtr. The eval loop uses this to pin the next-pc value the
-// generated arms return.
 // advance returns the next pc, one instruction word past the current
-// instr ptr. Cache-word advances will need a parameterised variant
-// once instructions with inline caches dispatch through this path.
-func (e *evalState) advance() int { return e.f.InstrPtr + 2 }
+// instr ptr plus any inline-cache codeunits the current opcode owns
+// (_PyOpcode_Caches[op]). The eval loop relies on this so adaptive
+// opcodes don't run their cache cells as real instructions.
+//
+// CPython: Python/ceval_macros.h NEXTOPARG / DISPATCH (the implicit
+// `next_instr += INLINE_CACHE_ENTRIES_<OP>` step inside each arm).
+func (e *evalState) advance() int {
+	ip := e.f.InstrPtr
+	if ip < 0 || ip >= len(e.f.Code.Code) {
+		return ip + 2
+	}
+	op := compile.Opcode(e.f.Code.Code[ip])
+	return ip + 2 + 2*compile.CacheCount(op)
+}
 
 // jumpBy returns the instruction offset delta instructions away.
 // Forward jumps pass a positive delta; backward jumps pass negative.
+// The delta is in codeunits relative to the *next* instruction (the
+// one right after this op's cache cells), matching CPython's JUMPBY.
 //
 // CPython: Python/ceval_macros.h JUMPBY
-func (e *evalState) jumpBy(delta int) int { return e.f.InstrPtr + 2*delta }
+func (e *evalState) jumpBy(delta int) int { return e.advance() + 2*(delta-1) }
 
 // push pushes r onto the value stack.
 func (e *evalState) push(r stackref.Ref) { e.f.PushStack(r) }

@@ -94,9 +94,9 @@ func Assemble(seq *Sequence, info *Info, unit *Unit, filename string) (*Code, er
 // emitInstr packs one instruction into the _Py_CODEUNIT stream.
 // Opcodes carry one byte each; opargs > 255 widen via up to three
 // EXTENDED_ARG prefixes (CPython supports a 32-bit oparg total).
-// CACHE entries are not yet emitted: the v0.5 pipeline does not run
-// the specializer, so all caches are zero-padded by the VM at load
-// time.
+// Adaptive opcodes are followed by _PyOpcode_Caches[op] CACHE
+// codeunits (op=0, arg=0) so specialize.Quicken can stamp seed
+// counters into them post-load.
 //
 // CPython: Python/assemble.c:L369 write_instr
 func (a *Assembler) emitInstr(ins *Instr) {
@@ -120,6 +120,15 @@ func (a *Assembler) emitInstr(ins *Instr) {
 		}
 	}
 	a.Code = append(a.Code, byte(ins.Op), byte(arg&0xff))
+	// CACHE pseudo-ops: two bytes each (op=CACHE=0, arg=0). Cleared
+	// by the assembler, populated by specialize.Quicken before first
+	// dispatch.
+	//
+	// CPython: Python/assemble.c:L378 write_instr (the trailing
+	// memset of size cache * sizeof(_Py_CODEUNIT)).
+	for range CacheCount(ins.Op) {
+		a.Code = append(a.Code, 0, 0)
+	}
 }
 
 // CoNoFree is set when a code object captures no free variables and

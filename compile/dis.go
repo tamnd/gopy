@@ -34,11 +34,28 @@ func disasmCode(b *strings.Builder, co *Code, indent int) {
 	for off := 0; off < len(co.Code); off += 2 {
 		op := Opcode(co.Code[off])
 		oparg := int32(co.Code[off+1])
+		// CACHE codeunits are inline-cache slots emitted after every
+		// adaptive opcode. They never disassemble as standalone
+		// instructions; dis just steps past them.
+		//
+		// CPython: Lib/dis.py _get_instructions_bytes (skips when
+		// opcode in _inline_cache_entries).
+		if op == CACHE {
+			continue
+		}
 		// Walk back any EXTENDED_ARG prefixes the assembler emitted.
 		// CPython recombines them with shift+or; we just look back
-		// up to three slots.
+		// up to three slots, hopping over CACHE cells that may sit
+		// between the previous real instruction and this one.
 		shift := 0
-		for back := off - 2; back >= 0 && Opcode(co.Code[back]) == EXTENDED_ARG && shift < 24; back -= 2 {
+		for back := off - 2; back >= 0 && shift < 24; back -= 2 {
+			prev := Opcode(co.Code[back])
+			if prev == CACHE {
+				continue
+			}
+			if prev != EXTENDED_ARG {
+				break
+			}
 			shift += 8
 			oparg |= int32(co.Code[back+1]) << shift
 		}
@@ -46,6 +63,9 @@ func disasmCode(b *strings.Builder, co *Code, indent int) {
 			continue
 		}
 		fmt.Fprintf(b, "%s%4d %-30s %d\n", prefix, off, op.Name(), oparg)
+		// Skip the trailing cache slots so the next iteration lands
+		// on the next real instruction.
+		off += 2 * CacheCount(op)
 	}
 	for _, c := range co.Consts {
 		if inner, ok := c.(*Code); ok {

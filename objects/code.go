@@ -99,6 +99,19 @@ type Code struct {
 	//
 	// CPython: Include/internal/pycore_code.h co_executors
 	Executors any
+
+	// CacheObjects is gopy's stand-in for CPython's in-cache pointer
+	// slots. CPython packs the cached descriptor / function object
+	// pointer into 4 codeunits of the inline cache (write_obj +
+	// read_obj in pycore_code.h). Go cannot stash GC-tracked pointers
+	// inside a []byte, so per-codeunit pointer cells live here,
+	// indexed by codeunit index of the opcode that owns the slot.
+	// Allocated by specialize.Enable; nil for opcodes that don't
+	// cache a pointer. Validity is gated by the same version cells in
+	// Code so a stale pointer is never observed.
+	//
+	// CPython: Include/internal/pycore_code.h:175 write_obj / read_obj
+	CacheObjects []Object
 }
 
 // CodeType is the type singleton for code objects.

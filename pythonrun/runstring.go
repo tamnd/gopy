@@ -16,6 +16,7 @@ import (
 	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
+	"github.com/tamnd/gopy/specialize"
 	"github.com/tamnd/gopy/state"
 	"github.com/tamnd/gopy/vm"
 )
@@ -118,5 +119,6 @@ func liftCode(c *compile.Code) *objects.Code {
 		ExceptionTable:  c.ExceptionTable,
 	}
 	out.Init(objects.CodeType)
+	specialize.Enable(out)
 	return out
 }

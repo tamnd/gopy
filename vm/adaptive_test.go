@@ -40,8 +40,8 @@ func quickenedCode(bc []byte, consts []any, names []string) *objects.Code {
 // TestDispatchAdaptiveSpecializesToBool exercises the round trip:
 // Quickened bytecode runs TO_BOOL, the adaptive driver decrements
 // the counter, on trigger the specializer rewrites TO_BOOL ->
-// TO_BOOL_INT, the dispatch loop deopts the specialized opcode back
-// to TO_BOOL, and the generic body still produces the right value.
+// TO_BOOL_INT, and the fast-path arm handles the int operand
+// producing True. The opcode stays specialized after the run.
 func TestDispatchAdaptiveSpecializesToBool(t *testing.T) {
 	var bc []byte
 	bc = emitWithCache(bc, compile.LOAD_CONST, 0)
@@ -64,12 +64,12 @@ func TestDispatchAdaptiveSpecializesToBool(t *testing.T) {
 	if out != objects.True() {
 		t.Fatalf("result: got %v want True", out)
 	}
-	// After running, the TO_BOOL slot should now read TO_BOOL (the
-	// adaptive parent), because the dispatch loop deopted the
-	// TO_BOOL_INT the specializer wrote.
+	// After running, the TO_BOOL slot should read TO_BOOL_INT: the
+	// adaptive driver triggered specialization and the fast-path arm
+	// handled the int operand without deopting.
 	got := compile.Opcode(co.Code[2*idx])
-	if got != compile.TO_BOOL {
-		t.Fatalf("opcode after dispatch: got %s want TO_BOOL", got.Name())
+	if got != compile.TO_BOOL_INT {
+		t.Fatalf("opcode after dispatch: got %s want TO_BOOL_INT", got.Name())
 	}
 }
 
@@ -105,8 +105,9 @@ func TestDispatchAdaptiveTicksCounter(t *testing.T) {
 }
 
 // TestDispatchDeoptsSpecialized sanity-checks the deopt arm directly:
-// hand-place TO_BOOL_INT in the bytecode, dispatch should rewrite it
-// to TO_BOOL and still produce True for an int.
+// hand-place TO_BOOL_STR in the bytecode while the operand is an int,
+// the fast-path arm refuses the type guard so dispatch should rewrite
+// the opcode to TO_BOOL and still produce True via the generic body.
 func TestDispatchDeoptsSpecialized(t *testing.T) {
 	var bc []byte
 	bc = emitWithCache(bc, compile.LOAD_CONST, 0)
@@ -115,7 +116,7 @@ func TestDispatchDeoptsSpecialized(t *testing.T) {
 	co := quickenedCode(bc, []any{int64(7)}, nil)
 
 	idx := 1
-	co.Code[2*idx] = byte(compile.TO_BOOL_INT)
+	co.Code[2*idx] = byte(compile.TO_BOOL_STR)
 	// Stamp cooldown counter so adaptiveTick won't re-specialize
 	// before we observe the deopt.
 	specialize.StoreCounter(co.Code, idx, specialize.AdaptiveCounterCooldown())
