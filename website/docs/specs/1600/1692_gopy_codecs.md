@@ -36,27 +36,27 @@ The codec registry lives on the interpreter state as
 
 | Function | Location |
 |---|---|
-| `PyCodec_Register` | `Python/codecs.c:31` |
-| `_PyCodec_Lookup` | `Python/codecs.c:141` |
-| `_PyCodec_LookupBuiltin` | `Python/codecs.c:92` |
-| `codec_register` (Python-level) | `Python/codecs.c:57` |
-| `PyCodec_Encode` | `Python/codecs.c:491` |
-| `PyCodec_Decode` | `Python/codecs.c:504` |
-| `_PyCodec_EncodeInternal` | `Python/codecs.c:435` |
-| `_PyCodec_DecodeInternal` | `Python/codecs.c:458` |
-| `PyCodec_RegisterError` | `Python/codecs.c:625` |
-| `PyCodec_LookupError` | `Python/codecs.c:654` |
-| `PyCodec_StrictErrors` | `Python/codecs.c:785` |
-| `PyCodec_IgnoreErrors` | `Python/codecs.c:812` |
-| `PyCodec_ReplaceErrors` | `Python/codecs.c:882` |
-| `PyCodec_XMLCharRefReplaceErrors` | `Python/codecs.c:960` |
-| `PyCodec_BackslashReplaceErrors` | `Python/codecs.c:1058` |
-| `PyCodec_NameReplaceErrors` | `Python/codecs.c:1131` |
-| `normalise_encoding` | `Python/codecs.c:125` |
+| `PyCodec_Register` | [Python/codecs.c:31](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L31) |
+| `_PyCodec_Lookup` | [Python/codecs.c:141](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L141) |
+| `_PyCodec_LookupBuiltin` | [Python/codecs.c:92](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L92) |
+| `codec_register` (Python-level) | [Python/codecs.c:57](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L57) |
+| `PyCodec_Encode` | [Python/codecs.c:491](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L491) |
+| `PyCodec_Decode` | [Python/codecs.c:504](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L504) |
+| `_PyCodec_EncodeInternal` | [Python/codecs.c:435](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L435) |
+| `_PyCodec_DecodeInternal` | [Python/codecs.c:458](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L458) |
+| `PyCodec_RegisterError` | [Python/codecs.c:625](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L625) |
+| `PyCodec_LookupError` | [Python/codecs.c:654](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L654) |
+| `PyCodec_StrictErrors` | [Python/codecs.c:785](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L785) |
+| `PyCodec_IgnoreErrors` | [Python/codecs.c:812](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L812) |
+| `PyCodec_ReplaceErrors` | [Python/codecs.c:882](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L882) |
+| `PyCodec_XMLCharRefReplaceErrors` | [Python/codecs.c:960](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L960) |
+| `PyCodec_BackslashReplaceErrors` | [Python/codecs.c:1058](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L1058) |
+| `PyCodec_NameReplaceErrors` | [Python/codecs.c:1131](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L1131) |
+| `normalise_encoding` | [Python/codecs.c:125](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L125) |
 
 ### Name normalisation
 
-`Python/codecs.c:125 normalise_encoding`: convert to lower-case,
+[Python/codecs.c:125](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L125) normalise_encoding: convert to lower-case,
 replace hyphens and spaces with underscores, collapse leading/trailing
 underscores. `"UTF-8"` normalises to `"utf_8"`. `"iso-8859-1"`
 normalises to `"iso_8859_1"`.
@@ -118,21 +118,21 @@ type ErrorHandler func(err error) (replacement objects.Object, pos int, rerr err
 
 | C source | Go target |
 |---|---|
-| `Python/codecs.c:31` `PyCodec_Register` | `codecs/registry.go` |
-| `Python/codecs.c:141` `_PyCodec_Lookup` | `codecs/registry.go` |
-| `Python/codecs.c:125` `normalise_encoding` | `codecs/registry.go` |
-| `Python/codecs.c:491` `PyCodec_Encode` | `codecs/codec.go` |
-| `Python/codecs.c:504` `PyCodec_Decode` | `codecs/codec.go` |
-| `Python/codecs.c:435` `_PyCodec_EncodeInternal` | `codecs/codec.go` |
-| `Python/codecs.c:458` `_PyCodec_DecodeInternal` | `codecs/codec.go` |
-| `Python/codecs.c:625` `PyCodec_RegisterError` | `codecs/errors.go` |
-| `Python/codecs.c:654` `PyCodec_LookupError` | `codecs/errors.go` |
-| `Python/codecs.c:785` `PyCodec_StrictErrors` | `codecs/errors.go` |
-| `Python/codecs.c:812` `PyCodec_IgnoreErrors` | `codecs/errors.go` |
-| `Python/codecs.c:882` `PyCodec_ReplaceErrors` | `codecs/errors.go` |
-| `Python/codecs.c:960` `PyCodec_XMLCharRefReplaceErrors` | `codecs/errors.go` |
-| `Python/codecs.c:1058` `PyCodec_BackslashReplaceErrors` | `codecs/errors.go` |
-| `Python/codecs.c:1131` `PyCodec_NameReplaceErrors` | `codecs/errors.go` |
+| [Python/codecs.c:31](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L31) `PyCodec_Register` | `codecs/registry.go` |
+| [Python/codecs.c:141](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L141) `_PyCodec_Lookup` | `codecs/registry.go` |
+| [Python/codecs.c:125](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L125) `normalise_encoding` | `codecs/registry.go` |
+| [Python/codecs.c:491](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L491) `PyCodec_Encode` | `codecs/codec.go` |
+| [Python/codecs.c:504](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L504) `PyCodec_Decode` | `codecs/codec.go` |
+| [Python/codecs.c:435](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L435) `_PyCodec_EncodeInternal` | `codecs/codec.go` |
+| [Python/codecs.c:458](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L458) `_PyCodec_DecodeInternal` | `codecs/codec.go` |
+| [Python/codecs.c:625](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L625) `PyCodec_RegisterError` | `codecs/errors.go` |
+| [Python/codecs.c:654](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L654) `PyCodec_LookupError` | `codecs/errors.go` |
+| [Python/codecs.c:785](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L785) `PyCodec_StrictErrors` | `codecs/errors.go` |
+| [Python/codecs.c:812](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L812) `PyCodec_IgnoreErrors` | `codecs/errors.go` |
+| [Python/codecs.c:882](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L882) `PyCodec_ReplaceErrors` | `codecs/errors.go` |
+| [Python/codecs.c:960](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L960) `PyCodec_XMLCharRefReplaceErrors` | `codecs/errors.go` |
+| [Python/codecs.c:1058](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L1058) `PyCodec_BackslashReplaceErrors` | `codecs/errors.go` |
+| [Python/codecs.c:1131](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L1131) `PyCodec_NameReplaceErrors` | `codecs/errors.go` |
 | Built-in utf-8, ascii, latin-1 implementations | `codecs/builtin.go` |
 
 ## Checklist
@@ -144,18 +144,18 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 
 * [ ] `searchPath`: package-level slice of `SearchFunc`, protected by a
   mutex for future thread safety. Initially empty; seeded by `init()`.
-  CPython: `Python/codecs.c:141` `interp->codecs.search_path`.
+  CPython: [Python/codecs.c:141](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L141) `interp->codecs.search_path`.
 * [ ] `normalizeEncoding(name string) string`: lower-case, replace `-`
-  and ` ` with `_`. CPython: `Python/codecs.c:125 normalise_encoding`.
+  and ` ` with `_`. CPython: [Python/codecs.c:125](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L125) normalise_encoding.
 * [ ] `lookupCache`: `map[string]*CodecInfo` keyed by normalised name,
   cleared when a new search function is registered.
-  CPython: `Python/codecs.c:141` `interp->codecs.search_cache`.
+  CPython: [Python/codecs.c:141](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L141) `interp->codecs.search_cache`.
 * [ ] `Register(fn SearchFunc) error`: append to `searchPath`, clear
-  `lookupCache`. CPython: `Python/codecs.c:31 PyCodec_Register`.
+  `lookupCache`. CPython: [Python/codecs.c:31](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L31) PyCodec_Register.
 * [ ] `Lookup(encoding string) (*CodecInfo, error)`: normalise name,
   check `lookupCache`, walk `searchPath`, populate cache on hit,
   return `LookupError` on miss.
-  CPython: `Python/codecs.c:141 _PyCodec_Lookup`.
+  CPython: [Python/codecs.c:141](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L141) _PyCodec_Lookup.
 * [ ] `init()` in `codecs/registry.go`: call `Register` with the
   built-in search function from `codecs/builtin.go` that handles
   `utf_8`, `ascii`, `latin_1` (and their common aliases).
@@ -163,28 +163,28 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 ### codecs/errors.go
 
 * [ ] `errorHandlers`: `map[string]ErrorHandler`, seeded by `init()`.
-  CPython: `Python/codecs.c:625` `interp->codecs.error_registry`.
+  CPython: [Python/codecs.c:625](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L625) `interp->codecs.error_registry`.
 * [ ] `RegisterError(name string, handler ErrorHandler) error`: insert
-  into `errorHandlers`. CPython: `Python/codecs.c:625 PyCodec_RegisterError`.
+  into `errorHandlers`. CPython: [Python/codecs.c:625](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L625) PyCodec_RegisterError.
 * [ ] `LookupError(name string) (ErrorHandler, error)`: look up
   `errorHandlers[name]`, return `LookupError` if absent.
-  CPython: `Python/codecs.c:654 PyCodec_LookupError`.
+  CPython: [Python/codecs.c:654](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L654) PyCodec_LookupError.
 * [ ] `strictErrors`: raise `UnicodeEncodeError` or `UnicodeDecodeError`
-  immediately. CPython: `Python/codecs.c:785 PyCodec_StrictErrors`.
+  immediately. CPython: [Python/codecs.c:785](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L785) PyCodec_StrictErrors.
 * [ ] `ignoreErrors`: return an empty string / empty bytes replacement
   and advance past the bad range.
-  CPython: `Python/codecs.c:812 PyCodec_IgnoreErrors`.
+  CPython: [Python/codecs.c:812](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L812) PyCodec_IgnoreErrors.
 * [ ] `replaceErrors` (encode): replace each un-encodable codepoint with
   `?` (0x3F). (Decode): replace each bad byte sequence with U+FFFD.
-  CPython: `Python/codecs.c:882 PyCodec_ReplaceErrors`.
+  CPython: [Python/codecs.c:882](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L882) PyCodec_ReplaceErrors.
 * [ ] `xmlcharrefreplace`: replace un-encodable codepoints with
   `&#N;` decimal entity references.
-  CPython: `Python/codecs.c:960 PyCodec_XMLCharRefReplaceErrors`.
+  CPython: [Python/codecs.c:960](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L960) PyCodec_XMLCharRefReplaceErrors.
 * [ ] `backslashreplace`: replace un-encodable or un-decodable ranges
   with `\xNN`, `\uNNNN`, or `\UNNNNNNNN` escape sequences.
-  CPython: `Python/codecs.c:1058 PyCodec_BackslashReplaceErrors`.
+  CPython: [Python/codecs.c:1058](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L1058) PyCodec_BackslashReplaceErrors.
 * [ ] `namereplace`: replace un-encodable codepoints with
-  `\N{UNICODE NAME}`. CPython: `Python/codecs.c:1131 PyCodec_NameReplaceErrors`.
+  `\N{UNICODE NAME}`. CPython: [Python/codecs.c:1131](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L1131) PyCodec_NameReplaceErrors.
 * [ ] `init()` in `codecs/errors.go`: seed `errorHandlers` with
   `"strict"`, `"ignore"`, `"replace"`, `"xmlcharrefreplace"`,
   `"backslashreplace"`, `"namereplace"`, `"surrogateescape"` (stub),
@@ -194,19 +194,19 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 
 * [ ] `Encode(obj objects.Object, encoding, errors string) (objects.Object, error)`:
   call `Lookup(encoding)`, then `info.Encode(obj, errors)`.
-  CPython: `Python/codecs.c:491 PyCodec_Encode` via
-  `Python/codecs.c:435 _PyCodec_EncodeInternal`.
+  CPython: [Python/codecs.c:491](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L491) PyCodec_Encode via
+  [Python/codecs.c:435](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L435) _PyCodec_EncodeInternal.
 * [ ] `Decode(obj objects.Object, encoding, errors string) (objects.Object, error)`:
   call `Lookup(encoding)`, then `info.Decode(obj, errors)`.
-  CPython: `Python/codecs.c:504 PyCodec_Decode` via
-  `Python/codecs.c:458 _PyCodec_DecodeInternal`.
+  CPython: [Python/codecs.c:504](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L504) PyCodec_Decode via
+  [Python/codecs.c:458](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L458) _PyCodec_DecodeInternal.
 * [ ] Both entry points must call `LookupError(errors)` if the codec
   signals a partial error and re-invoke the error handler in a loop
   until all input is consumed or an error is raised.
-  CPython: `Python/codecs.c:435 _PyCodec_EncodeInternal` handler loop.
+  CPython: [Python/codecs.c:435](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L435) _PyCodec_EncodeInternal handler loop.
 * [ ] Return type is the first element of the codec result tuple (the
   encoded/decoded object); discard the integer consumed count at this
-  level. CPython: `Python/codecs.c:491` result extraction.
+  level. CPython: [Python/codecs.c:491](https://github.com/python/cpython/blob/v3.14.5/Python/codecs.c#L491) result extraction.
 
 ### codecs/builtin.go
 

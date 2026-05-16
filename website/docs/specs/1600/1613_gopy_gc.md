@@ -94,8 +94,7 @@ generators. v0.10 extends to:
 
 The collector visits an object's references through a per-type
 `tp_traverse` slot. v0.10 adds the slot to `objects.Type` and
-populates it for every tracked type. CPython: `Include/object.h:339
-tp_traverse`.
+populates it for every tracked type. CPython: [Include/object.h:339](https://github.com/python/cpython/blob/v3.14.5/Include/object.h#L339) tp_traverse.
 
 ## Generation lists
 
@@ -104,7 +103,7 @@ freeze list. Each generation has a count; the collector runs
 generation `n` when `count[n] > threshold[n]`. Defaults are 700 / 10 /
 10. We mirror these and the same per-generation linked list layout.
 
-CPython: `Include/internal/pycore_gc.h:122 GCState`,
+CPython: [Include/internal/pycore_gc.h:122](https://github.com/python/cpython/blob/v3.14.5/Include/internal/pycore_gc.h#L122) GCState,
 `Modules/gcmodule.c gc_collect_generations`.
 
 ## Cycle algorithm (port of `gc_collect_main`)
@@ -142,7 +141,7 @@ list during `handle_weakrefs`.
 
 The list head goes on `objects.Header` as a new optional field. Types
 that opt into weakref support set a flag in `tp_flags`. CPython:
-`Include/cpython/object.h:235 tp_weaklistoffset`.
+[Include/cpython/object.h:235](https://github.com/python/cpython/blob/v3.14.5/Include/cpython/object.h#L235) tp_weaklistoffset.
 
 Callbacks: a weakref with a callback survives object death long enough
 to fire the callback once on a clean Python frame. CPython queues

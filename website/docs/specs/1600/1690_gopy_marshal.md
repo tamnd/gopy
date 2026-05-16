@@ -39,18 +39,18 @@ loading a .pyc file containing a code object for `json/__init__.py`.
 
 | C item | Location |
 |---|---|
-| `w_object` main write dispatch | `Python/marshal.c:459` |
-| `w_complex_object` FLAG_REF wrap | `Python/marshal.c:356` |
-| `w_long` TYPE_LONG encode | `Python/marshal.c:201` |
-| `w_short_pstring` / `w_pstring` | `Python/marshal.c:168` |
-| `r_object` main read dispatch | `Python/marshal.c:1159` |
-| `r_object` FLAG_REF read path | `Python/marshal.c:1022` |
-| `r_long` TYPE_LONG decode | `Python/marshal.c:937` |
-| `PyMarshal_ReadLastObjectFromFile` | `Python/marshal.c:1807` |
-| `PyMarshal_WriteObjectToString` | `Python/marshal.c:1928` |
-| `PyMarshal_ReadObjectFromString` | `Python/marshal.c:1876` |
+| `w_object` main write dispatch | [Python/marshal.c:459](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L459) |
+| `w_complex_object` FLAG_REF wrap | [Python/marshal.c:356](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L356) |
+| `w_long` TYPE_LONG encode | [Python/marshal.c:201](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L201) |
+| `w_short_pstring` / `w_pstring` | [Python/marshal.c:168](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L168) |
+| `r_object` main read dispatch | [Python/marshal.c:1159](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1159) |
+| `r_object` FLAG_REF read path | [Python/marshal.c:1022](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1022) |
+| `r_long` TYPE_LONG decode | [Python/marshal.c:937](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L937) |
+| `PyMarshal_ReadLastObjectFromFile` | [Python/marshal.c:1807](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1807) |
+| `PyMarshal_WriteObjectToString` | [Python/marshal.c:1928](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1928) |
+| `PyMarshal_ReadObjectFromString` | [Python/marshal.c:1876](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1876) |
 
-Type tags (full set, matching `Python/marshal.c:58-110`):
+Type tags (full set, matching [Python/marshal.c:58-110](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L58-L110)):
 
 | Tag | Char | Notes |
 |-----|------|-------|
@@ -90,7 +90,7 @@ slot in the decoder ref list, fill in the decoded object after
 construction. TYPE_REF `'r'` reads a 4-byte index and returns the
 stored object.
 
-TYPE_LONG encoding (`Python/marshal.c:201`): the absolute value is
+TYPE_LONG encoding ([Python/marshal.c:201](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L201)): the absolute value is
 split into base-2^15 digits in little-endian order. The digit count is
 stored as a signed 32-bit integer; negative count signals a negative
 number. Each digit is a uint16 in little-endian.
@@ -140,11 +140,11 @@ func Loads(data []byte) (objects.Object, error)
 |---|---|
 | `Python/marshal.c` `w_object` full dispatch | `marshal/write.go` (replaces encoder in marshal.go) |
 | `Python/marshal.c` `r_object` full dispatch | `marshal/read.go` (replaces decoder in marshal.go) |
-| `Python/marshal.c:201` TYPE_LONG encode/decode | `marshal/long.go` |
-| `Python/marshal.c:356` FLAG_REF writer, ref table | `marshal/refs.go` |
-| `Python/marshal.c:1022` FLAG_REF reader | `marshal/refs.go` |
-| `Python/marshal.c:1807` pyc header read | `marshal/pyc.go` |
-| `Python/marshal.c:1928` pyc header write | `marshal/pyc.go` |
+| [Python/marshal.c:201](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L201) TYPE_LONG encode/decode | `marshal/long.go` |
+| [Python/marshal.c:356](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L356) FLAG_REF writer, ref table | `marshal/refs.go` |
+| [Python/marshal.c:1022](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1022) FLAG_REF reader | `marshal/refs.go` |
+| [Python/marshal.c:1807](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1807) pyc header read | `marshal/pyc.go` |
+| [Python/marshal.c:1928](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1928) pyc header write | `marshal/pyc.go` |
 | Existing skeleton | `marshal/marshal.go` (shrinks to package doc + Dumps/Loads wrappers) |
 
 ## Checklist
@@ -156,10 +156,10 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 
 * [ ] `writeLong`: split `*big.Int` absolute value into base-2^15 uint16
   limbs, little-endian. Emit signed 32-bit count (negative = negative
-  number). CPython: `Python/marshal.c:201 w_long`.
+  number). CPython: [Python/marshal.c:201](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L201) w_long.
 * [ ] `readLong`: read signed 32-bit count, read `|count|` uint16 limbs,
   reconstruct `*big.Int`, apply sign from count sign.
-  CPython: `Python/marshal.c:937 r_long`.
+  CPython: [Python/marshal.c:937](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L937) r_long.
 * [ ] Zero `big.Int` encodes as count=0 with no limbs.
 * [ ] Negative numbers encode as negative count (not two's complement).
 * [ ] Round-trip property: `readLong(writeLong(n)) == n` for arbitrary
@@ -170,7 +170,7 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 * [ ] `writerRefs`: map from `objects.Object` identity to pre-assigned
   32-bit index. Populated during `w_complex_object` when an object is
   seen more than once or is flagged for interning.
-  CPython: `Python/marshal.c:356 w_complex_object`.
+  CPython: [Python/marshal.c:356](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L356) w_complex_object.
 * [ ] Write path: before writing a compound object, check if it needs a
   ref slot; if so, OR FLAG_REF (0x80) onto the tag byte and record
   `len(refs)` as the slot index.
@@ -178,18 +178,18 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
   order of first appearance.
 * [ ] Read path: if FLAG_REF bit is set on the tag, pre-allocate slot
   (`append(refs, nil)`) before decoding; after decoding, store the
-  result at that slot. CPython: `Python/marshal.c:1022`.
+  result at that slot. CPython: [Python/marshal.c:1022](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1022).
 * [ ] TYPE_REF (`'r'`): read 4-byte little-endian index, return
   `refs[index]`. Error if index out of range.
-  CPython: `Python/marshal.c:1159` REF arm.
+  CPython: [Python/marshal.c:1159](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1159) REF arm.
 
 ### TYPE_INTERNED string variants (marshal/write.go, marshal/read.go)
 
 * [ ] Write TYPE_SHORT_ASCII_INTERNED (`'Z'`) for interned strings
-  shorter than 256 bytes. CPython: `Python/marshal.c:459 w_object`
+  shorter than 256 bytes. CPython: [Python/marshal.c:459](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L459) w_object
   unicode arm.
 * [ ] Write TYPE_ASCII_INTERNED (`'A'`) for interned strings >= 256
-  bytes. CPython: `Python/marshal.c:459 w_object`.
+  bytes. CPython: [Python/marshal.c:459](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L459) w_object.
 * [ ] Write TYPE_SHORT_ASCII (`'z'`) for non-interned ASCII strings
   shorter than 256 bytes.
 * [ ] Write TYPE_ASCII (`'a'`) for non-interned ASCII strings >= 256
@@ -198,18 +198,18 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
   4-byte length).
 * [ ] Read path: TYPE_ASCII_INTERNED and TYPE_SHORT_ASCII_INTERNED add
   the decoded string to the interned-string table (the decoder's
-  `strings` slice). CPython: `Python/marshal.c:1159` string arms.
+  `strings` slice). CPython: [Python/marshal.c:1159](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1159) string arms.
 
 ### TYPE_CODE (marshal/write.go, marshal/read.go)
 
 * [ ] Write TYPE_CODE: emit tag, then all `objects.Code` fields in the
-  exact CPython order (`Python/marshal.c:459 w_object` code arm):
+  exact CPython order ([Python/marshal.c:459](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L459) w_object code arm):
   argcount, posonlyargcount, kwonlyargcount, stacksize, flags,
   code (bytes), consts (tuple), names (tuple), localsplusnames (tuple),
   localspluskinds (bytes), filename (str), name (str), qualname (str),
   firstlineno (int), linetable (bytes), exceptiontable (bytes).
 * [ ] Read TYPE_CODE: reconstruct `objects.Code` from the same field
-  sequence. CPython: `Python/marshal.c:1159` code arm.
+  sequence. CPython: [Python/marshal.c:1159](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1159) code arm.
 * [ ] Field order must match CPython 3.14 exactly; any mismatch
   produces an unreadable .pyc file.
 * [ ] CODE_FIELD_COUNT constant (16 for 3.14) guards against accidental
@@ -219,29 +219,29 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 
 * [ ] Write TYPE_BINARY_COMPLEX (`'Y'`): real then imag, each as
   IEEE 754 little-endian double (8 bytes each).
-  CPython: `Python/marshal.c:459 w_object` complex arm.
+  CPython: [Python/marshal.c:459](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L459) w_object complex arm.
 * [ ] Read TYPE_BINARY_COMPLEX: two 8-byte IEEE 754 doubles.
-  CPython: `Python/marshal.c:1159` binary-complex arm.
+  CPython: [Python/marshal.c:1159](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1159) binary-complex arm.
 * [n] TYPE_COMPLEX ASCII form (`'y'`): deferred to v0.9 with full
   complex number support.
 
 ### TYPE_SET / TYPE_FROZENSET (marshal/write.go, marshal/read.go)
 
 * [ ] Write TYPE_SET (`'<'`): 4-byte count then each element.
-  CPython: `Python/marshal.c:459 w_object` set arm.
+  CPython: [Python/marshal.c:459](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L459) w_object set arm.
 * [ ] Write TYPE_FROZENSET (`'>'`): same layout.
 * [ ] Read TYPE_SET / TYPE_FROZENSET: count then elements, reconstruct
   `*objects.Set` or `*objects.FrozenSet`.
-  CPython: `Python/marshal.c:1159` set/frozenset arm.
+  CPython: [Python/marshal.c:1159](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1159) set/frozenset arm.
 * [ ] Empty frozenset uses FLAG_REF dedup (CPython interns it).
 
 ### TYPE_DICT (marshal/write.go, marshal/read.go)
 
 * [ ] Write TYPE_DICT (`'{'`): interleaved key, value pairs terminated
   by a NULL byte (the `w_object(NULL)` sentinel).
-  CPython: `Python/marshal.c:459 w_object` dict arm.
+  CPython: [Python/marshal.c:459](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L459) w_object dict arm.
 * [ ] Read TYPE_DICT: read key/value pairs until NULL sentinel is read.
-  CPython: `Python/marshal.c:1159` dict arm.
+  CPython: [Python/marshal.c:1159](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1159) dict arm.
 
 ### .pyc header (marshal/pyc.go)
 
@@ -267,7 +267,7 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 * [x] TYPE_NONE, TYPE_TRUE, TYPE_FALSE: already in skeleton.
 * [x] TYPE_INT (32-bit): already in skeleton.
 * [ ] TYPE_INT64: emit when int fits in int64 but not int32
-  (Python 2 compat path). CPython: `Python/marshal.c:459`.
+  (Python 2 compat path). CPython: [Python/marshal.c:459](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L459).
 * [x] TYPE_BINARY_FLOAT: already in skeleton.
 * [x] TYPE_STRING (bytes): already in skeleton.
 * [x] TYPE_SMALL_TUPLE / TYPE_TUPLE: already in skeleton.
@@ -289,7 +289,7 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 * [ ] TYPE_INT64: read 8 bytes, return `*objects.Long`.
 * [x] TYPE_BINARY_FLOAT: already in skeleton.
 * [ ] TYPE_FLOAT ASCII form: parse ASCII float string.
-  CPython: `Python/marshal.c:1159` float arm.
+  CPython: [Python/marshal.c:1159](https://github.com/python/cpython/blob/v3.14.5/Python/marshal.c#L1159) float arm.
 * [x] TYPE_STRING (bytes): already in skeleton.
 * [x] TYPE_SMALL_TUPLE, TYPE_TUPLE: already in skeleton.
 * [x] TYPE_LIST: already in skeleton.

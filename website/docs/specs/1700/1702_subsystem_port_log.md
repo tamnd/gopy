@@ -85,10 +85,10 @@ byte-equal once A is in. Public surface:
 | Python entity | Source span | Status |
 |---------------|-------------|--------|
 | `__all__` re-export list | top of file | done |
-| `Counter` (init, `most_common`, `subtract`, `__add__`, `__sub__`, `__or__`, `__and__`, `__pos__`, `__neg__`, `total`) | `Lib/collections/__init__.py:600-870` | done |
-| `ChainMap` (init, `new_child`, `parents`, `maps`, the MutableMapping methods, `__missing__`, `__contains__`, `__bool__`, `__or__`, `__ror__`, `__ior__`) | `Lib/collections/__init__.py:912-1090` | done |
-| `namedtuple(typename, field_names, ...)` factory and the `_*` helper module | `Lib/collections/__init__.py:381-595` | done |
-| `UserDict`, `UserList`, `UserString` | `Lib/collections/__init__.py:1100-1530` | done |
+| `Counter` (init, `most_common`, `subtract`, `__add__`, `__sub__`, `__or__`, `__and__`, `__pos__`, `__neg__`, `total`) | [Lib/collections/__init__.py:600-870](https://github.com/python/cpython/blob/v3.14.5/Lib/collections/__init__.py#L600-L870) | done |
+| `ChainMap` (init, `new_child`, `parents`, `maps`, the MutableMapping methods, `__missing__`, `__contains__`, `__bool__`, `__or__`, `__ror__`, `__ior__`) | [Lib/collections/__init__.py:912-1090](https://github.com/python/cpython/blob/v3.14.5/Lib/collections/__init__.py#L912-L1090) | done |
+| `namedtuple(typename, field_names, ...)` factory and the `_*` helper module | [Lib/collections/__init__.py:381-595](https://github.com/python/cpython/blob/v3.14.5/Lib/collections/__init__.py#L381-L595) | done |
+| `UserDict`, `UserList`, `UserString` | [Lib/collections/__init__.py:1100-1530](https://github.com/python/cpython/blob/v3.14.5/Lib/collections/__init__.py#L1100-L1530) | done |
 
 **Gate.** `TestCollectionsImportResolvesNames` passes: `import collections` loads `stdlib/collections/__init__.py` via PathFinder and exposes `OrderedDict` and `deque` in the module dict.
 
@@ -113,11 +113,11 @@ introspection, `linecache` integration, the `_colorize` hook).
 
 | Python entity | Source span | Status |
 |---------------|-------------|--------|
-| Module-level helpers `print_tb`, `format_tb`, `print_exception`, `format_exception`, `print_exc`, `format_exc`, `print_last`, `print_stack`, `format_stack`, `extract_tb`, `extract_stack`, `clear_frames`, `walk_tb`, `walk_stack` | `Lib/traceback.py:30-260` | done |
-| `FrameSummary` (init, `__repr__`, `__eq__`, `line`) | `Lib/traceback.py:270-360` | done |
-| `StackSummary` (init, `extract`, `from_list`, `format`, `format_frame_summary`) | `Lib/traceback.py:370-540` | done |
-| `TracebackException` (init, `from_exception`, `format`, `format_exception_only`, `_format_final_exc_line`, `__eq__`, `__str__`, exception chain `__cause__` / `__context__` formatting) | `Lib/traceback.py:550-1050` | done |
-| `_Sentinel`, `_safe_string`, `_some_str`, `_format_traceback_exception_list`, `_walk_tb_with_full_positions`, `_extract_caret_anchors_from_line_segment`, the syntax-error caret renderer | `Lib/traceback.py:1060-1300` | done |
+| Module-level helpers `print_tb`, `format_tb`, `print_exception`, `format_exception`, `print_exc`, `format_exc`, `print_last`, `print_stack`, `format_stack`, `extract_tb`, `extract_stack`, `clear_frames`, `walk_tb`, `walk_stack` | [Lib/traceback.py:30-260](https://github.com/python/cpython/blob/v3.14.5/Lib/traceback.py#L30-L260) | done |
+| `FrameSummary` (init, `__repr__`, `__eq__`, `line`) | [Lib/traceback.py:270-360](https://github.com/python/cpython/blob/v3.14.5/Lib/traceback.py#L270-L360) | done |
+| `StackSummary` (init, `extract`, `from_list`, `format`, `format_frame_summary`) | [Lib/traceback.py:370-540](https://github.com/python/cpython/blob/v3.14.5/Lib/traceback.py#L370-L540) | done |
+| `TracebackException` (init, `from_exception`, `format`, `format_exception_only`, `_format_final_exc_line`, `__eq__`, `__str__`, exception chain `__cause__` / `__context__` formatting) | [Lib/traceback.py:550-1050](https://github.com/python/cpython/blob/v3.14.5/Lib/traceback.py#L550-L1050) | done |
+| `_Sentinel`, `_safe_string`, `_some_str`, `_format_traceback_exception_list`, `_walk_tb_with_full_positions`, `_extract_caret_anchors_from_line_segment`, the syntax-error caret renderer | [Lib/traceback.py:1060-1300](https://github.com/python/cpython/blob/v3.14.5/Lib/traceback.py#L1060-L1300) | done |
 
 `stdlib/traceback.py` is vendored byte-equal and walks the exception chain end-to-end. Multi-frame tracebacks render with the right `co_qualname` per frame, `__cause__` / `__context__` get the correct separators, and bare `raise` in an except clause re-raises the handled exception with its chain intact.
 
@@ -153,14 +153,14 @@ side is real.
 **Audit (2026-05-14).** A re-audit on 2026-05-14 found the
 2026-05-13 commits that flipped D and E to **done** ("io D: full
 port of Modules/_io/bufferedio.c", "io E: full port of
-Modules/_io/textio.c") shipped ports that are 31–41% of the
+Modules/_io/textio.c") shipped ports that are 31 to 41% of the
 upstream line count with major functional gaps. The same audit
-shows B, C, F, G ship 35–55% of upstream and miss whole methods
+shows B, C, F, G ship 35 to 55% of upstream and miss whole methods
 (`readinto` on FileIO, `getbuffer` on BytesIO, the
 `__getstate__/__setstate__` pickle pair on StringIO). The status
 above and the per-function tables below have been flipped back
 from **done** to the truth. Outstanding work is captured in the
-"Missing" notes after each function table; #571–#576 are
+"Missing" notes after each function table; #571 through #576 are
 re-opened and a follow-up commit will port the remaining
 functions in full.
 
@@ -380,12 +380,12 @@ no translation is installed) and `os.path` for help-formatting.
 
 | Class | Span | Status |
 |-------|------|--------|
-| `HelpFormatter` and its subclasses `RawDescriptionHelpFormatter`, `RawTextHelpFormatter`, `ArgumentDefaultsHelpFormatter`, `MetavarTypeHelpFormatter` | `Lib/argparse.py:200-690` | done |
-| `ArgumentError`, `ArgumentTypeError`, `_AttributeHolder`, `Namespace` | `Lib/argparse.py:730-870` | done |
-| `Action` hierarchy (`Action`, `BooleanOptionalAction`, `_StoreAction`, `_StoreConstAction`, `_StoreTrueAction`, `_StoreFalseAction`, `_AppendAction`, `_AppendConstAction`, `_CountAction`, `_HelpAction`, `_VersionAction`, `_SubParsersAction`, `_ExtendAction`) | `Lib/argparse.py:880-1380` | done |
-| `FileType` | `Lib/argparse.py:1390-1430` | done |
-| `_ActionsContainer`, `_ArgumentGroup`, `_MutuallyExclusiveGroup`, `_SubParsersAction.add_parser` | `Lib/argparse.py:1450-1860` | done |
-| `ArgumentParser` (init, `parse_args`, `parse_known_args`, `_parse_known_args`, `_get_optional_kwargs`, `_get_positional_kwargs`, `format_help`, `format_usage`, `exit`, `error`, the env / file-prefix reader) | `Lib/argparse.py:1870-2710` | done |
+| `HelpFormatter` and its subclasses `RawDescriptionHelpFormatter`, `RawTextHelpFormatter`, `ArgumentDefaultsHelpFormatter`, `MetavarTypeHelpFormatter` | [Lib/argparse.py:200-690](https://github.com/python/cpython/blob/v3.14.5/Lib/argparse.py#L200-L690) | done |
+| `ArgumentError`, `ArgumentTypeError`, `_AttributeHolder`, `Namespace` | [Lib/argparse.py:730-870](https://github.com/python/cpython/blob/v3.14.5/Lib/argparse.py#L730-L870) | done |
+| `Action` hierarchy (`Action`, `BooleanOptionalAction`, `_StoreAction`, `_StoreConstAction`, `_StoreTrueAction`, `_StoreFalseAction`, `_AppendAction`, `_AppendConstAction`, `_CountAction`, `_HelpAction`, `_VersionAction`, `_SubParsersAction`, `_ExtendAction`) | [Lib/argparse.py:880-1380](https://github.com/python/cpython/blob/v3.14.5/Lib/argparse.py#L880-L1380) | done |
+| `FileType` | [Lib/argparse.py:1390-1430](https://github.com/python/cpython/blob/v3.14.5/Lib/argparse.py#L1390-L1430) | done |
+| `_ActionsContainer`, `_ArgumentGroup`, `_MutuallyExclusiveGroup`, `_SubParsersAction.add_parser` | [Lib/argparse.py:1450-1860](https://github.com/python/cpython/blob/v3.14.5/Lib/argparse.py#L1450-L1860) | done |
+| `ArgumentParser` (init, `parse_args`, `parse_known_args`, `_parse_known_args`, `_get_optional_kwargs`, `_get_positional_kwargs`, `format_help`, `format_usage`, `exit`, `error`, the env / file-prefix reader) | [Lib/argparse.py:1870-2710](https://github.com/python/cpython/blob/v3.14.5/Lib/argparse.py#L1870-L2710) | done |
 
 **Gate.** `TestImportArgparse` passes. Vendored `stdlib/argparse.py` loads via PathFinder. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`.
 
@@ -589,13 +589,13 @@ Status legend:
 | re / _sre | #510 | done | `Lib/re/` + `Modules/_sre/` | `stdlib/re/` + `module/_sre/` | I | Full CPython-faithful bytecode interpreter; vendored Python layer drives it. Final gate pinned in `stdlibinit/re_match_smoke_test.go`. See spec 1703. |
 | enum | #544 | done | `Lib/enum.py` | `stdlib/enum.py` | I | Vendored byte-equal; PEP 487 hooks (`__init_subclass__`, `__set_name__`) and the `@enum.global_enum` decorator land via the mappingproxy methodlist + `dict.update(keys() fast path)` fix. Pinned by `stdlibinit/enum_import_test.go` and `stdlibinit/re_match_smoke_test.go`. |
 | difflib | #512 | done | `Lib/difflib.py` | `stdlib/difflib.py` | I | Vendored byte-equal (2064 lines). Loads via PathFinder. |
-| io / _io | #514 | done | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files fully ported. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` / `fileio.c` / `bufferedio.c` plus `textio.c` (write-flush helper landed 2026-05-15: `pending_bytes` / `pending_bytes_count` / `chunk_size` ported from `Modules/_io/textio.c:706`; `_textiowrapper_writeflush` at `module/io/textiowrapper.go writeflush`). bufferedio re-port 2026-05-14 replaces the split readBuf/writeBuf model with CPython's unified slab + pos/raw_pos/read_end/write_pos/write_end offsets so BufferedRandom interleaves reads and writes correctly; iobase re-port 2026-05-14 adds the readline peek fast path, fixes the readlines hint-break rule, centralizes `iobase_unsupported`, and exports `IOBaseCannotPickle`. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
+| io / _io | #514 | done | `Lib/io.py` + `Modules/_io/` | `stdlib/io.py` + `module/_io/` | I | All seven C files fully ported. `_iomodule.c` / `iobase.c` / `bytesio.c` / `stringio.c` / `fileio.c` / `bufferedio.c` plus `textio.c` (write-flush helper landed 2026-05-15: `pending_bytes` / `pending_bytes_count` / `chunk_size` ported from [Modules/_io/textio.c:706](https://github.com/python/cpython/blob/v3.14.5/Modules/_io/textio.c#L706); `_textiowrapper_writeflush` at `module/io/textiowrapper.go writeflush`). bufferedio re-port 2026-05-14 replaces the split readBuf/writeBuf model with CPython's unified slab + pos/raw_pos/read_end/write_pos/write_end offsets so BufferedRandom interleaves reads and writes correctly; iobase re-port 2026-05-14 adds the readline peek fast path, fixes the readlines hint-break rule, centralizes `iobase_unsupported`, and exports `IOBaseCannotPickle`. `stdlib/io.py` is vendored byte-equal; `TestImportIO` green. |
 | argparse | #515 | done | `Lib/argparse.py` | `stdlib/argparse.py` (via PathFinder) | I | Removed inittab shim; PathFinder serves Lib/argparse.py. VM fix: `tuple.__mul__` (sq_concat + sq_repeat) was missing, causing `(x,)*n` to TypeError in `_metavar_formatter`. Gate: `add_argument('--name'); add_argument('-v', action='count'); parse_args(['--name','x','-vv'])` → `x\n2`. Pinned in `stdlibinit/argparse_import_test.go`. |
 | signal / _signal | #516 | done | `Modules/signalmodule.c` + `Lib/signal.py` | `module/_signal/` + `stdlib/signal.py` | I | Full port of signalmodule.c (16 functions, raw darwin syscalls); `stdlib/signal.py` vendored byte-equal. Gate: `signal.Signals.SIGINT.value==2`, `signal.Handlers.SIG_DFL.value==0`. |
 | weakref / _weakref | #517 | done | `Lib/weakref.py` + `Modules/_weakref.c` | `stdlib/weakref.py` (via PathFinder) + `module/_weakref/` | I | Removed inittab shim so PathFinder serves Lib/weakref.py. Fixed `property.getter/setter/deleter` and `WeakrefType.TpNew`. Gate: `r() is obj → True`, `getweakrefcount → 1`. |
 | os + posixpath + ntpath | #518 | done | `Lib/os.py`, `Lib/posixpath.py`, `Lib/ntpath.py`, `Modules/posixmodule.c` slice | `stdlib/` + `module/os/` | I | All posixmodule.c slice functions done: getcwd, getcwdb, chdir, listdir, scandir, stat, lstat, fstat, open, close, read, write, lseek, dup, pipe, unlink/remove/rename/mkdir/rmdir/makedirs/replace, getenv/environ, getpid/getuid/getppid, kill, waitpid, fspath, access, get_terminal_size, O_*/F_*/SEEK_* constants. os.py, posixpath.py, ntpath.py, genericpath.py vendored byte-equal. |
 | VM / compile audit | #521 | done | `Python/ceval.c`, `Python/bytecodes.c`, `Python/compile.c` | (in-tree) | A | All three sweeps closed: ceval.c handlers (#586), bytecodes.c op bodies (#587), compile.c codegen (#588). Findings folded into VM bug fix tasks (#589-#591). |
-| socket | #606 | done | `Lib/socket.py` + `Modules/socketmodule.c` | `stdlib/socket.py` + `module/socket/` shim + `module/_socket/` | I | `Lib/socket.py` vendored byte-equal (992 lines); PathFinder serves it on top of full `_socket` port (#601). `AF_*` / `SOCK_*` promoted to `AddressFamily` / `SocketKind` IntEnums. Gate: `stdlibinit/socket_import_test.go`. |
+| socket | #606 | done | `Lib/socket.py` + `Modules/socketmodule.c` | `stdlib/socket.py` + `module/socket/` shim + `module/_socket/` | I | `Lib/socket.py` vendored byte-equal (992 lines); PathFinder serves it on top of full `_socket` port (#601): `AF_*` / `SOCK_*` promoted to `AddressFamily` / `SocketKind` IntEnums. Gate: `stdlibinit/socket_import_test.go`. |
 
 Wave column: `1` = first parallel batch, `2` = second batch
 (queued after wave 1 merges), `3` = depends on earlier waves,
@@ -611,7 +611,7 @@ view.
 **Done (full port landed):**
 - [x] errno (#499)
 - [x] fnmatch (#519)
-- [x] types (#509) — all five descriptor types resolve via `type(...)` in `stdlib/types.py`
+- [x] types (#509): all five descriptor types resolve via `type(...)` in `stdlib/types.py`
 - [x] collections (#497)
 - [x] contextlib (#508)
 - [x] abc (#533)
@@ -626,16 +626,16 @@ view.
 - [x] signal / _signal (#516)
 - [x] weakref / _weakref (#517)
 - [x] os + posixpath + ntpath (#518)
-- [x] dataclasses (#522) — `make_dataclass`, `order`, `slots`, `InitVar` all in `module/dataclasses/`
-- [x] VM / compile audit (#521) — three sweeps closed (#586/#587/#588)
-- [x] socket (#606) — `Lib/socket.py` vendored on top of full `_socket` (#601)
-- [x] io / _io (#514) — all seven `_io` C files fully ported; codecs in `module/io/codecs.go` shipped PR #44; `_textiowrapper_writeflush` + `pending_bytes` batching landed 2026-05-15
-- [x] _colorize (#520) — inittab shim removed 2026-05-15; PathFinder serves `stdlib/_colorize.py`
-- [x] functools (#498) — inittab shim flipped 2026-05-15; PathFinder serves `stdlib/functools.py` on top of full `_functools`; `_lru_cache_wrapper` now accepts attribute assignment
-- [x] pprint (#511) — inittab stub deleted 2026-05-15; PathFinder serves byte-equal `stdlib/pprint.py`
-- [x] time (#500) — dead `module/time/` stub deleted 2026-05-15; real port is `module/_time/` (1074 lines)
+- [x] dataclasses (#522): `make_dataclass`, `order`, `slots`, `InitVar` all in `module/dataclasses/`
+- [x] VM / compile audit (#521): three sweeps closed (#586/#587/#588)
+- [x] socket (#606): `Lib/socket.py` vendored on top of full `_socket` (#601)
+- [x] io / _io (#514): all seven `_io` C files fully ported; codecs in `module/io/codecs.go` shipped PR #44; `_textiowrapper_writeflush` + `pending_bytes` batching landed 2026-05-15
+- [x] _colorize (#520): inittab shim removed 2026-05-15; PathFinder serves `stdlib/_colorize.py`
+- [x] functools (#498): inittab shim flipped 2026-05-15; PathFinder serves `stdlib/functools.py` on top of full `_functools`; `_lru_cache_wrapper` now accepts attribute assignment
+- [x] pprint (#511): inittab stub deleted 2026-05-15; PathFinder serves byte-equal `stdlib/pprint.py`
+- [x] time (#500): dead `module/time/` stub deleted 2026-05-15; real port is `module/_time/` (1074 lines)
 
-- [x] traceback (#496) — `stdlib/traceback.py` vendored byte-equal; multi-frame walk, chain rendering, bare-raise re-raise all green after PR #54. PR #55 closed the linecache on-disk source-context lookup by adding TextIOWrapper's instance `__dict__` slot and type-level `__enter__` / `__exit__` descriptors. 2026-05-15 (task #608): `handleException` now synthesizes-and-installs on the thread state at the bottom unwind frame so bare Go errors (`1/0`, `IndexError:` prefix, etc.) pick up one TB entry per frame on the way up, matching the typed-raise path. `FOR_ITER` mirrors CPython `iter_iternext` and clears the absorbed `IndexError`/`StopIteration` off the thread state. Gate: `stdlibinit/traceback_bare_err_test.go` (three-frame `1/0` chain renders end-to-end through `traceback.format_exception`).
+- [x] traceback (#496): `stdlib/traceback.py` vendored byte-equal; multi-frame walk, chain rendering, bare-raise re-raise all green after PR #54. PR #55 closed the linecache on-disk source-context lookup by adding TextIOWrapper's instance `__dict__` slot and type-level `__enter__` / `__exit__` descriptors. 2026-05-15 (task #608): `handleException` now synthesizes-and-installs on the thread state at the bottom unwind frame so bare Go errors (`1/0`, `IndexError:` prefix, etc.) pick up one TB entry per frame on the way up, matching the typed-raise path. `FOR_ITER` mirrors CPython `iter_iternext` and clears the absorbed `IndexError`/`StopIteration` off the thread state. Gate: `stdlibinit/traceback_bare_err_test.go` (three-frame `1/0` chain renders end-to-end through `traceback.format_exception`).
 
 **Partial (vendor in place, behaviour still gated):** none.
 
@@ -784,7 +784,7 @@ registered through `imp.AppendInittab("_types", …)` from
 `stdlibinit/registry.go`. The runtime support that this port
 exposed came along the way:
 `objects/mapping_proxy.go` (new port of CPython mappingproxy from
-`Objects/descrobject.c:1034`, with read-only enforcement, repr,
+[Objects/descrobject.c:1034](https://github.com/python/cpython/blob/v3.14.5/Objects/descrobject.c#L1034), with read-only enforcement, repr,
 iter, contains, hash, richcompare),
 `objects/namespace.go` (`TpNew` so `SimpleNamespace(a=1, b=2)`
 works), `objects/property.go` (`TpNew` so `@property` decorators

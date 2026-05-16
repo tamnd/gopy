@@ -109,7 +109,7 @@ tagging v0.7.0.
 
 * `1622-A` Port `PyPreConfig` struct + defaults +
   `PyPreConfig_InitPythonConfig`.
-  CPython: `Python/preconfig.c:33 PyPreConfig_InitPythonConfig`.
+  CPython: [Python/preconfig.c:33](https://github.com/python/cpython/blob/v3.14.5/Python/preconfig.c#L33) PyPreConfig_InitPythonConfig.
 * `1622-B` Port the `PYTHON*` env-var reader subset gopy
   honours (`PYTHONHOME`, `PYTHONPATH`, `PYTHONHASHSEED`,
   `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED`, `PYTHONUTF8`,

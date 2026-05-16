@@ -51,7 +51,7 @@ in the codec / cookie layer:
   `f.seek(saved)`) raises in gopy where CPython would return.
 - `Reconfigure` is partially wired (`textiowrapper.go:1086`) but
   does not rebuild the codecs when `encoding=` / `errors=` change,
-  because there is no codec object to rebuild — just a string.
+  because there is no codec object to rebuild. Just a string.
 
 Sources of truth: `/Users/apple/cpython-314/Modules/_io/textio.c`
 and `/Users/apple/cpython-314/Lib/codecs.py` for the abstract
@@ -62,7 +62,7 @@ IncrementalDecoder/Encoder interface.
 | # | CPython | Lines | gopy target | Status |
 |---|---------|------:|-------------|--------|
 | A | `Modules/_io/textio.c` codec hook block: `_textiowrapper_set_decoder`, `_textiowrapper_set_encoder`, `_textiowrapper_fix_encoder_state`, `_textiowrapper_decode` | ~150 | `module/io/textio_codec.go` (new) | pending |
-| B | `Modules/_io/textio.c` read pipeline: `textiowrapper_read_chunk`, `textiowrapper_set_decoded_chars`, `textiowrapper_get_decoded_chars`, `_textiowrapper_writeflush` already done | ~300 | `module/io/textio_read.go` (new) — move read / readline off `decodeBytes` | pending |
+| B | `Modules/_io/textio.c` read pipeline: `textiowrapper_read_chunk`, `textiowrapper_set_decoded_chars`, `textiowrapper_get_decoded_chars`, `_textiowrapper_writeflush` already done | ~300 | `module/io/textio_read.go` (new); move read / readline off `decodeBytes` | pending |
 | C | `Modules/_io/textio.c` cookie: `cookie_type`, `textiowrapper_parse_cookie`, `textiowrapper_build_cookie`, the tell/seek `_impl` bodies | ~280 | `module/io/textio_cookie.go` (new) + rewrite of `Tell` / `Seek` in `textiowrapper.go` | pending |
 | D | `Modules/_io/textio.c` reconfigure: `_io_TextIOWrapper_reconfigure_impl`, validation of `encoding=` / `errors=` / `newline=` changes against the live decoder / encoder | ~140 | `module/io/textiowrapper.go` (replace existing skeleton) | pending |
 
@@ -74,9 +74,9 @@ IncrementalDecoder/Encoder interface.
 | 2 | B | Port `textiowrapper_read_chunk`: call `buffer.read1(size)`, feed to the decoder, snapshot `(dec_flags, bytes_fed)`, update `b2cratio`, drive `decoded_chars` / `decoded_chars_used`. Rewrite `read` and `readline` to go through it. Delete `decodeBytes` and the one-shot path. | pending |
 | 3 | C | Port the cookie: 5 fields (`start_pos`, `dec_flags`, `bytes_to_feed`, `chars_to_skip`, `need_eof`) packed via `_PyLong_FromByteArray` / `_PyLong_AsByteArray` in little-endian order. Rewrite `Tell` to build the cookie from the decoder snapshot + chars already consumed; rewrite `Seek` to parse the cookie, reposition the buffer, feed bytes back through a fresh decoder, then skip chars. | pending |
 | 4 | D | Port `reconfigure` fully: validate that no read-ahead / write-ahead is pending, rebuild the codecs when `encoding` / `errors` changes, re-run `setNewline` when `newline` changes, and re-wire `line_buffering` / `write_through`. | pending |
-| Gate | | After all four phases land: `t = open(path, 'r', encoding='utf-16'); t.read(2); pos = t.tell(); rest = t.read(); t.seek(pos); t.read() == rest` — i.e. tell+seek round-trips mid-stream against a multi-byte encoding. `for line in open(...): pass` with mixed CR/LF still green. `reconfigure(encoding='latin-1', newline=None)` after a `read` raises the expected `ValueError` (CPython rejects encoding swap when read-ahead is pending). | pending |
+| Gate | | After all four phases land: `t = open(path, 'r', encoding='utf-16'); t.read(2); pos = t.tell(); rest = t.read(); t.seek(pos); t.read() == rest`. Tell+seek round-trips mid-stream against a multi-byte encoding. `for line in open(...): pass` with mixed CR/LF still green. `reconfigure(encoding='latin-1', newline=None)` after a `read` raises the expected `ValueError` (CPython rejects encoding swap when read-ahead is pending). | pending |
 
-## Phase 1 — IncrementalDecoder / IncrementalEncoder
+## Phase 1. IncrementalDecoder / IncrementalEncoder
 
 `module/io/textio_codec.go` (new) exports:
 
@@ -105,7 +105,7 @@ func getIncrementalEncoder(encoding, errors string) (IncrementalEncoder, error)
 `decodeBytes` / `encodeString` switch becomes the bodies of the
 built-in Go decoders / encoders for utf-8, ascii, and latin-1.
 
-`utf-16` and `utf-32` need real state — `dec_flags` encodes "I am
+`utf-16` and `utf-32` need real state. `dec_flags` encodes "I am
 mid-BOM" / "I emitted the BOM" so a chunk boundary mid-BOM works.
 This is the case the current code silently mis-handles.
 
@@ -116,7 +116,7 @@ This is the case the current code silently mis-handles.
 chain of `decode(b, False)` calls, assert the concatenation equals
 `"héllo"`.
 
-## Phase 2 — `_textiowrapper_read_chunk`
+## Phase 2. `_textiowrapper_read_chunk`
 
 Per CPython `textio.c:1853`:
 
@@ -144,7 +144,7 @@ Round-trip read fixture: write a fixed corpus to a `BytesIO` wrapped
 in a `TextIOWrapper(encoding='utf-8')`, read the whole thing back
 character by character. Match CPython byte-for-byte.
 
-## Phase 3 — Cookie pack / unpack
+## Phase 3. Cookie pack / unpack
 
 `textio.c:2387 cookie_type`:
 
@@ -185,7 +185,7 @@ decoder.
 read past the BOM, tell, read more, seek back, re-read, assert
 equality.
 
-## Phase 4 — `reconfigure`
+## Phase 4. `reconfigure`
 
 `textio.c:1370` `_io_TextIOWrapper_reconfigure_impl`. The current
 gopy skeleton accepts the call but never rebuilds the codec
@@ -202,8 +202,8 @@ objects (because there are none). Phase 4 wires it for real:
 ### Gate
 
 Open in `'r'`, read partial content, call
-`f.reconfigure(encoding='latin-1')` → expect `ValueError`. Open
-fresh, no read, call same — expect success and the next `read`
+`f.reconfigure(encoding='latin-1')` then expect `ValueError`. Open
+fresh, no read, call same. Expect success and the next `read`
 returns latin-1 decoded bytes.
 
 ## Final gate
@@ -213,7 +213,7 @@ After all four phases land:
 1. `decodeBytes` and `encodeString` are deleted from
    `module/io/textiowrapper.go`.
 2. `TextIOWrapper.encoding` is no longer the single source of
-   truth — the decoder / encoder objects are.
+   truth. The decoder / encoder objects are.
 3. `module/io/codecs.go` either gets folded into the new
    `textio_codec.go` layer or stays as the low-level codec table
    the new layer reads from.

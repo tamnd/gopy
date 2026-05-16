@@ -37,9 +37,9 @@ known follow-up; `pending` not started.
 | Closure / decorator codegen | done | Stack-underflow at STORE_FAST was three layered bugs: liftCode dropped Argcount, decorator codegen used CALL 1 instead of CALL 0 (3.14 self_or_null promotion), and MAKE_CELL never moved the parameter value into the cell. Fixed in PR #21 commit 2fdcbd2. `callPyFunction` also gained `*args` / `**kwargs` / kw-only support. |
 | Chained-comparison compile bug | done | Two layered fixes: `compile/codegen_expr_op.go` `visitCompare` was missing the `COPY 1` + `TO_BOOL` pair before each rung's `POP_JUMP_IF_FALSE` (3.14 codegen.c:3552 `codegen_compare`); independently, `compile/flowgraph.go` `ApplyLabelMap` predicate failed to resolve `JUMP_NO_INTERRUPT` opargs because the pseudo opcode is absent from `opcodeFlags`. Both fixed. |
 | Loader-error propagation | done | `imp.ImportModuleLevel` was treating any wrapped `ErrModuleNotFound` from `PathFinder.FindModule` as a finder miss and discarding it, folding transitive failures into a misleading "No module named 'unittest'". Introduced `errFinderMiss` (still wraps `ErrModuleNotFound` for external callers) and match it specifically in the import driver. |
-| Cell-binding subsystem | done | Two layered fixes ported as one subsystem. `compile/codegen_stmt_funclike.go:emitMakeCellAndCopyFree` used to emit `MAKE_CELL` only for cell-bound parameters; ported the full CPython contract (`Python/flowgraph.c:3792 insert_prefix_instructions` cellvars block) so every cell var gets a `MAKE_CELL` at the prologue. That uncovered a latent operand bug in `compile/codegen_expr_name.go:emitDeref` where FREE-var `LOAD`/`STORE`/`DELETE_DEREF` emitted the raw FreeVars pool index instead of the deref-space offset `len(CellVars) + freeIdx`; ported the offset rewrite that `Python/flowgraph.c:3844 fix_cell_offsets` applies. Nested closures with non-parameter cell vars (the genexp inside `unittest.loader.shouldIncludeMethod` capturing `fullName`) now resolve correctly. |
-| BaseException getset | done | `errors/exception_attrs.go` registers `args`, `__traceback__`, `__context__`, `__cause__`, `__suppress_context__` as data descriptors on `PyExc_BaseException` and wires `GenericGetAttr`/`GenericSetAttr` on the type. `unittest.result._clean_tracebacks` reads/writes these attributes; without them `addFailure` raised `AttributeError` and the failing-test path crashed. CPython: `Objects/exceptions.c:508 BaseException_getset`. |
-| Exception str / repr | done | `excStr` / `excRepr` on `newExcType` port `BaseException_str` and `BaseException_repr` (`Objects/exceptions.c:171, 193`) so failing-test output shows `AssertionError: 1 != 2` instead of `<AssertionError object at 0x...>`. |
+| Cell-binding subsystem | done | Two layered fixes ported as one subsystem. `compile/codegen_stmt_funclike.go:emitMakeCellAndCopyFree` used to emit `MAKE_CELL` only for cell-bound parameters; ported the full CPython contract ([Python/flowgraph.c:3792](https://github.com/python/cpython/blob/v3.14.5/Python/flowgraph.c#L3792) insert_prefix_instructions cellvars block) so every cell var gets a `MAKE_CELL` at the prologue. That uncovered a latent operand bug in `compile/codegen_expr_name.go:emitDeref` where FREE-var `LOAD`/`STORE`/`DELETE_DEREF` emitted the raw FreeVars pool index instead of the deref-space offset `len(CellVars) + freeIdx`; ported the offset rewrite that [Python/flowgraph.c:3844](https://github.com/python/cpython/blob/v3.14.5/Python/flowgraph.c#L3844) fix_cell_offsets applies. Nested closures with non-parameter cell vars (the genexp inside `unittest.loader.shouldIncludeMethod` capturing `fullName`) now resolve correctly. |
+| BaseException getset | done | `errors/exception_attrs.go` registers `args`, `__traceback__`, `__context__`, `__cause__`, `__suppress_context__` as data descriptors on `PyExc_BaseException` and wires `GenericGetAttr`/`GenericSetAttr` on the type. `unittest.result._clean_tracebacks` reads/writes these attributes; without them `addFailure` raised `AttributeError` and the failing-test path crashed. CPython: [Objects/exceptions.c:508](https://github.com/python/cpython/blob/v3.14.5/Objects/exceptions.c#L508) BaseException_getset. |
+| Exception str / repr | done | `excStr` / `excRepr` on `newExcType` port `BaseException_str` and `BaseException_repr` ([Objects/exceptions.c:171](https://github.com/python/cpython/blob/v3.14.5/Objects/exceptions.c#L171), [193](https://github.com/python/cpython/blob/v3.14.5/Objects/exceptions.c#L193)) so failing-test output shows `AssertionError: 1 != 2` instead of `<AssertionError object at 0x...>`. |
 | Generator goroutine thread | done | `vm/eval_gen.go` calls `setActiveThread` inside the generator goroutine so `sys.exc_info()` works from within `@contextmanager` bodies (the goid-to-thread map used to miss the generator goroutine). |
 | Handled-exception slot | done | `state.Thread.handled` (separate from `exc`) backs `sys.exc_info()` and the `PUSH_EXC_INFO` / `POP_EXCEPT` pair. The original combined-slot scheme tripped on the `with` codegen pattern `COPY 3 / POP_EXCEPT / RERAISE 1`. |
 
@@ -156,10 +156,10 @@ to close before any `Lib/test/test_*.py` module can run.
 - CPython 3.14 source tree at `/Users/apple/github/python/cpython/`. Reference
   paths in this spec use that root.
 - `gopy/imp/` is the existing port of CPython's `Python/import.c`.
-  `imp.AppendInittab` (`Python/import.c:2243 PyImport_AppendInittab`)
-  and `imp.ImportModule` (`Python/import.c:1450 PyImport_ImportModule`)
+  `imp.AppendInittab` ([Python/import.c:2243](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2243) PyImport_AppendInittab)
+  and `imp.ImportModule` ([Python/import.c:1450](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L1450) PyImport_ImportModule)
   are already in place.
-- `gopy/imp/bootstrap.go` ports `Python/pylifecycle.c:987 init_importlib`
+- `gopy/imp/bootstrap.go` ports [Python/pylifecycle.c:987](https://github.com/python/cpython/blob/v3.14.5/Python/pylifecycle.c#L987) init_importlib
   but returns `ErrBootstrapNotReady` because the frozen importlib code
   objects are not embedded.
 
@@ -239,7 +239,7 @@ CPython references:
 - `Modules/config.c.in:26 _PyImport_Inittab[]`: the static array.
 - `Modules/makesetup:1 makesetup`: the script that generates
   `Modules/config.c` from `Modules/Setup` files.
-- `Python/import.c:2403 _PyImport_FindBuiltin`: the lookup that
+- [Python/import.c:2403](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2403) _PyImport_FindBuiltin: the lookup that
   walks `INITTAB`.
 
 ### Step B. Built-in modules unittest depends on (audit and fill)
@@ -294,13 +294,13 @@ when run from its parent directory. `imp/pathfinder_test.go` pins
 the top-level / package / not-found / SetPathFinder paths.
 
 CPython references:
-- `Lib/importlib/_bootstrap_external.py:1531 FileFinder`: the
+- [Lib/importlib/_bootstrap_external.py:1531](https://github.com/python/cpython/blob/v3.14.5/Lib/importlib/_bootstrap_external.py#L1531) FileFinder: the
   finder that walks one directory entry on `sys.path`.
-- `Lib/importlib/_bootstrap_external.py:1080 SourceFileLoader`
+- [Lib/importlib/_bootstrap_external.py:1080](https://github.com/python/cpython/blob/v3.14.5/Lib/importlib/_bootstrap_external.py#L1080) SourceFileLoader
  : loads a `.py` file, compiles it, executes it as a module.
-- `Lib/importlib/_bootstrap_external.py:1190 SourcelessFileLoader`
+- [Lib/importlib/_bootstrap_external.py:1190](https://github.com/python/cpython/blob/v3.14.5/Lib/importlib/_bootstrap_external.py#L1190) SourcelessFileLoader
  : loads a `.pyc` file. Out of scope for v0.12.1; sources only.
-- `Lib/importlib/_bootstrap.py:1184 _bootstrap._find_and_load`: the
+- [Lib/importlib/_bootstrap.py:1184](https://github.com/python/cpython/blob/v3.14.5/Lib/importlib/_bootstrap.py#L1184) `_bootstrap._find_and_load`: the
   top-level lookup that consults `sys.meta_path` and then the path
   finders.
 
@@ -365,7 +365,7 @@ the class object.
 root once it has an `__init__.py`).
 
 CPython references:
-- `Lib/test/support/__init__.py:1`: the support module surface.
+- [Lib/test/support/__init__.py:1](https://github.com/python/cpython/blob/v3.14.5/Lib/test/support/__init__.py#L1): the support module surface.
 - `Lib/test/support/import_helper.py`: used by test_grammar.py
   among many.
 - `Lib/test/support/warnings_helper.py`: used by test_grammar.py.

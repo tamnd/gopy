@@ -171,7 +171,7 @@ The walk stops on:
   trace; deopt arms become exits).
 
 CPython's `translate_bytecode_to_trace` is the canonical reference
-(`Python/optimizer.c:554-1001`). The Go port mirrors its control
+([Python/optimizer.c:554-1001](https://github.com/python/cpython/blob/v3.14.5/Python/optimizer.c#L554-L1001)). The Go port mirrors its control
 flow byte for byte, including the projection of inlined Python
 calls (`PUSH_FRAME`).
 

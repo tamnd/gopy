@@ -126,7 +126,7 @@ The intrinsic table entry shape is `func(ts *state.Thread, v Object)`,
 which has no frame access. v0.9 special-cases `UnaryImportStarID`
 inside the `CALL_INTRINSIC_1` arm so `e.importStar(v)` can read and
 write the current frame's locals. The body lives in
-`vm/eval_import.go` and follows `Python/intrinsics.c:124 import_star`:
+`vm/eval_import.go` and follows [Python/intrinsics.c:124](https://github.com/python/cpython/blob/v3.14.5/Python/intrinsics.c#L124) import_star:
 prefer `__all__`, fall back to `__dict__` while skipping names that
 start with `_`, and `SetItem` each name into the destination dict.
 

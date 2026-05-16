@@ -148,8 +148,8 @@ equals the numeric value `_constants.py` ships, by reading
 `_constants.py` at test time and comparing each name.
 
 **CPython references.**
-- `Modules/_sre/sre_constants.h:1` `SRE_OP_*` enum
-- `Lib/re/_constants.py:78` `OPCODES`
+- [Modules/_sre/sre_constants.h:1](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre_constants.h#L1) `SRE_OP_*` enum
+- [Lib/re/_constants.py:78](https://github.com/python/cpython/blob/v3.14.5/Lib/re/_constants.py#L78) `OPCODES`
 
 ### Phase 2. _casefix port
 
@@ -163,7 +163,7 @@ the table directly and cite the generator.
 case-folds to ASCII i under Unicode rules).
 
 **CPython reference.**
-- `Lib/re/_casefix.py:1` `_EXTRA_CASES`
+- [Lib/re/_casefix.py:1](https://github.com/python/cpython/blob/v3.14.5/Lib/re/_casefix.py#L1) `_EXTRA_CASES`
 
 ### Phase 3. Match engine core
 
@@ -202,11 +202,11 @@ opcode per family in the test: literal, charset, repeat,
 alternation, mark, groupref, AT-boundary.
 
 **CPython references.**
-- `Modules/_sre/sre_lib.h:599` `SRE(match)` - dispatcher
-- `Modules/_sre/sre_lib.h:1692` `SRE(search)` - search wrapper
-- `Modules/_sre/sre_lib.h:193` `SRE(count)` - REPEAT_ONE counter
-- `Modules/_sre/sre.h:71` `SRE_REPEAT` - repeat-stack node
-- `Modules/_sre/sre.h:81` `SRE_STATE` - match state
+- [Modules/_sre/sre_lib.h:599](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre_lib.h#L599) `SRE(match)` - dispatcher
+- [Modules/_sre/sre_lib.h:1692](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre_lib.h#L1692) `SRE(search)` - search wrapper
+- [Modules/_sre/sre_lib.h:193](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre_lib.h#L193) `SRE(count)` - REPEAT_ONE counter
+- [Modules/_sre/sre.h:71](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.h#L71) `SRE_REPEAT` - repeat-stack node
+- [Modules/_sre/sre.h:81](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.h#L81) `SRE_STATE` - match state
 
 ### Phase 4. Pattern type and compile
 
@@ -230,10 +230,10 @@ a Pattern that carries the bytecode produced by `_compiler.py`.
 with a hand-crafted bytecode list returns a Match.
 
 **CPython references.**
-- `Modules/_sre/sre.c:1621` `_sre_compile_impl`
-- `Modules/_sre/sre.c:3166` Pattern_match
-- `Modules/_sre/sre.c:3225` Pattern_search
-- `Modules/_sre/sre.c:2959` Scanner_match
+- [Modules/_sre/sre.c:1621](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L1621) `_sre_compile_impl`
+- [Modules/_sre/sre.c:3166](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L3166) Pattern_match
+- [Modules/_sre/sre.c:3225](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L3225) Pattern_search
+- [Modules/_sre/sre.c:2959](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L2959) Scanner_match
 
 ### Phase 5. Match type
 
@@ -255,7 +255,7 @@ Port the Match object surface.
 pattern. Both numeric and named group access pinned.
 
 **CPython reference.**
-- `Modules/_sre/sre.c:3225` match methods block
+- [Modules/_sre/sre.c:3225](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L3225) match methods block
 
 ### Phase 6. Higher-level Pattern methods
 
@@ -268,11 +268,11 @@ zero-width separator that CPython 3.7+ tolerates, findall on a
 multi-group pattern returning tuples).
 
 **CPython references.**
-- `Modules/_sre/sre.c:2400` Pattern_findall
-- `Modules/_sre/sre.c:2453` Pattern_finditer
-- `Modules/_sre/sre.c:2509` Pattern_split
-- `Modules/_sre/sre.c:2618` Pattern_sub
-- `Modules/_sre/sre.c:2705` Pattern_subn
+- [Modules/_sre/sre.c:2400](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L2400) Pattern_findall
+- [Modules/_sre/sre.c:2453](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L2453) Pattern_finditer
+- [Modules/_sre/sre.c:2509](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L2509) Pattern_split
+- [Modules/_sre/sre.c:2618](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L2618) Pattern_sub
+- [Modules/_sre/sre.c:2705](https://github.com/python/cpython/blob/v3.14.5/Modules/_sre/sre.c#L2705) Pattern_subn
 
 ### Phase 7. Vendor the Python layer
 

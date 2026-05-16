@@ -57,17 +57,17 @@ gopy/pythonrun/
 * `1624-A` Port `PyRun_SimpleStringFlags`. Drives the v0.6
   `gopy -c` smoke; same fixture must keep passing once the
   call site moves into pythonrun.
-  CPython: `Python/pythonrun.c:432 PyRun_SimpleStringFlags`.
+  CPython: [Python/pythonrun.c:432](https://github.com/python/cpython/blob/v3.14.5/Python/pythonrun.c#L432) PyRun_SimpleStringFlags.
 * `1624-B` Port `PyRun_AnyFileExFlags` plus the closeit-on-EOF
   semantics.
-  CPython: `Python/pythonrun.c:88 PyRun_AnyFileExFlags`.
+  CPython: [Python/pythonrun.c:88](https://github.com/python/cpython/blob/v3.14.5/Python/pythonrun.c#L88) PyRun_AnyFileExFlags.
 * `1624-C` Port `PyRun_InteractiveLoopFlags` for the basic
   REPL. v0.7 uses `bufio.Scanner` from stdin; readline editing
   is deferred to v0.9 (spec 1645).
-  CPython: `Python/pythonrun.c:128 PyRun_InteractiveLoopFlags`.
+  CPython: [Python/pythonrun.c:128](https://github.com/python/cpython/blob/v3.14.5/Python/pythonrun.c#L128) PyRun_InteractiveLoopFlags.
 * `1624-D` Port `_PyErr_Print` so unhandled exceptions print
   the traceback CPython would.
-  CPython: `Python/pythonrun.c:797 _PyErr_PrintEx`.
+  CPython: [Python/pythonrun.c:797](https://github.com/python/cpython/blob/v3.14.5/Python/pythonrun.c#L797) _PyErr_PrintEx.
 * `1624-E` `pythonrun_test.go` panel: 12 fixtures driven
   through RunString, plus `TestREPL` exercising a pipe-based
   stdin against canned input.

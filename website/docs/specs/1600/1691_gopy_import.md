@@ -27,7 +27,7 @@ json.dumps({"a": 1})` requires all of the following to work:
 6. A builtin module table analogous to `PyImport_Inittab`.
 
 CPython's import path flows through
-`PyImport_ImportModuleLevelObject` (`Python/import.c:3460`), which
+`PyImport_ImportModuleLevelObject` ([Python/import.c:3460](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3460)), which
 delegates to `importlib._bootstrap._find_and_load`, which walks
 `sys.meta_path` finders. For v0.8, gopy bypasses `sys.meta_path`
 and implements the two loaders directly in Go. Full `meta_path`
@@ -45,17 +45,17 @@ identical.
 
 | Function | Location |
 |---|---|
-| `PyImport_ImportModuleLevelObject` | `Python/import.c:3460` |
-| `PyImport_ImportFrozenModuleObject` | `Python/import.c:3095` |
-| `init_importlib` | `Python/import.c:3185` |
-| `PyImport_ExecCodeModuleObject` | `Python/import.c:2726` |
-| `PyImport_GetModule` | `Python/import.c:149` |
-| `PyImport_AddModuleObject` | `Python/import.c:160` |
-| `PyImport_RemoveModule` | `Python/import.c:191` |
-| `get_module_dict` (sys.modules accessor) | `Python/import.c:2549` |
+| `PyImport_ImportModuleLevelObject` | [Python/import.c:3460](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3460) |
+| `PyImport_ImportFrozenModuleObject` | [Python/import.c:3095](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3095) |
+| `init_importlib` | [Python/import.c:3185](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3185) |
+| `PyImport_ExecCodeModuleObject` | [Python/import.c:2726](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2726) |
+| `PyImport_GetModule` | [Python/import.c:149](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L149) |
+| `PyImport_AddModuleObject` | [Python/import.c:160](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L160) |
+| `PyImport_RemoveModule` | [Python/import.c:191](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L191) |
+| `get_module_dict` (sys.modules accessor) | [Python/import.c:2549](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2549) |
 | `PyImport_Inittab` builtin table | `Python/import.c` global |
 | `FrozenModule` table | `Python/frozen.c` |
-| `_find_frozen` | `Python/import.c:2836` |
+| `_find_frozen` | [Python/import.c:2836](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2836) |
 | `IMPORT_NAME` bytecode | `Python/bytecodes.c` IMPORT_NAME |
 | `IMPORT_FROM` bytecode | `Python/bytecodes.c` IMPORT_FROM |
 | `IMPORT_STAR` bytecode | `Python/bytecodes.c` IMPORT_STAR |
@@ -127,14 +127,14 @@ func ExecCodeModule(name string, co *objects.Code, pathname, cpathname string) (
 |---|---|
 | `Python/frozen.c` frozen module table | `imp/frozen.go` |
 | CPython 3.14 frozen bytecode blobs | `imp/frozen_bootstrap.go` (generated) |
-| `Python/import.c:149` `PyImport_GetModule` | `imp/sysmodules.go` |
-| `Python/import.c:160` `PyImport_AddModuleObject` | `imp/sysmodules.go` |
-| `Python/import.c:191` `PyImport_RemoveModule` | `imp/sysmodules.go` |
-| `Python/import.c:2549` `get_module_dict` | `imp/sysmodules.go` |
-| `Python/import.c:3460` `PyImport_ImportModuleLevelObject` | `imp/import.go` |
-| `Python/import.c:3095` `PyImport_ImportFrozenModuleObject` | `imp/frozen.go` |
-| `Python/import.c:2726` `PyImport_ExecCodeModuleObject` | `imp/exec.go` |
-| `Python/import.c:3185` `init_importlib` | `imp/bootstrap.go` |
+| [Python/import.c:149](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L149) `PyImport_GetModule` | `imp/sysmodules.go` |
+| [Python/import.c:160](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L160) `PyImport_AddModuleObject` | `imp/sysmodules.go` |
+| [Python/import.c:191](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L191) `PyImport_RemoveModule` | `imp/sysmodules.go` |
+| [Python/import.c:2549](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2549) `get_module_dict` | `imp/sysmodules.go` |
+| [Python/import.c:3460](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3460) `PyImport_ImportModuleLevelObject` | `imp/import.go` |
+| [Python/import.c:3095](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3095) `PyImport_ImportFrozenModuleObject` | `imp/frozen.go` |
+| [Python/import.c:2726](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2726) `PyImport_ExecCodeModuleObject` | `imp/exec.go` |
+| [Python/import.c:3185](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3185) `init_importlib` | `imp/bootstrap.go` |
 | `PyImport_Inittab` builtin module table | `imp/inittab.go` |
 | .pyc cache read/write helpers | `imp/loader.go` |
 | `Python/bytecodes.c` IMPORT_NAME | `vm/opcodes_import.go` |
@@ -164,12 +164,11 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
   array). Entries: `_frozen_importlib`, `_frozen_importlib_external`,
   `_collections_abc`, `_sitebuiltins`. CPython: `Python/frozen.c`.
 * [ ] `FindFrozen(name string)`: linear scan of `frozenModules`,
-  returns `(*FrozenModule, bool)`. CPython: `Python/import.c:2836 _find_frozen`.
+  returns `(*FrozenModule, bool)`. CPython: [Python/import.c:2836](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2836) _find_frozen.
 * [ ] `ExecFrozen(name string)`: call `marshal.ReadCodeFromBytes`,
-  then `ExecCodeModule`. CPython: `Python/import.c:3095
-  PyImport_ImportFrozenModuleObject`.
+  then `ExecCodeModule`. CPython: [Python/import.c:3095](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3095) PyImport_ImportFrozenModuleObject.
 * [ ] Frozen packages set `__path__` to `[name]` on the module after exec.
-  CPython: `Python/import.c:3095` package path fixup.
+  CPython: [Python/import.c:3095](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3095) package path fixup.
 
 ### imp/frozen_bootstrap.go
 
@@ -189,20 +188,20 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 
 * [ ] `GetModule(name string)`: look up `sys.modules[name]`, return
   nil if absent or if value is `None` (the "blocked" sentinel).
-  CPython: `Python/import.c:149 PyImport_GetModule`.
+  CPython: [Python/import.c:149](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L149) PyImport_GetModule.
 * [ ] `AddModule(name string)`: if `sys.modules[name]` already exists
   and is a module, return it; otherwise create a new `objects.Module`
   with `__name__ = name`, insert it, return it.
-  CPython: `Python/import.c:160 PyImport_AddModuleObject`.
+  CPython: [Python/import.c:160](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L160) PyImport_AddModuleObject.
 * [ ] `RemoveModule(name string)`: delete from `sys.modules`.
-  CPython: `Python/import.c:191 PyImport_RemoveModule`.
+  CPython: [Python/import.c:191](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L191) PyImport_RemoveModule.
 * [ ] `modulesDict()`: return the `*objects.Dict` for `sys.modules`.
-  CPython: `Python/import.c:2549 get_module_dict`.
+  CPython: [Python/import.c:2549](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2549) get_module_dict.
 
 ### imp/bootstrap.go
 
 * [ ] `InitImportlib()`: the bootstrap sequence run once at interpreter
-  startup. CPython: `Python/import.c:3185 init_importlib`.
+  startup. CPython: [Python/import.c:3185](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3185) init_importlib.
   Steps:
   1. Create a minimal `_imp` builtin module (see `imp/inittab.go`).
   2. Call `ExecFrozen("_frozen_importlib")`.
@@ -210,7 +209,7 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
   4. Call `ExecFrozen("_frozen_importlib_external")`.
   5. Call `_frozen_importlib_external._install(_frozen_importlib)`.
 * [ ] If bootstrap fails, return a wrapped `ImportError` with the
-  module name and cause. CPython: `Python/import.c:3185` error path.
+  module name and cause. CPython: [Python/import.c:3185](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3185) error path.
 
 ### imp/inittab.go
 
@@ -233,11 +232,11 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
   set `__file__` to `pathname`, set `__cached__` to `cpathname`,
   set `__loader__` to the loader used, eval the code object in the
   module's `__dict__`, return the module.
-  CPython: `Python/import.c:2726 PyImport_ExecCodeModuleObject`.
+  CPython: [Python/import.c:2726](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2726) PyImport_ExecCodeModuleObject.
 * [ ] On eval error, remove the module from `sys.modules` before
-  returning the error. CPython: `Python/import.c:2726` cleanup path.
+  returning the error. CPython: [Python/import.c:2726](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2726) cleanup path.
 * [ ] Set `__spec__` on the module after exec using a minimal
-  `ModuleSpec` struct. CPython: `Python/import.c:2726` spec fixup.
+  `ModuleSpec` struct. CPython: [Python/import.c:2726](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L2726) spec fixup.
 
 ### imp/loader.go
 
@@ -258,8 +257,7 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
 
 ### imp/import.go
 
-* [ ] `ImportModuleLevel`: CPython: `Python/import.c:3460
-  PyImport_ImportModuleLevelObject`.
+* [ ] `ImportModuleLevel`: CPython: [Python/import.c:3460](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3460) PyImport_ImportModuleLevelObject.
   1. Resolve relative `level` to an absolute name using the `__package__`
      or `__spec__.parent` of `globals`.
   2. Fast path: return immediately if `sys.modules[absname]` exists and
@@ -270,11 +268,11 @@ Status legend: `[x]` shipped, `[ ]` pending, `[~]` partial / scaffold,
   6. If nothing found, raise `ModuleNotFoundError`.
 * [ ] `resolveRelative(level int, globals *objects.Dict) string`:
   strips `level` components from `__package__` (or infers package from
-  `__name__`). CPython: `Python/import.c:3460` relative resolution
+  `__name__`). CPython: [Python/import.c:3460](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3460) relative resolution
   block.
 * [ ] On successful import return the top-level name if `fromlist` is
   empty, or the final sub-module if `fromlist` is non-empty.
-  CPython: `Python/import.c:3460` fromlist handling.
+  CPython: [Python/import.c:3460](https://github.com/python/cpython/blob/v3.14.5/Python/import.c#L3460) fromlist handling.
 
 ### vm/opcodes_import.go
 

@@ -95,15 +95,15 @@ implementations earlier in the file. Every row must land.
 
 | # | Reference |
 |---|-----------|
-| 1 | `Objects/object.c:6048` `object_methods` table |
-| 2 | `Objects/object.c:6075` `object_getsets` table |
-| 3 | `Objects/object.c:5800` `object___subclasshook__` |
-| 4 | `Objects/object.c:5750` `object___init_subclass__` |
-| 5 | `Objects/object.c:766` `object_format` |
-| 6 | `Objects/object.c:884` `object_richcompare` |
-| 7 | `Objects/object.c:1146` `object_get_class` / `object_set_class` |
-| 8 | `Objects/object.c:1462` `object_get_dict` / `object_set_dict` |
-| 9 | `Objects/object.c:5900` `object___getstate__` |
+| 1 | [Objects/object.c:6048](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L6048) `object_methods` table |
+| 2 | [Objects/object.c:6075](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L6075) `object_getsets` table |
+| 3 | [Objects/object.c:5800](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L5800) `object___subclasshook__` |
+| 4 | [Objects/object.c:5750](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L5750) `object___init_subclass__` |
+| 5 | [Objects/object.c:766](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L766) `object_format` |
+| 6 | [Objects/object.c:884](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L884) `object_richcompare` |
+| 7 | [Objects/object.c:1146](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L1146) `object_get_class` / `object_set_class` |
+| 8 | [Objects/object.c:1462](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L1462) `object_get_dict` / `object_set_dict` |
+| 9 | [Objects/object.c:5900](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L5900) `object___getstate__` |
 
 ## Phase 2 - `Objects/funcobject.c` classmethod block
 
@@ -135,21 +135,21 @@ implementations earlier in the file. Every row must land.
 
 | # | Reference |
 |---|-----------|
-| 1 | `Objects/funcobject.c:1487` `cm_init` |
-| 2 | `Objects/funcobject.c:1459` `cm_descr_get` |
-| 3 | `Objects/funcobject.c:1440` `cm_traverse` |
-| 4 | `Objects/funcobject.c:1504` `cm_memberlist` |
-| 5 | `Objects/funcobject.c:1511` `cm_get___isabstractmethod__` |
-| 6 | `Objects/funcobject.c:1525` `cm_get___annotations__` / `cm_set___annotations__` |
-| 7 | `Objects/funcobject.c:1538` `cm_get___annotate__` / `cm_set___annotate__` |
-| 8 | `Objects/funcobject.c:1551` `cm_getsetlist` |
-| 9 | `Objects/funcobject.c:1559` `cm_methodlist` |
-| 10 | `Objects/funcobject.c:1565` `cm_repr` |
-| 11 | `Objects/funcobject.c:1594` `PyClassMethod_Type` |
-| 12 | `Objects/funcobject.c:1316` `functools_wraps` |
-| 13 | `Objects/funcobject.c:1337` `descriptor_get_wrapped_attribute` |
-| 14 | `Objects/funcobject.c:1367` `descriptor_set_wrapped_attribute` |
-| 15 | `Objects/object.c:1235` `_PyObject_IsAbstract` |
+| 1 | [Objects/funcobject.c:1487](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1487) `cm_init` |
+| 2 | [Objects/funcobject.c:1459](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1459) `cm_descr_get` |
+| 3 | [Objects/funcobject.c:1440](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1440) `cm_traverse` |
+| 4 | [Objects/funcobject.c:1504](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1504) `cm_memberlist` |
+| 5 | [Objects/funcobject.c:1511](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1511) `cm_get___isabstractmethod__` |
+| 6 | [Objects/funcobject.c:1525](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1525) `cm_get___annotations__` / `cm_set___annotations__` |
+| 7 | [Objects/funcobject.c:1538](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1538) `cm_get___annotate__` / `cm_set___annotate__` |
+| 8 | [Objects/funcobject.c:1551](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1551) `cm_getsetlist` |
+| 9 | [Objects/funcobject.c:1559](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1559) `cm_methodlist` |
+| 10 | [Objects/funcobject.c:1565](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1565) `cm_repr` |
+| 11 | [Objects/funcobject.c:1594](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1594) `PyClassMethod_Type` |
+| 12 | [Objects/funcobject.c:1316](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1316) `functools_wraps` |
+| 13 | [Objects/funcobject.c:1337](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1337) `descriptor_get_wrapped_attribute` |
+| 14 | [Objects/funcobject.c:1367](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1367) `descriptor_set_wrapped_attribute` |
+| 15 | [Objects/object.c:1235](https://github.com/python/cpython/blob/v3.14.5/Objects/object.c#L1235) `_PyObject_IsAbstract` |
 
 ## Phase 3 - `Objects/funcobject.c` staticmethod block
 
@@ -180,18 +180,18 @@ implementations earlier in the file. Every row must land.
 
 | # | Reference |
 |---|-----------|
-| 1 | `Objects/funcobject.c:1731` `sm_init` |
-| 2 | `Objects/funcobject.c:1705` `sm_descr_get` |
-| 3 | `Objects/funcobject.c:1749` `sm_call` |
-| 4 | `Objects/funcobject.c:1687` `sm_traverse` |
-| 5 | `Objects/funcobject.c:1755` `sm_memberlist` |
-| 6 | `Objects/funcobject.c:1762` `sm_get___isabstractmethod__` |
-| 7 | `Objects/funcobject.c:1776` `sm_get___annotations__` / `sm_set___annotations__` |
-| 8 | `Objects/funcobject.c:1789` `sm_get___annotate__` / `sm_set___annotate__` |
-| 9 | `Objects/funcobject.c:1801` `sm_getsetlist` |
-| 10 | `Objects/funcobject.c:1809` `sm_methodlist` |
-| 11 | `Objects/funcobject.c:1815` `sm_repr` |
-| 12 | `Objects/funcobject.c:1842` `PyStaticMethod_Type` |
+| 1 | [Objects/funcobject.c:1731](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1731) `sm_init` |
+| 2 | [Objects/funcobject.c:1705](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1705) `sm_descr_get` |
+| 3 | [Objects/funcobject.c:1749](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1749) `sm_call` |
+| 4 | [Objects/funcobject.c:1687](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1687) `sm_traverse` |
+| 5 | [Objects/funcobject.c:1755](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1755) `sm_memberlist` |
+| 6 | [Objects/funcobject.c:1762](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1762) `sm_get___isabstractmethod__` |
+| 7 | [Objects/funcobject.c:1776](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1776) `sm_get___annotations__` / `sm_set___annotations__` |
+| 8 | [Objects/funcobject.c:1789](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1789) `sm_get___annotate__` / `sm_set___annotate__` |
+| 9 | [Objects/funcobject.c:1801](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1801) `sm_getsetlist` |
+| 10 | [Objects/funcobject.c:1809](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1809) `sm_methodlist` |
+| 11 | [Objects/funcobject.c:1815](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1815) `sm_repr` |
+| 12 | [Objects/funcobject.c:1842](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1842) `PyStaticMethod_Type` |
 
 ## Phase 4 - `Objects/funcobject.c` PyFunction_Type block
 
@@ -229,12 +229,12 @@ implementations earlier in the file. Every row must land.
 
 | # | Reference |
 |---|-----------|
-| 1 | `Objects/funcobject.c:30` `PyFunction_NewWithQualName` |
-| 2 | `Objects/funcobject.c:760` `func_getsetlist` |
-| 3 | `Objects/funcobject.c:810` `func_memberlist` |
-| 4 | `Objects/funcobject.c:920` `func_repr` |
-| 5 | `Objects/funcobject.c:1093` `func_traverse` |
-| 6 | `Objects/funcobject.c:1232` `PyFunction_Type` |
+| 1 | [Objects/funcobject.c:30](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L30) `PyFunction_NewWithQualName` |
+| 2 | [Objects/funcobject.c:760](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L760) `func_getsetlist` |
+| 3 | [Objects/funcobject.c:810](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L810) `func_memberlist` |
+| 4 | [Objects/funcobject.c:920](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L920) `func_repr` |
+| 5 | [Objects/funcobject.c:1093](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1093) `func_traverse` |
+| 6 | [Objects/funcobject.c:1232](https://github.com/python/cpython/blob/v3.14.5/Objects/funcobject.c#L1232) `PyFunction_Type` |
 
 ## Phase 5 - `Objects/classobject.c` PyMethod_Type full port
 
@@ -268,14 +268,14 @@ implementations earlier in the file. Every row must land.
 
 | # | Reference |
 |---|-----------|
-| 1 | `Objects/classobject.c:38` `PyMethod_New` |
-| 2 | `Objects/classobject.c:75` `method_getattro` |
-| 3 | `Objects/classobject.c:135` `method_call` / `method_vectorcall` |
-| 4 | `Objects/classobject.c:206` `method_richcompare` |
-| 5 | `Objects/classobject.c:230` `method_hash` |
-| 6 | `Objects/classobject.c:262` `method_traverse` |
-| 7 | `Objects/classobject.c:268` `PyMethod_Type` |
-| 8 | `Objects/classobject.c:280` `method_repr` |
+| 1 | [Objects/classobject.c:38](https://github.com/python/cpython/blob/v3.14.5/Objects/classobject.c#L38) `PyMethod_New` |
+| 2 | [Objects/classobject.c:75](https://github.com/python/cpython/blob/v3.14.5/Objects/classobject.c#L75) `method_getattro` |
+| 3 | [Objects/classobject.c:135](https://github.com/python/cpython/blob/v3.14.5/Objects/classobject.c#L135) `method_call` / `method_vectorcall` |
+| 4 | [Objects/classobject.c:206](https://github.com/python/cpython/blob/v3.14.5/Objects/classobject.c#L206) `method_richcompare` |
+| 5 | [Objects/classobject.c:230](https://github.com/python/cpython/blob/v3.14.5/Objects/classobject.c#L230) `method_hash` |
+| 6 | [Objects/classobject.c:262](https://github.com/python/cpython/blob/v3.14.5/Objects/classobject.c#L262) `method_traverse` |
+| 7 | [Objects/classobject.c:268](https://github.com/python/cpython/blob/v3.14.5/Objects/classobject.c#L268) `PyMethod_Type` |
+| 8 | [Objects/classobject.c:280](https://github.com/python/cpython/blob/v3.14.5/Objects/classobject.c#L280) `method_repr` |
 
 ### Side fixes
 
@@ -341,14 +341,14 @@ implementations earlier in the file. Every row must land.
 
 | # | Reference |
 |---|-----------|
-| 1 | `Objects/typeobject.c:4153` `type_new` |
-| 2 | `Objects/typeobject.c:4350` `type_new_set_attrs` |
-| 3 | `Objects/typeobject.c:4419` `type_new_set_attrs` (classmethod wrap branch) |
-| 4 | `Objects/typeobject.c:4549` `type_new_set_names` |
-| 5 | `Objects/typeobject.c:4595` `type_init_subclass` |
-| 6 | `Objects/typeobject.c:9874` `fixup_slot_dispatchers` |
-| 7 | `Objects/typeobject.c:984` `type_qualname` |
-| 8 | `Objects/typeobject.c:1003` `type_set_qualname` |
+| 1 | [Objects/typeobject.c:4153](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L4153) `type_new` |
+| 2 | [Objects/typeobject.c:4350](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L4350) `type_new_set_attrs` |
+| 3 | [Objects/typeobject.c:4419](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L4419) `type_new_set_attrs` (classmethod wrap branch) |
+| 4 | [Objects/typeobject.c:4549](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L4549) `type_new_set_names` |
+| 5 | [Objects/typeobject.c:4595](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L4595) `type_init_subclass` |
+| 6 | [Objects/typeobject.c:9874](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L9874) `fixup_slot_dispatchers` |
+| 7 | [Objects/typeobject.c:984](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L984) `type_qualname` |
+| 8 | [Objects/typeobject.c:1003](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L1003) `type_set_qualname` |
 | 9 | `Python/codegen.c` `codegen_class_body` (docstring branch) |
 
 ## Phase 7 - `Objects/typeobject.c` inherit_slots
@@ -400,9 +400,9 @@ fixup writes never mutate the base.
 
 | # | Reference |
 |---|-----------|
-| 1 | `Objects/typeobject.c:7521` `inherit_slots` |
-| 2 | `Objects/typeobject.c:9770` slotdefs table header |
-| 3 | `Objects/typeobject.c:6854` `object_new` (Py_TPFLAGS_IS_ABSTRACT branch) |
+| 1 | [Objects/typeobject.c:7521](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L7521) `inherit_slots` |
+| 2 | [Objects/typeobject.c:9770](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L9770) slotdefs table header |
+| 3 | [Objects/typeobject.c:6854](https://github.com/python/cpython/blob/v3.14.5/Objects/typeobject.c#L6854) `object_new` (Py_TPFLAGS_IS_ABSTRACT branch) |
 
 ## Phase 8 - `Python/ceval.c` name ops
 
