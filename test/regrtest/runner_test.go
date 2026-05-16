@@ -262,14 +262,17 @@ func TestStdtestCorpus(t *testing.T) {
 	}
 	corpus := filepath.Join(repoRoot, "stdtest")
 
-	// Each entry: name plus a substring that must appear somewhere in
-	// the combined stdout/stderr (unittest's summary line is the most
-	// reliable witness that the suite drove to completion).
+	// Each entry: name plus an optional substring that must appear in
+	// the combined stdout/stderr. unittest's summary line is the most
+	// reliable witness for tests that wire up `unittest.main` at the
+	// bottom; entries with no `if __name__ == "__main__"` driver leave
+	// witness empty and rely on the exit-status check alone.
 	cases := []struct {
 		name    string
 		witness string
 	}{
 		{"test_keyword", "Ran 11 tests"},
+		{"test_tabnanny", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,6 +281,9 @@ func TestStdtestCorpus(t *testing.T) {
 			if res.Outcome != OutcomePass && res.Outcome != OutcomeFail {
 				t.Fatalf("Outcome = %s (err=%v stderr=%q), want pass|fail",
 					res.Outcome, res.Err, res.Stderr)
+			}
+			if tc.witness == "" {
+				return
 			}
 			combined := res.Stdout + res.Stderr
 			if !strings.Contains(combined, tc.witness) {
