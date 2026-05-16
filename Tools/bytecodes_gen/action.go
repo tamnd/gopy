@@ -277,6 +277,27 @@ func (t *actionTranslator) translateOutputAssign(name string) error {
 		t.pos++
 	}
 	t.acceptSemi()
+	// Ternary expansion: `name = cond ? a : b;` becomes an if/else
+	// pair in Go since Go has no ternary operator. The split is
+	// top-level only so nested parens/calls stay intact.
+	if condToks, aToks, bToks, isTern := splitTopLevelTernary(rhs); isTern {
+		condExpr, err := t.translateExpr(condToks)
+		if err != nil {
+			return fmt.Errorf("output assign %q ternary cond: %w", name, err)
+		}
+		aExpr, err := t.translateExpr(aToks)
+		if err != nil {
+			return fmt.Errorf("output assign %q ternary then: %w", name, err)
+		}
+		bExpr, err := t.translateExpr(bToks)
+		if err != nil {
+			return fmt.Errorf("output assign %q ternary else: %w", name, err)
+		}
+		fmt.Fprintf(t.writer, "if %s { %s = %s } else { %s = %s }\n",
+			condExpr, goLocalName(name), aExpr, goLocalName(name), bExpr)
+		t.assigned[name] = true
+		return nil
+	}
 	goExpr, err := t.translateExpr(rhs)
 	if err != nil {
 		return fmt.Errorf("output assign %q: %w", name, err)
@@ -284,6 +305,50 @@ func (t *actionTranslator) translateOutputAssign(name string) error {
 	fmt.Fprintf(t.writer, "%s = %s\n", goLocalName(name), goExpr)
 	t.assigned[name] = true
 	return nil
+}
+
+// splitTopLevelTernary scans `cond ? a : b` and returns the three
+// token slices. Operators inside parens/brackets are ignored. Returns
+// ok=false when no top-level `?` is present.
+func splitTopLevelTernary(toks []string) (cond, a, b []string, ok bool) {
+	depth := 0
+	qPos := -1
+	for i, tk := range toks {
+		switch tk {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			depth--
+		case "?":
+			if depth == 0 && qPos < 0 {
+				qPos = i
+			}
+		}
+	}
+	if qPos < 0 {
+		return nil, nil, nil, false
+	}
+	depth = 0
+	cPos := -1
+	for i := qPos + 1; i < len(toks); i++ {
+		switch toks[i] {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			depth--
+		case ":":
+			if depth == 0 {
+				cPos = i
+			}
+		}
+		if cPos >= 0 {
+			break
+		}
+	}
+	if cPos < 0 {
+		return nil, nil, nil, false
+	}
+	return toks[:qPos], toks[qPos+1 : cPos], toks[cPos+1:], true
 }
 
 // translateExpr renders a small CPython expression vocabulary into Go.
@@ -344,6 +409,24 @@ func (p *exprParser) parsePrimary() (string, error) {
 			return "", err
 		}
 		return arg + ".IsNull()", nil
+	case "PyStackRef_IsTrue":
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		return arg + ".IsTrue()", nil
+	case "PyStackRef_IsFalse":
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		return arg + ".IsFalse()", nil
+	case "PyStackRef_IsNone":
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		return arg + ".IsNone()", nil
 	case "GETLOCAL":
 		arg, err := p.parseCallArg()
 		if err != nil {

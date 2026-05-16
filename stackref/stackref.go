@@ -94,3 +94,24 @@ func (r Ref) IsNull() bool {
 //
 // CPython: Include/internal/pycore_stackref.h PyStackRef_CLOSE
 func (r Ref) Close() {}
+
+// IsTrue reports whether the ref carries the True singleton.
+//
+// CPython: Include/internal/pycore_stackref.h PyStackRef_IsTrue
+func (r Ref) IsTrue() bool {
+	return r.o == True.o
+}
+
+// IsFalse reports whether the ref carries the False singleton.
+//
+// CPython: Include/internal/pycore_stackref.h PyStackRef_IsFalse
+func (r Ref) IsFalse() bool {
+	return r.o == False.o
+}
+
+// IsNone reports whether the ref carries the None singleton.
+//
+// CPython: Include/internal/pycore_stackref.h PyStackRef_IsNone
+func (r Ref) IsNone() bool {
+	return r.o == None.o
+}

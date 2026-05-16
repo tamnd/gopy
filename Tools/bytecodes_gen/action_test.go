@@ -240,6 +240,28 @@ func TestTranslateBodyStoreFast(t *testing.T) {
 	}
 }
 
+func TestTranslateBodyOutputAssignTernary(t *testing.T) {
+	body := tokLine("res = PyStackRef_IsFalse(value) ? PyStackRef_True : PyStackRef_False;")
+	sig := &SignatureAnalysis{
+		Name:    "UNARY_NOT",
+		Inputs:  []StackBinding{{Name: "value"}},
+		Outputs: []StackBinding{{Name: "res"}},
+	}
+	got, _, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	for _, want := range []string{
+		"if value.IsFalse()",
+		"res = stackref.True",
+		"res = stackref.False",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestTranslateBodyJumpByNegativeOparg(t *testing.T) {
 	body := tokLine("JUMPBY(-oparg);")
 	got, terminates, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "JUMP_BACKWARD"})
