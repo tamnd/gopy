@@ -40,6 +40,18 @@ func initSmallInts() {
 	}
 }
 
+// SmallInt returns the cached singleton at offset into the small-int
+// table. Mirrors CPython's `_PyLong_SMALL_INTS[offset]` lookup used
+// by LOAD_SMALL_INT (offset = _PY_NSMALLNEGINTS + oparg).
+//
+// CPython: Objects/longobject.c:19 _PyLong_SMALL_INTS
+func SmallInt(offset int) Object {
+	if offset < 0 || offset >= len(smallInts) {
+		return nil
+	}
+	return smallInts[offset]
+}
+
 // smallIntFromInt64 returns the cached singleton for x, or nil if x
 // is outside the cache window. Callers fall back to allocating a
 // fresh Int.

@@ -938,11 +938,44 @@ func (p *exprParser) parsePrimary() (string, error) {
 		}
 		return tk + operand, nil
 	}
+	// Unary `&` is C's address-of. Under Go's interface dispatch every
+	// objects.Object already presents as a pointer, so the operator has
+	// no Go-side analogue. Drop it and parse the operand directly.
+	if tk == "&" {
+		return p.parsePrimary()
+	}
 	if tk == "oparg" {
 		return "oparg", nil
 	}
 	if tk == "NULL" {
 		return "nil", nil
+	}
+	// CPython's small-int singleton table. Used by LOAD_SMALL_INT as
+	// `(PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + oparg]`.
+	// Render the subscript as objects.SmallInt(offset).
+	//
+	// CPython: Objects/longobject.c:19 _PyLong_SMALL_INTS
+	if tk == "_PyLong_SMALL_INTS" {
+		if p.pos >= len(p.toks) || p.toks[p.pos] != "[" {
+			return "", fmt.Errorf("expected '[' after _PyLong_SMALL_INTS")
+		}
+		p.pos++
+		idx, err := p.parseExpr(0)
+		if err != nil {
+			return "", err
+		}
+		if p.pos >= len(p.toks) || p.toks[p.pos] != "]" {
+			return "", fmt.Errorf("expected ']' to close _PyLong_SMALL_INTS subscript")
+		}
+		p.pos++
+		return fmt.Sprintf("objects.SmallInt(int(%s))", idx), nil
+	}
+	// CPython global-objects constant for the negative half of the
+	// small-int table. Hard-coded to 5 in pycore_global_objects.h.
+	//
+	// CPython: Include/internal/pycore_global_objects.h:35 _PY_NSMALLNEGINTS
+	if tk == "_PY_NSMALLNEGINTS" {
+		return "5", nil
 	}
 	if tk == "true" || tk == "false" {
 		return tk, nil
