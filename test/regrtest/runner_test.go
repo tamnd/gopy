@@ -23,6 +23,19 @@ func requireSignalModule(t *testing.T) {
 	}
 }
 
+// requireNonRace skips a panel test under -race. The gopy interpreter
+// calls runtime.Stack on every Eval entry to derive a goroutine id
+// (vm/eval_call.go goid), which under the race detector inflates a
+// 2-second corpus run past the 5-minute mark. CI has a dedicated
+// no-race step that exercises these panels; task #639 removes the
+// workaround once goid is replaced.
+func requireNonRace(t *testing.T) {
+	t.Helper()
+	if raceEnabled {
+		t.Skip("panel tests skipped under -race; see task #639 (goid runtime.Stack hot path)")
+	}
+}
+
 // buildGopy compiles the gopy binary into the test's temp dir and
 // returns its path. Skips the test if `go build` itself is unhappy
 // (e.g. cross-compile sandbox).
@@ -206,6 +219,7 @@ func TestRunSmokeTest(t *testing.T) {
 // Spec: 1710.
 func TestLexerTokenizerPanel(t *testing.T) {
 	requireSignalModule(t)
+	requireNonRace(t)
 	bin := buildGopy(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -240,6 +254,7 @@ func TestLexerTokenizerPanel(t *testing.T) {
 // vendored into stdtest/ and this gate keeps them honest.
 func TestStdtestCorpus(t *testing.T) {
 	requireSignalModule(t)
+	requireNonRace(t)
 	bin := buildGopy(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
