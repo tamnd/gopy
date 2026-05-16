@@ -56,9 +56,28 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.BUILD_SLICE:
 		args := e.peekSliceBottomFirst(0, int(oparg))
 		_ = args
-		// body bail: PyObject start_o rhs: expected ')' to close call
-		// outputs: slice
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var slice stackref.Ref
+		start_o := args[0].AsObject()
+		_ = start_o
+		stop_o := args[1].AsObject()
+		_ = stop_o
+		var step_o objects.Object
+		if oparg == 3 {
+			step_o = args[2].AsObject()
+		} else {
+			step_o = nil
+		}
+		_ = step_o
+		slice_o := e.sliceNew(start_o, stop_o, step_o)
+		_ = slice_o
+		e.decrefInputs(1)
+		if slice_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		slice = stackref.FromObject(slice_o)
+		e.drop(int(oparg))
+		e.push(slice)
+		return e.advance(), nil, nil, false, nil
 	case compile.BUILD_STRING:
 		pieces := e.peekSliceBottomFirst(0, int(oparg))
 		_ = pieces
@@ -726,9 +745,21 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = type_v
 		names := e.peek(0)
 		_ = names
-		// body bail: if else: output assign "attrs": unexpected token "PyStackRef_None" in expression
-		// outputs: attrs
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var attrs stackref.Ref
+		attrs_o := e.matchClass(subject.AsObject(), type_v.AsObject(), oparg, names.AsObject())
+		_ = attrs_o
+		e.decrefInputs(3)
+		if attrs_o != nil {
+			attrs = stackref.FromObject(attrs_o)
+		} else {
+			if e.errOccurred() {
+				return 0, nil, nil, false, e.error("error")
+			}
+			attrs = stackref.None
+		}
+		e.drop(1 + 1 + 1)
+		e.push(attrs)
+		return e.advance(), nil, nil, false, nil
 	case compile.MATCH_KEYS:
 		subject := e.peek(1)
 		_ = subject
@@ -784,7 +815,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.RAISE_VARARGS:
 		args := e.peekSliceBottomFirst(0, int(oparg))
 		_ = args
-		// body bail: PyObject cause rhs: trailing tokens after expression: "? PyStackRef_AsPyObjectSteal ( args [ 1 ] ) : NULL"
+		// body bail: int err rhs: unexpected token "do_raise" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RERAISE:
 		exc_st := e.peek(0)

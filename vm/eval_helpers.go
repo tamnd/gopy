@@ -85,6 +85,18 @@ func (e *evalState) error(label string) error {
 	return fmt.Errorf("vm: error label %q reached without pending exception", label)
 }
 
+// errOccurred mirrors CPython's _PyErr_Occurred(tstate): true when a
+// pending exception is on the thread state. Under gopy the eval loop
+// stashes pending failures on evalState.pendingErr, so the wrapper just
+// reports whether that slot is populated.
+//
+// CPython: Python/errors.c _PyErr_Occurred.
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) errOccurred() bool {
+	return e.pendingErr != nil
+}
+
 // pyNumberNegative is the translator-side wrapper for CPython's
 // PyNumber_Negative. The body keeps the NULL-on-failure convention so
 // the surrounding `ERROR_IF(res_o == NULL)` translation just works:
@@ -816,6 +828,17 @@ func (e *evalState) cellSwapTakeRef(cell, newVal objects.Object) objects.Object 
 	old := c.Contents
 	c.Contents = newVal
 	return old
+}
+
+// sliceNew wraps PySlice_New. Build a slice object from start/stop/step.
+// CPython surfaces NULL for "absent" step; the Go side maps the nil
+// trio to Python None implicitly through objects.NewSlice.
+//
+// CPython: Objects/sliceobject.c PySlice_New
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) sliceNew(start, stop, step objects.Object) objects.Object {
+	return objects.NewSlice(start, stop, step)
 }
 
 // cellSetTakeRef wraps PyCell_SetTakeRef: writes a value into a cell,

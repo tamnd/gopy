@@ -52,7 +52,8 @@ func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, termina
 		writer:    &strings.Builder{},
 		assigned:  map[string]bool{},
 		locals:    map[string]bool{},
-		intLocals: map[string]bool{},
+		intLocals:  map[string]bool{},
+		boolLocals: map[string]bool{},
 	}
 	// Passthrough outputs: when an output reuses an input name, CPython's
 	// analyzer treats the slot as already populated (the input ref flows
@@ -98,6 +99,7 @@ type actionTranslator struct {
 	assigned   map[string]bool // output names that got assigned
 	locals     map[string]bool // C-locals declared in the body
 	intLocals  map[string]bool // subset of locals whose C type was `int`
+	boolLocals map[string]bool // subset of locals whose Go type is bool (helper-typed)
 	nestDepth  int             // brace-block nesting; >0 means inside an if/else body
 }
 
@@ -335,6 +337,8 @@ func (t *actionTranslator) translateTypedDecl() error {
 		// would otherwise append `!= 0` to later boolean uses).
 		if !rhsIsBool(rhsExpr) {
 			t.intLocals[name] = true
+		} else {
+			t.boolLocals[name] = true
 		}
 	}
 	fmt.Fprintf(t.writer, "%s := %s\n", goLocalName(name), rhsExpr)
@@ -757,6 +761,8 @@ func (p *exprParser) parsePrimary() (string, error) {
 		return "stackref.True", nil
 	case "PyStackRef_False":
 		return "stackref.False", nil
+	case "PyStackRef_None":
+		return "stackref.None", nil
 	case "PyStackRef_DUP", "PyStackRef_Borrow":
 		// CPython distinguishes owned (DUP) from borrowed (Borrow) refs;
 		// under Go's GC the distinction collapses, so both render the
@@ -1035,6 +1041,12 @@ var helperCalls = map[string]helperCall{
 	// PyErr_GivenExceptionMatches: 1 if exc is an instance of (or
 	// matches) the target type, else 0.
 	"PyErr_GivenExceptionMatches": {goExpr: "e.exceptionMatches", arity: 2},
+	// _PyErr_Occurred(tstate) returns whether the running thread state
+	// holds a pending exception; gopy stashes pending failures on the
+	// evalState so the wrapper just inspects e.pendingErr.
+	//
+	// CPython: Python/errors.c _PyErr_Occurred.
+	"_PyErr_Occurred": {goExpr: "e.errOccurred", arity: 0, dropFirst: 1},
 	// Dict / list / set mutation helpers. These all return a C int err
 	// (0 ok, nonzero error) and stash the cause on pendingErr.
 	"PyDict_Pop":           {goExpr: "e.dictPop", arity: 3},
@@ -1095,6 +1107,12 @@ var helperCalls = map[string]helperCall{
 	"PyGen_CheckExact":     {goExpr: "objects.IsGenerator", arity: 1},
 	// Long predicate. Returns bool, matching the C int 0/1 convention.
 	"_PyLong_IsZero": {goExpr: "e.longIsZero", arity: 1},
+	// Slice constructor. CPython exposes a 3-arg PyObject* factory; the
+	// Go side maps to a thin e.sliceNew helper that wraps the runtime
+	// PySlice equivalent and reflects "NULL step" as Python None.
+	//
+	// CPython: Objects/sliceobject.c PySlice_New.
+	"PySlice_New": {goExpr: "e.sliceNew", arity: 3},
 }
 
 // parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.
@@ -1147,7 +1165,10 @@ func (p *exprParser) parseCallArg() (string, error) {
 		return "", fmt.Errorf("expected '(' after function name")
 	}
 	p.pos++
-	inner, err := p.parsePrimary()
+	// parseExpr (not parsePrimary) so postfix subscripts on the inner
+	// expression participate: callers like PyStackRef_AsPyObjectBorrow
+	// often wrap a sized-input index such as `args[0]`.
+	inner, err := p.parseExpr(0)
 	if err != nil {
 		return "", err
 	}
@@ -1210,41 +1231,42 @@ func (t *actionTranslator) translateControlIf(action string) error {
 // CPython: Tools/cases_generator/generators_common.py error_if.
 func (t *actionTranslator) translateErrorIf() error {
 	t.pos++ // ERROR_IF
-	cond, err := t.takeParenthesised()
+	condToks, err := t.takeParenTokens()
 	if err != nil {
 		return err
 	}
 	t.acceptSemi()
-	cond = strings.TrimSpace(cond)
-	if cond == "true" {
-		// Unconditional error path. CPython skips the `if` and emits
-		// the jump straight; we mirror that. Only mark the whole arm
-		// as terminating when we are at the top level; inside a brace
-		// block the surrounding flow still needs the post-body epilogue.
+	if len(condToks) == 1 && condToks[0] == "true" {
 		fmt.Fprintln(t.writer, `return 0, nil, nil, false, e.error("error")`)
 		if t.nestDepth == 0 {
 			t.terminates = true
 		}
 		return nil
 	}
-	// Token-level rewrites for the handful of C idioms that show up
-	// inside ERROR_IF: NULL is the only nil sentinel the translator
-	// emits today, and helper wrappers all return nil-on-error.
-	cond = rewriteCCondToGo(cond, t.intLocals)
-	fmt.Fprintf(t.writer, "if %s { return 0, nil, nil, false, e.error(\"error\") }\n", cond)
+	// Route through translateExpr so helper-call vocabulary (NULL → nil,
+	// _PyErr_Occurred → e.errOccurred(), etc.) gets the same treatment
+	// as in any other expression context.
+	condExpr, err := t.translateExpr(condToks)
+	if err != nil {
+		// Legacy passthrough for synthetic fixtures that name a bare
+		// identifier not declared anywhere in the body. CPython sources
+		// always declare the cond, so this only matters for unit tests.
+		condExpr = strings.Join(condToks, " ")
+		condExpr = rewriteCCondToGo(condExpr, t.intLocals)
+	}
+	if len(condToks) == 1 && t.intLocals[condToks[0]] {
+		condExpr = condExpr + " != 0"
+	} else if len(condToks) == 1 && t.locals[condToks[0]] && !t.intLocals[condToks[0]] && !t.boolLocals[condToks[0]] {
+		condExpr = condExpr + " != nil"
+	}
+	fmt.Fprintf(t.writer, "if %s { return 0, nil, nil, false, e.error(\"error\") }\n", condExpr)
 	return nil
 }
 
-// rewriteCCondToGo rewrites the small set of C tokens that show up
-// inside ERROR_IF conditions. The condition text is otherwise emitted
-// verbatim so unknown C identifiers (member access, helper variables)
-// pass through unchanged; the surrounding Go compile catches anything
-// that wouldn't parse.
+// rewriteCCondToGo was the legacy ERROR_IF condition rewriter; it has
+// been superseded by routing through translateExpr.
 //
-// intLocals tracks Go-int locals introduced by typed-decl translation;
-// when the entire condition is a bare int identifier (the `int err = ...;
-// ERROR_IF(err);` idiom) we expand it to `err != 0` so Go's stricter
-// boolean typing is satisfied.
+//nolint:unused // retained briefly while the action translator stabilises
 func rewriteCCondToGo(s string, intLocals map[string]bool) string {
 	parts := strings.Fields(s)
 	for i, p := range parts {
@@ -1300,9 +1322,13 @@ func (t *actionTranslator) translateIfStmt() error {
 		return fmt.Errorf("if cond: %w", err)
 	}
 	// Bare int identifiers need explicit `!= 0` to satisfy Go's
-	// boolean typing; mirrors the ERROR_IF condition fixup.
+	// boolean typing; mirrors the ERROR_IF condition fixup. Bare
+	// object-typed locals (PyObject *attrs_o = ...; if (attrs_o) ...)
+	// likewise need `!= nil` because Go has no implicit nil truthiness.
 	if len(condToks) == 1 && t.intLocals[condToks[0]] {
 		condExpr = condExpr + " != 0"
+	} else if len(condToks) == 1 && t.locals[condToks[0]] && !t.intLocals[condToks[0]] && !t.boolLocals[condToks[0]] {
+		condExpr = condExpr + " != nil"
 	}
 	thenBody, err := t.translateBraceBlock()
 	if err != nil {
