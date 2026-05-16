@@ -723,56 +723,133 @@ panel.
 | `JUMP_BACKWARD_NO_INTERRUPT` | generated | `337d126` | `JUMPBY(-oparg)` | shares JUMPBY body with JUMP_FORWARD; `JUMP_BACKWARD` proper stays handwritten for breaker poll |
 | `END_SEND` | generated | `8ac6d1c` | `val = value; DEAD(value); PyStackRef_CLOSE(receiver)` | bit-equivalent to handwritten body in eval_simple.go |
 
-#### Hand-written staging (`dispatchHandwritten`)
+#### Porting backlog (organized by blocker)
 
-Bodies live in `vm/eval_dispatch_handwritten.go` under the
-typed `op<NAME>(oparg) -> (next, retVal, retErr, retDone, ok,
-err)` signature. Each row leaves this table once the action
-translator can render an equivalent generated body and the
-whitelist accepts it. **Status** flips to `generated` and the
-row migrates up to the previous table once that happens; the
-**Commit** column stamps the flip (or the staging landing
-commit, while still here) so we can audit the chain.
+Every `inst()` body in CPython 3.14.5 `Python/bytecodes.c` that
+does *not* yet route through `dispatchGen` lives in one of the
+buckets below. Each bucket corresponds to a single unblocker
+(a translator extension, a Go helper port, or an emitter
+rewrite). Landing one unblocker should flip the *whole bucket*
+in one step, with the per-opcode work being audit-and-whitelist
+rather than ad-hoc translation. This replaces the previous
+staging/legacy split: opcodes are no longer ordered by which Go
+panel happens to host their handwritten arm, they are ordered
+by what we have to build to retire them.
 
-| Opcode | Status | Commit | Blocker | Notes |
-|--------|--------|--------|---------|-------|
-| `LOAD_CONST` | staging | - | needs `co_consts[oparg]` indexing in translator | hand-written body wraps via `wrapConst` |
-| `LOAD_FAST_CHECK` | staging | - | `_PyEval_FormatExcCheckArg` helper port | adds null-guard error path |
-| `DELETE_FAST` | staging | - | same as LOAD_FAST_CHECK | STORE_FAST plus unbound error |
-| `RETURN_VALUE` | staging | - | frame unlinking / `SAVE_STACK` | terminator that returns TOS |
-| `INTERPRETER_EXIT` | staging | - | `tstate->current_frame` machinery | same body as RETURN_VALUE today |
-| `COPY` | staging | - | sized-input `unused[oparg-1]` peek | `stack[-oparg]` peek + dup |
-| `SWAP` | staging | - | sized-input `unused[oparg-2]` peek | `stack[-oparg] <-> stack[-1]` |
-| `IS_OP` | staging | - | `Py_Is` + `PyStackRef_AsPyObjectBorrow` + ternary + C-int local | identity compare + bool push |
-| `BUILD_LIST` | staging | - | sized inputs + `objects.NewList` constructor | sized pop + list constructor |
-| `BUILD_TUPLE` | staging | - | sized inputs + `objects.NewTuple` constructor | sized pop + tuple constructor |
-| `BUILD_SLICE` | staging | - | conditional 2-vs-3 arg constructor | 2/3-arg slice constructor |
-| `GET_ITER` | staging | - | `PyObject_GetIter` → `objects.Iter` with `ERROR_IF(NULL)` | hand-written body checks nil return |
-| `POP_JUMP_IF_TRUE` | staging | - | `JUMPBY(flag ? oparg : NOT_TAKEN)` ternary + `PyStackRef_IsFalse` | shared body with the other three |
-| `POP_JUMP_IF_FALSE` | staging | - | same as POP_JUMP_IF_TRUE | shared body |
-| `POP_JUMP_IF_NONE` | staging | - | macro composition (`_IS_NONE + _POP_JUMP_IF_TRUE`) | shared body, identity check |
-| `POP_JUMP_IF_NOT_NONE` | staging | - | macro composition (`_IS_NONE + _POP_JUMP_IF_FALSE`) | shared body, identity check |
+Counts come straight from the bytecodes.c coverage gauge
+(`TestCPythonBytecodesCoverage`). The opcode list under each
+row is verbatim from the bail histogram; keep it in sync when
+the gauge histogram changes.
 
-#### Legacy (`trySimple` and friends)
+##### Bucket A — translator extensions
 
-Every remaining opcode in `vm/eval_simple.go`,
-`vm/eval_import.go`, `vm/eval_match.go`, and `vm/eval_gen.go`.
-These flip into staging (or straight into the generated column
-once the translator covers their shape) as the migration
-progresses. Tracking individual rows here would duplicate the
-switch statements themselves, so instead we track the *count*
-that still has to move.
+These flip 50+ opcodes between them. They are the highest
+leverage work in Phase 5 and should land before any helper-port
+campaign starts.
 
-| Panel | Approx. remaining arms |
-|-------|------------------------|
-| `trySimple` (vm/eval_simple.go) | ~70 |
-| `tryImport` (vm/eval_import.go) | ~6 |
-| `tryGen` (vm/eval_gen.go) | ~6 |
-| `tryMatch` (vm/eval_match.go) | ~9 |
+| Bucket | Count | Opcodes | Unblock task |
+|--------|-------|---------|--------------|
+| **A1. Sized inputs/outputs** (`unused[oparg-1]`, `values[oparg]`, etc.) | 11 | COPY, SWAP, DICT_MERGE, DICT_UPDATE, LIST_APPEND, LIST_EXTEND, MAP_ADD, RERAISE, SET_ADD, SET_UPDATE, UNPACK_EX | Teach `tier1_arm.tmpl` to peek (not auto-pop) sized regions and to declare passthrough outputs without shadowing the input. Reference: optimizer `_COPY` / `_SWAP` in `optimizer/uops_impl.go:152`. |
+| **A2. `int` C local** (`int flag = ...;`) | 14 | BUILD_INTERPOLATION, CALL_ISINSTANCE, CHECK_EG_MATCH, CLEANUP_THROW, DELETE_SUBSCR, INSTRUMENTED_INSTRUCTION, INSTRUMENTED_LINE, INSTRUMENTED_POP_JUMP_IF_{TRUE,FALSE,NONE,NOT_NONE}, IS_OP, MATCH_MAPPING, MATCH_SEQUENCE | Add `case "int":` to the C-local statement walker in `action.go`, emit `name := <int-expr>` (Go `bool` for 0/1 flags where the only use site is a conditional). |
+| **A3. `if` / `else` statement** | 8 | DELETE_FAST, EXIT_INIT_CHECK, FORMAT_SIMPLE, GET_YIELD_FROM_ITER, INSTRUMENTED_END_FOR, INSTRUMENTED_END_SEND, LOAD_FAST_CHECK, TO_BOOL_INT | Add an `if (cond) { ... } [else { ... }]` statement parser to the body walker. Existing expression parser already handles the test; only the statement-level shape is missing. |
+| **A4. `GETITEM(consts/names, oparg)`** | 14 | DELETE_ATTR, DELETE_GLOBAL, DELETE_NAME, IMPORT_FROM, IMPORT_NAME, LOAD_CONST, LOAD_CONST_IMMORTAL, LOAD_CONST_MORTAL, LOAD_FROM_DICT_OR_GLOBALS, LOAD_NAME, LOAD_SUPER_ATTR_ATTR, LOAD_SUPER_ATTR_METHOD, STORE_GLOBAL, STORE_NAME | Recognise the `GETITEM(FRAME_CO_CONSTS, oparg)` / `GETITEM(FRAME_CO_NAMES, oparg)` idioms and emit `e.constAt(int(oparg))` / `e.nameAt(int(oparg))`. Removes the long-standing `LOAD_CONST.wrapConst` handwritten arm. |
+| **A5. `uint32_t` / paired-fast locals** | 4 | LOAD_FAST_LOAD_FAST, LOAD_FAST_BORROW_LOAD_FAST_BORROW, STORE_FAST_LOAD_FAST, STORE_FAST_STORE_FAST | Extend the C-local walker to `uint32_t` and add the high/low oparg decode helper (`uint32_t loparg = oparg & 0xF; uint32_t hiparg = oparg >> 4;`). |
+| **A6. `PyObject *x = <call-returning-Object>`** | 4 | LOAD_FROM_DICT_OR_DEREF, LOAD_BUILD_CLASS, SETUP_ANNOTATIONS, WITH_EXCEPT_START | The existing `PyObject *` walker only accepts `PyStackRef_AsPyObject{Borrow,Steal}(...)` on the RHS. Generalise it to accept any expression that resolves to `objects.Object`. |
+| **A7. C-typed declarations to keep as Go locals** | 13 | LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN (PyTypeObject), GET_LEN (Py_ssize_t), MAKE_FUNCTION + RETURN_GENERATOR (PyFunctionObject), COPY_FREE_VARS + ENTER_EXECUTOR (PyCodeObject), LOAD_DEREF + STORE_DEREF (PyCellObject), POP_EXCEPT + PUSH_EXC_INFO (_PyErr_StackItem), CACHE + RESERVED (Py_FatalError stub), SET_FUNCTION_ATTRIBUTE (size_t), CONVERT_VALUE (conversion_func), YIELD_VALUE (frame), INTERPRETER_EXIT (tstate), EXTENDED_ARG (opcode), GET_AITER (unaryfunc), CALL_LIST_APPEND (PyInterpreterState), LOAD_COMMON_CONSTANT + RESUME_CHECK (tstate / _Py_emscripten_signal_clock) | Per-type table of C-type → Go-type mappings (e.g. `Py_ssize_t → int`, `size_t → int`, `PyCellObject → *objects.Cell`). Each entry takes <10 lines once the table is in place. |
+| **A8. Misc parser rough edges** | 9 | LOAD_SMALL_INT (literal sign-extend cast), RAISE_VARARGS + BUILD_SLICE (ternary `?:` in call args), CHECK_EXC_MATCH (output name `b` written from `PyStackRef_True/False`), INSTRUMENTED_FOR_ITER (output redeclares input name), LOAD_LOCALS (`LOCALS()` macro), DELETE_DEREF (`PyCell_SwapTakeRef`), STACKREFS_TO_PYOBJECTS macro (BUILD_MAP, BUILD_STRING), INSTRUMENTED_JUMP family (3 — INSTRUMENTED_JUMP_FORWARD, INSTRUMENTED_NOT_TAKEN, INSTRUMENTED_POP_ITER) | One small parser fix each; group into one commit. The ternary + `STACKREFS_TO_PYOBJECTS` items are real translator features; the rest are one-line typos in the action walker. |
 
-Phase 5.3 closes when the legacy panels are empty and the
-staging panel is empty too. Phase 5.4 closes when `go test ./vm`
-stays green across that final flip.
+##### Bucket B — Go helper ports
+
+After Bucket A lands, every remaining bail reduces to "the
+translator wants to emit a call but the Go target does not
+exist yet". The action translator already knows how to render
+the call shape (`<callee>(args...)`); we just need the callee
+to compile. Each helper below is a single CPython function we
+port to gopy's `objects/` (or `module/`) package. Once the Go
+helper exists, the translator emits the call verbatim and the
+opcode flips.
+
+| Helper (CPython → gopy) | Opcodes unblocked |
+|------------------------|-------------------|
+| `PyNumber_Negative` → `objects.NumberNegative` | UNARY_NEGATIVE |
+| `PyNumber_Invert` → `objects.NumberInvert` | UNARY_INVERT |
+| `PyObject_Format` → `objects.Format` | FORMAT_WITH_SPEC |
+| `PyObject_GetIter` → `objects.GetIter` (already exists; just wire the `_Py_GatherStats_GetIter` instrumentation stub) | GET_ITER |
+| `PySet_New` → `objects.NewSet([]Object)` | BUILD_SET |
+| `PyCell_New` → `objects.NewCell` | MAKE_CELL |
+| `_PyList_FromStackRefStealOnSuccess` → wrapper over `objects.NewList` | BUILD_LIST |
+| `_PyTuple_FromStackRefStealOnSuccess` → wrapper over `objects.NewTuple` | BUILD_TUPLE |
+| `_PyTemplate_Build` → `objects.BuildTemplate` (t-string runtime) | BUILD_TEMPLATE |
+| `_PyEval_GetAwaitable` → `objects.GetAwaitable` | GET_AWAITABLE |
+| `_PyEval_GetANext` → `objects.GetANext` | GET_ANEXT |
+| `_PyEval_MatchClass` → `objects.MatchClass` | MATCH_CLASS |
+| `_PyEval_MatchKeys` → `objects.MatchKeys` | MATCH_KEYS |
+| `_PyIntrinsics_UnaryFunctions` / `_PyIntrinsics_BinaryFunctions` tables → `vm/intrinsics.go` lookup | CALL_INTRINSIC_1, CALL_INTRINSIC_2 |
+| `PyStackRef_MakeHeapSafe` → `stackref.MakeHeapSafe` (escapes after a yield/return; trivial under Go GC) | RETURN_VALUE |
+| `LOCALS()` → `e.frame.Locals()` (combined with A8 misc) | LOAD_LOCALS |
+| `PyCell_SwapTakeRef` → `objects.Cell.SwapTakeRef` (combined with A8) | DELETE_DEREF |
+
+After Bucket A + B, the only opcodes still routed through
+`trySimple` / `tryImport` / `tryGen` / `tryMatch` are the ones
+whose CPython bodies are structurally divergent from gopy
+(LOAD_CONST's `wrapConst` once we delete it, FOR_ITER /
+SEND / specialized CALL family with cache-driven control flow).
+Those are Phase 6 work; they stay in their handwritten panels
+until then.
+
+##### Bucket C — structurally divergent (Phase 6 work, listed here for completeness)
+
+These bodies will not flip in Phase 5 because the CPython
+shape disagrees with the gopy runtime in load-bearing ways.
+They are tracked here so a future audit doesn't try to "fix"
+them by extending the translator.
+
+| Opcode | Divergence |
+|--------|------------|
+| `FOR_ITER` family | Cache-driven deopt + specialized fast paths; needs the Phase 6 specialized-arm harness. |
+| `SEND` / `SEND_GEN` | Generator-frame swap that the gopy generator runtime does differently. |
+| `CALL` / `CALL_KW` / `CALL_FUNCTION_EX` family | gopy's call sites already share a single helper; the CPython body would force a re-split. Wait for the specialized harness. |
+| `RESUME` (and friends) | Eval breaker poll has gopy-specific signal hooks. |
+| `JUMP_BACKWARD` (non-`NO_INTERRUPT`) | Same — breaker poll. |
+| `BINARY_OP` | gopy resolves the op via `slot dispatch`, not via a helper-table indexed by `oparg`. Wait until slot-dispatch lands on the generated side. |
+
+##### Sequenced plan
+
+The buckets above are independent enough to parallelise across
+sessions, but the dependency order is:
+
+1. **A1 (sized I/O emitter rewrite)** first. Without it, no
+   sized opcode can flip and the translator continues to grow
+   ad-hoc workarounds. ~11 opcodes flip on landing.
+2. **A4 (GETITEM) + A6 (general `PyObject *` RHS)** together.
+   They unblock the LOAD_/STORE_/DELETE_NAME/GLOBAL/CONST
+   cluster and the LOAD_BUILD_CLASS group. ~18 opcodes flip.
+3. **A2 (`int`) + A3 (`if`)** together. They share a parser
+   surface (statement-level recognition + bool/int locals) and
+   land ~22 opcodes.
+4. **A5 (paired-fast) + A7 (C-type table) + A8 (misc)**.
+   Cleanup pass. ~26 opcodes.
+5. **Bucket B** — schedule each helper port as its own task.
+   They are now linear: each unblocks one (sometimes two)
+   opcodes.
+
+After step 4, parser coverage in the bytecodes.c gauge should
+be ≥80 / 118 (current floor 14). After bucket B it should be
+≥95; the rest are bucket C and stay on the Phase 6 list.
+
+##### Tracking
+
+- `Tools/bytecodes_gen/cpython_coverage_test.go` is the gauge;
+  `const minTranslates` is the floor and bumps as each bucket
+  lands.
+- `vm/dispatch_gen_whitelist.go` is the production gate; an
+  opcode lands here once its generated body is bit-equivalent
+  to the previous handwritten arm.
+- `vm/eval_dispatch_handwritten.go` shrinks one entry at a time
+  as opcodes graduate. When empty, Phase 5.3 closes.
+- `vm/eval_simple.go` / `vm/eval_import.go` / `vm/eval_gen.go`
+  / `vm/eval_match.go` shrink in step. When all four are gone,
+  Phase 5.4 closes.
 
 ## Phase 6 — specialized arms
 
