@@ -276,19 +276,18 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_JUMP_FORWARD:
-		// body bail: unrecognized token at action body start: "INSTRUMENTED_JUMP"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_LINE:
 		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_NOT_TAKEN:
-		// body bail: unrecognized token at action body start: "INSTRUMENTED_JUMP"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_POP_ITER:
 		iter := e.peek(0)
 		_ = iter
-		// body bail: unrecognized token at action body start: "INSTRUMENTED_JUMP"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		iter.Close()
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_POP_JUMP_IF_FALSE:
 		cond := e.peek(0)
 		_ = cond

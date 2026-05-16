@@ -132,6 +132,13 @@ func (t *actionTranslator) translateStmt() error {
 		// point. The refcount-only path has nothing to do; the stack
 		// slot for the input has already been popped by the prologue.
 		return t.skipParenthesised()
+	case "INSTRUMENTED_JUMP":
+		// Monitoring callback emit. v0.6 has no monitoring path, so the
+		// macro collapses to a no-op; the surrounding arm still needs
+		// to commit its real stack effect.
+		//
+		// CPython: Python/ceval_macros.h INSTRUMENTED_JUMP.
+		return t.skipParenthesised()
 	case "SYNC_SP", "DISPATCH", "DISPATCH_GOTO", "DISPATCH_SAME_OPARG",
 		"ADVANCE_ADAPTIVE_COUNTER", "PAUSE_ADAPTIVE_COUNTER":
 		// Cache/dispatch macros that are no-ops for v0.6 (no
