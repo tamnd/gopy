@@ -61,11 +61,21 @@ func StoreCounter(code []byte, instr int, value BackoffCounter) {
 // CacheCell reads the kth cache codeunit (1-based: cell 1 is the
 // counter slot, cell 2 is the next field, etc.). Per-family helpers
 // use it to fetch type or dict versions out of the inline cache.
+//
+// Deprecated: gopy-only helper. Phase 3.3+ of spec 1714 migrates
+// every caller to typed accessors generated from CPython's
+// pycore_code.h cache structs (see specialize/cache_layouts_gen.go).
+// CPython uses `cache->field` directly; the kth-cell shim has no
+// upstream counterpart and is a known source of cell-N-vs-field-Y
+// drift bugs. New code must not call CacheCell.
 func CacheCell(code []byte, instr, k int) uint16 {
 	return binary.LittleEndian.Uint16(code[2*(instr+k):])
 }
 
 // SetCacheCell writes the kth cache codeunit. Mirror of CacheCell.
+//
+// Deprecated: see CacheCell. Migrating callers to typed accessors
+// is tracked under spec 1714 phase 3.3.
 func SetCacheCell(code []byte, instr, k int, value uint16) {
 	binary.LittleEndian.PutUint16(code[2*(instr+k):], value)
 }
@@ -73,12 +83,18 @@ func SetCacheCell(code []byte, instr, k int, value uint16) {
 // SetCacheU32 writes a uint32 split across cache cells k and k+1
 // (low 16 bits first, matching the C struct field order on
 // little-endian targets, which is what CPython assumes).
+//
+// Deprecated: see CacheCell. Use the typed 32-bit setters that
+// the cache-layout generator emits (e.g. uint32 fields land as
+// two adjacent uint16 cells named field0/field1).
 func SetCacheU32(code []byte, instr, k int, value uint32) {
 	SetCacheCell(code, instr, k, uint16(value))
 	SetCacheCell(code, instr, k+1, uint16(value>>16))
 }
 
 // CacheU32 reads a uint32 split across cache cells k and k+1.
+//
+// Deprecated: see CacheCell.
 func CacheU32(code []byte, instr, k int) uint32 {
 	lo := uint32(CacheCell(code, instr, k))
 	hi := uint32(CacheCell(code, instr, k+1))
