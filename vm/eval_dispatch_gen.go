@@ -71,8 +71,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: tup
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CACHE:
-		// body bail: unrecognized token at action body start: "Py_FatalError"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		panic("vm: Py_FatalError")
 	case compile.CALL_INTRINSIC_1:
 		value := e.peek(0)
 		_ = value
@@ -432,26 +431,46 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		cond := e.peek(0)
 		_ = cond
 		// cache "unused" size=1 offset=0
-		// body bail: unrecognized token at action body start: "RECORD_BRANCH_TAKEN"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		jump := cond.IsFalse()
+		_ = jump
+		if jump {
+		}
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_POP_JUMP_IF_NONE:
 		value := e.peek(0)
 		_ = value
 		// cache "unused" size=1 offset=0
-		// body bail: unrecognized token at action body start: "RECORD_BRANCH_TAKEN"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		jump := value.IsNone()
+		_ = jump
+		if jump {
+		} else {
+			value.Close()
+		}
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_POP_JUMP_IF_NOT_NONE:
 		value := e.peek(0)
 		_ = value
 		// cache "unused" size=1 offset=0
-		// body bail: unrecognized token at action body start: "RECORD_BRANCH_TAKEN"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		jump := !value.IsNone()
+		_ = jump
+		if jump {
+			value.Close()
+		} else {
+		}
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_POP_JUMP_IF_TRUE:
 		cond := e.peek(0)
 		_ = cond
 		// cache "unused" size=1 offset=0
-		// body bail: unrecognized token at action body start: "RECORD_BRANCH_TAKEN"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		jump := cond.IsTrue()
+		_ = jump
+		if jump {
+		}
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.INTERPRETER_EXIT:
 		retval := e.peek(0)
 		_ = retval
@@ -701,8 +720,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: values[oparg]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RESERVED:
-		// body bail: unrecognized token at action body start: "Py_FatalError"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		panic("vm: Py_FatalError")
 	case compile.RETURN_GENERATOR:
 		// body bail: PyFunctionObject func rhs: expected ')' to close call
 		// outputs: res

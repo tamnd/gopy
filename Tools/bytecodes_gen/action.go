@@ -152,7 +152,8 @@ func (t *actionTranslator) translateStmt() error {
 		// CPython: Python/ceval_macros.h INSTRUMENTED_JUMP.
 		return t.skipParenthesised()
 	case "SYNC_SP", "DISPATCH", "DISPATCH_GOTO", "DISPATCH_SAME_OPARG",
-		"ADVANCE_ADAPTIVE_COUNTER", "PAUSE_ADAPTIVE_COUNTER":
+		"ADVANCE_ADAPTIVE_COUNTER", "PAUSE_ADAPTIVE_COUNTER",
+		"RECORD_BRANCH_TAKEN":
 		// Cache/dispatch macros that are no-ops for v0.6 (no
 		// specializer, no computed-goto). The eval loop drives every
 		// dispatch through the main switch, so DISPATCH() is implicit.
@@ -281,7 +282,13 @@ func (t *actionTranslator) translateTypedDecl() error {
 	}
 	t.locals[name] = true
 	if prefix == "int" || prefix == "uint8_t" || prefix == "uint32_t" || prefix == "size_t" || prefix == "Py_ssize_t" || prefix == "Py_hash_t" {
-		t.intLocals[name] = true
+		// `int jump = PyStackRef_IsFalse(cond);` is idiomatic CPython
+		// for "store a 0/1 from a predicate". The Go translation
+		// returns a real bool, so dont mark the local as int (which
+		// would otherwise append `!= 0` to later boolean uses).
+		if !rhsIsBool(rhsExpr) {
+			t.intLocals[name] = true
+		}
 	}
 	fmt.Fprintf(t.writer, "%s := %s\n", goLocalName(name), rhsExpr)
 	fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(name))
@@ -300,6 +307,7 @@ var stmtErrSetters = map[string]bool{
 	"_PyEval_FormatExcUnbound":  true,
 	"_PyEval_FormatExcCheckArg": true,
 	"_PyEval_FormatKwargsError": true,
+	"Py_FatalError":             true,
 }
 
 // translateStmtErrSetter consumes `NAME(args...);` and emits a
@@ -311,8 +319,32 @@ func (t *actionTranslator) translateStmtErrSetter(name string) error {
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	t.acceptSemi()
+	// Py_FatalError is the "abort the interpreter" macro; treat it as
+	// a hard panic so the surrounding epilogue can't reach.
+	if name == "Py_FatalError" {
+		fmt.Fprintf(t.writer, "panic(%q)\n", "vm: Py_FatalError")
+		if t.nestDepth == 0 {
+			t.terminates = true
+		}
+		return nil
+	}
 	fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", name)
 	return nil
+}
+
+// rhsIsBool returns true when the translated Go RHS resolves to a bool
+// rather than an int. CPython conflates the two in `int err = cond` but
+// our generated wrappers return real bools for predicate helpers.
+func rhsIsBool(expr string) bool {
+	for _, s := range []string{".IsFalse()", ".IsTrue()", ".IsNone()", ".IsNull()"} {
+		if strings.Contains(expr, s) {
+			return true
+		}
+	}
+	if strings.HasPrefix(expr, "!") {
+		return true
+	}
+	return false
 }
 
 // goTypeForPrefix maps a CPython type-name token to the Go type used
