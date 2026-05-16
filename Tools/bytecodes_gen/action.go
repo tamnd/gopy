@@ -161,12 +161,56 @@ func (t *actionTranslator) translateStmt() error {
 		// statements that reference it (e.g. PyStackRef_CLOSE(name))
 		// can find it.
 		return t.translateLocalDecl()
+	case "PyObject":
+		// `PyObject *name = expr;` — C-local PyObject pointer
+		// declaration. Renders the same as `_PyStackRef` since
+		// `objects.Object` is the Go type returned by AsObject; the
+		// `*` is part of CPython's pointer syntax and gets consumed
+		// here. Tracked as a local so later references resolve.
+		return t.translatePyObjectDecl()
 	}
 	// Output assignment: `name = expr ;` where name is a bound output.
 	if isBareIdent(tk.Text) && t.bound[tk.Text] == "out" {
 		return t.translateOutputAssign(tk.Text)
 	}
 	return fmt.Errorf("unrecognized token at action body start: %q", tk.Text)
+}
+
+// translatePyObjectDecl handles `PyObject * NAME = EXPR;`. The Go
+// output is `NAME := <go-expr>`; the value is an `objects.Object`,
+// which is what `Ref.AsObject()` (the usual rhs) already returns.
+// We do not emit a type annotation because Go's `:=` infers it.
+func (t *actionTranslator) translatePyObjectDecl() error {
+	t.pos++ // PyObject
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "*" {
+		return fmt.Errorf("expected '*' after PyObject")
+	}
+	t.pos++ // *
+	if t.pos >= len(t.toks) {
+		return fmt.Errorf("expected name after PyObject *")
+	}
+	name := t.toks[t.pos].Text
+	if !isBareIdent(name) {
+		return fmt.Errorf("expected identifier after PyObject *, got %q", name)
+	}
+	t.pos++
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "=" {
+		return fmt.Errorf("expected '=' after PyObject *%s", name)
+	}
+	t.pos++
+	rhs := []string{}
+	for t.pos < len(t.toks) && t.toks[t.pos].Text != ";" {
+		rhs = append(rhs, t.toks[t.pos].Text)
+		t.pos++
+	}
+	t.acceptSemi()
+	rhsExpr, err := t.translateExpr(rhs)
+	if err != nil {
+		return fmt.Errorf("PyObject *%s rhs: %w", name, err)
+	}
+	t.locals[name] = true
+	fmt.Fprintf(t.writer, "%s := %s\n", goLocalName(name), rhsExpr)
+	return nil
 }
 
 // translateLocalDecl handles `_PyStackRef NAME = EXPR;`. The Go output
@@ -433,6 +477,25 @@ func (p *exprParser) parsePrimary() (string, error) {
 			return "", err
 		}
 		return arg + ".IsNone()", nil
+	case "PyStackRef_AsPyObjectBorrow", "PyStackRef_AsPyObjectSteal":
+		// CPython distinguishes borrowed from owning extraction. Under
+		// Go's GC both collapse to `Ref.AsObject()`.
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		return arg + ".AsObject()", nil
+	case "PyStackRef_FromPyObjectSteal",
+		"PyStackRef_FromPyObjectNew",
+		"PyStackRef_FromPyObjectImmortal",
+		"PyStackRef_FromPyObjectBorrow":
+		// CPython distinguishes ownership transfer modes; under Go's
+		// GC they all collapse to `stackref.FromObject(obj)`.
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		return "stackref.FromObject(" + arg + ")", nil
 	case "GETLOCAL":
 		arg, err := p.parseCallArg()
 		if err != nil {

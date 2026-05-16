@@ -303,6 +303,50 @@ func TestTranslateBodyVoidCastFollowedByCall(t *testing.T) {
 	}
 }
 
+func TestTranslateBodyPyObjectDecl(t *testing.T) {
+	// `PyObject *obj = PyStackRef_AsPyObjectBorrow(value);` is the
+	// idiomatic prologue for bytecodes that need a borrowed view of a
+	// stack input. The decl should render as `obj := value.AsObject()`
+	// and the name should be reachable for later references.
+	sig := &SignatureAnalysis{
+		Name:   "X",
+		Inputs: []StackBinding{{Name: "value"}},
+	}
+	body := tokLine("PyObject *obj = PyStackRef_AsPyObjectBorrow(value);")
+	got, _, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "obj := value.AsObject()") {
+		t.Errorf("unexpected output:\n%s", got)
+	}
+}
+
+func TestTranslateBodyFromPyObjectExpressions(t *testing.T) {
+	// The Steal / New / Immortal / Borrow variants all collapse to
+	// stackref.FromObject under Go's GC.
+	sig := &SignatureAnalysis{
+		Name:    "X",
+		Inputs:  []StackBinding{{Name: "value"}},
+		Outputs: []StackBinding{{Name: "res"}},
+	}
+	for _, variant := range []string{
+		"PyStackRef_FromPyObjectSteal",
+		"PyStackRef_FromPyObjectNew",
+		"PyStackRef_FromPyObjectImmortal",
+		"PyStackRef_FromPyObjectBorrow",
+	} {
+		body := tokLine("PyObject *o = PyStackRef_AsPyObjectBorrow(value); res = " + variant + "(o);")
+		got, _, ok, note := TranslateBody(body, sig)
+		if !ok {
+			t.Fatalf("%s: translate failed: %s", variant, note)
+		}
+		if !strings.Contains(got, "stackref.FromObject(o)") {
+			t.Errorf("%s: missing FromObject wrap:\n%s", variant, got)
+		}
+	}
+}
+
 func TestSplitTopLevelComma(t *testing.T) {
 	a, b, ok := splitTopLevelComma("res == NULL, error")
 	if !ok || strings.TrimSpace(a) != "res == NULL" || strings.TrimSpace(b) != "error" {
