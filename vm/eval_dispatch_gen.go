@@ -118,7 +118,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.DELETE_ATTR:
 		owner := e.peek(0)
 		_ = owner
-		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_DEREF:
 		// body bail: PyObject *oldobj rhs: unexpected token "PyCell_SwapTakeRef" in expression
@@ -127,10 +127,10 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// body bail: unrecognized token at action body start: "if"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_GLOBAL:
-		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_NAME:
-		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
+		// body bail: PyObject *ns rhs: unexpected token "LOCALS" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_SUBSCR:
 		container := e.peek(1)
@@ -238,7 +238,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.IMPORT_FROM:
 		from := e.peek(0)
 		_ = from
-		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
+		// body bail: PyObject *res_o rhs: unexpected token "_PyEval_ImportFrom" in expression
 		// outputs: from* res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.IMPORT_NAME:
@@ -246,7 +246,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = level
 		fromlist := e.peek(0)
 		_ = fromlist
-		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
+		// body bail: PyObject *res_o rhs: unexpected token "_PyEval_ImportName" in expression
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_END_FOR:
@@ -355,7 +355,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_CONST:
-		// body bail: PyObject *obj rhs: unexpected token "GETITEM" in expression
+		// body bail: unrecognized token at action body start: "uint8_t"
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_DEREF:
@@ -399,7 +399,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:
 		mod_or_class_dict := e.peek(0)
 		_ = mod_or_class_dict
-		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
+		// body bail: expected '=' after PyObject *v_o
 		// outputs: v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_LOCALS:
@@ -407,7 +407,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: locals
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_NAME:
-		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
+		// body bail: PyObject *v_o rhs: unexpected token "_PyEval_LoadName" in expression
 		// outputs: v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_SMALL_INT:
@@ -565,12 +565,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_GLOBAL:
 		v := e.peek(0)
 		_ = v
-		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.STORE_NAME:
 		v := e.peek(0)
 		_ = v
-		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
+		// body bail: PyObject *ns rhs: unexpected token "LOCALS" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SWAP:
 		bottom := e.peek(int(oparg-2) + 1)

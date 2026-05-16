@@ -493,6 +493,7 @@ func (p *exprParser) parsePrimary() (string, error) {
 		return arg + ".AsObject()", nil
 	case "PyStackRef_FromPyObjectSteal",
 		"PyStackRef_FromPyObjectNew",
+		"PyStackRef_FromPyObjectNewMortal",
 		"PyStackRef_FromPyObjectImmortal",
 		"PyStackRef_FromPyObjectBorrow":
 		// CPython distinguishes ownership transfer modes; under Go's
@@ -508,6 +509,14 @@ func (p *exprParser) parsePrimary() (string, error) {
 			return "", err
 		}
 		return fmt.Sprintf("e.localAt(int(%s))", arg), nil
+	case "GETITEM":
+		// CPython macro: GETITEM(FRAME_CO_CONSTS, i) -> co_consts[i],
+		// GETITEM(FRAME_CO_NAMES, i) -> co_names[i]. We route them
+		// through e.constAt / e.nameAt; the resulting Go expression
+		// has type objects.Object, matching the PyObject* lhs.
+		//
+		// CPython: Python/ceval_macros.h GETITEM.
+		return p.parseGetItemCall()
 	}
 	if tk == "oparg" {
 		return "oparg", nil
@@ -521,6 +530,45 @@ func (p *exprParser) parsePrimary() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unexpected token %q in expression", tk)
+}
+
+// parseGetItemCall consumes `( FRAME_CO_CONSTS | FRAME_CO_NAMES , <idx> )`
+// and emits the matching evalState helper. CPython's GETITEM is a
+// PyTuple_GET_ITEM macro under the hood; for the two co_consts / co_names
+// table arguments we generate dedicated helpers that handle the wrap from
+// the raw compile-time storage to objects.Object.
+func (p *exprParser) parseGetItemCall() (string, error) {
+	if p.pos >= len(p.toks) || p.toks[p.pos] != "(" {
+		return "", fmt.Errorf("expected '(' after GETITEM")
+	}
+	p.pos++
+	if p.pos >= len(p.toks) {
+		return "", fmt.Errorf("unexpected end of GETITEM call")
+	}
+	table := p.toks[p.pos]
+	p.pos++
+	var helper string
+	switch table {
+	case "FRAME_CO_CONSTS":
+		helper = "e.constAt"
+	case "FRAME_CO_NAMES":
+		helper = "e.nameAt"
+	default:
+		return "", fmt.Errorf("unsupported GETITEM table %q", table)
+	}
+	if p.pos >= len(p.toks) || p.toks[p.pos] != "," {
+		return "", fmt.Errorf("expected ',' after GETITEM table")
+	}
+	p.pos++
+	idx, err := p.parsePrimary()
+	if err != nil {
+		return "", fmt.Errorf("GETITEM index: %w", err)
+	}
+	if p.pos >= len(p.toks) || p.toks[p.pos] != ")" {
+		return "", fmt.Errorf("expected ')' to close GETITEM")
+	}
+	p.pos++
+	return fmt.Sprintf("%s(int(%s))", helper, idx), nil
 }
 
 // parseCallArg consumes ( <expr> ) and returns the rendered inner

@@ -219,6 +219,29 @@ func (e *evalState) popObject() objects.Object {
 	return e.pop().AsObjectSteal()
 }
 
+// constAt returns co_consts[i] lifted into an Object. Mirrors CPython's
+// GETITEM(FRAME_CO_CONSTS, i): the bytecode compiler guarantees i is in
+// range and the const wraps cleanly, so a failure here is a compiler bug
+// rather than a runtime error.
+//
+// CPython: Python/ceval_macros.h GETITEM
+func (e *evalState) constAt(i int) objects.Object {
+	obj, err := wrapConst(e.f.Code.Consts[i])
+	if err != nil {
+		panic(fmt.Sprintf("vm: bad const at %d: %v", i, err))
+	}
+	return obj
+}
+
+// nameAt returns co_names[i] as a Python str. CPython stores names as
+// already-interned PyUnicodes; in gopy the storage is a Go string, so
+// we wrap on access.
+//
+// CPython: Python/ceval_macros.h GETITEM
+func (e *evalState) nameAt(i int) objects.Object {
+	return objects.NewStr(e.f.Code.Names[i])
+}
+
 // localAt returns fast-local i. Out-of-range indexes panic since the
 // compiler is supposed to validate them.
 //
