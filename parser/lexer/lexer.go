@@ -60,6 +60,10 @@ func isPotentialIdentifierChar(c int) bool {
 func (s *State) nextC() int {
 	for {
 		if s.cur != s.inp {
+			if s.pendingLineno != 0 {
+				s.lineno += s.pendingLineno
+				s.pendingLineno = 0
+			}
 			s.col++
 			c := int(s.buf[s.cur])
 			s.cur++
@@ -140,7 +144,7 @@ func (s *State) tokGetNormalMode() Tok {
 		// CPython: Parser/lexer/lexer.c:1205 (continuation branch)
 		for c == '\\' && s.peek() == '\n' {
 			s.nextC()
-			s.lineno++
+			s.pendingLineno++
 			s.col = 0
 			s.lineStart = s.cur
 			s.contLine = true
@@ -197,7 +201,7 @@ func (s *State) tokGetNormalMode() Tok {
 			endNEWLINE := s.cur - 1
 			bump := func() {
 				s.atbol = true
-				s.lineno++
+				s.pendingLineno++
 				s.col = 0
 				s.lineStart = s.cur
 			}
@@ -467,7 +471,7 @@ func (s *State) scanString(quote int) Tok {
 				s.recordError("unterminated string literal")
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
-			s.lineno++
+			s.pendingLineno++
 			s.col = 0
 		}
 		if c == quote {
