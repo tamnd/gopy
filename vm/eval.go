@@ -47,6 +47,15 @@ type evalState struct {
 	// and the generator object's gi_frame_state)
 	genYield chan<- objects.GenMsg
 	genSend  <-chan objects.GenMsg
+
+	// pendingErr is set by translator-emitted helper wrappers (the ones
+	// modeled on CPython helpers that return NULL + set the thread
+	// exception state). The matching ERROR_IF in the body checks for
+	// the NULL/zero sentinel and bubbles this error up.
+	//
+	// CPython: tstate->current_exception, set by helpers that signal
+	// failure via NULL return.
+	pendingErr error
 }
 
 // Eval runs f to completion under ts and returns the value the frame

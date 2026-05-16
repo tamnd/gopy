@@ -6,6 +6,7 @@ package vm
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
@@ -23,6 +24,65 @@ import (
 //nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) decrefInputs(n int) {
 	_ = n
+}
+
+// error returns the error currently held in pendingErr (and clears it),
+// or constructs a generic one if no specific cause was recorded. The
+// translator emits `return 0, e.error("error")` for every ERROR_IF;
+// helpers that signal failure via NULL stash the real cause on
+// pendingErr before returning the sentinel, so this method surfaces
+// the right exception to the eval loop.
+//
+// CPython: Python/ceval.c JUMP_TO_LABEL(error) — the per-instruction
+// error label inspects tstate->current_exception.
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) error(label string) error {
+	if e.pendingErr != nil {
+		err := e.pendingErr
+		e.pendingErr = nil
+		return err
+	}
+	return fmt.Errorf("vm: error label %q reached without pending exception", label)
+}
+
+// pyNumberNegative is the translator-side wrapper for CPython's
+// PyNumber_Negative. The body keeps the NULL-on-failure convention so
+// the surrounding `ERROR_IF(res_o == NULL)` translation just works:
+// the real Go error rides on e.pendingErr until e.error() retrieves it.
+//
+// CPython: Objects/abstract.c:1381 PyNumber_Negative
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) pyNumberNegative(o objects.Object) objects.Object {
+	r, err := objects.NumberNegative(o)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return r
+}
+
+// pyIs mirrors CPython's Py_Is macro: identity comparison returning
+// 1 / 0 as an int.
+//
+// CPython: Include/object.h Py_Is
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) pyIs(a, b objects.Object) uint32 {
+	if a == b {
+		return 1
+	}
+	return 0
+}
+
+// pyType mirrors Py_TYPE: returns the type object for o.
+//
+// CPython: Include/object.h Py_TYPE
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) pyType(o objects.Object) objects.Object {
+	return objects.TypeOf(o)
 }
 
 // iterToSlice walks any iterable and returns its items. Used by

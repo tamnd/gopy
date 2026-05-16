@@ -183,7 +183,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// body bail: unrecognized token at action body start: "if"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.EXTENDED_ARG:
-		// body bail: expected identifier after opcode, got "="
+		// body bail: unrecognized token at action body start: "opcode"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.FORMAT_SIMPLE:
 		value := e.peek(0)
@@ -202,7 +202,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.GET_AITER:
 		obj := e.peek(0)
 		_ = obj
-		// body bail: unaryfunc getter rhs: unexpected token "NULL" in expression
+		// body bail: expected '=' after PyObject iter_o
 		// outputs: iter
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.GET_ANEXT:
@@ -315,16 +315,25 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.INTERPRETER_EXIT:
 		retval := e.peek(0)
 		_ = retval
-		// body bail: expected identifier after tstate, got "->"
+		// body bail: unrecognized token at action body start: "tstate"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.IS_OP:
 		left := e.peek(1)
 		_ = left
 		right := e.peek(0)
 		_ = right
-		// body bail: int res rhs: unexpected token "Py_Is" in expression
-		// outputs: b
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var b stackref.Ref
+		res := e.pyIs(left.AsObject(), right.AsObject()) ^ oparg
+		_ = res
+		e.decrefInputs(2)
+		if res != 0 {
+			b = stackref.True
+		} else {
+			b = stackref.False
+		}
+		e.drop(1 + 1)
+		e.push(b)
+		return e.advance(), nil, nil, false, nil
 	case compile.JUMP_BACKWARD_NO_INTERRUPT:
 		return e.jumpBy(-int(oparg) + 1), nil, nil, false, nil
 	case compile.JUMP_FORWARD:
@@ -381,7 +390,9 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		var value1 stackref.Ref
 		var value2 stackref.Ref
 		oparg1 := oparg >> 4
+		_ = oparg1
 		oparg2 := oparg & 15
+		_ = oparg2
 		value1 = e.localAt(int(oparg1)).Dup()
 		value2 = e.localAt(int(oparg2)).Dup()
 		e.push(value1)
@@ -395,7 +406,9 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		var value1 stackref.Ref
 		var value2 stackref.Ref
 		oparg1 := oparg >> 4
+		_ = oparg1
 		oparg2 := oparg & 15
+		_ = oparg2
 		value1 = e.localAt(int(oparg1)).Dup()
 		value2 = e.localAt(int(oparg2)).Dup()
 		e.push(value1)
@@ -556,6 +569,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		value := e.peek(0)
 		_ = value
 		tmp := e.localAt(int(oparg))
+		_ = tmp
 		e.setLocal(int(oparg), value)
 		tmp.Close()
 		e.drop(1)
@@ -565,8 +579,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value1
 		var value2 stackref.Ref
 		oparg1 := oparg >> 4
+		_ = oparg1
 		oparg2 := oparg & 15
+		_ = oparg2
 		tmp := e.localAt(int(oparg1))
+		_ = tmp
 		e.setLocal(int(oparg1), value1)
 		value2 = e.localAt(int(oparg2)).Dup()
 		tmp.Close()
@@ -607,9 +624,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.UNARY_NEGATIVE:
 		value := e.peek(0)
 		_ = value
-		// body bail: PyObject res_o rhs: unexpected token "PyNumber_Negative" in expression
-		// outputs: res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		res_o := e.pyNumberNegative(value.AsObject())
+		_ = res_o
+		value.Close()
+		if res_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		res = stackref.FromObject(res_o)
+		e.drop(1)
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.UNARY_NOT:
 		value := e.peek(0)
 		_ = value

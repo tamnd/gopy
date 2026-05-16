@@ -32,7 +32,7 @@ func TestTranslateBodyErrorIf(t *testing.T) {
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
-	if !strings.Contains(got, "res") || !strings.Contains(got, "NULL") || !strings.Contains(got, `e.error("error")`) {
+	if !strings.Contains(got, "res") || !strings.Contains(got, "nil") || !strings.Contains(got, `e.error("error")`) {
 		t.Errorf("unexpected output:\n%s", got)
 	}
 }

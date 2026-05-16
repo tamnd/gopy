@@ -49,9 +49,10 @@ func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, termina
 		sig:      sig,
 		bound:    bindNames(sig),
 		toks:     stripWhitespace(body),
-		writer:   &strings.Builder{},
-		assigned: map[string]bool{},
-		locals:   map[string]bool{},
+		writer:    &strings.Builder{},
+		assigned:  map[string]bool{},
+		locals:    map[string]bool{},
+		intLocals: map[string]bool{},
 	}
 	// Passthrough outputs: when an output reuses an input name, CPython's
 	// analyzer treats the slot as already populated (the input ref flows
@@ -96,6 +97,7 @@ type actionTranslator struct {
 	terminates bool            // body emits its own dispatch return
 	assigned   map[string]bool // output names that got assigned
 	locals     map[string]bool // C-locals declared in the body
+	intLocals  map[string]bool // subset of locals whose C type was `int`
 }
 
 func (t *actionTranslator) run() error {
@@ -242,7 +244,11 @@ func (t *actionTranslator) translateTypedDecl() error {
 		return fmt.Errorf("%s %s rhs: %w", prefix, name, err)
 	}
 	t.locals[name] = true
+	if prefix == "int" || prefix == "uint8_t" || prefix == "uint32_t" || prefix == "size_t" || prefix == "Py_ssize_t" || prefix == "Py_hash_t" {
+		t.intLocals[name] = true
+	}
 	fmt.Fprintf(t.writer, "%s := %s\n", goLocalName(name), rhsExpr)
+	fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(name))
 	return nil
 }
 
@@ -335,6 +341,11 @@ func (t *actionTranslator) translateOutputAssign(name string) error {
 		condExpr, err := t.translateExpr(condToks)
 		if err != nil {
 			return fmt.Errorf("output assign %q ternary cond: %w", name, err)
+		}
+		// C int doubles as a boolean. When the condition reduces to a
+		// single int-typed local, emit the explicit `!= 0` Go needs.
+		if len(condToks) == 1 && t.intLocals[condToks[0]] {
+			condExpr = condExpr + " != 0"
 		}
 		aExpr, err := t.translateExpr(aToks)
 		if err != nil {
@@ -554,6 +565,14 @@ func (p *exprParser) parsePrimary() (string, error) {
 		// CPython: Python/ceval_macros.h GETITEM.
 		return p.parseGetItemCall()
 	}
+	// Helper-call vocabulary. Each entry maps a CPython helper name to
+	// a Go expression template and an argument arity. The translator
+	// renders the call as a method on the eval state so the helper
+	// owns the failure mode (pendingErr) instead of inventing a
+	// per-call error path.
+	if h, ok := helperCalls[tk]; ok {
+		return p.parseHelperCall(h)
+	}
 	// Parenthesised subexpression.
 	if tk == "(" {
 		inner, err := p.parseExpr(0)
@@ -576,6 +595,12 @@ func (p *exprParser) parsePrimary() (string, error) {
 	}
 	if tk == "oparg" {
 		return "oparg", nil
+	}
+	if tk == "NULL" {
+		return "nil", nil
+	}
+	if tk == "true" || tk == "false" {
+		return tk, nil
 	}
 	if isNumericLiteral(tk) {
 		return stripIntSuffix(tk), nil
@@ -673,6 +698,68 @@ func (p *exprParser) parseGetItemCall() (string, error) {
 	return "", fmt.Errorf("unterminated GETITEM call")
 }
 
+// helperCall describes how to render a CPython helper as a Go call on
+// the eval state. Arity must match the number of comma-separated args
+// in the source; tstate / frame are dropped because they are implicit
+// receivers in the evalState method.
+type helperCall struct {
+	goExpr    string // e.g. "e.pyNumberNegative" — applied as Func(args...)
+	arity     int    // expected non-implicit arg count
+	dropFirst int    // strip this many leading args (tstate, frame)
+}
+
+// helperCalls is the registry of CPython helpers mapped to gopy
+// evalState methods. The Go wrappers live in vm/eval_helpers.go and
+// own the failure mode (pendingErr) so the translator can emit them
+// uniformly inside the action body.
+var helperCalls = map[string]helperCall{
+	"Py_Is":            {goExpr: "e.pyIs", arity: 2},
+	"Py_TYPE":          {goExpr: "e.pyType", arity: 1},
+	"PyNumber_Negative": {goExpr: "e.pyNumberNegative", arity: 1},
+}
+
+// parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.
+func (p *exprParser) parseHelperCall(h helperCall) (string, error) {
+	if p.pos >= len(p.toks) || p.toks[p.pos] != "(" {
+		return "", fmt.Errorf("expected '(' after helper")
+	}
+	p.pos++
+	args := []string{}
+	if p.pos < len(p.toks) && p.toks[p.pos] == ")" {
+		p.pos++
+	} else {
+		for {
+			a, err := p.parseExpr(0)
+			if err != nil {
+				return "", err
+			}
+			args = append(args, a)
+			if p.pos >= len(p.toks) {
+				return "", fmt.Errorf("unterminated helper call")
+			}
+			if p.toks[p.pos] == "," {
+				p.pos++
+				continue
+			}
+			if p.toks[p.pos] == ")" {
+				p.pos++
+				break
+			}
+			return "", fmt.Errorf("expected ',' or ')' in helper call, got %q", p.toks[p.pos])
+		}
+	}
+	if h.dropFirst > 0 {
+		if len(args) < h.dropFirst {
+			return "", fmt.Errorf("helper call missing %d implicit args", h.dropFirst)
+		}
+		args = args[h.dropFirst:]
+	}
+	if len(args) != h.arity {
+		return "", fmt.Errorf("helper call arity: want %d, got %d", h.arity, len(args))
+	}
+	return h.goExpr + "(" + strings.Join(args, ", ") + ")", nil
+}
+
 // parseCallArg consumes ( <expr> ) and returns the rendered inner
 // expression. Single-arg callees only for now; multi-arg can layer on
 // when an opcode needs it.
@@ -753,12 +840,34 @@ func (t *actionTranslator) translateErrorIf() error {
 	if cond == "true" {
 		// Unconditional error path. CPython skips the `if` and emits
 		// the jump straight; we mirror that.
-		fmt.Fprintln(t.writer, `return 0, e.error("error")`)
+		fmt.Fprintln(t.writer, `return 0, nil, nil, false, e.error("error")`)
 		t.terminates = true
 		return nil
 	}
-	fmt.Fprintf(t.writer, "if %s { return 0, e.error(\"error\") }\n", cond)
+	// Token-level rewrites for the handful of C idioms that show up
+	// inside ERROR_IF: NULL is the only nil sentinel the translator
+	// emits today, and helper wrappers all return nil-on-error.
+	cond = rewriteCCondToGo(cond)
+	fmt.Fprintf(t.writer, "if %s { return 0, nil, nil, false, e.error(\"error\") }\n", cond)
 	return nil
+}
+
+// rewriteCCondToGo rewrites the small set of C tokens that show up
+// inside ERROR_IF conditions. The condition text is otherwise emitted
+// verbatim so unknown C identifiers (member access, helper variables)
+// pass through unchanged; the surrounding Go compile catches anything
+// that wouldn't parse.
+func rewriteCCondToGo(s string) string {
+	// Word-boundary replace of NULL with nil. The condition string is
+	// a token slice joined by single spaces, so a plain substring
+	// replace works without breaking identifiers that contain NULL.
+	parts := strings.Fields(s)
+	for i, p := range parts {
+		if p == "NULL" {
+			parts[i] = "nil"
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // translateUnaryCall handles `MACRO(arg);` where arg is a single bound
