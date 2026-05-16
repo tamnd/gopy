@@ -1,0 +1,171 @@
+---
+title: Codecs
+description: The codec registry, str/bytes conversion, error handlers, and the ASCII/Latin-1/UTF-8 fast paths on PEP 393 strings.
+---
+
+# Codecs
+
+A *codec* in CPython is the bidirectional bridge between `bytes`
+and `str`. Encoders take a `str` and produce a `bytes`; decoders
+do the reverse. The codec system lives behind a registry keyed
+by encoding name: `utf-8`, `latin-1`, `ascii`, plus many more.
+The most common encodings ship as C built-ins; others are
+implemented in `Lib/encodings/`. Hot-path decoding for ASCII and
+Latin-1 hits SIMD-tuned code paths that exploit the PEP 393
+compact-string representation.
+
+## Where the code lives
+
+| File                                | Role                                                                |
+| ----------------------------------- | ------------------------------------------------------------------- |
+| `Python/codecs.c`                   | The registry: `codecs.register`, `codecs.lookup`, codec-info cache. |
+| `Objects/unicodeobject.c`           | The C-implemented encoders/decoders: UTF-8, UTF-16, ASCII, Latin-1, UCS-4. |
+| `Modules/_codecsmodule.c`           | The Python-level `_codecs` module exposing the C codecs.            |
+| `Lib/encodings/`                    | Python-implemented codecs (`hex`, `rot_13`, `cp1252`, ...).         |
+| `Modules/_multibytecodec.c`         | The CJK family (`gb2312`, `shift_jis`, ...).                        |
+
+## The registry
+
+```c
+/* Python/codecs.c */
+int PyCodec_Register(PyObject *search_function);
+PyObject *_PyCodec_Lookup(const char *encoding);
+```
+
+A *search function* takes a normalised encoding name (lower-case,
+underscores) and returns a `CodecInfo` tuple
+`(encoder, decoder, stream_reader, stream_writer)`, or None to
+signal "not me; try the next one". The default search function
+walks `Lib/encodings/<name>.py`; the C codecs are registered as a
+search function that recognises a small set of canonical names.
+
+`codecs.lookup(name)` returns the `CodecInfo` for `name` from the
+cache, calling search functions on miss. The cache is a Python
+dict keyed by the normalised name.
+
+## str/bytes conversion
+
+`str.encode(encoding, errors)` calls the encoder; `bytes.decode`
+calls the decoder. For the common encodings, the dispatch goes
+straight to the C implementation:
+
+```c
+PyObject *PyUnicode_AsUTF8String(PyObject *unicode);
+PyObject *PyUnicode_AsASCIIString(PyObject *unicode);
+PyObject *PyUnicode_AsLatin1String(PyObject *unicode);
+PyObject *PyUnicode_DecodeUTF8(const char *s, Py_ssize_t size, const char *errors);
+```
+
+These bypass the registry on the fast path: the string method
+calls into the C function directly when the encoding name is one
+of the built-ins.
+
+## Error handlers
+
+Encoding/decoding can fail. CPython provides a fixed set of
+*error handlers*:
+
+| Name                  | On encode error                                  | On decode error                          |
+| --------------------- | ------------------------------------------------ | ---------------------------------------- |
+| `strict`              | Raise.                                           | Raise.                                   |
+| `ignore`              | Skip the character.                              | Skip the byte.                           |
+| `replace`             | Insert `?` or U+FFFD.                            | Insert U+FFFD.                           |
+| `xmlcharrefreplace`   | Insert `&#NNN;`.                                 | (encode-only)                            |
+| `backslashreplace`    | Insert `\\xNN` / `\\uNNNN` / `\\UNNNNNNNN`.      | Insert `\\xNN`.                          |
+| `namereplace`         | Insert `\\N{NAME}`.                              | (encode-only)                            |
+| `surrogateescape`     | (encode roundtrip)                               | Map invalid bytes to U+DC80..U+DCFF.     |
+| `surrogatepass`       | Pass surrogates through.                         | Accept surrogates from the byte stream.  |
+
+`surrogateescape` is the one PEP 383 introduced for file-system
+paths: invalid bytes get a reserved private-use codepoint range,
+which the encoder turns back into the original bytes. This is
+how Python preserves invalid filenames on Linux without
+exceptions.
+
+Custom handlers register via `codecs.register_error(name, handler)`.
+The handler receives a `UnicodeError` instance with `.start`,
+`.end`, `.object`, and returns `(replacement_string, resume_index)`.
+
+## PEP 393 fast paths
+
+A `str` in CPython is *compact*: stored as the narrowest of
+Latin-1, UCS-2, or UCS-4 that holds every codepoint. PEP 393
+guarantees this; encoders exploit it:
+
+* **ASCII encode/decode.** If the string is Latin-1 *and* all
+  bytes are `< 0x80`, the output is a `memcpy`. CPython sets a
+  flag on the string at construction time (`PyUnicode_IS_ASCII`)
+  so the check is a load.
+* **Latin-1 encode/decode.** If the string is Latin-1, the
+  output is a `memcpy` to bytes; the decode is a Latin-1 string
+  copy.
+* **UTF-8 encode.** The encoder reads the input one chunk at a
+  time, hitting a SIMD-aware fast path when the chunk is pure
+  ASCII; non-ASCII codepoints fall back to the per-codepoint
+  encoder.
+* **UTF-8 decode.** Uses a state machine that processes input
+  one byte at a time, but with SIMD-aware ASCII detection
+  before each chunk.
+
+The result: ASCII string round-trip through UTF-8 is roughly the
+cost of two `memcpy`s.
+
+## UTF-8 source encoding
+
+CPython source is UTF-8 by default; the parser reads it through
+the tokenizer's BOM-aware reader. PEP 263 still lets a file
+declare an encoding via `# -*- coding: latin-1 -*-`, but the
+default is universal.
+
+## File encodings
+
+`open(file)` uses the locale's preferred encoding by default,
+which is *UTF-8* in 3.15+ (PEP 686 made UTF-8 the default mode
+across the platform-default coercion path; 3.7 already
+introduced UTF-8 mode for stdout/stderr/stdin under
+`PYTHONUTF8=1`). `Lib/io.py` plumbs the encoding through
+`TextIOWrapper`.
+
+`locale.getencoding()` returns the *actual* locale encoding
+(typically still platform-dependent); `os.fsencode` /
+`os.fsdecode` use the filesystem encoding (UTF-8 on Linux/macOS,
+the active codepage on Windows) with `surrogateescape`.
+
+## Multibyte and stateful codecs
+
+CJK codecs (`gb2312`, `shift_jis`, `euc_kr`, `iso2022_*`) have
+mode bits and are implemented in C via a generic state machine
+in `Modules/cjkcodecs/`. They register through the codec
+registry like the simpler ones; the state is per-codec, not
+per-string.
+
+Stateful encoders (incremental encoders/decoders) live in
+`codecs.IncrementalEncoder`/`IncrementalDecoder` and are what
+`io.TextIOWrapper` uses to handle the chunked input stream.
+
+## CPython 3.14 changes
+
+* **UTF-8 mode default-on** for the open-file encoding under
+  PEP 686 (deferred from 3.15 to a phased rollout starting in
+  3.14 by some platforms; the Python-level default of
+  `locale.getencoding()` remains).
+* **PEP 597 EncodingWarning** continues to fire when `open` is
+  called without an explicit `encoding=`; useful for catching
+  latent locale-dependence bugs.
+
+## PEP touchpoints
+
+* **PEP 263.** Source-file encoding declarations.
+* **PEP 383.** Non-decodable bytes via `surrogateescape`.
+* **PEP 393.** Flexible string representation.
+* **PEP 540.** UTF-8 mode (`PYTHONUTF8`).
+* **PEP 597.** Locale-dependent default encoding warning.
+* **PEP 686.** UTF-8 mode default.
+
+## Reference
+
+* `Python/codecs.c`, `Objects/unicodeobject.c`,
+  `Modules/_codecsmodule.c`, `Lib/encodings/`,
+  `Modules/cjkcodecs/`.
+* Unicode TR15 (Normalization), TR29 (Text Segmentation).
+* PEP 393. Flexible string representation.

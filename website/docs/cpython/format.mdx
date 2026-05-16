@@ -1,0 +1,172 @@
+---
+title: Format
+description: __format__, the format spec mini-language, f-strings, t-strings.
+---
+
+# Format
+
+Python has three formatting surfaces. `__format__` and the
+`format()` builtin; f-strings; and the older `%`-formatting on
+strings and bytes. All three converge on the same per-type
+`__format__` slot and the format-spec mini-language documented in
+`Doc/library/string.rst`. The compiler turns f-strings into a
+sequence of opcodes that call `__format__` directly; t-strings
+(PEP 750) defer the formatting to a template object.
+
+## Where the code lives
+
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Objects/unicodeobject.c::unicode_format`  | `str.__format__`, `str.format`.                                   |
+| `Python/formatter_unicode.c`               | The numeric format specs (precision, alignment, grouping).        |
+| `Python/bytecodes.c`                       | `FORMAT_VALUE`, `FORMAT_SIMPLE`, `FORMAT_WITH_SPEC`, `BUILD_STRING`. |
+| `Objects/longobject.c::long__format__`     | `int.__format__`.                                                 |
+| `Objects/floatobject.c::float__format__`   | `float.__format__`.                                               |
+| `Objects/template/`                        | PEP 750 `string.templatelib` runtime.                             |
+
+## The protocol
+
+`format(obj, spec)` calls `type(obj).__format__(obj, spec)`. The
+spec is a string in the *format spec mini-language*:
+
+```
+[[fill]align][sign][#][0][width][grouping][.precision][type]
+```
+
+Numeric types parse the spec into a `_PyUnicodeWriter` plan and
+emit the formatted output. String types implement the alignment,
+width, and `s` type code.
+
+The compile-time check is permissive: every type's `__format__`
+sees the same string. Per-type rules reject unknown options
+(`int.__format__(1, "f")` raises because `f` is a float-only
+type code).
+
+## f-strings
+
+```python
+name = "Tam"
+n = 42
+s = f"{name!r:>10} = {n:#06x}"
+```
+
+Compiles to roughly:
+
+```
+LOAD_FAST          name
+FORMAT_SIMPLE        # !r conversion
+LOAD_CONST         '>10'
+FORMAT_WITH_SPEC
+LOAD_CONST         ' = '
+LOAD_FAST          n
+LOAD_CONST         '#06x'
+FORMAT_WITH_SPEC
+BUILD_STRING       3
+```
+
+* `FORMAT_SIMPLE` converts the top of stack using the optional
+  `!s`/`!r`/`!a` conversion (or just `str()` if none).
+* `FORMAT_WITH_SPEC` pops the spec, then the value, calls
+  `__format__`, pushes the result.
+* `BUILD_STRING n` pops `n` strings and concatenates them.
+
+The bytecode shape is *flat*: no nested calls, no format-string
+parsing at runtime. Parsing happens at compile time in the
+tokenizer (see [parser](parser)).
+
+### Self-documenting `{x=}`
+
+`f"{x=}"` compiles to the equivalent of `f"x={x!r}"`. The
+tokenizer recognises the `=` suffix inside a replacement field;
+the parser emits a literal `"x="` followed by the formatted
+value with implicit `!r`.
+
+## Bytes formatting
+
+`b"hello %s" % b"world"` works for bytes too, with the
+constraint that `%s` requires a bytes-like operand. The
+implementation in `Objects/bytesobject.c::bytes_format` mirrors
+the string implementation; PEP 461 documented the bytes-only
+subset.
+
+## t-strings (PEP 750)
+
+PEP 750 adds *template strings*:
+
+```python
+from string.templatelib import Template
+
+t = t"Hello, {name}!"
+assert isinstance(t, Template)
+```
+
+A `t"..."` literal does *not* run any formatting: it constructs
+a `Template` object containing the literal segments and the
+interpolation entries. The consumer decides what to do with it.
+
+The compile path is parallel to f-strings but emits
+`BUILD_TEMPLATE` instead of `BUILD_STRING`; the interpolations
+are wrapped in `Interpolation(value, expr, conversion, format_spec)`
+objects so the consumer can inspect the original expression
+source. The shape is described by the AST `TemplateStr` /
+`Interpolation` nodes (see [ast](ast)).
+
+t-strings give SQL builders, HTML escapers, and shell-command
+constructors a safe, library-defined interpolation primitive
+without the implicit string conversion that f-strings perform.
+
+## The format spec language for numbers
+
+```
+[align][sign][z][#][0][width][grouping][.precision][type]
+```
+
+* `align`: `<`, `>`, `=`, `^` plus optional fill character.
+* `sign`: `+`, `-`, space.
+* `z`: PEP 682 negative-zero coercion (`-0.0` formatted with
+  `z.2f` becomes `0.00`).
+* `#`: alternate form (`0x` prefix for hex, etc.).
+* `0`: zero-padding.
+* `width`: minimum width.
+* `grouping`: `,` (3-digit groups), `_` (PEP 515 underscore
+  grouping).
+* `precision`: digits after the decimal for `f`/`e`; significant
+  digits for `g`; max characters for `s`.
+* `type`: `b`, `o`, `d`, `x`, `X`, `e`, `E`, `f`, `F`, `g`, `G`,
+  `n`, `%`, `c`, `s`.
+
+The parser is in `Python/formatter_unicode.c::parse_internal_render_format_spec`;
+the formatter dispatches to per-type renderers from there.
+
+## Locale-aware grouping
+
+`'n'` type and `,_` group separators interact with the locale.
+For `'n'` the separator comes from `LC_NUMERIC`; for `,` and
+`_`, it is always the literal character regardless of locale.
+The locale path lives in `Python/formatter_unicode.c::get_locale_info`.
+
+## CPython 3.14 changes
+
+* **PEP 750 t-strings.** New AST nodes, new opcodes
+  (`BUILD_TEMPLATE`), new stdlib module `string.templatelib`.
+* **f-string parser refinements.** 3.12 made f-strings fully
+  PEG-parsed (PEP 701); 3.14 polished the resulting error
+  messages.
+
+## PEP touchpoints
+
+* **PEP 3101.** New string-formatting (`str.format`).
+* **PEP 498.** f-strings.
+* **PEP 515.** Underscores in numeric literals (and as a
+  grouping separator).
+* **PEP 682.** Negative-zero coercion in numeric formatting.
+* **PEP 701.** Syntactic formalisation of f-strings.
+* **PEP 750.** Template strings.
+
+## Reference
+
+* `Python/formatter_unicode.c`,
+  `Objects/unicodeobject.c::unicode_format`,
+  `Objects/template/`.
+* `Doc/library/string.rst`. Format spec mini-language.
+* PEP 3101, 498, 701, 750.

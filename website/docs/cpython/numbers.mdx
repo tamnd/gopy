@@ -1,0 +1,165 @@
+---
+title: Numbers
+description: int, float, complex. Arbitrary precision longs, the small-int cache, and IEEE-754 doubles.
+---
+
+# Numbers
+
+Python's numeric tower runs on three concrete types in the
+interpreter: `int`, `float`, `complex`. `int` is arbitrary
+precision; `float` is IEEE-754 double; `complex` is a pair of
+doubles. The interesting one is `int`, which doubles as the
+universal integer type and as the building block for every
+hashable key that derives from an integer.
+
+## Where the code lives
+
+| File                                | Role                                                                |
+| ----------------------------------- | ------------------------------------------------------------------- |
+| `Objects/longobject.c`              | `int`. Variable-length digits, arithmetic, conversion.              |
+| `Objects/floatobject.c`             | `float`. IEEE-754 wrapper, formatting, free-list.                   |
+| `Objects/complexobject.c`           | `complex`. Pair of doubles.                                         |
+| `Include/cpython/longintrepr.h`     | `PyLongObject` layout.                                              |
+| `Python/dtoa.c`                     | David Gay's double-to-string and string-to-double.                  |
+| `Python/pyhash.c`                   | Numeric hashing (the rule `hash(x) == hash(int(x))` for equal values). |
+
+## int
+
+```c
+/* Include/cpython/longintrepr.h PyLongObject */
+struct _longobject {
+    PyObject_VAR_HEAD
+    digit ob_digit[1];           /* base 2^30 (or 2^15 on 32-bit) */
+};
+```
+
+`int` is a variable-length array of *digits*. Each digit holds 30
+bits on 64-bit systems (15 on 32-bit). The sign is encoded in
+`ob_size`: positive `ob_size` means positive value, negative
+means negative value, zero means zero (a sentinel). Single-digit
+integers (which cover most of the dynamic range hit in practice)
+take one digit.
+
+Arithmetic is school-book: addition and subtraction propagate
+carries across digits; multiplication is quadratic but switches
+to Karatsuba for larger operands; division uses the `divmod`
+algorithm from Knuth (Algorithm D).
+
+### Small-int cache
+
+Integers in the range -5 to 256 are pre-allocated and shared as
+immortal singletons:
+
+```c
+/* Objects/longobject.c (sketch) */
+static PyLongObject _PyLong_SMALL_INTS[257 + 5];
+```
+
+`PyLong_FromLong(5)` returns the cached object without allocation;
+`Py_INCREF`/`Py_DECREF` see the immortal sentinel and skip. Most
+arithmetic in real code lands in this range, so the cache is a
+big win.
+
+### Compact ints (3.12+)
+
+CPython 3.12 introduced a compact representation: small integers
+that fit in one digit pack the sign, the digit count, and the
+flags into the existing fields, leaving `ob_digit[0]` as a plain
+30-bit value. The decoding is a few bit ops; the encoding
+removes a bunch of edge cases from arithmetic hot paths.
+
+### From/to other types
+
+Conversion between `int` and `float`, `str`, `bytes` lives in
+`longobject.c`. The string parser handles arbitrary bases, the
+PEP 696 `_` separators, and the PEP 678 maximum string-conversion
+limit (4300 digits by default) to prevent denial of service via
+gigantic decimal strings.
+
+## float
+
+```c
+/* Objects/floatobject.c PyFloatObject */
+typedef struct {
+    PyObject_HEAD
+    double ob_fval;
+} PyFloatObject;
+```
+
+A `float` is one `double`. Operations are the corresponding C
+operations with a thin wrapper handling NaN, infinity, and
+division-by-zero (which raises rather than returns inf).
+
+`float.__repr__` uses David Gay's *shortest* round-trip
+representation (`dtoa.c`): the smallest decimal string that
+parses back to the same double. The implementation is the same
+Gay code the rest of the world uses, with a small wrapper.
+
+A per-thread free list of ~100 float objects amortises
+allocation; numerical code that allocates intermediate floats
+hits the free list instead of the small-object allocator.
+
+## complex
+
+```c
+typedef struct {
+    PyObject_HEAD
+    Py_complex cval;       /* {double real; double imag;} */
+} PyComplexObject;
+```
+
+`complex` is a pair of doubles. Arithmetic uses the canonical
+formulas; division uses the Smith-1962 algorithm to avoid
+overflow when scaling. There is no free list.
+
+## Hash compatibility
+
+Python guarantees that `x == y` implies `hash(x) == hash(y)`. For
+numbers this means:
+
+* `hash(1) == hash(1.0) == hash(1+0j) == hash(Fraction(1, 1))`.
+* `hash(0.5) == hash(Fraction(1, 2))`.
+
+`Python/pyhash.c` implements the rule: every numeric hash
+reduces mod a prime (`P = 2^61 - 1` on 64-bit), and the float
+hash is built from the integer hash of the float's
+exact-rational representation.
+
+```c
+/* Python/pyhash.c _Py_HashDouble */
+Py_hash_t _Py_HashDouble(PyObject *inst, double v);
+```
+
+The implementation: split the double into a fraction and an
+exponent, hash the integer numerator, multiply by `2^exp` mod P.
+This is what makes `dict` and `set` deduplicate numeric keys
+regardless of type.
+
+## Performance notes
+
+* Most operations on small ints take the compact path: no
+  allocation, no carry propagation.
+* The specializer rewrites hot `BINARY_OP` sites to typed
+  variants (`BINARY_OP_ADD_INT`, `BINARY_OP_ADD_FLOAT`,
+  `BINARY_OP_SUBTRACT_INT`, ...). The typed variant skips the
+  type check and goes straight to the digit math.
+* The Tier-2 optimiser propagates type facts further: once
+  `_GUARD_BOTH_INT` has fired, subsequent additions in the same
+  trace skip the guard.
+
+## PEP touchpoints
+
+* **PEP 327.** Decimal data type (separate module
+  `_decimal`/`decimal`).
+* **PEP 3101.** `format` and `__format__` numeric spec.
+* **PEP 515.** Underscores in numeric literals.
+* **PEP 678.** Maximum string-to-int conversion length.
+
+## Reference
+
+* `Objects/longobject.c`, `Objects/floatobject.c`,
+  `Objects/complexobject.c`, `Include/cpython/longintrepr.h`,
+  `Python/dtoa.c`, `Python/pyhash.c`.
+* Knuth, *TAOCP* vol. 2. Algorithm D (long division).
+* Gay, *Correctly Rounded Binary-Decimal and Decimal-Binary
+  Conversions*. (`dtoa.c`)

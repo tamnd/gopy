@@ -1,0 +1,165 @@
+---
+title: Time
+description: PyTime_t, monotonic clocks, the GIL switch interval, and how CPython picks an OS clock.
+---
+
+# Time
+
+Python's time surface is small. `time.time`, `time.monotonic`,
+`time.perf_counter`, `time.process_time`, `time.thread_time` plus
+their `_ns` variants. but the implementation underneath is a
+careful platform layer that picks an OS clock per use case and
+funnels everything through a single internal type, `PyTime_t`,
+that holds nanoseconds since some epoch as a signed 64-bit.
+
+## Where the code lives
+
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/pytime.c`                          | The `PyTime_t` arithmetic and OS-clock dispatch.                  |
+| `Include/cpython/pytime.h`                 | Public clock entry points.                                        |
+| `Modules/timemodule.c`                     | The Python-level `time` module.                                   |
+| `Python/ceval_gil.c`                       | Uses monotonic time for the GIL switch interval.                  |
+
+## PyTime_t
+
+```c
+/* Include/cpython/pytime.h */
+typedef int64_t PyTime_t;     /* nanoseconds */
+#define PyTime_MIN INT64_MIN
+#define PyTime_MAX INT64_MAX
+```
+
+A signed 64-bit nanosecond count covers ~292 years either side
+of an epoch, more than enough for any clock CPython needs.
+Arithmetic uses saturating add/sub helpers so that an overflow
+clamps rather than wrapping, which means a clock value past
+`PyTime_MAX` is recognisable rather than silently aliased.
+
+The internal representation is the source of the `*_ns`
+functions: `time.time_ns()` returns the raw `PyTime_t`;
+`time.time()` converts to a `double` and loses precision past
+about 100 microseconds for current Unix timestamps.
+
+## The clocks
+
+| Function              | OS source (Linux)              | OS source (macOS)               | OS source (Windows)                |
+| --------------------- | ------------------------------ | ------------------------------- | ---------------------------------- |
+| `time.time`           | `clock_gettime(REALTIME)`      | `clock_gettime(REALTIME)`       | `GetSystemTimePreciseAsFileTime`   |
+| `time.monotonic`      | `clock_gettime(MONOTONIC)`     | `clock_gettime(UPTIME_RAW)`     | `QueryPerformanceCounter`          |
+| `time.perf_counter`   | `clock_gettime(MONOTONIC)`     | `clock_gettime(UPTIME_RAW)`     | `QueryPerformanceCounter`          |
+| `time.process_time`   | `clock_gettime(PROCESS_CPUTIME)` | `clock_gettime(PROCESS_CPUTIME)` | `GetProcessTimes`                |
+| `time.thread_time`    | `clock_gettime(THREAD_CPUTIME)`  | `clock_gettime(THREAD_CPUTIME)`  | `GetThreadTimes`                 |
+
+The selection is at module init time; the dispatch is a function
+pointer table set up in `Python/pytime.c::pytime_init_*`. If a
+preferred clock is unavailable, CPython falls back to a less
+precise one and exposes the result through `time.get_clock_info`.
+
+## get_clock_info
+
+`time.get_clock_info(name)` returns a `clock_info` named tuple:
+
+```python
+>>> time.get_clock_info("monotonic")
+namespace(adjustable=False, implementation='clock_gettime(MONOTONIC)',
+          monotonic=True, resolution=1e-09)
+```
+
+`resolution` is the smallest difference two consecutive readings
+of the clock can show. monotonic clocks back this with a vDSO call
+where available, so on Linux the resolution is genuinely 1 ns.
+
+`adjustable` says whether the clock can jump backward
+(`time.time` can if NTP adjusts the system; monotonic clocks
+cannot).
+
+## Conversions
+
+CPython exposes helpers to go between `PyTime_t` and Python
+floats:
+
+```c
+PyTime_t PyTime_FromSecondsObject(PyObject *obj, _PyTime_round_t round);
+int PyTime_AsTimespec(PyTime_t t, struct timespec *ts);
+double _PyTime_AsSecondsDouble(PyTime_t t);
+```
+
+The rounding mode (`_PyTime_ROUND_FLOOR`, `..._CEILING`,
+`..._HALF_EVEN`, `..._UP`) lets callers pick the rounding that
+matches their needs. `time.sleep` uses `_PyTime_ROUND_TIMEOUT`
+which rounds up to ensure the requested duration is at least
+honoured.
+
+## The GIL switch interval
+
+`sys.setswitchinterval(secs)` stores `secs * 1e9` as `PyTime_t`
+in the GIL state. The eval loop's GIL-drop check uses
+`PyTime_t` arithmetic to decide whether the current holder has
+exceeded its quantum:
+
+```c
+PyTime_t deadline = held_since + interval;
+PyTime_t now;
+PyTime_GetMonotonicClock(&now);
+if (now >= deadline) request_drop();
+```
+
+Using a monotonic clock here is critical: a backward jump in
+wall-clock time must not cause spurious drop requests.
+
+## Sleep and timeouts
+
+`time.sleep(secs)` converts to nanoseconds (rounded up) and
+calls a platform sleep that respects monotonic-clock semantics:
+
+* Linux: `clock_nanosleep(MONOTONIC)`.
+* macOS: `nanosleep` (which uses the monotonic clock).
+* Windows: `WaitForSingleObject` on a timer object created from
+  `CreateWaitableTimer` with relative time.
+
+Timeouts elsewhere (`select`, `lock.acquire`, queue waits) go
+through the same conversion path; everything uses monotonic
+clocks.
+
+## strftime / strptime / datetime
+
+`datetime` is implemented in `Modules/_datetimemodule.c`; it
+holds time as broken-down fields (year, month, day, ...) rather
+than as `PyTime_t`. The `time.strftime`/`time.strptime`
+functions parse and format using the platform's C library
+formatters. They are slow but exact; for high-frequency
+formatting, `datetime.isoformat()` is the usual alternative.
+
+## Threading interactions
+
+`threading.Lock.acquire(timeout=secs)`,
+`threading.Condition.wait(timeout=secs)`,
+`queue.Queue.get(timeout=secs)` all funnel through
+`_PyTime_FromSecondsObject` and into the platform's
+monotonic-clock-based wait primitives. PEP 654 introduced
+`threading.Lock`'s relative timeout semantics; the C code uses
+`pthread_cond_timedwait_relative_np` or computes an absolute
+deadline depending on what the platform supports.
+
+## CPython 3.14 changes
+
+* **`PyTime_t` is the supported public type.** Earlier versions
+  used internal helpers; 3.14 promoted them to the public API
+  surface for C extension authors.
+* **`time.monotonic` on macOS** switched to `UPTIME_RAW` for
+  immunity to NTP slewing; the previous default subtly drifted.
+
+## PEP touchpoints
+
+* **PEP 564.** Nanosecond resolution time functions.
+* **PEP 615.** IANA tzdata in the stdlib (used by `zoneinfo`).
+* **PEP 686.** UTF-8 mode default (incidental: affects strftime
+  output decoding).
+
+## Reference
+
+* `Python/pytime.c`, `Include/cpython/pytime.h`,
+  `Modules/timemodule.c`.
+* `clock_gettime(2)` man page.
+* PEP 564. Nanosecond-resolution time functions.

@@ -1,0 +1,223 @@
+---
+title: Lifecycle
+description: Interpreter startup, the runtime state, subinterpreters, finalisation.
+---
+
+# Lifecycle
+
+CPython starts an interpreter in a sequence of carefully ordered
+phases: allocate runtime state, parse configuration, build the
+initial type registry, run the import bootstrap, hand off to the
+user's `__main__`. It tears down in the reverse order, with two
+shutdown phases because some objects must outlive most of the
+others. The full life cycle is described by the
+*PyInitConfig* API (PEP 587) and implemented in `Python/pylifecycle.c`.
+
+## Where the code lives
+
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/pylifecycle.c`                     | Init, finalise, the phase sequencing.                             |
+| `Python/initconfig.c`                      | `PyConfig` / `PyPreConfig` parsing, env-var handling.             |
+| `Include/cpython/initconfig.h`             | `PyConfig`, `PyPreConfig` structs.                                |
+| `Python/pystate.c`                         | `_PyRuntimeState`, `PyThreadState`, `PyInterpreterState`.         |
+| `Include/internal/pycore_runtime.h`        | Runtime-state layout.                                             |
+
+## The three-layer state
+
+CPython distinguishes three kinds of state:
+
+* **Runtime** (`_PyRuntimeState`). One per process. Holds the
+  set of interpreters, the GIL infrastructure, immortal
+  singletons, the audit-hook list.
+* **Interpreter** (`PyInterpreterState`). One per (sub)interpreter.
+  Holds `sys.modules`, the import locks, the builtins module,
+  the per-interpreter GIL (PEP 684).
+* **Thread** (`PyThreadState`). One per running thread per
+  interpreter. Holds `current_frame`, `current_exception`, the
+  eval breaker, the recursion counter.
+
+The eval loop's three inputs (`tstate`, `frame`, `throwflag`)
+imply this hierarchy: from `tstate` you get to `interp` and from
+`interp` to `runtime`.
+
+## Startup phases
+
+`Py_InitializeFromConfig(&config)` runs the phases:
+
+```
+1. _Py_PreInitialize:      ensure runtime allocated, parse PyPreConfig
+2. _Py_InitializeCore:     init refcount, types, builtins, exceptions
+3. _Py_InitializeMain:     run importlib bootstrap, import site
+```
+
+Between phases 2 and 3 the interpreter is partially live: it can
+run bytecode for built-in types, but `import os` will not work.
+Embedders that need a minimal interpreter can stop at phase 2.
+
+### PyPreConfig
+
+```c
+/* Include/cpython/initconfig.h PyPreConfig */
+typedef struct {
+    int isolated;
+    int use_environment;
+    int utf8_mode;
+    int dev_mode;
+    int allocator;
+    /* ... */
+} PyPreConfig;
+```
+
+`PyPreConfig` controls things that must be decided before the
+runtime is fully alive: which allocator to use, whether UTF-8
+mode is on, whether to read environment variables. It is parsed
+*before* memory is allocated for the runtime, because the
+allocator choice influences how the runtime is allocated.
+
+### PyConfig
+
+```c
+typedef struct {
+    PyWideStringList argv;
+    wchar_t *executable;
+    wchar_t *home;
+    PyWideStringList module_search_paths;
+    int optimization_level;
+    int verbose;
+    int hash_randomization;
+    wchar_t *run_module, *run_filename;
+    int faulthandler;
+    int tracemalloc;
+    /* ~50 more fields */
+} PyConfig;
+```
+
+`PyConfig` is the full configuration: argv, `sys.path`,
+optimisation flags, what to run (a file? a module? a string?
+the REPL?). Defaults are filled in from environment variables,
+the `-X` switches, and platform conventions.
+
+### Frozen-module boot
+
+After phase 2 has the type system up and `sys.modules` exists,
+phase 3 reads `Python/frozen_modules/importlib._bootstrap` (a
+pre-compiled `.pyc` embedded in the binary), execs it, then
+loads `importlib._bootstrap_external` the same way. From this
+point, `import` is fully functional and the rest of `site.py`
+and the user's entry point can run. See [imports](imports).
+
+## Subinterpreters
+
+`PyInterpreterState_New` creates a fresh interpreter sharing
+the runtime. PEP 684 made each subinterpreter own its own GIL,
+so two subinterpreters on two OS threads can run Python in
+parallel. The Python-level surface is the stdlib `interpreters`
+module:
+
+```python
+from concurrent import interpreters
+
+interp = interpreters.create()
+interp.exec("print('hello from sub')")
+interp.close()
+```
+
+Subinterpreters share the process's binary modules (built-in,
+frozen) but each has its own `sys.modules`. Sharing Python
+objects directly is unsafe; PEP 554 / PEP 734 channels and the
+`interpreters.queues` module are the supported cross-interpreter
+transport.
+
+## Threads
+
+`Py_NewInterpreter` returns a `PyThreadState` for the new
+interpreter. Native threads created from C use
+`PyGILState_Ensure` to attach to whichever interpreter is the
+process's *autointerp* (typically the main one); `PyGILState_Release`
+detaches.
+
+OS threads created from Python (`threading.Thread`) belong to
+the parent's interpreter. The parent must outlive the children
+or the threads will fail to acquire a now-freed GIL.
+
+## Finalisation
+
+`Py_FinalizeEx` is the inverse of `Py_InitializeFromConfig`:
+
+```
+1. flush stdout/stderr, run atexit handlers
+2. clear sys.modules, run module __del__ where possible
+3. final cycle GC
+4. tear down threads, free interpreter and runtime state
+```
+
+The two-stage GC (one between steps 2 and 3, one after) handles
+modules that reference each other in cycles. Some objects are
+intentionally leaked: small-int cache entries, interned strings,
+the immortal singletons. The OS reclaims them at process exit.
+
+## Atexit and audit hooks
+
+* `atexit.register(fn)` queues `fn` to run during finalisation
+  before module cleanup.
+* `sys.addaudithook(hook)` and the C-level `PySys_AuditTuple`
+  fire on every observable event (`open`, `exec`, `import`,
+  `socket.connect`, ...). Audit hooks survive across
+  finalisation re-init.
+
+## Faulthandler and devmode
+
+* `faulthandler.enable()` installs SIGSEGV/SIGFPE handlers that
+  print a Python traceback before the OS terminates the process.
+* `python -X dev` turns on a bundle of warnings: warning filters
+  set to "default", `ResourceWarning` enabled, malloc-debug
+  hooks on (`PYTHONMALLOC=debug`).
+
+## PEP 587 embedding
+
+The full embedding flow:
+
+```c
+PyStatus status;
+PyConfig config;
+PyConfig_InitPythonConfig(&config);
+status = PyConfig_SetString(&config, &config.program_name, L"my_app");
+if (PyStatus_Exception(status)) goto error;
+status = Py_InitializeFromConfig(&config);
+PyConfig_Clear(&config);
+if (PyStatus_Exception(status)) Py_ExitStatusException(status);
+
+PyRun_SimpleString("print('hello')");
+Py_Finalize();
+```
+
+`PyConfig_InitPythonConfig` versus `PyConfig_InitIsolatedConfig`
+chooses between "behave like the `python` binary" and "isolated
+embed" (no env vars, no `~/.pyhistory`, no `site.py`).
+
+## CPython 3.14 changes
+
+* **`PyConfig.use_frozen_modules`** can opt out of the frozen
+  importlib boot for debugging; the default remains on for
+  startup speed.
+* **PEP 684 final.** Subinterpreters are fully isolated by
+  default; the legacy "shared GIL" mode requires explicit opt-in.
+* **`PyInitConfig` extension API.** A new C API (PEP 741) layered
+  on top of `PyConfig` for embedders that want to set config
+  options by string name without a `PyConfig` struct.
+
+## PEP touchpoints
+
+* **PEP 587.** Python initialization configuration.
+* **PEP 684.** Per-interpreter GIL.
+* **PEP 734.** Multiple interpreters in the stdlib.
+* **PEP 741.** Python configuration C API.
+
+## Reference
+
+* `Python/pylifecycle.c`, `Python/initconfig.c`,
+  `Python/pystate.c`, `Include/cpython/initconfig.h`,
+  `Include/internal/pycore_runtime.h`.
+* PEP 587. Python initialization configuration.
+* PEP 684. A per-interpreter GIL.

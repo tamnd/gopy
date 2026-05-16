@@ -1,0 +1,163 @@
+---
+title: HAMT
+description: Hash-Array-Mapped Trie. The persistent dict that powers contextvars.
+---
+
+# HAMT
+
+The HAMT (Hash-Array-Mapped Trie) is CPython's persistent
+immutable mapping. It supports O(log32 N) lookup, insertion, and
+deletion, where each non-mutating operation returns a *new* HAMT
+that shares structure with the old one. CPython uses the HAMT
+to implement `contextvars.Context` (PEP 567) so that
+context-local variables can be snapshotted, switched, and
+restored without copying.
+
+## Where the code lives
+
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/hamt.c`                            | The full implementation.                                          |
+| `Include/internal/pycore_hamt.h`           | Node types, public entry points.                                  |
+| `Python/context.c`                         | The HAMT's only consumer (contextvars).                           |
+
+## The data structure
+
+A HAMT is a trie keyed by the bits of `hash(key)`. The hash is
+chopped into 5-bit chunks; each chunk selects a slot among 32 in
+the current node. Three node kinds:
+
+* **Bitmap node.** A 32-bit bitmap plus a packed array of
+  entries for the set bits. The bitmap says which chunk values
+  have children; the array holds them. Typical for sparse
+  populations.
+* **Array node.** A flat 32-entry array. Used when a bitmap node
+  fills past a threshold.
+* **Collision node.** A flat list of `(key, value)` pairs that
+  all have the same hash. Used only on hash collisions.
+
+```c
+/* Include/internal/pycore_hamt.h PyHamtNode_Bitmap (sketch) */
+typedef struct {
+    PyObject_VAR_HEAD
+    uint32_t b_bitmap;
+    PyObject *b_array[1];        /* entries, two slots per child */
+} PyHamtNode_Bitmap;
+```
+
+Each entry in a bitmap node is either a `(key, value)` pair (two
+slots) or a `(NULL, subnode)` pair (the first slot NULL marks
+the second as a subnode pointer). The encoding keeps the node
+compact.
+
+## Lookup
+
+```
+lookup(node, key, hash, shift):
+    chunk = (hash >> shift) & 0x1F
+    if node is bitmap:
+        if bitmap bit `chunk` not set: not found
+        entry = array[popcount(bitmap & ((1 << chunk) - 1))]
+        if entry is (k, v):
+            return v if k == key else not found
+        else:
+            return lookup(subnode, key, hash, shift + 5)
+    if node is array:
+        return lookup(array[chunk], key, hash, shift + 5)
+    if node is collision:
+        linear search
+```
+
+The bitmap-plus-popcount trick is what makes bitmap nodes
+compact and fast: a 32-bit bitmap plus an array of length
+`popcount(bitmap)` is the same information as a 32-entry sparse
+array, but uses memory proportional only to occupancy.
+
+## Insert and delete
+
+Mutations return a fresh node. The path from the root to the
+modified leaf is rebuilt; everything off that path is shared
+with the old tree. The number of fresh nodes is at most the
+depth, which is `ceil(log32 N)`. for a million entries, four.
+
+```c
+/* Python/hamt.c (sketch) */
+PyHamtNode *hamt_node_assoc(PyHamtNode *node, uint32_t shift,
+                            int32_t hash, PyObject *key, PyObject *val);
+PyHamtNode *hamt_node_without(PyHamtNode *node, uint32_t shift,
+                              int32_t hash, PyObject *key);
+```
+
+Insertion may convert a bitmap node to an array node if it fills
+past the threshold; deletion may collapse an array node back to
+a bitmap node if it empties past another threshold.
+
+## Iteration
+
+Iteration walks the tree depth-first, yielding `(key, value)`
+pairs in the order they appear in the structure (which is
+arbitrary but deterministic for a given tree). The iterator
+keeps a small stack of cursors, one per visited level; space
+overhead is `O(log32 N)`.
+
+## Persistence and sharing
+
+The HAMT's defining property: any mutation produces a new tree
+that shares most of its structure with the old one. This is what
+PEP 567 needs:
+
+```python
+ctx_old = copy_context()   # snapshot of current context vars
+ctx_new = ctx_old.run(callback)  # callback may set/unset vars
+# ctx_old still observes the pre-callback state
+```
+
+`copy_context` is the bump of a pointer; `ContextVar.set` returns
+a token holding a reference to the previous tree; restoration is
+swapping the pointer back. Nothing is copied except for nodes on
+the path to the changed leaf.
+
+## Why a HAMT, not a dict snapshot
+
+A naive implementation would clone `sys._current_frames()`'s
+context dict at each `copy_context()`. For ten context vars,
+that's cheap; for a thousand, it isn't. The HAMT amortises across
+many snapshots; if 999 vars are unchanged across two contexts,
+those 999 entries are shared.
+
+The library that introduced this for Python was
+`immutables.Map`; CPython absorbed a copy as the contextvars
+backbone in 3.7.
+
+## Memory layout choices
+
+* Bitmap nodes are variable-length (`PyVarObject`) so the array
+  is sized exactly to the entries.
+* Array nodes are fixed 32 entries; the conversion threshold
+  (currently when a bitmap has 16 entries) trades a one-time
+  allocation against faster access.
+* Collision nodes are rare in practice because Python's hashes
+  are well distributed; PEP 456 hash randomisation keeps
+  adversarial collisions out of reach.
+
+## CPython 3.14 changes
+
+* Implementation has been stable since the 3.7 introduction; the
+  3.14 cycle added minor cleanups but no public-facing changes.
+* The free-threaded build adds atomic refcounts on the nodes;
+  since the HAMT is immutable post-construction, the only
+  contention is on refcount updates, which the split-counter
+  representation handles cheaply.
+
+## PEP touchpoints
+
+* **PEP 567.** Context variables. The HAMT's reason for being
+  in CPython.
+
+## Reference
+
+* `Python/hamt.c`, `Include/internal/pycore_hamt.h`,
+  `Python/context.c`.
+* Bagwell, P. *Ideal Hash Trees*. EPFL technical report (2001).
+  Original HAMT description.
+* `immutables` package on PyPI; CPython's HAMT is a port.

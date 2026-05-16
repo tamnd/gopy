@@ -1,0 +1,161 @@
+---
+title: Hashing
+description: SipHash-1-3, hash randomisation, the numeric-hash compatibility rule.
+---
+
+# Hashing
+
+`hash(o)` is the gate to every hash-based container. CPython's
+hashing has three concerns: it must be fast (called on every
+dict lookup), it must be safe against adversarial collisions
+(PEP 456), and it must be consistent across types that compare
+equal (a literal `1` and a literal `1.0` must hash the same).
+The result is a small library of hashers in `Python/pyhash.c`
+and a per-type `tp_hash` slot.
+
+## Where the code lives
+
+| File                                       | Role                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `Python/pyhash.c`                          | SipHash, numeric hash, the public dispatch.                       |
+| `Include/internal/pycore_pyhash.h`         | `_Py_HashSecret` initialisation.                                  |
+| `Objects/object.c`                         | `PyObject_Hash`, `PyObject_HashNotImplemented`.                   |
+| `Objects/unicodeobject.c`                  | `str.__hash__` (calls SipHash).                                   |
+| `Objects/bytesobject.c`, `tupleobject.c`   | `bytes.__hash__`, `tuple.__hash__`.                               |
+
+## The dispatch
+
+```c
+/* Objects/object.c PyObject_Hash */
+Py_hash_t PyObject_Hash(PyObject *v) {
+    PyTypeObject *tp = Py_TYPE(v);
+    if (tp->tp_hash != NULL) return tp->tp_hash(v);
+    if (!_PyType_IsReady(tp) && PyType_Ready(tp) < 0) return -1;
+    if (tp->tp_hash != NULL) return tp->tp_hash(v);
+    return PyObject_HashNotImplemented(v);
+}
+```
+
+`Py_hash_t` is a signed integer (64-bit on 64-bit builds). The
+sentinel `-1` indicates an error; types that hash to `-1`
+internally collapse it to `-2`.
+
+Unhashable types set `tp_hash = PyObject_HashNotImplemented`,
+which raises `TypeError`. `list`, `dict`, `set` are unhashable
+because they are mutable.
+
+## SipHash-1-3
+
+`str` and `bytes` use SipHash-1-3 (one compression round, three
+finalisation rounds. faster than the original 2-4 variant with
+acceptable cryptographic strength for hash-table use):
+
+```c
+/* Python/pyhash.c (sketch) siphash */
+static uint64_t siphash13(const void *src, Py_ssize_t src_sz);
+```
+
+The key is process-wide and initialised at startup from
+`_Py_HashSecret` (16 random bytes from the OS entropy source).
+The randomisation is what defeats algorithmic-complexity attacks
+on dicts: an attacker cannot pre-compute colliding keys without
+knowing the key, and the key is fresh on every process start.
+
+`PYTHONHASHSEED=0` disables randomisation (the secret is all
+zeros); `PYTHONHASHSEED=<n>` uses `n` as the secret. The
+non-default modes are for reproducible builds and debugging.
+
+## Short-string optimisation
+
+For strings short enough that SipHash setup dominates the
+actual hashing, CPython uses a smaller, faster mixing function.
+The threshold is a few bytes; the implementation lives behind
+the same dispatch.
+
+## Numeric hashing
+
+The rule `hash(x) == hash(y)` whenever `x == y` for numeric
+types is implemented in `_Py_HashDouble` and the integer hash:
+
+```c
+/* Python/pyhash.c _Py_HashDouble */
+Py_hash_t _Py_HashDouble(PyObject *inst, double v) {
+    /* split v into integer part, fractional part, exponent */
+    /* hash the fractional bits scaled by 2^exp mod P */
+}
+```
+
+Where `P = 2^61 - 1` is a Mersenne prime. Working mod `P` makes
+the rational arithmetic of "compute hash of `x` as if it were
+the rational number `numerator / denominator`" feasible without
+arbitrary precision; the algorithm is documented in detail in
+the docstring of the `Hashable` ABC.
+
+The integer hash of `n` is `n mod P` (adjusted to fit in
+`Py_hash_t`); the float hash is computed so that, for any
+integer-valued float, the result matches the integer hash. The
+same scheme extends to `Fraction`, `Decimal`, and `complex`.
+
+## Tuple hashing
+
+`tuple.__hash__` combines element hashes with an xxHash-style
+mixing function:
+
+```c
+/* Objects/tupleobject.c tuplehash (sketch) */
+Py_uhash_t acc = _PyHASH_XXPRIME_5;
+for each element:
+    Py_uhash_t lane = PyObject_Hash(elem);
+    acc += lane * _PyHASH_XXPRIME_2;
+    acc = ((acc << 31) | (acc >> 33)) * _PyHASH_XXPRIME_1;
+return acc ^ (acc >> 11);
+```
+
+The constants are the xxHash primes; the rotate-and-multiply
+mixing gives good avalanche even for short tuples. Older Python
+versions used a simple xor-and-multiply that was vulnerable to
+canonical collisions; the current scheme is from 3.8.
+
+## Frozenset hashing
+
+`frozenset.__hash__` is order-independent: it xors per-element
+hashes with an additional fold-in to mix in the cardinality.
+The implementation is in `Objects/setobject.c::frozenset_hash`.
+
+## Hashable objects in practice
+
+Most user-defined classes inherit `tp_hash` from `object`, which
+returns `id(self) >> 4` mixed with the hash secret. Two distinct
+objects of the same user class collide only by accident; the
+shift removes alignment artefacts that would cluster hashes for
+similarly sized objects.
+
+A class that defines `__eq__` and not `__hash__` becomes
+unhashable: the metaclass sets `tp_hash = PyObject_HashNotImplemented`
+to prevent inconsistency.
+
+## Hash randomisation interactions
+
+* `dict` and `set` iteration order is independent of hash
+  randomisation: the order is insertion order for `dict` and
+  insertion order for `set` *until* a resize.
+* `repr(dict)`, `repr(set)`, `json.dumps(dict)` all respect this
+  ordering, so randomisation only affects which key triggers a
+  collision in the open-addressed probe sequence, not the
+  observable iteration.
+* Process-to-process determinism (when needed for tooling) is
+  achieved with `PYTHONHASHSEED=0`.
+
+## PEP touchpoints
+
+* **PEP 456.** Secure and interchangeable hash algorithm.
+* **PEP 644.** OpenSSL 1.1.1 or newer (independent: the
+  cryptographic hash functions in `hashlib`).
+
+## Reference
+
+* `Python/pyhash.c`, `Include/internal/pycore_pyhash.h`,
+  `Objects/object.c`, `Objects/tupleobject.c`.
+* Aumasson, Bernstein. *SipHash: a fast short-input PRF*.
+  https://cr.yp.to/siphash/siphash.pdf
+* PEP 456. Hash randomisation.
