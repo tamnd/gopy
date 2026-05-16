@@ -109,13 +109,14 @@ func wrapConst(v any) (objects.Object, error) {
 //nolint:gocognit,gocyclo,gocritic // hand-written opcode switch; the wide return tuple matches dispatch's contract and the arm count shrinks as 1621 codegen replaces these.
 func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
 	switch op {
-	case compile.NOP, compile.CACHE, compile.RESERVED:
+	case compile.CACHE, compile.RESERVED:
 		// CACHE words are inline-specialization slots; the dispatcher
 		// only sees them when fetch() runs past the end of an
 		// instruction word, which the action translator does not do.
 		// Treat them as NOP so a hand-rolled bytecode that includes
 		// padding stays valid. RESERVED is the parity-pin opcode in
 		// CPython's table; behavior matches NOP in unspecialized form.
+		// NOP itself routes through dispatchGen (spec 1714 phase 5.2).
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.RESUME:
@@ -124,11 +125,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, rerr
 		}
 		return next, nil, nil, false, true, nil
-
-	case compile.POP_TOP:
-		ref := e.pop()
-		ref.Close()
-		return e.advance(), nil, nil, false, true, nil
 
 	case compile.PUSH_NULL:
 		e.push(stackref.Null)

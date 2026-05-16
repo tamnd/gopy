@@ -70,6 +70,13 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 			op = base2
 		}
 	}
+	// Spec 1714 phase 5.2: route opcodes whose generated body in
+	// vm/eval_dispatch_gen.go has been verified equivalent to the
+	// hand-written arm through the generated harness. The whitelist
+	// grows as more arms gain real bodies via the action translator.
+	if dispatchGenSupported[op] {
+		return e.dispatchGen(op, oparg)
+	}
 	// Hand-written panel for the smallest core opcodes so trivial
 	// programs run end-to-end before 1621 codegen lands.
 	if next, retVal, retErr, retDone, ok, err := e.trySimple(op, oparg); ok {
