@@ -48,9 +48,7 @@ const sidebars = {
         'gopy/parser',
         'gopy/ast',
         'gopy/symtable',
-        'gopy/compiler',
-        'gopy/flowgraph',
-        'gopy/assembler',
+        'gopy/compile',
       ],
     },
     {

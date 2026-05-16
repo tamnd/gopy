@@ -1,37 +1,311 @@
 ---
-title: uast
-description: gopy's ast subsystem. Mirrors CPython's design.
+title: AST
+description: Abstract syntax tree nodes, the constant-folding preprocess pass, validation, unparsing, and __future__ flag extraction.
 ---
 
-# uast
+# AST
 
-This page describes how gopy implements **ast**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/ast`](../cpython/ast).
+The abstract syntax tree is the bridge between the parser and
+everything downstream. Every later stage (preprocess, symtable,
+codegen) walks the same tree shape. The shape itself is dictated
+by the CPython `Parser/Python.asdl` file, which lists every node
+kind, its attributes, and which attributes are sequences. gopy
+checks in a Go translation of that file and treats it as the
+source of truth: changing a node kind means regenerating
+`ast/nodes_gen.go`, not editing it by hand.
 
-## Source map
+This page covers the node definitions, the preprocess pass that
+turns the parser's raw tree into the tree codegen wants, the
+validation step, the unparser used by error messages, and the
+`__future__` flag extraction that runs alongside.
 
-The Go code lives at the module root in flat packages.
+## Where the code lives
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+| gopy path                  | CPython source                              | Role                                          |
+| -------------------------- | ------------------------------------------- | --------------------------------------------- |
+| `ast/nodes.go`             | `Include/internal/pycore_ast.h`             | `Node` interface, `Seq` container, position fields |
+| `ast/nodes_gen.go`         | generated from `Parser/Python.asdl`         | All stmt, expr, type node structs (1,382 lines) |
+| `ast/asdl.go`              | `Parser/asdl.py`                            | ASDL schema reflection helpers                 |
+| `ast/visitor.go`           | `Lib/ast.py:482 NodeVisitor`                | NodeVisitor and NodeTransformer dispatch       |
+| `ast/walk.go`              | `Lib/ast.py:373 iter_child_nodes`           | Direct tree iteration helpers                  |
+| `ast/preprocess.go`        | `Python/ast_preprocess.c`                   | Constant folding, docstring removal, `__debug__` |
+| `ast/validate.go`          | `Python/ast.c` validate helpers             | Structural validation                          |
+| `ast/unparse.go`           | `Lib/ast.py:1040 unparse`                   | AST to source                                  |
+| `ast/dump.go`              | `Lib/ast.py:117 dump`                       | AST repr                                       |
+| `ast/literal_eval.go`      | `Lib/ast.py:62 literal_eval`                | Safe constant evaluation                       |
+| `ast/docstring.go`         | `Python/ast.c:_PyAST_GetDocString`          | Docstring detection                            |
+| `ast/locations.go`         | `Python/compile.c` location fusion          | PEP 626 lineno fusion onto orphan children     |
+| `ast/compare.go`           | `Lib/ast.py:332 compare`                    | Structural AST equality                        |
+| `future/future.go`         | `Python/future.c`, `Include/future.h`       | `__future__` extraction, CO_FUTURE_* bits      |
+
+## Node shape
+
+Every AST node implements the `Node` interface from
+`ast/nodes.go:L7 Node`. The interface is small: each node returns
+its kind name, its position (lineno, col_offset, end_lineno,
+end_col_offset), and provides accessors generated alongside it.
+Children that are themselves nodes are typed pointers; children
+that are sequences use the `Seq[T]` container, a thin generic
+wrapper around `[]T` that gives consistent accessors regardless
+of whether the underlying ASDL declared the field as
+`expr*`, `expr+`, or `expr?`.
+
+The generated file `ast/nodes_gen.go` contains one struct per
+node kind. Statements (`Module`, `FunctionDef`, `AsyncFunctionDef`,
+`ClassDef`, `Return`, `Assign`, `AugAssign`, `AnnAssign`, `Delete`,
+`For`, `AsyncFor`, `While`, `If`, `With`, `AsyncWith`, `Match`,
+`Raise`, `Try`, `TryStar`, `Assert`, `Import`, `ImportFrom`,
+`Global`, `Nonlocal`, `Expr`, `Pass`, `Break`, `Continue`,
+`TypeAlias`) live next to expressions (`BoolOp`, `NamedExpr`,
+`BinOp`, `UnaryOp`, `Lambda`, `IfExp`, `Dict`, `Set`, `ListComp`,
+`SetComp`, `DictComp`, `GeneratorExp`, `Await`, `Yield`,
+`YieldFrom`, `Compare`, `Call`, `FormattedValue`, `JoinedStr`,
+`Constant`, `Attribute`, `Subscript`, `Starred`, `Name`, `List`,
+`Tuple`, `Slice`) and the type parameter, pattern, and exception
+handler nodes. The file is around 1,400 lines and is the source
+of truth for what a tree can hold.
+
+Three architectural details are worth flagging. First, every node
+carries position information; there are no synthesised nodes
+without a line number, even if it has to be inherited from a
+parent. Second, the file uses Go interfaces rather than a tagged
+union, so a `Stmt` is `Module | FunctionDef | ...` represented as
+an interface with a sealed method. Third, the same generator that
+emits the structs also emits the `Visit` and `Walk` methods, so
+every reader of the tree can pick between calling a visitor or
+iterating children directly.
+
+## Visiting the tree
+
+Two visitor flavours live in `ast/visitor.go`. `NodeVisitor` walks
+the tree calling per-kind handlers without rewriting; the default
+handler descends into children. `NodeTransformer` walks the tree
+the same way but allows handlers to return a replacement node,
+which the framework substitutes in place. The pattern is the same
+as Python's `ast.py`, ported because most readers of an AST
+expect it.
+
+```go
+// ast/visitor.go:L20
+type NodeVisitor struct {
+    handlers map[string]func(Node) error
+}
+
+func (v *NodeVisitor) Visit(n Node) error {
+    if h, ok := v.handlers[n.Kind()]; ok {
+        return h(n)
+    }
+    return v.GenericVisit(n)
+}
+
+func (v *NodeVisitor) GenericVisit(n Node) error {
+    for _, c := range IterChildNodes(n) {
+        if err := v.Visit(c); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+```
+
+For cases where the caller does not need dispatch, `ast/walk.go`
+provides `IterChildNodes` (direct children only) and
+`IterAllNodes` (depth-first pre-order over every descendant).
+Both are implemented in terms of the generated `Walk` method, so
+they pick up new node kinds automatically.
+
+## The preprocess pass
+
+`ast/preprocess.go:L62 Preprocess` is the only mutating pass that
+runs between parse and codegen. It does three things, and it
+walks the tree once.
+
+**Constant folding.** A `UnaryOp(USub, Constant(1))` becomes a
+single `Constant(-1)`. `BinOp(Constant(2), Add, Constant(3))`
+becomes `Constant(5)`. The fold is type-aware: integer arithmetic
+checks for overflow into long form, float arithmetic respects IEEE
+754 special values, and string concatenation is folded only when
+the result is bounded by a configurable size limit so that
+`"a" * 10**9` does not blow up the constant pool. The CPython
+counterpart is `Python/ast_preprocess.c:L400 astfold_*`. The
+per-kind fold helpers mirror CPython one-to-one:
+`foldStmtFunc` handles function-shaped statements,
+`foldStmtControl` handles loops and conditionals, `foldExprBinop`
+handles binary operations, and so on.
+
+**Docstring removal.** When the optimisation level is 2 (`-OO`),
+docstrings are stripped. The pass detects a docstring by looking
+at the first statement of a module, class, or function body and
+checking whether it is an `Expr` wrapping a `Constant` whose
+value is a string. If so, the statement is dropped. The detection
+also runs at optimisation level 1, but the docstring is preserved
+there (`-O` only strips assertion statements).
+
+**`__debug__` substitution.** Any `Name("__debug__")` is rewritten
+to `Constant(True)` at optimisation level 0 and `Constant(False)`
+at 1 or 2. The rewrite happens at the AST layer so that codegen
+never has to emit a load of `__debug__`; the constant pool sees
+the substituted value.
+
+```go
+// ast/preprocess.go:L62
+func Preprocess(mod Mod, opts Options) error {
+    p := &preprocessor{opts: opts}
+    return p.foldMod(mod)
+}
+
+func (p *preprocessor) foldStmt(s Stmt) {
+    if p.foldStmtFunc(s) {
+        return
+    }
+    if p.foldStmtAssign(s) {
+        return
+    }
+    if p.foldStmtControl(s) {
+        return
+    }
+    p.foldStmtMisc(s)
+}
+```
+
+The four-stage `foldStmt` split is purely organisational and
+matches the file layout in `Python/ast_preprocess.c`. Each helper
+returns `true` if it handled the statement and the dispatcher
+stops there.
+
+## Validation
+
+`ast/validate.go:L35 Validate` runs a structural check that the
+grammar cannot enforce on its own. Examples: a `FunctionDef` must
+have a non-empty body; the keyword arguments of a `Call` cannot
+have duplicate keys; a `Match` pattern can use `_` only in
+specific positions; a top-level `await` is only allowed in async
+contexts. The checks live in `ast/validate_panel.go` as small
+inline functions and are wired into a per-kind dispatch table.
+Failures surface as `SyntaxError`. The pass is normally invisible
+because the grammar prevents most of these conditions, but it is
+load-bearing for AST-from-string callers like `compile(ast,
+filename, mode)`, where the caller can hand the compiler an
+ill-formed tree.
+
+## Unparse and dump
+
+The unparser in `ast/unparse.go:L50 Unparse` walks an AST and
+emits equivalent Python source. It is used in two places: error
+messages that quote a fragment of code, and the public
+`ast.unparse` function exposed in the stdlib pillar. The
+implementation walks the tree with a small precedence table and a
+string builder, matching the pure-Python implementation in
+`Lib/ast.py:L1040 unparse` closely enough that the output is
+byte-identical for most inputs.
+
+`ast/dump.go:L21 Dump` is the cousin: it walks the tree and emits
+the textual repr that `ast.dump` produces, with optional
+indentation for readability. The two functions intentionally do
+not share code; their requirements diverge enough that the
+duplication is cleaner than the abstraction would be.
+
+## Locations and the line table
+
+PEP 626 requires every bytecode instruction to carry a line and
+column position. The information starts on AST nodes: every node
+has `lineno`, `col_offset`, `end_lineno`, `end_col_offset`. The
+parser fills these from the lexer's token positions. The trouble
+is that some AST nodes are synthesised, not parsed. The implicit
+iteration variable in a comprehension, the body of a generator
+expression, the synthetic `Return None` at the end of a function:
+none of these have a natural source position.
+
+`ast/locations.go:L1` provides the fusion helpers. They walk the
+tree and propagate position information from parent to child for
+any child that does not have its own. The fusion runs before
+codegen, so the assembler can encode a complete location table
+without having to guess. The CPython counterpart is inlined in
+`Python/compile.c` rather than living as a separate pass, but the
+algorithm is the same.
+
+## `__future__` flag extraction
+
+`from __future__ import X` statements are not normal imports.
+They have to come before any other statement (a leading
+docstring is permitted but is the only exception), and they
+affect the compiler's behaviour, not the importer's.
+`future/future.go:L50 FromAST` walks the top of a module body
+and extracts the flag set.
+
+```go
+// future/future.go:L50
+func FromAST(mod *ast.Module, filename string) (Features, error) {
+    var f Features
+    for i, stmt := range mod.Body {
+        if isDocstring(stmt) && i == 0 {
+            continue
+        }
+        imp, ok := stmt.(*ast.ImportFrom)
+        if !ok || imp.Module != "__future__" {
+            // first non-future statement closes the window
+            return f, nil
+        }
+        for _, alias := range imp.Names {
+            bit, ok := featureBit(alias.Name)
+            if !ok {
+                return f, syntaxError(filename, alias, "future feature %q is not defined", alias.Name)
+            }
+            f |= bit
+        }
+    }
+    return f, nil
+}
+```
+
+The bit set mirrors `Include/future.h:CO_FUTURE_*`. The flags
+that matter in 3.14 are `CO_FUTURE_ANNOTATIONS` (stringify all
+annotations, retained for compatibility although PEP 649 changes
+the default representation) and the historical no-op bits that
+exist for source compatibility with older code (`CO_FUTURE_DIVISION`,
+`CO_FUTURE_PRINT_FUNCTION`, etc.; their corresponding features
+have been the default for years but the import is still legal
+and still sets the flag).
+
+The extracted flags travel with the compilation context. The
+preprocess pass reads them so that, for example, future
+annotations is honoured; the codegen reads them so that the
+emitted code object's `co_flags` field carries the same bits.
+
+## Literal evaluation
+
+`ast/literal_eval.go:L45 LiteralEval` implements `ast.literal_eval`.
+It walks a tree and evaluates a restricted subset: constants,
+tuple, list, dict, set, unary plus and minus on numeric constants,
+and binary plus and minus when the operands are numeric. Anything
+else raises `ValueError`. The function is small but load-bearing
+for tools that want a safe alternative to `eval`, including the
+default `argparse` type parsers.
 
 ## Differences from CPython
 
-```
-Notes on places where gopy intentionally diverges from CPython.
-```
+* The preprocess pass is one file in gopy. CPython splits it
+  across `Python/ast_preprocess.c` and the related helpers in
+  `Python/ast.c`; the split exists because they share data
+  structures, not because the responsibilities differ.
+* `NodeVisitor` and `NodeTransformer` are Go structs with a
+  handler map, not subclassable types. The pattern is the same;
+  the implementation idiom differs because Go has no class
+  inheritance.
+* AST sequences use a generic `Seq[T]` rather than CPython's
+  `asdl_*_seq` typedefs. The behaviour is identical; the
+  representation is simpler.
+* Future flag extraction runs after the AST is built. CPython
+  interleaves it with parse for legacy reasons; the two
+  arrangements are equivalent because the flags do not affect
+  parsing.
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+## Reference
 
-## Status
-
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
-
-## Cross reference
-
-* CPython companion: [cpython/ast](../cpython/ast).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+* PEP 626. Precise line numbers for debugging.
+* PEP 649. Deferred evaluation of annotations.
+* PEP 657. Including fine-grained error locations in tracebacks.
+* PEP 695. Type parameter syntax.
+* [parser](parser) for the source of the tree.
+* [symtable](symtable) for the next consumer.
+* [compile](compile) for codegen.

@@ -1,0 +1,348 @@
+---
+title: Compile
+description: Codegen, flowgraph, and assembly. How an AST and a symbol table become a Code object the VM can dispatch.
+---
+
+# Compile
+
+The compiler is the last stage of the pipeline. It takes an AST,
+a symbol table, and a `__future__` flag set, and produces a Code
+object. Internally it does three jobs that CPython splits across
+three source files (`Python/codegen.c`, `Python/flowgraph.c`,
+`Python/assemble.c`). gopy keeps them in one Go package because
+no caller crosses the boundary between them: codegen emits a flat
+instruction sequence, the flowgraph stage rewrites the sequence
+through a basic-block graph, and the assembler packs the result
+into the on-disk layout. A reader who is only interested in the
+last byte of bytecode can think of `compile/` as one black box;
+a reader who is debugging a bad opcode emission or a wrong stack
+depth will want to know the boundary.
+
+This page walks the three jobs in order, then describes the four
+output tables (code, consts, locations, exceptions) and the
+optimisation passes that run between codegen and assembly.
+
+## Where the code lives
+
+| gopy path                                | CPython source                          | Role                                          |
+| ---------------------------------------- | --------------------------------------- | --------------------------------------------- |
+| `compile/compiler.go`                    | `Python/compile.c:L353 _PyAST_Compile`  | Top-level `Compile` and unit driver           |
+| `compile/codegen.go`                     | `Python/codegen.c _PyCodegen_*`         | `Compiler` struct, scope entry, dispatch      |
+| `compile/codegen_stmt.go`                | `Python/codegen.c` per-stmt visitors    | Module, Interactive, Expr, Return, Pass       |
+| `compile/codegen_stmt_control.go`        | `Python/codegen.c` if/for/while/match dispatch | Control flow shape                       |
+| `compile/codegen_stmt_funclike.go`       | `Python/codegen.c compiler_function`    | FunctionDef, AsyncFunctionDef, Lambda         |
+| `compile/codegen_stmt_try.go`            | `Python/codegen.c compiler_try`         | Try, TryStar, exception setup                 |
+| `compile/codegen_stmt_with.go`           | `Python/codegen.c compiler_with`        | With, AsyncWith                               |
+| `compile/codegen_stmt_match.go`          | `Python/codegen.c compiler_match`       | PEP 634 structural matching                   |
+| `compile/codegen_class.go`               | `Python/codegen.c compiler_class`       | ClassDef, descriptor protocol setup           |
+| `compile/codegen_expr_*.go`              | `Python/codegen.c` per-expr visitors    | Names, calls, containers, comprehensions      |
+| `compile/codegen_addop.go`               | `Python/codegen.c ADDOP_*` macros       | `addOp`, `addOpI`, `addOpName`, `addConst`    |
+| `compile/codegen_fblock.go`              | `Python/codegen.c compiler_unit.fblock` | Frame block stack tracking                    |
+| `compile/codegen_annotations.go`         | `Python/codegen.c codegen_deferred_annotations_body` | PEP 649 annotation deferral        |
+| `compile/flowgraph.go`                   | `Python/flowgraph.c cfg_builder`        | BasicBlock graph, public Optimize             |
+| `compile/flowgraph_jumps.go`             | `Python/flowgraph.c` label resolution   | Jump target resolution                        |
+| `compile/flowgraph_stackdepth.go`        | `Python/flowgraph.c calculate_stackdepth` | Stack-depth dataflow                       |
+| `compile/flowgraph_except.go`            | `Python/flowgraph.c label_exception_targets` | Try-region labelling                     |
+| `compile/flowgraph_passes.go`            | `Python/flowgraph.c optimize_*`         | Peephole and graph optimisations              |
+| `compile/assemble.go`                    | `Python/assemble.c _PyAssemble_MakeCodeObject` | Final packing                          |
+| `compile/assemble_locations.go`          | `Python/assemble.c emit_location_info`  | PEP 626 location table                        |
+| `compile/assemble_exceptions.go`         | `Python/assemble.c emit_exception_table` | PEP 657 exception table                      |
+| `compile/assemble_varint.go`             | `Python/assemble.c assemble_varint`     | Varint encoder                                |
+| `compile/instrseq.go`                    | `Python/compile.c instr_sequence`       | `Instr` and `Sequence` types                  |
+| `compile/code.go`                        | `Include/cpython/code.h PyCodeObject`   | Code object struct                            |
+| `compile/opcodes_gen.go`                 | generated from `Lib/_opcode_metadata.py` | Opcode constants and metadata               |
+
+## The compiler driver
+
+`compile/compiler.go:L30 Compile` is the entry point. It takes an
+AST root (`ast.Mod`), a filename, an optimisation level, the
+`__future__` flag set, and an already-built symbol table. It
+returns a single Code object.
+
+```go
+// compile/compiler.go:L30
+func Compile(mod ast.Mod, filename string, optimize int, ff future.Features, st *symtable.Table) (*Code, error) {
+    c := NewCompiler(filename, optimize, ff, st)
+    return c.compileMod(mod)
+}
+```
+
+The `Compiler` struct holds a stack of `Unit` values, one per
+scope currently being compiled. A unit owns the instruction
+sequence being built, the constants pool, the variable name
+lists, the frame block stack (described below), and pointers to
+the parent unit and the symbol table `Entry` for this scope.
+When `compileMod` enters the module scope, it pushes a unit,
+emits instructions for the body, runs flowgraph optimisation,
+calls assemble, and pops the unit. The recursion handles nested
+scopes: a `FunctionDef` visitor pushes a new unit, recursively
+compiles the body, and pops. The Code object that comes out of
+the pop is stored in the parent unit's constants pool, where
+*MAKE_FUNCTION* will pick it up.
+
+The unit-stack discipline keeps the per-scope state isolated.
+There is no shared mutable state between sibling scopes;
+nested-function compilation is just a recursive call.
+
+## Dispatching the AST
+
+`compile/codegen.go:L159 Compiler.Codegen` is the per-scope entry
+point. It switches on the AST root kind (`Module`, `Expression`,
+`Interactive`, `FunctionType`) and walks the body with one of
+the per-mode visitors. Most of the work happens in the statement
+and expression visitors split across the `codegen_stmt_*.go` and
+`codegen_expr_*.go` files.
+
+The statement visitor dispatch is fanned across three helpers,
+mirroring the symtable split: `visitStmtDef` for bindings and
+scope-introducers, `visitStmtControl` for control flow,
+`visitStmtSimple` for everything else. Each helper returns
+`true` if it handled the statement, otherwise the dispatcher
+falls through to the next. Expression visitors fan similarly.
+
+Emitting an opcode is done through one of four helpers in
+`codegen_addop.go`. `addOp(op, pos)` adds an opcode with no
+oparg and a source position. `addOpI(op, arg, pos)` adds one
+with a numeric oparg. `addOpName(op, pool, name, pos)` looks up
+or interns a name in the relevant pool (`co_names`,
+`co_varnames`, `co_freevars`, `co_cellvars`) and adds an opcode
+that references it. `addConst(val, pos)` interns a Python
+constant into `co_consts` and adds a *LOAD_CONST* referencing
+it. The helpers handle the EXTENDED_ARG widening, the inline
+cache slots, and the location-information accumulation; the
+visitors stay free of that bookkeeping.
+
+```go
+// compile/codegen_addop.go:L40
+func (c *Compiler) addOpI(op Opcode, arg int, pos ast.Pos) {
+    c.unit.instrs = append(c.unit.instrs, Instr{
+        Op:   op,
+        Arg:  arg,
+        Pos:  pos,
+    })
+}
+```
+
+The instruction sequence is a flat slice. The flowgraph pass
+later rebuilds it as a graph; codegen does not have to think in
+basic blocks.
+
+## The frame block stack
+
+Some statements (`break`, `continue`, `return`, `raise`,
+unwinding through `with` or `try` finally) need to know what
+control structures are currently open. The frame block stack in
+`compile/codegen_fblock.go` records that. When codegen enters a
+`while` body, it pushes a `LOOP` block with the start and end
+labels of the loop. When codegen enters a `try` body, it pushes
+a `TRY` block with the handler label. When codegen enters a
+`with` body, it pushes a `WITH` block with the cleanup label.
+
+A `break` statement is emitted by walking the stack from the top
+until a `LOOP` block is found, emitting whatever cleanups
+intervening `WITH` and `TRY` blocks require, then jumping to the
+loop's end label. The stack guarantees that the cleanup
+emissions happen in the right order: with-finally cleanups
+before try-finally cleanups before the loop exit.
+
+The same machinery underwrites `return` inside a try-finally. The
+return value is held on the stack across the finally block,
+which means codegen has to emit the right *PUSH_EXC_INFO* and
+*POP_EXCEPT* dances so that the runtime stack remains consistent.
+
+## From flat sequence to basic blocks
+
+After codegen finishes emitting, the compiler hands the flat
+instruction sequence to `compile/flowgraph.go:L58`. The
+flowgraph package rebuilds the sequence as a graph of
+`BasicBlock` values. Each block is a maximal run of instructions
+ending in a jump, a return, a raise, or a fall-through to the
+next block. Blocks are stored in a slice; the graph edges are
+the per-block successor list.
+
+The label resolution pass in `compile/flowgraph_jumps.go` is
+where the conversion happens. Codegen emits jumps with symbolic
+label targets (small integer ids). The pass walks the sequence,
+splits it at label boundaries, and resolves each jump's label to
+the destination block index. After this pass, every jump in the
+sequence has a numeric target relative to its position in the
+final byte stream, ready for the assembler.
+
+## Stack-depth analysis
+
+The VM needs to know how much stack space a Code object can
+consume so it can preallocate the right size. The information is
+the `co_stacksize` field. Computing it is a dataflow problem on
+the basic-block graph: each opcode has a known stack effect
+(some opcodes have variable effects depending on their oparg,
+which `compile/flowgraph_stackdepth.go:L26 getStackEffects`
+handles), and the maximum depth across all reachable states is
+`co_stacksize`.
+
+The pass runs a forward walk over the graph. It starts at the
+entry block with stack depth zero, propagates each instruction's
+effect to compute the depth after it, takes the maximum, and
+records the per-block post-depth. Successors receive the
+post-depth of their predecessor as their entry depth; if a block
+is reached by multiple predecessors with different entry depths
+the algorithm flags a bug (the depths must agree under the
+soundness assumption codegen enforces).
+
+The analysis runs only on reachable blocks, so unreachable code
+(emitted by codegen but pruned by an earlier optimisation pass)
+does not contribute. CPython does the same; the algorithm has
+been stable for many releases.
+
+## Exception-region labelling
+
+PEP 657 changed how the runtime finds an exception handler for
+each instruction. Instead of a stack of `SETUP_FINALLY` blocks
+that the interpreter pushes and pops, every Code object now
+carries a side table mapping instruction-range pairs to handler
+addresses. Building that table is
+`compile/flowgraph_except.go:L40 labelExceptionTargets`.
+
+The pass walks the graph with a stack of open try regions. When
+it enters a try region, it pushes the handler label and the
+stack depth that the runtime should restore. When it exits the
+region, it pops. For every instruction in the region, it records
+the (instruction offset, region) pair. The output is a list of
+ranges that the assembler turns into a varint-encoded byte
+sequence.
+
+The stack depth is the crucial part. When an exception fires
+mid-expression, the runtime has to unwind the value stack before
+jumping to the handler. The depth recorded in the exception
+table tells it how many values to pop. CPython is the same:
+`Python/flowgraph.c:L885 label_exception_targets` walks the same
+way.
+
+## Optimisation passes
+
+`compile/flowgraph_passes.go` holds the passes that run between
+graph construction and assembly. The current set in gopy is a
+subset of CPython's: unreachable blocks are removed, redundant
+`NOP` instructions are dropped, jumps that target the next
+instruction are erased, jumps to unconditional jumps are folded
+through, and a handful of peephole rewrites are applied.
+
+The passes are deliberately conservative. They run on the graph
+after exception-region labelling so that they do not have to
+reason about handler edges; they preserve every observable side
+effect, including the location-information shape; and they
+preserve the in-graph order of instructions, so a block that
+codegen built last stays last in the graph.
+
+CPython 3.14 has many more passes than gopy presently ports.
+Super-instruction fusion and constant propagation across blocks
+are not yet in. The missing passes cost performance but not
+correctness: the same Code object would have been valid in 3.13
+before those passes existed.
+
+## The assembler
+
+`compile/assemble.go:L33 Assemble` flattens the graph back to a
+linear instruction list and emits the four parallel tables that
+make up a Code object.
+
+The bytecode itself (`co_code`) is the linear instruction list
+packed as 16-bit code units (`_Py_CODEUNIT`). Each unit holds an
+opcode in the high byte and an oparg in the low byte. Opargs
+larger than 255 are widened with one or more *EXTENDED_ARG*
+prefix units. Inline cache slots, which the specializer fills in
+later, are reserved by emitting *CACHE* placeholder units after
+the opcode they belong to; the number per opcode is fixed by the
+opcode metadata in `compile/opcodes_gen.go`.
+
+The constants pool (`co_consts`) holds every literal and every
+nested Code object. The assembler does not see the pool grow;
+codegen has already added each constant through `addConst`, which
+interns by identity for hashable values and by deep-equality for
+specific nested containers.
+
+The location table (`co_linetable`, despite the name covering
+more than lines) is encoded by
+`compile/assemble_locations.go:L1`. The format is the PEP 626
+varint encoding: each entry carries an instruction count and a
+line/column delta from the previous entry, with a small set of
+short forms for the common cases (entire instruction on the same
+line as the previous one, instruction with no line info).
+Decoding is the reverse, used at runtime by *RAISE_VARARGS* and
+the traceback machinery.
+
+The exception table (`co_exceptiontable`) is encoded by
+`compile/assemble_exceptions.go:L1`. The format is also a varint
+list, with each entry holding a start offset, an end offset, a
+handler offset, the stack depth to restore, and a flag bit for
+whether `lasti` should be restored. The runtime binary-searches
+this table when an exception fires, finding the entry whose
+range covers the current instruction.
+
+Each of the four tables is emitted in the same order as it would
+be marshalled to `.pyc`, which makes the marshal step in
+`marshal/` a serialisation that preserves byte order rather than
+a rewrite.
+
+```go
+// compile/assemble.go:L33
+func Assemble(seq *Sequence, info Info, unit *Unit, filename string) (*Code, error) {
+    // resolve labels and widen opargs
+    code, err := pack(seq)
+    if err != nil {
+        return nil, err
+    }
+    locs, err := emitLocations(seq, info)
+    if err != nil {
+        return nil, err
+    }
+    excs, err := emitExceptions(info)
+    if err != nil {
+        return nil, err
+    }
+    return &Code{
+        Code:            code,
+        Consts:          unit.consts,
+        Names:           unit.names,
+        Varnames:        unit.varnames,
+        Freevars:        unit.freevars,
+        Cellvars:        unit.cellvars,
+        Linetable:       locs,
+        Exceptiontable:  excs,
+        Filename:        filename,
+        Name:            unit.name,
+        Argcount:        unit.argcount,
+        Stacksize:       info.MaxStackDepth,
+        Flags:           unit.flags,
+        // ...
+    }, nil
+}
+```
+
+## Differences from CPython
+
+* Codegen, flowgraph, and assembler are one Go package. CPython
+  keeps them in three C source files; the Go consolidation is
+  legal because the package boundary is the right level of
+  separation in Go.
+* Some advanced optimisation passes are not yet ported. The
+  current set covers reachability, no-op removal, and basic jump
+  folding. Super-instruction fusion and inter-block constant
+  propagation are pending. The pages on [specializer](specializer)
+  and [optimizer](optimizer) cover the runtime tiers that
+  partially compensate at execution time.
+* The assembler emits Code objects with the same field layout
+  CPython produces, so a marshalled `.pyc` round-trips byte for
+  byte between the two implementations.
+* The frame block stack is a slice of structs, not a linked list
+  of malloc'd records. The behaviour is identical.
+
+## Reference
+
+* PEP 626. Precise line numbers for debugging.
+* PEP 634. Structural pattern matching.
+* PEP 649. Deferred evaluation of annotations.
+* PEP 657. Including fine-grained error locations in tracebacks.
+* PEP 695. Type parameter syntax.
+* [symtable](symtable) for the prerequisite scope analysis.
+* [vm](vm) for what executes the Code object.
+* [specializer](specializer) for the runtime adaptive layer.

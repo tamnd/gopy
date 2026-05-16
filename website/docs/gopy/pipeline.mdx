@@ -1,37 +1,276 @@
 ---
-title: upipeline
-description: gopy's pipeline subsystem. Mirrors CPython's design.
+title: Pipeline
+description: The end-to-end tour from a Python source string to running bytecode. Names every subsystem the source passes through.
 ---
 
-# upipeline
+# Pipeline
 
-This page describes how gopy implements **pipeline**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/pipeline`](../cpython/pipeline).
+A line of Python crosses six well-defined stages before the
+interpreter executes it: source bytes are decoded, the decoded
+text is tokenised, the token stream is parsed into an abstract
+syntax tree, the tree is preprocessed and validated, a symbol
+table is built from it, and finally a code generator turns it
+into a Code object that the VM can dispatch. Each stage hands its
+output to the next as a typed Go value. There is no shared
+mutable state between stages; the pipeline is a function of the
+source, the filename, and a small bag of flags. This page is the
+map. The per-stage pages that follow zoom in on each box.
 
-## Source map
+## Where the pipeline lives
 
-The Go code lives at the module root in flat packages.
+The pipeline is spread across nine Go packages. Six of them
+mirror a single CPython source file; three exist to give a clean
+Go home to functionality that CPython scatters.
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+| gopy path                  | CPython source                | Role                                                |
+| -------------------------- | ----------------------------- | --------------------------------------------------- |
+| `parser/parser.go`         | `Parser/peg_api.c`            | The public `ParseString` / `ParseBytes` entry point |
+| `parser/lexer/`            | `Parser/lexer/`               | Tokenisation FSM, indent stack, f-string mode       |
+| `parser/pegen/`            | `Parser/pegen.c`              | PEG runtime, memo table, generated rule bodies      |
+| `parser/string/`           | `Parser/string_parser.c`      | String literal decode, prefix handling              |
+| `token/`, `tokenize/`      | `Include/internal/pycore_token.h`, `Python/Python-tokenize.c` | Token kinds, Python-level tokenize API |
+| `arena/`                   | `Python/pyarena.c`            | Arena allocator for AST nodes                       |
+| `ast/`                     | `Parser/Python.asdl`, `Python/ast_preprocess.c`, `Python/ast.c` | AST node definitions, preprocess pass, validation |
+| `future/`                  | `Python/future.c`             | `__future__` flag extraction                        |
+| `symtable/`                | `Python/symtable.c`           | Two-pass symbol table builder                       |
+| `compile/`                 | `Python/codegen.c`, `Python/flowgraph.c`, `Python/assemble.c` | Codegen, flowgraph, assembly to Code object |
+
+The arrow of data flow follows the table rows from top to bottom.
+A reader who wants depth on any one row should jump to the
+per-stage page; the rest of this page sketches the overall shape.
+
+## Source bytes to a token stream
+
+The pipeline starts at `parser/parser.go:L45 ParseString` or the
+bytes-aware variant `ParseBytes`. The string variant assumes the
+source is already valid UTF-8; the bytes variant runs PEP 263
+encoding detection over the first two lines, decodes accordingly,
+and then proceeds as the string variant would. Both call into
+`parser/lexer/source.go` to construct a `State` value that owns
+the source buffer and the current cursor.
+
+The lexer in `parser/lexer/lexer.go:L114 tokGetNormalMode` is a
+character-level finite state machine. It pulls the next character
+with `nextC`, dispatches on it, and emits one `token.Tok` per
+call. The hot path runs through `for c == ' ' || c == '\t'`,
+skipping whitespace, and then into a switch over operator
+prefixes (`onechar.go` resolves single, double, and triple
+character operators in one pass over the next three characters).
+Identifiers, numbers, and string literals each have their own
+branch. The lexer also owns the indent stack, emitting *INDENT*
+and *DEDENT* synthetic tokens when the column at the start of a
+logical line changes. Continuation lines (backslash at end of
+line or unclosed brackets) suppress *NEWLINE* and keep the
+indent stack stable.
+
+F-strings get their own mode. When the lexer encounters the
+opening quote of an f-string, it switches to the FSM in
+`parser/lexer/fstring.go` and tracks brace depth, swapping between
+*FSTRING_MIDDLE* (literal text inside the f-string) and *FSTRING_END*
+(closing the f-string). Expressions inside the braces are lexed
+in normal mode with the prevailing brace depth tracked so that
+`f"{ {1: 2} }"` does not close the f-string at the first inner
+brace.
+
+## Token stream to an AST
+
+The PEG parser in `parser/pegen/parser.go` consumes the token
+stream. It does not see the lexer; the lexer fills a token buffer
+on demand. The parser exposes `Parser.Peek` and `Parser.Next` to
+the rule bodies, and `Parser.Mark` and `Parser.Reset` to support
+backtracking. The rule bodies themselves are generated from the
+CPython `Grammar/python.gram` file by `tools/parser_gen` and live
+in `parser/pegen/parser_gen.go` (19,425 lines) and
+`parser/pegen/action_helpers_gen.go` (2,732 lines). A rule body
+that matches returns the AST node it builds; one that fails
+returns nil and the parser backtracks.
+
+PEG parsers naturally have exponential worst-case time on
+backtracking, and Python's grammar is left-recursive in several
+places. Both problems are handled the same way: a memo table in
+`parser/pegen/memo.go:L19 IsMemoized` caches the result of every
+rule attempt keyed by the (rule id, token position) pair. A
+second attempt at the same rule at the same position is a cache
+lookup, not a re-parse.
+
+Error reporting is the other non-trivial piece. The parser
+records a *pinned error* at the farthest token position reached
+during a failed parse. When the top-level rule eventually fails,
+the pinned error is the message surfaced to the user. The logic
+lives in `parser/pegen/errors.go:L18 RaiseSyntaxError` and
+mirrors `Parser/pegen.c:L1136 _PyPegen_run_parser`. Most of the
+work building the actual message string is template-driven from
+`parser/errors/messages.go`.
+
+The AST nodes live in `ast/nodes_gen.go`, generated from the
+CPython `Parser/Python.asdl` file. Every node carries lineno,
+col_offset, end_lineno, and end_col_offset fields, encoded into
+the location table later in the pipeline. Sequences of children
+use the `Seq` container so that the same generated code can
+handle one-or-more, zero-or-more, and optional children
+uniformly.
+
+## AST preprocess and validation
+
+A freshly parsed AST is not yet ready for codegen. `ast/preprocess.go:L62 Preprocess`
+walks the tree once and performs three transformations. First,
+it folds compile-time constants: `-1` is parsed as
+`UnaryOp(USub, Num(1))` and gets rewritten to `Num(-1)`. Binary
+operations on constants (e.g. `2 + 3`) fold to a single constant
+node. The pass mirrors `Python/ast_preprocess.c:L400 astfold_*`.
+Second, when the optimisation level is 2 or higher (`-OO`),
+docstrings are stripped from module, class, and function bodies.
+Third, references to the special name `__debug__` are rewritten
+to the constant `True` or `False` depending on the optimisation
+level.
+
+`future/future.go:L50 FromAST` scans the top of the module body
+for `from __future__ import X` statements. They must come before
+any non-docstring statement, mirroring `Python/future.c:L60 PyFuture_FromAST`.
+The flag bits returned drive small behavioural toggles
+downstream (most notably `from __future__ import annotations`
+which forces all annotations into string form, although in 3.14
+the default is the PEP 649 deferred form).
+
+`ast/validate.go:L35 Validate` runs a structural check, for
+example asserting that `def` statements have a non-empty body
+and that match patterns are well-formed. It catches a class of
+errors that the grammar cannot catch on its own.
+
+## Building the symbol table
+
+`symtable/build.go:L16 Build` walks the validated AST twice. The
+first pass dispatches in `symtable/build_visit.go:L12 visitStmt`,
+recording for each name the bits that say where the name appears:
+`DEF_LOCAL`, `DEF_GLOBAL`, `USE`, `DEF_NONLOCAL`, and so on. Each
+scope (module, function, class, comprehension, lambda, annotation
+scope) gets its own `Entry`. Comprehension scopes are synthesised
+on the fly for list, set, dict, and generator expressions, and
+the implicit `.0` iterator binding is recorded as local in that
+scope.
+
+The second pass, `symtable/analyze.go:L36 analyze`, resolves each
+recorded name to its final `Scope`. The rules are the closure
+classification ones every Python programmer eventually learns:
+if a name is assigned in a function and never declared `global`
+or `nonlocal`, it is `LOCAL`; if it is captured by a nested
+function, the defining function marks it `CELL` and the capturing
+function marks it `FREE`; otherwise it is `GLOBAL`. The two-pass
+shape is required: closure classification cannot be done in one
+pass because a `nonlocal x` declaration may appear before any
+binding of `x` in the enclosing scope.
+
+Name mangling for class private attributes happens here too.
+`symtable/mangle.go:L20 Mangle` rewrites `__x` to `_ClassName__x`
+when it appears inside a class body, matching `Python/compile.c:L1065 _Py_Mangle`.
+The mangling has to happen at the symtable layer because the
+mangled name is the one codegen looks up later.
+
+## Codegen, flowgraph, assemble
+
+The `compile/` package merges three CPython source files into
+one Go package because they form one logical unit: nothing
+outside `compile/` calls into flowgraph or assemble directly.
+`compile/compiler.go:L30 Compile` is the entry point. It enters
+the top-level scope, calls `Compiler.Codegen` to emit a flat
+instruction sequence, hands the sequence to `compile.Optimize`,
+and finally calls `compile.Assemble` to pack the optimised
+sequence into a Code object.
+
+Codegen is recursive. Each function or class body is a separate
+scope and gets its own `Unit` on the compiler stack. Nested
+scopes are compiled depth-first and the resulting Code objects
+land in the parent scope's constants pool. The dispatch happens
+in `compile/codegen.go:L159 Compiler.Codegen`, which switches on
+the AST root (`Module`, `Expression`, `Interactive`,
+`FunctionType`) and walks the body with the per-kind statement
+and expression visitors split across `codegen_stmt*.go` and
+`codegen_expr*.go`.
+
+The flat instruction sequence is then converted to a
+`BasicBlock` graph in `compile/flowgraph.go:L58`. Each basic
+block is a maximal run of instructions ending in a jump or a
+fall-through. Optimisation passes run over the graph:
+unreachable blocks are dropped, no-op instructions are removed,
+chained jumps are folded. Stack-depth analysis in
+`compile/flowgraph_stackdepth.go:L26` propagates the
+post-instruction stack height forward through the graph and
+computes the `co_stacksize` field. Exception-handler labelling
+in `compile/flowgraph_except.go:L40 labelExceptionTargets` walks
+the graph with a stack of open try regions and tags each
+in-region instruction with its handler.
+
+`compile/assemble.go:L33 Assemble` flattens the graph back to a
+linear instruction list, widens any oparg over 8 bits with
+*EXTENDED_ARG* prefixes, and emits the four parallel tables:
+the bytecode (`co_code`), the constants pool (`co_consts`), the
+location table encoded per PEP 657
+(`compile/assemble_locations.go:L1`), and the exception table
+encoded per PEP 654 (`compile/assemble_exceptions.go:L1`). The
+output is a single Code object ready for the VM.
+
+## A short example end to end
+
+To make the boxes concrete, trace `print("hi")` through them.
+
+```python
+>>> import dis
+>>> dis.dis(compile('print("hi")', '<input>', 'exec'))
+  0           RESUME                   0
+
+  1           LOAD_NAME                0 (print)
+              PUSH_NULL
+              LOAD_CONST               0 ('hi')
+              CALL                     1
+              POP_TOP
+              LOAD_CONST               1 (None)
+              RETURN_VALUE
+```
+
+The lexer emits `NAME(print)`, `OP(()`, `STRING("hi")`, `OP())`,
+`NEWLINE`, `ENDMARKER`. The PEG parser matches the
+`expression_statement` rule and builds `Module(body=[Expr(value=Call(func=Name("print"), args=[Constant("hi")]))])`.
+Preprocess sees no constants to fold and no docstring to strip.
+The symbol table records two names: `print` as `GLOBAL` (not
+defined in the module) and the literal `"hi"` is not a name.
+Codegen visits the module, emits *RESUME*, then visits the
+`Expr` statement which delegates to expression codegen.
+Expression codegen for a `Call` emits *LOAD_NAME* for the
+callable, *PUSH_NULL* (the missing `self`), *LOAD_CONST* for the
+argument, and *CALL 1*. The trailing *POP_TOP* discards the
+return value of the expression statement, and
+`addReturnNoneIfMissing` appends the implicit *LOAD_CONST None*
+and *RETURN_VALUE* pair. Flowgraph optimisation has nothing to
+remove. Assembly packs the eight instructions into 22 bytes
+(each instruction is two bytes, plus inline caches for *LOAD_NAME*
+and *CALL*) and emits the matching location and exception
+tables.
 
 ## Differences from CPython
 
-```
-Notes on places where gopy intentionally diverges from CPython.
-```
+* The grammar file is shared with CPython; gopy emits Go from it
+  with `tools/parser_gen` rather than C. The generated file is
+  checked in to keep the build standalone.
+* The arena allocator in `arena/arena.go` is a thin wrapper over
+  Go slices; it never frees individual nodes, because the Go
+  garbage collector handles that. CPython's `pyarena.c` is more
+  involved because it has to free arena blocks itself.
+* The pipeline does not memoise the path from AST to Code object.
+  CPython does the same; both rely on the `.pyc` cache one level
+  up to skip the whole pipeline when an unchanged source is
+  re-imported.
+* Codegen, flowgraph, and assembly are one Go package because no
+  caller crosses the boundary between them. CPython keeps them
+  in three files because the C compilation unit boundary
+  approximates what Go gets from a package.
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+## Reference
 
-## Status
-
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
-
-## Cross reference
-
-* CPython companion: [cpython/pipeline](../cpython/pipeline).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+* PEP 263. Defining Python source code encodings.
+* PEP 617. New PEG parser for CPython.
+* PEP 626. Precise line numbers for debugging and other tools.
+* PEP 657. Including fine-grained error locations in tracebacks.
+* PEP 695. Type parameter syntax.
+* [parser](parser), [ast](ast), [symtable](symtable),
+  [compile](compile) for per-stage detail.
+* [vm](vm) for what happens after the pipeline finishes.

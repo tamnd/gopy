@@ -1,37 +1,329 @@
 ---
-title: uparser
-description: gopy's parser subsystem. Mirrors CPython's design.
+title: Parser
+description: Tokenisation and PEG parsing. Token kinds, the lexer state machine, the memoised rule runner, and how syntax errors are reported.
 ---
 
-# uparser
+# Parser
 
-This page describes how gopy implements **parser**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/parser`](../cpython/parser).
+The parser is the front end. It takes a string or a byte buffer
+that contains Python source and produces an abstract syntax tree.
+Internally it has two halves: a hand-written character-level
+lexer that turns the source into a stream of tokens, and a PEG
+parser that consumes that stream and runs grammar rules generated
+from `Grammar/python.gram`. The lexer and the parser do not share
+state; they communicate through a token buffer that the parser
+fills on demand. This page describes both halves and the
+plumbing between them.
 
-## Source map
+## Where the code lives
 
-The Go code lives at the module root in flat packages.
+| gopy path                              | CPython source                                | Role                                          |
+| -------------------------------------- | --------------------------------------------- | --------------------------------------------- |
+| `parser/parser.go`                     | `Parser/peg_api.c`                            | Public entry points                            |
+| `parser/lexer/lexer.go`                | `Parser/lexer/lexer.c`                        | Regular-mode tokenisation FSM                  |
+| `parser/lexer/state.go`                | `Parser/lexer/state.c`                        | Lexer state, indent stack, buffer cursors      |
+| `parser/lexer/fstring.go`              | `Parser/lexer/fstring.c`                      | F-string mode FSM                              |
+| `parser/lexer/source.go`               | `Parser/tokenizer/file_tokenizer.c`           | Encoding detection (PEP 263), BOM, source intake |
+| `parser/lexer/helpers.go`              | `Parser/lexer/helpers.c`                      | Escape, whitespace, number, identifier classification |
+| `parser/lexer/onechar.go`              | `Parser/lexer/lexer.c`                        | One, two, and three character operator resolution |
+| `parser/lexer/buffer.go`               | `Parser/lexer/buffer.c`                       | Refill buffer plumbing                         |
+| `parser/lexer/driver_*.go`             | `Parser/tokenizer/{string,file,readline}_tokenizer.c` | Per-source-kind drivers              |
+| `parser/string/parse.go`               | `Parser/string_parser.c`                      | String literal prefix and escape decode        |
+| `parser/string/fstring.go`             | `Parser/string_parser.c`                      | F-string `JoinedStr` assembly                  |
+| `parser/string/concat.go`              | `Parser/string_parser.c`                      | Adjacent string literal folding                |
+| `parser/pegen/parser.go`               | `Parser/pegen.c`                              | `Parser` struct, token buffer, mark/restore    |
+| `parser/pegen/memo.go`                 | `Parser/pegen.c`                              | Memo table for rule results                    |
+| `parser/pegen/parser_gen.go`           | generated from `Grammar/python.gram`          | Generated rule bodies (19,425 lines)           |
+| `parser/pegen/action_helpers_gen.go`   | generated from `Grammar/python.gram`          | Generated AST-constructing actions (2,732 lines) |
+| `parser/pegen/errors.go`               | `Parser/pegen_errors.c`                       | Syntax error builders, pinned-error state      |
+| `parser/errors/messages.go`            | `Parser/pegen_errors.c`                       | Error message templates                        |
+| `token/token.go`                       | `Include/internal/pycore_token.h`             | Token kind constants                            |
+| `token/types_gen.go`                   | generated from `Grammar/Tokens`               | Token type registry                            |
+| `tokenize/tokenize.go`                 | `Python/Python-tokenize.c`                    | Python-level `tokenize` API                    |
+| `arena/arena.go`                       | `Python/pyarena.c`                            | Arena allocator backing AST nodes              |
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+The flat layout at the root of the repository (`token/`, `tokenize/`,
+`arena/`) holds the small, self-contained pieces; everything that
+takes more than a single file lives under `parser/`.
+
+## Token kinds and the lexer state
+
+A token in gopy is a value of type `token.Tok` defined in
+`token/token.go`. It carries a kind, the start and end byte
+offsets in the source buffer, the starting line and column, and
+the literal string for tokens that have one (identifiers,
+numbers, strings, operators that are not single characters). The
+kind set is the same one CPython uses, generated from the shared
+`Grammar/Tokens` file by `tools/types_gen` into
+`token/types_gen.go`. There are around 90 distinct kinds, give
+or take the version of Python.
+
+The lexer state in `parser/lexer/state.go` holds the source buffer,
+a cursor (`cur`), a token-start cursor (`start`), the current line
+and column, an *INDENT* stack, a pending *INDENT*/*DEDENT* count
+(`pendin`), and a few small flags. The state is owned by the
+caller and threaded through the lexer routines; nothing in
+`parser/lexer/` is package-level mutable state. A pull happens via
+`State.Get`, which returns one token and advances the cursor past
+its end.
+
+Three lexer drivers wrap three kinds of source. The string driver
+(`parser/lexer/driver_string.go`) accepts a UTF-8 string and
+makes it the whole buffer. The file driver
+(`parser/lexer/driver_file.go`) wraps an `io.Reader` and refills
+the buffer line by line. The readline driver
+(`parser/lexer/driver_readline.go`) wraps the REPL line editor so
+the lexer can yield control between physical lines.
+
+## The regular-mode FSM
+
+The hot path of the lexer is the loop in
+`parser/lexer/lexer.go:L114 tokGetNormalMode`. The shape mirrors
+`Parser/lexer/lexer.c:L501 tok_get_normal_mode` line for line.
+
+```go
+// parser/lexer/lexer.go:L114
+func (s *State) tokGetNormalMode() Tok {
+    for {
+        s.start = s.cur
+        s.startCol = s.col
+        s.blankline = false
+
+        if s.atbol {
+            s.atbol = false
+            if t, emit := s.indentNL(); emit {
+                return t
+            }
+        }
+
+        if s.pendin != 0 {
+            // emit pending INDENT or DEDENT
+            // ...
+        }
+
+        c := s.nextC()
+        for c == ' ' || c == '\t' || c == '\014' {
+            c = s.nextC()
+        }
+        // ... operator, identifier, number, string dispatch
+    }
+}
+```
+
+The outer `for` exists to skip blank lines without surfacing
+spurious *NEWLINE* tokens. The `atbol` (at beginning of line)
+flag is set whenever the previous token ended with a newline and
+drives the call to `indentNL`, which compares the leading
+whitespace against the indent stack and may push a level (`pendin`
+goes positive, producing an *INDENT* token on the next iteration)
+or pop levels (`pendin` goes negative, producing one *DEDENT* per
+iteration until it returns to zero).
+
+Operator resolution happens in
+`parser/lexer/onechar.go`, which looks at one, two, or three
+characters and returns the longest match. Identifiers, numbers,
+and string literal prefixes branch off the main switch and call
+into helpers in `parser/lexer/helpers.go`. Line continuation
+(backslash followed by newline) is handled inline: the backslash
+swallows the next newline and the lexer keeps scanning the same
+logical line without emitting *NEWLINE*.
+
+Brackets affect tokenisation: while the bracket depth is non-zero
+(any of `(`, `[`, `{` open without a matching close), newlines
+inside the brackets emit *NL* rather than *NEWLINE*, indents are
+not tracked, and continuation lines are implicit. The depth lives
+on the lexer state and is incremented in `tokGetNormalMode` for
+each opener, decremented for each closer.
+
+## F-strings and string literals
+
+F-strings are the only place the lexer leaves regular mode. The
+opening quote of an f-string (`f"..."`, `f'...'`, `F"..."`, etc.,
+including byte and raw variants combined with f) pushes a frame
+on the lexer's f-string stack and switches the FSM to
+`parser/lexer/fstring.go`. Inside, the lexer emits
+*FSTRING_START*, then one or more of *FSTRING_MIDDLE* (literal
+runs) and *FSTRING_END* (closing the f-string). When the lexer
+sees `{`, it switches back to regular mode for the embedded
+expression and tracks brace depth so that nested object literals
+do not close the f-string by accident. The `}` that closes the
+expression switches the lexer back to f-string mode.
+
+Triple-quoted strings, byte strings, and raw strings live in
+`parser/string/`. The escape decoder in `parser/string/parse.go`
+walks the literal once and produces the final value plus a
+diagnostic if any escape is malformed. `parser/string/concat.go`
+folds adjacent string literals at parse time, so `"a" "b"` ends
+up as a single `Constant("ab")` AST node. PEP 263 encoding
+detection happens in `parser/lexer/source.go` before the lexer
+runs: the first two lines are scanned for a coding declaration,
+and the rest of the buffer is decoded accordingly.
+
+## The PEG parser
+
+The parser proper lives in `parser/pegen/`. The struct in
+`parser/pegen/parser.go` carries a reference to the lexer, the
+token buffer it has filled so far, the current mark (an index
+into the buffer), the rule stack (for error reporting), and the
+memo table. The runtime is small; the bulk of the package is the
+two generated files.
+
+A rule body is a Go function with a fixed signature: it takes the
+parser, returns the AST node or nil on failure, and advances the
+parser's mark only if the match commits. Most rule bodies are
+exclusive-or sequences of alternatives. The generator emits one
+function per grammar rule plus a dispatcher in
+`parser/pegen/parser_gen.go` that picks the entry rule based on
+the parse mode (`Py_file_input`, `Py_eval_input`,
+`Py_single_input`, `Py_func_type_input`).
+
+```go
+// parser/pegen/parser.go:L160
+func New(st *lexer.State, rule int, flags Flags) *Parser {
+    p := &Parser{state: st, rule: rule, flags: flags}
+    p.tokens = make([]token.Tok, 0, 64)
+    p.fill = 0
+    return p
+}
+
+func (p *Parser) Peek() token.Tok {
+    if p.mark >= p.fill {
+        p.fillOne()
+    }
+    return p.tokens[p.mark]
+}
+
+func (p *Parser) Mark() int            { return p.mark }
+func (p *Parser) Reset(m int)          { p.mark = m }
+```
+
+`Peek` does not advance; `Next` does. A rule body that wants to
+try an alternative captures the current `Mark`, attempts the
+alternative, and either commits (by leaving the mark advanced) or
+backs out (by calling `Reset`).
+
+## Memoisation and left recursion
+
+A pure PEG parser has exponential worst-case time when alternatives
+share a prefix, because the same rule can be re-attempted at the
+same position from many ancestor frames. The Python grammar also
+has left-recursive rules (notably the chain of `expression`
+through `disjunction`, `conjunction`, `inversion`, `comparison`,
+and so on). Both problems are addressed by the memo table in
+`parser/pegen/memo.go:L19 IsMemoized`.
+
+The table is keyed by the pair (rule id, mark). Every rule body
+checks the memo before doing any work; if a result is cached
+(success or failure), the parser returns it and advances the mark
+to the cached endpoint. On a successful match, the rule writes the
+result and the endpoint into the memo before returning. The
+left-recursion handling is a small generalisation: a rule marked
+left-recursive seeds the memo with a failure result, runs the
+rule body, and replaces the seed with the new result if the run
+succeeds. The seeded failure breaks the infinite descent; the
+replacement loop iterates to a fixed point. The technique is
+Warth et al., adopted in CPython by PEP 617 and ported verbatim
+here.
+
+The memo storage is per-token: each `token.Tok` carries a pointer
+to a small linked list of memo entries. When the parser advances
+past a token, its memo entries become unreachable and the Go
+garbage collector reclaims them.
+
+## Error recovery and syntax messages
+
+PEG parsers do not naturally produce good error messages. A
+failure at the top-level rule means "nothing matched", which is
+useless. CPython's approach, ported in
+`parser/pegen/errors.go:L18 RaiseSyntaxError`, is to track the
+*pinned error*: the farthest token position any rule attempt
+reached, together with the rule context at that position. If
+parsing fails, the pinned error is what the user sees.
+
+The actual message strings come from `parser/errors/messages.go`,
+which holds the templates by error kind, and from one-off
+construction sites scattered through the generated action bodies
+(for example, the rule that handles `print x` produces the famous
+"Missing parentheses in call to 'print'" hint at the point of
+match). The messages are byte-for-byte identical to CPython's so
+that test suites do not need conditional strings.
+
+The lexer also raises syntax errors in a few places, mostly for
+malformed string literals, unterminated brackets, and bad encoding
+declarations. Those go through `parser/errors/tokenizer_errors.go`
+and surface with a fake token position pointing at the offending
+character.
+
+## Arena allocation and entry points
+
+AST nodes are allocated through `arena/arena.go`. The arena is a
+Go slice that grows by powers of two; allocations bump a cursor
+and never free. When the parse completes, the parser returns the
+AST root; the arena dies when no rooted pointer keeps it alive.
+The Go garbage collector handles the eventual reclamation. There
+is no manual free path because there is nothing to free
+individually.
+
+```go
+// parser/parser.go:L45
+func ParseString(src, filename, mode string) (ast.Mod, error) {
+    st, err := lexer.FromString(src, mode)
+    if err != nil {
+        return nil, err
+    }
+    return parse(st, filename, mode)
+}
+
+func ParseBytes(src []byte, filename, mode string) (ast.Mod, error) {
+    st, err := lexer.FromBytes(src, mode)
+    if err != nil {
+        return nil, err
+    }
+    return parse(st, filename, mode)
+}
+```
+
+The internal `parse` function constructs a `pegen.Parser`, picks
+the entry rule based on the mode (`exec`, `eval`, `single`, or
+`func_type`), and calls the dispatcher in
+`parser/pegen/parser_gen.go:L19394 Dispatch`. If the dispatcher
+returns nil, the pinned error is converted to a `SyntaxError`. If
+the dispatcher returns a node, it is the AST root.
+
+`tokenize/tokenize.go:L42 Tokenize` exposes the lexer as a Python
+iterator. It is used by the `tokenize` module and by tools that
+want the token stream without building an AST. The implementation
+wraps `lexer.State.Get` and adapts the result into the named
+tuple shape `(type, string, start, end, line)` that the Python
+tokenize API documents.
 
 ## Differences from CPython
 
-```
-Notes on places where gopy intentionally diverges from CPython.
-```
+* The lexer runs over UTF-8 throughout. CPython's lexer runs over
+  the source as the encoding produced (typically UTF-8 by the time
+  the lexer sees it) but uses byte offsets and explicit width
+  calculations. gopy's lexer uses Go's native UTF-8 rune iteration
+  in `parser/lexer/helpers.go`, which collapses several CPython
+  helpers into one.
+* The PEG runtime stores its memo table on the token rather than
+  in a dedicated array. CPython does the same; the point is worth
+  flagging only because Go's garbage collector handles the
+  reclamation automatically.
+* The generated parser is checked into the repository
+  (`parser/pegen/parser_gen.go`). CPython generates `Parser/parser.c`
+  at build time. The two strategies are equivalent; gopy chooses
+  to commit the generated file so that the build does not need
+  Python at hand.
+* The arena is a thin slice. CPython's arena (`pyarena.c`) is a
+  block allocator with explicit free, because malloc and free are
+  the wrong unit of cost in C. Go does not need either.
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+## Reference
 
-## Status
-
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
-
-## Cross reference
-
-* CPython companion: [cpython/parser](../cpython/parser).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+* PEP 263. Defining Python source code encodings.
+* PEP 617. New PEG parser for CPython.
+* PEP 657. Including fine-grained error locations in tracebacks.
+* Warth, A., Douglass, J., Millstein, T. 2008. *Packrat parsers
+  can support left recursion*. PEPM '08.
+* [pipeline](pipeline) for the end-to-end tour.
+* [ast](ast) for what the parser hands off to.

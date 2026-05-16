@@ -1,37 +1,321 @@
 ---
-title: usymtable
-description: gopy's symtable subsystem. Mirrors CPython's design.
+title: Symbol table
+description: Two-pass scope analysis. How names get classified as local, global, nonlocal, cell, or free before codegen sees them.
 ---
 
-# usymtable
+# Symbol table
 
-This page describes how gopy implements **symtable**. The design follows
-CPython page-for-page. For the upstream reference see
-[`cpython/symtable`](../cpython/symtable).
+The symbol table is the answer to a single question: for every
+name used in a Python program, which scope binds it? That answer
+sounds easy, and at module top level it is. Inside nested
+functions, comprehensions, lambdas, class bodies, and annotation
+scopes it gets subtle. A name written `x` in a function body
+might be a local variable, a closure-captured `nonlocal`, a
+global, or even a class-private mangled `_ClassName__x`. The
+choice depends on what assignments and `global` and `nonlocal`
+declarations appear in the same scope and in enclosing scopes.
+The symbol table runs *before* codegen so that codegen can emit
+*LOAD_FAST*, *LOAD_GLOBAL*, or *LOAD_DEREF* without having to
+work that out for itself.
 
-## Source map
+The implementation runs in two passes. The first pass walks the
+AST and, for every name that appears, sets bit flags recording
+how it was used: assigned, read, declared global, declared
+nonlocal, deleted, used as a parameter. The second pass walks
+the resulting tree of scopes and resolves each name to a final
+`Scope` value. Splitting the work in two is required, not
+cosmetic: a `nonlocal x` declaration can appear before any
+binding of `x` in the enclosing scope, so the analyzer needs the
+full picture of the program before it can resolve any single
+name.
 
-The Go code lives at the module root in flat packages.
+## Where the code lives
 
-| Package        | Role                                                  |
-| -------------- | ----------------------------------------------------- |
-| (TBD)          | Mirror of the matching CPython source file.           |
+| gopy path                  | CPython source                          | Role                                          |
+| -------------------------- | --------------------------------------- | --------------------------------------------- |
+| `symtable/build.go`        | `Python/symtable.c:L412 _PySymtable_Build` | Two-pass driver                                |
+| `symtable/build_visit.go`  | `Python/symtable.c:L1847 symtable_visit_stmt` | Per-statement visitors                      |
+| `symtable/build_expr.go`   | `Python/symtable.c symtable_visit_expr` | Per-expression visitors                        |
+| `symtable/build_comp.go`   | `Python/symtable.c symtable_visit_listcomp` | Comprehension scope synthesis                |
+| `symtable/build_helpers.go`| `Python/symtable.c` add_one_to_*        | `addDef`, `addUse`, name mangling, annotations |
+| `symtable/analyze.go`      | `Python/symtable.c:L475 _PySymtable_Analyze` | Pass 2: scope resolution                    |
+| `symtable/table.go`        | `Include/cpython/symtable.h`            | `Table` root, block map, future flags          |
+| `symtable/entry.go`        | `Python/symtable.c PySTEntry`           | One scope's symbol table                       |
+| `symtable/types.go`        | `Include/cpython/symtable.h`            | `Block` kinds, `SymbolFlags` bits, `Scope` enum |
+| `symtable/mangle.go`       | `Python/compile.c:L1065 _Py_Mangle`     | `__private` to `_ClassName__private` rewrite   |
+| `symtable/errors.go`       | `Python/symtable.c symtable_warn`       | Symbol-related syntax errors                   |
+
+## What a scope looks like
+
+A scope in symtable lives in an `Entry` struct from
+`symtable/entry.go`. Every scope has a name (the function name,
+the class name, `<module>`, `<lambda>`, `<listcomp>`, and so on),
+a kind (`BlockKind` from `symtable/types.go`), a parent pointer,
+a map from name to `SymbolFlags`, and three derived lists
+populated by the analyzer: `Varnames` (positional and keyword
+locals), `CellVars` (variables captured by nested scopes), and
+`FreeVars` (variables captured from enclosing scopes). The
+parent pointer plus the children list (held on the parent) build
+the scope tree that mirrors the lexical nesting of the program.
+
+```go
+// symtable/entry.go:L20
+type Entry struct {
+    Name      string
+    Kind      Block
+    Lineno    int
+    ColOffset int
+
+    Symbols   map[string]SymbolFlags
+    Children  []*Entry
+    Parent    *Entry
+
+    Varnames  []string
+    CellVars  []string
+    FreeVars  []string
+
+    NestedFunctionsHaveFreeVars bool
+    HasFreeVars                 bool
+    HasNestedScope              bool
+    HasOptimizedScope           bool
+    Generator                   bool
+    Coroutine                   bool
+    Comprehension               bool
+    IsClass                     bool
+    // ...
+}
+```
+
+The flag soup at the bottom matches the bit fields CPython's
+`PySTEntry` carries. Most of them are set during the visit pass
+and read during the analyze pass; a few (`HasFreeVars`,
+`NestedFunctionsHaveFreeVars`) are computed at the very end and
+consumed by codegen.
+
+## Pass 1: walking the AST
+
+`symtable/build.go:L16 Build` is the entry point. It allocates a
+`Table`, creates the root `Entry` (a `Module` block), and calls
+`visitStmt` on every statement in the body. The visit dispatch
+in `symtable/build_visit.go:L12` switches on the statement kind
+and either drives directly into helpers or enters a new scope
+first.
+
+```go
+// symtable/build_visit.go:L12
+func (b *builder) visitStmt(s ast.Stmt) error {
+    if handled, err := b.visitStmtDef(s); handled {
+        return err
+    }
+    if handled, err := b.visitStmtControl(s); handled {
+        return err
+    }
+    return b.visitStmtSimple(s)
+}
+```
+
+Statements that introduce a binding or a new scope go through
+`visitStmtDef`: `FunctionDef`, `AsyncFunctionDef`, `ClassDef`,
+`TypeAlias`, `Assign`, `AnnAssign`, `AugAssign`, `Import`,
+`ImportFrom`, `Global`, `Nonlocal`. Statements that affect
+control flow go through `visitStmtControl`: `If`, `For`,
+`AsyncFor`, `While`, `Try`, `TryStar`, `With`, `AsyncWith`,
+`Match`, `Raise`, `Assert`. Everything else (`Expr`, `Return`,
+`Yield`, `Pass`, `Break`, `Continue`, `Delete`) goes through
+`visitStmtSimple`.
+
+The expression visitor in `symtable/build_expr.go` runs in
+parallel: every expression that mentions a name calls into
+`build_helpers.go:addUse` or `addDef` with the right flag bits.
+A `Name(id="x", ctx=Load)` calls `addUse("x", DEF_USE)`. A
+`Name(id="x", ctx=Store)` calls `addDef("x", DEF_LOCAL)`. A
+`Global("x")` calls `addDef("x", DEF_GLOBAL)`. A walrus
+expression (`(y := 3)`) calls `addDef("y", DEF_LOCAL)` in the
+enclosing function scope rather than in the current comprehension
+scope, because PEP 572 says the binding belongs outside.
+
+A function definition is the most involved case. The visitor
+walks the decorators in the current scope, walks the default
+expressions in the current scope (defaults evaluate in the
+defining scope), walks the parameter annotations in the current
+scope (with PEP 649 deferring them to an `__annotate__` function,
+which is its own scope), then enters a new function scope and
+walks the body inside. The parameter names get added as
+`DEF_PARAM` plus `DEF_LOCAL`.
+
+## Comprehensions are their own scope
+
+A list, set, dict, or generator comprehension creates a synthetic
+scope, the way a lambda does. The visitor for comprehensions in
+`symtable/build_comp.go` enters a new `Entry` with the block kind
+`Comprehension`, defines the implicit `.0` iterator variable as
+local, walks the generators (the leftmost iterable expression
+evaluates in the *enclosing* scope, the others in the new scope),
+and walks the element expression and any `if` filters in the new
+scope. The parent scope sees only the iteration variable's *use*
+through `.0`; the body's variables are local to the comprehension.
+
+The CPython equivalent is at `Python/symtable.c symtable_visit_listcomp`,
+duplicated four ways (one per comprehension kind). gopy
+parameterises the helper so the four kinds share the same body.
+
+## Pass 2: scope resolution
+
+After pass 1, every `Entry` knows what flag bits each name has.
+That is necessary but not sufficient. Codegen needs to know
+whether a `LOAD x` should be a *LOAD_FAST* (local), a
+*LOAD_GLOBAL* (module-level), a *LOAD_DEREF* (closed over from an
+enclosing scope), or a *LOAD_CLASSDEREF* (class body closure). The
+analyzer in `symtable/analyze.go:L36` computes that.
+
+The pass is a post-order walk over the scope tree. For each scope:
+
+1. Compile a working set of names that the scope itself binds.
+   This is the union of all symbols with any `DEF_*` bit set,
+   minus those declared `global` or `nonlocal`.
+2. For each name used (`DEF_USE`) but not bound here, ask the
+   enclosing scope chain. If an enclosing scope binds the name as
+   a local, mark that scope's symbol with `DEF_FREE_CLASS` and
+   the current scope's symbol with `DEF_FREE`. The binding scope's
+   symbol additionally gets the cell flag.
+3. For each `nonlocal x` declaration, walk outward until a
+   binding scope is found. Failing that, raise `SyntaxError`.
+4. For each `global x` declaration, jump straight to the module
+   scope. The module-scope `Entry` is the analyzer's reference,
+   not the lexically enclosing one.
+5. Anything left over with `DEF_USE` and no binding becomes
+   `GLOBAL_IMPLICIT`. At runtime, *LOAD_NAME* falls back to the
+   builtins, but the symbol-table classification is still global.
+
+The analyzer returns each name's final `Scope` value from a small
+enum: `Local`, `GlobalExplicit`, `GlobalImplicit`, `Free`,
+`Cell`, `FreeClass`. Codegen reads the `Scope` and picks the
+opcode.
+
+```go
+// symtable/analyze.go:L36
+func analyze(t *Table) error {
+    return analyzeBlock(t.Top, nil, nil, nil)
+}
+
+func analyzeBlock(b *Entry, bound, free, global names) error {
+    local := names{}
+    scopes := map[string]Scope{}
+
+    for name, flags := range b.Symbols {
+        if err := analyzeName(b, scopes, name, flags, bound, local, free, global); err != nil {
+            return err
+        }
+    }
+    for _, child := range b.Children {
+        if err := analyzeBlock(child, /* ... */); err != nil {
+            return err
+        }
+    }
+    return updateSymbols(b, scopes)
+}
+```
+
+The `bound`, `free`, and `global` parameters are accumulated as
+the recursion descends. `bound` is the union of names the
+enclosing function-scope chain binds; `free` is the union of free
+variables from enclosing scopes; `global` is what was declared
+global anywhere in the chain. The analyzer compares each name's
+flag bits against these sets to decide its scope.
+
+## Class scopes are special
+
+A class body is a scope of its own, but it does not behave like a
+function. Names bound in a class body are not visible to nested
+function definitions; instead, those names become *attributes* of
+the class. Names used inside methods bypass the class scope and
+look up the surrounding function chain or the module.
+
+The analyzer handles this by skipping the class scope when
+computing the `bound` set for a method. A function nested inside
+a class sees the class body's enclosing function chain as if the
+class were not there. The exception is the implicit `__class__`
+cell that codegen inserts whenever a method uses zero-argument
+`super()`. The symbol table is what tells codegen to create the
+cell.
+
+Class-private name mangling runs at the symbol-table layer too.
+`symtable/mangle.go:L20 Mangle` rewrites `__x` to `_ClassName__x`
+when `__x` appears in a class body and does not end with two
+underscores. The mangled name is what gets entered into the
+symbol table, so codegen later looks up the mangled form
+naturally.
+
+```go
+// symtable/mangle.go:L20
+func Mangle(className, name string) string {
+    if !strings.HasPrefix(name, "__") {
+        return name
+    }
+    if strings.HasSuffix(name, "__") {
+        return name
+    }
+    cls := strings.TrimLeft(className, "_")
+    if cls == "" {
+        return name
+    }
+    return "_" + cls + name
+}
+```
+
+The `TrimLeft` handles the corner case of a class named with
+leading underscores: `class _Foo: __x` mangles to `_Foo__x`, not
+`__Foo__x`. CPython does the same; it is one of those quirks
+that lives in `_Py_Mangle` and surprises everyone the first time.
+
+## Annotation scopes
+
+PEP 649 introduces the notion of an annotation scope. An
+annotation expression on a function or class is captured and
+compiled into a synthetic `__annotate__` function rather than
+evaluated when the surrounding definition runs. From the symbol
+table's perspective this is a new scope kind. The visitor in
+`build_visit.go` enters an `Annotation` block when it walks the
+annotations of a function or class and exits it when the
+annotations are done. The analyzer treats it like any other
+scope; codegen emits a function body that returns a dict of
+annotation values.
+
+The result is that you can write a forward-reference annotation
+without `from __future__ import annotations`. The name does not
+get resolved until `__annotate__` runs, which gives the rest of
+the module time to define it.
+
+## What the table tells codegen
+
+The output of the whole pass is a tree of `Entry` rooted at the
+module. Codegen never inspects an AST node without first looking
+up its containing scope in the table. The lookup is keyed by AST
+node identity; `Table.Blocks` is a map from any function, class,
+comprehension, or annotation node to its `Entry`. The accessors
+codegen uses most are `Entry.Lookup(name)` (return the
+`SymbolFlags` and `Scope` for a name) and `Entry.CellVars` (the
+list of cells the codegen needs to allocate for this scope).
 
 ## Differences from CPython
 
-```
-Notes on places where gopy intentionally diverges from CPython.
-```
+* The Go port uses a `map[string]SymbolFlags` per scope.
+  CPython uses a `PyDict` because everything is a `PyObject` in
+  CPython; the structural difference does not matter at this
+  layer.
+* The scope tree is built incrementally during pass 1 rather than
+  as a deferred construction. CPython does the same; the
+  alternative (lazy construction) is hard to combine with
+  closure analysis.
+* The analyzer is iterative rather than recursive in CPython
+  (`Python/symtable.c:L625 analyze_block` uses an explicit stack
+  for a few of its substeps). gopy uses Go function recursion
+  because the depth is bounded by lexical nesting in real code.
 
-* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
-* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
-* Goroutines back the C threads model where it shows through.
+## Reference
 
-## Status
-
-See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
-
-## Cross reference
-
-* CPython companion: [cpython/symtable](../cpython/symtable).
-* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.
+* PEP 572. Assignment expressions.
+* PEP 649. Deferred evaluation of annotations.
+* PEP 695. Type parameter syntax.
+* [parser](parser) and [ast](ast) for what the symtable consumes.
+* [compile](compile) for what consumes the symtable's output.
