@@ -724,6 +724,31 @@ func storeSlice(container, start, stop, value objects.Object) error {
 	return nil
 }
 
+// dictFromItems builds a dict from an interleaved key/value array.
+// values holds 2*n entries; even indices are keys, odd are values.
+// Mirrors CPython's _PyDict_FromItems, which the bytecodes.c BUILD_MAP
+// body calls with `(values_o, 2, values_o+1, 2, oparg)` (both ptr args
+// alias the same array, just offset by one with stride 2).
+//
+// CPython: Objects/dictobject.c _PyDict_FromItems
+// CPython: Python/bytecodes.c BUILD_MAP
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) dictFromItems(values []objects.Object, n uint32) objects.Object {
+	if uint32(len(values)) < n*2 {
+		e.pendingErr = fmt.Errorf("BUILD_MAP: values has %d entries, want %d", len(values), n*2)
+		return nil
+	}
+	d := objects.NewDict()
+	for i := uint32(0); i < n; i++ {
+		if err := d.SetItem(values[i*2], values[i*2+1]); err != nil {
+			e.pendingErr = err
+			return nil
+		}
+	}
+	return d
+}
+
 // callIntrinsic1 dispatches `_PyIntrinsics_UnaryFunctions[oparg].func(tstate, x)`.
 // On error returns nil with pendingErr set; the translator's
 // ERROR_IF(res == NULL) pattern picks that up.

@@ -1025,6 +1025,41 @@ func (p *exprParser) parsePrimary() (string, error) {
 		}
 		return "", fmt.Errorf("_Py_STR: unsupported singleton %q", arg)
 	}
+	// _PyDict_FromItems builds a dict from an interleaved key/value
+	// array. The only call shape in bytecodes.c (BUILD_MAP) is
+	// `_PyDict_FromItems(values_o, 2, values_o+1, 2, oparg)`: same
+	// array twice with stride 2, second pointer offset by one. gopy's
+	// dict helper takes the values slice and count directly. Consume
+	// the five args literally, then emit the simpler helper.
+	//
+	// CPython: Objects/dictobject.c _PyDict_FromItems
+	if tk == "_PyDict_FromItems" {
+		if p.pos >= len(p.toks) || p.toks[p.pos] != "(" {
+			return "", fmt.Errorf("_PyDict_FromItems: expected '('")
+		}
+		p.pos++
+		args := make([]string, 0, 5)
+		for {
+			a, err := p.parseExpr(0)
+			if err != nil {
+				return "", err
+			}
+			args = append(args, a)
+			if p.pos < len(p.toks) && p.toks[p.pos] == "," {
+				p.pos++
+				continue
+			}
+			if p.pos < len(p.toks) && p.toks[p.pos] == ")" {
+				p.pos++
+				break
+			}
+			return "", fmt.Errorf("_PyDict_FromItems: expected ',' or ')'")
+		}
+		if len(args) != 5 {
+			return "", fmt.Errorf("_PyDict_FromItems: expected 5 args, got %d", len(args))
+		}
+		return fmt.Sprintf("e.dictFromItems(%s, %s)", args[0], args[4]), nil
+	}
 	// _PyIntrinsics_UnaryFunctions / _PyIntrinsics_BinaryFunctions: dispatch
 	// tables of function pointers indexed by oparg. The opcode bodies
 	// consume them as `_PyIntrinsics_UnaryFunctions[oparg].func(tstate, x)`

@@ -49,9 +49,24 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.BUILD_MAP:
 		values := e.peekSliceBottomFirst(0, int(oparg*2))
 		_ = values
-		// body bail: PyObject map_o rhs: unexpected token "_PyDict_FromItems" in expression
-		// outputs: map_v
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var map_v stackref.Ref
+		values_o := e.stackrefsToObjects(values, oparg*2)
+		_ = values_o
+		if false {
+			e.decrefInputs(1)
+			return 0, nil, nil, false, e.error("error")
+		}
+		map_o := e.dictFromItems(values_o, oparg)
+		_ = map_o
+		// STACKREFS_TO_PYOBJECTS_CLEANUP: no-op under GC
+		e.decrefInputs(1)
+		if map_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		map_v = stackref.FromObject(map_o)
+		e.drop(int(oparg * 2))
+		e.push(map_v)
+		return e.advance(), nil, nil, false, nil
 	case compile.BUILD_SET:
 		values := e.peekSliceBottomFirst(0, int(oparg))
 		_ = values
