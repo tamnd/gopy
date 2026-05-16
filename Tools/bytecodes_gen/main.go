@@ -16,7 +16,7 @@ func main() {
 		src         = flag.String("src", "", "path to Python/bytecodes.c")
 		out         = flag.String("out", "", "output Go file")
 		pkg         = flag.String("pkg", "", "target Go package")
-		mode        = flag.String("mode", "", "metadata|tier1|family|check-drift")
+		mode        = flag.String("mode", "", "metadata|tier1|family|check-drift|portgentests")
 		againstHash = flag.String("hash", "", "expected sha256 (for check-drift)")
 	)
 	flag.Parse()
@@ -39,6 +39,15 @@ func main() {
 		}
 		if err := runEmit(*src, *out, *pkg, *mode); err != nil {
 			fmt.Fprintln(os.Stderr, *mode+":", err)
+			os.Exit(1)
+		}
+	case "portgentests":
+		if *out == "" || *pkg == "" {
+			fmt.Fprintln(os.Stderr, "portgentests requires -out and -pkg")
+			os.Exit(2)
+		}
+		if err := runPortGenTests(*src, *out, *pkg); err != nil {
+			fmt.Fprintln(os.Stderr, "portgentests:", err)
 			os.Exit(1)
 		}
 	default:
