@@ -125,12 +125,24 @@ func (s *State) tokGetNormalMode() Tok {
 		}
 
 		if s.pendin != 0 {
+			// CPython only fills p_start/p_end for INDENT/DEDENT when
+			// tok_extra_tokens is set (Parser/lexer/lexer.c:619, 627);
+			// otherwise NULL falls through to _PyLexer_token_setup and
+			// the row/col fields end up at -1.
+			start, end := -1, -1
+			if s.tokExtraTokens {
+				start = s.cur
+				end = s.cur
+			}
 			if s.pendin < 0 {
 				s.pendin++
-				return s.tokenSetup(token.DEDENT, s.cur, s.cur)
+				return s.tokenSetup(token.DEDENT, start, end)
 			}
 			s.pendin--
-			return s.tokenSetup(token.INDENT, s.cur, s.cur)
+			if s.tokExtraTokens {
+				start = s.lineStart
+			}
+			return s.tokenSetup(token.INDENT, start, end)
 		}
 
 		c := s.nextC()
@@ -655,7 +667,11 @@ func (s *State) popParen(c byte) {
 func (s *State) endmarker() Tok {
 	if s.indent > 0 {
 		s.indent--
-		return s.tokenSetup(token.DEDENT, s.cur, s.cur)
+		start, end := -1, -1
+		if s.tokExtraTokens {
+			start, end = s.cur, s.cur
+		}
+		return s.tokenSetup(token.DEDENT, start, end)
 	}
 	s.done = eEOF
 	return s.tokenSetup(token.ENDMARKER, s.cur, s.cur)

@@ -230,21 +230,22 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 	startCol := tok.Start.Col
 	endLine := tok.End.Line
 	endCol := tok.End.Col
-	if startCol < 0 {
-		startCol = 0
-	}
-	if endCol < 0 {
-		endCol = 0
-	}
 
-	// Convert byte offsets to character offsets for col positions on
-	// multi-byte source. CPython does this through
-	// _PyPegen_byte_offset_to_character_offset.
-	startCol = byteToCharCol(it.lineAt(startLine), startCol)
-	if startLine == endLine {
-		endCol = startCol + utf8.RuneCountInString(string(tok.Bytes))
-	} else {
-		endCol = byteToCharCol(it.lineAt(endLine), endCol)
+	// CPython preserves col_offset = -1 for tokens that came in with
+	// NULL pointers (notably INDENT / DEDENT outside extra_tokens
+	// mode). Only convert byte offsets to character offsets when the
+	// col is real; leave -1 sentinels alone.
+	//
+	// CPython: Python/Python-tokenize.c:204 _get_col_offsets
+	if startCol >= 0 {
+		startCol = byteToCharCol(it.lineAt(startLine), startCol)
+	}
+	if endCol >= 0 {
+		if startLine == endLine && startCol >= 0 {
+			endCol = startCol + utf8.RuneCountInString(string(tok.Bytes))
+		} else {
+			endCol = byteToCharCol(it.lineAt(endLine), endCol)
+		}
 	}
 
 	var lineStr objects.Object = objects.NewStr("")
