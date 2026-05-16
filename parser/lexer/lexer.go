@@ -185,33 +185,47 @@ func (s *State) tokGetNormalMode() Tok {
 		}
 
 		if c == '\n' {
+			// CPython emits NL with p_end = tok->cur (includes the
+			// trailing '\n') and NEWLINE with p_end = tok->cur - 1
+			// (excludes it). Both fire while tok->lineno still points at
+			// the line that just ended, so we build the Tok before
+			// bumping line state and advance afterwards.
+			//
+			// CPython: Parser/lexer/lexer.c:805
 			start := s.start
-			end := s.cur
-			s.atbol = true
-			s.lineno++
-			s.col = 0
-			s.lineStart = s.cur
-			// CPython: Parser/lexer/lexer.c:805. Blank line or in-paren
-			// continuation drops the newline entirely (`goto nextline`)
-			// unless extra-tokens mode wants the NL. Otherwise emit
-			// NEWLINE.
+			endNL := s.cur
+			endNEWLINE := s.cur - 1
+			bump := func() {
+				s.atbol = true
+				s.lineno++
+				s.col = 0
+				s.lineStart = s.cur
+			}
+			// Blank line or in-paren continuation: drop the newline
+			// unless extra-tokens mode wants the NL.
 			if s.blankline || s.level > 0 {
 				if s.tokExtraTokens {
 					if s.commentNewline {
 						s.commentNewline = false
 					}
-					return s.tokenSetup(token.NL, start, end)
+					tok := s.newlineTokenSetup(token.NL, start, endNL)
+					bump()
+					return tok
 				}
+				bump()
 				continue
 			}
-			// CPython: Parser/lexer/lexer.c:819. A comment-only line in
-			// extra-tokens mode emitted COMMENT first, then this branch
-			// flushes the trailing NL.
+			// CPython: Parser/lexer/lexer.c:819. Comment-only line in
+			// extra-tokens mode flushes a trailing NL after the COMMENT.
 			if s.commentNewline && s.tokExtraTokens {
 				s.commentNewline = false
-				return s.tokenSetup(token.NL, start, end)
+				tok := s.newlineTokenSetup(token.NL, start, endNL)
+				bump()
+				return tok
 			}
-			return s.tokenSetup(token.NEWLINE, start, end)
+			tok := s.newlineTokenSetup(token.NEWLINE, start, endNEWLINE)
+			bump()
+			return tok
 		}
 
 		if c == eof {
