@@ -11,6 +11,7 @@ package builtins
 import (
 	"fmt"
 
+	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
@@ -148,30 +149,63 @@ func resolveScope(fnName string, globals, locals objects.Object) (objects.Object
 }
 
 // codeForSource turns the source argument into an *objects.Code. A
-// code object is returned as-is; a str is parsed under mode and
-// compiled. fnName / mode pair the call to its CPython sibling
-// ("eval"/ModeEval, "exec"/ModeFile).
+// code object is returned as-is; str routes through ParseString while
+// bytes / bytearray route through ParseBytes so the PEP 263 coding
+// cookie controls the decode. fnName / mode pair the call to its
+// CPython sibling ("eval"/ModeEval, "exec"/ModeFile).
+//
+// CPython: Python/bltinmodule.c:1081 builtin_exec_impl (source-decode block)
 func codeForSource(source objects.Object, fnName string, mode parser.Mode) (*objects.Code, error) {
 	if c, ok := source.(*objects.Code); ok {
 		return c, nil
 	}
-	str, ok := source.(*objects.Unicode)
-	if !ok {
+	var mod ast.Mod
+	switch v := source.(type) {
+	case *objects.Unicode:
+		src := v.Value()
+		if src == "" || src[len(src)-1] != '\n' {
+			src += "\n"
+		}
+		m, err := parser.ParseString(src, "<string>", mode)
+		if err != nil {
+			return nil, err
+		}
+		mod = m
+	case *objects.Bytes:
+		m, err := parser.ParseBytes(bytesWithNewline(v.Bytes()), "<string>", mode)
+		if err != nil {
+			return nil, err
+		}
+		mod = m
+	case *objects.ByteArray:
+		m, err := parser.ParseBytes(bytesWithNewline(v.Bytes()), "<string>", mode)
+		if err != nil {
+			return nil, err
+		}
+		mod = m
+	default:
 		return nil, fmt.Errorf("TypeError: %s() arg 1 must be a string, bytes or code object", fnName)
-	}
-	src := str.Value()
-	if src == "" || src[len(src)-1] != '\n' {
-		src += "\n"
-	}
-	mod, err := parser.ParseString(src, "<string>", mode)
-	if err != nil {
-		return nil, err
 	}
 	cco, err := compile.Compile(mod, "<string>", 0)
 	if err != nil {
 		return nil, err
 	}
 	return liftCompileCode(cco), nil
+}
+
+// bytesWithNewline returns a copy of b with a trailing newline so the
+// lexer's "must end with NEWLINE" invariant holds. CPython's
+// _Py_SourceAsString appends '\n' in the same spot.
+func bytesWithNewline(b []byte) []byte {
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		dup := make([]byte, len(b))
+		copy(dup, b)
+		return dup
+	}
+	dup := make([]byte, len(b)+1)
+	copy(dup, b)
+	dup[len(b)] = '\n'
+	return dup
 }
 
 // runCode dispatches a compiled code object through the vm via the
