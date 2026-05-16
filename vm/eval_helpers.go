@@ -993,6 +993,57 @@ func (e *evalState) tupleGetItem(o objects.Object, i uint32) objects.Object {
 	return t.Item(int(i))
 }
 
+// stackrefsToObjects materializes the first n stackref slots into a
+// []objects.Object. Mirrors CPython's STACKREFS_TO_PYOBJECTS macro,
+// which builds a borrowed-ref PyObject* array alongside the stack-ref
+// array so functions that need a flat PyObject** (e.g.
+// _PyUnicode_JoinArray) can consume it. gopy's stackref.Ref already
+// wraps an Object so the materialization is a simple slice build.
+//
+// CPython: Python/ceval_macros.h STACKREFS_TO_PYOBJECTS
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) stackrefsToObjects(refs []stackref.Ref, n uint32) []objects.Object {
+	if int(n) > len(refs) {
+		e.pendingErr = fmt.Errorf("STACKREFS_TO_PYOBJECTS: count %d exceeds slice (len %d)", n, len(refs))
+		return nil
+	}
+	out := make([]objects.Object, n)
+	for i := range out {
+		out[i] = refs[i].AsObject()
+	}
+	return out
+}
+
+// unicodeJoinArray wraps CPython's _PyUnicode_JoinArray: concatenate
+// `items[:n]` using `sep` as the separator. Returns nil on error with
+// pendingErr set so the surrounding ERROR_IF translates as expected.
+//
+// CPython: Objects/unicodeobject.c _PyUnicode_JoinArray
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) unicodeJoinArray(sep objects.Object, items []objects.Object, n uint32) objects.Object {
+	sepStr, ok := sep.(*objects.Unicode)
+	if !ok {
+		e.pendingErr = fmt.Errorf("TypeError: _PyUnicode_JoinArray separator must be str, got %T", sep)
+		return nil
+	}
+	if int(n) > len(items) {
+		e.pendingErr = fmt.Errorf("_PyUnicode_JoinArray: count %d exceeds slice (len %d)", n, len(items))
+		return nil
+	}
+	parts := make([]string, n)
+	for i := uint32(0); i < n; i++ {
+		s, serr := objects.Str(items[i])
+		if serr != nil {
+			e.pendingErr = serr
+			return nil
+		}
+		parts[i] = s
+	}
+	return objects.NewStr(strings.Join(parts, sepStr.Value()))
+}
+
 // tupleFromStackRef wraps _PyTuple_FromStackRefStealOnSuccess. The
 // translator passes the input scratch name (a Go slice of objects.Object
 // since the action body's `values[oparg]` sized input is rendered as a

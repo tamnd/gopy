@@ -167,6 +167,22 @@ func (t *actionTranslator) translateStmt() error {
 		return t.skipParenthesised()
 	case "JUMPBY":
 		return t.translateJumpBy()
+	case "STACKREFS_TO_PYOBJECTS":
+		// CPython macro that materializes a borrowed PyObject* array
+		// alongside a stack-ref array. Under gopy stackref.Ref already
+		// wraps an Object, so the materialization is a simple slice
+		// build through a helper. Declares the output name as a local
+		// of type []objects.Object.
+		//
+		// CPython: Python/ceval_macros.h STACKREFS_TO_PYOBJECTS
+		return t.translateStackrefsToPyObjects()
+	case "STACKREFS_TO_PYOBJECTS_CLEANUP":
+		// Cleanup macro: drops a refcount on every PyObject* the
+		// materialization step would have added. gopy has GC, so the
+		// cleanup is a no-op. Consume the call and emit a comment.
+		//
+		// CPython: Python/ceval_macros.h STACKREFS_TO_PYOBJECTS_CLEANUP
+		return t.translateStmtNoop("STACKREFS_TO_PYOBJECTS_CLEANUP")
 	case "PyStackRef_CLOSE", "PyStackRef_XCLOSE":
 		// Stack-ref close: drop the runtime ref. CLOSE asserts non-null;
 		// XCLOSE tolerates null. Both map to .Close() on the popped
@@ -950,6 +966,47 @@ func (p *exprParser) parsePrimary() (string, error) {
 	if tk == "NULL" {
 		return "nil", nil
 	}
+	// CONVERSION_FAILED(arr) tests the result of a STACKREFS_TO_PYOBJECTS
+	// materialization. gopy's stack-refs always wrap a real Object so
+	// the materialization cannot fail; render the macro as the constant
+	// `false` and consume the argument list.
+	//
+	// CPython: Python/ceval_macros.h CONVERSION_FAILED
+	if tk == "CONVERSION_FAILED" {
+		if _, err := p.parseCallArg(); err != nil {
+			return "", err
+		}
+		return "false", nil
+	}
+	// _Py_STR(name) returns one of CPython's preallocated interned
+	// string singletons. The only call shape in bytecodes.c today is
+	// _Py_STR(empty), used by BUILD_STRING as the join separator;
+	// render it directly as the empty string literal.
+	//
+	// CPython: Include/internal/pycore_global_strings.h _Py_STR
+	if tk == "_Py_STR" {
+		// _Py_STR takes a bare identifier (a key in CPython's interned
+		// strings table), not an expression. Consume the parens and the
+		// token directly so unknown-identifier expression parsing never
+		// sees the inner name.
+		if p.pos >= len(p.toks) || p.toks[p.pos] != "(" {
+			return "", fmt.Errorf("_Py_STR: expected '('")
+		}
+		p.pos++
+		if p.pos >= len(p.toks) {
+			return "", fmt.Errorf("_Py_STR: missing singleton name")
+		}
+		arg := p.toks[p.pos]
+		p.pos++
+		if p.pos >= len(p.toks) || p.toks[p.pos] != ")" {
+			return "", fmt.Errorf("_Py_STR: expected ')'")
+		}
+		p.pos++
+		if arg == "empty" {
+			return `objects.NewStr("")`, nil
+		}
+		return "", fmt.Errorf("_Py_STR: unsupported singleton %q", arg)
+	}
 	// CPython's small-int singleton table. Used by LOAD_SMALL_INT as
 	// `(PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + oparg]`.
 	// Render the subscript as objects.SmallInt(offset).
@@ -1225,6 +1282,12 @@ var helperCalls = map[string]helperCall{
 	//
 	// CPython: Objects/sliceobject.c PySlice_New.
 	"PySlice_New": {goExpr: "e.sliceNew", arity: 3},
+	// _PyUnicode_JoinArray(sep, items, n) returns the joined string or
+	// NULL on error. Maps to e.unicodeJoinArray which handles the type
+	// check on the separator and surfaces the failure on pendingErr.
+	//
+	// CPython: Objects/unicodeobject.c _PyUnicode_JoinArray
+	"_PyUnicode_JoinArray": {goExpr: "e.unicodeJoinArray", arity: 3},
 }
 
 // parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.
@@ -1289,6 +1352,79 @@ func (p *exprParser) parseCallArg() (string, error) {
 	}
 	p.pos++
 	return inner, nil
+}
+
+// translateStackrefsToPyObjects handles
+// `STACKREFS_TO_PYOBJECTS(src, n, dst);`. Reads src as a sized-input
+// array name (a Go []stackref.Ref local), n as a count expression,
+// and declares dst as a new []objects.Object local that the
+// subsequent body uses for PyObject*-array consumers like
+// _PyUnicode_JoinArray.
+//
+// CPython: Python/ceval_macros.h STACKREFS_TO_PYOBJECTS
+func (t *actionTranslator) translateStackrefsToPyObjects() error {
+	t.pos++ // STACKREFS_TO_PYOBJECTS
+	args, err := t.takeParenTokens()
+	if err != nil {
+		return fmt.Errorf("STACKREFS_TO_PYOBJECTS: %w", err)
+	}
+	t.acceptSemi()
+	// Three comma-separated args at top level.
+	parts, err := splitTopLevelCommas(args)
+	if err != nil {
+		return fmt.Errorf("STACKREFS_TO_PYOBJECTS: %w", err)
+	}
+	if len(parts) != 3 {
+		return fmt.Errorf("STACKREFS_TO_PYOBJECTS: want 3 args, got %d", len(parts))
+	}
+	srcExpr, err := t.translateExpr(parts[0])
+	if err != nil {
+		return fmt.Errorf("STACKREFS_TO_PYOBJECTS src: %w", err)
+	}
+	nExpr, err := t.translateExpr(parts[1])
+	if err != nil {
+		return fmt.Errorf("STACKREFS_TO_PYOBJECTS count: %w", err)
+	}
+	if len(parts[2]) != 1 || !isBareIdent(parts[2][0]) {
+		return fmt.Errorf("STACKREFS_TO_PYOBJECTS dst: not a bare identifier")
+	}
+	dstName := parts[2][0]
+	t.locals[dstName] = true
+	fmt.Fprintf(t.writer, "%s := e.stackrefsToObjects(%s, %s)\n",
+		goLocalName(dstName), srcExpr, nExpr)
+	fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(dstName))
+	return nil
+}
+
+// splitTopLevelCommas splits a token slice on top-level commas (commas
+// not inside nested parens or brackets). Returns one slice of tokens
+// per argument.
+func splitTopLevelCommas(toks []string) ([][]string, error) {
+	if len(toks) == 0 {
+		return nil, nil
+	}
+	out := [][]string{}
+	cur := []string{}
+	depth := 0
+	for _, tk := range toks {
+		switch tk {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			depth--
+			if depth < 0 {
+				return nil, fmt.Errorf("unbalanced bracket")
+			}
+		}
+		if tk == "," && depth == 0 {
+			out = append(out, cur)
+			cur = []string{}
+			continue
+		}
+		cur = append(cur, tk)
+	}
+	out = append(out, cur)
+	return out, nil
 }
 
 // translateJumpBy emits the dispatch return for `JUMPBY(<expr>);`.

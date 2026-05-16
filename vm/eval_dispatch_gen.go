@@ -29,7 +29,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = str
 		format := e.peekSliceBottomFirst(0, int(oparg&1))
 		_ = format
-		// body bail: if else: local assign "format_o": unexpected token "_Py_STR" in expression
+		// body bail: PyObject interpolation_o rhs: unexpected token "_PyInterpolation_Build" in expression
 		// outputs: interpolation
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_LIST:
@@ -49,7 +49,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.BUILD_MAP:
 		values := e.peekSliceBottomFirst(0, int(oparg*2))
 		_ = values
-		// body bail: unrecognized token at action body start: "STACKREFS_TO_PYOBJECTS"
+		// body bail: PyObject map_o rhs: unexpected token "_PyDict_FromItems" in expression
 		// outputs: map_v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_SET:
@@ -86,9 +86,24 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.BUILD_STRING:
 		pieces := e.peekSliceBottomFirst(0, int(oparg))
 		_ = pieces
-		// body bail: unrecognized token at action body start: "STACKREFS_TO_PYOBJECTS"
-		// outputs: str
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var str stackref.Ref
+		pieces_o := e.stackrefsToObjects(pieces, oparg)
+		_ = pieces_o
+		if false {
+			e.decrefInputs(1)
+			return 0, nil, nil, false, e.error("error")
+		}
+		str_o := e.unicodeJoinArray(objects.NewStr(""), pieces_o, oparg)
+		_ = str_o
+		// STACKREFS_TO_PYOBJECTS_CLEANUP: no-op under GC
+		e.decrefInputs(1)
+		if str_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		str = stackref.FromObject(str_o)
+		e.drop(int(oparg))
+		e.push(str)
+		return e.advance(), nil, nil, false, nil
 	case compile.BUILD_TEMPLATE:
 		strings := e.peek(1)
 		_ = strings
