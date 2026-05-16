@@ -11,6 +11,18 @@ import (
 	"time"
 )
 
+// requireSignalModule skips a test when the _signal module isn't
+// built for the current platform. The vendored unittest package
+// imports signal at module load, which means every CPython-corpus
+// gate transitively depends on _signal. Modules/signalmodule.c is
+// only ported for darwin today; linux + windows are still pending.
+func requireSignalModule(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skipf("_signal not ported for %s yet; see module/signal/module_stub.go", runtime.GOOS)
+	}
+}
+
 // buildGopy compiles the gopy binary into the test's temp dir and
 // returns its path. Skips the test if `go build` itself is unhappy
 // (e.g. cross-compile sandbox).
@@ -193,6 +205,7 @@ func TestRunSmokeTest(t *testing.T) {
 //
 // Spec: 1710.
 func TestLexerTokenizerPanel(t *testing.T) {
+	requireSignalModule(t)
 	bin := buildGopy(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -226,6 +239,7 @@ func TestLexerTokenizerPanel(t *testing.T) {
 // As more rows in test/cpython/MANIFEST.txt turn green, they get
 // vendored into stdtest/ and this gate keeps them honest.
 func TestStdtestCorpus(t *testing.T) {
+	requireSignalModule(t)
 	bin := buildGopy(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
