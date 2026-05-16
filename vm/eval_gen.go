@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/compile"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
@@ -234,6 +235,18 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	// Suspend: block until the next Send / throw.
 	msg := <-e.genSend
 	if msg.Err != nil {
+		// A throw() that carried a Python exception object travels as
+		// objects.RaisedError. Install it on the thread state so
+		// handleException's Occurred(ts) check finds the original
+		// PyObject, preserving identity for `exc is value` checks.
+		//
+		// CPython: Objects/genobject.c:586 _gen_throw (PyErr_Restore
+		// before gen_send_ex)
+		if re, ok := msg.Err.(*objects.RaisedError); ok {
+			if exc, ok2 := re.Exc.(*pyerrors.Exception); ok2 {
+				pyerrors.Raise(e.ts, exc)
+			}
+		}
 		return genResult{ok: true}, msg.Err
 	}
 	// Push the sent value as the result of the yield expression, then

@@ -36,6 +36,29 @@ type GenMsg struct {
 	Err error  // ErrStopIteration at normal end; other errors on throw()
 }
 
+// RaisedError is the Go-level wrapper for a Python exception object
+// crossing the generator yield/send protocol or any other channel that
+// only carries Go errors. The vm side recognizes this wrapper and
+// installs Exc on the thread state via pyerrors.Raise before unwinding,
+// so a `raise` re-raised inside the generator preserves the original
+// PyObject identity (`exc is value` checks in contextlib's __exit__).
+//
+// CPython: equivalent of PyErr_Restore passing the exception PyObject
+// directly across the generator boundary.
+type RaisedError struct {
+	Exc Object // The Python exception instance
+	Msg string // Formatted message for Error()
+}
+
+// Error implements the error interface. The text mirrors excSentinel
+// so any caller that pins err.Error() keeps working.
+func (r *RaisedError) Error() string {
+	if r == nil {
+		return "Exception"
+	}
+	return r.Msg
+}
+
 // Generator is PyGenObject: a suspended frame that produces values
 // one at a time via __next__ or send(). The goroutine that runs the
 // generator body communicates through YieldCh and SendCh.
@@ -88,7 +111,16 @@ func genSendMethod(args []Object, _ map[string]Object) (Object, error) {
 
 // GenThrowHook converts a Python exception object to a Go error for
 // generator.throw(). Installed by the vm package to break the import cycle.
+// The returned error is what gets sent into the generator goroutine;
+// callers can pass it to Generator.Throw directly.
 var GenThrowHook func(Object) (error, error)
+
+// NewRaisedError wraps a Python exception object as a Go error. The
+// caller is responsible for ensuring exc is a real exception instance
+// (not a class). msg should be the formatted "Type: message" string.
+func NewRaisedError(exc Object, msg string) *RaisedError {
+	return &RaisedError{Exc: exc, Msg: msg}
+}
 
 func genThrowMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {

@@ -7,7 +7,10 @@
 package vm
 
 import (
+	"fmt"
+
 	"github.com/tamnd/gopy/builtins"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/state"
@@ -17,6 +20,38 @@ func init() {
 	builtins.SetCurrentScope(currentScope)
 	builtins.SetImporter(currentImporter)
 	builtins.SetEvaluator(currentEvaluator)
+	objects.GenThrowHook = genThrowHook
+}
+
+// genThrowHook validates the argument passed to generator.throw(exc),
+// instantiates an exception class with no args, and wraps the resulting
+// Python exception object in objects.RaisedError so the generator's
+// YIELD_VALUE handler can install it on the thread state. The single-arg
+// signature mirrors CPython 3.14's preferred form.
+//
+// CPython: Objects/genobject.c:599 gen_throw / :466 _gen_throw (throw_here
+// branch handling the PyExceptionClass_Check and PyExceptionInstance_Check
+// cases)
+func genThrowHook(arg objects.Object) (error, error) {
+	var exc *pyerrors.Exception
+	switch v := arg.(type) {
+	case *pyerrors.Exception:
+		exc = v
+	case *objects.Type:
+		if !pyerrors.IsSubtype(v, pyerrors.PyExc_BaseException) {
+			return nil, fmt.Errorf("TypeError: exceptions must derive from BaseException")
+		}
+		exc = pyerrors.New(v, objects.NewTuple(nil))
+	default:
+		return nil, fmt.Errorf(
+			"TypeError: exceptions must be classes or instances deriving from BaseException, not %s",
+			arg.Type().Name)
+	}
+	msg := exc.TypeName()
+	if m := exc.Message(); m != "" {
+		msg = msg + ": " + m
+	}
+	return objects.NewRaisedError(exc, msg), nil
 }
 
 // currentScope yields the running frame's (globals, locals). The
