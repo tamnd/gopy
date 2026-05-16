@@ -173,7 +173,10 @@ func osIsatty(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	}
 	info, err := f.Stat()
 	if err != nil {
-		return objects.NewBool(false), nil
+		// CPython os.isatty returns False on any error rather than
+		// raising; a Stat failure here means the fd is not a real
+		// device, which is exactly what callers want to know.
+		return objects.NewBool(false), nil //nolint:nilerr // CPython os.isatty parity
 	}
 	return objects.NewBool((info.Mode() & goos.ModeCharDevice) != 0), nil
 }

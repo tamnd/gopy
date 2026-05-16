@@ -181,6 +181,11 @@ linters:
       - path: imp/loader\.go
         linters:
           - gosec
+      # FindEncodingFilename is the port of _PyTokenizer_FindEncodingFilename:
+      # opening a caller-supplied source path is the entire contract.
+      - path: parser/lexer/driver_file\.go
+        linters:
+          - gosec
       # FormatInt and ParseSpec mirror format_long_internal /
       # parse_internal_render_format_spec; the branch tree matches
       # CPython's switch and is the unit of parity.
@@ -271,6 +276,14 @@ linters:
         linters:
           - gocritic
           - gocyclo
+          - gocognit
+      # fileMethod mirrors PyFile_Type's tp_methods dispatch table:
+      # one big attribute-name switch is the parity unit with CPython
+      # Objects/fileobject.c.
+      - path: objects/file\.go
+        linters:
+          - gocyclo
+          - gocognit
       # builtins.Init wires every built-in into the dict; the size
       # mirrors the surface, not algorithmic complexity.
       - path: builtins/init\.go
@@ -280,6 +293,13 @@ linters:
       # sys.buildModule wires every sys attribute into the dict; the
       # size mirrors the surface (Python/sysmodule.c), not complexity.
       - path: module/sys/module\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # sys.Init mirrors _PySys_InitCore: the long setStr/setInt chain
+      # is the parity unit with the upstream initializer, not algorithmic
+      # branching.
+      - path: module/sys/sys\.go
         linters:
           - gocognit
           - gocyclo

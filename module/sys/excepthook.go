@@ -24,7 +24,10 @@ func excepthookShim(args []objects.Object, _ map[string]objects.Object) (objects
 	exc := args[1]
 	repr, err := objects.Str(exc)
 	if err != nil {
-		return objects.None(), nil
+		// Best-effort hook: a failing repr is swallowed because the
+		// excepthook itself runs while an exception is already being
+		// reported and must not re-raise.
+		return objects.None(), nil //nolint:nilerr // intentional swallow
 	}
 	tp := exc.Type().Name
 	fmt.Fprintf(os.Stderr, "%s: %s\n", tp, repr)
