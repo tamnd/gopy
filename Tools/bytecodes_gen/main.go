@@ -16,7 +16,7 @@ func main() {
 		src         = flag.String("src", "", "path to Python/bytecodes.c")
 		out         = flag.String("out", "", "output Go file")
 		pkg         = flag.String("pkg", "", "target Go package")
-		mode        = flag.String("mode", "", "metadata|tier1|check-drift")
+		mode        = flag.String("mode", "", "metadata|tier1|family|check-drift")
 		againstHash = flag.String("hash", "", "expected sha256 (for check-drift)")
 	)
 	flag.Parse()
@@ -32,9 +32,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, "drift:", err)
 			os.Exit(1)
 		}
-	case "metadata", "tier1":
+	case "metadata", "tier1", "family":
 		if *out == "" || *pkg == "" {
-			fmt.Fprintln(os.Stderr, "metadata/tier1 require -out and -pkg")
+			fmt.Fprintln(os.Stderr, "metadata/tier1/family require -out and -pkg")
 			os.Exit(2)
 		}
 		if err := runEmit(*src, *out, *pkg, *mode); err != nil {
@@ -83,6 +83,8 @@ func runEmit(src, out, pkg, mode string) error {
 			return err
 		}
 		rendered = EmitTier1File(pkg, hash, analyses, BuildFamilyMap(defs.Order))
+	case "family":
+		rendered = EmitFamilyFile(pkg, hash, CollectFamilies(defs.Order))
 	}
 	return os.WriteFile(out, []byte(rendered), 0o644)
 }
