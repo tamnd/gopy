@@ -22,21 +22,52 @@ const codingCookieMax = 256
 // codingCookieMax of each line. Lines may end with \n, \r\n, or
 // \r; the function is newline-flavor agnostic.
 //
-// CPython: Parser/tokenizer/helpers.c:165 check_coding_spec
+// Mirrors CPython's decoding_state machine: the cookie may only
+// appear on a line that is blank or comment-only. Once a line
+// containing actual code is seen the search stops, so a `coding:`
+// comment after the first statement is ignored just like in
+// CPython.
+//
+// CPython: Parser/tokenizer/helpers.c:388 _PyTokenizer_check_coding_spec
 func DetectEncodingCookie(src []byte) string {
 	rest := src
 	for line := 0; line < 2 && len(rest) > 0; line++ {
 		end := lineEnd(rest)
 		head := rest[:end]
-		if len(head) > codingCookieMax {
-			head = head[:codingCookieMax]
+		scan := head
+		if len(scan) > codingCookieMax {
+			scan = scan[:codingCookieMax]
 		}
-		if name := matchCodingCookie(head); name != "" {
+		if name := matchCodingCookie(scan); name != "" {
 			return name
+		}
+		if lineHasCode(scan) {
+			return ""
 		}
 		rest = skipNewline(rest, end)
 	}
 	return ""
+}
+
+// lineHasCode reports whether line contains a non-whitespace byte
+// before any `#`. CPython's check_coding_spec uses this to decide
+// whether the decoding state should transition to STATE_NORMAL,
+// halting further cookie scans.
+//
+// CPython: Parser/tokenizer/helpers.c:401 the post-get_coding_spec loop
+func lineHasCode(line []byte) bool {
+	for _, c := range line {
+		if c == '#' || c == '\n' || c == '\r' {
+			return false
+		}
+		// CPython treats space, tab, and form-feed (\014) as
+		// indentation-only bytes; anything else flips the line
+		// into "has code" territory.
+		if c != ' ' && c != '\t' && c != '\014' {
+			return true
+		}
+	}
+	return false
 }
 
 // matchCodingCookie picks the encoding name out of one line if it
@@ -119,7 +150,8 @@ func skipNewline(src []byte, at int) []byte {
 // non-utf-8 encoding. Returns the empty string when there is no
 // conflict (no BOM, no cookie, or cookie says utf-8 / utf8 / U8).
 //
-// CPython: Parser/tokenizer/helpers.c:223 check_bom
+// CPython: Parser/tokenizer/helpers.c:425 check_coding_spec
+// (the encoding-vs-cookie comparison arm)
 func CheckBOMCookieConflict(src []byte) string {
 	if len(src) < 3 || src[0] != 0xef || src[1] != 0xbb || src[2] != 0xbf {
 		return ""
@@ -131,7 +163,7 @@ func CheckBOMCookieConflict(src []byte) string {
 	if isUTF8Name(name) {
 		return ""
 	}
-	return "encoding declaration in Unicode string"
+	return "encoding problem: " + name + " with BOM"
 }
 
 func isUTF8Name(name string) bool {

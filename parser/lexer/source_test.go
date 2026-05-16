@@ -15,6 +15,13 @@ func TestDetectEncodingCookie(t *testing.T) {
 		{"third_line_ignored", "\n\n# coding: utf-8\n", ""},
 		{"non_comment", "x = 'coding: utf-8'\n", ""},
 		{"crlf", "# coding: utf-8\r\nx\r\n", "utf-8"},
+		// Line 1 carries real code, so the line-2 cookie must be
+		// ignored. Matches CPython's STATE_NORMAL transition in
+		// _PyTokenizer_check_coding_spec.
+		{"code_then_cookie", "x = 1\n# coding: latin-1\n", ""},
+		// Form-feed counts as whitespace, so a blank-but-FF first
+		// line still permits the line-2 cookie scan.
+		{"formfeed_then_cookie", "\014\n# coding: utf-8\n", "utf-8"},
 	}
 	for _, c := range cases {
 		got := DetectEncodingCookie([]byte(c.src))

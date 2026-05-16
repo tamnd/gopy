@@ -54,15 +54,18 @@ func TestUnknownCookieRecordsError(t *testing.T) {
 }
 
 // TestBOMConflictWithLatin1Cookie pins that a UTF-8 BOM combined with
-// a non-utf-8 cookie surfaces the CPython error wording.
+// a non-utf-8 cookie surfaces the CPython error wording, namely
+// "encoding problem: <name> with BOM".
+//
+// CPython: Parser/tokenizer/helpers.c:425 check_coding_spec
 func TestBOMConflictWithLatin1Cookie(t *testing.T) {
 	src := []byte("\xef\xbb\xbf# coding: latin-1\nx = 1\n")
 	st := FromBytes(src, ModeFile)
 	if st.Err() == nil {
 		t.Fatal("expected lexer error for BOM/cookie mismatch")
 	}
-	if !strings.Contains(st.Err().Message, "encoding declaration") {
-		t.Errorf("error = %q, want to mention encoding declaration", st.Err().Message)
+	if !strings.Contains(st.Err().Message, "encoding problem: latin-1 with BOM") {
+		t.Errorf("error = %q, want to mention \"encoding problem: latin-1 with BOM\"", st.Err().Message)
 	}
 }
 
