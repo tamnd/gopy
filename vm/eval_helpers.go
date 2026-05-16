@@ -7,8 +7,10 @@ package vm
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	pyerrors "github.com/tamnd/gopy/errors"
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
@@ -239,11 +241,38 @@ func (e *evalState) loadName(name objects.Object) objects.Object {
 //
 //nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) importName(name, fromlist, level objects.Object) objects.Object {
-	e.pendingErr = errors.New("vm: importName helper not wired (spec 1714 A6 pending)")
-	_ = name
-	_ = fromlist
-	_ = level
-	return nil
+	s, ok := name.(*objects.Unicode)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: import name must be str")
+		return nil
+	}
+	modname := s.Value()
+	lvl := importLevel(level)
+	pkgname := globalName(e.f.Globals)
+
+	exec := &vmExecutor{ts: e.ts, builtins: callerBuiltins(e.f)}
+	mod, ierr := imp.ImportModuleLevel(exec, modname, pkgname, lvl)
+	if ierr != nil {
+		if errors.Is(ierr, imp.ErrModuleNotFound) {
+			pyerrors.SetString(e.ts, pyerrors.PyExc_ModuleNotFoundError,
+				fmt.Sprintf("No module named %q", modname))
+		}
+		e.pendingErr = ierr
+		return nil
+	}
+	// When fromlist is empty (`import a.b.c`) return the top-level
+	// package; otherwise return the deepest module so IMPORT_FROM can
+	// extract attributes.
+	//
+	// CPython: Python/bytecodes.c IMPORT_NAME "return the head of the
+	// dotted name" when fromlist is empty.
+	if isEmptyFromlist(fromlist) && strings.Contains(modname, ".") {
+		top := strings.SplitN(modname, ".", 2)[0]
+		if tm, ok := imp.GetModule(top); ok {
+			return tm
+		}
+	}
+	return mod
 }
 
 // importFrom wraps _PyEval_ImportFrom: fetch `name` as an attribute of
