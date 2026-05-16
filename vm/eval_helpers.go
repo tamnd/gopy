@@ -896,6 +896,20 @@ func (e *evalState) longFromSsizeT(n int32) objects.Object {
 	return objects.NewInt(int64(n))
 }
 
+// longIsZero wraps _PyLong_IsZero. The TO_BOOL_INT body asks whether a
+// PyLong's value is exactly 0 to pick between PyStackRef_False and
+// PyStackRef_True without a full comparison.
+//
+// CPython: Objects/longobject.c _PyLong_IsZero
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) longIsZero(o objects.Object) bool {
+	if i, ok := o.(*objects.Int); ok {
+		return i.Sign() == 0
+	}
+	return false
+}
+
 // cellGetStackRef wraps _PyCell_GetStackRef: returns the cell's contents
 // (nil if unbound).
 //

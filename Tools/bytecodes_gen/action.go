@@ -977,6 +977,8 @@ var helperCalls = map[string]helperCall{
 	"PyCoro_CheckExact":    {goExpr: "objects.IsCoroutine", arity: 1},
 	"PyGen_Check":          {goExpr: "objects.IsGenerator", arity: 1},
 	"PyGen_CheckExact":     {goExpr: "objects.IsGenerator", arity: 1},
+	// Long predicate. Returns bool, matching the C int 0/1 convention.
+	"_PyLong_IsZero": {goExpr: "e.longIsZero", arity: 1},
 }
 
 // parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.

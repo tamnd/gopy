@@ -122,7 +122,7 @@ func TestCPythonBytecodesCoverage(t *testing.T) {
 	// Hard floor: refuse to let coverage regress. Bump this number
 	// up (never down) as fixtures flip. The value tracks reality;
 	// the porting auto-flow reads this constant to know progress.
-	const minTranslates = 61
+	const minTranslates = 62
 	if len(passed) < minTranslates {
 		t.Fatalf("coverage regressed: %d < %d. either the translator broke or upstream bytecodes.c shrank.",
 			len(passed), minTranslates)
