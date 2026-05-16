@@ -58,6 +58,20 @@ func StoreCounter(code []byte, instr int, value BackoffCounter) {
 	binary.LittleEndian.PutUint16(code[2*(instr+1):], value.ValueAndBackoff)
 }
 
+// readCell / writeCell are the internal building blocks used by the
+// typed cache views (loadGlobalCacheView, etc.). They share the same
+// addressing math as the deprecated CacheCell/SetCacheCell shims but
+// stay package-private so call sites must go through a typed wrapper.
+//
+// CPython: Include/internal/pycore_code.h:175 read_obj / write_obj
+func readCell(code []byte, instr, k int) uint16 {
+	return binary.LittleEndian.Uint16(code[2*(instr+k):])
+}
+
+func writeCell(code []byte, instr, k int, value uint16) {
+	binary.LittleEndian.PutUint16(code[2*(instr+k):], value)
+}
+
 // CacheCell reads the kth cache codeunit (1-based: cell 1 is the
 // counter slot, cell 2 is the next field, etc.). Per-family helpers
 // use it to fetch type or dict versions out of the inline cache.

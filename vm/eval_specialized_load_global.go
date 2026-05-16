@@ -3,14 +3,14 @@
 // LOAD_GLOBAL packs a "push NULL" flag into bit 0 of oparg, with the
 // real name index in bits 1+. The fast-path arms ignore the name
 // index entirely: the specializer has already stamped a slot index
-// in cache cell 4, so the arm reads straight out of the dict's
+// in the inline cache, so the arm reads straight out of the dict's
 // entry table without walking the names array.
 //
-// Cache layout (4 codeunits per pycore_code.h _PyLoadGlobalCache):
-//   cell 0: counter (managed by Specialize/Unspecialize)
-//   cell 1: slot index in the matching dict
-//   cell 2: module (globals) keys_version
-//   cell 3: builtin keys_version (BUILTIN variant only)
+// Cache layout per pycore_code.h:_PyLoadGlobalCache:
+//   cell 1: counter (managed by Specialize/Unspecialize)
+//   cell 2: module_keys_version (globals)
+//   cell 3: builtin_keys_version (BUILTIN variant only)
+//   cell 4: index (slot in the matching dict)
 //
 // CPython: Python/bytecodes.c LOAD_GLOBAL_MODULE, LOAD_GLOBAL_BUILTIN
 
@@ -38,10 +38,10 @@ func (e *evalState) pushGlobalResult(value objects.Object, oparg uint32) {
 
 // fastLoadGlobalModule implements LOAD_GLOBAL_MODULE.
 //
-// Guards: globals is exactly a dict, keys_version matches cell 2,
-// slot index in cell 4 still resolves to a live entry.
+// Guards: globals is exactly a dict, module_keys_version matches,
+// slot index still resolves to a live entry.
 //
-// CPython: Python/bytecodes.c LOAD_GLOBAL_MODULE
+// CPython: Python/bytecodes.c:1797 op(_LOAD_GLOBAL_MODULE)
 func (e *evalState) fastLoadGlobalModule(oparg uint32) (int, bool) {
 	if !objects.IsExactDict(e.f.Globals) {
 		return 0, false
@@ -49,12 +49,12 @@ func (e *evalState) fastLoadGlobalModule(oparg uint32) (int, bool) {
 	gd := e.f.Globals.(*objects.Dict)
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedVer := uint32(specialize.CacheCell(code, idx, 2))
+	cachedVer := uint32(specialize.LoadGlobalModuleKeysVersion(code, idx))
 	curVer := gd.GetKeysVersion()
 	if curVer == 0 || curVer != cachedVer {
 		return 0, false
 	}
-	slot := int(specialize.CacheCell(code, idx, 1))
+	slot := int(specialize.LoadGlobalIndex(code, idx))
 	_, value, found := gd.EntryAt(slot)
 	if !found || value == nil {
 		return 0, false
@@ -66,12 +66,12 @@ func (e *evalState) fastLoadGlobalModule(oparg uint32) (int, bool) {
 // fastLoadGlobalBuiltin implements LOAD_GLOBAL_BUILTIN.
 //
 // Guards: globals + builtins are exactly dicts, each keys_version
-// matches its cache cell, slot index in cell 4 resolves in the
-// builtins dict. The globals version is still checked: a write to
-// globals could shadow the builtin lookup, which must invalidate
-// the cache.
+// matches the cached value, slot index resolves in the builtins
+// dict. The globals version is still checked: a write to globals
+// could shadow the builtin lookup, which must invalidate the
+// cache.
 //
-// CPython: Python/bytecodes.c LOAD_GLOBAL_BUILTIN
+// CPython: Python/bytecodes.c:1817 op(_LOAD_GLOBAL_BUILTINS)
 func (e *evalState) fastLoadGlobalBuiltin(oparg uint32) (int, bool) {
 	if !objects.IsExactDict(e.f.Globals) || !objects.IsExactDict(e.f.Builtins) {
 		return 0, false
@@ -80,15 +80,15 @@ func (e *evalState) fastLoadGlobalBuiltin(oparg uint32) (int, bool) {
 	bd := e.f.Builtins.(*objects.Dict)
 	idx := e.instrIdx()
 	code := e.f.Code.Code
-	cachedGV := uint32(specialize.CacheCell(code, idx, 2))
+	cachedGV := uint32(specialize.LoadGlobalModuleKeysVersion(code, idx))
 	if curGV := gd.GetKeysVersion(); curGV == 0 || curGV != cachedGV {
 		return 0, false
 	}
-	cachedBV := uint32(specialize.CacheCell(code, idx, 3))
+	cachedBV := uint32(specialize.LoadGlobalBuiltinKeysVersion(code, idx))
 	if curBV := bd.GetKeysVersion(); curBV == 0 || curBV != cachedBV {
 		return 0, false
 	}
-	slot := int(specialize.CacheCell(code, idx, 1))
+	slot := int(specialize.LoadGlobalIndex(code, idx))
 	_, value, found := bd.EntryAt(slot)
 	if !found || value == nil {
 		return 0, false

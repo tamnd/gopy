@@ -32,12 +32,12 @@ func TestLoadGlobalModuleHit(t *testing.T) {
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_GLOBAL_MODULE {
 		t.Fatalf("opcode: got %s want LOAD_GLOBAL_MODULE", got.Name())
 	}
-	if v := CacheCell(buf, 0, 2); uint32(v) != g.GetKeysVersion() {
+	if v := LoadGlobalModuleKeysVersion(buf, 0); uint32(v) != g.GetKeysVersion() {
 		t.Fatalf("module_keys_version: got 0x%04x want 0x%08x",
 			v, g.GetKeysVersion())
 	}
 	idx, _ := g.LookupString(name)
-	if v := CacheCell(buf, 0, 4); int(v) != idx {
+	if v := LoadGlobalIndex(buf, 0); int(v) != idx {
 		t.Fatalf("index: got %d want %d", v, idx)
 	}
 }
@@ -57,11 +57,15 @@ func TestLoadGlobalBuiltinHit(t *testing.T) {
 	if got := compile.Opcode(buf[0]); got != compile.LOAD_GLOBAL_BUILTIN {
 		t.Fatalf("opcode: got %s want LOAD_GLOBAL_BUILTIN", got.Name())
 	}
-	if v := CacheCell(buf, 0, 2); uint32(v) != g.GetKeysVersion() {
+	if v := LoadGlobalModuleKeysVersion(buf, 0); uint32(v) != g.GetKeysVersion() {
 		t.Fatalf("module_keys_version: got 0x%04x", v)
 	}
-	if v := CacheCell(buf, 0, 3); uint32(v) != b.GetKeysVersion() {
+	if v := LoadGlobalBuiltinKeysVersion(buf, 0); uint32(v) != b.GetKeysVersion() {
 		t.Fatalf("builtin_keys_version: got 0x%04x", v)
+	}
+	bidx, _ := b.LookupString(name)
+	if v := LoadGlobalIndex(buf, 0); int(v) != bidx {
+		t.Fatalf("index: got %d want %d", v, bidx)
 	}
 }
 

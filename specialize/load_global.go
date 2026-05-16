@@ -93,14 +93,61 @@ func specializeLoadGlobalLockHeld(globals, builtins objects.Object, code []byte,
 	return true
 }
 
-// writeLoadGlobalCache stamps the LOAD_GLOBAL inline cache. The
-// cache layout is { counter, index, module_keys_version,
-// builtin_keys_version } per pycore_code.h:_PyLoadGlobalCache;
-// counter is rewritten by Specialize, so we only fill the trailing
-// three cells here. Writing past cell 3 overlaps the next
-// instruction, so the slot index lives in cell 1, not cell 4.
+// writeLoadGlobalCache stamps the LOAD_GLOBAL inline cache.
+//
+// Layout per pycore_code.h:_PyLoadGlobalCache:
+//
+//	cell 1: counter            (written by Specialize, skipped here)
+//	cell 2: module_keys_version
+//	cell 3: builtin_keys_version
+//	cell 4: index
+//
+// CPython: Python/specialize.c:1722-1768 cache->index / module_keys_version
+// CPython: Include/internal/pycore_code.h:67 _PyLoadGlobalCache
 func writeLoadGlobalCache(code []byte, instr int, idx, moduleKeys, builtinKeys uint16) {
-	SetCacheCell(code, instr, 1, idx)
-	SetCacheCell(code, instr, 2, moduleKeys)
-	SetCacheCell(code, instr, 3, builtinKeys)
+	c := loadGlobalCacheAt(code, instr)
+	c.setModuleKeysVersion(moduleKeys)
+	c.setBuiltinKeysVersion(builtinKeys)
+	c.setIndex(idx)
+}
+
+// loadGlobalCacheView mirrors _PyLoadGlobalCache. Field accessors
+// match CPython's `cache->field` spellings. This is the typed shape
+// that spec 1714 phase 3.5 will replace with the generated wrapper
+// in specialize/cache_layouts_gen.go once the byte/codeunit slice
+// boundary is unified.
+//
+// CPython: Include/internal/pycore_code.h:67 _PyLoadGlobalCache
+type loadGlobalCacheView struct {
+	code  []byte
+	instr int
+}
+
+func loadGlobalCacheAt(code []byte, instr int) loadGlobalCacheView {
+	return loadGlobalCacheView{code, instr}
+}
+
+func (c loadGlobalCacheView) moduleKeysVersion() uint16    { return readCell(c.code, c.instr, 2) }
+func (c loadGlobalCacheView) setModuleKeysVersion(v uint16) { writeCell(c.code, c.instr, 2, v) }
+func (c loadGlobalCacheView) builtinKeysVersion() uint16    { return readCell(c.code, c.instr, 3) }
+func (c loadGlobalCacheView) setBuiltinKeysVersion(v uint16) { writeCell(c.code, c.instr, 3, v) }
+func (c loadGlobalCacheView) index() uint16                  { return readCell(c.code, c.instr, 4) }
+func (c loadGlobalCacheView) setIndex(v uint16)              { writeCell(c.code, c.instr, 4, v) }
+
+// LoadGlobalIndex exposes the cached slot index from the dispatch
+// loop without leaking cell numbers. Mirror of `cache->index`.
+//
+// CPython: Python/bytecodes.c _LOAD_GLOBAL_MODULE index operand
+func LoadGlobalIndex(code []byte, instr int) uint16 {
+	return loadGlobalCacheAt(code, instr).index()
+}
+
+// LoadGlobalModuleKeysVersion mirrors `cache->module_keys_version`.
+func LoadGlobalModuleKeysVersion(code []byte, instr int) uint16 {
+	return loadGlobalCacheAt(code, instr).moduleKeysVersion()
+}
+
+// LoadGlobalBuiltinKeysVersion mirrors `cache->builtin_keys_version`.
+func LoadGlobalBuiltinKeysVersion(code []byte, instr int) uint16 {
+	return loadGlobalCacheAt(code, instr).builtinKeysVersion()
 }
