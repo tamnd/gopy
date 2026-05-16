@@ -126,30 +126,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return next, nil, nil, false, true, nil
 
-	case compile.COPY:
-		// COPY i pushes a duplicate of stack[-i]. oparg=1 means
-		// duplicate the top.
-		if oparg < 1 {
-			return 0, nil, nil, false, true, errors.New("vm: COPY oparg must be >= 1")
-		}
-		if e.f.StackTop < int(oparg) {
-			panic(fmt.Sprintf("vm: COPY %d: stack underflow (StackTop=%d, ip=%d, code=%s)", oparg, e.f.StackTop, e.f.InstrPtr, e.f.Code.Name))
-		}
-		ref := e.peek(int(oparg) - 1)
-		e.push(ref.Dup())
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.SWAP:
-		// SWAP i swaps the top with stack[-i]. oparg=2 swaps top two.
-		if oparg < 2 {
-			return 0, nil, nil, false, true, errors.New("vm: SWAP oparg must be >= 2")
-		}
-		top := e.f.StackTop - 1
-		other := e.f.StackTop - int(oparg)
-		nlp := frame.NLocalsPlusOf(e.f.Code)
-		e.f.LocalsPlus[nlp+top], e.f.LocalsPlus[nlp+other] = e.f.LocalsPlus[nlp+other], e.f.LocalsPlus[nlp+top]
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.JUMP_BACKWARD, compile.JUMP_BACKWARD_NO_INTERRUPT:
 		// Backward jumps poll the eval breaker (CPython: CHECK_EVAL_BREAKER
 		// fires here so signal handlers and pending calls can run mid-loop).
@@ -228,24 +204,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(out)
 		return e.cacheAdvance(compile.COMPARE_OP), nil, nil, false, true, nil
 
-	case compile.BUILD_LIST:
-		n := int(oparg)
-		items := make([]objects.Object, n)
-		for i := n - 1; i >= 0; i-- {
-			items[i] = e.popObject()
-		}
-		e.pushObject(objects.NewList(items))
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.BUILD_TUPLE:
-		n := int(oparg)
-		items := make([]objects.Object, n)
-		for i := n - 1; i >= 0; i-- {
-			items[i] = e.popObject()
-		}
-		e.pushObject(objects.NewTuple(items))
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.BUILD_MAP:
 		n := int(oparg)
 		d := objects.NewDict()
@@ -264,53 +222,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			}
 		}
 		e.pushObject(d)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.IS_OP:
-		b := e.popObject()
-		a := e.popObject()
-		eq := (a == b)
-		if oparg == 1 {
-			eq = !eq
-		}
-		e.pushObject(objects.NewBool(eq))
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_FALSE,
-		compile.POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NOT_NONE:
-		v := e.popObject()
-		var take bool
-		switch op {
-		case compile.POP_JUMP_IF_NONE:
-			take = (v == objects.None())
-		case compile.POP_JUMP_IF_NOT_NONE:
-			take = (v != objects.None())
-		default:
-			truthy, terr := objects.IsTruthy(v)
-			if terr != nil {
-				return 0, nil, nil, false, true, terr
-			}
-			if op == compile.POP_JUMP_IF_TRUE {
-				take = truthy
-			} else {
-				take = !truthy
-			}
-		}
-		if take {
-			return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.GET_ITER:
-		obj := e.popObject()
-		it, ierr := objects.Iter(obj)
-		if ierr != nil {
-			return 0, nil, nil, false, true, ierr
-		}
-		if it == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: GET_ITER: Iter returned nil for %T", obj)
-		}
-		e.pushObject(it)
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.FOR_ITER:
@@ -389,17 +300,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			e.pushObject(items[i])
 		}
 		return e.cacheAdvance(compile.UNPACK_SEQUENCE), nil, nil, false, true, nil
-
-	case compile.BUILD_SLICE:
-		// oparg is 2 (start:stop) or 3 (start:stop:step).
-		var step objects.Object
-		if oparg == 3 {
-			step = e.popObject()
-		}
-		stop := e.popObject()
-		start := e.popObject()
-		e.pushObject(objects.NewSlice(start, stop, step))
-		return e.advance(), nil, nil, false, true, nil
 
 	case compile.STORE_SUBSCR:
 		key := e.popObject()
@@ -955,12 +855,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, excSentinel(pyExc)
 		}
 		return 0, nil, nil, false, true, fmt.Errorf("%s", objectRepr(exc))
-
-	case compile.INTERPRETER_EXIT:
-		// CPython uses this to mark the implicit module-end return; for
-		// our purposes it terminates the eval loop with the value at TOS.
-		v := e.popObject()
-		return 0, v, nil, true, true, nil
 
 	case compile.LOAD_BUILD_CLASS:
 		// Push the __build_class__ builtin so the codegen sequence

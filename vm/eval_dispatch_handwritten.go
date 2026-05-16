@@ -15,9 +15,11 @@
 package vm
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 )
@@ -48,6 +50,25 @@ func (e *evalState) dispatchHandwritten(op compile.Opcode, oparg uint32) (next i
 		return e.opJUMP_FORWARD(oparg)
 	case compile.RETURN_VALUE:
 		return e.opRETURN_VALUE(oparg)
+	case compile.INTERPRETER_EXIT:
+		return e.opINTERPRETER_EXIT(oparg)
+	case compile.COPY:
+		return e.opCOPY(oparg)
+	case compile.SWAP:
+		return e.opSWAP(oparg)
+	case compile.IS_OP:
+		return e.opIS_OP(oparg)
+	case compile.BUILD_LIST:
+		return e.opBUILD_LIST(oparg)
+	case compile.BUILD_TUPLE:
+		return e.opBUILD_TUPLE(oparg)
+	case compile.BUILD_SLICE:
+		return e.opBUILD_SLICE(oparg)
+	case compile.GET_ITER:
+		return e.opGET_ITER(oparg)
+	case compile.POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_FALSE,
+		compile.POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NOT_NONE:
+		return e.opPOP_JUMP_IF(op, oparg)
 	}
 	return 0, nil, nil, false, false, nil
 }
@@ -130,4 +151,121 @@ func (e *evalState) opJUMP_FORWARD(oparg uint32) (next int, retVal objects.Objec
 func (e *evalState) opRETURN_VALUE(_ uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
 	v := e.popObject()
 	return 0, v, nil, true, true, nil
+}
+
+// CPython: Python/bytecodes.c INTERPRETER_EXIT terminates the eval loop with TOS.
+func (e *evalState) opINTERPRETER_EXIT(_ uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+	v := e.popObject()
+	return 0, v, nil, true, true, nil
+}
+
+// CPython: Python/bytecodes.c COPY: pushes a duplicate of stack[-oparg].
+func (e *evalState) opCOPY(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+	if oparg < 1 {
+		return 0, nil, nil, false, true, errors.New("vm: COPY oparg must be >= 1")
+	}
+	if e.f.StackTop < int(oparg) {
+		panic(fmt.Sprintf("vm: COPY %d: stack underflow (StackTop=%d, ip=%d, code=%s)", oparg, e.f.StackTop, e.f.InstrPtr, e.f.Code.Name))
+	}
+	ref := e.peek(int(oparg) - 1)
+	e.push(ref.Dup())
+	return e.advance(), nil, nil, false, true, nil
+}
+
+// CPython: Python/bytecodes.c SWAP: swaps top with stack[-oparg].
+func (e *evalState) opSWAP(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+	if oparg < 2 {
+		return 0, nil, nil, false, true, errors.New("vm: SWAP oparg must be >= 2")
+	}
+	top := e.f.StackTop - 1
+	other := e.f.StackTop - int(oparg)
+	nlp := frame.NLocalsPlusOf(e.f.Code)
+	e.f.LocalsPlus[nlp+top], e.f.LocalsPlus[nlp+other] = e.f.LocalsPlus[nlp+other], e.f.LocalsPlus[nlp+top]
+	return e.advance(), nil, nil, false, true, nil
+}
+
+// CPython: Python/bytecodes.c IS_OP: pushes (a is b) negated when oparg==1.
+func (e *evalState) opIS_OP(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+	b := e.popObject()
+	a := e.popObject()
+	eq := (a == b)
+	if oparg == 1 {
+		eq = !eq
+	}
+	e.pushObject(objects.NewBool(eq))
+	return e.advance(), nil, nil, false, true, nil
+}
+
+// CPython: Python/bytecodes.c BUILD_LIST: pop oparg values, push list.
+func (e *evalState) opBUILD_LIST(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+	n := int(oparg)
+	items := make([]objects.Object, n)
+	for i := n - 1; i >= 0; i-- {
+		items[i] = e.popObject()
+	}
+	e.pushObject(objects.NewList(items))
+	return e.advance(), nil, nil, false, true, nil
+}
+
+// CPython: Python/bytecodes.c BUILD_TUPLE: pop oparg values, push tuple.
+func (e *evalState) opBUILD_TUPLE(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+	n := int(oparg)
+	items := make([]objects.Object, n)
+	for i := n - 1; i >= 0; i-- {
+		items[i] = e.popObject()
+	}
+	e.pushObject(objects.NewTuple(items))
+	return e.advance(), nil, nil, false, true, nil
+}
+
+// CPython: Python/bytecodes.c BUILD_SLICE: oparg in {2,3} for start:stop[:step].
+func (e *evalState) opBUILD_SLICE(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+	var step objects.Object
+	if oparg == 3 {
+		step = e.popObject()
+	}
+	stop := e.popObject()
+	start := e.popObject()
+	e.pushObject(objects.NewSlice(start, stop, step))
+	return e.advance(), nil, nil, false, true, nil
+}
+
+// CPython: Python/bytecodes.c GET_ITER: pop obj, push iter(obj).
+func (e *evalState) opGET_ITER(_ uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+	obj := e.popObject()
+	it, ierr := objects.Iter(obj)
+	if ierr != nil {
+		return 0, nil, nil, false, true, ierr
+	}
+	if it == nil {
+		return 0, nil, nil, false, true, fmt.Errorf("vm: GET_ITER: Iter returned nil for %T", obj)
+	}
+	e.pushObject(it)
+	return e.advance(), nil, nil, false, true, nil
+}
+
+// CPython: Python/bytecodes.c POP_JUMP_IF_{TRUE,FALSE,NONE,NOT_NONE}.
+func (e *evalState) opPOP_JUMP_IF(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+	v := e.popObject()
+	var take bool
+	switch op {
+	case compile.POP_JUMP_IF_NONE:
+		take = (v == objects.None())
+	case compile.POP_JUMP_IF_NOT_NONE:
+		take = (v != objects.None())
+	default:
+		truthy, terr := objects.IsTruthy(v)
+		if terr != nil {
+			return 0, nil, nil, false, true, terr
+		}
+		if op == compile.POP_JUMP_IF_TRUE {
+			take = truthy
+		} else {
+			take = !truthy
+		}
+	}
+	if take {
+		return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
+	}
+	return e.advance(), nil, nil, false, true, nil
 }
