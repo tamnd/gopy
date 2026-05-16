@@ -262,19 +262,18 @@ func (s *State) fstringPrefixChar(m *tokenizerMode) byte {
 // buffer; gopy uses offsets into s.buf, so strlen(tok->cur) becomes
 // inp-cur and strlen(tok->start) becomes inp-start.
 //
-// Returns false to signal an out-of-memory error in CPython; in gopy
-// the GC-managed slice never fails to allocate, so the return is
-// always true and the value is kept only for call-site parity.
+// CPython returns int (0/1) so PyMem allocation failures can bubble
+// up. Go's append never fails, so the gopy port is void.
 //
 // CPython: Parser/lexer/lexer.c:227 _PyLexer_update_ftstring_expr
-func (s *State) updateFtstringExpr(cur byte) bool {
+func (s *State) updateFtstringExpr(cur byte) {
 	size := s.inp - s.cur
 	m := s.curMode()
 
 	switch cur {
 	case 0:
 		if m.lastExprBuffer == nil || m.lastExprEnd >= 0 {
-			return true
+			return
 		}
 		m.lastExprBuffer = append(m.lastExprBuffer, s.buf[s.cur:s.cur+size]...)
 		m.lastExprSize += size
@@ -291,30 +290,31 @@ func (s *State) updateFtstringExpr(cur byte) bool {
 	default:
 		panic("updateFtstringExpr: unexpected character")
 	}
-	return true
 }
 
 // setFtstringExpr writes the buffered expression text into token's
 // Metadata field. Mirrors CPython's set_ftstring_expr: skips when
 // already populated, otherwise extracts last_expr_buffer truncated
 // by last_expr_end, stripping comments for t-strings or debug-mode
-// f-strings. Returns true to signal an error (only happens on UTF-8
-// decode failure in CPython; gopy carries raw bytes so this path
-// always returns false).
+// f-strings.
+//
+// CPython returns int (0=ok, 1=error) so PyUnicode_FromStringAndSize
+// failures bubble up. gopy carries raw bytes through Metadata and the
+// allocation cannot fail, so the gopy port is void.
 //
 // CPython: Parser/lexer/lexer.c:114 set_ftstring_expr
-func (s *State) setFtstringExpr(tok *Tok, c byte) bool {
+func (s *State) setFtstringExpr(tok *Tok, c byte) {
 	if c != '}' && c != ':' && c != '!' {
-		return false
+		return
 	}
 	m := s.curMode()
-	if !(m.inDebug || m.stringKind == kindTString) || tok.Metadata != nil {
-		return false
+	if (!m.inDebug && m.stringKind != kindTString) || tok.Metadata != nil {
+		return
 	}
 
 	usable := m.lastExprSize - m.lastExprEnd
 	if usable <= 0 || m.lastExprBuffer == nil {
-		return false
+		return
 	}
 
 	src := m.lastExprBuffer[:usable]
@@ -345,7 +345,7 @@ func (s *State) setFtstringExpr(tok *Tok, c byte) bool {
 
 	if !hashDetected {
 		tok.Metadata = append([]byte(nil), src...)
-		return false
+		return
 	}
 
 	out := make([]byte, 0, len(src))
@@ -387,5 +387,4 @@ func (s *State) setFtstringExpr(tok *Tok, c byte) bool {
 		i++
 	}
 	tok.Metadata = out
-	return false
 }
