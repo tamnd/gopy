@@ -1,28 +1,43 @@
 const fs = require('fs');
 const path = require('path');
 
-// Auto-discover every spec under docs/specs/<group>/ and return its
-// docId (e.g. "specs/1700/1709_textio_internals_full_port") sorted
-// by filename so we can present newest-first.
+// Read the `title:` value from a markdown file's frontmatter. Returns
+// null if the file has no frontmatter or no title key.
+function readTitle(file) {
+  const text = fs.readFileSync(file, 'utf8');
+  if (!text.startsWith('---')) return null;
+  const end = text.indexOf('\n---', 3);
+  if (end < 0) return null;
+  const fm = text.slice(3, end);
+  const m = fm.match(/^title:\s*(.+?)\s*$/m);
+  if (!m) return null;
+  return m[1].replace(/^["']|["']$/g, '');
+}
+
+// Auto-discover every spec under docs/specs/<group>/ and return doc
+// entries labelled by their frontmatter title, newest first.
 function discoverSpecs() {
   const root = path.join(__dirname, 'docs', 'specs');
   const groups = fs
     .readdirSync(root, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .map((d) => d.name);
-  const ids = [];
+  const entries = [];
   for (const group of groups) {
     const dir = path.join(root, group);
-    for (const entry of fs.readdirSync(dir)) {
-      if (!entry.endsWith('.md') && !entry.endsWith('.mdx')) continue;
-      const base = entry.replace(/\.mdx?$/, '');
-      ids.push(`specs/${group}/${base}`);
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith('.md') && !name.endsWith('.mdx')) continue;
+      const base = name.replace(/\.mdx?$/, '');
+      const id = `specs/${group}/${base}`;
+      const title = readTitle(path.join(dir, name));
+      entries.push({ id, title, sortKey: `${group}/${base}` });
     }
   }
-  // Filename starts with the numeric id so a descending string sort
-  // is equivalent to newest-first.
-  ids.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
-  return ids;
+  // Filename starts with the numeric id so descending sort = newest first.
+  entries.sort((a, b) => (a.sortKey < b.sortKey ? 1 : a.sortKey > b.sortKey ? -1 : 0));
+  return entries.map(({ id, title }) =>
+    title ? { type: 'doc', id, label: title } : id
+  );
 }
 
 /** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */
