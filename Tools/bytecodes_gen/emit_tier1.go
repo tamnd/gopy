@@ -44,13 +44,15 @@ func EmitTier1Arm(a *SignatureAnalysis) string {
 	// Action body. The translator handles the shapes it understands;
 	// anything else falls back to a panic-stub return so the file
 	// always compiles.
-	if body, ok, note := TranslateBody(a.Body, a); ok {
+	if body, terminates, ok, note := TranslateBody(a.Body, a); ok {
 		if body != "" {
 			for line := range strings.SplitSeq(strings.TrimRight(body, "\n"), "\n") {
 				fmt.Fprintf(&b, "\t\t%s\n", line)
 			}
 		}
-		fmt.Fprintf(&b, "\t\treturn e.advance(), nil, nil, false, nil\n")
+		if !terminates {
+			fmt.Fprintf(&b, "\t\treturn e.advance(), nil, nil, false, nil\n")
+		}
 	} else {
 		if note != "" {
 			fmt.Fprintf(&b, "\t\t// body bail: %s\n", note)

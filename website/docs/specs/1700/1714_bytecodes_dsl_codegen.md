@@ -636,6 +636,82 @@ body, so the body never reaches for raw codeunits.
 | `vm/eval_simple.go` shrinks to evalLoop scaffolding only (frame setup, exit handling) | PARTIAL (NOP, POP_TOP routed) | this commit |
 | `go test ./vm` green | DONE | this commit |
 
+### Migration progress
+
+The harness routes every opcode through one of three layers, in
+order: generated (`dispatchGen`, gated by `dispatchGenSupported`),
+hand-written staging (`dispatchHandwritten`), and the legacy
+`trySimple` panel. The goal is to flip every opcode into the
+generated column. Each row migrates exactly once. Update these
+tables whenever an opcode moves.
+
+#### Generated (`dispatchGen`)
+
+These arms come straight out of `Tools/bytecodes_gen` and the
+action translator. The whitelist in
+`vm/dispatch_gen_whitelist.go` controls which ones the dispatcher
+actually consults; an opcode lands here only after its generated
+body has been audited byte-equivalent to the prior arm.
+
+| Opcode | Translator shape | Notes |
+|--------|------------------|-------|
+| `NOP` | empty body | trivial |
+| `POP_TOP` | `PyStackRef_CLOSE(value)` | exercises stack-ref close |
+| `JUMP_FORWARD` | `JUMPBY(oparg)` | body-driven terminator |
+
+#### Hand-written staging (`dispatchHandwritten`)
+
+Bodies live in `vm/eval_dispatch_handwritten.go` under the
+typed `op<NAME>(oparg) -> (next, retVal, retErr, retDone, ok,
+err)` signature. Each row leaves this table once the action
+translator can render an equivalent generated body and the
+whitelist accepts it.
+
+| Opcode | Notes |
+|--------|-------|
+| `PUSH_NULL` | needs `PyStackRef_NULL` output binding in translator |
+| `LOAD_CONST` | needs `co_consts[oparg]` indexing in translator |
+| `LOAD_FAST` | needs `GETLOCAL(oparg)` + `PyStackRef_DUP` |
+| `LOAD_FAST_BORROW` | aliased to LOAD_FAST under our GC model |
+| `LOAD_FAST_CHECK` | adds null-guard error path |
+| `LOAD_FAST_AND_CLEAR` | LOAD_FAST + `SETLOCAL(oparg, NULL)` |
+| `STORE_FAST` | needs `SETLOCAL(oparg, value)` with old close |
+| `DELETE_FAST` | STORE_FAST plus unbound error |
+| `RETURN_VALUE` | terminator that returns TOS |
+| `INTERPRETER_EXIT` | same body as RETURN_VALUE today |
+| `COPY` | `stack[-oparg]` peek + dup |
+| `SWAP` | `stack[-oparg] <-> stack[-1]` |
+| `IS_OP` | identity compare + bool push |
+| `BUILD_LIST` | sized pop + list constructor |
+| `BUILD_TUPLE` | sized pop + tuple constructor |
+| `BUILD_SLICE` | 2/3-arg slice constructor |
+| `GET_ITER` | `objects.Iter` call |
+| `POP_JUMP_IF_TRUE` | shared body with the other three |
+| `POP_JUMP_IF_FALSE` | shared body |
+| `POP_JUMP_IF_NONE` | shared body, identity check |
+| `POP_JUMP_IF_NOT_NONE` | shared body, identity check |
+
+#### Legacy (`trySimple` and friends)
+
+Every remaining opcode in `vm/eval_simple.go`,
+`vm/eval_import.go`, `vm/eval_match.go`, and `vm/eval_gen.go`.
+These flip into staging (or straight into the generated column
+once the translator covers their shape) as the migration
+progresses. Tracking individual rows here would duplicate the
+switch statements themselves, so instead we track the *count*
+that still has to move.
+
+| Panel | Approx. remaining arms |
+|-------|------------------------|
+| `trySimple` (vm/eval_simple.go) | ~70 |
+| `tryImport` (vm/eval_import.go) | ~6 |
+| `tryGen` (vm/eval_gen.go) | ~6 |
+| `tryMatch` (vm/eval_match.go) | ~9 |
+
+Phase 5.3 closes when the legacy panels are empty and the
+staging panel is empty too. Phase 5.4 closes when `go test ./vm`
+stays green across that final flip.
+
 ## Phase 6 — specialized arms
 
 Same harness; the specialized switch arms live in

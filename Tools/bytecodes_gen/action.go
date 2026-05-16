@@ -21,15 +21,19 @@ import (
 // Returns ok=false (with a non-nil note) when a shape is not yet
 // supported, so the emitter can fall back to a panic-stub arm.
 //
+// terminates=true means the rendered body already emits its own
+// dispatch return (e.g. JUMPBY); the emitter must not append the
+// default `return e.advance()` tail in that case.
+//
 // The output is a Go statement block (no surrounding braces); the
 // caller indents and wraps it.
-func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, ok bool, note string) {
+func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, terminates, ok bool, note string) {
 	if len(sig.Outputs) > 0 {
 		// The current panel only understands control macros that do
 		// not push. Anything that produces outputs needs the typed
 		// helper layer that the action translator does not yet drive,
 		// so bail and let the emitter use a panic-stub.
-		return "", false, "outputs not yet handled by action translator"
+		return "", false, false, "outputs not yet handled by action translator"
 	}
 	t := &actionTranslator{
 		sig:    sig,
@@ -38,17 +42,18 @@ func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, ok bool
 		writer: &strings.Builder{},
 	}
 	if err := t.run(); err != nil {
-		return "", false, err.Error()
+		return "", false, false, err.Error()
 	}
-	return t.writer.String(), true, ""
+	return t.writer.String(), t.terminates, true, ""
 }
 
 type actionTranslator struct {
-	sig    *SignatureAnalysis
-	bound  map[string]string // name -> "in"/"out"
-	toks   []dslTok
-	pos    int
-	writer *strings.Builder
+	sig        *SignatureAnalysis
+	bound      map[string]string // name -> "in"/"out"
+	toks       []dslTok
+	pos        int
+	writer     *strings.Builder
+	terminates bool // body emits its own dispatch return
 }
 
 func (t *actionTranslator) run() error {
@@ -96,6 +101,8 @@ func (t *actionTranslator) translateStmt() error {
 		// no compiled-out assert. The body's behavior holds regardless,
 		// so consume `assert(...)` and any trailing `;` and continue.
 		return t.skipParenthesised()
+	case "JUMPBY":
+		return t.translateJumpBy()
 	case "PyStackRef_CLOSE", "PyStackRef_XCLOSE":
 		// Stack-ref close: drop the runtime ref. CLOSE asserts non-null;
 		// XCLOSE tolerates null. Both map to .Close() on the popped
@@ -103,6 +110,26 @@ func (t *actionTranslator) translateStmt() error {
 		return t.translateUnaryCall(".Close()")
 	}
 	return fmt.Errorf("unrecognized token at action body start: %q", tk.Text)
+}
+
+// translateJumpBy emits the dispatch return for `JUMPBY(<expr>);`.
+// CPython's JUMPBY adjusts next_instr by oparg codeunits *relative to
+// the instruction following the current one*, so our jumpBy helper
+// adds 1 to land on the same place.
+func (t *actionTranslator) translateJumpBy() error {
+	t.pos++ // JUMPBY
+	arg, err := t.takeParenthesised()
+	if err != nil {
+		return err
+	}
+	t.acceptSemi()
+	arg = strings.TrimSpace(arg)
+	if !isBareIdent(arg) || arg != "oparg" {
+		return fmt.Errorf("JUMPBY arg %q is not the bare 'oparg' identifier", arg)
+	}
+	fmt.Fprintln(t.writer, "return e.jumpBy(int(oparg) + 1), nil, nil, false, nil")
+	t.terminates = true
+	return nil
 }
 
 // translateControlIf emits:

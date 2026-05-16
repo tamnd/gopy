@@ -46,8 +46,6 @@ func (e *evalState) dispatchHandwritten(op compile.Opcode, oparg uint32) (next i
 		return e.opSTORE_FAST(oparg)
 	case compile.DELETE_FAST:
 		return e.opDELETE_FAST(oparg)
-	case compile.JUMP_FORWARD:
-		return e.opJUMP_FORWARD(oparg)
 	case compile.RETURN_VALUE:
 		return e.opRETURN_VALUE(oparg)
 	case compile.INTERPRETER_EXIT:
@@ -140,11 +138,6 @@ func (e *evalState) opDELETE_FAST(oparg uint32) (next int, retVal objects.Object
 	old.Close()
 	e.setLocal(int(oparg), stackref.Null)
 	return e.advance(), nil, nil, false, true, nil
-}
-
-// CPython: Python/bytecodes.c JUMP_FORWARD: JUMPBY(oparg).
-func (e *evalState) opJUMP_FORWARD(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
 }
 
 // CPython: Python/bytecodes.c RETURN_VALUE: (value --) returns from frame.

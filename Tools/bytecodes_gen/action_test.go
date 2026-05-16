@@ -15,7 +15,7 @@ func tokLine(text string) []dslTok {
 
 func TestTranslateBodyDeoptIf(t *testing.T) {
 	body := tokLine("DEOPT_IF(!check(left));")
-	got, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
+	got, _, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
@@ -26,7 +26,7 @@ func TestTranslateBodyDeoptIf(t *testing.T) {
 
 func TestTranslateBodyErrorIf(t *testing.T) {
 	body := tokLine("ERROR_IF(res == NULL, error);")
-	got, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
+	got, _, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
@@ -38,7 +38,7 @@ func TestTranslateBodyErrorIf(t *testing.T) {
 func TestTranslateBodyDecrefInputs(t *testing.T) {
 	body := tokLine("DECREF_INPUTS();")
 	sig := &SignatureAnalysis{Name: "X", Inputs: []StackBinding{{Name: "a"}, {Name: "b"}}}
-	got, ok, note := TranslateBody(body, sig)
+	got, _, ok, note := TranslateBody(body, sig)
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
@@ -49,7 +49,7 @@ func TestTranslateBodyDecrefInputs(t *testing.T) {
 
 func TestTranslateBodyStatIncSkipped(t *testing.T) {
 	body := tokLine("STAT_INC(BINARY_OP, hit);")
-	got, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
+	got, _, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
@@ -60,7 +60,7 @@ func TestTranslateBodyStatIncSkipped(t *testing.T) {
 
 func TestTranslateBodyUnrecognizedFalls(t *testing.T) {
 	body := tokLine("res = some_helper(left, right);")
-	_, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
+	_, _, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "X"})
 	if ok {
 		t.Errorf("expected fallback for unrecognized body")
 	}
@@ -72,7 +72,7 @@ func TestTranslateBodyUnrecognizedFalls(t *testing.T) {
 func TestTranslateBodyStackRefClose(t *testing.T) {
 	body := tokLine("PyStackRef_CLOSE(value);")
 	sig := &SignatureAnalysis{Name: "POP_TOP", Inputs: []StackBinding{{Name: "value"}}}
-	got, ok, note := TranslateBody(body, sig)
+	got, _, ok, note := TranslateBody(body, sig)
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
@@ -84,7 +84,7 @@ func TestTranslateBodyStackRefClose(t *testing.T) {
 func TestTranslateBodyStackRefCloseKeywordSlot(t *testing.T) {
 	body := tokLine("PyStackRef_CLOSE(type);")
 	sig := &SignatureAnalysis{Name: "X", Inputs: []StackBinding{{Name: "type"}}}
-	got, ok, note := TranslateBody(body, sig)
+	got, _, ok, note := TranslateBody(body, sig)
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
@@ -96,7 +96,7 @@ func TestTranslateBodyStackRefCloseKeywordSlot(t *testing.T) {
 func TestTranslateBodyDeadIsNoop(t *testing.T) {
 	body := tokLine("DEAD(value);")
 	sig := &SignatureAnalysis{Name: "X", Inputs: []StackBinding{{Name: "value"}}}
-	got, ok, note := TranslateBody(body, sig)
+	got, _, ok, note := TranslateBody(body, sig)
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
@@ -108,12 +108,26 @@ func TestTranslateBodyDeadIsNoop(t *testing.T) {
 func TestTranslateBodyOutputsBail(t *testing.T) {
 	body := tokLine("DEAD(value);")
 	sig := &SignatureAnalysis{Name: "X", Outputs: []StackBinding{{Name: "out"}}}
-	_, ok, note := TranslateBody(body, sig)
+	_, _, ok, note := TranslateBody(body, sig)
 	if ok {
 		t.Errorf("expected bail when sig has outputs")
 	}
 	if note == "" {
 		t.Errorf("expected explanatory note")
+	}
+}
+
+func TestTranslateBodyJumpBy(t *testing.T) {
+	body := tokLine("JUMPBY(oparg);")
+	got, terminates, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "JUMP_FORWARD"})
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !terminates {
+		t.Errorf("expected terminates=true for JUMPBY")
+	}
+	if !strings.Contains(got, "e.jumpBy(int(oparg) + 1)") {
+		t.Errorf("expected jumpBy return, got:\n%s", got)
 	}
 }
 

@@ -343,11 +343,10 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: b
 	case compile.JUMP_BACKWARD_NO_INTERRUPT:
-		// body bail: unrecognized token at action body start: "JUMPBY"
+		// body bail: JUMPBY arg "- oparg" is not the bare 'oparg' identifier
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.JUMP_FORWARD:
-		// body bail: unrecognized token at action body start: "JUMPBY"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return e.jumpBy(int(oparg) + 1), nil, nil, false, nil
 	case compile.LIST_APPEND:
 		v := e.pop()
 		_ = v

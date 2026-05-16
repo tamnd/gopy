@@ -15,6 +15,7 @@ package vm
 import "github.com/tamnd/gopy/compile"
 
 var dispatchGenSupported = map[compile.Opcode]bool{
-	compile.NOP:     true,
-	compile.POP_TOP: true,
+	compile.NOP:          true,
+	compile.POP_TOP:      true,
+	compile.JUMP_FORWARD: true,
 }
