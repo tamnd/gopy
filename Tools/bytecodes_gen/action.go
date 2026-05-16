@@ -217,6 +217,13 @@ func (t *actionTranslator) translateStmt() error {
 	if isBareIdent(tk.Text) && t.bound[tk.Text] != "" {
 		return t.translateOutputAssign(tk.Text)
 	}
+	// Assignment to a previously declared local. CPython routinely
+	// reuses `int err;` followed by branchy `err = helper(...)` legs;
+	// the Go translation is just `err = ...` since the local already
+	// exists from the typed-decl prologue.
+	if isBareIdent(tk.Text) && t.locals[tk.Text] {
+		return t.translateLocalAssign(tk.Text)
+	}
 	return fmt.Errorf("unrecognized token at action body start: %q", tk.Text)
 }
 
@@ -620,6 +627,29 @@ func (t *actionTranslator) translateOutputAssign(name string) error {
 	}
 	fmt.Fprintf(t.writer, "%s = %s\n", goLocalName(name), goExpr)
 	t.assigned[name] = true
+	return nil
+}
+
+// translateLocalAssign handles `name = expr;` for a previously declared
+// local. Mirrors translateOutputAssign but does not mark the slot as an
+// "output" — locals do not participate in the post-body push epilogue.
+func (t *actionTranslator) translateLocalAssign(name string) error {
+	t.pos++ // name
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "=" {
+		return fmt.Errorf("expected '=' after local name %q", name)
+	}
+	t.pos++ // =
+	rhs := []string{}
+	for t.pos < len(t.toks) && t.toks[t.pos].Text != ";" {
+		rhs = append(rhs, t.toks[t.pos].Text)
+		t.pos++
+	}
+	t.acceptSemi()
+	goExpr, err := t.translateExpr(rhs)
+	if err != nil {
+		return fmt.Errorf("local assign %q: %w", name, err)
+	}
+	fmt.Fprintf(t.writer, "%s = %s\n", goLocalName(name), goExpr)
 	return nil
 }
 
@@ -1043,6 +1073,7 @@ var helperCalls = map[string]helperCall{
 	// pattern handles the dispatch.
 	"PyDict_SetItem":   {goExpr: "e.dictSetItem", arity: 3},
 	"PyObject_DelItem": {goExpr: "e.objectDelItem", arity: 2},
+	"PyObject_SetItem": {goExpr: "e.objectSetItem", arity: 3},
 	"PyObject_DelAttr": {goExpr: "e.objectDelAttr", arity: 2},
 	// Pattern-matching helpers from Python/ceval.c.
 	"_PyEval_MatchKeys":  {goExpr: "e.matchKeys", arity: 2, dropFirst: 1},

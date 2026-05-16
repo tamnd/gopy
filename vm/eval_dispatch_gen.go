@@ -24,7 +24,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = str
 		format := e.peekSliceBottomFirst(0, int(oparg&1))
 		_ = format
-		// body bail: if then: unrecognized token at action body start: "format_o"
+		// body bail: if else: local assign "format_o": unexpected token "&" in expression
 		// outputs: interpolation
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_LIST:
@@ -183,7 +183,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.CONVERT_VALUE:
 		value := e.peek(0)
 		_ = value
-		// body bail: unrecognized token at action body start: "conv_fn"
+		// body bail: local assign "conv_fn": unexpected token "_PyEval_ConversionFuncs" in expression
 		// outputs: result
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.COPY:
@@ -247,8 +247,22 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		}
 		return e.advance(), nil, nil, false, nil
 	case compile.DELETE_NAME:
-		// body bail: unrecognized token at action body start: "err"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		name := e.nameAt(int(oparg))
+		_ = name
+		ns := e.localsDict()
+		_ = ns
+		var err int32
+		_ = err
+		if ns == nil {
+			e.setPendingErr("_PyErr_Format")
+			return 0, nil, nil, false, e.error("error")
+		}
+		err = e.objectDelItem(ns, name)
+		if err != 0 {
+			e.setPendingErr("_PyEval_FormatExcCheckArg")
+			return 0, nil, nil, false, e.error("error")
+		}
+		return e.advance(), nil, nil, false, nil
 	case compile.DELETE_SUBSCR:
 		container := e.peek(1)
 		_ = container
@@ -682,7 +696,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		class_dict_st := e.peek(0)
 		_ = class_dict_st
-		// body bail: unrecognized token at action body start: "name"
+		// body bail: local assign "name": unexpected token "PyTuple_GET_ITEM" in expression
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:
@@ -929,8 +943,19 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value2
 		value1 := e.peek(0)
 		_ = value1
-		// body bail: unrecognized token at action body start: "tmp"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		oparg1 := oparg >> 4
+		_ = oparg1
+		oparg2 := oparg & 15
+		_ = oparg2
+		tmp := e.localAt(int(oparg1))
+		_ = tmp
+		e.setLocal(int(oparg1), value1)
+		tmp.Close()
+		tmp = e.localAt(int(oparg2))
+		e.setLocal(int(oparg2), value2)
+		tmp.Close()
+		e.drop(1 + 1)
+		return e.advance(), nil, nil, false, nil
 	case compile.STORE_GLOBAL:
 		v := e.peek(0)
 		_ = v
@@ -947,7 +972,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_NAME:
 		v := e.peek(0)
 		_ = v
-		// body bail: if then: unrecognized token at action body start: "err"
+		// body bail: if else: local assign "err": unexpected token "PyObject_SetItem" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SWAP:
 		bottom := e.peek(int(oparg-2) + 1)

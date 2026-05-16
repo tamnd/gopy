@@ -272,6 +272,19 @@ func (e *evalState) dictSetItem(scope, key, value objects.Object) int32 {
 	return 0
 }
 
+// objectSetItem wraps PyObject_SetItem: container[sub] = val.
+//
+// CPython: Objects/abstract.c:175 PyObject_SetItem
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) objectSetItem(container, sub, val objects.Object) int32 {
+	if err := objects.SetItem(container, sub, val); err != nil {
+		e.pendingErr = err
+		return 1
+	}
+	return 0
+}
+
 // objectDelItem wraps PyObject_DelItem: del container[sub].
 //
 // CPython: Objects/abstract.c:191 PyObject_DelItem
