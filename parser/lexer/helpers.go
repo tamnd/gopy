@@ -67,16 +67,24 @@ func (s *State) indentError() Tok {
 }
 
 // warnInvalidEscape mirrors the deprecation warning the C tokenizer
-// raises for unrecognized \X escapes inside string literals. The gopy
-// surface just stashes the offender for the parser to surface.
+// raises for unrecognized \X escapes inside string literals. CPython
+// routes this through PyErr_WarnExplicitObject(PyExc_SyntaxWarning), and
+// when the warnings filter elevates the warning to an error, surfaces
+// a SyntaxError with a slightly shorter message. gopy's tokenizer
+// doesn't yet expose the warnings filter to the lexer, so the warning
+// text is recorded via parserWarn until the warnings plumbing reaches
+// in here.
 //
 // CPython: Parser/tokenizer/helpers.c:110 _PyTokenizer_warn_invalid_escape_sequence
 func (s *State) warnInvalidEscape(c byte) {
 	if !s.reportWarnings {
 		return
 	}
-	// Held for the action_helpers port to surface as a SyntaxWarning.
-	_ = c
+	s.parserWarn("SyntaxWarning",
+		"\"\\%c\" is an invalid escape sequence. "+
+			"Such sequences will not work in the future. "+
+			"Did you mean \"\\\\%c\"? A raw string is also an option.",
+		c, c)
 }
 
 // errorRet returns the canonical ERRORTOKEN value the C lexer hands
