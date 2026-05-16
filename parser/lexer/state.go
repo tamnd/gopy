@@ -391,7 +391,7 @@ func (s *State) Free() {
 }
 
 // TokenInit zeroes a Tok value. CPython's _PyToken_Init sets the
-// metadata pointer to NULL; Tok values are zero-initialised in Go so
+// metadata pointer to NULL; Tok values are zero-initialized in Go so
 // this is purely a citation anchor for parity.
 //
 // CPython: Parser/lexer/state.c:67 _PyToken_Init
