@@ -635,7 +635,8 @@ body, so the body never reaches for raw codeunits.
 | `vm/eval_dispatch_gen.go` covers every unspecialized opcode (skeleton; bodies pending Phase 8) | PARTIAL (107 arms, bodies stubbed) | this commit |
 | `vm/eval_simple.go` shrinks to evalLoop scaffolding only (frame setup, exit handling) | PARTIAL (NOP, POP_TOP routed) | this commit |
 | `go test ./vm` green | DONE | this commit |
-| CPython-parity harness (`Tools/bytecodes_gen/cpython_parity_test.go`) lifts `Lib/test/test_generated_cases.py` fixtures and prints rolling coverage | DONE (3 / 6 fixtures translate today) | `f97a926` |
+| CPython-parity harness (`Tools/bytecodes_gen/cpython_parity_test.go`) lifts `Lib/test/test_generated_cases.py` fixtures and prints rolling coverage | DONE (5 / 10 fixtures translate today) | `f97a926` |
+| Bytecodes.c coverage gauge (`Tools/bytecodes_gen/cpython_coverage_test.go`) walks every `inst()` in CPython 3.14.5's `Python/bytecodes.c` and reports the bail histogram | DONE (12 / 118 inst() bodies translate today) | `a93336d` |
 
 ### CPython-parity gate
 
@@ -660,6 +661,30 @@ monotonic: a fixture never moves from `bail=false` back to
 `bail=true`. Rows are never removed; when CPython retires a test
 we mirror the deletion in a separate commit so blame stays
 honest.
+
+### Bytecodes.c coverage gauge
+
+`Tools/bytecodes_gen/cpython_coverage_test.go` is the
+complementary, exhaustive gauge: it walks every `inst()` in CPython
+3.14.5's `Python/bytecodes.c`, runs each through the full pipeline
+(`ParseBytecodes → AnalyzeInst → TranslateBody`), and groups the
+bail reasons. The headline number is `N / total inst() bodies
+translate`; the bail histogram (`bail (count) reason  names...`)
+exposes which translator extension yields the most leverage.
+
+A hard floor (`const minTranslates`) in the test refuses to let the
+count regress. Bump it (never down) when a translator change flips
+more bodies; the porting auto-flow reads that constant to know
+progress without scraping logs.
+
+Caveat: the gauge tracks *parser coverage* — a body "translates"
+when no stage rejects it. Compile-correctness of the emitted Go is
+verified separately by the strict `dispatchGenSupported`
+whitelist, which gates which opcodes route through `dispatchGen` in
+the live eval loop. The two layers measure different things on
+purpose: the gauge tells us "how much of bytecodes.c does the
+translator parse without bailing", the whitelist tells us "which
+opcodes have we audited end-to-end and run in production".
 
 ### Migration progress
 
