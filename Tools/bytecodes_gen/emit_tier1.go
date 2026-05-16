@@ -8,69 +8,118 @@
 package main
 
 import (
+	"embed"
 	"fmt"
+	"go/format"
 	"sort"
 	"strings"
+	"text/template"
 )
 
-// EmitTier1Arm renders the `case opcode.NAME:` block for one analyzed
-// instruction. Inputs are popped in reverse source order into named
-// locals; outputs are pushed bottom-first. The action body is a
-// panic-stub until B6 fills it in.
-func EmitTier1Arm(a *SignatureAnalysis) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "\tcase compile.%s:\n", a.Name)
+//go:embed templates/*.tmpl
+var tier1Templates embed.FS
 
-	// Pop inputs in reverse so source-order Inputs[0] ends up bound
-	// to the deepest popped slot (matches CPython's stack-bottom-first
-	// signature).
-	for i := len(a.Inputs) - 1; i >= 0; i-- {
-		in := a.Inputs[i]
-		name := bindName(in.Name, "in", in.Index)
-		if in.Sized {
-			fmt.Fprintf(&b, "\t\t// sized input %s, size=%s\n", name, in.SizeExpr)
-			fmt.Fprintf(&b, "\t\tfor i := 0; i < int(%s); i++ { _ = e.pop() }\n", in.SizeExpr)
-			continue
-		}
-		fmt.Fprintf(&b, "\t\t%s := e.pop()\n", name)
-		fmt.Fprintf(&b, "\t\t_ = %s\n", name)
-	}
-
-	// Cache reads: emit a comment so B6 can plug in real decoding.
-	for _, c := range a.Caches {
-		fmt.Fprintf(&b, "\t\t// cache %q size=%d offset=%d\n", c.Name, c.Size, c.Offset)
-	}
-
-	// Action body. The translator handles the shapes it understands;
-	// anything else falls back to a panic-stub return so the file
-	// always compiles.
-	if body, terminates, ok, note := TranslateBody(a.Body, a); ok {
-		if body != "" {
-			for line := range strings.SplitSeq(strings.TrimRight(body, "\n"), "\n") {
-				fmt.Fprintf(&b, "\t\t%s\n", line)
+func mustParseTemplate(name string) *template.Template {
+	t := template.New(name).Funcs(template.FuncMap{
+		"reverse": func(in []inputView) []inputView {
+			out := make([]inputView, len(in))
+			for i, v := range in {
+				out[len(in)-1-i] = v
 			}
-		}
-		if !terminates {
-			fmt.Fprintf(&b, "\t\treturn e.advance(), nil, nil, false, nil\n")
+			return out
+		},
+		"bodyLines": func(s string) []string {
+			s = strings.TrimRight(s, "\n")
+			if s == "" {
+				return nil
+			}
+			return strings.Split(s, "\n")
+		},
+	})
+	data, err := tier1Templates.ReadFile("templates/" + name)
+	if err != nil {
+		panic(fmt.Sprintf("read template %q: %v", name, err))
+	}
+	return template.Must(t.Parse(string(data)))
+}
+
+// armView is the template input for one switch arm.
+type armView struct {
+	Name        string       // opcode constant suffix
+	Inputs      []inputView  // popped in source order (template reverses)
+	Caches      []cacheView  // cache slots
+	Bail        bool         // body translator bailed; emit panic-stub
+	Note        string       // bail explanation
+	BailOutputs []outputView // outputs (rendered as comment when bailing)
+	Outputs     []outputView // output locals (declared, then pushed)
+	Body        string       // translated body lines (no surrounding braces)
+	Terminates  bool         // body emits its own return
+}
+
+type inputView struct {
+	Name     string
+	Sized    bool
+	SizeExpr string
+}
+
+type cacheView struct {
+	Name   string
+	Size   int
+	Offset int
+}
+
+type outputView struct {
+	Name     string
+	Sized    bool
+	SizeExpr string
+}
+
+// armTemplate prints one switch arm. The reverse-order input pop
+// matches CPython's stack-bottom-first signature. The body lives in
+// templates/tier1_arm.tmpl so the format is easy to read without
+// fighting Go's string-escape rules.
+var armTemplate = mustParseTemplate("tier1_arm.tmpl")
+
+// EmitTier1Arm renders the `case opcode.NAME:` block for one analyzed
+// instruction.
+func EmitTier1Arm(a *SignatureAnalysis) string {
+	v := armView{Name: a.Name}
+	for _, in := range a.Inputs {
+		v.Inputs = append(v.Inputs, inputView{
+			Name:     bindName(in.Name, "in", in.Index),
+			Sized:    in.Sized,
+			SizeExpr: in.SizeExpr,
+		})
+	}
+	for _, c := range a.Caches {
+		v.Caches = append(v.Caches, cacheView{Name: c.Name, Size: c.Size, Offset: c.Offset})
+	}
+
+	body, terminates, ok, note := TranslateBody(a.Body, a)
+	if !ok {
+		v.Bail = true
+		v.Note = note
+		for _, o := range a.Outputs {
+			v.BailOutputs = append(v.BailOutputs, outputView{
+				Name:     bindName(o.Name, "out", o.Index),
+				Sized:    o.Sized,
+				SizeExpr: o.SizeExpr,
+			})
 		}
 	} else {
-		if note != "" {
-			fmt.Fprintf(&b, "\t\t// body bail: %s\n", note)
-		}
-		fmt.Fprintf(&b, "\t\treturn 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)\n")
-	}
-
-	// Output pushes are unreachable until B6 fills the body, but emit
-	// them in a dead block so the analysis stays visible to readers.
-	if len(a.Outputs) > 0 {
-		b.WriteString("\t\t// outputs:")
+		v.Body = body
+		v.Terminates = terminates
 		for _, o := range a.Outputs {
-			fmt.Fprintf(&b, " %s", bindName(o.Name, "out", o.Index))
-			if o.Sized {
-				fmt.Fprintf(&b, "[%s]", o.SizeExpr)
-			}
+			v.Outputs = append(v.Outputs, outputView{
+				Name:     bindName(o.Name, "out", o.Index),
+				Sized:    o.Sized,
+				SizeExpr: o.SizeExpr,
+			})
 		}
-		b.WriteString("\n")
+	}
+	var b strings.Builder
+	if err := armTemplate.Execute(&b, v); err != nil {
+		panic(fmt.Sprintf("arm template: %v", err))
 	}
 	return b.String()
 }
@@ -102,6 +151,11 @@ var goKeywords = map[string]bool{
 	"var": true,
 }
 
+// fileTemplate wraps the per-arm output into a complete Go source
+// file. The marker comment up top is what the drift check reads. The
+// body lives in templates/tier1_file.tmpl.
+var fileTemplate = mustParseTemplate("tier1_file.tmpl")
+
 // EmitTier1File renders a Go source file containing dispatchGen, which
 // the hand-written dispatch falls back to once codegen takes over.
 // `pkg` is the target package, `hash` is the bytecodes.c sha256 stamped
@@ -118,24 +172,28 @@ func EmitTier1File(pkg, hash string, analyses []*SignatureAnalysis, fm FamilyMap
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 
-	var b strings.Builder
-	b.WriteString("// Code generated by tools/bytecodes_gen. DO NOT EDIT.\n")
-	b.WriteString(MarkerLine(hash))
-	b.WriteString("\npackage " + pkg + "\n\n")
-	b.WriteString("import (\n")
-	b.WriteString("\t\"github.com/tamnd/gopy/compile\"\n")
-	b.WriteString("\t\"github.com/tamnd/gopy/objects\"\n")
-	b.WriteString(")\n\n")
-	b.WriteString("// dispatchGen is the generated Tier-1 dispatcher. Each arm is\n")
-	b.WriteString("// produced from one `inst` in Python/bytecodes.c.\n")
-	b.WriteString("func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone bool, err error) {\n")
-	b.WriteString("\t_ = oparg\n")
-	b.WriteString("\tswitch op {\n")
+	arms := make([]string, 0, len(sorted))
 	for _, a := range sorted {
-		b.WriteString(EmitTier1Arm(a))
+		arms = append(arms, strings.TrimRight(EmitTier1Arm(a), "\n"))
 	}
-	b.WriteString("\t}\n")
-	b.WriteString("\treturn 0, nil, nil, false, opcodeNotImplemented(op)\n")
-	b.WriteString("}\n")
-	return b.String()
+
+	var b strings.Builder
+	if err := fileTemplate.Execute(&b, struct {
+		Pkg    string
+		Marker string
+		Arms   []string
+	}{Pkg: pkg, Marker: strings.TrimRight(MarkerLine(hash), "\n"), Arms: arms}); err != nil {
+		panic(fmt.Sprintf("file template: %v", err))
+	}
+	// Run gofmt so the on-disk file matches what `gofmt -l` expects;
+	// CPython's cases_generator runs clang-format on its tier-1 output
+	// for the same reason.
+	raw := b.String()
+	formatted, err := format.Source([]byte(raw))
+	if err != nil {
+		// Templates produced something Go can't parse; surface the raw
+		// text so the user can see exactly what failed.
+		panic(fmt.Sprintf("gofmt on generated source: %v\n--- source ---\n%s", err, raw))
+	}
+	return string(formatted)
 }

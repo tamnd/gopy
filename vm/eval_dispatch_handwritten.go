@@ -29,8 +29,6 @@ import (
 // the next layer.
 func (e *evalState) dispatchHandwritten(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
 	switch op {
-	case compile.PUSH_NULL:
-		return e.opPUSH_NULL(oparg)
 	case compile.LOAD_CONST:
 		return e.opLOAD_CONST(oparg)
 	case compile.LOAD_FAST, compile.LOAD_FAST_BORROW:
@@ -69,12 +67,6 @@ func (e *evalState) dispatchHandwritten(op compile.Opcode, oparg uint32) (next i
 		return e.opPOP_JUMP_IF(op, oparg)
 	}
 	return 0, nil, nil, false, false, nil
-}
-
-// CPython: Python/bytecodes.c PUSH_NULL: (-- res) { res = PyStackRef_NULL; }
-func (e *evalState) opPUSH_NULL(_ uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	e.push(stackref.Null)
-	return e.advance(), nil, nil, false, true, nil
 }
 
 // CPython: Python/bytecodes.c LOAD_CONST: (-- value) reads from frame->code->co_consts[oparg].

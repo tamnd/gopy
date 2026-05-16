@@ -1,0 +1,35 @@
+	case compile.{{.Name}}:
+{{- range reverse .Inputs}}
+{{- if .Sized}}
+		// sized input {{.Name}}, size={{.SizeExpr}}
+		for i := 0; i < int({{.SizeExpr}}); i++ { _ = e.pop() }
+{{- else}}
+		{{.Name}} := e.pop()
+		_ = {{.Name}}
+{{- end}}
+{{- end}}
+{{- range .Caches}}
+		// cache "{{.Name}}" size={{.Size}} offset={{.Offset}}
+{{- end}}
+{{- if .Bail}}
+{{- if .Note}}
+		// body bail: {{.Note}}
+{{- end}}
+{{- if .BailOutputs}}
+		// outputs:{{range .BailOutputs}} {{.Name}}{{if .Sized}}[{{.SizeExpr}}]{{end}}{{end}}
+{{- end}}
+		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+{{- else}}
+{{- range .Outputs}}
+		var {{.Name}} stackref.Ref
+{{- end}}
+{{- range bodyLines .Body}}
+		{{.}}
+{{- end}}
+{{- if not .Terminates}}
+{{- range .Outputs}}
+		e.push({{.Name}})
+{{- end}}
+		return e.advance(), nil, nil, false, nil
+{{- end}}
+{{- end}}

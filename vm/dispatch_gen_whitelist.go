@@ -18,4 +18,5 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.NOP:          true,
 	compile.POP_TOP:      true,
 	compile.JUMP_FORWARD: true,
+	compile.PUSH_NULL:    true,
 }

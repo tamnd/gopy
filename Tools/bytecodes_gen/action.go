@@ -28,21 +28,36 @@ import (
 // The output is a Go statement block (no surrounding braces); the
 // caller indents and wraps it.
 func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, terminates, ok bool, note string) {
-	if len(sig.Outputs) > 0 {
-		// The current panel only understands control macros that do
-		// not push. Anything that produces outputs needs the typed
-		// helper layer that the action translator does not yet drive,
-		// so bail and let the emitter use a panic-stub.
-		return "", false, false, "outputs not yet handled by action translator"
+	// Outputs with a Sized variadic shape or an explicit :type
+	// annotation need the typed helper layer; we only translate the
+	// simple stack-ref outputs today.
+	for _, o := range sig.Outputs {
+		if o.Sized {
+			return "", false, false, "sized output not yet handled by action translator"
+		}
+		if o.Type != "" {
+			return "", false, false, fmt.Sprintf("typed output %q not yet handled by action translator", o.Type)
+		}
 	}
 	t := &actionTranslator{
-		sig:    sig,
-		bound:  bindNames(sig),
-		toks:   stripWhitespace(body),
-		writer: &strings.Builder{},
+		sig:      sig,
+		bound:    bindNames(sig),
+		toks:     stripWhitespace(body),
+		writer:   &strings.Builder{},
+		assigned: map[string]bool{},
 	}
 	if err := t.run(); err != nil {
 		return "", false, false, err.Error()
+	}
+	// Every output must have been assigned by the body; otherwise the
+	// epilogue would push an undefined slot.
+	for _, o := range sig.Outputs {
+		if o.Name == "" || o.Name == "unused" {
+			continue
+		}
+		if !t.assigned[o.Name] {
+			return "", false, false, fmt.Sprintf("output %q never assigned", o.Name)
+		}
 	}
 	return t.writer.String(), t.terminates, true, ""
 }
@@ -53,7 +68,8 @@ type actionTranslator struct {
 	toks       []dslTok
 	pos        int
 	writer     *strings.Builder
-	terminates bool // body emits its own dispatch return
+	terminates bool            // body emits its own dispatch return
+	assigned   map[string]bool // output names that got assigned
 }
 
 func (t *actionTranslator) run() error {
@@ -109,7 +125,46 @@ func (t *actionTranslator) translateStmt() error {
 		// local, since stackref.Ref's Close already null-checks.
 		return t.translateUnaryCall(".Close()")
 	}
+	// Output assignment: `name = expr ;` where name is a bound output.
+	if isBareIdent(tk.Text) && t.bound[tk.Text] == "out" {
+		return t.translateOutputAssign(tk.Text)
+	}
 	return fmt.Errorf("unrecognized token at action body start: %q", tk.Text)
+}
+
+// translateOutputAssign handles `name = expr ;` where name is a
+// declared output of the instruction. The right-hand side is parsed
+// from a small vocabulary of CPython expressions; unrecognized shapes
+// bail so the emitter can fall back to the panic-stub.
+func (t *actionTranslator) translateOutputAssign(name string) error {
+	t.pos++ // name
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "=" {
+		return fmt.Errorf("expected '=' after output name %q", name)
+	}
+	t.pos++ // =
+	// Collect the RHS up to the semicolon.
+	rhs := []string{}
+	for t.pos < len(t.toks) && t.toks[t.pos].Text != ";" {
+		rhs = append(rhs, t.toks[t.pos].Text)
+		t.pos++
+	}
+	t.acceptSemi()
+	goExpr, err := t.translateExpr(rhs)
+	if err != nil {
+		return fmt.Errorf("output assign %q: %w", name, err)
+	}
+	fmt.Fprintf(t.writer, "%s = %s\n", goLocalName(name), goExpr)
+	t.assigned[name] = true
+	return nil
+}
+
+// translateExpr renders a small CPython expression vocabulary into Go.
+// The vocabulary grows as more opcode bodies migrate.
+func (t *actionTranslator) translateExpr(toks []string) (string, error) {
+	if len(toks) == 1 && toks[0] == "PyStackRef_NULL" {
+		return "stackref.Null", nil
+	}
+	return "", fmt.Errorf("unrecognized expression %q", strings.Join(toks, " "))
 }
 
 // translateJumpBy emits the dispatch return for `JUMPBY(<expr>);`.

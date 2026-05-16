@@ -26,3 +26,4 @@ TECHNICAL_BRIEF.md
 /parser_gen
 /tools/parser_gen/parser_gen
 /compare-baseline
+Tools/bytecodes_gen/bytecodes_gen
