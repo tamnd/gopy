@@ -18,6 +18,15 @@ func init() {
 		SetTypeDescr(ListType, name, NewMethodDescr(ListType, name, fn))
 	}
 
+	// list.__repr__ slot wrapper. CPython exposes tp_repr via
+	// add_operators -> slotdefs so callers can do `list.__repr__(L)`
+	// and so pprint's dispatch table can key on it (otherwise the
+	// table falls back to object.__repr__, which collides with the
+	// dict/deque entries).
+	//
+	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
+	bind("__repr__", listReprMethod)
+
 	bind("append", listAppendMethod)
 	bind("extend", listExtendMethod)
 	bind("insert", listInsertMethod)
@@ -232,6 +241,18 @@ func listLenMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, err
 	}
 	return NewInt(int64(l.Len())), nil
+}
+
+func listReprMethod(args []Object, _ map[string]Object) (Object, error) {
+	l, err := selfList(args, "__repr__")
+	if err != nil {
+		return nil, err
+	}
+	s, rerr := listRepr(l)
+	if rerr != nil {
+		return nil, rerr
+	}
+	return NewStr(s), nil
 }
 
 func listContainsMethod(args []Object, _ map[string]Object) (Object, error) {

@@ -87,6 +87,10 @@ func init() {
 		d.init(cls)
 		return d, nil
 	}
+	// dict.__repr__ slot wrapper (tp_repr add_operators path).
+	//
+	// CPython: Objects/typeobject.c add_operators
+	SetTypeDescr(DictType, "__repr__", NewMethodDescr(DictType, "__repr__", dictReprMethod))
 	SetTypeDescr(DictType, "keys", NewMethodDescr(DictType, "keys", dictKeysMethod))
 	SetTypeDescr(DictType, "values", NewMethodDescr(DictType, "values", dictValuesMethod))
 	SetTypeDescr(DictType, "items", NewMethodDescr(DictType, "items", dictItemsMethod))
@@ -104,6 +108,27 @@ func init() {
 	SetTypeDescr(DictType, "setdefault", NewMethodDescr(DictType, "setdefault", dictSetDefaultMethod))
 	SetTypeDescr(DictType, "fromkeys", NewClassMethod(NewBuiltinFunction("fromkeys", dictFromKeysMethod)))
 	SetTypeDescr(DictType, "popitem", NewMethodDescr(DictType, "popitem", dictPopItemMethod))
+}
+
+// dictReprMethod is the slot wrapper for tp_repr. Binding it as a
+// descriptor keeps `dict.__repr__` distinct from `object.__repr__` so
+// pprint's dispatch table (keyed on type.__repr__) does not collapse
+// dict/list/deque onto the same entry.
+//
+// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
+func dictReprMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __repr__() takes no arguments (%d given)", len(args)-1)
+	}
+	d, ok := args[0].(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'dict' object")
+	}
+	s, err := dictRepr(d)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(s), nil
 }
 
 func dictKeysMethod(args []Object, _ map[string]Object) (Object, error) {

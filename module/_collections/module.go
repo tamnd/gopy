@@ -109,6 +109,12 @@ func newDequeType() *objects.Type {
 	objects.SetTypeDescr(t, "clear", objects.NewMethodDescr(t, "clear", dequeClearMethod))
 	objects.SetTypeDescr(t, "copy", objects.NewMethodDescr(t, "copy", dequeCopyMethod))
 	objects.SetTypeDescr(t, "__copy__", objects.NewMethodDescr(t, "__copy__", dequeCopyMethod))
+	// __repr__ slot wrapper. Binding distinct descriptors per type
+	// keeps pprint's dispatch table from collapsing every C type onto
+	// object.__repr__.
+	//
+	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
+	objects.SetTypeDescr(t, "__repr__", objects.NewMethodDescr(t, "__repr__", dequeReprMethod))
 	objects.SetTypeDescr(t, "__reversed__", objects.NewMethodDescr(t, "__reversed__", dequeReversedMethod))
 	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", dequeInitMethod))
 	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", dequeReduceMethod))
@@ -880,6 +886,27 @@ func dequeSeqInPlaceConcat(a, b objects.Object) (objects.Object, error) {
 // CPython: Modules/_collectionsmodule.c:1866 deque deque_getset/deque_methods
 func dequeGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
 	return objects.GenericGetAttr(o, name)
+}
+
+// dequeReprMethod is the slot wrapper for tp_repr. Binding it as a
+// descriptor keeps deque.__repr__ distinct from object.__repr__ so
+// pprint's _dispatch table maps deque to _pprint_deque instead of
+// collapsing onto the object.__repr__ entry shared with list/dict.
+//
+// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
+func dequeReprMethod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __repr__() takes no arguments (%d given)", len(args)-1)
+	}
+	d, ok := args[0].(*dequeObject)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'deque' object")
+	}
+	s, err := dequeRepr(d)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewStr(s), nil
 }
 
 // dequeRepr renders deque([...]) or deque([...], maxlen=N).

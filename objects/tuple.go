@@ -54,6 +54,14 @@ func init() {
 		Repeat:  tupleRepeat,
 	}
 	TupleType.TpTraverse = tupleTraverse
+	TupleType.Getattro = GenericGetAttr
+	// __repr__ slot wrapper. add_operators exposes tp_repr as a
+	// distinct descriptor so callers can do `tuple.__repr__(t)` and so
+	// pprint's dispatch table can key on it instead of collapsing onto
+	// object.__repr__.
+	//
+	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
+	SetTypeDescr(TupleType, "__repr__", NewMethodDescr(TupleType, "__repr__", tupleReprMethod))
 	// TpNew honors cls so `class T(tuple): pass; T((1,2))` returns a T
 	// instance instead of a plain tuple. tuple is immutable, so unlike
 	// list we populate items here rather than deferring to __init__.
@@ -137,6 +145,21 @@ func tupleGetItem(o Object, i int) (Object, error) {
 		return nil, errIndexOutOfRange
 	}
 	return t.items[i], nil
+}
+
+func tupleReprMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __repr__() takes no arguments (%d given)", len(args)-1)
+	}
+	t, ok := args[0].(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'tuple' object")
+	}
+	s, err := tupleRepr(t)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(s), nil
 }
 
 func tupleRepr(o Object) (string, error) {
