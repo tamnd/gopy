@@ -121,6 +121,15 @@ func (t *actionTranslator) translateStmt() error {
 		return t.translateControlIf("return e.deoptHere()")
 	case "ERROR_IF":
 		return t.translateErrorIf()
+	case "ERROR_NO_POP":
+		// CPython macro: same effect as ERROR_IF(true) — unconditional
+		// jump to the per-instruction error label. Appears inside if
+		// blocks that have already prepared tstate->current_exception.
+		//
+		// CPython: Python/ceval_macros.h ERROR_NO_POP.
+		return t.translateErrorNoPop()
+	case "if":
+		return t.translateIfStmt()
 	case "EXIT_IF":
 		return t.translateControlIf("return e.exitTrace()")
 	case "DECREF_INPUTS":
@@ -974,6 +983,113 @@ func rewriteCCondToGo(s string, intLocals map[string]bool) string {
 		out = out + " != 0"
 	}
 	return out
+}
+
+// translateErrorNoPop emits the unconditional `goto error` equivalent.
+// CPython's ERROR_NO_POP jumps to the per-instruction error label
+// without first popping inputs; under the gopy refcount-only path
+// that distinction collapses to the same `e.error("error")` return.
+//
+// CPython: Python/ceval_macros.h ERROR_NO_POP.
+func (t *actionTranslator) translateErrorNoPop() error {
+	t.pos++ // ERROR_NO_POP
+	// CPython spells it ERROR_NO_POP() — consume the empty parens.
+	if t.pos < len(t.toks) && t.toks[t.pos].Text == "(" {
+		if _, err := t.takeParenthesised(); err != nil {
+			return err
+		}
+	}
+	t.acceptSemi()
+	fmt.Fprintln(t.writer, `return 0, nil, nil, false, e.error("error")`)
+	return nil
+}
+
+// translateIfStmt translates a C-style `if (cond) { body }` plus an
+// optional `else { body }` clause. The condition is parsed via the
+// expression vocabulary so helpers like PyStackRef_IsNull resolve to
+// their Go method counterparts. The body is recursively translated
+// using the same statement walker; this means nested if blocks and
+// ERROR_NO_POP / ERROR_IF / output assignments inside the branch all
+// work without extra plumbing.
+//
+// CPython: bodies in Python/bytecodes.c routinely guard error paths
+// with `if (cond) { _PyErr_*(...); ERROR_NO_POP(); }` and dispatch
+// branches with `if (cond) { ... } else { ... }`.
+func (t *actionTranslator) translateIfStmt() error {
+	t.pos++ // if
+	condToks, err := t.takeParenTokens()
+	if err != nil {
+		return fmt.Errorf("if: %w", err)
+	}
+	condExpr, err := t.translateExpr(condToks)
+	if err != nil {
+		return fmt.Errorf("if cond: %w", err)
+	}
+	// Bare int identifiers need explicit `!= 0` to satisfy Go's
+	// boolean typing; mirrors the ERROR_IF condition fixup.
+	if len(condToks) == 1 && t.intLocals[condToks[0]] {
+		condExpr = condExpr + " != 0"
+	}
+	thenBody, err := t.translateBraceBlock()
+	if err != nil {
+		return fmt.Errorf("if then: %w", err)
+	}
+	fmt.Fprintf(t.writer, "if %s {\n%s}\n", condExpr, thenBody)
+	if t.pos < len(t.toks) && t.toks[t.pos].Text == "else" {
+		t.pos++ // else
+		if t.pos < len(t.toks) && t.toks[t.pos].Text == "if" {
+			// `else if (cond) { ... }` — render as `else { if ... }` to
+			// avoid having to special-case it. Go is happy with either.
+			fmt.Fprintln(t.writer, "{")
+			if err := t.translateIfStmt(); err != nil {
+				return fmt.Errorf("else if: %w", err)
+			}
+			fmt.Fprintln(t.writer, "}")
+			return nil
+		}
+		elseBody, err := t.translateBraceBlock()
+		if err != nil {
+			return fmt.Errorf("if else: %w", err)
+		}
+		// Rewrite the trailing newline of the printed `}` so the `else`
+		// keyword sits on the same line; Go's parser does not allow a
+		// standalone `else` after a line break.
+		w := t.writer.String()
+		if strings.HasSuffix(w, "}\n") {
+			t.writer.Reset()
+			t.writer.WriteString(strings.TrimSuffix(w, "}\n"))
+			fmt.Fprintf(t.writer, "} else {\n%s}\n", elseBody)
+		} else {
+			fmt.Fprintf(t.writer, "else {\n%s}\n", elseBody)
+		}
+	}
+	return nil
+}
+
+// translateBraceBlock consumes `{ stmt; stmt; ... }` and returns the
+// translated Go body as a string. The inner statements share locals
+// and assigned-output state with the outer translator so a value
+// assigned inside the branch is still considered "assigned" after the
+// block closes.
+func (t *actionTranslator) translateBraceBlock() (string, error) {
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "{" {
+		return "", fmt.Errorf("expected '{', got %q", t.toks[t.pos].Text)
+	}
+	t.pos++
+	saved := t.writer
+	sub := &strings.Builder{}
+	t.writer = sub
+	defer func() { t.writer = saved }()
+	for t.pos < len(t.toks) && t.toks[t.pos].Text != "}" {
+		if err := t.translateStmt(); err != nil {
+			return "", err
+		}
+	}
+	if t.pos >= len(t.toks) {
+		return "", fmt.Errorf("unterminated '{'")
+	}
+	t.pos++ // }
+	return sub.String(), nil
 }
 
 // translateUnaryCall handles `MACRO(arg);` where arg is a single bound
