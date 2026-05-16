@@ -593,8 +593,15 @@ func (p *exprParser) parsePrimary() (string, error) {
 	if h, ok := helperCalls[tk]; ok {
 		return p.parseHelperCall(h)
 	}
-	// Parenthesised subexpression.
+	// Parenthesised subexpression. Also recognise a C-style cast of the
+	// form `(TypeName *)operand` and discard it: under Go's interface
+	// representation every object already presents as objects.Object,
+	// so the cast has no Go-side analogue.
 	if tk == "(" {
+		if p.pos+2 < len(p.toks) && cTypeDecls[p.toks[p.pos]] && p.toks[p.pos+1] == "*" && p.toks[p.pos+2] == ")" {
+			p.pos += 3
+			return p.parsePrimary()
+		}
 		inner, err := p.parseExpr(0)
 		if err != nil {
 			return "", err
@@ -790,6 +797,25 @@ var helperCalls = map[string]helperCall{
 	"_PyList_FromStackRefStealOnSuccess":  {goExpr: "e.listFromStackRef", arity: 2},
 	// PyObject_Format(obj, spec) used by FORMAT_WITH_SPEC. spec may be NULL.
 	"PyObject_Format": {goExpr: "e.objectFormat", arity: 2},
+	// Long constructor from a Go ssize_t (int). Boxes a Py_ssize_t as a
+	// Python int. Used by GET_LEN.
+	"PyLong_FromSsize_t": {goExpr: "e.longFromSsizeT", arity: 1},
+	// _PyCell_GetStackRef(cell) returns the cell's contents as a stack
+	// ref; in gopy we surface it as an Object.
+	"_PyCell_GetStackRef": {goExpr: "e.cellGetStackRef", arity: 1},
+	// _PyEval_GetAwaitable(iter, opcode) wraps GET_AWAITABLE; the second
+	// arg is a hint about the opcode triggering the call (BEFORE_ASYNC_WITH
+	// vs ordinary). gopy ignores the hint.
+	"_PyEval_GetAwaitable": {goExpr: "e.getAwaitable", arity: 2},
+	// PyDict_Update(a, b) returns int err; merges b into a without
+	// duplicate-key checking.
+	"PyDict_Update": {goExpr: "e.dictUpdate", arity: 2},
+	// _PyDict_SetItem_Take2(dict, key, value) returns int err; gopy
+	// treats it the same as PyDict_SetItem since no refcount transfer
+	// matters under Go's GC.
+	"_PyDict_SetItem_Take2": {goExpr: "e.dictSetItem", arity: 3},
+	// _PyTemplate_Build(strings, interpolations) returns a t-string.
+	"_PyTemplate_Build": {goExpr: "e.templateBuild", arity: 2},
 }
 
 // parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.

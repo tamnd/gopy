@@ -843,6 +843,83 @@ func (e *evalState) listFromStackRef(values []objects.Object, n int32) objects.O
 	return objects.NewList(items)
 }
 
+// longFromSsizeT wraps PyLong_FromSsize_t: boxes a Go int as a Python
+// int.
+//
+// CPython: Objects/longobject.c:1488 PyLong_FromSsize_t
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) longFromSsizeT(n int32) objects.Object {
+	return objects.NewInt(int64(n))
+}
+
+// cellGetStackRef wraps _PyCell_GetStackRef: returns the cell's contents
+// (nil if unbound).
+//
+// CPython: Include/cpython/cellobject.h _PyCell_GetStackRef
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) cellGetStackRef(cell objects.Object) objects.Object {
+	c, ok := cell.(*objects.Cell)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: _PyCell_GetStackRef expected cell")
+		return nil
+	}
+	return c.Contents
+}
+
+// getAwaitable wraps _PyEval_GetAwaitable. opcode is a hint CPython uses
+// for tailored error messages; gopy currently ignores it.
+//
+// CPython: Python/ceval.c:3525 _PyEval_GetAwaitable
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) getAwaitable(iter objects.Object, opcode uint32) objects.Object {
+	_ = opcode
+	out, err := getAwaitableIter(iter)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return out
+}
+
+// dictUpdate wraps PyDict_Update: merges b into a without duplicate-key
+// checking.
+//
+// CPython: Objects/dictobject.c:3354 PyDict_Update
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) dictUpdate(a, b objects.Object) int32 {
+	d, ok := a.(*objects.Dict)
+	if !ok {
+		e.pendingErr = errors.New("TypeError: PyDict_Update expected dict")
+		return -1
+	}
+	if bd, ok := b.(*objects.Dict); ok {
+		for _, k := range bd.Keys() {
+			v, _ := bd.GetItem(k)
+			if serr := d.SetItem(k, v); serr != nil {
+				e.pendingErr = serr
+				return -1
+			}
+		}
+		return 0
+	}
+	e.pendingErr = errors.New("TypeError: PyDict_Update expected dict source")
+	return -1
+}
+
+// templateBuild wraps _PyTemplate_Build: builds a PEP 750 t-string from
+// its strings/interpolations tuples.
+//
+// CPython: Objects/templateobject.c _PyTemplate_Build
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) templateBuild(strings, interpolations objects.Object) objects.Object {
+	return objects.NewTemplateStr(strings, interpolations)
+}
+
 // objectFormat wraps PyObject_Format. spec may be nil for an empty
 // format spec.
 //

@@ -50,9 +50,22 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = strings
 		interpolations := e.peek(0)
 		_ = interpolations
-		// body bail: PyObject template_o rhs: unexpected token "_PyTemplate_Build" in expression
-		// outputs: template
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var template stackref.Ref
+		strings_o := strings.AsObject()
+		_ = strings_o
+		interpolations_o := interpolations.AsObject()
+		_ = interpolations_o
+		template_o := e.templateBuild(strings_o, interpolations_o)
+		_ = template_o
+		interpolations.Close()
+		strings.Close()
+		if template_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		template = stackref.FromObject(template_o)
+		e.drop(1 + 1)
+		e.push(template)
+		return e.advance(), nil, nil, false, nil
 	case compile.BUILD_TUPLE:
 		// body bail: unrecognized token at action body start: "if"
 		// outputs: tup
@@ -131,7 +144,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.drop(1)
 		return e.advance(), nil, nil, false, nil
 	case compile.DELETE_DEREF:
-		// body bail: PyObject oldobj rhs: unexpected token "PyCellObject" in expression
+		// body bail: unrecognized token at action body start: "if"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_FAST:
 		// body bail: unrecognized token at action body start: "if"
@@ -170,7 +183,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = dict
 		update := e.peek(0)
 		_ = update
-		// body bail: int err rhs: unexpected token "PyDict_Update" in expression
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: dict* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.END_FOR:
@@ -238,9 +251,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.GET_AWAITABLE:
 		iterable := e.peek(0)
 		_ = iterable
-		// body bail: PyObject iter_o rhs: unexpected token "_PyEval_GetAwaitable" in expression
-		// outputs: iter
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var iter stackref.Ref
+		iter_o := e.getAwaitable(iterable.AsObject(), oparg)
+		_ = iter_o
+		iterable.Close()
+		if iter_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		iter = stackref.FromObject(iter_o)
+		e.drop(1)
+		e.push(iter)
+		return e.advance(), nil, nil, false, nil
 	case compile.GET_ITER:
 		iterable := e.peek(0)
 		_ = iterable
@@ -250,9 +271,21 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.GET_LEN:
 		obj := e.peek(0)
 		_ = obj
-		// body bail: PyObject len_o rhs: unexpected token "PyLong_FromSsize_t" in expression
-		// outputs: obj* len
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var len stackref.Ref
+		len_i := e.objectLength(obj.AsObject())
+		_ = len_i
+		if len_i < 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		len_o := e.longFromSsizeT(len_i)
+		_ = len_o
+		if len_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		len = stackref.FromObject(len_o)
+		e.setPeek(0, obj)
+		e.push(len)
+		return e.advance(), nil, nil, false, nil
 	case compile.GET_YIELD_FROM_ITER:
 		iterable := e.peek(0)
 		_ = iterable
@@ -410,7 +443,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_DEREF:
-		// body bail: PyCellObject cell rhs: unexpected token "PyCellObject" in expression
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_FAST:
@@ -486,7 +519,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.push(v)
 		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_SMALL_INT:
-		// body bail: PyObject obj rhs: unexpected token "PyObject" in expression
+		// body bail: PyObject obj rhs: unexpected token "&" in expression
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MAKE_CELL:
@@ -495,7 +528,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.MAKE_FUNCTION:
 		codeobj_st := e.peek(0)
 		_ = codeobj_st
-		// body bail: PyFunctionObject func_obj rhs: unexpected token "PyFunctionObject" in expression
+		// body bail: PyFunctionObject func_obj rhs: unexpected token "PyFunction_New" in expression
 		// outputs: func_v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MAP_ADD:
@@ -505,7 +538,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = key
 		value := e.peek(0)
 		_ = value
-		// body bail: int err rhs: unexpected token "_PyDict_SetItem_Take2" in expression
+		// body bail: int err rhs: unexpected token "PyDictObject" in expression
 		// outputs: dict_st* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MATCH_CLASS:
@@ -583,7 +616,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// body bail: unrecognized token at action body start: "Py_FatalError"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RETURN_GENERATOR:
-		// body bail: PyFunctionObject func rhs: unexpected token "PyFunctionObject" in expression
+		// body bail: PyFunctionObject func rhs: expected ')' to close call
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RETURN_VALUE:
@@ -628,7 +661,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_DEREF:
 		v := e.peek(0)
 		_ = v
-		// body bail: PyCellObject cell rhs: unexpected token "PyCellObject" in expression
+		// body bail: unrecognized token at action body start: "PyCell_SetTakeRef"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.STORE_FAST:
 		value := e.peek(0)
