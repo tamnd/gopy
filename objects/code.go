@@ -261,6 +261,9 @@ func codeGetAttr(o Object, name Object) (Object, error) {
 	case "co_flags":
 		return NewInt(int64(c.Flags)), nil
 	}
+	if v, ok := codeAttrLookup(c, n.v); ok {
+		return v, nil
+	}
 	return GenericGetAttr(o, name)
 }
 
