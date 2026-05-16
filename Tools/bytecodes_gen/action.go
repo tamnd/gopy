@@ -799,6 +799,21 @@ func (p *exprParser) parsePrimary() (string, error) {
 		return "stackref.False", nil
 	case "PyStackRef_None":
 		return "stackref.None", nil
+	case "PyStackRef_TYPE":
+		// CPython macro: returns the PyTypeObject* of the boxed object.
+		// In bytecodes.c the only call shape we see is
+		// `PyStackRef_TYPE(x) -> tp_flags`, used for tp_flags bit-tests
+		// in MATCH_MAPPING / MATCH_SEQUENCE. Translate that compound
+		// into a single helper that returns the flag bitset as uint64.
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		if p.pos+1 < len(p.toks) && p.toks[p.pos] == "->" && p.toks[p.pos+1] == "tp_flags" {
+			p.pos += 2
+			return fmt.Sprintf("e.stackrefTypeFlags(%s)", arg), nil
+		}
+		return "", fmt.Errorf("PyStackRef_TYPE only supported with -> tp_flags")
 	case "PyStackRef_DUP", "PyStackRef_Borrow":
 		// CPython distinguishes owned (DUP) from borrowed (Borrow) refs;
 		// under Go's GC the distinction collapses, so both render the
@@ -954,6 +969,12 @@ func (p *exprParser) parsePrimary() (string, error) {
 		// helper ignores. Surface a nil objects.Object via the helper sentinel.
 		if strings.HasPrefix(tk, "PyExc_") {
 			return "nil", nil
+		}
+		// Py_TPFLAGS_* constants. Used as the RHS of `tp_flags & FLAG`
+		// bit tests in MATCH_MAPPING / MATCH_SEQUENCE. The objects
+		// package exposes the same values as TpFlagMapping etc.
+		if rest, ok := strings.CutPrefix(tk, "Py_TPFLAGS_"); ok {
+			return "objects.TpFlag" + camelizeFlag(rest), nil
 		}
 	}
 	return "", fmt.Errorf("unexpected token %q in expression", tk)
@@ -1471,6 +1492,19 @@ func (t *actionTranslator) translateUnaryCall(suffix string) error {
 // goLocalName mirrors bindName for the case where the slot has a real
 // source name. Keyword slots get a `_v` suffix so the body references
 // match the prologue's locals.
+// camelizeFlag turns a SCREAMING_SNAKE flag name (MAPPING, SEQUENCE)
+// into the CamelCase suffix used by objects.TpFlagXxx constants.
+func camelizeFlag(s string) string {
+	parts := strings.Split(strings.ToLower(s), "_")
+	for i, p := range parts {
+		if p == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(p[:1]) + p[1:]
+	}
+	return strings.Join(parts, "")
+}
+
 func goLocalName(name string) string {
 	if goKeywords[name] {
 		return name + "_v"

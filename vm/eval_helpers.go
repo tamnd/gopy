@@ -272,6 +272,26 @@ func (e *evalState) dictSetItem(scope, key, value objects.Object) int32 {
 	return 0
 }
 
+// stackrefTypeFlags returns the boxed object's tp_flags. Translates the
+// CPython compound `PyStackRef_TYPE(x)->tp_flags` so MATCH_MAPPING and
+// MATCH_SEQUENCE can `& Py_TPFLAGS_MAPPING` etc. without exposing the
+// PyTypeObject indirection at the bytecode action level.
+//
+// CPython: Include/internal/pycore_stackref.h PyStackRef_TYPE
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) stackrefTypeFlags(r stackref.Ref) uint64 {
+	o := r.AsObject()
+	if o == nil {
+		return 0
+	}
+	t := o.Type()
+	if t == nil {
+		return 0
+	}
+	return t.TpFlags
+}
+
 // objectSetItem wraps PyObject_SetItem: container[sub] = val.
 //
 // CPython: Objects/abstract.c:175 PyObject_SetItem
