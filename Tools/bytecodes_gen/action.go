@@ -206,8 +206,6 @@ var cTypeDecls = map[string]bool{
 	"_PyErr_StackItem": true,
 	"conversion_func":  true,
 	"unaryfunc":        true,
-	"opcode":           true,
-	"tstate":           true,
 }
 
 // translateTypedDecl handles `<C-type> [*] NAME = EXPR;`. Go infers the
