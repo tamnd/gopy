@@ -97,7 +97,8 @@ func FromBytes(src []byte, mode Mode) *State {
 			}
 		}
 	}
-	src = NormalizeNewlines(src)
+	// CPython: Parser/pegen.c:1048 exec_input = start_rule == Py_file_input
+	src = TranslateNewlines(src, mode == ModeFile)
 	s.buf = src
 	s.cur = 0
 	s.inp = len(src)

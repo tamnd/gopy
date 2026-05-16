@@ -149,42 +149,35 @@ func resolveScope(fnName string, globals, locals objects.Object) (objects.Object
 }
 
 // codeForSource turns the source argument into an *objects.Code. A
-// code object is returned as-is; str routes through ParseString while
-// bytes / bytearray route through ParseBytes so the PEP 263 coding
-// cookie controls the decode. fnName / mode pair the call to its
-// CPython sibling ("eval"/ModeEval, "exec"/ModeFile).
+// code object is returned as-is; everything else goes through
+// sourceAsString (the gopy port of _Py_SourceAsString) and then through
+// the parser. Unicode keeps the str-side ParseString entry (CPython
+// sets PyCF_IGNORE_COOKIE for unicode sources); bytes / bytearray
+// route through ParseBytes so the PEP 263 cookie controls decode.
 //
 // CPython: Python/bltinmodule.c:1081 builtin_exec_impl (source-decode block)
+// CPython: Python/bltinmodule.c:956 builtin_eval_impl (source-decode block)
 func codeForSource(source objects.Object, fnName string, mode parser.Mode) (*objects.Code, error) {
 	if c, ok := source.(*objects.Code); ok {
 		return c, nil
 	}
+	str, isUnicode, err := sourceAsString(source, fnName)
+	if err != nil {
+		return nil, err
+	}
 	var mod ast.Mod
-	switch v := source.(type) {
-	case *objects.Unicode:
-		src := v.Value()
-		if src == "" || src[len(src)-1] != '\n' {
-			src += "\n"
-		}
-		m, err := parser.ParseString(src, "<string>", mode)
-		if err != nil {
-			return nil, err
+	if isUnicode {
+		m, perr := parser.ParseString(str, "<string>", mode)
+		if perr != nil {
+			return nil, perr
 		}
 		mod = m
-	case *objects.Bytes:
-		m, err := parser.ParseBytes(bytesWithNewline(v.Bytes()), "<string>", mode)
-		if err != nil {
-			return nil, err
+	} else {
+		m, perr := parser.ParseBytes([]byte(str), "<string>", mode)
+		if perr != nil {
+			return nil, perr
 		}
 		mod = m
-	case *objects.ByteArray:
-		m, err := parser.ParseBytes(bytesWithNewline(v.Bytes()), "<string>", mode)
-		if err != nil {
-			return nil, err
-		}
-		mod = m
-	default:
-		return nil, fmt.Errorf("TypeError: %s() arg 1 must be a string, bytes or code object", fnName)
 	}
 	cco, err := compile.Compile(mod, "<string>", 0)
 	if err != nil {
@@ -193,19 +186,36 @@ func codeForSource(source objects.Object, fnName string, mode parser.Mode) (*obj
 	return liftCompileCode(cco), nil
 }
 
-// bytesWithNewline returns a copy of b with a trailing newline so the
-// lexer's "must end with NEWLINE" invariant holds. CPython's
-// _Py_SourceAsString appends '\n' in the same spot.
-func bytesWithNewline(b []byte) []byte {
-	if len(b) > 0 && b[len(b)-1] == '\n' {
-		dup := make([]byte, len(b))
-		copy(dup, b)
-		return dup
+// sourceAsString is the gopy port of CPython's _Py_SourceAsString.
+// It extracts the raw source from a str / bytes / bytearray, rejects
+// embedded NUL bytes (which CPython surfaces as a SyntaxError), and
+// reports whether the input came in as unicode so callers can pick the
+// str-side or bytes-side parser entry. The trailing-newline injection
+// that CPython does inside _PyTokenizer_translate_newlines lives in
+// the gopy lexer (parser/lexer/source.go TranslateNewlines) so it
+// applies uniformly to all entry points, not just exec/eval.
+//
+// CPython: Python/pythonrun.c:1572 _Py_SourceAsString
+func sourceAsString(cmd objects.Object, fnName string) (string, bool, error) {
+	var s string
+	isUnicode := false
+	switch v := cmd.(type) {
+	case *objects.Unicode:
+		s = v.Value()
+		isUnicode = true
+	case *objects.Bytes:
+		s = string(v.Bytes())
+	case *objects.ByteArray:
+		s = string(v.Bytes())
+	default:
+		return "", false, fmt.Errorf("TypeError: %s() arg 1 must be a string, bytes or code object", fnName)
 	}
-	dup := make([]byte, len(b)+1)
-	copy(dup, b)
-	dup[len(b)] = '\n'
-	return dup
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0 {
+			return "", false, fmt.Errorf("SyntaxError: source code string cannot contain null bytes")
+		}
+	}
+	return s, isUnicode, nil
 }
 
 // runCode dispatches a compiled code object through the vm via the
