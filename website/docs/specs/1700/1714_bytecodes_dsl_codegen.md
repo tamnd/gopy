@@ -532,12 +532,12 @@ failure.
 
 | Step | Status | Commit |
 |------|--------|--------|
-| `tools/cases_generator/cache_struct_parser.py` | TODO | - |
-| `specialize/cache_layouts_gen.go` lands with every `_Py<Op>Cache` typed | TODO | - |
+| `tools/cases_generator/cache_struct_parser.py` | DONE | this commit |
+| `specialize/cache_layouts_gen.go` lands with every `_Py<Op>Cache` typed | DONE | this commit |
 | Migrate `specialize/load_global.go` + `vm/eval_specialized_load_global.go` to typed access | TODO | - |
 | Migrate every other `specialize/*.go` + `vm/eval_specialized_*.go` | TODO | - |
 | `specialize/cache.go` `SetCacheCell` / `CacheCell` deleted (no callers) | TODO | - |
-| Cache-layout size test green | TODO | - |
+| Cache-layout size test green | DONE | this commit |
 
 ## Phase 4 — family + deopt
 
@@ -890,8 +890,8 @@ helper).
 - [x] Phase 2.2 — `gopy_opcode_metadata_generator.py` emits `compile/opcode_metadata_gen.go`
 - [x] Phase 2.3 — parity test vs `compile/opcodes_gen.go` + `compile/opcode_caches.go`
 - [ ] Phase 2.4 — delete `compile/opcode_caches.go`; redirect references
-- [ ] Phase 3.1 — `cache_struct_parser.py` parses `pycore_code.h` struct definitions
-- [ ] Phase 3.2 — `specialize/cache_layouts_gen.go` covers every `_Py<Op>Cache`
+- [x] Phase 3.1 — `cache_struct_parser.py` parses `pycore_code.h` struct definitions
+- [x] Phase 3.2 — `specialize/cache_layouts_gen.go` covers every `_Py<Op>Cache`
 - [ ] Phase 3.3 — migrate `specialize/load_global.go` + `vm/eval_specialized_load_global.go` to typed accessors
 - [ ] Phase 3.4 — migrate every other `specialize/*.go` + `vm/eval_specialized_*.go`
 - [ ] Phase 3.5 — delete `specialize.SetCacheCell` / `CacheCell` (no callers)

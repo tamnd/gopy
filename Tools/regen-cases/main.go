@@ -128,6 +128,9 @@ var gopyGenerators = []generator{
 	{name: "gopy_opcode_metadata_generator.py", out: "compile/opcode_metadata_gen.go",
 		inputs:  []string{"Python/bytecodes.c"},
 		comment: "//"},
+	{name: "cache_struct_parser.py", out: "specialize/cache_layouts_gen.go",
+		inputs:  []string{"Include/internal/pycore_code.h"},
+		comment: "//"},
 }
 
 func main() {
