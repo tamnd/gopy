@@ -658,6 +658,11 @@ body has been audited byte-equivalent to the prior arm.
 | `NOP` | empty body | trivial |
 | `POP_TOP` | `PyStackRef_CLOSE(value)` | exercises stack-ref close |
 | `JUMP_FORWARD` | `JUMPBY(oparg)` | body-driven terminator |
+| `PUSH_NULL` | output `= PyStackRef_NULL` | output-assignment statement |
+| `LOAD_FAST` | output `= PyStackRef_DUP(GETLOCAL(oparg))` | GETLOCAL rvalue + Dup |
+| `LOAD_FAST_BORROW` | same body as LOAD_FAST | borrow collapses under Go GC |
+| `LOAD_FAST_AND_CLEAR` | LOAD_FAST plus `GETLOCAL(oparg) = PyStackRef_NULL` | GETLOCAL lvalue |
+| `STORE_FAST` | `_PyStackRef tmp = GETLOCAL(oparg); GETLOCAL(oparg) = value; PyStackRef_XCLOSE(tmp)` | C-local decl + lvalue |
 
 #### Hand-written staging (`dispatchHandwritten`)
 
@@ -669,14 +674,9 @@ whitelist accepts it.
 
 | Opcode | Notes |
 |--------|-------|
-| `PUSH_NULL` | needs `PyStackRef_NULL` output binding in translator |
 | `LOAD_CONST` | needs `co_consts[oparg]` indexing in translator |
-| `LOAD_FAST` | needs `GETLOCAL(oparg)` + `PyStackRef_DUP` |
-| `LOAD_FAST_BORROW` | aliased to LOAD_FAST under our GC model |
-| `LOAD_FAST_CHECK` | adds null-guard error path |
-| `LOAD_FAST_AND_CLEAR` | LOAD_FAST + `SETLOCAL(oparg, NULL)` |
-| `STORE_FAST` | needs `SETLOCAL(oparg, value)` with old close |
-| `DELETE_FAST` | STORE_FAST plus unbound error |
+| `LOAD_FAST_CHECK` | adds null-guard error path; CPython body calls `_PyEval_FormatExcCheckArg` |
+| `DELETE_FAST` | STORE_FAST plus unbound error; same `_PyEval_FormatExcCheckArg` call |
 | `RETURN_VALUE` | terminator that returns TOS |
 | `INTERPRETER_EXIT` | same body as RETURN_VALUE today |
 | `COPY` | `stack[-oparg]` peek + dup |
