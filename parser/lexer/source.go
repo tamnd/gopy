@@ -246,16 +246,21 @@ func utf8Size(c byte) int {
 	return 0
 }
 
-// NormalizeNewlines folds \r\n and bare \r into \n so the FSM can
-// treat newline as a single byte. CPython does the same fold in
-// the file driver before handing lines to the scanner.
+// TranslateNewlines is the gopy port of CPython's
+// _PyTokenizer_translate_newlines. It folds CRLF and bare CR into LF
+// (so the FSM treats newline as a single byte) and, when execInput is
+// true, appends a trailing LF when the source does not already end in
+// one. The trailing-newline injection is what file-input mode relies on
+// so the final statement's NEWLINE token closes the suite.
 //
-// CPython: Parser/tokenizer/file_tokenizer.c:118 translate_newlines
-func NormalizeNewlines(src []byte) []byte {
-	if bytes.IndexByte(src, '\r') < 0 {
+// CPython: Parser/tokenizer/helpers.c:215 _PyTokenizer_translate_newlines
+func TranslateNewlines(src []byte, execInput bool) []byte {
+	needsFold := bytes.IndexByte(src, '\r') >= 0
+	needsTrailingNL := execInput && len(src) > 0 && src[len(src)-1] != '\n'
+	if !needsFold && !needsTrailingNL {
 		return src
 	}
-	out := make([]byte, 0, len(src))
+	out := make([]byte, 0, len(src)+1)
 	for i := 0; i < len(src); i++ {
 		if src[i] == '\r' {
 			out = append(out, '\n')
@@ -266,5 +271,17 @@ func NormalizeNewlines(src []byte) []byte {
 		}
 		out = append(out, src[i])
 	}
+	if execInput && len(out) > 0 && out[len(out)-1] != '\n' {
+		out = append(out, '\n')
+	}
 	return out
+}
+
+// NormalizeNewlines is the no-injection form (execInput=false). Kept
+// for callers and tests that only need the CRLF fold.
+//
+// CPython: Parser/tokenizer/helpers.c:215 _PyTokenizer_translate_newlines
+// (with exec_input == 0)
+func NormalizeNewlines(src []byte) []byte {
+	return TranslateNewlines(src, false)
 }
