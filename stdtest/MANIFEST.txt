@@ -15,3 +15,4 @@
 #   name<TAB>note (optional)
 test_keyword	10/11 sub-tests green; the eleventh fails on a compile-in-single-mode parser gap unrelated to lexer/tokenizer
 test_utf8source	3/3 green; covers PEP 3120 utf-8 default, badsyntax non-utf-8 detection, and compile() over latin-1 bytes
+test_tabnanny	exits 0; gates the tabnanny module on top of the lexer/tokenizer indent panel

@@ -17,7 +17,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | CPython source | C LOC | gopy destination | Go LOC | Status | Commit |
 |---|---:|---|---:|---|---|
 | `Parser/lexer/buffer.c` | 76 | `parser/lexer/buffer.go` | 56 | DONE | 5374e84 |
-| `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` (+ `fstring.go`) | 633 + 240 | WIP | function-map landed, gaps tracked under #612 (verify_*), #613 (check_coding_spec), #617 (maybe_raise_syntax_error_for_string_prefixes), #618 (update_ftstring_expr) |
+| `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` (+ `fstring.go` + `onechar.go`) | 957 + 240 + (operator table) | DONE | function-map + verify_* (#612), check_coding_spec (#613), maybe_raise_syntax_error_for_string_prefixes (#617), update_ftstring_expr (#618) all landed |
 | `Parser/lexer/state.c` | 151 | `parser/lexer/state.go` | 402 | DONE | d157189 |
 | `Parser/tokenizer/helpers.c` | 581 | `parser/lexer/helpers.go` (+ encoding subset in `parser/lexer/source.go`) | 176 + 238 | DONE | de537e1 |
 | `Parser/tokenizer/file_tokenizer.c` | 493 | `parser/lexer/driver_file.go` | 120 | DONE | 268c8f8 |
@@ -35,7 +35,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 |---|---:|---|---|
 | `test_keyword.py` | 56 | DONE (10/11 sub-tests green; the eleventh hits a parser-generator gap unrelated to lexer/tokenizer, `parser: generated rule bodies not yet emitted`. Also mirrored at `stdtest/test_keyword.py` and gated via `TestStdtestCorpus`.) | — |
 | `test_utf8source.py` | 41 | DONE (3/3 sub-tests green; mirrored at `stdtest/test_utf8source.py`) | — |
-| `test_tabnanny.py` | 354 | DONE (exits 0 after typed `UnicodeDecodeError` + `surrogateescape` decode fix) | 3066fe3 |
+| `test_tabnanny.py` | 354 | DONE (exits 0 after typed `UnicodeDecodeError` + `surrogateescape` decode fix; mirrored under `stdtest/test_tabnanny.py`) | 3066fe3 |
 | `test_source_encoding.py` | 547 | TODO (imports clear; first hang is `BytesSourceEncodingTest.test_crcrcrlf`, which is `exec(bytes)` inside `captured_stdout`; the underlying gap is the VM's `exec(bytes)` path, not lexer/tokenizer). | — |
 | `test_tokenize.py` | 3480 | WIP. Three plumbing blockers cleared: (a) `drainReadline` encoding inversion fixed in 538ab52; (b) `FORMAT_WITH_SPEC` now routes through `objects.Format` in 5bd8455; (c) `scanOperator` now emits the specific operator token type via the new `_PyToken_OneChar`/`TwoChars`/`ThreeChars` port in 669c11f. `unittest.main` reaches the test bodies now, but most sub-tests still ERROR and one hangs: tokenize position output is off (e.g. `1 + 1` emits the implicit NEWLINE at `(2, 0) (2, 2)` instead of `(1, 5) (1, 6)`, and the second `check_tokenize` reorders NEWLINE before COMMENT and reports it on the wrong line). The remaining work is a token-position parity pass over `parser/lexer/lexer.go` against `Parser/lexer/lexer.c`, not within the scope of this commit batch. | 538ab52, 5bd8455, 669c11f |
 
