@@ -68,7 +68,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: tup
 	case compile.CACHE:
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "Py_FatalError"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CALL_INTRINSIC_1:
 		value := e.pop()
@@ -199,7 +199,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// body bail: unrecognized token at action body start: "if"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.EXTENDED_ARG:
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "opcode"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.FORMAT_SIMPLE:
 		value := e.pop()
@@ -309,7 +309,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		cond := e.pop()
 		_ = cond
 		// cache "unused" size=1 offset=0
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_POP_JUMP_IF_NONE:
 		value := e.pop()
@@ -327,12 +327,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		cond := e.pop()
 		_ = cond
 		// cache "unused" size=1 offset=0
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INTERPRETER_EXIT:
 		retval := e.pop()
 		_ = retval
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "tstate"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.IS_OP:
 		right := e.pop()
@@ -343,7 +343,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: b
 	case compile.JUMP_BACKWARD_NO_INTERRUPT:
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "JUMPBY"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.JUMP_FORWARD:
 		// body bail: unrecognized token at action body start: "JUMPBY"
@@ -508,7 +508,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.RAISE_VARARGS:
 		// sized input args, size=oparg
 		for i := 0; i < int(oparg); i++ { _ = e.pop() }
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RERAISE:
 		exc_st := e.pop()
@@ -519,7 +519,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: values[oparg]
 	case compile.RESERVED:
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "Py_FatalError"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RETURN_GENERATOR:
 		// body bail: outputs not yet handled by action translator
@@ -570,7 +570,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_FAST:
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "_PyStackRef"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.STORE_FAST_LOAD_FAST:
 		value1 := e.pop()
@@ -583,7 +583,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value1
 		value2 := e.pop()
 		_ = value2
-		// body bail: unrecognized token at action body start: "assert"
+		// body bail: unrecognized token at action body start: "uint32_t"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.STORE_GLOBAL:
 		v := e.pop()

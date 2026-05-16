@@ -91,6 +91,11 @@ func (t *actionTranslator) translateStmt() error {
 		// specializer, no computed-goto). The eval loop drives every
 		// dispatch through the main switch, so DISPATCH() is implicit.
 		return t.skipParenthesised()
+	case "assert":
+		// CPython sprinkles assert(invariant) through bytecodes; Go has
+		// no compiled-out assert. The body's behavior holds regardless,
+		// so consume `assert(...)` and any trailing `;` and continue.
+		return t.skipParenthesised()
 	case "PyStackRef_CLOSE", "PyStackRef_XCLOSE":
 		// Stack-ref close: drop the runtime ref. CLOSE asserts non-null;
 		// XCLOSE tolerates null. Both map to .Close() on the popped
