@@ -163,7 +163,13 @@ type State struct {
 	atbol     bool
 	pendin    int // >0 indents pending, <0 dedents pending
 	lineno    int
-	firstLine int
+	// pendingLineno defers the post-'\n' line bump until the next
+	// non-EOF byte is actually consumed. CPython's tok_underflow_*
+	// callbacks call ADVANCE_LINENO when they successfully fetch the
+	// next line; gopy preloads the buffer, so we mimic the timing by
+	// bumping in nextC instead.
+	pendingLineno int
+	firstLine     int
 
 	startCol int
 	col      int
