@@ -66,7 +66,7 @@ over them by adding `_PyOpcode_Caches[op]` to the program counter.
 | `STORE_SLICE`         | -4           | TOS3[TOS1:TOS] = TOS4.                |
 | `DELETE_SUBSCR`       | -2           | del TOS1[TOS].                        |
 
-`BINARY_OP <kind>` covers `+ - * / // % ** @ << >> & | ^` and their
+`BINARY_OP <kind>` covers `+ - * / // % ** @ << >> & \| ^` and their
 in-place variants. The kind byte selects the operator.
 
 ### Constants and names
@@ -100,9 +100,9 @@ in-place variants. The kind byte selects the operator.
 
 | Opcode                 | Effect                                                 |
 | ---------------------- | ------------------------------------------------------ |
-| `LOAD_ATTR <i>`        | TOS = TOS.<name>.                                      |
-| `STORE_ATTR <i>`       | TOS1.<name> = TOS.                                     |
-| `DELETE_ATTR <i>`      | del TOS.<name>.                                        |
+| `LOAD_ATTR <i>`        | `TOS = TOS.<name>`.                                    |
+| `STORE_ATTR <i>`       | `TOS1.<name> = TOS`.                                   |
+| `DELETE_ATTR <i>`      | `del TOS.<name>`.                                      |
 | `LOAD_SUPER_ATTR <i>`  | super().attr load (3.12+).                             |
 | `LOAD_METHOD` (folded into LOAD_ATTR with low bit) | Push bound method or NULL+function. |
 
@@ -130,7 +130,7 @@ in-place variants. The kind byte selects the operator.
 
 | Opcode             | Effect                                                     |
 | ------------------ | ---------------------------------------------------------- |
-| `COMPARE_OP <op>`  | TOS = TOS1 op TOS, where op is `<,<=,==,!=,>,>=`.          |
+| `COMPARE_OP <op>`  | `TOS = TOS1 op TOS`; op is one of `<`, `<=`, `==`, `!=`, `>`, `>=`. |
 | `IS_OP <invert>`   | TOS = (TOS1 is TOS) XOR invert.                            |
 | `CONTAINS_OP <invert>` | TOS = (TOS in TOS1) XOR invert.                        |
 | `CHECK_EXC_MATCH`  | exception-match check used by `except`.                    |

@@ -1,18 +1,149 @@
 ---
 title: io
-description: The io module in gopy.
+description: The I/O stack. Raw, buffered, and text layers around files, pipes, and bytes objects.
 ---
 
 # `io`
 
-The `io` module. Behaviour matches CPython 3.14. Source lives at
-`module/io/` in the gopy repo (or under `stdlib/io.py` for
-pure-Python ports).
+The `io` module is the implementation of `open()` and the family of
+stream classes Python uses for every kind of file-like object. It is
+a three-layer stack:
 
-## Status
+| Layer    | Base class            | Purpose                                |
+| -------- | --------------------- | -------------------------------------- |
+| Raw      | `RawIOBase`           | Unbuffered byte I/O on a file descriptor. |
+| Buffered | `BufferedIOBase`      | Byte buffering on top of a raw stream. |
+| Text     | `TextIOBase`          | Codec on top of a buffered byte stream. |
 
-See [manual/status](../manual/status) for current coverage.
+Source-of-record: `Modules/_io/*`, `Lib/io.py`, `Lib/_pyio.py`,
+[io docs](https://docs.python.org/3.14/library/io.html).
 
-## API
+## `open` and helpers
 
-(Reference table in progress.)
+```python
+open(file, mode='r', buffering=-1, encoding=None, errors=None,
+     newline=None, closefd=True, opener=None)
+```
+
+| Mode char | Effect                                              |
+| --------- | --------------------------------------------------- |
+| `r`       | Read (default).                                     |
+| `w`       | Write, truncate.                                    |
+| `x`       | Exclusive create.                                   |
+| `a`       | Append.                                             |
+| `b`       | Binary.                                             |
+| `t`       | Text (default).                                     |
+| `+`       | Read and write.                                     |
+
+Helpers:
+
+| Function                              | Returns                                    |
+| ------------------------------------- | ------------------------------------------ |
+| `io.open_code(path)`                  | Opens a `.py` source file for the import system. |
+| `io.text_encoding(encoding, stacklevel=2)` | Resolves the default text encoding, warning if needed. |
+| `io.IOBase.__del__`                   | Closes on collection.                      |
+
+## `IOBase` interface
+
+All stream types implement at least:
+
+| Method                  | Role                                          |
+| ----------------------- | --------------------------------------------- |
+| `close()`               | Flush and release resources.                  |
+| `closed`                | Predicate.                                    |
+| `fileno()`              | OS file descriptor; `OSError` if none.        |
+| `flush()`               | Push buffered data.                           |
+| `isatty()`              | Predicate.                                    |
+| `readable()`            | Predicate.                                    |
+| `readline(size=-1)`     | One line.                                     |
+| `readlines(hint=-1)`    | All lines.                                    |
+| `seek(offset, whence=SEEK_SET)` | Reposition.                          |
+| `seekable()`            | Predicate.                                    |
+| `tell()`                | Position.                                     |
+| `truncate(size=None)`   | Truncate to size.                             |
+| `writable()`            | Predicate.                                    |
+| `writelines(lines)`     | Many writes.                                  |
+| `__enter__` / `__exit__` | Context manager protocol.                    |
+| `__iter__` / `__next__` | Iterates lines.                              |
+
+`SEEK_SET=0`, `SEEK_CUR=1`, `SEEK_END=2`.
+
+## Raw streams
+
+| Class           | Wraps                                | Notes                            |
+| --------------- | ------------------------------------ | -------------------------------- |
+| `FileIO`        | OS file descriptor                   | `RawIOBase` over `read`/`write`. |
+| `BytesIO`       | In-memory bytes buffer               | Binary stream backed by `bytes`. |
+
+`FileIO(path, mode='r', closefd=True, opener=None)` accepts `'r'`,
+`'w'`, `'x'`, `'a'`, `'+'`.
+
+## Buffered streams
+
+| Class              | Wraps             | Use                                  |
+| ------------------ | ----------------- | ------------------------------------ |
+| `BufferedReader`   | Raw read stream   | Read buffering.                      |
+| `BufferedWriter`   | Raw write stream  | Write buffering, flushes on `close`. |
+| `BufferedRandom`   | Raw rw stream     | Bidirectional buffering.             |
+| `BufferedRWPair`   | Two raw streams   | Pipe pairs.                          |
+
+Buffered API additions:
+
+| Method                   | Role                                       |
+| ------------------------ | ------------------------------------------ |
+| `read(size=-1)`          | Up to `size` bytes; full buffer flush.     |
+| `read1(size=-1)`         | One underlying read.                       |
+| `readinto(b)`            | Fill `b`.                                  |
+| `readinto1(b)`           | One underlying read into `b`.              |
+| `peek(size=0)`           | Peek without advancing.                    |
+| `write(b)`               | Returns bytes written.                     |
+| `raw`                    | The wrapped raw stream.                    |
+
+Default buffer size is `DEFAULT_BUFFER_SIZE = 8192`.
+
+## Text streams
+
+| Class                  | Wraps          | Notes                                  |
+| ---------------------- | -------------- | -------------------------------------- |
+| `TextIOWrapper`        | Buffered binary | The encoding layer applied to files.   |
+| `StringIO`             | In-memory `str` | Text stream backed by `str`.           |
+| `IncrementalNewlineDecoder` | bytes -> str | Newline translation.                |
+
+`TextIOWrapper(buffer, encoding=None, errors=None, newline=None,
+line_buffering=False, write_through=False)`.
+
+| Attribute        | Meaning                                           |
+| ---------------- | ------------------------------------------------- |
+| `encoding`       | Codec name.                                       |
+| `errors`         | Codec error handler.                              |
+| `newline`        | Translation: `''`, `'\\n'`, `'\\r'`, `'\\r\\n'`.  |
+| `line_buffering` | Flush on each newline.                            |
+| `write_through`  | Pass writes straight through, no buffering.       |
+| `buffer`         | Underlying buffered byte stream.                  |
+
+`reconfigure(encoding=None, errors=None, newline=None,
+line_buffering=None, write_through=None)` mutates settings.
+
+## Exceptions
+
+| Exception              | Trigger                                |
+| ---------------------- | -------------------------------------- |
+| `BlockingIOError`      | Non-blocking I/O would block.          |
+| `UnsupportedOperation` | `OSError` + `ValueError`; raised by base classes when an op isn't valid. |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `open` and mode parsing               | Complete.                                          |
+| `FileIO`, `BytesIO`, `StringIO`       | Complete.                                          |
+| Buffered classes                      | Complete.                                          |
+| `TextIOWrapper` and newline policy    | Complete.                                          |
+| Non-blocking and locking semantics    | Complete; uses Go's `os` package under the hood.   |
+
+## Reference
+
+* CPython 3.14: [io module](https://docs.python.org/3.14/library/io.html).
+* `Modules/_io/`. C side.
+* `Lib/io.py`, `Lib/_pyio.py`. Python side.
+* `module/io/`. gopy port.

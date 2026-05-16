@@ -1,18 +1,114 @@
 ---
 title: sys
-description: The sys module in gopy.
+description: System-specific parameters, runtime configuration, and interpreter hooks.
 ---
 
 # `sys`
 
-The `sys` module. Behaviour matches CPython 3.14. Source lives at
-`module/sys/` in the gopy repo (or under `stdlib/sys.py` for
-pure-Python ports).
+The `sys` module exposes the running interpreter: command line, search
+path, streams, hooks, recursion limits, exception handling, GC and
+performance counters. Almost every CPython internal that needs a
+Python-visible knob surfaces it here.
 
-## Status
+Source-of-record: `Python/sysmodule.c`,
+[sys docs](https://docs.python.org/3.14/library/sys.html).
 
-See [manual/status](../manual/status) for current coverage.
+## Streams and command line
 
-## API
+| Name                                 | Type                  | Notes                                |
+| ------------------------------------ | --------------------- | ------------------------------------ |
+| `sys.argv`                           | `list[str]`           | Script name + args.                  |
+| `sys.stdin` / `stdout` / `stderr`    | `TextIOWrapper`       | Line-buffered by default.            |
+| `sys.__stdin__` / `__stdout__` / `__stderr__` | originals    | Snapshot at interpreter start.       |
+| `sys.path`                           | `list[str]`           | Module search path.                  |
+| `sys.path_hooks`                     | `list[callable]`      | Path-entry finders.                  |
+| `sys.path_importer_cache`            | `dict`                | Memoised path importers.             |
+| `sys.modules`                        | `dict[str, Module]`   | Import cache.                        |
+| `sys.meta_path`                      | `list[MetaPathFinder]` | Top-of-import dispatcher.           |
+| `sys.builtin_module_names`           | `tuple[str, ...]`     | Names compiled into the interpreter. |
+| `sys.stdlib_module_names`            | `frozenset[str]`      | Stdlib module names (PEP 643).       |
 
-(Reference table in progress.)
+## Version and platform
+
+| Name                       | Type             | Value                                  |
+| -------------------------- | ---------------- | -------------------------------------- |
+| `sys.version`              | `str`            | Human-readable version string.         |
+| `sys.version_info`         | `sys.version_info` | `(major, minor, micro, releaselevel, serial)`. |
+| `sys.hexversion`           | `int`            | Packed version number.                 |
+| `sys.implementation`       | `SimpleNamespace` | `(name, version, hexversion, cache_tag)`. |
+| `sys.platform`             | `str`            | `'linux'`, `'darwin'`, `'win32'`, ... |
+| `sys.maxsize`              | `int`            | Largest `Py_ssize_t`.                  |
+| `sys.maxunicode`           | `int`            | `0x10FFFF`.                            |
+| `sys.byteorder`            | `str`            | `'little'` or `'big'`.                 |
+| `sys.float_info`           | named tuple      | `DBL_MAX`, epsilon, etc.               |
+| `sys.int_info`             | named tuple      | Internal int representation info.      |
+| `sys.hash_info`            | named tuple      | Hash algorithm, width, modulus.        |
+| `sys.thread_info`          | named tuple      | Thread implementation info.            |
+| `sys.flags`                | named tuple      | Command-line flag values.              |
+
+## Hooks
+
+| Function                                  | Role                                               |
+| ----------------------------------------- | -------------------------------------------------- |
+| `sys.excepthook(type, value, traceback)`  | Called on unhandled top-level exception.           |
+| `sys.unraisablehook(args)`                | Called when an exception is logged unraisable.     |
+| `sys.displayhook(value)`                  | REPL output.                                       |
+| `sys.audit(event, *args)`                 | Emit audit event (PEP 578).                        |
+| `sys.addaudithook(hook)`                  | Register audit hook.                               |
+| `sys.breakpointhook(*args, **kw)`         | Backend for the `breakpoint()` builtin.            |
+| `sys.exit(code=None)`                     | Raise `SystemExit(code)`.                          |
+| `sys.exception()`                         | Currently handled exception, or `None`.            |
+| `sys.exc_info()`                          | `(type, value, traceback)` of current exception.   |
+| `sys.last_type` / `last_value` / `last_traceback` / `last_exc` | Most recent unhandled exception in REPL. |
+
+## Runtime control
+
+| Function                                            | Effect                                       |
+| --------------------------------------------------- | -------------------------------------------- |
+| `sys.setrecursionlimit(n)` / `getrecursionlimit()`  | Frame depth cap.                             |
+| `sys.setswitchinterval(n)` / `getswitchinterval()`  | GIL switch interval in seconds.              |
+| `sys.settrace(fn)` / `gettrace()`                   | Per-frame trace function.                    |
+| `sys.setprofile(fn)` / `getprofile()`               | Per-call profile function.                   |
+| `sys.monitoring`                                    | PEP 669 monitoring API namespace.            |
+| `sys.set_int_max_str_digits(n)` / `get_int_max_str_digits()` | `int`/`str` length cap.             |
+| `sys.set_coroutine_origin_tracking_depth(n)`        | Coroutine origin tracking depth.             |
+| `sys.set_asyncgen_hooks(firstiter=, finalizer=)`    | Async generator hooks.                       |
+| `sys.intern(s)`                                     | Intern a string.                             |
+| `sys.getsizeof(obj, default=...)`                   | Memory footprint of obj.                     |
+| `sys.getrefcount(obj)`                              | Reference count incl. temp.                  |
+| `sys._getframe(depth=0)`                            | Internal: caller frame.                      |
+| `sys._current_frames()`                             | Frame per thread.                            |
+| `sys._current_exceptions()`                         | Active exception per thread.                 |
+| `sys.is_finalizing()`                               | True during interpreter shutdown.            |
+
+## Filesystem encoding
+
+| Name                                | Value                                                  |
+| ----------------------------------- | ------------------------------------------------------ |
+| `sys.getfilesystemencoding()`       | Encoding used for paths (`'utf-8'` on POSIX).         |
+| `sys.getfilesystemencodeerrors()`   | Error handler (`'surrogateescape'`).                  |
+| `sys.getdefaultencoding()`          | `'utf-8'`.                                            |
+
+## Interpreter shutdown
+
+`sys.exit(code)` raises `SystemExit`. Cleanup runs `atexit` callbacks
+in LIFO order, then finalises GC. `sys.is_finalizing()` reports the
+finalisation phase.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Streams, command line, paths          | Complete.                                          |
+| Version / platform / impl info        | Complete; `cache_tag` is `gopy-NNN`.               |
+| Hooks (`excepthook`, audit, display)  | Complete.                                          |
+| `settrace`/`setprofile`               | Complete.                                          |
+| `sys.monitoring` (PEP 669)            | Complete.                                          |
+| `setrecursionlimit`                   | Complete; enforced by frame depth check.           |
+| `set_int_max_str_digits`              | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [sys module](https://docs.python.org/3.14/library/sys.html).
+* `Python/sysmodule.c`. C side.
+* `module/sys/`. gopy port.

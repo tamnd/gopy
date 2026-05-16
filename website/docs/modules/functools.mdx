@@ -1,18 +1,87 @@
 ---
 title: functools
-description: The functools module in gopy.
+description: Higher-order tools. Caches, partial application, reduction, dispatch, ordering.
 ---
 
 # `functools`
 
-The `functools` module. Behaviour matches CPython 3.14. Source lives at
-`module/functools/` in the gopy repo (or under `stdlib/functools.py` for
-pure-Python ports).
+Tools for working with functions and callables: caches, partial
+application, reduction, single-dispatch, and decorator helpers.
 
-## Status
+Source-of-record: `Lib/functools.py`, `Modules/_functoolsmodule.c`,
+[functools docs](https://docs.python.org/3.14/library/functools.html).
 
-See [manual/status](../manual/status) for current coverage.
+## Caching
 
-## API
+| Function                                       | Returns                                  |
+| ---------------------------------------------- | ---------------------------------------- |
+| `@functools.cache`                             | Unbounded `lru_cache(maxsize=None)`.     |
+| `@functools.lru_cache(maxsize=128, typed=False)` | Bounded LRU cache decorator.          |
+| `@functools.cached_property`                   | Compute once, store on instance.         |
 
-(Reference table in progress.)
+Cache info: `.cache_info()` returns `CacheInfo(hits, misses, maxsize, currsize)`.
+`.cache_clear()` empties. `.cache_parameters()` returns the kwargs.
+
+## Reduction
+
+```python
+functools.reduce(function, iterable, initializer=missing)
+```
+
+Folds left. `initializer` provides the seed; without it the first
+iterable element seeds.
+
+## Partial application
+
+| Class / function                       | Effect                                              |
+| -------------------------------------- | --------------------------------------------------- |
+| `functools.partial(func, /, *args, **kw)` | Pre-bind positional and keyword args.            |
+| `functools.partialmethod(func, /, *args, **kw)` | Same, but as a descriptor for class bodies. |
+
+Attributes: `.func`, `.args`, `.keywords`.
+
+## Dispatch
+
+| API                                    | Role                                               |
+| -------------------------------------- | -------------------------------------------------- |
+| `@functools.singledispatch`            | Generic function dispatched on first arg type.     |
+| `fn.register(type)(impl)`              | Register an implementation.                        |
+| `fn.dispatch(cls)`                     | Pick the impl for `cls`.                           |
+| `fn.registry`                          | Mapping of type to impl.                           |
+| `@functools.singledispatchmethod`      | Same, as a method.                                 |
+
+## Decorator helpers
+
+| Helper                                          | Role                                       |
+| ----------------------------------------------- | ------------------------------------------ |
+| `functools.wraps(wrapped, ...)`                 | Copy metadata onto a wrapper.              |
+| `functools.update_wrapper(wrapper, wrapped, assigned=WRAPPER_ASSIGNMENTS, updated=WRAPPER_UPDATES)` | The underlying logic. |
+| `WRAPPER_ASSIGNMENTS`                           | `(__module__, __name__, __qualname__, __annotations__, __doc__)`. |
+| `WRAPPER_UPDATES`                               | `(__dict__,)`.                             |
+
+## Ordering
+
+| Helper                                          | Role                                       |
+| ----------------------------------------------- | ------------------------------------------ |
+| `@functools.total_ordering`                     | Fill in the missing comparison methods given one of `__lt__`, `__le__`, `__gt__`, `__ge__` and `__eq__`. |
+| `functools.cmp_to_key(cmp)`                     | Adapt a 3-way comparator for `key=`.       |
+
+## Reduce-time evaluation
+
+`functools.reduce` and `functools.partial` are both implemented in C
+for speed; Python equivalents live in `Lib/functools.py`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `cache`, `lru_cache`, `cached_property` | Complete.                                        |
+| `partial`, `partialmethod`            | Complete; C-fast paths in `module/_functools`.     |
+| `singledispatch`                      | Complete.                                          |
+| `wraps`, `update_wrapper`, `total_ordering`, `cmp_to_key` | Complete.                  |
+
+## Reference
+
+* CPython 3.14: [functools](https://docs.python.org/3.14/library/functools.html).
+* `Lib/functools.py`, `Modules/_functoolsmodule.c`.
+* `module/functools/`, `module/_functools/`. gopy port.

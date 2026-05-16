@@ -82,7 +82,7 @@ From lowest to highest binding:
 | 4          | `and`                                             | left          |
 | 5          | `not x`                                           | -             |
 | 6          | `in`, `not in`, `is`, `is not`, `<`, `<=`, `>`, `>=`, `!=`, `==` | left   |
-| 7          | `|`                                               | left          |
+| 7          | `\|`                                              | left          |
 | 8          | `^`                                               | left          |
 | 9          | `&`                                               | left          |
 | 10         | `<<`, `>>`                                        | left          |
@@ -124,7 +124,7 @@ Comparison expressions can be chained: `a < b < c` desugars to
 | `in` / `not in` | `__contains__`         | Falls back to iteration.               |
 
 For numeric comparison, mixed types are coerced according to the
-numeric tower: `int` < `float` < `complex`. Equality across types
+numeric tower (`int`, `float`, `complex`). Equality across types
 that are not numerically related returns `False`.
 
 ## Arithmetic and bitwise operators

@@ -1,18 +1,154 @@
 ---
 title: os
-description: The os module in gopy.
+description: Operating system interface. Files, processes, environment, paths.
 ---
 
 # `os`
 
-The `os` module. Behaviour matches CPython 3.14. Source lives at
-`module/os/` in the gopy repo (or under `stdlib/os.py` for
-pure-Python ports).
+The `os` module is the portable interface to OS-level facilities:
+file descriptors, file system metadata, process management,
+environment variables, and the `os.path` submodule for path
+manipulation.
 
-## Status
+Source-of-record: `Modules/posixmodule.c`, `Lib/os.py`,
+[os docs](https://docs.python.org/3.14/library/os.html).
 
-See [manual/status](../manual/status) for current coverage.
+## Environment
 
-## API
+| Name                              | Type                  | Description                                    |
+| --------------------------------- | --------------------- | ---------------------------------------------- |
+| `os.environ`                      | `os._Environ`         | Mutable, syncs to the C environment.           |
+| `os.environb`                     | `os._Environ[bytes]`  | Bytes view; POSIX only.                        |
+| `os.getenv(key, default=None)`    | `str` or default      | Read.                                          |
+| `os.putenv(key, value)`           |                       | Set.                                           |
+| `os.unsetenv(key)`                |                       | Remove.                                        |
+| `os.get_exec_path(env=None)`      | `list[str]`           | `PATH` split.                                  |
 
-(Reference table in progress.)
+## Process
+
+| Function                              | Effect                                          |
+| ------------------------------------- | ----------------------------------------------- |
+| `os.getpid()` / `os.getppid()`        | Current / parent PID.                           |
+| `os.getuid()` / `getgid()` / `geteuid()` / `getegid()` | POSIX IDs.                |
+| `os.getlogin()`                       | Login name.                                     |
+| `os.umask(mask)`                      | Set umask.                                      |
+| `os.fork()`                           | POSIX fork.                                     |
+| `os.forkpty()`                        | Fork with new pty.                              |
+| `os.execv*` / `os.execvp*` / `os.execle*` | Replace current process image.              |
+| `os.spawnv*`                          | Spawn child.                                    |
+| `os.posix_spawn(path, argv, env, ...)` | POSIX_SPAWN wrapper.                           |
+| `os.system(cmd)`                      | Shell out.                                      |
+| `os.popen(cmd, mode='r', buffering=-1)` | Pipe to/from process.                         |
+| `os.waitpid(pid, options)`            | Reap child.                                     |
+| `os.wait()` / `os.wait3()` / `os.wait4()` | Reap.                                       |
+| `os.kill(pid, sig)` / `os.killpg(pgid, sig)` | Signal.                                  |
+| `os._exit(code)`                      | Exit without finalisation.                      |
+| `os.abort()`                          | `SIGABRT`.                                      |
+| `os.cpu_count()`                      | Available CPUs.                                 |
+| `os.process_cpu_count()`              | CPUs available to the process (PEP 711).        |
+| `os.sched_getaffinity(0)`             | CPU affinity set; Linux.                        |
+| `os.times()`                          | Process times tuple.                            |
+
+## File descriptors
+
+| Function                              | Effect                                          |
+| ------------------------------------- | ----------------------------------------------- |
+| `os.open(path, flags, mode=0o777, *, dir_fd=None)` | Return fd.                         |
+| `os.close(fd)` / `os.closerange(low, high)` | Close.                                    |
+| `os.dup(fd)` / `os.dup2(fd, fd2, inheritable=True)` | Duplicate.                        |
+| `os.pipe()` / `os.pipe2(flags)`       | Anonymous pipe.                                 |
+| `os.read(fd, n)`                      | Read.                                           |
+| `os.write(fd, b)`                     | Write.                                          |
+| `os.pread(fd, n, offset)` / `os.pwrite(fd, b, offset)` | Positional I/O.            |
+| `os.lseek(fd, pos, whence)`           | Reposition.                                     |
+| `os.fstat(fd)` / `os.fsync(fd)` / `os.fdatasync(fd)` / `os.ftruncate(fd, n)` | Metadata. |
+| `os.fdopen(fd, *args, **kwargs)`      | Wrap fd as file object.                         |
+| `os.get_inheritable(fd)` / `os.set_inheritable(fd, b)` | Close-on-exec flag.            |
+| `os.get_blocking(fd)` / `os.set_blocking(fd, b)` | Blocking flag.                       |
+
+Open flags: `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_APPEND`, `O_CREAT`,
+`O_EXCL`, `O_TRUNC`, `O_NONBLOCK`, `O_CLOEXEC`, `O_DIRECTORY`,
+`O_NOFOLLOW`, `O_DSYNC`, `O_RSYNC`, `O_SYNC`, `O_BINARY`, `O_TEXT`,
+`O_PATH`.
+
+## File system
+
+| Function                              | Returns                                         |
+| ------------------------------------- | ----------------------------------------------- |
+| `os.getcwd()` / `os.getcwdb()`        | Current working directory.                      |
+| `os.chdir(path)`                      | Change cwd.                                     |
+| `os.listdir(path='.')`                | List entries.                                   |
+| `os.scandir(path='.')`                | Iterator of `DirEntry` (`name`, `path`, `is_dir`, `is_file`, `is_symlink`, `stat()`). |
+| `os.walk(top, topdown=True, onerror=None, followlinks=False)` | Recursive walk. |
+| `os.fwalk(...)`                       | Walk yielding fds.                              |
+| `os.mkdir(path, mode=0o777, *, dir_fd=None)` | Create dir.                              |
+| `os.makedirs(path, mode=0o777, exist_ok=False)` | Recursive mkdir.                     |
+| `os.rmdir(path, *, dir_fd=None)`      | Remove empty dir.                               |
+| `os.removedirs(path)`                 | Remove dir tree of empty dirs.                  |
+| `os.remove(path, *, dir_fd=None)` / `os.unlink(path)` | Delete file.                    |
+| `os.rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None)` | Rename.                |
+| `os.replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None)` | Rename, replacing.    |
+| `os.link(src, dst)` / `os.symlink(src, dst, target_is_directory=False)` | Links.    |
+| `os.readlink(path)`                   | Symlink target.                                 |
+| `os.stat(path, *, dir_fd=None, follow_symlinks=True)` | `os.stat_result`.              |
+| `os.lstat(path)`                      | `stat` without following symlinks.              |
+| `os.chmod(path, mode)`                | Permissions.                                    |
+| `os.chown(path, uid, gid)`            | Ownership.                                      |
+| `os.access(path, mode, *, dir_fd=None, effective_ids=False, follow_symlinks=True)` | Permission check (`F_OK`, `R_OK`, `W_OK`, `X_OK`). |
+| `os.fspath(path)`                     | PEP 519 coercion.                               |
+| `os.PathLike`                         | ABC requiring `__fspath__`.                    |
+| `os.realpath(path, *, strict=False)`  | Resolve symlinks.                               |
+
+`os.stat_result` fields: `st_mode`, `st_ino`, `st_dev`, `st_nlink`,
+`st_uid`, `st_gid`, `st_size`, `st_atime`, `st_mtime`, `st_ctime`,
+plus `_ns` variants.
+
+## Path manipulation
+
+`os.path` submodule. Same module re-exported as `posixpath` (POSIX)
+or `ntpath` (Windows).
+
+| Function                                | Role                                            |
+| --------------------------------------- | ----------------------------------------------- |
+| `os.path.join(*parts)`                  | Join with separators.                           |
+| `os.path.split(path)`                   | `(head, tail)`.                                 |
+| `os.path.splitext(path)`                | `(root, ext)`.                                  |
+| `os.path.basename(path)` / `dirname(path)` | Tail / head.                                |
+| `os.path.abspath(path)` / `realpath(path)` | Absolute / resolved.                         |
+| `os.path.normpath(path)` / `normcase(path)` | Normalise.                                  |
+| `os.path.exists(path)` / `isfile` / `isdir` / `islink` / `ismount` | Predicates.    |
+| `os.path.expanduser(path)` / `expandvars(path)` | `~` / `$VAR` expansion.                |
+| `os.path.getsize(path)` / `getmtime` / `getatime` / `getctime` | Metadata.        |
+| `os.path.commonpath(paths)` / `commonprefix(paths)` | Shared prefix.                      |
+| `os.path.relpath(path, start=os.curdir)` | Relativise.                                    |
+| `os.path.isabs(path)`                   | Predicate.                                      |
+
+`os.sep`, `os.altsep`, `os.curdir`, `os.pardir`, `os.extsep`,
+`os.pathsep`, `os.linesep`, `os.defpath`, `os.devnull`, `os.name`.
+
+## URandom and randomness
+
+`os.urandom(n)`, `os.getrandom(n, flags=0)` (Linux).
+
+## Terminal and pty
+
+`os.get_terminal_size(fd=STDOUT_FILENO)`, `os.isatty(fd)`,
+`os.openpty()`, `os.login_tty(fd)`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Environment                           | Complete.                                          |
+| Process control (`fork`/`exec`/`wait`) | Complete; `posix_spawn` complete.                 |
+| File descriptors                      | Complete.                                          |
+| File system                           | Complete; `scandir` and `walk` complete.           |
+| `os.path` (POSIX and NT)              | Complete via `genericpath`.                        |
+| `urandom` / `getrandom`               | Complete; backed by Go's `crypto/rand`.            |
+
+## Reference
+
+* CPython 3.14: [os module](https://docs.python.org/3.14/library/os.html).
+* `Modules/posixmodule.c`. C side.
+* `Lib/os.py`. Python side.
+* `module/os/`. gopy port.

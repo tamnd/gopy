@@ -1,18 +1,145 @@
 ---
 title: collections
-description: The collections module in gopy.
+description: Specialised container datatypes complementing the built-ins.
 ---
 
 # `collections`
 
-The `collections` module. Behaviour matches CPython 3.14. Source lives at
-`module/collections/` in the gopy repo (or under `stdlib/collections.py` for
-pure-Python ports).
+Container datatypes beyond the built-ins: ordered/default dicts,
+counters, deques, named tuples, chain maps, and user-extensible bases.
+The `collections.abc` submodule houses the abstract base classes for
+the container protocols.
 
-## Status
+Source-of-record: `Lib/collections/__init__.py`,
+`Modules/_collectionsmodule.c`,
+[collections docs](https://docs.python.org/3.14/library/collections.html).
 
-See [manual/status](../manual/status) for current coverage.
+## `Counter`
 
-## API
+```python
+Counter(iterable_or_mapping=None, **kwargs)
+```
 
-(Reference table in progress.)
+Multiset / frequency map. Subclass of `dict`.
+
+| Method                            | Behaviour                                         |
+| --------------------------------- | ------------------------------------------------- |
+| `c.elements()`                    | Iterator of elements repeated by count.           |
+| `c.most_common(n=None)`           | `[(elem, count), ...]` sorted descending.         |
+| `c.subtract(other)`               | Element-wise subtraction; can go negative.        |
+| `c.update(other)`                 | Element-wise addition.                            |
+| `c.total()`                       | Sum of counts (3.10+).                            |
+| `c + c2`, `c - c2`                | Multiset add / subtract (drops non-positive).     |
+| `c \| c2`, `c & c2`               | Multiset union (max) / intersection (min).        |
+| `+c`, `-c`                        | Drop non-positive / non-negative counts.          |
+
+## `OrderedDict`
+
+`dict` subclass that preserved insertion order even before 3.7 made
+the plain `dict` order-stable. Still distinct because of:
+
+| Method                       | Behaviour                                                |
+| ---------------------------- | -------------------------------------------------------- |
+| `od.move_to_end(key, last=True)` | Reorder.                                           |
+| `od.popitem(last=True)`      | LIFO by default; `last=False` for FIFO.                  |
+| Equality                     | Order-sensitive between two `OrderedDict`s.              |
+
+## `defaultdict`
+
+```python
+defaultdict(default_factory=None, /, *args, **kwargs)
+```
+
+Provides a default value via `default_factory()` on missing keys.
+
+| Attribute              | Meaning                                                |
+| ---------------------- | ------------------------------------------------------ |
+| `dd.default_factory`   | Zero-arg callable; missing keys call it.               |
+| `dd[k]`                | Inserts `default_factory()` if missing.                |
+| `dd.__missing__(k)`    | Hook the lookup uses.                                  |
+
+## `deque`
+
+```python
+deque(iterable=(), maxlen=None)
+```
+
+Doubly-linked list-like container with O(1) appends/pops at both ends.
+
+| Method                              | Behaviour                              |
+| ----------------------------------- | -------------------------------------- |
+| `append(x)` / `appendleft(x)`       | Push.                                  |
+| `pop()` / `popleft()`               | Pop.                                   |
+| `extend(it)` / `extendleft(it)`     | Bulk push (note: `extendleft` reverses). |
+| `rotate(n=1)`                       | Rotate right (or left if negative).    |
+| `clear()`, `copy()`, `count(x)`, `index(x[, start[, stop]])`, `insert(i, x)`, `remove(x)`, `reverse()` | Stdlib operations. |
+| `maxlen`                            | Read-only cap.                         |
+
+## `ChainMap`
+
+```python
+ChainMap(*maps)
+```
+
+Composes several mappings into one view. Writes go to the first map;
+reads cascade through the chain.
+
+| Method / attr                     | Role                                            |
+| --------------------------------- | ----------------------------------------------- |
+| `maps`                            | List of underlying mappings.                    |
+| `new_child(m=None)`               | Push a fresh mapping (or `m`) onto the chain.   |
+| `parents`                         | View without the first mapping.                 |
+
+## `namedtuple`
+
+```python
+collections.namedtuple(typename, field_names, *, rename=False,
+                       defaults=None, module=None)
+```
+
+Generates a `tuple` subclass with named fields.
+
+| Generated member                 | Notes                                              |
+| -------------------------------- | -------------------------------------------------- |
+| `T._fields`                      | Field names.                                       |
+| `T._field_defaults`              | Defaults dict.                                     |
+| `t._asdict()`                    | Dict view.                                         |
+| `t._replace(**changes)`          | Returns a new tuple with fields replaced.          |
+| `T._make(iterable)`              | Construct from iterable.                           |
+
+## `UserList`, `UserDict`, `UserString`
+
+Subclassable wrappers around `list`, `dict`, `str`. Useful where
+subclassing the built-in is awkward (mutators may bypass the wrapper).
+
+## `collections.abc`
+
+Re-exports the ABCs from `_collections_abc`:
+
+| Group         | ABCs                                                                   |
+| ------------- | ---------------------------------------------------------------------- |
+| Hashable      | `Hashable`.                                                            |
+| Iterable      | `Iterable`, `Iterator`, `Generator`, `Reversible`, `Collection`.        |
+| Containers    | `Container`, `Sized`.                                                  |
+| Sequence      | `Sequence`, `MutableSequence`, `ByteString` (deprecated 3.12).         |
+| Set           | `Set`, `MutableSet`.                                                   |
+| Mapping       | `Mapping`, `MutableMapping`, `MappingView`, `KeysView`, `ValuesView`, `ItemsView`. |
+| Callable      | `Callable`.                                                            |
+| Async         | `Awaitable`, `Coroutine`, `AsyncIterable`, `AsyncIterator`, `AsyncGenerator`. |
+| Buffer (3.12) | `Buffer`.                                                              |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `Counter`, `OrderedDict`, `defaultdict` | Complete.                                        |
+| `deque`                               | Complete; C-fast path in `module/_collections`.    |
+| `ChainMap`                            | Complete.                                          |
+| `namedtuple`                          | Complete.                                          |
+| `collections.abc` ABCs                | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [collections](https://docs.python.org/3.14/library/collections.html).
+* `Lib/collections/`, `Modules/_collectionsmodule.c`.
+* `module/collections/`, `module/_collections/`. gopy port.

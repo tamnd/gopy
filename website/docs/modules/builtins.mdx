@@ -1,18 +1,93 @@
 ---
 title: builtins
-description: The builtins module in gopy.
+description: The implicit namespace every module inherits.
 ---
 
 # `builtins`
 
-The `builtins` module. Behaviour matches CPython 3.14. Source lives at
-`module/builtins/` in the gopy repo (or under `stdlib/builtins.py` for
-pure-Python ports).
+The `builtins` module holds the implicit namespace consulted last
+during name resolution. Built-in functions, constants, exceptions,
+and types live here. The `builtins` module is the canonical place
+to look up `len`, `print`, `Exception`, and so on without typing
+`builtins.` explicitly.
 
-## Status
+Source-of-record: `Python/bltinmodule.c`,
+[built-in functions](https://docs.python.org/3.14/library/functions.html).
 
-See [manual/status](../manual/status) for current coverage.
+## Index
 
-## API
+For full per-function documentation see
+[Reference -> Built-ins](../reference/builtins).
 
-(Reference table in progress.)
+### Constants
+
+`True`, `False`, `None`, `NotImplemented`, `Ellipsis`,
+`__debug__`, `__name__`, `__doc__`, `__package__`, `__loader__`,
+`__spec__`, `__build_class__`, `__import__`.
+
+### Object inspection
+
+`type`, `isinstance`, `issubclass`, `id`, `hash`, `len`, `repr`,
+`ascii`, `dir`, `vars`, `callable`, `hasattr`, `getattr`, `setattr`,
+`delattr`.
+
+### Numeric
+
+`abs`, `divmod`, `pow`, `round`, `bin`, `hex`, `oct`, `int`, `float`,
+`complex`, `bool`, `min`, `max`, `sum`.
+
+### Sequence and iteration
+
+`iter`, `next`, `aiter`, `anext`, `enumerate`, `zip`, `range`, `slice`,
+`reversed`, `sorted`, `map`, `filter`, `any`, `all`.
+
+### Constructors
+
+`bytes`, `bytearray`, `memoryview`, `str`, `list`, `tuple`, `dict`,
+`set`, `frozenset`, `object`, `type`, `super`, `property`,
+`staticmethod`, `classmethod`.
+
+### I/O and execution
+
+`print`, `input`, `open`, `format`, `chr`, `ord`, `compile`, `exec`,
+`eval`, `breakpoint`, `help`, `copyright`, `credits`, `license`, `quit`,
+`exit`.
+
+### Exceptions
+
+The full `BaseException` hierarchy lives here too; see
+[Reference -> Errors](../reference/errors).
+
+## Customising builtins
+
+Modifying `builtins` is observable everywhere. Assigning
+`builtins.print = fn` redirects `print` for every module that hasn't
+shadowed the name locally. Test runners and REPLs rely on this.
+
+## `__import__`
+
+```python
+__import__(name, globals=None, locals=None, fromlist=(), level=0)
+```
+
+The low-level hook the `import` statement compiles into. Replaceable
+by assigning to `builtins.__import__`.
+
+## `__build_class__`
+
+The hook that `class X(...)` compiles into; see
+[Reference -> Statements (compound)](../reference/statements-compound#class-definitions).
+
+## Gopy status
+
+| Area                                            | State                          |
+| ----------------------------------------------- | ------------------------------ |
+| All builtins listed above                       | Complete.                      |
+| `__import__` and `__build_class__` hooks        | Complete.                      |
+| Replacement and shadowing semantics             | Complete.                      |
+
+## Reference
+
+* CPython 3.14: [builtins](https://docs.python.org/3.14/library/builtins.html).
+* `Python/bltinmodule.c`. C side.
+* `module/builtins/`. gopy port.
