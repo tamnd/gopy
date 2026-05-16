@@ -82,7 +82,7 @@ func FromBytes(src []byte, mode Mode) *State {
 	if name := cookie; name != "" {
 		// CPython: Parser/tokenizer/helpers.c:425 BOM vs cookie mismatch
 		if hadBOM && !isUTF8Name(name) {
-			s.recordError("encoding declaration in Unicode string")
+			s.recordError("encoding problem: " + name + " with BOM")
 			s.done = eEncoding
 		} else if !hadBOM {
 			s.encoding = name
