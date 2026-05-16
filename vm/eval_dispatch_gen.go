@@ -449,9 +449,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.GET_ITER:
 		iterable := e.peek(0)
 		_ = iterable
-		// body bail: unrecognized token at action body start: "_Py_GatherStats_GetIter"
-		// outputs: iter
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var iter stackref.Ref
+		iter_o := e.objectGetIter(iterable.AsObject())
+		_ = iter_o
+		iterable.Close()
+		if iter_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		iter = stackref.FromObject(iter_o)
+		e.drop(1)
+		e.push(iter)
+		return e.advance(), nil, nil, false, nil
 	case compile.GET_LEN:
 		obj := e.peek(0)
 		_ = obj
@@ -648,7 +656,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_CONST:
-		// body bail: uint8_t expected rhs: unexpected token "LOAD_CONST" in expression
+		// body bail: if cond: unexpected token "this_instr" in expression
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_DEREF:

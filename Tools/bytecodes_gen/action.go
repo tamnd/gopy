@@ -1169,6 +1169,12 @@ type helperCall struct {
 // uniformly inside the action body.
 var helperCalls = map[string]helperCall{
 	"Py_Is":             {goExpr: "e.pyIs", arity: 2},
+	// PyObject_GetIter(obj) calls obj.__iter__() and returns the
+	// resulting iterator or NULL on error. Mirrors abstract.c
+	// PyObject_GetIter.
+	//
+	// CPython: Objects/abstract.c PyObject_GetIter
+	"PyObject_GetIter": {goExpr: "e.objectGetIter", arity: 1},
 	"Py_TYPE":           {goExpr: "e.pyType", arity: 1},
 	"PyNumber_Negative": {goExpr: "e.pyNumberNegative", arity: 1},
 	"PyNumber_Invert":   {goExpr: "e.pyNumberInvert", arity: 1},
@@ -1811,7 +1817,9 @@ func bindNames(sig *SignatureAnalysis) map[string]string {
 }
 
 // stripWhitespace drops newline / comment tokens so the statement
-// walker doesn't have to skip them at every step.
+// walker doesn't have to skip them at every step. CMacro tokens are
+// already filtered (and their conditional bodies are elided) by
+// tokenize().
 func stripWhitespace(in []dslTok) []dslTok {
 	out := make([]dslTok, 0, len(in))
 	for _, t := range in {

@@ -334,10 +334,22 @@ var dslMatcher = regexp.MustCompile(strings.Join([]string{
 // tokenize splits src into a slice of tokens. Whitespace (other than
 // newlines) and embedded newlines inside #-prefixed macro lines are
 // dropped, mirroring the upstream behavior.
+//
+// Content inside `#ifdef FLAG ... #endif` regions where FLAG names a
+// build option the runtime doesn't carry (Py_STATS, Py_GIL_DISABLED,
+// ENABLE_SPECIALIZATION_FT) is also dropped so dead-code helpers like
+// `_Py_GatherStats_*` never reach the action translator. Nested ifdefs
+// inside a skipped region count toward the same skip-depth.
 func tokenize(src string) ([]dslTok, error) {
+	skipFlags := map[string]bool{
+		"Py_STATS":                 true,
+		"Py_GIL_DISABLED":          true,
+		"ENABLE_SPECIALIZATION_FT": true,
+	}
 	var out []dslTok
 	line := 1
 	lineStart := 0 // byte offset where current line begins
+	skipDepth := 0
 	matches := dslMatcher.FindAllStringIndex(src, -1)
 	for _, m := range matches {
 		start, end := m[0], m[1]
@@ -361,10 +373,52 @@ func tokenize(src string) ([]dslTok, error) {
 			line += strings.Count(text, "\n")
 			lineStart = start + nl + 1
 		}
-		// Drop comments and bare CMACRO lines from the stream so the
-		// parser sees a clean program. Tests can request raw tokens
-		// via tokenizeAll.
-		if kind == tokComment || kind == tokCMacro {
+		if kind == tokCMacro {
+			trimmed := strings.TrimSpace(text)
+			switch {
+			case strings.HasPrefix(trimmed, "#ifdef ") || strings.HasPrefix(trimmed, "#ifndef ") || strings.HasPrefix(trimmed, "#if "):
+				if skipDepth > 0 {
+					skipDepth++
+					continue
+				}
+				flag := ""
+				if strings.HasPrefix(trimmed, "#ifdef ") {
+					flag = strings.TrimSpace(strings.TrimPrefix(trimmed, "#ifdef"))
+				} else if strings.HasPrefix(trimmed, "#ifndef ") {
+					flag = strings.TrimSpace(strings.TrimPrefix(trimmed, "#ifndef"))
+				} else {
+					rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "#if"))
+					if strings.HasPrefix(rest, "defined(") {
+						flag = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(rest, "defined("), ")"))
+					}
+				}
+				if skipFlags[flag] {
+					skipDepth = 1
+				}
+				continue
+			case strings.HasPrefix(trimmed, "#endif"):
+				if skipDepth > 0 {
+					skipDepth--
+				}
+				continue
+			case strings.HasPrefix(trimmed, "#else") || strings.HasPrefix(trimmed, "#elif"):
+				// Flip the active branch at the level we're currently
+				// at: depth-1 means we were skipping the if-branch and
+				// want to keep the else; depth-0 means we kept the
+				// if-branch and want to skip the else.
+				if skipDepth == 1 {
+					skipDepth = 0
+				} else if skipDepth == 0 {
+					skipDepth = 1
+				}
+				continue
+			}
+			continue
+		}
+		if skipDepth > 0 {
+			continue
+		}
+		if kind == tokComment {
 			continue
 		}
 		out = append(out, t)

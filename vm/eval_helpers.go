@@ -972,6 +972,25 @@ func (e *evalState) getANext(iter objects.Object) objects.Object {
 	return next
 }
 
+// objectGetIter wraps PyObject_GetIter: returns iter(o) or nil on
+// error. Drives GET_ITER and friends.
+//
+// CPython: Objects/abstract.c PyObject_GetIter
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) objectGetIter(o objects.Object) objects.Object {
+	it, err := objects.Iter(o)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	if it == nil {
+		e.pendingErr = fmt.Errorf("TypeError: iter() returned non-iterator for %s", o.Type().Name)
+		return nil
+	}
+	return it
+}
+
 // tupleGetItem mirrors CPython's PyTuple_GET_ITEM macro: borrowed
 // reference into a tuple's items array. The macro is unchecked in C,
 // but the translator turns invariants into pendingErr fail paths so a
