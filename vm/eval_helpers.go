@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
@@ -98,17 +99,25 @@ func (e *evalState) errOccurred() bool {
 }
 
 // errExceptionMatches mirrors CPython's _PyErr_ExceptionMatches: true
-// when the running exception is an instance of the supplied type. gopy
-// carries pending exceptions as Go errors rather than typed objects, so
-// the matcher reports false by default. The translator passes a nil
-// placeholder for every PyExc_X reference, which keeps the call site
-// well-formed without claiming a faithful match.
+// when the running exception is an instance (or subclass) of t.
+// Reads pendingErr. *pyerrors.Exception carries the exact type;
+// generic Go errors get classified via synthesizeException's prefix
+// table so a `try: ... except ValueError:` still catches a
+// "ValueError: ..." Go error.
 //
-// CPython: Python/errors.c _PyErr_ExceptionMatches.
+// CPython: Python/errors.c PyErr_ExceptionMatches (calls
+// PyErr_GivenExceptionMatches with tstate->current_exception).
 //
 //nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
-func (e *evalState) errExceptionMatches(_ objects.Object) bool {
-	return false
+func (e *evalState) errExceptionMatches(t *objects.Type) bool {
+	if e.pendingErr == nil || t == nil {
+		return false
+	}
+	// pendingErr is always a Go error (Exception itself does not
+	// implement error). Promote to a typed Exception via the same
+	// prefix table eval_unwind uses, then ask IsSubtype.
+	exc := synthesizeException(e.pendingErr)
+	return pyerrors.IsSubtype(exc.ExcType, t)
 }
 
 // pyNumberNegative is the translator-side wrapper for CPython's

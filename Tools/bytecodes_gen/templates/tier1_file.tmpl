@@ -4,9 +4,14 @@ package {{.Pkg}}
 
 import (
 	"github.com/tamnd/gopy/compile"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 )
+
+// Keep pyerrors imported even when no arm references it; PyExc_*
+// references from CPython opcode bodies are the usual consumer.
+var _ = pyerrors.PyExc_TypeError
 
 // Keep stackref imported even when no arm references it; output
 // locals declared as stackref.Ref are the usual consumer.

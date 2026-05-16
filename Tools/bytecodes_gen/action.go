@@ -997,11 +997,12 @@ func (p *exprParser) parsePrimary() (string, error) {
 			return goLocalName(tk), nil
 		}
 		// CPython exception-type constants: PyExc_TypeError, PyExc_AttributeError,
-		// etc. gopy carries pending exceptions as Go errors rather than type
-		// objects, so the surface only needs a placeholder that the matcher
-		// helper ignores. Surface a nil objects.Object via the helper sentinel.
+		// etc. The gopy errors package mirrors each as a *objects.Type
+		// singleton, so the surface reference resolves directly without a
+		// sentinel. _PyErr_ExceptionMatches and friends consume the
+		// *objects.Type to compare against the pending exception's class.
 		if strings.HasPrefix(tk, "PyExc_") {
-			return "nil", nil
+			return "pyerrors." + tk, nil
 		}
 		// Py_TPFLAGS_* constants. Used as the RHS of `tp_flags & FLAG`
 		// bit tests in MATCH_MAPPING / MATCH_SEQUENCE. The objects

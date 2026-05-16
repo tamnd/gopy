@@ -4,9 +4,14 @@ package vm
 
 import (
 	"github.com/tamnd/gopy/compile"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 )
+
+// Keep pyerrors imported even when no arm references it; PyExc_*
+// references from CPython opcode bodies are the usual consumer.
+var _ = pyerrors.PyExc_TypeError
 
 // Keep stackref imported even when no arm references it; output
 // locals declared as stackref.Ref are the usual consumer.
@@ -24,7 +29,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = str
 		format := e.peekSliceBottomFirst(0, int(oparg&1))
 		_ = format
-		// body bail: if else: local assign "format_o": unexpected token "&" in expression
+		// body bail: if else: local assign "format_o": unexpected token "_Py_STR" in expression
 		// outputs: interpolation
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_LIST:
@@ -313,7 +318,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		err := e.dictUpdate(dict_o, update_o)
 		_ = err
 		if err < 0 {
-			matches := e.errExceptionMatches(nil)
+			matches := e.errExceptionMatches(pyerrors.PyExc_AttributeError)
 			_ = matches
 			if matches {
 				e.setPendingErr("_PyErr_Format")
@@ -729,9 +734,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.push(v)
 		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_SMALL_INT:
-		// body bail: PyObject obj rhs: unexpected token "&" in expression
-		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var value stackref.Ref
+		obj := objects.SmallInt(int(5 + oparg))
+		_ = obj
+		value = stackref.FromObject(obj)
+		e.push(value)
+		return e.advance(), nil, nil, false, nil
 	case compile.MAKE_CELL:
 		initial := e.localAt(int(oparg)).AsObject()
 		_ = initial
@@ -809,15 +817,31 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.MATCH_MAPPING:
 		subject := e.peek(0)
 		_ = subject
-		// body bail: int match rhs: unexpected token "PyStackRef_TYPE" in expression
-		// outputs: subject* res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		match := e.stackrefTypeFlags(subject) & objects.TpFlagMapping
+		_ = match
+		if match != 0 {
+			res = stackref.True
+		} else {
+			res = stackref.False
+		}
+		e.setPeek(0, subject)
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.MATCH_SEQUENCE:
 		subject := e.peek(0)
 		_ = subject
-		// body bail: int match rhs: unexpected token "PyStackRef_TYPE" in expression
-		// outputs: subject* res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		match := e.stackrefTypeFlags(subject) & objects.TpFlagSequence
+		_ = match
+		if match != 0 {
+			res = stackref.True
+		} else {
+			res = stackref.False
+		}
+		e.setPeek(0, subject)
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.NOP:
 		return e.advance(), nil, nil, false, nil
 	case compile.POP_EXCEPT:
@@ -972,8 +996,28 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_NAME:
 		v := e.peek(0)
 		_ = v
-		// body bail: if else: local assign "err": unexpected token "PyObject_SetItem" in expression
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		name := e.nameAt(int(oparg))
+		_ = name
+		ns := e.localsDict()
+		_ = ns
+		var err int32
+		_ = err
+		if ns == nil {
+			e.setPendingErr("_PyErr_Format")
+			v.Close()
+			return 0, nil, nil, false, e.error("error")
+		}
+		if objects.IsExactDict(ns) {
+			err = e.dictSetItem(ns, name, v.AsObject())
+		} else {
+			err = e.objectSetItem(ns, name, v.AsObject())
+		}
+		v.Close()
+		if err != 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.SWAP:
 		bottom := e.peek(int(oparg-2) + 1)
 		_ = bottom
