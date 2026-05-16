@@ -240,6 +240,20 @@ func TestTranslateBodyStoreFast(t *testing.T) {
 	}
 }
 
+func TestTranslateBodyJumpByNegativeOparg(t *testing.T) {
+	body := tokLine("JUMPBY(-oparg);")
+	got, terminates, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "JUMP_BACKWARD"})
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !terminates {
+		t.Errorf("expected terminates=true for JUMPBY")
+	}
+	if !strings.Contains(got, "e.jumpBy(-int(oparg) + 1)") {
+		t.Errorf("expected negative jumpBy return, got:\n%s", got)
+	}
+}
+
 func TestSplitTopLevelComma(t *testing.T) {
 	a, b, ok := splitTopLevelComma("res == NULL, error")
 	if !ok || strings.TrimSpace(a) != "res == NULL" || strings.TrimSpace(b) != "error" {

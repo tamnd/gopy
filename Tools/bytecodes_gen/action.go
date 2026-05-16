@@ -396,10 +396,18 @@ func (t *actionTranslator) translateJumpBy() error {
 	}
 	t.acceptSemi()
 	arg = strings.TrimSpace(arg)
-	if !isBareIdent(arg) || arg != "oparg" {
+	// JUMPBY(oparg) — forward jump (JUMP_FORWARD).
+	// JUMPBY(-oparg) — backward jump (JUMP_BACKWARD family). The
+	// space appears because takeParenthesised joins tokens with a
+	// single space.
+	switch arg {
+	case "oparg":
+		fmt.Fprintln(t.writer, "return e.jumpBy(int(oparg) + 1), nil, nil, false, nil")
+	case "- oparg":
+		fmt.Fprintln(t.writer, "return e.jumpBy(-int(oparg) + 1), nil, nil, false, nil")
+	default:
 		return fmt.Errorf("JUMPBY arg %q is not the bare 'oparg' identifier", arg)
 	}
-	fmt.Fprintln(t.writer, "return e.jumpBy(int(oparg) + 1), nil, nil, false, nil")
 	t.terminates = true
 	return nil
 }
