@@ -209,6 +209,48 @@ func (e *evalState) builtinsDict() objects.Object { return e.f.Builtins }
 //nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) localsDict() objects.Object { return e.f.Locals }
 
+// commonConsts returns the interpreter's LOAD_COMMON_CONSTANT lookup
+// table. CPython populates this during interpreter init in
+// _PyInterpreterState_InitConsts; gopy delays the fill to the first
+// read because the frame builtins (source of `all` / `any`) are not
+// finalized until execution starts. After the first call the array
+// is cached on state.Interpreter and reused.
+//
+// CPython: Python/pylifecycle.c:815 _PyInterpreterState_InitConsts
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) commonConsts() [state.NumCommonConstants]objects.Object {
+	interp := e.ts.Interp()
+	var out [state.NumCommonConstants]objects.Object
+	ready := true
+	for i := 0; i < state.NumCommonConstants; i++ {
+		v, ok := interp.CommonConsts[i].(objects.Object)
+		if !ok || v == nil {
+			ready = false
+			break
+		}
+		out[i] = v
+	}
+	if ready {
+		return out
+	}
+	interp.CommonConsts[state.ConstantAssertionError] = pyerrors.PyExc_AssertionError
+	interp.CommonConsts[state.ConstantNotImplementedError] = pyerrors.PyExc_NotImplementedError
+	interp.CommonConsts[state.ConstantBuiltinTuple] = objects.TupleType
+	if v, ok := lookupIn(e.f.Builtins, objects.NewStr("all")); ok {
+		interp.CommonConsts[state.ConstantBuiltinAll] = v
+	}
+	if v, ok := lookupIn(e.f.Builtins, objects.NewStr("any")); ok {
+		interp.CommonConsts[state.ConstantBuiltinAny] = v
+	}
+	for i := 0; i < state.NumCommonConstants; i++ {
+		if v, ok := interp.CommonConsts[i].(objects.Object); ok {
+			out[i] = v
+		}
+	}
+	return out
+}
+
 // loadName wraps CPython's _PyEval_LoadName: scan locals, then globals,
 // then builtins for `name`. Returns nil-on-failure with pendingErr set,
 // mirroring the NULL-on-failure convention the translator expects.

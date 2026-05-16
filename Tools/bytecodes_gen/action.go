@@ -752,6 +752,24 @@ func (p *exprParser) parseExpr(minPrec int) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Postfix `->field` chains. CPython uses `tstate->interp->common_consts`,
+	// `frame->stackpointer`, etc., to reach struct fields the opcode body
+	// reads or writes. We translate them via a per-segment table: each
+	// (tag, field) entry produces a fresh Go expression and a new tag for
+	// the next link. Unknown chains bail so the coverage test reports
+	// them as a single grouped reason.
+	tag := lhs
+	for p.pos+1 < len(p.toks) && p.toks[p.pos] == "->" {
+		field := p.toks[p.pos+1]
+		key := tag + "." + field
+		mapping, ok := structArrow[key]
+		if !ok {
+			return "", fmt.Errorf("unsupported struct arrow %s", key)
+		}
+		p.pos += 2
+		lhs = mapping.goExpr
+		tag = mapping.nextTag
+	}
 	// Postfix `[index]` subscripts. CPython uses these to read elements
 	// of sized inputs (`args[0]`) or fixed arrays; in Go the same
 	// syntax indexes a slice, so we pass the index through as a Go
@@ -1161,6 +1179,30 @@ type helperCall struct {
 	goExpr    string // e.g. "e.pyNumberNegative" — applied as Func(args...)
 	arity     int    // expected non-implicit arg count
 	dropFirst int    // strip this many leading args (tstate, frame)
+}
+
+// structArrow is the per-segment translation table for postfix
+// `->field` chains in CPython opcode bodies. Each key is
+// `currentTag.field`; the value is the Go expression that replaces the
+// chain up to and including that segment, plus the tag the next link
+// uses. Tags start as the leading identifier (`tstate`, `frame`) and
+// thread through each link.
+//
+// Replacements are full-substitution, not suffixes: `tstate->interp`
+// renders as `e.ts.Interp()`, dropping the literal `tstate` because
+// the gopy receiver carries it implicitly.
+var structArrow = map[string]struct {
+	goExpr  string
+	nextTag string
+}{
+	// `tstate->interp->common_consts` is the LOAD_COMMON_CONSTANT input.
+	// The chain bottoms out at a helper because state.Interpreter stores
+	// the array as `[5]any` (state stays free of objects imports); the
+	// helper asserts each slot to objects.Object on the way out.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h common_consts
+	"tstate.interp":         {goExpr: "e.ts.Interp()", nextTag: "interp"},
+	"interp.common_consts":  {goExpr: "e.commonConsts()", nextTag: "common_consts"},
 }
 
 // helperCalls is the registry of CPython helpers mapped to gopy

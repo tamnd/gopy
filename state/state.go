@@ -101,7 +101,31 @@ type Interpreter struct {
 	//
 	// CPython: Include/internal/pycore_interp_structs.h rare_events.builtin_dict
 	BuiltinDictMutations int
+
+	// CommonConsts is the LOAD_COMMON_CONSTANT lookup table. Five slots,
+	// indexed by the CONSTANT_* enum: AssertionError, NotImplementedError,
+	// tuple, all, any. Stored as any so package state stays free of
+	// objects/errors imports; the vm layer asserts back to objects.Object.
+	// Populated lazily on first read by the vm package; CPython fills it
+	// in during interpreter init.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h common_consts
+	// CPython: Python/pylifecycle.c:815 _PyInterpreterState_InitConsts
+	CommonConsts [NumCommonConstants]any
 }
+
+// CONSTANT_* enum: indices into Interpreter.CommonConsts. Matches the
+// CPython opcode utility header byte-for-byte.
+//
+// CPython: Include/internal/pycore_opcode_utils.h CONSTANT_*
+const (
+	ConstantAssertionError     = 0
+	ConstantNotImplementedError = 1
+	ConstantBuiltinTuple       = 2
+	ConstantBuiltinAll         = 3
+	ConstantBuiltinAny         = 4
+	NumCommonConstants         = 5
+)
 
 // Thread is the per-goroutine state. v0.3 carries the current
 // exception pointer; v0.6 adds the frame stack and v0.7 adds the

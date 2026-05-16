@@ -416,7 +416,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.GET_AITER:
 		obj := e.peek(0)
 		_ = obj
-		// body bail: if cond: trailing tokens after expression: "-> tp_as_async != NULL"
+		// body bail: if cond: unsupported struct arrow type_v.tp_as_async
 		// outputs: iter
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.GET_ANEXT:
@@ -546,7 +546,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.INSTRUMENTED_JUMP_FORWARD:
 		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_LINE:
-		// body bail: if cond: trailing tokens after expression: "-> tracing"
+		// body bail: if cond: unsupported struct arrow tstate.tracing
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_NOT_TAKEN:
 		return e.advance(), nil, nil, false, nil
@@ -644,7 +644,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = list_st
 		iterable_st := e.peek(0)
 		_ = iterable_st
-		// body bail: if then: if cond: expected ')' to close subexpression
+		// body bail: if then: if cond: unsupported struct arrow e.pyType(iterable).tp_iter
 		// outputs: list_st* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_BUILD_CLASS:
@@ -652,9 +652,10 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: bc
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_COMMON_CONSTANT:
-		// body bail: output assign "value": expected ')' to close call
-		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var value stackref.Ref
+		value = stackref.FromObject(e.commonConsts()[oparg])
+		e.push(value)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_CONST:
 		// body bail: if cond: unexpected token "this_instr" in expression
 		// outputs: value
@@ -870,7 +871,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.POP_EXCEPT:
 		exc_value := e.peek(0)
 		_ = exc_value
-		// body bail: _PyErr_StackItem exc_info rhs: trailing tokens after expression: "-> exc_info"
+		// body bail: _PyErr_StackItem exc_info rhs: unsupported struct arrow tstate.exc_info
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.POP_TOP:
 		value := e.peek(0)
@@ -881,7 +882,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.PUSH_EXC_INFO:
 		exc := e.peek(0)
 		_ = exc
-		// body bail: _PyErr_StackItem exc_info rhs: trailing tokens after expression: "-> exc_info"
+		// body bail: _PyErr_StackItem exc_info rhs: unsupported struct arrow tstate.exc_info
 		// outputs: prev_exc new_exc
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.PUSH_NULL:
@@ -905,7 +906,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.RESERVED:
 		panic("vm: Py_FatalError")
 	case compile.RETURN_GENERATOR:
-		// body bail: PyFunctionObject func rhs: expected ')' to close call
+		// body bail: PyFunctionObject func rhs: unsupported struct arrow frame.f_funcobj
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RETURN_VALUE:
