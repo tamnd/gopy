@@ -126,10 +126,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return next, nil, nil, false, true, nil
 
-	case compile.PUSH_NULL:
-		e.push(stackref.Null)
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.COPY:
 		// COPY i pushes a duplicate of stack[-i]. oparg=1 means
 		// duplicate the top.
@@ -154,65 +150,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.f.LocalsPlus[nlp+top], e.f.LocalsPlus[nlp+other] = e.f.LocalsPlus[nlp+other], e.f.LocalsPlus[nlp+top]
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.LOAD_CONST:
-		co := e.f.Code
-		if int(oparg) >= len(co.Consts) {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: LOAD_CONST index %d out of range", oparg)
-		}
-		obj, werr := wrapConst(co.Consts[oparg])
-		if werr != nil {
-			return 0, nil, nil, false, true, werr
-		}
-		e.pushObject(obj)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.LOAD_FAST, compile.LOAD_FAST_BORROW:
-		// LOAD_FAST_BORROW (3.13+) is the same observable shape as
-		// LOAD_FAST under our model: Go GC handles the lifetime, so
-		// the borrow-vs-own distinction collapses.
-		ref := e.localAt(int(oparg))
-		if ref.IsNull() {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: LOAD_FAST: local %d unbound", oparg)
-		}
-		e.push(ref.Dup())
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.LOAD_FAST_CHECK:
-		ref := e.localAt(int(oparg))
-		if ref.IsNull() {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: LOAD_FAST_CHECK: local %d unbound", oparg)
-		}
-		e.push(ref.Dup())
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.LOAD_FAST_AND_CLEAR:
-		ref := e.localAt(int(oparg))
-		e.setLocal(int(oparg), stackref.Null)
-		e.push(ref)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.STORE_FAST:
-		ref := e.pop()
-		old := e.localAt(int(oparg))
-		old.Close()
-		e.setLocal(int(oparg), ref)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.DELETE_FAST:
-		old := e.localAt(int(oparg))
-		if old.IsNull() {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: DELETE_FAST: local %d unbound", oparg)
-		}
-		old.Close()
-		e.setLocal(int(oparg), stackref.Null)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.RETURN_VALUE:
-		v := e.popObject()
-		return 0, v, nil, true, true, nil
-
-	case compile.JUMP_FORWARD:
-		return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
 	case compile.JUMP_BACKWARD, compile.JUMP_BACKWARD_NO_INTERRUPT:
 		// Backward jumps poll the eval breaker (CPython: CHECK_EVAL_BREAKER
 		// fires here so signal handlers and pending calls can run mid-loop).

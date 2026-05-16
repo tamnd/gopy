@@ -77,6 +77,13 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 	if dispatchGenSupported[op] {
 		return e.dispatchGen(op, oparg)
 	}
+	// Spec 1714 phase 5: hand-written op<NAME> bodies, one per opcode,
+	// matching the DSL signature. The action translator will replace
+	// these with generated arms in vm/eval_dispatch_gen.go as it gains
+	// coverage; until then, the bodies live in eval_dispatch_handwritten.go.
+	if next, retVal, retErr, retDone, ok, err := e.dispatchHandwritten(op, oparg); ok {
+		return next, retVal, retErr, retDone, err
+	}
 	// Hand-written panel for the smallest core opcodes so trivial
 	// programs run end-to-end before 1621 codegen lands.
 	if next, retVal, retErr, retDone, ok, err := e.trySimple(op, oparg); ok {
