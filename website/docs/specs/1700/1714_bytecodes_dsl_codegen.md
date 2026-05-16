@@ -631,10 +631,10 @@ body, so the body never reaches for raw codeunits.
 
 | Step | Status | Commit |
 |------|--------|--------|
-| `gopy_tier1_generator.py` lands | TODO | - |
-| `vm/eval_dispatch_gen.go` covers every unspecialized opcode | TODO | - |
+| `gopy_tier1_generator.py` lands (as `Tools/bytecodes_gen` Go emitter) | DONE | (prior phase) |
+| `vm/eval_dispatch_gen.go` covers every unspecialized opcode (skeleton; bodies pending Phase 8) | PARTIAL (107 arms, bodies stubbed) | this commit |
 | `vm/eval_simple.go` shrinks to evalLoop scaffolding only (frame setup, exit handling) | TODO | - |
-| `go test ./vm` green | TODO | - |
+| `go test ./vm` green | DONE | this commit |
 
 ## Phase 6 — specialized arms
 
@@ -899,7 +899,7 @@ helper).
 - [ ] Phase 4.1 — generator emits `specialize/family_gen.go` (family + deopt tables)
 - [ ] Phase 4.2 — `specialize/quicken.go` + `specialize/deopt.go` consume the generated tables
 - [ ] Phase 4.3 — parity test green; literal tables deleted
-- [ ] Phase 5.1 — `gopy_tier1_generator.py` emits `vm/eval_dispatch_gen.go` for unspecialized opcodes
+- [x] Phase 5.1 — tier-1 emitter (Go-side `Tools/bytecodes_gen` in lieu of `gopy_tier1_generator.py`) emits `vm/eval_dispatch_gen.go` for unspecialized opcodes (107 arms, bodies stubbed pending Phase 8 action translator)
 - [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function
 - [ ] Phase 5.3 — `vm/eval_simple.go` shrinks to evalLoop scaffolding only
 - [ ] Phase 5.4 — `go test ./vm` green
