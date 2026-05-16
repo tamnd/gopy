@@ -98,6 +98,7 @@ type actionTranslator struct {
 	assigned   map[string]bool // output names that got assigned
 	locals     map[string]bool // C-locals declared in the body
 	intLocals  map[string]bool // subset of locals whose C type was `int`
+	nestDepth  int             // brace-block nesting; >0 means inside an if/else body
 }
 
 func (t *actionTranslator) run() error {
@@ -180,6 +181,17 @@ func (t *actionTranslator) translateStmt() error {
 		// declared local with `_ = name`, so the cast has no analogue.
 		return t.translateVoidCast()
 	}
+	// Statement-level error setters. CPython spells these as
+	// `PyErr_Format(tstate, type, "fmt", args...);` or similar; their
+	// only effect is to stash an exception on the thread state. Under
+	// the refcount-only path the message text is informational, so we
+	// translate to a generic pendingErr stash and let the surrounding
+	// `ERROR_NO_POP()` / `ERROR_IF(...)` carry the failure.
+	//
+	// CPython: Python/errors.c PyErr_Format and friends.
+	if stmtErrSetters[tk.Text] {
+		return t.translateStmtErrSetter(tk.Text)
+	}
 	// Generic C-local declaration: `<type-prefix> name = expr;` or
 	// `<type-prefix> * name = expr;`. The set of accepted prefixes lives
 	// in cTypeDecls below. Go infers the type from the rhs so we drop
@@ -238,6 +250,21 @@ func (t *actionTranslator) translateTypedDecl() error {
 		return fmt.Errorf("expected identifier after %s, got %q", prefix, name)
 	}
 	t.pos++
+	// `<type> [*] name ;` — uninitialized declaration. CPython relies
+	// on these for "I will assign later (often via & out-param)"
+	// patterns. Translate to a zero-valued Go var so subsequent
+	// statements can read or write the slot.
+	if t.pos < len(t.toks) && t.toks[t.pos].Text == ";" {
+		t.acceptSemi()
+		t.locals[name] = true
+		goType := goTypeForPrefix(prefix)
+		if goType == "int32" {
+			t.intLocals[name] = true
+		}
+		fmt.Fprintf(t.writer, "var %s %s\n", goLocalName(name), goType)
+		fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(name))
+		return nil
+	}
 	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "=" {
 		return fmt.Errorf("expected '=' after %s %s", prefix, name)
 	}
@@ -259,6 +286,48 @@ func (t *actionTranslator) translateTypedDecl() error {
 	fmt.Fprintf(t.writer, "%s := %s\n", goLocalName(name), rhsExpr)
 	fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(name))
 	return nil
+}
+
+// stmtErrSetters is the set of CPython helpers that only set the
+// thread exception state. Translated as a generic pendingErr stash
+// since the actual format string is informational and the surrounding
+// ERROR_NO_POP / ERROR_IF carries the bail.
+var stmtErrSetters = map[string]bool{
+	"PyErr_Format":              true,
+	"_PyErr_Format":             true,
+	"_PyErr_SetString":          true,
+	"_PyErr_SetKeyError":        true,
+	"_PyEval_FormatExcUnbound":  true,
+	"_PyEval_FormatExcCheckArg": true,
+	"_PyEval_FormatKwargsError": true,
+}
+
+// translateStmtErrSetter consumes `NAME(args...);` and emits a
+// pendingErr stash. The args themselves are discarded since the
+// translated wrapper synthesises a generic error.
+func (t *actionTranslator) translateStmtErrSetter(name string) error {
+	t.pos++ // helper name
+	if _, err := t.takeParenthesised(); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	t.acceptSemi()
+	fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", name)
+	return nil
+}
+
+// goTypeForPrefix maps a CPython type-name token to the Go type used
+// when emitting an uninitialized declaration. Sized integer prefixes
+// all funnel to int32 because that is what helper wrappers return for
+// CPython's "int err" / "Py_ssize_t" failure signals; everything else
+// falls back to objects.Object since the surface only really cares
+// about PyObject*-shaped slots.
+func goTypeForPrefix(prefix string) string {
+	switch prefix {
+	case "int", "uint8_t", "uint32_t", "size_t", "Py_ssize_t", "Py_hash_t":
+		return "int32"
+	default:
+		return "objects.Object"
+	}
 }
 
 // translateGetlocalAssign handles `GETLOCAL(<idx>) = <expr>;`. The
@@ -948,9 +1017,13 @@ func (t *actionTranslator) translateErrorIf() error {
 	cond = strings.TrimSpace(cond)
 	if cond == "true" {
 		// Unconditional error path. CPython skips the `if` and emits
-		// the jump straight; we mirror that.
+		// the jump straight; we mirror that. Only mark the whole arm
+		// as terminating when we are at the top level; inside a brace
+		// block the surrounding flow still needs the post-body epilogue.
 		fmt.Fprintln(t.writer, `return 0, nil, nil, false, e.error("error")`)
-		t.terminates = true
+		if t.nestDepth == 0 {
+			t.terminates = true
+		}
 		return nil
 	}
 	// Token-level rewrites for the handful of C idioms that show up
@@ -1079,7 +1152,8 @@ func (t *actionTranslator) translateBraceBlock() (string, error) {
 	saved := t.writer
 	sub := &strings.Builder{}
 	t.writer = sub
-	defer func() { t.writer = saved }()
+	t.nestDepth++
+	defer func() { t.writer = saved; t.nestDepth-- }()
 	for t.pos < len(t.toks) && t.toks[t.pos].Text != "}" {
 		if err := t.translateStmt(); err != nil {
 			return "", err

@@ -26,6 +26,21 @@ func (e *evalState) decrefInputs(n int) {
 	_ = n
 }
 
+// setPendingErr stashes a generic synthetic exception on pendingErr,
+// keyed by the CPython helper name that set it. Translator-emitted
+// statements for `PyErr_Format(...)` / `_PyEval_FormatExcUnbound(...)`
+// and friends route through here; the surrounding ERROR_NO_POP /
+// ERROR_IF picks the error up via e.error().
+//
+// CPython: Python/errors.c PyErr_Format — sets tstate->current_exception
+// with a formatted message; gopy preserves the failure signal but
+// drops the format string since the eval loop only inspects existence.
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) setPendingErr(name string) {
+	e.pendingErr = fmt.Errorf("vm: %s", name)
+}
+
 // error returns the error currently held in pendingErr (and clears it),
 // or constructs a generic one if no specific cause was recorded. The
 // translator emits `return 0, e.error("error")` for every ERROR_IF;

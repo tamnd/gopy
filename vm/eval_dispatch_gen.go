@@ -22,7 +22,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value
 		str := e.peek(int(oparg & 1))
 		_ = str
-		// body bail: expected '=' after PyObject format_o
+		// body bail: if then: unrecognized token at action body start: "format_o"
 		// outputs: interpolation
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_LIST:
@@ -135,7 +135,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.CONVERT_VALUE:
 		value := e.peek(0)
 		_ = value
-		// body bail: expected '=' after conversion_func conv_fn
+		// body bail: unrecognized token at action body start: "conv_fn"
 		// outputs: result
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.COPY:
@@ -163,16 +163,35 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.drop(1)
 		return e.advance(), nil, nil, false, nil
 	case compile.DELETE_DEREF:
-		// body bail: if then: unrecognized token at action body start: "_PyEval_FormatExcUnbound"
+		// body bail: unrecognized token at action body start: "Py_DECREF"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_FAST:
-		// body bail: if then: unrecognized token at action body start: "_PyEval_FormatExcCheckArg"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		v := e.localAt(int(oparg))
+		_ = v
+		if v.IsNull() {
+			e.setPendingErr("_PyEval_FormatExcCheckArg")
+			return 0, nil, nil, false, e.error("error")
+		}
+		tmp := e.localAt(int(oparg))
+		_ = tmp
+		e.setLocal(int(oparg), stackref.Null)
+		tmp.Close()
+		return e.advance(), nil, nil, false, nil
 	case compile.DELETE_GLOBAL:
-		// body bail: if then: unrecognized token at action body start: "_PyEval_FormatExcCheckArg"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		name := e.nameAt(int(oparg))
+		_ = name
+		err := e.dictPop(e.globals(), name, nil)
+		_ = err
+		if err < 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		if err == 0 {
+			e.setPendingErr("_PyEval_FormatExcCheckArg")
+			return 0, nil, nil, false, e.error("error")
+		}
+		return e.advance(), nil, nil, false, nil
 	case compile.DELETE_NAME:
-		// body bail: expected '=' after int err
+		// body bail: unrecognized token at action body start: "err"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_SUBSCR:
 		container := e.peek(1)
@@ -194,9 +213,24 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = dict
 		update := e.peek(0)
 		_ = update
-		// body bail: if then: unrecognized token at action body start: "_PyEval_FormatKwargsError"
-		// outputs: callable* _out1* _out2* dict* _out4[oparg - 1]*
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		callable_o := callable.AsObject()
+		_ = callable_o
+		dict_o := dict.AsObject()
+		_ = dict_o
+		update_o := update.AsObject()
+		_ = update_o
+		err := e.dictMergeEx(dict_o, update_o, 2)
+		_ = err
+		if err < 0 {
+			e.setPendingErr("_PyEval_FormatKwargsError")
+			update.Close()
+			return 0, nil, nil, false, e.error("error")
+		}
+		update.Close()
+		e.setPeek(1+1+1+int(oparg-1)+1, callable)
+		e.setPeek(int(oparg-1)+1, dict)
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.DICT_UPDATE:
 		dict := e.peek(int(oparg-1) + 1)
 		_ = dict
@@ -228,8 +262,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.EXIT_INIT_CHECK:
 		should_be_none := e.peek(0)
 		_ = should_be_none
-		// body bail: if then: unrecognized token at action body start: "PyErr_Format"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		if !should_be_none.IsNone() {
+			e.setPendingErr("PyErr_Format")
+			return 0, nil, nil, false, e.error("error")
+		}
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.EXTENDED_ARG:
 		// body bail: unrecognized token at action body start: "opcode"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
@@ -258,7 +296,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.GET_AITER:
 		obj := e.peek(0)
 		_ = obj
-		// body bail: expected '=' after PyObject iter_o
+		// body bail: if cond: trailing tokens after expression: "-> tp_as_async != NULL"
 		// outputs: iter
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.GET_ANEXT:
@@ -457,7 +495,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: list_st* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_BUILD_CLASS:
-		// body bail: expected '=' after PyObject bc_o
+		// body bail: int err rhs: unexpected token "PyMapping_GetOptionalItem" in expression
 		// outputs: bc
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_COMMON_CONSTANT:
@@ -501,9 +539,16 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.push(value2)
 		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_FAST_CHECK:
-		// body bail: if then: unrecognized token at action body start: "_PyEval_FormatExcCheckArg"
-		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var value stackref.Ref
+		value_s := e.localAt(int(oparg))
+		_ = value_s
+		if value_s.IsNull() {
+			e.setPendingErr("_PyEval_FormatExcCheckArg")
+			return 0, nil, nil, false, e.error("error")
+		}
+		value = value_s.Dup()
+		e.push(value)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_FAST_LOAD_FAST:
 		var value1 stackref.Ref
 		var value2 stackref.Ref
@@ -519,19 +564,26 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		class_dict_st := e.peek(0)
 		_ = class_dict_st
-		// body bail: expected '=' after PyObject value_o
+		// body bail: unrecognized token at action body start: "name"
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:
 		mod_or_class_dict := e.peek(0)
 		_ = mod_or_class_dict
-		// body bail: expected '=' after PyObject v_o
+		// body bail: int err rhs: unexpected token "PyMapping_GetOptionalItem" in expression
 		// outputs: v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_LOCALS:
-		// body bail: if then: unrecognized token at action body start: "_PyErr_SetString"
-		// outputs: locals
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var locals stackref.Ref
+		l := e.localsDict()
+		_ = l
+		if l == nil {
+			e.setPendingErr("_PyErr_SetString")
+			return 0, nil, nil, false, e.error("error")
+		}
+		locals = stackref.FromObject(l)
+		e.push(locals)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_NAME:
 		var v stackref.Ref
 		name := e.nameAt(int(oparg))
@@ -662,7 +714,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SETUP_ANNOTATIONS:
-		// body bail: expected '=' after PyObject ann_dict
+		// body bail: int err rhs: unexpected token "PyMapping_GetOptionalItem" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SET_ADD:
 		set := e.peek(int(oparg-1) + 1)
@@ -747,7 +799,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_NAME:
 		v := e.peek(0)
 		_ = v
-		// body bail: expected '=' after int err
+		// body bail: if cond: unexpected token "PyDict_CheckExact" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SWAP:
 		bottom := e.peek(int(oparg-2) + 1)
