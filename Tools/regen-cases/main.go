@@ -109,6 +109,22 @@ type options struct {
 	outDir        string
 	python        string
 	checkUpstream bool
+	target        string
+}
+
+// gopyGenerators lists the gopy-targeted emitters introduced by
+// spec 1714. Each writes directly into the repo tree (no scratch
+// dir): regenerated files are checked in so reviewers can read
+// them without running the toolchain.
+//
+// Field semantics match upstreamGenerators: `name` is the script
+// under Tools/cases_generator/, `out` is the destination path
+// relative to the repo root, `inputs` are CPython-relative input
+// paths resolved against Tools/cases_generator/inputs/.
+var gopyGenerators = []generator{
+	{name: "gopy_opcode_id_generator.py", out: "compile/opcode_ids_gen.go",
+		inputs:  []string{"Python/bytecodes.c"},
+		comment: "//"},
 }
 
 func main() {
@@ -129,6 +145,12 @@ func run() error {
 	}
 	defer cleanup()
 
+	if opts.target == "go" {
+		if err := emitGopy(opts); err != nil {
+			return fmt.Errorf("emit gopy outputs: %w", err)
+		}
+		return nil
+	}
 	if err := emitUpstream(opts); err != nil {
 		return fmt.Errorf("emit upstream outputs: %w", err)
 	}
@@ -155,6 +177,7 @@ func parseFlags(argv []string) (options, error) {
 	fs.StringVar(&opts.python, "python", opts.python, "python interpreter")
 	fs.StringVar(&opts.cpythonRoot, "cpython-root", opts.cpythonRoot, "pinned CPython 3.14.5 source tree for --check-upstream")
 	fs.BoolVar(&opts.checkUpstream, "check-upstream", false, "verify vendored generator+inputs+outputs vs CPython 3.14.5")
+	fs.StringVar(&opts.target, "target", "c", "what to emit: c (upstream CPython outputs) or go (gopy-targeted outputs)")
 	if err := fs.Parse(argv); err != nil {
 		return opts, err
 	}
@@ -215,6 +238,31 @@ func emitUpstream(opts options) error {
 	inputsDir := filepath.Join(genDir, "inputs")
 	for _, g := range upstreamGenerators {
 		args := []string{filepath.Join(genDir, g.name), "-o", filepath.Join(opts.outDir, g.out)}
+		for _, in := range g.inputs {
+			args = append(args, filepath.Join(inputsDir, filepath.FromSlash(in)))
+		}
+		fmt.Printf("==> %s -> %s\n", g.name, g.out)
+		cmd := exec.Command(opts.python, args...)
+		cmd.Dir = genDir
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("%s: %w", g.name, err)
+		}
+	}
+	return nil
+}
+
+// emitGopy runs the gopy-targeted generators. Each writes
+// directly into the repo (not into outDir): the generated files
+// are checked in so reviewers do not need a working python
+// toolchain to read the code.
+func emitGopy(opts options) error {
+	genDir := filepath.Join(opts.repoRoot, "Tools", "cases_generator")
+	inputsDir := filepath.Join(genDir, "inputs")
+	for _, g := range gopyGenerators {
+		outPath := filepath.Join(opts.repoRoot, filepath.FromSlash(g.out))
+		args := []string{filepath.Join(genDir, g.name), "-o", outPath}
 		for _, in := range g.inputs {
 			args = append(args, filepath.Join(inputsDir, filepath.FromSlash(in)))
 		}
