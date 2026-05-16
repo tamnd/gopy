@@ -186,6 +186,12 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 		endQuoteSize = 0
 
 		if c == '{' {
+			// CPython snapshots the expression source at the opening
+			// `{` so set_ftstring_expr can later attach it as token
+			// metadata for debug f-strings and t-strings.
+			//
+			// CPython: Parser/lexer/lexer.c:1525
+			s.updateFtstringExpr('{')
 			peek := s.nextC()
 			if peek != '{' {
 				s.backup(peek)
@@ -243,4 +249,138 @@ func (s *State) fstringPrefixChar(m *tokenizerMode) byte {
 		return 't'
 	}
 	return 'f'
+}
+
+// updateFtstringExpr records expression bytes for the active f-string
+// (or t-string) so set_ftstring_expr can later attach them as token
+// metadata. CPython uses C string operations on a null-terminated
+// buffer; gopy uses offsets into s.buf, so strlen(tok->cur) becomes
+// inp-cur and strlen(tok->start) becomes inp-start.
+//
+// Returns false to signal an out-of-memory error in CPython; in gopy
+// the GC-managed slice never fails to allocate, so the return is
+// always true and the value is kept only for call-site parity.
+//
+// CPython: Parser/lexer/lexer.c:227 _PyLexer_update_ftstring_expr
+func (s *State) updateFtstringExpr(cur byte) bool {
+	size := s.inp - s.cur
+	m := s.curMode()
+
+	switch cur {
+	case 0:
+		if m.lastExprBuffer == nil || m.lastExprEnd >= 0 {
+			return true
+		}
+		m.lastExprBuffer = append(m.lastExprBuffer, s.buf[s.cur:s.cur+size]...)
+		m.lastExprSize += size
+	case '{':
+		m.lastExprBuffer = append(m.lastExprBuffer[:0], s.buf[s.cur:s.cur+size]...)
+		m.lastExprSize = size
+		m.lastExprEnd = -1
+	case '}', '!':
+		m.lastExprEnd = s.inp - s.start
+	case ':':
+		if m.lastExprEnd == -1 {
+			m.lastExprEnd = s.inp - s.start
+		}
+	default:
+		panic("updateFtstringExpr: unexpected character")
+	}
+	return true
+}
+
+// setFtstringExpr writes the buffered expression text into token's
+// Metadata field. Mirrors CPython's set_ftstring_expr: skips when
+// already populated, otherwise extracts last_expr_buffer truncated
+// by last_expr_end, stripping comments for t-strings or debug-mode
+// f-strings. Returns true to signal an error (only happens on UTF-8
+// decode failure in CPython; gopy carries raw bytes so this path
+// always returns false).
+//
+// CPython: Parser/lexer/lexer.c:114 set_ftstring_expr
+func (s *State) setFtstringExpr(tok *Tok, c byte) bool {
+	if c != '}' && c != ':' && c != '!' {
+		return false
+	}
+	m := s.curMode()
+	if !(m.inDebug || m.stringKind == kindTString) || tok.Metadata != nil {
+		return false
+	}
+
+	usable := m.lastExprSize - m.lastExprEnd
+	if usable <= 0 || m.lastExprBuffer == nil {
+		return false
+	}
+
+	src := m.lastExprBuffer[:usable]
+
+	hashDetected := false
+	inString := false
+	var quoteChar byte
+	for i := 0; i < len(src); i++ {
+		ch := src[i]
+		if ch == '\\' {
+			i++
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			if !inString {
+				inString = true
+				quoteChar = ch
+			} else if ch == quoteChar {
+				inString = false
+			}
+			continue
+		}
+		if ch == '#' && !inString {
+			hashDetected = true
+			break
+		}
+	}
+
+	if !hashDetected {
+		tok.Metadata = append([]byte(nil), src...)
+		return false
+	}
+
+	out := make([]byte, 0, len(src))
+	inString = false
+	quoteChar = 0
+	for i := 0; i < len(src); {
+		ch := src[i]
+		if ch == '\\' {
+			if i+1 < len(src) {
+				out = append(out, ch, src[i+1])
+				i += 2
+				continue
+			}
+			out = append(out, ch)
+			i++
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			if !inString {
+				inString = true
+				quoteChar = ch
+			} else if ch == quoteChar {
+				inString = false
+			}
+			out = append(out, ch)
+			i++
+			continue
+		}
+		if ch == '#' && !inString {
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			if i < len(src) {
+				out = append(out, '\n')
+			}
+			continue
+		}
+		out = append(out, ch)
+		i++
+	}
+	tok.Metadata = out
+	return false
 }

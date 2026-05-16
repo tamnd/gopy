@@ -571,6 +571,29 @@ func (s *State) scanString(quote int) Tok {
 //
 // CPython: Parser/lexer/lexer.c:1255 (punctuation branch in tok_get_normal_mode)
 func (s *State) scanOperator(c int) Tok {
+	// CPython's tok_get_normal_mode runs the f-string punctuation hook
+	// (update_ftstring_expr + set_ftstring_expr) before the operator
+	// dispatch, using curly_bracket_depth - (c != '{') as the cursor.
+	// gopy folds the hook in here; the cursor check uses the depth
+	// before the dispatch increments/decrements it for '{' and '}'.
+	//
+	// CPython: Parser/lexer/lexer.c:1258
+	ftCursorValid := false
+	if (c == ':' || c == '}' || c == '!' || c == '{') &&
+		s.insideFString() && s.insideFStringExpr() {
+		m := s.curMode()
+		delta := 1
+		if c == '{' {
+			delta = 0
+		}
+		cursor := m.curlyBracketDepth - delta
+		cursorInFormatWithDebug := cursor == 1 && (m.inDebug || m.inFormatSpec)
+		ftCursorValid = cursor == 0 || cursorInFormatWithDebug
+		if ftCursorValid {
+			s.updateFtstringExpr(byte(c))
+		}
+	}
+	var tok Tok
 	switch c {
 	case '(', '[', '{':
 		s.pushParen(byte(c))
@@ -585,7 +608,7 @@ func (s *State) scanOperator(c int) Tok {
 		if s.insideFString() {
 			s.curMode().curlyBracketDepth++
 		}
-		return s.tokenSetup(oneCharOp(c), s.start, s.cur)
+		tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	case ')', ']', '}':
 		s.popParen(byte(c))
 		// Inside an f-string expression, after popping, a `}` that
@@ -606,7 +629,7 @@ func (s *State) scanOperator(c int) Tok {
 				m.inDebug = false
 			}
 		}
-		return s.tokenSetup(oneCharOp(c), s.start, s.cur)
+		tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	case '*', '/', '<', '>', '=', '!':
 		c2, c3 := 0, 0
 		if s.peek() == '=' {
@@ -620,21 +643,21 @@ func (s *State) scanOperator(c int) Tok {
 				s.nextC()
 			}
 		}
-		return s.tokenSetup(classifyOp(c, c2, c3), s.start, s.cur)
+		tok = s.tokenSetup(classifyOp(c, c2, c3), s.start, s.cur)
 	case '+', '%', '&', '|', '^', '@':
 		c2 := 0
 		if s.peek() == '=' {
 			c2 = s.peek()
 			s.nextC()
 		}
-		return s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
+		tok = s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
 	case '-':
 		c2 := 0
 		if s.peek() == '=' || s.peek() == '>' {
 			c2 = s.peek()
 			s.nextC()
 		}
-		return s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
+		tok = s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
 	case ':':
 		c2 := 0
 		if s.peek() == '=' {
@@ -655,7 +678,7 @@ func (s *State) scanOperator(c int) Tok {
 				m.inFormatSpec = true
 			}
 		}
-		return s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
+		tok = s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
 	case '.':
 		// `...` is the only multi-dot operator; `..` is two separate
 		// DOTs. CPython's lexer mirrors that: peek twice and only
@@ -666,19 +689,27 @@ func (s *State) scanOperator(c int) Tok {
 			s.nextC()
 			if s.peek() == '.' {
 				s.nextC()
-				return s.tokenSetup(threeCharOp('.', '.', '.'), s.start, s.cur)
+				tok = s.tokenSetup(threeCharOp('.', '.', '.'), s.start, s.cur)
+				break
 			}
 			s.backup('.')
+			tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 		} else if d := s.peek(); d >= '0' && d <= '9' {
 			return s.scanNumber('.')
+		} else {
+			tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 		}
-		return s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	case ',', ';', '~':
-		return s.tokenSetup(oneCharOp(c), s.start, s.cur)
+		tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
+	default:
+		s.done = eToken
+		s.recordError("invalid character")
+		tok = s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
-	s.done = eToken
-	s.recordError("invalid character")
-	return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	if ftCursorValid && c != '{' {
+		s.setFtstringExpr(&tok, byte(c))
+	}
+	return tok
 }
 
 func (s *State) pushParen(c byte) {
