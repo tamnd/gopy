@@ -1,0 +1,53 @@
+---
+title: tokenize
+description: Lexer for Python source. Token stream, untokenize, CLI.
+---
+
+# `tokenize`
+
+Produce a token stream for Python source. Used by `ast`, IDEs, and
+codemods that need exact whitespace and comments.
+
+Source-of-record: `Lib/tokenize.py`, `Parser/tokenizer.c`,
+[tokenize docs](https://docs.python.org/3.14/library/tokenize.html).
+
+## Functions
+
+| Function                                              | Returns                          |
+| ----------------------------------------------------- | -------------------------------- |
+| `tokenize(readline)`                                  | Iterator of `TokenInfo`.         |
+| `generate_tokens(readline)`                           | Same but reads `str`.            |
+| `untokenize(iterable)`                                | Reconstructed source.            |
+| `detect_encoding(readline)`                           | `(encoding, lines)`.             |
+| `open(filename)`                                      | Open with detected encoding.     |
+
+`TokenInfo(type, string, start, end, line)` where `start` and `end`
+are `(row, col)` pairs.
+
+## Token types
+
+`NAME`, `NUMBER`, `STRING`, `FSTRING_START`, `FSTRING_MIDDLE`,
+`FSTRING_END` (3.12+), `OP`, `NEWLINE`, `NL`, `INDENT`, `DEDENT`,
+`COMMENT`, `ENCODING`, `ENDMARKER`, `TYPE_COMMENT`, `SOFT_KEYWORD`,
+`ERRORTOKEN`, `EXACT_TOKEN_TYPES` map.
+
+## CLI
+
+`python -m tokenize [-e] [source]` prints the stream. With `-e` it
+uses exact token types.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `tokenize`, `generate_tokens`         | Complete.                                          |
+| `untokenize`                          | Complete.                                          |
+| F-string token split (3.12+)          | Complete.                                          |
+| CLI                                   | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [tokenize](https://docs.python.org/3.14/library/tokenize.html).
+* `Lib/tokenize.py`, `Parser/tokenizer.c`.
+* `module/tokenize/`. gopy port.
+* PEP 701.

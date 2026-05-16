@@ -1,0 +1,77 @@
+---
+title: string
+description: Common string operations, character classes, Formatter, Template.
+---
+
+# `string`
+
+Character class constants, a `Formatter` extension point for
+`str.format`, and `Template` for `$identifier` substitution.
+
+Source-of-record: `Lib/string.py`,
+[string docs](https://docs.python.org/3.14/library/string.html).
+
+## Character classes
+
+| Constant            | Value                                                        |
+| ------------------- | ------------------------------------------------------------ |
+| `ascii_lowercase`   | `'abcdefghijklmnopqrstuvwxyz'`.                              |
+| `ascii_uppercase`   | `'ABCDEFGHIJKLMNOPQRSTUVWXYZ'`.                              |
+| `ascii_letters`     | Concatenation of the two above.                              |
+| `digits`            | `'0123456789'`.                                              |
+| `hexdigits`         | `'0123456789abcdefABCDEF'`.                                  |
+| `octdigits`         | `'01234567'`.                                                |
+| `punctuation`       | ASCII punctuation.                                           |
+| `whitespace`        | Space, tab, newline, return, formfeed, vertical tab.         |
+| `printable`         | Digits + letters + punctuation + whitespace.                 |
+
+## `Formatter`
+
+Backbone of `str.format` / f-strings. Override to customise.
+
+| Method                                       | Override role                            |
+| -------------------------------------------- | ---------------------------------------- |
+| `format(format_string, *args, **kwargs)`     | Top-level entry.                         |
+| `vformat(format_string, args, kwargs)`       | Bypass packing.                          |
+| `parse(format_string)`                       | Iterator of `(literal, field_name, spec, conversion)`. |
+| `get_field(field_name, args, kwargs)`        | Resolve `0.attr[key]`.                   |
+| `get_value(key, args, kwargs)`               | Look up by name or position.             |
+| `check_unused_args(used_args, args, kwargs)` | Validation hook.                         |
+| `format_field(value, format_spec)`           | Apply format spec.                       |
+| `convert_field(value, conversion)`           | Apply `!s`, `!r`, `!a`.                  |
+
+## `Template`
+
+`Template` performs `$identifier` and `${identifier}` substitution
+without invoking `str.format`'s richer mini-language.
+
+| Method                                       | Effect                                  |
+| -------------------------------------------- | --------------------------------------- |
+| `Template(template)`                         | Construct.                              |
+| `substitute(mapping={}, /, **kwargs)`        | Replace; missing keys raise `KeyError`. |
+| `safe_substitute(mapping={}, /, **kwargs)`   | Leave missing placeholders intact.      |
+| `get_identifiers()`                          | Names referenced (3.11+).               |
+| `is_valid()`                                 | Predicate (3.11+).                      |
+
+Customise via `Template.delimiter`, `Template.idpattern`,
+`Template.braceidpattern`, `Template.flags`.
+
+## `capwords`
+
+`string.capwords(s, sep=None)` splits on whitespace and capitalises
+each word. Equivalent to `sep.join(x.capitalize() for x in s.split(sep))`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All character class constants         | Complete.                                          |
+| `Formatter` API                       | Complete.                                          |
+| `Template` (incl. `is_valid`)         | Complete.                                          |
+| `capwords`                            | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [string](https://docs.python.org/3.14/library/string.html).
+* `Lib/string.py`.
+* `module/string/`, `module/_string/`. gopy port.

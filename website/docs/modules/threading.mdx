@@ -1,0 +1,72 @@
+---
+title: threading
+description: Thread-based parallelism. Lock, RLock, Condition, Event, Semaphore, Barrier, Thread.
+---
+
+# `threading`
+
+Higher-level threading API built on `_thread`. Provides `Thread`,
+synchronisation primitives, thread-local data, and timers.
+
+Source-of-record: `Lib/threading.py`,
+[threading docs](https://docs.python.org/3.14/library/threading.html).
+
+## Module-level
+
+| Name                                  | Returns                                |
+| ------------------------------------- | -------------------------------------- |
+| `active_count()`                      | Live thread count.                     |
+| `current_thread()`                    | Calling `Thread`.                      |
+| `main_thread()`                       | Main `Thread`.                         |
+| `enumerate()`                         | List of live threads.                  |
+| `get_ident()` / `get_native_id()`     | Identifier.                            |
+| `excepthook(args)`                    | Override unhandled exception hook.     |
+| `settrace(func)` / `setprofile(func)` | Install tracers.                       |
+| `stack_size([size])`                  | New-thread stack size.                 |
+| `local()`                             | Thread-local storage.                  |
+
+## `Thread`
+
+| API                                                            | Purpose                  |
+| -------------------------------------------------------------- | ------------------------ |
+| `Thread(group=None, target=None, name=None, args=(), kwargs={}, *, daemon=None)` | Construct. |
+| `start()` / `run()`                                            | Launch / body.           |
+| `join(timeout=None)`                                           | Wait.                    |
+| `is_alive()`                                                   | Predicate.               |
+| `name`, `ident`, `native_id`, `daemon`                         | Attributes.              |
+
+## Synchronisation
+
+| Primitive                | Methods                                                |
+| ------------------------ | ------------------------------------------------------ |
+| `Lock`                   | `acquire(blocking=True, timeout=-1)`, `release()`, `locked()`. |
+| `RLock`                  | Re-entrant lock.                                        |
+| `Condition(lock=None)`   | `wait`, `wait_for`, `notify`, `notify_all`.            |
+| `Semaphore(value=1)` / `BoundedSemaphore` | `acquire`, `release`.                     |
+| `Event`                  | `set`, `clear`, `wait`, `is_set`.                      |
+| `Barrier(parties, action=None, timeout=None)` | `wait`, `reset`, `abort`.         |
+| `Timer(interval, function, args=None, kwargs=None)` | `start`, `cancel`.           |
+
+All locks act as context managers via `with`.
+
+## GIL
+
+CPython holds a global interpreter lock; threading runs cooperatively
+in CPU-bound Python code. 3.13 introduced an opt-in free-threaded
+build; 3.14 stabilises it.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `Thread`, daemon, join                | Complete.                                          |
+| Locks (`Lock`, `RLock`, `Semaphore`, `BoundedSemaphore`) | Complete.                       |
+| `Condition`, `Event`, `Barrier`       | Complete.                                          |
+| `Timer`, `local`                      | Complete.                                          |
+| Free-threaded interpreter             | Out of scope; gopy is single-threaded VM.          |
+
+## Reference
+
+* CPython 3.14: [threading](https://docs.python.org/3.14/library/threading.html).
+* `Lib/threading.py`.
+* `module/threading/`. gopy port.

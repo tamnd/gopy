@@ -1,0 +1,43 @@
+---
+title: fnmatch
+description: Unix shell-style filename matching.
+---
+
+# `fnmatch`
+
+Glob-style pattern matching. Used by `glob`, by command-line tools,
+and by anyone matching filenames without firing up a full regex.
+
+Source-of-record: `Lib/fnmatch.py`,
+[fnmatch docs](https://docs.python.org/3.14/library/fnmatch.html).
+
+## Patterns
+
+| Token        | Meaning                                                 |
+| ------------ | ------------------------------------------------------- |
+| `*`          | Any sequence (no path separator in `glob`; any in `fnmatch`). |
+| `?`          | One character.                                          |
+| `[seq]`      | One character in `seq` (ranges allowed).                |
+| `[!seq]`     | One character not in `seq`.                             |
+
+## API
+
+| Function                                   | Effect                                       |
+| ------------------------------------------ | -------------------------------------------- |
+| `fnmatch(filename, pattern)`               | Case-insensitive on case-insensitive FS, case-sensitive elsewhere. |
+| `fnmatchcase(filename, pattern)`           | Always case-sensitive.                       |
+| `filter(names, pattern)`                   | Subset matching the pattern.                 |
+| `translate(pattern)`                       | Convert to a regex pattern string.           |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All four functions                    | Complete.                                          |
+| `translate` output matches CPython    | Complete; emits the same regex source.             |
+
+## Reference
+
+* CPython 3.14: [fnmatch](https://docs.python.org/3.14/library/fnmatch.html).
+* `Lib/fnmatch.py`.
+* `module/fnmatch/`. gopy port.

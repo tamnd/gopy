@@ -1,0 +1,74 @@
+---
+title: decimal
+description: Decimal fixed and floating point arithmetic. IEEE 754-2008 / IBM spec.
+---
+
+# `decimal`
+
+Arbitrary precision decimal arithmetic following the IBM General
+Decimal Arithmetic Specification. Used where binary float rounding is
+unacceptable (financial, accounting, regulatory).
+
+Source-of-record: `Lib/_pydecimal.py`, `Modules/_decimal/`,
+[decimal docs](https://docs.python.org/3.14/library/decimal.html).
+
+## Core
+
+| Construct                                | Purpose                                  |
+| ---------------------------------------- | ---------------------------------------- |
+| `Decimal(value='0', context=None)`       | Build from `str`, `int`, `float` (via `from_float`), tuple. |
+| `getcontext()` / `setcontext(ctx)`       | Thread-local context.                    |
+| `localcontext(ctx=None, **kw)`           | Context manager.                         |
+| `Context(prec=..., rounding=..., Emin=..., Emax=..., capitals=..., clamp=..., flags=..., traps=...)` | Configuration. |
+
+## Operations on `Decimal`
+
+`+`, `-`, `*`, `/`, `//`, `%`, `**`, `divmod`, unary `+`/`-`,
+`abs`. Methods: `quantize(exp, rounding=None, context=None)`,
+`fma(other, third, context=None)`, `sqrt`, `exp`, `ln`,
+`log10`, `logb`, `logical_and`, `logical_or`, `logical_xor`,
+`logical_invert`, `scaleb`, `shift`, `rotate`, `compare`,
+`compare_signal`, `compare_total`, `compare_total_mag`,
+`copy_sign`, `copy_abs`, `copy_negate`, `next_minus`,
+`next_plus`, `next_toward`, `number_class`, `radix`,
+`remainder_near`, `same_quantum`, `to_integral_value`,
+`to_integral_exact`, `as_tuple`, `as_integer_ratio`,
+`from_float`, `is_canonical`, `is_finite`, `is_infinite`,
+`is_nan`, `is_normal`, `is_qnan`, `is_signed`, `is_snan`,
+`is_subnormal`, `is_zero`.
+
+## Rounding modes
+
+`ROUND_CEILING`, `ROUND_DOWN`, `ROUND_FLOOR`, `ROUND_HALF_DOWN`,
+`ROUND_HALF_EVEN`, `ROUND_HALF_UP`, `ROUND_UP`, `ROUND_05UP`.
+
+## Signals / traps
+
+`Clamped`, `DecimalException`, `DivisionByZero`, `Inexact`,
+`InvalidOperation`, `Overflow`, `Rounded`, `Subnormal`,
+`Underflow`, `FloatOperation`.
+
+`ConversionSyntax`, `DivisionImpossible`, `DivisionUndefined`,
+`InvalidContext` are subclasses of `InvalidOperation`.
+
+## Presets
+
+`DefaultContext`, `BasicContext`, `ExtendedContext`.
+`MAX_PREC`, `MAX_EMAX`, `MIN_EMIN`, `MIN_ETINY`, `HAVE_THREADS`,
+`HAVE_CONTEXTVAR`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Arithmetic and rounding               | Complete.                                          |
+| Transcendentals (`exp`, `ln`, `log10`, `sqrt`) | Complete.                                  |
+| Context management and traps          | Complete.                                          |
+| ContextVar-based context              | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [decimal](https://docs.python.org/3.14/library/decimal.html).
+* `Lib/_pydecimal.py`, `Modules/_decimal/`.
+* `module/_decimal/`. gopy port.
+* IBM General Decimal Arithmetic spec.

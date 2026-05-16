@@ -1,0 +1,63 @@
+---
+title: heapq
+description: Binary min-heap algorithm for priority queues.
+---
+
+# `heapq`
+
+`heapq` implements the binary-heap algorithm on a regular Python list.
+Element 0 is always the smallest. The list itself is the heap; there
+is no wrapper object.
+
+Source-of-record: `Lib/heapq.py`, `Modules/_heapqmodule.c`,
+[heapq docs](https://docs.python.org/3.14/library/heapq.html).
+
+## Core operations
+
+| Function                                    | Effect                                       |
+| ------------------------------------------- | -------------------------------------------- |
+| `heappush(heap, item)`                      | Add item.                                    |
+| `heappop(heap)`                             | Remove and return the smallest.              |
+| `heappushpop(heap, item)`                   | Push then pop in one step.                   |
+| `heapreplace(heap, item)`                   | Pop then push; faster than push+pop.         |
+| `heapify(list)`                             | Transform list into heap in-place, O(n).     |
+
+## Selection
+
+| Function                                    | Effect                                       |
+| ------------------------------------------- | -------------------------------------------- |
+| `nlargest(n, iterable, key=None)`           | `n` largest elements.                        |
+| `nsmallest(n, iterable, key=None)`          | `n` smallest elements.                       |
+| `merge(*iterables, key=None, reverse=False)` | Merge sorted inputs into a sorted output.   |
+
+## Priority queue idiom
+
+Heap items are usually `(priority, ...payload)` tuples. Insert with a
+monotonically increasing tie-breaker to keep entries unique and
+comparable:
+
+```python
+import itertools
+counter = itertools.count()
+heapq.heappush(heap, (priority, next(counter), payload))
+```
+
+## Internals
+
+The heap is a complete binary tree stored breadth-first in the list.
+For `i`, children live at `2i+1` and `2i+2`, parent at `(i-1)//2`.
+`heapify` runs sift-down from `n//2-1` down to `0` for O(n) build.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All five core operations              | Complete.                                          |
+| `nlargest`, `nsmallest`, `merge`      | Complete.                                          |
+| C-fast paths                          | Complete via `module/_heapq`.                      |
+
+## Reference
+
+* CPython 3.14: [heapq](https://docs.python.org/3.14/library/heapq.html).
+* `Lib/heapq.py`, `Modules/_heapqmodule.c`.
+* `module/_heapq/`. gopy port.

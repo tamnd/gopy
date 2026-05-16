@@ -1,0 +1,85 @@
+---
+title: warnings
+description: Issue and filter non-error diagnostics. Filter spec, simplefilter, catch_warnings.
+---
+
+# `warnings`
+
+The `warnings` module raises non-fatal diagnostics distinct from
+exceptions. The filter list controls which warnings are shown,
+ignored, or escalated into errors.
+
+Source-of-record: `Lib/warnings.py`, `Python/_warnings.c`,
+[warnings docs](https://docs.python.org/3.14/library/warnings.html).
+
+## API
+
+| Function                                                      | Behaviour                       |
+| ------------------------------------------------------------- | ------------------------------- |
+| `warn(message, category=UserWarning, stacklevel=1, source=None)` | Issue a warning.            |
+| `warn_explicit(message, category, filename, lineno, module=None, registry=None, module_globals=None, source=None)` | Without stack lookup. |
+| `showwarning(message, category, filename, lineno, file=None, line=None)` | Hook (override to redirect). |
+| `formatwarning(message, category, filename, lineno, line=None)` | Format for `showwarning`.   |
+
+## Filter spec
+
+```
+action:message:category:module:lineno
+```
+
+| Action       | Effect                                              |
+| ------------ | --------------------------------------------------- |
+| `"default"`  | Print once per location.                            |
+| `"error"`    | Raise instead of warning.                           |
+| `"ignore"`   | Drop.                                               |
+| `"always"`   | Print every time.                                   |
+| `"module"`   | Print once per module.                              |
+| `"once"`     | Print once globally.                                |
+| `"all"`      | Alias for `"always"`.                               |
+
+## Filter management
+
+| Function                                                  | Behaviour                                   |
+| --------------------------------------------------------- | ------------------------------------------- |
+| `filterwarnings(action, message='', category=Warning, module='', lineno=0, append=False)` | Add a filter. |
+| `simplefilter(action, category=Warning, lineno=0, append=False)` | Concise variant.                  |
+| `resetwarnings()`                                         | Clear all filters and registries.           |
+| `catch_warnings(*, record=False, action=None, category=Warning, lineno=0, append=False)` | Context manager that snapshots filters. |
+| `warnings.filters`                                        | Active filter list.                         |
+
+## Categories
+
+| Class                              | Use                                            |
+| ---------------------------------- | ---------------------------------------------- |
+| `Warning`                          | Base.                                          |
+| `UserWarning`                      | Default if no category given.                  |
+| `DeprecationWarning`               | Deprecation aimed at code authors.             |
+| `PendingDeprecationWarning`        | Future deprecation.                            |
+| `SyntaxWarning`                    | Dubious syntax that still parses.              |
+| `RuntimeWarning`                   | Runtime feature issues.                        |
+| `FutureWarning`                    | Behaviour change in a future release.          |
+| `ImportWarning`                    | Issues during import.                          |
+| `UnicodeWarning`                   | Encoding issues.                               |
+| `BytesWarning`                     | Comparing `bytes` and `str`.                   |
+| `ResourceWarning`                  | Unclosed resources.                            |
+| `EncodingWarning`                  | Implicit default encoding (PEP 597).           |
+
+## `-W` command-line
+
+`python -W <spec>` applies a filter at startup. `PYTHONWARNINGS=spec`
+does the same via env.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Filter language and registry          | Complete.                                          |
+| All categories                        | Complete.                                          |
+| `catch_warnings`                      | Complete.                                          |
+| `-W` and `PYTHONWARNINGS`             | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [warnings](https://docs.python.org/3.14/library/warnings.html).
+* `Lib/warnings.py`, `Python/_warnings.c`.
+* `module/warnings/`, `module/_warnings/`. gopy port.

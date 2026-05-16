@@ -1,0 +1,39 @@
+---
+title: hmac
+description: Keyed-hashing for message authentication (RFC 2104).
+---
+
+# `hmac`
+
+HMAC keyed-hash message authentication. Builds on `hashlib`.
+
+Source-of-record: `Lib/hmac.py`,
+[hmac docs](https://docs.python.org/3.14/library/hmac.html).
+
+## API
+
+| Function / class                                       | Purpose                              |
+| ------------------------------------------------------ | ------------------------------------ |
+| `new(key, msg=None, digestmod)`                        | Construct HMAC.                      |
+| `digest(key, msg, digest)`                             | One-shot.                            |
+| `compare_digest(a, b)`                                 | Constant-time compare.               |
+| `HMAC.update(msg)`                                     | Feed bytes.                          |
+| `HMAC.digest()` / `hexdigest()`                        | Finalise.                            |
+| `HMAC.copy()`                                          | Fork.                                |
+| `HMAC.name`, `digest_size`, `block_size`               | Metadata.                            |
+
+`digestmod` accepts a hashlib name, constructor, or `hashlib.new`-returned object.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `HMAC`, `new`, `digest`               | Complete.                                          |
+| `compare_digest`                      | Complete via `subtle.ConstantTimeCompare`.         |
+
+## Reference
+
+* CPython 3.14: [hmac](https://docs.python.org/3.14/library/hmac.html).
+* `Lib/hmac.py`.
+* `module/_hmac/`. gopy port.
+* RFC 2104.

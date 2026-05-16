@@ -1,0 +1,73 @@
+---
+title: inspect
+description: Live object introspection. Signatures, source, frames, classifiers.
+---
+
+# `inspect`
+
+Inspect modules, classes, functions, methods, frames, and code
+objects at runtime. Powers tooling such as `help()`, pydoc, IDEs.
+
+Source-of-record: `Lib/inspect.py`,
+[inspect docs](https://docs.python.org/3.14/library/inspect.html).
+
+## Classification
+
+`ismodule`, `isclass`, `isfunction`, `ismethod`, `isgenerator`,
+`isgeneratorfunction`, `iscoroutine`, `iscoroutinefunction`,
+`isasyncgen`, `isasyncgenfunction`, `isawaitable`, `isframe`,
+`iscode`, `ismethoddescriptor`, `isdatadescriptor`,
+`isgetsetdescriptor`, `ismemberdescriptor`, `isbuiltin`, `isabstract`.
+
+## Source and documentation
+
+| Function                       | Returns                                   |
+| ------------------------------ | ----------------------------------------- |
+| `getsource(object)`            | Source text.                              |
+| `getsourcelines(object)`       | `(lines, start)`.                         |
+| `getsourcefile(object)`        | Source file path.                         |
+| `getfile(object)`              | Defining file.                            |
+| `getdoc(object)`               | Cleaned docstring.                        |
+| `getcomments(object)`          | Adjacent comments.                        |
+| `cleandoc(doc)`                | Strip indentation.                        |
+
+## Signatures
+
+| Construct                       | Purpose                                   |
+| ------------------------------- | ----------------------------------------- |
+| `signature(callable, *, follow_wrapped=True, globals=None, locals=None, eval_str=False)` | Build. |
+| `Signature(parameters=None, *, return_annotation=Signature.empty)` | Class. |
+| `Parameter(name, kind, *, default, annotation)` | Parameter.                 |
+| `BoundArguments`                | `bind`, `bind_partial`, `arguments`, `apply_defaults`. |
+
+`Parameter.kind` values: `POSITIONAL_ONLY`, `POSITIONAL_OR_KEYWORD`,
+`VAR_POSITIONAL`, `KEYWORD_ONLY`, `VAR_KEYWORD`.
+
+## Frames and stack
+
+`currentframe()`, `stack()`, `trace()`, `getouterframes(frame)`,
+`getinnerframes(traceback)`, `getframeinfo(frame, context=1)`,
+`getargvalues(frame)`, `formatargvalues`. `FrameInfo` dataclass
+exposes `frame`, `filename`, `lineno`, `function`, `code_context`,
+`index`, `positions` (3.11+).
+
+## Class introspection
+
+`getmro(cls)`, `getmembers(object, predicate=None)`, `classify_class_attrs(cls)`,
+`getattr_static(obj, attr, default)`, `get_annotations(obj, *, globals=None, locals=None, eval_str=False)` (3.10+).
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Classification predicates             | Complete.                                          |
+| `signature`, `Signature`, `Parameter` | Complete.                                          |
+| `getsource` / `getsourcelines`        | Complete; requires loader linecache.               |
+| Frame helpers and `FrameInfo.positions` | Complete.                                        |
+
+## Reference
+
+* CPython 3.14: [inspect](https://docs.python.org/3.14/library/inspect.html).
+* `Lib/inspect.py`.
+* `module/inspect/`. gopy port.
+* PEPs 362, 657.

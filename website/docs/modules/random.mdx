@@ -1,0 +1,76 @@
+---
+title: random
+description: Pseudo-random number generators. Mersenne Twister, distributions, weighted choices.
+---
+
+# `random`
+
+Pseudo-random number generators for various distributions. The
+default generator is the Mersenne Twister (period `2**19937-1`).
+
+For cryptographic randomness, use the `secrets` module instead.
+
+Source-of-record: `Lib/random.py`, `Modules/_randommodule.c`,
+[random docs](https://docs.python.org/3.14/library/random.html).
+
+## Bookkeeping
+
+| Function                              | Effect                                          |
+| ------------------------------------- | ----------------------------------------------- |
+| `seed(a=None, version=2)`             | Initialise from `a` (int or `bytes`) or system entropy. |
+| `getstate()`                          | Snapshot the internal state.                    |
+| `setstate(state)`                     | Restore.                                        |
+
+## Integers
+
+| Function                              | Returns                                         |
+| ------------------------------------- | ----------------------------------------------- |
+| `randrange(stop)` / `randrange(start, stop, step=1)` | Integer in range.                |
+| `randint(a, b)`                       | Inclusive integer.                              |
+| `getrandbits(k)`                      | k-bit non-negative int.                         |
+
+## Sequences
+
+| Function                              | Returns                                         |
+| ------------------------------------- | ----------------------------------------------- |
+| `choice(seq)`                         | One element.                                    |
+| `choices(population, weights=None, *, cum_weights=None, k=1)` | With replacement.       |
+| `shuffle(seq)`                        | In-place shuffle.                               |
+| `sample(population, k, *, counts=None)` | Without replacement.                          |
+
+## Real-valued distributions
+
+| Function                                   | Distribution                              |
+| ------------------------------------------ | ----------------------------------------- |
+| `random()`                                 | Uniform 0.0 to 1.0.                       |
+| `uniform(a, b)`                            | Uniform `[a, b]`.                         |
+| `triangular(low=0.0, high=1.0, mode=None)` | Triangular.                               |
+| `betavariate(alpha, beta)`                 | Beta.                                     |
+| `expovariate(lambd=1.0)`                   | Exponential.                              |
+| `gammavariate(alpha, beta)`                | Gamma.                                    |
+| `gauss(mu=0.0, sigma=1.0)` / `normalvariate(mu=0.0, sigma=1.0)` | Normal.            |
+| `lognormvariate(mu, sigma)`                | Log-normal.                               |
+| `vonmisesvariate(mu, kappa)`               | von Mises.                                |
+| `paretovariate(alpha)`                     | Pareto.                                   |
+| `weibullvariate(alpha, beta)`              | Weibull.                                  |
+| `binomialvariate(n=1, p=0.5)`              | Binomial (3.12+).                         |
+
+## `Random` and `SystemRandom`
+
+`Random` is the default class. Construct your own for isolated state.
+`SystemRandom` wraps `os.urandom` and rejects `seed`/`getstate`/`setstate`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Mersenne Twister core                 | Complete; bit-identical to CPython for the same seed. |
+| All distributions                     | Complete.                                          |
+| `choices`, `sample`, `shuffle`        | Complete.                                          |
+| `SystemRandom`                        | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [random](https://docs.python.org/3.14/library/random.html).
+* `Lib/random.py`, `Modules/_randommodule.c`.
+* `module/_random/`. gopy port.

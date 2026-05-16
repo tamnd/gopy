@@ -1,0 +1,73 @@
+---
+title: importlib
+description: Programmatic access to the import system. Finders, loaders, resources, metadata.
+---
+
+# `importlib`
+
+Implements `import` and provides hooks for customising it. Split into
+sub-packages: `importlib.abc`, `importlib.machinery`,
+`importlib.util`, `importlib.resources`, `importlib.metadata`.
+
+Source-of-record: `Lib/importlib/`,
+[importlib docs](https://docs.python.org/3.14/library/importlib.html).
+
+## Top-level
+
+| Function                                              | Effect                                |
+| ----------------------------------------------------- | ------------------------------------- |
+| `import_module(name, package=None)`                   | Import by string.                     |
+| `reload(module)`                                      | Re-import.                            |
+| `invalidate_caches()`                                 | Clear finder caches.                  |
+| `__import__(...)`                                     | Low-level entry, used by `import`.    |
+
+## `importlib.util`
+
+`spec_from_file_location`, `module_from_spec`,
+`find_spec(name, package=None)`, `resolve_name(name, package)`,
+`source_from_cache`, `cache_from_source`,
+`spec_from_loader`, `LazyLoader`.
+
+## `importlib.machinery`
+
+`ModuleSpec`, `BuiltinImporter`, `FrozenImporter`,
+`PathFinder`, `FileFinder`, `SourceFileLoader`,
+`SourcelessFileLoader`, `ExtensionFileLoader`, `NamespaceLoader`,
+`SOURCE_SUFFIXES`, `BYTECODE_SUFFIXES`, `EXTENSION_SUFFIXES`,
+`OPTIMIZED_BYTECODE_SUFFIXES`, `DEBUG_BYTECODE_SUFFIXES`,
+`AppleFrameworkLoader` (3.13+).
+
+## `importlib.abc`
+
+Abstract bases for the import protocol: `Finder` (deprecated),
+`MetaPathFinder`, `PathEntryFinder`, `Loader`, `ResourceLoader`,
+`InspectLoader`, `ExecutionLoader`, `FileLoader`, `SourceLoader`,
+`Traversable`, `TraversableResources`.
+
+## `importlib.resources`
+
+`files(package)` returns a `Traversable`. Use `.joinpath`,
+`.iterdir`, `.is_file`, `.is_dir`, `.read_bytes`, `.read_text`,
+and the `as_file` context manager.
+
+## `importlib.metadata`
+
+`distribution(name)`, `distributions()`, `metadata(name)`,
+`version(name)`, `entry_points(*, group=None, name=None)`,
+`files(name)`, `requires(name)`, `packages_distributions()`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Top-level (`import_module`, `reload`) | Complete.                                          |
+| `util`, `machinery`, `abc`            | Complete.                                          |
+| `resources`                           | Complete.                                          |
+| `metadata`                            | Complete; reads `*.dist-info` / `*.egg-info`.      |
+
+## Reference
+
+* CPython 3.14: [importlib](https://docs.python.org/3.14/library/importlib.html).
+* `Lib/importlib/`.
+* `module/importlib/`. gopy port.
+* PEPs 328, 366, 451, 489, 690.

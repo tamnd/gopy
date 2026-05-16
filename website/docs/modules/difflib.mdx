@@ -1,0 +1,74 @@
+---
+title: difflib
+description: Sequence diff. SequenceMatcher, Differ, HtmlDiff, unified and context formats.
+---
+
+# `difflib`
+
+Compute deltas between sequences. The core algorithm is Hunt-McIlroy
+on hashable elements (lines, characters, tokens).
+
+Source-of-record: `Lib/difflib.py`,
+[difflib docs](https://docs.python.org/3.14/library/difflib.html).
+
+## Free functions
+
+| Function                                                       | Returns                          |
+| -------------------------------------------------------------- | -------------------------------- |
+| `get_close_matches(word, possibilities, n=3, cutoff=0.6)`      | Best matches.                    |
+| `ndiff(a, b, linejunk=None, charjunk=IS_CHARACTER_JUNK)`       | Pretty line-by-line diff.        |
+| `restore(sequence, which)`                                     | Recover side 1 or 2 from `ndiff`. |
+| `unified_diff(a, b, fromfile='', tofile='', fromfiledate='', tofiledate='', n=3, lineterm='\\n')` | Unified diff. |
+| `context_diff(...)`                                            | Context diff (same kwargs).      |
+
+## `SequenceMatcher`
+
+```python
+SequenceMatcher(isjunk=None, a='', b='', autojunk=True)
+```
+
+| Method                                | Returns                                       |
+| ------------------------------------- | --------------------------------------------- |
+| `ratio()`                             | Similarity 0.0 to 1.0.                        |
+| `quick_ratio()` / `real_quick_ratio()` | Upper bounds.                                |
+| `get_matching_blocks()`               | List of `(i, j, n)` triples.                  |
+| `get_opcodes()`                       | List of `(tag, i1, i2, j1, j2)`.              |
+| `get_grouped_opcodes(n=3)`            | Grouped for diff display.                     |
+| `find_longest_match(alo, ahi, blo, bhi)` | LCS-like longest matching block.           |
+| `set_seqs(a, b)` / `set_seq1(a)` / `set_seq2(b)` | Set sequences (caches).            |
+
+Opcode tags: `'equal'`, `'replace'`, `'delete'`, `'insert'`.
+
+## `Differ`
+
+`Differ(linejunk=None, charjunk=None)` produces multi-line diffs with
+markers: `' '` equal, `'-'` left only, `'+'` right only, `'?'` hint.
+
+## `HtmlDiff`
+
+`HtmlDiff(tabsize=8, wrapcolumn=None, linejunk=None, charjunk=IS_CHARACTER_JUNK)`.
+
+| Method                                                  | Returns         |
+| ------------------------------------------------------- | --------------- |
+| `make_table(fromlines, tolines, fromdesc='', todesc='', context=False, numlines=5)` | HTML table. |
+| `make_file(...)`                                        | Full HTML page. |
+
+## Junk filters
+
+`difflib.IS_LINE_JUNK(line)` returns True for blank or `'#'`-only
+lines. `difflib.IS_CHARACTER_JUNK(ch)` returns True for space or tab.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `SequenceMatcher`, `Differ`           | Complete.                                          |
+| `unified_diff` / `context_diff`       | Complete; byte-identical output.                   |
+| `HtmlDiff`                            | Complete.                                          |
+| Junk filters                          | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [difflib](https://docs.python.org/3.14/library/difflib.html).
+* `Lib/difflib.py`.
+* `module/difflib/`. gopy port.

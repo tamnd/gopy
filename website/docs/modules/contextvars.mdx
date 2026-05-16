@@ -1,0 +1,73 @@
+---
+title: contextvars
+description: Per-task context variables. Context, ContextVar, Token, copy_context.
+---
+
+# `contextvars`
+
+`contextvars` provides task-local context variables (PEP 567). A
+`ContextVar` carries a value that propagates with the current
+context, so an asyncio task can read it without explicit threading.
+
+Source-of-record: `Lib/contextvars.py`, `Python/context.c`,
+[contextvars docs](https://docs.python.org/3.14/library/contextvars.html).
+
+## `ContextVar`
+
+```python
+var = ContextVar('var', default=missing)
+```
+
+| Method                            | Effect                                          |
+| --------------------------------- | ----------------------------------------------- |
+| `var.get(*default)`               | Get current value; raises `LookupError` if unset and no default. |
+| `var.set(value)`                  | Set; returns a `Token` for reset.               |
+| `var.reset(token)`                | Restore the previous value.                     |
+| `var.name`                        | Read-only.                                      |
+
+## `Token`
+
+| Attribute              | Meaning                                              |
+| ---------------------- | ---------------------------------------------------- |
+| `var`                  | The variable.                                        |
+| `old_value`            | Value before `set`, or `Token.MISSING`.              |
+
+## `Context`
+
+Immutable mapping of `ContextVar` to value. Created via `copy_context()`.
+
+| Method                                | Effect                                           |
+| ------------------------------------- | ------------------------------------------------ |
+| `ctx.run(callable, *args, **kw)`      | Run with `ctx` activated; mutations stay inside. |
+| `ctx[var]`                            | Read.                                            |
+| `iter(ctx)` / `len(ctx)` / `var in ctx` | Mapping protocol.                              |
+| `ctx.copy()` / `ctx.keys()` / `values()` / `items()` / `get(var)` | Mapping ops.       |
+
+## `copy_context()`
+
+Returns a snapshot of the current context. Used to dispatch work to
+threads/tasks that should inherit context.
+
+## Propagation
+
+| Runtime                       | Propagation                                           |
+| ----------------------------- | ----------------------------------------------------- |
+| `asyncio.Task`                | Captures `copy_context()` at task creation.           |
+| `threading.Thread`            | Does *not* propagate (start fresh context).           |
+| `concurrent.futures.ThreadPoolExecutor` | Inherits context for submitted tasks (3.7+). |
+| `asyncio.to_thread`           | Propagates context.                                   |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `ContextVar`, `Token`, `Context`      | Complete; backed by HAMT (immutable map).          |
+| `copy_context`                        | Complete.                                          |
+| Asyncio propagation                   | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [contextvars](https://docs.python.org/3.14/library/contextvars.html).
+* `Python/context.c`, `Python/hamt.c`.
+* `module/contextvars/`. gopy port.
+* PEP 567.

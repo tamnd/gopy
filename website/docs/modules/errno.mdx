@@ -1,0 +1,37 @@
+---
+title: errno
+description: Standard errno symbols. EAGAIN, ENOENT, EPERM, all mapped to integer codes.
+---
+
+# `errno`
+
+Symbolic names for the C `errno` values. Used by `OSError.errno`
+and by code that needs to distinguish between failure modes.
+
+Source-of-record: `Modules/errnomodule.c`,
+[errno docs](https://docs.python.org/3.14/library/errno.html).
+
+## Tables
+
+`errorcode` maps `int` to symbolic name. The module surface is a
+flat namespace of integer constants. Common groups:
+
+| Group               | Examples                                                          |
+| ------------------- | ----------------------------------------------------------------- |
+| Generic POSIX       | `EPERM`, `ENOENT`, `ESRCH`, `EINTR`, `EIO`, `ENXIO`, `E2BIG`, `ENOEXEC`, `EBADF`, `ECHILD`, `EAGAIN`, `EWOULDBLOCK`, `ENOMEM`, `EACCES`, `EFAULT`, `ENOTBLK`, `EBUSY`, `EEXIST`, `EXDEV`, `ENODEV`, `ENOTDIR`, `EISDIR`, `EINVAL`, `ENFILE`, `EMFILE`, `ENOTTY`, `ETXTBSY`, `EFBIG`, `ENOSPC`, `ESPIPE`, `EROFS`, `EMLINK`, `EPIPE`, `EDOM`, `ERANGE`. |
+| Networking          | `EADDRINUSE`, `EADDRNOTAVAIL`, `ECONNREFUSED`, `ECONNRESET`, `ECONNABORTED`, `ENETUNREACH`, `EHOSTUNREACH`, `ETIMEDOUT`, `ENOTCONN`, `EISCONN`, `EPIPE`, `EAFNOSUPPORT`, `EPROTONOSUPPORT`. |
+| Filesystem          | `ENAMETOOLONG`, `ENOLCK`, `ENOSYS`, `ENOTEMPTY`, `ELOOP`, `ENOMSG`, `EIDRM`. |
+| Stream              | `EOVERFLOW`, `ECANCELED`, `EOWNERDEAD`, `ENOTRECOVERABLE`.        |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All POSIX errno symbols               | Complete.                                          |
+| Windows extras (`WSA*`)               | Windows builds only; partial.                      |
+
+## Reference
+
+* CPython 3.14: [errno](https://docs.python.org/3.14/library/errno.html).
+* `Modules/errnomodule.c`.
+* `module/errno/`. gopy port.

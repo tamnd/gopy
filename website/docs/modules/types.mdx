@@ -1,18 +1,86 @@
 ---
 title: types
-description: The types module in gopy.
+description: Names for internal types that the language uses but does not expose elsewhere.
 ---
 
 # `types`
 
-The `types` module. Behaviour matches CPython 3.14. Source lives at
-`module/types/` in the gopy repo (or under `stdlib/types.py` for
-pure-Python ports).
+The `types` module exposes the constructors and type objects that the
+interpreter creates implicitly. It is the canonical source of
+`FunctionType`, `ModuleType`, `MethodType`, `MappingProxyType`,
+`SimpleNamespace`, and the rest of the under-the-hood types that
+have no other Python name.
 
-## Status
+Source-of-record: `Lib/types.py`,
+[types docs](https://docs.python.org/3.14/library/types.html).
 
-See [manual/status](../manual/status) for current coverage.
+## Constructable types
 
-## API
+| Name                       | Constructor                                       |
+| -------------------------- | ------------------------------------------------- |
+| `FunctionType`             | `FunctionType(code, globals, name=None, argdefs=None, closure=None, kwdefaults=None)` |
+| `LambdaType`               | Same as `FunctionType`.                           |
+| `MethodType`               | `MethodType(func, instance)`                      |
+| `BuiltinFunctionType`      | (not constructible)                               |
+| `BuiltinMethodType`        | (not constructible)                               |
+| `WrapperDescriptorType`    | (not constructible)                               |
+| `MethodWrapperType`        | (not constructible)                               |
+| `MethodDescriptorType`     | (not constructible)                               |
+| `ClassMethodDescriptorType`| (not constructible)                               |
+| `ModuleType`               | `ModuleType(name, doc=None)`                      |
+| `TracebackType`            | `TracebackType(tb_next, tb_frame, tb_lasti, tb_lineno)` |
+| `FrameType`                | (not constructible)                               |
+| `GetSetDescriptorType`     | (not constructible)                               |
+| `MemberDescriptorType`     | (not constructible)                               |
+| `MappingProxyType`         | `MappingProxyType(mapping)`                       |
+| `SimpleNamespace`          | `SimpleNamespace(**kwargs)`                       |
+| `GenericAlias`             | `GenericAlias(origin, args)`                      |
+| `UnionType`                | `int | str` etc.                                  |
+| `EllipsisType`             | `type(...)`. Singleton: `Ellipsis`.               |
+| `NoneType`                 | `type(None)`. Singleton: `None`.                  |
+| `NotImplementedType`       | `type(NotImplemented)`. Singleton.                |
+| `CodeType`                 | (`code.replace(...)` is preferred).               |
+| `CellType`                 | (closure cells).                                  |
+| `GeneratorType`            | (not constructible directly).                     |
+| `CoroutineType`            | (not constructible directly).                     |
+| `AsyncGeneratorType`       | (not constructible directly).                     |
 
-(Reference table in progress.)
+## Helpers
+
+| Function                                       | Returns                                  |
+| ---------------------------------------------- | ---------------------------------------- |
+| `new_class(name, bases=(), kwds=None, exec_body=None)` | Build a class using a metaclass and exec body. |
+| `prepare_class(name, bases=(), kwds=None)`     | Metaclass and namespace for `new_class`. |
+| `resolve_bases(bases)`                         | Apply `__mro_entries__` rewriting.       |
+| `get_original_bases(cls)`                      | Bases pre-`__mro_entries__`.             |
+| `coroutine(gen_func)`                          | Wrap a generator into an awaitable.      |
+| `DynamicClassAttribute`                        | Descriptor that defers to the metaclass when accessed on the class. |
+
+## Module helpers
+
+| Helper                                        | Behaviour                                       |
+| --------------------------------------------- | ----------------------------------------------- |
+| `ModuleType` instance attributes               | `__name__`, `__doc__`, `__loader__`, `__spec__`, `__package__`, `__file__` (where applicable). |
+| `ModuleType.__class__` swap                   | Used by `__getattr__` (PEP 562).                |
+
+## PEP 695 helpers (3.12+)
+
+`TypeAliasType` instances (created by `type Alias = ...`) are also
+exposed via the `types` module. Lazy value is computed via `__value__`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Every type alias listed above         | Complete.                                          |
+| `new_class`, `prepare_class`, `resolve_bases` | Complete.                                  |
+| `SimpleNamespace`                     | Complete.                                          |
+| `MappingProxyType`                    | Complete.                                          |
+| `GenericAlias`, `UnionType`           | Complete.                                          |
+| `TypeAliasType` (PEP 695)             | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [types](https://docs.python.org/3.14/library/types.html).
+* `Lib/types.py`.
+* `module/types/`. gopy port.

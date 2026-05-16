@@ -1,0 +1,52 @@
+---
+title: queue
+description: Synchronised FIFO, LIFO, and priority queues for threads.
+---
+
+# `queue`
+
+Thread-safe queues built on `threading` primitives. Producers call
+`put`, consumers call `get`; both block by default.
+
+Source-of-record: `Lib/queue.py`,
+[queue docs](https://docs.python.org/3.14/library/queue.html).
+
+## Classes
+
+| Class                                 | Ordering                                       |
+| ------------------------------------- | ---------------------------------------------- |
+| `Queue(maxsize=0)`                    | FIFO.                                          |
+| `LifoQueue(maxsize=0)`                | LIFO (stack).                                  |
+| `PriorityQueue(maxsize=0)`            | Min-heap.                                      |
+| `SimpleQueue()`                       | Unbounded FIFO, no `task_done`/`join`.         |
+
+## Common methods
+
+| Method                                      | Effect                                |
+| ------------------------------------------- | ------------------------------------- |
+| `put(item, block=True, timeout=None)`       | Insert; blocks if full.               |
+| `put_nowait(item)`                          | Non-blocking put.                     |
+| `get(block=True, timeout=None)`             | Remove; blocks if empty.              |
+| `get_nowait()`                              | Non-blocking get.                     |
+| `qsize()`                                   | Approximate length.                   |
+| `empty()` / `full()`                        | Predicates.                           |
+| `task_done()` / `join()`                    | Producer/consumer rendezvous.         |
+| `shutdown(immediate=False)` (3.13+)         | Refuse further puts; wake waiters.    |
+
+## Exceptions
+
+`Empty`, `Full`, `ShutDown` (3.13+).
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `Queue`, `LifoQueue`, `PriorityQueue` | Complete.                                          |
+| `SimpleQueue`                         | Complete.                                          |
+| `shutdown` (3.13+)                    | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [queue](https://docs.python.org/3.14/library/queue.html).
+* `Lib/queue.py`.
+* `module/queue/`. gopy port.

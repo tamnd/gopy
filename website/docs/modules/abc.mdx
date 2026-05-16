@@ -1,0 +1,72 @@
+---
+title: abc
+description: Abstract base classes. The ABCMeta metaclass, abstractmethod, register, virtual subclass machinery.
+---
+
+# `abc`
+
+`abc` provides the machinery for abstract base classes (PEP 3119).
+Classes can declare abstract methods, register virtual subclasses,
+and hook into `isinstance` / `issubclass` without inheritance.
+
+Source-of-record: `Lib/abc.py`, `Modules/_abc.c`,
+[abc docs](https://docs.python.org/3.14/library/abc.html).
+
+## Metaclass
+
+```python
+class MyABC(metaclass=ABCMeta): ...
+```
+
+`ABCMeta` records abstract methods, manages the virtual-subclass
+registry, and dispatches `__subclasshook__` during `issubclass`.
+
+`ABC` is a helper base class equivalent to setting `metaclass=ABCMeta`.
+
+## Decorators
+
+| Decorator                          | Effect                                            |
+| ---------------------------------- | ------------------------------------------------- |
+| `@abstractmethod`                  | Mark a method abstract.                           |
+| `@abstractclassmethod` (deprecated) | Use `@classmethod` + `@abstractmethod`.          |
+| `@abstractstaticmethod` (deprecated) | Use `@staticmethod` + `@abstractmethod`.        |
+| `@abstractproperty` (deprecated)   | Use `@property` + `@abstractmethod`.              |
+
+An abstract class records its abstract methods in
+`__abstractmethods__` (frozenset). Instantiating a class with
+non-empty `__abstractmethods__` raises `TypeError`.
+
+## Registry
+
+| Method                                | Effect                                            |
+| ------------------------------------- | ------------------------------------------------- |
+| `ABCMeta.register(subclass)`          | Mark `subclass` as a virtual child of the ABC.    |
+| `ABCMeta.__subclasshook__(cls)`       | Custom hook for `issubclass` (return `True` / `False` / `NotImplemented`). |
+
+Caching: each `issubclass`/`isinstance` result is cached. The cache
+invalidates when a new class is registered or a new subclass is
+created. `abc.get_cache_token()` returns a token that changes on each
+invalidation.
+
+## Helpers
+
+| Function                              | Returns                                         |
+| ------------------------------------- | ----------------------------------------------- |
+| `abc.get_cache_token()`               | Current cache token.                            |
+| `abc.update_abstractmethods(cls)`     | Recompute `__abstractmethods__` after mutation. |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `ABCMeta` / `ABC`                     | Complete.                                          |
+| `@abstractmethod`                     | Complete.                                          |
+| `register`, `__subclasshook__`        | Complete.                                          |
+| Caching and `get_cache_token`         | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [abc](https://docs.python.org/3.14/library/abc.html).
+* `Lib/abc.py`, `Modules/_abc.c`.
+* `module/_abc/`. gopy port.
+* PEP 3119.

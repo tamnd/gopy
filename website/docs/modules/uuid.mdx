@@ -1,0 +1,57 @@
+---
+title: uuid
+description: RFC 4122 / 9562 universally unique identifiers. UUID1, 3, 4, 5, 6, 7, 8.
+---
+
+# `uuid`
+
+128-bit UUIDs. Supports versions 1, 3, 4, 5 from RFC 4122 and
+versions 6, 7, 8 from RFC 9562 (added in 3.14).
+
+Source-of-record: `Lib/uuid.py`,
+[uuid docs](https://docs.python.org/3.14/library/uuid.html).
+
+## Constructors
+
+| Function                                 | Version              |
+| ---------------------------------------- | -------------------- |
+| `uuid1(node=None, clock_seq=None)`       | Time-based.          |
+| `uuid3(namespace, name)`                 | MD5 name hash.       |
+| `uuid4()`                                | Random.              |
+| `uuid5(namespace, name)`                 | SHA-1 name hash.     |
+| `uuid6(node=None, clock_seq=None)` (3.14+) | Reordered v1.      |
+| `uuid7()` (3.14+)                        | Unix-time + random.  |
+| `uuid8(a=None, b=None, c=None)` (3.14+)  | Custom.              |
+| `UUID(hex=None, bytes=None, bytes_le=None, fields=None, int=None, version=None, *, is_safe=SafeUUID.unknown)` | Parse / build. |
+
+## Attributes
+
+`bytes`, `bytes_le`, `fields`, `time_low`, `time_mid`,
+`time_hi_version`, `clock_seq_hi_variant`, `clock_seq_low`,
+`node`, `time`, `clock_seq`, `hex`, `int`, `urn`, `variant`,
+`version`, `is_safe`.
+
+## Namespaces
+
+`NAMESPACE_DNS`, `NAMESPACE_URL`, `NAMESPACE_OID`, `NAMESPACE_X500`.
+
+## Variant constants
+
+`RESERVED_NCS`, `RFC_4122`, `RESERVED_MICROSOFT`, `RESERVED_FUTURE`.
+
+`SafeUUID.safe`, `unsafe`, `unknown`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Versions 1, 3, 4, 5                   | Complete.                                          |
+| Versions 6, 7, 8 (3.14)               | Complete.                                          |
+| MAC discovery (`getnode`)             | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [uuid](https://docs.python.org/3.14/library/uuid.html).
+* `Lib/uuid.py`.
+* `module/uuid/`. gopy port.
+* RFC 4122, RFC 9562.

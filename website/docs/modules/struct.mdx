@@ -1,0 +1,85 @@
+---
+title: struct
+description: Pack and unpack C-style binary data. Format characters, byte order, alignment.
+---
+
+# `struct`
+
+Interpret bytes as packed binary data. Convert between Python values
+and C structs represented as Python `bytes` objects.
+
+Source-of-record: `Modules/_struct.c`, `Lib/struct.py`,
+[struct docs](https://docs.python.org/3.14/library/struct.html).
+
+## Functions
+
+| Function                                  | Effect                                           |
+| ----------------------------------------- | ------------------------------------------------ |
+| `pack(format, v1, v2, ...)`               | Pack values into bytes.                          |
+| `unpack(format, buffer)`                  | Unpack to tuple; buffer must equal `calcsize`.   |
+| `pack_into(format, buffer, offset, ...)`  | Pack into a writable buffer at offset.           |
+| `unpack_from(format, buffer, offset=0)`   | Unpack from buffer at offset.                    |
+| `iter_unpack(format, buffer)`             | Iterator of tuples.                              |
+| `calcsize(format)`                        | Size in bytes.                                   |
+| `Struct(format)`                          | Pre-compile a format; reuse `pack`/`unpack` etc. |
+
+## Byte order, size, alignment prefixes
+
+| Char | Byte order  | Size      | Alignment   |
+| ---- | ----------- | --------- | ----------- |
+| `@`  | native      | native    | native (default) |
+| `=`  | native      | standard  | none        |
+| `<`  | little      | standard  | none        |
+| `>`  | big         | standard  | none        |
+| `!`  | network (big) | standard | none       |
+
+## Format characters
+
+| Char | C type             | Python type | Standard size |
+| ---- | ------------------ | ----------- | ------------- |
+| `x`  | pad byte           | -           | 1             |
+| `c`  | char               | `bytes` of length 1 | 1     |
+| `b` / `B` | signed/unsigned char | `int`     | 1            |
+| `?`  | `_Bool`            | `bool`      | 1             |
+| `h` / `H` | short/ushort  | `int`       | 2             |
+| `i` / `I` | int/uint      | `int`       | 4             |
+| `l` / `L` | long/ulong    | `int`       | 4             |
+| `q` / `Q` | long long     | `int`       | 8             |
+| `n` / `N` | ssize_t/size_t (native only) | `int` | -      |
+| `e`  | half float         | `float`     | 2             |
+| `f` / `d` | float/double  | `float`     | 4 / 8         |
+| `s`  | `char[]`           | `bytes`     | count         |
+| `p`  | Pascal string      | `bytes`     | count         |
+| `P`  | `void*` (native)   | `int`       | -             |
+
+A leading count multiplies the next format (e.g. `4i`, `10s`).
+
+## `Struct` class
+
+```python
+s = Struct('<I H 4s')
+buf = s.pack(1, 2, b'abcd')
+i, h, b = s.unpack(buf)
+```
+
+Compiled `Struct` objects are faster for repeated use.
+
+## Errors
+
+`struct.error` for malformed format strings, size mismatches, or
+out-of-range integers.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All format characters incl. `e`, `n`/`N`, `P` | Complete.                                  |
+| Byte-order prefixes                   | Complete.                                          |
+| Native alignment with `@`             | Complete; matches the host C compiler layout.      |
+| Compiled `Struct` cache               | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [struct](https://docs.python.org/3.14/library/struct.html).
+* `Modules/_struct.c`.
+* `module/_struct/`. gopy port.

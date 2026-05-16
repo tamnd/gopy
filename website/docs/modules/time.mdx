@@ -1,0 +1,76 @@
+---
+title: time
+description: Wall clock, monotonic clocks, sleep, strptime/strftime.
+---
+
+# `time`
+
+Functions related to time and dates. Includes wall-clock and
+monotonic clocks, sleeping, time formatting, and the `struct_time`
+named tuple.
+
+Source-of-record: `Modules/timemodule.c`,
+[time docs](https://docs.python.org/3.14/library/time.html).
+
+## Clocks
+
+| Function                                | Returns                                          |
+| --------------------------------------- | ------------------------------------------------ |
+| `time()`                                | Wall clock seconds (float).                      |
+| `time_ns()`                             | Wall clock nanoseconds (int).                    |
+| `monotonic()` / `monotonic_ns()`        | Monotonic clock; cannot go backwards.            |
+| `perf_counter()` / `perf_counter_ns()`  | Highest available resolution clock.              |
+| `process_time()` / `process_time_ns()`  | CPU time of the process (no sleep).              |
+| `thread_time()` / `thread_time_ns()`    | CPU time of the current thread.                  |
+| `get_clock_info(name)`                  | Resolution / monotonic / adjustable info.        |
+
+## Sleep
+
+| Function                | Behaviour                                              |
+| ----------------------- | ------------------------------------------------------ |
+| `sleep(secs)`           | Yields the GIL; signals interrupt.                     |
+| `clock_settime(clock_id, time)` | POSIX clock adjustment (privileged).           |
+| `clock_gettime(clock_id)`       | Read POSIX clock.                              |
+| `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`, `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` | Constants. |
+
+## struct_time
+
+```python
+time.struct_time(tm_year, tm_mon, tm_mday, tm_hour, tm_min, tm_sec,
+                 tm_wday, tm_yday, tm_isdst, tm_zone, tm_gmtoff)
+```
+
+`tm_wday` Monday = 0; `tm_yday` 1-based; `tm_isdst` `1`, `0`, or `-1`.
+
+## Formatting
+
+| Function                                      | Returns                                  |
+| --------------------------------------------- | ---------------------------------------- |
+| `gmtime(seconds=None)`                        | `struct_time` in UTC.                    |
+| `localtime(seconds=None)`                     | `struct_time` in local tz.               |
+| `mktime(struct_time)`                         | Local-tz `time_t` from struct.           |
+| `asctime(struct_time=None)`                   | `'Sun Jun 20 23:21:05 1993'`.            |
+| `ctime(seconds=None)`                         | `asctime(localtime(seconds))`.           |
+| `strftime(format, t=None)`                    | Format `struct_time`.                    |
+| `strptime(string, format)`                    | Parse string.                            |
+| `tzset()`                                     | Re-read `TZ` (POSIX).                    |
+| `tzname` / `daylight` / `timezone` / `altzone` | Local-tz info attributes.               |
+
+## strftime / strptime directives
+
+`%Y %m %d %H %M %S %f %A %a %B %b %p %j %U %W %w %Z %z %s %%`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Clock functions                       | Complete; monotonic backed by Go's `time.Time`.    |
+| `struct_time` and formatting          | Complete.                                          |
+| `strftime` / `strptime` directives    | Complete.                                          |
+| POSIX `clock_gettime`/`settime`       | Complete on POSIX.                                 |
+
+## Reference
+
+* CPython 3.14: [time](https://docs.python.org/3.14/library/time.html).
+* `Modules/timemodule.c`.
+* `module/_time/`. gopy port.

@@ -1,0 +1,86 @@
+---
+title: signal
+description: POSIX signal handling. Handlers, masks, alarm, sigwait.
+---
+
+# `signal`
+
+Interface to OS signals: install handlers, query the current handler,
+manage masks, schedule alarms. On Windows only a subset is available.
+
+Source-of-record: `Modules/signalmodule.c`,
+[signal docs](https://docs.python.org/3.14/library/signal.html).
+
+## Handlers
+
+| Function                                  | Effect                                            |
+| ----------------------------------------- | ------------------------------------------------- |
+| `signal(signum, handler)`                 | Install handler; returns previous handler.        |
+| `getsignal(signum)`                       | Current handler.                                  |
+| `strsignal(signum)`                       | Human-readable name.                              |
+| `valid_signals()`                         | `set[int]` of signals on this platform.           |
+
+Special handlers: `SIG_DFL` (default), `SIG_IGN` (ignore).
+
+Handlers run between bytecodes in the main thread.
+
+## Constants
+
+`SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT`, `SIGKILL`, `SIGSTOP`,
+`SIGCONT`, `SIGCHLD`, `SIGPIPE`, `SIGALRM`, `SIGUSR1`, `SIGUSR2`,
+`SIGABRT`, `SIGSEGV`, `SIGILL`, `SIGFPE`, `SIGBUS`, `SIGWINCH`,
+`SIGIO`, `SIGTRAP`, `SIGSYS`, `NSIG`.
+
+## Masks (POSIX)
+
+| Function                                      | Effect                                       |
+| --------------------------------------------- | -------------------------------------------- |
+| `pthread_sigmask(how, mask)`                  | Block / unblock signals on the thread.       |
+| `pthread_kill(thread_id, signum)`             | Send signal to a thread.                     |
+| `sigpending()`                                | Set of pending signals.                      |
+| `sigwait(sigset)`                             | Block waiting for a signal.                  |
+| `sigwaitinfo(sigset)`                         | Same, returns `struct_siginfo`.              |
+| `sigtimedwait(sigset, timeout)`               | Timed variant.                               |
+
+`how` constants: `SIG_BLOCK`, `SIG_UNBLOCK`, `SIG_SETMASK`.
+
+## Alarms and timers
+
+| Function                                      | Effect                                       |
+| --------------------------------------------- | -------------------------------------------- |
+| `alarm(seconds)`                              | Schedule `SIGALRM`.                          |
+| `setitimer(which, seconds, interval=0.0)`     | POSIX timer.                                 |
+| `getitimer(which)`                            | Read.                                        |
+
+Timer kinds: `ITIMER_REAL`, `ITIMER_VIRTUAL`, `ITIMER_PROF`.
+
+## Async wakeup fd
+
+| Function                              | Effect                                       |
+| ------------------------------------- | -------------------------------------------- |
+| `set_wakeup_fd(fd, *, warn_on_full_buffer=True)` | Write signum byte on a signal.    |
+
+Used by event loops to wake from select/poll on signal delivery.
+
+## Cross-platform notes
+
+| Limitation                                                        |
+| ----------------------------------------------------------------- |
+| `signal()` works only in the main thread.                         |
+| `SIGKILL` and `SIGSTOP` cannot be caught.                         |
+| Windows supports `SIGINT`, `SIGTERM`, `SIGBREAK`, `SIGABRT`, `SIGFPE`, `SIGILL`, `SIGSEGV`. |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `signal`, `getsignal`, `valid_signals` | Complete.                                         |
+| Masks and `sigwait` family            | Complete.                                          |
+| `alarm`, `setitimer`/`getitimer`      | Complete.                                          |
+| `set_wakeup_fd`                       | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [signal](https://docs.python.org/3.14/library/signal.html).
+* `Modules/signalmodule.c`.
+* `module/signal/`. gopy port.

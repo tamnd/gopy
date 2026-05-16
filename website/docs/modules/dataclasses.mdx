@@ -1,18 +1,125 @@
 ---
 title: dataclasses
-description: The dataclasses module in gopy.
+description: Auto-generated boilerplate (init, repr, eq, ordering, frozen, slots) for value-class types.
 ---
 
 # `dataclasses`
 
-The `dataclasses` module. Behaviour matches CPython 3.14. Source lives at
-`module/dataclasses/` in the gopy repo (or under `stdlib/dataclasses.py` for
-pure-Python ports).
+A decorator that synthesises `__init__`, `__repr__`, `__eq__`,
+ordering, hash, slots, and replacement on a regular Python class.
+Decorator-generated code is appended to the class at decoration
+time; introspection sees real methods.
 
-## Status
+Source-of-record: `Lib/dataclasses.py`,
+[dataclasses docs](https://docs.python.org/3.14/library/dataclasses.html).
 
-See [manual/status](../manual/status) for current coverage.
+## `@dataclass`
 
-## API
+```python
+@dataclass(*, init=True, repr=True, eq=True, order=False,
+           unsafe_hash=False, frozen=False, match_args=True,
+           kw_only=False, slots=False, weakref_slot=False)
+```
 
-(Reference table in progress.)
+| Parameter        | Default | Effect                                              |
+| ---------------- | ------- | --------------------------------------------------- |
+| `init`           | True    | Generate `__init__`.                                |
+| `repr`           | True    | Generate `__repr__`.                                |
+| `eq`             | True    | Generate `__eq__`.                                  |
+| `order`          | False   | Generate `<`, `<=`, `>`, `>=`.                      |
+| `unsafe_hash`    | False   | Force `__hash__` even when mutable.                 |
+| `frozen`         | False   | Immutable: assignments raise `FrozenInstanceError`. |
+| `match_args`     | True    | Generate `__match_args__` (PEP 634).                |
+| `kw_only`        | False   | All fields keyword-only by default.                 |
+| `slots`          | False   | Generate `__slots__` and return a new class.        |
+| `weakref_slot`   | False   | Add `__weakref__` to slots.                         |
+
+## Fields
+
+```python
+field(*, default=MISSING, default_factory=MISSING, init=True,
+      repr=True, hash=None, compare=True, metadata=None,
+      kw_only=MISSING)
+```
+
+| Parameter         | Effect                                                |
+| ----------------- | ----------------------------------------------------- |
+| `default`         | Static default value.                                 |
+| `default_factory` | Zero-arg callable producing a default per instance.   |
+| `init`            | Include in `__init__`.                                |
+| `repr`            | Include in `__repr__`.                                |
+| `compare`         | Use for `__eq__` / ordering.                          |
+| `hash`            | Override; default tracks `compare`.                   |
+| `metadata`        | Arbitrary mapping for downstream tools.               |
+| `kw_only`         | Override the class-level setting per field.           |
+
+The sentinel `dataclasses.MISSING` indicates "no value supplied".
+
+## Inspection
+
+| Function                                | Returns                                       |
+| --------------------------------------- | --------------------------------------------- |
+| `fields(class_or_instance)`             | Tuple of `Field` objects in declaration order. |
+| `asdict(obj, *, dict_factory=dict)`     | Recursively convert to dict.                  |
+| `astuple(obj, *, tuple_factory=tuple)`  | Recursively convert to tuple.                 |
+| `is_dataclass(obj)`                     | Predicate.                                    |
+| `replace(obj, /, **changes)`            | New instance with fields replaced.            |
+| `make_dataclass(cls_name, fields, *, bases=(), namespace=None, init=True, repr=True, eq=True, order=False, unsafe_hash=False, frozen=False, match_args=True, kw_only=False, slots=False)` | Build a dataclass at runtime. |
+
+`Field` attributes: `name`, `type`, `default`, `default_factory`,
+`repr`, `hash`, `init`, `compare`, `metadata`, `kw_only`.
+
+## Frozen
+
+Frozen instances raise `FrozenInstanceError` on assignment. `__hash__`
+is generated from the compare fields. Cycle: `frozen=True` and
+`eq=True` together produce a hashable value class.
+
+## Slots
+
+`slots=True` rewrites the class with `__slots__` set to the field names.
+Because `__slots__` cannot be added after class creation, the decorator
+returns a fresh class object. Subclasses must also set `__slots__` to
+keep instances slot-only.
+
+## Post-init hook
+
+`__post_init__(self)` runs at the end of the generated `__init__`. Use
+to derive fields from inputs. With `init=False`, the user provides the
+`__init__` and `__post_init__` is not called.
+
+## InitVar
+
+```python
+from dataclasses import InitVar
+@dataclass
+class C:
+    x: int
+    y: InitVar[int] = 0
+    def __post_init__(self, y): ...
+```
+
+`InitVar[T]` fields are passed to `__init__` and `__post_init__` but
+are not stored on the instance.
+
+## ClassVar
+
+`typing.ClassVar[T]` annotations are excluded from the field set; they
+remain ordinary class attributes.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `@dataclass` and all options          | Complete.                                          |
+| `field`, `MISSING`                    | Complete.                                          |
+| `fields`, `asdict`, `astuple`, `replace`, `make_dataclass` | Complete.                |
+| `__post_init__`, `InitVar`, `ClassVar` | Complete.                                         |
+| `slots=True`, `weakref_slot=True`     | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [dataclasses](https://docs.python.org/3.14/library/dataclasses.html).
+* `Lib/dataclasses.py`.
+* `module/dataclasses/`. gopy port.
+* PEP 557.

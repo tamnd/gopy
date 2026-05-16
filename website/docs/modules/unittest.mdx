@@ -1,0 +1,70 @@
+---
+title: unittest
+description: xUnit-style test framework. TestCase, fixtures, discovery, mock.
+---
+
+# `unittest`
+
+xUnit-style test framework bundled with CPython. Provides
+`TestCase`, fixtures, loaders, runners, and mocks.
+
+Source-of-record: `Lib/unittest/`,
+[unittest docs](https://docs.python.org/3.14/library/unittest.html).
+
+## `TestCase`
+
+| API                                  | Purpose                                       |
+| ------------------------------------ | --------------------------------------------- |
+| `setUp` / `tearDown`                 | Per-test fixtures.                            |
+| `setUpClass` / `tearDownClass`       | Per-class fixtures.                           |
+| `setUpModule` / `tearDownModule`     | Per-module fixtures.                          |
+| `addCleanup(func, *args, **kw)`      | Stacked cleanup.                              |
+| `enterContext(cm)` (3.11+)           | Push CM onto cleanup stack.                   |
+| `subTest(msg=None, **params)`        | Parameterised inner test.                     |
+| `skipTest(reason)` / decorators `skip`, `skipIf`, `skipUnless`, `expectedFailure` | Skips. |
+
+## Assertions
+
+`assertEqual`, `assertNotEqual`, `assertTrue`, `assertFalse`,
+`assertIs`, `assertIsNot`, `assertIsNone`, `assertIsNotNone`,
+`assertIn`, `assertNotIn`, `assertIsInstance`, `assertNotIsInstance`,
+`assertRaises`, `assertRaisesRegex`, `assertWarns`,
+`assertWarnsRegex`, `assertLogs`, `assertNoLogs` (3.10+),
+`assertAlmostEqual`, `assertNotAlmostEqual`, `assertGreater`,
+`assertGreaterEqual`, `assertLess`, `assertLessEqual`,
+`assertRegex`, `assertNotRegex`, `assertCountEqual`,
+`assertMultiLineEqual`, `assertSequenceEqual`, `assertListEqual`,
+`assertTupleEqual`, `assertSetEqual`, `assertDictEqual`.
+
+## Loader and runner
+
+| Name                     | Purpose                                       |
+| ------------------------ | --------------------------------------------- |
+| `TestLoader`             | `loadTestsFromTestCase`, `loadTestsFromModule`, `loadTestsFromName(s)`, `discover(start_dir, pattern='test*.py', top_level_dir=None)`. |
+| `TestSuite`              | Composite.                                    |
+| `TextTestRunner`         | Run and report.                               |
+| `TestResult`             | `errors`, `failures`, `skipped`, `expectedFailures`, `unexpectedSuccesses`. |
+| `main(...)`              | CLI entry.                                    |
+
+## Mock
+
+`unittest.mock` provides `Mock`, `MagicMock`, `AsyncMock`,
+`patch`, `patch.object`, `patch.dict`, `patch.multiple`,
+`call`, `sentinel`, `ANY`, `mock_open`, `create_autospec`,
+`seal` (3.7+).
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `TestCase`, fixtures                  | Complete.                                          |
+| Assertions                            | Complete.                                          |
+| Loader, discovery, runner             | Complete.                                          |
+| `unittest.mock`                       | Complete.                                          |
+| `enterContext` (3.11+)                | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [unittest](https://docs.python.org/3.14/library/unittest.html).
+* `Lib/unittest/`.
+* `module/unittest/`. gopy port.

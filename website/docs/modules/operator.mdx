@@ -1,0 +1,68 @@
+---
+title: operator
+description: Functional equivalents of operators and attribute / item / method accessors.
+---
+
+# `operator`
+
+The `operator` module exports functions corresponding to every Python
+operator and helpers (`attrgetter`, `itemgetter`, `methodcaller`) for
+building accessor callables.
+
+Source-of-record: `Lib/operator.py`, `Modules/_operator.c`,
+[operator docs](https://docs.python.org/3.14/library/operator.html).
+
+## Object comparisons
+
+`lt(a, b)`, `le(a, b)`, `eq(a, b)`, `ne(a, b)`, `gt(a, b)`, `ge(a, b)`.
+Aliases: `__lt__`, etc.
+
+## Logical
+
+`not_(a)`, `truth(a)`, `is_(a, b)`, `is_not(a, b)`.
+
+## Arithmetic
+
+`abs(a)`, `add(a, b)`, `and_(a, b)`, `floordiv(a, b)`, `index(a)`,
+`inv(a)` / `invert(a)`, `lshift(a, b)`, `mod(a, b)`, `mul(a, b)`,
+`matmul(a, b)`, `neg(a)`, `or_(a, b)`, `pos(a)`, `pow(a, b)`,
+`rshift(a, b)`, `sub(a, b)`, `truediv(a, b)`, `xor(a, b)`.
+
+## Sequence
+
+`concat(a, b)`, `contains(a, b)`, `countOf(a, b)`, `delitem(a, b)`,
+`getitem(a, b)`, `indexOf(a, b)`, `setitem(a, b, c)`, `length_hint(obj, default=0)`.
+
+## In-place
+
+`iadd`, `iand`, `iconcat`, `ifloordiv`, `ilshift`, `imod`, `imul`,
+`imatmul`, `ior`, `ipow`, `irshift`, `isub`, `itruediv`, `ixor`.
+
+## Accessor factories
+
+| Factory                                  | Returns                                       |
+| ---------------------------------------- | --------------------------------------------- |
+| `attrgetter('attr')` / `attrgetter('a', 'b.c')` | Callable: `obj -> obj.attr` or tuple.   |
+| `itemgetter(0)` / `itemgetter(1, 3)`     | Callable: `seq -> seq[i]` or tuple.           |
+| `methodcaller('name', *args, **kw)`      | Callable: `obj -> obj.name(*args, **kw)`.     |
+
+Used heavily with `sort(key=...)`, `min`, `max`, `groupby`.
+
+## Helpers for class dispatch
+
+`operator.call(obj, *args, **kw)` is `obj(*args, **kw)`. Used by
+generic dispatchers needing a function for calls.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All operator functions                | Complete.                                          |
+| `attrgetter`, `itemgetter`, `methodcaller` | Complete (C-fast in `module/_operator`).      |
+| `length_hint`, `index`, `truth`       | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [operator](https://docs.python.org/3.14/library/operator.html).
+* `Lib/operator.py`, `Modules/_operator.c`.
+* `module/_operator/`. gopy port.

@@ -1,0 +1,63 @@
+---
+title: csv
+description: Read and write CSV files. Dialects, sniffer, DictReader, DictWriter.
+---
+
+# `csv`
+
+Comma-separated values reader and writer. Supports custom dialects,
+quoting policies, and dictionary-shaped rows.
+
+Source-of-record: `Lib/csv.py`, `Modules/_csv.c`,
+[csv docs](https://docs.python.org/3.14/library/csv.html).
+
+## Functions and classes
+
+| Name                                                    | Purpose                                |
+| ------------------------------------------------------- | -------------------------------------- |
+| `reader(csvfile, dialect='excel', **fmtparams)`         | Row iterator of `list[str]`.           |
+| `writer(csvfile, dialect='excel', **fmtparams)`         | Row writer; `writerow`, `writerows`.   |
+| `DictReader(f, fieldnames=None, restkey=None, restval=None, dialect='excel', **kw)` | Dict rows. |
+| `DictWriter(f, fieldnames, restval='', extrasaction='raise', dialect='excel', **kw)` | Dict rows. |
+| `Sniffer()`                                             | `sniff`, `has_header`.                 |
+| `list_dialects()` / `get_dialect(name)`                 | Registered dialects.                   |
+| `register_dialect(name, dialect=None, **fmtparams)`     | Register.                              |
+| `unregister_dialect(name)`                              | Remove.                                |
+| `field_size_limit([new_limit])`                         | Max field length.                      |
+
+## Dialect parameters
+
+| Parameter            | Default     | Meaning                                |
+| -------------------- | ----------- | -------------------------------------- |
+| `delimiter`          | `,`         | Field separator.                       |
+| `quotechar`          | `"`         | Quote character.                       |
+| `doublequote`        | True        | Escape quote by doubling.              |
+| `escapechar`         | None        | Alternative escape.                    |
+| `lineterminator`     | `\r\n`      | Writer row terminator.                 |
+| `quoting`            | `QUOTE_MINIMAL` | Quoting policy.                    |
+| `skipinitialspace`   | False       | Ignore space after delimiter.          |
+| `strict`             | False       | Raise on bad input.                    |
+
+## Quoting constants
+
+`QUOTE_ALL`, `QUOTE_MINIMAL`, `QUOTE_NONNUMERIC`, `QUOTE_NONE`,
+`QUOTE_STRINGS` (3.12+), `QUOTE_NOTNULL` (3.12+).
+
+## Built-in dialects
+
+`excel`, `excel-tab`, `unix`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `reader`, `writer`                    | Complete.                                          |
+| `DictReader`, `DictWriter`            | Complete.                                          |
+| `Sniffer`                             | Complete.                                          |
+| All quoting modes incl. 3.12+ additions | Complete.                                        |
+
+## Reference
+
+* CPython 3.14: [csv](https://docs.python.org/3.14/library/csv.html).
+* `Lib/csv.py`, `Modules/_csv.c`.
+* `module/_csv/`. gopy port.

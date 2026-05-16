@@ -1,0 +1,103 @@
+---
+title: enum
+description: Enumerations. Enum, IntEnum, StrEnum, Flag, IntFlag, auto, member, nonmember, decorator helpers.
+---
+
+# `enum`
+
+Symbolic constant collections. Enum members are singletons with
+`name` and `value`. Subclasses can mix in `int`, `str`, or other
+types so members behave like the underlying value.
+
+Source-of-record: `Lib/enum.py`,
+[enum docs](https://docs.python.org/3.14/library/enum.html).
+
+## Base classes
+
+| Class            | Mix-in           | Use                                          |
+| ---------------- | ---------------- | -------------------------------------------- |
+| `Enum`           | (none)           | Plain enumeration.                           |
+| `IntEnum`        | `int`            | Members are also `int`.                      |
+| `StrEnum`        | `str`            | Members are also `str` (3.11+).              |
+| `Flag`           | (none)           | Bit flags; supports `\|`, `&`, `^`, `~`.     |
+| `IntFlag`        | `int`            | Bit flags as `int`.                          |
+| `ReprEnum`       | (none)           | Use the mixed-in type's `repr` (3.11+).      |
+
+## Member declaration
+
+```python
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+    BLUE = auto()
+```
+
+`enum.auto()` generates the next value using `_generate_next_value_`.
+
+## Decorators and helpers
+
+| Helper                                | Role                                            |
+| ------------------------------------- | ----------------------------------------------- |
+| `@unique`                             | Reject duplicate values.                        |
+| `@verify(...)`                        | Apply a verifier; see below.                    |
+| `@member` / `@nonmember`              | Force a class-body assignment into / out of the enum (3.12+). |
+| `@property`                           | Class-body properties are not turned into members. |
+| `auto()`                              | Auto-assign value.                              |
+| `Enum.__init_subclass__(cls, **kw)`   | Hook for boundaries (3.12+).                    |
+
+## Verifier flags
+
+| Flag          | Effect                                              |
+| ------------- | --------------------------------------------------- |
+| `UNIQUE`      | All members distinct.                               |
+| `CONTINUOUS`  | No gaps in `IntEnum` values.                        |
+| `NAMED_FLAGS` | All flag bits are named.                            |
+
+## Boundary
+
+For `Flag` / `IntFlag`, members can be combined; out-of-range bits
+are handled per the `boundary` argument:
+
+| Value      | Behaviour for unknown bits                            |
+| ---------- | ----------------------------------------------------- |
+| `STRICT`   | Raise `ValueError`.                                   |
+| `CONFORM`  | Strip unknown bits.                                   |
+| `EJECT`    | Fall back to a plain int.                             |
+| `KEEP`     | Keep them in the flag value.                          |
+
+## Functional API
+
+```python
+Color = Enum('Color', ['RED', 'GREEN', 'BLUE'])
+Status = IntEnum('Status', 'OK FAIL', start=10)
+```
+
+Accepts a sequence of names, a name-value mapping, or a space/comma
+separated string.
+
+## Member introspection
+
+| Attribute / method            | Meaning                                       |
+| ----------------------------- | --------------------------------------------- |
+| `member.name` / `member.value` | Symbolic name / underlying value.            |
+| `EnumClass.__members__`       | Mapping of name -> member.                    |
+| `list(EnumClass)`             | Members in definition order.                  |
+| `EnumClass(value)`            | Lookup by value.                              |
+| `EnumClass['NAME']`           | Lookup by name.                               |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `Enum`, `IntEnum`, `StrEnum`, `ReprEnum` | Complete.                                       |
+| `Flag`, `IntFlag` (all boundaries)    | Complete.                                          |
+| `auto`, `unique`, `verify`            | Complete.                                          |
+| `@member` / `@nonmember`              | Complete.                                          |
+| Functional API                        | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [enum](https://docs.python.org/3.14/library/enum.html).
+* `Lib/enum.py`.
+* `module/enum/`. gopy port.
+* PEP 435.

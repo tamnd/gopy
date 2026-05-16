@@ -1,0 +1,59 @@
+---
+title: hashlib
+description: Secure and message-digest hashes. SHA-2, SHA-3, BLAKE2, KDFs.
+---
+
+# `hashlib`
+
+Cryptographic and message-digest hashes. Wraps OpenSSL on most
+builds; pure-Python fallbacks exist for portability.
+
+Source-of-record: `Lib/hashlib.py`, `Modules/_hashopenssl.c`,
+[hashlib docs](https://docs.python.org/3.14/library/hashlib.html).
+
+## Constructors
+
+`new(name, [data], *, usedforsecurity=True)`. Named constructors:
+`md5`, `sha1`, `sha224`, `sha256`, `sha384`, `sha512`, `sha3_224`,
+`sha3_256`, `sha3_384`, `sha3_512`, `shake_128`, `shake_256`,
+`blake2b`, `blake2s`.
+
+`algorithms_guaranteed`, `algorithms_available` enumerate names.
+
+## Hash object
+
+| Attribute / method                       | Purpose                                |
+| ---------------------------------------- | -------------------------------------- |
+| `digest_size`, `block_size`, `name`      | Metadata.                              |
+| `update(data)`                           | Append bytes.                          |
+| `digest()` / `hexdigest()`               | Finalise (non-destructive).            |
+| `copy()`                                 | Fork state.                            |
+| `shake_*.digest(length)` / `hexdigest(length)` | Variable-length output.          |
+
+`blake2*` constructors accept `digest_size`, `key`, `salt`, `person`,
+`fanout`, `depth`, `leaf_size`, `node_offset`, `node_depth`,
+`inner_size`, `last_node`.
+
+## Key-derivation functions
+
+| Function                                                     | Purpose                              |
+| ------------------------------------------------------------ | ------------------------------------ |
+| `pbkdf2_hmac(hash_name, password, salt, iterations, dklen=None)` | PBKDF2.                          |
+| `scrypt(password, *, salt, n, r, p, maxmem=0, dklen=64)`     | scrypt.                              |
+| `file_digest(fileobj, digest, /, *, _bufsize=2**18)` (3.11+) | Stream hash.                         |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| SHA-1, SHA-2, SHA-3, BLAKE2           | Complete via Go `crypto/*` and `golang.org/x/crypto`. |
+| `shake_128`, `shake_256`              | Complete.                                          |
+| PBKDF2, scrypt                        | Complete.                                          |
+| `file_digest`                         | Complete.                                          |
+| OpenSSL FIPS mode                     | Out of scope.                                      |
+
+## Reference
+
+* CPython 3.14: [hashlib](https://docs.python.org/3.14/library/hashlib.html).
+* `Lib/hashlib.py`.
+* `module/_hashlib/`. gopy port.

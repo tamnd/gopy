@@ -1,0 +1,101 @@
+---
+title: pathlib
+description: Object-oriented file system paths. Pure and concrete Path classes.
+---
+
+# `pathlib`
+
+Filesystem paths as objects. Pure paths are inert string operations;
+concrete paths add I/O. The classes split along OS conventions
+(`PosixPath` vs `WindowsPath`).
+
+Source-of-record: `Lib/pathlib/`,
+[pathlib docs](https://docs.python.org/3.14/library/pathlib.html).
+
+## Class hierarchy
+
+| Class                | OS check | I/O   |
+| -------------------- | -------- | ----- |
+| `PurePath`           | both     | no    |
+| `PurePosixPath`      | POSIX    | no    |
+| `PureWindowsPath`    | Windows  | no    |
+| `Path`               | current  | yes   |
+| `PosixPath`          | POSIX    | yes   |
+| `WindowsPath`        | Windows  | yes   |
+
+## Construction
+
+| Constructor                              | Effect                                       |
+| ---------------------------------------- | -------------------------------------------- |
+| `Path('a', 'b', 'c')`                    | Build from parts.                            |
+| `Path.cwd()` / `Path.home()`             | Common locations.                            |
+
+## Parts and components
+
+| Attribute             | Meaning                                              |
+| --------------------- | ---------------------------------------------------- |
+| `parts`               | Tuple of path components.                            |
+| `drive` / `root` / `anchor` | Windows drive, root, drive+root.               |
+| `parents` / `parent`  | Iterable of parents / immediate parent.              |
+| `name` / `stem` / `suffix` / `suffixes` | Final component pieces.            |
+
+## Pure-path operations
+
+| Method                                            | Returns                                |
+| ------------------------------------------------- | -------------------------------------- |
+| `joinpath(*others)` / `__truediv__(other)`        | New path.                              |
+| `match(pattern, *, case_sensitive=None)`          | Glob-style match (3.12 adds case sensitivity). |
+| `full_match(pattern, *, case_sensitive=None)` (3.13+) | Whole-path match.                  |
+| `relative_to(*other, walk_up=False)`              | Relative path.                         |
+| `is_relative_to(other)`                           | Predicate.                             |
+| `with_name(name)` / `with_stem(stem)` / `with_suffix(suffix)` | Functional updates.       |
+| `with_segments(*pathsegments)` (3.12+)            | Build a new path of the same class.    |
+| `as_posix()` / `as_uri()`                         | Conversion.                            |
+| `is_absolute()` / `is_reserved()`                 | Predicates.                            |
+
+## Concrete-path I/O
+
+| Method                                            | Effect                                  |
+| ------------------------------------------------- | --------------------------------------- |
+| `stat(*, follow_symlinks=True)` / `lstat()`       | `os.stat_result`.                       |
+| `exists(*, follow_symlinks=True)`                 | Predicate.                              |
+| `is_file()` / `is_dir()` / `is_symlink()` / `is_socket()` / `is_fifo()` / `is_block_device()` / `is_char_device()` / `is_mount()` / `is_junction()` | Predicates. |
+| `iterdir()`                                       | Iterator of children.                   |
+| `glob(pattern, *, case_sensitive=None, recurse_symlinks=False)` | Glob children.            |
+| `rglob(pattern, ...)`                             | Recursive glob.                         |
+| `walk(top_down=True, on_error=None, follow_symlinks=False)` (3.12+) | Recursive walk.       |
+| `open(mode='r', buffering=-1, encoding=None, errors=None, newline=None)` | Open file.       |
+| `read_bytes()` / `write_bytes(b)`                 | Whole-file binary.                      |
+| `read_text(encoding=None, errors=None, newline=None)` / `write_text(text, ...)` | Text. |
+| `touch(mode=0o666, exist_ok=True)`                | Create / update mtime.                  |
+| `mkdir(mode=0o777, parents=False, exist_ok=False)` | Create dir.                            |
+| `rmdir()` / `unlink(missing_ok=False)`            | Remove.                                 |
+| `rename(target)` / `replace(target)`              | Move.                                   |
+| `symlink_to(target, target_is_directory=False)` / `hardlink_to(target)` (3.10+) | Link.    |
+| `readlink()`                                      | Symlink target.                         |
+| `samefile(other)`                                 | Predicate.                              |
+| `expanduser()` / `resolve(strict=False)` / `absolute()` | Path resolution.                  |
+| `chmod(mode, *, follow_symlinks=True)` / `lchmod(mode)` | Permissions.                       |
+| `owner()` / `group()`                             | POSIX ownership.                        |
+
+## Globbing semantics
+
+`*` does not cross path separators; `**` does (single `**` matches
+zero or more components). Hidden files starting with `.` are not
+matched unless the pattern starts with `.`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `PurePath` family                     | Complete.                                          |
+| `Path` I/O                            | Complete.                                          |
+| `glob` / `rglob` / `walk`             | Complete.                                          |
+| `with_segments`, case-sensitive glob  | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [pathlib](https://docs.python.org/3.14/library/pathlib.html).
+* `Lib/pathlib/`.
+* `module/pathlib/`. gopy port.
+* PEP 428.

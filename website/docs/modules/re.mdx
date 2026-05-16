@@ -1,0 +1,122 @@
+---
+title: re
+description: Regular expression engine. Compile, match, search, sub, syntax, flags.
+---
+
+# `re`
+
+Regular expressions for Python strings (and `bytes`). The engine is
+backtracking with sophisticated lookarounds, named groups, and
+Unicode-aware classes.
+
+Source-of-record: `Lib/re/`, `Modules/_sre/`,
+[re docs](https://docs.python.org/3.14/library/re.html).
+
+## Top-level functions
+
+| Function                                              | Returns                            |
+| ----------------------------------------------------- | ---------------------------------- |
+| `compile(pattern, flags=0)`                           | `Pattern` object.                  |
+| `search(pattern, string, flags=0)`                    | First match or `None`.             |
+| `match(pattern, string, flags=0)`                     | Match at start or `None`.          |
+| `fullmatch(pattern, string, flags=0)`                 | Entire-string match.               |
+| `split(pattern, string, maxsplit=0, flags=0)`         | Split on matches.                  |
+| `findall(pattern, string, flags=0)`                   | All matches as strings or tuples.  |
+| `finditer(pattern, string, flags=0)`                  | Iterator of `Match`.               |
+| `sub(pattern, repl, string, count=0, flags=0)`        | Substitute.                        |
+| `subn(pattern, repl, string, count=0, flags=0)`       | `(new_string, count)`.             |
+| `escape(string)`                                      | Backslash-escape regex specials.   |
+| `purge()`                                             | Clear the compile cache.           |
+
+## Flags
+
+| Flag                      | Effect                                                    |
+| ------------------------- | --------------------------------------------------------- |
+| `IGNORECASE` / `I`        | Case-insensitive matching.                                |
+| `MULTILINE` / `M`         | `^` and `$` match at every line.                          |
+| `DOTALL` / `S`            | `.` matches newlines too.                                 |
+| `VERBOSE` / `X`           | Ignore whitespace and `#` comments in pattern.            |
+| `ASCII` / `A`             | `\\w`, `\\d`, etc. match ASCII only.                      |
+| `UNICODE` / `U`           | Unicode (default for `str` patterns).                     |
+| `LOCALE` / `L`            | Locale-aware (`bytes` only).                              |
+| `DEBUG`                   | Print the compiled program.                               |
+| `NOFLAG`                  | `0`.                                                      |
+
+## Pattern syntax
+
+| Construct                | Meaning                                                  |
+| ------------------------ | -------------------------------------------------------- |
+| `.`                      | Any char (or newline with `DOTALL`).                     |
+| `^` / `$`                | Start / end of string (or line with `MULTILINE`).        |
+| `*` `+` `?`              | Greedy quantifiers.                                      |
+| `*?` `+?` `??`           | Lazy quantifiers.                                        |
+| `{m,n}` / `{m,n}?`       | Bounded quantifier.                                      |
+| `[]`                     | Character class.                                         |
+| `\|`                     | Alternation.                                             |
+| `()`                     | Capturing group.                                         |
+| `(?:...)`                | Non-capturing group.                                     |
+| `(?P<name>...)`          | Named capture.                                           |
+| `(?P=name)`              | Backreference by name.                                   |
+| `(?#...)`                | Comment.                                                 |
+| `(?aiLmsux)`             | Inline flag setting.                                     |
+| `(?aiLmsux-imsx:...)`    | Inline flag scoped (3.7+).                               |
+| `(?=...)` / `(?!...)`    | Positive / negative lookahead.                           |
+| `(?<=...)` / `(?<!...)`  | Positive / negative lookbehind.                          |
+| `(?>...)`                | Atomic group (3.11+).                                    |
+| `\\d` `\\D` `\\w` `\\W` `\\s` `\\S` | Digit, word, whitespace classes.              |
+| `\\b` `\\B`              | Word boundary / non-boundary.                            |
+| `\\A` `\\Z`              | Start / end of string anchors.                           |
+| `\\N{NAME}`              | Unicode by name.                                         |
+| `\\g<name>` / `\\1`      | Backreference in `repl`.                                 |
+
+## Pattern objects
+
+| Method                                       | Returns                                  |
+| -------------------------------------------- | ---------------------------------------- |
+| `pattern.search(string, pos=0, endpos=...)`  | First match.                             |
+| `pattern.match(string, pos=0, endpos=...)`   | Anchored at `pos`.                       |
+| `pattern.fullmatch(string, pos=0, endpos=...)` | Entire region.                         |
+| `pattern.findall(...)`                       | All matches.                             |
+| `pattern.finditer(...)`                      | Iterator of `Match`.                     |
+| `pattern.split(...)` / `sub(...)` / `subn(...)` | Edits.                                |
+| `pattern.flags`                              | Effective flags.                         |
+| `pattern.groups`                             | Number of capturing groups.              |
+| `pattern.groupindex`                         | Name -> index mapping.                   |
+| `pattern.pattern`                            | Source.                                  |
+
+## Match objects
+
+| Method / attr                  | Returns                                          |
+| ------------------------------ | ------------------------------------------------ |
+| `m.group(0)` / `m.group(name)` | Group text.                                      |
+| `m.groups(default=None)`       | Tuple of all groups.                             |
+| `m.groupdict(default=None)`    | Named-group dict.                                |
+| `m.start([g])` / `m.end([g])`  | Indices.                                         |
+| `m.span([g])`                  | `(start, end)`.                                  |
+| `m.expand(template)`           | Apply substitution template.                     |
+| `m.lastindex` / `m.lastgroup`  | Index / name of last matched group.              |
+| `m.string`                     | Subject.                                         |
+| `m.re`                         | Pattern.                                         |
+| `m.pos` / `m.endpos`           | Search range.                                    |
+
+## Replacement strings
+
+`\\g<name>`, `\\g<index>`, `\\1`-`\\99` backreferences, `\\\\`,
+`\\n`, `\\t`, etc. `repl` may also be a callable
+`fn(match) -> str`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Full regex syntax                     | Complete (PCRE-style backtracking engine).         |
+| All flags                             | Complete.                                          |
+| Unicode property classes              | Complete; tracks CPython behaviour.                |
+| Lookarounds, atomic groups            | Complete.                                          |
+| Compile cache                         | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [re](https://docs.python.org/3.14/library/re.html).
+* `Lib/re/`, `Modules/_sre/`.
+* `module/re/`, `module/_sre/`. gopy port.

@@ -1,0 +1,90 @@
+---
+title: gc
+description: Interface to the cycle collector. Generations, thresholds, callbacks, freezing.
+---
+
+# `gc`
+
+The `gc` module exposes the cycle collector. Reference counting frees
+most objects immediately; the cycle collector reaps reference cycles
+between containers. See
+[Reference -> Memory model](../reference/memory-model) for the
+algorithm.
+
+Source-of-record: `Modules/gcmodule.c`, `Lib/gc.py`,
+[gc docs](https://docs.python.org/3.14/library/gc.html).
+
+## Control
+
+| Function                                | Effect                                          |
+| --------------------------------------- | ----------------------------------------------- |
+| `gc.enable()` / `gc.disable()`          | Toggle automatic collection.                    |
+| `gc.isenabled()`                        | Predicate.                                      |
+| `gc.collect(generation=2)`              | Force a collection.                             |
+| `gc.set_threshold(threshold0, threshold1=, threshold2=)` | Configure auto-collection. |
+| `gc.get_threshold()`                    | Current thresholds.                             |
+| `gc.get_count()`                        | Per-generation allocation counters.             |
+
+Defaults: thresholds `(700, 10, 10)`. The first counter triggers
+generation-0 collection; the latter two trigger promotion.
+
+## Inspection
+
+| Function                                | Returns                                         |
+| --------------------------------------- | ----------------------------------------------- |
+| `gc.get_objects(generation=None)`       | All tracked objects (or one generation).        |
+| `gc.get_referrers(*objs)`               | What points at `objs`.                          |
+| `gc.get_referents(*objs)`               | What `objs` point at.                           |
+| `gc.is_tracked(obj)`                    | Predicate.                                      |
+| `gc.is_finalized(obj)`                  | True if `obj` has been finalised.               |
+| `gc.get_stats()`                        | Per-generation stats dict.                      |
+| `gc.get_freeze_count()`                 | Permanent-gen size.                             |
+
+## Debug
+
+| Constant            | Effect when set in `gc.set_debug(flags)`              |
+| ------------------- | ----------------------------------------------------- |
+| `DEBUG_STATS`       | Print stats after every collection.                   |
+| `DEBUG_COLLECTABLE` | Print each collectable object.                        |
+| `DEBUG_UNCOLLECTABLE` | Print each uncollectable object.                    |
+| `DEBUG_SAVEALL`     | Keep unreachable objects in `gc.garbage`.             |
+| `DEBUG_LEAK`        | All of the above except `DEBUG_STATS`.                |
+
+`gc.get_debug()` reports current flags. `gc.garbage` holds objects
+the collector could not free.
+
+## Callbacks
+
+```python
+gc.callbacks.append(lambda phase, info: ...)
+```
+
+| `phase`    | `info` keys                                              |
+| ---------- | -------------------------------------------------------- |
+| `"start"`  | `generation`, `collected`, `uncollectable`.              |
+| `"stop"`   | Same, populated after collection.                        |
+
+## Freezing
+
+| Function                       | Effect                                            |
+| ------------------------------ | ------------------------------------------------- |
+| `gc.freeze()`                  | Move tracked objects into a permanent generation. |
+| `gc.unfreeze()`                | Move them back.                                   |
+
+Used by forking servers: freeze parent state so children don't have to
+trace it.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Module surface (all functions above)  | Complete.                                          |
+| Three-generation collector            | Complete.                                          |
+| Callbacks and debug flags             | Complete.                                          |
+| `freeze`/`unfreeze`                   | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [gc module](https://docs.python.org/3.14/library/gc.html).
+* `Modules/gcmodule.c`.
+* `module/gc/`. gopy port.

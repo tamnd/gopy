@@ -1,0 +1,54 @@
+---
+title: bisect
+description: Maintain a list in sorted order via binary search.
+---
+
+# `bisect`
+
+`bisect` maintains a list in sorted order without sorting after each
+insertion. Built on binary search.
+
+Source-of-record: `Lib/bisect.py`, `Modules/_bisectmodule.c`,
+[bisect docs](https://docs.python.org/3.14/library/bisect.html).
+
+## Locate
+
+| Function                                                    | Returns                                  |
+| ----------------------------------------------------------- | ---------------------------------------- |
+| `bisect_left(a, x, lo=0, hi=len(a), *, key=None)`           | Index where `x` could be inserted to keep sorted; ties go to the left. |
+| `bisect_right(a, x, lo=0, hi=len(a), *, key=None)`          | Same; ties go to the right.              |
+| `bisect(...)`                                               | Alias for `bisect_right`.                |
+
+## Insert
+
+| Function                                                    | Effect                                   |
+| ----------------------------------------------------------- | ---------------------------------------- |
+| `insort_left(a, x, lo=0, hi=len(a), *, key=None)`           | Insert `x` keeping sorted; ties left.    |
+| `insort_right(a, x, lo=0, hi=len(a), *, key=None)`          | Insert keeping sorted; ties right.       |
+| `insort(...)`                                               | Alias for `insort_right`.                |
+
+The `key` argument applies a one-arg key function similar to
+`sorted(..., key=)`. The list must already be sorted by that key.
+
+## Membership and find
+
+`bisect` doesn't ship `find`/`contains`; the recipe is:
+
+```python
+i = bisect_left(a, x)
+hit = i != len(a) and a[i] == x
+```
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All locate / insert variants          | Complete.                                          |
+| `key` argument                        | Complete.                                          |
+| C-fast paths                          | Complete via `module/_bisect`.                     |
+
+## Reference
+
+* CPython 3.14: [bisect](https://docs.python.org/3.14/library/bisect.html).
+* `Lib/bisect.py`, `Modules/_bisectmodule.c`.
+* `module/_bisect/`. gopy port.

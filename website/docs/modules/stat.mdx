@@ -1,0 +1,68 @@
+---
+title: stat
+description: Helpers for interpreting os.stat() / os.lstat() results.
+---
+
+# `stat`
+
+The `stat` module defines constants and helpers for interpreting the
+result of `os.stat`, `os.fstat`, and `os.lstat`.
+
+Source-of-record: `Lib/stat.py`, `Modules/_stat.c`,
+[stat docs](https://docs.python.org/3.14/library/stat.html).
+
+## Mode test functions
+
+| Function                  | Predicate on `st_mode`                                |
+| ------------------------- | ----------------------------------------------------- |
+| `S_ISDIR(mode)`           | Directory.                                            |
+| `S_ISCHR(mode)`           | Character device.                                     |
+| `S_ISBLK(mode)`           | Block device.                                         |
+| `S_ISREG(mode)`           | Regular file.                                         |
+| `S_ISFIFO(mode)`          | FIFO / named pipe.                                    |
+| `S_ISLNK(mode)`           | Symlink.                                              |
+| `S_ISSOCK(mode)`          | Socket.                                               |
+| `S_ISDOOR(mode)`          | Door (Solaris).                                       |
+| `S_ISPORT(mode)`          | Event port (Solaris).                                 |
+| `S_ISWHT(mode)`           | Whiteout.                                             |
+
+## Decomposition
+
+| Function                  | Returns                                               |
+| ------------------------- | ----------------------------------------------------- |
+| `S_IMODE(mode)`           | Permission bits.                                      |
+| `S_IFMT(mode)`            | File-type bits.                                       |
+| `filemode(mode)`          | `'drwxr-xr-x'`-style string.                          |
+
+## File-type constants
+
+`S_IFDIR`, `S_IFCHR`, `S_IFBLK`, `S_IFREG`, `S_IFIFO`, `S_IFLNK`,
+`S_IFSOCK`, `S_IFDOOR`, `S_IFPORT`, `S_IFWHT`.
+
+## Permission constants
+
+| Group           | Constants                                            |
+| --------------- | ---------------------------------------------------- |
+| User            | `S_IRUSR`, `S_IWUSR`, `S_IXUSR`, `S_IRWXU`.         |
+| Group           | `S_IRGRP`, `S_IWGRP`, `S_IXGRP`, `S_IRWXG`.         |
+| Other           | `S_IROTH`, `S_IWOTH`, `S_IXOTH`, `S_IRWXO`.         |
+| Bits            | `S_ISUID`, `S_ISGID`, `S_ISVTX`.                    |
+| Combined        | `S_IREAD`, `S_IWRITE`, `S_IEXEC`.                   |
+
+## Windows file attributes
+
+`FILE_ATTRIBUTE_*` constants for `st_file_attributes` on Windows.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All `S_IS*` predicates                | Complete.                                          |
+| Decomposition (`S_IMODE`, `filemode`) | Complete.                                          |
+| File-type, permission, and Windows constants | Complete.                                   |
+
+## Reference
+
+* CPython 3.14: [stat](https://docs.python.org/3.14/library/stat.html).
+* `Lib/stat.py`, `Modules/_stat.c`.
+* `module/_stat/`. gopy port.

@@ -1,0 +1,84 @@
+---
+title: typing
+description: Static type hints. Generics, protocols, TypedDict, type aliases, ParamSpec.
+---
+
+# `typing`
+
+Runtime support for type hints. Hints are not enforced; tools like
+mypy, pyright, and pyrefly consume them.
+
+Source-of-record: `Lib/typing.py`,
+[typing docs](https://docs.python.org/3.14/library/typing.html).
+
+## Special forms
+
+`Any`, `LiteralString`, `Never`, `NoReturn`, `Self` (3.11+),
+`TypeGuard`, `TypeIs` (3.13+), `Required`, `NotRequired`, `Unpack`,
+`Annotated`, `ClassVar`, `Final`, `Literal`, `Optional`, `Union`,
+`ReadOnly` (3.13+), `Concatenate`.
+
+## Generics and constructs
+
+| Name                              | Purpose                                       |
+| --------------------------------- | --------------------------------------------- |
+| `Generic[*type_params]`           | User-defined generic base.                    |
+| `TypeVar(name, *constraints, bound=None, covariant=False, contravariant=False, infer_variance=False, default=...)` (3.12+ defaults) | Type variable. |
+| `TypeVarTuple(name, *, default=...)` (3.11+) | Variadic.                          |
+| `ParamSpec(name, *, default=...)` (3.10+) | Callable parameter spec.              |
+| `NewType(name, tp)`               | Distinct nominal alias.                       |
+| `TypeAliasType(name, value, *, type_params=())` (3.12+) | Runtime alias.          |
+| `Callable[[A, B], R]`             | Callable type.                                |
+| `Protocol`                        | Structural typing base.                       |
+| `runtime_checkable`               | Enable `isinstance` on `Protocol`.            |
+| `TypedDict`                       | Dict with named keys.                         |
+| `NamedTuple`                      | Typed `collections.namedtuple`.               |
+
+## Helper functions
+
+`cast(typ, val)`, `assert_type(val, typ)` (3.11+),
+`assert_never(arg)` (3.11+), `reveal_type(obj)` (3.11+),
+`get_type_hints(obj, globalns=None, localns=None, include_extras=False)`,
+`get_origin(tp)`, `get_args(tp)`, `get_overloads(func)` (3.11+),
+`clear_overloads()` (3.11+), `is_typeddict(tp)`,
+`override(method)` (3.12+), `dataclass_transform(...)` (3.11+),
+`no_type_check`, `no_type_check_decorator`,
+`final`, `overload`.
+
+## Abstract containers
+
+`AbstractSet`, `MutableSet`, `Mapping`, `MutableMapping`,
+`Sequence`, `MutableSequence`, `Iterable`, `Iterator`, `Reversible`,
+`Container`, `Collection`, `Hashable`, `Sized`, `AsyncIterable`,
+`AsyncIterator`, `Awaitable`, `Coroutine`, `AsyncGenerator`,
+`Generator`, `ContextManager`, `AsyncContextManager`,
+`SupportsAbs`, `SupportsBytes`, `SupportsComplex`,
+`SupportsFloat`, `SupportsIndex`, `SupportsInt`, `SupportsRound`.
+
+`TYPE_CHECKING` is `False` at runtime; tools see it as `True`.
+
+## 3.12 / 3.13 / 3.14 additions
+
+- PEP 695 `type X = ...` syntax (3.12).
+- PEP 696 type-parameter defaults (3.13).
+- PEP 705 `ReadOnly` for `TypedDict` (3.13).
+- PEP 742 `TypeIs` (3.13).
+- PEP 649 deferred annotations (3.14).
+- PEP 728 `TypedDict.__extra_items__` (3.14).
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All forms above                       | Complete; runtime-only enforcement.                |
+| `TypeAliasType`, PEP 695 syntax       | Complete.                                          |
+| PEP 696 defaults                      | Complete.                                          |
+| PEP 649 lazy annotations              | Complete.                                          |
+| `assert_type`, `reveal_type`          | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [typing](https://docs.python.org/3.14/library/typing.html).
+* `Lib/typing.py`.
+* `module/typing/`. gopy port.
+* PEPs 484, 526, 544, 561, 585, 586, 591, 593, 604, 612, 613, 646, 647, 655, 673, 675, 681, 692, 695, 696, 698, 705, 728, 742, 749.

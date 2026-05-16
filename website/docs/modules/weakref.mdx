@@ -1,18 +1,84 @@
 ---
 title: weakref
-description: The weakref module in gopy.
+description: Weak references, proxies, finalisers, and weak-keyed/valued containers.
 ---
 
 # `weakref`
 
-The `weakref` module. Behaviour matches CPython 3.14. Source lives at
-`module/weakref/` in the gopy repo (or under `stdlib/weakref.py` for
-pure-Python ports).
+The `weakref` module exposes weak references: object references that
+do not contribute to the referent's refcount. When the last strong
+reference goes away the weakref clears, fires its callback, and is
+removed from any container that holds it.
 
-## Status
+Source-of-record: `Lib/weakref.py`, `Objects/weakrefobject.c`,
+[weakref docs](https://docs.python.org/3.14/library/weakref.html).
 
-See [manual/status](../manual/status) for current coverage.
+## Core API
 
-## API
+| API                                       | Returns                                    |
+| ----------------------------------------- | ------------------------------------------ |
+| `ref(obj[, callback])`                    | Weak reference. Call to retrieve the referent or `None`. |
+| `proxy(obj[, callback])`                  | Transparent proxy; raises `ReferenceError` when dead. |
+| `getweakrefcount(obj)`                    | Number of live weakrefs.                   |
+| `getweakrefs(obj)`                        | List of live weakrefs.                     |
+| `finalize(obj, func, /, *args, **kw)`     | Run `func(*args, **kw)` when `obj` dies.   |
+| `WeakMethod(method[, callback])`          | Weak reference to a bound method.          |
 
-(Reference table in progress.)
+The `finalize` API replaces `__del__` for many uses: it's safer
+(runs once, in a controlled context) and does not interfere with
+cycle collection.
+
+## Containers
+
+| Container                              | Semantics                                          |
+| -------------------------------------- | -------------------------------------------------- |
+| `WeakSet([data])`                      | Set whose members are weakly referenced.           |
+| `WeakValueDictionary([data])`          | Dict whose values are weakly referenced.           |
+| `WeakKeyDictionary([data])`            | Dict whose keys are weakly referenced.             |
+
+Common methods: `keys`, `values`, `items`, `setdefault`, `update`,
+`pop`, plus iteration variants that emit live references.
+
+## Callbacks
+
+A callback `cb(weakref)` runs after the referent has been collected.
+It runs synchronously in the thread that drops the last refcount.
+Exceptions go to `sys.unraisablehook`.
+
+## Finalize details
+
+```python
+f = finalize(obj, func, *args, **kw)
+```
+
+| Attribute / method        | Meaning                                            |
+| ------------------------- | -------------------------------------------------- |
+| `f.alive`                 | True until `obj` dies or `f` is called explicitly. |
+| `f.atexit`                | If True, runs at interpreter shutdown if not yet fired. |
+| `f.peek()`                | Inspect arguments.                                 |
+| `f.detach()`              | Cancel.                                            |
+| `f()`                     | Run early; idempotent.                             |
+
+## Types requiring support
+
+A type must opt into weak reference support: include `__weakref__` in
+`__slots__` (or omit `__slots__` entirely). `int`, `str`, `tuple`, and
+many built-ins do *not* support weak references; subclass them to add
+`__weakref__`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `ref`, `proxy`, callbacks             | Complete.                                          |
+| `WeakSet`, `WeakValueDictionary`, `WeakKeyDictionary` | Complete.                          |
+| `finalize`                            | Complete.                                          |
+| `WeakMethod`                          | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [weakref](https://docs.python.org/3.14/library/weakref.html).
+* `Lib/weakref.py`, `Objects/weakrefobject.c`.
+* `module/weakref/`, `module/_weakref/`. gopy port.
+* PEP 205 (weak references).
+* PEP 442 (safe finalisation).

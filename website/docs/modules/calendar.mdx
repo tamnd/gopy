@@ -1,0 +1,59 @@
+---
+title: calendar
+description: Calendar arithmetic. Month and year printing, weekday helpers, HTMLCalendar.
+---
+
+# `calendar`
+
+Calendar arithmetic. Generates plain-text or HTML calendars, exposes
+locale-aware month and weekday names.
+
+Source-of-record: `Lib/calendar.py`,
+[calendar docs](https://docs.python.org/3.14/library/calendar.html).
+
+## Module-level
+
+| Function                                       | Returns                              |
+| ---------------------------------------------- | ------------------------------------ |
+| `setfirstweekday(weekday)` / `firstweekday()`  | Configure week start.                |
+| `isleap(year)` / `leapdays(y1, y2)`            | Leap-year predicates.                |
+| `weekday(year, month, day)`                    | 0=Monday..6=Sunday.                  |
+| `weekheader(n)`                                | Header string.                       |
+| `monthrange(year, month)`                      | `(first_weekday, length)`.           |
+| `monthcalendar(year, month)`                   | List of weeks.                       |
+| `prmonth(year, month, ...)` / `month(year, month, ...)` | Print / format.             |
+| `prcal(year, ...)` / `calendar(year, ...)`     | Print / format full year.            |
+| `timegm(tuple)`                                | Inverse of `time.gmtime`.            |
+
+## Classes
+
+| Class                          | Purpose                                       |
+| ------------------------------ | --------------------------------------------- |
+| `Calendar(firstweekday=0)`     | Iterators for dates, days, weeks.             |
+| `TextCalendar`                 | Text formatting.                              |
+| `HTMLCalendar`                 | HTML formatting; subclassable.                |
+| `LocaleTextCalendar(firstweekday=0, locale=None)` | Locale-aware text.         |
+| `LocaleHTMLCalendar(firstweekday=0, locale=None)` | Locale-aware HTML.         |
+
+## Constants
+
+`MONDAY..SUNDAY` (0..6), `January..December` (1..12),
+`day_name`, `day_abbr`, `month_name`, `month_abbr`.
+
+## CLI
+
+`python -m calendar [year [month]] [-w WIDTH] [-l LINES] [-s SPACING] [-c CSS] [--type {text,html}]`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Text and HTML calendars               | Complete.                                          |
+| Locale-aware variants                 | Complete; depends on `locale`.                     |
+| CLI                                   | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [calendar](https://docs.python.org/3.14/library/calendar.html).
+* `Lib/calendar.py`.
+* `module/calendar/`. gopy port.

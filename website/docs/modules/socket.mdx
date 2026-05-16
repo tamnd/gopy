@@ -1,0 +1,70 @@
+---
+title: socket
+description: Low-level networking. BSD socket interface for IPv4, IPv6, Unix, raw.
+---
+
+# `socket`
+
+Thin wrapper over the BSD socket API. Address families, socket
+types, and protocol constants mirror the platform headers.
+
+Source-of-record: `Modules/socketmodule.c`, `Lib/socket.py`,
+[socket docs](https://docs.python.org/3.14/library/socket.html).
+
+## Constructors
+
+| Name                                                          | Returns                          |
+| ------------------------------------------------------------- | -------------------------------- |
+| `socket(family=AF_INET, type=SOCK_STREAM, proto=0, fileno=None)` | New `socket`.                 |
+| `socketpair([family[, type[, proto]]])`                       | Connected pair.                  |
+| `create_connection(address, timeout=GLOBAL, source_address=None, *, all_errors=False)` | Client. |
+| `create_server(address, *, family=AF_INET, backlog=None, reuse_port=False, dualstack_ipv6=False)` | Listener. |
+| `fromfd(fd, family, type, proto=0)`                           | Wrap descriptor.                 |
+| `if_nameindex()` / `if_nametoindex(name)` / `if_indextoname(index)` | Interface helpers.        |
+
+## `socket` methods
+
+`bind`, `listen`, `accept`, `connect`, `connect_ex`, `send`,
+`sendall`, `sendto`, `sendmsg`, `recv`, `recv_into`, `recvfrom`,
+`recvmsg`, `close`, `shutdown`, `getsockopt`, `setsockopt`,
+`getpeername`, `getsockname`, `fileno`, `dup`, `detach`,
+`settimeout`, `gettimeout`, `setblocking`, `makefile`,
+`set_inheritable`, `get_inheritable`.
+
+## Address families
+
+`AF_INET`, `AF_INET6`, `AF_UNIX`, `AF_NETLINK`, `AF_PACKET`,
+`AF_VSOCK`, `AF_BLUETOOTH`, `AF_CAN`, `AF_QIPCRTR`, `AF_HYPERV`.
+
+## Socket types
+
+`SOCK_STREAM`, `SOCK_DGRAM`, `SOCK_RAW`, `SOCK_RDM`,
+`SOCK_SEQPACKET`. Flags `SOCK_CLOEXEC`, `SOCK_NONBLOCK`.
+
+## Name resolution
+
+`getaddrinfo(host, port, family=0, type=0, proto=0, flags=0)`,
+`gethostbyname(host)`, `gethostbyname_ex(host)`, `gethostbyaddr(ip)`,
+`gethostname()`, `getfqdn(name='')`, `getnameinfo(sockaddr, flags)`,
+`getservbyname(servicename, protocolname=None)`,
+`getservbyport(port, protocolname=None)`.
+
+## Conversion
+
+`htons`, `htonl`, `ntohs`, `ntohl`, `inet_aton`, `inet_ntoa`,
+`inet_pton`, `inet_ntop`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| TCP, UDP, Unix sockets                | Complete.                                          |
+| Address resolution                    | Complete via Go `net`.                             |
+| Raw, packet, netlink, vsock           | Linux-only; partial.                               |
+| Bluetooth, CAN, HYPERV                | Not implemented.                                   |
+
+## Reference
+
+* CPython 3.14: [socket](https://docs.python.org/3.14/library/socket.html).
+* `Modules/socketmodule.c`, `Lib/socket.py`.
+* `module/_socket/`. gopy port.

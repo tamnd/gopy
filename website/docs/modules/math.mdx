@@ -1,0 +1,82 @@
+---
+title: math
+description: Floating-point math. Trig, logs, special functions, constants.
+---
+
+# `math`
+
+Mathematical functions defined by the C standard, plus extras
+(comb, isqrt, prod, dist). All functions take and return `float`
+unless documented as `int`.
+
+Source-of-record: `Modules/mathmodule.c`,
+[math docs](https://docs.python.org/3.14/library/math.html).
+
+## Constants
+
+| Name        | Value                                                |
+| ----------- | ---------------------------------------------------- |
+| `pi`        | 3.141592653589793.                                   |
+| `e`         | 2.718281828459045.                                   |
+| `tau`       | `2*pi`.                                              |
+| `inf`       | Positive infinity.                                   |
+| `nan`       | IEEE NaN.                                            |
+
+## Number-theoretic and representation
+
+| Function                                  | Returns                                       |
+| ----------------------------------------- | --------------------------------------------- |
+| `ceil(x)` / `floor(x)` / `trunc(x)`       | `int`.                                        |
+| `fabs(x)`                                 | `float` absolute value.                       |
+| `factorial(n)`                            | `int`.                                        |
+| `gcd(*ints)` / `lcm(*ints)`               | `int`.                                        |
+| `copysign(x, y)`                          | `x` with sign of `y`.                         |
+| `fmod(x, y)`                              | C-style `fmod`.                               |
+| `frexp(x)`                                | `(m, e)` with `x = m * 2**e`.                 |
+| `ldexp(x, i)`                             | `x * 2**i`.                                   |
+| `modf(x)`                                 | `(frac, int)` both `float`.                   |
+| `remainder(x, y)`                         | IEEE 754 remainder.                           |
+| `isclose(a, b, *, rel_tol=1e-9, abs_tol=0.0)` | Relative tolerance check.                 |
+| `isfinite(x)` / `isinf(x)` / `isnan(x)`   | Predicates.                                   |
+| `nextafter(x, y, steps=1)`                | Next representable float.                     |
+| `ulp(x)`                                  | Unit in last place.                           |
+| `comb(n, k)` / `perm(n, k=None)`          | Combinatorial counts (3.8+).                  |
+| `isqrt(n)`                                | Integer sqrt.                                 |
+| `prod(iterable, *, start=1)`              | Product.                                      |
+| `sumprod(p, q)`                           | Dot product (3.12+).                          |
+
+## Power and logarithm
+
+`exp(x)`, `expm1(x)`, `log(x[, base])`, `log1p(x)`, `log2(x)`,
+`log10(x)`, `pow(x, y)`, `sqrt(x)`, `cbrt(x)`.
+
+## Trigonometry
+
+`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)`, `hypot(*coordinates)`.
+
+## Hyperbolic
+
+`sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`.
+
+## Angular conversion
+
+`degrees(x)`, `radians(x)`.
+
+## Special functions
+
+`erf(x)`, `erfc(x)`, `gamma(x)`, `lgamma(x)`, `dist(p, q)`,
+`fsum(iterable)` (Neumaier exact sum), `floor`/`ceil` round to int.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All functions and constants           | Complete.                                          |
+| `fsum`, `isqrt`, `comb`, `perm`, `sumprod` | Complete.                                     |
+| Domain / range errors raise `ValueError` / `OverflowError` | Complete.                 |
+
+## Reference
+
+* CPython 3.14: [math](https://docs.python.org/3.14/library/math.html).
+* `Modules/mathmodule.c`.
+* `module/math/`. gopy port.

@@ -1,0 +1,111 @@
+---
+title: datetime
+description: Calendar dates, wall clock times, durations, and time-zone aware values.
+---
+
+# `datetime`
+
+Concrete date / time / datetime / timedelta types and the abstract
+`tzinfo`. All types are immutable and hashable.
+
+Source-of-record: `Modules/_datetimemodule.c`, `Lib/_pydatetime.py`,
+[datetime docs](https://docs.python.org/3.14/library/datetime.html).
+
+## `date`
+
+```python
+date(year, month, day)
+```
+
+| Method / attr             | Returns                                          |
+| ------------------------- | ------------------------------------------------ |
+| `year`, `month`, `day`    | Components.                                      |
+| `date.today()`            | Today (local).                                   |
+| `date.fromtimestamp(t)` / `date.fromordinal(n)` / `date.fromisoformat(s)` / `date.fromisocalendar(y, w, d)` | Constructors. |
+| `replace(year=, month=, day=)` | Functional update.                         |
+| `weekday()` / `isoweekday()` | Monday=0 / Monday=1.                          |
+| `isocalendar()`           | `(year, week, weekday)` named tuple.             |
+| `isoformat()`             | `'YYYY-MM-DD'`.                                  |
+| `strftime(fmt)`           | Format.                                          |
+| `toordinal()`             | Proleptic Gregorian ordinal.                     |
+| `ctime()`                 | `'Mon Aug 14 00:00:00 2023'`-style string.       |
+| `__add__(timedelta)`      | Returns new `date`.                              |
+| `__sub__(date)` / `__sub__(timedelta)` | `timedelta` or `date`.              |
+
+`min = date(1, 1, 1)`, `max = date(9999, 12, 31)`, `resolution = timedelta(days=1)`.
+
+## `time`
+
+```python
+time(hour=0, minute=0, second=0, microsecond=0, tzinfo=None, *, fold=0)
+```
+
+Same accessors plus `tzinfo`, `fold`, `utcoffset()`, `tzname()`,
+`dst()`. `time.fromisoformat(s)` and `isoformat(timespec='auto')`.
+
+## `datetime`
+
+`datetime(year, month, day, hour=0, minute=0, second=0, microsecond=0, tzinfo=None, *, fold=0)`.
+
+| Class method                                            | Returns                                    |
+| ------------------------------------------------------- | ------------------------------------------ |
+| `datetime.today()`                                      | Naive local now.                           |
+| `datetime.now(tz=None)`                                 | Aware-if-`tz` now.                         |
+| `datetime.utcnow()` (deprecated)                        | Use `now(timezone.utc)`.                   |
+| `datetime.fromtimestamp(t, tz=None)`                    | From POSIX timestamp.                      |
+| `datetime.utcfromtimestamp(t)` (deprecated)             | Use `fromtimestamp(t, tz=timezone.utc)`.   |
+| `datetime.combine(date, time, tzinfo=...)`              | Glue together.                             |
+| `datetime.fromisoformat(s)`                             | Parse ISO 8601 (accepts most variants).    |
+| `datetime.strptime(s, fmt)`                             | Parse.                                     |
+
+Operations: `astimezone(tz=None)`, `utcoffset`, `tzname`, `dst`,
+`timetuple`, `utctimetuple`, `toordinal`, `timestamp`, `weekday`,
+`isoweekday`, `isocalendar`, `isoformat(sep='T', timespec='auto')`,
+`strftime(fmt)`, `replace(...)`, arithmetic with `timedelta`.
+
+## `timedelta`
+
+```python
+timedelta(days=0, seconds=0, microseconds=0, milliseconds=0,
+          minutes=0, hours=0, weeks=0)
+```
+
+| Attribute              | Meaning                                              |
+| ---------------------- | ---------------------------------------------------- |
+| `days`, `seconds`, `microseconds` | Normalised components.                    |
+| `total_seconds()`      | Float total.                                         |
+| Arithmetic             | `+`, `-`, `*`, `/`, `//`, `%`, `abs`, `bool`.       |
+
+`min = timedelta(-999999999)`, `max = timedelta(days=999999999, hours=23, minutes=59, seconds=59, microseconds=999999)`.
+
+## `tzinfo` and `timezone`
+
+`tzinfo` is abstract: subclasses implement `utcoffset(dt)`,
+`tzname(dt)`, `dst(dt)`, optionally `fromutc(dt)`.
+
+`timezone(offset, name=None)` is the concrete fixed-offset
+implementation. `timezone.utc` is the UTC singleton.
+
+For IANA zones use `zoneinfo.ZoneInfo` (see `zoneinfo`).
+
+## `strftime` / `strptime` format
+
+`%Y %y %m %d %H %M %S %f %A %a %B %b %p %j %U %W %w %Z %z %s %%`.
+
+`%G %V %u` for ISO calendar; `%G-W%V-%u`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `date`, `time`, `datetime`, `timedelta` | Complete.                                        |
+| `tzinfo`, `timezone`, `timezone.utc`  | Complete.                                          |
+| ISO 8601 parsing (`fromisoformat`)    | Complete.                                          |
+| `strftime` / `strptime`               | Complete.                                          |
+| Pickle round-trip                     | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [datetime](https://docs.python.org/3.14/library/datetime.html).
+* `Modules/_datetimemodule.c`, `Lib/_pydatetime.py`.
+* `module/_datetime/`. gopy port.

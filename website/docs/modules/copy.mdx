@@ -1,0 +1,61 @@
+---
+title: copy
+description: Shallow and deep copy operations. __copy__ and __deepcopy__ hooks.
+---
+
+# `copy`
+
+The `copy` module makes copies of arbitrary objects. Shallow copies
+duplicate the outer container; deep copies recurse, sharing identity
+inside cycles via a memo dict.
+
+Source-of-record: `Lib/copy.py`,
+[copy docs](https://docs.python.org/3.14/library/copy.html).
+
+## API
+
+| Function                              | Effect                                          |
+| ------------------------------------- | ----------------------------------------------- |
+| `copy.copy(x)`                        | Shallow copy.                                   |
+| `copy.deepcopy(x, memo=None)`         | Recursive copy preserving sharing via `memo`.   |
+| `copy.replace(obj, /, **changes)`     | Functional update (3.13+).                      |
+
+## Hooks
+
+| Method                                | Role                                            |
+| ------------------------------------- | ----------------------------------------------- |
+| `__copy__(self)`                      | Override `copy.copy`.                           |
+| `__deepcopy__(self, memo)`            | Override `copy.deepcopy`.                       |
+| `__replace__(self, /, **changes)`     | Override `copy.replace`.                        |
+| `__reduce__`, `__reduce_ex__`         | Used as a fallback (same protocol as pickle).   |
+| `__getstate__`, `__setstate__`        | Component of the pickle protocol used by deep copy. |
+
+## Algorithm
+
+1. Look up a per-type dispatch table (built-ins).
+2. If a class has `__deepcopy__`, call it with `memo`.
+3. Otherwise call `__reduce_ex__(4)` and reconstruct.
+4. Atomic types (numbers, strings, frozenset, code, modules, types,
+   ranges, functions, classes) are returned as-is.
+
+`memo` is keyed by `id(obj)`. Self-referential graphs round-trip
+correctly because the memo records the new object before recursing.
+
+## Exceptions
+
+`copy.Error` wraps copy-time failures. Typed as `Exception`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `copy`, `deepcopy`                    | Complete.                                          |
+| Hook dispatch (`__copy__`, `__deepcopy__`) | Complete.                                     |
+| `__reduce_ex__` fallback              | Complete.                                          |
+| `copy.replace`                        | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [copy](https://docs.python.org/3.14/library/copy.html).
+* `Lib/copy.py`.
+* `module/copy/`. gopy port.

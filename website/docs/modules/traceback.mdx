@@ -1,18 +1,84 @@
 ---
 title: traceback
-description: The traceback module in gopy.
+description: Formatting, extracting, and printing exception tracebacks.
 ---
 
 # `traceback`
 
-The `traceback` module. Behaviour matches CPython 3.14. Source lives at
-`module/traceback/` in the gopy repo (or under `stdlib/traceback.py` for
-pure-Python ports).
+The `traceback` module formats Python tracebacks for display. It
+walks `__traceback__` frame chains, collects source context, applies
+PEP 657 column highlights, and renders the result CPython users
+expect from `sys.excepthook`.
 
-## Status
+Source-of-record: `Lib/traceback.py`,
+[traceback docs](https://docs.python.org/3.14/library/traceback.html).
 
-See [manual/status](../manual/status) for current coverage.
+## Printing
 
-## API
+| Function                                                  | Effect                            |
+| --------------------------------------------------------- | --------------------------------- |
+| `print_tb(tb, limit=None, file=None)`                     | Walk frames from oldest to newest. |
+| `print_exception(exc, /, value=_sentinel, tb=_sentinel, limit=None, file=None, chain=True)` | Full exception report. |
+| `print_exc(limit=None, file=None, chain=True)`            | The active exception.             |
+| `print_last(limit=None, file=None, chain=True)`           | `sys.last_exc`.                   |
+| `print_stack(f=None, limit=None, file=None)`              | Stack of frame `f` (or caller).   |
 
-(Reference table in progress.)
+## Formatting
+
+| Function                                                  | Returns                           |
+| --------------------------------------------------------- | --------------------------------- |
+| `format_tb(tb, limit=None)`                               | List of formatted strings.        |
+| `format_exception(exc, /, value=_sentinel, tb=_sentinel, limit=None, chain=True)` | List. |
+| `format_exception_only(exc, /, value=_sentinel, *, show_group=False)` | List, no traceback. |
+| `format_exc(limit=None, chain=True)`                      | Single string for the active exc. |
+| `format_list(extracted_list)`                             | Pretty `FrameSummary` list.       |
+| `format_stack(f=None, limit=None)`                        | Pretty stack list.                |
+| `extract_tb(tb, limit=None)`                              | `StackSummary` of `FrameSummary`. |
+| `extract_stack(f=None, limit=None)`                       | `StackSummary` from `f`.          |
+| `clear_frames(tb)`                                        | Drop local references from each frame. |
+| `walk_tb(tb)` / `walk_stack(f)`                           | Iterator of `(frame, lineno)`.    |
+
+## Objects
+
+| Class           | Role                                                          |
+| --------------- | ------------------------------------------------------------- |
+| `TracebackException` | Pre-extracted exception suitable for serialisation.      |
+| `StackSummary`  | List of `FrameSummary` with formatting methods.               |
+| `FrameSummary`  | `filename`, `lineno`, `name`, `line`, `locals`, `colno`, `end_colno`. |
+
+`TracebackException(exc_type, exc_value, exc_traceback, *, limit=None, lookup_lines=True, capture_locals=False, compact=False, max_group_width=15, max_group_depth=10)`.
+
+| Method                                | Returns                                       |
+| ------------------------------------- | --------------------------------------------- |
+| `format(*, chain=True, _ctx=None)`    | Generator of strings.                         |
+| `format_exception_only(*, show_group=False)` | List of strings.                       |
+| `print(*, file=None, chain=True)`     | Print to `file`.                              |
+
+## Cause and context
+
+A traceback rendering walks `__cause__` first (PEP 3134 explicit
+`raise X from Y`), then `__context__` (implicit), then the exception
+itself. The frames between are rendered. PEP 654 exception groups
+recursively render sub-groups.
+
+## Anchors and column highlights
+
+PEP 657 stores precise locations on the code object. The renderer
+underlines the offending span. `TracebackException.format` emits the
+anchor line beneath the source line.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Print and format APIs                 | Complete.                                          |
+| `TracebackException` round-trip       | Complete.                                          |
+| Exception group rendering             | Complete.                                          |
+| PEP 657 anchors                       | Complete.                                          |
+| `capture_locals`                      | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [traceback](https://docs.python.org/3.14/library/traceback.html).
+* `Lib/traceback.py`.
+* `module/traceback/`. gopy port.

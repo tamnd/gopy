@@ -1,0 +1,68 @@
+---
+title: shutil
+description: High-level file operations. Copy, move, archive, disk usage, terminal size.
+---
+
+# `shutil`
+
+High-level operations on files and directories: copying, moving,
+removing trees, packing / unpacking archives, querying disk usage.
+
+Source-of-record: `Lib/shutil.py`,
+[shutil docs](https://docs.python.org/3.14/library/shutil.html).
+
+## Copying
+
+| Function                                                          | Effect                                       |
+| ----------------------------------------------------------------- | -------------------------------------------- |
+| `copyfileobj(fsrc, fdst, length=COPY_BUFSIZE)`                    | Stream copy.                                 |
+| `copyfile(src, dst, *, follow_symlinks=True)`                     | Just the data; no metadata.                  |
+| `copymode(src, dst, *, follow_symlinks=True)`                     | Permissions only.                            |
+| `copystat(src, dst, *, follow_symlinks=True)`                     | Permissions + times + flags.                 |
+| `copy(src, dst, *, follow_symlinks=True)`                         | `copyfile` + `copymode`.                     |
+| `copy2(src, dst, *, follow_symlinks=True)`                        | `copyfile` + `copystat`.                     |
+| `copytree(src, dst, symlinks=False, ignore=None, copy_function=copy2, ignore_dangling_symlinks=False, dirs_exist_ok=False)` | Recursive copy. |
+| `ignore_patterns(*patterns)`                                      | Factory for the `ignore` callback.           |
+
+## Moving and removing
+
+| Function                                              | Effect                                  |
+| ----------------------------------------------------- | --------------------------------------- |
+| `move(src, dst, copy_function=copy2)`                 | Rename or copy + remove.                |
+| `rmtree(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None)` | Recursive remove. |
+| `disk_usage(path)`                                    | `(total, used, free)`.                  |
+| `chown(path, user=None, group=None, *, dir_fd=None, follow_symlinks=True)` | POSIX chown. |
+| `which(cmd, mode=os.F_OK | os.X_OK, path=None)`       | Locate executable on PATH.              |
+| `get_terminal_size(fallback=(80, 24))`                | `(columns, lines)`.                     |
+
+## Archives
+
+| Function                                                  | Effect                                       |
+| --------------------------------------------------------- | -------------------------------------------- |
+| `make_archive(base_name, format, root_dir=None, base_dir=None, verbose=0, dry_run=0, owner=None, group=None, logger=None)` | Pack. |
+| `unpack_archive(filename, extract_dir=None, format=None, *, filter=None)` (`filter` 3.12+) | Unpack. |
+| `get_archive_formats()` / `get_unpack_formats()`          | Available formats.                           |
+| `register_archive_format(name, function, extra_args=None, description='')` | Register packer. |
+| `unregister_archive_format(name)` / `register_unpack_format(...)` / `unregister_unpack_format(...)` | Reverse. |
+
+Built-in formats: `zip`, `tar`, `gztar`, `bztar`, `xztar`.
+
+## Filter for extraction
+
+`tarfile.data_filter`, `tarfile.tar_filter`, `tarfile.fully_trusted_filter`.
+3.14 raises `DeprecationWarning` when no filter is set.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Copying and moving                    | Complete.                                          |
+| `rmtree`, `disk_usage`, `which`, terminal size | Complete.                                |
+| Archive packing / unpacking           | Complete for `zip`, `tar`, `gztar`, `bztar`, `xztar`. |
+| Extraction filters                    | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [shutil](https://docs.python.org/3.14/library/shutil.html).
+* `Lib/shutil.py`.
+* `module/shutil/`. gopy port.

@@ -1,0 +1,41 @@
+---
+title: atexit
+description: Register callbacks to run at interpreter shutdown.
+---
+
+# `atexit`
+
+Callbacks registered with `atexit` run during normal interpreter
+shutdown, in LIFO order. They do not run on `os._exit()` or fatal
+signals.
+
+Source-of-record: `Modules/atexitmodule.c`,
+[atexit docs](https://docs.python.org/3.14/library/atexit.html).
+
+## API
+
+| Function                                  | Behaviour                                       |
+| ----------------------------------------- | ----------------------------------------------- |
+| `register(func, *args, **kwargs)`         | Add a callback; returns `func` (decorator-friendly). |
+| `unregister(func)`                        | Remove every registration of `func`.            |
+| `_run_exitfuncs()`                        | Force-run all callbacks (testing).              |
+| `_clear()`                                | Drop the registry without running callbacks.    |
+
+## Ordering
+
+Callbacks run last-in, first-out. Exceptions are caught and printed
+via `sys.excepthook`; they do not stop subsequent callbacks.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `register` / `unregister`             | Complete.                                          |
+| LIFO ordering at shutdown             | Complete.                                          |
+| Exception isolation                   | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [atexit](https://docs.python.org/3.14/library/atexit.html).
+* `Modules/atexitmodule.c`.
+* `module/atexit/`. gopy port.

@@ -1,0 +1,63 @@
+---
+title: ast
+description: Abstract Syntax Tree nodes, parser, visitors, transformers, unparser.
+---
+
+# `ast`
+
+Build, inspect, and modify Python ASTs. Powers linters, codemods,
+notebooks, and the compiler front-end.
+
+Source-of-record: `Lib/ast.py`, `Parser/Python.asdl`,
+[ast docs](https://docs.python.org/3.14/library/ast.html).
+
+## Entry points
+
+| Function                                                    | Returns                          |
+| ----------------------------------------------------------- | -------------------------------- |
+| `parse(source, filename='<unknown>', mode='exec', *, type_comments=False, feature_version=None, optimize=-1)` | `Module` / `Expression`. |
+| `dump(node, annotate_fields=True, include_attributes=False, *, indent=None)` | Debug string. |
+| `unparse(ast_obj)` (3.9+)                                   | Source text.                     |
+| `literal_eval(node_or_string)`                              | Safe constant eval.              |
+| `walk(node)`                                                | Pre-order iterator.              |
+| `iter_fields(node)` / `iter_child_nodes(node)`              | Field iterators.                 |
+| `fix_missing_locations(node)`                               | Propagate `lineno`/`col_offset`. |
+| `increment_lineno(node, n=1)` / `copy_location(new, old)`   | Adjust positions.                |
+| `get_docstring(node, clean=True)` / `get_source_segment(source, node, *, padded=False)` | Helpers. |
+| `compare(a, b, *, compare_attributes=False)` (3.14+)        | Structural equality.             |
+
+## Visitors
+
+`NodeVisitor`, `NodeTransformer`. `NodeVisitor.generic_visit(node)`
+recurses by default; `visit_<ClassName>` dispatches.
+
+## Node hierarchy
+
+Root: `AST`. Major branches:
+
+| Branch     | Examples                                                      |
+| ---------- | ------------------------------------------------------------- |
+| `mod`      | `Module`, `Interactive`, `Expression`, `FunctionType`.        |
+| `stmt`     | `FunctionDef`, `AsyncFunctionDef`, `ClassDef`, `Return`, `Delete`, `Assign`, `AugAssign`, `AnnAssign`, `For`, `AsyncFor`, `While`, `If`, `With`, `AsyncWith`, `Match`, `Raise`, `Try`, `TryStar`, `Assert`, `Import`, `ImportFrom`, `Global`, `Nonlocal`, `Expr`, `Pass`, `Break`, `Continue`, `TypeAlias` (3.12+). |
+| `expr`     | `BoolOp`, `NamedExpr`, `BinOp`, `UnaryOp`, `Lambda`, `IfExp`, `Dict`, `Set`, `ListComp`, `SetComp`, `DictComp`, `GeneratorExp`, `Await`, `Yield`, `YieldFrom`, `Compare`, `Call`, `FormattedValue`, `JoinedStr`, `Constant`, `Attribute`, `Subscript`, `Starred`, `Name`, `List`, `Tuple`, `Slice`. |
+| `pattern`  | `MatchValue`, `MatchSingleton`, `MatchSequence`, `MatchMapping`, `MatchClass`, `MatchStar`, `MatchAs`, `MatchOr`. |
+| `type_param` (3.12+) | `TypeVar`, `ParamSpec`, `TypeVarTuple`.              |
+
+## Position attributes
+
+`lineno`, `col_offset`, `end_lineno` (3.8+), `end_col_offset` (3.8+).
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `parse`, `dump`, `unparse`            | Complete.                                          |
+| `NodeVisitor`, `NodeTransformer`      | Complete.                                          |
+| Match patterns, TryStar, TypeAlias    | Complete.                                          |
+| `literal_eval`                        | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [ast](https://docs.python.org/3.14/library/ast.html).
+* `Lib/ast.py`, `Parser/Python.asdl`.
+* `module/ast/`. gopy port.

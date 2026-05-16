@@ -1,0 +1,72 @@
+---
+title: pickle
+description: Python object serialisation. Protocols 0 to 5, Pickler, Unpickler, persistent IDs.
+---
+
+# `pickle`
+
+Binary serialisation of arbitrary Python object graphs. Five
+protocol versions; protocol 5 (PEP 574) adds out-of-band buffers.
+
+Source-of-record: `Lib/pickle.py`, `Modules/_pickle.c`,
+[pickle docs](https://docs.python.org/3.14/library/pickle.html).
+
+## Functions
+
+| Function                                                | Effect                                |
+| ------------------------------------------------------- | ------------------------------------- |
+| `dump(obj, file, protocol=None, *, fix_imports=True, buffer_callback=None)` | Write. |
+| `dumps(obj, protocol=None, *, fix_imports=True, buffer_callback=None)` | Bytes. |
+| `load(file, *, fix_imports=True, encoding='ASCII', errors='strict', buffers=None)` | Read. |
+| `loads(data, /, *, fix_imports=True, encoding='ASCII', errors='strict', buffers=None)` | Bytes in. |
+
+## Classes
+
+| Class                       | Purpose                                              |
+| --------------------------- | ---------------------------------------------------- |
+| `Pickler(file, protocol=None, *, fix_imports=True, buffer_callback=None)` | Stream pickler.   |
+| `Unpickler(file, *, fix_imports=True, encoding='ASCII', errors='strict', buffers=None)` | Stream unpickler. |
+| `PickleBuffer(buffer)`      | Out-of-band buffer holder.                           |
+
+`Pickler.persistent_id(obj)` and `Unpickler.persistent_load(pid)`
+implement object reference sharing across pickles.
+`dispatch_table` and `reducer_override(obj)` customise reduction.
+
+## Protocols
+
+| Version | Notes                                                            |
+| ------- | ---------------------------------------------------------------- |
+| 0       | ASCII; printable.                                                |
+| 1       | Old binary.                                                      |
+| 2       | New-style classes (3.0+).                                        |
+| 3       | Bytes support (3.0+).                                            |
+| 4       | Large objects, qualname (3.4+).                                  |
+| 5       | Out-of-band buffers (3.8+).                                      |
+
+`HIGHEST_PROTOCOL = 5`. `DEFAULT_PROTOCOL = 5` since 3.8.
+
+## What can be pickled
+
+`None`, `True`, `False`; numbers; `str`, `bytes`, `bytearray`;
+tuples, lists, sets, dicts of picklable values; functions and classes
+defined at module top level; objects whose `__reduce__` /
+`__reduce_ex__` cooperates.
+
+## Exceptions
+
+`PickleError` (base), `PicklingError`, `UnpicklingError`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Protocols 0-5                         | Complete.                                          |
+| `PickleBuffer` / out-of-band          | Complete.                                          |
+| `Pickler.dispatch_table`, `reducer_override` | Complete.                                   |
+
+## Reference
+
+* CPython 3.14: [pickle](https://docs.python.org/3.14/library/pickle.html).
+* `Lib/pickle.py`, `Modules/_pickle.c`.
+* `module/_pickle/`. gopy port.
+* PEP 574.

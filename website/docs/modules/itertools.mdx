@@ -1,0 +1,68 @@
+---
+title: itertools
+description: Iterator algebra. Infinite, terminating, and combinatoric iterators.
+---
+
+# `itertools`
+
+Compositional iterators for fast looping. Memory-efficient because
+each function returns an iterator that lazily produces values.
+
+Source-of-record: `Modules/itertoolsmodule.c`,
+[itertools docs](https://docs.python.org/3.14/library/itertools.html).
+
+## Infinite iterators
+
+| Iterator                                  | Output                                          |
+| ----------------------------------------- | ----------------------------------------------- |
+| `count(start=0, step=1)`                  | `start, start+step, start+2*step, ...`         |
+| `cycle(iterable)`                         | Forever cycle through `iterable`.               |
+| `repeat(object, times=None)`              | `object` forever, or `times` times.             |
+
+## Terminating iterators
+
+| Iterator                                          | Output                                       |
+| ------------------------------------------------- | -------------------------------------------- |
+| `accumulate(iterable, func=operator.add, *, initial=None)` | Running totals.                  |
+| `batched(iterable, n, *, strict=False)`           | Tuples of up to `n` elements (3.12+).        |
+| `chain(*iterables)` / `chain.from_iterable(it)`   | Flatten one level.                           |
+| `compress(data, selectors)`                       | `data` where selector is truthy.             |
+| `dropwhile(predicate, iterable)`                  | Skip while predicate is true, then yield rest. |
+| `filterfalse(predicate, iterable)`                | Inverse of `filter`.                         |
+| `groupby(iterable, key=None)`                     | Adjacent-run grouping.                       |
+| `islice(iterable, stop)` / `islice(iterable, start, stop, step=1)` | Slice an iterator.        |
+| `pairwise(iterable)`                              | Overlapping pairs (3.10+).                   |
+| `starmap(func, iterable)`                         | `func(*item)` per item.                      |
+| `takewhile(predicate, iterable)`                  | Yield while predicate is true.               |
+| `tee(iterable, n=2)`                              | `n` independent iterators sharing buffer.    |
+| `zip_longest(*iterables, fillvalue=None)`         | Zip padded to longest.                       |
+
+## Combinatoric iterators
+
+| Iterator                                          | Output                                       |
+| ------------------------------------------------- | -------------------------------------------- |
+| `product(*iterables, repeat=1)`                   | Cartesian product.                           |
+| `permutations(iterable, r=None)`                  | `r`-length permutations.                     |
+| `combinations(iterable, r)`                       | `r`-length combinations.                     |
+| `combinations_with_replacement(iterable, r)`      | With replacement.                            |
+
+## Recipes
+
+`itertools` ships docstring recipes (not module members):
+`grouper`, `roundrobin`, `partition`, `iter_except`. Copy into your
+code; not part of the importable surface.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All infinite iterators                | Complete.                                          |
+| All terminating iterators incl. `batched`, `pairwise` | Complete.                          |
+| All combinatoric iterators            | Complete.                                          |
+| C-fast paths                          | Complete via `module/_itertools`.                  |
+
+## Reference
+
+* CPython 3.14: [itertools](https://docs.python.org/3.14/library/itertools.html).
+* `Modules/itertoolsmodule.c`.
+* `module/_itertools/`. gopy port.

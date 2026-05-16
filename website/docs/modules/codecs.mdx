@@ -1,0 +1,77 @@
+---
+title: codecs
+description: Codec registry and stream classes for arbitrary text encodings.
+---
+
+# `codecs`
+
+The `codecs` module exposes the codec registry, error handlers,
+incremental codecs, and stream wrappers. Full per-codec catalogue
+lives in [Reference -> Codec registry](../reference/codecs).
+
+Source-of-record: `Lib/codecs.py`, `Python/codecs.c`,
+[codecs docs](https://docs.python.org/3.14/library/codecs.html).
+
+## Top-level functions
+
+| Function                                                | Returns                              |
+| ------------------------------------------------------- | ------------------------------------ |
+| `encode(obj, encoding='utf-8', errors='strict')`        | `bytes`.                             |
+| `decode(obj, encoding='utf-8', errors='strict')`        | `str`.                               |
+| `lookup(encoding)`                                      | `CodecInfo`.                         |
+| `lookup_error(name)`                                    | Error handler.                       |
+| `register(search_function)`                             | Add a search function.               |
+| `register_error(name, fn)`                              | Register handler.                    |
+| `open(filename, mode='r', encoding=None, errors='strict', buffering=-1)` | Opens a file with codec. |
+| `iterencode(iterator, encoding, errors='strict')`       | Stream encode.                       |
+| `iterdecode(iterator, encoding, errors='strict')`       | Stream decode.                       |
+| `EncodedFile(file, data_encoding, file_encoding=None, errors='strict')` | Transparent transcoder. |
+| `getencoder(encoding)` / `getdecoder(encoding)`         | Codec function.                      |
+| `getreader(encoding)` / `getwriter(encoding)`           | Stream class.                        |
+| `getincrementalencoder(encoding)` / `getincrementaldecoder(encoding)` | Class.    |
+
+## BOM constants
+
+| Constant         | Bytes               |
+| ---------------- | ------------------- |
+| `BOM`            | Platform-default BOM. |
+| `BOM_UTF8`       | `b'\\xef\\xbb\\xbf'`. |
+| `BOM_UTF16_BE`   | `b'\\xfe\\xff'`.     |
+| `BOM_UTF16_LE`   | `b'\\xff\\xfe'`.     |
+| `BOM_UTF32_BE`   | `b'\\x00\\x00\\xfe\\xff'`. |
+| `BOM_UTF32_LE`   | `b'\\xff\\xfe\\x00\\x00'`. |
+
+## Error handlers
+
+`'strict'`, `'ignore'`, `'replace'`, `'xmlcharrefreplace'`,
+`'backslashreplace'`, `'surrogateescape'`, `'surrogatepass'`,
+`'namereplace'`. Custom handlers are
+`fn(exc) -> (replacement, new_index)`.
+
+## Classes
+
+| Class                          | Role                                            |
+| ------------------------------ | ----------------------------------------------- |
+| `Codec`                        | Stateless `encode`/`decode` pair.               |
+| `IncrementalEncoder` / `IncrementalDecoder` | Streaming with `encode(s, final=False)`. |
+| `BufferedIncrementalEncoder` / `BufferedIncrementalDecoder` | Helpers with internal buffer. |
+| `StreamReader` / `StreamWriter` | Wrap a binary stream as decoded text.          |
+| `StreamRecoder`                | Mix encoder + decoder for transcoding.          |
+| `StreamReaderWriter`           | Bidirectional wrapper.                          |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Module surface                        | Complete.                                          |
+| Built-in codecs                       | UTF-8/16/32, ASCII, Latin-1 complete; codepage codecs complete for common set. |
+| Error handlers                        | Complete.                                          |
+| Incremental codecs                    | Complete.                                          |
+| Stream classes                        | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [codecs](https://docs.python.org/3.14/library/codecs.html).
+* `Lib/codecs.py`, `Python/codecs.c`.
+* `codecs/`, `module/_codecs/`. gopy port.
+* [Reference -> Codec registry](../reference/codecs) for the full catalogue.

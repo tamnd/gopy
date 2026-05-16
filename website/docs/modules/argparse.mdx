@@ -1,0 +1,74 @@
+---
+title: argparse
+description: Command-line argument parser. ArgumentParser, subcommands, types, help.
+---
+
+# `argparse`
+
+Build command-line interfaces declaratively. Produces help and usage
+strings, parses values, dispatches subcommands.
+
+Source-of-record: `Lib/argparse.py`,
+[argparse docs](https://docs.python.org/3.14/library/argparse.html).
+
+## `ArgumentParser`
+
+`ArgumentParser(prog=None, usage=None, description=None, epilog=None, parents=[], formatter_class=HelpFormatter, prefix_chars='-', fromfile_prefix_chars=None, argument_default=None, conflict_handler='error', add_help=True, allow_abbrev=True, exit_on_error=True, suggest_on_error=False)` (3.14+ adds `suggest_on_error`).
+
+| Method                                                       | Purpose                                  |
+| ------------------------------------------------------------ | ---------------------------------------- |
+| `add_argument(...)`                                          | Register flag / positional.              |
+| `add_subparsers(...)`                                        | Subcommand container.                    |
+| `add_argument_group(title=None, description=None)`           | Group for help.                          |
+| `add_mutually_exclusive_group(required=False)`               | XOR group.                               |
+| `parse_args(args=None, namespace=None)`                      | Parse.                                   |
+| `parse_known_args(...)`                                      | Partial parse.                           |
+| `parse_intermixed_args(...)` / `parse_known_intermixed_args(...)` | Positional-after-optional support.  |
+| `set_defaults(**kw)`                                         | Inject defaults.                         |
+| `format_help()` / `format_usage()` / `print_help()` / `print_usage()` | Help text.                      |
+| `error(msg)` / `exit(status=0, message=None)`                | Exit hooks.                              |
+
+## `add_argument` parameters
+
+`name_or_flags`, `action`, `nargs`, `const`, `default`, `type`,
+`choices`, `required`, `help`, `metavar`, `dest`, `version`,
+`deprecated` (3.13+).
+
+## Built-in actions
+
+`store`, `store_const`, `store_true`, `store_false`, `append`,
+`append_const`, `count`, `help`, `version`, `extend`,
+`BooleanOptionalAction` (3.9+).
+
+## Types
+
+Pass any callable; common helpers: `int`, `float`,
+`argparse.FileType('r')`. `BooleanOptionalAction` emits paired
+`--flag` / `--no-flag`.
+
+## Formatters
+
+`HelpFormatter`, `RawDescriptionHelpFormatter`,
+`RawTextHelpFormatter`, `ArgumentDefaultsHelpFormatter`,
+`MetavarTypeHelpFormatter`.
+
+## Subparsers
+
+`add_subparsers(title=None, description=None, prog=None, parser_class=ArgumentParser, action=None, dest=None, required=False, help=None, metavar=None)`.
+Sub-parsers can have their own defaults and parents.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Core parser, all actions              | Complete.                                          |
+| Subparsers, parents, groups           | Complete.                                          |
+| `parse_intermixed_args`               | Complete.                                          |
+| `BooleanOptionalAction`               | Complete.                                          |
+| `suggest_on_error` (3.14)             | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [argparse](https://docs.python.org/3.14/library/argparse.html).
+* `Lib/argparse.py`.
+* `module/argparse/`. gopy port.

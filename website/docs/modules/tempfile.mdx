@@ -1,0 +1,59 @@
+---
+title: tempfile
+description: Create temporary files and directories with safe defaults.
+---
+
+# `tempfile`
+
+Allocate temporary files and directories whose paths are unique and
+which clean themselves up. Used widely by test runners, by build
+systems, and by code that needs to stage data on disk.
+
+Source-of-record: `Lib/tempfile.py`,
+[tempfile docs](https://docs.python.org/3.14/library/tempfile.html).
+
+## High-level
+
+| Function / class                                                  | Returns                                  |
+| ----------------------------------------------------------------- | ---------------------------------------- |
+| `TemporaryFile(mode='w+b', buffering=-1, encoding=None, newline=None, suffix=None, prefix=None, dir=None, *, errors=None)` | Anonymous file (POSIX) / hidden file (Windows). |
+| `NamedTemporaryFile(...)`                                         | Same; with a visible `.name`.            |
+| `SpooledTemporaryFile(max_size=0, ...)`                           | In-memory until threshold, then disk.    |
+| `TemporaryDirectory(suffix=None, prefix=None, dir=None, ignore_cleanup_errors=False, *, delete=True)` | Context manager dir. |
+| `mkstemp(suffix=None, prefix=None, dir=None, text=False)`         | `(fd, abspath)`; caller cleans up.       |
+| `mkdtemp(suffix=None, prefix=None, dir=None)`                     | New directory; caller cleans up.         |
+| `gettempdir()` / `gettempdirb()`                                  | Default directory (`str`/`bytes`).       |
+| `gettempprefix()` / `gettempprefixb()`                            | Default prefix.                          |
+
+## Defaults and search order
+
+`tempfile` selects the temp directory in this order: `TMPDIR`,
+`TEMP`, `TMP`, then `/tmp`, `/var/tmp`, `/usr/tmp` on POSIX or
+`C:\\TEMP`, `C:\\TMP`, `\\TEMP`, `\\TMP` on Windows.
+
+`tempfile.tempdir = path` overrides the default for the process.
+
+## Cleanup semantics
+
+| Class / function           | Cleanup                                                   |
+| -------------------------- | --------------------------------------------------------- |
+| `TemporaryFile`            | Unlinked at open (POSIX) or on close (Windows).           |
+| `NamedTemporaryFile`       | Unlinked on close; suppress with `delete=False`.          |
+| `SpooledTemporaryFile`     | As `NamedTemporaryFile` once rolled.                      |
+| `TemporaryDirectory`       | Recursive remove on `__exit__` / `cleanup()`.             |
+| `mkstemp` / `mkdtemp`      | Caller responsibility.                                    |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All factories                         | Complete.                                          |
+| Spooled files                         | Complete.                                          |
+| `TemporaryDirectory` with `delete=False` (3.12+) | Complete.                               |
+| Atomic name generation                | Complete; uses `os.urandom`.                       |
+
+## Reference
+
+* CPython 3.14: [tempfile](https://docs.python.org/3.14/library/tempfile.html).
+* `Lib/tempfile.py`.
+* `module/tempfile/`. gopy port.

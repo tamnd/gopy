@@ -1,0 +1,76 @@
+---
+title: asyncio
+description: Coroutine-based concurrency. Event loop, tasks, streams, subprocesses, synchronisation.
+---
+
+# `asyncio`
+
+Single-threaded concurrency with coroutines. The event loop schedules
+coroutines, awaits I/O via selectors, and provides primitives for
+synchronisation and subprocess management.
+
+Source-of-record: `Lib/asyncio/`,
+[asyncio docs](https://docs.python.org/3.14/library/asyncio.html).
+
+## Entry points
+
+| Function                                                     | Effect                                   |
+| ------------------------------------------------------------ | ---------------------------------------- |
+| `run(coro, *, debug=None, loop_factory=None)`                | Run a coroutine to completion.           |
+| `Runner(*, debug=None, loop_factory=None)`                   | Reusable runner context.                 |
+| `get_event_loop()` / `new_event_loop()` / `set_event_loop()` | Loop management (deprecated direct use). |
+| `get_running_loop()`                                         | Current loop or raise.                   |
+
+## Coroutines and tasks
+
+| Name                                                       | Purpose                              |
+| ---------------------------------------------------------- | ------------------------------------ |
+| `create_task(coro, *, name=None, context=None)`            | Schedule a coroutine.                |
+| `gather(*aws, return_exceptions=False)`                    | Concurrent wait.                     |
+| `wait(aws, *, timeout=None, return_when=ALL_COMPLETED)`    | Set wait.                            |
+| `wait_for(aw, timeout)`                                    | Timeout wrapper.                     |
+| `as_completed(aws, *, timeout=None)`                       | Iterator of futures.                 |
+| `shield(aw)`                                               | Protect from cancellation.           |
+| `sleep(delay, result=None)`                                | Async sleep.                         |
+| `to_thread(func, *args, **kwargs)`                         | Off-load to thread.                  |
+| `TaskGroup()` (3.11+)                                      | Structured concurrency.              |
+| `timeout(delay)` / `timeout_at(when)` (3.11+)              | Context-manager timeouts.            |
+
+## Streams
+
+`open_connection`, `start_server`, `open_unix_connection`,
+`start_unix_server`. `StreamReader` and `StreamWriter`.
+
+## Subprocesses
+
+`create_subprocess_exec(...)`, `create_subprocess_shell(...)`,
+returning `Process` with `stdin`, `stdout`, `stderr`, `wait()`,
+`communicate(input=None)`, `kill`, `terminate`.
+
+## Synchronisation
+
+`Lock`, `Event`, `Condition`, `Semaphore`, `BoundedSemaphore`,
+`Barrier` (3.11+), `Queue`, `LifoQueue`, `PriorityQueue`. APIs mirror
+the threading ones but are coroutines.
+
+## Exceptions
+
+`CancelledError`, `InvalidStateError`, `TimeoutError`,
+`IncompleteReadError`, `LimitOverrunError`, `BrokenBarrierError`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Event loop and `run`                  | Complete.                                          |
+| Tasks, `gather`, `wait`, `as_completed`, `TaskGroup` | Complete.                          |
+| Streams, subprocesses                 | Complete.                                          |
+| Sync primitives                       | Complete.                                          |
+| `timeout` / `timeout_at` (3.11+)      | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [asyncio](https://docs.python.org/3.14/library/asyncio.html).
+* `Lib/asyncio/`.
+* `module/asyncio/`. gopy port.
+* PEPs 492, 525, 530, 654.

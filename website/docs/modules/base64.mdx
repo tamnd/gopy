@@ -1,0 +1,61 @@
+---
+title: base64
+description: RFC 4648 base16/32/64 and a85/b85 encoders.
+---
+
+# `base64`
+
+Encode and decode binary data with base16, base32, base64, base85,
+ascii85, and their URL-safe variants.
+
+Source-of-record: `Lib/base64.py`,
+[base64 docs](https://docs.python.org/3.14/library/base64.html).
+
+## RFC 4648
+
+| Function                                | Effect                                          |
+| --------------------------------------- | ----------------------------------------------- |
+| `b64encode(s, altchars=None)`           | Standard base64; `altchars` of length 2 replace `+/`. |
+| `b64decode(s, altchars=None, validate=False)` | Decode; `validate=True` rejects non-alphabet chars. |
+| `standard_b64encode(s)` / `standard_b64decode(s)` | Same with no `altchars`.            |
+| `urlsafe_b64encode(s)` / `urlsafe_b64decode(s)` | `-_` instead of `+/`.                 |
+| `b32encode(s)` / `b32decode(s, casefold=False, map01=None)` | Base32.                  |
+| `b32hexencode(s)` / `b32hexdecode(s, casefold=False)` | Extended hex alphabet (3.10+).  |
+| `b16encode(s)` / `b16decode(s, casefold=False)` | Hex.                                  |
+
+## Ascii85 / Base85
+
+| Function                                | Effect                                          |
+| --------------------------------------- | ----------------------------------------------- |
+| `a85encode(b, *, foldspaces=False, wrapcol=0, pad=False, adobe=False)` | Adobe-compatible. |
+| `a85decode(b, *, foldspaces=False, adobe=False, ignorechars=b' \\t\\n\\r\\x0b')` | Decode. |
+| `b85encode(b, pad=False)`               | RFC 1924-style.                                 |
+| `b85decode(b)`                          | Decode.                                         |
+
+## File helpers
+
+| Function                                | Effect                                          |
+| --------------------------------------- | ----------------------------------------------- |
+| `encode(input, output)`                 | MIME base64 to stream.                          |
+| `decode(input, output)`                 | Stream decode.                                  |
+| `encodebytes(s)` / `decodebytes(s)`     | MIME-style with newlines.                       |
+
+## Padding
+
+Standard base64 outputs are padded to a multiple of 4 with `=`.
+`b64decode(..., validate=True)` rejects misformed padding.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Base64 (standard, urlsafe, MIME)      | Complete.                                          |
+| Base32, base32hex, base16             | Complete.                                          |
+| Ascii85 / Base85                      | Complete.                                          |
+| File helpers                          | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [base64](https://docs.python.org/3.14/library/base64.html).
+* `Lib/base64.py`.
+* `module/base64/`. gopy port.

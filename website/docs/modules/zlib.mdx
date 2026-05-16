@@ -1,0 +1,68 @@
+---
+title: zlib
+description: DEFLATE / zlib compression. compress, decompress, streaming objects.
+---
+
+# `zlib`
+
+`zlib` provides DEFLATE compression and decompression. Used by
+`gzip`, `zipfile`, `tarfile`, and many wire protocols.
+
+Source-of-record: `Modules/zlibmodule.c`,
+[zlib docs](https://docs.python.org/3.14/library/zlib.html).
+
+## Functions
+
+| Function                                                | Returns                              |
+| ------------------------------------------------------- | ------------------------------------ |
+| `compress(data, /, level=-1, wbits=MAX_WBITS)`          | Compressed bytes.                    |
+| `decompress(data, /, wbits=MAX_WBITS, bufsize=DEF_BUF_SIZE)` | Original bytes.                  |
+| `adler32(data, value=1)`                                | Adler-32 checksum.                   |
+| `crc32(data, value=0)`                                  | CRC-32 checksum.                     |
+| `compressobj(level=-1, method=DEFLATED, wbits=MAX_WBITS, memLevel=DEF_MEM_LEVEL, strategy=Z_DEFAULT_STRATEGY[, zdict])` | Streaming. |
+| `decompressobj(wbits=MAX_WBITS[, zdict])`               | Streaming.                           |
+
+## Streaming objects
+
+`Compress.compress(data)`, `Compress.flush(mode=Z_FINISH)`,
+`Compress.copy()`.
+
+`Decompress.decompress(data, max_length=0)`,
+`Decompress.flush(length=DEF_BUF_SIZE)`, `Decompress.copy()`.
+Attributes: `unused_data`, `unconsumed_tail`, `eof`.
+
+## Constants
+
+| Constant            | Default | Meaning                                |
+| ------------------- | ------- | -------------------------------------- |
+| `MAX_WBITS`         | 15      | Window size bits.                      |
+| `DEF_BUF_SIZE`      | 16K     | Default buffer.                        |
+| `DEF_MEM_LEVEL`     | 8       | Memory usage 1..9.                     |
+| `DEFLATED`          | 8       | Only valid method.                     |
+| `Z_BEST_SPEED`, `Z_BEST_COMPRESSION`, `Z_DEFAULT_COMPRESSION` | Levels 1, 9, -1. |
+| `Z_NO_FLUSH`, `Z_PARTIAL_FLUSH`, `Z_SYNC_FLUSH`, `Z_FULL_FLUSH`, `Z_FINISH`, `Z_BLOCK`, `Z_TREES` | Flush modes. |
+| `Z_FILTERED`, `Z_HUFFMAN_ONLY`, `Z_RLE`, `Z_FIXED`, `Z_DEFAULT_STRATEGY` | Strategies. |
+
+## wbits decoder
+
+| Value range            | Format                          |
+| ---------------------- | ------------------------------- |
+| 8..15                  | zlib wrapped.                   |
+| -8..-15                | raw DEFLATE.                    |
+| 24..31 (16 + 8..15)    | gzip wrapped.                   |
+| 40..47 (32 + 8..15)    | auto-detect zlib/gzip.          |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `compress` / `decompress` one-shot    | Complete.                                          |
+| Streaming `compressobj` / `decompressobj` | Complete.                                      |
+| `adler32`, `crc32`                    | Complete.                                          |
+| All wbits modes (zlib, raw, gzip, auto) | Complete.                                        |
+
+## Reference
+
+* CPython 3.14: [zlib](https://docs.python.org/3.14/library/zlib.html).
+* `Modules/zlibmodule.c`.
+* `module/zlib/`. gopy port.

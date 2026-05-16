@@ -1,18 +1,90 @@
 ---
 title: contextlib
-description: The contextlib module in gopy.
+description: Tools for the with statement. Helpers, exit stacks, suppression, redirection, async variants.
 ---
 
 # `contextlib`
 
-The `contextlib` module. Behaviour matches CPython 3.14. Source lives at
-`module/contextlib/` in the gopy repo (or under `stdlib/contextlib.py` for
-pure-Python ports).
+Helpers for building, composing, and customising context managers.
+The decorator `@contextmanager` adapts a generator into a sync
+manager; `@asynccontextmanager` does the same for async generators.
 
-## Status
+Source-of-record: `Lib/contextlib.py`,
+[contextlib docs](https://docs.python.org/3.14/library/contextlib.html).
 
-See [manual/status](../manual/status) for current coverage.
+## Decorators
 
-## API
+| Decorator                      | Adapts                                  |
+| ------------------------------ | --------------------------------------- |
+| `@contextmanager`              | A generator yielding once.              |
+| `@asynccontextmanager`         | An async generator yielding once.       |
 
-(Reference table in progress.)
+The generator yields the resource. Exceptions thrown into the
+generator on exit propagate through, unless the generator catches them
+and exits normally.
+
+## Helpers
+
+| Helper                                              | Role                                  |
+| --------------------------------------------------- | ------------------------------------- |
+| `closing(thing)`                                    | Calls `thing.close()` on exit.        |
+| `aclosing(thing)`                                   | Awaits `thing.aclose()` on exit.      |
+| `suppress(*exceptions)`                             | Swallow the listed exceptions.        |
+| `redirect_stdout(target)`                           | Patch `sys.stdout` for the block.     |
+| `redirect_stderr(target)`                           | Patch `sys.stderr` for the block.     |
+| `nullcontext(enter_result=None)`                    | No-op manager; useful as a placeholder. |
+| `chdir(path)`                                       | Change cwd for the block.             |
+
+## Stacks
+
+| Class            | Variant   | Use                                          |
+| ---------------- | --------- | -------------------------------------------- |
+| `ExitStack`      | sync      | Dynamic composition; LIFO unwinding.         |
+| `AsyncExitStack` | async     | Mix of sync and async managers.              |
+
+`ExitStack` methods:
+
+| Method                                    | Behaviour                                       |
+| ----------------------------------------- | ----------------------------------------------- |
+| `enter_context(cm)`                       | Enter `cm` and record it.                       |
+| `push(cm_or_exit)`                        | Record an existing exit callback.               |
+| `callback(fn, *args, **kw)`               | Record a plain function to call.                |
+| `pop_all()`                               | Transfer callbacks to a fresh stack.            |
+| `close()`                                 | Run all callbacks.                              |
+
+`AsyncExitStack` adds `enter_async_context`, `push_async_exit`,
+`push_async_callback`, `aclose`.
+
+## Base classes
+
+| Class                  | Implements                                             |
+| ---------------------- | ------------------------------------------------------ |
+| `ContextDecorator`     | Mix-in: lets a manager double as a decorator.          |
+| `AsyncContextDecorator` | Same, for async.                                      |
+| `AbstractContextManager` | ABC with `__enter__` and `__exit__`.                 |
+| `AbstractAsyncContextManager` | ABC with `__aenter__` and `__aexit__`.          |
+
+## Suppress patterns
+
+```python
+with suppress(FileNotFoundError):
+    os.remove(path)
+```
+
+`suppress` catches subclass exceptions matching any of the listed
+types and continues. Behaves like `try/except: pass`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `@contextmanager`, `@asynccontextmanager` | Complete.                                      |
+| `closing`, `aclosing`, `suppress`, redirects, `nullcontext`, `chdir` | Complete.       |
+| `ExitStack`, `AsyncExitStack`         | Complete.                                          |
+| ABCs                                  | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [contextlib](https://docs.python.org/3.14/library/contextlib.html).
+* `Lib/contextlib.py`.
+* `module/contextlib/`. gopy port.

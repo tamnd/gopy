@@ -1,0 +1,85 @@
+---
+title: logging
+description: Hierarchical logging. Loggers, handlers, filters, formatters, dictConfig.
+---
+
+# `logging`
+
+Hierarchical, configurable logging. Every logger has a level, a list
+of handlers, and inherits unset levels from its parent.
+
+Source-of-record: `Lib/logging/`,
+[logging docs](https://docs.python.org/3.14/library/logging.html).
+
+## Module-level
+
+| Function                                              | Effect                                |
+| ----------------------------------------------------- | ------------------------------------- |
+| `getLogger(name=None)`                                | Get / create logger.                  |
+| `basicConfig(**kw)`                                   | Configure root logger.                |
+| `debug` / `info` / `warning` / `error` / `critical` / `exception` / `log` | Log on root. |
+| `disable(level=CRITICAL)`                             | Disable up to level.                  |
+| `addLevelName(level, name)` / `getLevelName(level)` / `getLevelNamesMapping()` (3.11+) | Level table. |
+| `captureWarnings(capture)`                            | Bridge from `warnings`.               |
+| `shutdown()`                                          | Flush and close.                      |
+
+## Levels
+
+`CRITICAL=50`, `ERROR=40`, `WARNING=30`, `INFO=20`, `DEBUG=10`,
+`NOTSET=0`. Custom levels via `addLevelName`.
+
+## `Logger`
+
+`setLevel`, `isEnabledFor`, `addHandler`, `removeHandler`,
+`addFilter`, `removeFilter`, `handle`, `makeRecord`, `findCaller`,
+`getChild`, `getChildren` (3.12+), `getEffectiveLevel`.
+
+## `Handler`
+
+Subclasses live in `logging.handlers`:
+
+| Handler                          | Purpose                                    |
+| -------------------------------- | ------------------------------------------ |
+| `StreamHandler` / `FileHandler`  | Stream / file output.                      |
+| `RotatingFileHandler` / `TimedRotatingFileHandler` | Rotation.                |
+| `WatchedFileHandler`             | Reopen on rename (logrotate).              |
+| `SocketHandler` / `DatagramHandler` | Network.                                |
+| `SysLogHandler`                  | syslog.                                    |
+| `SMTPHandler`                    | Mail.                                      |
+| `HTTPHandler`                    | HTTP POST/GET.                             |
+| `QueueHandler` / `QueueListener` | Async.                                     |
+| `MemoryHandler`                  | Buffered.                                  |
+| `NTEventLogHandler`              | Windows event log.                         |
+| `NullHandler`                    | Library default.                           |
+
+## `Formatter`
+
+`Formatter(fmt=None, datefmt=None, style='%', validate=True, *, defaults=None)`.
+Built-in styles: `%`, `{`, `$`. `BufferingFormatter` for batch.
+
+`LogRecord` attributes: `name`, `msg`, `args`, `levelname`,
+`levelno`, `pathname`, `filename`, `module`, `exc_info`, `exc_text`,
+`stack_info`, `lineno`, `funcName`, `created`, `msecs`,
+`relativeCreated`, `thread`, `threadName`, `processName`, `process`,
+`taskName` (3.12+).
+
+## Configuration
+
+`logging.config.dictConfig(config)`, `logging.config.fileConfig(fname, ...)`,
+`logging.config.listen(port=DEFAULT_LOGGING_CONFIG_PORT, verify=None)`,
+`logging.config.stopListening()`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| Core (`Logger`, `Handler`, `Formatter`, `Filter`) | Complete.                              |
+| `dictConfig`, `fileConfig`            | Complete.                                          |
+| All standard handlers                 | Complete except `NTEventLogHandler` (Windows).     |
+| Queue listener / handler              | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [logging](https://docs.python.org/3.14/library/logging.html).
+* `Lib/logging/`.
+* `module/logging/`. gopy port.

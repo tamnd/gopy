@@ -1,0 +1,57 @@
+---
+title: dis
+description: Bytecode disassembler. Instruction listings, traceback assist, opcode tables.
+---
+
+# `dis`
+
+Disassemble code objects, functions, and source strings into a
+human-readable instruction listing. Used by debuggers and the
+traceback formatter.
+
+Source-of-record: `Lib/dis.py`,
+[dis docs](https://docs.python.org/3.14/library/dis.html).
+
+## Functions
+
+| Function                                                       | Effect                                |
+| -------------------------------------------------------------- | ------------------------------------- |
+| `dis(x=None, *, file=None, depth=None, show_caches=False, adaptive=False, show_offsets=False, show_positions=False)` | Disassemble any. |
+| `disassemble(co, lasti=-1, *, file=None, show_caches=False, adaptive=False)` | Single code object. |
+| `distb(tb=None, *, file=None)`                                | Last traceback.                       |
+| `get_instructions(x, *, first_line=None, show_caches=False, adaptive=False)` | Iterator. |
+| `findlinestarts(code)` / `findlabels(code)`                   | Source map / jump targets.            |
+| `code_info(x)`                                                | Multi-line summary.                   |
+| `show_code(x, *, file=None)`                                  | Print summary.                        |
+| `stack_effect(opcode, oparg=None, *, jump=None)`              | Stack delta.                          |
+
+## Classes
+
+| Class               | Fields                                                       |
+| ------------------- | ------------------------------------------------------------ |
+| `Instruction`       | `opname`, `opcode`, `arg`, `argval`, `argrepr`, `offset`, `start_offset`, `starts_line`, `is_jump_target`, `positions`, `cache_offset`, `end_offset`. |
+| `Bytecode(x, *, first_line=None, current_offset=None, show_caches=False, adaptive=False, show_offsets=False)` | `dis()`, `info()`, iteration. |
+| `Positions`         | `lineno`, `end_lineno`, `col_offset`, `end_col_offset` (PEP 657). |
+
+## Opcode tables
+
+`opname`, `opmap`, `cmp_op`, `hasarg`, `hasconst`, `hasname`,
+`hasjrel`, `hasjabs`, `haslocal`, `hascompare`, `hasfree`,
+`hasexc` (3.12+).
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `dis`, `disassemble`, `distb`         | Complete; uses gopy opcode set.                    |
+| `get_instructions`, `Bytecode`        | Complete.                                          |
+| `Positions`, PEP 657 columns          | Complete.                                          |
+| `stack_effect`                        | Complete.                                          |
+| `show_caches` / `adaptive`            | Reflects gopy specialiser; partial.                |
+
+## Reference
+
+* CPython 3.14: [dis](https://docs.python.org/3.14/library/dis.html).
+* `Lib/dis.py`.
+* `module/dis/`. gopy port.
+* PEP 657.

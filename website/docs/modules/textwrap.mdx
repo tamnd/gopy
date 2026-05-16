@@ -1,0 +1,51 @@
+---
+title: textwrap
+description: Wrap, fill, dedent, indent, shorten text.
+---
+
+# `textwrap`
+
+Word-wrap, dedent, indent, and shorten human-readable text.
+
+Source-of-record: `Lib/textwrap.py`,
+[textwrap docs](https://docs.python.org/3.14/library/textwrap.html).
+
+## Functions
+
+| Function                              | Effect                                          |
+| ------------------------------------- | ----------------------------------------------- |
+| `wrap(text, width=70, **kw)`          | List of wrapped lines.                          |
+| `fill(text, width=70, **kw)`          | Single string with `\\n` joins.                 |
+| `shorten(text, width, *, placeholder=' [...]')` | Truncate at word boundary.            |
+| `dedent(text)`                        | Remove common leading whitespace.               |
+| `indent(text, prefix, predicate=None)` | Prepend `prefix` to lines.                     |
+
+## `TextWrapper` parameters
+
+| Name                       | Default       | Effect                                       |
+| -------------------------- | ------------- | -------------------------------------------- |
+| `width`                    | 70            | Target width.                                |
+| `initial_indent`           | `''`          | First-line prefix.                           |
+| `subsequent_indent`        | `''`          | Subsequent-line prefix.                      |
+| `expand_tabs`              | True          | Tabs to spaces.                              |
+| `tabsize`                  | 8             | Tab width.                                   |
+| `replace_whitespace`       | True          | Whitespace -> single space.                  |
+| `fix_sentence_endings`     | False         | Two spaces between sentences.                |
+| `break_long_words`         | True          | Break words longer than `width`.             |
+| `break_on_hyphens`         | True          | Allow breaking on hyphens.                   |
+| `drop_whitespace`          | True          | Strip whitespace from line ends.             |
+| `max_lines`                | None          | Limit; uses `placeholder`.                   |
+| `placeholder`              | `' [...]'`    | Suffix when truncated.                       |
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| All free functions                    | Complete.                                          |
+| `TextWrapper` and its options         | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [textwrap](https://docs.python.org/3.14/library/textwrap.html).
+* `Lib/textwrap.py`.
+* `module/textwrap/`. gopy port.

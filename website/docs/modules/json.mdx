@@ -1,0 +1,87 @@
+---
+title: json
+description: JSON encoder and decoder. dumps, loads, JSONEncoder, JSONDecoder, streaming.
+---
+
+# `json`
+
+Encode Python objects as JSON and decode JSON back into Python.
+Encoder and decoder are subclassable for custom types.
+
+Source-of-record: `Lib/json/`, `Modules/_json.c`,
+[json docs](https://docs.python.org/3.14/library/json.html).
+
+## Functions
+
+| Function                                                                    | Returns                |
+| --------------------------------------------------------------------------- | ---------------------- |
+| `dump(obj, fp, *, skipkeys=False, ensure_ascii=True, check_circular=True, allow_nan=True, cls=None, indent=None, separators=None, default=None, sort_keys=False, **kw)` | Write to file.   |
+| `dumps(obj, **kw)`                                                          | Return a `str`.        |
+| `load(fp, *, cls=None, object_hook=None, parse_float=None, parse_int=None, parse_constant=None, object_pairs_hook=None, **kw)` | Read from file. |
+| `loads(s, **kw)`                                                            | Parse a `str`/`bytes`. |
+
+## Type mapping
+
+| Python                 | JSON          |
+| ---------------------- | ------------- |
+| `dict`                 | object        |
+| `list`, `tuple`        | array         |
+| `str`                  | string        |
+| `int`, `float`         | number        |
+| `True` / `False`       | `true` / `false` |
+| `None`                 | `null`        |
+
+Decoding produces `dict`, `list`, `str`, `int` or `float`, `bool`, `None`.
+`json.loads` accepts UTF-8, UTF-16, or UTF-32 bytes.
+
+## Encoder
+
+| `JSONEncoder` parameter   | Default | Effect                                                |
+| ------------------------- | ------- | ----------------------------------------------------- |
+| `skipkeys`                | False   | Drop non-string keys instead of raising.              |
+| `ensure_ascii`            | True    | Escape non-ASCII.                                     |
+| `check_circular`          | True    | Detect cycles.                                        |
+| `allow_nan`               | True    | Permit `nan` / `inf`.                                 |
+| `sort_keys`               | False   | Sort object keys.                                     |
+| `indent`                  | None    | Pretty-print with this indent.                        |
+| `separators`              | None    | Defaults: `(', ', ': ')` or `(',', ':')` with `indent`. |
+| `default`                 | None    | Fallback for unsupported types.                       |
+
+Override `JSONEncoder.default(self, obj)` to serialise new types.
+
+## Decoder
+
+| `JSONDecoder` parameter           | Effect                                          |
+| --------------------------------- | ----------------------------------------------- |
+| `object_hook(dict)`               | Replace each object with a custom value.        |
+| `object_pairs_hook(list_of_pairs)` | Same; preserves order; mutually exclusive.    |
+| `parse_float(str)`                | Parse number with a fraction.                   |
+| `parse_int(str)`                  | Parse integer.                                  |
+| `parse_constant(str)`             | Handle `Infinity`, `-Infinity`, `NaN`.          |
+| `strict`                          | When False, accept control chars in strings.    |
+
+## Exceptions
+
+`json.JSONDecodeError(msg, doc, pos)` carries `lineno`, `colno`,
+`pos`, `doc`. Subclass of `ValueError`.
+
+## Tool
+
+`python -m json.tool` reformats stdin or a file. Flags: `--sort-keys`,
+`--indent`, `--no-ensure-ascii`, `--json-lines`, `--compact`.
+
+## Gopy status
+
+| Area                                  | State                                              |
+| ------------------------------------- | -------------------------------------------------- |
+| `dumps` / `loads` byte-identical with CPython | Complete.                                  |
+| Encoder hooks (`default`, `cls`)      | Complete.                                          |
+| Decoder hooks                         | Complete.                                          |
+| Streaming                             | Complete via `load`/`dump`.                        |
+| `json.tool`                           | Complete.                                          |
+
+## Reference
+
+* CPython 3.14: [json](https://docs.python.org/3.14/library/json.html).
+* `Lib/json/`, `Modules/_json.c`.
+* `module/_json/`. gopy port.
