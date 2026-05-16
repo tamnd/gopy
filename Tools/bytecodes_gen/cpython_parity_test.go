@@ -173,6 +173,38 @@ var parityFixtures = []parityFixture{
 			"tmp.Close()",
 		},
 	},
+	{
+		// `PyObject *name = expr;` C-local declaration. The Go form
+		// is `name := <expr>`, where the expression resolves to an
+		// `objects.Object` (which is what `Ref.AsObject()` returns).
+		name:    "pyobject_decl_borrow",
+		cpyLine: 0, // synthetic; mirrors UNARY_NEGATIVE prologue
+		input: `
+		inst(OP, (value --)) {
+			PyObject *value_o = PyStackRef_AsPyObjectBorrow(value);
+			DEAD(value);
+		}
+	`,
+		want: []string{"value_o := value.AsObject()"},
+	},
+	{
+		// FromPyObject{Steal,New,Immortal,Borrow} all collapse to
+		// stackref.FromObject under Go GC. This fixture uses Steal
+		// (the most common case at value-write sites).
+		name:    "pyobject_assign_from_steal",
+		cpyLine: 0, // synthetic; mirrors UNARY_NEGATIVE epilogue
+		input: `
+		inst(OP, (value -- res)) {
+			PyObject *value_o = PyStackRef_AsPyObjectBorrow(value);
+			res = PyStackRef_FromPyObjectSteal(value_o);
+			DEAD(value);
+		}
+	`,
+		want: []string{
+			"value_o := value.AsObject()",
+			"res = stackref.FromObject(value_o)",
+		},
+	},
 }
 
 func runParityFixture(t *testing.T, f parityFixture) (body string, bailed bool, note string) {

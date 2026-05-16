@@ -26,7 +26,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = str
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: unrecognized token at action body start: "int"
 		// outputs: interpolation
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_LIST:
@@ -34,7 +34,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg); i++ {
 			_ = e.pop()
 		}
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *list_o rhs: unexpected token "_PyList_FromStackRefStealOnSuccess" in expression
 		// outputs: list
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_MAP:
@@ -50,7 +50,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg); i++ {
 			_ = e.pop()
 		}
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *set_o rhs: unexpected token "PySet_New" in expression
 		// outputs: set
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_SLICE:
@@ -58,7 +58,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg); i++ {
 			_ = e.pop()
 		}
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *start_o rhs: expected ')' to close call
 		// outputs: slice
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_STRING:
@@ -74,7 +74,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = interpolations
 		strings := e.pop()
 		_ = strings
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *template_o rhs: unexpected token "_PyTemplate_Build" in expression
 		// outputs: template
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_TUPLE:
@@ -82,7 +82,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg); i++ {
 			_ = e.pop()
 		}
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *tup_o rhs: unexpected token "_PyTuple_FromStackRefStealOnSuccess" in expression
 		// outputs: tup
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CACHE:
@@ -91,7 +91,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.CALL_INTRINSIC_1:
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *res_o rhs: unexpected token "_PyIntrinsics_UnaryFunctions" in expression
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CALL_INTRINSIC_2:
@@ -99,7 +99,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value1_st
 		value2_st := e.pop()
 		_ = value2_st
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *res_o rhs: unexpected token "_PyIntrinsics_BinaryFunctions" in expression
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CHECK_EG_MATCH:
@@ -107,7 +107,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = match_type_st
 		exc_value_st := e.pop()
 		_ = exc_value_st
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: unrecognized token at action body start: "int"
 		// outputs: rest match
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CHECK_EXC_MATCH:
@@ -115,7 +115,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = right
 		left := e.pop()
 		_ = left
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *left_o rhs: unexpected token "left" in expression
 		// outputs: left b
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CLEANUP_THROW:
@@ -125,7 +125,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = last_sent_val
 		sub_iter := e.pop()
 		_ = sub_iter
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: unrecognized token at action body start: "int"
 		// outputs: none value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CONVERT_VALUE:
@@ -150,19 +150,19 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.DELETE_ATTR:
 		owner := e.pop()
 		_ = owner
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_DEREF:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *oldobj rhs: unexpected token "PyCell_SwapTakeRef" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_FAST:
 		// body bail: unrecognized token at action body start: "if"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_GLOBAL:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_NAME:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_SUBSCR:
 		sub := e.pop()
@@ -230,7 +230,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.FORMAT_SIMPLE:
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.FORMAT_WITH_SPEC:
@@ -238,7 +238,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = fmt_spec
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *res_o rhs: unexpected token "PyObject_Format" in expression
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.GET_AITER:
@@ -250,13 +250,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.GET_ANEXT:
 		aiter := e.pop()
 		_ = aiter
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *awaitable_o rhs: unexpected token "_PyEval_GetANext" in expression
 		// outputs: aiter awaitable
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.GET_AWAITABLE:
 		iterable := e.pop()
 		_ = iterable
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *iter_o rhs: unexpected token "_PyEval_GetAwaitable" in expression
 		// outputs: iter
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.GET_ITER:
@@ -274,13 +274,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.GET_YIELD_FROM_ITER:
 		iterable := e.pop()
 		_ = iterable
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: iter
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.IMPORT_FROM:
 		from := e.pop()
 		_ = from
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
 		// outputs: from res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.IMPORT_NAME:
@@ -288,7 +288,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = fromlist
 		level := e.pop()
 		_ = level
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_END_FOR:
@@ -304,14 +304,14 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value
 		receiver := e.pop()
 		_ = receiver
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: unrecognized token at action body start: "if"
 		// outputs: val
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_FOR_ITER:
 		iter := e.pop()
 		_ = iter
 		// cache "unused" size=1 offset=0
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *iter_o rhs: unexpected token "iter" in expression
 		// outputs: iter next
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_INSTRUCTION:
@@ -324,7 +324,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_NOT_TAKEN:
-		// body bail: unrecognized token at action body start: "("
+		// body bail: unrecognized token at action body start: "INSTRUMENTED_JUMP"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_POP_ITER:
 		iter := e.pop()
@@ -397,15 +397,15 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: list_st _out1[oparg - 1]
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_BUILD_CLASS:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: expected '=' after PyObject *bc_o
 		// outputs: bc
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_COMMON_CONSTANT:
-		// body bail: output assign "value": unexpected token "PyStackRef_FromPyObjectNew" in expression
+		// body bail: output assign "value": unexpected token "tstate" in expression
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_CONST:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *obj rhs: unexpected token "GETITEM" in expression
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_DEREF:
@@ -443,34 +443,34 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		class_dict_st := e.pop()
 		_ = class_dict_st
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: expected '=' after PyObject *value_o
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:
 		mod_or_class_dict := e.pop()
 		_ = mod_or_class_dict
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
 		// outputs: v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_LOCALS:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *l rhs: unexpected token "LOCALS" in expression
 		// outputs: locals
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_NAME:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
 		// outputs: v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_SMALL_INT:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *obj rhs: unexpected token "(" in expression
 		// outputs: value
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MAKE_CELL:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *cell rhs: unexpected token "PyCell_New" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MAKE_FUNCTION:
 		codeobj_st := e.pop()
 		_ = codeobj_st
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: unrecognized token at action body start: "PyFunctionObject"
 		// outputs: func_v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MAP_ADD:
@@ -494,7 +494,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = type_v
 		subject := e.pop()
 		_ = subject
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *attrs_o rhs: unexpected token "_PyEval_MatchClass" in expression
 		// outputs: attrs
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MATCH_KEYS:
@@ -502,7 +502,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = keys
 		subject := e.pop()
 		_ = subject
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *values_or_none_o rhs: unexpected token "_PyEval_MatchKeys" in expression
 		// outputs: subject keys values_or_none
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MATCH_MAPPING:
@@ -545,7 +545,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg); i++ {
 			_ = e.pop()
 		}
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *cause rhs: trailing tokens after expression: "== 2 ? PyStackRef_AsPyObjectSteal ( args [ 1 ] ) : NULL"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RERAISE:
 		exc_st := e.pop()
@@ -571,7 +571,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SETUP_ANNOTATIONS:
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: expected '=' after PyObject *ann_dict
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SET_ADD:
 		v := e.pop()
@@ -590,7 +590,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = func_in
 		attr_st := e.pop()
 		_ = attr_st
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: unrecognized token at action body start: "size_t"
 		// outputs: func_out
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SET_UPDATE:
@@ -633,12 +633,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.STORE_GLOBAL:
 		v := e.pop()
 		_ = v
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.STORE_NAME:
 		v := e.pop()
 		_ = v
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *name rhs: unexpected token "GETITEM" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SWAP:
 		top := e.pop()
@@ -655,13 +655,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.UNARY_INVERT:
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *res_o rhs: unexpected token "PyNumber_Invert" in expression
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.UNARY_NEGATIVE:
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: PyObject *res_o rhs: unexpected token "PyNumber_Negative" in expression
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.UNARY_NOT:
@@ -692,7 +692,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = exit_self
 		exit_func := e.pop()
 		_ = exit_func
-		// body bail: unrecognized token at action body start: "PyObject"
+		// body bail: expected '=' after PyObject *exc
 		// outputs: exit_func exit_self lasti _out3 val res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.YIELD_VALUE:
