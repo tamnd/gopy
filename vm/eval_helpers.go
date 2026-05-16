@@ -63,6 +63,48 @@ func (e *evalState) pyNumberNegative(o objects.Object) objects.Object {
 	return r
 }
 
+// pyNumberInvert wraps PyNumber_Invert.
+//
+// CPython: Objects/abstract.c:1389 PyNumber_Invert
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) pyNumberInvert(o objects.Object) objects.Object {
+	r, err := objects.NumberInvert(o)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return r
+}
+
+// pyNumberPositive wraps PyNumber_Positive.
+//
+// CPython: Objects/abstract.c:1373 PyNumber_Positive
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) pyNumberPositive(o objects.Object) objects.Object {
+	r, err := objects.NumberPositive(o)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return r
+}
+
+// pyNumberAbsolute wraps PyNumber_Absolute.
+//
+// CPython: Objects/abstract.c:1397 PyNumber_Absolute
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) pyNumberAbsolute(o objects.Object) objects.Object {
+	r, err := objects.NumberAbsolute(o)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return r
+}
+
 // pyIs mirrors CPython's Py_Is macro: identity comparison returning
 // 1 / 0 as an int.
 //

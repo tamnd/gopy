@@ -713,9 +713,12 @@ type helperCall struct {
 // own the failure mode (pendingErr) so the translator can emit them
 // uniformly inside the action body.
 var helperCalls = map[string]helperCall{
-	"Py_Is":            {goExpr: "e.pyIs", arity: 2},
-	"Py_TYPE":          {goExpr: "e.pyType", arity: 1},
+	"Py_Is":             {goExpr: "e.pyIs", arity: 2},
+	"Py_TYPE":           {goExpr: "e.pyType", arity: 1},
 	"PyNumber_Negative": {goExpr: "e.pyNumberNegative", arity: 1},
+	"PyNumber_Invert":   {goExpr: "e.pyNumberInvert", arity: 1},
+	"PyNumber_Positive": {goExpr: "e.pyNumberPositive", arity: 1},
+	"PyNumber_Absolute": {goExpr: "e.pyNumberAbsolute", arity: 1},
 }
 
 // parseHelperCall consumes `(arg1, arg2, ...)` and renders the call.

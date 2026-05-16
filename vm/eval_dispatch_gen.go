@@ -618,9 +618,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.UNARY_INVERT:
 		value := e.peek(0)
 		_ = value
-		// body bail: PyObject res_o rhs: unexpected token "PyNumber_Invert" in expression
-		// outputs: res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var res stackref.Ref
+		res_o := e.pyNumberInvert(value.AsObject())
+		_ = res_o
+		value.Close()
+		if res_o == nil {
+			return 0, nil, nil, false, e.error("error")
+		}
+		res = stackref.FromObject(res_o)
+		e.drop(1)
+		e.push(res)
+		return e.advance(), nil, nil, false, nil
 	case compile.UNARY_NEGATIVE:
 		value := e.peek(0)
 		_ = value
