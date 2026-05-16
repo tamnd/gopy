@@ -187,7 +187,7 @@ runs the Python module.
 |------|--------|--------|
 | Vendor `Lib/runpy.py` 1:1 into `stdlib/runpy.py` | done | 554dfca |
 | Wire `cmd/gopy -m mod` to call `runpy._run_module_as_main(mod)` | done | 554dfca |
-| Expose Python-facing `co_code` / `co_consts` / `co_names` / `co_varnames` / `co_*` attrs on `objects.Code` so `hasattr(co, 'co_code')` succeeds | TODO | - |
+| Expose Python-facing `co_code` / `co_consts` / `co_names` / `co_varnames` / `co_*` attrs on `objects.Code` so `hasattr(co, 'co_code')` succeeds | done | 08b0d9d |
 | Plumb builtin `compile(src, fn, mode)` through the parser + compiler (`_try_compile` in `Lib/dis.py:80` calls this) | TODO | - |
 | Fix `importlib.util` attribute access path so `importlib.util.find_spec` resolves | TODO | - |
 | `gopy -m dis foo.py` runs end to end on a hello-world fixture | TODO | - |
