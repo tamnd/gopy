@@ -69,6 +69,76 @@ func basicblockRemoveRedundantNops(b *basicblock) int {
 	return removed
 }
 
+// cfgNormalizeJumps rewrites backward conditional jumps into a
+// reversed forward conditional plus an unconditional backward jump,
+// and inserts a NOT_TAKEN marker on every fall-through edge of a
+// forward conditional. Walk order is fallthrough so b_visited reliably
+// distinguishes "already seen / backward target" from "still ahead".
+//
+// CPython: Python/flowgraph.c:590 normalize_jumps
+func cfgNormalizeJumps(g *cfgBuilder) {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		b.Visited = false
+	}
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		b.Visited = true
+		normalizeJumpsInBlock(g, b)
+	}
+}
+
+// normalizeJumpsInBlock applies the rewrite to a single block.
+//
+// CPython: Python/flowgraph.c:536 normalize_jumps_in_block
+func normalizeJumpsInBlock(g *cfgBuilder, b *basicblock) {
+	last := b.lastInstr()
+	if last == nil || !isConditionalJump(last.Op) {
+		return
+	}
+
+	if !last.Target.Visited {
+		// Forward conditional: mark the fall-through edge with NOT_TAKEN
+		// so a later assembler pass can record it precisely.
+		b.addOp(NOT_TAKEN, 0, last.Loc)
+		return
+	}
+
+	reversed, ok := reverseConditionalJumpOp(last.Op)
+	if !ok {
+		return
+	}
+
+	target := last.Target
+	backwards := g.newBlock()
+	backwards.addOp(NOT_TAKEN, 0, last.Loc)
+	backwards.addJump(JUMP, target, last.Loc)
+	backwards.StartDepth = target.StartDepth
+	backwards.Cold = b.Cold
+
+	last.Op = reversed
+	last.Target = b.Next
+
+	backwards.Next = b.Next
+	b.Next = backwards
+}
+
+// reverseConditionalJumpOp returns the opposite-sense conditional
+// jump opcode, or (op,false) when op is not a reversible conditional.
+//
+// CPython: Python/flowgraph.c:551 normalize_jumps_in_block switch
+func reverseConditionalJumpOp(op Opcode) (Opcode, bool) {
+	switch op {
+	case POP_JUMP_IF_NOT_NONE:
+		return POP_JUMP_IF_NONE, true
+	case POP_JUMP_IF_NONE:
+		return POP_JUMP_IF_NOT_NONE, true
+	case POP_JUMP_IF_FALSE:
+		return POP_JUMP_IF_TRUE, true
+	case POP_JUMP_IF_TRUE:
+		return POP_JUMP_IF_FALSE, true
+	}
+	return op, false
+}
+
 // nextBlockFirstLineno returns the lineno of the first
 // location-bearing instruction in next, skipping NOPs that have no
 // location (those will be removed too). Returns -1 if none found.

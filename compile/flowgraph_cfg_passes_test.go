@@ -49,6 +49,70 @@ func TestCfgRemoveRedundantNopsDonatesLocationForward(t *testing.T) {
 	}
 }
 
+func TestCfgNormalizeJumpsForwardAddsNotTaken(t *testing.T) {
+	// b1: POP_JUMP_IF_FALSE -> b2 (forward).
+	// Expect NOT_TAKEN appended after the conditional in b1.
+	g := newCfgBuilder()
+	b2 := g.newBlock()
+	loc := ast.Pos{Lineno: 1}
+	g.CurBlock.Instr = append(g.CurBlock.Instr, cfgInstr{
+		Op: POP_JUMP_IF_FALSE, Target: b2, Loc: loc,
+	})
+	g.useNextBlock(b2)
+	b2.addOp(RETURN_VALUE, 0, loc)
+
+	cfgNormalizeJumps(g)
+
+	if got := len(g.EntryBlock.Instr); got != 2 {
+		t.Fatalf("entry block instrs = %d, want 2 (cond + NOT_TAKEN)", got)
+	}
+	if g.EntryBlock.Instr[1].Op != NOT_TAKEN {
+		t.Errorf("instr[1] = %v, want NOT_TAKEN", g.EntryBlock.Instr[1].Op)
+	}
+}
+
+func TestCfgNormalizeJumpsBackwardReversesAndInsertsTrampoline(t *testing.T) {
+	// entry (loop head) <- POP_JUMP_IF_TRUE (backward).
+	// Expected layout: entry, ..., body, trampoline, after.
+	g := newCfgBuilder()
+	entry := g.EntryBlock
+	loc := ast.Pos{Lineno: 1}
+	entry.addOp(LOAD_CONST, 0, loc)
+
+	body := g.newBlock()
+	g.useNextBlock(body)
+	body.Instr = append(body.Instr, cfgInstr{
+		Op: POP_JUMP_IF_TRUE, Target: entry, Loc: loc,
+	})
+
+	after := g.newBlock()
+	g.useNextBlock(after)
+	after.addOp(RETURN_VALUE, 0, loc)
+
+	cfgNormalizeJumps(g)
+
+	last := body.lastInstr()
+	if last.Op != POP_JUMP_IF_FALSE {
+		t.Errorf("body last op = %v, want POP_JUMP_IF_FALSE (reversed)", last.Op)
+	}
+	if last.Target == entry {
+		t.Error("reversed jump should retarget away from the loop head")
+	}
+	if body.Next == after {
+		t.Fatal("trampoline block should have been inserted between body and after")
+	}
+	tramp := body.Next
+	if tramp.Next != after {
+		t.Error("trampoline should chain to the original next")
+	}
+	if len(tramp.Instr) != 2 || tramp.Instr[0].Op != NOT_TAKEN || tramp.Instr[1].Op != JUMP {
+		t.Errorf("trampoline body = %+v, want [NOT_TAKEN, JUMP]", tramp.Instr)
+	}
+	if tramp.Instr[1].Target != entry {
+		t.Error("trampoline JUMP should target the loop head")
+	}
+}
+
 func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	// Trailing NOP whose line matches the next block's first real
 	// instruction is removable.

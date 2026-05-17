@@ -78,6 +78,8 @@ func (b *basicblock) lastInstr() *cfgInstr {
 // two jumps in the same block).
 //
 // CPython: Python/flowgraph.c:210 basicblock_add_jump
+//
+//nolint:unparam // op in CPython signature; conditional-jump callers arrive in later passes.
 func (b *basicblock) addJump(op Opcode, target *basicblock, loc ast.Pos) bool {
 	if last := b.lastInstr(); last != nil && isJumpOpcode(last.Op) {
 		return false
