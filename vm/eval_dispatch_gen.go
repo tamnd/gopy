@@ -398,8 +398,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.push(val)
 		return e.advance(), nil, nil, false, nil
 	case compile.ENTER_EXECUTOR:
-		// body bail: PyCodeObject code rhs: unexpected token "_PyFrame_GetCode" in expression
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		panic("vm: Py_FatalError")
 	case compile.EXIT_INIT_CHECK:
 		should_be_none := e.peek(0)
 		_ = should_be_none

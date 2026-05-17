@@ -345,6 +345,17 @@ func tokenize(src string) ([]dslTok, error) {
 		"Py_STATS":                 true,
 		"Py_GIL_DISABLED":          true,
 		"ENABLE_SPECIALIZATION_FT": true,
+		// gopy targets neither Emscripten nor the experimental tail-
+		// call interpreter; the bodies under those guards reference
+		// symbols (_Py_emscripten_signal_clock, entry.frame) we have
+		// no analogue for.
+		"__EMSCRIPTEN__":   true,
+		"Py_TAIL_CALL_INTERP": true,
+		// _Py_TIER2 guards the executor-list maintenance inside tier1
+		// instructions. We have a tier-2 path but the inline writes to
+		// tstate->current_executor are not part of the tier-1 dispatch
+		// loop; skip the gated bodies.
+		"_Py_TIER2": true,
 	}
 	var out []dslTok
 	line := 1
