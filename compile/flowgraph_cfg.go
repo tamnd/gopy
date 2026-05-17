@@ -196,8 +196,6 @@ func (g *cfgBuilder) useLabel(lbl JumpTargetLabel) {
 // block first if the current one is already terminated.
 //
 // CPython: Python/flowgraph.c:482 _PyCfgBuilder_Addop
-//
-//nolint:unparam // oparg in CPython signature; non-zero callers arrive with the bridge.
 func (g *cfgBuilder) addOp(op Opcode, oparg int32, loc ast.Pos) {
 	g.maybeStartNewBlock()
 	g.CurBlock.addOp(op, oparg, loc)
