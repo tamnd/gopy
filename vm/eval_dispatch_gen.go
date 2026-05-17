@@ -556,17 +556,37 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = receiver
 		value := e.peek(0)
 		_ = value
-		// body bail: if cond: unexpected token "PyStackRef_GenCheck" in expression
-		// outputs: receiver*
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		if objects.IsGenerator(receiver.AsObject()) {
+			err := e.monitorStopIteration(value.AsObject())
+			_ = err
+			if err != 0 {
+				return 0, nil, nil, false, e.error("error")
+			}
+		}
+		value.Close()
+		e.setPeek(1, receiver)
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_END_SEND:
 		receiver := e.peek(1)
 		_ = receiver
 		value := e.peek(0)
 		_ = value
-		// body bail: if then: int err rhs: unexpected token "monitor_stop_iteration" in expression
-		// outputs: val
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var val stackref.Ref
+		receiver_o := receiver.AsObject()
+		_ = receiver_o
+		if objects.IsGenerator(receiver_o) || objects.IsCoroutine(receiver_o) {
+			err := e.monitorStopIteration(value.AsObject())
+			_ = err
+			if err != 0 {
+				return 0, nil, nil, false, e.error("error")
+			}
+		}
+		val = value
+		receiver.Close()
+		e.drop(1 + 1)
+		e.push(val)
+		return e.advance(), nil, nil, false, nil
 	case compile.INSTRUMENTED_FOR_ITER:
 		iter := e.peek(0)
 		_ = iter

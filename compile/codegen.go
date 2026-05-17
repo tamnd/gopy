@@ -57,6 +57,7 @@ const (
 	CoCoroutine         uint32 = 0x0080
 	CoIterableCoroutine uint32 = 0x0100
 	CoAsyncGenerator    uint32 = 0x0200
+	CoNoMonitoringEvents uint32 = 0x2000000
 	CoHasDocstring      uint32 = 0x4000000
 	CoMethod            uint32 = 0x8000000
 )

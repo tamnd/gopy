@@ -1062,6 +1062,14 @@ func (p *exprParser) parsePrimary() (string, error) {
 			return "", err
 		}
 		return arg + ".IsNone()", nil
+	case "PyStackRef_GenCheck":
+		// CPython: Include/internal/pycore_stackref.h PyStackRef_GenCheck
+		// wraps PyGen_Check around the stack-ref unwrap.
+		arg, err := p.parseCallArg()
+		if err != nil {
+			return "", err
+		}
+		return "objects.IsGenerator(" + arg + ".AsObject())", nil
 	case "PyStackRef_AsPyObjectBorrow", "PyStackRef_AsPyObjectSteal", "PyStackRef_AsPyObjectNew":
 		// CPython distinguishes borrowed from owning extraction. Under
 		// Go's GC both collapse to `Ref.AsObject()`.
@@ -1331,7 +1339,7 @@ func (p *exprParser) parsePrimary() (string, error) {
 	// CPython helpers carry tstate / frame as the first one or two args.
 	// The helperCall translation drops them via dropFirst, but the parse
 	// still needs to consume the tokens, so pass them through verbatim.
-	if tk == "tstate" || tk == "frame" {
+	if tk == "tstate" || tk == "frame" || tk == "this_instr" {
 		return tk, nil
 	}
 	if isNumericLiteral(tk) {
@@ -1595,6 +1603,12 @@ var helperCalls = map[string]helperCall{
 	"PyCoro_CheckExact":    {goExpr: "objects.IsCoroutine", arity: 1},
 	"PyGen_Check":          {goExpr: "objects.IsGenerator", arity: 1},
 	"PyGen_CheckExact":     {goExpr: "objects.IsGenerator", arity: 1},
+// monitor_stop_iteration fires PEP 669 STOP_ITERATION for the
+	// running frame. The first three args (tstate, frame, this_instr)
+	// are implicit on the evalState; the wrapper takes only the value.
+	//
+	// CPython: Python/ceval.c:2550 monitor_stop_iteration
+	"monitor_stop_iteration": {goExpr: "e.monitorStopIteration", arity: 1, dropFirst: 3},
 	// Long predicate. Returns bool, matching the C int 0/1 convention.
 	"_PyLong_IsZero": {goExpr: "e.longIsZero", arity: 1},
 	// Slice constructor. CPython exposes a 3-arg PyObject* factory; the
