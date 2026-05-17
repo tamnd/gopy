@@ -340,26 +340,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(objects.NewBool(match))
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.FORMAT_WITH_SPEC:
-		// Stack: [value, spec]. Dispatch through objects.Format
-		// (PyObject_Format), which routes to the value's __format__
-		// slot. An empty spec falls back to Str inside Format.
-		//
-		// CPython: Python/bytecodes.c FORMAT_WITH_SPEC
-		// CPython: Objects/object.c:803 PyObject_Format
-		spec := e.popObject()
-		v := e.popObject()
-		specStr, serr := objects.Str(spec)
-		if serr != nil {
-			return 0, nil, nil, false, true, serr
-		}
-		s, ferr := objects.Format(v, specStr)
-		if ferr != nil {
-			return 0, nil, nil, false, true, ferr
-		}
-		e.pushObject(objects.NewStr(s))
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.CONVERT_VALUE:
 		v := e.popObject()
 		out, cerr := convertValue(v, oparg)

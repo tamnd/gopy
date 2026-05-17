@@ -49,4 +49,5 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.PUSH_EXC_INFO:              true,
 	compile.STORE_GLOBAL:               true,
 	compile.DELETE_GLOBAL:              true,
+	compile.FORMAT_WITH_SPEC:           true,
 }
