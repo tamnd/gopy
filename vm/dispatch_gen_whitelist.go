@@ -50,4 +50,5 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.STORE_GLOBAL:               true,
 	compile.DELETE_GLOBAL:              true,
 	compile.FORMAT_WITH_SPEC:           true,
+	compile.GET_ITER:                   true,
 }
