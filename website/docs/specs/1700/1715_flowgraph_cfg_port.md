@@ -79,7 +79,7 @@ function list matches `Python/flowgraph.c`'s function list.
 | 2     | `_PyCfg_FromInstructionSequence` bridge                                                | done        | `c5485af` |
 | 3     | Re-port every pass in `flowgraph_passes.go` onto `*cfgBuilder`                         | done        | `6f49fd5` |
 | 4     | `stackdepth` and `optimize_load_fast` onto the graph                                   | done        | `1ce8763` |
-| 5     | `_PyCfg_ToInstructionSequence` bridge                                                  | pending     | —         |
+| 5     | `_PyCfg_ToInstructionSequence` bridge                                                  | done        | `1ee78e2` |
 | 6     | Delete flat-sequence pass shim; `flowgraph_passes.go` matches `Python/flowgraph.c` 1:1 | pending     | —         |
 
 ### Phase 1. Graph substrate
