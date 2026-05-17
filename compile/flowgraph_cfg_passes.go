@@ -7,6 +7,8 @@
 
 package compile
 
+import "github.com/tamnd/gopy/ast"
+
 // cfgRemoveRedundantNops drops NOPs whose location info adds nothing.
 // Walks every block and calls basicblockRemoveRedundantNops.
 //
@@ -205,6 +207,42 @@ func cfgRemoveUnreachable(g *cfgBuilder) {
 		if b.Predecessors == 0 {
 			b.Instr = b.Instr[:0]
 			b.ExceptHandler = false
+		}
+	}
+}
+
+// cfgPropagateLineNumbers fills in missing per-instruction line
+// numbers from the previous located instruction inside the same
+// block. Also seeds the first instruction of any single-predecessor
+// successor (fallthrough or jump target) so a NOP-less head still
+// reports a sensible line.
+//
+// CPython: Python/flowgraph.c:3616 propagate_line_numbers
+func cfgPropagateLineNumbers(g *cfgBuilder) {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		if b.lastInstr() == nil {
+			continue
+		}
+		prev := ast.Pos{Lineno: -1}
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			if ins.Loc.Lineno < 0 {
+				ins.Loc = prev
+			} else {
+				prev = ins.Loc
+			}
+		}
+		if !b.nofallthrough() && b.Next != nil && b.Next.Predecessors == 1 && len(b.Next.Instr) > 0 {
+			if b.Next.Instr[0].Loc.Lineno < 0 {
+				b.Next.Instr[0].Loc = prev
+			}
+		}
+		last := b.lastInstr()
+		if hasJumpTarget(last.Op) && last.Target != nil {
+			target := last.Target
+			if target.Predecessors == 1 && len(target.Instr) > 0 && target.Instr[0].Loc.Lineno < 0 {
+				target.Instr[0].Loc = prev
+			}
 		}
 	}
 }

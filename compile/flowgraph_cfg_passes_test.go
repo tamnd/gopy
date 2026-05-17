@@ -195,6 +195,36 @@ func TestCfgRemoveUnreachableCountsJumpAndFallthrough(t *testing.T) {
 	}
 }
 
+func TestCfgPropagateLineNumbersFillsHolesInBlock(t *testing.T) {
+	// First instr on line 5, second unlocated -> inherits 5.
+	g := newCfgBuilder()
+	g.addOp(LOAD_CONST, 0, ast.Pos{Lineno: 5})
+	g.addOp(NOP, 0, ast.Pos{Lineno: -1})
+	g.addOp(RETURN_VALUE, 0, ast.Pos{Lineno: 6})
+
+	cfgPropagateLineNumbers(g)
+	if got := g.EntryBlock.Instr[1].Loc.Lineno; got != 5 {
+		t.Errorf("middle NOP lineno = %d, want 5 (inherited)", got)
+	}
+	if got := g.EntryBlock.Instr[2].Loc.Lineno; got != 6 {
+		t.Errorf("RETURN_VALUE lineno = %d, want 6 (unchanged)", got)
+	}
+}
+
+func TestCfgPropagateLineNumbersSeedsSinglePredSuccessor(t *testing.T) {
+	g := newCfgBuilder()
+	g.addOp(LOAD_CONST, 0, ast.Pos{Lineno: 9})
+	b2 := g.newBlock()
+	b2.Predecessors = 1
+	g.useNextBlock(b2)
+	b2.addOp(RETURN_VALUE, 0, ast.Pos{Lineno: -1})
+
+	cfgPropagateLineNumbers(g)
+	if got := b2.Instr[0].Loc.Lineno; got != 9 {
+		t.Errorf("successor head lineno = %d, want 9 (seeded)", got)
+	}
+}
+
 func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	// Trailing NOP whose line matches the next block's first real
 	// instruction is removable.
