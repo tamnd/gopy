@@ -1390,18 +1390,6 @@ func sliceSequence(container objects.Object, sl *objects.Slice) (objects.Object,
 	return objects.NewList(items), nil
 }
 
-// delItem mirrors PyObject_DelItem.
-//
-// CPython: Objects/abstract.c PyObject_DelItem
-func delItem(container, key objects.Object) error {
-	t := container.Type()
-	mp, _ := mappingAndSequence(t)
-	if mp != nil && mp.DelItem != nil {
-		return mp.DelItem(container, key)
-	}
-	return fmt.Errorf("TypeError: '%s' object does not support item deletion", t.Name)
-}
-
 // containsItem mirrors PySequence_Contains. Falls back to walking the
 // iterator when the type provides no Contains slot.
 //
