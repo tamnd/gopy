@@ -330,49 +330,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return 0, nil, nil, false, true, fmt.Errorf("vm: RAISE_VARARGS: invalid oparg %d", oparg)
 
-	case compile.PUSH_EXC_INFO:
-		// Save the previously-handled exception under the new top, then
-		// install the new exception as the current handled exception
-		// so sys.exc_info() reads it from inside the except handler.
-		// POP_EXCEPT restores the saved value. The handled slot is
-		// distinct from the raised slot used by the unwind path, so
-		// installing it here does not perturb getOptionalAttr et al.
-		//
-		// CPython: Python/bytecodes.c PUSH_EXC_INFO (push exc_info->exc_value;
-		// exc_info->exc_value = new_exc)
-		top := e.pop()
-		prev := pyerrors.Handled(e.ts)
-		if prev != nil {
-			e.pushObject(prev)
-		} else {
-			e.pushObject(objects.None())
-		}
-		e.push(top)
-		if exc, ok := top.AsObject().(*pyerrors.Exception); ok {
-			pyerrors.SetHandled(e.ts, exc)
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.POP_EXCEPT:
-		// Restore the previously-handled exception saved under the
-		// handled-exception ref by PUSH_EXC_INFO. None signals "no
-		// outer handler", which clears the slot. The with-statement
-		// codegen also emits POP_EXCEPT via COPY 3 / POP_EXCEPT /
-		// RERAISE 1 where the popped value is a fresh copy of the
-		// active exception, in which case we install that exception
-		// as handled, which is harmless (the next handler entry will
-		// overwrite, and the RERAISE that follows triggers unwind).
-		//
-		// CPython: Python/bytecodes.c POP_EXCEPT (exc_info->exc_value = saved)
-		ref := e.pop()
-		if exc, ok := ref.AsObject().(*pyerrors.Exception); ok {
-			pyerrors.SetHandled(e.ts, exc)
-		} else {
-			pyerrors.SetHandled(e.ts, nil)
-		}
-		ref.Close()
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.CHECK_EXC_MATCH:
 		// Stack: [exc, type]. Push True if isinstance(exc, type), else
 		// False. v0.6 doesn't have exception class hierarchy, so use a

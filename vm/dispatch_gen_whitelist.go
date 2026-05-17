@@ -45,4 +45,6 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.SET_UPDATE:                 true,
 	compile.DICT_UPDATE:                true,
 	compile.LOAD_COMMON_CONSTANT:       true,
+	compile.POP_EXCEPT:                 true,
+	compile.PUSH_EXC_INFO:              true,
 }
