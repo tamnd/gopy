@@ -955,3 +955,64 @@ func TestCfgOptimizeLoadConstWalksAllBlocks(t *testing.T) {
 		t.Fatalf("tail LOAD_CONST not promoted: %s", tail.Instr[0].Op.Name())
 	}
 }
+
+func TestCfgOptimizeCfgRunsPipeline(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{int64(0)}
+	tgt := g.newBlock()
+	// LOAD_CONST 0; POP_JUMP_IF_TRUE -> folds: const 0 is falsy, so the
+	// jump becomes NOP and LOAD_CONST nops out.
+	g.addOp(LOAD_CONST, 0, loc)
+	g.CurBlock.addJump(POP_JUMP_IF_TRUE, tgt, loc)
+	g.useNextBlock(tgt)
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	if err := cfgOptimizeCfg(g, &consts, 1); err != nil {
+		t.Fatalf("cfgOptimizeCfg: %v", err)
+	}
+	// LOAD_CONST 0 should have been promoted to LOAD_SMALL_INT in at
+	// least one of the blocks (driver walks every block).
+	sawSmallInt := false
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		for i := range b.Instr {
+			if b.Instr[i].Op == LOAD_SMALL_INT {
+				sawSmallInt = true
+			}
+		}
+	}
+	if !sawSmallInt {
+		t.Fatal("expected at least one LOAD_SMALL_INT after pipeline")
+	}
+}
+
+func TestCfgOptimizeCodeUnitSmoke(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{int64(7)}
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	if err := cfgOptimizeCodeUnit(g, &consts, 0, 0, 1); err != nil {
+		t.Fatalf("cfgOptimizeCodeUnit: %v", err)
+	}
+	// 7 should be folded to LOAD_SMALL_INT, freeing consts[0], which
+	// remove_unused_consts then leaves as a single docstring slot.
+	if g.EntryBlock.Instr[0].Op != LOAD_SMALL_INT {
+		t.Fatalf("entry op = %s, want LOAD_SMALL_INT", g.EntryBlock.Instr[0].Op.Name())
+	}
+	if g.EntryBlock.Instr[0].Oparg != 7 {
+		t.Fatalf("entry oparg = %d, want 7", g.EntryBlock.Instr[0].Oparg)
+	}
+}
+
+func TestCfgOptimizeCodeUnitRejectsMalformed(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{}
+	// Two terminators in one block -> check_cfg should reject.
+	g.addOp(RETURN_VALUE, 0, loc)
+	g.CurBlock.Instr = append(g.CurBlock.Instr, cfgInstr{Op: RETURN_VALUE, Loc: loc})
+	if err := cfgOptimizeCodeUnit(g, &consts, 0, 0, 1); err == nil {
+		t.Fatal("expected check_cfg error on malformed graph")
+	}
+}

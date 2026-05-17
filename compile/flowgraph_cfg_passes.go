@@ -1840,3 +1840,54 @@ func cfgRemoveUnusedConsts(entry *basicblock, consts *[]any) {
 	}
 	*consts = newConsts
 }
+
+// cfgOptimizeCfg runs the optimization pipeline that lives inside
+// CPython's optimize_cfg, in source order: check, inline small/no-lineno
+// blocks, drop unreachable, resolve line numbers, optimize_load_const,
+// per-block peephole, remove redundant nops/pairs, remove unreachable
+// again, then remove redundant nops/jumps.
+//
+// CPython: Python/flowgraph.c:2552 optimize_cfg
+func cfgOptimizeCfg(g *cfgBuilder, consts *[]any, firstlineno int) error {
+	if err := cfgCheckCfg(g); err != nil {
+		return err
+	}
+	cfgInlineSmallOrNoLinenoBlocks(g)
+	cfgRemoveUnreachable(g)
+	cfgResolveLineNumbers(g, firstlineno)
+	cfgOptimizeLoadConst(g, consts)
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		optimizeBasicBlockCFG(b, consts)
+	}
+	cfgRemoveRedundantNopsAndPairs(g.EntryBlock)
+	cfgRemoveUnreachable(g)
+	cfgRemoveRedundantNopsAndJumps(g)
+	return nil
+}
+
+// cfgOptimizeCodeUnit is the public entry point that wraps the whole
+// pipeline. Preprocessing translates jump labels to targets, marks
+// exception handlers, and propagates the handler stack through the
+// graph. Then optimize_cfg runs the per-block / whole-CFG passes.
+// Postprocessing trims unused consts, inserts LOAD_FAST_CHECK at
+// loads of possibly-uninitialized variables, folds in
+// super-instructions, pushes cold blocks to the tail, and re-resolves
+// line numbers for the new layout.
+//
+// CPython: Python/flowgraph.c:3658 _PyCfg_OptimizeCodeUnit
+func cfgOptimizeCodeUnit(g *cfgBuilder, consts *[]any, nlocals, nparams, firstlineno int) error {
+	cfgTranslateJumpLabelsToTargets(g)
+	cfgMarkExceptHandlers(g)
+	cfgLabelExceptionTargets(g.EntryBlock)
+	if err := cfgOptimizeCfg(g, consts, firstlineno); err != nil {
+		return err
+	}
+	cfgRemoveUnusedConsts(g.EntryBlock, consts)
+	if err := addChecksForLoadsOfUninitializedVariables(g.EntryBlock, nlocals, nparams); err != nil {
+		return err
+	}
+	cfgInsertSuperinstructions(g)
+	cfgPushColdBlocksToEnd(g)
+	cfgResolveLineNumbers(g, firstlineno)
+	return nil
+}
