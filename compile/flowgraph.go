@@ -118,6 +118,14 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 		}
 	}
 
+	// PASS 0a: insert NOT_TAKEN after every forward conditional jump.
+	// Runs before ApplyLabelMap so the Insert label-shift lands on
+	// symbolic ids; running after offset resolution would require
+	// patching every absolute jump oparg.
+	//
+	// CPython: Python/flowgraph.c:535 normalize_jumps_in_block
+	normalizeJumps(seq)
+
 	// PASS 0b: promote LOAD_CONST <small int> to LOAD_SMALL_INT.
 	// Runs after fold so any folded result that lands in the small-int
 	// range gets promoted in the same optimisation pass.

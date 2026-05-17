@@ -250,6 +250,83 @@ func propagateLineNumbers(seq *Sequence) {
 	}
 }
 
+// normalizeJumps walks the sequence and gives every POP_JUMP_IF_X the
+// shape CPython emits: forward jumps gain a NOT_TAKEN at the
+// fall-through edge, backward jumps are flipped to a forward reversed
+// jump followed by a NOT_TAKEN + unconditional JUMP to the original
+// target. Monitoring and the disassembler key off NOT_TAKEN to
+// attribute the not-taken branch back to its source.
+//
+// Runs before ApplyLabelMap so target lookups go through s.labelmap
+// and Insert handles the label index bump for us.
+//
+// CPython: Python/flowgraph.c:535 normalize_jumps_in_block
+func normalizeJumps(seq *Sequence) {
+	for i := 0; i < len(seq.Instrs); i++ {
+		ins := &seq.Instrs[i]
+		if !isConditionalJump(ins.Op) {
+			continue
+		}
+		id := int(ins.Oparg)
+		if id <= 0 || id >= len(seq.labelmap) {
+			continue
+		}
+		target := seq.labelmap[id]
+		if target == labelUnbound {
+			continue
+		}
+		if target > i {
+			seq.Insert(i+1, NOT_TAKEN, 0, ins.Loc)
+			i++
+			continue
+		}
+		if i+1 >= len(seq.Instrs) {
+			// Backward conditional with no fall-through instruction
+			// is malformed bytecode. Bail rather than synthesise a
+			// target that points past the end.
+			continue
+		}
+		reversed, ok := reverseConditionalJump(ins.Op)
+		if !ok {
+			continue
+		}
+		loc := ins.Loc
+		origTarget := int32(id)
+		// Insert [NOT_TAKEN, JUMP origTarget] at i+1 / i+2. Insert
+		// leaves origTarget's labelmap entry alone because the label
+		// is bound to a position <= i, which is < i+1.
+		seq.Insert(i+1, NOT_TAKEN, 0, loc)
+		seq.Insert(i+2, JUMP, origTarget, loc)
+		// Allocate a fresh label bound to the instruction that used
+		// to sit at i+1 and now sits at i+3, after the two inserts.
+		next := seq.NewLabel()
+		seq.ensureLabelmap(next.id)
+		seq.labelmap[next.id] = i + 3
+		seq.Instrs[i].Op = reversed
+		seq.Instrs[i].Oparg = int32(next.id)
+		i += 2
+	}
+}
+
+// reverseConditionalJump returns the opcode that branches on the
+// opposite truth value. Used by normalizeJumps to flip a backward
+// POP_JUMP_IF_X into a forward jump past the inserted JUMP block.
+//
+// CPython: Python/flowgraph.c:551 normalize_jumps_in_block switch
+func reverseConditionalJump(op Opcode) (Opcode, bool) {
+	switch op {
+	case POP_JUMP_IF_FALSE:
+		return POP_JUMP_IF_TRUE, true
+	case POP_JUMP_IF_TRUE:
+		return POP_JUMP_IF_FALSE, true
+	case POP_JUMP_IF_NONE:
+		return POP_JUMP_IF_NOT_NONE, true
+	case POP_JUMP_IF_NOT_NONE:
+		return POP_JUMP_IF_NONE, true
+	}
+	return 0, false
+}
+
 // removeRedundantNops compacts the sequence by deleting NOP
 // instructions that no jump or handler points at. Must run AFTER
 // ApplyLabelMap because it rewrites the absolute oparg of every jump
