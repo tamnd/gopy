@@ -893,16 +893,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// NO_INTERRUPT variant skips the eval breaker poll.
 		return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
 
-	case compile.END_SEND:
-		// `yield from` cleanup. Stack is (receiver, value); we want
-		// the value on top and the receiver dropped.
-		// CPython: Python/bytecodes.c END_SEND
-		val := e.pop()
-		recv := e.pop()
-		recv.Close()
-		e.push(val)
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.EXIT_INIT_CHECK:
 		// `__init__` must return None. Pop the return value and raise
 		// TypeError if it's something else.
@@ -910,22 +900,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		v := e.popObject()
 		if v != objects.None() {
 			return 0, nil, nil, false, true, fmt.Errorf("TypeError: __init__() should return None, not '%s'", v.Type().Name)
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.LOAD_COMMON_CONSTANT:
-		// 3.14 fast load for a small set of compiler-emitted constants.
-		// Index 0 is AssertionError, used by `assert`. Without an
-		// exception class hierarchy yet (1686), we surface a Type object
-		// whose name RAISE_VARARGS can format into a runtime error.
-		// CPython: Python/bytecodes.c LOAD_COMMON_CONSTANT.
-		switch oparg {
-		case 0:
-			e.pushObject(commonConstant("AssertionError"))
-		case 1:
-			e.pushObject(commonConstant("NotImplementedError"))
-		default:
-			return 0, nil, nil, false, true, fmt.Errorf("LOAD_COMMON_CONSTANT: unknown index %d", oparg)
 		}
 		return e.advance(), nil, nil, false, true, nil
 
@@ -1569,20 +1543,6 @@ func mappingAndSequence(t *objects.Type) (*objects.MappingMethods, *objects.Sequ
 		}
 	}
 	return mp, sq
-}
-
-// commonConstantsCache memoises the placeholder Type objects
-// LOAD_COMMON_CONSTANT pushes. Real exception classes arrive with the
-// exceptions module port (1686).
-var commonConstantsCache = map[string]*objects.Type{}
-
-func commonConstant(name string) *objects.Type {
-	if t, ok := commonConstantsCache[name]; ok {
-		return t
-	}
-	t := objects.NewType(name, nil)
-	commonConstantsCache[name] = t
-	return t
 }
 
 // raiseValue is the do-raise body of RAISE_VARARGS. val is whatever
