@@ -646,6 +646,58 @@ func cfgRemoveRedundantNopsAndJumps(g *cfgBuilder) {
 	}
 }
 
+// makeSuperInstruction folds the (inst1, inst2) pair into a single
+// super-opcode when both opargs fit in the low 4 bits and the pair
+// shares (or is missing) line information. inst2 becomes a NOP.
+//
+// CPython: Python/flowgraph.c:2572 make_super_instruction
+func makeSuperInstruction(inst1, inst2 *cfgInstr, superOp Opcode) {
+	line1 := inst1.Loc.Lineno
+	line2 := inst2.Loc.Lineno
+	if line1 >= 0 && line2 >= 0 && line1 != line2 {
+		return
+	}
+	if inst1.Oparg >= 16 || inst2.Oparg >= 16 {
+		return
+	}
+	inst1.Op = superOp
+	inst1.Oparg = (inst1.Oparg << 4) | inst2.Oparg
+	inst2.Op = NOP
+	inst2.Oparg = 0
+}
+
+// cfgInsertSuperinstructions scans each block for adjacent LOAD_FAST /
+// STORE_FAST pairs and folds them into LOAD_FAST_LOAD_FAST /
+// STORE_FAST_LOAD_FAST / STORE_FAST_STORE_FAST. Runs
+// remove_redundant_nops afterwards to drop the NOPs left by the fold.
+//
+// CPython: Python/flowgraph.c:2588 insert_superinstructions
+func cfgInsertSuperinstructions(g *cfgBuilder) {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		for i := range b.Instr {
+			cur := &b.Instr[i]
+			var nextOp Opcode
+			if i+1 < len(b.Instr) {
+				nextOp = b.Instr[i+1].Op
+			}
+			switch cur.Op {
+			case LOAD_FAST:
+				if nextOp == LOAD_FAST {
+					makeSuperInstruction(cur, &b.Instr[i+1], LOAD_FAST_LOAD_FAST)
+				}
+			case STORE_FAST:
+				switch nextOp {
+				case LOAD_FAST:
+					makeSuperInstruction(cur, &b.Instr[i+1], STORE_FAST_LOAD_FAST)
+				case STORE_FAST:
+					makeSuperInstruction(cur, &b.Instr[i+1], STORE_FAST_STORE_FAST)
+				}
+			}
+		}
+	}
+	cfgRemoveRedundantNops(g)
+}
+
 // basicblockHasNoLineno reports whether every instruction in b lacks a
 // source location (Lineno < 0). Used by the inline pass to decide
 // whether a target block can be folded without losing line info.

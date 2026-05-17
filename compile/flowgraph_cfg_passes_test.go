@@ -757,3 +757,28 @@ func TestCfgRemoveRedundantNopsAndJumpsConverges(t *testing.T) {
 		}
 	}
 }
+
+func TestCfgInsertSuperinstructionsFoldsLoadFastPair(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	g.addOp(LOAD_FAST, 0, loc)
+	g.addOp(LOAD_FAST, 1, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	cfgInsertSuperinstructions(g)
+	if g.EntryBlock.Instr[0].Op != LOAD_FAST_LOAD_FAST {
+		t.Fatalf("op = %s, want LOAD_FAST_LOAD_FAST", g.EntryBlock.Instr[0].Op.Name())
+	}
+	if g.EntryBlock.Instr[0].Oparg != (0<<4)|1 {
+		t.Fatalf("oparg = %d, want %d", g.EntryBlock.Instr[0].Oparg, (0<<4)|1)
+	}
+}
+
+func TestMakeSuperInstructionRejectsLargeOparg(t *testing.T) {
+	var loc ast.Pos
+	a := cfgInstr{Op: LOAD_FAST, Oparg: 17, Loc: loc}
+	b := cfgInstr{Op: LOAD_FAST, Oparg: 0, Loc: loc}
+	makeSuperInstruction(&a, &b, LOAD_FAST_LOAD_FAST)
+	if a.Op != LOAD_FAST {
+		t.Fatalf("op = %s, want unchanged LOAD_FAST when oparg >= 16", a.Op.Name())
+	}
+}
