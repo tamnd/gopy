@@ -159,41 +159,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(out)
 		return e.cacheAdvance(compile.BINARY_OP), nil, nil, false, true, nil
 
-	case compile.UNARY_NEGATIVE:
-		a := e.popObject()
-		neg := a.Type().Number
-		if neg == nil || neg.Negative == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: bad operand type for unary -: %s", a.Type().Name)
-		}
-		out, nerr := neg.Negative(a)
-		if nerr != nil {
-			return 0, nil, nil, false, true, nerr
-		}
-		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.UNARY_NOT:
-		a := e.popObject()
-		truthy, terr := objects.IsTruthy(a)
-		if terr != nil {
-			return 0, nil, nil, false, true, terr
-		}
-		e.pushObject(objects.NewBool(!truthy))
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.UNARY_INVERT:
-		a := e.popObject()
-		nm := a.Type().Number
-		if nm == nil || nm.Invert == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("TypeError: bad operand type for unary ~: '%s'", a.Type().Name)
-		}
-		out, ierr := nm.Invert(a)
-		if ierr != nil {
-			return 0, nil, nil, false, true, ierr
-		}
-		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.COMPARE_OP:
 		b := e.popObject()
 		a := e.popObject()

@@ -30,4 +30,7 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.LOAD_FROM_DICT_OR_GLOBALS:  true,
 	compile.LOAD_SMALL_INT:             true,
 	compile.LOAD_LOCALS:                true,
+	compile.UNARY_NEGATIVE:             true,
+	compile.UNARY_INVERT:               true,
+	compile.UNARY_NOT:                  true,
 }

@@ -203,7 +203,11 @@ func TestEvalBinaryOpMixedNumeric(t *testing.T) {
 
 func TestEvalUnaryNot(t *testing.T) {
 	ts := state.NewThread()
-	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.UNARY_NOT, 0)...)
+	// CPython 3.14 UNARY_NOT asserts PyStackRef_BoolCheck(value); the
+	// compiler always emits a TO_BOOL before it. Mirror that here so
+	// the input is the False singleton, not a raw int.
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.TO_BOOL, 0)...)
+	bc = append(bc, instr(compile.UNARY_NOT, 0)...)
 	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
 	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{int64(0)}}
 	v, err := EvalCode(ts, co, nil, nil)
