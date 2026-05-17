@@ -405,9 +405,23 @@ func (t *actionTranslator) translateTypedDecl() error {
 					}
 					t.locals[name] = true
 					t.intLocals[name] = true
-					fmt.Fprintf(t.writer, "%s, %s := %s(%s)\n",
-						goLocalName(outName), goLocalName(name),
-						h.goExpr, strings.Join(argExprs, ", "))
+					// In a nested block (if/else body) Go's `:=` would
+					// shadow the outer outName instead of writing through
+					// it. Emit a separate `var err int32` declaration and
+					// a plain `=` multi-assign so the outer slot is the
+					// one updated. CPython: a fresh `int err` inside a
+					// braced block in C declares a new err but still
+					// writes the outer PyObject *out via `&out`.
+					if t.nestDepth > 0 {
+						fmt.Fprintf(t.writer, "var %s int32\n", goLocalName(name))
+						fmt.Fprintf(t.writer, "%s, %s = %s(%s)\n",
+							goLocalName(outName), goLocalName(name),
+							h.goExpr, strings.Join(argExprs, ", "))
+					} else {
+						fmt.Fprintf(t.writer, "%s, %s := %s(%s)\n",
+							goLocalName(outName), goLocalName(name),
+							h.goExpr, strings.Join(argExprs, ", "))
+					}
 					fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(name))
 					fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(outName))
 					return nil
@@ -504,12 +518,52 @@ func (t *actionTranslator) translateStmtErrSetter(name string) error {
 	// formatted message is informational, but the surrounding code
 	// (and gate-skip logic in tests) reads it to decide whether the
 	// failure is a known gap or a real regression.
+	exc := extractExceptionName(inner)
 	if lit, ok := extractLastStringLiteral(inner); ok {
-		fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", lit)
+		if exc != "" {
+			fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", exc+": "+lit)
+		} else {
+			fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", lit)
+		}
+		return nil
+	}
+	// No string literal found, but a PyExc_<Name> token in the args is
+	// enough to label the failure so the test gate-skip logic can
+	// classify it (e.g. NameError vs a real regression).
+	if exc != "" {
+		fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", exc)
 		return nil
 	}
 	fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", name)
 	return nil
+}
+
+// extractExceptionName scans args for a `PyExc_<Name>` token and
+// returns "<Name>Error" so a translated err setter still carries the
+// exception type into pendingErr (e.g. NameError, SystemError). The
+// trailing "Error" is dropped if the token already ends with it
+// (PyExc_StopIteration -> "StopIteration"). Returns "" when no
+// PyExc_* token is present.
+func extractExceptionName(s string) string {
+	for tok := range strings.FieldsSeq(s) {
+		if !strings.HasPrefix(tok, "PyExc_") {
+			continue
+		}
+		// Strip surrounding punctuation (commas left in by the joined
+		// arg string).
+		tok = strings.TrimRight(tok, ",")
+		name := strings.TrimPrefix(tok, "PyExc_")
+		if name == "" {
+			continue
+		}
+		// PyExc_NameError, PyExc_SystemError, PyExc_ValueError, etc.
+		// already carry the suffix; pass through unchanged. The bare
+		// ones (PyExc_StopIteration, PyExc_GeneratorExit) we leave as
+		// is so the test logic that matches on the type name still
+		// works.
+		return name
+	}
+	return ""
 }
 
 // extractLastStringLiteral returns the contents of the last `"..."`

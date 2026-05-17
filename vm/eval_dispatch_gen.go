@@ -280,7 +280,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		v := e.localAt(int(oparg))
 		_ = v
 		if v.IsNull() {
-			e.setPendingErr("_PyEval_FormatExcCheckArg")
+			e.setPendingErr("UnboundLocalError")
 			return 0, nil, nil, false, e.error("error")
 		}
 		tmp := e.localAt(int(oparg))
@@ -297,7 +297,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 			return 0, nil, nil, false, e.error("error")
 		}
 		if err == 0 {
-			e.setPendingErr("_PyEval_FormatExcCheckArg")
+			e.setPendingErr("NameError")
 			return 0, nil, nil, false, e.error("error")
 		}
 		return e.advance(), nil, nil, false, nil
@@ -309,12 +309,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		var err int32
 		_ = err
 		if ns == nil {
-			e.setPendingErr("_PyErr_Format")
+			e.setPendingErr("SystemError")
 			return 0, nil, nil, false, e.error("error")
 		}
 		err = e.objectDelItem(ns, name)
 		if err != 0 {
-			e.setPendingErr("_PyEval_FormatExcCheckArg")
+			e.setPendingErr("NameError")
 			return 0, nil, nil, false, e.error("error")
 		}
 		return e.advance(), nil, nil, false, nil
@@ -371,7 +371,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 			matches := e.errExceptionMatches(pyerrors.PyExc_AttributeError)
 			_ = matches
 			if matches {
-				e.setPendingErr("_PyErr_Format")
+				e.setPendingErr("TypeError")
 			}
 			update.Close()
 			return 0, nil, nil, false, e.error("error")
@@ -403,7 +403,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		should_be_none := e.peek(0)
 		_ = should_be_none
 		if !should_be_none.IsNone() {
-			e.setPendingErr("PyErr_Format")
+			e.setPendingErr("TypeError")
 			return 0, nil, nil, false, e.error("error")
 		}
 		e.drop(1)
@@ -712,7 +712,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 			return 0, nil, nil, false, e.error("error")
 		}
 		if bc_o == nil {
-			e.setPendingErr("__build_class__ not found")
+			e.setPendingErr("NameError: __build_class__ not found")
 			return 0, nil, nil, false, e.error("error")
 		}
 		bc = stackref.FromObject(bc_o)
@@ -774,7 +774,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		value_s := e.localAt(int(oparg))
 		_ = value_s
 		if value_s.IsNull() {
-			e.setPendingErr("_PyEval_FormatExcCheckArg")
+			e.setPendingErr("UnboundLocalError")
 			return 0, nil, nil, false, e.error("error")
 		}
 		value = value_s.Dup()
@@ -818,26 +818,28 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 				v_o = e.dictLoadGlobal(e.globals(), e.builtinsDict(), name)
 				if v_o == nil {
 					if !e.errOccurred() {
-						e.setPendingErr("_PyEval_FormatExcCheckArg")
+						e.setPendingErr("NameError")
 					}
 					return 0, nil, nil, false, e.error("error")
 				}
 			} else {
-				v_o, err := e.mappingGetOptionalItem(e.globals(), name)
+				var err int32
+				v_o, err = e.mappingGetOptionalItem(e.globals(), name)
 				_ = err
 				_ = v_o
 				if err < 0 {
 					return 0, nil, nil, false, e.error("error")
 				}
 				if v_o == nil {
-					v_o, err := e.mappingGetOptionalItem(e.builtinsDict(), name)
+					var err int32
+					v_o, err = e.mappingGetOptionalItem(e.builtinsDict(), name)
 					_ = err
 					_ = v_o
 					if err < 0 {
 						return 0, nil, nil, false, e.error("error")
 					}
 					if v_o == nil {
-						e.setPendingErr("_PyEval_FormatExcCheckArg")
+						e.setPendingErr("NameError")
 						return 0, nil, nil, false, e.error("error")
 					}
 				}
@@ -852,7 +854,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		l := e.localsDict()
 		_ = l
 		if l == nil {
-			e.setPendingErr("no locals found")
+			e.setPendingErr("SystemError: no locals found")
 			return 0, nil, nil, false, e.error("error")
 		}
 		locals = stackref.FromObject(l)
@@ -1047,7 +1049,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		var ann_dict objects.Object
 		_ = ann_dict
 		if e.localsDict() == nil {
-			e.setPendingErr("no locals found when setting up annotations")
+			e.setPendingErr("SystemError: no locals found when setting up annotations")
 			return 0, nil, nil, false, e.error("error")
 		}
 		ann_dict, err := e.mappingGetOptionalItem(e.localsDict(), objects.NewStr("__annotations__"))
@@ -1179,7 +1181,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		var err int32
 		_ = err
 		if ns == nil {
-			e.setPendingErr("_PyErr_Format")
+			e.setPendingErr("SystemError")
 			v.Close()
 			return 0, nil, nil, false, e.error("error")
 		}

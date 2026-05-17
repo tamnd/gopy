@@ -1072,28 +1072,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.LOAD_FROM_DICT_OR_GLOBALS:
-		// PEP 695 helper: lookup name in the dict at TOS first; if
-		// absent, fall back to LOAD_GLOBAL semantics (globals -> builtins).
-		// CPython: Python/bytecodes.c LOAD_FROM_DICT_OR_GLOBALS.
-		dictTOS := e.popObject()
-		nameObj := e.f.Code.Names[oparg]
-		nameKey := objects.NewStr(nameObj)
-		if d, ok := dictTOS.(*objects.Dict); ok {
-			if v, derr := d.GetItem(nameKey); derr == nil && v != nil {
-				e.pushObject(v)
-				return e.advance(), nil, nil, false, true, nil
-			}
-		}
-		v, perr := e.execNameOp(compile.LOAD_GLOBAL, oparg)
-		if perr != nil {
-			return 0, nil, nil, false, true, perr
-		}
-		if v != nil {
-			e.pushObject(v)
-		}
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.LOAD_COMMON_CONSTANT:
 		// 3.14 fast load for a small set of compiler-emitted constants.
 		// Index 0 is AssertionError, used by `assert`. Without an
