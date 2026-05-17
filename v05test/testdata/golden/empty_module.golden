@@ -1,2 +1,3 @@
-   0 LOAD_CONST                     0
-   2 RETURN_VALUE                   0
+   0 RESUME                         0
+   2 LOAD_CONST                     0
+   4 RETURN_VALUE                   0

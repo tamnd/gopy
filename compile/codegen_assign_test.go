@@ -142,8 +142,8 @@ func TestAssignWithStarUsesUnpackEx(t *testing.T) {
 	}
 	// CPython packs (after << 8) | before. For a, *b, c: before=1 after=1.
 	want_oparg := int32((1 << 8) | 1)
-	if u.Seq.Instrs[1].Oparg != want_oparg {
-		t.Errorf("UNPACK_EX oparg = %#x, want %#x", u.Seq.Instrs[1].Oparg, want_oparg)
+	if u.Seq.Instrs[2].Oparg != want_oparg {
+		t.Errorf("UNPACK_EX oparg = %#x, want %#x", u.Seq.Instrs[2].Oparg, want_oparg)
 	}
 }
 

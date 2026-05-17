@@ -29,8 +29,8 @@ func TestEmptyClassEmitsBuildClassCall(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Fatalf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[5].Op != CALL || u.Seq.Instrs[5].Oparg != 2 {
-		t.Errorf("CALL oparg = %d, want 2", u.Seq.Instrs[5].Oparg)
+	if u.Seq.Instrs[6].Op != CALL || u.Seq.Instrs[6].Oparg != 2 {
+		t.Errorf("CALL oparg = %d, want 2", u.Seq.Instrs[6].Oparg)
 	}
 }
 
@@ -58,8 +58,8 @@ func TestClassWithBaseEmitsBaseLoad(t *testing.T) {
 	if !equalStrings(got, want) {
 		t.Fatalf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[6].Oparg != 3 {
-		t.Errorf("CALL oparg = %d, want 3", u.Seq.Instrs[6].Oparg)
+	if u.Seq.Instrs[7].Oparg != 3 {
+		t.Errorf("CALL oparg = %d, want 3", u.Seq.Instrs[7].Oparg)
 	}
 }
 

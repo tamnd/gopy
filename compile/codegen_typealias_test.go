@@ -31,7 +31,7 @@ func TestTypeAliasNonGeneric(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Fatalf("ops = %v, want %v", got, want)
 	}
-	if op := u.Seq.Instrs[3]; op.Op != CALL_INTRINSIC_1 || op.Oparg != intrinsicTypeAlias {
+	if op := u.Seq.Instrs[4]; op.Op != CALL_INTRINSIC_1 || op.Oparg != intrinsicTypeAlias {
 		t.Errorf("CALL_INTRINSIC_1 oparg = %d, want %d (TYPEALIAS)",
 			op.Oparg, intrinsicTypeAlias)
 	}

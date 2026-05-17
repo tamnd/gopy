@@ -61,7 +61,7 @@ func TestBinOpEmitsBinaryOp(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if got := u.Seq.Instrs[2].Oparg; got != nbAdd {
+	if got := u.Seq.Instrs[3].Oparg; got != nbAdd {
 		t.Errorf("BINARY_OP oparg = %d, want NB_ADD (%d)", got, nbAdd)
 	}
 }
@@ -139,8 +139,8 @@ func TestCompareInUsesContainsOp(t *testing.T) {
 	if got[2] != "CONTAINS_OP" {
 		t.Errorf("expected CONTAINS_OP, got %s", got[2])
 	}
-	if u.Seq.Instrs[2].Oparg != 1 {
-		t.Errorf("expected `not in` to set oparg=1, got %d", u.Seq.Instrs[2].Oparg)
+	if u.Seq.Instrs[3].Oparg != 1 {
+		t.Errorf("expected `not in` to set oparg=1, got %d", u.Seq.Instrs[3].Oparg)
 	}
 }
 
@@ -318,8 +318,8 @@ func TestSubscriptLoadEmitsBinaryOpSubscr(t *testing.T) {
 	if !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[2].Oparg != nbSubscr {
-		t.Errorf("expected NB_SUBSCR oparg, got %d", u.Seq.Instrs[2].Oparg)
+	if u.Seq.Instrs[3].Oparg != nbSubscr {
+		t.Errorf("expected NB_SUBSCR oparg, got %d", u.Seq.Instrs[3].Oparg)
 	}
 }
 
@@ -361,8 +361,8 @@ func TestCallPlainEmitsCall(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[4].Oparg != 2 {
-		t.Errorf("CALL oparg = %d, want 2", u.Seq.Instrs[4].Oparg)
+	if u.Seq.Instrs[5].Oparg != 2 {
+		t.Errorf("CALL oparg = %d, want 2", u.Seq.Instrs[5].Oparg)
 	}
 }
 
@@ -425,8 +425,8 @@ func TestCallStarStarUsesCallFunctionExWithFlag(t *testing.T) {
 	if exIdx < 0 {
 		t.Fatalf("expected CALL_FUNCTION_EX in ops; got %v", got)
 	}
-	if u.Seq.Instrs[exIdx].Oparg&1 == 0 {
+	if u.Seq.Instrs[exIdx+1].Oparg&1 == 0 {
 		t.Errorf("CALL_FUNCTION_EX oparg low bit must be set when **kw present, got %d",
-			u.Seq.Instrs[exIdx].Oparg)
+			u.Seq.Instrs[exIdx+1].Oparg)
 	}
 }

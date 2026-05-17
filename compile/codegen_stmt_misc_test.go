@@ -49,8 +49,8 @@ func TestAugAssignNameEmitsLoadInPlaceStore(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[2].Oparg != 13 {
-		t.Errorf("BINARY_OP oparg = %d, want NB_INPLACE_ADD (13)", u.Seq.Instrs[2].Oparg)
+	if u.Seq.Instrs[3].Oparg != 13 {
+		t.Errorf("BINARY_OP oparg = %d, want NB_INPLACE_ADD (13)", u.Seq.Instrs[3].Oparg)
 	}
 }
 
@@ -110,8 +110,8 @@ func TestRaiseBareEmitsRaiseVarargs0(t *testing.T) {
 	if got[0] != "RAISE_VARARGS" {
 		t.Fatalf("ops = %v, want RAISE_VARARGS first", got)
 	}
-	if u.Seq.Instrs[0].Oparg != 0 {
-		t.Errorf("RAISE_VARARGS oparg = %d, want 0", u.Seq.Instrs[0].Oparg)
+	if u.Seq.Instrs[1].Oparg != 0 {
+		t.Errorf("RAISE_VARARGS oparg = %d, want 0", u.Seq.Instrs[1].Oparg)
 	}
 }
 
@@ -122,8 +122,8 @@ func TestRaiseExcEmitsRaiseVarargs1(t *testing.T) {
 	if !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[1].Oparg != 1 {
-		t.Errorf("RAISE_VARARGS oparg = %d, want 1", u.Seq.Instrs[1].Oparg)
+	if u.Seq.Instrs[2].Oparg != 1 {
+		t.Errorf("RAISE_VARARGS oparg = %d, want 1", u.Seq.Instrs[2].Oparg)
 	}
 }
 
@@ -134,8 +134,8 @@ func TestRaiseFromEmitsRaiseVarargs2(t *testing.T) {
 	if !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[2].Oparg != 2 {
-		t.Errorf("RAISE_VARARGS oparg = %d, want 2", u.Seq.Instrs[2].Oparg)
+	if u.Seq.Instrs[3].Oparg != 2 {
+		t.Errorf("RAISE_VARARGS oparg = %d, want 2", u.Seq.Instrs[3].Oparg)
 	}
 }
 
