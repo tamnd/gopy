@@ -28,6 +28,30 @@ import (
 	"github.com/tamnd/gopy/state"
 )
 
+// init wires the const-wrap hook so objects.wrapConstAttr (the path
+// dis.py and friends take when they read co_consts) can convert
+// compile-pipeline value types into Objects without dragging the
+// compile package into objects/.
+func init() {
+	objects.ConstWrapHook = func(v any) (objects.Object, bool) {
+		switch x := v.(type) {
+		case *compile.Code:
+			return liftNestedCode(x), true
+		case *compile.ConstTuple:
+			items := make([]objects.Object, len(x.Values))
+			for i, raw := range x.Values {
+				item, err := wrapConst(raw)
+				if err != nil {
+					return nil, false
+				}
+				items[i] = item
+			}
+			return objects.NewTuple(items), true
+		}
+		return nil, false
+	}
+}
+
 // liftNestedCode mirrors pythonrun.liftCode for inner code objects
 // reached through a parent's Consts slot. Nested defs / lambdas /
 // class bodies all surface here.

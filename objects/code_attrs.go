@@ -115,6 +115,11 @@ func wrapConstAttr(v any) Object {
 	case Object:
 		return x
 	}
+	if ConstWrapHook != nil {
+		if o, ok := ConstWrapHook(v); ok {
+			return o
+		}
+	}
 	return NewStr(fmt.Sprintf("%v", v))
 }
 
