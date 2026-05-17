@@ -1013,12 +1013,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.setLocal(lo, r2)
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.LOAD_SMALL_INT:
-		// 3.14 fast path: oparg is the literal int value (0..255). No
-		// const lookup, no indirection.
-		e.pushObject(objects.NewInt(int64(oparg)))
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.TO_BOOL:
 		// Replace TOS with bool(TOS).
 		v := e.popObject()
@@ -1086,27 +1080,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		default:
 			return 0, nil, nil, false, true, fmt.Errorf("LOAD_COMMON_CONSTANT: unknown index %d", oparg)
 		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.LOAD_LOCALS:
-		// Push the f_locals dict. Class-body frames keep an explicit
-		// Locals dict; fast-locals frames synthesize one from the
-		// current LocalsPlus values keyed by Code.Varnames.
-		if e.f.Locals != nil {
-			e.pushObject(e.f.Locals)
-			return e.advance(), nil, nil, false, true, nil
-		}
-		d := objects.NewDict()
-		for i, name := range e.f.Code.Varnames {
-			ref := e.localAt(i)
-			if ref.IsNull() {
-				continue
-			}
-			if serr := d.SetItem(objects.NewStr(name), ref.AsObject()); serr != nil {
-				return 0, nil, nil, false, true, serr
-			}
-		}
-		e.pushObject(d)
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_FROM_DICT_OR_DEREF:
