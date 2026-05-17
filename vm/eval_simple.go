@@ -279,14 +279,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.cacheAdvance(compile.STORE_SUBSCR), nil, nil, false, true, nil
 
-	case compile.DELETE_SUBSCR:
-		key := e.popObject()
-		container := e.popObject()
-		if derr := delItem(container, key); derr != nil {
-			return 0, nil, nil, false, true, derr
-		}
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.CONTAINS_OP:
 		// Stack layout: [..., left, right]. CPython pops right (haystack)
 		// then left (needle); oparg low bit toggles `not in`.
@@ -593,19 +585,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.LIST_APPEND:
-		// Stack: ..., list, ..., value (oparg slots above list).
-		// Pops value, appends to the list at depth oparg.
-		//
-		// CPython: Python/bytecodes.c LIST_APPEND
-		v := e.popObject()
-		l, ok := e.peek(int(oparg) - 1).AsObject().(*objects.List)
-		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("LIST_APPEND: target not a list")
-		}
-		l.Append(v)
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.LIST_EXTEND:
 		// Pops iter, extends list at depth oparg with all its items.
 		v := e.popObject()
@@ -619,22 +598,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		for _, it := range items {
 			l.Append(it)
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.MAP_ADD:
-		// Stack: ..., dict, ..., key, value. Pops key+value, sets in
-		// the dict at depth oparg.
-		//
-		// CPython: Python/bytecodes.c MAP_ADD
-		val := e.popObject()
-		key := e.popObject()
-		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
-		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("MAP_ADD: target not a dict")
-		}
-		if serr := d.SetItem(key, val); serr != nil {
-			return 0, nil, nil, false, true, serr
 		}
 		return e.advance(), nil, nil, false, true, nil
 
@@ -686,21 +649,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		interpolations := e.popObject()
 		strings := e.popObject()
 		e.pushObject(objects.NewTemplateStr(strings, interpolations))
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.SET_ADD:
-		// Stack: ..., set, ..., value (oparg slots above set). Pops value,
-		// adds to the set at depth oparg.
-		//
-		// CPython: Python/bytecodes.c SET_ADD
-		v := e.popObject()
-		s, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Set)
-		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("SET_ADD: target not a set")
-		}
-		if aerr := s.Add(v); aerr != nil {
-			return 0, nil, nil, false, true, aerr
-		}
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.SET_UPDATE:
