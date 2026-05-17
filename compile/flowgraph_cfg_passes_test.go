@@ -306,6 +306,37 @@ func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	}
 }
 
+func TestBasicblockFoldConstUnaryopNegates(t *testing.T) {
+	consts := []any{int64(5)}
+	bb := &basicblock{Instr: []cfgInstr{
+		{Op: LOAD_CONST, Oparg: 0},
+		{Op: UNARY_NEGATIVE},
+	}}
+	if got := basicblockFoldConstUnaryop(bb, &consts); got != 1 {
+		t.Fatalf("folded = %d, want 1", got)
+	}
+	if bb.Instr[0].Op != NOP {
+		t.Errorf("loader = %v, want NOP", bb.Instr[0].Op)
+	}
+	if bb.Instr[1].Op != LOAD_CONST {
+		t.Fatalf("instr[1] = %v, want LOAD_CONST", bb.Instr[1].Op)
+	}
+	if v := consts[bb.Instr[1].Oparg]; v != int64(-5) {
+		t.Errorf("folded value = %v, want -5", v)
+	}
+}
+
+func TestBasicblockFoldConstUnaryopSkipsNonConst(t *testing.T) {
+	consts := []any{int64(5)}
+	bb := &basicblock{Instr: []cfgInstr{
+		{Op: LOAD_FAST, Oparg: 0},
+		{Op: UNARY_NEGATIVE},
+	}}
+	if got := basicblockFoldConstUnaryop(bb, &consts); got != 0 {
+		t.Errorf("folded = %d, want 0 (operand not const)", got)
+	}
+}
+
 func TestBasicblockSwaptimizeCollapsesDoubleSwap(t *testing.T) {
 	// SWAP(2); SWAP(2) is identity. swaptimize should NOP both.
 	bb := &basicblock{}

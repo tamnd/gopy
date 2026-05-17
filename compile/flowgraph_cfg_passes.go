@@ -436,6 +436,60 @@ func cfgInlineSmallOrNoLinenoBlocks(g *cfgBuilder) {
 	}
 }
 
+// basicblockFoldConstUnaryop folds UNARY_NEGATIVE / UNARY_INVERT /
+// UNARY_NOT preceded by a LOAD_CONST(_SMALL_INT). The const loader
+// becomes NOP and the unary slot becomes LOAD_CONST of the folded
+// value. Within a basic block the run cannot be split by a jump
+// landing in the middle, so no pinned-target gate is needed.
+//
+// CPython: Python/flowgraph.c:1935 fold_const_unaryop
+func basicblockFoldConstUnaryop(bb *basicblock, consts *[]any) int {
+	if consts == nil || len(bb.Instr) < 2 {
+		return 0
+	}
+	folded := 0
+	for i := 1; i < len(bb.Instr); i++ {
+		ins := &bb.Instr[i]
+		if !isFoldableUnary(ins.Op) {
+			continue
+		}
+		operand, ok := cfgLoadsConstValue(&bb.Instr[i-1], *consts)
+		if !ok {
+			continue
+		}
+		result, ok := evalConstUnaryop(ins.Op, operand)
+		if !ok {
+			continue
+		}
+		bb.Instr[i-1].Op = NOP
+		bb.Instr[i-1].Oparg = 0
+		bb.Instr[i-1].Target = nil
+		ins.Op = LOAD_CONST
+		ins.Oparg = int32(appendConst(consts, result))
+		folded++
+	}
+	return folded
+}
+
+// cfgLoadsConstValue is the cfgInstr-flavored loadsConstValue. Returns
+// the underlying const for LOAD_CONST / LOAD_SMALL_INT, ok=false
+// otherwise.
+//
+// CPython: Python/flowgraph.c:1389 loads_const + get_const_value
+func cfgLoadsConstValue(ins *cfgInstr, consts []any) (any, bool) {
+	switch ins.Op {
+	case LOAD_CONST:
+		idx := int(ins.Oparg)
+		if idx < 0 || idx >= len(consts) {
+			return nil, false
+		}
+		return consts[idx], true
+	case LOAD_SMALL_INT:
+		return int64(ins.Oparg), true
+	}
+	return nil, false
+}
+
 // basicblockSwaptimize collapses a run of SWAP/NOP instructions starting
 // at *ix into the optimal SWAP sequence realizing the same permutation.
 // Returns the count of opcodes turned into NOPs and advances *ix past
