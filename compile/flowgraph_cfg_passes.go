@@ -512,7 +512,7 @@ func basicblockHasFallthrough(b *basicblock) bool {
 //
 // switch hurts the 1:1 mapping with flowgraph.c:886.
 //
-//nolint:gocognit,gocyclo // direct port of the CPython algorithm; flattening the
+//nolint:gocognit // direct port of the CPython algorithm; flattening the
 func cfgLabelExceptionTargets(entry *basicblock) {
 	for b := entry; b != nil; b = b.Next {
 		b.Visited = false
@@ -526,9 +526,6 @@ func cfgLabelExceptionTargets(entry *basicblock) {
 		todo = todo[:len(todo)-1]
 		exceptStack = b.ExceptStack
 		b.ExceptStack = nil
-		if exceptStack == nil {
-			exceptStack = makeExceptStack()
-		}
 		handler := exceptStackTop(exceptStack)
 		lastYieldExceptDepth := -1
 		for i := range b.Instr {
@@ -559,11 +556,7 @@ func cfgLabelExceptionTargets(entry *basicblock) {
 				}
 			case ins.Op == YIELD_VALUE:
 				ins.Except = handler
-				if exceptStack != nil {
-					lastYieldExceptDepth = exceptStack.depth
-				} else {
-					lastYieldExceptDepth = 0
-				}
+				lastYieldExceptDepth = exceptStack.depth
 			case ins.Op == RESUME:
 				ins.Except = handler
 				if ins.Oparg != resumeAtFuncStart {
@@ -1243,33 +1236,12 @@ func basicblockFoldConstantIntrinsicListToTuple(bb *basicblock, i int, consts *[
 	return 0
 }
 
-// cfgLoadInt64 extracts the int64 value from a LOAD_CONST or
-// LOAD_SMALL_INT instruction. Mirrors CPython's get_const_value for
-// the integer path used in fold_const_binop.
+// basicblockFoldConstBinop rewrites `LOAD_CONST a; LOAD_CONST b;
+// BINARY_OP op` triples where both operands are int64 constants and op
+// has a defined integer result. The two loads become NOPs and the
+// BINARY_OP becomes LOAD_CONST of the folded value.
 //
-// CPython: Python/flowgraph.c:1294 get_const_value
-func cfgLoadInt64(ins *cfgInstr, consts []any) (int64, bool) {
-	if ins.Op == LOAD_SMALL_INT {
-		return int64(ins.Oparg), true
-	}
-	if ins.Op == LOAD_CONST {
-		idx := int(ins.Oparg)
-		if idx < 0 || idx >= len(consts) {
-			return 0, false
-		}
-		v, ok := consts[idx].(int64)
-		return v, ok
-	}
-	return 0, false
-}
-
-// basicblockFoldConstBinop rewrites `LOAD_CONST/LOAD_SMALL_INT a;
-// LOAD_CONST/LOAD_SMALL_INT b; BINARY_OP op` triples where both
-// operands are int64 constants and op has a defined integer result.
-// The two loads become NOPs and the BINARY_OP becomes LOAD_CONST of
-// the folded value.
-//
-// CPython: Python/flowgraph.c:1847 fold_const_binop
+// CPython: Python/flowgraph.c:1894 fold_const_binop
 func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
 	if consts == nil {
 		return 0
@@ -1279,14 +1251,15 @@ func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
 		a := &bb.Instr[i]
 		b := &bb.Instr[i+1]
 		c := &bb.Instr[i+2]
-		isConstLoader := func(op Opcode) bool {
-			return op == LOAD_CONST || op == LOAD_SMALL_INT
-		}
-		if !isConstLoader(a.Op) || !isConstLoader(b.Op) || c.Op != BINARY_OP {
+		if a.Op != LOAD_CONST || b.Op != LOAD_CONST || c.Op != BINARY_OP {
 			continue
 		}
-		x, xok := cfgLoadInt64(a, *consts)
-		y, yok := cfgLoadInt64(b, *consts)
+		ai, bi := int(a.Oparg), int(b.Oparg)
+		if ai < 0 || ai >= len(*consts) || bi < 0 || bi >= len(*consts) {
+			continue
+		}
+		x, xok := (*consts)[ai].(int64)
+		y, yok := (*consts)[bi].(int64)
 		if !xok || !yok {
 			continue
 		}
@@ -1303,11 +1276,6 @@ func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
 		b.Target = nil
 		c.Op = LOAD_CONST
 		c.Oparg = int32(idx)
-		// Promote the folded result to LOAD_SMALL_INT when eligible,
-		// matching CPython's instr_make_load_const -> maybe_instr_make_load_smallint.
-		//
-		// CPython: Python/flowgraph.c:1408 maybe_instr_make_load_smallint
-		maybeInstrMakeLoadSmallint(c, *consts)
 		folded++
 		i += 2
 	}

@@ -34,14 +34,10 @@ func cfgFromSequence(seq *Sequence) *cfgBuilder {
 		}
 		g.addOp(ins.Op, ins.Oparg, ins.Loc)
 		idxToBlock[i] = g.CurBlock
-		// Handler.Label is NOT stashed: CPython's _PyCfg_FromInstructionSequence
-		// does not preserve ExceptHandlerInfo into the CFG. The exception handler
-		// connections are established later by cfgLabelExceptionTargets which
-		// reads the SETUP_X jump targets to reconstruct the handler chain.
-		// Stashing here would corrupt non-jump instruction opargs for every
-		// instruction inside a try-block.
-		//
-		// CPython: Python/flowgraph.c:3923 _PyCfg_FromInstructionSequence
+		if ins.Handler.Label >= 0 {
+			last := g.CurBlock.lastInstr()
+			last.Oparg = int32(ins.Handler.Label) // temp stash for wiring
+		}
 	}
 
 	rewriteJumpTargets(g, idxToBlock)

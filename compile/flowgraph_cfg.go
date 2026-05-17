@@ -213,11 +213,9 @@ func (g *cfgBuilder) addOp(op Opcode, oparg int32, loc ast.Pos) {
 // block instead of allocating a fresh one.
 //
 // CPython: Python/flowgraph.c:357 cfg_builder_current_block_is_terminated
-// CPython's IS_TERMINATOR_OPCODE covers both scope-exit opcodes and
-// any opcode that carries a jump target (OPCODE_HAS_JUMP).
 func (g *cfgBuilder) currentBlockTerminated() bool {
 	last := g.CurBlock.lastInstr()
-	if last != nil && (isTerminator(last.Op) || hasJumpTarget(last.Op)) {
+	if last != nil && isTerminator(last.Op) {
 		return true
 	}
 	if g.HasLabel {

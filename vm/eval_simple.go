@@ -946,26 +946,18 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		}
 		fallthrough
 	case compile.LOAD_GLOBAL:
-		// Push the callable first, then NULL on top. This matches CPython's
-		// LOAD_GLOBAL semantics where the stack layout for CALL is
-		// [callable, NULL_or_self, arg0, ...] with callable at the bottom.
-		// The push_null flag means "insert a NULL slot above the callable".
-		//
-		// CPython: Python/bytecodes.c LOAD_GLOBAL (output: null, v) where
-		// v is TOS and null is below it — so callable lands first.
-		var gv objects.Object
-		if v, ok := lookupIn(e.f.Globals, keyObj); ok {
-			gv = v
-		} else if v, ok := lookupIn(e.f.Builtins, keyObj); ok {
-			gv = v
-		} else {
-			return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
-		}
-		e.pushObject(gv)
 		if pushNull {
 			e.push(stackref.Null)
 		}
-		return gv, nil
+		if v, ok := lookupIn(e.f.Globals, keyObj); ok {
+			e.pushObject(v)
+			return v, nil
+		}
+		if v, ok := lookupIn(e.f.Builtins, keyObj); ok {
+			e.pushObject(v)
+			return v, nil
+		}
+		return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
 
 	case compile.STORE_NAME:
 		v := e.popObject()

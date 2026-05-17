@@ -258,9 +258,6 @@ var opcodeArity = map[Opcode]arityEntry{
 	MATCH_CLASS:                arity(3, 1),
 	TO_BOOL:                    arity(1, 1),
 	NOT_TAKEN:                  arity(0, 0),
-	LOAD_FAST_LOAD_FAST:        arity(0, 2),
-	STORE_FAST_LOAD_FAST:       arity(1, 1),
-	STORE_FAST_STORE_FAST:      arity(2, 0),
 	SETUP_ANNOTATIONS:          arity(0, 0),
 	EXIT_INIT_CHECK:            arity(1, 0),
 }

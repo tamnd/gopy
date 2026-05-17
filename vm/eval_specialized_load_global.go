@@ -27,16 +27,13 @@ import (
 )
 
 // pushGlobalResult finalizes the stack shape for a LOAD_GLOBAL fast
-// path hit: the loaded value first, then an optional NULL slot on top.
-// CPython: Python/bytecodes.c LOAD_GLOBAL output order is [null, v]
-// (v on TOS, null below) so callable lands at the bottom of the call
-// frame, matching the [callable, NULL_or_self, args...] layout CALL
-// expects.
+// path hit: optional NULL self slot when bit 0 of oparg is set, then
+// the looked-up value.
 func (e *evalState) pushGlobalResult(value objects.Object, oparg uint32) {
-	e.pushObject(value)
 	if oparg&1 != 0 {
 		e.push(stackref.Null)
 	}
+	e.pushObject(value)
 }
 
 // fastLoadGlobalModule implements LOAD_GLOBAL_MODULE.
