@@ -153,6 +153,12 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	foldTupleOfConstants(seq, consts)
 	optimizeListsAndSets(seq, consts)
 
+	// PASS 0b3: fold unary opcodes on const operands so `-1` becomes a
+	// single LOAD_CONST -1 rather than LOAD_CONST 1 + UNARY_NEGATIVE.
+	//
+	// CPython: Python/flowgraph.c:1935 fold_const_unaryop
+	foldConstUnaryop(seq, consts)
+
 	// PASS 0c: prune the const-pool entries no surviving instruction
 	// references. rewriteLoadSmallInt leaves small-int slots orphaned;
 	// removing them here is what brings co_consts byte-equal with

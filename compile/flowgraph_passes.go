@@ -237,6 +237,118 @@ func rewriteLoadSmallInt(seq *Sequence, consts *[]any) int {
 	return rewritten
 }
 
+// foldConstUnaryop folds `LOAD_CONST x; UNARY_NEGATIVE | UNARY_INVERT |
+// UNARY_NOT` pairs into a single LOAD_CONST holding the evaluated
+// result. CPython also folds `CALL_INTRINSIC_1 INTRINSIC_UNARY_POSITIVE`,
+// which only matters for explicit unary `+` on a literal; UAdd on a
+// numeric constant is already collapsed in the parser-folding pass.
+//
+// CPython: Python/flowgraph.c:1935 fold_const_unaryop
+// CPython: Python/flowgraph.c:1894 eval_const_unaryop
+func foldConstUnaryop(seq *Sequence, consts *[]any) int {
+	if consts == nil || len(seq.Instrs) < 2 {
+		return 0
+	}
+	pinned := pinnedTargets(seq)
+	folded := 0
+	for i := 1; i < len(seq.Instrs); i++ {
+		ins := &seq.Instrs[i]
+		if !isFoldableUnary(ins.Op) {
+			continue
+		}
+		if pinned[i] {
+			continue
+		}
+		operand, ok := loadsConstValue(&seq.Instrs[i-1], *consts)
+		if !ok {
+			continue
+		}
+		result, ok := evalConstUnaryop(ins.Op, operand)
+		if !ok {
+			continue
+		}
+		setNop(&seq.Instrs[i-1])
+		ins.Op = LOAD_CONST
+		ins.Oparg = int32(appendConst(consts, result))
+		folded++
+	}
+	return folded
+}
+
+// isFoldableUnary reports whether op is one of the three unary opcodes
+// the folder rewrites.
+//
+// CPython: Python/flowgraph.c:1898 eval_const_unaryop opcode switch
+func isFoldableUnary(op Opcode) bool {
+	switch op {
+	case UNARY_NEGATIVE, UNARY_INVERT, UNARY_NOT:
+		return true
+	}
+	return false
+}
+
+// evalConstUnaryop applies one unary opcode to a const operand, mirroring
+// CPython's PyNumber_Negative / PyNumber_Invert / bool(!x) dispatch.
+// Returns ok=false when the operand type is not foldable (e.g. unary
+// negate of a string) or would overflow the int64 representation.
+//
+// CPython: Python/flowgraph.c:1894 eval_const_unaryop
+func evalConstUnaryop(op Opcode, operand any) (any, bool) {
+	switch op {
+	case UNARY_NEGATIVE:
+		switch v := operand.(type) {
+		case int64:
+			if v == minInt64 {
+				return nil, false
+			}
+			return -v, true
+		case float64:
+			return -v, true
+		}
+	case UNARY_INVERT:
+		// CPython rejects ~bool with a SyntaxWarning. gopy's const pool
+		// doesn't carry bool through this path (the AST folder promotes
+		// `True` / `False` to int in numeric context), so the bool
+		// guard is unreachable here.
+		if v, ok := operand.(int64); ok {
+			return ^v, true
+		}
+	case UNARY_NOT:
+		b, ok := constTruthValue(operand)
+		if !ok {
+			return nil, false
+		}
+		return !b, true
+	}
+	return nil, false
+}
+
+const minInt64 int64 = -1 << 63
+
+// constTruthValue mirrors PyObject_IsTrue for the const-pool value
+// shapes gopy stores. Returns ok=false when the value's truthiness is
+// not statically determinable (e.g. a user-typed value reaching the
+// const pool via marshal round-trip).
+//
+// CPython: Python/flowgraph.c:1916 eval_const_unaryop UNARY_NOT case
+func constTruthValue(v any) (bool, bool) {
+	switch x := v.(type) {
+	case nil:
+		return false, true
+	case bool:
+		return x, true
+	case int64:
+		return x != 0, true
+	case float64:
+		return x != 0, true
+	case string:
+		return x != "", true
+	case complex128:
+		return real(x) != 0 || imag(x) != 0, true
+	}
+	return false, false
+}
+
 // loadsConstValue reports whether ins is a const-loading instruction
 // (LOAD_CONST or LOAD_SMALL_INT) and returns the underlying Python
 // value. For LOAD_SMALL_INT the value is the literal oparg as int64.
