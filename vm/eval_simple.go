@@ -173,26 +173,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(out)
 		return e.cacheAdvance(compile.COMPARE_OP), nil, nil, false, true, nil
 
-	case compile.BUILD_MAP:
-		n := int(oparg)
-		d := objects.NewDict()
-		// Stack layout: ..., k0, v0, k1, v1, ..., kn-1, vn-1 (top)
-		// We pop pairs in reverse and insert; insertion order is then
-		// reversed but Dict iteration order isn't pinned in v0.6.
-		pairs := make([][2]objects.Object, n)
-		for i := n - 1; i >= 0; i-- {
-			v := e.popObject()
-			k := e.popObject()
-			pairs[i] = [2]objects.Object{k, v}
-		}
-		for _, p := range pairs {
-			if serr := d.SetItem(p[0], p[1]); serr != nil {
-				return 0, nil, nil, false, true, serr
-			}
-		}
-		e.pushObject(d)
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.FOR_ITER:
 		// Stack: [iter]. Pop iter, peek by re-pushing. CPython peeks
 		// directly to avoid the dup but the FOR_ITER arm in 3.14 keeps
@@ -556,14 +536,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			}
 		}
 		e.pushObject(s)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.BUILD_TEMPLATE:
-		// PEP 750 t-string literal. Stack: [strings_tuple, interpolations_tuple].
-		// CPython: Python/bytecodes.c:1977 BUILD_TEMPLATE
-		interpolations := e.popObject()
-		strings := e.popObject()
-		e.pushObject(objects.NewTemplateStr(strings, interpolations))
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.CALL_INTRINSIC_1:

@@ -54,4 +54,6 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.BUILD_LIST:                 true,
 	compile.BUILD_TUPLE:                true,
 	compile.BUILD_SLICE:                true,
+	compile.BUILD_MAP:                  true,
+	compile.BUILD_TEMPLATE:             true,
 }
