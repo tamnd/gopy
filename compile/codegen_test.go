@@ -37,9 +37,20 @@ func mustBuildSym(t *testing.T, m ast.Mod) *symtable.Table {
 	return st
 }
 
+// opNames lists the opcode names emitted into u.Seq. For module-scope
+// units it skips the leading RESUME prologue (emitted by Codegen to
+// mirror CPython's codegen_enter_scope) so existing want lists, which
+// were authored before the prologue landed, keep matching the body.
+// Inner function / class / comprehension Units already had their own
+// RESUME emission before the prologue port and their tests bake it in,
+// so we leave those alone.
 func opNames(u *Unit) []string {
-	out := make([]string, len(u.Seq.Instrs))
-	for i, in := range u.Seq.Instrs {
+	instrs := u.Seq.Instrs
+	if u.ScopeType == symtable.ModuleBlock && len(instrs) > 0 && instrs[0].Op == RESUME {
+		instrs = instrs[1:]
+	}
+	out := make([]string, len(instrs))
+	for i, in := range instrs {
 		out[i] = in.Op.Name()
 	}
 	return out

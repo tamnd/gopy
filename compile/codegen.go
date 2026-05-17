@@ -161,6 +161,18 @@ func (c *Compiler) Codegen(sc *symtable.Entry, mod ast.Mod) (*Unit, error) {
 	c.enterScope(sc)
 	defer c.leaveScope()
 
+	// Module scope opens with RESUME RESUME_AT_FUNC_START at line 0,
+	// matching CPython's codegen_enter_scope: every scope entry emits
+	// the prologue, and COMPILE_SCOPE_MODULE forces loc.lineno = 0 so
+	// the dis output prints `0 RESUME 0` ahead of the body. Function,
+	// class, and comprehension scopes emit their own RESUME at their
+	// own enterScope call sites.
+	//
+	// CPython: Python/codegen.c:647 codegen_enter_scope (the
+	// ADDOP_I(c, loc, RESUME, RESUME_AT_FUNC_START) after
+	// _PyCompile_EnterScope, with loc.lineno = 0 for module scope).
+	c.addOpI(RESUME, resumeAtFuncStart, ast.Pos{Lineno: 0})
+
 	switch m := mod.(type) {
 	case *ast.Module:
 		if err := c.visitModule(m); err != nil {

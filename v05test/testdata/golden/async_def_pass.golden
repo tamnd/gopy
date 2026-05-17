@@ -1,8 +1,9 @@
-   0 LOAD_CONST                     0
-   2 MAKE_FUNCTION                  0
-   4 STORE_NAME                     0
-   6 LOAD_CONST                     1
-   8 RETURN_VALUE                   0
+   0 RESUME                         0
+   2 LOAD_CONST                     0
+   4 MAKE_FUNCTION                  0
+   6 STORE_NAME                     0
+   8 LOAD_CONST                     1
+  10 RETURN_VALUE                   0
 
 Disassembly of f:
      0 RETURN_GENERATOR               0

@@ -190,9 +190,10 @@ runs the Python module.
 | Expose Python-facing `co_code` / `co_consts` / `co_names` / `co_varnames` / `co_*` attrs on `objects.Code` so `hasattr(co, 'co_code')` succeeds | done | 08b0d9d |
 | Plumb builtin `compile(src, fn, mode)` through the parser + compiler (`_try_compile` in `Lib/dis.py:80` calls this) | done | 83fc368 |
 | Fix `importlib.util` attribute access path so `importlib.util.find_spec` resolves | done | d009fd9 |
-| `gopy -m dis foo.py` runs end to end on a hello-world fixture | TODO | - |
-| `test/gate/disdata/` corpus (30 small files, one per feature) | TODO | - |
-| `test/gate/dis_parity_test.go` green on the 30-fixture corpus | TODO | - |
+| Port `codegen_enter_scope` RESUME prologue for module / eval / interactive scopes | done | (current branch) |
+| `gopy -m dis foo.py` runs end to end on a hello-world fixture | partial — empty.py parity, hello.py blocked on LOAD_SMALL_INT | - |
+| `test/gate/disdata/` corpus (30 small files, one per feature) | seed (empty.py); rest grows as gaps close | (current branch) |
+| `test/gate/dis_parity_test.go` green on the 30-fixture corpus | started — empty.py green | (current branch) |
 
 ## Phase 3 — codegen / flowgraph audit
 

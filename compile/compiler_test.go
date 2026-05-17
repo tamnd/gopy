@@ -16,7 +16,7 @@ func TestCompileEmptyModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	want := []byte{byte(LOAD_CONST), 0, byte(RETURN_VALUE), 0}
+	want := []byte{byte(RESUME), 0, byte(LOAD_CONST), 0, byte(RETURN_VALUE), 0}
 	if !bytes.Equal(co.Code, want) {
 		t.Errorf("co.Code = %v, want %v", co.Code, want)
 	}

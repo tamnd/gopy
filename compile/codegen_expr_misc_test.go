@@ -28,8 +28,8 @@ func TestNamedExprCopiesAndStores(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[1].Oparg != 1 {
-		t.Errorf("COPY oparg = %d, want 1", u.Seq.Instrs[1].Oparg)
+	if u.Seq.Instrs[2].Oparg != 1 {
+		t.Errorf("COPY oparg = %d, want 1", u.Seq.Instrs[2].Oparg)
 	}
 }
 
@@ -140,8 +140,8 @@ func TestJoinedStrEmitsBuildString(t *testing.T) {
 	if !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[4].Oparg != 3 {
-		t.Errorf("BUILD_STRING oparg = %d, want 3", u.Seq.Instrs[4].Oparg)
+	if u.Seq.Instrs[5].Oparg != 3 {
+		t.Errorf("BUILD_STRING oparg = %d, want 3", u.Seq.Instrs[5].Oparg)
 	}
 }
 
@@ -162,8 +162,8 @@ func TestFormattedValueWithConversionEmitsConvertValue(t *testing.T) {
 	if !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[1].Oparg != 2 {
-		t.Errorf("CONVERT_VALUE oparg = %d, want 2 (!r)", u.Seq.Instrs[1].Oparg)
+	if u.Seq.Instrs[2].Oparg != 2 {
+		t.Errorf("CONVERT_VALUE oparg = %d, want 2 (!r)", u.Seq.Instrs[2].Oparg)
 	}
 }
 

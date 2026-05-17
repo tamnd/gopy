@@ -146,9 +146,9 @@ func TestFunctionDefaultEmitsBuildTuple(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Fatalf("ops = %v, want %v", got, want)
 	}
-	sfa := u.Seq.Instrs[4]
+	sfa := u.Seq.Instrs[5]
 	if sfa.Op != SET_FUNCTION_ATTRIBUTE {
-		t.Fatalf("expected SET_FUNCTION_ATTRIBUTE at index 4, got %v", sfa.Op)
+		t.Fatalf("expected SET_FUNCTION_ATTRIBUTE at index 5, got %v", sfa.Op)
 	}
 	if sfa.Oparg != 0x01 {
 		t.Errorf("SET_FUNCTION_ATTRIBUTE oparg = %#x, want 0x01", sfa.Oparg)
@@ -182,9 +182,9 @@ func TestKwonlyDefaultEmitsBuildMap(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Fatalf("ops = %v, want %v", got, want)
 	}
-	sfa := u.Seq.Instrs[5]
+	sfa := u.Seq.Instrs[6]
 	if sfa.Op != SET_FUNCTION_ATTRIBUTE {
-		t.Fatalf("expected SET_FUNCTION_ATTRIBUTE at index 5, got %v", sfa.Op)
+		t.Fatalf("expected SET_FUNCTION_ATTRIBUTE at index 6, got %v", sfa.Op)
 	}
 	if sfa.Oparg != 0x02 {
 		t.Errorf("SET_FUNCTION_ATTRIBUTE oparg = %#x, want 0x02", sfa.Oparg)
