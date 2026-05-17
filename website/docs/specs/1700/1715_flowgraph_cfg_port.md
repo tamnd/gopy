@@ -113,7 +113,7 @@ flat-sequence versions as each ported pass lands.
 | `optimize_basic_block`             | `flowgraph.c:1718`   | pending | —         |
 | `resolve_line_numbers`             | `flowgraph.c:2823`   | pending | —         |
 | `duplicate_exits_without_lineno`   | `flowgraph.c:2756`   | pending | —         |
-| `propagate_line_numbers`           | `flowgraph.c:2722`   | pending | —         |
+| `propagate_line_numbers`           | `flowgraph.c:3616`   | done    | `c653483` |
 | `convert_pseudo_ops`               | `flowgraph.c:2911`   | pending | —         |
 | `_PyCfg_OptimizeCodeUnit`          | `flowgraph.c:2997`   | pending | —         |
 

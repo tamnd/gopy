@@ -247,6 +247,75 @@ func cfgPropagateLineNumbers(g *cfgBuilder) {
 	}
 }
 
+// cfgDuplicateExitsWithoutLineno duplicates every shared scope-exit
+// block that has no line numbers so each jump into it owns a private
+// copy. PEP 626 requires the f_lineno of a frame to be correct after
+// the frame terminates; rather than tracking that at runtime, the
+// optimizer ensures each exit block has exactly one predecessor and
+// inherits its line number from there.
+//
+// CPython: Python/flowgraph.c:3563 duplicate_exits_without_lineno
+func cfgDuplicateExitsWithoutLineno(g *cfgBuilder) {
+	nextLbl := getMaxLabel(g) + 1
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		last := b.lastInstr()
+		if last == nil || !hasJumpTarget(last.Op) || last.Target == nil {
+			continue
+		}
+		target := nextNonemptyBlock(last.Target)
+		if target == nil || !isExitWithoutLineno(target) || target.Predecessors <= 1 {
+			continue
+		}
+		newTarget := g.copyBasicblock(target)
+		newTarget.Instr[0].Loc = last.Loc
+		last.Target = newTarget
+		target.Predecessors--
+		newTarget.Predecessors = 1
+		newTarget.Next = target.Next
+		newTarget.Label = JumpTargetLabel{id: nextLbl}
+		nextLbl++
+		target.Next = newTarget
+	}
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		if b.nofallthrough() || b.Next == nil || len(b.Instr) == 0 {
+			continue
+		}
+		if isExitWithoutLineno(b.Next) {
+			b.Next.Instr[0].Loc = b.lastInstr().Loc
+		}
+	}
+}
+
+// isExitWithoutLineno mirrors is_exit_or_eval_check_without_lineno.
+// gopy has no opcodes carrying the HAS_EVAL_BREAK_FLAG yet, so the
+// eval-break leg of the disjunction is always false.
+//
+// CPython: Python/flowgraph.c:3543 is_exit_or_eval_check_without_lineno
+func isExitWithoutLineno(b *basicblock) bool {
+	if !b.exitsScope() {
+		return false
+	}
+	for i := range b.Instr {
+		if b.Instr[i].Loc.Lineno >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// getMaxLabel returns the largest label id in use across g.
+//
+// CPython: Python/flowgraph.c:622 get_max_label
+func getMaxLabel(g *cfgBuilder) int {
+	maxLbl := 0
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		if b.Label.id > maxLbl {
+			maxLbl = b.Label.id
+		}
+	}
+	return maxLbl
+}
+
 // nextBlockFirstLineno returns the lineno of the first
 // location-bearing instruction in next, skipping NOPs that have no
 // location (those will be removed too). Returns -1 if none found.

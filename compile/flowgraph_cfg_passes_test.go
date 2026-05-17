@@ -225,6 +225,32 @@ func TestCfgPropagateLineNumbersSeedsSinglePredSuccessor(t *testing.T) {
 	}
 }
 
+func TestCfgDuplicateExitsWithoutLinenoSplitsSharedExit(t *testing.T) {
+	// Two predecessors jump into a shared RETURN_VALUE with no lineno.
+	// duplicate_exits_without_lineno must clone it for one of them.
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 4}
+	b2 := g.newBlock()
+	exit := g.newBlock()
+	exit.addOp(RETURN_VALUE, 0, ast.Pos{Lineno: -1})
+	exit.Predecessors = 2
+	g.CurBlock.addJump(JUMP, exit, loc)
+	b2.addJump(JUMP, exit, loc)
+	g.useNextBlock(b2)
+	g.useNextBlock(exit)
+
+	cfgDuplicateExitsWithoutLineno(g)
+	// One of the jumps should now point to a freshly-cloned exit.
+	t1 := g.EntryBlock.Instr[0].Target
+	t2 := b2.Instr[0].Target
+	if t1 == t2 {
+		t.Fatal("expected one jump retargeted to a clone")
+	}
+	if exit.Predecessors != 1 {
+		t.Errorf("original exit predecessors = %d, want 1", exit.Predecessors)
+	}
+}
+
 func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	// Trailing NOP whose line matches the next block's first real
 	// instruction is removable.
