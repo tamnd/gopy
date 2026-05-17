@@ -47,4 +47,6 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.LOAD_COMMON_CONSTANT:       true,
 	compile.POP_EXCEPT:                 true,
 	compile.PUSH_EXC_INFO:              true,
+	compile.STORE_GLOBAL:               true,
+	compile.DELETE_GLOBAL:              true,
 }

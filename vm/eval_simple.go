@@ -875,7 +875,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
-		compile.STORE_GLOBAL, compile.DELETE_NAME, compile.DELETE_GLOBAL:
+		compile.DELETE_NAME:
 		v, perr := e.execNameOp(op, oparg)
 		if perr != nil {
 			return 0, nil, nil, false, true, perr
