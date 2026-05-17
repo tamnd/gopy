@@ -1700,6 +1700,13 @@ var helperCalls = map[string]helperCall{
 	"PyObject_Length": {goExpr: "e.objectLength", arity: 1},
 	// PySet_New(iterable) builds a fresh set; iterable may be NULL.
 	"PySet_New": {goExpr: "e.setNew", arity: 1},
+	// _PyDict_LoadGlobal(globals, builtins, name) walks globals then
+	// builtins for a name without raising on miss. Returns the found
+	// value (Object) or nil when neither dict carries the key; on a
+	// real lookup failure pendingErr is set.
+	//
+	// CPython: Objects/dictobject.c _PyDict_LoadGlobal
+	"_PyDict_LoadGlobal": {goExpr: "e.dictLoadGlobal", arity: 3},
 	// PyDict_New() returns a fresh empty dict. CPython can fail with
 	// MemoryError; gopy's NewDict is infallible under Go's GC.
 	//

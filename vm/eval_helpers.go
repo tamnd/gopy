@@ -668,6 +668,32 @@ func storeSlice(container, start, stop, value objects.Object) error {
 	return nil
 }
 
+// dictLoadGlobal wraps _PyDict_LoadGlobal: scan globals then builtins
+// for name. Returns the bound value on hit, nil with no pendingErr on a
+// pure miss (so the caller can synthesize NameError), and nil with
+// pendingErr set on a real lookup failure.
+//
+// CPython: Objects/dictobject.c _PyDict_LoadGlobal
+func (e *evalState) dictLoadGlobal(globals, builtins, name objects.Object) objects.Object {
+	if d, ok := globals.(*objects.Dict); ok {
+		if v, gerr := d.GetItem(name); gerr != nil {
+			e.pendingErr = gerr
+			return nil
+		} else if v != nil {
+			return v
+		}
+	}
+	if d, ok := builtins.(*objects.Dict); ok {
+		if v, gerr := d.GetItem(name); gerr != nil {
+			e.pendingErr = gerr
+			return nil
+		} else if v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
 // dictNew returns a fresh empty dict. Mirrors CPython's PyDict_New,
 // which can fail with MemoryError; under Go's GC NewDict is infallible
 // so the helper never stashes a pendingErr.

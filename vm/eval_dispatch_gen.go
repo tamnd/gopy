@@ -801,9 +801,52 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:
 		mod_or_class_dict := e.peek(0)
 		_ = mod_or_class_dict
-		// body bail: if then: if then: local assign "v_o": unexpected token "_PyDict_LoadGlobal" in expression
-		// outputs: v
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var v stackref.Ref
+		name := e.nameAt(int(oparg))
+		_ = name
+		var v_o objects.Object
+		_ = v_o
+		v_o, err := e.mappingGetOptionalItem(mod_or_class_dict.AsObject(), name)
+		_ = err
+		_ = v_o
+		mod_or_class_dict.Close()
+		if err < 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		if v_o == nil {
+			if objects.IsExactDict(e.globals()) && objects.IsExactDict(e.builtinsDict()) {
+				v_o = e.dictLoadGlobal(e.globals(), e.builtinsDict(), name)
+				if v_o == nil {
+					if !e.errOccurred() {
+						e.setPendingErr("_PyEval_FormatExcCheckArg")
+					}
+					return 0, nil, nil, false, e.error("error")
+				}
+			} else {
+				v_o, err := e.mappingGetOptionalItem(e.globals(), name)
+				_ = err
+				_ = v_o
+				if err < 0 {
+					return 0, nil, nil, false, e.error("error")
+				}
+				if v_o == nil {
+					v_o, err := e.mappingGetOptionalItem(e.builtinsDict(), name)
+					_ = err
+					_ = v_o
+					if err < 0 {
+						return 0, nil, nil, false, e.error("error")
+					}
+					if v_o == nil {
+						e.setPendingErr("_PyEval_FormatExcCheckArg")
+						return 0, nil, nil, false, e.error("error")
+					}
+				}
+			}
+		}
+		v = stackref.FromObject(v_o)
+		e.drop(1)
+		e.push(v)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_LOCALS:
 		var locals stackref.Ref
 		l := e.localsDict()
