@@ -118,6 +118,13 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 		}
 	}
 
+	// PASS 0b: promote LOAD_CONST <small int> to LOAD_SMALL_INT.
+	// Runs after fold so any folded result that lands in the small-int
+	// range gets promoted in the same optimisation pass.
+	//
+	// CPython: Python/flowgraph.c:2169 basicblock_optimize_load_const
+	rewriteLoadSmallInt(seq, consts)
+
 	// PASS 2: resolve symbolic jump labels to instruction offsets.
 	// CPython does this on the CFG; we exploit instrseq's existing
 	// ApplyLabelMap so the post-pass Sequence has resolved opargs.

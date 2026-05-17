@@ -186,6 +186,44 @@ func hasJumpTarget(op Opcode) bool {
 	return HasTarget(op)
 }
 
+// rewriteLoadSmallInt promotes every `LOAD_CONST <int n>` with
+// 0 <= n <= 255 to `LOAD_SMALL_INT n`. The new oparg is the literal
+// value, not a consts-pool index. The const slot is intentionally
+// left in the pool: gopy has no remove_unused_consts pass yet, and
+// CPython's dis output (the spec 1713 gate) still references the
+// trailing implicit-return None at its original slot index, so the
+// leftover slot keeps every subsequent LOAD_CONST oparg stable.
+//
+// CPython: Python/flowgraph.c:1408 maybe_instr_make_load_smallint
+// CPython: Python/flowgraph.c:2169 basicblock_optimize_load_const
+func rewriteLoadSmallInt(seq *Sequence, consts *[]any) int {
+	if consts == nil {
+		return 0
+	}
+	rewritten := 0
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if ins.Op != LOAD_CONST {
+			continue
+		}
+		idx := int(ins.Oparg)
+		if idx < 0 || idx >= len(*consts) {
+			continue
+		}
+		v, ok := (*consts)[idx].(int64)
+		if !ok {
+			continue
+		}
+		if v < 0 || v > 255 {
+			continue
+		}
+		ins.Op = LOAD_SMALL_INT
+		ins.Oparg = int32(v)
+		rewritten++
+	}
+	return rewritten
+}
+
 // propagateLineNumbers fills every NO_LOCATION (Lineno == -1)
 // instruction with the most recent valid location seen earlier in the
 // sequence. CPython runs this on the CFG: within each block,
