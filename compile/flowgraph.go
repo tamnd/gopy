@@ -208,9 +208,19 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// CPython: Python/flowgraph.c:2449 optimize_basic_block
 	peepholeOpcodePairs(seq)
 
-	// PASS 3: compact NOP runs. ApplyLabelMap has baked indices into
-	// jump opargs, so removeRedundantNops can reindex safely.
-	removeRedundantNops(seq)
+	// PASS 3: compact NOP runs and drop unconditional jumps that fall
+	// through to their target. ApplyLabelMap has baked indices into
+	// jump opargs, so both passes can read/rewrite them safely. CPython
+	// loops these two until both reach zero changes.
+	//
+	// CPython: Python/flowgraph.c:2529 remove_redundant_nops_and_jumps
+	for {
+		j := removeRedundantJumps(seq)
+		n := removeRedundantNops(seq)
+		if j == 0 && n == 0 {
+			break
+		}
+	}
 
 	// PASS 3c: backfill NO_LOCATION instructions with the previous
 	// valid location so the linetable does not encode a stray

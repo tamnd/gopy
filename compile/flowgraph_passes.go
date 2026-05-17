@@ -955,6 +955,46 @@ func setNop(ins *Instr) {
 	ins.Oparg = 0
 }
 
+// removeRedundantJumps drops every unconditional JUMP whose target is
+// the immediately following non-NOP instruction. Runs after
+// ApplyLabelMap so we can read the jump oparg as an absolute index and
+// scan forward to find the next live instruction.
+//
+// CPython runs this inside remove_redundant_nops_and_jumps in a loop
+// with remove_redundant_nops until both reach zero changes. The flat-
+// sequence version mirrors that loop in OptimizeWithFlags.
+//
+// CPython: Python/flowgraph.c:1158 remove_redundant_jumps
+// CPython: Python/flowgraph.c:2529 remove_redundant_nops_and_jumps
+func removeRedundantJumps(seq *Sequence) int {
+	dropped := 0
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if !isUnconditionalJump(ins.Op) {
+			continue
+		}
+		target := int(ins.Oparg)
+		if target < 0 || target >= len(seq.Instrs) {
+			continue
+		}
+		next := i + 1
+		for next < len(seq.Instrs) && seq.Instrs[next].Op == NOP {
+			next++
+		}
+		// Resolve target by skipping NOPs too (CPython's
+		// next_nonempty_block does the same on the CFG side).
+		landed := target
+		for landed < len(seq.Instrs) && seq.Instrs[landed].Op == NOP {
+			landed++
+		}
+		if landed == next {
+			setNop(ins)
+			dropped++
+		}
+	}
+	return dropped
+}
+
 // removeRedundantNops compacts the sequence by deleting NOP
 // instructions that no jump or handler points at. Must run AFTER
 // ApplyLabelMap because it rewrites the absolute oparg of every jump
