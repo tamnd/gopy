@@ -251,6 +251,43 @@ func TestCfgDuplicateExitsWithoutLinenoSplitsSharedExit(t *testing.T) {
 	}
 }
 
+func TestCfgResolveLineNumbersRunsBothPasses(t *testing.T) {
+	g := newCfgBuilder()
+	g.addOp(LOAD_CONST, 0, ast.Pos{Lineno: 3})
+	g.addOp(NOP, 0, ast.Pos{Lineno: -1})
+	g.addOp(RETURN_VALUE, 0, ast.Pos{Lineno: 4})
+
+	cfgResolveLineNumbers(g, 1)
+	if got := g.EntryBlock.Instr[1].Loc.Lineno; got != 3 {
+		t.Errorf("middle NOP lineno = %d, want 3 (propagated)", got)
+	}
+}
+
+func TestCfgConvertPseudoOpsRewritesAndCompacts(t *testing.T) {
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 1}
+	g.addOp(LOAD_CLOSURE, 0, loc)
+	g.addOp(STORE_FAST_MAYBE_NULL, 1, loc)
+	target := g.newBlock()
+	g.CurBlock.Instr = append(g.CurBlock.Instr, cfgInstr{Op: SETUP_FINALLY, Target: target, Loc: loc})
+	g.addOp(RETURN_VALUE, 0, loc)
+	g.useNextBlock(target)
+	target.addOp(NOP, 0, loc)
+
+	cfgConvertPseudoOps(g)
+	if g.EntryBlock.Instr[0].Op != LOAD_FAST {
+		t.Errorf("instr[0] = %v, want LOAD_FAST", g.EntryBlock.Instr[0].Op)
+	}
+	if g.EntryBlock.Instr[1].Op != STORE_FAST {
+		t.Errorf("instr[1] = %v, want STORE_FAST", g.EntryBlock.Instr[1].Op)
+	}
+	for _, ins := range g.EntryBlock.Instr {
+		if ins.Op == SETUP_FINALLY {
+			t.Errorf("SETUP_FINALLY survived: %+v", ins)
+		}
+	}
+}
+
 func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	// Trailing NOP whose line matches the next block's first real
 	// instruction is removable.

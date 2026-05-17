@@ -316,6 +316,45 @@ func getMaxLabel(g *cfgBuilder) int {
 	return maxLbl
 }
 
+// cfgResolveLineNumbers runs the two-step PEP 626 finishing pass:
+// duplicate every shared exit-without-lineno so exits have a single
+// predecessor, then propagate line numbers forward through the graph.
+// firstlineno is accepted to mirror the CPython signature but the
+// body itself does not consult it.
+//
+// CPython: Python/flowgraph.c:3650 resolve_line_numbers
+func cfgResolveLineNumbers(g *cfgBuilder, _ int) {
+	cfgDuplicateExitsWithoutLineno(g)
+	cfgPropagateLineNumbers(g)
+}
+
+// cfgConvertPseudoOps rewrites the assembler-time pseudo opcodes
+// into their real counterparts: SETUP_FINALLY/WITH/CLEANUP become
+// NOPs (the exception-handler info has already been baked into the
+// block by the codegen stage), LOAD_CLOSURE becomes LOAD_FAST, and
+// STORE_FAST_MAYBE_NULL becomes STORE_FAST. After the rewrite,
+// runs remove_redundant_nops to compact the NOPs we just produced.
+//
+// CPython: Python/flowgraph.c:3520 convert_pseudo_ops
+func cfgConvertPseudoOps(g *cfgBuilder) int {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			switch {
+			case isBlockPushOpcode(ins.Op):
+				ins.Op = NOP
+				ins.Oparg = 0
+				ins.Target = nil
+			case ins.Op == LOAD_CLOSURE:
+				ins.Op = LOAD_FAST
+			case ins.Op == STORE_FAST_MAYBE_NULL:
+				ins.Op = STORE_FAST
+			}
+		}
+	}
+	return cfgRemoveRedundantNops(g)
+}
+
 // nextBlockFirstLineno returns the lineno of the first
 // location-bearing instruction in next, skipping NOPs that have no
 // location (those will be removed too). Returns -1 if none found.
