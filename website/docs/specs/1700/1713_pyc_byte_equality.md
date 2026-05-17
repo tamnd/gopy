@@ -193,9 +193,10 @@ runs the Python module.
 | Port `codegen_enter_scope` RESUME prologue for module / eval / interactive scopes | done | (current branch) |
 | Port `propagate_line_numbers` flowgraph pass so NO_LOCATION instructions inherit prior valid location | done | (current branch) |
 | Port `maybe_instr_make_load_smallint` rewrite so 0..255 int constants emit `LOAD_SMALL_INT` | done | (current branch) |
-| `gopy -m dis foo.py` runs end to end on a hello-world fixture | done for the seed corpus (empty / string-assign / int-assign) | (current branch) |
-| `test/gate/disdata/` corpus (30 small files, one per feature) | 3 of 30 seeded (empty.py, hello.py, assign_int.py); rest grows as gaps close | (current branch) |
-| `test/gate/dis_parity_test.go` green on the 30-fixture corpus | 3 of 30 green | (current branch) |
+| Port `remove_unused_consts` from `Python/flowgraph.c:3174` so orphaned const slots vanish from `co_consts` after small-int promotion | done | f679821 |
+| `gopy -m dis foo.py` runs end to end on a hello-world fixture | done for the seed corpus (empty / string-assign / int-assign / if_simple) | (current branch) |
+| `test/gate/disdata/` corpus (30 small files, one per feature) | 4 of 30 seeded (empty.py, hello.py, assign_int.py, if_simple.py); rest grows as gaps close | (current branch) |
+| `test/gate/dis_parity_test.go` green on the 30-fixture corpus | 4 of 30 green | (current branch) |
 
 ## Phase 3 — codegen / flowgraph audit
 
