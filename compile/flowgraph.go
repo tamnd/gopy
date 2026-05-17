@@ -118,6 +118,14 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 		}
 	}
 
+	// PASS 0a-pre: duplicate exit-without-lineno blocks reached by more
+	// than one predecessor so each control-flow path can carry its own
+	// source line. Must run before normalizeJumps because that pass
+	// adds opargs that this counter would otherwise overcount.
+	//
+	// CPython: Python/flowgraph.c:3563 duplicate_exits_without_lineno
+	duplicateExitsWithoutLineno(seq)
+
 	// PASS 0a: insert NOT_TAKEN after every forward conditional jump.
 	// Runs before ApplyLabelMap so the Insert label-shift lands on
 	// symbolic ids; running after offset resolution would require

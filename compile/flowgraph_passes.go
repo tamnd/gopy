@@ -250,6 +250,172 @@ func propagateLineNumbers(seq *Sequence) {
 	}
 }
 
+// duplicateExitsWithoutLineno clones every exit-without-lineno block
+// that has more than one predecessor, retargeting each incoming jump
+// at its own copy. CPython does this so the trailing
+// `LOAD_CONST None; RETURN_VALUE` epilogue can carry a different
+// source line on each control-flow path (the line of the jump that
+// reaches it vs. the line of the fall-through). Without it, both
+// paths share one exit block and the linetable has to encode a
+// NO_LOCATION row for the second arrival.
+//
+// Block detection on the flat sequence: starts are position 0, every
+// labeled position, and every position after a terminator or
+// unconditional jump. An "exit block" is one whose first instruction
+// carries no lineno (Lineno == -1) and which ends in a terminator
+// (RETURN_VALUE / RAISE_VARARGS / RERAISE / INTERPRETER_EXIT) before
+// the next block start. Predecessor count combines jump targets (from
+// labelmap) with fall-through from the previous instruction.
+//
+// Runs before ApplyLabelMap so target lookups go through labelmap and
+// fresh duplicates can bind a new label via NewLabel.
+//
+// CPython: Python/flowgraph.c:3563 duplicate_exits_without_lineno
+//
+//nolint:gocognit // 1:1 port of CPython's CFG-based pass adapted to flat sequence
+func duplicateExitsWithoutLineno(seq *Sequence) {
+	blockStarts := computeBlockStarts(seq)
+	preds := computePredecessorCounts(seq, blockStarts)
+
+	n := len(seq.Instrs)
+	for i := range n {
+		ins := &seq.Instrs[i]
+		if !isAnyJump(ins.Op) {
+			continue
+		}
+		id := int(ins.Oparg)
+		if id <= 0 || id >= len(seq.labelmap) {
+			continue
+		}
+		target := seq.labelmap[id]
+		if target < 0 || target >= n {
+			continue
+		}
+		if seq.Instrs[target].Loc.Lineno != -1 {
+			continue
+		}
+		end := findExitBlockEnd(seq, blockStarts, target, n)
+		if end < 0 {
+			continue
+		}
+		if preds[target] <= 1 {
+			continue
+		}
+		copyStart := len(seq.Instrs)
+		for k := target; k <= end; k++ {
+			cp := seq.Instrs[k]
+			if k == target {
+				cp.Loc = ins.Loc
+			}
+			seq.Instrs = append(seq.Instrs, cp)
+		}
+		newLbl := seq.NewLabel()
+		seq.ensureLabelmap(newLbl.id)
+		seq.labelmap[newLbl.id] = copyStart
+		ins.Oparg = int32(newLbl.id)
+		preds[target]--
+	}
+
+	// Pass two from CPython: any remaining exit-without-lineno that is
+	// only reachable by fall-through gets its first instruction stamped
+	// with the predecessor's last lineno.
+	for start := range blockStarts {
+		if start == 0 || start >= len(seq.Instrs) {
+			continue
+		}
+		prev := seq.Instrs[start-1]
+		if isTerminator(prev.Op) || isUnconditionalJump(prev.Op) {
+			continue
+		}
+		if seq.Instrs[start].Loc.Lineno != -1 {
+			continue
+		}
+		end := findExitBlockEnd(seq, blockStarts, start, len(seq.Instrs))
+		if end < 0 {
+			continue
+		}
+		seq.Instrs[start].Loc = prev.Loc
+	}
+}
+
+// computeBlockStarts returns the set of instruction positions that
+// begin a basic block: position 0, every labeled position, and every
+// position immediately after a terminator or unconditional jump.
+//
+// CPython: Python/flowgraph.c basicblock cuts inside
+// _PyCfgBuilder_FromInstructionSequence
+func computeBlockStarts(seq *Sequence) map[int]bool {
+	starts := map[int]bool{0: true}
+	for i, ins := range seq.Instrs {
+		if (isTerminator(ins.Op) || isUnconditionalJump(ins.Op)) && i+1 < len(seq.Instrs) {
+			starts[i+1] = true
+		}
+	}
+	for id := 1; id < len(seq.labelmap); id++ {
+		off := seq.labelmap[id]
+		if off >= 0 {
+			starts[off] = true
+		}
+	}
+	return starts
+}
+
+// computePredecessorCounts tallies how many predecessors each block
+// start has: jump targets via labelmap plus the at-most-one
+// fall-through from the previous instruction.
+//
+// CPython: Python/flowgraph.c basicblock->b_predecessors maintenance
+func computePredecessorCounts(seq *Sequence, starts map[int]bool) map[int]int {
+	preds := map[int]int{}
+	for _, ins := range seq.Instrs {
+		if !isAnyJump(ins.Op) {
+			continue
+		}
+		id := int(ins.Oparg)
+		if id <= 0 || id >= len(seq.labelmap) {
+			continue
+		}
+		off := seq.labelmap[id]
+		if off >= 0 {
+			preds[off]++
+		}
+	}
+	for start := range starts {
+		if start == 0 || start > len(seq.Instrs) {
+			continue
+		}
+		prev := seq.Instrs[start-1]
+		if !isTerminator(prev.Op) && !isUnconditionalJump(prev.Op) {
+			preds[start]++
+		}
+	}
+	return preds
+}
+
+// findExitBlockEnd returns the index of the terminator that closes
+// the block starting at start, or -1 if the block runs into another
+// block boundary first (meaning it is not an exit block).
+//
+// CPython: is_exit_without_lineno predicate
+func findExitBlockEnd(seq *Sequence, starts map[int]bool, start, n int) int {
+	for k := start; k < n; k++ {
+		if k > start && starts[k] {
+			return -1
+		}
+		if isTerminator(seq.Instrs[k].Op) {
+			return k
+		}
+	}
+	return -1
+}
+
+// isAnyJump reports whether op is any conditional or unconditional
+// jump (including the JUMP / JUMP_NO_INTERRUPT pseudo-ops that codegen
+// emits and the back-direction variants lowering produces).
+func isAnyJump(op Opcode) bool {
+	return isConditionalJump(op) || isUnconditionalJump(op)
+}
+
 // normalizeJumps walks the sequence and gives every POP_JUMP_IF_X the
 // shape CPython emits: forward jumps gain a NOT_TAKEN at the
 // fall-through edge, backward jumps are flipped to a forward reversed
