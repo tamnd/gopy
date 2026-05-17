@@ -110,7 +110,7 @@ flat-sequence versions as each ported pass lands.
 | `remove_redundant_jumps`           | `flowgraph.c:1159`   | done    | `fb9d104` |
 | `remove_unreachable`               | `flowgraph.c:996`    | done    | `fb9d104` |
 | `inline_small_or_no_lineno_blocks` | `flowgraph.c:1210`   | done    | `9972eaa` |
-| `optimize_basic_block`             | `flowgraph.c:1718`   | pending | —         |
+| `optimize_basic_block`             | `flowgraph.c:2311`   | done    | `a7c4003` |
 | `resolve_line_numbers`             | `flowgraph.c:3650`   | done    | `c376e2c` |
 | `duplicate_exits_without_lineno`   | `flowgraph.c:3563`   | done    | `2f40735` |
 | `propagate_line_numbers`           | `flowgraph.c:3616`   | done    | `c653483` |
