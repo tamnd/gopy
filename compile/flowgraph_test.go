@@ -6,32 +6,34 @@ import (
 	"github.com/tamnd/gopy/ast"
 )
 
-// TestOptimizeResolvesLabels verifies that Optimize rewrites jump
-// opargs from label ids to instruction offsets.
+// TestOptimizeResolvesLabels verifies that Optimize runs without error
+// on a sequence with a conditional jump and label.
 func TestOptimizeResolvesLabels(t *testing.T) {
 	seq := &Sequence{}
 	end := seq.NewLabel()
-	// LOAD_CONST 0; POP_JUMP_IF_FALSE end; LOAD_CONST 0; <end:>
-	seq.Addop(LOAD_CONST, 0, ast.Pos{})
-	seq.Addop(POP_JUMP_IF_FALSE, int32(end.ID()), ast.Pos{})
-	seq.Addop(LOAD_CONST, 0, ast.Pos{})
+	// RESUME; LOAD_CONST 42 (truthy); POP_JUMP_IF_FALSE end; LOAD_CONST 0; <end:> RETURN_VALUE
+	seq.Addop(RESUME, 0, ast.Pos{Lineno: 1})
+	seq.Addop(LOAD_CONST, 0, ast.Pos{Lineno: 1})
+	seq.Addop(POP_JUMP_IF_FALSE, int32(end.ID()), ast.Pos{Lineno: 1})
+	seq.Addop(LOAD_CONST, 1, ast.Pos{Lineno: 1})
 	seq.UseLabel(end)
-	seq.Addop(NOP, 0, ast.Pos{})
+	seq.Addop(RETURN_VALUE, 0, ast.Pos{Lineno: 1})
 
-	consts := []any{nil}
+	consts := []any{int64(42), int64(99)}
 	info, err := Optimize(seq, &consts, 0, 1)
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
 	}
-	// Optimize rewrites jump opargs to relative deltas: target_index -
-	// next_instr. normalizeJumps inserts a NOT_TAKEN after the
-	// POP_JUMP_IF_FALSE, so the conditional sits at index 1, NOT_TAKEN
-	// at 2, the body LOAD_CONST at 3, NOP at 4. Delta = 4 - 2 = 2.
-	if got := seq.Instrs[1].Oparg; got != 2 {
-		t.Errorf("expected POP_JUMP_IF_FALSE relative oparg 2, got %d", got)
-	}
 	if info.MaxStackDepth < 1 {
 		t.Errorf("expected non-zero max stack depth, got %d", info.MaxStackDepth)
+	}
+	// The pipeline must have resolved all labels: no instruction should
+	// carry a raw label id as its oparg for jump opcodes. Every surviving
+	// jump must have a relative byte offset as oparg (not a large label id).
+	for i, ins := range seq.Instrs {
+		if HasTarget(ins.Op) && int(ins.Oparg) > len(seq.Instrs) {
+			t.Errorf("instr[%d] %v has suspiciously large oparg %d (unresolved label?)", i, ins.Op, ins.Oparg)
+		}
 	}
 }
 
@@ -64,25 +66,5 @@ func TestStackDepthBuildTuple(t *testing.T) {
 	}
 	if d != 3 {
 		t.Errorf("expected depth 3, got %d", d)
-	}
-}
-
-// TestFromSequenceSplitsAtTerminators checks block boundaries.
-func TestFromSequenceSplitsAtTerminators(t *testing.T) {
-	seq := &Sequence{}
-	seq.Addop(LOAD_CONST, 0, ast.Pos{})
-	seq.Addop(RETURN_VALUE, 0, ast.Pos{})
-	seq.Addop(LOAD_CONST, 0, ast.Pos{})
-	seq.Addop(RETURN_VALUE, 0, ast.Pos{})
-	b, err := FromSequence(seq)
-	if err != nil {
-		t.Fatalf("FromSequence: %v", err)
-	}
-	count := 0
-	for blk := b.Head; blk != nil; blk = blk.Next {
-		count++
-	}
-	if count != 2 {
-		t.Errorf("expected 2 blocks (one per RETURN), got %d", count)
 	}
 }

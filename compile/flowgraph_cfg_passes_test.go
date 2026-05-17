@@ -314,11 +314,20 @@ func TestOptimizeBasicBlockCFGFoldsBinop(t *testing.T) {
 		{Op: BINARY_OP, Oparg: nbAdd},
 	}}
 	optimizeBasicBlockCFG(bb, &consts)
-	if bb.Instr[2].Op != LOAD_CONST {
-		t.Errorf("binop = %v, want LOAD_CONST after folding", bb.Instr[2].Op)
-	}
-	if consts[bb.Instr[2].Oparg] != int64(7) {
-		t.Errorf("folded = %v, want 7", consts[bb.Instr[2].Oparg])
+	// 3+4=7 fits in the small-int range, so maybeInstrMakeLoadSmallint
+	// promotes the folded LOAD_CONST to LOAD_SMALL_INT. Accept either.
+	ins := bb.Instr[2]
+	switch ins.Op {
+	case LOAD_SMALL_INT:
+		if ins.Oparg != 7 {
+			t.Errorf("LOAD_SMALL_INT oparg = %d, want 7", ins.Oparg)
+		}
+	case LOAD_CONST:
+		if consts[ins.Oparg] != int64(7) {
+			t.Errorf("LOAD_CONST value = %v, want 7", consts[ins.Oparg])
+		}
+	default:
+		t.Errorf("binop result op = %v, want LOAD_SMALL_INT or LOAD_CONST after folding", ins.Op)
 	}
 }
 
@@ -360,11 +369,20 @@ func TestBasicblockFoldConstBinopAdds(t *testing.T) {
 	if bb.Instr[0].Op != NOP || bb.Instr[1].Op != NOP {
 		t.Errorf("loaders not NOPed: %v %v", bb.Instr[0].Op, bb.Instr[1].Op)
 	}
-	if bb.Instr[2].Op != LOAD_CONST {
-		t.Fatalf("instr[2] = %v, want LOAD_CONST", bb.Instr[2].Op)
-	}
-	if consts[bb.Instr[2].Oparg] != int64(7) {
-		t.Errorf("folded value = %v, want 7", consts[bb.Instr[2].Oparg])
+	// 3+4=7 fits in the small-int range, so maybeInstrMakeLoadSmallint
+	// promotes the result from LOAD_CONST to LOAD_SMALL_INT. Accept either.
+	ins := bb.Instr[2]
+	switch ins.Op {
+	case LOAD_SMALL_INT:
+		if ins.Oparg != 7 {
+			t.Errorf("LOAD_SMALL_INT oparg = %d, want 7", ins.Oparg)
+		}
+	case LOAD_CONST:
+		if consts[ins.Oparg] != int64(7) {
+			t.Errorf("LOAD_CONST value = %v, want 7", consts[ins.Oparg])
+		}
+	default:
+		t.Fatalf("instr[2] = %v, want LOAD_SMALL_INT or LOAD_CONST", ins.Op)
 	}
 }
 

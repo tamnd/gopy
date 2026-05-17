@@ -1,83 +1,11 @@
-// Exception-table labeling and pseudo-op lowering for the flowgraph.
+// Exception-table stamping and pseudo-op lowering for the flat
+// instruction sequence. These pass over the assembled sequence after
+// the CFG pipeline has run and returned a flat result.
 //
-// Port of the matching CPython passes from Python/flowgraph.c. The
-// CPython version walks the basicblock graph; gopy walks the flat
-// instruction sequence. The structural property both rely on is the
-// SETUP_X / POP_BLOCK pseudo-ops bracketing a try / with region, and
-// the codegen guarantees that brackets are well nested in the linear
-// emission order.
-//
-// CPython: Python/flowgraph.c:668 mark_except_handlers
-// CPython: Python/flowgraph.c:885 label_exception_targets
 // CPython: Python/flowgraph.c:3520 convert_pseudo_ops
+// CPython: Python/assemble.c:132 assemble_emit_exception_table_entry
 
 package compile
-
-// exceptFrame tracks one open try / with region during the linear
-// walk. Mirrors the entries on CPython's _PyCfgExceptStack.
-//
-// CPython: Python/flowgraph.c:686 _PyCfgExceptStack
-type exceptFrame struct {
-	target        int // index of the handler instruction
-	preserveLasti int // 1 for SETUP_WITH / SETUP_CLEANUP, 0 otherwise
-}
-
-// labelExceptionTargets assigns Handler.Label and Handler.PreserveLasti
-// to every instruction that falls inside an open SETUP_X / POP_BLOCK
-// region. POP_BLOCK is rewritten to NOP here so it does not affect
-// later passes; SETUP_X is kept until convertPseudoOps so the
-// stackdepth analysis can follow its exception edge.
-//
-// CPython propagates an except stack along control-flow edges so the
-// handler attribution survives jumps that leave the linear sequence.
-// gopy relies on the structural invariant that codegen emits the
-// SETUP_X / POP_BLOCK pair in linear order; the handler block (which
-// is reached only through the exception edge in well-formed code)
-// follows the JUMP-over-handler in the emitted stream, so a linear
-// walk lands on it with the outer except stack already restored.
-//
-// CPython: Python/flowgraph.c:885 label_exception_targets
-func labelExceptionTargets(seq *Sequence) {
-	var stack []exceptFrame
-	for i := range seq.Instrs {
-		// A SETUP_X target block inherits the except_stack from BEFORE
-		// its corresponding push. The linear walk reaches the handler
-		// block via fall-through (the code laid out right after RERAISE
-		// is the cleanup block of the enclosing SETUP_X), so the frame
-		// is still on the stack here even though no POP_BLOCK bridges
-		// the gap. Dropping it now keeps the handler block's own
-		// instructions (COPY 3 / POP_EXCEPT / RERAISE 1) from being
-		// labeled with the very handler they implement, which would
-		// trap RERAISE 1 in an unwind loop back to itself.
-		//
-		// CPython: Python/flowgraph.c:885 label_exception_targets —
-		// the handler block inherits the except_stack from the block
-		// ending in SETUP_X, before the push.
-		for len(stack) > 0 && stack[len(stack)-1].target == i {
-			stack = stack[:len(stack)-1]
-		}
-		ins := &seq.Instrs[i]
-		switch ins.Op {
-		case SETUP_FINALLY:
-			stack = append(stack, exceptFrame{target: int(ins.Oparg), preserveLasti: 0})
-		case SETUP_WITH, SETUP_CLEANUP:
-			stack = append(stack, exceptFrame{target: int(ins.Oparg), preserveLasti: 1})
-		case POP_BLOCK:
-			if len(stack) > 0 {
-				stack = stack[:len(stack)-1]
-			}
-			ins.Op = NOP
-			ins.Oparg = 0
-		default:
-			if len(stack) == 0 {
-				continue
-			}
-			top := stack[len(stack)-1]
-			ins.Handler.Label = top.target
-			ins.Handler.PreserveLasti = top.preserveLasti
-		}
-	}
-}
 
 // stampHandlerStartDepths fills Handler.StartDepth on every
 // in-try-region instruction by looking up the per-instruction
