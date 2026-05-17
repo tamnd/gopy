@@ -156,12 +156,28 @@ passes that run inside it.
 
 ## Checklist
 
-- [ ] Phase 1. `basicblock` + `cfgBuilder` types and constructors.
-- [ ] Phase 2. `_PyCfg_FromInstructionSequence` ported.
-- [ ] Phase 3. Every pass currently in `flowgraph_passes.go`
-      re-ported onto `*cfgBuilder`.
-- [ ] Phase 4. `stackdepth` and `optimize_load_fast` ported.
-- [ ] Phase 5. `_PyCfg_ToInstructionSequence` ported.
-- [ ] Phase 6. Flat-sequence pass functions deleted; gopy's
-      `compile/flowgraph_passes.go` function list matches
-      `Python/flowgraph.c`'s function list.
+| Phase | Scope                                                                                   | Status      | Commit    |
+| ----- | --------------------------------------------------------------------------------------- | ----------- | --------- |
+| 1     | `basicblock` + `cfgBuilder` types and constructors                                      | done        | `ebae0b1` |
+| 2     | `_PyCfg_FromInstructionSequence` bridge                                                 | done        | `c5485af` |
+| 3     | Re-port every pass in `flowgraph_passes.go` onto `*cfgBuilder`                          | in progress | `58075c7` |
+| 4     | `stackdepth` and `optimize_load_fast` onto the graph                                    | pending     | —         |
+| 5     | `_PyCfg_ToInstructionSequence` bridge                                                   | pending     | —         |
+| 6     | Delete flat-sequence pass shim; `flowgraph_passes.go` matches `Python/flowgraph.c` 1:1  | pending     | —         |
+
+### Phase 3 sub-progress
+
+| Pass                              | CPython                       | Status  | Commit    |
+| --------------------------------- | ----------------------------- | ------- | --------- |
+| `remove_redundant_nops`           | `flowgraph.c:1104`            | done    | `2d4f82a` |
+| `normalize_jumps`                 | `flowgraph.c:590`             | done    | `58075c7` |
+| `remove_redundant_jumps`          | `flowgraph.c:1158`            | pending | —         |
+| `mark_reachable`                  | `flowgraph.c:1052`            | pending | —         |
+| `eliminate_empty_basic_blocks`    | `flowgraph.c:1097`            | pending | —         |
+| `inline_small_or_no_lineno_blocks`| `flowgraph.c:1210`            | pending | —         |
+| `optimize_basic_block`            | `flowgraph.c:1718`            | pending | —         |
+| `resolve_line_numbers`            | `flowgraph.c:2823`            | pending | —         |
+| `duplicate_exits_without_lineno`  | `flowgraph.c:2756`            | pending | —         |
+| `propagate_line_numbers`          | `flowgraph.c:2722`            | pending | —         |
+| `convert_pseudo_ops`              | `flowgraph.c:2911`            | pending | —         |
+| `_PyCfg_OptimizeCodeUnit`         | `flowgraph.c:2997`            | pending | —         |
