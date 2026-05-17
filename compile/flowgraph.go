@@ -141,6 +141,18 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// CPython: Python/flowgraph.c:2169 basicblock_optimize_load_const
 	rewriteLoadSmallInt(seq, consts)
 
+	// PASS 0b2: fold BUILD_TUPLE-of-constants into a single LOAD_CONST,
+	// and rewrite BUILD_LIST / BUILD_SET of constants into the
+	// BUILD_X 0 + LOAD_CONST tuple + LIST_EXTEND / SET_UPDATE prelude
+	// CPython emits. Must run after rewriteLoadSmallInt so LOAD_SMALL_INT
+	// values participate, and before removeUnusedConsts so the orphaned
+	// per-element const slots get reclaimed.
+	//
+	// CPython: Python/flowgraph.c:1454 fold_tuple_of_constants
+	// CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
+	foldTupleOfConstants(seq, consts)
+	optimizeListsAndSets(seq, consts)
+
 	// PASS 0c: prune the const-pool entries no surviving instruction
 	// references. rewriteLoadSmallInt leaves small-int slots orphaned;
 	// removing them here is what brings co_consts byte-equal with

@@ -113,13 +113,28 @@ func evalIntBinop(op int32, x, y int64) (int64, bool) {
 //
 // CPython: Python/flowgraph.c add_const
 func appendConst(consts *[]any, v any) int {
-	for i, c := range *consts {
-		if c == v {
-			return i
+	if isComparableConst(v) {
+		for i, c := range *consts {
+			if isComparableConst(c) && c == v {
+				return i
+			}
 		}
 	}
 	*consts = append(*consts, v)
 	return len(*consts) - 1
+}
+
+// isComparableConst reports whether v can be used with the == operator
+// without panicking. Tuples (modeled as []any in the const pool) are
+// not directly comparable; CPython's add_const reuses by hash+eq, which
+// gopy will revisit when 1713 lands the const-key port. Until then,
+// duplicate tuple consts simply both land in the pool.
+func isComparableConst(v any) bool {
+	switch v.(type) {
+	case nil, bool, int64, float64, string, complex128:
+		return true
+	}
+	return false
 }
 
 // eliminateDeadCodeAfterTerminator replaces every instruction
@@ -220,6 +235,178 @@ func rewriteLoadSmallInt(seq *Sequence, consts *[]any) int {
 		rewritten++
 	}
 	return rewritten
+}
+
+// loadsConstValue reports whether ins is a const-loading instruction
+// (LOAD_CONST or LOAD_SMALL_INT) and returns the underlying Python
+// value. For LOAD_SMALL_INT the value is the literal oparg as int64.
+//
+// CPython: Python/flowgraph.c:1389 loads_const + get_const_value
+func loadsConstValue(ins *Instr, consts []any) (any, bool) {
+	switch ins.Op {
+	case LOAD_CONST:
+		idx := int(ins.Oparg)
+		if idx < 0 || idx >= len(consts) {
+			return nil, false
+		}
+		return consts[idx], true
+	case LOAD_SMALL_INT:
+		return int64(ins.Oparg), true
+	}
+	return nil, false
+}
+
+// minConstSequenceSize mirrors CPython's MIN_CONST_SEQUENCE_SIZE: a
+// list / set literal shorter than this stays as N pushes + BUILD_X
+// because the LIST_EXTEND prelude would not pay off.
+//
+// CPython: Python/flowgraph.c:1585 MIN_CONST_SEQUENCE_SIZE
+const minConstSequenceSize = 3
+
+// foldTupleOfConstants rewrites `LOAD_CONST c1; ...; LOAD_CONST cN;
+// BUILD_TUPLE N` into `NOP; ...; NOP; LOAD_CONST (c1, ..., cN)` when
+// every preceding loader is a constant. The orphaned const slots get
+// reclaimed by removeUnusedConsts.
+//
+// We only fold when the run of N const loaders sits immediately before
+// the BUILD_TUPLE with no jump landing in the middle. The pinned set
+// is computed once over the whole sequence.
+//
+// CPython: Python/flowgraph.c:1454 fold_tuple_of_constants
+func foldTupleOfConstants(seq *Sequence, consts *[]any) int {
+	if consts == nil || len(seq.Instrs) == 0 {
+		return 0
+	}
+	pinned := pinnedTargets(seq)
+	folded := 0
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if ins.Op != BUILD_TUPLE {
+			continue
+		}
+		n := int(ins.Oparg)
+		if n <= 0 || i < n {
+			continue
+		}
+		start := i - n
+		ok, values := collectConstLoaders(seq, *consts, pinned, start, n)
+		if !ok {
+			continue
+		}
+		tuple := &ConstTuple{Values: append([]any(nil), values...)}
+		for k := start; k < i; k++ {
+			setNop(&seq.Instrs[k])
+		}
+		idx := appendConst(consts, tuple)
+		ins.Op = LOAD_CONST
+		ins.Oparg = int32(idx)
+		folded++
+	}
+	return folded
+}
+
+// optimizeListsAndSets rewrites `LOAD_CONST c1; ...; LOAD_CONST cN;
+// BUILD_LIST N` (and BUILD_SET) into
+//
+//	NOP; ...; BUILD_LIST 0; LOAD_CONST (c1, ..., cN); LIST_EXTEND 1
+//
+// when the run of N loaders is all constants and N is large enough to
+// pay for the prelude. CPython's pass also handles the GET_ITER /
+// CONTAINS_OP follow-up (collapse the literal to a tuple/frozenset and
+// drop the BUILD_X), but that branch is not on spec 1713's hot path
+// yet. The body-of-loop case is the one disdata/for_simple.py exercises.
+//
+// CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
+func optimizeListsAndSets(seq *Sequence, consts *[]any) int {
+	if consts == nil || len(seq.Instrs) < 3 {
+		return 0
+	}
+	pinned := pinnedTargets(seq)
+	folded := 0
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if ins.Op != BUILD_LIST && ins.Op != BUILD_SET {
+			continue
+		}
+		n := int(ins.Oparg)
+		if n < minConstSequenceSize || i < n {
+			continue
+		}
+		start := i - n
+		ok, values := collectConstLoaders(seq, *consts, pinned, start, n)
+		if !ok {
+			continue
+		}
+		tuple := &ConstTuple{Values: append([]any(nil), values...)}
+		// Need at least two preceding instruction slots: one for the
+		// BUILD_X 0 prelude and one for the LOAD_CONST. The const
+		// loaders run takes care of that (n >= 3).
+		idx := appendConst(consts, tuple)
+		// NOP every loader except the last two slots, which carry the
+		// prelude and the LOAD_CONST.
+		for k := start; k < i-2; k++ {
+			setNop(&seq.Instrs[k])
+		}
+		preludeOp := ins.Op
+		seq.Instrs[i-2].Op = preludeOp
+		seq.Instrs[i-2].Oparg = 0
+		seq.Instrs[i-2].Loc = ins.Loc
+		seq.Instrs[i-1].Op = LOAD_CONST
+		seq.Instrs[i-1].Oparg = int32(idx)
+		seq.Instrs[i-1].Loc = ins.Loc
+		if preludeOp == BUILD_LIST {
+			ins.Op = LIST_EXTEND
+		} else {
+			ins.Op = SET_UPDATE
+		}
+		ins.Oparg = 1
+		folded++
+	}
+	return folded
+}
+
+// pinnedTargets returns a bool slice marking every position that is a
+// jump target or exception-handler target, so length-preserving folds
+// don't reach across a label.
+func pinnedTargets(seq *Sequence) []bool {
+	pinned := make([]bool, len(seq.Instrs))
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if hasJumpTarget(ins.Op) {
+			id := int(ins.Oparg)
+			if id > 0 && id < len(seq.labelmap) {
+				off := seq.labelmap[id]
+				if off >= 0 && off < len(pinned) {
+					pinned[off] = true
+				}
+			}
+		}
+		if ins.Handler.Label >= 0 && ins.Handler.Label < len(pinned) {
+			pinned[ins.Handler.Label] = true
+		}
+	}
+	return pinned
+}
+
+// collectConstLoaders checks that the run of length n starting at start
+// is entirely const loaders (LOAD_CONST / LOAD_SMALL_INT) with no
+// pinned position inside the run (apart from start itself, which is
+// fine: the rewrite preserves the position of start). Returns the list
+// of loaded values when the check passes.
+func collectConstLoaders(seq *Sequence, consts []any, pinned []bool, start, n int) (bool, []any) {
+	values := make([]any, 0, n)
+	for k := range n {
+		pos := start + k
+		if k > 0 && pinned[pos] {
+			return false, nil
+		}
+		v, ok := loadsConstValue(&seq.Instrs[pos], consts)
+		if !ok {
+			return false, nil
+		}
+		values = append(values, v)
+	}
+	return true, values
 }
 
 // removeUnusedConsts prunes entries from the per-unit const pool that
