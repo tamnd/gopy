@@ -1,5 +1,5 @@
    0 RESUME                         0
-   2 LOAD_CONST                     0
+   2 LOAD_SMALL_INT                 1
    4 STORE_NAME                     0
    6 LOAD_NAME                      0
    8 POP_TOP                        0

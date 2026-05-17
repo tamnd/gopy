@@ -8,6 +8,8 @@
 
 package compile
 
+import "github.com/tamnd/gopy/ast"
+
 // In-place BINARY_OP suboperators not declared in codegen_expr_op.go.
 // Values come from CPython's NB_INPLACE_* enum.
 //
@@ -182,6 +184,70 @@ func hasJumpTarget(op Opcode) bool {
 		return true
 	}
 	return HasTarget(op)
+}
+
+// rewriteLoadSmallInt promotes every `LOAD_CONST <int n>` with
+// 0 <= n <= 255 to `LOAD_SMALL_INT n`. The new oparg is the literal
+// value, not a consts-pool index. The const slot is intentionally
+// left in the pool: gopy has no remove_unused_consts pass yet, and
+// CPython's dis output (the spec 1713 gate) still references the
+// trailing implicit-return None at its original slot index, so the
+// leftover slot keeps every subsequent LOAD_CONST oparg stable.
+//
+// CPython: Python/flowgraph.c:1408 maybe_instr_make_load_smallint
+// CPython: Python/flowgraph.c:2169 basicblock_optimize_load_const
+func rewriteLoadSmallInt(seq *Sequence, consts *[]any) int {
+	if consts == nil {
+		return 0
+	}
+	rewritten := 0
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if ins.Op != LOAD_CONST {
+			continue
+		}
+		idx := int(ins.Oparg)
+		if idx < 0 || idx >= len(*consts) {
+			continue
+		}
+		v, ok := (*consts)[idx].(int64)
+		if !ok {
+			continue
+		}
+		if v < 0 || v > 255 {
+			continue
+		}
+		ins.Op = LOAD_SMALL_INT
+		ins.Oparg = int32(v)
+		rewritten++
+	}
+	return rewritten
+}
+
+// propagateLineNumbers fills every NO_LOCATION (Lineno == -1)
+// instruction with the most recent valid location seen earlier in the
+// sequence. CPython runs this on the CFG: within each block,
+// prev_location starts at NO_LOCATION and walks forward; at block
+// boundaries the value may seed the first instruction of a single-
+// predecessor successor. The flat-sequence port collapses both edges
+// into one linear walk that never resets prev_location. The net effect
+// matches CPython for the common cases driving spec 1713: the trailing
+// `LOAD_CONST None; RETURN_VALUE` epilogue _PyCodegen_AddReturnAtEnd
+// emits with NO_LOCATION inherits the module body's last line, so the
+// linetable no longer encodes a stray PY_CODE_LOCATION_INFO_NONE row
+// that findlinestarts surfaces as an extra (offset, None) transition.
+//
+// CPython: Python/flowgraph.c:3616 propagate_line_numbers
+func propagateLineNumbers(seq *Sequence) {
+	prev := ast.NoPos
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if ins.Loc.Lineno == -1 {
+			ins.Loc = prev
+		} else {
+			prev = ins.Loc
+		}
+	}
 }
 
 // removeRedundantNops compacts the sequence by deleting NOP

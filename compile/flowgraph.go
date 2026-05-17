@@ -118,6 +118,13 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 		}
 	}
 
+	// PASS 0b: promote LOAD_CONST <small int> to LOAD_SMALL_INT.
+	// Runs after fold so any folded result that lands in the small-int
+	// range gets promoted in the same optimisation pass.
+	//
+	// CPython: Python/flowgraph.c:2169 basicblock_optimize_load_const
+	rewriteLoadSmallInt(seq, consts)
+
 	// PASS 2: resolve symbolic jump labels to instruction offsets.
 	// CPython does this on the CFG; we exploit instrseq's existing
 	// ApplyLabelMap so the post-pass Sequence has resolved opargs.
@@ -154,6 +161,15 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// PASS 3: compact NOP runs. ApplyLabelMap has baked indices into
 	// jump opargs, so removeRedundantNops can reindex safely.
 	removeRedundantNops(seq)
+
+	// PASS 3c: backfill NO_LOCATION instructions with the previous
+	// valid location so the linetable does not encode a stray
+	// PY_CODE_LOCATION_INFO_NONE row at every implicit RETURN epilogue
+	// (which findlinestarts otherwise surfaces as an extra `(off, None)`
+	// transition and dis.py renders as a `--` lineno on a blank line).
+	//
+	// CPython: Python/flowgraph.c:3616 propagate_line_numbers
+	propagateLineNumbers(seq)
 
 	// PASS 11: stack-depth analysis. Forward dataflow over the flat
 	// sequence is sufficient while the optimiser is minimal: every

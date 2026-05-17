@@ -191,9 +191,11 @@ runs the Python module.
 | Plumb builtin `compile(src, fn, mode)` through the parser + compiler (`_try_compile` in `Lib/dis.py:80` calls this) | done | 83fc368 |
 | Fix `importlib.util` attribute access path so `importlib.util.find_spec` resolves | done | d009fd9 |
 | Port `codegen_enter_scope` RESUME prologue for module / eval / interactive scopes | done | (current branch) |
-| `gopy -m dis foo.py` runs end to end on a hello-world fixture | partial — empty.py parity, hello.py blocked on LOAD_SMALL_INT | - |
-| `test/gate/disdata/` corpus (30 small files, one per feature) | seed (empty.py); rest grows as gaps close | (current branch) |
-| `test/gate/dis_parity_test.go` green on the 30-fixture corpus | started — empty.py green | (current branch) |
+| Port `propagate_line_numbers` flowgraph pass so NO_LOCATION instructions inherit prior valid location | done | (current branch) |
+| Port `maybe_instr_make_load_smallint` rewrite so 0..255 int constants emit `LOAD_SMALL_INT` | done | (current branch) |
+| `gopy -m dis foo.py` runs end to end on a hello-world fixture | done for the seed corpus (empty / string-assign / int-assign) | (current branch) |
+| `test/gate/disdata/` corpus (30 small files, one per feature) | 3 of 30 seeded (empty.py, hello.py, assign_int.py); rest grows as gaps close | (current branch) |
+| `test/gate/dis_parity_test.go` green on the 30-fixture corpus | 3 of 30 green | (current branch) |
 
 ## Phase 3 — codegen / flowgraph audit
 
