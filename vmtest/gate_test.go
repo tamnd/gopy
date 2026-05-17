@@ -135,8 +135,22 @@ func TestGateEvalListBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Eval err: %v", err)
 	}
-	if _, ok := v.(*objects.List); !ok {
+	list, ok := v.(*objects.List)
+	if !ok {
 		t.Fatalf("got %T, want *objects.List", v)
+	}
+	if got := list.Len(); got != 3 {
+		t.Fatalf("len = %d, want 3", got)
+	}
+	for i, want := range []int64{1, 2, 3} {
+		iv, ok := list.Item(i).(*objects.Int)
+		if !ok {
+			t.Fatalf("list[%d]: got %T, want *objects.Int", i, list.Item(i))
+		}
+		got, _ := iv.Int64()
+		if got != want {
+			t.Errorf("list[%d] = %d, want %d", i, got, want)
+		}
 	}
 }
 
