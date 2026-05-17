@@ -39,14 +39,6 @@ func (e *evalState) dispatchHandwritten(op compile.Opcode, oparg uint32) (next i
 		return e.opINTERPRETER_EXIT(oparg)
 	case compile.IS_OP:
 		return e.opIS_OP(oparg)
-	case compile.BUILD_LIST:
-		return e.opBUILD_LIST(oparg)
-	case compile.BUILD_TUPLE:
-		return e.opBUILD_TUPLE(oparg)
-	case compile.BUILD_SLICE:
-		return e.opBUILD_SLICE(oparg)
-	case compile.GET_ITER:
-		return e.opGET_ITER(oparg)
 	case compile.POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_FALSE,
 		compile.POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NOT_NONE:
 		return e.opPOP_JUMP_IF(op, oparg)
@@ -112,54 +104,6 @@ func (e *evalState) opIS_OP(oparg uint32) (next int, retVal objects.Object, retE
 		eq = !eq
 	}
 	e.pushObject(objects.NewBool(eq))
-	return e.advance(), nil, nil, false, true, nil
-}
-
-// CPython: Python/bytecodes.c BUILD_LIST: pop oparg values, push list.
-func (e *evalState) opBUILD_LIST(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	n := int(oparg)
-	items := make([]objects.Object, n)
-	for i := n - 1; i >= 0; i-- {
-		items[i] = e.popObject()
-	}
-	e.pushObject(objects.NewList(items))
-	return e.advance(), nil, nil, false, true, nil
-}
-
-// CPython: Python/bytecodes.c BUILD_TUPLE: pop oparg values, push tuple.
-func (e *evalState) opBUILD_TUPLE(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	n := int(oparg)
-	items := make([]objects.Object, n)
-	for i := n - 1; i >= 0; i-- {
-		items[i] = e.popObject()
-	}
-	e.pushObject(objects.NewTuple(items))
-	return e.advance(), nil, nil, false, true, nil
-}
-
-// CPython: Python/bytecodes.c BUILD_SLICE: oparg in {2,3} for start:stop[:step].
-func (e *evalState) opBUILD_SLICE(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	var step objects.Object
-	if oparg == 3 {
-		step = e.popObject()
-	}
-	stop := e.popObject()
-	start := e.popObject()
-	e.pushObject(objects.NewSlice(start, stop, step))
-	return e.advance(), nil, nil, false, true, nil
-}
-
-// CPython: Python/bytecodes.c GET_ITER: pop obj, push iter(obj).
-func (e *evalState) opGET_ITER(_ uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	obj := e.popObject()
-	it, ierr := objects.Iter(obj)
-	if ierr != nil {
-		return 0, nil, nil, false, true, ierr
-	}
-	if it == nil {
-		return 0, nil, nil, false, true, fmt.Errorf("vm: GET_ITER: Iter returned nil for %T", obj)
-	}
-	e.pushObject(it)
 	return e.advance(), nil, nil, false, true, nil
 }
 

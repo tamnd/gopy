@@ -49,14 +49,8 @@ func (e *evalState) tryGen(op compile.Opcode, oparg uint32) (genResult, error) {
 	case compile.GET_YIELD_FROM_ITER:
 		return e.execGetYieldFromIter()
 
-	case compile.GET_AWAITABLE:
-		return e.execGetAwaitable(oparg)
-
 	case compile.GET_AITER:
 		return e.execGetAiter()
-
-	case compile.GET_ANEXT:
-		return e.execGetAnext()
 
 	case compile.END_ASYNC_FOR:
 		return e.execEndAsyncFor()
@@ -350,24 +344,6 @@ func (e *evalState) execGetYieldFromIter() (genResult, error) {
 	return genResult{next: e.advance(), ok: true}, nil
 }
 
-// execGetAwaitable ports GET_AWAITABLE: pops a value and pushes an
-// awaitable iterator. Coroutines act as their own iterator (CPython
-// returns the coroutine directly without the coro_wrapper indirection).
-// For everything else the type's __await__ slot is consulted.
-//
-// CPython: Python/bytecodes.c:1274 GET_AWAITABLE
-// CPython: Python/ceval.c:3640 _PyEval_GetAwaitable
-// CPython: Objects/genobject.c:1067 _PyCoro_GetAwaitableIter
-func (e *evalState) execGetAwaitable(_ uint32) (genResult, error) {
-	iterable := e.popObject()
-	iter, err := getAwaitableIter(iterable)
-	if err != nil {
-		return genResult{ok: true}, err
-	}
-	e.pushObject(iter)
-	return genResult{next: e.advance(), ok: true}, nil
-}
-
 // execGetAiter ports GET_AITER: pops an iterable and pushes its async
 // iterator. Equivalent to value.__aiter__(). The result must itself
 // expose __anext__; otherwise the type doesn't satisfy the async-for
@@ -392,42 +368,6 @@ func (e *evalState) execGetAiter() (genResult, error) {
 			it.Name)
 	}
 	e.pushObject(iter)
-	return genResult{next: e.advance(), ok: true}, nil
-}
-
-// execGetAnext ports GET_ANEXT: leaves the async iterator on the stack
-// and pushes the awaitable that yields the next value. AsyncGenerator
-// objects already produce an awaitable from __anext__; for any other
-// async iterator the result is routed through the awaitable-iter
-// helper to wrap a __await__ shape into an iterator.
-//
-// CPython: Python/bytecodes.c:1266 GET_ANEXT
-// CPython: Python/ceval.c:3562 _PyEval_GetANext
-func (e *evalState) execGetAnext() (genResult, error) {
-	aiter := e.peek(0).AsObject()
-	t := aiter.Type()
-	if t.Async == nil || t.Async.Anext == nil {
-		return genResult{ok: true}, fmt.Errorf(
-			"TypeError: 'async for' requires an iterator with __anext__ method, got %s", t.Name)
-	}
-	next, err := t.Async.Anext(aiter)
-	if err != nil {
-		return genResult{ok: true}, err
-	}
-	// AsyncGenerator's am_anext already returns the AsyncGenASend
-	// awaitable. Other shapes return a coroutine or an object whose
-	// __await__ produces the awaitable; route through the same helper
-	// GET_AWAITABLE uses.
-	if _, ok := aiter.(*objects.AsyncGenerator); !ok {
-		wrapped, werr := getAwaitableIter(next)
-		if werr != nil {
-			return genResult{ok: true}, fmt.Errorf(
-				"TypeError: 'async for' received an invalid object from __anext__: %s",
-				next.Type().Name)
-		}
-		next = wrapped
-	}
-	e.pushObject(next)
 	return genResult{next: e.advance(), ok: true}, nil
 }
 

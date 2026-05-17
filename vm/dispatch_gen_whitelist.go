@@ -50,4 +50,12 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.STORE_GLOBAL:               true,
 	compile.DELETE_GLOBAL:              true,
 	compile.FORMAT_WITH_SPEC:           true,
+	compile.GET_ITER:                   true,
+	compile.BUILD_LIST:                 true,
+	compile.BUILD_TUPLE:                true,
+	compile.BUILD_SLICE:                true,
+	compile.BUILD_MAP:                  true,
+	compile.BUILD_TEMPLATE:             true,
+	compile.GET_AWAITABLE:              true,
+	compile.GET_ANEXT:                  true,
 }
