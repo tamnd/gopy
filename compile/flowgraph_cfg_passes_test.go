@@ -306,6 +306,44 @@ func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	}
 }
 
+func TestCfgJumpThreadRewritesToFinalTarget(t *testing.T) {
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 1}
+	final := g.newBlock()
+	final.addOp(RETURN_VALUE, 0, loc)
+	mid := g.newBlock()
+	mid.addJump(JUMP, final, loc)
+	g.CurBlock.addJump(JUMP, mid, loc)
+
+	bb := g.EntryBlock
+	inst := &bb.Instr[0]
+	target := &mid.Instr[0]
+	if !cfgJumpThread(bb, inst, target, JUMP) {
+		t.Fatal("cfgJumpThread returned false on threadable pair")
+	}
+	if bb.Instr[0].Op != NOP {
+		t.Errorf("original jump not NOPed: %v", bb.Instr[0].Op)
+	}
+	last := bb.lastInstr()
+	if last == nil || last.Op != JUMP || last.Target != final {
+		t.Errorf("appended jump = %+v, want JUMP -> final", last)
+	}
+}
+
+func TestCfgJumpThreadSkipsSameTarget(t *testing.T) {
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 1}
+	shared := g.newBlock()
+	shared.addOp(RETURN_VALUE, 0, loc)
+	mid := g.newBlock()
+	mid.addJump(JUMP, shared, loc)
+	g.CurBlock.addJump(JUMP, shared, loc)
+
+	if cfgJumpThread(g.EntryBlock, &g.EntryBlock.Instr[0], &mid.Instr[0], JUMP) {
+		t.Error("jump_thread should refuse when both jumps share a target")
+	}
+}
+
 func TestCfgInlineSmallExitBlockFolds(t *testing.T) {
 	// Entry ends with JUMP to a 2-instr exit block (LOAD_CONST + RETURN_VALUE).
 	// inline pass must replace the JUMP with the exit's instructions.

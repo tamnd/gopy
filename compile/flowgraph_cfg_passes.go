@@ -436,6 +436,26 @@ func cfgInlineSmallOrNoLinenoBlocks(g *cfgBuilder) {
 	}
 }
 
+// cfgJumpThread rewrites a trailing jump in bb whose target is itself
+// a jump, so bb jumps directly to the second target with opcode op.
+// Returns true when the rewrite happened. bpo-45773: if both jumps
+// already share a destination, the rewrite is skipped to avoid an
+// infinite loop.
+//
+// CPython: Python/flowgraph.c:1283 jump_thread
+func cfgJumpThread(bb *basicblock, inst *cfgInstr, target *cfgInstr, op Opcode) bool {
+	if inst.Target == target.Target {
+		return false
+	}
+	loc := target.Loc
+	newTarget := target.Target
+	inst.Op = NOP
+	inst.Oparg = 0
+	inst.Target = nil
+	bb.addJump(op, newTarget, loc)
+	return true
+}
+
 // nextBlockFirstLineno returns the lineno of the first
 // location-bearing instruction in next, skipping NOPs that have no
 // location (those will be removed too). Returns -1 if none found.
