@@ -610,3 +610,51 @@ func TestCfgInlineNoLinenoBlockFolds(t *testing.T) {
 		t.Errorf("entry last = %+v, want RETURN_VALUE", last)
 	}
 }
+
+func TestCfgCheckCfgAcceptsTerminatorAtEnd(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	if err := cfgCheckCfg(g); err != nil {
+		t.Fatalf("cfgCheckCfg: %v", err)
+	}
+}
+
+func TestCfgCheckCfgRejectsTerminatorMidBlock(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	// Bypass cfgBuilder gating to plant a malformed block.
+	g.EntryBlock.Instr = []cfgInstr{
+		{Op: RETURN_VALUE, Loc: loc},
+		{Op: LOAD_CONST, Loc: loc},
+	}
+	if err := cfgCheckCfg(g); err == nil {
+		t.Fatal("expected malformed CFG error")
+	}
+}
+
+func TestCfgTranslateJumpLabelsToTargetsResolvesByLabel(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	tgt := g.newBlock()
+	tgt.Label = JumpTargetLabel{id: 7}
+	g.EntryBlock.Instr = []cfgInstr{{Op: JUMP, Oparg: 7, Loc: loc}}
+	g.EntryBlock.Next = tgt
+	cfgTranslateJumpLabelsToTargets(g)
+	if g.EntryBlock.Instr[0].Target != tgt {
+		t.Fatal("jump target was not resolved by label")
+	}
+}
+
+func TestCfgMarkExceptHandlersFlagsTarget(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	handler := g.newBlock()
+	g.EntryBlock.addOp(SETUP_FINALLY, 0, loc)
+	g.EntryBlock.Instr[0].Target = handler
+	cfgMarkExceptHandlers(g)
+	if !handler.ExceptHandler {
+		t.Fatal("handler block was not marked")
+	}
+}

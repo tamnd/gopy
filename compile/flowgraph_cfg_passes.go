@@ -355,6 +355,78 @@ func cfgConvertPseudoOps(g *cfgBuilder) int {
 	return cfgRemoveRedundantNops(g)
 }
 
+// cfgCheckCfg verifies that every terminator opcode sits at the end of
+// its block. Returns a non-nil error (via panic-free
+// boolean) when violated; the codegen invariants make this a debug
+// check in practice.
+//
+// CPython: Python/flowgraph.c:604 check_cfg
+func cfgCheckCfg(g *cfgBuilder) error {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		for i := range b.Instr {
+			if isTerminator(b.Instr[i].Op) && i != len(b.Instr)-1 {
+				return errMalformedCFG
+			}
+		}
+	}
+	return nil
+}
+
+// errMalformedCFG mirrors CPython's "malformed control flow graph"
+// SystemError raised by check_cfg.
+var errMalformedCFG = cfgError("malformed control flow graph")
+
+type cfgError string
+
+func (e cfgError) Error() string { return string(e) }
+
+// cfgTranslateJumpLabelsToTargets resolves every jump instruction's
+// oparg label id into a *basicblock Target pointer. gopy's bridge
+// already wires Target during cfgFromSequence, so this is a no-op
+// when Target is already set; idempotency keeps it safe to call
+// from _PyCfg_OptimizeCodeUnit's prelude.
+//
+// CPython: Python/flowgraph.c:635 translate_jump_labels_to_targets
+func cfgTranslateJumpLabelsToTargets(g *cfgBuilder) {
+	maxLbl := getMaxLabel(g)
+	label2block := make([]*basicblock, maxLbl+1)
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		if b.Label.id > 0 {
+			label2block[b.Label.id] = b
+		}
+	}
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			if !hasJumpTarget(ins.Op) {
+				continue
+			}
+			if ins.Target != nil {
+				continue
+			}
+			lbl := int(ins.Oparg)
+			if lbl >= 0 && lbl <= maxLbl {
+				ins.Target = label2block[lbl]
+			}
+		}
+	}
+}
+
+// cfgMarkExceptHandlers stamps ExceptHandler=true on every block that
+// is the target of a SETUP_FINALLY / SETUP_WITH / SETUP_CLEANUP push.
+//
+// CPython: Python/flowgraph.c:668 mark_except_handlers
+func cfgMarkExceptHandlers(g *cfgBuilder) {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			if isBlockPushOpcode(ins.Op) && ins.Target != nil {
+				ins.Target.ExceptHandler = true
+			}
+		}
+	}
+}
+
 // basicblockHasNoLineno reports whether every instruction in b lacks a
 // source location (Lineno < 0). Used by the inline pass to decide
 // whether a target block can be folded without losing line info.
