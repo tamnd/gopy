@@ -17,11 +17,29 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// pointerAddrRE matches a Python repr's "at 0x..." pointer suffix. The
+// digits differ between runs and between interpreters, so we collapse
+// the address before comparing. CPython renders code objects, function
+// objects, modules, and most opaque types via this convention, so a
+// fixture that touches any of them needs the address scrubbed.
+//
+// CPython: Objects/object.c:579 PyObject_Repr (default tp_repr emits
+// "<%s object at %p>"; the same suffix bleeds into dis output for
+// nested code objects via co_consts).
+var pointerAddrRE = regexp.MustCompile(`at 0x[0-9a-fA-F]+`)
+
+func normalize(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = pointerAddrRE.ReplaceAllString(s, "at 0xNNNN")
+	return s
+}
 
 // FindCPython returns a CPython 3.14.x interpreter on PATH, or "" if
 // none is available. Callers typically Skip the test when this is "".
@@ -122,9 +140,8 @@ func Compare(t *testing.T, cpythonBin, gopyBin, script string, args ...string) {
 		t.Fatalf("gopy run: %v", gRes.Err)
 	}
 
-	// Normalize CRLF -> LF: Windows CPython writes \r\n, gopy writes \n.
-	cRes.Stdout = strings.ReplaceAll(cRes.Stdout, "\r\n", "\n")
-	gRes.Stdout = strings.ReplaceAll(gRes.Stdout, "\r\n", "\n")
+	cRes.Stdout = normalize(cRes.Stdout)
+	gRes.Stdout = normalize(gRes.Stdout)
 
 	if cRes.ExitCode != gRes.ExitCode {
 		t.Errorf("exit code mismatch: cpython=%d gopy=%d\n--- script ---\n%s\n--- cpython stdout ---\n%s\n--- gopy stdout ---\n%s\n--- cpython stderr ---\n%s\n--- gopy stderr ---\n%s",
