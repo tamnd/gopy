@@ -831,3 +831,127 @@ func TestCfgPushColdBlocksToEndReorders(t *testing.T) {
 		t.Fatal("entry block should remain at head")
 	}
 }
+
+func TestBasicblockOptimizeLoadConstFoldsPopJumpIfTrueOnFalsy(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{int64(0)}
+	tgt := g.newBlock()
+	g.addOp(LOAD_CONST, 0, loc)
+	g.CurBlock.addJump(POP_JUMP_IF_TRUE, tgt, loc)
+	g.useNextBlock(tgt)
+	g.addOp(RETURN_VALUE, 0, loc)
+	basicblockOptimizeLoadConst(g.EntryBlock, &consts)
+	if g.EntryBlock.Instr[0].Op != NOP {
+		t.Fatalf("LOAD_CONST not nopped: %s", g.EntryBlock.Instr[0].Op.Name())
+	}
+	if g.EntryBlock.Instr[1].Op != NOP {
+		t.Fatalf("POP_JUMP_IF_TRUE on falsy const should become NOP, got %s", g.EntryBlock.Instr[1].Op.Name())
+	}
+}
+
+func TestBasicblockOptimizeLoadConstFoldsPopJumpIfTrueOnTruthy(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{int64(1)}
+	tgt := g.newBlock()
+	g.addOp(LOAD_CONST, 0, loc)
+	g.CurBlock.addJump(POP_JUMP_IF_TRUE, tgt, loc)
+	g.useNextBlock(tgt)
+	g.addOp(RETURN_VALUE, 0, loc)
+	basicblockOptimizeLoadConst(g.EntryBlock, &consts)
+	if g.EntryBlock.Instr[1].Op != JUMP {
+		t.Fatalf("POP_JUMP_IF_TRUE on truthy should become JUMP, got %s", g.EntryBlock.Instr[1].Op.Name())
+	}
+}
+
+func TestBasicblockOptimizeLoadConstFoldsToBool(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{int64(5)}
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(TO_BOOL, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	basicblockOptimizeLoadConst(g.EntryBlock, &consts)
+	if g.EntryBlock.Instr[0].Op != NOP {
+		t.Fatalf("LOAD_CONST not nopped under TO_BOOL fold")
+	}
+	if g.EntryBlock.Instr[1].Op != LOAD_CONST {
+		t.Fatalf("TO_BOOL not replaced with LOAD_CONST: %s", g.EntryBlock.Instr[1].Op.Name())
+	}
+	idx := int(g.EntryBlock.Instr[1].Oparg)
+	if v, ok := consts[idx].(bool); !ok || v != true {
+		t.Fatalf("expected bool(True) in consts[%d], got %v", idx, consts[idx])
+	}
+}
+
+func TestBasicblockOptimizeLoadConstPromotesSmallInt(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{int64(7)}
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	basicblockOptimizeLoadConst(g.EntryBlock, &consts)
+	if g.EntryBlock.Instr[0].Op != LOAD_SMALL_INT {
+		t.Fatalf("LOAD_CONST 7 should become LOAD_SMALL_INT, got %s", g.EntryBlock.Instr[0].Op.Name())
+	}
+	if g.EntryBlock.Instr[0].Oparg != 7 {
+		t.Fatalf("LOAD_SMALL_INT oparg = %d, want 7", g.EntryBlock.Instr[0].Oparg)
+	}
+}
+
+func TestBasicblockOptimizeLoadConstFoldsIsNone(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{nil}
+	tgt := g.newBlock()
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(IS_OP, 0, loc)
+	g.CurBlock.addJump(POP_JUMP_IF_TRUE, tgt, loc)
+	g.useNextBlock(tgt)
+	g.addOp(RETURN_VALUE, 0, loc)
+	basicblockOptimizeLoadConst(g.EntryBlock, &consts)
+	if g.EntryBlock.Instr[0].Op != NOP || g.EntryBlock.Instr[1].Op != NOP {
+		t.Fatal("LOAD_CONST None / IS_OP should both be nopped")
+	}
+	if g.EntryBlock.Instr[2].Op != POP_JUMP_IF_NONE {
+		t.Fatalf("expected POP_JUMP_IF_NONE, got %s", g.EntryBlock.Instr[2].Op.Name())
+	}
+}
+
+func TestCfgRemoveUnusedConstsCompacts(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{"docstring", int64(99), int64(42), "unused"}
+	g.addOp(LOAD_CONST, 2, loc) // uses consts[2] = 42
+	g.addOp(RETURN_VALUE, 0, loc)
+	cfgRemoveUnusedConsts(g.EntryBlock, &consts)
+	if len(consts) != 2 {
+		t.Fatalf("consts len = %d, want 2 (docstring + 42)", len(consts))
+	}
+	if consts[0] != "docstring" || consts[1].(int64) != 42 {
+		t.Fatalf("consts content wrong: %v", consts)
+	}
+	if g.EntryBlock.Instr[0].Oparg != 1 {
+		t.Fatalf("rewritten oparg = %d, want 1", g.EntryBlock.Instr[0].Oparg)
+	}
+}
+
+func TestCfgOptimizeLoadConstWalksAllBlocks(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	consts := []any{int64(3)}
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	tail := g.newBlock()
+	g.useNextBlock(tail)
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	cfgOptimizeLoadConst(g, &consts)
+	if g.EntryBlock.Instr[0].Op != LOAD_SMALL_INT {
+		t.Fatalf("entry LOAD_CONST not promoted: %s", g.EntryBlock.Instr[0].Op.Name())
+	}
+	if tail.Instr[0].Op != LOAD_SMALL_INT {
+		t.Fatalf("tail LOAD_CONST not promoted: %s", tail.Instr[0].Op.Name())
+	}
+}

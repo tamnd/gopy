@@ -1618,3 +1618,225 @@ func nextBlockFirstLineno(next *basicblock) int {
 	}
 	return -1
 }
+
+// maybeInstrMakeLoadSmallint promotes a LOAD_CONST of a non-negative
+// int that fits in 8 bits to LOAD_SMALL_INT. The orphaned const slot
+// stays in the pool until cfgRemoveUnusedConsts runs.
+//
+// CPython: Python/flowgraph.c:1408 maybe_instr_make_load_smallint
+func maybeInstrMakeLoadSmallint(inst *cfgInstr, consts []any) {
+	if inst.Op != LOAD_CONST {
+		return
+	}
+	idx := int(inst.Oparg)
+	if idx < 0 || idx >= len(consts) {
+		return
+	}
+	v, ok := consts[idx].(int64)
+	if !ok {
+		return
+	}
+	if v < 0 || v > 255 {
+		return
+	}
+	inst.Op = LOAD_SMALL_INT
+	inst.Oparg = int32(v)
+}
+
+// basicblockOptimizeLoadConst folds LOAD_CONST / LOAD_SMALL_INT against
+// the instruction that follows. Four cases mirror CPython exactly:
+//
+//   - LOAD_CONST X; POP_JUMP_IF_FALSE/TRUE | JUMP_IF_FALSE/TRUE:
+//     resolve the branch statically; rewrite as JUMP / NOP.
+//   - LOAD_CONST None; IS_OP k; (TO_BOOL?) POP_JUMP_IF_*:
+//     fold into POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE.
+//   - LOAD_CONST X; TO_BOOL: replace TO_BOOL with LOAD_CONST bool(X).
+//   - COPY 1 right after a LOAD_CONST is transparent.
+//
+// Also runs maybeInstrMakeLoadSmallint on every LOAD_CONST in the
+// block, matching CPython's interleaved smallint conversion.
+//
+// CPython: Python/flowgraph.c:2168 basicblock_optimize_load_const
+//
+//nolint:gocognit,gocyclo // direct port of the CPython switch; flattening hurts the 1:1 mapping with flowgraph.c:2168.
+func basicblockOptimizeLoadConst(bb *basicblock, consts *[]any) {
+	var opcode Opcode
+	var oparg int32
+	for i := 0; i < len(bb.Instr); i++ {
+		inst := &bb.Instr[i]
+		if inst.Op == LOAD_CONST {
+			maybeInstrMakeLoadSmallint(inst, *consts)
+		}
+		isCopyOfLoadConst := opcode == LOAD_CONST && inst.Op == COPY && inst.Oparg == 1
+		if !isCopyOfLoadConst {
+			opcode = inst.Op
+			oparg = inst.Oparg
+		}
+		if opcode != LOAD_CONST && opcode != LOAD_SMALL_INT {
+			continue
+		}
+		if i+1 >= len(bb.Instr) {
+			continue
+		}
+		nextop := bb.Instr[i+1].Op
+		switch nextop {
+		case POP_JUMP_IF_FALSE, POP_JUMP_IF_TRUE, JUMP_IF_FALSE, JUMP_IF_TRUE:
+			cnt, ok := cfgLoadsConstValue(&cfgInstr{Op: opcode, Oparg: oparg}, *consts)
+			if !ok {
+				continue
+			}
+			isTrue, ok := constTruthValue(cnt)
+			if !ok {
+				continue
+			}
+			if nextop == POP_JUMP_IF_FALSE || nextop == POP_JUMP_IF_TRUE {
+				setNopCfg(inst)
+			}
+			jumpIfTrue := nextop == POP_JUMP_IF_TRUE || nextop == JUMP_IF_TRUE
+			if isTrue == jumpIfTrue {
+				bb.Instr[i+1].Op = JUMP
+			} else {
+				setNopCfg(&bb.Instr[i+1])
+			}
+		case IS_OP:
+			cnt, ok := cfgLoadsConstValue(&cfgInstr{Op: opcode, Oparg: oparg}, *consts)
+			if !ok {
+				continue
+			}
+			if cnt != nil {
+				continue
+			}
+			if i+2 >= len(bb.Instr) {
+				continue
+			}
+			isInstr := &bb.Instr[i+1]
+			jumpIdx := i + 2
+			if bb.Instr[jumpIdx].Op == TO_BOOL {
+				setNopCfg(&bb.Instr[jumpIdx])
+				jumpIdx = i + 3
+				if jumpIdx >= len(bb.Instr) {
+					continue
+				}
+			}
+			jumpInstr := &bb.Instr[jumpIdx]
+			invert := isInstr.Oparg != 0
+			switch jumpInstr.Op {
+			case POP_JUMP_IF_FALSE:
+				invert = !invert
+			case POP_JUMP_IF_TRUE:
+				// keep invert as-is
+			default:
+				continue
+			}
+			setNopCfg(inst)
+			setNopCfg(isInstr)
+			if invert {
+				jumpInstr.Op = POP_JUMP_IF_NOT_NONE
+			} else {
+				jumpInstr.Op = POP_JUMP_IF_NONE
+			}
+		case TO_BOOL:
+			cnt, ok := cfgLoadsConstValue(&cfgInstr{Op: opcode, Oparg: oparg}, *consts)
+			if !ok {
+				continue
+			}
+			isTrue, ok := constTruthValue(cnt)
+			if !ok {
+				continue
+			}
+			idx := appendConst(consts, isTrue)
+			setNopCfg(inst)
+			bb.Instr[i+1].Op = LOAD_CONST
+			bb.Instr[i+1].Oparg = int32(idx)
+		}
+	}
+}
+
+// cfgOptimizeLoadConst is the outer driver: runs
+// basicblockOptimizeLoadConst over every block.
+//
+// CPython: Python/flowgraph.c:2301 optimize_load_const
+func cfgOptimizeLoadConst(g *cfgBuilder, consts *[]any) {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		basicblockOptimizeLoadConst(b, consts)
+	}
+}
+
+// setNopCfg clears a cfgInstr to a plain NOP, preserving Loc so the
+// later nop-removal pass can fold the lineno forward.
+func setNopCfg(ins *cfgInstr) {
+	ins.Op = NOP
+	ins.Oparg = 0
+	ins.Target = nil
+}
+
+// cfgRemoveUnusedConsts compacts the consts pool. Scans every block
+// for instructions with the HasConst flag, marks used slots, condenses
+// the list while keeping slot 0 (potential docstring), then rewrites
+// every CONST-bearing oparg through a reverse index map.
+//
+// CPython: Python/flowgraph.c:3174 remove_unused_consts
+//
+//nolint:gocyclo // 1:1 port of remove_unused_consts; splitting the index_map dance hurts the source mapping.
+func cfgRemoveUnusedConsts(entry *basicblock, consts *[]any) {
+	if consts == nil {
+		return
+	}
+	nconsts := len(*consts)
+	if nconsts == 0 {
+		return
+	}
+	indexMap := make([]int, nconsts)
+	for i := 1; i < nconsts; i++ {
+		indexMap[i] = -1
+	}
+	indexMap[0] = 0
+	for b := entry; b != nil; b = b.Next {
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			if !ins.Op.HasConst() {
+				continue
+			}
+			idx := int(ins.Oparg)
+			if idx < 0 || idx >= nconsts {
+				continue
+			}
+			indexMap[idx] = idx
+		}
+	}
+	nUsed := 0
+	for i := range nconsts {
+		if indexMap[i] != -1 {
+			indexMap[nUsed] = indexMap[i]
+			nUsed++
+		}
+	}
+	if nUsed == nconsts {
+		return
+	}
+	newConsts := make([]any, nUsed)
+	for i := range nUsed {
+		newConsts[i] = (*consts)[indexMap[i]]
+	}
+	reverse := make([]int, nconsts)
+	for i := range nconsts {
+		reverse[i] = -1
+	}
+	for i := range nUsed {
+		reverse[indexMap[i]] = i
+	}
+	for b := entry; b != nil; b = b.Next {
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			if !ins.Op.HasConst() {
+				continue
+			}
+			idx := int(ins.Oparg)
+			if idx < 0 || idx >= nconsts || reverse[idx] < 0 {
+				continue
+			}
+			ins.Oparg = int32(reverse[idx])
+		}
+	}
+	*consts = newConsts
+}
