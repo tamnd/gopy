@@ -92,7 +92,7 @@ func TestForEmitsGetIterAndForIter(t *testing.T) {
 		"NOP",        // pass
 		"JUMP",       // -> for_iter
 		"END_FOR",
-		"POP_TOP",
+		"POP_ITER",
 		"LOAD_CONST",
 		"RETURN_VALUE",
 	}

@@ -104,9 +104,11 @@ func (c *Compiler) visitFor(s *ast.For) error {
 	}
 	c.addOpJump(JUMP, start, loc(s))
 
+	// CPython: Python/codegen.c:2101 END_FOR comes first so instrumentation
+	// can attach to it, then POP_ITER drops the exhausted iterator.
 	c.useLabel(cleanup)
 	c.addOp(END_FOR, loc(s))
-	c.addOp(POP_TOP, loc(s))
+	c.addOp(POP_ITER, loc(s))
 	if err := c.popFblock(fblockForLoop); err != nil {
 		return err
 	}
