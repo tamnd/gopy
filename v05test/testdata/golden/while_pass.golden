@@ -1,6 +1,7 @@
    0 RESUME                         0
    2 LOAD_NAME                      0
-   4 POP_JUMP_IF_FALSE              2
-   8 JUMP_BACKWARD                  5
-  12 LOAD_CONST                     0
-  14 RETURN_VALUE                   0
+   4 TO_BOOL                        0
+  12 POP_JUMP_IF_FALSE              2
+  16 JUMP_BACKWARD                  9
+  20 LOAD_CONST                     0
+  22 RETURN_VALUE                   0

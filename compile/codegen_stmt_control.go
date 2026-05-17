@@ -22,10 +22,9 @@ func (c *Compiler) visitIf(s *ast.If) error {
 	} else {
 		elseLbl = end
 	}
-	if err := c.visitExpr(s.Test); err != nil {
+	if err := c.codegenJumpIf(s.Test, elseLbl, false, loc(s)); err != nil {
 		return err
 	}
-	c.addOpJump(POP_JUMP_IF_FALSE, elseLbl, loc(s))
 	if err := c.visitStmts(s.Body); err != nil {
 		return err
 	}
@@ -54,10 +53,9 @@ func (c *Compiler) visitWhile(s *ast.While) error {
 	c.useLabel(loop)
 	c.pushFblock(fblockWhileLoop, loop, end, s)
 
-	if err := c.visitExpr(s.Test); err != nil {
+	if err := c.codegenJumpIf(s.Test, anchor, false, loc(s)); err != nil {
 		return err
 	}
-	c.addOpJump(POP_JUMP_IF_FALSE, anchor, loc(s))
 
 	c.useLabel(body)
 	if err := c.visitStmts(s.Body); err != nil {

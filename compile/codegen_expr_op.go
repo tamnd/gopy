@@ -277,12 +277,11 @@ const (
 //
 // CPython: Python/codegen.c:L1979 codegen_ifexp
 func (c *Compiler) visitIfExp(e *ast.IfExp) error {
-	if err := c.visitExpr(e.Test); err != nil {
-		return err
-	}
 	elseLab := c.newLabel()
 	endLab := c.newLabel()
-	c.addOpJump(POP_JUMP_IF_FALSE, elseLab, loc(e))
+	if err := c.codegenJumpIf(e.Test, elseLab, false, loc(e)); err != nil {
+		return err
+	}
 	if err := c.visitExpr(e.Body); err != nil {
 		return err
 	}

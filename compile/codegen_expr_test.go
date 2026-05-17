@@ -183,6 +183,7 @@ func TestIfExpEmitsConditional(t *testing.T) {
 	u := compileMod(t, exprMod(e))
 	want := []string{
 		"LOAD_NAME",
+		"TO_BOOL",
 		"POP_JUMP_IF_FALSE",
 		"LOAD_CONST", // 1
 		"JUMP",
