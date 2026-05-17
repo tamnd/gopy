@@ -722,6 +722,31 @@ panel.
 | `STORE_FAST` | generated | `b842a4a` | `_PyStackRef tmp = GETLOCAL(oparg); GETLOCAL(oparg) = value; PyStackRef_XCLOSE(tmp)` | C-local decl + lvalue |
 | `JUMP_BACKWARD_NO_INTERRUPT` | generated | `337d126` | `JUMPBY(-oparg)` | shares JUMPBY body with JUMP_FORWARD; `JUMP_BACKWARD` proper stays handwritten for breaker poll |
 | `END_SEND` | generated | `8ac6d1c` | `val = value; DEAD(value); PyStackRef_CLOSE(receiver)` | bit-equivalent to handwritten body in eval_simple.go |
+| `LOAD_BUILD_CLASS` | generated | `55440dc` | `int err = PyMapping_GetOptionalItem(BUILTINS(), &_Py_ID(__build_class__), &bc_o)` + NameError when absent | first Bucket B flip; lit `_PyErr_SetString` payload now flows through `setPendingErr` |
+| `SETUP_ANNOTATIONS` | generated | `07aa060` | `LOCALS()` + `PyMapping_GetOptionalItem(LOCALS(), &_Py_ID(__annotations__), &ann_dict)` + `PyDict_New()` fallback + `PyObject_SetItem(LOCALS(), &_Py_ID(__annotations__), ann_dict)` | second Bucket B flip; `PyDict_New` registered as expression-side helper; `EvalCode` now defaults `f.Locals = globals` for module frames so `LOCALS()` matches CPython at module scope |
+| `LOAD_FROM_DICT_OR_GLOBALS` | generated | `40a53e3` | `GETITEM(FRAME_CO_NAMES, oparg)` + `_PyDict_LoadGlobal` cascade | A6 helper-call vocabulary registered the dict-globals lookup |
+| `LOAD_SMALL_INT` | generated | `a7a4f7f` | `PyStackRef_FromPyObjectBorrow(_PyLong_GetSmallInt(oparg))` | small-int constant pool |
+| `LOAD_LOCALS` | generated | `a7a4f7f` | `LOCALS()` lifted into Go via `e.frame.Locals()` | Bucket B `LOCALS()` shim |
+| `UNARY_NEGATIVE` | generated | `e2c5275` | `PyNumber_Negative(value)` → `objects.NumberNegative` | Bucket B helper |
+| `UNARY_INVERT` | generated | `e2c5275` | `PyNumber_Invert(value)` → `objects.NumberInvert` | Bucket B helper |
+| `UNARY_NOT` | generated | `e2c5275` | `int err = PyObject_IsTrue(...)` → `objects.IsTruthy`; output is `PyStackRef_True/False` | shares `IsTruthy` plumbing with POP_JUMP_IF |
+| `LIST_APPEND` | generated | `f658e40` | `int err = _PyList_AppendTakeRef(list, v)` | A1 sized-input flip |
+| `SET_ADD` | generated | `f658e40` | `int err = PySet_Add(set, v)` | A1 sized-input flip |
+| `MAP_ADD` | generated | `f658e40` | `int err = _PyDict_SetItem_Take2(dict, key, value)` | A1 sized-input flip |
+| `DELETE_SUBSCR` | generated | `f658e40` | `int err = PyObject_DelItem(container, sub)` → `objects.DelItem` | A2 int-local + helper port |
+| `GET_LEN` | generated | `44eff3d` | `Py_ssize_t len_i = PyObject_Length(obj)` → `objects.Length` | A7 C-type table (Py_ssize_t) |
+| `BUILD_STRING` | generated | `44eff3d` | `_PyUnicode_JoinArray` over the stackref slice | A8 STACKREFS_TO_PYOBJECTS macro |
+| `FORMAT_SIMPLE` | generated | `44eff3d` | `if (!PyUnicode_CheckExact(value)) ...` → `objects.Str` fallback | A3 if-statement parser |
+| `COPY` | generated | `90c4fce` | output `= PyStackRef_DUP(bottom)` over a sized-input region | A1 sized-input flip |
+| `SWAP` | generated | `90c4fce` | swap top with `top[1 - oparg]` over a sized-input region | A1 sized-input flip |
+| `SET_UPDATE` | generated | `ab365fa` | `int err = _PySet_Update(set, iterable)` | A1 sized-input flip |
+| `DICT_UPDATE` | generated | `ab365fa` | `int err = PyDict_Update(dict, mapping)` | A1 sized-input flip |
+| `LOAD_COMMON_CONSTANT` | generated | `4ac50b5` | `PyStackRef_FromPyObjectImmortal(tstate->interp->common_consts[oparg])` | A7 C-type table (tstate); also drops dead END_SEND arm |
+| `POP_EXCEPT` | generated | `ee55ed4` | `_PyErr_StackItem` swap into `tstate->exc_info` | A7 C-type table (`_PyErr_StackItem`); routes through `setHandledException` |
+| `PUSH_EXC_INFO` | generated | `ee55ed4` | mirrors POP_EXCEPT in the opposite direction | A7 C-type table |
+| `STORE_GLOBAL` | generated | `d6ad44b` | `GETITEM(FRAME_CO_NAMES, oparg)` + `PyDict_SetItem(GLOBALS(), name, v)` | A4 GETITEM helper |
+| `DELETE_GLOBAL` | generated | `d6ad44b` | `GETITEM(FRAME_CO_NAMES, oparg)` + `PyDict_DelItem(GLOBALS(), name)` | A4 GETITEM helper |
+| `FORMAT_WITH_SPEC` | generated | `67735f0` | `PyObject_Format(value, format_spec)` → `objects.Format` | Bucket B helper |
 
 #### Porting backlog (organized by blocker)
 
@@ -769,25 +794,32 @@ port to gopy's `objects/` (or `module/`) package. Once the Go
 helper exists, the translator emits the call verbatim and the
 opcode flips.
 
-| Helper (CPython → gopy) | Opcodes unblocked |
-|------------------------|-------------------|
-| `PyNumber_Negative` → `objects.NumberNegative` | UNARY_NEGATIVE |
-| `PyNumber_Invert` → `objects.NumberInvert` | UNARY_INVERT |
-| `PyObject_Format` → `objects.Format` | FORMAT_WITH_SPEC |
-| `PyObject_GetIter` → `objects.GetIter` (already exists; just wire the `_Py_GatherStats_GetIter` instrumentation stub) | GET_ITER |
-| `PySet_New` → `objects.NewSet([]Object)` | BUILD_SET |
-| `PyCell_New` → `objects.NewCell` | MAKE_CELL |
-| `_PyList_FromStackRefStealOnSuccess` → wrapper over `objects.NewList` | BUILD_LIST |
-| `_PyTuple_FromStackRefStealOnSuccess` → wrapper over `objects.NewTuple` | BUILD_TUPLE |
-| `_PyTemplate_Build` → `objects.BuildTemplate` (t-string runtime) | BUILD_TEMPLATE |
-| `_PyEval_GetAwaitable` → `objects.GetAwaitable` | GET_AWAITABLE |
-| `_PyEval_GetANext` → `objects.GetANext` | GET_ANEXT |
-| `_PyEval_MatchClass` → `objects.MatchClass` | MATCH_CLASS |
-| `_PyEval_MatchKeys` → `objects.MatchKeys` | MATCH_KEYS |
-| `_PyIntrinsics_UnaryFunctions` / `_PyIntrinsics_BinaryFunctions` tables → `vm/intrinsics.go` lookup | CALL_INTRINSIC_1, CALL_INTRINSIC_2 |
-| `PyStackRef_MakeHeapSafe` → `stackref.MakeHeapSafe` (escapes after a yield/return; trivial under Go GC) | RETURN_VALUE |
-| `LOCALS()` → `e.frame.Locals()` (combined with A8 misc) | LOAD_LOCALS |
-| `PyCell_SwapTakeRef` → `objects.Cell.SwapTakeRef` (combined with A8) | DELETE_DEREF |
+Each row carries a **Status** (`DONE` once the opcode is in the
+`dispatchGenSupported` whitelist; `TODO` while the helper does not
+exist or the opcode is still routed through the handwritten panel)
+and a **Commit** stamp (the commit that flipped the opcode through
+`dispatchGen`). Flip rows in step with the Phase 5.2 audit table
+above.
+
+| Helper (CPython → gopy) | Opcodes unblocked | Status | Commit |
+|------------------------|-------------------|--------|--------|
+| `PyNumber_Negative` → `objects.NumberNegative` | UNARY_NEGATIVE | DONE | `e2c5275` |
+| `PyNumber_Invert` → `objects.NumberInvert` | UNARY_INVERT | DONE | `e2c5275` |
+| `PyObject_Format` → `objects.Format` | FORMAT_WITH_SPEC | DONE | `67735f0` |
+| `PyObject_GetIter` → `objects.GetIter` (already exists; just wire the `_Py_GatherStats_GetIter` instrumentation stub) | GET_ITER | TODO | - |
+| `PySet_New` → `objects.NewSet([]Object)` | BUILD_SET | TODO | - |
+| `PyCell_New` → `objects.NewCell` | MAKE_CELL | TODO | - |
+| `_PyList_FromStackRefStealOnSuccess` → wrapper over `objects.NewList` | BUILD_LIST | TODO | - |
+| `_PyTuple_FromStackRefStealOnSuccess` → wrapper over `objects.NewTuple` | BUILD_TUPLE | TODO | - |
+| `_PyTemplate_Build` → `objects.BuildTemplate` (t-string runtime) | BUILD_TEMPLATE | TODO | - |
+| `_PyEval_GetAwaitable` → `objects.GetAwaitable` | GET_AWAITABLE | TODO | - |
+| `_PyEval_GetANext` → `objects.GetANext` | GET_ANEXT | TODO | - |
+| `_PyEval_MatchClass` → `objects.MatchClass` | MATCH_CLASS | TODO | - |
+| `_PyEval_MatchKeys` → `objects.MatchKeys` | MATCH_KEYS | TODO | - |
+| `_PyIntrinsics_UnaryFunctions` / `_PyIntrinsics_BinaryFunctions` tables → `vm/intrinsics.go` lookup | CALL_INTRINSIC_1, CALL_INTRINSIC_2 | TODO | - |
+| `PyStackRef_MakeHeapSafe` → `stackref.MakeHeapSafe` (escapes after a yield/return; trivial under Go GC) | RETURN_VALUE | TODO | - |
+| `LOCALS()` → `e.frame.Locals()` (combined with A8 misc) | LOAD_LOCALS | DONE | `a7a4f7f` |
+| `PyCell_SwapTakeRef` → `objects.Cell.SwapTakeRef` (combined with A8) | DELETE_DEREF | TODO | - |
 
 After Bucket A + B, the only opcodes still routed through
 `trySimple` / `tryImport` / `tryGen` / `tryMatch` are the ones
@@ -1115,7 +1147,15 @@ helper).
 - [ ] Phase 4.2 — `specialize/quicken.go` + `specialize/deopt.go` consume the generated tables
 - [ ] Phase 4.3 — parity test green; literal tables deleted
 - [x] Phase 5.1 — tier-1 emitter (Go-side `Tools/bytecodes_gen` in lieu of `gopy_tier1_generator.py`) emits `vm/eval_dispatch_gen.go` for unspecialized opcodes (107 arms, bodies stubbed pending Phase 8 action translator)
-- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (NOP, POP_TOP routed through `dispatchGen` via the `dispatchGenSupported` whitelist)
+- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (35 / ~118 opcodes routed through `dispatchGen` via the `dispatchGenSupported` whitelist; see the Phase 5.2 audit table for the per-opcode commit stamp)
+- [x] Phase 5 Bucket A6.1 — `_Py_ID(NAME)` translates to `objects.NewStr("NAME")`
+- [x] Phase 5 Bucket A6.2 — out-param `int err = HELPER(args..., &out)` translates to Go multi-return
+- [x] Phase 5 Bucket A6.3 — `_PyErr_SetString` carries the literal message through `setPendingErr`
+- [x] Phase 5 Bucket B1 — `PyMapping_GetOptionalItem` → `objects.MappingGetOptionalItem`; flips `LOAD_BUILD_CLASS` (`55440dc`)
+- [x] Phase 5 Bucket B2 — `PyDict_New` registered as expression helper; `EvalCode` defaults `f.Locals = globals` so module-frame `LOCALS()` matches CPython; flips `SETUP_ANNOTATIONS` (`07aa060`)
+- [x] Phase 5 Bucket B3 — `PyNumber_Negative` / `PyNumber_Invert` helpers; flips `UNARY_NEGATIVE`, `UNARY_INVERT` (`e2c5275`)
+- [x] Phase 5 Bucket B4 — `PyObject_Format` helper; flips `FORMAT_WITH_SPEC` (`67735f0`)
+- [x] Phase 5 Bucket B5 — `LOCALS()` → `e.frame.Locals()`; flips `LOAD_LOCALS` (`a7a4f7f`)
 - [ ] Phase 5.3 — `vm/eval_simple.go` shrinks to evalLoop scaffolding only
 - [ ] Phase 5.4 — `go test ./vm` green
 - [ ] Phase 6.1 — specialized cases emitted in `vm/eval_dispatch_gen.go`

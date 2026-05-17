@@ -159,41 +159,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(out)
 		return e.cacheAdvance(compile.BINARY_OP), nil, nil, false, true, nil
 
-	case compile.UNARY_NEGATIVE:
-		a := e.popObject()
-		neg := a.Type().Number
-		if neg == nil || neg.Negative == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: bad operand type for unary -: %s", a.Type().Name)
-		}
-		out, nerr := neg.Negative(a)
-		if nerr != nil {
-			return 0, nil, nil, false, true, nerr
-		}
-		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.UNARY_NOT:
-		a := e.popObject()
-		truthy, terr := objects.IsTruthy(a)
-		if terr != nil {
-			return 0, nil, nil, false, true, terr
-		}
-		e.pushObject(objects.NewBool(!truthy))
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.UNARY_INVERT:
-		a := e.popObject()
-		nm := a.Type().Number
-		if nm == nil || nm.Invert == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("TypeError: bad operand type for unary ~: '%s'", a.Type().Name)
-		}
-		out, ierr := nm.Invert(a)
-		if ierr != nil {
-			return 0, nil, nil, false, true, ierr
-		}
-		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.COMPARE_OP:
 		b := e.popObject()
 		a := e.popObject()
@@ -314,14 +279,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.cacheAdvance(compile.STORE_SUBSCR), nil, nil, false, true, nil
 
-	case compile.DELETE_SUBSCR:
-		key := e.popObject()
-		container := e.popObject()
-		if derr := delItem(container, key); derr != nil {
-			return 0, nil, nil, false, true, derr
-		}
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.CONTAINS_OP:
 		// Stack layout: [..., left, right]. CPython pops right (haystack)
 		// then left (needle); oparg low bit toggles `not in`.
@@ -373,49 +330,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return 0, nil, nil, false, true, fmt.Errorf("vm: RAISE_VARARGS: invalid oparg %d", oparg)
 
-	case compile.PUSH_EXC_INFO:
-		// Save the previously-handled exception under the new top, then
-		// install the new exception as the current handled exception
-		// so sys.exc_info() reads it from inside the except handler.
-		// POP_EXCEPT restores the saved value. The handled slot is
-		// distinct from the raised slot used by the unwind path, so
-		// installing it here does not perturb getOptionalAttr et al.
-		//
-		// CPython: Python/bytecodes.c PUSH_EXC_INFO (push exc_info->exc_value;
-		// exc_info->exc_value = new_exc)
-		top := e.pop()
-		prev := pyerrors.Handled(e.ts)
-		if prev != nil {
-			e.pushObject(prev)
-		} else {
-			e.pushObject(objects.None())
-		}
-		e.push(top)
-		if exc, ok := top.AsObject().(*pyerrors.Exception); ok {
-			pyerrors.SetHandled(e.ts, exc)
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.POP_EXCEPT:
-		// Restore the previously-handled exception saved under the
-		// handled-exception ref by PUSH_EXC_INFO. None signals "no
-		// outer handler", which clears the slot. The with-statement
-		// codegen also emits POP_EXCEPT via COPY 3 / POP_EXCEPT /
-		// RERAISE 1 where the popped value is a fresh copy of the
-		// active exception, in which case we install that exception
-		// as handled, which is harmless (the next handler entry will
-		// overwrite, and the RERAISE that follows triggers unwind).
-		//
-		// CPython: Python/bytecodes.c POP_EXCEPT (exc_info->exc_value = saved)
-		ref := e.pop()
-		if exc, ok := ref.AsObject().(*pyerrors.Exception); ok {
-			pyerrors.SetHandled(e.ts, exc)
-		} else {
-			pyerrors.SetHandled(e.ts, nil)
-		}
-		ref.Close()
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.CHECK_EXC_MATCH:
 		// Stack: [exc, type]. Push True if isinstance(exc, type), else
 		// False. v0.6 doesn't have exception class hierarchy, so use a
@@ -426,35 +340,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(objects.NewBool(match))
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.FORMAT_SIMPLE:
-		v := e.popObject()
-		s, serr := objects.Str(v)
-		if serr != nil {
-			return 0, nil, nil, false, true, serr
-		}
-		e.pushObject(objects.NewStr(s))
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.FORMAT_WITH_SPEC:
-		// Stack: [value, spec]. Dispatch through objects.Format
-		// (PyObject_Format), which routes to the value's __format__
-		// slot. An empty spec falls back to Str inside Format.
-		//
-		// CPython: Python/bytecodes.c FORMAT_WITH_SPEC
-		// CPython: Objects/object.c:803 PyObject_Format
-		spec := e.popObject()
-		v := e.popObject()
-		specStr, serr := objects.Str(spec)
-		if serr != nil {
-			return 0, nil, nil, false, true, serr
-		}
-		s, ferr := objects.Format(v, specStr)
-		if ferr != nil {
-			return 0, nil, nil, false, true, ferr
-		}
-		e.pushObject(objects.NewStr(s))
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.CONVERT_VALUE:
 		v := e.popObject()
 		out, cerr := convertValue(v, oparg)
@@ -462,20 +347,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.BUILD_STRING:
-		n := int(oparg)
-		pieces := make([]string, n)
-		for i := n - 1; i >= 0; i-- {
-			v := e.popObject()
-			s, serr := objects.Str(v)
-			if serr != nil {
-				return 0, nil, nil, false, true, serr
-			}
-			pieces[i] = s
-		}
-		e.pushObject(objects.NewStr(strings.Join(pieces, "")))
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.MAKE_FUNCTION:
@@ -628,19 +499,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.LIST_APPEND:
-		// Stack: ..., list, ..., value (oparg slots above list).
-		// Pops value, appends to the list at depth oparg.
-		//
-		// CPython: Python/bytecodes.c LIST_APPEND
-		v := e.popObject()
-		l, ok := e.peek(int(oparg) - 1).AsObject().(*objects.List)
-		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("LIST_APPEND: target not a list")
-		}
-		l.Append(v)
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.LIST_EXTEND:
 		// Pops iter, extends list at depth oparg with all its items.
 		v := e.popObject()
@@ -657,34 +515,19 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.MAP_ADD:
-		// Stack: ..., dict, ..., key, value. Pops key+value, sets in
-		// the dict at depth oparg.
-		//
-		// CPython: Python/bytecodes.c MAP_ADD
-		val := e.popObject()
-		key := e.popObject()
-		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
-		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("MAP_ADD: target not a dict")
-		}
-		if serr := d.SetItem(key, val); serr != nil {
-			return 0, nil, nil, false, true, serr
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.DICT_UPDATE, compile.DICT_MERGE:
-		// Pop dict-like and merge into the dict at depth oparg.
-		// DICT_MERGE additionally errors on duplicate keys; v0.6 treats
-		// both as "last write wins".
+	case compile.DICT_MERGE:
+		// Pop dict-like and merge into the dict at depth oparg. Last
+		// write wins; the dictMergeEx duplicate-key check still trips a
+		// kwargs reformat path that we can't yet emit faithfully, so
+		// this stays out of dispatchGen.
 		src := e.popObject()
 		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("%s: target not a dict", opcodeName(op))
+			return 0, nil, nil, false, true, fmt.Errorf("DICT_MERGE: target not a dict")
 		}
 		srcDict, ok := src.(*objects.Dict)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("%s: source not a dict", opcodeName(op))
+			return 0, nil, nil, false, true, fmt.Errorf("DICT_MERGE: source not a dict")
 		}
 		for _, k := range srcDict.Keys() {
 			v, gerr := srcDict.GetItem(k)
@@ -721,65 +564,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		interpolations := e.popObject()
 		strings := e.popObject()
 		e.pushObject(objects.NewTemplateStr(strings, interpolations))
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.SET_ADD:
-		// Stack: ..., set, ..., value (oparg slots above set). Pops value,
-		// adds to the set at depth oparg.
-		//
-		// CPython: Python/bytecodes.c SET_ADD
-		v := e.popObject()
-		s, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Set)
-		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("SET_ADD: target not a set")
-		}
-		if aerr := s.Add(v); aerr != nil {
-			return 0, nil, nil, false, true, aerr
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.SET_UPDATE:
-		// Pop iterable, extend the set at depth oparg.
-		//
-		// CPython: Python/bytecodes.c SET_UPDATE
-		v := e.popObject()
-		s, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Set)
-		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("SET_UPDATE: target not a set")
-		}
-		items, ierr := iterToSlice(v)
-		if ierr != nil {
-			return 0, nil, nil, false, true, ierr
-		}
-		for _, it := range items {
-			if aerr := s.Add(it); aerr != nil {
-				return 0, nil, nil, false, true, aerr
-			}
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.SETUP_ANNOTATIONS:
-		// SETUP_ANNOTATIONS: ensure __annotations__ is a dict in the
-		// current local namespace. CPython looks up "__annotations__"
-		// in f_locals, creates it if missing, and leaves the stack
-		// untouched. At module scope f_locals == f_globals; in gopy
-		// f.Locals is nil for modules and the module dict lives in
-		// f.Globals, so route the store there. Class-body frames carry
-		// an explicit Locals dict.
-		//
-		// CPython: Python/bytecodes.c SETUP_ANNOTATIONS
-		ns := e.f.Locals
-		if ns == nil {
-			ns = e.f.Globals
-		}
-		if d, ok := ns.(*objects.Dict); ok {
-			key := objects.NewStr("__annotations__")
-			if v, _ := d.GetItem(key); v == nil {
-				if serr := d.SetItem(key, objects.NewDict()); serr != nil {
-					return 0, nil, nil, false, true, serr
-				}
-			}
-		}
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.CALL_INTRINSIC_1:
@@ -859,24 +643,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, excSentinel(pyExc)
 		}
 		return 0, nil, nil, false, true, fmt.Errorf("%s", objectRepr(exc))
-
-	case compile.LOAD_BUILD_CLASS:
-		// Push the __build_class__ builtin so the codegen sequence
-		// (PUSH_NULL, body fn, name, *bases, CALL) lands on the right
-		// callable. The builtin is registered into the dict by
-		// builtins.Init via the BuildClass hook the vm package wires.
-		// Frames built without an explicit Builtins dict (the v0.7
-		// pattern that uses globals as both) fall through to globals.
-		key := objects.NewStr("__build_class__")
-		bc, ok := lookupIn(e.f.Builtins, key)
-		if !ok {
-			bc, ok = lookupIn(e.f.Globals, key)
-		}
-		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("NameError: __build_class__ not found")
-		}
-		e.pushObject(bc)
-		return e.advance(), nil, nil, false, true, nil
 
 	case compile.UNPACK_EX:
 		// oparg low byte: items before *rest. high byte: items after.
@@ -988,30 +754,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.GET_LEN:
-		// Push len(TOS) without consuming TOS.
-		v := e.peek(0).AsObject()
-		t := v.Type()
-		var n int
-		switch {
-		case t.Sequence != nil && t.Sequence.Length != nil:
-			x, lerr := t.Sequence.Length(v)
-			if lerr != nil {
-				return 0, nil, nil, false, true, lerr
-			}
-			n = x
-		case t.Mapping != nil && t.Mapping.Length != nil:
-			x, lerr := t.Mapping.Length(v)
-			if lerr != nil {
-				return 0, nil, nil, false, true, lerr
-			}
-			n = x
-		default:
-			return 0, nil, nil, false, true, fmt.Errorf("TypeError: object of type '%s' has no len()", t.Name)
-		}
-		e.pushObject(objects.NewInt(int64(n)))
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.LOAD_FAST_LOAD_FAST, compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:
 		// Two local indexes packed: high nibble first, low nibble second.
 		// The BORROW variant is identical under Go GC.
@@ -1055,12 +797,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.setLocal(lo, r2)
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.LOAD_SMALL_INT:
-		// 3.14 fast path: oparg is the literal int value (0..255). No
-		// const lookup, no indirection.
-		e.pushObject(objects.NewInt(int64(oparg)))
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.TO_BOOL:
 		// Replace TOS with bool(TOS).
 		v := e.popObject()
@@ -1094,16 +830,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// NO_INTERRUPT variant skips the eval breaker poll.
 		return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
 
-	case compile.END_SEND:
-		// `yield from` cleanup. Stack is (receiver, value); we want
-		// the value on top and the receiver dropped.
-		// CPython: Python/bytecodes.c END_SEND
-		val := e.pop()
-		recv := e.pop()
-		recv.Close()
-		e.push(val)
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.EXIT_INIT_CHECK:
 		// `__init__` must return None. Pop the return value and raise
 		// TypeError if it's something else.
@@ -1112,65 +838,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		if v != objects.None() {
 			return 0, nil, nil, false, true, fmt.Errorf("TypeError: __init__() should return None, not '%s'", v.Type().Name)
 		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.LOAD_FROM_DICT_OR_GLOBALS:
-		// PEP 695 helper: lookup name in the dict at TOS first; if
-		// absent, fall back to LOAD_GLOBAL semantics (globals -> builtins).
-		// CPython: Python/bytecodes.c LOAD_FROM_DICT_OR_GLOBALS.
-		dictTOS := e.popObject()
-		nameObj := e.f.Code.Names[oparg]
-		nameKey := objects.NewStr(nameObj)
-		if d, ok := dictTOS.(*objects.Dict); ok {
-			if v, derr := d.GetItem(nameKey); derr == nil && v != nil {
-				e.pushObject(v)
-				return e.advance(), nil, nil, false, true, nil
-			}
-		}
-		v, perr := e.execNameOp(compile.LOAD_GLOBAL, oparg)
-		if perr != nil {
-			return 0, nil, nil, false, true, perr
-		}
-		if v != nil {
-			e.pushObject(v)
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.LOAD_COMMON_CONSTANT:
-		// 3.14 fast load for a small set of compiler-emitted constants.
-		// Index 0 is AssertionError, used by `assert`. Without an
-		// exception class hierarchy yet (1686), we surface a Type object
-		// whose name RAISE_VARARGS can format into a runtime error.
-		// CPython: Python/bytecodes.c LOAD_COMMON_CONSTANT.
-		switch oparg {
-		case 0:
-			e.pushObject(commonConstant("AssertionError"))
-		case 1:
-			e.pushObject(commonConstant("NotImplementedError"))
-		default:
-			return 0, nil, nil, false, true, fmt.Errorf("LOAD_COMMON_CONSTANT: unknown index %d", oparg)
-		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.LOAD_LOCALS:
-		// Push the f_locals dict. Class-body frames keep an explicit
-		// Locals dict; fast-locals frames synthesize one from the
-		// current LocalsPlus values keyed by Code.Varnames.
-		if e.f.Locals != nil {
-			e.pushObject(e.f.Locals)
-			return e.advance(), nil, nil, false, true, nil
-		}
-		d := objects.NewDict()
-		for i, name := range e.f.Code.Varnames {
-			ref := e.localAt(i)
-			if ref.IsNull() {
-				continue
-			}
-			if serr := d.SetItem(objects.NewStr(name), ref.AsObject()); serr != nil {
-				return 0, nil, nil, false, true, serr
-			}
-		}
-		e.pushObject(d)
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_FROM_DICT_OR_DEREF:
@@ -1188,7 +855,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
-		compile.STORE_GLOBAL, compile.DELETE_NAME, compile.DELETE_GLOBAL:
+		compile.DELETE_NAME:
 		v, perr := e.execNameOp(op, oparg)
 		if perr != nil {
 			return 0, nil, nil, false, true, perr
@@ -1723,18 +1390,6 @@ func sliceSequence(container objects.Object, sl *objects.Slice) (objects.Object,
 	return objects.NewList(items), nil
 }
 
-// delItem mirrors PyObject_DelItem.
-//
-// CPython: Objects/abstract.c PyObject_DelItem
-func delItem(container, key objects.Object) error {
-	t := container.Type()
-	mp, _ := mappingAndSequence(t)
-	if mp != nil && mp.DelItem != nil {
-		return mp.DelItem(container, key)
-	}
-	return fmt.Errorf("TypeError: '%s' object does not support item deletion", t.Name)
-}
-
 // containsItem mirrors PySequence_Contains. Falls back to walking the
 // iterator when the type provides no Contains slot.
 //
@@ -1813,20 +1468,6 @@ func mappingAndSequence(t *objects.Type) (*objects.MappingMethods, *objects.Sequ
 		}
 	}
 	return mp, sq
-}
-
-// commonConstantsCache memoises the placeholder Type objects
-// LOAD_COMMON_CONSTANT pushes. Real exception classes arrive with the
-// exceptions module port (1686).
-var commonConstantsCache = map[string]*objects.Type{}
-
-func commonConstant(name string) *objects.Type {
-	if t, ok := commonConstantsCache[name]; ok {
-		return t
-	}
-	t := objects.NewType(name, nil)
-	commonConstantsCache[name] = t
-	return t
 }
 
 // raiseValue is the do-raise body of RAISE_VARARGS. val is whatever

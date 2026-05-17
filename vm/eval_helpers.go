@@ -668,6 +668,41 @@ func storeSlice(container, start, stop, value objects.Object) error {
 	return nil
 }
 
+// dictLoadGlobal wraps _PyDict_LoadGlobal: scan globals then builtins
+// for name. Returns the bound value on hit, nil with no pendingErr on a
+// pure miss (so the caller can synthesize NameError), and nil with
+// pendingErr set on a real lookup failure.
+//
+// CPython: Objects/dictobject.c _PyDict_LoadGlobal
+func (e *evalState) dictLoadGlobal(globals, builtins, name objects.Object) objects.Object {
+	if d, ok := globals.(*objects.Dict); ok {
+		if v, gerr := d.GetItem(name); gerr != nil {
+			e.pendingErr = gerr
+			return nil
+		} else if v != nil {
+			return v
+		}
+	}
+	if d, ok := builtins.(*objects.Dict); ok {
+		if v, gerr := d.GetItem(name); gerr != nil {
+			e.pendingErr = gerr
+			return nil
+		} else if v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
+// dictNew returns a fresh empty dict. Mirrors CPython's PyDict_New,
+// which can fail with MemoryError; under Go's GC NewDict is infallible
+// so the helper never stashes a pendingErr.
+//
+// CPython: Objects/dictobject.c PyDict_New
+func (e *evalState) dictNew() objects.Object {
+	return objects.NewDict()
+}
+
 // dictFromItems builds a dict from an interleaved key/value array.
 // values holds 2*n entries; even indices are keys, odd are values.
 // Mirrors CPython's _PyDict_FromItems, which the bytecodes.c BUILD_MAP
@@ -961,6 +996,25 @@ func (e *evalState) objectLength(o objects.Object) int32 {
 // CPython: Objects/cellobject.c:9 PyCell_New
 func (e *evalState) cellNew(initial objects.Object) objects.Object {
 	return objects.NewCell(initial)
+}
+
+// mappingGetOptionalItem wraps PyMapping_GetOptionalItem: look up key in
+// o, returning (value, status) where status is CPython's int contract
+// (1 found, 0 missing, -1 error). The looked-up value is nil when
+// status is 0 or -1; the failure cause is stashed on pendingErr for the
+// surrounding ERROR_IF to surface.
+//
+// CPython: Objects/abstract.c:207 PyMapping_GetOptionalItem
+func (e *evalState) mappingGetOptionalItem(o, key objects.Object) (objects.Object, int32) {
+	v, found, err := objects.MappingGetOptionalItem(o, key)
+	if err != nil {
+		e.pendingErr = err
+		return nil, -1
+	}
+	if !found {
+		return nil, 0
+	}
+	return v, 1
 }
 
 // cellSwapTakeRef wraps PyCell_SwapTakeRef: atomically replaces the

@@ -371,6 +371,64 @@ func (t *actionTranslator) translateTypedDecl() error {
 		t.locals[name] = true
 		return nil
 	}
+	// Out-param helper call: `int err = HELPER(args..., &out);`. CPython
+	// uses this shape for PyMapping_GetOptionalItem and friends — a
+	// helper that returns an int status (-1 / 0 / 1 in CPython, error /
+	// not-found / found here) and writes the looked-up value into a
+	// previously declared PyObject* slot. The Go signature returns the
+	// status and the value as a pair, so the emission is a multi-assign
+	// against an already-declared local.
+	//
+	// CPython: Objects/abstract.c PyMapping_GetOptionalItem
+	if prefix == "int" && len(rhs) >= 5 {
+		if h, ok := outParamHelpers[rhs[0]]; ok && rhs[1] == "(" && rhs[len(rhs)-1] == ")" {
+			// Trailing `, & IDENT` is the out-param. Strip it before
+			// translating the remaining args.
+			if rhs[len(rhs)-3] == "&" && isBareIdent(rhs[len(rhs)-2]) && rhs[len(rhs)-4] == "," {
+				outName := rhs[len(rhs)-2]
+				if t.locals[outName] {
+					inner := rhs[2 : len(rhs)-4]
+					args, err := splitTopLevelArgs(inner)
+					if err != nil {
+						return fmt.Errorf("%s %s out-param helper: %w", prefix, name, err)
+					}
+					if len(args) != h.arity {
+						return fmt.Errorf("%s expects %d args, got %d", rhs[0], h.arity, len(args))
+					}
+					argExprs := make([]string, len(args))
+					for i, a := range args {
+						ex, err := t.translateExpr(a)
+						if err != nil {
+							return fmt.Errorf("%s arg %d: %w", rhs[0], i, err)
+						}
+						argExprs[i] = ex
+					}
+					t.locals[name] = true
+					t.intLocals[name] = true
+					// In a nested block (if/else body) Go's `:=` would
+					// shadow the outer outName instead of writing through
+					// it. Emit a separate `var err int32` declaration and
+					// a plain `=` multi-assign so the outer slot is the
+					// one updated. CPython: a fresh `int err` inside a
+					// braced block in C declares a new err but still
+					// writes the outer PyObject *out via `&out`.
+					if t.nestDepth > 0 {
+						fmt.Fprintf(t.writer, "var %s int32\n", goLocalName(name))
+						fmt.Fprintf(t.writer, "%s, %s = %s(%s)\n",
+							goLocalName(outName), goLocalName(name),
+							h.goExpr, strings.Join(argExprs, ", "))
+					} else {
+						fmt.Fprintf(t.writer, "%s, %s := %s(%s)\n",
+							goLocalName(outName), goLocalName(name),
+							h.goExpr, strings.Join(argExprs, ", "))
+					}
+					fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(name))
+					fmt.Fprintf(t.writer, "_ = %s\n", goLocalName(outName))
+					return nil
+				}
+			}
+		}
+	}
 	// Ternary RHS expands the same way as in translateOutputAssign: Go
 	// has no ?: operator, so emit a zero-valued declaration and an
 	// if/else write-back. CPython sprinkles ternaries in typed decls
@@ -441,7 +499,8 @@ var stmtErrSetters = map[string]bool{
 // translated wrapper synthesises a generic error.
 func (t *actionTranslator) translateStmtErrSetter(name string) error {
 	t.pos++ // helper name
-	if _, err := t.takeParenthesised(); err != nil {
+	inner, err := t.takeParenthesised()
+	if err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	t.acceptSemi()
@@ -454,8 +513,77 @@ func (t *actionTranslator) translateStmtErrSetter(name string) error {
 		}
 		return nil
 	}
+	// Carry the string literal through to pendingErr when the helper
+	// has the standard shape `NAME(tstate, PyExc_Foo, "literal")`. The
+	// formatted message is informational, but the surrounding code
+	// (and gate-skip logic in tests) reads it to decide whether the
+	// failure is a known gap or a real regression.
+	exc := extractExceptionName(inner)
+	if lit, ok := extractLastStringLiteral(inner); ok {
+		if exc != "" {
+			fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", exc+": "+lit)
+		} else {
+			fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", lit)
+		}
+		return nil
+	}
+	// No string literal found, but a PyExc_<Name> token in the args is
+	// enough to label the failure so the test gate-skip logic can
+	// classify it (e.g. NameError vs a real regression).
+	if exc != "" {
+		fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", exc)
+		return nil
+	}
 	fmt.Fprintf(t.writer, "e.setPendingErr(%q)\n", name)
 	return nil
+}
+
+// extractExceptionName scans args for a `PyExc_<Name>` token and
+// returns "<Name>Error" so a translated err setter still carries the
+// exception type into pendingErr (e.g. NameError, SystemError). The
+// trailing "Error" is dropped if the token already ends with it
+// (PyExc_StopIteration -> "StopIteration"). Returns "" when no
+// PyExc_* token is present.
+func extractExceptionName(s string) string {
+	for tok := range strings.FieldsSeq(s) {
+		if !strings.HasPrefix(tok, "PyExc_") {
+			continue
+		}
+		// Strip surrounding punctuation (commas left in by the joined
+		// arg string).
+		tok = strings.TrimRight(tok, ",")
+		name := strings.TrimPrefix(tok, "PyExc_")
+		if name == "" {
+			continue
+		}
+		// PyExc_NameError, PyExc_SystemError, PyExc_ValueError, etc.
+		// already carry the suffix; pass through unchanged. The bare
+		// ones (PyExc_StopIteration, PyExc_GeneratorExit) we leave as
+		// is so the test logic that matches on the type name still
+		// works.
+		return name
+	}
+	return ""
+}
+
+// extractLastStringLiteral returns the contents of the last `"..."`
+// run that closes the input. Lexer tokens for C string literals carry
+// their surrounding quotes verbatim, so a final `"` in the joined
+// argument list pairs with the previous `"` and the bracketed slice
+// is the literal payload. Returns ok=false when no string literal
+// terminates the input.
+func extractLastStringLiteral(s string) (string, bool) {
+	s = strings.TrimRight(s, " \t")
+	if len(s) < 2 || s[len(s)-1] != '"' {
+		return "", false
+	}
+	end := len(s) - 1
+	for i := end - 1; i >= 0; i-- {
+		if s[i] == '"' && (i == 0 || s[i-1] != '\\') {
+			return s[i+1 : end], true
+		}
+	}
+	return "", false
 }
 
 // stmtNoopCalls is the set of CPython statement-form macros that are
@@ -833,6 +961,56 @@ func (t *actionTranslator) translateExcInfoAssign() error {
 	}
 	fmt.Fprintf(t.writer, "e.setHandledException(%s)\n", goExpr)
 	return nil
+}
+
+// splitTopLevelArgs splits a comma-separated argument list (already
+// stripped of the enclosing parens) into per-arg token slices, honoring
+// nested parens/brackets so a comma inside a sub-call does not split
+// the outer arg.
+func splitTopLevelArgs(toks []string) ([][]string, error) {
+	var out [][]string
+	depth := 0
+	start := 0
+	for i, tk := range toks {
+		switch tk {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			depth--
+			if depth < 0 {
+				return nil, fmt.Errorf("unbalanced %q", tk)
+			}
+		case ",":
+			if depth == 0 {
+				out = append(out, toks[start:i])
+				start = i + 1
+			}
+		}
+	}
+	if depth != 0 {
+		return nil, fmt.Errorf("unbalanced parens in arg list")
+	}
+	if start < len(toks) {
+		out = append(out, toks[start:])
+	}
+	return out, nil
+}
+
+// outParamHelpers is the registry of CPython helpers whose call shape is
+// `int err = HELPER(in1, ..., inN, &out);` — they return a status int
+// and write the value through an out-pointer. The Go wrappers return
+// (value, status) so the translator can emit a multi-assign:
+//
+//	out, err := e.helper(in1, ..., inN)
+//
+// CPython: Objects/abstract.c PyMapping_GetOptionalItem (and similar)
+var outParamHelpers = map[string]helperCall{
+	// PyMapping_GetOptionalItem(obj, key, &out) -> int (1 found / 0
+	// missing / -1 error). gopy stashes the error on pendingErr; the
+	// wrapper returns the value and an int matching CPython's contract.
+	//
+	// CPython: Objects/abstract.c:207 PyMapping_GetOptionalItem
+	"PyMapping_GetOptionalItem": {goExpr: "e.mappingGetOptionalItem", arity: 2},
 }
 
 // splitTopLevelTernary scans `cond ? a : b` and returns the three
@@ -1214,6 +1392,31 @@ func (p *exprParser) parsePrimary() (string, error) {
 		}
 		return "", fmt.Errorf("_Py_STR: unsupported singleton %q", arg)
 	}
+	// _Py_ID(name) returns CPython's preallocated interned identifier
+	// for `name` (a bare identifier, not an expression). Used in
+	// bytecodes.c via `&_Py_ID(__build_class__)` and friends; the `&`
+	// is dropped earlier by the unary-prefix path, so the call surface
+	// is the bare macro form. Render as a fresh objects.NewStr — string
+	// equality in gopy already collapses across identical contents, so
+	// the interning is an optimization rather than a semantic.
+	//
+	// CPython: Include/internal/pycore_runtime_init_generated.h _Py_ID
+	if tk == "_Py_ID" {
+		if p.pos >= len(p.toks) || p.toks[p.pos] != "(" {
+			return "", fmt.Errorf("_Py_ID: expected '('")
+		}
+		p.pos++
+		if p.pos >= len(p.toks) {
+			return "", fmt.Errorf("_Py_ID: missing identifier")
+		}
+		arg := p.toks[p.pos]
+		p.pos++
+		if p.pos >= len(p.toks) || p.toks[p.pos] != ")" {
+			return "", fmt.Errorf("_Py_ID: expected ')'")
+		}
+		p.pos++
+		return fmt.Sprintf("objects.NewStr(%q)", arg), nil
+	}
 	// _PyDict_FromItems builds a dict from an interleaved key/value
 	// array. The only call shape in bytecodes.c (BUILD_MAP) is
 	// `_PyDict_FromItems(values_o, 2, values_o+1, 2, oparg)`: same
@@ -1551,6 +1754,18 @@ var helperCalls = map[string]helperCall{
 	"PyObject_Length": {goExpr: "e.objectLength", arity: 1},
 	// PySet_New(iterable) builds a fresh set; iterable may be NULL.
 	"PySet_New": {goExpr: "e.setNew", arity: 1},
+	// _PyDict_LoadGlobal(globals, builtins, name) walks globals then
+	// builtins for a name without raising on miss. Returns the found
+	// value (Object) or nil when neither dict carries the key; on a
+	// real lookup failure pendingErr is set.
+	//
+	// CPython: Objects/dictobject.c _PyDict_LoadGlobal
+	"_PyDict_LoadGlobal": {goExpr: "e.dictLoadGlobal", arity: 3},
+	// PyDict_New() returns a fresh empty dict. CPython can fail with
+	// MemoryError; gopy's NewDict is infallible under Go's GC.
+	//
+	// CPython: Objects/dictobject.c PyDict_New
+	"PyDict_New": {goExpr: "e.dictNew", arity: 0},
 	// Cell helpers.
 	"PyCell_New":         {goExpr: "e.cellNew", arity: 1},
 	"PyCell_SwapTakeRef": {goExpr: "e.cellSwapTakeRef", arity: 2},
