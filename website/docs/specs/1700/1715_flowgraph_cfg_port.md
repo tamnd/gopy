@@ -78,7 +78,7 @@ function list matches `Python/flowgraph.c`'s function list.
 | 1     | `basicblock` + `cfgBuilder` types and constructors                                     | done        | `ebae0b1` |
 | 2     | `_PyCfg_FromInstructionSequence` bridge                                                | done        | `c5485af` |
 | 3     | Re-port every pass in `flowgraph_passes.go` onto `*cfgBuilder`                         | in progress | `fb9d104` |
-| 4     | `stackdepth` and `optimize_load_fast` onto the graph                                   | pending     | —         |
+| 4     | `stackdepth` and `optimize_load_fast` onto the graph                                   | done        | `1ce8763` |
 | 5     | `_PyCfg_ToInstructionSequence` bridge                                                  | pending     | —         |
 | 6     | Delete flat-sequence pass shim; `flowgraph_passes.go` matches `Python/flowgraph.c` 1:1 | pending     | —         |
 
