@@ -427,6 +427,156 @@ func cfgMarkExceptHandlers(g *cfgBuilder) {
 	}
 }
 
+// coMaxBlocks bounds the static nesting depth of try / with regions
+// inside a single function.
+//
+// CPython: Include/cpython/code.h:160 CO_MAXBLOCKS
+const coMaxBlocks = 21
+
+// resumeOpargDepth1Mask is the bit RESUME sets in its oparg when the
+// surrounding YIELD ran with an exception stack of depth 1.
+//
+// CPython: Include/internal/pycore_opcode_utils.h:85 RESUME_OPARG_DEPTH1_MASK
+const resumeOpargDepth1Mask int32 = 0x4
+
+// cfgExceptStack is a transient handler stack used while
+// labelExceptionTargets walks the graph. Each entry is the handler
+// block of an open SETUP_X push.
+//
+// CPython: Python/flowgraph.c:686 _PyCfgExceptStack
+type cfgExceptStack struct {
+	handlers [coMaxBlocks + 2]*basicblock
+	depth    int
+}
+
+// pushExceptBlock pushes setup's target onto stack. Marks the target
+// PreserveLasti when setup is SETUP_WITH or SETUP_CLEANUP.
+//
+// CPython: Python/flowgraph.c:692 push_except_block
+func pushExceptBlock(stack *cfgExceptStack, setup *cfgInstr) *basicblock {
+	target := setup.Target
+	if setup.Op == SETUP_WITH || setup.Op == SETUP_CLEANUP {
+		target.PreserveLasti = true
+	}
+	stack.depth++
+	stack.handlers[stack.depth] = target
+	return target
+}
+
+// popExceptBlock pops the topmost handler. Returns the new top.
+//
+// CPython: Python/flowgraph.c:705 pop_except_block
+func popExceptBlock(stack *cfgExceptStack) *basicblock {
+	stack.depth--
+	return stack.handlers[stack.depth]
+}
+
+// exceptStackTop returns the topmost handler, or nil when the stack
+// is empty.
+//
+// CPython: Python/flowgraph.c:711 except_stack_top
+func exceptStackTop(stack *cfgExceptStack) *basicblock {
+	return stack.handlers[stack.depth]
+}
+
+// makeExceptStack allocates an empty stack with depth 0 and a nil
+// handler at the bottom.
+//
+// CPython: Python/flowgraph.c:716 make_except_stack
+func makeExceptStack() *cfgExceptStack {
+	return &cfgExceptStack{}
+}
+
+// copyExceptStack returns a deep copy of stack. Used at branch points
+// where the two successors must each own their handler chain.
+//
+// CPython: Python/flowgraph.c:728 copy_except_stack
+func copyExceptStack(stack *cfgExceptStack) *cfgExceptStack {
+	out := *stack
+	return &out
+}
+
+// basicblockHasFallthrough is the inverse of nofallthrough. Mirrors
+// the BB_HAS_FALLTHROUGH macro.
+//
+// CPython: Python/flowgraph.c:247 BB_HAS_FALLTHROUGH
+func basicblockHasFallthrough(b *basicblock) bool {
+	return !b.nofallthrough()
+}
+
+// cfgLabelExceptionTargets propagates the exception-handler stack
+// through the graph and stamps Except on every instruction inside an
+// open region. POP_BLOCK is rewritten to NOP here, matching CPython.
+//
+// CPython: Python/flowgraph.c:886 label_exception_targets
+//
+// switch hurts the 1:1 mapping with flowgraph.c:886.
+//
+//nolint:gocognit // direct port of the CPython algorithm; flattening the
+func cfgLabelExceptionTargets(entry *basicblock) {
+	for b := entry; b != nil; b = b.Next {
+		b.Visited = false
+	}
+	exceptStack := makeExceptStack()
+	entry.Visited = true
+	entry.ExceptStack = exceptStack
+	todo := []*basicblock{entry}
+	for len(todo) > 0 {
+		b := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+		exceptStack = b.ExceptStack
+		b.ExceptStack = nil
+		handler := exceptStackTop(exceptStack)
+		lastYieldExceptDepth := -1
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			switch {
+			case isBlockPushOpcode(ins.Op):
+				if ins.Target != nil && !ins.Target.Visited {
+					ins.Target.ExceptStack = copyExceptStack(exceptStack)
+					ins.Target.Visited = true
+					todo = append(todo, ins.Target)
+				}
+				handler = pushExceptBlock(exceptStack, ins)
+			case ins.Op == POP_BLOCK:
+				handler = popExceptBlock(exceptStack)
+				ins.Op = NOP
+				ins.Oparg = 0
+			case isJumpOpcode(ins.Op):
+				ins.Except = handler
+				if ins.Target != nil && !ins.Target.Visited {
+					if basicblockHasFallthrough(b) {
+						ins.Target.ExceptStack = copyExceptStack(exceptStack)
+					} else {
+						ins.Target.ExceptStack = exceptStack
+						exceptStack = nil
+					}
+					ins.Target.Visited = true
+					todo = append(todo, ins.Target)
+				}
+			case ins.Op == YIELD_VALUE:
+				ins.Except = handler
+				lastYieldExceptDepth = exceptStack.depth
+			case ins.Op == RESUME:
+				ins.Except = handler
+				if ins.Oparg != resumeAtFuncStart {
+					if lastYieldExceptDepth == 1 {
+						ins.Oparg |= resumeOpargDepth1Mask
+					}
+					lastYieldExceptDepth = -1
+				}
+			default:
+				ins.Except = handler
+			}
+		}
+		if basicblockHasFallthrough(b) && b.Next != nil && !b.Next.Visited {
+			b.Next.ExceptStack = exceptStack
+			b.Next.Visited = true
+			todo = append(todo, b.Next)
+		}
+	}
+}
+
 // basicblockHasNoLineno reports whether every instruction in b lacks a
 // source location (Lineno < 0). Used by the inline pass to decide
 // whether a target block can be folded without losing line info.

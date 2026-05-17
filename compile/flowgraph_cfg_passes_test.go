@@ -658,3 +658,52 @@ func TestCfgMarkExceptHandlersFlagsTarget(t *testing.T) {
 		t.Fatal("handler block was not marked")
 	}
 }
+
+func TestCfgLabelExceptionTargetsAttributesInsideRegion(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	handler := g.newBlock()
+	g.EntryBlock.addOp(SETUP_FINALLY, 0, loc)
+	g.EntryBlock.Instr[0].Target = handler
+	g.EntryBlock.addOp(LOAD_CONST, 0, loc)
+	g.EntryBlock.addOp(POP_BLOCK, 0, loc)
+	g.EntryBlock.addOp(RETURN_VALUE, 0, loc)
+	g.EntryBlock.Next = handler
+	handler.addOp(RERAISE, 1, loc)
+
+	cfgLabelExceptionTargets(g.EntryBlock)
+
+	// LOAD_CONST inside the SETUP_FINALLY region inherits the handler.
+	if g.EntryBlock.Instr[1].Except != handler {
+		t.Fatalf("LOAD_CONST.Except = %v, want handler", g.EntryBlock.Instr[1].Except)
+	}
+	// POP_BLOCK rewritten to NOP.
+	if g.EntryBlock.Instr[2].Op != NOP {
+		t.Fatalf("POP_BLOCK was not rewritten to NOP")
+	}
+	// RETURN_VALUE sits past the pop; handler stack is empty so Except is nil.
+	if g.EntryBlock.Instr[3].Except != nil {
+		t.Fatalf("RETURN_VALUE.Except = %v, want nil", g.EntryBlock.Instr[3].Except)
+	}
+}
+
+func TestExceptStackPushPopTop(t *testing.T) {
+	s := makeExceptStack()
+	if exceptStackTop(s) != nil {
+		t.Fatal("empty stack top is not nil")
+	}
+	b1 := &basicblock{}
+	b2 := &basicblock{}
+	pushExceptBlock(s, &cfgInstr{Op: SETUP_FINALLY, Target: b1})
+	if exceptStackTop(s) != b1 {
+		t.Fatal("push did not set top")
+	}
+	pushExceptBlock(s, &cfgInstr{Op: SETUP_WITH, Target: b2})
+	if !b2.PreserveLasti {
+		t.Fatal("SETUP_WITH did not set PreserveLasti")
+	}
+	popExceptBlock(s)
+	if exceptStackTop(s) != b1 {
+		t.Fatal("pop did not restore previous top")
+	}
+}

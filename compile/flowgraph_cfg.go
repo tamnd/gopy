@@ -49,6 +49,12 @@ type basicblock struct {
 	Warm          bool
 
 	UnsafeLocalsMask uint64
+
+	// ExceptStack is the transient handler stack snapshot used during
+	// label_exception_targets. Nil at all other times.
+	//
+	// CPython: Python/flowgraph.c:686 _PyCfgExceptStack (b_exceptstack)
+	ExceptStack *cfgExceptStack
 }
 
 // addOp appends an instruction. CPython's basicblock_addop asserts
