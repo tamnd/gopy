@@ -205,11 +205,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 
 	case compile.END_FOR:
 		// END_FOR is a no-op for ordinary iterators in CPython 3.14:
-		// the codegen pairs it with POP_ITER (POP_TOP in gopy today),
-		// and FOR_ITER's exhaustion path leaves the iterator on the
-		// stack for that following pop. Generator finalization is the
-		// only case where END_FOR has a real effect, and gopy doesn't
-		// land that path yet.
+		// the codegen pairs it with POP_ITER, and FOR_ITER's exhaustion
+		// path leaves the iterator on the stack for that following pop.
+		// Generator finalization is the only case where END_FOR has a
+		// real effect, and gopy doesn't land that path yet.
 		//
 		// CPython: Python/bytecodes.c END_FOR
 		return e.advance(), nil, nil, false, true, nil

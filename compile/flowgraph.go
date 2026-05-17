@@ -118,12 +118,54 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 		}
 	}
 
+	// PASS 0a-pre: duplicate exit-without-lineno blocks reached by more
+	// than one predecessor so each control-flow path can carry its own
+	// source line. Must run before normalizeJumps because that pass
+	// adds opargs that this counter would otherwise overcount.
+	//
+	// CPython: Python/flowgraph.c:3563 duplicate_exits_without_lineno
+	duplicateExitsWithoutLineno(seq)
+
+	// PASS 0a: insert NOT_TAKEN after every forward conditional jump.
+	// Runs before ApplyLabelMap so the Insert label-shift lands on
+	// symbolic ids; running after offset resolution would require
+	// patching every absolute jump oparg.
+	//
+	// CPython: Python/flowgraph.c:535 normalize_jumps_in_block
+	normalizeJumps(seq)
+
 	// PASS 0b: promote LOAD_CONST <small int> to LOAD_SMALL_INT.
 	// Runs after fold so any folded result that lands in the small-int
 	// range gets promoted in the same optimisation pass.
 	//
 	// CPython: Python/flowgraph.c:2169 basicblock_optimize_load_const
 	rewriteLoadSmallInt(seq, consts)
+
+	// PASS 0b2: fold BUILD_TUPLE-of-constants into a single LOAD_CONST,
+	// and rewrite BUILD_LIST / BUILD_SET of constants into the
+	// BUILD_X 0 + LOAD_CONST tuple + LIST_EXTEND / SET_UPDATE prelude
+	// CPython emits. Must run after rewriteLoadSmallInt so LOAD_SMALL_INT
+	// values participate, and before removeUnusedConsts so the orphaned
+	// per-element const slots get reclaimed.
+	//
+	// CPython: Python/flowgraph.c:1454 fold_tuple_of_constants
+	// CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
+	foldTupleOfConstants(seq, consts)
+	optimizeListsAndSets(seq, consts)
+
+	// PASS 0b3: fold unary opcodes on const operands so `-1` becomes a
+	// single LOAD_CONST -1 rather than LOAD_CONST 1 + UNARY_NEGATIVE.
+	//
+	// CPython: Python/flowgraph.c:1935 fold_const_unaryop
+	foldConstUnaryop(seq, consts)
+
+	// PASS 0c: prune the const-pool entries no surviving instruction
+	// references. rewriteLoadSmallInt leaves small-int slots orphaned;
+	// removing them here is what brings co_consts byte-equal with
+	// CPython's output for the spec 1713 gate.
+	//
+	// CPython: Python/flowgraph.c:3174 remove_unused_consts
+	removeUnusedConsts(seq, consts)
 
 	// PASS 2: resolve symbolic jump labels to instruction offsets.
 	// CPython does this on the CFG; we exploit instrseq's existing
@@ -158,9 +200,39 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// preserving so jump opargs and the handler table stay valid.
 	removeUnreachableBlocks(seq)
 
-	// PASS 3: compact NOP runs. ApplyLabelMap has baked indices into
-	// jump opargs, so removeRedundantNops can reindex safely.
-	removeRedundantNops(seq)
+	// PASS 3b2: fold (compare-like)+(TO_BOOL or UNARY_NOT) pairs so the
+	// emitted stream matches CPython's optimize_basic_block output. The
+	// pass NOP-outs the first half and rewrites the second; the freshly
+	// generated NOPs are reclaimed by removeRedundantNops below.
+	//
+	// CPython: Python/flowgraph.c:2449 optimize_basic_block
+	peepholeOpcodePairs(seq)
+
+	// PASS 3b3: collapse adjacent SWAP / NOP runs into the optimal
+	// permutation, then statically slide single SWAPs through the
+	// following swappable instructions (NOP, STORE_FAST, POP_TOP) so
+	// patterns like SWAP(2), POP_TOP, STORE_FAST(x) collapse to NOP,
+	// STORE_FAST(x), POP_TOP. NOPs the freed SWAPs; the loop below
+	// reclaims them.
+	//
+	// CPython: Python/flowgraph.c:1982 swaptimize
+	// CPython: Python/flowgraph.c:2117 apply_static_swaps
+	runSwaptimize(seq)
+	runApplyStaticSwaps(seq)
+
+	// PASS 3: compact NOP runs and drop unconditional jumps that fall
+	// through to their target. ApplyLabelMap has baked indices into
+	// jump opargs, so both passes can read/rewrite them safely. CPython
+	// loops these two until both reach zero changes.
+	//
+	// CPython: Python/flowgraph.c:2529 remove_redundant_nops_and_jumps
+	for {
+		j := removeRedundantJumps(seq)
+		n := removeRedundantNops(seq)
+		if j == 0 && n == 0 {
+			break
+		}
+	}
 
 	// PASS 3c: backfill NO_LOCATION instructions with the previous
 	// valid location so the linetable does not encode a stray

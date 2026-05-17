@@ -11,11 +11,18 @@ import (
 
 // visitBoolOp emits the short-circuit form for `and` / `or`.
 //
-//	A and B and C  ->  evaluate A; copy and to-bool; if false jump
-//	                   to end with the first falsy value on top.
+//	A and B and C  ->  evaluate A; copy + to_bool; if false jump to
+//	                   end with the first falsy value on top.
 //	A or  B or  C  ->  same shape with POP_JUMP_IF_TRUE.
 //
-// CPython: Python/codegen.c:L3290 codegen_boolop
+// CPython emits the pseudo JUMP_IF_FALSE / JUMP_IF_TRUE here and
+// convert_pseudo_conditional_jumps later expands it to COPY 1 + TO_BOOL
+// + POP_JUMP_IF_X. gopy emits the expanded form inline because its
+// flowgraph has no pseudo-conditional pass; the resulting bytecode is
+// identical.
+//
+// CPython: Python/codegen.c:3290 codegen_boolop
+// CPython: Python/flowgraph.c:3485 convert_pseudo_conditional_jumps
 func (c *Compiler) visitBoolOp(e *ast.BoolOp) error {
 	if len(e.Values) < 2 {
 		return fmt.Errorf("compile: BoolOp needs at least two values")
@@ -32,10 +39,8 @@ func (c *Compiler) visitBoolOp(e *ast.BoolOp) error {
 		if i == len(e.Values)-1 {
 			break
 		}
-		// Keep the value alive: COPY 1 leaves the operand on the
-		// stack for the jump-on-truthiness check, popping only when
-		// the chain continues.
 		c.addOpI(COPY, 1, loc(e))
+		c.addOp(TO_BOOL, loc(e))
 		c.addOpJump(jump, end, loc(e))
 		c.addOp(POP_TOP, loc(e))
 	}
@@ -277,12 +282,11 @@ const (
 //
 // CPython: Python/codegen.c:L1979 codegen_ifexp
 func (c *Compiler) visitIfExp(e *ast.IfExp) error {
-	if err := c.visitExpr(e.Test); err != nil {
-		return err
-	}
 	elseLab := c.newLabel()
 	endLab := c.newLabel()
-	c.addOpJump(POP_JUMP_IF_FALSE, elseLab, loc(e))
+	if err := c.codegenJumpIf(e.Test, elseLab, false, loc(e)); err != nil {
+		return err
+	}
 	if err := c.visitExpr(e.Body); err != nil {
 		return err
 	}

@@ -17,6 +17,7 @@ func TestIfNoElseEmitsPopJumpIfFalse(t *testing.T) {
 	got := opNames(u)
 	want := []string{
 		"LOAD_NAME",         // x
+		"TO_BOOL",           // normalize for conditional jump
 		"POP_JUMP_IF_FALSE", // skip body
 		"NOP",               // pass
 		"LOAD_CONST",        // implicit None
@@ -39,6 +40,7 @@ func TestIfWithElseEmitsJumpAroundElse(t *testing.T) {
 	got := opNames(u)
 	want := []string{
 		"LOAD_NAME",
+		"TO_BOOL",
 		"POP_JUMP_IF_FALSE", // -> else
 		"NOP",
 		"JUMP", // -> end (skip else)
@@ -61,6 +63,7 @@ func TestWhileEmitsLoop(t *testing.T) {
 	got := opNames(u)
 	want := []string{
 		"LOAD_NAME",
+		"TO_BOOL",
 		"POP_JUMP_IF_FALSE", // -> end
 		"NOP",
 		"JUMP", // -> top
@@ -89,7 +92,7 @@ func TestForEmitsGetIterAndForIter(t *testing.T) {
 		"NOP",        // pass
 		"JUMP",       // -> for_iter
 		"END_FOR",
-		"POP_TOP",
+		"POP_ITER",
 		"LOAD_CONST",
 		"RETURN_VALUE",
 	}
@@ -108,6 +111,7 @@ func TestBreakInLoopEmitsJumpToExit(t *testing.T) {
 	got := opNames(u)
 	want := []string{
 		"LOAD_NAME",
+		"TO_BOOL",
 		"POP_JUMP_IF_FALSE",
 		"JUMP", // break -> end
 		"JUMP", // bottom-of-body -> top
@@ -131,11 +135,11 @@ func TestContinueInLoopEmitsJumpToTop(t *testing.T) {
 	if len(got) < 4 {
 		t.Fatalf("ops = %v", got)
 	}
-	if got[0] != "LOAD_NAME" || got[1] != "POP_JUMP_IF_FALSE" {
-		t.Errorf("expected LOAD_NAME / POP_JUMP_IF_FALSE prefix, got %v", got[:2])
+	if got[0] != "LOAD_NAME" || got[1] != "TO_BOOL" || got[2] != "POP_JUMP_IF_FALSE" {
+		t.Errorf("expected LOAD_NAME / TO_BOOL / POP_JUMP_IF_FALSE prefix, got %v", got[:3])
 	}
-	if got[2] != "JUMP" || got[3] != "JUMP" {
-		t.Errorf("expected two JUMPs in body, got %v", got[2:4])
+	if got[3] != "JUMP" || got[4] != "JUMP" {
+		t.Errorf("expected two JUMPs in body, got %v", got[3:5])
 	}
 }
 

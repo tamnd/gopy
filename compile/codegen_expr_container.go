@@ -133,6 +133,10 @@ func hasStarred(elts ast.Seq[ast.Expr]) bool {
 // Include/internal/pycore_intrinsics.h).
 const intrinsicListToTuple int32 = 6
 
+// intrinsicUnaryPositive is INTRINSIC_UNARY_POSITIVE (CPython:
+// Include/internal/pycore_intrinsics.h).
+const intrinsicUnaryPositive int32 = 5
+
 // visitDict emits a dict literal. CPython lays this out as a series
 // of LOAD_CONST keys + BUILD_MAP for each contiguous run, with
 // DICT_UPDATE for `**other` splat keys.

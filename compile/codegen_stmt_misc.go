@@ -219,10 +219,9 @@ func (c *Compiler) visitAssert(s *ast.Assert) error {
 		return nil
 	}
 	end := c.newLabel()
-	if err := c.visitExpr(s.Test); err != nil {
+	if err := c.codegenJumpIf(s.Test, end, true, loc(s)); err != nil {
 		return err
 	}
-	c.addOpJump(POP_JUMP_IF_TRUE, end, loc(s))
 	c.addOpI(LOAD_COMMON_CONSTANT, constantAssertionError, loc(s))
 	if s.Msg != nil {
 		if err := c.visitExpr(s.Msg); err != nil {

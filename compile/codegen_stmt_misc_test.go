@@ -147,6 +147,7 @@ func TestAssertEmitsLoadCommonConstantAndRaise(t *testing.T) {
 	got := opNames(u)
 	want := []string{
 		"LOAD_NAME",
+		"TO_BOOL",
 		"POP_JUMP_IF_TRUE",
 		"LOAD_COMMON_CONSTANT",
 		"RAISE_VARARGS",
@@ -165,6 +166,7 @@ func TestAssertWithMessageCallsConstructor(t *testing.T) {
 	got := opNames(u)
 	want := []string{
 		"LOAD_NAME",
+		"TO_BOOL",
 		"POP_JUMP_IF_TRUE",
 		"LOAD_COMMON_CONSTANT",
 		"LOAD_CONST", // "boom"
