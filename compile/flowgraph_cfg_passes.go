@@ -490,6 +490,280 @@ func cfgLoadsConstValue(ins *cfgInstr, consts []any) (any, bool) {
 	return nil, false
 }
 
+// optimizeBasicBlockCFG runs CPython's per-block peephole/const-fold
+// pass over bb. Each switch case mirrors a case in CPython's
+// optimize_basic_block in source order; the trailing loop reruns
+// swaptimize + apply_static_swaps once new SWAPs become visible.
+//
+// CPython: Python/flowgraph.c:2311 optimize_basic_block
+//
+//nolint:gocognit,gocyclo // direct port of CPython's monolithic switch; splitting cases would diverge from the source.
+func optimizeBasicBlockCFG(bb *basicblock, consts *[]any) {
+	var nop cfgInstr
+	nop.Op = NOP
+	for i := 0; i < len(bb.Instr); i++ {
+		inst := &bb.Instr[i]
+		var target *cfgInstr
+		if hasJumpTarget(inst.Op) && inst.Target != nil && len(inst.Target.Instr) > 0 {
+			target = &inst.Target.Instr[0]
+		} else {
+			target = &nop
+		}
+		var nextop Opcode
+		if i+1 < len(bb.Instr) {
+			nextop = bb.Instr[i+1].Op
+		}
+		opcode := inst.Op
+		oparg := inst.Oparg
+		switch opcode {
+		case BUILD_TUPLE:
+			if nextop == UNPACK_SEQUENCE && oparg == bb.Instr[i+1].Oparg {
+				switch oparg {
+				case 1:
+					inst.Op = NOP
+					inst.Oparg = 0
+					inst.Target = nil
+					bb.Instr[i+1].Op = NOP
+					bb.Instr[i+1].Oparg = 0
+					continue
+				case 2, 3:
+					inst.Op = NOP
+					inst.Oparg = 0
+					inst.Target = nil
+					bb.Instr[i+1].Op = SWAP
+					continue
+				}
+			}
+			basicblockFoldTupleOfConstants(bb, consts)
+		case BUILD_LIST, BUILD_SET:
+			basicblockOptimizeListsAndSets(bb, consts)
+		case POP_JUMP_IF_NOT_NONE, POP_JUMP_IF_NONE:
+			if target.Op == JUMP {
+				if cfgJumpThread(bb, inst, target, opcode) {
+					i--
+				}
+			}
+		case POP_JUMP_IF_FALSE:
+			if target.Op == JUMP {
+				if cfgJumpThread(bb, inst, target, POP_JUMP_IF_FALSE) {
+					i--
+				}
+			}
+		case POP_JUMP_IF_TRUE:
+			if target.Op == JUMP {
+				if cfgJumpThread(bb, inst, target, POP_JUMP_IF_TRUE) {
+					i--
+				}
+			}
+		case JUMP_IF_FALSE:
+			switch target.Op {
+			case JUMP, JUMP_IF_FALSE:
+				if cfgJumpThread(bb, inst, target, JUMP_IF_FALSE) {
+					i--
+				}
+				continue
+			case JUMP_IF_TRUE:
+				if inst.Target != nil && inst.Target.Next != nil {
+					inst.Target = inst.Target.Next
+					inst.Oparg = int32(inst.Target.Label.id)
+					i--
+				}
+				continue
+			}
+		case JUMP_IF_TRUE:
+			switch target.Op {
+			case JUMP, JUMP_IF_TRUE:
+				if cfgJumpThread(bb, inst, target, JUMP_IF_TRUE) {
+					i--
+				}
+				continue
+			case JUMP_IF_FALSE:
+				if inst.Target != nil && inst.Target.Next != nil {
+					inst.Target = inst.Target.Next
+					inst.Oparg = int32(inst.Target.Label.id)
+					i--
+				}
+				continue
+			}
+		case JUMP, JUMP_NO_INTERRUPT:
+			switch target.Op {
+			case JUMP:
+				if cfgJumpThread(bb, inst, target, JUMP) {
+					i--
+				}
+				continue
+			case JUMP_NO_INTERRUPT:
+				if cfgJumpThread(bb, inst, target, opcode) {
+					i--
+				}
+				continue
+			}
+		case FOR_ITER:
+			// CPython leaves the JUMP target rewrite commented out
+			// since FOR_ITER only jumps forward. Match that.
+		case STORE_FAST:
+			if opcode == nextop &&
+				oparg == bb.Instr[i+1].Oparg &&
+				bb.Instr[i].Loc.Lineno == bb.Instr[i+1].Loc.Lineno {
+				bb.Instr[i].Op = POP_TOP
+				bb.Instr[i].Oparg = 0
+			}
+		case SWAP:
+			if oparg == 1 {
+				inst.Op = NOP
+				inst.Oparg = 0
+				inst.Target = nil
+			}
+		case LOAD_GLOBAL:
+			if nextop == PUSH_NULL && (oparg&1) == 0 {
+				inst.Op = LOAD_GLOBAL
+				inst.Oparg = oparg | 1
+				bb.Instr[i+1].Op = NOP
+				bb.Instr[i+1].Oparg = 0
+				bb.Instr[i+1].Target = nil
+			}
+		case COMPARE_OP:
+			if nextop == TO_BOOL {
+				inst.Op = NOP
+				inst.Oparg = 0
+				inst.Target = nil
+				bb.Instr[i+1].Op = COMPARE_OP
+				bb.Instr[i+1].Oparg = oparg | 16
+				continue
+			}
+		case CONTAINS_OP, IS_OP:
+			if nextop == TO_BOOL {
+				inst.Op = NOP
+				inst.Oparg = 0
+				inst.Target = nil
+				bb.Instr[i+1].Op = opcode
+				bb.Instr[i+1].Oparg = oparg
+				continue
+			}
+			if nextop == UNARY_NOT {
+				inst.Op = NOP
+				inst.Oparg = 0
+				inst.Target = nil
+				bb.Instr[i+1].Op = opcode
+				bb.Instr[i+1].Oparg = oparg ^ 1
+				continue
+			}
+		case TO_BOOL:
+			if nextop == TO_BOOL {
+				inst.Op = NOP
+				inst.Oparg = 0
+				inst.Target = nil
+				continue
+			}
+		case UNARY_NOT:
+			if nextop == TO_BOOL {
+				inst.Op = NOP
+				inst.Oparg = 0
+				inst.Target = nil
+				bb.Instr[i+1].Op = UNARY_NOT
+				bb.Instr[i+1].Oparg = 0
+				continue
+			}
+			if nextop == UNARY_NOT {
+				inst.Op = NOP
+				inst.Oparg = 0
+				inst.Target = nil
+				bb.Instr[i+1].Op = NOP
+				bb.Instr[i+1].Oparg = 0
+				continue
+			}
+			fallthrough
+		case UNARY_INVERT, UNARY_NEGATIVE:
+			basicblockFoldConstUnaryop(bb, consts)
+		case CALL_INTRINSIC_1:
+			switch oparg {
+			case intrinsicListToTuple:
+				if nextop == GET_ITER {
+					inst.Op = NOP
+					inst.Oparg = 0
+					inst.Target = nil
+				} else {
+					basicblockFoldConstantIntrinsicListToTuple(bb, i, consts)
+				}
+			case intrinsicUnaryPositive:
+				basicblockFoldConstUnaryop(bb, consts)
+			}
+		case BINARY_OP:
+			basicblockFoldConstBinop(bb, consts)
+		}
+	}
+	for i := 0; i < len(bb.Instr); i++ {
+		if bb.Instr[i].Op == SWAP {
+			basicblockSwaptimize(bb, &i)
+			basicblockApplyStaticSwaps(bb, i)
+		}
+	}
+}
+
+// basicblockFoldConstantIntrinsicListToTuple folds a
+//
+//	BUILD_LIST 0; (LOAD_CONST cK; LIST_APPEND 1)+ ; CALL_INTRINSIC_1 LIST_TO_TUPLE
+//
+// run at position i into a single LOAD_CONST(c1, ..., cN). Returns 1
+// when a fold happened.
+//
+// CPython: Python/flowgraph.c:1509 fold_constant_intrinsic_list_to_tuple
+//
+//nolint:gocognit // single-function port of CPython's reverse scan.
+func basicblockFoldConstantIntrinsicListToTuple(bb *basicblock, i int, consts *[]any) int {
+	if consts == nil {
+		return 0
+	}
+	intrinsic := &bb.Instr[i]
+	if intrinsic.Op != CALL_INTRINSIC_1 || intrinsic.Oparg != intrinsicListToTuple {
+		return 0
+	}
+	constsFound := 0
+	expectAppend := true
+	for pos := i - 1; pos >= 0; pos-- {
+		ins := &bb.Instr[pos]
+		if ins.Op == NOP {
+			continue
+		}
+		if ins.Op == BUILD_LIST && ins.Oparg == 0 {
+			if !expectAppend {
+				return 0
+			}
+			values := make([]any, constsFound)
+			cursor := constsFound
+			for newpos := i - 1; newpos >= pos; newpos-- {
+				p := &bb.Instr[newpos]
+				if p.Op == NOP {
+					continue
+				}
+				if v, ok := cfgLoadsConstValue(p, *consts); ok {
+					cursor--
+					values[cursor] = v
+				}
+				p.Op = NOP
+				p.Oparg = 0
+				p.Target = nil
+			}
+			tuple := &ConstTuple{Values: values}
+			intrinsic.Op = LOAD_CONST
+			intrinsic.Oparg = int32(appendConst(consts, tuple))
+			return 1
+		}
+		if expectAppend {
+			if ins.Op != LIST_APPEND || ins.Oparg != 1 {
+				return 0
+			}
+		} else {
+			if _, ok := cfgLoadsConstValue(ins, *consts); !ok {
+				return 0
+			}
+			constsFound++
+		}
+		expectAppend = !expectAppend
+	}
+	return 0
+}
+
 // basicblockFoldConstBinop rewrites `LOAD_CONST a; LOAD_CONST b;
 // BINARY_OP op` triples where both operands are int64 constants and op
 // has a defined integer result. The two loads become NOPs and the

@@ -306,6 +306,47 @@ func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	}
 }
 
+func TestOptimizeBasicBlockCFGFoldsBinop(t *testing.T) {
+	consts := []any{int64(3), int64(4)}
+	bb := &basicblock{Instr: []cfgInstr{
+		{Op: LOAD_CONST, Oparg: 0},
+		{Op: LOAD_CONST, Oparg: 1},
+		{Op: BINARY_OP, Oparg: nbAdd},
+	}}
+	optimizeBasicBlockCFG(bb, &consts)
+	if bb.Instr[2].Op != LOAD_CONST {
+		t.Errorf("binop = %v, want LOAD_CONST after folding", bb.Instr[2].Op)
+	}
+	if consts[bb.Instr[2].Oparg] != int64(7) {
+		t.Errorf("folded = %v, want 7", consts[bb.Instr[2].Oparg])
+	}
+}
+
+func TestOptimizeBasicBlockCFGSwapOneNoops(t *testing.T) {
+	bb := &basicblock{Instr: []cfgInstr{
+		{Op: SWAP, Oparg: 1},
+		{Op: POP_TOP},
+	}}
+	optimizeBasicBlockCFG(bb, nil)
+	if bb.Instr[0].Op != NOP {
+		t.Errorf("SWAP(1) = %v, want NOP", bb.Instr[0].Op)
+	}
+}
+
+func TestOptimizeBasicBlockCFGUnpackTwoSwaps(t *testing.T) {
+	bb := &basicblock{Instr: []cfgInstr{
+		{Op: BUILD_TUPLE, Oparg: 2},
+		{Op: UNPACK_SEQUENCE, Oparg: 2},
+	}}
+	optimizeBasicBlockCFG(bb, nil)
+	if bb.Instr[0].Op != NOP {
+		t.Errorf("BUILD_TUPLE 2 = %v, want NOP", bb.Instr[0].Op)
+	}
+	if bb.Instr[1].Op != SWAP {
+		t.Errorf("UNPACK_SEQUENCE 2 = %v, want SWAP", bb.Instr[1].Op)
+	}
+}
+
 func TestBasicblockFoldConstBinopAdds(t *testing.T) {
 	consts := []any{int64(3), int64(4)}
 	bb := &basicblock{Instr: []cfgInstr{
