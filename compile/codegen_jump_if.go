@@ -14,6 +14,11 @@ import "github.com/tamnd/gopy/ast"
 // false" case).
 //
 // CPython: Python/codegen.c:1884 codegen_jump_if
+//
+// 1:1 port of CPython's codegen_jump_if; the switch is one flat
+// dispatch on expr kind to keep parity with the C source.
+//
+//nolint:gocognit,gocyclo // tracks the C function shape
 func (c *Compiler) codegenJumpIf(test ast.Expr, next JumpTargetLabel, cond bool, loc ast.Pos) error {
 	switch e := test.(type) {
 	case *ast.UnaryOp:

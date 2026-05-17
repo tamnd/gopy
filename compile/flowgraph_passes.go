@@ -282,7 +282,7 @@ func normalizeJumps(seq *Sequence) {
 		}
 		if i+1 >= len(seq.Instrs) {
 			// Backward conditional with no fall-through instruction
-			// is malformed bytecode. Bail rather than synthesise a
+			// is malformed bytecode. Bail rather than synthesize a
 			// target that points past the end.
 			continue
 		}
