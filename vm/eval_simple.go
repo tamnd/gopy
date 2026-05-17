@@ -383,15 +383,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(objects.NewBool(match))
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.FORMAT_SIMPLE:
-		v := e.popObject()
-		s, serr := objects.Str(v)
-		if serr != nil {
-			return 0, nil, nil, false, true, serr
-		}
-		e.pushObject(objects.NewStr(s))
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.FORMAT_WITH_SPEC:
 		// Stack: [value, spec]. Dispatch through objects.Format
 		// (PyObject_Format), which routes to the value's __format__
@@ -419,20 +410,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.BUILD_STRING:
-		n := int(oparg)
-		pieces := make([]string, n)
-		for i := n - 1; i >= 0; i-- {
-			v := e.popObject()
-			s, serr := objects.Str(v)
-			if serr != nil {
-				return 0, nil, nil, false, true, serr
-			}
-			pieces[i] = s
-		}
-		e.pushObject(objects.NewStr(strings.Join(pieces, "")))
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.MAKE_FUNCTION:
@@ -857,30 +834,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		if serr := storeSlice(container, start, stop, value); serr != nil {
 			return 0, nil, nil, false, true, serr
 		}
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.GET_LEN:
-		// Push len(TOS) without consuming TOS.
-		v := e.peek(0).AsObject()
-		t := v.Type()
-		var n int
-		switch {
-		case t.Sequence != nil && t.Sequence.Length != nil:
-			x, lerr := t.Sequence.Length(v)
-			if lerr != nil {
-				return 0, nil, nil, false, true, lerr
-			}
-			n = x
-		case t.Mapping != nil && t.Mapping.Length != nil:
-			x, lerr := t.Mapping.Length(v)
-			if lerr != nil {
-				return 0, nil, nil, false, true, lerr
-			}
-			n = x
-		default:
-			return 0, nil, nil, false, true, fmt.Errorf("TypeError: object of type '%s' has no len()", t.Name)
-		}
-		e.pushObject(objects.NewInt(int64(n)))
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_FAST_LOAD_FAST, compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:

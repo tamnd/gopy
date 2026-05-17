@@ -37,4 +37,7 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.SET_ADD:                    true,
 	compile.MAP_ADD:                    true,
 	compile.DELETE_SUBSCR:              true,
+	compile.GET_LEN:                    true,
+	compile.BUILD_STRING:               true,
+	compile.FORMAT_SIMPLE:              true,
 }
