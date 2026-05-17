@@ -77,7 +77,7 @@ function list matches `Python/flowgraph.c`'s function list.
 | ----- | -------------------------------------------------------------------------------------- | ----------- | --------- |
 | 1     | `basicblock` + `cfgBuilder` types and constructors                                     | done        | `ebae0b1` |
 | 2     | `_PyCfg_FromInstructionSequence` bridge                                                | done        | `c5485af` |
-| 3     | Re-port every pass in `flowgraph_passes.go` onto `*cfgBuilder`                         | in progress | `fb9d104` |
+| 3     | Re-port every pass in `flowgraph_passes.go` onto `*cfgBuilder`                         | done        | `6f49fd5` |
 | 4     | `stackdepth` and `optimize_load_fast` onto the graph                                   | done        | `1ce8763` |
 | 5     | `_PyCfg_ToInstructionSequence` bridge                                                  | pending     | —         |
 | 6     | Delete flat-sequence pass shim; `flowgraph_passes.go` matches `Python/flowgraph.c` 1:1 | pending     | —         |
@@ -115,7 +115,7 @@ flat-sequence versions as each ported pass lands.
 | `duplicate_exits_without_lineno`   | `flowgraph.c:3563`   | done    | `2f40735` |
 | `propagate_line_numbers`           | `flowgraph.c:3616`   | done    | `c653483` |
 | `convert_pseudo_ops`               | `flowgraph.c:3520`   | done    | `c376e2c` |
-| `_PyCfg_OptimizeCodeUnit`          | `flowgraph.c:2997`   | pending | —         |
+| `_PyCfg_OptimizeCodeUnit`          | `flowgraph.c:3658`   | done    | `6f49fd5` |
 
 ### Phase 4. Stackdepth + locals
 
