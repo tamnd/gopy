@@ -747,6 +747,7 @@ panel.
 | `STORE_GLOBAL` | generated | `d6ad44b` | `GETITEM(FRAME_CO_NAMES, oparg)` + `PyDict_SetItem(GLOBALS(), name, v)` | A4 GETITEM helper |
 | `DELETE_GLOBAL` | generated | `d6ad44b` | `GETITEM(FRAME_CO_NAMES, oparg)` + `PyDict_DelItem(GLOBALS(), name)` | A4 GETITEM helper |
 | `FORMAT_WITH_SPEC` | generated | `67735f0` | `PyObject_Format(value, format_spec)` → `objects.Format` | Bucket B helper |
+| `GET_ITER` | generated | `02e72c3` | `PyObject_GetIter(iterable)` → `e.objectGetIter` | Bucket B helper; routes errors via `e.pendingErr` |
 
 #### Porting backlog (organized by blocker)
 
@@ -806,7 +807,7 @@ above.
 | `PyNumber_Negative` → `objects.NumberNegative` | UNARY_NEGATIVE | DONE | `e2c5275` |
 | `PyNumber_Invert` → `objects.NumberInvert` | UNARY_INVERT | DONE | `e2c5275` |
 | `PyObject_Format` → `objects.Format` | FORMAT_WITH_SPEC | DONE | `67735f0` |
-| `PyObject_GetIter` → `objects.GetIter` (already exists; just wire the `_Py_GatherStats_GetIter` instrumentation stub) | GET_ITER | TODO | - |
+| `PyObject_GetIter` → `objects.GetIter` (already exists; just wire the `_Py_GatherStats_GetIter` instrumentation stub) | GET_ITER | DONE | `02e72c3` |
 | `PySet_New` → `objects.NewSet([]Object)` | BUILD_SET | TODO | - |
 | `PyCell_New` → `objects.NewCell` | MAKE_CELL | TODO | - |
 | `_PyList_FromStackRefStealOnSuccess` → wrapper over `objects.NewList` | BUILD_LIST | TODO | - |
@@ -1147,7 +1148,7 @@ helper).
 - [ ] Phase 4.2 — `specialize/quicken.go` + `specialize/deopt.go` consume the generated tables
 - [ ] Phase 4.3 — parity test green; literal tables deleted
 - [x] Phase 5.1 — tier-1 emitter (Go-side `Tools/bytecodes_gen` in lieu of `gopy_tier1_generator.py`) emits `vm/eval_dispatch_gen.go` for unspecialized opcodes (107 arms, bodies stubbed pending Phase 8 action translator)
-- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (35 / ~118 opcodes routed through `dispatchGen` via the `dispatchGenSupported` whitelist; see the Phase 5.2 audit table for the per-opcode commit stamp)
+- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (36 / ~118 opcodes routed through `dispatchGen` via the `dispatchGenSupported` whitelist; see the Phase 5.2 audit table for the per-opcode commit stamp)
 - [x] Phase 5 Bucket A6.1 — `_Py_ID(NAME)` translates to `objects.NewStr("NAME")`
 - [x] Phase 5 Bucket A6.2 — out-param `int err = HELPER(args..., &out)` translates to Go multi-return
 - [x] Phase 5 Bucket A6.3 — `_PyErr_SetString` carries the literal message through `setPendingErr`
@@ -1156,6 +1157,7 @@ helper).
 - [x] Phase 5 Bucket B3 — `PyNumber_Negative` / `PyNumber_Invert` helpers; flips `UNARY_NEGATIVE`, `UNARY_INVERT` (`e2c5275`)
 - [x] Phase 5 Bucket B4 — `PyObject_Format` helper; flips `FORMAT_WITH_SPEC` (`67735f0`)
 - [x] Phase 5 Bucket B5 — `LOCALS()` → `e.frame.Locals()`; flips `LOAD_LOCALS` (`a7a4f7f`)
+- [x] Phase 5 Bucket B6 — `PyObject_GetIter` already wired through `e.objectGetIter`; flips `GET_ITER` (`02e72c3`)
 - [ ] Phase 5.3 — `vm/eval_simple.go` shrinks to evalLoop scaffolding only
 - [ ] Phase 5.4 — `go test ./vm` green
 - [ ] Phase 6.1 — specialized cases emitted in `vm/eval_dispatch_gen.go`
