@@ -3,6 +3,9 @@
 
 package compile
 
+// DEPRECATED (spec 1714): Fully deleted in spec 1714 phase 2; replaced by compile/opcode_ids_gen.go (generated from CPython Include/opcode_ids.h via tools/cases_generator).
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 // Opcode flag bits. Mirror HAS_*_FLAG in pycore_opcode_metadata.h.
 const (
 	flagArg         = 1 << 0

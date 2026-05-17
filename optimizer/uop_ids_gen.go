@@ -3,6 +3,9 @@
 
 package optimizer
 
+// DEPRECATED (spec 1714): Spec 1714 phase 7: content fully regenerated through tools/cases_generator (currently produced by a separate hand-rolled script).
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import "github.com/tamnd/gopy/compile"
 
 // Tier-2 micro-op IDs. Numeric IDs (>= 300) name uops the Tier-2

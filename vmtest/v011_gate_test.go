@@ -32,8 +32,8 @@ func emitWithCache(buf []byte, op compile.Opcode, arg byte) []byte {
 
 // TestGateSpecializerRewritesToBool drives a TO_BOOL through the
 // adaptive path with a forced-zero counter. The dispatch loop has to
-// land on the specialized variant, recognize it, and deopt back to
-// TO_BOOL while still producing True for an int operand.
+// land on the specialized variant and the TO_BOOL_INT fast-path arm
+// produces True for the int operand without deopting.
 func TestGateSpecializerRewritesToBool(t *testing.T) {
 	var bc []byte
 	bc = emitWithCache(bc, compile.LOAD_CONST, 0)
@@ -62,8 +62,8 @@ func TestGateSpecializerRewritesToBool(t *testing.T) {
 	if out != objects.True() {
 		t.Fatalf("result = %v, want True", out)
 	}
-	if got := compile.Opcode(co.Code[2*idx]); got != compile.TO_BOOL {
-		t.Fatalf("TO_BOOL slot = %s, want TO_BOOL after deopt", got.Name())
+	if got := compile.Opcode(co.Code[2*idx]); got != compile.TO_BOOL_INT {
+		t.Fatalf("TO_BOOL slot = %s, want TO_BOOL_INT after specialization", got.Name())
 	}
 }
 

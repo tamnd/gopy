@@ -77,21 +77,3 @@ func TestUnspecializeRestoresParent(t *testing.T) {
 		t.Fatalf("counter after unspecialize: got %v want %v", got, want)
 	}
 }
-
-func TestCacheU32RoundTrip(t *testing.T) {
-	buf := newAdaptiveBuf(compile.LOAD_ATTR)
-	const want uint32 = 0xDEADBEEF
-	SetCacheU32(buf, 0, 2, want)
-	if got := CacheU32(buf, 0, 2); got != want {
-		t.Fatalf("u32 cache cell: got 0x%08x want 0x%08x", got, want)
-	}
-}
-
-func TestCacheCellRoundTrip(t *testing.T) {
-	buf := newAdaptiveBuf(compile.STORE_ATTR)
-	const want uint16 = 0xBEEF
-	SetCacheCell(buf, 0, 1, want)
-	if got := CacheCell(buf, 0, 1); got != want {
-		t.Fatalf("u16 cache cell: got 0x%04x want 0x%04x", got, want)
-	}
-}

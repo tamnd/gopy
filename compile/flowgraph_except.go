@@ -40,6 +40,22 @@ type exceptFrame struct {
 func labelExceptionTargets(seq *Sequence) {
 	var stack []exceptFrame
 	for i := range seq.Instrs {
+		// A SETUP_X target block inherits the except_stack from BEFORE
+		// its corresponding push. The linear walk reaches the handler
+		// block via fall-through (the code laid out right after RERAISE
+		// is the cleanup block of the enclosing SETUP_X), so the frame
+		// is still on the stack here even though no POP_BLOCK bridges
+		// the gap. Dropping it now keeps the handler block's own
+		// instructions (COPY 3 / POP_EXCEPT / RERAISE 1) from being
+		// labeled with the very handler they implement, which would
+		// trap RERAISE 1 in an unwind loop back to itself.
+		//
+		// CPython: Python/flowgraph.c:885 label_exception_targets —
+		// the handler block inherits the except_stack from the block
+		// ending in SETUP_X, before the push.
+		for len(stack) > 0 && stack[len(stack)-1].target == i {
+			stack = stack[:len(stack)-1]
+		}
 		ins := &seq.Instrs[i]
 		switch ins.Op {
 		case SETUP_FINALLY:

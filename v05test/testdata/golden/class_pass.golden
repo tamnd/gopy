@@ -4,9 +4,9 @@
    6 MAKE_FUNCTION                  0
    8 LOAD_CONST                     1
   10 CALL                           2
-  12 STORE_NAME                     0
-  14 LOAD_CONST                     2
-  16 RETURN_VALUE                   0
+  18 STORE_NAME                     0
+  20 LOAD_CONST                     2
+  22 RETURN_VALUE                   0
 
 Disassembly of C:
      0 RESUME                         0

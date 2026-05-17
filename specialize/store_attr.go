@@ -20,6 +20,9 @@
 
 package specialize
 
+// DEPRECATED (spec 1714): Spec 1714 phases 3+4: raw cache writes migrate to typed accessors; family/deopt literals move to specialize/family_gen.go. File shrinks to specialize-policy.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
@@ -52,8 +55,9 @@ func StoreAttr(owner objects.Object, name *objects.Unicode, code []byte, instr i
 				Unspecialize(code, instr)
 				return
 			}
-			SetCacheU32(code, instr, 2, version)
-			SetCacheCell(code, instr, 4, uint16(idx))
+			c := attrCacheAt(code, instr)
+			c.setVersion(version)
+			c.setIndex(uint16(idx))
 			Specialize(code, instr, compile.STORE_ATTR_SLOT)
 			return
 		}
@@ -76,9 +80,10 @@ func StoreAttr(owner objects.Object, name *objects.Unicode, code []byte, instr i
 		Unspecialize(code, instr)
 		return
 	}
-	SetCacheU32(code, instr, 2, version)
+	c := attrCacheAt(code, instr)
+	c.setVersion(version)
 	if idx == objects.DictKeyAbsent {
-		SetCacheCell(code, instr, 4, 0)
+		c.setIndex(0)
 		Specialize(code, instr, compile.STORE_ATTR_WITH_HINT)
 		return
 	}
@@ -86,6 +91,6 @@ func StoreAttr(owner objects.Object, name *objects.Unicode, code []byte, instr i
 		Unspecialize(code, instr)
 		return
 	}
-	SetCacheCell(code, instr, 4, uint16(idx))
+	c.setIndex(uint16(idx))
 	Specialize(code, instr, compile.STORE_ATTR_INSTANCE_VALUE)
 }

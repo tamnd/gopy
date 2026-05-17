@@ -77,6 +77,31 @@ func TestSentinels(t *testing.T) {
 	}
 }
 
+func TestBoolNonePredicates(t *testing.T) {
+	if !True.IsTrue() {
+		t.Error("True.IsTrue must hold")
+	}
+	if True.IsFalse() || True.IsNone() {
+		t.Error("True must not be False or None")
+	}
+	if !False.IsFalse() {
+		t.Error("False.IsFalse must hold")
+	}
+	if False.IsTrue() || False.IsNone() {
+		t.Error("False must not be True or None")
+	}
+	if !None.IsNone() {
+		t.Error("None.IsNone must hold")
+	}
+	if None.IsTrue() || None.IsFalse() {
+		t.Error("None must not be True or False")
+	}
+	other := FromObject(objects.NewInt(7))
+	if other.IsTrue() || other.IsFalse() || other.IsNone() {
+		t.Error("arbitrary int must not satisfy any singleton predicate")
+	}
+}
+
 func TestFromObjectNewAndImmortal(t *testing.T) {
 	o := objects.NewInt(1)
 	if FromObjectNew(o).AsObject() != o {

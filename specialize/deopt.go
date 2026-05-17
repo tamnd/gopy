@@ -1,13 +1,16 @@
-// Per-opcode cache widths and the de-optimization table.
+// Per-opcode cache widths and the de-optimization lookup.
 //
 // _PyOpcode_Caches[op] is the number of trailing _Py_CODEUNIT slots
 // reserved as the inline cache for opcode op. Zero means the opcode
-// has no cache.
+// has no cache. The width table lives in compile/; CacheCount is a
+// thin alias so specialize-side code does not have to import compile
+// at every call site.
 //
 // _PyOpcode_Deopt[op] maps every specialized opcode back to its
-// adaptive parent. For an unspecialized opcode the entry is a fixed
-// point (op -> op). The dispatch loop reads this table when a
-// specialized arm hits a shape mismatch and needs to fall back.
+// adaptive parent. The fan-out lives in DeoptParent (specialize/family_gen.go,
+// emitted from Python/bytecodes.c family() declarations). Deopt is the
+// public accessor: unspecialized opcodes are fixed points (op -> op)
+// so the dispatch loop never reads a zero accidentally.
 //
 // CPython: Include/internal/pycore_opcode_metadata.h _PyOpcode_Caches
 // CPython: Include/internal/pycore_opcode_metadata.h _PyOpcode_Deopt
@@ -16,279 +19,13 @@ package specialize
 
 import "github.com/tamnd/gopy/compile"
 
-// caches is the per-opcode cache width in codeunits. Index 256.
-//
-// CPython: Include/internal/pycore_opcode_metadata.h:1764 _PyOpcode_Caches
-var caches = [256]uint8{
-	compile.TO_BOOL:              3,
-	compile.STORE_SUBSCR:         1,
-	compile.SEND:                 1,
-	compile.UNPACK_SEQUENCE:      1,
-	compile.STORE_ATTR:           4,
-	compile.LOAD_GLOBAL:          4,
-	compile.LOAD_SUPER_ATTR:      1,
-	compile.LOAD_ATTR:            9,
-	compile.COMPARE_OP:           1,
-	compile.CONTAINS_OP:          1,
-	compile.JUMP_BACKWARD:        1,
-	compile.POP_JUMP_IF_TRUE:     1,
-	compile.POP_JUMP_IF_FALSE:    1,
-	compile.POP_JUMP_IF_NONE:     1,
-	compile.POP_JUMP_IF_NOT_NONE: 1,
-	compile.FOR_ITER:             1,
-	compile.CALL:                 3,
-	compile.CALL_KW:              3,
-	compile.BINARY_OP:            5,
-}
-
 // CacheCount returns the number of trailing codeunits reserved as
-// inline cache after op. Zero means op carries no cache.
+// inline cache after op. Zero means op carries no cache. Source of
+// truth lives in compile/opcode_caches.go; this wrapper exists so
+// callers inside the specialize package don't pay the import-cycle
+// awkwardness of taking compile directly at every site.
 func CacheCount(op compile.Opcode) int {
-	if op < 0 || int(op) >= len(caches) {
-		return 0
-	}
-	return int(caches[op])
-}
-
-// deopt maps each specialized opcode to its adaptive parent. An
-// unspecialized opcode maps to itself. Reserved opcodes 121..127 and
-// 212..233 (the slots CPython keeps free for future use) keep their
-// own slot so the dispatch loop never reads a zero accidentally.
-//
-// CPython: Include/internal/pycore_opcode_metadata.h:1789 _PyOpcode_Deopt
-var deopt = [256]compile.Opcode{
-	121: 121, 122: 122, 123: 123, 124: 124, 125: 125, 126: 126, 127: 127,
-	212: 212, 213: 213, 214: 214, 215: 215, 216: 216, 217: 217, 218: 218,
-	219: 219, 220: 220, 221: 221, 222: 222, 223: 223, 224: 224, 225: 225,
-	226: 226, 227: 227, 228: 228, 229: 229, 230: 230, 231: 231, 232: 232,
-	233:                                               233,
-	compile.BINARY_OP:                                 compile.BINARY_OP,
-	compile.BINARY_OP_ADD_FLOAT:                       compile.BINARY_OP,
-	compile.BINARY_OP_ADD_INT:                         compile.BINARY_OP,
-	compile.BINARY_OP_ADD_UNICODE:                     compile.BINARY_OP,
-	compile.BINARY_OP_EXTEND:                          compile.BINARY_OP,
-	compile.BINARY_OP_INPLACE_ADD_UNICODE:             compile.BINARY_OP,
-	compile.BINARY_OP_MULTIPLY_FLOAT:                  compile.BINARY_OP,
-	compile.BINARY_OP_MULTIPLY_INT:                    compile.BINARY_OP,
-	compile.BINARY_OP_SUBSCR_DICT:                     compile.BINARY_OP,
-	compile.BINARY_OP_SUBSCR_GETITEM:                  compile.BINARY_OP,
-	compile.BINARY_OP_SUBSCR_LIST_INT:                 compile.BINARY_OP,
-	compile.BINARY_OP_SUBSCR_LIST_SLICE:               compile.BINARY_OP,
-	compile.BINARY_OP_SUBSCR_STR_INT:                  compile.BINARY_OP,
-	compile.BINARY_OP_SUBSCR_TUPLE_INT:                compile.BINARY_OP,
-	compile.BINARY_OP_SUBTRACT_FLOAT:                  compile.BINARY_OP,
-	compile.BINARY_OP_SUBTRACT_INT:                    compile.BINARY_OP,
-	compile.BINARY_SLICE:                              compile.BINARY_SLICE,
-	compile.BUILD_INTERPOLATION:                       compile.BUILD_INTERPOLATION,
-	compile.BUILD_LIST:                                compile.BUILD_LIST,
-	compile.BUILD_MAP:                                 compile.BUILD_MAP,
-	compile.BUILD_SET:                                 compile.BUILD_SET,
-	compile.BUILD_SLICE:                               compile.BUILD_SLICE,
-	compile.BUILD_STRING:                              compile.BUILD_STRING,
-	compile.BUILD_TEMPLATE:                            compile.BUILD_TEMPLATE,
-	compile.BUILD_TUPLE:                               compile.BUILD_TUPLE,
-	compile.CACHE:                                     compile.CACHE,
-	compile.CALL:                                      compile.CALL,
-	compile.CALL_ALLOC_AND_ENTER_INIT:                 compile.CALL,
-	compile.CALL_BOUND_METHOD_EXACT_ARGS:              compile.CALL,
-	compile.CALL_BOUND_METHOD_GENERAL:                 compile.CALL,
-	compile.CALL_BUILTIN_CLASS:                        compile.CALL,
-	compile.CALL_BUILTIN_FAST:                         compile.CALL,
-	compile.CALL_BUILTIN_FAST_WITH_KEYWORDS:           compile.CALL,
-	compile.CALL_BUILTIN_O:                            compile.CALL,
-	compile.CALL_FUNCTION_EX:                          compile.CALL_FUNCTION_EX,
-	compile.CALL_INTRINSIC_1:                          compile.CALL_INTRINSIC_1,
-	compile.CALL_INTRINSIC_2:                          compile.CALL_INTRINSIC_2,
-	compile.CALL_ISINSTANCE:                           compile.CALL,
-	compile.CALL_KW:                                   compile.CALL_KW,
-	compile.CALL_KW_BOUND_METHOD:                      compile.CALL_KW,
-	compile.CALL_KW_NON_PY:                            compile.CALL_KW,
-	compile.CALL_KW_PY:                                compile.CALL_KW,
-	compile.CALL_LEN:                                  compile.CALL,
-	compile.CALL_LIST_APPEND:                          compile.CALL,
-	compile.CALL_METHOD_DESCRIPTOR_FAST:               compile.CALL,
-	compile.CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS: compile.CALL,
-	compile.CALL_METHOD_DESCRIPTOR_NOARGS:             compile.CALL,
-	compile.CALL_METHOD_DESCRIPTOR_O:                  compile.CALL,
-	compile.CALL_NON_PY_GENERAL:                       compile.CALL,
-	compile.CALL_PY_EXACT_ARGS:                        compile.CALL,
-	compile.CALL_PY_GENERAL:                           compile.CALL,
-	compile.CALL_STR_1:                                compile.CALL,
-	compile.CALL_TUPLE_1:                              compile.CALL,
-	compile.CALL_TYPE_1:                               compile.CALL,
-	compile.CHECK_EG_MATCH:                            compile.CHECK_EG_MATCH,
-	compile.CHECK_EXC_MATCH:                           compile.CHECK_EXC_MATCH,
-	compile.CLEANUP_THROW:                             compile.CLEANUP_THROW,
-	compile.COMPARE_OP:                                compile.COMPARE_OP,
-	compile.COMPARE_OP_FLOAT:                          compile.COMPARE_OP,
-	compile.COMPARE_OP_INT:                            compile.COMPARE_OP,
-	compile.COMPARE_OP_STR:                            compile.COMPARE_OP,
-	compile.CONTAINS_OP:                               compile.CONTAINS_OP,
-	compile.CONTAINS_OP_DICT:                          compile.CONTAINS_OP,
-	compile.CONTAINS_OP_SET:                           compile.CONTAINS_OP,
-	compile.CONVERT_VALUE:                             compile.CONVERT_VALUE,
-	compile.COPY:                                      compile.COPY,
-	compile.COPY_FREE_VARS:                            compile.COPY_FREE_VARS,
-	compile.DELETE_ATTR:                               compile.DELETE_ATTR,
-	compile.DELETE_DEREF:                              compile.DELETE_DEREF,
-	compile.DELETE_FAST:                               compile.DELETE_FAST,
-	compile.DELETE_GLOBAL:                             compile.DELETE_GLOBAL,
-	compile.DELETE_NAME:                               compile.DELETE_NAME,
-	compile.DELETE_SUBSCR:                             compile.DELETE_SUBSCR,
-	compile.DICT_MERGE:                                compile.DICT_MERGE,
-	compile.DICT_UPDATE:                               compile.DICT_UPDATE,
-	compile.END_ASYNC_FOR:                             compile.END_ASYNC_FOR,
-	compile.END_FOR:                                   compile.END_FOR,
-	compile.END_SEND:                                  compile.END_SEND,
-	compile.ENTER_EXECUTOR:                            compile.ENTER_EXECUTOR,
-	compile.EXIT_INIT_CHECK:                           compile.EXIT_INIT_CHECK,
-	compile.EXTENDED_ARG:                              compile.EXTENDED_ARG,
-	compile.FORMAT_SIMPLE:                             compile.FORMAT_SIMPLE,
-	compile.FORMAT_WITH_SPEC:                          compile.FORMAT_WITH_SPEC,
-	compile.FOR_ITER:                                  compile.FOR_ITER,
-	compile.FOR_ITER_GEN:                              compile.FOR_ITER,
-	compile.FOR_ITER_LIST:                             compile.FOR_ITER,
-	compile.FOR_ITER_RANGE:                            compile.FOR_ITER,
-	compile.FOR_ITER_TUPLE:                            compile.FOR_ITER,
-	compile.GET_AITER:                                 compile.GET_AITER,
-	compile.GET_ANEXT:                                 compile.GET_ANEXT,
-	compile.GET_AWAITABLE:                             compile.GET_AWAITABLE,
-	compile.GET_ITER:                                  compile.GET_ITER,
-	compile.GET_LEN:                                   compile.GET_LEN,
-	compile.GET_YIELD_FROM_ITER:                       compile.GET_YIELD_FROM_ITER,
-	compile.IMPORT_FROM:                               compile.IMPORT_FROM,
-	compile.IMPORT_NAME:                               compile.IMPORT_NAME,
-	compile.INSTRUMENTED_CALL:                         compile.INSTRUMENTED_CALL,
-	compile.INSTRUMENTED_CALL_FUNCTION_EX:             compile.INSTRUMENTED_CALL_FUNCTION_EX,
-	compile.INSTRUMENTED_CALL_KW:                      compile.INSTRUMENTED_CALL_KW,
-	compile.INSTRUMENTED_END_ASYNC_FOR:                compile.INSTRUMENTED_END_ASYNC_FOR,
-	compile.INSTRUMENTED_END_FOR:                      compile.INSTRUMENTED_END_FOR,
-	compile.INSTRUMENTED_END_SEND:                     compile.INSTRUMENTED_END_SEND,
-	compile.INSTRUMENTED_FOR_ITER:                     compile.INSTRUMENTED_FOR_ITER,
-	compile.INSTRUMENTED_INSTRUCTION:                  compile.INSTRUMENTED_INSTRUCTION,
-	compile.INSTRUMENTED_JUMP_BACKWARD:                compile.INSTRUMENTED_JUMP_BACKWARD,
-	compile.INSTRUMENTED_JUMP_FORWARD:                 compile.INSTRUMENTED_JUMP_FORWARD,
-	compile.INSTRUMENTED_LINE:                         compile.INSTRUMENTED_LINE,
-	compile.INSTRUMENTED_LOAD_SUPER_ATTR:              compile.INSTRUMENTED_LOAD_SUPER_ATTR,
-	compile.INSTRUMENTED_NOT_TAKEN:                    compile.INSTRUMENTED_NOT_TAKEN,
-	compile.INSTRUMENTED_POP_ITER:                     compile.INSTRUMENTED_POP_ITER,
-	compile.INSTRUMENTED_POP_JUMP_IF_FALSE:            compile.INSTRUMENTED_POP_JUMP_IF_FALSE,
-	compile.INSTRUMENTED_POP_JUMP_IF_NONE:             compile.INSTRUMENTED_POP_JUMP_IF_NONE,
-	compile.INSTRUMENTED_POP_JUMP_IF_NOT_NONE:         compile.INSTRUMENTED_POP_JUMP_IF_NOT_NONE,
-	compile.INSTRUMENTED_POP_JUMP_IF_TRUE:             compile.INSTRUMENTED_POP_JUMP_IF_TRUE,
-	compile.INSTRUMENTED_RESUME:                       compile.INSTRUMENTED_RESUME,
-	compile.INSTRUMENTED_RETURN_VALUE:                 compile.INSTRUMENTED_RETURN_VALUE,
-	compile.INSTRUMENTED_YIELD_VALUE:                  compile.INSTRUMENTED_YIELD_VALUE,
-	compile.INTERPRETER_EXIT:                          compile.INTERPRETER_EXIT,
-	compile.IS_OP:                                     compile.IS_OP,
-	compile.JUMP_BACKWARD:                             compile.JUMP_BACKWARD,
-	compile.JUMP_BACKWARD_JIT:                         compile.JUMP_BACKWARD,
-	compile.JUMP_BACKWARD_NO_INTERRUPT:                compile.JUMP_BACKWARD_NO_INTERRUPT,
-	compile.JUMP_BACKWARD_NO_JIT:                      compile.JUMP_BACKWARD,
-	compile.JUMP_FORWARD:                              compile.JUMP_FORWARD,
-	compile.LIST_APPEND:                               compile.LIST_APPEND,
-	compile.LIST_EXTEND:                               compile.LIST_EXTEND,
-	compile.LOAD_ATTR:                                 compile.LOAD_ATTR,
-	compile.LOAD_ATTR_CLASS:                           compile.LOAD_ATTR,
-	compile.LOAD_ATTR_CLASS_WITH_METACLASS_CHECK:      compile.LOAD_ATTR,
-	compile.LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN:         compile.LOAD_ATTR,
-	compile.LOAD_ATTR_INSTANCE_VALUE:                  compile.LOAD_ATTR,
-	compile.LOAD_ATTR_METHOD_LAZY_DICT:                compile.LOAD_ATTR,
-	compile.LOAD_ATTR_METHOD_NO_DICT:                  compile.LOAD_ATTR,
-	compile.LOAD_ATTR_METHOD_WITH_VALUES:              compile.LOAD_ATTR,
-	compile.LOAD_ATTR_MODULE:                          compile.LOAD_ATTR,
-	compile.LOAD_ATTR_NONDESCRIPTOR_NO_DICT:           compile.LOAD_ATTR,
-	compile.LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES:       compile.LOAD_ATTR,
-	compile.LOAD_ATTR_PROPERTY:                        compile.LOAD_ATTR,
-	compile.LOAD_ATTR_SLOT:                            compile.LOAD_ATTR,
-	compile.LOAD_ATTR_WITH_HINT:                       compile.LOAD_ATTR,
-	compile.LOAD_BUILD_CLASS:                          compile.LOAD_BUILD_CLASS,
-	compile.LOAD_COMMON_CONSTANT:                      compile.LOAD_COMMON_CONSTANT,
-	compile.LOAD_CONST:                                compile.LOAD_CONST,
-	compile.LOAD_CONST_IMMORTAL:                       compile.LOAD_CONST,
-	compile.LOAD_CONST_MORTAL:                         compile.LOAD_CONST,
-	compile.LOAD_DEREF:                                compile.LOAD_DEREF,
-	compile.LOAD_FAST:                                 compile.LOAD_FAST,
-	compile.LOAD_FAST_AND_CLEAR:                       compile.LOAD_FAST_AND_CLEAR,
-	compile.LOAD_FAST_BORROW:                          compile.LOAD_FAST_BORROW,
-	compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:         compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW,
-	compile.LOAD_FAST_CHECK:                           compile.LOAD_FAST_CHECK,
-	compile.LOAD_FAST_LOAD_FAST:                       compile.LOAD_FAST_LOAD_FAST,
-	compile.LOAD_FROM_DICT_OR_DEREF:                   compile.LOAD_FROM_DICT_OR_DEREF,
-	compile.LOAD_FROM_DICT_OR_GLOBALS:                 compile.LOAD_FROM_DICT_OR_GLOBALS,
-	compile.LOAD_GLOBAL:                               compile.LOAD_GLOBAL,
-	compile.LOAD_GLOBAL_BUILTIN:                       compile.LOAD_GLOBAL,
-	compile.LOAD_GLOBAL_MODULE:                        compile.LOAD_GLOBAL,
-	compile.LOAD_LOCALS:                               compile.LOAD_LOCALS,
-	compile.LOAD_NAME:                                 compile.LOAD_NAME,
-	compile.LOAD_SMALL_INT:                            compile.LOAD_SMALL_INT,
-	compile.LOAD_SPECIAL:                              compile.LOAD_SPECIAL,
-	compile.LOAD_SUPER_ATTR:                           compile.LOAD_SUPER_ATTR,
-	compile.LOAD_SUPER_ATTR_ATTR:                      compile.LOAD_SUPER_ATTR,
-	compile.LOAD_SUPER_ATTR_METHOD:                    compile.LOAD_SUPER_ATTR,
-	compile.MAKE_CELL:                                 compile.MAKE_CELL,
-	compile.MAKE_FUNCTION:                             compile.MAKE_FUNCTION,
-	compile.MAP_ADD:                                   compile.MAP_ADD,
-	compile.MATCH_CLASS:                               compile.MATCH_CLASS,
-	compile.MATCH_KEYS:                                compile.MATCH_KEYS,
-	compile.MATCH_MAPPING:                             compile.MATCH_MAPPING,
-	compile.MATCH_SEQUENCE:                            compile.MATCH_SEQUENCE,
-	compile.NOP:                                       compile.NOP,
-	compile.NOT_TAKEN:                                 compile.NOT_TAKEN,
-	compile.POP_EXCEPT:                                compile.POP_EXCEPT,
-	compile.POP_ITER:                                  compile.POP_ITER,
-	compile.POP_JUMP_IF_FALSE:                         compile.POP_JUMP_IF_FALSE,
-	compile.POP_JUMP_IF_NONE:                          compile.POP_JUMP_IF_NONE,
-	compile.POP_JUMP_IF_NOT_NONE:                      compile.POP_JUMP_IF_NOT_NONE,
-	compile.POP_JUMP_IF_TRUE:                          compile.POP_JUMP_IF_TRUE,
-	compile.POP_TOP:                                   compile.POP_TOP,
-	compile.PUSH_EXC_INFO:                             compile.PUSH_EXC_INFO,
-	compile.PUSH_NULL:                                 compile.PUSH_NULL,
-	compile.RAISE_VARARGS:                             compile.RAISE_VARARGS,
-	compile.RERAISE:                                   compile.RERAISE,
-	compile.RESERVED:                                  compile.RESERVED,
-	compile.RESUME:                                    compile.RESUME,
-	compile.RESUME_CHECK:                              compile.RESUME,
-	compile.RETURN_GENERATOR:                          compile.RETURN_GENERATOR,
-	compile.RETURN_VALUE:                              compile.RETURN_VALUE,
-	compile.SEND:                                      compile.SEND,
-	compile.SEND_GEN:                                  compile.SEND,
-	compile.SETUP_ANNOTATIONS:                         compile.SETUP_ANNOTATIONS,
-	compile.SET_ADD:                                   compile.SET_ADD,
-	compile.SET_FUNCTION_ATTRIBUTE:                    compile.SET_FUNCTION_ATTRIBUTE,
-	compile.SET_UPDATE:                                compile.SET_UPDATE,
-	compile.STORE_ATTR:                                compile.STORE_ATTR,
-	compile.STORE_ATTR_INSTANCE_VALUE:                 compile.STORE_ATTR,
-	compile.STORE_ATTR_SLOT:                           compile.STORE_ATTR,
-	compile.STORE_ATTR_WITH_HINT:                      compile.STORE_ATTR,
-	compile.STORE_DEREF:                               compile.STORE_DEREF,
-	compile.STORE_FAST:                                compile.STORE_FAST,
-	compile.STORE_FAST_LOAD_FAST:                      compile.STORE_FAST_LOAD_FAST,
-	compile.STORE_FAST_STORE_FAST:                     compile.STORE_FAST_STORE_FAST,
-	compile.STORE_GLOBAL:                              compile.STORE_GLOBAL,
-	compile.STORE_NAME:                                compile.STORE_NAME,
-	compile.STORE_SLICE:                               compile.STORE_SLICE,
-	compile.STORE_SUBSCR:                              compile.STORE_SUBSCR,
-	compile.STORE_SUBSCR_DICT:                         compile.STORE_SUBSCR,
-	compile.STORE_SUBSCR_LIST_INT:                     compile.STORE_SUBSCR,
-	compile.SWAP:                                      compile.SWAP,
-	compile.TO_BOOL:                                   compile.TO_BOOL,
-	compile.TO_BOOL_ALWAYS_TRUE:                       compile.TO_BOOL,
-	compile.TO_BOOL_BOOL:                              compile.TO_BOOL,
-	compile.TO_BOOL_INT:                               compile.TO_BOOL,
-	compile.TO_BOOL_LIST:                              compile.TO_BOOL,
-	compile.TO_BOOL_NONE:                              compile.TO_BOOL,
-	compile.TO_BOOL_STR:                               compile.TO_BOOL,
-	compile.UNARY_INVERT:                              compile.UNARY_INVERT,
-	compile.UNARY_NEGATIVE:                            compile.UNARY_NEGATIVE,
-	compile.UNARY_NOT:                                 compile.UNARY_NOT,
-	compile.UNPACK_EX:                                 compile.UNPACK_EX,
-	compile.UNPACK_SEQUENCE:                           compile.UNPACK_SEQUENCE,
-	compile.UNPACK_SEQUENCE_LIST:                      compile.UNPACK_SEQUENCE,
-	compile.UNPACK_SEQUENCE_TUPLE:                     compile.UNPACK_SEQUENCE,
-	compile.UNPACK_SEQUENCE_TWO_TUPLE:                 compile.UNPACK_SEQUENCE,
-	compile.WITH_EXCEPT_START:                         compile.WITH_EXCEPT_START,
-	compile.YIELD_VALUE:                               compile.YIELD_VALUE,
+	return compile.CacheCount(op)
 }
 
 // Deopt returns the adaptive parent of op. For an unspecialized
@@ -298,8 +35,8 @@ var deopt = [256]compile.Opcode{
 //
 // CPython: Include/internal/pycore_code.h _PyOpcode_Deopt access
 func Deopt(op compile.Opcode) compile.Opcode {
-	if op < 0 || int(op) >= len(deopt) {
-		return op
+	if parent, ok := DeoptParent[op]; ok {
+		return parent
 	}
-	return deopt[op]
+	return op
 }

@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 
 	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/objects"
 )
 
 // SetOpcode rewrites the opcode at instr to op. Returns false when
@@ -57,31 +58,47 @@ func StoreCounter(code []byte, instr int, value BackoffCounter) {
 	binary.LittleEndian.PutUint16(code[2*(instr+1):], value.ValueAndBackoff)
 }
 
-// CacheCell reads the kth cache codeunit (1-based: cell 1 is the
-// counter slot, cell 2 is the next field, etc.). Per-family helpers
-// use it to fetch type or dict versions out of the inline cache.
-func CacheCell(code []byte, instr, k int) uint16 {
+// CodeUnitWidth is the width in bytes of one bytecode codeunit. All
+// inline-cache layouts are sized as a whole number of codeunits.
+const CodeUnitWidth = 2
+
+// readCell / writeCell are the internal building blocks used by the
+// typed cache views (loadGlobalCacheView, attrCacheView, etc.). They
+// stay package-private so call sites must go through a typed wrapper
+// that names the CPython struct field being addressed.
+//
+// CPython: Include/internal/pycore_code.h:175 read_obj / write_obj
+func readCell(code []byte, instr, k int) uint16 {
 	return binary.LittleEndian.Uint16(code[2*(instr+k):])
 }
 
-// SetCacheCell writes the kth cache codeunit. Mirror of CacheCell.
-func SetCacheCell(code []byte, instr, k int, value uint16) {
+func writeCell(code []byte, instr, k int, value uint16) {
 	binary.LittleEndian.PutUint16(code[2*(instr+k):], value)
 }
 
-// SetCacheU32 writes a uint32 split across cache cells k and k+1
-// (low 16 bits first, matching the C struct field order on
-// little-endian targets, which is what CPython assumes).
-func SetCacheU32(code []byte, instr, k int, value uint32) {
-	SetCacheCell(code, instr, k, uint16(value))
-	SetCacheCell(code, instr, k+1, uint16(value>>16))
+// SetCacheObject stashes a Go pointer in the parallel CacheObjects
+// slab. CPython packs the same pointer into 4 codeunits of the inline
+// cache via write_obj; gopy keeps the slab side-by-side because the
+// runtime can't tuck GC-tracked pointers inside a []byte. The slot
+// index is the codeunit offset of the opcode itself, matching how the
+// per-instruction cache cells are addressed by `instr`.
+//
+// CPython: Include/internal/pycore_code.h:175 write_obj
+func SetCacheObject(cache []objects.Object, instr int, value objects.Object) {
+	if instr >= 0 && instr < len(cache) {
+		cache[instr] = value
+	}
 }
 
-// CacheU32 reads a uint32 split across cache cells k and k+1.
-func CacheU32(code []byte, instr, k int) uint32 {
-	lo := uint32(CacheCell(code, instr, k))
-	hi := uint32(CacheCell(code, instr, k+1))
-	return lo | hi<<16
+// CacheObject reads the pointer slot at instr from the parallel slab.
+// Returns nil when the slot is out of range or unset.
+//
+// CPython: Include/internal/pycore_code.h:175 read_obj
+func CacheObject(cache []objects.Object, instr int) objects.Object {
+	if instr < 0 || instr >= len(cache) {
+		return nil
+	}
+	return cache[instr]
 }
 
 // Specialize rewrites the opcode at instr to specialized and stamps

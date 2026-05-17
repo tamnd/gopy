@@ -6,6 +6,9 @@
 
 package optimizer
 
+// DEPRECATED (spec 1714): Spec 1714 phase 7: fully deleted; generated content moves to vm/eval_uops_gen.go produced by tools/cases_generator.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 // executeUop is the dispatch fan-out. Generated from the analyzer
 // AST so adding a uop upstream auto-extends the switch on regen;
 // hand-ported bodies live in uops_impl.go and the un-ported tail

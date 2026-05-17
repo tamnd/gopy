@@ -10,6 +10,9 @@
 
 package optimizer
 
+// DEPRECATED (spec 1714): Spec 1714 phase 7: fully deleted; uop definitions come from optimizer/uop_meta_gen.go (regenerated through tools/cases_generator).
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/state"

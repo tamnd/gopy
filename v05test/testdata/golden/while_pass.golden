@@ -1,5 +1,5 @@
    0 LOAD_NAME                      0
-   2 POP_JUMP_IF_FALSE              1
-   4 JUMP_BACKWARD                  3
-   6 LOAD_CONST                     0
-   8 RETURN_VALUE                   0
+   2 POP_JUMP_IF_FALSE              2
+   6 JUMP_BACKWARD                  5
+  10 LOAD_CONST                     0
+  12 RETURN_VALUE                   0

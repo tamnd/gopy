@@ -47,6 +47,15 @@ type evalState struct {
 	// and the generator object's gi_frame_state)
 	genYield chan<- objects.GenMsg
 	genSend  <-chan objects.GenMsg
+
+	// pendingErr is set by translator-emitted helper wrappers (the ones
+	// modeled on CPython helpers that return NULL + set the thread
+	// exception state). The matching ERROR_IF in the body checks for
+	// the NULL/zero sentinel and bubbles this error up.
+	//
+	// CPython: tstate->current_exception, set by helpers that signal
+	// failure via NULL return.
+	pendingErr error
 }
 
 // Eval runs f to completion under ts and returns the value the frame
@@ -167,19 +176,29 @@ func (e *evalState) fetch() (op compile.Opcode, oparg uint32, ok bool) {
 	}
 }
 
-// advance returns the instruction offset n instructions ahead of
-// f.InstrPtr. The eval loop uses this to pin the next-pc value the
-// generated arms return.
 // advance returns the next pc, one instruction word past the current
-// instr ptr. Cache-word advances will need a parameterised variant
-// once instructions with inline caches dispatch through this path.
-func (e *evalState) advance() int { return e.f.InstrPtr + 2 }
+// instr ptr plus any inline-cache codeunits the current opcode owns
+// (_PyOpcode_Caches[op]). The eval loop relies on this so adaptive
+// opcodes don't run their cache cells as real instructions.
+//
+// CPython: Python/ceval_macros.h NEXTOPARG / DISPATCH (the implicit
+// `next_instr += INLINE_CACHE_ENTRIES_<OP>` step inside each arm).
+func (e *evalState) advance() int {
+	ip := e.f.InstrPtr
+	if ip < 0 || ip >= len(e.f.Code.Code) {
+		return ip + 2
+	}
+	op := compile.Opcode(e.f.Code.Code[ip])
+	return ip + 2 + 2*compile.CacheCount(op)
+}
 
 // jumpBy returns the instruction offset delta instructions away.
 // Forward jumps pass a positive delta; backward jumps pass negative.
+// The delta is in codeunits relative to the *next* instruction (the
+// one right after this op's cache cells), matching CPython's JUMPBY.
 //
 // CPython: Python/ceval_macros.h JUMPBY
-func (e *evalState) jumpBy(delta int) int { return e.f.InstrPtr + 2*delta }
+func (e *evalState) jumpBy(delta int) int { return e.advance() + 2*(delta-1) }
 
 // push pushes r onto the value stack.
 func (e *evalState) push(r stackref.Ref) { e.f.PushStack(r) }
@@ -190,6 +209,15 @@ func (e *evalState) pop() stackref.Ref { return e.f.PopStack() }
 // peek returns the value at depth from the top (0 = top).
 func (e *evalState) peek(depth int) stackref.Ref { return e.f.PeekStack(depth) }
 
+// setPeek writes r at depth from the top. Mirrors CPython's POKE,
+// used by generated dispatch arms to commit a value back to a
+// passthrough slot before STACK_SHRINK runs.
+func (e *evalState) setPeek(depth int, r stackref.Ref) { e.f.SetPeekStack(depth, r) }
+
+// drop pops n stack entries without binding them to locals; mirrors
+// CPython's STACK_SHRINK(n).
+func (e *evalState) drop(n int) { e.f.DropStack(n) }
+
 // pushObject is a shortcut for push(stackref.FromObject(o)).
 func (e *evalState) pushObject(o objects.Object) {
 	e.push(stackref.FromObject(o))
@@ -198,6 +226,29 @@ func (e *evalState) pushObject(o objects.Object) {
 // popObject is a shortcut for pop().AsObjectSteal().
 func (e *evalState) popObject() objects.Object {
 	return e.pop().AsObjectSteal()
+}
+
+// constAt returns co_consts[i] lifted into an Object. Mirrors CPython's
+// GETITEM(FRAME_CO_CONSTS, i): the bytecode compiler guarantees i is in
+// range and the const wraps cleanly, so a failure here is a compiler bug
+// rather than a runtime error.
+//
+// CPython: Python/ceval_macros.h GETITEM
+func (e *evalState) constAt(i int) objects.Object {
+	obj, err := wrapConst(e.f.Code.Consts[i])
+	if err != nil {
+		panic(fmt.Sprintf("vm: bad const at %d: %v", i, err))
+	}
+	return obj
+}
+
+// nameAt returns co_names[i] as a Python str. CPython stores names as
+// already-interned PyUnicodes; in gopy the storage is a Go string, so
+// we wrap on access.
+//
+// CPython: Python/ceval_macros.h GETITEM
+func (e *evalState) nameAt(i int) objects.Object {
+	return objects.NewStr(e.f.Code.Names[i])
 }
 
 // localAt returns fast-local i. Out-of-range indexes panic since the

@@ -1,0 +1,1 @@
+_ = 0 // Py_INCREF/DECREF: GC no-op

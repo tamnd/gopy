@@ -28,10 +28,10 @@ func TestStoreAttrSlot(t *testing.T) {
 	if got := compile.Opcode(buf[0]); got != compile.STORE_ATTR_SLOT {
 		t.Fatalf("opcode: got %s want STORE_ATTR_SLOT", got.Name())
 	}
-	if v := CacheU32(buf, 0, 2); v == 0 || v != cls.VersionTag() {
+	if v := AttrCacheVersion(buf, 0); v == 0 || v != cls.VersionTag() {
 		t.Fatalf("version cache: got %d want %d", v, cls.VersionTag())
 	}
-	if idx := CacheCell(buf, 0, 4); idx != 0 {
+	if idx := AttrCacheIndex(buf, 0); idx != 0 {
 		t.Fatalf("index cache: got %d want 0", idx)
 	}
 }

@@ -152,7 +152,9 @@ func TestTypeCodeRoundtrip(t *testing.T) {
 	c.KwonlyArgcount = 0
 	c.Stacksize = 4
 	c.Flags = 0x43
-	c.Code = []byte{0x64, 0x00, 0x53, 0x00}
+	// LOAD_CONST(82), RETURN_VALUE(35) — neither is adaptive, so Quicken
+	// leaves the buffer untouched after marshal load.
+	c.Code = []byte{82, 0x00, 35, 0x00}
 	c.Consts = []any{nil, int64(42), "hello"}
 	c.Names = []string{"x", "y"}
 	c.Varnames = []string{"a", "b"}

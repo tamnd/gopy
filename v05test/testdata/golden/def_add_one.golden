@@ -9,4 +9,4 @@ Disassembly of f:
      2 LOAD_FAST                      0
      4 LOAD_CONST                     0
      6 BINARY_OP                      0
-     8 RETURN_VALUE                   0
+    18 RETURN_VALUE                   0

@@ -201,10 +201,12 @@ func sameLocation(a, b ast.Pos) bool {
 }
 
 // instrSize returns the number of 16-bit code units one instruction
-// occupies in the final byte stream: one for the opcode + oparg, plus
-// one EXTENDED_ARG prefix per non-zero high byte of the oparg. CACHE
-// entries are not yet emitted (the v0.5 pipeline does not run the
-// specializer).
+// occupies in the final byte stream: one for the opcode + oparg, one
+// EXTENDED_ARG prefix per non-zero high byte of the oparg, plus
+// _PyOpcode_Caches[op] trailing CACHE codeunits for adaptive opcodes.
+// Cache cells are part of the on-disk bytecode layout so the
+// specializer (specialize.Quicken) can stamp seed counters into them
+// after marshal load.
 //
 // CPython: Python/assemble.c:39 instr_size
 func instrSize(ins *Instr) int {
@@ -217,5 +219,6 @@ func instrSize(ins *Instr) int {
 		n++
 		arg >>= 8
 	}
+	n += CacheCount(ins.Op)
 	return n
 }

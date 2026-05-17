@@ -6,6 +6,9 @@
 
 package optimizer
 
+// DEPRECATED (spec 1714): Spec 1714 phase 7: fully deleted; replaced by tools/cases_generator output.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 // One StatusDeopt method per Tier-2-viable uop the optimizer/ tree
 // has not yet hand-ported. Each method's // comment block carries
 // the Tier-2-rewritten C body so a porter has the spec inline.

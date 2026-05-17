@@ -211,6 +211,27 @@ func (f *Frame) PeekStack(depth int) stackref.Ref {
 	return f.LocalsPlus[base+f.StackTop-1-depth]
 }
 
+// SetPeekStack writes r into the slot at depth from the top.
+//
+// CPython: Python/ceval_macros.h POKE macro (stack_pointer[-(depth)+1] = ref).
+func (f *Frame) SetPeekStack(depth int, r stackref.Ref) {
+	base := NLocalsPlusOf(f.Code)
+	f.LocalsPlus[base+f.StackTop-1-depth] = r
+}
+
+// DropStack removes the top n stack entries, clearing each slot so the
+// underlying ref can be reclaimed. Mirrors CPython's STACK_SHRINK plus
+// the explicit slot poisoning the generator emits for safety.
+//
+// CPython: Python/ceval_macros.h STACK_SHRINK.
+func (f *Frame) DropStack(n int) {
+	base := NLocalsPlusOf(f.Code)
+	for range n {
+		f.StackTop--
+		f.LocalsPlus[base+f.StackTop] = stackref.Null
+	}
+}
+
 // Clear closes every live stackref (locals, cells, frees, stack)
 // and resets Code/Globals/Builtins/Locals to nil. Used both on normal
 // frame teardown (eval loop unwinding the call) and on the path that

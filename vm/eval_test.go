@@ -15,8 +15,19 @@ func codeWithBytecode(bc []byte) *objects.Code {
 	return &objects.Code{Code: bc, Stacksize: 4}
 }
 
-// instr packs an opcode + oparg byte pair.
-func instr(op compile.Opcode, arg byte) []byte { return []byte{byte(op), arg} }
+// instr packs an opcode + oparg byte pair, plus the trailing CACHE
+// codeunits the adaptive opcode owns. Production codegen emits these
+// in compile/assemble.go:emitInstr; hand-crafted test bytecode has to
+// do the same so advance() and jumpBy() compute correct offsets.
+func instr(op compile.Opcode, arg byte) []byte {
+	caches := compile.CacheCount(op)
+	out := make([]byte, 0, 2+2*caches)
+	out = append(out, byte(op), arg)
+	for range caches {
+		out = append(out, 0, 0)
+	}
+	return out
+}
 
 func TestEvalNotImplementedSurface(t *testing.T) {
 	ts := state.NewThread()

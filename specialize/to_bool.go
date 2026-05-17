@@ -9,6 +9,9 @@
 
 package specialize
 
+// DEPRECATED (spec 1714): Spec 1714 phases 3+4: raw cache writes migrate to typed accessors; family/deopt literals move to specialize/family_gen.go. File shrinks to specialize-policy.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
@@ -52,7 +55,7 @@ func ToBool(value objects.Object, code []byte, instr int) {
 			Unspecialize(code, instr)
 			return
 		}
-		SetCacheU32(code, instr, 2, version)
+		toBoolCacheAt(code, instr).setVersion(version)
 		Specialize(code, instr, compile.TO_BOOL_ALWAYS_TRUE)
 		return
 	}

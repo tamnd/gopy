@@ -131,6 +131,17 @@ linters:
       - path: compile/codegen_expr_op\.go
         linters:
           - revive
+      # eval_dispatch_handwritten.go and eval_dispatch_gen.go keep
+      # CPython's opXXX_YYY / opXXX naming for opcode-handler methods so
+      # the dispatch table reads against bytecodes.c case-for-case.
+      - path: vm/eval_dispatch_handwritten\.go
+        linters:
+          - revive
+          - gocritic
+      - path: vm/eval_dispatch_gen\.go
+        linters:
+          - revive
+          - gocritic
       - path: compile/instrseq\.go
         linters:
           - revive
@@ -167,9 +178,17 @@ linters:
       # Code generators read CPython source paths from CLI flags and
       # write to checked-in output files; standard gosec heuristics
       # for file inclusion / permissions do not apply.
-      - path: tools/
+      - path: Tools/
         linters:
           - gosec
+          - gocritic
+          - gocognit
+          - gocyclo
+          - prealloc
+          - staticcheck
+          - noctx
+          - errorlint
+          - misspell
       # pythonrun.RunFile is the port of PyRun_AnyFileExFlags: reading a
       # caller-supplied path is the entire contract, so G304 does not
       # apply.
@@ -309,6 +328,25 @@ linters:
       - path: parser/pegen/
         linters:
           - unused
+      # vm/eval_helpers.go is the helper pool the bytecodes_gen
+      # translator draws from. We keep helpers ported but not yet
+      # referenced by an instrumented opcode body. Same pattern as
+      # parser/pegen scaffolding.
+      - path: vm/eval_helpers\.go
+        linters:
+          - unused
+      # monitorRaise / monitorReraise mirror _PyEval_MonitorRaise and
+      # monitor_reraise. They are picked up once RERAISE / ERROR_NO_POP
+      # arms wire them through the translator (next A6 batch).
+      - path: vm/instrument_monitor_exc\.go
+        linters:
+          - unused
+      # loadMethodCacheView dictOffset accessors mirror LOAD_METHOD's
+      # adaptive cache layout from Python/specialize.c; the setter is
+      # invoked once specialize_load_method lands.
+      - path: specialize/cache_views\.go
+        linters:
+          - unused
       # Lexer scaffolding holds helpers consumed once the file driver
       # and action_helpers ports land.
       - path: parser/lexer/buffer\.go
@@ -359,13 +397,13 @@ linters:
       # Token value type, the master regex builder, and the recursive
       # descent functions verbatim is the parity discipline. Token
       # is intentionally a value because lexer.py treats it as one.
-      - path: tools/uops_gen/(lexer|parsing|plexer|cwriter|analyzer|stack|generators_common|tier2_generator|optimizer_generator)\.go
+      - path: Tools/uops_gen/(lexer|parsing|plexer|cwriter|analyzer|stack|generators_common|tier2_generator|optimizer_generator)\.go
         linters:
           - gocritic
           - gocognit
           - gocyclo
           - prealloc
-      - path: tools/uops_gen/lexer_test\.go
+      - path: Tools/uops_gen/lexer_test\.go
         linters:
           - gocritic
           - errorlint

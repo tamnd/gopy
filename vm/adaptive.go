@@ -150,7 +150,8 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 			return false
 		}
 		name := mustUnicode(co.Names[nameIdx])
-		specialize.LoadAttr(owner, name, code, idx)
+		_ = code
+		specialize.LoadAttr(owner, name, co, idx)
 		return true
 	case compile.STORE_ATTR:
 		owner := e.peek(0).AsObject()

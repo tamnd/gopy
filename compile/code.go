@@ -45,4 +45,10 @@ type Code struct {
 	Linetable       []byte
 	ExceptionTable  []byte
 	Nested          []*Code
+	// Lifted caches the *objects.Code wrapper minted by vm.liftNestedCode.
+	// The wrapper carries the Quickened flag and CacheObjects slab that
+	// pair with this Code's bytes; reusing it across LOAD_CONST hits
+	// keeps specialize.Enable idempotent and prevents Quicken from
+	// re-running on already-specialized bytecode.
+	Lifted any
 }

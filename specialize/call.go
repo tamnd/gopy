@@ -16,6 +16,9 @@
 
 package specialize
 
+// DEPRECATED (spec 1714): Spec 1714 phases 3+4: raw cache writes migrate to typed accessors; family/deopt literals move to specialize/family_gen.go. File shrinks to specialize-policy.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
@@ -77,7 +80,7 @@ func specializePyCall(fn *objects.Function, code []byte, instr int, nargs int32,
 	if version == 0 {
 		return false
 	}
-	SetCacheU32(code, instr, 2, version)
+	callCacheAt(code, instr).setFuncVersion(version)
 	exact := int32(fn.Code.Argcount) == nargs+boolToInt32(boundMethod)
 	switch {
 	case exact && boundMethod:

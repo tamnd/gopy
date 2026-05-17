@@ -8,7 +8,11 @@
 
 package vm
 
+// DEPRECATED (spec 1714): Spec 1714 phase 5: error-label dispatch is generated; this file shrinks to error helpers.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
+	"errors"
 	"strings"
 
 	pyerrors "github.com/tamnd/gopy/errors"
@@ -65,6 +69,16 @@ var errorPrefixToType = map[string]*objects.Type{
 // the result falls back to a plain Exception, matching the previous
 // behavior.
 func synthesizeException(err error) *pyerrors.Exception {
+	// Iterator-protocol sentinels: the Go side carries them as bare
+	// errors.New("StopIteration") / "StopAsyncIteration", which the
+	// prefix table below misses (no trailing colon). Recognize them
+	// up front so `except StopIteration:` actually catches.
+	if errors.Is(err, objects.ErrStopIteration) {
+		return pyerrors.New(pyerrors.PyExc_StopIteration, nil)
+	}
+	if errors.Is(err, objects.ErrStopAsyncIteration) {
+		return pyerrors.New(pyerrors.PyExc_StopAsyncIteration, nil)
+	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.
 	if rest, ok := strings.CutPrefix(msg, "vm: "); ok {

@@ -1,0 +1,62 @@
+	case compile.{{.Name}}:
+{{- /*
+    Prologue: bind every named scalar input via peek at its initial
+    depth on the value stack. Sized regions and "unused" slots stay in
+    place without a binding, the same way CPython leaves their
+    stack_pointer entries untouched.
+*/ -}}
+{{- range .Peeks}}
+		{{.Name}} := e.peek({{.DepthExpr}})
+		_ = {{.Name}}
+{{- end}}
+{{- range .SizedPeeks}}
+		{{.Name}} := e.peekSliceBottomFirst({{.TopOffset}}, int({{.SizeExpr}}))
+		_ = {{.Name}}
+{{- end}}
+{{- range .Caches}}
+		// cache "{{.Name}}" size={{.Size}} offset={{.Offset}}
+{{- end}}
+{{- if .Bail}}
+{{- if .Note}}
+		// body bail: {{.Note}}
+{{- end}}
+{{- if .BailOutputs}}
+		// outputs:{{range .BailOutputs}} {{.}}{{end}}
+{{- end}}
+		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+{{- else}}
+{{- range .OutputDecls}}
+{{- if .Sized}}
+		{{.Name}} := make([]stackref.Ref, int({{.SizeExpr}}))
+		_ = {{.Name}}
+{{- else}}
+		var {{.Name}} stackref.Ref
+{{- end}}
+{{- end}}
+{{- range bodyLines .Body}}
+		{{.}}
+{{- end}}
+{{- if not .Terminates}}
+{{- /*
+    Epilogue: commit passthrough scalars back to their slot (in case
+    the body reassigned them), shrink the stack by the count of
+    consumed inputs, then push every new output.
+*/ -}}
+{{- range .Writebacks}}
+		e.setPeek({{.DepthExpr}}, {{.Name}})
+{{- end}}
+{{- if .DropExpr}}
+		e.drop({{.DropExpr}})
+{{- end}}
+{{- range .Pushes}}
+{{- if .Sized}}
+		for _, _r := range {{.Name}} {
+			e.push(_r)
+		}
+{{- else}}
+		e.push({{.Name}})
+{{- end}}
+{{- end}}
+		return e.advance(), nil, nil, false, nil
+{{- end}}
+{{- end}}

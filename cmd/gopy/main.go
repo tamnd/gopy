@@ -89,8 +89,8 @@ opts:
 	case hasC:
 		return runSource(evalSrc, stdout, stderr)
 	case hasM:
-		fmt.Fprintf(stderr, "gopy: -m %s: not implemented yet\n", modName)
-		return 2
+		modArgs := argv[st.OptInd:]
+		return runModule(modName, modArgs, stdout, stderr)
 	}
 
 	if st.OptInd < len(argv) {
@@ -254,6 +254,29 @@ func runSource(src string, stdout, stderr *os.File) int {
 	installPathFinder("")
 	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
+	return pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
+}
+
+// runModule is the gopy -m mod entry. Mirrors pymain_run_module: set
+// sys.argv to (mod_name, *args) as a placeholder, then hand off to
+// runpy._run_module_as_main which resolves mod_name, sets argv[0] to
+// the module's file path, and executes the module in the __main__
+// namespace.
+//
+// CPython: Modules/main.c:294 pymain_run_module
+func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
+	g, err := bootstrapBuiltins(stdout)
+	if err != nil {
+		fmt.Fprintln(stderr, "builtins:", err)
+		return 1
+	}
+	installPathFinder("")
+	sys.SetArgv(append([]string{modName}, modArgs...))
+	mainGlobals := newMainGlobals(g)
+	ts := state.NewThread()
+	// Equivalent of CPython's pymain_run_module which calls
+	// runpy._run_module_as_main(modName) on the Python side.
+	src := fmt.Sprintf("import runpy\nrunpy._run_module_as_main(%q)\n", modName)
 	return pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
 }
 

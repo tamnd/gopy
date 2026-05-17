@@ -62,7 +62,7 @@ func TestToBoolAlwaysTrueUserType(t *testing.T) {
 	if got := compile.Opcode(buf[0]); got != compile.TO_BOOL_ALWAYS_TRUE {
 		t.Fatalf("opcode: got %s want TO_BOOL_ALWAYS_TRUE", got.Name())
 	}
-	if v := CacheU32(buf, 0, 2); v == 0 || v != cls.VersionTag() {
+	if v := ToBoolVersion(buf, 0); v == 0 || v != cls.VersionTag() {
 		t.Fatalf("version cache: got %d want %d", v, cls.VersionTag())
 	}
 }

@@ -16,6 +16,9 @@
 
 package vm
 
+// DEPRECATED (spec 1714): Spec 1714 phase 7: tier-2 trace dispatcher is generated from Python/optimizer_bytecodes.c via tools/cases_generator. This file shrinks to trace-loop scaffolding.
+// See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
+
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
@@ -61,6 +64,9 @@ func (e *evalState) enterExecutor(oparg uint32) (int, objects.Object, error, boo
 	}
 	op := compile.Opcode(exec.VMData.Opcode)
 	arg := uint32(exec.VMData.Oparg)
+	if next, retVal, retErr, retDone, ok, err := e.dispatchHandwritten(op, arg); ok {
+		return next, retVal, retErr, retDone, err
+	}
 	next, retVal, retErr, retDone, _, err := e.trySimple(op, arg)
 	return next, retVal, retErr, retDone, err
 }

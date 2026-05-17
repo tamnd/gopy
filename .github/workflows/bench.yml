@@ -1,0 +1,69 @@
+name: bench
+
+on:
+  schedule:
+    # Nightly at 04:00 UTC. Runs the small subset against the frozen
+    # baseline_v0124.json and fails on a >10% regression.
+    - cron: "0 4 * * *"
+  pull_request:
+    branches: [main]
+    # Only re-run the bench gate when files in a perf-critical
+    # subsystem change; everything else uses the green CI.yml status.
+    paths:
+      - "compile/**"
+      - "vm/**"
+      - "specialize/**"
+      - "optimizer/**"
+      - "objects/**"
+      - "bench/**"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  small-subset:
+    name: small-subset baseline gate
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Build gopy
+        run: make build LDFLAGS='-s -w'
+      - name: Run small subset
+        env:
+          CPYTHON_BIN: python3.14
+          # PyPy is optional in CI; the script writes a placeholder if
+          # it's missing, so the gate still runs against cpython + gopy.
+          PYPY_BIN: /dev/null
+          TARGET_WALL_MS: "30000"
+          BASELINE_TOLERANCE: "0.10"
+        run: bench/run_small.sh
+      - name: Upload bench artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-results
+          path: |
+            bench/raw_cpython314.json
+            bench/raw_pypy311.json
+            bench/raw_gopy.json
+            bench/results_small.md
+          retention-days: 14
