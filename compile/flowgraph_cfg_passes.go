@@ -139,6 +139,76 @@ func reverseConditionalJumpOp(op Opcode) (Opcode, bool) {
 	return op, false
 }
 
+// cfgRemoveRedundantJumps NOPs out unconditional jumps whose target
+// is the same block control would fall through to anyway.
+//
+// CPython: Python/flowgraph.c:1159 remove_redundant_jumps
+func cfgRemoveRedundantJumps(g *cfgBuilder) int {
+	changes := 0
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		last := b.lastInstr()
+		if last == nil {
+			continue
+		}
+		if !isUnconditionalJump(last.Op) {
+			continue
+		}
+		jumpTarget := nextNonemptyBlock(last.Target)
+		next := nextNonemptyBlock(b.Next)
+		if jumpTarget == next && jumpTarget != nil {
+			last.Op = NOP
+			last.Oparg = 0
+			last.Target = nil
+			changes++
+		}
+	}
+	return changes
+}
+
+// cfgRemoveUnreachable walks the graph from the entry block via
+// fallthrough edges and jump targets, counts predecessors, then
+// empties any block that ended up unreachable.
+//
+// CPython: Python/flowgraph.c:996 remove_unreachable
+func cfgRemoveUnreachable(g *cfgBuilder) {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		b.Predecessors = 0
+		b.Visited = false
+	}
+	stack := []*basicblock{g.EntryBlock}
+	g.EntryBlock.Visited = true
+	g.EntryBlock.Predecessors = 1
+	for len(stack) > 0 {
+		b := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if b.Next != nil && !b.nofallthrough() {
+			if !b.Next.Visited {
+				stack = append(stack, b.Next)
+				b.Next.Visited = true
+			}
+			b.Next.Predecessors++
+		}
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			if !hasJumpTarget(ins.Op) || ins.Target == nil {
+				continue
+			}
+			target := ins.Target
+			if !target.Visited {
+				stack = append(stack, target)
+				target.Visited = true
+			}
+			target.Predecessors++
+		}
+	}
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		if b.Predecessors == 0 {
+			b.Instr = b.Instr[:0]
+			b.ExceptHandler = false
+		}
+	}
+}
+
 // nextBlockFirstLineno returns the lineno of the first
 // location-bearing instruction in next, skipping NOPs that have no
 // location (those will be removed too). Returns -1 if none found.

@@ -113,6 +113,88 @@ func TestCfgNormalizeJumpsBackwardReversesAndInsertsTrampoline(t *testing.T) {
 	}
 }
 
+func TestCfgRemoveRedundantJumpsDropsFallthroughJump(t *testing.T) {
+	// entry: JUMP -> b2; b2: RETURN_VALUE. Fallthrough also lands on b2,
+	// so the JUMP is redundant and becomes NOP.
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 1}
+	b2 := g.newBlock()
+	g.CurBlock.addJump(JUMP, b2, loc)
+	g.useNextBlock(b2)
+	b2.addOp(RETURN_VALUE, 0, loc)
+
+	if got := cfgRemoveRedundantJumps(g); got != 1 {
+		t.Errorf("changes = %d, want 1", got)
+	}
+	if g.EntryBlock.Instr[0].Op != NOP {
+		t.Errorf("entry[0] = %v, want NOP", g.EntryBlock.Instr[0].Op)
+	}
+}
+
+func TestCfgRemoveRedundantJumpsKeepsRealJump(t *testing.T) {
+	// entry: JUMP -> b3 (skips b2). JUMP must survive.
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 1}
+	b2 := g.newBlock()
+	b3 := g.newBlock()
+	g.CurBlock.addJump(JUMP, b3, loc)
+	g.useNextBlock(b2)
+	b2.addOp(NOP, 0, loc)
+	g.useNextBlock(b3)
+	b3.addOp(RETURN_VALUE, 0, loc)
+
+	if got := cfgRemoveRedundantJumps(g); got != 0 {
+		t.Errorf("changes = %d, want 0", got)
+	}
+	if g.EntryBlock.Instr[0].Op != JUMP {
+		t.Errorf("entry[0] = %v, want JUMP (preserved)", g.EntryBlock.Instr[0].Op)
+	}
+}
+
+func TestCfgRemoveUnreachableEmptiesOrphanBlock(t *testing.T) {
+	// entry: RETURN_VALUE  (terminator, no fallthrough)
+	// orphan: LOAD_CONST   (unreferenced -> emptied)
+	// reachable_via_jump: NOP (target of entry-side jump? no — we only
+	// have RETURN_VALUE; orphan is genuinely unreachable)
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 1}
+	g.addOp(RETURN_VALUE, 0, loc)
+	orphan := g.newBlock()
+	g.useNextBlock(orphan)
+	orphan.addOp(LOAD_CONST, 0, loc)
+
+	cfgRemoveUnreachable(g)
+	if orphan.Predecessors != 0 {
+		t.Errorf("orphan predecessors = %d, want 0", orphan.Predecessors)
+	}
+	if len(orphan.Instr) != 0 {
+		t.Errorf("orphan should be emptied, has %d instrs", len(orphan.Instr))
+	}
+	if g.EntryBlock.Predecessors != 1 {
+		t.Errorf("entry predecessors = %d, want 1", g.EntryBlock.Predecessors)
+	}
+}
+
+func TestCfgRemoveUnreachableCountsJumpAndFallthrough(t *testing.T) {
+	// entry: JUMP -> b2 (no fallthrough since JUMP is unconditional).
+	// b2: NOP -> falls through to b3.
+	// b3: RETURN_VALUE.
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 1}
+	b2 := g.newBlock()
+	b3 := g.newBlock()
+	g.CurBlock.addJump(JUMP, b2, loc)
+	g.useNextBlock(b2)
+	b2.addOp(NOP, 0, loc)
+	g.useNextBlock(b3)
+	b3.addOp(RETURN_VALUE, 0, loc)
+
+	cfgRemoveUnreachable(g)
+	if b2.Predecessors != 1 || b3.Predecessors != 1 {
+		t.Errorf("predecessors b2=%d b3=%d, want 1/1", b2.Predecessors, b3.Predecessors)
+	}
+}
+
 func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	// Trailing NOP whose line matches the next block's first real
 	// instruction is removable.
