@@ -194,9 +194,10 @@ runs the Python module.
 | Port `propagate_line_numbers` flowgraph pass so NO_LOCATION instructions inherit prior valid location | done | (current branch) |
 | Port `maybe_instr_make_load_smallint` rewrite so 0..255 int constants emit `LOAD_SMALL_INT` | done | (current branch) |
 | Port `remove_unused_consts` from `Python/flowgraph.c:3174` so orphaned const slots vanish from `co_consts` after small-int promotion | done | f679821 |
-| `gopy -m dis foo.py` runs end to end on a hello-world fixture | done for the seed corpus (empty / string-assign / int-assign / if_simple) | (current branch) |
-| `test/gate/disdata/` corpus (30 small files, one per feature) | 4 of 30 seeded (empty.py, hello.py, assign_int.py, if_simple.py); rest grows as gaps close | (current branch) |
-| `test/gate/dis_parity_test.go` green on the 30-fixture corpus | 4 of 30 green | (current branch) |
+| Port `optimize_basic_block` peephole pairs from `Python/flowgraph.c:2449` (COMPARE_OP/CONTAINS_OP/IS_OP fused with TO_BOOL/UNARY_NOT, TO_BOOL+TO_BOOL, UNARY_NOT+TO_BOOL) onto the flat sequence with a jump-target pin set; also fix `visitBoolOp` to emit the post-`convert_pseudo_conditional_jumps` COPY + TO_BOOL + POP_JUMP_IF_X form | done | b7c2d26 |
+| `gopy -m dis foo.py` runs end to end on a hello-world fixture | done for the seed corpus (empty / string-assign / int-assign / if_simple / and_or) | (current branch) |
+| `test/gate/disdata/` corpus (30 small files, one per feature) | 5 of 30 seeded (empty.py, hello.py, assign_int.py, if_simple.py, and_or.py); rest grows as gaps close | (current branch) |
+| `test/gate/dis_parity_test.go` green on the 30-fixture corpus | 5 of 30 green | (current branch) |
 
 ## Phase 3 — codegen / flowgraph audit
 
