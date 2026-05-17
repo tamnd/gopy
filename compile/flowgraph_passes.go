@@ -560,6 +560,102 @@ func reverseConditionalJump(op Opcode) (Opcode, bool) {
 	return 0, false
 }
 
+// peepholeOpcodePairs runs the two-instruction rewrites from CPython's
+// optimize_basic_block. Each rewrite folds a (compare-like)+(TO_BOOL or
+// UNARY_NOT) pair into a single instruction by NOP-ing the first and
+// updating the second's opcode/oparg. The pass is length-preserving;
+// removeRedundantNops compacts the NOPs afterwards.
+//
+// Safety: the rewrite changes the pop arity at i+1 for the COMPARE_OP /
+// CONTAINS_OP / IS_OP cases (TO_BOOL pops 1 → fused op pops 2), so we
+// must not fuse if anything jumps into i+1. The pinned set mirrors
+// removeRedundantNops: every absolute jump target plus every
+// Handler.Label that points at an instruction inside the sequence.
+//
+// CPython: Python/flowgraph.c:2449 optimize_basic_block (case
+// COMPARE_OP / CONTAINS_OP / IS_OP / TO_BOOL / UNARY_NOT)
+func peepholeOpcodePairs(seq *Sequence) int {
+	if len(seq.Instrs) < 2 {
+		return 0
+	}
+	pinned := make([]bool, len(seq.Instrs))
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if hasJumpTarget(ins.Op) {
+			t := int(ins.Oparg)
+			if t >= 0 && t < len(pinned) {
+				pinned[t] = true
+			}
+		}
+		if ins.Handler.Label >= 0 && ins.Handler.Label < len(pinned) {
+			pinned[ins.Handler.Label] = true
+		}
+	}
+	folded := 0
+	for i := 0; i+1 < len(seq.Instrs); i++ {
+		if pinned[i+1] {
+			continue
+		}
+		if tryPeepholePair(&seq.Instrs[i], &seq.Instrs[i+1]) {
+			folded++
+		}
+	}
+	return folded
+}
+
+// tryPeepholePair applies the (a, b) → (NOP, fused) rewrite at one
+// adjacent pair. Returns true if the pair matched a rewrite rule.
+func tryPeepholePair(a, b *Instr) bool {
+	origArg := a.Oparg
+	switch a.Op {
+	case COMPARE_OP:
+		if b.Op == TO_BOOL {
+			setNop(a)
+			b.Op = COMPARE_OP
+			b.Oparg = origArg | 16
+			return true
+		}
+	case CONTAINS_OP, IS_OP:
+		switch b.Op {
+		case TO_BOOL:
+			fused := a.Op
+			setNop(a)
+			b.Op = fused
+			b.Oparg = origArg
+			return true
+		case UNARY_NOT:
+			fused := a.Op
+			setNop(a)
+			b.Op = fused
+			b.Oparg = origArg ^ 1
+			return true
+		}
+	case TO_BOOL:
+		if b.Op == TO_BOOL {
+			setNop(a)
+			return true
+		}
+	case UNARY_NOT:
+		switch b.Op {
+		case TO_BOOL:
+			setNop(a)
+			b.Op = UNARY_NOT
+			b.Oparg = 0
+			return true
+		case UNARY_NOT:
+			setNop(a)
+			setNop(b)
+			return true
+		}
+	}
+	return false
+}
+
+func setNop(ins *Instr) {
+	ins.Op = NOP
+	ins.Oparg = 0
+}
+
 // removeRedundantNops compacts the sequence by deleting NOP
 // instructions that no jump or handler points at. Must run AFTER
 // ApplyLabelMap because it rewrites the absolute oparg of every jump

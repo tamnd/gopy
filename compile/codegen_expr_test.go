@@ -24,6 +24,7 @@ func TestBoolOpAndShortCircuits(t *testing.T) {
 	want := []string{
 		"LOAD_NAME",         // x
 		"COPY",              // dup for jump check
+		"TO_BOOL",           // normalize before POP_JUMP_IF_X
 		"POP_JUMP_IF_FALSE", // -> end (x falsy: leave x)
 		"POP_TOP",           // discard the dup
 		"LOAD_NAME",         // y
@@ -43,8 +44,8 @@ func TestBoolOpOrUsesPopJumpIfTrue(t *testing.T) {
 	}
 	u := compileMod(t, exprMod(e))
 	got := opNames(u)
-	if got[2] != "POP_JUMP_IF_TRUE" {
-		t.Errorf("expected POP_JUMP_IF_TRUE for `or`, got %s", got[2])
+	if got[3] != "POP_JUMP_IF_TRUE" {
+		t.Errorf("expected POP_JUMP_IF_TRUE for `or`, got %s", got[3])
 	}
 }
 

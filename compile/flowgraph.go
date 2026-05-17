@@ -182,6 +182,14 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// preserving so jump opargs and the handler table stay valid.
 	removeUnreachableBlocks(seq)
 
+	// PASS 3b2: fold (compare-like)+(TO_BOOL or UNARY_NOT) pairs so the
+	// emitted stream matches CPython's optimize_basic_block output. The
+	// pass NOP-outs the first half and rewrites the second; the freshly
+	// generated NOPs are reclaimed by removeRedundantNops below.
+	//
+	// CPython: Python/flowgraph.c:2449 optimize_basic_block
+	peepholeOpcodePairs(seq)
+
 	// PASS 3: compact NOP runs. ApplyLabelMap has baked indices into
 	// jump opargs, so removeRedundantNops can reindex safely.
 	removeRedundantNops(seq)
