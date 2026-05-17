@@ -490,6 +490,52 @@ func cfgLoadsConstValue(ins *cfgInstr, consts []any) (any, bool) {
 	return nil, false
 }
 
+// basicblockFoldConstBinop rewrites `LOAD_CONST a; LOAD_CONST b;
+// BINARY_OP op` triples where both operands are int64 constants and op
+// has a defined integer result. The two loads become NOPs and the
+// BINARY_OP becomes LOAD_CONST of the folded value.
+//
+// CPython: Python/flowgraph.c:1894 fold_const_binop
+func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
+	if consts == nil {
+		return 0
+	}
+	folded := 0
+	for i := 0; i+2 < len(bb.Instr); i++ {
+		a := &bb.Instr[i]
+		b := &bb.Instr[i+1]
+		c := &bb.Instr[i+2]
+		if a.Op != LOAD_CONST || b.Op != LOAD_CONST || c.Op != BINARY_OP {
+			continue
+		}
+		ai, bi := int(a.Oparg), int(b.Oparg)
+		if ai < 0 || ai >= len(*consts) || bi < 0 || bi >= len(*consts) {
+			continue
+		}
+		x, xok := (*consts)[ai].(int64)
+		y, yok := (*consts)[bi].(int64)
+		if !xok || !yok {
+			continue
+		}
+		result, ok := evalIntBinop(c.Oparg, x, y)
+		if !ok {
+			continue
+		}
+		idx := appendConst(consts, result)
+		a.Op = NOP
+		a.Oparg = 0
+		a.Target = nil
+		b.Op = NOP
+		b.Oparg = 0
+		b.Target = nil
+		c.Op = LOAD_CONST
+		c.Oparg = int32(idx)
+		folded++
+		i += 2
+	}
+	return folded
+}
+
 // basicblockCollectConstLoaders walks n instructions starting at start
 // and returns their const values when every slot is a LOAD_CONST or
 // LOAD_SMALL_INT. Within a basic block no slot can be a jump target,

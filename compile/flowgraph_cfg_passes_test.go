@@ -306,6 +306,27 @@ func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	}
 }
 
+func TestBasicblockFoldConstBinopAdds(t *testing.T) {
+	consts := []any{int64(3), int64(4)}
+	bb := &basicblock{Instr: []cfgInstr{
+		{Op: LOAD_CONST, Oparg: 0},
+		{Op: LOAD_CONST, Oparg: 1},
+		{Op: BINARY_OP, Oparg: nbAdd},
+	}}
+	if got := basicblockFoldConstBinop(bb, &consts); got != 1 {
+		t.Fatalf("folded = %d, want 1", got)
+	}
+	if bb.Instr[0].Op != NOP || bb.Instr[1].Op != NOP {
+		t.Errorf("loaders not NOPed: %v %v", bb.Instr[0].Op, bb.Instr[1].Op)
+	}
+	if bb.Instr[2].Op != LOAD_CONST {
+		t.Fatalf("instr[2] = %v, want LOAD_CONST", bb.Instr[2].Op)
+	}
+	if consts[bb.Instr[2].Oparg] != int64(7) {
+		t.Errorf("folded value = %v, want 7", consts[bb.Instr[2].Oparg])
+	}
+}
+
 func TestBasicblockFoldTupleOfConstantsRewrites(t *testing.T) {
 	consts := []any{int64(1), int64(2), int64(3)}
 	bb := &basicblock{Instr: []cfgInstr{
