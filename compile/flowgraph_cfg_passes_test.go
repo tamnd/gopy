@@ -305,3 +305,77 @@ func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 		t.Errorf("entry instrs = %d, want 1", len(g.EntryBlock.Instr))
 	}
 }
+
+func TestCfgInlineSmallExitBlockFolds(t *testing.T) {
+	// Entry ends with JUMP to a 2-instr exit block (LOAD_CONST + RETURN_VALUE).
+	// inline pass must replace the JUMP with the exit's instructions.
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 1}
+	exit := g.newBlock()
+	exit.addOp(LOAD_CONST, 0, loc)
+	exit.addOp(RETURN_VALUE, 0, loc)
+	exit.Predecessors = 1
+	g.CurBlock.addOp(LOAD_CONST, 1, loc)
+	g.CurBlock.addJump(JUMP, exit, loc)
+	g.useNextBlock(exit)
+
+	cfgInlineSmallOrNoLinenoBlocks(g)
+
+	entry := g.EntryBlock
+	if len(entry.Instr) != 4 {
+		t.Fatalf("entry instrs = %d, want 4 (load + nop + load + return)", len(entry.Instr))
+	}
+	if entry.Instr[1].Op != NOP {
+		t.Errorf("instr[1] = %v, want NOP (folded jump)", entry.Instr[1].Op)
+	}
+	if entry.Instr[3].Op != RETURN_VALUE {
+		t.Errorf("instr[3] = %v, want RETURN_VALUE", entry.Instr[3].Op)
+	}
+	if exit.Predecessors != 0 {
+		t.Errorf("exit predecessors = %d, want 0", exit.Predecessors)
+	}
+}
+
+func TestCfgInlineLeavesLargeBlock(t *testing.T) {
+	// Target block has >MAX_COPY_SIZE instructions and ends in scope
+	// exit. Should NOT be inlined.
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 1}
+	exit := g.newBlock()
+	for range maxInlineCopySize + 1 {
+		exit.addOp(NOP, 0, loc)
+	}
+	exit.addOp(RETURN_VALUE, 0, loc)
+	exit.Predecessors = 1
+	g.CurBlock.addJump(JUMP, exit, loc)
+	g.useNextBlock(exit)
+
+	cfgInlineSmallOrNoLinenoBlocks(g)
+
+	if g.EntryBlock.Instr[0].Op != JUMP {
+		t.Errorf("entry[0] = %v, want JUMP (target too large)", g.EntryBlock.Instr[0].Op)
+	}
+}
+
+func TestCfgInlineNoLinenoBlockFolds(t *testing.T) {
+	// Target has no lineno and no fallthrough (ends in RETURN_VALUE).
+	// Should fold even though it is small.
+	g := newCfgBuilder()
+	noloc := ast.Pos{Lineno: -1}
+	target := g.newBlock()
+	target.addOp(NOP, 0, noloc)
+	target.addOp(RETURN_VALUE, 0, noloc)
+	target.Predecessors = 1
+	g.CurBlock.addJump(JUMP, target, ast.Pos{Lineno: 5})
+	g.useNextBlock(target)
+
+	cfgInlineSmallOrNoLinenoBlocks(g)
+
+	if g.EntryBlock.Instr[0].Op != NOP {
+		t.Errorf("entry[0] = %v, want NOP (jump rewritten)", g.EntryBlock.Instr[0].Op)
+	}
+	last := g.EntryBlock.lastInstr()
+	if last == nil || last.Op != RETURN_VALUE {
+		t.Errorf("entry last = %+v, want RETURN_VALUE", last)
+	}
+}

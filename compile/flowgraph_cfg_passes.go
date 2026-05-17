@@ -355,6 +355,87 @@ func cfgConvertPseudoOps(g *cfgBuilder) int {
 	return cfgRemoveRedundantNops(g)
 }
 
+// basicblockHasNoLineno reports whether every instruction in b lacks a
+// source location (Lineno < 0). Used by the inline pass to decide
+// whether a target block can be folded without losing line info.
+//
+// CPython: Python/flowgraph.c:1193 basicblock_has_no_lineno
+func basicblockHasNoLineno(b *basicblock) bool {
+	for i := range b.Instr {
+		if b.Instr[i].Loc.Lineno >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// MaxCopySize matches CPython's MAX_COPY_SIZE: a target block of at
+// most this many instructions can be inlined into its predecessor.
+//
+// CPython: Python/flowgraph.c:1203 MAX_COPY_SIZE
+const maxInlineCopySize = 4
+
+// basicblockInlineSmallOrNoLinenoBlocks folds the target of bb's
+// trailing unconditional jump into bb when the target is either a
+// small exit block or a no-lineno block with no fallthrough. Returns
+// true when bb was extended.
+//
+// CPython: Python/flowgraph.c:1210 basicblock_inline_small_or_no_lineno_blocks
+func basicblockInlineSmallOrNoLinenoBlocks(bb *basicblock) bool {
+	last := bb.lastInstr()
+	if last == nil {
+		return false
+	}
+	if !isUnconditionalJump(last.Op) {
+		return false
+	}
+	target := last.Target
+	if target == nil {
+		return false
+	}
+	smallExit := target.exitsScope() && len(target.Instr) <= maxInlineCopySize
+	noLinenoNoFallthrough := basicblockHasNoLineno(target) && target.nofallthrough()
+	if !smallExit && !noLinenoNoFallthrough {
+		return false
+	}
+	removedJump := last.Op
+	last.Op = NOP
+	last.Oparg = 0
+	last.Target = nil
+	bb.appendInstructions(target)
+	if noLinenoNoFallthrough {
+		newLast := bb.lastInstr()
+		if newLast != nil && isUnconditionalJump(newLast.Op) && removedJump == JUMP {
+			// Preserve eval-breaker semantics: a forward JUMP must
+			// stay JUMP rather than becoming the appended JUMP_BACKWARD.
+			newLast.Op = JUMP
+		}
+	}
+	if target.Predecessors > 0 {
+		target.Predecessors--
+	}
+	return true
+}
+
+// cfgInlineSmallOrNoLinenoBlocks iterates basicblockInlineSmallOrNo...
+// across every block until no more inlining is possible. Each pass
+// removes at least one jump, so the fixpoint is guaranteed.
+//
+// CPython: Python/flowgraph.c:1245 inline_small_or_no_lineno_blocks
+func cfgInlineSmallOrNoLinenoBlocks(g *cfgBuilder) {
+	for {
+		changed := false
+		for b := g.EntryBlock; b != nil; b = b.Next {
+			if basicblockInlineSmallOrNoLinenoBlocks(b) {
+				changed = true
+			}
+		}
+		if !changed {
+			return
+		}
+	}
+}
+
 // nextBlockFirstLineno returns the lineno of the first
 // location-bearing instruction in next, skipping NOPs that have no
 // location (those will be removed too). Returns -1 if none found.
