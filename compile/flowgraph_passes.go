@@ -8,7 +8,19 @@
 
 package compile
 
-import "github.com/tamnd/gopy/ast"
+import (
+	"math/bits"
+
+	"github.com/tamnd/gopy/ast"
+)
+
+// MAX_INT_SIZE caps the bit-length of folded integer results. CPython
+// runs unlimited-precision arithmetic and refuses to fold once the
+// product / power / shift exceeds 128 bits; gopy stores constants as
+// int64, so the effective ceiling is 63 (sign bit reserved).
+//
+// CPython: Python/flowgraph.c:1690 MAX_INT_SIZE
+const maxIntFoldBits = 63
 
 // In-place BINARY_OP suboperators not declared in codegen_expr_op.go.
 // Values come from CPython's NB_INPLACE_* enum.
@@ -78,15 +90,15 @@ func foldBinaryIntConst(seq *Sequence, consts *[]any) int {
 // MATRIX_MULTIPLY, FLOOR_DIVIDE on a zero divisor, POWER with a
 // negative exponent, etc.).
 //
-// CPython: Python/flowgraph.c eval_const_binop_int
+// CPython: Python/flowgraph.c:1791 eval_const_binop
 func evalIntBinop(op int32, x, y int64) (int64, bool) {
 	switch op {
 	case nbAdd, nbInplAdd:
-		return x + y, true
+		return safeAdd(x, y)
 	case nbSubtract, nbInplSub:
-		return x - y, true
+		return safeSub(x, y)
 	case nbMult, nbInplMul:
-		return x * y, true
+		return safeMultiply(x, y)
 	case nbAnd, nbInplAnd:
 		return x & y, true
 	case nbOr, nbInplOr:
@@ -94,17 +106,148 @@ func evalIntBinop(op int32, x, y int64) (int64, bool) {
 	case nbXor, nbInplXor:
 		return x ^ y, true
 	case nbLShift, nbInplLsh:
-		if y < 0 || y >= 64 {
-			return 0, false
-		}
-		return x << uint(y), true
+		return safeLshift(x, y)
 	case nbRShift, nbInplRsh:
 		if y < 0 || y >= 64 {
 			return 0, false
 		}
 		return x >> uint(y), true
+	case nbPower:
+		return safePower(x, y)
+	case nbFloorDiv:
+		if y == 0 {
+			return 0, false
+		}
+		// Python floor div rounds toward negative infinity.
+		q := x / y
+		if (x%y != 0) && ((x < 0) != (y < 0)) {
+			q--
+		}
+		return q, true
+	case nbRemainder:
+		if y == 0 {
+			return 0, false
+		}
+		r := x % y
+		if r != 0 && ((r < 0) != (y < 0)) {
+			r += y
+		}
+		return r, true
 	}
 	return 0, false
+}
+
+// intBitLen reports the bit length of |v|, matching _PyLong_NumBits.
+//
+// CPython: Objects/longobject.c _PyLong_NumBits
+func intBitLen(v int64) int {
+	if v < 0 {
+		v = -v
+	}
+	return bits.Len64(uint64(v))
+}
+
+// safeAdd returns x + y when the result fits in int64. Matches
+// CPython's implicit "fits in MAX_INT_SIZE bits" guard for the
+// gopy int64 const pool.
+//
+// CPython: Python/flowgraph.c:1799 PyNumber_Add (eval_const_binop)
+func safeAdd(x, y int64) (int64, bool) {
+	r := x + y
+	if (y > 0 && r < x) || (y < 0 && r > x) {
+		return 0, false
+	}
+	return r, true
+}
+
+// safeSub returns x - y when the result fits in int64.
+//
+// CPython: Python/flowgraph.c:1802 PyNumber_Subtract (eval_const_binop)
+func safeSub(x, y int64) (int64, bool) {
+	r := x - y
+	if (y > 0 && r > x) || (y < 0 && r < x) {
+		return 0, false
+	}
+	return r, true
+}
+
+// safeMultiply mirrors const_folding_safe_multiply for the int64
+// path. CPython caps at 128 bits combined; we cap at 63 to keep the
+// result in int64.
+//
+// CPython: Python/flowgraph.c:1696 const_folding_safe_multiply
+func safeMultiply(x, y int64) (int64, bool) {
+	if x == 0 || y == 0 {
+		return 0, true
+	}
+	if intBitLen(x)+intBitLen(y) > maxIntFoldBits {
+		return 0, false
+	}
+	return x * y, true
+}
+
+// safeLshift mirrors const_folding_safe_lshift for the int64 path.
+//
+// CPython: Python/flowgraph.c:1761 const_folding_safe_lshift
+func safeLshift(x, y int64) (int64, bool) {
+	if y < 0 {
+		return 0, false
+	}
+	if x == 0 || y == 0 {
+		return x, true
+	}
+	if y > maxIntFoldBits || intBitLen(x)+int(y) > maxIntFoldBits {
+		return 0, false
+	}
+	return x << uint(y), true
+}
+
+// safePower mirrors const_folding_safe_power for the int64 path. Only
+// folds non-negative exponents; negative exponents would produce a
+// float, and gopy keeps the const pool homogeneous per slot.
+//
+// CPython: Python/flowgraph.c:1741 const_folding_safe_power
+func safePower(x, y int64) (int64, bool) {
+	if y < 0 {
+		return 0, false
+	}
+	if x == 0 {
+		if y == 0 {
+			return 1, true
+		}
+		return 0, true
+	}
+	if y == 0 {
+		return 1, true
+	}
+	xbits := intBitLen(x)
+	if xbits == 0 {
+		xbits = 1
+	}
+	if int64(xbits)*y > int64(maxIntFoldBits) {
+		return 0, false
+	}
+	result := int64(1)
+	base := x
+	exp := y
+	for exp > 0 {
+		if exp&1 == 1 {
+			r, ok := safeMultiply(result, base)
+			if !ok {
+				return 0, false
+			}
+			result = r
+		}
+		exp >>= 1
+		if exp > 0 {
+			r, ok := safeMultiply(base, base)
+			if !ok {
+				return 0, false
+			}
+			base = r
+		}
+	}
+	return result, true
 }
 
 // appendConst returns the index of v in *consts, appending if not
