@@ -109,12 +109,12 @@ flat-sequence versions as each ported pass lands.
 | `normalize_jumps`                  | `flowgraph.c:590`    | done    | `58075c7` |
 | `remove_redundant_jumps`           | `flowgraph.c:1159`   | done    | `fb9d104` |
 | `remove_unreachable`               | `flowgraph.c:996`    | done    | `fb9d104` |
-| `inline_small_or_no_lineno_blocks` | `flowgraph.c:1210`   | pending | —         |
+| `inline_small_or_no_lineno_blocks` | `flowgraph.c:1210`   | done    | `9972eaa` |
 | `optimize_basic_block`             | `flowgraph.c:1718`   | pending | —         |
-| `resolve_line_numbers`             | `flowgraph.c:2823`   | pending | —         |
+| `resolve_line_numbers`             | `flowgraph.c:3650`   | done    | `c376e2c` |
 | `duplicate_exits_without_lineno`   | `flowgraph.c:3563`   | done    | `2f40735` |
 | `propagate_line_numbers`           | `flowgraph.c:3616`   | done    | `c653483` |
-| `convert_pseudo_ops`               | `flowgraph.c:2911`   | pending | —         |
+| `convert_pseudo_ops`               | `flowgraph.c:3520`   | done    | `c376e2c` |
 | `_PyCfg_OptimizeCodeUnit`          | `flowgraph.c:2997`   | pending | —         |
 
 ### Phase 4. Stackdepth + locals
