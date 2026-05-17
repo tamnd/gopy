@@ -73,56 +73,49 @@ function list matches `Python/flowgraph.c`'s function list.
 
 ## Phases
 
+| Phase | Scope                                                                                  | Status      | Commit    |
+| ----- | -------------------------------------------------------------------------------------- | ----------- | --------- |
+| 1     | `basicblock` + `cfgBuilder` types and constructors                                     | done        | `ebae0b1` |
+| 2     | `_PyCfg_FromInstructionSequence` bridge                                                | done        | `c5485af` |
+| 3     | Re-port every pass in `flowgraph_passes.go` onto `*cfgBuilder`                         | in progress | `fb9d104` |
+| 4     | `stackdepth` and `optimize_load_fast` onto the graph                                   | pending     | —         |
+| 5     | `_PyCfg_ToInstructionSequence` bridge                                                  | pending     | —         |
+| 6     | Delete flat-sequence pass shim; `flowgraph_passes.go` matches `Python/flowgraph.c` 1:1 | pending     | —         |
+
 ### Phase 1. Graph substrate
 
-Port the data model from `Python/flowgraph.c:60-220`:
-
-- `cfgInstr` (i_opcode, i_oparg, i_target, i_loc, i_except)
-- `basicblock` (b_instr, b_iused, b_ialloc, b_next, b_label,
-  b_predecessors, b_startdepth, b_reachable, b_visited,
-  b_warm, b_cold, b_exit, b_return)
-- `cfgBuilder` (g_entryblock, g_curblock, g_block_list,
-  g_current_label)
-
-Plus the constructors / mutators:
-
-- `cfg_builder_init` (flowgraph.c:284)
-- `cfg_builder_check` (flowgraph.c:296)
-- `cfg_builder_new_block` (flowgraph.c:341)
-- `cfg_builder_use_label` (flowgraph.c:364)
-- `cfg_builder_use_next_block` (flowgraph.c:355)
-- `basicblock_addop` (flowgraph.c:243)
-- `basicblock_add_jump` (flowgraph.c:376)
+Port the data model from `Python/flowgraph.c:60-220` (`cfgInstr`,
+`basicblock`, `cfgBuilder`) plus the constructors / mutators
+`cfg_builder_init`, `cfg_builder_check`, `cfg_builder_new_block`,
+`cfg_builder_use_label`, `cfg_builder_use_next_block`,
+`basicblock_addop`, `basicblock_add_jump`.
 
 ### Phase 2. Build the graph from the instruction sequence
 
-Port `_PyCfg_FromInstructionSequence` (flowgraph.c:2972). This is
-the bridge: gopy's codegen still emits an `instruction_sequence`
-(per spec 1714 DSL plans), and the flowgraph passes start by
-folding that sequence into a `cfgBuilder`. Mirrors CPython's own
-boundary between codegen and flowgraph optimization.
+Port `_PyCfg_FromInstructionSequence` (flowgraph.c:3923). gopy's
+codegen still emits an `instruction_sequence`; the flowgraph
+passes start by folding that sequence into a `cfgBuilder`. Mirrors
+CPython's boundary between codegen and flowgraph optimization.
 
 ### Phase 3. Port every pass onto the graph
 
 Re-port every function already shipped under 1713 to take
-`*cfgBuilder` instead of `[]Instr`, in source order:
+`*cfgBuilder` instead of `[]Instr`, in source order. Drop the
+flat-sequence versions as each ported pass lands.
 
-- `normalize_jumps` (flowgraph.c:830)
-- `mark_reachable` (flowgraph.c:1052)
-- `eliminate_empty_basic_blocks` (flowgraph.c:1097)
-- `remove_redundant_nops` (flowgraph.c:1117)
-- `remove_redundant_jumps` (flowgraph.c:1158)
-- `inline_small_or_no_lineno_blocks` (flowgraph.c:1210)
-- `basicblock_remove_redundant_nops_and_jumps` (flowgraph.c:1185)
-- `optimize_basic_block` (flowgraph.c:1718)
-- `optimize_load_fast` (flowgraph.c:2546)
-- `resolve_line_numbers` (flowgraph.c:2823)
-- `duplicate_exits_without_lineno` (flowgraph.c:2756)
-- `propagate_line_numbers` (flowgraph.c:2722)
-- `convert_pseudo_ops` (flowgraph.c:2911)
-- `_PyCfg_OptimizeCodeUnit` (flowgraph.c:2997)
-
-Drop the flat-sequence versions as each ported pass lands.
+| Pass                               | CPython              | Status  | Commit    |
+| ---------------------------------- | -------------------- | ------- | --------- |
+| `remove_redundant_nops`            | `flowgraph.c:1104`   | done    | `2d4f82a` |
+| `normalize_jumps`                  | `flowgraph.c:590`    | done    | `58075c7` |
+| `remove_redundant_jumps`           | `flowgraph.c:1159`   | done    | `fb9d104` |
+| `remove_unreachable`               | `flowgraph.c:996`    | done    | `fb9d104` |
+| `inline_small_or_no_lineno_blocks` | `flowgraph.c:1210`   | pending | —         |
+| `optimize_basic_block`             | `flowgraph.c:1718`   | pending | —         |
+| `resolve_line_numbers`             | `flowgraph.c:2823`   | pending | —         |
+| `duplicate_exits_without_lineno`   | `flowgraph.c:2756`   | pending | —         |
+| `propagate_line_numbers`           | `flowgraph.c:2722`   | pending | —         |
+| `convert_pseudo_ops`               | `flowgraph.c:2911`   | pending | —         |
+| `_PyCfg_OptimizeCodeUnit`          | `flowgraph.c:2997`   | pending | —         |
 
 ### Phase 4. Stackdepth + locals
 
@@ -134,7 +127,7 @@ Drop the flat-sequence versions as each ported pass lands.
 
 ### Phase 5. Assemble bridge
 
-Port `_PyCfg_ToInstructionSequence` (flowgraph.c:3081) so the
+Port `_PyCfg_ToInstructionSequence` (flowgraph.c:3988) so the
 optimized graph flattens back into the assembler's expected
 input. This is the seam with spec 1708 (assemble location table).
 
@@ -153,31 +146,3 @@ direct port of `_PyCfg_OptimizeCodeUnit`.
 
 This spec is purely the flowgraph subsystem's data model and the
 passes that run inside it.
-
-## Checklist
-
-| Phase | Scope                                                                                   | Status      | Commit    |
-| ----- | --------------------------------------------------------------------------------------- | ----------- | --------- |
-| 1     | `basicblock` + `cfgBuilder` types and constructors                                      | done        | `ebae0b1` |
-| 2     | `_PyCfg_FromInstructionSequence` bridge                                                 | done        | `c5485af` |
-| 3     | Re-port every pass in `flowgraph_passes.go` onto `*cfgBuilder`                          | in progress | `58075c7` |
-| 4     | `stackdepth` and `optimize_load_fast` onto the graph                                    | pending     | —         |
-| 5     | `_PyCfg_ToInstructionSequence` bridge                                                   | pending     | —         |
-| 6     | Delete flat-sequence pass shim; `flowgraph_passes.go` matches `Python/flowgraph.c` 1:1  | pending     | —         |
-
-### Phase 3 sub-progress
-
-| Pass                              | CPython                       | Status  | Commit    |
-| --------------------------------- | ----------------------------- | ------- | --------- |
-| `remove_redundant_nops`           | `flowgraph.c:1104`            | done    | `2d4f82a` |
-| `normalize_jumps`                 | `flowgraph.c:590`             | done    | `58075c7` |
-| `remove_redundant_jumps`          | `flowgraph.c:1158`            | pending | —         |
-| `mark_reachable`                  | `flowgraph.c:1052`            | pending | —         |
-| `eliminate_empty_basic_blocks`    | `flowgraph.c:1097`            | pending | —         |
-| `inline_small_or_no_lineno_blocks`| `flowgraph.c:1210`            | pending | —         |
-| `optimize_basic_block`            | `flowgraph.c:1718`            | pending | —         |
-| `resolve_line_numbers`            | `flowgraph.c:2823`            | pending | —         |
-| `duplicate_exits_without_lineno`  | `flowgraph.c:2756`            | pending | —         |
-| `propagate_line_numbers`          | `flowgraph.c:2722`            | pending | —         |
-| `convert_pseudo_ops`              | `flowgraph.c:2911`            | pending | —         |
-| `_PyCfg_OptimizeCodeUnit`         | `flowgraph.c:2997`            | pending | —         |
