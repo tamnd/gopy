@@ -668,6 +668,15 @@ func storeSlice(container, start, stop, value objects.Object) error {
 	return nil
 }
 
+// dictNew returns a fresh empty dict. Mirrors CPython's PyDict_New,
+// which can fail with MemoryError; under Go's GC NewDict is infallible
+// so the helper never stashes a pendingErr.
+//
+// CPython: Objects/dictobject.c PyDict_New
+func (e *evalState) dictNew() objects.Object {
+	return objects.NewDict()
+}
+
 // dictFromItems builds a dict from an interleaved key/value array.
 // values holds 2*n entries; even indices are keys, odd are values.
 // Mirrors CPython's _PyDict_FromItems, which the bytecodes.c BUILD_MAP

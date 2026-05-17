@@ -758,30 +758,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.SETUP_ANNOTATIONS:
-		// SETUP_ANNOTATIONS: ensure __annotations__ is a dict in the
-		// current local namespace. CPython looks up "__annotations__"
-		// in f_locals, creates it if missing, and leaves the stack
-		// untouched. At module scope f_locals == f_globals; in gopy
-		// f.Locals is nil for modules and the module dict lives in
-		// f.Globals, so route the store there. Class-body frames carry
-		// an explicit Locals dict.
-		//
-		// CPython: Python/bytecodes.c SETUP_ANNOTATIONS
-		ns := e.f.Locals
-		if ns == nil {
-			ns = e.f.Globals
-		}
-		if d, ok := ns.(*objects.Dict); ok {
-			key := objects.NewStr("__annotations__")
-			if v, _ := d.GetItem(key); v == nil {
-				if serr := d.SetItem(key, objects.NewDict()); serr != nil {
-					return 0, nil, nil, false, true, serr
-				}
-			}
-		}
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.CALL_INTRINSIC_1:
 		v := e.popObject()
 		if int(oparg) >= len(intrinsicsUnary) {

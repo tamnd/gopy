@@ -723,6 +723,7 @@ panel.
 | `JUMP_BACKWARD_NO_INTERRUPT` | generated | `337d126` | `JUMPBY(-oparg)` | shares JUMPBY body with JUMP_FORWARD; `JUMP_BACKWARD` proper stays handwritten for breaker poll |
 | `END_SEND` | generated | `8ac6d1c` | `val = value; DEAD(value); PyStackRef_CLOSE(receiver)` | bit-equivalent to handwritten body in eval_simple.go |
 | `LOAD_BUILD_CLASS` | generated | _pending_ | `int err = PyMapping_GetOptionalItem(BUILTINS(), &_Py_ID(__build_class__), &bc_o)` + NameError when absent | first Bucket B flip; lit `_PyErr_SetString` payload now flows through `setPendingErr` |
+| `SETUP_ANNOTATIONS` | generated | _pending_ | `LOCALS()` + `PyMapping_GetOptionalItem(LOCALS(), &_Py_ID(__annotations__), &ann_dict)` + `PyDict_New()` fallback + `PyObject_SetItem(LOCALS(), &_Py_ID(__annotations__), ann_dict)` | second Bucket B flip; `PyDict_New` registered as expression-side helper; `EvalCode` now defaults `f.Locals = globals` for module frames so `LOCALS()` matches CPython at module scope |
 
 #### Porting backlog (organized by blocker)
 
@@ -1121,6 +1122,7 @@ helper).
 - [x] Phase 5 Bucket A6.2 — out-param `int err = HELPER(args..., &out)` translates to Go multi-return
 - [x] Phase 5 Bucket A6.3 — `_PyErr_SetString` carries the literal message through `setPendingErr`
 - [x] Phase 5 Bucket B1 — `PyMapping_GetOptionalItem` → `objects.MappingGetOptionalItem`; flips `LOAD_BUILD_CLASS`
+- [x] Phase 5 Bucket B2 — `PyDict_New` registered as expression helper; `EvalCode` defaults `f.Locals = globals` so module-frame `LOCALS()` matches CPython; flips `SETUP_ANNOTATIONS`
 - [ ] Phase 5.3 — `vm/eval_simple.go` shrinks to evalLoop scaffolding only
 - [ ] Phase 5.4 — `go test ./vm` green
 - [ ] Phase 6.1 — specialized cases emitted in `vm/eval_dispatch_gen.go`

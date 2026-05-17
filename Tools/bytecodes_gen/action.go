@@ -1700,6 +1700,11 @@ var helperCalls = map[string]helperCall{
 	"PyObject_Length": {goExpr: "e.objectLength", arity: 1},
 	// PySet_New(iterable) builds a fresh set; iterable may be NULL.
 	"PySet_New": {goExpr: "e.setNew", arity: 1},
+	// PyDict_New() returns a fresh empty dict. CPython can fail with
+	// MemoryError; gopy's NewDict is infallible under Go's GC.
+	//
+	// CPython: Objects/dictobject.c PyDict_New
+	"PyDict_New": {goExpr: "e.dictNew", arity: 0},
 	// Cell helpers.
 	"PyCell_New":         {goExpr: "e.cellNew", arity: 1},
 	"PyCell_SwapTakeRef": {goExpr: "e.cellSwapTakeRef", arity: 2},

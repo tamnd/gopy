@@ -1001,8 +1001,32 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SETUP_ANNOTATIONS:
-		// body bail: if then: local assign "ann_dict": unexpected token "PyDict_New" in expression
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var ann_dict objects.Object
+		_ = ann_dict
+		if e.localsDict() == nil {
+			e.setPendingErr("no locals found when setting up annotations")
+			return 0, nil, nil, false, e.error("error")
+		}
+		ann_dict, err := e.mappingGetOptionalItem(e.localsDict(), objects.NewStr("__annotations__"))
+		_ = err
+		_ = ann_dict
+		if err < 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		if ann_dict == nil {
+			ann_dict = e.dictNew()
+			if ann_dict == nil {
+				return 0, nil, nil, false, e.error("error")
+			}
+			err = e.objectSetItem(e.localsDict(), objects.NewStr("__annotations__"), ann_dict)
+			// Py_DECREF: no-op under GC
+			if err != 0 {
+				return 0, nil, nil, false, e.error("error")
+			}
+		} else {
+			// Py_DECREF: no-op under GC
+		}
+		return e.advance(), nil, nil, false, nil
 	case compile.SET_ADD:
 		set := e.peek(int(oparg-1) + 1)
 		_ = set

@@ -26,4 +26,5 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.LOAD_FAST_AND_CLEAR:        true,
 	compile.STORE_FAST:                 true,
 	compile.LOAD_BUILD_CLASS:           true,
+	compile.SETUP_ANNOTATIONS:          true,
 }

@@ -79,6 +79,14 @@ func EvalCode(ts *state.Thread, co *objects.Code, globals, locals objects.Object
 	f := stack.Push(co, globals, builtinsFromGlobals(globals), nil, nil)
 	if locals != nil {
 		f.Locals = locals
+	} else {
+		// CPython: Python/frame.c _PyFrame_Initialize sets f_locals
+		// from the caller; for module-level execution PyEval_EvalCode
+		// passes locals == globals. Mirror that here so LOCALS()-using
+		// opcodes (SETUP_ANNOTATIONS, STORE_NAME, ...) see the module
+		// dict instead of NULL. Function-call frames are built in
+		// vm/eval_call.go and keep Locals nil to drive fast-locals.
+		f.Locals = globals
 	}
 	defer stack.Pop()
 	return Eval(ts, f)
