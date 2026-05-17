@@ -306,6 +306,57 @@ func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	}
 }
 
+func TestBasicblockFoldTupleOfConstantsRewrites(t *testing.T) {
+	consts := []any{int64(1), int64(2), int64(3)}
+	bb := &basicblock{Instr: []cfgInstr{
+		{Op: LOAD_CONST, Oparg: 0},
+		{Op: LOAD_CONST, Oparg: 1},
+		{Op: LOAD_CONST, Oparg: 2},
+		{Op: BUILD_TUPLE, Oparg: 3},
+	}}
+	if got := basicblockFoldTupleOfConstants(bb, &consts); got != 1 {
+		t.Fatalf("folded = %d, want 1", got)
+	}
+	for i := range 3 {
+		if bb.Instr[i].Op != NOP {
+			t.Errorf("instr[%d] = %v, want NOP", i, bb.Instr[i].Op)
+		}
+	}
+	if bb.Instr[3].Op != LOAD_CONST {
+		t.Errorf("instr[3] = %v, want LOAD_CONST", bb.Instr[3].Op)
+	}
+	tup, ok := consts[bb.Instr[3].Oparg].(*ConstTuple)
+	if !ok {
+		t.Fatalf("folded const not a tuple: %T", consts[bb.Instr[3].Oparg])
+	}
+	if len(tup.Values) != 3 {
+		t.Errorf("tuple len = %d, want 3", len(tup.Values))
+	}
+}
+
+func TestBasicblockOptimizeListsAndSetsRewrites(t *testing.T) {
+	consts := []any{int64(1), int64(2), int64(3), int64(4)}
+	bb := &basicblock{Instr: []cfgInstr{
+		{Op: LOAD_CONST, Oparg: 0},
+		{Op: LOAD_CONST, Oparg: 1},
+		{Op: LOAD_CONST, Oparg: 2},
+		{Op: LOAD_CONST, Oparg: 3},
+		{Op: BUILD_LIST, Oparg: 4},
+	}}
+	if got := basicblockOptimizeListsAndSets(bb, &consts); got != 1 {
+		t.Fatalf("folded = %d, want 1", got)
+	}
+	if bb.Instr[2].Op != BUILD_LIST || bb.Instr[2].Oparg != 0 {
+		t.Errorf("prelude = %v %d, want BUILD_LIST 0", bb.Instr[2].Op, bb.Instr[2].Oparg)
+	}
+	if bb.Instr[3].Op != LOAD_CONST {
+		t.Errorf("instr[3] = %v, want LOAD_CONST", bb.Instr[3].Op)
+	}
+	if bb.Instr[4].Op != LIST_EXTEND || bb.Instr[4].Oparg != 1 {
+		t.Errorf("tail = %v %d, want LIST_EXTEND 1", bb.Instr[4].Op, bb.Instr[4].Oparg)
+	}
+}
+
 func TestBasicblockFoldConstUnaryopNegates(t *testing.T) {
 	consts := []any{int64(5)}
 	bb := &basicblock{Instr: []cfgInstr{

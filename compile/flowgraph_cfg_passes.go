@@ -490,6 +490,111 @@ func cfgLoadsConstValue(ins *cfgInstr, consts []any) (any, bool) {
 	return nil, false
 }
 
+// basicblockCollectConstLoaders walks n instructions starting at start
+// and returns their const values when every slot is a LOAD_CONST or
+// LOAD_SMALL_INT. Within a basic block no slot can be a jump target,
+// so the flat-substrate pinned gate is unnecessary.
+//
+// CPython: Python/flowgraph.c:1430 get_const_loading_instrs
+func basicblockCollectConstLoaders(bb *basicblock, consts []any, start, n int) (bool, []any) {
+	values := make([]any, 0, n)
+	for k := range n {
+		v, ok := cfgLoadsConstValue(&bb.Instr[start+k], consts)
+		if !ok {
+			return false, nil
+		}
+		values = append(values, v)
+	}
+	return true, values
+}
+
+// basicblockFoldTupleOfConstants rewrites `LOAD_CONST c1; ...;
+// LOAD_CONST cN; BUILD_TUPLE N` into `NOP; ...; NOP; LOAD_CONST
+// (c1, ..., cN)`.
+//
+// CPython: Python/flowgraph.c:1454 fold_tuple_of_constants
+func basicblockFoldTupleOfConstants(bb *basicblock, consts *[]any) int {
+	if consts == nil || len(bb.Instr) == 0 {
+		return 0
+	}
+	folded := 0
+	for i := range bb.Instr {
+		ins := &bb.Instr[i]
+		if ins.Op != BUILD_TUPLE {
+			continue
+		}
+		n := int(ins.Oparg)
+		if n <= 0 || i < n {
+			continue
+		}
+		start := i - n
+		ok, values := basicblockCollectConstLoaders(bb, *consts, start, n)
+		if !ok {
+			continue
+		}
+		tuple := &ConstTuple{Values: append([]any(nil), values...)}
+		for k := start; k < i; k++ {
+			bb.Instr[k].Op = NOP
+			bb.Instr[k].Oparg = 0
+			bb.Instr[k].Target = nil
+		}
+		idx := appendConst(consts, tuple)
+		ins.Op = LOAD_CONST
+		ins.Oparg = int32(idx)
+		folded++
+	}
+	return folded
+}
+
+// basicblockOptimizeListsAndSets folds `LOAD_CONST c1; ...; LOAD_CONST
+// cN; BUILD_LIST N` (and BUILD_SET) into a const-tuple plus
+// LIST_EXTEND/SET_UPDATE prelude.
+//
+// CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
+func basicblockOptimizeListsAndSets(bb *basicblock, consts *[]any) int {
+	if consts == nil || len(bb.Instr) < 3 {
+		return 0
+	}
+	folded := 0
+	for i := range bb.Instr {
+		ins := &bb.Instr[i]
+		if ins.Op != BUILD_LIST && ins.Op != BUILD_SET {
+			continue
+		}
+		n := int(ins.Oparg)
+		if n < minConstSequenceSize || i < n {
+			continue
+		}
+		start := i - n
+		ok, values := basicblockCollectConstLoaders(bb, *consts, start, n)
+		if !ok {
+			continue
+		}
+		tuple := &ConstTuple{Values: append([]any(nil), values...)}
+		idx := appendConst(consts, tuple)
+		for k := start; k < i-2; k++ {
+			bb.Instr[k].Op = NOP
+			bb.Instr[k].Oparg = 0
+			bb.Instr[k].Target = nil
+		}
+		preludeOp := ins.Op
+		bb.Instr[i-2].Op = preludeOp
+		bb.Instr[i-2].Oparg = 0
+		bb.Instr[i-2].Loc = ins.Loc
+		bb.Instr[i-1].Op = LOAD_CONST
+		bb.Instr[i-1].Oparg = int32(idx)
+		bb.Instr[i-1].Loc = ins.Loc
+		if preludeOp == BUILD_LIST {
+			ins.Op = LIST_EXTEND
+		} else {
+			ins.Op = SET_UPDATE
+		}
+		ins.Oparg = 1
+		folded++
+	}
+	return folded
+}
+
 // basicblockSwaptimize collapses a run of SWAP/NOP instructions starting
 // at *ix into the optimal SWAP sequence realizing the same permutation.
 // Returns the count of opcodes turned into NOPs and advances *ix past
