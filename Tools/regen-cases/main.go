@@ -52,33 +52,51 @@ type generator struct {
 }
 
 var upstreamGenerators = []generator{
-	{name: "tier1_generator.py", out: "generated_cases.c.h",
+	{
+		name: "tier1_generator.py", out: "generated_cases.c.h",
 		inputs: []string{"Python/bytecodes.c"},
-		upPath: "Python/generated_cases.c.h", comment: "//"},
-	{name: "tier2_generator.py", out: "executor_cases.c.h",
+		upPath: "Python/generated_cases.c.h", comment: "//",
+	},
+	{
+		name: "tier2_generator.py", out: "executor_cases.c.h",
 		inputs: []string{"Python/bytecodes.c"},
-		upPath: "Python/executor_cases.c.h", comment: "//"},
-	{name: "optimizer_generator.py", out: "optimizer_cases.c.h",
+		upPath: "Python/executor_cases.c.h", comment: "//",
+	},
+	{
+		name: "optimizer_generator.py", out: "optimizer_cases.c.h",
 		inputs: []string{"Python/optimizer_bytecodes.c", "Python/bytecodes.c"},
-		upPath: "Python/optimizer_cases.c.h", comment: "//"},
-	{name: "opcode_id_generator.py", out: "opcode_ids.h",
+		upPath: "Python/optimizer_cases.c.h", comment: "//",
+	},
+	{
+		name: "opcode_id_generator.py", out: "opcode_ids.h",
 		inputs: []string{"Python/bytecodes.c"},
-		upPath: "Include/opcode_ids.h", comment: "//"},
-	{name: "opcode_metadata_generator.py", out: "pycore_opcode_metadata.h",
+		upPath: "Include/opcode_ids.h", comment: "//",
+	},
+	{
+		name: "opcode_metadata_generator.py", out: "pycore_opcode_metadata.h",
 		inputs: []string{"Python/bytecodes.c"},
-		upPath: "Include/internal/pycore_opcode_metadata.h", comment: "//"},
-	{name: "uop_id_generator.py", out: "pycore_uop_ids.h",
+		upPath: "Include/internal/pycore_opcode_metadata.h", comment: "//",
+	},
+	{
+		name: "uop_id_generator.py", out: "pycore_uop_ids.h",
 		inputs: []string{"Python/bytecodes.c"},
-		upPath: "Include/internal/pycore_uop_ids.h", comment: "//"},
-	{name: "uop_metadata_generator.py", out: "pycore_uop_metadata.h",
+		upPath: "Include/internal/pycore_uop_ids.h", comment: "//",
+	},
+	{
+		name: "uop_metadata_generator.py", out: "pycore_uop_metadata.h",
 		inputs: []string{"Python/bytecodes.c"},
-		upPath: "Include/internal/pycore_uop_metadata.h", comment: "//"},
-	{name: "target_generator.py", out: "opcode_targets.h",
+		upPath: "Include/internal/pycore_uop_metadata.h", comment: "//",
+	},
+	{
+		name: "target_generator.py", out: "opcode_targets.h",
 		inputs: []string{"Python/bytecodes.c"},
-		upPath: "Python/opcode_targets.h", comment: "//"},
-	{name: "py_metadata_generator.py", out: "_opcode_metadata.py",
+		upPath: "Python/opcode_targets.h", comment: "//",
+	},
+	{
+		name: "py_metadata_generator.py", out: "_opcode_metadata.py",
 		inputs: []string{"Python/bytecodes.c"},
-		upPath: "Lib/_opcode_metadata.py", comment: "#"},
+		upPath: "Lib/_opcode_metadata.py", comment: "#",
+	},
 }
 
 // vendoredGenerator lists the files we expect to find inside
@@ -122,15 +140,21 @@ type options struct {
 // relative to the repo root, `inputs` are CPython-relative input
 // paths resolved against Tools/cases_generator/inputs/.
 var gopyGenerators = []generator{
-	{name: "gopy_opcode_id_generator.py", out: "compile/opcode_ids_gen.go",
+	{
+		name: "gopy_opcode_id_generator.py", out: "compile/opcode_ids_gen.go",
 		inputs:  []string{"Python/bytecodes.c"},
-		comment: "//"},
-	{name: "gopy_opcode_metadata_generator.py", out: "compile/opcode_metadata_gen.go",
+		comment: "//",
+	},
+	{
+		name: "gopy_opcode_metadata_generator.py", out: "compile/opcode_metadata_gen.go",
 		inputs:  []string{"Python/bytecodes.c"},
-		comment: "//"},
-	{name: "cache_struct_parser.py", out: "specialize/cache_layouts_gen.go",
+		comment: "//",
+	},
+	{
+		name: "cache_struct_parser.py", out: "specialize/cache_layouts_gen.go",
 		inputs:  []string{"Include/internal/pycore_code.h"},
-		comment: "//"},
+		comment: "//",
+	},
 }
 
 func main() {

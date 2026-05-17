@@ -27,10 +27,10 @@ type attrCacheView struct {
 
 func attrCacheAt(code []byte, instr int) attrCacheView { return attrCacheView{code, instr} }
 
-func (c attrCacheView) version() uint32         { return readU32(c.code, c.instr, 2) }
-func (c attrCacheView) setVersion(v uint32)      { writeU32(c.code, c.instr, 2, v) }
-func (c attrCacheView) index() uint16            { return readCell(c.code, c.instr, 4) }
-func (c attrCacheView) setIndex(v uint16)        { writeCell(c.code, c.instr, 4, v) }
+func (c attrCacheView) version() uint32     { return readU32(c.code, c.instr, 2) }
+func (c attrCacheView) setVersion(v uint32) { writeU32(c.code, c.instr, 2, v) }
+func (c attrCacheView) index() uint16       { return readCell(c.code, c.instr, 4) }
+func (c attrCacheView) setIndex(v uint16)   { writeCell(c.code, c.instr, 4, v) }
 
 // AttrCacheVersion / AttrCacheIndex are the public dispatch-loop
 // accessors. Both STORE_ATTR and LOAD_ATTR_MODULE share this layout.
@@ -88,9 +88,11 @@ func (c loadMethodCacheView) setDictOffset(v uint16)  { writeCell(c.code, c.inst
 func LoadMethodTypeVersion(code []byte, instr int) uint32 {
 	return loadMethodCacheAt(code, instr).typeVersion()
 }
+
 func LoadMethodKeysVersion(code []byte, instr int) uint32 {
 	return loadMethodCacheAt(code, instr).keysVersion()
 }
+
 func LoadMethodMetaVersion(code []byte, instr int) uint32 {
 	return loadMethodCacheAt(code, instr).metaVersion()
 }
@@ -100,12 +102,15 @@ func LoadMethodMetaVersion(code []byte, instr int) uint32 {
 func SetLoadMethodTypeVersion(code []byte, instr int, v uint32) {
 	loadMethodCacheAt(code, instr).setTypeVersion(v)
 }
+
 func SetLoadMethodKeysVersion(code []byte, instr int, v uint32) {
 	loadMethodCacheAt(code, instr).setKeysVersion(v)
 }
+
 func SetLoadMethodMetaVersion(code []byte, instr int, v uint32) {
 	loadMethodCacheAt(code, instr).setMetaVersion(v)
 }
+
 func SetLoadAttrInstanceValueSlot(code []byte, instr int, v uint16) {
 	writeCell(code, instr, 6, v)
 }

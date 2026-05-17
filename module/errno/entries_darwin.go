@@ -15,7 +15,7 @@ import "syscall"
 //
 // CPython: Modules/errnomodule.c:88 errno_exec (Darwin slice)
 func errnoEntries() []errnoEntry {
-	entries := []errnoEntry{
+	entries := []errnoEntry{ //nolint:prealloc // literal table, extended once via append(arch...)
 		{"EPERM", int(syscall.EPERM)},
 		{"ENOENT", int(syscall.ENOENT)},
 		{"ESRCH", int(syscall.ESRCH)},

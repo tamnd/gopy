@@ -48,18 +48,18 @@ const (
 
 // CO_* flags. CPython: Include/cpython/code.h.
 const (
-	CoOptimized         uint32 = 0x0001
-	CoNewLocals         uint32 = 0x0002
-	CoVarargs           uint32 = 0x0004
-	CoVarkeywords       uint32 = 0x0008
-	CoNested            uint32 = 0x0010
-	CoGenerator         uint32 = 0x0020
-	CoCoroutine         uint32 = 0x0080
-	CoIterableCoroutine uint32 = 0x0100
-	CoAsyncGenerator    uint32 = 0x0200
+	CoOptimized          uint32 = 0x0001
+	CoNewLocals          uint32 = 0x0002
+	CoVarargs            uint32 = 0x0004
+	CoVarkeywords        uint32 = 0x0008
+	CoNested             uint32 = 0x0010
+	CoGenerator          uint32 = 0x0020
+	CoCoroutine          uint32 = 0x0080
+	CoIterableCoroutine  uint32 = 0x0100
+	CoAsyncGenerator     uint32 = 0x0200
 	CoNoMonitoringEvents uint32 = 0x2000000
-	CoHasDocstring      uint32 = 0x4000000
-	CoMethod            uint32 = 0x8000000
+	CoHasDocstring       uint32 = 0x4000000
+	CoMethod             uint32 = 0x8000000
 )
 
 // Unit is the per-scope handoff codegen produces. The flowgraph

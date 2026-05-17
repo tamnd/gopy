@@ -6,8 +6,8 @@
 package vm
 
 import (
-	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/compile"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/monitor"
 	"github.com/tamnd/gopy/objects"
 )

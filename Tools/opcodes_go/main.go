@@ -236,7 +236,7 @@ func camelFlag(f string) string {
 		case "IP":
 			parts[i] = "IP"
 		default:
-			parts[i] = strings.Title(strings.ToLower(p)) //nolint:staticcheck // ASCII-only.
+			parts[i] = strings.Title(strings.ToLower(p))
 		}
 	}
 	return strings.Join(parts, "")

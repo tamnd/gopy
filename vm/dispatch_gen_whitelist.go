@@ -5,7 +5,7 @@
 // behavior bit-for-bit (same stack effect, same error path, same
 // cache advance), so removing the hand-written arm is safe.
 //
-// CPython has no analogue: every opcode lives in bytecodes.c and the
+// CPython has no analog: every opcode lives in bytecodes.c and the
 // generated switch is the only dispatch. This map is gopy-specific
 // migration scaffolding that goes away when phase 5 closes and
 // trySimple/tryImport/tryGen/tryMatch are folded into dispatchGen.

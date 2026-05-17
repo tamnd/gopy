@@ -133,7 +133,7 @@ func codeCoLinesMethod(args []Object, kwargs map[string]Object) (Object, error) 
 	entries := CoLines(c)
 	items := make([]Object, len(entries))
 	for i, e := range entries {
-		line := Object(None())
+		line := None()
 		if e.Line >= 0 {
 			line = NewInt(int64(e.Line))
 		}

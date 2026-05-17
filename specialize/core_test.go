@@ -77,4 +77,3 @@ func TestUnspecializeRestoresParent(t *testing.T) {
 		t.Fatalf("counter after unspecialize: got %v want %v", got, want)
 	}
 }
-

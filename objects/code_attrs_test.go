@@ -23,9 +23,9 @@ func TestCodeAttrLookupReadOnly(t *testing.T) {
 	c.ExceptionTable = []byte{0x82, 0x40}
 
 	cases := []struct {
-		name      string
-		wantType  string
-		wantLen   int
+		name     string
+		wantType string
+		wantLen  int
 	}{
 		{"co_code", "bytes", 4},
 		{"_co_code_adaptive", "bytes", 4},

@@ -127,9 +127,9 @@ func loadGlobalCacheAt(code []byte, instr int) loadGlobalCacheView {
 	return loadGlobalCacheView{code, instr}
 }
 
-func (c loadGlobalCacheView) moduleKeysVersion() uint16    { return readCell(c.code, c.instr, 2) }
-func (c loadGlobalCacheView) setModuleKeysVersion(v uint16) { writeCell(c.code, c.instr, 2, v) }
-func (c loadGlobalCacheView) builtinKeysVersion() uint16    { return readCell(c.code, c.instr, 3) }
+func (c loadGlobalCacheView) moduleKeysVersion() uint16      { return readCell(c.code, c.instr, 2) }
+func (c loadGlobalCacheView) setModuleKeysVersion(v uint16)  { writeCell(c.code, c.instr, 2, v) }
+func (c loadGlobalCacheView) builtinKeysVersion() uint16     { return readCell(c.code, c.instr, 3) }
 func (c loadGlobalCacheView) setBuiltinKeysVersion(v uint16) { writeCell(c.code, c.instr, 3, v) }
 func (c loadGlobalCacheView) index() uint16                  { return readCell(c.code, c.instr, 4) }
 func (c loadGlobalCacheView) setIndex(v uint16)              { writeCell(c.code, c.instr, 4, v) }

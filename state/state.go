@@ -119,12 +119,12 @@ type Interpreter struct {
 //
 // CPython: Include/internal/pycore_opcode_utils.h CONSTANT_*
 const (
-	ConstantAssertionError     = 0
+	ConstantAssertionError      = 0
 	ConstantNotImplementedError = 1
-	ConstantBuiltinTuple       = 2
-	ConstantBuiltinAll         = 3
-	ConstantBuiltinAny         = 4
-	NumCommonConstants         = 5
+	ConstantBuiltinTuple        = 2
+	ConstantBuiltinAll          = 3
+	ConstantBuiltinAny          = 4
+	NumCommonConstants          = 5
 )
 
 // Thread is the per-goroutine state. v0.3 carries the current

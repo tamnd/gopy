@@ -349,7 +349,7 @@ func tokenize(src string) ([]dslTok, error) {
 		// call interpreter; the bodies under those guards reference
 		// symbols (_Py_emscripten_signal_clock, entry.frame) we have
 		// no analogue for.
-		"__EMSCRIPTEN__":   true,
+		"__EMSCRIPTEN__":      true,
 		"Py_TAIL_CALL_INTERP": true,
 		// _Py_TIER2 guards the executor-list maintenance inside tier1
 		// instructions. We have a tier-2 path but the inline writes to
@@ -473,7 +473,6 @@ func tokenizeAll(src string) ([]dslTok, error) {
 	return out, nil
 }
 
-//nolint:gocyclo // mirrors the upstream tok kind dispatcher; collapsing the branches would diverge from parsing.py.
 func classify(text, src string, start int) (tokKind, error) {
 	if text == "\n" {
 		return tokNewline, nil

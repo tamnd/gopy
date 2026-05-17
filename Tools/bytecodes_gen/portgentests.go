@@ -12,9 +12,10 @@
 // plus the count whose `inst` bodies translate without bailing.
 //
 // CPython references:
-//   Lib/test/test_generated_cases.py            (the file we're reading)
-//   Tools/cases_generator/parser.py             (BEGIN/END_MARKER wrap)
-//   Tools/cases_generator/tier1_generator.py    (downstream consumer)
+//
+//	Lib/test/test_generated_cases.py            (the file we're reading)
+//	Tools/cases_generator/parser.py             (BEGIN/END_MARKER wrap)
+//	Tools/cases_generator/tier1_generator.py    (downstream consumer)
 //
 // Invoked via `bytecodes_gen -mode portgentests -src <test.py> -out <go> -pkg main`.
 // The generated file is checked in so casual builds don't need a

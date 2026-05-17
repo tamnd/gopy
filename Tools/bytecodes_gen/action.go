@@ -46,14 +46,14 @@ func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, termina
 		}
 	}
 	t := &actionTranslator{
-		sig:      sig,
-		bound:    bindNames(sig),
-		toks:     stripWhitespace(body),
-		writer:    &strings.Builder{},
-		assigned:  map[string]bool{},
-		locals:    map[string]bool{},
-		intLocals:  map[string]bool{},
-		boolLocals: map[string]bool{},
+		sig:          sig,
+		bound:        bindNames(sig),
+		toks:         stripWhitespace(body),
+		writer:       &strings.Builder{},
+		assigned:     map[string]bool{},
+		locals:       map[string]bool{},
+		intLocals:    map[string]bool{},
+		boolLocals:   map[string]bool{},
 		excInfoAlias: map[string]bool{},
 	}
 	// Passthrough outputs: when an output reuses an input name, CPython's
@@ -283,30 +283,30 @@ func (t *actionTranslator) translateStmt() error {
 // the name. Buckets A2 (int / bool), A5 (uint32_t), A7 (typed pointers
 // like PyFunctionObject *) all funnel through here.
 var cTypeDecls = map[string]bool{
-	"_PyStackRef":      true,
-	"PyObject":         true,
-	"int":              true,
-	"uint8_t":          true,
-	"uint32_t":         true,
-	"size_t":           true,
-	"Py_ssize_t":       true,
-	"Py_hash_t":        true,
-	"PyTypeObject":     true,
-	"PyFunctionObject": true,
-	"PyCodeObject":     true,
-	"PyCellObject":     true,
-	"PyListObject":    true,
-	"PyDictObject":    true,
-	"PySetObject":     true,
-	"PyGenObject":     true,
-	"PyCoroObject":    true,
-	"PyLongObject":    true,
-	"PyUnicodeObject": true,
-	"PyTupleObject":   true,
+	"_PyStackRef":        true,
+	"PyObject":           true,
+	"int":                true,
+	"uint8_t":            true,
+	"uint32_t":           true,
+	"size_t":             true,
+	"Py_ssize_t":         true,
+	"Py_hash_t":          true,
+	"PyTypeObject":       true,
+	"PyFunctionObject":   true,
+	"PyCodeObject":       true,
+	"PyCellObject":       true,
+	"PyListObject":       true,
+	"PyDictObject":       true,
+	"PySetObject":        true,
+	"PyGenObject":        true,
+	"PyCoroObject":       true,
+	"PyLongObject":       true,
+	"PyUnicodeObject":    true,
+	"PyTupleObject":      true,
 	"PyInterpreterState": true,
-	"_PyErr_StackItem": true,
-	"conversion_func":  true,
-	"unaryfunc":        true,
+	"_PyErr_StackItem":   true,
+	"conversion_func":    true,
+	"unaryfunc":          true,
 }
 
 // translateTypedDecl handles `<C-type> [*] NAME = EXPR;`. Go infers the
@@ -1482,8 +1482,8 @@ var structArrow = map[string]struct {
 	// helper asserts each slot to objects.Object on the way out.
 	//
 	// CPython: Include/internal/pycore_interp_structs.h common_consts
-	"tstate.interp":         {goExpr: "e.ts.Interp()", nextTag: "interp"},
-	"interp.common_consts":  {goExpr: "e.commonConsts()", nextTag: "common_consts"},
+	"tstate.interp":        {goExpr: "e.ts.Interp()", nextTag: "interp"},
+	"interp.common_consts": {goExpr: "e.commonConsts()", nextTag: "common_consts"},
 }
 
 // helperCalls is the registry of CPython helpers mapped to gopy
@@ -1491,13 +1491,13 @@ var structArrow = map[string]struct {
 // own the failure mode (pendingErr) so the translator can emit them
 // uniformly inside the action body.
 var helperCalls = map[string]helperCall{
-	"Py_Is":             {goExpr: "e.pyIs", arity: 2},
+	"Py_Is": {goExpr: "e.pyIs", arity: 2},
 	// PyObject_GetIter(obj) calls obj.__iter__() and returns the
 	// resulting iterator or NULL on error. Mirrors abstract.c
 	// PyObject_GetIter.
 	//
 	// CPython: Objects/abstract.c PyObject_GetIter
-	"PyObject_GetIter": {goExpr: "e.objectGetIter", arity: 1},
+	"PyObject_GetIter":  {goExpr: "e.objectGetIter", arity: 1},
 	"Py_TYPE":           {goExpr: "e.pyType", arity: 1},
 	"PyNumber_Negative": {goExpr: "e.pyNumberNegative", arity: 1},
 	"PyNumber_Invert":   {goExpr: "e.pyNumberInvert", arity: 1},
@@ -1541,12 +1541,12 @@ var helperCalls = map[string]helperCall{
 	"_PyErr_ExceptionMatches": {goExpr: "e.errExceptionMatches", arity: 1, dropFirst: 1},
 	// Dict / list / set mutation helpers. These all return a C int err
 	// (0 ok, nonzero error) and stash the cause on pendingErr.
-	"PyDict_Pop":           {goExpr: "e.dictPop", arity: 3},
-	"_PyDict_MergeEx":      {goExpr: "e.dictMergeEx", arity: 3},
-	"_PyList_Extend":       {goExpr: "e.listExtend", arity: 2},
+	"PyDict_Pop":            {goExpr: "e.dictPop", arity: 3},
+	"_PyDict_MergeEx":       {goExpr: "e.dictMergeEx", arity: 3},
+	"_PyList_Extend":        {goExpr: "e.listExtend", arity: 2},
 	"_PyList_AppendTakeRef": {goExpr: "e.listAppendTakeRef", arity: 2},
-	"_PySet_AddTakeRef":    {goExpr: "e.setAddTakeRef", arity: 2},
-	"_PySet_Update":        {goExpr: "e.setUpdate", arity: 2},
+	"_PySet_AddTakeRef":     {goExpr: "e.setAddTakeRef", arity: 2},
+	"_PySet_Update":         {goExpr: "e.setUpdate", arity: 2},
 	// PyObject_Length returns Py_ssize_t (-1 on error).
 	"PyObject_Length": {goExpr: "e.objectLength", arity: 1},
 	// PySet_New(iterable) builds a fresh set; iterable may be NULL.
@@ -1595,15 +1595,15 @@ var helperCalls = map[string]helperCall{
 	// IndexError via pendingErr instead of segfaulting.
 	//
 	// CPython: Include/cpython/tupleobject.h PyTuple_GET_ITEM
-	"PyTuple_GET_ITEM": {goExpr: "e.tupleGetItem", arity: 2},
-	"PyDict_CheckExact":    {goExpr: "objects.IsExactDict", arity: 1},
-	"PySet_CheckExact":     {goExpr: "objects.IsExactSet", arity: 1},
-	"PyBool_Check":         {goExpr: "objects.IsExactBool", arity: 1},
-	"PySlice_Check":        {goExpr: "objects.IsExactSlice", arity: 1},
-	"PyCoro_CheckExact":    {goExpr: "objects.IsCoroutine", arity: 1},
-	"PyGen_Check":          {goExpr: "objects.IsGenerator", arity: 1},
-	"PyGen_CheckExact":     {goExpr: "objects.IsGenerator", arity: 1},
-// monitor_stop_iteration fires PEP 669 STOP_ITERATION for the
+	"PyTuple_GET_ITEM":  {goExpr: "e.tupleGetItem", arity: 2},
+	"PyDict_CheckExact": {goExpr: "objects.IsExactDict", arity: 1},
+	"PySet_CheckExact":  {goExpr: "objects.IsExactSet", arity: 1},
+	"PyBool_Check":      {goExpr: "objects.IsExactBool", arity: 1},
+	"PySlice_Check":     {goExpr: "objects.IsExactSlice", arity: 1},
+	"PyCoro_CheckExact": {goExpr: "objects.IsCoroutine", arity: 1},
+	"PyGen_Check":       {goExpr: "objects.IsGenerator", arity: 1},
+	"PyGen_CheckExact":  {goExpr: "objects.IsGenerator", arity: 1},
+	// monitor_stop_iteration fires PEP 669 STOP_ITERATION for the
 	// running frame. The first three args (tstate, frame, this_instr)
 	// are implicit on the evalState; the wrapper takes only the value.
 	//
@@ -1848,8 +1848,6 @@ func (t *actionTranslator) translateErrorIf() error {
 
 // rewriteCCondToGo was the legacy ERROR_IF condition rewriter; it has
 // been superseded by routing through translateExpr.
-//
-//nolint:unused // retained briefly while the action translator stabilises
 func rewriteCCondToGo(s string, intLocals map[string]bool) string {
 	parts := strings.Fields(s)
 	for i, p := range parts {

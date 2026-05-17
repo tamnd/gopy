@@ -197,7 +197,8 @@ func (e *evalState) fastBinaryOpMultiplyFloat() (int, bool) {
 // observable behavior is the same concat).
 //
 // CPython: Python/bytecodes.c _BINARY_OP_ADD_UNICODE,
-//          _BINARY_OP_INPLACE_ADD_UNICODE
+//
+//	_BINARY_OP_INPLACE_ADD_UNICODE
 func (e *evalState) fastBinaryOpAddUnicode() (int, bool) {
 	r, rOk := e.peek(0).AsObject().(*objects.Unicode)
 	l, lOk := e.peek(1).AsObject().(*objects.Unicode)
@@ -296,8 +297,9 @@ func (e *evalState) fastBinaryOpSubscrDict() (next int, ok bool, err error) {
 	}
 	v, gerr := d.GetItem(key)
 	if gerr != nil {
-		// Key miss or hash failure: defer to the generic path.
-		return 0, false, nil
+		// Key miss or hash failure: defer to the generic path so the
+		// slow handler can raise KeyError with the right shape.
+		return 0, false, nil //nolint:nilerr // intentional fast-path fallback
 	}
 	e.pushBinaryResult(v)
 	return e.cacheAdvance(compile.BINARY_OP), true, nil

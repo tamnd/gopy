@@ -82,7 +82,7 @@ func TestCodeParityRoundTrip(t *testing.T) {
 	}
 
 	cases := []struct {
-		field   string
+		field     string
 		want, got any
 	}{
 		{"Argcount", want.Argcount, got.Argcount},

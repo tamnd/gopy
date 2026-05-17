@@ -24,8 +24,6 @@ import (
 // kept so generated arms can call it without conditional emission.
 //
 // CPython: Python/ceval_macros.h DECREF_INPUTS
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) decrefInputs(n int) {
 	_ = n
 }
@@ -43,8 +41,6 @@ func (e *evalState) decrefInputs(n int) {
 // CPython: Tools/cases_generator/stack.py Local.from_memory_effect —
 // sized inputs bind to a stack_pointer slice without copying, but the
 // gopy refcount-only path doesn't need the aliasing.
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) peekSliceBottomFirst(topOffset, n int) []stackref.Ref {
 	out := make([]stackref.Ref, n)
 	for i := 0; i < n; i++ {
@@ -62,8 +58,6 @@ func (e *evalState) peekSliceBottomFirst(topOffset, n int) []stackref.Ref {
 // CPython: Python/errors.c PyErr_Format — sets tstate->current_exception
 // with a formatted message; gopy preserves the failure signal but
 // drops the format string since the eval loop only inspects existence.
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) setPendingErr(name string) {
 	e.pendingErr = fmt.Errorf("vm: %s", name)
 }
@@ -77,9 +71,7 @@ func (e *evalState) setPendingErr(name string) {
 //
 // CPython: Python/ceval.c JUMP_TO_LABEL(error) — the per-instruction
 // error label inspects tstate->current_exception.
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
-func (e *evalState) error(label string) error {
+func (e *evalState) error(label string) error { //nolint:unparam // label reserved for ERROR_NO_POP / RERAISE arms the translator will add
 	if e.pendingErr != nil {
 		err := e.pendingErr
 		e.pendingErr = nil
@@ -94,8 +86,6 @@ func (e *evalState) error(label string) error {
 // reports whether that slot is populated.
 //
 // CPython: Python/errors.c _PyErr_Occurred.
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) errOccurred() bool {
 	return e.pendingErr != nil
 }
@@ -109,8 +99,6 @@ func (e *evalState) errOccurred() bool {
 //
 // CPython: Python/errors.c PyErr_ExceptionMatches (calls
 // PyErr_GivenExceptionMatches with tstate->current_exception).
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) errExceptionMatches(t *objects.Type) bool {
 	if e.pendingErr == nil || t == nil {
 		return false
@@ -128,8 +116,6 @@ func (e *evalState) errExceptionMatches(t *objects.Type) bool {
 // the real Go error rides on e.pendingErr until e.error() retrieves it.
 //
 // CPython: Objects/abstract.c:1381 PyNumber_Negative
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) pyNumberNegative(o objects.Object) objects.Object {
 	r, err := objects.NumberNegative(o)
 	if err != nil {
@@ -142,8 +128,6 @@ func (e *evalState) pyNumberNegative(o objects.Object) objects.Object {
 // pyNumberInvert wraps PyNumber_Invert.
 //
 // CPython: Objects/abstract.c:1389 PyNumber_Invert
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) pyNumberInvert(o objects.Object) objects.Object {
 	r, err := objects.NumberInvert(o)
 	if err != nil {
@@ -156,8 +140,6 @@ func (e *evalState) pyNumberInvert(o objects.Object) objects.Object {
 // pyNumberPositive wraps PyNumber_Positive.
 //
 // CPython: Objects/abstract.c:1373 PyNumber_Positive
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) pyNumberPositive(o objects.Object) objects.Object {
 	r, err := objects.NumberPositive(o)
 	if err != nil {
@@ -170,8 +152,6 @@ func (e *evalState) pyNumberPositive(o objects.Object) objects.Object {
 // pyNumberAbsolute wraps PyNumber_Absolute.
 //
 // CPython: Objects/abstract.c:1397 PyNumber_Absolute
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) pyNumberAbsolute(o objects.Object) objects.Object {
 	r, err := objects.NumberAbsolute(o)
 	if err != nil {
@@ -185,8 +165,6 @@ func (e *evalState) pyNumberAbsolute(o objects.Object) objects.Object {
 // 1 / 0 as an int.
 //
 // CPython: Include/object.h Py_Is
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) pyIs(a, b objects.Object) uint32 {
 	if a == b {
 		return 1
@@ -199,14 +177,10 @@ func (e *evalState) pyIs(a, b objects.Object) uint32 {
 // evalState accessors so the translator can emit them verbatim.
 //
 // CPython: Python/ceval_macros.h GLOBALS / BUILTINS / LOCALS
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) globals() objects.Object { return e.f.Globals }
 
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) builtinsDict() objects.Object { return e.f.Builtins }
 
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) localsDict() objects.Object { return e.f.Locals }
 
 // commonConsts returns the interpreter's LOAD_COMMON_CONSTANT lookup
@@ -217,8 +191,6 @@ func (e *evalState) localsDict() objects.Object { return e.f.Locals }
 // is cached on state.Interpreter and reused.
 //
 // CPython: Python/pylifecycle.c:815 _PyInterpreterState_InitConsts
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) commonConsts() [state.NumCommonConstants]objects.Object {
 	interp := e.ts.Interp()
 	var out [state.NumCommonConstants]objects.Object
@@ -256,8 +228,6 @@ func (e *evalState) commonConsts() [state.NumCommonConstants]objects.Object {
 // mirroring the NULL-on-failure convention the translator expects.
 //
 // CPython: Python/ceval.c:2789 _PyEval_LoadName
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) loadName(name objects.Object) objects.Object {
 	if v, ok := lookupIn(e.f.Locals, name); ok {
 		return v
@@ -280,8 +250,6 @@ func (e *evalState) loadName(name objects.Object) objects.Object {
 // (name, fromlist, level). Failure surfaces through pendingErr.
 //
 // CPython: Python/ceval.c:3043 _PyEval_ImportName
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) importName(name, fromlist, level objects.Object) objects.Object {
 	s, ok := name.(*objects.Unicode)
 	if !ok {
@@ -321,8 +289,6 @@ func (e *evalState) importName(name, fromlist, level objects.Object) objects.Obj
 // the already-imported module `from`.
 //
 // CPython: Python/ceval.c:3154 _PyEval_ImportFrom
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) importFrom(from objects.Object, name objects.Object) objects.Object {
 	s, ok := name.(*objects.Unicode)
 	if !ok {
@@ -342,8 +308,6 @@ func (e *evalState) importFrom(from objects.Object, name objects.Object) objects
 // matching the C int err convention.
 //
 // CPython: Objects/dictobject.c:2240 PyDict_SetItem
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) dictSetItem(scope, key, value objects.Object) int32 {
 	if err := storeIn(scope, key, value); err != nil {
 		e.pendingErr = err
@@ -358,8 +322,6 @@ func (e *evalState) dictSetItem(scope, key, value objects.Object) int32 {
 // PyTypeObject indirection at the bytecode action level.
 //
 // CPython: Include/internal/pycore_stackref.h PyStackRef_TYPE
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) stackrefTypeFlags(r stackref.Ref) uint64 {
 	o := r.AsObject()
 	if o == nil {
@@ -375,8 +337,6 @@ func (e *evalState) stackrefTypeFlags(r stackref.Ref) uint64 {
 // objectSetItem wraps PyObject_SetItem: container[sub] = val.
 //
 // CPython: Objects/abstract.c:175 PyObject_SetItem
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) objectSetItem(container, sub, val objects.Object) int32 {
 	if err := objects.SetItem(container, sub, val); err != nil {
 		e.pendingErr = err
@@ -388,8 +348,6 @@ func (e *evalState) objectSetItem(container, sub, val objects.Object) int32 {
 // objectDelItem wraps PyObject_DelItem: del container[sub].
 //
 // CPython: Objects/abstract.c:191 PyObject_DelItem
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) objectDelItem(container, sub objects.Object) int32 {
 	if err := objects.DelItem(container, sub); err != nil {
 		e.pendingErr = err
@@ -401,8 +359,6 @@ func (e *evalState) objectDelItem(container, sub objects.Object) int32 {
 // objectDelAttr wraps PyObject_DelAttr.
 //
 // CPython: Objects/object.c:1308 PyObject_DelAttr
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) objectDelAttr(o, name objects.Object) int32 {
 	if err := objects.DelAttr(o, name); err != nil {
 		e.pendingErr = err
@@ -415,8 +371,6 @@ func (e *evalState) objectDelAttr(o, name objects.Object) int32 {
 // None on partial match, or nil on a real error.
 //
 // CPython: Python/ceval.c:5052 _PyEval_MatchKeys
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) matchKeys(subject, keys objects.Object) objects.Object {
 	keysTup, ok := keys.(*objects.Tuple)
 	if !ok {
@@ -446,8 +400,6 @@ func (e *evalState) matchKeys(subject, keys objects.Object) objects.Object {
 // attributes, or None on no match, or nil on a real error.
 //
 // CPython: Python/ceval.c _PyEval_MatchClass
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, names objects.Object) objects.Object {
 	namesTup, ok := names.(*objects.Tuple)
 	if !ok {
@@ -505,8 +457,6 @@ func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, na
 // with pendingErr set.
 //
 // CPython: Python/ceval.c _PyEval_CheckExceptTypeValid
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) checkExceptTypeValid(right objects.Object) int32 {
 	if _, ok := right.(*objects.Type); ok {
 		return 0
@@ -529,8 +479,6 @@ func (e *evalState) checkExceptTypeValid(right objects.Object) int32 {
 // but also rejects ExceptionGroup operands.
 //
 // CPython: Python/ceval.c _PyEval_CheckExceptStarTypeValid
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) checkExceptStarTypeValid(right objects.Object) int32 {
 	return e.checkExceptTypeValid(right)
 }
@@ -539,8 +487,6 @@ func (e *evalState) checkExceptStarTypeValid(right objects.Object) int32 {
 // instance of (or matches) the type operand, else 0.
 //
 // CPython: Python/errors.c:299 PyErr_GivenExceptionMatches
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) exceptionMatches(exc, target objects.Object) int32 {
 	if exc == nil {
 		return 0
@@ -564,8 +510,6 @@ func (e *evalState) exceptionMatches(exc, target objects.Object) int32 {
 // pyType mirrors Py_TYPE: returns the type object for o.
 //
 // CPython: Include/object.h Py_TYPE
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) pyType(o objects.Object) objects.Object {
 	return objects.TypeOf(o)
 }
@@ -732,8 +676,6 @@ func storeSlice(container, start, stop, value objects.Object) error {
 //
 // CPython: Objects/dictobject.c _PyDict_FromItems
 // CPython: Python/bytecodes.c BUILD_MAP
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) dictFromItems(values []objects.Object, n uint32) objects.Object {
 	if uint32(len(values)) < n*2 {
 		e.pendingErr = fmt.Errorf("BUILD_MAP: values has %d entries, want %d", len(values), n*2)
@@ -755,8 +697,6 @@ func (e *evalState) dictFromItems(values []objects.Object, n uint32) objects.Obj
 // the outer handler before installing the new one.
 //
 // CPython: Python/bytecodes.c PUSH_EXC_INFO (read of exc_info->exc_value)
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) handledException() objects.Object {
 	h := e.ts.HandledException()
 	if h == nil {
@@ -777,8 +717,6 @@ func (e *evalState) handledException() objects.Object {
 // matching the hand-written POP_EXCEPT arm in eval_simple.go.
 //
 // CPython: Python/bytecodes.c POP_EXCEPT, PUSH_EXC_INFO
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) setHandledException(obj objects.Object) {
 	if obj == nil {
 		pyerrors.SetHandled(e.ts, nil)
@@ -797,8 +735,6 @@ func (e *evalState) setHandledException(obj objects.Object) {
 // ERROR_IF(res == NULL) pattern picks that up.
 //
 // CPython: Python/bytecodes.c CALL_INTRINSIC_1
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) callIntrinsic1(oparg uint32, value objects.Object) objects.Object {
 	if int(oparg) >= len(intrinsicsUnary) || intrinsicsUnary[oparg] == nil {
 		e.pendingErr = fmt.Errorf("CALL_INTRINSIC_1: unknown id %d", oparg)
@@ -816,8 +752,6 @@ func (e *evalState) callIntrinsic1(oparg uint32, value objects.Object) objects.O
 // Argument order matches the C body byte-for-byte.
 //
 // CPython: Python/bytecodes.c CALL_INTRINSIC_2
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) callIntrinsic2(oparg uint32, value2, value1 objects.Object) objects.Object {
 	if int(oparg) >= len(intrinsicsBinary) || intrinsicsBinary[oparg] == nil {
 		e.pendingErr = fmt.Errorf("CALL_INTRINSIC_2: unknown id %d", oparg)
@@ -853,8 +787,6 @@ func binaryTable() []func(*state.Thread, objects.Object, objects.Object) (object
 // only DELETE_* caller passes NULL.
 //
 // CPython: Objects/dictobject.c:5044 PyDict_Pop
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) dictPop(dict, key, _ objects.Object) int32 {
 	d, ok := dict.(*objects.Dict)
 	if !ok {
@@ -880,8 +812,6 @@ func (e *evalState) dictPop(dict, key, _ objects.Object) int32 {
 // "raise on duplicate key" (DICT_MERGE semantics).
 //
 // CPython: Objects/dictobject.c:3232 _PyDict_MergeEx
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) dictMergeEx(a, b objects.Object, override int32) int32 {
 	d, ok := a.(*objects.Dict)
 	if !ok {
@@ -921,8 +851,6 @@ func (e *evalState) dictMergeEx(a, b objects.Object, override int32) int32 {
 // listExtend wraps _PyList_Extend: appends every item from iter to list.
 //
 // CPython: Objects/listobject.c:1029 _PyList_Extend
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) listExtend(list, iter objects.Object) int32 {
 	l, ok := list.(*objects.List)
 	if !ok {
@@ -943,8 +871,6 @@ func (e *evalState) listExtend(list, iter objects.Object) int32 {
 // listAppendTakeRef wraps _PyList_AppendTakeRef.
 //
 // CPython: Objects/listobject.c:362 _PyList_AppendTakeRef
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) listAppendTakeRef(list, item objects.Object) int32 {
 	l, ok := list.(*objects.List)
 	if !ok {
@@ -958,8 +884,6 @@ func (e *evalState) listAppendTakeRef(list, item objects.Object) int32 {
 // setAddTakeRef wraps _PySet_AddTakeRef.
 //
 // CPython: Objects/setobject.c:2433 _PySet_AddTakeRef
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) setAddTakeRef(set, elem objects.Object) int32 {
 	s, ok := set.(*objects.Set)
 	if !ok {
@@ -976,8 +900,6 @@ func (e *evalState) setAddTakeRef(set, elem objects.Object) int32 {
 // setUpdate wraps _PySet_Update.
 //
 // CPython: Objects/setobject.c:1942 _PySet_Update
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) setUpdate(set, iter objects.Object) int32 {
 	s, ok := set.(*objects.Set)
 	if !ok {
@@ -1002,8 +924,6 @@ func (e *evalState) setUpdate(set, iter objects.Object) int32 {
 // iter. iter==nil means "empty set".
 //
 // CPython: Objects/setobject.c:2419 PySet_New
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) setNew(iter objects.Object) objects.Object {
 	s := objects.NewSet()
 	if iter == nil {
@@ -1026,8 +946,6 @@ func (e *evalState) setNew(iter objects.Object) objects.Object {
 // objectLength wraps PyObject_Length: returns len(o) or -1 on error.
 //
 // CPython: Objects/abstract.c:55 PyObject_Size
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) objectLength(o objects.Object) int32 {
 	n, err := objects.Length(o)
 	if err != nil {
@@ -1041,8 +959,6 @@ func (e *evalState) objectLength(o objects.Object) int32 {
 // may be nil (unbound cell).
 //
 // CPython: Objects/cellobject.c:9 PyCell_New
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) cellNew(initial objects.Object) objects.Object {
 	return objects.NewCell(initial)
 }
@@ -1051,8 +967,6 @@ func (e *evalState) cellNew(initial objects.Object) objects.Object {
 // cell's contents and returns the previous value (nil if unbound).
 //
 // CPython: Objects/cellobject.c:60 PyCell_SwapTakeRef
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) cellSwapTakeRef(cell, newVal objects.Object) objects.Object {
 	c, ok := cell.(*objects.Cell)
 	if !ok {
@@ -1069,8 +983,6 @@ func (e *evalState) cellSwapTakeRef(cell, newVal objects.Object) objects.Object 
 // trio to Python None implicitly through objects.NewSlice.
 //
 // CPython: Objects/sliceobject.c PySlice_New
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) sliceNew(start, stop, step objects.Object) objects.Object {
 	return objects.NewSlice(start, stop, step)
 }
@@ -1079,8 +991,6 @@ func (e *evalState) sliceNew(start, stop, step objects.Object) objects.Object {
 // stealing the caller's reference. Used by STORE_DEREF.
 //
 // CPython: Objects/cellobject.c PyCell_SetTakeRef
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) cellSetTakeRef(cell, newVal objects.Object) {
 	c, ok := cell.(*objects.Cell)
 	if !ok {
@@ -1094,8 +1004,6 @@ func (e *evalState) cellSetTakeRef(cell, newVal objects.Object) {
 // next async value, or nil on error.
 //
 // CPython: Python/ceval.c:3562 _PyEval_GetANext
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) getANext(iter objects.Object) objects.Object {
 	t := iter.Type()
 	if t.Async == nil || t.Async.Anext == nil {
@@ -1125,8 +1033,6 @@ func (e *evalState) getANext(iter objects.Object) objects.Object {
 // error. Drives GET_ITER and friends.
 //
 // CPython: Objects/abstract.c PyObject_GetIter
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) objectGetIter(o objects.Object) objects.Object {
 	it, err := objects.Iter(o)
 	if err != nil {
@@ -1146,8 +1052,6 @@ func (e *evalState) objectGetIter(o objects.Object) objects.Object {
 // mis-shaped opcode body surfaces an IndexError instead of a panic.
 //
 // CPython: Include/cpython/tupleobject.h PyTuple_GET_ITEM
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) tupleGetItem(o objects.Object, i uint32) objects.Object {
 	t, ok := o.(*objects.Tuple)
 	if !ok {
@@ -1169,8 +1073,6 @@ func (e *evalState) tupleGetItem(o objects.Object, i uint32) objects.Object {
 // wraps an Object so the materialization is a simple slice build.
 //
 // CPython: Python/ceval_macros.h STACKREFS_TO_PYOBJECTS
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) stackrefsToObjects(refs []stackref.Ref, n uint32) []objects.Object {
 	if int(n) > len(refs) {
 		e.pendingErr = fmt.Errorf("STACKREFS_TO_PYOBJECTS: count %d exceeds slice (len %d)", n, len(refs))
@@ -1188,8 +1090,6 @@ func (e *evalState) stackrefsToObjects(refs []stackref.Ref, n uint32) []objects.
 // pendingErr set so the surrounding ERROR_IF translates as expected.
 //
 // CPython: Objects/unicodeobject.c _PyUnicode_JoinArray
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) unicodeJoinArray(sep objects.Object, items []objects.Object, n uint32) objects.Object {
 	sepStr, ok := sep.(*objects.Unicode)
 	if !ok {
@@ -1218,8 +1118,6 @@ func (e *evalState) unicodeJoinArray(sep objects.Object, items []objects.Object,
 // peek loop above) and the count.
 //
 // CPython: Objects/tupleobject.c:226 _PyTuple_FromStackRefStealOnSuccess
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) tupleFromStackRef(values []stackref.Ref, n uint32) objects.Object {
 	if int(n) > len(values) {
 		e.pendingErr = errors.New("BUILD_TUPLE: count exceeds values slice")
@@ -1235,8 +1133,6 @@ func (e *evalState) tupleFromStackRef(values []stackref.Ref, n uint32) objects.O
 // listFromStackRef wraps _PyList_FromStackRefStealOnSuccess.
 //
 // CPython: Objects/listobject.c:3146 _PyList_FromStackRefStealOnSuccess
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) listFromStackRef(values []stackref.Ref, n uint32) objects.Object {
 	if int(n) > len(values) {
 		e.pendingErr = errors.New("BUILD_LIST: count exceeds values slice")
@@ -1253,8 +1149,6 @@ func (e *evalState) listFromStackRef(values []stackref.Ref, n uint32) objects.Ob
 // int.
 //
 // CPython: Objects/longobject.c:1488 PyLong_FromSsize_t
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) longFromSsizeT(n int32) objects.Object {
 	return objects.NewInt(int64(n))
 }
@@ -1264,8 +1158,6 @@ func (e *evalState) longFromSsizeT(n int32) objects.Object {
 // PyStackRef_True without a full comparison.
 //
 // CPython: Objects/longobject.c _PyLong_IsZero
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) longIsZero(o objects.Object) bool {
 	if i, ok := o.(*objects.Int); ok {
 		return i.Sign() == 0
@@ -1277,8 +1169,6 @@ func (e *evalState) longIsZero(o objects.Object) bool {
 // (nil if unbound).
 //
 // CPython: Include/cpython/cellobject.h _PyCell_GetStackRef
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) cellGetStackRef(cell objects.Object) stackref.Ref {
 	c, ok := cell.(*objects.Cell)
 	if !ok {
@@ -1295,8 +1185,6 @@ func (e *evalState) cellGetStackRef(cell objects.Object) stackref.Ref {
 // for tailored error messages; gopy currently ignores it.
 //
 // CPython: Python/ceval.c:3525 _PyEval_GetAwaitable
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) getAwaitable(iter objects.Object, opcode uint32) objects.Object {
 	_ = opcode
 	out, err := getAwaitableIter(iter)
@@ -1311,8 +1199,6 @@ func (e *evalState) getAwaitable(iter objects.Object, opcode uint32) objects.Obj
 // checking.
 //
 // CPython: Objects/dictobject.c:3354 PyDict_Update
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) dictUpdate(a, b objects.Object) int32 {
 	d, ok := a.(*objects.Dict)
 	if !ok {
@@ -1337,18 +1223,14 @@ func (e *evalState) dictUpdate(a, b objects.Object) int32 {
 // its strings/interpolations tuples.
 //
 // CPython: Objects/templateobject.c _PyTemplate_Build
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
-func (e *evalState) templateBuild(strings, interpolations objects.Object) objects.Object {
-	return objects.NewTemplateStr(strings, interpolations)
+func (e *evalState) templateBuild(strs, interpolations objects.Object) objects.Object {
+	return objects.NewTemplateStr(strs, interpolations)
 }
 
 // objectFormat wraps PyObject_Format. spec may be nil for an empty
 // format spec.
 //
 // CPython: Objects/abstract.c:776 PyObject_Format
-//
-//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) objectFormat(obj, spec objects.Object) objects.Object {
 	specStr := ""
 	if spec != nil {
