@@ -133,6 +133,38 @@ func TestTranslateBodyOutputsBail(t *testing.T) {
 	}
 }
 
+// TestTranslateBodyLoadBuildClass exercises the LOAD_BUILD_CLASS body
+// from CPython 3.14.5 Python/bytecodes.c — the smallest opcode using
+// PyMapping_GetOptionalItem. Drives Bucket B vocabulary: `_Py_ID(name)`,
+// out-param helper-call shape, and the `bc = PyStackRef_FromPyObjectSteal`
+// output assign.
+func TestTranslateBodyLoadBuildClass(t *testing.T) {
+	body := tokLine(`
+		PyObject *bc_o;
+		int err = PyMapping_GetOptionalItem(BUILTINS(), &_Py_ID(__build_class__), &bc_o);
+		ERROR_IF(err < 0);
+		if (bc_o == NULL) {
+			_PyErr_SetString(tstate, PyExc_NameError, "__build_class__ not found");
+			ERROR_IF(true);
+		}
+		bc = PyStackRef_FromPyObjectSteal(bc_o);
+	`)
+	sig := &SignatureAnalysis{Name: "LOAD_BUILD_CLASS", Outputs: []StackBinding{{Name: "bc"}}}
+	got, _, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "e.mappingGetOptionalItem(") {
+		t.Errorf("missing mappingGetOptionalItem call:\n%s", got)
+	}
+	if !strings.Contains(got, `objects.NewStr("__build_class__")`) {
+		t.Errorf("missing _Py_ID expansion:\n%s", got)
+	}
+	if !strings.Contains(got, "stackref.FromObject(bc_o)") {
+		t.Errorf("missing output assign:\n%s", got)
+	}
+}
+
 func TestTranslateBodyJumpBy(t *testing.T) {
 	body := tokLine("JUMPBY(oparg);")
 	got, terminates, ok, note := TranslateBody(body, &SignatureAnalysis{Name: "JUMP_FORWARD"})

@@ -722,6 +722,7 @@ panel.
 | `STORE_FAST` | generated | `b842a4a` | `_PyStackRef tmp = GETLOCAL(oparg); GETLOCAL(oparg) = value; PyStackRef_XCLOSE(tmp)` | C-local decl + lvalue |
 | `JUMP_BACKWARD_NO_INTERRUPT` | generated | `337d126` | `JUMPBY(-oparg)` | shares JUMPBY body with JUMP_FORWARD; `JUMP_BACKWARD` proper stays handwritten for breaker poll |
 | `END_SEND` | generated | `8ac6d1c` | `val = value; DEAD(value); PyStackRef_CLOSE(receiver)` | bit-equivalent to handwritten body in eval_simple.go |
+| `LOAD_BUILD_CLASS` | generated | _pending_ | `int err = PyMapping_GetOptionalItem(BUILTINS(), &_Py_ID(__build_class__), &bc_o)` + NameError when absent | first Bucket B flip; lit `_PyErr_SetString` payload now flows through `setPendingErr` |
 
 #### Porting backlog (organized by blocker)
 
@@ -1115,7 +1116,11 @@ helper).
 - [ ] Phase 4.2 — `specialize/quicken.go` + `specialize/deopt.go` consume the generated tables
 - [ ] Phase 4.3 — parity test green; literal tables deleted
 - [x] Phase 5.1 — tier-1 emitter (Go-side `Tools/bytecodes_gen` in lieu of `gopy_tier1_generator.py`) emits `vm/eval_dispatch_gen.go` for unspecialized opcodes (107 arms, bodies stubbed pending Phase 8 action translator)
-- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (NOP, POP_TOP routed through `dispatchGen` via the `dispatchGenSupported` whitelist)
+- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (NOP, POP_TOP, JUMP_FORWARD, JUMP_BACKWARD_NO_INTERRUPT, END_SEND, PUSH_NULL, LOAD_FAST*, STORE_FAST, LOAD_BUILD_CLASS routed through `dispatchGen` via the `dispatchGenSupported` whitelist)
+- [x] Phase 5 Bucket A6.1 — `_Py_ID(NAME)` translates to `objects.NewStr("NAME")`
+- [x] Phase 5 Bucket A6.2 — out-param `int err = HELPER(args..., &out)` translates to Go multi-return
+- [x] Phase 5 Bucket A6.3 — `_PyErr_SetString` carries the literal message through `setPendingErr`
+- [x] Phase 5 Bucket B1 — `PyMapping_GetOptionalItem` → `objects.MappingGetOptionalItem`; flips `LOAD_BUILD_CLASS`
 - [ ] Phase 5.3 — `vm/eval_simple.go` shrinks to evalLoop scaffolding only
 - [ ] Phase 5.4 — `go test ./vm` green
 - [ ] Phase 6.1 — specialized cases emitted in `vm/eval_dispatch_gen.go`

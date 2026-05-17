@@ -963,6 +963,25 @@ func (e *evalState) cellNew(initial objects.Object) objects.Object {
 	return objects.NewCell(initial)
 }
 
+// mappingGetOptionalItem wraps PyMapping_GetOptionalItem: look up key in
+// o, returning (value, status) where status is CPython's int contract
+// (1 found, 0 missing, -1 error). The looked-up value is nil when
+// status is 0 or -1; the failure cause is stashed on pendingErr for the
+// surrounding ERROR_IF to surface.
+//
+// CPython: Objects/abstract.c:207 PyMapping_GetOptionalItem
+func (e *evalState) mappingGetOptionalItem(o, key objects.Object) (objects.Object, int32) {
+	v, found, err := objects.MappingGetOptionalItem(o, key)
+	if err != nil {
+		e.pendingErr = err
+		return nil, -1
+	}
+	if !found {
+		return nil, 0
+	}
+	return v, 1
+}
+
 // cellSwapTakeRef wraps PyCell_SwapTakeRef: atomically replaces the
 // cell's contents and returns the previous value (nil if unbound).
 //

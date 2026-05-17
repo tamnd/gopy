@@ -702,9 +702,22 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: list_st* _out1[oparg - 1]*
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_BUILD_CLASS:
-		// body bail: int err rhs: unexpected token "PyMapping_GetOptionalItem" in expression
-		// outputs: bc
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var bc stackref.Ref
+		var bc_o objects.Object
+		_ = bc_o
+		bc_o, err := e.mappingGetOptionalItem(e.builtinsDict(), objects.NewStr("__build_class__"))
+		_ = err
+		_ = bc_o
+		if err < 0 {
+			return 0, nil, nil, false, e.error("error")
+		}
+		if bc_o == nil {
+			e.setPendingErr("__build_class__ not found")
+			return 0, nil, nil, false, e.error("error")
+		}
+		bc = stackref.FromObject(bc_o)
+		e.push(bc)
+		return e.advance(), nil, nil, false, nil
 	case compile.LOAD_COMMON_CONSTANT:
 		var value stackref.Ref
 		value = stackref.FromObject(e.commonConsts()[oparg])
@@ -788,7 +801,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:
 		mod_or_class_dict := e.peek(0)
 		_ = mod_or_class_dict
-		// body bail: int err rhs: unexpected token "PyMapping_GetOptionalItem" in expression
+		// body bail: if then: if then: local assign "v_o": unexpected token "_PyDict_LoadGlobal" in expression
 		// outputs: v
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_LOCALS:
@@ -796,7 +809,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		l := e.localsDict()
 		_ = l
 		if l == nil {
-			e.setPendingErr("_PyErr_SetString")
+			e.setPendingErr("no locals found")
 			return 0, nil, nil, false, e.error("error")
 		}
 		locals = stackref.FromObject(l)
@@ -988,7 +1001,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		// outputs: res
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SETUP_ANNOTATIONS:
-		// body bail: int err rhs: unexpected token "PyMapping_GetOptionalItem" in expression
+		// body bail: if then: local assign "ann_dict": unexpected token "PyDict_New" in expression
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SET_ADD:
 		set := e.peek(int(oparg-1) + 1)

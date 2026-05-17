@@ -95,11 +95,17 @@ func EvalCode(ts *state.Thread, co *objects.Code, globals, locals objects.Object
 func builtinsFromGlobals(globals objects.Object) objects.Object {
 	d, ok := globals.(*objects.Dict)
 	if !ok {
-		return nil
+		return globals
 	}
 	v, err := d.GetItem(objects.NewStr("__builtins__"))
 	if err != nil || v == nil {
-		return nil
+		// CPython makes up a minimal builtins dict here; gopy
+		// callers (notably tests) commonly pass the builtins dict
+		// itself as globals, so fall back to globals to preserve
+		// that pattern. LOAD_NAME / LOAD_GLOBAL / LOAD_BUILD_CLASS
+		// all read builtins for fallback, and treating globals as
+		// the implicit builtins matches the v0.7 single-dict setup.
+		return globals
 	}
 	if m, ok := v.(*objects.Module); ok {
 		return m.Dict()
