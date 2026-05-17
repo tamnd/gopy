@@ -15,11 +15,9 @@
 package vm
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/compile"
-	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 )
@@ -39,10 +37,6 @@ func (e *evalState) dispatchHandwritten(op compile.Opcode, oparg uint32) (next i
 		return e.opRETURN_VALUE(oparg)
 	case compile.INTERPRETER_EXIT:
 		return e.opINTERPRETER_EXIT(oparg)
-	case compile.COPY:
-		return e.opCOPY(oparg)
-	case compile.SWAP:
-		return e.opSWAP(oparg)
 	case compile.IS_OP:
 		return e.opIS_OP(oparg)
 	case compile.BUILD_LIST:
@@ -109,30 +103,6 @@ func (e *evalState) opINTERPRETER_EXIT(_ uint32) (next int, retVal objects.Objec
 }
 
 // CPython: Python/bytecodes.c COPY: pushes a duplicate of stack[-oparg].
-func (e *evalState) opCOPY(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	if oparg < 1 {
-		return 0, nil, nil, false, true, errors.New("vm: COPY oparg must be >= 1")
-	}
-	if e.f.StackTop < int(oparg) {
-		panic(fmt.Sprintf("vm: COPY %d: stack underflow (StackTop=%d, ip=%d, code=%s)", oparg, e.f.StackTop, e.f.InstrPtr, e.f.Code.Name))
-	}
-	ref := e.peek(int(oparg) - 1)
-	e.push(ref.Dup())
-	return e.advance(), nil, nil, false, true, nil
-}
-
-// CPython: Python/bytecodes.c SWAP: swaps top with stack[-oparg].
-func (e *evalState) opSWAP(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
-	if oparg < 2 {
-		return 0, nil, nil, false, true, errors.New("vm: SWAP oparg must be >= 2")
-	}
-	top := e.f.StackTop - 1
-	other := e.f.StackTop - int(oparg)
-	nlp := frame.NLocalsPlusOf(e.f.Code)
-	e.f.LocalsPlus[nlp+top], e.f.LocalsPlus[nlp+other] = e.f.LocalsPlus[nlp+other], e.f.LocalsPlus[nlp+top]
-	return e.advance(), nil, nil, false, true, nil
-}
-
 // CPython: Python/bytecodes.c IS_OP: pushes (a is b) negated when oparg==1.
 func (e *evalState) opIS_OP(oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
 	b := e.popObject()
