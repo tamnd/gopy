@@ -155,6 +155,15 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// jump opargs, so removeRedundantNops can reindex safely.
 	removeRedundantNops(seq)
 
+	// PASS 3c: backfill NO_LOCATION instructions with the previous
+	// valid location so the linetable does not encode a stray
+	// PY_CODE_LOCATION_INFO_NONE row at every implicit RETURN epilogue
+	// (which findlinestarts otherwise surfaces as an extra `(off, None)`
+	// transition and dis.py renders as a `--` lineno on a blank line).
+	//
+	// CPython: Python/flowgraph.c:3616 propagate_line_numbers
+	propagateLineNumbers(seq)
+
 	// PASS 11: stack-depth analysis. Forward dataflow over the flat
 	// sequence is sufficient while the optimiser is minimal: every
 	// block boundary is a jump, and the per-instruction effect table
