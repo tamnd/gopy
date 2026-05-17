@@ -107,3 +107,64 @@ func TestCfgFromSequenceBackwardJump(t *testing.T) {
 		t.Error("backward JUMP should target entry block")
 	}
 }
+
+func TestCfgToSequenceLinearRoundtrip(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	seq := &Sequence{}
+	cfgToSequence(g, seq)
+	if len(seq.Instrs) != 2 {
+		t.Fatalf("got %d instrs, want 2", len(seq.Instrs))
+	}
+	if seq.Instrs[0].Op != LOAD_CONST || seq.Instrs[1].Op != RETURN_VALUE {
+		t.Fatalf("ops = %s %s", seq.Instrs[0].Op.Name(), seq.Instrs[1].Op.Name())
+	}
+}
+
+func TestCfgToSequenceResolvesJumpTargets(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	tgt := g.newBlock()
+	g.addOp(LOAD_CONST, 0, loc)
+	g.CurBlock.addJump(JUMP, tgt, loc)
+	g.useNextBlock(tgt)
+	g.addOp(RETURN_VALUE, 0, loc)
+
+	seq := &Sequence{}
+	cfgToSequence(g, seq)
+	// JUMP at index 1 should point at the RETURN_VALUE at index 2.
+	if seq.Instrs[1].Op != JUMP {
+		t.Fatalf("instr[1] = %s, want JUMP", seq.Instrs[1].Op.Name())
+	}
+	if got := int(seq.Instrs[1].Oparg); got != 2 {
+		t.Fatalf("JUMP oparg = %d, want 2 (offset of RETURN_VALUE)", got)
+	}
+}
+
+func TestCfgRoundtripThroughBridge(t *testing.T) {
+	// Build a sequence with a forward JUMP, round-trip it through the
+	// graph and back, expect identical opcode/oparg layout.
+	seq := &Sequence{}
+	bridgeAddInstr(seq, JUMP, 2, 1)
+	bridgeAddInstr(seq, NOP, 0, 1)
+	bridgeAddInstr(seq, LOAD_CONST, 0, 1)
+	bridgeAddInstr(seq, RETURN_VALUE, 0, 1)
+
+	g := cfgFromSequence(seq)
+	out := &Sequence{}
+	cfgToSequence(g, out)
+
+	if len(out.Instrs) != len(seq.Instrs) {
+		t.Fatalf("len = %d, want %d", len(out.Instrs), len(seq.Instrs))
+	}
+	for i := range out.Instrs {
+		if out.Instrs[i].Op != seq.Instrs[i].Op {
+			t.Errorf("instr[%d] op = %s, want %s", i, out.Instrs[i].Op.Name(), seq.Instrs[i].Op.Name())
+		}
+	}
+	if out.Instrs[0].Oparg != 2 {
+		t.Fatalf("JUMP oparg = %d, want 2 after roundtrip", out.Instrs[0].Oparg)
+	}
+}

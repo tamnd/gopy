@@ -66,6 +66,49 @@ func buildTargetSet(seq *Sequence) []bool {
 	return isTarget
 }
 
+// cfgToSequence flattens g back into a fresh instruction sequence.
+// Mirrors _PyCfg_ToInstructionSequence: assign every block a label,
+// walk the graph in fallthrough order calling UseLabel + Addop, then
+// ApplyLabelMap to resolve jump opargs back to instruction offsets.
+//
+// Every jump's oparg is rewritten from "stale id" to "the target
+// block's freshly assigned label id" before it lands in the sequence,
+// so ApplyLabelMap can resolve it. ExceptHandlerInfo on a cfg
+// instruction (StartDepth + PreserveLasti carried via the Except
+// block's fields) is recreated on the sequence side.
+//
+// CPython: Python/flowgraph.c:3988 _PyCfg_ToInstructionSequence
+func cfgToSequence(g *cfgBuilder, seq *Sequence) {
+	// Assign each block a fresh label id. CPython uses lbl++ starting
+	// at 0; gopy reserves id 0 as NO_LABEL, so we allocate from
+	// seq.NewLabel which is 1-based.
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		b.Label = seq.NewLabel()
+	}
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		seq.UseLabel(b.Label)
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			oparg := ins.Oparg
+			if hasJumpTarget(ins.Op) && ins.Target != nil {
+				oparg = int32(ins.Target.Label.id)
+			}
+			seq.Addop(ins.Op, oparg, ins.Loc)
+			if ins.Except != nil {
+				h := &seq.Instrs[len(seq.Instrs)-1].Handler
+				h.Label = ins.Except.Label.id
+				h.StartDepth = ins.Except.StartDepth
+				if ins.Except.PreserveLasti {
+					h.PreserveLasti = 1
+				} else {
+					h.PreserveLasti = 0
+				}
+			}
+		}
+	}
+	seq.ApplyLabelMap(hasJumpTarget)
+}
+
 // rewriteJumpTargets converts every jump's oparg from
 // "target seqIdx" into a *basicblock pointer. Uses the idxToBlock
 // map produced during cfgFromSequence.
