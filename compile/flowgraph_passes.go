@@ -188,11 +188,9 @@ func hasJumpTarget(op Opcode) bool {
 
 // rewriteLoadSmallInt promotes every `LOAD_CONST <int n>` with
 // 0 <= n <= 255 to `LOAD_SMALL_INT n`. The new oparg is the literal
-// value, not a consts-pool index. The const slot is intentionally
-// left in the pool: gopy has no remove_unused_consts pass yet, and
-// CPython's dis output (the spec 1713 gate) still references the
-// trailing implicit-return None at its original slot index, so the
-// leftover slot keeps every subsequent LOAD_CONST oparg stable.
+// value, not a consts-pool index. The orphaned const slot is pruned
+// later by removeUnusedConsts; until that pass runs the slot stays
+// in the pool so every subsequent LOAD_CONST oparg is still valid.
 //
 // CPython: Python/flowgraph.c:1408 maybe_instr_make_load_smallint
 // CPython: Python/flowgraph.c:2169 basicblock_optimize_load_const
@@ -222,6 +220,75 @@ func rewriteLoadSmallInt(seq *Sequence, consts *[]any) int {
 		rewritten++
 	}
 	return rewritten
+}
+
+// removeUnusedConsts prunes entries from the per-unit const pool that
+// no surviving instruction references. Runs after rewriteLoadSmallInt
+// so the small-int slots, which now point at LOAD_SMALL_INT literals
+// rather than const-pool indices, get reclaimed. Slot 0 is always
+// preserved: CPython treats it as the docstring slot whether or not
+// the body actually has a docstring.
+//
+// CPython: Python/flowgraph.c:3174 remove_unused_consts
+func removeUnusedConsts(seq *Sequence, consts *[]any) {
+	if consts == nil {
+		return
+	}
+	nconsts := len(*consts)
+	if nconsts == 0 {
+		return
+	}
+	indexMap := make([]int, nconsts)
+	for i := 1; i < nconsts; i++ {
+		indexMap[i] = -1
+	}
+	// The first constant may be the docstring; keep it always.
+	indexMap[0] = 0
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if !ins.Op.HasConst() {
+			continue
+		}
+		idx := int(ins.Oparg)
+		if idx < 0 || idx >= nconsts {
+			continue
+		}
+		indexMap[idx] = idx
+	}
+	// Condense: keep used entries in their original order.
+	nUsed := 0
+	for i := range nconsts {
+		if indexMap[i] != -1 {
+			indexMap[nUsed] = indexMap[i]
+			nUsed++
+		}
+	}
+	if nUsed == nconsts {
+		return
+	}
+	newConsts := make([]any, nUsed)
+	for i := range nUsed {
+		newConsts[i] = (*consts)[indexMap[i]]
+	}
+	reverse := make([]int, nconsts)
+	for i := range nconsts {
+		reverse[i] = -1
+	}
+	for i := range nUsed {
+		reverse[indexMap[i]] = i
+	}
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if !ins.Op.HasConst() {
+			continue
+		}
+		idx := int(ins.Oparg)
+		if idx < 0 || idx >= nconsts || reverse[idx] < 0 {
+			continue
+		}
+		ins.Oparg = int32(reverse[idx])
+	}
+	*consts = newConsts
 }
 
 // propagateLineNumbers fills every NO_LOCATION (Lineno == -1)

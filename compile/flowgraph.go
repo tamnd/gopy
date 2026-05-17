@@ -141,6 +141,14 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// CPython: Python/flowgraph.c:2169 basicblock_optimize_load_const
 	rewriteLoadSmallInt(seq, consts)
 
+	// PASS 0c: prune the const-pool entries no surviving instruction
+	// references. rewriteLoadSmallInt leaves small-int slots orphaned;
+	// removing them here is what brings co_consts byte-equal with
+	// CPython's output for the spec 1713 gate.
+	//
+	// CPython: Python/flowgraph.c:3174 remove_unused_consts
+	removeUnusedConsts(seq, consts)
+
 	// PASS 2: resolve symbolic jump labels to instruction offsets.
 	// CPython does this on the CFG; we exploit instrseq's existing
 	// ApplyLabelMap so the post-pass Sequence has resolved opargs.

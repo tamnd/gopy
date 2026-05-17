@@ -70,10 +70,9 @@ func TestGateSimpleAssign(t *testing.T) {
 }
 
 // TestGateBinaryAdd: the v0.5 spec gate is `a = 1 + 2`. The optimiser
-// folds the int-int BINARY_OP at flowgraph time, so the disassembly
-// no longer contains BINARY_OP; instead it stores the folded constant
-// 3 directly. The full byte-equal parity check against CPython lands
-// once the marshal package and golden corpus are in place.
+// folds the int-int BINARY_OP at flowgraph time and then promotes the
+// folded value into LOAD_SMALL_INT; the const pool no longer needs to
+// carry the 3, matching CPython's `co_consts = (1, None)` shape.
 func TestGateBinaryAdd(t *testing.T) {
 	body := &ast.Assign{
 		Targets: []ast.Expr{nameStore("a")},
@@ -88,19 +87,18 @@ func TestGateBinaryAdd(t *testing.T) {
 		t.Fatalf("Compile a = 1 + 2: %v", err)
 	}
 	dis := compile.Disassemble(co)
-	for _, want := range []string{"LOAD_CONST", "STORE_NAME"} {
+	for _, want := range []string{"LOAD_SMALL_INT", "STORE_NAME"} {
 		if !strings.Contains(dis, want) {
 			t.Errorf("disasm missing %s:\n%s", want, dis)
 		}
 	}
-	hasThree := false
+	if !strings.Contains(dis, "LOAD_SMALL_INT") || !strings.Contains(dis, " 3\n") {
+		t.Errorf("expected LOAD_SMALL_INT with oparg 3 from folded 1+2:\n%s", dis)
+	}
 	for _, c := range co.Consts {
 		if v, ok := c.(int64); ok && v == 3 {
-			hasThree = true
+			t.Errorf("folded 3 should not remain in co.Consts: %v", co.Consts)
 		}
-	}
-	if !hasThree {
-		t.Errorf("folded constant 3 missing from co.Consts: %v", co.Consts)
 	}
 }
 
