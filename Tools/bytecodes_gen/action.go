@@ -54,6 +54,7 @@ func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, termina
 		locals:    map[string]bool{},
 		intLocals:  map[string]bool{},
 		boolLocals: map[string]bool{},
+		excInfoAlias: map[string]bool{},
 	}
 	// Passthrough outputs: when an output reuses an input name, CPython's
 	// analyzer treats the slot as already populated (the input ref flows
@@ -101,6 +102,14 @@ type actionTranslator struct {
 	intLocals  map[string]bool // subset of locals whose C type was `int`
 	boolLocals map[string]bool // subset of locals whose Go type is bool (helper-typed)
 	nestDepth  int             // brace-block nesting; >0 means inside an if/else body
+	// excInfoAlias names a local that was bound to `tstate->exc_info`,
+	// the per-thread handled-exception slot. POP_EXCEPT and PUSH_EXC_INFO
+	// declare such a local then read or write `<alias>->exc_value`; we
+	// translate those references to e.handledException() / setHandledException
+	// rather than emitting a real struct alias.
+	//
+	// CPython: Include/internal/pycore_runtime.h _PyErr_StackItem
+	excInfoAlias map[string]bool
 }
 
 func (t *actionTranslator) run() error {
@@ -167,6 +176,18 @@ func (t *actionTranslator) translateStmt() error {
 		return t.skipParenthesised()
 	case "JUMPBY":
 		return t.translateJumpBy()
+	case "Py_XSETREF":
+		// Py_XSETREF(slot, value): set slot to value, dropping the
+		// previous content. The only slot we model is the per-thread
+		// handled-exception slot (exc_info->exc_value); the alias was
+		// recorded by translateTypedDecl when CPython introduced the
+		// `_PyErr_StackItem *NAME = tstate->exc_info` local. Translate
+		// to e.setHandledException(<value>), peeling off the conditional
+		// `IsNone(x) ? NULL : Steal(x)` shape that POP_EXCEPT uses.
+		//
+		// CPython: Include/refcount.h Py_XSETREF
+		// CPython: Python/bytecodes.c POP_EXCEPT
+		return t.translateExcInfoXSetRef()
 	case "STACKREFS_TO_PYOBJECTS":
 		// CPython macro that materializes a borrowed PyObject* array
 		// alongside a stack-ref array. Under gopy stackref.Ref already
@@ -224,6 +245,19 @@ func (t *actionTranslator) translateStmt() error {
 	// expression.
 	if cTypeDecls[tk.Text] {
 		return t.translateTypedDecl()
+	}
+	// `<exc_info_alias>->exc_value = EXPR;` writes the per-thread
+	// handled-exception slot. The alias was bound earlier by
+	// translateTypedDecl. PUSH_EXC_INFO uses this lvalue form (rather
+	// than Py_XSETREF) once it's already saved the previous value.
+	//
+	// CPython: Python/bytecodes.c PUSH_EXC_INFO
+	if t.pos+4 < len(t.toks) &&
+		t.excInfoAlias[t.toks[t.pos].Text] &&
+		t.toks[t.pos+1].Text == "->" &&
+		t.toks[t.pos+2].Text == "exc_value" &&
+		t.toks[t.pos+3].Text == "=" {
+		return t.translateExcInfoAssign()
 	}
 	// Assignment to a bound slot. Outputs need this for the obvious
 	// `result = something;` pattern; passthrough inputs need it for
@@ -319,6 +353,24 @@ func (t *actionTranslator) translateTypedDecl() error {
 		t.pos++
 	}
 	t.acceptSemi()
+	// `_PyErr_StackItem *NAME = tstate->exc_info;` binds NAME to the
+	// per-thread handled-exception slot. CPython then reads or writes
+	// `NAME->exc_value` to peek at / install the active handler. We do
+	// not model the C struct in Go; instead we record the alias so
+	// later reads/writes route through the e.handledException /
+	// setHandledException helpers in eval_helpers.go.
+	//
+	// CPython: Python/bytecodes.c POP_EXCEPT, PUSH_EXC_INFO
+	if prefix == "_PyErr_StackItem" && len(rhs) == 3 &&
+		rhs[0] == "tstate" && rhs[1] == "->" && rhs[2] == "exc_info" {
+		t.excInfoAlias[name] = true
+		// Mark the alias as a local so parsePrimary accepts bare
+		// references to it; the postfix `->` loop intercepts the
+		// only legal use (NAME->exc_value) before any Go code is
+		// emitted for the bare name itself.
+		t.locals[name] = true
+		return nil
+	}
 	// Ternary RHS expands the same way as in translateOutputAssign: Go
 	// has no ?: operator, so emit a zero-valued declaration and an
 	// if/else write-back. CPython sprinkles ternaries in typed decls
@@ -669,6 +721,120 @@ func (t *actionTranslator) translateLocalAssign(name string) error {
 	return nil
 }
 
+// translateExcInfoXSetRef handles `Py_XSETREF(ALIAS->exc_value, EXPR);`
+// where ALIAS was bound to tstate->exc_info. EXPR is usually a ternary
+// `cond ? NULL : steal_expr` (POP_EXCEPT) so we expand to an if/else
+// pair around setHandledException. A non-ternary EXPR (or the bare
+// NULL value) just funnels to a single setHandledException call.
+//
+// CPython: Python/bytecodes.c POP_EXCEPT
+func (t *actionTranslator) translateExcInfoXSetRef() error {
+	t.pos++ // Py_XSETREF
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "(" {
+		return fmt.Errorf("Py_XSETREF: expected '('")
+	}
+	t.pos++
+	// First arg: ALIAS -> exc_value.
+	if t.pos+2 >= len(t.toks) ||
+		!t.excInfoAlias[t.toks[t.pos].Text] ||
+		t.toks[t.pos+1].Text != "->" ||
+		t.toks[t.pos+2].Text != "exc_value" {
+		return fmt.Errorf("Py_XSETREF: only exc_info->exc_value supported")
+	}
+	t.pos += 3
+	if t.pos >= len(t.toks) || t.toks[t.pos].Text != "," {
+		return fmt.Errorf("Py_XSETREF: expected ',' after slot")
+	}
+	t.pos++
+	// Second arg: collect tokens until the matching ')'.
+	depth := 1
+	var rhs []string
+	for t.pos < len(t.toks) {
+		tk := t.toks[t.pos].Text
+		if tk == "(" {
+			depth++
+		} else if tk == ")" {
+			depth--
+			if depth == 0 {
+				break
+			}
+		}
+		rhs = append(rhs, tk)
+		t.pos++
+	}
+	if t.pos >= len(t.toks) {
+		return fmt.Errorf("Py_XSETREF: unterminated arglist")
+	}
+	t.pos++ // consume ')'
+	t.acceptSemi()
+	// Bare NULL: clear the slot.
+	if len(rhs) == 1 && rhs[0] == "NULL" {
+		fmt.Fprintln(t.writer, "e.setHandledException(nil)")
+		return nil
+	}
+	if condToks, aToks, bToks, isTern := splitTopLevelTernary(rhs); isTern {
+		condExpr, err := t.translateExpr(condToks)
+		if err != nil {
+			return fmt.Errorf("Py_XSETREF cond: %w", err)
+		}
+		aExpr, err := excInfoSetExpr(t, aToks)
+		if err != nil {
+			return fmt.Errorf("Py_XSETREF then: %w", err)
+		}
+		bExpr, err := excInfoSetExpr(t, bToks)
+		if err != nil {
+			return fmt.Errorf("Py_XSETREF else: %w", err)
+		}
+		fmt.Fprintf(t.writer, "if %s {\n%s\n} else {\n%s\n}\n", condExpr, aExpr, bExpr)
+		return nil
+	}
+	expr, err := excInfoSetExpr(t, rhs)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(t.writer, expr)
+	return nil
+}
+
+// excInfoSetExpr renders one Py_XSETREF arm. NULL clears the slot; any
+// other expression evaluates to objects.Object and routes through
+// setHandledException.
+func excInfoSetExpr(t *actionTranslator, toks []string) (string, error) {
+	if len(toks) == 1 && toks[0] == "NULL" {
+		return "e.setHandledException(nil)", nil
+	}
+	goExpr, err := t.translateExpr(toks)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("e.setHandledException(%s)", goExpr), nil
+}
+
+// translateExcInfoAssign handles `ALIAS->exc_value = EXPR;` for an
+// alias that was bound to tstate->exc_info. PUSH_EXC_INFO uses this
+// form (no Py_XSETREF) once it's already saved the previous slot.
+//
+// CPython: Python/bytecodes.c PUSH_EXC_INFO
+func (t *actionTranslator) translateExcInfoAssign() error {
+	t.pos += 4 // ALIAS -> exc_value =
+	rhs := []string{}
+	for t.pos < len(t.toks) && t.toks[t.pos].Text != ";" {
+		rhs = append(rhs, t.toks[t.pos].Text)
+		t.pos++
+	}
+	t.acceptSemi()
+	if len(rhs) == 1 && rhs[0] == "NULL" {
+		fmt.Fprintln(t.writer, "e.setHandledException(nil)")
+		return nil
+	}
+	goExpr, err := t.translateExpr(rhs)
+	if err != nil {
+		return fmt.Errorf("exc_info assign: %w", err)
+	}
+	fmt.Fprintf(t.writer, "e.setHandledException(%s)\n", goExpr)
+	return nil
+}
+
 // splitTopLevelTernary scans `cond ? a : b` and returns the three
 // token slices. Operators inside parens/brackets are ignored. Returns
 // ok=false when no top-level `?` is present.
@@ -717,7 +883,7 @@ func splitTopLevelTernary(toks []string) (cond, a, b []string, ok bool) {
 // The vocabulary grows as more opcode bodies migrate. The parser is a
 // tiny recursive-descent walker over the token stream.
 func (t *actionTranslator) translateExpr(toks []string) (string, error) {
-	p := &exprParser{toks: toks, bound: t.bound, locals: t.locals}
+	p := &exprParser{toks: toks, bound: t.bound, locals: t.locals, excInfoAlias: t.excInfoAlias}
 	out, err := p.parse()
 	if err != nil {
 		return "", err
@@ -737,6 +903,10 @@ type exprParser struct {
 	pos    int
 	bound  map[string]string
 	locals map[string]bool
+	// excInfoAlias mirrors actionTranslator.excInfoAlias so the
+	// expression layer can rewrite reads of `<alias>->exc_value` into
+	// e.handledException() without re-deriving the alias map.
+	excInfoAlias map[string]bool
 }
 
 func (p *exprParser) parse() (string, error) {
@@ -761,6 +931,17 @@ func (p *exprParser) parseExpr(minPrec int) (string, error) {
 	tag := lhs
 	for p.pos+1 < len(p.toks) && p.toks[p.pos] == "->" {
 		field := p.toks[p.pos+1]
+		// `<alias>->exc_value` read where <alias> was bound to
+		// `tstate->exc_info` earlier in the body. Route through the
+		// runtime accessor; from here the value behaves like any
+		// other objects.Object so a following `!= NULL` or
+		// `PyStackRef_FromPyObjectSteal(...)` resumes the normal path.
+		if field == "exc_value" && p.excInfoAlias[lhs] {
+			p.pos += 2
+			lhs = "e.handledException()"
+			tag = "objects.Object"
+			continue
+		}
 		key := tag + "." + field
 		mapping, ok := structArrow[key]
 		if !ok {
@@ -881,7 +1062,7 @@ func (p *exprParser) parsePrimary() (string, error) {
 			return "", err
 		}
 		return arg + ".IsNone()", nil
-	case "PyStackRef_AsPyObjectBorrow", "PyStackRef_AsPyObjectSteal":
+	case "PyStackRef_AsPyObjectBorrow", "PyStackRef_AsPyObjectSteal", "PyStackRef_AsPyObjectNew":
 		// CPython distinguishes borrowed from owning extraction. Under
 		// Go's GC both collapse to `Ref.AsObject()`.
 		arg, err := p.parseCallArg()

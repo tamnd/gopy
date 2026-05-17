@@ -749,6 +749,49 @@ func (e *evalState) dictFromItems(values []objects.Object, n uint32) objects.Obj
 	return d
 }
 
+// handledException returns the currently-handled exception as an
+// objects.Object, or nil if no handler is active. Mirrors the rvalue
+// read `tstate->exc_info->exc_value` that PUSH_EXC_INFO uses to stash
+// the outer handler before installing the new one.
+//
+// CPython: Python/bytecodes.c PUSH_EXC_INFO (read of exc_info->exc_value)
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) handledException() objects.Object {
+	h := e.ts.HandledException()
+	if h == nil {
+		return nil
+	}
+	exc, ok := h.(*pyerrors.Exception)
+	if !ok {
+		return nil
+	}
+	return exc
+}
+
+// setHandledException installs obj as the currently-handled exception,
+// or clears the slot when obj is nil. Mirrors the lvalue write
+// `tstate->exc_info->exc_value = ...` plus the Py_XSETREF macro that
+// CPython uses in POP_EXCEPT / PUSH_EXC_INFO. A non-Exception object
+// (e.g. None, which CPython stores as a sentinel) clears the slot,
+// matching the hand-written POP_EXCEPT arm in eval_simple.go.
+//
+// CPython: Python/bytecodes.c POP_EXCEPT, PUSH_EXC_INFO
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
+func (e *evalState) setHandledException(obj objects.Object) {
+	if obj == nil {
+		pyerrors.SetHandled(e.ts, nil)
+		return
+	}
+	exc, ok := obj.(*pyerrors.Exception)
+	if !ok {
+		pyerrors.SetHandled(e.ts, nil)
+		return
+	}
+	pyerrors.SetHandled(e.ts, exc)
+}
+
 // callIntrinsic1 dispatches `_PyIntrinsics_UnaryFunctions[oparg].func(tstate, x)`.
 // On error returns nil with pendingErr set; the translator's
 // ERROR_IF(res == NULL) pattern picks that up.

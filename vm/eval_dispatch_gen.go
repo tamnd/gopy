@@ -909,8 +909,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.POP_EXCEPT:
 		exc_value := e.peek(0)
 		_ = exc_value
-		// body bail: _PyErr_StackItem exc_info rhs: unsupported struct arrow tstate.exc_info
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		if exc_value.IsNone() {
+			e.setHandledException(nil)
+		} else {
+			e.setHandledException(exc_value.AsObject())
+		}
+		e.drop(1)
+		return e.advance(), nil, nil, false, nil
 	case compile.POP_TOP:
 		value := e.peek(0)
 		_ = value
@@ -920,9 +925,19 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.PUSH_EXC_INFO:
 		exc := e.peek(0)
 		_ = exc
-		// body bail: _PyErr_StackItem exc_info rhs: unsupported struct arrow tstate.exc_info
-		// outputs: prev_exc new_exc
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		var prev_exc stackref.Ref
+		var new_exc stackref.Ref
+		if e.handledException() != nil {
+			prev_exc = stackref.FromObject(e.handledException())
+		} else {
+			prev_exc = stackref.None
+		}
+		e.setHandledException(exc.AsObject())
+		new_exc = exc
+		e.drop(1)
+		e.push(prev_exc)
+		e.push(new_exc)
+		return e.advance(), nil, nil, false, nil
 	case compile.PUSH_NULL:
 		var res stackref.Ref
 		res = stackref.Null
