@@ -58,7 +58,8 @@ func TestSnippetParity(t *testing.T) {
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("input.py failed: %v\nstderr:\n%s", err, stderr.String())
 			}
-			got := stdout.Bytes()
+			got := bytes.ReplaceAll(stdout.Bytes(), []byte("\r\n"), []byte("\n"))
+			want := bytes.ReplaceAll(want, []byte("\r\n"), []byte("\n"))
 			if !bytes.Equal(got, want) {
 				t.Fatalf("output mismatch\n--- got ---\n%s\n--- want ---\n%s",
 					indent(string(got)), indent(string(want)))

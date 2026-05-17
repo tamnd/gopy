@@ -32,6 +32,9 @@ import (
 // reached through a parent's Consts slot. Nested defs / lambdas /
 // class bodies all surface here.
 func liftNestedCode(c *compile.Code) *objects.Code {
+	if cached, ok := c.Lifted.(*objects.Code); ok && cached != nil {
+		return cached
+	}
 	out := &objects.Code{
 		Argcount:        c.Argcount,
 		PosonlyArgcount: c.PosOnlyArgCount,
@@ -53,6 +56,7 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 	}
 	out.Init(objects.CodeType)
 	specialize.Enable(out)
+	c.Lifted = out
 	return out
 }
 
