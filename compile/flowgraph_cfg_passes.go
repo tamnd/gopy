@@ -436,6 +436,202 @@ func cfgInlineSmallOrNoLinenoBlocks(g *cfgBuilder) {
 	}
 }
 
+// basicblockSwaptimize collapses a run of SWAP/NOP instructions starting
+// at *ix into the optimal SWAP sequence realizing the same permutation.
+// Returns the count of opcodes turned into NOPs and advances *ix past
+// the run. Within a basic block no instruction can be a jump target, so
+// the flat-substrate "pinned" set is unnecessary here.
+//
+// CPython: Python/flowgraph.c:1982 swaptimize
+func basicblockSwaptimize(bb *basicblock, ix *int) int {
+	if *ix >= len(bb.Instr) || bb.Instr[*ix].Op != SWAP {
+		return 0
+	}
+	instr := bb.Instr[*ix:]
+	depth := int(instr[0].Oparg)
+	length := 1
+	more := false
+	for length < len(instr) {
+		op := instr[length].Op
+		if op == SWAP {
+			if d := int(instr[length].Oparg); d > depth {
+				depth = d
+			}
+			more = true
+		} else if op != NOP {
+			break
+		}
+		length++
+	}
+	if !more {
+		return 0
+	}
+	stack := make([]int, depth)
+	for i := range stack {
+		stack[i] = i
+	}
+	for k := range length {
+		if instr[k].Op != SWAP {
+			continue
+		}
+		oparg := int(instr[k].Oparg)
+		stack[0], stack[oparg-1] = stack[oparg-1], stack[0]
+	}
+	current := basicblockEmitSwapCycles(instr[:length], stack, length-1)
+	rewrites := basicblockNopOutRemaining(instr[:length], current)
+	*ix += length - 1
+	return rewrites
+}
+
+// basicblockEmitSwapCycles fills the swap-run instructions, starting at
+// index `current` and working backward, with the SWAP opcodes that
+// realize the cycle decomposition of stack[]. Returns the next free
+// slot index (may be -1).
+//
+// CPython: Python/flowgraph.c:2036 swaptimize cycle loop
+func basicblockEmitSwapCycles(run []cfgInstr, stack []int, current int) int {
+	const visited = -1
+	for k := range stack {
+		if stack[k] == visited || stack[k] == k {
+			continue
+		}
+		j := k
+		for {
+			if j != 0 {
+				run[current].Op = SWAP
+				run[current].Oparg = int32(j + 1)
+				current--
+			}
+			if stack[j] == visited {
+				break
+			}
+			nextJ := stack[j]
+			stack[j] = visited
+			j = nextJ
+		}
+	}
+	return current
+}
+
+// basicblockNopOutRemaining NOPs the prefix of run[:current+1] left
+// unused by basicblockEmitSwapCycles. Returns the number of opcodes
+// newly turned into NOPs.
+//
+// CPython: Python/flowgraph.c:2069 swaptimize NOP-out tail
+func basicblockNopOutRemaining(run []cfgInstr, current int) int {
+	rewrites := 0
+	for current >= 0 {
+		if run[current].Op != NOP {
+			run[current].Op = NOP
+			run[current].Oparg = 0
+			run[current].Target = nil
+			rewrites++
+		}
+		current--
+	}
+	return rewrites
+}
+
+// isSwappableOpcode mirrors the SWAPPABLE macro: opcodes safe to slide
+// a SWAP past.
+//
+// CPython: Python/flowgraph.c:2082 SWAPPABLE
+func isSwappableOpcode(op Opcode) bool {
+	return op == STORE_FAST || op == STORE_FAST_MAYBE_NULL || op == POP_TOP
+}
+
+// cfgInstrStoresTo returns the local index a STORE_FAST(_MAYBE_NULL)
+// writes, or -1.
+//
+// CPython: Python/flowgraph.c:2087 STORES_TO
+func cfgInstrStoresTo(ins *cfgInstr) int32 {
+	if ins.Op == STORE_FAST || ins.Op == STORE_FAST_MAYBE_NULL {
+		return ins.Oparg
+	}
+	return -1
+}
+
+// nextSwappableInstructionInBlock returns the index of the next
+// swappable instruction past i in the same line group within bb, or -1.
+//
+// CPython: Python/flowgraph.c:2093 next_swappable_instruction
+func nextSwappableInstructionInBlock(bb *basicblock, i, lineno int) int {
+	for k := i + 1; k < len(bb.Instr); k++ {
+		ins := &bb.Instr[k]
+		if lineno >= 0 && ins.Loc.Lineno != lineno {
+			return -1
+		}
+		if ins.Op == NOP {
+			continue
+		}
+		if isSwappableOpcode(ins.Op) {
+			return k
+		}
+		return -1
+	}
+	return -1
+}
+
+// basicblockApplyStaticSwaps walks back from index i, turning each SWAP
+// it crosses into a direct reorder of the following swappable
+// instructions. SWAP(2), POP_TOP, STORE_FAST(42) becomes NOP,
+// STORE_FAST(42), POP_TOP.
+//
+// CPython: Python/flowgraph.c:2117 apply_static_swaps
+func basicblockApplyStaticSwaps(bb *basicblock, i int) {
+	for ; i >= 0; i-- {
+		swap := &bb.Instr[i]
+		if swap.Op != SWAP {
+			if swap.Op == NOP || isSwappableOpcode(swap.Op) {
+				continue
+			}
+			return
+		}
+		j := nextSwappableInstructionInBlock(bb, i, -1)
+		if j < 0 {
+			return
+		}
+		k := j
+		lineno := bb.Instr[j].Loc.Lineno
+		for count := int(swap.Oparg) - 1; count > 0; count-- {
+			k = nextSwappableInstructionInBlock(bb, k, lineno)
+			if k < 0 {
+				return
+			}
+		}
+		if !basicblockStaticSwapSafe(bb.Instr, j, k) {
+			return
+		}
+		swap.Op = NOP
+		swap.Oparg = 0
+		swap.Target = nil
+		bb.Instr[j], bb.Instr[k] = bb.Instr[k], bb.Instr[j]
+	}
+}
+
+// basicblockStaticSwapSafe enforces the STORE_FAST aliasing constraint:
+// the two endpoints must not write the same local, and no intervening
+// store may write to either endpoint's local.
+//
+// CPython: Python/flowgraph.c:2144 apply_static_swaps store-aliasing block
+func basicblockStaticSwapSafe(instrs []cfgInstr, j, k int) bool {
+	storeJ := cfgInstrStoresTo(&instrs[j])
+	storeK := cfgInstrStoresTo(&instrs[k])
+	if storeJ < 0 && storeK < 0 {
+		return true
+	}
+	if storeJ == storeK {
+		return false
+	}
+	for idx := j + 1; idx < k; idx++ {
+		storeIdx := cfgInstrStoresTo(&instrs[idx])
+		if storeIdx >= 0 && (storeIdx == storeJ || storeIdx == storeK) {
+			return false
+		}
+	}
+	return true
+}
+
 // cfgJumpThread rewrites a trailing jump in bb whose target is itself
 // a jump, so bb jumps directly to the second target with opcode op.
 // Returns true when the rewrite happened. bpo-45773: if both jumps

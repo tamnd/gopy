@@ -306,6 +306,55 @@ func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	}
 }
 
+func TestBasicblockSwaptimizeCollapsesDoubleSwap(t *testing.T) {
+	// SWAP(2); SWAP(2) is identity. swaptimize should NOP both.
+	bb := &basicblock{}
+	loc := ast.Pos{Lineno: 1}
+	bb.Instr = []cfgInstr{
+		{Op: SWAP, Oparg: 2, Loc: loc},
+		{Op: SWAP, Oparg: 2, Loc: loc},
+	}
+	ix := 0
+	rewrites := basicblockSwaptimize(bb, &ix)
+	if rewrites != 2 {
+		t.Errorf("rewrites = %d, want 2", rewrites)
+	}
+	for i, ins := range bb.Instr {
+		if ins.Op != NOP {
+			t.Errorf("instr[%d] = %v, want NOP", i, ins.Op)
+		}
+	}
+}
+
+func TestBasicblockSwaptimizeSingleSwapUnchanged(t *testing.T) {
+	bb := &basicblock{Instr: []cfgInstr{{Op: SWAP, Oparg: 2}}}
+	ix := 0
+	if r := basicblockSwaptimize(bb, &ix); r != 0 {
+		t.Errorf("rewrites = %d, want 0 (single SWAP is already optimal)", r)
+	}
+	if bb.Instr[0].Op != SWAP {
+		t.Errorf("instr[0] = %v, want SWAP unchanged", bb.Instr[0].Op)
+	}
+}
+
+func TestBasicblockApplyStaticSwapsReordersStoreFast(t *testing.T) {
+	// SWAP(2); STORE_FAST(0); STORE_FAST(1)  ->  NOP; STORE_FAST(1); STORE_FAST(0)
+	bb := &basicblock{}
+	loc := ast.Pos{Lineno: 1}
+	bb.Instr = []cfgInstr{
+		{Op: SWAP, Oparg: 2, Loc: loc},
+		{Op: STORE_FAST, Oparg: 0, Loc: loc},
+		{Op: STORE_FAST, Oparg: 1, Loc: loc},
+	}
+	basicblockApplyStaticSwaps(bb, 0)
+	if bb.Instr[0].Op != NOP {
+		t.Errorf("instr[0] = %v, want NOP", bb.Instr[0].Op)
+	}
+	if bb.Instr[1].Oparg != 1 || bb.Instr[2].Oparg != 0 {
+		t.Errorf("stores after swap = (%d, %d), want (1, 0)", bb.Instr[1].Oparg, bb.Instr[2].Oparg)
+	}
+}
+
 func TestCfgJumpThreadRewritesToFinalTarget(t *testing.T) {
 	g := newCfgBuilder()
 	loc := ast.Pos{Lineno: 1}
