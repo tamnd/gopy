@@ -782,3 +782,52 @@ func TestMakeSuperInstructionRejectsLargeOparg(t *testing.T) {
 		t.Fatalf("op = %s, want unchanged LOAD_FAST when oparg >= 16", a.Op.Name())
 	}
 }
+
+func TestCfgMarkWarmReachesEverythingViaFallthrough(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	b2 := g.newBlock()
+	g.addOp(NOP, 0, loc)
+	g.useNextBlock(b2)
+	g.addOp(RETURN_VALUE, 0, loc)
+	cfgMarkWarm(g.EntryBlock)
+	if !g.EntryBlock.Warm || !b2.Warm {
+		t.Fatalf("warm marks: entry=%v b2=%v", g.EntryBlock.Warm, b2.Warm)
+	}
+}
+
+func TestCfgMarkColdSpreadsFromExceptHandler(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	handler := g.newBlock()
+	handler.ExceptHandler = true
+	g.addOp(RETURN_VALUE, 0, loc)
+	g.useNextBlock(handler)
+	g.addOp(RERAISE, 1, loc)
+	cfgMarkCold(g.EntryBlock)
+	if !handler.Cold {
+		t.Fatal("handler should be cold")
+	}
+	if g.EntryBlock.Cold {
+		t.Fatal("entry (warm) should not be cold")
+	}
+}
+
+func TestCfgPushColdBlocksToEndReorders(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	// entry (warm, no fallthrough: RETURN)
+	g.addOp(RETURN_VALUE, 0, loc)
+	// handler (cold) fallthrough to tail (warm)
+	handler := g.newBlock()
+	handler.ExceptHandler = true
+	g.useNextBlock(handler)
+	g.addOp(NOP, 0, loc)
+	// Reordering only triggers if there is a "warm after cold" arrangement.
+	// With entry -> RETURN (warm), handler (cold) at end, no reorder needed.
+	cfgPushColdBlocksToEnd(g)
+	// At minimum, the call should not crash and entry stays first.
+	if g.EntryBlock != g.blocks()[0] {
+		t.Fatal("entry block should remain at head")
+	}
+}

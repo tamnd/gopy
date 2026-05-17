@@ -698,6 +698,135 @@ func cfgInsertSuperinstructions(g *cfgBuilder) {
 	cfgRemoveRedundantNops(g)
 }
 
+// cfgMarkWarm walks the graph from the entry following fallthroughs
+// and jumps, marking every reachable non-handler block as Warm.
+//
+// CPython: Python/flowgraph.c:3323 mark_warm
+func cfgMarkWarm(entry *basicblock) {
+	for b := entry; b != nil; b = b.Next {
+		b.Visited = false
+	}
+	stack := []*basicblock{entry}
+	entry.Visited = true
+	for len(stack) > 0 {
+		b := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		b.Warm = true
+		if b.Next != nil && basicblockHasFallthrough(b) && !b.Next.Visited {
+			b.Next.Visited = true
+			stack = append(stack, b.Next)
+		}
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			if isJumpOpcode(ins.Op) && ins.Target != nil && !ins.Target.Visited {
+				ins.Target.Visited = true
+				stack = append(stack, ins.Target)
+			}
+		}
+	}
+}
+
+// cfgMarkCold runs cfgMarkWarm first, then seeds a second worklist
+// from every ExceptHandler block and marks every reachable non-warm
+// block as Cold.
+//
+// CPython: Python/flowgraph.c:3354 mark_cold
+func cfgMarkCold(entry *basicblock) {
+	cfgMarkWarm(entry)
+	for b := entry; b != nil; b = b.Next {
+		b.Visited = false
+	}
+	var stack []*basicblock
+	for b := entry; b != nil; b = b.Next {
+		if b.ExceptHandler {
+			stack = append(stack, b)
+			b.Visited = true
+		}
+	}
+	for len(stack) > 0 {
+		b := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		b.Cold = true
+		if b.Next != nil && basicblockHasFallthrough(b) {
+			if !b.Next.Warm && !b.Next.Visited {
+				b.Next.Visited = true
+				stack = append(stack, b.Next)
+			}
+		}
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			if isJumpOpcode(ins.Op) && ins.Target != nil {
+				if !ins.Target.Warm && !ins.Target.Visited {
+					ins.Target.Visited = true
+					stack = append(stack, ins.Target)
+				}
+			}
+		}
+	}
+}
+
+// cfgPushColdBlocksToEnd reorders the block list so every cold block
+// trails every warm block. When a cold block has a fallthrough edge to
+// a warm successor, a synthetic JUMP_NO_INTERRUPT bridge is inserted
+// so the reordering does not change the program's control flow.
+//
+// CPython: Python/flowgraph.c:3404 push_cold_blocks_to_end
+func cfgPushColdBlocksToEnd(g *cfgBuilder) {
+	entry := g.EntryBlock
+	if entry.Next == nil {
+		return
+	}
+	cfgMarkCold(entry)
+
+	nextLbl := getMaxLabel(g) + 1
+	for b := entry; b != nil; b = b.Next {
+		if !b.Cold || !basicblockHasFallthrough(b) {
+			continue
+		}
+		if b.Next == nil || !b.Next.Warm {
+			continue
+		}
+		bridge := g.newBlock()
+		if b.Next.Label.id == 0 {
+			b.Next.Label = JumpTargetLabel{id: nextLbl}
+			nextLbl++
+		}
+		bridge.addOp(JUMP_NO_INTERRUPT, int32(b.Next.Label.id), ast.Pos{Lineno: -1})
+		bridge.Instr[0].Target = b.Next
+		bridge.Cold = true
+		bridge.Next = b.Next
+		bridge.Predecessors = 1
+		b.Next = bridge
+	}
+
+	var coldHead, coldTail *basicblock
+	b := entry
+	for b.Next != nil {
+		for b.Next != nil && !b.Next.Cold {
+			b = b.Next
+		}
+		if b.Next == nil {
+			break
+		}
+		bEnd := b.Next
+		for bEnd.Next != nil && bEnd.Next.Cold {
+			bEnd = bEnd.Next
+		}
+		if coldHead == nil {
+			coldHead = b.Next
+		} else {
+			coldTail.Next = b.Next
+		}
+		coldTail = bEnd
+		b.Next = bEnd.Next
+		bEnd.Next = nil
+	}
+	b.Next = coldHead
+	if coldHead != nil {
+		cfgRemoveRedundantNopsAndJumps(g)
+	}
+}
+
 // basicblockHasNoLineno reports whether every instruction in b lacks a
 // source location (Lineno < 0). Used by the inline pass to decide
 // whether a target block can be folded without losing line info.
