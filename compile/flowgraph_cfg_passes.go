@@ -577,6 +577,75 @@ func cfgLabelExceptionTargets(entry *basicblock) {
 	}
 }
 
+// cfgRemoveRedundantNopsAndPairs rewrites every LOAD_CONST/POP_TOP,
+// LOAD_SMALL_INT/POP_TOP, and COPY 1/POP_TOP pair into two NOPs, then
+// re-runs basicblock_remove_redundant_nops to drop the freshly produced
+// NOPs. Loops until no rewrite fires. The walk forgets prev_instr when
+// it crosses a labeled block (jump target) or a block that does not
+// fall through, since the previous instruction is then not necessarily
+// the dynamic predecessor.
+//
+// CPython: Python/flowgraph.c:1114 remove_redundant_nops_and_pairs
+//
+//nolint:gocognit // 1:1 port of the CPython loop structure.
+func cfgRemoveRedundantNopsAndPairs(entry *basicblock) {
+	for done := false; !done; {
+		done = true
+		var prev, cur *cfgInstr
+		for b := entry; b != nil; b = b.Next {
+			basicblockRemoveRedundantNops(b)
+			if b.Label.id > 0 {
+				cur = nil
+			}
+			for i := range b.Instr {
+				prev = cur
+				cur = &b.Instr[i]
+				prevOp := Opcode(0)
+				var prevArg int32
+				if prev != nil {
+					prevOp = prev.Op
+					prevArg = prev.Oparg
+				}
+				if cur.Op != POP_TOP {
+					continue
+				}
+				redundant := false
+				switch {
+				case prevOp == LOAD_CONST || prevOp == LOAD_SMALL_INT:
+					redundant = true
+				case prevOp == COPY && prevArg == 1:
+					redundant = true
+				}
+				if redundant {
+					prev.Op = NOP
+					prev.Oparg = 0
+					cur.Op = NOP
+					cur.Oparg = 0
+					done = false
+				}
+			}
+			if (cur != nil && isJumpOpcode(cur.Op)) || !basicblockHasFallthrough(b) {
+				cur = nil
+			}
+		}
+	}
+}
+
+// cfgRemoveRedundantNopsAndJumps loops removeRedundantNops and
+// removeRedundantJumps until neither makes progress. Convergence is
+// guaranteed because both passes only remove instructions.
+//
+// CPython: Python/flowgraph.c:2529 remove_redundant_nops_and_jumps
+func cfgRemoveRedundantNopsAndJumps(g *cfgBuilder) {
+	for {
+		nops := cfgRemoveRedundantNops(g)
+		jumps := cfgRemoveRedundantJumps(g)
+		if nops+jumps == 0 {
+			return
+		}
+	}
+}
+
 // basicblockHasNoLineno reports whether every instruction in b lacks a
 // source location (Lineno < 0). Used by the inline pass to decide
 // whether a target block can be folded without losing line info.

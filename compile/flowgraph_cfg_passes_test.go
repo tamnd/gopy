@@ -707,3 +707,53 @@ func TestExceptStackPushPopTop(t *testing.T) {
 		t.Fatal("pop did not restore previous top")
 	}
 }
+
+func TestCfgRemoveRedundantNopsAndPairsRewritesLoadPop(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	g.addOp(LOAD_CONST, 0, loc)
+	g.addOp(POP_TOP, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	cfgRemoveRedundantNopsAndPairs(g.EntryBlock)
+	// After NOP rewrite + remove_redundant_nops compaction, only RETURN_VALUE
+	// should remain (locless NOPs were swept).
+	if len(g.EntryBlock.Instr) != 1 || g.EntryBlock.Instr[0].Op != RETURN_VALUE {
+		got := make([]string, len(g.EntryBlock.Instr))
+		for i, x := range g.EntryBlock.Instr {
+			got[i] = x.Op.Name()
+		}
+		t.Fatalf("after pair-rewrite: %v", got)
+	}
+}
+
+func TestCfgRemoveRedundantNopsAndPairsKeepsAcrossJumpTarget(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	g.addOp(LOAD_CONST, 0, loc)
+	tgt := g.newBlock()
+	tgt.Label = JumpTargetLabel{id: 1}
+	g.useNextBlock(tgt)
+	g.addOp(POP_TOP, 0, loc)
+	g.addOp(RETURN_VALUE, 0, loc)
+	cfgRemoveRedundantNopsAndPairs(g.EntryBlock)
+	if g.EntryBlock.Instr[0].Op != LOAD_CONST {
+		t.Fatalf("LOAD_CONST in entry block was eaten across label boundary")
+	}
+}
+
+func TestCfgRemoveRedundantNopsAndJumpsConverges(t *testing.T) {
+	var loc ast.Pos
+	g := newCfgBuilder()
+	tgt := g.newBlock()
+	// JUMP whose target is the fallthrough block: redundant.
+	g.CurBlock.addJump(JUMP, tgt, loc)
+	g.useNextBlock(tgt)
+	g.addOp(RETURN_VALUE, 0, loc)
+	cfgRemoveRedundantNopsAndJumps(g)
+	// Entry block jump should now be removed/NOP-compacted.
+	for _, ins := range g.EntryBlock.Instr {
+		if ins.Op == JUMP {
+			t.Fatal("redundant JUMP survived")
+		}
+	}
+}

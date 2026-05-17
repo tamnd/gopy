@@ -253,7 +253,7 @@ const (
 
 // Boundaries published by CPython for the dispatch loop.
 const (
-	HAVE_ARGUMENT          Opcode = 43
-	MIN_SPECIALIZED_OPCODE Opcode = 129
+	HAVE_ARGUMENT           Opcode = 43
+	MIN_SPECIALIZED_OPCODE  Opcode = 129
 	MIN_INSTRUMENTED_OPCODE Opcode = 234
 )
