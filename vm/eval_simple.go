@@ -578,18 +578,19 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.DICT_UPDATE, compile.DICT_MERGE:
-		// Pop dict-like and merge into the dict at depth oparg.
-		// DICT_MERGE additionally errors on duplicate keys; v0.6 treats
-		// both as "last write wins".
+	case compile.DICT_MERGE:
+		// Pop dict-like and merge into the dict at depth oparg. Last
+		// write wins; the dictMergeEx duplicate-key check still trips a
+		// kwargs reformat path that we can't yet emit faithfully, so
+		// this stays out of dispatchGen.
 		src := e.popObject()
 		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("%s: target not a dict", opcodeName(op))
+			return 0, nil, nil, false, true, fmt.Errorf("DICT_MERGE: target not a dict")
 		}
 		srcDict, ok := src.(*objects.Dict)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("%s: source not a dict", opcodeName(op))
+			return 0, nil, nil, false, true, fmt.Errorf("DICT_MERGE: source not a dict")
 		}
 		for _, k := range srcDict.Keys() {
 			v, gerr := srcDict.GetItem(k)
@@ -626,26 +627,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		interpolations := e.popObject()
 		strings := e.popObject()
 		e.pushObject(objects.NewTemplateStr(strings, interpolations))
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.SET_UPDATE:
-		// Pop iterable, extend the set at depth oparg.
-		//
-		// CPython: Python/bytecodes.c SET_UPDATE
-		v := e.popObject()
-		s, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Set)
-		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("SET_UPDATE: target not a set")
-		}
-		items, ierr := iterToSlice(v)
-		if ierr != nil {
-			return 0, nil, nil, false, true, ierr
-		}
-		for _, it := range items {
-			if aerr := s.Add(it); aerr != nil {
-				return 0, nil, nil, false, true, aerr
-			}
-		}
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.CALL_INTRINSIC_1:
