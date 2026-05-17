@@ -208,6 +208,18 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// CPython: Python/flowgraph.c:2449 optimize_basic_block
 	peepholeOpcodePairs(seq)
 
+	// PASS 3b3: collapse adjacent SWAP / NOP runs into the optimal
+	// permutation, then statically slide single SWAPs through the
+	// following swappable instructions (NOP, STORE_FAST, POP_TOP) so
+	// patterns like SWAP(2), POP_TOP, STORE_FAST(x) collapse to NOP,
+	// STORE_FAST(x), POP_TOP. NOPs the freed SWAPs; the loop below
+	// reclaims them.
+	//
+	// CPython: Python/flowgraph.c:1982 swaptimize
+	// CPython: Python/flowgraph.c:2117 apply_static_swaps
+	runSwaptimize(seq)
+	runApplyStaticSwaps(seq)
+
 	// PASS 3: compact NOP runs and drop unconditional jumps that fall
 	// through to their target. ApplyLabelMap has baked indices into
 	// jump opargs, so both passes can read/rewrite them safely. CPython

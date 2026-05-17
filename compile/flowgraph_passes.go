@@ -1047,3 +1047,247 @@ func removeRedundantNops(seq *Sequence) int {
 	seq.Instrs = out
 	return dropped
 }
+
+// isSwappable returns true for opcodes apply_static_swaps is willing
+// to slide a SWAP past. Mirrors the SWAPPABLE macro.
+//
+// CPython: Python/flowgraph.c:2082 SWAPPABLE
+func isSwappable(op Opcode) bool {
+	return op == STORE_FAST || op == STORE_FAST_MAYBE_NULL || op == POP_TOP
+}
+
+// storesTo returns the local index a STORE_FAST(_MAYBE_NULL) writes,
+// or -1 for any other opcode.
+//
+// CPython: Python/flowgraph.c:2087 STORES_TO
+func storesTo(ins *Instr) int32 {
+	if ins.Op == STORE_FAST || ins.Op == STORE_FAST_MAYBE_NULL {
+		return ins.Oparg
+	}
+	return -1
+}
+
+// swaptimize replaces an arbitrary run of SWAP / NOP starting at i with
+// the optimal SWAP sequence that produces the same stack permutation.
+// Returns the new index (advanced past the run) and the number of
+// swaps it rewrote. pinned[k] true means k is a jump or handler
+// target; the run is cut short before any pinned position past i so we
+// never move or NOP an instruction something else points at.
+//
+// CPython: Python/flowgraph.c:1982 swaptimize
+func swaptimize(seq *Sequence, pinned []bool, i int) (int, int) {
+	instrs := seq.Instrs
+	if i >= len(instrs) || instrs[i].Op != SWAP {
+		return i + 1, 0
+	}
+	depth := int(instrs[i].Oparg)
+	limit := len(instrs) - i
+	length := 1
+	more := false
+	for length < limit {
+		pos := i + length
+		if pinned[pos] {
+			break
+		}
+		op := instrs[pos].Op
+		if op == SWAP {
+			if d := int(instrs[pos].Oparg); d > depth {
+				depth = d
+			}
+			more = true
+		} else if op != NOP {
+			break
+		}
+		length++
+	}
+	if !more {
+		return i + length, 0
+	}
+	// Simulate the combined permutation on a {0, 1, ..., depth-1} stack.
+	stack := make([]int, depth)
+	for k := range stack {
+		stack[k] = k
+	}
+	for k := range length {
+		ins := &instrs[i+k]
+		if ins.Op != SWAP {
+			continue
+		}
+		oparg := int(ins.Oparg)
+		stack[0], stack[oparg-1] = stack[oparg-1], stack[0]
+	}
+	current := emitSwapCycles(instrs[i:i+length], stack, length-1)
+	rewrites := nopOutRemaining(instrs[i:i+length], current)
+	return i + length, rewrites
+}
+
+// emitSwapCycles cycle-decomposes stack[] and emits the SWAPs that
+// realize the permutation, filling instructions from index `current`
+// backward. Returns the next free slot index (which may be -1).
+//
+// CPython: Python/flowgraph.c:2036 swaptimize cycle loop
+func emitSwapCycles(run []Instr, stack []int, current int) int {
+	const visited = -1
+	for k := range stack {
+		if stack[k] == visited || stack[k] == k {
+			continue
+		}
+		j := k
+		for {
+			if j != 0 {
+				run[current].Op = SWAP
+				run[current].Oparg = int32(j + 1)
+				current--
+			}
+			if stack[j] == visited {
+				break
+			}
+			nextJ := stack[j]
+			stack[j] = visited
+			j = nextJ
+		}
+	}
+	return current
+}
+
+// nopOutRemaining NOPs the prefix of run[:current+1] left unused by
+// emitSwapCycles. Returns the number of opcodes turned into NOPs.
+//
+// CPython: Python/flowgraph.c:2069 swaptimize NOP-out tail
+func nopOutRemaining(run []Instr, current int) int {
+	rewrites := 0
+	for current >= 0 {
+		if run[current].Op != NOP {
+			setNop(&run[current])
+			rewrites++
+		}
+		current--
+	}
+	return rewrites
+}
+
+// runSwaptimize sweeps the sequence, applying swaptimize at every SWAP.
+//
+// CPython: Python/flowgraph.c:2515 basicblock_optimize_load_const swaptimize call
+func runSwaptimize(seq *Sequence) int {
+	pinned := pinnedTargets(seq)
+	rewrites := 0
+	i := 0
+	for i < len(seq.Instrs) {
+		if seq.Instrs[i].Op != SWAP {
+			i++
+			continue
+		}
+		next, n := swaptimize(seq, pinned, i)
+		rewrites += n
+		if next <= i {
+			i++
+		} else {
+			i = next
+		}
+	}
+	return rewrites
+}
+
+// nextSwappableInstruction returns the index of the next swappable
+// instruction past i in the same line group, or -1 if scanning hits a
+// non-swappable opcode, a different line number, or a pinned position.
+//
+// CPython: Python/flowgraph.c:2093 next_swappable_instruction
+func nextSwappableInstruction(seq *Sequence, pinned []bool, i, lineno int) int {
+	for k := i + 1; k < len(seq.Instrs); k++ {
+		if pinned[k] {
+			return -1
+		}
+		ins := &seq.Instrs[k]
+		if lineno >= 0 && ins.Loc.Lineno != lineno {
+			return -1
+		}
+		if ins.Op == NOP {
+			continue
+		}
+		if isSwappable(ins.Op) {
+			return k
+		}
+		return -1
+	}
+	return -1
+}
+
+// applyStaticSwaps walks back from index i, turning every SWAP it
+// passes into a direct reorder of the following swappable
+// instructions. Mirrors the SWAP(2), POP_TOP, STORE_FAST(42) -> NOP,
+// STORE_FAST(42), POP_TOP rewrite called out in the CPython comment.
+//
+// CPython: Python/flowgraph.c:2117 apply_static_swaps
+func applyStaticSwaps(seq *Sequence, pinned []bool, i int) {
+	instrs := seq.Instrs
+	for ; i >= 0; i-- {
+		if pinned[i] {
+			return
+		}
+		swap := &instrs[i]
+		if swap.Op != SWAP {
+			if swap.Op == NOP || isSwappable(swap.Op) {
+				continue
+			}
+			return
+		}
+		j := nextSwappableInstruction(seq, pinned, i, -1)
+		if j < 0 {
+			return
+		}
+		k := j
+		lineno := instrs[j].Loc.Lineno
+		for count := int(swap.Oparg) - 1; count > 0; count-- {
+			k = nextSwappableInstruction(seq, pinned, k, lineno)
+			if k < 0 {
+				return
+			}
+		}
+		if !staticSwapSafe(instrs, j, k) {
+			return
+		}
+		setNop(swap)
+		instrs[j], instrs[k] = instrs[k], instrs[j]
+	}
+}
+
+// staticSwapSafe checks whether swapping instrs[j] and instrs[k] is
+// safe given the STORE_FAST aliasing rules: the two endpoints must
+// not write the same local, and no intervening instruction may write
+// to either endpoint's local.
+//
+// CPython: Python/flowgraph.c:2144 apply_static_swaps store-aliasing block
+func staticSwapSafe(instrs []Instr, j, k int) bool {
+	storeJ := storesTo(&instrs[j])
+	storeK := storesTo(&instrs[k])
+	if storeJ < 0 && storeK < 0 {
+		return true
+	}
+	if storeJ == storeK {
+		return false
+	}
+	for idx := j + 1; idx < k; idx++ {
+		storeIdx := storesTo(&instrs[idx])
+		if storeIdx >= 0 && (storeIdx == storeJ || storeIdx == storeK) {
+			return false
+		}
+	}
+	return true
+}
+
+// runApplyStaticSwaps scans for SWAP opcodes and invokes
+// applyStaticSwaps at each one. CPython does the walk from inside
+// basicblock_optimize_load_const; gopy runs it as its own pass over
+// the flat sequence.
+//
+// CPython: Python/flowgraph.c:2518 basicblock_optimize_load_const apply_static_swaps call
+func runApplyStaticSwaps(seq *Sequence) {
+	pinned := pinnedTargets(seq)
+	for i := range seq.Instrs {
+		if seq.Instrs[i].Op == SWAP {
+			applyStaticSwaps(seq, pinned, i)
+		}
+	}
+}
