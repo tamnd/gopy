@@ -10,8 +10,9 @@ package compile
 // _PyCfg_FromInstructionSequence: resolves the label map, marks every
 // instruction that is a jump target, then walks the sequence calling
 // useLabel + addOp on the builder. After the build pass, every jump
-// instruction's Target is set to the *basicblock it lands on, so
-// subsequent flowgraph passes can ignore label ids entirely.
+// instruction's Target is set to the *basicblock it lands on, and
+// every in-region instruction's Except is set to the handler block,
+// so subsequent flowgraph passes can ignore label ids entirely.
 //
 // CPython: Python/flowgraph.c:3923 _PyCfg_FromInstructionSequence
 func cfgFromSequence(seq *Sequence) *cfgBuilder {
@@ -26,22 +27,42 @@ func cfgFromSequence(seq *Sequence) *cfgBuilder {
 
 	// Walk the sequence, calling useLabel at every target instruction.
 	// Track which cfg block each original seqIdx ends up in so the
-	// jump-target rewrite below can resolve oparg -> *basicblock.
+	// jump-target / handler-target rewrites below can resolve indices
+	// to *basicblock pointers.
 	idxToBlock := make([]*basicblock, len(seq.Instrs))
+	idxToInstr := make([]*cfgInstr, len(seq.Instrs))
 	for i, ins := range seq.Instrs {
 		if isTarget[i] {
 			g.useLabel(JumpTargetLabel{id: i + 1})
 		}
 		g.addOp(ins.Op, ins.Oparg, ins.Loc)
 		idxToBlock[i] = g.CurBlock
-		if ins.Handler.Label >= 0 {
-			last := g.CurBlock.lastInstr()
-			last.Oparg = int32(ins.Handler.Label) // temp stash for wiring
-		}
+		idxToInstr[i] = g.CurBlock.lastInstr()
 	}
 
 	rewriteJumpTargets(g, idxToBlock)
+	rewriteExceptTargets(seq, idxToBlock, idxToInstr)
 	return g
+}
+
+// rewriteExceptTargets resolves each in-region instruction's
+// Handler.Label (a seq index) to the basicblock containing that index,
+// stamping it on cfgInstr.Except. Mirrors CPython's
+// _PyCfg_FromInstructionSequence handler wiring loop.
+//
+// CPython: Python/flowgraph.c:3976 _PyCfg_FromInstructionSequence
+// (handler wiring)
+func rewriteExceptTargets(seq *Sequence, idxToBlock []*basicblock, idxToInstr []*cfgInstr) {
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if ins.Handler.Label < 0 {
+			continue
+		}
+		idx := ins.Handler.Label
+		if idx >= 0 && idx < len(idxToBlock) {
+			idxToInstr[i].Except = idxToBlock[idx]
+		}
+	}
 }
 
 // buildTargetSet flags every seq index that is the target of a jump
@@ -107,6 +128,44 @@ func cfgToSequence(g *cfgBuilder, seq *Sequence) {
 		}
 	}
 	seq.ApplyLabelMap(hasJumpTarget)
+}
+
+// optimizeLoadFastOnSequence runs optimizeLoadFast against a cfg built
+// from seq, then copies the LOAD_FAST -> LOAD_FAST_BORROW (and the
+// LOAD_FAST_LOAD_FAST -> LOAD_FAST_BORROW_LOAD_FAST_BORROW) opcode
+// rewrites back into seq in place. The pass does not move, add, or
+// remove instructions, so the cfg's entry-order walk aligns 1:1 with
+// seq.Instrs and no opargs change. Every block's StartDepth is reset
+// to the stackdepthMin sentinel so loadFastPushBlock can seed it as
+// it propagates the abstract ref stack.
+//
+// CPython: Python/flowgraph.c:2776 optimize_load_fast (driven from
+// _PyAssemble_MakeCodeObject)
+func optimizeLoadFastOnSequence(seq *Sequence) error {
+	if len(seq.Instrs) == 0 {
+		return nil
+	}
+	g := cfgFromSequence(seq)
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		b.StartDepth = stackdepthMin
+	}
+	if err := optimizeLoadFast(g); err != nil {
+		return err
+	}
+	idx := 0
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		for i := range b.Instr {
+			if idx >= len(seq.Instrs) {
+				return nil
+			}
+			switch b.Instr[i].Op {
+			case LOAD_FAST_BORROW, LOAD_FAST_BORROW_LOAD_FAST_BORROW:
+				seq.Instrs[idx].Op = b.Instr[i].Op
+			}
+			idx++
+		}
+	}
+	return nil
 }
 
 // rewriteJumpTargets converts every jump's oparg from
