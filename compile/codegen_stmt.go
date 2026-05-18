@@ -19,7 +19,21 @@ import (
 // CPython: Python/codegen.c:L868 codegen_body called from
 // _PyCodegen_Module
 func (c *Compiler) visitModule(m *ast.Module) error {
+	docstring, docLoc, hasDoc := moduleDocstring(m.Body)
 	body := c.consumeDocstring(m.Body)
+	// CPython codegen_body emits LOAD_CONST <docstring> / STORE_NAME
+	// __doc__ at module entry whenever the symtable flagged a
+	// docstring. consumeDocstring above pins the string at consts[0];
+	// here we surface it on the module as __doc__ so attribute access
+	// matches CPython.
+	//
+	// CPython: Python/codegen.c:895 codegen_body (ADDOP_LOAD_CONST +
+	// codegen_nameop(__doc__, Store))
+	if hasDoc {
+		pool := poolNames
+		c.addLoadConst(docstring, docLoc)
+		c.addOpName(STORE_NAME, &pool, "__doc__", ast.Pos{Lineno: -1})
+	}
 	// PEP 649 conditional-annotations prologue. Same shape as the
 	// class body emitter: when a top-level annotation hides behind a
 	// conditional, the analyzer flips HasConditionalAnnotations and
@@ -102,6 +116,33 @@ func (c *Compiler) visitStmts(stmts ast.Seq[ast.Stmt]) error {
 		}
 	}
 	return nil
+}
+
+// moduleDocstring extracts the leading bare-string docstring (if any)
+// without touching the unit's const pool. The module emitter uses it
+// to capture the docstring value and source location before
+// consumeDocstring runs, so it can emit the matching LOAD_CONST +
+// STORE_NAME __doc__ pair at module entry.
+//
+// CPython: Python/codegen.c:883 codegen_body (_PyAST_GetDocString +
+// LOC(st->v.Expr.value))
+func moduleDocstring(body ast.Seq[ast.Stmt]) (string, ast.Pos, bool) {
+	if len(body) == 0 {
+		return "", ast.Pos{}, false
+	}
+	es, ok := body[0].(*ast.ExprStmt)
+	if !ok {
+		return "", ast.Pos{}, false
+	}
+	con, ok := es.Value.(*ast.Constant)
+	if !ok {
+		return "", ast.Pos{}, false
+	}
+	s, ok := con.Value.(string)
+	if !ok {
+		return "", ast.Pos{}, false
+	}
+	return s, loc(con), true
 }
 
 // consumeDocstring inspects body[0] for a bare string literal. When
