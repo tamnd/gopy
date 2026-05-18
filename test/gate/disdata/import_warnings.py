@@ -1,1 +1,2 @@
 import warnings
+print(warnings)
