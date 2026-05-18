@@ -77,8 +77,8 @@ same commit that flips a row.
 | B.3   | Diff harness (`cfg_phase_parity_test.go` + corpus)                                                                          | done        | `fbb22f7` |
 | C.1   | Finish `Python/flowgraph.c` port (`convert_pseudo_conditional_jumps`, `prepare_localsplus`, `_PyCfg_OptimizedCfgToInstructionSequence`, helpers) | done        | `e4c6827` |
 | C.2   | Finish `Python/assemble.c` port (split into `assemble_makecode.go` / `assemble_jumps.go` / `assemble.go`)                   | done        | `686fd64` |
-| C.3   | Port `optimize_and_assemble_code_unit` driver into `compile/compiler.go`                                                    | pending     | -         |
-| D.1   | Flip `assembleUnit` to the cfg driver                                                                                       | pending     | -         |
+| C.3   | Port `optimize_and_assemble_code_unit` driver into `compile/compiler.go`                                                    | done        | `37563f5` |
+| D.1   | Flip `assembleUnit` to the cfg driver                                                                                       | done        | `c124587` |
 | D.2   | Delete `compile/flowgraph_passes.go`, `flowgraph_jumps.go`, `flowgraph_except.go`, `flowgraph_locals.go`, `flowgraph_stackdepth.go` | pending     | -         |
 | D.3   | Rename cfg files so the filename map in **Goal** holds                                                                       | pending     | -         |
 | E     | All gates green; 1713 byte-equality work resumes on the new substrate                                                       | pending     | -         |
@@ -420,7 +420,7 @@ flat-sequence files lined up cleanly except for two classes:
 
 | Step | What                                                                                                                                                                                                  | Status  | Commit |
 | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------ |
-| D.1  | Flip `assembleUnit` to call the C.3 driver instead of `OptimizeWithFlags`                                                                                                                              | pending | -      |
+| D.1  | Flip `assembleUnit` to call the C.3 driver instead of `OptimizeWithFlags`                                                                                                                              | done    | `c124587` |
 | D.2  | Delete `compile/flowgraph_passes.go`, `flowgraph_jumps.go`, `flowgraph_except.go`, `flowgraph_locals.go`, `flowgraph_stackdepth.go` (`flowgraph.go` shrinks to `Info` + `ExceptHandler`)                  | pending | -      |
 | D.3  | Rename / split cfg files so the filename map in **Goal** holds (`flowgraph_cfg.go` becomes `flowgraph_cfg.go` + `flowgraph_cfg_passes.go` + `flowgraph_cfg_locals.go` + `flowgraph_cfg_stackdepth.go`)   | pending | -      |
 
