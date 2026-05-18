@@ -73,7 +73,7 @@ same commit that flips a row.
 | A     | Function-by-function audit: `Python/flowgraph.c`, `Python/assemble.c`, `optimize_and_assemble_code_unit`                    | done        | `95b53a4` |
 | B.0   | gopy substrate (DumpCfg + CfgPhaseHook)                                                                                     | done        | `e94fcfa` |
 | B.1   | CPython patch (per-phase dump + hook export)                                                                                | done        | `c9d380f` |
-| B.2   | CPython oracle wrappers (L1 / L3 / L4)                                                                                      | done        | (B.2)     |
+| B.2   | CPython oracle wrappers (L1 / L3 / L4)                                                                                      | done        | `f960caf`     |
 | B.3   | Diff harness (`cfg_phase_parity_test.go` + corpus)                                                                          | pending     | -         |
 | C.1   | Finish `Python/flowgraph.c` port (`convert_pseudo_conditional_jumps`, `prepare_localsplus`, `_PyCfg_OptimizedCfgToInstructionSequence`, helpers) | pending     | -         |
 | C.2   | Finish `Python/assemble.c` port (split into `assemble_makecode.go` / `assemble_jumps.go` / `assemble.go`)                   | pending     | -         |
@@ -266,12 +266,12 @@ internally.
 
 | Item                                                                                                                                      | Status | Commit    |
 | ----------------------------------------------------------------------------------------------------------------------------------------- | ------ | --------- |
-| `test/cpython/patches/oracle_common.py`: shared `opname`, `format_const`, `dump_instruction_sequence`, `parse_source` helpers              | done   | (B.2)     |
-| `test/cpython/patches/codegen_oracle.py`: drives `_testinternalcapi.compiler_codegen(ast, filename, optimize)` -> `unit000.l1.txt`         | done   | (B.2)     |
-| `test/cpython/patches/optimize_oracle.py`: drives `compiler_codegen` then `_testinternalcapi.optimize_cfg(seq, consts, nlocals)` -> `unit000.l3.txt` | done   | (B.2)     |
-| `test/cpython/patches/assemble_oracle.py`: walks every nested code object from `compile(src, filename, "exec")` -> `unit<idx>.l4.txt`     | done   | (B.2)     |
-| Each oracle prints stable `InstructionSequence.get_instructions()` tuples (L1/L3) or code-object fields (L4) for diff                     | done   | (B.2)     |
-| Smoke-tested: `def f(x): return x+1; print(f(2))` shows the `LOAD_CONST 2` -> `LOAD_SMALL_INT 2` rewrite between L1 and L3                | done   | (B.2)     |
+| `test/cpython/patches/oracle_common.py`: shared `opname`, `format_const`, `dump_instruction_sequence`, `parse_source` helpers              | done   | `f960caf`     |
+| `test/cpython/patches/codegen_oracle.py`: drives `_testinternalcapi.compiler_codegen(ast, filename, optimize)` -> `unit000.l1.txt`         | done   | `f960caf`     |
+| `test/cpython/patches/optimize_oracle.py`: drives `compiler_codegen` then `_testinternalcapi.optimize_cfg(seq, consts, nlocals)` -> `unit000.l3.txt` | done   | `f960caf`     |
+| `test/cpython/patches/assemble_oracle.py`: walks every nested code object from `compile(src, filename, "exec")` -> `unit<idx>.l4.txt`     | done   | `f960caf`     |
+| Each oracle prints stable `InstructionSequence.get_instructions()` tuples (L1/L3) or code-object fields (L4) for diff                     | done   | `f960caf`     |
+| Smoke-tested: `def f(x): return x+1; print(f(2))` shows the `LOAD_CONST 2` -> `LOAD_SMALL_INT 2` rewrite between L1 and L3                | done   | `f960caf`     |
 
 ### B.3. Diff harness (`cfg_phase_parity_test.go`)
 
