@@ -1,1 +1,1 @@
-print(range(1, 5))
+print(range(0, 10))

@@ -1,1 +1,1 @@
-print(str(42))
+print(str(1))

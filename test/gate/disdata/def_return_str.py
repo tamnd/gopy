@@ -1,3 +1,3 @@
 def f():
-    return (1, 2)
+    return "hello"
 print(f())
