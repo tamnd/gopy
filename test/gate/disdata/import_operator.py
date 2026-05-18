@@ -1,1 +1,2 @@
 import operator
+print(operator)

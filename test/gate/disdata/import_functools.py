@@ -1,1 +1,2 @@
 import functools
+print(functools)

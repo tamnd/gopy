@@ -1,1 +1,2 @@
 import time
+print(time)

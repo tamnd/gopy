@@ -1,2 +1,2 @@
-import os
-import sys
+import os, sys
+print(os, sys)

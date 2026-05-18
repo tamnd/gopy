@@ -1,1 +1,2 @@
-from os import sep, name
+from os import path, sep
+print(path, sep)
