@@ -1,1 +1,1 @@
-print(id(0))
+print(id(1) > 0)

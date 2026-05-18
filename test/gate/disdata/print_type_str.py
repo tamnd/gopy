@@ -1,1 +1,1 @@
-print(type("x"))
+print(type("a"))
