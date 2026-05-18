@@ -139,7 +139,7 @@ C.2 / C.3 land the missing functions.
 | `build_cellfixedoffsets`                          | 3711         | ported 1:1                                                          | done    | `ea74ea5` |
 | `insert_prefix_instructions` (graph version)      | 3760         | ported 1:1                                                          | done    | `ea74ea5` |
 | `fix_cell_offsets`                                | 3729         | ported 1:1                                                          | done    | `ea74ea5` |
-| `_PyCfg_OptimizedCfgToInstructionSequence`        | 4026         | missing as a single function (callers cobble it from pieces)        | missing | C.1       |
+| `_PyCfg_OptimizedCfgToInstructionSequence`        | 4026         | ported 1:1 (`flowgraph_cfg_bridge.go`)                              | done    | `9fb2206` |
 
 ### A.2. `Python/assemble.c` (802 lines)
 
@@ -352,7 +352,7 @@ across phases.
 | `insert_prefix_instructions` (graph version)   | 3760         | `flowgraph_cfg_passes.go`           | done    | `ea74ea5` |
 | `fix_cell_offsets`                             | 3729         | `flowgraph_cfg_passes.go`           | done    | `ea74ea5` |
 | `prepare_localsplus`                           | 3768         | `flowgraph_cfg_passes.go`           | done    | `ea74ea5` |
-| `_PyCfg_OptimizedCfgToInstructionSequence`     | 4026         | `flowgraph_cfg_bridge.go`           | pending | -      |
+| `_PyCfg_OptimizedCfgToInstructionSequence`     | 4026         | `flowgraph_cfg_bridge.go`           | done    | `9fb2206` |
 | Sweep: diff cfg-side function list vs `Python/flowgraph.c`; flag elisions and follow-ups | -    | -                                   | pending | -      |
 
 ### C.2. Finish `Python/assemble.c`
