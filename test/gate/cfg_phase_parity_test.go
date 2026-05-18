@@ -89,7 +89,7 @@ func readCorpus(t *testing.T, path string) []string {
 	if err != nil {
 		t.Fatalf("open corpus: %v", err)
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close()
 
 	var out []string
 	scanner := bufio.NewScanner(f)
@@ -120,7 +120,7 @@ func readSkip(t *testing.T, path string) map[string]string {
 		}
 		t.Fatalf("open skip: %v", err)
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -161,7 +161,7 @@ func dumpGopyPhases(t *testing.T, src, filename, outDir string) {
 			idx++
 		}
 		name := filepath.Join(outDir, gopyDumpName(idx, phase))
-		if err := os.WriteFile(name, []byte(dump), 0o644); err != nil { //nolint:gosec
+		if err := os.WriteFile(name, []byte(dump), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
@@ -232,7 +232,7 @@ func TestCfgPhaseParity(t *testing.T) {
 			}
 
 			abs := filepath.Join(root, rel)
-			src, err := os.ReadFile(abs) //nolint:gosec // path comes from vetted corpus file
+			src, err := os.ReadFile(abs)
 			if err != nil {
 				t.Fatalf("read %s: %v", abs, err)
 			}
@@ -244,7 +244,7 @@ func TestCfgPhaseParity(t *testing.T) {
 				t.Fatalf("mkdir cpython: %v", err)
 			}
 
-			cmd := exec.CommandContext(t.Context(), cpy, dumpScript, //nolint:gosec // cpy from env, dumpScript repo-local
+			cmd := exec.CommandContext(t.Context(), cpy, dumpScript,
 				"--src", abs, "--out", cpyDir, "--filename", rel)
 			cmd.Env = append(os.Environ(), "PYTHONHASHSEED=0")
 			var stderr bytes.Buffer
