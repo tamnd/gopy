@@ -1,0 +1,8 @@
+# Spec 1716 B.3 skip list: per-file skips for the cfg_phase_parity
+# gate. Each entry is `<repo-relative-path> # <reason>`. Use the
+# reason field to link to the issue or spec section that tracks the
+# fix. Once the underlying gopy port closes the gap, delete the row
+# and the corpus entry runs again.
+#
+# format: path/to/file.py # reason / bug link
+test/cpython/Lib/__future__.py # trailing empty block missing on gopy side at add_checks_for_loads_of_uninitialized_variables (spec 1716 C.1 will close it)

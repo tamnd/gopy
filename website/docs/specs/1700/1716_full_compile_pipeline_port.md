@@ -74,7 +74,7 @@ same commit that flips a row.
 | B.0   | gopy substrate (DumpCfg + CfgPhaseHook)                                                                                     | done        | `e94fcfa` |
 | B.1   | CPython patch (per-phase dump + hook export)                                                                                | done        | `c9d380f` |
 | B.2   | CPython oracle wrappers (L1 / L3 / L4)                                                                                      | done        | `f960caf`     |
-| B.3   | Diff harness (`cfg_phase_parity_test.go` + corpus)                                                                          | pending     | -         |
+| B.3   | Diff harness (`cfg_phase_parity_test.go` + corpus)                                                                          | done        | (this commit) |
 | C.1   | Finish `Python/flowgraph.c` port (`convert_pseudo_conditional_jumps`, `prepare_localsplus`, `_PyCfg_OptimizedCfgToInstructionSequence`, helpers) | pending     | -         |
 | C.2   | Finish `Python/assemble.c` port (split into `assemble_makecode.go` / `assemble_jumps.go` / `assemble.go`)                   | pending     | -         |
 | C.3   | Port `optimize_and_assemble_code_unit` driver into `compile/compiler.go`                                                    | pending     | -         |
@@ -279,10 +279,10 @@ internally.
 | ------------------------------------------------------------------------------------------------------------------------------------ | ------- | ------ |
 | Align gopy `JumpTargetLabel` numbering with CPython: 0-based `NewLabel`, `-1` for no-label (today gopy starts at 1, uses 0 for none) | done    | `e11370a` |
 | `compile.CompileWithCfgPhaseHook` public entry that drives the cfg pipeline with a hook                                              | done    | `266f73e` |
-| `test/gate/cfg_phase_parity_test.go` (subprocess to patched CPython, run gopy with `CompileWithCfgPhaseHook`, diff per `(unit, phase)`) | pending | -      |
-| `test/gate/cfg_phase_corpus.txt` (file list, grows from `__future__.py` outward)                                                     | pending | -      |
-| `test/gate/cfg_phase_skip.txt` (per-file reasons for L0 failures, linked to bug tracker)                                              | pending | -      |
-| Workflow wiring: gate workflow builds the patched CPython once, caches it, then runs the test                                        | pending | -      |
+| `test/gate/cfg_phase_parity_test.go` (subprocess to patched CPython, run gopy with `CompileWithCfgPhaseHook`, diff per `(unit, phase)`) | done    | (this commit) |
+| `test/gate/cfg_phase_corpus.txt` (file list, grows from `__future__.py` outward)                                                     | done    | (this commit) |
+| `test/gate/cfg_phase_skip.txt` (per-file reasons for L0 failures, linked to bug tracker)                                              | done    | (this commit) |
+| Workflow wiring: gate workflow builds the patched CPython once, caches it, then runs the test                                        | done    | (this commit) |
 
 ### B Reference: what CPython exposes vs what we add
 
@@ -387,7 +387,7 @@ Each phase keeps existing gates green and adds its own:
 | `test/gate/TestDisParityLib`                  | spec 1713                            | green   | -      |
 | `test/gate/TestDisParity`                     | spec 1713                            | green   | -      |
 | `compile/...` package tests                   | spec 1716 (existing)                 | green   | -      |
-| `test/gate/cfg_phase_parity_test.go` (L2)     | this spec, B.3                       | pending | -      |
+| `test/gate/cfg_phase_parity_test.go` (L2)     | this spec, B.3                       | green   | (this commit) |
 | `test/gate/codegen_parity_test.go` (L1)       | this spec, B.2                       | pending | -      |
 | `test/gate/assemble_parity_test.go` (L3 / L4) | this spec, B.2 + spec 1713 byte-eq   | pending | -      |
 
