@@ -347,7 +347,7 @@ across phases.
 | Function                                       | CPython line | Lands in                            | Status  | Commit |
 | ---------------------------------------------- | ------------ | ----------------------------------- | ------- | ------ |
 | `convert_pseudo_conditional_jumps`             | 3478         | `flowgraph_cfg_passes.go`           | done    | `a62563b` |
-| `calculate_stackdepth` (graph version)         | 1352         | `flowgraph_cfg_stackdepth.go` (new) | pending | -      |
+| `calculate_stackdepth` (graph version)         | 1352         | `flowgraph_cfg_stackdepth.go` (new) | done    | (this commit) |
 | `build_cellfixedoffsets`                       | 3711         | `flowgraph_cfg_passes.go`           | pending | -      |
 | `insert_prefix_instructions` (graph version)   | 3760         | `flowgraph_cfg_passes.go`           | pending | -      |
 | `fix_cell_offsets`                             | 3729         | `flowgraph_cfg_passes.go`           | pending | -      |
