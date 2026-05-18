@@ -278,7 +278,7 @@ internally.
 | Item                                                                                                                                 | Status  | Commit |
 | ------------------------------------------------------------------------------------------------------------------------------------ | ------- | ------ |
 | Align gopy `JumpTargetLabel` numbering with CPython: 0-based `NewLabel`, `-1` for no-label (today gopy starts at 1, uses 0 for none) | done    | `e11370a` |
-| `compile.CompileWithCfgPhaseHook` public entry that drives the cfg pipeline with a hook                                              | done    | (this commit) |
+| `compile.CompileWithCfgPhaseHook` public entry that drives the cfg pipeline with a hook                                              | done    | `266f73e` |
 | `test/gate/cfg_phase_parity_test.go` (subprocess to patched CPython, run gopy with `CompileWithCfgPhaseHook`, diff per `(unit, phase)`) | pending | -      |
 | `test/gate/cfg_phase_corpus.txt` (file list, grows from `__future__.py` outward)                                                     | pending | -      |
 | `test/gate/cfg_phase_skip.txt` (per-file reasons for L0 failures, linked to bug tracker)                                              | pending | -      |
