@@ -143,6 +143,60 @@ func TestCfgToSequenceResolvesJumpTargets(t *testing.T) {
 	}
 }
 
+func TestCfgOptimizedCfgToInstructionSequenceSmoke(t *testing.T) {
+	// Hand-build a graph with a pseudo JUMP_IF_FALSE and verify the
+	// closer expands it to COPY 1 + TO_BOOL 0 + POP_JUMP_IF_FALSE, then
+	// flattens cleanly. The unit has no cell/free vars and no generator
+	// flag so the localsplus pipeline runs trivially.
+	var loc ast.Pos
+	g := newCfgBuilder()
+	tgt := g.newBlock()
+	g.addOp(LOAD_CONST, 0, loc)
+	g.CurBlock.addJump(JUMP_IF_FALSE, tgt, loc)
+	g.useNextBlock(tgt)
+	g.addOp(RETURN_VALUE, 0, loc)
+
+	unit := &Unit{Name: "<test>", VarNames: []string{"x"}}
+	seq := &Sequence{}
+	stackdepth, nlocalsplus, err := cfgOptimizedCfgToInstructionSequence(g, unit, 0, seq)
+	if err != nil {
+		t.Fatalf("closer returned err: %v", err)
+	}
+	if stackdepth < 0 {
+		t.Errorf("stackdepth = %d, want >= 0", stackdepth)
+	}
+	if nlocalsplus != 1 {
+		t.Errorf("nlocalsplus = %d, want 1 (one varname, no cells/frees)", nlocalsplus)
+	}
+
+	// Pseudo-jump must have been rewritten into COPY 1 + TO_BOOL 0 +
+	// POP_JUMP_IF_FALSE before flattening.
+	var sawCopy, sawToBool, sawPopJump bool
+	for _, ins := range seq.Instrs {
+		switch ins.Op {
+		case COPY:
+			if ins.Oparg == 1 {
+				sawCopy = true
+			}
+		case TO_BOOL:
+			sawToBool = true
+		case POP_JUMP_IF_FALSE:
+			sawPopJump = true
+		case JUMP_IF_FALSE:
+			t.Error("pseudo JUMP_IF_FALSE survived the closer")
+		}
+	}
+	if !sawCopy {
+		t.Error("expanded sequence missing COPY 1")
+	}
+	if !sawToBool {
+		t.Error("expanded sequence missing TO_BOOL")
+	}
+	if !sawPopJump {
+		t.Error("expanded sequence missing POP_JUMP_IF_FALSE")
+	}
+}
+
 func TestCfgRoundtripThroughBridge(t *testing.T) {
 	// Build a sequence with a forward JUMP, round-trip it through the
 	// graph and back, expect identical opcode/oparg layout.

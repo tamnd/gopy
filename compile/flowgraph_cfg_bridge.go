@@ -167,6 +167,36 @@ func optimizeLoadFastOnSequence(seq *Sequence) error {
 	return nil
 }
 
+// cfgOptimizedCfgToInstructionSequence is the closer that turns an
+// optimized cfg into a flat instruction sequence ready for the
+// assembler. After the optimizer pass returns, this routine: expands
+// the pseudo conditional jumps; computes the running stack depth;
+// builds the localsplus table and rewrites cell/free opargs through
+// it; rewrites the remaining assembler-time pseudo ops; normalizes
+// jumps; and runs optimize_load_fast as the last bytecode mutation.
+// The graph is then flattened by cfgToSequence into seq.
+//
+// CPython: Python/flowgraph.c:4026 _PyCfg_OptimizedCfgToInstructionSequence
+func cfgOptimizedCfgToInstructionSequence(g *cfgBuilder, unit *Unit, codeFlags uint32, seq *Sequence) (stackdepth, nlocalsplus int, err error) {
+	cfgConvertPseudoConditionalJumps(g)
+
+	stackdepth, err = cfgCalculateStackdepth(g)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	nlocalsplus = cfgPrepareLocalsPlus(unit, g, codeFlags)
+
+	cfgConvertPseudoOps(g)
+	cfgNormalizeJumps(g)
+	if err := optimizeLoadFast(g); err != nil {
+		return 0, 0, err
+	}
+
+	cfgToSequence(g, seq)
+	return stackdepth, nlocalsplus, nil
+}
+
 // rewriteJumpTargets converts every jump's oparg from
 // "target seqIdx" into a *basicblock pointer. Uses the idxToBlock
 // map produced during cfgFromSequence.
