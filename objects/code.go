@@ -285,7 +285,7 @@ func codeRepr(o Object) (string, error) {
 		lineno = -1
 	}
 	if c.Filename != "" {
-		return fmt.Sprintf("<code object %s at %p, file %q, line %d>", c.Name, c, c.Filename, lineno), nil
+		return fmt.Sprintf("<code object %s at %p, file \"%s\", line %d>", c.Name, c, c.Filename, lineno), nil
 	}
 	return fmt.Sprintf("<code object %s at %p, file ???, line %d>", c.Name, c, lineno), nil
 }

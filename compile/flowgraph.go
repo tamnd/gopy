@@ -105,6 +105,16 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 		empty := []any{}
 		consts = &empty
 	}
+	// PASS pre-0: hoist every MAKE_CELL emitted inline by codegen to the
+	// front of the sequence with NO_LOCATION. CPython's flowgraph inserts
+	// MAKE_CELL via insert_prefix_instructions during _PyCfg_OptimizeCodeUnit
+	// so the cell ops sit before RESUME in the linetable. Running this
+	// before label resolution keeps the move safe even if a future codepath
+	// were to introduce jumps that land on a cell op.
+	//
+	// CPython: Python/flowgraph.c:3792 insert_prefix_instructions (cellvars)
+	hoistCellPrefix(seq)
+
 	// PASS 0: fold int-int BINARY_OP triples into a single LOAD_CONST,
 	// then drop instructions after an unconditional terminator. Run to
 	// a fixed point so a fold that exposes a new dead tail (or a new
@@ -141,23 +151,29 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// CPython: Python/flowgraph.c:2169 basicblock_optimize_load_const
 	rewriteLoadSmallInt(seq, consts)
 
-	// PASS 0b2: fold BUILD_TUPLE-of-constants into a single LOAD_CONST,
-	// and rewrite BUILD_LIST / BUILD_SET of constants into the
-	// BUILD_X 0 + LOAD_CONST tuple + LIST_EXTEND / SET_UPDATE prelude
-	// CPython emits. Must run after rewriteLoadSmallInt so LOAD_SMALL_INT
-	// values participate, and before removeUnusedConsts so the orphaned
-	// per-element const slots get reclaimed.
+	// PASS 0b2: fold BUILD_TUPLE / BUILD_LIST / BUILD_SET of constants
+	// in a single in-order sweep, matching the per-instruction switch
+	// dispatch CPython runs in optimize_basic_block. A separate sweep
+	// per opcode would order new const-pool entries by opcode rather
+	// than by source position, breaking co_consts byte-equality.
 	//
-	// CPython: Python/flowgraph.c:1454 fold_tuple_of_constants
-	// CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
-	foldTupleOfConstants(seq, consts)
-	optimizeListsAndSets(seq, consts)
+	// CPython: Python/flowgraph.c:2311 optimize_basic_block (BUILD_*)
+	foldConstSequences(seq, consts)
 
 	// PASS 0b3: fold unary opcodes on const operands so `-1` becomes a
 	// single LOAD_CONST -1 rather than LOAD_CONST 1 + UNARY_NEGATIVE.
 	//
 	// CPython: Python/flowgraph.c:1935 fold_const_unaryop
 	foldConstUnaryop(seq, consts)
+
+	// PASS 0b4: collapse `x is None` / `x is not None` triples into the
+	// POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE peephole opcodes. CPython
+	// runs the same fold inside basicblock_optimize_load_const (case
+	// IS_OP) so the LOAD_CONST and IS_OP drop and the conditional jump
+	// becomes a single-instruction None test.
+	//
+	// CPython: Python/flowgraph.c:2230 basicblock_optimize_load_const
+	foldIsOpNone(seq, consts)
 
 	// PASS 0c: prune the const-pool entries no surviving instruction
 	// references. rewriteLoadSmallInt leaves small-int slots orphaned;
@@ -278,7 +294,34 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// this pass the sequence contains only real opcodes.
 	//
 	// CPython: Python/flowgraph.c:3520 convert_pseudo_ops
-	convertPseudoOps(seq)
+	convertPseudoOps(seq, nlocals)
+
+	// PASS 11c.1: fuse adjacent LOAD_FAST / STORE_FAST pairs into the
+	// super-instruction forms. Must run before optimize_load_fast so
+	// the dataflow downgrades LOAD_FAST_LOAD_FAST directly to
+	// LOAD_FAST_BORROW_LOAD_FAST_BORROW. removeRedundantNops compacts
+	// the NOP each fusion leaves behind, then jump and handler opargs
+	// rebind to the surviving instruction offsets.
+	//
+	// CPython: Python/flowgraph.c:2588 insert_superinstructions
+	if insertSuperinstructionsOnSequence(seq) > 0 {
+		removeRedundantNops(seq)
+	}
+
+	// PASS 11d: downgrade LOAD_FAST{,_LOAD_FAST} to the BORROW variants
+	// where the borrowed reference is provably consumed before the local
+	// is killed. Runs on a temporary cfg built from the resolved
+	// sequence so the abstract ref-stack walk can follow block
+	// boundaries the flat sequence does not expose. Only opcode
+	// rewrites flow back into seq; opargs, jumps, and handler info
+	// stay untouched. Must run after convertPseudoOps so LOAD_CLOSURE
+	// and friends are visible as LOAD_FAST to the dataflow.
+	//
+	// CPython: Python/flowgraph.c:4062 optimize_load_fast (after
+	// convert_pseudo_ops + normalize_jumps)
+	if err := optimizeLoadFastOnSequence(seq); err != nil {
+		return nil, err
+	}
 
 	// PASS 4: lower the pseudo unconditional jumps (`JUMP`,
 	// `JUMP_NO_INTERRUPT`) to their forward / backward counterparts,

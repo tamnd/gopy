@@ -10,6 +10,7 @@ package compile
 
 import (
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/symtable"
 )
 
 // visitCall emits one of the three call shapes above.
@@ -19,10 +20,81 @@ func (c *Compiler) visitCall(e *ast.Call) error {
 	if hasStarArg(e.Args) || hasStarStar(e.Keywords) {
 		return c.emitCallEx(e)
 	}
+	ok, err := c.maybeOptimizeMethodCall(e)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
 	if hasKeyword(e.Keywords) {
 		return c.emitCallKw(e)
 	}
 	return c.emitCallPlain(e)
+}
+
+// maybeOptimizeMethodCall emits the LOAD_ATTR-with-NULL-bit + CALL form
+// for `obj.method(args)` so the runtime can take the bound-method
+// fast path without materializing a method object. The receiver is
+// pushed in the slot a PUSH_NULL would normally occupy, and LOAD_ATTR
+// is encoded with `oparg = (name_index << 1) | 1` so the interpreter
+// pushes self in place of the NULL.
+//
+// Skips the optimization when:
+//   - the callable is not Attribute(Load)
+//   - the call has *args / **kwargs (caller already routed to emitCallEx)
+//   - any keyword has no name (i.e. **expr; same as above)
+//   - argsl + kwdsl + (kwdsl != 0) hits _PY_STACK_USE_GUIDELINE
+//
+// CPython: Python/codegen.c:3944 maybe_optimize_method_call
+func (c *Compiler) maybeOptimizeMethodCall(e *ast.Call) (bool, error) {
+	attr, ok := e.Func.(*ast.Attribute)
+	if !ok || attr.Ctx != ast.Load {
+		return false, nil
+	}
+	for _, a := range e.Args {
+		if _, star := a.(*ast.Starred); star {
+			return false, nil
+		}
+	}
+	kwExtra := 0
+	for _, kw := range e.Keywords {
+		if kw.Arg == nil {
+			return false, nil
+		}
+	}
+	if len(e.Keywords) > 0 {
+		kwExtra = 1
+	}
+	if len(e.Args)+len(e.Keywords)+kwExtra >= stackUseGuideline {
+		return false, nil
+	}
+	if err := c.visitExpr(attr.Value); err != nil {
+		return false, err
+	}
+	pool := poolNames
+	mangled := symtable.Mangle(c.unit().Private, attr.Attr)
+	nameIdx := c.poolIndex(&pool, mangled)
+	c.addOpI(LOAD_ATTR, int32((nameIdx<<1)|1), loc(attr))
+	for _, a := range e.Args {
+		if err := c.visitExpr(a); err != nil {
+			return false, err
+		}
+	}
+	if len(e.Keywords) == 0 {
+		c.addOpI(CALL, int32(len(e.Args)), loc(e))
+		return true, nil
+	}
+	names := make([]any, 0, len(e.Keywords))
+	for _, kw := range e.Keywords {
+		if err := c.visitExpr(kw.Value); err != nil {
+			return false, err
+		}
+		names = append(names, *kw.Arg)
+	}
+	c.addLoadConst(tupleOf(names), loc(e))
+	c.addOpI(CALL_KW, int32(len(e.Args)+len(e.Keywords)), loc(e))
+	return true, nil
 }
 
 // emitCallPlain: LOAD callable, push self placeholder (NULL),

@@ -28,6 +28,30 @@ import (
 	"github.com/tamnd/gopy/state"
 )
 
+// init wires the const-wrap hook so objects.wrapConstAttr (the path
+// dis.py and friends take when they read co_consts) can convert
+// compile-pipeline value types into Objects without dragging the
+// compile package into objects/.
+func init() {
+	objects.ConstWrapHook = func(v any) (objects.Object, bool) {
+		switch x := v.(type) {
+		case *compile.Code:
+			return liftNestedCode(x), true
+		case *compile.ConstTuple:
+			items := make([]objects.Object, len(x.Values))
+			for i, raw := range x.Values {
+				item, err := wrapConst(raw)
+				if err != nil {
+					return nil, false
+				}
+				items[i] = item
+			}
+			return objects.NewTuple(items), true
+		}
+		return nil, false
+	}
+}
+
 // liftNestedCode mirrors pythonrun.liftCode for inner code objects
 // reached through a parent's Consts slot. Nested defs / lambdas /
 // class bodies all surface here.
@@ -946,18 +970,25 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		}
 		fallthrough
 	case compile.LOAD_GLOBAL:
+		// Stack effect (CPython 3.14, bytecodes.c:1769):
+		//     ( -- res, null if oparg & 1 )
+		// res is pushed first (deeper slot), the NULL marker on top.
+		// That matches the codegen pair LOAD_GLOBAL + PUSH_NULL: the
+		// callable lands below, NULL above, so an insert_superinstructions
+		// fold to LOAD_GLOBAL with bit 0 set is a no-op for the stack.
+		var v objects.Object
+		if w, ok := lookupIn(e.f.Globals, keyObj); ok {
+			v = w
+		} else if w, ok := lookupIn(e.f.Builtins, keyObj); ok {
+			v = w
+		} else {
+			return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
+		}
+		e.pushObject(v)
 		if pushNull {
 			e.push(stackref.Null)
 		}
-		if v, ok := lookupIn(e.f.Globals, keyObj); ok {
-			e.pushObject(v)
-			return v, nil
-		}
-		if v, ok := lookupIn(e.f.Builtins, keyObj); ok {
-			e.pushObject(v)
-			return v, nil
-		}
-		return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
+		return v, nil
 
 	case compile.STORE_NAME:
 		v := e.popObject()

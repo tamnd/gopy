@@ -132,8 +132,12 @@ func TestClassBodyStoresDocstring(t *testing.T) {
 		"STORE_NAME", // __module__
 		"LOAD_CONST", // "C" qualname
 		"STORE_NAME", // __qualname__
+		"LOAD_CONST", // firstlineno int (LOAD_SMALL_INT eligible but stays LOAD_CONST until int64 path)
+		"STORE_NAME", // __firstlineno__
 		"LOAD_CONST", // "hello doc"
 		"STORE_NAME", // __doc__
+		"LOAD_CONST", // () __static_attributes__ tuple
+		"STORE_NAME", // __static_attributes__
 		"LOAD_CONST", // implicit None
 		"RETURN_VALUE",
 	}
@@ -142,6 +146,12 @@ func TestClassBodyStoresDocstring(t *testing.T) {
 	}
 	if !slices.Contains(inner.Names, "__doc__") {
 		t.Errorf("inner.Names %v missing __doc__", inner.Names)
+	}
+	if !slices.Contains(inner.Names, "__firstlineno__") {
+		t.Errorf("inner.Names %v missing __firstlineno__", inner.Names)
+	}
+	if !slices.Contains(inner.Names, "__static_attributes__") {
+		t.Errorf("inner.Names %v missing __static_attributes__", inner.Names)
 	}
 	// The docstring lands as a const (deduped with the qualname const
 	// in the per-unit cache only if they happen to match).
@@ -200,15 +210,26 @@ func TestClassBodyStoresModuleAndQualname(t *testing.T) {
 		"STORE_NAME", // __module__
 		"LOAD_CONST", // "C"
 		"STORE_NAME", // __qualname__
+		"LOAD_CONST", // firstlineno
+		"STORE_NAME", // __firstlineno__
 		"NOP",        // pass
+		"LOAD_CONST", // () __static_attributes__ tuple
+		"STORE_NAME", // __static_attributes__
 		"LOAD_CONST", // implicit None
 		"RETURN_VALUE",
 	}
 	if !equalStrings(got, want) {
 		t.Fatalf("inner ops = %v, want %v", got, want)
 	}
-	// Verify the names pool has __name__, __module__, __qualname__.
-	want_names := map[string]bool{"__name__": true, "__module__": true, "__qualname__": true}
+	// Verify the names pool has __name__, __module__, __qualname__,
+	// __firstlineno__, __static_attributes__.
+	want_names := map[string]bool{
+		"__name__":              true,
+		"__module__":            true,
+		"__qualname__":          true,
+		"__firstlineno__":       true,
+		"__static_attributes__": true,
+	}
 	for _, n := range inner.Names {
 		delete(want_names, n)
 	}

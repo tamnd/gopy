@@ -32,6 +32,19 @@ func Compile(mod ast.Mod, filename string, optimize int) (*Code, error) {
 	if err != nil {
 		return nil, err
 	}
+	// AST preprocess runs between future scan and symtable build, matching
+	// the CPython ordering in compiler_init. The pass applies printf-format
+	// folding, __debug__ substitution, MatchValue numeric folding, and (at
+	// -OO) docstring removal. SyntaxCheckOnly stays false so mutations land
+	// before symtable sees the tree.
+	//
+	// CPython: Python/compile.c:139 compiler_init
+	ast.Preprocess(mod, ast.PreprocessOptions{
+		Filename:       filename,
+		OptimizeLevel:  optimize,
+		FFFeatures:     ff.Bits,
+		EnableWarnings: true,
+	})
 	st, err := symtable.Build(mod, filename, ff)
 	if err != nil {
 		return nil, err

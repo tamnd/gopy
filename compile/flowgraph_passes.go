@@ -251,33 +251,22 @@ func safePower(x, y int64) (int64, bool) {
 }
 
 // appendConst returns the index of v in *consts, appending if not
-// present. Linear search is fine here: the per-unit pool is small
-// and flowgraph runs once per scope.
+// present. Dedup runs through constCacheKey, the port of CPython's
+// _PyCode_ConstantKey, so nested *ConstTuple values share a slot when
+// equal by value. Linear search is fine here: the per-unit pool is
+// small and flowgraph runs once per scope.
 //
-// CPython: Python/flowgraph.c add_const
+// CPython: Python/flowgraph.c add_const + Objects/codeobject.c:3035
+// _PyCode_ConstantKey
 func appendConst(consts *[]any, v any) int {
-	if isComparableConst(v) {
-		for i, c := range *consts {
-			if isComparableConst(c) && c == v {
-				return i
-			}
+	key := constCacheKey(v)
+	for i, c := range *consts {
+		if constCacheKey(c) == key {
+			return i
 		}
 	}
 	*consts = append(*consts, v)
 	return len(*consts) - 1
-}
-
-// isComparableConst reports whether v can be used with the == operator
-// without panicking. Tuples (modeled as []any in the const pool) are
-// not directly comparable; CPython's add_const reuses by hash+eq, which
-// gopy will revisit when 1713 lands the const-key port. Until then,
-// duplicate tuple consts simply both land in the pool.
-func isComparableConst(v any) bool {
-	switch v.(type) {
-	case nil, bool, int64, float64, string, complex128:
-		return true
-	}
-	return false
 }
 
 // eliminateDeadCodeAfterTerminator replaces every instruction
@@ -330,6 +319,86 @@ func eliminateDeadCodeAfterTerminator(seq *Sequence) int {
 		}
 	}
 	return dropped
+}
+
+// insertSuperinstructionsOnSequence folds adjacent LOAD_FAST / STORE_FAST
+// pairs into LOAD_FAST_LOAD_FAST, STORE_FAST_LOAD_FAST, or
+// STORE_FAST_STORE_FAST. The second instruction is rewritten to NOP and
+// removeRedundantNops compacts the stream afterwards. Pairs are fused
+// only when both instructions sit in the same basic block: the second
+// must not be a jump or handler target, and the first must not be a
+// terminator. Lines must agree (or be unset) and both opargs must fit in
+// the low 4 bits, matching makeSuperInstruction's contract.
+//
+// CPython: Python/flowgraph.c:2588 insert_superinstructions
+// CPython: Python/flowgraph.c:2572 make_super_instruction
+func insertSuperinstructionsOnSequence(seq *Sequence) int {
+	if len(seq.Instrs) < 2 {
+		return 0
+	}
+	pinned := computePinnedTargets(seq)
+	fused := 0
+	for i := 0; i+1 < len(seq.Instrs); i++ {
+		cur := &seq.Instrs[i]
+		next := &seq.Instrs[i+1]
+		superOp := pickSuperOp(cur, next, pinned[i+1])
+		if superOp == 0 {
+			continue
+		}
+		cur.Op = superOp
+		cur.Oparg = (cur.Oparg << 4) | next.Oparg
+		next.Op = NOP
+		next.Oparg = 0
+		fused++
+	}
+	return fused
+}
+
+func computePinnedTargets(seq *Sequence) []bool {
+	pinned := make([]bool, len(seq.Instrs))
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if hasJumpTarget(ins.Op) {
+			idx := int(ins.Oparg)
+			if idx >= 0 && idx < len(pinned) {
+				pinned[idx] = true
+			}
+		}
+		if ins.Handler.Label >= 0 && ins.Handler.Label < len(pinned) {
+			pinned[ins.Handler.Label] = true
+		}
+	}
+	return pinned
+}
+
+func pickSuperOp(cur, next *Instr, nextIsPinned bool) Opcode {
+	if nextIsPinned || isTerminator(cur.Op) {
+		return 0
+	}
+	if cur.Oparg >= 16 || next.Oparg >= 16 {
+		return 0
+	}
+	if cur.Loc.Lineno >= 0 && next.Loc.Lineno >= 0 && cur.Loc.Lineno != next.Loc.Lineno {
+		return 0
+	}
+	return superOpForPair(cur.Op, next.Op)
+}
+
+func superOpForPair(a, b Opcode) Opcode {
+	switch a {
+	case LOAD_FAST:
+		if b == LOAD_FAST {
+			return LOAD_FAST_LOAD_FAST
+		}
+	case STORE_FAST:
+		switch b {
+		case LOAD_FAST:
+			return STORE_FAST_LOAD_FAST
+		case STORE_FAST:
+			return STORE_FAST_STORE_FAST
+		}
+	}
+	return 0
 }
 
 // hasJumpTarget reports whether op carries a label oparg, including the
@@ -413,6 +482,77 @@ func foldConstUnaryop(seq *Sequence, consts *[]any) int {
 		setNop(&seq.Instrs[i-1])
 		ins.Op = LOAD_CONST
 		ins.Oparg = int32(appendConst(consts, result))
+		folded++
+	}
+	return folded
+}
+
+// foldIsOpNone collapses the `x is None` / `x is not None` test
+// sequence emitted by codegen into the POP_JUMP_IF_NONE /
+// POP_JUMP_IF_NOT_NONE peephole opcodes. The codegen emits:
+//
+//	LOAD_CONST None
+//	IS_OP        0      ; or 1 for `is not`
+//	POP_JUMP_IF_FALSE   ; or POP_JUMP_IF_TRUE
+//
+// optionally with a TO_BOOL between the IS_OP and the jump. The fold
+// is safe whenever the LOAD_CONST loads None and a real jump follows;
+// every consumer of the IS_OP result (the conditional jump and TO_BOOL)
+// is rewritten or dropped.
+//
+// CPython: Python/flowgraph.c:2230 basicblock_optimize_load_const
+// (case IS_OP).
+func foldIsOpNone(seq *Sequence, consts *[]any) int {
+	if consts == nil || len(seq.Instrs) < 3 {
+		return 0
+	}
+	pinned := pinnedTargets(seq)
+	folded := 0
+	for i := 0; i+2 < len(seq.Instrs); i++ {
+		load := &seq.Instrs[i]
+		if load.Op != LOAD_CONST {
+			continue
+		}
+		v, ok := loadsConstValue(load, *consts)
+		if !ok || v != nil {
+			continue
+		}
+		isInstr := &seq.Instrs[i+1]
+		if isInstr.Op != IS_OP {
+			continue
+		}
+		if pinned[i+1] {
+			continue
+		}
+		jumpIdx := i + 2
+		if seq.Instrs[jumpIdx].Op == TO_BOOL {
+			if jumpIdx+1 >= len(seq.Instrs) || pinned[jumpIdx] {
+				continue
+			}
+			jumpIdx++
+		}
+		if pinned[jumpIdx] {
+			continue
+		}
+		jumpInstr := &seq.Instrs[jumpIdx]
+		invert := isInstr.Oparg != 0
+		switch jumpInstr.Op {
+		case POP_JUMP_IF_FALSE:
+			invert = !invert
+		case POP_JUMP_IF_TRUE:
+		default:
+			continue
+		}
+		setNop(load)
+		setNop(isInstr)
+		if jumpIdx == i+3 {
+			setNop(&seq.Instrs[i+2])
+		}
+		if invert {
+			jumpInstr.Op = POP_JUMP_IF_NOT_NONE
+		} else {
+			jumpInstr.Op = POP_JUMP_IF_NONE
+		}
 		folded++
 	}
 	return folded
@@ -518,104 +658,87 @@ func loadsConstValue(ins *Instr, consts []any) (any, bool) {
 // CPython: Python/flowgraph.c:1585 MIN_CONST_SEQUENCE_SIZE
 const minConstSequenceSize = 3
 
-// foldTupleOfConstants rewrites `LOAD_CONST c1; ...; LOAD_CONST cN;
-// BUILD_TUPLE N` into `NOP; ...; NOP; LOAD_CONST (c1, ..., cN)` when
-// every preceding loader is a constant. The orphaned const slots get
-// reclaimed by removeUnusedConsts.
-//
-// We only fold when the run of N const loaders sits immediately before
-// the BUILD_TUPLE with no jump landing in the middle. The pinned set
-// is computed once over the whole sequence.
+// foldBuildOpAt folds a single BUILD_TUPLE / BUILD_LIST / BUILD_SET at
+// position i, mirroring the per-position dispatch CPython runs from the
+// optimize_basic_block loop. Returns true if a fold landed.
 //
 // CPython: Python/flowgraph.c:1454 fold_tuple_of_constants
-func foldTupleOfConstants(seq *Sequence, consts *[]any) int {
-	if consts == nil || len(seq.Instrs) == 0 {
-		return 0
+// CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
+func foldBuildOpAt(seq *Sequence, consts *[]any, pinned []bool, i int) bool {
+	ins := &seq.Instrs[i]
+	n := int(ins.Oparg)
+	if n <= 0 || i < n {
+		return false
 	}
-	pinned := pinnedTargets(seq)
-	folded := 0
-	for i := range seq.Instrs {
-		ins := &seq.Instrs[i]
-		if ins.Op != BUILD_TUPLE {
-			continue
+	switch ins.Op {
+	case BUILD_TUPLE:
+		// nothing
+	case BUILD_LIST, BUILD_SET:
+		if n < minConstSequenceSize {
+			return false
 		}
-		n := int(ins.Oparg)
-		if n <= 0 || i < n {
-			continue
-		}
-		start := i - n
-		ok, values := collectConstLoaders(seq, *consts, pinned, start, n)
-		if !ok {
-			continue
-		}
-		tuple := &ConstTuple{Values: append([]any(nil), values...)}
+	default:
+		return false
+	}
+	start := i - n
+	ok, values := collectConstLoaders(seq, *consts, pinned, start, n)
+	if !ok {
+		return false
+	}
+	tuple := &ConstTuple{Values: append([]any(nil), values...)}
+	if ins.Op == BUILD_TUPLE {
 		for k := start; k < i; k++ {
 			setNop(&seq.Instrs[k])
 		}
 		idx := appendConst(consts, tuple)
 		ins.Op = LOAD_CONST
 		ins.Oparg = int32(idx)
-		folded++
+		return true
 	}
-	return folded
+	idx := appendConst(consts, tuple)
+	for k := start; k < i-2; k++ {
+		setNop(&seq.Instrs[k])
+	}
+	preludeOp := ins.Op
+	seq.Instrs[i-2].Op = preludeOp
+	seq.Instrs[i-2].Oparg = 0
+	seq.Instrs[i-2].Loc = ins.Loc
+	seq.Instrs[i-1].Op = LOAD_CONST
+	seq.Instrs[i-1].Oparg = int32(idx)
+	seq.Instrs[i-1].Loc = ins.Loc
+	if preludeOp == BUILD_LIST {
+		ins.Op = LIST_EXTEND
+	} else {
+		ins.Op = SET_UPDATE
+	}
+	ins.Oparg = 1
+	return true
 }
 
-// optimizeListsAndSets rewrites `LOAD_CONST c1; ...; LOAD_CONST cN;
-// BUILD_LIST N` (and BUILD_SET) into
+// foldConstSequences walks the flat sequence in order and runs the
+// const-sequence folds CPython's optimize_basic_block dispatches per
+// instruction. Replacing the two separate whole-sequence sweeps with a
+// single in-order pass keeps the order of new const-pool entries the
+// same as CPython's: a BUILD_LIST at source line N gets its tuple
+// appended before a BUILD_TUPLE at line N+10, instead of after every
+// BUILD_TUPLE in the unit.
 //
-//	NOP; ...; BUILD_LIST 0; LOAD_CONST (c1, ..., cN); LIST_EXTEND 1
-//
-// when the run of N loaders is all constants and N is large enough to
-// pay for the prelude. CPython's pass also handles the GET_ITER /
-// CONTAINS_OP follow-up (collapse the literal to a tuple/frozenset and
-// drop the BUILD_X), but that branch is not on spec 1713's hot path
-// yet. The body-of-loop case is the one disdata/for_simple.py exercises.
-//
-// CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
-func optimizeListsAndSets(seq *Sequence, consts *[]any) int {
-	if consts == nil || len(seq.Instrs) < 3 {
+// CPython: Python/flowgraph.c:2311 optimize_basic_block (BUILD_TUPLE /
+// BUILD_LIST / BUILD_SET cases)
+func foldConstSequences(seq *Sequence, consts *[]any) int {
+	if consts == nil || len(seq.Instrs) == 0 {
 		return 0
 	}
 	pinned := pinnedTargets(seq)
 	folded := 0
 	for i := range seq.Instrs {
-		ins := &seq.Instrs[i]
-		if ins.Op != BUILD_LIST && ins.Op != BUILD_SET {
+		op := seq.Instrs[i].Op
+		if op != BUILD_TUPLE && op != BUILD_LIST && op != BUILD_SET {
 			continue
 		}
-		n := int(ins.Oparg)
-		if n < minConstSequenceSize || i < n {
-			continue
+		if foldBuildOpAt(seq, consts, pinned, i) {
+			folded++
 		}
-		start := i - n
-		ok, values := collectConstLoaders(seq, *consts, pinned, start, n)
-		if !ok {
-			continue
-		}
-		tuple := &ConstTuple{Values: append([]any(nil), values...)}
-		// Need at least two preceding instruction slots: one for the
-		// BUILD_X 0 prelude and one for the LOAD_CONST. The const
-		// loaders run takes care of that (n >= 3).
-		idx := appendConst(consts, tuple)
-		// NOP every loader except the last two slots, which carry the
-		// prelude and the LOAD_CONST.
-		for k := start; k < i-2; k++ {
-			setNop(&seq.Instrs[k])
-		}
-		preludeOp := ins.Op
-		seq.Instrs[i-2].Op = preludeOp
-		seq.Instrs[i-2].Oparg = 0
-		seq.Instrs[i-2].Loc = ins.Loc
-		seq.Instrs[i-1].Op = LOAD_CONST
-		seq.Instrs[i-1].Oparg = int32(idx)
-		seq.Instrs[i-1].Loc = ins.Loc
-		if preludeOp == BUILD_LIST {
-			ins.Op = LIST_EXTEND
-		} else {
-			ins.Op = SET_UPDATE
-		}
-		ins.Oparg = 1
-		folded++
 	}
 	return folded
 }
@@ -1086,6 +1209,21 @@ func tryPeepholePair(a, b *Instr) bool {
 			return true
 		case UNARY_NOT:
 			setNop(a)
+			setNop(b)
+			return true
+		}
+	case LOAD_GLOBAL:
+		// Fold LOAD_GLOBAL + PUSH_NULL into LOAD_GLOBAL with bit 0
+		// of oparg set (the NULL flag). The fused form pushes the
+		// global then a NULL marker, matching the codegen pattern of
+		// LOAD_GLOBAL followed by PUSH_NULL. Unlike the other rules,
+		// this rewrites the FIRST instruction (LOAD_GLOBAL stays,
+		// gains the flag) and NOPs the SECOND (PUSH_NULL drops).
+		//
+		// CPython: Python/flowgraph.c:2443 optimize_basic_block
+		// (case LOAD_GLOBAL).
+		if b.Op == PUSH_NULL && (origArg&1) == 0 {
+			a.Oparg = origArg | 1
 			setNop(b)
 			return true
 		}

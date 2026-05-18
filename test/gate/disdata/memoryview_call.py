@@ -1,0 +1,1 @@
+print(memoryview(b"abc"))

@@ -1,0 +1,1 @@
+raise TypeError("bad type")

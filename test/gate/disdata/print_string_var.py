@@ -1,0 +1,2 @@
+s = "hi"
+print(s)

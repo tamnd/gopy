@@ -15,5 +15,9 @@ Disassembly of C:
      4 STORE_NAME                     1
      6 LOAD_CONST                     0
      8 STORE_NAME                     2
-    10 LOAD_CONST                     1
-    12 RETURN_VALUE                   0
+    10 LOAD_SMALL_INT                 0
+    12 STORE_NAME                     3
+    14 LOAD_CONST                     1
+    16 STORE_NAME                     4
+    18 LOAD_CONST                     2
+    20 RETURN_VALUE                   0

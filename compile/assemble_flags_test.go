@@ -28,14 +28,50 @@ func TestFinalizeFlagsWithFrees(t *testing.T) {
 	}
 }
 
-// TestConstCacheKeyTypeAware: int(1) and int64(1) and float64(1.0)
-// each get distinct cache slots.
-func TestConstCacheKeyTypeAware(t *testing.T) {
-	a := constCacheKey(int(1))
-	b := constCacheKey(int64(1))
-	c := constCacheKey(float64(1.0))
-	if a == b || a == c || b == c {
-		t.Errorf("cache keys collide: int=%v int64=%v float=%v", a, b, c)
+// TestConstCacheKeyIntFloatBool: 1 (int), 1.0 (float), True (bool)
+// and "1" (str) get distinct slots, but Go's int / int32 / int64 all
+// collapse onto the same Python int slot. CPython keys ints by value
+// alone (`Py_NewRef(op)`) while tagging bool/float separately, so the
+// distinct-types-with-same-value triple must stay split here.
+//
+// CPython: Objects/codeobject.c:3035 _PyCode_ConstantKey
+func TestConstCacheKeyIntFloatBool(t *testing.T) {
+	intKey := constCacheKey(int64(1))
+	if k := constCacheKey(int(1)); k != intKey {
+		t.Errorf("int(1) and int64(1) should share a slot: %v vs %v", k, intKey)
+	}
+	if k := constCacheKey(int32(1)); k != intKey {
+		t.Errorf("int32(1) and int64(1) should share a slot: %v vs %v", k, intKey)
+	}
+	floatKey := constCacheKey(float64(1.0))
+	boolKey := constCacheKey(true)
+	strKey := constCacheKey("1")
+	if intKey == floatKey || intKey == boolKey || intKey == strKey {
+		t.Errorf("int collides: int=%v float=%v bool=%v str=%v",
+			intKey, floatKey, boolKey, strKey)
+	}
+	if floatKey == boolKey || floatKey == strKey || boolKey == strKey {
+		t.Errorf("float/bool/str collide: float=%v bool=%v str=%v",
+			floatKey, boolKey, strKey)
+	}
+}
+
+// TestConstCacheKeyTupleByValue: equal-by-value tuples share a slot
+// even when emitted from separate codegen sites (different *ConstTuple
+// pointers). This mirrors CPython's recursive tuple-of-keys packing.
+//
+// CPython: Objects/codeobject.c:3090 _PyCode_ConstantKey tuple branch
+func TestConstCacheKeyTupleByValue(t *testing.T) {
+	a := &ConstTuple{Values: []any{int64(1), "x", nil}}
+	b := &ConstTuple{Values: []any{int64(1), "x", nil}}
+	if constCacheKey(a) != constCacheKey(b) {
+		t.Errorf("equal-by-value tuples should dedupe: %v vs %v",
+			constCacheKey(a), constCacheKey(b))
+	}
+	c := &ConstTuple{Values: []any{int64(1), "x", "y"}}
+	if constCacheKey(a) == constCacheKey(c) {
+		t.Errorf("differing tuples should not dedupe: %v",
+			constCacheKey(a))
 	}
 }
 
