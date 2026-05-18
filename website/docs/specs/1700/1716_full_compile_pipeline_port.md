@@ -81,7 +81,32 @@ same commit that flips a row.
 | D.1   | Flip `assembleUnit` to the cfg driver                                                                                       | done        | `c124587` |
 | D.2   | Delete `compile/flowgraph_passes.go`, `flowgraph_jumps.go`, `flowgraph_except.go`, `flowgraph_locals.go`, `flowgraph_stackdepth.go` | done        | `8d12ecf` |
 | D.3   | Rename cfg files so the filename map in **Goal** holds                                                                       | done        | `8d12ecf` |
-| E     | All gates green; 1713 byte-equality work resumes on the new substrate                                                       | pending     | -         |
+| E     | All gates green; 1713 byte-equality work resumes on the new substrate                                                       | done        | `6004c1c` |
+
+## Checklist
+
+- [x] Phase A: function-by-function audit of `Python/flowgraph.c`,
+      `Python/assemble.c`, and the
+      `optimize_and_assemble_code_unit` driver.
+- [x] Phase B.0: gopy substrate (`DumpCfg`, `CfgPhaseHook`).
+- [x] Phase B.1: CPython patch adding `_testinternalcapi.set_cfg_phase_hook`
+      and the per-phase dump format.
+- [x] Phase B.2: CPython oracle wrappers (codegen / optimize / assemble).
+- [x] Phase B.3: diff harness `test/gate/cfg_phase_parity_test.go` plus
+      `cfg_phase_corpus.txt` + `cfg_phase_skip.txt`.
+- [x] Phase C.1: finish `Python/flowgraph.c` port
+      (`convert_pseudo_conditional_jumps`, `prepare_localsplus`,
+      `_PyCfg_OptimizedCfgToInstructionSequence`, helpers).
+- [x] Phase C.2: finish `Python/assemble.c` port, split across
+      `compile/assemble.go` + `assemble_makecode.go` + `assemble_jumps.go`.
+- [x] Phase C.3: port `optimize_and_assemble_code_unit` driver
+      into `compile/compiler_assemble.go`.
+- [x] Phase D.1: flip `assembleUnit` to the cfg driver.
+- [x] Phase D.2: delete the flat-sequence pass files.
+- [x] Phase D.3: rename cfg files so the filename map in **Goal** holds.
+- [x] Phase E: add the L1 / L3 / L4 gate suite
+      (`compile/parity_dump.go`, `test/gate/codegen_parity_test.go`,
+      `test/gate/assemble_parity_test.go`, corpus + skip files).
 
 ## Goal
 
@@ -456,8 +481,8 @@ Each phase keeps existing gates green and adds its own:
 | `test/gate/TestDisParity`                     | spec 1713                            | green   | -      |
 | `compile/...` package tests                   | spec 1716 (existing)                 | green   | -      |
 | `test/gate/cfg_phase_parity_test.go` (L2)     | this spec, B.3                       | green   | `fbb22f7` |
-| `test/gate/codegen_parity_test.go` (L1)       | this spec, B.2                       | pending | -      |
-| `test/gate/assemble_parity_test.go` (L3 / L4) | this spec, B.2 + spec 1713 byte-eq   | pending | -      |
+| `test/gate/codegen_parity_test.go` (L1)       | this spec, B.2                       | green   | `6004c1c` |
+| `test/gate/assemble_parity_test.go` (L3 / L4) | this spec, B.2 + spec 1713 byte-eq   | green   | `6004c1c` |
 
 Once D lands, the byte-equality work in 1713 can resume on a
 substrate that matches CPython, so divergences localize to the
