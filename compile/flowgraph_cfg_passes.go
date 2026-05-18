@@ -1865,6 +1865,12 @@ func cfgOptimizeCfg(g *cfgBuilder, consts *[]any, firstlineno int) error {
 	return nil
 }
 
+// CfgPhaseHook is called after every named phase inside
+// cfgOptimizeCodeUnit. Per-phase compat tests (spec 1716 Phase B)
+// register a hook that dumps the graph at each call point so the
+// dumps diff against a CPython-side dump at the same phase boundary.
+type CfgPhaseHook func(phase string, g *cfgBuilder)
+
 // cfgOptimizeCodeUnit is the public entry point that wraps the whole
 // pipeline. Preprocessing translates jump labels to targets, marks
 // exception handlers, and propagates the handler stack through the
@@ -1876,18 +1882,39 @@ func cfgOptimizeCfg(g *cfgBuilder, consts *[]any, firstlineno int) error {
 //
 // CPython: Python/flowgraph.c:3658 _PyCfg_OptimizeCodeUnit
 func cfgOptimizeCodeUnit(g *cfgBuilder, consts *[]any, nlocals, nparams, firstlineno int) error {
+	return cfgOptimizeCodeUnitWithHook(g, consts, nlocals, nparams, firstlineno, nil)
+}
+
+// cfgOptimizeCodeUnitWithHook is cfgOptimizeCodeUnit plus a hook that
+// fires after every phase boundary. Passing nil for hook is identical
+// to calling cfgOptimizeCodeUnit directly.
+func cfgOptimizeCodeUnitWithHook(g *cfgBuilder, consts *[]any, nlocals, nparams, firstlineno int, hook CfgPhaseHook) error {
+	fire := func(phase string) {
+		if hook != nil {
+			hook(phase, g)
+		}
+	}
 	cfgTranslateJumpLabelsToTargets(g)
+	fire("translate_jump_labels_to_targets")
 	cfgMarkExceptHandlers(g)
+	fire("mark_except_handlers")
 	cfgLabelExceptionTargets(g.EntryBlock)
+	fire("label_exception_targets")
 	if err := cfgOptimizeCfg(g, consts, firstlineno); err != nil {
 		return err
 	}
+	fire("optimize_cfg")
 	cfgRemoveUnusedConsts(g.EntryBlock, consts)
+	fire("remove_unused_consts")
 	if err := addChecksForLoadsOfUninitializedVariables(g.EntryBlock, nlocals, nparams); err != nil {
 		return err
 	}
+	fire("add_checks_for_loads_of_uninitialized_variables")
 	cfgInsertSuperinstructions(g)
+	fire("insert_superinstructions")
 	cfgPushColdBlocksToEnd(g)
+	fire("push_cold_blocks_to_end")
 	cfgResolveLineNumbers(g, firstlineno)
+	fire("resolve_line_numbers")
 	return nil
 }
