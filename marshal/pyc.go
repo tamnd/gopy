@@ -20,15 +20,20 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// MagicNumber is the gopy .pyc wire-format discriminator. The low two
-// bytes are a little-endian magic tag; the high two bytes are always
-// \r\n so that text-mode file transfers are detectable. The numeric
-// tag (3627) tracks CPython 3.14's PYC_MAGIC_NUMBER one-for-one; bump
-// this constant in lockstep with the header any time CPython does.
+// MagicNumber is the gopy .pyc wire-format discriminator. Written
+// little-endian as the first four bytes of every .pyc file: the low
+// two bytes carry the magic tag (3627 = CPython 3.14's
+// PYC_MAGIC_NUMBER), and the high two bytes carry b'\r\n' so that
+// text-mode file transfers are detectable. CPython packs this as
+// PYC_MAGIC_NUMBER_TOKEN = MAGIC | ('\r' << 16) | ('\n' << 24), so the
+// uint32 looks like 0x0A0D_0E2B and writes the bytes [0x2b, 0x0e,
+// 0x0d, 0x0a] in that order. Bump this constant in lockstep with the
+// header any time CPython does.
 //
 // CPython: Include/internal/pycore_magic_number.h:295 PYC_MAGIC_NUMBER
+// CPython: Include/internal/pycore_magic_number.h PYC_MAGIC_NUMBER_TOKEN
 // CPython: Lib/importlib/_bootstrap_external.py:222 MAGIC_NUMBER
-const MagicNumber uint32 = (3627 | (0x0D0A << 16))
+const MagicNumber uint32 = (3627 | (uint32('\r') << 16) | (uint32('\n') << 24))
 
 // pyc flags for the bit-field at bytes [4:8].
 //
