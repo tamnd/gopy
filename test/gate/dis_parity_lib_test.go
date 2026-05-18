@@ -15,7 +15,7 @@ import (
 // painting CI red on every vendored slice. Phase 3 of spec 1713 is done
 // when this map is empty and every vendored Lib/ file passes Compare.
 var libKnownFailing = map[string]string{
-	"__future__.py": "co_consts ordering: _Feature class body emits extra const slots before kwarg tuple",
+	"__future__.py": "optimize_load_fast peephole: LOAD_FAST stays LOAD_FAST instead of LOAD_FAST_BORROW / LOAD_FAST_BORROW_LOAD_FAST_BORROW, and LOAD_GLOBAL skips the NULL-push flag fold (task #660)",
 }
 
 // TestDisParityLib drives spec 1713 Phase 3: dis-stream byte-equality on

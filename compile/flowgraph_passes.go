@@ -507,104 +507,87 @@ func loadsConstValue(ins *Instr, consts []any) (any, bool) {
 // CPython: Python/flowgraph.c:1585 MIN_CONST_SEQUENCE_SIZE
 const minConstSequenceSize = 3
 
-// foldTupleOfConstants rewrites `LOAD_CONST c1; ...; LOAD_CONST cN;
-// BUILD_TUPLE N` into `NOP; ...; NOP; LOAD_CONST (c1, ..., cN)` when
-// every preceding loader is a constant. The orphaned const slots get
-// reclaimed by removeUnusedConsts.
-//
-// We only fold when the run of N const loaders sits immediately before
-// the BUILD_TUPLE with no jump landing in the middle. The pinned set
-// is computed once over the whole sequence.
+// foldBuildOpAt folds a single BUILD_TUPLE / BUILD_LIST / BUILD_SET at
+// position i, mirroring the per-position dispatch CPython runs from the
+// optimize_basic_block loop. Returns true if a fold landed.
 //
 // CPython: Python/flowgraph.c:1454 fold_tuple_of_constants
-func foldTupleOfConstants(seq *Sequence, consts *[]any) int {
-	if consts == nil || len(seq.Instrs) == 0 {
-		return 0
+// CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
+func foldBuildOpAt(seq *Sequence, consts *[]any, pinned []bool, i int) bool {
+	ins := &seq.Instrs[i]
+	n := int(ins.Oparg)
+	if n <= 0 || i < n {
+		return false
 	}
-	pinned := pinnedTargets(seq)
-	folded := 0
-	for i := range seq.Instrs {
-		ins := &seq.Instrs[i]
-		if ins.Op != BUILD_TUPLE {
-			continue
+	switch ins.Op {
+	case BUILD_TUPLE:
+		// nothing
+	case BUILD_LIST, BUILD_SET:
+		if n < minConstSequenceSize {
+			return false
 		}
-		n := int(ins.Oparg)
-		if n <= 0 || i < n {
-			continue
-		}
-		start := i - n
-		ok, values := collectConstLoaders(seq, *consts, pinned, start, n)
-		if !ok {
-			continue
-		}
-		tuple := &ConstTuple{Values: append([]any(nil), values...)}
+	default:
+		return false
+	}
+	start := i - n
+	ok, values := collectConstLoaders(seq, *consts, pinned, start, n)
+	if !ok {
+		return false
+	}
+	tuple := &ConstTuple{Values: append([]any(nil), values...)}
+	if ins.Op == BUILD_TUPLE {
 		for k := start; k < i; k++ {
 			setNop(&seq.Instrs[k])
 		}
 		idx := appendConst(consts, tuple)
 		ins.Op = LOAD_CONST
 		ins.Oparg = int32(idx)
-		folded++
+		return true
 	}
-	return folded
+	idx := appendConst(consts, tuple)
+	for k := start; k < i-2; k++ {
+		setNop(&seq.Instrs[k])
+	}
+	preludeOp := ins.Op
+	seq.Instrs[i-2].Op = preludeOp
+	seq.Instrs[i-2].Oparg = 0
+	seq.Instrs[i-2].Loc = ins.Loc
+	seq.Instrs[i-1].Op = LOAD_CONST
+	seq.Instrs[i-1].Oparg = int32(idx)
+	seq.Instrs[i-1].Loc = ins.Loc
+	if preludeOp == BUILD_LIST {
+		ins.Op = LIST_EXTEND
+	} else {
+		ins.Op = SET_UPDATE
+	}
+	ins.Oparg = 1
+	return true
 }
 
-// optimizeListsAndSets rewrites `LOAD_CONST c1; ...; LOAD_CONST cN;
-// BUILD_LIST N` (and BUILD_SET) into
+// foldConstSequences walks the flat sequence in order and runs the
+// const-sequence folds CPython's optimize_basic_block dispatches per
+// instruction. Replacing the two separate whole-sequence sweeps with a
+// single in-order pass keeps the order of new const-pool entries the
+// same as CPython's: a BUILD_LIST at source line N gets its tuple
+// appended before a BUILD_TUPLE at line N+10, instead of after every
+// BUILD_TUPLE in the unit.
 //
-//	NOP; ...; BUILD_LIST 0; LOAD_CONST (c1, ..., cN); LIST_EXTEND 1
-//
-// when the run of N loaders is all constants and N is large enough to
-// pay for the prelude. CPython's pass also handles the GET_ITER /
-// CONTAINS_OP follow-up (collapse the literal to a tuple/frozenset and
-// drop the BUILD_X), but that branch is not on spec 1713's hot path
-// yet. The body-of-loop case is the one disdata/for_simple.py exercises.
-//
-// CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
-func optimizeListsAndSets(seq *Sequence, consts *[]any) int {
-	if consts == nil || len(seq.Instrs) < 3 {
+// CPython: Python/flowgraph.c:2311 optimize_basic_block (BUILD_TUPLE /
+// BUILD_LIST / BUILD_SET cases)
+func foldConstSequences(seq *Sequence, consts *[]any) int {
+	if consts == nil || len(seq.Instrs) == 0 {
 		return 0
 	}
 	pinned := pinnedTargets(seq)
 	folded := 0
 	for i := range seq.Instrs {
-		ins := &seq.Instrs[i]
-		if ins.Op != BUILD_LIST && ins.Op != BUILD_SET {
+		op := seq.Instrs[i].Op
+		if op != BUILD_TUPLE && op != BUILD_LIST && op != BUILD_SET {
 			continue
 		}
-		n := int(ins.Oparg)
-		if n < minConstSequenceSize || i < n {
-			continue
+		if foldBuildOpAt(seq, consts, pinned, i) {
+			folded++
 		}
-		start := i - n
-		ok, values := collectConstLoaders(seq, *consts, pinned, start, n)
-		if !ok {
-			continue
-		}
-		tuple := &ConstTuple{Values: append([]any(nil), values...)}
-		// Need at least two preceding instruction slots: one for the
-		// BUILD_X 0 prelude and one for the LOAD_CONST. The const
-		// loaders run takes care of that (n >= 3).
-		idx := appendConst(consts, tuple)
-		// NOP every loader except the last two slots, which carry the
-		// prelude and the LOAD_CONST.
-		for k := start; k < i-2; k++ {
-			setNop(&seq.Instrs[k])
-		}
-		preludeOp := ins.Op
-		seq.Instrs[i-2].Op = preludeOp
-		seq.Instrs[i-2].Oparg = 0
-		seq.Instrs[i-2].Loc = ins.Loc
-		seq.Instrs[i-1].Op = LOAD_CONST
-		seq.Instrs[i-1].Oparg = int32(idx)
-		seq.Instrs[i-1].Loc = ins.Loc
-		if preludeOp == BUILD_LIST {
-			ins.Op = LIST_EXTEND
-		} else {
-			ins.Op = SET_UPDATE
-		}
-		ins.Oparg = 1
-		folded++
 	}
 	return folded
 }
