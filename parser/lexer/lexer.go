@@ -543,10 +543,22 @@ func (s *State) scanString(quote int) Tok {
 			s.recordError("unterminated string literal")
 			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 		case '\\':
-			if s.nextC() == eof {
+			escaped := s.nextC()
+			if escaped == eof {
 				s.done = eEOFS
 				s.recordError("unterminated string literal")
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			// `\<newline>` inside a string literal still consumes a
+			// physical line. CPython's tok_nextc bumps tok->lineno on
+			// every '\n' regardless of context; gopy's scanString uses
+			// the raw nextC for the escape byte and must track the
+			// line bump itself.
+			//
+			// CPython: Parser/lexer/lexer.c:1205 (line counter in nextc)
+			if escaped == '\n' {
+				s.pendingLineno++
+				s.col = 0
 			}
 			continue
 		case '\n':
