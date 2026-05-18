@@ -297,3 +297,68 @@ func (g *cfgBuilder) copyBasicblock(src *basicblock) *basicblock {
 func isJumpOpcode(op Opcode) bool {
 	return hasJumpTarget(op)
 }
+
+// hasJumpTarget reports whether op encodes a jump destination in its
+// oparg. Mirrors OPCODE_HAS_JUMP plus the pseudo JUMP / JUMP_NO_INTERRUPT
+// and SETUP_X family that gopy keeps outside the auto-generated metadata.
+// HasTarget alone returns false for the pseudo forms, which would leave
+// their opargs unrewritten by the NOP-compaction pass.
+//
+// CPython: Python/flowgraph.c:107 is_jump + OPCODE_HAS_JUMP
+func hasJumpTarget(op Opcode) bool {
+	switch op {
+	case JUMP, JUMP_NO_INTERRUPT, SETUP_FINALLY, SETUP_WITH, SETUP_CLEANUP:
+		return true
+	}
+	return HasTarget(op)
+}
+
+// isTerminator reports whether op ends a basic block by control flow.
+// Mirrors the CPython predicate IS_TERMINATOR_OPCODE.
+//
+// CPython: Include/internal/pycore_opcode_utils.h IS_TERMINATOR_OPCODE
+func isTerminator(op Opcode) bool {
+	switch op {
+	case RETURN_VALUE, RAISE_VARARGS, RERAISE, INTERPRETER_EXIT:
+		return true
+	}
+	return false
+}
+
+// isUnconditionalJump reports whether op is one of the unconditional
+// jump opcodes (real or pseudo). The pseudo-op `JUMP` is treated as
+// unconditional too because pseudo-op lowering still hands it to the
+// jump panel.
+//
+// CPython: Include/internal/pycore_opcode_utils.h IS_UNCONDITIONAL_JUMP_OPCODE
+func isUnconditionalJump(op Opcode) bool {
+	switch op {
+	case JUMP, JUMP_NO_INTERRUPT, JUMP_FORWARD, JUMP_BACKWARD, JUMP_BACKWARD_NO_INTERRUPT:
+		return true
+	}
+	return false
+}
+
+// isBackwardsJump matches IS_BACKWARDS_JUMP_OPCODE.
+//
+// CPython: Include/internal/pycore_opcode_utils.h:35 IS_BACKWARDS_JUMP_OPCODE
+func isBackwardsJump(op Opcode) bool {
+	switch op {
+	case JUMP_BACKWARD, JUMP_BACKWARD_NO_INTERRUPT:
+		return true
+	}
+	return false
+}
+
+// isConditionalJump reports whether op is one of the POP_JUMP_IF_*
+// family.
+//
+// CPython: Include/internal/pycore_opcode_utils.h IS_CONDITIONAL_JUMP_OPCODE
+func isConditionalJump(op Opcode) bool {
+	switch op {
+	case POP_JUMP_IF_FALSE, POP_JUMP_IF_TRUE,
+		POP_JUMP_IF_NONE, POP_JUMP_IF_NOT_NONE:
+		return true
+	}
+	return false
+}

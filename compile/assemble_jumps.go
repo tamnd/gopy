@@ -92,8 +92,6 @@ func resolveJumpOffsets(instrs *Sequence) {
 				// here.
 				ins.Oparg = int32(curOffset - int(ins.Oparg) - endSendOffset)
 			case int(ins.Oparg) < curOffset:
-				// IS_BACKWARDS_JUMP_OPCODE assertion in CPython.
-				_ = isBackwardsJump
 				ins.Oparg = int32(curOffset - int(ins.Oparg))
 			default:
 				ins.Oparg = int32(int(ins.Oparg) - curOffset)

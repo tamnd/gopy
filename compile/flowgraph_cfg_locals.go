@@ -1,7 +1,5 @@
 // optimize_load_fast and the uninitialized-locals scanner ported onto
-// the cfgBuilder graph. Stackdepth lives in
-// flowgraph_cfg_stackdepth.go; the flat-sequence shim in
-// flowgraph_stackdepth.go stays until phase 6 of spec 1715 retires it.
+// the cfgBuilder graph. Stackdepth lives in flowgraph_cfg_stackdepth.go.
 //
 // CPython: Python/flowgraph.c:2637 ref_stack_push / pop / swap_top / at / clear
 // CPython: Python/flowgraph.c:2707 kill_local
