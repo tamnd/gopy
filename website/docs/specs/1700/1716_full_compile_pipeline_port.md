@@ -133,12 +133,12 @@ C.2 / C.3 land the missing functions.
 | `mark_warm` / `mark_cold` / `push_cold_blocks_to_end` | 3174 / 3273 / 3323 | ported 1:1                                                       | done    | `3b1fb50` |
 | `insert_superinstructions`                        | 3404         | ported 1:1                                                          | done    | `caf4e13` |
 | `add_checks_for_loads_of_uninitialized_variables` | 2843         | ported 1:1 (lives in `flowgraph_cfg_locals.go`)                     | done    | `e94fcfa` |
-| `convert_pseudo_conditional_jumps`                | 3478         | partial, only flat-sequence `peepholeOpcodePairs` covers a subset   | partial | C.1       |
-| `calculate_stackdepth` (graph version)            | 1352         | partial, flat-sequence in `flowgraph_stackdepth.go`                 | partial | C.1       |
-| `prepare_localsplus`                              | 3768         | missing (flat-sequence `insertPrefixInstructions` covers prefix)    | missing | C.1       |
-| `build_cellfixedoffsets`                          | 3711         | missing                                                             | missing | C.1       |
-| `insert_prefix_instructions` (graph version)      | 3760         | partial, flat-sequence only                                         | partial | C.1       |
-| `fix_cell_offsets`                                | 3729         | missing                                                             | missing | C.1       |
+| `convert_pseudo_conditional_jumps`                | 3478         | ported 1:1 onto cfgBuilder                                          | done    | `a62563b` |
+| `calculate_stackdepth` (graph version)            | 1352         | ported 1:1 (`flowgraph_cfg_stackdepth.go`)                          | done    | `3dfe874` |
+| `prepare_localsplus`                              | 3768         | ported 1:1                                                          | done    | `ea74ea5` |
+| `build_cellfixedoffsets`                          | 3711         | ported 1:1                                                          | done    | `ea74ea5` |
+| `insert_prefix_instructions` (graph version)      | 3760         | ported 1:1                                                          | done    | `ea74ea5` |
+| `fix_cell_offsets`                                | 3729         | ported 1:1                                                          | done    | `ea74ea5` |
 | `_PyCfg_OptimizedCfgToInstructionSequence`        | 4026         | missing as a single function (callers cobble it from pieces)        | missing | C.1       |
 
 ### A.2. `Python/assemble.c` (802 lines)
@@ -348,10 +348,10 @@ across phases.
 | ---------------------------------------------- | ------------ | ----------------------------------- | ------- | ------ |
 | `convert_pseudo_conditional_jumps`             | 3478         | `flowgraph_cfg_passes.go`           | done    | `a62563b` |
 | `calculate_stackdepth` (graph version)         | 1352         | `flowgraph_cfg_stackdepth.go` (new) | done    | `3dfe874` |
-| `build_cellfixedoffsets`                       | 3711         | `flowgraph_cfg_passes.go`           | done    | (this commit) |
-| `insert_prefix_instructions` (graph version)   | 3760         | `flowgraph_cfg_passes.go`           | done    | (this commit) |
-| `fix_cell_offsets`                             | 3729         | `flowgraph_cfg_passes.go`           | done    | (this commit) |
-| `prepare_localsplus`                           | 3768         | `flowgraph_cfg_passes.go`           | done    | (this commit) |
+| `build_cellfixedoffsets`                       | 3711         | `flowgraph_cfg_passes.go`           | done    | `ea74ea5` |
+| `insert_prefix_instructions` (graph version)   | 3760         | `flowgraph_cfg_passes.go`           | done    | `ea74ea5` |
+| `fix_cell_offsets`                             | 3729         | `flowgraph_cfg_passes.go`           | done    | `ea74ea5` |
+| `prepare_localsplus`                           | 3768         | `flowgraph_cfg_passes.go`           | done    | `ea74ea5` |
 | `_PyCfg_OptimizedCfgToInstructionSequence`     | 4026         | `flowgraph_cfg_bridge.go`           | pending | -      |
 | Sweep: diff cfg-side function list vs `Python/flowgraph.c`; flag elisions and follow-ups | -    | -                                   | pending | -      |
 
