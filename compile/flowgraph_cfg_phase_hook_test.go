@@ -22,6 +22,7 @@ func TestCfgOptimizeCodeUnitFiresEveryPhase(t *testing.T) {
 		t.Fatalf("cfgOptimizeCodeUnitWithHook: %v", err)
 	}
 	want := []string{
+		"entry",
 		"translate_jump_labels_to_targets",
 		"mark_except_handlers",
 		"label_exception_targets",

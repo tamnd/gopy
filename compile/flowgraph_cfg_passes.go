@@ -1894,6 +1894,7 @@ func cfgOptimizeCodeUnitWithHook(g *cfgBuilder, consts *[]any, nlocals, nparams,
 			hook(phase, g)
 		}
 	}
+	fire("entry")
 	cfgTranslateJumpLabelsToTargets(g)
 	fire("translate_jump_labels_to_targets")
 	cfgMarkExceptHandlers(g)
