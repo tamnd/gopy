@@ -217,6 +217,7 @@ full `test/cpython/Lib/` corpus, not just the 30-fixture starter.
 | 1:1 audit of `Python/codegen.c` against `compile/codegen*.go` (citation pass) | TODO | - |
 | 1:1 audit of `Python/flowgraph.c` against `compile/flowgraph*.go` (citation pass) | TODO | - |
 | Port every missing flowgraph optimization pass surfaced by Phase 2 diffs | TODO | - |
+| Vendor first `test/cpython/Lib/` slice + add `test/gate/dis_parity_lib_test.go` skeleton with per-file known-failing map | done (keyword.py + __future__.py vendored; both currently skip with `task #662` / `task #664` reasons) | (current branch) |
 | Dis-stream gate green on full `test/cpython/Lib/` corpus | TODO | - |
 
 ## Phase 4 — code-object field audit
