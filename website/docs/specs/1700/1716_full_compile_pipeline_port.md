@@ -401,6 +401,28 @@ flat-sequence files lined up cleanly except for two classes:
    the helpers in (1) are tracked here so D.2 can resolve them
    atomically with the file deletions.
 
+4. **Codegen-side MAKE_CELL / COPY_FREE_VARS removal.** Until C.1
+   landed, gopy's codegen emitted `MAKE_CELL` for each cell var and
+   `COPY_FREE_VARS` at the start of every function / class / inner
+   comprehension body (see the deleted `emitMakeCellAndCopyFree` in
+   `compile/codegen_stmt_funclike.go`). CPython only emits
+   `MAKE_CELL` inline for inlined comprehensions
+   (`Python/codegen.c:4660` `codegen_push_inlined_comprehension_locals`);
+   for everything else the prologue is produced by
+   `insert_prefix_instructions` during `prepare_localsplus`. Now
+   that C.1's prepare_localsplus runs unconditionally, the codegen
+   emissions were duplicate prologue ops and the
+   `fix_cell_offsets` rewrite landed on top of the wrong opargs.
+   The codegen paths in `codegen_stmt_funclike.go`,
+   `codegen_expr_comp.go`, `codegen_annotations.go`, and
+   `codegen_class.go` no longer emit `MAKE_CELL` / `COPY_FREE_VARS`;
+   `enterScope` pre-populates `u.CellVars` from the symtable so the
+   cfg pipeline sees every cell name. The VM handlers (`MAKE_CELL`,
+   `LOAD_CLOSURE`, `LOAD_DEREF`, `STORE_DEREF`, `DELETE_DEREF`,
+   `LOAD_FROM_DICT_OR_DEREF`) now treat `oparg` as the final
+   localsplus offset post `fix_cell_offsets`, matching
+   `Python/bytecodes.c:1862`.
+
 ### C.2. Finish `Python/assemble.c`
 
 | Split                                                                                                           | Lands in                  | Status  | Commit |

@@ -29,15 +29,16 @@ import "fmt"
 // const_cache (a private interp-level dedup table); gopy does the same
 // dedup inside codegen via objects.constantKey, so the cache argument
 // goes away. nlocals is len(unit.VarNames). nparams comes from
-// symtable's ste_varnames in CPython; gopy stores the same count as
-// Argcount + KwOnlyArgCount (positional plus kwonly, the only names
-// that always have a value before the body runs).
+// symtable's ste_varnames in CPython (posonly + posorkw + kwonly named
+// params); gopy stores the same three counts on Unit separately, so the
+// sum reproduces ste_varnames length.
 //
 // CPython: Python/compile.c:1411 optimize_and_assemble_code_unit
+// CPython: Python/compile.c:1429 nparams = PyList_GET_SIZE(u_ste->ste_varnames)
 func optimizeAndAssembleCodeUnit(unit *Unit, codeFlags uint32, filename string) (*Code, error) {
 	g := cfgFromSequence(unit.Seq)
 	nlocals := len(unit.VarNames)
-	nparams := unit.Argcount + unit.KwOnlyArgCount
+	nparams := unit.PosOnlyArgCount + unit.Argcount + unit.KwOnlyArgCount
 	if err := cfgOptimizeCodeUnit(g, &unit.Consts, nlocals, nparams, unit.FirstLineno); err != nil {
 		return nil, fmt.Errorf("compile: %s: cfg optimize: %w", unit.Name, err)
 	}

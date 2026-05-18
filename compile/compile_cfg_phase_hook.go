@@ -93,7 +93,8 @@ func runCfgPhaseHook(unit *Unit, hook CompilePhaseHook) error {
 	}
 	consts := unit.Consts
 	nlocals := len(unit.VarNames)
-	if err := cfgOptimizeCodeUnitWithHook(g, &consts, nlocals, unit.Argcount, unit.FirstLineno, phaseHook); err != nil {
+	nparams := unit.PosOnlyArgCount + unit.Argcount + unit.KwOnlyArgCount
+	if err := cfgOptimizeCodeUnitWithHook(g, &consts, nlocals, nparams, unit.FirstLineno, phaseHook); err != nil {
 		return fmt.Errorf("compile: %s: cfg pipeline: %w", unitName, err)
 	}
 	return nil

@@ -93,9 +93,12 @@ func (c *Compiler) emitAnnotateBody(innerScope *symtable.Entry, deferred []defer
 	c.addOpI(RAISE_VARARGS, 1, l)
 	c.useLabel(body)
 
-	if err := c.emitMakeCellAndCopyFree(innerScope, l); err != nil {
-		return err
-	}
+	// MAKE_CELL / COPY_FREE_VARS get inserted by the cfg pipeline's
+	// prepare_localsplus at the entry block; codegen no longer emits
+	// them inline.
+	//
+	// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
+	_ = innerScope
 
 	// Build the dict on top of stack, then for each annotation push
 	// the evaluated expression, COPY the dict to the top, push the

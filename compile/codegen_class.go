@@ -163,10 +163,18 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	c.enterScope(innerScope)
 	c.addOpI(RESUME, 0, loc(s))
 
+	// MAKE_CELL for __class__ (when needs_class_closure) is inserted by
+	// the cfg pipeline's prepare_localsplus; codegen does not emit it
+	// inline. Same for __classdict__ below.
+	//
+	// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
+
 	if innerScope.NeedsClassClosure {
+		// Register the cell name in the cellvars pool so the cfg
+		// pipeline sees __class__ in CellVars and includes it in the
+		// MAKE_CELL prologue.
 		cellPool := poolCellVars
-		idx := c.poolIndex(&cellPool, "__class__")
-		c.addOpI(MAKE_CELL, int32(idx), loc(s))
+		c.poolIndex(&cellPool, "__class__")
 	}
 
 	pool := poolNames
@@ -191,9 +199,12 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	c.addOpName(STORE_NAME, &pool, "__firstlineno__", loc(s))
 
 	if innerScope.NeedsClassDict {
+		// MAKE_CELL is inserted by prepare_localsplus; only register
+		// __classdict__ in cellvars so the prologue picks it up, then
+		// emit LOAD_LOCALS + STORE_DEREF to seed the cell with the
+		// class namespace dict.
 		cellPool := poolCellVars
 		idx := c.poolIndex(&cellPool, "__classdict__")
-		c.addOpI(MAKE_CELL, int32(idx), loc(s))
 		c.addOp(LOAD_LOCALS, loc(s))
 		c.addOpI(STORE_DEREF, int32(idx), loc(s))
 	}
