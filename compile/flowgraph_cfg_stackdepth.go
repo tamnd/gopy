@@ -81,7 +81,7 @@ func cfgCalculateStackdepth(g *cfgBuilder) (int, error) {
 			if depth > maxdepth {
 				maxdepth = depth
 			}
-			if HasTarget(ins.Op) && ins.Op != END_ASYNC_FOR {
+			if hasJumpTarget(ins.Op) && ins.Op != END_ASYNC_FOR {
 				if err := getStackEffects(ins.Op, ins.Oparg, true, &effects); err != nil {
 					return 0, fmt.Errorf("compile: invalid stack effect for opcode=%s arg=%d (jump): %w",
 						ins.Op.Name(), ins.Oparg, err)

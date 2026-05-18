@@ -1107,8 +1107,7 @@ func basicblockFoldConstUnaryop(bb *basicblock, consts *[]any) int {
 		bb.Instr[i-1].Op = NOP
 		bb.Instr[i-1].Oparg = 0
 		bb.Instr[i-1].Target = nil
-		ins.Op = LOAD_CONST
-		ins.Oparg = int32(appendConst(consts, result))
+		cfgInstrMakeLoadConst(ins, result, consts)
 		folded++
 	}
 	return folded
@@ -1407,10 +1406,11 @@ func basicblockFoldConstantIntrinsicListToTuple(bb *basicblock, i int, consts *[
 	return 0
 }
 
-// basicblockFoldConstBinop rewrites `LOAD_CONST a; LOAD_CONST b;
-// BINARY_OP op` triples where both operands are int64 constants and op
-// has a defined integer result. The two loads become NOPs and the
-// BINARY_OP becomes LOAD_CONST of the folded value.
+// basicblockFoldConstBinop rewrites `(LOAD_CONST | LOAD_SMALL_INT) a;
+// (LOAD_CONST | LOAD_SMALL_INT) b; BINARY_OP op` triples where both
+// operands are int64 constants and op has a defined integer result. The
+// two loads become NOPs and the BINARY_OP becomes LOAD_CONST of the
+// folded value.
 //
 // CPython: Python/flowgraph.c:1894 fold_const_binop
 func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
@@ -1422,15 +1422,19 @@ func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
 		a := &bb.Instr[i]
 		b := &bb.Instr[i+1]
 		c := &bb.Instr[i+2]
-		if a.Op != LOAD_CONST || b.Op != LOAD_CONST || c.Op != BINARY_OP {
+		if c.Op != BINARY_OP {
 			continue
 		}
-		ai, bi := int(a.Oparg), int(b.Oparg)
-		if ai < 0 || ai >= len(*consts) || bi < 0 || bi >= len(*consts) {
+		va, okA := cfgLoadsConstValue(a, *consts)
+		if !okA {
 			continue
 		}
-		x, xok := (*consts)[ai].(int64)
-		y, yok := (*consts)[bi].(int64)
+		vb, okB := cfgLoadsConstValue(b, *consts)
+		if !okB {
+			continue
+		}
+		x, xok := va.(int64)
+		y, yok := vb.(int64)
 		if !xok || !yok {
 			continue
 		}
@@ -1438,15 +1442,13 @@ func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
 		if !ok {
 			continue
 		}
-		idx := appendConst(consts, result)
 		a.Op = NOP
 		a.Oparg = 0
 		a.Target = nil
 		b.Op = NOP
 		b.Oparg = 0
 		b.Target = nil
-		c.Op = LOAD_CONST
-		c.Oparg = int32(idx)
+		cfgInstrMakeLoadConst(c, result, consts)
 		folded++
 		i += 2
 	}
@@ -1812,6 +1814,21 @@ func maybeInstrMakeLoadSmallint(inst *cfgInstr, consts []any) {
 	}
 	inst.Op = LOAD_SMALL_INT
 	inst.Oparg = int32(v)
+}
+
+// cfgInstrMakeLoadConst stamps inst with the bytecode that loads
+// newconst. Small non-negative ints become LOAD_SMALL_INT; everything
+// else lands as LOAD_CONST with the const appended to the pool.
+//
+// CPython: Python/flowgraph.c:1429 instr_make_load_const
+func cfgInstrMakeLoadConst(inst *cfgInstr, newconst any, consts *[]any) {
+	if v, ok := newconst.(int64); ok && v >= 0 && v <= 255 {
+		inst.Op = LOAD_SMALL_INT
+		inst.Oparg = int32(v)
+		return
+	}
+	inst.Op = LOAD_CONST
+	inst.Oparg = int32(appendConst(consts, newconst))
 }
 
 // basicblockOptimizeLoadConst folds LOAD_CONST / LOAD_SMALL_INT against

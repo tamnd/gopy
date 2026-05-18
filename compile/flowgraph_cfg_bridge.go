@@ -29,6 +29,14 @@ func cfgFromSequence(seq *Sequence) *cfgBuilder {
 	// Track which cfg block each original seqIdx ends up in so the
 	// jump-target / handler-target rewrites below can resolve indices
 	// to *basicblock pointers.
+	//
+	// After each jump, force the next instruction into a fresh block.
+	// CPython relies on IS_TERMINATOR_OPCODE (jumps OR scope exits) in
+	// cfg_builder_current_block_is_terminated, so every jump is always
+	// the last instruction in its block. gopy's narrower isTerminator
+	// predicate already handles scope exits; the explicit useNextBlock
+	// closes the gap for jumps so passes like cfgLabelExceptionTargets,
+	// which assume a jump terminates its block, see the same invariant.
 	idxToBlock := make([]*basicblock, len(seq.Instrs))
 	idxToInstr := make([]*cfgInstr, len(seq.Instrs))
 	for i, ins := range seq.Instrs {
@@ -38,6 +46,9 @@ func cfgFromSequence(seq *Sequence) *cfgBuilder {
 		g.addOp(ins.Op, ins.Oparg, ins.Loc)
 		idxToBlock[i] = g.CurBlock
 		idxToInstr[i] = g.CurBlock.lastInstr()
+		if hasJumpTarget(ins.Op) {
+			g.useNextBlock(g.newBlock())
+		}
 	}
 
 	rewriteJumpTargets(g, idxToBlock)
