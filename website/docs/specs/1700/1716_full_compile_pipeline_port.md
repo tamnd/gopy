@@ -224,10 +224,10 @@ Python callable.
 
 | Item                                                                                                                       | Status | Commit            |
 | -------------------------------------------------------------------------------------------------------------------------- | ------ | ----------------- |
-| `test/cpython/patches/0001-cfg-phase-dump.patch` (re-enables dumpers, adds hook registry + `FIRE_PHASE` calls, exposes thunk) | done   | (this commit)     |
-| `test/cpython/patches/dump_phases.py` harness driving the patched interpreter into a `<unit>.<phase>.cfg` tree              | done   | (this commit)     |
-| `test/cpython/patches/README.md` (how to apply + rebuild + run the harness)                                                 | done   | (this commit)     |
-| Patched build smoke-tested: `python.exe dump_phases.py --src foo.py --out /tmp/cfg` produces one file per `(unit, phase)`   | done   | (this commit)     |
+| `test/cpython/patches/0001-cfg-phase-dump.patch` (re-enables dumpers, adds hook registry + `FIRE_PHASE` calls, exposes thunk) | done   | `c9d380f`         |
+| `test/cpython/patches/dump_phases.py` harness driving the patched interpreter into a `<unit>.<phase>.cfg` tree              | done   | `c9d380f`         |
+| `test/cpython/patches/README.md` (how to apply + rebuild + run the harness)                                                 | done   | `c9d380f`         |
+| Patched build smoke-tested: `python.exe dump_phases.py --src foo.py --out /tmp/cfg` produces one file per `(unit, phase)`   | done   | `c9d380f`         |
 
 Phase boundaries fired (each emits one dump per code unit):
 
