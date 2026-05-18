@@ -76,7 +76,7 @@ same commit that flips a row.
 | B.2   | CPython oracle wrappers (L1 / L3 / L4)                                                                                      | done        | `f960caf`     |
 | B.3   | Diff harness (`cfg_phase_parity_test.go` + corpus)                                                                          | done        | `fbb22f7` |
 | C.1   | Finish `Python/flowgraph.c` port (`convert_pseudo_conditional_jumps`, `prepare_localsplus`, `_PyCfg_OptimizedCfgToInstructionSequence`, helpers) | done        | `e4c6827` |
-| C.2   | Finish `Python/assemble.c` port (split into `assemble_makecode.go` / `assemble_jumps.go` / `assemble.go`)                   | pending     | -         |
+| C.2   | Finish `Python/assemble.c` port (split into `assemble_makecode.go` / `assemble_jumps.go` / `assemble.go`)                   | done        | `686fd64` |
 | C.3   | Port `optimize_and_assemble_code_unit` driver into `compile/compiler.go`                                                    | pending     | -         |
 | D.1   | Flip `assembleUnit` to the cfg driver                                                                                       | pending     | -         |
 | D.2   | Delete `compile/flowgraph_passes.go`, `flowgraph_jumps.go`, `flowgraph_except.go`, `flowgraph_locals.go`, `flowgraph_stackdepth.go` | pending     | -         |
@@ -145,7 +145,7 @@ C.2 / C.3 land the missing functions.
 
 | CPython function                                  | CPython line | gopy state                                                | Status  | Commit    |
 | ------------------------------------------------- | ------------ | --------------------------------------------------------- | ------- | --------- |
-| `same_location`                                   | 30           | inline in `assembleLocationInfo`                          | partial | C.2       |
+| `same_location`                                   | 30           | inline in `assembleLocationInfo`                          | done    | spec 1708 |
 | `instr_size`                                      | 39           | `instrSize` in `assemble_locations.go`                    | done    | spec 1708 |
 | `assemble_init` / `assemble_free`                 | 62 / 90      | replaced by `Assembler` struct lifecycle                  | done    | spec 1708 |
 | `write_except_byte`                               | 98           | done                                                      | done    | spec 1708 |
@@ -164,23 +164,24 @@ C.2 / C.3 land the missing functions.
 | `write_location_info_entry`                       | 286          | done                                                      | done    | spec 1708 |
 | `assemble_emit_location`                          | 324          | done                                                      | done    | spec 1708 |
 | `assemble_location_info`                          | 337          | done                                                      | done    | spec 1708 |
-| `write_instr`                                     | 369          | done (inline in `emitInstr`)                              | done    | spec 1708 |
-| `assemble_emit_instr`                             | 413          | inline in `Assemble`, no separate function                | partial | C.2       |
-| `assemble_emit`                                   | 432          | inline loop in `Assemble`                                 | partial | C.2       |
-| `dict_keys_inorder`                               | 458          | reads from `Unit` directly                                | missing | C.2       |
-| `compute_localsplus_info`                         | 484          | `buildLocalsPlus`, not split out                          | partial | C.2       |
-| `makecode`                                        | 575          | inline in `Assemble`                                      | partial | C.2       |
-| `resolve_jump_offsets`                            | 675          | flat-sequence in `flowgraph_jumps.go`                     | partial | C.2       |
-| `resolve_unconditional_jumps`                     | 749          | flat-sequence in `flowgraph_jumps.go`                     | partial | C.2       |
-| `_PyAssemble_MakeCodeObject`                      | 779          | inline in `Assemble`                                      | partial | C.2       |
+| `write_instr`                                     | 369          | done (inline in `assembleEmitInstr`)                      | done    | spec 1708 |
+| `assemble_emit_instr`                             | 413          | done (`assembleEmitInstr` in `assemble.go`)               | done    | `686fd64` |
+| `assemble_emit`                                   | 432          | done (`assembleEmit` in `assemble.go`)                    | done    | `686fd64` |
+| `dict_keys_inorder`                               | 458          | done (`dictKeysInorder` in `assemble_makecode.go`)        | done    | `686fd64` |
+| `compute_localsplus_info`                         | 484          | done (`computeLocalsplusInfo` in `assemble_makecode.go`)  | done    | `686fd64` |
+| `makecode`                                        | 575          | done (`makecode` in `assemble_makecode.go`)               | done    | `686fd64` |
+| `resolve_jump_offsets`                            | 675          | done (`resolveJumpOffsets` in `assemble_jumps.go`)        | done    | `12ee36f` |
+| `resolve_unconditional_jumps`                     | 749          | done (`resolveUnconditionalJumps` in `assemble_jumps.go`) | done    | `12ee36f` |
+| `_PyAssemble_MakeCodeObject`                      | 779          | done (`assembleMakeCodeObject` in `assemble_makecode.go`) | done    | `686fd64` |
 
-The location and exception writers are clean from 1708. The
-remaining gap is structural: gopy collapses
-`_PyAssemble_MakeCodeObject` -> `assemble_emit` ->
-`assemble_emit_instr` into one inline loop and keeps the
-jump-resolution helpers on the flat-sequence side. They have to
-move onto the cfg side to match the CPython ordering inside
-`_PyCfg_OptimizedCfgToInstructionSequence`.
+The location and exception writers were already clean from 1708.
+C.2 split the remaining inline pipeline. `_PyAssemble_MakeCodeObject`
+-> `assemble_emit` -> `assemble_emit_instr` are now three separate
+functions (`assembleMakeCodeObject` in `assemble_makecode.go`,
+`assembleEmit` and `assembleEmitInstr` in `assemble.go`). The
+jump-resolution helpers moved off the flat-sequence file into
+`assemble_jumps.go`, and `makecode` / `compute_localsplus_info` /
+`dict_keys_inorder` are factored out in `assemble_makecode.go`.
 
 ### A.3. `Python/compile.c` driver
 
