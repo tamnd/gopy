@@ -119,18 +119,6 @@ func (c *Compiler) emitListOrSet(elts ast.Seq[ast.Expr], op Opcode, l ast.Pos) e
 // CPython: Include/internal/pycore_compile.h:24 _PY_STACK_USE_GUIDELINE
 const stackUseGuideline = 30
 
-// emitExtend emits LIST_EXTEND or SET_UPDATE depending on whether the
-// container we are building is a list or a set.
-//
-// CPython: Python/codegen.c codegen_subkind in starunpack_helper
-func (c *Compiler) emitExtend(op Opcode, l ast.Pos) {
-	if op == BUILD_SET {
-		c.addOpI(SET_UPDATE, 1, l)
-	} else {
-		c.addOpI(LIST_EXTEND, 1, l)
-	}
-}
-
 // hasStarred reports whether any expression in elts is a Starred node.
 //
 // CPython: Python/codegen.c starred check in starunpack_helper
