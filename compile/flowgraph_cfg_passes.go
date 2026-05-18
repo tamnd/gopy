@@ -621,7 +621,7 @@ func cfgResolveLineNumbers(g *cfgBuilder, _ int) {
 // runs remove_redundant_nops to compact the NOPs we just produced.
 //
 // CPython: Python/flowgraph.c:3520 convert_pseudo_ops
-func cfgConvertPseudoOps(g *cfgBuilder) int {
+func cfgConvertPseudoOps(g *cfgBuilder) {
 	for b := g.EntryBlock; b != nil; b = b.Next {
 		for i := range b.Instr {
 			ins := &b.Instr[i]
@@ -637,14 +637,14 @@ func cfgConvertPseudoOps(g *cfgBuilder) int {
 			}
 		}
 	}
-	return cfgRemoveRedundantNops(g)
+	cfgRemoveRedundantNops(g)
 }
 
 // cfgConvertPseudoConditionalJumps rewrites the codegen-time pseudo
 // conditional jumps (JUMP_IF_FALSE / JUMP_IF_TRUE) into the real
 // POP_JUMP_IF_* sequence preceded by COPY 1 + TO_BOOL 0. The pseudo
 // op kept the condition value on the stack so optimize_cfg could see
-// it; here we materialise the duplicate-and-coerce-to-bool dance the
+// it; here we materialize the duplicate-and-coerce-to-bool dance the
 // VM actually wants. The pseudo jump is always the last instruction
 // in its block (codegen invariant), and the inserted helpers inherit
 // its location and exception-handler pointer.

@@ -140,44 +140,6 @@ func cfgToSequence(g *cfgBuilder, seq *Sequence) {
 	seq.ApplyLabelMap(hasJumpTarget)
 }
 
-// optimizeLoadFastOnSequence runs optimizeLoadFast against a cfg built
-// from seq, then copies the LOAD_FAST -> LOAD_FAST_BORROW (and the
-// LOAD_FAST_LOAD_FAST -> LOAD_FAST_BORROW_LOAD_FAST_BORROW) opcode
-// rewrites back into seq in place. The pass does not move, add, or
-// remove instructions, so the cfg's entry-order walk aligns 1:1 with
-// seq.Instrs and no opargs change. Every block's StartDepth is reset
-// to the stackdepthMin sentinel so loadFastPushBlock can seed it as
-// it propagates the abstract ref stack.
-//
-// CPython: Python/flowgraph.c:2776 optimize_load_fast (driven from
-// _PyAssemble_MakeCodeObject)
-func optimizeLoadFastOnSequence(seq *Sequence) error {
-	if len(seq.Instrs) == 0 {
-		return nil
-	}
-	g := cfgFromSequence(seq)
-	for b := g.EntryBlock; b != nil; b = b.Next {
-		b.StartDepth = stackdepthMin
-	}
-	if err := optimizeLoadFast(g); err != nil {
-		return err
-	}
-	idx := 0
-	for b := g.EntryBlock; b != nil; b = b.Next {
-		for i := range b.Instr {
-			if idx >= len(seq.Instrs) {
-				return nil
-			}
-			switch b.Instr[i].Op {
-			case LOAD_FAST_BORROW, LOAD_FAST_BORROW_LOAD_FAST_BORROW:
-				seq.Instrs[idx].Op = b.Instr[i].Op
-			}
-			idx++
-		}
-	}
-	return nil
-}
-
 // cfgOptimizedCfgToInstructionSequence is the closer that turns an
 // optimized cfg into a flat instruction sequence ready for the
 // assembler. After the optimizer pass returns, this routine: expands

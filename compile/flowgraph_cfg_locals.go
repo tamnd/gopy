@@ -141,7 +141,7 @@ func loadFastPushBlock(stack []*basicblock, target *basicblock, startDepth int) 
 //
 // CPython: Python/flowgraph.c:2776 optimize_load_fast
 //
-//nolint:gocognit,gocyclo // direct port; CPython returns ERROR on PyMem failures, gopy's append cannot.
+//nolint:gocognit,gocyclo,unparam // direct port; CPython returns ERROR on PyMem failures, gopy's append cannot.
 func optimizeLoadFast(g *cfgBuilder) error {
 	refs := refStack{}
 	maxInstrs := 0

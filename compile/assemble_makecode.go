@@ -20,7 +20,7 @@ func dictKeysInorder(names []string, offset int) []string {
 	return out
 }
 
-// computeLocalsplusInfo materialises the flat 3.11+ co_localsplus
+// computeLocalsplusInfo materializes the flat 3.11+ co_localsplus
 // layout: positional/kwonly args, then ordinary locals, then cells,
 // then frees. Args/locals share FastLocal; FastHidden is OR'd in for
 // synthetic locals (lambda implicit arg, comprehension `.0`).

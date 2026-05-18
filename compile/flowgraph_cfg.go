@@ -339,17 +339,6 @@ func isUnconditionalJump(op Opcode) bool {
 	return false
 }
 
-// isBackwardsJump matches IS_BACKWARDS_JUMP_OPCODE.
-//
-// CPython: Include/internal/pycore_opcode_utils.h:35 IS_BACKWARDS_JUMP_OPCODE
-func isBackwardsJump(op Opcode) bool {
-	switch op {
-	case JUMP_BACKWARD, JUMP_BACKWARD_NO_INTERRUPT:
-		return true
-	}
-	return false
-}
-
 // isConditionalJump reports whether op is one of the POP_JUMP_IF_*
 // family.
 //
