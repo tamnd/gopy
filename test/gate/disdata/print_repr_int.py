@@ -1,1 +1,1 @@
-print(repr(7))
+print(repr(42))

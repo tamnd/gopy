@@ -1,1 +1,2 @@
-import os as o
+import sys as s
+print(s)

@@ -1,1 +1,2 @@
-from sys import version
+from sys import path
+print(path)

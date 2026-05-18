@@ -1,1 +1,2 @@
-from os import sep as s
+from sys import path as p
+print(p)
