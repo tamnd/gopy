@@ -280,26 +280,27 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
 	insertPrefixInstructions(seq, codeFlags)
 
-	// PASS 11b3: downgrade LOAD_FAST{,_LOAD_FAST} to the BORROW variants
-	// where the borrowed reference is provably consumed before the local
-	// is killed. Runs on a temporary cfg built from the resolved
-	// sequence so the abstract ref-stack walk can follow block
-	// boundaries the flat sequence does not expose. Only opcode
-	// rewrites flow back into seq; opargs, jumps, and handler info
-	// stay untouched.
-	//
-	// CPython: Python/flowgraph.c:2776 optimize_load_fast (driven from
-	// _PyAssemble_MakeCodeObject)
-	if err := optimizeLoadFastOnSequence(seq); err != nil {
-		return nil, err
-	}
-
 	// PASS 11c: lower the SETUP_X pseudo opcodes to NOP now that the
 	// exception table is fully described on ExceptHandlerInfo. After
 	// this pass the sequence contains only real opcodes.
 	//
 	// CPython: Python/flowgraph.c:3520 convert_pseudo_ops
-	convertPseudoOps(seq)
+	convertPseudoOps(seq, nlocals)
+
+	// PASS 11d: downgrade LOAD_FAST{,_LOAD_FAST} to the BORROW variants
+	// where the borrowed reference is provably consumed before the local
+	// is killed. Runs on a temporary cfg built from the resolved
+	// sequence so the abstract ref-stack walk can follow block
+	// boundaries the flat sequence does not expose. Only opcode
+	// rewrites flow back into seq; opargs, jumps, and handler info
+	// stay untouched. Must run after convertPseudoOps so LOAD_CLOSURE
+	// and friends are visible as LOAD_FAST to the dataflow.
+	//
+	// CPython: Python/flowgraph.c:4062 optimize_load_fast (after
+	// convert_pseudo_ops + normalize_jumps)
+	if err := optimizeLoadFastOnSequence(seq); err != nil {
+		return nil, err
+	}
 
 	// PASS 4: lower the pseudo unconditional jumps (`JUMP`,
 	// `JUMP_NO_INTERRUPT`) to their forward / backward counterparts,

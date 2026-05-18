@@ -189,19 +189,23 @@ func insertPrefixInstructions(seq *Sequence, codeFlags uint32) {
 }
 
 // convertPseudoOps rewrites every remaining SETUP_X to NOP. POP_BLOCK
-// is already a NOP after labelExceptionTargets. LOAD_CLOSURE is also
-// lowered here to match CPython, although gopy's codegen already
-// emits the runtime opcode in deref-index space, so the rewrite is a
-// no-op until specialization adds STORE_FAST_MAYBE_NULL.
+// is already a NOP after labelExceptionTargets. LOAD_CLOSURE is rewritten
+// to LOAD_FAST with the oparg biased into localsplus index space (gopy's
+// codegen emits it in deref-index space; CPython emits it directly in
+// localsplus space). Doing the bias here lets the downstream
+// optimize_load_fast pass treat the cell access as an ordinary LOAD_FAST.
 //
 // CPython: Python/flowgraph.c:3520 convert_pseudo_ops
-func convertPseudoOps(seq *Sequence) {
+func convertPseudoOps(seq *Sequence, nlocals int) {
 	for i := range seq.Instrs {
 		ins := &seq.Instrs[i]
 		switch ins.Op {
 		case SETUP_FINALLY, SETUP_WITH, SETUP_CLEANUP:
 			ins.Op = NOP
 			ins.Oparg = 0
+		case LOAD_CLOSURE:
+			ins.Op = LOAD_FAST
+			ins.Oparg = int32(nlocals) + ins.Oparg
 		}
 	}
 }
