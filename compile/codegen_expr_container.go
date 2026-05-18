@@ -54,56 +54,70 @@ func (c *Compiler) visitSet(e *ast.Set) error {
 }
 
 // emitListOrSet handles the BUILD_LIST / BUILD_SET / BUILD_TUPLE-as-list
-// branches by walking elts, switching to LIST_EXTEND / SET_UPDATE when
-// a Starred element appears.
+// branches by walking elts. The short, no-stars path emits the literal
+// directly with `op n`; the big-or-starred path opens with `BUILD_LIST 0`
+// and appends/extends per element so the value stack stays bounded.
 //
-// CPython: codegen_list / codegen_set share the helper
-// starunpack_helper.
+// CPython: Python/codegen.c:3318 starunpack_helper_impl
 func (c *Compiler) emitListOrSet(elts ast.Seq[ast.Expr], op Opcode, l ast.Pos) error {
-	if !hasStarred(elts) {
+	n := len(elts)
+	seenStar := hasStarred(elts)
+	big := n > stackUseGuideline
+	if !seenStar && !big {
 		for _, e := range elts {
 			if err := c.visitExpr(e); err != nil {
 				return err
 			}
 		}
-		c.addOpI(op, int32(len(elts)), l)
+		c.addOpI(op, int32(n), l)
 		return nil
 	}
-	// Stars present: emit BUILD_LIST 0, then for each chunk of
-	// non-star elts BUILD_LIST + LIST_EXTEND, and for each star
-	// LIST_EXTEND with the value. SET path uses SET_UPDATE in place
-	// of LIST_EXTEND. After everything is collected, convert with
-	// LIST_TO_TUPLE if the caller wanted a tuple.
-	c.addOpI(BUILD_LIST, 0, l)
-	pending := 0
-	flush := func() {
-		if pending == 0 {
-			return
-		}
-		c.addOpI(BUILD_LIST, int32(pending), l)
-		c.emitExtend(op, l)
-		pending = 0
+	addOp := SET_ADD
+	extendOp := SET_UPDATE
+	if op != BUILD_SET {
+		addOp = LIST_APPEND
+		extendOp = LIST_EXTEND
 	}
-	for _, elt := range elts {
+	sequenceBuilt := false
+	if big {
+		c.addOpI(op, 0, l)
+		sequenceBuilt = true
+	}
+	for i, elt := range elts {
 		if star, ok := elt.(*ast.Starred); ok {
-			flush()
+			if !sequenceBuilt {
+				c.addOpI(op, int32(i), l)
+				sequenceBuilt = true
+			}
 			if err := c.visitExpr(star.Value); err != nil {
 				return err
 			}
-			c.emitExtend(op, l)
+			c.addOpI(extendOp, 1, l)
 			continue
 		}
 		if err := c.visitExpr(elt); err != nil {
 			return err
 		}
-		pending++
+		if sequenceBuilt {
+			c.addOpI(addOp, 1, l)
+		}
 	}
-	flush()
-	// BUILD_SET path leaves a set on the stack; BUILD_LIST path
-	// leaves a list. BUILD_TUPLE branch comes through visitTuple
-	// which calls CALL_INTRINSIC_1 LIST_TO_TUPLE after this returns.
+	if !sequenceBuilt {
+		// Pure non-star path already handled above; this would only
+		// trip if n == 0 with no stars, but the caller never invokes
+		// us for empty literals. Guard anyway.
+		c.addOpI(op, 0, l)
+	}
 	return nil
 }
+
+// stackUseGuideline mirrors CPython's _PY_STACK_USE_GUIDELINE: a list,
+// set, or call with more than this many leaf elements switches from
+// the single-op `BUILD_X n` form to the per-element APPEND/EXTEND form
+// so the evaluation stack stays bounded.
+//
+// CPython: Include/internal/pycore_compile.h:24 _PY_STACK_USE_GUIDELINE
+const stackUseGuideline = 30
 
 // emitExtend emits LIST_EXTEND or SET_UPDATE depending on whether the
 // container we are building is a list or a set.

@@ -251,33 +251,22 @@ func safePower(x, y int64) (int64, bool) {
 }
 
 // appendConst returns the index of v in *consts, appending if not
-// present. Linear search is fine here: the per-unit pool is small
-// and flowgraph runs once per scope.
+// present. Dedup runs through constCacheKey, the port of CPython's
+// _PyCode_ConstantKey, so nested *ConstTuple values share a slot when
+// equal by value. Linear search is fine here: the per-unit pool is
+// small and flowgraph runs once per scope.
 //
-// CPython: Python/flowgraph.c add_const
+// CPython: Python/flowgraph.c add_const + Objects/codeobject.c:3035
+// _PyCode_ConstantKey
 func appendConst(consts *[]any, v any) int {
-	if isComparableConst(v) {
-		for i, c := range *consts {
-			if isComparableConst(c) && c == v {
-				return i
-			}
+	key := constCacheKey(v)
+	for i, c := range *consts {
+		if constCacheKey(c) == key {
+			return i
 		}
 	}
 	*consts = append(*consts, v)
 	return len(*consts) - 1
-}
-
-// isComparableConst reports whether v can be used with the == operator
-// without panicking. Tuples (modeled as []any in the const pool) are
-// not directly comparable; CPython's add_const reuses by hash+eq, which
-// gopy will revisit when 1713 lands the const-key port. Until then,
-// duplicate tuple consts simply both land in the pool.
-func isComparableConst(v any) bool {
-	switch v.(type) {
-	case nil, bool, int64, float64, string, complex128:
-		return true
-	}
-	return false
 }
 
 // eliminateDeadCodeAfterTerminator replaces every instruction

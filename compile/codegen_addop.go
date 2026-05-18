@@ -9,6 +9,7 @@ package compile
 import (
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/tamnd/gopy/ast"
 )
@@ -133,36 +134,70 @@ func (c *Compiler) constIndex(value any) int {
 }
 
 // constCacheKey returns a hashable key that distinguishes constants
-// by both Go type and value. CPython keys its const_cache on
-// (type(v), v) so that 1 (int) and 1.0 (float) get separate slots
-// even though their values compare equal in Python; the same applies
-// here for int vs int64, float64 vs string-of-digits, etc. Floats
-// route through math.Float64bits so NaN payloads do not collide and
-// -0.0 stays distinct from 0.0.
+// by CPython's _PyCode_ConstantKey rules so equal-by-value constants
+// of the same Python type collapse to one consts slot.
 //
-// CPython: Python/compile.c compiler_add_const cache key
+// The encoding is a string so tuples can recurse into their items
+// without needing Go-comparable slice types. Each leaf is tagged with
+// a one-character type code; tuples wrap their items in `(...)`.
+// CPython packs (type, op) for bool/bytes/float/complex specifically
+// to keep them distinct from objects that would otherwise compare
+// equal (True == 1, b"x" might warn vs "x", -0.0 == 0.0); the same
+// type-tag prefix gives that here.
+//
+// CPython: Objects/codeobject.c:3035 _PyCode_ConstantKey
 func constCacheKey(value any) any {
-	type tagged struct {
-		t string
-		v any
-	}
+	var b strings.Builder
+	appendConstKey(&b, value)
+	return b.String()
+}
+
+func appendConstKey(b *strings.Builder, value any) {
 	switch x := value.(type) {
 	case nil:
-		return tagged{"nil", nil}
+		b.WriteString("N")
+	case bool:
+		if x {
+			b.WriteString("B1")
+		} else {
+			b.WriteString("B0")
+		}
+	case int:
+		fmt.Fprintf(b, "i%d;", x)
+	case int32:
+		fmt.Fprintf(b, "i%d;", x)
+	case int64:
+		fmt.Fprintf(b, "i%d;", x)
+	case uint64:
+		fmt.Fprintf(b, "u%d;", x)
 	case float64:
-		return tagged{"float64", math.Float64bits(x)}
+		// CPython distinguishes -0.0 from 0.0 via an extra slot
+		// (PyTuple_Pack(3, type, op, Py_None)); float bits give that
+		// for free since -0.0 has a different bit pattern.
+		fmt.Fprintf(b, "f%x;", math.Float64bits(x))
 	case float32:
-		return tagged{"float32", math.Float32bits(x)}
+		fmt.Fprintf(b, "F%x;", math.Float32bits(x))
 	case complex128:
-		return tagged{"complex128", [2]uint64{math.Float64bits(real(x)), math.Float64bits(imag(x))}}
+		// CPython tags each (real-negzero, imag-negzero) combination
+		// with True / False / None to keep all four complex zeros
+		// distinct; bit-pattern encoding captures the same.
+		fmt.Fprintf(b, "c%x:%x;", math.Float64bits(real(x)), math.Float64bits(imag(x)))
+	case string:
+		fmt.Fprintf(b, "s%d:%s", len(x), x)
 	case []byte:
-		return tagged{"bytes", string(x)}
+		fmt.Fprintf(b, "y%d:", len(x))
+		b.Write(x)
+	case *ConstTuple:
+		b.WriteString("(")
+		for _, item := range x.Values {
+			appendConstKey(b, item)
+		}
+		b.WriteString(")")
+	default:
+		// Inner code units and any other reference-typed value get a
+		// pointer-identity tag so two distinct objects never collide
+		// even if they share a structural representation. This
+		// matches CPython's fallback branch which uses the object id.
+		fmt.Fprintf(b, "p%T:%p;", value, value)
 	}
-	// Fall back to a type-tagged pair for everything else; Go == on
-	// the struct uses == on both fields, which gives the same
-	// type-aware dedup CPython implements.
-	return struct {
-		t string
-		v any
-	}{fmt.Sprintf("%T", value), value}
 }
