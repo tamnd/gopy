@@ -353,7 +353,52 @@ across phases.
 | `fix_cell_offsets`                             | 3729         | `flowgraph_cfg_passes.go`           | done    | `ea74ea5` |
 | `prepare_localsplus`                           | 3768         | `flowgraph_cfg_passes.go`           | done    | `ea74ea5` |
 | `_PyCfg_OptimizedCfgToInstructionSequence`     | 4026         | `flowgraph_cfg_bridge.go`           | done    | `9fb2206` |
-| Sweep: diff cfg-side function list vs `Python/flowgraph.c`; flag elisions and follow-ups | -    | -                                   | pending | -      |
+| Sweep: diff cfg-side function list vs `Python/flowgraph.c`; flag elisions and follow-ups | -    | -                                   | done    | `9fb2206` |
+
+#### C.1 sweep findings
+
+A function-by-function diff of `Python/flowgraph.c` (109 named
+functions) against gopy's `compile/flowgraph_cfg_*.go` plus the
+flat-sequence files lined up cleanly except for two classes:
+
+1. **Migration follow-ups for D.2.** Const-folding helpers
+   (`evalIntBinop`, `evalConstUnaryop`, `safeMultiply`, `safePower`,
+   `safeLshift`, the `safeMod` variant, `loadsConstValue`,
+   `nopOutRemaining`, `appendConst`) currently live in
+   `compile/flowgraph_passes.go`. The cfg-side passes
+   (`basicblockFoldConstBinop` et al. in `flowgraph_cfg_passes.go`)
+   already call them, so they are not "missing"; they are in the
+   file D.2 deletes. D.2 must move them to a cfg-side file
+   (suggested `flowgraph_cfg_constfold.go`) before removing
+   `flowgraph_passes.go`. Same applies to swaptimize / static-swap
+   helpers (`isSwappable`, `storesTo`, `swaptimize`, `emitSwapCycles`,
+   `runSwaptimize`, `nextSwappableInstruction`, `applyStaticSwaps`,
+   `staticSwapSafe`, `runApplyStaticSwaps`).
+
+2. **Inlined in Go.** Trivial CPython helpers map to single Go
+   expressions or methods and need no row of their own:
+   `is_jump`, `is_block_push`, `basicblock_last_instr`,
+   `basicblock_next_instr`, `basicblock_returns`,
+   `basicblock_nofallthrough`, `basicblock_exits_scope`,
+   `basicblock_has_eval_break`, `basicblock_has_no_lineno`,
+   `basicblock_append_instructions`, `basicblock_insert_instruction`,
+   `copy_basicblock`, `next_nonempty_block`, `dump_instr`,
+   `dump_basicblock`, `_PyCfgBuilder_DumpGraph`, `init_cfg_builder`,
+   `_PyCfgBuilder_New/Free/CheckSize/UseLabel/Addop`,
+   `cfg_builder_use_next_block`,
+   `cfg_builder_current_block_is_terminated`,
+   `cfg_builder_maybe_start_new_block`, `cfg_builder_check`,
+   `no_redundant_nops`, `no_redundant_jumps`, `get_max_label`,
+   `push_except_block`, `pop_except_block`, `except_stack_top`,
+   `make_except_stack`, `copy_except_stack`. These live in
+   `flowgraph_cfg.go` as `cfgBuilder` / `basicblock` methods or are
+   one-liners inside their callers.
+
+3. **No truly missing entries.** Every CPython flowgraph.c function
+   has a 1:1 gopy port or a documented inline equivalent. The audit
+   table A.1 stays authoritative for the optimizer-stage functions;
+   the helpers in (1) are tracked here so D.2 can resolve them
+   atomically with the file deletions.
 
 ### C.2. Finish `Python/assemble.c`
 
