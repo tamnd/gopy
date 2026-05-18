@@ -1,0 +1,1 @@
+print(len(b"abc"))
