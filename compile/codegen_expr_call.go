@@ -10,6 +10,7 @@ package compile
 
 import (
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/symtable"
 )
 
 // visitCall emits one of the three call shapes above.
@@ -72,7 +73,8 @@ func (c *Compiler) maybeOptimizeMethodCall(e *ast.Call) (bool, error) {
 		return false, err
 	}
 	pool := poolNames
-	nameIdx := c.poolIndex(&pool, attr.Attr)
+	mangled := symtable.Mangle(c.unit().Private, attr.Attr)
+	nameIdx := c.poolIndex(&pool, mangled)
 	c.addOpI(LOAD_ATTR, int32((nameIdx<<1)|1), loc(attr))
 	for _, a := range e.Args {
 		if err := c.visitExpr(a); err != nil {
