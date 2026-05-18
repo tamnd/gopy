@@ -1,0 +1,11 @@
+# Spec 1716 Phase E (L3 + L4) corpus: Python source files driven
+# through both the patched CPython interpreter and gopy. The L3 gate
+# diffs the post-cfg-optimize InstructionSequence; the L4 gate diffs
+# every nested code object's field-by-field text dump.
+#
+# Paths are repository-relative. Add new files one at a time. When a
+# file fails either gate, move it to assemble_parity_skip.txt with a
+# bug tracker link rather than removing it. The gates only run when
+# GOPY_PATCHED_CPYTHON is set, so this file is harmless on CI runs
+# that do not have the patched python.exe staged.
+test/cpython/Lib/__future__.py

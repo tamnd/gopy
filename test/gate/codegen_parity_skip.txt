@@ -1,0 +1,8 @@
+# Spec 1716 Phase E (L1) skip list: per-file skips for the
+# codegen_parity gate. Each entry is `<repo-relative-path> # <reason>`.
+# Use the reason field to link to the issue or spec section that
+# tracks the fix. Once the underlying gopy port closes the gap, drop
+# the row and the corpus entry runs again.
+#
+# format: path/to/file.py # reason / bug link
+test/cpython/Lib/__future__.py # codegen ordering parity with CPython tracked under spec 1716 Phase E follow-ups
