@@ -336,6 +336,25 @@ func insertSuperinstructionsOnSequence(seq *Sequence) int {
 	if len(seq.Instrs) < 2 {
 		return 0
 	}
+	pinned := computePinnedTargets(seq)
+	fused := 0
+	for i := 0; i+1 < len(seq.Instrs); i++ {
+		cur := &seq.Instrs[i]
+		next := &seq.Instrs[i+1]
+		superOp := pickSuperOp(cur, next, pinned[i+1])
+		if superOp == 0 {
+			continue
+		}
+		cur.Op = superOp
+		cur.Oparg = (cur.Oparg << 4) | next.Oparg
+		next.Op = NOP
+		next.Oparg = 0
+		fused++
+	}
+	return fused
+}
+
+func computePinnedTargets(seq *Sequence) []bool {
 	pinned := make([]bool, len(seq.Instrs))
 	for i := range seq.Instrs {
 		ins := &seq.Instrs[i]
@@ -349,46 +368,37 @@ func insertSuperinstructionsOnSequence(seq *Sequence) int {
 			pinned[ins.Handler.Label] = true
 		}
 	}
-	fused := 0
-	for i := 0; i+1 < len(seq.Instrs); i++ {
-		cur := &seq.Instrs[i]
-		next := &seq.Instrs[i+1]
-		if pinned[i+1] {
-			continue
-		}
-		if isTerminator(cur.Op) {
-			continue
-		}
-		var superOp Opcode
-		switch cur.Op {
-		case LOAD_FAST:
-			if next.Op == LOAD_FAST {
-				superOp = LOAD_FAST_LOAD_FAST
-			}
-		case STORE_FAST:
-			switch next.Op {
-			case LOAD_FAST:
-				superOp = STORE_FAST_LOAD_FAST
-			case STORE_FAST:
-				superOp = STORE_FAST_STORE_FAST
-			}
-		}
-		if superOp == 0 {
-			continue
-		}
-		if cur.Loc.Lineno >= 0 && next.Loc.Lineno >= 0 && cur.Loc.Lineno != next.Loc.Lineno {
-			continue
-		}
-		if cur.Oparg >= 16 || next.Oparg >= 16 {
-			continue
-		}
-		cur.Op = superOp
-		cur.Oparg = (cur.Oparg << 4) | next.Oparg
-		next.Op = NOP
-		next.Oparg = 0
-		fused++
+	return pinned
+}
+
+func pickSuperOp(cur, next *Instr, nextIsPinned bool) Opcode {
+	if nextIsPinned || isTerminator(cur.Op) {
+		return 0
 	}
-	return fused
+	if cur.Oparg >= 16 || next.Oparg >= 16 {
+		return 0
+	}
+	if cur.Loc.Lineno >= 0 && next.Loc.Lineno >= 0 && cur.Loc.Lineno != next.Loc.Lineno {
+		return 0
+	}
+	return superOpForPair(cur.Op, next.Op)
+}
+
+func superOpForPair(a, b Opcode) Opcode {
+	switch a {
+	case LOAD_FAST:
+		if b == LOAD_FAST {
+			return LOAD_FAST_LOAD_FAST
+		}
+	case STORE_FAST:
+		switch b {
+		case LOAD_FAST:
+			return STORE_FAST_LOAD_FAST
+		case STORE_FAST:
+			return STORE_FAST_STORE_FAST
+		}
+	}
+	return 0
 }
 
 // hasJumpTarget reports whether op carries a label oparg, including the

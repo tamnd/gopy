@@ -7,7 +7,7 @@
 
 Disassembly of f:
      0 RESUME                         0
-     2 LOAD_FAST                      0
+     2 LOAD_FAST_BORROW               0
      4 LOAD_SMALL_INT                 1
      6 BINARY_OP                      0
     18 RETURN_VALUE                   0

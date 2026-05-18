@@ -3,7 +3,6 @@ package compile_test
 import (
 	"testing"
 
-	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/parser"
 )
@@ -42,7 +41,7 @@ def gen_with_try(it):
 			if err != nil {
 				t.Fatal(err)
 			}
-			code, err := compile.Compile(mod.(ast.Mod), "test.py", 0)
+			code, err := compile.Compile(mod, "test.py", 0)
 			if err != nil {
 				t.Fatal(err)
 			}
