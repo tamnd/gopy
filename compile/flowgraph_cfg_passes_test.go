@@ -364,6 +364,143 @@ func TestCfgConvertPseudoConditionalJumpsLeavesOtherOpsAlone(t *testing.T) {
 	}
 }
 
+func TestCfgBuildCellFixedOffsetsNormalCells(t *testing.T) {
+	unit := &Unit{
+		VarNames: []string{"a", "b"},
+		CellVars: []string{"c", "d"},
+		FreeVars: []string{"e"},
+	}
+	fixed := cfgBuildCellFixedOffsets(unit)
+	want := []int{2, 3, 4}
+	if len(fixed) != len(want) {
+		t.Fatalf("len(fixed) = %d, want %d", len(fixed), len(want))
+	}
+	for i, v := range want {
+		if fixed[i] != v {
+			t.Errorf("fixed[%d] = %d, want %d", i, fixed[i], v)
+		}
+	}
+}
+
+func TestCfgBuildCellFixedOffsetsArgCell(t *testing.T) {
+	unit := &Unit{
+		VarNames: []string{"x", "y"},
+		CellVars: []string{"y", "z"},
+		FreeVars: []string{},
+	}
+	fixed := cfgBuildCellFixedOffsets(unit)
+	// y is at varname index 1; z is a normal cell at nlocals+1 = 3.
+	want := []int{1, 3}
+	for i, v := range want {
+		if fixed[i] != v {
+			t.Errorf("fixed[%d] = %d, want %d", i, fixed[i], v)
+		}
+	}
+}
+
+func TestCfgFixCellOffsetsDropsArgCellDuplicates(t *testing.T) {
+	unit := &Unit{
+		VarNames: []string{"x", "y"},
+		CellVars: []string{"y", "z"},
+		FreeVars: []string{},
+	}
+	fixed := cfgBuildCellFixedOffsets(unit)
+	g := newCfgBuilder()
+	g.addOp(MAKE_CELL, 0, ast.Pos{Lineno: 1})
+	g.addOp(LOAD_DEREF, 1, ast.Pos{Lineno: 1})
+
+	dropped := cfgFixCellOffsets(unit, g.EntryBlock, fixed)
+	if dropped != 1 {
+		t.Errorf("numdropped = %d, want 1 (one arg-cell duplicate)", dropped)
+	}
+	// MAKE_CELL 0 -> fixedmap[0] = 1 (arg slot for y)
+	// LOAD_DEREF 1 -> fixedmap[1] = 3 - 1 = 2 (z at nlocals+0 after compaction)
+	got := g.EntryBlock.Instr
+	if got[0].Oparg != 1 {
+		t.Errorf("MAKE_CELL oparg = %d, want 1 (arg slot)", got[0].Oparg)
+	}
+	if got[1].Oparg != 2 {
+		t.Errorf("LOAD_DEREF oparg = %d, want 2 (post-compaction slot)", got[1].Oparg)
+	}
+}
+
+func TestCfgInsertPrefixInstructionsGenerator(t *testing.T) {
+	unit := &Unit{
+		VarNames:    []string{"a"},
+		CellVars:    []string{},
+		FreeVars:    []string{},
+		FirstLineno: 12,
+	}
+	g := newCfgBuilder()
+	g.addOp(LOAD_FAST, 0, ast.Pos{Lineno: 12})
+	g.addOp(RETURN_VALUE, 0, ast.Pos{Lineno: 12})
+
+	fixed := cfgBuildCellFixedOffsets(unit)
+	cfgInsertPrefixInstructions(unit, g.EntryBlock, fixed, 0, CoGenerator)
+
+	got := g.EntryBlock.Instr
+	if got[0].Op != RETURN_GENERATOR {
+		t.Errorf("instr[0] = %v, want RETURN_GENERATOR", got[0].Op)
+	}
+	if got[0].Loc.Lineno != 12 || got[0].Loc.ColOffset != -1 {
+		t.Errorf("RETURN_GENERATOR loc = %+v, want lineno=12 cols=-1", got[0].Loc)
+	}
+	if got[1].Op != POP_TOP {
+		t.Errorf("instr[1] = %v, want POP_TOP", got[1].Op)
+	}
+	if got[2].Op != LOAD_FAST {
+		t.Errorf("instr[2] = %v, want LOAD_FAST", got[2].Op)
+	}
+}
+
+func TestCfgInsertPrefixInstructionsCellsAndFrees(t *testing.T) {
+	unit := &Unit{
+		VarNames: []string{"x"},
+		CellVars: []string{"y", "z"},
+		FreeVars: []string{"f"},
+	}
+	g := newCfgBuilder()
+	g.addOp(LOAD_DEREF, 0, ast.Pos{Lineno: 1})
+
+	fixed := cfgBuildCellFixedOffsets(unit)
+	cfgInsertPrefixInstructions(unit, g.EntryBlock, fixed, len(unit.FreeVars), 0)
+
+	got := g.EntryBlock.Instr
+	if got[0].Op != COPY_FREE_VARS || got[0].Oparg != 1 {
+		t.Errorf("instr[0] = {%v, %d}, want {COPY_FREE_VARS, 1}", got[0].Op, got[0].Oparg)
+	}
+	if got[1].Op != MAKE_CELL {
+		t.Errorf("instr[1] = %v, want MAKE_CELL", got[1].Op)
+	}
+	if got[2].Op != MAKE_CELL {
+		t.Errorf("instr[2] = %v, want MAKE_CELL", got[2].Op)
+	}
+	if got[1].Loc.Lineno != -1 {
+		t.Errorf("MAKE_CELL loc = %+v, want NO_LOCATION", got[1].Loc)
+	}
+	if got[3].Op != LOAD_DEREF {
+		t.Errorf("instr[3] = %v, want LOAD_DEREF", got[3].Op)
+	}
+}
+
+func TestCfgPrepareLocalsPlusReturnsCompactedCount(t *testing.T) {
+	unit := &Unit{
+		VarNames: []string{"x", "y"},
+		CellVars: []string{"y", "z"},
+		FreeVars: []string{"f"},
+	}
+	g := newCfgBuilder()
+	g.addOp(LOAD_DEREF, 0, ast.Pos{Lineno: 1})
+	g.addOp(LOAD_DEREF, 1, ast.Pos{Lineno: 1})
+	g.addOp(LOAD_DEREF, 2, ast.Pos{Lineno: 1})
+
+	n := cfgPrepareLocalsPlus(unit, g, 0)
+	// nlocals=2, ncellvars=2, nfreevars=1, one arg-cell duplicate dropped: 5-1 = 4.
+	if n != 4 {
+		t.Errorf("nlocalsplus = %d, want 4", n)
+	}
+}
+
 func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	// Trailing NOP whose line matches the next block's first real
 	// instruction is removable.

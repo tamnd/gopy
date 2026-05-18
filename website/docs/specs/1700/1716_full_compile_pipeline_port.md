@@ -348,10 +348,10 @@ across phases.
 | ---------------------------------------------- | ------------ | ----------------------------------- | ------- | ------ |
 | `convert_pseudo_conditional_jumps`             | 3478         | `flowgraph_cfg_passes.go`           | done    | `a62563b` |
 | `calculate_stackdepth` (graph version)         | 1352         | `flowgraph_cfg_stackdepth.go` (new) | done    | `3dfe874` |
-| `build_cellfixedoffsets`                       | 3711         | `flowgraph_cfg_passes.go`           | pending | -      |
-| `insert_prefix_instructions` (graph version)   | 3760         | `flowgraph_cfg_passes.go`           | pending | -      |
-| `fix_cell_offsets`                             | 3729         | `flowgraph_cfg_passes.go`           | pending | -      |
-| `prepare_localsplus`                           | 3768         | `flowgraph_cfg_passes.go`           | pending | -      |
+| `build_cellfixedoffsets`                       | 3711         | `flowgraph_cfg_passes.go`           | done    | (this commit) |
+| `insert_prefix_instructions` (graph version)   | 3760         | `flowgraph_cfg_passes.go`           | done    | (this commit) |
+| `fix_cell_offsets`                             | 3729         | `flowgraph_cfg_passes.go`           | done    | (this commit) |
+| `prepare_localsplus`                           | 3768         | `flowgraph_cfg_passes.go`           | done    | (this commit) |
 | `_PyCfg_OptimizedCfgToInstructionSequence`     | 4026         | `flowgraph_cfg_bridge.go`           | pending | -      |
 | Sweep: diff cfg-side function list vs `Python/flowgraph.c`; flag elisions and follow-ups | -    | -                                   | pending | -      |
 

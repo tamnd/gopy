@@ -392,6 +392,140 @@ func cfgConvertPseudoConditionalJumps(g *cfgBuilder) {
 	}
 }
 
+// cfgBuildCellFixedOffsets returns the localsplus offset for each cell
+// or free var. The slot order is [varnames | cellvars | freevars]; the
+// returned slice maps cell/free index (0..ncellvars+nfreevars-1) to the
+// final localsplus offset. The default offset is nlocals + i, but cell
+// vars whose name also appears in varnames are arg cells: they reuse
+// the arg's varname slot, and the localsplus shrinks by the matching
+// duplicate count after fix_cell_offsets compacts the table.
+//
+// CPython: Python/flowgraph.c:3711 build_cellfixedoffsets
+func cfgBuildCellFixedOffsets(unit *Unit) []int {
+	nlocals := len(unit.VarNames)
+	ncellvars := len(unit.CellVars)
+	nfreevars := len(unit.FreeVars)
+	noffsets := ncellvars + nfreevars
+	fixed := make([]int, noffsets)
+	for i := range noffsets {
+		fixed[i] = nlocals + i
+	}
+	varIdx := make(map[string]int, len(unit.VarNames))
+	for i, name := range unit.VarNames {
+		varIdx[name] = i
+	}
+	for cellPos, name := range unit.CellVars {
+		if argOffset, ok := varIdx[name]; ok {
+			fixed[cellPos] = argOffset
+		}
+	}
+	return fixed
+}
+
+// cfgInsertPrefixInstructions prepends the per-scope prologue to entry.
+// For generator / coroutine scopes: RETURN_GENERATOR + POP_TOP at
+// positions 0,1 with location LOCATION(firstlineno, firstlineno, -1, -1).
+// For ncellvars > 0: MAKE_CELL instructions, sorted by their fixed
+// localsplus offset, inserted at positions 0..ncellvars-1 with
+// NO_LOCATION. For nfreevars > 0: COPY_FREE_VARS nfreevars at position
+// 0 with NO_LOCATION.
+//
+// The MAKE_CELL sort matches CPython: cells are first listed in
+// localsplus order via the fixed map, then visited at slot positions
+// 0..nvars-1, only counting slots that are actually cells (sorted[i]-1
+// >= 0). The result is arg cells in varname-declaration order followed
+// by non-arg cells in their CellVars order.
+//
+// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
+func cfgInsertPrefixInstructions(unit *Unit, entry *basicblock, fixed []int, nfreevars int, codeFlags uint32) {
+	if codeFlags&(CoGenerator|CoCoroutine|CoAsyncGenerator) != 0 {
+		loc := ast.Pos{Lineno: unit.FirstLineno, EndLineno: unit.FirstLineno, ColOffset: -1, EndColOffset: -1}
+		entry.insertInstruction(0, cfgInstr{Op: RETURN_GENERATOR, Oparg: 0, Loc: loc})
+		entry.insertInstruction(1, cfgInstr{Op: POP_TOP, Oparg: 0, Loc: loc})
+	}
+	ncellvars := len(unit.CellVars)
+	if ncellvars > 0 {
+		nvars := ncellvars + len(unit.VarNames)
+		sorted := make([]int, nvars)
+		for i := range ncellvars {
+			sorted[fixed[i]] = i + 1
+		}
+		noLoc := ast.Pos{Lineno: -1, EndLineno: -1, ColOffset: -1, EndColOffset: -1}
+		ncellsused := 0
+		for i := 0; ncellsused < ncellvars; i++ {
+			oldindex := sorted[i] - 1
+			if oldindex == -1 {
+				continue
+			}
+			entry.insertInstruction(ncellsused, cfgInstr{Op: MAKE_CELL, Oparg: int32(oldindex), Loc: noLoc})
+			ncellsused++
+		}
+	}
+	if nfreevars > 0 {
+		noLoc := ast.Pos{Lineno: -1, EndLineno: -1, ColOffset: -1, EndColOffset: -1}
+		entry.insertInstruction(0, cfgInstr{Op: COPY_FREE_VARS, Oparg: int32(nfreevars), Loc: noLoc})
+	}
+}
+
+// cfgFixCellOffsets rewrites every deref-style oparg from "cell/free
+// table index" to "final localsplus offset" and reports the number of
+// arg-cell duplicates dropped (cells whose slot was reassigned to an
+// arg slot). The first pass walks the fixed map: a slot is a normal
+// (post-locals) cell iff fixedmap[i] == i + nlocals; otherwise it was
+// an arg cell whose offset was rewritten to the arg's varname index.
+// Normal cells shift down by the running duplicate count so the
+// surviving slots stay packed.
+//
+// CPython: Python/flowgraph.c:3843 fix_cell_offsets
+func cfgFixCellOffsets(unit *Unit, entry *basicblock, fixedmap []int) int {
+	nlocals := len(unit.VarNames)
+	ncellvars := len(unit.CellVars)
+	nfreevars := len(unit.FreeVars)
+	noffsets := ncellvars + nfreevars
+
+	numdropped := 0
+	for i := range noffsets {
+		if fixedmap[i] == i+nlocals {
+			fixedmap[i] -= numdropped
+		} else {
+			numdropped++
+		}
+	}
+
+	for b := entry; b != nil; b = b.Next {
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			oldoffset := int(ins.Oparg)
+			switch ins.Op {
+			case MAKE_CELL, LOAD_CLOSURE, LOAD_DEREF, STORE_DEREF, DELETE_DEREF, LOAD_FROM_DICT_OR_DEREF:
+				ins.Oparg = int32(fixedmap[oldoffset])
+			}
+		}
+	}
+	return numdropped
+}
+
+// cfgPrepareLocalsPlus runs the three-step localsplus pipeline that
+// CPython's optimize_and_assemble_code_unit calls after the graph has
+// been fully optimized: build the cell/free offset table, insert the
+// scope prologue (RETURN_GENERATOR + MAKE_CELL + COPY_FREE_VARS), then
+// rewrite every deref oparg through the table. Returns the localsplus
+// table size, which is nlocals + ncellvars + nfreevars minus the
+// arg-cell duplicates dropped by fix_cell_offsets.
+//
+// CPython: Python/flowgraph.c:3888 prepare_localsplus
+func cfgPrepareLocalsPlus(unit *Unit, g *cfgBuilder, codeFlags uint32) int {
+	nlocals := len(unit.VarNames)
+	ncellvars := len(unit.CellVars)
+	nfreevars := len(unit.FreeVars)
+	nlocalsplus := nlocals + ncellvars + nfreevars
+	fixed := cfgBuildCellFixedOffsets(unit)
+	cfgInsertPrefixInstructions(unit, g.EntryBlock, fixed, nfreevars, codeFlags)
+	numdropped := cfgFixCellOffsets(unit, g.EntryBlock, fixed)
+	nlocalsplus -= numdropped
+	return nlocalsplus
+}
+
 // cfgCheckCfg verifies that every terminator opcode sits at the end of
 // its block. Returns a non-nil error (via panic-free
 // boolean) when violated; the codegen invariants make this a debug
