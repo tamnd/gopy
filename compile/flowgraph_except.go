@@ -13,6 +13,8 @@
 
 package compile
 
+import "github.com/tamnd/gopy/ast"
+
 // exceptFrame tracks one open try / with region during the linear
 // walk. Mirrors the entries on CPython's _PyCfgExceptStack.
 //
@@ -100,6 +102,50 @@ func stampHandlerStartDepths(seq *Sequence, startDepth []int) {
 		}
 		ins.Handler.StartDepth = max(startDepth[idx], 0)
 	}
+}
+
+// hoistCellPrefix moves every MAKE_CELL op that codegen emitted into
+// the body to the very front of the sequence and clears its location
+// to NO_LOCATION. CPython's flowgraph inserts MAKE_CELL as a prefix
+// during _PyCfg_OptimizeCodeUnit (insert_prefix_instructions); gopy's
+// codegen emits them inline after RESUME, so this pass normalises the
+// layout for dis-stream byte equality.
+//
+// The pass walks once and runs before label resolution, so absolute
+// jump opargs are still symbolic and the reorder is safe even if a
+// future codepath were to introduce jumps into the prefix region. The
+// MAKE_CELL ops retain their emission order: codegen orders arg cells
+// in varname declaration order then non-arg cells alphabetically, which
+// matches CPython's flowgraph.c:3792 sort.
+//
+// CPython: Python/flowgraph.c:3792 insert_prefix_instructions (cellvars)
+func hoistCellPrefix(seq *Sequence) {
+	if len(seq.Instrs) == 0 {
+		return
+	}
+	type cellInstr struct {
+		ins Instr
+	}
+	var cells []cellInstr
+	others := seq.Instrs[:0]
+	for _, ins := range seq.Instrs {
+		if ins.Op == MAKE_CELL {
+			ins.Loc = ast.Pos{Lineno: -1, EndLineno: -1, ColOffset: -1, EndColOffset: -1}
+			cells = append(cells, cellInstr{ins: ins})
+			continue
+		}
+		others = append(others, ins)
+	}
+	if len(cells) == 0 {
+		seq.Instrs = others
+		return
+	}
+	prefix := make([]Instr, 0, len(cells)+len(others))
+	for _, c := range cells {
+		prefix = append(prefix, c.ins)
+	}
+	prefix = append(prefix, others...)
+	seq.Instrs = prefix
 }
 
 // insertPrefixInstructions prepends RETURN_GENERATOR + POP_TOP to the

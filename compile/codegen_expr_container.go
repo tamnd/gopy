@@ -220,6 +220,9 @@ func (c *Compiler) visitDict(e *ast.Dict) error {
 //
 // CPython: Python/codegen.c Attribute case in visit_expr
 func (c *Compiler) visitAttribute(e *ast.Attribute) error {
+	if e.Ctx == ast.Store {
+		c.maybeAddStaticAttribute(e)
+	}
 	if err := c.visitExpr(e.Value); err != nil {
 		return err
 	}
@@ -244,6 +247,29 @@ func (c *Compiler) visitAttribute(e *ast.Attribute) error {
 		return fmt.Errorf("compile: Attribute with unknown context %v", e.Ctx)
 	}
 	return nil
+}
+
+// maybeAddStaticAttribute walks the active unit stack and, when the
+// attribute is `self.X = ...` reached from inside a method, records X
+// on the nearest enclosing class unit. The class body emitter later
+// sorts the collected set and stores it as __static_attributes__.
+//
+// CPython: Python/compile.c:202 _PyCompile_MaybeAddStaticAttributeToClass
+func (c *Compiler) maybeAddStaticAttribute(e *ast.Attribute) {
+	name, ok := e.Value.(*ast.Name)
+	if !ok || name.Id != "self" {
+		return
+	}
+	for i := len(c.units) - 1; i >= 0; i-- {
+		u := c.units[i]
+		if u.ScopeType == symtable.ClassBlock {
+			if u.StaticAttributes == nil {
+				u.StaticAttributes = map[string]bool{}
+			}
+			u.StaticAttributes[e.Attr] = true
+			return
+		}
+	}
 }
 
 // visitSubscript emits BINARY_SUBSCR / STORE_SUBSCR / DELETE_SUBSCR.

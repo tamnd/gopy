@@ -137,7 +137,24 @@ func extractDocstring(body ast.Seq[ast.Stmt]) (string, bool) {
 // pops. The inner code object is left on the outer stack as a *Unit
 // const; the assembler translates it to a real PyCodeObject.
 //
-// CPython: Python/codegen.c:L1515 codegen_class_body
+// Emission order mirrors codegen_class_body in CPython 3.14:
+//
+//	MAKE_CELL __class__               (if needs_class_closure)
+//	LOAD __name__ / STORE __module__
+//	LOAD_CONST qualname / STORE __qualname__
+//	LOAD_CONST firstlineno / STORE __firstlineno__
+//	(needs_classdict: MAKE_CELL __classdict__, LOAD_LOCALS, STORE_DEREF)
+//	(has_conditional_annotations: BUILD_SET 0, STORE_DEREF __conditional_annotations__)
+//	(docstring: LOAD_CONST cleandoc, STORE __doc__)
+//	body
+//	process_deferred_annotations
+//	LOAD_CONST static_attributes_tuple / STORE __static_attributes__
+//	(needs_classdict: LOAD_CLOSURE __classdict__, STORE __classdictcell__)
+//	(needs_class_closure: LOAD_CLOSURE __class__ + COPY + STORE __classcell__
+//	 else LOAD_CONST None)
+//	RETURN_VALUE
+//
+// CPython: Python/codegen.c:1515 codegen_class_body
 func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDef) error {
 	outerScope := c.scope
 	outerFblocks := c.fblocks
@@ -146,25 +163,33 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	c.enterScope(innerScope)
 	c.addOpI(RESUME, 0, loc(s))
 
-	// MAKE_CELL for __class__ when an inner method referenced super or
-	// __class__ directly. The cell stays unbound until __build_class__
-	// patches it with the freshly built class object.
 	if innerScope.NeedsClassClosure {
 		cellPool := poolCellVars
 		idx := c.poolIndex(&cellPool, "__class__")
 		c.addOpI(MAKE_CELL, int32(idx), loc(s))
 	}
 
-	// PEP 649 __classdict__: the synthetic __annotate__ function closes
-	// over the class body's f_locals via this cell so annotation
-	// expressions can look up sibling annotations defined on the same
-	// class. The symtable analyzer flips NeedsClassDict whenever a
-	// nested AnnotationBlock declares __classdict__ as Use; we stamp
-	// the cell here and seed it with LOAD_LOCALS so a later LOAD_DEREF
-	// inside the annotate body sees the class namespace.
+	pool := poolNames
+	c.addOpName(LOAD_NAME, &pool, "__name__", loc(s))
+	c.addOpName(STORE_NAME, &pool, "__module__", loc(s))
+
+	qualname := s.Name
+	if u := c.unit(); u != nil && u.Qualname != "" {
+		qualname = u.Qualname
+	}
+	c.addLoadConst(qualname, loc(s))
+	c.addOpName(STORE_NAME, &pool, "__qualname__", loc(s))
+
+	// __firstlineno__: the source line where the class header starts
+	// (or the first decorator's line when the class has decorators).
+	// The class's FirstLineno is already set by enterScope from the
+	// symtable entry's Loc.Lineno. Cast to int64 so the small-int
+	// rewrite pass recognizes it.
 	//
-	// CPython: Python/compile.c compiler_classdef (LOAD_LOCALS +
-	// STORE_FAST __classdict__ block)
+	// CPython: Python/codegen.c:1540
+	c.addLoadConst(int64(c.unit().FirstLineno), loc(s))
+	c.addOpName(STORE_NAME, &pool, "__firstlineno__", loc(s))
+
 	if innerScope.NeedsClassDict {
 		cellPool := poolCellVars
 		idx := c.poolIndex(&cellPool, "__classdict__")
@@ -173,66 +198,30 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 		c.addOpI(STORE_DEREF, int32(idx), loc(s))
 	}
 
-	// __name__ -> __module__: the class body sees the enclosing
-	// module's __name__ via the surrounding namespace (LOAD_NAME) and
-	// stores it as the class's __module__ attribute.
-	pool := poolNames
-	c.addOpName(LOAD_NAME, &pool, "__name__", loc(s))
-	c.addOpName(STORE_NAME, &pool, "__module__", loc(s))
-
-	// __qualname__: the dotted path to the class. buildQualname has
-	// already composed the dotted form when we enterScope'd into the
-	// inner class, so the current unit's Qualname is "Outer.Inner"
-	// (or "<locals>"-laced when nested inside a function). Stamp that
-	// directly so C.D.__qualname__ == "C.D" instead of "D".
-	//
-	// CPython: Python/codegen.c codegen_class_body (LOAD_CONST qualname)
-	qualname := s.Name
-	if u := c.unit(); u != nil && u.Qualname != "" {
-		qualname = u.Qualname
+	if innerScope.HasConditionalAnnotations {
+		cellPool := poolCellVars
+		idx := c.poolIndex(&cellPool, "__conditional_annotations__")
+		c.addOpI(BUILD_SET, 0, loc(s))
+		c.addOpI(STORE_DEREF, int32(idx), loc(s))
 	}
-	c.addLoadConst(qualname, loc(s))
-	c.addOpName(STORE_NAME, &pool, "__qualname__", loc(s))
 
-	// Docstring: if body[0] is a bare string literal, pin it at
-	// consts[0], stamp CoHasDocstring, and store it under __doc__ in
-	// the class namespace. Mirrors CPython's class-body docstring
-	// handling, which routes through codegen_body's docstring branch
-	// before the rest of the body runs.
+	// Docstring lives inside codegen_body in CPython; emit it after the
+	// firstlineno / classdict / conditional annotations prologue so the
+	// class namespace gets __doc__ at the same instruction offset. The
+	// LOAD_CONST carries the docstring expression's own location so the
+	// linetable surfaces a row at the body line; STORE_NAME uses
+	// NO_LOCATION so it inherits via propagateLineNumbers.
 	//
-	// CPython: Python/codegen.c codegen_class_body (docstring branch)
+	// CPython: Python/codegen.c:879 codegen_body (docstring branch)
 	body := s.Body
 	if doc, ok := extractDocstring(body); ok {
-		c.addLoadConst(doc, loc(s))
-		c.addOpName(STORE_NAME, &pool, "__doc__", loc(s))
+		cleaned := cleanDoc(doc)
+		docLoc := loc(body[0])
+		c.addLoadConst(cleaned, docLoc)
+		c.addOpName(STORE_NAME, &pool, "__doc__", ast.Pos{Lineno: -1})
 		body = body[1:]
 	}
 
-	// PEP 649 conditional-annotations prologue: when an annotation
-	// lives inside a conditional branch (if / for / while / try), the
-	// symtable analyzer flags the class entry with
-	// HasConditionalAnnotations. The body opens an empty set under
-	// __conditional_annotations__ that the conditional emitter inside
-	// visitAnnAssign tracks names against, so __annotate__ can report
-	// which annotations were actually evaluated.
-	//
-	// CPython: Python/codegen.c:860 codegen_class_body (BUILD_SET 0 +
-	// STORE_NAME __conditional_annotations__)
-	if innerScope.HasConditionalAnnotations {
-		c.addOpI(BUILD_SET, 0, loc(s))
-		c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", loc(s))
-	}
-
-	// PEP 649: class-body annotations are deferred. visitAnnAssign
-	// records each annotation into the unit's DeferredAnnotations
-	// slice instead of emitting an eager STORE_SUBSCR, and we synth
-	// the `__annotate__` function after visitStmts. The lazy
-	// `__annotations__` getset (objects/type_attr.go:typeGetAttr)
-	// invokes that function on first read. Skip SETUP_ANNOTATIONS
-	// entirely; nothing in the body writes to __annotations__ now.
-	//
-	// CPython: Python/codegen.c codegen_class_body (the
-	// codegen_process_deferred_annotations call after the body loop)
 	if err := c.visitStmts(body); err != nil {
 		return err
 	}
@@ -240,23 +229,36 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 		return err
 	}
 
-	// Return __classcell__ when the class needs the implicit cell so
-	// __build_class__ can fill it with the new class object. Otherwise
-	// fall through to LOAD_CONST None / RETURN_VALUE.
-	if innerScope.NeedsClassClosure {
-		// LOAD_CLOSURE is the conceptual op (push the cell itself); the
-		// gopy assembler models it as LOAD_FAST against the cellvars
-		// pool, matching how emitClosure threads cells into a child
-		// function's MAKE_FUNCTION.
+	// __static_attributes__: tuple of attribute names assigned via
+	// `self.X = ...` in any method body. Collected during attribute
+	// visits via maybeAddStaticAttribute. Sorted alphabetically; emitted
+	// at NO_LOCATION so propagateLineNumbers inherits the previous
+	// instruction's line (CPython renders these rows as continuations).
+	//
+	// CPython: Python/codegen.c:1560
+	noLoc := ast.Pos{Lineno: -1}
+	c.emitStaticAttributes(noLoc)
+
+	if innerScope.NeedsClassDict {
+		// __classdictcell__: pushes the __classdict__ cell into the
+		// class namespace so type construction sees the dict-cell pair
+		// it needs to wire __annotate__.
 		cellPool := poolCellVars
-		c.addOpName(LOAD_FAST, &cellPool, "__class__", loc(s))
-		c.addOpI(COPY, 1, loc(s))
-		namePool := poolNames
-		c.addOpName(STORE_NAME, &namePool, "__classcell__", loc(s))
-		c.addOp(RETURN_VALUE, loc(s))
-	} else {
-		c.addReturnNoneIfMissing(loc(s))
+		idx := c.poolIndex(&cellPool, "__classdict__")
+		c.addOpI(LOAD_CLOSURE, int32(idx), noLoc)
+		c.addOpName(STORE_NAME, &pool, "__classdictcell__", noLoc)
 	}
+
+	if innerScope.NeedsClassClosure {
+		cellPool := poolCellVars
+		idx := c.poolIndex(&cellPool, "__class__")
+		c.addOpI(LOAD_CLOSURE, int32(idx), noLoc)
+		c.addOpI(COPY, 1, noLoc)
+		c.addOpName(STORE_NAME, &pool, "__classcell__", noLoc)
+	} else {
+		c.addLoadConst(nil, noLoc)
+	}
+	c.addOp(RETURN_VALUE, noLoc)
 
 	innerUnit := c.unit()
 	innerUnit.Name = s.Name
@@ -268,4 +270,137 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 
 	c.addLoadConst(innerUnit, loc(s))
 	return nil
+}
+
+// emitStaticAttributes pulls the collected self.X store names off the
+// current class unit, sorts them, and emits LOAD_CONST(tuple) +
+// STORE_NAME __static_attributes__.
+//
+// CPython: Python/compile.c:948 _PyCompile_StaticAttributesAsTuple
+func (c *Compiler) emitStaticAttributes(l ast.Pos) {
+	u := c.unit()
+	names := make([]string, 0, len(u.StaticAttributes))
+	for name := range u.StaticAttributes {
+		names = append(names, name)
+	}
+	sortStrings(names)
+	items := make([]any, len(names))
+	for i, n := range names {
+		items[i] = n
+	}
+	c.addLoadConst(&ConstTuple{Values: items}, l)
+	pool := poolNames
+	c.addOpName(STORE_NAME, &pool, "__static_attributes__", l)
+}
+
+// cleanDoc strips uniform leading whitespace from a docstring, mirroring
+// inspect.cleandoc / textwrap.dedent semantics. The first line keeps any
+// trailing content but loses leading spaces; subsequent lines lose up to
+// the minimum indent common to every non-blank line.
+//
+// CPython: Python/compile.c:1516 _PyCompile_CleanDoc
+func cleanDoc(doc string) string {
+	// First pass: expand tabs (PyUnicode str.expandtabs default tabsize 8)
+	doc = expandTabs(doc, 8)
+	// First pass: find minimum indentation of any non-blank line after
+	// the first line.
+	const maxMargin = int(^uint(0) >> 1)
+	margin := maxMargin
+	first := true
+	for i := 0; i < len(doc); {
+		if first {
+			for i < len(doc) && doc[i] != '\n' {
+				i++
+			}
+			if i < len(doc) {
+				i++
+			}
+			first = false
+			continue
+		}
+		start := i
+		for i < len(doc) && doc[i] == ' ' {
+			i++
+		}
+		if i < len(doc) && doc[i] != '\n' {
+			if i-start < margin {
+				margin = i - start
+			}
+		}
+		for i < len(doc) && doc[i] != '\n' {
+			i++
+		}
+		if i < len(doc) {
+			i++
+		}
+	}
+	if margin == maxMargin {
+		margin = 0
+	}
+	// Strip leading spaces from line one.
+	p := 0
+	for p < len(doc) && doc[p] == ' ' {
+		p++
+	}
+	if p == 0 && margin == 0 {
+		return doc
+	}
+	var b []byte
+	for p < len(doc) {
+		ch := doc[p]
+		p++
+		b = append(b, ch)
+		if ch == '\n' {
+			break
+		}
+	}
+	for p < len(doc) {
+		dropped := 0
+		for dropped < margin && p < len(doc) {
+			if doc[p] != ' ' {
+				break
+			}
+			p++
+			dropped++
+		}
+		for p < len(doc) {
+			ch := doc[p]
+			p++
+			b = append(b, ch)
+			if ch == '\n' {
+				break
+			}
+		}
+	}
+	return string(b)
+}
+
+// expandTabs replaces tab characters with spaces so each tab advances
+// the column to the next multiple of tabsize. Newlines reset the column.
+//
+// CPython: Objects/unicodeobject.c unicode_expandtabs_impl
+func expandTabs(s string, tabsize int) string {
+	if tabsize <= 0 {
+		return s
+	}
+	out := make([]byte, 0, len(s))
+	col := 0
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch ch {
+		case '\t':
+			n := tabsize - col%tabsize
+			for k := 0; k < n; k++ {
+				out = append(out, ' ')
+			}
+			col += n
+		case '\n', '\r':
+			out = append(out, ch)
+			col = 0
+		default:
+			out = append(out, ch)
+			col++
+		}
+	}
+	return string(out)
 }

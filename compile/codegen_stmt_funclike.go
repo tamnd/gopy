@@ -148,8 +148,12 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 	}
 
 	// Implicit return None at the end if the body did not already
-	// return.
-	c.addReturnNoneIfMissing(loc(key))
+	// return. CPython emits the synthetic LOAD_CONST None / RETURN_VALUE
+	// pair with NO_LOCATION so propagateLineNumbers carries the previous
+	// statement's line into the linetable epilogue.
+	//
+	// CPython: Python/codegen.c:867 codegen_body (implicit return None)
+	c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})
 
 	innerUnit := c.unit()
 	innerUnit.Name = name

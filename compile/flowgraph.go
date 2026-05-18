@@ -105,6 +105,16 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 		empty := []any{}
 		consts = &empty
 	}
+	// PASS pre-0: hoist every MAKE_CELL emitted inline by codegen to the
+	// front of the sequence with NO_LOCATION. CPython's flowgraph inserts
+	// MAKE_CELL via insert_prefix_instructions during _PyCfg_OptimizeCodeUnit
+	// so the cell ops sit before RESUME in the linetable. Running this
+	// before label resolution keeps the move safe even if a future codepath
+	// were to introduce jumps that land on a cell op.
+	//
+	// CPython: Python/flowgraph.c:3792 insert_prefix_instructions (cellvars)
+	hoistCellPrefix(seq)
+
 	// PASS 0: fold int-int BINARY_OP triples into a single LOAD_CONST,
 	// then drop instructions after an unconditional terminator. Run to
 	// a fixed point so a fold that exposes a new dead tail (or a new

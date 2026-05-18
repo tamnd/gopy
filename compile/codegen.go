@@ -91,6 +91,13 @@ type Unit struct {
 	//
 	// CPython: Python/compile.c compiler_unit.u_private
 	Private string
+	// StaticAttributes collects attribute names assigned via `self.X = ...`
+	// inside any nested method of a class body. The class body emitter
+	// sorts these into a tuple and stores it as __static_attributes__ on
+	// the class, used by the runtime for slot-skipping optimization.
+	//
+	// CPython: Python/compile.c compiler_unit.u_static_attributes
+	StaticAttributes map[string]bool
 }
 
 // deferredAnnotation records one PEP 649 annotation pending emission
@@ -249,6 +256,7 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 		}
 	case symtable.ClassBlock:
 		u.Flags = 0
+		u.StaticAttributes = map[string]bool{}
 	case symtable.AnnotationBlock:
 		// PEP 649 __annotate__ runs as a regular function: optimized
 		// fast locals, fresh f_locals. Without these flags the inner
