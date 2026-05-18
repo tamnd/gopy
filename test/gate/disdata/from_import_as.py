@@ -1,2 +1,1 @@
-from sys import path as p
-print(p)
+from os import path as p

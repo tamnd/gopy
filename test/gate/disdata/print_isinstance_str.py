@@ -1,1 +1,1 @@
-print(isinstance("x", str))
+print(isinstance("a", str))

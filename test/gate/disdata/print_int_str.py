@@ -1,1 +1,1 @@
-print("count:", 7)
+print(int("7"))

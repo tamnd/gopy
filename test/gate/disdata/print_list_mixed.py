@@ -1,1 +1,1 @@
-print([1, "a", True])
+print([1, "two", 3.0])

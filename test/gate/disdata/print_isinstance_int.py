@@ -1,1 +1,1 @@
-print(isinstance(1, int))
+print(isinstance(5, int))

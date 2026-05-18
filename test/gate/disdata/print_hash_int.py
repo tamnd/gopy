@@ -1,1 +1,1 @@
-print(hash(0))
+print(hash(42))

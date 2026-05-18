@@ -1,1 +1,1 @@
-print(0xFF & 0x0F)
+print(7 & 3)

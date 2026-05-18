@@ -1,1 +1,1 @@
-print("ab" in "cabd")
+print("a" in "abc")

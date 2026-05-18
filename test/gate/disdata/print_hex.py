@@ -1,1 +1,1 @@
-print(0xff)
+print(hex(255))
