@@ -100,9 +100,8 @@ func buildTargetSet(seq *Sequence) []bool {
 //
 // CPython: Python/flowgraph.c:3988 _PyCfg_ToInstructionSequence
 func cfgToSequence(g *cfgBuilder, seq *Sequence) {
-	// Assign each block a fresh label id. CPython uses lbl++ starting
-	// at 0; gopy reserves id 0 as NO_LABEL, so we allocate from
-	// seq.NewLabel which is 1-based.
+	// Assign each block a fresh label id. Matches CPython's lbl++
+	// starting at 0; seq.NewLabel post-increments from 0 as well.
 	for b := g.EntryBlock; b != nil; b = b.Next {
 		b.Label = seq.NewLabel()
 	}
