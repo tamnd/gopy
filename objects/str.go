@@ -350,12 +350,67 @@ func (s *Unicode) IsASCII() bool { return s.ascii }
 // for strings created via NewStr.
 func (s *Unicode) IsReady() bool { return s.ready }
 
-// unicodeRepr returns "'value'" with no escaping. The full repr that
-// escapes control characters and quotes lives in 1677-B.
+// unicodeRepr emits the Python repr() of a str. Mirrors CPython's
+// two-pass scan: first count single/double quotes to decide the outer
+// quote, then walk the runes escaping the special characters
+// (\\, \', or \", \t, \n, \r), encoding ASCII controls as \xHH, and
+// rendering non-printable Unicode as \xHH / \uHHHH / \UHHHHHHHH.
 //
-// CPython: Objects/unicodeobject.c:L11756 unicode_repr
+// CPython: Objects/unicodeobject.c:12956 unicode_repr
+// CPython: Objects/stringlib/repr.h:9 STRINGLIB(repr) inner loop
 func unicodeRepr(o Object) (string, error) {
-	return "'" + o.(*Unicode).v + "'", nil
+	s := o.(*Unicode).v
+
+	squote, dquote := 0, 0
+	for _, ch := range s {
+		switch ch {
+		case '\'':
+			squote++
+		case '"':
+			dquote++
+		}
+	}
+
+	quote := byte('\'')
+	if squote > 0 && dquote == 0 {
+		quote = '"'
+	}
+
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte(quote)
+	for _, ch := range s {
+		switch {
+		case ch == rune(quote) || ch == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(ch)
+		case ch == '\t':
+			b.WriteString(`\t`)
+		case ch == '\n':
+			b.WriteString(`\n`)
+		case ch == '\r':
+			b.WriteString(`\r`)
+		case ch < ' ' || ch == 0x7f:
+			fmt.Fprintf(&b, `\x%02x`, ch)
+		case ch < 0x7f:
+			b.WriteRune(ch)
+		default:
+			if !IsPrintableRune(ch) {
+				switch {
+				case ch <= 0xff:
+					fmt.Fprintf(&b, `\x%02x`, ch)
+				case ch <= 0xffff:
+					fmt.Fprintf(&b, `\u%04x`, ch)
+				default:
+					fmt.Fprintf(&b, `\U%08x`, ch)
+				}
+			} else {
+				b.WriteRune(ch)
+			}
+		}
+	}
+	b.WriteByte(quote)
+	return b.String(), nil
 }
 
 // unicodeStr returns the raw value.
