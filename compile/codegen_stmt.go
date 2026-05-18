@@ -400,16 +400,17 @@ func (c *Compiler) assignToSequence(elts ast.Seq[ast.Expr], l ast.Pos) error {
 	return nil
 }
 
-// addReturnNoneIfMissing emits LOAD_CONST None / RETURN_VALUE if the
-// last instruction is not already a RETURN_VALUE. Modules and bare
-// function bodies need this fall-through.
+// addReturnNoneIfMissing unconditionally emits LOAD_CONST None /
+// RETURN_VALUE at the current sequence tail. The CPython routine notes
+// "this also ensures that no jump target offsets are out of bounds":
+// every labeled position past the last codegen-visible statement (for
+// example the merge label after an if-then with an early return) needs
+// at least one instruction to bind to, so the if-statement's
+// post-merge label resolves inside the sequence instead of past its
+// end.
 //
-// CPython: Python/codegen.c:L6473 _PyCodegen_AddReturnAtEnd
+// CPython: Python/codegen.c:6475 _PyCodegen_AddReturnAtEnd
 func (c *Compiler) addReturnNoneIfMissing(l ast.Pos) {
-	seq := c.seq()
-	if n := len(seq.Instrs); n > 0 && seq.Instrs[n-1].Op == RETURN_VALUE {
-		return
-	}
 	c.addLoadConst(nil, l)
 	c.addOp(RETURN_VALUE, l)
 }

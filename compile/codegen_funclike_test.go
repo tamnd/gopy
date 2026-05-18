@@ -80,8 +80,11 @@ func TestEmptyFunctionDefBuildsInnerUnit(t *testing.T) {
 
 // TestFunctionWithReturnExpr verifies the body sees its own scope:
 // `def f(): return 1` puts 1 in inner.Consts and emits LOAD_CONST /
-// RETURN_VALUE. There must be no extra LOAD_CONST None tail, since the
-// explicit return already emitted one.
+// RETURN_VALUE. CPython's _PyCodegen_AddReturnAtEnd unconditionally
+// appends a trailing LOAD_CONST None / RETURN_VALUE so jump targets
+// past the body always bind to a real instruction.
+//
+// CPython: Python/codegen.c:6475 _PyCodegen_AddReturnAtEnd
 func TestFunctionWithReturnExpr(t *testing.T) {
 	fn := &ast.FunctionDef{
 		Name: "f",
@@ -90,7 +93,7 @@ func TestFunctionWithReturnExpr(t *testing.T) {
 	}
 	u := compileMod(t, module(fn))
 	inner := findInnerUnit(t, u)
-	want := []string{"RESUME", "LOAD_CONST", "RETURN_VALUE"}
+	want := []string{"RESUME", "LOAD_CONST", "RETURN_VALUE", "LOAD_CONST", "RETURN_VALUE"}
 	if got := opNames(inner); !equalStrings(got, want) {
 		t.Errorf("inner ops = %v, want %v", got, want)
 	}
@@ -107,7 +110,7 @@ func TestFunctionParamUsesLoadFast(t *testing.T) {
 	}
 	u := compileMod(t, module(fn))
 	inner := findInnerUnit(t, u)
-	want := []string{"RESUME", "LOAD_FAST", "RETURN_VALUE"}
+	want := []string{"RESUME", "LOAD_FAST", "RETURN_VALUE", "LOAD_CONST", "RETURN_VALUE"}
 	if got := opNames(inner); !equalStrings(got, want) {
 		t.Errorf("inner ops = %v, want %v", got, want)
 	}
@@ -245,7 +248,7 @@ func TestLambdaEmitsInnerCodeAndMakeFunction(t *testing.T) {
 	if inner.Name != "<lambda>" {
 		t.Errorf("inner.Name = %q, want <lambda>", inner.Name)
 	}
-	wantInner := []string{"RESUME", "LOAD_CONST", "RETURN_VALUE"}
+	wantInner := []string{"RESUME", "LOAD_CONST", "RETURN_VALUE", "LOAD_CONST", "RETURN_VALUE"}
 	if got := opNames(inner); !equalStrings(got, wantInner) {
 		t.Errorf("inner ops = %v, want %v", got, wantInner)
 	}
