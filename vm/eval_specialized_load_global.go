@@ -27,13 +27,16 @@ import (
 )
 
 // pushGlobalResult finalizes the stack shape for a LOAD_GLOBAL fast
-// path hit: optional NULL self slot when bit 0 of oparg is set, then
-// the looked-up value.
+// path hit. Stack effect (CPython 3.14, bytecodes.c:1769):
+//
+//	( -- res, null if oparg & 1 )
+//
+// value is pushed first (deeper slot), the NULL marker on top.
 func (e *evalState) pushGlobalResult(value objects.Object, oparg uint32) {
+	e.pushObject(value)
 	if oparg&1 != 0 {
 		e.push(stackref.Null)
 	}
-	e.pushObject(value)
 }
 
 // fastLoadGlobalModule implements LOAD_GLOBAL_MODULE.

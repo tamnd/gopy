@@ -287,6 +287,18 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// CPython: Python/flowgraph.c:3520 convert_pseudo_ops
 	convertPseudoOps(seq, nlocals)
 
+	// PASS 11c.1: fuse adjacent LOAD_FAST / STORE_FAST pairs into the
+	// super-instruction forms. Must run before optimize_load_fast so
+	// the dataflow downgrades LOAD_FAST_LOAD_FAST directly to
+	// LOAD_FAST_BORROW_LOAD_FAST_BORROW. removeRedundantNops compacts
+	// the NOP each fusion leaves behind, then jump and handler opargs
+	// rebind to the surviving instruction offsets.
+	//
+	// CPython: Python/flowgraph.c:2588 insert_superinstructions
+	if insertSuperinstructionsOnSequence(seq) > 0 {
+		removeRedundantNops(seq)
+	}
+
 	// PASS 11d: downgrade LOAD_FAST{,_LOAD_FAST} to the BORROW variants
 	// where the borrowed reference is provably consumed before the local
 	// is killed. Runs on a temporary cfg built from the resolved

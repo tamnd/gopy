@@ -321,6 +321,76 @@ func eliminateDeadCodeAfterTerminator(seq *Sequence) int {
 	return dropped
 }
 
+// insertSuperinstructionsOnSequence folds adjacent LOAD_FAST / STORE_FAST
+// pairs into LOAD_FAST_LOAD_FAST, STORE_FAST_LOAD_FAST, or
+// STORE_FAST_STORE_FAST. The second instruction is rewritten to NOP and
+// removeRedundantNops compacts the stream afterwards. Pairs are fused
+// only when both instructions sit in the same basic block: the second
+// must not be a jump or handler target, and the first must not be a
+// terminator. Lines must agree (or be unset) and both opargs must fit in
+// the low 4 bits, matching makeSuperInstruction's contract.
+//
+// CPython: Python/flowgraph.c:2588 insert_superinstructions
+// CPython: Python/flowgraph.c:2572 make_super_instruction
+func insertSuperinstructionsOnSequence(seq *Sequence) int {
+	if len(seq.Instrs) < 2 {
+		return 0
+	}
+	pinned := make([]bool, len(seq.Instrs))
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if hasJumpTarget(ins.Op) {
+			idx := int(ins.Oparg)
+			if idx >= 0 && idx < len(pinned) {
+				pinned[idx] = true
+			}
+		}
+		if ins.Handler.Label >= 0 && ins.Handler.Label < len(pinned) {
+			pinned[ins.Handler.Label] = true
+		}
+	}
+	fused := 0
+	for i := 0; i+1 < len(seq.Instrs); i++ {
+		cur := &seq.Instrs[i]
+		next := &seq.Instrs[i+1]
+		if pinned[i+1] {
+			continue
+		}
+		if isTerminator(cur.Op) {
+			continue
+		}
+		var superOp Opcode
+		switch cur.Op {
+		case LOAD_FAST:
+			if next.Op == LOAD_FAST {
+				superOp = LOAD_FAST_LOAD_FAST
+			}
+		case STORE_FAST:
+			switch next.Op {
+			case LOAD_FAST:
+				superOp = STORE_FAST_LOAD_FAST
+			case STORE_FAST:
+				superOp = STORE_FAST_STORE_FAST
+			}
+		}
+		if superOp == 0 {
+			continue
+		}
+		if cur.Loc.Lineno >= 0 && next.Loc.Lineno >= 0 && cur.Loc.Lineno != next.Loc.Lineno {
+			continue
+		}
+		if cur.Oparg >= 16 || next.Oparg >= 16 {
+			continue
+		}
+		cur.Op = superOp
+		cur.Oparg = (cur.Oparg << 4) | next.Oparg
+		next.Op = NOP
+		next.Oparg = 0
+		fused++
+	}
+	return fused
+}
+
 // hasJumpTarget reports whether op carries a label oparg, including the
 // pseudo JUMP / JUMP_NO_INTERRUPT opcodes that have no opcode-metadata
 // row. HasTarget alone returns false for the pseudo forms, which would
@@ -1058,6 +1128,21 @@ func tryPeepholePair(a, b *Instr) bool {
 			return true
 		case UNARY_NOT:
 			setNop(a)
+			setNop(b)
+			return true
+		}
+	case LOAD_GLOBAL:
+		// Fold LOAD_GLOBAL + PUSH_NULL into LOAD_GLOBAL with bit 0
+		// of oparg set (the NULL flag). The fused form pushes the
+		// global then a NULL marker, matching the codegen pattern of
+		// LOAD_GLOBAL followed by PUSH_NULL. Unlike the other rules,
+		// this rewrites the FIRST instruction (LOAD_GLOBAL stays,
+		// gains the flag) and NOPs the SECOND (PUSH_NULL drops).
+		//
+		// CPython: Python/flowgraph.c:2443 optimize_basic_block
+		// (case LOAD_GLOBAL).
+		if b.Op == PUSH_NULL && (origArg&1) == 0 {
+			a.Oparg = origArg | 1
 			setNop(b)
 			return true
 		}
