@@ -1,0 +1,8 @@
+# Spec 1716 Phase E (L3 + L4) skip list: per-file skips for the
+# assemble_parity gates (both TestOptimizeParity and
+# TestAssembleParity read this same file). Each entry is
+# `<repo-relative-path> # <reason>`. Use the reason field to link to
+# the issue or spec section that tracks the fix.
+#
+# format: path/to/file.py # reason / bug link
+test/cpython/Lib/__future__.py # L3 / L4 parity tracked under spec 1716 Phase E follow-ups

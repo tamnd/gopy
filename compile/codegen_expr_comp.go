@@ -134,14 +134,12 @@ func (c *Compiler) emitInnerComprehensionCode(innerScope *symtable.Entry,
 	// Implicit .0 parameter: the outermost iter.
 	c.declareArg(".0")
 
-	if !innerScope.CompInlined {
-		if err := c.emitMakeCellAndCopyFree(innerScope, loc(key)); err != nil {
-			c.scope = outerScope
-			c.fblocks = outerFblocks
-			c.restoreCaches(outerCaches)
-			return err
-		}
-	}
+	// MAKE_CELL / COPY_FREE_VARS get inserted by the cfg pipeline's
+	// prepare_localsplus at the entry block when the comprehension is
+	// compiled as its own scope. Inlined comprehensions (CompInlined)
+	// don't carry their own scope and don't need a prologue.
+	//
+	// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
 
 	switch kind {
 	case compListComp:
@@ -264,7 +262,7 @@ func (c *Compiler) compileAsyncGenerator(gens ast.Seq[*ast.Comprehension],
 	}
 
 	c.useLabel(start)
-	c.pushFblock(fblockAsyncComprehensionGenerator, start, JumpTargetLabel{}, nil)
+	c.pushFblock(fblockAsyncComprehensionGenerator, start, NoLabel, nil)
 	c.addOpJump(SETUP_FINALLY, except, loc(gen.Iter))
 	c.addOp(GET_ANEXT, loc(gen.Iter))
 	c.addLoadConst(nil, loc(gen.Iter))

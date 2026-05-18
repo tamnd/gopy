@@ -1,0 +1,11 @@
+# Spec 1716 Phase E (L1) corpus: Python source files driven through
+# both the patched CPython interpreter's codegen_oracle.py and gopy's
+# compile.CompileAndDumpL1. Both sides emit one unit000.l1.txt; the
+# gate diffs the two files byte-for-byte.
+#
+# Paths are repository-relative. Add new files one at a time. When a
+# file fails the gate, move it to codegen_parity_skip.txt with a bug
+# tracker link rather than removing it. The gate only runs when
+# GOPY_PATCHED_CPYTHON is set, so this file is harmless on CI runs
+# that do not have the patched python.exe staged.
+test/cpython/Lib/__future__.py

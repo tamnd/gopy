@@ -72,14 +72,21 @@ func (c *Compiler) compileMod(mod ast.Mod, filename string) (*Code, error) {
 	return assembleUnit(unit, filename)
 }
 
-// assembleUnit runs flowgraph + assemble on one Unit and recurses
-// into the nested units the codegen attached. The recursion lands on
-// each function/class/comprehension scope in post-order, mirroring
-// CPython's compile_codegen path that finishes inner scopes before
-// patching their MAKE_FUNCTION operand into the outer scope.
+// assembleUnit runs the cfg pipeline + assembler on one Unit and
+// recurses into the nested units the codegen attached. The recursion
+// lands on each function/class/comprehension scope in post-order,
+// mirroring CPython's compile_codegen path that finishes inner scopes
+// before patching their MAKE_FUNCTION operand into the outer scope.
 //
-// CPython: Python/compile.c:L1843 compile_make_closure / inner-unit
-// assembly inside compile_function
+// The actual four-call pipeline (cfgFromSequence ->
+// cfgOptimizeCodeUnit -> cfgOptimizedCfgToInstructionSequence ->
+// assembleMakeCodeObject) lives in optimizeAndAssembleCodeUnit, which
+// is a 1:1 port of Python/compile.c's optimize_and_assemble_code_unit.
+// This wrapper handles the nested-scope recursion plus the codeFlags
+// computation that CPython's _PyCompile_OptimizeAndAssemble does
+// before calling the driver.
+//
+// CPython: Python/compile.c:1458 _PyCompile_OptimizeAndAssemble
 func assembleUnit(unit *Unit, filename string) (*Code, error) {
 	// Recurse into nested Units before flowgraph runs on the parent:
 	// codegen embedded each inner *Unit as a const-pool entry, and the
@@ -97,13 +104,10 @@ func assembleUnit(unit *Unit, filename string) (*Code, error) {
 		}
 		unit.Consts[i] = childCo
 	}
-	info, err := OptimizeWithFlags(unit.Seq, &unit.Consts, len(unit.VarNames), unit.Flags)
+	codeFlags := finalizeFlags(unit)
+	co, err := optimizeAndAssembleCodeUnit(unit, codeFlags, filename)
 	if err != nil {
-		return nil, fmt.Errorf("compile: %s: flowgraph: %w", unit.Name, err)
-	}
-	co, err := Assemble(unit.Seq, info, unit, filename)
-	if err != nil {
-		return nil, fmt.Errorf("compile: %s: assemble: %w", unit.Name, err)
+		return nil, fmt.Errorf("compile: %s: %w", unit.Name, err)
 	}
 	return co, nil
 }

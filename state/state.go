@@ -112,6 +112,17 @@ type Interpreter struct {
 	// CPython: Include/internal/pycore_interp_structs.h common_consts
 	// CPython: Python/pylifecycle.c:815 _PyInterpreterState_InitConsts
 	CommonConsts [NumCommonConstants]any
+
+	// JIT mirrors CPython's interp->jit flag. When false, the Tier-2
+	// optimizer refuses to project a trace and ENTER_EXECUTOR is never
+	// installed; all execution stays on the Tier-1 interpreter. CPython
+	// flips this to true only when the interpreter was built with
+	// --enable-experimental-jit and PYTHON_JIT does not opt out.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h jit
+	// CPython: Python/optimizer.c:120 _PyOptimizer_Optimize jit gate
+	// CPython: Python/pystate.c:674 interp->jit = false (default)
+	JIT bool
 }
 
 // CONSTANT_* enum: indices into Interpreter.CommonConsts. Matches the

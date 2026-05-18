@@ -1,0 +1,266 @@
+diff --git a/Include/internal/pycore_flowgraph.h b/Include/internal/pycore_flowgraph.h
+index 5043260d2fd..3371d919ec2 100644
+--- a/Include/internal/pycore_flowgraph.h
++++ b/Include/internal/pycore_flowgraph.h
+@@ -41,6 +41,11 @@ PyAPI_FUNC(PyObject*) _PyCompile_OptimizeCfg(
+         PyObject *consts,
+         int nlocals);
+ 
++/* gopy spec 1716: install a Python callable that receives
++   (phase_name: str, dump_text: str) after each pass in
++   _PyCfg_OptimizeCodeUnit. Pass Py_None (or NULL) to clear. */
++PyAPI_FUNC(void) _PyCfgBuilder_SetPhaseHook(PyObject *callback);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Modules/_testinternalcapi.c b/Modules/_testinternalcapi.c
+index 158c26d442e..81490492594 100644
+--- a/Modules/_testinternalcapi.c
++++ b/Modules/_testinternalcapi.c
+@@ -771,6 +771,22 @@ _testinternalcapi_optimize_cfg_impl(PyObject *module, PyObject *instructions,
+     return _PyCompile_OptimizeCfg(instructions, consts, nlocals);
+ }
+ 
++/* gopy spec 1716: install a phase-hook on _PyCfg_OptimizeCodeUnit so the
++   port can capture a CFG dump after each optimization pass. The argument
++   must be either None (to clear the hook) or a callable accepting
++   (phase_name: str, dump_text: str). */
++static PyObject *
++_testinternalcapi_set_cfg_phase_hook(PyObject *module, PyObject *callback)
++{
++    if (callback != Py_None && !PyCallable_Check(callback)) {
++        PyErr_SetString(PyExc_TypeError,
++                        "set_cfg_phase_hook() argument must be a callable or None");
++        return NULL;
++    }
++    _PyCfgBuilder_SetPhaseHook(callback);
++    Py_RETURN_NONE;
++}
++
+ static int
+ get_nonnegative_int_from_dict(PyObject *dict, const char *key) {
+     PyObject *obj = PyDict_GetItemString(dict, key);
+@@ -2512,6 +2528,7 @@ static PyMethodDef module_functions[] = {
+     _TESTINTERNALCAPI_COMPILER_CODEGEN_METHODDEF
+     _TESTINTERNALCAPI_OPTIMIZE_CFG_METHODDEF
+     _TESTINTERNALCAPI_ASSEMBLE_CODE_OBJECT_METHODDEF
++    {"set_cfg_phase_hook", _testinternalcapi_set_cfg_phase_hook, METH_O, NULL},
+     {"get_interp_settings", get_interp_settings, METH_VARARGS, NULL},
+     {"clear_extension", clear_extension, METH_VARARGS, NULL},
+     {"write_perf_map_entry", write_perf_map_entry, METH_VARARGS},
+diff --git a/Python/flowgraph.c b/Python/flowgraph.c
+index eff2fc90d3c..29caa008584 100644
+--- a/Python/flowgraph.c
++++ b/Python/flowgraph.c
+@@ -273,25 +273,10 @@ basicblock_insert_instruction(basicblock *block, int pos, cfg_instr *instr) {
+     return SUCCESS;
+ }
+ 
+-/* For debugging purposes only */
+-#if 0
+-static void
+-dump_instr(cfg_instr *i)
+-{
+-    const char *jump = is_jump(i) ? "jump " : "";
+-
+-    char arg[128];
+-
+-    *arg = '\0';
+-    if (OPCODE_HAS_ARG(i->i_opcode)) {
+-        sprintf(arg, "arg: %d ", i->i_oparg);
+-    }
+-    if (HAS_TARGET(i->i_opcode)) {
+-        sprintf(arg, "target: %p [%d] ", i->i_target, i->i_oparg);
+-    }
+-    fprintf(stderr, "line: %d, %s (%d)  %s%s\n",
+-                    i->i_loc.lineno, _PyOpcode_OpName[i->i_opcode], i->i_opcode, arg, jump);
+-}
++/* gopy spec 1716: CFG phase-dump and per-phase hook.
++   The dump format is reproducible (no raw pointers, no addresses) and is
++   captured into a PyUnicodeWriter so a Python hook can compare it 1-1
++   against the gopy port. */
+ 
+ static inline int
+ basicblock_returns(const basicblock *b) {
+@@ -299,32 +284,130 @@ basicblock_returns(const basicblock *b) {
+     return last && IS_RETURN_OPCODE(last->i_opcode);
+ }
+ 
+-static void
+-dump_basicblock(const basicblock *b)
++static int
++dump_instr(PyUnicodeWriter *w, const cfg_instr *i)
++{
++    const char *jump_str = is_jump((cfg_instr *)i) ? "jump " : "";
++    if (PyUnicodeWriter_Format(w, "line: %d, %s (%d) ",
++                               i->i_loc.lineno,
++                               _PyOpcode_OpName[i->i_opcode],
++                               i->i_opcode) < 0) {
++        return -1;
++    }
++    if (HAS_TARGET(i->i_opcode)) {
++        int tgt_label = (i->i_target != NULL) ? i->i_target->b_label.id : -1;
++        if (PyUnicodeWriter_Format(w, "target: B%d [%d] ", tgt_label, i->i_oparg) < 0) {
++            return -1;
++        }
++    }
++    else if (OPCODE_HAS_ARG(i->i_opcode)) {
++        if (PyUnicodeWriter_Format(w, "arg: %d ", i->i_oparg) < 0) {
++            return -1;
++        }
++    }
++    if (PyUnicodeWriter_WriteUTF8(w, jump_str, -1) < 0) {
++        return -1;
++    }
++    return PyUnicodeWriter_WriteChar(w, '\n');
++}
++
++static int
++dump_basicblock(PyUnicodeWriter *w, const basicblock *b)
+ {
+     const char *b_return = basicblock_returns(b) ? "return " : "";
+-    fprintf(stderr, "%d: [EH=%d CLD=%d WRM=%d NO_FT=%d %p] used: %d, depth: %d, preds: %d %s\n",
+-        b->b_label.id, b->b_except_handler, b->b_cold, b->b_warm, BB_NO_FALLTHROUGH(b), b, b->b_iused,
+-        b->b_startdepth, b->b_predecessors, b_return);
++    if (PyUnicodeWriter_Format(w,
++            "B%d: [EH=%d CLD=%d WRM=%d NO_FT=%d] used: %d, depth: %d, preds: %d %s\n",
++            b->b_label.id, b->b_except_handler, b->b_cold, b->b_warm,
++            BB_NO_FALLTHROUGH(b), b->b_iused, b->b_startdepth,
++            b->b_predecessors, b_return) < 0) {
++        return -1;
++    }
+     if (b->b_instr) {
+-        int i;
+-        for (i = 0; i < b->b_iused; i++) {
+-            fprintf(stderr, "  [%02d] ", i);
+-            dump_instr(b->b_instr + i);
++        for (int i = 0; i < b->b_iused; i++) {
++            if (PyUnicodeWriter_Format(w, "  [%02d] ", i) < 0) {
++                return -1;
++            }
++            if (dump_instr(w, b->b_instr + i) < 0) {
++                return -1;
++            }
++        }
++    }
++    return 0;
++}
++
++/* Returns a new str. Caller decrefs. */
++static PyObject *
++cfg_dump_to_string(cfg_builder *g)
++{
++    PyUnicodeWriter *w = PyUnicodeWriter_Create(0);
++    if (w == NULL) {
++        return NULL;
++    }
++    for (basicblock *b = g->g_entryblock; b != NULL; b = b->b_next) {
++        if (dump_basicblock(w, b) < 0) {
++            PyUnicodeWriter_Discard(w);
++            return NULL;
+         }
+     }
++    return PyUnicodeWriter_Finish(w);
++}
++
++static PyObject *cfg_phase_hook = NULL;
++
++void
++_PyCfgBuilder_SetPhaseHook(PyObject *callback)
++{
++    PyObject *new_hook = (callback == Py_None) ? NULL : callback;
++    Py_XINCREF(new_hook);
++    Py_XSETREF(cfg_phase_hook, new_hook);
++}
++
++static int
++cfg_fire_phase(cfg_builder *g, const char *phase_name)
++{
++    if (cfg_phase_hook == NULL) {
++        return SUCCESS;
++    }
++    PyObject *dump = cfg_dump_to_string(g);
++    if (dump == NULL) {
++        return ERROR;
++    }
++    PyObject *res = PyObject_CallFunction(cfg_phase_hook, "sO", phase_name, dump);
++    Py_DECREF(dump);
++    if (res == NULL) {
++        return ERROR;
++    }
++    Py_DECREF(res);
++    return SUCCESS;
+ }
+ 
+ void
+ _PyCfgBuilder_DumpGraph(const basicblock *entryblock)
+ {
++    PyUnicodeWriter *w = PyUnicodeWriter_Create(0);
++    if (w == NULL) {
++        PyErr_Clear();
++        return;
++    }
+     for (const basicblock *b = entryblock; b != NULL; b = b->b_next) {
+-        dump_basicblock(b);
++        if (dump_basicblock(w, b) < 0) {
++            PyUnicodeWriter_Discard(w);
++            PyErr_Clear();
++            return;
++        }
++    }
++    PyObject *s = PyUnicodeWriter_Finish(w);
++    if (s == NULL) {
++        PyErr_Clear();
++        return;
++    }
++    const char *buf = PyUnicode_AsUTF8(s);
++    if (buf != NULL) {
++        fputs(buf, stderr);
+     }
++    Py_DECREF(s);
+ }
+ 
+-#endif
+-
+ 
+ /***** CFG construction and modification *****/
+ 
+@@ -3660,11 +3743,15 @@ _PyCfg_OptimizeCodeUnit(cfg_builder *g, PyObject *consts, PyObject *const_cache,
+                         int nlocals, int nparams, int firstlineno)
+ {
+     assert(cfg_builder_check(g));
++    RETURN_IF_ERROR(cfg_fire_phase(g, "entry"));
+     /** Preprocessing **/
+     /* Map labels to targets and mark exception handlers */
+     RETURN_IF_ERROR(translate_jump_labels_to_targets(g->g_entryblock));
++    RETURN_IF_ERROR(cfg_fire_phase(g, "translate_jump_labels_to_targets"));
+     RETURN_IF_ERROR(mark_except_handlers(g->g_entryblock));
++    RETURN_IF_ERROR(cfg_fire_phase(g, "mark_except_handlers"));
+     RETURN_IF_ERROR(label_exception_targets(g->g_entryblock));
++    RETURN_IF_ERROR(cfg_fire_phase(g, "label_exception_targets"));
+ 
+     /** Optimization **/
+ 
+@@ -3693,15 +3780,21 @@ _PyCfg_OptimizeCodeUnit(cfg_builder *g, PyObject *consts, PyObject *const_cache,
+     _Py_hashtable_destroy(consts_index);
+ 
+     RETURN_IF_ERROR(ret);
++    RETURN_IF_ERROR(cfg_fire_phase(g, "optimize_cfg"));
+ 
+     RETURN_IF_ERROR(remove_unused_consts(g->g_entryblock, consts));
++    RETURN_IF_ERROR(cfg_fire_phase(g, "remove_unused_consts"));
+     RETURN_IF_ERROR(
+         add_checks_for_loads_of_uninitialized_variables(
+             g->g_entryblock, nlocals, nparams));
++    RETURN_IF_ERROR(cfg_fire_phase(g, "add_checks_for_loads_of_uninitialized_variables"));
+     RETURN_IF_ERROR(insert_superinstructions(g));
++    RETURN_IF_ERROR(cfg_fire_phase(g, "insert_superinstructions"));
+ 
+     RETURN_IF_ERROR(push_cold_blocks_to_end(g));
++    RETURN_IF_ERROR(cfg_fire_phase(g, "push_cold_blocks_to_end"));
+     RETURN_IF_ERROR(resolve_line_numbers(g, firstlineno));
++    RETURN_IF_ERROR(cfg_fire_phase(g, "resolve_line_numbers"));
+     // temporarily remove assert. See https://github.com/python/cpython/issues/125845
+     // assert(all_exits_have_lineno(g->g_entryblock));
+     return SUCCESS;

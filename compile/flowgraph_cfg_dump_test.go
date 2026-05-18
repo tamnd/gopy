@@ -1,57 +1,56 @@
 package compile
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/tamnd/gopy/ast"
 )
 
-func TestDumpCfgRendersHeaderAndBlocks(t *testing.T) {
+func TestDumpCfgRendersBlocksCPythonFormat(t *testing.T) {
 	g := newCfgBuilder()
 	loc := ast.Pos{Lineno: 1, ColOffset: 0, EndLineno: 1, EndColOffset: 4}
 	g.addOp(LOAD_CONST, 0, loc)
 	g.addOp(RETURN_VALUE, 0, loc)
 
-	got := DumpCfg(g, CfgDumpHeader{
-		Phase:       "test",
-		FirstLineno: 1,
-		NLocals:     0,
-		NParams:     0,
-		CodeFlags:   0x42,
-	})
-	want := `# cfg dump: test
-firstlineno: 1
-nlocals: 0
-nparams: 0
-codeflags: 0x42
-
-block 0 (label=0 preds=0 startdepth=0 warm=false cold=false):
-  0 LOAD_CONST(0) loc=1:0-1:4
-  1 RETURN_VALUE(0) loc=1:0-1:4
-  -> next=nil
-`
+	got := DumpCfg(g)
+	want := fmt.Sprintf(
+		"B-1: [EH=0 CLD=0 WRM=0 NO_FT=1] used: 2, depth: 0, preds: 0 return \n"+
+			"  [00] line: 1, LOAD_CONST (%d) arg: 0 \n"+
+			"  [01] line: 1, RETURN_VALUE (%d) \n",
+		int(LOAD_CONST), int(RETURN_VALUE))
 	if got != want {
 		t.Fatalf("DumpCfg mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
-func TestDumpCfgResolvesJumpTargetsAsBlockIndices(t *testing.T) {
+func TestDumpCfgResolvesJumpTargetsAsBlockLabels(t *testing.T) {
 	g := newCfgBuilder()
 	loc := ast.Pos{Lineno: 1}
 	g.addOp(LOAD_CONST, 0, loc)
-	// Force a fresh block via a label.
 	lbl := JumpTargetLabel{id: 1}
 	g.useLabel(lbl)
 	g.addOp(RETURN_VALUE, 0, loc)
 
 	target := g.EntryBlock.Next
-	jump := &cfgInstr{Op: JUMP_FORWARD, Oparg: 0, Loc: loc, Target: target}
-	g.EntryBlock.Instr = append(g.EntryBlock.Instr, *jump)
+	g.EntryBlock.Instr = append(g.EntryBlock.Instr, cfgInstr{
+		Op: JUMP_FORWARD, Oparg: 0, Loc: loc, Target: target,
+	})
 
-	dump := DumpCfg(g, CfgDumpHeader{Phase: "jumps"})
-	if !strings.Contains(dump, "target=block1") {
-		t.Fatalf("expected jump target rendered as block1, got:\n%s", dump)
+	dump := DumpCfg(g)
+	if !strings.Contains(dump, "target: B1 [0] jump \n") {
+		t.Fatalf("expected jump target rendered as B1 with jump marker, got:\n%s", dump)
+	}
+}
+
+func TestDumpCfgEntryBlockHasNoLabel(t *testing.T) {
+	g := newCfgBuilder()
+	g.addOp(RETURN_VALUE, 0, ast.Pos{Lineno: 1})
+
+	got := DumpCfg(g)
+	if !strings.HasPrefix(got, "B-1:") {
+		t.Fatalf("entry block should render as B-1 (NO_LABEL), got:\n%s", got)
 	}
 }
 
@@ -66,8 +65,8 @@ func TestDumpCfgIsDeterministic(t *testing.T) {
 		g.addOp(RETURN_VALUE, 0, loc)
 		return g
 	}
-	a := DumpCfg(build(), CfgDumpHeader{Phase: "p"})
-	b := DumpCfg(build(), CfgDumpHeader{Phase: "p"})
+	a := DumpCfg(build())
+	b := DumpCfg(build())
 	if a != b {
 		t.Fatalf("DumpCfg is non-deterministic:\n--- a ---\n%s\n--- b ---\n%s", a, b)
 	}

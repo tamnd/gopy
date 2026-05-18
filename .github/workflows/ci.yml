@@ -84,3 +84,53 @@ jobs:
         run: go build ./...
       - name: Run tests
         run: go test -race -count=1 ./...
+
+  cfg-phase-parity:
+    name: cfg-phase-parity (linux)
+    runs-on: ubuntu-latest
+    # Spec 1716 B.3 L2 gate. Builds a patched CPython 3.14.5 with the
+    # cfg-phase-dump hook, caches the resulting tree by patch hash, and
+    # runs test/gate/TestCfgPhaseParity against it. The test self-skips
+    # when GOPY_PATCHED_CPYTHON is unset, so this job is the only place
+    # the L2 diff actually fires.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libffi-dev libssl-dev zlib1g-dev
+      - name: Cache patched CPython
+        id: cpy-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/cpython-patched
+          key: cpy-patched-3.14.5-${{ hashFiles('test/cpython/patches/0001-cfg-phase-dump.patch') }}
+      - name: Build patched CPython
+        if: steps.cpy-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          mkdir -p $HOME/src
+          cd $HOME/src
+          git clone --depth 1 --branch v3.14.5 https://github.com/python/cpython.git
+          cd cpython
+          git apply $GITHUB_WORKSPACE/test/cpython/patches/0001-cfg-phase-dump.patch
+          ./configure --prefix=$HOME/cpython-patched --with-pydebug --disable-test-modules
+          make -j"$(nproc)"
+          # Stash the build tree (we need the in-place python.exe, not an
+          # `make install` target, because _testinternalcapi only loads
+          # against the in-tree build).
+          mkdir -p $HOME/cpython-patched
+          cp -r $HOME/src/cpython $HOME/cpython-patched/cpython
+      - name: Run cfg phase parity gate
+        run: |
+          export GOPY_PATCHED_CPYTHON="$HOME/cpython-patched/cpython/python"
+          test -x "$GOPY_PATCHED_CPYTHON"
+          go test -count=1 ./test/gate -run TestCfgPhaseParity -v

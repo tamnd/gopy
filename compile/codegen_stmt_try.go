@@ -71,7 +71,7 @@ func (c *Compiler) visitTryFinally(s *ast.Try) error {
 	c.useLabel(end)
 	c.addOpJump(SETUP_CLEANUP, cleanup, ast.Pos{})
 	c.addOp(PUSH_EXC_INFO, ast.Pos{})
-	c.pushFblock(fblockFinallyEnd, end, JumpTargetLabel{}, nil)
+	c.pushFblock(fblockFinallyEnd, end, NoLabel, nil)
 	if err := c.visitStmts(s.Finalbody); err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func (c *Compiler) visitTryStarFinally(s *ast.TryStar) error {
 	c.useLabel(end)
 	c.addOpJump(SETUP_CLEANUP, cleanup, ast.Pos{})
 	c.addOp(PUSH_EXC_INFO, ast.Pos{})
-	c.pushFblock(fblockFinallyEnd, end, JumpTargetLabel{}, nil)
+	c.pushFblock(fblockFinallyEnd, end, NoLabel, nil)
 	if err := c.visitStmts(s.Finalbody); err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func (c *Compiler) visitTryExcept(s *ast.Try) error {
 	c.addOpJump(SETUP_FINALLY, exceptLbl, l)
 
 	c.useLabel(body)
-	c.pushFblock(fblockTryExcept, body, JumpTargetLabel{}, nil)
+	c.pushFblock(fblockTryExcept, body, NoLabel, nil)
 	if err := c.visitStmts(s.Body); err != nil {
 		return err
 	}
@@ -173,7 +173,7 @@ func (c *Compiler) visitTryExcept(s *ast.Try) error {
 	c.useLabel(exceptLbl)
 	c.addOpJump(SETUP_CLEANUP, cleanup, ast.Pos{})
 	c.addOp(PUSH_EXC_INFO, ast.Pos{})
-	c.pushFblock(fblockExceptionHandler, JumpTargetLabel{}, JumpTargetLabel{}, nil)
+	c.pushFblock(fblockExceptionHandler, NoLabel, NoLabel, nil)
 
 	n := len(s.Handlers)
 	for i, h := range s.Handlers {
@@ -221,7 +221,7 @@ func (c *Compiler) emitExceptBody(h *ast.ExceptHandler, end JumpTargetLabel) err
 		cleanupBody := c.newLabel()
 		c.addOp(POP_TOP, hl)
 		c.useLabel(cleanupBody)
-		c.pushFblock(fblockHandlerCleanup, cleanupBody, JumpTargetLabel{}, nil)
+		c.pushFblock(fblockHandlerCleanup, cleanupBody, NoLabel, nil)
 		if err := c.visitStmts(h.Body); err != nil {
 			return err
 		}
@@ -240,7 +240,7 @@ func (c *Compiler) emitExceptBody(h *ast.ExceptHandler, end JumpTargetLabel) err
 	}
 	c.addOpJump(SETUP_CLEANUP, cleanupEnd, hl)
 	c.useLabel(cleanupBody)
-	c.pushFblock(fblockHandlerCleanup, cleanupBody, JumpTargetLabel{}, *h.Name)
+	c.pushFblock(fblockHandlerCleanup, cleanupBody, NoLabel, *h.Name)
 	if err := c.visitStmts(h.Body); err != nil {
 		return err
 	}
@@ -289,7 +289,7 @@ func (c *Compiler) visitTryStarExcept(s *ast.TryStar) error {
 	c.addOpJump(SETUP_FINALLY, exceptLbl, l)
 
 	c.useLabel(body)
-	c.pushFblock(fblockTryExcept, body, JumpTargetLabel{}, nil)
+	c.pushFblock(fblockTryExcept, body, NoLabel, nil)
 	if err := c.visitStmts(s.Body); err != nil {
 		return err
 	}
@@ -302,7 +302,7 @@ func (c *Compiler) visitTryStarExcept(s *ast.TryStar) error {
 	c.useLabel(exceptLbl)
 	c.addOpJump(SETUP_CLEANUP, cleanup, ast.Pos{})
 	c.addOp(PUSH_EXC_INFO, ast.Pos{})
-	c.pushFblock(fblockExceptionGroupHandler, JumpTargetLabel{}, JumpTargetLabel{}, "except handler")
+	c.pushFblock(fblockExceptionGroupHandler, NoLabel, NoLabel, "except handler")
 
 	n := len(s.Handlers)
 	for i, h := range s.Handlers {
@@ -384,7 +384,7 @@ func (c *Compiler) emitExceptStarHandler(h *ast.ExceptHandler, i, n int, reraise
 	if h.Name != nil {
 		datum = *h.Name
 	}
-	c.pushFblock(fblockHandlerCleanup, cleanupBody, JumpTargetLabel{}, datum)
+	c.pushFblock(fblockHandlerCleanup, cleanupBody, NoLabel, datum)
 	if err := c.visitStmts(h.Body); err != nil {
 		return err
 	}

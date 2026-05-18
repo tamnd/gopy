@@ -11,7 +11,7 @@ import (
 // the optimizer's dict and type watchers at the canonical IDs and
 // that re-running the init is a no-op.
 func TestWatcherInit_RegistersCallbacks(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 
 	w := watcherTable(interp)
@@ -35,7 +35,7 @@ func TestWatcherInit_RegistersCallbacks(t *testing.T) {
 // watcher up against an executor that depends on a synthetic dict,
 // fires DispatchDictMutation, and asserts the executor is invalidated.
 func TestDispatchDictMutation_FiresWatcherAndInvalidates(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 
 	_, exec := installLoopExecutor(t, interp)
@@ -65,7 +65,7 @@ func TestDispatchDictMutation_FiresWatcherAndInvalidates(t *testing.T) {
 // TestDispatchDictMutation_IgnoresUnsubscribedDict ensures the
 // dispatch path is silent for dicts that were never registered.
 func TestDispatchDictMutation_IgnoresUnsubscribedDict(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 	_, exec := installLoopExecutor(t, interp)
 
@@ -84,7 +84,7 @@ func TestDispatchDictMutation_IgnoresUnsubscribedDict(t *testing.T) {
 // TestDispatchTypeMutation_FiresWatcherAndInvalidates is the type
 // watcher analog of the dict test.
 func TestDispatchTypeMutation_FiresWatcherAndInvalidates(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 
 	_, exec := installLoopExecutor(t, interp)
@@ -112,7 +112,7 @@ func TestDispatchTypeMutation_FiresWatcherAndInvalidates(t *testing.T) {
 // PyDict_AddWatcher API (used outside the optimizer's own canonical
 // callbacks).
 func TestDictAddWatcher_AssignsFreeSlot(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp) // occupies slots 0 and 1
 
 	id := DictAddWatcher(interp, func(DictWatchEvent, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) int {

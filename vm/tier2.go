@@ -41,6 +41,13 @@ func (e *evalState) tryWarmupTier2(instrIdx int) {
 	if interp == nil {
 		return
 	}
+	// CPython: Python/bytecodes.c:2891 JUMP_BACKWARD selects between
+	// JUMP_BACKWARD_JIT and JUMP_BACKWARD_NO_JIT based on interp->jit;
+	// only the JIT specialization calls into _PyOptimizer_Optimize.
+	// gopy default-false on JIT keeps Tier-1 the only execution arm.
+	if !interp.JIT {
+		return
+	}
 	co := e.f.Code
 	if compile.Opcode(co.Code[instrIdx*2]) == compile.ENTER_EXECUTOR {
 		return
@@ -65,6 +72,10 @@ func (e *evalState) enterExecutor(oparg uint32) (int, objects.Object, error, boo
 	op := compile.Opcode(exec.VMData.Opcode)
 	arg := uint32(exec.VMData.Oparg)
 	if next, retVal, retErr, retDone, ok, err := e.dispatchHandwritten(op, arg); ok {
+		return next, retVal, retErr, retDone, err
+	}
+	if dispatchGenSupported[op] {
+		next, retVal, retErr, retDone, err := e.dispatchGen(op, arg)
 		return next, retVal, retErr, retDone, err
 	}
 	next, retVal, retErr, retDone, _, err := e.trySimple(op, arg)

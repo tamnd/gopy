@@ -281,19 +281,30 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	c.varnameCache = map[string]int{}
 	c.freeCache = map[string]int{}
 	c.cellCache = map[string]int{}
-	// Pre-allocate FreeVars slots in a deterministic order so the
-	// outer scope's emitClosure (which pushes cells in the same order)
-	// and the inner's lazy LOAD_DEREF emission agree on slot indices.
-	// Without this, the inner's FreeVars order depends on which free
-	// var is referenced first in the body, while the outer sorts
-	// alphabetically, producing a slot mismatch on COPY_FREE_VARS.
+	// Pre-allocate CellVars / FreeVars slots in a deterministic order so
+	// the outer scope's emitClosure (which pushes cells in the same order)
+	// and the cfg pipeline's insert_prefix_instructions (which emits one
+	// MAKE_CELL per cell symbol) agree on slot indices. Mirrors CPython's
+	// compiler_enter_scope dictbytype(CELL/FREE) population: cell symbols
+	// land in u_cellvars, free symbols in u_freevars, both alphabetically.
+	//
+	// CPython: Python/compile.c compiler_enter_scope (dictbytype CELL/FREE)
+	var cellNames []string
 	var freeNames []string
 	for name, flags := range sc.Symbols {
-		if flags.Scope() == symtable.Free {
+		switch flags.Scope() {
+		case symtable.Cell:
+			cellNames = append(cellNames, name)
+		case symtable.Free:
 			freeNames = append(freeNames, name)
 		}
 	}
+	sortStrings(cellNames)
 	sortStrings(freeNames)
+	for _, name := range cellNames {
+		u.CellVars = append(u.CellVars, name)
+		c.cellCache[name] = len(u.CellVars) - 1
+	}
 	for _, name := range freeNames {
 		u.FreeVars = append(u.FreeVars, name)
 		c.freeCache[name] = len(u.FreeVars) - 1

@@ -139,9 +139,12 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 		return err
 	}
 
-	if err := c.emitMakeCellAndCopyFree(innerScope, loc(key)); err != nil {
-		return err
-	}
+	// MAKE_CELL / COPY_FREE_VARS are not emitted by codegen: the cfg
+	// pipeline's prepare_localsplus / insert_prefix_instructions add
+	// them at the entry block right after RESUME (and rewrites every
+	// deref oparg to a localsplus offset via fix_cell_offsets).
+	//
+	// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
 
 	if err := c.visitStmts(body); err != nil {
 		return err
@@ -157,7 +160,14 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 
 	innerUnit := c.unit()
 	innerUnit.Name = name
-	innerUnit.Argcount = len(args.Posonlyargs) + len(args.Args)
+	// CPython convention: u_argcount counts positional-or-keyword args
+	// only, NOT positional-only ones. assemble.c:makecode sums posonly +
+	// posorkw into co_argcount. Keeping the unit fields aligned with
+	// CPython means the cfg passes, makecode, and the dis-side metadata
+	// dump all read the same numbers.
+	//
+	// CPython: Python/codegen.c:1338 u_argcount = asdl_seq_LEN(args->args)
+	innerUnit.Argcount = len(args.Args)
 	innerUnit.PosOnlyArgCount = len(args.Posonlyargs)
 	innerUnit.KwOnlyArgCount = len(args.Kwonlyargs)
 	if args.Vararg != nil {
@@ -320,63 +330,6 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 	}
 	c.addOpI(BUILD_TUPLE, int32(len(freeNames)), l)
 	return 0x08, nil
-}
-
-// emitMakeCellAndCopyFree emits MAKE_CELL for every cell var in the
-// function and COPY_FREE_VARS when the function captures any free
-// variable.
-//
-// CPython emits MAKE_CELL for every cell var, not only cell-bound
-// parameters: a local that the symtable promoted to Cell scope
-// (because a nested scope captures it) still needs its cell created
-// up front so the eventual STORE_DEREF / LOAD_DEREF has a cell to
-// write into. The arg vs non-arg split only matters for the operand
-// rewrite in fix_cell_offsets; the runtime arm of MAKE_CELL in gopy
-// keys off the cellvars index and looks up the name in Varnames to
-// decide whether to seed the cell from a parameter slot.
-//
-// Ordering: arg cells first in Varnames declaration order, then the
-// remaining cell vars in stable (alphabetical) order. CPython sorts
-// by the cellfixedoffsets table so arg cells come first; gopy's
-// split layout doesn't need the offset fix-up, but matching the
-// emission order keeps the cellvars pool deterministic and aligns
-// the LOAD_DEREF / STORE_DEREF operand with the runtime slot.
-//
-// CPython: Python/flowgraph.c:3792 insert_prefix_instructions
-// (cellvars block) + Python/flowgraph.c:3711 build_cellfixedoffsets
-func (c *Compiler) emitMakeCellAndCopyFree(sc *symtable.Entry, l ast.Pos) error {
-	pool := poolCellVars
-	emitted := make(map[string]bool)
-	for _, name := range sc.Varnames {
-		if sc.GetScope(name) != symtable.Cell {
-			continue
-		}
-		idx := c.poolIndex(&pool, name)
-		c.addOpI(MAKE_CELL, int32(idx), l)
-		emitted[name] = true
-	}
-	var rest []string
-	for name, flags := range sc.Symbols {
-		if flags.Scope() != symtable.Cell || emitted[name] {
-			continue
-		}
-		rest = append(rest, name)
-	}
-	sortStrings(rest)
-	for _, name := range rest {
-		idx := c.poolIndex(&pool, name)
-		c.addOpI(MAKE_CELL, int32(idx), l)
-	}
-	freeCount := 0
-	for _, flags := range sc.Symbols {
-		if flags.Scope() == symtable.Free {
-			freeCount++
-		}
-	}
-	if freeCount > 0 {
-		c.addOpI(COPY_FREE_VARS, int32(freeCount), l)
-	}
-	return nil
 }
 
 // freeVarsOf returns the free-variable names of the inner scope in

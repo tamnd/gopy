@@ -1,0 +1,9 @@
+# Spec 1716 B.3 corpus: Python source files driven through both the
+# patched CPython interpreter and gopy's CompileWithCfgPhaseHook.
+# Both sides emit one `unit<idx>.<phase>.cfg` file per (code unit,
+# pass) pair; the gate diffs the two trees byte-for-byte.
+#
+# Paths are repository-relative. Add new files one at a time. When
+# a file fails the gate, move it to cfg_phase_skip.txt with a bug
+# tracker link rather than removing it.
+test/cpython/Lib/__future__.py

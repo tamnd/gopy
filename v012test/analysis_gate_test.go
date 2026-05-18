@@ -24,7 +24,7 @@ import (
 // emits both rows up front should come back without them.
 func TestAnalysisGateCleanupRunsInOptimize(t *testing.T) {
 	co := loopBytecode()
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 
 	exec, status := optimizer.Optimize(interp, nil, co, 0, 0, 0)
 	if status != 1 {
@@ -66,7 +66,7 @@ func TestAnalysisGateBenignBailFromOptimizeUops(t *testing.T) {
 		Stacksize: 1 << 20,
 		Consts:    []any{nil},
 	}
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 
 	exec, status := optimizer.Optimize(interp, nil, co, 0, 0, 0)
 	if status != 0 {

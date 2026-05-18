@@ -1,13 +1,303 @@
 // Passes that operate on the *cfgBuilder graph rather than the flat
 // Sequence. Each function here is a 1:1 port of the corresponding
 // CPython routine in Python/flowgraph.c.
-//
-// These coexist with the flat-sequence passes in flowgraph_passes.go
-// until spec 1715 phase 6 retires the flat shim.
 
 package compile
 
-import "github.com/tamnd/gopy/ast"
+import (
+	"math/bits"
+
+	"github.com/tamnd/gopy/ast"
+)
+
+// maxIntFoldBits caps the bit-length of folded integer results. CPython
+// runs unlimited-precision arithmetic and refuses to fold once the
+// product / power / shift exceeds 128 bits; gopy stores constants as
+// int64, so the effective ceiling is 63 (sign bit reserved).
+//
+// CPython: Python/flowgraph.c:1690 MAX_INT_SIZE
+const maxIntFoldBits = 63
+
+// In-place BINARY_OP suboperators not declared in codegen_expr_op.go.
+// Values come from CPython's NB_INPLACE_* enum.
+//
+// CPython: Include/opcode.h NB_INPLACE_ADD etc.
+const (
+	nbInplAdd int32 = 13
+	nbInplAnd int32 = 14
+	nbInplLsh int32 = 16
+	nbInplMul int32 = 18
+	nbInplOr  int32 = 22
+	nbInplRsh int32 = 24
+	nbInplSub int32 = 23
+	nbInplXor int32 = 25
+)
+
+const minInt64 int64 = -1 << 63
+
+// minConstSequenceSize mirrors CPython's MIN_CONST_SEQUENCE_SIZE: a
+// list / set literal shorter than this stays as N pushes + BUILD_X
+// because the LIST_EXTEND prelude would not pay off.
+//
+// CPython: Python/flowgraph.c:1585 MIN_CONST_SEQUENCE_SIZE
+const minConstSequenceSize = 3
+
+// noLocation mirrors CPython's NO_LOCATION sentinel. Folds that nop out
+// instructions stamp this on the resulting NOP so the redundant-NOP
+// pass can drop them; CPython's nop_out does the same.
+//
+// CPython: Python/flowgraph.c:50 NO_LOCATION
+var noLocation = ast.Pos{Lineno: -1, EndLineno: -1, ColOffset: -1, EndColOffset: -1}
+
+// evalIntBinop computes the result of x <op> y for integer operands,
+// or returns ok=false if the operator is one we do not fold (TRUE_DIVIDE,
+// MATRIX_MULTIPLY, FLOOR_DIVIDE on a zero divisor, POWER with a
+// negative exponent, etc.).
+//
+// CPython: Python/flowgraph.c:1791 eval_const_binop
+func evalIntBinop(op int32, x, y int64) (int64, bool) {
+	switch op {
+	case nbAdd, nbInplAdd:
+		return safeAdd(x, y)
+	case nbSubtract, nbInplSub:
+		return safeSub(x, y)
+	case nbMult, nbInplMul:
+		return safeMultiply(x, y)
+	case nbAnd, nbInplAnd:
+		return x & y, true
+	case nbOr, nbInplOr:
+		return x | y, true
+	case nbXor, nbInplXor:
+		return x ^ y, true
+	case nbLShift, nbInplLsh:
+		return safeLshift(x, y)
+	case nbRShift, nbInplRsh:
+		if y < 0 || y >= 64 {
+			return 0, false
+		}
+		return x >> uint(y), true
+	case nbPower:
+		return safePower(x, y)
+	case nbFloorDiv:
+		if y == 0 {
+			return 0, false
+		}
+		q := x / y
+		if (x%y != 0) && ((x < 0) != (y < 0)) {
+			q--
+		}
+		return q, true
+	case nbRemainder:
+		if y == 0 {
+			return 0, false
+		}
+		r := x % y
+		if r != 0 && ((r < 0) != (y < 0)) {
+			r += y
+		}
+		return r, true
+	}
+	return 0, false
+}
+
+// intBitLen reports the bit length of |v|, matching _PyLong_NumBits.
+//
+// CPython: Objects/longobject.c _PyLong_NumBits
+func intBitLen(v int64) int {
+	if v < 0 {
+		v = -v
+	}
+	return bits.Len64(uint64(v))
+}
+
+// safeAdd returns x + y when the result fits in int64. Matches
+// CPython's implicit "fits in MAX_INT_SIZE bits" guard for the
+// gopy int64 const pool.
+//
+// CPython: Python/flowgraph.c:1799 PyNumber_Add (eval_const_binop)
+func safeAdd(x, y int64) (int64, bool) {
+	r := x + y
+	if (y > 0 && r < x) || (y < 0 && r > x) {
+		return 0, false
+	}
+	return r, true
+}
+
+// safeSub returns x - y when the result fits in int64.
+//
+// CPython: Python/flowgraph.c:1802 PyNumber_Subtract (eval_const_binop)
+func safeSub(x, y int64) (int64, bool) {
+	r := x - y
+	if (y > 0 && r > x) || (y < 0 && r < x) {
+		return 0, false
+	}
+	return r, true
+}
+
+// safeMultiply mirrors const_folding_safe_multiply for the int64
+// path. CPython caps at 128 bits combined; we cap at 63 to keep the
+// result in int64.
+//
+// CPython: Python/flowgraph.c:1696 const_folding_safe_multiply
+func safeMultiply(x, y int64) (int64, bool) {
+	if x == 0 || y == 0 {
+		return 0, true
+	}
+	if intBitLen(x)+intBitLen(y) > maxIntFoldBits {
+		return 0, false
+	}
+	return x * y, true
+}
+
+// safeLshift mirrors const_folding_safe_lshift for the int64 path.
+//
+// CPython: Python/flowgraph.c:1761 const_folding_safe_lshift
+func safeLshift(x, y int64) (int64, bool) {
+	if y < 0 {
+		return 0, false
+	}
+	if x == 0 || y == 0 {
+		return x, true
+	}
+	if y > maxIntFoldBits || intBitLen(x)+int(y) > maxIntFoldBits {
+		return 0, false
+	}
+	return x << uint(y), true
+}
+
+// safePower mirrors const_folding_safe_power for the int64 path. Only
+// folds non-negative exponents; negative exponents would produce a
+// float, and gopy keeps the const pool homogeneous per slot.
+//
+// CPython: Python/flowgraph.c:1741 const_folding_safe_power
+func safePower(x, y int64) (int64, bool) {
+	if y < 0 {
+		return 0, false
+	}
+	if x == 0 {
+		if y == 0 {
+			return 1, true
+		}
+		return 0, true
+	}
+	if y == 0 {
+		return 1, true
+	}
+	xbits := intBitLen(x)
+	if xbits == 0 {
+		xbits = 1
+	}
+	if int64(xbits)*y > int64(maxIntFoldBits) {
+		return 0, false
+	}
+	result := int64(1)
+	base := x
+	exp := y
+	for exp > 0 {
+		if exp&1 == 1 {
+			r, ok := safeMultiply(result, base)
+			if !ok {
+				return 0, false
+			}
+			result = r
+		}
+		exp >>= 1
+		if exp > 0 {
+			r, ok := safeMultiply(base, base)
+			if !ok {
+				return 0, false
+			}
+			base = r
+		}
+	}
+	return result, true
+}
+
+// appendConst returns the index of v in *consts, appending if not
+// present. Dedup runs through constCacheKey, the port of CPython's
+// _PyCode_ConstantKey, so nested *ConstTuple values share a slot when
+// equal by value. Linear search is fine here: the per-unit pool is
+// small and flowgraph runs once per scope.
+//
+// CPython: Python/flowgraph.c add_const + Objects/codeobject.c:3035
+// _PyCode_ConstantKey
+func appendConst(consts *[]any, v any) int {
+	key := constCacheKey(v)
+	for i, c := range *consts {
+		if constCacheKey(c) == key {
+			return i
+		}
+	}
+	*consts = append(*consts, v)
+	return len(*consts) - 1
+}
+
+// isFoldableUnary reports whether op is one of the three unary opcodes
+// the folder rewrites.
+//
+// CPython: Python/flowgraph.c:1898 eval_const_unaryop opcode switch
+func isFoldableUnary(op Opcode) bool {
+	switch op {
+	case UNARY_NEGATIVE, UNARY_INVERT, UNARY_NOT:
+		return true
+	}
+	return false
+}
+
+// evalConstUnaryop applies one unary opcode to a const operand, mirroring
+// CPython's PyNumber_Negative / PyNumber_Invert / bool(!x) dispatch.
+// Returns ok=false when the operand type is not foldable (e.g. unary
+// negate of a string) or would overflow the int64 representation.
+//
+// CPython: Python/flowgraph.c:1894 eval_const_unaryop
+func evalConstUnaryop(op Opcode, operand any) (any, bool) {
+	switch op {
+	case UNARY_NEGATIVE:
+		switch v := operand.(type) {
+		case int64:
+			if v == minInt64 {
+				return nil, false
+			}
+			return -v, true
+		case float64:
+			return -v, true
+		}
+	case UNARY_INVERT:
+		if v, ok := operand.(int64); ok {
+			return ^v, true
+		}
+	case UNARY_NOT:
+		b, ok := constTruthValue(operand)
+		if !ok {
+			return nil, false
+		}
+		return !b, true
+	}
+	return nil, false
+}
+
+// constTruthValue mirrors PyObject_IsTrue for the const-pool value
+// shapes gopy stores. Returns ok=false when the value's truthiness is
+// not statically determinable.
+//
+// CPython: Python/flowgraph.c:1916 eval_const_unaryop UNARY_NOT case
+func constTruthValue(v any) (bool, bool) {
+	switch x := v.(type) {
+	case nil:
+		return false, true
+	case bool:
+		return x, true
+	case int64:
+		return x != 0, true
+	case float64:
+		return x != 0, true
+	case string:
+		return x != "", true
+	case complex128:
+		return real(x) != 0 || imag(x) != 0, true
+	}
+	return false, false
+}
 
 // cfgRemoveRedundantNops drops NOPs whose location info adds nothing.
 // Walks every block and calls basicblockRemoveRedundantNops.
@@ -303,11 +593,13 @@ func isExitWithoutLineno(b *basicblock) bool {
 	return true
 }
 
-// getMaxLabel returns the largest label id in use across g.
+// getMaxLabel returns the largest label id in use across g, or -1 if
+// no block is labeled. Callers use the return value + 1 as the next
+// fresh label id (matches CPython's get_max_label, which starts at -1).
 //
 // CPython: Python/flowgraph.c:622 get_max_label
 func getMaxLabel(g *cfgBuilder) int {
-	maxLbl := 0
+	maxLbl := -1
 	for b := g.EntryBlock; b != nil; b = b.Next {
 		if b.Label.id > maxLbl {
 			maxLbl = b.Label.id
@@ -336,7 +628,7 @@ func cfgResolveLineNumbers(g *cfgBuilder, _ int) {
 // runs remove_redundant_nops to compact the NOPs we just produced.
 //
 // CPython: Python/flowgraph.c:3520 convert_pseudo_ops
-func cfgConvertPseudoOps(g *cfgBuilder) int {
+func cfgConvertPseudoOps(g *cfgBuilder) {
 	for b := g.EntryBlock; b != nil; b = b.Next {
 		for i := range b.Instr {
 			ins := &b.Instr[i]
@@ -352,7 +644,176 @@ func cfgConvertPseudoOps(g *cfgBuilder) int {
 			}
 		}
 	}
-	return cfgRemoveRedundantNops(g)
+	cfgRemoveRedundantNops(g)
+}
+
+// cfgConvertPseudoConditionalJumps rewrites the codegen-time pseudo
+// conditional jumps (JUMP_IF_FALSE / JUMP_IF_TRUE) into the real
+// POP_JUMP_IF_* sequence preceded by COPY 1 + TO_BOOL 0. The pseudo
+// op kept the condition value on the stack so optimize_cfg could see
+// it; here we materialize the duplicate-and-coerce-to-bool dance the
+// VM actually wants. The pseudo jump is always the last instruction
+// in its block (codegen invariant), and the inserted helpers inherit
+// its location and exception-handler pointer.
+//
+// CPython: Python/flowgraph.c:3485 convert_pseudo_conditional_jumps
+func cfgConvertPseudoConditionalJumps(g *cfgBuilder) {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		for i := 0; i < len(b.Instr); i++ {
+			op := b.Instr[i].Op
+			if op != JUMP_IF_FALSE && op != JUMP_IF_TRUE {
+				continue
+			}
+			if i != len(b.Instr)-1 {
+				panic("convert_pseudo_conditional_jumps: pseudo jump must be last in block")
+			}
+			if op == JUMP_IF_FALSE {
+				b.Instr[i].Op = POP_JUMP_IF_FALSE
+			} else {
+				b.Instr[i].Op = POP_JUMP_IF_TRUE
+			}
+			loc := b.Instr[i].Loc
+			except := b.Instr[i].Except
+			b.insertInstruction(i, cfgInstr{Op: COPY, Oparg: 1, Loc: loc, Except: except})
+			i++
+			b.insertInstruction(i, cfgInstr{Op: TO_BOOL, Oparg: 0, Loc: loc, Except: except})
+			i++
+		}
+	}
+}
+
+// cfgBuildCellFixedOffsets returns the localsplus offset for each cell
+// or free var. The slot order is [varnames | cellvars | freevars]; the
+// returned slice maps cell/free index (0..ncellvars+nfreevars-1) to the
+// final localsplus offset. The default offset is nlocals + i, but cell
+// vars whose name also appears in varnames are arg cells: they reuse
+// the arg's varname slot, and the localsplus shrinks by the matching
+// duplicate count after fix_cell_offsets compacts the table.
+//
+// CPython: Python/flowgraph.c:3711 build_cellfixedoffsets
+func cfgBuildCellFixedOffsets(unit *Unit) []int {
+	nlocals := len(unit.VarNames)
+	ncellvars := len(unit.CellVars)
+	nfreevars := len(unit.FreeVars)
+	noffsets := ncellvars + nfreevars
+	fixed := make([]int, noffsets)
+	for i := range noffsets {
+		fixed[i] = nlocals + i
+	}
+	varIdx := make(map[string]int, len(unit.VarNames))
+	for i, name := range unit.VarNames {
+		varIdx[name] = i
+	}
+	for cellPos, name := range unit.CellVars {
+		if argOffset, ok := varIdx[name]; ok {
+			fixed[cellPos] = argOffset
+		}
+	}
+	return fixed
+}
+
+// cfgInsertPrefixInstructions prepends the per-scope prologue to entry.
+// For generator / coroutine scopes: RETURN_GENERATOR + POP_TOP at
+// positions 0,1 with location LOCATION(firstlineno, firstlineno, -1, -1).
+// For ncellvars > 0: MAKE_CELL instructions, sorted by their fixed
+// localsplus offset, inserted at positions 0..ncellvars-1 with
+// NO_LOCATION. For nfreevars > 0: COPY_FREE_VARS nfreevars at position
+// 0 with NO_LOCATION.
+//
+// The MAKE_CELL sort matches CPython: cells are first listed in
+// localsplus order via the fixed map, then visited at slot positions
+// 0..nvars-1, only counting slots that are actually cells (sorted[i]-1
+// >= 0). The result is arg cells in varname-declaration order followed
+// by non-arg cells in their CellVars order.
+//
+// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
+func cfgInsertPrefixInstructions(unit *Unit, entry *basicblock, fixed []int, nfreevars int, codeFlags uint32) {
+	if codeFlags&(CoGenerator|CoCoroutine|CoAsyncGenerator) != 0 {
+		loc := ast.Pos{Lineno: unit.FirstLineno, EndLineno: unit.FirstLineno, ColOffset: -1, EndColOffset: -1}
+		entry.insertInstruction(0, cfgInstr{Op: RETURN_GENERATOR, Oparg: 0, Loc: loc})
+		entry.insertInstruction(1, cfgInstr{Op: POP_TOP, Oparg: 0, Loc: loc})
+	}
+	ncellvars := len(unit.CellVars)
+	if ncellvars > 0 {
+		nvars := ncellvars + len(unit.VarNames)
+		sorted := make([]int, nvars)
+		for i := range ncellvars {
+			sorted[fixed[i]] = i + 1
+		}
+		noLoc := ast.Pos{Lineno: -1, EndLineno: -1, ColOffset: -1, EndColOffset: -1}
+		ncellsused := 0
+		for i := 0; ncellsused < ncellvars; i++ {
+			oldindex := sorted[i] - 1
+			if oldindex == -1 {
+				continue
+			}
+			entry.insertInstruction(ncellsused, cfgInstr{Op: MAKE_CELL, Oparg: int32(oldindex), Loc: noLoc})
+			ncellsused++
+		}
+	}
+	if nfreevars > 0 {
+		noLoc := ast.Pos{Lineno: -1, EndLineno: -1, ColOffset: -1, EndColOffset: -1}
+		entry.insertInstruction(0, cfgInstr{Op: COPY_FREE_VARS, Oparg: int32(nfreevars), Loc: noLoc})
+	}
+}
+
+// cfgFixCellOffsets rewrites every deref-style oparg from "cell/free
+// table index" to "final localsplus offset" and reports the number of
+// arg-cell duplicates dropped (cells whose slot was reassigned to an
+// arg slot). The first pass walks the fixed map: a slot is a normal
+// (post-locals) cell iff fixedmap[i] == i + nlocals; otherwise it was
+// an arg cell whose offset was rewritten to the arg's varname index.
+// Normal cells shift down by the running duplicate count so the
+// surviving slots stay packed.
+//
+// CPython: Python/flowgraph.c:3843 fix_cell_offsets
+func cfgFixCellOffsets(unit *Unit, entry *basicblock, fixedmap []int) int {
+	nlocals := len(unit.VarNames)
+	ncellvars := len(unit.CellVars)
+	nfreevars := len(unit.FreeVars)
+	noffsets := ncellvars + nfreevars
+
+	numdropped := 0
+	for i := range noffsets {
+		if fixedmap[i] == i+nlocals {
+			fixedmap[i] -= numdropped
+		} else {
+			numdropped++
+		}
+	}
+
+	for b := entry; b != nil; b = b.Next {
+		for i := range b.Instr {
+			ins := &b.Instr[i]
+			oldoffset := int(ins.Oparg)
+			switch ins.Op {
+			case MAKE_CELL, LOAD_CLOSURE, LOAD_DEREF, STORE_DEREF, DELETE_DEREF, LOAD_FROM_DICT_OR_DEREF:
+				ins.Oparg = int32(fixedmap[oldoffset])
+			}
+		}
+	}
+	return numdropped
+}
+
+// cfgPrepareLocalsPlus runs the three-step localsplus pipeline that
+// CPython's optimize_and_assemble_code_unit calls after the graph has
+// been fully optimized: build the cell/free offset table, insert the
+// scope prologue (RETURN_GENERATOR + MAKE_CELL + COPY_FREE_VARS), then
+// rewrite every deref oparg through the table. Returns the localsplus
+// table size, which is nlocals + ncellvars + nfreevars minus the
+// arg-cell duplicates dropped by fix_cell_offsets.
+//
+// CPython: Python/flowgraph.c:3888 prepare_localsplus
+func cfgPrepareLocalsPlus(unit *Unit, g *cfgBuilder, codeFlags uint32) int {
+	nlocals := len(unit.VarNames)
+	ncellvars := len(unit.CellVars)
+	nfreevars := len(unit.FreeVars)
+	nlocalsplus := nlocals + ncellvars + nfreevars
+	fixed := cfgBuildCellFixedOffsets(unit)
+	cfgInsertPrefixInstructions(unit, g.EntryBlock, fixed, nfreevars, codeFlags)
+	numdropped := cfgFixCellOffsets(unit, g.EntryBlock, fixed)
+	nlocalsplus -= numdropped
+	return nlocalsplus
 }
 
 // cfgCheckCfg verifies that every terminator opcode sits at the end of
@@ -391,7 +852,7 @@ func cfgTranslateJumpLabelsToTargets(g *cfgBuilder) {
 	maxLbl := getMaxLabel(g)
 	label2block := make([]*basicblock, maxLbl+1)
 	for b := g.EntryBlock; b != nil; b = b.Next {
-		if b.Label.id > 0 {
+		if b.Label.IsValid() {
 			label2block[b.Label.id] = b
 		}
 	}
@@ -594,7 +1055,7 @@ func cfgRemoveRedundantNopsAndPairs(entry *basicblock) {
 		var prev, cur *cfgInstr
 		for b := entry; b != nil; b = b.Next {
 			basicblockRemoveRedundantNops(b)
-			if b.Label.id > 0 {
+			if b.Label.IsValid() {
 				cur = nil
 			}
 			for i := range b.Instr {
@@ -787,7 +1248,7 @@ func cfgPushColdBlocksToEnd(g *cfgBuilder) {
 			continue
 		}
 		bridge := g.newBlock()
-		if b.Next.Label.id == 0 {
+		if !b.Next.Label.IsValid() {
 			b.Next.Label = JumpTargetLabel{id: nextLbl}
 			nextLbl++
 		}
@@ -936,8 +1397,7 @@ func basicblockFoldConstUnaryop(bb *basicblock, consts *[]any) int {
 		bb.Instr[i-1].Op = NOP
 		bb.Instr[i-1].Oparg = 0
 		bb.Instr[i-1].Target = nil
-		ins.Op = LOAD_CONST
-		ins.Oparg = int32(appendConst(consts, result))
+		cfgInstrMakeLoadConst(ins, result, consts)
 		folded++
 	}
 	return folded
@@ -1236,10 +1696,11 @@ func basicblockFoldConstantIntrinsicListToTuple(bb *basicblock, i int, consts *[
 	return 0
 }
 
-// basicblockFoldConstBinop rewrites `LOAD_CONST a; LOAD_CONST b;
-// BINARY_OP op` triples where both operands are int64 constants and op
-// has a defined integer result. The two loads become NOPs and the
-// BINARY_OP becomes LOAD_CONST of the folded value.
+// basicblockFoldConstBinop rewrites `(LOAD_CONST | LOAD_SMALL_INT) a;
+// (LOAD_CONST | LOAD_SMALL_INT) b; BINARY_OP op` triples where both
+// operands are int64 constants and op has a defined integer result. The
+// two loads become NOPs and the BINARY_OP becomes LOAD_CONST of the
+// folded value.
 //
 // CPython: Python/flowgraph.c:1894 fold_const_binop
 func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
@@ -1251,15 +1712,19 @@ func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
 		a := &bb.Instr[i]
 		b := &bb.Instr[i+1]
 		c := &bb.Instr[i+2]
-		if a.Op != LOAD_CONST || b.Op != LOAD_CONST || c.Op != BINARY_OP {
+		if c.Op != BINARY_OP {
 			continue
 		}
-		ai, bi := int(a.Oparg), int(b.Oparg)
-		if ai < 0 || ai >= len(*consts) || bi < 0 || bi >= len(*consts) {
+		va, okA := cfgLoadsConstValue(a, *consts)
+		if !okA {
 			continue
 		}
-		x, xok := (*consts)[ai].(int64)
-		y, yok := (*consts)[bi].(int64)
+		vb, okB := cfgLoadsConstValue(b, *consts)
+		if !okB {
+			continue
+		}
+		x, xok := va.(int64)
+		y, yok := vb.(int64)
 		if !xok || !yok {
 			continue
 		}
@@ -1267,15 +1732,13 @@ func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
 		if !ok {
 			continue
 		}
-		idx := appendConst(consts, result)
 		a.Op = NOP
 		a.Oparg = 0
 		a.Target = nil
 		b.Op = NOP
 		b.Oparg = 0
 		b.Target = nil
-		c.Op = LOAD_CONST
-		c.Oparg = int32(idx)
+		cfgInstrMakeLoadConst(c, result, consts)
 		folded++
 		i += 2
 	}
@@ -1329,6 +1792,7 @@ func basicblockFoldTupleOfConstants(bb *basicblock, consts *[]any) int {
 			bb.Instr[k].Op = NOP
 			bb.Instr[k].Oparg = 0
 			bb.Instr[k].Target = nil
+			bb.Instr[k].Loc = noLocation
 		}
 		idx := appendConst(consts, tuple)
 		ins.Op = LOAD_CONST
@@ -1368,6 +1832,7 @@ func basicblockOptimizeListsAndSets(bb *basicblock, consts *[]any) int {
 			bb.Instr[k].Op = NOP
 			bb.Instr[k].Oparg = 0
 			bb.Instr[k].Target = nil
+			bb.Instr[k].Loc = noLocation
 		}
 		preludeOp := ins.Op
 		bb.Instr[i-2].Op = preludeOp
@@ -1643,6 +2108,21 @@ func maybeInstrMakeLoadSmallint(inst *cfgInstr, consts []any) {
 	inst.Oparg = int32(v)
 }
 
+// cfgInstrMakeLoadConst stamps inst with the bytecode that loads
+// newconst. Small non-negative ints become LOAD_SMALL_INT; everything
+// else lands as LOAD_CONST with the const appended to the pool.
+//
+// CPython: Python/flowgraph.c:1429 instr_make_load_const
+func cfgInstrMakeLoadConst(inst *cfgInstr, newconst any, consts *[]any) {
+	if v, ok := newconst.(int64); ok && v >= 0 && v <= 255 {
+		inst.Op = LOAD_SMALL_INT
+		inst.Oparg = int32(v)
+		return
+	}
+	inst.Op = LOAD_CONST
+	inst.Oparg = int32(appendConst(consts, newconst))
+}
+
 // basicblockOptimizeLoadConst folds LOAD_CONST / LOAD_SMALL_INT against
 // the instruction that follows. Four cases mirror CPython exactly:
 //
@@ -1894,6 +2374,7 @@ func cfgOptimizeCodeUnitWithHook(g *cfgBuilder, consts *[]any, nlocals, nparams,
 			hook(phase, g)
 		}
 	}
+	fire("entry")
 	cfgTranslateJumpLabelsToTargets(g)
 	fire("translate_jump_labels_to_targets")
 	cfgMarkExceptHandlers(g)

@@ -29,6 +29,14 @@ func cfgFromSequence(seq *Sequence) *cfgBuilder {
 	// Track which cfg block each original seqIdx ends up in so the
 	// jump-target / handler-target rewrites below can resolve indices
 	// to *basicblock pointers.
+	//
+	// After each jump, force the next instruction into a fresh block.
+	// CPython relies on IS_TERMINATOR_OPCODE (jumps OR scope exits) in
+	// cfg_builder_current_block_is_terminated, so every jump is always
+	// the last instruction in its block. gopy's narrower isTerminator
+	// predicate already handles scope exits; the explicit useNextBlock
+	// closes the gap for jumps so passes like cfgLabelExceptionTargets,
+	// which assume a jump terminates its block, see the same invariant.
 	idxToBlock := make([]*basicblock, len(seq.Instrs))
 	idxToInstr := make([]*cfgInstr, len(seq.Instrs))
 	for i, ins := range seq.Instrs {
@@ -38,6 +46,9 @@ func cfgFromSequence(seq *Sequence) *cfgBuilder {
 		g.addOp(ins.Op, ins.Oparg, ins.Loc)
 		idxToBlock[i] = g.CurBlock
 		idxToInstr[i] = g.CurBlock.lastInstr()
+		if hasJumpTarget(ins.Op) {
+			g.useNextBlock(g.newBlock())
+		}
 	}
 
 	rewriteJumpTargets(g, idxToBlock)
@@ -100,9 +111,8 @@ func buildTargetSet(seq *Sequence) []bool {
 //
 // CPython: Python/flowgraph.c:3988 _PyCfg_ToInstructionSequence
 func cfgToSequence(g *cfgBuilder, seq *Sequence) {
-	// Assign each block a fresh label id. CPython uses lbl++ starting
-	// at 0; gopy reserves id 0 as NO_LABEL, so we allocate from
-	// seq.NewLabel which is 1-based.
+	// Assign each block a fresh label id. Matches CPython's lbl++
+	// starting at 0; seq.NewLabel post-increments from 0 as well.
 	for b := g.EntryBlock; b != nil; b = b.Next {
 		b.Label = seq.NewLabel()
 	}
@@ -130,42 +140,34 @@ func cfgToSequence(g *cfgBuilder, seq *Sequence) {
 	seq.ApplyLabelMap(hasJumpTarget)
 }
 
-// optimizeLoadFastOnSequence runs optimizeLoadFast against a cfg built
-// from seq, then copies the LOAD_FAST -> LOAD_FAST_BORROW (and the
-// LOAD_FAST_LOAD_FAST -> LOAD_FAST_BORROW_LOAD_FAST_BORROW) opcode
-// rewrites back into seq in place. The pass does not move, add, or
-// remove instructions, so the cfg's entry-order walk aligns 1:1 with
-// seq.Instrs and no opargs change. Every block's StartDepth is reset
-// to the stackdepthMin sentinel so loadFastPushBlock can seed it as
-// it propagates the abstract ref stack.
+// cfgOptimizedCfgToInstructionSequence is the closer that turns an
+// optimized cfg into a flat instruction sequence ready for the
+// assembler. After the optimizer pass returns, this routine: expands
+// the pseudo conditional jumps; computes the running stack depth;
+// builds the localsplus table and rewrites cell/free opargs through
+// it; rewrites the remaining assembler-time pseudo ops; normalizes
+// jumps; and runs optimize_load_fast as the last bytecode mutation.
+// The graph is then flattened by cfgToSequence into seq.
 //
-// CPython: Python/flowgraph.c:2776 optimize_load_fast (driven from
-// _PyAssemble_MakeCodeObject)
-func optimizeLoadFastOnSequence(seq *Sequence) error {
-	if len(seq.Instrs) == 0 {
-		return nil
+// CPython: Python/flowgraph.c:4026 _PyCfg_OptimizedCfgToInstructionSequence
+func cfgOptimizedCfgToInstructionSequence(g *cfgBuilder, unit *Unit, codeFlags uint32, seq *Sequence) (stackdepth, nlocalsplus int, err error) {
+	cfgConvertPseudoConditionalJumps(g)
+
+	stackdepth, err = cfgCalculateStackdepth(g)
+	if err != nil {
+		return 0, 0, err
 	}
-	g := cfgFromSequence(seq)
-	for b := g.EntryBlock; b != nil; b = b.Next {
-		b.StartDepth = stackdepthMin
-	}
+
+	nlocalsplus = cfgPrepareLocalsPlus(unit, g, codeFlags)
+
+	cfgConvertPseudoOps(g)
+	cfgNormalizeJumps(g)
 	if err := optimizeLoadFast(g); err != nil {
-		return err
+		return 0, 0, err
 	}
-	idx := 0
-	for b := g.EntryBlock; b != nil; b = b.Next {
-		for i := range b.Instr {
-			if idx >= len(seq.Instrs) {
-				return nil
-			}
-			switch b.Instr[i].Op {
-			case LOAD_FAST_BORROW, LOAD_FAST_BORROW_LOAD_FAST_BORROW:
-				seq.Instrs[idx].Op = b.Instr[i].Op
-			}
-			idx++
-		}
-	}
-	return nil
+
+	cfgToSequence(g, seq)
+	return stackdepth, nlocalsplus, nil
 }
 
 // rewriteJumpTargets converts every jump's oparg from

@@ -400,16 +400,20 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 	case compile.LOAD_CLOSURE:
 		// Same as LOAD_DEREF but pushes the cell itself, not its
 		// contents. Used by MAKE_FUNCTION when constructing the
-		// closure tuple. CPython: Python/bytecodes.c LOAD_CLOSURE.
-		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		// closure tuple. After cfgFixCellOffsets, oparg is the final
+		// localsplus offset of the cell slot.
+		//
+		// CPython: Python/bytecodes.c:261 pseudo(LOAD_CLOSURE)
+		ref := e.f.LocalsPlus[int(oparg)]
 		e.push(ref.Dup())
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_DEREF:
-		// oparg indexes the cell+free slots (cells first, then frees).
+		// oparg is the localsplus offset of the cell, as rewritten by
+		// fix_cell_offsets during prepare_localsplus.
 		//
-		// CPython: Python/bytecodes.c LOAD_DEREF
-		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		// CPython: Python/bytecodes.c:1911 LOAD_DEREF
+		ref := e.f.LocalsPlus[int(oparg)]
 		cellObj := ref.AsObject()
 		cell, ok := cellObj.(*objects.Cell)
 		if !ok || cell == nil {
@@ -424,19 +428,21 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.STORE_DEREF:
+		// CPython: Python/bytecodes.c:1920 STORE_DEREF
 		v := e.popObject()
-		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		ref := e.f.LocalsPlus[int(oparg)]
 		cellObj := ref.AsObject()
 		cell, ok := cellObj.(*objects.Cell)
 		if !ok {
 			cell = objects.NewCell(nil)
-			e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)] = stackref.FromObject(cell)
+			e.f.LocalsPlus[int(oparg)] = stackref.FromObject(cell)
 		}
 		cell.Contents = v
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.DELETE_DEREF:
-		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		// CPython: Python/bytecodes.c:1875 DELETE_DEREF
+		ref := e.f.LocalsPlus[int(oparg)]
 		cell, ok := ref.AsObject().(*objects.Cell)
 		if !ok || cell.Contents == nil {
 			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable referenced before assignment")
@@ -445,44 +451,20 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.MAKE_CELL:
-		// Wrap the named local in a fresh cell. oparg is the cellvars
-		// index (in gopy's split layout); the cell var name is looked
-		// up against varnames so that a parameter that's also a cell
-		// var transfers its value into the cell. The cell is stored at
-		// the cell-region slot for LOAD_DEREF, and mirrored back to
-		// the local slot so the LOAD_FAST that emitClosure threads
-		// into the closure tuple picks up the cell rather than the
-		// raw parameter value (CPython 3.14 achieves the same effect
-		// via overlapped localsplus slots).
+		// Wrap whatever is currently in slot oparg in a fresh cell.
+		// The initial value is usually NULL but is the arg value when
+		// the cell name was also a parameter (CPython 3.14 overlapped
+		// arg-cell slot). The slot then holds the cell.
 		//
-		// CPython: Python/bytecodes.c:1863 MAKE_CELL
-		co := e.f.Code
-		base := frame.NLocalsOf(co)
-		cellIdx := int(oparg)
-		var name string
-		if cellIdx < len(co.Cellvars) {
-			name = co.Cellvars[cellIdx]
-		}
-		localIdx := -1
-		for i, vn := range co.Varnames {
-			if vn == name {
-				localIdx = i
-				break
-			}
-		}
+		// CPython: Python/bytecodes.c:1862 MAKE_CELL
+		slot := int(oparg)
 		var contents objects.Object
-		if localIdx >= 0 {
-			ref := e.f.LocalsPlus[localIdx]
-			if !ref.IsNull() {
-				contents = ref.AsObject()
-			}
+		ref := e.f.LocalsPlus[slot]
+		if !ref.IsNull() {
+			contents = ref.AsObject()
 		}
 		cell := objects.NewCell(contents)
-		cellRef := stackref.FromObject(cell)
-		e.f.LocalsPlus[base+cellIdx] = cellRef
-		if localIdx >= 0 {
-			e.f.LocalsPlus[localIdx] = cellRef
-		}
+		e.f.LocalsPlus[slot] = stackref.FromObject(cell)
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.COPY_FREE_VARS:
@@ -837,11 +819,13 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		// PEP 695 helper: look up name in the dict at TOS first; if absent,
-		// fall back to LOAD_DEREF semantics. v0.6 doesn't have class
-		// namespace machinery, so the dict path stays a stub and we
-		// dispatch through to LOAD_DEREF.
+		// fall back to LOAD_DEREF semantics. The dict path stays a stub
+		// and we dispatch through to LOAD_DEREF. oparg is the localsplus
+		// offset of the cell, post fix_cell_offsets.
+		//
+		// CPython: Python/bytecodes.c:1887 LOAD_FROM_DICT_OR_DEREF
 		_ = e.popObject() // discard the class dict TOS
-		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		ref := e.f.LocalsPlus[int(oparg)]
 		cell, ok := ref.AsObject().(*objects.Cell)
 		if !ok || cell.Contents == nil {
 			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable referenced before assignment")

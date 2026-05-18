@@ -17,7 +17,7 @@ func TestOptimize_InstallsExecutorOnLoop(t *testing.T) {
 			0, 0,
 		},
 	}
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	exec, status := Optimize(interp, nil, co, 0, 0, 0)
 	if status != 1 {
 		t.Fatalf("Optimize status = %d, want 1", status)
@@ -41,7 +41,7 @@ func TestOptimize_BailsOnEntryReturn(t *testing.T) {
 			byte(compile.RETURN_VALUE), 0,
 		},
 	}
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	exec, status := Optimize(interp, nil, co, 0, 0, 0)
 	if status != 0 {
 		t.Errorf("Optimize status = %d, want 0", status)

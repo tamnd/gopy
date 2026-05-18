@@ -62,16 +62,17 @@ func TestVarint(t *testing.T) {
 	}
 }
 
-// TestBuildLocalsPlus exercises the flat layout: args+locals first,
-// then cells, then frees.
-func TestBuildLocalsPlus(t *testing.T) {
+// TestComputeLocalsplusInfo exercises the flat layout: args+locals
+// first, then cells, then frees.
+func TestComputeLocalsplusInfo(t *testing.T) {
 	unit := &Unit{
 		VarNames:   []string{"a", "b"},
 		CellVars:   []string{"c"},
 		FreeVars:   []string{"f"},
 		FastHidden: map[string]bool{"b": true},
 	}
-	names, kinds := buildLocalsPlus(unit)
+	nlocalsplus := len(unit.VarNames) + len(unit.CellVars) + len(unit.FreeVars)
+	names, kinds := computeLocalsplusInfo(unit, nlocalsplus, 0)
 	wantNames := []string{"a", "b", "c", "f"}
 	wantKinds := []uint8{FastLocal, FastLocal | FastHidden, FastCell, FastFree}
 	if len(names) != len(wantNames) {

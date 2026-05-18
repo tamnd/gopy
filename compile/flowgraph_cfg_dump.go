@@ -1,13 +1,10 @@
 // Deterministic dump of a cfgBuilder, used by per-phase compat tests
-// that diff gopy's pipeline against CPython's _testinternalcapi dump
-// at every phase boundary inside _PyCfg_OptimizeCodeUnit /
-// _PyCfg_OptimizedCfgToInstructionSequence / _PyAssemble_MakeCodeObject.
+// that diff gopy's pipeline against the patched CPython _testinternalcapi
+// hook at every phase boundary inside _PyCfg_OptimizeCodeUnit.
 //
-// The format is documented in website/docs/specs/1700/1716_full_compile_pipeline_port.md
-// section "Dump format". Blocks come out in fallthrough order, jump
-// targets and exception handlers print as block indices into that
-// order, so two dumps compare with `cmp` even though the underlying
-// pointer addresses differ.
+// The output is byte-identical to CPython's cfg_dump_to_string: just the
+// block listing, with no header. Callers (the harness) wrap it with the
+// phase name they fed the hook.
 
 package compile
 
@@ -16,71 +13,63 @@ import (
 	"strings"
 )
 
-// CfgDumpHeader is the per-unit metadata that prefixes every dump.
-// Carries the inputs CPython's _PyCfg_OptimizeCodeUnit takes by
-// argument, so a diff catches mismatches in the caller as well as in
-// the graph itself.
-type CfgDumpHeader struct {
-	Phase       string
-	FirstLineno int
-	NLocals     int
-	NParams     int
-	CodeFlags   uint32
-}
-
-// DumpCfg renders g plus header as a deterministic string.
+// DumpCfg renders g as a deterministic block listing.
 //
-// CPython: Python/flowgraph.c:321 _PyCfgBuilder_DumpGraph (debug-only
-// dump used by the same compat tests we mirror here)
-func DumpCfg(g *cfgBuilder, header CfgDumpHeader) string {
+// CPython: Python/flowgraph.c cfg_dump_to_string (added by the gopy
+// phase-dump patch under test/cpython/patches/0001-cfg-phase-dump.patch).
+func DumpCfg(g *cfgBuilder) string {
 	if g == nil {
-		return fmt.Sprintf("# cfg dump: %s\n(nil)\n", header.Phase)
-	}
-	blocks := g.blocks()
-	index := make(map[*basicblock]int, len(blocks))
-	for i, b := range blocks {
-		index[b] = i
+		return ""
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "# cfg dump: %s\n", header.Phase)
-	fmt.Fprintf(&sb, "firstlineno: %d\n", header.FirstLineno)
-	fmt.Fprintf(&sb, "nlocals: %d\n", header.NLocals)
-	fmt.Fprintf(&sb, "nparams: %d\n", header.NParams)
-	fmt.Fprintf(&sb, "codeflags: 0x%x\n", header.CodeFlags)
-	sb.WriteString("\n")
-	for i, b := range blocks {
-		fmt.Fprintf(&sb, "block %d (label=%d preds=%d startdepth=%d warm=%t cold=%t):\n",
-			i, b.Label.id, b.Predecessors, b.StartDepth, b.Warm, b.Cold)
-		for j := range b.Instr {
-			ins := &b.Instr[j]
-			fmt.Fprintf(&sb, "  %d %s(%d) loc=%s",
-				j, ins.Op.Name(), ins.Oparg, formatLoc(ins))
-			if ins.Target != nil {
-				fmt.Fprintf(&sb, " target=block%d", blockIndex(index, ins.Target))
-			}
-			if ins.Except != nil {
-				fmt.Fprintf(&sb, " except=block%d", blockIndex(index, ins.Except))
-			}
-			sb.WriteString("\n")
-		}
-		if b.Next != nil {
-			fmt.Fprintf(&sb, "  -> next=block%d\n", blockIndex(index, b.Next))
-		} else {
-			sb.WriteString("  -> next=nil\n")
-		}
+	for _, b := range g.blocks() {
+		dumpBasicblock(&sb, b)
 	}
 	return sb.String()
 }
 
-func formatLoc(ins *cfgInstr) string {
-	return fmt.Sprintf("%d:%d-%d:%d",
-		ins.Loc.Lineno, ins.Loc.ColOffset,
-		ins.Loc.EndLineno, ins.Loc.EndColOffset)
+func dumpBasicblock(sb *strings.Builder, b *basicblock) {
+	bReturn := ""
+	if basicblockReturns(b) {
+		bReturn = "return "
+	}
+	fmt.Fprintf(sb,
+		"B%d: [EH=%d CLD=%d WRM=%d NO_FT=%d] used: %d, depth: %d, preds: %d %s\n",
+		b.Label.id, boolToInt(b.ExceptHandler), boolToInt(b.Cold),
+		boolToInt(b.Warm), boolToInt(b.nofallthrough()),
+		len(b.Instr), b.StartDepth, b.Predecessors, bReturn)
+	for i := range b.Instr {
+		fmt.Fprintf(sb, "  [%02d] ", i)
+		dumpInstr(sb, &b.Instr[i])
+	}
 }
 
-func blockIndex(index map[*basicblock]int, b *basicblock) int {
-	if i, ok := index[b]; ok {
-		return i
+func dumpInstr(sb *strings.Builder, ins *cfgInstr) {
+	fmt.Fprintf(sb, "line: %d, %s (%d) ", ins.Loc.Lineno, ins.Op.Name(), int(ins.Op))
+	switch {
+	case hasJumpTarget(ins.Op):
+		tgtID := -1
+		if ins.Target != nil {
+			tgtID = ins.Target.Label.id
+		}
+		fmt.Fprintf(sb, "target: B%d [%d] ", tgtID, ins.Oparg)
+	case ins.Op.HasArg():
+		fmt.Fprintf(sb, "arg: %d ", ins.Oparg)
 	}
-	return -1
+	if isJumpOpcode(ins.Op) {
+		sb.WriteString("jump ")
+	}
+	sb.WriteByte('\n')
+}
+
+func basicblockReturns(b *basicblock) bool {
+	last := b.lastInstr()
+	return last != nil && last.Op == RETURN_VALUE
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
