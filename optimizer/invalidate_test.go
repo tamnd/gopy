@@ -49,7 +49,7 @@ func TestExecutorDependsOn_StampsBloom(t *testing.T) {
 }
 
 func TestExecutorsInvalidateAll_ClearsCodeAnchored(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	co, exec := installLoopExecutor(t, interp)
 
 	prev := optStatExecutorsInvalidated
@@ -72,7 +72,7 @@ func TestExecutorsInvalidateAll_ClearsCodeAnchored(t *testing.T) {
 }
 
 func TestExecutorsInvalidateDependency_HitsViaBloom(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	_, exec := installLoopExecutor(t, interp)
 
 	var dep int
@@ -89,7 +89,7 @@ func TestExecutorsInvalidateDependency_HitsViaBloom(t *testing.T) {
 }
 
 func TestExecutorsInvalidateDependency_MissesUnrelated(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	_, exec := installLoopExecutor(t, interp)
 
 	var dep int
@@ -123,7 +123,7 @@ func TestExecutorsInvalidateDependency_MissesUnrelated(t *testing.T) {
 }
 
 func TestExecutorsInvalidateCold_DropsNonWarm(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	_, exec := installLoopExecutor(t, interp)
 	exec.VMData.Warm = false
 
@@ -134,7 +134,7 @@ func TestExecutorsInvalidateCold_DropsNonWarm(t *testing.T) {
 }
 
 func TestExecutorsInvalidateCold_PreservesWarm(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	_, exec := installLoopExecutor(t, interp)
 	exec.VMData.Warm = true
 

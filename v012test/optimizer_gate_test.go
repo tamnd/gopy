@@ -48,7 +48,7 @@ func loopBytecode() *objects.Code {
 // it at runtime.
 func TestOptimizerGateInstall(t *testing.T) {
 	co := loopBytecode()
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 
 	exec, status := optimizer.Optimize(interp, nil, co, 0, 0, 0)
 	if status != 1 {

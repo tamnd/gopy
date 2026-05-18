@@ -100,7 +100,7 @@ func (s *stubFrame) FrameFunc() objects.Object           { return s.fn }
 // (stamped with the function version) and registers the dict with the
 // globals watcher.
 func TestRemoveGlobals_RewritesGuardToCheckFunction(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 	globals := objects.NewDict()
 	builtins := objects.NewDict()
@@ -141,7 +141,7 @@ func TestRemoveGlobals_RewritesGuardToCheckFunction(t *testing.T) {
 // version stamped on a guard uop returns 0 so the orchestrator drops
 // the trace.
 func TestRemoveGlobals_BailsOnIncorrectKeys(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 	globals := objects.NewDict()
 	builtins := objects.NewDict()
@@ -168,7 +168,7 @@ func TestRemoveGlobals_BailsOnIncorrectKeys(t *testing.T) {
 // f_builtins differs from interp.builtins short-circuits to 1 (treat
 // as no-op pass).
 func TestRemoveGlobals_BailsOnCustomBuiltins(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	interp.Builtins = objects.NewDict() // canonical
 	customBuiltins := objects.NewDict() // someone else's
 	globals := objects.NewDict()

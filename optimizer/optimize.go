@@ -28,6 +28,15 @@ import (
 //
 // CPython: Python/optimizer.c:113-163 _PyOptimizer_Optimize
 func Optimize(interp *state.Interpreter, frame objects.InterpreterFrame, code *objects.Code, start, chainDepth int, currStackEntries int) (*Executor, int) {
+	// CPython: Python/optimizer.c:120-127 _PyOptimizer_Optimize
+	// `if (!interp->jit) { return 0; }` short-circuits trace projection
+	// when the interpreter was not built with --enable-experimental-jit.
+	// gopy keeps JIT default-false: no uop dispatcher exists yet, so an
+	// installed ENTER_EXECUTOR would land in the deopt path. Honoring
+	// the gate keeps Tier-1 dispatch the only execution arm in v0.x.
+	if interp == nil || !interp.JIT {
+		return nil, 0
+	}
 	chainDepth %= MaxChainDepth
 	progressNeeded := chainDepth == 0
 	if progressNeeded && !hasSpaceForExecutor(code, start) {

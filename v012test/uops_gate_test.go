@@ -120,7 +120,7 @@ func TestUopsGateStubReturnsDeopt(t *testing.T) {
 // are acceptable as long as the loop ran.
 func TestUopsGateProjectedTraceTerminates(t *testing.T) {
 	co := loopBytecode()
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	exec, status := optimizer.Optimize(interp, nil, co, 0, 0, 0)
 	if status != 1 || exec == nil {
 		t.Fatalf("Optimize status=%d exec=%v, want a usable trace", status, exec)

@@ -13,7 +13,7 @@ import (
 // DispatchDictMutation through the watcher and clears every
 // executor whose dependency bloom names the mutated dict.
 func TestDictMutationHook_FiresWatcherFromMutate(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 
 	_, exec := installLoopExecutor(t, interp)
@@ -39,7 +39,7 @@ func TestDictMutationHook_FiresWatcherFromMutate(t *testing.T) {
 // watcher and clears any executor whose dependency bloom names the
 // mutated type.
 func TestTypeModifiedHook_FiresWatcherFromInvalidate(t *testing.T) {
-	interp := &state.Interpreter{}
+	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 
 	_, exec := installLoopExecutor(t, interp)
