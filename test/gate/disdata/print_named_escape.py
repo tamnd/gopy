@@ -1,0 +1,1 @@
+print("\N{GREEK SMALL LETTER ALPHA}")
