@@ -15,8 +15,8 @@ import (
 // painting CI red on every vendored slice. Phase 3 of spec 1713 is done
 // when this map is empty and every vendored Lib/ file passes Compare.
 var libKnownFailing = map[string]string{
-	"keyword.py":    "task #662 module docstring emit + task #664 list-literal fold",
-	"__future__.py": "task #662 module docstring emit",
+	"keyword.py":    "task #664 list-literal fold + task #666 co_consts dedup",
+	"__future__.py": "task #666 co_consts ordering + dedup against CPython _PyCode_ConstantKey",
 }
 
 // TestDisParityLib drives spec 1713 Phase 3: dis-stream byte-equality on
