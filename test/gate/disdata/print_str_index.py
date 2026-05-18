@@ -1,2 +1,2 @@
-x = "abc"
-print(x[0])
+s = "hello"
+print(s[0])
