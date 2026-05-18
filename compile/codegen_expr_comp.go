@@ -264,7 +264,7 @@ func (c *Compiler) compileAsyncGenerator(gens ast.Seq[*ast.Comprehension],
 	}
 
 	c.useLabel(start)
-	c.pushFblock(fblockAsyncComprehensionGenerator, start, JumpTargetLabel{}, nil)
+	c.pushFblock(fblockAsyncComprehensionGenerator, start, NoLabel, nil)
 	c.addOpJump(SETUP_FINALLY, except, loc(gen.Iter))
 	c.addOp(GET_ANEXT, loc(gen.Iter))
 	c.addLoadConst(nil, loc(gen.Iter))

@@ -752,7 +752,7 @@ func pinnedTargets(seq *Sequence) []bool {
 		ins := &seq.Instrs[i]
 		if hasJumpTarget(ins.Op) {
 			id := int(ins.Oparg)
-			if id > 0 && id < len(seq.labelmap) {
+			if id >= 0 && id < len(seq.labelmap) {
 				off := seq.labelmap[id]
 				if off >= 0 && off < len(pinned) {
 					pinned[off] = true
@@ -916,7 +916,7 @@ func duplicateExitsWithoutLineno(seq *Sequence) {
 			continue
 		}
 		id := int(ins.Oparg)
-		if id <= 0 || id >= len(seq.labelmap) {
+		if id < 0 || id >= len(seq.labelmap) {
 			continue
 		}
 		target := seq.labelmap[id]
@@ -983,7 +983,7 @@ func computeBlockStarts(seq *Sequence) map[int]bool {
 			starts[i+1] = true
 		}
 	}
-	for id := 1; id < len(seq.labelmap); id++ {
+	for id := 0; id < len(seq.labelmap); id++ {
 		off := seq.labelmap[id]
 		if off >= 0 {
 			starts[off] = true
@@ -1004,7 +1004,7 @@ func computePredecessorCounts(seq *Sequence, starts map[int]bool) map[int]int {
 			continue
 		}
 		id := int(ins.Oparg)
-		if id <= 0 || id >= len(seq.labelmap) {
+		if id < 0 || id >= len(seq.labelmap) {
 			continue
 		}
 		off := seq.labelmap[id]
@@ -1066,7 +1066,7 @@ func normalizeJumps(seq *Sequence) {
 			continue
 		}
 		id := int(ins.Oparg)
-		if id <= 0 || id >= len(seq.labelmap) {
+		if id < 0 || id >= len(seq.labelmap) {
 			continue
 		}
 		target := seq.labelmap[id]

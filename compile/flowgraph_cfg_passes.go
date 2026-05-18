@@ -303,11 +303,13 @@ func isExitWithoutLineno(b *basicblock) bool {
 	return true
 }
 
-// getMaxLabel returns the largest label id in use across g.
+// getMaxLabel returns the largest label id in use across g, or -1 if
+// no block is labeled. Callers use the return value + 1 as the next
+// fresh label id (matches CPython's get_max_label, which starts at -1).
 //
 // CPython: Python/flowgraph.c:622 get_max_label
 func getMaxLabel(g *cfgBuilder) int {
-	maxLbl := 0
+	maxLbl := -1
 	for b := g.EntryBlock; b != nil; b = b.Next {
 		if b.Label.id > maxLbl {
 			maxLbl = b.Label.id
@@ -391,7 +393,7 @@ func cfgTranslateJumpLabelsToTargets(g *cfgBuilder) {
 	maxLbl := getMaxLabel(g)
 	label2block := make([]*basicblock, maxLbl+1)
 	for b := g.EntryBlock; b != nil; b = b.Next {
-		if b.Label.id > 0 {
+		if b.Label.IsValid() {
 			label2block[b.Label.id] = b
 		}
 	}
@@ -594,7 +596,7 @@ func cfgRemoveRedundantNopsAndPairs(entry *basicblock) {
 		var prev, cur *cfgInstr
 		for b := entry; b != nil; b = b.Next {
 			basicblockRemoveRedundantNops(b)
-			if b.Label.id > 0 {
+			if b.Label.IsValid() {
 				cur = nil
 			}
 			for i := range b.Instr {
@@ -787,7 +789,7 @@ func cfgPushColdBlocksToEnd(g *cfgBuilder) {
 			continue
 		}
 		bridge := g.newBlock()
-		if b.Next.Label.id == 0 {
+		if !b.Next.Label.IsValid() {
 			b.Next.Label = JumpTargetLabel{id: nextLbl}
 			nextLbl++
 		}

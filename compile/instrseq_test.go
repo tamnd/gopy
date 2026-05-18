@@ -10,8 +10,8 @@ func TestNewLabelIDs(t *testing.T) {
 	var s Sequence
 	a := s.NewLabel()
 	b := s.NewLabel()
-	if a.ID() != 1 || b.ID() != 2 {
-		t.Fatalf("labels = %d, %d, want 1, 2", a.ID(), b.ID())
+	if a.ID() != 0 || b.ID() != 1 {
+		t.Fatalf("labels = %d, %d, want 0, 1", a.ID(), b.ID())
 	}
 }
 

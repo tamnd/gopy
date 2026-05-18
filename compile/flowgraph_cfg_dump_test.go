@@ -16,7 +16,7 @@ func TestDumpCfgRendersBlocksCPythonFormat(t *testing.T) {
 
 	got := DumpCfg(g)
 	want := fmt.Sprintf(
-		"B0: [EH=0 CLD=0 WRM=0 NO_FT=1] used: 2, depth: 0, preds: 0 return \n"+
+		"B-1: [EH=0 CLD=0 WRM=0 NO_FT=1] used: 2, depth: 0, preds: 0 return \n"+
 			"  [00] line: 1, LOAD_CONST (%d) arg: 0 \n"+
 			"  [01] line: 1, RETURN_VALUE (%d) \n",
 		int(LOAD_CONST), int(RETURN_VALUE))
@@ -41,6 +41,16 @@ func TestDumpCfgResolvesJumpTargetsAsBlockLabels(t *testing.T) {
 	dump := DumpCfg(g)
 	if !strings.Contains(dump, "target: B1 [0] jump \n") {
 		t.Fatalf("expected jump target rendered as B1 with jump marker, got:\n%s", dump)
+	}
+}
+
+func TestDumpCfgEntryBlockHasNoLabel(t *testing.T) {
+	g := newCfgBuilder()
+	g.addOp(RETURN_VALUE, 0, ast.Pos{Lineno: 1})
+
+	got := DumpCfg(g)
+	if !strings.HasPrefix(got, "B-1:") {
+		t.Fatalf("entry block should render as B-1 (NO_LABEL), got:\n%s", got)
 	}
 }
 

@@ -36,9 +36,21 @@ type Opcode int32
 
 // JumpTargetLabel is an opaque label id created by NewLabel and bound
 // to an instruction position by UseLabel. Mirrors _PyJumpTargetLabel.
+// Label ids start at 0; -1 (NoLabel) means "no label" and matches
+// CPython's NO_LABEL sentinel.
 //
 // CPython: Include/internal/pycore_compile.h _PyJumpTargetLabel
 type JumpTargetLabel struct{ id int }
+
+// NoLabel is the "no label assigned" sentinel. Matches CPython's
+// `#define NO_LABEL ((jump_target_label){-1})`.
+//
+// CPython: Include/internal/pycore_compile.h NO_LABEL
+var NoLabel = JumpTargetLabel{id: -1}
+
+// IsValid reports whether l is a real label (i.e. NewLabel result),
+// not the NoLabel sentinel.
+func (l JumpTargetLabel) IsValid() bool { return l.id >= 0 }
 
 // ID returns the underlying label id. CPython exposes the same
 // integer to Python via `InstructionSequence.new_label`.
@@ -75,9 +87,9 @@ type Sequence struct {
 	Nested   []*Sequence
 	AnnoCode *Sequence
 
-	// labelmap[id-1] is the instruction index labeled by id, or
+	// labelmap[id] is the instruction index labeled by id, or
 	// labelUnbound if no UseLabel call has bound it yet. Cleared by
-	// ApplyLabelMap. id 0 is reserved (NewLabel returns ids >= 1).
+	// ApplyLabelMap. id 0 is the first valid label (matches CPython).
 	labelmap      []int
 	nextFreeLabel int
 }
@@ -89,13 +101,15 @@ type Sequence struct {
 // CPython: Python/instruction_sequence.c:80 _PyInstructionSequence_UseLabel
 const labelUnbound = -111
 
-// NewLabel allocates a fresh label id (1-based, matching CPython's
-// post-increment of s_next_free_label).
+// NewLabel allocates a fresh label id. CPython's
+// `_PyInstructionSequence_NewLabel` post-increments `s_next_free_label`
+// so the first id handed out is 0.
 //
 // CPython: Python/instruction_sequence.c:58 _PyInstructionSequence_NewLabel
 func (s *Sequence) NewLabel() JumpTargetLabel {
+	lbl := JumpTargetLabel{id: s.nextFreeLabel}
 	s.nextFreeLabel++
-	return JumpTargetLabel{id: s.nextFreeLabel}
+	return lbl
 }
 
 // UseLabel binds lbl to the position of the next instruction to be
@@ -159,7 +173,7 @@ func (s *Sequence) Insert(pos int, op Opcode, oparg int32, loc ast.Pos) {
 	copy(s.Instrs[pos+1:], s.Instrs[pos:])
 	s.Instrs[pos] = in
 	for i, off := range s.labelmap {
-		if i == 0 || off == labelUnbound {
+		if off == labelUnbound {
 			continue
 		}
 		if off >= pos {

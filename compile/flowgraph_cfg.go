@@ -156,7 +156,7 @@ type cfgBuilder struct {
 // CPython: Python/flowgraph.c:426 _PyCfgBuilder_New
 // CPython: Python/flowgraph.c:413 init_cfg_builder
 func newCfgBuilder() *cfgBuilder {
-	g := &cfgBuilder{}
+	g := &cfgBuilder{CurrentLabel: NoLabel}
 	block := g.newBlock()
 	g.EntryBlock = block
 	g.CurBlock = block
@@ -164,13 +164,12 @@ func newCfgBuilder() *cfgBuilder {
 }
 
 // newBlock allocates an empty basicblock and pushes it on the
-// allocation list. The label defaults to the zero JumpTargetLabel
-// (which compares equal to NO_LABEL since gopy uses id 0 as the
-// "unlabeled" sentinel; live labels start at 1).
+// allocation list. Blocks start with Label = NoLabel; useLabel /
+// maybeStartNewBlock stamp on a real label when one is pinned.
 //
 // CPython: Python/flowgraph.c:174 cfg_builder_new_block
 func (g *cfgBuilder) newBlock() *basicblock {
-	b := &basicblock{List: g.BlockList}
+	b := &basicblock{List: g.BlockList, Label: NoLabel}
 	g.BlockList = b
 	return b
 }
@@ -219,7 +218,7 @@ func (g *cfgBuilder) currentBlockTerminated() bool {
 		return true
 	}
 	if g.HasLabel {
-		if last != nil || g.CurBlock.Label.id != 0 {
+		if last != nil || g.CurBlock.Label.IsValid() {
 			return true
 		}
 		g.CurBlock.Label = g.CurrentLabel
@@ -245,7 +244,7 @@ func (g *cfgBuilder) maybeStartNewBlock() {
 }
 
 func (g *cfgBuilder) clearPendingLabel() {
-	g.CurrentLabel = JumpTargetLabel{}
+	g.CurrentLabel = NoLabel
 	g.HasLabel = false
 }
 

@@ -384,7 +384,7 @@ func FromSequence(seq *Sequence) (*Builder, error) {
 	}
 
 	// Bind label ids to their resolved block by walking labelmap.
-	for id := 1; id < len(seq.labelmap); id++ {
+	for id := 0; id < len(seq.labelmap); id++ {
 		off := seq.labelmap[id]
 		if off < 0 {
 			continue
