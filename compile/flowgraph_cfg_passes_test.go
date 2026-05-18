@@ -288,6 +288,82 @@ func TestCfgConvertPseudoOpsRewritesAndCompacts(t *testing.T) {
 	}
 }
 
+func TestCfgConvertPseudoConditionalJumpsRewritesJumpIfFalse(t *testing.T) {
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 7}
+	target := g.newBlock()
+	g.CurBlock.Instr = append(g.CurBlock.Instr, cfgInstr{Op: JUMP_IF_FALSE, Target: target, Loc: loc})
+	g.useNextBlock(target)
+	target.addOp(NOP, 0, loc)
+
+	cfgConvertPseudoConditionalJumps(g)
+
+	got := g.EntryBlock.Instr
+	if len(got) != 3 {
+		t.Fatalf("entry instrs = %d, want 3", len(got))
+	}
+	if got[0].Op != COPY || got[0].Oparg != 1 {
+		t.Errorf("instr[0] = {%v, %d}, want {COPY, 1}", got[0].Op, got[0].Oparg)
+	}
+	if got[1].Op != TO_BOOL || got[1].Oparg != 0 {
+		t.Errorf("instr[1] = {%v, %d}, want {TO_BOOL, 0}", got[1].Op, got[1].Oparg)
+	}
+	if got[2].Op != POP_JUMP_IF_FALSE {
+		t.Errorf("instr[2] = %v, want POP_JUMP_IF_FALSE", got[2].Op)
+	}
+	if got[2].Target != target {
+		t.Errorf("instr[2].Target = %p, want %p", got[2].Target, target)
+	}
+}
+
+func TestCfgConvertPseudoConditionalJumpsRewritesJumpIfTrue(t *testing.T) {
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 9}
+	handler := g.newBlock()
+	target := g.newBlock()
+	g.CurBlock.Instr = append(g.CurBlock.Instr, cfgInstr{Op: JUMP_IF_TRUE, Target: target, Except: handler, Loc: loc})
+	g.useNextBlock(target)
+	target.addOp(NOP, 0, loc)
+
+	cfgConvertPseudoConditionalJumps(g)
+
+	got := g.EntryBlock.Instr
+	if len(got) != 3 {
+		t.Fatalf("entry instrs = %d, want 3", len(got))
+	}
+	if got[0].Op != COPY || got[0].Except != handler {
+		t.Errorf("instr[0] = {%v, except=%p}, want {COPY, except=%p}", got[0].Op, got[0].Except, handler)
+	}
+	if got[1].Op != TO_BOOL || got[1].Except != handler {
+		t.Errorf("instr[1] = {%v, except=%p}, want {TO_BOOL, except=%p}", got[1].Op, got[1].Except, handler)
+	}
+	if got[2].Op != POP_JUMP_IF_TRUE || got[2].Except != handler {
+		t.Errorf("instr[2] = {%v, except=%p}, want {POP_JUMP_IF_TRUE, except=%p}", got[2].Op, got[2].Except, handler)
+	}
+}
+
+func TestCfgConvertPseudoConditionalJumpsLeavesOtherOpsAlone(t *testing.T) {
+	g := newCfgBuilder()
+	loc := ast.Pos{Lineno: 2}
+	target := g.newBlock()
+	g.addOp(LOAD_CONST, 0, loc)
+	g.CurBlock.Instr = append(g.CurBlock.Instr, cfgInstr{Op: POP_JUMP_IF_FALSE, Target: target, Loc: loc})
+	g.useNextBlock(target)
+	target.addOp(RETURN_VALUE, 0, loc)
+
+	cfgConvertPseudoConditionalJumps(g)
+
+	if len(g.EntryBlock.Instr) != 2 {
+		t.Fatalf("entry instrs = %d, want 2 (unchanged)", len(g.EntryBlock.Instr))
+	}
+	if g.EntryBlock.Instr[0].Op != LOAD_CONST {
+		t.Errorf("instr[0] = %v, want LOAD_CONST", g.EntryBlock.Instr[0].Op)
+	}
+	if g.EntryBlock.Instr[1].Op != POP_JUMP_IF_FALSE {
+		t.Errorf("instr[1] = %v, want POP_JUMP_IF_FALSE", g.EntryBlock.Instr[1].Op)
+	}
+}
+
 func TestCfgRemoveRedundantNopsAcrossBlockBoundary(t *testing.T) {
 	// Trailing NOP whose line matches the next block's first real
 	// instruction is removable.

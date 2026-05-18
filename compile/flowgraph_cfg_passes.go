@@ -357,6 +357,41 @@ func cfgConvertPseudoOps(g *cfgBuilder) int {
 	return cfgRemoveRedundantNops(g)
 }
 
+// cfgConvertPseudoConditionalJumps rewrites the codegen-time pseudo
+// conditional jumps (JUMP_IF_FALSE / JUMP_IF_TRUE) into the real
+// POP_JUMP_IF_* sequence preceded by COPY 1 + TO_BOOL 0. The pseudo
+// op kept the condition value on the stack so optimize_cfg could see
+// it; here we materialise the duplicate-and-coerce-to-bool dance the
+// VM actually wants. The pseudo jump is always the last instruction
+// in its block (codegen invariant), and the inserted helpers inherit
+// its location and exception-handler pointer.
+//
+// CPython: Python/flowgraph.c:3485 convert_pseudo_conditional_jumps
+func cfgConvertPseudoConditionalJumps(g *cfgBuilder) {
+	for b := g.EntryBlock; b != nil; b = b.Next {
+		for i := 0; i < len(b.Instr); i++ {
+			op := b.Instr[i].Op
+			if op != JUMP_IF_FALSE && op != JUMP_IF_TRUE {
+				continue
+			}
+			if i != len(b.Instr)-1 {
+				panic("convert_pseudo_conditional_jumps: pseudo jump must be last in block")
+			}
+			if op == JUMP_IF_FALSE {
+				b.Instr[i].Op = POP_JUMP_IF_FALSE
+			} else {
+				b.Instr[i].Op = POP_JUMP_IF_TRUE
+			}
+			loc := b.Instr[i].Loc
+			except := b.Instr[i].Except
+			b.insertInstruction(i, cfgInstr{Op: COPY, Oparg: 1, Loc: loc, Except: except})
+			i++
+			b.insertInstruction(i, cfgInstr{Op: TO_BOOL, Oparg: 0, Loc: loc, Except: except})
+			i++
+		}
+	}
+}
+
 // cfgCheckCfg verifies that every terminator opcode sits at the end of
 // its block. Returns a non-nil error (via panic-free
 // boolean) when violated; the codegen invariants make this a debug
