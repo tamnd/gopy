@@ -42,6 +42,13 @@ const minInt64 int64 = -1 << 63
 // CPython: Python/flowgraph.c:1585 MIN_CONST_SEQUENCE_SIZE
 const minConstSequenceSize = 3
 
+// noLocation mirrors CPython's NO_LOCATION sentinel. Folds that nop out
+// instructions stamp this on the resulting NOP so the redundant-NOP
+// pass can drop them; CPython's nop_out does the same.
+//
+// CPython: Python/flowgraph.c:50 NO_LOCATION
+var noLocation = ast.Pos{Lineno: -1, EndLineno: -1, ColOffset: -1, EndColOffset: -1}
+
 // evalIntBinop computes the result of x <op> y for integer operands,
 // or returns ok=false if the operator is one we do not fold (TRUE_DIVIDE,
 // MATRIX_MULTIPLY, FLOOR_DIVIDE on a zero divisor, POWER with a
@@ -1785,6 +1792,7 @@ func basicblockFoldTupleOfConstants(bb *basicblock, consts *[]any) int {
 			bb.Instr[k].Op = NOP
 			bb.Instr[k].Oparg = 0
 			bb.Instr[k].Target = nil
+			bb.Instr[k].Loc = noLocation
 		}
 		idx := appendConst(consts, tuple)
 		ins.Op = LOAD_CONST
@@ -1824,6 +1832,7 @@ func basicblockOptimizeListsAndSets(bb *basicblock, consts *[]any) int {
 			bb.Instr[k].Op = NOP
 			bb.Instr[k].Oparg = 0
 			bb.Instr[k].Target = nil
+			bb.Instr[k].Loc = noLocation
 		}
 		preludeOp := ins.Op
 		bb.Instr[i-2].Op = preludeOp
