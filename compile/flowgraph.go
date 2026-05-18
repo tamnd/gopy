@@ -166,6 +166,15 @@ func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint
 	// CPython: Python/flowgraph.c:1935 fold_const_unaryop
 	foldConstUnaryop(seq, consts)
 
+	// PASS 0b4: collapse `x is None` / `x is not None` triples into the
+	// POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE peephole opcodes. CPython
+	// runs the same fold inside basicblock_optimize_load_const (case
+	// IS_OP) so the LOAD_CONST and IS_OP drop and the conditional jump
+	// becomes a single-instruction None test.
+	//
+	// CPython: Python/flowgraph.c:2230 basicblock_optimize_load_const
+	foldIsOpNone(seq, consts)
+
 	// PASS 0c: prune the const-pool entries no surviving instruction
 	// references. rewriteLoadSmallInt leaves small-int slots orphaned;
 	// removing them here is what brings co_consts byte-equal with

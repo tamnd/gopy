@@ -477,6 +477,77 @@ func foldConstUnaryop(seq *Sequence, consts *[]any) int {
 	return folded
 }
 
+// foldIsOpNone collapses the `x is None` / `x is not None` test
+// sequence emitted by codegen into the POP_JUMP_IF_NONE /
+// POP_JUMP_IF_NOT_NONE peephole opcodes. The codegen emits:
+//
+//	LOAD_CONST None
+//	IS_OP        0      ; or 1 for `is not`
+//	POP_JUMP_IF_FALSE   ; or POP_JUMP_IF_TRUE
+//
+// optionally with a TO_BOOL between the IS_OP and the jump. The fold
+// is safe whenever the LOAD_CONST loads None and a real jump follows;
+// every consumer of the IS_OP result (the conditional jump and TO_BOOL)
+// is rewritten or dropped.
+//
+// CPython: Python/flowgraph.c:2230 basicblock_optimize_load_const
+// (case IS_OP).
+func foldIsOpNone(seq *Sequence, consts *[]any) int {
+	if consts == nil || len(seq.Instrs) < 3 {
+		return 0
+	}
+	pinned := pinnedTargets(seq)
+	folded := 0
+	for i := 0; i+2 < len(seq.Instrs); i++ {
+		load := &seq.Instrs[i]
+		if load.Op != LOAD_CONST {
+			continue
+		}
+		v, ok := loadsConstValue(load, *consts)
+		if !ok || v != nil {
+			continue
+		}
+		isInstr := &seq.Instrs[i+1]
+		if isInstr.Op != IS_OP {
+			continue
+		}
+		if pinned[i+1] {
+			continue
+		}
+		jumpIdx := i + 2
+		if seq.Instrs[jumpIdx].Op == TO_BOOL {
+			if jumpIdx+1 >= len(seq.Instrs) || pinned[jumpIdx] {
+				continue
+			}
+			jumpIdx++
+		}
+		if pinned[jumpIdx] {
+			continue
+		}
+		jumpInstr := &seq.Instrs[jumpIdx]
+		invert := isInstr.Oparg != 0
+		switch jumpInstr.Op {
+		case POP_JUMP_IF_FALSE:
+			invert = !invert
+		case POP_JUMP_IF_TRUE:
+		default:
+			continue
+		}
+		setNop(load)
+		setNop(isInstr)
+		if jumpIdx == i+3 {
+			setNop(&seq.Instrs[i+2])
+		}
+		if invert {
+			jumpInstr.Op = POP_JUMP_IF_NOT_NONE
+		} else {
+			jumpInstr.Op = POP_JUMP_IF_NONE
+		}
+		folded++
+	}
+	return folded
+}
+
 // isFoldableUnary reports whether op is one of the three unary opcodes
 // the folder rewrites.
 //
