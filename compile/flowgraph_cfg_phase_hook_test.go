@@ -52,7 +52,8 @@ func TestCfgPhaseHookCanDumpAtEveryBoundary(t *testing.T) {
 	consts := []any{int64(1)}
 	var dumps strings.Builder
 	hook := func(phase string, g *cfgBuilder) {
-		dumps.WriteString(DumpCfg(g, CfgDumpHeader{Phase: phase, FirstLineno: 1}))
+		dumps.WriteString("# cfg dump: " + phase + "\n")
+		dumps.WriteString(DumpCfg(g))
 		dumps.WriteString("---\n")
 	}
 	if err := cfgOptimizeCodeUnitWithHook(g, &consts, 0, 0, 1, hook); err != nil {

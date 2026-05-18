@@ -315,15 +315,25 @@ together.
 
 ### B Reference: dump format
 
+Each phase dump is just the block listing CPython's `cfg_dump_to_string`
+returns, with no per-unit header. The harness on both sides composes
+the header `# cfg dump: <phase>` outside the dump itself.
+
+Per-block:
+
 ```
-B<label>: [EH=<n> CLD=<n> WRM=<n> NO_FT=<n>] used: <n>, depth: <n>, preds: <n> <return-marker>
-  [<idx>] line: <lineno>, <opname> (<opcode>) <arg-or-target> <jump-marker>
+B<label.id>: [EH=<eh> CLD=<cold> WRM=<warm> NO_FT=<no_ft>] used: <iused>, depth: <startdepth>, preds: <predecessors> <return-marker>
+  [<idx:02d>] line: <lineno>, <opname> (<opcode>) <arg-or-target><jump-marker>
 ```
 
-No raw pointers, no addresses. Targets render as `target: B<label> [<oparg>]`;
-non-target ops render as `arg: <oparg>`. gopy's `compile.DumpCfg`
-and the patch's `dump_basicblock` produce byte-identical strings;
-any drift is a gopy bug and fails L2.
+- `<return-marker>` is `"return "` when the last instruction is `RETURN_VALUE`, else empty.
+- `<arg-or-target>` is `"target: B<tgt.label.id> [<oparg>] "` for HAS_TARGET opcodes (`-1` when target is nil), `"arg: <oparg> "` for opcodes with HAS_ARG but no target, else empty.
+- `<jump-marker>` is `"jump "` when the opcode is a jump, else empty.
+- Numeric fields use the same `%d` width as CPython (no padding). Boolean fields render as `0` or `1`.
+
+No raw pointers, no addresses. gopy's `compile.DumpCfg` and the patch's
+`cfg_dump_to_string` must produce byte-identical strings. Any drift is
+a gopy bug and fails L2.
 
 ## Phase C: port whole files
 
