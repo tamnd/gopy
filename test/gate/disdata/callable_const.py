@@ -1,0 +1,1 @@
+print(callable(1))
