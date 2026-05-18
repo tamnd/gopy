@@ -75,7 +75,7 @@ same commit that flips a row.
 | B.1   | CPython patch (per-phase dump + hook export)                                                                                | done        | `c9d380f` |
 | B.2   | CPython oracle wrappers (L1 / L3 / L4)                                                                                      | done        | `f960caf`     |
 | B.3   | Diff harness (`cfg_phase_parity_test.go` + corpus)                                                                          | done        | `fbb22f7` |
-| C.1   | Finish `Python/flowgraph.c` port (`convert_pseudo_conditional_jumps`, `prepare_localsplus`, `_PyCfg_OptimizedCfgToInstructionSequence`, helpers) | pending     | -         |
+| C.1   | Finish `Python/flowgraph.c` port (`convert_pseudo_conditional_jumps`, `prepare_localsplus`, `_PyCfg_OptimizedCfgToInstructionSequence`, helpers) | done        | `e4c6827` |
 | C.2   | Finish `Python/assemble.c` port (split into `assemble_makecode.go` / `assemble_jumps.go` / `assemble.go`)                   | pending     | -         |
 | C.3   | Port `optimize_and_assemble_code_unit` driver into `compile/compiler.go`                                                    | pending     | -         |
 | D.1   | Flip `assembleUnit` to the cfg driver                                                                                       | pending     | -         |
