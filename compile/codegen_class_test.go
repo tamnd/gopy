@@ -224,11 +224,11 @@ func TestClassBodyStoresModuleAndQualname(t *testing.T) {
 	// Verify the names pool has __name__, __module__, __qualname__,
 	// __firstlineno__, __static_attributes__.
 	want_names := map[string]bool{
-		"__name__":               true,
-		"__module__":             true,
-		"__qualname__":           true,
-		"__firstlineno__":        true,
-		"__static_attributes__":  true,
+		"__name__":              true,
+		"__module__":            true,
+		"__qualname__":          true,
+		"__firstlineno__":       true,
+		"__static_attributes__": true,
 	}
 	for _, n := range inner.Names {
 		delete(want_names, n)

@@ -300,24 +300,32 @@ func (c *Compiler) emitStaticAttributes(l ast.Pos) {
 //
 // CPython: Python/compile.c:1516 _PyCompile_CleanDoc
 func cleanDoc(doc string) string {
-	// First pass: expand tabs (PyUnicode str.expandtabs default tabsize 8)
 	doc = expandTabs(doc, 8)
-	// First pass: find minimum indentation of any non-blank line after
-	// the first line.
+	margin := docMargin(doc)
+	p := 0
+	for p < len(doc) && doc[p] == ' ' {
+		p++
+	}
+	if p == 0 && margin == 0 {
+		return doc
+	}
+	var b []byte
+	b, p = appendDocLine(b, doc, p)
+	for p < len(doc) {
+		p = skipUpTo(doc, p, margin)
+		b, p = appendDocLine(b, doc, p)
+	}
+	return string(b)
+}
+
+// docMargin returns the minimum number of leading spaces on any non-blank
+// line after the first. Lines that are entirely blank are ignored. Returns
+// 0 when no following line has any indentation to strip.
+func docMargin(doc string) int {
 	const maxMargin = int(^uint(0) >> 1)
 	margin := maxMargin
-	first := true
-	for i := 0; i < len(doc); {
-		if first {
-			for i < len(doc) && doc[i] != '\n' {
-				i++
-			}
-			if i < len(doc) {
-				i++
-			}
-			first = false
-			continue
-		}
+	i := skipPastNewline(doc, 0)
+	for i < len(doc) {
 		start := i
 		for i < len(doc) && doc[i] == ' ' {
 			i++
@@ -327,25 +335,37 @@ func cleanDoc(doc string) string {
 				margin = i - start
 			}
 		}
-		for i < len(doc) && doc[i] != '\n' {
-			i++
-		}
-		if i < len(doc) {
-			i++
-		}
+		i = skipPastNewline(doc, i)
 	}
 	if margin == maxMargin {
-		margin = 0
+		return 0
 	}
-	// Strip leading spaces from line one.
-	p := 0
-	for p < len(doc) && doc[p] == ' ' {
+	return margin
+}
+
+// skipPastNewline advances past the next '\n' (or end-of-string).
+func skipPastNewline(doc string, i int) int {
+	for i < len(doc) && doc[i] != '\n' {
+		i++
+	}
+	if i < len(doc) {
+		i++
+	}
+	return i
+}
+
+// skipUpTo advances at most n positions while the input is a space.
+func skipUpTo(doc string, p, n int) int {
+	for n > 0 && p < len(doc) && doc[p] == ' ' {
 		p++
+		n--
 	}
-	if p == 0 && margin == 0 {
-		return doc
-	}
-	var b []byte
+	return p
+}
+
+// appendDocLine copies bytes from doc[p:] up to and including the next
+// newline into b. Returns the updated buffer and position.
+func appendDocLine(b []byte, doc string, p int) ([]byte, int) {
 	for p < len(doc) {
 		ch := doc[p]
 		p++
@@ -354,25 +374,7 @@ func cleanDoc(doc string) string {
 			break
 		}
 	}
-	for p < len(doc) {
-		dropped := 0
-		for dropped < margin && p < len(doc) {
-			if doc[p] != ' ' {
-				break
-			}
-			p++
-			dropped++
-		}
-		for p < len(doc) {
-			ch := doc[p]
-			p++
-			b = append(b, ch)
-			if ch == '\n' {
-				break
-			}
-		}
-	}
-	return string(b)
+	return b, p
 }
 
 // expandTabs replaces tab characters with spaces so each tab advances
