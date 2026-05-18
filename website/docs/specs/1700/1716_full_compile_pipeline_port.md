@@ -250,22 +250,189 @@ after assemble_location_info
 after makecode
 ```
 
-### CPython side
+## State capture mechanics (Phase B deep dive)
 
-CPython 3.14 already exposes `_testinternalcapi.optimize_cfg` and
-`_testinternalcapi.assemble_code_object` for unit tests. The
-existing hooks dump after the whole pipeline runs. The spec adds
-a debug build flag (`-X dump-cfg-after=<phase>`) that calls the
-same dump format gopy emits, so the two outputs diff line for
-line.
+The high-level Phase B summary above tells what to dump and when.
+This subsection answers the operational question: *how* do we
+actually pull the same state out of CPython, what does CPython
+already expose, what do we have to patch in, and how does the
+diff harness consume both sides? Without this section the port
+keeps slipping back into "patch the symptom" mode because the
+gopy side has no ground-truth oracle for the intermediate states.
 
-### Test driver
+### What CPython 3.14 already exposes
 
-`test/gate/cfg_phase_parity_test.go` walks
-`test/cpython/Lib/` (currently `__future__.py` plus `keyword.py`,
-to be grown) and for each file runs both interpreters with the
-hook flag set at every phase boundary. Mismatches surface the
-exact phase where gopy diverges.
+CPython ships three Python-callable entry points in
+`Modules/_testinternalcapi.c` that drive the compile back-end
+directly. They are the canonical handles for diffing intermediate
+state without spinning up the full interpreter.
+
+| Hook                                                                  | CPython source                                       | Returns                                                              |
+| --------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------- |
+| `_testinternalcapi.new_instruction_sequence()`                        | `Modules/_testinternalcapi.c:715`                    | empty `_PyInstructionSequence`                                       |
+| `_testinternalcapi.compiler_codegen(ast, filename, optimize, mode=0)` | `Modules/_testinternalcapi.c:728`                    | `(InstructionSequence, metadata_dict)` straight out of `codegen.c`   |
+| `_testinternalcapi.optimize_cfg(seq, consts, nlocals)`                | `Modules/_testinternalcapi.c:754` driving `flowgraph.c:4126` | optimized `InstructionSequence` (full pipeline runs internally)      |
+| `_testinternalcapi.assemble_code_object(filename, insts, metadata)`   | `Modules/_testinternalcapi.c:785`                    | `types.CodeType` from `_PyCompile_Assemble`                          |
+
+`InstructionSequence` itself is introspectable via
+`get_instructions()` (returns a list of
+`(opcode, oparg, lineno, end_lineno, col_offset, end_col_offset)`
+tuples, with `-1` as the sentinel for unset locations) and
+`get_nested()` (the list of nested sub-sequences for inner
+scopes). Both are defined in `Python/instruction_sequence.c:333`
+and `:353`. Labels appear inline as the relocated `oparg` after
+`_PyInstructionSequence_ApplyLabelMap` runs, so a label-resolved
+sequence dumps as flat tuples with integer targets.
+
+These four hooks give us a stable, post-3.14-ABI surface for
+three of the five comparison levels (L0, L1, L4 in the ladder
+below). The two intermediate levels (L2 and L3) need a patched
+build because CPython collapses every CFG pass into a single
+`_PyCompile_OptimizeCfg` call.
+
+### What CPython does *not* expose (and the patch we ship)
+
+`_PyCfgBuilder_DumpGraph` is the closest thing CPython has to a
+phase dumper, but it lives behind `#if 0` at
+`Python/flowgraph.c:319` and only prints to stderr in CPython's
+internal block format. To capture per-phase CFG snapshots, the
+spec adds a single patch file:
+
+```
+test/cpython/patches/0001-cfg-phase-dump.patch
+```
+
+The patch is small and additive:
+
+1. Re-enables `dump_basicblock` / `dump_instr` /
+   `_PyCfgBuilder_DumpGraph` (remove the `#if 0` guard at
+   `Python/flowgraph.c:277..328`).
+2. Adds a `cfg_phase_dump` callback registry to `flowgraph.c`
+   (one function pointer keyed by phase name) and arms it via a
+   new `_testinternalcapi.set_cfg_phase_hook(callback)` thunk.
+   `callback` is a Python callable that receives
+   `(phase_name: str, dump_text: str)`.
+3. Inserts `FIRE_PHASE("translate_jump_labels_to_targets")` etc.
+   calls in `_PyCfg_OptimizeCodeUnit` at the same boundaries
+   listed in **Hook points** above. The macro is a no-op when no
+   hook is registered, so production builds are unaffected.
+4. Replaces the `fprintf(stderr, ...)` in `dump_basicblock` with
+   a `PyUnicodeWriter` so the dump goes back as a string instead
+   of polluting stderr.
+
+The patch is checked in under `test/cpython/patches/`, applied
+during gate-builds of the bundled CPython, and never against the
+system Python (`brew`'s interpreter is the reference for `.pyc`
+parity only; the patched build is reference for CFG parity).
+Rebasing the patch on top of new CPython tags is part of the
+1707-style "pull CPython 3.14.x" routine.
+
+### The comparison ladder
+
+Each step traps regressions earlier than the next, so a
+divergence lands at the highest level where it occurs and the
+debug work points at one pass instead of the whole back-end.
+
+| Level | What's compared                              | Source of truth                                   | Caught when                                              |
+| ----- | -------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------- |
+| L0    | AST                                          | `ast.dump(tree, indent=2)` on both sides          | Parser / preprocess diverges (caught by spec 1710 gates) |
+| L1    | Pre-optimize instruction sequence            | `compiler_codegen` -> `get_instructions()` tuples | Codegen-side AST emission diverges (spec 1714 surface)   |
+| L2    | Per-phase CFG dump (entry, after every pass) | patched `_PyCfg_OptimizeCodeUnit` callback        | Any individual optimization pass diverges                |
+| L3    | Post-optimize instruction sequence           | `optimize_cfg` -> `get_instructions()` tuples     | The CFG -> sequence bridge diverges                      |
+| L4    | Code object byte-equality                    | `marshal.dumps(co)` (spec 1713's gate)            | Assemble-side metadata, location, or constant order diverges |
+
+Every test under Phase E runs at the highest level its inputs
+allow. Synthetic snippets in `test/gate/cfg_phase_parity_test.go`
+target L2 directly. The `test/gate/dis_parity_test.go` corpus
+runs at L1 and L3. The byte-equality gate from 1713 runs at L4.
+L0 is owned by the parser specs.
+
+### Capture mechanics on each side
+
+Both sides must emit byte-identical strings for any given level,
+otherwise the diff harness fights formatting drift instead of
+real divergences. The dump rules (alphabetical for sets, integer
+indices instead of pointers, lowercased boolean literals) are
+enforced by:
+
+- gopy: `compile.DumpCfg` (`compile/flowgraph_cfg_dump.go`) and
+  `compile.DumpInstructionSequence` (to be added in C.1 alongside
+  the bridge port).
+- CPython patched build: the patch's `PyUnicodeWriter`-backed
+  dumpers, which copy the gopy format verbatim. The patch's
+  `dump_basicblock` is the canonical source. gopy's `DumpCfg`
+  mirrors it character-for-character; any drift is a gopy bug
+  and fails L2.
+
+Reproducibility constraints:
+
+- Both sides run with `PYTHONHASHSEED=0`. CPython interns string
+  constants by content hash inside the const cache; the order
+  bleeds through `co_consts` and `co_names`. Without a fixed
+  hash seed the diff harness sees spurious reorderings.
+- `co_consts` and `co_names` ordering is *not* hash-stable across
+  CPython releases. The gate pins to one CPython tag (currently
+  3.14.5) and the patch carries that tag in its header. Tag
+  bumps go through spec 1707's audit so the patch and the gopy
+  port move together.
+- Location ordering: PEP 657 emits `i_loc` as
+  `(lineno, end_lineno, col_offset, end_col_offset)`. gopy stores
+  it as `ast.Pos`. The dump uses `lineno:col-end_lineno:end_col`,
+  with `-1` rendered literally on either side so unset locations
+  round-trip.
+
+### The diff harness
+
+`test/gate/cfg_phase_parity_test.go` is the single Go-side
+driver. Operationally:
+
+1. Read a `.py` file from `test/cpython/Lib/` (corpus grows from
+   `__future__.py` plus `keyword.py` outward; the file list is
+   captured in `test/gate/cfg_phase_corpus.txt`).
+2. Subprocess to the patched CPython build with
+   `python -X gopy-cfg-dump=<outdir>`. The `-X` flag is parsed
+   by the patch's small `_testinternalcapi.set_cfg_phase_hook`
+   bootstrap and writes one file per `(unit, phase)` pair under
+   `outdir`.
+3. Drive gopy through `compile.CompileWithCfgPhaseHook(src,
+   filename, hook)` from the same Go test, writing the same file
+   layout into a sibling `outdir`.
+4. For each `(unit, phase)` pair, `os.ReadFile` both sides and
+   `t.Errorf` on the first byte difference, with the surrounding
+   ~10-line context.
+
+The harness skips files whose AST-level parity (L0) already
+fails: that divergence is a parser bug, not a back-end bug, and
+reporting it here would only drown the real signal. Skipped
+files go into `test/gate/cfg_phase_skip.txt` with a one-line
+reason and a bug-tracker reference.
+
+### How this section unblocks the rest of the spec
+
+C.1, C.2 and C.3 each ship with a corresponding addition to the
+phase-parity corpus:
+
+- C.1 lands `convert_pseudo_conditional_jumps`,
+  `calculate_stackdepth`, `prepare_localsplus`, and
+  `_PyCfg_OptimizedCfgToInstructionSequence`. Their L2 hooks fire
+  inside the section those functions own; the gate refuses to
+  flip the C.1 row green until the dumps for each of those four
+  new hook points match byte-for-byte.
+- C.2 ships `makecode`, `resolve_jump_offsets`,
+  `resolve_unconditional_jumps`, `assemble_emit`,
+  `assemble_emit_instr` as separate functions. Each emits its own
+  L3-equivalent dump (post-assemble bytecode + location table)
+  for the diff harness.
+- C.3's driver port lands the four-call sequence at the same
+  call sites as `Python/compile.c:1411`. The driver row only
+  flips after L4 (the byte-equality gate) goes green across the
+  full corpus.
+
+Because divergences localize to a phase, the work of fixing them
+also localizes: the port that emitted the wrong dump is the port
+to re-read against CPython, not the entire pipeline. That is the
+"port functions, do not patch" rule operationalized on the
+back-end.
 
 ## Phase C: port whole files
 
@@ -363,7 +530,10 @@ pass that produced them rather than to the substrate translation.
 ## Checklist
 
 - [x] A. Audit: function-by-function map for `flowgraph.c`, `assemble.c`, `optimize_and_assemble_code_unit`
-- [ ] B. State capture: cfg dump format + CPython side hook + `test/gate/cfg_phase_parity_test.go`
+- [x] B.0 gopy substrate: `DumpCfg` + `CfgPhaseHook` + tests
+- [ ] B.1 CPython patch: `test/cpython/patches/0001-cfg-phase-dump.patch` (un-`#if 0` dumpers, add `set_cfg_phase_hook`, fire macro at every phase)
+- [ ] B.2 CPython introspection wrappers: helpers around `_testinternalcapi.compiler_codegen` / `optimize_cfg` / `assemble_code_object` for L1/L3/L4 oracles
+- [ ] B.3 Diff harness: `test/gate/cfg_phase_parity_test.go` with `cfg_phase_corpus.txt` + `cfg_phase_skip.txt`, wired into the existing gate workflow
 - [ ] C.1. Finish `Python/flowgraph.c` (convert_pseudo_conditional_jumps, calculate_stackdepth graph version, prepare_localsplus + helpers, `_PyCfg_OptimizedCfgToInstructionSequence`)
 - [ ] C.2. Finish `Python/assemble.c` (split into makecode / jumps / emit files, every CPython function gets its own gopy function)
 - [ ] C.3. Port `optimize_and_assemble_code_unit` driver into `compile/compiler.go`
