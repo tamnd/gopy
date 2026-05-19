@@ -732,7 +732,7 @@ LOAD_FAST_CHECK shipped via spec 1716:
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P6.1 | `vm/frame_pool.go`: per-goroutine free list, capped at 20. Recycle frame + locals + stack slices; reset, not free. | TODO | - |
+| P6.1 | `frame/chunk.go`: extend the existing chunk arena so `Pop` recycles the `LocalsPlus` slice header on the chunk slot and the bottom chunk persists across pop-back-to-zero. The next `Push` then hits `Init`'s `cap(LocalsPlus) >= size` fast path and skips the `make`. CPython parity: `_PyThreadState_PopFrame` leaves the activation-record memory in the data stack for the next `_PyEvalFramePushAndInit`; `_PyStackChunk` is only freed at thread destruction. | DONE | (working tree) |
 | P6.2 | `LOAD_FAST_CHECK` codegen in `compile/flowgraph_cfg_locals.go:scanBlockForLocals` + eval arm in `vm/eval_dispatch_handwritten.go:opLOAD_FAST_CHECK`. | DONE (spec 1716) | - |
 | P6.3 | `LOAD_FAST_BORROW` / `STORE_FAST_STORE_FAST` (CPython 3.14 new opcodes that elide the incref pair). | TODO | - |
 | P6.4 | Args-tuple bypass: `CALL_PY_EXACT_ARGS` stores args directly into the callee's frame locals. | TODO | - |
@@ -743,6 +743,45 @@ LOAD_FAST_CHECK shipped via spec 1716:
 - `BenchmarkCallNop` shows 0 allocations on the hot path.
 
 **Estimated win.** 1.5x on call-heavy code (richards, deltablue).
+
+**Technical notes (P6.1 chunk LocalsPlus recycle).**
+
+- The chunk arena in `frame/chunk.go` already recycled the `*Frame`
+  slot, but the previous `Pop` wrote `s.current.frames[top] = Frame{}`
+  wholesale, which threw away the `LocalsPlus` slice header along
+  with the rest of the frame. The next `Push` at that slot saw a
+  zero-length slice and re-`make()`d the locals storage on every
+  call. The two-line fix: drop the wholesale overwrite on the
+  non-generator branch and let `f.Clear()` (which nils out
+  `Code/Globals/Builtins/Locals/Func/Previous` but leaves
+  `LocalsPlus` alone) prepare the slot. `Init` already has the
+  `cap(LocalsPlus) >= size` fast path that reuses the backing
+  array.
+- The OwnedByGenerator branch still wipes the slot wholesale
+  because the generator owns the storage after `Detach`. Sharing
+  the backing array between the live generator and the next
+  caller's frame would alias generator locals across calls. The
+  new `TestFrameStackGeneratorOwnedDropsLocalsPlus` locks that
+  invariant in.
+- The bottom chunk now stays attached when the call depth hits
+  zero. Before, `s.current = s.current.prev` set `s.current = nil`
+  whenever the only chunk emptied; that wiped the recycled
+  `LocalsPlus` storage on the very next `Push`. CPython's
+  `_PyStackChunk` is only freed at thread destruction (or explicit
+  shrink), and the same pop-to-zero-then-push pattern hits every
+  pyperformance benchmark that returns to module scope between
+  iterations. The `s.current.top == 0 && s.current.prev != nil`
+  guard mirrors the CPython "idle thread keeps its chunk" rule.
+- The Pop guard `s.current == nil || s.current.top == 0` was
+  tightened to cover the new state where the bottom chunk is
+  retained but empty. The pre-existing
+  `TestFrameStackPushPop` test pops one extra time as a no-op gate
+  and would have indexed `frames[-1]` without the guard.
+- New tests: `TestFrameStackLocalsPlusRecycled` (asserts both
+  `cap(LocalsPlus)` and `&LocalsPlus[0]` survive the round-trip),
+  `TestFrameStackGeneratorOwnedDropsLocalsPlus` (asserts the
+  generator path does not alias). Both pass; `frame/`, `vm/`,
+  `objects/`, `compile/` all green.
 
 ### P7. Type slot caching — `Objects/typeobject.c`
 
@@ -1429,7 +1468,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P3. PyLong fast path            | `Objects/longobject.c` | `objects/long_fast.go`    | 3x            | DONE (P3.1-P3.4; P3.5 deferred behind Int repr refactor) | `d9e16d2` |
 | P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | TODO   | -      |
 | P5. Dict open-addressing        | `Objects/dictobject.c` | `objects/dict.go` (extend) | 2x           | WIP (open-addressed layout already in tree, split-keys + watcher API + KnownHash gaps remain) | - |
-| P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `vm/frame_pool.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go` | 1.5x | WIP (P6.2 done via spec 1716; P6.1/P6.3/P6.4 open) | spec 1716 |
+| P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `frame/chunk.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go` | 1.5x | WIP (P6.1 chunk LocalsPlus recycle done; P6.2 done via spec 1716; P6.3/P6.4 open) | spec 1716, P6.1 this PR |
 | P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`, `objects/type_inherit.go`, `objects/type_watcher.go` | 1.5x | WIP (P7.0 watcher API, P7.2 inherit_slots, P7.3 version invalidation, P7.4 single-load dispatch done; P7.1/P7.5 open) | `e94cf31`, `2d82694`, `d71cf26`, P7.4 this PR |
 | P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-106` | unblock 2 N/A | DONE | `02f6c40` |
 | P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go`, `objects/float_format.go`, `objects/int_bind.go`, `objects/float.go` | unblock 1 N/A | DONE | `a5d25ea`, `5512f4f` |
@@ -1488,7 +1527,8 @@ nothing tells the specializer when a class attribute changes.
    (independent `objects/` work).
 7. **P4 kind tags + P15 unicode writer** ship together (writer's
    `Finish()` depends on kind detection).
-8. **P6.1 frame pool**, **P6.3 LOAD_FAST_BORROW / STORE_FAST_STORE_FAST**,
+8. **P6.1 chunk LocalsPlus recycle** (DONE on PR #74, see chunk-arena
+   notes under P6), **P6.3 LOAD_FAST_BORROW / STORE_FAST_STORE_FAST**,
    **P6.4 args-tuple bypass** in parallel.
 9. **P13 GC**, **P14 native modules** are bench-specific; pickle /
    xml / sqlite cannot run today so P14 is the priority among the

@@ -56,7 +56,7 @@ func (s *FrameStack) Push(co *objects.Code, globals, builtins, fn objects.Object
 //
 // CPython: Python/frame.c _PyThreadState_PopFrame
 func (s *FrameStack) Pop() {
-	if s.current == nil {
+	if s.current == nil || s.current.top == 0 {
 		return
 	}
 	s.current.top--
@@ -64,13 +64,37 @@ func (s *FrameStack) Pop() {
 	f := &s.current.frames[s.current.top]
 	if f.Owner == OwnedByGenerator {
 		// The frame's been handed off to a Generator object; the
-		// generator owns the storage now, so just unwire the slot.
+		// generator owns the storage now, including the LocalsPlus
+		// slice, so unwire the slot wholesale. The next Push at this
+		// slot will allocate fresh LocalsPlus.
 		s.current.frames[s.current.top] = Frame{}
 	} else {
+		// f.Clear() closes every live stackref and nils out Code /
+		// Globals / Builtins / Locals / Func / Previous, but leaves
+		// f.LocalsPlus alone. Init() on the next Push at this same
+		// slot then hits its `cap(LocalsPlus) >= size` fast path and
+		// recycles the slice instead of make()ing a new one. This is
+		// the gopy analogue of CPython's _PyThreadState_PopFrame
+		// leaving the activation-record memory in the data stack for
+		// the next _PyEvalFramePushAndInit to claim.
+		//
+		// CPython: Include/internal/pycore_frame.h _PyFrame_Initialize
+		// (recycles _PyInterpreterFrame slots in-place)
 		f.Clear()
-		s.current.frames[s.current.top] = Frame{}
 	}
-	if s.current.top == 0 {
+	// Drop a now-empty chunk only when there is an older chunk
+	// underneath it. The bottom chunk stays attached so its frame
+	// slots survive across a pop-back-to-zero cycle, mirroring
+	// CPython's data stack: even when the call depth hits zero
+	// the thread keeps its current PyStackChunk for the next
+	// _PyEvalFramePushAndInit. Without this, every benchmark that
+	// returns to the module-level scope and then re-enters a call
+	// would reallocate a fresh LocalsPlus slice.
+	//
+	// CPython: Include/internal/pycore_pystate.h _PyStackChunk
+	// (chunks are only freed at thread destruction or when explicitly
+	// shrunk; an idle thread keeps its current chunk).
+	if s.current.top == 0 && s.current.prev != nil {
 		s.current = s.current.prev
 	}
 }
