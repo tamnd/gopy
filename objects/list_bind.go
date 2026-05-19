@@ -14,22 +14,16 @@ import (
 func init() {
 	ListType.Getattro = GenericGetAttr
 
-	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
-		SetTypeDescr(ListType, name, NewMethodDescr(ListType, name, fn))
-	}
-	// bindO matches CPython's METH_O rows in list_methods. Tagging the
-	// descriptor with MethO lets specialize_method_descriptor emit
-	// CALL_METHOD_DESCRIPTOR_O / CALL_LIST_APPEND. The wrapper still
-	// receives args as a slice (self + arg) so the closure body is
-	// unchanged; only the specializer hint differs.
+	// bindConv tags the descriptor with the matching METH_* flag so
+	// specialize_method_descriptor picks the right CALL_METHOD_DESCRIPTOR_*
+	// arm. The wrapper closure still receives args as a slice (self
+	// followed by user args), so only the specializer hint differs.
 	//
-	// CPython: Objects/listobject.c:3308 list_methods (append / count / index / remove / insert / __contains__)
-	bindO := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
-		d := NewMethodDescrConv(ListType, name, MethO, fn)
+	// CPython: Objects/clinic/listobject.c.h list_methods table.
+	bindConv := func(name string, conv MethFlag, fn func(args []Object, kwargs map[string]Object) (Object, error)) *MethodDescr {
+		d := NewMethodDescrConv(ListType, name, conv, fn)
 		SetTypeDescr(ListType, name, d)
-		if name == "append" {
-			RegisterCallableCacheListAppend(d)
-		}
+		return d
 	}
 
 	// list.__repr__ slot wrapper. CPython exposes tp_repr via
@@ -39,21 +33,31 @@ func init() {
 	// dict/deque entries).
 	//
 	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
-	bind("__repr__", listReprMethod)
+	bindConv("__repr__", MethNoArgs, listReprMethod)
 
-	bindO("append", listAppendMethod)
-	bind("extend", listExtendMethod)
-	bind("insert", listInsertMethod)
-	bind("remove", listRemoveMethod)
-	bind("pop", listPopMethod)
-	bind("clear", listClearMethod)
-	bind("reverse", listReverseMethod)
-	bind("copy", listCopyMethod)
-	bind("index", listIndexMethod)
-	bind("count", listCountMethod)
-	bind("sort", listSortMethod)
-	bind("__len__", listLenMethod)
-	bind("__contains__", listContainsMethod)
+	// METH_O rows: append, extend, remove, count. append additionally
+	// gets registered into the callable cache so the specializer can
+	// emit CALL_LIST_APPEND on identity match.
+	appendDescr := bindConv("append", MethO, listAppendMethod)
+	RegisterCallableCacheListAppend(appendDescr)
+	bindConv("extend", MethO, listExtendMethod)
+	bindConv("remove", MethO, listRemoveMethod)
+	bindConv("count", MethO, listCountMethod)
+	bindConv("__contains__", MethO, listContainsMethod)
+
+	// METH_FASTCALL rows: insert (2 args), index (1-3 args), pop (0-1 args).
+	bindConv("insert", MethFastcall, listInsertMethod)
+	bindConv("index", MethFastcall, listIndexMethod)
+	bindConv("pop", MethFastcall, listPopMethod)
+
+	// METH_FASTCALL|METH_KEYWORDS: sort (kwargs key= / reverse=).
+	bindConv("sort", MethFastcall|MethKeywords, listSortMethod)
+
+	// METH_NOARGS rows: clear, reverse, copy, __len__.
+	bindConv("clear", MethNoArgs, listClearMethod)
+	bindConv("reverse", MethNoArgs, listReverseMethod)
+	bindConv("copy", MethNoArgs, listCopyMethod)
+	bindConv("__len__", MethNoArgs, listLenMethod)
 }
 
 func selfList(args []Object, name string) (*List, error) {
