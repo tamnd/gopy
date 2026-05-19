@@ -75,7 +75,6 @@ func TestPycParity(t *testing.T) {
 	}
 	stdlib := filepath.Join(root, "stdlib")
 	gopyEnv := append(os.Environ(), "GOPY_STDLIB="+stdlib)
-	smokeProbe(t, gopyBin, gopyEnv, files[0])
 	batchCompile(t, cpython, nil, files)
 	batchCompile(t, gopyBin, gopyEnv, files)
 
@@ -120,35 +119,6 @@ func batchCompile(t *testing.T, bin string, env, files []string) {
 				bin, len(chunk), err, out)
 		}
 	}
-}
-
-// smokeProbe runs a couple of trivial invocations of gopy and logs
-// their output so a silent exit-1 from gopy.exe on Windows surfaces
-// something we can read. It does not fail the test on smoke errors,
-// only on a follow-up batch failure. sample is one of the .py fixtures
-// the batch will see (post-copy path in tmp) so we can probe -m
-// py_compile against a real input.
-func smokeProbe(t *testing.T, bin string, env []string, sample string) {
-	t.Helper()
-	probes := [][]string{
-		{"--version"},
-		{"-c", "import sys; print(sys.platform)"},
-		{"-c", "import runpy; print('runpy ok')"},
-		{"-c", "import py_compile; print('py_compile ok')"},
-		{"-m", "py_compile", "--help"},
-		{"-c", "import py_compile; py_compile.compile(" + pyRepr(sample) + ", doraise=True); print('compile ok')"},
-		{"-m", "py_compile", sample},
-	}
-	for _, args := range probes {
-		cmd := exec.CommandContext(t.Context(), bin, args...)
-		cmd.Env = env
-		out, err := cmd.CombinedOutput()
-		t.Logf("smoke %s %v: err=%v len(out)=%d output=%q", bin, args, err, len(out), out)
-	}
-}
-
-func pyRepr(s string) string {
-	return "r'" + strings.ReplaceAll(s, "'", "\\'") + "'"
 }
 
 func tryCompile(t *testing.T, bin string, env, files []string) ([]byte, error) {
