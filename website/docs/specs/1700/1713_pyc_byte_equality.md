@@ -125,7 +125,7 @@ citations.
 | # | CPython file | gopy target | Why | 1716 status |
 |---|--------------|-------------|-----|-------------|
 | A | `Python/marshal.c` | `marshal/marshal.go`, `marshal/code.go`, `marshal/long.go` | The bytes the gate compares. Every TYPE_* tag, every TYPE_REF reuse decision, every short-vs-long-int encoding must match. | code present; audit pending (Phase 6) |
-| B | `Lib/importlib/_bootstrap_external.py` (pyc writer slice) | `stdlib/importlib/_bootstrap_external.py` (new) | 16-byte header layout + hash-based cache flow. | not present (Phase 7) |
+| B | `Lib/importlib/_bootstrap_external.py` (pyc writer slice) | `stdlib/importlib/_bootstrap_external.py` | 16-byte header layout + hash-based cache flow. | writer slice ported (859df19); reader/finder slice future work |
 | C | `Include/internal/pycore_magic_number.h` | `marshal/pyc.go` MagicNumber const | Single source of the version bump. | done (5dbfac9) |
 | D | `Objects/codeobject.c` (`_PyCode_New`, `intern_strings`, `intern_constants`, `_PyCode_ConstantKey`) | `objects/code.go` | co_consts / co_names ordering. | `_PyCode_ConstantKey` ported; `intern_strings` / `intern_constants` watch-item |
 | E | `Python/compile.c` (`compute_code_flags`, `dict_keys_inorder`, `consts_dict_keys_inorder`, `optimize_and_assemble_code_unit`) | `compile/compiler.go`, `compile/assemble_makecode.go` | Final stage before the assembler. | done via 1716 C.3 |
@@ -134,7 +134,8 @@ citations.
 | H | `Python/instruction_sequence.c` | `compile/instrseq.go` | Codegen → cfg bridge. | done via 1716 D |
 | I | `Python/assemble.c` | `compile/assemble*.go` | Exception table, location table, makecode. | done via 1708 + 1716 C.2 |
 | J | `Lib/dis.py` | `stdlib/dis.py` (vendor) | First-line debugging signal for divergence. | vendored; L0 gate green on 946 fixtures |
-| K | `Lib/py_compile.py` | `stdlib/py_compile.py` | The `gopy -m py_compile` driver. | stub only (Phase 7) |
+| K | `Lib/py_compile.py` | `stdlib/py_compile.py` | The `gopy -m py_compile` driver. | vendored 1:1 (859df19) |
+| L | `Python/import.c` (`_imp.source_hash`, `_imp.pyc_magic_number_token`) | `module/_imp/module.go` | Backs `_bootstrap_external.source_hash` and `MAGIC_NUMBER`. | done (859df19) |
 
 ## Phase index
 
@@ -149,7 +150,7 @@ at the bottom of this spec, mirrored per row here.
 | 4 | Code-object field-level parity. L4 gate dumps every observable field on the assembled Code object and diffs CPython vs gopy. | L4 field-parity gate | done via 1716 E | 6004c1c |
 | 5 | Assemble audit (exception table, code flags, stacksize). | L4 field-parity gate green | done via 1708 + 1716 C.2 | (multiple) |
 | 6 | Marshal port audit. 1:1 against `Python/marshal.c` writer + reader. TYPE_REF reuse table, int short/long encoding, float encoding, interning. Per-tag round-trip fixtures. | `marshal/parity_test.go` extended | TODO | - |
-| 7 | py_compile + importlib pyc writer. Vendor `Lib/py_compile.py`. Port `_code_to_timestamp_pyc` / `_code_to_hash_pyc` / `_classify_pyc` slice of `_bootstrap_external.py`. `gopy -m py_compile foo.py` produces a real `__pycache__/foo.cpython-314.pyc`. | `test/gate/pyc_parity_test.go` green on disdata | TODO | - |
+| 7 | py_compile + importlib pyc writer. Vendor `Lib/py_compile.py`. Port `_code_to_timestamp_pyc` / `_code_to_hash_pyc` / `_classify_pyc` slice of `_bootstrap_external.py`. `gopy -m py_compile foo.py` produces a real `__pycache__/foo.cpython-314.pyc`. | `test/gate/pyc_parity_test.go` green on disdata | writer slice ported; gate pending | 859df19 |
 | Gate | Byte-equality across the full vendored CPython corpus. | gate green on `test/cpython/Lib/` | TODO | - |
 
 ## Phase 1 — magic + marshal round-trip (done, 5dbfac9)
@@ -269,7 +270,7 @@ TYPE_UNICODE, decided by the string's `state.interned` flag).
 | TYPE_INTERNED vs TYPE_UNICODE fixture (interned reused name, non-interned literal) | TODO | - |
 | `marshal/parity_test.go` per-tag fixture matrix green | TODO | - |
 
-## Phase 7 — py_compile + importlib pyc writer (TODO, next PR)
+## Phase 7 — py_compile + importlib pyc writer (active on PR #72)
 
 The user-facing entry point. Drops the `stdlib/py_compile.py` stub,
 vendors `Lib/py_compile.py` 1:1, ports the writer/reader slice of
@@ -279,10 +280,13 @@ it cannot run until `gopy -m py_compile foo.py` produces a real `.pyc`.
 
 | Step | Status | Commit |
 |------|--------|--------|
-| Vendor `Lib/py_compile.py` 1:1 into `stdlib/py_compile.py` (replace the stub) | TODO | - |
-| Create `stdlib/importlib/_bootstrap_external.py` (currently absent) and port the writer slice (`_code_to_timestamp_pyc`, `_code_to_hash_pyc`, `_classify_pyc`, `_r_long`, `_w_long`, `_pack_uint32`, `source_hash`) | TODO | - |
-| Wire `gopy -m py_compile foo.py` so it writes `__pycache__/foo.cpython-314.pyc` | TODO | - |
-| Stand up `test/gate/pyc_parity_test.go` (self-skip on `GOPY_PATCHED_CPYTHON` unset + Windows) | TODO | - |
+| Fix `marshal.MagicNumber` byte order to match CPython `PYC_MAGIC_NUMBER_TOKEN` | done | d6eb31e |
+| Create `module/_imp` builtin: `source_hash`, `pyc_magic_number_token`, `check_hash_based_pycs` | done | 859df19 |
+| Create `stdlib/importlib/_bootstrap_external.py` and port the writer slice (`_pack_uint32`, `_unpack_uint*`, `_code_to_timestamp_pyc`, `_code_to_hash_pyc`, `_classify_pyc`, `_validate_timestamp_pyc`, `_validate_hash_pyc`, `_calc_mode`, `_write_atomic`, `source_hash`, `MAGIC_NUMBER`, `SourceFileLoader`) | done | 859df19 |
+| Drop stub `MAGIC_NUMBER` in `stdlib/importlib/util.py`; rewire to `_bootstrap_external` | done | 859df19 |
+| Vendor `Lib/py_compile.py` 1:1 into `stdlib/py_compile.py` (replace the stub) | done | 859df19 |
+| Wire `gopy -m py_compile foo.py` so it writes `<source>c` (or `__pycache__/foo.cpython-314.pyc` once cache path is implemented) | TODO | - |
+| Stand up `test/gate/pyc_parity_test.go` (self-skip when `python3.14` is missing) | TODO | - |
 | `test/gate/pyc_parity_corpus.txt` + `test/gate/pyc_parity_skip.txt` (start with disdata corpus subset) | TODO | - |
 | Byte-equality gate green on disdata 946-fixture corpus | TODO | - |
 | Byte-equality gate green on `test/cpython/Lib/` corpus | TODO | - |
