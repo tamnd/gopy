@@ -166,6 +166,8 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		return e.fastLoadSuperAttrMethod(oparg)
 	case compile.SEND_GEN:
 		return e.fastSendGen(oparg)
+	case compile.CALL_ALLOC_AND_ENTER_INIT:
+		return e.fastCallAllocAndEnterInit(oparg)
 	}
 	return next, ok, nil
 }

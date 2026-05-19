@@ -221,6 +221,25 @@ type Type struct {
 	//
 	// CPython: Include/cpython/object.h:234 tp_watched
 	tpWatched uint8
+
+	// specCacheInit mirrors PyHeapTypeObject._spec_cache.init: the
+	// __init__ Function pointer the adaptive specializer caches when
+	// it picks CALL_ALLOC_AND_ENTER_INIT for the class. The fast arm
+	// dereferences this directly instead of re-walking the MRO for
+	// "__init__" on every call. Cleared by InvalidateVersionTag along
+	// with specCacheInitVersion so a class mutation forces a re-cache.
+	//
+	// CPython: Include/internal/pycore_typeobject.h _spec_cache.init
+	specCacheInit *Function
+
+	// specCacheInitVersion mirrors PyHeapTypeObject._spec_cache.init_version:
+	// the tp_version_tag captured at the moment specCacheInit was
+	// stashed. The fast arm compares this against the live version
+	// tag in cache cells 2-3; mismatch deopts. Cleared with the
+	// version tag on type mutation.
+	//
+	// CPython: Include/internal/pycore_typeobject.h _spec_cache.init_version
+	specCacheInitVersion uint32
 }
 
 // Visitor is the visitproc shape passed to TpTraverse. CPython's

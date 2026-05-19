@@ -332,7 +332,7 @@ gate that backs it.
 | STORE_ATTR | 1/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (faithful 1-1 port of CPython's macro: validate type_version, write to cached `Instance.slots[idx]`) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`) | WIP — `INSTANCE_VALUE` and `WITH_HINT` deliberately deferred; they need a `Dict.SetValueAt(slot, value)` primitive that writes the entry's value cell without re-hashing the key, plus the managed-dict-offset modelling listed in P1.4a. Shipping them before that lands forces a shim that re-runs `SetItem(name, value)`, which is exactly the ad-hoc patch the ground rule forbids. | 96130ac |
 | SEND | 1/1 dispatch-level | `vm/eval_specialized_send_gen.go` — `fastSendGen` short-circuits the `execSend` type-switch with an identity check on `*Generator` / `*Coroutine` and forwards to `r.Send(v)`. Architectural ceiling: gopy generators run on a dedicated goroutine driven by `yieldCh` / `sendCh` channels, so the CPython `_SEND_GEN_FRAME` + `_PUSH_FRAME` "push gen's frame onto eval-stack, DISPATCH_INLINED into gen body" path has no analogue without retiring the goroutine-based design (tracked separately under P12). | `vm/eval_specialized_send_gen_test.go` (hit / StopIteration / wrong-type deopt / coroutine guard / surfacing non-StopIteration errors) | DONE — fast-arm dispatch | TBD |
 | LOAD_SUPER_ATTR | 2/2 | `vm/eval_specialized_load_super_attr.go` — `ATTR`, `METHOD`; backed by `objects.SuperLookup` with a `method_found` out-param mirroring CPython's `_PySuper_Lookup` | `vm/eval_specialized_load_super_attr_test.go` (hit / missing / non-super deopt / non-type deopt / method-found vs bound shape / oparg bit-0 assertions) | DONE | 2f09f55b |
-| CALL | 16/19 emitted | `vm/eval_specialized_call.go` + `vm/eval_specialized_call_builtin.go` — `PY_EXACT_ARGS`, `BOUND_METHOD_EXACT_ARGS`, `BUILTIN_O`, `BUILTIN_FAST`, `BUILTIN_FAST_WITH_KEYWORDS`, `LEN`, `ISINSTANCE`, `LIST_APPEND` (consumes trailing POP_TOP via SKIP_OVER), `TYPE_1`, `STR_1`, `TUPLE_1`, `BUILTIN_CLASS`, `METHOD_DESCRIPTOR_O`, `METHOD_DESCRIPTOR_FAST`, `METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS`, `METHOD_DESCRIPTOR_NOARGS` | `vm/eval_specialized_call_test.go`, `vm/eval_specialized_call_builtin_test.go` (one hit + identity/Conv-mismatch deopt assertion per arm) | WIP — generic `PY_GENERAL` / `BOUND_METHOD_GENERAL` / `NON_PY_GENERAL` arms fall through to the adaptive parent body (no fast path needed: CPython's bodies for those are themselves the generic call). `ALLOC_AND_ENTER_INIT` deferred. | 39ba997f |
+| CALL | 17/19 emitted | `vm/eval_specialized_call.go` + `vm/eval_specialized_call_builtin.go` + `vm/eval_specialized_call_alloc_init.go` — `PY_EXACT_ARGS`, `BOUND_METHOD_EXACT_ARGS`, `BUILTIN_O`, `BUILTIN_FAST`, `BUILTIN_FAST_WITH_KEYWORDS`, `LEN`, `ISINSTANCE`, `LIST_APPEND` (consumes trailing POP_TOP via SKIP_OVER), `TYPE_1`, `STR_1`, `TUPLE_1`, `BUILTIN_CLASS`, `METHOD_DESCRIPTOR_O`, `METHOD_DESCRIPTOR_FAST`, `METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS`, `METHOD_DESCRIPTOR_NOARGS`, `ALLOC_AND_ENTER_INIT` (stamps init pointer + version into `Type._spec_cache`; fast arm validates cache cell version vs live tp_version_tag, allocates via `NewInstance`, pushes init frame, folds the `_Py_InitCleanup` shim's EXIT_INIT_CHECK None-validation into the arm because Go-level `Eval()` returns directly without a DISPATCH_INLINED hop) | `vm/eval_specialized_call_test.go`, `vm/eval_specialized_call_builtin_test.go`, `vm/eval_specialized_call_alloc_init_test.go` (hit / one-arg hit / non-None TypeError / non-Type deopt / version-miss deopt / argcount-mismatch deopt) | WIP — generic `PY_GENERAL` / `BOUND_METHOD_GENERAL` / `NON_PY_GENERAL` arms fall through to the adaptive parent body (no fast path needed: CPython's bodies for those are themselves the generic call). | 39ba997f, TBD |
 
 **Technical notes (P1.6 watcher install at specialize.Enable).**
 
@@ -733,13 +733,6 @@ gate that backs it.
    classes whose construction has to go through the generic
    `type_call` path (which gopy spells `t.New` + `t.Init`).
 7. **Deferred work and why.**
-   - `CALL_ALLOC_AND_ENTER_INIT` (the 20th CALL variant) needs the
-     SIMPLE_FUNCTION-shape `init` cache: stash a pointer to `__init__`
-     and its expected arity at type construction time, then bypass
-     both `tp_new` AND `tp_init` lookups at call time. gopy's
-     `Instance.New` / `Instance.Init` interface needs a flag bit per
-     type to mark "init-cached" before the arm can stamp anything
-     meaningful.
    - `list.remove` / `count` / `index` / `__contains__` are still
      `MethVarargs`. Flipping them to `MethO` is a one-line change
      per row, but the wrappers were written assuming `args[1]` is
@@ -747,8 +740,6 @@ gate that backs it.
      audit needs to confirm none of them call `self.checkArgs(args, 1, 1)`
      or similar arity-validation helpers that assume the varargs entry
      convention.
-   - `SEND_GEN` is the next CALL-family follow-up that benefits
-     similarly (generator frame push/pop), tracked under P1.4b SEND.
 8. **Why the test file lives at vm/eval_specialized_call_builtin_test.go,
    not specialize/.** The arms execute under `vm.evalState`, and
    stamping a specialized opcode at the bytecode level requires
@@ -762,6 +753,161 @@ gate that backs it.
    it builds custom bytecode that includes the trailing `POP_TOP` +
    `LOAD_CONST None` + `RETURN_VALUE` so the arm's SKIP_OVER advance
    has a target to land on without falling off the codestream.
+
+**Technical notes (P1.4b CALL_ALLOC_AND_ENTER_INIT fast arm + init cache).**
+
+1. **CPython's macro composition.**
+   `Python/bytecodes.c:4186` defines
+   `CALL_ALLOC_AND_ENTER_INIT = unused/1 + _CHECK_PEP_523 + _CHECK_AND_ALLOCATE_OBJECT + _CREATE_INIT_FRAME + _PUSH_FRAME`.
+   `_CHECK_AND_ALLOCATE_OBJECT` (`Python/bytecodes.c:4137`) DEOPTs
+   when `self_or_null` is non-null (only direct class calls qualify;
+   bound-method shape goes elsewhere), validates the cached
+   `tp_version_tag` against cells 2..3, loads `init` from
+   `cls->_spec_cache.init`, allocates the instance via
+   `PyType_GenericAlloc(cls, 0)`, and rewrites the stack window
+   `(cls, NULL, args...)` into `(init, self, args...)`.
+   `_CREATE_INIT_FRAME` (`Python/bytecodes.c:4161`) pushes a 2-op
+   shim frame running `_Py_InitCleanup` (which is
+   `EXIT_INIT_CHECK + RETURN_VALUE`) plus a real Python frame for
+   `init`. `_PUSH_FRAME` then `DISPATCH_INLINED`s into the init body.
+   On init return, the shim frame's `EXIT_INIT_CHECK`
+   (`Python/bytecodes.c:4193`) validates the return is None
+   (raising `TypeError("__init__() should return None, not ...")`
+   otherwise) and `RETURN_VALUE` pushes the cached self back to the
+   caller.
+
+2. **Why gopy folds the shim into the fast arm.**
+   gopy's `Eval()` is a Go function returning `(Object, error)`,
+   not a C `goto`-driven dispatch loop. When `fastCallAllocAndEnterInit`
+   calls `Eval(e.ts, f2)` for the init body it gets the return
+   value back directly, so the `_Py_InitCleanup` shim is
+   architecturally redundant: there is no separate bytecode-level
+   PC the init frame returns to. The fast arm validates
+   `objects.IsNone(out)` immediately after Eval and surfaces the
+   same `TypeError` message CPython's `EXIT_INIT_CHECK` would raise.
+   This is not a shim under the ground rule: the observable
+   behaviour (instance pushed on success, TypeError with that exact
+   message on non-None return) is preserved 1:1 with CPython's
+   opcode. The two-frame setup is purely a control-flow artifact of
+   CPython's tier-1 dispatch shape.
+
+3. **Where the init cache lives.**
+   CPython packs `init` and `init_version` into the
+   `_specialization_cache` substructure on `PyHeapTypeObject`
+   (`Include/internal/pycore_typeobject.h _spec_cache`). gopy mirrors
+   it as two `*objects.Type` fields: `specCacheInit *Function` and
+   `specCacheInitVersion uint32`, populated by
+   `CacheInitForSpecialization(init)` which atomically grabs the
+   current `VersionTag()` and stamps both. `SpecCacheInit()` /
+   `SpecCacheInitVersion()` are the readers the fast arm consults.
+   Storing the resolved `*Function` directly (rather than a
+   re-lookup-by-name flag bit) means the fast arm skips MRO walk
+   AND the descriptor binding step, matching the spirit of
+   CPython's pointer-stash.
+
+4. **Three-layer version-tag check.**
+   The arm validates the version tag at three levels before
+   committing to the allocation:
+   - `liveVer := cls.VersionTag()` rejects `0` because that means
+     `_PyType_AssignVersionTag` could not allocate (counter
+     wraparound or watcher refused) and CPython's
+     `_CHECK_AND_ALLOCATE_OBJECT` treats that case as DEOPT.
+   - `liveVer == cachedVer` (cells 2..3) rejects when the type
+     was modified between specialize and dispatch (any
+     `PyType_Modified` zeroes the tag and the next read allocates
+     a fresh non-matching value).
+   - `liveVer == cls.SpecCacheInitVersion()` rejects when the
+     cache's stamp went stale (defensive: the prior check should
+     already catch this since both versions are bumped together,
+     but CPython's `_CHECK_AND_ALLOCATE_OBJECT` checks both fields
+     too and mismatches between them indicate cache corruption).
+   `InvalidateVersionTag()` was extended to clear
+   `specCacheInit = nil` + `specCacheInitVersion = 0` so a
+   `STORE_ATTR` on the class (or any other type-mutation path that
+   goes through `PyType_Modified`) automatically poisons the cache
+   the next specialization will repopulate.
+
+5. **Runtime argcount validation.**
+   The specializer fires `CALL_ALLOC_AND_ENTER_INIT` for the
+   observed `nargs` at stamp time (carried in the CALL opcode's
+   oparg), but the cached `init` function carries its own
+   `co.Argcount`. A call site that stays the same opcode but
+   changes its oparg between stamp and dispatch (e.g. the
+   specializer fired on a one-arg call and the same site now hits
+   with two args after a refactor) would otherwise corrupt
+   `LocalsPlus`. The arm guards on `co.Argcount == argc + 1` (the
+   `+1` is the implicit self) and deopts on mismatch. This is the
+   one runtime check that has no direct CPython analogue because
+   CPython's `_CHECK_AND_ALLOCATE_OBJECT` runs the same arity
+   check implicitly via the frame-build step inside
+   `_CREATE_INIT_FRAME`; gopy lifts it earlier so the deopt is
+   clean before we touch the frame stack.
+
+6. **SIMPLE_FUNCTION classification.**
+   `isSimpleFunction` in `specialize/call.go` mirrors CPython's
+   `Python/specialize.c:1785 function_kind` filter to SIMPLE: the
+   init must have `CO_OPTIMIZED` set and zero `*args` / `**kwargs`
+   / kwonly parameters. CPython enforces this so the cached
+   pointer can be invoked through the fixed-arity fast-frame
+   builder; gopy enforces it for the same reason, because the
+   `f2.SetLocal(i+1, ...)` loop in the fast arm assumes a flat
+   positional layout. `lookupInitFunction` filters
+   `LookupDescriptor(tp, "__init__")` to `*Function` (declining to
+   stamp when the descriptor resolves to a method-descriptor or
+   wrapped slot), matching the `PyFunction_Check` filter on
+   `_PyType_LookupRefAndVersion` in `specialize_class_call`.
+
+7. **TpNew == nil is gopy's `tp_new == object.__new__`.**
+   CPython requires `tp_new == object.__new__` so the allocation
+   path is the generic one. gopy's user heap types leave
+   `TpNew == nil` whenever no `__new__` is defined in the class
+   body (the metaclass path inherits the default), so the
+   `tp.TpNew == nil` guard in `specializeClassCall` is the exact
+   equivalent. The allocation itself runs through
+   `objects.NewInstance(cls)` which is gopy's `PyType_GenericAlloc`
+   analogue.
+
+8. **Frame stack push/pop discipline.**
+   `frameStackFor(e.ts).Push(co, init.Globals, init.Builtins, init, nil)`
+   matches `CALL_PY_EXACT_ARGS`'s frame-build pattern: the new frame
+   takes the init function's `co_globals` / `co_builtins`, the
+   `*Function` pointer as the function attribute, and a nil parent
+   slot (because Eval will wire f2.Back to the current frame).
+   `stack.Pop()` runs in BOTH the success and error branches; an
+   earlier draft only popped on success and surfaced a leaked
+   frame when the test that intentionally returned non-None ran in
+   sequence with the next test. The `(int, bool, error)` return
+   contract makes the dispatcher distinguish "fast arm took the
+   dispatch and produced result" from "guard miss, deopt" — the
+   non-None error case is `(0, true, err)` so the dispatcher knows
+   not to re-run the generic body.
+
+9. **Stack layout on entry and exit.**
+   Entry: `[..., cls, NULL, arg0, ..., arg(argc-1)]` with TOS at
+   `arg(argc-1)`, so `peek(argc)` is the NULL self-slot and
+   `peek(argc+1)` is `cls`. The arm drops `argc + 2` entries (cls,
+   NULL, all args) and pushes the freshly-allocated instance.
+   `cacheAdvance(compile.CALL)` advances the InstrPtr past the
+   CALL plus its 3 inline-cache codeunits, exactly the same stride
+   the generic CALL body uses.
+
+10. **Test coverage.**
+    `vm/eval_specialized_call_alloc_init_test.go` exercises six
+    paths: (1) zero-arg init hit, returns a fresh `*Instance` of
+    the expected type; (2) one-positional-arg init hit, propagates
+    the argument through `SetLocal(1, ...)`; (3) init that returns
+    a non-None value raises `TypeError: __init__() should return
+    None, not '...'` with the actual return-value type in the
+    message; (4) non-`*Type` callable deopts cleanly (the generic
+    CALL body runs and produces the expected 42 sentinel); (5)
+    `InvalidateVersionTag()` between stamp and dispatch forces a
+    deopt, the slow path still produces a working `*Instance`;
+    (6) argcount mismatch (specialized for one arg, called with
+    two) deopts and the slow path raises the standard
+    `TypeError: __init__() takes 2 positional arguments but 3 were
+    given` from `Instance.Init`. All six pass; broader
+    `go test ./vm ./specialize ./objects ./compile -count=1`
+    stays green.
 
 **Gate.**
 
@@ -2114,11 +2260,16 @@ nothing tells the specializer when a class attribute changes.
    Cache layout: type_version in cells 2..3, `func_version` cells
    left zero (gopy has no per-function version, type_version
    invalidation alone covers freshness), cached `*Function`
-   pointer in `CacheObjects[instr]`. Remaining P1.4 work: ship
-   the SEND fast arm (gated on generator-frame push/pop the VM
-   does not yet expose) and close the P1.4a CALL gap (8 builtin
-   variants + `CALL_TYPE_1`/`STR_1`/`TUPLE_1` need METH_* calling-
-   convention flags on `BuiltinFunction`).
+   pointer in `CacheObjects[instr]`. SEND_GEN landed as a
+   dispatch-level fast arm (the goroutine-channel generator
+   design rules out the CPython frame-push inlining; see
+   technical-notes block). CALL_ALLOC_AND_ENTER_INIT landed by
+   stashing `(*Function, version)` into `Type._spec_cache` and
+   folding the `_Py_InitCleanup` EXIT_INIT_CHECK None-validation
+   into the fast arm directly (Go-level `Eval()` returns
+   without a DISPATCH_INLINED hop). Remaining P1.4 work: the
+   FOR_ITER_GEN variant shares the SEND_GEN ceiling (waits on
+   P12 generator redesign).
 4. **P1.5 marshal persistence** so `.pyc` files retain the warm
    specializer state across runs.
 5. **P2.1 open the JIT gate** (`interp.JIT = true`); validate

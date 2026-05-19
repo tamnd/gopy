@@ -229,11 +229,63 @@ func specializeClassCall(tp *objects.Type, code []byte, instr int, oparg, nargs 
 		Specialize(code, instr, compile.CALL_BUILTIN_CLASS)
 		return
 	}
-	// User class: CPython only specializes the
-	// CALL_ALLOC_AND_ENTER_INIT path when tp_new is object.__new__
-	// and __init__ is a SIMPLE_FUNCTION. gopy does not yet wire the
-	// init-cache machinery so we fall through to the generic arm.
+	// User class: CPython picks CALL_ALLOC_AND_ENTER_INIT when tp_new
+	// is object.__new__ (gopy: TpNew == nil on a user heap class),
+	// tp_alloc is the generic allocator (gopy: NewInstance), and
+	// __init__ is a SIMPLE_FUNCTION (CO_OPTIMIZED, no *args/**kwargs/
+	// kwonly). The init pointer + matching tp_version_tag get stashed
+	// in the type's spec cache; the fast arm consumes both.
+	//
+	// CPython: Python/specialize.c:1965 specialize_class_call
+	if tp.TpNew == nil {
+		if init := lookupInitFunction(tp); init != nil && isSimpleFunction(init) {
+			version, ok := tp.CacheInitForSpecialization(init)
+			if ok {
+				callCacheAt(code, instr).setFuncVersion(version)
+				Specialize(code, instr, compile.CALL_ALLOC_AND_ENTER_INIT)
+				return
+			}
+		}
+	}
 	Specialize(code, instr, compile.CALL_NON_PY_GENERAL)
+}
+
+// lookupInitFunction walks tp's MRO looking for `__init__`, returning
+// it only when it resolves to a Python `Function` (not a builtin,
+// method-descriptor, or wrapped slot). The CALL_ALLOC_AND_ENTER_INIT
+// fast arm needs a Function to push a frame against.
+//
+// CPython: Python/specialize.c:1950 _PyType_LookupRefAndVersion
+// (filtered down to PyFunction_Check)
+func lookupInitFunction(tp *objects.Type) *objects.Function {
+	descr, _ := objects.LookupDescriptor(tp, "__init__")
+	if descr == nil {
+		return nil
+	}
+	fn, ok := descr.(*objects.Function)
+	if !ok {
+		return nil
+	}
+	return fn
+}
+
+// isSimpleFunction mirrors CPython's SIMPLE_FUNCTION classification:
+// CO_OPTIMIZED set, and no *args / **kwargs / kwonly parameters. The
+// init cache only fires for classes whose __init__ obeys this shape.
+//
+// CPython: Python/specialize.c:1785 function_kind
+func isSimpleFunction(fn *objects.Function) bool {
+	if fn.Code == nil {
+		return false
+	}
+	flags := uint32(fn.Code.Flags)
+	if flags&(compile.CoVarargs|compile.CoVarkeywords) != 0 || fn.Code.KwonlyArgcount != 0 {
+		return false
+	}
+	if flags&compile.CoOptimized == 0 {
+		return false
+	}
+	return true
 }
 
 func boolToInt32(b bool) int32 {
