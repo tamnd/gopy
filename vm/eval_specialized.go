@@ -120,6 +120,12 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		return e.fastCallPyExactArgs(oparg)
 	case compile.CALL_BOUND_METHOD_EXACT_ARGS:
 		return e.fastCallBoundMethodExactArgs(oparg)
+	case compile.FOR_ITER_LIST:
+		next, ok = e.fastForIterList(oparg)
+	case compile.FOR_ITER_TUPLE:
+		next, ok = e.fastForIterTuple(oparg)
+	case compile.FOR_ITER_RANGE:
+		next, ok = e.fastForIterRange(oparg)
 	}
 	return next, ok, nil
 }

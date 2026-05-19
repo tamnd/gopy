@@ -487,3 +487,27 @@ func listIter(o Object) (Object, error) {
 	it.init(listIterType)
 	return it, nil
 }
+
+// ListIterNextFast advances o as a list_iterator without going through
+// the type-table tp_iternext indirection. Returns the next value, or
+// (nil, true) on exhaustion. ok=false means o was not exactly a
+// list_iterator and the FOR_ITER_LIST fast arm must deopt.
+//
+// On exhaustion the function nulls it.src so a re-entered FOR_ITER on
+// the dead iterator releases its grip on the source list, mirroring
+// CPython's `it->it_seq = NULL; Py_DECREF(seq);` in _ITER_JUMP_LIST.
+//
+// CPython: Python/bytecodes.c _ITER_CHECK_LIST + _ITER_JUMP_LIST + _ITER_NEXT_LIST
+func ListIterNextFast(o Object) (value Object, exhausted bool, ok bool) {
+	it, asserted := o.(*listIterator)
+	if !asserted || it.Type() != listIterType {
+		return nil, false, false
+	}
+	if it.src == nil || it.pos >= len(it.src.items) {
+		it.src = nil
+		return nil, true, true
+	}
+	v := it.src.items[it.pos]
+	it.pos++
+	return v, false, true
+}

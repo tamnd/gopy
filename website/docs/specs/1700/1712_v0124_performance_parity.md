@@ -327,7 +327,7 @@ gate that backs it.
 | UNPACK_SEQUENCE | 3/3 | `vm/eval_specialized.go` — `TWO_TUPLE`, `TUPLE`, `LIST` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | STORE_SUBSCR | 2/2 | `vm/eval_specialized.go` — `LIST_INT`, `DICT` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | BINARY_OP | 13/13 non-JIT | `vm/eval_specialized_binary_op.go` — `ADD_INT`, `SUBTRACT_INT`, `MULTIPLY_INT` (math/bits overflow guard); `ADD_FLOAT`, `SUBTRACT_FLOAT`, `MULTIPLY_FLOAT`; `ADD_UNICODE` shared with `INPLACE_ADD_UNICODE`; `SUBSCR_LIST_INT`, `SUBSCR_TUPLE_INT`, `SUBSCR_STR_INT` (ASCII fast path), `SUBSCR_DICT`, `SUBSCR_LIST_SLICE` | `specialize/gatedata/spec_binary_op.py` (`TestGateSpecBinaryOp`) | DONE | 6a8aace |
-| FOR_ITER | 0/4 | — | — | TODO — needs typed `Next` helpers on `objects.{listIterator,tupleIterator,rangeIterator}` so the arm can skip the `IterNext` slot lookup | - |
+| FOR_ITER | 3/4 | `vm/eval_specialized_for_iter.go` — `LIST`, `TUPLE`, `RANGE`; typed `Next` helpers in `objects/list.go::ListIterNextFast`, `objects/tuple.go::TupleIterNextFast`, `objects/range_iter.go::RangeIterNextFast` skip the `tp_iternext` slot lookup | `vm/eval_specialized_for_iter_test.go` (hit / exhaustion / wrong-type deopt per family) | WIP — `GEN` deferred: it needs the generator-frame push/pop path the VM does not yet expose; dispatch loop falls through to the generic FOR_ITER body for `FOR_ITER_GEN` until that lands | (this commit) |
 | LOAD_GLOBAL | 2/2 | `vm/eval_specialized_load_global.go` — `MODULE`, `BUILTIN` | `specialize/gatedata/spec_load_global.py` (`TestGateSpecLoadGlobal`) | DONE | 2f1f603 |
 | STORE_ATTR | 1/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (faithful 1-1 port of CPython's macro: validate type_version, write to cached `Instance.slots[idx]`) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`) | WIP — `INSTANCE_VALUE` and `WITH_HINT` deliberately deferred; they need a `Dict.SetValueAt(slot, value)` primitive that writes the entry's value cell without re-hashing the key, plus the managed-dict-offset modelling listed in P1.4a. Shipping them before that lands forces a shim that re-runs `SetItem(name, value)`, which is exactly the ad-hoc patch the ground rule forbids. | 96130ac |
 | SEND | 0/1 | — | — | TODO — depends on generator-frame plumbing | - |
@@ -380,6 +380,52 @@ gate that backs it.
    idempotent on the stamp: a second call with a different dict leaves the
    first one in place, because module-specific builtins must not steal the
    slot the canonical dict already occupies.
+
+**Technical notes (P1.4b FOR_ITER fast arms).**
+
+1. CPython's `macro(FOR_ITER_LIST)` / `FOR_ITER_TUPLE` / `FOR_ITER_RANGE`
+   (`Python/bytecodes.c:3349` / `:3412` / `:3462`) decompose into three
+   uops: `_ITER_CHECK_<x>` (type guard), `_ITER_JUMP_<x>` (exhaustion +
+   `JUMPBY(oparg+1)`), `_ITER_NEXT_<x>` (advance, push value). gopy folds
+   the three uops into one helper per family
+   (`objects.ListIterNextFast`, `TupleIterNextFast`, `RangeIterNextFast`)
+   that returns `(value, exhausted, ok)`: `ok=false` means type guard
+   failed (caller deopts), `exhausted=true` means the iterator drained
+   (caller does `JUMPBY(oparg+1)`), otherwise `value` is the next item.
+2. **Iterator zeroing on exhaustion.** CPython's `_ITER_JUMP_LIST` and
+   `_ITER_JUMP_TUPLE` clear `it->it_seq` and Py_DECREF the source on
+   exhaustion (so a re-entered FOR_ITER on the dead iterator returns
+   StopIteration without re-walking the source). gopy mirrors this by
+   setting `it.src = nil` on exhaustion in `ListIterNextFast` /
+   `TupleIterNextFast`. The range iterator does not hold a source ref so
+   the equivalent is moot.
+3. **`forIterJump` helper.** The naive call was
+   `e.jumpBy(int(oparg) + 1)`, but `e.jumpBy` resolves stride via
+   `e.advance()`, which reads `opcodeCaches[byte at InstrPtr]`. That
+   table only carries the base opcodes (mirroring CPython's
+   `_PyOpcode_Caches`), so on a specialized variant byte
+   (`FOR_ITER_LIST` etc.) the lookup returns 0 and undercounts the
+   stride by 2 bytes. `forIterJump(oparg)` instead anchors on
+   `cacheAdvance(compile.FOR_ITER)`, which always passes the parent op
+   and gets the correct 4-byte stride. The hit path already does this
+   correctly via `cacheAdvance(compile.FOR_ITER)`.
+4. **Range allocation parity.** gopy's `range_iterator` carries a
+   `*big.Int` triple (`cur`, `stop`, `step`) unified across CPython's
+   short and long range types. The fast arm still allocates a fresh
+   `*Int` per iteration (`NewIntFromBig(&it.cur.v)`) plus the next
+   `cur` because the gopy `Int` representation does not pack small ints
+   inline. The win is purely from skipping the `tp_iternext` table
+   dispatch and the `range_iterator` type check; closing the
+   allocation gap would require a small-int pool in `objects/int.go`
+   (tracked separately under P3 PyLong fast path).
+5. **FOR_ITER_GEN deferred.** The `GEN` variant requires a generator
+   frame push/pop in the dispatch loop that gopy does not yet expose;
+   the dispatcher falls through to the generic FOR_ITER body for
+   `FOR_ITER_GEN`, which works because `Deopt(FOR_ITER_GEN) == FOR_ITER`
+   already routes it through the generic IterNext path. Closing this
+   needs the SEND fast arm (P1.4b TODO line) to land first, since
+   FOR_ITER_GEN's `_ITER_NEXT_GEN` body is structurally identical to
+   the SEND_GEN body.
 
 **Gate.**
 
@@ -1694,7 +1740,10 @@ nothing tells the specializer when a class attribute changes.
    (`METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`,
    `METHOD_LAZY_DICT`, `GETATTRIBUTE_OVERRIDDEN`) once
    `Py_TPFLAGS_INLINE_VALUES` modelling lands; then ship the
-   FOR_ITER / SEND / LOAD_SUPER_ATTR / CALL dispatch arms (P1.4b).
+   remaining FOR_ITER / SEND / LOAD_SUPER_ATTR / CALL dispatch
+   arms (P1.4b). FOR_ITER `LIST`/`TUPLE`/`RANGE` shipped with the
+   typed `Next` helpers; `GEN` waits on the SEND generator-frame
+   path (see P1.4b sub-table + technical-notes block).
 4. **P1.5 marshal persistence** so `.pyc` files retain the warm
    specializer state across runs.
 5. **P2.1 open the JIT gate** (`interp.JIT = true`); validate
