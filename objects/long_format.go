@@ -4,12 +4,46 @@
 // glues the IntType.Format slot to it, plus the float-spec coercion
 // branch CPython takes for 'e'/'E'/'f'/'F'/'g'/'G'/'%' types.
 //
+// Findings worth noting for future readers (the things that took the
+// longest to track down):
+//
+//  1. IntType.Format and BoolType.Format had no wiring, so any
+//     non-empty spec hit objectFormatDescr's TypeError fallback. That
+//     alone was enough to break json.encoder at import time, since
+//     ESCAPE_DCT initializes via '\\u{0:04x}'.format(i). The format/
+//     package already shipped a complete CPython-equivalent
+//     mini-language parser and integer renderer; the only missing
+//     piece was attaching them to the type.
+//
+//  2. CPython "inherits" the Format slot for bool via tp_base =
+//     PyLong_Type plus inherit_slots walking the base chain. gopy's
+//     type machinery does not walk the base chain for built-in Format
+//     slots, so the wiring has to be explicit. Setting
+//     BoolType.Format = intFormat mirrors what inherit_slots would
+//     have produced.
+//
+//  3. The 'e'/'E'/'f'/'F'/'g'/'G'/'%' branch matches CPython's
+//     format_long_internal: it promotes the int through
+//     PyNumber_Float and dispatches to the float renderer. We mirror
+//     that via bigIntToFloat64 + format.FormatFloat. This is how
+//     '{:.2g}'.format(255) -> '2.6e+02' is supposed to come out, even
+//     though the input was an int.
+//
+//  4. PyLong_AsDouble's overflow semantics: raise OverflowError when
+//     the magnitude exceeds float64 range. big.Float.Float64()
+//     returns +/-Inf for out-of-range values, so we test for Inf and
+//     turn it into the same OverflowError CPython raises. The
+//     big.Float Accuracy flag is *not* a reliable overflow signal: it
+//     is also set Above/Below for ordinary rounding, so checking it
+//     here would false-positive on every non-representable integer.
+//
 // CPython: Python/formatter_unicode.c:1589 _PyLong_FormatAdvancedWriter
 
 package objects
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/tamnd/gopy/format"
@@ -76,10 +110,14 @@ func bigIntFromIntLike(o Object) (*big.Int, error) {
 // bigIntToFloat64 mirrors PyLong_AsDouble: convert v to a Go double,
 // raising OverflowError if the magnitude exceeds float64 range. CPython
 // matches this with a dedicated mantissa-extract loop; big.Float gives
-// us the same rounding semantics with one allocation.
+// us the same rounding semantics with one allocation, and big.Float's
+// accuracy flag signals whether the result was clamped to +/-Inf.
 //
 // CPython: Objects/longobject.c:3038 PyLong_AsDouble
 func bigIntToFloat64(v *big.Int) (float64, error) {
 	f, _ := new(big.Float).SetInt(v).Float64()
+	if math.IsInf(f, 0) {
+		return 0, fmt.Errorf("OverflowError: int too large to convert to float")
+	}
 	return f, nil
 }

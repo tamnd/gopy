@@ -67,6 +67,13 @@ func init() {
 }
 
 // floatReprDescr is the slot wrapper for float.__repr__ / float.__str__.
+// Required for the same reason as intReprDescr: json.encoder captures
+// `_floatstr=float.__repr__` as a default parameter, so the attribute
+// has to resolve to the digit-emitting routine, not object.__repr__.
+// FloatType.Repr already implements the runtime slot; this descriptor
+// is what makes the bound-method lookup return a real callable. Once
+// the add_operators slot-wrapper generation in #647 ships, this manual
+// wiring goes away alongside intReprDescr.
 //
 // CPython: Objects/floatobject.c:357 float_repr
 func floatReprDescr(args []Object, _ map[string]Object) (Object, error) {

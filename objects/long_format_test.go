@@ -106,8 +106,8 @@ func TestBoolFormatInheritsIntSlot(t *testing.T) {
 }
 
 // TestIntFormatJSONEscapeDct reproduces the import-time failure from
-// stdlib/json/encoder.py:31. ESCAPE_DCT initialises with
-// '\\u{0:04x}'.format(i) for each control char; before P9 this raised
+// stdlib/json/encoder.py:31. ESCAPE_DCT initializes with
+// '\\u{0:04x}'.format(i) for each control char. Before P9 this raised
 // `TypeError: unsupported format string passed to int.__format__` and
 // kept `import json` from completing.
 //

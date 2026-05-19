@@ -42,6 +42,18 @@ func init() {
 // `_intstr=int.__repr__` default, would inherit object.__repr__ and emit
 // `<int object at 0x...>` instead of the decimal digit string.
 //
+// Why this is needed even though IntType.Repr already exists in Go:
+// IntType.Repr is the runtime slot the interpreter uses for builtins like
+// repr(x) or implicit str(x); it does not show up in the type's __dict__.
+// Python code that uses bound-method lookup such as
+// `int.__repr__(123)` or captures the attribute as a default parameter
+// (json.encoder's `_intstr=int.__repr__`) needs an actual descriptor on
+// the type. CPython's add_operators emits this descriptor automatically
+// from slotdefs; gopy does not run that loop yet (task #647), so the
+// two slots have to be installed manually for the types that
+// pyperformance and the stdlib reach for. Same pattern as
+// float.__repr__ / __str__ in objects/float.go.
+//
 // CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __repr__)
 // CPython: Objects/longobject.c:1762 long_repr
 func intReprDescr(args []Object, _ map[string]Object) (Object, error) {

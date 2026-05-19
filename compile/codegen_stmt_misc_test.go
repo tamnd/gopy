@@ -71,15 +71,15 @@ func TestAugAssignSubscriptEmitsCopyCopyBinarySwapSwapStore(t *testing.T) {
 	}
 	u := compileMod(t, module(a))
 	want := []string{
-		"LOAD_NAME",   // x
-		"LOAD_CONST",  // 0
-		"COPY",        // 2
-		"COPY",        // 2
-		"BINARY_OP",   // NB_SUBSCR
-		"LOAD_CONST",  // 1
-		"BINARY_OP",   // NB_INPLACE_SUBTRACT
-		"SWAP",        // 3
-		"SWAP",        // 2
+		"LOAD_NAME",  // x
+		"LOAD_CONST", // 0
+		"COPY",       // 2
+		"COPY",       // 2
+		"BINARY_OP",  // NB_SUBSCR
+		"LOAD_CONST", // 1
+		"BINARY_OP",  // NB_INPLACE_SUBTRACT
+		"SWAP",       // 3
+		"SWAP",       // 2
 		"STORE_SUBSCR",
 		"LOAD_CONST",
 		"RETURN_VALUE",
