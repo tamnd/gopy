@@ -73,8 +73,10 @@ func TestPycParity(t *testing.T) {
 	for i, f := range batch {
 		files[i] = f.dst
 	}
-	batchCompile(t, cpython, files)
-	batchCompile(t, gopyBin, files)
+	stdlib := filepath.Join(root, "stdlib")
+	gopyEnv := append(os.Environ(), "GOPY_STDLIB="+stdlib)
+	batchCompile(t, cpython, nil, files)
+	batchCompile(t, gopyBin, gopyEnv, files)
 
 	cacheDir := filepath.Join(tmp, "__pycache__")
 	for _, rel := range corpus {
@@ -96,15 +98,19 @@ func TestPycParity(t *testing.T) {
 // entry, so we still pay interpreter startup only a handful of times
 // per side instead of once per fixture. When a chunk fails we bisect
 // to locate a single failing fixture in O(log N) interpreter starts
-// instead of O(N), then fail loudly with its name and stderr.
-func batchCompile(t *testing.T, bin string, files []string) {
+// instead of O(N), then fail loudly with its name and stderr. The env
+// argument is passed verbatim to the child (use nil to inherit); the
+// gopy invocation needs GOPY_STDLIB so the spawned binary doesn't have
+// to discover the repo stdlib by walking the cwd (which is unreliable
+// on Windows where the test's tempdir lives on a different drive).
+func batchCompile(t *testing.T, bin string, env, files []string) {
 	t.Helper()
 	if len(files) == 0 {
 		return
 	}
 	for _, chunk := range chunkForCmdline(files, 24000) {
-		if out, err := tryCompile(t, bin, chunk); err != nil {
-			bad, badOut, badErr := bisectCompile(t, bin, chunk)
+		if out, err := tryCompile(t, bin, env, chunk); err != nil {
+			bad, badOut, badErr := bisectCompile(t, bin, env, chunk)
 			if bad != "" {
 				t.Fatalf("%s -m py_compile %s: %v\noutput:\n%s\n(batch of %d failed: %v\nbatch output:\n%s)",
 					bin, bad, badErr, badOut, len(chunk), err, out)
@@ -115,10 +121,11 @@ func batchCompile(t *testing.T, bin string, files []string) {
 	}
 }
 
-func tryCompile(t *testing.T, bin string, files []string) ([]byte, error) {
+func tryCompile(t *testing.T, bin string, env, files []string) ([]byte, error) {
 	t.Helper()
 	args := append([]string{"-m", "py_compile"}, files...)
 	cmd := exec.CommandContext(t.Context(), bin, args...)
+	cmd.Env = env
 	return cmd.CombinedOutput()
 }
 
@@ -127,16 +134,16 @@ func tryCompile(t *testing.T, bin string, files []string) ([]byte, error) {
 // path plus its captured output and error, or ("", nil, nil) if every
 // fixture passes in isolation (an env-level batch failure with no
 // per-file culprit).
-func bisectCompile(t *testing.T, bin string, files []string) (string, []byte, error) {
+func bisectCompile(t *testing.T, bin string, env, files []string) (string, []byte, error) {
 	t.Helper()
 	for len(files) > 1 {
 		mid := len(files) / 2
 		left, right := files[:mid], files[mid:]
-		if _, err := tryCompile(t, bin, left); err != nil {
+		if _, err := tryCompile(t, bin, env, left); err != nil {
 			files = left
 			continue
 		}
-		if _, err := tryCompile(t, bin, right); err != nil {
+		if _, err := tryCompile(t, bin, env, right); err != nil {
 			files = right
 			continue
 		}
@@ -145,7 +152,7 @@ func bisectCompile(t *testing.T, bin string, files []string) (string, []byte, er
 	if len(files) == 0 {
 		return "", nil, nil
 	}
-	out, err := tryCompile(t, bin, files)
+	out, err := tryCompile(t, bin, env, files)
 	if err == nil {
 		return "", nil, nil
 	}
