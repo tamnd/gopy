@@ -226,6 +226,12 @@ import (
 	// CPython: Modules/_posixsubprocess.c:1333 _posixsubprocessmodule
 	_ "github.com/tamnd/gopy/module/_posixsubprocess"
 
+	// Built-in module: _winapi. Registers itself via module/_winapi/
+	// module.go init(). Exposes the integer constants stdlib/shutil.py
+	// and stdlib/subprocess.py import at module top level on Windows.
+	// CPython: Modules/_winapi.c:3023 _winapi_exec
+	_ "github.com/tamnd/gopy/module/_winapi"
+
 	// Built-in module: _hashlib. Registers itself via
 	// module/_hashlib/module.go init(). Backs Lib/hashlib.py with the
 	// HASH object type and openssl_* convenience constructors using
