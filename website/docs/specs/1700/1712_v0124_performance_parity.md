@@ -738,18 +738,24 @@ SWAP 3                ; restore stack: ..., new_val, container, index
 STORE_SUBSCR
 ```
 
-gopy is likely missing the `COPY 2` / `SWAP 3` pair, so the second
-operand on STORE_SUBSCR's stack-effect slot is the loaded int, not
-the saved container.
+**Diff captured 2026-05-19.** CPython emits `SWAP 3 / SWAP 2 / STORE_SUBSCR`;
+gopy emitted `SWAP 3 / STORE_SUBSCR`. The missing `SWAP 2` left the
+stack as `[..., new_value, index, container]` instead of
+`[..., new_value, container, index]`, so STORE_SUBSCR's TOS (the
+container slot) saw the index integer and raised TypeError. Fix:
+add `c.addOpI(SWAP, 2, targetLoc)` between SWAP 3 and STORE_SUBSCR
+in `visitAugAssign`'s Subscript arm. Mirrors
+`Python/codegen.c:5409-5411 codegen_augassign Subscript_kind`. The
+Attribute arm was already correct (`SWAP 2 / STORE_ATTR`).
 
 **Phases.**
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P8.1 | Capture gopy `dis` output for the reproducer; diff against cpython 3.14. Land the diff in `compile/augassign_test.go::TestStoreSubscrSequence`. | TODO | - |
-| P8.2 | Fix the lowering in `compile/codegen.go` (Subscript LHS in augmented context). | TODO | - |
-| P8.3 | Extend the test matrix: augmented STORE_SUBSCR with all bound-context flavors (nested unpack, dict.get returns, comprehension target). | TODO | - |
-| P8.4 | Same audit for augmented `STORE_ATTR` (`obj.attr -= rhs`). | TODO | - |
+| P8.1 | Capture gopy `dis` output for the reproducer; diff against cpython 3.14. Land the diff in `compile/codegen_stmt_misc_test.go::TestAugAssignSubscriptEmitsCopyCopyBinarySwapSwapStore`. | DONE | (this PR) |
+| P8.2 | Fix the lowering in `compile/codegen_stmt_misc.go` (Subscript LHS in augmented context). Add missing `SWAP 2`. | DONE | (this PR) |
+| P8.3 | Extend the test matrix: augmented STORE_SUBSCR with nested unpack, dict subscript, list element, attribute aug, function-returned container, all BINARY_OP flavors, deep attribute target. Runtime suite in `compile/codegen_stmt_misc_test.go`. | DONE | (this PR) |
+| P8.4 | Audit augmented `STORE_ATTR` (`obj.attr -= rhs`). Already correct: `COPY 1 / LOAD_ATTR / ... / SWAP 2 / STORE_ATTR`. Test `TestAugAssignAttributeEmitsCopyLoadBinarySwapStore` locks it in. | DONE | (this PR) |
 
 **Gate.** `nbody`, `fannkuch` run to completion under `bin/gopy`;
 both show up with real numbers in the small-subset table.
@@ -1058,7 +1064,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P5. Dict open-addressing        | `Objects/dictobject.c` | `objects/dict.go` (extend) | 2x           | WIP (open-addressed layout already in tree, split-keys + watcher API + KnownHash gaps remain) | - |
 | P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `vm/frame_pool.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go` | 1.5x | WIP (P6.2 done via spec 1716; P6.1/P6.3/P6.4 open) | spec 1716 |
 | P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`   | 1.5x          | TODO   | -      |
-| P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-105` | unblock 2 N/A | TODO | - |
+| P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-106` | unblock 2 N/A | DONE | (this PR) |
 | P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go` | unblock 1 N/A | TODO | - |
 | P10. Float fast path            | `Objects/floatobject.c` | `objects/float_pool.go`  | 2.5x          | TODO   | -      |
 | P11. CFG optimizer + peephole   | `Python/flowgraph.c`   | `compile/flowgraph_cfg_passes.go` | 1.1x | DONE (spec 1716) | 9d7d9f0, 37563f5 |

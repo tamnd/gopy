@@ -101,6 +101,7 @@ func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
 		}
 		c.addOpI(BINARY_OP, op, loc(s))
 		c.addOpI(SWAP, 3, targetLoc)
+		c.addOpI(SWAP, 2, targetLoc)
 		c.addOp(STORE_SUBSCR, targetLoc)
 		return nil
 	}
