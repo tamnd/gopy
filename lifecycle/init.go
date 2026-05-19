@@ -170,5 +170,10 @@ func initInterpMain(tstate *state.Thread) initconfig.Status {
 	if status := pathconfig.Resolve(cfg); status.IsException() {
 		return status
 	}
+	// CPython: Python/pylifecycle.c:1325-1352 init_interp_main reads
+	// $PYTHON_JIT here so the tier-2 gate is open before any user
+	// code runs. gopy only flips the main-interp gate; sub-interpreters
+	// inherit interp.JIT=false until v0.13 lands.
+	ApplyJITEnv(tstate.Interp())
 	return initconfig.StatusOk()
 }

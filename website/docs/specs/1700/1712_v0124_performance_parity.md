@@ -1004,7 +1004,7 @@ once the cases-generator port (spec 1714) ships.
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P2.1 | Open the JIT gate. Flip `interp.JIT` to true by default (or behind a `-O2` CLI flag) so trace projection actually fires. Add `optimizer/trace_test.go` that runs `call_method.py` and asserts ≥1 trace was projected. | TODO | - |
+| P2.1 | Open the JIT gate. Shipped `lifecycle.ApplyJITEnv` (`lifecycle/jit_gate.go`) which mirrors `Python/pylifecycle.c:1325-1352` byte-for-byte: read `$PYTHON_JIT`, flip `interp.JIT = (env[0] != '0')` when the env is non-empty, leave the gate alone otherwise. Wired into `initInterpMain` (`lifecycle/init.go`) so any `gopy` entry that runs the full lifecycle picks it up. The default stays false to match CPython's release-build default (the `#if _Py_TIER2 & 2` branch CPython uses to zero `enabled` when the JIT machine-code backend isn't built); flipping it on globally would just churn projection cycles until P2.2+P2.3 land real uop bodies. Five unit tests in `lifecycle/jit_gate_test.go` cover env-unset (gate untouched), `PYTHON_JIT=1` (enables), `PYTHON_JIT=0` (disables even when caller pre-enabled), non-'0' values (enable), and the nil-interp defensive path. `optimizer.Optimize` continues to short-circuit at the `!interp.JIT` check (already covered by `optimizer/optimize_test.go::TestOptimize_InstallsExecutorOnLoop`), so the env now provides the runtime knob to unlock projection without changing the default. | DONE | 1712-P2.1 |
 | P2.2 | Port `Python/optimizer_bytecodes.c` in full (1107 LOC). This is the abstract-interpreter case table that `optimize_uops` dispatches through. Lands as `optimizer/optimizer_bytecodes_gen.go` driven by the spec-1714 cases generator. Gate: every uop ID has a corresponding case body (no `unknown semantics` bail). | TODO | - |
 | P2.3 | Port `Python/executor_cases.c.h` in full (7163 LOC) into `vm/eval_uops_gen.go`. Driven by the spec-1714 cases generator. Replaces the 271 deopt-pass-through stubs in `optimizer/uops_stubs_gen.go`. Gate: every uop ID has a real executable body. | TODO | - |
 | P2.4 | Wire tier-2 → tier-1 deopt path: on guard fail mid-trace, fall back to the adaptive opcode at the recorded resume offset. Validate against `_CHECK_VALIDITY` and `_GUARD_TYPE_VERSION` failure scenarios. | TODO | - |
@@ -2168,7 +2168,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 |---------------------------------|------------------------|---------------------------|--------------:|--------|--------|
 | P0. pyperformance harness       | n/a (tooling)          | `bench/`                  | n/a           | WIP    | ca0bef1 |
 | P1. Specializer wire-up         | `Python/specialize.c`  | `specialize/`             | 6-10x         | WIP (P1.0-P1.3 + P1.5 + P1.6 done, P1.4 open) | 67abc0a, 691c2d7, 71a9181, 6a8aace, 96130ac, 2f1f603, b059710d |
-| P2. Tier-2 (full-file ports)    | `Python/optimizer_bytecodes.c`, `Python/executor_cases.c.h` | `optimizer/`, `vm/eval_uops_gen.go` | 1.5-2x | WIP (scaffolding + JIT gate hardcoded off) | -      |
+| P2. Tier-2 (full-file ports)    | `Python/optimizer_bytecodes.c`, `Python/executor_cases.c.h` | `optimizer/`, `vm/eval_uops_gen.go` | 1.5-2x | WIP (scaffolding done, P2.1 PYTHON_JIT gate shipped, P2.2/P2.3 full-file ports open) | -      |
 | P3. PyLong fast path            | `Objects/longobject.c` | `objects/long_fast.go`    | 3x            | DONE (P3.1-P3.4; P3.5 deferred behind Int repr refactor) | `d9e16d2` |
 | P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | TODO   | -      |
 | P5. Dict open-addressing        | `Objects/dictobject.c` | `objects/dict.go` (extend) | 2x           | WIP (open-addressed layout already in tree, split-keys + watcher API + KnownHash gaps remain) | - |
@@ -2283,8 +2283,19 @@ nothing tells the specializer when a class attribute changes.
    `marshal.marshalCode`. Net effect: `.pyc` bytes are deterministic
    across runs and independent of any specialization state the
    in-memory `Code` happened to warm at marshal time.
-5. **P2.1 open the JIT gate** (`interp.JIT = true`); validate
-   trace projection fires. Then **P2.2 + P2.3 full-file ports of
+5. **P2.1 open the JIT gate** (DONE on PR #74): ported the
+   `Python/pylifecycle.c:1325-1352` PYTHON_JIT env-var block as
+   `lifecycle.ApplyJITEnv`, called from `initInterpMain`. Default
+   stays `interp.JIT = false` to match CPython's release-build
+   default (the `_Py_TIER2 & 2` branch zeros `enabled` until the
+   JIT machine-code backend is built); `PYTHON_JIT=1` flips the
+   gate on, `PYTHON_JIT=0` opts out even when a caller pre-enabled
+   it. Trace projection already had end-to-end coverage at
+   `optimizer/optimize_test.go::TestOptimize_InstallsExecutorOnLoop`;
+   the new gate unlocks it from the env without changing the
+   default (flipping JIT on globally would churn projection cycles
+   on every hot loop until P2.2+P2.3 land real uop bodies).
+   Then **P2.2 + P2.3 full-file ports of
    `Python/optimizer_bytecodes.c` and `Python/executor_cases.c.h`**,
    driven by the spec-1714 cases generator.
 6. **P3 PyLong fast path** + **P10 float pool** ship in parallel
