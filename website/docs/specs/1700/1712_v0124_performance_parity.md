@@ -330,7 +330,7 @@ gate that backs it.
 | FOR_ITER | 3/4 | `vm/eval_specialized_for_iter.go` — `LIST`, `TUPLE`, `RANGE`; typed `Next` helpers in `objects/list.go::ListIterNextFast`, `objects/tuple.go::TupleIterNextFast`, `objects/range_iter.go::RangeIterNextFast` skip the `tp_iternext` slot lookup | `vm/eval_specialized_for_iter_test.go` (hit / exhaustion / wrong-type deopt per family) | WIP — `GEN` deferred: it needs the generator-frame push/pop path the VM does not yet expose; dispatch loop falls through to the generic FOR_ITER body for `FOR_ITER_GEN` until that lands | 44786dc4 |
 | LOAD_GLOBAL | 2/2 | `vm/eval_specialized_load_global.go` — `MODULE`, `BUILTIN` | `specialize/gatedata/spec_load_global.py` (`TestGateSpecLoadGlobal`) | DONE | 2f1f603 |
 | STORE_ATTR | 1/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (faithful 1-1 port of CPython's macro: validate type_version, write to cached `Instance.slots[idx]`) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`) | WIP — `INSTANCE_VALUE` and `WITH_HINT` deliberately deferred; they need a `Dict.SetValueAt(slot, value)` primitive that writes the entry's value cell without re-hashing the key, plus the managed-dict-offset modelling listed in P1.4a. Shipping them before that lands forces a shim that re-runs `SetItem(name, value)`, which is exactly the ad-hoc patch the ground rule forbids. | 96130ac |
-| SEND | 0/1 | — | — | TODO — depends on generator-frame plumbing | - |
+| SEND | 1/1 dispatch-level | `vm/eval_specialized_send_gen.go` — `fastSendGen` short-circuits the `execSend` type-switch with an identity check on `*Generator` / `*Coroutine` and forwards to `r.Send(v)`. Architectural ceiling: gopy generators run on a dedicated goroutine driven by `yieldCh` / `sendCh` channels, so the CPython `_SEND_GEN_FRAME` + `_PUSH_FRAME` "push gen's frame onto eval-stack, DISPATCH_INLINED into gen body" path has no analogue without retiring the goroutine-based design (tracked separately under P12). | `vm/eval_specialized_send_gen_test.go` (hit / StopIteration / wrong-type deopt / coroutine guard / surfacing non-StopIteration errors) | DONE — fast-arm dispatch | TBD |
 | LOAD_SUPER_ATTR | 2/2 | `vm/eval_specialized_load_super_attr.go` — `ATTR`, `METHOD`; backed by `objects.SuperLookup` with a `method_found` out-param mirroring CPython's `_PySuper_Lookup` | `vm/eval_specialized_load_super_attr_test.go` (hit / missing / non-super deopt / non-type deopt / method-found vs bound shape / oparg bit-0 assertions) | DONE | 2f09f55b |
 | CALL | 16/19 emitted | `vm/eval_specialized_call.go` + `vm/eval_specialized_call_builtin.go` — `PY_EXACT_ARGS`, `BOUND_METHOD_EXACT_ARGS`, `BUILTIN_O`, `BUILTIN_FAST`, `BUILTIN_FAST_WITH_KEYWORDS`, `LEN`, `ISINSTANCE`, `LIST_APPEND` (consumes trailing POP_TOP via SKIP_OVER), `TYPE_1`, `STR_1`, `TUPLE_1`, `BUILTIN_CLASS`, `METHOD_DESCRIPTOR_O`, `METHOD_DESCRIPTOR_FAST`, `METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS`, `METHOD_DESCRIPTOR_NOARGS` | `vm/eval_specialized_call_test.go`, `vm/eval_specialized_call_builtin_test.go` (one hit + identity/Conv-mismatch deopt assertion per arm) | WIP — generic `PY_GENERAL` / `BOUND_METHOD_GENERAL` / `NON_PY_GENERAL` arms fall through to the adaptive parent body (no fast path needed: CPython's bodies for those are themselves the generic call). `ALLOC_AND_ENTER_INIT` deferred. | 39ba997f |
 
@@ -418,14 +418,81 @@ gate that backs it.
    dispatch and the `range_iterator` type check; closing the
    allocation gap would require a small-int pool in `objects/int.go`
    (tracked separately under P3 PyLong fast path).
-5. **FOR_ITER_GEN deferred.** The `GEN` variant requires a generator
-   frame push/pop in the dispatch loop that gopy does not yet expose;
-   the dispatcher falls through to the generic FOR_ITER body for
-   `FOR_ITER_GEN`, which works because `Deopt(FOR_ITER_GEN) == FOR_ITER`
-   already routes it through the generic IterNext path. Closing this
-   needs the SEND fast arm (P1.4b TODO line) to land first, since
-   FOR_ITER_GEN's `_ITER_NEXT_GEN` body is structurally identical to
-   the SEND_GEN body.
+5. **FOR_ITER_GEN deferred.** The `GEN` variant has the same
+   architectural ceiling as `SEND_GEN`: CPython pushes the gen's
+   interpreter frame onto the host eval-stack and runs the gen body
+   inline via `DISPATCH_INLINED`. gopy's generators run on a separate
+   goroutine with channel-mediated `yieldCh` / `sendCh`, so frame-push
+   inlining is structurally unreachable. The dispatcher falls through
+   to the generic FOR_ITER body for `FOR_ITER_GEN`, which works
+   because `Deopt(FOR_ITER_GEN) == FOR_ITER` already routes it through
+   the generic IterNext path. Closing the remaining headroom requires
+   retiring the goroutine-based generator design in favor of
+   frame-stack pushing (tracked separately under P12). The SEND_GEN
+   dispatch-level fast arm (next block) is the analogue of what we
+   can ship without that retire.
+
+**Technical notes (P1.4b SEND_GEN fast arm + architectural ceiling).**
+
+1. **CPython's SEND_GEN macro composition.**
+   `Python/bytecodes.c:1364` defines
+   `SEND_GEN = unused/1 + _CHECK_PEP_523 + _SEND_GEN_FRAME + _PUSH_FRAME`.
+   `_SEND_GEN_FRAME` (`Python/bytecodes.c:1348`) pushes `v` onto the
+   generator's interpreter frame via `_PyFrame_StackPush`, flips the
+   gen's `gi_frame_state` to `FRAME_EXECUTING`, links
+   `gen->gi_exc_state.previous_item = tstate->exc_info`, and stashes
+   `frame->return_offset` so YIELD_VALUE knows where to resume the
+   caller. `_PUSH_FRAME` then `DISPATCH_INLINED(gen_frame)` so the
+   generator's bytecode body runs in the SAME Tier-1 dispatch loop:
+   one switch-table evaluation, no goroutine, no channel hop, no
+   thread-state swap.
+2. **Why gopy can't replicate that inline-dispatch path.**
+   `vm/eval_gen.go:execReturnGenerator` materializes generators with
+   `go func() { ... }()`: the generator body runs on a dedicated
+   goroutine, yields via `yieldCh <- GenMsg`, and blocks on `<-sendCh`
+   until the host frame's SEND pushes a value through. Pushing the
+   gen's frame onto the host evalState's value-stack would race with
+   that goroutine's reads/writes against the same LocalsPlus and
+   InstrPtr. The channel coordination IS the mechanism that keeps
+   the two contexts coherent; bypassing it would require deleting
+   the goroutine entirely.
+3. **What the fast arm does ship.**
+   `fastSendGen` in `vm/eval_specialized_send_gen.go` is a
+   dispatch-level optimization: it skips the type-switch in
+   `execSend` (`vm/eval_gen.go:270`) by identity-checking
+   `*Generator` / `*Coroutine` at the head, then calls `r.Send(v)`
+   directly. That's the only legitimate fast path the goroutine
+   design permits. Per-call savings are small (one Go type-switch
+   step) compared to CPython's gen-frame inlining, but the arm still
+   matches CPython's pattern of "trust the specializer's type guard
+   and skip the generic body's redispatch."
+4. **Stride anchoring.**
+   `cacheAdvance(compile.SEND) + 2*int(oparg)` is the StopIteration
+   jump target. The straightforward `e.jumpBy(int(oparg) + 1)` is
+   wrong on the fast path because `e.advance()` reads the opcode
+   byte at InstrPtr — which is `SEND_GEN` after stamping — and
+   `opcodeCaches[SEND_GEN] == 0` undercounts the stride by one
+   codeunit. Same wart as `forIterJump` in
+   `vm/eval_specialized_for_iter.go`; same fix.
+5. **Coroutine guard.**
+   `specialize/send.go:25` picks SEND_GEN when receiver is either
+   `IsGenerator` OR `IsCoroutine`; the fast arm therefore accepts
+   both in the type switch. CPython's `_SEND_GEN_FRAME` has the
+   matching DEOPT_IF on `Py_TYPE(gen) != &PyGen_Type && Py_TYPE(gen)
+   != &PyCoro_Type`. AsyncGenerator is NOT in this set (specializer
+   declines to stamp; fast arm declines via the default case).
+6. **Architectural ceiling, quantified.**
+   The remaining win between gopy's dispatch-level fast arm and
+   CPython's frame-push inlining is the goroutine roundtrip per
+   yield: two unbuffered channel sends (host -> sendCh, gen ->
+   yieldCh) plus two scheduler ticks. For a tight generator loop
+   that yields 10K times this is ~20K-30K goroutine context
+   switches per call site; tier-1 CPython does zero. Closing this
+   requires the P12 generator redesign — retiring the goroutine in
+   favor of a frame-stack representation that the host eval loop
+   pushes onto its own evalState. That retire is out of scope for
+   P1.4b but unblocks FOR_ITER_GEN, the rest of `gi_exc_state`
+   linkage, and bound-method gen send patterns. Tracked separately.
 
 **Technical notes (P1.4b LOAD_SUPER_ATTR fast arms).**
 

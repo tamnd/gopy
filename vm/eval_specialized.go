@@ -164,6 +164,8 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		return e.fastLoadSuperAttrAttr(oparg)
 	case compile.LOAD_SUPER_ATTR_METHOD:
 		return e.fastLoadSuperAttrMethod(oparg)
+	case compile.SEND_GEN:
+		return e.fastSendGen(oparg)
 	}
 	return next, ok, nil
 }
