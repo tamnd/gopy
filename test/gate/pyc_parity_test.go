@@ -94,32 +94,62 @@ func TestPycParity(t *testing.T) {
 // Windows' CreateProcess limit (~32 KiB). py_compile.main accepts an
 // arbitrary file list and compiles each into its own __pycache__
 // entry, so we still pay interpreter startup only a handful of times
-// per side instead of once per fixture. When a chunk fails we retry
-// per-file so the failing fixture (and its actual stderr) end up in
-// the test output instead of an opaque "exit status 1".
+// per side instead of once per fixture. When a chunk fails we bisect
+// to locate a single failing fixture in O(log N) interpreter starts
+// instead of O(N), then fail loudly with its name and stderr.
 func batchCompile(t *testing.T, bin string, files []string) {
 	t.Helper()
 	if len(files) == 0 {
 		return
 	}
 	for _, chunk := range chunkForCmdline(files, 24000) {
-		args := append([]string{"-m", "py_compile"}, chunk...)
-		cmd := exec.CommandContext(t.Context(), bin, args...)
-		out, err := cmd.CombinedOutput()
-		if err == nil {
+		if out, err := tryCompile(t, bin, chunk); err != nil {
+			bad, badOut, badErr := bisectCompile(t, bin, chunk)
+			if bad != "" {
+				t.Fatalf("%s -m py_compile %s: %v\noutput:\n%s\n(batch of %d failed: %v\nbatch output:\n%s)",
+					bin, bad, badErr, badOut, len(chunk), err, out)
+			}
+			t.Fatalf("%s -m py_compile <%d files>: batch failed (%v) but every file passed in isolation\noutput:\n%s",
+				bin, len(chunk), err, out)
+		}
+	}
+}
+
+func tryCompile(t *testing.T, bin string, files []string) ([]byte, error) {
+	t.Helper()
+	args := append([]string{"-m", "py_compile"}, files...)
+	cmd := exec.CommandContext(t.Context(), bin, args...)
+	return cmd.CombinedOutput()
+}
+
+// bisectCompile narrows a failing chunk down to a single fixture by
+// halving until the remaining slice is one file. Returns the file
+// path plus its captured output and error, or ("", nil, nil) if every
+// fixture passes in isolation (an env-level batch failure with no
+// per-file culprit).
+func bisectCompile(t *testing.T, bin string, files []string) (string, []byte, error) {
+	t.Helper()
+	for len(files) > 1 {
+		mid := len(files) / 2
+		left, right := files[:mid], files[mid:]
+		if _, err := tryCompile(t, bin, left); err != nil {
+			files = left
 			continue
 		}
-		for _, file := range chunk {
-			one := exec.CommandContext(t.Context(), bin, "-m", "py_compile", file)
-			oneOut, oneErr := one.CombinedOutput()
-			if oneErr != nil {
-				t.Fatalf("%s -m py_compile %s: %v\noutput:\n%s\n(batch error: %v, batch output:\n%s)",
-					bin, file, oneErr, oneOut, err, out)
-			}
+		if _, err := tryCompile(t, bin, right); err != nil {
+			files = right
+			continue
 		}
-		t.Fatalf("%s -m py_compile <%d files>: batch failed (%v) but every file passed in isolation\noutput:\n%s",
-			bin, len(chunk), err, out)
+		return "", nil, nil
 	}
+	if len(files) == 0 {
+		return "", nil, nil
+	}
+	out, err := tryCompile(t, bin, files)
+	if err == nil {
+		return "", nil, nil
+	}
+	return files[0], out, err
 }
 
 // chunkForCmdline groups paths so the joined command line stays below
