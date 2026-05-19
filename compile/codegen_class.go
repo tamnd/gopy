@@ -161,7 +161,12 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	outerCaches := c.savedCaches()
 
 	c.enterScope(innerScope)
-	c.addOpI(RESUME, 0, loc(s))
+	// RESUME loc = LOCATION(firstlineno, firstlineno, 0, 0); CPython
+	// drops the def-stmt's columns on the class-entry RESUME.
+	//
+	// CPython: Python/codegen.c:654 codegen_enter_scope
+	first := c.unit().FirstLineno
+	c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
 
 	// MAKE_CELL for __class__ (when needs_class_closure) is inserted by
 	// the cfg pipeline's prepare_localsplus; codegen does not emit it

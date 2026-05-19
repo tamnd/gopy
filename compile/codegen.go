@@ -168,17 +168,19 @@ func (c *Compiler) Codegen(sc *symtable.Entry, mod ast.Mod) (*Unit, error) {
 	c.enterScope(sc)
 	defer c.leaveScope()
 
-	// Module scope opens with RESUME RESUME_AT_FUNC_START at line 0,
-	// matching CPython's codegen_enter_scope: every scope entry emits
-	// the prologue, and COMPILE_SCOPE_MODULE forces loc.lineno = 0 so
-	// the dis output prints `0 RESUME 0` ahead of the body. Function,
-	// class, and comprehension scopes emit their own RESUME at their
-	// own enterScope call sites.
+	// Module scope opens with RESUME RESUME_AT_FUNC_START. CPython
+	// builds loc = LOCATION(lineno, lineno, 0, 0) where lineno is the
+	// scope's firstlineno (1 for the toplevel module), then for
+	// COMPILE_SCOPE_MODULE overrides loc.lineno to 0 so dis prints
+	// `0 RESUME 0` ahead of the body. The override leaves end_lineno
+	// at firstlineno, which is what the long-form location entry on
+	// the linetable encodes (line_delta=-1, end_line_delta=1, ...).
 	//
 	// CPython: Python/codegen.c:647 codegen_enter_scope (the
 	// ADDOP_I(c, loc, RESUME, RESUME_AT_FUNC_START) after
 	// _PyCompile_EnterScope, with loc.lineno = 0 for module scope).
-	c.addOpI(RESUME, resumeAtFuncStart, ast.Pos{Lineno: 0})
+	resumeLoc := ast.Pos{Lineno: 0, EndLineno: c.unit().FirstLineno, ColOffset: 0, EndColOffset: 0}
+	c.addOpI(RESUME, resumeAtFuncStart, resumeLoc)
 
 	switch m := mod.(type) {
 	case *ast.Module:
@@ -207,6 +209,8 @@ func (c *Compiler) Codegen(sc *symtable.Entry, mod ast.Mod) (*Unit, error) {
 // per-scope caches. Mirrors codegen_enter_scope.
 //
 // CPython: Python/codegen.c:L648 codegen_enter_scope
+//
+//nolint:gocyclo // mirrors codegen_enter_scope per-scope dispatch
 func (c *Compiler) enterScope(sc *symtable.Entry) {
 	name := sc.Name
 	// Symtable uses "top" as the internal name for the module-level
@@ -217,11 +221,22 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	if sc.Type == symtable.ModuleBlock {
 		name = "<module>"
 	}
+	// firstlineno follows the call site that pushes the scope. CPython
+	// passes `1` for the toplevel module scope via
+	// _PyCodegen_EnterAnonymousScope (Python/codegen.c:917) and the
+	// statement's lineno for nested scopes. The symtable Entry does
+	// not record a Loc for the module block, so its sc.Loc.Lineno is
+	// zero; clamp to 1 here so co_firstlineno matches CPython for
+	// freshly compiled modules.
+	firstLine := sc.Loc.Lineno
+	if sc.Type == symtable.ModuleBlock {
+		firstLine = 1
+	}
 	u := &Unit{
 		Name:        name,
 		Qualname:    buildQualname(c.units, name),
 		ScopeType:   sc.Type,
-		FirstLineno: sc.Loc.Lineno,
+		FirstLineno: firstLine,
 		Seq:         &Sequence{},
 		FastHidden:  map[string]bool{},
 	}

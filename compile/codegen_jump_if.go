@@ -19,11 +19,11 @@ import "github.com/tamnd/gopy/ast"
 // dispatch on expr kind to keep parity with the C source.
 //
 //nolint:gocognit,gocyclo // tracks the C function shape
-func (c *Compiler) codegenJumpIf(test ast.Expr, next JumpTargetLabel, cond bool, loc ast.Pos) error {
+func (c *Compiler) codegenJumpIf(test ast.Expr, next JumpTargetLabel, cond bool) error {
 	switch e := test.(type) {
 	case *ast.UnaryOp:
 		if e.Op == ast.Not {
-			return c.codegenJumpIf(e.Operand, next, !cond, loc)
+			return c.codegenJumpIf(e.Operand, next, !cond)
 		}
 		// fall through to general
 	case *ast.BoolOp:
@@ -38,11 +38,11 @@ func (c *Compiler) codegenJumpIf(test ast.Expr, next JumpTargetLabel, cond bool,
 			next2 = c.newLabel()
 		}
 		for i := range n {
-			if err := c.codegenJumpIf(values[i], next2, cond2, loc); err != nil {
+			if err := c.codegenJumpIf(values[i], next2, cond2); err != nil {
 				return err
 			}
 		}
-		if err := c.codegenJumpIf(values[n], next, cond, loc); err != nil {
+		if err := c.codegenJumpIf(values[n], next, cond); err != nil {
 			return err
 		}
 		if next2 != next {
@@ -52,15 +52,15 @@ func (c *Compiler) codegenJumpIf(test ast.Expr, next JumpTargetLabel, cond bool,
 	case *ast.IfExp:
 		end := c.newLabel()
 		next2 := c.newLabel()
-		if err := c.codegenJumpIf(e.Test, next2, false, loc); err != nil {
+		if err := c.codegenJumpIf(e.Test, next2, false); err != nil {
 			return err
 		}
-		if err := c.codegenJumpIf(e.Body, next, cond, loc); err != nil {
+		if err := c.codegenJumpIf(e.Body, next, cond); err != nil {
 			return err
 		}
 		c.addOpJump(JUMP_NO_INTERRUPT, end, ast.Pos{})
 		c.useLabel(next2)
-		if err := c.codegenJumpIf(e.Orelse, next, cond, loc); err != nil {
+		if err := c.codegenJumpIf(e.Orelse, next, cond); err != nil {
 			return err
 		}
 		c.useLabel(end)
@@ -68,6 +68,7 @@ func (c *Compiler) codegenJumpIf(test ast.Expr, next JumpTargetLabel, cond bool,
 	case *ast.Compare:
 		n := len(e.Ops) - 1
 		if n > 0 {
+			le := loc(e)
 			cleanup := c.newLabel()
 			if err := c.visitExpr(e.Left); err != nil {
 				return err
@@ -76,26 +77,26 @@ func (c *Compiler) codegenJumpIf(test ast.Expr, next JumpTargetLabel, cond bool,
 				if err := c.visitExpr(e.Comparators[i]); err != nil {
 					return err
 				}
-				c.addOpI(SWAP, 2, loc)
-				c.addOpI(COPY, 2, loc)
-				c.emitCmpOp(e.Ops[i], loc)
-				c.addOp(TO_BOOL, loc)
-				c.addOpJump(POP_JUMP_IF_FALSE, cleanup, loc)
+				c.addOpI(SWAP, 2, le)
+				c.addOpI(COPY, 2, le)
+				c.emitCmpOp(e.Ops[i], le)
+				c.addOp(TO_BOOL, le)
+				c.addOpJump(POP_JUMP_IF_FALSE, cleanup, le)
 			}
 			if err := c.visitExpr(e.Comparators[n]); err != nil {
 				return err
 			}
-			c.emitCmpOp(e.Ops[n], loc)
-			c.addOp(TO_BOOL, loc)
+			c.emitCmpOp(e.Ops[n], le)
+			c.addOp(TO_BOOL, le)
 			op := POP_JUMP_IF_FALSE
 			if cond {
 				op = POP_JUMP_IF_TRUE
 			}
-			c.addOpJump(op, next, loc)
+			c.addOpJump(op, next, le)
 			end := c.newLabel()
 			c.addOpJump(JUMP_NO_INTERRUPT, end, ast.Pos{})
 			c.useLabel(cleanup)
-			c.addOp(POP_TOP, loc)
+			c.addOp(POP_TOP, le)
 			if !cond {
 				c.addOpJump(JUMP_NO_INTERRUPT, next, ast.Pos{})
 			}
@@ -106,14 +107,15 @@ func (c *Compiler) codegenJumpIf(test ast.Expr, next JumpTargetLabel, cond bool,
 	}
 
 	// general implementation
+	le := loc(test)
 	if err := c.visitExpr(test); err != nil {
 		return err
 	}
-	c.addOp(TO_BOOL, loc)
+	c.addOp(TO_BOOL, le)
 	op := POP_JUMP_IF_FALSE
 	if cond {
 		op = POP_JUMP_IF_TRUE
 	}
-	c.addOpJump(op, next, loc)
+	c.addOpJump(op, next, le)
 	return nil
 }

@@ -131,9 +131,14 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 	body = c.consumeDocstring(body)
 
 	// RESUME 0 marks the function entry point for the eval loop.
+	// Mirrors CPython codegen_enter_scope: loc = LOCATION(firstlineno,
+	// firstlineno, 0, 0). Using loc(key) would carry the def stmt's
+	// columns, which CPython drops on the function-entry RESUME.
 	//
-	// CPython: Python/codegen.c codegen_function_body emits RESUME
-	c.addOpI(RESUME, 0, loc(key))
+	// CPython: Python/codegen.c:654 codegen_enter_scope (loc =
+	// LOCATION(lineno, lineno, 0, 0); RESUME RESUME_AT_FUNC_START)
+	first := c.unit().FirstLineno
+	c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
 
 	if err := c.declareArgs(args); err != nil {
 		return err
