@@ -75,6 +75,7 @@ func TestPycParity(t *testing.T) {
 	}
 	stdlib := filepath.Join(root, "stdlib")
 	gopyEnv := append(os.Environ(), "GOPY_STDLIB="+stdlib)
+	smokeProbe(t, gopyBin, gopyEnv)
 	batchCompile(t, cpython, nil, files)
 	batchCompile(t, gopyBin, gopyEnv, files)
 
@@ -118,6 +119,25 @@ func batchCompile(t *testing.T, bin string, env, files []string) {
 			t.Fatalf("%s -m py_compile <%d files>: batch failed (%v) but every file passed in isolation\noutput:\n%s",
 				bin, len(chunk), err, out)
 		}
+	}
+}
+
+// smokeProbe runs a couple of trivial invocations of gopy and logs
+// their output so a silent exit-1 from gopy.exe on Windows surfaces
+// something we can read. It does not fail the test on smoke errors,
+// only on a follow-up batch failure.
+func smokeProbe(t *testing.T, bin string, env []string) {
+	t.Helper()
+	probes := [][]string{
+		{"--version"},
+		{"-c", "import sys; print(sys.platform)"},
+		{"-c", "import runpy; print('runpy ok')"},
+	}
+	for _, args := range probes {
+		cmd := exec.CommandContext(t.Context(), bin, args...)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		t.Logf("smoke %s %v: err=%v len(out)=%d output=%q", bin, args, err, len(out), out)
 	}
 }
 
