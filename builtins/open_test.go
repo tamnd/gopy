@@ -171,9 +171,13 @@ func TestOpenMissingFileArg(t *testing.T) {
 }
 
 func TestOpenInvalidFileType(t *testing.T) {
-	_, err := Open([]objects.Object{objects.NewInt(7)}, nil)
+	// CPython accepts int (file descriptor) and str/bytes (path).
+	// A tuple is neither, so it must raise TypeError.
+	//
+	// CPython: Modules/_io/_iomodule.c:214 path_or_fd handling
+	_, err := Open([]objects.Object{objects.NewTuple(nil)}, nil)
 	if err == nil || !strings.Contains(err.Error(), "TypeError: invalid file") {
-		t.Fatalf("err = %v, want TypeError on int file arg", err)
+		t.Fatalf("err = %v, want TypeError on tuple file arg", err)
 	}
 }
 
