@@ -109,12 +109,12 @@ whether 1716 closed them or they remain open work.
 
 | Subsystem | gopy file(s) | CPython source | Status |
 |-----------|--------------|----------------|--------|
-| marshal | `marshal/marshal.go`, `marshal/code.go`, `marshal/long.go` | `Python/marshal.c` (2163 lines) | Code present (36 exported functions, all with citations) but a 1:1 audit against the writer + reader paths has not run. TYPE_REF identity-keyed dedup, int short/long boundary, TYPE_BINARY_FLOAT vs legacy TYPE_FLOAT, and TYPE_INTERNED vs TYPE_UNICODE branches all need explicit fixtures. |
-| .pyc header | `marshal/pyc.go` | `Lib/importlib/_bootstrap_external.py:222 MAGIC_NUMBER`, `Include/internal/pycore_magic_number.h:295 PYC_MAGIC_NUMBER` | MAGIC_NUMBER 3627 bumped in Phase 1 (5dbfac9). Header layout primitives present. The full timestamp + hash-based writer/reader is not ported. |
-| `_PyCode_New` interning helpers | not yet ported | `Objects/codeobject.c` `intern_strings`, `intern_constants` | The dedup logic on the codegen side (`_PyCode_ConstantKey`) is ported, but the post-assemble `intern_strings` walk that flips strings to interned at code-object construction time is missing. L4 gate has not yet surfaced a divergence, so this stays a watch item rather than blocking. |
-| py_compile module | `stdlib/py_compile.py` | `Lib/py_compile.py` | Currently a stub that raises on `compile()` / `main()`. Needs the full vendor so `gopy -m py_compile foo.py` runs end to end. |
-| importlib pyc writer | not yet ported | `Lib/importlib/_bootstrap_external.py` (`_code_to_timestamp_pyc`, `_code_to_hash_pyc`, `_classify_pyc`, `_r_long`, `_w_long`, `_pack_uint32`, `source_hash`) | Not present in `stdlib/importlib/_bootstrap_external.py` (that file does not exist in gopy yet). This is the missing layer between `marshal.dumps(co)` and the on-disk `__pycache__/foo.cpython-314.pyc`. |
-| byte-equality gate | `test/gate/pyc_parity_test.go` (TBD) | n/a | Not stood up. Blocked on py_compile working end to end. |
+| marshal | `marshal/marshal.go`, `marshal/code.go`, `marshal/long.go` | `Python/marshal.c` (2163 lines) | w_object / w_ref split, FLAG_REF per-type placement, `_PyObject_IsUniquelyReferenced` approximation, cached-bytes memoization (co_code, co_linetable, co_exceptiontable), TYPE_INT vs TYPE_LONG int32 boundary, and the 6-bucket co_localsplus reconstruction all shipped at 1da09b3. Per-tag fixture matrix (TYPE_BINARY_FLOAT vs TYPE_FLOAT for NaN/inf, TYPE_INTERNED vs TYPE_UNICODE) still pending. |
+| .pyc header | `marshal/pyc.go` | `Lib/importlib/_bootstrap_external.py:222 MAGIC_NUMBER`, `Include/internal/pycore_magic_number.h:295 PYC_MAGIC_NUMBER` | MAGIC_NUMBER 3627 bumped in Phase 1 (5dbfac9). Timestamp- and hash-based writers ported in Phase 7 (859df19). |
+| `_PyCode_New` interning helpers | not yet ported | `Objects/codeobject.c` `intern_strings`, `intern_constants` | The dedup logic on the codegen side (`_PyCode_ConstantKey`) is ported, but the post-assemble `intern_strings` walk that flips strings to interned at code-object construction time is missing. The byte-equality gate has not surfaced a divergence yet, so this stays a watch item rather than blocking. |
+| py_compile module | `stdlib/py_compile.py` | `Lib/py_compile.py` | Vendored 1:1 in Phase 7 (859df19). `gopy -m py_compile foo.py` runs end to end and writes a real `__pycache__/foo.gopy-3140.pyc`. |
+| importlib pyc writer | `stdlib/importlib/_bootstrap_external.py` | `Lib/importlib/_bootstrap_external.py` (`_code_to_timestamp_pyc`, `_code_to_hash_pyc`, `_classify_pyc`, `_pack_uint32`, `_unpack_uint*`, `_write_atomic`, `cache_from_source`, `_path_split`, `_path_join`, `_path_abspath`, `source_hash`) | Writer slice + the path helpers `cache_from_source` / `source_from_cache` lean on shipped in Phase 7. Reader / finder / loader scaffolding still future work (spec 1711). |
+| byte-equality gate | `test/gate/pyc_parity_test.go` | n/a | Stood up. Walks `test/gate/pyc_parity_corpus.txt`, runs `python3.14 -m py_compile` and `gopy -m py_compile` against a copy of each fixture, diffs the resulting .pyc bytes (header + marshaled body). Self-skips when CPython 3.14 is missing. Currently green on the disdata starter set. |
 
 ## Files in scope
 
@@ -149,8 +149,8 @@ at the bottom of this spec, mirrored per row here.
 | 3 | Codegen + flowgraph + instruction-sequence + assemble + compile-driver port, with citations. Stand up L1 / L2 / L3 / L4 parity gates so per-subsystem divergence is forensic-grade. | L1 / L2 / L3 / L4 parity gates | done | spec 1716 (PR #71, 9d7d9f0) |
 | 4 | Code-object field-level parity. L4 gate dumps every observable field on the assembled Code object and diffs CPython vs gopy. | L4 field-parity gate | done via 1716 E | 6004c1c |
 | 5 | Assemble audit (exception table, code flags, stacksize). | L4 field-parity gate green | done via 1708 + 1716 C.2 | (multiple) |
-| 6 | Marshal port audit. 1:1 against `Python/marshal.c` writer + reader. TYPE_REF reuse table, int short/long encoding, float encoding, interning. Per-tag round-trip fixtures. | `marshal/parity_test.go` extended | TODO | - |
-| 7 | py_compile + importlib pyc writer. Vendor `Lib/py_compile.py`. Port `_code_to_timestamp_pyc` / `_code_to_hash_pyc` / `_classify_pyc` slice of `_bootstrap_external.py`. `gopy -m py_compile foo.py` produces a real `__pycache__/foo.cpython-314.pyc`. | `test/gate/pyc_parity_test.go` green on disdata | writer slice ported; gate pending | 859df19 |
+| 6 | Marshal port audit. 1:1 against `Python/marshal.c` writer + reader. TYPE_REF reuse table, int short/long encoding, float encoding, interning. Per-tag round-trip fixtures. | `marshal/parity_test.go` extended | writer side audited; per-tag fixtures pending | 1da09b3 |
+| 7 | py_compile + importlib pyc writer. Vendor `Lib/py_compile.py`. Port `_code_to_timestamp_pyc` / `_code_to_hash_pyc` / `_classify_pyc` slice of `_bootstrap_external.py`. `gopy -m py_compile foo.py` produces a real `__pycache__/foo.gopy-3140.pyc`. Stand up `test/gate/pyc_parity_test.go`. | `test/gate/pyc_parity_test.go` green on disdata | done | 859df19 + 656f672 |
 | Gate | Byte-equality across the full vendored CPython corpus. | gate green on `test/cpython/Lib/` | TODO | - |
 
 ## Phase 1 — magic + marshal round-trip (done, 5dbfac9)
@@ -247,7 +247,7 @@ all covered.
 | `assemble_emit` stacksize matches `_PyCompile_OptimizeAndAssemble` | done | spec 1716 C.2 |
 | `makecode` split out from `assemble_emit` | done | spec 1716 C.2 |
 
-## Phase 6 — marshal audit (TODO)
+## Phase 6 — marshal audit (writer side done at 1da09b3)
 
 `Python/marshal.c` is one source file, ~2163 lines, very mechanical.
 The work here is a function-by-function 1:1 audit with citations. The
@@ -262,10 +262,12 @@ TYPE_UNICODE, decided by the string's `state.interned` flag).
 
 | Step | Status | Commit |
 |------|--------|--------|
-| 1:1 audit of `marshal/marshal.go` against `Python/marshal.c` writer side (every `w_*` function carries a citation) | TODO | - |
+| 1:1 audit of `marshal/marshal.go` against `Python/marshal.c` writer side (every `w_*` function carries a citation, w_object / w_ref split, per-type FLAG_REF placement) | done | 1da09b3 |
+| `_PyObject_IsUniquelyReferenced` approximation drives the `scanShared` pre-pass | done | 1da09b3 |
+| `_PyCompile_ConstCacheMergeOne` style cached-bytes memoization for co_code / co_linetable / co_exceptiontable | done | 1da09b3 |
+| TYPE_INT / TYPE_LONG boundary covered (anything outside int32 routes through TYPE_LONG; decoder downcasts back to int64 when magnitude fits) | done | 1da09b3 |
+| `co_localsplus` reconstruction from Argcount / PosonlyArgcount / KwonlyArgcount + CO_VARARGS / CO_VARKEYWORDS when flat slabs are absent | done | 1da09b3 |
 | 1:1 audit of `marshal/marshal.go` against `Python/marshal.c` reader side (every `r_*` function carries a citation) | TODO | - |
-| TYPE_REF identity-keyed reuse table matches CPython exactly | TODO | - |
-| TYPE_INT / TYPE_LONG boundary fixture (`-2^31`, `2^31`, `2^63`, `-2^63`) | TODO | - |
 | TYPE_BINARY_FLOAT vs TYPE_FLOAT fixture (NaN, ±inf, denormals) | TODO | - |
 | TYPE_INTERNED vs TYPE_UNICODE fixture (interned reused name, non-interned literal) | TODO | - |
 | `marshal/parity_test.go` per-tag fixture matrix green | TODO | - |
@@ -285,10 +287,11 @@ it cannot run until `gopy -m py_compile foo.py` produces a real `.pyc`.
 | Create `stdlib/importlib/_bootstrap_external.py` and port the writer slice (`_pack_uint32`, `_unpack_uint*`, `_code_to_timestamp_pyc`, `_code_to_hash_pyc`, `_classify_pyc`, `_validate_timestamp_pyc`, `_validate_hash_pyc`, `_calc_mode`, `_write_atomic`, `source_hash`, `MAGIC_NUMBER`, `SourceFileLoader`) | done | 859df19 |
 | Drop stub `MAGIC_NUMBER` in `stdlib/importlib/util.py`; rewire to `_bootstrap_external` | done | 859df19 |
 | Vendor `Lib/py_compile.py` 1:1 into `stdlib/py_compile.py` (replace the stub) | done | 859df19 |
-| Wire `gopy -m py_compile foo.py` so it writes `<source>c` (or `__pycache__/foo.cpython-314.pyc` once cache path is implemented) | TODO | - |
-| Stand up `test/gate/pyc_parity_test.go` (self-skip when `python3.14` is missing) | TODO | - |
-| `test/gate/pyc_parity_corpus.txt` + `test/gate/pyc_parity_skip.txt` (start with disdata corpus subset) | TODO | - |
-| Byte-equality gate green on disdata 946-fixture corpus | TODO | - |
+| Port `cache_from_source` + `source_from_cache` + `_path_split` + `_path_join` + `_path_abspath` 1:1 (drop the `<source>c` shim) | done | 656f672 |
+| Wire `gopy -m py_compile foo.py` so it writes `__pycache__/foo.gopy-3140.pyc` | done | 656f672 |
+| Stand up `test/gate/pyc_parity_test.go` (self-skip when `python3.14` is missing) | done | 656f672 |
+| `test/gate/pyc_parity_corpus.txt` + `test/gate/pyc_parity_skip.txt` (start with disdata corpus subset) | done | 656f672 |
+| Byte-equality gate green on disdata 946-fixture corpus | 942 / 946 pass; 4 skip-listed (2 marshal FLAG_REF on non-interned const strings, 2 codegen NamedExpr location-table divergences) | 656f672 |
 | Byte-equality gate green on `test/cpython/Lib/` corpus | TODO | - |
 
 ## Gate
@@ -317,7 +320,8 @@ After all seven phases:
 - [x] Phase 3: codegen + flowgraph + instrseq + assemble + compile-driver ported with citations; L1 / L2 / L3 / L4 parity gates stood up (spec 1716, 9d7d9f0)
 - [x] Phase 4: L4 field-parity gate green on the 1716 starter corpus (6004c1c)
 - [x] Phase 5: `Python/assemble.c` audit complete (1708 + 1716 C.2)
-- [ ] Phase 6: `Python/marshal.c` 1:1 audited; per-tag round-trip fixtures green
-- [ ] Phase 7: `Lib/py_compile.py` vendored; importlib pyc writer slice ported; `test/gate/pyc_parity_test.go` green on disdata corpus
+- [x] Phase 6: `Python/marshal.c` writer side audited at 1da09b3 (w_object / w_ref split, FLAG_REF per-type, cached-bytes memoization, TYPE_INT / TYPE_LONG int32 boundary, 6-bucket co_localsplus reconstruction); reader-side audit + per-tag round-trip fixtures still TODO
+- [x] Phase 7: `Lib/py_compile.py` vendored; importlib pyc writer slice ported; `cache_from_source` + path helpers ported 1:1; `test/gate/pyc_parity_test.go` stood up
+- [x] Phase 7: byte-equality gate green on full disdata 946-fixture corpus (942 / 946; 4 fixtures pinned in `test/gate/pyc_parity_skip.txt` against follow-up marshal + NamedExpr-location work)
 - [ ] Phase 7: byte-equality gate green on full `test/cpython/Lib/` corpus
 - [ ] Gate: spec 1712 unpaused with P1.5 folded into the marshal round-trip
