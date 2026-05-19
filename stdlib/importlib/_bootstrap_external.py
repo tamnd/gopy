@@ -12,6 +12,19 @@ CPython: Lib/importlib/_bootstrap_external.py
 import _imp
 import marshal
 import os as _os
+import sys
+
+
+_MS_WINDOWS = (sys.platform == 'win32')
+if _MS_WINDOWS:
+    path_separators = ['\\', '/']
+else:
+    path_separators = ['/']
+# Assumption made in _path_join()
+assert all(len(sep) == 1 for sep in path_separators)
+path_sep = path_separators[0]
+path_sep_tuple = tuple(path_separators)
+path_separators = ''.join(path_separators)
 
 
 # CPython: Lib/importlib/_bootstrap_external.py:79 _pack_uint32
@@ -238,22 +251,129 @@ class SourceFileLoader(FileLoader):
         return {'mtime': st.st_mtime, 'size': st.st_size}
 
 
-# CPython: Lib/importlib/_bootstrap_external.py:79 cache_from_source
+# CPython: Lib/importlib/_bootstrap_external.py:101 _path_join
+def _path_join(*path_parts):
+    """Replacement for os.path.join()."""
+    return path_sep.join([part.rstrip(path_separators)
+                          for part in path_parts if part])
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:107 _path_split
+def _path_split(path):
+    """Replacement for os.path.split()."""
+    i = max(path.rfind(p) for p in path_separators)
+    if i < 0:
+        return '', path
+    return path[:i], path[i + 1:]
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:202 _path_isabs
+def _path_isabs(path):
+    """Replacement for os.path.isabs."""
+    if not path:
+        return False
+    return path[0] in path_separators
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:217 _path_abspath
+def _path_abspath(path):
+    """Replacement for os.path.abspath."""
+    if not _path_isabs(path):
+        for sep in path_separators:
+            path = path.removeprefix(f".{sep}")
+        return _path_join(_os.getcwd(), path)
+    else:
+        return path
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:239 cache_from_source
 def cache_from_source(path, debug_override=None, *, optimization=None):
-    """Given the path to a .py file, return the path to its .pyc file."""
-    if not path.endswith('.py'):
-        if path.endswith('.pyc'):
-            return path
-        raise ValueError(f'{path!r} is not a .py path')
-    # gopy doesn't currently materialize __pycache__ subdirectories; the
-    # canonical "where py_compile would put it" path used by the byte-
-    # equality gate is just <source>c (same dir).
-    return path + 'c'
+    """Given the path to a .py file, return the path to its .pyc file.
+
+    The .py file does not need to exist; this simply returns the path to the
+    .pyc file calculated as if the .py file were imported.
+
+    The 'optimization' parameter controls the presumed optimization level of
+    the bytecode file. If 'optimization' is not None, the string representation
+    of the argument is taken and verified to be alphanumeric (else ValueError
+    is raised).
+
+    The debug_override parameter is deprecated. If debug_override is not None,
+    a True value is the same as setting 'optimization' to the empty string
+    while a False value is equivalent to setting 'optimization' to '1'.
+
+    If sys.implementation.cache_tag is None then NotImplementedError is raised.
+    """
+    if debug_override is not None:
+        if optimization is not None:
+            message = 'debug_override or optimization must be set to None'
+            raise TypeError(message)
+        optimization = '' if debug_override else 1
+    path = _os.fspath(path)
+    head, tail = _path_split(path)
+    base, sep, rest = tail.rpartition('.')
+    tag = sys.implementation.cache_tag
+    if tag is None:
+        raise NotImplementedError('sys.implementation.cache_tag is None')
+    almost_filename = ''.join([(base if base else rest), sep, tag])
+    if optimization is None:
+        if sys.flags.optimize == 0:
+            optimization = ''
+        else:
+            optimization = sys.flags.optimize
+    optimization = str(optimization)
+    if optimization != '':
+        if not optimization.isalnum():
+            raise ValueError(f'{optimization!r} is not alphanumeric')
+        almost_filename = f'{almost_filename}.{_OPT}{optimization}'
+    filename = almost_filename + BYTECODE_SUFFIXES[0]
+    if getattr(sys, 'pycache_prefix', None) is not None:
+        head = _path_abspath(head)
+        if head[1:2] == ':' and head[0:1] not in path_separators:
+            head = head[2:]
+        return _path_join(
+            sys.pycache_prefix,
+            head.lstrip(path_separators),
+            filename,
+        )
+    return _path_join(head, _PYCACHE, filename)
 
 
 # CPython: Lib/importlib/_bootstrap_external.py:310 source_from_cache
 def source_from_cache(path):
-    """Given the path to a .pyc. file, return the path to its .py file."""
-    if not path.endswith('.pyc'):
-        raise ValueError(f'{path!r} is not a .pyc path')
-    return path[:-1]
+    """Given the path to a .pyc. file, return the path to its .py file.
+
+    The .pyc file does not need to exist; this simply returns the path to
+    the .py file calculated to correspond to the .pyc file.  If path does
+    not conform to PEP 3147/488 format, ValueError will be raised. If
+    sys.implementation.cache_tag is None then NotImplementedError is raised.
+    """
+    if sys.implementation.cache_tag is None:
+        raise NotImplementedError('sys.implementation.cache_tag is None')
+    path = _os.fspath(path)
+    head, pycache_filename = _path_split(path)
+    found_in_pycache_prefix = False
+    if getattr(sys, 'pycache_prefix', None) is not None:
+        stripped_path = sys.pycache_prefix.rstrip(path_separators)
+        if head.startswith(stripped_path + path_sep):
+            head = head[len(stripped_path):]
+            found_in_pycache_prefix = True
+    if not found_in_pycache_prefix:
+        head, pycache = _path_split(head)
+        if pycache != _PYCACHE:
+            raise ValueError(f'{_PYCACHE} not bottom-level directory in '
+                             f'{path!r}')
+    dot_count = pycache_filename.count('.')
+    if dot_count not in {2, 3}:
+        raise ValueError(f'expected only 2 or 3 dots in {pycache_filename!r}')
+    elif dot_count == 3:
+        optimization = pycache_filename.rsplit('.', 2)[-2]
+        if not optimization.startswith(_OPT):
+            raise ValueError("optimization portion of filename does not start "
+                             f"with {_OPT!r}")
+        opt_level = optimization[len(_OPT):]
+        if not opt_level.isalnum():
+            raise ValueError(f"optimization level {opt_level!r} is not an "
+                             "alphanumeric value")
+    base_filename = pycache_filename.partition('.')[0]
+    return _path_join(head, base_filename + SOURCE_SUFFIXES[0])
