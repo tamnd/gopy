@@ -290,7 +290,7 @@ Adjacent gaps surface once the above are closed:
 | P1.3 | Wire de-opt. `vm/adaptive.go:53 maybeDeopt` calls `specialize.Deopt` + `specialize.Unspecialize`, and `vm/adaptive.go:72 adaptiveTick` drives the counter and routes triggers into the per-family specializers. No panics, no re-walks. | DONE | 67abc0a |
 | P1.4a | Extend specializer emission coverage. CPython 3.14 ships specialized opcode variants across 13 families; gopy's emission state per family is broken out in the P1.4a sub-table below. Faithful port of `classify_descriptor` lives at `specialize/descr_classify.go`. | WIP | 67abc0a |
 | P1.4b | VM fast-path arms for each specialized opcode. Framework landed at `vm/eval_specialized.go:trySpecialized`, wired into `vm/dispatch.go` before `maybeDeopt` so hot sites take the fast path first and fall through to deopt on guard miss. Prerequisite: `Code.CacheObjects []Object` parallel slab is gopy's stand-in for CPython's in-cache pointer slots (Go cannot stash GC-tracked pointers in a `[]byte`); `specialize.{Set,}CacheObject` stamp / read by codeunit index, validity gated by the same version cells. Per-family arm state in the P1.4b sub-table below. | WIP | 691c2d7, 71a9181, 6a8aace |
-| P1.5 | Bytecode cache persistence: `Code.Quickened` + `CacheObjects` slab survive `marshal.dumps`/`marshal.loads` so `.pyc` files retain specialization (CPython persists the warmed cache via the `co_quickened` byte-blob next to `co_code`). Requires marshal-writer extension for the parallel-pointer slab; the `Code.Quickened` flag itself rides in the existing flags word. | TODO | - |
+| P1.5 | Deopt-before-marshal so `.pyc` bytes are deterministic across runs. **The original premise was inverted**: CPython does NOT persist the warmed cache; `Python/marshal.c:681` calls `_PyCode_GetCode(co)` which clones `co_code_adaptive` and immediately runs `deopt_code` (`Objects/codeobject.c:2293`) to rewrite every specialized opcode back to its adaptive parent and zero every inline cache cell. The marshal writer sees only the canonical adaptive shape. On load, `_PyCode_New` runs `_PyCode_Quicken` again to re-stamp the adaptive counters. gopy already re-quickens on `unmarshalCode` via `specialize.Enable` (P1.1); the missing piece was the pre-write deopt. Shipped `specialize.DeoptCode(code []byte) []byte` (`specialize/deopt_code.go`) mirroring `deopt_code` byte-for-byte: walk every codeunit, call `Deopt(op)` to map specialized → adaptive parent, preserve oparg, zero the trailing `CacheCount(base)` codeunits. `marshal.marshalCode` now passes `specialize.DeoptCode(c.Code)` to `writeCachedBytes` instead of the raw `c.Code`. Eight tests in `specialize/deopt_code_test.go` cover idempotence, fixed-point on non-adaptive opcodes, opcode rewrite with oparg preserved + cache zeroed, short/empty input, input-non-mutation, in-place variant, truncated cache, and a full DeoptParent sweep. | DONE | 1712-P1.5 |
 | P1.6 | Cross-cutting coherency: install dict watcher (P5.5) + type-version invalidation (P7.5) hooks at `specialize.Enable` time so inline caches invalidate atomically on dict/type mutation. Without this, every LOAD_ATTR / LOAD_GLOBAL inline cache risks reading stale state after a class attribute assignment. Shipped: `specialize.Enable` now calls `ensureWatchersInstalled()` before `Quicken`; the optimizer registers its installer at package-init via `specialize.SetWatcherInstaller`; the installer reads `state.MainInterpreter()` (new accessor mirroring `_PyInterpreterState_Main`) and owns its own atomic latch. Fixed a parity bug in `optimizer/watcher.go::WatcherInit`: slot 0 was previously installed with `globalsWatcherCallback` (duplicated from slot 1) instead of the dedicated `builtins_dict_watcher` (`Python/pylifecycle.c:599-610`); slot 0 now bumps `interp.BuiltinDictMutations` and guards `ExecutorsInvalidateAll` on `MaxAllowedBuiltinsModifications`. `EnsureBuiltinsSubscribed` mirrors `Python/pylifecycle.c:1381` (idempotent `PyDict_Watch(0, interp->builtins)` + stamp). Nine new tests across `optimizer/builtins_watcher_test.go`, `optimizer/install_test.go`, `specialize/watcher_test.go`. | DONE | b059710d |
 
 **P1.4a sub-table — specializer emission per family.** Numbers
@@ -1008,7 +1008,7 @@ once the cases-generator port (spec 1714) ships.
 | P2.2 | Port `Python/optimizer_bytecodes.c` in full (1107 LOC). This is the abstract-interpreter case table that `optimize_uops` dispatches through. Lands as `optimizer/optimizer_bytecodes_gen.go` driven by the spec-1714 cases generator. Gate: every uop ID has a corresponding case body (no `unknown semantics` bail). | TODO | - |
 | P2.3 | Port `Python/executor_cases.c.h` in full (7163 LOC) into `vm/eval_uops_gen.go`. Driven by the spec-1714 cases generator. Replaces the 271 deopt-pass-through stubs in `optimizer/uops_stubs_gen.go`. Gate: every uop ID has a real executable body. | TODO | - |
 | P2.4 | Wire tier-2 → tier-1 deopt path: on guard fail mid-trace, fall back to the adaptive opcode at the recorded resume offset. Validate against `_CHECK_VALIDITY` and `_GUARD_TYPE_VERSION` failure scenarios. | TODO | - |
-| P2.5 | Turn on the tier-2 executor by default for any function that has been Quickened (depends on P1.5 marshal persistence so warm caches survive). | TODO | - |
+| P2.5 | Turn on the tier-2 executor by default for any function that has been Quickened. (P1.5 originally listed as a prereq under the assumption that `.pyc` carries the warmed cache; investigation while shipping P1.5 showed CPython deopts before write and re-quickens on load, so warm caches never persist across `.pyc` boundaries in either runtime. `specialize.Enable` already re-quickens on `unmarshalCode`, so this gate is independent of P1.5.) | TODO | - |
 
 **Gate.**
 
@@ -2167,7 +2167,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | Subsystem                       | CPython source         | gopy destination          | Estimated win | Status | Commit |
 |---------------------------------|------------------------|---------------------------|--------------:|--------|--------|
 | P0. pyperformance harness       | n/a (tooling)          | `bench/`                  | n/a           | WIP    | ca0bef1 |
-| P1. Specializer wire-up         | `Python/specialize.c`  | `specialize/`             | 6-10x         | WIP (P1.0-P1.3 + P1.6 done, P1.4/P1.5 open) | 67abc0a, 691c2d7, 71a9181, 6a8aace, 96130ac, 2f1f603, b059710d |
+| P1. Specializer wire-up         | `Python/specialize.c`  | `specialize/`             | 6-10x         | WIP (P1.0-P1.3 + P1.5 + P1.6 done, P1.4 open) | 67abc0a, 691c2d7, 71a9181, 6a8aace, 96130ac, 2f1f603, b059710d |
 | P2. Tier-2 (full-file ports)    | `Python/optimizer_bytecodes.c`, `Python/executor_cases.c.h` | `optimizer/`, `vm/eval_uops_gen.go` | 1.5-2x | WIP (scaffolding + JIT gate hardcoded off) | -      |
 | P3. PyLong fast path            | `Objects/longobject.c` | `objects/long_fast.go`    | 3x            | DONE (P3.1-P3.4; P3.5 deferred behind Int repr refactor) | `d9e16d2` |
 | P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | TODO   | -      |
@@ -2270,8 +2270,19 @@ nothing tells the specializer when a class attribute changes.
    without a DISPATCH_INLINED hop). Remaining P1.4 work: the
    FOR_ITER_GEN variant shares the SEND_GEN ceiling (waits on
    P12 generator redesign).
-4. **P1.5 marshal persistence** so `.pyc` files retain the warm
-   specializer state across runs.
+4. **P1.5 deopt-before-marshal** (DONE on PR #74): the original spec
+   premise was inverted. CPython does NOT persist warm specializer
+   state via `.pyc`; `_PyCode_GetCode` clones `co_code_adaptive`
+   and runs `deopt_code` (`Objects/codeobject.c:2293`) before
+   marshal-write, so every specialized opcode is rewritten to its
+   adaptive parent and every inline cache cell is zeroed. On load,
+   `_PyCode_New` re-runs `_PyCode_Quicken` to re-stamp the adaptive
+   counters. gopy already re-quickens on `unmarshalCode` via
+   `specialize.Enable` (P1.1); the missing half was the pre-write
+   deopt, now shipped as `specialize.DeoptCode` and wired into
+   `marshal.marshalCode`. Net effect: `.pyc` bytes are deterministic
+   across runs and independent of any specialization state the
+   in-memory `Code` happened to warm at marshal time.
 5. **P2.1 open the JIT gate** (`interp.JIT = true`); validate
    trace projection fires. Then **P2.2 + P2.3 full-file ports of
    `Python/optimizer_bytecodes.c` and `Python/executor_cases.c.h`**,
