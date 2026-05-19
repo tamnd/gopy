@@ -19,16 +19,18 @@ func (t *Type) VersionTag() uint32 {
 	return v
 }
 
-// InvalidateVersionTag clears the cached version so the next read
-// allocates a fresh one. Mutators that change observable type state
-// (Setattr, Setattro on a class) call this so old inline caches no
-// longer match.
+// InvalidateVersionTag is gopy's port of CPython's
+// type_modified_unlocked / PyType_Modified pair. It walks every
+// subclass recursively (matching the invariant that a subclass's
+// cached state must be cleared before the parent's), fires the
+// registered watcher loop for this type, then zeroes the version
+// tag so the next read allocates a fresh one.
 //
-// Notifies any subscribed type watcher before zeroing the version
-// tag so the optimizer's invalidation pass sees the type while it
-// is still in its "watched" state. Mirrors the notify-then-zero
-// ordering inside type_modified_unlocked: the watcher loop runs
-// first, then set_version_unlocked(type, 0) writes the new tag.
+// The recursion order matters: each subclass runs the full
+// function (clear-its-subclasses, fire-its-watchers, then zero its
+// tag) before this type's watcher fires and tag is zeroed. That
+// way a subclass watcher sees the still-watched, still-valid
+// state, exactly the ordering inside type_modified_unlocked.
 //
 // CPython: Objects/typeobject.c:1130 type_modified_unlocked /
 // Objects/typeobject.c:1200 PyType_Modified
@@ -36,6 +38,20 @@ func (t *Type) InvalidateVersionTag() {
 	if t.versionTag == 0 {
 		return
 	}
+	for _, sub := range t.subclasses {
+		if sub != nil {
+			sub.InvalidateVersionTag()
+		}
+	}
 	notifyTypeWatchers(t)
 	t.versionTag = 0
+}
+
+// PyTypeModified is the CPython entrypoint name; kept as an alias
+// so the call sites in code that ports new CPython files line up
+// 1-for-1 with PyType_Modified.
+//
+// CPython: Objects/typeobject.c:1200 PyType_Modified
+func (t *Type) PyTypeModified() {
+	t.InvalidateVersionTag()
 }

@@ -166,6 +166,54 @@ func TestTypeSetReservedWatcher_HitsReservedSlot(t *testing.T) {
 	}
 }
 
+// TestInvalidateVersionTag_RecursesSubclasses confirms the gopy
+// port of CPython's type_modified_unlocked subclass walk fires
+// every subclass's watcher and zeros every subclass's version tag
+// before this type's tag clears, matching the post-order recursion
+// inside typeobject.c:1130.
+func TestInvalidateVersionTag_RecursesSubclasses(t *testing.T) {
+	resetTypeWatchers(t)
+
+	var order []string
+	id, err := TypeAddWatcher(func(t *Type) int {
+		order = append(order, t.Name)
+		return 0
+	})
+	if err != nil {
+		t.Fatalf("AddWatcher: %v", err)
+	}
+
+	base := NewType("Base", []*Type{ObjectType()})
+	sub := NewType("Sub", []*Type{base})
+	grandsub := NewType("GrandSub", []*Type{sub})
+
+	for _, ty := range []*Type{base, sub, grandsub} {
+		if err := TypeWatch(id, ty); err != nil {
+			t.Fatalf("Watch %s: %v", ty.Name, err)
+		}
+	}
+
+	base.InvalidateVersionTag()
+
+	// Post-order: deepest subclass fires first, base last.
+	want := []string{"GrandSub", "Sub", "Base"}
+	if len(order) != len(want) {
+		t.Fatalf("watch order: want %v, got %v", want, order)
+	}
+	for i, w := range want {
+		if order[i] != w {
+			t.Errorf("order[%d]: want %s, got %s", i, w, order[i])
+		}
+	}
+
+	// Every tag must be cleared.
+	for _, ty := range []*Type{base, sub, grandsub} {
+		if ty.versionTag != 0 {
+			t.Errorf("%s version tag not cleared after walk", ty.Name)
+		}
+	}
+}
+
 // resetTypeWatchers clears the package-level watcher table. Tests
 // share the global so each test must start from a clean slate.
 func resetTypeWatchers(t *testing.T) {
