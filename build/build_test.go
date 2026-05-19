@@ -14,7 +14,13 @@ func TestVersion(t *testing.T) {
 
 func TestPlatform(t *testing.T) {
 	got := Platform()
-	want := runtime.GOOS + "/" + runtime.GOARCH
+	want := runtime.GOOS
+	switch runtime.GOOS {
+	case "windows":
+		want = "win32"
+	case "wasip1":
+		want = "wasi"
+	}
 	if got != want {
 		t.Fatalf("Platform() = %q, want %q", got, want)
 	}
