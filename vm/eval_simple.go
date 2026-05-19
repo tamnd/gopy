@@ -66,7 +66,7 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 		Stacksize:       c.Stacksize,
 		Flags:           int(c.Flags),
 		Code:            c.Code,
-		Consts:          c.Consts,
+		Consts:          liftConsts(c.Consts),
 		Names:           c.Names,
 		Varnames:        c.VarNames,
 		Freevars:        c.FreeVars,
@@ -82,6 +82,38 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 	specialize.Enable(out)
 	c.Lifted = out
 	return out
+}
+
+// liftConsts walks a Code.Consts slice and converts compile-pipeline
+// value types into marshal-friendly forms: *compile.Code becomes
+// *objects.Code (recursively lifted) and *compile.ConstTuple becomes
+// []any (recursively lifted). Scalars pass through unchanged.
+//
+// Without this lift, nested code objects keep CPython's pre-lift type
+// in the parent's Consts slot and marshal.Dump refuses them.
+//
+// CPython: Python/compile.c assemble_consts paths (each child code
+// is already a PyObject* so this conversion is implicit there).
+func liftConsts(consts []any) []any {
+	out := make([]any, len(consts))
+	for i, v := range consts {
+		out[i] = liftConst(v)
+	}
+	return out
+}
+
+func liftConst(v any) any {
+	switch x := v.(type) {
+	case *compile.Code:
+		return liftNestedCode(x)
+	case *compile.ConstTuple:
+		items := make([]any, len(x.Values))
+		for i, raw := range x.Values {
+			items[i] = liftConst(raw)
+		}
+		return items
+	}
+	return v
 }
 
 // wrapConst converts a raw compile-time constant value into an Object.
@@ -109,6 +141,19 @@ func wrapConst(v any) (objects.Object, error) {
 	case *compile.ConstTuple:
 		items := make([]objects.Object, len(x.Values))
 		for i, raw := range x.Values {
+			item, err := wrapConst(raw)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = item
+		}
+		return objects.NewTuple(items), nil
+	case []any:
+		// Tuple constants that have been pre-lifted by liftConsts: the
+		// codegen-side *compile.ConstTuple was flattened to []any so
+		// marshal can encode it, and LOAD_CONST now sees the bare slice.
+		items := make([]objects.Object, len(x))
+		for i, raw := range x {
 			item, err := wrapConst(raw)
 			if err != nil {
 				return nil, err
