@@ -464,24 +464,24 @@ func objectGetstateDescr(args []Object, _ map[string]Object) (Object, error) {
 }
 
 // objectReduceDescr is object.__reduce__(self): forwards to
-// __reduce_ex__(2). CPython routes through _common_reduce which
-// requires copyreg; gopy mirrors the entry point and defers the
-// full reducer pipeline to a pickle subsystem port.
+// __reduce_ex__(2). Mirrors CPython's object___reduce___impl which
+// hands off to _common_reduce(self, 0); _reduce_ex_ takes the same
+// path so the two methods stay in lockstep.
 //
 // CPython: Objects/typeobject.c:7771 object___reduce___impl
 func objectReduceDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
 	}
-	return objectReduceExDescr([]Object{args[0], NewInt(2)}, nil)
+	return commonReduce(args[0], 0)
 }
 
 // objectReduceExDescr is object.__reduce_ex__(self, protocol). The
 // CPython implementation checks whether __reduce__ has been
 // overridden on the type (vs inherited from object) and dispatches
 // to it; otherwise falls into _common_reduce. gopy ports the
-// override-detection prologue and raises a typed TypeError when
-// the fallback branch fires, since copyreg has not landed.
+// override-detection prologue and the full reducer pipeline through
+// commonReduce / reduceNewobj.
 //
 // CPython: Objects/typeobject.c:7787 object___reduce_ex___impl
 func objectReduceExDescr(args []Object, _ map[string]Object) (Object, error) {
@@ -489,6 +489,14 @@ func objectReduceExDescr(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: __reduce_ex__() takes exactly one argument (%d given)", len(args)-1)
 	}
 	self := args[0]
+	proto, ok := args[1].(*Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __reduce_ex__() argument 1 must be int, not %s", args[1].Type().Name)
+	}
+	protoVal, fits := proto.Int64()
+	if !fits {
+		return nil, fmt.Errorf("OverflowError: __reduce_ex__() protocol out of range")
+	}
 	// Detect __reduce__ override: when the type's __reduce__
 	// descriptor is the one we installed on objectType, the
 	// subclass inherits the default and CPython falls through to
@@ -502,7 +510,7 @@ func objectReduceExDescr(args []Object, _ map[string]Object) (Object, error) {
 		}
 		return Call(fn, NewTuple(nil), nil)
 	}
-	return nil, fmt.Errorf("TypeError: cannot pickle '%s' object (copyreg not yet ported)", self.Type().Name)
+	return commonReduce(self, int(protoVal))
 }
 
 // objectSubclasshook is object.__subclasshook__(cls, subclass). The
