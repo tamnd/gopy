@@ -87,11 +87,11 @@ func DelAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object
 //
 // CPython: Python/bltinmodule.c:1001 builtin_dir
 func Dir(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) == 0 {
-		return nil, fmt.Errorf("TypeError: dir() with no argument is not supported")
-	}
 	if len(args) > 1 {
 		return nil, fmt.Errorf("TypeError: dir expected at most 1 argument, got %d", len(args))
+	}
+	if len(args) == 0 {
+		return dirLocals()
 	}
 	seen := map[string]struct{}{}
 	collect := func(d *objects.Dict) {
@@ -124,6 +124,37 @@ func Dir(args []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	names := make([]string, 0, len(seen))
 	for n := range seen {
 		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]objects.Object, len(names))
+	for i, n := range names {
+		out[i] = objects.NewStr(n)
+	}
+	return objects.NewList(out), nil
+}
+
+// dirLocals returns the running frame's local-scope keys, sorted.
+// Used by the no-argument dir() form. Matches CPython _dir_locals
+// which reads f_locals (== f_globals at module scope).
+//
+// CPython: Objects/object.c:2110 _dir_locals
+func dirLocals() (objects.Object, error) {
+	if currentScope == nil {
+		return objects.NewList(nil), nil
+	}
+	_, locals := currentScope()
+	d, ok := locals.(*objects.Dict)
+	if !ok {
+		return objects.NewList(nil), nil
+	}
+	keys := d.Keys()
+	names := make([]string, 0, len(keys))
+	for _, k := range keys {
+		s, err := objects.Str(k)
+		if err != nil {
+			continue
+		}
+		names = append(names, s)
 	}
 	sort.Strings(names)
 	out := make([]objects.Object, len(names))

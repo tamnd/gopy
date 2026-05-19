@@ -22,6 +22,26 @@ type Exception struct {
 	Suppress bool
 	Notes    *objects.List
 	TB       *traceback.Traceback
+	attrs    *objects.Dict
+}
+
+// AttrDict implements objects.AttrDictHolder so a Python subclass of a
+// built-in exception (e.g. `class MyExc(Exception)`) can store
+// per-instance attributes set in __init__ through GenericSetAttr.
+//
+// CPython: Objects/exceptions.c:L34 BaseExceptionObject (dict member at
+// offsetof(PyBaseExceptionObject, dict))
+func (e *Exception) AttrDict() *objects.Dict { return e.attrs }
+
+// EnsureAttrDict allocates the per-instance attribute dict on first
+// write. Matches CPython's lazy materialisation of tp_dictoffset.
+//
+// CPython: Objects/object.c:_PyObject_GetDictPtr (lazy dict alloc)
+func (e *Exception) EnsureAttrDict() *objects.Dict {
+	if e.attrs == nil {
+		e.attrs = objects.NewDict()
+	}
+	return e.attrs
 }
 
 // IsException implements the state.Exception marker.

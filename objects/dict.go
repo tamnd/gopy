@@ -79,6 +79,7 @@ func init() {
 	DictType.Repr = dictRepr
 	DictType.Str = dictRepr
 	DictType.Iter = dictIter
+	DictType.RichCmp = dictRichCmp
 	DictType.Mapping = &MappingMethods{
 		Length:  dictLen,
 		GetItem: dictMappingGet,
@@ -367,9 +368,6 @@ func dictSubclassGetAttr(o Object, name Object) (Object, error) {
 		}
 		return descr, nil
 	}
-	if descr != nil {
-		return descr, nil
-	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 }
 
@@ -448,6 +446,62 @@ func dictLenMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewInt(int64(args[0].(*Dict).Len())), nil
 }
 
+// dictEqual reports whether two dicts compare equal by key/value.
+//
+// CPython: Objects/dictobject.c:3494 dict_equal
+func dictEqual(a, b *Dict) (bool, error) {
+	if a.Len() != b.Len() {
+		return false, nil
+	}
+	for _, k := range a.Keys() {
+		av, err := a.GetItem(k)
+		if err != nil {
+			return false, err
+		}
+		bv, err := b.GetItem(k)
+		if err != nil {
+			if errors.Is(err, errKeyNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+		eq, err := RichCmpBool(av, bv, CompareEQ)
+		if err != nil {
+			return false, err
+		}
+		if !eq {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// dictRichCmp is the tp_richcompare slot for dict. Only EQ and NE are
+// defined; ordered comparisons fall through to NotImplemented.
+//
+// CPython: Objects/dictobject.c:3554 dict_richcompare
+func dictRichCmp(a, b Object, op CompareOp) (Object, error) {
+	ad, ok := a.(*Dict)
+	if !ok {
+		return notImplemented(), nil
+	}
+	bd, ok := b.(*Dict)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if op != CompareEQ && op != CompareNE {
+		return notImplemented(), nil
+	}
+	eq, err := dictEqual(ad, bd)
+	if err != nil {
+		return nil, err
+	}
+	if op == CompareNE {
+		eq = !eq
+	}
+	return NewBool(eq), nil
+}
+
 // dictEqMethod backs dict.__eq__.
 //
 // CPython: Objects/dictobject.c:3554 dict_richcompare (Py_EQ branch)
@@ -463,34 +517,11 @@ func dictEqMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	if a.Len() != b.Len() {
-		return False(), nil
+	eq, err := dictEqual(a, b)
+	if err != nil {
+		return nil, err
 	}
-	for _, k := range a.Keys() {
-		av, err := a.GetItem(k)
-		if err != nil {
-			return nil, err
-		}
-		bv, err := b.GetItem(k)
-		if err != nil {
-			if errors.Is(err, errKeyNotFound) {
-				return False(), nil
-			}
-			return nil, err
-		}
-		eq, err := RichCmp(av, bv, CompareEQ)
-		if err != nil {
-			return nil, err
-		}
-		t, err := IsTruthy(eq)
-		if err != nil {
-			return nil, err
-		}
-		if !t {
-			return False(), nil
-		}
-	}
-	return True(), nil
+	return NewBool(eq), nil
 }
 
 // dictClearMethod backs dict.clear().

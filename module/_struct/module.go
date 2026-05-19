@@ -36,8 +36,10 @@ func buildModule() (*objects.Module, error) {
 		{"unpack", objects.NewBuiltinFunction("unpack", moduleUnpack)},
 		{"unpack_from", objects.NewBuiltinFunction("unpack_from", moduleUnpackFrom)},
 		{"iter_unpack", objects.NewBuiltinFunction("iter_unpack", moduleIterUnpack)},
+		{"_clearcache", objects.NewBuiltinFunction("_clearcache", moduleClearcache)},
 		{"Struct", StructType},
 		{"error", objects.NewType("struct.error", []*objects.Type{objects.ObjectType()})},
+		{"__doc__", objects.NewStr(structDoc)},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
@@ -875,6 +877,52 @@ func moduleUnpackFrom(args []objects.Object, kwargs map[string]objects.Object) (
 	}
 	return doUnpack(bo, codes, buf, offset)
 }
+
+// moduleClearcache implements struct._clearcache(). CPython caches
+// compiled Struct objects in a module-level dict and exposes this
+// helper to flush it; our parser is allocation-free per call, so the
+// hook is a no-op. We still expose it because struct.py imports it
+// unconditionally at module load.
+//
+// CPython: Modules/_struct.c:2541 _clearcache_impl
+func moduleClearcache(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.None(), nil
+}
+
+// structDoc is the module-level docstring CPython attaches to _struct
+// via PyModuleDef.m_doc. struct.py copies it through
+// `from _struct import __doc__`.
+//
+// CPython: Modules/_struct.c:2569 module_doc
+const structDoc = `Functions to convert between Python values and C structs.
+Python bytes objects are used to hold the data representing the C struct
+and also as format strings (explained below) to describe the layout of data
+in the C struct.
+
+The optional first format char indicates byte order, size and alignment:
+  @: native order, size & alignment (default)
+  =: native order, std. size & alignment
+  <: little-endian, std. size & alignment
+  >: big-endian, std. size & alignment
+  !: same as >
+
+The remaining chars indicate types of args and must match exactly;
+these can be preceded by a decimal repeat count:
+  x: pad byte (no data); c:char; b:signed byte; B:unsigned byte;
+  ?: _Bool (requires C99; if not available, char is used instead)
+  h:short; H:unsigned short; i:int; I:unsigned int;
+  l:long; L:unsigned long; f:float; d:double; e:half-float.
+Special cases (preceding decimal count indicates length):
+  s:string (array of char); p: pascal string (with count byte).
+Special cases (only available in native format):
+  n:ssize_t; N:size_t;
+  P:an integer type that is wide enough to hold a pointer.
+Special case (not in native mode unless 'long long' in platform C):
+  q:long long; Q:unsigned long long
+Whitespace between formats is ignored.
+
+The variable struct.error is an exception raised on errors.
+`
 
 // moduleIterUnpack implements struct.iter_unpack(fmt, buffer). Returns
 // an iterator yielding successive tuples until the buffer is exhausted.

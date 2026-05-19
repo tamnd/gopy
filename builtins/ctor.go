@@ -71,6 +71,10 @@ func numberToInt(o objects.Object) (objects.Object, error) {
 	case *objects.Float:
 		out, _ := new(big.Float).SetFloat64(v.Float64()).Int(nil)
 		return objects.NewIntFromBig(out), nil
+	case *objects.Bytes:
+		return parseIntString(string(v.Bytes()), 10)
+	case *objects.ByteArray:
+		return parseIntString(string(v.Bytes()), 10)
 	}
 	if o.Type() == objects.StrType() {
 		s, _ := objects.Str(o)
@@ -168,6 +172,20 @@ func FloatCtor(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 		return v, nil
 	case *objects.Int:
 		f, _ := new(big.Float).SetInt(v.BigInt()).Float64()
+		return objects.NewFloat(f), nil
+	case *objects.Bytes:
+		s := string(v.Bytes())
+		f, err := pystrconv.ParseFloat(trimSpace(s))
+		if err != nil {
+			return nil, fmt.Errorf("ValueError: could not convert string to float: %q", s)
+		}
+		return objects.NewFloat(f), nil
+	case *objects.ByteArray:
+		s := string(v.Bytes())
+		f, err := pystrconv.ParseFloat(trimSpace(s))
+		if err != nil {
+			return nil, fmt.Errorf("ValueError: could not convert string to float: %q", s)
+		}
 		return objects.NewFloat(f), nil
 	}
 	if args[0].Type() == objects.StrType() {

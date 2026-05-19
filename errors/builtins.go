@@ -50,9 +50,24 @@ var (
 func newExcType(name string, bases []*objects.Type) *objects.Type {
 	t := objects.NewType(name, bases)
 	t.Call = excCall
+	t.TpNew = excTpNew
 	t.Str = excStr
 	t.Repr = excRepr
 	return t
+}
+
+// excTpNew is the tp_new slot for every built-in exception type. It
+// mirrors BaseException_new: allocate a fresh PyBaseExceptionObject,
+// store positional args on .args, and return. tp_init is a no-op on
+// BaseException itself; user subclasses that override __init__ run
+// after this via typeCallViaTpNew. Kwargs are tolerated for the same
+// reason excCall tolerates them: stdlib call sites that pass
+// `name=` / `path=` to ImportError use the keyword form before the
+// proper ImportError init lands.
+//
+// CPython: Objects/exceptions.c:L42 BaseException_new
+func excTpNew(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return New(cls, objects.NewTuple(args)), nil
 }
 
 // excStr ports BaseException_str: empty for no args, str(args[0]) for
