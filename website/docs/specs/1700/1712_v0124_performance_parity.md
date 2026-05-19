@@ -300,7 +300,7 @@ list the variants still missing. CPython 3.14 reference:
 
 | Family | Coverage | Variants shipped | Missing | Status | Commit |
 |--------|----------|------------------|---------|--------|--------|
-| LOAD_ATTR | 10/13 | `MODULE`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `SLOT`, `INSTANCE_VALUE`, `WITH_HINT`, `PROPERTY`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `GETATTRIBUTE_OVERRIDDEN` | `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`, `METHOD_LAZY_DICT` — need `Py_TPFLAGS_INLINE_VALUES` / managed-dict-offset modelling in `objects/type.go` | WIP | 67abc0a |
+| LOAD_ATTR | 12/13 | `MODULE`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `SLOT`, `INSTANCE_VALUE`, `WITH_HINT`, `PROPERTY`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `GETATTRIBUTE_OVERRIDDEN`, `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES` | `METHOD_LAZY_DICT` — gopy instances allocate `Instance.dict` eagerly in `NewInstance`, so the CPython LAZY_DICT shape (managed-dict slot is null at LOAD_ATTR time, materialized on first write) does not yet exist as a runtime state. Needs a per-instance lazy-dict mode bit before the arm can stamp anything meaningful. | WIP | 67abc0a, 9051a0c3 |
 | STORE_ATTR | 3/3 | `INSTANCE_VALUE`, `SLOT`, `WITH_HINT` | — | DONE | 67abc0a |
 | LOAD_GLOBAL | 2/2 | `MODULE`, `BUILTIN` | — | DONE | 67abc0a |
 | COMPARE_OP | 3/3 | `INT`, `FLOAT`, `STR` | — | DONE | 67abc0a |
@@ -320,14 +320,14 @@ gate that backs it.
 
 | Family | Arms shipped | Source | Gate | Status | Commit |
 |--------|--------------|--------|------|--------|--------|
-| LOAD_ATTR | 9/10 emitted | `vm/eval_specialized.go` — `MODULE`, `SLOT`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `PROPERTY`, `INSTANCE_VALUE`, `GETATTRIBUTE_OVERRIDDEN` | `specialize/gatedata/spec_property.py` (`TestGateSpecPropertyAndMethod`), `vm/eval_specialized_load_attr_getattribute_overridden_test.go` | WIP — `WITH_HINT` deferred until dict keys-version cache stamping lands | 691c2d7, 71a9181 |
+| LOAD_ATTR | 11/12 emitted | `vm/eval_specialized.go` — `MODULE`, `SLOT`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `PROPERTY`, `INSTANCE_VALUE`, `GETATTRIBUTE_OVERRIDDEN`, `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES` | `specialize/gatedata/spec_property.py` (`TestGateSpecPropertyAndMethod`), `vm/eval_specialized_load_attr_getattribute_overridden_test.go`, `vm/eval_specialized_load_attr_with_values_test.go` | WIP — `WITH_HINT` deferred until dict keys-version cache stamping lands | 691c2d7, 71a9181, 9051a0c3 |
 | TO_BOOL | 6/6 | `vm/eval_specialized.go` — `BOOL`, `INT`, `LIST`, `NONE`, `STR`, `ALWAYS_TRUE` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | COMPARE_OP | 3/3 | `vm/eval_specialized_compare.go` — `INT`, `FLOAT`, `STR` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | CONTAINS_OP | 2/2 | `vm/eval_specialized.go` — `DICT`, `SET` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | UNPACK_SEQUENCE | 3/3 | `vm/eval_specialized.go` — `TWO_TUPLE`, `TUPLE`, `LIST` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | STORE_SUBSCR | 2/2 | `vm/eval_specialized.go` — `LIST_INT`, `DICT` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | BINARY_OP | 13/13 non-JIT | `vm/eval_specialized_binary_op.go` — `ADD_INT`, `SUBTRACT_INT`, `MULTIPLY_INT` (math/bits overflow guard); `ADD_FLOAT`, `SUBTRACT_FLOAT`, `MULTIPLY_FLOAT`; `ADD_UNICODE` shared with `INPLACE_ADD_UNICODE`; `SUBSCR_LIST_INT`, `SUBSCR_TUPLE_INT`, `SUBSCR_STR_INT` (ASCII fast path), `SUBSCR_DICT`, `SUBSCR_LIST_SLICE` | `specialize/gatedata/spec_binary_op.py` (`TestGateSpecBinaryOp`) | DONE | 6a8aace |
-| FOR_ITER | 3/4 | `vm/eval_specialized_for_iter.go` — `LIST`, `TUPLE`, `RANGE`; typed `Next` helpers in `objects/list.go::ListIterNextFast`, `objects/tuple.go::TupleIterNextFast`, `objects/range_iter.go::RangeIterNextFast` skip the `tp_iternext` slot lookup | `vm/eval_specialized_for_iter_test.go` (hit / exhaustion / wrong-type deopt per family) | WIP — `GEN` deferred: it needs the generator-frame push/pop path the VM does not yet expose; dispatch loop falls through to the generic FOR_ITER body for `FOR_ITER_GEN` until that lands | (this commit) |
+| FOR_ITER | 3/4 | `vm/eval_specialized_for_iter.go` — `LIST`, `TUPLE`, `RANGE`; typed `Next` helpers in `objects/list.go::ListIterNextFast`, `objects/tuple.go::TupleIterNextFast`, `objects/range_iter.go::RangeIterNextFast` skip the `tp_iternext` slot lookup | `vm/eval_specialized_for_iter_test.go` (hit / exhaustion / wrong-type deopt per family) | WIP — `GEN` deferred: it needs the generator-frame push/pop path the VM does not yet expose; dispatch loop falls through to the generic FOR_ITER body for `FOR_ITER_GEN` until that lands | 44786dc4 |
 | LOAD_GLOBAL | 2/2 | `vm/eval_specialized_load_global.go` — `MODULE`, `BUILTIN` | `specialize/gatedata/spec_load_global.py` (`TestGateSpecLoadGlobal`) | DONE | 2f1f603 |
 | STORE_ATTR | 1/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (faithful 1-1 port of CPython's macro: validate type_version, write to cached `Instance.slots[idx]`) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`) | WIP — `INSTANCE_VALUE` and `WITH_HINT` deliberately deferred; they need a `Dict.SetValueAt(slot, value)` primitive that writes the entry's value cell without re-hashing the key, plus the managed-dict-offset modelling listed in P1.4a. Shipping them before that lands forces a shim that re-runs `SetItem(name, value)`, which is exactly the ad-hoc patch the ground rule forbids. | 96130ac |
 | SEND | 0/1 | — | — | TODO — depends on generator-frame plumbing | - |
@@ -484,6 +484,121 @@ gate that backs it.
    tests assert the opcode actually flipped back; the trailing
    `TypeError` from the generic body invoking a non-callable is
    incidental but exercises the deopt path end-to-end.
+
+**Technical notes (P1.4 INLINE_VALUES foundation + LOAD_ATTR_*_WITH_VALUES fast arms).**
+
+1. **Why these arms are "with values" but read no values.** Reading
+   the CPython 3.14 macros `LOAD_ATTR_METHOD_WITH_VALUES` and
+   `LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES` (`Python/bytecodes.c`) was
+   the first surprise: they never touch the inline-values block.
+   Both arms simply guard that the inline-values shape is still
+   intact and that the type's `ht_cached_keys` has not grown to
+   include the looked-up name, then push the class-level descriptor
+   verbatim. The specializer's assert at stamp time is the proof:
+   `Python/specialize.c:1614 specialize_attr_loadclassattr` calls
+   `_PyDictKeys_StringLookup(ht_cached_keys, name) < 0`, i.e. the
+   name is NOT in the shared-keys set. As long as that stays true,
+   no instance has ever stored an attribute under this name, so the
+   load returns the class descriptor without consulting any dict.
+2. **Mapping CPython's PyDictValues onto gopy.** CPython packs the
+   inline-values block immediately before the instance's payload at
+   `MANAGED_DICT_OFFSET = -3 * sizeof(void*)` and exposes a `valid`
+   bit (`Include/internal/pycore_dict.h PyDictValues.valid`) that
+   `_PyObject_InitInlineValues` sets and
+   `make_dict_from_instance_attributes` clears. gopy does not lay
+   instances out with a pre-header inline-values block; instead it
+   models the same two invariants directly on the Go side:
+   - `Instance.inlineValid bool` is the analogue of `PyDictValues.valid`.
+     Defaults true at `NewInstance`, cleared by `instanceSetAttr` on
+     delete (`value == nil` branch). Future paths that would break
+     the shared-keys shape (e.g. monkey-patching `__dict__`) can call
+     `InvalidateInlineValues` to drop the instance out of
+     WITH_VALUES specialization at the next guard miss.
+   - `Type.cachedKeys map[string]bool` is the analogue of
+     `PyHeapTypeObject.ht_cached_keys`. Grows monotonically: every
+     `instanceSetAttr` that writes a new attribute name calls
+     `tp.AddCachedKey(name)`, which inserts and bumps the version.
+3. **Why a monotonic shared-keys set is sufficient.** CPython's
+   `ht_cached_keys` is a real `PyDictKeysObject` shared across every
+   split dict on the type. The shared-keys *insertion* path
+   (`Objects/dictobject.c:5132 insert_split_key`) is what gopy needs
+   to mirror, not the lookup machinery: the LOAD_ATTR fast arms only
+   need to answer "has any instance ever stored a key under this
+   name?", which is exactly what the monotonic set answers in O(1).
+   Future work that ports a faithful PyDictKeysObject (for
+   `LOAD_ATTR_WITH_HINT`) can replace the map without churning the
+   call sites.
+4. **Version stamping.** `Type.cachedKeysVersion` mirrors `dk_version`
+   on `ht_cached_keys`. It is allocated lazily by
+   `CachedKeysVersion()` via the existing `allocDictKeysVersion()`
+   global counter (shared with `cachedKeysVersion` to keep stamp
+   uniqueness across the runtime). Every `AddCachedKey` zeroes the
+   field so the next reader allocates a fresh value. The specializer
+   stamps the version into cache cells 4..5 of the `_PyLoadMethodCache`
+   slot (existing `setKeysVersion`); the fast arm rejects on
+   mismatch, which is the deopt trigger when any instance grows the
+   shared-keys set after specialize time.
+5. **Why heap-type bits are set in NewUserTypeMeta and not
+   inherit_slots.** CPython sets `Py_TPFLAGS_INLINE_VALUES` +
+   `Py_TPFLAGS_MANAGED_DICT` inside `type_new`
+   (`Objects/typeobject.c:4153`) whenever a heap type ends up with a
+   managed dict. gopy already runs that logic in
+   `objects/usertype.go::NewUserTypeMeta`: the
+   `noSlotsDeclared → HasDict = true` branch is the equivalent of
+   CPython picking the managed-dict layout, so the bits land in the
+   same place. C-port builtin types (list, dict, etc.) do not set
+   the flags because their attribute storage is fixed-shape; the
+   specializer simply never considers them WITH_VALUES candidates.
+6. **Specializer plumbing.** `specialize/load_attr.go` now branches on
+   `tp.HasInlineValues() && !tp.HasCachedKey(name.Value())` for both
+   KindMethod and KindNonDescriptor. The cache layout (cells 2..3
+   type_version, 4..5 keys_version, parallel `CacheObjects[idx]`
+   descriptor) is identical to the NO_DICT variant; only the opcode
+   tag differs. `allocDictKeysVersion()` returning 0 (counter
+   wraparound) is treated as a refuse-to-specialize signal, same as
+   the NO_DICT path.
+7. **VM fast-arm shape.** `fastLoadAttrMethodWithValues` and
+   `fastLoadAttrNondescriptorWithValues` in `vm/eval_specialized.go`
+   share the guard sequence: oparg shape (`&1` set for METHOD, clear
+   for NONDESCRIPTOR), owner is `*objects.Instance`,
+   `tp.HasInlineValues()`, `inst.InlineValid()`, type_version match,
+   cached_keys_version match, descr non-nil. The METHOD arm then
+   pushes `(descr, self)` so the following CALL sees the unbound-
+   method pair shape; the NONDESCRIPTOR arm pops the owner and
+   pushes only `descr` (oparg bit 0 == 0 means "regular attribute").
+8. **Coverage in `vm/eval_specialized_load_attr_with_values_test.go`.**
+   Eight tests: METHOD hit / version-miss / keys-miss /
+   inline-invalidated-after-delete / wrong-oparg-shape;
+   NONDESCRIPTOR hit; specializer-emits with shared-keys empty;
+   specializer-skips when the looked-up name is already in
+   `cachedKeys`. The InlineInvalidated test calls `instanceSetAttr`
+   with `value == nil` to flip the bit, then asserts the fast arm
+   deopts even though all other guards still pass.
+9. **LAZY_DICT deliberately deferred.** CPython's
+   `LOAD_ATTR_METHOD_LAZY_DICT` (`Python/specialize.c:1635`) fires
+   when the managed-dict slot reads as null at LOAD_ATTR time
+   (i.e. the instance has not materialized its dict yet); the arm
+   skips reading it. gopy's `NewInstance` allocates `Instance.dict`
+   eagerly whenever `t.HasDict`, so no instance is ever in the
+   LAZY_DICT runtime state today. Shipping the arm requires a
+   per-instance "lazy" mode (allocate the dict on first
+   `instanceSetAttr`, leave it nil until then) so the guard has
+   something to check; that touches every attribute path in
+   `instance.go` plus the dict-watcher install in P1.6 and is the
+   wrong scope for the foundation port. Tracked as a follow-up in
+   the P1.4a LOAD_ATTR row.
+10. **Why no shim for the inline-values block.** A first sketch
+    considered packing a real `PyDictValues` array onto `Instance`
+    so the WITH_VALUES arm could read from it directly. That would
+    duplicate the dict's storage with nothing reading it, since
+    every actual access falls through to `inst.dict` anyway. The
+    invariants the fast arm needs (was the shape broken? was the
+    name ever stored?) are state, not storage, so they live on two
+    boolean / set-shaped fields and not a parallel value array.
+    This keeps the port honest with the "no shim" ground rule:
+    the runtime models the same observable behaviour CPython does,
+    without erecting a fake storage layer that no read path
+    consumes.
 
 **Gate.**
 
