@@ -21,15 +21,15 @@ func dictKeysInorder(names []string, offset int) []string {
 }
 
 // computeLocalsplusInfo materializes the flat 3.11+ co_localsplus
-// layout: positional/kwonly args, then ordinary locals, then cells,
-// then frees. Args/locals share FastLocal; FastHidden is OR'd in for
-// synthetic locals (lambda implicit arg, comprehension `.0`).
-// FastCell is OR'd in for cell names that also appear as locals (arg
-// cells). Cells that duplicate a varname are skipped at the cellvars
-// pass, mirroring the numdropped logic in CPython's
-// fix_cell_offsets / compute_localsplus_info.
+// layout: positional-only args, positional-or-keyword args,
+// keyword-only args, *args, **kwargs, ordinary locals, surviving
+// cells, then frees. Each slot gets FastLocal plus the matching
+// FastArg* sub-flags (CPython's argvarkinds bucket loop), FastHidden
+// for synthetic locals, and FastCell for arg cells that overlap a
+// varname. Cells that duplicate a varname are dropped at the cellvars
+// pass via numdropped, matching fix_cell_offsets.
 //
-// CPython: Python/assemble.c:484 compute_localsplus_info
+// CPython: Python/assemble.c:483 compute_localsplus_info
 func computeLocalsplusInfo(unit *Unit, nlocalsplus int, codeFlags uint32) (names []string, kinds []uint8) {
 	names = make([]string, nlocalsplus)
 	kinds = make([]uint8, nlocalsplus)
@@ -39,20 +39,41 @@ func computeLocalsplusInfo(unit *Unit, nlocalsplus int, codeFlags uint32) (names
 		cellset[n] = true
 	}
 
-	// Arg vars fill the first portion of the list. Walk varnames in
-	// order; gopy stores them as a single []string already in declared
-	// order so we don't need CPython's argvarkinds bucket loop. The
-	// cell-overlap test stamps FastCell on arg cells.
-	for i, name := range unit.VarNames {
-		kind := FastLocal
-		if unit.FastHidden[name] {
-			kind |= FastHidden
+	hasVarargs := codeFlags&CoVarargs != 0
+	hasVarkeywords := codeFlags&CoVarkeywords != 0
+	argvarkinds := [6]struct {
+		count int
+		kind  uint8
+	}{
+		{unit.PosOnlyArgCount, FastArgPos},
+		{unit.Argcount, FastArgPos | FastArgKw},
+		{unit.KwOnlyArgCount, FastArgKw},
+		{boolInt(hasVarargs), FastArgVar | FastArgPos},
+		{boolInt(hasVarkeywords), FastArgVar | FastArgKw},
+		{-1, 0},
+	}
+
+	pos := 0
+	bucketMax := 0
+	for i := range 6 {
+		if argvarkinds[i].count < 0 {
+			bucketMax = len(unit.VarNames)
+		} else {
+			bucketMax += argvarkinds[i].count
 		}
-		if cellset[name] {
-			kind |= FastCell
+		for pos < bucketMax && pos < len(unit.VarNames) {
+			name := unit.VarNames[pos]
+			kind := FastLocal | argvarkinds[i].kind
+			if unit.FastHidden[name] {
+				kind |= FastHidden
+			}
+			if cellset[name] {
+				kind |= FastCell
+			}
+			names[pos] = name
+			kinds[pos] = kind
+			pos++
 		}
-		names[i] = name
-		kinds[i] = kind
 	}
 
 	nlocals := len(unit.VarNames)
@@ -86,8 +107,14 @@ func computeLocalsplusInfo(unit *Unit, nlocalsplus int, codeFlags uint32) (names
 		kinds[off] = FastFree
 	}
 
-	_ = codeFlags
 	return names, kinds
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // makecode builds the final Code object from the per-unit assembler

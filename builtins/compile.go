@@ -276,6 +276,8 @@ func liftCompileCode(c *compile.Code) *objects.Code {
 		Varnames:        c.VarNames,
 		Freevars:        c.FreeVars,
 		Cellvars:        c.CellVars,
+		LocalsplusNames: c.LocalsPlusNames,
+		LocalsplusKinds: c.LocalsPlusKinds,
 		Filename:        c.Filename,
 		Name:            c.Name,
 		Qualname:        c.Qualname,

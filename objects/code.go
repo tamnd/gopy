@@ -49,6 +49,18 @@ type Code struct {
 	Freevars []string
 	Cellvars []string
 
+	// LocalsplusNames / LocalsplusKinds carry the flat 3.11+
+	// co_localsplus layout: every named slot the frame allocates
+	// for fastlocals, cells, and frees, paired with the
+	// CO_FAST_* kind byte computed by Python/assemble.c's
+	// compute_localsplus_info. Marshal writes both fields straight
+	// to the wire so .pyc round-trips byte-for-byte.
+	//
+	// CPython: Include/cpython/code.h:91 co_localsplusnames
+	// CPython: Python/assemble.c:483 compute_localsplus_info
+	LocalsplusNames []string
+	LocalsplusKinds []byte
+
 	// Filename, Name, Qualname mirror co_filename / co_name /
 	// co_qualname. The traceback renderer reads them.
 	Filename string

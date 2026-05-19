@@ -8,14 +8,19 @@
 package compile
 
 // FastLocalKind bits. Mirror cpython/Include/internal/pycore_code.h
-// CO_FAST_LOCAL / CO_FAST_CELL / CO_FAST_FREE / CO_FAST_HIDDEN.
+// CO_FAST_LOCAL / CO_FAST_CELL / CO_FAST_FREE / CO_FAST_HIDDEN plus
+// the CO_FAST_ARG_* sub-flags that distinguish argument slots.
 //
-// CPython: Include/internal/pycore_code.h:L42 CO_FAST_*
+// CPython: Include/internal/pycore_code.h:42 CO_FAST_*
 const (
+	FastArgPos uint8 = 0x02
+	FastArgKw  uint8 = 0x04
+	FastArgVar uint8 = 0x08
+	FastArg    uint8 = FastArgPos | FastArgKw | FastArgVar
+	FastHidden uint8 = 0x10
 	FastLocal  uint8 = 0x20
 	FastCell   uint8 = 0x40
 	FastFree   uint8 = 0x80
-	FastHidden uint8 = 0x10
 )
 
 // Code is the v0.5 placeholder for objects.Code. It carries every
