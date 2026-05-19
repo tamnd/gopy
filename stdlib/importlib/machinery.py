@@ -2,16 +2,20 @@
 
 The CPython module re-exports loader / finder classes plus suffix
 constants from ._bootstrap and ._bootstrap_external. gopy's import
-system is implemented Go-side, so the loaders and finders aren't
-needed at the Python boundary. Only the SUFFIXES constants and the
-all_suffixes() helper are observable from stdlib consumers
-(inspect.py being the main one for the v0.12.4 lexer/tokenizer gates).
+system is implemented Go-side, so most loaders and finders aren't
+needed at the Python boundary; the SourceFileLoader re-export is
+necessary because py_compile.compile() drives it directly.
 
 When a future spec lands the full importlib bootstrap port, this file
 becomes the byte-equal vendor of Lib/importlib/machinery.py.
 
 CPython: Lib/importlib/machinery.py
 """
+
+from importlib._bootstrap_external import (
+    FileLoader,
+    SourceFileLoader,
+)
 
 SOURCE_SUFFIXES = ['.py']
 DEBUG_BYTECODE_SUFFIXES = ['.pyc']
@@ -54,8 +58,10 @@ __all__ = [
     'BYTECODE_SUFFIXES',
     'DEBUG_BYTECODE_SUFFIXES',
     'EXTENSION_SUFFIXES',
+    'FileLoader',
     'ModuleSpec',
     'OPTIMIZED_BYTECODE_SUFFIXES',
     'SOURCE_SUFFIXES',
+    'SourceFileLoader',
     'all_suffixes',
 ]
