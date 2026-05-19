@@ -331,7 +331,7 @@ gate that backs it.
 | LOAD_GLOBAL | 2/2 | `vm/eval_specialized_load_global.go` — `MODULE`, `BUILTIN` | `specialize/gatedata/spec_load_global.py` (`TestGateSpecLoadGlobal`) | DONE | 2f1f603 |
 | STORE_ATTR | 1/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (faithful 1-1 port of CPython's macro: validate type_version, write to cached `Instance.slots[idx]`) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`) | WIP — `INSTANCE_VALUE` and `WITH_HINT` deliberately deferred; they need a `Dict.SetValueAt(slot, value)` primitive that writes the entry's value cell without re-hashing the key, plus the managed-dict-offset modelling listed in P1.4a. Shipping them before that lands forces a shim that re-runs `SetItem(name, value)`, which is exactly the ad-hoc patch the ground rule forbids. | 96130ac |
 | SEND | 0/1 | — | — | TODO — depends on generator-frame plumbing | - |
-| LOAD_SUPER_ATTR | 0/2 | — | — | TODO | - |
+| LOAD_SUPER_ATTR | 2/2 | `vm/eval_specialized_load_super_attr.go` — `ATTR`, `METHOD`; backed by `objects.SuperLookup` with a `method_found` out-param mirroring CPython's `_PySuper_Lookup` | `vm/eval_specialized_load_super_attr_test.go` (hit / missing / non-super deopt / non-type deopt / method-found vs bound shape / oparg bit-0 assertions) | DONE | (this commit) |
 | CALL | 0/5 emitted | — | — | TODO — gated on closing P1.4a CALL gap first | - |
 
 **Technical notes (P1.6 watcher install at specialize.Enable).**
@@ -426,6 +426,64 @@ gate that backs it.
    needs the SEND fast arm (P1.4b TODO line) to land first, since
    FOR_ITER_GEN's `_ITER_NEXT_GEN` body is structurally identical to
    the SEND_GEN body.
+
+**Technical notes (P1.4b LOAD_SUPER_ATTR fast arms).**
+
+1. **Oparg encoding.** LOAD_SUPER_ATTR packs three fields into a single
+   byte oparg: bit 0 is `load_method` (controls whether the following
+   CALL sees an unbound-method pair or a regular bound attribute), bit 1
+   is `has_self` (set when super was constructed with two args; not
+   consulted by the fast arms because the prelude already requires
+   (super, class, self) on the stack), bits 2+ are the name index into
+   `co.Names`. The ATTR arm asserts `!(oparg & 1)` and the METHOD arm
+   asserts `(oparg & 1)`, mirroring the C-level `assert` in
+   `Python/bytecodes.c:2222` / `:2238`.
+2. **Specialize-time invariants vs runtime guards.** The specializer
+   only stamps `_ATTR` / `_METHOD` when `global_super` is the unshadowed
+   builtin `super` and `class` is an actual `*Type`. The fast arms re-
+   check both: `globalSuper != objects.Object(objects.SuperType)` or
+   `class` not being a `*Type` produces `ok=false` so the dispatcher
+   deopts back to `LOAD_SUPER_ATTR` and runs the generic body. This
+   guard pair mirrors the macro-level `DEOPT_IF(global_super != ..., ...)`
+   block in `Python/bytecodes.c`.
+3. **`method_found` probe gating.** CPython's `_PySuper_Lookup`
+   (`Objects/typeobject.c:12003`) only fills its `int *method_found`
+   out-param when `Py_TYPE(self)->tp_getattro == PyObject_GenericGetAttr`;
+   if the type overrides `tp_getattro` the probe is suppressed so the
+   override sees a bound descriptor instead of a raw function. gopy's
+   equivalent test is `self.Type().Getattro == nil` — when the override
+   is present the METHOD arm calls `SuperLookup(..., nil)` and pushes
+   `(attr, NULL)` so the following CALL routes through the generic call
+   path, never the unbound-method trampoline.
+4. **Stack discipline.** The (super, class, self) tuple enters with
+   self at TOS. The ATTR arm pops all three and pushes the resolved
+   attribute; the METHOD arm saves the self stackref before popping
+   (because the method-found branch needs to push self back above the
+   attr to form the unbound-method pair the following CALL reads). An
+   earlier draft popped in the wrong order and saved the super stackref
+   into the "self" position, which surfaced as a test failure where
+   `peek(0)` after the arm returned the `SuperType` object instead of
+   the instance. The fix is to call `selfRef := e.pop()` first.
+5. **`SuperLookup` shape.** `objects.SuperLookup(suType, suObj, name,
+   *bool)` folds CPython's `do_super_lookup` + `_PySuper_Lookup` into
+   one entry: it runs `supercheck` for the type-or-instance test, walks
+   `suObjType.MRO` strictly past `suType` looking for `name`, and on
+   hit either sets `*methodFound=true` and returns the raw descriptor
+   (when `isMethodLike` is true on the descriptor and the caller asked
+   the question via a non-nil probe) or applies `tp_descr_get` to bind
+   the descriptor through the instance. The `bindTo=nil` case (class-
+   mode super where `su_obj == su_obj_type`) mirrors
+   `Objects/typeobject.c:11894`.
+6. **Generic-body shape on deopt.** When the prelude guard misses the
+   fast arm returns `(0, false, nil)` so the dispatch loop rewrites the
+   opcode back to `LOAD_SUPER_ATTR` and falls through. The generic body
+   then constructs `super(class, self)` by calling
+   `SuperType.Call(...)`, runs `superGetAttr` on the resulting Super,
+   and pushes the result — the same sequence the AST-level `super(C,
+   x).m` would compile to. Deopt-on-non-super and deopt-on-non-type
+   tests assert the opcode actually flipped back; the trailing
+   `TypeError` from the generic body invoking a non-callable is
+   incidental but exercises the deopt path end-to-end.
 
 **Gate.**
 
@@ -1740,10 +1798,13 @@ nothing tells the specializer when a class attribute changes.
    (`METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`,
    `METHOD_LAZY_DICT`, `GETATTRIBUTE_OVERRIDDEN`) once
    `Py_TPFLAGS_INLINE_VALUES` modelling lands; then ship the
-   remaining FOR_ITER / SEND / LOAD_SUPER_ATTR / CALL dispatch
-   arms (P1.4b). FOR_ITER `LIST`/`TUPLE`/`RANGE` shipped with the
-   typed `Next` helpers; `GEN` waits on the SEND generator-frame
-   path (see P1.4b sub-table + technical-notes block).
+   remaining FOR_ITER / SEND / CALL dispatch arms (P1.4b).
+   FOR_ITER `LIST`/`TUPLE`/`RANGE` shipped with the typed `Next`
+   helpers; `GEN` waits on the SEND generator-frame path.
+   LOAD_SUPER_ATTR `ATTR`/`METHOD` shipped via
+   `objects.SuperLookup` + the `method_found` probe gated on
+   `tp_getattro == GenericGetAttr` (see P1.4b sub-table +
+   technical-notes block).
 4. **P1.5 marshal persistence** so `.pyc` files retain the warm
    specializer state across runs.
 5. **P2.1 open the JIT gate** (`interp.JIT = true`); validate

@@ -906,6 +906,12 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, perr
 		}
 		return e.advance(), nil, nil, false, true, nil
+
+	case compile.LOAD_SUPER_ATTR:
+		if perr := e.execLoadSuperAttr(oparg); perr != nil {
+			return 0, nil, nil, false, true, perr
+		}
+		return e.cacheAdvance(compile.LOAD_SUPER_ATTR), nil, nil, false, true, nil
 	}
 	return 0, nil, nil, false, false, nil
 }
@@ -970,6 +976,46 @@ func (e *evalState) execDeleteAttr(oparg uint32) error {
 	owner := e.popObject()
 	name := objects.NewStr(co.Names[idx])
 	return objects.DelAttr(owner, name)
+}
+
+// execLoadSuperAttr implements the generic _LOAD_SUPER_ATTR uop. The
+// bytecode pushed (global_super, class, self); we pop the trio, call
+// global_super(class, self) (or super(class) when bit 1 of oparg is
+// clear) to mint a super proxy, then look up co.Names[oparg>>2] on
+// it. The trailing _PUSH_NULL_CONDITIONAL contributes the NULL self
+// slot when bit 0 of oparg is set so a following CALL sees the
+// (callable, NULL) shape.
+//
+// CPython: Python/bytecodes.c:2172 _LOAD_SUPER_ATTR
+func (e *evalState) execLoadSuperAttr(oparg uint32) error {
+	co := e.f.Code
+	nameIdx := int(oparg >> 2)
+	if nameIdx < 0 || nameIdx >= len(co.Names) {
+		return fmt.Errorf("vm: LOAD_SUPER_ATTR: name index %d out of range", nameIdx)
+	}
+	self := e.popObject()
+	cls := e.popObject()
+	globalSuper := e.popObject()
+	var argv []objects.Object
+	if oparg&2 != 0 {
+		argv = []objects.Object{cls, self}
+	} else {
+		argv = []objects.Object{cls}
+	}
+	su, err := objects.Call(globalSuper, objects.NewTuple(argv), nil)
+	if err != nil {
+		return err
+	}
+	name := objects.NewStr(co.Names[nameIdx])
+	attr, err := objects.GetAttr(su, name)
+	if err != nil {
+		return err
+	}
+	e.pushObject(attr)
+	if oparg&1 != 0 {
+		e.push(stackref.Null)
+	}
+	return nil
 }
 
 // execNameOp handles LOAD_NAME / LOAD_GLOBAL / STORE_NAME etc. Looks

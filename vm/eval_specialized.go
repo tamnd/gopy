@@ -126,6 +126,10 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		next, ok = e.fastForIterTuple(oparg)
 	case compile.FOR_ITER_RANGE:
 		next, ok = e.fastForIterRange(oparg)
+	case compile.LOAD_SUPER_ATTR_ATTR:
+		return e.fastLoadSuperAttrAttr(oparg)
+	case compile.LOAD_SUPER_ATTR_METHOD:
+		return e.fastLoadSuperAttrMethod(oparg)
 	}
 	return next, ok, nil
 }

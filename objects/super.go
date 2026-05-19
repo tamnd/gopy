@@ -162,6 +162,45 @@ func lookupSuperDescr(typ, objType *Type, name string) Object {
 	return nil
 }
 
+// SuperLookup runs supercheck(suType, suObj) and then walks the
+// resolved MRO past suType looking for `name`. The methodFound
+// out-param mirrors the int* method out-param on CPython's
+// do_super_lookup: when non-nil, the caller asked the unbound-method
+// shape question, and SuperLookup sets *methodFound=true if the raw
+// descriptor satisfies METHOD_DESCRIPTOR (in which case the
+// descriptor is returned unbound, ready for a following CALL to pair
+// it with self). Otherwise SuperLookup runs tp_descr_get to bind the
+// descriptor through the instance, matching the bound-method branch
+// of do_super_lookup.
+//
+// CPython: Objects/typeobject.c:11872 do_super_lookup
+// CPython: Objects/typeobject.c:12003 _PySuper_Lookup
+func SuperLookup(suType *Type, suObj Object, name string, methodFound *bool) (Object, error) {
+	suObjType, err := supercheck(suType, suObj)
+	if err != nil {
+		return nil, err
+	}
+	res := lookupSuperDescr(suType, suObjType, name)
+	if res == nil {
+		return nil, fmt.Errorf("AttributeError: 'super' object has no attribute '%s'", name)
+	}
+	if methodFound != nil && isMethodLike(res) {
+		*methodFound = true
+		return res, nil
+	}
+	dt := res.Type()
+	if dt.DescrGet != nil {
+		bindTo := suObj
+		// CPython passes obj==NULL when su_obj is the type itself
+		// (class-mode super): see Objects/typeobject.c:11894.
+		if suObj == suObjType {
+			bindTo = nil
+		}
+		return dt.DescrGet(res, bindTo, suObjType)
+	}
+	return res, nil
+}
+
 // superDescrGet implements the tp_descr_get slot for super itself:
 // `super(C).__get__(obj)` returns a fresh super bound to obj. Already
 // bound supers and class-level access return self unchanged. This is
