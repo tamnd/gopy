@@ -74,7 +74,7 @@ func dumps(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 	}
 	var buf bytes.Buffer
 	if err := marshal.Dump(&buf, value); err != nil {
-		return nil, fmt.Errorf("ValueError: %v", err)
+		return nil, fmt.Errorf("ValueError: %w", err)
 	}
 	return objects.NewBytes(buf.Bytes()), nil
 }
@@ -95,7 +95,7 @@ func loads(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 	}
 	val, err := marshal.Load(bytes.NewReader(src))
 	if err != nil {
-		return nil, fmt.Errorf("ValueError: %v", err)
+		return nil, fmt.Errorf("ValueError: %w", err)
 	}
 	return wrap(val), nil
 }
@@ -116,7 +116,7 @@ func dump(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 	}
 	writeMethod, err := objects.GetAttr(args[1], objects.NewStr("write"))
 	if err != nil {
-		return nil, fmt.Errorf("TypeError: dump() file object has no 'write' method: %v", err)
+		return nil, fmt.Errorf("TypeError: dump() file object has no 'write' method: %w", err)
 	}
 	if _, err := objects.Call(writeMethod, objects.NewTuple([]objects.Object{data}), nil); err != nil {
 		return nil, err
@@ -136,7 +136,7 @@ func load(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 	}
 	readMethod, err := objects.GetAttr(args[0], objects.NewStr("read"))
 	if err != nil {
-		return nil, fmt.Errorf("TypeError: load() file object has no 'read' method: %v", err)
+		return nil, fmt.Errorf("TypeError: load() file object has no 'read' method: %w", err)
 	}
 	data, err := objects.Call(readMethod, objects.NewTuple(nil), nil)
 	if err != nil {
@@ -168,6 +168,8 @@ func bufferOf(o objects.Object) ([]byte, error) {
 // type pointer.
 //
 // CPython: Python/marshal.c:339 w_object
+//
+//nolint:gocyclo // mirrors w_object per-type dispatch
 func unwrap(o objects.Object) (any, error) {
 	if o == nil {
 		return nil, nil

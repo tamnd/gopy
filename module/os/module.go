@@ -500,6 +500,7 @@ func islink(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 	}
 	info, ferr := goos.Lstat(s)
 	if ferr != nil {
+		//nolint:nilerr // CPython genericpath.islink swallows OSError, returns False
 		return objects.NewBool(false), nil
 	}
 	return objects.NewBool(info.Mode()&goos.ModeSymlink != 0), nil
