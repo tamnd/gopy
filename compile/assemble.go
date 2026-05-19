@@ -100,24 +100,14 @@ func assembleEmitInstr(a *Assembler, ins *Instr) {
 	}
 }
 
-// CoNoFree is set when a code object captures no free variables and
-// has no cell variables. CPython sets it in compute_code_flags after
-// flowgraph + symtable agree no closure cells are needed.
+// finalizeFlags returns unit.Flags unchanged. CPython 3.14's
+// compute_code_flags no longer sets CO_NOFREE; the bit was retired
+// when the C runtime stopped consulting it (cell handling is now
+// driven by len(c_cellvars) / len(c_freevars) directly), and dis.py
+// keeps the symbol only for backward compatibility. The hook stays
+// around for any future post-codegen flag massaging.
 //
-// CPython: Include/cpython/code.h CO_NOFREE
-const CoNoFree uint32 = 0x0040
-
-// finalizeFlags computes the assemble-side bits that depend on data
-// only available after codegen finishes: CO_NOFREE (no free or cell
-// variables) and a stable signature subset (CO_VARARGS, CO_VARKEYWORDS,
-// CO_GENERATOR, CO_COROUTINE, CO_ASYNC_GENERATOR were already set by
-// codegen; we leave them alone). Mirrors CPython's compute_code_flags.
-//
-// CPython: Python/compile.c:8061 compute_code_flags
+// CPython: Python/compile.c:1379 compute_code_flags
 func finalizeFlags(unit *Unit) uint32 {
-	flags := unit.Flags
-	if len(unit.FreeVars) == 0 && len(unit.CellVars) == 0 {
-		flags |= CoNoFree
-	}
-	return flags
+	return unit.Flags
 }

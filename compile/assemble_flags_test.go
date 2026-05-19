@@ -2,29 +2,13 @@ package compile
 
 import "testing"
 
-// TestFinalizeFlagsNoFree: a unit with no free or cell variables
-// gets CO_NOFREE set.
-func TestFinalizeFlagsNoFree(t *testing.T) {
+// TestFinalizeFlagsPassthrough: with CO_NOFREE retired in CPython
+// 3.14, finalizeFlags is a passthrough. Make sure it doesn't sneak
+// any extra bits onto a clean unit.
+func TestFinalizeFlagsPassthrough(t *testing.T) {
 	u := &Unit{Flags: CoOptimized}
-	got := finalizeFlags(u)
-	if got&CoNoFree == 0 {
-		t.Errorf("CoNoFree not set; flags=%#x", got)
-	}
-}
-
-// TestFinalizeFlagsWithCells: any cellvar suppresses CO_NOFREE.
-func TestFinalizeFlagsWithCells(t *testing.T) {
-	u := &Unit{Flags: CoOptimized, CellVars: []string{"x"}}
-	if got := finalizeFlags(u); got&CoNoFree != 0 {
-		t.Errorf("CoNoFree set despite cellvar; flags=%#x", got)
-	}
-}
-
-// TestFinalizeFlagsWithFrees: any freevar suppresses CO_NOFREE.
-func TestFinalizeFlagsWithFrees(t *testing.T) {
-	u := &Unit{Flags: CoOptimized, FreeVars: []string{"x"}}
-	if got := finalizeFlags(u); got&CoNoFree != 0 {
-		t.Errorf("CoNoFree set despite freevar; flags=%#x", got)
+	if got := finalizeFlags(u); got != CoOptimized {
+		t.Errorf("finalizeFlags added bits; flags=%#x want %#x", got, CoOptimized)
 	}
 }
 
