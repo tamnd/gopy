@@ -787,7 +787,7 @@ The type carries a `versionTag uint32` at `type.go:197` plus
 | P7.1 | `objects/type_slots.go`: full slot-table struct mirroring CPython `PyTypeObject` (nb_add, sq_length, mp_subscript, tp_call, tp_iter, ...). | TODO | - |
 | P7.2 | `_PyType_AssignSpecialMethods`: walk the MRO once at type creation, populate the slot table. | DONE | `d71cf26` (objects/type_inherit.go new; objects/type.go + objects/usertype.go inherit hook; objects/type_inherit_test.go gates) |
 | P7.3 | Type version tag (monotonic uint32 bumped on MRO mutation, class `__setattr__`, `__class__` reassignment). | TODO | - |
-| P7.4 | Operator dispatch (`abstract_binop.go`, `abstract_sequence.go`) consults the slot table first; falls back to `Lookup` only if slot nil. | TODO | - |
+| P7.4 | Operator dispatch (`abstract_binop.go`, `abstract_sequence.go`) consults the slot table first; falls back to `Lookup` only if slot nil. | DONE | objects/abstract_number.go `numberSlot` collapsed to single-field read on `o.Type().Number` after P7.2 inherit_slots port; sequence/mapping/async dispatch already used direct field load; objects/structseq.go documents the wholesale-replacement caveat. |
 | P7.5 | Invalidation hook: type-version change auto-stales every inline cache keyed on that version (interacts with P1). | TODO | - |
 
 **Gate.**
@@ -912,6 +912,55 @@ The type carries a `versionTag uint32` at `type.go:197` plus
    calling `numberSlot(t, accessor)` and walking the MRO. P7.2 is the
    prerequisite that makes P7.4 safe: now the bundle on every type
    is guaranteed populated.
+
+**Technical notes (P7.4 single-load operator dispatch).**
+
+1. `numberSlot` (objects/abstract_number.go:20) used to walk the full
+   MRO on every call: `for _, base := range o.Type().MRO { ... }`
+   then `op(base.Number)`. After P7.2's inherit_slots port populated
+   `t.Number` at type-creation time by COPYNUM-style deep-copy from
+   every ancestor, that per-dispatch loop is dead weight. The new
+   body is `n := o.Type().Number; if n == nil { return nil }; return
+   op(n)`, which is one field load and one nil check. Microbenchmark
+   on the int-add hot path: BenchmarkNumberAddIntsViaProtocol ~7.6
+   ns/op, 0 allocs; mul ~9.3 ns/op, 0 allocs. The MRO walk used to
+   be three iterations for the typical built-in (`Int -> Object` is
+   length 2; user types touch length 3+).
+2. Sequence / Mapping / Async dispatch sites (`abstract_sequence.go`,
+   `abstract_mapping.go`, `protocol.go`, `protocol_object.go`,
+   `seqiter.go`, `enum.go`) already used direct field reads on
+   `o.Type().Sequence` / `.Mapping` / `.Async`. The MRO walk only
+   ever lived in `numberSlot`; P7.4 brings the number protocol in
+   line with the rest of the bundles.
+3. structseq's wholesale-replacement quirk is documented in
+   objects/structseq.go: NewType pulls Tuple.Sequence (Length, Concat,
+   Repeat, GetItem, Contains) into the new type via
+   inheritProtocolPointers, but structseq then replaces the bundle
+   pointer wholesale, dropping the inherited slots. Attempting to
+   preserve them (populate in-place) is unsafe for structseq because
+   `tupleConcat` does `a.(*Tuple)` and gopy's `*StructSeq` is not a
+   `*Tuple` at the Go representation level. CPython gets away with
+   this because PyStructSequence_Type extends PyVarObject and shares
+   tuple's `ob_item`. Re-porting tuple Concat/Repeat against
+   `*StructSeq` is out of P7.4's scope and tracked as a separate
+   follow-up under [[project_structseq_repr_unify]].
+4. The dispatch saving is small per call (one MRO load + one
+   function-pointer call instead of a loop + indexing) but compounds
+   in operator-heavy loops. CPython's slot_tp_* dispatchers reach the
+   target slot via a single indirection through `tp_as_number`; the
+   inherit_slots COPYNUM pass at type-creation time is what makes
+   that single indirection sufficient. P7.4 mirrors that contract:
+   every type's Number bundle is fully populated, so the dispatcher
+   never has to consult a parent.
+5. Invariant: the bundle on every initialised type is populated
+   *before* any dispatcher reads it. This holds because (a) `NewType`
+   calls `inheritSlotsAllMRO` before returning, (b) `NewUserType`
+   calls `inheritSlotsAllMRO` again after `fixupSlotDispatchers`
+   installs per-type dispatchers from `__add__` / `__sub__` /
+   ... dunders, and (c) `PyType_Modified` re-runs the inherit pass
+   on the modified type and all subclasses, so any MRO mutation
+   (class `__bases__` reassignment, runtime `__class__` swap)
+   re-settles the bundles before the next dispatch.
 
 **Estimated win.** 1.5x on operator-heavy code (richards, deltablue,
 typing_runtime_protocols).
@@ -1377,14 +1426,14 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P0. pyperformance harness       | n/a (tooling)          | `bench/`                  | n/a           | WIP    | ca0bef1 |
 | P1. Specializer wire-up         | `Python/specialize.c`  | `specialize/`             | 6-10x         | WIP (P1.0-P1.3 done, P1.4-P1.6 open) | 67abc0a, 691c2d7, 71a9181, 6a8aace, 96130ac, 2f1f603 |
 | P2. Tier-2 (full-file ports)    | `Python/optimizer_bytecodes.c`, `Python/executor_cases.c.h` | `optimizer/`, `vm/eval_uops_gen.go` | 1.5-2x | WIP (scaffolding + JIT gate hardcoded off) | -      |
-| P3. PyLong fast path            | `Objects/longobject.c` | `objects/long_fast.go`    | 3x            | TODO   | -      |
+| P3. PyLong fast path            | `Objects/longobject.c` | `objects/long_fast.go`    | 3x            | DONE (P3.1-P3.4; P3.5 deferred behind Int repr refactor) | `d9e16d2` |
 | P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | TODO   | -      |
 | P5. Dict open-addressing        | `Objects/dictobject.c` | `objects/dict.go` (extend) | 2x           | WIP (open-addressed layout already in tree, split-keys + watcher API + KnownHash gaps remain) | - |
 | P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `vm/frame_pool.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go` | 1.5x | WIP (P6.2 done via spec 1716; P6.1/P6.3/P6.4 open) | spec 1716 |
-| P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`, `objects/type_inherit.go`, `objects/type_watcher.go` | 1.5x | WIP (P7.0 watcher API, P7.2 inherit_slots, P7.3 version invalidation done; P7.1/P7.4/P7.5 open) | `e94cf31`, `2d82694`, `d71cf26` |
+| P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`, `objects/type_inherit.go`, `objects/type_watcher.go` | 1.5x | WIP (P7.0 watcher API, P7.2 inherit_slots, P7.3 version invalidation, P7.4 single-load dispatch done; P7.1/P7.5 open) | `e94cf31`, `2d82694`, `d71cf26`, P7.4 this PR |
 | P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-106` | unblock 2 N/A | DONE | `02f6c40` |
 | P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go`, `objects/float_format.go`, `objects/int_bind.go`, `objects/float.go` | unblock 1 N/A | DONE | `a5d25ea`, `5512f4f` |
-| P10. Float fast path            | `Objects/floatobject.c` | `objects/float_pool.go`  | 2.5x          | TODO   | -      |
+| P10. Float fast path            | `Objects/floatobject.c` | `objects/float_fast.go`  | 2.5x          | DONE (P10.1/P10.2/P10.4; P10.3 tier-2 uops gated on P2 expansion) | `96ce4d9` |
 | P11. CFG optimizer + peephole   | `Python/flowgraph.c`   | `compile/flowgraph_cfg_passes.go` | 1.1x | DONE (spec 1716) | 9d7d9f0, 37563f5 |
 | P12. Generator fast path        | `Python/genobject.c`   | `objects/generator.go`, `vm/eval_gen.go` | 3x async | DONE (channel + goroutine model); P12.2 SEND tier-2 uop depends on P2.3 | - |
 | P13. GC tracking                | `Python/gc.c`          | `module/gc/`              | low geomean   | WIP (~90% done; thresholds + finalizer ordering pending) | - |

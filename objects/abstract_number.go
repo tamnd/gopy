@@ -10,23 +10,22 @@ package objects
 
 import "fmt"
 
-// numberSlot fetches op from the type's NumberMethods. Walks the MRO
-// so subclasses without their own NumberMethods inherit the parent's
-// slot table. CPython does the equivalent via inherit_slots() during
-// PyType_Ready, copying parent slot pointers when the child leaves them
-// NULL; here we resolve the inheritance lazily on each lookup.
+// numberSlot fetches op from the type's NumberMethods. Single field
+// load: P7.2's inherit_slots port populates t.Number at type-creation
+// time by walking the MRO once and deep-copying every nil slot from
+// the first ancestor that supplies it, so the per-dispatch MRO walk
+// CPython's slot_tp_* dispatchers would otherwise do (via tp_as_number
+// indirection + slot_nb_* lookup) collapses to a single field read
+// plus a nil check on the function pointer.
 //
-// CPython: Objects/typeobject.c:7895 inherit_slots
+// CPython: Objects/typeobject.c:8258 inherit_slots COPYNUM block (the
+// inherit pass that makes the per-dispatch walk unnecessary)
 func numberSlot(o Object, op func(*NumberMethods) func(a, b Object) (Object, error)) func(a, b Object) (Object, error) {
-	for _, base := range o.Type().MRO {
-		if base == nil || base.Number == nil {
-			continue
-		}
-		if fn := op(base.Number); fn != nil {
-			return fn
-		}
+	n := o.Type().Number
+	if n == nil {
+		return nil
 	}
-	return nil
+	return op(n)
 }
 
 // numberBinary walks LHS then RHS and returns the first concrete
