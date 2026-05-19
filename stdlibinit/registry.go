@@ -264,4 +264,10 @@ import (
 	// .pyc header magic), and check_hash_based_pycs.
 	// CPython: Python/import.c:4943 imp_module
 	_ "github.com/tamnd/gopy/module/_imp"
+
+	// Built-in module: marshal. Registers itself via module/marshal/module.go
+	// init(). Backs importlib._bootstrap_external + py_compile with the
+	// dumps / loads / dump / load entry points plus the version constant.
+	// CPython: Python/marshal.c:1949 marshal_methods
+	_ "github.com/tamnd/gopy/module/marshal"
 )
