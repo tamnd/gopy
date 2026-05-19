@@ -17,6 +17,7 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"unsafe"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -78,8 +79,47 @@ var ErrUnmarshallable = errors.New("marshal: object cannot be marshaled")
 //
 // CPython: Python/marshal.c PyMarshal_WriteObjectToFile
 func Dump(w io.Writer, v any) error {
-	enc := encoder{w: w}
+	enc := encoder{
+		w:           w,
+		refs:        map[refKey]int{},
+		sharedBytes: scanSharedBytes(v),
+	}
 	return enc.write(v)
+}
+
+// scanSharedBytes walks v counting linetable / exceptiontable
+// contents. Any blob that appears in more than one code object is
+// marked so writeCachedBytes will FLAG_REF + memo it; unique blobs
+// emit plain TYPE_STRING. co_code is always memoized regardless of
+// the count because _PyCode_GetCode caches it.
+//
+// CPython: Python/assemble.c:447 _PyCompile_ConstCacheMergeOne calls
+// CPython: Python/marshal.c:391 _PyObject_IsUniquelyReferenced.
+func scanSharedBytes(v any) map[string]bool {
+	counts := map[string]int{}
+	var visit func(x any)
+	visit = func(x any) {
+		switch t := x.(type) {
+		case *objects.Code:
+			counts[string(t.Linetable)]++
+			counts[string(t.ExceptionTable)]++
+			for _, k := range t.Consts {
+				visit(k)
+			}
+		case []any:
+			for _, k := range t {
+				visit(k)
+			}
+		}
+	}
+	visit(v)
+	out := make(map[string]bool, len(counts))
+	for s, c := range counts {
+		if c > 1 {
+			out[s] = true
+		}
+	}
+	return out
 }
 
 // Load reads one object from r in the version-5 wire format.
@@ -92,6 +132,165 @@ func Load(r io.Reader) (any, error) {
 
 type encoder struct {
 	w io.Writer
+	// refs maps already-emitted object identities to their assigned
+	// ref-table index. Mirrors CPython's WFILE.hashtable. CPython:
+	// Python/marshal.c:116 WFILE.hashtable.
+	refs  map[refKey]int
+	nrefs int
+	// depth tracks how deep into the object graph the encoder is at the
+	// moment refKeyFor is consulted. The root call sees depth==1; nested
+	// recursion increments further. CPython's w_ref uses Py_REFCNT(v)
+	// to decide skip vs memo: the outer code passed to marshal.dumps
+	// has refcount>=2 (caller frame + arg slot) so it memos with
+	// FLAG_REF, while an inner code object owned solely by its parent
+	// consts tuple has refcount==1 and skips entirely. We model the
+	// same emergent split via depth instead of refcounts.
+	//
+	// CPython: Python/marshal.c:391 _PyObject_IsUniquelyReferenced.
+	depth int
+	// sharedBytes records linetable / exceptiontable contents that
+	// appear in more than one code object. CPython funnels both through
+	// _PyCompile_ConstCacheMergeOne, so identical-content blobs end up
+	// as the same PyBytes object; once the compiler frees its
+	// c_const_cache the refcount on each blob equals the number of code
+	// objects that point at it. Marshal's w_ref then memoizes the ones
+	// with refcount > 1 and skips the singletons. We mirror that with a
+	// pre-pass walk over the code tree.
+	//
+	// CPython: Python/compile.c:159 Py_XDECREF(c->c_const_cache)
+	// CPython: Python/marshal.c:391 _PyObject_IsUniquelyReferenced.
+	sharedBytes map[string]bool
+}
+
+// literalString marks a string that originated as a literal inside a
+// code object's co_consts. CPython interns identifiers during parsing
+// via _PyUnicode_InternImmortal so their refcount is permanently > 1
+// and w_ref memoizes them with FLAG_REF + the _INTERNED tag; literals
+// in co_consts go through PyUnicode_FromString / parsestr which does
+// not intern, so the marshaled object has refcount 1 and w_ref skips
+// the memo entirely, emitting plain TYPE_SHORT_ASCII / TYPE_ASCII /
+// TYPE_UNICODE without FLAG_REF. marshalCode wraps consts strings in
+// this marker to drive the same split.
+//
+// CPython: Python/marshal.c:380 w_ref refcount skip
+// CPython: Parser/string_parser.c parsestr (literal path, no intern)
+type literalString string
+
+// refKind enumerates the comparable identity classes the encoder
+// deduplicates on. CPython keys directly on PyObject*; gopy uses a
+// tagged union because strings/bytes deduplicate by content (CPython
+// interns them) while *objects.Code deduplicates by pointer.
+type refKind uint8
+
+const (
+	refKindNone refKind = iota
+	refKindStr
+	refKindBytes
+	refKindSmallInt
+	refKindEmptyTuple
+	refKindCode
+)
+
+// refKey is a comparable identity for the marshal refs table.
+type refKey struct {
+	kind refKind
+	s    string  // str/bytes content
+	i    int64   // small int value
+	p    uintptr // pointer identity (code)
+}
+
+// refKeyFor decides whether v should participate in dedup, returning
+// (key, true) for dedupable values and the zero key with false to
+// skip. Mirrors w_ref's "skip if uniquely-referenced and not interned"
+// rule: scalars that aren't CPython singletons (floats, big ints,
+// non-empty tuples, non-empty mutable bytes) skip; everything else
+// (strings always interned in code objects, small ints in the -5..256
+// cache, empty container singletons, code objects at the root) goes
+// through the memo so a duplicate triggers TYPE_REF.
+//
+// Depth matters for code objects: CPython skips ref machinery when
+// Py_REFCNT(v) == 1. The outer code passed to marshal.dumps lives
+// on at least two Python stack frames (caller and arg slot) so it
+// has refcount >= 2 and lands in the refs table; a nested code held
+// solely by its parent consts tuple has refcount 1 and is skipped.
+//
+// CPython: Python/marshal.c:380 w_ref skip arm.
+func (e *encoder) refKeyFor(v any) (refKey, bool) {
+	switch x := v.(type) {
+	case literalString:
+		_ = x
+		return refKey{}, false
+	case string:
+		return refKey{kind: refKindStr, s: x}, true
+	case []byte:
+		// CPython treats empty b"" as a singleton (refcount > 1) and
+		// the cached co_code bytes also share, but a freshly built
+		// non-empty linetable is uniquely referenced. For the general
+		// dispatch we only memo the empty singleton here; marshalCode
+		// force-memos co_code through writeCodeBytes.
+		if len(x) == 0 {
+			return refKey{kind: refKindBytes}, true
+		}
+		return refKey{}, false
+	case int:
+		if isSmallIntCacheRange(int64(x)) {
+			return refKey{kind: refKindSmallInt, i: int64(x)}, true
+		}
+		return refKey{}, false
+	case int32:
+		if isSmallIntCacheRange(int64(x)) {
+			return refKey{kind: refKindSmallInt, i: int64(x)}, true
+		}
+		return refKey{}, false
+	case int64:
+		if isSmallIntCacheRange(x) {
+			return refKey{kind: refKindSmallInt, i: x}, true
+		}
+		return refKey{}, false
+	case []any:
+		if len(x) == 0 {
+			return refKey{kind: refKindEmptyTuple}, true
+		}
+		return refKey{}, false
+	case *objects.Code:
+		if e.depth > 1 {
+			return refKey{}, false
+		}
+		return refKey{kind: refKindCode, p: uintptr(unsafe.Pointer(x))}, true
+	}
+	return refKey{}, false
+}
+
+// isSmallIntCacheRange matches CPython's interpreter-wide cached
+// integers (-5..256, _PY_NSMALLNEGINTS / _PY_NSMALLPOSINTS). Those
+// PyLong objects are interned, so any reference from a code object's
+// const tuple sees refcount > 1 and w_ref memoizes with FLAG_REF.
+// Larger ints are freshly created, uniquely referenced, and skipped.
+//
+// CPython: Include/internal/pycore_global_objects_fini_generated.h
+// small_ints; Objects/longobject.c get_small_int.
+func isSmallIntCacheRange(x int64) bool {
+	return x >= -5 && x <= 256
+}
+
+// memoize stores key in the refs map at the next available index and
+// advances nrefs. CPython: Python/marshal.c:421 _Py_hashtable_set.
+func (e *encoder) memoize(key refKey) {
+	if e.refs == nil {
+		e.refs = map[refKey]int{}
+	}
+	e.refs[key] = e.nrefs
+	e.nrefs++
+}
+
+// writeRef emits a TYPE_REF tag pointing at the given index.
+//
+// CPython: Python/marshal.c:406 w_byte(TYPE_REF, ...).
+func (e *encoder) writeRef(idx int) error {
+	if err := e.writeByte(typeRef); err != nil {
+		return err
+	}
+	return e.writeInt32(int32(idx))
 }
 
 func (e *encoder) writeByte(b byte) error {
@@ -115,101 +314,188 @@ func (e *encoder) writeInt64(v int64) error {
 
 // write dispatches on the dynamic type of v. The accepted set is
 // documented in the package doc; anything else is a marshal error.
+// The w_object/w_ref split is faithful to CPython: short-circuit
+// singletons that get no FLAG_REF, otherwise do the memo lookup,
+// returning a TYPE_REF tag if seen before and falling through to
+// writeBody with FLAG_REF on first encounter.
 //
-// CPython: Python/marshal.c w_object
-//
-//nolint:gocyclo // mirrors CPython's per-type wire dispatch.
+// CPython: Python/marshal.c:458 w_object
 func (e *encoder) write(v any) error {
-	switch x := v.(type) {
-	case nil:
+	if v == nil {
 		return e.writeByte(typeNone)
-	case bool:
-		if x {
+	}
+	if b, ok := v.(bool); ok {
+		if b {
 			return e.writeByte(typeTrue)
 		}
 		return e.writeByte(typeFalse)
+	}
+
+	e.depth++
+	defer func() { e.depth-- }()
+
+	flag := byte(0)
+	if key, dedupable := e.refKeyFor(v); dedupable {
+		if idx, seen := e.refs[key]; seen {
+			return e.writeRef(idx)
+		}
+		e.memoize(key)
+		flag = flagRef
+	}
+	return e.writeBody(v, flag)
+}
+
+// writeBody emits the type byte (OR'd with flag) and the value's
+// payload. Counterpart to w_complex_object; w_ref has already decided
+// the FLAG_REF bit by the time we land here.
+//
+// CPython: Python/marshal.c:496 w_complex_object
+func (e *encoder) writeBody(v any, flag byte) error {
+	switch x := v.(type) {
 	case int:
-		return e.writeIntLike(int64(x))
+		return e.writeIntLike(int64(x), flag)
 	case int32:
-		return e.writeIntLike(int64(x))
+		return e.writeIntLike(int64(x), flag)
 	case int64:
-		return e.writeIntLike(x)
+		return e.writeIntLike(x, flag)
 	case *big.Int:
-		return writeLong(e.w, x, typeLong)
+		return writeLong(e.w, x, typeLong|flag)
 	case *objects.Code:
-		return marshalCode(e, x)
+		return marshalCode(e, x, flag)
 	case *objects.Set:
-		return e.writeSet(x)
+		return e.writeSet(x, flag)
 	case map[any]any:
-		return e.writeDict(x)
+		return e.writeDict(x, flag)
 	case complex128:
-		return e.writeComplex(x)
+		return e.writeComplex(x, flag)
 	case float64:
-		if err := e.writeByte(typeBinaryFloat); err != nil {
+		if err := e.writeByte(typeBinaryFloat | flag); err != nil {
 			return err
 		}
 		return e.writeInt64(int64(math.Float64bits(x)))
+	case literalString:
+		return e.writeUnicode(string(x), 0)
 	case string:
-		return e.writeUnicode(x)
+		return e.writeUnicode(x, flag)
 	case []byte:
-		if err := e.writeByte(typeString); err != nil {
+		if err := e.writeByte(typeString | flag); err != nil {
 			return err
 		}
 		if err := e.writeInt32(int32(len(x))); err != nil {
 			return err
 		}
-		_, err := e.w.Write(x)
-		return err
-	case []any:
-		if len(x) < 256 {
-			if err := e.writeByte(typeSmallTuple); err != nil {
-				return err
-			}
-			if err := e.writeByte(byte(len(x))); err != nil {
-				return err
-			}
-		} else {
-			if err := e.writeByte(typeTuple); err != nil {
-				return err
-			}
-			if err := e.writeInt32(int32(len(x))); err != nil {
-				return err
-			}
-		}
-		for _, item := range x {
-			if err := e.write(item); err != nil {
-				return err
-			}
+		if _, err := e.w.Write(x); err != nil {
+			return err
 		}
 		return nil
+	case []any:
+		return e.writeTuple(x, flag)
 	}
 	return fmt.Errorf("%w: %T", ErrUnmarshallable, v)
 }
 
-// writeIntLike picks TYPE_INT for values that fit in int32, falling
-// back to TYPE_INT64 for the rest.
+// writeTuple emits a tuple body. CPython picks TYPE_SMALL_TUPLE for
+// length < 256 and TYPE_TUPLE otherwise.
 //
-// CPython: Python/marshal.c w_object PyLong arm
-func (e *encoder) writeIntLike(v int64) error {
+// CPython: Python/marshal.c:584 w_complex_object PyTuple arm
+func (e *encoder) writeTuple(items []any, flag byte) error {
+	if len(items) < 256 {
+		if err := e.writeByte(typeSmallTuple | flag); err != nil {
+			return err
+		}
+		if err := e.writeByte(byte(len(items))); err != nil {
+			return err
+		}
+	} else {
+		if err := e.writeByte(typeTuple | flag); err != nil {
+			return err
+		}
+		if err := e.writeInt32(int32(len(items))); err != nil {
+			return err
+		}
+	}
+	for _, item := range items {
+		if err := e.write(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeCachedBytes emits a bytes payload that the compiler passed
+// through _PyCompile_ConstCacheMergeOne. The three call sites in
+// CPython's Python/assemble.c makecode are co_code (a_bytecode),
+// co_linetable (a_linetable), and co_exceptiontable (a_except_table).
+// alwaysShared marks the co_code path: _PyCode_GetCode caches the
+// bytes on the code object so it carries refcount > 1 regardless of
+// duplication and always memoizes with FLAG_REF. The other two only
+// take the FLAG_REF path when scanSharedBytes saw them in multiple
+// code objects (refcount > 1 after the compiler's const cache is
+// freed); uniquely-referenced ones emit plain TYPE_STRING and skip
+// the memo.
+//
+// CPython: Python/assemble.c:447 _PyCompile_ConstCacheMergeOne (except)
+// CPython: Python/assemble.c:450 _PyCompile_ConstCacheMergeOne (line)
+// CPython: Python/assemble.c:453 _PyCompile_ConstCacheMergeOne (code)
+// CPython: Python/marshal.c:686 w_complex_object PyCode arm.
+func (e *encoder) writeCachedBytes(b []byte, alwaysShared bool) error {
+	key := refKey{kind: refKindBytes, s: string(b)}
+	if idx, seen := e.refs[key]; seen {
+		return e.writeRef(idx)
+	}
+	memo := alwaysShared || len(b) == 0 || e.sharedBytes[string(b)]
+	if memo {
+		e.memoize(key)
+	}
+	tag := byte(typeString)
+	if memo {
+		tag |= flagRef
+	}
+	if err := e.writeByte(tag); err != nil {
+		return err
+	}
+	if err := e.writeInt32(int32(len(b))); err != nil {
+		return err
+	}
+	_, err := e.w.Write(b)
+	return err
+}
+
+// writeIntLike picks TYPE_INT for values that fit in int32. Anything
+// wider goes through TYPE_LONG, matching CPython's w_object PyLong
+// arm where the int32-overflow branch falls through to w_PyLong.
+// TYPE_INT64 ('I') is "not generated any more" per marshal.c so we
+// never emit it. flag carries FLAG_REF from the w_object dispatch.
+//
+// CPython: Python/marshal.c:88 TYPE_INT comment "Not generated any more"
+// CPython: Python/marshal.c:501 w_object PyLong arm
+func (e *encoder) writeIntLike(v int64, flag byte) error {
 	if v >= math.MinInt32 && v <= math.MaxInt32 {
-		if err := e.writeByte(typeInt); err != nil {
+		if err := e.writeByte(typeInt | flag); err != nil {
 			return err
 		}
 		return e.writeInt32(int32(v))
 	}
-	if err := e.writeByte(typeInt64); err != nil {
-		return err
-	}
-	return e.writeInt64(v)
+	return writeLong(e.w, big.NewInt(v), typeLong|flag)
 }
 
-// writeUnicode emits a string as TYPE_SHORT_ASCII when length < 256
-// and the bytes are 7-bit, else TYPE_UNICODE with a 4-byte length.
+// writeUnicode emits a string. CPython interns every string that
+// reaches the marshal layer through a code object (filename, name,
+// qualname, co_names, co_varnames, co_cellvars, co_freevars), and the
+// FLAG_REF bit is the proxy for that: w_object only memoizes strings
+// that participate in dedup, which gopy refKeyFor stamps for every
+// string. Pick TYPE_SHORT_ASCII_INTERNED / TYPE_ASCII_INTERNED when
+// flag carries FLAG_REF; otherwise TYPE_SHORT_ASCII / TYPE_ASCII /
+// TYPE_UNICODE.
 //
-// CPython: Python/marshal.c w_PyUnicode arm
-func (e *encoder) writeUnicode(s string) error {
+// CPython: Python/marshal.c:528 w_PyUnicode arm
+func (e *encoder) writeUnicode(s string, flag byte) error {
 	if len(s) < 256 && isASCII(s) {
-		if err := e.writeByte(typeShortASCII); err != nil {
+		tag := byte(typeShortASCII)
+		if flag != 0 {
+			tag = typeShortASCIIInterned
+		}
+		if err := e.writeByte(tag | flag); err != nil {
 			return err
 		}
 		if err := e.writeByte(byte(len(s))); err != nil {
@@ -218,7 +504,21 @@ func (e *encoder) writeUnicode(s string) error {
 		_, err := e.w.Write([]byte(s))
 		return err
 	}
-	if err := e.writeByte(typeUnicode); err != nil {
+	if isASCII(s) {
+		tag := byte(typeASCII)
+		if flag != 0 {
+			tag = typeASCIIInterned
+		}
+		if err := e.writeByte(tag | flag); err != nil {
+			return err
+		}
+		if err := e.writeInt32(int32(len(s))); err != nil {
+			return err
+		}
+		_, err := e.w.Write([]byte(s))
+		return err
+	}
+	if err := e.writeByte(typeUnicode | flag); err != nil {
 		return err
 	}
 	if err := e.writeInt32(int32(len(s))); err != nil {
@@ -338,7 +638,14 @@ func (d *decoder) decodeTag(tag byte) (any, error) {
 	case typeInt64:
 		return d.readInt64()
 	case typeLong:
-		return readLong(d.r)
+		bi, err := readLong(d.r)
+		if err != nil {
+			return nil, err
+		}
+		if bi.IsInt64() {
+			return bi.Int64(), nil
+		}
+		return bi, nil
 	case typeBinaryFloat:
 		bits, err := d.readInt64()
 		if err != nil {
@@ -420,15 +727,16 @@ func (d *decoder) readTuple(n int) ([]any, error) {
 	return out, nil
 }
 
-// writeSet encodes a set or frozenset.
+// writeSet encodes a set or frozenset. flag carries FLAG_REF from the
+// w_object dispatch.
 //
 // CPython: Python/marshal.c w_object PySet_Type / PyFrozenSet_Type
-func (e *encoder) writeSet(s *objects.Set) error {
+func (e *encoder) writeSet(s *objects.Set, flag byte) error {
 	tag := byte(typeSet)
 	if s.Type() == objects.FrozensetType {
 		tag = typeFrozenset
 	}
-	if err := e.writeByte(tag); err != nil {
+	if err := e.writeByte(tag | flag); err != nil {
 		return err
 	}
 	items := s.Items()
@@ -448,10 +756,11 @@ func (e *encoder) writeSet(s *objects.Set) error {
 }
 
 // writeDict encodes a map[any]any as TYPE_DICT with null terminator.
+// flag carries FLAG_REF from the w_object dispatch.
 //
 // CPython: Python/marshal.c w_object PyDict_Type
-func (e *encoder) writeDict(m map[any]any) error {
-	if err := e.writeByte(typeDict); err != nil {
+func (e *encoder) writeDict(m map[any]any, flag byte) error {
+	if err := e.writeByte(typeDict | flag); err != nil {
 		return err
 	}
 	for k, v := range m {
@@ -465,11 +774,12 @@ func (e *encoder) writeDict(m map[any]any) error {
 	return e.writeByte(typeNull)
 }
 
-// writeComplex encodes a complex128 as TYPE_BINARY_COMPLEX.
+// writeComplex encodes a complex128 as TYPE_BINARY_COMPLEX. flag
+// carries FLAG_REF from the w_object dispatch.
 //
 // CPython: Python/marshal.c w_object PyComplex_Type (binary form)
-func (e *encoder) writeComplex(c complex128) error {
-	if err := e.writeByte(typeBinaryComplex); err != nil {
+func (e *encoder) writeComplex(c complex128, flag byte) error {
+	if err := e.writeByte(typeBinaryComplex | flag); err != nil {
 		return err
 	}
 	if err := e.writeInt64(int64(math.Float64bits(real(c)))); err != nil {
