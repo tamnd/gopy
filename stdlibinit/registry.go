@@ -226,6 +226,12 @@ import (
 	// CPython: Modules/_posixsubprocess.c:1333 _posixsubprocessmodule
 	_ "github.com/tamnd/gopy/module/_posixsubprocess"
 
+	// Built-in module: _winapi. Registers itself via module/_winapi/
+	// module.go init(). Exposes the integer constants stdlib/shutil.py
+	// and stdlib/subprocess.py import at module top level on Windows.
+	// CPython: Modules/_winapi.c:3023 _winapi_exec
+	_ "github.com/tamnd/gopy/module/_winapi"
+
 	// Built-in module: _hashlib. Registers itself via
 	// module/_hashlib/module.go init(). Backs Lib/hashlib.py with the
 	// HASH object type and openssl_* convenience constructors using
@@ -256,4 +262,18 @@ import (
 	// init(). Backs Lib/socket.py with the low-level socket API.
 	// CPython: Modules/socketmodule.c:4040 socket_getaddrinfo
 	_ "github.com/tamnd/gopy/module/_socket"
+
+	// Built-in module: _imp. Registers itself via module/_imp/module.go
+	// init(). Exposes the slice of CPython's imp module consumed by
+	// importlib._bootstrap_external: source_hash (keyed SipHash-1-3 over
+	// the source buffer), pyc_magic_number_token (raw int form of the
+	// .pyc header magic), and check_hash_based_pycs.
+	// CPython: Python/import.c:4943 imp_module
+	_ "github.com/tamnd/gopy/module/_imp"
+
+	// Built-in module: marshal. Registers itself via module/marshal/module.go
+	// init(). Backs importlib._bootstrap_external + py_compile with the
+	// dumps / loads / dump / load entry points plus the version constant.
+	// CPython: Python/marshal.c:1949 marshal_methods
+	_ "github.com/tamnd/gopy/module/marshal"
 )

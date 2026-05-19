@@ -11,15 +11,14 @@ import (
 	"github.com/tamnd/gopy/symtable"
 )
 
-// visitDelete emits a delete sequence for each target. Names go to
-// nameOpDelete; attributes / subscripts route through the value
-// expression (visitAttribute / visitSubscript already pick the right
-// opcode based on Ctx).
+// visitDelete emits a delete sequence for each target. Each target's
+// location info comes from the target node itself, matching CPython's
+// VISIT_SEQ(c, expr, s->v.Delete.targets) dispatch.
 //
-// CPython: Python/codegen.c codegen_delete_targets / Delete case
+// CPython: Python/codegen.c:3003 Delete_kind in codegen_visit_stmt
 func (c *Compiler) visitDelete(s *ast.Delete) error {
 	for _, t := range s.Targets {
-		if err := c.deleteTarget(t, loc(s)); err != nil {
+		if err := c.deleteTarget(t); err != nil {
 			return err
 		}
 	}
@@ -27,15 +26,16 @@ func (c *Compiler) visitDelete(s *ast.Delete) error {
 }
 
 // deleteTarget routes a single `del` target to nameOpDelete /
-// visitAttribute / visitSubscript based on its concrete type.
+// visitAttribute / visitSubscript based on its concrete type. Names
+// take their location from the target itself; Attribute / Subscript
+// reuse their own visit helper which picks loc internally.
 //
-// CPython: Python/codegen.c codegen_delete_targets per-target dispatch
-func (c *Compiler) deleteTarget(t ast.Expr, l ast.Pos) error {
+// CPython: Python/codegen.c codegen_delete per-target visit_expr
+func (c *Compiler) deleteTarget(t ast.Expr) error {
 	switch tt := t.(type) {
 	case *ast.Name:
-		return c.nameOpDelete(tt.Id, l)
+		return c.nameOpDelete(tt.Id, loc(tt))
 	case *ast.Attribute:
-		// Attribute already routes by Ctx.
 		return c.visitAttribute(tt)
 	case *ast.Subscript:
 		return c.visitSubscript(tt)
@@ -49,9 +49,10 @@ func (c *Compiler) deleteTarget(t ast.Expr, l ast.Pos) error {
 //
 // CPython: Python/codegen.c:L5346 codegen_augassign
 func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
+	targetLoc := loc(s.Target)
 	switch t := s.Target.(type) {
 	case *ast.Name:
-		if err := c.nameOpLoad(t.Id, loc(s)); err != nil {
+		if err := c.nameOpLoad(t.Id, targetLoc); err != nil {
 			return err
 		}
 		if err := c.visitExpr(s.Value); err != nil {
@@ -62,14 +63,14 @@ func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
 			return err
 		}
 		c.addOpI(BINARY_OP, op, loc(s))
-		return c.nameOpStore(t.Id, loc(s))
+		return c.nameOpStore(t.Id, targetLoc)
 	case *ast.Attribute:
 		if err := c.visitExpr(t.Value); err != nil {
 			return err
 		}
-		c.addOpI(COPY, 1, loc(s))
+		c.addOpI(COPY, 1, targetLoc)
 		pool := poolNames
-		c.addOpName(LOAD_ATTR, &pool, t.Attr, loc(s))
+		c.addOpName(LOAD_ATTR, &pool, t.Attr, targetLoc)
 		if err := c.visitExpr(s.Value); err != nil {
 			return err
 		}
@@ -78,8 +79,8 @@ func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
 			return err
 		}
 		c.addOpI(BINARY_OP, op, loc(s))
-		c.addOpI(SWAP, 2, loc(s))
-		c.addOpName(STORE_ATTR, &pool, t.Attr, loc(s))
+		c.addOpI(SWAP, 2, targetLoc)
+		c.addOpName(STORE_ATTR, &pool, t.Attr, targetLoc)
 		return nil
 	case *ast.Subscript:
 		if err := c.visitExpr(t.Value); err != nil {
@@ -88,9 +89,9 @@ func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
 		if err := c.visitExpr(t.Slice); err != nil {
 			return err
 		}
-		c.addOpI(COPY, 2, loc(s))
-		c.addOpI(COPY, 2, loc(s))
-		c.addOpI(BINARY_OP, nbSubscr, loc(s))
+		c.addOpI(COPY, 2, targetLoc)
+		c.addOpI(COPY, 2, targetLoc)
+		c.addOpI(BINARY_OP, nbSubscr, targetLoc)
 		if err := c.visitExpr(s.Value); err != nil {
 			return err
 		}
@@ -99,8 +100,8 @@ func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
 			return err
 		}
 		c.addOpI(BINARY_OP, op, loc(s))
-		c.addOpI(SWAP, 3, loc(s))
-		c.addOp(STORE_SUBSCR, loc(s))
+		c.addOpI(SWAP, 3, targetLoc)
+		c.addOp(STORE_SUBSCR, targetLoc)
 		return nil
 	}
 	return fmt.Errorf("compile: AugAssign target %T not supported", s.Target)
@@ -219,7 +220,7 @@ func (c *Compiler) visitAssert(s *ast.Assert) error {
 		return nil
 	}
 	end := c.newLabel()
-	if err := c.codegenJumpIf(s.Test, end, true, loc(s)); err != nil {
+	if err := c.codegenJumpIf(s.Test, end, true); err != nil {
 		return err
 	}
 	c.addOpI(LOAD_COMMON_CONSTANT, constantAssertionError, loc(s))
@@ -229,7 +230,7 @@ func (c *Compiler) visitAssert(s *ast.Assert) error {
 		}
 		c.addOpI(CALL, 0, loc(s))
 	}
-	c.addOpI(RAISE_VARARGS, 1, loc(s))
+	c.addOpI(RAISE_VARARGS, 1, loc(s.Test))
 	c.useLabel(end)
 	return nil
 }

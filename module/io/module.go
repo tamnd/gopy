@@ -140,7 +140,10 @@ func Open(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 //
 // CPython: Modules/_io/_iomodule.c:199 _io_open_impl signature.
 type ioOpenArgs struct {
+	fileObj   objects.Object
 	file      string
+	fileFd    int
+	fileIsFd  bool
 	mode      string
 	buffering int
 	encoding  string
@@ -185,9 +188,20 @@ func bindIOOpenArgs(args []objects.Object, kwargs map[string]objects.Object) (*i
 	if bound[0] == nil {
 		return nil, fmt.Errorf("TypeError: open() missing required argument: 'file'")
 	}
-	a := &ioOpenArgs{}
+	a := &ioOpenArgs{fileObj: bound[0]}
 	var err error
-	if a.file, err = ioFileArg(bound[0]); err != nil {
+	if fd, ok := bound[0].(*objects.Int); ok {
+		// CPython open() accepts an existing file descriptor in addition
+		// to a path; FileIO's __init__ does the actual fdopen below.
+		//
+		// CPython: Modules/_io/_iomodule.c:319 raw creation with fd path
+		n, fits := fd.Int64()
+		if !fits {
+			return nil, fmt.Errorf("OverflowError: open() file descriptor too large")
+		}
+		a.fileIsFd = true
+		a.fileFd = int(n)
+	} else if a.file, err = ioFileArg(bound[0]); err != nil {
 		return nil, err
 	}
 	if a.mode, err = ioModeArg(bound[1]); err != nil {
@@ -223,6 +237,22 @@ func bindIOOpenArgs(args []objects.Object, kwargs map[string]objects.Object) (*i
 		return nil, err
 	}
 	return a, nil
+}
+
+// stripTextBit removes 't' from the mode string before passing it to
+// the raw FileIO constructor, which only understands the binary-mode
+// letters. Mirrors CPython's `raw_mode` derivation in _io_open_impl.
+//
+// CPython: Modules/_io/_iomodule.c:309 raw_mode buffer build
+func stripTextBit(mode string) string {
+	out := make([]byte, 0, len(mode))
+	for i := 0; i < len(mode); i++ {
+		if mode[i] == 't' {
+			continue
+		}
+		out = append(out, mode[i])
+	}
+	return string(out)
 }
 
 // ioFileArg extracts the path string from the file argument.
@@ -348,12 +378,25 @@ func ioOpenFlags(a *ioOpenArgs) (flag int, readable, writable bool) {
 // CPython: Modules/_io/_iomodule.c:319 raw creation through :440 wrapper
 func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 	flag, readable, writable := ioOpenFlags(a)
-	f, err := os.OpenFile(a.file, flag, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("OSError: %s", err.Error())
-	}
 	rawMode := a.mode
-	raw := NewFileIO(f, a.file, rawMode, readable, writable)
+	var raw objects.Object
+	if a.fileIsFd {
+		// Construct FileIO via its type-call slot so the existing
+		// integer-fd arm in fileIOCall runs (fdopen path).
+		//
+		// CPython: Modules/_io/_iomodule.c:329 PyObject_CallFunction(FileIO, ...)
+		obj, err := fileIOCall(nil, []objects.Object{a.fileObj, objects.NewStr(stripTextBit(a.mode))}, nil)
+		if err != nil {
+			return nil, err
+		}
+		raw = obj
+	} else {
+		f, err := os.OpenFile(a.file, flag, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("OSError: %s", err.Error())
+		}
+		raw = NewFileIO(f, a.file, rawMode, readable, writable)
+	}
 
 	buffering := a.buffering
 	lineBuffering := false
@@ -375,18 +418,19 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 	// Choose buffered class by readable/writable.
 	// CPython: Modules/_io/_iomodule.c:392 buffered selection.
 	var buffered objects.Object
+	var berr error
 	switch {
 	case readable && writable:
-		buffered, err = bufferedRandomCall(nil, []objects.Object{raw, objects.NewInt(int64(buffering))}, nil)
+		buffered, berr = bufferedRandomCall(nil, []objects.Object{raw, objects.NewInt(int64(buffering))}, nil)
 	case readable:
-		buffered, err = bufferedReaderCall(nil, []objects.Object{raw, objects.NewInt(int64(buffering))}, nil)
+		buffered, berr = bufferedReaderCall(nil, []objects.Object{raw, objects.NewInt(int64(buffering))}, nil)
 	case writable:
-		buffered, err = bufferedWriterCall(nil, []objects.Object{raw, objects.NewInt(int64(buffering))}, nil)
+		buffered, berr = bufferedWriterCall(nil, []objects.Object{raw, objects.NewInt(int64(buffering))}, nil)
 	default:
 		return nil, fmt.Errorf("ValueError: unknown mode: %q", a.mode)
 	}
-	if err != nil {
-		return nil, err
+	if berr != nil {
+		return nil, berr
 	}
 	if a.binary {
 		return buffered, nil

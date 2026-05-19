@@ -106,7 +106,7 @@ func (c *Compiler) emitCallPlain(e *ast.Call) error {
 	if err := c.visitExpr(e.Func); err != nil {
 		return err
 	}
-	c.addOp(PUSH_NULL, loc(e))
+	c.addOp(PUSH_NULL, loc(e.Func))
 	for _, a := range e.Args {
 		if err := c.visitExpr(a); err != nil {
 			return err
@@ -124,7 +124,7 @@ func (c *Compiler) emitCallKw(e *ast.Call) error {
 	if err := c.visitExpr(e.Func); err != nil {
 		return err
 	}
-	c.addOp(PUSH_NULL, loc(e))
+	c.addOp(PUSH_NULL, loc(e.Func))
 	for _, a := range e.Args {
 		if err := c.visitExpr(a); err != nil {
 			return err
@@ -154,7 +154,7 @@ func (c *Compiler) emitCallEx(e *ast.Call) error {
 	if err := c.visitExpr(e.Func); err != nil {
 		return err
 	}
-	c.addOp(PUSH_NULL, loc(e))
+	c.addOp(PUSH_NULL, loc(e.Func))
 	c.addOpI(BUILD_LIST, 0, loc(e))
 	pending := 0
 	flushArgs := func() {

@@ -323,6 +323,8 @@ func pathEntries() []struct {
 		{"isfile", objects.NewBuiltinFunction("isfile", isfile)},
 		{"isdir", objects.NewBuiltinFunction("isdir", isdir)},
 		{"exists", objects.NewBuiltinFunction("exists", exists)},
+		{"islink", objects.NewBuiltinFunction("islink", islink)},
+		{"lexists", objects.NewBuiltinFunction("lexists", lexists)},
 		{"commonprefix", objects.NewBuiltinFunction("commonprefix", commonprefix)},
 		{"expanduser", objects.NewBuiltinFunction("expanduser", expanduser)},
 		{"realpath", objects.NewBuiltinFunction("realpath", abspath)},
@@ -484,6 +486,36 @@ func exists(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 		return nil, err
 	}
 	_, ferr := goos.Stat(s)
+	return objects.NewBool(ferr == nil), nil
+}
+
+// islink returns true when path names a symbolic link. Uses lstat so a
+// dangling symlink still reports as a link.
+//
+// CPython: Lib/genericpath.py:60 islink
+func islink(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, err := argString(args)
+	if err != nil {
+		return nil, err
+	}
+	info, ferr := goos.Lstat(s)
+	if ferr != nil {
+		//nolint:nilerr // CPython genericpath.islink swallows OSError, returns False
+		return objects.NewBool(false), nil
+	}
+	return objects.NewBool(info.Mode()&goos.ModeSymlink != 0), nil
+}
+
+// lexists tests whether a path exists, treating broken symlinks as
+// existing. Returns false on any stat error.
+//
+// CPython: Lib/genericpath.py:26 lexists
+func lexists(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, err := argString(args)
+	if err != nil {
+		return nil, err
+	}
+	_, ferr := goos.Lstat(s)
 	return objects.NewBool(ferr == nil), nil
 }
 

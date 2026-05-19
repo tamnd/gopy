@@ -3,6 +3,8 @@
 // getversion.c, getplatform.c, getcompiler.c, and getcopyright.c.
 package build
 
+import "runtime"
+
 // Version is the gopy release version. Bumped per release tag.
 const Version = "0.12.1"
 
@@ -24,5 +26,5 @@ const PythonMinorVersion = 14
 // CPython: Python/getversion.c:27 Py_GetVersion
 func VersionString() string {
 	return "gopy " + Version + " (" + PythonCompatVersion + ") [" +
-		Compiler() + " " + Platform() + "]"
+		Compiler() + " " + runtime.GOOS + "/" + runtime.GOARCH + "]"
 }

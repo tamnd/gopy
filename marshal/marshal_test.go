@@ -67,13 +67,12 @@ func TestVersionConstant(t *testing.T) {
 }
 
 // TestTypeLongRoundtrip pins *big.Int encode/decode for values that
-// don't fit in int64.
+// don't fit in int64. The decoder downcasts TYPE_LONG payloads whose
+// magnitude fits in int64 because every callsite (module/marshal
+// wrap, the VM int-loading path) treats Python int as int64 when it
+// can; *big.Int is only handed back when the magnitude truly overflows.
 func TestTypeLongRoundtrip(t *testing.T) {
 	cases := []*big.Int{
-		big.NewInt(0),
-		big.NewInt(1),
-		big.NewInt(-1),
-		big.NewInt(0x7FFFFFFFFFFFFFFF),
 		new(big.Int).Lsh(big.NewInt(1), 100), // 2^100
 		new(big.Int).Neg(new(big.Int).Lsh(big.NewInt(1), 100)),
 	}
@@ -240,10 +239,10 @@ func TestTypeCodeNestedConst(t *testing.T) {
 }
 
 // TestTypeLongLimbArithmetic pins the limb encode/decode for a value
-// that exercises multiple 15-bit limbs.
+// that exercises multiple 15-bit limbs. 2^70 still doesn't fit in
+// int64 so the load path stays on the *big.Int branch.
 func TestTypeLongLimbArithmetic(t *testing.T) {
-	// 2^30 = 1073741824; needs at least two 15-bit limbs.
-	v := new(big.Int).Lsh(big.NewInt(1), 30)
+	v := new(big.Int).Lsh(big.NewInt(1), 70)
 	var buf bytes.Buffer
 	if err := Dump(&buf, v); err != nil {
 		t.Fatal(err)

@@ -106,11 +106,13 @@ func liftCode(c *compile.Code) *objects.Code {
 		Stacksize:       c.Stacksize,
 		Flags:           int(c.Flags),
 		Code:            c.Code,
-		Consts:          c.Consts,
+		Consts:          liftRunConsts(c.Consts),
 		Names:           c.Names,
 		Varnames:        c.VarNames,
 		Freevars:        c.FreeVars,
 		Cellvars:        c.CellVars,
+		LocalsplusNames: c.LocalsPlusNames,
+		LocalsplusKinds: c.LocalsPlusKinds,
 		Filename:        c.Filename,
 		Name:            c.Name,
 		Qualname:        c.Qualname,
@@ -121,4 +123,32 @@ func liftCode(c *compile.Code) *objects.Code {
 	out.Init(objects.CodeType)
 	specialize.Enable(out)
 	return out
+}
+
+// liftRunConsts mirrors vm.liftConsts: lift nested compile-pipeline
+// value types into marshal-friendly forms so a code object produced
+// by RunString can later go through marshal.Dump.
+//
+// CPython: Python/compile.c assemble_consts paths (each child code is
+// already a PyObject* so this conversion is implicit there).
+func liftRunConsts(consts []any) []any {
+	out := make([]any, len(consts))
+	for i, v := range consts {
+		out[i] = liftRunConst(v)
+	}
+	return out
+}
+
+func liftRunConst(v any) any {
+	switch x := v.(type) {
+	case *compile.Code:
+		return liftCode(x)
+	case *compile.ConstTuple:
+		items := make([]any, len(x.Values))
+		for i, raw := range x.Values {
+			items[i] = liftRunConst(raw)
+		}
+		return items
+	}
+	return v
 }

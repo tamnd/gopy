@@ -271,11 +271,13 @@ func liftCompileCode(c *compile.Code) *objects.Code {
 		Stacksize:       c.Stacksize,
 		Flags:           int(c.Flags),
 		Code:            c.Code,
-		Consts:          c.Consts,
+		Consts:          liftCompileConsts(c.Consts),
 		Names:           c.Names,
 		Varnames:        c.VarNames,
 		Freevars:        c.FreeVars,
 		Cellvars:        c.CellVars,
+		LocalsplusNames: c.LocalsPlusNames,
+		LocalsplusKinds: c.LocalsPlusKinds,
 		Filename:        c.Filename,
 		Name:            c.Name,
 		Qualname:        c.Qualname,
@@ -285,4 +287,35 @@ func liftCompileCode(c *compile.Code) *objects.Code {
 	}
 	out.Init(objects.CodeType)
 	return out
+}
+
+// liftCompileConsts walks a Code.Consts slice and converts
+// compile-pipeline value types into marshal-friendly forms:
+// *compile.Code becomes *objects.Code (recursively lifted) and
+// *compile.ConstTuple becomes []any (recursively lifted). Scalars
+// pass through unchanged. Without this lift the .pyc marshal layer
+// refuses nested code objects.
+//
+// CPython: Python/compile.c assemble_consts paths (each child code
+// is already a PyObject* so this conversion is implicit there).
+func liftCompileConsts(consts []any) []any {
+	out := make([]any, len(consts))
+	for i, v := range consts {
+		out[i] = liftCompileConst(v)
+	}
+	return out
+}
+
+func liftCompileConst(v any) any {
+	switch x := v.(type) {
+	case *compile.Code:
+		return liftCompileCode(x)
+	case *compile.ConstTuple:
+		items := make([]any, len(x.Values))
+		for i, raw := range x.Values {
+			items[i] = liftCompileConst(raw)
+		}
+		return items
+	}
+	return v
 }

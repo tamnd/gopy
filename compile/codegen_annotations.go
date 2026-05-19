@@ -67,7 +67,10 @@ func (c *Compiler) emitAnnotateBody(innerScope *symtable.Entry, deferred []defer
 
 	c.enterScope(innerScope)
 
-	c.addOpI(RESUME, 0, l)
+	// RESUME loc = LOCATION(firstlineno, firstlineno, 0, 0). Mirrors
+	// CPython codegen_enter_scope.
+	first := c.unit().FirstLineno
+	c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
 	// The annotate function takes a single positional argument named
 	// "format". CPython's generated __annotate__ raises
 	// NotImplementedError for format > VALUE_WITH_FAKE_GLOBALS (2)

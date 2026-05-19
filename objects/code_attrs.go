@@ -112,6 +112,15 @@ func wrapConstAttr(v any) Object {
 		return NewBytes(x)
 	case *Code:
 		return x
+	case []any:
+		// Lifted tuple constants (see vm.liftConsts) arrive here when
+		// dis.py reads co_consts on a code whose nested tuples were
+		// already flattened for marshal.
+		items := make([]Object, len(x))
+		for i, raw := range x {
+			items[i] = wrapConstAttr(raw)
+		}
+		return NewTuple(items)
 	case Object:
 		return x
 	}

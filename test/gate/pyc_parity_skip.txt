@@ -1,0 +1,20 @@
+# Spec 1713 byte-equality skip list. Format: `<path> # <reason>` per
+# line. Each entry pins a tracked divergence. When a divergence is
+# fixed in the marshal / codegen / flowgraph layers, drop the line.
+
+# Marshal writer: FLAG_REF not attached to non-interned const strings
+# that the rest of the stream references back via TYPE_REF. CPython
+# tags the original `s` (TYPE_STRING) and `u` (TYPE_UNICODE) emission
+# with 0x80 so a later w_ref can short-circuit; gopy still emits the
+# bare type byte and re-encodes the literal. _PyObject_IsUniquelyReferenced
+# / w_ref interaction in marshal/writer.go needs the cpython refcount
+# parity pass.
+test/gate/disdata/print_str_bytes_call.py # marshal FLAG_REF on non-interned str const (bytes(s))
+test/gate/disdata/print_unicode_str.py # marshal FLAG_REF on non-interned unicode const ('\xe9')
+
+# Codegen / assemble.c location table: the walrus operator emits an
+# extra column-span entry vs CPython, so the compressed location
+# bytes diverge by two bytes even though the bytecode stream matches.
+# Driven by NamedExpr source-position handling in compile/codegen.go.
+test/gate/disdata/walrus_simple.py # location table diverges on NamedExpr (walrus :=)
+test/gate/disdata/walrus_in_var.py # location table diverges on NamedExpr (walrus :=)

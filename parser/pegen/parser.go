@@ -239,9 +239,15 @@ func (p *Parser) Mark() int { return p.mark }
 // token is p.tokens[mark-1]. Returns ast.NoPos when startMark is
 // out of range or the run is empty.
 //
-// CPython: Tools/peg_generator/pegen/c_generator.py EXTRA macro
-// (start_lineno / start_col_offset / end_lineno / end_col_offset
-// captured from the parser's mark/end_mark).
+// The end-position search walks backward past ENDMARKER / NEWLINE /
+// INDENT / DEDENT so the AST node ends at the last token that carries
+// source content. Without this, compound statements (function_def,
+// class_def, for/while/if/with/try) inherit the position of the
+// trailing DEDENT — the line of the next top-level statement, with
+// col_offset == -1 — which then leaks into co_linetable.
+//
+// CPython: Parser/pegen.c:488 _PyPegen_get_last_nonnwhitespace_token
+// + Tools/peg_generator/pegen/c_generator.py EXTRA macro.
 func (p *Parser) Span(startMark int) ast.Pos {
 	if startMark < 0 || startMark >= len(p.tokens) {
 		return ast.NoPos
@@ -252,6 +258,13 @@ func (p *Parser) Span(startMark int) ast.Pos {
 	}
 	if end >= len(p.tokens) {
 		end = len(p.tokens) - 1
+	}
+	for end > startMark {
+		t := p.tokens[end]
+		if t.Type != token.ENDMARKER && (t.Type < token.NEWLINE || t.Type > token.DEDENT) {
+			break
+		}
+		end--
 	}
 	st := p.tokens[startMark]
 	et := p.tokens[end]

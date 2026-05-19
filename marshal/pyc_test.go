@@ -93,14 +93,20 @@ func TestReadPycBadMagic(t *testing.T) {
 	}
 }
 
-// TestMagicNumberFormat pins that MagicNumber has b'\r\n' in the high
-// two bytes, matching CPython's text-transfer-detection convention.
+// TestMagicNumberFormat pins that MagicNumber writes b'\r\n' at bytes
+// 2 and 3 of the on-disk header, matching CPython's
+// text-transfer-detection convention. The check goes through the same
+// little-endian PutUint32 path WritePyc uses, so it catches the
+// uint16-vs-byte-order confusion that shipped on the original Phase 1
+// commit.
 //
 // CPython: Lib/importlib/_bootstrap_external.py:L246 MAGIC_NUMBER
 func TestMagicNumberFormat(t *testing.T) {
-	hi := MagicNumber >> 16
-	if hi != 0x0D0A {
-		t.Errorf("MagicNumber high bytes = 0x%04x, want 0x0D0A (\\r\\n)", hi)
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], MagicNumber)
+	want := [4]byte{0x2b, 0x0e, '\r', '\n'}
+	if buf != want {
+		t.Errorf("MagicNumber bytes = % x, want % x", buf[:], want[:])
 	}
 }
 

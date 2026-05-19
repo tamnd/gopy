@@ -129,7 +129,10 @@ func (c *Compiler) emitInnerComprehensionCode(innerScope *symtable.Entry,
 	outerCaches := c.savedCaches()
 
 	c.enterScope(innerScope)
-	c.addOpI(RESUME, 0, loc(key))
+	// RESUME loc = LOCATION(firstlineno, firstlineno, 0, 0). Mirrors
+	// CPython codegen_enter_scope.
+	first := c.unit().FirstLineno
+	c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
 
 	// Implicit .0 parameter: the outermost iter.
 	c.declareArg(".0")

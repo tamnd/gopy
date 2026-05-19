@@ -88,10 +88,10 @@ func TestUnaryNegEmitsUnaryNegative(t *testing.T) {
 	}
 }
 
-func TestUnaryPlusIsIdentity(t *testing.T) {
+func TestUnaryPlusEmitsCallIntrinsicUnaryPositive(t *testing.T) {
 	e := &ast.UnaryOp{Op: ast.UAdd, Operand: cnst(int64(1))}
 	u := compileMod(t, exprMod(e))
-	want := []string{"LOAD_CONST", "POP_TOP", "LOAD_CONST", "RETURN_VALUE"}
+	want := []string{"LOAD_CONST", "CALL_INTRINSIC_1", "POP_TOP", "LOAD_CONST", "RETURN_VALUE"}
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}

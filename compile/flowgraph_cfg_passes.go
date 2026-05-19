@@ -232,22 +232,28 @@ func appendConst(consts *[]any, v any) int {
 	return len(*consts) - 1
 }
 
-// isFoldableUnary reports whether op is one of the three unary opcodes
-// the folder rewrites.
+// isFoldableUnary reports whether (op, oparg) names one of the four
+// unary forms the folder rewrites. CALL_INTRINSIC_1 only qualifies for
+// oparg == INTRINSIC_UNARY_POSITIVE, mirroring the assertion in
+// eval_const_unaryop.
 //
 // CPython: Python/flowgraph.c:1898 eval_const_unaryop opcode switch
-func isFoldableUnary(op Opcode) bool {
+func isFoldableUnary(op Opcode, oparg int32) bool {
 	switch op {
 	case UNARY_NEGATIVE, UNARY_INVERT, UNARY_NOT:
 		return true
+	case CALL_INTRINSIC_1:
+		return oparg == intrinsicUnaryPositive
 	}
 	return false
 }
 
 // evalConstUnaryop applies one unary opcode to a const operand, mirroring
-// CPython's PyNumber_Negative / PyNumber_Invert / bool(!x) dispatch.
-// Returns ok=false when the operand type is not foldable (e.g. unary
-// negate of a string) or would overflow the int64 representation.
+// CPython's PyNumber_Negative / PyNumber_Invert / bool(!x) /
+// PyNumber_Positive dispatch. Returns ok=false when the operand type
+// is not foldable (e.g. unary negate of a string) or would overflow the
+// int64 representation. The CALL_INTRINSIC_1 case is only valid for
+// oparg == INTRINSIC_UNARY_POSITIVE; callers gate via isFoldableUnary.
 //
 // CPython: Python/flowgraph.c:1894 eval_const_unaryop
 func evalConstUnaryop(op Opcode, operand any) (any, bool) {
@@ -272,6 +278,11 @@ func evalConstUnaryop(op Opcode, operand any) (any, bool) {
 			return nil, false
 		}
 		return !b, true
+	case CALL_INTRINSIC_1:
+		switch operand.(type) {
+		case int64, float64, complex128:
+			return operand, true
+		}
 	}
 	return nil, false
 }
@@ -1383,7 +1394,7 @@ func basicblockFoldConstUnaryop(bb *basicblock, consts *[]any) int {
 	folded := 0
 	for i := 1; i < len(bb.Instr); i++ {
 		ins := &bb.Instr[i]
-		if !isFoldableUnary(ins.Op) {
+		if !isFoldableUnary(ins.Op, ins.Oparg) {
 			continue
 		}
 		operand, ok := cfgLoadsConstValue(&bb.Instr[i-1], *consts)

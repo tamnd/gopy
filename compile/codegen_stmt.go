@@ -298,16 +298,30 @@ func (c *Compiler) visitExprStmt(s *ast.ExprStmt) error {
 // differently (RETURN_VALUE in a generator raises StopIteration with
 // the value); that path lands when generators land.
 //
-// CPython: Python/codegen.c:L2191 codegen_return
+// CPython: Python/codegen.c:2191 codegen_return
 func (c *Compiler) visitReturn(s *ast.Return) error {
-	if s.Value == nil {
-		c.addLoadConst(nil, loc(s))
-	} else {
+	l := loc(s)
+	_, valueIsConst := s.Value.(*ast.Constant)
+	preserveTOS := s.Value != nil && !valueIsConst
+
+	if preserveTOS {
 		if err := c.visitExpr(s.Value); err != nil {
 			return err
 		}
+	} else if s.Value != nil {
+		l = loc(s.Value)
+		c.addOp(NOP, l)
 	}
-	c.addOp(RETURN_VALUE, loc(s))
+	if s.Value == nil || loc(s.Value).Lineno != loc(s).Lineno {
+		l = loc(s)
+		c.addOp(NOP, l)
+	}
+	if s.Value == nil {
+		c.addLoadConst(nil, l)
+	} else if !preserveTOS {
+		c.addLoadConst(s.Value.(*ast.Constant).Value, l)
+	}
+	c.addOp(RETURN_VALUE, l)
 	return nil
 }
 
@@ -325,7 +339,7 @@ func (c *Compiler) visitAssign(s *ast.Assign) error {
 		c.addOpI(COPY, 1, loc(s))
 	}
 	for _, target := range s.Targets {
-		if err := c.assignTo(target, loc(s)); err != nil {
+		if err := c.assignTo(target, loc(target)); err != nil {
 			return err
 		}
 	}
@@ -393,7 +407,11 @@ func (c *Compiler) assignToSequence(elts ast.Seq[ast.Expr], l ast.Pos) error {
 		c.addOpI(UNPACK_EX, int32((countAfter<<8)|countBefore), l)
 	}
 	for _, e := range elts {
-		if err := c.assignTo(e, l); err != nil {
+		inner := e
+		if star, ok := e.(*ast.Starred); ok {
+			inner = star.Value
+		}
+		if err := c.assignTo(inner, loc(inner)); err != nil {
 			return err
 		}
 	}

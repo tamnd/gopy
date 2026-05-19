@@ -2,7 +2,7 @@
 
 CPython's Lib/importlib/util.py re-exports symbols from the import
 machinery's _bootstrap and _bootstrap_external modules, which gopy
-doesn't ship. The pkgutil/unittest.mock load path only references
+doesn't fully ship. The pkgutil/unittest.mock load path only references
 MAGIC_NUMBER at module load (inside a function body) plus find_spec
 later; resolve_name doesn't touch util at all. Until spec 1711 Phase
 9 wires the full importlib port this stub keeps the import chain
@@ -15,30 +15,13 @@ import os
 import sys
 import types
 
-# 16-bit magic + 0x0a0d, identical to CPython 3.14's pyc magic. Used
-# only by pkgutil.read_code in code paths gopy doesn't currently hit.
-#
-# CPython: Lib/importlib/_bootstrap_external.py MAGIC_NUMBER
-MAGIC_NUMBER = b'\x74\x0e\r\n'
-
-
-def source_from_cache(path):
-    """Strip the .pyc tail and return the .py path. CPython resolves
-    __pycache__/name.cpython-NN.pyc; gopy doesn't write caches yet so
-    the simple inverse is enough for test.support's script_helper.
-
-    CPython: Lib/importlib/_bootstrap_external.py source_from_cache
-    """
-    if not path.endswith('.pyc'):
-        raise ValueError(f'{path!r} is not a .pyc path')
-    return path[:-1]
-
-
-def cache_from_source(path, debug_override=None, *, optimization=None):
-    """Inverse of source_from_cache."""
-    if not path.endswith('.py'):
-        raise ValueError(f'{path!r} is not a .py path')
-    return path + 'c'
+from importlib._bootstrap_external import (
+    MAGIC_NUMBER,
+    cache_from_source,
+    decode_source,
+    source_from_cache,
+    source_hash,
+)
 
 
 class _SourceFileLoader:
@@ -144,10 +127,6 @@ def spec_from_loader(name, loader, *, origin=None, is_package=None):
 def spec_from_file_location(name, location=None, *, loader=None,
                             submodule_search_locations=None):
     raise NotImplementedError("importlib.util.spec_from_file_location is unavailable in gopy")
-
-
-def source_hash(source_bytes):
-    raise NotImplementedError("importlib.util.source_hash is unavailable in gopy")
 
 
 def resolve_name(name, package):
