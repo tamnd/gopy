@@ -89,24 +89,48 @@ func TestPycParity(t *testing.T) {
 	}
 }
 
-// batchCompile invokes `bin -m py_compile <files...>` once for the
-// whole batch. py_compile.main accepts an arbitrary file list and
-// compiles each into its own __pycache__ entry, so we pay interpreter
-// startup just once per side.
+// batchCompile invokes `bin -m py_compile <files...>` for the whole
+// batch, chunked so a single invocation's command line stays under
+// Windows' CreateProcess limit (~32 KiB). py_compile.main accepts an
+// arbitrary file list and compiles each into its own __pycache__
+// entry, so we still pay interpreter startup only a handful of times
+// per side instead of once per fixture.
 func batchCompile(t *testing.T, bin string, files []string) {
 	t.Helper()
 	if len(files) == 0 {
 		return
 	}
-	args := append([]string{"-m", "py_compile"}, files...)
-	cmd := exec.CommandContext(t.Context(), bin, args...)
-	// Leave cwd alone so gopy's findStdlibRoot can walk up from the
-	// test/gate directory to the repo root; CPython resolves its
-	// own stdlib independently.
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s -m py_compile <%d files>: %v\noutput:\n%s", bin, len(files), err, out)
+	for _, chunk := range chunkForCmdline(files, 24000) {
+		args := append([]string{"-m", "py_compile"}, chunk...)
+		cmd := exec.CommandContext(t.Context(), bin, args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s -m py_compile <%d files>: %v\noutput:\n%s", bin, len(chunk), err, out)
+		}
 	}
+}
+
+// chunkForCmdline groups paths so the joined command line stays below
+// budget bytes. Windows' CreateProcess caps the lpCommandLine string
+// at 32767 chars; we target 24 KiB so the bin path + "-m py_compile"
+// prefix and per-arg quoting overhead stay safely inside the limit.
+func chunkForCmdline(files []string, budget int) [][]string {
+	var chunks [][]string
+	start, used := 0, 0
+	for i, f := range files {
+		// +1 accounts for the separating space and worst-case quoting.
+		cost := len(f) + 1
+		if i > start && used+cost > budget {
+			chunks = append(chunks, files[start:i])
+			start = i
+			used = 0
+		}
+		used += cost
+	}
+	if start < len(files) {
+		chunks = append(chunks, files[start:])
+	}
+	return chunks
 }
 
 func diffPyc(t *testing.T, cacheDir, stem string) {
