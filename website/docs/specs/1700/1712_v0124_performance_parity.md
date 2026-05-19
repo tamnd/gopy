@@ -2101,10 +2101,19 @@ Critical pickle protocol-5 opcodes from `Modules/_pickle.c:107-137`:
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P14.1 | `module/_pickle/`: Go-native pickle protocol 5 encoder + decoder. Full port of `Modules/_pickle.c` (8500 LOC). | TODO | - |
+| P14.1 | `module/_pickle/`: Go-native pickle protocol 5 encoder + decoder. Full port of `Modules/_pickle.c` (8500 LOC). | WIP | - |
 | P14.2 | `module/_elementtree/`: thin wrapper over `encoding/xml` matching the cpython `_elementtree` API. Full port of `Modules/_elementtree.c` (4000 LOC). | TODO | - |
 | P14.3 | `module/_sqlite3/`: cgo binding to libsqlite3 or pure Go via `modernc.org/sqlite`. Full port of `Modules/_sqlite/` (6000 LOC). | TODO | - |
 | P14.4 | `module/_csv/`: Go-native csv reader/writer matching `Modules/_csv.c` (1600 LOC). | WIP | - |
+
+**Notes.**
+
+`module/_datetime` pickle pathway (date, time, datetime, timedelta, timezone):
+
+- The bytes-state fast path (`PyDateTime_*_DATASIZE` buffer plus optional tzinfo) must live inside `TpNew`, not just in a Python-level `__new__` wrapper. Pickle's REDUCE opcode runs `cls(*args)` which enters `type.__call__` then `cls.TpNew` directly, bypassing the Python attribute lookup. A `tp_new_wrapper`-shaped Builtin only catches direct `cls.__new__(cls, bytes)` calls.
+- gopy does not carry a tzinfo base type. CPython 3.14 has timezone inherit `__reduce__` from `tzinfo.tp_methods.__reduce__` (`_datetimemodule.c:4140 tzinfo_reduce`), which calls `__getinitargs__` and wraps into `(cls, init_args)`. Without porting that onto Timezone, proto 2+ falls through to `object.__reduce_ex__` -> `reduceNewobj`, which only consults `__getnewargs__` / `__getnewargs_ex__`. Result: `(cls.__new__, (cls,), None, ...)` and unpickle calls `timezone()` with zero args.
+- Proto 0/1 has no BYTES opcode, so pickle encodes bytes-state payloads as a `latin1` string. When the payload includes bytes >= 0x80, the wire form is the UTF-8 encoding of the latin1 string (e.g. `\xd0\x90` -> `\xc3\x90\xc2\x90`). `Unicode.Value()` returns the decoded string, and `[]byte(v)` rebuilds the original payload byte-for-byte.
+- Pickle's GLOBAL opcode reads `module\nname\n` and looks up `cls.__module__` + `cls.__qualname__`. Static types like Date carry `tp_name = "datetime.date"`. `objects/type_getsets.go` now parses the dotted form (`strrchr(tp_name, '.')`) so `__module__` is everything before the last dot and `__name__` / `__qualname__` are the tail.
 
 **Gate.** `pickle` / `unpickle` benches drop to under 3x cpython.
 `xml_etree_*` benches drop to under 5x.
