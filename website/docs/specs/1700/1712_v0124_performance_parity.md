@@ -312,7 +312,7 @@ list the variants still missing. CPython 3.14 reference:
 | TO_BOOL | 6/6 | `BOOL`, `INT`, `LIST`, `NONE`, `STR`, `ALWAYS_TRUE` | — | DONE | 67abc0a |
 | UNPACK_SEQUENCE | 3/3 | `TWO_TUPLE`, `TUPLE`, `LIST` | — | DONE | 67abc0a |
 | BINARY_OP | 13/14 | `ADD_INT`, `SUBTRACT_INT`, `MULTIPLY_INT`, `ADD_FLOAT`, `SUBTRACT_FLOAT`, `MULTIPLY_FLOAT`, `ADD_UNICODE`, `INPLACE_ADD_UNICODE`, `SUBSCR_LIST_INT`, `SUBSCR_TUPLE_INT`, `SUBSCR_STR_INT`, `SUBSCR_DICT`, `SUBSCR_LIST_SLICE` | `BINARY_OP_EXTEND` is JIT-only and intentionally skipped | DONE | 67abc0a |
-| CALL | 5/16 | `PY_EXACT_ARGS`, `PY_GENERAL`, `BOUND_METHOD_EXACT_ARGS`, `BOUND_METHOD_GENERAL`, `NON_PY_GENERAL` | 8 builtin variants (`CALL_BUILTIN_FAST`, `CALL_BUILTIN_O`, `CALL_METHOD_DESCRIPTOR_*`, `CALL_ISINSTANCE`, `CALL_LEN`, `CALL_LIST_APPEND`, `CALL_ALLOC_AND_ENTER_INIT`) collapse into `CALL_NON_PY_GENERAL` — needs METH_* calling-convention flags on `BuiltinFunction`. `CALL_TYPE_1`, `CALL_STR_1`, `CALL_TUPLE_1` also pending. | WIP | 67abc0a |
+| CALL | 19/20 | `PY_EXACT_ARGS`, `PY_GENERAL`, `BOUND_METHOD_EXACT_ARGS`, `BOUND_METHOD_GENERAL`, `NON_PY_GENERAL`, `BUILTIN_O`, `BUILTIN_FAST`, `BUILTIN_FAST_WITH_KEYWORDS`, `LEN`, `ISINSTANCE`, `LIST_APPEND`, `TYPE_1`, `STR_1`, `TUPLE_1`, `BUILTIN_CLASS`, `METHOD_DESCRIPTOR_O`, `METHOD_DESCRIPTOR_FAST`, `METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS`, `METHOD_DESCRIPTOR_NOARGS` | `ALLOC_AND_ENTER_INIT` deferred (needs SIMPLE_FUNCTION-shape init-cache). Specializer in `specialize/call.go` reads `BuiltinFunction.Conv` and `MethodDescr.Conv()` against the METH_* mask, identity-compares against `objects.CallableCache{Len,Isinstance,ListAppend}`. `CALL_LIST_APPEND` extra guard: peek `(instr + 2*(1+INLINE_CACHE_ENTRIES_CALL))` to verify the trailing opcode is POP_TOP. | DONE | 39ba997f |
 
 **P1.4b sub-table — VM fast-path arms per family.** Each row tracks
 the arm count shipped in `vm/eval_specialized*.go` and the parity
@@ -332,7 +332,7 @@ gate that backs it.
 | STORE_ATTR | 1/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (faithful 1-1 port of CPython's macro: validate type_version, write to cached `Instance.slots[idx]`) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`) | WIP — `INSTANCE_VALUE` and `WITH_HINT` deliberately deferred; they need a `Dict.SetValueAt(slot, value)` primitive that writes the entry's value cell without re-hashing the key, plus the managed-dict-offset modelling listed in P1.4a. Shipping them before that lands forces a shim that re-runs `SetItem(name, value)`, which is exactly the ad-hoc patch the ground rule forbids. | 96130ac |
 | SEND | 0/1 | — | — | TODO — depends on generator-frame plumbing | - |
 | LOAD_SUPER_ATTR | 2/2 | `vm/eval_specialized_load_super_attr.go` — `ATTR`, `METHOD`; backed by `objects.SuperLookup` with a `method_found` out-param mirroring CPython's `_PySuper_Lookup` | `vm/eval_specialized_load_super_attr_test.go` (hit / missing / non-super deopt / non-type deopt / method-found vs bound shape / oparg bit-0 assertions) | DONE | 2f09f55b |
-| CALL | 0/5 emitted | — | — | TODO — gated on closing P1.4a CALL gap first | - |
+| CALL | 16/19 emitted | `vm/eval_specialized_call.go` + `vm/eval_specialized_call_builtin.go` — `PY_EXACT_ARGS`, `BOUND_METHOD_EXACT_ARGS`, `BUILTIN_O`, `BUILTIN_FAST`, `BUILTIN_FAST_WITH_KEYWORDS`, `LEN`, `ISINSTANCE`, `LIST_APPEND` (consumes trailing POP_TOP via SKIP_OVER), `TYPE_1`, `STR_1`, `TUPLE_1`, `BUILTIN_CLASS`, `METHOD_DESCRIPTOR_O`, `METHOD_DESCRIPTOR_FAST`, `METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS`, `METHOD_DESCRIPTOR_NOARGS` | `vm/eval_specialized_call_test.go`, `vm/eval_specialized_call_builtin_test.go` (one hit + identity/Conv-mismatch deopt assertion per arm) | WIP — generic `PY_GENERAL` / `BOUND_METHOD_GENERAL` / `NON_PY_GENERAL` arms fall through to the adaptive parent body (no fast path needed: CPython's bodies for those are themselves the generic call). `ALLOC_AND_ENTER_INIT` deferred. | 39ba997f |
 
 **Technical notes (P1.6 watcher install at specialize.Enable).**
 
@@ -599,6 +599,102 @@ gate that backs it.
     the runtime models the same observable behaviour CPython does,
     without erecting a fake storage layer that no read path
     consumes.
+
+**Technical notes (P1.4a/P1.4b CALL fast arms + METH_* foundation).**
+
+1. **Where the METH_* tag actually lives in gopy.** CPython reads
+   `PyCFunction_GET_FLAGS(callable)` which dereferences
+   `((PyCFunctionObject*)callable)->m_ml->ml_flags` (`Include/cpython/methodobject.h`),
+   i.e. the calling convention lives on the per-row `PyMethodDef`, not
+   on the bound function object. gopy does not vendor `PyMethodDef`
+   rows verbatim (each builtin is registered as a closure), so the
+   flag has to live on the wrapper itself. We added
+   `BuiltinFunction.Conv` and `MethodDescr.conv` (with `Conv()` accessor).
+   `NewBuiltinFunction` and `NewMethodDescr` default to
+   `MethVarargs|MethKeywords` so the dozens of pre-existing registration
+   sites continue to match the closure shape they always passed.
+   New callers that want a specialized arm reach for
+   `NewBuiltinFunctionConv` / `NewMethodDescrConv` with the explicit tag.
+2. **The callable cache is package state, not interpreter state.**
+   `Python/specialize.c:2143,2162,2039` reads
+   `interp->callable_cache.{len, isinstance, list_append}` for the
+   identity guards `target == cache->len`. gopy has no `Interpreter`
+   struct in the hot path (the `state.Interpreter` exists but the
+   specializer would have to thread it through), so the cache is a
+   tiny package-level variable trio in `objects/callable_cache.go`.
+   `RegisterCallableCacheLen` is called from `builtins/init.go` while
+   `builtinRow{name: "len", cacheHook: ...}` is iterated;
+   `RegisterCallableCacheListAppend` fires from
+   `objects/list_bind.go::bindO("append", ...)`. Because every gopy
+   process registers the same builtin closures during `builtins.Init`,
+   the cache is effectively single-writer-single-reader and the bare
+   `*BuiltinFunction` / `*MethodDescr` pointers work without locking.
+3. **CALL_LIST_APPEND's "consumes POP_TOP" trick.** The CPython arm
+   stamps `INSTR_PTR + INLINE_CACHE_ENTRIES_CALL + 1` past the
+   instruction so the next dispatch skips the implicit POP_TOP that
+   the compiler emits after every CALL whose result is unused. Mirrored
+   in `vm/eval_specialized_call_builtin.go::fastCallListAppend` by
+   advancing `e.cacheAdvance(compile.CALL) + 2` (one codeunit past
+   the standard CALL cache window, which puts the dispatch right
+   after the trailing `POP_TOP`). The specializer in
+   `specialize/call.go::callFollowedByPopTop` peeks the next codeunit
+   at `instr + 2*(1+INLINE_CACHE_ENTRIES_CALL) = instr + 8` to verify
+   the bytecode shape before stamping.
+4. **Args-window allocation matches CPython's `total_args` rule.**
+   `Python/bytecodes.c` `_CALL_*` prologues do
+   `arguments-- ; total_args++` whenever `self_or_null` is non-null
+   so the unbound-method form (`LOAD_ATTR` emitted with the trailing
+   nullshift) ends up sharing the call site with the bound-method
+   form. gopy's `callFrameArgs` allocates a single slice of
+   `oparg + (self_or_null != nil)` Objects and prepends `selfOrNull`
+   when set, so every arm receives `args[0] = self` in the method
+   shape without branching internally.
+5. **Guard-miss returns (0, false, nil), not a deopt opcode rewrite.**
+   The arms only need to back out to the generic CALL when the cache
+   has gone stale; they do *not* rewrite the opcode themselves.
+   `maybeDeopt` upstream (see `vm/eval_specialized.go::trySpecialized`
+   wrapping in `eval.go`) handles the counter decrement and adaptive
+   rollback. This matches CPython's `DEOPT_IF` which is a `goto deopt`
+   to the parent's tier-1 body, not an in-place opcode rewrite.
+6. **`CALL_BUILTIN_CLASS` reads `Type.Vectorcall`, not `Type.Call`.**
+   CPython's `_CALL_BUILTIN_CLASS` arm only fires for types whose
+   `tp_vectorcall_offset` is set (a small set: `type`, `str`, `bytes`,
+   `tuple`, plus a few extension types). gopy's `*Type` carries a
+   `Vectorcall func(t *Type, args []Object, kwargs map[string]Object) (Object, error)`
+   field that's non-nil exactly for the same set. The arm guards on
+   `t.Vectorcall != nil` and falls through to deopt for user-defined
+   classes whose construction has to go through the generic
+   `type_call` path (which gopy spells `t.New` + `t.Init`).
+7. **Deferred work and why.**
+   - `CALL_ALLOC_AND_ENTER_INIT` (the 20th CALL variant) needs the
+     SIMPLE_FUNCTION-shape `init` cache: stash a pointer to `__init__`
+     and its expected arity at type construction time, then bypass
+     both `tp_new` AND `tp_init` lookups at call time. gopy's
+     `Instance.New` / `Instance.Init` interface needs a flag bit per
+     type to mark "init-cached" before the arm can stamp anything
+     meaningful.
+   - `list.remove` / `count` / `index` / `__contains__` are still
+     `MethVarargs`. Flipping them to `MethO` is a one-line change
+     per row, but the wrappers were written assuming `args[1]` is
+     the user-passed value while args[0] is self, so the closure-shape
+     audit needs to confirm none of them call `self.checkArgs(args, 1, 1)`
+     or similar arity-validation helpers that assume the varargs entry
+     convention.
+   - `SEND_GEN` is the next CALL-family follow-up that benefits
+     similarly (generator frame push/pop), tracked under P1.4b SEND.
+8. **Why the test file lives at vm/eval_specialized_call_builtin_test.go,
+   not specialize/.** The arms execute under `vm.evalState`, and
+   stamping a specialized opcode at the bytecode level requires
+   reaching into `compile.Code` to overwrite the opcode byte. That
+   surface (`stampCallVariant`) already exists in
+   `vm/eval_specialized_call_test.go` for `CALL_PY_EXACT_ARGS`, so
+   adding the new tests next to it reuses the helpers and the
+   builder-shape (`callOneArg` / `callTwoArgs` build the standard
+   `LOAD_CONST callable / PUSH_NULL / LOAD_CONST arg / CALL n /
+   RETURN_VALUE` frame). `TestFastCallListAppend` is the one outlier:
+   it builds custom bytecode that includes the trailing `POP_TOP` +
+   `LOAD_CONST None` + `RETURN_VALUE` so the arm's SKIP_OVER advance
+   has a target to land on without falling off the codestream.
 
 **Gate.**
 
