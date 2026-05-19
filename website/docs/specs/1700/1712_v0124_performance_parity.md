@@ -1909,13 +1909,25 @@ nothing tells the specializer when a class attribute changes.
    PR #74 too. P1.6 specializer-time watcher install closed with
    `b059710d` (see the P1.6 technical-notes block in the Phases
    table for the parity fix + wiring).
-3. **P1.4 closure**: emit the remaining LOAD_ATTR arms
-   (`METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`,
-   `METHOD_LAZY_DICT`) once `Py_TPFLAGS_INLINE_VALUES` modelling
-   lands; then ship the remaining FOR_ITER / SEND / CALL dispatch
-   arms (P1.4b). FOR_ITER `LIST`/`TUPLE`/`RANGE` shipped with the
-   typed `Next` helpers; `GEN` waits on the SEND generator-frame
-   path. LOAD_SUPER_ATTR `ATTR`/`METHOD` shipped via
+3. **P1.4 closure**: LOAD_ATTR closed for every variant that exists in
+   the gopy runtime today. `METHOD_WITH_VALUES` and
+   `NONDESCRIPTOR_WITH_VALUES` shipped on `9051a0c3`: the
+   `Py_TPFLAGS_INLINE_VALUES` + `Py_TPFLAGS_MANAGED_DICT` flags land
+   in `objects/usertype.go::NewUserTypeMeta` whenever the new class
+   ends up with a managed dict; the inline-values shape and shared-
+   keys version invariants are modelled directly on `Instance.inlineValid`
+   and `Type.cachedKeys` / `Type.cachedKeysVersion` (no parallel
+   value array, since the WITH_VALUES arms in CPython guard but
+   never read the inline-values block, per the technical-notes
+   block on P1.4 INLINE_VALUES). `METHOD_LAZY_DICT` is the lone
+   remaining LOAD_ATTR variant; gopy allocates `Instance.dict`
+   eagerly in `NewInstance` so the LAZY_DICT runtime state
+   (managed-dict slot null at LOAD_ATTR time) does not exist
+   yet, and shipping the arm requires a per-instance lazy-dict
+   mode that touches every attribute path in `instance.go`.
+   FOR_ITER `LIST`/`TUPLE`/`RANGE` shipped with the typed `Next`
+   helpers; `GEN` waits on the SEND generator-frame path.
+   LOAD_SUPER_ATTR `ATTR`/`METHOD` shipped via
    `objects.SuperLookup` + the `method_found` probe gated on
    `tp_getattro == GenericGetAttr` (see P1.4b sub-table +
    technical-notes block). `LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN`
@@ -1939,7 +1951,11 @@ nothing tells the specializer when a class attribute changes.
    Cache layout: type_version in cells 2..3, `func_version` cells
    left zero (gopy has no per-function version, type_version
    invalidation alone covers freshness), cached `*Function`
-   pointer in `CacheObjects[instr]`.
+   pointer in `CacheObjects[instr]`. Remaining P1.4 work: ship
+   the SEND fast arm (gated on generator-frame push/pop the VM
+   does not yet expose) and close the P1.4a CALL gap (8 builtin
+   variants + `CALL_TYPE_1`/`STR_1`/`TUPLE_1` need METH_* calling-
+   convention flags on `BuiltinFunction`).
 4. **P1.5 marshal persistence** so `.pyc` files retain the warm
    specializer state across runs.
 5. **P2.1 open the JIT gate** (`interp.JIT = true`); validate
