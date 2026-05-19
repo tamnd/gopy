@@ -547,23 +547,10 @@ func strSubclassSetAttr(o Object, name Object, value Object) error {
 }
 
 // unicodeGetItem returns the Nth code point of a string as a single-char
-// string. Supports negative indexing.
+// string. Supports negative indexing. Routes through the kind-dispatched
+// fast path so ASCII strings index in O(1) via byte addressing.
 //
 // CPython: Objects/unicodeobject.c:1848 unicode_getitem
 func unicodeGetItem(o Object, i int) (Object, error) {
-	s := o.(*Unicode)
-	if i < 0 {
-		i += s.length
-	}
-	if i < 0 || i >= s.length {
-		return nil, fmt.Errorf("IndexError: string index out of range")
-	}
-	n := 0
-	for _, r := range s.v {
-		if n == i {
-			return NewStr(string(r)), nil
-		}
-		n++
-	}
-	return nil, fmt.Errorf("IndexError: string index out of range")
+	return unicodeGetItemKind(o.(*Unicode), i)
 }

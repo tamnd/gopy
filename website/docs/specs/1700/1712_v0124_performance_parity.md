@@ -1137,11 +1137,11 @@ slicing, find/count/replace all walk bytes.
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P4.1 | `objects/unicode_kind.go`: detect kind at construction. Latin-1: byte-equal to ASCII; BMP: re-encode to `[]uint16`; Full: `[]rune`. | TODO | - |
-| P4.2 | Kind-dispatched `__getitem__`, `__len__`, slicing. Latin-1 hits a byte-index path (allocation-free for single chars via small-string cache). | TODO | - |
-| P4.3 | Kind-dispatched `find`, `rfind`, `count`, `index`, `replace`, `split`. Latin-1 → `bytes.IndexByte` / `bytes.Count` (memchr speed). | TODO | - |
+| P4.1 | `objects/unicode_kind.go`: detect kind at construction. Latin-1: byte-equal to ASCII; BMP: re-encode to `[]uint16`; Full: `[]rune`. | PARTIAL (Unicode struct already tracks `kind`+`ascii`+`length` via `str.go:312 classify`; new `unicode_kind.go` exposes the kind-dispatch helpers and is wired into the str method bindings. Pre-encoded UCS2/UCS4 storage still TODO so non-ASCII paths keep walking UTF-8 until the kind-1/2/4 storage lands.) | this PR |
+| P4.2 | Kind-dispatched `__getitem__`, `__len__`, slicing. Latin-1 hits a byte-index path (allocation-free for single chars via small-string cache). | DONE for ASCII (`unicodeGetItemKind` indexes `s.v[i:i+1]` directly when `IsASCII()`; non-ASCII falls back to the rune walk). `__len__` already reads `u.length` so it is O(1). Slicing fast path still TODO. | this PR |
+| P4.3 | Kind-dispatched `find`, `rfind`, `count`, `index`, `rindex`, `startswith`, `endswith`. Latin-1 → `bytes.IndexByte` / `bytes.Count` (memchr speed). | DONE for ASCII (haystack `IsASCII()` skips the `runeSlice` + re-encode + `RuneCountInString` chain and hands the raw Go-string view to `strings.Index` / `LastIndex` / `Count` / `HasPrefix` / `HasSuffix`). `BenchmarkStrFindASCII` goes from 215 ns/op + 224 B/op + 2 allocs/op to 8.4 ns/op + 0 B/op + 0 allocs/op on Apple M4 (25x). Non-ASCII keeps the rune walk. `replace`, `split` are next. | this PR |
 | P4.4 | `_PyUnicodeWriter` port (lands with P15). | TODO | - |
-| P4.5 | Small-string cache: `__getitem__` returning a one-char str is allocation-free for ASCII. | TODO | - |
+| P4.5 | Small-string cache: `__getitem__` returning a one-char str is allocation-free for ASCII. | TODO (the byte-slice fast path still allocates a fresh `*Unicode`; a small-string cache mirroring CPython's latin1 single-char table is the follow-up). | - |
 
 **Gate.**
 
@@ -2170,7 +2170,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P1. Specializer wire-up         | `Python/specialize.c`  | `specialize/`             | 6-10x         | WIP (P1.0-P1.3 + P1.5 + P1.6 done, P1.4 open) | 67abc0a, 691c2d7, 71a9181, 6a8aace, 96130ac, 2f1f603, b059710d |
 | P2. Tier-2 (full-file ports)    | `Python/optimizer_bytecodes.c`, `Python/executor_cases.c.h` | `optimizer/`, `vm/eval_uops_gen.go` | 1.5-2x | WIP (scaffolding done, P2.1 PYTHON_JIT gate shipped, P2.2/P2.3 full-file ports open) | -      |
 | P3. PyLong fast path            | `Objects/longobject.c` | `objects/long_fast.go`    | 3x            | DONE (P3.1-P3.4; P3.5 deferred behind Int repr refactor) | `d9e16d2` |
-| P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | TODO   | -      |
+| P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | WIP (P4.2 + P4.3 ASCII fast paths shipped, 25x faster ASCII find / 0 allocs; P4.1 pre-encoded UCS2/UCS4 storage, P4.4 writer, P4.5 small-string cache, P4.3 replace/split still open) | this PR |
 | P5. Dict open-addressing        | `Objects/dictobject.c` | `objects/dict.go` (extend) | 2x           | WIP (open-addressed layout already in tree, split-keys + watcher API + KnownHash gaps remain) | - |
 | P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `frame/chunk.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go`, `compile/flowgraph_cfg_passes.go`, `vm/eval_specialized_call.go` | 1.5x | DONE (P6.1 chunk LocalsPlus recycle; P6.2 via spec 1716; P6.3 via spec 1715/1716 + e2e gate; P6.4 CALL_PY_EXACT_ARGS + CALL_BOUND_METHOD_EXACT_ARGS fast arms) | spec 1716, P6.1 + P6.3 + P6.4 in this PR |
 | P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`, `objects/type_inherit.go`, `objects/type_watcher.go` | 1.5x | WIP (P7.0 watcher API, P7.2 inherit_slots, P7.3 version invalidation, P7.4 single-load dispatch done; P7.1/P7.5 open) | `e94cf31`, `2d82694`, `d71cf26`, P7.4 this PR |
@@ -2301,7 +2301,22 @@ nothing tells the specializer when a class attribute changes.
 6. **P3 PyLong fast path** + **P10 float pool** ship in parallel
    (independent `objects/` work).
 7. **P4 kind tags + P15 unicode writer** ship together (writer's
-   `Finish()` depends on kind detection).
+   `Finish()` depends on kind detection). **P4 ASCII fast paths
+   shipped on PR #74.** The Unicode struct already classifies kind
+   at construction (`str.go:312 classify`); the new
+   `objects/unicode_kind.go` exposes kind-dispatched helpers
+   (`strFindKind`, `strRFindKind`, `strIndexKind`, `strRIndexKind`,
+   `strCountKind`, `strStartsWithKind`, `strEndsWithKind`,
+   `unicodeGetItemKind`) and the str method bindings now hand the
+   `*Unicode` receiver in instead of `runeSlice(s)`-ing twice per
+   call. ASCII haystacks skip the rune materialize + re-encode +
+   `RuneCountInString` chain and route to `strings.Index` / etc.
+   directly. `BenchmarkStrFindASCII` runs 25x faster
+   (215.4 ns/op → 8.4 ns/op) and allocation-free (224 B/op → 0).
+   Non-ASCII (Latin-1 supplement, BMP, full unicode) still walks
+   UTF-8 until P4.1's UCS2/UCS4 storage lands and P4.3's
+   `replace`/`split` ports go through the same dispatch. P15 unicode
+   writer still TODO.
 8. **P6.1 chunk LocalsPlus recycle** (DONE on PR #74, see chunk-arena
    notes under P6), **P6.3 LOAD_FAST_BORROW / STORE_FAST fusion**
    (DONE: the cfg-pass port shipped under spec 1715/1716 and the

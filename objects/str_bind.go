@@ -81,6 +81,24 @@ func selfStr(args []Object, name string) (string, error) {
 	return s, nil
 }
 
+// selfStrUnicode returns the *Unicode receiver so callers can read
+// the kind tag and length without re-classifying. Used by the
+// kind-dispatched search / index / count fast paths.
+//
+// CPython: Objects/unicodeobject.c:9680 any_find_slice reads
+// PyUnicode_KIND off the receiver to pick the asciilib_* / ucs1lib_*
+// / ucs2lib_* / ucs4lib_* path.
+func selfStrUnicode(args []Object, name string) (*Unicode, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: descriptor '%s' of 'str' needs an argument", name)
+	}
+	u, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '%s' requires a 'str' object", name)
+	}
+	return u, nil
+}
+
 func strRange(args []Object) (int, int, error) {
 	const base = 2
 	start, end := 0, -1
@@ -119,7 +137,7 @@ func resolveEnd(end, n int) int {
 }
 
 func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "startswith")
+	u, err := selfStrUnicode(args, "startswith")
 	if err != nil {
 		return nil, err
 	}
@@ -130,9 +148,8 @@ func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	rs := runeSlice(s)
-	end = resolveEnd(end, len(rs))
-	check := func(prefix string) bool { return StrStartsWith(s, prefix, start, end) }
+	end = resolveEnd(end, u.length)
+	check := func(prefix string) bool { return strStartsWithKind(u, prefix, start, end) }
 	if t, ok := args[1].(*Tuple); ok {
 		for _, item := range tupleSlice(t) {
 			p, perr := strNeedle(item)
@@ -153,7 +170,7 @@ func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func strEndsWithMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "endswith")
+	u, err := selfStrUnicode(args, "endswith")
 	if err != nil {
 		return nil, err
 	}
@@ -164,9 +181,8 @@ func strEndsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	rs := runeSlice(s)
-	end = resolveEnd(end, len(rs))
-	check := func(suffix string) bool { return StrEndsWith(s, suffix, start, end) }
+	end = resolveEnd(end, u.length)
+	check := func(suffix string) bool { return strEndsWithKind(u, suffix, start, end) }
 	if t, ok := args[1].(*Tuple); ok {
 		for _, item := range tupleSlice(t) {
 			p, perr := strNeedle(item)
@@ -187,7 +203,7 @@ func strEndsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func strFindMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "find")
+	u, err := selfStrUnicode(args, "find")
 	if err != nil {
 		return nil, err
 	}
@@ -202,12 +218,12 @@ func strFindMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	return NewInt(int64(StrFind(s, needle, start, end))), nil
+	end = resolveEnd(end, u.length)
+	return NewInt(int64(strFindKind(u, needle, start, end))), nil
 }
 
 func strRFindMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "rfind")
+	u, err := selfStrUnicode(args, "rfind")
 	if err != nil {
 		return nil, err
 	}
@@ -222,12 +238,12 @@ func strRFindMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	return NewInt(int64(StrRFind(s, needle, start, end))), nil
+	end = resolveEnd(end, u.length)
+	return NewInt(int64(strRFindKind(u, needle, start, end))), nil
 }
 
 func strIndexMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "index")
+	u, err := selfStrUnicode(args, "index")
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +258,8 @@ func strIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	i, ierr := StrIndex(s, needle, start, end)
+	end = resolveEnd(end, u.length)
+	i, ierr := strIndexKind(u, needle, start, end)
 	if ierr != nil {
 		return nil, ierr
 	}
@@ -251,7 +267,7 @@ func strIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func strRIndexMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "rindex")
+	u, err := selfStrUnicode(args, "rindex")
 	if err != nil {
 		return nil, err
 	}
@@ -266,8 +282,8 @@ func strRIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	i, ierr := StrRIndex(s, needle, start, end)
+	end = resolveEnd(end, u.length)
+	i, ierr := strRIndexKind(u, needle, start, end)
 	if ierr != nil {
 		return nil, ierr
 	}
@@ -275,7 +291,7 @@ func strRIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func strCountMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "count")
+	u, err := selfStrUnicode(args, "count")
 	if err != nil {
 		return nil, err
 	}
@@ -290,8 +306,8 @@ func strCountMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	return NewInt(int64(StrCount(s, needle, start, end))), nil
+	end = resolveEnd(end, u.length)
+	return NewInt(int64(strCountKind(u, needle, start, end))), nil
 }
 
 func strSimple1(fn func(string) string) func([]Object, map[string]Object) (Object, error) {
