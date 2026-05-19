@@ -1,5 +1,7 @@
 package objects
 
+import "fmt"
+
 // BuiltinFunction wraps a Go function so the VM can call it through
 // the type's Vectorcall / Call slots. The Fn closure shape mirrors
 // METH_VARARGS|METH_KEYWORDS (positional slice plus a kwargs map),
@@ -12,12 +14,18 @@ package objects
 // defaults to MethVarargs|MethKeywords so legacy registration sites
 // keep matching the closure shape they always passed.
 //
+// Module is the name string of the owning module (m_module). CPython
+// stamps this at PyCFunction_NewEx time and PyModule_AddFunctions
+// passes the parent module's __name__ here, so pickle's whichmodule
+// can resolve codecs.encode to "_codecs" without scanning sys.modules.
+//
 // CPython: Include/cpython/methodobject.h PyCFunctionObject
 type BuiltinFunction struct {
 	Header
-	Name string
-	Conv MethFlag
-	Fn   func(args []Object, kwargs map[string]Object) (Object, error)
+	Name   string
+	Module string
+	Conv   MethFlag
+	Fn     func(args []Object, kwargs map[string]Object) (Object, error)
 }
 
 // BuiltinFunctionType is the type singleton for built-in functions.
@@ -65,10 +73,47 @@ func init() {
 		func(o Object) (Object, error) { return None(), nil },
 		nil,
 	))
+	// __module__ returns the owning module's name (m_module) when one
+	// was stamped at registration, else None. Pickle's whichmodule
+	// reads this first; returning None makes it fall back to scanning
+	// sys.modules for an attribute that matches.
+	//
+	// CPython: Objects/methodobject.c:233 meth_get__module__
 	SetTypeDescr(BuiltinFunctionType, "__module__", NewGetSetDescr("__module__",
-		func(o Object) (Object, error) { return NewStr(""), nil },
+		func(o Object) (Object, error) {
+			if bf, ok := o.(*BuiltinFunction); ok && bf.Module != "" {
+				return NewStr(bf.Module), nil
+			}
+			return None(), nil
+		},
 		nil,
 	))
+	// meth_methods: __reduce__ returns the bare name string when the
+	// function is module-bound (m_self is the module or NULL). Pickle's
+	// save() inspects __reduce__ via __reduce_ex__ and treats a str
+	// return as "look this up by name in self.__module__". Without
+	// this, codecs.encode falls through into copyreg._reduce_ex which
+	// can't pickle a BIF.
+	//
+	// CPython: Objects/methodobject.c:192 meth_reduce
+	SetTypeDescr(BuiltinFunctionType, "__reduce__", NewMethodDescr(BuiltinFunctionType, "__reduce__", builtinFunctionReduce))
+}
+
+// builtinFunctionReduce is meth_reduce. For module-level functions
+// (m_self == NULL or a module), CPython returns just the name string,
+// which pickle takes as "save_global by name". gopy's BuiltinFunction
+// has no m_self slot yet, so we always take the module-bound branch.
+//
+// CPython: Objects/methodobject.c:192 meth_reduce
+func builtinFunctionReduce(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	bf, ok := args[0].(*BuiltinFunction)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'builtin_function_or_method' object")
+	}
+	return NewStr(bf.Name), nil
 }
 
 // NewBuiltinFunction wraps fn under name. Conv defaults to
