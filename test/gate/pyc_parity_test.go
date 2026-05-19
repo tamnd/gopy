@@ -94,7 +94,9 @@ func TestPycParity(t *testing.T) {
 // Windows' CreateProcess limit (~32 KiB). py_compile.main accepts an
 // arbitrary file list and compiles each into its own __pycache__
 // entry, so we still pay interpreter startup only a handful of times
-// per side instead of once per fixture.
+// per side instead of once per fixture. When a chunk fails we retry
+// per-file so the failing fixture (and its actual stderr) end up in
+// the test output instead of an opaque "exit status 1".
 func batchCompile(t *testing.T, bin string, files []string) {
 	t.Helper()
 	if len(files) == 0 {
@@ -104,9 +106,19 @@ func batchCompile(t *testing.T, bin string, files []string) {
 		args := append([]string{"-m", "py_compile"}, chunk...)
 		cmd := exec.CommandContext(t.Context(), bin, args...)
 		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("%s -m py_compile <%d files>: %v\noutput:\n%s", bin, len(chunk), err, out)
+		if err == nil {
+			continue
 		}
+		for _, file := range chunk {
+			one := exec.CommandContext(t.Context(), bin, "-m", "py_compile", file)
+			oneOut, oneErr := one.CombinedOutput()
+			if oneErr != nil {
+				t.Fatalf("%s -m py_compile %s: %v\noutput:\n%s\n(batch error: %v, batch output:\n%s)",
+					bin, file, oneErr, oneOut, err, out)
+			}
+		}
+		t.Fatalf("%s -m py_compile <%d files>: batch failed (%v) but every file passed in isolation\noutput:\n%s",
+			bin, len(chunk), err, out)
 	}
 }
 
