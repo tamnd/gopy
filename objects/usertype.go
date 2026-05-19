@@ -335,8 +335,85 @@ func fixupSlotDispatchers(t *Type) {
 	fixupRichCmpAndBool(t)
 	fixupSubscriptSlots(t)
 	fixupDescriptorSlots(t)
+	fixupGetattroSlot(t)
 	fixupTpNew(t)
 }
+
+// fixupGetattroSlot wires tp_getattro to a slot dispatcher that calls
+// the user's __getattribute__ when the class body (or any user-defined
+// base) overrides it. Without this, LookupDescriptor finds the user
+// function but the C-level Getattro slot still points at instanceGetAttr
+// so attribute access bypasses the override. CPython installs
+// _Py_slot_tp_getattr_hook in the same situation; the hook degrades to
+// _Py_slot_tp_getattro when no __getattr__ is present, but gopy folds
+// the two into one entry point that consults __getattr__ on
+// AttributeError.
+//
+// CPython: Objects/typeobject.c:10336 update_one_slot tp_getattro path
+// CPython: Objects/typeobject.c:10341 _Py_slot_tp_getattro
+// CPython: Objects/typeobject.c:10373 _Py_slot_tp_getattr_hook
+func fixupGetattroSlot(t *Type) {
+	descr, owner := LookupDescriptor(t, "__getattribute__")
+	if descr == nil || owner == nil {
+		return
+	}
+	if owner == objectType {
+		return
+	}
+	t.Getattro = slotTpGetattroHook
+}
+
+// slotTpGetattroHook calls the user's __getattribute__ and falls back
+// to __getattr__ on AttributeError. CPython routes both
+// _Py_slot_tp_getattro (no __getattr__) and _Py_slot_tp_getattr_hook
+// (with __getattr__) through the same call_attribute helper; gopy
+// keeps a single dispatcher and consults __getattr__ only when the
+// primary call raises AttributeError.
+//
+// CPython: Objects/typeobject.c:10373 _Py_slot_tp_getattr_hook
+func slotTpGetattroHook(o Object, name Object) (Object, error) {
+	tp := o.Type()
+	getattribute, _ := LookupDescriptor(tp, "__getattribute__")
+	if getattribute == nil {
+		return GenericGetAttr(o, name)
+	}
+	fn, err := bindAttrCallable(getattribute, o, tp)
+	if err != nil {
+		return nil, err
+	}
+	res, err := Call(fn, NewTuple([]Object{name}), nil)
+	if err == nil {
+		return res, nil
+	}
+	if !isAttributeError(err) {
+		return nil, err
+	}
+	getattr, _ := LookupDescriptor(tp, "__getattr__")
+	if getattr == nil {
+		return nil, err
+	}
+	fb, err2 := bindAttrCallable(getattr, o, tp)
+	if err2 != nil {
+		return nil, err2
+	}
+	return Call(fb, NewTuple([]Object{name}), nil)
+}
+
+// bindAttrCallable applies tp_descr_get to attr with (o, tp) so the
+// resulting callable already has self bound, mirroring CPython's
+// call_attribute helper. Unbound objects (plain functions found on a
+// class with no DescrGet wrapping) pass through unchanged so the call
+// site can supply self explicitly.
+//
+// CPython: Objects/typeobject.c:10347 call_attribute
+func bindAttrCallable(attr Object, o Object, tp *Type) (Object, error) {
+	dt := attr.Type()
+	if dt.DescrGet != nil {
+		return dt.DescrGet(attr, o, tp)
+	}
+	return attr, nil
+}
+
 
 // fixupTpNew installs slotTpNew when the class body defines its own
 // __new__. Without this, typeCallViaTpNew would call the inherited

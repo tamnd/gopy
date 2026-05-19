@@ -52,6 +52,8 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		next, ok = e.fastLoadAttrNondescriptorNoDict(oparg)
 	case compile.LOAD_ATTR_PROPERTY:
 		return e.fastLoadAttrProperty(oparg)
+	case compile.LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN:
+		return e.fastLoadAttrGetattributeOverridden(oparg)
 	case compile.LOAD_ATTR_INSTANCE_VALUE:
 		next, ok = e.fastLoadAttrInstanceValue(oparg)
 	case compile.TO_BOOL_BOOL:
@@ -376,6 +378,59 @@ func (e *evalState) fastLoadAttrInstanceValue(oparg uint32) (int, bool) {
 	}
 	e.pushAttrResult(value, oparg)
 	return e.cacheAdvance(compile.LOAD_ATTR), true
+}
+
+// fastLoadAttrGetattributeOverridden implements
+// LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN. Owner is an instance whose type
+// owns a Python __getattribute__ override and has no __getattr__ hook;
+// the cached function pointer (CacheObjects[instr]) is invoked with
+// (owner, name) so user code observes the attribute fetch.
+//
+// CPython inlines the user function as a Python frame via
+// DISPATCH_INLINED so the resolved descriptor never escapes the
+// dispatch loop. gopy can't bounce frames the same way from inside a
+// fast arm; we call the function synchronously through objects.Call,
+// which still beats the generic LOAD_ATTR path (no descriptor walk,
+// no instance-dict lookup, no slot dispatcher).
+//
+// The arm refuses the unbound-method oparg shape because
+// _Py_slot_tp_getattro never produces a (descr, self) pair: the user
+// function decides the return shape itself.
+//
+// CPython: Python/bytecodes.c:2518 LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN
+func (e *evalState) fastLoadAttrGetattributeOverridden(oparg uint32) (int, bool, error) {
+	if oparg&1 != 0 {
+		return 0, false, nil
+	}
+	owner := e.peek(0).AsObject()
+	tp := owner.Type()
+	if tp == nil {
+		return 0, false, nil
+	}
+	idx := e.instrIdx()
+	code := e.f.Code.Code
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
+	curVer := tp.VersionTag()
+	if curVer == 0 || curVer != cachedVer {
+		return 0, false, nil
+	}
+	getattribute := specialize.CacheObject(e.f.Code.CacheObjects, idx)
+	if getattribute == nil {
+		return 0, false, nil
+	}
+	co := e.f.Code
+	nameIdx := int(oparg >> 1)
+	if nameIdx < 0 || nameIdx >= len(co.Names) {
+		return 0, false, nil
+	}
+	name := mustUnicode(co.Names[nameIdx])
+	e.pop()
+	result, err := objects.Call(getattribute, objects.NewTuple([]objects.Object{owner, name}), nil)
+	if err != nil {
+		return 0, true, err
+	}
+	e.pushObject(result)
+	return e.cacheAdvance(compile.LOAD_ATTR), true, nil
 }
 
 // fastLoadAttrProperty implements LOAD_ATTR_PROPERTY. Owner is an

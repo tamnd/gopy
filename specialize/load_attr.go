@@ -130,6 +130,40 @@ func specializeClassLoadAttr(cls *objects.Type, name *objects.Unicode, co *objec
 	return true
 }
 
+// specializeGetattributeOverridden emits LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN
+// when the user type owns a Python __getattribute__ and no __getattr__
+// fallback is present. Returns true when the cache was stamped, false
+// when the caller should keep classifying.
+//
+// Cache layout (the _PyLoadMethodCache shape used by ATTR_PROPERTY too):
+//
+//	cells 2..3 type_version
+//	cells 4..5 unused (CPython stamps func_version; gopy doesn't track
+//	            per-function versions yet so we leave them zero and rely on
+//	            type_version invalidation via the descriptor mutation path)
+//	cells 6..9 cached Python function pointer (in the CacheObjects slab)
+//
+// CPython: Python/specialize.c:1260 GETATTRIBUTE_IS_PYTHON_FUNCTION
+func specializeGetattributeOverridden(tp *objects.Type, version uint32, co *objects.Code, code []byte, instr int) bool {
+	ga, owner := objects.LookupDescriptor(tp, "__getattribute__")
+	if ga == nil || owner == nil || owner == objects.ObjectType() {
+		return false
+	}
+	fn, ok := ga.(*objects.Function)
+	if !ok {
+		return false
+	}
+	// Bail when __getattr__ exists too: slot_tp_getattr_hook has to
+	// fall back on AttributeError, and we don't emit a hookful arm.
+	if gx, _ := objects.LookupDescriptor(tp, "__getattr__"); gx != nil {
+		return false
+	}
+	loadMethodCacheAt(code, instr).setTypeVersion(version)
+	SetCacheObject(co.CacheObjects, instr, fn)
+	Specialize(code, instr, compile.LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN)
+	return true
+}
+
 // specializeInstanceLoadAttr handles `obj.attr` when obj is a user
 // instance. Fans out by descriptor kind (ClassifyDescriptor): slot
 // reads → LOAD_ATTR_SLOT, property getters → LOAD_ATTR_PROPERTY,
@@ -152,6 +186,22 @@ func specializeInstanceLoadAttr(inst *objects.Instance, name *objects.Unicode, c
 	version := tp.VersionTag()
 	if version == 0 {
 		return false
+	}
+	// GETATTRIBUTE_IS_PYTHON_FUNCTION arm: the user class overrides
+	// __getattribute__ with a plain Python function. CPython gates on
+	// tp_getattro == _Py_slot_tp_getattr_hook, no __getattr__ present,
+	// and the descriptor being PyFunction_Type. gopy detects the same
+	// situation by checking that LookupDescriptor(__getattribute__) is
+	// not owned by objectType and is a *Function, and that
+	// LookupDescriptor(__getattr__) is absent (so a fallback hook isn't
+	// involved). Specialization fails when oparg requests the
+	// unbound-method shape, matching CPython's SPEC_FAIL_ATTR_METHOD.
+	//
+	// CPython: Python/specialize.c:1260 GETATTRIBUTE_IS_PYTHON_FUNCTION
+	if name.Value() != "__getattribute__" && name.Value() != "__getattr__" {
+		if ga := specializeGetattributeOverridden(tp, version, co, code, instr); ga {
+			return true
+		}
 	}
 	descr, _ := objects.LookupDescriptor(tp, name.Value())
 	kind := ClassifyDescriptor(descr)

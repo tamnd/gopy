@@ -300,7 +300,7 @@ list the variants still missing. CPython 3.14 reference:
 
 | Family | Coverage | Variants shipped | Missing | Status | Commit |
 |--------|----------|------------------|---------|--------|--------|
-| LOAD_ATTR | 9/13 | `MODULE`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `SLOT`, `INSTANCE_VALUE`, `WITH_HINT`, `PROPERTY`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT` | `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`, `METHOD_LAZY_DICT`, `GETATTRIBUTE_OVERRIDDEN` — need `Py_TPFLAGS_INLINE_VALUES` / managed-dict-offset / `__getattribute__`-override modelling in `objects/type.go` | WIP | 67abc0a |
+| LOAD_ATTR | 10/13 | `MODULE`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `SLOT`, `INSTANCE_VALUE`, `WITH_HINT`, `PROPERTY`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `GETATTRIBUTE_OVERRIDDEN` | `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`, `METHOD_LAZY_DICT` — need `Py_TPFLAGS_INLINE_VALUES` / managed-dict-offset modelling in `objects/type.go` | WIP | 67abc0a |
 | STORE_ATTR | 3/3 | `INSTANCE_VALUE`, `SLOT`, `WITH_HINT` | — | DONE | 67abc0a |
 | LOAD_GLOBAL | 2/2 | `MODULE`, `BUILTIN` | — | DONE | 67abc0a |
 | COMPARE_OP | 3/3 | `INT`, `FLOAT`, `STR` | — | DONE | 67abc0a |
@@ -320,7 +320,7 @@ gate that backs it.
 
 | Family | Arms shipped | Source | Gate | Status | Commit |
 |--------|--------------|--------|------|--------|--------|
-| LOAD_ATTR | 8/9 emitted | `vm/eval_specialized.go` — `MODULE`, `SLOT`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `PROPERTY`, `INSTANCE_VALUE` | `specialize/gatedata/spec_property.py` (`TestGateSpecPropertyAndMethod`) | WIP — `WITH_HINT` deferred until dict keys-version cache stamping lands | 691c2d7, 71a9181 |
+| LOAD_ATTR | 9/10 emitted | `vm/eval_specialized.go` — `MODULE`, `SLOT`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `PROPERTY`, `INSTANCE_VALUE`, `GETATTRIBUTE_OVERRIDDEN` | `specialize/gatedata/spec_property.py` (`TestGateSpecPropertyAndMethod`), `vm/eval_specialized_load_attr_getattribute_overridden_test.go` | WIP — `WITH_HINT` deferred until dict keys-version cache stamping lands | 691c2d7, 71a9181 |
 | TO_BOOL | 6/6 | `vm/eval_specialized.go` — `BOOL`, `INT`, `LIST`, `NONE`, `STR`, `ALWAYS_TRUE` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | COMPARE_OP | 3/3 | `vm/eval_specialized_compare.go` — `INT`, `FLOAT`, `STR` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | CONTAINS_OP | 2/2 | `vm/eval_specialized.go` — `DICT`, `SET` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
@@ -1796,15 +1796,35 @@ nothing tells the specializer when a class attribute changes.
    table for the parity fix + wiring).
 3. **P1.4 closure**: emit the remaining LOAD_ATTR arms
    (`METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`,
-   `METHOD_LAZY_DICT`, `GETATTRIBUTE_OVERRIDDEN`) once
-   `Py_TPFLAGS_INLINE_VALUES` modelling lands; then ship the
-   remaining FOR_ITER / SEND / CALL dispatch arms (P1.4b).
-   FOR_ITER `LIST`/`TUPLE`/`RANGE` shipped with the typed `Next`
-   helpers; `GEN` waits on the SEND generator-frame path.
-   LOAD_SUPER_ATTR `ATTR`/`METHOD` shipped via
+   `METHOD_LAZY_DICT`) once `Py_TPFLAGS_INLINE_VALUES` modelling
+   lands; then ship the remaining FOR_ITER / SEND / CALL dispatch
+   arms (P1.4b). FOR_ITER `LIST`/`TUPLE`/`RANGE` shipped with the
+   typed `Next` helpers; `GEN` waits on the SEND generator-frame
+   path. LOAD_SUPER_ATTR `ATTR`/`METHOD` shipped via
    `objects.SuperLookup` + the `method_found` probe gated on
    `tp_getattro == GenericGetAttr` (see P1.4b sub-table +
-   technical-notes block).
+   technical-notes block). `LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN`
+   shipped independently: a new `fixupGetattroSlot` (called from
+   `fixupSlotDispatchers` between descriptor-slot fixup and
+   `tp_new` fixup) wires a `slotTpGetattroHook` Getattro slot
+   whenever a non-`object` class owns `__getattribute__`; the
+   hook resolves the override, binds it via `tp_descr_get`, and
+   falls back to `__getattr__` on AttributeError, collapsing
+   CPython's `_Py_slot_tp_getattro` + `_Py_slot_tp_getattr_hook`
+   into one entry point. The specializer (`specializeGetattributeOverridden`
+   in `specialize/load_attr.go`) refuses the arm when the class
+   also owns `__getattr__` since the fast arm doesn't run the
+   hookful fallback path. The fast arm
+   (`fastLoadAttrGetattributeOverridden` in `vm/eval_specialized.go`)
+   calls the cached function synchronously through `objects.Call`
+   instead of CPython's `DISPATCH_INLINED` frame bounce; gopy
+   can't push a Python frame from inside a fast arm so the
+   synchronous call beats the generic LOAD_ATTR path by skipping
+   descriptor walk + instance-dict lookup + slot dispatcher.
+   Cache layout: type_version in cells 2..3, `func_version` cells
+   left zero (gopy has no per-function version, type_version
+   invalidation alone covers freshness), cached `*Function`
+   pointer in `CacheObjects[instr]`.
 4. **P1.5 marshal persistence** so `.pyc` files retain the warm
    specializer state across runs.
 5. **P2.1 open the JIT gate** (`interp.JIT = true`); validate
