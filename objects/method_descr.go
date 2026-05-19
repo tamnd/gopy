@@ -16,10 +16,17 @@ import "fmt"
 // closure can serve as the unbound call target after BoundMethod
 // prepends self.
 //
+// Conv is the METH_* calling-convention tag inherited from the
+// PyMethodDef row. specialize_method_descriptor reads it to pick
+// CALL_METHOD_DESCRIPTOR_NOARGS / _O / _FAST / _FAST_WITH_KEYWORDS.
+// Defaults to MethVarargs|MethKeywords so legacy NewMethodDescr
+// callers keep matching the closure shape they always passed.
+//
 // CPython: Include/cpython/descrobject.h PyMethodDescrObject
 type MethodDescr struct {
 	Header
 	name  string
+	conv  MethFlag
 	fn    func(args []Object, kwargs map[string]Object) (Object, error)
 	owner *Type
 }
@@ -41,17 +48,33 @@ func init() {
 }
 
 // NewMethodDescr builds a method descriptor that exposes name on
-// owner. fn receives the receiver as args[0].
+// owner. fn receives the receiver as args[0]. Conv defaults to
+// MethVarargs|MethKeywords.
 //
 // CPython: Objects/descrobject.c:1100 PyDescr_NewMethod
 func NewMethodDescr(owner *Type, name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) *MethodDescr {
-	d := &MethodDescr{name: name, fn: fn, owner: owner}
+	d := &MethodDescr{name: name, conv: MethVarargs | MethKeywords, fn: fn, owner: owner}
+	d.init(MethodDescrType)
+	return d
+}
+
+// NewMethodDescrConv builds a method descriptor with an explicit
+// METH_* tag. Mirrors PyDescr_NewMethod when the PyMethodDef row
+// declares METH_NOARGS / METH_O / METH_FASTCALL / etc.
+//
+// CPython: Objects/descrobject.c:1100 PyDescr_NewMethod
+func NewMethodDescrConv(owner *Type, name string, conv MethFlag, fn func(args []Object, kwargs map[string]Object) (Object, error)) *MethodDescr {
+	d := &MethodDescr{name: name, conv: conv, fn: fn, owner: owner}
 	d.init(MethodDescrType)
 	return d
 }
 
 // Name returns the attribute name this descriptor binds to.
 func (d *MethodDescr) Name() string { return d.name }
+
+// Conv returns the METH_* calling-convention tag the specializer
+// uses to pick the descriptor-specific CALL fast arm.
+func (d *MethodDescr) Conv() MethFlag { return d.conv }
 
 func methodDescrRepr(o Object) (string, error) {
 	d := o.(*MethodDescr)

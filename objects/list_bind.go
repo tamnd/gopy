@@ -17,6 +17,20 @@ func init() {
 	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
 		SetTypeDescr(ListType, name, NewMethodDescr(ListType, name, fn))
 	}
+	// bindO matches CPython's METH_O rows in list_methods. Tagging the
+	// descriptor with MethO lets specialize_method_descriptor emit
+	// CALL_METHOD_DESCRIPTOR_O / CALL_LIST_APPEND. The wrapper still
+	// receives args as a slice (self + arg) so the closure body is
+	// unchanged; only the specializer hint differs.
+	//
+	// CPython: Objects/listobject.c:3308 list_methods (append / count / index / remove / insert / __contains__)
+	bindO := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		d := NewMethodDescrConv(ListType, name, MethO, fn)
+		SetTypeDescr(ListType, name, d)
+		if name == "append" {
+			RegisterCallableCacheListAppend(d)
+		}
+	}
 
 	// list.__repr__ slot wrapper. CPython exposes tp_repr via
 	// add_operators -> slotdefs so callers can do `list.__repr__(L)`
@@ -27,7 +41,7 @@ func init() {
 	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
 	bind("__repr__", listReprMethod)
 
-	bind("append", listAppendMethod)
+	bindO("append", listAppendMethod)
 	bind("extend", listExtendMethod)
 	bind("insert", listInsertMethod)
 	bind("remove", listRemoveMethod)

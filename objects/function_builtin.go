@@ -6,10 +6,17 @@ package objects
 // which is the convention CPython's cfunction_call dispatches when
 // vectorcall is unavailable.
 //
+// Conv is the METH_* calling-convention tag. The CALL specializer
+// reads it to pick CALL_BUILTIN_O / CALL_BUILTIN_FAST /
+// CALL_BUILTIN_FAST_WITH_KEYWORDS / CALL_LEN / CALL_ISINSTANCE. Conv
+// defaults to MethVarargs|MethKeywords so legacy registration sites
+// keep matching the closure shape they always passed.
+//
 // CPython: Include/cpython/methodobject.h PyCFunctionObject
 type BuiltinFunction struct {
 	Header
 	Name string
+	Conv MethFlag
 	Fn   func(args []Object, kwargs map[string]Object) (Object, error)
 }
 
@@ -64,9 +71,24 @@ func init() {
 	))
 }
 
-// NewBuiltinFunction wraps fn under name.
+// NewBuiltinFunction wraps fn under name. Conv defaults to
+// MethVarargs|MethKeywords so legacy registration sites match the
+// closure shape they always passed.
 func NewBuiltinFunction(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) *BuiltinFunction {
-	bf := &BuiltinFunction{Name: name, Fn: fn}
+	bf := &BuiltinFunction{Name: name, Conv: MethVarargs | MethKeywords, Fn: fn}
+	bf.init(BuiltinFunctionType)
+	return bf
+}
+
+// NewBuiltinFunctionConv wraps fn with an explicit METH_* tag. The
+// specializer reads bf.Conv to pick CALL_BUILTIN_O /
+// CALL_BUILTIN_FAST / CALL_BUILTIN_FAST_WITH_KEYWORDS / CALL_LEN /
+// CALL_ISINSTANCE, matching specialize_c_call's switch on
+// PyCFunction_GET_FLAGS.
+//
+// CPython: Python/specialize.c:2137 specialize_c_call
+func NewBuiltinFunctionConv(name string, conv MethFlag, fn func(args []Object, kwargs map[string]Object) (Object, error)) *BuiltinFunction {
+	bf := &BuiltinFunction{Name: name, Conv: conv, Fn: fn}
 	bf.init(BuiltinFunctionType)
 	return bf
 }
