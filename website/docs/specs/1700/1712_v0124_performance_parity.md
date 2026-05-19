@@ -291,7 +291,7 @@ Adjacent gaps surface once the above are closed:
 | P1.4a | Extend specializer emission coverage. CPython 3.14 ships specialized opcode variants across 13 families; gopy's emission state per family is broken out in the P1.4a sub-table below. Faithful port of `classify_descriptor` lives at `specialize/descr_classify.go`. | WIP | 67abc0a |
 | P1.4b | VM fast-path arms for each specialized opcode. Framework landed at `vm/eval_specialized.go:trySpecialized`, wired into `vm/dispatch.go` before `maybeDeopt` so hot sites take the fast path first and fall through to deopt on guard miss. Prerequisite: `Code.CacheObjects []Object` parallel slab is gopy's stand-in for CPython's in-cache pointer slots (Go cannot stash GC-tracked pointers in a `[]byte`); `specialize.{Set,}CacheObject` stamp / read by codeunit index, validity gated by the same version cells. Per-family arm state in the P1.4b sub-table below. | WIP | 691c2d7, 71a9181, 6a8aace |
 | P1.5 | Bytecode cache persistence: `Code.Quickened` + `CacheObjects` slab survive `marshal.dumps`/`marshal.loads` so `.pyc` files retain specialization (CPython persists the warmed cache via the `co_quickened` byte-blob next to `co_code`). Requires marshal-writer extension for the parallel-pointer slab; the `Code.Quickened` flag itself rides in the existing flags word. | TODO | - |
-| P1.6 | Cross-cutting coherency: install dict watcher (P5.5) + type-version invalidation (P7.5) hooks at `specialize.Enable` time so inline caches invalidate atomically on dict/type mutation. Without this, every LOAD_ATTR / LOAD_GLOBAL inline cache risks reading stale state after a class attribute assignment. | TODO | - |
+| P1.6 | Cross-cutting coherency: install dict watcher (P5.5) + type-version invalidation (P7.5) hooks at `specialize.Enable` time so inline caches invalidate atomically on dict/type mutation. Without this, every LOAD_ATTR / LOAD_GLOBAL inline cache risks reading stale state after a class attribute assignment. Shipped: `specialize.Enable` now calls `ensureWatchersInstalled()` before `Quicken`; the optimizer registers its installer at package-init via `specialize.SetWatcherInstaller`; the installer reads `state.MainInterpreter()` (new accessor mirroring `_PyInterpreterState_Main`) and owns its own atomic latch. Fixed a parity bug in `optimizer/watcher.go::WatcherInit`: slot 0 was previously installed with `globalsWatcherCallback` (duplicated from slot 1) instead of the dedicated `builtins_dict_watcher` (`Python/pylifecycle.c:599-610`); slot 0 now bumps `interp.BuiltinDictMutations` and guards `ExecutorsInvalidateAll` on `MaxAllowedBuiltinsModifications`. `EnsureBuiltinsSubscribed` mirrors `Python/pylifecycle.c:1381` (idempotent `PyDict_Watch(0, interp->builtins)` + stamp). Nine new tests across `optimizer/builtins_watcher_test.go`, `optimizer/install_test.go`, `specialize/watcher_test.go`. | DONE | b059710d |
 
 **P1.4a sub-table — specializer emission per family.** Numbers
 report shipped variants vs the CPython 3.14 variant count, then
@@ -334,6 +334,53 @@ gate that backs it.
 | LOAD_SUPER_ATTR | 0/2 | — | — | TODO | - |
 | CALL | 0/5 emitted | — | — | TODO — gated on closing P1.4a CALL gap first | - |
 
+**Technical notes (P1.6 watcher install at specialize.Enable).**
+
+1. CPython installs watchers at two distinct sites:
+   `Python/pylifecycle.c:1378-1383` calls `PyDict_Watch(0, interp->builtins)`
+   while the interpreter is being minted; `Python/optimizer_analysis.c:175-180`
+   lazily calls `PyDict_AddWatcher` / `PyType_AddWatcher` (slot 1 + type slot 0)
+   the first time `remove_globals` projects a trace. gopy collapses both onto
+   `specialize.Enable`: every Code-creation path (`pythonrun`, `vm.liftNestedCode`,
+   `marshal.unmarshalCode`) already calls Enable, so calling
+   `ensureWatchersInstalled()` from it once per Code creation gives the
+   runtime as many retries as it needs without coordinating a startup hook.
+2. **Parity fix.** `optimizer/watcher.go::WatcherInit` was previously installing
+   `globalsWatcherCallback` in BOTH slot 0 (BUILTINS) and slot 1 (GLOBALS).
+   CPython splits them: `Python/pylifecycle.c:599-610 builtins_dict_watcher`
+   bumps `interp->rare_events.builtin_dict` and calls
+   `_Py_Executors_InvalidateAll(interp, 1)` only while under the
+   `MaxAllowedBuiltinsModifications` cap. The new
+   `builtinsDictWatcherCallback` in `optimizer/watcher.go` mirrors that
+   exactly: bump counter unconditionally, gate invalidation on the cap.
+3. **Dependency cycle.** `optimizer` imports `specialize` (for Enable hooks,
+   Quicken, etc.), so `specialize` cannot import `optimizer`. The install hook
+   flows via a function variable: `specialize.SetWatcherInstaller(fn func())`
+   stores the callback, `ensureWatchersInstalled()` fires it.
+   `optimizer/install.go::func init()` registers `installWatchers` at process
+   start. Until that init runs (e.g. specialize unit tests that do not import
+   optimizer), the hook is a no-op rather than nil-deref.
+4. **Latch ownership.** The optimizer-side installer owns its idempotency
+   latch (`atomic.Bool` in `optimizer/install.go`), not specialize. This is
+   load-bearing because Enable is called on every Code creation including
+   the compile-only test path that mints no runtime; the installer reads
+   `state.MainInterpreter()` and returns early if no interp exists, leaving
+   the latch open. The first Enable() that fires after `Runtime.NewInterpreter`
+   minted the main interp finally flips the latch and runs `WatcherInit`.
+5. **`state.MainInterpreter()`** mirrors CPython's
+   `Python/pystate.c::_PyInterpreterState_Main`. gopy stores it in an
+   `atomic.Pointer[Interpreter]`; `Runtime.NewInterpreter` does
+   `mainInterpreter.CompareAndSwap(nil, i)` so the first interp minted in
+   the process latches in as "main" without disturbing later (e.g. test)
+   interps that share the runtime. `DropMainInterpreter` is the
+   test-only escape hatch.
+6. **`EnsureBuiltinsSubscribed`** in `optimizer/watcher.go` mirrors
+   `Python/pylifecycle.c:1381 PyDict_Watch(0, interp->builtins)` plus the
+   `interp->builtins = dict` stamp from `_PyInterpreterState_Init`. It is
+   idempotent on the stamp: a second call with a different dict leaves the
+   first one in place, because module-specific builtins must not steal the
+   slot the canonical dict already occupies.
+
 **Gate.**
 
 - `specialize/integration_test.go` — run `richards.py` 3 times under
@@ -341,6 +388,14 @@ gate that backs it.
   by 10:1 after warmup.
 - Small-subset bench: `call_method`, `richards`, `regex_compile`
   drop to <200x cpython (from 1899x-2407x).
+- `optimizer/builtins_watcher_test.go` covers the slot-0 callback end-to-end
+  (counter bump, executor invalidation under cap, no invalidation past cap)
+  plus `EnsureBuiltinsSubscribed` stamp + idempotency. 4 tests.
+- `specialize/watcher_test.go` covers the installer hook (fires on every
+  ensureWatchersInstalled, no-op when unregistered, replacement semantics).
+  3 tests.
+- `optimizer/install_test.go` covers the latch: skip when no main interp,
+  install exactly once otherwise. 2 tests.
 
 **Estimated win.** 6-10x geomean improvement. Single biggest lever.
 
@@ -643,7 +698,7 @@ The hooks the specializer needs are mostly plumbed:
 | P5.2 | Real split-keys storage: per-type `SharedKeys` object owns the entries-array shape; instance `__dict__` carries `values []Object` only. Materialise to combined on delete or non-shared insert. Cite `Objects/dictobject.c:insertion_resize_inplace`. | TODO | - |
 | P5.3 | `_PyDict_SetItem_KnownHash` fast path: skip rehash when caller passes the hash. Wire from LOAD_ATTR / LOAD_GLOBAL specialized arms. Cite `Objects/dictobject.c:_PyDict_SetItem_KnownHash`. | TODO | - |
 | P5.4 | Public watcher subscription API: `PyDict_Watch(watcher_id, dict)` / `PyDict_AddWatcher(callback) -> int8_t`. Cite `Objects/dictobject.c:7710 PyDict_Watch / :7741 PyDict_AddWatcher`. Replaces the bare `DictMutationHook` pointer. | DONE | objects/dict_watcher.go + objects/dict.go (`watcherTag`), objects/dict_mutate.go + objects/dict.go fire ADDED / MODIFIED / DELETED / CLEARED / CLONED; optimizer/watcher.go delegates AddWatcher/Watch/Unwatch to the public API; `DictMutationHook` retired. |
-| P5.5 | Install the watcher at `specialize.Enable` time + invalidate inline caches on dict mutation. Interacts with P1.6. | TODO | - |
+| P5.5 | Install the watcher at `specialize.Enable` time + invalidate inline caches on dict mutation. Interacts with P1.6. | DONE (closed by P1.6 wiring: `specialize.Enable` calls `ensureWatchersInstalled()`, optimizer slot 0 = builtins callback, slot 1 = globals callback. `EnsureBuiltinsSubscribed` mirrors `Python/pylifecycle.c:1381` for the canonical builtins subscription.) | b059710d |
 
 **Gate.**
 
@@ -1584,7 +1639,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | Subsystem                       | CPython source         | gopy destination          | Estimated win | Status | Commit |
 |---------------------------------|------------------------|---------------------------|--------------:|--------|--------|
 | P0. pyperformance harness       | n/a (tooling)          | `bench/`                  | n/a           | WIP    | ca0bef1 |
-| P1. Specializer wire-up         | `Python/specialize.c`  | `specialize/`             | 6-10x         | WIP (P1.0-P1.3 done, P1.4-P1.6 open) | 67abc0a, 691c2d7, 71a9181, 6a8aace, 96130ac, 2f1f603 |
+| P1. Specializer wire-up         | `Python/specialize.c`  | `specialize/`             | 6-10x         | WIP (P1.0-P1.3 + P1.6 done, P1.4/P1.5 open) | 67abc0a, 691c2d7, 71a9181, 6a8aace, 96130ac, 2f1f603, b059710d |
 | P2. Tier-2 (full-file ports)    | `Python/optimizer_bytecodes.c`, `Python/executor_cases.c.h` | `optimizer/`, `vm/eval_uops_gen.go` | 1.5-2x | WIP (scaffolding + JIT gate hardcoded off) | -      |
 | P3. PyLong fast path            | `Objects/longobject.c` | `objects/long_fast.go`    | 3x            | DONE (P3.1-P3.4; P3.5 deferred behind Int repr refactor) | `d9e16d2` |
 | P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | TODO   | -      |
@@ -1631,8 +1686,10 @@ nothing tells the specializer when a class attribute changes.
    #74.** P5.4 PyDict_Watch (`863d6fb`), P7.0 PyType_Watch
    (`e94cf31`), P7.3 type-version invalidation walks subclasses
    (`2d82694`), and P7.2 inherit_slots pre-population (`d71cf26`)
-   all landed. P7.4 operator-dispatch single-load and P1.6
-   specializer-time watcher install are the next remaining items.
+   all landed. P7.4 operator-dispatch single-load shipped with
+   PR #74 too. P1.6 specializer-time watcher install closed with
+   `b059710d` (see the P1.6 technical-notes block in the Phases
+   table for the parity fix + wiring).
 3. **P1.4 closure**: emit the remaining LOAD_ATTR arms
    (`METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`,
    `METHOD_LAZY_DICT`, `GETATTRIBUTE_OVERRIDDEN`) once
