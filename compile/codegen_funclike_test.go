@@ -93,7 +93,7 @@ func TestFunctionWithReturnExpr(t *testing.T) {
 	}
 	u := compileMod(t, module(fn))
 	inner := findInnerUnit(t, u)
-	want := []string{"RESUME", "LOAD_CONST", "RETURN_VALUE", "LOAD_CONST", "RETURN_VALUE"}
+	want := []string{"RESUME", "NOP", "LOAD_CONST", "RETURN_VALUE", "LOAD_CONST", "RETURN_VALUE"}
 	if got := opNames(inner); !equalStrings(got, want) {
 		t.Errorf("inner ops = %v, want %v", got, want)
 	}
@@ -248,7 +248,7 @@ func TestLambdaEmitsInnerCodeAndMakeFunction(t *testing.T) {
 	if inner.Name != "<lambda>" {
 		t.Errorf("inner.Name = %q, want <lambda>", inner.Name)
 	}
-	wantInner := []string{"RESUME", "LOAD_CONST", "RETURN_VALUE", "LOAD_CONST", "RETURN_VALUE"}
+	wantInner := []string{"RESUME", "NOP", "LOAD_CONST", "RETURN_VALUE", "LOAD_CONST", "RETURN_VALUE"}
 	if got := opNames(inner); !equalStrings(got, wantInner) {
 		t.Errorf("inner ops = %v, want %v", got, wantInner)
 	}

@@ -154,19 +154,20 @@ const (
 	NB_SUBSCR                  int32 = 26
 )
 
-// visitUnaryOp emits UNARY_NEGATIVE / UNARY_INVERT / UNARY_NOT or, for
-// `not`, TO_BOOL + UNARY_NOT. CPython 3.14 collapsed unary plus on
-// numeric constants in the folder, so UAdd just visits the operand
-// without an opcode.
+// visitUnaryOp emits UNARY_NEGATIVE / UNARY_INVERT / UNARY_NOT, or
+// CALL_INTRINSIC_1 INTRINSIC_UNARY_POSITIVE for UAdd. The CFG
+// const-folder collapses any of the four when the operand is a
+// constant, copying the UnaryOp's location onto the resulting
+// LOAD_CONST.
 //
-// CPython: Python/codegen.c UnaryOp case in visit_expr
+// CPython: Python/codegen.c:5194 UnaryOp_kind in codegen_visit_expr
 func (c *Compiler) visitUnaryOp(e *ast.UnaryOp) error {
 	if err := c.visitExpr(e.Operand); err != nil {
 		return err
 	}
 	switch e.Op {
 	case ast.UAdd:
-		// Identity: leave the value on the stack.
+		c.addOpI(CALL_INTRINSIC_1, intrinsicUnaryPositive, loc(e))
 	case ast.USub:
 		c.addOp(UNARY_NEGATIVE, loc(e))
 	case ast.Invert:
@@ -284,7 +285,7 @@ const (
 func (c *Compiler) visitIfExp(e *ast.IfExp) error {
 	elseLab := c.newLabel()
 	endLab := c.newLabel()
-	if err := c.codegenJumpIf(e.Test, elseLab, false, loc(e)); err != nil {
+	if err := c.codegenJumpIf(e.Test, elseLab, false); err != nil {
 		return err
 	}
 	if err := c.visitExpr(e.Body); err != nil {
