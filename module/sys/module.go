@@ -200,6 +200,18 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "_getframe", objects.NewBuiltinFunction("_getframe", getFrame)); err != nil {
 		return nil, err
 	}
+	// sys.audit dispatches an audit event to any registered hooks.
+	// pickle.Unpickler.find_class fires "pickle.find_class" at every
+	// GLOBAL opcode, so importing/loading pickled payloads needs the
+	// slot wired even when no hooks are installed.
+	//
+	// CPython: Python/sysmodule.c:565 sys_audit_impl
+	if err := setItem(md, "audit", objects.NewBuiltinFunction("audit", sysAudit)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "addaudithook", objects.NewBuiltinFunction("addaudithook", sysAddAuditHook)); err != nil {
+		return nil, err
+	}
 	// stdout/stderr/stdin wrap the process file descriptors. CPython
 	// hands these to PyConfig and then PyConfig_InitPythonConfig
 	// stamps them onto sys; gopy's PyConfig port is incomplete so the

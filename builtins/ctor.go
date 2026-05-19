@@ -18,6 +18,7 @@ import (
 	"math/big"
 
 	"github.com/tamnd/gopy/abstract"
+	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/pystrconv"
 )
@@ -468,16 +469,61 @@ func mergeDict(dst, src *objects.Dict) error {
 }
 
 // BytesCtor ports bytes_new.
-// bytes()              -> b""
-// bytes(int)           -> zero-filled bytes of that length
-// bytes(iterable)      -> bytes from ints in iterable
-// bytes(bytes/bytearray) -> copy
-// bytes(str, encoding) -> not yet ported; raises TypeError
+// bytes()                       -> b""
+// bytes(int)                    -> zero-filled bytes of that length
+// bytes(iterable)               -> bytes from ints in iterable
+// bytes(bytes/bytearray)        -> copy
+// bytes(str, encoding[, errors]) -> str.encode(encoding, errors)
 //
 // CPython: Objects/bytesobject.c bytes_new_impl
 func BytesCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) == 0 {
 		return objects.NewBytes(nil), nil
+	}
+	// Look for a str source first so the encoding/errors kwargs are
+	// honored before the iterable fallback catches str (which is iterable).
+	srcIsStr := args[0].Type() == objects.StrType()
+	if srcIsStr {
+		encoding := ""
+		errorsName := "strict"
+		if len(args) > 1 {
+			if u := args[1].Type() == objects.StrType(); u {
+				s, _ := objects.Str(args[1])
+				encoding = s
+			} else {
+				return nil, fmt.Errorf("TypeError: bytes() encoding must be str, not '%s'", args[1].Type().Name)
+			}
+		}
+		if v, ok := kwargs["encoding"]; ok {
+			if v.Type() != objects.StrType() {
+				return nil, fmt.Errorf("TypeError: bytes() encoding must be str, not '%s'", v.Type().Name)
+			}
+			s, _ := objects.Str(v)
+			encoding = s
+		}
+		if len(args) > 2 {
+			if args[2].Type() != objects.StrType() {
+				return nil, fmt.Errorf("TypeError: bytes() errors must be str, not '%s'", args[2].Type().Name)
+			}
+			s, _ := objects.Str(args[2])
+			errorsName = s
+		}
+		if v, ok := kwargs["errors"]; ok {
+			if v.Type() != objects.StrType() {
+				return nil, fmt.Errorf("TypeError: bytes() errors must be str, not '%s'", v.Type().Name)
+			}
+			s, _ := objects.Str(v)
+			errorsName = s
+		}
+		if encoding == "" {
+			return nil, fmt.Errorf("TypeError: string argument without an encoding")
+		}
+		s, _ := objects.Str(args[0])
+		out, _, encErr := codecs.Encode(s, encoding, errorsName)
+		if encErr != nil {
+			return nil, encErr
+		}
+		return objects.NewBytes(out), nil
 	}
 	switch v := args[0].(type) {
 	case *objects.Bytes:
