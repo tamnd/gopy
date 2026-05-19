@@ -1147,13 +1147,75 @@ Method:
 | **geomean**       |             55.11 |          44.24 |  15573.05 |        282.56x |     351.98x |          0.80x |
 
 PyPy is ~1.25x faster than cpython on geomean (5/8 benches faster,
-3/8 slower) — that matches the published PyPy 7.3 numbers and
+3/8 slower) which matches the published PyPy 7.3 numbers and
 confirms the JIT is doing its job.
 
 gopy is at **283x cpython on geomean** across the five benches that
 complete. That ratio compresses dramatically with P1 (specializer
-wire-up) alone — without P1 every adaptive opcode short-circuits
+wire-up) alone, since without P1 every adaptive opcode short-circuits
 in `vm/adaptive.go:41/54/73`.
+
+### Small subset, re-run 2026-05-19 (post spec 1715 + 1716 compile pipeline port)
+
+_Captured: 2026-05-19 against `c012ba0` on branch
+`feat/spec-1713-p7-pyc-writer`. Same host, same harness, same
+warmups/runs as the 2026-05-16 snapshot. The intent of this re-run
+was to baseline gopy after the cfg-builder bridge (1715) and the
+full compile-pipeline port (1716) landed on top of the 2026-05-16
+binary, so the next P1-P15 PR has an honest starting line._
+
+| Benchmark         | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy | PyPy / cpython |
+|-------------------|------------------:|---------------:|----------:|---------------:|------------:|---------------:|
+| `call_method`     |             29.03 |          17.79 | 106905.78 |       3682.79x |    6008.47x |          0.61x |
+| `fannkuch`        |            246.21 |          71.92 |       N/A |            N/A |         N/A |          0.29x |
+| `json_dumps`      |             86.47 |         113.70 |       N/A |            N/A |         N/A |          1.31x |
+| `nbody`           |             31.98 |          23.64 |       N/A |            N/A |         N/A |          0.74x |
+| `pidigits`        |             33.46 |          28.99 |    117.33 |          3.51x |       4.05x |          0.87x |
+| `regex_compile`   |             35.68 |         120.05 | 137260.51 |       3847.38x |    1143.39x |          3.37x |
+| `richards`        |             34.55 |          26.21 |  94072.02 |       2723.00x |    3588.81x |          0.76x |
+| `unpack_sequence` |             21.84 |          17.52 |  19278.36 |        882.57x |    1100.40x |          0.80x |
+| **geomean**       |             45.32 |          39.13 |  19902.16 |        439.11x |     508.62x |          0.86x |
+
+Trend vs 2026-05-16 baseline (`bench/baseline_v0124.json` is frozen
+at the 2026-05-16 numbers, so `bench/compare-baseline` reports these
+as regressions until we refresh it):
+
+| Bench             | 2026-05-16 (ms) | 2026-05-19 (ms) | Delta    |
+|-------------------|----------------:|----------------:|---------:|
+| `pidigits`        |          289.97 |          117.33 |  -59.5%  |
+| `richards`        |        81250.57 |        94072.02 |  +15.8%  |
+| `call_method`     |        78043.22 |       106905.78 |  +37.0%  |
+| `regex_compile`   |        80286.50 |       137260.51 |  +71.0%  |
+| `unpack_sequence` |         6204.49 |        19278.36 | +210.7%  |
+
+Takeaways:
+
+- `pidigits` halved. That bench is GMP-shape arbitrary-precision int
+  arithmetic, and the 1715 cfg-builder port collapsed several
+  bytecode redundancies on the hot loop, exactly the shape where the
+  flowgraph-level optimizer earns its keep.
+- The other four regressed. The two big-ticket changes between
+  2026-05-16 and 2026-05-19 are the cfg-builder bridge (1715) and
+  the full Python/flowgraph.c + Python/assemble.c port (1716). Both
+  paid for byte-equality parity with CPython (`.pyc` round-trip,
+  L1-L4 gates green), not for execution speed. The CFG layer is
+  doing strictly more work per compile (extra normalization passes,
+  pseudo-jump rewriting, stackdepth recomputation), and the new
+  layout is not yet feeding the VM any new fast paths because P1
+  has not landed. So the regression is the bill for parity work
+  that unblocks P1 / P2 inline-caching and tier-2 wire-up.
+- `unpack_sequence` is the loudest regression (+211%). It is the
+  bench most sensitive to per-call frame setup. Plausible
+  attribution: the cfg-builder path now emits the CPython 3.14
+  prologue (RESUME + extra MAKE_CELL housekeeping) where the old
+  flat-sequence path skipped some of it, but the VM still walks
+  every prologue op generically. Concrete number to chase once P6.1
+  (frame pool) and P6.2 (LOAD_FAST_CHECK fast path) close.
+
+This snapshot is the new "floor". The next P1-P7 PR must drag at
+least three of these benches back below the 2026-05-16 baseline
+column, or document why parity-driven cost is structural for that
+PR's scope.
 
 ### Full corpus (release-tag and nightly only)
 
