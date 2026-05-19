@@ -111,14 +111,14 @@ The remaining structural blockers are now:
 | Bench                  | cpython 3.14 | gopy target | gopy 2026-05-16 |
 | ---------------------- | -----------: | ----------: | --------------: |
 | `pyperformance` geomean| 1.0x         | <=1.5x      |          283x   |
-| `nbody`                | 1.0x         | <=2.0x      |  TBD (P8 done; rerun pending) |
-| `fannkuch`             | 1.0x         | <=2.0x      |  TBD (P8 done; rerun pending) |
+| `nbody`                | 1.0x         | <=2.0x      |         5.26x   |
+| `fannkuch`             | 1.0x         | <=2.0x      |        28.83x   |
 | `richards`             | 1.0x         | <=2.0x      |         1899x   |
 | `unpack_sequence`      | 1.0x         | <=2.0x      |          254x   |
 | `call_method`          | 1.0x         | <=1.5x      |         2407x   |
 | `regex_compile`        | 1.0x         | <=2.0x      |         1952x   |
 | `pidigits`             | 1.0x         | <=2.0x      |         7.83x   |
-| `json_dumps`           | 1.0x         | <=2.0x      |  TBD (P9 done; rerun pending) |
+| `json_dumps`           | 1.0x         | <=2.0x      |        485.60x  |
 
 ## Benchmark coverage matrix
 
@@ -752,10 +752,10 @@ Attribute arm was already correct (`SWAP 2 / STORE_ATTR`).
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P8.1 | Capture gopy `dis` output for the reproducer; diff against cpython 3.14. Land the diff in `compile/codegen_stmt_misc_test.go::TestAugAssignSubscriptEmitsCopyCopyBinarySwapSwapStore`. | DONE | (this PR) |
-| P8.2 | Fix the lowering in `compile/codegen_stmt_misc.go` (Subscript LHS in augmented context). Add missing `SWAP 2`. | DONE | (this PR) |
-| P8.3 | Extend the test matrix: augmented STORE_SUBSCR with nested unpack, dict subscript, list element, attribute aug, function-returned container, all BINARY_OP flavors, deep attribute target. Runtime suite in `compile/codegen_stmt_misc_test.go`. | DONE | (this PR) |
-| P8.4 | Audit augmented `STORE_ATTR` (`obj.attr -= rhs`). Already correct: `COPY 1 / LOAD_ATTR / ... / SWAP 2 / STORE_ATTR`. Test `TestAugAssignAttributeEmitsCopyLoadBinarySwapStore` locks it in. | DONE | (this PR) |
+| P8.1 | Capture gopy `dis` output for the reproducer; diff against cpython 3.14. Land the diff in `compile/codegen_stmt_misc_test.go::TestAugAssignSubscriptEmitsCopyCopyBinarySwapSwapStore`. | DONE | `02f6c40` |
+| P8.2 | Fix the lowering in `compile/codegen_stmt_misc.go` (Subscript LHS in augmented context). Add missing `SWAP 2`. | DONE | `02f6c40` |
+| P8.3 | Extend the test matrix: augmented STORE_SUBSCR with nested unpack, dict subscript, list element, attribute aug, function-returned container, all BINARY_OP flavors, deep attribute target. Runtime suite in `compile/codegen_stmt_misc_test.go`. | DONE | `02f6c40`, `5512f4f` (gofmt) |
+| P8.4 | Audit augmented `STORE_ATTR` (`obj.attr -= rhs`). Already correct: `COPY 1 / LOAD_ATTR / ... / SWAP 2 / STORE_ATTR`. Test `TestAugAssignAttributeEmitsCopyLoadBinarySwapStore` locks it in. | DONE | `02f6c40` |
 
 **Gate.** `nbody`, `fannkuch` run to completion under `bin/gopy`;
 both show up with real numbers in the small-subset table.
@@ -784,10 +784,10 @@ serialised numbers as object reprs. The fix wires both pieces.
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P9.1 | `objects/long_format.go`: glue `IntType.Format` (and `BoolType.Format`, since `tp_base = PyLong_Type`) to `format.ParseSpec` + `format.FormatInt`, with a float-coercion branch for `e/E/f/F/g/G/%` codes. | DONE | (this PR) |
-| P9.2 | `objects/float_format.go`: glue `FloatType.Format` to `format.ParseSpec` + `format.FormatFloat`, so the int float-coercion branch and any direct `f.__format__(...)` call share the same renderer. | DONE | (this PR) |
-| P9.3 | `int_bind.go` + `float.go`: install slot wrappers for `int.__repr__` / `int.__str__` / `float.__repr__` / `float.__str__` so `json/encoder.py`'s `_intstr=int.__repr__` and `_floatstr=float.__repr__` defaults bind to the real digit-emitting wrappers instead of `object.__repr__`. | DONE | (this PR) |
-| P9.4 | `objects/long_format_test.go`: table-driven cases pulled from CPython `Lib/test/test_format.py` (int, float-coerced, bool inherited, and the json.encoder ESCAPE_DCT loop). | DONE | (this PR) |
+| P9.1 | `objects/long_format.go`: glue `IntType.Format` (and `BoolType.Format`, since `tp_base = PyLong_Type`) to `format.ParseSpec` + `format.FormatInt`, with a float-coercion branch for `e/E/f/F/g/G/%` codes. | DONE | `a5d25ea`, `5512f4f` (overflow + comments) |
+| P9.2 | `objects/float_format.go`: glue `FloatType.Format` to `format.ParseSpec` + `format.FormatFloat`, so the int float-coercion branch and any direct `f.__format__(...)` call share the same renderer. | DONE | `a5d25ea`, `5512f4f` (gofmt + comments) |
+| P9.3 | `int_bind.go` + `float.go`: install slot wrappers for `int.__repr__` / `int.__str__` / `float.__repr__` / `float.__str__` so `json/encoder.py`'s `_intstr=int.__repr__` and `_floatstr=float.__repr__` defaults bind to the real digit-emitting wrappers instead of `object.__repr__`. | DONE | `a5d25ea`, `5512f4f` (comments) |
+| P9.4 | `objects/long_format_test.go`: table-driven cases pulled from CPython `Lib/test/test_format.py` (int, float-coerced, bool inherited, and the json.encoder ESCAPE_DCT loop). | DONE | `a5d25ea`, `5512f4f` (misspell) |
 
 **Gate.** `objects/long_format_test.go` matches cpython output on the
 covered specs. `json_dumps`, `nbody`, and `fannkuch` run to completion
@@ -805,6 +805,53 @@ emission. P9 manually installs the four wrappers `pyperformance` and
 `json` reach for. The rest of the slotdefs catalog (`__add__`,
 `__sub__`, `__mul__`, etc.) is still missing on most builtin types
 and lands as part of #647.
+
+**Technical notes (findings worth keeping).**
+
+- *The slot wiring was the gap, not the parser.* `format/format.go`
+  already had a complete CPython-equivalent `ParseSpec`, `FormatInt`,
+  and `FormatFloat`; they were exercised by `str.format` and
+  f-strings via `objects/str_format.go`. `IntType.Format` and
+  `FloatType.Format` were left at zero, so the protocol-level
+  `Format()` helper fell through to `objectFormatDescr`, which
+  rejects every non-empty spec. Wiring the three slots (int, bool,
+  float) is the whole port.
+
+- *Bool inherits int's slot, but only because we set it.* CPython's
+  `inherit_slots` walks `tp_base` for built-in types and copies
+  `tp_format` from `PyLong_Type` to `PyBool_Type`. gopy's type
+  machinery does not walk the base chain for the `Format` slot on
+  built-in types, so `BoolType.Format = intFormat` is the explicit
+  mirror of that inheritance. Without it `'{:d}'.format(True)`
+  rejected.
+
+- *Float coercion for 'e'/'E'/'f'/'F'/'g'/'G'/'%'.* `int.__format__`
+  with a float type code promotes through `PyNumber_Float` in
+  CPython's `format_long_internal`; we mirror that with
+  `bigIntToFloat64` + `format.FormatFloat`. The OverflowError path
+  uses `math.IsInf` on the `big.Float -> float64` result because
+  `big.Float`'s `Accuracy` flag is non-zero for ordinary rounding
+  and is not a usable overflow signal.
+
+- *The hidden second gap: slot-wrapper descriptors for `__repr__` /
+  `__str__`.* After the Format slot wiring landed, `json.dumps` still
+  emitted `<int object at 0x...>` and `<float object at 0x...>`.
+  `json/encoder.py:_make_iterencode` captures
+  `_intstr=int.__repr__` and `_floatstr=float.__repr__` as default
+  parameter values at function-definition time, so it does not go
+  through the runtime `tp_repr` slot. It does a dictionary lookup on
+  the type and binds the resulting descriptor. CPython generates
+  these descriptors automatically from `slotdefs` via
+  `add_operators` in `Objects/typeobject.c`; gopy does not run that
+  loop yet (task #647). The fix here installs the four wrappers
+  manually (`intReprDescr` for int + bool, `floatReprDescr` for
+  float). Once #647 lands the manual wiring deletes.
+
+- *Why both `__repr__` and `__str__` get the same function.* CPython's
+  `slotdefs` table maps `__repr__` to `tp_repr` and `__str__` to
+  `tp_str`; for `int` and `float`, `tp_str` falls through to
+  `tp_repr`, so the digit string is the same. Mirroring that with a
+  single descriptor keeps the binding semantics consistent.
 
 ### P10. Float fast path — `Objects/floatobject.c`
 
@@ -1081,8 +1128,8 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P5. Dict open-addressing        | `Objects/dictobject.c` | `objects/dict.go` (extend) | 2x           | WIP (open-addressed layout already in tree, split-keys + watcher API + KnownHash gaps remain) | - |
 | P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `vm/frame_pool.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go` | 1.5x | WIP (P6.2 done via spec 1716; P6.1/P6.3/P6.4 open) | spec 1716 |
 | P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`   | 1.5x          | TODO   | -      |
-| P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-106` | unblock 2 N/A | DONE | (this PR) |
-| P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go`, `objects/float_format.go`, `objects/int_bind.go`, `objects/float.go` | unblock 1 N/A | DONE | (this PR) |
+| P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-106` | unblock 2 N/A | DONE | `02f6c40` |
+| P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go`, `objects/float_format.go`, `objects/int_bind.go`, `objects/float.go` | unblock 1 N/A | DONE | `a5d25ea`, `5512f4f` |
 | P10. Float fast path            | `Objects/floatobject.c` | `objects/float_pool.go`  | 2.5x          | TODO   | -      |
 | P11. CFG optimizer + peephole   | `Python/flowgraph.c`   | `compile/flowgraph_cfg_passes.go` | 1.1x | DONE (spec 1716) | 9d7d9f0, 37563f5 |
 | P12. Generator fast path        | `Python/genobject.c`   | `objects/generator.go`, `vm/eval_gen.go` | 3x async | DONE (channel + goroutine model); P12.2 SEND tier-2 uop depends on P2.3 | - |
@@ -1098,10 +1145,22 @@ API + P7.3 type-version auto-invalidation land, because today
 nothing tells the specializer when a class attribute changes.
 
 1. **P8 + P9 unblock N/A benches** (independent, small). `v[0] -= rhs`
-   codegen fix and `int.__format__` spec parser. **DONE on the active
-   branch.** `nbody`, `fannkuch`, and `json_dumps` all run to
-   completion under `bin/gopy` (exit 0). Pending: refresh the
-   small-subset bench table with real numbers.
+   codegen fix and `int.__format__` spec parser. **DONE on PR #74.**
+   `nbody`, `fannkuch`, and `json_dumps` all run to completion under
+   `bin/gopy` (exit 0). Small-subset bench rerun on Apple M4 / macOS
+   15.7.7 / go1.26.3 (2026-05-19):
+
+   | Benchmark | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy |
+   |---|---:|---:|---:|---:|---:|
+   | `fannkuch` | 246.80 | 70.92 | 7115.49 | 28.83x | 100.33x |
+   | `json_dumps` | 88.43 | 112.23 | 42941.82 | 485.60x | 382.62x |
+   | `nbody` | 31.47 | 21.44 | 165.42 | 5.26x | 7.72x |
+   | **geomean (these three)** | 88.23 | 55.47 | 3697.38 | 41.91x | 66.66x |
+
+   The "ratio went from infinity to a number" is the win that
+   matters for these three. Compressing the ratios further is
+   downstream work (P1 specializer for `nbody` / `fannkuch`, P15
+   unicode writer + P3 longs for `json_dumps`).
 2. **P5.4 watcher API + P7.2 slot pre-population + P7.3 version
    invalidation** ship as one PR. This unblocks P1.4 deferred arms
    (`STORE_ATTR_INSTANCE_VALUE`, `STORE_ATTR_WITH_HINT`) and lets
