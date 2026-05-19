@@ -27,6 +27,15 @@ type Instance struct {
 
 	dict  *Dict
 	slots []Object
+
+	// inlineValid mirrors PyDictValues.valid: true while the instance
+	// is still in the default inline-values shape (no DELETE_ATTR,
+	// no key replacement that would materialize a separate dict).
+	// The LOAD_ATTR_*_WITH_VALUES fast arms deopt when this flag is
+	// cleared.
+	//
+	// CPython: Include/internal/pycore_dict.h PyDictValues.valid
+	inlineValid bool
 }
 
 // NewInstance allocates a fresh Instance bound to t. The instance
@@ -43,9 +52,29 @@ func NewInstance(t *Type) *Instance {
 	if n := len(t.Slots); n > 0 {
 		inst.slots = make([]Object, n)
 	}
+	// Every fresh instance starts with inline values valid; only a
+	// DELETE_ATTR (or other mutation that materializes a dict outside
+	// the shared-keys shape) clears it.
+	//
+	// CPython: Objects/object.c _PyObject_InitInlineValues
+	inst.inlineValid = true
 	inst.init(t)
 	return inst
 }
+
+// InlineValid reports whether the instance is still in the inline-
+// values shape the LOAD_ATTR_*_WITH_VALUES fast arms expect.
+//
+// CPython: Include/internal/pycore_dict.h PyDictValues.valid
+func (i *Instance) InlineValid() bool { return i.inlineValid }
+
+// InvalidateInlineValues flips inlineValid to false. The next fast-arm
+// guard miss deopts the call site. Called from instanceSetAttr on
+// delete (and from any future path that breaks the shared-keys shape).
+//
+// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
+// (called when the inline-values shape is broken)
+func (i *Instance) InvalidateInlineValues() { i.inlineValid = false }
 
 // Dict returns the instance __dict__. Mutating it is how attribute
 // stores land. Returns nil when the class declared __slots__ without
@@ -161,7 +190,23 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 		if _, err := inst.dict.GetItem(name); err != nil {
 			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 		}
+		// Deleting an instance attribute materializes the dict in
+		// CPython (clears PyDictValues.valid). gopy already keeps a
+		// real per-instance dict; flipping inlineValid drops the
+		// instance out of WITH_VALUES specialization.
+		inst.inlineValid = false
 		return inst.dict.DelItem(name)
+	}
+	// Record the attribute name in the type's shared-keys set the
+	// first time it shows up on any instance. CPython updates
+	// ht_cached_keys lazily through insert_split_key; gopy keeps the
+	// same monotonic invariant: cachedKeys only grows, and every
+	// growth bumps cachedKeysVersion so caches stamped before the
+	// change reject on the next hit.
+	//
+	// CPython: Objects/dictobject.c:5132 insert_split_key
+	if u, ok := name.(*Unicode); ok {
+		tp.AddCachedKey(u.v)
 	}
 	return inst.dict.SetItem(name, value)
 }

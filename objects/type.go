@@ -196,6 +196,22 @@ type Type struct {
 	// CPython: Include/internal/pycore_typeobject.h tp_version_tag
 	versionTag uint32
 
+	// cachedKeys mirrors PyHeapTypeObject.ht_cached_keys: the union of
+	// attribute names ever observed in an instance's __dict__. The
+	// LOAD_ATTR_*_WITH_VALUES specializer arms refuse to fire for any
+	// name in this set, because such names can shadow class-level
+	// descriptors. Populated lazily by instanceSetAttr.
+	//
+	// CPython: Include/cpython/typeobject.h ht_cached_keys
+	cachedKeys map[string]bool
+
+	// cachedKeysVersion is the dk_version of cachedKeys. Bumps on
+	// every additive change so caches stamped before the change
+	// invalidate. 0 means "not yet allocated or invalidated".
+	//
+	// CPython: Include/internal/pycore_dict.h dk_version
+	cachedKeysVersion uint32
+
 	// tpWatched mirrors CPython's PyTypeObject.tp_watched: an 8-bit
 	// mask, one bit per registered type watcher. PyType_Watch sets
 	// the bit, PyType_Unwatch clears it, type_modified_unlocked
@@ -220,7 +236,95 @@ type Visitor func(Object) error
 const (
 	TpFlagMapping  uint64 = 1 << 6
 	TpFlagSequence uint64 = 1 << 5
+	// TpFlagInlineValues mirrors Py_TPFLAGS_INLINE_VALUES. Set on heap
+	// types whose instances begin life with a PyDictValues block stored
+	// inline at tp_basicsize. The adaptive specializer keys its
+	// LOAD_ATTR_METHOD_WITH_VALUES / NONDESCRIPTOR_WITH_VALUES arms on
+	// this bit.
+	//
+	// CPython: Include/object.h:518 Py_TPFLAGS_INLINE_VALUES
+	TpFlagInlineValues uint64 = 1 << 2
+	// TpFlagManagedDict mirrors Py_TPFLAGS_MANAGED_DICT. Set on heap
+	// types whose instances carry their __dict__ in a managed slot at
+	// MANAGED_DICT_OFFSET rather than via tp_dictoffset. Gates the
+	// LOAD_ATTR_METHOD_LAZY_DICT arm.
+	//
+	// CPython: Include/object.h:528 Py_TPFLAGS_MANAGED_DICT
+	TpFlagManagedDict uint64 = 1 << 4
 )
+
+// HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.
+//
+// CPython: Include/object.h:518 Py_TPFLAGS_INLINE_VALUES
+func (t *Type) HasInlineValues() bool {
+	return t.TpFlags&TpFlagInlineValues != 0
+}
+
+// HasManagedDict reports whether t carries Py_TPFLAGS_MANAGED_DICT.
+//
+// CPython: Include/object.h:528 Py_TPFLAGS_MANAGED_DICT
+func (t *Type) HasManagedDict() bool {
+	return t.TpFlags&TpFlagManagedDict != 0
+}
+
+// CachedKeysVersion returns the cached_keys version, allocating a
+// fresh value on first read. Mirrors PyHeapTypeObject.ht_cached_keys
+// dk_version: the specializer stamps this into LOAD_ATTR_*_WITH_VALUES
+// caches and the fast arm rejects on mismatch (i.e. when a new
+// attribute name was added to any instance's dict).
+//
+// CPython: Include/internal/pycore_dict.h dk_version
+func (t *Type) CachedKeysVersion() uint32 {
+	if t.cachedKeysVersion != 0 {
+		return t.cachedKeysVersion
+	}
+	v := allocDictKeysVersion()
+	if v == 0 {
+		return 0
+	}
+	t.cachedKeysVersion = v
+	return v
+}
+
+// InvalidateCachedKeysVersion zeroes t.cachedKeysVersion so the next
+// CachedKeysVersion call allocates a fresh value. Called by
+// AddCachedKey when a new attribute name enters the shared-keys set.
+//
+// CPython: Objects/dictobject.c:739 dictkeys_modified
+func (t *Type) InvalidateCachedKeysVersion() {
+	t.cachedKeysVersion = 0
+}
+
+// HasCachedKey reports whether name has ever been observed as an
+// instance attribute on t (or any subclass that bubbled it up).
+// The specializer uses this to refuse WITH_VALUES specialization for
+// names that an instance might shadow.
+//
+// CPython: Objects/dictobject.c:5132 insert_split_key (shared-keys insertion)
+func (t *Type) HasCachedKey(name string) bool {
+	if t.cachedKeys == nil {
+		return false
+	}
+	_, ok := t.cachedKeys[name]
+	return ok
+}
+
+// AddCachedKey records name in the shared-keys set and bumps
+// cached_keys_version. No-op when name is already known. Called from
+// instanceSetAttr the first time a given attribute name is stored on
+// any instance.
+//
+// CPython: Objects/dictobject.c:5132 insert_split_key
+func (t *Type) AddCachedKey(name string) {
+	if t.cachedKeys == nil {
+		t.cachedKeys = map[string]bool{}
+	}
+	if t.cachedKeys[name] {
+		return
+	}
+	t.cachedKeys[name] = true
+	t.InvalidateCachedKeysVersion()
+}
 
 // typeType is the type of Type itself. Lazily initialized on first
 // use to break the bootstrap cycle (Type.Header.typ == typeType).

@@ -117,6 +117,17 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 	if noSlotsDeclared {
 		t.HasDict = true
 	}
+	// User classes with a per-instance __dict__ ship with the
+	// INLINE_VALUES + MANAGED_DICT flag pair set, matching CPython
+	// heap types built through type_new. The flags gate the
+	// LOAD_ATTR_*_WITH_VALUES specializer arms.
+	//
+	// CPython: Objects/typeobject.c:4153 type_new (sets
+	// Py_TPFLAGS_INLINE_VALUES + Py_TPFLAGS_MANAGED_DICT on heap types
+	// with a managed dict)
+	if t.HasDict {
+		t.TpFlags |= TpFlagInlineValues | TpFlagManagedDict
+	}
 	if ns != nil {
 		// __classcell__ is the cell __build_class__ left in the
 		// namespace so we can patch it with the new class. It is not a

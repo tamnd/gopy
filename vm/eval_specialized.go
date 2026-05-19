@@ -50,6 +50,10 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		next, ok = e.fastLoadAttrMethodNoDict(oparg)
 	case compile.LOAD_ATTR_NONDESCRIPTOR_NO_DICT:
 		next, ok = e.fastLoadAttrNondescriptorNoDict(oparg)
+	case compile.LOAD_ATTR_METHOD_WITH_VALUES:
+		next, ok = e.fastLoadAttrMethodWithValues(oparg)
+	case compile.LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES:
+		next, ok = e.fastLoadAttrNondescriptorWithValues(oparg)
 	case compile.LOAD_ATTR_PROPERTY:
 		return e.fastLoadAttrProperty(oparg)
 	case compile.LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN:
@@ -332,6 +336,102 @@ func (e *evalState) fastLoadAttrNondescriptorNoDict(oparg uint32) (int, bool) {
 	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
 	curVer := tp.VersionTag()
 	if curVer == 0 || curVer != cachedVer {
+		return 0, false
+	}
+	descr := specialize.CacheObject(e.f.Code.CacheObjects, idx)
+	if descr == nil {
+		return 0, false
+	}
+	e.pop()
+	e.pushObject(descr)
+	return e.cacheAdvance(compile.LOAD_ATTR), true
+}
+
+// fastLoadAttrMethodWithValues implements LOAD_ATTR_METHOD_WITH_VALUES.
+//
+// Guards: oparg requests the unbound-method shape (bit 0 set), owner
+// is *Instance, owner's type_version matches cells 2..3, the type's
+// cached_keys_version matches cells 4..5, and inst.InlineValid() is
+// still true (no DELETE_ATTR has materialized a separate dict). The
+// cached descriptor is the class-level method; on hit pushes (descr,
+// self) so the following CALL sees the unbound-method (callable, self)
+// shape.
+//
+// The specializer asserts at stamp time that the name being looked up
+// is NOT in the type's cached_keys (CPython:
+// Python/specialize.c:1614). Together with the keys_version guard,
+// that proves no instance has ever stored an attribute under this
+// name, so the load returns the class-level descriptor verbatim.
+//
+// CPython: Python/bytecodes.c LOAD_ATTR_METHOD_WITH_VALUES
+func (e *evalState) fastLoadAttrMethodWithValues(oparg uint32) (int, bool) {
+	if oparg&1 == 0 {
+		return 0, false
+	}
+	inst, ok := e.peek(0).AsObject().(*objects.Instance)
+	if !ok {
+		return 0, false
+	}
+	tp := inst.Type()
+	if !tp.HasInlineValues() {
+		return 0, false
+	}
+	if !inst.InlineValid() {
+		return 0, false
+	}
+	idx := e.instrIdx()
+	code := e.f.Code.Code
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
+	curVer := tp.VersionTag()
+	if curVer == 0 || curVer != cachedVer {
+		return 0, false
+	}
+	cachedKeys := specialize.LoadMethodKeysVersion(code, idx)
+	curKeys := tp.CachedKeysVersion()
+	if curKeys == 0 || curKeys != cachedKeys {
+		return 0, false
+	}
+	descr := specialize.CacheObject(e.f.Code.CacheObjects, idx)
+	if descr == nil {
+		return 0, false
+	}
+	self := e.pop()
+	e.pushObject(descr)
+	e.push(self)
+	return e.cacheAdvance(compile.LOAD_ATTR), true
+}
+
+// fastLoadAttrNondescriptorWithValues implements
+// LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES. Same guards as the METHOD
+// variant; pushes only the cached descriptor (oparg&1 == 0, no
+// unbound-method shape) and consumes the owner.
+//
+// CPython: Python/bytecodes.c LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES
+func (e *evalState) fastLoadAttrNondescriptorWithValues(oparg uint32) (int, bool) {
+	if oparg&1 != 0 {
+		return 0, false
+	}
+	inst, ok := e.peek(0).AsObject().(*objects.Instance)
+	if !ok {
+		return 0, false
+	}
+	tp := inst.Type()
+	if !tp.HasInlineValues() {
+		return 0, false
+	}
+	if !inst.InlineValid() {
+		return 0, false
+	}
+	idx := e.instrIdx()
+	code := e.f.Code.Code
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
+	curVer := tp.VersionTag()
+	if curVer == 0 || curVer != cachedVer {
+		return 0, false
+	}
+	cachedKeys := specialize.LoadMethodKeysVersion(code, idx)
+	curKeys := tp.CachedKeysVersion()
+	if curKeys == 0 || curKeys != cachedKeys {
 		return 0, false
 	}
 	descr := specialize.CacheObject(e.f.Code.CacheObjects, idx)

@@ -233,27 +233,58 @@ func specializeInstanceLoadAttr(inst *objects.Instance, name *objects.Unicode, c
 		return true
 	case KindMethod:
 		// CPython: Python/specialize.c:1162-1179 METHOD case → routes
-		// through specialize_attr_loadclassattr which picks
-		// METHOD_NO_DICT when tp_dictoffset == 0. gopy expresses
-		// "no instance dict" as Type.HasDict == false.
-		if tp.HasDict {
-			return false
+		// through specialize_attr_loadclassattr. The branch on
+		// tp_flags picks WITH_VALUES (INLINE_VALUES heap types),
+		// NO_DICT (tp_dictoffset == 0), or LAZY_DICT (MANAGED_DICT
+		// with a null managed pointer). gopy expresses "no instance
+		// dict" as Type.HasDict == false.
+		//
+		// CPython: Python/specialize.c:1614 specialize_attr_loadclassattr
+		if !tp.HasDict {
+			loadMethodCacheAt(code, instr).setTypeVersion(version)
+			SetCacheObject(co.CacheObjects, instr, descr)
+			Specialize(code, instr, compile.LOAD_ATTR_METHOD_NO_DICT)
+			return true
 		}
-		loadMethodCacheAt(code, instr).setTypeVersion(version)
-		SetCacheObject(co.CacheObjects, instr, descr)
-		Specialize(code, instr, compile.LOAD_ATTR_METHOD_NO_DICT)
-		return true
+		if tp.HasInlineValues() && !tp.HasCachedKey(name.Value()) {
+			keysVer := tp.CachedKeysVersion()
+			if keysVer == 0 {
+				return false
+			}
+			lm := loadMethodCacheAt(code, instr)
+			lm.setTypeVersion(version)
+			lm.setKeysVersion(keysVer)
+			SetCacheObject(co.CacheObjects, instr, descr)
+			Specialize(code, instr, compile.LOAD_ATTR_METHOD_WITH_VALUES)
+			return true
+		}
+		return false
 	case KindNonDescriptor:
 		// CPython: Python/specialize.c:1300-1311 NON_DESCRIPTOR case →
-		// LOAD_ATTR_NONDESCRIPTOR_NO_DICT when tp_dictoffset == 0 and
-		// the attribute is not requested as a bound method.
-		if tp.HasDict {
-			return false
+		// LOAD_ATTR_NONDESCRIPTOR_NO_DICT when tp_dictoffset == 0,
+		// NONDESCRIPTOR_WITH_VALUES when INLINE_VALUES.
+		//
+		// CPython: Python/specialize.c:1625 specialize_attr_loadclassattr
+		// (NONDESCRIPTOR branch)
+		if !tp.HasDict {
+			loadMethodCacheAt(code, instr).setTypeVersion(version)
+			SetCacheObject(co.CacheObjects, instr, descr)
+			Specialize(code, instr, compile.LOAD_ATTR_NONDESCRIPTOR_NO_DICT)
+			return true
 		}
-		loadMethodCacheAt(code, instr).setTypeVersion(version)
-		SetCacheObject(co.CacheObjects, instr, descr)
-		Specialize(code, instr, compile.LOAD_ATTR_NONDESCRIPTOR_NO_DICT)
-		return true
+		if tp.HasInlineValues() && !tp.HasCachedKey(name.Value()) {
+			keysVer := tp.CachedKeysVersion()
+			if keysVer == 0 {
+				return false
+			}
+			lm := loadMethodCacheAt(code, instr)
+			lm.setTypeVersion(version)
+			lm.setKeysVersion(keysVer)
+			SetCacheObject(co.CacheObjects, instr, descr)
+			Specialize(code, instr, compile.LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES)
+			return true
+		}
+		return false
 	case KindAbsent:
 		// fall through to dict-access panel below
 	default:
