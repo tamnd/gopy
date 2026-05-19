@@ -88,7 +88,7 @@ func BenchmarkFloatNewOne(b *testing.B) {
 // to newFloatRaw without extra overhead.
 func BenchmarkFloatNewArbitrary(b *testing.B) {
 	b.ReportAllocs()
-	var x float64 = 2.5
+	x := 2.5
 	for b.Loop() {
 		_ = NewFloat(x)
 		x += 0.1

@@ -32,7 +32,7 @@ var (
 	bitsNaN = math.Float64bits(math.NaN())
 )
 
-// singleton *Float pointers. Initialised lazily in init() once
+// singleton *Float pointers. Initialized lazily in init() once
 // FloatType has its slots wired so floatHash / floatRepr don't trip
 // over the unfilled type singleton during package load.
 var (

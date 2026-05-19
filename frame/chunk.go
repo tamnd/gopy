@@ -74,7 +74,7 @@ func (s *FrameStack) Pop() {
 		// f.LocalsPlus alone. Init() on the next Push at this same
 		// slot then hits its `cap(LocalsPlus) >= size` fast path and
 		// recycles the slice instead of make()ing a new one. This is
-		// the gopy analogue of CPython's _PyThreadState_PopFrame
+		// the gopy analog of CPython's _PyThreadState_PopFrame
 		// leaving the activation-record memory in the data stack for
 		// the next _PyEvalFramePushAndInit to claim.
 		//

@@ -2,7 +2,7 @@
 // CPython folds the "both operands fit one machine digit" case into a
 // branch at the top of long_add / long_sub / long_mul / long_and / etc.
 // that does native arithmetic on stwodigits before falling back to the
-// multi-digit path. gopy's storage is math/big, so the analogue is to
+// multi-digit path. gopy's storage is math/big, so the analog is to
 // test IsInt64() on both operands, do the op in native int64 with an
 // overflow guard, and only fall through to big.Int when the inputs (or
 // the result) outgrow the machine word.
