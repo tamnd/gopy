@@ -126,6 +126,34 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		return e.fastCallPyExactArgs(oparg)
 	case compile.CALL_BOUND_METHOD_EXACT_ARGS:
 		return e.fastCallBoundMethodExactArgs(oparg)
+	case compile.CALL_BUILTIN_O:
+		return e.fastCallBuiltinO(oparg)
+	case compile.CALL_BUILTIN_FAST:
+		return e.fastCallBuiltinFast(oparg)
+	case compile.CALL_BUILTIN_FAST_WITH_KEYWORDS:
+		return e.fastCallBuiltinFastWithKeywords(oparg)
+	case compile.CALL_LEN:
+		return e.fastCallLen(oparg)
+	case compile.CALL_ISINSTANCE:
+		return e.fastCallIsinstance(oparg)
+	case compile.CALL_LIST_APPEND:
+		return e.fastCallListAppend(oparg)
+	case compile.CALL_TYPE_1:
+		return e.fastCallType1(oparg)
+	case compile.CALL_STR_1:
+		return e.fastCallStr1(oparg)
+	case compile.CALL_TUPLE_1:
+		return e.fastCallTuple1(oparg)
+	case compile.CALL_BUILTIN_CLASS:
+		return e.fastCallBuiltinClass(oparg)
+	case compile.CALL_METHOD_DESCRIPTOR_O:
+		return e.fastCallMethodDescriptorO(oparg)
+	case compile.CALL_METHOD_DESCRIPTOR_FAST:
+		return e.fastCallMethodDescriptorFast(oparg)
+	case compile.CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS:
+		return e.fastCallMethodDescriptorFastKw(oparg)
+	case compile.CALL_METHOD_DESCRIPTOR_NOARGS:
+		return e.fastCallMethodDescriptorNoArgs(oparg)
 	case compile.FOR_ITER_LIST:
 		next, ok = e.fastForIterList(oparg)
 	case compile.FOR_ITER_TUPLE:
