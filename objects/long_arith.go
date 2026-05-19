@@ -19,6 +19,11 @@ func intAdd(a, b Object) (Object, error) {
 	if !ok {
 		return notImplemented(), nil
 	}
+	if x, y, both := compactPair(ai, bi); both {
+		if r, over := addOverflow(x, y); !over {
+			return NewInt(r), nil
+		}
+	}
 	return NewIntFromBig(new(big.Int).Add(&ai.v, &bi.v)), nil
 }
 
@@ -27,6 +32,11 @@ func intSub(a, b Object) (Object, error) {
 	if !ok {
 		return notImplemented(), nil
 	}
+	if x, y, both := compactPair(ai, bi); both {
+		if r, over := subOverflow(x, y); !over {
+			return NewInt(r), nil
+		}
+	}
 	return NewIntFromBig(new(big.Int).Sub(&ai.v, &bi.v)), nil
 }
 
@@ -34,6 +44,11 @@ func intMul(a, b Object) (Object, error) {
 	ai, bi, ok := intPair(a, b)
 	if !ok {
 		return notImplemented(), nil
+	}
+	if x, y, both := compactPair(ai, bi); both {
+		if r, over := mulOverflow(x, y); !over {
+			return NewInt(r), nil
+		}
 	}
 	return NewIntFromBig(new(big.Int).Mul(&ai.v, &bi.v)), nil
 }

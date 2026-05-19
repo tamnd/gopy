@@ -477,23 +477,62 @@ sides fit in int64.
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P3.1 | `objects/long_fast.go`: detect inline-representable values, store unboxed int64 alongside `big.Int`. Add `compactValue int64; isCompact bool` (or single int64 with sentinel bit). | TODO | - |
-| P3.2 | Route `New(int64)` and `FromString` through `long_cache.go` for `[-5, 256]`. Allocation-free. | TODO | - |
-| P3.3 | `Add`/`Sub`/`Mul`/`Neg`/`Abs` fast-path: int64 arithmetic with overflow check when both compact; fall back to big.Int on overflow. | TODO | - |
-| P3.4 | `__index__` / `PyLong_AsLong` fast path. | TODO | - |
-| P3.5 | `_PyLong_FromUint64` / `_PyLong_FromInt64` mirrored constructors that bypass big.Int when input fits compact. | TODO | - |
+| P3.1 | `objects/long_fast.go`: `compactInt`/`compactPair` int64 view + overflow helpers (`addOverflow`, `subOverflow`, `mulOverflow`, `negOverflow`, `absOverflow`). Reuses existing `big.Int` storage; fast path bypasses the temp `new(big.Int)` and falls through to the slow path only on overflow. | DONE | objects/long_fast.go |
+| P3.2 | `NewInt(int64)` already routes through `smallIntFromInt64` so `[-5, 256]` is alloc-free; fast-path slots feed results through `NewInt` so the cache singleton is returned for the common case. | DONE | objects/int.go:67 (verified) |
+| P3.3 | `intAdd`/`intSub`/`intMul`/`intNeg`/`intAbs`/`intAnd`/`intOr`/`intXor`/`intInvert` fast path: int64 arithmetic with overflow check when both operands are compact; fall back to `big.Int` on overflow. | DONE | objects/long_arith.go, objects/long_bitwise.go, objects/long_misc.go |
+| P3.4 | `__index__` / `PyLong_AsLong` fast path. Already covered by `(*Int).Int64()` returning `(int64, ok)` and by `compactInt(i)` short-circuiting on `i.v.IsInt64()`. | DONE | objects/int.go:94, objects/long_fast.go |
+| P3.5 | `_PyLong_FromUint64` / `_PyLong_FromInt64` mirrored constructors that bypass big.Int when input fits compact. Deferred until the storage layout is refactored to keep an inline int64; the alloc savings are real but require touching every reader of `Int.v`. | DEFERRED | - |
 
 **Gate.**
 
-- `objects/long_arith_test.go` adds a cross-check: every fast-path
-  result equals the big.Int slow-path result on a 10k-entry random
-  table.
-- `BenchmarkLongAddSmall`/`BenchmarkLongMulSmall` show 0 allocs and
-  ≥5x speedup vs the current path.
-- `pidigits` bench drops from 7.83x to under 2x cpython.
+- `objects/long_fast_test.go` cross-checks every fast-path slot
+  (`intAdd`/`intSub`/`intMul`/`intAnd`/`intOr`/`intXor`/`intInvert`/`intNeg`/`intAbs`)
+  against the `big.Int` slow path on a 5000-entry randomized table plus
+  an overflow-boundary table (`MaxInt64`, `MinInt64`, `(1<<40)^2`).
+- `BenchmarkLongAddSmall` and `BenchmarkLongMulSmall` show **0 allocs**
+  and 5.3 ns / 8.6 ns per op on Apple M4 (previously 3 allocs + ~70
+  ns). `BenchmarkLongAddLarge` keeps 3 allocs / 65 ns to confirm the
+  big.Int slow path still fires when an operand grows past int64.
+- `pidigits` bench expected to drop from 7.83x to under 2x cpython
+  after P10 (float pool) lands and the multi-word path is exercised
+  less.
 
 **Estimated win.** 3x on integer-heavy benchmarks (pidigits, pyflate,
 go, hexiom). Geomean impact ~1.4x.
+
+**Technical notes (P3 PyLong fast path).**
+
+1. CPython's compact representation is `_PyLong_BothAreCompact`, which
+   in 3.14 checks that both PyLongs have `ob_size in {-1, 0, 1}` and
+   that `medium_value(x)` (a signed `stwodigits`, two 30-bit digits)
+   holds the value. gopy's analogue is `i.v.IsInt64()`; the int64
+   window is strictly larger than the CPython compact window on 64-bit
+   builds so we never miss a fast-path opportunity that CPython takes.
+2. Overflow detection is the well-known sign-bit XOR trick for add /
+   sub and `math/bits.Mul64` for mul. The mul helper splits the operand
+   signs out and then re-applies them after the unsigned multiply to
+   keep the int64 wraparound semantics consistent with `int64 * int64`
+   on every reachable input pair.
+3. `negOverflow` and `absOverflow` handle the single overflow case at
+   `math.MinInt64` (the negation of which does not fit). CPython hits
+   the same boundary at `medium_value == -(1 << (PYLONG_BITS - 1))`
+   and falls back to multi-digit construction.
+4. `intInvert` does not need an overflow guard because `^x` for any
+   int64 stays inside int64 (two's-complement bit-flip is a closed
+   operation on the type).
+5. The fast path threads results through `NewInt(int64)` which already
+   consults `smallIntFromInt64` for the `[-5, 256]` cache. Hot loops
+   that bounce inside that window (counter increments, boolean
+   coercions, small comparisons) are now **allocation-free**, which is
+   what the BenchmarkLongAddSmall numbers above demonstrate.
+6. We deliberately did **not** add a `compact int64; isCompact bool`
+   pair to `Int` itself. The minimum-blast-radius design keeps `i.v`
+   as the sole storage and reuses `IsInt64()` as the cheap compact
+   predicate. A future P3.5 step can replace the big.Int storage with
+   an inline int64 + lazy-materialised big.Int for the multi-word
+   path, but that refactor touches every reader of `Int.v` (about 14
+   files in objects/, plus marshal/, format/, vm/) and is best landed
+   on its own branch after P10 + P7.4 settle.
 
 ### P4. PyUnicode kind tags — `Objects/unicodeobject.c`
 

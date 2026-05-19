@@ -79,11 +79,23 @@ func intRichCmp(a, b Object, op CompareOp) (Object, error) {
 //
 // CPython: Objects/longobject.c long_neg / long_abs / long_long
 func intNeg(o Object) (Object, error) {
-	return NewIntFromBig(new(big.Int).Neg(&o.(*Int).v)), nil
+	i := o.(*Int)
+	if x, ok := compactInt(i); ok {
+		if r, over := negOverflow(x); !over {
+			return NewInt(r), nil
+		}
+	}
+	return NewIntFromBig(new(big.Int).Neg(&i.v)), nil
 }
 
 func intAbs(o Object) (Object, error) {
-	return NewIntFromBig(new(big.Int).Abs(&o.(*Int).v)), nil
+	i := o.(*Int)
+	if x, ok := compactInt(i); ok {
+		if r, over := absOverflow(x); !over {
+			return NewInt(r), nil
+		}
+	}
+	return NewIntFromBig(new(big.Int).Abs(&i.v)), nil
 }
 
 func intPos(o Object) (Object, error) { return o, nil }

@@ -24,6 +24,9 @@ func intAnd(a, b Object) (Object, error) {
 	if !ok {
 		return notImplemented(), nil
 	}
+	if x, y, both := compactPair(ai, bi); both {
+		return NewInt(x & y), nil
+	}
 	return NewIntFromBig(new(big.Int).And(&ai.v, &bi.v)), nil
 }
 
@@ -32,6 +35,9 @@ func intOr(a, b Object) (Object, error) {
 	if !ok {
 		return notImplemented(), nil
 	}
+	if x, y, both := compactPair(ai, bi); both {
+		return NewInt(x | y), nil
+	}
 	return NewIntFromBig(new(big.Int).Or(&ai.v, &bi.v)), nil
 }
 
@@ -39,6 +45,9 @@ func intXor(a, b Object) (Object, error) {
 	ai, bi, ok := intPair(a, b)
 	if !ok {
 		return notImplemented(), nil
+	}
+	if x, y, both := compactPair(ai, bi); both {
+		return NewInt(x ^ y), nil
 	}
 	return NewIntFromBig(new(big.Int).Xor(&ai.v, &bi.v)), nil
 }
@@ -71,9 +80,14 @@ func intRshift(a, b Object) (Object, error) {
 
 // intInvert returns the bitwise complement, matching ~x == -(x+1).
 //
-// CPython: Objects/longobject.c long_invert
+// CPython: Objects/longobject.c:5158 long_invert (compact branch at
+// :5164 uses ~medium_value(v) before falling through to long_add).
 func intInvert(o Object) (Object, error) {
 	i := o.(*Int)
+	if x, ok := compactInt(i); ok {
+		// ~x never overflows in two's complement int64.
+		return NewInt(^x), nil
+	}
 	return NewIntFromBig(new(big.Int).Not(&i.v)), nil
 }
 
