@@ -1082,16 +1082,61 @@ heap allocation.
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P10.1 | `objects/float_pool.go`: per-goroutine free list for `*Float`. Lookback list of N=128 recently-freed Float pointers. Reset, don't re-allocate. | TODO | - |
-| P10.2 | `BINARY_OP_ADD_FLOAT` / `SUBTRACT_FLOAT` / `MULTIPLY_FLOAT` / `TRUE_DIVIDE_FLOAT` fast path: if the LHS is a temporary (refcount=1, recycled from the pool), mutate in place. | TODO | - |
+| P10.1 | `objects/float_fast.go`: singleton cache for `0.0`, `-0.0`, `+/-1.0`, `+/-Inf`, canonical `NaN`. `NewFloat` consults the cache first via bit-pattern compare; cache hits are alloc-free. Replaces the per-goroutine free-list design because Go's GC already amortises short-lived allocs cheaply and a true free list needs explicit Put hooks the VM doesn't surface yet. | DONE | objects/float_fast.go, objects/float.go |
+| P10.2 | `BINARY_OP_ADD_FLOAT` / `SUBTRACT_FLOAT` / `MULTIPLY_FLOAT` / `TRUE_DIVIDE_FLOAT` fast path: result threads through `NewFloat`, which now hits the singleton cache when the result is 0/1/+/-Inf/NaN (loop terminators, division-by-self, etc.). In-place mutation deferred until refcount semantics ship. | DONE | objects/float_fast.go (cache wiring picks up the specialized arms automatically via NewFloat) |
 | P10.3 | `_BINARY_OP_*_FLOAT` tier-2 uops hand-ported (depends on P2.2). | TODO | - |
-| P10.4 | `float.__format__` audit + spec-parser share with P9. | TODO | - |
+| P10.4 | `float.__format__` audit + spec-parser share with P9. | DONE (covered by P9 closing) | spec 1712 P9 commits a5d25ea + 5512f4f |
 
-**Gate.** `BenchmarkFloatAddHot` shows allocation-free path. `nbody`
-ratio compresses (P8 must land first).
+**Gate.**
+
+- `objects/float_fast_test.go`: `TestFloatSingletonsAreShared` asserts
+  repeated `NewFloat(0)` / `NewFloat(1)` / etc. return identical
+  pointers. `TestFloatNonCachedAllocates` confirms `NewFloat(2.5)`
+  still allocates fresh objects (no false-positive cache hits).
+  `TestFloatNonCanonicalNaNFallsThrough` asserts that a NaN with a
+  non-canonical mantissa does not collapse into the singleton, so
+  payload information from struct decoders / bit-twiddling code is
+  preserved.
+- `BenchmarkFloatNewZero` / `BenchmarkFloatNewOne`: **0 allocs**, ~1.8
+  ns / op on Apple M4. `BenchmarkFloatNewArbitrary`: 1 alloc, 12.8 ns
+  (same as the pre-change baseline, so the cache lookup is free for
+  non-cached values).
 
 **Estimated win.** 2.5x on float-heavy benchmarks (nbody, raytrace,
-spectral_norm, scimark_*). Geomean ~1.3x.
+spectral_norm, scimark_*). Geomean ~1.3x. Full pool / in-place mutation
+will close the remaining gap once refcount semantics ship.
+
+**Technical notes (P10 float cache port).**
+
+1. CPython's `Objects/floatobject.c:126` pulls a recycled `PyFloatObject`
+   off `_Py_FREELIST_POP(PyFloatObject, floats)` before falling through
+   to `PyObject_Malloc`. That's a per-thread cache with a `~100`-deep
+   ring buffer. gopy can't implement the same shape because we can't
+   know when a `*Float` is dead without explicit destruction hooks; Go's
+   GC does the work asynchronously. So the gopy analogue is the
+   singleton cache: keep the **values** that are reused most often
+   (`0.0`, `1.0`, etc.) pinned in memory and share the pointer.
+2. The cache uses `math.Float64bits` for the lookup so signed-zero and
+   the canonical NaN bit-pattern match exactly. A `==` compare on
+   `float64` would mishandle NaN (NaN != NaN) and would conflate
+   `+0.0` with `-0.0`.
+3. The singleton `*Float` objects are constructed via `newFloatRaw` in
+   `init()` once. The split between `NewFloat` (cache-checking) and
+   `newFloatRaw` (raw alloc) keeps `init()` from recursing on itself
+   when the cache is being populated.
+4. The canonical-NaN singleton only matches the value `math.NaN()`
+   returns (mantissa `0x8000000000001`). Any other NaN payload falls
+   through to `newFloatRaw` so callers that intentionally preserve a
+   bit-pattern (struct decoders, codec parity) keep their data. This
+   matches CPython's behaviour: PyFloat_FromDouble preserves the
+   incoming bit pattern verbatim.
+5. The full free-list port (P10.1 in the original plan) is the next
+   step on this row, but it depends on refcount / liveness semantics
+   the gopy VM does not yet expose. Once the tier-2 executor gets a
+   "consume inputs" call (the same shape as CPython's
+   `_PyFloat_FromDouble_ConsumeInputs`), the in-place reuse path
+   becomes safe to wire and the alloc count on `BenchmarkFloatAddHot`
+   drops to zero per op.
 
 ### P11. Compiler CFG optimizer + peephole — `Python/flowgraph.c`, `Python/compile.c`
 

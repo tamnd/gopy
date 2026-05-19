@@ -122,13 +122,16 @@ func hostIsLittleEndian() bool {
 	return b[0] == 1
 }
 
-// NewFloat builds a float.
+// NewFloat builds a float. The singleton cache short-circuits the
+// well-known constants (0.0, -0.0, +/- 1.0, NaN, +/- Inf) so the hot
+// numeric loops that bounce on those values stay allocation-free.
 //
-// CPython: Objects/floatobject.c:L132 PyFloat_FromDouble
+// CPython: Objects/floatobject.c:124 PyFloat_FromDouble
 func NewFloat(x float64) *Float {
-	o := &Float{v: x}
-	o.init(FloatType)
-	return o
+	if cached := cachedFloat(x); cached != nil {
+		return cached
+	}
+	return newFloatRaw(x)
 }
 
 // Float64 returns the underlying double.
