@@ -10,7 +10,7 @@
 package objects
 
 // inheritSlotsAllMRO is the gopy port of CPython's type_ready_inherit
-// minus the parts that have no analogue (tp_flags inheritance, GC
+// minus the parts that have no analog (tp_flags inheritance, GC
 // flag handling, vectorcall flag).
 //
 // CPython walks the full MRO and uses SLOTDEFINED (base->SLOT !=
@@ -184,6 +184,14 @@ func inheritProtocolPointers(t, base *Type) {
 //
 // CPython: Objects/typeobject.c:8258 COPYNUM block
 func copyNumberSlots(dst, src *NumberMethods) {
+	copyNumberBinarySlots(dst, src)
+	copyNumberInPlaceSlots(dst, src)
+	copyNumberUnarySlots(dst, src)
+}
+
+// copyNumberBinarySlots fills nil binary-op slots on dst from src.
+// Split out from copyNumberSlots so gocognit stays under 30.
+func copyNumberBinarySlots(dst, src *NumberMethods) {
 	if dst.Add == nil {
 		dst.Add = src.Add
 	}
@@ -226,30 +234,10 @@ func copyNumberSlots(dst, src *NumberMethods) {
 	if dst.Divmod == nil {
 		dst.Divmod = src.Divmod
 	}
-	if dst.Negative == nil {
-		dst.Negative = src.Negative
-	}
-	if dst.Positive == nil {
-		dst.Positive = src.Positive
-	}
-	if dst.Absolute == nil {
-		dst.Absolute = src.Absolute
-	}
-	if dst.Invert == nil {
-		dst.Invert = src.Invert
-	}
-	if dst.Bool == nil {
-		dst.Bool = src.Bool
-	}
-	if dst.Int == nil {
-		dst.Int = src.Int
-	}
-	if dst.Float == nil {
-		dst.Float = src.Float
-	}
-	if dst.Index == nil {
-		dst.Index = src.Index
-	}
+}
+
+// copyNumberInPlaceSlots fills nil in-place op slots on dst from src.
+func copyNumberInPlaceSlots(dst, src *NumberMethods) {
 	if dst.InPlaceAdd == nil {
 		dst.InPlaceAdd = src.InPlaceAdd
 	}
@@ -288,6 +276,34 @@ func copyNumberSlots(dst, src *NumberMethods) {
 	}
 	if dst.InPlacePower == nil {
 		dst.InPlacePower = src.InPlacePower
+	}
+}
+
+// copyNumberUnarySlots fills nil unary / coercion slots on dst from src.
+func copyNumberUnarySlots(dst, src *NumberMethods) {
+	if dst.Negative == nil {
+		dst.Negative = src.Negative
+	}
+	if dst.Positive == nil {
+		dst.Positive = src.Positive
+	}
+	if dst.Absolute == nil {
+		dst.Absolute = src.Absolute
+	}
+	if dst.Invert == nil {
+		dst.Invert = src.Invert
+	}
+	if dst.Bool == nil {
+		dst.Bool = src.Bool
+	}
+	if dst.Int == nil {
+		dst.Int = src.Int
+	}
+	if dst.Float == nil {
+		dst.Float = src.Float
+	}
+	if dst.Index == nil {
+		dst.Index = src.Index
 	}
 }
 

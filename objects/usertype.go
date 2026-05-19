@@ -38,6 +38,40 @@ func NewUserTypeKwargs(name string, bases []*Type, ns *Dict, kwargs map[string]O
 	return NewUserTypeMeta(name, bases, ns, kwargs, nil)
 }
 
+// installSubclassAttrSlots stamps the right Getattro / Setattro pair
+// (plus TpNew for the C-port subclass cases) on t. Metaclasses route
+// through typeGetAttr because their instances are *Type. dict / str /
+// int subclasses keep the C-port TpNew so instances are *Dict / *Unicode
+// / *Int instead of *Instance, and use their type-specific attr slots
+// so descriptor lookups hit the right vtable. Everything else lands on
+// the generic instance attr slots.
+//
+// CPython: Objects/typeobject.c inherit_slots (type_getattro inheritance
+// + tp_new copy)
+func installSubclassAttrSlots(t *Type) {
+	switch {
+	case IsSubtype(t, typeType):
+		t.Getattro = typeGetAttr
+		t.Setattro = typeSetAttr
+	case IsSubtype(t, DictType):
+		t.Getattro = dictSubclassGetAttr
+		t.Setattro = dictSubclassSetAttr
+		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
+		t.TpNew = DictType.TpNew
+	case IsSubtype(t, strType):
+		t.Getattro = strSubclassGetAttr
+		t.Setattro = strSubclassSetAttr
+		t.TpNew = strType.TpNew
+	case IsSubtype(t, IntType):
+		t.Getattro = intSubclassGetAttr
+		t.Setattro = intSubclassSetAttr
+		t.TpNew = IntType.TpNew
+	default:
+		t.Getattro = instanceGetAttr
+		t.Setattro = instanceSetAttr
+	}
+}
+
 // NewUserTypeMeta is the full-form constructor used by type.__new__.
 // meta is the metaclass to stamp on the new type; nil means inherit
 // the default typeType. Stamping happens before typeSetNames so PEP
@@ -60,41 +94,7 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 	if meta != nil && meta != typeType {
 		t.Init(meta)
 	}
-	// Metaclasses (subtypes of type) must use typeGetAttr/typeSetAttr so
-	// that attribute access on their instances (which are *Type objects
-	// like `class Foo(metaclass=ABCMeta)`) goes through the correct path.
-	// Dict subclasses use dict-specific attr slots since their instances
-	// are *Dict objects (from DictType.TpNew), not *Instance objects.
-	// Regular user classes use the instance-level slots.
-	//
-	// CPython: Objects/typeobject.c inherit_slots (type_getattro inheritance)
-	switch {
-	case IsSubtype(t, typeType):
-		t.Getattro = typeGetAttr
-		t.Setattro = typeSetAttr
-	case IsSubtype(t, DictType):
-		t.Getattro = dictSubclassGetAttr
-		t.Setattro = dictSubclassSetAttr
-		// Inherit DictType.TpNew so instances are *Dict, not *Instance.
-		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
-		t.TpNew = DictType.TpNew
-	case IsSubtype(t, strType):
-		t.Getattro = strSubclassGetAttr
-		t.Setattro = strSubclassSetAttr
-		// Inherit strType.TpNew so instances are *Unicode (tagged with
-		// the subclass), not *Instance.
-		t.TpNew = strType.TpNew
-	case IsSubtype(t, IntType):
-		t.Getattro = intSubclassGetAttr
-		t.Setattro = intSubclassSetAttr
-		// Inherit IntType.TpNew so instances are *Int (tagged with the
-		// subclass), not *Instance. The cls-aware intTpNew handles the
-		// subclass re-tag.
-		t.TpNew = IntType.TpNew
-	default:
-		t.Getattro = instanceGetAttr
-		t.Setattro = instanceSetAttr
-	}
+	installSubclassAttrSlots(t)
 	// Inherit a per-instance __dict__ from any base that has one, then
 	// let __slots__ processing override it (e.g. the base contributes
 	// dict, but the subclass's __slots__ also adds nothing new — still
@@ -145,7 +145,7 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 	// yet populated, so typeOverridesHash could not see __hash__. If the
 	// just-copied namespace declares __hash__, drop any inherited Hash /
 	// RichCmp pair so the second inheritSlotsAllMRO inside
-	// fixupSlotDispatchers honours the override and the per-type fixup
+	// fixupSlotDispatchers honors the override and the per-type fixup
 	// installs the correct dispatcher (None namespace entry => identityHash
 	// fallback, real callable => slotTpHash).
 	//

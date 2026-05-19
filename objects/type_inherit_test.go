@@ -85,7 +85,7 @@ func TestInheritSlots_FillsNilFieldsInOwnBundle(t *testing.T) {
 // TestInheritSlots_SubclassBundleIsIndependent verifies a subclass's
 // per-type fixup (e.g. installing slotNbBool when __bool__ exists)
 // does not bleed into the base's slot table. Sharing the bundle
-// pointer would cause this; copying it (current behaviour) does
+// pointer would cause this; copying it (current behavior) does
 // not.
 //
 // CPython: Objects/typeobject.c:8685 type_ready_inherit_as_structs
