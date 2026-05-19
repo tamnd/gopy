@@ -195,6 +195,16 @@ type Type struct {
 	//
 	// CPython: Include/internal/pycore_typeobject.h tp_version_tag
 	versionTag uint32
+
+	// tpWatched mirrors CPython's PyTypeObject.tp_watched: an 8-bit
+	// mask, one bit per registered type watcher. PyType_Watch sets
+	// the bit, PyType_Unwatch clears it, type_modified_unlocked
+	// scans it on every mutation. Keeping the subscription on the
+	// type (rather than on a per-watcher pointer set) puts the
+	// "anyone watching?" check on a single load and bitwise-and.
+	//
+	// CPython: Include/cpython/object.h:234 tp_watched
+	tpWatched uint8
 }
 
 // Visitor is the visitproc shape passed to TpTraverse. CPython's

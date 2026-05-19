@@ -744,6 +744,7 @@ The type carries a `versionTag uint32` at `type.go:197` plus
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
+| P7.0 | Public type-watcher subscription API: `PyType_Watch(id, type)` / `PyType_AddWatcher(callback) -> int`. Cite `Objects/typeobject.c:1016 PyType_AddWatcher / :1060 PyType_Watch / :1170 notify loop in type_modified_unlocked`. Replaces the bare `TypeModifiedHook` pointer. | DONE | objects/type_watcher.go + objects/type.go (`tpWatched`), objects/type_specialize.go fires through `notifyTypeWatchers`; optimizer/watcher.go delegates AddWatcher/Watch/Unwatch to the public API; `TypeModifiedHook` retired. |
 | P7.1 | `objects/type_slots.go`: full slot-table struct mirroring CPython `PyTypeObject` (nb_add, sq_length, mp_subscript, tp_call, tp_iter, ...). | TODO | - |
 | P7.2 | `_PyType_AssignSpecialMethods`: walk the MRO once at type creation, populate the slot table. | TODO | - |
 | P7.3 | Type version tag (monotonic uint32 bumped on MRO mutation, class `__setattr__`, `__class__` reassignment). | TODO | - |
@@ -756,6 +757,54 @@ The type carries a `versionTag uint32` at `type.go:197` plus
 - `objects/slots_test.go`: slot table populated correctly for a
   hand-rolled type; invalidates on mutation.
 - `richards` ratio compresses by another ~2x on top of P1.
+
+**Technical notes (P7.0 type watcher port).**
+
+1. `tp_watched` is a single `uint8` in CPython (Include/cpython/object.h:234)
+   not a uint64 like `_ma_watcher_tag`. The type watcher table is
+   smaller and there is no per-type mutation counter on the type
+   object: type version tags live in `tp_version_tag` and have their
+   own bookkeeping in `types.type_version_cache`. gopy mirrors the
+   8-bit bitmask exactly on `Type.tpWatched`.
+2. `TYPE_MAX_WATCHERS = 8` is hard-coded at
+   `pycore_interp_structs.h:22`. Slot 0 is reserved for the Tier-2
+   optimizer; CPython's `PyType_AddWatcher` walks from index 1.
+   Asymmetric with dicts (which reserve 0 and 1 for BUILTINS and
+   GLOBALS): types only need one optimizer slot because the type
+   watcher fans out over every mutated type, not per attribute scope.
+   gopy keeps the asymmetry: `typeReservedWatchers = 1`,
+   `TypeAddWatcher` returns slot 1 or higher,
+   `TypeSetReservedWatcher` is the back-door for slot 0.
+3. The notify loop inside `type_modified_unlocked`
+   (typeobject.c:1170-1188) walks the bits the same way
+   `_PyDict_SendEvent` does. gopy's `notifyTypeWatchers` ports it
+   verbatim. The ordering matters: CPython notifies watchers *before*
+   `set_version_unlocked(type, 0)` writes the new tag, so the watcher
+   sees the type in its still-watched, still-valid state. gopy's
+   `InvalidateVersionTag` follows the same order: `notifyTypeWatchers(t)`
+   then `t.versionTag = 0`.
+4. `PyType_Watch` calls `assign_version_tag` before setting the
+   tp_watched bit (typeobject.c:1074). The reason: if the version tag
+   is 0, the next mutation short-circuits inside
+   `type_modified_unlocked` (the `if (type->tp_version_tag == 0)
+   return` at typeobject.c:1148) and the watcher would never fire.
+   gopy's `TypeWatch` calls `t.VersionTag()` for the same reason
+   before flipping the bit.
+5. The dispatch path used to be `TypeModifiedHook func(t *Type)` in
+   gopy. Replacing it with the bitmask + table layout gives multiple
+   watchers (8 slots), makes user-installed type watchers possible,
+   and removes the global function pointer that imposed a
+   single-consumer constraint on the type-modify path. Sub-interp
+   promotion later moves the table off the package into
+   `state.Interpreter`; the call sites (`InvalidateVersionTag`,
+   `TypeWatch`, `TypeUnwatch`) are the only ones that need an
+   interp pointer threaded.
+6. The optimizer's `DispatchTypeMutation` became a thin shim that
+   ensures the version tag is allocated then calls
+   `InvalidateVersionTag` on the type. It is retained because some
+   gate tests drive a raw `unsafe.Pointer` (typed as a Type) through
+   the dispatch path without going through Setattr. Production
+   mutation sites all go through `InvalidateVersionTag` directly.
 
 **Estimated win.** 1.5x on operator-heavy code (richards, deltablue,
 typing_runtime_protocols).
