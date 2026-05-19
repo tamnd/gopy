@@ -746,7 +746,7 @@ The type carries a `versionTag uint32` at `type.go:197` plus
 |-------|-------------|--------|--------|
 | P7.0 | Public type-watcher subscription API: `PyType_Watch(id, type)` / `PyType_AddWatcher(callback) -> int`. Cite `Objects/typeobject.c:1016 PyType_AddWatcher / :1060 PyType_Watch / :1170 notify loop in type_modified_unlocked`. Replaces the bare `TypeModifiedHook` pointer. | DONE | objects/type_watcher.go + objects/type.go (`tpWatched`), objects/type_specialize.go fires through `notifyTypeWatchers`; optimizer/watcher.go delegates AddWatcher/Watch/Unwatch to the public API; `TypeModifiedHook` retired. |
 | P7.1 | `objects/type_slots.go`: full slot-table struct mirroring CPython `PyTypeObject` (nb_add, sq_length, mp_subscript, tp_call, tp_iter, ...). | TODO | - |
-| P7.2 | `_PyType_AssignSpecialMethods`: walk the MRO once at type creation, populate the slot table. | TODO | - |
+| P7.2 | `_PyType_AssignSpecialMethods`: walk the MRO once at type creation, populate the slot table. | DONE | `d71cf26` (objects/type_inherit.go new; objects/type.go + objects/usertype.go inherit hook; objects/type_inherit_test.go gates) |
 | P7.3 | Type version tag (monotonic uint32 bumped on MRO mutation, class `__setattr__`, `__class__` reassignment). | TODO | - |
 | P7.4 | Operator dispatch (`abstract_binop.go`, `abstract_sequence.go`) consults the slot table first; falls back to `Lookup` only if slot nil. | TODO | - |
 | P7.5 | Invalidation hook: type-version change auto-stales every inline cache keyed on that version (interacts with P1). | TODO | - |
@@ -805,6 +805,74 @@ The type carries a `versionTag uint32` at `type.go:197` plus
    gate tests drive a raw `unsafe.Pointer` (typed as a Type) through
    the dispatch path without going through Setattr. Production
    mutation sites all go through `InvalidateVersionTag` directly.
+
+**Technical notes (P7.2 inherit_slots port).**
+
+1. CPython's `inherit_slots` (typeobject.c:8227) is gated by the
+   `SLOTDEFINED` macro: `base->SLOT != 0 && (basebase->SLOT == 0 ||
+   base->SLOT != basebase->SLOT)`. The intent is that a slot is only
+   copied if the base "owns" it (defines it locally or differs from
+   the grandparent). Go cannot port this directly: function values
+   only compare to nil, never to another function value. Our port
+   collapses the test to "copy if subclass slot is nil and ancestor
+   slot is non-nil" and walks the full MRO ancestor-by-ancestor. The
+   first ancestor that supplies the slot wins. This matches CPython's
+   net behaviour for typical hierarchies because the SLOTDEFINED
+   check almost always succeeds when the slot exists on `base`; the
+   difference only matters when an intermediate base re-aliases a
+   grandparent's slot pointer (rare in pure-Python code, more common
+   in C extensions).
+2. Bundles (`NumberMethods`, `SequenceMethods`, `MappingMethods`,
+   `AsyncMethods`) are deep-copied per-subclass, not pointer-shared
+   the way CPython does in `type_ready_inherit_as_structs`
+   (typeobject.c:8685). The reason is gopy-specific: `fixupHashAndIter`
+   and the other fixup passes in `usertype.go` write per-type slot
+   dispatchers back into the bundle. If sub and base shared the bundle
+   pointer, installing a slot dispatcher on the subclass would also
+   overwrite the base's slot. The `SubclassBundleIsIndependent` gate
+   in `type_inherit_test.go` locks this behaviour in.
+3. Two inheritance entrypoints, two different scopes. `NewType`
+   (used for built-in types) only inherits bundles + protocol
+   pointers via `inheritSlotsAllMRO` and `inheritProtocolPointers`.
+   Scalar slots (TpNew, Call, Hash, Repr, Str, ...) stay nil.
+   `NewUserType` calls the same MRO walk plus
+   `inheritDirectBaseScalars` for every direct base, then runs the
+   fixup passes. The split is forced by gopy's `typeCall` fallback
+   architecture: `typeType`, `enumerateType`, `ReversedType`, and the
+   entire exception chain (`BaseException` -> `Exception` ->
+   `ValueError`, etc.) intentionally leave `TpNew` nil and route
+   construction through `typeCall`'s `IsSubtype(cls, typeType)` /
+   exception-init branch. If `NewType` inherited `object.TpNew`
+   through the MRO walk, `typeCall` would dispatch through
+   `objectNew` and raise `"Meta() takes no arguments"` or
+   `"ValueError() takes no arguments"`. CPython does not have this
+   conflict because its `PyType_Type.tp_new` is an owned slot
+   (`type_new`) so SLOTDEFINED keeps `object.tp_new` out.
+4. `__hash__` override skipping is ported faithfully. CPython's
+   `overrides_hash` (typeobject.c:8205) inspects the type dict; the
+   gopy port reads `typeDescrTable[t]["__hash__"]`. When the
+   namespace declares `__hash__` (including `__hash__ = None`), both
+   `Hash` and `RichCmp` are cleared before fixup, mirroring CPython's
+   `COPYSLOT(tp_richcompare); COPYSLOT(tp_hash)` skip at
+   typeobject.c:8366. The clear happens in `NewUserType` between
+   `copyNamespaceToType` and `fixupSlotDispatchers` so the fixup pass
+   gets a clean slate to install the per-type slot dispatcher (or
+   `identityHash` if `__hash__` is `None`).
+5. User-class subclasses of C-port types (dict/str/int) still take
+   their `TpNew` from the explicit switch in `NewUserType` that
+   forwards to the base's typed constructor. The MRO walk does not
+   touch this path because the switch runs before
+   `inheritDirectBaseScalars` would have a chance to copy a nil
+   ancestor slot. This was already the behaviour pre-port and is
+   preserved.
+6. The performance payoff is not visible from the inherit pass
+   alone. `inheritSlotsAllMRO` only moves the MRO walk from runtime
+   (per-dispatch in `numberSlot`, `sequenceSlot`, `mappingSlot`) to
+   type-creation time. The actual win lands when P7.4 rewrites
+   operator dispatch to read the bundle field directly instead of
+   calling `numberSlot(t, accessor)` and walking the MRO. P7.2 is the
+   prerequisite that makes P7.4 safe: now the bundle on every type
+   is guaranteed populated.
 
 **Estimated win.** 1.5x on operator-heavy code (richards, deltablue,
 typing_runtime_protocols).
@@ -1229,7 +1297,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | TODO   | -      |
 | P5. Dict open-addressing        | `Objects/dictobject.c` | `objects/dict.go` (extend) | 2x           | WIP (open-addressed layout already in tree, split-keys + watcher API + KnownHash gaps remain) | - |
 | P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `vm/frame_pool.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go` | 1.5x | WIP (P6.2 done via spec 1716; P6.1/P6.3/P6.4 open) | spec 1716 |
-| P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`   | 1.5x          | TODO   | -      |
+| P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`, `objects/type_inherit.go`, `objects/type_watcher.go` | 1.5x | WIP (P7.0 watcher API, P7.2 inherit_slots, P7.3 version invalidation done; P7.1/P7.4/P7.5 open) | `e94cf31`, `2d82694`, `d71cf26` |
 | P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-106` | unblock 2 N/A | DONE | `02f6c40` |
 | P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go`, `objects/float_format.go`, `objects/int_bind.go`, `objects/float.go` | unblock 1 N/A | DONE | `a5d25ea`, `5512f4f` |
 | P10. Float fast path            | `Objects/floatobject.c` | `objects/float_pool.go`  | 2.5x          | TODO   | -      |
@@ -1266,7 +1334,12 @@ nothing tells the specializer when a class attribute changes.
 2. **P5.4 watcher API + P7.2 slot pre-population + P7.3 version
    invalidation** ship as one PR. This unblocks P1.4 deferred arms
    (`STORE_ATTR_INSTANCE_VALUE`, `STORE_ATTR_WITH_HINT`) and lets
-   the specializer trust inline caches across calls.
+   the specializer trust inline caches across calls. **DONE on PR
+   #74.** P5.4 PyDict_Watch (`863d6fb`), P7.0 PyType_Watch
+   (`e94cf31`), P7.3 type-version invalidation walks subclasses
+   (`2d82694`), and P7.2 inherit_slots pre-population (`d71cf26`)
+   all landed. P7.4 operator-dispatch single-load and P1.6
+   specializer-time watcher install are the next remaining items.
 3. **P1.4 closure**: emit the remaining LOAD_ATTR arms
    (`METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`,
    `METHOD_LAZY_DICT`, `GETATTRIBUTE_OVERRIDDEN`) once
