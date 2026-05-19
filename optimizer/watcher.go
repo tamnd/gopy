@@ -233,6 +233,28 @@ func globalsWatcherCallback(interp *state.Interpreter) DictWatchCallback {
 	}
 }
 
+// builtinsDictWatcherCallback is the interpreter-wide builtins
+// watcher. It fires on every mutation to the builtins dict and
+// bumps interp.BuiltinDictMutations (CPython's
+// rare_events.builtin_dict). When the counter is still under the
+// cap, it also clears every executor: any LOAD_GLOBAL_BUILTIN trace
+// in flight has implicitly closed over the old builtins shape, so
+// the next call has to re-specialize.
+//
+// CPython: Python/pylifecycle.c:599 builtins_dict_watcher
+func builtinsDictWatcherCallback(interp *state.Interpreter) DictWatchCallback {
+	return func(_ DictWatchEvent, _ unsafe.Pointer, _ unsafe.Pointer, _ unsafe.Pointer) int {
+		if interp == nil {
+			return 0
+		}
+		if interp.BuiltinDictMutations < MaxAllowedBuiltinsModifications {
+			ExecutorsInvalidateAll(interp, true)
+		}
+		interp.BuiltinDictMutations++
+		return 0
+	}
+}
+
 // typeWatcherCallback is the optimizer's type watcher: invalidates
 // every executor whose bloom may contain typ, then unsubscribes the
 // type.
@@ -248,24 +270,51 @@ func typeWatcherCallback(interp *state.Interpreter) TypeWatchCallback {
 
 // WatcherInit registers the dict and type watcher callbacks at the
 // canonical Tier-2 IDs. Idempotent: re-running leaves the existing
-// callbacks in place.
+// callbacks in place. CPython splits the two reserved dict slots
+// across two installation sites (slot 0 in pylifecycle.c:1380 at
+// interp init and slot 1 lazily in optimizer_analysis.c:175 from
+// remove_globals); gopy installs both up-front so the watcher table
+// is fully armed before any specialization fires, matching the spec
+// 1712 P1.6 contract.
 //
-// CPython: Python/optimizer_analysis.c:175-180 (callback registration
-// inside remove_globals)
+// CPython: Python/pylifecycle.c:1380 (slot 0 install) /
+// Python/optimizer_analysis.c:175-180 (slot 1 + type install)
 func WatcherInit(interp *state.Interpreter) {
 	_ = watcherTable(interp) // allocate the placeholder for sub-interp scaffolding
 
-	// Builtins and Globals occupy the two reserved dict watcher
-	// slots. CPython's optimizer writes directly into
-	// interp->dict_state.watchers[BUILTINS/GLOBALS]; we go through
-	// the gopy equivalent DictSetReservedWatcher path so the public
-	// PyDict_AddWatcher refuses to hand these out to user code.
-	_ = objects.DictSetReservedWatcher(BuiltinsWatcherID, adaptDictWatchCallback(globalsWatcherCallback(interp)))
+	// Slot 0 (BUILTINS): builtins_dict_watcher. Bumps
+	// rare_events.builtin_dict (gopy: BuiltinDictMutations) and
+	// invalidates every executor while still under the cap.
+	// CPython wires this in pylifecycle.c:1380.
+	_ = objects.DictSetReservedWatcher(BuiltinsWatcherID, adaptDictWatchCallback(builtinsDictWatcherCallback(interp)))
+
+	// Slot 1 (GLOBALS): globals_watcher_callback. Per-frame globals
+	// dict invalidation routed through the executor bloom. CPython
+	// wires this lazily in optimizer_analysis.c:175.
 	_ = objects.DictSetReservedWatcher(GlobalsWatcherID, adaptDictWatchCallback(globalsWatcherCallback(interp)))
 
-	// The optimizer's type watcher occupies the reserved type slot.
-	// Same back-door reasoning as for dict: PyType_AddWatcher refuses
-	// id 0 so user-installed type watchers cannot collide with the
-	// Tier-2 invalidation pass.
+	// Type slot 0: type_watcher_callback. CPython wires this lazily
+	// in optimizer_analysis.c:179; gopy installs it up-front for
+	// the same parity reason as the dict watchers.
 	_ = objects.TypeSetReservedWatcher(TypeWatcherID, adaptTypeWatchCallback(typeWatcherCallback(interp)))
+}
+
+// EnsureBuiltinsSubscribed subscribes builtins to slot 0 so the
+// callback installed by WatcherInit actually fires on mutation. The
+// optimizer also stamps interp.Builtins so the tier-2 globals folder
+// recognises this dict as the canonical builtins. Idempotent: the
+// DictWatch bit is set with FT_ATOMIC_OR and Builtins is only stamped
+// if previously unset. Callers should invoke this once the runtime
+// has materialised the real builtins dict (typically at the first
+// frame-eval).
+//
+// CPython: Python/pylifecycle.c:1381 PyDict_Watch(0, interp->builtins)
+func EnsureBuiltinsSubscribed(interp *state.Interpreter, builtins *objects.Dict) {
+	if interp == nil || builtins == nil {
+		return
+	}
+	if interp.Builtins == nil {
+		interp.Builtins = objects.Object(builtins)
+	}
+	_ = objects.DictWatch(BuiltinsWatcherID, builtins)
 }
