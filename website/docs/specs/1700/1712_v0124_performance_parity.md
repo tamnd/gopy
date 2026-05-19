@@ -66,12 +66,15 @@ draft of this spec. Highlights:
   gaps are: split-keys saves zero memory, no `PyDict_Watch`
   subscription API, no `_PyDict_SetItem_KnownHash` skip-rehash
   path.
-- **P6.2 (LOAD_FAST_CHECK) is DONE.** Shipped via spec 1716
+- **P6 (frame free-list + LOAD_FAST_CHECK + args-tuple bypass) is
+  DONE.** `LOAD_FAST_CHECK` shipped via spec 1716
   (`compile/flowgraph_cfg_locals.go:320-358` rewrites
   `LOAD_FAST → LOAD_FAST_CHECK`;
-  `vm/eval_dispatch_handwritten.go:63-72` dispatches). Frame pool,
-  `LOAD_FAST_BORROW`, `STORE_FAST_STORE_FAST`, args-tuple bypass
-  remain.
+  `vm/eval_dispatch_handwritten.go:63-72` dispatches).
+  P6.1 chunk `LocalsPlus` recycle, P6.3
+  `LOAD_FAST_BORROW` / `STORE_FAST_STORE_FAST` fusion, and P6.4
+  `CALL_PY_EXACT_ARGS` + `CALL_BOUND_METHOD_EXACT_ARGS` args-tuple
+  bypass all landed on PR #74 (see Technical-notes blocks).
 - **P11 (CFG optimizer + peephole) is FULLY CLOSED.** Shipped via
   spec 1716 (commits 9d7d9f0 + 37563f5). Jump threading,
   unreachable-block elimination, redundant-jump removal, constant
@@ -735,7 +738,7 @@ LOAD_FAST_CHECK shipped via spec 1716:
 | P6.1 | `frame/chunk.go`: extend the existing chunk arena so `Pop` recycles the `LocalsPlus` slice header on the chunk slot and the bottom chunk persists across pop-back-to-zero. The next `Push` then hits `Init`'s `cap(LocalsPlus) >= size` fast path and skips the `make`. CPython parity: `_PyThreadState_PopFrame` leaves the activation-record memory in the data stack for the next `_PyEvalFramePushAndInit`; `_PyStackChunk` is only freed at thread destruction. | DONE | (working tree) |
 | P6.2 | `LOAD_FAST_CHECK` codegen in `compile/flowgraph_cfg_locals.go:scanBlockForLocals` + eval arm in `vm/eval_dispatch_handwritten.go:opLOAD_FAST_CHECK`. | DONE (spec 1716) | - |
 | P6.3 | `LOAD_FAST_BORROW` / `LOAD_FAST_BORROW_LOAD_FAST_BORROW` / `STORE_FAST_LOAD_FAST` / `STORE_FAST_STORE_FAST` (CPython 3.14 new opcodes that elide the incref pair and fold adjacent local-slot ops). | DONE | (working tree) |
-| P6.4 | Args-tuple bypass: `CALL_PY_EXACT_ARGS` stores args directly into the callee's frame locals. | TODO | - |
+| P6.4 | Args-tuple bypass: `CALL_PY_EXACT_ARGS` stores args directly into the callee's frame locals. | DONE | (working tree) |
 
 **Gate.**
 
@@ -830,6 +833,76 @@ LOAD_FAST_CHECK shipped via spec 1716:
   passes in isolation, but a regression that wired the pass out
   of the pipeline could pass them and still break user code, so
   the gate lives at the public entry point.
+
+**Technical notes (P6.4 CALL_PY_EXACT_ARGS args-tuple bypass).**
+
+- Audit before the port found the specializer was already
+  stamping `CALL_PY_EXACT_ARGS` (and `CALL_BOUND_METHOD_EXACT_ARGS`)
+  on hot sites in `specialize/call.go`, but `vm/eval_specialized.go::trySpecialized`
+  had no switch case for either opcode. The adaptive dispatcher's
+  `maybeDeopt` path was rewriting them back to generic `CALL`
+  every tick, so the cooldown counter and stored func_version
+  cells were being burnt with no benefit. The fast arm has been
+  on the wishlist since `Spec 1712 P6.4` was filed but the
+  dispatch arm itself was the missing piece.
+- The new arms live in `vm/eval_specialized_call.go` and are
+  wired into `vm/eval_specialized.go::trySpecialized` so the
+  dispatch loop reaches them before `maybeDeopt`. Three functions:
+  `fastCallPyExactArgs(oparg)` peeks the stack for the callable,
+  asserts it is `*objects.Function`, and calls the shared body.
+  `fastCallBoundMethodExactArgs(oparg)` unwraps the `BoundMethod`
+  prefix (matches `_CHECK_CALL_BOUND_METHOD_EXACT_ARGS` plus
+  `_INIT_CALL_BOUND_METHOD_EXACT_ARGS` from `Python/bytecodes.c:3960`)
+  and then runs the same body. `callPyExactArgsCommon(fn, selfOrNull, argc)`
+  carries `_CHECK_FUNCTION_VERSION` (bytecodes.c:3864) against
+  `*Function.Version` vs the cached `specialize.CallFuncVersion(...)`
+  read, `_CHECK_FUNCTION_EXACT_ARGS` (bytecodes.c:3979) against
+  `co.Argcount == oparg + hasSelf`, and finally
+  `_INIT_CALL_PY_EXACT_ARGS` (bytecodes.c:3998) which pushes a
+  frame off the chunk arena and writes args straight into
+  `LocalsPlus`.
+- What the arm bypasses on the generic CALL path:
+  (1) `make([]objects.Object, argc)` allocating an args slice
+  off the value stack in `vm/eval_simple.go::opCALL`,
+  (2) `append([]objects.Object{self}, args...)` building a second
+  slice in the method-shape branch,
+  (3) the `Vectorcall` slot lookup landing in `callPyFunction`,
+  (4) the full varargs / kwargs / defaults / missing-arg loop in
+  `vm/eval_call.go::callPyFunction` which re-walks every
+  positional / kw-only slot per call even when none of those
+  features are used. The fast arm replaces all of it with a
+  single `stack.Push(...)` plus an `argc`-iteration loop writing
+  one `stackref.FromObject` per slot.
+- The `_CHECK_FUNCTION_VERSION` cell uses
+  `specialize.CallFuncVersion(code, idx)` (read) /
+  `specialize.SetCallFuncVersion(...)` (write) from
+  `specialize/cache_views.go:140-141`. The specializer already
+  populates it in `specialize.specializePyCall`. We additionally
+  reject `fn.Version == 0` so a `*Function` that has not yet had
+  a version stamped (or has been invalidated by Code/Defaults/Closure
+  mutation, which resets to 0) deopts cleanly.
+- gopy uses recursive `Eval(ts, f2)` to drive the callee where
+  CPython's `_PUSH_FRAME` does an iterative `LOAD_IP` frame swap
+  (bytecodes.c:4010). The iterative form is faster in steady
+  state because it stays in the same goroutine stack and skips
+  the per-call Go runtime entry. Lifting gopy's dispatch loop to
+  match would require restructuring `Eval` itself into an outer
+  loop that pulls frames off a vector, which is a separate
+  spec-scoped change. The P6.4 win compounds with P6.1's chunk
+  `LocalsPlus` recycle: the `stack.Push` here lands on the
+  already-warm chunk slot with no `make()` for the locals.
+- E2E gate in `vm/eval_specialized_call_test.go` covers six
+  paths: identity call with `oparg=1`, two-arg add via
+  `BINARY_OP NB_ADD`, version miss with stale cached version
+  (asserts the dispatcher rewrites the opcode back to `CALL`),
+  argcount mismatch (asserts TypeError surfaces from the generic
+  body), bound-method unwrap exercising the prefix step on a
+  `objects.BoundMethod(fn, Int(99))`, and a type miss where the
+  cache says `CALL_PY_EXACT_ARGS` but the callable is a
+  `*BuiltinFunction` (asserts the arm deopts and the
+  `BuiltinFunction` `Vectorcall` services the call). All six
+  pass; `vm/`, `specialize/`, `compile/`, `pythonrun/` all green
+  in the regression sweep.
 
 ### P7. Type slot caching — `Objects/typeobject.c`
 
@@ -1516,7 +1589,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P3. PyLong fast path            | `Objects/longobject.c` | `objects/long_fast.go`    | 3x            | DONE (P3.1-P3.4; P3.5 deferred behind Int repr refactor) | `d9e16d2` |
 | P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | TODO   | -      |
 | P5. Dict open-addressing        | `Objects/dictobject.c` | `objects/dict.go` (extend) | 2x           | WIP (open-addressed layout already in tree, split-keys + watcher API + KnownHash gaps remain) | - |
-| P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `frame/chunk.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go`, `compile/flowgraph_cfg_passes.go` | 1.5x | WIP (P6.1 chunk LocalsPlus recycle done; P6.2 done via spec 1716; P6.3 done via spec 1715/1716, e2e gate this PR; P6.4 open) | spec 1716, P6.1 + P6.3 e2e this PR |
+| P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `frame/chunk.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go`, `compile/flowgraph_cfg_passes.go`, `vm/eval_specialized_call.go` | 1.5x | DONE (P6.1 chunk LocalsPlus recycle; P6.2 via spec 1716; P6.3 via spec 1715/1716 + e2e gate; P6.4 CALL_PY_EXACT_ARGS + CALL_BOUND_METHOD_EXACT_ARGS fast arms) | spec 1716, P6.1 + P6.3 + P6.4 in this PR |
 | P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`, `objects/type_inherit.go`, `objects/type_watcher.go` | 1.5x | WIP (P7.0 watcher API, P7.2 inherit_slots, P7.3 version invalidation, P7.4 single-load dispatch done; P7.1/P7.5 open) | `e94cf31`, `2d82694`, `d71cf26`, P7.4 this PR |
 | P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-106` | unblock 2 N/A | DONE | `02f6c40` |
 | P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go`, `objects/float_format.go`, `objects/int_bind.go`, `objects/float.go` | unblock 1 N/A | DONE | `a5d25ea`, `5512f4f` |
@@ -1579,7 +1652,12 @@ nothing tells the specializer when a class attribute changes.
    notes under P6), **P6.3 LOAD_FAST_BORROW / STORE_FAST fusion**
    (DONE: the cfg-pass port shipped under spec 1715/1716 and the
    public-entry e2e gate landed on PR #74),
-   **P6.4 args-tuple bypass** still open.
+   **P6.4 args-tuple bypass** (DONE: `CALL_PY_EXACT_ARGS` and
+   `CALL_BOUND_METHOD_EXACT_ARGS` fast arms in
+   `vm/eval_specialized_call.go` skip the generic CALL args
+   slice, the method-shape prepend, the Vectorcall slot lookup,
+   and the full varargs / kwargs binding loop in
+   `callPyFunction`).
 9. **P13 GC**, **P14 native modules** are bench-specific; pickle /
    xml / sqlite cannot run today so P14 is the priority among the
    three.
