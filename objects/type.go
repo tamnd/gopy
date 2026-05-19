@@ -272,6 +272,15 @@ func NewType(name string, bases []*Type) *Type {
 		}
 		b.addSubclass(t)
 	}
+	// inherit slots from every ancestor so dispatch can resolve in
+	// one field load. Built-in types that set their own Number /
+	// Sequence / Mapping / Async bundle after NewType returns will
+	// wholesale replace what was inherited here; user types built
+	// through NewUserType run a second pass after their namespace
+	// has populated additional dunders.
+	//
+	// CPython: Objects/typeobject.c:8712 type_ready_inherit
+	inheritSlotsAllMRO(t)
 	return t
 }
 

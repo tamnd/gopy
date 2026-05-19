@@ -141,6 +141,19 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 		}
 		copyNamespaceToType(t, ns)
 	}
+	// NewType already ran inheritSlotsAllMRO when the namespace was not
+	// yet populated, so typeOverridesHash could not see __hash__. If the
+	// just-copied namespace declares __hash__, drop any inherited Hash /
+	// RichCmp pair so the second inheritSlotsAllMRO inside
+	// fixupSlotDispatchers honours the override and the per-type fixup
+	// installs the correct dispatcher (None namespace entry => identityHash
+	// fallback, real callable => slotTpHash).
+	//
+	// CPython: Objects/typeobject.c:8366 (richcompare/hash dance)
+	if typeOverridesHash(t) {
+		t.Hash = nil
+		t.RichCmp = nil
+	}
 	fixupSlotDispatchers(t)
 	// PEP 487: after the class is built, walk the namespace and call
 	// __set_name__ on every value that defines it. enum._proto_member
@@ -311,7 +324,12 @@ func lookupOnType(t *Type, name string) (Object, bool) {
 //
 // CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
 func fixupSlotDispatchers(t *Type) {
-	inheritSlotsFromBases(t)
+	inheritSlotsAllMRO(t)
+	for _, base := range t.Bases {
+		if base != nil {
+			inheritDirectBaseScalars(t, base)
+		}
+	}
 	fixupCallReprStr(t)
 	fixupHashAndIter(t)
 	fixupRichCmpAndBool(t)
@@ -348,88 +366,6 @@ func fixupCallReprStr(t *Type) {
 		t.Str = slotTpStr
 	} else if t.Repr != nil && t.Str == nil {
 		t.Str = t.Repr
-	}
-}
-
-// inheritSlotsFromBases pulls C-level slots from base types when the
-// subclass leaves them nil. CPython's inherit_slots walks the primary
-// base and copies every slot that is not already set on the subclass.
-// The fixup pass that runs after this can still override individual
-// slots when the user namespace supplies a matching dunder.
-//
-// gopy keeps the Getattro / Setattro choice in NewUserType because the
-// dispatcher depends on the concrete instance shape (*Instance versus
-// *Dict versus *Type); the rest of the slot table is straight pointer
-// inheritance.
-//
-// CPython: Objects/typeobject.c:9770 inherit_slots
-func inheritSlotsFromBases(t *Type) {
-	for _, base := range t.Bases {
-		inheritBasicSlots(t, base)
-		inheritProtocolTables(t, base)
-	}
-}
-
-// inheritBasicSlots copies the scalar slot pointers from base to t for
-// every slot t does not already define.
-func inheritBasicSlots(t, base *Type) {
-	if t.Repr == nil {
-		t.Repr = base.Repr
-	}
-	if t.Str == nil {
-		t.Str = base.Str
-	}
-	if t.Call == nil {
-		t.Call = base.Call
-	}
-	if t.Hash == nil {
-		t.Hash = base.Hash
-	}
-	if t.TpNew == nil {
-		t.TpNew = base.TpNew
-	}
-	if t.Iter == nil {
-		t.Iter = base.Iter
-	}
-	if t.IterNext == nil {
-		t.IterNext = base.IterNext
-	}
-	if t.RichCmp == nil {
-		t.RichCmp = base.RichCmp
-	}
-	if t.DescrGet == nil {
-		t.DescrGet = base.DescrGet
-	}
-	if t.DescrSet == nil {
-		t.DescrSet = base.DescrSet
-	}
-	if t.Format == nil {
-		t.Format = base.Format
-	}
-	if t.TpTraverse == nil {
-		t.TpTraverse = base.TpTraverse
-	}
-}
-
-// inheritProtocolTables copies the Number / Sequence / Mapping / Async
-// tables as deep copies so per-subclass fixup writes never mutate the
-// base type's struct.
-func inheritProtocolTables(t, base *Type) {
-	if t.Number == nil && base.Number != nil {
-		cp := *base.Number
-		t.Number = &cp
-	}
-	if t.Sequence == nil && base.Sequence != nil {
-		cp := *base.Sequence
-		t.Sequence = &cp
-	}
-	if t.Mapping == nil && base.Mapping != nil {
-		cp := *base.Mapping
-		t.Mapping = &cp
-	}
-	if t.Async == nil && base.Async != nil {
-		cp := *base.Async
-		t.Async = &cp
 	}
 }
 
