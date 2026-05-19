@@ -27,10 +27,32 @@ func init() {
 	bind("__ceil__", intIndexMethod)
 	bind("conjugate", intIndexMethod)
 	bind("to_bytes", intToBytesMethod)
+	bind("__repr__", intReprDescr)
+	bind("__str__", intReprDescr)
 
 	SetTypeDescr(IntType, "from_bytes", NewClassMethod(
 		NewBuiltinFunction("from_bytes", intFromBytesMethod),
 	))
+}
+
+// intReprDescr backs int.__dict__["__repr__"] and int.__dict__["__str__"].
+// CPython generates these via add_operators from slotdefs (TPSLOT __repr__
+// + PyLong_Type.tp_repr). Without the descriptor, Python code that pulls
+// int.__repr__ as a value, like json.encoder._make_iterencode's
+// `_intstr=int.__repr__` default, would inherit object.__repr__ and emit
+// `<int object at 0x...>` instead of the decimal digit string.
+//
+// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __repr__)
+// CPython: Objects/longobject.c:1762 long_repr
+func intReprDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
+	}
+	v, err := bigIntFromIntLike(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(v.String()), nil
 }
 
 // intBitLengthMethod ports int.bit_length(): the number of bits needed

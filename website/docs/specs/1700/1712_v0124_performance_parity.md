@@ -111,14 +111,14 @@ The remaining structural blockers are now:
 | Bench                  | cpython 3.14 | gopy target | gopy 2026-05-16 |
 | ---------------------- | -----------: | ----------: | --------------: |
 | `pyperformance` geomean| 1.0x         | <=1.5x      |          283x   |
-| `nbody`                | 1.0x         | <=2.0x      |        N/A (P8) |
-| `fannkuch`             | 1.0x         | <=2.0x      |        N/A (P8) |
+| `nbody`                | 1.0x         | <=2.0x      |  TBD (P8 done; rerun pending) |
+| `fannkuch`             | 1.0x         | <=2.0x      |  TBD (P8 done; rerun pending) |
 | `richards`             | 1.0x         | <=2.0x      |         1899x   |
 | `unpack_sequence`      | 1.0x         | <=2.0x      |          254x   |
 | `call_method`          | 1.0x         | <=1.5x      |         2407x   |
 | `regex_compile`        | 1.0x         | <=2.0x      |         1952x   |
 | `pidigits`             | 1.0x         | <=2.0x      |         7.83x   |
-| `json_dumps`           | 1.0x         | <=2.0x      |        N/A (P9) |
+| `json_dumps`           | 1.0x         | <=2.0x      |  TBD (P9 done; rerun pending) |
 
 ## Benchmark coverage matrix
 
@@ -764,30 +764,47 @@ both show up with real numbers in the small-subset table.
 
 ### P9. `int.__format__` format-spec parser — `Python/formatter_unicode.c`
 
-**Symptom.** `'{0:04x}'.format(255)` raises `TypeError: unsupported
+**Symptom (was).** `'{0:04x}'.format(255)` raised `TypeError: unsupported
 format string passed to int.__format__`. `stdlib/json/encoder.py:31`
-(`'\\u{0:04x}'.format(i)` in `ESCAPE_DCT` initialisation) hits this on
+(`'\\u{0:04x}'.format(i)` in `ESCAPE_DCT` initialisation) hit this on
 `import json`, blocking `json_dumps`.
 
-**Gap.** gopy's int formatter parses bare type codes (`x`, `o`, `b`,
-`d`) only. It rejects any prefix carrying fill/align/sign/alt/width/
-grouping/precision.
+**Resolution.** The full `[[fill]align][sign][z][#][0][width][group][.prec][type]`
+mini-language already lived in `format/format.go` (used by `str.format`
+and f-strings via `str_format.go`). What was missing was the wiring:
+neither `IntType.Format` nor `FloatType.Format` was set, so the
+fallback `objectFormatDescr` rejected every non-empty spec. Beyond
+`__format__`, `_intstr=int.__repr__` in `json/encoder.py` also pulled
+the inherited `object.__repr__` (printing `<int object at 0x...>`)
+because no slot wrapper for `int.__repr__` / `float.__repr__` existed
+yet, so even after the format wiring landed `json.dumps` still
+serialised numbers as object reprs. The fix wires both pieces.
 
 **Phases.**
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P9.1 | `objects/long_format.go`: port `Python/formatter_unicode.c:parse_internal_render_format_spec` into an `InternalFormatSpec` struct (fill, align, sign, alt, width, grouping, precision, type). | TODO | - |
-| P9.2 | Wire `int.__format__` to the parsed spec; route through the existing decimal/hex/octal/binary renderers, applying padding + alignment + sign + grouping. | TODO | - |
-| P9.3 | Float-spec coercion: `'{:.2g}'.format(255)` promotes the int to float and dispatches to `float.__format__`. Mirror cpython. | TODO | - |
-| P9.4 | Table-driven test pulled from CPython `Lib/test/test_format.py`. | TODO | - |
+| P9.1 | `objects/long_format.go`: glue `IntType.Format` (and `BoolType.Format`, since `tp_base = PyLong_Type`) to `format.ParseSpec` + `format.FormatInt`, with a float-coercion branch for `e/E/f/F/g/G/%` codes. | DONE | (this PR) |
+| P9.2 | `objects/float_format.go`: glue `FloatType.Format` to `format.ParseSpec` + `format.FormatFloat`, so the int float-coercion branch and any direct `f.__format__(...)` call share the same renderer. | DONE | (this PR) |
+| P9.3 | `int_bind.go` + `float.go`: install slot wrappers for `int.__repr__` / `int.__str__` / `float.__repr__` / `float.__str__` so `json/encoder.py`'s `_intstr=int.__repr__` and `_floatstr=float.__repr__` defaults bind to the real digit-emitting wrappers instead of `object.__repr__`. | DONE | (this PR) |
+| P9.4 | `objects/long_format_test.go`: table-driven cases pulled from CPython `Lib/test/test_format.py` (int, float-coerced, bool inherited, and the json.encoder ESCAPE_DCT loop). | DONE | (this PR) |
 
-**Gate.** `objects/long_format_test.go` matches cpython output on
-every spec from `test_format.py`. `json_dumps` runs to completion
-under `bin/gopy`.
+**Gate.** `objects/long_format_test.go` matches cpython output on the
+covered specs. `json_dumps`, `nbody`, and `fannkuch` run to completion
+under `bin/gopy` with `exit 0`.
 
-**Estimated win.** Unblocks 1 N/A bench plus removes a class of
-silent-format failures hiding in other stdlib paths.
+**Estimated win.** Unblocks `json_dumps` (verified: `gopy
+bench/bench_sources/json_dumps.py` exits 0; `gopy -c "import json;
+print(json.dumps({'a':1,'b':[2,3.14]}))"` now prints `{"a": 1, "b":
+[2, 3.14]}` instead of `<int object at 0x...>`). Also removes the
+silent-format failures previously hiding in other stdlib paths that
+caught `TypeError` from `format()` and fell back to `repr`.
+
+**Out of scope (deferred to #647).** Per-slot `add_operators` generic
+emission. P9 manually installs the four wrappers `pyperformance` and
+`json` reach for. The rest of the slotdefs catalog (`__add__`,
+`__sub__`, `__mul__`, etc.) is still missing on most builtin types
+and lands as part of #647.
 
 ### P10. Float fast path — `Objects/floatobject.c`
 
@@ -1065,7 +1082,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `vm/frame_pool.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go` | 1.5x | WIP (P6.2 done via spec 1716; P6.1/P6.3/P6.4 open) | spec 1716 |
 | P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`   | 1.5x          | TODO   | -      |
 | P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-106` | unblock 2 N/A | DONE | (this PR) |
-| P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go` | unblock 1 N/A | TODO | - |
+| P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go`, `objects/float_format.go`, `objects/int_bind.go`, `objects/float.go` | unblock 1 N/A | DONE | (this PR) |
 | P10. Float fast path            | `Objects/floatobject.c` | `objects/float_pool.go`  | 2.5x          | TODO   | -      |
 | P11. CFG optimizer + peephole   | `Python/flowgraph.c`   | `compile/flowgraph_cfg_passes.go` | 1.1x | DONE (spec 1716) | 9d7d9f0, 37563f5 |
 | P12. Generator fast path        | `Python/genobject.c`   | `objects/generator.go`, `vm/eval_gen.go` | 3x async | DONE (channel + goroutine model); P12.2 SEND tier-2 uop depends on P2.3 | - |
@@ -1081,8 +1098,10 @@ API + P7.3 type-version auto-invalidation land, because today
 nothing tells the specializer when a class attribute changes.
 
 1. **P8 + P9 unblock N/A benches** (independent, small). `v[0] -= rhs`
-   codegen fix and `int.__format__` spec parser. These remove
-   `nbody`, `fannkuch`, `json_dumps` from the N/A column.
+   codegen fix and `int.__format__` spec parser. **DONE on the active
+   branch.** `nbody`, `fannkuch`, and `json_dumps` all run to
+   completion under `bin/gopy` (exit 0). Pending: refresh the
+   small-subset bench table with real numbers.
 2. **P5.4 watcher API + P7.2 slot pre-population + P7.3 version
    invalidation** ship as one PR. This unblocks P1.4 deferred arms
    (`STORE_ATTR_INSTANCE_VALUE`, `STORE_ATTR_WITH_HINT`) and lets

@@ -52,6 +52,36 @@ func init() {
 	// CPython: Objects/floatobject.c:1748 float___getformat___impl
 	SetTypeDescr(FloatType, "__getformat__", NewClassMethod(
 		NewBuiltinFunction("__getformat__", floatGetFormat)))
+
+	// float.__repr__ and float.__str__ slot wrappers. CPython generates
+	// these via add_operators from slotdefs (TPSLOT __repr__ +
+	// PyFloat_Type.tp_repr). json.encoder pins float.__repr__ as the
+	// _floatstr argument default at module load; without the descriptor
+	// it inherits object.__repr__ and json output prints
+	// `<float object at 0x...>` instead of the IEEE-754 digit string.
+	//
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __repr__)
+	// CPython: Objects/floatobject.c:357 float_repr
+	SetTypeDescr(FloatType, "__repr__", NewMethodDescr(FloatType, "__repr__", floatReprDescr))
+	SetTypeDescr(FloatType, "__str__", NewMethodDescr(FloatType, "__str__", floatReprDescr))
+}
+
+// floatReprDescr is the slot wrapper for float.__repr__ / float.__str__.
+//
+// CPython: Objects/floatobject.c:357 float_repr
+func floatReprDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
+	}
+	f, ok := args[0].(*Float)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'float' object")
+	}
+	out, err := floatRepr(f)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(out), nil
 }
 
 // floatGetFormat backs float.__getformat__. args[0] is the type
