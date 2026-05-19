@@ -70,6 +70,10 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	slot := &d.entries[idx]
 	if found {
 		slot.value = value
+		// CPython fires MODIFIED in insertdict's replace branch
+		// (dictobject.c:1875). The key set didn't change, but
+		// watchers still need to know the value did.
+		notifyDictEvent(DictEventModified, d, key, value)
 		return nil
 	}
 	if !slot.dummy {
@@ -80,6 +84,9 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	d.used++
 	d.downgradeKindOnInsert(key)
 	d.invalidateKeysVersion()
+	// CPython fires ADDED at the same site once the new entry is in
+	// the table (dictobject.c:1806/1869).
+	notifyDictEvent(DictEventAdded, d, key, value)
 	return nil
 }
 
@@ -109,6 +116,9 @@ func dictDelete(d *Dict, key Object) error {
 	}
 	d.used--
 	d.invalidateKeysVersion()
+	// CPython fires DELETED from delitem_common (dictobject.c:2872).
+	// Pass nil for value (the old value isn't part of the contract).
+	notifyDictEvent(DictEventDeleted, d, key, nil)
 	return nil
 }
 

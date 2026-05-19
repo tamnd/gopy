@@ -79,33 +79,16 @@ func (d *Dict) GetKeysVersion() uint32 {
 // invalidateKeysVersion is called from every mutation that changes
 // the keys layout (insert or delete). The next GetKeysVersion call
 // will allocate a fresh version, so any cached inline-cache copy
-// stops matching.
+// stops matching. Event notification is the caller's responsibility:
+// each mutation site picks the right DictEvent* and routes through
+// notifyDictEvent (see objects/dict_watcher.go), because the version
+// reset is the same for ADDED / MODIFIED / DELETED but the event
+// payload is not.
 //
-// Also fires DictMutationHook so registered dict watchers (notably
-// the Tier-2 optimizer's globals/builtins invalidation) can drop any
-// cached state keyed on this dict. Mirrors the _PyDict_NotifyEvent
-// dispatch CPython runs from every mutation site.
-//
-// CPython: Objects/dictobject.c dk_version invalidation /
-// Objects/dictobject.c _PyDict_NotifyEvent
+// CPython: Objects/dictobject.c dk_version invalidation
 func (d *Dict) invalidateKeysVersion() {
 	d.keysVersion = 0
-	if hook := DictMutationHook; hook != nil {
-		hook(d)
-	}
 }
-
-// DictMutationHook is fired by every mutation that calls
-// invalidateKeysVersion (insert, delete, resize). The Tier-2
-// optimizer installs a closure here at WatcherInit time so it can
-// run DispatchDictMutation without objects depending on optimizer.
-//
-// Single-interpreter assumption holds in v0.12; sub-interpreters
-// (v0.13) need a per-interpreter registry instead.
-//
-// CPython: Objects/dictobject.c _PyDict_NotifyEvent (the watcher
-// dispatch invoked from every mutation site)
-var DictMutationHook func(d *Dict)
 
 // Mutations returns the watcher mutation counter for d. The Tier-2
 // optimizer caps folding once this exceeds

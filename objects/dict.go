@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // dictEntry is one slot in the dict's open-addressed table. The slot
@@ -56,6 +57,14 @@ type Dict struct {
 	//
 	// CPython: Include/internal/pycore_dict.h DICT_WATCHED_MUTATION_BITS
 	mutationCount uint32
+
+	// watcherTag mirrors CPython's _ma_watcher_tag. Bits 0..7 (one per
+	// DICT_MAX_WATCHERS slot) flag which watchers have subscribed via
+	// PyDict_Watch. Notification iterates the set bits and dispatches
+	// through the package-level watcher table.
+	//
+	// CPython: Include/cpython/dictobject.h:23 _ma_watcher_tag
+	watcherTag uint64
 }
 
 // DictType is the type singleton for dict. Mirrors PyDict_Type.
@@ -492,9 +501,20 @@ func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: clear() takes no arguments (%d given)", len(args)-1)
 	}
 	d := args[0].(*Dict)
+	// CPython fires a single CLEARED rather than one DELETED per
+	// entry (dictobject.c:2979 inside PyDict_Clear). Fire it before
+	// the per-key DelItem calls so a watcher that re-subscribes
+	// after CLEARED does not also see the synthetic DELETEDs.
+	notifyDictEvent(DictEventCleared, d, nil, nil)
+	had := atomic.LoadUint64(&d.watcherTag) & dictWatcherMask
+	// Suppress the per-entry DELETED events that the DelItem loop
+	// would otherwise emit, so the semantics match the C path which
+	// blows the table away in one shot.
+	atomic.AndUint64(&d.watcherTag, ^dictWatcherMask)
 	for _, k := range d.Keys() {
 		_ = d.DelItem(k)
 	}
+	atomic.OrUint64(&d.watcherTag, had)
 	return None(), nil
 }
 
@@ -635,12 +655,20 @@ func dictCopyMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	src := args[0].(*Dict)
 	dst := NewDict()
+	// CPython fires CLONED on the destination once per dict_merge
+	// fastpath (dictobject.c:3915). The source dict is passed as the
+	// "key" so watchers can identify where the entries came from.
+	notifyDictEvent(DictEventCloned, dst, src, nil)
+	had := atomic.LoadUint64(&dst.watcherTag) & dictWatcherMask
+	atomic.AndUint64(&dst.watcherTag, ^dictWatcherMask)
 	for _, k := range src.Keys() {
 		v, _ := src.GetItem(k)
 		if err := dst.SetItem(k, v); err != nil {
+			atomic.OrUint64(&dst.watcherTag, had)
 			return nil, err
 		}
 	}
+	atomic.OrUint64(&dst.watcherTag, had)
 	return dst, nil
 }
 

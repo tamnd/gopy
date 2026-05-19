@@ -600,7 +600,7 @@ The hooks the specializer needs are mostly plumbed:
 | P5.1 | Audit / regression-check the existing open-addressed layout against `Objects/dictobject.c:lookdict` probe sequence. Add `objects/dict_lookup_parity_test.go` table-driven from CPython's hash collisions. | TODO | - |
 | P5.2 | Real split-keys storage: per-type `SharedKeys` object owns the entries-array shape; instance `__dict__` carries `values []Object` only. Materialise to combined on delete or non-shared insert. Cite `Objects/dictobject.c:insertion_resize_inplace`. | TODO | - |
 | P5.3 | `_PyDict_SetItem_KnownHash` fast path: skip rehash when caller passes the hash. Wire from LOAD_ATTR / LOAD_GLOBAL specialized arms. Cite `Objects/dictobject.c:_PyDict_SetItem_KnownHash`. | TODO | - |
-| P5.4 | Public watcher subscription API: `PyDict_Watch(watcher_id, dict)` / `PyDict_AddWatcher(callback) -> int8_t`. Cite `Objects/dictobject.c:5797 PyDict_AddWatcher`. Replaces the bare `DictMutationHook` pointer. | TODO | - |
+| P5.4 | Public watcher subscription API: `PyDict_Watch(watcher_id, dict)` / `PyDict_AddWatcher(callback) -> int8_t`. Cite `Objects/dictobject.c:7710 PyDict_Watch / :7741 PyDict_AddWatcher`. Replaces the bare `DictMutationHook` pointer. | DONE | objects/dict_watcher.go + objects/dict.go (`watcherTag`), objects/dict_mutate.go + objects/dict.go fire ADDED / MODIFIED / DELETED / CLEARED / CLONED; optimizer/watcher.go delegates AddWatcher/Watch/Unwatch to the public API; `DictMutationHook` retired. |
 | P5.5 | Install the watcher at `specialize.Enable` time + invalidate inline caches on dict mutation. Interacts with P1.6. | TODO | - |
 
 **Gate.**
@@ -611,6 +611,59 @@ The hooks the specializer needs are mostly plumbed:
 - `meteor_contest` / `go` benches drop primarily on P5.
 
 **Estimated win.** 2x on attribute- and call-method-heavy code.
+
+**Technical notes (P5.4 dict watcher port).**
+
+1. `_ma_watcher_tag` is a uint64 in CPython. Bits 0-7 are the
+   subscription bitmask (`DICT_WATCHER_MASK`), bits 8-11 are the
+   mutation counter the Tier-2 globals folder reads
+   (`DICT_WATCHED_MUTATION_BITS = 4`), bits 12-31 are reserved, and
+   bits 32-63 are the per-dict unique id for free-threaded refcount.
+   gopy only mirrors the low-8 subscription bits inline on `Dict`
+   (`watcherTag uint64`); the mutation counter stays in its own
+   `mutationCount uint32` because the Tier-2 folder reads it directly
+   and the embedded layout would force an atomic dance every read.
+2. `DictMaxWatchers = 8` is hard-coded in CPython at
+   `pycore_dict_state.h:11`. Slots 0 and 1 are reserved for the
+   Tier-2 BUILTINS / GLOBALS watcher: `PyDict_AddWatcher` walks from
+   index 2. The optimizer needs an internal back-door to install
+   into a reserved slot; gopy exposes that as
+   `DictSetReservedWatcher` (the CPython equivalent is writing
+   `interp->dict_state.watchers[i]` directly inside `remove_globals`).
+3. `_PyDict_NotifyEvent` and `_PyDict_SendEvent` are split in CPython
+   so the inline notify path can hot-skip on `watcher_bits == 0` and
+   only spill into the dispatch loop when somebody is subscribed.
+   gopy folds the version bump (`DICT_VERSION_INCREMENT` in CPython)
+   into `notifyDictEvent` so the mutation paths don't carry two
+   hooks. Effect on the counter is identical.
+4. Mutation site map (CPython site -> gopy site):
+   `insertdict` ADDED at dictobject.c:1806/1869 ->
+   `dictInsert` (objects/dict_mutate.go).
+   `insertdict` MODIFIED at dictobject.c:1875 -> same.
+   `delitem_common` DELETED at dictobject.c:2872 ->
+   `dictDelete`.
+   `PyDict_Clear` CLEARED at dictobject.c:2979 ->
+   `dictClearMethod` (objects/dict.go); fires once even though
+   the implementation loops over `DelItem`, by masking the
+   watcher bits for the duration of the inner loop.
+   `dict_merge` CLONED at dictobject.c:3915 ->
+   `dictCopyMethod`. Source dict is passed as the "key" arg per
+   CPython's encoding.
+   DEALLOCATED at dictobject.c:3370 (`dict_dealloc`) ->
+   *not ported*. Go's GC has no faithful equivalent to `tp_dealloc`;
+   a `runtime.SetFinalizer` would resurrect the dict through the
+   callback and is unsound. Documented in `dict_watcher.go`.
+5. The previous gopy design used a per-watcher map keyed on `*Dict`
+   pointer (in `optimizer/watcher.go`). Replacing it with the
+   per-dict bitmask removes one map allocation on the first
+   subscribe per dict and aligns the data layout with CPython, so a
+   future C-extension consumer of the watcher API gets the same
+   semantics out of the box.
+6. The dict callback signature became `(event, *Dict, key Object,
+   newValue Object) -> int` (vs `unsafe.Pointer` triple in the old
+   internal API). The optimizer wraps that through
+   `adaptDictWatchCallback` because its `ExecutorsInvalidateDependency`
+   bloom is keyed on raw addresses.
 
 ### P6. Frame free-list + LOAD_FAST_CHECK — `Objects/frameobject.c`, `Python/ceval.c`
 
