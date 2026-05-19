@@ -734,7 +734,7 @@ LOAD_FAST_CHECK shipped via spec 1716:
 |-------|-------------|--------|--------|
 | P6.1 | `frame/chunk.go`: extend the existing chunk arena so `Pop` recycles the `LocalsPlus` slice header on the chunk slot and the bottom chunk persists across pop-back-to-zero. The next `Push` then hits `Init`'s `cap(LocalsPlus) >= size` fast path and skips the `make`. CPython parity: `_PyThreadState_PopFrame` leaves the activation-record memory in the data stack for the next `_PyEvalFramePushAndInit`; `_PyStackChunk` is only freed at thread destruction. | DONE | (working tree) |
 | P6.2 | `LOAD_FAST_CHECK` codegen in `compile/flowgraph_cfg_locals.go:scanBlockForLocals` + eval arm in `vm/eval_dispatch_handwritten.go:opLOAD_FAST_CHECK`. | DONE (spec 1716) | - |
-| P6.3 | `LOAD_FAST_BORROW` / `STORE_FAST_STORE_FAST` (CPython 3.14 new opcodes that elide the incref pair). | TODO | - |
+| P6.3 | `LOAD_FAST_BORROW` / `LOAD_FAST_BORROW_LOAD_FAST_BORROW` / `STORE_FAST_LOAD_FAST` / `STORE_FAST_STORE_FAST` (CPython 3.14 new opcodes that elide the incref pair and fold adjacent local-slot ops). | DONE | (working tree) |
 | P6.4 | Args-tuple bypass: `CALL_PY_EXACT_ARGS` stores args directly into the callee's frame locals. | TODO | - |
 
 **Gate.**
@@ -782,6 +782,54 @@ LOAD_FAST_CHECK shipped via spec 1716:
   `TestFrameStackGeneratorOwnedDropsLocalsPlus` (asserts the
   generator path does not alias). Both pass; `frame/`, `vm/`,
   `objects/`, `compile/` all green.
+
+**Technical notes (P6.3 LOAD_FAST_BORROW / STORE_FAST fusion).**
+
+- Audit showed the full subsystem was already ported and wired,
+  shipped as part of spec 1715 / 1716. `optimizeLoadFast` in
+  `compile/flowgraph_cfg_locals.go:145` ports `optimize_load_fast`
+  from `Python/flowgraph.c:2776` and rewrites `LOAD_FAST` /
+  `LOAD_FAST_LOAD_FAST` into the BORROW variants when the abstract
+  reference stack can prove the slot value lives at least as long
+  as the consumer. `cfgInsertSuperinstructions` in
+  `compile/flowgraph_cfg_passes.go:1147` ports `insert_superinstructions`
+  from `Python/flowgraph.c:2588` and folds adjacent `LOAD_FAST` /
+  `STORE_FAST` pairs into the four super-opcodes via the shared
+  `makeSuperInstruction` helper (`Python/flowgraph.c:2572`). The
+  pipeline runs `cfgInsertSuperinstructions` inside
+  `cfgOptimizeCodeUnit`, then `optimizeLoadFast` later in
+  `cfgOptimizedCfgToInstructionSequence` at
+  `compile/flowgraph_cfg_bridge.go:165`, matching CPython's
+  ordering.
+- Eval-loop arms exist in `vm/eval_dispatch_gen.go`:
+  `LOAD_FAST_BORROW` at line 755 (uses `stackref.Ref.Dup`, a no-op
+  in the GIL build since the dispatch saving is the whole point),
+  `LOAD_FAST_BORROW_LOAD_FAST_BORROW` at line 760,
+  `STORE_FAST_LOAD_FAST` at line 1127, `STORE_FAST_STORE_FAST` at
+  line 1143. The opargs encode two 4-bit local indices as
+  `(idx1 << 4) | idx2`, identical to CPython.
+- Verified byte-for-byte against CPython 3.14 on four real Python
+  sources: `def f(a): return a` emits `LOAD_FAST_BORROW`; `def f(a, b): return a + b`
+  emits `LOAD_FAST_BORROW_LOAD_FAST_BORROW`; `def f(a): x = a; return x`
+  (same line) emits `STORE_FAST_LOAD_FAST` arg=17; `def f(a, b): x, y = a, b; return x + y`
+  emits `STORE_FAST_STORE_FAST` arg=50 then `LOAD_FAST_BORROW_LOAD_FAST_BORROW`
+  arg=35. All four opcode IDs, opargs, and operand orderings
+  match `dis.dis(f)` on CPython 3.14.5 exactly.
+- `make_super_instruction` only fuses when the two instructions
+  share a source line (the `line1 != line2` guard in
+  `Python/flowgraph.c:2572`). gopy's `makeSuperInstruction` ports
+  the guard verbatim, so multiline `x = a` then `return x`
+  legitimately stays unfused, mirroring CPython.
+- New e2e gate: `compile/load_fast_borrow_e2e_test.go` drives all
+  four borrow / super-instruction patterns through
+  `compile.Compile` so the full pipeline (codegen plus every cfg
+  pass plus optimize_load_fast plus assembler) is exercised, not
+  just the unit-test slice. The unit tests in
+  `compile/flowgraph_cfg_locals_test.go` and
+  `compile/flowgraph_cfg_passes_test.go` already cover the cfg
+  passes in isolation, but a regression that wired the pass out
+  of the pipeline could pass them and still break user code, so
+  the gate lives at the public entry point.
 
 ### P7. Type slot caching — `Objects/typeobject.c`
 
@@ -1468,7 +1516,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P3. PyLong fast path            | `Objects/longobject.c` | `objects/long_fast.go`    | 3x            | DONE (P3.1-P3.4; P3.5 deferred behind Int repr refactor) | `d9e16d2` |
 | P4. PyUnicode kind tags         | `Objects/unicodeobject.c` | `objects/unicode_kind.go` | 2x         | TODO   | -      |
 | P5. Dict open-addressing        | `Objects/dictobject.c` | `objects/dict.go` (extend) | 2x           | WIP (open-addressed layout already in tree, split-keys + watcher API + KnownHash gaps remain) | - |
-| P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `frame/chunk.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go` | 1.5x | WIP (P6.1 chunk LocalsPlus recycle done; P6.2 done via spec 1716; P6.3/P6.4 open) | spec 1716, P6.1 this PR |
+| P6. Frame free-list + LOAD_FAST_CHECK | `Objects/frameobject.c`, `Python/ceval.c` | `frame/chunk.go`, `compile/flowgraph_cfg_locals.go`, `vm/eval_dispatch_handwritten.go`, `compile/flowgraph_cfg_passes.go` | 1.5x | WIP (P6.1 chunk LocalsPlus recycle done; P6.2 done via spec 1716; P6.3 done via spec 1715/1716, e2e gate this PR; P6.4 open) | spec 1716, P6.1 + P6.3 e2e this PR |
 | P7. Type slot cache             | `Objects/typeobject.c` | `objects/type_slots.go`, `objects/type_inherit.go`, `objects/type_watcher.go` | 1.5x | WIP (P7.0 watcher API, P7.2 inherit_slots, P7.3 version invalidation, P7.4 single-load dispatch done; P7.1/P7.5 open) | `e94cf31`, `2d82694`, `d71cf26`, P7.4 this PR |
 | P8. Aug-STORE_SUBSCR fix        | `Python/compile.c`     | `compile/codegen_stmt_misc.go:85-106` | unblock 2 N/A | DONE | `02f6c40` |
 | P9. int.__format__ spec         | `Python/formatter_unicode.c` | `objects/long_format.go`, `objects/float_format.go`, `objects/int_bind.go`, `objects/float.go` | unblock 1 N/A | DONE | `a5d25ea`, `5512f4f` |
@@ -1528,8 +1576,10 @@ nothing tells the specializer when a class attribute changes.
 7. **P4 kind tags + P15 unicode writer** ship together (writer's
    `Finish()` depends on kind detection).
 8. **P6.1 chunk LocalsPlus recycle** (DONE on PR #74, see chunk-arena
-   notes under P6), **P6.3 LOAD_FAST_BORROW / STORE_FAST_STORE_FAST**,
-   **P6.4 args-tuple bypass** in parallel.
+   notes under P6), **P6.3 LOAD_FAST_BORROW / STORE_FAST fusion**
+   (DONE: the cfg-pass port shipped under spec 1715/1716 and the
+   public-entry e2e gate landed on PR #74),
+   **P6.4 args-tuple bypass** still open.
 9. **P13 GC**, **P14 native modules** are bench-specific; pickle /
    xml / sqlite cannot run today so P14 is the priority among the
    three.
