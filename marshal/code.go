@@ -191,6 +191,7 @@ func unmarshalCode(d *decoder) (*objects.Code, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.SyncNameObjs()
 
 	// localsplusnames + localspluskinds
 	lplusObj, err := d.read()

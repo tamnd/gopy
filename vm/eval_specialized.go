@@ -559,7 +559,7 @@ func (e *evalState) fastLoadAttrGetattributeOverridden(oparg uint32) (int, bool,
 	if nameIdx < 0 || nameIdx >= len(co.Names) {
 		return 0, false, nil
 	}
-	name := mustUnicode(co.Names[nameIdx])
+	name := co.NameObj(nameIdx)
 	e.pop()
 	result, err := objects.Call(getattribute, objects.NewTuple([]objects.Object{owner, name}), nil)
 	if err != nil {

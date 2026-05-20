@@ -238,6 +238,7 @@ func gopyCompile(src, filename string) (*objects.Code, error) {
 		ExceptionTable:  cco.ExceptionTable,
 	}
 	out.Init(objects.CodeType)
+	out.SyncNameObjs()
 	return out, nil
 }
 

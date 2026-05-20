@@ -140,7 +140,7 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 		if nameIdx < 0 || nameIdx >= len(co.Names) {
 			return false
 		}
-		name := mustUnicode(co.Names[nameIdx])
+		name := co.NameObj(nameIdx)
 		specialize.LoadGlobal(e.f.Globals, e.f.Builtins, code, idx, name)
 		return true
 	case compile.LOAD_ATTR:
@@ -149,7 +149,7 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 		if nameIdx < 0 || nameIdx >= len(co.Names) {
 			return false
 		}
-		name := mustUnicode(co.Names[nameIdx])
+		name := co.NameObj(nameIdx)
 		_ = code
 		specialize.LoadAttr(owner, name, co, idx)
 		return true
@@ -159,7 +159,7 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 		if nameIdx < 0 || nameIdx >= len(co.Names) {
 			return false
 		}
-		name := mustUnicode(co.Names[nameIdx])
+		name := co.NameObj(nameIdx)
 		specialize.StoreAttr(owner, name, code, idx)
 		return true
 	case compile.LOAD_SUPER_ATTR:
@@ -199,12 +199,6 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 		return true
 	}
 	return false
-}
-
-// mustUnicode wraps s in an *Unicode for use in specializer entry
-// points that key by attribute / global name.
-func mustUnicode(s string) *objects.Unicode {
-	return objects.NewStr(s).(*objects.Unicode)
 }
 
 // peekNextInstr returns the (opcode, oparg) pair immediately after

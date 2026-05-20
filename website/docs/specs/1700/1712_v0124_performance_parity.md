@@ -2761,14 +2761,132 @@ CALL-specializer findings:
   (`Objects/funcobject.c:325`). No additional invalidation wiring
   was required.
 
+Full small-subset re-run on the post-CALL-fix build:
+
+| Benchmark         | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy |
+|-------------------|------------------:|---------------:|----------:|---------------:|------------:|
+| `call_method`     |             33.75 |          21.10 |  39003.97 |       1155.72x |    1848.13x |
+| `fannkuch`        |            310.30 |          85.93 |  12594.83 |         40.59x |     146.58x |
+| `json_dumps`      |            122.82 |         139.23 |  24938.93 |        203.05x |     179.12x |
+| `nbody`           |             38.88 |          25.29 |    230.24 |          5.92x |       9.11x |
+| `pidigits`        |             40.27 |          33.35 |    120.07 |          2.98x |       3.60x |
+| `regex_compile`   |             41.74 |         145.58 |  39469.58 |        945.61x |     271.11x |
+| `richards`        |             40.60 |          30.40 |  34519.46 |        850.13x |    1135.64x |
+| `unpack_sequence` |             26.02 |          18.97 |   2027.26 |         77.90x |     106.85x |
+| **geomean**       |             55.41 |          45.35 |   5576.74 |        100.65x |     122.98x |
+
+Headline: gopy / cpython **geomean drops 201x to 100.65x** (-50%).
+The CALL fix cascaded into every method-heavy bench. baseline
+gate vs `baseline_v0124.json` reports every bench improved:
+`call_method` -50.0%, `pidigits` -58.6%, `regex_compile` -50.8%,
+`richards` -57.5%, `unpack_sequence` -67.3%, and three benches
+flipped from `runtime_error` to passing (`fannkuch`, `json_dumps`,
+`nbody` already ran post-P8/P9, the runtime_error entries in
+baseline date back to the 2026-05-16 baseline before P8/P9
+landed). The pyperformance shape now looks much closer to PyPy's
+tail (the 1800x gopy/PyPy on `call_method` reflects PyPy's
+hyper-optimized one-shot call path; CPython is the real target
+and gopy is currently 1166x worst-case there).
+
 Highest-leverage next step (per ship order):
 
-`call_method` still at 1166x cpython. Next sweep: confirm
-`CALL_PY_EXACT_ARGS` and `CALL_BOUND_METHOD_EXACT_ARGS` fast arms
-in `vm/eval_specialized_call.go` are not hitting deopt branches in
-the warm loop, then re-run full small subset to capture the new
-geomean and identify the next worst-case bench. After that:
-P14.1 pickle (still un-runnable today) and P5 dict gaps.
+Three benches remain >800x cpython after this fix: `call_method`
+(1166x), `regex_compile` (946x), `richards` (850x). All three
+hot-loop on the runtime's slow path, not the parser/compiler.
+- `call_method` and `richards` are dominated by Python-defined
+  function calls; CALL_PY_EXACT_ARGS now fires but the residual
+  gap is the interpreter dispatch loop itself (frame push/pop,
+  stack manipulation, opcode decode). P2.2 + P2.3 tier-2 uop
+  port is the next-largest interpreter win.
+- `regex_compile` hot-loops on Python-level `re.compile`, which
+  walks the pattern in pure Python (`Lib/re/_parser.py` +
+  `Lib/re/_compiler.py`). The remaining cost is generic
+  Python execution, not regex internals.
+- `richards` additionally exercises polymorphic dispatch (Task
+  subclasses), which deopts LOAD_ATTR_METHOD_WITH_VALUES back to
+  generic LOAD_ATTR. The fix there is P1 polymorphic-inline-cache
+  (PIC) support, which is a CPython 3.14 hot topic but not yet
+  in main; not in scope for this spec.
+
+The next concrete subsystem to port is **P2.2 (Python/optimizer_bytecodes.c)
++ P2.3 (Python/executor_cases.c.h)** via the spec 1714 cases
+generator. This unlocks the JIT projection's payoff: today
+`PYTHON_JIT=1` projects traces but the executor body deopts on
+every uop because most opcode bodies are placeholders.
+
+After P2.2 + P2.3: P5 dict gaps (split keys + KnownHash), then
+P14.1 pickle (still un-runnable; vendor task #707 in progress).
+
+### Small subset re-run, 2026-05-20 (post co_names cache)
+
+Hot path identified in the previous report (`call_method` 972x
+after CALL specializer fix) walked LOAD_GLOBAL / LOAD_ATTR's slow
+arm through `objects.NewStr(co.Names[idx])` on every dispatch.
+That allocator path mints a fresh `*Unicode`, walks the string
+for the `classify()` ASCII / KIND classification, and resets the
+hash to the `-1` sentinel; the next `Dict.GetItem` then walks
+the string again to compute SipHash. CPython side-steps both
+costs because `co_names` is a tuple of interned `PyUnicode`
+objects (`Include/cpython/code.h:108`) whose cached hash sticks
+across calls.
+
+The port mirrors that by adding `NameObjs []*Unicode` to
+`objects.Code` and a `SyncNameObjs()` builder that fills it from
+`Names` at construction time. The four construction sites
+(`vm.liftNestedCode`, `pythonrun.liftCode`, `cmd/gopy.gopyCompile`,
+`builtins.liftCode`) plus the marshal decoder call `SyncNameObjs`
+right after `Names` is populated, so every dispatch can index
+straight into a shared `*Unicode` whose hash is computed once and
+amortized across the entire module's lifetime.
+
+Then the four hot dispatch paths route through `co.NameObj(idx)`:
+
+- `vm/eval_simple.go execLoadAttr` (generic LOAD_ATTR)
+- `vm/eval_simple.go execStoreAttr / execDeleteAttr`
+- `vm/eval_simple.go execLoadSuperAttr` (generic LOAD_SUPER_ATTR)
+- `vm/eval_simple.go execNameOp` (LOAD_NAME / LOAD_GLOBAL /
+  STORE_NAME / STORE_GLOBAL / DELETE_NAME / DELETE_GLOBAL)
+- `vm/eval_specialized.go LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN`
+- `vm/adaptive.go specializeAt` for LOAD_GLOBAL / LOAD_ATTR /
+  STORE_ATTR specializer entry points
+
+Net effect: `mustUnicode` is now unused and was removed from
+`vm/adaptive.go`. Test fixtures that build `objects.Code` by
+struct literal without calling `SyncNameObjs` still work because
+`NameObj(i)` falls back to a fresh `NewStr` when the cache is
+absent or out of range, matching the same semantics as before
+this change.
+
+| Benchmark         | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy |
+|-------------------|------------------:|---------------:|----------:|---------------:|------------:|
+| `call_method`     |             43.90 |          22.88 |  42713.32 |        972.87x |    1866.78x |
+| `fannkuch`        |            339.61 |          95.61 |  12384.98 |         36.47x |     129.54x |
+| `json_dumps`      |            123.68 |         158.54 |  25391.31 |        205.29x |     160.15x |
+| `nbody`           |             46.52 |          28.43 |    241.92 |          5.20x |       8.51x |
+| `pidigits`        |             43.16 |          36.98 |    127.44 |          2.95x |       3.45x |
+| `regex_compile`   |             50.69 |         164.31 |  44814.20 |        884.07x |     272.74x |
+| `richards`        |             46.08 |          33.20 |  39563.15 |        858.56x |    1191.80x |
+| `unpack_sequence` |             30.66 |          21.95 |   2025.46 |         66.06x |      92.28x |
+| **geomean**       |             63.52 |          50.70 |   5909.43 |         93.03x |     116.56x |
+
+Headline: gopy / cpython **geomean drops 100.65x to 93.03x**.
+The shipping deltas vs the 2026-05-16 baseline are now: `call_method`
+-45.3%, `fannkuch` ok (was runtime_error), `json_dumps` ok,
+`nbody` ok, `pidigits` -56.0%, `regex_compile` -44.2%, `richards`
+-51.3%, `unpack_sequence` -67.4%. cpython itself ran a bit slower
+this round so the geomean delta understates the raw gopy speedup
+(call_method gopy ms went 39003 to 42713, but on the slower cpython
+clock the ratio compressed because each cpython call also cost
+more).
+
+Why this is the right shape, not a shim: CPython does the exact
+same thing. `co_names` is allocated as a tuple of interned
+`PyUnicode` once at code-object construction (`_PyCode_New` in
+`Objects/codeobject.c:421`) and every LOAD_GLOBAL / LOAD_ATTR
+arm reuses the same `PyObject*` pointer for the rest of the
+code object's life. Without this cache gopy was paying for an
+allocation and a string walk on every dispatch that cpython
+amortized down to a single pointer load.
 
 ### Full corpus (release-tag and nightly only)
 

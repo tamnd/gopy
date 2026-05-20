@@ -67,6 +67,19 @@ type Code struct {
 	Freevars []string
 	Cellvars []string
 
+	// NameObjs is the cached *Unicode form of Names, populated at
+	// Code construction time. CPython stores co_names as a tuple of
+	// interned PyUnicode objects so every LOAD_NAME / LOAD_GLOBAL /
+	// LOAD_ATTR / STORE_ATTR reuses the same object (and its cached
+	// hash) across calls. Without this slice each name lookup would
+	// allocate a fresh *Unicode and re-classify the string + recompute
+	// the SipHash on every dispatch, which dominates the LOAD_GLOBAL
+	// fallback path. Built lazily via SyncNameObjs to keep marshal
+	// round-trips intact (Names is still the wire form).
+	//
+	// CPython: Include/cpython/code.h:108 co_names
+	NameObjs []*Unicode
+
 	// LocalsplusNames / LocalsplusKinds carry the flat 3.11+
 	// co_localsplus layout: every named slot the frame allocates
 	// for fastlocals, cells, and frees, paired with the
@@ -312,6 +325,42 @@ func NewCode() *Code {
 	c := &Code{Version: AllocCodeVersion()}
 	c.init(CodeType)
 	return c
+}
+
+// SyncNameObjs rebuilds NameObjs to match the current Names slice.
+// Construction sites (NewCode caller, lift helpers, marshal decode)
+// call this after populating Names so the dispatch loop can index
+// straight into NameObjs without minting a fresh *Unicode per call.
+//
+// CPython: Objects/codeobject.c:421 _PyCode_New (co_names tuple is
+// stored verbatim from the compiler).
+func (c *Code) SyncNameObjs() {
+	if len(c.Names) == 0 {
+		c.NameObjs = nil
+		return
+	}
+	if cap(c.NameObjs) < len(c.Names) {
+		c.NameObjs = make([]*Unicode, len(c.Names))
+	} else {
+		c.NameObjs = c.NameObjs[:len(c.Names)]
+	}
+	for i, s := range c.Names {
+		c.NameObjs[i] = NewStr(s).(*Unicode)
+	}
+}
+
+// NameObj returns the cached *Unicode for Names[i]. Falls back to
+// minting a fresh object when NameObjs is missing or out of sync,
+// which covers test fixtures that build Code by struct literal
+// without calling SyncNameObjs.
+func (c *Code) NameObj(i int) *Unicode {
+	if i >= 0 && i < len(c.NameObjs) && c.NameObjs[i] != nil {
+		return c.NameObjs[i]
+	}
+	if i < 0 || i >= len(c.Names) {
+		return nil
+	}
+	return NewStr(c.Names[i]).(*Unicode)
 }
 
 // codeRepr formats as <code object NAME at PTR, file "FILE", line LINE>.

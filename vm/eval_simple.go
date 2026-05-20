@@ -82,6 +82,7 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 		ExceptionTable:  c.ExceptionTable,
 	}
 	out.Init(objects.CodeType)
+	out.SyncNameObjs()
 	specialize.Enable(out)
 	c.Lifted = out
 	return out
@@ -938,7 +939,7 @@ func (e *evalState) execLoadAttr(oparg uint32) error {
 		return fmt.Errorf("vm: LOAD_ATTR: name index %d out of range", idx)
 	}
 	owner := e.popObject()
-	name := objects.NewStr(co.Names[idx])
+	name := co.NameObj(idx)
 	attr, err := objects.GetAttr(owner, name)
 	if err != nil {
 		return err
@@ -967,7 +968,7 @@ func (e *evalState) execStoreAttr(oparg uint32) error {
 	}
 	owner := e.popObject()
 	value := e.popObject()
-	name := objects.NewStr(co.Names[idx])
+	name := co.NameObj(idx)
 	return objects.SetAttr(owner, name, value)
 }
 
@@ -982,7 +983,7 @@ func (e *evalState) execDeleteAttr(oparg uint32) error {
 		return fmt.Errorf("vm: DELETE_ATTR: name index %d out of range", idx)
 	}
 	owner := e.popObject()
-	name := objects.NewStr(co.Names[idx])
+	name := co.NameObj(idx)
 	return objects.DelAttr(owner, name)
 }
 
@@ -1014,7 +1015,7 @@ func (e *evalState) execLoadSuperAttr(oparg uint32) error {
 	if err != nil {
 		return err
 	}
-	name := objects.NewStr(co.Names[nameIdx])
+	name := co.NameObj(nameIdx)
 	attr, err := objects.GetAttr(su, name)
 	if err != nil {
 		return err
@@ -1045,7 +1046,7 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		return nil, fmt.Errorf("vm: %s: name index %d out of range", op.Name(), idx)
 	}
 	name := co.Names[idx]
-	keyObj := objects.NewStr(name)
+	keyObj := co.NameObj(idx)
 
 	switch op {
 	case compile.LOAD_NAME:

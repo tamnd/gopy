@@ -286,6 +286,7 @@ func liftCompileCode(c *compile.Code) *objects.Code {
 		ExceptionTable:  c.ExceptionTable,
 	}
 	out.Init(objects.CodeType)
+	out.SyncNameObjs()
 	return out
 }
 

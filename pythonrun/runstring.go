@@ -122,6 +122,7 @@ func liftCode(c *compile.Code) *objects.Code {
 		ExceptionTable:  c.ExceptionTable,
 	}
 	out.Init(objects.CodeType)
+	out.SyncNameObjs()
 	specialize.Enable(out)
 	return out
 }
