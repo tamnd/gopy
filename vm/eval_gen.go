@@ -184,8 +184,8 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		// so currentThread() (used by sys.exc_info and friends) resolves
 		// to savedTS. Without this, hook-driven builtins running inside
 		// the generator body see a nil thread and return defaults.
-		prev := setActiveThread(savedTS)
-		defer restoreActiveThread(prev)
+		prev, g := setActiveThread(savedTS)
+		defer restoreActiveThread(prev, g)
 
 		// Block until the first Send() call. The first message must be
 		// None (enforced by Generator.Send); we discard it here because

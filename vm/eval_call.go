@@ -56,22 +56,26 @@ func goid() uint64 {
 }
 
 // setActiveThread primes the current goroutine's Eval slot and
-// returns the previous occupant so the caller can restore it on the
-// way out. Eval calls this on entry; callPyFunction reads through
-// currentThread.
-func setActiveThread(ts *state.Thread) *state.Thread {
-	g := goid()
-	var prev *state.Thread
+// returns the previous occupant + goid so the caller can restore it
+// on the way out without re-resolving goid (runtime.Stack is the
+// dominant cost in tight EvalCode loops). Mirrors CPython, where
+// PyThreadState_Swap also takes the thread state in/out with one TLS
+// read pair, not two.
+//
+// CPython: Python/pystate.c:2120 _PyThreadState_Swap
+func setActiveThread(ts *state.Thread) (prev *state.Thread, g uint64) {
+	g = goid()
 	if v, ok := activeThreads.Load(g); ok {
 		prev = v.(*state.Thread)
 	}
 	activeThreads.Store(g, ts)
-	return prev
+	return prev, g
 }
 
-// restoreActiveThread is the defer-side of setActiveThread.
-func restoreActiveThread(prev *state.Thread) {
-	g := goid()
+// restoreActiveThread is the defer-side of setActiveThread. Takes the
+// cached goid from setActiveThread so we avoid a second goid() call
+// per Eval; runtime.Stack is the bench-dominant cost otherwise.
+func restoreActiveThread(prev *state.Thread, g uint64) {
 	if prev == nil {
 		activeThreads.Delete(g)
 		return

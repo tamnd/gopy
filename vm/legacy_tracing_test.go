@@ -137,8 +137,8 @@ func TestSetTraceJumpDisablesForwardJump(t *testing.T) {
 	if _, err := SetTrace(ts, func(objects.Object, *frame.Frame, int, objects.Object) error { return nil }, nil); err != nil {
 		t.Fatalf("SetTrace: %v", err)
 	}
-	prev := setActiveThread(ts)
-	defer restoreActiveThread(prev)
+	prev, gid := setActiveThread(ts)
+	defer restoreActiveThread(prev, gid)
 	args := []objects.Object{co, objects.NewInt(0), objects.NewInt(8)}
 	out, err := sysTraceJumpFunc(args, nil)
 	if err != nil {

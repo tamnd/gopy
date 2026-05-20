@@ -23,8 +23,8 @@ func callBuiltin(t *testing.T, fn objects.Object, args ...objects.Object) object
 
 func TestSysSetTraceInstallsBridge(t *testing.T) {
 	ts := state.NewThread()
-	prev := setActiveThread(ts)
-	defer restoreActiveThread(prev)
+	prev, gid := setActiveThread(ts)
+	defer restoreActiveThread(prev, gid)
 
 	cb := objects.NewBuiltinFunction("trace_cb", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		return objects.None(), nil
@@ -62,8 +62,8 @@ func TestSysSetTraceInstallsBridge(t *testing.T) {
 
 func TestSysSetProfileInstallsBridge(t *testing.T) {
 	ts := state.NewThread()
-	prev := setActiveThread(ts)
-	defer restoreActiveThread(prev)
+	prev, gid := setActiveThread(ts)
+	defer restoreActiveThread(prev, gid)
 
 	cb := objects.NewBuiltinFunction("profile_cb", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		return objects.None(), nil
