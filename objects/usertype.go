@@ -348,6 +348,21 @@ func fixupSlotDispatchers(t *Type) {
 	fixupDescriptorSlots(t)
 	fixupGetattroSlot(t)
 	fixupTpNew(t)
+	fixupFinalize(t)
+}
+
+// fixupFinalize wires tp_finalize when the class body (or any base on
+// the MRO) provides __del__. Without this, user __del__ never fires
+// during cycle collection because the cycle collector calls Type.Finalize
+// directly. Mirrors CPython's slotdefs entry for tp_finalize, which
+// update_one_slot resolves to slot_tp_finalize when __del__ is present.
+//
+// CPython: Objects/typeobject.c:10336 update_one_slot (tp_finalize entry)
+// CPython: Objects/typeobject.c:10585 slot_tp_finalize
+func fixupFinalize(t *Type) {
+	if lookupDunderCallable(t, "__del__") {
+		t.Finalize = slotTpFinalize
+	}
 }
 
 // fixupGetattroSlot wires tp_getattro to a slot dispatcher that calls
@@ -696,6 +711,21 @@ func slotTpIterNext(o Object) (Object, error) {
 		return nil, err
 	}
 	return Call(fn, NewTuple(nil), nil)
+}
+
+// slotTpFinalize dispatches to the user's __del__. Errors raised by
+// __del__ are swallowed: CPython routes them through
+// PyErr_FormatUnraisable so the collector can press on; gopy follows
+// the same convention because re-raising mid-cycle-collection has no
+// useful target.
+//
+// CPython: Objects/typeobject.c:10585 slot_tp_finalize
+func slotTpFinalize(o Object) {
+	fn, err := lookupMethodOnSelf(o, "__del__")
+	if err != nil {
+		return
+	}
+	_, _ = Call(fn, NewTuple(nil), nil)
 }
 
 // slotTpRichCompare looks up the dunder that matches op and calls it,
