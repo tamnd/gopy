@@ -5,58 +5,73 @@
 // behavior bit-for-bit (same stack effect, same error path, same
 // cache advance), so removing the hand-written arm is safe.
 //
-// CPython has no analog: every opcode lives in bytecodes.c and the
-// generated switch is the only dispatch. This map is gopy-specific
-// migration scaffolding that goes away when phase 5 closes and
-// trySimple/tryImport/tryGen/tryMatch are folded into dispatchGen.
+// CPython: Python/ceval.c uses a static opcode_targets[256] table for
+// computed-goto dispatch (see opcode_targets.h). gopy mirrors the
+// constant-indexable lookup shape; the per-dispatch cost drops from
+// one map hash to one bounds-checked slice load.
 
 package vm
 
 import "github.com/tamnd/gopy/compile"
 
-var dispatchGenSupported = map[compile.Opcode]bool{
-	compile.NOP:                        true,
-	compile.POP_TOP:                    true,
-	compile.JUMP_FORWARD:               true,
-	compile.JUMP_BACKWARD_NO_INTERRUPT: true,
-	compile.END_SEND:                   true,
-	compile.PUSH_NULL:                  true,
-	compile.LOAD_FAST:                  true,
-	compile.LOAD_FAST_BORROW:           true,
-	compile.LOAD_FAST_AND_CLEAR:        true,
-	compile.STORE_FAST:                 true,
-	compile.LOAD_BUILD_CLASS:           true,
-	compile.SETUP_ANNOTATIONS:          true,
-	compile.LOAD_FROM_DICT_OR_GLOBALS:  true,
-	compile.LOAD_SMALL_INT:             true,
-	compile.LOAD_LOCALS:                true,
-	compile.UNARY_NEGATIVE:             true,
-	compile.UNARY_INVERT:               true,
-	compile.UNARY_NOT:                  true,
-	compile.LIST_APPEND:                true,
-	compile.SET_ADD:                    true,
-	compile.MAP_ADD:                    true,
-	compile.DELETE_SUBSCR:              true,
-	compile.GET_LEN:                    true,
-	compile.BUILD_STRING:               true,
-	compile.FORMAT_SIMPLE:              true,
-	compile.COPY:                       true,
-	compile.SWAP:                       true,
-	compile.SET_UPDATE:                 true,
-	compile.DICT_UPDATE:                true,
-	compile.LOAD_COMMON_CONSTANT:       true,
-	compile.POP_EXCEPT:                 true,
-	compile.PUSH_EXC_INFO:              true,
-	compile.STORE_GLOBAL:               true,
-	compile.DELETE_GLOBAL:              true,
-	compile.FORMAT_WITH_SPEC:           true,
-	compile.GET_ITER:                   true,
-	compile.BUILD_LIST:                 true,
-	compile.BUILD_TUPLE:                true,
-	compile.BUILD_SLICE:                true,
-	compile.BUILD_MAP:                  true,
-	compile.BUILD_TEMPLATE:             true,
-	compile.GET_AWAITABLE:              true,
-	compile.GET_ANEXT:                  true,
-	compile.MAKE_CELL:                  true,
+// dispatchGenSupported is a 256-entry bitmap indexed by Opcode. Empty
+// slots default false (the zero value), so unknown opcodes route to
+// the hand-written ladder. Populated at init from the source list
+// below so the entry set stays trivially auditable.
+var dispatchGenSupported [256]bool
+
+// dispatchGenSupportedList is the source-of-truth set of opcodes that
+// have a verified body in dispatchGen. The init function below stamps
+// these into dispatchGenSupported.
+var dispatchGenSupportedList = []compile.Opcode{
+	compile.NOP,
+	compile.POP_TOP,
+	compile.JUMP_FORWARD,
+	compile.JUMP_BACKWARD_NO_INTERRUPT,
+	compile.END_SEND,
+	compile.PUSH_NULL,
+	compile.LOAD_FAST,
+	compile.LOAD_FAST_BORROW,
+	compile.LOAD_FAST_AND_CLEAR,
+	compile.STORE_FAST,
+	compile.LOAD_BUILD_CLASS,
+	compile.SETUP_ANNOTATIONS,
+	compile.LOAD_FROM_DICT_OR_GLOBALS,
+	compile.LOAD_SMALL_INT,
+	compile.LOAD_LOCALS,
+	compile.UNARY_NEGATIVE,
+	compile.UNARY_INVERT,
+	compile.UNARY_NOT,
+	compile.LIST_APPEND,
+	compile.SET_ADD,
+	compile.MAP_ADD,
+	compile.DELETE_SUBSCR,
+	compile.GET_LEN,
+	compile.BUILD_STRING,
+	compile.FORMAT_SIMPLE,
+	compile.COPY,
+	compile.SWAP,
+	compile.SET_UPDATE,
+	compile.DICT_UPDATE,
+	compile.LOAD_COMMON_CONSTANT,
+	compile.POP_EXCEPT,
+	compile.PUSH_EXC_INFO,
+	compile.STORE_GLOBAL,
+	compile.DELETE_GLOBAL,
+	compile.FORMAT_WITH_SPEC,
+	compile.GET_ITER,
+	compile.BUILD_LIST,
+	compile.BUILD_TUPLE,
+	compile.BUILD_SLICE,
+	compile.BUILD_MAP,
+	compile.BUILD_TEMPLATE,
+	compile.GET_AWAITABLE,
+	compile.GET_ANEXT,
+	compile.MAKE_CELL,
+}
+
+func init() {
+	for _, op := range dispatchGenSupportedList {
+		dispatchGenSupported[op] = true
+	}
 }
