@@ -3798,3 +3798,46 @@ body would compress that further. GC is the other lever
 (~10% flat split across `madvise`/`mallocgc`/`memclr`/`writeBarrier`);
 that one ports CPython's PyList freelist and intermediate-slice
 reuse, but it is a heavier change with broader correctness surface.
+
+### D3 closer (2026-05-21): POP_JUMP_IF + JUMP_BACKWARD inline.
+
+Extended the `run()` inline opcode panel from seven opcodes to eleven
+by adding `POP_JUMP_IF_FALSE/TRUE/NONE/NOT_NONE` (bool/None singleton
+TOS fast path), `JUMP_BACKWARD` (eval-breaker-zero fast path with
+inline `tryWarmupTier2`), and `JUMP_BACKWARD_NO_INTERRUPT` (cache=0
+stride-2 jump, used by try/except cleanup paths).
+
+Bug caught during port: a first attempt inlined both JUMP_BACKWARD
+variants with stride 4. `JUMP_BACKWARD_NO_INTERRUPT` has cache=0 in
+`compile/opcode_caches.go`, so its codeunit stride is 2, not 4. The
+stride-4 inline shifted every jump target by 2 bytes inside
+try/except cleanup, corrupting control flow and crashing
+regex_compile with `panic: index out of range [-1]` in
+`Frame.PeekStack` from a POP_EXCEPT that saw an empty stack. Fix:
+match each variant to its real cache width via separate arms
+(stride 4 for `JUMP_BACKWARD`, stride 2 for `JUMP_BACKWARD_NO_INTERRUPT`).
+
+| Benchmark | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy |
+|---|---:|---:|---:|---:|---:|
+| `call_method` | 47.88 | 27.41 | 222.58 | 4.65x | 8.12x |
+| `fannkuch` | 418.51 | 117.82 | 7973.27 | 19.05x | 67.67x |
+| `json_dumps` | 143.75 | 187.73 | 567.26 | 3.95x | 3.02x |
+| `nbody` | 48.43 | 34.49 | 144.31 | 2.98x | 4.18x |
+| `pidigits` | 55.52 | 45.44 | 94.60 | 1.70x | 2.08x |
+| `regex_compile` | 59.15 | 200.02 | 327.79 | 5.54x | 1.64x |
+| `richards` | 56.62 | 40.45 | 348.84 | 6.16x | 8.62x |
+| `unpack_sequence` | 34.73 | 25.86 | 68.45 | 1.97x | 2.65x |
+| **geomean** | 74.01 | 61.28 | 319.13 | 4.31x | 5.21x |
+
+Geomean 4.45x to 4.31x. `pidigits` cleared 2x cpython for the first
+time at 1.70x, joining `unpack_sequence` (1.97x). `nbody` dropped
+under 3x at 2.98x. `richards` lost ~1x. fannkuch nudged slightly the
+wrong way (19.48x to 19.05x is within bench noise) because its hot
+loop already collapsed onto the LOAD_FAST_BORROW arms in the prior
+panel, leaving little JUMP_BACKWARD share to recover.
+
+Three benches now sit at or below 2x cpython. The five outliers
+ahead of D12: `fannkuch` (19.05x), `richards` (6.16x), `regex_compile`
+(5.54x), `call_method` (4.65x), `json_dumps` (3.95x). Each needs a
+subsystem port rather than another dispatch-tightening pass to clear
+the 1.5x gate.

@@ -260,6 +260,87 @@ func (e *evalState) run() (objects.Object, error) {
 			f.PrevInstr = f.InstrPtr
 			f.InstrPtr = f.InstrPtr + 2
 			continue
+		case compile.POP_JUMP_IF_FALSE, compile.POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NOT_NONE:
+			f := e.f
+			if f.StackTop == 0 {
+				break
+			}
+			i := f.StackBase + f.StackTop - 1
+			v := f.LocalsPlus[i].AsObject()
+			var take bool
+			fastOk := true
+			switch {
+			case v == objects.None():
+				switch op {
+				case compile.POP_JUMP_IF_NONE:
+					take = true
+				case compile.POP_JUMP_IF_NOT_NONE:
+					take = false
+				case compile.POP_JUMP_IF_TRUE:
+					take = false
+				case compile.POP_JUMP_IF_FALSE:
+					take = true
+				}
+			case v == objects.True():
+				switch op {
+				case compile.POP_JUMP_IF_NONE:
+					take = false
+				case compile.POP_JUMP_IF_NOT_NONE:
+					take = true
+				case compile.POP_JUMP_IF_TRUE:
+					take = true
+				case compile.POP_JUMP_IF_FALSE:
+					take = false
+				}
+			case v == objects.False():
+				switch op {
+				case compile.POP_JUMP_IF_NONE:
+					take = false
+				case compile.POP_JUMP_IF_NOT_NONE:
+					take = true
+				case compile.POP_JUMP_IF_TRUE:
+					take = false
+				case compile.POP_JUMP_IF_FALSE:
+					take = true
+				}
+			default:
+				fastOk = false
+			}
+			if !fastOk {
+				break
+			}
+			e.recordOpcode(op)
+			f.StackTop--
+			f.LocalsPlus[i] = stackref.Null
+			f.PrevInstr = f.InstrPtr
+			if take {
+				f.InstrPtr = f.InstrPtr + 4 + 2*int(oparg)
+			} else {
+				f.InstrPtr = f.InstrPtr + 4
+			}
+			continue
+		case compile.JUMP_BACKWARD_NO_INTERRUPT:
+			e.recordOpcode(op)
+			f := e.f
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr = f.InstrPtr + 2 - 2*int(oparg)
+			continue
+		case compile.JUMP_BACKWARD:
+			if e.gilTimer != nil {
+				e.gilTimer.poll(e.gil, e.breaker)
+			}
+			if e.breaker != nil && e.breaker.Load() != 0 {
+				break
+			}
+			e.recordOpcode(op)
+			f := e.f
+			target := f.InstrPtr + 4 - 2*int(oparg)
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr = target
+			if target >= 0 {
+				e.tryWarmupTier2(target / 2)
+			}
+			continue
 		}
 		next, err := e.dispatch(op, oparg)
 		if err != nil {
