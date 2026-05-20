@@ -29,7 +29,9 @@ var (
 
 func resolveTier2LogSink() {
 	if path := os.Getenv("GOPY_TIER2_TRACE_FILE"); path != "" {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+		// Path is developer-controlled via env var; this sink is dev-only
+		// instrumentation, not exposed to untrusted input.
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644) //nolint:gosec // G304
 		if err == nil {
 			tier2LogSink = f
 			return
