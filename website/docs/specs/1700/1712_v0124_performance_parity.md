@@ -2163,8 +2163,8 @@ Functions to port (with CPython line refs):
 |-------|-------------|--------|--------|
 | P15.1 | `objects/unicode_writer.go`: pre-sized writer with kind-aware finalisation (matches P4). Port the 13 `_PyUnicodeWriter_*` functions in full. API: `WriteStr`, `WriteASCII`, `WriteRune`, `Finish() *Unicode`. | DONE | `12b14349` |
 | P15.2 | Re-route `str.join`, `str.format`, `%` formatting through the writer. Audit `objects/str_methods.go` + `objects/str_format.go`. | DONE | `f40251bf`, `f72f658f` |
-| P15.3 | `BUILD_STRING` opcode lowering: emit a single `writer.Finish()` call instead of N concats. Touch `vm/eval_dispatch_gen.go`. | TODO | - |
-| P15.4 | f-string codegen: in `compile/codegen.go`, lower an f-string's pieces directly into writer calls (skip `FORMAT_VALUE` + `BUILD_STRING`). Shares P9 spec-parser. | TODO | - |
+| P15.3 | `BUILD_STRING` opcode lowering: emit a single `writer.Finish()` call instead of N concats. Touch `vm/eval_dispatch_gen.go`. | DONE | `0aa0a42f` |
+| P15.4 | f-string codegen: in `compile/codegen.go`, lower an f-string's pieces directly into writer calls (skip `FORMAT_VALUE` + `BUILD_STRING`). Shares P9 spec-parser. | DEFERRED | - |
 
 **Notes (P15.1 + P15.2).** Implementation specifics worth recording
 since CPython's writer is kind-tagged (1/2/4 bytes) and ours is not:
@@ -2200,6 +2200,33 @@ since CPython's writer is kind-tagged (1/2/4 bytes) and ours is not:
   out of scope for P15.2 (the conversion is byte-identical to the
   baseline output).
 
+**Notes (P15.3).** BUILD_STRING (`vm/eval_helpers.go`
+unicodeJoinArray) now delegates to `objects.StrJoinUnicode` so the
+writer's Finish() builds the result *Unicode with kind / ascii /
+length populated in one pass. Previously it ran `objects.Str(item)`
+per piece (calling `__str__`) then `strings.Join`+`NewStr`. The new
+path matches CPython's `_PyUnicode_JoinArray` strict TypeError when
+an item is not a *Unicode subclass; FORMAT_VALUE always pushes a str
+so no legitimate codegen path hits the strict check. F-string smoke
+corpus (positional, repr, format-spec, unicode literals, multi-piece
+chains, empty, 5-element loop join) verified byte-identical to
+CPython.
+
+**Notes (P15.4 deferred).** The spec line called for f-string
+codegen to lower pieces directly into writer calls and skip
+`FORMAT_VALUE` + `BUILD_STRING`. CPython 3.14 retains
+`CONVERT_VALUE` / `FORMAT_SIMPLE` / `FORMAT_WITH_SPEC` + `BUILD_STRING`
+as the f-string lowering and the gopy codegen mirrors it
+(`compile/codegen_expr_misc.go:138-159`). Inventing new
+writer-direct opcodes would diverge from CPython's bytecode contract
+and violate "always use cpython as single source of truth." Most of
+the P15.4 win is already captured: `FORMAT_SIMPLE` is a no-op for
+existing *Unicode values (`vm/eval_dispatch_gen.go:420`), and
+`BUILD_STRING` collects via the writer (P15.3). Re-open only if
+CPython itself adds a writer-direct opcode, or if a clean Tier-2
+uop fusion lands that avoids per-piece intermediate strings without
+introducing custom opcodes.
+
 **Gate.** `BenchmarkStrFormatHot` allocation-free for static format
 strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 
@@ -2224,7 +2251,7 @@ strings. `json_dumps`, `logging`, `pprint` benches drop materially.
 | P12. Generator fast path        | `Python/genobject.c`   | `objects/generator.go`, `vm/eval_gen.go` | 3x async | DONE (channel + goroutine model); P12.2 SEND tier-2 uop depends on P2.3 | - |
 | P13. GC tracking                | `Python/gc.c`          | `module/gc/`              | low geomean   | WIP (~90% done; thresholds + finalizer ordering pending) | - |
 | P14. Native pickle/xml/sqlite   | `Modules/_pickle.c`, etc | `module/_pickle/`, etc  | bench-specific | TODO  | -      |
-| P15. Unicode writer             | `Objects/unicodeobject.c` | `objects/unicode_writer.go` | 2x text  | WIP (P15.1 primitives + P15.2 str.join/format/% routing shipped; P15.3 BUILD_STRING + P15.4 f-string codegen open) | `12b14349`, `f40251bf`, `f72f658f` |
+| P15. Unicode writer             | `Objects/unicodeobject.c` | `objects/unicode_writer.go` | 2x text  | DONE (P15.1-3 shipped; P15.4 deferred as CPython divergence, see Notes) | `12b14349`, `f40251bf`, `f72f658f`, `0aa0a42f` |
 
 ## Recommended ship order
 
