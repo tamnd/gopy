@@ -12,21 +12,23 @@ package vm
 
 import (
 	"github.com/tamnd/gopy/compile"
-	"github.com/tamnd/gopy/objects"
 )
 
-// dispatch executes one instruction and returns the next-pc, a
-// terminal return value (set when retDone is true), or an error.
+// dispatch executes one instruction and returns the next-pc and any
+// error. Frame termination uses the errFrameReturn sentinel (with the
+// terminal value parked on e.retVal); the loop pattern-matches that
+// sentinel before consulting handleException, matching CPython's
+// goto exit_frame pattern.
 //
 // Return contract:
 //
-//   - retDone=true: the loop returns retVal/retErr immediately. Used
-//     by RETURN_VALUE / RETURN_CONST / INTERPRETER_EXIT.
+//   - err == errFrameReturn: loop returns e.retVal, nil. Used by
+//     RETURN_VALUE / INTERPRETER_EXIT / RETURN_GENERATOR.
 //   - err != nil: the loop walks the exception table.
 //   - otherwise: the loop sets InstrPtr = next and continues.
 //
 // CPython: Python/ceval.c switch over op
-func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone bool, err error) {
+func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, err error) {
 	// CPython: Python/ceval_macros.h:63 INSTRUCTION_STATS. Bumps the
 	// per-opcode counter + pair counter before any specializer / fast
 	// arm runs, matching the CPython placement (DISPATCH expands to
@@ -48,7 +50,7 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 		if op == compile.INSTRUMENTED_LINE {
 			newOp, err := e.handleInstrumentedLine()
 			if err != nil {
-				return 0, nil, nil, false, err
+				return 0, err
 			}
 			op = newOp
 			if !instrumentedRewrite[op] {
@@ -56,7 +58,7 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 			}
 		}
 		if err := e.fireInstrumented(op, oparg); err != nil {
-			return 0, nil, nil, false, err
+			return 0, err
 		}
 		op = instrumentedToBase[op]
 	}
@@ -74,7 +76,7 @@ afterInstrument:
 	// non-quickened body.
 	if e.f.Code.Quickened {
 		if next, ok, err := e.trySpecialized(op, oparg); ok {
-			return next, nil, nil, false, err
+			return next, err
 		}
 		if base, deopted := e.maybeDeopt(op); deopted {
 			op = base
@@ -84,7 +86,7 @@ afterInstrument:
 			// falling back to the generic body.
 			op = compile.Opcode(e.f.Code.Code[e.f.InstrPtr])
 			if next, ok, err := e.trySpecialized(op, oparg); ok {
-				return next, nil, nil, false, err
+				return next, err
 			}
 			if base2, deopted2 := e.maybeDeopt(op); deopted2 {
 				op = base2
@@ -102,27 +104,27 @@ afterInstrument:
 	// matching the DSL signature. The action translator will replace
 	// these with generated arms in vm/eval_dispatch_gen.go as it gains
 	// coverage; until then, the bodies live in eval_dispatch_handwritten.go.
-	if next, retVal, retErr, retDone, ok, err := e.dispatchHandwritten(op, oparg); ok {
-		return next, retVal, retErr, retDone, err
+	if next, ok, err := e.dispatchHandwritten(op, oparg); ok {
+		return next, err
 	}
 	// Hand-written panel for the smallest core opcodes so trivial
 	// programs run end-to-end before 1621 codegen lands.
-	if next, retVal, retErr, retDone, ok, err := e.trySimple(op, oparg); ok {
-		return next, retVal, retErr, retDone, err
+	if next, ok, err := e.trySimple(op, oparg); ok {
+		return next, err
 	}
 	// Import machinery arms.
 	if next, ok, err := e.tryImport(op, oparg); ok {
-		return next, nil, nil, false, err
+		return next, err
 	}
 	// Generator / coroutine / context-manager arms.
 	if r, err := e.tryGen(op, oparg); r.ok {
-		return r.next, r.retVal, r.retErr, r.retDone, err
+		return r.next, err
 	}
 	// Pattern-match arms.
 	if next, ok, err := e.tryMatch(op, oparg); ok {
-		return next, nil, nil, false, err
+		return next, err
 	}
-	return 0, nil, nil, false, opcodeNotImplemented(op)
+	return 0, opcodeNotImplemented(op)
 }
 
 // opcodeNotImplemented wraps ErrNotImplemented with the offending op.

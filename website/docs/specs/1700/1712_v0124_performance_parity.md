@@ -2662,7 +2662,7 @@ default-config geomean.
 | D3    | Inline opcode arms (no method-call wrapper)           | TODO     | -        |
 | D4    | Cache stack_pointer + next_instr as loop locals       | TODO     | -        |
 | D5    | Inline LOAD_FAST + top-N hot arms                     | DONE     | b8145817 |
-| D6    | Prune dispatch 5-tuple to error-only                  | TODO     | -        |
+| D6    | Prune dispatch 5-tuple to error-only                  | DONE     | pending  |
 | D7    | Move eval-breaker to RESUME-only                      | DONE     | c58f2e34 |
 | D8    | Port Modules/_json.c native encoder                   | DONE     | pending  |
 | D9    | Port Objects/abstract.c direct-slot dispatch          | TODO     | -        |
@@ -3627,3 +3627,36 @@ operations that today go through `objects/abstract.go::Add` (and
 friends), which carry a type-switch + interface dispatch per call.
 D9 caches the slot pointer once at type-construction time so each
 `BINARY_OP` arm becomes a direct call.
+
+### Small subset, re-run 2026-05-21 (post D6 dispatch return prune)
+
+| Benchmark        | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython |
+|------------------|------------------:|---------------:|----------:|---------------:|
+| `call_method`    |             48.12 |          27.09 |    268.32 |          5.58x |
+| `fannkuch`       |            421.41 |         118.61 |  14178.90 |         33.65x |
+| `json_dumps`     |            144.46 |         192.74 |    587.83 |          4.07x |
+| `nbody`          |             48.71 |          34.52 |    182.69 |          3.75x |
+| `pidigits`       |             54.57 |          44.93 |    125.11 |          2.29x |
+| `regex_compile`  |             59.21 |         199.39 |    387.62 |          6.55x |
+| `richards`       |             56.87 |          40.54 |    445.93 |          7.84x |
+| `unpack_sequence`|             35.44 |          26.22 |     81.27 |          2.29x |
+| **geomean**      |             74.31 |          61.46 |    404.59 |          5.44x |
+
+D6 collapses `dispatch()`'s `(next, retVal, retErr, retDone, err)`
+5-tuple to `(next, err)`, mirroring CPython's `goto exit_frame`
+pattern. RETURN_VALUE / INTERPRETER_EXIT / RETURN_GENERATOR park the
+terminal value on `evalState.retVal` and raise the `errFrameReturn`
+sentinel; the loop pattern-matches that sentinel before consulting
+the exception walker. Every generated arm in `vm/eval_dispatch_gen.go`
+drops its three unused middle returns, every hand-written arm in
+`vm/eval_dispatch_handwritten.go` returns the `(next, ok, err)`
+3-tuple, and the bytecodes_gen Go emitter's templates +
+`tools/bytecodes_gen/action.go` emission sites are updated so a fresh
+regeneration produces the same shape.
+
+Bench wall-clock vs the post-D2+D5 baseline (8.21x): geomean improves
+to 5.44x, with the long-tail `fannkuch` still pinning the geomean at
+~33x. `compare-baseline -baseline bench/baseline_v0124.json` returns
+OK; every bench that previously ran clean now runs within tolerance,
+and the previously `runtime_error` rows (`fannkuch`, `json_dumps`,
+`nbody`) all complete.

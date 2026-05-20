@@ -27,6 +27,16 @@ import (
 // tests can pin the surface without crashing.
 var ErrNotImplemented = errors.New("vm: opcode not implemented in v0.6")
 
+// errFrameReturn is the sentinel RETURN_VALUE / INTERPRETER_EXIT /
+// RETURN_GENERATOR raise to unwind out of the dispatch loop. The
+// terminal value is stashed on evalState.retVal so the dispatch chain
+// no longer has to thread retVal/retErr/retDone through every return.
+//
+// CPython: Python/ceval.c TARGET(RETURN_VALUE) sets retval and falls
+// through to the exit_frame label; gopy mirrors that with a sentinel
+// error since the dispatch arms are real function returns.
+var errFrameReturn = errors.New("vm: frame return")
+
 // evalState is the per-call state the dispatch arms read and write.
 // One per Eval invocation; not safe for concurrent use across
 // goroutines.
@@ -72,6 +82,16 @@ type evalState struct {
 	//
 	// CPython: Python/ceval.c next_instr local in _PyEval_EvalFrameDefault
 	code []byte
+
+	// retVal holds the value RETURN_VALUE / INTERPRETER_EXIT /
+	// RETURN_GENERATOR want the loop to return. The arms set it before
+	// returning errFrameReturn so the dispatch chain no longer has to
+	// thread a separate retVal through every return.
+	//
+	// CPython: Python/ceval.c retval local at the top of
+	// _PyEval_EvalFrameDefault, set by TARGET(RETURN_VALUE) just before
+	// the goto exit_frame.
+	retVal objects.Object
 }
 
 // Eval runs f to completion under ts and returns the value the frame
@@ -219,11 +239,11 @@ func (e *evalState) run() (objects.Object, error) {
 			f.InstrPtr = f.InstrPtr + 2
 			continue
 		}
-		next, retVal, retErr, retDone, err := e.dispatch(op, oparg)
-		if retDone {
-			return retVal, retErr
-		}
+		next, err := e.dispatch(op, oparg)
 		if err != nil {
+			if errors.Is(err, errFrameReturn) {
+				return e.retVal, nil
+			}
 			if e.handleException(err) {
 				continue
 			}

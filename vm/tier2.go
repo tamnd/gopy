@@ -71,22 +71,22 @@ func (e *evalState) tryWarmupTier2(instrIdx int) {
 // CPython: Python/bytecodes.c:2884-2943 ENTER_EXECUTOR /
 // JUMP_BACKWARD_JIT body
 // CPython: Python/ceval.c:1240-1358 enter_tier_two
-func (e *evalState) enterExecutor(oparg uint32) (int, objects.Object, error, bool, error) {
+func (e *evalState) enterExecutor(oparg uint32) (int, error) {
 	co := e.f.Code
 	exec := codeExecutorAt(co, int(oparg))
 	if exec == nil {
-		return 0, nil, nil, false, opcodeNotImplemented(compile.ENTER_EXECUTOR)
+		return 0, opcodeNotImplemented(compile.ENTER_EXECUTOR)
 	}
 	installOffset := e.f.InstrPtr
 	status := optimizer.RunExecutor(e.ts, e.f, exec)
 	switch status {
 	case optimizer.StatusError:
 		if e.f.InstrPtr != installOffset {
-			return e.f.InstrPtr, nil, nil, false, nil
+			return e.f.InstrPtr, nil
 		}
 	case optimizer.StatusExit, optimizer.StatusDeopt:
 		if e.f.InstrPtr != installOffset {
-			return e.f.InstrPtr, nil, nil, false, nil
+			return e.f.InstrPtr, nil
 		}
 	}
 	// Fallback: the trace bailed before any uop touched frame.InstrPtr
@@ -95,15 +95,14 @@ func (e *evalState) enterExecutor(oparg uint32) (int, objects.Object, error, boo
 	// the install path stashed so the program still makes progress.
 	op := compile.Opcode(exec.VMData.Opcode)
 	arg := uint32(exec.VMData.Oparg)
-	if next, retVal, retErr, retDone, ok, err := e.dispatchHandwritten(op, arg); ok {
-		return next, retVal, retErr, retDone, err
+	if next, ok, err := e.dispatchHandwritten(op, arg); ok {
+		return next, err
 	}
 	if dispatchGenSupported[op] {
-		next, retVal, retErr, retDone, err := e.dispatchGen(op, arg)
-		return next, retVal, retErr, retDone, err
+		return e.dispatchGen(op, arg)
 	}
-	next, retVal, retErr, retDone, _, err := e.trySimple(op, arg)
-	return next, retVal, retErr, retDone, err
+	next, _, err := e.trySimple(op, arg)
+	return next, err
 }
 
 // codeExecutorAt resolves Code.Executors back to the executor at

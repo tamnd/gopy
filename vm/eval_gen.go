@@ -23,13 +23,12 @@ import (
 
 // genResult bundles the dispatch outcome for the generator / coroutine
 // / with panel. ok=false means tryGen did not match the opcode and the
-// caller should fall through to the next dispatch layer.
+// caller should fall through to the next dispatch layer. Frame return
+// (RETURN_GENERATOR) parks the value on e.retVal and surfaces the
+// errFrameReturn sentinel through the err return.
 type genResult struct {
-	next    int
-	retVal  objects.Object
-	retErr  error
-	retDone bool
-	ok      bool
+	next int
+	ok   bool
 }
 
 // tryGen handles generator / coroutine / with opcodes. ok=false on the
@@ -216,7 +215,12 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 	}()
 
 	// Return the generator/coroutine/async-generator to the caller.
-	return genResult{retVal: retVal, retDone: true, ok: true}, nil
+	// CPython: Python/bytecodes.c:4982 RETURN_GENERATOR ends with
+	// goto exit_frame after stashing retval; gopy mirrors that by
+	// parking retval on e.retVal and surfacing errFrameReturn so the
+	// loop driver pops out of run().
+	e.retVal = retVal
+	return genResult{ok: true}, errFrameReturn
 }
 
 // execYieldValue ports YIELD_VALUE: pops the value to yield, sends it
