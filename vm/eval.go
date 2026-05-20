@@ -205,11 +205,33 @@ func (e *evalState) run() (objects.Object, error) {
 			f.PrevInstr = f.InstrPtr
 			f.InstrPtr = f.InstrPtr + 2
 			continue
-		case compile.LOAD_FAST:
+		case compile.LOAD_FAST, compile.LOAD_FAST_BORROW:
 			e.recordOpcode(op)
 			f := e.f
 			r := f.LocalsPlus[oparg].Dup()
 			f.LocalsPlus[f.StackBase+f.StackTop] = r
+			f.StackTop++
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr = f.InstrPtr + 2
+			continue
+		case compile.LOAD_FAST_LOAD_FAST, compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:
+			e.recordOpcode(op)
+			f := e.f
+			hi := oparg >> 4
+			lo := oparg & 0xF
+			r1 := f.LocalsPlus[hi].Dup()
+			r2 := f.LocalsPlus[lo].Dup()
+			f.LocalsPlus[f.StackBase+f.StackTop] = r1
+			f.LocalsPlus[f.StackBase+f.StackTop+1] = r2
+			f.StackTop += 2
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr = f.InstrPtr + 2
+			continue
+		case compile.LOAD_SMALL_INT:
+			e.recordOpcode(op)
+			f := e.f
+			obj := objects.SmallInt(int(5 + oparg))
+			f.LocalsPlus[f.StackBase+f.StackTop] = stackref.FromObject(obj)
 			f.StackTop++
 			f.PrevInstr = f.InstrPtr
 			f.InstrPtr = f.InstrPtr + 2
