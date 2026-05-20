@@ -47,6 +47,13 @@ type pickler struct {
 	bin        bool
 	framing    bool
 	frameStart int
+	// memo maps an object's identity to its memo index. The keys are
+	// interface values whose dynamic type is a pointer, so map equality
+	// degenerates into pointer identity. CPython's PyMemoTable uses raw
+	// PyObject pointers for the same effect.
+	//
+	// CPython: Modules/_pickle.c:592 PyMemoTable
+	memo map[objects.Object]int
 }
 
 // newPickler returns a pickler set for proto 5 binary output. The
@@ -58,6 +65,7 @@ func newPickler(proto int) *pickler {
 		proto:      proto,
 		bin:        proto > 0,
 		frameStart: -1,
+		memo:       make(map[objects.Object]int),
 	}
 	// Pre-size to the WRITE_BUF_SIZE CPython picks; small enough that
 	// the typical short pickle does not grow the slice.
@@ -363,68 +371,142 @@ func (p *pickler) saveUnicode(s string) error {
 	return nil
 }
 
-// writeMemoize emits MEMOIZE, the proto 4+ implicit memo PUT that
-// records the top-of-stack object at the next free memo slot.
+// memoPut records obj at the next available memo index and emits the
+// matching memo opcode. Proto >= 4 uses the implicit MEMOIZE opcode;
+// earlier protocols emit BINPUT / LONG_BINPUT with an explicit index.
 //
-// CPython: Modules/_pickle.c:1903 memo_put (MEMOIZE path)
-func (p *pickler) writeMemoize() {
-	p.writeByte(opMemoize)
+// CPython: Modules/_pickle.c:1802 memo_put
+func (p *pickler) memoPut(obj objects.Object) error {
+	idx := len(p.memo)
+	p.memo[obj] = idx
+	if p.proto >= 4 {
+		p.writeByte(opMemoize)
+		return nil
+	}
+	if !p.bin {
+		p.write([]byte(fmt.Sprintf("%c%d\n", opPut, idx)))
+		return nil
+	}
+	if idx < 256 {
+		p.write([]byte{opBinput, byte(idx)})
+		return nil
+	}
+	if uint64(idx) <= 0xffffffff {
+		var hdr [5]byte
+		hdr[0] = opLongBinput
+		binary.LittleEndian.PutUint32(hdr[1:], uint32(idx))
+		p.write(hdr[:])
+		return nil
+	}
+	return errors.New("PicklingError: memo id too large for LONG_BINPUT")
+}
+
+// memoGet emits a BINGET / LONG_BINGET for an object the memo has
+// already recorded. Used when save() encounters a non-atom it has
+// already pickled in this stream so it can re-use the prior position
+// instead of re-serializing.
+//
+// CPython: Modules/_pickle.c:1754 memo_get
+func (p *pickler) memoGet(obj objects.Object) error {
+	idx, ok := p.memo[obj]
+	if !ok {
+		return errors.New("PicklingError: object missing from memo")
+	}
+	if !p.bin {
+		p.write([]byte(fmt.Sprintf("%c%d\n", opGet, idx)))
+		return nil
+	}
+	if idx < 256 {
+		p.write([]byte{opBinget, byte(idx)})
+		return nil
+	}
+	if uint64(idx) <= 0xffffffff {
+		var hdr [5]byte
+		hdr[0] = opLongBinget
+		binary.LittleEndian.PutUint32(hdr[1:], uint32(idx))
+		p.write(hdr[:])
+		return nil
+	}
+	return errors.New("PicklingError: memo id too large for LONG_BINGET")
 }
 
 // ---------------------------------------------------------------------------
-// Atom dispatch.
+// Dispatch.
 // ---------------------------------------------------------------------------
 
-// saveAtom routes obj to the matching save_* writer for the atomic
-// types Phase 2 handles. Returns errUnsupportedType for any type that
-// has not yet been ported, so callers can decide whether to fall
-// through to the pure-Python pickler (the wiring in module.go does
-// not expose this yet).
+// save is the central dispatch. Atoms (None / bool / int / float)
+// are never memoized; CPython skips the memo lookup for them entirely
+// because they're cheap to re-encode and BINGET would be at best
+// break-even. Everything else goes through the memo: a hit emits
+// BINGET, a miss runs the per-type save_* and then memo_put.
 //
 // Bool subclasses Int in gopy (matching CPython), so the *Bool branch
 // must come before the *Int branch in the type switch.
 //
-// CPython: Modules/_pickle.c:4401 save (atom-dispatch subset)
-func (p *pickler) saveAtom(obj objects.Object) error {
+// CPython: Modules/_pickle.c:4401 save
+func (p *pickler) save(obj objects.Object) error {
 	if obj == nil {
 		return errors.New("PicklingError: nil object")
 	}
+	// Atoms first, never memoized.
 	if objects.IsNone(obj) {
 		p.saveNone()
 		return nil
 	}
+	if obj == objects.True() {
+		p.saveBool(true)
+		return nil
+	}
+	if obj == objects.False() {
+		p.saveBool(false)
+		return nil
+	}
+	if _, isBool := obj.(*objects.Bool); !isBool {
+		if i, ok := obj.(*objects.Int); ok {
+			return p.saveLong(i)
+		}
+	}
+	if f, ok := obj.(*objects.Float); ok {
+		p.saveFloat(f.Float64())
+		return nil
+	}
+
+	// Memoized types: BINGET on hit.
+	if _, hit := p.memo[obj]; hit {
+		return p.memoGet(obj)
+	}
+
 	switch v := obj.(type) {
-	case *objects.Bool:
-		p.saveBool(obj == objects.True())
-		_ = v
-		return nil
-	case *objects.Int:
-		return p.saveLong(v)
-	case *objects.Float:
-		p.saveFloat(v.Float64())
-		return nil
 	case *objects.Bytes:
 		if err := p.saveBytes(v.Bytes()); err != nil {
 			return err
 		}
-		p.writeMemoize()
-		return nil
+		return p.memoPut(obj)
 	case *objects.Unicode:
 		if err := p.saveUnicode(v.Value()); err != nil {
 			return err
 		}
-		p.writeMemoize()
-		return nil
+		return p.memoPut(obj)
+	case *objects.List:
+		return p.saveList(v)
+	case *objects.Tuple:
+		return p.saveTuple(v)
+	case *objects.Dict:
+		return p.saveDict(v)
+	case *objects.Set:
+		if v.Type() == objects.FrozensetType {
+			return p.saveFrozenset(v)
+		}
+		return p.saveSet(v)
 	}
 	return errUnsupportedType
 }
 
-var errUnsupportedType = errors.New("PicklingError: unsupported type in Phase 2 encoder")
+var errUnsupportedType = errors.New("PicklingError: unsupported type in encoder")
 
-// dumpsAtom is the Phase 2 driver: PROTO header, save the atom,
+// dumpsAtom is the Phase 2/3 driver: PROTO header, save the object,
 // STOP, commit the frame. The result is a fresh []byte holding the
-// pickle stream. Callers that need to share the buffer across
-// multiple objects should drive the writers directly.
+// pickle stream.
 //
 // CPython: Modules/_pickle.c:7865 _pickle_dumps_impl (single-object path)
 func dumpsAtom(obj objects.Object, proto int) ([]byte, error) {
@@ -433,7 +515,7 @@ func dumpsAtom(obj objects.Object, proto int) ([]byte, error) {
 	}
 	p := newPickler(proto)
 	p.writeProtoHeader()
-	if err := p.saveAtom(obj); err != nil {
+	if err := p.save(obj); err != nil {
 		return nil, err
 	}
 	p.writeStop()
