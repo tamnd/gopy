@@ -166,6 +166,17 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 		t.RichCmp = nil
 	}
 	fixupSlotDispatchers(t)
+	// User-class instances are *Instance carrying a per-instance dict
+	// and/or slots, so the cycle collector needs a tp_traverse that
+	// walks both. If no base contributed one (the common object-only
+	// case), install instanceTraverse. Subclasses of built-ins
+	// (list/dict/str/int) inherit their base's traverse via
+	// inheritSlotsAllMRO and keep that wiring.
+	//
+	// CPython: Objects/typeobject.c:1356 subtype_traverse
+	if t.TpTraverse == nil {
+		t.TpTraverse = instanceTraverse
+	}
 	// PEP 487: after the class is built, walk the namespace and call
 	// __set_name__ on every value that defines it. enum._proto_member
 	// uses this hook to turn each placeholder into a real enum member
@@ -611,6 +622,45 @@ func lookupMethodOnSelf(o Object, name string) (Object, error) {
 	return descr, nil
 }
 
+// lookupMaybeMethod is the CPython-faithful port of lookup_maybe_method.
+// It returns the descriptor plus an unbound flag matching CPython's
+// out-parameter contract: when the descriptor's type carries
+// METHOD_DESCRIPTOR semantics (gopy's BuiltinFunction / Function pair,
+// covered by isMethodLike), the returned object is the raw descriptor
+// and unbound=true so the slot dispatcher prepends self before
+// invoking it. Otherwise the descriptor is bound through descr_get and
+// unbound=false. This preserves the no-temporary-PyMethodObject
+// optimization the CPython routine was written to enable.
+//
+// CPython: Objects/typeobject.c:2255 lookup_maybe_method
+func lookupMaybeMethod(self Object, name string) (Object, bool, error) {
+	descr, _ := LookupDescriptor(self.Type(), name)
+	if descr == nil {
+		return nil, false, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", self.Type().Name, name)
+	}
+	if isMethodLike(descr) {
+		return descr, true, nil
+	}
+	if dg := descr.Type().DescrGet; dg != nil {
+		bound, err := dg(descr, self, self.Type())
+		return bound, false, err
+	}
+	return descr, false, nil
+}
+
+// callUnboundNoArg invokes fn under the (unbound, self) shape returned
+// by lookupMaybeMethod. When unbound is true, self is passed as the
+// sole positional argument; when false, fn is already bound and the
+// call carries no args.
+//
+// CPython: Objects/typeobject.c:2308 call_unbound_noarg
+func callUnboundNoArg(unbound bool, fn Object, self Object) (Object, error) {
+	if unbound {
+		return Call(fn, NewTuple([]Object{self}), nil)
+	}
+	return Call(fn, NewTuple(nil), nil)
+}
+
 // slotTpCall is the generic tp_call dispatcher: look up __call__ via
 // the descriptor protocol (so the instance is bound) and call it.
 //
@@ -721,11 +771,11 @@ func slotTpIterNext(o Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:10585 slot_tp_finalize
 func slotTpFinalize(o Object) {
-	fn, err := lookupMethodOnSelf(o, "__del__")
+	fn, unbound, err := lookupMaybeMethod(o, "__del__")
 	if err != nil {
 		return
 	}
-	_, _ = Call(fn, NewTuple(nil), nil)
+	_, _ = callUnboundNoArg(unbound, fn, o)
 }
 
 // slotTpRichCompare looks up the dunder that matches op and calls it,

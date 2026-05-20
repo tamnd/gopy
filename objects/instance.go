@@ -81,6 +81,40 @@ func (i *Instance) InvalidateInlineValues() { i.inlineValid = false }
 // __dict__.
 func (i *Instance) Dict() *Dict { return i.dict }
 
+// instanceTraverse visits every Object reachable from a user-class
+// instance: each non-nil slot value plus every key and value stored
+// in the per-instance __dict__. The cycle collector calls this
+// through Type.TpTraverse to detect cycles whose back-edges run
+// through instance attributes.
+//
+// gopy walks the dict's entries inline rather than visiting the dict
+// object itself (CPython's subtype_traverse does Py_VISIT(*dictptr)
+// because the dict has its own gc-tracked head). Inlining avoids the
+// requirement that every per-instance dict be tracked separately,
+// which gopy does not do today, and keeps the traversal complete.
+//
+// CPython: Objects/typeobject.c:1356 subtype_traverse
+func instanceTraverse(o Object, visit Visitor) error {
+	i, ok := o.(*Instance)
+	if !ok {
+		return nil
+	}
+	for _, s := range i.slots {
+		if s == nil {
+			continue
+		}
+		if err := visit(s); err != nil {
+			return err
+		}
+	}
+	if i.dict != nil {
+		if err := dictTraverse(i.dict, visit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SlotAt returns the value stored in slot idx, or nil when the slot
 // is out of range or unset. Used by the LOAD_ATTR_SLOT fast-path arm
 // to skip the descriptor protocol.
