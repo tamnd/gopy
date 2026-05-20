@@ -75,6 +75,48 @@ func NewSharedKeys(names []string) (*SharedKeys, error) {
 // growthRateShared mirrors growthRate but reads off SharedKeys.used.
 func growthRateShared(sk *SharedKeys) int { return sk.used * 3 }
 
+// NewEmptySharedKeys returns a SharedKeys pre-sized to hold up to
+// dictMinSize attribute names without ever needing to reallocate the
+// entries slice. The fixed allocation matters: NewSplitDict copies
+// sk.entries's slice header into d.entries, so a later resize would
+// leave attached dicts pointing at the stale backing array. Callers
+// that need a larger table must seed via NewSharedKeys before any
+// dict attaches.
+func NewEmptySharedKeys() *SharedKeys {
+	return &SharedKeys{entries: make([]dictEntry, dictMinSize)}
+}
+
+// AddKey inserts name into the shared table without ever resizing.
+// Returns true when the name landed (either already present or
+// inserted into an empty slot), false when the table is full and the
+// caller must fall back to materialize-on-new-key. The no-resize
+// invariant keeps sk.entries's backing array stable for any
+// NewSplitDict that has already shared the slice header.
+//
+// CPython: Objects/dictobject.c:1832 insert_split_key (the in-place
+// insertion path when dk_usable > 0; gopy adds the explicit cap
+// instead of CPython's dk_usable countdown).
+func (sk *SharedKeys) AddKey(name string) bool {
+	key := NewStr(name).(*Unicode)
+	h, err := Hash(key)
+	if err != nil {
+		return false
+	}
+	idx, found := sharedProbe(sk, key, h)
+	if found {
+		return true
+	}
+	if loadAtCapacity(sk.fill, len(sk.entries)) {
+		return false
+	}
+	sk.entries[idx] = dictEntry{hash: h, key: key, used: true}
+	sk.order = append(sk.order, idx)
+	sk.used++
+	sk.fill++
+	sk.version = allocDictKeysVersion()
+	return true
+}
+
 // sharedProbe is the SharedKeys-flavored dictProbe. It can't call the
 // regular probe because that one reads d.entries; here entries live on
 // the SharedKeys directly and the equality check is unicode-only since

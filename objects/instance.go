@@ -54,7 +54,19 @@ type Instance struct {
 func NewInstance(t *Type) *Instance {
 	inst := &Instance{}
 	if t.HasDict && t.HasInlineValues() {
-		inst.dict = NewDict()
+		// Split-keys shape: when the type has already cached at least
+		// one attribute name, allocate a split __dict__ that shares the
+		// type's keys table and only carries this instance's value
+		// array. The shared table is fixed-size (NewEmptySharedKeys
+		// returns dictMinSize slots) so its entries slice header stays
+		// valid for the lifetime of every attached split dict.
+		//
+		// CPython: Objects/dictobject.c:897 new_dict_with_shared_keys
+		if sk := t.SharedKeys(); sk != nil && sk.Len() > 0 {
+			inst.dict = NewSplitDict(sk)
+		} else {
+			inst.dict = NewDict()
+		}
 	}
 	if n := len(t.Slots); n > 0 {
 		inst.slots = make([]Object, n)

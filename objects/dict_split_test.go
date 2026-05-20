@@ -180,3 +180,115 @@ func TestConvertToCombinedIdempotent(t *testing.T) {
 		t.Errorf("refs = %d after double-convert, want 0", sk.refs)
 	}
 }
+
+func TestSharedKeysAddKeyInPlace(t *testing.T) {
+	sk := NewEmptySharedKeys()
+	if !sk.AddKey("first") {
+		t.Fatal("AddKey(first) should land")
+	}
+	if !sk.AddKey("second") {
+		t.Fatal("AddKey(second) should land")
+	}
+	// Re-adding an existing name is a hit, not an error.
+	if !sk.AddKey("first") {
+		t.Error("AddKey of an existing name should report true")
+	}
+	if sk.Len() != 2 {
+		t.Errorf("len after dedup = %d, want 2", sk.Len())
+	}
+	// Probing should round-trip both names.
+	for _, name := range []string{"first", "second"} {
+		if !sk.HasKey(name) {
+			t.Errorf("HasKey(%q) = false", name)
+		}
+	}
+}
+
+func TestSharedKeysAddKeyStopsAtCapacity(t *testing.T) {
+	sk := NewEmptySharedKeys()
+	// dictMinSize = 8, usableFraction(8) = 5. Beyond that AddKey must
+	// refuse rather than resize (resize would reallocate sk.entries
+	// and orphan any attached split dicts).
+	added := 0
+	for i := range 32 {
+		if sk.AddKey(string(rune('a' + i))) {
+			added++
+		}
+	}
+	if added > usableFraction(dictMinSize) {
+		t.Errorf("AddKey added %d names, expected <= %d", added, usableFraction(dictMinSize))
+	}
+	if len(sk.entries) != dictMinSize {
+		t.Errorf("sk.entries grew to len %d after AddKey loop, expected %d", len(sk.entries), dictMinSize)
+	}
+}
+
+func TestTypeAddCachedKeyExtendsSharedKeys(t *testing.T) {
+	tp := NewType("UserCls", []*Type{objectType})
+	tp.HasDict = true
+	tp.TpFlags |= TpFlagInlineValues | TpFlagManagedDict
+
+	tp.AddCachedKey("alpha")
+	tp.AddCachedKey("beta")
+
+	if tp.SharedKeys() == nil {
+		t.Fatal("AddCachedKey should have allocated SharedKeys")
+	}
+	if !tp.SharedKeys().HasKey("alpha") || !tp.SharedKeys().HasKey("beta") {
+		t.Error("SharedKeys missing names AddCachedKey recorded")
+	}
+}
+
+func TestNewInstanceSharesKeysAcrossSiblings(t *testing.T) {
+	tp := NewType("Sibling", []*Type{objectType})
+	tp.HasDict = true
+	tp.TpFlags |= TpFlagInlineValues | TpFlagManagedDict
+	tp.AddCachedKey("x")
+	tp.AddCachedKey("y")
+
+	a := NewInstance(tp)
+	b := NewInstance(tp)
+
+	if !a.Dict().IsSplit() || !b.Dict().IsSplit() {
+		t.Fatalf("both instance dicts should be split: a=%v b=%v",
+			a.Dict().IsSplit(), b.Dict().IsSplit())
+	}
+	if a.Dict().sharedKeys != b.Dict().sharedKeys {
+		t.Error("sibling instances should point at the same SharedKeys")
+	}
+	if a.Dict().sharedKeys.refs != 2 {
+		t.Errorf("after two instances refs = %d, want 2", a.Dict().sharedKeys.refs)
+	}
+	// Writes through GenericSetAttr must stay isolated even though
+	// the keys table is shared.
+	if err := a.Dict().SetItem(NewStr("x"), NewInt(11)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Dict().SetItem(NewStr("x"), NewInt(22)); err != nil {
+		t.Fatal(err)
+	}
+	av, _ := a.Dict().GetItem(NewStr("x"))
+	bv, _ := b.Dict().GetItem(NewStr("x"))
+	avi, _ := av.(*Int).Int64()
+	bvi, _ := bv.(*Int).Int64()
+	if avi != 11 || bvi != 22 {
+		t.Errorf("expected a.x=11 b.x=22, got a.x=%d b.x=%d", avi, bvi)
+	}
+}
+
+func TestNewInstanceFirstInstanceStillCombined(t *testing.T) {
+	// Before any AddCachedKey has run, NewInstance has nothing to seed
+	// the SharedKeys with, so the dict has to start combined. The first
+	// SetAttr will later populate cachedKeys, and the *next* instance of
+	// the same type picks up the split shape. This matches CPython's
+	// observation that the very first object materializes the
+	// SharedKeys for subsequent siblings.
+	tp := NewType("FreshCls", []*Type{objectType})
+	tp.HasDict = true
+	tp.TpFlags |= TpFlagInlineValues | TpFlagManagedDict
+
+	a := NewInstance(tp)
+	if a.Dict().IsSplit() {
+		t.Error("first instance with no cached keys should not be split")
+	}
+}

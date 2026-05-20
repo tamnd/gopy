@@ -205,6 +205,17 @@ type Type struct {
 	// CPython: Include/cpython/typeobject.h ht_cached_keys
 	cachedKeys map[string]bool
 
+	// sharedKeys is the real PyDictKeysObject shared by every split
+	// __dict__ allocated for an instance of this type. AddCachedKey
+	// lazily allocates it and extends it in place via AddKey; the
+	// table never resizes (NewSplitDict copies sk.entries's slice
+	// header into d.entries, so a reallocation would orphan attached
+	// dicts). When the table fills, AddCachedKey stops extending and
+	// new keys fall through the dictInsertSplit materialize path.
+	//
+	// CPython: Include/cpython/typeobject.h ht_cached_keys
+	sharedKeys *SharedKeys
+
 	// cachedKeysVersion is the dk_version of cachedKeys. Bumps on
 	// every additive change so caches stamped before the change
 	// invalidate. 0 means "not yet allocated or invalidated".
@@ -333,7 +344,13 @@ func (t *Type) HasCachedKey(name string) bool {
 // instanceSetAttr the first time a given attribute name is stored on
 // any instance.
 //
-// CPython: Objects/dictobject.c:5132 insert_split_key
+// Also extends t.sharedKeys in place via AddKey so future instances
+// of t can allocate a split __dict__ whose splitValues array already
+// includes this slot. When the shared table is full (or hashing the
+// name fails) the extension silently fails and instances that need
+// the new key will materialize through dictInsertSplit instead.
+//
+// CPython: Objects/dictobject.c:1832 insert_split_key
 func (t *Type) AddCachedKey(name string) {
 	if t.cachedKeys == nil {
 		t.cachedKeys = map[string]bool{}
@@ -342,8 +359,20 @@ func (t *Type) AddCachedKey(name string) {
 		return
 	}
 	t.cachedKeys[name] = true
+	if t.sharedKeys == nil {
+		t.sharedKeys = NewEmptySharedKeys()
+	}
+	t.sharedKeys.AddKey(name)
 	t.InvalidateCachedKeysVersion()
 }
+
+// SharedKeys returns the per-type shared keys table, or nil when no
+// instance attribute has been observed yet. Used by NewInstance to
+// decide whether a freshly built __dict__ can attach as a split dict
+// or has to fall back to combined.
+//
+// CPython: Include/cpython/typeobject.h ht_cached_keys
+func (t *Type) SharedKeys() *SharedKeys { return t.sharedKeys }
 
 // typeType is the type of Type itself. Lazily initialized on first
 // use to break the bootstrap cycle (Type.Header.typ == typeType).
