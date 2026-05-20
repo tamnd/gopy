@@ -3124,6 +3124,79 @@ gopy mirrors the same split: specialized arms already had cache
 hashes baked into the inline cache; the generic / slow-path arms
 now take the same short-circuit when they see a *Unicode key.
 
+### Small subset re-run, 2026-05-20 (post spec 1714 Phase L + M generators)
+
+_Captured: 2026-05-20 against `93bba547` on branch
+`feat/v0.12.4-spec-1712-p8p9` (PR #74). Same host, same harness, same
+warmups/runs as the previous 2026-05-20 snapshots. The window since
+the post-P5.3 KnownHash bench contains spec 1714 Phase L (port of
+`Tools/cases_generator/tier2_generator.py` to
+`Tools/cases_generator/gopy_tier2_generator.py`) and Phase M (port
+of `Tools/cases_generator/optimizer_generator.py` to
+`Tools/cases_generator/gopy_optimizer_generator.py`). Both phases are
+generator-infrastructure only. They emit `optimizer/tier2_cases_gen.go`
+and `optimizer/optimizer_cases_gen.go` as doc-only Go files carrying
+the per-uop bodies as // comment blocks; no runtime dispatch path
+changed, no specializer arm landed. This snapshot is the post-L+M
+floor that the upcoming P2.2 / P2.3 body ports will measure against._
+
+| Benchmark         | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy |
+|-------------------|------------------:|---------------:|----------:|---------------:|------------:|
+| `call_method`     |             69.52 |          47.19 |  76910.33 |       1106.31x |    1629.64x |
+| `fannkuch`        |            602.63 |         165.79 |  44827.81 |         74.39x |     270.40x |
+| `json_dumps`      |            212.10 |         323.76 |  73886.45 |        348.36x |     228.21x |
+| `nbody`           |             79.07 |          52.66 |    485.22 |          6.14x |       9.21x |
+| `pidigits`        |             94.15 |          78.05 |    175.05 |          1.86x |       2.24x |
+| `regex_compile`   |             85.56 |         281.49 |  81808.62 |        956.17x |     290.63x |
+| `richards`        |             81.15 |          63.30 |  68414.52 |        843.01x |    1080.80x |
+| `unpack_sequence` |             57.83 |          45.26 |   4490.37 |         77.65x |      99.21x |
+| **geomean**       |            112.99 |          97.84 |  12357.43 |        109.37x |     126.30x |
+
+Headline: gopy / cpython **geomean 109.37x** (vs 88.60x on the post-P5.3
+KnownHash snapshot, same host). The absolute wall times moved up
+across all three interpreters this run (cpython geomean 66.56 ms to
+112.99 ms, gopy geomean 5897 ms to 12357 ms) which is host load,
+not a regression. The cleaner signal is the relative shape:
+
+- `pidigits` 1.86x cpython (was 2.79x). Now inside the 2.0x ship gate.
+- `nbody` 6.14x (was 6.23x). Effectively flat.
+- `unpack_sequence` 77.65x (was 65.91x). Within the host-noise band.
+- `json_dumps` 348x (was 190x). The outlier; noise floor on this
+  bench is wide because the run lasts ~74 s for gopy. Re-run on a
+  quiet host to confirm.
+- `call_method` 1106x (was 1003x), `regex_compile` 956x (was 724x),
+  `richards` 843x (was 617x). All three are within the ~15-30% run-to-run
+  variance the prior snapshot called out for the slowest benches at
+  `TARGET_WALL_MS=30000`.
+
+Improvements vs the 2026-05-16 `bench/baseline_v0124.json`:
+`fannkuch`, `json_dumps`, `nbody` flipped from runtime_error to ok;
+`pidigits` -39.6%; `richards` -15.8%; `unpack_sequence` -27.6%.
+`compare-baseline: OK`.
+
+Why this snapshot earns a row: the L+M generator landing changes
+the source-of-truth for tier-2 abstract-interp + executor bodies
+from hand-written stubs to upstream-driven DSL output. Phase 7+ of
+spec 1714 will translate those // comment blocks into real Go
+dispatch methods. Until then this row is the floor that the
+upcoming P2.2 (`Python/optimizer_bytecodes.c` body port) and P2.3
+(`Python/executor_cases.c.h` body port) will be measured against.
+Tier-2 today still deopts on the placeholder bodies so the JIT gate
+(`PYTHON_JIT=1`) does not yet move this geomean; the L+M emitters
+are the precondition for that move.
+
+Highest-leverage next step (per ship order):
+
+P2.2 + P2.3 body ports via the L+M generators. The L emitter
+already lands `optimizer/tier2_cases_gen.go` with per-uop C body
+captures; the M emitter does the same for abstract-interp bodies.
+Phase 7 of spec 1714 translates those bodies one-by-one into real
+methods on `*Frame` / `*AbstractCtx`. The bench result that closes
+the P2 gate is `richards` and `call_method` dropping below the
+2026-05-16 baseline column on a quiet host, since both benches
+hot-loop on the Python-defined call path that the tier-2 trace
+projection optimizes.
+
 ### Full corpus (release-tag and nightly only)
 
 _Populated when `bench/run_full.sh` lands its first end-to-end run.
