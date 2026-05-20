@@ -13,7 +13,6 @@ package vm
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
-	"github.com/tamnd/gopy/stackref"
 )
 
 // dispatch executes one instruction and returns the next-pc, a
@@ -33,53 +32,6 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 	// arm runs, matching the CPython placement (DISPATCH expands to
 	// INSTRUCTION_STATS(op) just before the TARGET label).
 	e.recordOpcode(op)
-	// Hot-opcode fast switch. The bench's tight LOAD_CONST / POP_TOP
-	// pair, along with LOAD_FAST and STORE_FAST, drive the geomean.
-	// None of these four opcodes have an INSTRUMENTED_ variant or an
-	// adaptive specialization, so they can short-circuit ahead of the
-	// instrumentation + Quickened gates and run their full body with
-	// direct field access. Skips one method-call layer (dispatchGen /
-	// dispatchHandwritten) per dispatch.
-	//
-	// CPython: Python/ceval.c TARGET(LOAD_FAST) / TARGET(LOAD_CONST) /
-	// TARGET(STORE_FAST) / TARGET(POP_TOP) bodies, reached directly via
-	// the computed-goto table.
-	switch op {
-	case compile.LOAD_CONST:
-		f := e.f
-		co := f.Code
-		if uint(oparg) < uint(len(co.ConstObjs)) {
-			if obj := co.ConstObjs[oparg]; obj != nil {
-				f.LocalsPlus[f.StackBase+f.StackTop] = stackref.FromObject(obj)
-				f.StackTop++
-				return f.InstrPtr + 2, nil, nil, false, nil
-			}
-		}
-	case compile.LOAD_FAST:
-		f := e.f
-		r := f.LocalsPlus[oparg].Dup()
-		f.LocalsPlus[f.StackBase+f.StackTop] = r
-		f.StackTop++
-		return f.InstrPtr + 2, nil, nil, false, nil
-	case compile.STORE_FAST:
-		f := e.f
-		f.StackTop--
-		i := f.StackBase + f.StackTop
-		value := f.LocalsPlus[i]
-		f.LocalsPlus[i] = stackref.Null
-		old := f.LocalsPlus[oparg]
-		f.LocalsPlus[oparg] = value
-		old.Close()
-		return f.InstrPtr + 2, nil, nil, false, nil
-	case compile.POP_TOP:
-		f := e.f
-		f.StackTop--
-		i := f.StackBase + f.StackTop
-		r := f.LocalsPlus[i]
-		f.LocalsPlus[i] = stackref.Null
-		r.Close()
-		return f.InstrPtr + 2, nil, nil, false, nil
-	}
 	// Instrumentation routing: the common case (op is not an
 	// INSTRUMENTED_ variant) bails on a single [256]bool load. Only
 	// when op is one of the 21 INSTRUMENTED_ opcodes do we route

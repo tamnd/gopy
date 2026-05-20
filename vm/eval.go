@@ -157,6 +157,68 @@ func (e *evalState) run() (objects.Object, error) {
 			}
 			return nil, fmt.Errorf("vm: instruction pointer past end of code in %q (ip=%d, len=%d)", name, e.f.InstrPtr, len(e.f.Code.Code))
 		}
+		// Hot-opcode fast switch inlined into the loop body to skip
+		// the dispatch() method-call frame. recordOpcode runs from
+		// dispatch() on the slow path; the fast arms record inline so
+		// the stats counter stays in sync. The four arms here are the
+		// same ones that ship in vm/dispatch.go (see D5); duplicating
+		// them at the loop level lets Go's compiler inline the body
+		// straight into the loop and skip the dispatch() call entirely
+		// on every LOAD_CONST / LOAD_FAST / STORE_FAST / POP_TOP.
+		//
+		// CPython: Python/ceval.c TARGET labels reached directly from
+		// the computed-goto table, no function-call layer.
+		switch op {
+		case compile.LOAD_CONST:
+			e.recordOpcode(op)
+			f := e.f
+			co := f.Code
+			var obj objects.Object
+			if uint(oparg) < uint(len(co.ConstObjs)) {
+				obj = co.ConstObjs[oparg]
+			}
+			if obj == nil {
+				obj = e.constAtSlow(co, int(oparg))
+			}
+			f.LocalsPlus[f.StackBase+f.StackTop] = stackref.FromObject(obj)
+			f.StackTop++
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr = f.InstrPtr + 2
+			continue
+		case compile.LOAD_FAST:
+			e.recordOpcode(op)
+			f := e.f
+			r := f.LocalsPlus[oparg].Dup()
+			f.LocalsPlus[f.StackBase+f.StackTop] = r
+			f.StackTop++
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr = f.InstrPtr + 2
+			continue
+		case compile.STORE_FAST:
+			e.recordOpcode(op)
+			f := e.f
+			f.StackTop--
+			i := f.StackBase + f.StackTop
+			value := f.LocalsPlus[i]
+			f.LocalsPlus[i] = stackref.Null
+			old := f.LocalsPlus[oparg]
+			f.LocalsPlus[oparg] = value
+			old.Close()
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr = f.InstrPtr + 2
+			continue
+		case compile.POP_TOP:
+			e.recordOpcode(op)
+			f := e.f
+			f.StackTop--
+			i := f.StackBase + f.StackTop
+			r := f.LocalsPlus[i]
+			f.LocalsPlus[i] = stackref.Null
+			r.Close()
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr = f.InstrPtr + 2
+			continue
+		}
 		next, retVal, retErr, retDone, err := e.dispatch(op, oparg)
 		if retDone {
 			return retVal, retErr
