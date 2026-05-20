@@ -755,6 +755,7 @@ panel.
 | `BUILD_TEMPLATE` | generated | `60c7912` | `_PyTemplate_Build(strings, interpolations)` → `e.templateBuild` | t-string runtime; helper is a thin `objects.NewTemplateStr` wrapper |
 | `GET_AWAITABLE` | generated | `419072c` | `_PyEval_GetAwaitable(iter, opcode)` → `e.getAwaitable` | helper already wired; flipped after auditing handwritten arm against generated body |
 | `GET_ANEXT` | generated | `419072c` | `_PyEval_GetANext(aiter)` → `e.getANext` | async-gen `__anext__` wrapper; flipped after audit |
+| `MAKE_CELL` | generated | `a8d7afd` | `PyCell_New(PyStackRef_AsPyObjectBorrow(GETLOCAL(oparg)))` → `e.cellNew(e.localAt(int(oparg)).AsObject())` + `setLocal` + `tmp.Close()` | Bucket B `PyCell_New → objects.NewCell` helper flip. `AsObject()` returns nil for a null stackref, which matches the borrow-of-NULL semantics CPython documents for unset cell slots. `Close()` is a no-op under Go GC, matching `PyStackRef_XCLOSE` for the discarded prior ref. Handwritten arm in `vm/eval_simple.go` deleted in the same commit. |
 
 #### Porting backlog (organized by blocker)
 
@@ -816,7 +817,7 @@ above.
 | `PyObject_Format` → `objects.Format` | FORMAT_WITH_SPEC | DONE | `67735f0` |
 | `PyObject_GetIter` → `objects.GetIter` (already exists; just wire the `_Py_GatherStats_GetIter` instrumentation stub) | GET_ITER | DONE | `02e72c3` |
 | `PySet_New` → `objects.NewSet([]Object)` | BUILD_SET | TODO | - |
-| `PyCell_New` → `objects.NewCell` | MAKE_CELL | TODO | - |
+| `PyCell_New` → `objects.NewCell` | MAKE_CELL | DONE | `a8d7afd` |
 | `_PyList_FromStackRefStealOnSuccess` → wrapper over `objects.NewList` | BUILD_LIST | DONE | `b0819a5` |
 | `_PyTuple_FromStackRefStealOnSuccess` → wrapper over `objects.NewTuple` | BUILD_TUPLE | DONE | `b0819a5` |
 | `_PyTemplate_Build` → `objects.BuildTemplate` (t-string runtime) | BUILD_TEMPLATE | DONE | `60c7912` |
@@ -1155,7 +1156,7 @@ helper).
 - [ ] Phase 4.2 — `specialize/quicken.go` + `specialize/deopt.go` consume the generated tables
 - [ ] Phase 4.3 — parity test green; literal tables deleted
 - [x] Phase 5.1 — tier-1 emitter (Go-side `Tools/bytecodes_gen` in lieu of `gopy_tier1_generator.py`) emits `vm/eval_dispatch_gen.go` for unspecialized opcodes (107 arms, bodies stubbed pending Phase 8 action translator)
-- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (43 / ~118 opcodes routed through `dispatchGen` via the `dispatchGenSupported` whitelist; see the Phase 5.2 audit table for the per-opcode commit stamp)
+- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (44 / ~118 opcodes routed through `dispatchGen` via the `dispatchGenSupported` whitelist; see the Phase 5.2 audit table for the per-opcode commit stamp)
 - [x] Phase 5 Bucket A6.1 — `_Py_ID(NAME)` translates to `objects.NewStr("NAME")`
 - [x] Phase 5 Bucket A6.2 — out-param `int err = HELPER(args..., &out)` translates to Go multi-return
 - [x] Phase 5 Bucket A6.3 — `_PyErr_SetString` carries the literal message through `setPendingErr`
