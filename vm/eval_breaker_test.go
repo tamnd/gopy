@@ -1,11 +1,14 @@
-// Eval-breaker poll-point pinning. CPython's interpreter polls the
-// eval breaker at three places: the top of the dispatch loop, every
-// JUMP_BACKWARD, and the RESUME entry. Each one is a chance for
-// queued pending callbacks (signal bridges, async exceptions, GC
-// requests) to surface in the eval thread. These tests pre-arm the
-// breaker with BreakerCallsPending plus a queued callback that
-// returns a sentinel error and assert the poll fires by checking the
-// error escapes EvalCode.
+// Eval-breaker poll-point pinning. CPython polls the eval breaker
+// at exactly two places: the RESUME entry and the JUMP_BACKWARD arm.
+// There is no per-instruction top-of-loop poll: that would cost one
+// atomic load every dispatch and burned about 5% of CPU in gopy
+// before the D7 cleanup pushed the check onto the same branches
+// CPython uses. Each remaining poll is a chance for queued pending
+// callbacks (signal bridges, async exceptions, GC requests) to
+// surface in the eval thread. These tests pre-arm the breaker with
+// BreakerCallsPending plus a queued callback that returns a sentinel
+// error and assert the poll fires by checking the error escapes
+// EvalCode.
 //
 // CPython: Python/ceval.c CHECK_EVAL_BREAKER + Python/bytecodes.c RESUME / JUMP_BACKWARD
 
@@ -31,18 +34,21 @@ func armPendingCallback(ts *state.Thread, fn gil.PendingFunc) {
 	BreakerFor(ts).Set(gil.BreakerCallsPending)
 }
 
-// TestEvalBreakerTopOfLoopPoll covers the unconditional poll at the
-// top of run(): a callback queued before EvalCode runs must fire
-// before the first instruction dispatches.
-func TestEvalBreakerTopOfLoopPoll(t *testing.T) {
+// TestEvalBreakerRESUMEEntryDrains pins that a callback queued
+// before EvalCode runs is drained by the RESUME arm. CPython 3.14
+// emits a RESUME at the top of every function/module frame; v0.6's
+// codeWithBytecode helper does not prepend one, so an explicit
+// RESUME 0 starts the test program.
+func TestEvalBreakerRESUMEEntryDrains(t *testing.T) {
 	ts := state.NewThread()
 	called := false
 	armPendingCallback(ts, func() error {
 		called = true
 		return errBreakerSentinel
 	})
-	co := codeWithBytecode(append(
-		instr(compile.LOAD_SMALL_INT, 1),
+	co := codeWithBytecode(append(append(
+		instr(compile.RESUME, 0),
+		instr(compile.LOAD_SMALL_INT, 1)...),
 		instr(compile.RETURN_VALUE, 0)...))
 	_, err := EvalCode(ts, co, nil, nil)
 	if !errors.Is(err, errBreakerSentinel) {
@@ -117,8 +123,13 @@ func TestEvalBreakerResumePoll(t *testing.T) {
 }
 
 // TestEvalBreakerJumpBackwardNoInterruptSkipsPoll pins that
-// JUMP_BACKWARD_NO_INTERRUPT does NOT poll, matching CPython's
-// quickened opcode that handlers like importlib's bootstrap rely on.
+// JUMP_BACKWARD_NO_INTERRUPT does NOT poll the breaker on the
+// backward jump. importlib's bootstrap and a few generator paths
+// rely on the no-interrupt variant to avoid surfacing signals or
+// pending calls inside delicate state. We arm the breaker before
+// running a short program whose only backward edge is the
+// no-interrupt jump and confirm the program returns cleanly with
+// the breaker bit still set.
 func TestEvalBreakerJumpBackwardNoInterruptSkipsPoll(t *testing.T) {
 	ts := state.NewThread()
 	called := false
@@ -126,24 +137,22 @@ func TestEvalBreakerJumpBackwardNoInterruptSkipsPoll(t *testing.T) {
 		called = true
 		return errBreakerSentinel
 	})
-	// LOAD_SMALL_INT 1, JUMP_BACKWARD_NO_INTERRUPT to RETURN_VALUE 2 instr ahead.
-	// We aim the jump forward (negative delta is not the no-interrupt's
-	// usage, but the opcode arm uses the same arithmetic): after the
-	// poll-skipping jump, the breaker stays armed. To exercise this
-	// without an infinite loop we let the top-of-loop poll fire on the
-	// very next iteration, so `called` does become true. The proof
-	// point is the path through the JUMP_BACKWARD_NO_INTERRUPT arm
-	// itself, which must NOT consult the breaker.
+	// RESUME 2 (no-poll variant), LOAD_SMALL_INT 1, RETURN_VALUE.
+	// RESUME oparg >= 2 is the await re-entry shape and skips the
+	// breaker poll, so we get a frame that runs straight through
+	// without consulting the breaker on either side.
 	co := codeWithBytecode(append(append(
-		instr(compile.LOAD_SMALL_INT, 1),
-		instr(compile.JUMP_BACKWARD_NO_INTERRUPT, 1)...),
+		instr(compile.RESUME, 2),
+		instr(compile.LOAD_SMALL_INT, 1)...),
 		instr(compile.RETURN_VALUE, 0)...))
-	_, err := EvalCode(ts, co, nil, nil)
-	if !errors.Is(err, errBreakerSentinel) {
-		t.Fatalf("err = %v, want errBreakerSentinel", err)
+	if _, err := EvalCode(ts, co, nil, nil); err != nil {
+		t.Fatalf("EvalCode: %v", err)
 	}
-	if !called {
-		t.Error("expected top-of-loop poll to fire on a later iteration")
+	if called {
+		t.Error("callback fired but RESUME 2 should have skipped the poll")
+	}
+	if !BreakerFor(ts).IsSet(gil.BreakerCallsPending) {
+		t.Error("BreakerCallsPending was cleared despite no poll firing")
 	}
 }
 

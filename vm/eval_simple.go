@@ -206,10 +206,17 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 	case compile.JUMP_BACKWARD, compile.JUMP_BACKWARD_NO_INTERRUPT:
 		// Backward jumps poll the eval breaker (CPython: CHECK_EVAL_BREAKER
 		// fires here so signal handlers and pending calls can run mid-loop).
-		// JUMP_BACKWARD_NO_INTERRUPT skips the poll.
-		if op == compile.JUMP_BACKWARD && e.breaker != nil && e.breaker.Load() != 0 {
-			if berr := e.handleEvalBreaker(); berr != nil {
-				return 0, nil, nil, false, true, berr
+		// JUMP_BACKWARD_NO_INTERRUPT skips the poll. The gilTimer tick
+		// rides along here too because backward branches are the
+		// preemption points CPython arms the GIL drop request at.
+		if op == compile.JUMP_BACKWARD {
+			if e.gilTimer != nil {
+				e.gilTimer.poll(e.gil, e.breaker)
+			}
+			if e.breaker != nil && e.breaker.Load() != 0 {
+				if berr := e.handleEvalBreaker(); berr != nil {
+					return 0, nil, nil, false, true, berr
+				}
 			}
 		}
 		target := e.jumpBy(-int(oparg) + 1)

@@ -21,9 +21,14 @@ import "github.com/tamnd/gopy/compile"
 // CPython: Python/bytecodes.c RESUME
 func (e *evalState) handleResume(op compile.Opcode, oparg uint32) (next int, err error) {
 	_ = op
-	if oparg < 2 && e.breaker != nil && e.breaker.Load() != 0 {
-		if berr := e.handleEvalBreaker(); berr != nil {
-			return 0, berr
+	if oparg < 2 {
+		if e.gilTimer != nil {
+			e.gilTimer.poll(e.gil, e.breaker)
+		}
+		if e.breaker != nil && e.breaker.Load() != 0 {
+			if berr := e.handleEvalBreaker(); berr != nil {
+				return 0, berr
+			}
 		}
 	}
 	return e.advance(), nil
