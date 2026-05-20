@@ -286,11 +286,19 @@ func (e *evalState) popObject() objects.Object {
 // CPython: Python/ceval_macros.h GETITEM
 func (e *evalState) constAt(i int) objects.Object {
 	co := e.f.Code
-	if i < len(co.ConstObjs) {
+	if uint(i) < uint(len(co.ConstObjs)) {
 		if obj := co.ConstObjs[i]; obj != nil {
 			return obj
 		}
 	}
+	return e.constAtSlow(co, i)
+}
+
+// constAtSlow handles the lazy-fill path for test fixtures that build
+// Code by struct literal without calling SyncConstObjs. Wraps the raw
+// const and caches it in ConstObjs so the next dispatch hits the fast
+// path in constAt.
+func (e *evalState) constAtSlow(co *objects.Code, i int) objects.Object {
 	obj, err := wrapConst(co.Consts[i])
 	if err != nil {
 		panic(fmt.Sprintf("vm: bad const at %d: %v", i, err))
