@@ -602,43 +602,68 @@ func strFormatMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	if ferr != nil {
 		return nil, ferr
 	}
-	return NewStr(out), nil
+	return out, nil
 }
 
-func strFormatExpand(s string, args []Object, kwargs map[string]Object) (string, error) {
-	var b strings.Builder
+// strFormatExpand walks the str.format() template and routes every literal
+// chunk and rendered field through UnicodeWriter so Finish() builds the
+// result *Unicode with kind/maxchar pre-populated.
+//
+// CPython: Objects/stringlib/unicode_format.h:1306 do_string_format
+func strFormatExpand(s string, args []Object, kwargs map[string]Object) (*Unicode, error) {
+	var w UnicodeWriter
+	w.Init()
+	w.overallocate = true
 	auto := 0
-	for i := 0; i < len(s); i++ {
+	i := 0
+	for i < len(s) {
+		next := strings.IndexAny(s[i:], "{}")
+		if next < 0 {
+			if err := writeBodyChunk(&w, s[i:]); err != nil {
+				return nil, err
+			}
+			break
+		}
+		if next > 0 {
+			if err := writeBodyChunk(&w, s[i:i+next]); err != nil {
+				return nil, err
+			}
+			i += next
+		}
 		c := s[i]
-		if c == '{' && i+1 < len(s) && s[i+1] == '{' {
-			b.WriteByte('{')
-			i++
+		if c == '{' {
+			if i+1 < len(s) && s[i+1] == '{' {
+				if err := w.WriteChar('{'); err != nil {
+					return nil, err
+				}
+				i += 2
+				continue
+			}
+			field, _, ok := strings.Cut(s[i+1:], "}")
+			if !ok {
+				return nil, fmt.Errorf("ValueError: unmatched '{' in format string")
+			}
+			rendered, ferr := strFormatField(field, args, kwargs, &auto)
+			if ferr != nil {
+				return nil, ferr
+			}
+			if err := writeBodyChunk(&w, rendered); err != nil {
+				return nil, err
+			}
+			i += 1 + len(field) + 1
 			continue
 		}
-		if c == '}' && i+1 < len(s) && s[i+1] == '}' {
-			b.WriteByte('}')
-			i++
+		// c == '}'
+		if i+1 < len(s) && s[i+1] == '}' {
+			if err := w.WriteChar('}'); err != nil {
+				return nil, err
+			}
+			i += 2
 			continue
 		}
-		if c == '}' {
-			return "", fmt.Errorf("ValueError: single '}' in format string")
-		}
-		if c != '{' {
-			b.WriteByte(c)
-			continue
-		}
-		end := strings.IndexByte(s[i:], '}')
-		if end < 0 {
-			return "", fmt.Errorf("ValueError: unmatched '{' in format string")
-		}
-		rendered, ferr := strFormatField(s[i+1:i+end], args, kwargs, &auto)
-		if ferr != nil {
-			return "", ferr
-		}
-		b.WriteString(rendered)
-		i += end
+		return nil, fmt.Errorf("ValueError: single '}' in format string")
 	}
-	return b.String(), nil
+	return w.Finish(), nil
 }
 
 func strFormatField(field string, args []Object, kwargs map[string]Object, auto *int) (string, error) {
@@ -753,7 +778,7 @@ func strFormatMapMethod(args []Object, _ map[string]Object) (Object, error) {
 	if ferr != nil {
 		return nil, ferr
 	}
-	return NewStr(out), nil
+	return out, nil
 }
 
 // strTranslateMethod backs str.translate(table).
