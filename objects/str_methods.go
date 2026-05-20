@@ -908,12 +908,27 @@ func StrIsTitle(s string) bool {
 	return hasCased
 }
 
+// StrIsSpace ports str.isspace. A string is whitespace if it is
+// non-empty and every code point satisfies _PyUnicode_IsWhitespace.
+// ASCII haystacks walk bytes via isPyWhitespaceASCII (covering the
+// 0x09-0x0D, 0x1C-0x1F, 0x20 set Go's unicode.IsSpace drops on the
+// floor for FS/GS/RS/US); non-ASCII falls back to isPyWhitespaceRune.
+//
+// CPython: Objects/unicodeobject.c:12209 unicode_isspace_impl
 func StrIsSpace(s string) bool {
 	if s == "" {
 		return false
 	}
+	if isASCII(s) {
+		for i := 0; i < len(s); i++ {
+			if !isPyWhitespaceASCII(s[i]) {
+				return false
+			}
+		}
+		return true
+	}
 	for _, r := range s {
-		if !unicode.IsSpace(r) {
+		if !isPyWhitespaceRune(r) {
 			return false
 		}
 	}

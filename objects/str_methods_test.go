@@ -405,6 +405,37 @@ func TestStrIsSpace(t *testing.T) {
 	}
 }
 
+// TestStrIsSpaceASCIIControls pins the 0x1C-0x1F semantic fix: CPython
+// _PyUnicode_IsWhitespace returns true for FS/GS/RS/US, so str.isspace
+// on a string of just those four bytes is True. Go's unicode.IsSpace
+// drops them and the pre-port code returned False.
+//
+// CPython: Objects/unicodeobject.c:12209 unicode_isspace_impl
+func TestStrIsSpaceASCIIControls(t *testing.T) {
+	if !StrIsSpace("\x1c\x1d\x1e\x1f") {
+		t.Error("FS/GS/RS/US isspace")
+	}
+	if !StrIsSpace(" \t\n\v\f\r\x1c\x1d\x1e\x1f") {
+		t.Error("mixed ASCII whitespace isspace")
+	}
+	if StrIsSpace("a\x1c") {
+		t.Error("payload + control not isspace")
+	}
+}
+
+// TestStrIsSpaceNonASCII confirms the rune slow path uses the broader
+// Unicode whitespace set: NBSP (U+00A0) is whitespace under
+// _PyUnicode_IsWhitespace and Go's unicode.IsSpace; ogham space mark
+// (U+1680) and line/paragraph separators (U+2028 / U+2029) are too.
+func TestStrIsSpaceNonASCII(t *testing.T) {
+	if !StrIsSpace("   ") {
+		t.Error("nbsp + line/para sep isspace")
+	}
+	if StrIsSpace("a ") {
+		t.Error("payload + nbsp not isspace")
+	}
+}
+
 func TestStrIsAlpha(t *testing.T) {
 	if !StrIsAlpha("abc") {
 		t.Error("abc isalpha")
