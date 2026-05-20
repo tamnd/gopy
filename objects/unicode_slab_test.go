@@ -14,6 +14,7 @@
 package objects
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -26,7 +27,7 @@ func TestStrSlabClassify(t *testing.T) {
 	}{
 		{"hello", StrKind1Byte, true, []rune{'h', 'e', 'l', 'l', 'o'}},
 		{"café", StrKind1Byte, false, []rune{'c', 'a', 'f', 'é'}},
-		{"abc", StrKind1Byte, false, []rune{'a', 'b', 'c', 0x80}},
+		{"abc\u0080", StrKind1Byte, false, []rune{'a', 'b', 'c', 0x80}},
 		{"中文", StrKind2Byte, false, []rune{0x4E2D, 0x6587}},
 		{"a中b", StrKind2Byte, false, []rune{'a', 0x4E2D, 'b'}},
 		{"\U0001F600", StrKind4Byte, false, []rune{0x1F600}},
@@ -159,7 +160,7 @@ func TestStrIteratorSlabs(t *testing.T) {
 		var got []string
 		for {
 			next, err := strIterType.IterNext(it)
-			if err == ErrStopIteration {
+			if errors.Is(err, ErrStopIteration) {
 				break
 			}
 			if err != nil {
@@ -185,7 +186,7 @@ func TestStrIteratorSlabs(t *testing.T) {
 //
 // CPython: Include/cpython/unicodeobject.h:151 PyUnicode_READ (O(1))
 func BenchmarkUnicodeGetItem_UCS2_Last(b *testing.B) {
-	var sb []rune
+	sb := make([]rune, 0, 4096)
 	for range 4096 {
 		sb = append(sb, '中')
 	}
@@ -200,7 +201,7 @@ func BenchmarkUnicodeGetItem_UCS2_Last(b *testing.B) {
 }
 
 func BenchmarkUnicodeGetItem_UCS4_Last(b *testing.B) {
-	var sb []rune
+	sb := make([]rune, 0, 4096)
 	for range 4096 {
 		sb = append(sb, '\U0001F600')
 	}

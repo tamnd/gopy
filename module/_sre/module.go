@@ -202,8 +202,9 @@ func sreTemplate(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 		return nil, fmt.Errorf("TypeError: template() takes 2 arguments")
 	}
 	inst := objects.NewInstance(templateType)
-	_ = inst.Dict().SetItem(objects.NewStr("_pattern"), args[0])
-	_ = inst.Dict().SetItem(objects.NewStr("_template"), args[1])
+	d := inst.EnsureDict()
+	_ = d.SetItem(objects.NewStr("_pattern"), args[0])
+	_ = d.SetItem(objects.NewStr("_template"), args[1])
 	return inst, nil
 }
 

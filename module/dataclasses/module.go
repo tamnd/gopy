@@ -849,10 +849,11 @@ func setField(self objects.Object, name string, value objects.Object, frozen boo
 	if frozen {
 		// Frozen guard hooks Setattro on the type, so we have to write
 		// straight into the instance __dict__. user types created via
-		// NewUserType always carry HasDict, so this is safe.
+		// NewUserType always carry HasDict, so EnsureDict materializes
+		// the LAZY_DICT shape on first store and returns the existing
+		// dict in the INLINE_VALUES shape.
 		if inst, ok := self.(*objects.Instance); ok {
-			d := inst.Dict()
-			if d != nil {
+			if d := inst.EnsureDict(); d != nil {
 				// The LOAD_ATTR specializer's NONDESCRIPTOR_WITH_VALUES
 				// arm gates on tp.HasCachedKey(name): if the name has
 				// never been stored on any instance, it caches the class

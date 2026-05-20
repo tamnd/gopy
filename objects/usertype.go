@@ -85,90 +85,11 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 	}
 	t := NewType(name, bases)
 	t.IsUser = true
-	// Stamp the metaclass first so the upcoming namespace pass and
-	// __set_name__ hooks see Py_TYPE(t) == meta, matching CPython where
-	// type_new sets the metatype as part of allocation. Skip a nil or
-	// typeType meta (NewType already wires the default).
-	//
-	// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
-	if meta != nil && meta != typeType {
-		t.Init(meta)
-	}
+	stampMetaclass(t, meta)
 	installSubclassAttrSlots(t)
-	// Inherit a per-instance __dict__ from any base that has one, then
-	// let __slots__ processing override it (e.g. the base contributes
-	// dict, but the subclass's __slots__ also adds nothing new — still
-	// inherits dict).
-	for _, b := range bases {
-		if b != nil && b.HasDict {
-			t.HasDict = true
-			break
-		}
-	}
-	// object itself does not advertise HasDict, but every gopy user class
-	// without __slots__ has historically carried a dict; preserve that
-	// default so omitting __slots__ keeps the prior behavior.
-	noSlotsDeclared := true
-	if ns != nil {
-		if has, _ := ns.Contains(NewStr("__slots__")); has {
-			noSlotsDeclared = false
-		}
-	}
-	if noSlotsDeclared {
-		t.HasDict = true
-	}
-	// User classes with a per-instance __dict__ ship with MANAGED_DICT
-	// always; INLINE_VALUES rides along only when every base supports
-	// it. CPython's type_new gates INLINE_VALUES on the basicsize fit
-	// (no inline-values slot inside int / list / str / etc.), so a
-	// heap subclass of a built-in falls into the LAZY_DICT shape where
-	// the dict slot is null until first store. Mirror that here: the
-	// flag stays set when bases are object or user types that already
-	// carry INLINE_VALUES, and clears otherwise.
-	//
-	// CPython: Objects/typeobject.c:4153 type_new (sets
-	// Py_TPFLAGS_INLINE_VALUES + Py_TPFLAGS_MANAGED_DICT on heap types
-	// with a managed dict)
-	if t.HasDict {
-		t.TpFlags |= TpFlagManagedDict
-		inlineOK := noSlotsDeclared
-		for _, b := range bases {
-			if b == nil || b == objectType {
-				continue
-			}
-			if !b.HasInlineValues() {
-				inlineOK = false
-				break
-			}
-		}
-		if inlineOK {
-			t.TpFlags |= TpFlagInlineValues
-		}
-	}
-	if ns != nil {
-		// __classcell__ is the cell __build_class__ left in the
-		// namespace so we can patch it with the new class. It is not a
-		// real attribute, so install it before walking the rest of the
-		// namespace and skip it during the descriptor copy.
-		classCellKey := NewStr("__classcell__")
-		if cellObj, err := ns.GetItem(classCellKey); err == nil {
-			if cell, ok := cellObj.(*Cell); ok {
-				cell.Contents = t
-			}
-			_ = ns.DelItem(classCellKey)
-		}
-		// __slots__ processing runs before the descriptor copy so the
-		// MemberDescr entries land in typeDescrTable before any class
-		// body assignments could overwrite them.
-		if err := installSlots(t, ns); err != nil {
-			// Errors here are programming bugs in the class body
-			// (non-string slot, conflict with class variable, etc.).
-			// CPython raises TypeError/ValueError; gopy's NewUserType
-			// has no error channel yet, so panic with the same text.
-			panic(err)
-		}
-		copyNamespaceToType(t, ns)
-	}
+	noSlotsDeclared := hasNoSlotsDeclared(ns)
+	configureManagedDict(t, bases, noSlotsDeclared)
+	processClassNamespace(t, ns)
 	// NewType already ran inheritSlotsAllMRO when the namespace was not
 	// yet populated, so typeOverridesHash could not see __hash__. If the
 	// just-copied namespace declares __hash__, drop any inherited Hash /
@@ -207,6 +128,106 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 		panic(err)
 	}
 	return t
+}
+
+// stampMetaclass writes meta onto t so PEP 487 hooks see Py_TYPE(t) ==
+// meta. Skips a nil or typeType meta because NewType already wired the
+// default.
+//
+// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
+func stampMetaclass(t *Type, meta *Type) {
+	if meta != nil && meta != typeType {
+		t.Init(meta)
+	}
+}
+
+// hasNoSlotsDeclared reports whether ns lacks a __slots__ entry. object
+// itself does not advertise HasDict, but every gopy user class without
+// __slots__ has historically carried a dict; the result feeds back into
+// configureManagedDict so omitting __slots__ keeps the prior behavior.
+func hasNoSlotsDeclared(ns *Dict) bool {
+	if ns == nil {
+		return true
+	}
+	has, _ := ns.Contains(NewStr("__slots__"))
+	return !has
+}
+
+// configureManagedDict inherits HasDict from any base that exposes one
+// and stamps MANAGED_DICT / INLINE_VALUES on t. INLINE_VALUES rides
+// along only when every base supports it; CPython's type_new gates the
+// flag on basicsize fit (no inline-values slot inside int / list / str /
+// etc.), so heap subclasses of built-ins drop into the LAZY_DICT shape
+// where the dict slot is null until the first store.
+//
+// CPython: Objects/typeobject.c:4153 type_new (sets
+// Py_TPFLAGS_INLINE_VALUES + Py_TPFLAGS_MANAGED_DICT on heap types with
+// a managed dict)
+func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
+	for _, b := range bases {
+		if b != nil && b.HasDict {
+			t.HasDict = true
+			break
+		}
+	}
+	if noSlotsDeclared {
+		t.HasDict = true
+	}
+	if !t.HasDict {
+		return
+	}
+	t.TpFlags |= TpFlagManagedDict
+	if basesAllowInlineValues(bases, noSlotsDeclared) {
+		t.TpFlags |= TpFlagInlineValues
+	}
+}
+
+// basesAllowInlineValues reports whether every non-object base on bases
+// still carries INLINE_VALUES, which is the gate for the new type
+// keeping the flag.
+func basesAllowInlineValues(bases []*Type, noSlotsDeclared bool) bool {
+	if !noSlotsDeclared {
+		return false
+	}
+	for _, b := range bases {
+		if b == nil || b == objectType {
+			continue
+		}
+		if !b.HasInlineValues() {
+			return false
+		}
+	}
+	return true
+}
+
+// processClassNamespace patches __classcell__, installs __slots__
+// descriptors, and copies the rest of ns onto t.
+func processClassNamespace(t *Type, ns *Dict) {
+	if ns == nil {
+		return
+	}
+	// __classcell__ is the cell __build_class__ left in the namespace so
+	// we can patch it with the new class. It is not a real attribute,
+	// so install it before walking the rest of the namespace and skip
+	// it during the descriptor copy.
+	classCellKey := NewStr("__classcell__")
+	if cellObj, err := ns.GetItem(classCellKey); err == nil {
+		if cell, ok := cellObj.(*Cell); ok {
+			cell.Contents = t
+		}
+		_ = ns.DelItem(classCellKey)
+	}
+	// __slots__ processing runs before the descriptor copy so the
+	// MemberDescr entries land in typeDescrTable before any class body
+	// assignments could overwrite them. Errors here are programming
+	// bugs in the class body (non-string slot, conflict with class
+	// variable, etc.). CPython raises TypeError/ValueError; gopy's
+	// NewUserType has no error channel yet, so panic with the same
+	// text.
+	if err := installSlots(t, ns); err != nil {
+		panic(err)
+	}
+	copyNamespaceToType(t, ns)
 }
 
 // copyNamespaceToType walks ns and installs each entry as a type

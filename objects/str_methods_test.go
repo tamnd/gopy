@@ -220,7 +220,7 @@ func TestStrStrip(t *testing.T) {
 }
 
 // TestStrStripASCIIControls pins the 0x1C-0x1F semantic fix:
-// _PyUnicode_IsWhitespace recognises FS/GS/RS/US as whitespace, so
+// _PyUnicode_IsWhitespace recognizes FS/GS/RS/US as whitespace, so
 // CPython strip drops them. Pre-port gopy used unicode.IsSpace which
 // misses them, so " \x1c\x1dhi\x1e\x1f " would have kept the controls.
 //

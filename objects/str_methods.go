@@ -257,7 +257,7 @@ func reverseStrings(out []string) {
 // whitespace produces no empty fragments. reverse=true peels from
 // the right (used by rsplit).
 //
-// ASCII fast path: byte-indexed loop avoids materialising []rune(s)
+// ASCII fast path: byte-indexed loop avoids materializing []rune(s)
 // and lets the inner loop run as plain byte comparisons. Non-ASCII
 // falls back to the rune walk until P4.1 lands kind-2/4 storage so
 // BMP/Full strings can hit a kind-dispatched loop too.
@@ -282,7 +282,7 @@ func strSplitWhitespaceASCII(s string, maxsplit int, reverse bool) []string {
 	if reverse {
 		// Build in reverse-walk order (right to left) then reverse the
 		// slice once before returning. Matches CPython's SPLIT_ADD into
-		// a preallocated list that is later finalised in place, and
+		// a preallocated list that is later finalized in place, and
 		// avoids the O(n^2) prepend-into-head pattern.
 		out := []string{}
 		i := n
@@ -549,7 +549,7 @@ func StrReplace(s, old, newS string, count int) string {
 }
 
 // stripASCIIWhitespace walks s from each end skipping bytes that
-// _PyUnicode_IsWhitespace recognises in the ASCII range. Returns
+// _PyUnicode_IsWhitespace recognizes in the ASCII range. Returns
 // the bounds (lo, hi) of the kept slice. left/right control which
 // ends get trimmed: left/right both true is strip, left-only is
 // lstrip, right-only is rstrip.

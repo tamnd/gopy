@@ -156,7 +156,7 @@ func sreCompile(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	}
 
 	inst := objects.NewInstance(PatternType)
-	d := inst.Dict()
+	d := inst.EnsureDict()
 	_ = d.SetItem(objects.NewStr("pattern"), args[0])
 	_ = d.SetItem(objects.NewStr("flags"), objects.NewInt(flags))
 	_ = d.SetItem(objects.NewStr("groups"), objects.NewInt(groups))
@@ -245,7 +245,7 @@ func engineSearch(cp *compiledPattern, in []int32, pos, endpos int, mustAdvance 
 // CPython: Modules/_sre/sre.c:2900 pattern_new_match
 func makeMatch(cp *compiledPattern, st *state, src objects.Object, patInst objects.Object, pos, endpos int) objects.Object {
 	inst := objects.NewInstance(MatchType)
-	d := inst.Dict()
+	d := inst.EnsureDict()
 	_ = d.SetItem(objects.NewStr("string"), src)
 	_ = d.SetItem(objects.NewStr("re"), patInst)
 	_ = d.SetItem(objects.NewStr("pos"), objects.NewInt(int64(pos)))
@@ -359,8 +359,9 @@ func patternScanner(args []objects.Object, _ map[string]objects.Object) (objects
 		return nil, err
 	}
 	inst := objects.NewInstance(ScannerType)
-	_ = inst.Dict().SetItem(objects.NewStr("string"), src)
-	_ = inst.Dict().SetItem(objects.NewStr("pattern"), args[0])
+	d := inst.EnsureDict()
+	_ = d.SetItem(objects.NewStr("string"), src)
+	_ = d.SetItem(objects.NewStr("pattern"), args[0])
 	scannerStore[inst] = &scannerState{
 		cp:     cp,
 		input:  in,

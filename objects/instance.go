@@ -85,8 +85,26 @@ func (i *Instance) InvalidateInlineValues() { i.inlineValid = false }
 
 // Dict returns the instance __dict__. Mutating it is how attribute
 // stores land. Returns nil when the class declared __slots__ without
-// __dict__.
+// __dict__ and also nil for the LAZY_DICT shape before the first store
+// has materialized the dict. Callers that need a non-nil dict to mutate
+// should use EnsureDict.
 func (i *Instance) Dict() *Dict { return i.dict }
+
+// EnsureDict returns i.dict, allocating it on demand when the class
+// declares __dict__ but the instance is in the LAZY_DICT shape (heap
+// subclasses of built-ins, where NewInstance leaves dict nil until the
+// first SetAttr). Returns nil only when the class lacks __dict__ in the
+// first place (pure __slots__ class). Mirrors CPython's
+// make_dict_from_instance_attributes which materializes the managed
+// dict when a store can't fit in the inline-values shape.
+//
+// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
+func (i *Instance) EnsureDict() *Dict {
+	if i.dict == nil && i.Type().HasDict {
+		i.dict = NewDict()
+	}
+	return i.dict
+}
 
 // instanceTraverse visits every Object reachable from a user-class
 // instance: each non-nil slot value plus every key and value stored
