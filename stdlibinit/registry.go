@@ -159,6 +159,14 @@ import (
 	// CPython: Modules/_csv.c:1423 _csv_exec
 	_ "github.com/tamnd/gopy/module/_csv"
 
+	// Built-in module: _elementtree. Registers itself via
+	// module/_elementtree/module.go init(). C accelerator backing
+	// xml.etree.ElementTree. Phase 1 publishes ParseError, Element,
+	// and SubElement; the TreeBuilder + XMLParser + ElementPath
+	// integration land in later phases.
+	// CPython: Modules/_elementtree.c:4495 module_exec
+	_ "github.com/tamnd/gopy/module/_elementtree"
+
 	// Built-in module: _string. Registers itself via
 	// module/_string/module.go init(). Exposes formatter_parser and
 	// formatter_field_name_split, the two low-level helpers consumed by
