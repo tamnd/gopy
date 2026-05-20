@@ -278,6 +278,37 @@ func (d *Dict) GetItem(key Object) (Object, error) {
 	return d.entries[idx].value, nil
 }
 
+// GetItemKnownHash is GetItem with a caller-supplied hash. The
+// LOAD_NAME / LOAD_GLOBAL slow arm threads the *Unicode's cached
+// hash straight in, skipping the PyObject_Hash vtable dispatch.
+//
+// CPython: Objects/dictobject.c:1965 _PyDict_GetItem_KnownHash
+func (d *Dict) GetItemKnownHash(key Object, h int64) (Object, error) {
+	idx, ok, err := d.lookup(h, key)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errKeyNotFound
+	}
+	return d.entries[idx].value, nil
+}
+
+// ContainsKnownHash is Contains with a caller-supplied hash.
+//
+// CPython: Objects/dictobject.c:2530 _PyDict_Contains_KnownHash
+func (d *Dict) ContainsKnownHash(key Object, h int64) (bool, error) {
+	_, ok, err := d.lookup(h, key)
+	return ok, err
+}
+
+// SetItemKnownHash is SetItem with a caller-supplied hash.
+//
+// CPython: Objects/dictobject.c:2069 _PyDict_SetItem_KnownHash
+func (d *Dict) SetItemKnownHash(key, value Object, h int64) error {
+	return dictInsert(d, h, key, value)
+}
+
 // DelItem removes key. Mirrors PyDict_DelItem.
 //
 // CPython: Objects/dictobject.c:2834 PyDict_DelItem

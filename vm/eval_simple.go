@@ -1275,6 +1275,20 @@ func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool) {
 	// CPython: Python/bytecodes.c LOAD_NAME (PyMapping_GetOptionalItem
 	// on locals)
 	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
+		// KnownHash short-circuit: the LOAD_NAME / LOAD_GLOBAL key
+		// is a *Unicode pulled from co.NameObj, whose hash is cached
+		// after the first dispatch on this code object. Threading the
+		// cached hash straight through avoids the PyObject_Hash vtable
+		// dispatch (one virtual call) per lookup.
+		//
+		// CPython: Objects/dictobject.c:1965 _PyDict_GetItem_KnownHash
+		if u, ok := key.(*objects.Unicode); ok {
+			v, err := d.GetItemKnownHash(u, u.HashCached())
+			if err != nil {
+				return nil, false
+			}
+			return v, true
+		}
 		v, err := d.GetItem(key)
 		if err != nil {
 			return nil, false
@@ -1297,6 +1311,10 @@ func storeIn(scope objects.Object, key, value objects.Object) error {
 	//
 	// CPython: Python/ceval.c STORE_NAME uses PyObject_SetItem on locals
 	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
+		if u, ok := key.(*objects.Unicode); ok {
+			// CPython: Objects/dictobject.c:2069 _PyDict_SetItem_KnownHash
+			return d.SetItemKnownHash(u, value, u.HashCached())
+		}
 		return d.SetItem(key, value)
 	}
 	return objects.SetItem(scope, key, value)

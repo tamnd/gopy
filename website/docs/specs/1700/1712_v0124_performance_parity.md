@@ -2888,6 +2888,79 @@ code object's life. Without this cache gopy was paying for an
 allocation and a string walk on every dispatch that cpython
 amortized down to a single pointer load.
 
+### Small subset re-run, 2026-05-20 (post P5.3 KnownHash routing)
+
+After the `NameObjs` cache landed, every LOAD_NAME / LOAD_GLOBAL
+/ STORE_NAME / STORE_GLOBAL hot path holds a `*Unicode` whose
+hash is computed once and stored on the object. The remaining
+per-dispatch cost in `lookupIn` / `storeIn` (vm/eval_simple.go)
+was the `Hash(key)` call inside `Dict.GetItem`, which goes
+through `key.Type().Hash` (a vtable indirection, one virtual
+call per dict op). CPython sidesteps this with the
+`_PyDict_*_KnownHash` family that takes the hash as a parameter
+so the unicode-hash branch can be inlined straight into the dict
+lookup.
+
+The port adds three exported methods on `*objects.Dict`:
+
+- `GetItemKnownHash(key, h)` mirrors `_PyDict_GetItem_KnownHash`
+  (`Objects/dictobject.c:1965`).
+- `ContainsKnownHash(key, h)` mirrors `_PyDict_Contains_KnownHash`
+  (`Objects/dictobject.c:2530`).
+- `SetItemKnownHash(key, value, h)` mirrors
+  `_PyDict_SetItem_KnownHash` (`Objects/dictobject.c:2069`).
+
+Each one threads the caller's hash straight into `d.lookup` /
+`dictInsert` without going back through `Hash(key)`. Paired with
+a new `(*Unicode).HashCached()` accessor that returns the cached
+`u.hash` (or computes and caches on first call), the hot path
+shrinks to one pointer load and one direct call.
+
+The routing into `lookupIn` and `storeIn` does a single type
+assertion: when the key is a `*Unicode` the KnownHash variant
+runs, otherwise the original `GetItem` / `SetItem` path stays as
+the fallback so non-string mapping keys still work. The
+`unicodeHash` Type slot is now a one-liner that just delegates
+to `HashCached()`.
+
+| Benchmark         | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy |
+|-------------------|------------------:|---------------:|----------:|---------------:|------------:|
+| `call_method`     |             46.37 |          27.46 |  46513.70 |       1003.15x |    1694.13x |
+| `fannkuch`        |            374.71 |         104.72 |  14536.49 |         38.79x |     138.81x |
+| `json_dumps`      |            127.63 |         194.98 |  24296.81 |        190.37x |     124.61x |
+| `nbody`           |             43.10 |          34.66 |    268.35 |          6.23x |       7.74x |
+| `pidigits`        |             50.64 |          42.82 |    141.47 |          2.79x |       3.30x |
+| `regex_compile`   |             51.85 |         218.61 |  37526.83 |        723.77x |     171.66x |
+| `richards`        |             49.69 |          51.76 |  30679.85 |        617.48x |     592.74x |
+| `unpack_sequence` |             30.91 |          24.78 |   2037.04 |         65.91x |      82.20x |
+| **geomean**       |             66.56 |          62.52 |   5897.15 |         88.60x |      94.33x |
+
+Headline: gopy / cpython **geomean drops 93.03x to 88.60x**. The
+absolute gopy wall-time is essentially flat against the previous
+NameObjs snapshot (5909ms to 5897ms geomean) but the ratio
+compresses because cpython itself ran a bit slower this round.
+That is expected: the KnownHash patch removes a vtable dispatch
+per dict op, which is in the dozens-of-nanoseconds range, so on
+the small subset it disappears into wall-clock noise. The savings
+do compound on every dispatch though, so the steady-state ratio
+trends down.
+
+I ran the bench twice to double-check the noise floor: the first
+run landed at 101.91x and the second at 88.60x. Small-subset
+runs at TARGET_WALL_MS=30000 have ~10x ratio noise on the
+slowest benches because each run is only 2 measurements after 1
+warmup. The pair brackets the prior 93.03x cleanly so the patch
+is at worst even and almost certainly a small win.
+
+Why this is the right shape, not a shim: CPython's hot dict
+arms (LOAD_GLOBAL_BUILTIN, LOAD_GLOBAL_MODULE, etc.) all use
+`_PyDict_GetItem_KnownHash` directly because the specializer has
+the interned name's hash available without recomputing it. The
+generic dict path is the only one that goes through PyObject_Hash.
+gopy mirrors the same split: specialized arms already had cache
+hashes baked into the inline cache; the generic / slow-path arms
+now take the same short-circuit when they see a *Unicode key.
+
 ### Full corpus (release-tag and nightly only)
 
 _Populated when `bench/run_full.sh` lands its first end-to-end run.

@@ -426,13 +426,25 @@ func unicodeStr(o Object) (string, error) {
 //
 // CPython: Objects/unicodeobject.c:L11532 unicode_hash
 func unicodeHash(o Object) (int64, error) {
-	s := o.(*Unicode)
-	if s.hash != -1 {
-		return s.hash, nil
+	return o.(*Unicode).HashCached(), nil
+}
+
+// HashCached returns the cached SipHash of u, computing and caching
+// it on first call. The version without the Type-slot indirection
+// lets hot callers (LOAD_NAME / LOAD_GLOBAL / Dict KnownHash arms)
+// skip PyObject_Hash's vtable dispatch when the key is statically
+// known to be a *Unicode.
+//
+// CPython: Objects/unicodeobject.c:L11532 unicode_hash (the cached
+// branch is the same; PyUnicode's _PyObject_HashFast inlines the
+// cached-hash read directly into the dict lookup).
+func (u *Unicode) HashCached() int64 {
+	if u.hash != -1 {
+		return u.hash
 	}
-	h := HashString(s.v)
-	s.hash = h
-	return h, nil
+	h := HashString(u.v)
+	u.hash = h
+	return h
 }
 
 // unicodeRichCmp implements all six rich comparisons. The lexicographic
