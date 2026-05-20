@@ -39,14 +39,21 @@ type Instance struct {
 }
 
 // NewInstance allocates a fresh Instance bound to t. The instance
-// __dict__ is empty when t.HasDict; the slots array is sized to
-// t.Slots and starts all-nil (each slot reads as AttributeError until
-// assigned).
+// __dict__ is empty when t.HasDict and t.HasInlineValues (INLINE_VALUES
+// shape: dict ships pre-allocated so the WITH_VALUES specializer arms
+// can stamp keys_version without a materialization step). LAZY_DICT
+// shape (HasDict && !HasInlineValues, the case for heap subclasses of
+// built-ins) leaves dict nil until instanceSetAttr lands the first
+// store; that null state is the runtime guard the
+// LOAD_ATTR_METHOD_LAZY_DICT fast arm checks. The slots array is
+// sized to t.Slots and starts all-nil (each slot reads as
+// AttributeError until assigned).
 //
 // CPython: Objects/typeobject.c:1748 type_call (object_new path)
+// CPython: Objects/typeobject.c:4153 type_new (INLINE_VALUES gate)
 func NewInstance(t *Type) *Instance {
 	inst := &Instance{}
-	if t.HasDict {
+	if t.HasDict && t.HasInlineValues() {
 		inst.dict = NewDict()
 	}
 	if n := len(t.Slots); n > 0 {
@@ -215,10 +222,26 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 		}
 	}
 	if inst.dict == nil {
-		// __slots__ class without __dict__: any name not covered by a
-		// type-level descriptor is rejected, mirroring CPython's
-		// PyObject_GenericSetAttr when tp_dictoffset == 0.
-		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+		if !tp.HasDict {
+			// __slots__ class without __dict__: any name not covered by
+			// a type-level descriptor is rejected, mirroring CPython's
+			// PyObject_GenericSetAttr when tp_dictoffset == 0.
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+		}
+		if value == nil {
+			// LAZY_DICT shape with a still-null managed dict: nothing to
+			// delete, so raise AttributeError without materializing.
+			//
+			// CPython: Objects/object.c PyObject_GenericSetAttr (NULL dict,
+			// delete branch)
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+		}
+		// LAZY_DICT shape: first store materializes the managed dict.
+		// CPython does this in _PyObject_StoreInstanceAttribute via
+		// new_values / make_dict_from_instance_attributes.
+		//
+		// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
+		inst.dict = NewDict()
 	}
 	if value == nil {
 		if _, err := inst.dict.GetItem(name); err != nil {

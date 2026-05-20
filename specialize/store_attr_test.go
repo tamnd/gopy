@@ -40,6 +40,7 @@ func TestStoreAttrInstanceValue(t *testing.T) {
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
 	cls.HasDict = true
+	cls.TpFlags |= objects.TpFlagInlineValues | objects.TpFlagManagedDict
 	inst := objects.NewInstance(cls)
 	if err := inst.Dict().SetItem(objects.NewStr("y"), objects.NewInt(1)); err != nil {
 		t.Fatalf("SetItem: %v", err)

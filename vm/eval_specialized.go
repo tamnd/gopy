@@ -52,6 +52,8 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		next, ok = e.fastLoadAttrNondescriptorNoDict(oparg)
 	case compile.LOAD_ATTR_METHOD_WITH_VALUES:
 		next, ok = e.fastLoadAttrMethodWithValues(oparg)
+	case compile.LOAD_ATTR_METHOD_LAZY_DICT:
+		next, ok = e.fastLoadAttrMethodLazyDict(oparg)
 	case compile.LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES:
 		next, ok = e.fastLoadAttrNondescriptorWithValues(oparg)
 	case compile.LOAD_ATTR_PROPERTY:
@@ -476,6 +478,54 @@ func (e *evalState) fastLoadAttrNondescriptorWithValues(oparg uint32) (int, bool
 	}
 	e.pop()
 	e.pushObject(descr)
+	return e.cacheAdvance(compile.LOAD_ATTR), true
+}
+
+// fastLoadAttrMethodLazyDict implements LOAD_ATTR_METHOD_LAZY_DICT.
+//
+// Guards: oparg requests the unbound-method shape (bit 0 set), owner
+// is *Instance whose type carries MANAGED_DICT without INLINE_VALUES
+// (the LAZY_DICT shape for heap subclasses of built-ins), the managed
+// dict is still nil (no per-instance store has materialized it), and
+// the type_version matches cells 2..3. On hit pushes (descr, self) so
+// the following CALL sees the unbound-method (callable, self) shape.
+//
+// The dict-is-nil guard is gopy's equivalent of CPython's
+// _PyManagedDictPointer_GET(owner)->dict != NULL check: the moment
+// instanceSetAttr materializes the managed dict, an instance-level
+// store could shadow the class descriptor, so the arm deopts and the
+// generic LOAD_ATTR path repeats the descriptor lookup.
+//
+// CPython: Python/bytecodes.c LOAD_ATTR_METHOD_LAZY_DICT
+func (e *evalState) fastLoadAttrMethodLazyDict(oparg uint32) (int, bool) {
+	if oparg&1 == 0 {
+		return 0, false
+	}
+	inst, ok := e.peek(0).AsObject().(*objects.Instance)
+	if !ok {
+		return 0, false
+	}
+	tp := inst.Type()
+	if !tp.HasManagedDict() || tp.HasInlineValues() {
+		return 0, false
+	}
+	if inst.Dict() != nil {
+		return 0, false
+	}
+	idx := e.instrIdx()
+	code := e.f.Code.Code
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
+	curVer := tp.VersionTag()
+	if curVer == 0 || curVer != cachedVer {
+		return 0, false
+	}
+	descr := specialize.CacheObject(e.f.Code.CacheObjects, idx)
+	if descr == nil {
+		return 0, false
+	}
+	self := e.pop()
+	e.pushObject(descr)
+	e.push(self)
 	return e.cacheAdvance(compile.LOAD_ATTR), true
 }
 

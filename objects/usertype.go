@@ -117,16 +117,33 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 	if noSlotsDeclared {
 		t.HasDict = true
 	}
-	// User classes with a per-instance __dict__ ship with the
-	// INLINE_VALUES + MANAGED_DICT flag pair set, matching CPython
-	// heap types built through type_new. The flags gate the
-	// LOAD_ATTR_*_WITH_VALUES specializer arms.
+	// User classes with a per-instance __dict__ ship with MANAGED_DICT
+	// always; INLINE_VALUES rides along only when every base supports
+	// it. CPython's type_new gates INLINE_VALUES on the basicsize fit
+	// (no inline-values slot inside int / list / str / etc.), so a
+	// heap subclass of a built-in falls into the LAZY_DICT shape where
+	// the dict slot is null until first store. Mirror that here: the
+	// flag stays set when bases are object or user types that already
+	// carry INLINE_VALUES, and clears otherwise.
 	//
 	// CPython: Objects/typeobject.c:4153 type_new (sets
 	// Py_TPFLAGS_INLINE_VALUES + Py_TPFLAGS_MANAGED_DICT on heap types
 	// with a managed dict)
 	if t.HasDict {
-		t.TpFlags |= TpFlagInlineValues | TpFlagManagedDict
+		t.TpFlags |= TpFlagManagedDict
+		inlineOK := noSlotsDeclared
+		for _, b := range bases {
+			if b == nil || b == objectType {
+				continue
+			}
+			if !b.HasInlineValues() {
+				inlineOK = false
+				break
+			}
+		}
+		if inlineOK {
+			t.TpFlags |= TpFlagInlineValues
+		}
 	}
 	if ns != nil {
 		// __classcell__ is the cell __build_class__ left in the

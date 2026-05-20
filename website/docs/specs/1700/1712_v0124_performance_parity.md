@@ -300,7 +300,7 @@ list the variants still missing. CPython 3.14 reference:
 
 | Family | Coverage | Variants shipped | Missing | Status | Commit |
 |--------|----------|------------------|---------|--------|--------|
-| LOAD_ATTR | 12/13 | `MODULE`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `SLOT`, `INSTANCE_VALUE`, `WITH_HINT`, `PROPERTY`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `GETATTRIBUTE_OVERRIDDEN`, `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES` | `METHOD_LAZY_DICT` — gopy instances allocate `Instance.dict` eagerly in `NewInstance`, so the CPython LAZY_DICT shape (managed-dict slot is null at LOAD_ATTR time, materialized on first write) does not yet exist as a runtime state. Needs a per-instance lazy-dict mode bit before the arm can stamp anything meaningful. | WIP | 67abc0a, 9051a0c3 |
+| LOAD_ATTR | 13/13 | `MODULE`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `SLOT`, `INSTANCE_VALUE`, `WITH_HINT`, `PROPERTY`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `GETATTRIBUTE_OVERRIDDEN`, `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`, `METHOD_LAZY_DICT` | — | DONE | 67abc0a, 9051a0c3, (this commit) |
 | STORE_ATTR | 3/3 | `INSTANCE_VALUE`, `SLOT`, `WITH_HINT` | — | DONE | 67abc0a |
 | LOAD_GLOBAL | 2/2 | `MODULE`, `BUILTIN` | — | DONE | 67abc0a |
 | COMPARE_OP | 3/3 | `INT`, `FLOAT`, `STR` | — | DONE | 67abc0a |
@@ -320,7 +320,7 @@ gate that backs it.
 
 | Family | Arms shipped | Source | Gate | Status | Commit |
 |--------|--------------|--------|------|--------|--------|
-| LOAD_ATTR | 11/12 emitted | `vm/eval_specialized.go` — `MODULE`, `SLOT`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `PROPERTY`, `INSTANCE_VALUE`, `GETATTRIBUTE_OVERRIDDEN`, `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES` | `specialize/gatedata/spec_property.py` (`TestGateSpecPropertyAndMethod`), `vm/eval_specialized_load_attr_getattribute_overridden_test.go`, `vm/eval_specialized_load_attr_with_values_test.go` | WIP — `WITH_HINT` deferred until dict keys-version cache stamping lands | 691c2d7, 71a9181, 9051a0c3 |
+| LOAD_ATTR | 12/13 emitted | `vm/eval_specialized.go` — `MODULE`, `SLOT`, `CLASS`, `CLASS_WITH_METACLASS_CHECK`, `METHOD_NO_DICT`, `NONDESCRIPTOR_NO_DICT`, `PROPERTY`, `INSTANCE_VALUE`, `GETATTRIBUTE_OVERRIDDEN`, `METHOD_WITH_VALUES`, `NONDESCRIPTOR_WITH_VALUES`, `METHOD_LAZY_DICT` | `specialize/gatedata/spec_property.py` (`TestGateSpecPropertyAndMethod`), `vm/eval_specialized_load_attr_getattribute_overridden_test.go`, `vm/eval_specialized_load_attr_with_values_test.go`, `vm/eval_specialized_load_attr_lazy_dict_test.go` | WIP — `WITH_HINT` deferred until dict keys-version cache stamping lands | 691c2d7, 71a9181, 9051a0c3, (this commit) |
 | TO_BOOL | 6/6 | `vm/eval_specialized.go` — `BOOL`, `INT`, `LIST`, `NONE`, `STR`, `ALWAYS_TRUE` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | COMPARE_OP | 3/3 | `vm/eval_specialized_compare.go` — `INT`, `FLOAT`, `STR` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
 | CONTAINS_OP | 2/2 | `vm/eval_specialized.go` — `DICT`, `SET` | `vm/eval_specialized_test.go` | DONE | 691c2d7 |
@@ -641,19 +641,34 @@ gate that backs it.
    `cachedKeys`. The InlineInvalidated test calls `instanceSetAttr`
    with `value == nil` to flip the bit, then asserts the fast arm
    deopts even though all other guards still pass.
-9. **LAZY_DICT deliberately deferred.** CPython's
+9. **LAZY_DICT shipped.** CPython's
    `LOAD_ATTR_METHOD_LAZY_DICT` (`Python/specialize.c:1635`) fires
    when the managed-dict slot reads as null at LOAD_ATTR time
    (i.e. the instance has not materialized its dict yet); the arm
-   skips reading it. gopy's `NewInstance` allocates `Instance.dict`
-   eagerly whenever `t.HasDict`, so no instance is ever in the
-   LAZY_DICT runtime state today. Shipping the arm requires a
-   per-instance "lazy" mode (allocate the dict on first
-   `instanceSetAttr`, leave it nil until then) so the guard has
-   something to check; that touches every attribute path in
-   `instance.go` plus the dict-watcher install in P1.6 and is the
-   wrong scope for the foundation port. Tracked as a follow-up in
-   the P1.4a LOAD_ATTR row.
+   skips reading it. The port flips the INLINE_VALUES flag on
+   user types from "always on for HasDict" to base-conditional:
+   `NewUserTypeMeta` keeps `Py_TPFLAGS_INLINE_VALUES` only when
+   every non-`object` base already carries it (mirrors CPython's
+   `type_new` basicsize gate at `Objects/typeobject.c:4153`). Heap
+   subclasses of built-ins like list/dict/str therefore land in
+   the MANAGED_DICT-without-INLINE_VALUES shape that is the
+   LAZY_DICT runtime state. `NewInstance` no longer pre-allocates
+   `Instance.dict` for that shape, and `instanceSetAttr`
+   materializes it on first store (CPython:
+   `Objects/dictobject.c:6857 make_dict_from_instance_attributes`).
+   The specializer arm in `specialize/load_attr.go::KindMethod`
+   stamps `LOAD_ATTR_METHOD_LAZY_DICT` when
+   `tp.HasManagedDict() && inst.Dict() == nil`. VM fast arm at
+   `vm/eval_specialized.go::fastLoadAttrMethodLazyDict` guards
+   `oparg&1 != 0`, the MANAGED_DICT-without-INLINE_VALUES flag
+   combo, `inst.Dict() == nil`, and the cached `type_version`
+   (the dict-is-nil check is gopy's equivalent of CPython's
+   `_PyManagedDictPointer_GET(owner)->dict != NULL` runtime
+   check). On hit pushes (descr, self) for the unbound-method
+   shape. Five tests in
+   `vm/eval_specialized_load_attr_lazy_dict_test.go`: METHOD hit
+   / dict-materialized-deopts / version-miss / wrong-oparg-shape;
+   specializer-emits with nil dict.
 10. **Why no shim for the inline-values block.** A first sketch
     considered packing a real `PyDictValues` array onto `Instance`
     so the WITH_VALUES arm could read from it directly. That would

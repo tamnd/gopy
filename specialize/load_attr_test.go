@@ -77,6 +77,7 @@ func TestLoadAttrInstanceValue(t *testing.T) {
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
 	cls.HasDict = true
+	cls.TpFlags |= objects.TpFlagInlineValues | objects.TpFlagManagedDict
 	inst := objects.NewInstance(cls)
 	if err := inst.Dict().SetItem(objects.NewStr("v"), objects.NewInt(1)); err != nil {
 		t.Fatalf("SetItem: %v", err)
@@ -96,6 +97,7 @@ func TestLoadAttrAbsentKeyFallsBack(t *testing.T) {
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
 	cls.HasDict = true
+	cls.TpFlags |= objects.TpFlagInlineValues | objects.TpFlagManagedDict
 	inst := objects.NewInstance(cls)
 	if err := inst.Dict().SetItem(objects.NewStr("seed"), objects.NewInt(0)); err != nil {
 		t.Fatalf("SetItem: %v", err)

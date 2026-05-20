@@ -258,6 +258,21 @@ func specializeInstanceLoadAttr(inst *objects.Instance, name *objects.Unicode, c
 			Specialize(code, instr, compile.LOAD_ATTR_METHOD_WITH_VALUES)
 			return true
 		}
+		// LAZY_DICT arm: MANAGED_DICT heap subclasses of built-ins that
+		// don't carry INLINE_VALUES. The instance's managed-dict pointer
+		// is null until the first store; while it stays null, method
+		// lookup can bypass the instance dict and pull straight from
+		// the class. Stamp the type_version into the cache so any
+		// type-tree mutation (new attribute, MRO change) deopts.
+		//
+		// CPython: Python/specialize.c:1635 specialize_attr_loadclassattr
+		// (LAZY_DICT branch)
+		if tp.HasManagedDict() && inst.Dict() == nil {
+			loadMethodCacheAt(code, instr).setTypeVersion(version)
+			SetCacheObject(co.CacheObjects, instr, descr)
+			Specialize(code, instr, compile.LOAD_ATTR_METHOD_LAZY_DICT)
+			return true
+		}
 		return false
 	case KindNonDescriptor:
 		// CPython: Python/specialize.c:1300-1311 NON_DESCRIPTOR case →
