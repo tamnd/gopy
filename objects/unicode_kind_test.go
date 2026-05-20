@@ -48,7 +48,7 @@ func TestStrFindKind_NonASCIIFallback(t *testing.T) {
 	}{
 		{"café au lait", "au", 0, 12, 5},
 		{"中文中文", "文", 0, 4, 1},
-		{"abcdef", "def", 0, 7, 4},  // Latin-1 supplement triggers kind=1 ascii=false
+		{"abc\u0080def", "def", 0, 7, 4},     // Latin-1 supplement triggers kind=1 ascii=false
 		{"abc\U0001F600def", "def", 0, 7, 4}, // astral triggers kind=4
 	}
 	for _, c := range cases {
@@ -87,8 +87,8 @@ func TestStrCountKind_ASCIIFastPath(t *testing.T) {
 		want       int
 	}{
 		{"aaaa", "a", 0, 4, 4},
-		{"aaaa", "aa", 0, 4, 2}, // non-overlapping
-		{"abc", "", 0, 3, 4},    // empty needle: len+1
+		{"aaaa", "aa", 0, 4, 2},  // non-overlapping
+		{"abc", "", 0, 3, 4},     // empty needle: len+1
 		{"abcabc", "b", 1, 5, 2}, // "bcab" contains "b" twice
 		{"abcabc", "b", 2, 5, 1}, // "cab" contains "b" once
 	}

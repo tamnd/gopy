@@ -43,10 +43,10 @@ func TestProbeSequenceMatchesCPython(t *testing.T) {
 	}{
 		{"zero", 0, 7},
 		{"one", 1, 7},
-		{"power-of-two-collisions", 0x08, 7},        // 0 mod 8
+		{"power-of-two-collisions", 0x08, 7},         // 0 mod 8
 		{"large-positive", 0x0123456789ABCDEF, 0xFF}, // 256-slot
-		{"negative-hash", -1, 7},                    // sign bits cascade through perturb
-		{"siphash-shape", 0x6c83d9379c39c0a1, 31},   // 32-slot dict
+		{"negative-hash", -1, 7},                     // sign bits cascade through perturb
+		{"siphash-shape", 0x6c83d9379c39c0a1, 31},    // 32-slot dict
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,7 +56,7 @@ func TestProbeSequenceMatchesCPython(t *testing.T) {
 			// dictProbe directly because it stops at the first miss;
 			// instead, we re-implement the recurrence from the same
 			// source and trust dictProbe's existing tests for the
-			// stop-at-empty / freeslot behaviour, while this one
+			// stop-at-empty / freeslot behavior, while this one
 			// verifies the math.
 			got := make([]int, 0, len(want))
 			i := uint64(tc.hash) & tc.mask
@@ -96,7 +96,6 @@ func TestDictProbeWalksSameChain(t *testing.T) {
 	want := cpythonProbeSequence(0, mask, 4)
 
 	keys := []*Unicode{}
-	hashes := []int64{}
 	// Build a sequence of unique str keys whose hash mod 8 = 0.
 	// Walk the natural numbers until we have four of them.
 	for n := 0; len(keys) < 4; n++ {
@@ -104,7 +103,6 @@ func TestDictProbeWalksSameChain(t *testing.T) {
 		h := k.HashCached()
 		if uint64(h)&mask == 0 {
 			keys = append(keys, k)
-			hashes = append(hashes, h)
 		}
 	}
 
@@ -156,7 +154,7 @@ func TestDictProbeWalksSameChain(t *testing.T) {
 // hits an empty slot. Matches CPython's freeslot tracking in
 // do_lookup. The test stamps a controlled dummy slot directly into
 // d.entries (the bookkeeping counters are touched accordingly) so we
-// can isolate the probe-driver behaviour from the higher-level
+// can isolate the probe-driver behavior from the higher-level
 // DelItem path that rehashes on its own.
 //
 // CPython: Objects/dictobject.c:1001 do_lookup (freeslot branch)

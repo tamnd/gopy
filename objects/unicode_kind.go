@@ -9,7 +9,7 @@
 // set, every codepoint is < 0x80 so its UTF-8 encoding is one byte
 // and codepoint index equals byte index. That lets the fast path
 // hand the raw Go string straight to strings.Index / Count /
-// HasPrefix / HasSuffix without materialising a []rune. The
+// HasPrefix / HasSuffix without materializing a []rune. The
 // allocation savings dominate the pyperformance string benchmarks
 // (regex_compile, html5lib, mako, django_template) which work on
 // ASCII source.
@@ -18,7 +18,7 @@
 // kind=2 BMP, kind=4 full unicode) fall back to the rune-walk path
 // in str_methods.go. A follow-up will route those through an
 // allocation-free UTF-8 walk too; for now the slow path matches the
-// pre-port behaviour so correctness is preserved.
+// pre-port behavior so correctness is preserved.
 //
 // CPython: Objects/unicodeobject.c:9680 any_find_slice (kind dispatch)
 // CPython: Objects/unicodeobject.c:11779 unicode_count_impl
@@ -145,7 +145,7 @@ func unicodeGetItemKind(s *Unicode, i int) (Object, error) {
 
 // strFindASCII is the kind-1 ASCII fast path: codepoint index equals
 // byte index so strings.Index runs directly on the Go-string view
-// without materialising a rune slice.
+// without materializing a rune slice.
 //
 // CPython: Objects/stringlib/asciilib.h asciilib_find_slice
 func strFindASCII(s, needle string, start, end int) int {

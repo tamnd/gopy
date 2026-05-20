@@ -26,23 +26,22 @@ import (
 // name from co.Names[oparg>>2]. ok=false means the arm must deopt.
 //
 // CPython: Python/bytecodes.c LOAD_SUPER_ATTR_<x> DEOPT_IF block.
-func (e *evalState) superAttrPrelude(oparg uint32) (globalSuper, cls, self objects.Object, name string, ok bool) {
-	globalSuper = e.peek(2).AsObject()
-	if globalSuper != objects.Object(objects.SuperType) {
-		return nil, nil, nil, "", false
+func (e *evalState) superAttrPrelude(oparg uint32) (cls, self objects.Object, name string, ok bool) {
+	if e.peek(2).AsObject() != objects.Object(objects.SuperType) {
+		return nil, nil, "", false
 	}
 	clsObj := e.peek(1).AsObject()
 	clsType, isType := clsObj.(*objects.Type)
 	if !isType {
-		return nil, nil, nil, "", false
+		return nil, nil, "", false
 	}
 	self = e.peek(0).AsObject()
 	co := e.f.Code
 	idx := int(oparg >> 2)
 	if idx < 0 || idx >= len(co.Names) {
-		return nil, nil, nil, "", false
+		return nil, nil, "", false
 	}
-	return globalSuper, clsType, self, co.Names[idx], true
+	return clsType, self, co.Names[idx], true
 }
 
 // fastLoadSuperAttrAttr implements LOAD_SUPER_ATTR_ATTR. Pops the
@@ -60,7 +59,7 @@ func (e *evalState) fastLoadSuperAttrAttr(oparg uint32) (int, bool, error) {
 	if oparg&1 != 0 {
 		return 0, false, nil
 	}
-	_, cls, self, name, ok := e.superAttrPrelude(oparg)
+	cls, self, name, ok := e.superAttrPrelude(oparg)
 	if !ok {
 		return 0, false, nil
 	}
@@ -90,7 +89,7 @@ func (e *evalState) fastLoadSuperAttrMethod(oparg uint32) (int, bool, error) {
 	if oparg&1 == 0 {
 		return 0, false, nil
 	}
-	_, cls, self, name, ok := e.superAttrPrelude(oparg)
+	cls, self, name, ok := e.superAttrPrelude(oparg)
 	if !ok {
 		return 0, false, nil
 	}

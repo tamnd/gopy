@@ -40,7 +40,8 @@ func TestDeoptCode_SpecializedRewrite(t *testing.T) {
 	for i := range cache {
 		cache[i] = 0xAB // garbage that must be zeroed by deopt
 	}
-	code := []byte{byte(compile.LOAD_ATTR_SLOT), 0x42}
+	code := make([]byte, 0, 2+len(cache)+2)
+	code = append(code, byte(compile.LOAD_ATTR_SLOT), 0x42)
 	code = append(code, cache...)
 	code = append(code, byte(compile.RETURN_VALUE), 0x00)
 

@@ -62,7 +62,8 @@ func reduceNewobj(self Object) (Object, error) {
 	hasArgs := args != nil
 	var newobj Object
 	var newargs *Tuple
-	if kwargs == nil || kwargs.Len() == 0 {
+	switch {
+	case kwargs == nil || kwargs.Len() == 0:
 		newobj, err = CopyregLookup("__newobj__")
 		if err != nil {
 			return nil, err
@@ -74,16 +75,16 @@ func reduceNewobj(self Object) (Object, error) {
 			}
 		}
 		newargs = NewTuple(items)
-	} else if args != nil {
+	case args != nil:
 		newobj, err = CopyregLookup("__newobj_ex__")
 		if err != nil {
 			return nil, err
 		}
 		newargs = NewTuple([]Object{self.Type(), args, kwargs})
-	} else {
+	default:
 		return nil, fmt.Errorf("SystemError: bad internal call (kwargs without args)")
 	}
-	required := !(hasArgs || isListInstance(self) || isDictInstance(self))
+	required := !hasArgs && !isListInstance(self) && !isDictInstance(self)
 	state, err := objectGetState(self, required)
 	if err != nil {
 		return nil, err
@@ -151,7 +152,7 @@ func objectGetNewArguments(self Object) (*Tuple, *Dict, error) {
 //
 // CPython: Objects/typeobject.c:7594 _PyObject_GetItemsIter
 func objectGetItemsIter(self Object) (Object, Object, error) {
-	var listitems, dictitems Object = None(), None()
+	listitems, dictitems := None(), None()
 	if isListInstance(self) {
 		it, err := Iter(self)
 		if err != nil {
@@ -208,13 +209,14 @@ func objectGetState(self Object, required bool) (Object, error) {
 //
 // CPython: Objects/typeobject.c:7336 object_getstate_default
 func objectGetStateDefault(self Object, _ bool) (Object, error) {
-	var state Object = None()
-	if holder, ok := self.(AttrDictHolder); ok {
-		if d := holder.AttrDict(); d != nil && d.Len() > 0 {
+	state := None()
+	switch v := self.(type) {
+	case AttrDictHolder:
+		if d := v.AttrDict(); d != nil && d.Len() > 0 {
 			state = d
 		}
-	} else if inst, ok := self.(*Instance); ok {
-		if d := inst.Dict(); d != nil && d.Len() > 0 {
+	case *Instance:
+		if d := v.Dict(); d != nil && d.Len() > 0 {
 			state = d
 		}
 	}

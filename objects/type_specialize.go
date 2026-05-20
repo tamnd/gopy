@@ -53,7 +53,7 @@ func (t *Type) InvalidateVersionTag() {
 // CALL_ALLOC_AND_ENTER_INIT and stamps the type's current version into
 // specCacheInitVersion. Returns the type version the caller should
 // write into the CALL inline cache, plus a bool reporting whether the
-// cache was populated (false when VersionTag returns 0, signalling the
+// cache was populated (false when VersionTag returns 0, signaling the
 // global counter has wrapped and specialization must give up).
 //
 // CPython: Objects/typeobject.c:6219 _PyType_CacheInitForSpecialization

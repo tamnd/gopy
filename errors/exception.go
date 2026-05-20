@@ -34,7 +34,7 @@ type Exception struct {
 func (e *Exception) AttrDict() *objects.Dict { return e.attrs }
 
 // EnsureAttrDict allocates the per-instance attribute dict on first
-// write. Matches CPython's lazy materialisation of tp_dictoffset.
+// write. Matches CPython's lazy materialization of tp_dictoffset.
 //
 // CPython: Objects/object.c:_PyObject_GetDictPtr (lazy dict alloc)
 func (e *Exception) EnsureAttrDict() *objects.Dict {

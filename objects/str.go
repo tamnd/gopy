@@ -441,12 +441,12 @@ func unicodeHash(o Object) (int64, error) {
 // CPython: Objects/unicodeobject.c:L11532 unicode_hash (the cached
 // branch is the same; PyUnicode's _PyObject_HashFast inlines the
 // cached-hash read directly into the dict lookup).
-func (u *Unicode) HashCached() int64 {
-	if u.hash != -1 {
-		return u.hash
+func (s *Unicode) HashCached() int64 {
+	if s.hash != -1 {
+		return s.hash
 	}
-	h := HashString(u.v)
-	u.hash = h
+	h := HashString(s.v)
+	s.hash = h
 	return h
 }
 

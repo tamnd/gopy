@@ -262,9 +262,9 @@ func (w *UnicodeWriter) PrepareInternal(length int, maxchar rune) error {
 			if maxchar < w.maxchar {
 				maxchar = w.maxchar
 			}
-			cap := byteCapForCodepoints(newlen, maxchar)
-			if cap > len(w.buf) {
-				b := make([]byte, len(w.buf), cap)
+			byteCap := byteCapForCodepoints(newlen, maxchar)
+			if byteCap > len(w.buf) {
+				b := make([]byte, len(w.buf), byteCap)
 				copy(b, w.buf)
 				w.buf = b
 			}
@@ -368,8 +368,8 @@ func (w *UnicodeWriter) materializeAlias() {
 		return
 	}
 	src := []byte(w.alias.v)
-	cap := max(byteCapForCodepoints(w.size, w.maxchar), len(src))
-	b := make([]byte, len(src), cap)
+	byteCap := max(byteCapForCodepoints(w.size, w.maxchar), len(src))
+	b := make([]byte, len(src), byteCap)
 	copy(b, src)
 	w.buf = b
 	w.pos = w.alias.length

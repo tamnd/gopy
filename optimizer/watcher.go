@@ -302,10 +302,10 @@ func WatcherInit(interp *state.Interpreter) {
 // EnsureBuiltinsSubscribed subscribes builtins to slot 0 so the
 // callback installed by WatcherInit actually fires on mutation. The
 // optimizer also stamps interp.Builtins so the tier-2 globals folder
-// recognises this dict as the canonical builtins. Idempotent: the
+// recognizes this dict as the canonical builtins. Idempotent: the
 // DictWatch bit is set with FT_ATOMIC_OR and Builtins is only stamped
 // if previously unset. Callers should invoke this once the runtime
-// has materialised the real builtins dict (typically at the first
+// has materialized the real builtins dict (typically at the first
 // frame-eval).
 //
 // CPython: Python/pylifecycle.c:1381 PyDict_Watch(0, interp->builtins)

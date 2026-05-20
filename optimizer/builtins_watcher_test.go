@@ -81,7 +81,7 @@ func TestBuiltinsWatcher_StopsInvalidatingAtCap(t *testing.T) {
 // TestEnsureBuiltinsSubscribed_StampsInterpBuiltins drives the helper
 // that mirrors CPython's pylifecycle.c:1381 PyDict_Watch(0,
 // interp->builtins): it both subscribes the dict to slot 0 and
-// stamps interp.Builtins so the tier-2 globals folder recognises the
+// stamps interp.Builtins so the tier-2 globals folder recognizes the
 // canonical builtins.
 func TestEnsureBuiltinsSubscribed_StampsInterpBuiltins(t *testing.T) {
 	interp := &state.Interpreter{JIT: true}

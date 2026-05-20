@@ -425,7 +425,6 @@ func bindAttrCallable(attr Object, o Object, tp *Type) (Object, error) {
 	return attr, nil
 }
 
-
 // fixupTpNew installs slotTpNew when the class body defines its own
 // __new__. Without this, typeCallViaTpNew would call the inherited
 // C-level tp_new (e.g. int's intTpNew) directly and skip the user's

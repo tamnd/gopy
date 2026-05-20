@@ -192,7 +192,7 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 		// CPython: Python/bytecodes.c:3725 _SPECIALIZE_CALL (CALL_KW)
 		nargs := int32(oparg)
 		callable := e.peek(int(nargs) + 2).AsObject()
-		if e.peek(int(nargs) + 1).AsObject() != nil {
+		if e.peek(int(nargs)+1).AsObject() != nil {
 			nargs++
 		}
 		specialize.CallKw(callable, code, idx, nargs)

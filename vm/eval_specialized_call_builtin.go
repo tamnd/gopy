@@ -37,9 +37,9 @@ import (
 // adjustment.
 //
 // CPython: Python/bytecodes.c _CALL_* prologue (arguments / total_args)
-func (e *evalState) callFrameArgs(oparg uint32) (callable, selfOrNull objects.Object, args []objects.Object) {
+func (e *evalState) callFrameArgs(oparg uint32) (callable objects.Object, args []objects.Object) {
 	argc := int(oparg)
-	selfOrNull = e.peek(argc).AsObject()
+	selfOrNull := e.peek(argc).AsObject()
 	callable = e.peek(argc + 1).AsObject()
 	total := argc
 	if selfOrNull != nil {
@@ -54,7 +54,7 @@ func (e *evalState) callFrameArgs(oparg uint32) (callable, selfOrNull objects.Ob
 	for i := range argc {
 		args[off+i] = e.peek(argc - 1 - i).AsObject()
 	}
-	return callable, selfOrNull, args
+	return callable, args
 }
 
 // finishCall drops the call frame and pushes the result, advancing
@@ -73,7 +73,7 @@ func (e *evalState) finishCall(oparg uint32, result objects.Object) int {
 //
 // CPython: Python/bytecodes.c:4233 _CALL_BUILTIN_O
 func (e *evalState) fastCallBuiltinO(oparg uint32) (int, bool, error) {
-	callable, _, args := e.callFrameArgs(oparg)
+	callable, args := e.callFrameArgs(oparg)
 	bf, ok := callable.(*objects.BuiltinFunction)
 	if !ok {
 		return 0, false, nil
@@ -96,7 +96,7 @@ func (e *evalState) fastCallBuiltinO(oparg uint32) (int, bool, error) {
 //
 // CPython: Python/bytecodes.c:4268 _CALL_BUILTIN_FAST
 func (e *evalState) fastCallBuiltinFast(oparg uint32) (int, bool, error) {
-	callable, _, args := e.callFrameArgs(oparg)
+	callable, args := e.callFrameArgs(oparg)
 	bf, ok := callable.(*objects.BuiltinFunction)
 	if !ok {
 		return 0, false, nil
@@ -119,7 +119,7 @@ func (e *evalState) fastCallBuiltinFast(oparg uint32) (int, bool, error) {
 //
 // CPython: Python/bytecodes.c:4305 _CALL_BUILTIN_FAST_WITH_KEYWORDS
 func (e *evalState) fastCallBuiltinFastWithKeywords(oparg uint32) (int, bool, error) {
-	callable, _, args := e.callFrameArgs(oparg)
+	callable, args := e.callFrameArgs(oparg)
 	bf, ok := callable.(*objects.BuiltinFunction)
 	if !ok {
 		return 0, false, nil
@@ -166,7 +166,7 @@ func (e *evalState) fastCallLen(oparg uint32) (int, bool, error) {
 //
 // CPython: Python/bytecodes.c:4374 CALL_ISINSTANCE
 func (e *evalState) fastCallIsinstance(oparg uint32) (int, bool, error) {
-	callable, _, args := e.callFrameArgs(oparg)
+	callable, args := e.callFrameArgs(oparg)
 	if len(args) != 2 {
 		return 0, false, nil
 	}
@@ -281,7 +281,7 @@ func (e *evalState) fastCallTuple1(oparg uint32) (int, bool, error) {
 //
 // CPython: Python/bytecodes.c:4203 _CALL_BUILTIN_CLASS
 func (e *evalState) fastCallBuiltinClass(oparg uint32) (int, bool, error) {
-	callable, _, args := e.callFrameArgs(oparg)
+	callable, args := e.callFrameArgs(oparg)
 	tp, ok := callable.(*objects.Type)
 	if !ok {
 		return 0, false, nil
@@ -302,7 +302,7 @@ func (e *evalState) fastCallBuiltinClass(oparg uint32) (int, bool, error) {
 //
 // CPython: Python/bytecodes.c:4424 _CALL_METHOD_DESCRIPTOR_O
 func (e *evalState) fastCallMethodDescriptorO(oparg uint32) (int, bool, error) {
-	callable, _, args := e.callFrameArgs(oparg)
+	callable, args := e.callFrameArgs(oparg)
 	d, ok := callable.(*objects.MethodDescr)
 	if !ok {
 		return 0, false, nil
@@ -313,7 +313,7 @@ func (e *evalState) fastCallMethodDescriptorO(oparg uint32) (int, bool, error) {
 	if len(args) != 2 {
 		return 0, false, nil
 	}
-	res, err := descrInvoke(d, args, nil)
+	res, err := descrInvoke(d, args)
 	if err != nil {
 		return 0, true, err
 	}
@@ -326,7 +326,7 @@ func (e *evalState) fastCallMethodDescriptorO(oparg uint32) (int, bool, error) {
 //
 // CPython: Python/bytecodes.c:4543 _CALL_METHOD_DESCRIPTOR_FAST
 func (e *evalState) fastCallMethodDescriptorFast(oparg uint32) (int, bool, error) {
-	callable, _, args := e.callFrameArgs(oparg)
+	callable, args := e.callFrameArgs(oparg)
 	d, ok := callable.(*objects.MethodDescr)
 	if !ok {
 		return 0, false, nil
@@ -337,7 +337,7 @@ func (e *evalState) fastCallMethodDescriptorFast(oparg uint32) (int, bool, error
 	if len(args) == 0 {
 		return 0, false, nil
 	}
-	res, err := descrInvoke(d, args, nil)
+	res, err := descrInvoke(d, args)
 	if err != nil {
 		return 0, true, err
 	}
@@ -351,7 +351,7 @@ func (e *evalState) fastCallMethodDescriptorFast(oparg uint32) (int, bool, error
 //
 // CPython: Python/bytecodes.c:4463 _CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS
 func (e *evalState) fastCallMethodDescriptorFastKw(oparg uint32) (int, bool, error) {
-	callable, _, args := e.callFrameArgs(oparg)
+	callable, args := e.callFrameArgs(oparg)
 	d, ok := callable.(*objects.MethodDescr)
 	if !ok {
 		return 0, false, nil
@@ -362,7 +362,7 @@ func (e *evalState) fastCallMethodDescriptorFastKw(oparg uint32) (int, bool, err
 	if len(args) == 0 {
 		return 0, false, nil
 	}
-	res, err := descrInvoke(d, args, nil)
+	res, err := descrInvoke(d, args)
 	if err != nil {
 		return 0, true, err
 	}
@@ -375,7 +375,7 @@ func (e *evalState) fastCallMethodDescriptorFastKw(oparg uint32) (int, bool, err
 //
 // CPython: Python/bytecodes.c:4505 _CALL_METHOD_DESCRIPTOR_NOARGS
 func (e *evalState) fastCallMethodDescriptorNoArgs(oparg uint32) (int, bool, error) {
-	callable, _, args := e.callFrameArgs(oparg)
+	callable, args := e.callFrameArgs(oparg)
 	d, ok := callable.(*objects.MethodDescr)
 	if !ok {
 		return 0, false, nil
@@ -386,7 +386,7 @@ func (e *evalState) fastCallMethodDescriptorNoArgs(oparg uint32) (int, bool, err
 	if len(args) != 1 {
 		return 0, false, nil
 	}
-	res, err := descrInvoke(d, args, nil)
+	res, err := descrInvoke(d, args)
 	if err != nil {
 		return 0, true, err
 	}
@@ -399,10 +399,10 @@ func (e *evalState) fastCallMethodDescriptorNoArgs(oparg uint32) (int, bool, err
 // descriptor's closure with the full positional window.
 //
 // CPython: Objects/descrobject.c:296 method_call (descriptor check + dispatch)
-func descrInvoke(d *objects.MethodDescr, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+func descrInvoke(d *objects.MethodDescr, args []objects.Object) (objects.Object, error) {
 	// gopy keeps the call shape uniform; dispatching through the
 	// type-call slot reuses the existing owner-type check.
-	return d.Type().Call(d, args, kwargs)
+	return d.Type().Call(d, args, nil)
 }
 
 // methConvMask masks the METH_* tag bits the specializer reads.
