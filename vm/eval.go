@@ -63,6 +63,15 @@ type evalState struct {
 	//
 	// CPython: Python/ceval.c:1156 lastopcode
 	lastOpcode compile.Opcode
+
+	// code caches f.Code.Code so fetch / advance skip two pointer
+	// chases (e.f -> *Code -> .Code slice header) on every dispatch.
+	// Stable for the lifetime of this evalState because each Eval
+	// call creates a fresh evalState bound to one frame, and Frame.Init
+	// is the only path that swaps Code.
+	//
+	// CPython: Python/ceval.c next_instr local in _PyEval_EvalFrameDefault
+	code []byte
 }
 
 // Eval runs f to completion under ts and returns the value the frame
@@ -73,7 +82,7 @@ func Eval(ts *state.Thread, f *frame.Frame) (objects.Object, error) {
 	prev, g := setActiveThread(ts)
 	defer restoreActiveThread(prev, g)
 	v := vmFor(ts)
-	e := &evalState{ts: ts, f: f, breaker: v.breaker, gilTimer: &v.gilTimer, gil: v.gil}
+	e := &evalState{ts: ts, f: f, breaker: v.breaker, gilTimer: &v.gilTimer, gil: v.gil, code: f.Code.Code}
 	return e.run()
 }
 
@@ -165,33 +174,46 @@ func (e *evalState) run() (objects.Object, error) {
 
 // fetch decodes the instruction at f.InstrPtr. The bytecode is a
 // flat byte slice with two bytes per instruction: opcode then oparg.
-// EXTENDED_ARG accumulates into the next instruction's oparg.
+// The common path (no EXTENDED_ARG prefix) is straight-line so the
+// inliner can fold this into run(). The rare prefix path branches
+// off to fetchExtended.
 //
 // CPython: Python/ceval_macros.h NEXTOPARG
 func (e *evalState) fetch() (op compile.Opcode, oparg uint32, ok bool) {
-	co := e.f.Code
+	code := e.code
 	pc := e.f.InstrPtr
+	if pc+1 >= len(code) {
+		return 0, 0, false
+	}
+	raw := compile.Opcode(code[pc])
+	arg := uint32(code[pc+1])
+	if raw == compile.EXTENDED_ARG {
+		return e.fetchExtended(pc, arg)
+	}
+	return raw, arg, true
+}
+
+// fetchExtended handles the rare EXTENDED_ARG prefix run. Each
+// EXTENDED_ARG shifts the accumulator left 8 and ORs in the next
+// arg byte; the trailing real opcode picks up the accumulated arg.
+// f.InstrPtr is left pointing at the real opcode, matching CPython's
+// next_instr semantics.
+//
+// CPython: Python/ceval.c TARGET(EXTENDED_ARG)
+func (e *evalState) fetchExtended(pc int, oparg uint32) (op compile.Opcode, arg uint32, ok bool) {
+	code := e.code
+	pc += 2
 	for {
-		if pc+1 >= len(co.Code) {
+		if pc+1 >= len(code) {
 			return 0, 0, false
 		}
-		raw := compile.Opcode(co.Code[pc])
-		arg := uint32(co.Code[pc+1])
+		raw := compile.Opcode(code[pc])
+		b := uint32(code[pc+1])
+		oparg = (oparg << 8) | b
 		if raw != compile.EXTENDED_ARG {
-			// Point InstrPtr at the actual instruction so advance() and
-			// jumpBy() compute correct offsets past any EXTENDED_ARG prefix.
-			//
-			// CPython: Python/ceval_macros.h NEXTOPARG — next_instr is
-			// always left pointing at the real opcode, not the prefix.
 			e.f.InstrPtr = pc
-			return raw, oparg<<8 | arg, true
+			return raw, oparg, true
 		}
-		// CPython: each EXTENDED_ARG shifts the accumulated value left by 8
-		// and ORs in the new byte. The old formula (oparg | arg) << 8 was
-		// wrong: it shifted one position too many.
-		//
-		// CPython: Python/ceval.c TARGET(EXTENDED_ARG) oparg <<= 8; oparg |= arg
-		oparg = (oparg << 8) | arg
 		pc += 2
 	}
 }
@@ -205,10 +227,11 @@ func (e *evalState) fetch() (op compile.Opcode, oparg uint32, ok bool) {
 // `next_instr += INLINE_CACHE_ENTRIES_<OP>` step inside each arm).
 func (e *evalState) advance() int {
 	ip := e.f.InstrPtr
-	if ip < 0 || ip >= len(e.f.Code.Code) {
+	code := e.code
+	if ip < 0 || ip >= len(code) {
 		return ip + 2
 	}
-	op := compile.Opcode(e.f.Code.Code[ip])
+	op := compile.Opcode(code[ip])
 	return ip + 2 + 2*compile.CacheCount(op)
 }
 

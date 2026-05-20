@@ -205,6 +205,7 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			breaker:  breakerFor(savedTS),
 			genYield: yieldCh,
 			genSend:  sendCh,
+			code:     savedFrame.Code.Code,
 		}
 		_, runErr := ge.run()
 		if runErr != nil && !errors.Is(runErr, objects.ErrStopIteration) {

@@ -100,7 +100,7 @@ func newEvalStateForFastArm(t *testing.T, ts *state.Thread, co *objects.Code) *e
 	f := stack.Push(co, nil, nil, nil, nil)
 	t.Cleanup(stack.Pop)
 	v := vmFor(ts)
-	return &evalState{ts: ts, f: f, breaker: v.breaker, gilTimer: &v.gilTimer, gil: v.gil}
+	return &evalState{ts: ts, f: f, breaker: v.breaker, gilTimer: &v.gilTimer, gil: v.gil, code: f.Code.Code}
 }
 
 var _ *frame.Frame // satisfy import linter when frame indirections are used below
