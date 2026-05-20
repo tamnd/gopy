@@ -354,19 +354,60 @@ func StrRPartition(s, sep string) (string, string, string, error) {
 }
 
 // StrJoin ports str.join. Each iterable item must be a *Unicode.
+// Internally routes through UnicodeWriter (spec 1712 P15.2) so the
+// output is classified once via the writer's maxchar tracking.
 //
-// CPython: Objects/unicodeobject.c:L12524 unicode_join
+// CPython: Objects/unicodeobject.c:10253 PyUnicode_Join
+// CPython: Objects/unicodeobject.c:12532 unicode_join
 func StrJoin(sep string, parts []Object) (string, error) {
-	pieces := make([]string, len(parts))
-	for i, p := range parts {
-		u, ok := asUnicode(p)
+	u, err := StrJoinUnicode(NewStr(sep).(*Unicode), parts)
+	if err != nil {
+		return "", err
+	}
+	return u.Value(), nil
+}
+
+// StrJoinUnicode is the *Unicode-returning variant. The str.join
+// binding calls this directly so the writer's Finish() produces an
+// already-classified *Unicode (kind / ascii / length populated)
+// instead of forcing a second walk via NewStr.
+//
+// CPython: Objects/unicodeobject.c:10278 _PyUnicode_JoinArray
+func StrJoinUnicode(sep *Unicode, parts []Object) (*Unicode, error) {
+	if len(parts) == 0 {
+		return NewStr("").(*Unicode), nil
+	}
+	// Singleton fast path mirrors _PyUnicode_JoinArray's seqlen==1
+	// branch.
+	if len(parts) == 1 {
+		u, ok := parts[0].(*Unicode)
 		if !ok {
-			return "", fmt.Errorf("TypeError: sequence item %d: expected str instance, %s found",
+			return nil, fmt.Errorf("TypeError: sequence item 0: expected str instance, %s found",
+				parts[0].Type().Name)
+		}
+		if u.Type() == strType {
+			return u, nil
+		}
+	}
+	var w UnicodeWriter
+	w.Init()
+	w.overallocate = true
+	for i, p := range parts {
+		u, ok := p.(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: sequence item %d: expected str instance, %s found",
 				i, p.Type().Name)
 		}
-		pieces[i] = u
+		if i > 0 && sep.length > 0 {
+			if err := w.WriteStr(sep); err != nil {
+				return nil, err
+			}
+		}
+		if err := w.WriteStr(u); err != nil {
+			return nil, err
+		}
 	}
-	return strings.Join(pieces, sep), nil
+	return w.Finish(), nil
 }
 
 // StrReplace ports str.replace. count<0 means all.

@@ -461,11 +461,15 @@ func strJoinMethod(args []Object, _ map[string]Object) (Object, error) {
 		}
 		parts = append(parts, v)
 	}
-	out, jerr := StrJoin(sep, parts)
+	sepU, ok := args[0].(*Unicode)
+	if !ok {
+		sepU = NewStr(sep).(*Unicode)
+	}
+	out, jerr := StrJoinUnicode(sepU, parts)
 	if jerr != nil {
 		return nil, jerr
 	}
-	return NewStr(out), nil
+	return out, nil
 }
 
 func strPartitionMethod(args []Object, _ map[string]Object) (Object, error) {
