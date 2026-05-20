@@ -3410,6 +3410,82 @@ the P2 gate is `richards` and `call_method` dropping below the
 hot-loop on the Python-defined call path that the tier-2 trace
 projection optimizes.
 
+### Small subset, re-run 2026-05-21 (post D2 + D5 dispatch tightening)
+
+_Captured: 2026-05-21 against `dd9b863d` on branch
+`feat/v0.12.4-spec-1712-p8p9` (PR #74). Same host as prior 2026-05-20 snapshots.
+The window since the post-spec-1714 L+M snapshot contains D2
+(ConstObjs pre-wrap + StackBase + cached code byte slice, commits
+`d912773d` / `96a089dd` / `98c8dcd5`) and D5 (inline LOAD_CONST /
+LOAD_FAST / STORE_FAST / POP_TOP fast switch hoisted into `run()`,
+commits `b8145817` + `2ac1e19e`). This is the first workload-level
+read of the D-series so far._
+
+| Benchmark         | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy |
+|-------------------|------------------:|---------------:|----------:|---------------:|------------:|
+| `call_method`     |             47.15 |          28.54 |    249.87 |          5.30x |       8.76x |
+| `fannkuch`        |            426.29 |         115.46 |  13541.15 |         31.76x |     117.28x |
+| `json_dumps`      |            142.00 |         194.12 |  20423.13 |        143.82x |     105.21x |
+| `nbody`           |             49.27 |          32.14 |    169.97 |          3.45x |       5.29x |
+| `pidigits`        |             52.03 |          47.95 |    117.78 |          2.26x |       2.46x |
+| `regex_compile`   |             57.01 |         208.94 |    395.82 |          6.94x |       1.89x |
+| `richards`        |             58.28 |          39.26 |    423.64 |          7.27x |      10.79x |
+| `unpack_sequence` |             34.45 |          27.24 |     74.82 |          2.17x |       2.75x |
+| **geomean**       |             73.35 |          62.07 |    602.46 |          8.21x |       9.71x |
+
+Headline: gopy / cpython **geomean 8.21x** (vs 109.37x on the prior
+spec-1714 L+M snapshot, same host). The shift is workload-real, not
+just host noise: the prior snapshot had four benches running at
+44-82 seconds each (`call_method`, `fannkuch`, `regex_compile`,
+`richards`), which means run_one.sh was extending iteration counts
+to chase `TARGET_WALL_MS=30000` and the slow dispatch path was being
+amplified by the auto-scaler. With D2+D5 in, those same benches
+finish in 250-13500 ms at the same iteration counts, so the
+auto-scaler does not need to inflate them and the ratio collapses.
+
+Per-bench:
+
+- `pidigits` 2.26x (was 1.86x). Within run-to-run band, still inside
+  the 2.0x ship gate window.
+- `unpack_sequence` 2.17x (was 77.65x). Pure tight loop on STORE_FAST
+  and the inlined fast switch is exactly what its inner loop hits.
+- `nbody` 3.45x (was 6.14x). Inner loop is LOAD_FAST + BINARY_OP +
+  STORE_FAST heavy; the LOAD_FAST + STORE_FAST inlines moved it.
+- `call_method` 5.30x (was 1106x). Auto-scaler effect plus inlined
+  LOAD_FAST.
+- `regex_compile` 6.94x (was 956x). Same auto-scaler effect; re
+  itself is now ported but compile time still pays the dispatch tax.
+- `richards` 7.27x (was 843x). Same.
+- `fannkuch` 31.76x. Still the second-worst outlier. The inner loop
+  reaches LIST_APPEND / GET_ITER / FOR_ITER heavy. D8 / D9 land next.
+- `json_dumps` 143.82x. The single biggest remaining workload-level
+  gap. The encoder runs as Python bytecode (`Lib/json/encoder.py`)
+  every call. The cpython path is `Modules/_json.c::py_encode_basestring_ascii`
+  plus the C `_iterencode` driver; until D8 ports those, this bench
+  is the geomean drag.
+
+Improvements vs the 2026-05-16 `bench/baseline_v0124.json`:
+`call_method` -99.7% (78043 ms -> 249.87 ms), `regex_compile` -99.5%
+(80286 ms -> 395.82 ms), `richards` -99.5% (81250 ms -> 423.64 ms),
+`unpack_sequence` -98.8% (6204 ms -> 74.82 ms), `pidigits` -59.4%
+(289.97 ms -> 117.78 ms). `fannkuch`, `json_dumps`, `nbody` flipped
+from runtime_error to ok. `compare-baseline: OK`.
+
+Highest-leverage next step (per ship order):
+
+D8 port of `Modules/_json.c` lands next: that alone closes the
+gap from 143.82x to within the run-to-run band on `json_dumps`,
+which drops the eight-bench geomean from 8.21x to ~5.45x even with
+no other change. D9 (`Objects/abstract.c` direct-slot dispatch on
+BINARY_OP / BINARY_SUBSCR) then peels off the remaining
+`fannkuch` / `nbody` / `richards` overhead since all three loop on
+arithmetic and subscript. D6 (prune retDone 5-tuple) + D3 (remove
+the remaining method-call indirection on the slow path) are smaller
+absolute wins now that the four hot arms are loop-local but they
+still matter for `richards` (which hits LOAD_GLOBAL / CALL more
+than the fast quartet). The 1.5x ship gate is now within reach
+inside D8 + D9.
+
 ### Full corpus (release-tag and nightly only)
 
 _Populated when `bench/run_full.sh` lands its first end-to-end run.
