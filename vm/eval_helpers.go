@@ -1142,8 +1142,11 @@ func (e *evalState) stackrefsToObjects(refs []stackref.Ref, n uint32) []objects.
 // unicodeJoinArray wraps CPython's _PyUnicode_JoinArray: concatenate
 // `items[:n]` using `sep` as the separator. Returns nil on error with
 // pendingErr set so the surrounding ERROR_IF translates as expected.
+// Routes through objects.StrJoinUnicode so the writer's Finish() builds
+// a *Unicode with kind/ascii/length populated, skipping the classify
+// walk NewStr would otherwise force. This is BUILD_STRING's hot path.
 //
-// CPython: Objects/unicodeobject.c _PyUnicode_JoinArray
+// CPython: Objects/unicodeobject.c:10278 _PyUnicode_JoinArray
 func (e *evalState) unicodeJoinArray(sep objects.Object, items []objects.Object, n uint32) objects.Object {
 	sepStr, ok := sep.(*objects.Unicode)
 	if !ok {
@@ -1154,16 +1157,12 @@ func (e *evalState) unicodeJoinArray(sep objects.Object, items []objects.Object,
 		e.pendingErr = fmt.Errorf("_PyUnicode_JoinArray: count %d exceeds slice (len %d)", n, len(items))
 		return nil
 	}
-	parts := make([]string, n)
-	for i := uint32(0); i < n; i++ {
-		s, serr := objects.Str(items[i])
-		if serr != nil {
-			e.pendingErr = serr
-			return nil
-		}
-		parts[i] = s
+	out, err := objects.StrJoinUnicode(sepStr, items[:n])
+	if err != nil {
+		e.pendingErr = err
+		return nil
 	}
-	return objects.NewStr(strings.Join(parts, sepStr.Value()))
+	return out
 }
 
 // tupleFromStackRef wraps _PyTuple_FromStackRefStealOnSuccess. The
