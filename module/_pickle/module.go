@@ -224,5 +224,17 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 
+	// Pickler / Unpickler types. pickle.py's second `from _pickle
+	// import (...)` block only succeeds once these resolve, after
+	// which pickle.dumps / pickle.loads pick the C accelerator.
+	// CPython: Modules/_pickle.c:8090 Pickler_Type
+	// CPython: Modules/_pickle.c:7510 Unpickler_Type
+	if err := d.SetItem(objects.NewStr("Pickler"), picklerType); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("Unpickler"), unpicklerType); err != nil {
+		return nil, err
+	}
+
 	return m, nil
 }

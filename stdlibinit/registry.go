@@ -278,12 +278,16 @@ import (
 	_ "github.com/tamnd/gopy/module/marshal"
 
 	// Built-in module: _pickle. Registers itself via
-	// module/_pickle/module.go init(). Phase 1 of the staged port:
-	// HIGHEST_PROTOCOL / DEFAULT_PROTOCOL, the wire-protocol opcode
-	// table (Go-internal constants), and the three exception classes.
-	// Pickler / Unpickler / dumps / loads land in later phases;
-	// pickle.py's `from _pickle import (...)` falls back to its pure-
-	// Python path on ImportError until then.
+	// module/_pickle/module.go init(). Publishes the full surface
+	// pickle.py reaches for in its C-accelerator try block:
+	// HIGHEST_PROTOCOL / DEFAULT_PROTOCOL, PickleError /
+	// PicklingError / UnpicklingError, dump / dumps / load / loads,
+	// and the Pickler / Unpickler classes. With these in place the
+	// `from _pickle import (...)` at pickle.py:1888 resolves and
+	// pickle.dumps / pickle.loads route through the Go encoder /
+	// decoder on every call. PickleBuffer (out-of-band buffers) is
+	// still deferred, pickle.py wraps that import in its own try /
+	// except so its absence is fine.
 	// CPython: Modules/_pickle.c:7700 _pickle_exec
 	_ "github.com/tamnd/gopy/module/_pickle"
 )
