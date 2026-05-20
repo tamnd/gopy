@@ -51,15 +51,22 @@ func TestStoreAttrInstanceValue(t *testing.T) {
 	}
 }
 
-func TestStoreAttrWithHint(t *testing.T) {
+func TestStoreAttrSkipsAbsentKey(t *testing.T) {
+	// CPython's specialize_dict_access_hint fails when LookupIndex
+	// returns DKIX_EMPTY, leaving STORE_ATTR as the adaptive parent.
+	// gopy follows the same rule: the first store of a fresh
+	// attribute must go through generic STORE_ATTR (which inserts
+	// the key), and only later stores can specialize.
+	//
+	// CPython: Python/specialize.c:1039 specialize_dict_access_hint
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
 	cls.HasDict = true
 	inst := objects.NewInstance(cls)
 	buf := storeAttrBuf()
 	StoreAttr(inst, newAttrName("z"), buf, 0)
-	if got := compile.Opcode(buf[0]); got != compile.STORE_ATTR_WITH_HINT {
-		t.Fatalf("opcode: got %s want STORE_ATTR_WITH_HINT", got.Name())
+	if got := compile.Opcode(buf[0]); got != compile.STORE_ATTR {
+		t.Fatalf("opcode: got %s want STORE_ATTR (absent key must not specialize)", got.Name())
 	}
 }
 

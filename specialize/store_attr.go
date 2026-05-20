@@ -80,17 +80,18 @@ func StoreAttr(owner objects.Object, name *objects.Unicode, code []byte, instr i
 		Unspecialize(code, instr)
 		return
 	}
-	c := attrCacheAt(code, instr)
-	c.setVersion(version)
-	if idx == objects.DictKeyAbsent {
-		c.setIndex(0)
-		Specialize(code, instr, compile.STORE_ATTR_WITH_HINT)
-		return
-	}
-	if idx > 0xFFFF {
+	// CPython's specialize_dict_access_hint fails when LookupIndex
+	// returns DKIX_EMPTY or an index >= 2^16. Both routes leave the
+	// adaptive parent intact so the next store inserts the key via
+	// the generic SetAttr path and the counter cools back down.
+	//
+	// CPython: Python/specialize.c:1039 specialize_dict_access_hint
+	if idx == objects.DictKeyAbsent || idx > 0xFFFF {
 		Unspecialize(code, instr)
 		return
 	}
+	c := attrCacheAt(code, instr)
+	c.setVersion(version)
 	c.setIndex(uint16(idx))
 	Specialize(code, instr, compile.STORE_ATTR_INSTANCE_VALUE)
 }

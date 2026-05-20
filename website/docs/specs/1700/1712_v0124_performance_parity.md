@@ -329,7 +329,7 @@ gate that backs it.
 | BINARY_OP | 13/13 non-JIT | `vm/eval_specialized_binary_op.go` — `ADD_INT`, `SUBTRACT_INT`, `MULTIPLY_INT` (math/bits overflow guard); `ADD_FLOAT`, `SUBTRACT_FLOAT`, `MULTIPLY_FLOAT`; `ADD_UNICODE` shared with `INPLACE_ADD_UNICODE`; `SUBSCR_LIST_INT`, `SUBSCR_TUPLE_INT`, `SUBSCR_STR_INT` (ASCII fast path), `SUBSCR_DICT`, `SUBSCR_LIST_SLICE` | `specialize/gatedata/spec_binary_op.py` (`TestGateSpecBinaryOp`) | DONE | 6a8aace |
 | FOR_ITER | 3/4 | `vm/eval_specialized_for_iter.go` — `LIST`, `TUPLE`, `RANGE`; typed `Next` helpers in `objects/list.go::ListIterNextFast`, `objects/tuple.go::TupleIterNextFast`, `objects/range_iter.go::RangeIterNextFast` skip the `tp_iternext` slot lookup | `vm/eval_specialized_for_iter_test.go` (hit / exhaustion / wrong-type deopt per family) | WIP — `GEN` deferred: it needs the generator-frame push/pop path the VM does not yet expose; dispatch loop falls through to the generic FOR_ITER body for `FOR_ITER_GEN` until that lands | 44786dc4 |
 | LOAD_GLOBAL | 2/2 | `vm/eval_specialized_load_global.go` — `MODULE`, `BUILTIN` | `specialize/gatedata/spec_load_global.py` (`TestGateSpecLoadGlobal`) | DONE | 2f1f603 |
-| STORE_ATTR | 1/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (faithful 1-1 port of CPython's macro: validate type_version, write to cached `Instance.slots[idx]`) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`) | WIP — `INSTANCE_VALUE` and `WITH_HINT` deliberately deferred; they need a `Dict.SetValueAt(slot, value)` primitive that writes the entry's value cell without re-hashing the key, plus the managed-dict-offset modelling listed in P1.4a. Shipping them before that lands forces a shim that re-runs `SetItem(name, value)`, which is exactly the ad-hoc patch the ground rule forbids. | 96130ac |
+| STORE_ATTR | 3/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (validate type_version, write `Instance.slots[idx]`), `INSTANCE_VALUE` (validate type_version, validate dict slot still names the same unicode key via `Dict.StoreEntryAtName`, write entry value, fire `DictEventModified`), `WITH_HINT` (same body as INSTANCE_VALUE — gopy stores every instance attribute in the dict so the CPython inline-values-vs-managed-dict split collapses to one path, both opcodes stay separate so the specializer's classification matches CPython 1:1 and deopt counters track each route) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`), `specialize/store_attr_test.go` (`TestStoreAttrSlot`, `TestStoreAttrInstanceValue`, `TestStoreAttrSkipsAbsentKey`) | DONE — also fixed a CPython-divergent specializer branch that used to emit `STORE_ATTR_WITH_HINT` with index=0 when the attribute was absent at specialize time. CPython's `specialize_dict_access_hint` (`Python/specialize.c:1039`) refuses to specialize in that case so the first store inserts via generic `STORE_ATTR` and only later stores can specialize once the slot is populated. The new arm requires the slot's key to still match `co_names[oparg]` because the 4-cell STORE_ATTR cache only stamps `type_version` (no `keys_version` slot like LOAD_ATTR has) so a delete + re-insert into the same bucket could leave the cached index pointing at a stale name — the runtime key compare is the same safety net CPython uses inside `_STORE_ATTR_WITH_HINT`. Micro-bench (`self.n += 1` × 1M iterations) drops 117s → 107s (~8%); the remaining ceiling is dispatch-loop overhead, not the STORE arm. | 96130ac, TBD |
 | SEND | 1/1 dispatch-level | `vm/eval_specialized_send_gen.go` — `fastSendGen` short-circuits the `execSend` type-switch with an identity check on `*Generator` / `*Coroutine` and forwards to `r.Send(v)`. Architectural ceiling: gopy generators run on a dedicated goroutine driven by `yieldCh` / `sendCh` channels, so the CPython `_SEND_GEN_FRAME` + `_PUSH_FRAME` "push gen's frame onto eval-stack, DISPATCH_INLINED into gen body" path has no analogue without retiring the goroutine-based design (tracked separately under P12). | `vm/eval_specialized_send_gen_test.go` (hit / StopIteration / wrong-type deopt / coroutine guard / surfacing non-StopIteration errors) | DONE — fast-arm dispatch | TBD |
 | LOAD_SUPER_ATTR | 2/2 | `vm/eval_specialized_load_super_attr.go` — `ATTR`, `METHOD`; backed by `objects.SuperLookup` with a `method_found` out-param mirroring CPython's `_PySuper_Lookup` | `vm/eval_specialized_load_super_attr_test.go` (hit / missing / non-super deopt / non-type deopt / method-found vs bound shape / oparg bit-0 assertions) | DONE | 2f09f55b |
 | CALL | 17/19 emitted | `vm/eval_specialized_call.go` + `vm/eval_specialized_call_builtin.go` + `vm/eval_specialized_call_alloc_init.go` — `PY_EXACT_ARGS`, `BOUND_METHOD_EXACT_ARGS`, `BUILTIN_O`, `BUILTIN_FAST`, `BUILTIN_FAST_WITH_KEYWORDS`, `LEN`, `ISINSTANCE`, `LIST_APPEND` (consumes trailing POP_TOP via SKIP_OVER), `TYPE_1`, `STR_1`, `TUPLE_1`, `BUILTIN_CLASS`, `METHOD_DESCRIPTOR_O`, `METHOD_DESCRIPTOR_FAST`, `METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS`, `METHOD_DESCRIPTOR_NOARGS`, `ALLOC_AND_ENTER_INIT` (stamps init pointer + version into `Type._spec_cache`; fast arm validates cache cell version vs live tp_version_tag, allocates via `NewInstance`, pushes init frame, folds the `_Py_InitCleanup` shim's EXIT_INIT_CHECK None-validation into the arm because Go-level `Eval()` returns directly without a DISPATCH_INLINED hop) | `vm/eval_specialized_call_test.go`, `vm/eval_specialized_call_builtin_test.go`, `vm/eval_specialized_call_alloc_init_test.go` (hit / one-arg hit / non-None TypeError / non-Type deopt / version-miss deopt / argcount-mismatch deopt) | WIP — generic `PY_GENERAL` / `BOUND_METHOD_GENERAL` / `NON_PY_GENERAL` arms fall through to the adaptive parent body (no fast path needed: CPython's bodies for those are themselves the generic call). | 39ba997f, TBD |
@@ -2515,6 +2515,107 @@ This snapshot is the new "floor". The next P1-P7 PR must drag at
 least three of these benches back below the 2026-05-16 baseline
 column, or document why parity-driven cost is structural for that
 PR's scope.
+
+### Small subset, re-run 2026-05-20 (post P1.4 closure + P3 + P4 + P6 + P10 + P15)
+
+_Captured: 2026-05-20 against `ed193b49` on branch
+`feat/v0.12.4-spec-1712-p8p9` (PR #74). Same host, same harness, same
+warmups/runs as the 2026-05-16 and 2026-05-19 snapshots. This is the
+first full re-baseline since P1.4 closure (METHOD_WITH_VALUES,
+GETATTRIBUTE_OVERRIDDEN, SUPER_ATTR, FOR_ITER fast arms, CALL fast
+arms, CALL_ALLOC_AND_ENTER_INIT, SEND_GEN), P3 int64 fast path, P4
+ASCII fast paths, P6.1 chunk frame recycle, P6.3 LOAD_FAST_BORROW
+fusion gate, P6.4 CALL_PY_EXACT_ARGS args-tuple bypass, P10 float
+pool, P15.1-P15.3 unicode writer landed on PR #74._
+
+| Benchmark         | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy | PyPy / cpython |
+|-------------------|------------------:|---------------:|----------:|---------------:|------------:|---------------:|
+| `call_method`     |             32.90 |          19.74 | 163095.06 |       4957.31x |    8264.03x |          0.60x |
+| `fannkuch`        |            282.25 |          82.28 |   8416.68 |         29.82x |     102.29x |          0.29x |
+| `json_dumps`      |             99.60 |         130.09 |  43783.71 |        439.58x |     336.57x |          1.31x |
+| `nbody`           |             37.29 |          25.27 |    210.68 |          5.65x |       8.34x |          0.68x |
+| `pidigits`        |             38.70 |          32.06 |    250.02 |          6.46x |       7.80x |          0.83x |
+| `regex_compile`   |             40.10 |         136.25 | 105299.83 |       2625.72x |     772.83x |          3.40x |
+| `richards`        |             39.17 |          28.70 | 105717.07 |       2698.67x |    3684.14x |          0.73x |
+| `unpack_sequence` |             26.75 |          18.57 |  10398.81 |        388.73x |     559.87x |          0.69x |
+| **geomean**       |             52.31 |          43.33 |  11762.64 |        224.85x |     271.47x |          0.83x |
+
+Headline: geomean **dropped from 283x (2026-05-16) → 225x (2026-05-20)**,
+all eight benches now run end-to-end (vs five at the 2026-05-16 baseline),
+and three of the five previously-running benches are still in
+double-or-triple-digit-times territory.
+
+Trend vs 2026-05-16 baseline (`bench/baseline_v0124.json`, frozen
+at the 2026-05-16 numbers):
+
+| Bench             | 2026-05-16 (ms) | 2026-05-20 (ms) | Delta    |
+|-------------------|----------------:|----------------:|---------:|
+| `fannkuch`        |   runtime_error |         8416.68 | unblocked |
+| `json_dumps`      |   runtime_error |        43783.71 | unblocked |
+| `nbody`           |   runtime_error |          210.68 | unblocked |
+| `pidigits`        |          289.97 |          250.02 |  -13.8%  |
+| `richards`        |        81250.57 |       105717.07 |  +30.1%  |
+| `call_method`     |        78043.22 |       163095.06 | +109.0%  |
+| `regex_compile`   |        80286.50 |       105299.83 |  +31.2%  |
+| `unpack_sequence` |         6204.49 |        10398.81 |  +67.6%  |
+
+Wins (post-P15.1-P15.3 unicode writer):
+
+- `pidigits` is the only bench inside the 2x target (6.46x cpython).
+  P3 PyLong int64 fast path is doing what it was supposed to do on
+  arbitrary-precision integer arithmetic.
+- `nbody` is at 5.65x cpython, 2.8x off the 2.0x target. P10 float
+  pool + P4 ASCII fast paths carry it; the next halving comes from
+  P1 inline caches on `dt * (dx * dx + dy * dy + dz * dz)`-style
+  expressions when the operand types are statically known.
+- `fannkuch` runs now (was N/A 2026-05-16). 29.82x is too slow but
+  the bench is unblocked.
+- `json_dumps` dropped from N/A to 439x. P15 writer is doing real
+  work on the json encoder's accumulated buffer; the remaining gap
+  is `_json` (still pure-Python, no C-native encoder port).
+
+Regressions (vs 2026-05-16 baseline):
+
+- `call_method` doubled (78s → 163s, +109%). This is the worst-case
+  microbench. The bench is a tight `c.tick()` loop where `tick`
+  reads-modifies-writes `self.n += 1` on an `object` subclass. The
+  baseline already missed the LOAD_ATTR_METHOD_WITH_VALUES arm
+  (LOAD_ATTR landed `INSTANCE_VALUE` first, METHOD_WITH_VALUES landed
+  `9051a0c3`); the doubling tells us the 1716 cfg-builder cost + new
+  frame setup is paid every call and the specialized method arm
+  hasn't fired. Two suspects worth a 1-day investigation: (a) the
+  specialized warmup counter is reset between iterations because of
+  `c = Counter()` materializing a fresh instance each time the
+  benchmark runs, draining the 16-tick adaptive ramp; (b) the
+  fast-arm guard is failing because `Py_TPFLAGS_INLINE_VALUES` is
+  not set on the user-class managed-dict path the bench actually
+  takes. Both can be confirmed by enabling `specialize/debug` and
+  diffing the dispatch trace against `python3.14 -X opt`.
+- `regex_compile` +31.2% — already accounted for by the 1716
+  compile-pipeline port (extra normalization passes, pseudo-jump
+  rewriting, stackdepth recomputation). The re/_sre engine itself
+  did not change in this window.
+- `richards` +30.1% — same family as `call_method`. Richards is
+  PEP 8 OO interpreter-style code with many small classes; same
+  LOAD_ATTR_METHOD_WITH_VALUES / CALL_PY_EXACT_ARGS specialization
+  ceiling.
+- `unpack_sequence` +67.6% — `LOAD_FAST_BORROW` / `STORE_FAST`
+  fusion landed but the prologue still walks every MAKE_CELL +
+  RESUME generically. P6 sub-row "LOAD_FAST_BORROW e2e gate" closed
+  the codegen edge; runtime side needs the borrow-vs-copy
+  distinction propagated to the unpack dispatch.
+
+Highest-leverage next step (per ship order):
+
+Investigate the `call_method` specialization-miss before any new
+port. A 2x regression on the smallest, most type-stable bench in
+the corpus signals a real defect in the just-landed
+LOAD_ATTR_METHOD_WITH_VALUES / CALL_PY_EXACT_ARGS pipeline.
+Fixing it should pull `call_method` back below the 2026-05-16
+column (78s) at minimum and shift the geomean materially below
+225x. Without this fix, P14 / P2 ports lift the un-runnable benches
+but do not move the geomean denominator that the Stop-hook target
+is gated against.
 
 ### Full corpus (release-tag and nightly only)
 

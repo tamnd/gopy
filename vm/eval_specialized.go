@@ -122,6 +122,10 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		next, ok = e.fastLoadGlobalBuiltin(oparg)
 	case compile.STORE_ATTR_SLOT:
 		next, ok = e.fastStoreAttrSlot(oparg)
+	case compile.STORE_ATTR_INSTANCE_VALUE:
+		next, ok = e.fastStoreAttrInstanceValue(oparg)
+	case compile.STORE_ATTR_WITH_HINT:
+		next, ok = e.fastStoreAttrWithHint(oparg)
 	case compile.CALL_PY_EXACT_ARGS:
 		return e.fastCallPyExactArgs(oparg)
 	case compile.CALL_BOUND_METHOD_EXACT_ARGS:

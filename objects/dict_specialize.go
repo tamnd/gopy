@@ -124,6 +124,37 @@ func (d *Dict) EntryAt(slot int) (key, value Object, ok bool) {
 	return e.key, e.value, true
 }
 
+// StoreEntryAtName overwrites the value at slot when the slot still
+// holds a *Unicode key whose contents equal expectName. Returns false
+// when the slot is out of range, dead, holds a non-unicode key, or
+// names a different attribute (a delete + re-insert into the same
+// bucket can leave the cached index pointing at a stale name). The
+// STORE_ATTR inline cache only stamps type_version, so this runtime
+// key check is the same safety net CPython relies on inside
+// _STORE_ATTR_WITH_HINT. Fires DictEventModified to match
+// insertdict's replace-branch notification.
+//
+// CPython: Python/bytecodes.c:2583 _STORE_ATTR_WITH_HINT key check
+func (d *Dict) StoreEntryAtName(slot int, expectName string, value Object) bool {
+	if slot < 0 || slot >= len(d.entries) {
+		return false
+	}
+	e := &d.entries[slot]
+	if !e.used {
+		return false
+	}
+	k, ok := e.key.(*Unicode)
+	if !ok {
+		return false
+	}
+	if k.Value() != expectName {
+		return false
+	}
+	e.value = value
+	notifyDictEvent(DictEventModified, d, e.key, value)
+	return true
+}
+
 // IsExactDict reports whether o is exactly *Dict (not a subclass).
 // The specializer narrows on this before reading dict internals.
 //
