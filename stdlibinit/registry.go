@@ -276,4 +276,14 @@ import (
 	// dumps / loads / dump / load entry points plus the version constant.
 	// CPython: Python/marshal.c:1949 marshal_methods
 	_ "github.com/tamnd/gopy/module/marshal"
+
+	// Built-in module: _pickle. Registers itself via
+	// module/_pickle/module.go init(). Phase 1 of the staged port:
+	// HIGHEST_PROTOCOL / DEFAULT_PROTOCOL, the wire-protocol opcode
+	// table (Go-internal constants), and the three exception classes.
+	// Pickler / Unpickler / dumps / loads land in later phases;
+	// pickle.py's `from _pickle import (...)` falls back to its pure-
+	// Python path on ImportError until then.
+	// CPython: Modules/_pickle.c:7700 _pickle_exec
+	_ "github.com/tamnd/gopy/module/_pickle"
 )

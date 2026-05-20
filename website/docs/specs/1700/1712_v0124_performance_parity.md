@@ -2101,7 +2101,7 @@ Critical pickle protocol-5 opcodes from `Modules/_pickle.c:107-137`:
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P14.1 | `module/_pickle/`: Go-native pickle protocol 5 encoder + decoder. Full port of `Modules/_pickle.c` (8500 LOC). | WIP | - |
+| P14.1 | `module/_pickle/`: Go-native pickle protocol 5 encoder + decoder. Full port of `Modules/_pickle.c` (8500 LOC). Phase 1 shipped: opcode table, `HIGHEST_PROTOCOL=5`, `DEFAULT_PROTOCOL=5`, `PickleError` / `PicklingError` / `UnpicklingError` (PicklingError + UnpicklingError subclass PickleError), inittab registration. With only the exception classes published, pickle.py's `from _pickle import (...)` still fails on `Pickler`; that triggers the `except ImportError` branch so `pickle.dumps` / `pickle.loads` continue routing through the pure-Python `_Pickler` / `_Unpickler`. The `from _pickle import PickleBuffer` shim at the top of pickle.py falls back the same way. | WIP | - |
 | P14.2 | `module/_elementtree/`: thin wrapper over `encoding/xml` matching the cpython `_elementtree` API. Full port of `Modules/_elementtree.c` (4000 LOC). | TODO | - |
 | P14.3 | `module/_sqlite3/`: cgo binding to libsqlite3 or pure Go via `modernc.org/sqlite`. Full port of `Modules/_sqlite/` (6000 LOC). | TODO | - |
 | P14.4 | `module/_csv/`: Go-native csv reader/writer matching `Modules/_csv.c` (1600 LOC). | WIP | - |
