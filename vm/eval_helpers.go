@@ -35,18 +35,20 @@ func (e *evalState) decrefInputs(n int) {
 // index n-1 is the slot closest to TOS.
 //
 // Used by translated arms whose body indexes a sized input like
-// `args[oparg]`. The slice is a copy; mutating an entry does not affect
-// the underlying stack.
+// `args[oparg]`. The returned slice aliases LocalsPlus directly so
+// hot opcodes like BUILD_SLICE / BUILD_LIST / BUILD_TUPLE skip the
+// per-instruction allocation; callers read but never mutate it, and
+// every consumer copies into its own buffer before the stack moves.
 //
 // CPython: Tools/cases_generator/stack.py Local.from_memory_effect —
-// sized inputs bind to a stack_pointer slice without copying, but the
-// gopy refcount-only path doesn't need the aliasing.
+// sized inputs bind to a stack_pointer slice without copying.
 func (e *evalState) peekSliceBottomFirst(topOffset, n int) []stackref.Ref {
-	out := make([]stackref.Ref, n)
-	for i := 0; i < n; i++ {
-		out[i] = e.peek(topOffset + n - 1 - i)
+	if n == 0 {
+		return nil
 	}
-	return out
+	f := e.f
+	top := f.StackBase + f.StackTop - topOffset
+	return f.LocalsPlus[top-n : top]
 }
 
 // setPendingErr stashes a generic synthetic exception on pendingErr,
