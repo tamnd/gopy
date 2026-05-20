@@ -217,6 +217,12 @@ func buildModule() (*objects.Module, error) {
 	if err := d.SetItem(objects.NewStr("dump"), objects.NewBuiltinFunction("dump", pickleDump)); err != nil {
 		return nil, err
 	}
+	if err := d.SetItem(objects.NewStr("loads"), objects.NewBuiltinFunction("loads", pickleLoads)); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("load"), objects.NewBuiltinFunction("load", pickleLoad)); err != nil {
+		return nil, err
+	}
 
 	return m, nil
 }

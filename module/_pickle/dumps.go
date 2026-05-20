@@ -100,6 +100,77 @@ func pickleDump(args []objects.Object, kwargs map[string]objects.Object) (object
 	return objects.None(), nil
 }
 
+// pickleLoads decodes a bytes / bytearray object and returns the
+// reconstructed value. CPython's clinic signature is
+// `loads(data, *, fix_imports=True, encoding='ASCII', errors='strict',
+//  buffers=None)`. encoding / errors / fix_imports only matter for
+// proto < 3 (legacy STRING / pickled-by-py2 paths); buffers feeds the
+// out-of-band NEXT_BUFFER opcode which we don't yet emit.
+//
+// CPython: Modules/_pickle.c:7992 _pickle_loads_impl
+func pickleLoads(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: loads() takes 1 positional argument (got %d)", len(args))
+	}
+	buf, err := asReadBuffer(args[0])
+	if err != nil {
+		return nil, err
+	}
+	for _, ignored := range []string{"fix_imports", "encoding", "errors", "buffers"} {
+		delete(kwargs, ignored)
+	}
+	for k := range kwargs {
+		return nil, fmt.Errorf("TypeError: loads() got an unexpected keyword argument %q", k)
+	}
+	return loadsAtom(buf)
+}
+
+// pickleLoad reads from a file-like (with .read(n) returning bytes)
+// and returns the decoded object. CPython signature:
+// `load(file, *, fix_imports=True, encoding='ASCII', errors='strict',
+//  buffers=None)`.
+//
+// CPython: Modules/_pickle.c:7930 _pickle_load_impl
+func pickleLoad(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: load() takes 1 positional argument (got %d)", len(args))
+	}
+	file := args[0]
+	for _, ignored := range []string{"fix_imports", "encoding", "errors", "buffers"} {
+		delete(kwargs, ignored)
+	}
+	for k := range kwargs {
+		return nil, fmt.Errorf("TypeError: load() got an unexpected keyword argument %q", k)
+	}
+	read, err := objects.GetAttr(file, objects.NewStr("read"))
+	if err != nil {
+		return nil, errors.New("TypeError: load() file argument has no read() method")
+	}
+	// CPython's load implementation reads incrementally. For Phase 5 we
+	// slurp the whole stream up front via read(-1), matching what
+	// io.BytesIO and io.BufferedReader return on a -1 argument.
+	out, err := objects.CallOneArg(read, objects.NewInt(-1))
+	if err != nil {
+		return nil, err
+	}
+	buf, err := asReadBuffer(out)
+	if err != nil {
+		return nil, err
+	}
+	return loadsAtom(buf)
+}
+
+// asReadBuffer extracts a []byte from a bytes / bytearray object.
+//
+// CPython: Modules/_pickle.c:7984 (loads PyBuffer_Release path)
+func asReadBuffer(obj objects.Object) ([]byte, error) {
+	switch v := obj.(type) {
+	case *objects.Bytes:
+		return v.Bytes(), nil
+	}
+	return nil, errors.New("TypeError: a bytes-like object is required")
+}
+
 // resolveProtocol picks the protocol value from the positional slot
 // at `protoArgIdx` (None / missing -> DEFAULT_PROTOCOL) or from the
 // `protocol` keyword argument. CPython performs the same lookup via
