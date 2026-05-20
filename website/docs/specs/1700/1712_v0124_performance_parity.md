@@ -3660,3 +3660,76 @@ to 5.44x, with the long-tail `fannkuch` still pinning the geomean at
 OK; every bench that previously ran clean now runs within tolerance,
 and the previously `runtime_error` rows (`fannkuch`, `json_dumps`,
 `nbody`) all complete.
+
+### Small subset, re-run 2026-05-21 (post list_ass_slice in-place port)
+
+| Benchmark        | gopy (ms) | gopy / cpython | prev (post-D6) |
+|------------------|----------:|---------------:|---------------:|
+| `call_method`    |    259.60 |          5.38x |          5.58x |
+| `fannkuch`       |  11439.21 |         26.36x |         33.65x |
+| `json_dumps`     |    553.05 |          3.77x |          4.07x |
+| `nbody`          |    195.90 |          3.94x |          3.75x |
+| `pidigits`       |    118.82 |          2.16x |          2.29x |
+| `regex_compile`  |    364.85 |          6.08x |          6.55x |
+| `richards`       |    418.57 |          7.16x |          7.84x |
+| `unpack_sequence`|     76.43 |          2.15x |          2.29x |
+| **geomean**      |    381.24 |          5.06x |          5.44x |
+
+CPU profile of `fannkuch` showed 50%+ of cycles in `runtime/GC` and
+`runtime.mallocgc`, not in dispatch. Root cause: the bench's hot inner
+loop is `a[i+1:j+1] = a[i:j][::-1]`, which hits
+`listSetSlice -> NewList(reversed) -> defensive copy` in the old path.
+Three allocations per loop body (`reversed` slice, `NewList` items
+vector, defensive copy in `listSetSlice`) where CPython
+`list_ass_slice_lock_held` does the work in place.
+
+Ports landed in `objects/list.go`:
+
+- `newListAdopt(items []objects.Object) *List` is an
+  ownership-transfer constructor that skips the defensive copy
+  `NewList` does. Used by `listGetSlice`, `listConcat`, and
+  `listRepeat` (all three already build a fresh `items` slice they
+  hand off, so the second copy was pure waste).
+- `listAssSlice(l, ilow, ihigh, v)` is the 1:1 port of
+  `Objects/listobject.c:768 list_ass_slice_lock_held`, including the
+  aliased self-assign protection (`v == l` duplicates `l.items`
+  first), the iterable-resolution path, and the three d-cases:
+  - d == 0: `copy(l.items[ilow:ihigh], items)` in place.
+  - d < 0 (shrink): `copy(l.items[ihigh+d:], l.items[ihigh:])` then
+    truncate by reslicing.
+  - d > 0 (grow): extend in place when capacity allows, otherwise
+    `make([]objects.Object, newLen, growCap(newLen))` with the
+    prefix/tail/items copied around the insertion point.
+- `growCap(n) = n + n>>3 + 6` matches
+  `Objects/listobject.c:74 list_resize`'s growth schedule, so a hot
+  append/extend pattern reaches the same capacity classes as
+  CPython does and gets the same amortized O(1) growth.
+- `listSetSlice` now delegates `step == 1` to `listAssSlice`. The
+  extended-slice path (`step != 1`) is unchanged; only the contiguous
+  case touches the in-place body, which is the case the
+  `fannkuch` hot loop hits.
+
+Drivers:
+
+- `fannkuch` collapsed 33.65x to 26.36x. Pure allocation savings:
+  the inner loop went from 4 allocations per pass (slice literal,
+  reverse buffer, NewList items, listSetSlice copy) to 0 (the slice
+  literal still allocates, but the rest is in place).
+- Every other bench moved within run-to-run noise. The list-slice
+  port doesn't touch dispatch, attribute access, or the bytecode
+  ladder, so the secondary benches see the noise floor.
+- Geomean 5.44x to 5.06x. Still 3.4x above the 1.5x ship gate. The
+  remaining wedge is dispatch: D3 (inline opcode arms; remove the
+  `trySpecialized` / `dispatchGen` / `dispatchHandwritten` method-
+  call indirection) and D4 (cache `stack_pointer` + `next_instr` as
+  loop locals). The fannkuch profile after this port shows
+  `trySpecialized` at 18.69% cum and `dispatchGen` at 4.01% cum, so
+  D3 is the next-biggest single lever.
+
+Next step per ship order: D3 inline opcode arms into the dispatch
+loop body. The dispatch ladder today is
+`dispatch -> trySpecialized -> dispatchGen -> dispatchHandwritten ->
+trySimple`. Each level is a method call with its own frame, return
+tuple, and (until D6) error-path tuple. D3 flattens that into a
+single `switch op` inside `dispatch` so the hot opcodes don't pay
+the method-call cost per instruction.
