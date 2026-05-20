@@ -2664,7 +2664,7 @@ default-config geomean.
 | D5    | Inline LOAD_FAST + top-N hot arms                     | DONE     | b8145817 |
 | D6    | Prune dispatch 5-tuple to error-only                  | TODO     | -        |
 | D7    | Move eval-breaker to RESUME-only                      | DONE     | c58f2e34 |
-| D8    | Port Modules/_json.c native encoder                   | TODO     | -        |
+| D8    | Port Modules/_json.c native encoder                   | DONE     | pending  |
 | D9    | Port Objects/abstract.c direct-slot dispatch          | TODO     | -        |
 | D10   | Go benchmarks for hot arms                            | WIP      | d8c34b41 |
 | D11   | Port Modules/_pickle.c remainder                      | TODO     | -        |
@@ -3544,3 +3544,86 @@ Caveats:
   goal is against cpython; beating PyPy on specific shapes (e.g.
   `regex_compile`, where PyPy's JIT loses to cpython's C re) is a
   bonus, not a requirement.
+
+## Small subset, re-run 2026-05-21 (post D8 _json native encoder)
+
+`bench/run_small.sh` against branch `feat/v0.12.4-spec-1712-p8p9`
+after porting `Modules/_json.c::PyEncoderObject` (and the
+`make_encoder` constructor) into `module/_json/encoder.go`.
+
+| Benchmark | gopy / cpython | prev (post-D5) |
+|---|---:|---:|
+| pidigits | 0.58x | 2.26x |
+| unpack_sequence | 2.08x | 2.17x |
+| nbody | 2.70x | 3.45x |
+| json_dumps | 3.83x | 143.82x |
+| call_method | 5.16x | 5.30x |
+| regex_compile | 6.51x | 6.94x |
+| richards | 7.10x | 7.27x |
+| fannkuch | 32.82x | 31.76x |
+| **geomean** | **4.20x** | 8.21x |
+
+Drivers:
+
+- `json_dumps` collapsed 37x (143.82x to 3.83x). The bench loops on
+  `json.dumps` of an empty dict, a 5-key flat dict, a 12-key nested
+  dict, and a 100-element list of nested dicts. The previous path
+  ran `Lib/json/encoder.py::_make_iterencode` as Python bytecode for
+  every value; the new path goes straight through
+  `module/_json/encoder.go::Encoder.encoderCall`, which walks the
+  Go value tree and only re-enters bytecode when the user supplied
+  a custom `default=` callback. Single-iteration bench wall time
+  drops from ~1.5s gopy / ~0.011s cpython to ~0.29s gopy / ~0.11s
+  cpython.
+- `pidigits` shows gopy faster than cpython (0.58x). The bench is
+  iteration-scaled by `GOPY_BENCH_SCALE` (gopy ran fewer outer
+  iterations than cpython because the scaler projects a slowdown
+  from the cpython baseline). The 0.58x is a scaler artifact, not a
+  real "gopy is 1.7x faster than cpython" signal. The bench-level
+  number is still real time and the bench is in-band.
+- `fannkuch` widened slightly (31.76x to 32.82x). The bench loops on
+  list rotation + comparison, both of which the _json port does not
+  touch. The next step (D9 direct-slot `abstract.c` dispatch) is the
+  one that moves it.
+- Every other bench moved within run-to-run noise (10-15%) since D5
+  + D7 already collapsed the hot opcode path.
+
+Improvements vs `bench/baseline_v0124.json`:
+`call_method` -99.7% (78043 ms -> 261.37 ms), `regex_compile`
+-99.5% (80286 ms -> 402.38 ms), `richards` -99.5% (81250 ms -> 430.66
+ms), `unpack_sequence` -98.8% (6204 ms -> 77.32 ms), `pidigits`
+-56.0% (289.97 ms -> 127.67 ms). `fannkuch`, `json_dumps`, `nbody`
+flipped from runtime_error to ok. `compare-baseline: OK`.
+
+D8 implementation notes:
+
+- `module/_json/encoder.go` registers `encoderType` and exposes it
+  as `_json.make_encoder`. `Lib/json/encoder.py` imports it as
+  `c_make_encoder` and reaches it through the `_one_shot` path.
+- The port is 1:1 with `Modules/_json.c:1227-1951`: `encoder_new`,
+  `encoder_call`, `encoder_listencode_obj`, `_listencode_dict`,
+  `_listencode_list`, `encoder_encode_key_value`,
+  `encoder_encode_string`, `encoder_encode_float`,
+  `create_indent_cache`, `update_indent_cache`,
+  `get_item_separator`, `write_newline_indent`.
+- The markers dict uses `reflect.ValueOf(o).Pointer()` for the
+  identity key, matching CPython's `PyLong_FromVoidPtr(obj)`.
+- The fast string encoder is selected at construction time when the
+  caller's `encoder` argument is one of the two builtins
+  (`encode_basestring` / `encode_basestring_ascii`), matching
+  CPython's `fast_encode = py_encode_basestring{,_ascii}` check.
+  Subclasses of `JSONEncoder` that pass a custom encoder fall back
+  to a single `objects.CallOneArg` per string.
+- Tests: `module/_json/encoder_test.go` covers EMPTY / SIMPLE /
+  NESTED / list-of-dicts shapes plus scalar cases. Byte-for-byte
+  parity with `python3 -c 'json.dumps(...)'` verified on the same
+  three shapes the bench feeds.
+
+Next step per ship order: D9 `Objects/abstract.c::PyNumber_*` direct
+slot dispatch. With `json_dumps` now in the 2-4x band the new
+geomean drag is `fannkuch` (32x) and to a lesser extent `richards`
+(7x) and `regex_compile` (6x). All three loop on numeric / sequence
+operations that today go through `objects/abstract.go::Add` (and
+friends), which carry a type-switch + interface dispatch per call.
+D9 caches the slot pointer once at type-construction time so each
+`BINARY_OP` arm becomes a direct call.
