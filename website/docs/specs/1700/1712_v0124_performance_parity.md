@@ -2052,7 +2052,7 @@ State machine in `module/gc/state.go` (~250 LOC) carries a
 
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
-| P13.1 | Drive `gc.collect(generation)` and `gc.set_threshold(g0, g1, g2)` from `module/gc/state.go` generation counters. Trigger `runtime.GC()` only when gen-0 threshold crossed. Track gen-1/gen-2 promotions. | TODO | - |
+| P13.1 | Ported `gc_select_generation` (Python/gc.c:1258) and the `_PyObject_GC_Link` allocator-side trigger (Python/gc.c:1855) into `module/gc/autotrigger.go`. `Track` now calls `maybeAutoCollect` after bumping `generations[0].count`; the helper short-circuits when `enabled=false`, `threshold==0`, the re-entrancy flag is set, or no generation has crossed its threshold. `selectGeneration` walks oldest-to-youngest and applies the issue-#4074 long-lived ratio gate (`long_lived_pending < long_lived_total/4`) before returning gen-2. `collectMain` now bookkeeps `long_lived_pending`/`long_lived_total` exactly as CPython does at Python/gc.c:1399. State carries the new `collecting bool` and the two long-lived counters. Tests in `autotrigger_test.go` cover threshold-crossing, disabled-gc skip, zero-threshold skip, the re-entrancy guard, and the gen-2 ratio gate. | Shipped | - |
 | P13.2 | Python-level finalizer queue: order `__del__` calls by gc-generation. | TODO | - |
 | P13.3 | Cycle detection for `__del__` resurrected objects. | TODO | - |
 

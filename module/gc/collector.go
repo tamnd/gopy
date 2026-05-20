@@ -129,11 +129,25 @@ func collectMain(gen int) (int, []pendingCallback) {
 
 	// Promote survivors. CPython moves them to the next-older
 	// generation unless we are already at the top; the same mapping
-	// applies here.
+	// applies here. The long_lived counters mirror the bookkeeping
+	// from gc_collect_main: a NUM_GENERATIONS-2 collection adds its
+	// survivors to long_lived_pending, while a full collection
+	// resets pending and republishes total.
+	//
+	// CPython: Python/gc.c:1399 long_lived_pending bookkeeping
 	dest := gen
 	if gen+1 < NumGenerations {
 		dest = gen + 1
 		state.generations[dest].count++
+	}
+	survivors := listSize(young)
+	if gen+1 < NumGenerations {
+		if gen == NumGenerations-2 {
+			state.longLivedPending += survivors
+		}
+	} else {
+		state.longLivedPending = 0
+		state.longLivedTotal = survivors
 	}
 
 	// Resurrected objects (still on the now-empty `unreachable` head)

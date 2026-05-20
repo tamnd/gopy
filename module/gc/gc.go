@@ -78,6 +78,7 @@ func Track(o objects.Object) {
 	listAppend(g, state.generations[0].head)
 	state.tracked[o] = g
 	state.generations[0].count++
+	maybeAutoCollect()
 }
 
 // Untrack removes o from whichever generation list it currently sits
