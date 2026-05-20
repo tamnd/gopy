@@ -2568,6 +2568,108 @@ P0 and P11 are already closed (P0 small-subset, P11 entire CFG
 optimizer). P12 core is closed; only P12.2 SEND tier-2 uop is
 open, gated on P2.3.
 
+## Dispatch tightening + parity ship plan (D0-D12, 2026-05-20)
+
+After the 2026-05-20 L+M generator landing locked tier-2 codegen
+behind a generator (geomean still 109.37x), the next gate is the
+tier-1 dispatch path itself. The audit below diffs `vm/dispatch.go`
++ `vm/eval.go` against the canonical CPython sources so every D
+phase cites the exact function being ported. Tier-2 is parked
+because both runtimes ship JIT default-off (`Python/pylifecycle.c:1325`
+mirrored by `lifecycle/jit_gate.go:48`), so it cannot move the
+default-config geomean.
+
+### Tier-1 dispatch drift audit
+
+| #   | Faithful CPython source                                                                  | gopy file / lines                                  | Drift                                                                                              |
+|-----|------------------------------------------------------------------------------------------|----------------------------------------------------|----------------------------------------------------------------------------------------------------|
+| D0  | `Include/internal/pycore_runtime_init.h` `_py_stats`, `Python/specialize.c::_Py_PrintSpecializationStats` | new `vm/eval_stats.go`                            | gopy has no per-opcode hot-count + pair-count infrastructure; can't profile without it             |
+| D1  | `Python/ceval.c:1145` `_PyEval_EvalFrameDefault` (single function, every opcode inlined) | `vm/eval.go:127 run` + `vm/dispatch.go:29 dispatch`  | gopy splits the loop driver from a 10-step sub-dispatcher ladder; CPython has neither            |
+| D2  | `Python/ceval_macros.h:204` `NEXTOPARG` (one 16-bit codeunit load)                        | `vm/eval.go:165 fetch` (byte-by-byte + EXTENDED_ARG carry + 3-tuple return) | byte loop vs single uint16 load                                                            |
+| D3  | `Python/ceval_macros.h:117` `TARGET(op)` (case label, USE_COMPUTED_GOTOS=0 branch)        | `vm/eval_dispatch_gen.go::dispatchGen` (switch reached via 5-tuple method) | switch is correct shape; method-call wrapper + 5-tuple return is the drift           |
+| D4  | `Python/ceval.c:1173` `next_instr` / `stack_pointer` (cached function locals)            | `Frame.InstrPtr` / `Frame.PushStack` (method calls every arm) | per-arm method dispatch instead of register-cached pointer                                       |
+| D5  | `Python/bytecodes.c:LOAD_FAST` (3 lines: GETLOCAL + STACK_GROW + DISPATCH inlined)        | `vm/eval_dispatch_gen.go` LOAD_FAST arm (peek/push/advance method chain) | hottest opcode runs 5+ method calls per instance                                              |
+| D6  | `Python/ceval.c` exit path (RETURN_VALUE jumps to `exit_frame:` label in same function)  | `dispatch()` returns `(next, retVal, retErr, retDone, err)` 5-tuple   | 5 return registers spilled on every opcode dispatch                                          |
+| D7  | `Python/ceval.c:1131` eval_breaker check only inside RESUME / CHECK_EVAL_BREAKER          | `vm/eval.go:129 gilTimer.poll + breaker.Load` (every iteration) | per-instruction poll vs only-on-RESUME                                                              |
+| D8  | `Modules/_json.c::py_encode_basestring_ascii` + `_json_encode_dict` (~3000 LoC native)    | absent. `module/_json/` not present; falls back to vendored Lib/json/encoder.py | json_dumps 348x slower because the encoder runs as Python bytecode                       |
+| D9  | `Objects/abstract.c::PyNumber_Add` (direct `tp_as_number->nb_add` slot)                   | `objects/abstract.go::Add` (interface{} vtable + type switch) | BINARY_OP arms pay one interface dispatch per operation                                         |
+| D10 | Go benchmark equivalents of `Python/bytecodes.c` hot arms                                | new `vm/eval_bench_test.go`                        | no quick-iter perf bench between D-phases                                                          |
+| D11 | `Modules/_pickle.c::save / load` (~8500 LoC)                                              | `module/_pickle/` (phases 1-6 shipped, decoder partial) | pickle benches still bytecode-bound                                                              |
+| D12 | n/a (verification only)                                                                   | `bench/run_small.sh` + timestamped append           | no parity gate enforcing geomean drop per D phase                                                 |
+
+### Recommended D-phase ship order
+
+1. **D0 Py_STATS port** ships first because every later phase relies
+   on the per-opcode profile to know which arms to attack. Faithful
+   target: `Include/internal/pycore_runtime_init.h::_py_stats` struct
+   plus `Python/specialize.c::_Py_PrintSpecializationStats` printer,
+   gated by a `GOPY_STATS` env var that mirrors CPython's `Py_STATS`
+   build flag. Land `vm/eval_stats.go` + a `vm/eval_stats_test.go`
+   gate that runs a tiny program and asserts the counters reflect
+   the executed opcodes. Bench gate: `bench/run_small.sh` with
+   `GOPY_STATS=1` captures the hot-arm profile that feeds D5.
+2. **D1 collapse ladder** then **D2 NEXTOPARG** then **D3 inline switch**
+   land as one PR. After this, `vm/dispatch.go` is gone and the eval
+   loop is a single function whose body is the generated switch in
+   `vm/eval_dispatch_gen.go`. Move trySpecialized / dispatchHandwritten /
+   trySimple / tryImport / tryGen / tryMatch into per-arm preludes
+   inside the switch (mirrors CPython's per-arm `DEOPT_IF` / `EXIT_IF`
+   / `ERROR_IF` macros, already locked by spec 1714 Phase 8 B2).
+3. **D4 cached pointers** then **D5 inline LOAD_FAST/LOAD_CONST/etc.**
+   ride the D1-D3 PR. After this, the eval-loop hot path matches the
+   shape of CPython's `_PyEval_EvalFrameDefault` byte-for-byte except
+   for missing computed-goto (Go has no labels-as-values; CPython's
+   USE_COMPUTED_GOTOS=0 fallback is the same shape gopy now emits).
+4. **D6 prune 5-tuple** + **D7 RESUME-only breaker** ship together.
+   After this, every dispatch returns at most an error (matching
+   CPython's `goto error;` from inside an arm).
+5. **D8 _json native encoder** is the single largest off-dispatch
+   win for the small subset (json_dumps drops from 348x toward
+   the cpython-PyPy range). Faithful port: `Modules/_json.c` lines
+   1-3050, no shims, no Lib/json/encoder.py fallback once the C-side
+   path is live.
+6. **D9 direct-slot abstract.c** ports `Objects/abstract.c` numeric
+   + subscript fast paths. Caches the slot pointer on `Type` so
+   BINARY_OP arms skip the interface{} type switch entirely.
+7. **D10 Go benchmarks** ship throughout the D-series (added in D0,
+   extended by each later phase). The benchmarks compare a release
+   build before/after each phase. Target: 2x+ on every hot-arm
+   micro-bench, geomean drop of 30%+ on each PR.
+8. **D11 _pickle remainder** + **D12 parity gate** close the series.
+   D12 is the explicit ship gate: `bench/run_small.sh` geomean must
+   be inside 1.5x of cpython before the D-series flips done.
+
+### Why this is faithful, not hacky
+
+- D1-D7 are the exact transformation CPython does when compiled with
+  `USE_COMPUTED_GOTOS=0` (see `Python/ceval_macros.h:122-128`). gopy
+  cannot use labels-as-values because Go has no such construct, so
+  the switch fallback is the correct port.
+- D8 and D11 are 1:1 file ports of `Modules/_json.c` and
+  `Modules/_pickle.c`. No ad-hoc shims; the existing scaffolding
+  (P14.1 phases) already carries the file layout.
+- D9 ports `Objects/abstract.c` slot dispatch directly; cached slot
+  pointers already exist on `Type` via P7 work, so this is a wire-up,
+  not a redesign.
+
+### Checklist
+
+| Phase | Description                                          | Status   | Commit |
+|-------|------------------------------------------------------|----------|--------|
+| D0    | Py_STATS per-opcode profile                          | WIP      | -      |
+| D1    | Collapse 10-step dispatch ladder to single function  | TODO     | -      |
+| D2    | NEXTOPARG single 16-bit codeunit load                 | TODO     | -      |
+| D3    | Inline opcode arms (no method-call wrapper)           | TODO     | -      |
+| D4    | Cache stack_pointer + next_instr as loop locals       | TODO     | -      |
+| D5    | Inline LOAD_FAST + top-N hot arms                     | TODO     | -      |
+| D6    | Prune dispatch 5-tuple to error-only                  | TODO     | -      |
+| D7    | Move eval-breaker to RESUME-only                      | TODO     | -      |
+| D8    | Port Modules/_json.c native encoder                   | TODO     | -      |
+| D9    | Port Objects/abstract.c direct-slot dispatch          | TODO     | -      |
+| D10   | Go benchmarks for hot arms                            | TODO     | -      |
+| D11   | Port Modules/_pickle.c remainder                      | TODO     | -      |
+| D12   | pyperformance small-subset rerun + parity gate        | TODO     | -      |
+
 ## Current benchmark results
 
 _Captured: 2026-05-16. First end-to-end P0 small-subset run with
