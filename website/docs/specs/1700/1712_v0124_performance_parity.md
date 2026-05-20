@@ -2389,9 +2389,13 @@ nothing tells the specializer when a class attribute changes.
    faster (the rsplit win comes from an append-then-reverse buffer
    that drops the O(n^2) head-prepend; matches CPython's
    pre-allocated `SPLIT_ADD` into a fixed-size PyList).
-   Non-ASCII (Latin-1 supplement, BMP, full unicode) still walks
-   UTF-8 until P4.1's UCS2/UCS4 storage lands. P15 unicode writer
-   DONE.
+   `StrStrip` / `StrLStrip` / `StrRStrip` ride the same dispatch:
+   `stripASCIIWhitespace` runs 9.3x faster than `stripRunesWhitespace`
+   (12 ns/op vs 111 ns/op) with zero allocations, and shares
+   `isPyWhitespaceASCII` so the 0x1C-0x1F semantic gap closes for
+   trimming too. Non-ASCII (Latin-1 supplement, BMP, full unicode)
+   still walks UTF-8 until P4.1's UCS2/UCS4 storage lands.
+   P15 unicode writer DONE.
 8. **P6.1 chunk LocalsPlus recycle** (DONE on PR #74, see chunk-arena
    notes under P6), **P6.3 LOAD_FAST_BORROW / STORE_FAST fusion**
    (DONE: the cfg-pass port shipped under spec 1715/1716 and the

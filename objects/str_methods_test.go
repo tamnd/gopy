@@ -219,6 +219,47 @@ func TestStrStrip(t *testing.T) {
 	}
 }
 
+// TestStrStripASCIIControls pins the 0x1C-0x1F semantic fix:
+// _PyUnicode_IsWhitespace recognises FS/GS/RS/US as whitespace, so
+// CPython strip drops them. Pre-port gopy used unicode.IsSpace which
+// misses them, so " \x1c\x1dhi\x1e\x1f " would have kept the controls.
+//
+// CPython: Objects/unicodetype_db.h:6676 _PyUnicode_IsWhitespace
+func TestStrStripASCIIControls(t *testing.T) {
+	in := " \x1c\x1dhi\x1e\x1f "
+	if got := StrStrip(in, ""); got != "hi" {
+		t.Errorf("StrStrip(%q) = %q, want %q", in, got, "hi")
+	}
+	if got := StrLStrip(in, ""); got != "hi\x1e\x1f " {
+		t.Errorf("StrLStrip(%q) = %q", in, got)
+	}
+	if got := StrRStrip(in, ""); got != " \x1c\x1dhi" {
+		t.Errorf("StrRStrip(%q) = %q", in, got)
+	}
+	// Pure controls strip down to the empty string.
+	if got := StrStrip("\x1c\x1d\x1e\x1f", ""); got != "" {
+		t.Errorf("StrStrip(all-controls) = %q", got)
+	}
+}
+
+// TestStrStripNonASCII keeps the rune slow path honest. NBSP (U+00A0)
+// is whitespace under _PyUnicode_IsWhitespace, so it must be trimmed
+// from both ends, including around non-ASCII payload.
+//
+// CPython: Objects/unicodeobject.c:11744 _PyUnicode_XStrip
+func TestStrStripNonASCII(t *testing.T) {
+	in := "  héllo  "
+	if got := StrStrip(in, ""); got != "héllo" {
+		t.Errorf("StrStrip(%q) = %q", in, got)
+	}
+	if got := StrLStrip(in, ""); got != "héllo  " {
+		t.Errorf("StrLStrip(%q) = %q", in, got)
+	}
+	if got := StrRStrip(in, ""); got != "  héllo" {
+		t.Errorf("StrRStrip(%q) = %q", in, got)
+	}
+}
+
 func TestStrCase(t *testing.T) {
 	if StrLower("Hello") != "hello" {
 		t.Error("lower")

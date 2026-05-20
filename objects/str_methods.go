@@ -548,12 +548,68 @@ func StrReplace(s, old, newS string, count int) string {
 	return strings.Replace(s, old, newS, count)
 }
 
+// stripASCIIWhitespace walks s from each end skipping bytes that
+// _PyUnicode_IsWhitespace recognises in the ASCII range. Returns
+// the bounds (lo, hi) of the kept slice. left/right control which
+// ends get trimmed: left/right both true is strip, left-only is
+// lstrip, right-only is rstrip.
+//
+// CPython: Objects/stringlib/transmogrify.h:80 do_strip
+func stripASCIIWhitespace(s string, left, right bool) string {
+	n := len(s)
+	lo := 0
+	if left {
+		for lo < n && isPyWhitespaceASCII(s[lo]) {
+			lo++
+		}
+	}
+	hi := n
+	if right {
+		for hi > lo && isPyWhitespaceASCII(s[hi-1]) {
+			hi--
+		}
+	}
+	if lo == 0 && hi == n {
+		return s
+	}
+	return s[lo:hi]
+}
+
+// stripRunesWhitespace is the non-ASCII slow path. Walks runes
+// because Latin-1+ strings still live as UTF-8 in *Unicode.v until
+// P4.1 ports kind-2/4 storage. Uses isPyWhitespaceRune so 0x1C-0x1F
+// match alongside the Unicode line/para/NBSP separators.
+//
+// CPython: Objects/unicodeobject.c:11744 _PyUnicode_XStrip
+func stripRunesWhitespace(s string, left, right bool) string {
+	rs := []rune(s)
+	lo := 0
+	if left {
+		for lo < len(rs) && isPyWhitespaceRune(rs[lo]) {
+			lo++
+		}
+	}
+	hi := len(rs)
+	if right {
+		for hi > lo && isPyWhitespaceRune(rs[hi-1]) {
+			hi--
+		}
+	}
+	if lo == 0 && hi == len(rs) {
+		return s
+	}
+	return string(rs[lo:hi])
+}
+
 // StrStrip ports str.strip. chars="" means default whitespace.
 //
 // CPython: Objects/unicodeobject.c:L12757 unicode_strip_impl
 func StrStrip(s, chars string) string {
 	if chars == "" {
-		return strings.TrimFunc(s, unicode.IsSpace)
+		if isASCII(s) {
+			return stripASCIIWhitespace(s, true, true)
+		}
+		return stripRunesWhitespace(s, true, true)
 	}
 	return strings.Trim(s, chars)
 }
@@ -563,7 +619,10 @@ func StrStrip(s, chars string) string {
 // CPython: Objects/unicodeobject.c:L12717 unicode_lstrip_impl
 func StrLStrip(s, chars string) string {
 	if chars == "" {
-		return strings.TrimLeftFunc(s, unicode.IsSpace)
+		if isASCII(s) {
+			return stripASCIIWhitespace(s, true, false)
+		}
+		return stripRunesWhitespace(s, true, false)
 	}
 	return strings.TrimLeft(s, chars)
 }
@@ -573,7 +632,10 @@ func StrLStrip(s, chars string) string {
 // CPython: Objects/unicodeobject.c:L12737 unicode_rstrip_impl
 func StrRStrip(s, chars string) string {
 	if chars == "" {
-		return strings.TrimRightFunc(s, unicode.IsSpace)
+		if isASCII(s) {
+			return stripASCIIWhitespace(s, false, true)
+		}
+		return stripRunesWhitespace(s, false, true)
 	}
 	return strings.TrimRight(s, chars)
 }
