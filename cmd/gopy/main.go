@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 
 	"github.com/tamnd/gopy/build"
@@ -30,7 +31,31 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(mainWithProfile())
+}
+
+// mainWithProfile wraps run() so that GOPY_CPUPROFILE's deferred
+// pprof.StopCPUProfile actually runs before the process exits.
+// os.Exit on its own skips defers, which would leave the profile
+// file empty.
+func mainWithProfile() int {
+	if path := os.Getenv("GOPY_CPUPROFILE"); path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "GOPY_CPUPROFILE:", err)
+			return 1
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintln(os.Stderr, "GOPY_CPUPROFILE:", err)
+			_ = f.Close()
+			return 1
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			_ = f.Close()
+		}()
+	}
+	return run(os.Args[1:], os.Stdout, os.Stderr)
 }
 
 // run drives _PyOS_GetOpt the same way pymain_init walks argv before
