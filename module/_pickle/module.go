@@ -209,5 +209,14 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 
+	// Module-level entry points.
+	// CPython: Modules/_pickle.c:8133 _pickle_methods
+	if err := d.SetItem(objects.NewStr("dumps"), objects.NewBuiltinFunction("dumps", pickleDumps)); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("dump"), objects.NewBuiltinFunction("dump", pickleDump)); err != nil {
+		return nil, err
+	}
+
 	return m, nil
 }
