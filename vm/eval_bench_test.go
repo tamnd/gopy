@@ -69,3 +69,66 @@ func BenchmarkLoadFastReturn(b *testing.B) {
 		}
 	}
 }
+
+// tightInstrCount is the number of LOAD_CONST/POP_TOP pairs packed
+// into one Code so EvalCode setup (frame push, builtins lookup, goid
+// swap) amortizes across thousands of dispatched opcodes. Without
+// this, a per-iter bench measures setup, not the dispatch loop.
+const tightInstrCount = 1000
+
+// BenchmarkDispatchTight runs one EvalCode with 1000 LOAD_CONST/POP_TOP
+// pairs followed by RETURN_VALUE. Reports ns/op per pair via b.SetBytes
+// shenanigans; instead we eyeball the absolute ns and divide. This is
+// the bench the D-series ladder-collapse work targets.
+func BenchmarkDispatchTight(b *testing.B) {
+	var bc []byte
+	for i := 0; i < tightInstrCount; i++ {
+		bc = emitWithCache(bc, compile.LOAD_CONST, 0)
+		bc = emitWithCache(bc, compile.POP_TOP, 0)
+	}
+	bc = emitWithCache(bc, compile.LOAD_CONST, 0)
+	bc = emitWithCache(bc, compile.RETURN_VALUE, 0)
+	co := &objects.Code{
+		Code:      bc,
+		Consts:    []any{int64(0)},
+		Stacksize: 4,
+	}
+	ts := state.NewThread()
+	g := objects.NewDict()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := EvalCode(ts, co, g, g); err != nil {
+			b.Fatalf("EvalCode: %v", err)
+		}
+	}
+}
+
+// BenchmarkDispatchLoadFastTight is the LOAD_FAST equivalent of the
+// tight bench above. LOAD_FAST + POP_TOP is the dominant pair in
+// pyperformance hotspots (Python/bytecodes.c LOAD_FAST). Use this to
+// measure D5 (LOAD_FAST/STORE_FAST/POP_TOP arm inlining).
+func BenchmarkDispatchLoadFastTight(b *testing.B) {
+	var bc []byte
+	bc = emitWithCache(bc, compile.LOAD_CONST, 0)
+	bc = emitWithCache(bc, compile.STORE_FAST, 0)
+	for i := 0; i < tightInstrCount; i++ {
+		bc = emitWithCache(bc, compile.LOAD_FAST, 0)
+		bc = emitWithCache(bc, compile.POP_TOP, 0)
+	}
+	bc = emitWithCache(bc, compile.LOAD_CONST, 0)
+	bc = emitWithCache(bc, compile.RETURN_VALUE, 0)
+	co := &objects.Code{
+		Code:      bc,
+		Consts:    []any{int64(0)},
+		Varnames:  []string{"x"},
+		Stacksize: 4,
+	}
+	ts := state.NewThread()
+	g := objects.NewDict()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := EvalCode(ts, co, g, g); err != nil {
+			b.Fatalf("EvalCode: %v", err)
+		}
+	}
+}
