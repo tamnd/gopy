@@ -44,6 +44,13 @@ func init() {
 			ready:  true,
 			hash:   -1,
 		}
+		if i >= 0x80 {
+			// Non-ASCII kind-1 singletons participate in slab dispatch
+			// (unicode_kind.go unicodeGetItemKind reads s.data1[i] when
+			// !ascii). Without this fill, indexing chr(0x80..0xFF)
+			// would deref nil.
+			u.data1 = []uint8{uint8(i)}
+		}
 		u.init(strType)
 		// Pre-compute the hash so the singletons don't race on first
 		// HashCached() call. Mirrors CPython's static-string preprocessing

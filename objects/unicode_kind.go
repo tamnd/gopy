@@ -112,11 +112,10 @@ func strEndsWithKind(s *Unicode, suffix string, start, end int) bool {
 }
 
 // unicodeGetItemKind returns the i-th codepoint as a one-char string.
-// Handles negative indices. ASCII strings index in O(1) via byte
-// addressing; non-ASCII strings walk the UTF-8 sequence. Single
-// codepoints < 0x100 route through the latin1 singleton cache
-// (`get_latin1_char` in CPython), so the fast path returns the shared
-// instance and skips Unicode allocation entirely.
+// Handles negative indices. Every kind reads its pre-encoded slab in
+// O(1); no UTF-8 walk. Single codepoints < 0x100 route through the
+// latin1 singleton cache (`get_latin1_char` in CPython), so the fast
+// path returns the shared instance and skips Unicode allocation.
 //
 // CPython: Objects/unicodeobject.c:1848 unicode_getitem
 // CPython: Objects/unicodeobject.c:1958 get_latin1_char
@@ -130,15 +129,21 @@ func unicodeGetItemKind(s *Unicode, i int) (Object, error) {
 	if s.ascii {
 		return latin1Cache[s.v[i]], nil
 	}
-	n := 0
-	for _, r := range s.v {
-		if n == i {
-			if r < 0x100 {
-				return latin1Cache[r], nil
-			}
-			return NewStr(string(r)), nil
+	switch s.kind {
+	case StrKind1Byte:
+		return latin1Cache[s.data1[i]], nil
+	case StrKind2Byte:
+		r := rune(s.data2[i])
+		if r < 0x100 {
+			return latin1Cache[r], nil
 		}
-		n++
+		return NewStr(string(r)), nil
+	case StrKind4Byte:
+		r := rune(s.data4[i])
+		if r < 0x100 {
+			return latin1Cache[r], nil
+		}
+		return NewStr(string(r)), nil
 	}
 	return nil, fmt.Errorf("IndexError: string index out of range")
 }

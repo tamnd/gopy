@@ -47,6 +47,19 @@ type Unicode struct {
 	ascii  bool   // all code points < 0x80
 	ready  bool   // CPython's "interned/canonicalized" flag
 	hash   int64  // -1 if not yet computed
+	// Pre-encoded PEP-393 narrow storage. CPython's PyUnicodeObject
+	// keeps one of `Py_UCS1*` / `Py_UCS2*` / `Py_UCS4*` based on the
+	// kind tag; gopy keeps the canonical UTF-8 view in `v` and builds
+	// the matching slab in `classify` for non-ASCII strings so codepoint
+	// indexing runs in O(1) (data1[i] / data2[i] / data4[i]) instead of
+	// re-walking the UTF-8 bytes. ASCII strings leave all three slabs
+	// nil since byte index equals codepoint index in `v`.
+	//
+	// CPython: Include/cpython/unicodeobject.h:75 PyUnicode_Kind
+	// CPython: Include/cpython/unicodeobject.h:135 PyUnicode_DATA
+	data1 []uint8  // kind=1, !ascii: latin1 codepoints 0x80..0xFF
+	data2 []uint16 // kind=2: UCS-2 BMP codepoints
+	data4 []uint32 // kind=4: full Unicode codepoints
 	// attrs holds instance attributes for str subclass objects. Nil for
 	// plain str instances; allocated by strSubclassSetAttr when first
 	// written. Mirrors CPython's tp_dictoffset on str subclasses (which
@@ -221,7 +234,7 @@ func init() {
 				return NewStr(""), nil
 			}
 			b := make([]byte, 0, len(s.v)*n)
-			for i := 0; i < n; i++ {
+			for range n {
 				b = append(b, s.v...)
 			}
 			return NewStr(string(b)), nil
@@ -253,14 +266,16 @@ func init() {
 	}
 }
 
-// strIterator is the iterator returned by iter(str).
+// strIterator is the iterator returned by iter(str). It walks the
+// codepoint count without materializing a []rune; each next() reads
+// the i-th codepoint through the source's PEP-393 slab in O(1) and
+// returns the cached latin1 singleton for codepoints < 0x100.
 //
 // CPython: Objects/unicodeobject.c:15126 unicodeiter_new
 type strIterator struct {
 	Header
-	src   *Unicode
-	runes []rune
-	pos   int
+	src *Unicode
+	pos int
 }
 
 var strIterType = NewType("str_iterator", []*Type{objectType})
@@ -269,11 +284,14 @@ func init() {
 	strIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	strIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*strIterator)
-		if it.pos >= len(it.runes) {
+		if it.pos >= it.src.length {
 			return nil, ErrStopIteration
 		}
-		r := it.runes[it.pos]
+		r := it.src.RuneAt(it.pos)
 		it.pos++
+		if r < 0x100 {
+			return latin1Cache[r], nil
+		}
 		return NewStr(string(r)), nil
 	}
 }
@@ -283,7 +301,7 @@ func init() {
 // CPython: Objects/unicodeobject.c:15126 unicodeiter_new
 func strIter(o Object) (Object, error) {
 	s := o.(*Unicode)
-	it := &strIterator{src: s, runes: []rune(s.v)}
+	it := &strIterator{src: s}
 	it.init(strIterType)
 	return it, nil
 }
@@ -308,10 +326,18 @@ func NewStr(s string) Object {
 	return o
 }
 
-// classify scans v to fill in length, kind, and ascii. Called from
-// NewStr; idempotent.
+// classify scans v to fill in length, kind, ascii, and the matching
+// PEP-393 narrow slab. Called from NewStr; idempotent.
 //
-// CPython: Objects/unicodeobject.c:L1696 find_maxchar_surrogates
+// The single-pass scan tracks the largest codepoint to pick the
+// narrowest kind that fits, then a second pass fills the chosen slab
+// (data1 for non-ASCII latin1, data2 for BMP, data4 for full
+// unicode). ASCII strings skip slab allocation: byte index equals
+// codepoint index in `v` so `unicodeGetItemKind` reads s.v[i]
+// directly.
+//
+// CPython: Objects/unicodeobject.c:1696 find_maxchar_surrogates
+// CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (slab fill)
 func (s *Unicode) classify() {
 	maxr := rune(0)
 	n := 0
@@ -328,12 +354,58 @@ func (s *Unicode) classify() {
 		s.ascii = true
 	case maxr < 0x100:
 		s.kind = StrKind1Byte
+		s.data1 = encodeUCS1(s.v, n)
 	case maxr < 0x10000:
 		s.kind = StrKind2Byte
+		s.data2 = encodeUCS2(s.v, n)
 	default:
 		s.kind = StrKind4Byte
+		s.data4 = encodeUCS4(s.v, n)
 	}
 	s.ready = true
+}
+
+// encodeUCS1 fills the kind-1 latin1 slab. Reached only for non-ASCII
+// strings whose max codepoint is < 0x100; every codepoint fits a byte.
+//
+// CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (UCS1 branch)
+func encodeUCS1(s string, n int) []uint8 {
+	out := make([]uint8, n)
+	i := 0
+	for _, r := range s {
+		out[i] = uint8(r)
+		i++
+	}
+	return out
+}
+
+// encodeUCS2 fills the kind-2 BMP slab. Reached only when the max
+// codepoint is in [0x100, 0x10000); every codepoint fits a uint16.
+//
+// CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (UCS2 branch)
+func encodeUCS2(s string, n int) []uint16 {
+	out := make([]uint16, n)
+	i := 0
+	for _, r := range s {
+		out[i] = uint16(r)
+		i++
+	}
+	return out
+}
+
+// encodeUCS4 fills the kind-4 full-unicode slab. Reached when the max
+// codepoint is >= 0x10000; codepoints are stored as raw uint32 (no
+// surrogate encoding).
+//
+// CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (UCS4 branch)
+func encodeUCS4(s string, n int) []uint32 {
+	out := make([]uint32, n)
+	i := 0
+	for _, r := range s {
+		out[i] = uint32(r)
+		i++
+	}
+	return out
 }
 
 // Value returns the canonical Go string. Same-package callers may
@@ -352,6 +424,46 @@ func (s *Unicode) IsASCII() bool { return s.ascii }
 // IsReady reports whether the canonical layout is built. Always true
 // for strings created via NewStr.
 func (s *Unicode) IsReady() bool { return s.ready }
+
+// Data1 returns the pre-encoded UCS-1 (latin1) slab. Non-nil only for
+// non-ASCII kind-1 strings (max codepoint in 0x80..0xFF). ASCII
+// callers should use s.Value() directly since byte index equals
+// codepoint index.
+//
+// CPython: Include/cpython/unicodeobject.h:135 PyUnicode_1BYTE_DATA
+func (s *Unicode) Data1() []uint8 { return s.data1 }
+
+// Data2 returns the pre-encoded UCS-2 (BMP) slab. Non-nil only for
+// kind-2 strings (max codepoint in 0x100..0xFFFF).
+//
+// CPython: Include/cpython/unicodeobject.h:138 PyUnicode_2BYTE_DATA
+func (s *Unicode) Data2() []uint16 { return s.data2 }
+
+// Data4 returns the pre-encoded UCS-4 (full unicode) slab. Non-nil
+// only for kind-4 strings (max codepoint >= 0x10000).
+//
+// CPython: Include/cpython/unicodeobject.h:141 PyUnicode_4BYTE_DATA
+func (s *Unicode) Data4() []uint32 { return s.data4 }
+
+// RuneAt returns the i-th codepoint of s as a Go rune, using the
+// pre-encoded slab so no UTF-8 walk is needed. Caller is responsible
+// for clamping i to [0, s.length).
+//
+// CPython: Include/cpython/unicodeobject.h:151 PyUnicode_READ
+func (s *Unicode) RuneAt(i int) rune {
+	if s.ascii {
+		return rune(s.v[i])
+	}
+	switch s.kind {
+	case StrKind1Byte:
+		return rune(s.data1[i])
+	case StrKind2Byte:
+		return rune(s.data2[i])
+	case StrKind4Byte:
+		return rune(s.data4[i])
+	}
+	return 0
+}
 
 // unicodeRepr emits the Python repr() of a str. Mirrors CPython's
 // two-pass scan: first count single/double quotes to decide the outer
