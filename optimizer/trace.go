@@ -132,6 +132,8 @@ func addToTrace(trace []UOPInstruction, length int, opcode, oparg uint16, operan
 	trace[length].Target = target
 	trace[length].Oparg = oparg
 	trace[length].Operand0 = operand
+	tier2Log("project_add", "idx=%d uop=%s oparg=%d operand0=%d target=%d",
+		length, tier2UopName(opcode), oparg, operand, target)
 	return length + 1
 }
 

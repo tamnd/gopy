@@ -73,12 +73,49 @@ func (s *Tier2State) uopSetIp(inst *UOPInstruction) Tier2Status {
 	return StatusContinue
 }
 
-// uopExitTrace ends the trace normally. The Tier-1 dispatcher resumes
-// at the side-exit target the executor stashed at install time.
+// uopExitTrace ends the trace via a side exit. CPython reads the exit
+// slot index from the uop's operand0 (makeExecutorFromUops stamps the
+// trailing _EXIT_TRACE row that way), looks up the ExitData, and
+// resumes Tier-1 at exit.target. The chain-trace warmup + dispatch
+// loop upstream wires here are deferred (gopy stays interpreter-only
+// at v0.12), so the body sets frame.InstrPtr to the resume codeunit
+// and lets vm.enterExecutor hand control back to the Tier-1 loop.
 //
-// CPython: Python/executor_cases.c.h:6961-7011 _EXIT_TRACE
-func (s *Tier2State) uopExitTrace(_ *UOPInstruction) Tier2Status {
+// CPython: Python/executor_cases.c.h:6960-7010 _EXIT_TRACE
+func (s *Tier2State) uopExitTrace(inst *UOPInstruction) Tier2Status {
+	idx := uint32(inst.Operand0)
+	if int(idx) < len(s.Executor.Exits) {
+		s.Frame.InstrPtr = int(s.Executor.Exits[idx].Target)
+	}
 	return StatusExit
+}
+
+// uopDeopt is the terminal stub stamped at the end of every trace
+// for guards that bail to Tier-1. prepareForExecution writes the
+// failing uop's source codeunit offset into Target; the body just
+// propagates it into frame.InstrPtr so the Tier-1 dispatcher resumes
+// at the right place. CPython's GOTO_TIER_ONE() macro carries the
+// same semantics: set frame->instr_ptr = bytecode + CURRENT_TARGET(),
+// drop out of the Tier-2 loop.
+//
+// CPython: Python/executor_cases.c.h:7132-7135 _DEOPT
+func (s *Tier2State) uopDeopt(inst *UOPInstruction) Tier2Status {
+	s.Frame.InstrPtr = int(inst.GetTarget())
+	return StatusDeopt
+}
+
+// uopErrorPopN is the terminal stub guards bail to when their uop
+// raised. prepareForExecution stamps the source codeunit offset into
+// operand0 and pops oparg stack slots; here the body just restores
+// frame.InstrPtr from operand0 and returns StatusError so the Tier-1
+// unwind path picks up the pending exception. The stack-pop bookkeeping
+// is owned by the guard uops themselves (each one closes refs before
+// it bails); gopy mirrors that contract.
+//
+// CPython: Python/executor_cases.c.h:7137-7144 _ERROR_POP_N
+func (s *Tier2State) uopErrorPopN(inst *UOPInstruction) Tier2Status {
+	s.Frame.InstrPtr = int(uint32(inst.Operand0))
+	return StatusError
 }
 
 // uopJumpToTop is the loop-edge backward jump. Upstream encodes it as

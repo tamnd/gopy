@@ -5036,30 +5036,6 @@ func (s *Tier2State) uopCreateInitFrame(_ *UOPInstruction) Tier2Status {
 	return s.unimplementedUop("_CREATE_INIT_FRAME")
 }
 
-// _DEOPT body (Tier-2 rewrite, awaiting hand-port):
-//
-//	case _DEOPT: {
-//	    GOTO_TIER_ONE(_PyFrame_GetBytecode(frame) + CURRENT_TARGET());
-//	    break;
-//	}
-func (s *Tier2State) uopDeopt(_ *UOPInstruction) Tier2Status {
-	return s.unimplementedUop("_DEOPT")
-}
-
-// _ERROR_POP_N body (Tier-2 rewrite, awaiting hand-port):
-//
-//	case _ERROR_POP_N: {
-//	    oparg = CURRENT_OPARG();
-//	    uint32_t target = (uint32_t)CURRENT_OPERAND0();
-//	    assert(oparg == 0);
-//	    frame->instr_ptr = _PyFrame_GetBytecode(frame) + target;
-//	    GOTO_TIER_ONE(NULL);
-//	    break;
-//	}
-func (s *Tier2State) uopErrorPopN(_ *UOPInstruction) Tier2Status {
-	return s.unimplementedUop("_ERROR_POP_N")
-}
-
 // _EXPAND_METHOD body (Tier-2 rewrite, awaiting hand-port):
 //
 //	case _EXPAND_METHOD: {

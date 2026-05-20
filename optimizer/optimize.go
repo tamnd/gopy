@@ -82,6 +82,8 @@ func uopOptimize(interp *state.Interpreter, frame objects.InterpreterFrame, code
 		return nil, -1
 	}
 	ExecutorInit(interp, exec, dependencies)
+	tier2Log("project_done", "executor=%p length=%d exit_count=%d start_offset=%d",
+		exec, length, len(exec.Exits), instr)
 	return exec, 1
 }
 
@@ -124,6 +126,12 @@ func prepareForExecution(buffer []UOPInstruction, length int) int {
 			jumpTarget := target
 			if jumpTarget != currentJumpTarget || currentExitOp != exitOp {
 				makeExit(&buffer[nextSpare], exitOp, jumpTarget)
+				kind := "deopt"
+				if exitOp == UopExitTrace {
+					kind = "exit_trace"
+				}
+				tier2Log("prepare_stub", "kind=%s slot=%d jump_target=%d source_uop=%s",
+					kind, nextSpare, jumpTarget, tier2UopName(opcode))
 				currentExitOp = exitOp
 				currentJumpTarget = jumpTarget
 				currentJump = int32(nextSpare)
@@ -143,6 +151,8 @@ func prepareForExecution(buffer []UOPInstruction, length int) int {
 				currentErrorTarget = target
 				makeExit(&buffer[nextSpare], UopErrorPopN, 0)
 				buffer[nextSpare].Operand0 = uint64(target)
+				tier2Log("prepare_stub", "kind=error_pop_n slot=%d operand0=%d popped=%d source_uop=%s",
+					nextSpare, target, popped, tier2UopName(opcode))
 				nextSpare++
 			}
 			if inst.Format() == UOPFormatTarget {
