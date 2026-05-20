@@ -63,8 +63,19 @@ func (d *Dict) LookupString(name *Unicode) (idx int, ok bool) {
 // when the global counter has wrapped (the specializer treats this
 // as "give up and never specialize").
 //
+// Split dicts delegate to the SharedKeys version so every sibling
+// instance reports the same dk_version: CPython's dk_version is a
+// property of PyDictKeysObject, not of the PyDictObject. When a
+// sibling extends the shared keys table via insert_split_key, the
+// SharedKeys version bumps and every cache stamped against the
+// previous version rejects on the next hit, even though no mutation
+// happened on this dict.
+//
 // CPython: Objects/dictobject.c:7150 _PyDict_GetKeysVersionForCurrentState
 func (d *Dict) GetKeysVersion() uint32 {
+	if d.sharedKeys != nil {
+		return d.sharedKeys.version
+	}
 	if d.keysVersion != 0 {
 		return d.keysVersion
 	}
@@ -125,22 +136,54 @@ func (d *Dict) EntryAt(slot int) (key, value Object, ok bool) {
 
 // StoreEntryAtName overwrites the value at slot when the slot still
 // holds a *Unicode key whose contents equal expectName. Returns false
-// when the slot is out of range, dead, holds a non-unicode key, or
-// names a different attribute (a delete + re-insert into the same
-// bucket can leave the cached index pointing at a stale name). The
-// STORE_ATTR inline cache only stamps type_version, so this runtime
-// key check is the same safety net CPython relies on inside
-// _STORE_ATTR_WITH_HINT. Fires DictEventModified to match
-// insertdict's replace-branch notification.
+// when the slot is out of range, holds a non-unicode key, or names a
+// different attribute (a delete + re-insert into the same bucket can
+// leave the cached index pointing at a stale name). The STORE_ATTR
+// inline cache only stamps type_version, so this runtime key check is
+// the same safety net CPython relies on inside _STORE_ATTR_WITH_HINT.
+//
+// Liveness rules differ across modes:
+//
+//   - Combined mode: the slot must already be live, since combined
+//     entries only carry a key when the dict has a value for that key
+//     (a fresh slot has no key to compare against). Matches CPython's
+//     _STORE_ATTR_WITH_HINT precondition.
+//   - Split mode: the shared key is always live in the shared table,
+//     but splitValues[slot] may be nil if this instance never set the
+//     attribute. The fast store still has to land: a sibling having
+//     populated the slot doesn't mean this instance has. Mirrors the
+//     "shared key, first write on this instance" branch of
+//     dictInsertSplit: bump d.used, append to d.order, fire ADDED.
 //
 // CPython: Python/bytecodes.c:2583 _STORE_ATTR_WITH_HINT key check
+// CPython: Objects/dictobject.c:1832 insert_split_key (split-mode
+//
+//	first-write bookkeeping)
 func (d *Dict) StoreEntryAtName(slot int, expectName string, value Object) bool {
 	if slot < 0 || slot >= len(d.entries) {
 		return false
 	}
-	if !d.slotIsLive(slot) {
-		return false
+	if d.sharedKeys == nil {
+		// Combined mode: slot must be live, otherwise we have no key
+		// to compare expectName against.
+		if !d.slotIsLive(slot) {
+			return false
+		}
+		storedKey := d.slotKey(slot)
+		k, ok := storedKey.(*Unicode)
+		if !ok {
+			return false
+		}
+		if k.Value() != expectName {
+			return false
+		}
+		d.entries[slot].value = value
+		notifyDictEvent(DictEventModified, d, storedKey, value)
+		return true
 	}
+	// Split mode: the shared key is always live in d.entries[slot]
+	// (shared table); only splitValues[slot] tracks per-instance
+	// liveness.
 	storedKey := d.slotKey(slot)
 	k, ok := storedKey.(*Unicode)
 	if !ok {
@@ -149,12 +192,15 @@ func (d *Dict) StoreEntryAtName(slot int, expectName string, value Object) bool 
 	if k.Value() != expectName {
 		return false
 	}
-	if d.sharedKeys != nil {
-		d.splitValues[slot] = value
+	prev := d.splitValues[slot]
+	d.splitValues[slot] = value
+	if prev == nil {
+		d.order = append(d.order, slot)
+		d.used++
+		notifyDictEvent(DictEventAdded, d, storedKey, value)
 	} else {
-		d.entries[slot].value = value
+		notifyDictEvent(DictEventModified, d, storedKey, value)
 	}
-	notifyDictEvent(DictEventModified, d, storedKey, value)
 	return true
 }
 

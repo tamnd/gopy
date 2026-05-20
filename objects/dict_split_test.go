@@ -276,6 +276,95 @@ func TestNewInstanceSharesKeysAcrossSiblings(t *testing.T) {
 	}
 }
 
+func TestSplitDictKeysVersionShared(t *testing.T) {
+	// Two split dicts pointing at the same SharedKeys must report the
+	// same dk_version. CPython's dk_version lives on PyDictKeysObject,
+	// not on PyDictObject; an inline cache stamped on one sibling has
+	// to invalidate when another sibling extends the shared table.
+	sk, _ := NewSharedKeys([]string{"x"})
+	a := NewSplitDict(sk)
+	b := NewSplitDict(sk)
+	va := a.GetKeysVersion()
+	vb := b.GetKeysVersion()
+	if va == 0 || vb == 0 {
+		t.Fatalf("split dicts must report non-zero keys version, got a=%d b=%d", va, vb)
+	}
+	if va != vb {
+		t.Errorf("split siblings should share dk_version, got a=%d b=%d", va, vb)
+	}
+	if va != sk.Version() {
+		t.Errorf("split dict version %d should equal sharedKeys.Version() %d", va, sk.Version())
+	}
+	// Extending the shared table must bump the version that every
+	// sibling sees, so inline caches stamped against the old version
+	// reject.
+	before := va
+	sk.AddKey("z")
+	if a.GetKeysVersion() == before {
+		t.Error("AddKey on sharedKeys should bump the version siblings see")
+	}
+	if a.GetKeysVersion() != b.GetKeysVersion() {
+		t.Error("siblings must still agree on the version after AddKey")
+	}
+}
+
+func TestSplitDictReadsThroughEntryAt(t *testing.T) {
+	// The LOAD_ATTR_INSTANCE_VALUE fast arm reads through Dict.EntryAt;
+	// EntryAt has to route through the split-aware slotValue accessor
+	// so a split dict's value array shows up. Without this the fast
+	// arm would read d.entries[slot].value, which is always nil for
+	// split dicts (values live on splitValues, not entries).
+	sk, _ := NewSharedKeys([]string{"x", "y"})
+	d := NewSplitDict(sk)
+	if err := d.SetItem(NewStr("x"), NewInt(42)); err != nil {
+		t.Fatal(err)
+	}
+	idx, ok := sk.LookupKey(NewStr("x").(*Unicode), mustHash(t, NewStr("x")))
+	if !ok {
+		t.Fatal("LookupKey(x) miss")
+	}
+	key, value, found := d.EntryAt(idx)
+	if !found {
+		t.Fatal("EntryAt should report live for the set slot")
+	}
+	if u, ok := key.(*Unicode); !ok || u.v != "x" {
+		t.Errorf("EntryAt key = %v, want x", key)
+	}
+	if v, _ := value.(*Int).Int64(); v != 42 {
+		t.Errorf("EntryAt value = %v, want 42", v)
+	}
+	// The "y" slot is shared but this instance never set it; EntryAt
+	// must report not-found so the fast arm bails to the slow path.
+	idxY, _ := sk.LookupKey(NewStr("y").(*Unicode), mustHash(t, NewStr("y")))
+	if _, _, found := d.EntryAt(idxY); found {
+		t.Error("EntryAt on an unset split slot must report not-found")
+	}
+}
+
+func TestSplitDictWritesThroughStoreEntryAtName(t *testing.T) {
+	// STORE_ATTR_INSTANCE_VALUE / STORE_ATTR_WITH_HINT route through
+	// Dict.StoreEntryAtName; the write must land in splitValues, not
+	// in entries[slot].value (which the split dict shares with every
+	// sibling).
+	sk, _ := NewSharedKeys([]string{"x"})
+	a := NewSplitDict(sk)
+	b := NewSplitDict(sk)
+	idx, _ := sk.LookupKey(NewStr("x").(*Unicode), mustHash(t, NewStr("x")))
+	if !a.StoreEntryAtName(idx, "x", NewInt(7)) {
+		t.Fatal("StoreEntryAtName on a should land")
+	}
+	if !b.StoreEntryAtName(idx, "x", NewInt(8)) {
+		t.Fatal("StoreEntryAtName on b should land")
+	}
+	_, av, _ := a.EntryAt(idx)
+	_, bv, _ := b.EntryAt(idx)
+	avi, _ := av.(*Int).Int64()
+	bvi, _ := bv.(*Int).Int64()
+	if avi != 7 || bvi != 8 {
+		t.Errorf("StoreEntryAtName isolation broken: a=%d b=%d", avi, bvi)
+	}
+}
+
 func TestNewInstanceFirstInstanceStillCombined(t *testing.T) {
 	// Before any AddCachedKey has run, NewInstance has nothing to seed
 	// the SharedKeys with, so the dict has to start combined. The first
