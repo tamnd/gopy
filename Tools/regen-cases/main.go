@@ -189,6 +189,12 @@ var gopyGenerators = []generator{
 		inputs:    []string{"Python/bytecodes.c"},
 		comment:   "//",
 	},
+	{
+		name:    "gopy_optimizer_generator.py",
+		out:     "optimizer/optimizer_cases_gen.go",
+		inputs:  []string{"Python/bytecodes.c", "Python/optimizer_bytecodes.c"},
+		comment: "//",
+	},
 }
 
 func main() {

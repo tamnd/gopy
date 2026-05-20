@@ -266,7 +266,7 @@ emitters and on any non-trivial bridging glue.
 | J | `Tools/cases_generator/uop_id_generator.py` + `uop_metadata_generator.py` | + Go companions | Tier-2 uop tables. |
 | K | `Tools/cases_generator/tier1_generator.py` | + `gopy_tier1_generator.py` | Emits `vm/eval_dispatch_gen.go`: the dispatch switch + per-opcode body harness. |
 | L | `Tools/cases_generator/tier2_generator.py` | + `gopy_tier2_generator.py` (landed) | Emits `optimizer/uops_dispatch_gen.go` + `optimizer/uops_stubs_gen.go`: dispatch fan-out on `*Tier2State` plus one StatusDeopt stub per Tier-2-viable uop whose body lives inline as a `//`-prefixed C block. The retired `tools/uops_gen/tier2_generator.go` Go duplicate is removed. The Phase L landing intentionally keeps the outputs in `optimizer/` (not `vm/eval_uops_gen.go`) because `*Tier2State` lives there; lifting them into `vm/` is left to a follow-up phase. |
-| M | `Tools/cases_generator/optimizer_generator.py` | + `gopy_optimizer_generator.py` | Emits `compile/optimizer_cases_gen.go` for spec 1712's abstract interpreter. |
+| M | `Tools/cases_generator/optimizer_generator.py` | + `gopy_optimizer_generator.py` (landed) | Emits `optimizer/optimizer_cases_gen.go`: one `//` comment block per Tier-2-viable uop carrying the abstract-interp C body (overlaid `optimizer_bytecodes.c` on `bytecodes.c`, falling back to `emit_default` when no override). The hand-written symbolic interpreter in `optimizer/symbols.go` + `optimizer/analysis.go` uses these blocks as the porting spec; when dispatch-by-uop lands (phase 7+), bodies translate to Go one-by-one and `analysis.go` shrinks. The output lands in `optimizer/` instead of the originally-planned `compile/` because `JitOptSymbol`/`JitOptContext` live there. The retired `tools/uops_gen/optimizer_generator.go` Go duplicate plus the `optimizer-cases` mode in `tools/uops_gen/main.go` are removed. |
 | N | `Tools/cases_generator/target_generator.py` | (not ported) | CPython-specific computed-goto. Go's `switch` is fine. Documented carve-out. |
 | O | `Tools/cases_generator/py_metadata_generator.py` | (vendored only) | Emits `Lib/_opcode_metadata.py`; gopy already vendors that file via 1710 T5.1. No regeneration needed; we ship CPython's. |
 | P | `Python/bytecodes.c` (v3.14.5) | `tools/cases_generator/inputs/bytecodes.c` | The single source. Frozen per CPython tag; bumped together with 1707 sync. |
@@ -280,7 +280,7 @@ none hand-edited):
 |-------------|-------------------|----------|
 | `compile/opcode_ids_gen.go` | ~600 | `compile/opcodes_gen.go` |
 | `compile/opcode_metadata_gen.go` | ~1500 | `compile/opcode_caches.go` |
-| `compile/optimizer_cases_gen.go` | ~2500 | parts of `vm/uops/*.go` (abstract interp) |
+| `optimizer/optimizer_cases_gen.go` | ~2700 | hand-rolled abstract-interp cases in `optimizer/analysis.go` (currently doc-only; replaces them once dispatch-by-uop lands) |
 | `specialize/cache_layouts_gen.go` | ~400 | implicit layout knowledge across `specialize/*.go` |
 | `specialize/family_gen.go` | ~200 | `specialize/quicken.go` family table + `specialize/deopt.go` map |
 | `vm/eval_dispatch_gen.go` | ~4000 | core of `vm/eval_simple.go` + `vm/eval_specialized*.go` |
@@ -1179,6 +1179,7 @@ helper).
 - [ ] Phase 6.3 — LOAD_GLOBAL cache-boundary regression test
 - [ ] Phase 6.4 — per-family boundary tests for ~10 other specialized families
 - [x] Phase L / 7.1 — `gopy_tier2_generator.py` lands and owns `optimizer/uops_dispatch_gen.go` + `optimizer/uops_stubs_gen.go`; Go-tool `tier2_generator.go` retired. Lifting outputs to `vm/eval_uops_gen.go` left to follow-up (depends on `*Tier2State` migration out of `optimizer/`).
+- [x] Phase M — `gopy_optimizer_generator.py` lands and owns `optimizer/optimizer_cases_gen.go`: one `//` comment block per Tier-2-viable uop carrying the abstract-interp C body. Go-tool `optimizer_generator.go` + `optimizer-cases` mode retired. Real dispatch-by-uop methods on the symbolic interpreter remain hand-written in `optimizer/symbols.go` / `optimizer/analysis.go`; the generated file is the porting spec until the abstract-interp dispatch migration (phase 7+).
 - [ ] Phase 7.2 — shared-body parity test (tier-1 LOAD_FAST ≡ tier-2 _LOAD_FAST)
 - [ ] Phase 7.3 — remaining ~270 uops emitted
 - [ ] Phase 7.4 — 1712 microbench ±2% before/after
