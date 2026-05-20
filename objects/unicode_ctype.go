@@ -59,10 +59,13 @@ func IsDecimalRune(r rune) bool { return unicode.IsDigit(r) }
 // CPython: Objects/unicodectype.c:239 _PyUnicode_IsNumeric
 func IsNumericRune(r rune) bool { return unicode.IsNumber(r) || unicode.IsDigit(r) }
 
-// IsSpaceRune reports whether r is whitespace.
+// IsSpaceRune reports whether r is whitespace. Routes through
+// isPyWhitespaceRune (the bit-for-bit port of the _PyUnicode_IsWhitespace
+// table) instead of Go's unicode.IsSpace, which misses 0x1C-0x1F
+// (FS/GS/RS/US) that CPython treats as whitespace.
 //
 // CPython: Objects/unicodectype.c:252 _PyUnicode_IsWhitespace
-func IsSpaceRune(r rune) bool { return unicode.IsSpace(r) }
+func IsSpaceRune(r rune) bool { return isPyWhitespaceRune(r) }
 
 // IsPrintableRune reports whether r is printable. Matches CPython's
 // definition: any rune that is not a control, format, surrogate,
