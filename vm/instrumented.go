@@ -68,13 +68,3 @@ func init() {
 	}
 }
 
-// baseForInstrumented returns the non-instrumented form of op when
-// op is one of the INSTRUMENTED_ variants. The second return is true
-// only when a rewrite happened so callers can keep counting cycles
-// correctly once monitoring lands.
-func baseForInstrumented(op compile.Opcode) (compile.Opcode, bool) {
-	if !instrumentedRewrite[op] {
-		return op, false
-	}
-	return instrumentedToBase[op], true
-}

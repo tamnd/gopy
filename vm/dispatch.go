@@ -32,47 +32,63 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 	// arm runs, matching the CPython placement (DISPATCH expands to
 	// INSTRUCTION_STATS(op) just before the TARGET label).
 	e.recordOpcode(op)
-	// Fire any registered PEP 669 callbacks subscribed to this
-	// (event, offset) pair, then strip the INSTRUMENTED_ prefix so
-	// the base body runs. INSTRUMENTED_LINE is handled separately:
-	// the original opcode is hidden in CoMonitoringData.Lines, not
-	// recoverable through the deinstrument table.
-	if op == compile.INSTRUMENTED_LINE {
-		newOp, err := e.handleInstrumentedLine()
-		if err != nil {
+	// Instrumentation routing: the common case (op is not an
+	// INSTRUMENTED_ variant) bails on a single [256]bool load. Only
+	// when op is one of the 21 INSTRUMENTED_ opcodes do we route
+	// through the LINE handler / PEP 669 callback fire / base-rewrite
+	// sequence. Pre-D1, monitor.IsInstrumented was called for every
+	// dispatch and burned ~6% of CPU on the tight bench just on the
+	// non-instrumented path.
+	//
+	// CPython: Python/ceval.c TARGET(INSTRUMENTED_*) labels are
+	// reached directly via the computed-goto table, so the
+	// non-instrumented path costs zero. Mirrored here by the
+	// instrumentedRewrite gate.
+	if instrumentedRewrite[op] {
+		if op == compile.INSTRUMENTED_LINE {
+			newOp, err := e.handleInstrumentedLine()
+			if err != nil {
+				return 0, nil, nil, false, err
+			}
+			op = newOp
+			if !instrumentedRewrite[op] {
+				goto afterInstrument
+			}
+		}
+		if err := e.fireInstrumented(op, oparg); err != nil {
 			return 0, nil, nil, false, err
 		}
-		op = newOp
+		op = instrumentedToBase[op]
 	}
-	if err := e.fireInstrumented(op, oparg); err != nil {
-		return 0, nil, nil, false, err
-	}
-	if base, rewritten := baseForInstrumented(op); rewritten {
-		op = base
-	}
-	// On Quickened code, give specialized variants a chance at their
-	// fast-path arm first. trySpecialized returns ok=true only when
-	// the guards held and the dispatch was taken; otherwise we fall
-	// through to the deopt path that rewrites the bytecode back to
-	// the adaptive parent and runs the generic body.
-	if next, ok, err := e.trySpecialized(op, oparg); ok {
-		return next, nil, nil, false, err
-	}
-	// On Quickened code, fold any remaining specialized variant back
-	// to its adaptive parent so the generic body runs, and tick the
-	// adaptive counter so a hot site eventually re-specializes.
-	if base, deopted := e.maybeDeopt(op); deopted {
-		op = base
-	} else if e.adaptiveTick(op, oparg) {
-		// adaptiveTick rewrote the opcode in place; pick up the
-		// fresh op and give the fast-path arm a shot before
-		// falling back to the generic body.
-		op = compile.Opcode(e.f.Code.Code[e.f.InstrPtr])
+afterInstrument:
+	// Specializer routing: only Quickened code carries inline-cache
+	// counters and specialized variants; non-Quickened code (raw
+	// compile output before specialize.Quicken) skips the entire
+	// adaptive ladder. Pre-D1, the three Quickened-gated helpers
+	// (trySpecialized + maybeDeopt + adaptiveTick) were each called
+	// unconditionally and burned ~12% of CPU on the tight bench just
+	// on their early-return paths.
+	//
+	// CPython: Python/ceval.c only enters the adaptive ladder under
+	// the per-opcode TARGET(<adaptive>) label, never on the generic
+	// non-quickened body.
+	if e.f.Code.Quickened {
 		if next, ok, err := e.trySpecialized(op, oparg); ok {
 			return next, nil, nil, false, err
 		}
-		if base2, deopted2 := e.maybeDeopt(op); deopted2 {
-			op = base2
+		if base, deopted := e.maybeDeopt(op); deopted {
+			op = base
+		} else if e.adaptiveTick(op, oparg) {
+			// adaptiveTick rewrote the opcode in place; pick up the
+			// fresh op and give the fast-path arm a shot before
+			// falling back to the generic body.
+			op = compile.Opcode(e.f.Code.Code[e.f.InstrPtr])
+			if next, ok, err := e.trySpecialized(op, oparg); ok {
+				return next, nil, nil, false, err
+			}
+			if base2, deopted2 := e.maybeDeopt(op); deopted2 {
+				op = base2
+			}
 		}
 	}
 	// Spec 1714 phase 5.2: route opcodes whose generated body in
