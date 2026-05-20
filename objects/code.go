@@ -60,6 +60,18 @@ type Code struct {
 	// Consts is the literal table the LOAD_CONST opcode indexes into.
 	Consts []any
 
+	// ConstObjs is the cached Object form of Consts, populated at
+	// Code construction time by SyncConstObjs. CPython stores co_consts
+	// as a tuple of PyObject* directly so LOAD_CONST is one pointer
+	// load. Without this slice every LOAD_CONST would re-run wrapConst's
+	// type switch and re-allocate an Int / Str / Tuple per dispatch,
+	// which the dispatch profile showed at 5.54% of CPU. Built lazily
+	// via SyncConstObjs to keep marshal round-trips intact (Consts is
+	// still the wire form).
+	//
+	// CPython: Include/cpython/code.h:107 co_consts
+	ConstObjs []Object
+
 	// Names, Varnames, Freevars, Cellvars are name tables indexed
 	// by their respective LOAD_/STORE_ opcodes.
 	Names    []string
@@ -349,6 +361,42 @@ func (c *Code) SyncNameObjs() {
 	}
 }
 
+// SyncConstObjs rebuilds ConstObjs to match the current Consts slice.
+// Construction sites populate Consts then call this so LOAD_CONST can
+// read straight from the cached slice without re-running wrapConst per
+// dispatch. Mirrors SyncNameObjs for the consts side.
+//
+// CPython: Objects/codeobject.c:421 _PyCode_New (co_consts tuple is
+// stored verbatim from the compiler so the runtime reads it directly).
+func (c *Code) SyncConstObjs() {
+	if len(c.Consts) == 0 {
+		c.ConstObjs = nil
+		return
+	}
+	if cap(c.ConstObjs) < len(c.Consts) {
+		c.ConstObjs = make([]Object, len(c.Consts))
+	} else {
+		c.ConstObjs = c.ConstObjs[:len(c.Consts)]
+	}
+	for i, v := range c.Consts {
+		c.ConstObjs[i] = wrapConstAttr(v)
+	}
+}
+
+// ConstObj returns the cached Object for Consts[i]. Falls back to
+// re-wrapping when ConstObjs is missing or out of sync, which covers
+// test fixtures that build Code by struct literal without calling
+// SyncConstObjs.
+func (c *Code) ConstObj(i int) Object {
+	if i >= 0 && i < len(c.ConstObjs) && c.ConstObjs[i] != nil {
+		return c.ConstObjs[i]
+	}
+	if i < 0 || i >= len(c.Consts) {
+		return nil
+	}
+	return wrapConstAttr(c.Consts[i])
+}
+
 // NameObj returns the cached *Unicode for Names[i]. Falls back to
 // minting a fresh object when NameObjs is missing or out of sync,
 // which covers test fixtures that build Code by struct literal
@@ -598,6 +646,7 @@ func (c *Code) Replace(r CodeReplace) (*Code, error) {
 	}
 	if r.SetConsts {
 		out.Consts = cloneConsts(r.Consts)
+		out.SyncConstObjs()
 	}
 	if r.SetNames {
 		out.Names = cloneStrings(r.Names)
@@ -650,6 +699,8 @@ func (c *Code) Copy() *Code {
 	out.Cellvars = cloneStrings(c.Cellvars)
 	out.Linetable = cloneBytes(c.Linetable)
 	out.ExceptionTable = cloneBytes(c.ExceptionTable)
+	out.SyncNameObjs()
+	out.SyncConstObjs()
 	return out
 }
 

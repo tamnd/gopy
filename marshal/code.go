@@ -181,6 +181,7 @@ func unmarshalCode(d *decoder) (*objects.Code, error) {
 		return nil, fmt.Errorf("marshal: code.consts expected tuple, got %T", constsObj)
 	}
 	c.Consts = constsTuple
+	c.SyncConstObjs()
 
 	// names tuple
 	namesObj, err := d.read()

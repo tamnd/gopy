@@ -239,6 +239,7 @@ func gopyCompile(src, filename string) (*objects.Code, error) {
 	}
 	out.Init(objects.CodeType)
 	out.SyncNameObjs()
+	out.SyncConstObjs()
 	return out, nil
 }
 

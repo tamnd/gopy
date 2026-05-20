@@ -253,12 +253,31 @@ func (e *evalState) popObject() objects.Object {
 // range and the const wraps cleanly, so a failure here is a compiler bug
 // rather than a runtime error.
 //
+// CPython stores co_consts as a tuple of PyObject* directly, so GETITEM
+// is one pointer load. gopy mirrors that shape via Code.ConstObjs, a
+// parallel slice populated by SyncConstObjs at construction time. The
+// lazy-fill fallback covers test fixtures that build Code by struct
+// literal without calling SyncConstObjs, so the next dispatch on the
+// same index returns the cached object.
+//
 // CPython: Python/ceval_macros.h GETITEM
 func (e *evalState) constAt(i int) objects.Object {
-	obj, err := wrapConst(e.f.Code.Consts[i])
+	co := e.f.Code
+	if i < len(co.ConstObjs) {
+		if obj := co.ConstObjs[i]; obj != nil {
+			return obj
+		}
+	}
+	obj, err := wrapConst(co.Consts[i])
 	if err != nil {
 		panic(fmt.Sprintf("vm: bad const at %d: %v", i, err))
 	}
+	if len(co.ConstObjs) < len(co.Consts) {
+		filled := make([]objects.Object, len(co.Consts))
+		copy(filled, co.ConstObjs)
+		co.ConstObjs = filled
+	}
+	co.ConstObjs[i] = obj
 	return obj
 }
 

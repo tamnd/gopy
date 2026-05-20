@@ -47,6 +47,8 @@ func init() {
 				items[i] = item
 			}
 			return objects.NewTuple(items), true
+		case ast.EllipsisType:
+			return objects.Ellipsis(), true
 		}
 		return nil, false
 	}
@@ -83,6 +85,7 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 	}
 	out.Init(objects.CodeType)
 	out.SyncNameObjs()
+	out.SyncConstObjs()
 	specialize.Enable(out)
 	c.Lifted = out
 	return out

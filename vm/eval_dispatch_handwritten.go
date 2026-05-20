@@ -52,11 +52,7 @@ func (e *evalState) opLOAD_CONST(oparg uint32) (next int, retVal objects.Object,
 	if int(oparg) >= len(co.Consts) {
 		return 0, nil, nil, false, true, fmt.Errorf("vm: LOAD_CONST index %d out of range", oparg)
 	}
-	obj, werr := wrapConst(co.Consts[oparg])
-	if werr != nil {
-		return 0, nil, nil, false, true, werr
-	}
-	e.pushObject(obj)
+	e.pushObject(e.constAt(int(oparg)))
 	return e.advance(), nil, nil, false, true, nil
 }
 

@@ -123,6 +123,7 @@ func liftCode(c *compile.Code) *objects.Code {
 	}
 	out.Init(objects.CodeType)
 	out.SyncNameObjs()
+	out.SyncConstObjs()
 	specialize.Enable(out)
 	return out
 }
