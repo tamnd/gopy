@@ -3887,3 +3887,73 @@ Next biggest user-side allocators per the post-D13 profile:
 (0.05s combined makeslice + newListAdopt). These both need the
 PyList / PySlice freelists from `Objects/listobject.c` and
 `Objects/sliceobject.c`, which is the next sized port (D14).
+
+### D14 investigation (2026-05-21): Go GC scavenger vs CPython refcount.
+
+Diagnosed where fannkuch's residual 16.88x lives after D13. The
+flat profile attributes 58% of wall time to two Go runtime
+syscalls: `runtime.madvise` (0.55s) and `runtime.kevent` (0.38s),
+both inside `runtime.systemstack`. Together that is 0.93s of
+1.59s total. The gopy VM work itself is only 0.41s. The remaining
+mallocgc cost is 0.08s, attributed to `NewSlice` (0.05s),
+`boundMethodVectorcall` (0.02s), `listGetSlice` (0.03s).
+
+GOGC sensitivity confirms the diagnosis. Same fannkuch(9), same
+binary, varying `GOGC`:
+
+| GOGC | wall (s) | vs default |
+|---:|---:|---:|
+| 100 (default) | 2.10 | 1.00x |
+| 200 | 1.44 | 0.69x |
+| 400 | 1.33 | 0.63x |
+| 800 | 1.33 | 0.63x |
+| off | 1.66 | 0.79x |
+
+At `GOGC=400` the scavenger drops out (madvise 0.03s, kevent
+0.07s) and the remaining time is dominated by the actual VM and
+allocator work (`mallocgcSmallScanNoHeader` 0.23s cum,
+`listGetSlice` 0.13s, `NewSlice` 0.10s).
+
+The structural mismatch with CPython: CPython's allocator
+(obmalloc + refcount) has no global allocation-rate-driven GC
+trigger. Refcount decrements free objects immediately at the
+last drop; cycle GC runs at thresholds (`gc.set_threshold(700,
+10, 10)`) that almost never fire in CPU-bound benches. Go's GC
+triggers when the heap grows by `GOGC%` since the previous live
+heap, so a tight allocation loop forces frequent cycles and the
+scavenger churns pages back to the OS each cycle. The result is
+0.93s of OS-level memory bookkeeping that has no CPython
+analogue.
+
+The PySlice / PyList freelists that the original D14 plan asked
+for cannot recover this. The CPython freelist relies on the
+slice's dealloc hook (called when refcount drops to 0) to push
+the slot back. gopy's Go GC has no per-object dealloc hook on
+short-lived objects, and the consumer call sites
+(`BINARY_OP_SUBSCR_LIST_SLICE`, `STORE_SLICE`) cannot safely call
+an explicit `ReleaseSlice` because the same slice may also live
+in a Python local (`s = slice(1, 5); l[s]`) where releasing it
+would alias-corrupt the local. CPython's refcount discriminates
+these cases automatically; gopy has no equivalent without adding
+refcount semantics to `*Slice` (and `*List`, and every other
+candidate freelist class).
+
+Three forward paths exist for D14:
+
+1. **Runtime alignment**: set a higher GOGC default at gopy
+   startup so the Go GC trigger frequency matches CPython's
+   "almost-never" cycle threshold. This is a configuration, not a
+   CPython port, but it closes the structural gap directly. On
+   fannkuch it recovers 0.77s of the 1.32s gap to cpython.
+
+2. **Selective refcount**: add a lightweight refcount-like marker
+   to short-lived types (`Slice`, transient `List`) so a freelist
+   has a safe dealloc hook. This is a partial refcount port and
+   would touch dozens of allocation sites.
+
+3. **Move off fannkuch**: the remaining four outliers
+   (`richards` 6.32x, `regex_compile` 5.32x, `call_method` 5.29x,
+   `json_dumps` 3.82x) are bounded by different subsystems and
+   may move with cleaner CPython-faithful ports (CALL fastpath,
+   re engine, json encoder hotpath). Geomean improves more from
+   fixing several mid-tier outliers than from grinding fannkuch.
