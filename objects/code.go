@@ -13,7 +13,25 @@ package objects
 import (
 	"fmt"
 	"reflect"
+	"sync/atomic"
 )
+
+// nextCodeVersion is the monotonic counter that backs co_version.
+// Each fresh Code object claims one slot via AllocCodeVersion so the
+// CALL family specializer can stamp a stable cache key for the
+// _CHECK_FUNCTION_VERSION guard.
+//
+// CPython: Include/internal/pycore_function.h func_state.next_version
+var nextCodeVersion atomic.Uint32
+
+// AllocCodeVersion returns the next monotonic co_version. Mirrors
+// CPython's func_state.next_version bump in _PyCode_New; values start
+// at FUNC_VERSION_FIRST_VALID (1) so 0 stays the "unset" sentinel.
+//
+// CPython: Objects/codeobject.c:556 (co_version = next_version)
+func AllocCodeVersion() uint32 {
+	return nextCodeVersion.Add(1)
+}
 
 // Code is the AST -> bytecode handoff value. Compile produces
 // one of these per code-bearing node (module, function body,
@@ -111,6 +129,15 @@ type Code struct {
 	//
 	// CPython: Include/internal/pycore_code.h co_executors
 	Executors any
+
+	// Version is the per-code monotonic id stamped by AllocCodeVersion
+	// at construction time. MAKE_FUNCTION copies it into the Function's
+	// Version field so the CALL specializer can write a stable
+	// _CHECK_FUNCTION_VERSION guard. Zero means "not yet versioned"
+	// and matches CPython's FUNC_VERSION_UNSET sentinel.
+	//
+	// CPython: Include/cpython/code.h:90 co_version
+	Version uint32
 
 	// CacheObjects is gopy's stand-in for CPython's in-cache pointer
 	// slots. CPython packs the cached descriptor / function object
@@ -279,9 +306,10 @@ func codeGetAttr(o Object, name Object) (Object, error) {
 	return GenericGetAttr(o, name)
 }
 
-// NewCode returns a Code with its header bound to CodeType.
+// NewCode returns a Code with its header bound to CodeType and a
+// fresh monotonic Version stamped in.
 func NewCode() *Code {
-	c := &Code{}
+	c := &Code{Version: AllocCodeVersion()}
 	c.init(CodeType)
 	return c
 }

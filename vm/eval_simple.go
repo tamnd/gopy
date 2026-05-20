@@ -60,6 +60,7 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 		return cached
 	}
 	out := &objects.Code{
+		Version:         objects.AllocCodeVersion(),
 		Argcount:        c.Argcount,
 		PosonlyArgcount: c.PosOnlyArgCount,
 		KwonlyArgcount:  c.KwOnlyArgCount,
@@ -411,6 +412,13 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, fmt.Errorf("MAKE_FUNCTION: TOS not a code object, got %T", v)
 		}
 		fn := objects.NewFunction(code.Name, code, e.f.Globals)
+		// Stamp the cached co_version so CALL_PY_EXACT_ARGS can write a
+		// stable _CHECK_FUNCTION_VERSION guard. Without this the call
+		// specializer always sees Version==0 and falls back to the
+		// generic CALL arm.
+		//
+		// CPython: Python/bytecodes.c:4956 _PyFunction_SetVersion
+		fn.Version = code.Version
 		e.pushObject(fn)
 		return e.advance(), nil, nil, false, true, nil
 

@@ -2694,6 +2694,82 @@ enabling `specialize/debug` and diffing the dispatch trace against
 `python3.14 -X opt`. After that: P14.1 pickle (un-runnable today)
 to lift the geomean denominator further.
 
+### Small subset, re-run 2026-05-20 (post CALL specializer method-shape bump)
+
+_Captured: 2026-05-20 on branch `feat/v0.12.4-spec-1712-p8p9`
+(PR #74), single `call_method` bench re-run after fixing two
+foundational gaps in the CALL specializer path. Same host, same
+harness, same warmups/runs as the previous 2026-05-20 snapshot._
+
+| Benchmark     | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy |
+|---------------|------------------:|---------------:|----------:|---------------:|------------:|
+| `call_method` |             33.89 |          34.07 |  39513.82 |       1166.05x |    1159.82x |
+
+Headline: `call_method` ratio drops **3083x to 1166x** (-62%) on
+this re-run, wall time **78043 ms to 39513 ms** (-49.4%). This
+isolates the CALL fast-arm gap; rerunning the full small subset is
+the next step before the next ship-order item.
+
+CALL-specializer findings:
+
+- The adaptive CALL dispatcher in `vm/adaptive.go` did not bump
+  `nargs` by 1 when `self_or_null` was non-NULL on the stack before
+  invoking `specialize.Call`. CPython's `_SPECIALIZE_CALL` macro
+  (`Python/bytecodes.c:3725`) always passes
+  `oparg + !PyStackRef_IsNull(self_or_null)` so
+  `specialize_py_call` sees the effective `total_args` that the
+  LOAD_ATTR_METHOD shape produces. Without the bump, `specialize_py_call`
+  was checking `Argcount == oparg` for the bench's
+  `c.tick()` (oparg=0, Argcount=1) and refusing to specialize on
+  the exact-args arm. The function previously also probed the
+  alternate stack slot when the primary `callable` was nil, which
+  was a stale workaround that masked the underlying bug; that
+  branch was removed.
+- `objects.Function.Version` was never assigned anywhere in the
+  codebase. CPython's `_PyFunction_SetVersion`
+  (`Python/bytecodes.c:4956`, invoked from MAKE_FUNCTION) copies
+  `co_version` into `func_version` so the CALL specializer can
+  write a stable `_CHECK_FUNCTION_VERSION` guard. `specialize_py_call`
+  in `specialize/call.go` already had the correct
+  `if fn.Version == 0 { return false }` short-circuit, but every
+  Function ever constructed in gopy was hitting that branch and
+  declining to specialize. Fix in three parts:
+  1. Added `Version uint32` field to `objects.Code` plus a
+     monotonic `AllocCodeVersion()` allocator
+     (`objects/code.go`). Mirrors `func_state.next_version` in
+     `Include/internal/pycore_function.h` and the bump in
+     `_PyCode_New` (`Objects/codeobject.c:556`).
+  2. Stamped `AllocCodeVersion()` into every Code construction
+     site: `objects.NewCode`, `vm/eval_simple.go liftNestedCode`,
+     `pythonrun/runstring.go liftCode`, `cmd/gopy/main.go`.
+  3. In `vm/eval_simple.go` MAKE_FUNCTION, copied
+     `code.Version` into `fn.Version` immediately after
+     `objects.NewFunction` returns.
+- The two fixes are dependent: without the version stamp, the
+  nargs bump alone still hits `specialize_py_call`'s
+  `version == 0` short-circuit. Without the nargs bump, the
+  version stamp alone still fails the
+  `Argcount == nargs + boundMethod` exact-args check.
+- Post-fix dispatch trace on the bench's inner loop
+  (`for _ in range(N): c.tick()`):
+  `LOAD_ATTR_METHOD_WITH_VALUES 3 (tick + NULL|self)` →
+  `CALL_PY_EXACT_ARGS 0`, with the cached function-version guard
+  stable across the warm loop.
+- `objects.Function` already has the `SetCode` / `SetDefaults` /
+  `SetKwDefaults` / `SetClosure` mutators reset `Version` to 0,
+  matching CPython's `func_clear_version` callback chain
+  (`Objects/funcobject.c:325`). No additional invalidation wiring
+  was required.
+
+Highest-leverage next step (per ship order):
+
+`call_method` still at 1166x cpython. Next sweep: confirm
+`CALL_PY_EXACT_ARGS` and `CALL_BOUND_METHOD_EXACT_ARGS` fast arms
+in `vm/eval_specialized_call.go` are not hitting deopt branches in
+the warm loop, then re-run full small subset to capture the new
+geomean and identify the next worst-case bench. After that:
+P14.1 pickle (still un-runnable today) and P5 dict gaps.
+
 ### Full corpus (release-tag and nightly only)
 
 _Populated when `bench/run_full.sh` lands its first end-to-end run.

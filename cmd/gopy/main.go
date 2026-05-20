@@ -218,6 +218,7 @@ func gopyCompile(src, filename string) (*objects.Code, error) {
 		return nil, err
 	}
 	out := &objects.Code{
+		Version:         objects.AllocCodeVersion(),
 		Argcount:        cco.Argcount,
 		PosonlyArgcount: cco.PosOnlyArgCount,
 		KwonlyArgcount:  cco.KwOnlyArgCount,
