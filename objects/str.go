@@ -296,6 +296,9 @@ func strIter(o Object) (Object, error) {
 //
 // CPython: Objects/unicodeobject.c:L1985 PyUnicode_FromString
 func NewStr(s string) Object {
+	if u, ok := latin1StringHit(s); ok {
+		return u
+	}
 	o := &Unicode{
 		v:    s,
 		hash: -1,
