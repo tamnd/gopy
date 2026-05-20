@@ -109,6 +109,33 @@ func TestStrRSplit(t *testing.T) {
 	}
 }
 
+// TestStrSplitWhitespaceASCIIControls pins the broader Py_UNICODE_ISSPACE
+// set (0x09-0x0D, 0x1C-0x1F, 0x20) which CPython recognizes for the
+// sep=None mode. Go's unicode.IsSpace misses 0x1C-0x1F (FS/GS/RS/US)
+// so a naive port via that helper drops the file/group/record/unit
+// separator chars on the floor.
+//
+// CPython: Objects/unicodetype_db.h:6676 _PyUnicode_IsWhitespace
+func TestStrSplitWhitespaceASCIIControls(t *testing.T) {
+	got, _ := StrSplit("a\x1cb\x1dc\x1ed\x1fe", "", -1)
+	if !reflect.DeepEqual(got, []string{"a", "b", "c", "d", "e"}) {
+		t.Errorf("split with 0x1c-0x1f = %v", got)
+	}
+	got, _ = StrSplit("\x1c\x1f a\tb \nc\v\f", "", -1)
+	if !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Errorf("split mixed ASCII whitespace = %v", got)
+	}
+}
+
+// TestStrSplitWhitespaceNonASCII covers the rune-walk slow path.
+// Latin-1 NBSP (0xA0) and the Unicode line/para separators must split.
+func TestStrSplitWhitespaceNonASCII(t *testing.T) {
+	got, _ := StrSplit("a b c", "", -1)
+	if !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Errorf("split with NBSP / LSEP = %v", got)
+	}
+}
+
 func TestStrSplitLines(t *testing.T) {
 	got := StrSplitLines("a\nb\r\nc\rd", false)
 	if !reflect.DeepEqual(got, []string{"a", "b", "c", "d"}) {
