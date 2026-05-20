@@ -1238,7 +1238,7 @@ The hooks the specializer needs are mostly plumbed:
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
 | P5.1 | Audit / regression-check the existing open-addressed layout against `Objects/dictobject.c:lookdict` probe sequence. Add `objects/dict_lookup_parity_test.go` table-driven from CPython's hash collisions. | DONE | objects/dict_lookup_parity_test.go pins the `(5i+1+perturb)&mask` recurrence (PERTURB_SHIFT=5), `TestDictProbeWalksSameChain` and `TestDictProbeHonoursPerturbCascade` confirm gopy's dictProbe lands on the same slots, `TestDictProbeRespectsDummyAsFreeSlot` covers the freeslot branch. |
-| P5.2 | Real split-keys storage: per-type `SharedKeys` object owns the entries-array shape; instance `__dict__` carries `values []Object` only. Materialise to combined on delete or non-shared insert. Cite `Objects/dictobject.c:insertion_resize_inplace`. | DONE (storage only; not wired through `NewInstance` yet) | 72b8c904 |
+| P5.2 | Real split-keys storage: per-type `SharedKeys` object owns the entries-array shape; instance `__dict__` carries `values []Object` only. Materialise to combined on delete or non-shared insert. Cite `Objects/dictobject.c:insertion_resize_inplace`. | DONE | 72b8c904 (storage); 1d0c9598 (wiring: `Type.sharedKeys` lazily allocated by `AddCachedKey`; `NewInstance` routes through `NewSplitDict` when shared keys is seeded; `TestNewInstanceSharesKeysAcrossSiblings` pins refs==2 sibling sharing). |
 | P5.3 | `_PyDict_SetItem_KnownHash` fast path: skip rehash when caller passes the hash. Wire from LOAD_ATTR / LOAD_GLOBAL specialized arms. Cite `Objects/dictobject.c:_PyDict_SetItem_KnownHash`. | DONE | 2b5edb3d (GetItemKnownHash / ContainsKnownHash / SetItemKnownHash on `*Dict`; `(*Unicode).HashCached()` accessor; `lookupIn` / `storeIn` short-circuit when key is `*Unicode`). |
 | P5.4 | Public watcher subscription API: `PyDict_Watch(watcher_id, dict)` / `PyDict_AddWatcher(callback) -> int8_t`. Cite `Objects/dictobject.c:7710 PyDict_Watch / :7741 PyDict_AddWatcher`. Replaces the bare `DictMutationHook` pointer. | DONE | objects/dict_watcher.go + objects/dict.go (`watcherTag`), objects/dict_mutate.go + objects/dict.go fire ADDED / MODIFIED / DELETED / CLEARED / CLONED; optimizer/watcher.go delegates AddWatcher/Watch/Unwatch to the public API; `DictMutationHook` retired. |
 | P5.5 | Install the watcher at `specialize.Enable` time + invalidate inline caches on dict mutation. Interacts with P1.6. | DONE (closed by P1.6 wiring: `specialize.Enable` calls `ensureWatchersInstalled()`, optimizer slot 0 = builtins callback, slot 1 = globals callback. `EnsureBuiltinsSubscribed` mirrors `Python/pylifecycle.c:1381` for the canonical builtins subscription.) | b059710d |
@@ -1292,13 +1292,36 @@ The hooks the specializer needs are mostly plumbed:
    value (`d.sharedKeys != nil && d.splitValues[idx] == nil`).
    The four probe variants under `dispatchLookup` stay unaware
    of split-mode semantics.
-6. Storage savings are **not yet reachable from the hot path**.
-   `Type.cachedKeys` is still a `map[string]bool` rather than a
-   real `*SharedKeys`; `NewInstance` does not yet route through
-   `NewSplitDict`. The follow-up task wires that and teaches the
+6. Storage savings are reachable end-to-end as of 1d0c9598.
+   `Type` carries a lazily-allocated `sharedKeys *SharedKeys` that
+   `AddCachedKey` extends in place via `AddKey`. `NewInstance`
+   for INLINE_VALUES types routes through `NewSplitDict` once the
+   shared table has at least one key, so sibling instances share
+   one keys table with per-instance value arrays.
+   `TestNewInstanceSharesKeysAcrossSiblings` pins `refs==2` and
+   write isolation. The first instance of a fresh class still
+   materializes combined since `SharedKeys` is empty until the
+   first `SetAttr` lands; this matches CPython's observation that
+   the first object seeds `ht_cached_keys` for siblings.
+7. `NewEmptySharedKeys` returns a fixed `dictMinSize` table and
+   `AddKey` refuses (returns false) at `loadAtCapacity` rather
+   than resizing. The no-resize invariant is load-bearing:
+   `NewSplitDict` shares its `entries` slice header with
+   `sk.entries`, so a resize would orphan every attached dict.
+   CPython sidesteps this with `dk_refcnt` + `dk_version`
+   stamping; gopy enforces the same outcome by refusing the
+   resize. With `usableFraction(8) = 5`, a class can cache up to
+   5 attribute names through the split shape; beyond that, new
+   names fall through `dictInsertSplit`'s materialize-on-new-key
+   branch. Lifting this cap requires either pre-sizing the
+   shared table at class-build time (when the attribute count is
+   known) or a refcount-snapshot-and-detach dance, neither of
+   which is in scope for this phase.
+8. Follow-up still pending: teach the
    `LOAD_ATTR_INSTANCE_VALUE_*` / `STORE_ATTR_INSTANCE_VALUE_*`
    specializer fast arms to read straight from
-   `splitValues[hint]`.
+   `splitValues[hint]`. The storage is in place; the specializer
+   arms still go through the regular dict lookup.
 
 **Technical notes (P5.4 dict watcher port).**
 
