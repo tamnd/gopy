@@ -86,47 +86,50 @@ func newDictIter(d *Dict, kind dictIterKind) *dictIterObj {
 // caller seeing the value and asking for the next one) is caught.
 //
 // CPython: Objects/dictobject.c:5237 (the di_used != ma_used branch)
-func (it *dictIterObj) advance() (*dictEntry, error) {
+// advance returns (key, value, error). The dictEntry struct can't
+// carry per-instance split values, so iteration returns key+value
+// pairs directly. The size-change check fires before the walk so a
+// mutation that happened during the previous iternext is caught.
+func (it *dictIterObj) advance() (Object, Object, error) {
 	if it.src == nil {
-		return nil, ErrStopIteration
+		return nil, nil, ErrStopIteration
 	}
 	if it.snapUsed != it.src.used {
 		it.src = nil
-		return nil, fmt.Errorf("RuntimeError: dictionary changed size during iteration")
+		return nil, nil, fmt.Errorf("RuntimeError: dictionary changed size during iteration")
 	}
 	for it.pos < len(it.src.order) {
 		slot := it.src.order[it.pos]
 		it.pos++
-		e := &it.src.entries[slot]
-		if e.used {
-			return e, nil
+		if it.src.slotIsLive(slot) {
+			return it.src.slotKey(slot), it.src.slotValue(slot), nil
 		}
 	}
-	return nil, ErrStopIteration
+	return nil, nil, ErrStopIteration
 }
 
 func dictIterNextKey(o Object) (Object, error) {
-	e, err := o.(*dictIterObj).advance()
+	k, _, err := o.(*dictIterObj).advance()
 	if err != nil {
 		return nil, err
 	}
-	return e.key, nil
+	return k, nil
 }
 
 func dictIterNextValue(o Object) (Object, error) {
-	e, err := o.(*dictIterObj).advance()
+	_, v, err := o.(*dictIterObj).advance()
 	if err != nil {
 		return nil, err
 	}
-	return e.value, nil
+	return v, nil
 }
 
 func dictIterNextItem(o Object) (Object, error) {
-	e, err := o.(*dictIterObj).advance()
+	k, v, err := o.(*dictIterObj).advance()
 	if err != nil {
 		return nil, err
 	}
-	return NewTuple([]Object{e.key, e.value}), nil
+	return NewTuple([]Object{k, v}), nil
 }
 
 // dictView is the shared payload behind dict.keys()/values()/items().

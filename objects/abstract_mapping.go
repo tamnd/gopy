@@ -173,9 +173,9 @@ func MappingKeys(o Object) (*List, error) {
 func MappingValues(o Object) (*List, error) {
 	if d, ok := o.(*Dict); ok {
 		out := make([]Object, 0, d.Len())
-		for _, e := range d.entries {
-			if e.used {
-				out = append(out, e.value)
+		for _, slot := range d.order {
+			if d.slotIsLive(slot) {
+				out = append(out, d.slotValue(slot))
 			}
 		}
 		return NewList(out), nil
@@ -191,9 +191,9 @@ func MappingValues(o Object) (*List, error) {
 func MappingItems(o Object) (*List, error) {
 	if d, ok := o.(*Dict); ok {
 		out := make([]Object, 0, d.Len())
-		for _, e := range d.entries {
-			if e.used {
-				out = append(out, NewTuple([]Object{e.key, e.value}))
+		for _, slot := range d.order {
+			if d.slotIsLive(slot) {
+				out = append(out, NewTuple([]Object{d.slotKey(slot), d.slotValue(slot)}))
 			}
 		}
 		return NewList(out), nil

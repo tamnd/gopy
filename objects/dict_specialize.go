@@ -117,11 +117,10 @@ func (d *Dict) EntryAt(slot int) (key, value Object, ok bool) {
 	if slot < 0 || slot >= len(d.entries) {
 		return nil, nil, false
 	}
-	e := d.entries[slot]
-	if !e.used {
+	if !d.slotIsLive(slot) {
 		return nil, nil, false
 	}
-	return e.key, e.value, true
+	return d.slotKey(slot), d.slotValue(slot), true
 }
 
 // StoreEntryAtName overwrites the value at slot when the slot still
@@ -139,19 +138,23 @@ func (d *Dict) StoreEntryAtName(slot int, expectName string, value Object) bool 
 	if slot < 0 || slot >= len(d.entries) {
 		return false
 	}
-	e := &d.entries[slot]
-	if !e.used {
+	if !d.slotIsLive(slot) {
 		return false
 	}
-	k, ok := e.key.(*Unicode)
+	storedKey := d.slotKey(slot)
+	k, ok := storedKey.(*Unicode)
 	if !ok {
 		return false
 	}
 	if k.Value() != expectName {
 		return false
 	}
-	e.value = value
-	notifyDictEvent(DictEventModified, d, e.key, value)
+	if d.sharedKeys != nil {
+		d.splitValues[slot] = value
+	} else {
+		d.entries[slot].value = value
+	}
+	notifyDictEvent(DictEventModified, d, storedKey, value)
 	return true
 }
 
