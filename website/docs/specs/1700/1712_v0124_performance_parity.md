@@ -2736,6 +2736,51 @@ body. The geomean bench (`bench/run_small.sh`) is too slow for
 per-commit verification; tight benches catch the dispatch-layer wins
 and the parity gate catches the workload-level wins.
 
+**6. Method-call indirection is the biggest single tax on the hot
+path.** D5 landed in two stages and the bench numbers tell the
+story:
+
+1. First stage: inline LOAD_CONST / LOAD_FAST / STORE_FAST / POP_TOP
+   bodies inside `dispatch()` (commit `b8145817`). The four hot ops
+   stop calling `dispatchHandwritten` / `dispatchGen`, saving one
+   method call each. `BenchmarkDispatchTight` drops from ~21k to
+   ~10.5k ns/op on Apple M4.
+2. Second stage: hoist that same switch out of `dispatch()` and into
+   the `run()` loop body (commit `2ac1e19e`). Hot ops now skip the
+   `dispatch()` method call too. Bench drops to ~7.5k ns/op.
+
+So `run() -> dispatch() -> dispatchHandwritten() -> opLOAD_CONST()`
+was costing ~13.5k ns/op (~64% of total) on a code path that boils
+down to "read `co_consts[oparg]`, push, advance ip". Each method
+call adds ~3-5 ns plus register-spill pressure. Go inlines aggressively
+within a function but never across method calls when the callee is
+over its 80-cost budget, and `dispatch()` (~1099 cost) and
+`dispatchGen()` (~26k cost) are both far over. The fix is to keep
+the hottest arms at the loop level, not split them across functions
+for readability. CPython's computed-goto table is the same shape:
+every `TARGET(LOAD_CONST)` is a label inside `_PyEval_EvalFrameDefault`,
+not a function.
+
+The hoist also forced a small structural change: `recordOpcode` had
+to move into each fast arm because `dispatch()` is no longer called.
+This is fine. The four hot arms each call `e.recordOpcode(op)` (which
+inlines at cost 8) and then run their body, and the slow path still
+calls `dispatch()` which calls `recordOpcode` itself. The
+double-record risk only arose when `LOAD_CONST` was allowed to fall
+through to `dispatch()` on the lazy-fill path; the fix was to inline
+`constAtSlow` into the loop arm so `LOAD_CONST` always `continue`s
+from `run()`.
+
+**7. Bench results are sensitive to allocator state.** While
+profiling D5 we saw `runtime.madvise` at ~10-20% flat in some runs
+and ~0% in others. This is the Go allocator returning memory to the
+OS during the benchmark, and it shows up as flat CPU in `pprof` even
+though the dispatch loop is not allocating. The bench numbers in
+commits should use the median across at least 5 `-count=5` runs to
+filter this out. A single hot run on the same code can read 7.5k
+ns/op or 9.5k ns/op depending on whether the allocator is reclaiming
+pages.
+
 ## Current benchmark results
 
 _Captured: 2026-05-16. First end-to-end P0 small-subset run with
