@@ -3733,3 +3733,68 @@ trySimple`. Each level is a method call with its own frame, return
 tuple, and (until D6) error-path tuple. D3 flattens that into a
 single `switch op` inside `dispatch` so the hot opcodes don't pay
 the method-call cost per instruction.
+
+## Small subset, re-run 2026-05-21 (post D3 deopt-table + LOAD_FAST_BORROW inline)
+
+Two D3 commits landed back-to-back:
+
+1. `specialize/deopt.go` replaced the `DeoptParent` `map[Opcode]Opcode`
+   lookup that `maybeDeopt` calls every dispatch with a flat
+   `[288]Opcode` direct-index table (filled at init from `DeoptParent`,
+   identity for everything else). The fannkuch profile pre-fix showed
+   `specialize.Deopt` at 9.02% flat because every Quickened dispatch
+   walked the map via `mapaccess2_fast32`. With the table it is one
+   bounds check plus one indexed load.
+2. `vm/eval.go` extended the inline opcode panel in `run()` from
+   four opcodes (LOAD_CONST / LOAD_FAST / STORE_FAST / POP_TOP) to
+   seven by adding LOAD_FAST_BORROW, LOAD_FAST_BORROW_LOAD_FAST_BORROW,
+   and LOAD_SMALL_INT. fannkuch's `while k: perm[:k+1] = perm[k::-1]`
+   inner loop is full of these three. Every LOAD_FAST_BORROW used to
+   walk `run -> dispatch -> dispatchGenSupported[op] -> dispatchGen`,
+   which is three frames per fetch.
+
+| Benchmark | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy |
+|---|---:|---:|---:|---:|---:|
+| `call_method` | 48.52 | 27.16 | 230.49 | 4.75x | 8.49x |
+| `fannkuch` | 420.17 | 118.16 | 8183.99 | 19.48x | 69.26x |
+| `json_dumps` | 147.08 | 186.52 | 589.78 | 4.01x | 3.16x |
+| `nbody` | 48.39 | 34.17 | 149.37 | 3.09x | 4.37x |
+| `pidigits` | 54.92 | 44.54 | 103.64 | 1.89x | 2.33x |
+| `regex_compile` | 59.41 | 198.70 | 333.34 | 5.61x | 1.68x |
+| `richards` | 57.05 | 40.85 | 364.23 | 6.38x | 8.92x |
+| `unpack_sequence` | 35.33 | 25.96 | 69.74 | 1.97x | 2.69x |
+| **geomean** | 74.55 | 61.01 | 331.50 | 4.45x | 5.43x |
+
+Geomean 5.06x to 4.45x. Two benches (`pidigits`, `unpack_sequence`)
+crossed under 2x of CPython for the first time. fannkuch took the
+biggest swing: 26.36x to 19.48x in one step (-26%), driven entirely
+by the LOAD_FAST_BORROW inline because the inner loop fetches
+LOAD_FAST_BORROW four times per pass for `perm`, `k`, `perm`, `k`
+plus a fifth LOAD_FAST_BORROW_LOAD_FAST_BORROW super.
+
+Drivers:
+
+- 3-iteration fannkuch wall time (the focused profile driver):
+  10.42s to 7.59s, a 27% real-world drop that matches the suite-level
+  fannkuch shift one-for-one. The profile after the inline shows
+  the interpreter routing flat (`run + fetch + dispatch + trySimple +
+  dispatchHandwritten + dispatchGen`) collapsed from ~25% of total
+  samples to ~13%, leaving GC (`madvise + mallocgc + memclr`) as the
+  next-biggest mutator slice at ~10%.
+- The deopt-table change moved `maybeDeopt` from a hot 9% flat (via
+  the map probe) down to noise. It is the kind of fix that does not
+  show up in micro-benchmarks because every dispatch path benefited
+  uniformly; the bench wins manifest as broad-spectrum geomean shift.
+- Three benches that weren't allocation-heavy (`nbody`, `regex_compile`,
+  `json_dumps`) all moved in tandem with the dispatch tightening, in
+  the 8-12% range each.
+
+Next step per ship order: still the dispatch-ladder collapse (D1 +
+the remaining D3 work). The current ladder of `dispatch -> trySpecialized
+-> dispatchGen / dispatchHandwritten -> trySimple` is each a method
+call. After the inline panel, the per-instruction flat for the
+ladder is ~13% of mutator. Folding the per-op switch into the loop
+body would compress that further. GC is the other lever
+(~10% flat split across `madvise`/`mallocgc`/`memclr`/`writeBarrier`);
+that one ports CPython's PyList freelist and intermediate-slice
+reuse, but it is a heavier change with broader correctness surface.
