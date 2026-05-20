@@ -265,7 +265,7 @@ emitters and on any non-trivial bridging glue.
 | I | `Tools/cases_generator/opcode_metadata_generator.py` | + `gopy_opcode_metadata_generator.py` | New emitter targeting `compile/opcode_metadata_gen.go` (replaces `compile/opcode_caches.go`). |
 | J | `Tools/cases_generator/uop_id_generator.py` + `uop_metadata_generator.py` | + Go companions | Tier-2 uop tables. |
 | K | `Tools/cases_generator/tier1_generator.py` | + `gopy_tier1_generator.py` | Emits `vm/eval_dispatch_gen.go`: the dispatch switch + per-opcode body harness. |
-| L | `Tools/cases_generator/tier2_generator.py` | + `gopy_tier2_generator.py` | Emits `vm/eval_uops_gen.go`: uop dispatch + body harness. |
+| L | `Tools/cases_generator/tier2_generator.py` | + `gopy_tier2_generator.py` (landed) | Emits `optimizer/uops_dispatch_gen.go` + `optimizer/uops_stubs_gen.go`: dispatch fan-out on `*Tier2State` plus one StatusDeopt stub per Tier-2-viable uop whose body lives inline as a `//`-prefixed C block. The retired `tools/uops_gen/tier2_generator.go` Go duplicate is removed. The Phase L landing intentionally keeps the outputs in `optimizer/` (not `vm/eval_uops_gen.go`) because `*Tier2State` lives there; lifting them into `vm/` is left to a follow-up phase. |
 | M | `Tools/cases_generator/optimizer_generator.py` | + `gopy_optimizer_generator.py` | Emits `compile/optimizer_cases_gen.go` for spec 1712's abstract interpreter. |
 | N | `Tools/cases_generator/target_generator.py` | (not ported) | CPython-specific computed-goto. Go's `switch` is fine. Documented carve-out. |
 | O | `Tools/cases_generator/py_metadata_generator.py` | (vendored only) | Emits `Lib/_opcode_metadata.py`; gopy already vendors that file via 1710 T5.1. No regeneration needed; we ship CPython's. |
@@ -933,7 +933,10 @@ the hand-rolled version had, and that's a generator fix.
 
 | Step | Status | Commit |
 |------|--------|--------|
-| `gopy_tier2_generator.py` lands | TODO | - |
+| `gopy_tier2_generator.py` lands | DONE | feat/v0.12.4-spec-1712-p8p9 |
+| Generator wired into `regen-cases --target=go`; Go-tool `tier2_generator.go` retired | DONE | feat/v0.12.4-spec-1712-p8p9 |
+| `optimizer/uops_dispatch_gen.go` + `uops_stubs_gen.go` byte-equal pre/post Python pipeline cutover | DONE | feat/v0.12.4-spec-1712-p8p9 |
+| Output bodies use upstream `JUMP_TO_ERROR()` (Go-tool drift `JUMP_TO_LABEL(error)` removed) | DONE | feat/v0.12.4-spec-1712-p8p9 |
 | `vm/eval_uops_gen.go` covers every uop currently hand-rolled | TODO | - |
 | Shared-body parity test (tier-1 LOAD_FAST ≡ tier-2 _LOAD_FAST) | TODO | - |
 | Remaining ~270 uops emitted; tier-2 trace coverage on micro-bench corpus jumps | TODO | - |
@@ -1175,7 +1178,7 @@ helper).
 - [ ] Phase 6.2 — each `vm/eval_specialized_*.go` shrinks to body functions
 - [ ] Phase 6.3 — LOAD_GLOBAL cache-boundary regression test
 - [ ] Phase 6.4 — per-family boundary tests for ~10 other specialized families
-- [ ] Phase 7.1 — `gopy_tier2_generator.py` emits `vm/eval_uops_gen.go`
+- [x] Phase L / 7.1 — `gopy_tier2_generator.py` lands and owns `optimizer/uops_dispatch_gen.go` + `optimizer/uops_stubs_gen.go`; Go-tool `tier2_generator.go` retired. Lifting outputs to `vm/eval_uops_gen.go` left to follow-up (depends on `*Tier2State` migration out of `optimizer/`).
 - [ ] Phase 7.2 — shared-body parity test (tier-1 LOAD_FAST ≡ tier-2 _LOAD_FAST)
 - [ ] Phase 7.3 — remaining ~270 uops emitted
 - [ ] Phase 7.4 — 1712 microbench ±2% before/after
