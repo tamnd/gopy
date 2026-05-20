@@ -506,23 +506,6 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		cell.Contents = nil
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.MAKE_CELL:
-		// Wrap whatever is currently in slot oparg in a fresh cell.
-		// The initial value is usually NULL but is the arg value when
-		// the cell name was also a parameter (CPython 3.14 overlapped
-		// arg-cell slot). The slot then holds the cell.
-		//
-		// CPython: Python/bytecodes.c:1862 MAKE_CELL
-		slot := int(oparg)
-		var contents objects.Object
-		ref := e.f.LocalsPlus[slot]
-		if !ref.IsNull() {
-			contents = ref.AsObject()
-		}
-		cell := objects.NewCell(contents)
-		e.f.LocalsPlus[slot] = stackref.FromObject(cell)
-		return e.advance(), nil, nil, false, true, nil
-
 	case compile.COPY_FREE_VARS:
 		// oparg = number of free vars. Source: f.Func's Closure tuple.
 		// Target: free-var slots, which start at NLocals + NCells.

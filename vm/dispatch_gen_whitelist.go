@@ -58,4 +58,5 @@ var dispatchGenSupported = map[compile.Opcode]bool{
 	compile.BUILD_TEMPLATE:             true,
 	compile.GET_AWAITABLE:              true,
 	compile.GET_ANEXT:                  true,
+	compile.MAKE_CELL:                  true,
 }
