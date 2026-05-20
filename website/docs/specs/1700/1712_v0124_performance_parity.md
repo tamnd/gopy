@@ -2658,10 +2658,10 @@ default-config geomean.
 |-------|------------------------------------------------------|----------|----------|
 | D0    | Py_STATS per-opcode profile                          | DONE     | 26aa411f |
 | D1    | Collapse 10-step dispatch ladder to single function  | WIP      | bfb852a5 |
-| D2    | NEXTOPARG single 16-bit codeunit load                 | TODO     | -        |
+| D2    | NEXTOPARG single 16-bit codeunit load                 | DONE     | 98c8dcd5 |
 | D3    | Inline opcode arms (no method-call wrapper)           | TODO     | -        |
 | D4    | Cache stack_pointer + next_instr as loop locals       | TODO     | -        |
-| D5    | Inline LOAD_FAST + top-N hot arms                     | TODO     | -        |
+| D5    | Inline LOAD_FAST + top-N hot arms                     | DONE     | b8145817 |
 | D6    | Prune dispatch 5-tuple to error-only                  | TODO     | -        |
 | D7    | Move eval-breaker to RESUME-only                      | DONE     | c58f2e34 |
 | D8    | Port Modules/_json.c native encoder                   | TODO     | -        |
