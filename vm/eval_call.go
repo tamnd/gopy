@@ -11,8 +11,6 @@ package vm
 
 import (
 	"fmt"
-	"runtime"
-	"strconv"
 	"sync"
 
 	sys "github.com/tamnd/gopy/module/sys"
@@ -33,27 +31,6 @@ import (
 //
 // CPython: Include/internal/pycore_pystate.h _PyThreadState_GET
 var activeThreads sync.Map // map[uint64]*state.Thread
-
-// goid returns the current goroutine's ID. Pulled out of
-// runtime.Stack since Go does not expose goroutine identity in its
-// public API. Cheap enough for Eval entry/exit; not called per
-// opcode.
-func goid() uint64 {
-	var buf [64]byte
-	n := runtime.Stack(buf[:], false)
-	// "goroutine N [..." — read digits after the "goroutine " prefix.
-	const prefix = "goroutine "
-	if n <= len(prefix) {
-		return 0
-	}
-	s := buf[len(prefix):n]
-	end := 0
-	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
-		end++
-	}
-	id, _ := strconv.ParseUint(string(s[:end]), 10, 64)
-	return id
-}
 
 // setActiveThread primes the current goroutine's Eval slot and
 // returns the previous occupant + goid so the caller can restore it
