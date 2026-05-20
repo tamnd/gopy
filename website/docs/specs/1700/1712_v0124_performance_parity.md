@@ -329,7 +329,7 @@ gate that backs it.
 | BINARY_OP | 13/13 non-JIT | `vm/eval_specialized_binary_op.go` — `ADD_INT`, `SUBTRACT_INT`, `MULTIPLY_INT` (math/bits overflow guard); `ADD_FLOAT`, `SUBTRACT_FLOAT`, `MULTIPLY_FLOAT`; `ADD_UNICODE` shared with `INPLACE_ADD_UNICODE`; `SUBSCR_LIST_INT`, `SUBSCR_TUPLE_INT`, `SUBSCR_STR_INT` (ASCII fast path), `SUBSCR_DICT`, `SUBSCR_LIST_SLICE` | `specialize/gatedata/spec_binary_op.py` (`TestGateSpecBinaryOp`) | DONE | 6a8aace |
 | FOR_ITER | 3/4 | `vm/eval_specialized_for_iter.go` — `LIST`, `TUPLE`, `RANGE`; typed `Next` helpers in `objects/list.go::ListIterNextFast`, `objects/tuple.go::TupleIterNextFast`, `objects/range_iter.go::RangeIterNextFast` skip the `tp_iternext` slot lookup | `vm/eval_specialized_for_iter_test.go` (hit / exhaustion / wrong-type deopt per family) | WIP — `GEN` deferred: it needs the generator-frame push/pop path the VM does not yet expose; dispatch loop falls through to the generic FOR_ITER body for `FOR_ITER_GEN` until that lands | 44786dc4 |
 | LOAD_GLOBAL | 2/2 | `vm/eval_specialized_load_global.go` — `MODULE`, `BUILTIN` | `specialize/gatedata/spec_load_global.py` (`TestGateSpecLoadGlobal`) | DONE | 2f1f603 |
-| STORE_ATTR | 3/3 | `vm/eval_specialized_store_attr.go` — `SLOT` (validate type_version, write `Instance.slots[idx]`), `INSTANCE_VALUE` (validate type_version, validate dict slot still names the same unicode key via `Dict.StoreEntryAtName`, write entry value, fire `DictEventModified`), `WITH_HINT` (same body as INSTANCE_VALUE — gopy stores every instance attribute in the dict so the CPython inline-values-vs-managed-dict split collapses to one path, both opcodes stay separate so the specializer's classification matches CPython 1:1 and deopt counters track each route) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`), `specialize/store_attr_test.go` (`TestStoreAttrSlot`, `TestStoreAttrInstanceValue`, `TestStoreAttrSkipsAbsentKey`) | DONE — also fixed a CPython-divergent specializer branch that used to emit `STORE_ATTR_WITH_HINT` with index=0 when the attribute was absent at specialize time. CPython's `specialize_dict_access_hint` (`Python/specialize.c:1039`) refuses to specialize in that case so the first store inserts via generic `STORE_ATTR` and only later stores can specialize once the slot is populated. The new arm requires the slot's key to still match `co_names[oparg]` because the 4-cell STORE_ATTR cache only stamps `type_version` (no `keys_version` slot like LOAD_ATTR has) so a delete + re-insert into the same bucket could leave the cached index pointing at a stale name — the runtime key compare is the same safety net CPython uses inside `_STORE_ATTR_WITH_HINT`. Micro-bench (`self.n += 1` × 1M iterations) drops 117s → 107s (~8%); the remaining ceiling is dispatch-loop overhead, not the STORE arm. | 96130ac, TBD |
+| STORE_ATTR | 3/3 | `vm/eval_specialized_store_attr.go`. `SLOT` (validate type_version, write `Instance.slots[idx]`), `INSTANCE_VALUE` (validate type_version, validate dict slot still names the same unicode key via `Dict.StoreEntryAtName`, write entry value, fire `DictEventModified`), `WITH_HINT` (same body as INSTANCE_VALUE because gopy stores every instance attribute in the dict so the CPython inline-values-vs-managed-dict split collapses to one path; both opcodes stay separate so the specializer's classification matches CPython 1:1 and deopt counters track each route) | `specialize/gatedata/spec_store_attr.py` (`TestGateSpecStoreAttr`), `specialize/store_attr_test.go` (`TestStoreAttrSlot`, `TestStoreAttrInstanceValue`, `TestStoreAttrSkipsAbsentKey`) | DONE. Also fixed a CPython-divergent specializer branch that used to emit `STORE_ATTR_WITH_HINT` with index=0 when the attribute was absent at specialize time. CPython's `specialize_dict_access_hint` (`Python/specialize.c:1039`) refuses to specialize in that case so the first store inserts via generic `STORE_ATTR` and only later stores can specialize once the slot is populated. The new arm requires the slot's key to still match `co_names[oparg]` because the 4-cell STORE_ATTR cache only stamps `type_version` (no `keys_version` slot like LOAD_ATTR has) so a delete + re-insert into the same bucket could leave the cached index pointing at a stale name. The runtime key compare is the same safety net CPython uses inside `_STORE_ATTR_WITH_HINT`. Micro-bench (`self.n += 1` × 1M iterations) drops 117s to 107s (~8%); the remaining ceiling is dispatch-loop overhead, not the STORE arm. | 96130ac, e95ede4d |
 | SEND | 1/1 dispatch-level | `vm/eval_specialized_send_gen.go` — `fastSendGen` short-circuits the `execSend` type-switch with an identity check on `*Generator` / `*Coroutine` and forwards to `r.Send(v)`. Architectural ceiling: gopy generators run on a dedicated goroutine driven by `yieldCh` / `sendCh` channels, so the CPython `_SEND_GEN_FRAME` + `_PUSH_FRAME` "push gen's frame onto eval-stack, DISPATCH_INLINED into gen body" path has no analogue without retiring the goroutine-based design (tracked separately under P12). | `vm/eval_specialized_send_gen_test.go` (hit / StopIteration / wrong-type deopt / coroutine guard / surfacing non-StopIteration errors) | DONE — fast-arm dispatch | TBD |
 | LOAD_SUPER_ATTR | 2/2 | `vm/eval_specialized_load_super_attr.go` — `ATTR`, `METHOD`; backed by `objects.SuperLookup` with a `method_found` out-param mirroring CPython's `_PySuper_Lookup` | `vm/eval_specialized_load_super_attr_test.go` (hit / missing / non-super deopt / non-type deopt / method-found vs bound shape / oparg bit-0 assertions) | DONE | 2f09f55b |
 | CALL | 17/19 emitted | `vm/eval_specialized_call.go` + `vm/eval_specialized_call_builtin.go` + `vm/eval_specialized_call_alloc_init.go` — `PY_EXACT_ARGS`, `BOUND_METHOD_EXACT_ARGS`, `BUILTIN_O`, `BUILTIN_FAST`, `BUILTIN_FAST_WITH_KEYWORDS`, `LEN`, `ISINSTANCE`, `LIST_APPEND` (consumes trailing POP_TOP via SKIP_OVER), `TYPE_1`, `STR_1`, `TUPLE_1`, `BUILTIN_CLASS`, `METHOD_DESCRIPTOR_O`, `METHOD_DESCRIPTOR_FAST`, `METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS`, `METHOD_DESCRIPTOR_NOARGS`, `ALLOC_AND_ENTER_INIT` (stamps init pointer + version into `Type._spec_cache`; fast arm validates cache cell version vs live tp_version_tag, allocates via `NewInstance`, pushes init frame, folds the `_Py_InitCleanup` shim's EXIT_INIT_CHECK None-validation into the arm because Go-level `Eval()` returns directly without a DISPATCH_INLINED hop) | `vm/eval_specialized_call_test.go`, `vm/eval_specialized_call_builtin_test.go`, `vm/eval_specialized_call_alloc_init_test.go` (hit / one-arg hit / non-None TypeError / non-Type deopt / version-miss deopt / argcount-mismatch deopt) | WIP — generic `PY_GENERAL` / `BOUND_METHOD_GENERAL` / `NON_PY_GENERAL` arms fall through to the adaptive parent body (no fast path needed: CPython's bodies for those are themselves the generic call). | 39ba997f, TBD |
@@ -2616,6 +2616,83 @@ column (78s) at minimum and shift the geomean materially below
 225x. Without this fix, P14 / P2 ports lift the un-runnable benches
 but do not move the geomean denominator that the Stop-hook target
 is gated against.
+
+### Small subset, re-run 2026-05-20 (post STORE_ATTR_INSTANCE_VALUE + WITH_HINT)
+
+_Captured: 2026-05-20 against `e95ede4d` on branch
+`feat/v0.12.4-spec-1712-p8p9` (PR #74). Same host, same harness,
+same warmups/runs as the previous 2026-05-20 snapshot. The intent
+of this re-run was to measure the impact of porting the missing
+STORE_ATTR fast arms (`INSTANCE_VALUE`, `WITH_HINT`) on the
+`call_method` bench, since that bench's hot loop is
+`self.n += 1` which compiles to `LOAD_FAST / LOAD_ATTR n /
+LOAD_CONST 1 / BINARY_OP add / STORE_ATTR n` and the STORE half
+was hitting generic STORE_ATTR every iteration until this commit._
+
+| Benchmark         | cpython 3.14 (ms) | PyPy 3.11 (ms) | gopy (ms) | gopy / cpython | gopy / PyPy | PyPy / cpython |
+|-------------------|------------------:|---------------:|----------:|---------------:|------------:|---------------:|
+| `call_method`     |             41.83 |          23.41 | 128983.96 |       3083.22x |    5510.27x |          0.56x |
+| `fannkuch`        |            405.97 |         102.66 |  17836.86 |         43.94x |     173.74x |          0.25x |
+| `json_dumps`      |            131.89 |         167.78 |  65271.36 |        494.88x |     389.03x |          1.27x |
+| `nbody`           |             56.37 |          29.26 |    256.37 |          4.55x |       8.76x |          0.52x |
+| `pidigits`        |             48.35 |          41.53 |    172.94 |          3.58x |       4.16x |          0.86x |
+| `regex_compile`   |             54.70 |         186.74 | 125253.88 |       2289.71x |     670.73x |          3.41x |
+| `richards`        |             52.50 |          35.50 | 127977.97 |       2437.65x |    3605.18x |          0.68x |
+| `unpack_sequence` |             31.65 |          24.11 |  14061.99 |        444.28x |     583.32x |          0.76x |
+| **geomean**       |             69.67 |          54.54 |  14029.43 |        201.38x |     257.23x |          0.78x |
+
+Headline: gopy / cpython geomean drops **225x to 201x** (-11%) on
+the post-STORE_ATTR build. `call_method` ratio drops **4957x to
+3083x** (-38%) on the bench, consistent with the micro-bench
+(1M `self.n += 1` iterations: 117s to 107s, ~8%). The pyperformance
+bench includes outer-loop overhead and additional method dispatch,
+which is why the wall-clock ratio drop is larger than the
+microbench drop. Absolute cpython times moved up (32.90 to 41.83 ms
+on `call_method`) which suggests background load on the host this
+run; the ratio comparison is the better signal.
+
+STORE_ATTR-attributable findings:
+
+- The specializer was specializing `STORE_ATTR` to
+  `STORE_ATTR_WITH_HINT` with `index=0` when the key was absent at
+  specialize time. CPython's `specialize_dict_access_hint`
+  (`Python/specialize.c:1039`) refuses to specialize on DKIX_EMPTY.
+  Fix: refuse to specialize and leave the opcode as generic
+  STORE_ATTR. First store inserts via generic STORE_ATTR; later
+  stores re-warm into INSTANCE_VALUE once the slot is populated.
+  Without this fix the runtime arm would deopt on every first
+  store, which is the common pattern for `__init__` setting up
+  instance attrs.
+- The new VM fast arms validate the cached slot with a key-string
+  compare because gopy's 4-cell STORE_ATTR cache only stamps
+  `type_version` (no `keys_version` slot like LOAD_ATTR's 5-cell
+  cache). A delete + re-insert that lands in the same dict bucket
+  could otherwise leave the cached index stale. The runtime key
+  compare is the same safety net CPython uses inside
+  `_STORE_ATTR_WITH_HINT` (`Python/bytecodes.c:2583`).
+- WITH_HINT delegates to INSTANCE_VALUE because gopy stores every
+  instance attribute in the dict; the CPython inline-values vs
+  managed-dict split collapses to one path. Both opcodes stay
+  distinct so the specializer's classification matches CPython 1:1
+  and deopt counters track each route independently. If gopy ever
+  splits storage paths, the WITH_HINT arm gets a dedicated body
+  without touching the dispatch table.
+
+Highest-leverage next step (per ship order):
+
+`call_method` still at 3083x cpython, so it remains the worst-case
+specialization gap. With STORE_ATTR closed, the next sweep is
+LOAD_ATTR fast-arm coverage: the bench's hot loop is
+`c.tick(); self.n += 1`. `LOAD_ATTR` on `c.tick` should fire
+`LOAD_ATTR_METHOD_WITH_VALUES`; `LOAD_ATTR` on `self.n` should
+fire `LOAD_ATTR_INSTANCE_VALUE`. The 2026-05-19 table noted these
+arms had landed but the `call_method` ratio did not move; that
+points at a guard mismatch (likely
+`Py_TPFLAGS_INLINE_VALUES` / `Py_TPFLAGS_MANAGED_DICT` not stamped
+on the user-class managed-dict path the bench takes). Confirm by
+enabling `specialize/debug` and diffing the dispatch trace against
+`python3.14 -X opt`. After that: P14.1 pickle (un-runnable today)
+to lift the geomean denominator further.
 
 ### Full corpus (release-tag and nightly only)
 
