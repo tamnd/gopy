@@ -2654,21 +2654,87 @@ default-config geomean.
 
 ### Checklist
 
-| Phase | Description                                          | Status   | Commit |
-|-------|------------------------------------------------------|----------|--------|
-| D0    | Py_STATS per-opcode profile                          | WIP      | -      |
-| D1    | Collapse 10-step dispatch ladder to single function  | TODO     | -      |
-| D2    | NEXTOPARG single 16-bit codeunit load                 | TODO     | -      |
-| D3    | Inline opcode arms (no method-call wrapper)           | TODO     | -      |
-| D4    | Cache stack_pointer + next_instr as loop locals       | TODO     | -      |
-| D5    | Inline LOAD_FAST + top-N hot arms                     | TODO     | -      |
-| D6    | Prune dispatch 5-tuple to error-only                  | TODO     | -      |
-| D7    | Move eval-breaker to RESUME-only                      | TODO     | -      |
-| D8    | Port Modules/_json.c native encoder                   | TODO     | -      |
-| D9    | Port Objects/abstract.c direct-slot dispatch          | TODO     | -      |
-| D10   | Go benchmarks for hot arms                            | TODO     | -      |
-| D11   | Port Modules/_pickle.c remainder                      | TODO     | -      |
-| D12   | pyperformance small-subset rerun + parity gate        | TODO     | -      |
+| Phase | Description                                          | Status   | Commit   |
+|-------|------------------------------------------------------|----------|----------|
+| D0    | Py_STATS per-opcode profile                          | DONE     | 26aa411f |
+| D1    | Collapse 10-step dispatch ladder to single function  | WIP      | bfb852a5 |
+| D2    | NEXTOPARG single 16-bit codeunit load                 | TODO     | -        |
+| D3    | Inline opcode arms (no method-call wrapper)           | TODO     | -        |
+| D4    | Cache stack_pointer + next_instr as loop locals       | TODO     | -        |
+| D5    | Inline LOAD_FAST + top-N hot arms                     | TODO     | -        |
+| D6    | Prune dispatch 5-tuple to error-only                  | TODO     | -        |
+| D7    | Move eval-breaker to RESUME-only                      | DONE     | c58f2e34 |
+| D8    | Port Modules/_json.c native encoder                   | TODO     | -        |
+| D9    | Port Objects/abstract.c direct-slot dispatch          | TODO     | -        |
+| D10   | Go benchmarks for hot arms                            | WIP      | d8c34b41 |
+| D11   | Port Modules/_pickle.c remainder                      | TODO     | -        |
+| D12   | pyperformance small-subset rerun + parity gate        | TODO     | -        |
+
+### Technical lessons learned (D0-D7 in flight)
+
+These are notes captured while the D-series was being shipped. Goal:
+let future ports skip the dead-ends and reach for the wins that
+already moved the bench dial.
+
+**1. Profile first, then port.** D5/D7 were both found by running
+`BenchmarkDispatchTight` under `go test -cpuprofile` and reading the
+top 30 frames in `pprof`. Two surprises:
+
+- `baseForInstrumented` map lookup ate ~20% of CPU on the tight
+  bench. The map was a `map[compile.Opcode]compile.Opcode` with at
+  most 22 keys. The runtime's `mapaccess2_fast32` is fine, but the
+  hash + bucket walk still costs five times what an array index does.
+  Faithful port target: `Python/instrumentation.c::de_instrument`
+  uses a static `[256]uint8` table, so the fix was already what
+  CPython does.
+- `gilSwitchTimer.poll` + `breaker.Load` ran on every iteration of
+  `run()` and cost ~5% of CPU even when the breaker bit was zero.
+  CPython does NOT poll every instruction. `Python/bytecodes.c`
+  `CHECK_EVAL_BREAKER` fires only at `RESUME` (oparg<2 branch) and
+  `JUMP_BACKWARD`. The per-iteration poll was gopy-only drift.
+
+The lesson: when gopy looks expensive relative to CPython, the first
+question is "is this what CPython actually does, or is it a gopy
+shim?" before tuning. Both wins above came from removing code, not
+from adding code.
+
+**2. Map -> array on hot paths.** Two map-to-array conversions landed
+under D1 (`bfb852a5` baseForInstrumented, `1f085af5`
+dispatchGenSupported) and each gave 15-22% on the tight bench. Both
+mirror existing CPython data structures (`opcode_targets[256]`,
+DE_INSTRUMENT). Rule: if the key space is bounded by opcode count
+(<256), prefer `[256]T` plus an optional `[256]bool` presence flag.
+Init cost is one-time at package init; lookup is a single bounds
+check the compiler can hoist.
+
+**3. Tight-loop bench shape matters.** Early benches called EvalCode
+on a 3-instruction program; setup dominated and signal was lost in
+noise. The shape that worked (in `vm/eval_bench_test.go`) packs 1000
+op-pairs in one Code object so setup amortizes to <1% of the run.
+Pair-level reuse also matches CPython's pyperformance loop shape:
+the gate we want to move is geomean across long hot loops, not
+single-instruction call latency.
+
+**4. Tests can codify gopy-specific behavior.** Two eval-breaker
+tests asserted "callback fires before the first instruction even
+without RESUME", which was the per-iteration poll being tested as if
+it were policy. When D7 deleted the per-iteration poll, those tests
+hung (JUMP_BACKWARD_NO_INTERRUPT loop with no other poll point ran
+forever) or failed (no RESUME, no poll, no drain). Both were
+rewritten to test CPython's actual policy: `RESUME` (oparg<2) drains,
+`JUMP_BACKWARD` drains, `JUMP_BACKWARD_NO_INTERRUPT` does not,
+`RESUME 2` (await re-entry) does not. The lesson: when a test breaks
+during a port, check whether the test is asserting CPython behavior
+or the previous gopy shim. The shim assertions get rewritten, not
+the port.
+
+**5. Bench delta per phase, not per series.** Each D-phase commit
+records its own ns/op delta so regressions are caught at the phase
+that introduced them, not three phases later. Format that worked:
+`BenchmarkDispatchTight: 48357 -> 38670 ns/op (-20%)` in the commit
+body. The geomean bench (`bench/run_small.sh`) is too slow for
+per-commit verification; tight benches catch the dispatch-layer wins
+and the parity gate catches the workload-level wins.
 
 ## Current benchmark results
 
