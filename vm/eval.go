@@ -56,6 +56,13 @@ type evalState struct {
 	// CPython: tstate->current_exception, set by helpers that signal
 	// failure via NULL return.
 	pendingErr error
+
+	// lastOpcode mirrors CPython's `int lastopcode` local in
+	// _PyEval_EvalFrameDefault. Used only when GOPY_STATS is on; the
+	// pair_count[last][cur] update reads this every dispatch.
+	//
+	// CPython: Python/ceval.c:1156 lastopcode
+	lastOpcode compile.Opcode
 }
 
 // Eval runs f to completion under ts and returns the value the frame

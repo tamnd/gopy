@@ -27,6 +27,11 @@ import (
 //
 // CPython: Python/ceval.c switch over op
 func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone bool, err error) {
+	// CPython: Python/ceval_macros.h:63 INSTRUCTION_STATS. Bumps the
+	// per-opcode counter + pair counter before any specializer / fast
+	// arm runs, matching the CPython placement (DISPATCH expands to
+	// INSTRUCTION_STATS(op) just before the TARGET label).
+	e.recordOpcode(op)
 	// Fire any registered PEP 669 callbacks subscribed to this
 	// (event, offset) pair, then strip the INSTRUMENTED_ prefix so
 	// the base body runs. INSTRUMENTED_LINE is handled separately:
