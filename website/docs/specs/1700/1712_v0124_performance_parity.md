@@ -1238,7 +1238,7 @@ The hooks the specializer needs are mostly plumbed:
 | Phase | Description | Status | Commit |
 |-------|-------------|--------|--------|
 | P5.1 | Audit / regression-check the existing open-addressed layout against `Objects/dictobject.c:lookdict` probe sequence. Add `objects/dict_lookup_parity_test.go` table-driven from CPython's hash collisions. | DONE | objects/dict_lookup_parity_test.go pins the `(5i+1+perturb)&mask` recurrence (PERTURB_SHIFT=5), `TestDictProbeWalksSameChain` and `TestDictProbeHonoursPerturbCascade` confirm gopy's dictProbe lands on the same slots, `TestDictProbeRespectsDummyAsFreeSlot` covers the freeslot branch. |
-| P5.2 | Real split-keys storage: per-type `SharedKeys` object owns the entries-array shape; instance `__dict__` carries `values []Object` only. Materialise to combined on delete or non-shared insert. Cite `Objects/dictobject.c:insertion_resize_inplace`. | TODO | - |
+| P5.2 | Real split-keys storage: per-type `SharedKeys` object owns the entries-array shape; instance `__dict__` carries `values []Object` only. Materialise to combined on delete or non-shared insert. Cite `Objects/dictobject.c:insertion_resize_inplace`. | DONE (storage only; not wired through `NewInstance` yet) | 72b8c904 |
 | P5.3 | `_PyDict_SetItem_KnownHash` fast path: skip rehash when caller passes the hash. Wire from LOAD_ATTR / LOAD_GLOBAL specialized arms. Cite `Objects/dictobject.c:_PyDict_SetItem_KnownHash`. | DONE | 2b5edb3d (GetItemKnownHash / ContainsKnownHash / SetItemKnownHash on `*Dict`; `(*Unicode).HashCached()` accessor; `lookupIn` / `storeIn` short-circuit when key is `*Unicode`). |
 | P5.4 | Public watcher subscription API: `PyDict_Watch(watcher_id, dict)` / `PyDict_AddWatcher(callback) -> int8_t`. Cite `Objects/dictobject.c:7710 PyDict_Watch / :7741 PyDict_AddWatcher`. Replaces the bare `DictMutationHook` pointer. | DONE | objects/dict_watcher.go + objects/dict.go (`watcherTag`), objects/dict_mutate.go + objects/dict.go fire ADDED / MODIFIED / DELETED / CLEARED / CLONED; optimizer/watcher.go delegates AddWatcher/Watch/Unwatch to the public API; `DictMutationHook` retired. |
 | P5.5 | Install the watcher at `specialize.Enable` time + invalidate inline caches on dict mutation. Interacts with P1.6. | DONE (closed by P1.6 wiring: `specialize.Enable` calls `ensureWatchersInstalled()`, optimizer slot 0 = builtins callback, slot 1 = globals callback. `EnsureBuiltinsSubscribed` mirrors `Python/pylifecycle.c:1381` for the canonical builtins subscription.) | b059710d |
@@ -1251,6 +1251,54 @@ The hooks the specializer needs are mostly plumbed:
 - `meteor_contest` / `go` benches drop primarily on P5.
 
 **Estimated win.** 2x on attribute- and call-method-heavy code.
+
+**Technical notes (P5.2 split-keys storage).**
+
+1. `SharedKeys` is now a real probing table that mirrors the
+   layout of a combined `PyDictKeysObject`: `entries []dictEntry`
+   plus `order []int`, `used`, `fill`, `version`, `refs`. Every
+   instance of a class points at the same `SharedKeys`; only the
+   per-instance value array is duplicated, which is the storage
+   win CPython advertises in `Objects/dictobject.c:567`.
+2. `NewSplitDict(sk)` reuses `sk.entries` as the dict's
+   `d.entries` slice header (the two slice variables share the same
+   backing array). Key + hash reads keep flowing through
+   `d.entries[idx].key` / `.hash` unchanged. Per-instance values
+   live on a separate `Dict.splitValues []Object` aligned with
+   the same slot indices; reads route through `slotKey` /
+   `slotValue` / `slotIsLive` accessors on `Dict`.
+3. `dictInsert` dispatches to `dictInsertSplit` when
+   `d.sharedKeys != nil`. Existing shared keys land in
+   `splitValues[idx]` directly; the dict stays split. **New keys
+   or non-unicode keys take the conservative path: materialize to
+   combined first and re-enter `dictInsert`.** CPython's
+   `insert_split_key` (`Objects/dictobject.c:1832`) extends the
+   shared table when `dk_refcnt == 1`, but that requires an
+   invalidation dance across every split sibling. Materializing
+   first preserves correctness without the multi-instance
+   bookkeeping; the SharedKeys itself stays intact for other
+   instances still using it. Lifting this restriction is a
+   follow-up: it would require a per-class `dk_version` bump
+   that wakes every sibling dict and re-derives their
+   `splitValues` indexes.
+4. `dictDelete` clears `splitValues[idx]` in split mode (the
+   slot drops from `d.order` but the shared `d.entries[idx]`
+   entry stays live so sibling instances still find their
+   values). `dictResize` calls `ensureCombined()` first; a split
+   dict can't resize without copying out, and the materialize
+   path allocates a fresh private `entries[]` anyway.
+5. `Dict.lookup` wraps `dispatchLookup` to flip `found=false`
+   when the shared key exists but this instance never set the
+   value (`d.sharedKeys != nil && d.splitValues[idx] == nil`).
+   The four probe variants under `dispatchLookup` stay unaware
+   of split-mode semantics.
+6. Storage savings are **not yet reachable from the hot path**.
+   `Type.cachedKeys` is still a `map[string]bool` rather than a
+   real `*SharedKeys`; `NewInstance` does not yet route through
+   `NewSplitDict`. The follow-up task wires that and teaches the
+   `LOAD_ATTR_INSTANCE_VALUE_*` / `STORE_ATTR_INSTANCE_VALUE_*`
+   specializer fast arms to read straight from
+   `splitValues[hint]`.
 
 **Technical notes (P5.4 dict watcher port).**
 
