@@ -344,6 +344,11 @@ func (s *State) setFtstringExpr(tok *Tok, c byte) {
 	}
 
 	if !hashDetected {
+		if _, _, ok := ValidateUTF8(src); !ok {
+			s.done = eDecode
+			s.syntaxError("invalid character in f-string expression")
+			return
+		}
 		tok.Metadata = append([]byte(nil), src...)
 		return
 	}
@@ -385,6 +390,11 @@ func (s *State) setFtstringExpr(tok *Tok, c byte) {
 		}
 		out = append(out, ch)
 		i++
+	}
+	if _, _, ok := ValidateUTF8(out); !ok {
+		s.done = eDecode
+		s.syntaxError("invalid character in f-string expression")
+		return
 	}
 	tok.Metadata = out
 }

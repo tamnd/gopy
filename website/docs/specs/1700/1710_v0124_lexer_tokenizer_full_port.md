@@ -101,7 +101,7 @@ re-run the audit if the upstream rebases.
 | `contains_null_bytes` | lexer.c:53 | (inlined) | lexer.go:78 | DONE | Inlined into `nextC` refill branch. |
 | `tok_nextc` | lexer.c:60 | `State.nextC` | lexer.go:60 | DONE | Mirrors line/col tracking + EOF/refill callback. |
 | `tok_backup` | lexer.c:99 | `State.backup` | lexer.go:86 | DONE | cur/col decrement. |
-| `set_ftstring_expr` | lexer.c:114 | `State.setFtstringExpr` | fstring.go:306 | DRIFT | Missing `PyUnicode_DecodeUTF8` step on the expression buffer. Stores raw bytes; CPython validates/normalizes UTF-8. Breaks `f"{x=}"` debug mode with non-ASCII names. Tracked #618. |
+| `set_ftstring_expr` | lexer.c:114 | `State.setFtstringExpr` | fstring.go:306 | DONE | Runs `ValidateUTF8` on the expression buffer before writing `tok.Metadata`. Malformed UTF-8 sets `tok->done = E_DECODE` and records a SyntaxError, mirroring CPython's `PyUnicode_DecodeUTF8` failure path. |
 | `_PyLexer_update_ftstring_expr` | lexer.c:227 | `State.updateFtstringExpr` | fstring.go:269 | DONE | Buffer append/realloc; void return (no PyMem errors). |
 | `lookahead` | lexer.c:282 | `State.lookahead` | lexer.go:831 | DONE | Closure that rewinds the consumed slice. |
 | `verify_end_of_number` | lexer.c:305 | `State.verifyEndOfNumber` | lexer.go:865 | DRIFT | Missing the CPython `SyntaxWarning` for abutting keywords like `1and` / `1or`. gopy accepts silently per the in-file comment at lexer.go:888-891. |
@@ -229,10 +229,10 @@ Phases are ordered to land DRIFT fixes by impact on the gate tests, smallest bla
 2. `verifyIdentifier` (lexer.go:914) now calls `scanIdentifier`, pins `tok->cur` to the first bad rune, and routes the message through `printable` vs `non-printable` like `Parser/lexer/lexer.c:402`.
 3. `parser/lexer/xid_test.go` covers the CPython accept set (Greek, Cyrillic, CJK, combining marks, micro sign, middle dot, SCRIPT CAPITAL P) and reject set (digit-leading, ASCII `$` / `-`, whitespace inside, empty string).
 
-### P3: `set_ftstring_expr` UTF-8 decode (gates: f-string `=` debug mode with non-ASCII names, task #618)
+### P3: `set_ftstring_expr` UTF-8 decode (DONE; gates f-string `=` debug mode with non-ASCII names, task #618)
 
-1. In `fstring.go:setFtstringExpr`, decode the expression buffer via `unicode/utf8` validation + `string(...)` rather than passing the raw byte slice through.
-2. Reject malformed UTF-8 with a `SyntaxError` (matches CPython behavior).
+1. `fstring.go:setFtstringExpr` runs `ValidateUTF8` on both the direct-copy and the comment-stripped path before assigning `tok.Metadata`.
+2. Malformed UTF-8 sets `tok->done = E_DECODE` and routes a `SyntaxError("invalid character in f-string expression")` through `syntaxError`, matching CPython's `PyUnicode_DecodeUTF8` failure path.
 
 ### P4: `verify_end_of_number` SyntaxWarning (gates: `test_tokenize.py` `1and` style sub-tests)
 
@@ -282,7 +282,7 @@ TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 | 5 | T6 | asyncio | `unittest.mock` imports `asyncio`; full port tracked in [spec 1711](./1711_v0124_asyncio_full_port.md) | BLOCKED | — |
 | 6 | P1 | tokenizer error routing | dispatch on `tok->done` not message substrings (see P1 above) | DONE | (this PR) |
 | 7 | P2 | XID tables | port `_PyUnicode_ScanIdentifier` for non-ASCII identifier validation | DONE | (this PR) |
-| 8 | P3 | f-string debug UTF-8 | decode `setFtstringExpr` buffer through `unicode/utf8` | TODO | — |
+| 8 | P3 | f-string debug UTF-8 | decode `setFtstringExpr` buffer through `unicode/utf8` | DONE | (this PR) |
 | 9 | P4 | SyntaxWarning | emit on `1and` / `1or` style numbers | TODO | — |
 | 10 | P5 | token positions | match `_PyLexer_token_setup` line/col emission | TODO | — |
 
