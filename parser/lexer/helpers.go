@@ -100,19 +100,25 @@ func (s *State) errorRet() Tok {
 	return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
 }
 
-// parserWarn records a SyntaxWarning-class diagnostic. CPython routes
-// this through PyErr_WarnExplicitObject so the warnings module can
-// classify it; gopy doesn't yet expose the warnings filter to the
-// tokenizer, so we file it under recordError tagged with a [warn]
-// marker until the warnings plumbing lands.
+// parserWarn records a SyntaxWarning-class diagnostic. CPython hands
+// this to PyErr_WarnExplicitObject so the warnings filter can decide
+// to ignore, log, or escalate; gopy stashes it on s.warnings and
+// expects the consumer (module/_tokenize, compile.Compile) to drain
+// it via Warnings() and route to module/warnings. Category is kept
+// for that downstream hand-off.
 //
 // CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
 func (s *State) parserWarn(category, format string, args ...any) {
 	if !s.reportWarnings {
 		return
 	}
-	_ = category
-	s.recordError("[warn] " + fmt.Sprintf(format, args...))
+	w := SyntaxError{
+		Pos:      Pos{Line: s.lineno, Col: s.col},
+		EndPos:   Pos{Line: s.lineno, Col: s.col},
+		Message:  fmt.Sprintf(format, args...),
+		Category: category,
+	}
+	s.warnings = append(s.warnings, w)
 }
 
 // newString duplicates a byte range into an owned string. CPython

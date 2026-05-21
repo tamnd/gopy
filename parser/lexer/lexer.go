@@ -887,9 +887,14 @@ func (s *State) verifyEndOfNumber(c int, kind string) bool {
 		r = s.lookahead("ot")
 	}
 	if r {
-		// Trailing keyword (`1and`, `1or`, ...): accept the literal.
-		// CPython emits a SyntaxWarning, gopy's tokenizer doesn't reach
-		// the warnings module yet so we record nothing.
+		// Backup so the keyword runs through the lexer normally on the
+		// next pass, matching tok_backup(tok, c) in CPython.
+		s.backup(c)
+		s.parserWarn("SyntaxWarning", "invalid %s literal", kind)
+		// Re-consume the byte we just backed up so the caller's cursor
+		// stays where CPython leaves it after the tok_nextc(tok) call
+		// inside verify_end_of_number.
+		s.nextC()
 		return true
 	}
 	if c < 128 && isPotentialIdentifierChar(c) {

@@ -155,6 +155,15 @@ type State struct {
 	done errCode
 	err  *SyntaxError
 
+	// warnings collects SyntaxWarning-class diagnostics from
+	// parserWarn. The lexer keeps these out of err so the parse can
+	// continue; consumers (module/_tokenize, py compile path) drain
+	// them via Warnings() and surface them through the warnings
+	// module.
+	//
+	// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
+	warnings []SyntaxError
+
 	mode     Mode
 	tabSize  int
 	indent   int
@@ -318,6 +327,11 @@ type SyntaxError struct {
 	EndPos  Pos
 	Message string
 	Text    string
+	// Category is "SyntaxWarning" for warnings recorded via
+	// parserWarn; empty for hard errors recorded via recordError.
+	// Downstream consumers route on this when surfacing through the
+	// warnings module vs raising.
+	Category string
 }
 
 // Error renders the lexer error in CPython's "<msg>" form. The full
@@ -349,6 +363,12 @@ func (s *State) SetFilename(name string) { s.filename = name }
 
 // Err returns the first SyntaxError recorded, or nil.
 func (s *State) Err() *SyntaxError { return s.err }
+
+// Warnings returns the SyntaxWarning-class diagnostics recorded
+// during tokenization. Order matches emission order.
+//
+// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
+func (s *State) Warnings() []SyntaxError { return s.warnings }
 
 // Done returns the lexer's terminal status as an exported int that
 // matches CPython's E_* numbering from Include/errcode.h. Callers
