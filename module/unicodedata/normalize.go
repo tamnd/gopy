@@ -44,8 +44,8 @@ func parseForm(form string) (nfc, k bool, err error) {
 	return false, false, fmt.Errorf("ValueError: invalid normalization form")
 }
 
-// isAscii reports whether every rune in s is < 0x80.
-func isAscii(s []rune) bool {
+// isASCII reports whether every rune in s is < 0x80.
+func isASCII(s []rune) bool {
 	for _, r := range s {
 		if r >= 0x80 {
 			return false
@@ -61,7 +61,7 @@ func isAscii(s []rune) bool {
 //
 // CPython: Modules/unicodedata.c:820 is_normalized_quickcheck
 func isNormalizedQuickcheck(input []rune, nfc, k, yesOnly bool) quickcheckResult {
-	if isAscii(input) {
+	if isASCII(input) {
 		return quickcheckYes
 	}
 	prevCombining := uint8(0)
@@ -97,55 +97,23 @@ func isNormalizedQuickcheck(input []rune, nfc, k, yesOnly bool) quickcheckResult
 	return result
 }
 
-// nfdNFKD decomposes input. When k=false produces NFD; when k=true
-// produces NFKD. Output is canonically reordered per CCC.
-//
-// CPython: Modules/unicodedata.c:514 nfd_nfkd
-func nfdNFKD(input []rune, k bool) []rune {
-	out := make([]rune, 0, len(input)+10)
-	var stack [20]rune
-	stackPtr := 0
-	for i := 0; i < len(input); i++ {
-		stack[stackPtr] = input[i]
-		stackPtr++
-		for stackPtr > 0 {
-			stackPtr--
-			code := stack[stackPtr]
-
-			// Hangul algorithmic decomposition.
-			if code >= hangulSBase && code < hangulSBase+hangulSCount {
-				s := int(code - hangulSBase)
-				l := rune(hangulLBase + s/hangulNCount)
-				v := rune(hangulVBase + (s%hangulNCount)/hangulTCount)
-				t := rune(hangulTBase + s%hangulTCount)
-				out = append(out, l, v)
-				if t != hangulTBase {
-					out = append(out, t)
-				}
-				continue
-			}
-
-			index, prefix, count := getDecompRecord(code)
-			// Either no decomposition, or a compatibility
-			// decomposition while we are doing NFD: copy as-is.
-			if count == 0 || (prefix != 0 && !k) {
-				out = append(out, code)
-				continue
-			}
-			// Push decomposition onto the stack in reverse order.
-			for j := count - 1; j >= 0; j-- {
-				if stackPtr >= len(stack) {
-					out = append(out, rune(decompData[index+j]))
-					continue
-				}
-				stack[stackPtr] = rune(decompData[index+j])
-				stackPtr++
-			}
-		}
+// decomposeHangul appends the algorithmic L+V(+T) decomposition of
+// a precomposed Hangul syllable.
+func decomposeHangul(out []rune, code rune) []rune {
+	s := int(code - hangulSBase)
+	l := rune(hangulLBase + s/hangulNCount)
+	v := rune(hangulVBase + (s%hangulNCount)/hangulTCount)
+	t := rune(hangulTBase + s%hangulTCount)
+	out = append(out, l, v)
+	if t != hangulTBase {
+		out = append(out, t)
 	}
+	return out
+}
 
-	// Canonical reordering: stable sort by Canonical_Combining_Class
-	// within runs of non-starters.
+// reorderCanonical applies the canonical reordering step: stable
+// sort by Canonical_Combining_Class within each run of non-starters.
+func reorderCanonical(out []rune) {
 	for i := 1; i < len(out); i++ {
 		curCC := getRecord(out[i]).Combining
 		if curCC == 0 {
@@ -164,6 +132,42 @@ func nfdNFKD(input []rune, k bool) []rune {
 			out[j], out[j-1] = out[j-1], out[j]
 		}
 	}
+}
+
+// nfdNFKD decomposes input. When k=false produces NFD; when k=true
+// produces NFKD. Output is canonically reordered per CCC.
+//
+// CPython: Modules/unicodedata.c:514 nfd_nfkd
+func nfdNFKD(input []rune, k bool) []rune {
+	out := make([]rune, 0, len(input)+10)
+	var stack [20]rune
+	stackPtr := 0
+	for i := 0; i < len(input); i++ {
+		stack[stackPtr] = input[i]
+		stackPtr++
+		for stackPtr > 0 {
+			stackPtr--
+			code := stack[stackPtr]
+			if code >= hangulSBase && code < hangulSBase+hangulSCount {
+				out = decomposeHangul(out, code)
+				continue
+			}
+			index, prefix, count := getDecompRecord(code)
+			if count == 0 || (prefix != 0 && !k) {
+				out = append(out, code)
+				continue
+			}
+			for j := count - 1; j >= 0; j-- {
+				if stackPtr >= len(stack) {
+					out = append(out, rune(decompData[index+j]))
+					continue
+				}
+				stack[stackPtr] = rune(decompData[index+j])
+				stackPtr++
+			}
+		}
+	}
+	reorderCanonical(out)
 	return out
 }
 
@@ -187,6 +191,85 @@ func findNFCIndex(table []reindexEntry, code rune) int {
 	return -1
 }
 
+// composeHangul tries Hangul L+V(+T) composition starting at
+// decomp[i]. Returns the composed syllable and the number of runes
+// consumed (2 or 3), or 0 when no composition applies.
+func composeHangul(decomp []rune, i int) (rune, int) {
+	code := decomp[i]
+	if code < hangulLBase || code >= hangulLBase+hangulLCount {
+		return 0, 0
+	}
+	if i+1 >= len(decomp) {
+		return 0, 0
+	}
+	v := decomp[i+1]
+	if v < hangulVBase || v >= hangulVBase+hangulVCount {
+		return 0, 0
+	}
+	lIndex := int(code - hangulLBase)
+	vIndex := int(v - hangulVBase)
+	composed := rune(hangulSBase + (lIndex*hangulVCount+vIndex)*hangulTCount)
+	consumed := 2
+	if i+2 < len(decomp) {
+		t := decomp[i+2]
+		if t > hangulTBase && t < hangulTBase+hangulTCount {
+			composed += t - hangulTBase
+			consumed = 3
+		}
+	}
+	return composed, consumed
+}
+
+// composeStarter attempts to compose decomp[i] (a known first
+// component, with reindex value f) with any of the following
+// combining marks. Returns the composed rune, the new f for the
+// composed rune, and updated skipped/cskipped state.
+func composeStarter(decomp []rune, i, f int, skipped *[20]int, cskipped *int) rune {
+	length := len(decomp)
+	comb := uint8(0)
+	composed := decomp[i]
+	for i1 := i + 1; i1 < length; i1++ {
+		code1 := decomp[i1]
+		comb1 := getRecord(code1).Combining
+		if comb != 0 {
+			if comb1 == 0 {
+				break
+			}
+			if comb >= comb1 {
+				continue
+			}
+		}
+		l := findNFCIndex(nfcLast, code1)
+		if l == -1 {
+			if comb1 == 0 {
+				break
+			}
+			comb = comb1
+			continue
+		}
+		index := f*totalLast + l
+		index1 := int(compIndex[index>>compShift])
+		candidate := compData[(index1<<compShift)+(index&((1<<compShift)-1))]
+		if candidate == 0 {
+			if comb1 == 0 {
+				break
+			}
+			comb = comb1
+			continue
+		}
+		composed = rune(candidate)
+		if *cskipped < len(skipped) {
+			skipped[*cskipped] = i1
+			*cskipped++
+		}
+		f = findNFCIndex(nfcFirst, composed)
+		if f == -1 {
+			break
+		}
+	}
+	return composed
+}
+
 // nfcNFKC composes input. nfc_nfkc starts from the NFD/NFKD
 // output of nfdNFKD and walks it joining starter+combining pairs
 // through the comp_index / comp_data tables.
@@ -204,34 +287,21 @@ func nfcNFKC(input []rune, k bool) []rune {
 	i, o := 0, 0
 loop:
 	for i < length {
-		// Drop characters already consumed by a prior pair.
 		for idx := 0; idx < cskipped; idx++ {
 			if skipped[idx] == i {
-				skipped[idx] = skipped[cskipped-1]
 				cskipped--
+				skipped[idx] = skipped[cskipped]
 				i++
 				continue loop
 			}
 		}
-
-		code := decomp[i]
-		// Hangul L+V (and optionally +T) composition.
-		if code >= hangulLBase && code < hangulLBase+hangulLCount &&
-			i+1 < length &&
-			decomp[i+1] >= hangulVBase && decomp[i+1] < hangulVBase+hangulVCount {
-			lIndex := int(code - hangulLBase)
-			vIndex := int(decomp[i+1] - hangulVBase)
-			composed := rune(hangulSBase + (lIndex*hangulVCount+vIndex)*hangulTCount)
-			i += 2
-			if i < length && decomp[i] > hangulTBase && decomp[i] < hangulTBase+hangulTCount {
-				composed += decomp[i] - hangulTBase
-				i++
-			}
+		if composed, consumed := composeHangul(decomp, i); consumed != 0 {
 			out[o] = composed
 			o++
+			i += consumed
 			continue
 		}
-
+		code := decomp[i]
 		f := findNFCIndex(nfcFirst, code)
 		if f == -1 {
 			out[o] = code
@@ -239,53 +309,7 @@ loop:
 			i++
 			continue
 		}
-
-		i1 := i + 1
-		comb := uint8(0)
-		out[o] = decomp[i]
-		for i1 < length {
-			code1 := decomp[i1]
-			comb1 := getRecord(code1).Combining
-			if comb != 0 {
-				if comb1 == 0 {
-					break
-				}
-				if comb >= comb1 {
-					i1++
-					continue
-				}
-			}
-			l := findNFCIndex(nfcLast, code1)
-			if l == -1 {
-				if comb1 == 0 {
-					break
-				}
-				comb = comb1
-				i1++
-				continue
-			}
-			index := f*totalLast + l
-			index1 := int(compIndex[index>>compShift])
-			candidate := compData[(index1<<compShift)+(index&((1<<compShift)-1))]
-			if candidate == 0 {
-				if comb1 == 0 {
-					break
-				}
-				comb = comb1
-				i1++
-				continue
-			}
-			out[o] = rune(candidate)
-			if cskipped < len(skipped) {
-				skipped[cskipped] = i1
-				cskipped++
-			}
-			i1++
-			f = findNFCIndex(nfcFirst, out[o])
-			if f == -1 {
-				break
-			}
-		}
+		out[o] = composeStarter(decomp, i, f, &skipped, &cskipped)
 		o++
 		i++
 	}

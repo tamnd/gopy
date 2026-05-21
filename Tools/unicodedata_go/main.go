@@ -56,7 +56,7 @@ func main() {
 	}
 
 	dbPath := filepath.Join(*cpython, "Modules", "unicodedata_db.h")
-	src, err := os.ReadFile(dbPath) //nolint:gosec
+	src, err := os.ReadFile(dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -69,11 +69,11 @@ func main() {
 	if *outType != "" {
 		typePath := filepath.Join(*cpython, "Objects", "unicodetype_db.h")
 		ctypePath := filepath.Join(*cpython, "Objects", "unicodectype.c")
-		typeSrc, err := os.ReadFile(typePath) //nolint:gosec
+		typeSrc, err := os.ReadFile(typePath)
 		if err != nil {
 			log.Fatal(err)
 		}
-		ctypeSrc, err := os.ReadFile(ctypePath) //nolint:gosec
+		ctypeSrc, err := os.ReadFile(ctypePath)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -92,10 +92,10 @@ func writeFormatted(path string, fn func(*bytes.Buffer) error) {
 	}
 	formatted, err := format.Source(buf.Bytes())
 	if err != nil {
-		_ = os.WriteFile(path+".raw", buf.Bytes(), 0o644) //nolint:gosec
+		_ = os.WriteFile(path+".raw", buf.Bytes(), 0o644)
 		log.Fatalf("gofmt %s: %v (raw dump at %s.raw)", path, err, path)
 	}
-	if err := os.WriteFile(path, formatted, 0o644); err != nil { //nolint:gosec
+	if err := os.WriteFile(path, formatted, 0o644); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -111,20 +111,20 @@ type db struct {
 	first   int
 	last    int
 
-	records        [][]uint32 // 6-tuples
-	categoryNames  []string
-	bidiNames      []string
-	eawNames       []string
-	decompPrefix   []string
-	index1         []uint32
-	index2         []uint32
-	decompData     []uint32
-	decompIndex1   []uint32
-	decompIndex2   []uint32
-	compIndex      []uint32
-	compData       []uint32
-	nfcFirst       []reindex
-	nfcLast        []reindex
+	records       [][]uint32 // 6-tuples
+	categoryNames []string
+	bidiNames     []string
+	eawNames      []string
+	decompPrefix  []string
+	index1        []uint32
+	index2        []uint32
+	decompData    []uint32
+	decompIndex1  []uint32
+	decompIndex2  []uint32
+	compIndex     []uint32
+	compData      []uint32
+	nfcFirst      []reindex
+	nfcLast       []reindex
 }
 
 type reindex struct {
@@ -156,7 +156,7 @@ func parseDB(src string) (*db, error) {
 	// _PyUnicode_Database_Records is a list of {a, b, c, d, e, f}
 	// tuples; parse with the tuple-walker because regexp on the
 	// braces is ambiguous against the outer braces.
-	recBody, err := extractBlock(src, "_PyUnicode_Database_Records[] = {", "};")
+	recBody, err := extractBlock(src, "_PyUnicode_Database_Records[] = {")
 	if err != nil {
 		return nil, fmt.Errorf("records: %w", err)
 	}
@@ -190,7 +190,7 @@ func parseDB(src string) (*db, error) {
 		// Leading space disambiguates from decomp_data[] = {.
 		{" comp_data[] = {", &out.compData},
 	} {
-		body, err := extractBlock(src, tab.name, "};")
+		body, err := extractBlock(src, tab.name)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", tab.name, err)
 		}
@@ -198,12 +198,12 @@ func parseDB(src string) (*db, error) {
 	}
 
 	// nfc_first / nfc_last are struct reindex tuples.
-	if body, err := extractBlock(src, "nfc_first[] = {", "};"); err == nil {
+	if body, err := extractBlock(src, "nfc_first[] = {"); err == nil {
 		out.nfcFirst = parseReindex(body)
 	} else {
 		return nil, fmt.Errorf("nfc_first: %w", err)
 	}
-	if body, err := extractBlock(src, "nfc_last[] = {", "};"); err == nil {
+	if body, err := extractBlock(src, "nfc_last[] = {"); err == nil {
 		out.nfcLast = parseReindex(body)
 	} else {
 		return nil, fmt.Errorf("nfc_last: %w", err)
@@ -226,13 +226,13 @@ func defineInt(src, name string) (int, bool) {
 
 // extractBlock finds the substring between `start` and the next
 // matching `};`, returning the inner text.
-func extractBlock(src, start, end string) (string, error) {
+func extractBlock(src, start string) (string, error) {
 	i := strings.Index(src, start)
 	if i < 0 {
 		return "", fmt.Errorf("not found: %s", start)
 	}
 	rest := src[i+len(start):]
-	j := strings.Index(rest, end)
+	j := strings.Index(rest, "};")
 	if j < 0 {
 		return "", fmt.Errorf("unterminated: %s", start)
 	}
@@ -243,7 +243,7 @@ func extractBlock(src, start, end string) (string, error) {
 // block (or similar) into a slice of Go strings, dropping the
 // trailing NULL sentinel if present.
 func extractStrings(src, start string) ([]string, error) {
-	body, err := extractBlock(src, start, "};")
+	body, err := extractBlock(src, start)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +496,7 @@ func parseTypeDB(src, ctype string) (*typeDB, error) {
 		return nil, fmt.Errorf("SHIFT not defined in unicodetype_db.h")
 	}
 
-	body, err := extractBlock(src, "_PyUnicode_TypeRecords[] = {", "};")
+	body, err := extractBlock(src, "_PyUnicode_TypeRecords[] = {")
 	if err != nil {
 		return nil, fmt.Errorf("type records: %w", err)
 	}
@@ -509,7 +509,7 @@ func parseTypeDB(src, ctype string) (*typeDB, error) {
 		{"index1[] = {", &out.index1},
 		{"index2[] = {", &out.index2},
 	} {
-		b, err := extractBlock(src, tab.name, "};")
+		b, err := extractBlock(src, tab.name)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", tab.name, err)
 		}

@@ -83,10 +83,10 @@ func TestNumeric(t *testing.T) {
 	}{
 		{"0", 0.0, true},
 		{"½", 0.5, true},
-		{"Ⅴ", 5.0, true},  // roman numeral five
-		{"༳", -0.5, true}, // tibetan digit half minus one
-		{"Ⅰ", 1.0, true},     // roman numeral one
-		{"Ⅿ", 1000.0, true},  // roman numeral one thousand
+		{"Ⅴ", 5.0, true},    // roman numeral five
+		{"༳", -0.5, true},   // tibetan digit half minus one
+		{"Ⅰ", 1.0, true},    // roman numeral one
+		{"Ⅿ", 1000.0, true}, // roman numeral one thousand
 		{"a", 0.0, false},
 	}
 	for _, tc := range cases {

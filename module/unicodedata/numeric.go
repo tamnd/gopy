@@ -19,19 +19,19 @@ import (
 
 // CPython: Objects/unicodectype.c:13-25 flag-bit definitions
 const (
-	typeFlagAlpha          = 0x0001
-	typeFlagDecimal        = 0x0002
-	typeFlagDigit          = 0x0004
-	typeFlagLower          = 0x0008
-	typeFlagTitle          = 0x0040
-	typeFlagUpper          = 0x0080
-	typeFlagXIDStart       = 0x0100
-	typeFlagXIDContinue    = 0x0200
-	typeFlagPrintable      = 0x0400
-	typeFlagNumeric        = 0x0800
-	typeFlagCaseIgnorable  = 0x1000
-	typeFlagCased          = 0x2000
-	typeFlagExtendedCase   = 0x4000
+	typeFlagAlpha         = 0x0001
+	typeFlagDecimal       = 0x0002
+	typeFlagDigit         = 0x0004
+	typeFlagLower         = 0x0008
+	typeFlagTitle         = 0x0040
+	typeFlagUpper         = 0x0080
+	typeFlagXIDStart      = 0x0100
+	typeFlagXIDContinue   = 0x0200
+	typeFlagPrintable     = 0x0400
+	typeFlagNumeric       = 0x0800
+	typeFlagCaseIgnorable = 0x1000
+	typeFlagCased         = 0x2000
+	typeFlagExtendedCase  = 0x4000
 )
 
 // getTypeRecord mirrors gettyperecord: the shift-then-index2 walk

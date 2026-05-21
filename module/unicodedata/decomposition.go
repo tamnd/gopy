@@ -20,10 +20,10 @@ import (
 //
 // CPython: Modules/unicodedata.c:392 SBase / LBase / VBase / TBase
 const (
-	hangulSBase = 0xAC00
-	hangulLBase = 0x1100
-	hangulVBase = 0x1161
-	hangulTBase = 0x11A7
+	hangulSBase  = 0xAC00
+	hangulLBase  = 0x1100
+	hangulVBase  = 0x1161
+	hangulTBase  = 0x11A7
 	hangulLCount = 19
 	hangulVCount = 21
 	hangulTCount = 28
@@ -48,8 +48,7 @@ func getDecompRecord(code rune) (index, prefix, count int) {
 	}
 	count = int(decompData[index] >> 8)
 	prefix = int(decompData[index] & 255)
-	index++
-	return
+	return index + 1, prefix, count
 }
 
 // CPython: Modules/unicodedata.c:415 unicodedata_UCD_decomposition_impl

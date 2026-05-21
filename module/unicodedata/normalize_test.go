@@ -30,7 +30,7 @@ func TestNormalizeNFD(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got := nfdNFKD([]rune(tc.in), false)
-		if !reflect.DeepEqual(got, tc.want) && !(len(got) == 0 && len(tc.want) == 0) {
+		if !reflect.DeepEqual(got, tc.want) && (len(got) != 0 || len(tc.want) != 0) {
 			t.Errorf("nfdNFKD(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
