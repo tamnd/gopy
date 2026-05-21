@@ -397,35 +397,50 @@ func (s *State) continuationLine() (int, bool) {
 }
 
 // scanName scans an identifier starting at the byte already consumed
-// into c. ASCII-only for now; non-ASCII bytes are accepted but the
-// PEP 3131 normalization pass lives in helpers.go.
+// into c. Mirrors CPython's tok_get_normal_mode identifier arm
+// character-by-character: the string-prefix probe is interleaved with
+// the identifier-char loop and breaks the moment a non-prefix letter
+// (or a repeat of one already seen) appears. That ordering is what
+// keeps `shrink"` from being mistaken for a string prefix.
 //
 // CPython: Parser/lexer/lexer.c:743 (identifier branch in tok_get_normal_mode)
-func (s *State) scanName(_ int) Tok {
-	var c int
+func (s *State) scanName(c int) Tok {
+	sawB, sawR, sawU, sawF, sawT := false, false, false, false, false
 	for {
+		switch {
+		case !sawB && (c == 'b' || c == 'B'):
+			sawB = true
+		case !sawU && (c == 'u' || c == 'U'):
+			sawU = true
+		case !sawR && (c == 'r' || c == 'R'):
+			sawR = true
+		case !sawF && (c == 'f' || c == 'F'):
+			sawF = true
+		case !sawT && (c == 't' || c == 'T'):
+			sawT = true
+		default:
+			goto identTail
+		}
 		c = s.nextC()
-		if !isPotentialIdentifierChar(c) {
-			break
+		if c == '"' || c == '\'' {
+			// CPython: Parser/lexer/lexer.c:771 maybe_raise_syntax_error_for_string_prefixes
+			if s.maybeRaiseSyntaxErrorForStringPrefixes(sawB, sawR, sawU, sawF, sawT) {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			// CPython: Parser/lexer/lexer.c:778 (f/t-string entry)
+			if sawF || sawT {
+				return s.startFString(s.start, s.cur-1, c)
+			}
+			// CPython: Parser/lexer/lexer.c:781 goto letter_quote
+			s.backup(c)
+			c = s.nextC()
+			return s.scanString(c)
 		}
 	}
-	// String-prefix detection: f", t", rf", rt", fr", tr", b", u", r".
-	//
-	// CPython: Parser/lexer/lexer.c:743 (identifier-followed-by-quote
-	// branch). The validation fires before either of the two follow-up
-	// branches (f-string entry vs plain string entry).
-	if c == '"' || c == '\'' {
-		_, _, isFT, ok := s.detectStringPrefix(s.start, s.cur-1)
-		if !ok {
-			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
-		}
-		if isFT {
-			return s.startFString(s.start, s.cur-1, c)
-		}
-		// Plain b/u/r prefix: rewind the quote and let scanString do it.
-		s.backup(c)
+identTail:
+	// CPython: Parser/lexer/lexer.c:784 identifier-char tail
+	for isPotentialIdentifierChar(c) {
 		c = s.nextC()
-		return s.scanString(c)
 	}
 	s.backup(c)
 	// CPython: Parser/lexer/lexer.c:364 verify_identifier

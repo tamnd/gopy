@@ -292,3 +292,64 @@ func TestNumberKinds(t *testing.T) {
 		}
 	}
 }
+
+// TestStringNameStringAdjacency pins the CPython behaviour that a
+// non-prefix identifier byte after a closing quote breaks the string
+// rather than being absorbed as a string prefix.
+//
+// CPython: Parser/lexer/lexer.c:743 identifier branch / prefix loop.
+// The probe character-by-character: a 's' that follows a closing quote
+// must not extend the string just because there's a quote later on the
+// same line.
+func TestStringNameStringAdjacency(t *testing.T) {
+	// Two strings glued together by a bare identifier. CPython treats
+	// the identifier as a NAME between two STRINGs (an implicit syntax
+	// error at parse time, but the tokens themselves are clean).
+	src := `x = "doesn't "shrink", does it"` + "\n"
+	got := kinds(tokenize_(t, src))
+	want := []token.Type{
+		token.NAME, token.EQUAL,
+		token.STRING, token.NAME, token.STRING,
+		token.NEWLINE, token.ENDMARKER,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestNonPrefixNameBeforeQuote covers identifiers that happen to end
+// in a quote without whitespace. Only b/B/u/U/r/R/f/F/t/T (alone or as
+// the documented two-letter combos) participate in the prefix probe;
+// any other letter must break the prefix loop and let the identifier
+// scan reach the quote as a separate token.
+func TestNonPrefixNameBeforeQuote(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []token.Type
+	}{
+		// 'x' is not a prefix letter, so `x"hi"` is NAME then STRING.
+		{`x"hi"` + "\n", []token.Type{token.NAME, token.STRING, token.NEWLINE, token.ENDMARKER}},
+		// 'br' is a valid prefix; `br"hi"` is one STRING.
+		{`br"hi"` + "\n", []token.Type{token.STRING, token.NEWLINE, token.ENDMARKER}},
+		// 'bb' repeats 'b' (the prefix loop forbids dupes), so the
+		// second 'b' breaks out and the whole identifier scans as NAME.
+		{`bb"hi"` + "\n", []token.Type{token.NAME, token.STRING, token.NEWLINE, token.ENDMARKER}},
+	}
+	for _, c := range cases {
+		got := kinds(tokenize_(t, c.src))
+		if len(got) != len(c.want) {
+			t.Errorf("src %q: got %v, want %v", c.src, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("src %q tok %d: got %v, want %v", c.src, i, got[i], c.want[i])
+			}
+		}
+	}
+}
