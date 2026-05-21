@@ -280,9 +280,9 @@ TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 | 3 | T1.6 | `module/os` | bind `os.fsdecode` + `os.fsencode` on the inittab module | DONE | 9bd4675 |
 | 4 | T1.7 | stdlib vendor | byte-equal `Lib/bisect.py` and `Lib/tempfile.py` under `stdlib/` | DONE | 4350edf |
 | 5 | T6 | asyncio | `unittest.mock` imports `asyncio`; full port tracked in [spec 1711](./1711_v0124_asyncio_full_port.md) | BLOCKED | — |
-| 6 | P1 | tokenizer error routing | dispatch on `tok->done` not message substrings (see P1 above) | DONE | (this PR) |
-| 7 | P2 | XID tables | port `_PyUnicode_ScanIdentifier` for non-ASCII identifier validation | DONE | (this PR) |
-| 8 | P3 | f-string debug UTF-8 | decode `setFtstringExpr` buffer through `unicode/utf8` | DONE | (this PR) |
+| 6 | P1 | tokenizer error routing | dispatch on `tok->done` not message substrings (see P1 above) | DONE | 31c3c52 |
+| 7 | P2 | XID tables | port `_PyUnicode_ScanIdentifier` for non-ASCII identifier validation | DONE | 2b972c7 |
+| 8 | P3 | f-string debug UTF-8 | decode `setFtstringExpr` buffer through `unicode/utf8` | DONE | a72ac60 |
 | 9 | P4 | SyntaxWarning | emit on `1and` / `1or` style numbers | TODO | — |
 | 10 | P5 | token positions | match `_PyLexer_token_setup` line/col emission | TODO | — |
 
