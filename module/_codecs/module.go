@@ -146,7 +146,7 @@ func makeCodecInfo(ci *codecs.CodecInfo) objects.Object {
 		}), nil
 	})
 
-	d := inst.Dict()
+	d := inst.EnsureDict()
 	_ = d.SetItem(objects.NewStr("name"), objects.NewStr(ci.Name))
 	_ = d.SetItem(objects.NewStr("encode"), encodeFn)
 	_ = d.SetItem(objects.NewStr("decode"), decodeFn)
@@ -735,18 +735,125 @@ func callEncodeErrorHandler(enc, input string, start, end int, errors string) (s
 }
 
 // ---------------------------------------------------------------------------
-// register(search_function) — no-op stub for now
+// register(search_function) — append search_function to the codec
+// registry so codecs.Lookup will consult it.
 //
-// CPython: Modules/_codecsmodule.c:76 _codecs_register_impl
+// CPython: Modules/_codecsmodule.c:76 _codecs_register_impl (and
+// Python/codecs.c:50 PyCodec_Register)
 // ---------------------------------------------------------------------------
 
 func codecsRegister(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: register() takes exactly 1 argument (%d given)", len(args))
 	}
-	// Stub: user-supplied search functions are not yet plumbed into the
-	// codecs.Lookup path. The registration succeeds silently.
+	search := args[0]
+	if !objects.Callable(search) {
+		return nil, fmt.Errorf("TypeError: argument must be callable")
+	}
+	codecs.Register(pythonSearchFunc(search))
 	return objects.None(), nil
+}
+
+// pythonSearchFunc adapts a Python callable into a Go-side SearchFunc.
+// The Python side returns either None / a CodecInfo / a 4-7-tuple of
+// callables. We extract `encode` and `decode` and wire them into a
+// codecs.CodecInfo so the Go-side lookup chain can serve the encoding.
+//
+// CPython: Python/codecs.c:99 _PyCodec_Lookup (calls each registered
+// search function with the normalised encoding name)
+func pythonSearchFunc(fn objects.Object) codecs.SearchFunc {
+	return func(name string) (*codecs.CodecInfo, error) {
+		ret, err := objects.Call(fn, objects.NewTuple([]objects.Object{objects.NewStr(name)}), nil)
+		if err != nil {
+			return nil, err
+		}
+		if ret == nil || ret == objects.None() {
+			return nil, nil
+		}
+		return codecInfoFromPython(ret, name)
+	}
+}
+
+// codecInfoFromPython unpacks the encode / decode callables from a
+// Python CodecInfo (or 4-7-tuple) and wraps them in a Go CodecInfo.
+//
+// CPython: Lib/encodings/__init__.py:120 search_function (entry =
+// getregentry(); coercion to codecs.CodecInfo)
+func codecInfoFromPython(info objects.Object, name string) (*codecs.CodecInfo, error) {
+	getAttr := func(key string) (objects.Object, error) {
+		// CodecInfo from Lib/codecs.py: namedtuple-like instance with
+		// attribute access on encode / decode. Our stdlib CodecInfo
+		// implements __getattr__ via the standard generic getattr path.
+		v, err := objects.GetAttr(info, objects.NewStr(key))
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	}
+	enc, err := getAttr("encode")
+	if err != nil {
+		return nil, err
+	}
+	dec, err := getAttr("decode")
+	if err != nil {
+		return nil, err
+	}
+	ci := &codecs.CodecInfo{
+		Name: name,
+		Encode: func(input string, errors string) ([]byte, int, error) {
+			ret, err := objects.Call(enc,
+				objects.NewTuple([]objects.Object{objects.NewStr(input), objects.NewStr(errors)}), nil)
+			if err != nil {
+				return nil, 0, err
+			}
+			return unpackEncodeResult(ret)
+		},
+		Decode: func(input []byte, errors string) (string, int, error) {
+			ret, err := objects.Call(dec,
+				objects.NewTuple([]objects.Object{objects.NewBytes(input), objects.NewStr(errors)}), nil)
+			if err != nil {
+				return "", 0, err
+			}
+			return unpackDecodeResult(ret)
+		},
+	}
+	return ci, nil
+}
+
+// unpackEncodeResult expects (bytes, n) and returns the two parts.
+func unpackEncodeResult(o objects.Object) ([]byte, int, error) {
+	t, ok := o.(*objects.Tuple)
+	if !ok || t.Len() != 2 {
+		return nil, 0, fmt.Errorf("TypeError: encoder must return a (bytes, int) tuple")
+	}
+	bobj, ok := t.Item(0).(*objects.Bytes)
+	if !ok {
+		return nil, 0, fmt.Errorf("TypeError: encoder must return bytes, got %s", t.Item(0).Type().Name)
+	}
+	nobj, ok := t.Item(1).(*objects.Int)
+	if !ok {
+		return nil, 0, fmt.Errorf("TypeError: encoder must return (bytes, int)")
+	}
+	n, _ := nobj.Int64()
+	return bobj.Bytes(), int(n), nil
+}
+
+// unpackDecodeResult expects (str, n) and returns the two parts.
+func unpackDecodeResult(o objects.Object) (string, int, error) {
+	t, ok := o.(*objects.Tuple)
+	if !ok || t.Len() != 2 {
+		return "", 0, fmt.Errorf("TypeError: decoder must return a (str, int) tuple")
+	}
+	sobj, ok := t.Item(0).(*objects.Unicode)
+	if !ok {
+		return "", 0, fmt.Errorf("TypeError: decoder must return str, got %s", t.Item(0).Type().Name)
+	}
+	nobj, ok := t.Item(1).(*objects.Int)
+	if !ok {
+		return "", 0, fmt.Errorf("TypeError: decoder must return (str, int)")
+	}
+	n, _ := nobj.Int64()
+	return sobj.Value(), int(n), nil
 }
 
 // ---------------------------------------------------------------------------

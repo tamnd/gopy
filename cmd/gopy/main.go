@@ -161,6 +161,28 @@ func installPathFinder(scriptPath string) {
 	sys.SetPath(paths)
 }
 
+// bootstrapEncodings imports the encodings package so its
+// search_function lands in the codec search path. CPython does this
+// from _PyCodec_Init at the tail of interpreter startup, after the
+// path config is wired and the C-side error handlers are registered.
+// Without it, codecs.lookup of anything but utf-8 / ascii / latin-1
+// (the Go-side registered codecs) fails, and the lexer cannot decode
+// source files that carry a non-ASCII PEP 263 encoding cookie.
+//
+// We drive the import through pythonrun so the package's
+// `codecs.register(search_function)` call at module init runs under
+// a real Executor; imp.ImportModule(nil, ...) only works for inittab
+// entries and would crash trying to exec Python source.
+//
+// CPython: Python/codecs.c:1690 _PyCodec_Init (PyImport_ImportModule "encodings")
+func bootstrapEncodings(ts *state.Thread, globals *objects.Dict, stderr *os.File) int {
+	if _, err := pythonrun.RunString(ts, "import encodings", "<bootstrap>", parser.ModeFile, globals, nil); err != nil {
+		fmt.Fprintln(stderr, "preload encodings:", err)
+		return 1
+	}
+	return 0
+}
+
 // findStdlibRoot locates the vendored gopy stdlib tree. CPython's
 // equivalent is Modules/getpath.py's prefix discovery; the gopy port
 // (pathconfig/) targets the CPython install layout, not the gopy
@@ -282,6 +304,9 @@ func runSource(src string, stdout, stderr *os.File) int {
 	installPathFinder("")
 	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
+	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
 	rc := pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
 	pythonrun.FlushStdFiles()
 	return rc
@@ -304,6 +329,9 @@ func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
 	sys.SetArgv(append([]string{modName}, modArgs...))
 	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
+	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
 	// Equivalent of CPython's pymain_run_module which calls
 	// runpy._run_module_as_main(modName) on the Python side.
 	src := fmt.Sprintf("import runpy\nrunpy._run_module_as_main(%q)\n", modName)
@@ -325,6 +353,9 @@ func runFile(path string, stdout, stderr *os.File) int {
 	installPathFinder(path)
 	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
+	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
 	rc := pythonrun.RunAnyFile(ts, path, mainGlobals, stderr)
 	pythonrun.FlushStdFiles()
 	return rc
@@ -345,6 +376,9 @@ func runInteractive(stdout, stderr *os.File) int {
 	installPathFinder("")
 	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
+	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
 	rc := pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, mainGlobals)
 	pythonrun.FlushStdFiles()
 	if rc != 0 {
