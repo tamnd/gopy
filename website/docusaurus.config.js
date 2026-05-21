@@ -1,6 +1,7 @@
 // @ts-check
 const { themes } = require('prism-react-renderer');
 const cpythonRefs = require('./src/remark/cpythonRefs');
+const gopyRefs = require('./src/remark/gopyRefs');
 
 // Deploy targets:
 //   Cloudflare Pages: https://gopy.tamnd.com (default, canonical)
@@ -54,7 +55,7 @@ const config = {
           editUrl: 'https://github.com/tamnd/gopy/tree/main/website/',
           breadcrumbs: true,
           showLastUpdateTime: false,
-          remarkPlugins: [cpythonRefs],
+          remarkPlugins: [cpythonRefs, gopyRefs],
         },
         blog: false,
         theme: {
