@@ -4044,7 +4044,7 @@ and Commit columns as phases land.
 | Phase | Scope | Status | Commit |
 |-------|-------|--------|--------|
 | P1 | Object refcount foundation (`Header.refcount`, `Type.Dealloc`, package `Incref`/`Decref`) | done (pre-existing) | n/a |
-| P1.5 | Drop `atomic.Int64` for plain `int64` on `Header.refcnt` (gopy is GIL-only, no concurrent mutator) | done | this PR |
+| P1.5 | Drop `atomic.Int64` for plain `int64` on `Header.refcnt` (gopy is GIL-only, no concurrent mutator) | done | 96960a08 |
 | P2 | Slice freelist + dealloc (`SliceType.Dealloc`, `sliceFreeListSlot`, `NewSlice` pop-first) | tried, reverted | - |
 | P3 | stackref discipline (`Ref.Close`/`Dup` real work, `FromObjectNew` Increfs, steal contract) | tried, reverted | - |
 | P4 | VM dispatch site audit (`DropStack` Close, `SetPeekStack` Close-old, `decrefInputs` real, 38 bare-pop sites) | tried, reverted | - |
