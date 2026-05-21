@@ -37,7 +37,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | `test_utf8source.py` | 41 | DONE (3/3 sub-tests green; mirrored at `stdtest/test_utf8source.py`) | — |
 | `test_tabnanny.py` | 354 | DONE (exits 0 after typed `UnicodeDecodeError` + `surrogateescape` decode fix; mirrored under `stdtest/test_tabnanny.py`) | 3066fe3 |
 | `test_source_encoding.py` | 547 | TODO (imports clear; first hang is `BytesSourceEncodingTest.test_crcrcrlf`, which is `exec(bytes)` inside `captured_stdout`; the underlying gap is the VM's `exec(bytes)` path, not lexer/tokenizer). | — |
-| `test_tokenize.py` | 3480 | BLOCKED on `functools.singledispatch.register`. Lexer-side work all green: plumbing blockers cleared (538ab52, 5bd8455, 669c11f), raw + wrapper position parity locked under `parser/lexer/position_test.go` + `module/_tokenize/module_test.go` (5f033ea), P6 cleanup landed (22e71b6, 5104498). Gate import chain trips a VM cell/free bug at `stdlib/functools.py:922` inside `singledispatch.<locals>.register` when `pkgutil` pulls in `unittest.mock`: `LOAD_DEREF: <unknown> slot 8 not a cell ... got <nil>`. Root cause is `frame.NLocalsPlusOf` double-counting arg-cells against the `fix_cell_offsets`-compacted bytecode; see P8 for the full handoff. The block lives in the VM closure-handling subsystem, not lexer/tokenizer. | 538ab52, 5bd8455, 669c11f, 5f033ea, 22e71b6, 5104498 |
+| `test_tokenize.py` | 3480 | Lexer-side work all green: plumbing blockers cleared (538ab52, 5bd8455, 669c11f), raw + wrapper position parity locked under `parser/lexer/position_test.go` + `module/_tokenize/module_test.go` (5f033ea), P6 cleanup landed (22e71b6, 5104498). The `functools.singledispatch.register` arg-cell LOAD_DEREF blocker is fixed (7b8d7b2): ported CPython's `get_localsplus_counts` so the frame layout matches the `fix_cell_offsets`-compacted bytecode. The gate now advances to the next out-of-scope gap (missing `unicodedata` extension module). | 538ab52, 5bd8455, 669c11f, 5f033ea, 22e71b6, 5104498, 7b8d7b2 |
 
 ## Goal
 
@@ -789,33 +789,34 @@ remaining two stay pending on subsystems outside lexer/tokenizer:
   which is a VM/builtins gap, not lexer/tokenizer.
 - `test_tokenize.py`: imports `unittest.mock` at line 12, which pulls
   in `pkgutil` -> `functools.singledispatch`'s decorator-with-args
-  branch. That path trips a VM bug surfacing as
-  `LOAD_DEREF: <unknown> slot 8 not a cell ... got <nil>` inside
+  branch. That path tripped a VM closure-frame layout bug surfacing
+  as `LOAD_DEREF: <unknown> slot 8 not a cell ... got <nil>` inside
   `functools.singledispatch.<locals>.register` at stdlib/functools.py:922.
-  Root cause localized while drafting the handoff: `register` has
-  `co_nlocals=8`, `co_cellvars=('cls',)`, `co_freevars=('_is_valid_dispatch_type',
-  'cache_token', 'dispatch_cache', 'register', 'registry')`. The
-  arg-cell `cls` overlaps with the local at slot 0, so
+  Root cause: `register` has `co_nlocals=8`, `co_cellvars=('cls',)`,
+  `co_freevars=('_is_valid_dispatch_type', 'cache_token',
+  'dispatch_cache', 'register', 'registry')`. The arg-cell `cls`
+  overlaps with the local at slot 0, so
   `Python/flowgraph.c:3711 build_cellfixedoffsets` +
   `Python/flowgraph.c:3843 fix_cell_offsets` compact the localsplus
   table to 13 slots and rewrite `LOAD_DEREF _is_valid_dispatch_type`
   to oparg 8. `compile/flowgraph_cfg_passes.go:cfgFixCellOffsets`
-  already drops the duplicate (`numdropped=1`), so the bytecode and
-  `LocalsplusNames` are correct at 13 slots. The frame layout
-  disagrees: `frame/frame.go:144 NLocalsPlusOf` returns
-  `len(Varnames) + len(Cellvars) + len(Freevars) = 14`, which leaves
-  slot 8 as cls's separate (un-merged) cell and shifts every free
-  var one slot up. That's why `LOAD_DEREF 8` finds the un-populated
-  arg-cell pre-`MAKE_CELL` and reports nil. Fix lives in the VM
-  closure subsystem: `NLocalsPlusOf` (and `CellsStart`/`FreesStart`)
-  must use `len(LocalsplusNames)` (or store a separate
-  `co_nlocalsplus` field) so the frame layout matches what
-  `fix_cell_offsets` compacted. Followup tracked under
-  [spec 1716](./1716_full_compile_pipeline_port.md). The lexer-side
-  raw + wrapper position parity is locked by the unit tests under
-  `parser/lexer/position_test.go` and `module/_tokenize/module_test.go`
-  so the gate, once unblocked upstream, will exercise an
-  already-correct surface.
+  already dropped the duplicate (`numdropped=1`), so the bytecode and
+  `LocalsplusNames` were correct at 13 slots, but
+  `frame/frame.go:144 NLocalsPlusOf` returned
+  `len(Varnames) + len(Cellvars) + len(Freevars) = 14`, leaving
+  slot 8 as cls's separate (un-merged) cell and shifting every free
+  var one slot up. Fixed (commit `7b8d7b2`) by porting CPython's
+  `Objects/codeobject.c:389 get_localsplus_counts` directly: cache
+  `co_nlocalsplus`, `co_nlocals`, `co_ncellvars`, `co_nfreevars` on
+  `objects.Code` (mirroring `Include/cpython/code.h:84 PyCodeObject`)
+  and walk `co_localspluskinds` to derive them. Frame helpers +
+  `COPY_FREE_VARS` now use the compacted `co_nlocalsplus`, matching
+  `Python/bytecodes.c:1925`. Regression test landed under
+  `pythonrun/argcell_closure_test.go`. Followup tracked under
+  [spec 1716](./1716_full_compile_pipeline_port.md) C.2. `test_tokenize.py`
+  now advances past the LOAD_DEREF and stops at the next gap (missing
+  `unicodedata` extension module), which is out of scope for the
+  lexer subsystem.
 
 **Flip plan.** Task #484 ("test e2e v0.5.5 — lexer panel") stays
 ready-to-flip once a follow-up spec lands the singledispatch closure

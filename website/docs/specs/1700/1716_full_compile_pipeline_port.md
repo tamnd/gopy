@@ -518,12 +518,26 @@ un-compacted layout, which is why it shows `LOAD_FAST_BORROW 11
 (dispatch_cache)` at line 931 where the bytecode actually wants
 slot 11 = `register`.
 
+Fixed by porting CPython's `Objects/codeobject.c:389
+get_localsplus_counts` directly: cache `co_nlocalsplus`,
+`co_nlocals`, `co_ncellvars`, `co_nfreevars` on `objects.Code`
+(mirroring `PyCodeObject` from `Include/cpython/code.h:84`) and
+derive them by walking `co_localspluskinds`. Every compile->objects
+Code lift site calls `SyncLocalsplusCounts` so the cached counts
+stay in sync with `LocalsplusNames` / `LocalsplusKinds`. Frame
+helpers and `COPY_FREE_VARS` read the compacted `co_nlocalsplus`,
+matching `Python/bytecodes.c:1925` which writes to
+`localsplus[co_nlocalsplus - oparg]`.
+
 | Item | Lands in | Status | Commit |
 | ---- | -------- | ------ | ------ |
-| `NLocalsPlusOf` (and `CellsStart` / `FreesStart`) read `len(LocalsplusNames)` so the frame matches the compacted bytecode | `frame/frame.go`                  | pending | - |
-| Audit `vm/build_class.go`, `vm/eval_simple.go` COPY_FREE_VARS / LOAD_CLOSURE for the same off-by-one once the frame fix lands                | `vm/`                             | pending | - |
-| `derefName` reads `LocalsplusNames[idx]` instead of indexing into `Cellvars + Freevars` so error messages name the actual slot               | `vm/eval_simple.go`               | pending | - |
-| Regression test: compile `singledispatch.<locals>.register`, run it, assert no LOAD_DEREF nil-cell fault                                      | `compile/codegen_funclike_test.go`| pending | - |
+| Port `get_localsplus_counts` as `(*Code).SyncLocalsplusCounts`, cache `Nlocalsplus`/`Nlocals`/`Ncellvars`/`Nfreevars` on `objects.Code`            | `objects/code.go`                 | done    | `7b8d7b2` |
+| Expose `co_nlocalsplus`/`co_ncellvars`/`co_nfreevars`/`co_localsplusnames` on the Python attribute surface, switch `co_nlocals` to cached value    | `objects/code_attrs.go`           | done    | `7b8d7b2` |
+| Frame helpers (`NLocalsPlusOf`, `NLocalsOf`, `NCellsOf`, `NFreeOf`, `FreesStart`) read the cached counts so the frame matches the compacted bytecode | `frame/frame.go`                  | done    | `7b8d7b2` |
+| `COPY_FREE_VARS` (interp + class body) writes to `nlocalsplus - oparg` so frees land where `Python/bytecodes.c:1925` puts them                     | `vm/eval_simple.go`, `vm/build_class.go` | done    | `7b8d7b2` |
+| `derefName` indexes `LocalsplusNames[idx]` so error messages name the actual slot                                                                  | `vm/eval_simple.go`               | done    | `7b8d7b2` |
+| Wire `SyncLocalsplusCounts` into every compile->objects lift site (`pythonrun`, `builtins.compile`, `vm` nested code, `marshal` load)              | `pythonrun/runstring.go`, `builtins/compile.go`, `vm/eval_simple.go`, `marshal/code.go` | done    | `7b8d7b2` |
+| Regression test: arg-cell + freevars closure (singledispatch shape) runs to completion                                                             | `pythonrun/argcell_closure_test.go` | done    | `7b8d7b2` |
 
 Unblocks: `test_tokenize.py` gate (panel row 11 on the
 `test_tokenize.py` chain in spec 1710), and any other CPython code
