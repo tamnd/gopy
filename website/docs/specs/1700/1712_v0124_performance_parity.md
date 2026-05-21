@@ -4045,10 +4045,11 @@ and Commit columns as phases land.
 |-------|-------|--------|--------|
 | P1 | Object refcount foundation (`Header.refcount`, `Type.Dealloc`, package `Incref`/`Decref`) | done (pre-existing) | n/a |
 | P1.5 | Drop `atomic.Int64` for plain `int64` on `Header.refcnt` (gopy is GIL-only, no concurrent mutator) | done | 96960a08 |
-| P2 | Slice freelist + dealloc (`SliceType.Dealloc`, `sliceFreeListSlot`, `NewSlice` pop-first) | tried, reverted | - |
-| P3 | stackref discipline (`Ref.Close`/`Dup` real work, `FromObjectNew` Increfs, steal contract) | tried, reverted | - |
-| P4 | VM dispatch site audit (`DropStack` Close, `SetPeekStack` Close-old, `decrefInputs` real, 38 bare-pop sites) | tried, reverted | - |
-| P5 | bench + parity gate (fannkuch rerun, append results row, optional `List` freelist follow-up) | done | this PR |
+| P1.6 | Immortal-refcount sentinel + stamps on None/True/False/small-ints (`Header.MakeImmortal`, `ImmortalRefcnt`, Incref/Decref short-circuit) | done | this PR |
+| P2 | Slice freelist + dealloc (`SliceType.Dealloc = sliceDealloc`, `sync.Pool` slice carcass, `NewSlice` pop-first, Incref start/stop/step) | done (scaffolding inactive until P3) | this PR |
+| P3 | stackref discipline (`Ref.Close`/`Dup` real work, `FromObjectNew` Increfs, steal contract) | deferred (see notes) | - |
+| P4 | VM dispatch site audit (`DropStack` Close, `SetPeekStack` Close-old, `decrefInputs` real, 38 bare-pop sites) | deferred (see notes) | - |
+| P5 | bench + parity gate (fannkuch rerun, append results row, optional `List` freelist follow-up) | partial | this PR |
 
 #### Result (P1.5 only)
 
@@ -4147,4 +4148,174 @@ ships clean wins.
 * Slice fields (start/stop/step) need their own Incref on
   construction, Decref on dealloc, matching CPython's
   `Py_NewRef(start)` in `PySlice_New`.
+
+#### Detailed status (2026-05-21): what works, what does not
+
+This subsection enumerates every piece touched in the D15 port so
+follow-up work can pick up cold.
+
+**Working: P1.6 immortal-refcount sentinel.**
+
+`objects/header.go` now exposes `ImmortalRefcnt = 1 << 30` plus
+`(*Header).MakeImmortal()` and `(*Header).IsImmortal()`. The threshold
+is well above any plausible mortal refcount, so the immortal check is a
+single load + compare + branch. Mirrors CPython's
+`Include/object.h:94 _Py_IMMORTAL_MINIMUM_REFCNT` and
+`Include/internal/pycore_object.h _Py_IsImmortal`.
+
+`objects/refcount.go` short-circuits Incref and Decref when the header
+is at or above `ImmortalRefcnt`:
+
+* `Incref`: `if h.refcnt >= ImmortalRefcnt { return }` before the bump.
+* `Decref`: same guard before the drop, so the counter never moves and
+  `Dealloc` never fires for singletons.
+
+The four singleton constructors now stamp themselves immortal:
+
+* `objects/none.go`: `noneSingleton.MakeImmortal()`.
+* `objects/bool.go`: `newBool` calls `MakeImmortal` for True / False.
+* `objects/long_cache.go`: `initSmallInts` loop stamps every `Int` in
+  the [-5, 256] window. Matches CPython's
+  `Objects/longobject.c:6209 _PyLong_Init` which marks the small-int
+  table immortal.
+
+What this buys: Incref / Decref on the hottest values in a real
+program (loop counters, None returns, boolean tests) becomes a load +
+compare + return. CPython's `Py_INCREF` macro is similarly cheap on
+immortal values (it inspects the sign bit). The remaining gap on this
+path is the `Object.Hdr()` itab dispatch Go inserts at every call site.
+
+**Working: P2 Slice freelist scaffolding.**
+
+`objects/slice.go` now wires the dealloc slot and a `sync.Pool` carcass
+cache. The pool composes with Go's GC (it drains under memory
+pressure) so it stands in for CPython's
+`Py_slices_MAXFREELIST = 1` per-interpreter slot without an explicit
+high-water cap.
+
+* `sliceFreeList sync.Pool` lazily produces zeroed `*Slice`.
+* `SliceType.Dealloc = sliceDealloc` installs the destructor.
+* `NewSlice`: pulls from the pool, runs `init(SliceType)` to reset the
+  refcount to 1, then `Incref`s each of start / stop / step. This
+  matches `Objects/sliceobject.c:143 PySlice_New`'s `Py_XNewRef` calls.
+* `sliceDealloc`: `Decref`s start / stop / step, nils them, then
+  `sliceFreeList.Put(s)`. Matches
+  `Objects/sliceobject.c:347 slice_dealloc`.
+
+The Increfs on immortal singletons (None, integer indices) are
+no-ops thanks to P1.6, so the construction overhead for the common
+`a[1:10]` shape is the pool Get plus three immortal-check branches.
+
+**Not working: P2 dealloc trigger.**
+
+`sliceDealloc` never fires today because no caller ever drops a slice
+to refcount 0. The stackref `Close` method is still a no-op (see P3
+deferral), so the BUILD_SLICE consumer's `DECREF_INPUTS` does not
+actually decrement the slice. The freelist Get path therefore always
+runs `New()`, behaving identically to a plain `&Slice{}` allocator
+plus a small interface-dispatch tax for the immortal Increfs.
+
+Consequence: P2 ships the CPython-faithful subsystem shape but does
+not yet realize the allocation savings. To activate it, P3 (stackref
+Close wired to Decref) must land, *and* every stackref producer that
+borrows must switch to FromObjectNew (Incref-on-push) so that the
+slice's refcount lifecycle hits zero cleanly. Without that second
+half, wiring Close alone over-decrements LOAD_CONST and similar
+borrow sites and drives non-immortal constants to spurious dealloc.
+
+**Deferred: P3 stackref discipline.**
+
+`stackref.Ref.Close` is intentionally still a no-op (see
+`stackref/stackref.go:96`). Wiring it to `objects.Decref(r.o)` requires
+matching Incref-on-push at *every* stackref producer. Audit of
+`vm/eval_dispatch_gen.go` shows the following producers that currently
+use `stackref.FromObject` (steal semantics):
+
+* `LOAD_CONST` (line 730): borrows from `co_consts`. Must become
+  FromObjectNew for non-immortal constants (bytes, floats, tuples,
+  un-cached interned strings, container literals).
+* `LOAD_COMMON_CONSTANT` (line 723): same shape.
+* `LOAD_FAST` / `LOAD_DEREF` / `LOAD_FAST_LOAD_FAST` / friends: borrow
+  from `LocalsPlus[i]`. Must Incref.
+* All `LOAD_GLOBAL` / `LOAD_ATTR` / `LOAD_NAME` slow-path stackref
+  pushes.
+
+Mismatched Incref counts surface as use-after-free only for types with
+a `Dealloc` slot. Today only `Slice` has one, so the practical blast
+radius is bounded: a mis-counted constant whose dealloc is nil just
+sits at refcount = -N until Go's GC reclaims it. But mis-counting
+slices specifically would double-recycle into the freelist (one slot
+returns into two stackrefs) which is the use-after-free case the spec
+warns about.
+
+**Deferred: P4 38-site bare-pop audit.**
+
+Identified sites (file paths from grep -rn 'bare e.pop()' inside
+`vm/eval_specialized_*.go`):
+
+* `vm/eval_specialized_binary_op.go` (4 sites)
+* `vm/eval_specialized_call.go` (3 sites)
+* `vm/eval_specialized_call_alloc_init.go` (2 sites)
+* `vm/eval_specialized_call_builtin.go` (6 sites)
+* `vm/eval_specialized_compare.go` (4 sites)
+* `vm/eval_specialized_contains.go` (3 sites)
+* `vm/eval_specialized_load_global.go` (2 sites)
+* `vm/eval_specialized_load_super_attr.go` (3 sites)
+* `vm/eval_specialized_store_attr.go` (4 sites)
+* `vm/eval_specialized_store_subscr.go` (3 sites)
+* `vm/eval_specialized_tobool.go` (2 sites)
+* `vm/eval_specialized_unpack.go` (2 sites)
+
+Each is structurally `_ = e.pop()` discarding a stackref without
+running its Close. Until Close has real work, converting these is a
+no-op churn; once P3 lands, every one of them must Close to balance
+the corresponding Incref-on-push the producer did.
+
+**Working: existing Close call-sites stay safe.**
+
+The 45 `.Close()` call-sites already present in `vm/`, `frame/`, and
+`stackref/` continue to compile against the no-op Close. When P3
+flips Close to call Decref, these sites will start paying the
+Decref cost (correctly), so a pre-flip pass to add Incref-on-push
+must precede the flip. The lifecycle invariant is:
+
+* every push of a strong ref must be preceded by an Incref (either
+  explicit via FromObjectNew or implicit because the producer
+  returned a fresh refcount-1 object);
+* every drop of a strong ref must Close (Decref-or-immortal-skip).
+
+**Not working: pyperformance rerun.**
+
+This PR ships P1.6 + P2 scaffolding. fannkuch is unaffected because
+fannkuch indexes an array of small ints (immortal) and never builds a
+slice. The previously logged P2+P3+P4 regression (median 0.96s vs
+0.84s P1.5) reflected the cost of wiring Close to Decref through the
+itab path on every Close call site, before the freelist could
+amortize against it.
+
+Path forward for activating real freelist savings (out of scope here):
+
+1. Land the LOAD_CONST audit (Incref-on-push for non-immortal
+   constants).
+2. Flip stackref.Close to Decref + cover the 38 bare-pop sites in one
+   sweep.
+3. Add type-specialized `IncrefSlice(*Slice)` and `DecrefSlice(*Slice)`
+   helpers that take the concrete pointer to skip the
+   `Object.Hdr()` itab. Use them in `NewSlice` / `sliceDealloc` and
+   any BUILD_SLICE-adjacent hot site. Mirrors how CPython's
+   `Py_INCREF` inlines without going through any function-pointer
+   table.
+4. Rerun fannkuch + a slice-heavy benchmark (e.g. chaos) and append
+   results.
+
+#### Files touched in this PR
+
+* `objects/header.go`: `ImmortalRefcnt` constant, `MakeImmortal`,
+  `IsImmortal` methods.
+* `objects/refcount.go`: immortal short-circuit in `Incref` / `Decref`.
+* `objects/none.go`: stamp singleton immortal.
+* `objects/bool.go`: stamp True / False immortal.
+* `objects/long_cache.go`: stamp small-int cache immortal.
+* `objects/slice.go`: `sync.Pool` carcass, `sliceDealloc`,
+  `NewSlice` Incref of start / stop / step.
 
