@@ -285,6 +285,17 @@ import (
 	// CPython: Python/marshal.c:1949 marshal_methods
 	_ "github.com/tamnd/gopy/module/marshal"
 
+	// Built-in module: unicodedata. Registers itself via
+	// module/unicodedata/module.go init(). Ports
+	// Modules/unicodedata.c: normalize / is_normalized / category /
+	// bidirectional / combining / mirrored / east_asian_width /
+	// decomposition plus the unidata_version constant. Unblocks
+	// stdlib/test/support/os_helper.py's `import unicodedata` and
+	// `unicodedata.normalize('NFD', ...)` along the test_tokenize.py
+	// panel import chain.
+	// CPython: Modules/unicodedata.c:1733 PyInit_unicodedata
+	_ "github.com/tamnd/gopy/module/unicodedata"
+
 	// Built-in module: _pickle. Registers itself via
 	// module/_pickle/module.go init(). Publishes the full surface
 	// pickle.py reaches for in its C-accelerator try block:
