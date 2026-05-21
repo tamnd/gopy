@@ -104,7 +104,7 @@ re-run the audit if the upstream rebases.
 | `set_ftstring_expr` | lexer.c:114 | `State.setFtstringExpr` | fstring.go:306 | DONE | Runs `ValidateUTF8` on the expression buffer before writing `tok.Metadata`. Malformed UTF-8 sets `tok->done = E_DECODE` and records a SyntaxError, mirroring CPython's `PyUnicode_DecodeUTF8` failure path. |
 | `_PyLexer_update_ftstring_expr` | lexer.c:227 | `State.updateFtstringExpr` | fstring.go:269 | DONE | Buffer append/realloc; void return (no PyMem errors). |
 | `lookahead` | lexer.c:282 | `State.lookahead` | lexer.go:831 | DONE | Closure that rewinds the consumed slice. |
-| `verify_end_of_number` | lexer.c:305 | `State.verifyEndOfNumber` | lexer.go:865 | DRIFT | Missing the CPython `SyntaxWarning` for abutting keywords like `1and` / `1or`. gopy accepts silently per the in-file comment at lexer.go:888-891. |
+| `verify_end_of_number` | lexer.c:305 | `State.verifyEndOfNumber` | lexer.go:865 | DONE | Records a `SyntaxWarning` via `parserWarn` on the abutting-keyword branch (`1and`, `1or`, `1if`, `1in`, `1is`, `1not`), accepting the literal. Plain-identifier follow (`1foo`) still raises `SyntaxError` via the existing branch. Pinned at 6dbf31a. |
 | `verify_identifier` | lexer.c:364 | `State.verifyIdentifier` | lexer.go:914 | DONE | Calls `scanIdentifier` in `parser/lexer/xid.go`, which composes XID_Start / XID_Continue from Go stdlib's L, Nl, Mn, Mc, Nd, Pc, Other_ID_Start, Other_ID_Continue tables minus Pattern_Syntax and Pattern_White_Space. Pins `tok->cur` to the bad rune on reject and emits the canonical `invalid character '%c' (U+%04X)` message. |
 | `tok_decimal_tail` | lexer.c:413 | (inlined) | lexer.go:467-483 | DONE | Inlined inside `scanNumber`. |
 | `tok_continuation_line` | lexer.c:435 | `State.continuationLine` | lexer.go:367 | DONE | Returns `(c, ok)` tuple; defers `lineno` bump to `nextC`. |
@@ -219,25 +219,295 @@ Phases are ordered to land DRIFT fixes by impact on the gate tests, smallest bla
 
 ### P1: errcode + tokenizer-error routing (DONE; gates `test_tokenize.py` error sub-tests)
 
-1. Added the missing `errCode` entries (`eNomem`, `eToodeep`, `eLineCont`) to `parser/lexer/state.go`, with `// CPython: Include/errcode.h:NN` citations.
-2. Rewrote `module/_tokenize/module.go:tokenizerError` to dispatch on `lexer.State.Done()` instead of message substrings, matching CPython's switch case-for-case. `E_INTR` to `KeyboardInterrupt`, `E_NOMEM` to `MemoryError`, `E_TABSPACE` to `TabError`, `E_DEDENT` / `E_TOODEEP` to `IndentationError`, everything else to `SyntaxError`.
-3. Renamed gopy's `eIndent` to `eToodeep` so `Parser/lexer/lexer.c:582` (E_TOODEEP on `tok->indent+1 >= MAXINDENT`) maps cleanly.
+Commit: 31c3c52.
+
+**Problem.** `module/_tokenize/module.go:tokenizerError` was matching
+on substrings of the recorded SyntaxError message ("tabs and spaces",
+"unindent", "indentation", "indent") to pick between TabError /
+IndentationError / SyntaxError. CPython does the opposite: switch on
+`tok->done` (the E_* enum), then synthesise the canonical message
+inside the case body. The substring approach silently collapses
+`E_INTR` (KeyboardInterrupt), `E_NOMEM` (MemoryError), `E_TOODEEP`
+(IndentationError), `E_LINECONT` (SyntaxError with the
+"unexpected character after line continuation" wording) into the
+generic SyntaxError bucket. The `errCode` enum was also missing
+`eNomem`, `eToodeep`, and `eLineCont` outright, so even routing
+on the enum was impossible.
+
+**Code shipped.**
+
+- `parser/lexer/state.go`: added `eNomem`, `eToodeep`, `eLineCont`
+  to the unexported `errCode` enum, with `// CPython:
+  Include/errcode.h:NN` line citations attached to each entry. The
+  enum is still iota-based (gopy doesn't need to preserve the numeric
+  literals from errcode.h) but now tracks the E_* family one-to-one.
+- `parser/lexer/state.go`: renamed the gopy-only `eIndent` to
+  `eToodeep`. Its sole use site at `parser/lexer/lexer.go:339`
+  ("too many levels of indentation") matches
+  `Parser/lexer/lexer.c:582`, which sets `E_TOODEEP` on
+  `tok->indent+1 >= MAXINDENT`. The old name was a misfit; the
+  rename is purely mechanical.
+- `parser/lexer/state.go`: added `State.Done() int` and the
+  exported `DoneOK..DoneColumnOverflow` constants. These let
+  `module/_tokenize` switch on the enum without depending on the
+  unexported `errCode` type.
+- `module/_tokenize/module.go:tokenizerError`: rewritten as a
+  switch on `lexer.State.Done()` case-for-case against the C
+  source. Each case picks the canonical CPython message and an
+  `errClass` string; the function then returns
+  `fmt.Errorf("%s: %s", errClass, msg)`. The previous
+  `containsAny` substring helper is gone. The `E_INTR` and
+  `E_NOMEM` cases short-circuit (no message body, the exception
+  class is the entire signal). On the catch-all branch the lexer's
+  stored message overrides the canonical "unknown tokenization
+  error" so detail-rich messages like `invalid character '(' (U+0028)`
+  flow through unchanged.
+
+**Mapping table.**
+
+| `tok->done` | gopy code | Python class | Canonical message |
+|---|---|---|---|
+| `E_TOKEN` | `DoneToken` | `SyntaxError` | "invalid token" |
+| `E_EOF` | `DoneEOF` | `SyntaxError` | "unexpected EOF in multi-line statement" |
+| `E_DEDENT` | `DoneDedent` | `IndentationError` | "unindent does not match any outer indentation level" |
+| `E_INTR` | `DoneIntr` | `KeyboardInterrupt` | (none) |
+| `E_NOMEM` | `DoneNomem` | `MemoryError` | (none) |
+| `E_TABSPACE` | `DoneTabSpace` | `TabError` | "inconsistent use of tabs and spaces in indentation" |
+| `E_TOODEEP` | `DoneToodeep` | `IndentationError` | "too many levels of indentation" |
+| `E_LINECONT` | `DoneLineCont` | `SyntaxError` | "unexpected character after line continuation character" |
+| default | other | `SyntaxError` | lexer's stored message, else "unknown tokenization error" |
+
+**Verification.** `go test ./parser/lexer/... ./module/_tokenize/...`
+green; `go vet ./...` clean; `golangci-lint run ./parser/lexer/...
+./module/_tokenize/...` clean. The substring helper deletion drops
+~10 LOC; the switch grows ~25 LOC.
+
+**Follow-ups.** None within P1 scope. The `E_EOF` case still ships
+just the message; CPython additionally attaches the syntax location
+via `PyErr_SyntaxLocationObject`. Wiring that on the gopy side
+needs a richer exception-shape across the lexer/parser bridge and is
+folded into P5 token-position work.
 
 ### P2: `verify_identifier` XID tables (DONE; gates `test_tokenize.py` non-ASCII identifier sub-tests, task #612)
 
-1. Added `parser/lexer/xid.go` exposing `isXIDStart`, `isXIDContinue`, and `scanIdentifier`. The derivation follows UAX #31: ID_Start = L | Nl | Other_ID_Start, ID_Continue extends with Mn, Mc, Nd, Pc, Other_ID_Continue; both filter out Pattern_Syntax and Pattern_White_Space. Go stdlib ships every table this needs at Unicode 16.0, matching CPython 3.14's bake.
-2. `verifyIdentifier` (lexer.go:914) now calls `scanIdentifier`, pins `tok->cur` to the first bad rune, and routes the message through `printable` vs `non-printable` like `Parser/lexer/lexer.c:402`.
-3. `parser/lexer/xid_test.go` covers the CPython accept set (Greek, Cyrillic, CJK, combining marks, micro sign, middle dot, SCRIPT CAPITAL P) and reject set (digit-leading, ASCII `$` / `-`, whitespace inside, empty string).
+Commit: 2b972c7.
+
+**Problem.** `Parser/lexer/lexer.c:364 verify_identifier` decodes the
+candidate identifier's bytes with `PyUnicode_DecodeUTF8` and feeds
+the result to `Objects/unicodeobject.c:12426 _PyUnicode_ScanIdentifier`,
+which walks code points against the Unicode `XID_Start` /
+`XID_Continue` tables baked into `Objects/unicodectype.c`. The gopy
+port (lexer.go:914) skipped that step entirely: it only validated
+UTF-8 byte well-formedness, so any code point that decoded cleanly
+was accepted. That permitted Pattern_Syntax characters (e.g. `‹›` at
+U+2039/U+203A), category-Po marks, and digit-only ASCII names like
+`123foo` (which the scanName entry already filters out, but not the
+underlying check). For the gate tests it manifests as `test_tokenize`
+non-ASCII identifier rows accepting input CPython rejects.
+
+**Code shipped.**
+
+- `parser/lexer/xid.go` (new, 90 LOC): exposes `isXIDStart`,
+  `isXIDContinue`, and `scanIdentifier`. The XID derivation follows
+  UAX #31 verbatim:
+
+  ```
+  ID_Start    = L | Nl | Other_ID_Start
+  ID_Continue = ID_Start | Mn | Mc | Nd | Pc | Other_ID_Continue
+  XID_*       = ID_* minus Pattern_Syntax minus Pattern_White_Space
+  ```
+
+  Go 1.26's `unicode` package ships every property table this needs at
+  Unicode 16.0, the same version CPython 3.14 bakes into
+  `Modules/unicodename_db.h`. The ID/XID delta (NFKC-instability
+  exclusion) is empty for the BMP planes Python lexes against on
+  Unicode 16.0, so the composition is exact for the gate-test
+  corpus. A future Unicode version that resurfaces an NFKC-unstable
+  Letter would need an explicit exclusion list; the file's package
+  comment notes that path.
+
+- ASCII fast path: `isXIDStart` and `isXIDContinue` short-circuit
+  for `r < 0x80`, hitting `_` plus the `a-z` / `A-Z` (start) and
+  digit (continue) sets directly. This keeps the common case at a
+  single integer compare.
+
+- `scanIdentifier` returns `(byteOffset, badRune, ok)`. The byte
+  offset gives `verifyIdentifier` a precise place to pin `tok->cur`
+  on failure; the bad rune drives the error message's codepoint
+  format. Empty input is rejected with offset 0 (matches
+  `_PyUnicode_ScanIdentifier`'s `len == 0` branch).
+
+- `parser/lexer/lexer.go:914 verifyIdentifier`: now decodes via
+  `ValidateUTF8` first (E_DECODE on malformed UTF-8, same as
+  CPython's `PyUnicode_DecodeUTF8` failure path), then calls
+  `scanIdentifier`. On reject it pins `s.cur = s.start + off +
+  utf8RuneLen(bad)` so the SyntaxError span matches CPython's
+  `tok->cur = tok->start + PyBytes_GET_SIZE(s)` after the
+  Py_SETREF / PyUnicode_Substring round-trip at lexer.c:391-393.
+  The message routes through `isPrintable` vs non-printable to pick
+  the `'%c' (U+%04X)` vs `non-printable character U+%04X` form,
+  mirroring lexer.c:401-407.
+
+- Two small helpers added alongside: `utf8RuneLen(r) int` (rune
+  byte length, returns 4 on negative / unassigned to avoid running
+  past the buffer) and `isPrintable(r) bool`
+  (`unicode.IsPrint(r) || r == ' '`, mirroring `Py_UNICODE_ISPRINTABLE`).
+
+**Verification.**
+
+- `parser/lexer/xid_test.go`: accept set covers ASCII underscore,
+  letters, digits-after-start, Greek (`αβγ`), Cyrillic (`привет`),
+  CJK (`漢字`), combining marks (`á`), micro sign (`µx`,
+  XID_Start in Unicode), middle dot (`x·`, XID_Continue in
+  Unicode), Other_ID_Start (`℘x` = SCRIPT CAPITAL P). Reject set
+  covers empty input, digit-leading, ASCII `$`, ASCII `-`, internal
+  whitespace, and U+00A0 NBSP.
+- `go test ./parser/lexer/...` green; `golangci-lint` clean.
+
+**Follow-ups.** None for the gate-test corpus. If a future Unicode
+version (17+) introduces NFKC-unstable Letters that bump the
+ID_Start - XID_Start delta into the BMP identifier range, the file
+header explains where to add the exclusion list.
 
 ### P3: `set_ftstring_expr` UTF-8 decode (DONE; gates f-string `=` debug mode with non-ASCII names, task #618)
 
-1. `fstring.go:setFtstringExpr` runs `ValidateUTF8` on both the direct-copy and the comment-stripped path before assigning `tok.Metadata`.
-2. Malformed UTF-8 sets `tok->done = E_DECODE` and routes a `SyntaxError("invalid character in f-string expression")` through `syntaxError`, matching CPython's `PyUnicode_DecodeUTF8` failure path.
+Commit: a72ac60.
 
-### P4: `verify_end_of_number` SyntaxWarning (gates: `test_tokenize.py` `1and` style sub-tests)
+**Problem.** `Parser/lexer/lexer.c:114 set_ftstring_expr` is called
+when the tokenizer closes an interpolation (`}`, `:`, or `!`) inside
+an f-string or t-string. It snapshots the expression text into
+`token->metadata` so the formatter can replay it for the debug
+`f"{x=}"` form. CPython runs the snapshot through
+`PyUnicode_DecodeUTF8`, which both validates the bytes are
+well-formed UTF-8 and normalises them into a `PyObject*` str. Failure
+returns `-1` and sets `tok->done = E_DECODE` upstream. The gopy port
+stored the raw `last_expr_buffer` bytes on `Tok.Metadata` directly, so
+a malformed UTF-8 sequence inside the expression slipped through and
+later surfaced as a runtime decode error far from the source point.
 
-1. Emit the `SyntaxWarning` via the gopy warnings facility on the `1and` / `1or` / `0xN` abutting-keyword path, matching the message text CPython uses in `verify_end_of_number`.
-2. Continue accepting the token (CPython behavior).
+The bug bites two paths inside `set_ftstring_expr`:
+
+1. The fast direct-copy path when no `#` appeared in the expression
+   (lexer.c:212 `else { res = PyUnicode_DecodeUTF8(...) }`).
+2. The comment-stripped path when at least one `#` was seen
+   (lexer.c:208 `res = PyUnicode_DecodeUTF8(result, j, NULL)` after
+   the buffer is filtered).
+
+Both paths feed the same `PyUnicode_DecodeUTF8`, so the gopy fix has
+to validate both.
+
+**Code shipped.**
+
+- `parser/lexer/fstring.go:setFtstringExpr`: each branch now runs
+  the buffer through `ValidateUTF8` before assigning
+  `tok.Metadata`. The validator is the existing one used by
+  `_PyTokenizer_ensure_utf8` (source.go:198); it walks the bytes
+  and returns `(line, badByte, ok)`. On failure the function sets
+  `s.done = eDecode` and records the SyntaxError via
+  `s.syntaxError("invalid character in f-string expression")`, then
+  returns without touching `tok.Metadata`. The empty-Metadata signal
+  lets the caller at lexer.go:730 fall through; the recorded
+  SyntaxError surfaces via `State.Err()` exactly like CPython's
+  `tok->done = E_DECODE` + `PyErr_Format` pair.
+
+- The function still doesn't return a status (CPython returns
+  `int` 0/-1). Threading a return through the single call site at
+  lexer.go:731 would force a second branch into the closing-brace
+  arm of `tok_get_normal_mode`; the recorded SyntaxError is already
+  the durable signal, so the side-effect-only port matches CPython
+  semantics without expanding the API surface.
+
+**Verification.** `go test ./parser/lexer/...` green;
+`golangci-lint` clean. The two `ValidateUTF8` calls add ~10 LOC.
+A dedicated test isn't added because the failure mode is exercised
+indirectly through any gate test that parses an f-string with a
+malformed UTF-8 sequence; the new check is a fail-fast guard that
+turns "raw bytes reach `Metadata`" into "lexer reports E_DECODE",
+which the existing `tokenizerError` switch already routes to
+`SyntaxError`.
+
+**Follow-ups.** When P5 wires `tok->done = E_DECODE` to the actual
+syntax-location attach (the same gap noted on P1's E_EOF follow-up),
+this path's error location will improve from line-only to line-and-col.
+
+### P4: `verify_end_of_number` SyntaxWarning (DONE; gates `test_tokenize.py` `1and` style sub-tests)
+
+Commit: 6dbf31a.
+
+**Problem.** `Parser/lexer/lexer.c:343 verify_end_of_number` peeks
+the character after a numeric literal and, if it is a letter that
+starts one of the operator-style keywords (`and`, `or`, `if`, `in`,
+`is`, `not`, `else`, `for`), calls `_PyTokenizer_parser_warn` with
+`"invalid %s literal"`, then accepts the literal. The point is to
+keep `1and 2` lexing as `NUMBER(1) NAME(and) NUMBER(2)` while still
+nudging the user about the missing space. The gopy port silently
+accepted the literal with an in-file comment that the warning was
+deferred; the `1and`-style rows in `test_tokenize.py` couldn't pass
+because no SyntaxWarning was ever recorded.
+
+The deeper problem was `parserWarn` itself. The function existed,
+but its body wrote the warning into `s.err` tagged with a `[warn]`
+prefix. That conflated warnings with hard errors: a benign warning
+from a real source could short-circuit later token emission because
+`State.Err() != nil` would already be true. So the P4 fix has two
+parts: rework `parserWarn` into a real warnings sink, then wire
+the keyword-adjacency branch to it.
+
+**Code shipped.**
+
+- `parser/lexer/state.go`: added `warnings []SyntaxError` field on
+  `State` and a `Warnings() []SyntaxError` accessor. The slice
+  preserves emission order. `SyntaxError` gained a `Category
+  string` field; the lexer leaves it empty for hard errors recorded
+  via `recordError`, populated (currently `"SyntaxWarning"`) for
+  diagnostics recorded via `parserWarn`. The struct lives in the
+  lexer package so module/_tokenize and the compile pipeline can
+  switch on it without an extra type.
+
+- `parser/lexer/helpers.go:parserWarn`: rewritten. It builds a
+  `SyntaxError` valued at `(Pos{lineno, col}, Pos{lineno, col})`
+  (CPython only records the line on parser warnings; gopy stays
+  consistent), copies the formatted message, sets `Category` from
+  the caller, and appends to `s.warnings`. The previous body
+  (`recordError("[warn] " + msg)`) is gone. The `if !s.reportWarnings
+  { return }` guard is preserved so callers that disable warnings
+  (e.g. an early reparse for incremental input) get the same
+  no-op behavior as before.
+
+- `parser/lexer/lexer.go:verifyEndOfNumber`: the keyword-adjacency
+  branch now calls `s.backup(c)`, then `s.parserWarn("SyntaxWarning",
+  "invalid %s literal", kind)`, then `s.nextC()` to re-consume the
+  byte. The backup/re-consume dance mirrors `tok_backup(tok, c)`
+  followed by `tok_nextc(tok)` in CPython, where the C source
+  positions the cursor for the parser_warn call (which reads
+  `tok->cur` to pin the warning's column) and then advances back
+  past the byte before returning to the caller. Going through
+  backup/nextC keeps the column accurate even when the lookahead
+  byte was a multi-line continuation.
+
+- `parser/lexer/warn_test.go` (new): two tests. The first feeds
+  `1and 2`, `1or 2`, `1if x else 2`, `1in x`, `1is None`,
+  `1not in x` through `FromString` + `Get`, drains tokens until
+  `ENDMARKER` or `ERRORTOKEN`, then asserts `State.Err() == nil`
+  and `State.Warnings()[0].Category == "SyntaxWarning"` plus the
+  message contains `"invalid"`. The second feeds `1foo`, asserts
+  an `ERRORTOKEN` was seen and `State.Err() != nil`, locking the
+  else branch (plain-identifier follow stays a hard SyntaxError).
+  Both loops use `for range 100` (gocritic rangeint compliant).
+
+**Verification.** `go test ./parser/lexer/...` green;
+`golangci-lint run ./parser/lexer/...` clean. The new `warn_test.go`
+catches both halves of the verify_end_of_number split (keyword
+adjacency to warning, plain identifier to error) without exercising
+the rest of the tokenizer.
+
+**Follow-ups.** P6 still owes `module/warnings` routing: today the
+lexer collects warnings in a slice, but no caller drains
+`State.Warnings()` and surfaces them through `module/warnings`'s
+filter chain. The `warnInvalidEscape` path (P6's DRIFT row at
+helpers.c:111) shares this plumbing and will be wired in the same
+P6 pass. Once that lands, `parserWarn`'s `Category` field becomes
+the dispatch key.
 
 ### P5: token position parity in `tok_get_normal_mode` (gates: the bulk of `test_tokenize.py`)
 
@@ -283,7 +553,7 @@ TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 | 6 | P1 | tokenizer error routing | dispatch on `tok->done` not message substrings (see P1 above) | DONE | 31c3c52 |
 | 7 | P2 | XID tables | port `_PyUnicode_ScanIdentifier` for non-ASCII identifier validation | DONE | 2b972c7 |
 | 8 | P3 | f-string debug UTF-8 | decode `setFtstringExpr` buffer through `unicode/utf8` | DONE | a72ac60 |
-| 9 | P4 | SyntaxWarning | emit on `1and` / `1or` style numbers | TODO | — |
+| 9 | P4 | SyntaxWarning | emit on `1and` / `1or` style numbers | DONE | 6dbf31a |
 | 10 | P5 | token positions | match `_PyLexer_token_setup` line/col emission | TODO | — |
 
 ### test_utf8source.py chain
