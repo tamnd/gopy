@@ -83,9 +83,9 @@ character names.
 | P5 | `category`, `bidirectional`, `combining`, `mirrored`. `category` falls back to Go's `unicode` tables when the CPython record returns the default value | done | 106b099 |
 | P6 | `east_asian_width(char)` returning "F/H/W/Na/A/N". Unblocks `stdlib/traceback.py:975` for non-ASCII traceback rendering | done | 106b099 |
 | P7 | `decimal`, `digit`, `numeric` (with default arg semantics: raise ValueError or return default) | done | a34be17 |
-| P8 | Character-name generator: emit name trie from `unicodename_db.h`. Wire `name(char[, default])` and `lookup(name)`. Unblocks `\N{NAME}` in `re/_parser.py` | pending | - |
+| P8 | Character-name generator: emit name trie from `unicodename_db.h`. Wire `name(char[, default])` and `lookup(name)`. Unblocks `\N{NAME}` in `re/_parser.py` | done | d783d9d |
 | P9 | `decomposition(char)` returning the hex form (`"<compat> 0020"` etc.) | done | 106b099 |
-| P10 | `UCD` type + `ucd_3_2_0` legacy instance (Unicode 3.2 snapshot used by IDNA) | pending | - |
+| P10 | `UCD` type + `ucd_3_2_0` legacy instance (Unicode 3.2 snapshot used by IDNA) | done | d48fae8 |
 | P11 | Re-run the `test_tokenize.py` panel row from spec 1710, flip the row to either green or to the next out-of-scope blocker | pending | - |
 
 ## Phase notes
@@ -246,8 +246,25 @@ Go destination function, and a status tick.
 | `is_normalized_quickcheck`                | 820  | `module/unicodedata/normalize.go` `isNormalizedQuickcheck` | done |
 | `unicodedata_UCD_is_normalized_impl`      | 885  | `module/unicodedata/normalize.go` `isNormalizedBuiltin` | done |
 | `unicodedata_UCD_normalize_impl`          | 953  | `module/unicodedata/normalize.go` `normalizeBuiltin` | done |
-| `unicodedata_UCD_name_impl`               | 1552 | `module/unicodedata/stubs.go` `nameBuiltin`          | stub |
-| `unicodedata_UCD_lookup_impl`             | 1585 | `module/unicodedata/stubs.go` `lookupBuiltin`        | stub |
-| `is_unified_ideograph`                    | 1124 | not yet ported                                       | pending |
-| Hangul syllables decomposition            | 1004 | not yet ported                                       | pending |
+| `_dawg_decode_varint_unsigned`            | 1058 | `module/unicodedata/name.go` `dawgDecodeVarint`      | done |
+| `_dawg_match_edge`                        | 1075 | `module/unicodedata/name.go` `dawgMatchEdge`         | done |
+| `_dawg_decode_node`                       | 1107 | `module/unicodedata/name.go` `dawgDecodeNode`        | done |
+| `_dawg_node_is_final`                     | 1116 | `module/unicodedata/name.go` `dawgNodeIsFinal`       | done |
+| `_dawg_node_descendant_count`             | 1124 | `module/unicodedata/name.go` `dawgNodeDescendantCount` | done |
+| `_dawg_decode_edge`                       | 1172 | `module/unicodedata/name.go` `dawgDecodeEdge`        | done |
+| `_lookup_dawg_packed`                     | 1196 | `module/unicodedata/name.go` `lookupDawgPacked`      | done |
+| `_inverse_dawg_lookup`                    | 1242 | `module/unicodedata/name.go` `inverseDawgLookup`     | done |
+| `_getucname`                              | 1296 | `module/unicodedata/name.go` `getUCName`             | done |
+| `find_prefix_id`                          | 1035 | `module/unicodedata/name.go` `findPrefixID`          | done |
+| `find_syllable`                           | 1378 | `module/unicodedata/name.go` `findSyllable`          | done |
+| `parse_hex_code`                          | 1411 | `module/unicodedata/name.go` `parseHexCode`          | done |
+| `_getcode`                                | 1441 | `module/unicodedata/name.go` `getCode`               | done |
+| `unicodedata_UCD_name_impl`               | 1552 | `module/unicodedata/name.go` `nameBuiltin`           | done |
+| `unicodedata_UCD_lookup_impl`             | 1585 | `module/unicodedata/name.go` `lookupBuiltin`         | done |
+| Hangul syllables table                    | 1004 | `module/unicodedata/name_gen.go` `hangulSyllables`   | done |
+| `change_record` struct                    | 45   | `module/unicodedata/ucd.go` `changeRecord`           | done |
+| `PreviousDBVersion` struct                | 73   | `module/unicodedata/ucd.go` `UCD`                    | done |
+| `new_previous_version`                    | 97   | `module/unicodedata/ucd.go` `newUCD`                 | done |
+| `get_change_3_2_0` (unicodedata_db.h)     | 8336 | `module/unicodedata/ucd.go` `getChange320`           | done |
+| `normalization_3_2_0` (unicodedata_db.h)  | 8347 | `module/unicodedata/ucd.go` `normalize320Func`       | done |
 | `PyInit_unicodedata`                      | 1734 | `module/unicodedata/module.go` `buildModule`         | done |
