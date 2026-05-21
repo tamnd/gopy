@@ -53,6 +53,8 @@ func buildModule() (*objects.Module, error) {
 		{"name", objects.NewBuiltinFunction("name", nameBuiltin)},
 		{"lookup", objects.NewBuiltinFunction("lookup", lookupBuiltin)},
 		{"unidata_version", objects.NewStr(unidataVersion)},
+		{"UCD", UCDType},
+		{"ucd_3_2_0", ucd320},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {

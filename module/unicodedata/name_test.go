@@ -28,7 +28,7 @@ func TestName(t *testing.T) {
 		{0x80, "", false},
 	}
 	for _, tc := range cases {
-		got, ok := getUCName(tc.code, false)
+		got, ok := getUCName(nil, tc.code, false)
 		if ok != tc.ok || got != tc.want {
 			t.Errorf("getUCName(%#x) = %q,%v; want %q,%v", tc.code, got, ok, tc.want, tc.ok)
 		}

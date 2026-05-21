@@ -29,7 +29,7 @@ func TestNormalizeNFD(t *testing.T) {
 		{"", nil},
 	}
 	for _, tc := range cases {
-		got := nfdNFKD([]rune(tc.in), false)
+		got := nfdNFKD(nil, []rune(tc.in), false)
 		if !reflect.DeepEqual(got, tc.want) && (len(got) != 0 || len(tc.want) != 0) {
 			t.Errorf("nfdNFKD(%q) = %v, want %v", tc.in, got, tc.want)
 		}
@@ -47,7 +47,7 @@ func TestNormalizeNFKD(t *testing.T) {
 		{"Ⅴ", []rune{'V'}},
 	}
 	for _, tc := range cases {
-		got := nfdNFKD([]rune(tc.in), true)
+		got := nfdNFKD(nil, []rune(tc.in), true)
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("nfdNFKD(%q, k=true) = %v, want %v", tc.in, got, tc.want)
 		}
@@ -67,7 +67,7 @@ func TestNormalizeNFC(t *testing.T) {
 		{"abc", []rune{'a', 'b', 'c'}},
 	}
 	for _, tc := range cases {
-		got := nfcNFKC([]rune(tc.in), false)
+		got := nfcNFKC(nil, []rune(tc.in), false)
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("nfcNFKC(%q) = %v, want %v", tc.in, got, tc.want)
 		}

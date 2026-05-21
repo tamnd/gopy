@@ -2,7 +2,10 @@
 // _PyUnicode_TypeRecord for the character (gettyperecord, the
 // unicodetype_db.h walk) and returns the matching field, falling
 // back to the caller's default (or ValueError) when the character
-// does not carry that property.
+// does not carry that property. When called as a UCD-instance method
+// decimal and numeric also consult the change_record overlay; CPython
+// leaves digit on the modern table because the digit field is not
+// versioned.
 //
 // CPython: Objects/unicodectype.c:43 gettyperecord
 // CPython: Objects/unicodectype.c:104 _PyUnicode_ToDecimalDigit
@@ -48,23 +51,41 @@ func getTypeRecord(code rune) typeRecord {
 }
 
 // CPython: Modules/unicodedata.c:132 unicodedata_UCD_decimal_impl
-func decimalBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func decimalImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	r, def, err := argCharWithDefault("decimal", args)
 	if err != nil {
 		return nil, err
 	}
-	rec := getTypeRecord(r)
-	if rec.Flags&typeFlagDecimal == 0 {
+	rc := int64(-1)
+	haveOld := false
+	if self != nil {
+		old := self.getRecord(r)
+		switch {
+		case old.CategoryChanged == 0:
+			haveOld = true
+			rc = -1
+		case old.DecimalChanged != 0xFF:
+			haveOld = true
+			rc = int64(old.DecimalChanged)
+		}
+	}
+	if !haveOld {
+		rec := getTypeRecord(r)
+		if rec.Flags&typeFlagDecimal != 0 {
+			rc = int64(rec.Decimal)
+		}
+	}
+	if rc < 0 {
 		if def != nil {
 			return def, nil
 		}
 		return nil, fmt.Errorf("ValueError: not a decimal")
 	}
-	return objects.NewInt(int64(rec.Decimal)), nil
+	return objects.NewInt(rc), nil
 }
 
 // CPython: Modules/unicodedata.c:184 unicodedata_UCD_digit_impl
-func digitBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func digitImpl(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	r, def, err := argCharWithDefault("digit", args)
 	if err != nil {
 		return nil, err
@@ -81,17 +102,46 @@ func digitBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.O
 
 // CPython: Modules/unicodedata.c:218 unicodedata_UCD_numeric_impl
 // CPython: Objects/unicodetype_db.h:4513 _PyUnicode_ToNumeric
-func numericBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func numericImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	r, def, err := argCharWithDefault("numeric", args)
 	if err != nil {
 		return nil, err
 	}
-	v, ok := numericValues[r]
-	if !ok {
+	rc := -1.0
+	haveOld := false
+	if self != nil {
+		old := self.getRecord(r)
+		switch {
+		case old.CategoryChanged == 0:
+			haveOld = true
+			rc = -1.0
+		case old.NumericChanged != 0.0:
+			haveOld = true
+			rc = old.NumericChanged
+		}
+	}
+	if !haveOld {
+		if v, ok := numericValues[r]; ok {
+			rc = v
+		}
+	}
+	if rc == -1.0 {
 		if def != nil {
 			return def, nil
 		}
 		return nil, fmt.Errorf("ValueError: not a numeric character")
 	}
-	return objects.NewFloat(v), nil
+	return objects.NewFloat(rc), nil
+}
+
+func decimalBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return decimalImpl(nil, args, kwargs)
+}
+
+func digitBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return digitImpl(args, kwargs)
+}
+
+func numericBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return numericImpl(nil, args, kwargs)
 }

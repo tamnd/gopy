@@ -51,6 +51,7 @@ func main() {
 	out := flag.String("out", "", "output Go file (unicodedata_db.h port)")
 	outType := flag.String("out-type", "", "output Go file (unicodetype_db.h port)")
 	outName := flag.String("out-name", "", "output Go file (unicodename_db.h port)")
+	outUCD320 := flag.String("out-ucd320", "", "output Go file (Unicode 3.2 snapshot tables)")
 	flag.Parse()
 	if *cpython == "" || *out == "" {
 		log.Fatal("both -cpython and -out required")
@@ -66,6 +67,14 @@ func main() {
 		log.Fatal(err)
 	}
 	writeFormatted(*out, func(w *bytes.Buffer) error { return emit(w, doc) })
+
+	if *outUCD320 != "" {
+		ucd, err := parseUCD320(string(src))
+		if err != nil {
+			log.Fatal(err)
+		}
+		writeFormatted(*outUCD320, func(w *bytes.Buffer) error { return emitUCD320(w, ucd) })
+	}
 
 	if *outType != "" {
 		typePath := filepath.Join(*cpython, "Objects", "unicodetype_db.h")
@@ -1116,5 +1125,192 @@ package unicodedata
 		fmt.Fprintf(w, "{%q, %q, %q},\n", row[0], row[1], row[2])
 	}
 	fmt.Fprint(w, "}\n\n")
+	return nil
+}
+
+// ucd320DB holds the Unicode 3.2 snapshot tables: the change_record
+// rows, the (index1, index2) page table get_change_3_2_0 walks, and
+// the normalization_3_2_0 switch payload.
+//
+// CPython: Modules/unicodedata_db.h:6144 change_records_3_2_0
+// CPython: Modules/unicodedata_db.h:8336 get_change_3_2_0
+// CPython: Modules/unicodedata_db.h:8347 normalization_3_2_0
+type ucd320DB struct {
+	records       []changeRow
+	index1        []uint32
+	index2        []uint32
+	normalization []normEntry
+}
+
+type changeRow struct {
+	bidir, category, decimal, mirrored, eaw int64
+	numeric                                 float64
+}
+
+type normEntry struct {
+	from, to uint32
+}
+
+// parseUCD320 pulls change_records_3_2_0, changes_3_2_0_index,
+// changes_3_2_0_data, and the normalization_3_2_0 switch out of
+// unicodedata_db.h. The same header drives CPython's compiled
+// get_change_3_2_0 / normalization_3_2_0 helpers.
+//
+// CPython: Modules/unicodedata_db.h:6144 change_records_3_2_0
+// CPython: Modules/unicodedata_db.h:8336 get_change_3_2_0
+// CPython: Modules/unicodedata_db.h:8347 normalization_3_2_0
+func parseUCD320(src string) (*ucd320DB, error) {
+	out := &ucd320DB{}
+
+	body, err := extractBlock(src, "change_records_3_2_0[] = {")
+	if err != nil {
+		return nil, fmt.Errorf("change_records_3_2_0: %w", err)
+	}
+	out.records, err = parseChangeRows(body)
+	if err != nil {
+		return nil, fmt.Errorf("change_records_3_2_0: %w", err)
+	}
+
+	if body, err := extractBlock(src, "changes_3_2_0_index[] = {"); err == nil {
+		out.index1 = parseInts(body)
+	} else {
+		return nil, err
+	}
+	if body, err := extractBlock(src, "changes_3_2_0_data[] = {"); err == nil {
+		out.index2 = parseInts(body)
+	} else {
+		return nil, err
+	}
+
+	out.normalization, err = parseNormalization320(src)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// parseChangeRows walks `{a, b, c, d, e, f}, ...` where the first
+// five values are unsigned chars and the sixth is a double literal.
+// The standard parseTupleList path can't handle the floats, so we
+// scan tokens by hand.
+func parseChangeRows(body string) ([]changeRow, error) {
+	body = stripComments(body)
+	var out []changeRow
+	i := 0
+	for i < len(body) {
+		if body[i] != '{' {
+			i++
+			continue
+		}
+		j := strings.IndexByte(body[i:], '}')
+		if j < 0 {
+			return nil, fmt.Errorf("unterminated row at offset %d", i)
+		}
+		fields := splitFields(body[i+1 : i+j])
+		if len(fields) != 6 {
+			return nil, fmt.Errorf("row arity: got %d want 6 in %q", len(fields), body[i:i+j+1])
+		}
+		row := changeRow{}
+		ints := []*int64{&row.bidir, &row.category, &row.decimal, &row.mirrored, &row.eaw}
+		for k := range 5 {
+			n, err := strconv.ParseInt(fields[k], 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("row int field %q: %w", fields[k], err)
+			}
+			*ints[k] = n
+		}
+		f, err := strconv.ParseFloat(fields[5], 64)
+		if err != nil {
+			return nil, fmt.Errorf("row float field %q: %w", fields[5], err)
+		}
+		row.numeric = f
+		out = append(out, row)
+		i += j + 1
+	}
+	return out, nil
+}
+
+// splitFields splits a comma-separated row, trimming surrounding
+// whitespace. Used by parseChangeRows because the numeric field is a
+// float literal that parseInts can't handle.
+func splitFields(row string) []string {
+	parts := strings.Split(row, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// parseNormalization320 reads the normalization_3_2_0 switch body and
+// returns one normEntry per `case 0xNNNN: return 0xMMMM;` line.
+//
+// CPython: Modules/unicodedata_db.h:8347 normalization_3_2_0
+func parseNormalization320(src string) ([]normEntry, error) {
+	idx := strings.Index(src, "normalization_3_2_0(Py_UCS4")
+	if idx < 0 {
+		return nil, fmt.Errorf("normalization_3_2_0 not found")
+	}
+	body := src[idx:]
+	end := strings.Index(body, "\n}\n")
+	if end < 0 {
+		return nil, fmt.Errorf("normalization_3_2_0: end brace not found")
+	}
+	body = body[:end]
+	re := regexp.MustCompile(`case\s+0x([0-9A-Fa-f]+)\s*:\s*return\s+0x([0-9A-Fa-f]+)`)
+	matches := re.FindAllStringSubmatch(body, -1)
+	out := make([]normEntry, 0, len(matches))
+	for _, m := range matches {
+		from, err := strconv.ParseUint(m[1], 16, 32)
+		if err != nil {
+			return nil, fmt.Errorf("bad from %q: %w", m[1], err)
+		}
+		to, err := strconv.ParseUint(m[2], 16, 32)
+		if err != nil {
+			return nil, fmt.Errorf("bad to %q: %w", m[2], err)
+		}
+		out = append(out, normEntry{from: uint32(from), to: uint32(to)})
+	}
+	return out, nil
+}
+
+// emitUCD320 writes module/unicodedata/ucd320_gen.go: the change
+// records, the (index1, index2) page tables get_change_3_2_0 walks,
+// and the normalization_3_2_0 switch.
+//
+// CPython: Modules/unicodedata_db.h:6144 change_records_3_2_0
+// CPython: Modules/unicodedata_db.h:8336 get_change_3_2_0
+// CPython: Modules/unicodedata_db.h:8347 normalization_3_2_0
+func emitUCD320(w *bytes.Buffer, d *ucd320DB) error {
+	fmt.Fprint(w, `// Code generated by Tools/unicodedata_go. DO NOT EDIT.
+//
+// Source: $CPYTHON/Modules/unicodedata_db.h (3.2 snapshot)
+//
+// CPython: Modules/unicodedata_db.h:6144 change_records_3_2_0
+// CPython: Modules/unicodedata_db.h:8336 get_change_3_2_0
+// CPython: Modules/unicodedata_db.h:8347 normalization_3_2_0
+
+package unicodedata
+
+`)
+	fmt.Fprintf(w, "var changeRecords320 = [%d]changeRecord{\n", len(d.records))
+	for _, r := range d.records {
+		fmt.Fprintf(w, "{%d, %d, %d, %d, %d, %s},\n",
+			r.bidir, r.category, r.decimal, r.mirrored, r.eaw, formatFloat(r.numeric))
+	}
+	fmt.Fprint(w, "}\n\n")
+
+	emitUint8(w, "changes320Index", d.index1)
+	emitUint8(w, "changes320Data", d.index2)
+
+	fmt.Fprintf(w, "var normalize320 = map[rune]rune{\n")
+	for _, e := range d.normalization {
+		fmt.Fprintf(w, "0x%X: 0x%X,\n", e.from, e.to)
+	}
+	fmt.Fprint(w, "}\n")
 	return nil
 }

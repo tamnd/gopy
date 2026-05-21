@@ -1,6 +1,9 @@
 // Unicode normalization: NFD / NFKD via nfdNFKD, NFC / NFKC via
 // nfcNFKC plus the is_normalized quickcheck. Port of CPython's
-// nfd_nfkd, nfc_nfkc, and is_normalized_quickcheck.
+// nfd_nfkd, nfc_nfkc, and is_normalized_quickcheck. When called as
+// a UCD-instance method the self pointer carries the snapshot's
+// normalization function and quickcheck is forced to MAYBE so the
+// 3.2 rollback runs unconditionally.
 //
 // CPython: Modules/unicodedata.c:514 nfd_nfkd
 // CPython: Modules/unicodedata.c:665 nfc_nfkc
@@ -57,10 +60,14 @@ func isASCII(s []rune) bool {
 // isNormalizedQuickcheck runs the UAX #15 quickcheck algorithm.
 // Returns YES when input is definitely normalized, NO when it
 // definitely is not, and MAYBE when a full normalize-and-compare
-// is required to be sure.
+// is required to be sure. UCD instances always answer MAYBE because
+// the quickcheck bits encode the modern table.
 //
 // CPython: Modules/unicodedata.c:820 is_normalized_quickcheck
-func isNormalizedQuickcheck(input []rune, nfc, k, yesOnly bool) quickcheckResult {
+func isNormalizedQuickcheck(self *UCD, input []rune, nfc, k, yesOnly bool) quickcheckResult {
+	if self != nil {
+		return quickcheckMaybe
+	}
 	if isASCII(input) {
 		return quickcheckYes
 	}
@@ -135,10 +142,13 @@ func reorderCanonical(out []rune) {
 }
 
 // nfdNFKD decomposes input. When k=false produces NFD; when k=true
-// produces NFKD. Output is canonically reordered per CCC.
+// produces NFKD. Output is canonically reordered per CCC. When self
+// is non-nil the snapshot normalization function is consulted before
+// the modern decomp tables, mirroring the UCD_Check branch in
+// nfd_nfkd.
 //
 // CPython: Modules/unicodedata.c:514 nfd_nfkd
-func nfdNFKD(input []rune, k bool) []rune {
+func nfdNFKD(self *UCD, input []rune, k bool) []rune {
 	out := make([]rune, 0, len(input)+10)
 	var stack [20]rune
 	stackPtr := 0
@@ -148,27 +158,43 @@ func nfdNFKD(input []rune, k bool) []rune {
 		for stackPtr > 0 {
 			stackPtr--
 			code := stack[stackPtr]
-			if code >= hangulSBase && code < hangulSBase+hangulSCount {
-				out = decomposeHangul(out, code)
-				continue
-			}
-			index, prefix, count := getDecompRecord(code)
-			if count == 0 || (prefix != 0 && !k) {
-				out = append(out, code)
-				continue
-			}
-			for j := count - 1; j >= 0; j-- {
-				if stackPtr >= len(stack) {
-					out = append(out, rune(decompData[index+j]))
-					continue
-				}
-				stack[stackPtr] = rune(decompData[index+j])
-				stackPtr++
-			}
+			out, stackPtr = nfdStep(self, code, k, out, &stack, stackPtr)
 		}
 	}
 	reorderCanonical(out)
 	return out
+}
+
+// nfdStep is one decomposition iteration. Returns the updated output
+// buffer and stackPtr. Hangul is expanded inline, the snapshot
+// normalization is consulted when self != nil, otherwise the modern
+// decomp tables drive the expansion.
+func nfdStep(self *UCD, code rune, k bool, out []rune, stack *[20]rune, stackPtr int) ([]rune, int) {
+	if code >= hangulSBase && code < hangulSBase+hangulSCount {
+		return decomposeHangul(out, code), stackPtr
+	}
+	if self != nil {
+		if v := self.normalization(code); v != 0 {
+			if stackPtr < len(stack) {
+				stack[stackPtr] = v
+				stackPtr++
+			}
+			return out, stackPtr
+		}
+	}
+	index, prefix, count := getDecompRecord(self, code)
+	if count == 0 || (prefix != 0 && !k) {
+		return append(out, code), stackPtr
+	}
+	for j := count - 1; j >= 0; j-- {
+		if stackPtr >= len(stack) {
+			out = append(out, rune(decompData[index+j]))
+			continue
+		}
+		stack[stackPtr] = rune(decompData[index+j])
+		stackPtr++
+	}
+	return out, stackPtr
 }
 
 // findNFCIndex walks the reindex table looking for code, returning
@@ -275,8 +301,8 @@ func composeStarter(decomp []rune, i, f int, skipped *[20]int, cskipped *int) ru
 // through the comp_index / comp_data tables.
 //
 // CPython: Modules/unicodedata.c:665 nfc_nfkc
-func nfcNFKC(input []rune, k bool) []rune {
-	decomp := nfdNFKD(input, k)
+func nfcNFKC(self *UCD, input []rune, k bool) []rune {
+	decomp := nfdNFKD(self, input, k)
 	length := len(decomp)
 	if length == 0 {
 		return decomp
@@ -320,7 +346,7 @@ loop:
 }
 
 // CPython: Modules/unicodedata.c:885 unicodedata_UCD_is_normalized_impl
-func isNormalizedBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func isNormalizedImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	form, input, err := normalizeArgs("is_normalized", args)
 	if err != nil {
 		return nil, err
@@ -332,13 +358,13 @@ func isNormalizedBuiltin(args []objects.Object, _ map[string]objects.Object) (ob
 	if err != nil {
 		return nil, err
 	}
-	m := isNormalizedQuickcheck(input, nfc, k, false)
+	m := isNormalizedQuickcheck(self, input, nfc, k, false)
 	if m == quickcheckMaybe {
 		var cmp []rune
 		if nfc {
-			cmp = nfcNFKC(input, k)
+			cmp = nfcNFKC(self, input, k)
 		} else {
-			cmp = nfdNFKD(input, k)
+			cmp = nfdNFKD(self, input, k)
 		}
 		if string(cmp) == string(input) {
 			return objects.True(), nil
@@ -352,7 +378,7 @@ func isNormalizedBuiltin(args []objects.Object, _ map[string]objects.Object) (ob
 }
 
 // CPython: Modules/unicodedata.c:953 unicodedata_UCD_normalize_impl
-func normalizeBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func normalizeImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	form, input, err := normalizeArgs("normalize", args)
 	if err != nil {
 		return nil, err
@@ -364,16 +390,24 @@ func normalizeBuiltin(args []objects.Object, _ map[string]objects.Object) (objec
 	if err != nil {
 		return nil, err
 	}
-	if isNormalizedQuickcheck(input, nfc, k, true) == quickcheckYes {
+	if isNormalizedQuickcheck(self, input, nfc, k, true) == quickcheckYes {
 		return objects.NewStr(string(input)), nil
 	}
 	var out []rune
 	if nfc {
-		out = nfcNFKC(input, k)
+		out = nfcNFKC(self, input, k)
 	} else {
-		out = nfdNFKD(input, k)
+		out = nfdNFKD(self, input, k)
 	}
 	return objects.NewStr(string(out)), nil
+}
+
+func isNormalizedBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return isNormalizedImpl(nil, args, kwargs)
+}
+
+func normalizeBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return normalizeImpl(nil, args, kwargs)
 }
 
 // normalizeArgs unpacks the (form, unistr) pair shared by

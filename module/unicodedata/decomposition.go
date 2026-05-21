@@ -1,7 +1,9 @@
 // Decomposition table walks: get_decomp_record (the low-level
 // lookup that returns the {prefix, count, index} triple) and
 // decompositionBuiltin (the Python-facing `unicodedata.decomposition`
-// query that turns that triple into the printable hex form).
+// query that turns that triple into the printable hex form). When
+// called as a UCD-instance method the impl returns "" for codepoints
+// the snapshot marks unassigned, matching CPython's UCD_Check arm.
 //
 // CPython: Modules/unicodedata.c:415 unicodedata_UCD_decomposition_impl
 // CPython: Modules/unicodedata.c:488 get_decomp_record
@@ -35,13 +37,18 @@ const (
 // (index, prefix, count) triple for code. index is the position
 // in decompData of the FIRST decomposition rune (count gives the
 // remaining length). prefix is the decompPrefix slot for
-// `<compat>` / `<noBreak>` / etc.
+// `<compat>` / `<noBreak>` / etc. self != nil routes through the
+// UCD overlay so unassigned codepoints in the snapshot decompose
+// to nothing.
 //
 // CPython: Modules/unicodedata.c:488 get_decomp_record
-func getDecompRecord(code rune) (index, prefix, count int) {
-	if code < 0 || code >= 0x110000 {
+func getDecompRecord(self *UCD, code rune) (index, prefix, count int) {
+	switch {
+	case code < 0 || code >= 0x110000:
 		index = 0
-	} else {
+	case self != nil && self.getRecord(code).CategoryChanged == 0:
+		index = 0
+	default:
 		i := int(decompIndex1[code>>decompShift])
 		i = int(decompIndex2[(i<<decompShift)+(int(code)&((1<<decompShift)-1))])
 		index = i
@@ -52,10 +59,14 @@ func getDecompRecord(code rune) (index, prefix, count int) {
 }
 
 // CPython: Modules/unicodedata.c:415 unicodedata_UCD_decomposition_impl
-func decompositionBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func decompositionImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	r, err := argChar("decomposition", args)
 	if err != nil {
 		return nil, err
+	}
+
+	if self != nil && self.getRecord(r).CategoryChanged == 0 {
+		return objects.NewStr(""), nil
 	}
 
 	// Hangul Syllable Decomposition.
@@ -70,7 +81,7 @@ func decompositionBuiltin(args []objects.Object, _ map[string]objects.Object) (o
 		return objects.NewStr(fmt.Sprintf("%04X %04X", l, v)), nil
 	}
 
-	index, prefix, count := getDecompRecord(r)
+	index, prefix, count := getDecompRecord(self, r)
 	if count == 0 && prefix == 0 {
 		return objects.NewStr(""), nil
 	}
@@ -84,4 +95,8 @@ func decompositionBuiltin(args []objects.Object, _ map[string]objects.Object) (o
 		fmt.Fprintf(&b, "%04X", decompData[index+i])
 	}
 	return objects.NewStr(b.String()), nil
+}
+
+func decompositionBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return decompositionImpl(nil, args, kwargs)
 }

@@ -268,12 +268,20 @@ func findPrefixID(code rune) int {
 // aliases and named sequences.
 //
 // CPython: Modules/unicodedata.c:1296 _getucname
-func getUCName(code rune, withAliasAndSeq bool) (string, bool) {
+func getUCName(self *UCD, code rune, withAliasAndSeq bool) (string, bool) {
 	if code < 0 || code >= 0x110000 {
 		return "", false
 	}
 	if !withAliasAndSeq && (isAlias(code) || isNamedSeq(code)) {
 		return "", false
+	}
+	if self != nil {
+		if isAlias(code) || isNamedSeq(code) {
+			return "", false
+		}
+		if self.getRecord(code).CategoryChanged == 0 {
+			return "", false
+		}
 	}
 
 	prefixID := findPrefixID(code)
@@ -405,12 +413,12 @@ func getCode(name string) rune {
 }
 
 // CPython: Modules/unicodedata.c:1551 unicodedata_UCD_name_impl
-func nameBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func nameImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	r, def, err := argCharWithDefault("name", args)
 	if err != nil {
 		return nil, err
 	}
-	s, ok := getUCName(r, false)
+	s, ok := getUCName(self, r, false)
 	if !ok {
 		if def != nil {
 			return def, nil
@@ -421,7 +429,7 @@ func nameBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 }
 
 // CPython: Modules/unicodedata.c:1584 unicodedata_UCD_lookup_impl
-func lookupBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func lookupImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: lookup() takes exactly 1 argument (%d given)", len(args))
 	}
@@ -437,6 +445,9 @@ func lookupBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.
 	if code < 0 {
 		return nil, fmt.Errorf("KeyError: undefined character name '%s'", name)
 	}
+	if self != nil && (isAlias(code) || isNamedSeq(code)) {
+		return nil, fmt.Errorf("KeyError: undefined character name '%s'", name)
+	}
 	if isNamedSeq(code) {
 		idx := uint32(code) - namedSeqStart
 		seq := namedSequences[idx].Seq
@@ -450,4 +461,12 @@ func lookupBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.
 		code = rune(nameAliases[uint32(code)-aliasesStart])
 	}
 	return objects.NewStr(string(code)), nil
+}
+
+func nameBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return nameImpl(nil, args, kwargs)
+}
+
+func lookupBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return lookupImpl(nil, args, kwargs)
 }

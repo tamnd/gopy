@@ -38,7 +38,7 @@ func TestNameLookupParitySweep(t *testing.T) {
 		}
 		want := line[sp+1:]
 		total++
-		got, ok := getUCName(rune(v), false)
+		got, ok := getUCName(nil, rune(v), false)
 		if !ok || got != want {
 			mismatches++
 			if mismatches <= 5 {
