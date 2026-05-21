@@ -1,10 +1,12 @@
 package objects
 
-// Incref bumps the refcount. Concurrent Increfs are safe.
+// Incref bumps the refcount. gopy runs under a global mutator lock
+// (Python's GIL), so the increment is a plain ++ matching CPython's
+// GIL-build expansion of Py_INCREF.
 //
 // CPython: Include/object.h:L605 Py_INCREF
 func Incref(o Object) {
-	o.Hdr().refcnt.Add(1)
+	o.Hdr().refcnt++
 }
 
 // Decref drops the refcount. If it reaches zero and the type defines
@@ -13,7 +15,9 @@ func Incref(o Object) {
 //
 // CPython: Include/object.h:L631 Py_DECREF
 func Decref(o Object) {
-	if o.Hdr().refcnt.Add(-1) != 0 {
+	h := o.Hdr()
+	h.refcnt--
+	if h.refcnt != 0 {
 		return
 	}
 	if dealloc := o.Type().Dealloc; dealloc != nil {

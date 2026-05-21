@@ -3957,3 +3957,194 @@ Three forward paths exist for D14:
    may move with cleaner CPython-faithful ports (CALL fastpath,
    re engine, json encoder hotpath). Geomean improves more from
    fixing several mid-tier outliers than from grinding fannkuch.
+
+### D15 (2026-05-21): port CPython refcount + freelist subsystem 1:1.
+
+The selective-refcount option from D14 path (2) is the only
+CPython-faithful answer to the GC scavenger floor. This section
+documents the upstream model and the phased port.
+
+#### CPython model (research summary)
+
+Three pieces compose the upstream design:
+
+1. **Per-object refcount.** Every `PyObject` carries `ob_refcnt`
+   (`Py_ssize_t`). `Py_INCREF(o)` bumps, `Py_DECREF(o)` drops;
+   at zero, the type's `tp_dealloc` runs.
+
+   CPython: `Include/object.h:590 Py_INCREF`, `Include/object.h:678 Py_DECREF`.
+
+2. **Tagged stack references (`_PyStackRef`).** A
+   `_PyStackRef` is one machine word: `{ uintptr_t bits }`.
+   Low bit `Py_TAG_REFCNT=1` marks the ref as **deferred /
+   immortal** (CLOSE is a no-op); cleared bit marks the ref as
+   **owned** (CLOSE calls `Py_DECREF`). The eval loop uses
+   `PyStackRef_FromPyObjectSteal` (consume), `_New` (Incref),
+   `_Immortal` (deferred), `_Borrow` (deferred), `_DUP`, `_CLOSE`
+   for every value that crosses the stack.
+
+   CPython: `Include/internal/pycore_stackref.h:461-619 GIL build`.
+   gopy already mirrors the API surface in `stackref/stackref.go`
+   but every method is a no-op; refcount work was deferred to
+   v0.14.
+
+3. **Per-type freelist.** A linked list anchored in
+   `tstate->interp->object_state.freelists.<name>`. The first
+   word of each cached slot overlaps with `ob_refcnt` /
+   `ob_tid` and chains to the next entry. `_Py_FREELIST_POP`
+   detaches one and calls `_Py_NewReference` (refcount = 1).
+   `_Py_FREELIST_FREE` either pushes (if `size < maxsize`) or
+   calls the type's `tp_free`.
+
+   CPython: `Include/internal/pycore_freelist.h:33-104`,
+   `Include/internal/pycore_freelist_state.h:11-32`.
+
+   Slice-specific instance (`Py_slices_MAXFREELIST = 1`):
+   `_PyBuildSlice_Consume2` (Objects/sliceobject.c:119) pops the
+   slot first, falls through to `PyObject_GC_New`; `slice_dealloc`
+   (Objects/sliceobject.c:347) decrefs start/stop/step then calls
+   `_Py_FREELIST_FREE(slices, r, PyObject_GC_Del)`.
+
+   The BUILD_SLICE bytecode handler (`Python/bytecodes.c:5004`):
+
+       inst(BUILD_SLICE, (args[oparg] -- slice)) {
+           PyObject *start_o = PyStackRef_AsPyObjectBorrow(args[0]);
+           PyObject *stop_o = PyStackRef_AsPyObjectBorrow(args[1]);
+           PyObject *step_o = oparg == 3 ? PyStackRef_AsPyObjectBorrow(args[2]) : NULL;
+           PyObject *slice_o = PySlice_New(start_o, stop_o, step_o);
+           DECREF_INPUTS();
+           ERROR_IF(slice_o == NULL);
+           slice = PyStackRef_FromPyObjectStealMortal(slice_o);
+       }
+
+   `DECREF_INPUTS()` is a generator-emitted macro that calls
+   `PyStackRef_CLOSE` on each named input. `STACK_SHRINK(N)`
+   adjusts the stack pointer afterwards without releasing
+   references (those are released by CLOSE).
+
+#### Why partial refcount is unsafe
+
+A naive "only Decref `*Slice` at the consumer site" plan
+violates ownership when the slice survives outside the consumer:
+
+    s = slice(1, 5)   # refcount = 1, stored in local
+    a[s]              # consumer Decrefs - refcount = 0 - freelist
+    a[s]              # next NewSlice overwrites the local's slice
+
+The freelist correctness invariant requires that the consumer
+only releases the reference it was handed. That is exactly what
+`PyStackRef_CLOSE` enforces. Anything less is the "hack /
+shim" the project rules forbid.
+
+#### Port plan (phases P1-P5)
+
+Each phase ships green CI before the next begins. Update Status
+and Commit columns as phases land.
+
+| Phase | Scope | Status | Commit |
+|-------|-------|--------|--------|
+| P1 | Object refcount foundation (`Header.refcount`, `Type.Dealloc`, package `Incref`/`Decref`) | done (pre-existing) | n/a |
+| P1.5 | Drop `atomic.Int64` for plain `int64` on `Header.refcnt` (gopy is GIL-only, no concurrent mutator) | done | this PR |
+| P2 | Slice freelist + dealloc (`SliceType.Dealloc`, `sliceFreeListSlot`, `NewSlice` pop-first) | tried, reverted | - |
+| P3 | stackref discipline (`Ref.Close`/`Dup` real work, `FromObjectNew` Increfs, steal contract) | tried, reverted | - |
+| P4 | VM dispatch site audit (`DropStack` Close, `SetPeekStack` Close-old, `decrefInputs` real, 38 bare-pop sites) | tried, reverted | - |
+| P5 | bench + parity gate (fannkuch rerun, append results row, optional `List` freelist follow-up) | done | this PR |
+
+#### Result (P1.5 only)
+
+fannkuch (15 runs, sort low-to-high, `bin/gopy bench_sources/fannkuch.py`):
+
+* pre-D15 (`atomic.Int64`): 0.82, 0.84, 0.85, 0.85, 0.85, 0.85, 0.85, 0.85, 0.86, 0.87, 0.88, 0.88, 0.89, 0.90, 0.98 (median 0.85s)
+* P1.5 (`int64`): 0.82, 0.83, 0.83, 0.84, 0.84, 0.84, 0.84, 0.84, 0.84, 0.85, 0.85, 0.85, 0.86, 0.87, 1.27 (median 0.84s)
+* P2+P3+P4 (freelist + Close discipline + 38-site audit): 0.93, 0.94, 0.95, 0.95, 0.95, 0.95, 0.96, 0.96, 0.96, 0.97, 0.98, 0.99, 0.99, 1.08, 1.09 (median 0.96s) - REGRESSION
+
+#### Why the freelist + Close discipline regresses
+
+Each `objects.Incref(o)` / `Decref(o)` takes an `objects.Object`
+interface argument and reaches the refcount via `o.Hdr()`. In Go
+this is an interface method call (itab dispatch). CPython's
+`Py_INCREF` is a macro that compiles to a single
+`((PyObject*)o)->ob_refcnt++` and inlines at every call site.
+Even with refcount reduced to plain `int64` arithmetic, the
+per-call interface dispatch dominates the freelist's saved
+allocation cost on this benchmark. P3 in particular adds a Decref
+call to every `Ref.Close()`, and P4 inserts those Closes into 38
+hot dispatch sites, so the new refcount traffic far exceeds the
+recycled Slice headers the freelist would save.
+
+Path forward (not in this PR): devirtualize hot-path refcount
+operations by emitting type-specialized `IncrefSlice` /
+`DecrefSlice` helpers that take `*Slice` directly and skip the
+interface dispatch. With that in place, the freelist port becomes
+viable again. Until then, P1.5 is the only refcount work that
+ships clean wins.
+
+**P1: Object refcount foundation.**
+
+* `objects/refcount.go` (existing): package-level `Incref(o Object)`,
+  `Decref(o Object)`. Both dispatch through `Header.refcnt` and
+  the type's `Dealloc` hook.
+* `objects.Header.refcnt atomic.Int64` (existing) inherited by
+  every embedding type. `init()` sets it to 1.
+* `Dealloc func(Object)` slot on `*objects.Type` (existing).
+
+   Mirrors CPython `Include/object.h:590 Py_INCREF`,
+   `Include/object.h:678 Py_DECREF`, `Include/cpython/object.h tp_dealloc`.
+
+**P2: Slice freelist + dealloc.**
+
+* `objects.SliceType.Dealloc = sliceDealloc`.
+* `sliceDealloc` decrefs start/stop/step, pushes to single-slot
+  `sliceFreeListSlot` (matching `Py_slices_MAXFREELIST = 1`).
+* `NewSlice` pops from `sliceFreeListSlot` first, else allocates.
+
+   Mirrors `Objects/sliceobject.c:119 _PyBuildSlice_Consume2`,
+   `Objects/sliceobject.c:347 slice_dealloc`.
+
+**P3: stackref discipline.**
+
+* `stackref.Ref.Close()` calls `objects.Decref(r.o)` for non-nil.
+* `stackref.Ref.Dup()` calls `objects.Incref(r.o)`.
+* `stackref.FromObjectNew(o)` Increfs (matches
+  `PyStackRef_FromPyObjectNew`).
+* `stackref.FromObject(o)` does NOT Incref (steal contract,
+  matches `PyStackRef_FromPyObjectSteal`).
+* `stackref.FromObjectImmortal(o)` does NOT Incref.
+* `stackref.Ref.AsObjectSteal()` returns o without Decref (caller
+  takes ownership).
+
+   Mirrors `Include/internal/pycore_stackref.h:461-619`.
+
+**P4: VM dispatch site audit.**
+
+* `Frame.DropStack(n)`: Close each slot before nilling
+  (currently nils without closing).
+* `Frame.SetPeekStack(d, r)`: Close the old slot before writing.
+* `Frame.PopStack`: caller takes ownership, no change.
+* `evalState.decrefInputs(n)`: real work (Close each top-n slot).
+* Every bare `e.pop()` discard site converted to `e.pop().Close()`
+  or `e.drop(1)` (38 sites across 9 files identified by grep).
+
+   Mirrors `Python/ceval_macros.h DECREF_INPUTS / STACK_SHRINK`
+   discipline.
+
+**P5: bench + parity gate.**
+
+* Rerun fannkuch at default GOGC. Target: close half of the
+  remaining 16.88x gap by eliminating Slice allocation churn.
+* Append a results row to this section.
+* Extend the freelist to `List` (`Py_lists_MAXFREELIST = 80`)
+  as a follow-up if Slice alone is insufficient.
+
+#### Risk
+
+* P4 audit is the largest scope. Missing a Close site does not
+  crash (Go GC still reclaims); it just leaks refcount and
+  defeats the freelist. P5 bench will surface remaining gaps.
+* Mid-port, refcount goes wrong silently. Mitigation: a debug
+  build flag that double-checks `refcount >= 0` and panics on
+  underflow, run in tests.
+* Slice fields (start/stop/step) need their own Incref on
+  construction, Decref on dealloc, matching CPython's
+  `Py_NewRef(start)` in `PySlice_New`.
+

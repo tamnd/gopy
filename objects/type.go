@@ -382,7 +382,7 @@ var typeType = &Type{Name: "type"}
 
 func init() {
 	typeType.typ = typeType
-	typeType.refcnt.Store(1)
+	typeType.refcnt = 1
 	// type inherits from object. CPython: Objects/typeobject.c:6361
 	// PyType_Type sets tp_base = &PyBaseObject_Type, which puts object
 	// in type's MRO so metatype lookup of __class__ / __dict__ finds
