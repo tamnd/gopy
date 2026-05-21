@@ -27,6 +27,7 @@ package lexer
 
 import (
 	"fmt"
+	"unicode"
 
 	"github.com/tamnd/gopy/token"
 )
@@ -900,15 +901,8 @@ func (s *State) verifyEndOfNumber(c int, kind string) bool {
 }
 
 // verifyIdentifier checks that the bytes between s.start and s.cur form
-// a valid PEP 3131 identifier. CPython runs _PyUnicode_ScanIdentifier
-// against the Unicode XID_Start / XID_Continue tables. gopy doesn't yet
-// vendor those tables (objects.IsXIDStartRune is itself approximated
-// via unicode.IsLetter, which can disagree on a handful of codepoints
-// at Unicode-version boundaries). Until the unicodedata XID tables
-// land, this routine only enforces UTF-8 validity. That's permissive:
-// it accepts a few identifiers CPython would reject. The function is
-// wired into scanName so the entry point is in place; tightening it
-// is one swap away once the tables exist. Gap tracked under #612.
+// a valid PEP 3131 identifier by running scanIdentifier against the
+// XID_Start / XID_Continue tables composed in xid.go.
 //
 // CPython: Parser/lexer/lexer.c:364 verify_identifier
 func (s *State) verifyIdentifier() bool {
@@ -916,23 +910,46 @@ func (s *State) verifyIdentifier() bool {
 		return true
 	}
 	bs := s.buf[s.start:s.cur]
-	asciiOnly := true
-	for _, b := range bs {
-		if b >= 0x80 {
-			asciiOnly = false
-			break
-		}
-	}
-	if asciiOnly {
-		return true
-	}
 	if _, _, ok := ValidateUTF8(bs); !ok {
 		s.done = eDecode
 		s.recordError("invalid character in identifier")
 		return false
 	}
-	return true
+	off, bad, ok := scanIdentifier(string(bs))
+	if ok {
+		return true
+	}
+	// Pin tok->cur to the bad rune so callers see the right span.
+	s.cur = s.start + off + utf8RuneLen(bad)
+	if isPrintable(bad) {
+		s.syntaxError("invalid character '%c' (U+%04X)", bad, bad)
+	} else {
+		s.syntaxError("invalid non-printable character U+%04X", bad)
+	}
+	return false
 }
+
+// utf8RuneLen reports the UTF-8 byte length of r, falling back to 1
+// for the replacement-character path so we never advance past the
+// buffer.
+func utf8RuneLen(r rune) int {
+	switch {
+	case r < 0x80:
+		return 1
+	case r < 0x800:
+		return 2
+	case r < 0x10000:
+		return 3
+	default:
+		return 4
+	}
+}
+
+// isPrintable mirrors Py_UNICODE_ISPRINTABLE for the error-message
+// branch in verify_identifier.
+//
+// CPython: Objects/unicodectype.c:269 _PyUnicode_IsPrintable
+func isPrintable(r rune) bool { return unicode.IsPrint(r) || r == ' ' }
 
 // maybeRaiseSyntaxErrorForStringPrefixes flags incompatible string
 // prefix combos. Supported combos: rb / rf / rt in any order. All other

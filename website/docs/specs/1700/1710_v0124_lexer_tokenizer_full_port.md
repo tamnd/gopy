@@ -17,7 +17,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | CPython source | C LOC | gopy destination | Go LOC | Status | Commit |
 |---|---:|---|---:|---|---|
 | `Parser/lexer/buffer.c` | 76 | `parser/lexer/buffer.go` | 50 | DONE | 5374e84 |
-| `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` (+ `fstring.go` + `onechar.go`) | 969 + 390 + 208 | DRIFT | three known gaps surface in `verify_identifier`, `set_ftstring_expr`, `verify_end_of_number` (see audit below) |
+| `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` (+ `fstring.go` + `onechar.go` + `xid.go`) | 986 + 390 + 208 + 90 | DRIFT | remaining gaps in `set_ftstring_expr` (P3) and `verify_end_of_number` (P4); `verify_identifier` flipped to use the XID composition in `xid.go` |
 | `Parser/lexer/state.c` | 151 | `parser/lexer/state.go` | 408 | DONE | d157189 |
 | `Parser/tokenizer/helpers.c` | 581 | `parser/lexer/helpers.go` (+ encoding subset in `parser/lexer/source.go`) | 179 + 287 | DRIFT | `check_coding_spec` skips `tok->cont_line`; `valid_utf8` collapsed into `utf8Size` (length-only); `_PyTokenizer_warn_invalid_escape_sequence` records as `[warn]`-tagged error instead of `PyErr_WarnExplicitObject` |
 | `Parser/tokenizer/file_tokenizer.c` | 493 | `parser/lexer/driver_file.go` | 119 | DRIFT | `tok_underflow_interactive` + `tok_concatenate_interactive_new_line` not ported; embedder owns REPL state |
@@ -105,7 +105,7 @@ re-run the audit if the upstream rebases.
 | `_PyLexer_update_ftstring_expr` | lexer.c:227 | `State.updateFtstringExpr` | fstring.go:269 | DONE | Buffer append/realloc; void return (no PyMem errors). |
 | `lookahead` | lexer.c:282 | `State.lookahead` | lexer.go:831 | DONE | Closure that rewinds the consumed slice. |
 | `verify_end_of_number` | lexer.c:305 | `State.verifyEndOfNumber` | lexer.go:865 | DRIFT | Missing the CPython `SyntaxWarning` for abutting keywords like `1and` / `1or`. gopy accepts silently per the in-file comment at lexer.go:888-891. |
-| `verify_identifier` | lexer.c:364 | `State.verifyIdentifier` | lexer.go:914 | DRIFT | **Critical**. Skips `_PyUnicode_ScanIdentifier`'s XID_Start / XID_Continue table check (lexer.c:382-407). Only validates UTF-8 byte well-formedness. Permits non-ASCII identifiers CPython rejects. Tracked #612. |
+| `verify_identifier` | lexer.c:364 | `State.verifyIdentifier` | lexer.go:914 | DONE | Calls `scanIdentifier` in `parser/lexer/xid.go`, which composes XID_Start / XID_Continue from Go stdlib's L, Nl, Mn, Mc, Nd, Pc, Other_ID_Start, Other_ID_Continue tables minus Pattern_Syntax and Pattern_White_Space. Pins `tok->cur` to the bad rune on reject and emits the canonical `invalid character '%c' (U+%04X)` message. |
 | `tok_decimal_tail` | lexer.c:413 | (inlined) | lexer.go:467-483 | DONE | Inlined inside `scanNumber`. |
 | `tok_continuation_line` | lexer.c:435 | `State.continuationLine` | lexer.go:367 | DONE | Returns `(c, ok)` tuple; defers `lineno` bump to `nextC`. |
 | `maybe_raise_syntax_error_for_string_prefixes` | lexer.c:455 | `State.maybeRaiseSyntaxErrorForStringPrefixes` | lexer.go:943 | DONE | Flags incompatible prefix pairs (u+b, u+r, u+f, u+t, b+f, b+t, f+t). |
@@ -217,17 +217,17 @@ the "too many levels of indentation" branch.
 
 Phases are ordered to land DRIFT fixes by impact on the gate tests, smallest blast radius first.
 
-### P1: errcode + tokenizer-error routing (gates: `test_tokenize.py` error sub-tests) — DONE
+### P1: errcode + tokenizer-error routing (DONE; gates `test_tokenize.py` error sub-tests)
 
 1. Added the missing `errCode` entries (`eNomem`, `eToodeep`, `eLineCont`) to `parser/lexer/state.go`, with `// CPython: Include/errcode.h:NN` citations.
 2. Rewrote `module/_tokenize/module.go:tokenizerError` to dispatch on `lexer.State.Done()` instead of message substrings, matching CPython's switch case-for-case. `E_INTR` to `KeyboardInterrupt`, `E_NOMEM` to `MemoryError`, `E_TABSPACE` to `TabError`, `E_DEDENT` / `E_TOODEEP` to `IndentationError`, everything else to `SyntaxError`.
 3. Renamed gopy's `eIndent` to `eToodeep` so `Parser/lexer/lexer.c:582` (E_TOODEEP on `tok->indent+1 >= MAXINDENT`) maps cleanly.
 
-### P2: `verify_identifier` XID tables (gates: `test_tokenize.py` non-ASCII identifier sub-tests, task #612)
+### P2: `verify_identifier` XID tables (DONE; gates `test_tokenize.py` non-ASCII identifier sub-tests, task #612)
 
-1. Add a `parser/lexer/xid.go` that ports CPython's `_PyUnicode_ScanIdentifier` against the Unicode XID_Start / XID_Continue tables. Use the Go stdlib `unicode/rangetable` for the tables; cite `Objects/unicodeobject.c` and the CPython generator script.
-2. Wire `verifyIdentifier` (lexer.go:914) to call into it before accepting the identifier.
-3. Add a unit test under `parser/lexer/` that covers the CPython rejection cases (e.g. ``, U+200C between non-joining contexts) and the accept cases (Greek, Cyrillic letters).
+1. Added `parser/lexer/xid.go` exposing `isXIDStart`, `isXIDContinue`, and `scanIdentifier`. The derivation follows UAX #31: ID_Start = L | Nl | Other_ID_Start, ID_Continue extends with Mn, Mc, Nd, Pc, Other_ID_Continue; both filter out Pattern_Syntax and Pattern_White_Space. Go stdlib ships every table this needs at Unicode 16.0, matching CPython 3.14's bake.
+2. `verifyIdentifier` (lexer.go:914) now calls `scanIdentifier`, pins `tok->cur` to the first bad rune, and routes the message through `printable` vs `non-printable` like `Parser/lexer/lexer.c:402`.
+3. `parser/lexer/xid_test.go` covers the CPython accept set (Greek, Cyrillic, CJK, combining marks, micro sign, middle dot, SCRIPT CAPITAL P) and reject set (digit-leading, ASCII `$` / `-`, whitespace inside, empty string).
 
 ### P3: `set_ftstring_expr` UTF-8 decode (gates: f-string `=` debug mode with non-ASCII names, task #618)
 
@@ -281,7 +281,7 @@ TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 | 4 | T1.7 | stdlib vendor | byte-equal `Lib/bisect.py` and `Lib/tempfile.py` under `stdlib/` | DONE | 4350edf |
 | 5 | T6 | asyncio | `unittest.mock` imports `asyncio`; full port tracked in [spec 1711](./1711_v0124_asyncio_full_port.md) | BLOCKED | — |
 | 6 | P1 | tokenizer error routing | dispatch on `tok->done` not message substrings (see P1 above) | DONE | (this PR) |
-| 7 | P2 | XID tables | port `_PyUnicode_ScanIdentifier` for non-ASCII identifier validation | TODO | — |
+| 7 | P2 | XID tables | port `_PyUnicode_ScanIdentifier` for non-ASCII identifier validation | DONE | (this PR) |
 | 8 | P3 | f-string debug UTF-8 | decode `setFtstringExpr` buffer through `unicode/utf8` | TODO | — |
 | 9 | P4 | SyntaxWarning | emit on `1and` / `1or` style numbers | TODO | — |
 | 10 | P5 | token positions | match `_PyLexer_token_setup` line/col emission | TODO | — |
