@@ -105,6 +105,26 @@ func TestReaderDriverDecodesLatin1(t *testing.T) {
 	}
 }
 
+// TestNonUTF8ErrorMessageFormat pins the byte-for-byte parity of the
+// "Non-UTF-8 code starting with '\xNN' on line N..." SyntaxError text
+// against CPython's _PyTokenizer_syntaxerror_known_range template.
+//
+// CPython: Parser/tokenizer/helpers.c:529 _PyTokenizer_syntaxerror_known_range
+func TestNonUTF8ErrorMessageFormat(t *testing.T) {
+	// 0xE9 on line 2, no encoding cookie, no BOM.
+	src := []byte("x = 1\nbad = \"\xe9\"\n")
+	st := FromBytes(src, ModeFile)
+	if st.Err() == nil {
+		t.Fatal("expected lexer error for non-utf-8 byte without cookie")
+	}
+	want := "Non-UTF-8 code starting with '\\xe9' on line 2, " +
+		"but no encoding declared; " +
+		"see https://peps.python.org/pep-0263/ for details"
+	if st.Err().Message != want {
+		t.Errorf("error message = %q\nwant %q", st.Err().Message, want)
+	}
+}
+
 // TestReaderDriverPlainUTF8 pins that the streaming path is preserved
 // when there is no non-utf-8 cookie. Refilling line-by-line is the
 // established behavior; only the cookie case slurps eagerly.

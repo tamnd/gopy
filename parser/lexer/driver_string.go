@@ -23,17 +23,20 @@ import (
 )
 
 // nonUTF8ErrorMessage renders the SyntaxError text CPython emits when
-// a non-utf-8 byte appears in source that has no PEP 263 cookie. The
-// test_utf8source gate only checks 'utf-8' (lowercased) is present;
-// the rest of the wording mirrors CPython so users see a familiar
-// message.
+// a non-utf-8 byte appears in source that has no PEP 263 cookie.
+// Matches the upstream format byte-for-byte (modulo the "in file %s"
+// fragment which only appears when the tokenizer carries a filename;
+// the bytes-source path here does not).
 //
-// CPython: Parser/tokenizer/helpers.c:332 ensure_utf8 error_ret arm
-func nonUTF8ErrorMessage(bad byte) string {
+// CPython: Parser/tokenizer/helpers.c:529 _PyTokenizer_syntaxerror_known_range
+// (Non-UTF-8 code starting with '\x%.2x'%s%V on line %i, but no
+// encoding declared; see https://peps.python.org/pep-0263/ for details)
+func nonUTF8ErrorMessage(bad byte, lineno int) string {
 	return fmt.Sprintf(
-		"Non-UTF-8 code starting with '\\x%02x' but no encoding declared; "+
+		"Non-UTF-8 code starting with '\\x%02x' on line %d, "+
+			"but no encoding declared; "+
 			"see https://peps.python.org/pep-0263/ for details",
-		bad,
+		bad, lineno,
 	)
 }
 
@@ -75,7 +78,7 @@ func FromBytes(src []byte, mode Mode) *State {
 		// CPython: Parser/tokenizer/helpers.c:332 ensure_utf8
 		if line, bad, ok := ValidateUTF8(src); !ok {
 			s.lineno = line
-			s.recordError(nonUTF8ErrorMessage(bad))
+			s.recordError(nonUTF8ErrorMessage(bad, line))
 			s.done = eEncoding
 		}
 	}
