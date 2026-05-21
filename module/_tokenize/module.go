@@ -220,9 +220,12 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 
 	str := string(tok.Bytes)
 
-	isTrailing := false
+	// CPython treats DEDENT-at-EOF as a trailing token alongside
+	// ENDMARKER so the extra_tokens reshape (lineno+1, 0) reaches both.
+	//
+	// CPython: Python/Python-tokenize.c:277 tokenizeriter_next
+	isTrailing := kind == token.ENDMARKER || (kind == token.DEDENT && it.tok.Done() == lexer.DoneEOF)
 	if kind == token.ENDMARKER {
-		isTrailing = true
 		it.done = true
 	}
 

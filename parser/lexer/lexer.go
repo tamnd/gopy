@@ -204,9 +204,14 @@ func (s *State) tokGetNormalMode() Tok {
 		if c == '\n' {
 			// CPython emits NL with p_end = tok->cur (includes the
 			// trailing '\n') and NEWLINE with p_end = tok->cur - 1
-			// (excludes it). Both fire while tok->lineno still points at
-			// the line that just ended, so we build the Tok before
-			// bumping line state and advance afterwards.
+			// (excludes it). The Python-tokenize wrapper later
+			// recomputes col_offset / end_col_offset from p_start and
+			// p_end via _get_col_offsets, so the raw token must carry
+			// columns derived from byte offsets, not from live
+			// s.col (which is the post-newline value, one past
+			// p_end for NEWLINE). The line-state bump runs after the
+			// Tok is built so s.lineno still points at the closing
+			// line.
 			//
 			// CPython: Parser/lexer/lexer.c:805
 			start := s.start
@@ -777,10 +782,21 @@ func (s *State) popParen(c byte) {
 }
 
 // endmarker emits the terminal ENDMARKER, also flushing any pending
-// dedents back to indent level 0.
+// dedents back to indent level 0. CPython leaves p_start / p_end NULL
+// on the EOF branch (Parser/lexer/lexer.c:738), so col_offset and
+// end_col_offset stay -1; the (lineno+1, 0) reshape happens later in
+// the Python-tokenize wrapper when extra_tokens is on.
 //
-// CPython: Parser/lexer/lexer.c:1500 (EOF branch in tok_get_normal_mode)
+// s.done is set to eEOF on the first call so the DEDENT-at-EOF
+// tokens that flush ahead of ENDMARKER report E_EOF to the wrapper.
+// In CPython this happens in the underflow (file/string/utf8
+// tokenizer) before the indent-unwind branch queues DEDENTs via
+// tok->pendin; gopy collapses that into endmarker() because the
+// buffer is already fully loaded.
+//
+// CPython: Parser/lexer/lexer.c:734 EOF branch in tok_get_normal_mode
 func (s *State) endmarker() Tok {
+	s.done = eEOF
 	if s.indent > 0 {
 		s.indent--
 		start, end := -1, -1
@@ -789,8 +805,7 @@ func (s *State) endmarker() Tok {
 		}
 		return s.tokenSetup(token.DEDENT, start, end)
 	}
-	s.done = eEOF
-	return s.tokenSetup(token.ENDMARKER, s.cur, s.cur)
+	return s.tokenSetup(token.ENDMARKER, -1, -1)
 }
 
 // maybeTypeComment inspects a comment span and emits a TYPE_COMMENT
