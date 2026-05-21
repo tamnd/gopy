@@ -6,21 +6,24 @@
 
 package lexer
 
-import "bytes"
+import (
+	"bytes"
+	"strings"
+)
 
-// codingCookieMax bounds how many bytes of the first two lines we
-// scan when looking for the PEP 263 cookie. CPython caps the scan
-// at the line length; gopy uses a hard 256-byte ceiling so a
-// pathological one-line file does not turn into a 1MB regex run.
+// cookieFileBufsize matches CPython's BUFSIZ default (8192) for file
+// reads. The file driver peeks twice this many bytes so a two-line
+// header that has a cookie inside either line is fully scanned.
 //
-// CPython: Parser/tokenizer/helpers.c:165 check_coding_spec
-const codingCookieMax = 256
+// CPython: Parser/tokenizer/file_tokenizer.c:379 (PyMem_Malloc(BUFSIZ))
+const cookieFileBufsize = 8192
 
 // DetectEncodingCookie scans the first two physical lines of src
 // for a PEP 263 `coding:` declaration and returns the encoding
-// name, or "" when no cookie is present. The scan stops at byte
-// codingCookieMax of each line. Lines may end with \n, \r\n, or
-// \r; the function is newline-flavor agnostic.
+// name, or "" when no cookie is present. The scan covers the full
+// line; CPython does the same in get_coding_spec by stepping
+// through `size - 6` bytes. Lines may end with \n, \r\n, or \r;
+// the function is newline-flavor agnostic.
 //
 // Mirrors CPython's decoding_state machine: the cookie may only
 // appear on a line that is blank or comment-only. Once a line
@@ -51,14 +54,10 @@ func detectEncodingCookieAt(src []byte) (string, int) {
 		end := lineEnd(rest)
 		head := rest[:end]
 		if !contLine {
-			scan := head
-			if len(scan) > codingCookieMax {
-				scan = scan[:codingCookieMax]
-			}
-			if name := matchCodingCookie(scan); name != "" {
+			if name := matchCodingCookie(head); name != "" {
 				return name, line + 1
 			}
-			if lineHasCode(scan) {
+			if lineHasCode(head) {
 				return "", 0
 			}
 		}
@@ -125,7 +124,40 @@ func matchCodingCookie(line []byte) string {
 	if end == 0 {
 		return ""
 	}
-	return string(rest[:end])
+	return getNormalName(string(rest[:end]))
+}
+
+// getNormalName folds the utf-8 / latin-1 family aliases CPython
+// short-circuits in get_normal_name. It only looks at the first 12
+// bytes of s; everything past that is ignored, so names like
+// "iso-8859-1-xxxxx..." normalise to "iso-8859-1" and the codec
+// lookup succeeds.
+//
+// CPython: Parser/tokenizer/helpers.c:305 get_normal_name
+func getNormalName(s string) string {
+	var buf [13]byte
+	n := 0
+	for n < 12 && n < len(s) {
+		c := s[n]
+		if c == '_' {
+			buf[n] = '-'
+		} else if c >= 'A' && c <= 'Z' {
+			buf[n] = c + 'a' - 'A'
+		} else {
+			buf[n] = c
+		}
+		n++
+	}
+	prefix := string(buf[:n])
+	switch {
+	case prefix == "utf-8" || strings.HasPrefix(prefix, "utf-8-"):
+		return "utf-8"
+	case prefix == "latin-1" || prefix == "iso-8859-1" || prefix == "iso-latin-1":
+		return "iso-8859-1"
+	case strings.HasPrefix(prefix, "latin-1-") || strings.HasPrefix(prefix, "iso-8859-1-") || strings.HasPrefix(prefix, "iso-latin-1-"):
+		return "iso-8859-1"
+	}
+	return s
 }
 
 func isCodingNameByte(c byte) bool {

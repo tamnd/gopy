@@ -28,7 +28,7 @@ import (
 //
 // CPython: Parser/tokenizer/file_tokenizer.c:31 _PyTokenizer_FromFile
 func FromReader(r io.Reader, mode Mode) *State {
-	br := bufio.NewReader(r)
+	br := bufio.NewReaderSize(r, 2*cookieFileBufsize)
 	if head, ok := readEncodingHead(br); ok {
 		// Non-UTF-8 cookie: read the rest of the stream and route
 		// through FromBytes so codec decoding runs on the full body.
@@ -76,7 +76,13 @@ func FromReader(r io.Reader, mode Mode) *State {
 // CPython: Parser/tokenizer/file_tokenizer.c:288 check_bom and L337
 // check_coding_spec on the first two lines.
 func readEncodingHead(br *bufio.Reader) ([]byte, bool) {
-	const peekSize = 2 * codingCookieMax
+	// CPython reads the first two source lines through fp_getc, which
+	// can grow tok->buf past BUFSIZ when a single line exceeds it.
+	// Peeking 2*BUFSIZ here covers the common case of two long header
+	// lines without forcing the caller to slurp the whole file just
+	// to find the cookie. The Bytes-mode driver (FromBytes) has the
+	// full source in memory and is unbounded.
+	const peekSize = 2 * cookieFileBufsize
 	peek, _ := br.Peek(peekSize)
 	scan := peek
 	if len(scan) >= 3 && scan[0] == 0xef && scan[1] == 0xbb && scan[2] == 0xbf {
@@ -108,7 +114,7 @@ func FindEncodingFilename(name string) (string, error) {
 	}
 	defer f.Close()
 	br := bufio.NewReader(f)
-	peek, _ := br.Peek(2 * codingCookieMax)
+	peek, _ := br.Peek(2 * cookieFileBufsize)
 	if conflict := CheckBOMCookieConflict(peek); conflict != "" {
 		return "", &SyntaxError{Message: conflict}
 	}
