@@ -18,9 +18,27 @@ package lexer
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/tamnd/gopy/codecs"
 )
+
+// decodeErrorMessage formats a codec failure into the SyntaxError text
+// CPython produces when the cookie-driven decode raises. The cookie
+// path is reached during tokenizer init, so the SyntaxError args[0]
+// is the bare str() of the UnicodeDecodeError, no "(unicode error)"
+// prefix. The prefix only appears when the decode error is raised
+// later inside the parser via _Pypegen_raise_decode_error; the string
+// driver never reaches that branch because tokenizer init already
+// returned NULL.
+//
+// CPython: Parser/pegen_errors.c:13 _PyPegen_raise_tokenizer_init_error
+func decodeErrorMessage(err error) string {
+	msg := err.Error()
+	msg = strings.TrimPrefix(msg, "UnicodeDecodeError: ")
+	msg = strings.TrimPrefix(msg, "UnicodeEncodeError: ")
+	return msg
+}
 
 // nonUTF8ErrorMessage renders the SyntaxError text CPython emits when
 // a non-utf-8 byte appears in source that has no PEP 263 cookie.
@@ -101,7 +119,7 @@ func FromBytes(src []byte, mode Mode) *State {
 				if err != nil {
 					s.lineno = cookieLine
 					s.recordErrorWithText(
-						"encoding problem: "+name,
+						decodeErrorMessage(err),
 						nthLine(src, cookieLine),
 					)
 					s.done = eEncoding

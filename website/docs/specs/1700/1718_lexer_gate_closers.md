@@ -107,7 +107,7 @@ underway, TODO = not started.
 | P9 | Multibyte codec runtime: port `Modules/cjkcodecs/multibytecodec.c` plus `_codecs_jp` (`cp932`) and `_codecs_kr` (`cp949`) with `mappings_jp.h` / `mappings_kr.h` tables. Required by `test_issue2301` (cp932) and `test_exec_valid_coding` (cp949). | TODO | pending |
 | P10 | Encoding alias table: port `Lib/encodings/aliases.py` so `iso8859-15`, `iso-8859-15`, `iso_8859_15`, `cp1252`, `cp932`, `cp949`, `utf8` etc. all canonicalise through the same alias mapping CPython uses. Plumb through `codecs.Lookup` after `NormalizeName`. | TODO | pending |
 | P11 | Per-line UTF-8 validation in the lexer: port `Parser/tokenizer/helpers.c:300 ensure_utf8` so the lexer raises Non-UTF-8 SyntaxError on the offending line regardless of cookie/BOM. Required by `test_non_utf8_{second,third}_line_error`, `test_utf8_bom_non_utf8_third_line_error`, `test_utf_8_non_utf8_third_line_error`. | TODO | pending |
-| P12 | Lexer surfaces UnicodeDecodeError text: when the cookie codec decode fails, the SyntaxError message must follow `Parser/tokenizer/helpers.c:534 _PyTokenizer_syntaxerror_known_range` and the CPython `'<codec>' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)` template. Required by `test_first_utf8_coding_line_error`, `test_second_utf8_coding_line_error`, `test_utf8_shebang_error`, `test_error_from_string`. | TODO | pending |
+| P12 | Lexer surfaces UnicodeDecodeError text: when the cookie codec decode fails, the SyntaxError message must follow `Parser/tokenizer/helpers.c:534 _PyTokenizer_syntaxerror_known_range` and the CPython `'<codec>' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)` template. Required by `test_first_utf8_coding_line_error`, `test_second_utf8_coding_line_error`, `test_utf8_shebang_error`, `test_error_from_string`. | DONE | pending |
 | P13 | `os.PathLike` port: add the abstract base class (`Lib/os.py:1145 PathLike`) plus the `__fspath__` protocol the rest of the os/posixpath subsystem already half-uses. Required by `test_20731`, `test_file_parse_error_multiline`, `test_tokenizer_fstring_warning_in_first_line`. | TODO | pending |
 | P14 | Test fixtures: vendor `Lib/test/tokenizedata/bad_coding.py`, `bad_coding2.py`, `coding20731.py`, plus `Lib/test/encoded_modules/__init__.py`, `module_iso_8859_1.py`, `module_koi8_r.py` into `test/cpython/tokenizedata/` and `test/cpython/encoded_modules/`. Required by `test_bad_coding`, `test_bad_coding2`, `test_import_encoded_module`, `test_20731`. | TODO | pending |
 | P15 | `__import__` SyntaxError surfacing: when an imported source file's tokeniser emits SyntaxError (bad cookie, bad UTF-8), `Lib/importlib/_bootstrap_external.py:846 _LoaderBasics.exec_module` must propagate the error. Required by `test_bad_coding2`. | TODO | pending |
@@ -284,18 +284,46 @@ line/column and matching the CPython message template exactly.
 ### P12: ASCII / UTF-8 decode error templates
 
 When the cookie is `ascii` and the source contains `\xc3\xa4`,
-CPython raises `(unicode error) 'ascii' codec can't decode byte
-0xc3 in position N: ordinal not in range(128)`. The lexer obtains
-this string from `PyUnicodeDecodeError_Create` via
-`PyUnicode_AsEncodedString` / `_PyCodec_DecodeText`. In gopy the
-encoding decode runs at `parser/lexer/driver_string.go:100` but the
-error returned is the bare codec error; the SyntaxError ends up
-with `encoding problem: ascii` instead.
+CPython raises a `UnicodeDecodeError` from `PyUnicode_DecodeASCII`
+(`Objects/unicodeobject.c:7656`, reason
+`"ordinal not in range(128)"`). The string tokenizer fails its
+`translate_into_utf8` step, the pending `UnicodeDecodeError` is
+turned into a `SyntaxError` by
+`_PyPegen_raise_tokenizer_init_error`
+(`Parser/pegen_errors.c:13`), and `args[0]` ends up as the bare
+`str()` of the original `UnicodeDecodeError`: `'ascii' codec
+can't decode byte 0xe2 in position N: ordinal not in range(128)`
+(no `(unicode error)` prefix — that prefix is only attached by
+`_Pypegen_raise_decode_error` for the in-parser path, not the
+init-error path).
 
-The port: when the cookie codec decode returns a UnicodeDecodeError,
-format the SyntaxError message via the CPython template (the
-position is the byte offset within the original source, lineno is
-the line containing that byte, text is the source line itself).
+Port:
+
+- `codecs/errors.go`: extend `ErrorHandler` with a `reason`
+  argument, mirror CPython's
+  `unicode_decode_call_errorhandler_writer` (encoding + reason
+  are passed alongside the position).
+- `strictHandler`: emit the singular byte form when
+  `end == start + 1`, plural otherwise. Same format as
+  `Objects/exceptions.c:3815 UnicodeDecodeError_str`.
+- `codecs/builtin.go`, `codecs/raw_unicode_escape.go`,
+  `module/_codecs/module.go`: thread the codec-specific reason
+  (`"ordinal not in range(128)"` for ascii,
+  `"ordinal not in range(256)"` for iso-8859-1,
+  `"invalid start byte"` / `"surrogates not allowed"` for utf-8,
+  `"character maps to <undefined>"` for charmap) into every
+  handler call.
+- `parser/lexer/driver_string.go`: stop replacing the codec
+  error with `encoding problem: <name>`. Surface the codec
+  message verbatim into the `SyntaxError.Text` and `.Message`.
+  No `(unicode error)` wrap: the prefix is added by the parser
+  path, not the tokenizer-init path.
+
+After this lands, `test_error_from_string` passes; the regex
+gate (`(\\(unicode error\\) )?'ascii' codec can't decode byte`)
+in `test_first_utf8_coding_line_error` /
+`test_second_utf8_coding_line_error` matches the bare form via
+the optional alternative in the regex.
 
 ### P13: os.PathLike
 

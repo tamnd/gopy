@@ -9,7 +9,7 @@ func TestDetectEncodingCookie(t *testing.T) {
 		want string
 	}{
 		{"none", "x = 1\n", ""},
-		{"first_line_colon", "# coding: latin-1\nx = 1\n", "latin-1"},
+		{"first_line_colon", "# coding: latin-1\nx = 1\n", "iso-8859-1"},
 		{"first_line_equals", "# -*- coding=utf-8 -*-\n", "utf-8"},
 		{"second_line", "#!/usr/bin/env python\n# coding: cp1252\n", "cp1252"},
 		{"third_line_ignored", "\n\n# coding: utf-8\n", ""},
@@ -82,7 +82,7 @@ func TestNormalizeNewlines(t *testing.T) {
 
 func TestFromBytesPicksUpEncoding(t *testing.T) {
 	st := FromString("# coding: latin-1\nx = 1\n", ModeFile)
-	if st.Encoding() != "latin-1" {
+	if st.Encoding() != "iso-8859-1" {
 		t.Errorf("Encoding = %q", st.Encoding())
 	}
 }

@@ -462,7 +462,7 @@ func charmapDecodeFromString(data []byte, errors string, table []rune) (string, 
 			x = table[ch]
 		}
 		if x == 0xFFFE {
-			rep, newpos, err := callDecodeErrorHandler("charmap", data, i, i+1, errors)
+			rep, newpos, err := callDecodeErrorHandler("charmap", "character maps to <undefined>", data, i, i+1, errors)
 			if err != nil {
 				return "", err
 			}
@@ -484,7 +484,7 @@ func charmapDecodeFromMapping(data []byte, errors string, mapping *objects.Dict)
 		key := objects.NewInt(int64(ch))
 		item, err := mapping.GetItem(key)
 		if err != nil || item == nil || objects.IsNone(item) {
-			rep, newpos, herr := callDecodeErrorHandler("charmap", data, i, i+1, errors)
+			rep, newpos, herr := callDecodeErrorHandler("charmap", "character maps to <undefined>", data, i, i+1, errors)
 			if herr != nil {
 				return "", herr
 			}
@@ -499,7 +499,7 @@ func charmapDecodeFromMapping(data []byte, errors string, mapping *objects.Dict)
 				return "", fmt.Errorf("TypeError: character mapping must be in range(0x110000)")
 			}
 			if val == 0xFFFE {
-				rep, newpos, herr := callDecodeErrorHandler("charmap", data, i, i+1, errors)
+				rep, newpos, herr := callDecodeErrorHandler("charmap", "character maps to <undefined>", data, i, i+1, errors)
 				if herr != nil {
 					return "", herr
 				}
@@ -589,7 +589,7 @@ func charmapEncodeError(runes []rune, i int, mapping objects.Object, inv map[run
 		buf, _, err := encodeXMLCharRefRun(runes[start:end], mapping, inv)
 		return buf, end, err
 	}
-	rep, newpos, herr := callEncodeErrorHandler("charmap", source, start, end, errors)
+	rep, newpos, herr := callEncodeErrorHandler("charmap", "character maps to <undefined>", source, start, end, errors)
 	if herr != nil {
 		return nil, 0, herr
 	}
@@ -715,23 +715,23 @@ func charmapBuildImpl(s string) (objects.Object, error) {
 
 // callDecodeErrorHandler invokes the named error handler for a decode
 // error and returns (replacement, new_position).
-func callDecodeErrorHandler(enc string, input []byte, start, end int, errors string) (string, int, error) {
+func callDecodeErrorHandler(enc, reason string, input []byte, start, end int, errors string) (string, int, error) {
 	h, err := codecs.LookupError(errors)
 	if err != nil {
 		return "", 0, err
 	}
-	return h(enc, input, start, end)
+	return h(enc, reason, input, start, end)
 }
 
 // callEncodeErrorHandler invokes the named error handler for an encode
 // error. The input is supplied as a string; we pass its UTF-8 bytes
 // since the handler signature is byte-oriented.
-func callEncodeErrorHandler(enc, input string, start, end int, errors string) (string, int, error) {
+func callEncodeErrorHandler(enc, reason, input string, start, end int, errors string) (string, int, error) {
 	h, err := codecs.LookupError(errors)
 	if err != nil {
 		return "", 0, err
 	}
-	return h(enc, []byte(input), start, end)
+	return h(enc, reason, []byte(input), start, end)
 }
 
 // ---------------------------------------------------------------------------
@@ -877,12 +877,15 @@ func codecsRegisterError(args []objects.Object, kwargs map[string]objects.Object
 	pyErrHandlers[name] = handler
 	pyErrMu.Unlock()
 	// Bridge the Python callable into the Go error handler registry.
-	codecs.RegisterError(name, func(enc string, input []byte, start, end int) (string, int, error) {
+	codecs.RegisterError(name, func(enc, reason string, input []byte, start, end int) (string, int, error) {
 		pyErrMu.RLock()
 		h := pyErrHandlers[name]
 		pyErrMu.RUnlock()
 		if h == nil {
 			return "", 0, fmt.Errorf("LookupError: unknown error handler name %q", name)
+		}
+		if reason == "" {
+			reason = "codec error"
 		}
 		// Build a minimal UnicodeDecodeError-like tuple to pass to the handler.
 		errArg := objects.NewTuple([]objects.Object{
@@ -890,7 +893,7 @@ func codecsRegisterError(args []objects.Object, kwargs map[string]objects.Object
 			objects.NewBytes(input),
 			objects.NewInt(int64(start)),
 			objects.NewInt(int64(end)),
-			objects.NewStr("codec error"),
+			objects.NewStr(reason),
 		})
 		result, cerr := objects.Call(h, objects.NewTuple([]objects.Object{errArg}), nil)
 		if cerr != nil {

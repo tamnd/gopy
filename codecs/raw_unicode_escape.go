@@ -131,9 +131,9 @@ func handleRawUnicodeEscapeError(input []byte, start, end int, reason, errors st
 	if herr != nil {
 		return "", 0, herr
 	}
-	rep, newpos, herr := handler("rawunicodeescape", input, start, end)
+	rep, newpos, herr := handler("rawunicodeescape", reason, input, start, end)
 	if herr != nil {
-		return "", 0, fmt.Errorf("UnicodeDecodeError: 'rawunicodeescape' codec can't decode bytes in position %d-%d: %s", start, end-1, reason)
+		return "", 0, herr
 	}
 	return rep, newpos, nil
 }

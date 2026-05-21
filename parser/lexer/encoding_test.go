@@ -14,8 +14,8 @@ import (
 func TestLatin1SourceDecodes(t *testing.T) {
 	src := []byte("# coding: latin-1\nx = \"caf\xe9\"\n")
 	st := FromBytes(src, ModeFile)
-	if st.Encoding() != "latin-1" {
-		t.Fatalf("Encoding = %q, want latin-1", st.Encoding())
+	if st.Encoding() != "iso-8859-1" {
+		t.Fatalf("Encoding = %q, want iso-8859-1", st.Encoding())
 	}
 	var sawString bool
 	for i := 0; i < 50; i++ {
@@ -48,14 +48,16 @@ func TestUnknownCookieRecordsError(t *testing.T) {
 	if st.Err() == nil {
 		t.Fatal("expected lexer error for unknown encoding")
 	}
-	if !strings.Contains(st.Err().Message, "encoding problem") {
-		t.Errorf("error = %q, want \"encoding problem\"", st.Err().Message)
+	if !strings.Contains(st.Err().Message, "unknown encoding") {
+		t.Errorf("error = %q, want to mention \"unknown encoding\"", st.Err().Message)
 	}
 }
 
 // TestBOMConflictWithLatin1Cookie pins that a UTF-8 BOM combined with
 // a non-utf-8 cookie surfaces the CPython error wording, namely
-// "encoding problem: <name> with BOM".
+// "encoding problem: <name> with BOM". The cookie name is normalized
+// to the CPython get_normal_name canonical form ("iso-8859-1") before
+// reaching the message builder.
 //
 // CPython: Parser/tokenizer/helpers.c:425 check_coding_spec
 func TestBOMConflictWithLatin1Cookie(t *testing.T) {
@@ -64,8 +66,8 @@ func TestBOMConflictWithLatin1Cookie(t *testing.T) {
 	if st.Err() == nil {
 		t.Fatal("expected lexer error for BOM/cookie mismatch")
 	}
-	if !strings.Contains(st.Err().Message, "encoding problem: latin-1 with BOM") {
-		t.Errorf("error = %q, want to mention \"encoding problem: latin-1 with BOM\"", st.Err().Message)
+	if !strings.Contains(st.Err().Message, "encoding problem: iso-8859-1 with BOM") {
+		t.Errorf("error = %q, want to mention \"encoding problem: iso-8859-1 with BOM\"", st.Err().Message)
 	}
 }
 
@@ -87,8 +89,8 @@ func TestUTF8CookieNoDecode(t *testing.T) {
 func TestReaderDriverDecodesLatin1(t *testing.T) {
 	src := "# coding: latin-1\ny = \"caf\xe9\"\n"
 	st := FromReader(strings.NewReader(src), ModeFile)
-	if st.Encoding() != "latin-1" {
-		t.Fatalf("Encoding = %q, want latin-1", st.Encoding())
+	if st.Encoding() != "iso-8859-1" {
+		t.Fatalf("Encoding = %q, want iso-8859-1", st.Encoding())
 	}
 	var sawString bool
 	for i := 0; i < 50; i++ {

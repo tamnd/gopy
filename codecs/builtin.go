@@ -94,7 +94,7 @@ func encodeUTF8(input, errors string) (out []byte, n int, err error) {
 		if herr != nil {
 			return nil, i, herr
 		}
-		rep, newpos, herr := handler("utf-8", []byte(string(r)), i, i+1)
+		rep, newpos, herr := handler("utf-8", "surrogates not allowed", []byte(string(r)), i, i+1)
 		if herr != nil {
 			return nil, i, herr
 		}
@@ -119,7 +119,7 @@ func decodeUTF8(input []byte, errors string) (out string, n int, err error) {
 			if herr != nil {
 				return "", i, herr
 			}
-			rep, newpos, herr := handler("utf-8", input, i, i+1)
+			rep, newpos, herr := handler("utf-8", "invalid start byte", input, i, i+1)
 			if herr != nil {
 				return "", i, herr
 			}
@@ -149,7 +149,7 @@ func encodeASCII(input, errors string) (out []byte, n int, err error) {
 		if herr != nil {
 			return nil, i, herr
 		}
-		rep, _, herr := handler("ascii", []byte(input), i, i+1)
+		rep, _, herr := handler("ascii", "ordinal not in range(128)", []byte(input), i, i+1)
 		if herr != nil {
 			return nil, i, herr
 		}
@@ -176,7 +176,7 @@ func decodeASCII(input []byte, errors string) (out string, n int, err error) {
 		if herr != nil {
 			return "", i, herr
 		}
-		rep, newpos, herr := handler("ascii", input, i, i+1)
+		rep, newpos, herr := handler("ascii", "ordinal not in range(128)", input, i, i+1)
 		if herr != nil {
 			return "", i, herr
 		}
@@ -202,7 +202,7 @@ func encodeLatin1(input, errors string) (out []byte, n int, err error) {
 		if herr != nil {
 			return nil, i, herr
 		}
-		rep, _, herr := handler("iso-8859-1", []byte(input), i, i+1)
+		rep, _, herr := handler("iso-8859-1", "ordinal not in range(256)", []byte(input), i, i+1)
 		if herr != nil {
 			return nil, i, herr
 		}
