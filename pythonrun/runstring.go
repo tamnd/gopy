@@ -124,6 +124,7 @@ func liftCode(c *compile.Code) *objects.Code {
 	out.Init(objects.CodeType)
 	out.SyncNameObjs()
 	out.SyncConstObjs()
+	out.SyncLocalsplusCounts()
 	specialize.Enable(out)
 	return out
 }

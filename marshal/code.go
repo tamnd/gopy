@@ -222,6 +222,7 @@ func unmarshalCode(d *decoder) (*objects.Code, error) {
 	c.LocalsplusKinds = make([]byte, len(lkinds))
 	copy(c.LocalsplusKinds, lkinds)
 	c.Varnames, c.Cellvars, c.Freevars = splitLocalsplusnames(lplusTuple, lkinds)
+	c.SyncLocalsplusCounts()
 
 	// filename, name, qualname
 	filenameObj, err := d.read()

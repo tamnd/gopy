@@ -86,6 +86,7 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 	out.Init(objects.CodeType)
 	out.SyncNameObjs()
 	out.SyncConstObjs()
+	out.SyncLocalsplusCounts()
 	specialize.Enable(out)
 	c.Lifted = out
 	return out
@@ -519,16 +520,18 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		return e.advance(), true, nil
 
 	case compile.COPY_FREE_VARS:
-		// oparg = number of free vars. Source: f.Func's Closure tuple.
-		// Target: free-var slots, which start at NLocals + NCells.
+		// oparg = co_nfreevars. CPython computes the destination as
+		// co_nlocalsplus - oparg so free vars always land at the end
+		// of the compacted localsplus table, regardless of how many
+		// arg-cells fix_cell_offsets merged into the locals span.
 		//
-		// CPython: Python/bytecodes.c COPY_FREE_VARS
+		// CPython: Python/bytecodes.c:1925 COPY_FREE_VARS
 		n := int(oparg)
 		fn, ok := e.f.Func.(*objects.Function)
 		if !ok || fn.Closure == nil {
 			return 0, true, fmt.Errorf("COPY_FREE_VARS: frame has no closure")
 		}
-		dst := frame.FreesStart(e.f.Code)
+		dst := frame.NLocalsPlusOf(e.f.Code) - n
 		for i := 0; i < n; i++ {
 			cell := fn.Closure.Item(i)
 			e.f.LocalsPlus[dst+i] = stackref.FromObject(cell)
@@ -1639,10 +1642,17 @@ func excSentinel(exc *pyerrors.Exception) error {
 	return fmt.Errorf("%s: %s", exc.TypeName(), msg)
 }
 
-// derefName returns the cell or free variable name at index idx in
-// the cell+free layout. Used purely for error messages so a failing
-// LOAD_DEREF tells the operator which name is unbound.
+// derefName returns the localsplus name at idx, post fix_cell_offsets
+// compaction. After C.1, every deref oparg is a final localsplus
+// offset, so LocalsplusNames is the canonical source. Falls back to
+// the legacy cell/free walk when LocalsplusNames is empty (test
+// fixtures only).
+//
+// CPython: Objects/codeobject.c:423 get_localsplus_names
 func derefName(co *objects.Code, idx int) string {
+	if idx >= 0 && idx < len(co.LocalsplusNames) {
+		return co.LocalsplusNames[idx]
+	}
 	if idx < len(co.Cellvars) {
 		return co.Cellvars[idx]
 	}

@@ -44,8 +44,29 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 	case "co_cellvars":
 		return stringsAsTuple(c.Cellvars), true
 	case "co_nlocals":
-		// CPython: Include/internal/pycore_code.h co_nlocals
+		// CPython: Include/cpython/code.h:87 co_nlocals
+		if c.Nlocalsplus != 0 {
+			return NewInt(int64(c.Nlocals)), true
+		}
 		return NewInt(int64(len(c.Varnames))), true
+	case "co_nlocalsplus":
+		// CPython: Include/cpython/code.h:84 co_nlocalsplus
+		return NewInt(int64(c.Nlocalsplus)), true
+	case "co_ncellvars":
+		// CPython: Include/cpython/code.h:88 co_ncellvars
+		if c.Nlocalsplus != 0 {
+			return NewInt(int64(c.Ncellvars)), true
+		}
+		return NewInt(int64(len(c.Cellvars))), true
+	case "co_nfreevars":
+		// CPython: Include/cpython/code.h:89 co_nfreevars
+		if c.Nlocalsplus != 0 {
+			return NewInt(int64(c.Nfreevars)), true
+		}
+		return NewInt(int64(len(c.Freevars))), true
+	case "co_localsplusnames":
+		// CPython: Include/cpython/code.h:92 co_localsplusnames
+		return stringsAsTuple(c.LocalsplusNames), true
 	case "co_linetable":
 		return NewBytes(c.Linetable), true
 	case "co_lnotab":

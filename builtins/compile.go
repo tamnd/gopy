@@ -288,6 +288,7 @@ func liftCompileCode(c *compile.Code) *objects.Code {
 	out.Init(objects.CodeType)
 	out.SyncNameObjs()
 	out.SyncConstObjs()
+	out.SyncLocalsplusCounts()
 	return out
 }
 
