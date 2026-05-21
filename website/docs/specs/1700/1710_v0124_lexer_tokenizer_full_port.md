@@ -17,7 +17,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | CPython source | C LOC | gopy destination | Go LOC | Status | Commit |
 |---|---:|---|---:|---|---|
 | `Parser/lexer/buffer.c` | 76 | `parser/lexer/buffer.go` | 50 | DONE | 5374e84 |
-| `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` (+ `fstring.go` + `onechar.go` + `xid.go`) | 986 + 390 + 208 + 90 | DRIFT | remaining gaps in `set_ftstring_expr` (P3) and `verify_end_of_number` (P4); `verify_identifier` flipped to use the XID composition in `xid.go` |
+| `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` (+ `fstring.go` + `onechar.go` + `xid.go`) | 986 + 390 + 208 + 90 | DONE | `set_ftstring_expr` (P3 / a72ac60), `verify_end_of_number` (P4 / 6dbf31a), `tok_get_normal_mode` position emission (P5 / 5f033ea); `verify_identifier` routed through XID composition in `xid.go` |
 | `Parser/lexer/state.c` | 151 | `parser/lexer/state.go` | 408 | DONE | d157189 |
 | `Parser/tokenizer/helpers.c` | 581 | `parser/lexer/helpers.go` (+ encoding subset in `parser/lexer/source.go`) | 179 + 287 | DRIFT | `check_coding_spec` skips `tok->cont_line`; `valid_utf8` collapsed into `utf8Size` (length-only); `_PyTokenizer_warn_invalid_escape_sequence` records as `[warn]`-tagged error instead of `PyErr_WarnExplicitObject` |
 | `Parser/tokenizer/file_tokenizer.c` | 493 | `parser/lexer/driver_file.go` | 119 | DRIFT | `tok_underflow_interactive` + `tok_concatenate_interactive_new_line` not ported; embedder owns REPL state |
@@ -37,7 +37,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | `test_utf8source.py` | 41 | DONE (3/3 sub-tests green; mirrored at `stdtest/test_utf8source.py`) | — |
 | `test_tabnanny.py` | 354 | DONE (exits 0 after typed `UnicodeDecodeError` + `surrogateescape` decode fix; mirrored under `stdtest/test_tabnanny.py`) | 3066fe3 |
 | `test_source_encoding.py` | 547 | TODO (imports clear; first hang is `BytesSourceEncodingTest.test_crcrcrlf`, which is `exec(bytes)` inside `captured_stdout`; the underlying gap is the VM's `exec(bytes)` path, not lexer/tokenizer). | — |
-| `test_tokenize.py` | 3480 | WIP (P5 below). Plumbing blockers cleared: `drainReadline` encoding inversion (538ab52), `FORMAT_WITH_SPEC` (5bd8455), `scanOperator` token-type emission (669c11f). Most sub-tests now run; position parity is still off (e.g. `1 + 1` emits the implicit NEWLINE at `(2, 0) (2, 2)` instead of `(1, 5) (1, 6)`, and the second `check_tokenize` reorders NEWLINE before COMMENT and reports it on the wrong line). The remaining work is the token-position parity pass tracked in P5 below. | 538ab52, 5bd8455, 669c11f |
+| `test_tokenize.py` | 3480 | WIP. Plumbing blockers cleared: `drainReadline` encoding inversion (538ab52), `FORMAT_WITH_SPEC` (5bd8455), `scanOperator` token-type emission (669c11f). Raw position parity locked in P5 (5f033ea) against `_tokenize.TokenizerIter(extra_tokens=False)`; wrapper extra_tokens parity locked against `_tokenize.TokenizerIter(extra_tokens=True)`. Remaining work is the P6 encoding/readline cleanup and a full re-run of the gate. | 538ab52, 5bd8455, 669c11f, 5f033ea |
 
 ## Goal
 
@@ -111,7 +111,7 @@ re-run the audit if the upstream rebases.
 | `maybe_raise_syntax_error_for_string_prefixes` | lexer.c:455 | `State.maybeRaiseSyntaxErrorForStringPrefixes` | lexer.go:943 | DONE | Flags incompatible prefix pairs (u+b, u+r, u+f, u+t, b+f, b+t, f+t). |
 | `is_potential_identifier_start` | lexer.c:12 | `isPotentialIdentifierStart` | lexer.go:42 | DONE | Macro port: a-z/A-Z/`_` / `≥128`. |
 | `is_potential_identifier_char` | lexer.c:18 | `isPotentialIdentifierChar` | lexer.go:52 | DONE | Extends start with digits. |
-| `tok_get_normal_mode` | lexer.c:501 | `State.tokGetNormalMode` | lexer.go:114 | DRIFT | Core FSM in place but token position emission diverges (NEWLINE after a simple statement reports the implicit position at the next line's column 0 instead of the source line's column-after-token). Drives the remaining `test_tokenize.py` failures. |
+| `tok_get_normal_mode` | lexer.c:501 | `State.tokGetNormalMode` | lexer.go:114 | DONE | FSM in place. Raw NEWLINE/NL build cols from byte offsets relative to `s.lineStart` (matches `_get_col_offsets` recomputation in the wrapper); ENDMARKER uses `(-1,-1)` sentinels to match the NULL `p_start`/`p_end` CPython hands back on EOF; `s.done = eEOF` flips at the start of `endmarker()` so DEDENT-at-EOF reports `E_EOF` to the wrapper's trailing-token reshape. Pinned at 5f033ea. |
 | `tok_get_fstring_mode` | lexer.c:1393 | `State.tokGetFStringModeImpl` | fstring.go:119 | DONE | Dispatches to `fstringMiddle` or `popMode`. |
 | `tok_get` | lexer.c:1616 | `State.tokGet` | token.go:120 | DONE | Mode-based dispatch. |
 | `_PyTokenizer_Get` | lexer.c:1626 | `State.Get` | token.go:111 | DONE | Public entry point. |
@@ -511,9 +511,105 @@ the dispatch key.
 
 ### P5: token position parity in `tok_get_normal_mode` (gates: the bulk of `test_tokenize.py`)
 
-1. Walk `parser/lexer/lexer.go:tokGetNormalMode` and every site that calls `tokenSetup` / `typeCommentTokenSetup`, comparing the `lineno`, `col_offset`, `end_lineno`, `end_col_offset` calculation against the corresponding `_PyLexer_token_setup` call in `Parser/lexer/lexer.c`.
-2. Fix the implicit-NEWLINE position emission so `1 + 1` reports `(1, 5) (1, 6)` instead of `(2, 0) (2, 2)`.
-3. Fix the NEWLINE-before-COMMENT reorder bug so the second `check_tokenize` from the test file matches CPython's output line by line.
+**Problem.** The DRIFT row at `lexer.c:501 tok_get_normal_mode`
+flagged "implicit-NEWLINE position emission" as breaking the bulk
+of `test_tokenize.py`. Walking the FSM exit points against
+`_PyLexer_token_setup` (state.c:131) and `_get_col_offsets`
+(Python-tokenize.c:205) surfaced three distinct issues, not one:
+
+1. `newlineTokenSetup` was correct: NEWLINE / NL build their
+   `(start_col, end_col)` from byte offsets relative to
+   `s.lineStart` (matching CPython's `_get_col_offsets` recomputation
+   from `p_start` / `p_end`), so `1 + 1\n` raw NEWLINE is
+   `(1,5)-(1,5)`. The `+1` that turns `end_col 5` into `end_col 6`
+   only fires in `extra_tokens` mode and is applied by the wrapper
+   in `module/_tokenize/module.go`, not by the raw lexer. An
+   earlier attempt to inline the `+1` here was reverted after
+   confirming against `_tokenize.TokenizerIter(extra_tokens=False)`.
+
+2. `endmarker()` passed `(s.cur, s.cur)` to `tokenSetup` for
+   ENDMARKER, which made `tokenSetup` compute `Start.Col = s.startCol`
+   and `End.Col = s.col` (i.e. `0` for inputs that ended on a
+   newline). CPython hands `p_start = p_end = NULL` on the EOF
+   branch (`Parser/lexer/lexer.c:738 MAKE_TOKEN(ENDMARKER)`), which
+   threads through `_get_col_offsets` as `col_offset = end_col_offset
+   = -1`. The raw expected output is `ENDMARKER (lineno,-1)-(lineno,-1)`.
+
+3. `s.done = eEOF` was set only at ENDMARKER emission, so the
+   DEDENT-at-EOF tokens that flush ahead of ENDMARKER reported
+   `Done() == DoneToken` to the wrapper. The wrapper's trailing-token
+   reshape check `(type == DEDENT && tok->done == E_EOF)` at
+   Python-tokenize.c:277 would never fire on those DEDENTs, so an
+   `extra_tokens=True` run of `def f():\n    pass\n` was emitting
+   DEDENT at `(2,-1)-(2,0)` instead of CPython's `(3,0)-(3,0)`.
+
+**Code shipped.**
+
+- `parser/lexer/lexer.go:endmarker`: `s.done = eEOF` is now set on
+  the first call, before the indent-unwind branch returns DEDENT.
+  This mirrors CPython where `tok->done = E_EOF` is set in the
+  buffer underflow (file/string/utf8 tokenizer) before the atbol
+  branch queues DEDENTs via `tok->pendin`. The trailing
+  `s.tokenSetup(token.ENDMARKER, ...)` call switched from
+  `(s.cur, s.cur)` to `(-1, -1)` so the boundary fields stay
+  sentinel rather than picking up `s.col`. Comment block updated
+  to cite `Parser/lexer/lexer.c:734` (the actual line of the EOF
+  branch in 3.14.5) and to explain why `s.done` flips up top.
+
+- `parser/lexer/token.go:newlineTokenSetup`: function body left
+  unchanged (the byte-offset computation was already correct).
+  Comment rewritten to point at the two CPython call sites that
+  jointly justify the byte-offset path: `state.c:131
+  _PyLexer_token_setup` for the boundary fields, and
+  `Python-tokenize.c:205 _get_col_offsets` for the recomputation
+  the wrapper applies. Notes that the `+1` for NEWLINE end_col is
+  applied downstream in `module/_tokenize`, not here.
+
+- `parser/lexer/lexer.go` (NEWLINE branch in tokGetNormalMode):
+  comment expanded to reference the wrapper recomputation and to
+  explain why `s.col` is one past `p_end` at this point (the `\n`
+  has already been consumed by `nextC`), forcing the byte-offset
+  route.
+
+- `module/_tokenize/module.go:tokenizerIterNext`: the `isTrailing`
+  check now matches CPython byte for byte. `kind == ENDMARKER ||
+  (kind == DEDENT && tok.Done() == DoneEOF)` enters the reshape
+  branch; only ENDMARKER additionally flips `it.done = true` to
+  terminate iteration. Cite added for `Python-tokenize.c:277`.
+
+- `parser/lexer/position_test.go` (new): pins `_PyLexer_token_setup`
+  output against `_tokenize.TokenizerIter(extra_tokens=False)`
+  fixtures captured from CPython 3.14.5 for `1 + 1\n`,
+  `def f():\n    pass\n`, and `a\n\nb\n`. Each token's
+  `(kind, start_line, start_col, end_line, end_col)` is asserted
+  against the canonical tuple. A second test pins that `s.Done()`
+  reports `DoneEOF` at DEDENT-at-EOF and at ENDMARKER, so the
+  wrapper-side trailing check never silently breaks.
+
+- `module/_tokenize/module_test.go` (new): pins the wrapper's
+  `extra_tokens=True` output for the same three fixtures plus
+  `# only\n`. Each token tuple's `(kind, str, start_line, start_col,
+  end_line, end_col)` is asserted against the canonical CPython
+  output. The DEDENT-at-EOF reshape from `(2,-1)-(2,0)` raw to
+  `(3,0)-(3,0)` wrapper-out is what this test locks.
+
+**Verification.** `go test ./parser/lexer/...` and
+`go test ./module/_tokenize` both green. The CPython fixtures
+were captured via `_tokenize.TokenizerIter(io.BytesIO(src.encode()).readline,
+extra_tokens=..., encoding='utf-8')` on Python 3.14.5 and pasted
+into the test tables verbatim, so a future drift here breaks the
+test rather than slipping through.
+
+**Follow-ups.** None for raw position emission; `tok_get_normal_mode`
+now matches `_PyLexer_token_setup` + `_get_col_offsets` for the
+covered token kinds. The original DRIFT row referenced a
+"NEWLINE-before-COMMENT reorder bug"; sweeping the test cases for
+that pattern (comment-only line followed by a code line, mixed
+`#` and `\n` sequences) found no surviving reorder. The
+"NEWLINE after a simple statement reports the implicit position
+at the next line's column 0 instead of the source line's
+column-after-token" symptom that drove the row was the same
+ENDMARKER-uses-`s.cur` bug above, surfaced through the wrapper.
 
 ### P6: encoding / readline DRIFT cleanup (gates: edge-case rows in `test_source_encoding.py` and streaming tests)
 
@@ -554,7 +650,7 @@ TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 | 7 | P2 | XID tables | port `_PyUnicode_ScanIdentifier` for non-ASCII identifier validation | DONE | 2b972c7 |
 | 8 | P3 | f-string debug UTF-8 | decode `setFtstringExpr` buffer through `unicode/utf8` | DONE | a72ac60 |
 | 9 | P4 | SyntaxWarning | emit on `1and` / `1or` style numbers | DONE | 6dbf31a |
-| 10 | P5 | token positions | match `_PyLexer_token_setup` line/col emission | TODO | — |
+| 10 | P5 | token positions | match `_PyLexer_token_setup` line/col emission | DONE | 5f033ea |
 
 ### test_utf8source.py chain
 
