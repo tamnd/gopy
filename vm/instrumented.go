@@ -67,4 +67,3 @@ func init() {
 		instrumentedRewrite[p.from] = true
 	}
 }
-

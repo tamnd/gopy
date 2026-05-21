@@ -140,7 +140,7 @@ func DumpStatsToFile() error {
 	if path == "" || statsTable == nil {
 		return nil
 	}
-	f, err := os.Create(path)
+	f, err := os.Create(path) //nolint:gosec // GOPY_STATS_FILE is a developer-supplied stats path; opening it is the entire contract.
 	if err != nil {
 		return err
 	}

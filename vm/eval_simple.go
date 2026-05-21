@@ -188,7 +188,7 @@ func wrapConst(v any) (objects.Object, error) {
 // e.retVal; arms set those fields and return errFrameReturn just like
 // CPython's goto exit_frame.
 //
-//nolint:gocognit,gocyclo,gocritic // hand-written opcode switch; the arm count shrinks as 1621 codegen replaces these.
+//nolint:gocognit,gocyclo // hand-written opcode switch; the arm count shrinks as 1621 codegen replaces these.
 func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok bool, err error) {
 	switch op {
 	case compile.CACHE, compile.RESERVED:

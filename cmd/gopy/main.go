@@ -40,7 +40,7 @@ func main() {
 // file empty.
 func mainWithProfile() int {
 	if path := os.Getenv("GOPY_CPUPROFILE"); path != "" {
-		f, err := os.Create(path)
+		f, err := os.Create(path) //nolint:gosec // GOPY_CPUPROFILE is a developer-supplied profile path; opening it is the entire contract.
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "GOPY_CPUPROFILE:", err)
 			return 1

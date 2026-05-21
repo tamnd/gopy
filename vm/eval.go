@@ -167,6 +167,8 @@ func builtinsFromGlobals(globals objects.Object) objects.Object {
 // branch or a yield/resume boundary.
 //
 // CPython: Python/ceval.c _PyEval_EvalFrameDefault main loop
+//
+//nolint:gocognit,gocyclo // hot-opcode arms are inlined at the loop level on purpose; collapsing them back into dispatch() costs ~5% on the dispatch micro-bench (spec 1712 D5).
 func (e *evalState) run() (objects.Object, error) {
 	for {
 		op, oparg, ok := e.fetch()
@@ -203,7 +205,7 @@ func (e *evalState) run() (objects.Object, error) {
 			f.LocalsPlus[f.StackBase+f.StackTop] = stackref.FromObject(obj)
 			f.StackTop++
 			f.PrevInstr = f.InstrPtr
-			f.InstrPtr = f.InstrPtr + 2
+			f.InstrPtr += 2
 			continue
 		case compile.LOAD_FAST, compile.LOAD_FAST_BORROW:
 			e.recordOpcode(op)
@@ -212,7 +214,7 @@ func (e *evalState) run() (objects.Object, error) {
 			f.LocalsPlus[f.StackBase+f.StackTop] = r
 			f.StackTop++
 			f.PrevInstr = f.InstrPtr
-			f.InstrPtr = f.InstrPtr + 2
+			f.InstrPtr += 2
 			continue
 		case compile.LOAD_FAST_LOAD_FAST, compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:
 			e.recordOpcode(op)
@@ -225,7 +227,7 @@ func (e *evalState) run() (objects.Object, error) {
 			f.LocalsPlus[f.StackBase+f.StackTop+1] = r2
 			f.StackTop += 2
 			f.PrevInstr = f.InstrPtr
-			f.InstrPtr = f.InstrPtr + 2
+			f.InstrPtr += 2
 			continue
 		case compile.LOAD_SMALL_INT:
 			e.recordOpcode(op)
@@ -234,7 +236,7 @@ func (e *evalState) run() (objects.Object, error) {
 			f.LocalsPlus[f.StackBase+f.StackTop] = stackref.FromObject(obj)
 			f.StackTop++
 			f.PrevInstr = f.InstrPtr
-			f.InstrPtr = f.InstrPtr + 2
+			f.InstrPtr += 2
 			continue
 		case compile.STORE_FAST:
 			e.recordOpcode(op)
@@ -247,7 +249,7 @@ func (e *evalState) run() (objects.Object, error) {
 			f.LocalsPlus[oparg] = value
 			old.Close()
 			f.PrevInstr = f.InstrPtr
-			f.InstrPtr = f.InstrPtr + 2
+			f.InstrPtr += 2
 			continue
 		case compile.POP_TOP:
 			e.recordOpcode(op)
@@ -258,7 +260,7 @@ func (e *evalState) run() (objects.Object, error) {
 			f.LocalsPlus[i] = stackref.Null
 			r.Close()
 			f.PrevInstr = f.InstrPtr
-			f.InstrPtr = f.InstrPtr + 2
+			f.InstrPtr += 2
 			continue
 		case compile.POP_JUMP_IF_FALSE, compile.POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NOT_NONE:
 			f := e.f
@@ -314,16 +316,16 @@ func (e *evalState) run() (objects.Object, error) {
 			f.LocalsPlus[i] = stackref.Null
 			f.PrevInstr = f.InstrPtr
 			if take {
-				f.InstrPtr = f.InstrPtr + 4 + 2*int(oparg)
+				f.InstrPtr += 4 + 2*int(oparg)
 			} else {
-				f.InstrPtr = f.InstrPtr + 4
+				f.InstrPtr += 4
 			}
 			continue
 		case compile.JUMP_BACKWARD_NO_INTERRUPT:
 			e.recordOpcode(op)
 			f := e.f
 			f.PrevInstr = f.InstrPtr
-			f.InstrPtr = f.InstrPtr + 2 - 2*int(oparg)
+			f.InstrPtr += 2 - 2*int(oparg)
 			continue
 		case compile.JUMP_BACKWARD:
 			if e.gilTimer != nil {
