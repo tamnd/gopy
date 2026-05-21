@@ -16,8 +16,6 @@ import (
 // CPython: Objects/exceptions.c:605 BaseException_members
 func init() {
 	t := PyExc_BaseException
-	t.Getattro = objects.GenericGetAttr
-	t.Setattro = objects.GenericSetAttr
 
 	objects.SetTypeDescr(t, "args", objects.NewGetSetDescr("args", argsGet, argsSet))
 	objects.SetTypeDescr(t, "__traceback__", objects.NewGetSetDescr("__traceback__", tracebackGet, tracebackSet))
@@ -27,6 +25,58 @@ func init() {
 	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", baseExceptionInit))
 	objects.SetTypeDescr(t, "add_note", objects.NewMethodDescr(t, "add_note", baseExceptionAddNote))
 	objects.SetTypeDescr(t, "__notes__", objects.NewGetSetDescr("__notes__", notesGet, notesSet))
+	objects.SetTypeDescr(t, "with_traceback", objects.NewMethodDescr(t, "with_traceback", baseExceptionWithTraceback))
+	objects.SetTypeDescr(t, "__setstate__", objects.NewMethodDescr(t, "__setstate__", baseExceptionSetState))
+}
+
+// baseExceptionWithTraceback writes tb into self.__traceback__ and
+// returns self. CPython's clinic wrapper calls
+// BaseException___traceback___set_impl, which is exactly tracebackSet
+// in gopy.
+//
+// CPython: Objects/exceptions.c:279 BaseException_with_traceback_impl
+func baseExceptionWithTraceback(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 2 {
+		return nil, errors.New("TypeError: with_traceback() takes exactly one argument")
+	}
+	self := args[0]
+	if _, ok := self.(*Exception); !ok {
+		return nil, errors.New("TypeError: with_traceback() requires a BaseException")
+	}
+	if err := tracebackSet(self, args[1]); err != nil {
+		return nil, err
+	}
+	return self, nil
+}
+
+// baseExceptionSetState restores per-instance attributes from a pickled
+// state dict. CPython iterates state as a dict and calls
+// PyObject_SetAttr(self, key, value) for every entry. None is a no-op.
+//
+// CPython: Objects/exceptions.c:243 BaseException___setstate___impl
+func baseExceptionSetState(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 2 {
+		return nil, errors.New("TypeError: __setstate__() takes exactly one argument")
+	}
+	self := args[0]
+	state := args[1]
+	if objects.IsNone(state) {
+		return objects.None(), nil
+	}
+	d, ok := state.(*objects.Dict)
+	if !ok {
+		return nil, errors.New("TypeError: state is not a dictionary")
+	}
+	for _, k := range d.Keys() {
+		v, err := d.GetItem(k)
+		if err != nil {
+			return nil, err
+		}
+		if err := objects.SetAttr(self, k, v); err != nil {
+			return nil, err
+		}
+	}
+	return objects.None(), nil
 }
 
 // baseExceptionAddNote appends a string note to self.__notes__,

@@ -54,6 +54,7 @@ var errorPrefixToType = map[string]*objects.Type{
 	"SystemError:":           pyerrors.PyExc_SystemError,
 	"RecursionError:":        pyerrors.PyExc_RecursionError,
 	"OSError:":               pyerrors.PyExc_OSError,
+	"io.UnsupportedOperation:": pyerrors.PyExc_UnsupportedOperation,
 	"MemoryError:":           pyerrors.PyExc_MemoryError,
 	"ReferenceError:":        pyerrors.PyExc_ReferenceError,
 	"BufferError:":           pyerrors.PyExc_BufferError,

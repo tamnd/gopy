@@ -23,6 +23,15 @@ type Exception struct {
 	Notes    *objects.List
 	TB       *traceback.Traceback
 	attrs    *objects.Dict
+
+	// SyntaxErr carries the SyntaxError-specific PyMemberDef payload
+	// (msg, filename, lineno, offset, text, end_lineno, end_offset,
+	// print_file_and_line, _metadata). Non-nil only when ExcType is a
+	// SyntaxError subclass. Populated by SyntaxError_init through the
+	// type's tp_call dispatch.
+	//
+	// CPython: Objects/exceptions.c:2670 PySyntaxErrorObject
+	SyntaxErr *SyntaxErrorState
 }
 
 // AttrDict implements objects.AttrDictHolder so a Python subclass of a
