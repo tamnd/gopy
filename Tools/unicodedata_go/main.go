@@ -50,6 +50,7 @@ func main() {
 	cpython := flag.String("cpython", "", "path to cpython source tree")
 	out := flag.String("out", "", "output Go file (unicodedata_db.h port)")
 	outType := flag.String("out-type", "", "output Go file (unicodetype_db.h port)")
+	outName := flag.String("out-name", "", "output Go file (unicodename_db.h port)")
 	flag.Parse()
 	if *cpython == "" || *out == "" {
 		log.Fatal("both -cpython and -out required")
@@ -82,6 +83,24 @@ func main() {
 			log.Fatal(err)
 		}
 		writeFormatted(*outType, func(w *bytes.Buffer) error { return emitType(w, tdoc) })
+	}
+
+	if *outName != "" {
+		namePath := filepath.Join(*cpython, "Modules", "unicodename_db.h")
+		udPath := filepath.Join(*cpython, "Modules", "unicodedata.c")
+		nameSrc, err := os.ReadFile(namePath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		udSrc, err := os.ReadFile(udPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		ndoc, err := parseNameDB(string(nameSrc), string(udSrc))
+		if err != nil {
+			log.Fatal(err)
+		}
+		writeFormatted(*outName, func(w *bytes.Buffer) error { return emitName(w, ndoc) })
 	}
 }
 
@@ -728,4 +747,374 @@ func formatFloat(v float64) string {
 		return strconv.FormatFloat(v, 'f', 1, 64)
 	}
 	return strconv.FormatFloat(v, 'g', -1, 64)
+}
+
+// nameDB is the parsed shape of unicodename_db.h plus the
+// hangul_syllables[][3] table from unicodedata.c. The DAWG is left
+// as the raw byte stream CPython emits; the runtime walks it via
+// the same varint protocol.
+type nameDB struct {
+	posShift        int
+	posNotFound     uint32
+	aliasesStart    uint32
+	aliasesEnd      uint32
+	namedSeqStart   uint32
+	namedSeqEnd     uint32
+	packed          []byte
+	posToCode       []uint32
+	codeToPosIndex1 []uint32
+	codeToPosIndex2 []uint32
+	aliases         []uint32
+	namedSequences  []namedSeq
+	derivedRanges   []derivedRange
+	derivedPrefixes []string
+	hangulSyllables [][3]string
+}
+
+type namedSeq struct {
+	seq []uint16
+}
+
+type derivedRange struct {
+	first    uint32
+	last     uint32
+	prefixID int
+}
+
+// parseNameDB walks unicodename_db.h (DAWG + index tables + aliases
+// + named sequences + derived-name ranges + derived-name prefixes)
+// and unicodedata.c (hangul_syllables[][3]).
+//
+// CPython: Modules/unicodename_db.h (generator output)
+// CPython: Modules/unicodedata.c:1004 hangul_syllables
+func parseNameDB(src, udSrc string) (*nameDB, error) {
+	out := &nameDB{}
+	if v, ok := defineInt(src, "DAWG_CODEPOINT_TO_POS_SHIFT"); ok {
+		out.posShift = v
+	} else {
+		return nil, fmt.Errorf("DAWG_CODEPOINT_TO_POS_SHIFT not defined")
+	}
+	if v, ok := defineInt(src, "DAWG_CODEPOINT_TO_POS_NOTFOUND"); ok {
+		out.posNotFound = uint32(v)
+	} else {
+		return nil, fmt.Errorf("DAWG_CODEPOINT_TO_POS_NOTFOUND not defined")
+	}
+	if v, ok := staticConstUint(src, "aliases_start"); ok {
+		out.aliasesStart = v
+	}
+	if v, ok := staticConstUint(src, "aliases_end"); ok {
+		out.aliasesEnd = v
+	}
+	if v, ok := staticConstUint(src, "named_sequences_start"); ok {
+		out.namedSeqStart = v
+	}
+	if v, ok := staticConstUint(src, "named_sequences_end"); ok {
+		out.namedSeqEnd = v
+	}
+
+	if body, err := extractBlock(src, "packed_name_dawg[] = {"); err == nil {
+		ints := parseInts(body)
+		out.packed = make([]byte, len(ints))
+		for i, v := range ints {
+			out.packed[i] = byte(v)
+		}
+	} else {
+		return nil, err
+	}
+	if body, err := extractBlock(src, "dawg_pos_to_codepoint[] = {"); err == nil {
+		out.posToCode = parseInts(body)
+	} else {
+		return nil, err
+	}
+	if body, err := extractBlock(src, "dawg_codepoint_to_pos_index1[] = {"); err == nil {
+		out.codeToPosIndex1 = parseInts(body)
+	} else {
+		return nil, err
+	}
+	if body, err := extractBlock(src, "dawg_codepoint_to_pos_index2[] = {"); err == nil {
+		out.codeToPosIndex2 = parseInts(body)
+	} else {
+		return nil, err
+	}
+	if body, err := extractBlock(src, "name_aliases[] = {"); err == nil {
+		out.aliases = parseInts(body)
+	} else {
+		return nil, err
+	}
+
+	if body, err := extractBlock(src, "named_sequences[] = {"); err == nil {
+		out.namedSequences = parseNamedSequences(body)
+	} else {
+		return nil, err
+	}
+
+	if body, err := extractBlock(src, "derived_name_ranges[] = {"); err == nil {
+		out.derivedRanges = parseDerivedRanges(body)
+	} else {
+		return nil, err
+	}
+
+	if body, err := extractBlock(src, "derived_name_prefixes[] = {"); err == nil {
+		out.derivedPrefixes = parseDerivedPrefixes(body)
+	} else {
+		return nil, err
+	}
+
+	hang, err := parseHangulSyllables(udSrc)
+	if err != nil {
+		return nil, err
+	}
+	out.hangulSyllables = hang
+	return out, nil
+}
+
+// staticConstUint pulls the integer literal out of a
+// `static const unsigned int NAME = VALUE;` line.
+func staticConstUint(src, name string) (uint32, bool) {
+	re := regexp.MustCompile(`static const unsigned int ` + regexp.QuoteMeta(name) + `\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*;`)
+	if m := re.FindStringSubmatch(src); m != nil {
+		base := 10
+		s := m[1]
+		if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+			base = 16
+			s = s[2:]
+		}
+		v, err := strconv.ParseUint(s, base, 64)
+		if err == nil {
+			return uint32(v), true
+		}
+	}
+	return 0, false
+}
+
+// parseNamedSequences walks a `{n, {a,b,c,d}}, ...` list. Each entry
+// has a leading length then a Py_UCS2 array of fixed size 4; only
+// the first `seqlen` items are meaningful.
+func parseNamedSequences(body string) []namedSeq {
+	body = stripComments(body)
+	var out []namedSeq
+	i := 0
+	for i < len(body) {
+		if body[i] != '{' {
+			i++
+			continue
+		}
+		// outer brace
+		j := i + 1
+		// find matching closing brace at depth 0
+		depth := 1
+		for j < len(body) && depth > 0 {
+			switch body[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+			j++
+		}
+		if depth != 0 {
+			return out
+		}
+		inner := body[i+1 : j-1]
+		// inner has format: SEQLEN, {U+0023, U+FE0F, ...}
+		commaIdx := strings.IndexByte(inner, ',')
+		if commaIdx < 0 {
+			i = j
+			continue
+		}
+		seqlenStr := strings.TrimSpace(inner[:commaIdx])
+		seqlen, _ := strconv.Atoi(seqlenStr)
+		braceStart := strings.IndexByte(inner[commaIdx:], '{')
+		if braceStart < 0 {
+			i = j
+			continue
+		}
+		braceStart += commaIdx
+		braceEnd := strings.IndexByte(inner[braceStart:], '}')
+		if braceEnd < 0 {
+			i = j
+			continue
+		}
+		braceEnd += braceStart
+		nums := parseInts(inner[braceStart+1 : braceEnd])
+		if len(nums) < seqlen {
+			seqlen = len(nums)
+		}
+		seq := make([]uint16, seqlen)
+		for k := 0; k < seqlen; k++ {
+			seq[k] = uint16(nums[k])
+		}
+		out = append(out, namedSeq{seq: seq})
+		i = j
+	}
+	return out
+}
+
+// parseDerivedRanges walks `{first, last, prefixid}` triples.
+func parseDerivedRanges(body string) []derivedRange {
+	tuples := parseTupleList(body, 3)
+	out := make([]derivedRange, len(tuples))
+	for i, t := range tuples {
+		out[i] = derivedRange{first: t[0], last: t[1], prefixID: int(t[2])}
+	}
+	return out
+}
+
+// parseDerivedPrefixes parses the trailing string-list:
+// `static const char * const derived_name_prefixes[] = {"X","Y",...};`.
+func parseDerivedPrefixes(body string) []string {
+	var out []string
+	i := 0
+	for i < len(body) {
+		if body[i] != '"' {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(body) && body[j] != '"' {
+			if body[j] == '\\' {
+				j++
+			}
+			j++
+		}
+		if j >= len(body) {
+			break
+		}
+		lit, err := strconv.Unquote(body[i : j+1])
+		if err == nil {
+			out = append(out, lit)
+		}
+		i = j + 1
+	}
+	return out
+}
+
+// parseHangulSyllables pulls the {{"G","A",""},...} table out of
+// unicodedata.c.
+//
+// CPython: Modules/unicodedata.c:1004 hangul_syllables
+func parseHangulSyllables(src string) ([][3]string, error) {
+	body, err := extractBlock(src, "hangul_syllables[][3] = {")
+	if err != nil {
+		return nil, err
+	}
+	var out [][3]string
+	i := 0
+	for i < len(body) {
+		if body[i] != '{' {
+			i++
+			continue
+		}
+		j := strings.IndexByte(body[i:], '}')
+		if j < 0 {
+			break
+		}
+		row := body[i+1 : i+j]
+		cells := parseHangulRow(row)
+		if len(cells) == 3 {
+			out = append(out, [3]string{cells[0], cells[1], cells[2]})
+		}
+		i += j + 1
+	}
+	return out, nil
+}
+
+// parseHangulRow turns `"G", "A", ""` (or `0, "AE", "G"`) into a
+// 3-string slice. A bare `0` becomes the empty string.
+func parseHangulRow(row string) []string {
+	var out []string
+	i := 0
+	for i < len(row) {
+		c := row[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == ',':
+			i++
+		case c == '"':
+			j := i + 1
+			for j < len(row) && row[j] != '"' {
+				if row[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j >= len(row) {
+				return out
+			}
+			lit, err := strconv.Unquote(row[i : j+1])
+			if err == nil {
+				out = append(out, lit)
+			}
+			i = j + 1
+		case c == '0':
+			out = append(out, "")
+			i++
+		default:
+			i++
+		}
+	}
+	return out
+}
+
+func emitName(w *bytes.Buffer, d *nameDB) error {
+	fmt.Fprint(w, `// Code generated by Tools/unicodedata_go. DO NOT EDIT.
+//
+// Source: $CPYTHON/Modules/unicodename_db.h
+// Source: $CPYTHON/Modules/unicodedata.c (hangul_syllables table)
+//
+// CPython: Modules/unicodename_db.h
+// CPython: Modules/unicodedata.c:1004 hangul_syllables
+
+package unicodedata
+
+`)
+	fmt.Fprintf(w, "const dawgPosShift = %d\n", d.posShift)
+	fmt.Fprintf(w, "const dawgPosNotFound = %d\n", d.posNotFound)
+	fmt.Fprintf(w, "const aliasesStart = 0x%X\n", d.aliasesStart)
+	fmt.Fprintf(w, "const aliasesEnd = 0x%X\n", d.aliasesEnd)
+	fmt.Fprintf(w, "const namedSeqStart = 0x%X\n", d.namedSeqStart)
+	fmt.Fprintf(w, "const namedSeqEnd = 0x%X\n\n", d.namedSeqEnd)
+
+	fmt.Fprintf(w, "var packedNameDawg = [...]byte{\n")
+	for i, b := range d.packed {
+		fmt.Fprintf(w, "%d,", b)
+		if i%32 == 31 {
+			fmt.Fprintln(w)
+		}
+	}
+	fmt.Fprint(w, "\n}\n\n")
+
+	emitUint32(w, "dawgPosToCode", d.posToCode)
+	emitUint8(w, "dawgCodeToPosIndex1", d.codeToPosIndex1)
+	emitUint16(w, "dawgCodeToPosIndex2", d.codeToPosIndex2)
+	emitUint32(w, "nameAliases", d.aliases)
+
+	fmt.Fprint(w, "type namedSequence struct{ Seq []uint16 }\n\n")
+	fmt.Fprintf(w, "var namedSequences = []namedSequence{\n")
+	for _, ns := range d.namedSequences {
+		fmt.Fprint(w, "{Seq: []uint16{")
+		for i, c := range ns.seq {
+			if i > 0 {
+				fmt.Fprint(w, ", ")
+			}
+			fmt.Fprintf(w, "0x%X", c)
+		}
+		fmt.Fprint(w, "}},\n")
+	}
+	fmt.Fprint(w, "}\n\n")
+
+	fmt.Fprint(w, "type derivedNameRange struct{ First, Last rune; PrefixID int }\n\n")
+	fmt.Fprintf(w, "var derivedNameRanges = []derivedNameRange{\n")
+	for _, r := range d.derivedRanges {
+		fmt.Fprintf(w, "{First: 0x%X, Last: 0x%X, PrefixID: %d},\n", r.first, r.last, r.prefixID)
+	}
+	fmt.Fprint(w, "}\n\n")
+
+	emitStrings(w, "derivedNamePrefixes", d.derivedPrefixes)
+
+	fmt.Fprintf(w, "var hangulSyllables = [...][3]string{\n")
+	for _, row := range d.hangulSyllables {
+		fmt.Fprintf(w, "{%q, %q, %q},\n", row[0], row[1], row[2])
+	}
+	fmt.Fprint(w, "}\n\n")
+	return nil
 }
