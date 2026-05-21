@@ -37,7 +37,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | `test_utf8source.py` | 41 | DONE (3/3 sub-tests green; mirrored at `stdtest/test_utf8source.py`) | — |
 | `test_tabnanny.py` | 354 | DONE (exits 0 after typed `UnicodeDecodeError` + `surrogateescape` decode fix; mirrored under `stdtest/test_tabnanny.py`) | 3066fe3 |
 | `test_source_encoding.py` | 547 | TODO (imports clear; first hang is `BytesSourceEncodingTest.test_crcrcrlf`, which is `exec(bytes)` inside `captured_stdout`; the underlying gap is the VM's `exec(bytes)` path, not lexer/tokenizer). | — |
-| `test_tokenize.py` | 3480 | WIP. Plumbing blockers cleared: `drainReadline` encoding inversion (538ab52), `FORMAT_WITH_SPEC` (5bd8455), `scanOperator` token-type emission (669c11f). Raw position parity locked in P5 (5f033ea) against `_tokenize.TokenizerIter(extra_tokens=False)`; wrapper extra_tokens parity locked against `_tokenize.TokenizerIter(extra_tokens=True)`. P6 cleanup landed (warnings routed through `PyErr_WarnExplicit`, full `valid_utf8` table, cont_line cookie skip). Remaining work is a full re-run of the gate. | 538ab52, 5bd8455, 669c11f, 5f033ea, 22e71b6, 5104498 |
+| `test_tokenize.py` | 3480 | BLOCKED on `functools.singledispatch.register`. Lexer-side work all green: plumbing blockers cleared (538ab52, 5bd8455, 669c11f), raw + wrapper position parity locked under `parser/lexer/position_test.go` + `module/_tokenize/module_test.go` (5f033ea), P6 cleanup landed (22e71b6, 5104498). Gate import chain trips a VM cell/free bug at `stdlib/functools.py:922` inside `singledispatch.<locals>.register` when `pkgutil` pulls in `unittest.mock`: `LOAD_DEREF: <unknown> slot 8 not a cell ... got <nil>`. The block lives in the VM closure-handling subsystem, not lexer/tokenizer; see P8 for the follow-up handoff. | 538ab52, 5bd8455, 669c11f, 5f033ea, 22e71b6, 5104498 |
 
 ## Goal
 
@@ -727,14 +727,83 @@ broken by routing through the hook instead of a direct import).
 
 ### P7: stdlib vendor location (gates: zero; consistency only)
 
-1. Move `stdlib/{keyword,tokenize,tabnanny}.py` to `module/{keyword,tokenize,tabnanny}/`, matching the `module/xxx/` rule.
-2. Keep the files byte-equal to upstream. Update import paths.
-3. Optional: remove the `stdlib/` location entirely if no other vendor relies on it.
+**Resolution.** The early draft of P7 proposed moving
+`stdlib/{keyword,tokenize,tabnanny}.py` into `module/{keyword,tokenize,tabnanny}/`
+to mirror the `module/xxx/` Go-port convention. Walking the actual
+gopy layout shows the convention splits cleanly along source-language
+lines instead of subsystem:
+
+- **C accelerators** (Go re-implementations of CPython's C-coded
+  modules) live in `module/<name>/`. Examples that already follow
+  this: `module/_tokenize/`, `module/_warnings/`, `module/_opcode/`,
+  `module/_bisect/`, `module/_collections/`. The Python public
+  facade either lives next to them as an empty stub (`module/warnings/`,
+  `module/functools/`, `module/re/`, `module/socket/`) or is
+  served straight from `stdlib/`.
+- **Pure-Python vendors** (byte-equal copies of `Lib/*.py`) live in
+  `stdlib/<name>.py`. PathFinder serves the whole `stdlib/` tree as
+  a single search root (see `cmd/gopy/main.go:findStdlibRoot`).
+  Every Lib/*.py vendor in the spec history (`bisect.py`, `tempfile.py`,
+  `opcode.py`, `dis.py`, `importlib/*.py`, `inspect.py`,
+  `functools.py`, `re/*.py`, `socket.py`, `traceback.py`,
+  `collections/__init__.py`) follows this rule.
+
+`Lib/keyword.py`, `Lib/tokenize.py`, and `Lib/tabnanny.py` are all
+pure-Python modules. The byte-equal vendor at `stdlib/keyword.py`,
+`stdlib/tokenize.py`, `stdlib/tabnanny.py` is in the right place
+by the gopy convention. Moving them to `module/{keyword,tokenize,tabnanny}/`
+would mean PathFinder must search multiple roots (or each module
+exposes its own per-module Python facade), and every existing Lib/*.py
+vendor would need the same migration for consistency. Neither change
+unlocks any gate test (P7 was tagged "gates: zero; consistency
+only" up front), so the move is dropped.
+
+**Verification.** Confirmed byte-equal vs CPython 3.14.5:
+
+```
+$ diff -q stdlib/keyword.py  ~/cpython-314/Lib/keyword.py
+$ diff -q stdlib/tokenize.py ~/cpython-314/Lib/tokenize.py
+$ diff -q stdlib/tabnanny.py ~/cpython-314/Lib/tabnanny.py
+```
+
+All three returned silently. No code shipped under P7; the audit table
+rows for these vendors stay DONE at their existing locations.
 
 ### P8: flip 1700
 
-Once every gate is green, flip task #484 ("test e2e v0.5.5 — lexer
-panel") to done and update the 1700 checklist row.
+**Lexer/tokenizer scope.** Every function in the function-level audit
+table is DONE: P1 (tokenizer error routing), P2 (XID identifier
+tables), P3 (f-string debug UTF-8), P4 (SyntaxWarning on numeric
+literals), P5 (token position parity), P6.1-P6.3 (warning routing,
+full `valid_utf8`, cont_line cookie skip). P6.4 (the inline BOM /
+encoding state machine in `tok_underflow_file`) stays conditional;
+no gate fixture surfaces a cookie past the head window so the upfront
+`readEncodingHead` covers every case. P7 resolved as N/A by the
+established gopy layout convention.
+
+**Panel gate status.** Three of the five panel rows are green
+(`test_keyword.py`, `test_utf8source.py`, `test_tabnanny.py`). The
+remaining two stay pending on subsystems outside lexer/tokenizer:
+
+- `test_source_encoding.py`: blocks on `exec(bytes)` (task T7 above),
+  which is a VM/builtins gap, not lexer/tokenizer.
+- `test_tokenize.py`: imports `unittest.mock` at line 12, which pulls
+  in `pkgutil` -> `functools.singledispatch`'s decorator-with-args
+  branch. That path trips a VM bug surfacing as
+  `LOAD_DEREF: <unknown> slot 8 not a cell ... got <nil>` inside
+  `functools.singledispatch.<locals>.register` at stdlib/functools.py:922.
+  The cell/free closure handling is the gap; out of scope for 1710.
+  The lexer-side raw + wrapper position parity is locked by the unit
+  tests under `parser/lexer/position_test.go` and
+  `module/_tokenize/module_test.go` so the gate, once unblocked
+  upstream, will exercise an already-correct surface.
+
+**Flip plan.** Task #484 ("test e2e v0.5.5 — lexer panel") stays
+ready-to-flip once a follow-up spec lands the singledispatch closure
+fix and the `exec(bytes)` builtin route. The 1700 checklist row for
+spec 1710 can be marked done now (every in-scope function is ported,
+every in-scope DRIFT is closed), with a footnote pointing at the
+out-of-scope panel blockers above.
 
 ## Per-gate-test blocker DFS
 
