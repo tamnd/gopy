@@ -323,43 +323,59 @@ func byteToCharCol(line string, byteCol int) int {
 }
 
 // tokenizerError lifts a lexer error code into the matching Python
-// exception. Mirrors CPython's _tokenizer_error.
+// exception. Mirrors CPython's _tokenizer_error switch case-for-case;
+// dispatches on tok->done (lexer.State.Done()) so the categories
+// stay aligned even when the recorded message text shifts.
 //
 // CPython: Python/Python-tokenize.c:87 _tokenizer_error
 func tokenizerError(st *lexer.State) error {
-	// Pull the recorded message and position from the lexer; the
-	// exact errCode is internal, so we route the canonical messages
-	// from the stored *SyntaxError.
 	se := st.Err()
-	if se == nil {
-		return fmt.Errorf("SyntaxError: invalid token")
+	storedMsg := ""
+	if se != nil {
+		storedMsg = se.Message
 	}
-	msg := se.Message
-	if msg == "" {
-		msg = "invalid token"
-	}
-	// Route TabError / IndentationError when the message hints at
-	// the underlying class. The lexer doesn't tag the error category
-	// directly, so we match on canonical strings the C source emits.
-	switch {
-	case containsAny(msg, "tabs and spaces"):
-		return fmt.Errorf("TabError: %s", msg)
-	case containsAny(msg, "unindent", "indentation", "indent"):
-		return fmt.Errorf("IndentationError: %s", msg)
-	default:
-		return fmt.Errorf("SyntaxError: %s", msg)
-	}
-}
 
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		for i := 0; i+len(sub) <= len(s); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
+	errClass := "SyntaxError"
+	msg := ""
+	switch st.Done() {
+	case lexer.DoneToken:
+		msg = "invalid token"
+	case lexer.DoneEOF:
+		// CPython attaches lineno/col via PyErr_SyntaxLocationObject
+		// and returns immediately. gopy reports the canonical text.
+		return fmt.Errorf("SyntaxError: unexpected EOF in multi-line statement")
+	case lexer.DoneDedent:
+		errClass = "IndentationError"
+		msg = "unindent does not match any outer indentation level"
+	case lexer.DoneIntr:
+		return fmt.Errorf("KeyboardInterrupt")
+	case lexer.DoneNomem:
+		return fmt.Errorf("MemoryError")
+	case lexer.DoneTabSpace:
+		errClass = "TabError"
+		msg = "inconsistent use of tabs and spaces in indentation"
+	case lexer.DoneToodeep:
+		errClass = "IndentationError"
+		msg = "too many levels of indentation"
+	case lexer.DoneLineCont:
+		msg = "unexpected character after line continuation character"
+	default:
+		if storedMsg != "" {
+			msg = storedMsg
+		} else {
+			msg = "unknown tokenization error"
 		}
 	}
-	return false
+
+	// CPython overrides the canonical message with the lexer's stored
+	// text on the SyntaxError path when it carries more detail (e.g.
+	// "invalid character ... (U+...)"). Preserve that behaviour without
+	// shadowing the dedicated TabError / IndentationError text.
+	if errClass == "SyntaxError" && storedMsg != "" && msg != storedMsg {
+		msg = storedMsg
+	}
+
+	return fmt.Errorf("%s: %s", errClass, msg)
 }
 
 // buildModule materializes the _tokenize module dict.

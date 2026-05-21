@@ -336,7 +336,7 @@ loop:
 	}
 	if col > s.indstack[s.indent] {
 		if s.indent+1 >= maxIndent {
-			s.done = eIndent
+			s.done = eToodeep
 			s.recordError("too many levels of indentation")
 			return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur), true
 		}

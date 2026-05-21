@@ -218,23 +218,27 @@ type State struct {
 }
 
 // errCode is the lexer's done state. Mirrors errcode.h's E_* family.
+// Values are not the literal E_* numbers (gopy uses iota), but the
+// set tracks errcode.h one-to-one so callers can switch on it.
 //
-// CPython: Parser/lexer/state.h:113 (and Include/internal/pycore_pyerrors.h E_OK family)
+// CPython: Include/errcode.h:22 E_OK..E_COLUMNOVERFLOW
 type errCode int
 
 const (
-	eOK errCode = iota
-	eEOF
-	eIntr
-	eToken
-	eSyntax
-	eIndent
-	eDedent
-	eTabSpace
-	eOverflow
-	eDecode
-	eEOFS
-	eEOLS
+	eOK       errCode = iota
+	eEOF              // CPython: Include/errcode.h:23 E_EOF
+	eIntr             // CPython: Include/errcode.h:24 E_INTR
+	eToken            // CPython: Include/errcode.h:25 E_TOKEN
+	eSyntax           // CPython: Include/errcode.h:26 E_SYNTAX
+	eNomem            // CPython: Include/errcode.h:27 E_NOMEM
+	eToodeep          // CPython: Include/errcode.h:32 E_TOODEEP
+	eDedent           // CPython: Include/errcode.h:33 E_DEDENT
+	eTabSpace         // CPython: Include/errcode.h:30 E_TABSPACE
+	eOverflow         // CPython: Include/errcode.h:31 E_OVERFLOW
+	eDecode           // CPython: Include/errcode.h:34 E_DECODE
+	eEOFS             // CPython: Include/errcode.h:35 E_EOFS
+	eEOLS             // CPython: Include/errcode.h:36 E_EOLS
+	eLineCont         // CPython: Include/errcode.h:37 E_LINECONT
 	eErrLine
 	eBadVisibility
 	eEncoding
@@ -345,6 +349,39 @@ func (s *State) SetFilename(name string) { s.filename = name }
 
 // Err returns the first SyntaxError recorded, or nil.
 func (s *State) Err() *SyntaxError { return s.err }
+
+// Done returns the lexer's terminal status as an exported int that
+// matches CPython's E_* numbering from Include/errcode.h. Callers
+// outside the package (notably module/_tokenize) need to switch on
+// it to map to the right Python exception class.
+//
+// CPython: Include/errcode.h:22 E_OK..E_COLUMNOVERFLOW
+func (s *State) Done() int { return int(s.done) }
+
+// Done* constants mirror the gopy errCode enum for cross-package
+// switches. They are not the literal E_* numbers from errcode.h
+// (gopy uses iota), but they track the family one-to-one so callers
+// can categorize tok->done without depending on the unexported enum.
+const (
+	DoneOK             = int(eOK)
+	DoneEOF            = int(eEOF)
+	DoneIntr           = int(eIntr)
+	DoneToken          = int(eToken)
+	DoneSyntax         = int(eSyntax)
+	DoneNomem          = int(eNomem)
+	DoneToodeep        = int(eToodeep)
+	DoneDedent         = int(eDedent)
+	DoneTabSpace       = int(eTabSpace)
+	DoneOverflow       = int(eOverflow)
+	DoneDecode         = int(eDecode)
+	DoneEOFS           = int(eEOFS)
+	DoneEOLS           = int(eEOLS)
+	DoneLineCont       = int(eLineCont)
+	DoneErrLine        = int(eErrLine)
+	DoneBadVisibility  = int(eBadVisibility)
+	DoneEncoding       = int(eEncoding)
+	DoneColumnOverflow = int(eColumnOverflow)
+)
 
 // recordError pins the first error we hit. CPython overwrites; we
 // preserve the first because PEG callers retry tokenization for

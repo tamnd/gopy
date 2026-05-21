@@ -24,7 +24,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | `Parser/tokenizer/readline_tokenizer.c` | 134 | `parser/lexer/driver_readline.go` | 50 | DRIFT | no `decoding_state` machine; readline callback assumed UTF-8 |
 | `Parser/tokenizer/string_tokenizer.c` | 148 | `parser/lexer/driver_string.go` | 113 | DRIFT | `buf_ungetc` and the on-demand `decode_str` BOM dance fold into `FromBytes` + `readEncodingHead` |
 | `Parser/tokenizer/utf8_tokenizer.c` | 55 | `parser/lexer/driver_string.go` (utf-8 path) | (shared) | DONE | 268c8f8 |
-| `Python/Python-tokenize.c` | 445 | `module/_tokenize/module.go` | 376 | DRIFT | `tokenizerError` routes on message substrings instead of `tok->done` enum codes; misses E_INTR / E_NOMEM / E_LINECONT / E_TOODEEP categories |
+| `Python/Python-tokenize.c` | 445 | `module/_tokenize/module.go` | 391 | WIP | `tokenizerError` now switches on `lexer.State.Done()` like CPython's `_tokenizer_error`; remaining DRIFT is upfront `drainReadline` (see audit) |
 | `Lib/keyword.py` | 64 | `stdlib/keyword.py` | 64 | DONE | byte-equal vendor (verified `diff` returns empty) |
 | `Lib/tokenize.py` | 598 | `stdlib/tokenize.py` | 598 | DONE | byte-equal vendor (verified `diff` returns empty) |
 | `Lib/tabnanny.py` | 338 | `stdlib/tabnanny.py` | 338 | DONE | byte-equal vendor (verified `diff` returns empty) |
@@ -174,7 +174,7 @@ re-run the audit if the upstream rebases.
 |---|---|---|---|---|---|
 | `tokenizeriterobject` (struct) | tokenize.c:32 | `tokenizerIter` | module.go:46 | DONE | Field-by-field; adds `linesByOneBased` for upfront drain. |
 | `tokenizeriter_new_impl` | tokenize.c:55 | `tokenizerIterNew` | module.go:84 | DRIFT | gopy drains the entire readline stream upfront in `drainReadline` (module.go:141-199). CPython runs the readline callback on demand. Hidden by the gate tests because they pass fixed inputs, but blocks real streaming use and contributes to position issues if the stream is large. |
-| `_tokenizer_error` | tokenize.c:87 | `tokenizerError` | module.go:329 | DRIFT | Routes on message substrings instead of `tok->done` enum codes. Missing E_INTR (KeyboardInterrupt), E_NOMEM (MemoryError), E_LINECONT, E_TOODEEP categories. Visible to `test_tokenize.py` on error-classification sub-tests. |
+| `_tokenizer_error` | tokenize.c:87 | `tokenizerError` | module.go:329 | DONE | Switches on `lexer.State.Done()` case-for-case (`E_TOKEN` / `E_EOF` / `E_DEDENT` / `E_INTR` / `E_NOMEM` / `E_TABSPACE` / `E_TOODEEP` / `E_LINECONT`). |
 | `_get_current_line` | tokenize.c:183 | `lineAt` (+ inline cache) | module.go:303 | DONE | Inlined into `tokenizerIterNext`. |
 | `_get_col_offsets` | tokenize.c:204 | `byteToCharCol` (+ inline) | module.go:315 | DONE | UTF-8 byte → char offset conversion via `utf8.RuneCountInString`. |
 | `tokenizeriter_next` | tokenize.c:241 | `tokenizerIterNext` | module.go:205 | DONE | Token emission + 5-tuple build. |
@@ -194,35 +194,34 @@ re-run the audit if the upstream rebases.
 | `E_INTR` | 12 | `eIntr` | DONE in enum, but `tokenizerError` doesn't route it to `KeyboardInterrupt`. |
 | `E_TOKEN` | 13 | `eToken` | DONE |
 | `E_SYNTAX` | 14 | `eSyntax` | DONE |
-| `E_NOMEM` | 15 | (none) | MISSING |
+| `E_NOMEM` | 15 | `eNomem` | DONE |
 | `E_DONE` | 16 | (none) | MISSING (parser-side; lower priority for tokenizer) |
 | `E_ERROR` | 17 | (none) | MISSING (parser-side) |
 | `E_TABSPACE` | 18 | `eTabSpace` | DONE |
 | `E_OVERFLOW` | 19 | `eOverflow` | DONE |
-| `E_TOODEEP` | 20 | (none) | MISSING |
+| `E_TOODEEP` | 20 | `eToodeep` | DONE (replaces former gopy-only `eIndent`) |
 | `E_DEDENT` | 21 | `eDedent` | DONE |
 | `E_DECODE` | 22 | `eDecode` | DONE |
 | `E_EOFS` | 23 | `eEOFS` | DONE |
 | `E_EOLS` | 24 | `eEOLS` | DONE |
-| `E_LINECONT` | 25 | (none) | MISSING |
+| `E_LINECONT` | 25 | `eLineCont` | DONE |
 | `E_BADSINGLE` | 27 | (none) | MISSING (parser-side) |
 | `E_INTERACT_STOP` | 28 | (none) | MISSING (REPL; out of scope) |
 | `E_COLUMNOVERFLOW` | 29 | `eColumnOverflow` | DONE |
 
-gopy carries one extra code, `eIndent`, that has no CPython counterpart;
-in CPython the equivalent path sets `E_TABSPACE` from `_PyTokenizer_indenterror`.
-The audit treats `eIndent` as a gopy-side hint that should fold into `eTabSpace`
-when it gets touched.
+The former gopy-only `eIndent` was renamed to `eToodeep` to match the
+CPython site (`Parser/lexer/lexer.c:582`), which sets `E_TOODEEP` on
+the "too many levels of indentation" branch.
 
 ## Phases
 
 Phases are ordered to land DRIFT fixes by impact on the gate tests, smallest blast radius first.
 
-### P1: errcode + tokenizer-error routing (gates: `test_tokenize.py` error sub-tests)
+### P1: errcode + tokenizer-error routing (gates: `test_tokenize.py` error sub-tests) — DONE
 
-1. Add the missing `errCode` entries (`eNomem`, `eToodeep`, `eLineCont`) to `parser/lexer/state.go`, with `// CPython: Include/errcode.h:NN` citations.
-2. Rewrite `module/_tokenize/module.go:tokenizerError` to dispatch on `st.Done()` (a new accessor on `*lexer.State`) instead of message substrings, matching CPython's switch case-for-case. Map `E_INTR` to `KeyboardInterrupt`, `E_NOMEM` to `MemoryError`, `E_TABSPACE` to `TabError`, `E_DEDENT` / `E_TOODEEP` to `IndentationError`, everything else to `SyntaxError`.
-3. Fold gopy's `eIndent` into `eTabSpace` so the `_PyTokenizer_indenterror` parity holds.
+1. Added the missing `errCode` entries (`eNomem`, `eToodeep`, `eLineCont`) to `parser/lexer/state.go`, with `// CPython: Include/errcode.h:NN` citations.
+2. Rewrote `module/_tokenize/module.go:tokenizerError` to dispatch on `lexer.State.Done()` instead of message substrings, matching CPython's switch case-for-case. `E_INTR` to `KeyboardInterrupt`, `E_NOMEM` to `MemoryError`, `E_TABSPACE` to `TabError`, `E_DEDENT` / `E_TOODEEP` to `IndentationError`, everything else to `SyntaxError`.
+3. Renamed gopy's `eIndent` to `eToodeep` so `Parser/lexer/lexer.c:582` (E_TOODEEP on `tok->indent+1 >= MAXINDENT`) maps cleanly.
 
 ### P2: `verify_identifier` XID tables (gates: `test_tokenize.py` non-ASCII identifier sub-tests, task #612)
 
@@ -281,7 +280,7 @@ TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 | 3 | T1.6 | `module/os` | bind `os.fsdecode` + `os.fsencode` on the inittab module | DONE | 9bd4675 |
 | 4 | T1.7 | stdlib vendor | byte-equal `Lib/bisect.py` and `Lib/tempfile.py` under `stdlib/` | DONE | 4350edf |
 | 5 | T6 | asyncio | `unittest.mock` imports `asyncio`; full port tracked in [spec 1711](./1711_v0124_asyncio_full_port.md) | BLOCKED | — |
-| 6 | P1 | tokenizer error routing | dispatch on `tok->done` not message substrings (see P1 above) | TODO | — |
+| 6 | P1 | tokenizer error routing | dispatch on `tok->done` not message substrings (see P1 above) | DONE | (this PR) |
 | 7 | P2 | XID tables | port `_PyUnicode_ScanIdentifier` for non-ASCII identifier validation | TODO | — |
 | 8 | P3 | f-string debug UTF-8 | decode `setFtstringExpr` buffer through `unicode/utf8` | TODO | — |
 | 9 | P4 | SyntaxWarning | emit on `1and` / `1or` style numbers | TODO | — |
