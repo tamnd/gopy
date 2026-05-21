@@ -244,24 +244,16 @@ func CheckBOMCookieConflict(src []byte) string {
 	return "encoding problem: " + name + " with BOM"
 }
 
+// isUTF8Name mirrors the strict equality CPython uses after
+// get_normal_name. Only the canonical "utf-8" matches: cookie aliases
+// like "utf8" or "U8" stay as-is through get_normal_name (the fold at
+// helpers.c:320 keys on "utf-8" / "utf-8-" prefixes) so they compare
+// unequal to tok->encoding == "utf-8" in the BOM-vs-cookie check.
+//
+// CPython: Parser/tokenizer/helpers.c:425 check_coding_spec (strcmp
+// branch) and helpers.c:418 (strcmp cs vs "utf-8").
 func isUTF8Name(name string) bool {
-	switch normalizeEncodingName(name) {
-	case "utf8", "utf-8", "u8":
-		return true
-	}
-	return false
-}
-
-func normalizeEncodingName(name string) string {
-	out := make([]byte, 0, len(name))
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		out = append(out, c)
-	}
-	return string(out)
+	return name == "utf-8"
 }
 
 // ValidateUTF8 walks src and returns the 1-based line number and
