@@ -165,6 +165,17 @@ type Type struct {
 	// CPython: Objects/typeobject.c:4401 type_new_descriptors
 	Slots []string
 
+	// SlotsBase is the cumulative count of slot fields contributed by
+	// the layout base chain (CPython's ctx->base->tp_basicsize translated
+	// to a slot-count offset). MemberDescr indices on this type start at
+	// SlotsBase, so an inherited slot keeps reading the parent's index
+	// while a freshly declared slot lands above it. NewInstance sizes
+	// Instance.slots to SlotsBase + len(Slots).
+	//
+	// CPython: Objects/typeobject.c:4404 type_new_descriptors (slotoffset
+	// = ctx->base->tp_basicsize)
+	SlotsBase int
+
 	// HasDict is true when instances of this type carry a per-instance
 	// __dict__. False only when the class declares __slots__ without
 	// __dict__ (and no base contributes one). Mirrors a non-zero

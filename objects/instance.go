@@ -68,7 +68,15 @@ func NewInstance(t *Type) *Instance {
 			inst.dict = NewDict()
 		}
 	}
-	if n := len(t.Slots); n > 0 {
+	// The slot array carries one entry per name in the cumulative
+	// chain: SlotsBase counts every slot inherited from the layout
+	// base, len(t.Slots) covers the names declared on this class.
+	// MemberDescrs from parent classes index into the SlotsBase
+	// prefix; the current class's MemberDescrs index above it.
+	//
+	// CPython: Objects/typeobject.c:4404 type_new_descriptors (slotoffset
+	// starts at ctx->base->tp_basicsize)
+	if n := t.SlotsBase + len(t.Slots); n > 0 {
 		inst.slots = make([]Object, n)
 	}
 	// Every fresh instance starts with inline values valid; only a

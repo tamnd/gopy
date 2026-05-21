@@ -1074,6 +1074,7 @@ func slotSqContains(o Object, key Object) (bool, error) {
 //
 //	Objects/typeobject.c:4401 type_new_descriptors
 func installSlots(t *Type, ns *Dict) error {
+	t.SlotsBase = layoutSlotBase(t)
 	slotsKey := NewStr("__slots__")
 	has, err := ns.Contains(slotsKey)
 	if err != nil || !has {
@@ -1117,13 +1118,32 @@ func installSlots(t *Type, ns *Dict) error {
 		resolved = append(resolved, n)
 	}
 	for i, n := range resolved {
-		SetTypeDescr(t, n, NewMemberDescr(n, i))
+		SetTypeDescr(t, n, NewMemberDescr(n, t.SlotsBase+i))
 	}
 	t.Slots = resolved
 	// Strip __slots__ from ns so it does not also become a stored
 	// attribute on the type.
 	_ = ns.DelItem(slotsKey)
 	return nil
+}
+
+// layoutSlotBase picks the layout base from t.Bases and returns the
+// cumulative slot count up to (but not including) the current class.
+// CPython's type_new walks the MRO looking for a "solid base" whose
+// PyMemberDef offsets the child must respect; gopy mirrors the same
+// behaviour by taking the first non-object base's SlotsBase + len(Slots)
+// as the new layout offset.
+//
+// CPython: Objects/typeobject.c:4086 type_new_slots_bases (best_base
+// selection feeds slotoffset)
+func layoutSlotBase(t *Type) int {
+	for _, b := range t.Bases {
+		if b == nil || b == objectType {
+			continue
+		}
+		return b.SlotsBase + len(b.Slots)
+	}
+	return 0
 }
 
 // slotsToNames flattens the value of __slots__ into a list of strings.

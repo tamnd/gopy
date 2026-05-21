@@ -148,6 +148,57 @@ func TestSlotsInheritDictFromBase(t *testing.T) {
 	}
 }
 
+// TestSlotsInheritFromParent covers the CPython behaviour where a
+// subclass with an empty __slots__ tuple inherits its parent's slot
+// names. Without the layout-base walk in installSlots / NewInstance
+// the MemberDescr lookup finds the parent's MemberDescr at index 0
+// but inst.slots has length 0, so the store raises AttributeError.
+//
+// CPython: Objects/typeobject.c:4404 type_new_descriptors (slotoffset
+// = ctx->base->tp_basicsize)
+func TestSlotsInheritFromParent(t *testing.T) {
+	parent := NewUserType("A", nil, nsWithSlots([]string{"_x"}, nil))
+	child := NewUserType("B", []*Type{parent}, nsWithSlots(nil, nil))
+	if got, want := child.SlotsBase, 1; got != want {
+		t.Fatalf("child.SlotsBase = %d, want %d", got, want)
+	}
+	inst := NewInstance(child)
+	if err := SetAttr(inst, NewStr("_x"), NewInt(11)); err != nil {
+		t.Fatalf("set _x on subclass: %v", err)
+	}
+	got, err := GetAttr(inst, NewStr("_x"))
+	if err != nil {
+		t.Fatalf("get _x: %v", err)
+	}
+	n, _ := got.(*Int).Int64()
+	if n != 11 {
+		t.Fatalf("_x = %d, want 11", n)
+	}
+}
+
+// TestSlotsInheritAndExtend confirms that a subclass declaring its
+// own __slots__ keeps the parent's slot accessible (at the inherited
+// index) and lands its own slot above the parent's range.
+func TestSlotsInheritAndExtend(t *testing.T) {
+	parent := NewUserType("A", nil, nsWithSlots([]string{"_x"}, nil))
+	child := NewUserType("B", []*Type{parent}, nsWithSlots([]string{"_y"}, nil))
+	inst := NewInstance(child)
+	if err := SetAttr(inst, NewStr("_x"), NewInt(1)); err != nil {
+		t.Fatalf("set _x: %v", err)
+	}
+	if err := SetAttr(inst, NewStr("_y"), NewInt(2)); err != nil {
+		t.Fatalf("set _y: %v", err)
+	}
+	gx, _ := GetAttr(inst, NewStr("_x"))
+	gy, _ := GetAttr(inst, NewStr("_y"))
+	if n, _ := gx.(*Int).Int64(); n != 1 {
+		t.Fatalf("_x = %d, want 1", n)
+	}
+	if n, _ := gy.(*Int).Int64(); n != 2 {
+		t.Fatalf("_y = %d, want 2", n)
+	}
+}
+
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
