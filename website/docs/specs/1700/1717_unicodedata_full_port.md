@@ -86,7 +86,7 @@ character names.
 | P8 | Character-name generator: emit name trie from `unicodename_db.h`. Wire `name(char[, default])` and `lookup(name)`. Unblocks `\N{NAME}` in `re/_parser.py` | done | d783d9d |
 | P9 | `decomposition(char)` returning the hex form (`"<compat> 0020"` etc.) | done | 106b099 |
 | P10 | `UCD` type + `ucd_3_2_0` legacy instance (Unicode 3.2 snapshot used by IDNA) | done | d48fae8 |
-| P11 | Re-run the `test_tokenize.py` panel row from spec 1710, flip the row to either green or to the next out-of-scope blocker | pending | - |
+| P11 | Re-run the `test_tokenize.py` panel row from spec 1710, flip the row to either green or to the next out-of-scope blocker | done | (this commit) |
 
 ## Phase notes
 
@@ -207,6 +207,17 @@ character names.
   if a further missing module surfaces (e.g. `_zoneinfo`), spec
   1710's panel row stays pending against the new blocker and a
   follow-up is filed.
+- 2026-05-21 re-run: `gopy test/cpython/test_tokenize.py` now
+  loads the suite past `from test.support import os_helper`
+  (which is what `import unicodedata` was blocking). `unittest.main`
+  reaches the `CTokenizeTest` bodies and reports passes / errors /
+  failures until the binary crashes inside
+  `CTokenizeTest.test_string`. That crash is the same token-position
+  parity gap the MANIFEST note already calls out (parser/lexer/lexer.go
+  vs Parser/lexer/lexer.c), not a new unicodedata-side blocker.
+  The corpus row stays pending against the lexer-parity work, and
+  the `v0.12.5` version stamp records that the unicodedata wall is
+  down.
 
 ## Out of scope
 

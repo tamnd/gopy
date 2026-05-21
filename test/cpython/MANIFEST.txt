@@ -25,7 +25,7 @@
 test_keyword	done	v0.12.4	10/11 green; the eleventh hits a parser-generator gap inside compile() single-mode, tracked separately
 test_source_encoding	pending	v0.12.4	first hang is BytesSourceEncodingTest.test_crcrcrlf which exercises exec(bytes); the gap is the VM exec(bytes) path, not lexer/tokenizer
 test_tabnanny	done	v0.12.4	exits 0 after typed UnicodeDecodeError + surrogateescape decode fix
-test_tokenize	pending	v0.12.4	unittest.main reaches the bodies; remaining work is a token-position parity pass over parser/lexer/lexer.go vs Parser/lexer/lexer.c
+test_tokenize	pending	v0.12.5	unicodedata import gate cleared via spec 1717 (d48fae8). unittest.main now runs the CTokenizeTest bodies and reports failures until the binary crashes inside CTokenizeTest.test_string; underlying work is the token-position parity pass over parser/lexer/lexer.go vs Parser/lexer/lexer.c
 test_utf8source	done	v0.12.4	3/3 green after compile(bytes), str.encode latin-1, sys.exit, and lexer non-UTF-8 byte check landed
 
 # ---- Parser / grammar / AST ----------------------------------------
