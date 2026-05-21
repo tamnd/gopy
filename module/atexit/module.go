@@ -62,7 +62,7 @@ func atexitRegister(args []objects.Object, kwargs map[string]objects.Object) (ob
 		return nil, fmt.Errorf("TypeError: register() takes at least 1 argument (0 given)")
 	}
 	fn := args[0]
-	if fn.Type().Call == nil {
+	if !objects.Callable(fn) {
 		return nil, fmt.Errorf("TypeError: the first argument must be callable")
 	}
 	mu.Lock()

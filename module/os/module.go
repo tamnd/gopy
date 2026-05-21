@@ -280,6 +280,15 @@ func buildOS() (*objects.Module, error) {
 		{"isatty", objects.NewBuiltinFunction("isatty", osIsatty)},
 		{"umask", objects.NewBuiltinFunction("umask", osUmask)},
 		{"_get_exports_list", objects.NewBuiltinFunction("_get_exports_list", osGetExportsList)},
+		// Sentinel object used by os.walk(followlinks=...) to distinguish
+		// "walk into symlinks" from "treat symlinks as files". shutil's
+		// _rmtree_unsafe passes it through to os.walk so symlinks aren't
+		// recursed into during rmtree.
+		// CPython: Lib/os.py:295 _walk_symlinks_as_files = object()
+		{"_walk_symlinks_as_files", objects.NewInstance(objects.ObjectType())},
+		// PathLike is the abstract base class for the os.fspath protocol.
+		// CPython: Lib/os.py:1123 class PathLike(abc.ABC)
+		{"PathLike", pathLikeType},
 	}
 	// geteuid / getegid / getgid / getgroups: posixmodule.c gates these
 	// on HAVE_GETEUID. On Windows the C build does not register them, so

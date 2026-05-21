@@ -102,6 +102,19 @@ underway, TODO = not started.
 | P4 | Rewrite `Print` to drop `defaultFile`, resolve `sys.stdout` on every call via the runtime sys lookup. `_PyFile_Flush` parity. | DONE | pending |
 | P5 | Re-port the string-literal arm of `tok_get_normal_mode`: a NAME-start byte after a closing quote breaks the string instead of continuing it; add lexer position-parity test for the adjacency snippet. | DONE | pending |
 | P6 | Re-run `test_tokenize.py` + `test_source_encoding.py` panel rows; flip MANIFEST to green or to the next out-of-scope blocker. Update spec 1710's panel rows. | DONE | pending |
+| P7 | Callable check parity: replace every `fn.Type().Call == nil` guard with `objects.Callable(fn)` so Vectorcall-only callables (bound methods, classmethods, etc.) pass the gate. Sites: `module/atexit/module.go`, `module/_functools/module.go`, `module/_collections/module.go`. | TODO | pending |
+| P8 | Charmap codec runtime: port `codecs.charmap_decode` / `charmap_encode` (CPython `Python/codecs.c` + `Objects/unicodeobject.c:7194 PyUnicode_DecodeCharmap`). Land Lib-side `Lib/encodings/iso8859_15.py` and `Lib/encodings/cp1252.py` decoding/encoding tables verbatim from CPython. | TODO | pending |
+| P9 | Multibyte codec runtime: port `Modules/cjkcodecs/multibytecodec.c` plus `_codecs_jp` (`cp932`) and `_codecs_kr` (`cp949`) with `mappings_jp.h` / `mappings_kr.h` tables. Required by `test_issue2301` (cp932) and `test_exec_valid_coding` (cp949). | TODO | pending |
+| P10 | Encoding alias table: port `Lib/encodings/aliases.py` so `iso8859-15`, `iso-8859-15`, `iso_8859_15`, `cp1252`, `cp932`, `cp949`, `utf8` etc. all canonicalise through the same alias mapping CPython uses. Plumb through `codecs.Lookup` after `NormalizeName`. | TODO | pending |
+| P11 | Per-line UTF-8 validation in the lexer: port `Parser/tokenizer/helpers.c:300 ensure_utf8` so the lexer raises Non-UTF-8 SyntaxError on the offending line regardless of cookie/BOM. Required by `test_non_utf8_{second,third}_line_error`, `test_utf8_bom_non_utf8_third_line_error`, `test_utf_8_non_utf8_third_line_error`. | TODO | pending |
+| P12 | Lexer surfaces UnicodeDecodeError text: when the cookie codec decode fails, the SyntaxError message must follow `Parser/tokenizer/helpers.c:534 _PyTokenizer_syntaxerror_known_range` and the CPython `'<codec>' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)` template. Required by `test_first_utf8_coding_line_error`, `test_second_utf8_coding_line_error`, `test_utf8_shebang_error`, `test_error_from_string`. | TODO | pending |
+| P13 | `os.PathLike` port: add the abstract base class (`Lib/os.py:1145 PathLike`) plus the `__fspath__` protocol the rest of the os/posixpath subsystem already half-uses. Required by `test_20731`, `test_file_parse_error_multiline`, `test_tokenizer_fstring_warning_in_first_line`. | TODO | pending |
+| P14 | Test fixtures: vendor `Lib/test/tokenizedata/bad_coding.py`, `bad_coding2.py`, `coding20731.py`, plus `Lib/test/encoded_modules/__init__.py`, `module_iso_8859_1.py`, `module_koi8_r.py` into `test/cpython/tokenizedata/` and `test/cpython/encoded_modules/`. Required by `test_bad_coding`, `test_bad_coding2`, `test_import_encoded_module`, `test_20731`. | TODO | pending |
+| P15 | `__import__` SyntaxError surfacing: when an imported source file's tokeniser emits SyntaxError (bad cookie, bad UTF-8), `Lib/importlib/_bootstrap_external.py:846 _LoaderBasics.exec_module` must propagate the error. Required by `test_bad_coding2`. | TODO | pending |
+| P16 | Long-cookie-line scanning: re-port `Parser/tokenizer/helpers.c:163 get_coding_spec` so cookie detection survives lines that fill the read buffer (`#<BUFSIZ spaces>coding:iso8859-15`). Required by `test_long_first_coding_line`, `test_long_second_coding_line`. | TODO | pending |
+| P17 | Round-tripped SyntaxError text bytes: when SyntaxError surfaces non-utf-8 source text the lexer must record the raw bytes; the descriptor returns them as a Python str via `decode(errors='replace')` parity. Required by `test_non_utf8_{second,third}_line_error`, `test_non_utf8_shebang_error`. | TODO | pending |
+| P18 | `compile()` pyc cleanup parity: after `__import__` succeeds, the `.pyc` file must exist so `test_file_parse`'s `unlink(filename + "c")` resolves. Port `Lib/importlib/_bootstrap_external.py:929 SourceFileLoader.set_data` and the `__pycache__` directory creation chain. | TODO | pending |
+| P19 | Re-run `test_source_encoding.py`; flip MANIFEST and spec 1710 panel row to green. | TODO | pending |
 
 ## Phase notes
 
@@ -190,3 +203,163 @@ go test ./test/cpython/... -run TestSourceEncoding -v
 Update the row in `test/cpython/MANIFEST.txt`, then update spec
 1710's `test_tokenize.py` and `test_source_encoding.py` rows. Update
 this spec's checklist to DONE.
+
+### P7: Callable check parity
+
+`module/atexit/module.go:65` reads `fn.Type().Call == nil` and rejects
+the callable. `objects.BoundMethodType` sets `Vectorcall` but not
+`Call`, so every method passed to `atexit.register` (eg
+`finalize._exitfunc`) raises `TypeError: the first argument must be
+callable`. This blocks the 37 `FileSourceEncodingTest` cases via
+`tempfile.TemporaryDirectory` → `weakref.finalize` → `atexit.register`.
+
+The port: replace every direct `Type().Call == nil` check on a
+"must be callable" guard with `objects.Callable(fn)` which mirrors
+`PyCallable_Check` (`Objects/object.c:2100`). Same fix applies to
+the `partial` / `lru_cache` constructors in `_functools` and the
+`deque` keyfunc check in `_collections`.
+
+### P8: charmap codec runtime + iso8859-15 + cp1252
+
+CPython `Lib/encodings/iso8859_15.py` ships a 256-entry
+`decoding_table` (and inverse `encoding_table`) as a literal
+`str` of length 256 plus a translation dict. The actual decode
+work is in C: `Objects/unicodeobject.c:7194 PyUnicode_DecodeCharmap`
+and `Python/codecs.c PyCodec_CharmapDecode`. The gopy port:
+
+- adds `codecs.CharmapDecode(input, errors, table)` / `CharmapEncode`
+  in `codecs/charmap.go` mirroring the CPython loop byte-for-byte
+- ports `Lib/encodings/iso8859_15.py` to `stdlib/encodings/iso8859_15.py`
+  using the same module shape
+- ports `Lib/encodings/cp1252.py` the same way
+- registers the search function so `codecs.lookup('iso8859-15')`
+  and aliases (P10) resolve through the cache
+
+### P9: multibyte codec runtime
+
+CPython splits multibyte codecs across:
+
+- `Modules/cjkcodecs/multibytecodec.c` (~1500 lines): the
+  `MultibyteCodec` runtime, Codec/IncrementalCodec/StreamReader
+- `Modules/cjkcodecs/cjkcodecs.h`: shared decode/encode helpers
+- `Modules/cjkcodecs/_codecs_jp.c` + `mappings_jp.h` (~4800 lines)
+- `Modules/cjkcodecs/_codecs_kr.c` + `mappings_kr.h` (~3200 lines)
+
+The port lands the runtime in `codecs/multibyte/`, the tables in
+`module/_codecs_jp/` and `module/_codecs_kr/`, with the Python
+wrappers `stdlib/encodings/cp932.py` and `cp949.py` ported
+verbatim. Required only by `test_issue2301` (cp932) and
+`test_exec_valid_coding` (cp949); ship as its own commit.
+
+### P10: encoding alias table
+
+CPython's `Lib/encodings/aliases.py` is one large dict that maps
+normalised names (lowercase, hyphens → underscores) to canonical
+encoding modules. Today `codecs.Lookup` falls back to the
+`builtinSearch` switch with a handful of hardcoded aliases.
+
+The port: import `Lib/encodings/aliases.py` verbatim into
+`stdlib/encodings/aliases.py`. Inside `codecs.Lookup`, after
+`NormalizeName` and before the search-function chain, consult the
+alias table and substitute the canonical name. Search functions
+then look up that canonical name (`encodings.<name>.getregentry`)
+following CPython's lazy-import flow (`Lib/encodings/__init__.py`).
+
+### P11: per-line UTF-8 validation
+
+CPython validates UTF-8 in two places:
+
+1. `Parser/tokenizer/helpers.c:332 ensure_utf8` once at startup
+   when no cookie / BOM declares the encoding.
+2. `Parser/tokenizer/file_tokenizer.c` line-by-line during
+   `tok_readline_*` whenever the declared encoding is utf-8
+   (cookie `utf-8` or BOM), so a bad byte on line 3 still raises
+   `Non-UTF-8 code starting with '\xXX' on line 3`.
+
+gopy currently only runs (1). The port adds the line-by-line
+validation pass after `TranslateNewlines` when the lexer's
+encoding is `utf-8`, recording the SyntaxError at the offending
+line/column and matching the CPython message template exactly.
+
+### P12: ASCII / UTF-8 decode error templates
+
+When the cookie is `ascii` and the source contains `\xc3\xa4`,
+CPython raises `(unicode error) 'ascii' codec can't decode byte
+0xc3 in position N: ordinal not in range(128)`. The lexer obtains
+this string from `PyUnicodeDecodeError_Create` via
+`PyUnicode_AsEncodedString` / `_PyCodec_DecodeText`. In gopy the
+encoding decode runs at `parser/lexer/driver_string.go:100` but the
+error returned is the bare codec error; the SyntaxError ends up
+with `encoding problem: ascii` instead.
+
+The port: when the cookie codec decode returns a UnicodeDecodeError,
+format the SyntaxError message via the CPython template (the
+position is the byte offset within the original source, lineno is
+the line containing that byte, text is the source line itself).
+
+### P13: os.PathLike
+
+CPython exposes `os.PathLike` as an `abc.ABCMeta` ABC with a
+`__fspath__` virtual method (`Lib/os.py:1145`). The port lands
+the ABC verbatim into `stdlib/os.py`, registers `str` and `bytes`
+as virtual subclasses, and wires the `os.fspath` helper at
+`Lib/os.py:1083` so `os.PathLike` instances work everywhere
+posixpath joins them.
+
+### P14: vendor fixtures
+
+`Lib/test/tokenizedata/bad_coding.py` is `# -*- coding: uft-8 -*-`
+(typo). `bad_coding2.py` is BOM + `#coding: utf8` + non-utf-8
+source bytes. `coding20731.py` exercises tokeniser cookie parity.
+The encoded_modules fixtures are short utf-8/koi8-r modules with
+a `test` attribute. Port all six files verbatim into
+`test/cpython/tokenizedata/` and `test/cpython/encoded_modules/`.
+
+### P15: __import__ SyntaxError surfacing
+
+`Lib/importlib/_bootstrap_external.py:846 _LoaderBasics.exec_module`
+catches and re-raises SyntaxError so `__import__('test.tokenizedata.
+bad_coding2')` raises SyntaxError. gopy's importer currently
+swallows it; the port walks the importlib bootstrap and lifts
+SyntaxError up through the `_call_with_frames_removed` chain.
+
+### P16: long cookie line scanning
+
+`Parser/tokenizer/helpers.c:163 get_coding_spec` reads the entire
+line into a stack buffer (`MAXBUFSIZE = 500`) and scans for
+`coding[:=]`. When the line exceeds the buffer it still consults
+the slice it managed to read. gopy's `parser/lexer/source.go`
+`detectEncodingCookieAt` short-circuits when the line is too long.
+The port matches CPython's "scan as much of the line as we have"
+behaviour: even an 8KB-spaced cookie line resolves.
+
+### P17: rountripped SyntaxError text
+
+When a Non-UTF-8 byte appears on line N, `e.text` must be the raw
+source line decoded with `errors='replace'`. Today the lexer
+captures `nthLine(src, lineno)` and passes the bytes through Go's
+implicit utf-8 string conversion, which substitutes U+FFFD using
+Go's RuneError mapping rather than CPython's `error='replace'`
+codec. The port routes the line through `codecs.Decode(bytes,
+"utf-8", "replace")` so the replacement bytes match.
+
+### P18: pyc cleanup parity
+
+`test_file_parse` writes a `.py` file, imports it, then unlinks
+`.pyc` from the same directory. CPython's `SourceFileLoader.set_data`
+writes `<dir>/__pycache__/<name>.cpython-314.pyc` and the test
+removes both via `unlink(filename + "c")` (no error suppression)
+and `rmtree('__pycache__')`. gopy doesn't emit `.pyc` files. The
+port wires `SourceFileLoader.set_data` to write the byte-compiled
+file path-equal to CPython's location.
+
+### P19: re-run + flip gate
+
+```
+go run ./cmd/gopy test/cpython/test_source_encoding.py
+```
+
+Expected: 91/91 passing (BytesSourceEncodingTest 31,
+FileSourceEncodingTest 31, MiscSourceEncodingTest 28, one
+linux-only test skipped). Update `test/cpython/MANIFEST.txt` to
+green and spec 1710's row.
