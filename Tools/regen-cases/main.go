@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // generator describes one upstream Tools/cases_generator entry
@@ -45,10 +46,30 @@ import (
 // upstream-parity check.
 type generator struct {
 	name    string   // python file under Tools/cases_generator/
-	out     string   // basename of the output file
+	out     string   // basename of the output file (single-output shape)
 	inputs  []string // CPython-relative paths (e.g. "Python/bytecodes.c")
 	upPath  string   // path inside CPYTHON_ROOT that this output mirrors
 	comment string   // "//" for C, "#" for Python; for header stripping
+
+	// outputs carries flag/path pairs for generators that emit more
+	// than one file (gopy_tier2_generator.py is the first). When
+	// non-empty, emitGopy passes each as `<flag> <path>` instead of
+	// the legacy `-o out` shape, and `out` is used only for the
+	// progress line.
+	outputs []namedOutput
+
+	// extraArgs are additional script flags passed before the input
+	// files. Paths inside extraArgs must already be resolved (the
+	// driver does not rewrite them).
+	extraArgs []string
+}
+
+// namedOutput pairs a generator flag with a repo-relative path. Used
+// for multi-output gopy generators where -o is replaced by one or
+// more --foo-output flags.
+type namedOutput struct {
+	flag string // e.g. "--dispatch-output"
+	path string // repo-relative output path
 }
 
 var upstreamGenerators = []generator{
@@ -153,6 +174,25 @@ var gopyGenerators = []generator{
 	{
 		name: "cache_struct_parser.py", out: "specialize/cache_layouts_gen.go",
 		inputs:  []string{"Include/internal/pycore_code.h"},
+		comment: "//",
+	},
+	{
+		name: "gopy_tier2_generator.py",
+		out:  "optimizer/uops_dispatch_gen.go + optimizer/uops_stubs_gen.go",
+		outputs: []namedOutput{
+			{flag: "--dispatch-output", path: "optimizer/uops_dispatch_gen.go"},
+			{flag: "--stubs-output", path: "optimizer/uops_stubs_gen.go"},
+		},
+		// --optimizer-dir is resolved against repoRoot in emitGopy
+		// because the script runs with cwd=Tools/cases_generator/.
+		extraArgs: []string{"--optimizer-dir", "@REPO@/optimizer"},
+		inputs:    []string{"Python/bytecodes.c"},
+		comment:   "//",
+	},
+	{
+		name:    "gopy_optimizer_generator.py",
+		out:     "optimizer/optimizer_cases_gen.go",
+		inputs:  []string{"Python/bytecodes.c", "Python/optimizer_bytecodes.c"},
 		comment: "//",
 	},
 }
@@ -287,12 +327,33 @@ func emitUpstream(opts options) error {
 // directly into the repo (not into outDir): the generated files
 // are checked in so reviewers do not need a working python
 // toolchain to read the code.
+//
+// After every generator runs, gofmt -w rewrites each .go output so
+// the checked-in copy matches what a developer would see after
+// `gofmt ./...`. The python emitters write structurally correct Go
+// but do not match gofmt's whitespace policy (alignment in const
+// blocks, tab vs space inside comment bodies, etc.) and asking each
+// emitter to mirror that policy by hand would be brittle.
 func emitGopy(opts options) error {
 	genDir := filepath.Join(opts.repoRoot, "Tools", "cases_generator")
 	inputsDir := filepath.Join(genDir, "inputs")
 	for _, g := range gopyGenerators {
-		outPath := filepath.Join(opts.repoRoot, filepath.FromSlash(g.out))
-		args := []string{filepath.Join(genDir, g.name), "-o", outPath}
+		args := []string{filepath.Join(genDir, g.name)}
+		var outPaths []string
+		if len(g.outputs) > 0 {
+			for _, o := range g.outputs {
+				p := filepath.Join(opts.repoRoot, filepath.FromSlash(o.path))
+				args = append(args, o.flag, p)
+				outPaths = append(outPaths, p)
+			}
+		} else {
+			p := filepath.Join(opts.repoRoot, filepath.FromSlash(g.out))
+			args = append(args, "-o", p)
+			outPaths = append(outPaths, p)
+		}
+		for _, a := range g.extraArgs {
+			args = append(args, resolveExtraArg(a, opts.repoRoot))
+		}
 		for _, in := range g.inputs {
 			args = append(args, filepath.Join(inputsDir, filepath.FromSlash(in)))
 		}
@@ -304,8 +365,29 @@ func emitGopy(opts options) error {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("%s: %w", g.name, err)
 		}
+		for _, p := range outPaths {
+			if filepath.Ext(p) != ".go" {
+				continue
+			}
+			if err := exec.Command("gofmt", "-w", p).Run(); err != nil {
+				return fmt.Errorf("gofmt %s: %w", p, err)
+			}
+		}
 	}
 	return nil
+}
+
+// resolveExtraArg expands the `@REPO@/` prefix into the absolute repo
+// root, leaving other args untouched. It exists so extraArgs entries
+// can stay platform-neutral (forward-slash, no machine-specific
+// prefix) while the spawned python still receives a fully resolved
+// path.
+func resolveExtraArg(arg, repoRoot string) string {
+	const marker = "@REPO@/"
+	if !strings.HasPrefix(arg, marker) {
+		return arg
+	}
+	return filepath.Join(repoRoot, filepath.FromSlash(arg[len(marker):]))
 }
 
 func checkUpstream(opts options) error {

@@ -100,6 +100,7 @@ func printRunError(ts *state.Thread, err error, w io.Writer) int {
 // will collapse once spec 1687 retires compile.Code.
 func liftCode(c *compile.Code) *objects.Code {
 	out := &objects.Code{
+		Version:         objects.AllocCodeVersion(),
 		Argcount:        c.Argcount,
 		PosonlyArgcount: c.PosOnlyArgCount,
 		KwonlyArgcount:  c.KwOnlyArgCount,
@@ -121,6 +122,8 @@ func liftCode(c *compile.Code) *objects.Code {
 		ExceptionTable:  c.ExceptionTable,
 	}
 	out.Init(objects.CodeType)
+	out.SyncNameObjs()
+	out.SyncConstObjs()
 	specialize.Enable(out)
 	return out
 }

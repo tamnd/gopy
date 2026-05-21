@@ -1995,9 +1995,9 @@ func (t *actionTranslator) translateJumpBy() error {
 	// single space.
 	switch arg {
 	case "oparg":
-		fmt.Fprintln(t.writer, "return e.jumpBy(int(oparg) + 1), nil, nil, false, nil")
+		fmt.Fprintln(t.writer, "return e.jumpBy(int(oparg) + 1), nil")
 	case "- oparg":
-		fmt.Fprintln(t.writer, "return e.jumpBy(-int(oparg) + 1), nil, nil, false, nil")
+		fmt.Fprintln(t.writer, "return e.jumpBy(-int(oparg) + 1), nil")
 	default:
 		return fmt.Errorf("JUMPBY arg %q is not the bare 'oparg' identifier", arg)
 	}
@@ -2035,7 +2035,7 @@ func (t *actionTranslator) translateErrorIf() error {
 	}
 	t.acceptSemi()
 	if len(condToks) == 1 && condToks[0] == "true" {
-		fmt.Fprintln(t.writer, `return 0, nil, nil, false, e.error("error")`)
+		fmt.Fprintln(t.writer, `return 0, e.error("error")`)
 		if t.nestDepth == 0 {
 			t.terminates = true
 		}
@@ -2057,7 +2057,7 @@ func (t *actionTranslator) translateErrorIf() error {
 	} else if len(condToks) == 1 && t.locals[condToks[0]] && !t.intLocals[condToks[0]] && !t.boolLocals[condToks[0]] {
 		condExpr = condExpr + " != nil"
 	}
-	fmt.Fprintf(t.writer, "if %s { return 0, nil, nil, false, e.error(\"error\") }\n", condExpr)
+	fmt.Fprintf(t.writer, "if %s { return 0, e.error(\"error\") }\n", condExpr)
 	return nil
 }
 
@@ -2092,7 +2092,7 @@ func (t *actionTranslator) translateErrorNoPop() error {
 		}
 	}
 	t.acceptSemi()
-	fmt.Fprintln(t.writer, `return 0, nil, nil, false, e.error("error")`)
+	fmt.Fprintln(t.writer, `return 0, e.error("error")`)
 	return nil
 }
 

@@ -42,6 +42,30 @@ func newRangeIterator(start, stop, step *Int) *rangeIterator {
 	return it
 }
 
+// RangeIterNextFast advances o as a range_iterator without going
+// through the type-table tp_iternext indirection. Returns the next
+// value or (nil, true) on exhaustion. ok=false means o was not
+// exactly a range_iterator and the FOR_ITER_RANGE fast arm must
+// deopt.
+//
+// CPython: Python/bytecodes.c _ITER_CHECK_RANGE + _ITER_JUMP_RANGE + _ITER_NEXT_RANGE
+func RangeIterNextFast(o Object) (value Object, exhausted bool, ok bool) {
+	it, asserted := o.(*rangeIterator)
+	if !asserted || it.Type() != rangeIterType {
+		return nil, false, false
+	}
+	c := it.cur.v.Cmp(&it.stop.v)
+	if (it.asc && c >= 0) || (!it.asc && c <= 0) {
+		return nil, true, true
+	}
+	out := NewIntFromBig(&it.cur.v)
+	next := &Int{}
+	next.init(IntType)
+	next.v.Add(&it.cur.v, &it.step.v)
+	it.cur = next
+	return out, false, true
+}
+
 // LengthHint returns the number of values the iterator will still
 // produce. Mirrors __length_hint__ on a range_iterator: ceil((stop -
 // cur) / step), clamped to 0.

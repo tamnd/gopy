@@ -1,6 +1,9 @@
 package objects
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // Slice is the Python slice object: start, stop, step.
 //
@@ -17,14 +20,29 @@ type Slice struct {
 // CPython: Objects/sliceobject.c:L325 PySlice_Type
 var SliceType = NewType("slice", []*Type{objectType})
 
+// sliceFreeList recycles slice carcasses. CPython keeps a single-slot
+// freelist per interpreter (Py_slices_MAXFREELIST = 1) because slices
+// are dominated by hot BUILD_SLICE / extended-slicing patterns that
+// alloc and free one slice at a time. gopy uses sync.Pool so the cache
+// composes with Go's GC: under pressure the pool drains on its own.
+//
+// CPython: Include/internal/pycore_freelist_state.h Py_slices_MAXFREELIST
+var sliceFreeList = sync.Pool{
+	New: func() any { return &Slice{} },
+}
+
 func init() {
 	SliceType.Repr = sliceRepr
 	SliceType.Str = sliceRepr
+	SliceType.Dealloc = sliceDealloc
 }
 
-// NewSlice builds a slice. Any of start/stop/step may be None.
+// NewSlice builds a slice. Any of start/stop/step may be None. The
+// carcass comes from the freelist when available so the hot BUILD_SLICE
+// path skips the allocator. start/stop/step are Increfed because the
+// slice now owns its references, matching PySlice_New's Py_XNewRef.
 //
-// CPython: Objects/sliceobject.c:L165 PySlice_New
+// CPython: Objects/sliceobject.c:L143 PySlice_New
 func NewSlice(start, stop, step Object) *Slice {
 	if start == nil {
 		start = None()
@@ -35,9 +53,32 @@ func NewSlice(start, stop, step Object) *Slice {
 	if step == nil {
 		step = None()
 	}
-	s := &Slice{Start: start, Stop: stop, Step: step}
+	s := sliceFreeList.Get().(*Slice)
 	s.init(SliceType)
+	s.Start = start
+	s.Stop = stop
+	s.Step = step
+	Incref(start)
+	Incref(stop)
+	Incref(step)
 	return s
+}
+
+// sliceDealloc releases the references the slice owns and returns the
+// carcass to the freelist. Mirrors slice_dealloc: Py_DECREF each field,
+// then either free the object or push it onto the per-interpreter
+// freelist when there is room.
+//
+// CPython: Objects/sliceobject.c:L347 slice_dealloc
+func sliceDealloc(o Object) {
+	s := o.(*Slice)
+	Decref(s.Start)
+	Decref(s.Stop)
+	Decref(s.Step)
+	s.Start = nil
+	s.Stop = nil
+	s.Step = nil
+	sliceFreeList.Put(s)
 }
 
 func sliceRepr(o Object) (string, error) {

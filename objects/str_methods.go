@@ -202,21 +202,93 @@ func StrRSplit(s, sep string, maxsplit int) ([]string, error) {
 	return append([]string{rest}, parts...), nil
 }
 
+// isPyWhitespaceASCII matches _PyUnicode_IsWhitespace restricted to
+// the ASCII range. CPython's table at unicodetype_db.h:6676 lists
+// 0x09-0x0D, 0x1C-0x1F, 0x20 as the ASCII-range whitespace bits
+// (the broader Py_UNICODE_ISSPACE set includes 0x85, 0xA0, and the
+// U+1680/U+2000-U+200A/U+2028/U+2029/U+202F/U+205F/U+3000 codepoints
+// which never appear in an isASCII() input).
+//
+// CPython: Objects/unicodetype_db.h:6676 _PyUnicode_IsWhitespace
+func isPyWhitespaceASCII(c byte) bool {
+	switch {
+	case c >= 0x09 && c <= 0x0D:
+		return true
+	case c >= 0x1C && c <= 0x1F:
+		return true
+	case c == 0x20:
+		return true
+	}
+	return false
+}
+
+// isPyWhitespaceRune matches _PyUnicode_IsWhitespace for any
+// codepoint. Go's unicode.IsSpace tracks the White_Space Unicode
+// property and is missing 0x1C-0x1F (FS, GS, RS, US ASCII control
+// chars) which CPython's Py_UNICODE_ISSPACE table does include, so
+// we cannot just defer to unicode.IsSpace here.
+//
+// CPython: Objects/unicodetype_db.h:6676 _PyUnicode_IsWhitespace
+func isPyWhitespaceRune(r rune) bool {
+	if r < 0x80 {
+		return isPyWhitespaceASCII(byte(r))
+	}
+	switch r {
+	case 0x85, 0xA0, 0x1680,
+		0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
+		0x2005, 0x2006, 0x2007, 0x2008, 0x2009,
+		0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
+		return true
+	}
+	return false
+}
+
+// reverseStrings flips out in place. Used by the rsplit-whitespace
+// fast path to drop the O(n^2) head-prepend without diverging from
+// CPython's iteration order.
+func reverseStrings(out []string) {
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+}
+
 // strSplitWhitespace handles the sep=None mode: a maximal run of any
 // Unicode whitespace is one separator, and leading/trailing
 // whitespace produces no empty fragments. reverse=true peels from
 // the right (used by rsplit).
 //
-// CPython: Objects/stringlib/split.h:L11 stringlib_split_whitespace
-// CPython: Objects/stringlib/split.h:L177 stringlib_rsplit_whitespace
+// ASCII fast path: byte-indexed loop avoids materializing []rune(s)
+// and lets the inner loop run as plain byte comparisons. Non-ASCII
+// falls back to the rune walk until P4.1 lands kind-2/4 storage so
+// BMP/Full strings can hit a kind-dispatched loop too.
+//
+// CPython: Objects/stringlib/split.h:11 stringlib_split_whitespace
+// CPython: Objects/stringlib/split.h:177 stringlib_rsplit_whitespace
 func strSplitWhitespace(s string, maxsplit int, reverse bool) []string {
-	rs := []rune(s)
+	if isASCII(s) {
+		return strSplitWhitespaceASCII(s, maxsplit, reverse)
+	}
+	return strSplitWhitespaceRunes(s, maxsplit, reverse)
+}
+
+// strSplitWhitespaceASCII is the byte-indexed fast path. Mirrors
+// stringlib_split_whitespace / stringlib_rsplit_whitespace one-for-one
+// against the ASCII char buffer.
+//
+// CPython: Objects/stringlib/split.h:53 stringlib_split_whitespace
+// CPython: Objects/stringlib/split.h:192 stringlib_rsplit_whitespace
+func strSplitWhitespaceASCII(s string, maxsplit int, reverse bool) []string {
+	n := len(s)
 	if reverse {
+		// Build in reverse-walk order (right to left) then reverse the
+		// slice once before returning. Matches CPython's SPLIT_ADD into
+		// a preallocated list that is later finalized in place, and
+		// avoids the O(n^2) prepend-into-head pattern.
 		out := []string{}
-		i := len(rs)
+		i := n
 		split := 0
 		for i > 0 {
-			for i > 0 && unicode.IsSpace(rs[i-1]) {
+			for i > 0 && isPyWhitespaceASCII(s[i-1]) {
 				i--
 			}
 			if i == 0 {
@@ -226,46 +298,102 @@ func strSplitWhitespace(s string, maxsplit int, reverse bool) []string {
 				break
 			}
 			j := i
-			for i > 0 && !unicode.IsSpace(rs[i-1]) {
+			for i > 0 && !isPyWhitespaceASCII(s[i-1]) {
 				i--
 			}
-			out = append([]string{string(rs[i:j])}, out...)
+			out = append(out, s[i:j])
 			split++
 		}
 		if i > 0 {
-			// Trim trailing whitespace from the head fragment. Per
-			// CPython, the remainder keeps its leading whitespace if
-			// it has more than one non-WS run, but loses it if it's
-			// at the very head.
+			for i > 0 && isPyWhitespaceASCII(s[i-1]) {
+				i--
+			}
+			if i > 0 {
+				out = append(out, s[:i])
+			}
+		}
+		reverseStrings(out)
+		return out
+	}
+	out := []string{}
+	i := 0
+	split := 0
+	for i < n {
+		for i < n && isPyWhitespaceASCII(s[i]) {
+			i++
+		}
+		if i == n {
+			break
+		}
+		if maxsplit >= 0 && split >= maxsplit {
+			out = append(out, s[i:])
+			return out
+		}
+		j := i
+		for i < n && !isPyWhitespaceASCII(s[i]) {
+			i++
+		}
+		out = append(out, s[j:i])
+		split++
+	}
+	return out
+}
+
+// strSplitWhitespaceRunes is the non-ASCII slow path. Walks runes
+// because Latin-1+ strings still live as UTF-8 in *Unicode.v until
+// P4.1 lands pre-encoded kind-2/4 storage.
+func strSplitWhitespaceRunes(s string, maxsplit int, reverse bool) []string {
+	rs := []rune(s)
+	if reverse {
+		out := []string{}
+		i := len(rs)
+		split := 0
+		for i > 0 {
+			for i > 0 && isPyWhitespaceRune(rs[i-1]) {
+				i--
+			}
+			if i == 0 {
+				break
+			}
+			if maxsplit >= 0 && split >= maxsplit {
+				break
+			}
+			j := i
+			for i > 0 && !isPyWhitespaceRune(rs[i-1]) {
+				i--
+			}
+			out = append(out, string(rs[i:j]))
+			split++
+		}
+		if i > 0 {
 			head := rs[:i]
-			// strip trailing ws from head
-			for len(head) > 0 && unicode.IsSpace(head[len(head)-1]) {
+			for len(head) > 0 && isPyWhitespaceRune(head[len(head)-1]) {
 				head = head[:len(head)-1]
 			}
 			if len(head) > 0 {
-				out = append([]string{string(head)}, out...)
+				out = append(out, string(head))
 			}
 		}
+		reverseStrings(out)
 		return out
 	}
 	out := []string{}
 	i := 0
 	split := 0
 	for i < len(rs) {
-		for i < len(rs) && unicode.IsSpace(rs[i]) {
+		for i < len(rs) && isPyWhitespaceRune(rs[i]) {
 			i++
 		}
 		if i == len(rs) {
 			break
 		}
 		if maxsplit >= 0 && split >= maxsplit {
-			// remainder, with its trailing ws, is one fragment
 			tail := rs[i:]
 			out = append(out, string(tail))
 			return out
 		}
 		j := i
-		for i < len(rs) && !unicode.IsSpace(rs[i]) {
+		for i < len(rs) && !isPyWhitespaceRune(rs[i]) {
 			i++
 		}
 		out = append(out, string(rs[j:i]))
@@ -354,19 +482,60 @@ func StrRPartition(s, sep string) (string, string, string, error) {
 }
 
 // StrJoin ports str.join. Each iterable item must be a *Unicode.
+// Internally routes through UnicodeWriter (spec 1712 P15.2) so the
+// output is classified once via the writer's maxchar tracking.
 //
-// CPython: Objects/unicodeobject.c:L12524 unicode_join
+// CPython: Objects/unicodeobject.c:10253 PyUnicode_Join
+// CPython: Objects/unicodeobject.c:12532 unicode_join
 func StrJoin(sep string, parts []Object) (string, error) {
-	pieces := make([]string, len(parts))
-	for i, p := range parts {
-		u, ok := asUnicode(p)
+	u, err := StrJoinUnicode(NewStr(sep).(*Unicode), parts)
+	if err != nil {
+		return "", err
+	}
+	return u.Value(), nil
+}
+
+// StrJoinUnicode is the *Unicode-returning variant. The str.join
+// binding calls this directly so the writer's Finish() produces an
+// already-classified *Unicode (kind / ascii / length populated)
+// instead of forcing a second walk via NewStr.
+//
+// CPython: Objects/unicodeobject.c:10278 _PyUnicode_JoinArray
+func StrJoinUnicode(sep *Unicode, parts []Object) (*Unicode, error) {
+	if len(parts) == 0 {
+		return NewStr("").(*Unicode), nil
+	}
+	// Singleton fast path mirrors _PyUnicode_JoinArray's seqlen==1
+	// branch.
+	if len(parts) == 1 {
+		u, ok := parts[0].(*Unicode)
 		if !ok {
-			return "", fmt.Errorf("TypeError: sequence item %d: expected str instance, %s found",
+			return nil, fmt.Errorf("TypeError: sequence item 0: expected str instance, %s found",
+				parts[0].Type().Name)
+		}
+		if u.Type() == strType {
+			return u, nil
+		}
+	}
+	var w UnicodeWriter
+	w.Init()
+	w.overallocate = true
+	for i, p := range parts {
+		u, ok := p.(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: sequence item %d: expected str instance, %s found",
 				i, p.Type().Name)
 		}
-		pieces[i] = u
+		if i > 0 && sep.length > 0 {
+			if err := w.WriteStr(sep); err != nil {
+				return nil, err
+			}
+		}
+		if err := w.WriteStr(u); err != nil {
+			return nil, err
+		}
 	}
-	return strings.Join(pieces, sep), nil
+	return w.Finish(), nil
 }
 
 // StrReplace ports str.replace. count<0 means all.
@@ -379,12 +548,68 @@ func StrReplace(s, old, newS string, count int) string {
 	return strings.Replace(s, old, newS, count)
 }
 
+// stripASCIIWhitespace walks s from each end skipping bytes that
+// _PyUnicode_IsWhitespace recognizes in the ASCII range. Returns
+// the bounds (lo, hi) of the kept slice. left/right control which
+// ends get trimmed: left/right both true is strip, left-only is
+// lstrip, right-only is rstrip.
+//
+// CPython: Objects/stringlib/transmogrify.h:80 do_strip
+func stripASCIIWhitespace(s string, left, right bool) string {
+	n := len(s)
+	lo := 0
+	if left {
+		for lo < n && isPyWhitespaceASCII(s[lo]) {
+			lo++
+		}
+	}
+	hi := n
+	if right {
+		for hi > lo && isPyWhitespaceASCII(s[hi-1]) {
+			hi--
+		}
+	}
+	if lo == 0 && hi == n {
+		return s
+	}
+	return s[lo:hi]
+}
+
+// stripRunesWhitespace is the non-ASCII slow path. Walks runes
+// because Latin-1+ strings still live as UTF-8 in *Unicode.v until
+// P4.1 ports kind-2/4 storage. Uses isPyWhitespaceRune so 0x1C-0x1F
+// match alongside the Unicode line/para/NBSP separators.
+//
+// CPython: Objects/unicodeobject.c:11744 _PyUnicode_XStrip
+func stripRunesWhitespace(s string, left, right bool) string {
+	rs := []rune(s)
+	lo := 0
+	if left {
+		for lo < len(rs) && isPyWhitespaceRune(rs[lo]) {
+			lo++
+		}
+	}
+	hi := len(rs)
+	if right {
+		for hi > lo && isPyWhitespaceRune(rs[hi-1]) {
+			hi--
+		}
+	}
+	if lo == 0 && hi == len(rs) {
+		return s
+	}
+	return string(rs[lo:hi])
+}
+
 // StrStrip ports str.strip. chars="" means default whitespace.
 //
 // CPython: Objects/unicodeobject.c:L12757 unicode_strip_impl
 func StrStrip(s, chars string) string {
 	if chars == "" {
-		return strings.TrimFunc(s, unicode.IsSpace)
+		if isASCII(s) {
+			return stripASCIIWhitespace(s, true, true)
+		}
+		return stripRunesWhitespace(s, true, true)
 	}
 	return strings.Trim(s, chars)
 }
@@ -394,7 +619,10 @@ func StrStrip(s, chars string) string {
 // CPython: Objects/unicodeobject.c:L12717 unicode_lstrip_impl
 func StrLStrip(s, chars string) string {
 	if chars == "" {
-		return strings.TrimLeftFunc(s, unicode.IsSpace)
+		if isASCII(s) {
+			return stripASCIIWhitespace(s, true, false)
+		}
+		return stripRunesWhitespace(s, true, false)
 	}
 	return strings.TrimLeft(s, chars)
 }
@@ -404,7 +632,10 @@ func StrLStrip(s, chars string) string {
 // CPython: Objects/unicodeobject.c:L12737 unicode_rstrip_impl
 func StrRStrip(s, chars string) string {
 	if chars == "" {
-		return strings.TrimRightFunc(s, unicode.IsSpace)
+		if isASCII(s) {
+			return stripASCIIWhitespace(s, false, true)
+		}
+		return stripRunesWhitespace(s, false, true)
 	}
 	return strings.TrimRight(s, chars)
 }
@@ -677,12 +908,27 @@ func StrIsTitle(s string) bool {
 	return hasCased
 }
 
+// StrIsSpace ports str.isspace. A string is whitespace if it is
+// non-empty and every code point satisfies _PyUnicode_IsWhitespace.
+// ASCII haystacks walk bytes via isPyWhitespaceASCII (covering the
+// 0x09-0x0D, 0x1C-0x1F, 0x20 set Go's unicode.IsSpace drops on the
+// floor for FS/GS/RS/US); non-ASCII falls back to isPyWhitespaceRune.
+//
+// CPython: Objects/unicodeobject.c:12209 unicode_isspace_impl
 func StrIsSpace(s string) bool {
 	if s == "" {
 		return false
 	}
+	if isASCII(s) {
+		for i := 0; i < len(s); i++ {
+			if !isPyWhitespaceASCII(s[i]) {
+				return false
+			}
+		}
+		return true
+	}
 	for _, r := range s {
-		if !unicode.IsSpace(r) {
+		if !isPyWhitespaceRune(r) {
 			return false
 		}
 	}

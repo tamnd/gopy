@@ -64,6 +64,11 @@ func Chr(args []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	if !ok || v < 0 || v > 0x10FFFF {
 		return nil, fmt.Errorf("ValueError: chr() arg not in range(0x110000)")
 	}
+	// CPython: Python/bltinmodule.c:809 PyUnicode_FromOrdinal short-circuit
+	// to get_latin1_char for ordinals < 256.
+	if v < 256 {
+		return objects.GetLatin1Char(int(v)), nil
+	}
 	return objects.NewStr(string(rune(v))), nil
 }
 

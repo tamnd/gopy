@@ -22,8 +22,8 @@ func TestCurrentScopeNoFrameReturnsNil(t *testing.T) {
 
 func TestCurrentScopeReturnsActiveFrame(t *testing.T) {
 	ts := state.NewThread()
-	prev := setActiveThread(ts)
-	defer restoreActiveThread(prev)
+	prev, gid := setActiveThread(ts)
+	defer restoreActiveThread(prev, gid)
 
 	g := objects.NewDict()
 	co := codeWithBytecode(append(
@@ -47,8 +47,8 @@ func TestCurrentScopeReturnsActiveFrame(t *testing.T) {
 
 func TestCurrentScopeReturnsExplicitLocals(t *testing.T) {
 	ts := state.NewThread()
-	prev := setActiveThread(ts)
-	defer restoreActiveThread(prev)
+	prev, gid := setActiveThread(ts)
+	defer restoreActiveThread(prev, gid)
 
 	g := objects.NewDict()
 	l := objects.NewDict()

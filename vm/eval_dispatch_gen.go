@@ -19,7 +19,7 @@ var _ = stackref.Null
 
 // dispatchGen is the generated Tier-1 dispatcher. Each arm is
 // produced from one `inst` in Python/bytecodes.c.
-func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone bool, err error) {
+func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err error) {
 	_ = oparg
 	switch op {
 	case compile.BUILD_INTERPOLATION:
@@ -31,7 +31,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = format
 		// body bail: PyObject interpolation_o rhs: unexpected token "_PyInterpolation_Build" in expression
 		// outputs: interpolation
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_LIST:
 		values := e.peekSliceBottomFirst(0, int(oparg))
 		_ = values
@@ -39,13 +39,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		list_o := e.listFromStackRef(values, oparg)
 		_ = list_o
 		if list_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		// INPUTS_DEAD: no-op in refcount-only path
 		list = stackref.FromObject(list_o)
 		e.drop(int(oparg))
 		e.push(list)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.BUILD_MAP:
 		values := e.peekSliceBottomFirst(0, int(oparg*2))
 		_ = values
@@ -54,25 +54,25 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = values_o
 		if false {
 			e.decrefInputs(1)
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		map_o := e.dictFromItems(values_o, oparg)
 		_ = map_o
 		// STACKREFS_TO_PYOBJECTS_CLEANUP: no-op under GC
 		e.decrefInputs(1)
 		if map_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		map_v = stackref.FromObject(map_o)
 		e.drop(int(oparg * 2))
 		e.push(map_v)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.BUILD_SET:
 		values := e.peekSliceBottomFirst(0, int(oparg))
 		_ = values
 		// body bail: unrecognized token at action body start: "for"
 		// outputs: set
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_SLICE:
 		args := e.peekSliceBottomFirst(0, int(oparg))
 		_ = args
@@ -92,12 +92,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = slice_o
 		e.decrefInputs(1)
 		if slice_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		slice = stackref.FromObject(slice_o)
 		e.drop(int(oparg))
 		e.push(slice)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.BUILD_STRING:
 		pieces := e.peekSliceBottomFirst(0, int(oparg))
 		_ = pieces
@@ -106,19 +106,19 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = pieces_o
 		if false {
 			e.decrefInputs(1)
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		str_o := e.unicodeJoinArray(objects.NewStr(""), pieces_o, oparg)
 		_ = str_o
 		// STACKREFS_TO_PYOBJECTS_CLEANUP: no-op under GC
 		e.decrefInputs(1)
 		if str_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		str = stackref.FromObject(str_o)
 		e.drop(int(oparg))
 		e.push(str)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.BUILD_TEMPLATE:
 		strings := e.peek(1)
 		_ = strings
@@ -134,12 +134,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		interpolations.Close()
 		strings.Close()
 		if template_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		template = stackref.FromObject(template_o)
 		e.drop(1 + 1)
 		e.push(template)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.BUILD_TUPLE:
 		values := e.peekSliceBottomFirst(0, int(oparg))
 		_ = values
@@ -147,13 +147,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		tup_o := e.tupleFromStackRef(values, oparg)
 		_ = tup_o
 		if tup_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		// INPUTS_DEAD: no-op in refcount-only path
 		tup = stackref.FromObject(tup_o)
 		e.drop(int(oparg))
 		e.push(tup)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.CACHE:
 		panic("vm: Py_FatalError")
 	case compile.CALL_INTRINSIC_1:
@@ -164,12 +164,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = res_o
 		value.Close()
 		if res_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		res = stackref.FromObject(res_o)
 		e.drop(1)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.CALL_INTRINSIC_2:
 		value2_st := e.peek(1)
 		_ = value2_st
@@ -184,12 +184,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = res_o
 		e.decrefInputs(2)
 		if res_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		res = stackref.FromObject(res_o)
 		e.drop(1 + 1)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.CHECK_EG_MATCH:
 		exc_value_st := e.peek(1)
 		_ = exc_value_st
@@ -197,7 +197,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = match_type_st
 		// body bail: int res rhs: unexpected token "_PyEval_ExceptionGroupMatch" in expression
 		// outputs: rest match
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CHECK_EXC_MATCH:
 		left := e.peek(1)
 		_ = left
@@ -211,7 +211,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		err := e.checkExceptTypeValid(right_o)
 		_ = err
 		if err < 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		res := e.exceptionMatches(left_o, right_o)
 		_ = res
@@ -224,7 +224,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.setPeek(1, left)
 		e.drop(1)
 		e.push(b)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.CLEANUP_THROW:
 		sub_iter := e.peek(1 + 1)
 		_ = sub_iter
@@ -234,13 +234,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = exc_value_st
 		// body bail: if then: output assign "value": unexpected token "PyStopIterationObject" in expression
 		// outputs: none value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CONVERT_VALUE:
 		value := e.peek(0)
 		_ = value
 		// body bail: local assign "conv_fn": unexpected token "_PyEval_ConversionFuncs" in expression
 		// outputs: result
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.COPY:
 		bottom := e.peek(int(oparg - 1))
 		_ = bottom
@@ -248,10 +248,10 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		top = bottom.Dup()
 		e.setPeek(int(oparg-1), bottom)
 		e.push(top)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.COPY_FREE_VARS:
 		// body bail: PyCodeObject co rhs: unexpected token "_PyFrame_GetCode" in expression
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_ATTR:
 		owner := e.peek(0)
 		_ = owner
@@ -261,10 +261,10 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = err
 		owner.Close()
 		if err != 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.DELETE_DEREF:
 		cell := e.localAt(int(oparg)).AsObject()
 		_ = cell
@@ -272,35 +272,35 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = oldobj
 		if oldobj == nil {
 			e.setPendingErr("_PyEval_FormatExcUnbound")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		// Py_DECREF: no-op under GC
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.DELETE_FAST:
 		v := e.localAt(int(oparg))
 		_ = v
 		if v.IsNull() {
 			e.setPendingErr("UnboundLocalError")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		tmp := e.localAt(int(oparg))
 		_ = tmp
 		e.setLocal(int(oparg), stackref.Null)
 		tmp.Close()
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.DELETE_GLOBAL:
 		name := e.nameAt(int(oparg))
 		_ = name
 		err := e.dictPop(e.globals(), name, nil)
 		_ = err
 		if err < 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		if err == 0 {
 			e.setPendingErr("NameError")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.DELETE_NAME:
 		name := e.nameAt(int(oparg))
 		_ = name
@@ -310,14 +310,14 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = err
 		if ns == nil {
 			e.setPendingErr("SystemError")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		err = e.objectDelItem(ns, name)
 		if err != 0 {
 			e.setPendingErr("NameError")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.DELETE_SUBSCR:
 		container := e.peek(1)
 		_ = container
@@ -327,10 +327,10 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = err
 		e.decrefInputs(2)
 		if err != 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.drop(1 + 1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.DICT_MERGE:
 		callable := e.peek(1 + 1 + 1 + int(oparg-1) + 1)
 		_ = callable
@@ -349,13 +349,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		if err < 0 {
 			e.setPendingErr("_PyEval_FormatKwargsError")
 			update.Close()
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		update.Close()
 		e.setPeek(1+1+1+int(oparg-1)+1, callable)
 		e.setPeek(int(oparg-1)+1, dict)
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.DICT_UPDATE:
 		dict := e.peek(int(oparg-1) + 1)
 		_ = dict
@@ -374,18 +374,18 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 				e.setPendingErr("TypeError")
 			}
 			update.Close()
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		update.Close()
 		e.setPeek(int(oparg-1)+1, dict)
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.END_FOR:
 		value := e.peek(0)
 		_ = value
 		value.Close()
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.END_SEND:
 		receiver := e.peek(1)
 		_ = receiver
@@ -396,7 +396,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		receiver.Close()
 		e.drop(1 + 1)
 		e.push(val)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.ENTER_EXECUTOR:
 		panic("vm: Py_FatalError")
 	case compile.EXIT_INIT_CHECK:
@@ -404,13 +404,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = should_be_none
 		if !should_be_none.IsNone() {
 			e.setPendingErr("TypeError")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.EXTENDED_ARG:
 		// body bail: unrecognized token at action body start: "opcode"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.FORMAT_SIMPLE:
 		value := e.peek(0)
 		_ = value
@@ -422,7 +422,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 			_ = res_o
 			value.Close()
 			if res_o == nil {
-				return 0, nil, nil, false, e.error("error")
+				return 0, e.error("error")
 			}
 			res = stackref.FromObject(res_o)
 		} else {
@@ -430,7 +430,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		}
 		e.drop(1)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.FORMAT_WITH_SPEC:
 		value := e.peek(1)
 		_ = value
@@ -441,18 +441,18 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = res_o
 		e.decrefInputs(2)
 		if res_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		res = stackref.FromObject(res_o)
 		e.drop(1 + 1)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.GET_AITER:
 		obj := e.peek(0)
 		_ = obj
 		// body bail: if cond: unsupported struct arrow type_v.tp_as_async
 		// outputs: iter
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.GET_ANEXT:
 		aiter := e.peek(0)
 		_ = aiter
@@ -460,12 +460,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		awaitable_o := e.getANext(aiter.AsObject())
 		_ = awaitable_o
 		if awaitable_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		awaitable = stackref.FromObject(awaitable_o)
 		e.setPeek(0, aiter)
 		e.push(awaitable)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.GET_AWAITABLE:
 		iterable := e.peek(0)
 		_ = iterable
@@ -474,12 +474,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = iter_o
 		iterable.Close()
 		if iter_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		iter = stackref.FromObject(iter_o)
 		e.drop(1)
 		e.push(iter)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.GET_ITER:
 		iterable := e.peek(0)
 		_ = iterable
@@ -488,12 +488,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = iter_o
 		iterable.Close()
 		if iter_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		iter = stackref.FromObject(iter_o)
 		e.drop(1)
 		e.push(iter)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.GET_LEN:
 		obj := e.peek(0)
 		_ = obj
@@ -501,23 +501,23 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		len_i := e.objectLength(obj.AsObject())
 		_ = len_i
 		if len_i < 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		len_o := e.longFromSsizeT(len_i)
 		_ = len_o
 		if len_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		len = stackref.FromObject(len_o)
 		e.setPeek(0, obj)
 		e.push(len)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.GET_YIELD_FROM_ITER:
 		iterable := e.peek(0)
 		_ = iterable
 		// body bail: if then: if cond: unexpected token "_PyFrame_GetCode" in expression
 		// outputs: iter
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.IMPORT_FROM:
 		from := e.peek(0)
 		_ = from
@@ -527,12 +527,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		res_o := e.importFrom(from.AsObject(), name)
 		_ = res_o
 		if res_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		res = stackref.FromObject(res_o)
 		e.setPeek(0, from)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.IMPORT_NAME:
 		level := e.peek(1)
 		_ = level
@@ -545,12 +545,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = res_o
 		e.decrefInputs(2)
 		if res_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		res = stackref.FromObject(res_o)
 		e.drop(1 + 1)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INSTRUMENTED_END_FOR:
 		receiver := e.peek(1)
 		_ = receiver
@@ -560,13 +560,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 			err := e.monitorStopIteration(value.AsObject())
 			_ = err
 			if err != 0 {
-				return 0, nil, nil, false, e.error("error")
+				return 0, e.error("error")
 			}
 		}
 		value.Close()
 		e.setPeek(1, receiver)
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INSTRUMENTED_END_SEND:
 		receiver := e.peek(1)
 		_ = receiver
@@ -579,37 +579,37 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 			err := e.monitorStopIteration(value.AsObject())
 			_ = err
 			if err != 0 {
-				return 0, nil, nil, false, e.error("error")
+				return 0, e.error("error")
 			}
 		}
 		val = value
 		receiver.Close()
 		e.drop(1 + 1)
 		e.push(val)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INSTRUMENTED_FOR_ITER:
 		iter := e.peek(0)
 		_ = iter
 		// cache "unused" size=1 offset=0
 		// body bail: unrecognized token at action body start: "iternextfunc"
 		// outputs: iter* next
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_INSTRUCTION:
 		// body bail: int next_opcode rhs: unexpected token "_Py_call_instrumentation_instruction" in expression
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_JUMP_FORWARD:
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INSTRUMENTED_LINE:
 		// body bail: if cond: unsupported struct arrow tstate.tracing
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_NOT_TAKEN:
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INSTRUMENTED_POP_ITER:
 		iter := e.peek(0)
 		_ = iter
 		iter.Close()
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INSTRUMENTED_POP_JUMP_IF_FALSE:
 		cond := e.peek(0)
 		_ = cond
@@ -619,7 +619,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		if jump {
 		}
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INSTRUMENTED_POP_JUMP_IF_NONE:
 		value := e.peek(0)
 		_ = value
@@ -631,7 +631,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 			value.Close()
 		}
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INSTRUMENTED_POP_JUMP_IF_NOT_NONE:
 		value := e.peek(0)
 		_ = value
@@ -643,7 +643,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		} else {
 		}
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INSTRUMENTED_POP_JUMP_IF_TRUE:
 		cond := e.peek(0)
 		_ = cond
@@ -653,12 +653,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		if jump {
 		}
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.INTERPRETER_EXIT:
 		retval := e.peek(0)
 		_ = retval
 		// body bail: unrecognized token at action body start: "tstate"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.IS_OP:
 		left := e.peek(1)
 		_ = left
@@ -675,11 +675,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		}
 		e.drop(1 + 1)
 		e.push(b)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.JUMP_BACKWARD_NO_INTERRUPT:
-		return e.jumpBy(-int(oparg) + 1), nil, nil, false, nil
+		return e.jumpBy(-int(oparg) + 1), nil
 	case compile.JUMP_FORWARD:
-		return e.jumpBy(int(oparg) + 1), nil, nil, false, nil
+		return e.jumpBy(int(oparg) + 1), nil
 	case compile.LIST_APPEND:
 		list := e.peek(int(oparg-1) + 1)
 		_ = list
@@ -688,11 +688,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		err := e.listAppendTakeRef(list.AsObject(), v.AsObject())
 		_ = err
 		if err < 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.setPeek(int(oparg-1)+1, list)
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LIST_EXTEND:
 		list_st := e.peek(int(oparg-1) + 1)
 		_ = list_st
@@ -700,7 +700,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = iterable_st
 		// body bail: if then: if cond: unsupported struct arrow e.pyType(iterable).tp_iter
 		// outputs: list_st* _out1[oparg - 1]*
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_BUILD_CLASS:
 		var bc stackref.Ref
 		var bc_o objects.Object
@@ -709,27 +709,27 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = err
 		_ = bc_o
 		if err < 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		if bc_o == nil {
 			e.setPendingErr("NameError: __build_class__ not found")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		bc = stackref.FromObject(bc_o)
 		e.push(bc)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_COMMON_CONSTANT:
 		var value stackref.Ref
 		value = stackref.FromObject(e.commonConsts()[oparg])
 		e.push(value)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_CONST:
 		var value stackref.Ref
 		obj := e.constAt(int(oparg))
 		_ = obj
 		value = stackref.FromObject(obj)
 		e.push(value)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_DEREF:
 		var value stackref.Ref
 		cell := e.localAt(int(oparg)).AsObject()
@@ -737,26 +737,26 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		value = e.cellGetStackRef(cell)
 		if value.IsNull() {
 			e.setPendingErr("_PyEval_FormatExcUnbound")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.push(value)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_FAST:
 		var value stackref.Ref
 		value = e.localAt(int(oparg)).Dup()
 		e.push(value)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_FAST_AND_CLEAR:
 		var value stackref.Ref
 		value = e.localAt(int(oparg))
 		e.setLocal(int(oparg), stackref.Null)
 		e.push(value)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_FAST_BORROW:
 		var value stackref.Ref
 		value = e.localAt(int(oparg)).Dup()
 		e.push(value)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:
 		var value1 stackref.Ref
 		var value2 stackref.Ref
@@ -768,18 +768,18 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		value2 = e.localAt(int(oparg2)).Dup()
 		e.push(value1)
 		e.push(value2)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_FAST_CHECK:
 		var value stackref.Ref
 		value_s := e.localAt(int(oparg))
 		_ = value_s
 		if value_s.IsNull() {
 			e.setPendingErr("UnboundLocalError")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		value = value_s.Dup()
 		e.push(value)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_FAST_LOAD_FAST:
 		var value1 stackref.Ref
 		var value2 stackref.Ref
@@ -791,13 +791,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		value2 = e.localAt(int(oparg2)).Dup()
 		e.push(value1)
 		e.push(value2)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		class_dict_st := e.peek(0)
 		_ = class_dict_st
 		// body bail: local assign "name": unexpected token "_PyFrame_GetCode" in expression
 		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:
 		mod_or_class_dict := e.peek(0)
 		_ = mod_or_class_dict
@@ -811,7 +811,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = v_o
 		mod_or_class_dict.Close()
 		if err < 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		if v_o == nil {
 			if objects.IsExactDict(e.globals()) && objects.IsExactDict(e.builtinsDict()) {
@@ -820,7 +820,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 					if !e.errOccurred() {
 						e.setPendingErr("NameError")
 					}
-					return 0, nil, nil, false, e.error("error")
+					return 0, e.error("error")
 				}
 			} else {
 				var err int32
@@ -828,7 +828,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 				_ = err
 				_ = v_o
 				if err < 0 {
-					return 0, nil, nil, false, e.error("error")
+					return 0, e.error("error")
 				}
 				if v_o == nil {
 					var err int32
@@ -836,11 +836,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 					_ = err
 					_ = v_o
 					if err < 0 {
-						return 0, nil, nil, false, e.error("error")
+						return 0, e.error("error")
 					}
 					if v_o == nil {
 						e.setPendingErr("NameError")
-						return 0, nil, nil, false, e.error("error")
+						return 0, e.error("error")
 					}
 				}
 			}
@@ -848,18 +848,18 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		v = stackref.FromObject(v_o)
 		e.drop(1)
 		e.push(v)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_LOCALS:
 		var locals stackref.Ref
 		l := e.localsDict()
 		_ = l
 		if l == nil {
 			e.setPendingErr("SystemError: no locals found")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		locals = stackref.FromObject(l)
 		e.push(locals)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_NAME:
 		var v stackref.Ref
 		name := e.nameAt(int(oparg))
@@ -867,37 +867,37 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		v_o := e.loadName(name)
 		_ = v_o
 		if v_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		v = stackref.FromObject(v_o)
 		e.push(v)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.LOAD_SMALL_INT:
 		var value stackref.Ref
 		obj := objects.SmallInt(int(5 + oparg))
 		_ = obj
 		value = stackref.FromObject(obj)
 		e.push(value)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.MAKE_CELL:
 		initial := e.localAt(int(oparg)).AsObject()
 		_ = initial
 		cell := e.cellNew(initial)
 		_ = cell
 		if cell == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		tmp := e.localAt(int(oparg))
 		_ = tmp
 		e.setLocal(int(oparg), stackref.FromObject(cell))
 		tmp.Close()
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.MAKE_FUNCTION:
 		codeobj_st := e.peek(0)
 		_ = codeobj_st
 		// body bail: PyFunctionObject func_obj rhs: unexpected token "PyFunction_New" in expression
 		// outputs: func_v
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MAP_ADD:
 		dict_st := e.peek(int(oparg-1) + 1 + 1)
 		_ = dict_st
@@ -910,11 +910,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		err := e.dictSetItem(dict, key.AsObject(), value.AsObject())
 		_ = err
 		if err != 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.setPeek(int(oparg-1)+1+1, dict_st)
 		e.drop(1 + 1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.MATCH_CLASS:
 		subject := e.peek(1 + 1)
 		_ = subject
@@ -930,13 +930,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 			attrs = stackref.FromObject(attrs_o)
 		} else {
 			if e.errOccurred() {
-				return 0, nil, nil, false, e.error("error")
+				return 0, e.error("error")
 			}
 			attrs = stackref.None
 		}
 		e.drop(1 + 1 + 1)
 		e.push(attrs)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.MATCH_KEYS:
 		subject := e.peek(1)
 		_ = subject
@@ -946,13 +946,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		values_or_none_o := e.matchKeys(subject.AsObject(), keys.AsObject())
 		_ = values_or_none_o
 		if values_or_none_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		values_or_none = stackref.FromObject(values_or_none_o)
 		e.setPeek(1, subject)
 		e.setPeek(0, keys)
 		e.push(values_or_none)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.MATCH_MAPPING:
 		subject := e.peek(0)
 		_ = subject
@@ -966,7 +966,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		}
 		e.setPeek(0, subject)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.MATCH_SEQUENCE:
 		subject := e.peek(0)
 		_ = subject
@@ -980,9 +980,9 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		}
 		e.setPeek(0, subject)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.NOP:
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.POP_EXCEPT:
 		exc_value := e.peek(0)
 		_ = exc_value
@@ -992,13 +992,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 			e.setHandledException(exc_value.AsObject())
 		}
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.POP_TOP:
 		value := e.peek(0)
 		_ = value
 		value.Close()
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.PUSH_EXC_INFO:
 		exc := e.peek(0)
 		_ = exc
@@ -1014,17 +1014,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.drop(1)
 		e.push(prev_exc)
 		e.push(new_exc)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.PUSH_NULL:
 		var res stackref.Ref
 		res = stackref.Null
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.RAISE_VARARGS:
 		args := e.peekSliceBottomFirst(0, int(oparg))
 		_ = args
 		// body bail: int err rhs: unexpected token "do_raise" in expression
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RERAISE:
 		exc_st := e.peek(0)
 		_ = exc_st
@@ -1032,46 +1032,46 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = values
 		// body bail: if then: unrecognized token at action body start: "frame"
 		// outputs: values[oparg]*
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RESERVED:
 		panic("vm: Py_FatalError")
 	case compile.RETURN_GENERATOR:
 		// body bail: PyFunctionObject func rhs: unsupported struct arrow frame.f_funcobj
 		// outputs: res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RETURN_VALUE:
 		retval := e.peek(0)
 		_ = retval
 		// body bail: _PyStackRef temp rhs: unexpected token "PyStackRef_MakeHeapSafe" in expression
 		// outputs: res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SETUP_ANNOTATIONS:
 		var ann_dict objects.Object
 		_ = ann_dict
 		if e.localsDict() == nil {
 			e.setPendingErr("SystemError: no locals found when setting up annotations")
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		ann_dict, err := e.mappingGetOptionalItem(e.localsDict(), objects.NewStr("__annotations__"))
 		_ = err
 		_ = ann_dict
 		if err < 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		if ann_dict == nil {
 			ann_dict = e.dictNew()
 			if ann_dict == nil {
-				return 0, nil, nil, false, e.error("error")
+				return 0, e.error("error")
 			}
 			err = e.objectSetItem(e.localsDict(), objects.NewStr("__annotations__"), ann_dict)
 			// Py_DECREF: no-op under GC
 			if err != 0 {
-				return 0, nil, nil, false, e.error("error")
+				return 0, e.error("error")
 			}
 		} else {
 			// Py_DECREF: no-op under GC
 		}
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.SET_ADD:
 		set := e.peek(int(oparg-1) + 1)
 		_ = set
@@ -1080,11 +1080,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		err := e.setAddTakeRef(set.AsObject(), v.AsObject())
 		_ = err
 		if err != 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.setPeek(int(oparg-1)+1, set)
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.SET_FUNCTION_ATTRIBUTE:
 		attr_st := e.peek(1)
 		_ = attr_st
@@ -1092,7 +1092,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = func_in
 		// body bail: size_t offset rhs: unexpected token "_Py_FunctionAttributeOffsets" in expression
 		// outputs: func_out
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SET_UPDATE:
 		set := e.peek(int(oparg-1) + 1)
 		_ = set
@@ -1102,11 +1102,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = err
 		iterable.Close()
 		if err < 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.setPeek(int(oparg-1)+1, set)
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.STORE_DEREF:
 		v := e.peek(0)
 		_ = v
@@ -1114,7 +1114,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = cell
 		e.cellSetTakeRef(cell, v.AsObject())
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.STORE_FAST:
 		value := e.peek(0)
 		_ = value
@@ -1123,7 +1123,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.setLocal(int(oparg), value)
 		tmp.Close()
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.STORE_FAST_LOAD_FAST:
 		value1 := e.peek(0)
 		_ = value1
@@ -1139,7 +1139,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		tmp.Close()
 		e.drop(1)
 		e.push(value2)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.STORE_FAST_STORE_FAST:
 		value2 := e.peek(1)
 		_ = value2
@@ -1157,7 +1157,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		e.setLocal(int(oparg2), value2)
 		tmp.Close()
 		e.drop(1 + 1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.STORE_GLOBAL:
 		v := e.peek(0)
 		_ = v
@@ -1167,10 +1167,10 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = err
 		v.Close()
 		if err != 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.STORE_NAME:
 		v := e.peek(0)
 		_ = v
@@ -1183,7 +1183,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		if ns == nil {
 			e.setPendingErr("SystemError")
 			v.Close()
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		if objects.IsExactDict(ns) {
 			err = e.dictSetItem(ns, name, v.AsObject())
@@ -1192,10 +1192,10 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		}
 		v.Close()
 		if err != 0 {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		e.drop(1)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.SWAP:
 		bottom := e.peek(int(oparg-2) + 1)
 		_ = bottom
@@ -1207,7 +1207,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		top = temp
 		e.setPeek(int(oparg-2)+1, bottom)
 		e.setPeek(0, top)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.UNARY_INVERT:
 		value := e.peek(0)
 		_ = value
@@ -1216,12 +1216,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = res_o
 		value.Close()
 		if res_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		res = stackref.FromObject(res_o)
 		e.drop(1)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.UNARY_NEGATIVE:
 		value := e.peek(0)
 		_ = value
@@ -1230,12 +1230,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = res_o
 		value.Close()
 		if res_o == nil {
-			return 0, nil, nil, false, e.error("error")
+			return 0, e.error("error")
 		}
 		res = stackref.FromObject(res_o)
 		e.drop(1)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.UNARY_NOT:
 		value := e.peek(0)
 		_ = value
@@ -1247,13 +1247,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		}
 		e.drop(1)
 		e.push(res)
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 	case compile.UNPACK_EX:
 		seq := e.peek(0)
 		_ = seq
 		// body bail: non-passthrough sized output not yet handled by action translator
 		// outputs: _out0[oparg & 0xFF] _out1 _out2[oparg >> 8] top[0]
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.WITH_EXCEPT_START:
 		exit_func := e.peek(1 + 1 + 1 + 1)
 		_ = exit_func
@@ -1265,13 +1265,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = val
 		// body bail: expected '=' after PyObject exc
 		// outputs: exit_func* exit_self* lasti* _out3* val* res
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.YIELD_VALUE:
 		retval := e.peek(0)
 		_ = retval
 		// body bail: unrecognized token at action body start: "frame"
 		// outputs: value
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	}
-	return 0, nil, nil, false, opcodeNotImplemented(op)
+	return 0, opcodeNotImplemented(op)
 }

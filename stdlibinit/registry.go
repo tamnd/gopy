@@ -159,6 +159,14 @@ import (
 	// CPython: Modules/_csv.c:1423 _csv_exec
 	_ "github.com/tamnd/gopy/module/_csv"
 
+	// Built-in module: _elementtree. Registers itself via
+	// module/_elementtree/module.go init(). C accelerator backing
+	// xml.etree.ElementTree. Phase 1 publishes ParseError, Element,
+	// and SubElement; the TreeBuilder + XMLParser + ElementPath
+	// integration land in later phases.
+	// CPython: Modules/_elementtree.c:4495 module_exec
+	_ "github.com/tamnd/gopy/module/_elementtree"
+
 	// Built-in module: _string. Registers itself via
 	// module/_string/module.go init(). Exposes formatter_parser and
 	// formatter_field_name_split, the two low-level helpers consumed by
@@ -276,4 +284,18 @@ import (
 	// dumps / loads / dump / load entry points plus the version constant.
 	// CPython: Python/marshal.c:1949 marshal_methods
 	_ "github.com/tamnd/gopy/module/marshal"
+
+	// Built-in module: _pickle. Registers itself via
+	// module/_pickle/module.go init(). Publishes the full surface
+	// pickle.py reaches for in its C-accelerator try block:
+	// HIGHEST_PROTOCOL / DEFAULT_PROTOCOL, PickleError /
+	// PicklingError / UnpicklingError, dump / dumps / load / loads,
+	// and the Pickler / Unpickler classes. With these in place the
+	// `from _pickle import (...)` at pickle.py:1888 resolves and
+	// pickle.dumps / pickle.loads route through the Go encoder /
+	// decoder on every call. PickleBuffer (out-of-band buffers) is
+	// still deferred, pickle.py wraps that import in its own try /
+	// except so its absence is fine.
+	// CPython: Modules/_pickle.c:7700 _pickle_exec
+	_ "github.com/tamnd/gopy/module/_pickle"
 )

@@ -446,6 +446,32 @@ linters:
           - gocritic
           - gocognit
           - gocyclo
+      # BytesCtor mirrors CPython's bytes_new_impl dispatch on the
+      # source/encoding combinations; the branch tree is the parity
+      # unit with Objects/bytesobject.c.
+      - path: builtins/ctor\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # strFormatExpand ports CPython's PyUnicode_Format conversion
+      # loop branch-for-branch.
+      - path: objects/str_bind\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # UnicodeWriter.PrepareInternal mirrors _PyUnicodeWriter_PrepareInternal
+      # branch-for-branch; the alias / kind-upgrade / grow tree is the
+      # parity unit with Objects/unicodeobject.c.
+      - path: objects/unicode_writer\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # specializeInstanceLoadAttr mirrors specialize_instance_load_attr's
+      # branch tree in Python/specialize.c case-for-case.
+      - path: specialize/load_attr\.go
+        linters:
+          - gocognit
+          - gocyclo
 
 formatters:
   enable:

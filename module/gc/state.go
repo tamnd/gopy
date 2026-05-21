@@ -117,6 +117,26 @@ type gcState struct {
 	// at the start and end of every cycle; user code can mutate the
 	// list directly through the module attribute.
 	callbacks *objects.List
+
+	// collecting is the re-entrancy guard mirrored from
+	// gcstate->collecting in CPython. _PyObject_GC_Link refuses to
+	// schedule a new automatic collection while this flag is set, so
+	// finalizers that allocate new objects do not recurse into the
+	// collector.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h gcstate.collecting
+	collecting bool
+
+	// longLivedPending counts gen-1 survivors waiting to be promoted
+	// into gen-2 on the next full collection. longLivedTotal tracks
+	// the total long-lived population. selectGeneration uses the
+	// pending/total ratio to gate full collections, matching the
+	// quadratic-cost heuristic from issue #4074.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h gcstate.long_lived_pending
+	// CPython: Include/internal/pycore_interp_structs.h gcstate.long_lived_total
+	longLivedPending int
+	longLivedTotal   int
 }
 
 // state is the single package-level collector state. The v0.3

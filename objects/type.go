@@ -195,6 +195,62 @@ type Type struct {
 	//
 	// CPython: Include/internal/pycore_typeobject.h tp_version_tag
 	versionTag uint32
+
+	// cachedKeys mirrors PyHeapTypeObject.ht_cached_keys: the union of
+	// attribute names ever observed in an instance's __dict__. The
+	// LOAD_ATTR_*_WITH_VALUES specializer arms refuse to fire for any
+	// name in this set, because such names can shadow class-level
+	// descriptors. Populated lazily by instanceSetAttr.
+	//
+	// CPython: Include/cpython/typeobject.h ht_cached_keys
+	cachedKeys map[string]bool
+
+	// sharedKeys is the real PyDictKeysObject shared by every split
+	// __dict__ allocated for an instance of this type. AddCachedKey
+	// lazily allocates it and extends it in place via AddKey; the
+	// table never resizes (NewSplitDict copies sk.entries's slice
+	// header into d.entries, so a reallocation would orphan attached
+	// dicts). When the table fills, AddCachedKey stops extending and
+	// new keys fall through the dictInsertSplit materialize path.
+	//
+	// CPython: Include/cpython/typeobject.h ht_cached_keys
+	sharedKeys *SharedKeys
+
+	// cachedKeysVersion is the dk_version of cachedKeys. Bumps on
+	// every additive change so caches stamped before the change
+	// invalidate. 0 means "not yet allocated or invalidated".
+	//
+	// CPython: Include/internal/pycore_dict.h dk_version
+	cachedKeysVersion uint32
+
+	// tpWatched mirrors CPython's PyTypeObject.tp_watched: an 8-bit
+	// mask, one bit per registered type watcher. PyType_Watch sets
+	// the bit, PyType_Unwatch clears it, type_modified_unlocked
+	// scans it on every mutation. Keeping the subscription on the
+	// type (rather than on a per-watcher pointer set) puts the
+	// "anyone watching?" check on a single load and bitwise-and.
+	//
+	// CPython: Include/cpython/object.h:234 tp_watched
+	tpWatched uint8
+
+	// specCacheInit mirrors PyHeapTypeObject._spec_cache.init: the
+	// __init__ Function pointer the adaptive specializer caches when
+	// it picks CALL_ALLOC_AND_ENTER_INIT for the class. The fast arm
+	// dereferences this directly instead of re-walking the MRO for
+	// "__init__" on every call. Cleared by InvalidateVersionTag along
+	// with specCacheInitVersion so a class mutation forces a re-cache.
+	//
+	// CPython: Include/internal/pycore_typeobject.h _spec_cache.init
+	specCacheInit *Function
+
+	// specCacheInitVersion mirrors PyHeapTypeObject._spec_cache.init_version:
+	// the tp_version_tag captured at the moment specCacheInit was
+	// stashed. The fast arm compares this against the live version
+	// tag in cache cells 2-3; mismatch deopts. Cleared with the
+	// version tag on type mutation.
+	//
+	// CPython: Include/internal/pycore_typeobject.h _spec_cache.init_version
+	specCacheInitVersion uint32
 }
 
 // Visitor is the visitproc shape passed to TpTraverse. CPython's
@@ -210,7 +266,113 @@ type Visitor func(Object) error
 const (
 	TpFlagMapping  uint64 = 1 << 6
 	TpFlagSequence uint64 = 1 << 5
+	// TpFlagInlineValues mirrors Py_TPFLAGS_INLINE_VALUES. Set on heap
+	// types whose instances begin life with a PyDictValues block stored
+	// inline at tp_basicsize. The adaptive specializer keys its
+	// LOAD_ATTR_METHOD_WITH_VALUES / NONDESCRIPTOR_WITH_VALUES arms on
+	// this bit.
+	//
+	// CPython: Include/object.h:518 Py_TPFLAGS_INLINE_VALUES
+	TpFlagInlineValues uint64 = 1 << 2
+	// TpFlagManagedDict mirrors Py_TPFLAGS_MANAGED_DICT. Set on heap
+	// types whose instances carry their __dict__ in a managed slot at
+	// MANAGED_DICT_OFFSET rather than via tp_dictoffset. Gates the
+	// LOAD_ATTR_METHOD_LAZY_DICT arm.
+	//
+	// CPython: Include/object.h:528 Py_TPFLAGS_MANAGED_DICT
+	TpFlagManagedDict uint64 = 1 << 4
 )
+
+// HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.
+//
+// CPython: Include/object.h:518 Py_TPFLAGS_INLINE_VALUES
+func (t *Type) HasInlineValues() bool {
+	return t.TpFlags&TpFlagInlineValues != 0
+}
+
+// HasManagedDict reports whether t carries Py_TPFLAGS_MANAGED_DICT.
+//
+// CPython: Include/object.h:528 Py_TPFLAGS_MANAGED_DICT
+func (t *Type) HasManagedDict() bool {
+	return t.TpFlags&TpFlagManagedDict != 0
+}
+
+// CachedKeysVersion returns the cached_keys version, allocating a
+// fresh value on first read. Mirrors PyHeapTypeObject.ht_cached_keys
+// dk_version: the specializer stamps this into LOAD_ATTR_*_WITH_VALUES
+// caches and the fast arm rejects on mismatch (i.e. when a new
+// attribute name was added to any instance's dict).
+//
+// CPython: Include/internal/pycore_dict.h dk_version
+func (t *Type) CachedKeysVersion() uint32 {
+	if t.cachedKeysVersion != 0 {
+		return t.cachedKeysVersion
+	}
+	v := allocDictKeysVersion()
+	if v == 0 {
+		return 0
+	}
+	t.cachedKeysVersion = v
+	return v
+}
+
+// InvalidateCachedKeysVersion zeroes t.cachedKeysVersion so the next
+// CachedKeysVersion call allocates a fresh value. Called by
+// AddCachedKey when a new attribute name enters the shared-keys set.
+//
+// CPython: Objects/dictobject.c:739 dictkeys_modified
+func (t *Type) InvalidateCachedKeysVersion() {
+	t.cachedKeysVersion = 0
+}
+
+// HasCachedKey reports whether name has ever been observed as an
+// instance attribute on t (or any subclass that bubbled it up).
+// The specializer uses this to refuse WITH_VALUES specialization for
+// names that an instance might shadow.
+//
+// CPython: Objects/dictobject.c:5132 insert_split_key (shared-keys insertion)
+func (t *Type) HasCachedKey(name string) bool {
+	if t.cachedKeys == nil {
+		return false
+	}
+	_, ok := t.cachedKeys[name]
+	return ok
+}
+
+// AddCachedKey records name in the shared-keys set and bumps
+// cached_keys_version. No-op when name is already known. Called from
+// instanceSetAttr the first time a given attribute name is stored on
+// any instance.
+//
+// Also extends t.sharedKeys in place via AddKey so future instances
+// of t can allocate a split __dict__ whose splitValues array already
+// includes this slot. When the shared table is full (or hashing the
+// name fails) the extension silently fails and instances that need
+// the new key will materialize through dictInsertSplit instead.
+//
+// CPython: Objects/dictobject.c:1832 insert_split_key
+func (t *Type) AddCachedKey(name string) {
+	if t.cachedKeys == nil {
+		t.cachedKeys = map[string]bool{}
+	}
+	if t.cachedKeys[name] {
+		return
+	}
+	t.cachedKeys[name] = true
+	if t.sharedKeys == nil {
+		t.sharedKeys = NewEmptySharedKeys()
+	}
+	t.sharedKeys.AddKey(name)
+	t.InvalidateCachedKeysVersion()
+}
+
+// SharedKeys returns the per-type shared keys table, or nil when no
+// instance attribute has been observed yet. Used by NewInstance to
+// decide whether a freshly built __dict__ can attach as a split dict
+// or has to fall back to combined.
+//
+// CPython: Include/cpython/typeobject.h ht_cached_keys
+func (t *Type) SharedKeys() *SharedKeys { return t.sharedKeys }
 
 // typeType is the type of Type itself. Lazily initialized on first
 // use to break the bootstrap cycle (Type.Header.typ == typeType).
@@ -220,7 +382,7 @@ var typeType = &Type{Name: "type"}
 
 func init() {
 	typeType.typ = typeType
-	typeType.refcnt.Store(1)
+	typeType.refcnt = 1
 	// type inherits from object. CPython: Objects/typeobject.c:6361
 	// PyType_Type sets tp_base = &PyBaseObject_Type, which puts object
 	// in type's MRO so metatype lookup of __class__ / __dict__ finds
@@ -262,6 +424,15 @@ func NewType(name string, bases []*Type) *Type {
 		}
 		b.addSubclass(t)
 	}
+	// inherit slots from every ancestor so dispatch can resolve in
+	// one field load. Built-in types that set their own Number /
+	// Sequence / Mapping / Async bundle after NewType returns will
+	// wholesale replace what was inherited here; user types built
+	// through NewUserType run a second pass after their namespace
+	// has populated additional dunders.
+	//
+	// CPython: Objects/typeobject.c:8712 type_ready_inherit
+	inheritSlotsAllMRO(t)
 	return t
 }
 

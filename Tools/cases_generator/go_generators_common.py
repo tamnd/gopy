@@ -215,3 +215,292 @@ def render_macro(name: str, args: tuple[str, ...]) -> str:
             f"Add it to MACRO_BINDINGS or document it in SUBSET.md."
         )
     return binding(args)
+
+
+# ----------------------------------------------------------------------
+# Tier-2 binding overrides
+# ----------------------------------------------------------------------
+#
+# Tier-2 dispatch carries a different receiver vocabulary than
+# Tier-1: methods hang off `*Tier2State` (named `s`), and the
+# instruction handle is the local `inst *UOPInstruction`. The
+# overrides here mirror what Tier2Emitter does on the C side
+# (tools/cases_generator/tier2_generator.py:61-133): rewrite
+# `DEOPT_IF` / `EXIT_IF` into a jump back to the trace's
+# JUMP_TO_JUMP_TARGET helper, and erase the family argument the
+# base emitter passes through.
+#
+# Rows are intentionally additive over `MACRO_BINDINGS`; the
+# `tier2_macro_bindings()` factory below merges them. The Tier-1
+# spelling stays untouched so existing snippet tests pass.
+#
+# Status legend (matches the Tier-1 table above):
+#   READY    — the helper exists on *Tier2State today.
+#   STAGED   — helper does not exist yet; B3 (Tier2GoEmitter draft)
+#              adds it before this binding is exercised.
+
+
+def _tier2_peek(args: tuple[str, ...]) -> str:
+    (n,) = args
+    return f"s.peek({n})"
+
+
+def _tier2_poke(args: tuple[str, ...]) -> str:
+    n, v = args
+    return f"s.poke({n}, {v})"
+
+
+def _tier2_stack_grow(args: tuple[str, ...]) -> str:
+    (n,) = args
+    return f"s.Frame.StackTop += {n}"
+
+
+def _tier2_stack_shrink(args: tuple[str, ...]) -> str:
+    (n,) = args
+    return f"s.Frame.StackTop -= {n}"
+
+
+def _tier2_top(_args: tuple[str, ...]) -> str:
+    return "s.peek(0)"
+
+
+def _tier2_second(_args: tuple[str, ...]) -> str:
+    return "s.peek(1)"
+
+
+def _tier2_getlocal(args: tuple[str, ...]) -> str:
+    (i,) = args
+    return f"s.localAt({i})"
+
+
+def _tier2_setlocal(args: tuple[str, ...]) -> str:
+    i, v = args
+    return f"s.setLocal({i}, {v})"
+
+
+def _tier2_jumpby(args: tuple[str, ...]) -> str:
+    (n,) = args
+    return f"s.Frame.InstrPtr += {n}"
+
+
+def _tier2_jumpto(args: tuple[str, ...]) -> str:
+    (t,) = args
+    return f"s.Frame.InstrPtr = {t}"
+
+
+def _tier2_deopt_if(args: tuple[str, ...]) -> str:
+    # Tier2Emitter erases the parent-instruction argument
+    # (tier2_generator.py:73-92), so the binding takes the
+    # condition only. Caller passes the trailing args verbatim
+    # for source parity, we ignore any beyond the first.
+    cond = args[0]
+    return f"if {cond} {{ return s.jumpToJumpTarget(inst) }}"
+
+
+def _tier2_error_if(args: tuple[str, ...]) -> str:
+    # Tier-2 collapses every error label to the JUMP_TO_ERROR
+    # sentinel (ceval.c:1335). On gopy that maps to StatusError.
+    cond = args[0]
+    return f"if {cond} {{ return StatusError }}"
+
+
+def _tier2_current_oparg(_args: tuple[str, ...]) -> str:
+    return "s.Oparg"
+
+
+def _tier2_current_operand0(_args: tuple[str, ...]) -> str:
+    return "inst.Operand0"
+
+
+def _tier2_current_operand1(_args: tuple[str, ...]) -> str:
+    return "inst.Operand1"
+
+
+def _tier2_jump_to_error(_args: tuple[str, ...]) -> str:
+    return "return StatusError"
+
+
+def _tier2_jump_to_jump_target(_args: tuple[str, ...]) -> str:
+    return "return s.jumpToJumpTarget(inst)"
+
+
+def _tier2_within_stack_bounds(_args: tuple[str, ...]) -> str:
+    return "true"
+
+
+def _tier2_stack_level(_args: tuple[str, ...]) -> str:
+    return "s.sp()"
+
+
+def _tier2_load_ip(args: tuple[str, ...]) -> str:
+    (off,) = args
+    return f"s.Frame.InstrPtr += {off}"
+
+
+def _tier2_load_sp(_args: tuple[str, ...]) -> str:
+    return "_ = 0 // LOAD_SP: gopy stack pointer is implicit"
+
+
+def _tier2_skip_over(args: tuple[str, ...]) -> str:
+    (n,) = args
+    return f"s.Frame.InstrPtr += {n}"
+
+
+def _tier2_stat_noop(_args: tuple[str, ...]) -> str:
+    return "_ = 0 // _STAT_INC: gopy has no Tier-2 stats counter"
+
+
+def _tier2_lock_noop(_args: tuple[str, ...]) -> str:
+    return "_ = 0 // LOCK/UNLOCK: gopy is single-threaded GIL build"
+
+
+def _tier2_atomic_load(args: tuple[str, ...]) -> str:
+    # gopy has no free-threaded build; atomic load collapses to
+    # the plain dereference its argument already represents.
+    (target,) = args
+    return target
+
+
+def _tier2_atomic_store(args: tuple[str, ...]) -> str:
+    target, value = args
+    return f"{target} = {value}"
+
+
+def _tier2_stackref_steal(args: tuple[str, ...]) -> str:
+    (r,) = args
+    return f"{r}.AsObject()"
+
+
+def _tier2_stackref_close_specialized(_args: tuple[str, ...]) -> str:
+    return "_ = 0 // PyStackRef_CLOSE_SPECIALIZED: GC no-op"
+
+
+def _tier2_decref_inputs(_args: tuple[str, ...]) -> str:
+    return "_ = 0 // DECREF_INPUTS: GC no-op"
+
+
+def _tier2_inputs_dead(_args: tuple[str, ...]) -> str:
+    return "_ = 0 // INPUTS_DEAD: GC no-op"
+
+
+def _tier2_dead(args: tuple[str, ...]) -> str:
+    (name,) = args
+    return f"_ = {name} // DEAD: stack slot kill, GC no-op"
+
+
+def _tier2_sync_sp(_args: tuple[str, ...]) -> str:
+    return "_ = 0 // SYNC_SP: gopy stack pointer is implicit"
+
+
+def _tier2_save_stack(_args: tuple[str, ...]) -> str:
+    return "_ = 0 // SAVE_STACK: gopy stack pointer is implicit"
+
+
+def _tier2_reload_stack(_args: tuple[str, ...]) -> str:
+    return "_ = 0 // RELOAD_STACK: gopy stack pointer is implicit"
+
+
+def _tier2_stack_pointer(_args: tuple[str, ...]) -> str:
+    return "s.sp()"
+
+
+_TIER2_OVERRIDES: dict[str, _Binding] = {
+    # Stack vocabulary rebound to *Tier2State receiver
+    "PEEK": _tier2_peek,                                # STAGED
+    "POKE": _tier2_poke,                                # STAGED
+    "TOP": _tier2_top,                                  # STAGED
+    "SECOND": _tier2_second,                            # STAGED
+    "STACK_GROW": _tier2_stack_grow,                    # READY
+    "STACK_SHRINK": _tier2_stack_shrink,                # READY
+    "GETLOCAL": _tier2_getlocal,                        # STAGED
+    "SETLOCAL": _tier2_setlocal,                        # STAGED
+    "JUMPBY": _tier2_jumpby,                            # READY
+    "JUMPTO": _tier2_jumpto,                            # READY
+    # Control flow rebound to Tier-2 dispatch helpers
+    "DEOPT_IF": _tier2_deopt_if,                        # READY
+    "EXIT_IF": _tier2_deopt_if,                         # READY (Tier2Emitter aliases)
+    "ERROR_IF": _tier2_error_if,                        # READY
+    # Body-surviving Tier-2 macros
+    "CURRENT_OPARG": _tier2_current_oparg,              # READY
+    "CURRENT_OPERAND0": _tier2_current_operand0,        # READY
+    "CURRENT_OPERAND1": _tier2_current_operand1,        # READY
+    "JUMP_TO_ERROR": _tier2_jump_to_error,              # READY
+    "JUMP_TO_JUMP_TARGET": _tier2_jump_to_jump_target,  # READY
+    "WITHIN_STACK_BOUNDS": _tier2_within_stack_bounds,  # READY
+    "STACK_LEVEL": _tier2_stack_level,                  # STAGED
+    "LOAD_IP": _tier2_load_ip,                          # READY
+    "LOAD_SP": _tier2_load_sp,                          # READY (no-op)
+    "SKIP_OVER": _tier2_skip_over,                      # READY
+    # Stats / locking / atomics collapse to no-ops
+    "STAT_INC": _tier2_stat_noop,                       # READY
+    "UOP_STAT_INC": _tier2_stat_noop,                   # READY
+    "CALL_STAT_INC": _tier2_stat_noop,                  # READY
+    "LLTRACE_RESUME_FRAME": _tier2_stat_noop,           # READY
+    "LOCK_OBJECT": _tier2_lock_noop,                    # READY
+    "UNLOCK_OBJECT": _tier2_lock_noop,                  # READY
+    "QSBR_QUIESCENT_STATE": _tier2_lock_noop,           # READY
+    "FT_ATOMIC_LOAD_PTR": _tier2_atomic_load,           # READY
+    "FT_ATOMIC_LOAD_PTR_ACQUIRE": _tier2_atomic_load,   # READY
+    "FT_ATOMIC_LOAD_PTR_RELAXED": _tier2_atomic_load,   # READY
+    "FT_ATOMIC_LOAD_SSIZE_RELAXED": _tier2_atomic_load, # READY
+    "FT_ATOMIC_LOAD_UINT_RELAXED": _tier2_atomic_load,  # READY
+    "FT_ATOMIC_LOAD_UINT32_RELAXED": _tier2_atomic_load,# READY
+    "FT_ATOMIC_LOAD_UINT8": _tier2_atomic_load,         # READY
+    "FT_ATOMIC_LOAD_UINTPTR_ACQUIRE": _tier2_atomic_load,# READY
+    "FT_ATOMIC_STORE_PTR_RELEASE": _tier2_atomic_store, # READY
+    # Stackref + refcount: Go GC handles lifecycle
+    "PyStackRef_FromPyObjectNew": _stackref_from_new,                  # READY (Tier-1 spelling unchanged)
+    "PyStackRef_AsPyObjectBorrow": _stackref_borrow,                   # READY
+    "PyStackRef_AsPyObjectSteal": _tier2_stackref_steal,               # READY
+    "PyStackRef_CLOSE": _stackref_close,                               # GC_NOOP
+    "PyStackRef_CLOSE_SPECIALIZED": _tier2_stackref_close_specialized, # GC_NOOP
+    "Py_INCREF": _refcount_noop,                        # GC_NOOP
+    "Py_DECREF": _refcount_noop,                        # GC_NOOP
+    "Py_XDECREF": _refcount_noop,                       # GC_NOOP
+    # Emitter-side cleanup macros (storage rewrites)
+    "DECREF_INPUTS": _tier2_decref_inputs,              # READY
+    "INPUTS_DEAD": _tier2_inputs_dead,                  # READY
+    "DEAD": _tier2_dead,                                # READY
+    "SYNC_SP": _tier2_sync_sp,                          # READY
+    "SAVE_STACK": _tier2_save_stack,                    # READY
+    "RELOAD_STACK": _tier2_reload_stack,                # READY
+    "stack_pointer": _tier2_stack_pointer,              # STAGED
+    # Layout
+    "INSTRUCTION_SIZE": _instruction_size,              # READY (literal '2', Tier-1 spelling)
+    "NEXTOPARG": _next_op_arg,                          # READY
+}
+
+
+def tier2_macro_bindings() -> dict[str, _Binding]:
+    """Return the Tier-2 emitter binding table.
+
+    Layered on `MACRO_BINDINGS`: starts with the Tier-1 rows, then
+    applies the Tier-2 overrides. The Tier-2 emitter
+    (Tier2GoEmitter, drafted in spec 1714 phase 8 bucket B3) calls
+    `render_with_bindings(bindings, name, args)` rather than the
+    bare `render_macro` so it picks up these overrides without
+    mutating the Tier-1 table.
+    """
+    table = dict(MACRO_BINDINGS)
+    table.update(_TIER2_OVERRIDES)
+    return table
+
+
+def render_with_bindings(
+    bindings: dict[str, _Binding], name: str, args: tuple[str, ...]
+) -> str:
+    """Render macro `name` against an explicit binding table.
+
+    Mirrors `render_macro` but takes the table as a parameter so
+    Tier-1 vs Tier-2 emitters can both call into the same
+    rendering logic.
+    """
+    try:
+        binding = bindings[name]
+    except KeyError:
+        raise KeyError(
+            f"go_generators_common: macro {name!r} has no Go binding "
+            "in the supplied table. Extend MACRO_BINDINGS / "
+            "_TIER2_OVERRIDES or document the macro in SUBSET.md."
+        )
+    return binding(args)

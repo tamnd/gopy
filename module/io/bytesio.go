@@ -522,13 +522,8 @@ func bytesIOMethod(b *BytesIO, name string) objects.Object {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: write() takes exactly 1 argument (%d given)", len(args))
 			}
-			var data []byte
-			switch v := args[0].(type) {
-			case *objects.Bytes:
-				data = v.Bytes()
-			case *objects.ByteArray:
-				data = v.Bytes()
-			default:
+			data, ok := objects.AsBytesLike(args[0])
+			if !ok {
 				return nil, fmt.Errorf("TypeError: a bytes-like object is required, not '%s'", args[0].Type().Name)
 			}
 			n := b.Write(data)

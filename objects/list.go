@@ -76,11 +76,26 @@ func listTraverse(o Object, visit Visitor) error {
 	return nil
 }
 
-// NewList builds a list from items. The slice is copied.
+// NewList builds a list from items. The slice is copied so callers can
+// keep using or mutating the input.
 //
 // CPython: Objects/listobject.c:L156 PyList_New
 func NewList(items []Object) *List {
 	l := &List{items: append([]Object(nil), items...)}
+	l.init(ListType)
+	l.size = int64(len(items))
+	return l
+}
+
+// newListAdopt wraps an already-fresh items slice as a *List without a
+// defensive copy. The caller must not reuse items after the call.
+// CPython's PyList_New(size) allocates the item vector exactly once;
+// callers that build the vector inline can hand it over instead of
+// going through NewList's copy path.
+//
+// CPython: Objects/listobject.c:L235 PyList_New (single-allocation path)
+func newListAdopt(items []Object) *List {
+	l := &List{items: items}
 	l.init(ListType)
 	l.size = int64(len(items))
 	return l
@@ -151,7 +166,7 @@ func listConcat(a, b Object) (Object, error) {
 	out := make([]Object, 0, len(la.items)+len(lb.items))
 	out = append(out, la.items...)
 	out = append(out, lb.items...)
-	return NewList(out), nil
+	return newListAdopt(out), nil
 }
 
 // listRepeat ports list_repeat: produce a fresh list containing n
@@ -162,13 +177,13 @@ func listConcat(a, b Object) (Object, error) {
 func listRepeat(o Object, n int) (Object, error) {
 	l := o.(*List)
 	if n <= 0 {
-		return NewList(nil), nil
+		return newListAdopt(nil), nil
 	}
 	out := make([]Object, 0, len(l.items)*n)
 	for i := 0; i < n; i++ {
 		out = append(out, l.items...)
 	}
-	return NewList(out), nil
+	return newListAdopt(out), nil
 }
 
 // listInPlaceConcat extends a with b's items. b must be iterable; the
@@ -312,7 +327,7 @@ func listGetSlice(l *List, s *Slice) (Object, error) {
 	for i, idx := 0, start; i < slicelen; i, idx = i+1, idx+step {
 		out[i] = l.items[idx]
 	}
-	return NewList(out), nil
+	return newListAdopt(out), nil
 }
 
 // listSetSlice replaces l[start:stop:step] with the values produced by
@@ -326,19 +341,12 @@ func listSetSlice(l *List, s *Slice, v Object) error {
 	if err != nil {
 		return err
 	}
+	if step == 1 {
+		return listAssSlice(l, start, stop, v)
+	}
 	src, err := drainIterableForSlice(v)
 	if err != nil {
 		return err
-	}
-	if step == 1 {
-		newLen := start + len(src) + (len(l.items) - stop)
-		out := make([]Object, 0, newLen)
-		out = append(out, l.items[:start]...)
-		out = append(out, src...)
-		out = append(out, l.items[stop:]...)
-		l.items = out
-		l.size = int64(len(l.items))
-		return nil
 	}
 	if len(src) != slicelen {
 		return fmt.Errorf("ValueError: attempt to assign sequence of size %d to extended slice of size %d", len(src), slicelen)
@@ -347,6 +355,100 @@ func listSetSlice(l *List, s *Slice, v Object) error {
 		l.items[idx] = src[i]
 	}
 	return nil
+}
+
+// listAssSlice ports list_ass_slice for the step==1 path. Equal-size
+// assignment writes the n items directly into the existing backing
+// array (no allocation); shrink and grow paths resize in place and use
+// copy() instead of building a fresh slice from three appends.
+//
+// CPython: Objects/listobject.c:892 list_ass_slice_lock_held
+// CPython: Objects/listobject.c:993 list_ass_slice
+func listAssSlice(l *List, ilow, ihigh int, v Object) error {
+	if v == Object(l) {
+		// Aliased self-assign: copy v first, matching CPython's
+		// list_ass_slice fall-through that calls list_slice_lock_held
+		// to capture the source before overwriting the target.
+		dup := make([]Object, len(l.items))
+		copy(dup, l.items)
+		return listAssSliceItems(l, ilow, ihigh, dup)
+	}
+	var src []Object
+	switch t := v.(type) {
+	case nil:
+		// nil v means delete.
+	case *List:
+		src = t.items
+	case *Tuple:
+		src = t.items
+	default:
+		drained, err := drainIterableForSlice(v)
+		if err != nil {
+			return err
+		}
+		src = drained
+	}
+	return listAssSliceItems(l, ilow, ihigh, src)
+}
+
+// listAssSliceItems is the in-place body of list_ass_slice once v has
+// been resolved into a flat items slice. items may alias neither l.items
+// nor any region that overlaps with the [ilow:ihigh] range.
+func listAssSliceItems(l *List, ilow, ihigh int, items []Object) error {
+	n := len(items)
+	if ilow < 0 {
+		ilow = 0
+	} else if ilow > len(l.items) {
+		ilow = len(l.items)
+	}
+	if ihigh < ilow {
+		ihigh = ilow
+	} else if ihigh > len(l.items) {
+		ihigh = len(l.items)
+	}
+	norig := ihigh - ilow
+	d := n - norig
+	if d == 0 {
+		// Equal-size replacement: store directly into existing slots.
+		if n > 0 {
+			copy(l.items[ilow:ihigh], items)
+		}
+		return nil
+	}
+	if d < 0 {
+		// Shrink: shift tail left, then truncate.
+		copy(l.items[ihigh+d:], l.items[ihigh:])
+		l.items = l.items[:len(l.items)+d]
+	} else {
+		// Grow: extend by d, then shift tail right.
+		newLen := len(l.items) + d
+		if cap(l.items) >= newLen {
+			l.items = l.items[:newLen]
+		} else {
+			grown := make([]Object, newLen, growCap(newLen))
+			copy(grown, l.items[:ilow])
+			copy(grown[ihigh+d:], l.items[ihigh:])
+			l.items = grown
+			l.size = int64(len(l.items))
+			if n > 0 {
+				copy(l.items[ilow:], items)
+			}
+			return nil
+		}
+		copy(l.items[ihigh+d:], l.items[ihigh:newLen-d])
+	}
+	if n > 0 {
+		copy(l.items[ilow:ilow+n], items)
+	}
+	l.size = int64(len(l.items))
+	return nil
+}
+
+// growCap mirrors list_resize's growth schedule (newLen + newLen/8 + 6).
+//
+// CPython: Objects/listobject.c:74 list_resize
+func growCap(n int) int {
+	return n + (n >> 3) + 6
 }
 
 // listDelSlice removes l[start:stop:step] in place.
@@ -486,4 +588,28 @@ func listIter(o Object) (Object, error) {
 	it := &listIterator{src: o.(*List)}
 	it.init(listIterType)
 	return it, nil
+}
+
+// ListIterNextFast advances o as a list_iterator without going through
+// the type-table tp_iternext indirection. Returns the next value, or
+// (nil, true) on exhaustion. ok=false means o was not exactly a
+// list_iterator and the FOR_ITER_LIST fast arm must deopt.
+//
+// On exhaustion the function nulls it.src so a re-entered FOR_ITER on
+// the dead iterator releases its grip on the source list, mirroring
+// CPython's `it->it_seq = NULL; Py_DECREF(seq);` in _ITER_JUMP_LIST.
+//
+// CPython: Python/bytecodes.c _ITER_CHECK_LIST + _ITER_JUMP_LIST + _ITER_NEXT_LIST
+func ListIterNextFast(o Object) (value Object, exhausted bool, ok bool) {
+	it, asserted := o.(*listIterator)
+	if !asserted || it.Type() != listIterType {
+		return nil, false, false
+	}
+	if it.src == nil || it.pos >= len(it.src.items) {
+		it.src = nil
+		return nil, true, true
+	}
+	v := it.src.items[it.pos]
+	it.pos++
+	return v, false, true
 }

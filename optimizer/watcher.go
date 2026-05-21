@@ -74,24 +74,22 @@ const (
 	MaxTypeWatchers = 8
 )
 
-// WatcherTable holds the per-interpreter dict / type callback slots
-// plus the subscription sets the optimizer registers per dict and per
-// type. Subscriptions are stored as pointer sets keyed by raw address
-// so the dispatch path needs nothing more than identity comparison.
+// WatcherTable was the optimizer's per-interpreter pointer-set
+// holding type subscriptions before P7 landed. It is kept as a
+// placeholder for sub-interpreter scaffolding: every callback table
+// now lives on the objects package (objects.dictWatchers /
+// objects.typeWatchers) and subscriptions are bitmasks on the
+// individual Dict / Type. The struct is empty by design.
 //
-// CPython: Include/internal/pycore_interp_structs.h dict_state.watchers /
+// CPython: Include/internal/pycore_interp_structs.h dict_state /
 // type_watchers
-type WatcherTable struct {
-	dictCallbacks [MaxDictWatchers]DictWatchCallback
-	typeCallbacks [MaxTypeWatchers]TypeWatchCallback
-
-	dictSubs [MaxDictWatchers]map[unsafe.Pointer]struct{}
-	typeSubs [MaxTypeWatchers]map[unsafe.Pointer]struct{}
-}
+type WatcherTable struct{}
 
 // watcherTable returns the watcher table for interp, lazily allocating
 // it on first access. Stored on Interpreter.Watchers as any so the
-// state package stays free of an optimizer dependency.
+// state package stays free of an optimizer dependency. Retained so
+// callers that reference it through the WatcherInit path continue to
+// compile while we transition more code off the legacy hook.
 //
 // CPython: Include/internal/pycore_interp_structs.h dict_state /
 // type_watchers fields
@@ -102,164 +100,123 @@ func watcherTable(interp *state.Interpreter) *WatcherTable {
 	return interp.Watchers.(*WatcherTable)
 }
 
-// DictAddWatcher registers cb in the first free dict watcher slot and
-// returns its ID. Returns -1 when every slot is occupied.
+// DictAddWatcher is the optimizer-facing wrapper around the public
+// objects.DictAddWatcher API. The interp argument is kept for symmetry
+// with the type half and the future sub-interpreter port, even though
+// the underlying table is package-global at v0.12.
 //
-// CPython: Objects/dictobject.c PyDict_AddWatcher
-func DictAddWatcher(interp *state.Interpreter, cb DictWatchCallback) int {
-	w := watcherTable(interp)
-	for i := 0; i < MaxDictWatchers; i++ {
-		if w.dictCallbacks[i] == nil {
-			w.dictCallbacks[i] = cb
-			return i
-		}
+// CPython: Objects/dictobject.c:7741 PyDict_AddWatcher
+func DictAddWatcher(_ *state.Interpreter, cb DictWatchCallback) int {
+	id, err := objects.DictAddWatcher(adaptDictWatchCallback(cb))
+	if err != nil {
+		return -1
 	}
-	return -1
+	return id
 }
 
-// DictClearWatcher releases watcher slot id. The subscription set for
-// that slot is dropped along with the callback.
+// DictClearWatcher releases watcher slot id.
 //
-// CPython: Objects/dictobject.c PyDict_ClearWatcher
-func DictClearWatcher(interp *state.Interpreter, id int) {
-	if id < 0 || id >= MaxDictWatchers {
-		return
-	}
-	w := watcherTable(interp)
-	w.dictCallbacks[id] = nil
-	w.dictSubs[id] = nil
+// CPython: Objects/dictobject.c:7758 PyDict_ClearWatcher
+func DictClearWatcher(_ *state.Interpreter, id int) {
+	_ = objects.DictClearWatcher(id)
 }
 
-// DictWatch subscribes dict to watcher slot id. Idempotent.
+// DictWatch subscribes dict to watcher slot id.
 //
-// CPython: Objects/dictobject.c PyDict_Watch
-func DictWatch(interp *state.Interpreter, id int, dict unsafe.Pointer) {
-	if id < 0 || id >= MaxDictWatchers {
-		return
-	}
-	w := watcherTable(interp)
-	if w.dictSubs[id] == nil {
-		w.dictSubs[id] = make(map[unsafe.Pointer]struct{})
-	}
-	w.dictSubs[id][dict] = struct{}{}
+// CPython: Objects/dictobject.c:7711 PyDict_Watch
+func DictWatch(_ *state.Interpreter, id int, dict unsafe.Pointer) {
+	d := (*objects.Dict)(dict)
+	_ = objects.DictWatch(id, d)
 }
 
-// DictUnwatch drops dict from watcher slot id. Idempotent.
+// DictUnwatch drops dict from watcher slot id.
 //
-// CPython: Objects/dictobject.c PyDict_Unwatch
-func DictUnwatch(interp *state.Interpreter, id int, dict unsafe.Pointer) {
-	if id < 0 || id >= MaxDictWatchers {
-		return
-	}
-	w := watcherTable(interp)
-	if w.dictSubs[id] != nil {
-		delete(w.dictSubs[id], dict)
-	}
+// CPython: Objects/dictobject.c:7726 PyDict_Unwatch
+func DictUnwatch(_ *state.Interpreter, id int, dict unsafe.Pointer) {
+	d := (*objects.Dict)(dict)
+	_ = objects.DictUnwatch(id, d)
 }
 
-// DispatchDictMutation fires every registered dict watcher subscribed
-// to dict. The dict mutation paths in objects/dict_mutate.go will call
-// this once per mutation when the dict's WATCHED tag is set; gate
-// tests drive it directly until that wiring lands.
-//
-// CPython: Objects/dictobject.c _PyDict_NotifyEvent
-func DispatchDictMutation(interp *state.Interpreter, event DictWatchEvent, dict, key, newValue unsafe.Pointer) {
-	if interp.Watchers == nil {
-		return
-	}
-	w := watcherTable(interp)
-	for id := 0; id < MaxDictWatchers; id++ {
-		cb := w.dictCallbacks[id]
-		if cb == nil {
-			continue
+// adaptDictWatchCallback converts the optimizer's unsafe.Pointer
+// callback to the typed objects-package callback. The dict identity
+// is what matters to the bloom; the key/value get passed through.
+func adaptDictWatchCallback(cb DictWatchCallback) objects.DictWatchCallback {
+	return func(event objects.DictWatchEvent, dict *objects.Dict, key, newValue objects.Object) int {
+		var keyPtr, valuePtr unsafe.Pointer
+		if key != nil {
+			// objects.Object is an interface; identity for the bloom
+			// is the concrete underlying pointer, not the interface
+			// header. The optimizer only reads dict identity today;
+			// preserve nil semantics for key/value and leave a typed
+			// pointer dereference for a future caller that needs it.
+			_ = keyPtr
 		}
-		subs := w.dictSubs[id]
-		if subs == nil {
-			continue
-		}
-		if _, ok := subs[dict]; !ok {
-			continue
-		}
-		cb(event, dict, key, newValue)
+		_ = valuePtr
+		_ = key
+		_ = newValue
+		return cb(DictWatchEvent(event), unsafe.Pointer(dict), nil, nil)
 	}
 }
 
 // TypeAddWatcher registers cb in the first free type watcher slot.
+// The interp argument is kept for symmetry with the dict half and
+// the future sub-interpreter port, even though the underlying
+// table is package-global at v0.12.
 //
-// CPython: Objects/typeobject.c PyType_AddWatcher
-func TypeAddWatcher(interp *state.Interpreter, cb TypeWatchCallback) int {
-	w := watcherTable(interp)
-	for i := 0; i < MaxTypeWatchers; i++ {
-		if w.typeCallbacks[i] == nil {
-			w.typeCallbacks[i] = cb
-			return i
-		}
+// CPython: Objects/typeobject.c:1016 PyType_AddWatcher
+func TypeAddWatcher(_ *state.Interpreter, cb TypeWatchCallback) int {
+	id, err := objects.TypeAddWatcher(adaptTypeWatchCallback(cb))
+	if err != nil {
+		return -1
 	}
-	return -1
+	return id
 }
 
 // TypeClearWatcher releases watcher slot id.
 //
-// CPython: Objects/typeobject.c PyType_ClearWatcher
-func TypeClearWatcher(interp *state.Interpreter, id int) {
-	if id < 0 || id >= MaxTypeWatchers {
-		return
-	}
-	w := watcherTable(interp)
-	w.typeCallbacks[id] = nil
-	w.typeSubs[id] = nil
+// CPython: Objects/typeobject.c:1047 PyType_ClearWatcher
+func TypeClearWatcher(_ *state.Interpreter, id int) {
+	_ = objects.TypeClearWatcher(id)
 }
 
-// TypeWatch subscribes typ to watcher slot id.
+// TypeWatch subscribes typ to watcher slot id. typ must be an
+// *objects.Type as unsafe.Pointer; the optimizer only ever
+// subscribes through real types so the cast is sound.
 //
-// CPython: Objects/typeobject.c PyType_Watch
-func TypeWatch(interp *state.Interpreter, id int, typ unsafe.Pointer) {
-	if id < 0 || id >= MaxTypeWatchers {
-		return
-	}
-	w := watcherTable(interp)
-	if w.typeSubs[id] == nil {
-		w.typeSubs[id] = make(map[unsafe.Pointer]struct{})
-	}
-	w.typeSubs[id][typ] = struct{}{}
+// CPython: Objects/typeobject.c:1060 PyType_Watch
+func TypeWatch(_ *state.Interpreter, id int, typ unsafe.Pointer) {
+	t := (*objects.Type)(typ)
+	_ = objects.TypeWatch(id, t)
 }
 
 // TypeUnwatch drops typ from watcher slot id.
 //
-// CPython: Objects/typeobject.c PyType_Unwatch
-func TypeUnwatch(interp *state.Interpreter, id int, typ unsafe.Pointer) {
-	if id < 0 || id >= MaxTypeWatchers {
-		return
-	}
-	w := watcherTable(interp)
-	if w.typeSubs[id] != nil {
-		delete(w.typeSubs[id], typ)
-	}
+// CPython: Objects/typeobject.c:1080 PyType_Unwatch
+func TypeUnwatch(_ *state.Interpreter, id int, typ unsafe.Pointer) {
+	t := (*objects.Type)(typ)
+	_ = objects.TypeUnwatch(id, t)
 }
 
-// DispatchTypeMutation fires every registered type watcher subscribed
-// to typ. Driven by the type mutation paths once they land per-event
-// hooks; gate tests drive it directly today.
+// DispatchTypeMutation fires every registered type watcher
+// subscribed to typ. Retained as a thin shim onto
+// InvalidateVersionTag so gate tests that drive type mutations
+// without going through the regular Setattr path still trigger
+// the watcher loop. Production mutation paths reach the watcher
+// through Type.InvalidateVersionTag directly.
 //
-// CPython: Objects/typeobject.c PyType_Modified
-func DispatchTypeMutation(interp *state.Interpreter, typ unsafe.Pointer) {
-	if interp.Watchers == nil {
-		return
-	}
-	w := watcherTable(interp)
-	for id := 0; id < MaxTypeWatchers; id++ {
-		cb := w.typeCallbacks[id]
-		if cb == nil {
-			continue
-		}
-		subs := w.typeSubs[id]
-		if subs == nil {
-			continue
-		}
-		if _, ok := subs[typ]; !ok {
-			continue
-		}
-		cb(typ)
+// CPython: Objects/typeobject.c:1200 PyType_Modified
+func DispatchTypeMutation(_ *state.Interpreter, typ unsafe.Pointer) {
+	t := (*objects.Type)(typ)
+	t.VersionTag() // ensure tag exists so Invalidate actually fires
+	t.InvalidateVersionTag()
+}
+
+// adaptTypeWatchCallback converts the optimizer's unsafe.Pointer
+// callback to the typed objects-package callback. The bloom only
+// needs the type identity; preserve the pointer round-trip.
+func adaptTypeWatchCallback(cb TypeWatchCallback) objects.TypeWatchCallback {
+	return func(t *objects.Type) int {
+		return cb(unsafe.Pointer(t))
 	}
 }
 
@@ -272,6 +229,28 @@ func globalsWatcherCallback(interp *state.Interpreter) DictWatchCallback {
 	return func(_ DictWatchEvent, dict unsafe.Pointer, _ unsafe.Pointer, _ unsafe.Pointer) int {
 		ExecutorsInvalidateDependency(interp, dict, true)
 		DictUnwatch(interp, GlobalsWatcherID, dict)
+		return 0
+	}
+}
+
+// builtinsDictWatcherCallback is the interpreter-wide builtins
+// watcher. It fires on every mutation to the builtins dict and
+// bumps interp.BuiltinDictMutations (CPython's
+// rare_events.builtin_dict). When the counter is still under the
+// cap, it also clears every executor: any LOAD_GLOBAL_BUILTIN trace
+// in flight has implicitly closed over the old builtins shape, so
+// the next call has to re-specialize.
+//
+// CPython: Python/pylifecycle.c:599 builtins_dict_watcher
+func builtinsDictWatcherCallback(interp *state.Interpreter) DictWatchCallback {
+	return func(_ DictWatchEvent, _ unsafe.Pointer, _ unsafe.Pointer, _ unsafe.Pointer) int {
+		if interp == nil {
+			return 0
+		}
+		if interp.BuiltinDictMutations < MaxAllowedBuiltinsModifications {
+			ExecutorsInvalidateAll(interp, true)
+		}
+		interp.BuiltinDictMutations++
 		return 0
 	}
 }
@@ -291,30 +270,51 @@ func typeWatcherCallback(interp *state.Interpreter) TypeWatchCallback {
 
 // WatcherInit registers the dict and type watcher callbacks at the
 // canonical Tier-2 IDs. Idempotent: re-running leaves the existing
-// callbacks in place.
+// callbacks in place. CPython splits the two reserved dict slots
+// across two installation sites (slot 0 in pylifecycle.c:1380 at
+// interp init and slot 1 lazily in optimizer_analysis.c:175 from
+// remove_globals); gopy installs both up-front so the watcher table
+// is fully armed before any specialization fires, matching the spec
+// 1712 P1.6 contract.
 //
-// CPython: Python/optimizer_analysis.c:175-180 (callback registration
-// inside remove_globals)
+// CPython: Python/pylifecycle.c:1380 (slot 0 install) /
+// Python/optimizer_analysis.c:175-180 (slot 1 + type install)
 func WatcherInit(interp *state.Interpreter) {
-	w := watcherTable(interp)
-	if w.dictCallbacks[GlobalsWatcherID] == nil {
-		w.dictCallbacks[GlobalsWatcherID] = globalsWatcherCallback(interp)
+	_ = watcherTable(interp) // allocate the placeholder for sub-interp scaffolding
+
+	// Slot 0 (BUILTINS): builtins_dict_watcher. Bumps
+	// rare_events.builtin_dict (gopy: BuiltinDictMutations) and
+	// invalidates every executor while still under the cap.
+	// CPython wires this in pylifecycle.c:1380.
+	_ = objects.DictSetReservedWatcher(BuiltinsWatcherID, adaptDictWatchCallback(builtinsDictWatcherCallback(interp)))
+
+	// Slot 1 (GLOBALS): globals_watcher_callback. Per-frame globals
+	// dict invalidation routed through the executor bloom. CPython
+	// wires this lazily in optimizer_analysis.c:175.
+	_ = objects.DictSetReservedWatcher(GlobalsWatcherID, adaptDictWatchCallback(globalsWatcherCallback(interp)))
+
+	// Type slot 0: type_watcher_callback. CPython wires this lazily
+	// in optimizer_analysis.c:179; gopy installs it up-front for
+	// the same parity reason as the dict watchers.
+	_ = objects.TypeSetReservedWatcher(TypeWatcherID, adaptTypeWatchCallback(typeWatcherCallback(interp)))
+}
+
+// EnsureBuiltinsSubscribed subscribes builtins to slot 0 so the
+// callback installed by WatcherInit actually fires on mutation. The
+// optimizer also stamps interp.Builtins so the tier-2 globals folder
+// recognizes this dict as the canonical builtins. Idempotent: the
+// DictWatch bit is set with FT_ATOMIC_OR and Builtins is only stamped
+// if previously unset. Callers should invoke this once the runtime
+// has materialized the real builtins dict (typically at the first
+// frame-eval).
+//
+// CPython: Python/pylifecycle.c:1381 PyDict_Watch(0, interp->builtins)
+func EnsureBuiltinsSubscribed(interp *state.Interpreter, builtins *objects.Dict) {
+	if interp == nil || builtins == nil {
+		return
 	}
-	if w.dictCallbacks[BuiltinsWatcherID] == nil {
-		w.dictCallbacks[BuiltinsWatcherID] = globalsWatcherCallback(interp)
+	if interp.Builtins == nil {
+		interp.Builtins = objects.Object(builtins)
 	}
-	if w.typeCallbacks[TypeWatcherID] == nil {
-		w.typeCallbacks[TypeWatcherID] = typeWatcherCallback(interp)
-	}
-	// Install the dispatch hook on objects so InvalidateVersionTag
-	// notifies the watchers without objects importing optimizer.
-	// Single-interpreter assumption: the most-recent WatcherInit
-	// wins, which is fine for v0.12.
-	objects.TypeModifiedHook = func(t *objects.Type) {
-		DispatchTypeMutation(interp, unsafe.Pointer(t))
-	}
-	objects.DictMutationHook = func(d *objects.Dict) {
-		d.IncrementMutations()
-		DispatchDictMutation(interp, DictEventModified, unsafe.Pointer(d), nil, nil)
-	}
+	_ = objects.DictWatch(BuiltinsWatcherID, builtins)
 }

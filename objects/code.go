@@ -13,7 +13,25 @@ package objects
 import (
 	"fmt"
 	"reflect"
+	"sync/atomic"
 )
+
+// nextCodeVersion is the monotonic counter that backs co_version.
+// Each fresh Code object claims one slot via AllocCodeVersion so the
+// CALL family specializer can stamp a stable cache key for the
+// _CHECK_FUNCTION_VERSION guard.
+//
+// CPython: Include/internal/pycore_function.h func_state.next_version
+var nextCodeVersion atomic.Uint32
+
+// AllocCodeVersion returns the next monotonic co_version. Mirrors
+// CPython's func_state.next_version bump in _PyCode_New; values start
+// at FUNC_VERSION_FIRST_VALID (1) so 0 stays the "unset" sentinel.
+//
+// CPython: Objects/codeobject.c:556 (co_version = next_version)
+func AllocCodeVersion() uint32 {
+	return nextCodeVersion.Add(1)
+}
 
 // Code is the AST -> bytecode handoff value. Compile produces
 // one of these per code-bearing node (module, function body,
@@ -42,12 +60,37 @@ type Code struct {
 	// Consts is the literal table the LOAD_CONST opcode indexes into.
 	Consts []any
 
+	// ConstObjs is the cached Object form of Consts, populated at
+	// Code construction time by SyncConstObjs. CPython stores co_consts
+	// as a tuple of PyObject* directly so LOAD_CONST is one pointer
+	// load. Without this slice every LOAD_CONST would re-run wrapConst's
+	// type switch and re-allocate an Int / Str / Tuple per dispatch,
+	// which the dispatch profile showed at 5.54% of CPU. Built lazily
+	// via SyncConstObjs to keep marshal round-trips intact (Consts is
+	// still the wire form).
+	//
+	// CPython: Include/cpython/code.h:107 co_consts
+	ConstObjs []Object
+
 	// Names, Varnames, Freevars, Cellvars are name tables indexed
 	// by their respective LOAD_/STORE_ opcodes.
 	Names    []string
 	Varnames []string
 	Freevars []string
 	Cellvars []string
+
+	// NameObjs is the cached *Unicode form of Names, populated at
+	// Code construction time. CPython stores co_names as a tuple of
+	// interned PyUnicode objects so every LOAD_NAME / LOAD_GLOBAL /
+	// LOAD_ATTR / STORE_ATTR reuses the same object (and its cached
+	// hash) across calls. Without this slice each name lookup would
+	// allocate a fresh *Unicode and re-classify the string + recompute
+	// the SipHash on every dispatch, which dominates the LOAD_GLOBAL
+	// fallback path. Built lazily via SyncNameObjs to keep marshal
+	// round-trips intact (Names is still the wire form).
+	//
+	// CPython: Include/cpython/code.h:108 co_names
+	NameObjs []*Unicode
 
 	// LocalsplusNames / LocalsplusKinds carry the flat 3.11+
 	// co_localsplus layout: every named slot the frame allocates
@@ -111,6 +154,15 @@ type Code struct {
 	//
 	// CPython: Include/internal/pycore_code.h co_executors
 	Executors any
+
+	// Version is the per-code monotonic id stamped by AllocCodeVersion
+	// at construction time. MAKE_FUNCTION copies it into the Function's
+	// Version field so the CALL specializer can write a stable
+	// _CHECK_FUNCTION_VERSION guard. Zero means "not yet versioned"
+	// and matches CPython's FUNC_VERSION_UNSET sentinel.
+	//
+	// CPython: Include/cpython/code.h:90 co_version
+	Version uint32
 
 	// CacheObjects is gopy's stand-in for CPython's in-cache pointer
 	// slots. CPython packs the cached descriptor / function object
@@ -279,11 +331,84 @@ func codeGetAttr(o Object, name Object) (Object, error) {
 	return GenericGetAttr(o, name)
 }
 
-// NewCode returns a Code with its header bound to CodeType.
+// NewCode returns a Code with its header bound to CodeType and a
+// fresh monotonic Version stamped in.
 func NewCode() *Code {
-	c := &Code{}
+	c := &Code{Version: AllocCodeVersion()}
 	c.init(CodeType)
 	return c
+}
+
+// SyncNameObjs rebuilds NameObjs to match the current Names slice.
+// Construction sites (NewCode caller, lift helpers, marshal decode)
+// call this after populating Names so the dispatch loop can index
+// straight into NameObjs without minting a fresh *Unicode per call.
+//
+// CPython: Objects/codeobject.c:421 _PyCode_New (co_names tuple is
+// stored verbatim from the compiler).
+func (c *Code) SyncNameObjs() {
+	if len(c.Names) == 0 {
+		c.NameObjs = nil
+		return
+	}
+	if cap(c.NameObjs) < len(c.Names) {
+		c.NameObjs = make([]*Unicode, len(c.Names))
+	} else {
+		c.NameObjs = c.NameObjs[:len(c.Names)]
+	}
+	for i, s := range c.Names {
+		c.NameObjs[i] = NewStr(s).(*Unicode)
+	}
+}
+
+// SyncConstObjs rebuilds ConstObjs to match the current Consts slice.
+// Construction sites populate Consts then call this so LOAD_CONST can
+// read straight from the cached slice without re-running wrapConst per
+// dispatch. Mirrors SyncNameObjs for the consts side.
+//
+// CPython: Objects/codeobject.c:421 _PyCode_New (co_consts tuple is
+// stored verbatim from the compiler so the runtime reads it directly).
+func (c *Code) SyncConstObjs() {
+	if len(c.Consts) == 0 {
+		c.ConstObjs = nil
+		return
+	}
+	if cap(c.ConstObjs) < len(c.Consts) {
+		c.ConstObjs = make([]Object, len(c.Consts))
+	} else {
+		c.ConstObjs = c.ConstObjs[:len(c.Consts)]
+	}
+	for i, v := range c.Consts {
+		c.ConstObjs[i] = wrapConstAttr(v)
+	}
+}
+
+// ConstObj returns the cached Object for Consts[i]. Falls back to
+// re-wrapping when ConstObjs is missing or out of sync, which covers
+// test fixtures that build Code by struct literal without calling
+// SyncConstObjs.
+func (c *Code) ConstObj(i int) Object {
+	if i >= 0 && i < len(c.ConstObjs) && c.ConstObjs[i] != nil {
+		return c.ConstObjs[i]
+	}
+	if i < 0 || i >= len(c.Consts) {
+		return nil
+	}
+	return wrapConstAttr(c.Consts[i])
+}
+
+// NameObj returns the cached *Unicode for Names[i]. Falls back to
+// minting a fresh object when NameObjs is missing or out of sync,
+// which covers test fixtures that build Code by struct literal
+// without calling SyncNameObjs.
+func (c *Code) NameObj(i int) *Unicode {
+	if i >= 0 && i < len(c.NameObjs) && c.NameObjs[i] != nil {
+		return c.NameObjs[i]
+	}
+	if i < 0 || i >= len(c.Names) {
+		return nil
+	}
+	return NewStr(c.Names[i]).(*Unicode)
 }
 
 // codeRepr formats as <code object NAME at PTR, file "FILE", line LINE>.
@@ -521,6 +646,7 @@ func (c *Code) Replace(r CodeReplace) (*Code, error) {
 	}
 	if r.SetConsts {
 		out.Consts = cloneConsts(r.Consts)
+		out.SyncConstObjs()
 	}
 	if r.SetNames {
 		out.Names = cloneStrings(r.Names)
@@ -573,6 +699,8 @@ func (c *Code) Copy() *Code {
 	out.Cellvars = cloneStrings(c.Cellvars)
 	out.Linetable = cloneBytes(c.Linetable)
 	out.ExceptionTable = cloneBytes(c.ExceptionTable)
+	out.SyncNameObjs()
+	out.SyncConstObjs()
 	return out
 }
 

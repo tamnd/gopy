@@ -11,8 +11,6 @@ package vm
 
 import (
 	"fmt"
-	"runtime"
-	"strconv"
 	"sync"
 
 	sys "github.com/tamnd/gopy/module/sys"
@@ -34,44 +32,27 @@ import (
 // CPython: Include/internal/pycore_pystate.h _PyThreadState_GET
 var activeThreads sync.Map // map[uint64]*state.Thread
 
-// goid returns the current goroutine's ID. Pulled out of
-// runtime.Stack since Go does not expose goroutine identity in its
-// public API. Cheap enough for Eval entry/exit; not called per
-// opcode.
-func goid() uint64 {
-	var buf [64]byte
-	n := runtime.Stack(buf[:], false)
-	// "goroutine N [..." — read digits after the "goroutine " prefix.
-	const prefix = "goroutine "
-	if n <= len(prefix) {
-		return 0
-	}
-	s := buf[len(prefix):n]
-	end := 0
-	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
-		end++
-	}
-	id, _ := strconv.ParseUint(string(s[:end]), 10, 64)
-	return id
-}
-
 // setActiveThread primes the current goroutine's Eval slot and
-// returns the previous occupant so the caller can restore it on the
-// way out. Eval calls this on entry; callPyFunction reads through
-// currentThread.
-func setActiveThread(ts *state.Thread) *state.Thread {
-	g := goid()
-	var prev *state.Thread
+// returns the previous occupant + goid so the caller can restore it
+// on the way out without re-resolving goid (runtime.Stack is the
+// dominant cost in tight EvalCode loops). Mirrors CPython, where
+// PyThreadState_Swap also takes the thread state in/out with one TLS
+// read pair, not two.
+//
+// CPython: Python/pystate.c:2120 _PyThreadState_Swap
+func setActiveThread(ts *state.Thread) (prev *state.Thread, g uint64) {
+	g = goid()
 	if v, ok := activeThreads.Load(g); ok {
 		prev = v.(*state.Thread)
 	}
 	activeThreads.Store(g, ts)
-	return prev
+	return prev, g
 }
 
-// restoreActiveThread is the defer-side of setActiveThread.
-func restoreActiveThread(prev *state.Thread) {
-	g := goid()
+// restoreActiveThread is the defer-side of setActiveThread. Takes the
+// cached goid from setActiveThread so we avoid a second goid() call
+// per Eval; runtime.Stack is the bench-dominant cost otherwise.
+func restoreActiveThread(prev *state.Thread, g uint64) {
 	if prev == nil {
 		activeThreads.Delete(g)
 		return

@@ -19,12 +19,12 @@ var _ = stackref.Null
 
 // dispatchGen is the generated Tier-1 dispatcher. Each arm is
 // produced from one `inst` in Python/bytecodes.c.
-func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone bool, err error) {
+func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err error) {
 	_ = oparg
 	switch op {
 {{- range .Arms}}
 {{.}}
 {{- end}}
 	}
-	return 0, nil, nil, false, opcodeNotImplemented(op)
+	return 0, opcodeNotImplemented(op)
 }

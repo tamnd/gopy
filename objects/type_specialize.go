@@ -19,33 +19,69 @@ func (t *Type) VersionTag() uint32 {
 	return v
 }
 
-// InvalidateVersionTag clears the cached version so the next read
-// allocates a fresh one. Mutators that change observable type state
-// (Setattr, Setattro on a class) call this so old inline caches no
-// longer match.
+// InvalidateVersionTag is gopy's port of CPython's
+// type_modified_unlocked / PyType_Modified pair. It walks every
+// subclass recursively (matching the invariant that a subclass's
+// cached state must be cleared before the parent's), fires the
+// registered watcher loop for this type, then zeroes the version
+// tag so the next read allocates a fresh one.
 //
-// Fires TypeModifiedHook so registered type watchers (notably the
-// Tier-2 optimizer's invalidation pass) can drop any cached state
-// keyed on this type. Mirrors the type_modified_unlocked walk over
-// interp->type_watchers in CPython.
+// The recursion order matters: each subclass runs the full
+// function (clear-its-subclasses, fire-its-watchers, then zero its
+// tag) before this type's watcher fires and tag is zeroed. That
+// way a subclass watcher sees the still-watched, still-valid
+// state, exactly the ordering inside type_modified_unlocked.
 //
 // CPython: Objects/typeobject.c:1130 type_modified_unlocked /
 // Objects/typeobject.c:1200 PyType_Modified
 func (t *Type) InvalidateVersionTag() {
-	t.versionTag = 0
-	if hook := TypeModifiedHook; hook != nil {
-		hook(t)
+	if t.versionTag == 0 {
+		return
 	}
+	for _, sub := range t.subclasses {
+		if sub != nil {
+			sub.InvalidateVersionTag()
+		}
+	}
+	notifyTypeWatchers(t)
+	t.versionTag = 0
+	t.specCacheInit = nil
+	t.specCacheInitVersion = 0
 }
 
-// TypeModifiedHook is fired by InvalidateVersionTag whenever a type
-// mutates. The Tier-2 optimizer installs a closure here at
-// WatcherInit time so it can run DispatchTypeMutation without
-// objects depending on optimizer.
+// CacheInitForSpecialization stashes init as the cached __init__ for
+// CALL_ALLOC_AND_ENTER_INIT and stamps the type's current version into
+// specCacheInitVersion. Returns the type version the caller should
+// write into the CALL inline cache, plus a bool reporting whether the
+// cache was populated (false when VersionTag returns 0, signaling the
+// global counter has wrapped and specialization must give up).
 //
-// Single-interpreter assumption holds in v0.12; sub-interpreters
-// (v0.13) need a per-interpreter registry instead.
+// CPython: Objects/typeobject.c:6219 _PyType_CacheInitForSpecialization
+func (t *Type) CacheInitForSpecialization(init *Function) (uint32, bool) {
+	v := t.VersionTag()
+	if v == 0 {
+		return 0, false
+	}
+	t.specCacheInit = init
+	t.specCacheInitVersion = v
+	return v, true
+}
+
+// SpecCacheInit returns the cached __init__ function (or nil when
+// nothing has been cached yet). Reads are paired with cache cell 2-3
+// validation in the fast arm.
+func (t *Type) SpecCacheInit() *Function { return t.specCacheInit }
+
+// SpecCacheInitVersion returns the type version stamped at the time
+// SpecCacheInit was populated. The fast arm rejects when this
+// disagrees with the cache cell's stored version.
+func (t *Type) SpecCacheInitVersion() uint32 { return t.specCacheInitVersion }
+
+// PyTypeModified is the CPython entrypoint name; kept as an alias
+// so the call sites in code that ports new CPython files line up
+// 1-for-1 with PyType_Modified.
 //
-// CPython: Objects/typeobject.c:1170-1188 (notify type watchers
-// loop inside type_modified_unlocked)
-var TypeModifiedHook func(t *Type)
+// CPython: Objects/typeobject.c:1200 PyType_Modified
+func (t *Type) PyTypeModified() {
+	t.InvalidateVersionTag()
+}

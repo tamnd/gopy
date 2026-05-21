@@ -52,6 +52,43 @@ func init() {
 	// CPython: Objects/floatobject.c:1748 float___getformat___impl
 	SetTypeDescr(FloatType, "__getformat__", NewClassMethod(
 		NewBuiltinFunction("__getformat__", floatGetFormat)))
+
+	// float.__repr__ and float.__str__ slot wrappers. CPython generates
+	// these via add_operators from slotdefs (TPSLOT __repr__ +
+	// PyFloat_Type.tp_repr). json.encoder pins float.__repr__ as the
+	// _floatstr argument default at module load; without the descriptor
+	// it inherits object.__repr__ and json output prints
+	// `<float object at 0x...>` instead of the IEEE-754 digit string.
+	//
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __repr__)
+	// CPython: Objects/floatobject.c:357 float_repr
+	SetTypeDescr(FloatType, "__repr__", NewMethodDescr(FloatType, "__repr__", floatReprDescr))
+	SetTypeDescr(FloatType, "__str__", NewMethodDescr(FloatType, "__str__", floatReprDescr))
+}
+
+// floatReprDescr is the slot wrapper for float.__repr__ / float.__str__.
+// Required for the same reason as intReprDescr: json.encoder captures
+// `_floatstr=float.__repr__` as a default parameter, so the attribute
+// has to resolve to the digit-emitting routine, not object.__repr__.
+// FloatType.Repr already implements the runtime slot; this descriptor
+// is what makes the bound-method lookup return a real callable. Once
+// the add_operators slot-wrapper generation in #647 ships, this manual
+// wiring goes away alongside intReprDescr.
+//
+// CPython: Objects/floatobject.c:357 float_repr
+func floatReprDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
+	}
+	f, ok := args[0].(*Float)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'float' object")
+	}
+	out, err := floatRepr(f)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(out), nil
 }
 
 // floatGetFormat backs float.__getformat__. args[0] is the type
@@ -85,13 +122,16 @@ func hostIsLittleEndian() bool {
 	return b[0] == 1
 }
 
-// NewFloat builds a float.
+// NewFloat builds a float. The singleton cache short-circuits the
+// well-known constants (0.0, -0.0, +/- 1.0, NaN, +/- Inf) so the hot
+// numeric loops that bounce on those values stay allocation-free.
 //
-// CPython: Objects/floatobject.c:L132 PyFloat_FromDouble
+// CPython: Objects/floatobject.c:124 PyFloat_FromDouble
 func NewFloat(x float64) *Float {
-	o := &Float{v: x}
-	o.init(FloatType)
-	return o
+	if cached := cachedFloat(x); cached != nil {
+		return cached
+	}
+	return newFloatRaw(x)
 }
 
 // Float64 returns the underlying double.

@@ -55,31 +55,54 @@ func (e *evalState) tryWarmupTier2(instrIdx int) {
 	optimizer.Optimize(interp, e.f, co, instrIdx, 0, 0)
 }
 
-// enterExecutor is the dispatch arm for ENTER_EXECUTOR. With no uop
-// loop yet, every entry deopts: read the executor from Code's side
-// table, look up the Tier-1 op/arg the install path stashed, then
-// fall back to the regular dispatcher with that synthetic
-// instruction. Once #431 lands the uop interpreter, this arm runs
-// the executor's trace instead and only deopts on a side exit.
+// enterExecutor is the dispatch arm for ENTER_EXECUTOR. Reads the
+// executor from Code's side table, drives the trace through
+// optimizer.RunExecutor, then hands control back to the Tier-1
+// dispatcher at the resume codeunit the trace left in frame.InstrPtr.
 //
-// CPython: Python/bytecodes.c:2884-2899 ENTER_EXECUTOR (deopt path)
-func (e *evalState) enterExecutor(oparg uint32) (int, objects.Object, error, bool, error) {
+// The terminal _DEOPT / _EXIT_TRACE / _ERROR_POP_N uops set
+// frame.InstrPtr before returning; if a trace bails before any uop
+// advanced the IP (early validity-check deopt at the trace head, or
+// an un-ported guard returning StatusDeopt before _DEOPT runs), the
+// fallback re-dispatches the stashed Tier-1 op so progress is still
+// guaranteed. Once every uop is hand-ported the fallback shrinks to
+// a defensive log + return-error.
+//
+// CPython: Python/bytecodes.c:2884-2943 ENTER_EXECUTOR /
+// JUMP_BACKWARD_JIT body
+// CPython: Python/ceval.c:1240-1358 enter_tier_two
+func (e *evalState) enterExecutor(oparg uint32) (int, error) {
 	co := e.f.Code
 	exec := codeExecutorAt(co, int(oparg))
 	if exec == nil {
-		return 0, nil, nil, false, opcodeNotImplemented(compile.ENTER_EXECUTOR)
+		return 0, opcodeNotImplemented(compile.ENTER_EXECUTOR)
 	}
+	installOffset := e.f.InstrPtr
+	status := optimizer.RunExecutor(e.ts, e.f, exec)
+	switch status {
+	case optimizer.StatusError:
+		if e.f.InstrPtr != installOffset {
+			return e.f.InstrPtr, nil
+		}
+	case optimizer.StatusExit, optimizer.StatusDeopt:
+		if e.f.InstrPtr != installOffset {
+			return e.f.InstrPtr, nil
+		}
+	}
+	// Fallback: the trace bailed before any uop touched frame.InstrPtr
+	// (an un-ported guard returned StatusDeopt early, or the trace
+	// head's validity check fired). Dispatch the Tier-1 instruction
+	// the install path stashed so the program still makes progress.
 	op := compile.Opcode(exec.VMData.Opcode)
 	arg := uint32(exec.VMData.Oparg)
-	if next, retVal, retErr, retDone, ok, err := e.dispatchHandwritten(op, arg); ok {
-		return next, retVal, retErr, retDone, err
+	if next, ok, err := e.dispatchHandwritten(op, arg); ok {
+		return next, err
 	}
 	if dispatchGenSupported[op] {
-		next, retVal, retErr, retDone, err := e.dispatchGen(op, arg)
-		return next, retVal, retErr, retDone, err
+		return e.dispatchGen(op, arg)
 	}
-	next, retVal, retErr, retDone, _, err := e.trySimple(op, arg)
-	return next, retVal, retErr, retDone, err
+	next, _, err := e.trySimple(op, arg)
+	return next, err
 }
 
 // codeExecutorAt resolves Code.Executors back to the executor at

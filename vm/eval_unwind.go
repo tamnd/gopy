@@ -236,15 +236,6 @@ func (e *evalState) attachFrameTraceback() {
 	exc.TB = tb
 }
 
-// unwind is invoked when the eval-breaker handler errors. It pops
-// the current frame and returns the error so the caller frame can
-// see it.
-//
-// CPython: Python/ceval.c goto exception_unwind
-func (e *evalState) unwind(err error) (objects.Object, error) {
-	return nil, err
-}
-
 // handleEvalBreaker drains pending state visible through the breaker:
 // requested GIL drops, queued pending calls, async exceptions, GC
 // requests. Returns an error if any handler errored.

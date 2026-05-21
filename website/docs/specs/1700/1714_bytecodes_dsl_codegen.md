@@ -265,8 +265,8 @@ emitters and on any non-trivial bridging glue.
 | I | `Tools/cases_generator/opcode_metadata_generator.py` | + `gopy_opcode_metadata_generator.py` | New emitter targeting `compile/opcode_metadata_gen.go` (replaces `compile/opcode_caches.go`). |
 | J | `Tools/cases_generator/uop_id_generator.py` + `uop_metadata_generator.py` | + Go companions | Tier-2 uop tables. |
 | K | `Tools/cases_generator/tier1_generator.py` | + `gopy_tier1_generator.py` | Emits `vm/eval_dispatch_gen.go`: the dispatch switch + per-opcode body harness. |
-| L | `Tools/cases_generator/tier2_generator.py` | + `gopy_tier2_generator.py` | Emits `vm/eval_uops_gen.go`: uop dispatch + body harness. |
-| M | `Tools/cases_generator/optimizer_generator.py` | + `gopy_optimizer_generator.py` | Emits `compile/optimizer_cases_gen.go` for spec 1712's abstract interpreter. |
+| L | `Tools/cases_generator/tier2_generator.py` | + `gopy_tier2_generator.py` (landed) | Emits `optimizer/uops_dispatch_gen.go` + `optimizer/uops_stubs_gen.go`: dispatch fan-out on `*Tier2State` plus one StatusDeopt stub per Tier-2-viable uop whose body lives inline as a `//`-prefixed C block. The retired `tools/uops_gen/tier2_generator.go` Go duplicate is removed. The Phase L landing intentionally keeps the outputs in `optimizer/` (not `vm/eval_uops_gen.go`) because `*Tier2State` lives there; lifting them into `vm/` is left to a follow-up phase. |
+| M | `Tools/cases_generator/optimizer_generator.py` | + `gopy_optimizer_generator.py` (landed) | Emits `optimizer/optimizer_cases_gen.go`: one `//` comment block per Tier-2-viable uop carrying the abstract-interp C body (overlaid `optimizer_bytecodes.c` on `bytecodes.c`, falling back to `emit_default` when no override). The hand-written symbolic interpreter in `optimizer/symbols.go` + `optimizer/analysis.go` uses these blocks as the porting spec; when dispatch-by-uop lands (phase 7+), bodies translate to Go one-by-one and `analysis.go` shrinks. The output lands in `optimizer/` instead of the originally-planned `compile/` because `JitOptSymbol`/`JitOptContext` live there. The retired `tools/uops_gen/optimizer_generator.go` Go duplicate plus the `optimizer-cases` mode in `tools/uops_gen/main.go` are removed. |
 | N | `Tools/cases_generator/target_generator.py` | (not ported) | CPython-specific computed-goto. Go's `switch` is fine. Documented carve-out. |
 | O | `Tools/cases_generator/py_metadata_generator.py` | (vendored only) | Emits `Lib/_opcode_metadata.py`; gopy already vendors that file via 1710 T5.1. No regeneration needed; we ship CPython's. |
 | P | `Python/bytecodes.c` (v3.14.5) | `tools/cases_generator/inputs/bytecodes.c` | The single source. Frozen per CPython tag; bumped together with 1707 sync. |
@@ -280,7 +280,7 @@ none hand-edited):
 |-------------|-------------------|----------|
 | `compile/opcode_ids_gen.go` | ~600 | `compile/opcodes_gen.go` |
 | `compile/opcode_metadata_gen.go` | ~1500 | `compile/opcode_caches.go` |
-| `compile/optimizer_cases_gen.go` | ~2500 | parts of `vm/uops/*.go` (abstract interp) |
+| `optimizer/optimizer_cases_gen.go` | ~2700 | hand-rolled abstract-interp cases in `optimizer/analysis.go` (currently doc-only; replaces them once dispatch-by-uop lands) |
 | `specialize/cache_layouts_gen.go` | ~400 | implicit layout knowledge across `specialize/*.go` |
 | `specialize/family_gen.go` | ~200 | `specialize/quicken.go` family table + `specialize/deopt.go` map |
 | `vm/eval_dispatch_gen.go` | ~4000 | core of `vm/eval_simple.go` + `vm/eval_specialized*.go` |
@@ -755,6 +755,7 @@ panel.
 | `BUILD_TEMPLATE` | generated | `60c7912` | `_PyTemplate_Build(strings, interpolations)` → `e.templateBuild` | t-string runtime; helper is a thin `objects.NewTemplateStr` wrapper |
 | `GET_AWAITABLE` | generated | `419072c` | `_PyEval_GetAwaitable(iter, opcode)` → `e.getAwaitable` | helper already wired; flipped after auditing handwritten arm against generated body |
 | `GET_ANEXT` | generated | `419072c` | `_PyEval_GetANext(aiter)` → `e.getANext` | async-gen `__anext__` wrapper; flipped after audit |
+| `MAKE_CELL` | generated | `a8d7afd` | `PyCell_New(PyStackRef_AsPyObjectBorrow(GETLOCAL(oparg)))` → `e.cellNew(e.localAt(int(oparg)).AsObject())` + `setLocal` + `tmp.Close()` | Bucket B `PyCell_New → objects.NewCell` helper flip. `AsObject()` returns nil for a null stackref, which matches the borrow-of-NULL semantics CPython documents for unset cell slots. `Close()` is a no-op under Go GC, matching `PyStackRef_XCLOSE` for the discarded prior ref. Handwritten arm in `vm/eval_simple.go` deleted in the same commit. |
 
 #### Porting backlog (organized by blocker)
 
@@ -816,7 +817,7 @@ above.
 | `PyObject_Format` → `objects.Format` | FORMAT_WITH_SPEC | DONE | `67735f0` |
 | `PyObject_GetIter` → `objects.GetIter` (already exists; just wire the `_Py_GatherStats_GetIter` instrumentation stub) | GET_ITER | DONE | `02e72c3` |
 | `PySet_New` → `objects.NewSet([]Object)` | BUILD_SET | TODO | - |
-| `PyCell_New` → `objects.NewCell` | MAKE_CELL | TODO | - |
+| `PyCell_New` → `objects.NewCell` | MAKE_CELL | DONE | `a8d7afd` |
 | `_PyList_FromStackRefStealOnSuccess` → wrapper over `objects.NewList` | BUILD_LIST | DONE | `b0819a5` |
 | `_PyTuple_FromStackRefStealOnSuccess` → wrapper over `objects.NewTuple` | BUILD_TUPLE | DONE | `b0819a5` |
 | `_PyTemplate_Build` → `objects.BuildTemplate` (t-string runtime) | BUILD_TEMPLATE | DONE | `60c7912` |
@@ -932,7 +933,10 @@ the hand-rolled version had, and that's a generator fix.
 
 | Step | Status | Commit |
 |------|--------|--------|
-| `gopy_tier2_generator.py` lands | TODO | - |
+| `gopy_tier2_generator.py` lands | DONE | feat/v0.12.4-spec-1712-p8p9 |
+| Generator wired into `regen-cases --target=go`; Go-tool `tier2_generator.go` retired | DONE | feat/v0.12.4-spec-1712-p8p9 |
+| `optimizer/uops_dispatch_gen.go` + `uops_stubs_gen.go` byte-equal pre/post Python pipeline cutover | DONE | feat/v0.12.4-spec-1712-p8p9 |
+| Output bodies use upstream `JUMP_TO_ERROR()` (Go-tool drift `JUMP_TO_LABEL(error)` removed) | DONE | feat/v0.12.4-spec-1712-p8p9 |
 | `vm/eval_uops_gen.go` covers every uop currently hand-rolled | TODO | - |
 | Shared-body parity test (tier-1 LOAD_FAST ≡ tier-2 _LOAD_FAST) | TODO | - |
 | Remaining ~270 uops emitted; tier-2 trace coverage on micro-bench corpus jumps | TODO | - |
@@ -1155,7 +1159,7 @@ helper).
 - [ ] Phase 4.2 — `specialize/quicken.go` + `specialize/deopt.go` consume the generated tables
 - [ ] Phase 4.3 — parity test green; literal tables deleted
 - [x] Phase 5.1 — tier-1 emitter (Go-side `Tools/bytecodes_gen` in lieu of `gopy_tier1_generator.py`) emits `vm/eval_dispatch_gen.go` for unspecialized opcodes (107 arms, bodies stubbed pending Phase 8 action translator)
-- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (43 / ~118 opcodes routed through `dispatchGen` via the `dispatchGenSupported` whitelist; see the Phase 5.2 audit table for the per-opcode commit stamp)
+- [ ] Phase 5.2 — every opcode body in `vm/eval_simple.go` migrated to a typed `op<NAME>` function (44 / ~118 opcodes routed through `dispatchGen` via the `dispatchGenSupported` whitelist; see the Phase 5.2 audit table for the per-opcode commit stamp)
 - [x] Phase 5 Bucket A6.1 — `_Py_ID(NAME)` translates to `objects.NewStr("NAME")`
 - [x] Phase 5 Bucket A6.2 — out-param `int err = HELPER(args..., &out)` translates to Go multi-return
 - [x] Phase 5 Bucket A6.3 — `_PyErr_SetString` carries the literal message through `setPendingErr`
@@ -1174,7 +1178,8 @@ helper).
 - [ ] Phase 6.2 — each `vm/eval_specialized_*.go` shrinks to body functions
 - [ ] Phase 6.3 — LOAD_GLOBAL cache-boundary regression test
 - [ ] Phase 6.4 — per-family boundary tests for ~10 other specialized families
-- [ ] Phase 7.1 — `gopy_tier2_generator.py` emits `vm/eval_uops_gen.go`
+- [x] Phase L / 7.1 — `gopy_tier2_generator.py` lands and owns `optimizer/uops_dispatch_gen.go` + `optimizer/uops_stubs_gen.go`; Go-tool `tier2_generator.go` retired. Lifting outputs to `vm/eval_uops_gen.go` left to follow-up (depends on `*Tier2State` migration out of `optimizer/`).
+- [x] Phase M — `gopy_optimizer_generator.py` lands and owns `optimizer/optimizer_cases_gen.go`: one `//` comment block per Tier-2-viable uop carrying the abstract-interp C body. Go-tool `optimizer_generator.go` + `optimizer-cases` mode retired. Real dispatch-by-uop methods on the symbolic interpreter remain hand-written in `optimizer/symbols.go` / `optimizer/analysis.go`; the generated file is the porting spec until the abstract-interp dispatch migration (phase 7+).
 - [ ] Phase 7.2 — shared-body parity test (tier-1 LOAD_FAST ≡ tier-2 _LOAD_FAST)
 - [ ] Phase 7.3 — remaining ~270 uops emitted
 - [ ] Phase 7.4 — 1712 microbench ±2% before/after

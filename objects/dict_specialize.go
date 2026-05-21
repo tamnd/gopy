@@ -63,8 +63,19 @@ func (d *Dict) LookupString(name *Unicode) (idx int, ok bool) {
 // when the global counter has wrapped (the specializer treats this
 // as "give up and never specialize").
 //
+// Split dicts delegate to the SharedKeys version so every sibling
+// instance reports the same dk_version: CPython's dk_version is a
+// property of PyDictKeysObject, not of the PyDictObject. When a
+// sibling extends the shared keys table via insert_split_key, the
+// SharedKeys version bumps and every cache stamped against the
+// previous version rejects on the next hit, even though no mutation
+// happened on this dict.
+//
 // CPython: Objects/dictobject.c:7150 _PyDict_GetKeysVersionForCurrentState
 func (d *Dict) GetKeysVersion() uint32 {
+	if d.sharedKeys != nil {
+		return d.sharedKeys.version
+	}
 	if d.keysVersion != 0 {
 		return d.keysVersion
 	}
@@ -79,33 +90,16 @@ func (d *Dict) GetKeysVersion() uint32 {
 // invalidateKeysVersion is called from every mutation that changes
 // the keys layout (insert or delete). The next GetKeysVersion call
 // will allocate a fresh version, so any cached inline-cache copy
-// stops matching.
+// stops matching. Event notification is the caller's responsibility:
+// each mutation site picks the right DictEvent* and routes through
+// notifyDictEvent (see objects/dict_watcher.go), because the version
+// reset is the same for ADDED / MODIFIED / DELETED but the event
+// payload is not.
 //
-// Also fires DictMutationHook so registered dict watchers (notably
-// the Tier-2 optimizer's globals/builtins invalidation) can drop any
-// cached state keyed on this dict. Mirrors the _PyDict_NotifyEvent
-// dispatch CPython runs from every mutation site.
-//
-// CPython: Objects/dictobject.c dk_version invalidation /
-// Objects/dictobject.c _PyDict_NotifyEvent
+// CPython: Objects/dictobject.c dk_version invalidation
 func (d *Dict) invalidateKeysVersion() {
 	d.keysVersion = 0
-	if hook := DictMutationHook; hook != nil {
-		hook(d)
-	}
 }
-
-// DictMutationHook is fired by every mutation that calls
-// invalidateKeysVersion (insert, delete, resize). The Tier-2
-// optimizer installs a closure here at WatcherInit time so it can
-// run DispatchDictMutation without objects depending on optimizer.
-//
-// Single-interpreter assumption holds in v0.12; sub-interpreters
-// (v0.13) need a per-interpreter registry instead.
-//
-// CPython: Objects/dictobject.c _PyDict_NotifyEvent (the watcher
-// dispatch invoked from every mutation site)
-var DictMutationHook func(d *Dict)
 
 // Mutations returns the watcher mutation counter for d. The Tier-2
 // optimizer caps folding once this exceeds
@@ -134,11 +128,80 @@ func (d *Dict) EntryAt(slot int) (key, value Object, ok bool) {
 	if slot < 0 || slot >= len(d.entries) {
 		return nil, nil, false
 	}
-	e := d.entries[slot]
-	if !e.used {
+	if !d.slotIsLive(slot) {
 		return nil, nil, false
 	}
-	return e.key, e.value, true
+	return d.slotKey(slot), d.slotValue(slot), true
+}
+
+// StoreEntryAtName overwrites the value at slot when the slot still
+// holds a *Unicode key whose contents equal expectName. Returns false
+// when the slot is out of range, holds a non-unicode key, or names a
+// different attribute (a delete + re-insert into the same bucket can
+// leave the cached index pointing at a stale name). The STORE_ATTR
+// inline cache only stamps type_version, so this runtime key check is
+// the same safety net CPython relies on inside _STORE_ATTR_WITH_HINT.
+//
+// Liveness rules differ across modes:
+//
+//   - Combined mode: the slot must already be live, since combined
+//     entries only carry a key when the dict has a value for that key
+//     (a fresh slot has no key to compare against). Matches CPython's
+//     _STORE_ATTR_WITH_HINT precondition.
+//   - Split mode: the shared key is always live in the shared table,
+//     but splitValues[slot] may be nil if this instance never set the
+//     attribute. The fast store still has to land: a sibling having
+//     populated the slot doesn't mean this instance has. Mirrors the
+//     "shared key, first write on this instance" branch of
+//     dictInsertSplit: bump d.used, append to d.order, fire ADDED.
+//
+// CPython: Python/bytecodes.c:2583 _STORE_ATTR_WITH_HINT key check
+// CPython: Objects/dictobject.c:1832 insert_split_key (split-mode
+//
+//	first-write bookkeeping)
+func (d *Dict) StoreEntryAtName(slot int, expectName string, value Object) bool {
+	if slot < 0 || slot >= len(d.entries) {
+		return false
+	}
+	if d.sharedKeys == nil {
+		// Combined mode: slot must be live, otherwise we have no key
+		// to compare expectName against.
+		if !d.slotIsLive(slot) {
+			return false
+		}
+		storedKey := d.slotKey(slot)
+		k, ok := storedKey.(*Unicode)
+		if !ok {
+			return false
+		}
+		if k.Value() != expectName {
+			return false
+		}
+		d.entries[slot].value = value
+		notifyDictEvent(DictEventModified, d, storedKey, value)
+		return true
+	}
+	// Split mode: the shared key is always live in d.entries[slot]
+	// (shared table); only splitValues[slot] tracks per-instance
+	// liveness.
+	storedKey := d.slotKey(slot)
+	k, ok := storedKey.(*Unicode)
+	if !ok {
+		return false
+	}
+	if k.Value() != expectName {
+		return false
+	}
+	prev := d.splitValues[slot]
+	d.splitValues[slot] = value
+	if prev == nil {
+		d.order = append(d.order, slot)
+		d.used++
+		notifyDictEvent(DictEventAdded, d, storedKey, value)
+	} else {
+		notifyDictEvent(DictEventModified, d, storedKey, value)
+	}
+	return true
 }
 
 // IsExactDict reports whether o is exactly *Dict (not a subclass).

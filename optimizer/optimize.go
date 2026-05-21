@@ -82,6 +82,8 @@ func uopOptimize(interp *state.Interpreter, frame objects.InterpreterFrame, code
 		return nil, -1
 	}
 	ExecutorInit(interp, exec, dependencies)
+	tier2Log("project_done", "executor=%p length=%d exit_count=%d start_offset=%d",
+		exec, length, len(exec.Exits), instr)
 	return exec, 1
 }
 
@@ -117,15 +119,11 @@ func prepareForExecution(buffer []UOPInstruction, length int) int {
 		target := int32(inst.GetTarget())
 		flags := uopFlags(opcode)
 		if flags&(FlagExit|FlagDeopt) != 0 {
-			exitOp := UopDeopt
-			if flags&FlagExit != 0 {
-				exitOp = UopExitTrace
-			}
-			jumpTarget := target
-			if jumpTarget != currentJumpTarget || currentExitOp != exitOp {
-				makeExit(&buffer[nextSpare], exitOp, jumpTarget)
+			exitOp := pickExitOp(flags)
+			if target != currentJumpTarget || currentExitOp != exitOp {
+				stampPrepareExitStub(buffer, nextSpare, exitOp, target, opcode)
 				currentExitOp = exitOp
-				currentJumpTarget = jumpTarget
+				currentJumpTarget = target
 				currentJump = int32(nextSpare)
 				nextSpare++
 			}
@@ -133,16 +131,12 @@ func prepareForExecution(buffer []UOPInstruction, length int) int {
 			inst.SetFormat(UOPFormatJump)
 		}
 		if flags&FlagError != 0 {
-			popped := int32(0)
-			if flags&FlagErrorNoPop == 0 {
-				popped = uopNumPopped(opcode, inst.Oparg)
-			}
+			popped := errorPoppedCount(opcode, inst.Oparg, flags)
 			if target != currentErrorTarget || popped != currentPopped {
 				currentPopped = popped
 				currentError = int32(nextSpare)
 				currentErrorTarget = target
-				makeExit(&buffer[nextSpare], UopErrorPopN, 0)
-				buffer[nextSpare].Operand0 = uint64(target)
+				stampPrepareErrorStub(buffer, nextSpare, target, popped, opcode)
 				nextSpare++
 			}
 			if inst.Format() == UOPFormatTarget {
@@ -157,6 +151,51 @@ func prepareForExecution(buffer []UOPInstruction, length int) int {
 		}
 	}
 	return nextSpare
+}
+
+// pickExitOp returns _EXIT_TRACE for HAS_EXIT_FLAG rows and _DEOPT
+// otherwise, matching CPython's exit_op ternary at
+// Python/optimizer.c:1054-1056.
+func pickExitOp(flags UopFlag) uint16 {
+	if flags&FlagExit != 0 {
+		return UopExitTrace
+	}
+	return UopDeopt
+}
+
+// errorPoppedCount mirrors the HAS_ERROR_NO_POP gate that decides
+// whether _ERROR_POP_N takes oparg-worth of stack frames off (zero for
+// the no-pop variant).
+//
+// CPython: Python/optimizer.c:1075-1078 prepare_for_execution
+func errorPoppedCount(opcode uint16, oparg uint16, flags UopFlag) int32 {
+	if flags&FlagErrorNoPop != 0 {
+		return 0
+	}
+	return uopNumPopped(opcode, oparg)
+}
+
+// stampPrepareExitStub writes an _EXIT_TRACE / _DEOPT stub row into
+// the trace's spare slot and emits the matching T2 prepare_stub log
+// entry for the gopy/CPython diff oracle.
+func stampPrepareExitStub(buffer []UOPInstruction, slot int, exitOp uint16, target int32, sourceOpcode uint16) {
+	makeExit(&buffer[slot], exitOp, target)
+	kind := "deopt"
+	if exitOp == UopExitTrace {
+		kind = "exit_trace"
+	}
+	tier2Log("prepare_stub", "kind=%s slot=%d jump_target=%d source_uop=%s",
+		kind, slot, target, tier2UopName(sourceOpcode))
+}
+
+// stampPrepareErrorStub writes an _ERROR_POP_N stub row plus its
+// operand0 (the Tier-1 jump target) and emits the matching T2
+// prepare_stub log entry.
+func stampPrepareErrorStub(buffer []UOPInstruction, slot int, target int32, popped int32, sourceOpcode uint16) {
+	makeExit(&buffer[slot], UopErrorPopN, 0)
+	buffer[slot].Operand0 = uint64(target)
+	tier2Log("prepare_stub", "kind=error_pop_n slot=%d operand0=%d popped=%d source_uop=%s",
+		slot, target, popped, tier2UopName(sourceOpcode))
 }
 
 // makeExit stamps an exit-stub row with the given opcode and Tier-1

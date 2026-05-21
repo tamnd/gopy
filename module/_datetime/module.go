@@ -158,7 +158,7 @@ func pythonToGoFmt(pyFmt string) string {
 // 0 <= seconds < 86400, 0 <= microseconds < 1000000.
 //
 // CPython: Modules/_datetimemodule.c:2838 timedelta_type
-var TimedeltaType = objects.NewType("timedelta", []*objects.Type{objects.ObjectType()})
+var TimedeltaType = objects.NewType("datetime.timedelta", []*objects.Type{objects.ObjectType()})
 
 // Timedelta backs a timedelta instance. The three fields are always
 // kept in normalized form.
@@ -209,6 +209,54 @@ func init() {
 	objects.SetTypeDescr(TimedeltaType, "resolution", TimedeltaResolution)
 	objects.SetTypeDescr(TimedeltaType, "total_seconds",
 		objects.NewMethodDescr(TimedeltaType, "total_seconds", timedeltaTotalSecondsMethod))
+	// Pickle hooks. __new__ exposes timedeltaNew at the Python level
+	// so pickle's NEWOBJ can dispatch into it instead of falling back
+	// to object.__new__.
+	//
+	// CPython: Objects/typeobject.c:9952 add_tp_new_wrapper
+	objects.SetTypeDescr(TimedeltaType, "__new__",
+		objects.NewBuiltinFunction("timedelta.__new__", timedeltaNewBuiltin))
+	// __reduce__ packs (cls, (days, seconds, microseconds)) so pickle
+	// recreates the timedelta via the normal constructor.
+	//
+	// CPython: Modules/_datetimemodule.c:3018 delta_reduce
+	objects.SetTypeDescr(TimedeltaType, "__reduce__",
+		objects.NewMethodDescr(TimedeltaType, "__reduce__", timedeltaReduce))
+}
+
+// timedeltaNewBuiltin is the Python-level wrapper that exposes
+// timedeltaNew as timedelta.__new__.
+//
+// CPython: Objects/typeobject.c:9952 tp_new_wrapper
+func timedeltaNewBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: timedelta.__new__(): not enough arguments")
+	}
+	cls, ok := args[0].(*objects.Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: timedelta.__new__(X): X is not a type object")
+	}
+	return timedeltaNew(cls, args[1:], kwargs)
+}
+
+// timedeltaReduce is timedelta.__reduce__. Returns (cls, (days, seconds,
+// microseconds)) so pickle.loads can call cls(*state).
+//
+// CPython: Modules/_datetimemodule.c:3018 delta_reduce
+func timedeltaReduce(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	td, ok := args[0].(*Timedelta)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'datetime.timedelta' object")
+	}
+	state := objects.NewTuple([]objects.Object{
+		objects.NewInt(td.Days),
+		objects.NewInt(td.Seconds),
+		objects.NewInt(td.Microseconds),
+	})
+	return objects.NewTuple([]objects.Object{td.Type(), state}), nil
 }
 
 // newTimedelta normalizes (days, seconds, us) and returns a Timedelta.
@@ -634,7 +682,7 @@ func floorModInt64(a, b int64) int64 {
 // DateType is datetime.date.
 //
 // CPython: Modules/_datetimemodule.c:3451 date_type
-var DateType = objects.NewType("date", []*objects.Type{objects.ObjectType()})
+var DateType = objects.NewType("datetime.date", []*objects.Type{objects.ObjectType()})
 
 // Date backs a date instance.
 //
@@ -656,6 +704,21 @@ func init() {
 	DateType.RichCmp = dateRichCmp
 	DateType.Getattro = dateGetattr
 
+	// __new__ exposes dateNew as a Python-level descriptor so
+	// pickle's load_newobj can do `cls.__new__(cls, state_bytes)`
+	// without falling through to object.__new__ (which would
+	// allocate a bare Instance instead of a Date).
+	//
+	// CPython: Objects/typeobject.c:9952 add_tp_new_wrapper
+	objects.SetTypeDescr(DateType, "__new__",
+		objects.NewBuiltinFunction("date.__new__", dateNewBuiltin))
+	// __reduce__ packs (cls, (state_bytes,)) so pickle.dumps
+	// produces NEWOBJ bytes that round-trip through dateNew's
+	// bytes-state path.
+	//
+	// CPython: Modules/_datetimemodule.c:3902 date_reduce
+	objects.SetTypeDescr(DateType, "__reduce__",
+		objects.NewMethodDescr(DateType, "__reduce__", dateReduce))
 	objects.SetTypeDescr(DateType, "today",
 		objects.NewMethodDescr(DateType, "today", dateTodayMethod))
 	objects.SetTypeDescr(DateType, "fromtimestamp",
@@ -746,10 +809,52 @@ func isLeap(year int64) bool {
 	return year%4 == 0 && (year%100 != 0 || year%400 == 0)
 }
 
-// dateNew is date.__new__.
+// dateDataSize is the length in bytes of a pickled date state.
 //
-// CPython: Modules/_datetimemodule.c:3121 date_new
+// CPython: Include/datetime.h:25 _PyDateTime_DATE_DATASIZE
+const dateDataSize = 4
+
+// monthIsSane mirrors CPython's MONTH_IS_SANE macro.
+//
+// CPython: Modules/_datetimemodule.c:325 MONTH_IS_SANE
+func monthIsSane(m byte) bool { return uint(m)-1 < 12 }
+
+// dateFromPickle rebuilds a date from a 4-byte state buffer
+// [year_hi, year_lo, month, day].
+//
+// CPython: Modules/_datetimemodule.c:3193 date_from_pickle
+func dateFromPickle(cls *objects.Type, state []byte) (objects.Object, error) {
+	if len(state) != dateDataSize {
+		return nil, fmt.Errorf("ValueError: bad date state length")
+	}
+	year := int64(state[0])<<8 | int64(state[1])
+	month := int64(state[2])
+	day := int64(state[3])
+	d := &Date{Year: year, Month: month, Day: day}
+	d.Init(cls)
+	return d, nil
+}
+
+// dateNew is date.__new__. The pickle path passes a single 4-byte
+// state (or a latin1 unicode equivalent) and routes through
+// dateFromPickle; the normal constructor path takes (year, month, day).
+//
+// CPython: Modules/_datetimemodule.c:3206 date_new
 func dateNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 1 && len(kwargs) == 0 {
+		switch s := args[0].(type) {
+		case *objects.Bytes:
+			buf := s.Bytes()
+			if len(buf) == dateDataSize && monthIsSane(buf[2]) {
+				return dateFromPickle(cls, buf)
+			}
+		case *objects.Unicode:
+			v := s.Value()
+			if len(v) == dateDataSize && monthIsSane(v[2]) {
+				return dateFromPickle(cls, []byte(v))
+			}
+		}
+	}
 	if len(args) != 3 {
 		return nil, fmt.Errorf("TypeError: date() takes exactly 3 arguments (%d given)", len(args))
 	}
@@ -771,6 +876,55 @@ func dateNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects
 	}
 	d.Init(cls)
 	return d, nil
+}
+
+// dateNewBuiltin is the Python-level wrapper that exposes dateNew as
+// date.__new__. The first positional arg is the class; the rest is
+// forwarded as the constructor argument list.
+//
+// CPython: Objects/typeobject.c:9952 tp_new_wrapper
+func dateNewBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: date.__new__(): not enough arguments")
+	}
+	cls, ok := args[0].(*objects.Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: date.__new__(X): X is not a type object")
+	}
+	return dateNew(cls, args[1:], kwargs)
+}
+
+// dateGetstate packs (year, month, day) into a 4-byte state buffer
+// matching CPython's PyDateTime_Date data layout. The buffer is
+// returned wrapped in a single-element tuple.
+//
+// CPython: Modules/_datetimemodule.c:3894 date_getstate
+func dateGetstate(d *Date) *objects.Tuple {
+	buf := []byte{
+		byte((d.Year >> 8) & 0xff),
+		byte(d.Year & 0xff),
+		byte(d.Month),
+		byte(d.Day),
+	}
+	return objects.NewTuple([]objects.Object{objects.NewBytes(buf)})
+}
+
+// dateReduce is date.__reduce__. Returns (cls, state) so pickle can
+// recreate the date via cls.__new__(cls, state_bytes).
+//
+// CPython: Modules/_datetimemodule.c:3902 date_reduce
+func dateReduce(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	d, ok := args[0].(*Date)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'datetime.date' object")
+	}
+	return objects.NewTuple([]objects.Object{
+		d.Type(),
+		dateGetstate(d),
+	}), nil
 }
 
 // dateGetattr exposes year, month, day attributes.
@@ -1075,7 +1229,7 @@ func asFloat64(o objects.Object) (float64, error) {
 // TimezoneType is datetime.timezone.
 //
 // CPython: Modules/_datetimemodule.c:7010 timezone_type
-var TimezoneType = objects.NewType("timezone", []*objects.Type{objects.ObjectType()})
+var TimezoneType = objects.NewType("datetime.timezone", []*objects.Type{objects.ObjectType()})
 
 // Timezone is a fixed-offset tzinfo implementation.
 //
@@ -1121,6 +1275,71 @@ func init() {
 		objects.NewMethodDescr(TimezoneType, "dst", timezoneDst))
 	objects.SetTypeDescr(TimezoneType, "fromutc",
 		objects.NewMethodDescr(TimezoneType, "fromutc", timezoneFromutc))
+	// Pickle hooks. CPython's tzinfo base type provides __reduce__ that
+	// dispatches via __getinitargs__, yielding (cls, init_args). Since
+	// gopy doesn't carry a separate tzinfo type, expose both on Timezone.
+	//
+	// CPython: Modules/_datetimemodule.c:4140 tzinfo_reduce
+	// CPython: Modules/_datetimemodule.c:4433 timezone_getinitargs
+	objects.SetTypeDescr(TimezoneType, "__new__",
+		objects.NewBuiltinFunction("timezone.__new__", timezoneNewBuiltin))
+	objects.SetTypeDescr(TimezoneType, "__getinitargs__",
+		objects.NewMethodDescr(TimezoneType, "__getinitargs__", timezoneGetinitargs))
+	objects.SetTypeDescr(TimezoneType, "__reduce__",
+		objects.NewMethodDescr(TimezoneType, "__reduce__", timezoneReduce))
+}
+
+// timezoneNewBuiltin exposes timezoneNew as timezone.__new__.
+//
+// CPython: Objects/typeobject.c:9952 tp_new_wrapper
+func timezoneNewBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: timezone.__new__(): not enough arguments")
+	}
+	cls, ok := args[0].(*objects.Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: timezone.__new__(X): X is not a type object")
+	}
+	return timezoneNew(cls, args[1:], kwargs)
+}
+
+// timezoneReduce mirrors CPython's tzinfo.__reduce__, which gopy
+// flattens onto Timezone since we lack a separate tzinfo base. The
+// shape returned is (cls, init_args) so pickle proto 2+ replays the
+// constructor on unpickle.
+//
+// CPython: Modules/_datetimemodule.c:4140 tzinfo_reduce
+func timezoneReduce(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	tz, ok := args[0].(*Timezone)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'datetime.timezone' object")
+	}
+	initArgs, err := timezoneGetinitargs([]objects.Object{tz}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewTuple([]objects.Object{tz.Type(), initArgs}), nil
+}
+
+// timezoneGetinitargs returns the init args (offset[, name]) so
+// copyreg.__reduce_ex__ can replay the constructor on unpickle.
+//
+// CPython: Modules/_datetimemodule.c:4433 timezone_getinitargs
+func timezoneGetinitargs(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __getinitargs__() takes no arguments (%d given)", len(args)-1)
+	}
+	tz, ok := args[0].(*Timezone)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getinitargs__' requires a 'datetime.timezone' object")
+	}
+	if tz.Name == "" {
+		return objects.NewTuple([]objects.Object{tz.Offset}), nil
+	}
+	return objects.NewTuple([]objects.Object{tz.Offset, objects.NewStr(tz.Name)}), nil
 }
 
 func mustTimezone(offsetSecs int64, name string) *Timezone {
@@ -1301,7 +1520,7 @@ func addSecsToDatetime(dt *Datetime, secs int64) *Datetime {
 // TimeType is datetime.time.
 //
 // CPython: Modules/_datetimemodule.c:4200 time_type
-var TimeType = objects.NewType("time", []*objects.Type{objects.ObjectType()})
+var TimeType = objects.NewType("datetime.time", []*objects.Type{objects.ObjectType()})
 
 // Time backs a time-of-day instance.
 //
@@ -1342,6 +1561,117 @@ func init() {
 	objects.SetTypeDescr(TimeType, "min", mustTimeObj(0, 0, 0, 0, nil))
 	objects.SetTypeDescr(TimeType, "max", mustTimeObj(23, 59, 59, 999999, nil))
 	objects.SetTypeDescr(TimeType, "resolution", mustTimedelta2(0, 1))
+	// Pickle hooks.
+	//
+	// CPython: Modules/_datetimemodule.c:5108 time_getstate
+	// CPython: Modules/_datetimemodule.c:5140 time_reduce
+	objects.SetTypeDescr(TimeType, "__new__",
+		objects.NewBuiltinFunction("time.__new__", timeNewBuiltin))
+	objects.SetTypeDescr(TimeType, "__reduce__",
+		objects.NewMethodDescr(TimeType, "__reduce__", timeReduce))
+	objects.SetTypeDescr(TimeType, "__reduce_ex__",
+		objects.NewMethodDescr(TimeType, "__reduce_ex__", timeReduceEx))
+}
+
+// timeDataSize is the length of a pickled time state buffer.
+//
+// CPython: Include/datetime.h:28 _PyDateTime_TIME_DATASIZE
+const timeDataSize = 6
+
+// timeFromPickle rebuilds a time from a 6-byte state buffer plus
+// optional tzinfo. When the fold-flag bit is set on byte[0] (proto>3),
+// we clear it and stamp fold=1 on the result.
+//
+// CPython: Modules/_datetimemodule.c:4592 time_from_pickle
+func timeFromPickle(cls *objects.Type, state []byte, tz *Timezone) (objects.Object, error) {
+	if len(state) != timeDataSize {
+		return nil, fmt.Errorf("ValueError: bad time state length")
+	}
+	buf := make([]byte, timeDataSize)
+	copy(buf, state)
+	var fold int64
+	if buf[0]&0x80 != 0 {
+		buf[0] -= 128
+		fold = 1
+	}
+	hour := int64(buf[0])
+	minute := int64(buf[1])
+	second := int64(buf[2])
+	us := int64(buf[3])<<16 | int64(buf[4])<<8 | int64(buf[5])
+	t := &Time{Hour: hour, Minute: minute, Second: second, Microsecond: us, TzInfo: tz, Fold: fold}
+	t.Init(cls)
+	return t, nil
+}
+
+// timeGetstate packs (hour, minute, second, microsecond) into a
+// 6-byte state buffer. Proto>3 sets the fold flag in bit 7 of byte[0].
+//
+// CPython: Modules/_datetimemodule.c:5108 time_getstate
+func timeGetstate(t *Time, proto int) *objects.Tuple {
+	buf := []byte{
+		byte(t.Hour),
+		byte(t.Minute),
+		byte(t.Second),
+		byte((t.Microsecond >> 16) & 0xff),
+		byte((t.Microsecond >> 8) & 0xff),
+		byte(t.Microsecond & 0xff),
+	}
+	if proto > 3 && t.Fold != 0 {
+		buf[0] |= 1 << 7
+	}
+	items := []objects.Object{objects.NewBytes(buf)}
+	if t.TzInfo != nil {
+		items = append(items, t.TzInfo)
+	}
+	return objects.NewTuple(items)
+}
+
+// timeReduce is time.__reduce__. Uses protocol 2 conventions.
+//
+// CPython: Modules/_datetimemodule.c:5140 time_reduce
+func timeReduce(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	t, ok := args[0].(*Time)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'datetime.time' object")
+	}
+	return objects.NewTuple([]objects.Object{t.Type(), timeGetstate(t, 2)}), nil
+}
+
+// timeReduceEx is time.__reduce_ex__(protocol). For proto>3 the
+// state's fold flag is encoded in bit 7 of byte[0].
+//
+// CPython: Modules/_datetimemodule.c:5129 time_reduce_ex
+func timeReduceEx(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __reduce_ex__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	t, ok := args[0].(*Time)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce_ex__' requires a 'datetime.time' object")
+	}
+	proto, err := asInt(args[1])
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewTuple([]objects.Object{t.Type(), timeGetstate(t, int(proto))}), nil
+}
+
+// timeNewBuiltin is the Python-level wrapper that exposes timeNew as
+// time.__new__.
+//
+// CPython: Objects/typeobject.c:9952 tp_new_wrapper
+func timeNewBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: time.__new__(): not enough arguments")
+	}
+	cls, ok := args[0].(*objects.Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: time.__new__(X): X is not a type object")
+	}
+	return timeNew(cls, args[1:], kwargs)
 }
 
 func mustTimeObj(h, m, s, us int64, tz *Timezone) *Time {
@@ -1398,6 +1728,30 @@ func checkTime(hour, minute, second, microsecond, fold int64) error {
 //
 // CPython: Modules/_datetimemodule.c:4094 time_new
 func timeNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if (len(args) == 1 || len(args) == 2) && len(kwargs) == 0 {
+		var tz *Timezone
+		if len(args) == 2 {
+			if !objects.IsNone(args[1]) {
+				tzv, ok := args[1].(*Timezone)
+				if !ok {
+					return nil, fmt.Errorf("TypeError: tzinfo must be a timezone or None")
+				}
+				tz = tzv
+			}
+		}
+		switch s := args[0].(type) {
+		case *objects.Bytes:
+			buf := s.Bytes()
+			if len(buf) == timeDataSize && (buf[0]&0x7f) < 24 {
+				return timeFromPickle(cls, buf, tz)
+			}
+		case *objects.Unicode:
+			v := s.Value()
+			if len(v) == timeDataSize && (v[0]&0x7f) < 24 {
+				return timeFromPickle(cls, []byte(v), tz)
+			}
+		}
+	}
 	var hour, minute, second, microsecond, fold int64
 	var tz *Timezone
 	if err := parseTimeArgs(args, kwargs, &hour, &minute, &second, &microsecond, &tz, &fold); err != nil {
@@ -1775,7 +2129,7 @@ func timeTzname(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 // DatetimeType is datetime.datetime, a subtype of date.
 //
 // CPython: Modules/_datetimemodule.c:6948 datetime_type
-var DatetimeType = objects.NewType("datetime", []*objects.Type{DateType})
+var DatetimeType = objects.NewType("datetime.datetime", []*objects.Type{DateType})
 
 // Datetime backs a datetime instance.
 //
@@ -1848,6 +2202,133 @@ func init() {
 	objects.SetTypeDescr(DatetimeType, "max",
 		mustDatetime(maxyear, 12, 31, 23, 59, 59, 999999, nil))
 	objects.SetTypeDescr(DatetimeType, "resolution", mustTimedelta2(0, 1))
+	// Pickle hooks.
+	//
+	// CPython: Modules/_datetimemodule.c:6976 datetime_getstate
+	// CPython: Modules/_datetimemodule.c:7009 datetime_reduce
+	objects.SetTypeDescr(DatetimeType, "__new__",
+		objects.NewBuiltinFunction("datetime.__new__", datetimeNewBuiltin))
+	objects.SetTypeDescr(DatetimeType, "__reduce__",
+		objects.NewMethodDescr(DatetimeType, "__reduce__", datetimeReduce))
+	objects.SetTypeDescr(DatetimeType, "__reduce_ex__",
+		objects.NewMethodDescr(DatetimeType, "__reduce_ex__", datetimeReduceEx))
+}
+
+// datetimeDataSize is the length of a pickled datetime state buffer.
+//
+// CPython: Include/datetime.h:31 _PyDateTime_DATETIME_DATASIZE
+const datetimeDataSize = 10
+
+// datetimeFromPickle rebuilds a datetime from a 10-byte state buffer
+// plus optional tzinfo. CPython encodes the fold flag in bit 7 of
+// byte[2] (the month byte); we clear it and stamp fold=1 on the
+// result.
+//
+// CPython: Modules/_datetimemodule.c:5314 datetime_from_pickle
+func datetimeFromPickle(cls *objects.Type, state []byte, tz *Timezone) (objects.Object, error) {
+	if len(state) != datetimeDataSize {
+		return nil, fmt.Errorf("ValueError: bad datetime state length")
+	}
+	buf := make([]byte, datetimeDataSize)
+	copy(buf, state)
+	var fold int64
+	if buf[2]&0x80 != 0 {
+		buf[2] -= 128
+		fold = 1
+	}
+	year := int64(buf[0])<<8 | int64(buf[1])
+	month := int64(buf[2])
+	day := int64(buf[3])
+	hour := int64(buf[4])
+	minute := int64(buf[5])
+	second := int64(buf[6])
+	us := int64(buf[7])<<16 | int64(buf[8])<<8 | int64(buf[9])
+	dt := &Datetime{
+		Date:        Date{Year: year, Month: month, Day: day},
+		Hour:        hour,
+		Minute:      minute,
+		Second:      second,
+		Microsecond: us,
+		TzInfo:      tz,
+		Fold:        fold,
+	}
+	dt.Init(cls)
+	return dt, nil
+}
+
+// datetimeGetstate packs (year_hi, year_lo, month, day, hour, minute,
+// second, us_hi, us_mid, us_lo) into a 10-byte buffer. Proto>3 sets
+// the fold flag in bit 7 of byte[2].
+//
+// CPython: Modules/_datetimemodule.c:6976 datetime_getstate
+func datetimeGetstate(dt *Datetime, proto int) *objects.Tuple {
+	buf := []byte{
+		byte((dt.Year >> 8) & 0xff),
+		byte(dt.Year & 0xff),
+		byte(dt.Month),
+		byte(dt.Day),
+		byte(dt.Hour),
+		byte(dt.Minute),
+		byte(dt.Second),
+		byte((dt.Microsecond >> 16) & 0xff),
+		byte((dt.Microsecond >> 8) & 0xff),
+		byte(dt.Microsecond & 0xff),
+	}
+	if proto > 3 && dt.Fold != 0 {
+		buf[2] |= 1 << 7
+	}
+	items := []objects.Object{objects.NewBytes(buf)}
+	if dt.TzInfo != nil {
+		items = append(items, dt.TzInfo)
+	}
+	return objects.NewTuple(items)
+}
+
+// datetimeReduce is datetime.__reduce__. Uses protocol 2 conventions.
+//
+// CPython: Modules/_datetimemodule.c:7009 datetime_reduce
+func datetimeReduce(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	dt, ok := args[0].(*Datetime)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'datetime.datetime' object")
+	}
+	return objects.NewTuple([]objects.Object{dt.Type(), datetimeGetstate(dt, 2)}), nil
+}
+
+// datetimeReduceEx is datetime.__reduce_ex__(protocol).
+//
+// CPython: Modules/_datetimemodule.c:6997 datetime_reduce_ex
+func datetimeReduceEx(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __reduce_ex__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	dt, ok := args[0].(*Datetime)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce_ex__' requires a 'datetime.datetime' object")
+	}
+	proto, err := asInt(args[1])
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewTuple([]objects.Object{dt.Type(), datetimeGetstate(dt, int(proto))}), nil
+}
+
+// datetimeNewBuiltin is the Python-level wrapper that exposes
+// datetimeNew as datetime.__new__.
+//
+// CPython: Objects/typeobject.c:9952 tp_new_wrapper
+func datetimeNewBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: datetime.__new__(): not enough arguments")
+	}
+	cls, ok := args[0].(*objects.Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: datetime.__new__(X): X is not a type object")
+	}
+	return datetimeNew(cls, args[1:], kwargs)
 }
 
 func mustDatetime(y, mo, d, h, mi, s, us int64, tz *Timezone) *Datetime {
@@ -1885,6 +2366,30 @@ func newDatetime(year, month, day, hour, minute, second, microsecond int64, tz *
 //
 // CPython: Modules/_datetimemodule.c:5550 datetime_new
 func datetimeNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if (len(args) == 1 || len(args) == 2) && len(kwargs) == 0 {
+		var tz *Timezone
+		if len(args) == 2 {
+			if !objects.IsNone(args[1]) {
+				tzv, ok := args[1].(*Timezone)
+				if !ok {
+					return nil, fmt.Errorf("TypeError: tzinfo must be a timezone or None")
+				}
+				tz = tzv
+			}
+		}
+		switch s := args[0].(type) {
+		case *objects.Bytes:
+			buf := s.Bytes()
+			if len(buf) == datetimeDataSize && monthIsSane(buf[2]&0x7f) {
+				return datetimeFromPickle(cls, buf, tz)
+			}
+		case *objects.Unicode:
+			v := s.Value()
+			if len(v) == datetimeDataSize && monthIsSane(v[2]&0x7f) {
+				return datetimeFromPickle(cls, []byte(v), tz)
+			}
+		}
+	}
 	if len(args) < 3 {
 		return nil, fmt.Errorf("TypeError: datetime() requires at least 3 arguments (year, month, day)")
 	}

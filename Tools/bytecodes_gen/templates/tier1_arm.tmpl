@@ -23,7 +23,7 @@
 {{- if .BailOutputs}}
 		// outputs:{{range .BailOutputs}} {{.}}{{end}}
 {{- end}}
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 {{- else}}
 {{- range .OutputDecls}}
 {{- if .Sized}}
@@ -57,6 +57,6 @@
 		e.push({{.Name}})
 {{- end}}
 {{- end}}
-		return e.advance(), nil, nil, false, nil
+		return e.advance(), nil
 {{- end}}
 {{- end}}

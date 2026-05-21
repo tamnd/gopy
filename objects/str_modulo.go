@@ -45,7 +45,9 @@ type fmtArg struct {
 }
 
 // fmtCtx is the % walker's working state. Mirrors unicode_formatter_t,
-// minus the writer indirection: we accumulate into a strings.Builder.
+// including the writer indirection: we accumulate into UnicodeWriter
+// (spec 1712 P15.2) so Finish builds a *Unicode with kind / maxchar
+// populated, skipping a second classify walk.
 //
 // CPython: Objects/unicodeobject.c:14643 unicode_formatter_t
 type fmtCtx struct {
@@ -84,13 +86,21 @@ func unicodeModulo(a, b Object) (Object, error) {
 		ctx.dict = d
 	}
 
-	var out strings.Builder
-	out.Grow(len(fmtStr.v) + 16)
+	var out UnicodeWriter
+	out.Init()
+	out.overallocate = true
+	// Pre-size: the literal portion of the format string plus a small
+	// reserve for substitutions. PrepareInternal grows on demand.
+	if err := out.PrepareInternal(len(fmtStr.v)+16, 127); err != nil {
+		return nil, err
+	}
 
 	for ctx.pos < len(ctx.fmt) {
 		ch := ctx.fmt[ctx.pos]
 		if ch != '%' {
-			out.WriteRune(ch)
+			if err := out.WriteChar(ch); err != nil {
+				return nil, err
+			}
 			ctx.pos++
 			continue
 		}
@@ -99,7 +109,9 @@ func unicodeModulo(a, b Object) (Object, error) {
 			return nil, fmt.Errorf("ValueError: incomplete format")
 		}
 		if ctx.fmt[ctx.pos] == '%' {
-			out.WriteByte('%')
+			if err := out.WriteChar('%'); err != nil {
+				return nil, err
+			}
 			ctx.pos++
 			continue
 		}
@@ -111,14 +123,14 @@ func unicodeModulo(a, b Object) (Object, error) {
 	if ctx.dict == nil && ctx.argIdx < ctx.argLen {
 		return nil, fmt.Errorf("TypeError: not all arguments converted during string formatting")
 	}
-	return NewStr(out.String()), nil
+	return out.Finish(), nil
 }
 
 // formatOneArg parses one %-spec at ctx.pos and writes the formatted
 // argument into out. Mirrors unicode_format_arg.
 //
 // CPython: Objects/unicodeobject.c:15455 unicode_format_arg
-func formatOneArg(ctx *fmtCtx, out *strings.Builder) error {
+func formatOneArg(ctx *fmtCtx, out *UnicodeWriter) error {
 	arg := fmtArg{width: -1, prec: -1}
 
 	if ctx.fmt[ctx.pos] == '(' {
@@ -217,7 +229,9 @@ widthParse:
 		return err
 	}
 
-	writePadded(out, &arg, body)
+	if err := writePadded(out, &arg, body); err != nil {
+		return err
+	}
 
 	if ctx.dict != nil && ctx.owned && ctx.argIdx >= 0 && ctx.argIdx < ctx.argLen {
 		return fmt.Errorf("TypeError: not all arguments converted during string formatting")
@@ -548,21 +562,22 @@ func asciiEscape(s string) string {
 // padding lives between the sign and the digits.
 //
 // CPython: Objects/unicodeobject.c:15301 unicode_format_arg_output
-func writePadded(out *strings.Builder, arg *fmtArg, body string) {
+func writePadded(out *UnicodeWriter, arg *fmtArg, body string) error {
 	width := arg.width
 	if width < 0 {
 		width = 0
 	}
 	bodyLen := runeLen(body)
 	if bodyLen >= width {
-		out.WriteString(body)
-		return
+		return writeBodyChunk(out, body)
 	}
 	pad := width - bodyLen
 	switch {
 	case arg.flags&fmtLJust != 0:
-		out.WriteString(body)
-		out.WriteString(strings.Repeat(" ", pad))
+		if err := writeBodyChunk(out, body); err != nil {
+			return err
+		}
+		return writeRepeat(out, ' ', pad)
 	case arg.flags&fmtZero != 0 && arg.signable:
 		signEnd := 0
 		if body != "" && (body[0] == '-' || body[0] == '+' || body[0] == ' ') {
@@ -574,13 +589,48 @@ func writePadded(out *strings.Builder, arg *fmtArg, body string) {
 				body[signEnd+1] == 'o') {
 			prefixEnd = signEnd + 2
 		}
-		out.WriteString(body[:prefixEnd])
-		out.WriteString(strings.Repeat("0", pad))
-		out.WriteString(body[prefixEnd:])
+		if err := writeBodyChunk(out, body[:prefixEnd]); err != nil {
+			return err
+		}
+		if err := writeRepeat(out, '0', pad); err != nil {
+			return err
+		}
+		return writeBodyChunk(out, body[prefixEnd:])
 	default:
-		out.WriteString(strings.Repeat(" ", pad))
-		out.WriteString(body)
+		if err := writeRepeat(out, ' ', pad); err != nil {
+			return err
+		}
+		return writeBodyChunk(out, body)
 	}
+}
+
+// writeBodyChunk pushes a Go-string chunk through UnicodeWriter, using
+// the ASCII fast path when the chunk is all-ASCII to skip rune decode.
+func writeBodyChunk(out *UnicodeWriter, s string) error {
+	if s == "" {
+		return nil
+	}
+	isASCII := true
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			isASCII = false
+			break
+		}
+	}
+	if isASCII {
+		return out.WriteASCIIString(s, len(s))
+	}
+	return out.WriteStr(NewStr(s).(*Unicode))
+}
+
+// writeRepeat writes ch n times into out.
+func writeRepeat(out *UnicodeWriter, ch rune, n int) error {
+	for range n {
+		if err := out.WriteChar(ch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // runeLen counts code points in s. width and precision in CPython are

@@ -97,6 +97,61 @@ func TestFrameLocalAccess(t *testing.T) {
 	}
 }
 
+// TestFrameStackLocalsPlusRecycled verifies that Pop preserves the
+// LocalsPlus slice on the underlying chunk slot so the next Push's
+// Init hits its `cap(LocalsPlus) >= size` fast path. Without this,
+// every call site re-allocated locals storage from the heap and
+// BenchmarkCallNop never reached zero allocs. The chunk arena
+// already recycled the *Frame slot; this gate locks in that the
+// slice header travels with the slot.
+//
+// CPython parity: _PyThreadState_PopFrame leaves the activation
+// record memory in the data stack for the next _PyEvalFramePushAndInit.
+func TestFrameStackLocalsPlusRecycled(t *testing.T) {
+	s := New()
+	co := mkCode(4, 0, 0, 6)
+
+	f := s.Push(co, nil, nil, nil, nil)
+	origPtr := &f.LocalsPlus[0]
+	origCap := cap(f.LocalsPlus)
+	s.Pop()
+
+	f2 := s.Push(co, nil, nil, nil, nil)
+	if cap(f2.LocalsPlus) != origCap {
+		t.Errorf("cap(LocalsPlus) = %d after recycle, want %d",
+			cap(f2.LocalsPlus), origCap)
+	}
+	if &f2.LocalsPlus[0] != origPtr {
+		t.Errorf("LocalsPlus backing array not recycled: got %p, want %p",
+			&f2.LocalsPlus[0], origPtr)
+	}
+	for i, r := range f2.LocalsPlus {
+		if !r.IsNull() {
+			t.Errorf("recycled slot %d not null", i)
+			break
+		}
+	}
+}
+
+// TestFrameStackGeneratorOwnedDropsLocalsPlus confirms that the
+// OwnedByGenerator Pop path still hands the storage off cleanly:
+// the slot is wiped wholesale, so a subsequent Push at the same
+// slot allocates a fresh LocalsPlus rather than sharing memory
+// with the live generator.
+func TestFrameStackGeneratorOwnedDropsLocalsPlus(t *testing.T) {
+	s := New()
+	co := mkCode(2, 0, 0, 2)
+	f := s.Push(co, nil, nil, nil, nil)
+	f.Owner = OwnedByGenerator
+	origPtr := &f.LocalsPlus[0]
+	s.Pop()
+
+	f2 := s.Push(co, nil, nil, nil, nil)
+	if len(f2.LocalsPlus) > 0 && &f2.LocalsPlus[0] == origPtr {
+		t.Errorf("generator-owned LocalsPlus was recycled, would alias generator storage")
+	}
+}
+
 func TestFrameStackPushPop(t *testing.T) {
 	s := New()
 	co := mkCode(1, 0, 0, 2)
@@ -124,7 +179,7 @@ func TestFrameStackChunkGrowth(t *testing.T) {
 	s := New()
 	co := mkCode(0, 0, 0, 0)
 	var prev *Frame
-	for i := 0; i < ChunkSize+5; i++ {
+	for range ChunkSize + 5 {
 		prev = s.Push(co, nil, nil, nil, prev)
 	}
 	if s.Depth() != ChunkSize+5 {

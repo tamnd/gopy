@@ -65,6 +65,14 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 		if err != nil {
 			return nil, fmt.Errorf("imp: init %q: %w", absName, err)
 		}
+		// Stamp m_module on every BuiltinFunction registered into
+		// the module's dict, the same way PyModule_AddFunctions
+		// passes the module name to PyCFunction_NewEx. Pickle's
+		// whichmodule reads __module__ off codecs.encode and
+		// friends to resolve save_global to the right import path.
+		//
+		// CPython: Objects/moduleobject.c:606 PyModule_AddFunctions
+		mod.StampBuiltinModule()
 		AddModule(absName, mod)
 		return mod, nil
 	}

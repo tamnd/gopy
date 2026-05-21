@@ -54,6 +54,85 @@ func TestAugAssignNameEmitsLoadInPlaceStore(t *testing.T) {
 	}
 }
 
+func TestAugAssignSubscriptEmitsCopyCopyBinarySwapSwapStore(t *testing.T) {
+	// x[0] -= 1
+	// CPython codegen_augassign Subscript_kind: container, index,
+	// COPY 2, COPY 2, BINARY_OP NB_SUBSCR, rhs, BINARY_OP NB_INPLACE_*,
+	// SWAP 3, SWAP 2, STORE_SUBSCR. Spec 1712 P8 reproducer was missing
+	// the second SWAP 2, so STORE_SUBSCR saw container/index swapped.
+	a := &ast.AugAssign{
+		Target: &ast.Subscript{
+			Value: nameLoad("x"),
+			Slice: cnst(int64(0)),
+			Ctx:   ast.Store,
+		},
+		Op:    ast.Sub,
+		Value: cnst(int64(1)),
+	}
+	u := compileMod(t, module(a))
+	want := []string{
+		"LOAD_NAME",  // x
+		"LOAD_CONST", // 0
+		"COPY",       // 2
+		"COPY",       // 2
+		"BINARY_OP",  // NB_SUBSCR
+		"LOAD_CONST", // 1
+		"BINARY_OP",  // NB_INPLACE_SUBTRACT
+		"SWAP",       // 3
+		"SWAP",       // 2
+		"STORE_SUBSCR",
+		"LOAD_CONST",
+		"RETURN_VALUE",
+	}
+	if got := opNames(u); !equalStrings(got, want) {
+		t.Errorf("ops = %v\nwant %v", got, want)
+	}
+	// opNames strips the leading RESUME prologue; raw Instrs keeps it,
+	// so add +1 to translate from want-list index to Instrs index.
+	if got := u.Seq.Instrs[3].Oparg; got != 2 {
+		t.Errorf("COPY[0] oparg = %d, want 2", got)
+	}
+	if got := u.Seq.Instrs[4].Oparg; got != 2 {
+		t.Errorf("COPY[1] oparg = %d, want 2", got)
+	}
+	if got := u.Seq.Instrs[8].Oparg; got != 3 {
+		t.Errorf("SWAP[0] oparg = %d, want 3", got)
+	}
+	if got := u.Seq.Instrs[9].Oparg; got != 2 {
+		t.Errorf("SWAP[1] oparg = %d, want 2", got)
+	}
+}
+
+func TestAugAssignAttributeEmitsCopyLoadBinarySwapStore(t *testing.T) {
+	// x.y -= 1
+	// CPython codegen_augassign Attribute_kind: container, COPY 1,
+	// LOAD_ATTR, rhs, BINARY_OP NB_INPLACE_*, SWAP 2, STORE_ATTR.
+	a := &ast.AugAssign{
+		Target: &ast.Attribute{
+			Value: nameLoad("x"),
+			Attr:  "y",
+			Ctx:   ast.Store,
+		},
+		Op:    ast.Sub,
+		Value: cnst(int64(1)),
+	}
+	u := compileMod(t, module(a))
+	want := []string{
+		"LOAD_NAME",  // x
+		"COPY",       // 1
+		"LOAD_ATTR",  // y
+		"LOAD_CONST", // 1
+		"BINARY_OP",  // NB_INPLACE_SUBTRACT
+		"SWAP",       // 2
+		"STORE_ATTR",
+		"LOAD_CONST",
+		"RETURN_VALUE",
+	}
+	if got := opNames(u); !equalStrings(got, want) {
+		t.Errorf("ops = %v\nwant %v", got, want)
+	}
+}
+
 // AnnAssign ----------------------------------------------------------
 
 func TestAnnAssignWithValueAssigns(t *testing.T) {

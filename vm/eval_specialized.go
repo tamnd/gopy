@@ -50,8 +50,16 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		next, ok = e.fastLoadAttrMethodNoDict(oparg)
 	case compile.LOAD_ATTR_NONDESCRIPTOR_NO_DICT:
 		next, ok = e.fastLoadAttrNondescriptorNoDict(oparg)
+	case compile.LOAD_ATTR_METHOD_WITH_VALUES:
+		next, ok = e.fastLoadAttrMethodWithValues(oparg)
+	case compile.LOAD_ATTR_METHOD_LAZY_DICT:
+		next, ok = e.fastLoadAttrMethodLazyDict(oparg)
+	case compile.LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES:
+		next, ok = e.fastLoadAttrNondescriptorWithValues(oparg)
 	case compile.LOAD_ATTR_PROPERTY:
 		return e.fastLoadAttrProperty(oparg)
+	case compile.LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN:
+		return e.fastLoadAttrGetattributeOverridden(oparg)
 	case compile.LOAD_ATTR_INSTANCE_VALUE:
 		next, ok = e.fastLoadAttrInstanceValue(oparg)
 	case compile.TO_BOOL_BOOL:
@@ -116,6 +124,56 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 		next, ok = e.fastLoadGlobalBuiltin(oparg)
 	case compile.STORE_ATTR_SLOT:
 		next, ok = e.fastStoreAttrSlot(oparg)
+	case compile.STORE_ATTR_INSTANCE_VALUE:
+		next, ok = e.fastStoreAttrInstanceValue(oparg)
+	case compile.STORE_ATTR_WITH_HINT:
+		next, ok = e.fastStoreAttrWithHint(oparg)
+	case compile.CALL_PY_EXACT_ARGS:
+		return e.fastCallPyExactArgs(oparg)
+	case compile.CALL_BOUND_METHOD_EXACT_ARGS:
+		return e.fastCallBoundMethodExactArgs(oparg)
+	case compile.CALL_BUILTIN_O:
+		return e.fastCallBuiltinO(oparg)
+	case compile.CALL_BUILTIN_FAST:
+		return e.fastCallBuiltinFast(oparg)
+	case compile.CALL_BUILTIN_FAST_WITH_KEYWORDS:
+		return e.fastCallBuiltinFastWithKeywords(oparg)
+	case compile.CALL_LEN:
+		return e.fastCallLen(oparg)
+	case compile.CALL_ISINSTANCE:
+		return e.fastCallIsinstance(oparg)
+	case compile.CALL_LIST_APPEND:
+		return e.fastCallListAppend(oparg)
+	case compile.CALL_TYPE_1:
+		return e.fastCallType1(oparg)
+	case compile.CALL_STR_1:
+		return e.fastCallStr1(oparg)
+	case compile.CALL_TUPLE_1:
+		return e.fastCallTuple1(oparg)
+	case compile.CALL_BUILTIN_CLASS:
+		return e.fastCallBuiltinClass(oparg)
+	case compile.CALL_METHOD_DESCRIPTOR_O:
+		return e.fastCallMethodDescriptorO(oparg)
+	case compile.CALL_METHOD_DESCRIPTOR_FAST:
+		return e.fastCallMethodDescriptorFast(oparg)
+	case compile.CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS:
+		return e.fastCallMethodDescriptorFastKw(oparg)
+	case compile.CALL_METHOD_DESCRIPTOR_NOARGS:
+		return e.fastCallMethodDescriptorNoArgs(oparg)
+	case compile.FOR_ITER_LIST:
+		next, ok = e.fastForIterList(oparg)
+	case compile.FOR_ITER_TUPLE:
+		next, ok = e.fastForIterTuple(oparg)
+	case compile.FOR_ITER_RANGE:
+		next, ok = e.fastForIterRange(oparg)
+	case compile.LOAD_SUPER_ATTR_ATTR:
+		return e.fastLoadSuperAttrAttr(oparg)
+	case compile.LOAD_SUPER_ATTR_METHOD:
+		return e.fastLoadSuperAttrMethod(oparg)
+	case compile.SEND_GEN:
+		return e.fastSendGen(oparg)
+	case compile.CALL_ALLOC_AND_ENTER_INIT:
+		return e.fastCallAllocAndEnterInit(oparg)
 	}
 	return next, ok, nil
 }
@@ -327,6 +385,150 @@ func (e *evalState) fastLoadAttrNondescriptorNoDict(oparg uint32) (int, bool) {
 	return e.cacheAdvance(compile.LOAD_ATTR), true
 }
 
+// fastLoadAttrMethodWithValues implements LOAD_ATTR_METHOD_WITH_VALUES.
+//
+// Guards: oparg requests the unbound-method shape (bit 0 set), owner
+// is *Instance, owner's type_version matches cells 2..3, the type's
+// cached_keys_version matches cells 4..5, and inst.InlineValid() is
+// still true (no DELETE_ATTR has materialized a separate dict). The
+// cached descriptor is the class-level method; on hit pushes (descr,
+// self) so the following CALL sees the unbound-method (callable, self)
+// shape.
+//
+// The specializer asserts at stamp time that the name being looked up
+// is NOT in the type's cached_keys (CPython:
+// Python/specialize.c:1614). Together with the keys_version guard,
+// that proves no instance has ever stored an attribute under this
+// name, so the load returns the class-level descriptor verbatim.
+//
+// CPython: Python/bytecodes.c LOAD_ATTR_METHOD_WITH_VALUES
+func (e *evalState) fastLoadAttrMethodWithValues(oparg uint32) (int, bool) {
+	if oparg&1 == 0 {
+		return 0, false
+	}
+	inst, ok := e.peek(0).AsObject().(*objects.Instance)
+	if !ok {
+		return 0, false
+	}
+	tp := inst.Type()
+	if !tp.HasInlineValues() {
+		return 0, false
+	}
+	if !inst.InlineValid() {
+		return 0, false
+	}
+	idx := e.instrIdx()
+	code := e.f.Code.Code
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
+	curVer := tp.VersionTag()
+	if curVer == 0 || curVer != cachedVer {
+		return 0, false
+	}
+	cachedKeys := specialize.LoadMethodKeysVersion(code, idx)
+	curKeys := tp.CachedKeysVersion()
+	if curKeys == 0 || curKeys != cachedKeys {
+		return 0, false
+	}
+	descr := specialize.CacheObject(e.f.Code.CacheObjects, idx)
+	if descr == nil {
+		return 0, false
+	}
+	self := e.pop()
+	e.pushObject(descr)
+	e.push(self)
+	return e.cacheAdvance(compile.LOAD_ATTR), true
+}
+
+// fastLoadAttrNondescriptorWithValues implements
+// LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES. Same guards as the METHOD
+// variant; pushes only the cached descriptor (oparg&1 == 0, no
+// unbound-method shape) and consumes the owner.
+//
+// CPython: Python/bytecodes.c LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES
+func (e *evalState) fastLoadAttrNondescriptorWithValues(oparg uint32) (int, bool) {
+	if oparg&1 != 0 {
+		return 0, false
+	}
+	inst, ok := e.peek(0).AsObject().(*objects.Instance)
+	if !ok {
+		return 0, false
+	}
+	tp := inst.Type()
+	if !tp.HasInlineValues() {
+		return 0, false
+	}
+	if !inst.InlineValid() {
+		return 0, false
+	}
+	idx := e.instrIdx()
+	code := e.f.Code.Code
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
+	curVer := tp.VersionTag()
+	if curVer == 0 || curVer != cachedVer {
+		return 0, false
+	}
+	cachedKeys := specialize.LoadMethodKeysVersion(code, idx)
+	curKeys := tp.CachedKeysVersion()
+	if curKeys == 0 || curKeys != cachedKeys {
+		return 0, false
+	}
+	descr := specialize.CacheObject(e.f.Code.CacheObjects, idx)
+	if descr == nil {
+		return 0, false
+	}
+	e.pop()
+	e.pushObject(descr)
+	return e.cacheAdvance(compile.LOAD_ATTR), true
+}
+
+// fastLoadAttrMethodLazyDict implements LOAD_ATTR_METHOD_LAZY_DICT.
+//
+// Guards: oparg requests the unbound-method shape (bit 0 set), owner
+// is *Instance whose type carries MANAGED_DICT without INLINE_VALUES
+// (the LAZY_DICT shape for heap subclasses of built-ins), the managed
+// dict is still nil (no per-instance store has materialized it), and
+// the type_version matches cells 2..3. On hit pushes (descr, self) so
+// the following CALL sees the unbound-method (callable, self) shape.
+//
+// The dict-is-nil guard is gopy's equivalent of CPython's
+// _PyManagedDictPointer_GET(owner)->dict != NULL check: the moment
+// instanceSetAttr materializes the managed dict, an instance-level
+// store could shadow the class descriptor, so the arm deopts and the
+// generic LOAD_ATTR path repeats the descriptor lookup.
+//
+// CPython: Python/bytecodes.c LOAD_ATTR_METHOD_LAZY_DICT
+func (e *evalState) fastLoadAttrMethodLazyDict(oparg uint32) (int, bool) {
+	if oparg&1 == 0 {
+		return 0, false
+	}
+	inst, ok := e.peek(0).AsObject().(*objects.Instance)
+	if !ok {
+		return 0, false
+	}
+	tp := inst.Type()
+	if !tp.HasManagedDict() || tp.HasInlineValues() {
+		return 0, false
+	}
+	if inst.Dict() != nil {
+		return 0, false
+	}
+	idx := e.instrIdx()
+	code := e.f.Code.Code
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
+	curVer := tp.VersionTag()
+	if curVer == 0 || curVer != cachedVer {
+		return 0, false
+	}
+	descr := specialize.CacheObject(e.f.Code.CacheObjects, idx)
+	if descr == nil {
+		return 0, false
+	}
+	self := e.pop()
+	e.pushObject(descr)
+	e.push(self)
+	return e.cacheAdvance(compile.LOAD_ATTR), true
+}
+
 // fastLoadAttrInstanceValue implements LOAD_ATTR_INSTANCE_VALUE.
 //
 // Guards: owner is *Instance, owner's type_version matches cells 2..3,
@@ -362,6 +564,59 @@ func (e *evalState) fastLoadAttrInstanceValue(oparg uint32) (int, bool) {
 	}
 	e.pushAttrResult(value, oparg)
 	return e.cacheAdvance(compile.LOAD_ATTR), true
+}
+
+// fastLoadAttrGetattributeOverridden implements
+// LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN. Owner is an instance whose type
+// owns a Python __getattribute__ override and has no __getattr__ hook;
+// the cached function pointer (CacheObjects[instr]) is invoked with
+// (owner, name) so user code observes the attribute fetch.
+//
+// CPython inlines the user function as a Python frame via
+// DISPATCH_INLINED so the resolved descriptor never escapes the
+// dispatch loop. gopy can't bounce frames the same way from inside a
+// fast arm; we call the function synchronously through objects.Call,
+// which still beats the generic LOAD_ATTR path (no descriptor walk,
+// no instance-dict lookup, no slot dispatcher).
+//
+// The arm refuses the unbound-method oparg shape because
+// _Py_slot_tp_getattro never produces a (descr, self) pair: the user
+// function decides the return shape itself.
+//
+// CPython: Python/bytecodes.c:2518 LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN
+func (e *evalState) fastLoadAttrGetattributeOverridden(oparg uint32) (int, bool, error) {
+	if oparg&1 != 0 {
+		return 0, false, nil
+	}
+	owner := e.peek(0).AsObject()
+	tp := owner.Type()
+	if tp == nil {
+		return 0, false, nil
+	}
+	idx := e.instrIdx()
+	code := e.f.Code.Code
+	cachedVer := specialize.LoadMethodTypeVersion(code, idx)
+	curVer := tp.VersionTag()
+	if curVer == 0 || curVer != cachedVer {
+		return 0, false, nil
+	}
+	getattribute := specialize.CacheObject(e.f.Code.CacheObjects, idx)
+	if getattribute == nil {
+		return 0, false, nil
+	}
+	co := e.f.Code
+	nameIdx := int(oparg >> 1)
+	if nameIdx < 0 || nameIdx >= len(co.Names) {
+		return 0, false, nil
+	}
+	name := co.NameObj(nameIdx)
+	e.pop()
+	result, err := objects.Call(getattribute, objects.NewTuple([]objects.Object{owner, name}), nil)
+	if err != nil {
+		return 0, true, err
+	}
+	e.pushObject(result)
+	return e.cacheAdvance(compile.LOAD_ATTR), true, nil
 }
 
 // fastLoadAttrProperty implements LOAD_ATTR_PROPERTY. Owner is an

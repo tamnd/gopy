@@ -295,7 +295,16 @@ func memoryViewRichCmp(a, b Object, op CompareOp) (Object, error) {
 // bytesViewOf returns the underlying byte slice for any bytes-like
 // object that memoryview can compare against. Supports MemoryView,
 // Bytes, ByteArray; returns false otherwise.
-func bytesViewOf(o Object) ([]byte, bool) {
+func bytesViewOf(o Object) ([]byte, bool) { return AsBytesLike(o) }
+
+// AsBytesLike unwraps any bytes-like object (Bytes, ByteArray, or
+// MemoryView) to the underlying byte slice. It is the gopy equivalent
+// of CPython's PyObject_GetBuffer for the common contiguous read path
+// and lets callers in io / marshal / struct accept any of those three
+// without re-implementing the switch.
+//
+// CPython: Objects/abstract.c:341 PyObject_GetBuffer (PyBUF_SIMPLE)
+func AsBytesLike(o Object) ([]byte, bool) {
 	switch v := o.(type) {
 	case *MemoryView:
 		return v.buf, true

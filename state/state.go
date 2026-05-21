@@ -261,14 +261,43 @@ func NewRuntime() *Runtime {
 
 // NewInterpreter allocates an interpreter owned by r and registers
 // it in r.interpreters. The first call returns the main interpreter;
-// later calls (sub-interpreters) land in v0.13.
+// later calls (sub-interpreters) land in v0.13. The first interpreter
+// minted in the process is also stashed as the main interpreter and
+// can be retrieved through MainInterpreter() so callback paths that
+// lack a thread state (notably the dict / type watcher callbacks the
+// optimizer installs) can locate the rare-event counters.
 //
 // CPython: Python/pystate.c:_PyInterpreterState_Enable
+// CPython: Python/pylifecycle.c:599 builtins_dict_watcher
 func (r *Runtime) NewInterpreter() *Interpreter {
 	i := &Interpreter{runtime: r, Monitors: monitor.NewInterpState()}
 	r.interpreters = append(r.interpreters, i)
+	mainInterpreter.CompareAndSwap(nil, i)
 	return i
 }
+
+// mainInterpreter is the process-wide pointer to the first interpreter
+// minted. Mirrors CPython's _PyInterpreterState_Main(), which other
+// runtime paths reach via _PyInterpreterState_GET when no thread state
+// is available. Single-interpreter at v0.12; sub-interpreter work
+// (v0.13) will promote this to a runtime-scoped lookup.
+//
+// CPython: Python/pystate.c:_PyInterpreterState_Main
+var mainInterpreter atomic.Pointer[Interpreter]
+
+// MainInterpreter returns the process-wide main interpreter, or nil if
+// none has been minted yet. Callback contexts (e.g. dict / type
+// watchers fired off a mutation deep in the runtime) use this to
+// locate counters and the executor list when no thread state is
+// available.
+//
+// CPython: Python/pystate.c:_PyInterpreterState_Main
+func MainInterpreter() *Interpreter { return mainInterpreter.Load() }
+
+// DropMainInterpreter clears the main-interpreter pointer. Used by
+// lifecycle.Finalize so a subsequent Initialize starts from a clean
+// slate; tests also call it to reset between runs.
+func DropMainInterpreter() { mainInterpreter.Store(nil) }
 
 // Interpreters returns the interpreters owned by r in registration
 // order. The slice aliases internal state; treat it as read-only.
@@ -287,6 +316,7 @@ func (r *Runtime) DropInterpreters() {
 		i.threads = nil
 	}
 	r.interpreters = nil
+	DropMainInterpreter()
 }
 
 // AttachThread builds a thread state bound to i and registers it.

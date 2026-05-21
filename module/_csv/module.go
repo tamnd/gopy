@@ -8,12 +8,8 @@
 package _csv
 
 import (
-	"bytes"
-	"encoding/csv"
 	"errors"
 	"fmt"
-	"io"
-	"strings"
 	"sync"
 
 	"github.com/tamnd/gopy/imp"
@@ -255,7 +251,8 @@ func lookupDialect(name string) (*Dialect, error) {
 // Reader
 // ---------------------------------------------------------------------------
 
-// Reader is the Python csv.reader object backed by encoding/csv.
+// Reader is the Python csv.reader object. Each instance carries its
+// own state-machine parser whose layout mirrors CPython's ReaderObj.
 //
 // CPython: Modules/_csv.c:795 ReaderObj
 type Reader struct {
@@ -265,6 +262,7 @@ type Reader struct {
 	source  objects.Object // iterable of str
 	it      objects.Object // active iterator
 	lineNum int64
+	parser  readerState
 }
 
 // readerType is the Python type for csv.reader objects.
@@ -278,62 +276,57 @@ func newReaderType() *objects.Type {
 	return t
 }
 
-// readerIterNext yields the next parsed row as a list of strings.
+// readerIterNext yields the next parsed row as a list. The loop keeps
+// pulling lines from the source iterator until the state machine
+// returns to psStartRecord, so a quoted field that spans multiple
+// input lines is folded back into a single record.
 //
-// CPython: Modules/_csv.c:876 Reader_iternext
+// CPython: Modules/_csv.c:924 Reader_iternext_lock_held
 func readerIterNext(o objects.Object) (objects.Object, error) {
 	r, ok := o.(*Reader)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: expected csv.reader")
 	}
-	// Get next line from the source iterator.
-	line, err := objects.IterNext(r.it)
-	if err != nil {
-		if errors.Is(err, objects.ErrStopIteration) {
+	r.parser.resetParser()
+	for {
+		line, err := objects.IterNext(r.it)
+		if err != nil {
+			if !errors.Is(err, objects.ErrStopIteration) {
+				return nil, err
+			}
+			// End of input. CPython's `Reader_iternext_lock_held` keeps the
+			// partial field iff we are mid-field or mid-quoted-field.
+			if len(r.parser.field) != 0 || r.parser.state == psInQuotedField {
+				if r.dialect.strict {
+					return nil, fmt.Errorf("csv.Error: unexpected end of data")
+				}
+				if err := r.parser.saveField(r.dialect); err != nil {
+					return nil, err
+				}
+				break
+			}
 			return nil, objects.ErrStopIteration
 		}
-		return nil, err
-	}
-	r.lineNum++
-	lineStr, ok := line.(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: iterator must return strings, not %s", line.Type().Name)
-	}
-	fields, perr := parseCSVLine(lineStr.Value(), r.dialect)
-	if perr != nil {
-		return nil, perr
-	}
-	items := make([]objects.Object, len(fields))
-	for i, f := range fields {
-		items[i] = objects.NewStr(f)
-	}
-	return objects.NewList(items), nil
-}
-
-// parseCSVLine parses a single CSV line using encoding/csv configured
-// by the dialect.
-//
-// CPython: Modules/_csv.c:706 parse_process_char
-func parseCSVLine(line string, d *Dialect) ([]string, error) {
-	r := csv.NewReader(strings.NewReader(line))
-	r.Comma = d.delimiter
-	r.LazyQuotes = !d.strict
-	r.TrimLeadingSpace = d.skipinitialspace
-	r.FieldsPerRecord = -1
-	if d.quoting == quoteNone {
-		r.Comma = d.delimiter
-		// With QUOTE_NONE there is no quoting; treat the raw line as a
-		// simple delimiter-split.
-		return strings.Split(line, string(d.delimiter)), nil
-	}
-	rec, err := r.Read()
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, nil
+		lineStr, ok := line.(*objects.Unicode)
+		if !ok {
+			return nil, fmt.Errorf("csv.Error: iterator should return strings, not %s (the file should be opened in text mode)", line.Type().Name)
 		}
-		return nil, fmt.Errorf("csv.Error: %v", err)
+		r.lineNum++
+		for _, c := range lineStr.Value() {
+			if err := r.parser.processChar(r.dialect, c); err != nil {
+				return nil, err
+			}
+		}
+		if err := r.parser.processChar(r.dialect, eol); err != nil {
+			return nil, err
+		}
+		if r.parser.state == psStartRecord {
+			break
+		}
 	}
-	return rec, nil
+	fields := r.parser.fields
+	r.parser.fields = nil
+	return objects.NewList(fields), nil
 }
 
 // readerGetattr exposes line_num on the reader.
@@ -361,7 +354,9 @@ func readerGetattr(o objects.Object, name objects.Object) (objects.Object, error
 // Writer
 // ---------------------------------------------------------------------------
 
-// Writer is the Python csv.writer object backed by encoding/csv.
+// Writer is the Python csv.writer object. The per-row record buffer
+// lives on the writer instance so writerow re-uses its allocation
+// across calls, matching CPython's WriterObj.rec.
 //
 // CPython: Modules/_csv.c:958 WriterObj
 type Writer struct {
@@ -369,6 +364,7 @@ type Writer struct {
 
 	dialect *Dialect
 	output  objects.Object // writable object (write method)
+	state   writerState
 }
 
 // writerType is the Python type for csv.writer objects.
@@ -407,23 +403,69 @@ func writerGetattr(o objects.Object, name objects.Object) (objects.Object, error
 	return nil, fmt.Errorf("AttributeError: 'writer' object has no attribute %q", n.Value())
 }
 
-// writerWriteRow formats row as CSV and writes it to the output object.
+// writerWriteRow ports csv_writerow_lock_held: iterate the row, derive
+// the per-field `quoted` flag from the dialect's quoting mode, coerce
+// non-str non-None entries via str(), drive joinAppend for each, then
+// flush with the line terminator and call output.write(line).
 //
-// CPython: Modules/_csv.c:999 csv_writerow
+// CPython: Modules/_csv.c:1327 csv_writerow_lock_held
 func writerWriteRow(w *Writer, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: writerow() takes exactly 1 argument (%d given)", len(args))
 	}
-	row := args[0]
-	fields, err := collectRow(row)
+	it, err := objects.Iter(args[0])
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("csv.Error: iterable expected, not %s", args[0].Type().Name)
 	}
-	line, err := formatCSVRow(fields, w.dialect)
-	if err != nil {
-		return nil, err
+	itType := it.Type()
+	if itType.IterNext == nil {
+		return nil, fmt.Errorf("csv.Error: iterable expected, not %s", args[0].Type().Name)
 	}
-	return callWrite(w.output, line)
+	d := w.dialect
+	w.state.joinReset()
+	nullField := false
+	for {
+		field, err := itType.IterNext(it)
+		if err != nil {
+			if errors.Is(err, objects.ErrStopIteration) {
+				break
+			}
+			return nil, err
+		}
+		quoted := quotedFor(field, d)
+		nullField = field == objects.None()
+		var fieldStr string
+		var isNull bool
+		switch v := field.(type) {
+		case *objects.Unicode:
+			fieldStr = v.Value()
+		default:
+			if nullField {
+				isNull = true
+			} else {
+				s, err := objects.Str(field)
+				if err != nil {
+					return nil, err
+				}
+				fieldStr = s
+			}
+		}
+		if err := w.state.joinAppend(d, fieldStr, isNull, quoted); err != nil {
+			return nil, err
+		}
+	}
+	if w.state.numFields > 0 && w.state.recLen == 0 {
+		if d.quoting == quoteNone ||
+			(nullField && (d.quoting == quoteStrings || d.quoting == quoteNotNull)) {
+			return nil, fmt.Errorf("csv.Error: single empty field record must be quoted")
+		}
+		w.state.numFields--
+		if err := w.state.joinAppend(d, "", true, true); err != nil {
+			return nil, err
+		}
+	}
+	w.state.joinAppendLineterminator(d)
+	return callWrite(w.output, string(w.state.rec[:w.state.recLen]))
 }
 
 // writerWriteRows writes multiple rows.
@@ -454,63 +496,6 @@ func writerWriteRows(w *Writer, args []objects.Object, _ map[string]objects.Obje
 		}
 	}
 	return objects.None(), nil
-}
-
-// collectRow gathers the string fields from an iterable row.
-func collectRow(row objects.Object) ([]string, error) {
-	it, err := objects.Iter(row)
-	if err != nil {
-		return nil, fmt.Errorf("TypeError: writerow() argument must be iterable: %v", err)
-	}
-	itType := it.Type()
-	if itType.IterNext == nil {
-		return nil, fmt.Errorf("TypeError: writerow() argument must be iterable")
-	}
-	var fields []string
-	for {
-		v, err := itType.IterNext(it)
-		if err != nil {
-			if errors.Is(err, objects.ErrStopIteration) {
-				break
-			}
-			return nil, err
-		}
-		if v == objects.None() {
-			fields = append(fields, "")
-			continue
-		}
-		switch sv := v.(type) {
-		case *objects.Unicode:
-			fields = append(fields, sv.Value())
-		case *objects.Int:
-			n, _ := sv.Int64()
-			fields = append(fields, fmt.Sprintf("%d", n))
-		case *objects.Float:
-			fields = append(fields, fmt.Sprintf("%g", sv.Float64()))
-		default:
-			// Fall back to repr-like string.
-			fields = append(fields, fmt.Sprintf("%v", v))
-		}
-	}
-	return fields, nil
-}
-
-// formatCSVRow formats a slice of strings as a CSV row using the dialect.
-//
-// CPython: Modules/_csv.c:858 csv_join_append
-func formatCSVRow(fields []string, d *Dialect) (string, error) {
-	var buf bytes.Buffer
-	w := csv.NewWriter(&buf)
-	w.Comma = d.delimiter
-	w.UseCRLF = d.lineterminator == "\r\n"
-	if err := w.Write(fields); err != nil {
-		return "", fmt.Errorf("csv.Error: %v", err)
-	}
-	w.Flush()
-	if err := w.Error(); err != nil {
-		return "", fmt.Errorf("csv.Error: %v", err)
-	}
-	return buf.String(), nil
 }
 
 // callWrite calls output.write(line).

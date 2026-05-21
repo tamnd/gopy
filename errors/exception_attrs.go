@@ -24,6 +24,81 @@ func init() {
 	objects.SetTypeDescr(t, "__context__", objects.NewGetSetDescr("__context__", contextGet, contextSet))
 	objects.SetTypeDescr(t, "__cause__", objects.NewGetSetDescr("__cause__", causeGet, causeSet))
 	objects.SetTypeDescr(t, "__suppress_context__", objects.NewGetSetDescr("__suppress_context__", suppressGet, suppressSet))
+	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", baseExceptionInit))
+	objects.SetTypeDescr(t, "add_note", objects.NewMethodDescr(t, "add_note", baseExceptionAddNote))
+	objects.SetTypeDescr(t, "__notes__", objects.NewGetSetDescr("__notes__", notesGet, notesSet))
+}
+
+// baseExceptionAddNote appends a string note to self.__notes__,
+// allocating the list on first call. Mirrors BaseException.add_note.
+//
+// CPython: Objects/exceptions.c:298 BaseException_add_note_impl
+func baseExceptionAddNote(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 2 {
+		return nil, errors.New("TypeError: add_note() takes exactly one argument")
+	}
+	e, ok := args[0].(*Exception)
+	if !ok {
+		return nil, errors.New("TypeError: add_note() requires a BaseException")
+	}
+	if args[1] == nil || args[1].Type() != objects.StrType() {
+		return nil, errors.New("TypeError: note must be a str")
+	}
+	if e.Notes == nil {
+		e.Notes = objects.NewList(nil)
+	}
+	e.Notes.Append(args[1])
+	return objects.None(), nil
+}
+
+// notesGet returns self.__notes__, or raises AttributeError when unset
+// (matching CPython's PyObject_GetOptionalAttr semantics through the
+// generic getattr path).
+//
+// CPython: Objects/exceptions.c:298 BaseException_add_note_impl (read path)
+func notesGet(owner objects.Object) (objects.Object, error) {
+	e := owner.(*Exception)
+	if e.Notes == nil {
+		return nil, errors.New("AttributeError: __notes__")
+	}
+	return e.Notes, nil
+}
+
+// notesSet stores __notes__. CPython lets users assign any object; the
+// list-only check fires only inside add_note when reading back.
+//
+// CPython: Objects/exceptions.c:298 BaseException_add_note_impl (write path)
+func notesSet(owner objects.Object, value objects.Object) error {
+	e := owner.(*Exception)
+	if value == nil {
+		e.Notes = nil
+		return nil
+	}
+	lst, ok := value.(*objects.List)
+	if !ok {
+		return errors.New("TypeError: __notes__ must be a list")
+	}
+	e.Notes = lst
+	return nil
+}
+
+// baseExceptionInit is the tp_init slot for BaseException. CPython
+// stores positional args on self.args and ignores kwargs. The slot
+// matters when user subclasses call super().__init__(*args): without
+// it the MRO walk falls through to object.__init__, which rejects
+// extra args.
+//
+// CPython: Objects/exceptions.c:L84 BaseException_init
+func baseExceptionInit(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return objects.None(), nil
+	}
+	e, ok := args[0].(*Exception)
+	if !ok {
+		return objects.None(), nil
+	}
+	e.Args = objects.NewTuple(args[1:])
+	return objects.None(), nil
 }
 
 // argsGet returns self->args, or None when args is unset. CPython

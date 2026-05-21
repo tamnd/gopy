@@ -15,42 +15,55 @@ package vm
 
 import "github.com/tamnd/gopy/compile"
 
-// instrumentedToBase pairs each INSTRUMENTED_<name> with the base
-// opcode that handles it. Pure marker variants (INSTRUMENTED_LINE,
-// INSTRUMENTED_INSTRUCTION) map to NOP; real monitoring will fire
+// instrumentedToBase is a 256-entry table; instrumentedToBase[op]
+// holds the non-instrumented form when op is an INSTRUMENTED_ variant,
+// and zero (NOP, also handled fine since baseForInstrumented gates on
+// the parallel rewrite flag) otherwise. Indexed access lifts
+// baseForInstrumented out of the per-dispatch hot path; the map form
+// it replaced burned 20% of CPU on the tight bench through
+// mapaccess2_fast32. Pure marker variants (INSTRUMENTED_LINE,
+// INSTRUMENTED_INSTRUCTION) rewrite to NOP; real monitoring will fire
 // the per-instruction / per-line hook before falling through.
-var instrumentedToBase = map[compile.Opcode]compile.Opcode{
-	compile.INSTRUMENTED_END_FOR:              compile.END_FOR,
-	compile.INSTRUMENTED_POP_ITER:             compile.POP_ITER,
-	compile.INSTRUMENTED_END_SEND:             compile.END_SEND,
-	compile.INSTRUMENTED_FOR_ITER:             compile.FOR_ITER,
-	compile.INSTRUMENTED_JUMP_FORWARD:         compile.JUMP_FORWARD,
-	compile.INSTRUMENTED_NOT_TAKEN:            compile.NOT_TAKEN,
-	compile.INSTRUMENTED_POP_JUMP_IF_TRUE:     compile.POP_JUMP_IF_TRUE,
-	compile.INSTRUMENTED_POP_JUMP_IF_FALSE:    compile.POP_JUMP_IF_FALSE,
-	compile.INSTRUMENTED_POP_JUMP_IF_NONE:     compile.POP_JUMP_IF_NONE,
-	compile.INSTRUMENTED_POP_JUMP_IF_NOT_NONE: compile.POP_JUMP_IF_NOT_NONE,
-	compile.INSTRUMENTED_RESUME:               compile.RESUME,
-	compile.INSTRUMENTED_RETURN_VALUE:         compile.RETURN_VALUE,
-	compile.INSTRUMENTED_YIELD_VALUE:          compile.YIELD_VALUE,
-	compile.INSTRUMENTED_END_ASYNC_FOR:        compile.END_ASYNC_FOR,
-	compile.INSTRUMENTED_LOAD_SUPER_ATTR:      compile.LOAD_SUPER_ATTR,
-	compile.INSTRUMENTED_CALL:                 compile.CALL,
-	compile.INSTRUMENTED_CALL_KW:              compile.CALL_KW,
-	compile.INSTRUMENTED_CALL_FUNCTION_EX:     compile.CALL_FUNCTION_EX,
-	compile.INSTRUMENTED_JUMP_BACKWARD:        compile.JUMP_BACKWARD,
-	compile.INSTRUMENTED_INSTRUCTION:          compile.NOP,
-	compile.INSTRUMENTED_LINE:                 compile.NOP,
-}
+//
+// CPython: Python/instrumentation.c uses static per-opcode arrays
+// (DE_INSTRUMENT) for the same purpose.
+var instrumentedToBase [256]compile.Opcode
 
-// baseForInstrumented returns the non-instrumented form of op when
-// op is one of the INSTRUMENTED_ variants. The second return is true
-// only when a rewrite happened so callers can keep counting cycles
-// correctly once monitoring lands.
-func baseForInstrumented(op compile.Opcode) (compile.Opcode, bool) {
-	base, ok := instrumentedToBase[op]
-	if !ok {
-		return op, false
+// instrumentedRewrite[op] is true exactly when instrumentedToBase[op]
+// is a real rewrite target. Parallel array so the zero default in
+// instrumentedToBase does not look like an empty rewrite to NOP for
+// every non-instrumented opcode. CPython carries the same flag
+// implicitly through the de_instrument table's NULL entries.
+var instrumentedRewrite [256]bool
+
+func init() {
+	pairs := [...]struct {
+		from, to compile.Opcode
+	}{
+		{compile.INSTRUMENTED_END_FOR, compile.END_FOR},
+		{compile.INSTRUMENTED_POP_ITER, compile.POP_ITER},
+		{compile.INSTRUMENTED_END_SEND, compile.END_SEND},
+		{compile.INSTRUMENTED_FOR_ITER, compile.FOR_ITER},
+		{compile.INSTRUMENTED_JUMP_FORWARD, compile.JUMP_FORWARD},
+		{compile.INSTRUMENTED_NOT_TAKEN, compile.NOT_TAKEN},
+		{compile.INSTRUMENTED_POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_TRUE},
+		{compile.INSTRUMENTED_POP_JUMP_IF_FALSE, compile.POP_JUMP_IF_FALSE},
+		{compile.INSTRUMENTED_POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NONE},
+		{compile.INSTRUMENTED_POP_JUMP_IF_NOT_NONE, compile.POP_JUMP_IF_NOT_NONE},
+		{compile.INSTRUMENTED_RESUME, compile.RESUME},
+		{compile.INSTRUMENTED_RETURN_VALUE, compile.RETURN_VALUE},
+		{compile.INSTRUMENTED_YIELD_VALUE, compile.YIELD_VALUE},
+		{compile.INSTRUMENTED_END_ASYNC_FOR, compile.END_ASYNC_FOR},
+		{compile.INSTRUMENTED_LOAD_SUPER_ATTR, compile.LOAD_SUPER_ATTR},
+		{compile.INSTRUMENTED_CALL, compile.CALL},
+		{compile.INSTRUMENTED_CALL_KW, compile.CALL_KW},
+		{compile.INSTRUMENTED_CALL_FUNCTION_EX, compile.CALL_FUNCTION_EX},
+		{compile.INSTRUMENTED_JUMP_BACKWARD, compile.JUMP_BACKWARD},
+		{compile.INSTRUMENTED_INSTRUCTION, compile.NOP},
+		{compile.INSTRUMENTED_LINE, compile.NOP},
 	}
-	return base, true
+	for _, p := range pairs {
+		instrumentedToBase[p.from] = p.to
+		instrumentedRewrite[p.from] = true
+	}
 }

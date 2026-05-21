@@ -23,6 +23,15 @@ func Enable(code *objects.Code) {
 	if code == nil || code.Quickened || len(code.Code) < 4 {
 		return
 	}
+	// Spec 1712 P1.6: arm the optimizer's dict / type watcher slots
+	// before any specialized opcode can fire so inline caches read
+	// only state the runtime has subscribed to. CPython splits the
+	// install across pylifecycle.c:1380 (slot 0 builtins) and
+	// optimizer_analysis.c:175 (slot 1 globals + type slot 0); gopy
+	// collapses both onto first Enable via a sync.Once-gated hook.
+	//
+	// CPython: Python/pylifecycle.c:1378-1383 / optimizer_analysis.c:175-180
+	ensureWatchersInstalled()
 	Quicken(code.Code, true)
 	// Allocate the parallel pointer-cache slab. One slot per codeunit
 	// of bytecode lets emit / read by codeunit index match CPython's

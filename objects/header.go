@@ -5,15 +5,19 @@
 // arrive in later phases (see notes/Spec/1700/).
 package objects
 
-import "sync/atomic"
-
 // Header is the per-object header. Mirrors struct _object in
 // cpython/Include/object.h. The zero value is invalid; constructors
 // set refcount to 1 and install the type pointer.
 //
+// refcnt is a plain int64 to match CPython's GIL-build ob_refcnt,
+// where Py_INCREF / Py_DECREF expand to non-atomic ++/--. Atomic
+// access would cost a memory barrier per op on the hot path. The
+// free-threaded build (v0.14) will introduce a tagged biased
+// refcount instead of a global atomic.
+//
 // CPython: Include/object.h:L107 _object
 type Header struct {
-	refcnt atomic.Int64
+	refcnt int64
 	typ    *Type
 
 	// weakrefs is the per-object doubly-linked list of weak references
@@ -71,7 +75,7 @@ func (h *Header) Hdr() *Header {
 // CPython: Objects/object.c:L184 _PyObject_Init
 func (h *Header) init(t *Type) {
 	h.typ = t
-	h.refcnt.Store(1)
+	h.refcnt = 1
 }
 
 // Init is the cross-package entry point to init. Out-of-package types
@@ -89,7 +93,7 @@ func (h *Header) Init(t *Type) {
 //
 // CPython: Include/object.h:L246 Py_REFCNT
 func (h *Header) Refcnt() int64 {
-	return h.refcnt.Load()
+	return h.refcnt
 }
 
 // Size returns ob_size. Only meaningful for VarHeader-backed types.
@@ -97,4 +101,33 @@ func (h *Header) Refcnt() int64 {
 // CPython: Include/object.h:L252 Py_SIZE
 func (v *VarHeader) Size() int64 {
 	return v.size
+}
+
+// ImmortalRefcnt is the sentinel refcount value that marks an object
+// as immortal: Incref and Decref are no-ops, and the object never
+// hits dealloc. CPython 3.14 uses a high-bit split refcount where
+// any value at or above 1<<31 is treated as immortal; gopy uses a
+// plain int64 threshold of 1<<30 (one billion, well above any real
+// program's actual refcount) so the immortal check is a single
+// compare-and-branch.
+//
+// CPython: Include/object.h:L94 _Py_IMMORTAL_MINIMUM_REFCNT,
+// Include/internal/pycore_object.h _Py_IsImmortal
+const ImmortalRefcnt int64 = 1 << 30
+
+// MakeImmortal stamps the header with the immortal sentinel so all
+// subsequent Incref / Decref calls short-circuit. Called from the
+// constructors of singletons (None, True, False), the small-int
+// cache, and any object the runtime never expects to dealloc.
+//
+// CPython: Include/internal/pycore_object.h _Py_SetImmortal
+func (h *Header) MakeImmortal() {
+	h.refcnt = ImmortalRefcnt
+}
+
+// IsImmortal reports whether the header has been stamped immortal.
+//
+// CPython: Include/internal/pycore_object.h _Py_IsImmortal
+func (h *Header) IsImmortal() bool {
+	return h.refcnt >= ImmortalRefcnt
 }

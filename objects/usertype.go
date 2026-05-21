@@ -38,6 +38,40 @@ func NewUserTypeKwargs(name string, bases []*Type, ns *Dict, kwargs map[string]O
 	return NewUserTypeMeta(name, bases, ns, kwargs, nil)
 }
 
+// installSubclassAttrSlots stamps the right Getattro / Setattro pair
+// (plus TpNew for the C-port subclass cases) on t. Metaclasses route
+// through typeGetAttr because their instances are *Type. dict / str /
+// int subclasses keep the C-port TpNew so instances are *Dict / *Unicode
+// / *Int instead of *Instance, and use their type-specific attr slots
+// so descriptor lookups hit the right vtable. Everything else lands on
+// the generic instance attr slots.
+//
+// CPython: Objects/typeobject.c inherit_slots (type_getattro inheritance
+// + tp_new copy)
+func installSubclassAttrSlots(t *Type) {
+	switch {
+	case IsSubtype(t, typeType):
+		t.Getattro = typeGetAttr
+		t.Setattro = typeSetAttr
+	case IsSubtype(t, DictType):
+		t.Getattro = dictSubclassGetAttr
+		t.Setattro = dictSubclassSetAttr
+		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
+		t.TpNew = DictType.TpNew
+	case IsSubtype(t, strType):
+		t.Getattro = strSubclassGetAttr
+		t.Setattro = strSubclassSetAttr
+		t.TpNew = strType.TpNew
+	case IsSubtype(t, IntType):
+		t.Getattro = intSubclassGetAttr
+		t.Setattro = intSubclassSetAttr
+		t.TpNew = IntType.TpNew
+	default:
+		t.Getattro = instanceGetAttr
+		t.Setattro = instanceSetAttr
+	}
+}
+
 // NewUserTypeMeta is the full-form constructor used by type.__new__.
 // meta is the metaclass to stamp on the new type; nil means inherit
 // the default typeType. Stamping happens before typeSetNames so PEP
@@ -51,97 +85,36 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 	}
 	t := NewType(name, bases)
 	t.IsUser = true
-	// Stamp the metaclass first so the upcoming namespace pass and
-	// __set_name__ hooks see Py_TYPE(t) == meta, matching CPython where
-	// type_new sets the metatype as part of allocation. Skip a nil or
-	// typeType meta (NewType already wires the default).
+	stampMetaclass(t, meta)
+	installSubclassAttrSlots(t)
+	noSlotsDeclared := hasNoSlotsDeclared(ns)
+	configureManagedDict(t, bases, noSlotsDeclared)
+	processClassNamespace(t, ns)
+	// NewType already ran inheritSlotsAllMRO when the namespace was not
+	// yet populated, so typeOverridesHash could not see __hash__. If the
+	// just-copied namespace declares __hash__, drop any inherited Hash /
+	// RichCmp pair so the second inheritSlotsAllMRO inside
+	// fixupSlotDispatchers honors the override and the per-type fixup
+	// installs the correct dispatcher (None namespace entry => identityHash
+	// fallback, real callable => slotTpHash).
 	//
-	// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
-	if meta != nil && meta != typeType {
-		t.Init(meta)
-	}
-	// Metaclasses (subtypes of type) must use typeGetAttr/typeSetAttr so
-	// that attribute access on their instances (which are *Type objects
-	// like `class Foo(metaclass=ABCMeta)`) goes through the correct path.
-	// Dict subclasses use dict-specific attr slots since their instances
-	// are *Dict objects (from DictType.TpNew), not *Instance objects.
-	// Regular user classes use the instance-level slots.
-	//
-	// CPython: Objects/typeobject.c inherit_slots (type_getattro inheritance)
-	switch {
-	case IsSubtype(t, typeType):
-		t.Getattro = typeGetAttr
-		t.Setattro = typeSetAttr
-	case IsSubtype(t, DictType):
-		t.Getattro = dictSubclassGetAttr
-		t.Setattro = dictSubclassSetAttr
-		// Inherit DictType.TpNew so instances are *Dict, not *Instance.
-		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
-		t.TpNew = DictType.TpNew
-	case IsSubtype(t, strType):
-		t.Getattro = strSubclassGetAttr
-		t.Setattro = strSubclassSetAttr
-		// Inherit strType.TpNew so instances are *Unicode (tagged with
-		// the subclass), not *Instance.
-		t.TpNew = strType.TpNew
-	case IsSubtype(t, IntType):
-		t.Getattro = intSubclassGetAttr
-		t.Setattro = intSubclassSetAttr
-		// Inherit IntType.TpNew so instances are *Int (tagged with the
-		// subclass), not *Instance. The cls-aware intTpNew handles the
-		// subclass re-tag.
-		t.TpNew = IntType.TpNew
-	default:
-		t.Getattro = instanceGetAttr
-		t.Setattro = instanceSetAttr
-	}
-	// Inherit a per-instance __dict__ from any base that has one, then
-	// let __slots__ processing override it (e.g. the base contributes
-	// dict, but the subclass's __slots__ also adds nothing new — still
-	// inherits dict).
-	for _, b := range bases {
-		if b != nil && b.HasDict {
-			t.HasDict = true
-			break
-		}
-	}
-	// object itself does not advertise HasDict, but every gopy user class
-	// without __slots__ has historically carried a dict; preserve that
-	// default so omitting __slots__ keeps the prior behavior.
-	noSlotsDeclared := true
-	if ns != nil {
-		if has, _ := ns.Contains(NewStr("__slots__")); has {
-			noSlotsDeclared = false
-		}
-	}
-	if noSlotsDeclared {
-		t.HasDict = true
-	}
-	if ns != nil {
-		// __classcell__ is the cell __build_class__ left in the
-		// namespace so we can patch it with the new class. It is not a
-		// real attribute, so install it before walking the rest of the
-		// namespace and skip it during the descriptor copy.
-		classCellKey := NewStr("__classcell__")
-		if cellObj, err := ns.GetItem(classCellKey); err == nil {
-			if cell, ok := cellObj.(*Cell); ok {
-				cell.Contents = t
-			}
-			_ = ns.DelItem(classCellKey)
-		}
-		// __slots__ processing runs before the descriptor copy so the
-		// MemberDescr entries land in typeDescrTable before any class
-		// body assignments could overwrite them.
-		if err := installSlots(t, ns); err != nil {
-			// Errors here are programming bugs in the class body
-			// (non-string slot, conflict with class variable, etc.).
-			// CPython raises TypeError/ValueError; gopy's NewUserType
-			// has no error channel yet, so panic with the same text.
-			panic(err)
-		}
-		copyNamespaceToType(t, ns)
+	// CPython: Objects/typeobject.c:8366 (richcompare/hash dance)
+	if typeOverridesHash(t) {
+		t.Hash = nil
+		t.RichCmp = nil
 	}
 	fixupSlotDispatchers(t)
+	// User-class instances are *Instance carrying a per-instance dict
+	// and/or slots, so the cycle collector needs a tp_traverse that
+	// walks both. If no base contributed one (the common object-only
+	// case), install instanceTraverse. Subclasses of built-ins
+	// (list/dict/str/int) inherit their base's traverse via
+	// inheritSlotsAllMRO and keep that wiring.
+	//
+	// CPython: Objects/typeobject.c:1356 subtype_traverse
+	if t.TpTraverse == nil {
+		t.TpTraverse = instanceTraverse
+	}
 	// PEP 487: after the class is built, walk the namespace and call
 	// __set_name__ on every value that defines it. enum._proto_member
 	// uses this hook to turn each placeholder into a real enum member
@@ -155,6 +128,106 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 		panic(err)
 	}
 	return t
+}
+
+// stampMetaclass writes meta onto t so PEP 487 hooks see Py_TYPE(t) ==
+// meta. Skips a nil or typeType meta because NewType already wired the
+// default.
+//
+// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
+func stampMetaclass(t *Type, meta *Type) {
+	if meta != nil && meta != typeType {
+		t.Init(meta)
+	}
+}
+
+// hasNoSlotsDeclared reports whether ns lacks a __slots__ entry. object
+// itself does not advertise HasDict, but every gopy user class without
+// __slots__ has historically carried a dict; the result feeds back into
+// configureManagedDict so omitting __slots__ keeps the prior behavior.
+func hasNoSlotsDeclared(ns *Dict) bool {
+	if ns == nil {
+		return true
+	}
+	has, _ := ns.Contains(NewStr("__slots__"))
+	return !has
+}
+
+// configureManagedDict inherits HasDict from any base that exposes one
+// and stamps MANAGED_DICT / INLINE_VALUES on t. INLINE_VALUES rides
+// along only when every base supports it; CPython's type_new gates the
+// flag on basicsize fit (no inline-values slot inside int / list / str /
+// etc.), so heap subclasses of built-ins drop into the LAZY_DICT shape
+// where the dict slot is null until the first store.
+//
+// CPython: Objects/typeobject.c:4153 type_new (sets
+// Py_TPFLAGS_INLINE_VALUES + Py_TPFLAGS_MANAGED_DICT on heap types with
+// a managed dict)
+func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
+	for _, b := range bases {
+		if b != nil && b.HasDict {
+			t.HasDict = true
+			break
+		}
+	}
+	if noSlotsDeclared {
+		t.HasDict = true
+	}
+	if !t.HasDict {
+		return
+	}
+	t.TpFlags |= TpFlagManagedDict
+	if basesAllowInlineValues(bases, noSlotsDeclared) {
+		t.TpFlags |= TpFlagInlineValues
+	}
+}
+
+// basesAllowInlineValues reports whether every non-object base on bases
+// still carries INLINE_VALUES, which is the gate for the new type
+// keeping the flag.
+func basesAllowInlineValues(bases []*Type, noSlotsDeclared bool) bool {
+	if !noSlotsDeclared {
+		return false
+	}
+	for _, b := range bases {
+		if b == nil || b == objectType {
+			continue
+		}
+		if !b.HasInlineValues() {
+			return false
+		}
+	}
+	return true
+}
+
+// processClassNamespace patches __classcell__, installs __slots__
+// descriptors, and copies the rest of ns onto t.
+func processClassNamespace(t *Type, ns *Dict) {
+	if ns == nil {
+		return
+	}
+	// __classcell__ is the cell __build_class__ left in the namespace so
+	// we can patch it with the new class. It is not a real attribute,
+	// so install it before walking the rest of the namespace and skip
+	// it during the descriptor copy.
+	classCellKey := NewStr("__classcell__")
+	if cellObj, err := ns.GetItem(classCellKey); err == nil {
+		if cell, ok := cellObj.(*Cell); ok {
+			cell.Contents = t
+		}
+		_ = ns.DelItem(classCellKey)
+	}
+	// __slots__ processing runs before the descriptor copy so the
+	// MemberDescr entries land in typeDescrTable before any class body
+	// assignments could overwrite them. Errors here are programming
+	// bugs in the class body (non-string slot, conflict with class
+	// variable, etc.). CPython raises TypeError/ValueError; gopy's
+	// NewUserType has no error channel yet, so panic with the same
+	// text.
+	if err := installSlots(t, ns); err != nil {
+		panic(err)
+	}
+	copyNamespaceToType(t, ns)
 }
 
 // copyNamespaceToType walks ns and installs each entry as a type
@@ -311,13 +384,109 @@ func lookupOnType(t *Type, name string) (Object, bool) {
 //
 // CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
 func fixupSlotDispatchers(t *Type) {
-	inheritSlotsFromBases(t)
+	inheritSlotsAllMRO(t)
+	for _, base := range t.Bases {
+		if base != nil {
+			inheritDirectBaseScalars(t, base)
+		}
+	}
 	fixupCallReprStr(t)
 	fixupHashAndIter(t)
 	fixupRichCmpAndBool(t)
 	fixupSubscriptSlots(t)
 	fixupDescriptorSlots(t)
+	fixupGetattroSlot(t)
 	fixupTpNew(t)
+	fixupFinalize(t)
+}
+
+// fixupFinalize wires tp_finalize when the class body (or any base on
+// the MRO) provides __del__. Without this, user __del__ never fires
+// during cycle collection because the cycle collector calls Type.Finalize
+// directly. Mirrors CPython's slotdefs entry for tp_finalize, which
+// update_one_slot resolves to slot_tp_finalize when __del__ is present.
+//
+// CPython: Objects/typeobject.c:10336 update_one_slot (tp_finalize entry)
+// CPython: Objects/typeobject.c:10585 slot_tp_finalize
+func fixupFinalize(t *Type) {
+	if lookupDunderCallable(t, "__del__") {
+		t.Finalize = slotTpFinalize
+	}
+}
+
+// fixupGetattroSlot wires tp_getattro to a slot dispatcher that calls
+// the user's __getattribute__ when the class body (or any user-defined
+// base) overrides it. Without this, LookupDescriptor finds the user
+// function but the C-level Getattro slot still points at instanceGetAttr
+// so attribute access bypasses the override. CPython installs
+// _Py_slot_tp_getattr_hook in the same situation; the hook degrades to
+// _Py_slot_tp_getattro when no __getattr__ is present, but gopy folds
+// the two into one entry point that consults __getattr__ on
+// AttributeError.
+//
+// CPython: Objects/typeobject.c:10336 update_one_slot tp_getattro path
+// CPython: Objects/typeobject.c:10341 _Py_slot_tp_getattro
+// CPython: Objects/typeobject.c:10373 _Py_slot_tp_getattr_hook
+func fixupGetattroSlot(t *Type) {
+	descr, owner := LookupDescriptor(t, "__getattribute__")
+	if descr == nil || owner == nil {
+		return
+	}
+	if owner == objectType {
+		return
+	}
+	t.Getattro = slotTpGetattroHook
+}
+
+// slotTpGetattroHook calls the user's __getattribute__ and falls back
+// to __getattr__ on AttributeError. CPython routes both
+// _Py_slot_tp_getattro (no __getattr__) and _Py_slot_tp_getattr_hook
+// (with __getattr__) through the same call_attribute helper; gopy
+// keeps a single dispatcher and consults __getattr__ only when the
+// primary call raises AttributeError.
+//
+// CPython: Objects/typeobject.c:10373 _Py_slot_tp_getattr_hook
+func slotTpGetattroHook(o Object, name Object) (Object, error) {
+	tp := o.Type()
+	getattribute, _ := LookupDescriptor(tp, "__getattribute__")
+	if getattribute == nil {
+		return GenericGetAttr(o, name)
+	}
+	fn, err := bindAttrCallable(getattribute, o, tp)
+	if err != nil {
+		return nil, err
+	}
+	res, err := Call(fn, NewTuple([]Object{name}), nil)
+	if err == nil {
+		return res, nil
+	}
+	if !isAttributeError(err) {
+		return nil, err
+	}
+	getattr, _ := LookupDescriptor(tp, "__getattr__")
+	if getattr == nil {
+		return nil, err
+	}
+	fb, err2 := bindAttrCallable(getattr, o, tp)
+	if err2 != nil {
+		return nil, err2
+	}
+	return Call(fb, NewTuple([]Object{name}), nil)
+}
+
+// bindAttrCallable applies tp_descr_get to attr with (o, tp) so the
+// resulting callable already has self bound, mirroring CPython's
+// call_attribute helper. Unbound objects (plain functions found on a
+// class with no DescrGet wrapping) pass through unchanged so the call
+// site can supply self explicitly.
+//
+// CPython: Objects/typeobject.c:10347 call_attribute
+func bindAttrCallable(attr Object, o Object, tp *Type) (Object, error) {
+	dt := attr.Type()
+	if dt.DescrGet != nil {
+		return dt.DescrGet(attr, o, tp)
+	}
+	return attr, nil
 }
 
 // fixupTpNew installs slotTpNew when the class body defines its own
@@ -348,88 +517,6 @@ func fixupCallReprStr(t *Type) {
 		t.Str = slotTpStr
 	} else if t.Repr != nil && t.Str == nil {
 		t.Str = t.Repr
-	}
-}
-
-// inheritSlotsFromBases pulls C-level slots from base types when the
-// subclass leaves them nil. CPython's inherit_slots walks the primary
-// base and copies every slot that is not already set on the subclass.
-// The fixup pass that runs after this can still override individual
-// slots when the user namespace supplies a matching dunder.
-//
-// gopy keeps the Getattro / Setattro choice in NewUserType because the
-// dispatcher depends on the concrete instance shape (*Instance versus
-// *Dict versus *Type); the rest of the slot table is straight pointer
-// inheritance.
-//
-// CPython: Objects/typeobject.c:9770 inherit_slots
-func inheritSlotsFromBases(t *Type) {
-	for _, base := range t.Bases {
-		inheritBasicSlots(t, base)
-		inheritProtocolTables(t, base)
-	}
-}
-
-// inheritBasicSlots copies the scalar slot pointers from base to t for
-// every slot t does not already define.
-func inheritBasicSlots(t, base *Type) {
-	if t.Repr == nil {
-		t.Repr = base.Repr
-	}
-	if t.Str == nil {
-		t.Str = base.Str
-	}
-	if t.Call == nil {
-		t.Call = base.Call
-	}
-	if t.Hash == nil {
-		t.Hash = base.Hash
-	}
-	if t.TpNew == nil {
-		t.TpNew = base.TpNew
-	}
-	if t.Iter == nil {
-		t.Iter = base.Iter
-	}
-	if t.IterNext == nil {
-		t.IterNext = base.IterNext
-	}
-	if t.RichCmp == nil {
-		t.RichCmp = base.RichCmp
-	}
-	if t.DescrGet == nil {
-		t.DescrGet = base.DescrGet
-	}
-	if t.DescrSet == nil {
-		t.DescrSet = base.DescrSet
-	}
-	if t.Format == nil {
-		t.Format = base.Format
-	}
-	if t.TpTraverse == nil {
-		t.TpTraverse = base.TpTraverse
-	}
-}
-
-// inheritProtocolTables copies the Number / Sequence / Mapping / Async
-// tables as deep copies so per-subclass fixup writes never mutate the
-// base type's struct.
-func inheritProtocolTables(t, base *Type) {
-	if t.Number == nil && base.Number != nil {
-		cp := *base.Number
-		t.Number = &cp
-	}
-	if t.Sequence == nil && base.Sequence != nil {
-		cp := *base.Sequence
-		t.Sequence = &cp
-	}
-	if t.Mapping == nil && base.Mapping != nil {
-		cp := *base.Mapping
-		t.Mapping = &cp
-	}
-	if t.Async == nil && base.Async != nil {
-		cp := *base.Async
-		t.Async = &cp
 	}
 }
 
@@ -573,6 +660,45 @@ func lookupMethodOnSelf(o Object, name string) (Object, error) {
 	return descr, nil
 }
 
+// lookupMaybeMethod is the CPython-faithful port of lookup_maybe_method.
+// It returns the descriptor plus an unbound flag matching CPython's
+// out-parameter contract: when the descriptor's type carries
+// METHOD_DESCRIPTOR semantics (gopy's BuiltinFunction / Function pair,
+// covered by isMethodLike), the returned object is the raw descriptor
+// and unbound=true so the slot dispatcher prepends self before
+// invoking it. Otherwise the descriptor is bound through descr_get and
+// unbound=false. This preserves the no-temporary-PyMethodObject
+// optimization the CPython routine was written to enable.
+//
+// CPython: Objects/typeobject.c:2255 lookup_maybe_method
+func lookupMaybeMethod(self Object, name string) (Object, bool, error) {
+	descr, _ := LookupDescriptor(self.Type(), name)
+	if descr == nil {
+		return nil, false, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", self.Type().Name, name)
+	}
+	if isMethodLike(descr) {
+		return descr, true, nil
+	}
+	if dg := descr.Type().DescrGet; dg != nil {
+		bound, err := dg(descr, self, self.Type())
+		return bound, false, err
+	}
+	return descr, false, nil
+}
+
+// callUnboundNoArg invokes fn under the (unbound, self) shape returned
+// by lookupMaybeMethod. When unbound is true, self is passed as the
+// sole positional argument; when false, fn is already bound and the
+// call carries no args.
+//
+// CPython: Objects/typeobject.c:2308 call_unbound_noarg
+func callUnboundNoArg(unbound bool, fn Object, self Object) (Object, error) {
+	if unbound {
+		return Call(fn, NewTuple([]Object{self}), nil)
+	}
+	return Call(fn, NewTuple(nil), nil)
+}
+
 // slotTpCall is the generic tp_call dispatcher: look up __call__ via
 // the descriptor protocol (so the instance is bound) and call it.
 //
@@ -673,6 +799,21 @@ func slotTpIterNext(o Object) (Object, error) {
 		return nil, err
 	}
 	return Call(fn, NewTuple(nil), nil)
+}
+
+// slotTpFinalize dispatches to the user's __del__. Errors raised by
+// __del__ are swallowed: CPython routes them through
+// PyErr_FormatUnraisable so the collector can press on; gopy follows
+// the same convention because re-raising mid-cycle-collection has no
+// useful target.
+//
+// CPython: Objects/typeobject.c:10585 slot_tp_finalize
+func slotTpFinalize(o Object) {
+	fn, unbound, err := lookupMaybeMethod(o, "__del__")
+	if err != nil {
+		return
+	}
+	_, _ = callUnboundNoArg(unbound, fn, o)
 }
 
 // slotTpRichCompare looks up the dunder that matches op and calls it,

@@ -31,9 +31,11 @@ func instr(op compile.Opcode, arg byte) []byte {
 
 func TestEvalNotImplementedSurface(t *testing.T) {
 	ts := state.NewThread()
-	// LOAD_SUPER_ATTR is not in any hand-written panel, so dispatch should
-	// fall through to ErrNotImplemented.
-	co := codeWithBytecode(instr(compile.LOAD_SUPER_ATTR, 0))
+	// CALL_LIST_APPEND has no fast-path arm in trySpecialized and is not
+	// in any hand-written panel; on fresh (unquickened) code the dispatch
+	// flow short-circuits past the specializer hooks and bottoms out in
+	// opcodeNotImplemented.
+	co := codeWithBytecode(instr(compile.CALL_LIST_APPEND, 0))
 	_, err := EvalCode(ts, co, nil, nil)
 	if err == nil {
 		t.Fatal("expected ErrNotImplemented for ungenerated dispatch")
@@ -45,13 +47,13 @@ func TestEvalNotImplementedSurface(t *testing.T) {
 
 func TestEvalErrorMentionsOpcodeName(t *testing.T) {
 	ts := state.NewThread()
-	co := codeWithBytecode(instr(compile.LOAD_SUPER_ATTR, 0))
+	co := codeWithBytecode(instr(compile.CALL_LIST_APPEND, 0))
 	_, err := EvalCode(ts, co, nil, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got := err.Error(); !contains(got, "LOAD_SUPER_ATTR") {
-		t.Errorf("error %q should mention LOAD_SUPER_ATTR", got)
+	if got := err.Error(); !contains(got, "CALL_LIST_APPEND") {
+		t.Errorf("error %q should mention CALL_LIST_APPEND", got)
 	}
 }
 
@@ -79,9 +81,9 @@ func TestThreadVMLazyInit(t *testing.T) {
 
 func TestEvalExtendedArgFetch(t *testing.T) {
 	ts := state.NewThread()
-	// EXTENDED_ARG 0x01, then LOAD_SUPER_ATTR 0x02 -> oparg should be 0x0102.
-	// LOAD_SUPER_ATTR is unimplemented so we expect ErrNotImplemented to bubble.
-	bc := append(instr(compile.EXTENDED_ARG, 1), instr(compile.LOAD_SUPER_ATTR, 2)...)
+	// EXTENDED_ARG 0x01, then CALL_LIST_APPEND 0x02 -> oparg should be 0x0102.
+	// CALL_LIST_APPEND is unimplemented so we expect ErrNotImplemented to bubble.
+	bc := append(instr(compile.EXTENDED_ARG, 1), instr(compile.CALL_LIST_APPEND, 2)...)
 	co := codeWithBytecode(bc)
 
 	_, err := EvalCode(ts, co, nil, nil)

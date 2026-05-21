@@ -122,7 +122,7 @@ func contextManager(args []objects.Object, _ map[string]objects.Object) (objects
 			return nil, err
 		}
 		inst := objects.NewInstance(genCMType)
-		if err := inst.Dict().SetItem(objects.NewStr("gen"), genObj); err != nil {
+		if err := inst.EnsureDict().SetItem(objects.NewStr("gen"), genObj); err != nil {
 			return nil, err
 		}
 		return inst, nil
@@ -272,7 +272,7 @@ func newSuppressType() *objects.Type {
 	t.Getattro = objects.GenericGetAttr
 	t.TpNew = func(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		inst := objects.NewInstance(cls)
-		if err := inst.Dict().SetItem(objects.NewStr("_exceptions"), objects.NewTuple(args)); err != nil {
+		if err := inst.EnsureDict().SetItem(objects.NewStr("_exceptions"), objects.NewTuple(args)); err != nil {
 			return nil, err
 		}
 		return inst, nil
@@ -387,7 +387,7 @@ func newClosingType() *objects.Type {
 			return nil, fmt.Errorf("TypeError: closing() takes exactly 1 argument (%d given)", len(args))
 		}
 		inst := objects.NewInstance(cls)
-		if err := inst.Dict().SetItem(objects.NewStr("thing"), args[0]); err != nil {
+		if err := inst.EnsureDict().SetItem(objects.NewStr("thing"), args[0]); err != nil {
 			return nil, err
 		}
 		return inst, nil
@@ -453,9 +453,10 @@ func newRedirectType(name, stream string) *objects.Type {
 			return nil, fmt.Errorf("TypeError: %s() takes exactly 1 argument (%d given)", name, len(args))
 		}
 		inst := objects.NewInstance(cls)
-		_ = inst.Dict().SetItem(objects.NewStr("_new_target"), args[0])
-		_ = inst.Dict().SetItem(objects.NewStr("_stream"), objects.NewStr(streamName))
-		_ = inst.Dict().SetItem(objects.NewStr("_old_targets"), objects.NewList(nil))
+		d := inst.EnsureDict()
+		_ = d.SetItem(objects.NewStr("_new_target"), args[0])
+		_ = d.SetItem(objects.NewStr("_stream"), objects.NewStr(streamName))
+		_ = d.SetItem(objects.NewStr("_old_targets"), objects.NewList(nil))
 		return inst, nil
 	}
 	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", redirectEnter))
@@ -538,7 +539,7 @@ func init() {
 	t.Getattro = objects.GenericGetAttr
 	t.TpNew = func(cls *objects.Type, _ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		inst := objects.NewInstance(cls)
-		_ = inst.Dict().SetItem(objects.NewStr("_exit_callbacks"), objects.NewList(nil))
+		_ = inst.EnsureDict().SetItem(objects.NewStr("_exit_callbacks"), objects.NewList(nil))
 		return inst, nil
 	}
 	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", exitStackEnter))

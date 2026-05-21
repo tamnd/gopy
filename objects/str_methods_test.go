@@ -109,6 +109,33 @@ func TestStrRSplit(t *testing.T) {
 	}
 }
 
+// TestStrSplitWhitespaceASCIIControls pins the broader Py_UNICODE_ISSPACE
+// set (0x09-0x0D, 0x1C-0x1F, 0x20) which CPython recognizes for the
+// sep=None mode. Go's unicode.IsSpace misses 0x1C-0x1F (FS/GS/RS/US)
+// so a naive port via that helper drops the file/group/record/unit
+// separator chars on the floor.
+//
+// CPython: Objects/unicodetype_db.h:6676 _PyUnicode_IsWhitespace
+func TestStrSplitWhitespaceASCIIControls(t *testing.T) {
+	got, _ := StrSplit("a\x1cb\x1dc\x1ed\x1fe", "", -1)
+	if !reflect.DeepEqual(got, []string{"a", "b", "c", "d", "e"}) {
+		t.Errorf("split with 0x1c-0x1f = %v", got)
+	}
+	got, _ = StrSplit("\x1c\x1f a\tb \nc\v\f", "", -1)
+	if !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Errorf("split mixed ASCII whitespace = %v", got)
+	}
+}
+
+// TestStrSplitWhitespaceNonASCII covers the rune-walk slow path.
+// Latin-1 NBSP (0xA0) and the Unicode line/para separators must split.
+func TestStrSplitWhitespaceNonASCII(t *testing.T) {
+	got, _ := StrSplit("a b c", "", -1)
+	if !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Errorf("split with NBSP / LSEP = %v", got)
+	}
+}
+
 func TestStrSplitLines(t *testing.T) {
 	got := StrSplitLines("a\nb\r\nc\rd", false)
 	if !reflect.DeepEqual(got, []string{"a", "b", "c", "d"}) {
@@ -189,6 +216,47 @@ func TestStrStrip(t *testing.T) {
 	}
 	if StrRStrip("  hi  ", "") != "  hi" {
 		t.Error("rstrip")
+	}
+}
+
+// TestStrStripASCIIControls pins the 0x1C-0x1F semantic fix:
+// _PyUnicode_IsWhitespace recognizes FS/GS/RS/US as whitespace, so
+// CPython strip drops them. Pre-port gopy used unicode.IsSpace which
+// misses them, so " \x1c\x1dhi\x1e\x1f " would have kept the controls.
+//
+// CPython: Objects/unicodetype_db.h:6676 _PyUnicode_IsWhitespace
+func TestStrStripASCIIControls(t *testing.T) {
+	in := " \x1c\x1dhi\x1e\x1f "
+	if got := StrStrip(in, ""); got != "hi" {
+		t.Errorf("StrStrip(%q) = %q, want %q", in, got, "hi")
+	}
+	if got := StrLStrip(in, ""); got != "hi\x1e\x1f " {
+		t.Errorf("StrLStrip(%q) = %q", in, got)
+	}
+	if got := StrRStrip(in, ""); got != " \x1c\x1dhi" {
+		t.Errorf("StrRStrip(%q) = %q", in, got)
+	}
+	// Pure controls strip down to the empty string.
+	if got := StrStrip("\x1c\x1d\x1e\x1f", ""); got != "" {
+		t.Errorf("StrStrip(all-controls) = %q", got)
+	}
+}
+
+// TestStrStripNonASCII keeps the rune slow path honest. NBSP (U+00A0)
+// is whitespace under _PyUnicode_IsWhitespace, so it must be trimmed
+// from both ends, including around non-ASCII payload.
+//
+// CPython: Objects/unicodeobject.c:11744 _PyUnicode_XStrip
+func TestStrStripNonASCII(t *testing.T) {
+	in := "  héllo  "
+	if got := StrStrip(in, ""); got != "héllo" {
+		t.Errorf("StrStrip(%q) = %q", in, got)
+	}
+	if got := StrLStrip(in, ""); got != "héllo  " {
+		t.Errorf("StrLStrip(%q) = %q", in, got)
+	}
+	if got := StrRStrip(in, ""); got != "  héllo" {
+		t.Errorf("StrRStrip(%q) = %q", in, got)
 	}
 }
 
@@ -334,6 +402,37 @@ func TestStrIsSpace(t *testing.T) {
 	}
 	if StrIsSpace(" a ") {
 		t.Error("' a ' not isspace")
+	}
+}
+
+// TestStrIsSpaceASCIIControls pins the 0x1C-0x1F semantic fix: CPython
+// _PyUnicode_IsWhitespace returns true for FS/GS/RS/US, so str.isspace
+// on a string of just those four bytes is True. Go's unicode.IsSpace
+// drops them and the pre-port code returned False.
+//
+// CPython: Objects/unicodeobject.c:12209 unicode_isspace_impl
+func TestStrIsSpaceASCIIControls(t *testing.T) {
+	if !StrIsSpace("\x1c\x1d\x1e\x1f") {
+		t.Error("FS/GS/RS/US isspace")
+	}
+	if !StrIsSpace(" \t\n\v\f\r\x1c\x1d\x1e\x1f") {
+		t.Error("mixed ASCII whitespace isspace")
+	}
+	if StrIsSpace("a\x1c") {
+		t.Error("payload + control not isspace")
+	}
+}
+
+// TestStrIsSpaceNonASCII confirms the rune slow path uses the broader
+// Unicode whitespace set: NBSP (U+00A0) is whitespace under
+// _PyUnicode_IsWhitespace and Go's unicode.IsSpace; ogham space mark
+// (U+1680) and line/paragraph separators (U+2028 / U+2029) are too.
+func TestStrIsSpaceNonASCII(t *testing.T) {
+	if !StrIsSpace("   ") {
+		t.Error("nbsp + line/para sep isspace")
+	}
+	if StrIsSpace("a ") {
+		t.Error("payload + nbsp not isspace")
 	}
 }
 

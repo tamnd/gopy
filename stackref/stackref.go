@@ -30,20 +30,22 @@ type Ref struct {
 var Null = Ref{}
 
 // FromObject wraps a strong reference. The caller transfers
-// ownership of the reference to the returned stackref.
+// ownership of the reference to the returned stackref. Mirrors the
+// steal variant: the underlying refcount is unchanged.
 //
 // CPython: Include/internal/pycore_stackref.h PyStackRef_FromPyObjectSteal
 func FromObject(o objects.Object) Ref {
 	return Ref{o: o}
 }
 
-// FromObjectNew wraps a new strong reference. CPython bumps the
-// refcount; gopy relies on Go's GC, so this is structurally the
-// same as FromObject. The separate name keeps the eval loop
-// readable and matches CPython's PyStackRef_FromPyObjectNew sites.
+// FromObjectNew wraps a borrowed reference, bumping its refcount so
+// the returned stackref owns its own strong reference.
 //
 // CPython: Include/internal/pycore_stackref.h PyStackRef_FromPyObjectNew
 func FromObjectNew(o objects.Object) Ref {
+	if o != nil {
+		objects.Incref(o)
+	}
 	return Ref{o: o}
 }
 
@@ -73,10 +75,15 @@ func (r Ref) AsObjectSteal() objects.Object {
 	return r.o
 }
 
-// Dup returns a duplicate strong reference to the same object.
+// Dup returns a duplicate strong reference to the same object. The
+// underlying object's refcount is bumped so the caller and the
+// returned ref each own one strong reference.
 //
 // CPython: Include/internal/pycore_stackref.h PyStackRef_DUP
 func (r Ref) Dup() Ref {
+	if r.o != nil {
+		objects.Incref(r.o)
+	}
 	return r
 }
 
@@ -87,13 +94,18 @@ func (r Ref) IsNull() bool {
 	return r.o == nil
 }
 
-// Close releases a stackref. Pairs with FromObject. In the GIL
-// build this is a no-op (Go's GC reclaims the underlying object
-// once the last reference drops); the call site exists so v0.14
-// can plug in deferred-refcount drops.
+// Close releases a stackref by dropping the refcount on the
+// underlying object. When the count hits zero the type's Dealloc
+// fires, which is how the per-type freelists (currently Slice) get
+// fed. Pairs with FromObject (steal) at construction and Dup
+// (incref) at duplication. Null stackrefs are a no-op.
 //
 // CPython: Include/internal/pycore_stackref.h PyStackRef_CLOSE
-func (r Ref) Close() {}
+func (r Ref) Close() {
+	if r.o != nil {
+		objects.Decref(r.o)
+	}
+}
 
 // IsTrue reports whether the ref carries the True singleton.
 //

@@ -62,6 +62,38 @@ func NewModuleWithDict(name string, d *Dict) *Module {
 // CPython: Objects/moduleobject.c:459 PyModule_GetDict
 func (m *Module) Dict() *Dict { return m.dict }
 
+// StampBuiltinModule walks the module's dict and sets the owning
+// module name on every BuiltinFunction whose Module field is still
+// empty. Mirrors PyModule_AddFunctions, which calls
+// PyCFunction_NewEx with the module's __name__ so each function
+// remembers its parent. Pickle's whichmodule reads __module__ off
+// the BIF to find the import path for save_global.
+//
+// Idempotent: a function whose Module is already set keeps its
+// existing value, so re-import does not clobber an explicit owner.
+//
+// CPython: Objects/moduleobject.c:606 PyModule_AddFunctions
+func (m *Module) StampBuiltinModule() {
+	name := ""
+	if v, _ := m.dict.GetItem(NewStr("__name__")); v != nil {
+		if s, ok := v.(*Unicode); ok {
+			name = s.Value()
+		}
+	}
+	if name == "" {
+		return
+	}
+	for _, k := range m.dict.Keys() {
+		v, err := m.dict.GetItem(k)
+		if err != nil || v == nil {
+			continue
+		}
+		if bf, ok := v.(*BuiltinFunction); ok && bf.Module == "" {
+			bf.Module = name
+		}
+	}
+}
+
 // State returns the per-module state pointer set by Go-implemented modules.
 //
 // CPython: Objects/moduleobject.c:476 PyModule_GetState

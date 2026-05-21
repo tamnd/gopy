@@ -27,6 +27,16 @@ import (
 // tests can pin the surface without crashing.
 var ErrNotImplemented = errors.New("vm: opcode not implemented in v0.6")
 
+// errFrameReturn is the sentinel RETURN_VALUE / INTERPRETER_EXIT /
+// RETURN_GENERATOR raise to unwind out of the dispatch loop. The
+// terminal value is stashed on evalState.retVal so the dispatch chain
+// no longer has to thread retVal/retErr/retDone through every return.
+//
+// CPython: Python/ceval.c TARGET(RETURN_VALUE) sets retval and falls
+// through to the exit_frame label; gopy mirrors that with a sentinel
+// error since the dispatch arms are real function returns.
+var errFrameReturn = errors.New("vm: frame return")
+
 // evalState is the per-call state the dispatch arms read and write.
 // One per Eval invocation; not safe for concurrent use across
 // goroutines.
@@ -56,6 +66,32 @@ type evalState struct {
 	// CPython: tstate->current_exception, set by helpers that signal
 	// failure via NULL return.
 	pendingErr error
+
+	// lastOpcode mirrors CPython's `int lastopcode` local in
+	// _PyEval_EvalFrameDefault. Used only when GOPY_STATS is on; the
+	// pair_count[last][cur] update reads this every dispatch.
+	//
+	// CPython: Python/ceval.c:1156 lastopcode
+	lastOpcode compile.Opcode
+
+	// code caches f.Code.Code so fetch / advance skip two pointer
+	// chases (e.f -> *Code -> .Code slice header) on every dispatch.
+	// Stable for the lifetime of this evalState because each Eval
+	// call creates a fresh evalState bound to one frame, and Frame.Init
+	// is the only path that swaps Code.
+	//
+	// CPython: Python/ceval.c next_instr local in _PyEval_EvalFrameDefault
+	code []byte
+
+	// retVal holds the value RETURN_VALUE / INTERPRETER_EXIT /
+	// RETURN_GENERATOR want the loop to return. The arms set it before
+	// returning errFrameReturn so the dispatch chain no longer has to
+	// thread a separate retVal through every return.
+	//
+	// CPython: Python/ceval.c retval local at the top of
+	// _PyEval_EvalFrameDefault, set by TARGET(RETURN_VALUE) just before
+	// the goto exit_frame.
+	retVal objects.Object
 }
 
 // Eval runs f to completion under ts and returns the value the frame
@@ -63,10 +99,10 @@ type evalState struct {
 //
 // CPython: Python/ceval.c _PyEval_EvalFrameDefault
 func Eval(ts *state.Thread, f *frame.Frame) (objects.Object, error) {
-	prev := setActiveThread(ts)
-	defer restoreActiveThread(prev)
+	prev, g := setActiveThread(ts)
+	defer restoreActiveThread(prev, g)
 	v := vmFor(ts)
-	e := &evalState{ts: ts, f: f, breaker: v.breaker, gilTimer: &v.gilTimer, gil: v.gil}
+	e := &evalState{ts: ts, f: f, breaker: v.breaker, gilTimer: &v.gilTimer, gil: v.gil, code: f.Code.Code}
 	return e.run()
 }
 
@@ -121,19 +157,20 @@ func builtinsFromGlobals(globals objects.Object) objects.Object {
 	return v
 }
 
-// run is the dispatch loop driver.
+// run is the dispatch loop driver. The eval-breaker poll lives only
+// on the RESUME and JUMP_BACKWARD arms, matching CPython's policy
+// (Python/bytecodes.c CHECK_EVAL_BREAKER fires at backward branches
+// and at frame resume, not every instruction). Pushing the poll out
+// of the per-iteration path saved ~5% on the dispatch micro-bench
+// without changing observable behavior, since pending signals and
+// GIL drops still reach the next loop iteration that hits a backward
+// branch or a yield/resume boundary.
 //
 // CPython: Python/ceval.c _PyEval_EvalFrameDefault main loop
+//
+//nolint:gocognit,gocyclo // hot-opcode arms are inlined at the loop level on purpose; collapsing them back into dispatch() costs ~5% on the dispatch micro-bench (spec 1712 D5).
 func (e *evalState) run() (objects.Object, error) {
 	for {
-		if e.gilTimer != nil {
-			e.gilTimer.poll(e.gil, e.breaker)
-		}
-		if e.breaker != nil && e.breaker.Load() != 0 {
-			if err := e.handleEvalBreaker(); err != nil {
-				return e.unwind(err)
-			}
-		}
 		op, oparg, ok := e.fetch()
 		if !ok {
 			name := "<unknown>"
@@ -142,11 +179,176 @@ func (e *evalState) run() (objects.Object, error) {
 			}
 			return nil, fmt.Errorf("vm: instruction pointer past end of code in %q (ip=%d, len=%d)", name, e.f.InstrPtr, len(e.f.Code.Code))
 		}
-		next, retVal, retErr, retDone, err := e.dispatch(op, oparg)
-		if retDone {
-			return retVal, retErr
+		// Hot-opcode fast switch inlined into the loop body to skip
+		// the dispatch() method-call frame. recordOpcode runs from
+		// dispatch() on the slow path; the fast arms record inline so
+		// the stats counter stays in sync. The four arms here are the
+		// same ones that ship in vm/dispatch.go (see D5); duplicating
+		// them at the loop level lets Go's compiler inline the body
+		// straight into the loop and skip the dispatch() call entirely
+		// on every LOAD_CONST / LOAD_FAST / STORE_FAST / POP_TOP.
+		//
+		// CPython: Python/ceval.c TARGET labels reached directly from
+		// the computed-goto table, no function-call layer.
+		switch op {
+		case compile.LOAD_CONST:
+			e.recordOpcode(op)
+			f := e.f
+			co := f.Code
+			var obj objects.Object
+			if uint(oparg) < uint(len(co.ConstObjs)) {
+				obj = co.ConstObjs[oparg]
+			}
+			if obj == nil {
+				obj = e.constAtSlow(co, int(oparg))
+			}
+			f.LocalsPlus[f.StackBase+f.StackTop] = stackref.FromObject(obj)
+			f.StackTop++
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr += 2
+			continue
+		case compile.LOAD_FAST, compile.LOAD_FAST_BORROW:
+			e.recordOpcode(op)
+			f := e.f
+			r := f.LocalsPlus[oparg].Dup()
+			f.LocalsPlus[f.StackBase+f.StackTop] = r
+			f.StackTop++
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr += 2
+			continue
+		case compile.LOAD_FAST_LOAD_FAST, compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:
+			e.recordOpcode(op)
+			f := e.f
+			hi := oparg >> 4
+			lo := oparg & 0xF
+			r1 := f.LocalsPlus[hi].Dup()
+			r2 := f.LocalsPlus[lo].Dup()
+			f.LocalsPlus[f.StackBase+f.StackTop] = r1
+			f.LocalsPlus[f.StackBase+f.StackTop+1] = r2
+			f.StackTop += 2
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr += 2
+			continue
+		case compile.LOAD_SMALL_INT:
+			e.recordOpcode(op)
+			f := e.f
+			obj := objects.SmallInt(int(5 + oparg))
+			f.LocalsPlus[f.StackBase+f.StackTop] = stackref.FromObject(obj)
+			f.StackTop++
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr += 2
+			continue
+		case compile.STORE_FAST:
+			e.recordOpcode(op)
+			f := e.f
+			f.StackTop--
+			i := f.StackBase + f.StackTop
+			value := f.LocalsPlus[i]
+			f.LocalsPlus[i] = stackref.Null
+			old := f.LocalsPlus[oparg]
+			f.LocalsPlus[oparg] = value
+			old.Close()
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr += 2
+			continue
+		case compile.POP_TOP:
+			e.recordOpcode(op)
+			f := e.f
+			f.StackTop--
+			i := f.StackBase + f.StackTop
+			r := f.LocalsPlus[i]
+			f.LocalsPlus[i] = stackref.Null
+			r.Close()
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr += 2
+			continue
+		case compile.POP_JUMP_IF_FALSE, compile.POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NOT_NONE:
+			f := e.f
+			if f.StackTop == 0 {
+				break
+			}
+			i := f.StackBase + f.StackTop - 1
+			v := f.LocalsPlus[i].AsObject()
+			var take bool
+			fastOk := true
+			switch {
+			case v == objects.None():
+				switch op {
+				case compile.POP_JUMP_IF_NONE:
+					take = true
+				case compile.POP_JUMP_IF_NOT_NONE:
+					take = false
+				case compile.POP_JUMP_IF_TRUE:
+					take = false
+				case compile.POP_JUMP_IF_FALSE:
+					take = true
+				}
+			case v == objects.True():
+				switch op {
+				case compile.POP_JUMP_IF_NONE:
+					take = false
+				case compile.POP_JUMP_IF_NOT_NONE:
+					take = true
+				case compile.POP_JUMP_IF_TRUE:
+					take = true
+				case compile.POP_JUMP_IF_FALSE:
+					take = false
+				}
+			case v == objects.False():
+				switch op {
+				case compile.POP_JUMP_IF_NONE:
+					take = false
+				case compile.POP_JUMP_IF_NOT_NONE:
+					take = true
+				case compile.POP_JUMP_IF_TRUE:
+					take = false
+				case compile.POP_JUMP_IF_FALSE:
+					take = true
+				}
+			default:
+				fastOk = false
+			}
+			if !fastOk {
+				break
+			}
+			e.recordOpcode(op)
+			f.StackTop--
+			f.LocalsPlus[i] = stackref.Null
+			f.PrevInstr = f.InstrPtr
+			if take {
+				f.InstrPtr += 4 + 2*int(oparg)
+			} else {
+				f.InstrPtr += 4
+			}
+			continue
+		case compile.JUMP_BACKWARD_NO_INTERRUPT:
+			e.recordOpcode(op)
+			f := e.f
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr += 2 - 2*int(oparg)
+			continue
+		case compile.JUMP_BACKWARD:
+			if e.gilTimer != nil {
+				e.gilTimer.poll(e.gil, e.breaker)
+			}
+			if e.breaker != nil && e.breaker.Load() != 0 {
+				break
+			}
+			e.recordOpcode(op)
+			f := e.f
+			target := f.InstrPtr + 4 - 2*int(oparg)
+			f.PrevInstr = f.InstrPtr
+			f.InstrPtr = target
+			if target >= 0 {
+				e.tryWarmupTier2(target / 2)
+			}
+			continue
 		}
+		next, err := e.dispatch(op, oparg)
 		if err != nil {
+			if errors.Is(err, errFrameReturn) {
+				return e.retVal, nil
+			}
 			if e.handleException(err) {
 				continue
 			}
@@ -159,33 +361,46 @@ func (e *evalState) run() (objects.Object, error) {
 
 // fetch decodes the instruction at f.InstrPtr. The bytecode is a
 // flat byte slice with two bytes per instruction: opcode then oparg.
-// EXTENDED_ARG accumulates into the next instruction's oparg.
+// The common path (no EXTENDED_ARG prefix) is straight-line so the
+// inliner can fold this into run(). The rare prefix path branches
+// off to fetchExtended.
 //
 // CPython: Python/ceval_macros.h NEXTOPARG
 func (e *evalState) fetch() (op compile.Opcode, oparg uint32, ok bool) {
-	co := e.f.Code
+	code := e.code
 	pc := e.f.InstrPtr
+	if pc+1 >= len(code) {
+		return 0, 0, false
+	}
+	raw := compile.Opcode(code[pc])
+	arg := uint32(code[pc+1])
+	if raw == compile.EXTENDED_ARG {
+		return e.fetchExtended(pc, arg)
+	}
+	return raw, arg, true
+}
+
+// fetchExtended handles the rare EXTENDED_ARG prefix run. Each
+// EXTENDED_ARG shifts the accumulator left 8 and ORs in the next
+// arg byte; the trailing real opcode picks up the accumulated arg.
+// f.InstrPtr is left pointing at the real opcode, matching CPython's
+// next_instr semantics.
+//
+// CPython: Python/ceval.c TARGET(EXTENDED_ARG)
+func (e *evalState) fetchExtended(pc int, oparg uint32) (op compile.Opcode, arg uint32, ok bool) {
+	code := e.code
+	pc += 2
 	for {
-		if pc+1 >= len(co.Code) {
+		if pc+1 >= len(code) {
 			return 0, 0, false
 		}
-		raw := compile.Opcode(co.Code[pc])
-		arg := uint32(co.Code[pc+1])
+		raw := compile.Opcode(code[pc])
+		b := uint32(code[pc+1])
+		oparg = (oparg << 8) | b
 		if raw != compile.EXTENDED_ARG {
-			// Point InstrPtr at the actual instruction so advance() and
-			// jumpBy() compute correct offsets past any EXTENDED_ARG prefix.
-			//
-			// CPython: Python/ceval_macros.h NEXTOPARG — next_instr is
-			// always left pointing at the real opcode, not the prefix.
 			e.f.InstrPtr = pc
-			return raw, oparg<<8 | arg, true
+			return raw, oparg, true
 		}
-		// CPython: each EXTENDED_ARG shifts the accumulated value left by 8
-		// and ORs in the new byte. The old formula (oparg | arg) << 8 was
-		// wrong: it shifted one position too many.
-		//
-		// CPython: Python/ceval.c TARGET(EXTENDED_ARG) oparg <<= 8; oparg |= arg
-		oparg = (oparg << 8) | arg
 		pc += 2
 	}
 }
@@ -199,10 +414,11 @@ func (e *evalState) fetch() (op compile.Opcode, oparg uint32, ok bool) {
 // `next_instr += INLINE_CACHE_ENTRIES_<OP>` step inside each arm).
 func (e *evalState) advance() int {
 	ip := e.f.InstrPtr
-	if ip < 0 || ip >= len(e.f.Code.Code) {
+	code := e.code
+	if ip < 0 || ip >= len(code) {
 		return ip + 2
 	}
-	op := compile.Opcode(e.f.Code.Code[ip])
+	op := compile.Opcode(code[ip])
 	return ip + 2 + 2*compile.CacheCount(op)
 }
 
@@ -247,9 +463,34 @@ func (e *evalState) popObject() objects.Object {
 // range and the const wraps cleanly, so a failure here is a compiler bug
 // rather than a runtime error.
 //
+// CPython stores co_consts as a tuple of PyObject* directly, so GETITEM
+// is one pointer load. gopy mirrors that shape via Code.ConstObjs, a
+// parallel slice populated by SyncConstObjs at construction time. The
+// lazy-fill fallback covers test fixtures that build Code by struct
+// literal without calling SyncConstObjs, so the next dispatch on the
+// same index returns the cached object.
+//
 // CPython: Python/ceval_macros.h GETITEM
 func (e *evalState) constAt(i int) objects.Object {
-	obj, err := wrapConst(e.f.Code.Consts[i])
+	co := e.f.Code
+	if uint(i) < uint(len(co.ConstObjs)) {
+		if obj := co.ConstObjs[i]; obj != nil {
+			return obj
+		}
+	}
+	return e.constAtSlow(co, i)
+}
+
+// constAtSlow handles the fallback path for Code objects whose
+// ConstObjs cache has not been populated (e.g. test fixtures that
+// build Code by struct literal without calling SyncConstObjs). It
+// re-wraps the raw const on every call and intentionally does not
+// touch co.ConstObjs: concurrent goroutines may share the Code and
+// caching the wrap here would race on the shared slice. The real
+// fast path is the ConstObjs slot populated once by SyncConstObjs at
+// Code construction.
+func (e *evalState) constAtSlow(co *objects.Code, i int) objects.Object {
+	obj, err := wrapConst(co.Consts[i])
 	if err != nil {
 		panic(fmt.Sprintf("vm: bad const at %d: %v", i, err))
 	}

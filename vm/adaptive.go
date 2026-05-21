@@ -140,7 +140,7 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 		if nameIdx < 0 || nameIdx >= len(co.Names) {
 			return false
 		}
-		name := mustUnicode(co.Names[nameIdx])
+		name := co.NameObj(nameIdx)
 		specialize.LoadGlobal(e.f.Globals, e.f.Builtins, code, idx, name)
 		return true
 	case compile.LOAD_ATTR:
@@ -149,7 +149,7 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 		if nameIdx < 0 || nameIdx >= len(co.Names) {
 			return false
 		}
-		name := mustUnicode(co.Names[nameIdx])
+		name := co.NameObj(nameIdx)
 		_ = code
 		specialize.LoadAttr(owner, name, co, idx)
 		return true
@@ -159,7 +159,7 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 		if nameIdx < 0 || nameIdx >= len(co.Names) {
 			return false
 		}
-		name := mustUnicode(co.Names[nameIdx])
+		name := co.NameObj(nameIdx)
 		specialize.StoreAttr(owner, name, code, idx)
 		return true
 	case compile.LOAD_SUPER_ATTR:
@@ -171,30 +171,34 @@ func (e *evalState) specializeAt(op compile.Opcode, oparg uint32, idx int) bool 
 		specialize.LoadSuperAttr(globalSuper, cls, code, idx, loadMethod)
 		return true
 	case compile.CALL:
+		// Stack: [callable, self_or_null, args[oparg]]. CPython bumps
+		// nargs by 1 when self_or_null is non-NULL so specialize_py_call
+		// sees the effective total_args (matches the LOAD_ATTR_METHOD
+		// unbound-method shape where the descr is the callable and self
+		// rides in the self_or_null slot).
+		//
+		// CPython: Python/bytecodes.c:3725 _SPECIALIZE_CALL
 		nargs := int32(oparg)
 		callable := e.peek(int(nargs) + 1).AsObject()
-		if callable == nil {
-			callable = e.peek(int(nargs)).AsObject()
+		if e.peek(int(nargs)).AsObject() != nil {
+			nargs++
 		}
 		specialize.Call(callable, code, idx, int32(oparg), nargs)
 		return true
 	case compile.CALL_KW:
+		// Same self_or_null bump as CALL; the kw tuple sits at PEEK(0)
+		// so the callable is one slot deeper.
+		//
+		// CPython: Python/bytecodes.c:3725 _SPECIALIZE_CALL (CALL_KW)
 		nargs := int32(oparg)
-		// kw tuple sits at PEEK(0); the callable is one slot deeper.
 		callable := e.peek(int(nargs) + 2).AsObject()
-		if callable == nil {
-			callable = e.peek(int(nargs) + 1).AsObject()
+		if e.peek(int(nargs)+1).AsObject() != nil {
+			nargs++
 		}
 		specialize.CallKw(callable, code, idx, nargs)
 		return true
 	}
 	return false
-}
-
-// mustUnicode wraps s in an *Unicode for use in specializer entry
-// points that key by attribute / global name.
-func mustUnicode(s string) *objects.Unicode {
-	return objects.NewStr(s).(*objects.Unicode)
 }
 
 // peekNextInstr returns the (opcode, oparg) pair immediately after

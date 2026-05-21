@@ -34,6 +34,13 @@ func buildModule() (*objects.Module, error) {
 		{"scanstring", objects.NewBuiltinFunction("scanstring", moduleScanstring)},
 		{"encode_basestring", objects.NewBuiltinFunction("encode_basestring", moduleEncodeBasestring)},
 		{"encode_basestring_ascii", objects.NewBuiltinFunction("encode_basestring_ascii", moduleEncodeBasestringASCII)},
+		// make_encoder is the C-accelerated Encoder type itself.
+		// Lib/json/encoder.py imports it as `c_make_encoder` and calls
+		// it in the one-shot path so json.dumps avoids the Python
+		// bytecode iterencode loop.
+		//
+		// CPython: Modules/_json.c:1889 PyEncoderType_spec
+		{"make_encoder", encoderType},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {

@@ -56,8 +56,17 @@ func loadAtCapacity(used, capacity int) bool { return used >= usableFraction(cap
 // resize. Without that, a heavily-deleted dict's probe chains stay
 // clogged with dummies and the table never compacts.
 //
+// In split mode the key lookup uses the shared keys table. If the
+// key is already in the shared set we route to insertSplit so the
+// per-instance value lands in splitValues; otherwise we materialize
+// to combined first and insert normally.
+//
 // CPython: Objects/dictobject.c:1891 insertdict
+// CPython: Objects/dictobject.c:1832 insert_split_key
 func dictInsert(d *Dict, h int64, key, value Object) error {
+	if d.sharedKeys != nil {
+		return dictInsertSplit(d, h, key, value)
+	}
 	if loadAtCapacity(d.fill, len(d.entries)) {
 		if err := dictResize(d, growthRate(d)); err != nil {
 			return err
@@ -70,6 +79,10 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	slot := &d.entries[idx]
 	if found {
 		slot.value = value
+		// CPython fires MODIFIED in insertdict's replace branch
+		// (dictobject.c:1875). The key set didn't change, but
+		// watchers still need to know the value did.
+		notifyDictEvent(DictEventModified, d, key, value)
 		return nil
 	}
 	if !slot.dummy {
@@ -80,12 +93,59 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	d.used++
 	d.downgradeKindOnInsert(key)
 	d.invalidateKeysVersion()
+	// CPython fires ADDED at the same site once the new entry is in
+	// the table (dictobject.c:1806/1869).
+	notifyDictEvent(DictEventAdded, d, key, value)
 	return nil
 }
 
-// dictDelete removes key. The matched slot becomes a dummy so probe
-// chains threading through it still resolve; the next resize compacts
-// the dummies out.
+// dictInsertSplit handles inserts on a split dict. Three cases:
+//
+//   - key already in shared set AND already has a value for this
+//     instance (splitValues[idx] != nil): replace; fire MODIFIED.
+//   - key already in shared set but this instance hasn't set it yet
+//     (splitValues[idx] == nil): land the new value in splitValues,
+//     append to d.order, bump d.used; fire ADDED.
+//   - key not in the shared set OR not a *Unicode (split dicts only
+//     hold unicode keys): materialize the dict to combined and route
+//     through the regular insert path.
+//
+// CPython: Objects/dictobject.c:1832 insert_split_key
+func dictInsertSplit(d *Dict, h int64, key, value Object) error {
+	u, isUnicode := key.(*Unicode)
+	if !isUnicode {
+		d.ensureCombined()
+		return dictInsert(d, h, key, value)
+	}
+	idx, found := d.sharedKeys.LookupKey(u, h)
+	if !found {
+		// Key not in the shared set. Materialize and insert through
+		// the combined path; CPython's insert_split_key would extend
+		// the shared keys when refs allow, but a conservative
+		// materialize keeps correctness without the multi-instance
+		// invalidation dance. The shared keys remain intact for any
+		// sibling instances still using them.
+		d.ensureCombined()
+		return dictInsert(d, h, key, value)
+	}
+	if d.splitValues[idx] != nil {
+		d.splitValues[idx] = value
+		notifyDictEvent(DictEventModified, d, key, value)
+		return nil
+	}
+	d.splitValues[idx] = value
+	d.order = append(d.order, idx)
+	d.used++
+	d.invalidateKeysVersion()
+	notifyDictEvent(DictEventAdded, d, key, value)
+	return nil
+}
+
+// dictDelete removes key. In combined mode the matched slot becomes a
+// dummy so probe chains threading through it still resolve; the next
+// resize compacts the dummies out. In split mode we just clear
+// splitValues[idx]; the shared keys entry stays put so other instances
+// pointing at the same SharedKeys still find their values.
 //
 // CPython: Objects/dictobject.c:2790 delitem_common
 func dictDelete(d *Dict, key Object) error {
@@ -100,7 +160,11 @@ func dictDelete(d *Dict, key Object) error {
 	if !found {
 		return errKeyNotFound
 	}
-	d.entries[idx] = dictEntry{dummy: true}
+	if d.sharedKeys != nil {
+		d.splitValues[idx] = nil
+	} else {
+		d.entries[idx] = dictEntry{dummy: true}
+	}
 	for i, slot := range d.order {
 		if slot == idx {
 			d.order = append(d.order[:i], d.order[i+1:]...)
@@ -109,6 +173,9 @@ func dictDelete(d *Dict, key Object) error {
 	}
 	d.used--
 	d.invalidateKeysVersion()
+	// CPython fires DELETED from delitem_common (dictobject.c:2872).
+	// Pass nil for value (the old value isn't part of the contract).
+	notifyDictEvent(DictEventDeleted, d, key, nil)
 	return nil
 }
 
@@ -118,8 +185,15 @@ func dictDelete(d *Dict, key Object) error {
 // stays put since deletion never promotes General back to Unicode.
 // fill resets to used since the rebuilt table has no tombstones.
 //
+// A split dict materializes first: its entries[] borrows the shared
+// keys table, and allocating a private table is exactly what
+// _PyDict_DetachFromObject does anyway.
+//
 // CPython: Objects/dictobject.c:2065 dictresize
 func dictResize(d *Dict, minNew int) error {
+	if d.sharedKeys != nil {
+		d.ensureCombined()
+	}
 	if minNew < d.used {
 		minNew = d.used
 	}

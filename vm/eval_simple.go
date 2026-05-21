@@ -47,6 +47,8 @@ func init() {
 				items[i] = item
 			}
 			return objects.NewTuple(items), true
+		case ast.EllipsisType:
+			return objects.Ellipsis(), true
 		}
 		return nil, false
 	}
@@ -60,6 +62,7 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 		return cached
 	}
 	out := &objects.Code{
+		Version:         objects.AllocCodeVersion(),
 		Argcount:        c.Argcount,
 		PosonlyArgcount: c.PosOnlyArgCount,
 		KwonlyArgcount:  c.KwOnlyArgCount,
@@ -81,6 +84,8 @@ func liftNestedCode(c *compile.Code) *objects.Code {
 		ExceptionTable:  c.ExceptionTable,
 	}
 	out.Init(objects.CodeType)
+	out.SyncNameObjs()
+	out.SyncConstObjs()
 	specialize.Enable(out)
 	c.Lifted = out
 	return out
@@ -179,10 +184,12 @@ func wrapConst(v any) (objects.Object, error) {
 
 // trySimple is consulted by dispatch before falling back to
 // notImplemented. Returns ok=false if op isn't in the hand-written
-// panel. The retDone/err return shape matches dispatch.
+// panel. Frame termination uses the errFrameReturn sentinel via
+// e.retVal; arms set those fields and return errFrameReturn just like
+// CPython's goto exit_frame.
 //
-//nolint:gocognit,gocyclo,gocritic // hand-written opcode switch; the wide return tuple matches dispatch's contract and the arm count shrinks as 1621 codegen replaces these.
-func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+//nolint:gocognit,gocyclo // hand-written opcode switch; the arm count shrinks as 1621 codegen replaces these.
+func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok bool, err error) {
 	switch op {
 	case compile.CACHE, compile.RESERVED:
 		// CACHE words are inline-specialization slots; the dispatcher
@@ -192,43 +199,50 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// padding stays valid. RESERVED is the parity-pin opcode in
 		// CPython's table; behavior matches NOP in unspecialized form.
 		// NOP itself routes through dispatchGen (spec 1714 phase 5.2).
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.RESUME:
 		next, rerr := e.handleResume(op, oparg)
 		if rerr != nil {
-			return 0, nil, nil, false, true, rerr
+			return 0, true, rerr
 		}
-		return next, nil, nil, false, true, nil
+		return next, true, nil
 
 	case compile.JUMP_BACKWARD, compile.JUMP_BACKWARD_NO_INTERRUPT:
 		// Backward jumps poll the eval breaker (CPython: CHECK_EVAL_BREAKER
 		// fires here so signal handlers and pending calls can run mid-loop).
-		// JUMP_BACKWARD_NO_INTERRUPT skips the poll.
-		if op == compile.JUMP_BACKWARD && e.breaker != nil && e.breaker.Load() != 0 {
-			if berr := e.handleEvalBreaker(); berr != nil {
-				return 0, nil, nil, false, true, berr
+		// JUMP_BACKWARD_NO_INTERRUPT skips the poll. The gilTimer tick
+		// rides along here too because backward branches are the
+		// preemption points CPython arms the GIL drop request at.
+		if op == compile.JUMP_BACKWARD {
+			if e.gilTimer != nil {
+				e.gilTimer.poll(e.gil, e.breaker)
+			}
+			if e.breaker != nil && e.breaker.Load() != 0 {
+				if berr := e.handleEvalBreaker(); berr != nil {
+					return 0, true, berr
+				}
 			}
 		}
 		target := e.jumpBy(-int(oparg) + 1)
 		if op == compile.JUMP_BACKWARD && target >= 0 {
 			e.tryWarmupTier2(target / 2)
 		}
-		return target, nil, nil, false, true, nil
+		return target, true, nil
 
 	case compile.ENTER_EXECUTOR:
-		next, retVal, retErr, retDone, eerr := e.enterExecutor(oparg)
-		return next, retVal, retErr, retDone, true, eerr
+		next, eerr := e.enterExecutor(oparg)
+		return next, true, eerr
 
 	case compile.BINARY_OP:
 		b := e.popObject()
 		a := e.popObject()
 		out, berr := binaryOp(int32(oparg), a, b)
 		if berr != nil {
-			return 0, nil, nil, false, true, berr
+			return 0, true, berr
 		}
 		e.pushObject(out)
-		return e.cacheAdvance(compile.BINARY_OP), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.BINARY_OP), true, nil
 
 	case compile.COMPARE_OP:
 		b := e.popObject()
@@ -239,10 +253,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		cmpOp := objects.CompareOp((oparg >> 5) & 0xf)
 		out, cerr := objects.RichCmp(a, b, cmpOp)
 		if cerr != nil {
-			return 0, nil, nil, false, true, cerr
+			return 0, true, cerr
 		}
 		e.pushObject(out)
-		return e.cacheAdvance(compile.COMPARE_OP), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.COMPARE_OP), true, nil
 
 	case compile.FOR_ITER:
 		// Stack: [iter]. Pop iter, peek by re-pushing. CPython peeks
@@ -250,11 +264,11 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// the iterator on the stack across iterations.
 		it := e.peek(0).AsObject()
 		if it == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: TypeError: FOR_ITER on nil object")
+			return 0, true, fmt.Errorf("vm: TypeError: FOR_ITER on nil object")
 		}
 		t := it.Type()
 		if t.IterNext == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: TypeError: '%s' object is not an iterator", t.Name)
+			return 0, true, fmt.Errorf("vm: TypeError: '%s' object is not an iterator", t.Name)
 		}
 		v, nerr := t.IterNext(it)
 		if nerr != nil {
@@ -267,12 +281,12 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 				pyerrors.Clear(e.ts)
 				// Skip past the loop body; oparg is the jump distance to
 				// END_FOR (in code units, not instruction words).
-				return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
+				return e.jumpBy(int(oparg) + 1), true, nil
 			}
-			return 0, nil, nil, false, true, nerr
+			return 0, true, nerr
 		}
 		e.pushObject(v)
-		return e.cacheAdvance(compile.FOR_ITER), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.FOR_ITER), true, nil
 
 	case compile.END_FOR:
 		// END_FOR is a no-op for ordinary iterators in CPython 3.14:
@@ -282,7 +296,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// real effect, and gopy doesn't land that path yet.
 		//
 		// CPython: Python/bytecodes.c END_FOR
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.CALL:
 		// Stack layout (3.14): [callable, NULL_or_self, arg0, ..., argN].
@@ -301,33 +315,33 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		out, cerr := objects.Vectorcall(callable, args, uint(len(args)), nil)
 		if cerr != nil {
-			return 0, nil, nil, false, true, cerr
+			return 0, true, cerr
 		}
 		e.pushObject(out)
-		return e.cacheAdvance(compile.CALL), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.CALL), true, nil
 
 	case compile.UNPACK_SEQUENCE:
 		seq := e.popObject()
 		n := int(oparg)
 		items, uerr := unpackSeq(seq, n)
 		if uerr != nil {
-			return 0, nil, nil, false, true, uerr
+			return 0, true, uerr
 		}
 		// Push in reverse so items[0] ends up at the top, matching
 		// the assignment order CPython documents.
 		for i := n - 1; i >= 0; i-- {
 			e.pushObject(items[i])
 		}
-		return e.cacheAdvance(compile.UNPACK_SEQUENCE), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.UNPACK_SEQUENCE), true, nil
 
 	case compile.STORE_SUBSCR:
 		key := e.popObject()
 		container := e.popObject()
 		v := e.popObject()
 		if serr := setItem(container, key, v); serr != nil {
-			return 0, nil, nil, false, true, serr
+			return 0, true, serr
 		}
-		return e.cacheAdvance(compile.STORE_SUBSCR), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.STORE_SUBSCR), true, nil
 
 	case compile.CONTAINS_OP:
 		// Stack layout: [..., left, right]. CPython pops right (haystack)
@@ -336,13 +350,13 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		needle := e.popObject()
 		hit, cerr := containsItem(haystack, needle)
 		if cerr != nil {
-			return 0, nil, nil, false, true, cerr
+			return 0, true, cerr
 		}
 		if oparg&1 == 1 {
 			hit = !hit
 		}
 		e.pushObject(objects.NewBool(hit))
-		return e.cacheAdvance(compile.CONTAINS_OP), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.CONTAINS_OP), true, nil
 
 	case compile.RAISE_VARARGS:
 		// oparg: 0 = re-raise, 1 = raise exc, 2 = raise exc from cause.
@@ -360,25 +374,25 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			// reads tstate->exc_info->exc_value via _PyErr_GetRaisedException.
 			handled := e.ts.HandledException()
 			if handled == nil {
-				return 0, nil, nil, false, true, errors.New("RuntimeError: No active exception to re-raise")
+				return 0, true, errors.New("RuntimeError: No active exception to re-raise")
 			}
 			exc, ok := handled.(*pyerrors.Exception)
 			if !ok {
-				return 0, nil, nil, false, true, errors.New("RuntimeError: No active exception to re-raise")
+				return 0, true, errors.New("RuntimeError: No active exception to re-raise")
 			}
 			pyerrors.Raise(e.ts, exc)
-			return 0, nil, nil, false, true, excSentinel(exc)
+			return 0, true, excSentinel(exc)
 		case 1:
 			val := e.popObject()
 			exc := raiseValue(e.ts, val, nil)
-			return 0, nil, nil, false, true, exc
+			return 0, true, exc
 		case 2:
 			cause := e.popObject()
 			val := e.popObject()
 			exc := raiseValue(e.ts, val, cause)
-			return 0, nil, nil, false, true, exc
+			return 0, true, exc
 		}
-		return 0, nil, nil, false, true, fmt.Errorf("vm: RAISE_VARARGS: invalid oparg %d", oparg)
+		return 0, true, fmt.Errorf("vm: RAISE_VARARGS: invalid oparg %d", oparg)
 
 	case compile.CHECK_EXC_MATCH:
 		// Stack: [exc, type]. Push True if isinstance(exc, type), else
@@ -388,16 +402,16 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		exc := e.peek(0).AsObject()
 		match := exceptionMatches(exc, typeObj)
 		e.pushObject(objects.NewBool(match))
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.CONVERT_VALUE:
 		v := e.popObject()
 		out, cerr := convertValue(v, oparg)
 		if cerr != nil {
-			return 0, nil, nil, false, true, cerr
+			return 0, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.MAKE_FUNCTION:
 		// TOS is a code object; build a Function bound to the current
@@ -408,11 +422,18 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		v := e.popObject()
 		code, ok := v.(*objects.Code)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("MAKE_FUNCTION: TOS not a code object, got %T", v)
+			return 0, true, fmt.Errorf("MAKE_FUNCTION: TOS not a code object, got %T", v)
 		}
 		fn := objects.NewFunction(code.Name, code, e.f.Globals)
+		// Stamp the cached co_version so CALL_PY_EXACT_ARGS can write a
+		// stable _CHECK_FUNCTION_VERSION guard. Without this the call
+		// specializer always sees Version==0 and falls back to the
+		// generic CALL arm.
+		//
+		// CPython: Python/bytecodes.c:4956 _PyFunction_SetVersion
+		fn.Version = code.Version
 		e.pushObject(fn)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.SET_FUNCTION_ATTRIBUTE:
 		// Stack: [func, attr]. oparg's bit identifies the attribute:
@@ -425,7 +446,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		attr := e.popObject()
 		fn, ok := fnObj.(*objects.Function)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("SET_FUNCTION_ATTRIBUTE: TOS not a function, got %T", fnObj)
+			return 0, true, fmt.Errorf("SET_FUNCTION_ATTRIBUTE: TOS not a function, got %T", fnObj)
 		}
 		switch oparg {
 		case 0x01:
@@ -442,7 +463,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			}
 		}
 		e.pushObject(fn)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.LOAD_CLOSURE:
 		// Same as LOAD_DEREF but pushes the cell itself, not its
@@ -453,7 +474,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// CPython: Python/bytecodes.c:261 pseudo(LOAD_CLOSURE)
 		ref := e.f.LocalsPlus[int(oparg)]
 		e.push(ref.Dup())
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.LOAD_DEREF:
 		// oparg is the localsplus offset of the cell, as rewritten by
@@ -465,14 +486,14 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		cell, ok := cellObj.(*objects.Cell)
 		if !ok || cell == nil {
 			name := derefName(e.f.Code, int(oparg))
-			return 0, nil, nil, false, true, fmt.Errorf("LOAD_DEREF: %s slot %d not a cell in %s:%s, got %T", name, oparg, e.f.Code.Filename, e.f.Code.Name, cellObj)
+			return 0, true, fmt.Errorf("LOAD_DEREF: %s slot %d not a cell in %s:%s, got %T", name, oparg, e.f.Code.Filename, e.f.Code.Name, cellObj)
 		}
 		if cell.Contents == nil {
 			name := derefName(e.f.Code, int(oparg))
-			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable %q referenced before assignment in %s:%s", name, e.f.Code.Filename, e.f.Code.Name)
+			return 0, true, fmt.Errorf("NameError: free variable %q referenced before assignment in %s:%s", name, e.f.Code.Filename, e.f.Code.Name)
 		}
 		e.pushObject(cell.Contents)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.STORE_DEREF:
 		// CPython: Python/bytecodes.c:1920 STORE_DEREF
@@ -485,34 +506,17 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			e.f.LocalsPlus[int(oparg)] = stackref.FromObject(cell)
 		}
 		cell.Contents = v
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.DELETE_DEREF:
 		// CPython: Python/bytecodes.c:1875 DELETE_DEREF
 		ref := e.f.LocalsPlus[int(oparg)]
 		cell, ok := ref.AsObject().(*objects.Cell)
 		if !ok || cell.Contents == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable referenced before assignment")
+			return 0, true, fmt.Errorf("NameError: free variable referenced before assignment")
 		}
 		cell.Contents = nil
-		return e.advance(), nil, nil, false, true, nil
-
-	case compile.MAKE_CELL:
-		// Wrap whatever is currently in slot oparg in a fresh cell.
-		// The initial value is usually NULL but is the arg value when
-		// the cell name was also a parameter (CPython 3.14 overlapped
-		// arg-cell slot). The slot then holds the cell.
-		//
-		// CPython: Python/bytecodes.c:1862 MAKE_CELL
-		slot := int(oparg)
-		var contents objects.Object
-		ref := e.f.LocalsPlus[slot]
-		if !ref.IsNull() {
-			contents = ref.AsObject()
-		}
-		cell := objects.NewCell(contents)
-		e.f.LocalsPlus[slot] = stackref.FromObject(cell)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.COPY_FREE_VARS:
 		// oparg = number of free vars. Source: f.Func's Closure tuple.
@@ -522,30 +526,30 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		n := int(oparg)
 		fn, ok := e.f.Func.(*objects.Function)
 		if !ok || fn.Closure == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("COPY_FREE_VARS: frame has no closure")
+			return 0, true, fmt.Errorf("COPY_FREE_VARS: frame has no closure")
 		}
 		dst := frame.FreesStart(e.f.Code)
 		for i := 0; i < n; i++ {
 			cell := fn.Closure.Item(i)
 			e.f.LocalsPlus[dst+i] = stackref.FromObject(cell)
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.LIST_EXTEND:
 		// Pops iter, extends list at depth oparg with all its items.
 		v := e.popObject()
 		l, ok := e.peek(int(oparg) - 1).AsObject().(*objects.List)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("LIST_EXTEND: target not a list")
+			return 0, true, fmt.Errorf("LIST_EXTEND: target not a list")
 		}
 		items, eerr := iterToSlice(v)
 		if eerr != nil {
-			return 0, nil, nil, false, true, eerr
+			return 0, true, eerr
 		}
 		for _, it := range items {
 			l.Append(it)
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.DICT_MERGE:
 		// Pop dict-like and merge into the dict at depth oparg. Last
@@ -555,22 +559,22 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		src := e.popObject()
 		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("DICT_MERGE: target not a dict")
+			return 0, true, fmt.Errorf("DICT_MERGE: target not a dict")
 		}
 		srcDict, ok := src.(*objects.Dict)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("DICT_MERGE: source not a dict")
+			return 0, true, fmt.Errorf("DICT_MERGE: source not a dict")
 		}
 		for _, k := range srcDict.Keys() {
 			v, gerr := srcDict.GetItem(k)
 			if gerr != nil {
-				return 0, nil, nil, false, true, gerr
+				return 0, true, gerr
 			}
 			if serr := d.SetItem(k, v); serr != nil {
-				return 0, nil, nil, false, true, serr
+				return 0, true, serr
 			}
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.BUILD_SET:
 		// Build a set from n stack items. CPython: Objects/setobject.c BUILD_SET.
@@ -584,53 +588,53 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		for _, it := range items {
 			if aerr := s.Add(it); aerr != nil {
-				return 0, nil, nil, false, true, aerr
+				return 0, true, aerr
 			}
 		}
 		e.pushObject(s)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.CALL_INTRINSIC_1:
 		v := e.popObject()
 		if int(oparg) >= len(intrinsicsUnary) {
-			return 0, nil, nil, false, true, fmt.Errorf("CALL_INTRINSIC_1: oparg %d out of range", oparg)
+			return 0, true, fmt.Errorf("CALL_INTRINSIC_1: oparg %d out of range", oparg)
 		}
 		// IMPORT_STAR needs the current frame's locals, which the generic
 		// intrinsic signature doesn't carry. Route it directly.
 		if oparg == intrinsics.UnaryImportStarID {
 			if ierr := e.importStar(v); ierr != nil {
-				return 0, nil, nil, false, true, ierr
+				return 0, true, ierr
 			}
 			e.pushObject(objects.None())
-			return e.advance(), nil, nil, false, true, nil
+			return e.advance(), true, nil
 		}
 		fn := intrinsicsUnary[oparg]
 		if fn == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("CALL_INTRINSIC_1: id %d unbound", oparg)
+			return 0, true, fmt.Errorf("CALL_INTRINSIC_1: id %d unbound", oparg)
 		}
 		out, cerr := fn(e.ts, v)
 		if cerr != nil {
-			return 0, nil, nil, false, true, cerr
+			return 0, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.CALL_INTRINSIC_2:
 		rhs := e.popObject()
 		lhs := e.popObject()
 		if int(oparg) >= len(intrinsicsBinary) {
-			return 0, nil, nil, false, true, fmt.Errorf("CALL_INTRINSIC_2: oparg %d out of range", oparg)
+			return 0, true, fmt.Errorf("CALL_INTRINSIC_2: oparg %d out of range", oparg)
 		}
 		fn := intrinsicsBinary[oparg]
 		if fn == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("CALL_INTRINSIC_2: id %d unbound", oparg)
+			return 0, true, fmt.Errorf("CALL_INTRINSIC_2: id %d unbound", oparg)
 		}
 		out, cerr := fn(e.ts, lhs, rhs)
 		if cerr != nil {
-			return 0, nil, nil, false, true, cerr
+			return 0, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.RERAISE:
 		// Stack: [values[oparg], exc]. Pop exc and reraise it through the
@@ -643,7 +647,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		//
 		// CPython: Python/bytecodes.c:1429 RERAISE
 		if oparg > 2 {
-			return 0, nil, nil, false, true, fmt.Errorf("vm: RERAISE: invalid oparg %d", oparg)
+			return 0, true, fmt.Errorf("vm: RERAISE: invalid oparg %d", oparg)
 		}
 		exc := e.popObject()
 		if oparg >= 1 {
@@ -664,9 +668,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		if pyExc, ok := exc.(*pyerrors.Exception); ok {
 			pyerrors.Raise(e.ts, pyExc)
-			return 0, nil, nil, false, true, excSentinel(pyExc)
+			return 0, true, excSentinel(pyExc)
 		}
-		return 0, nil, nil, false, true, fmt.Errorf("%s", objectRepr(exc))
+		return 0, true, fmt.Errorf("%s", objectRepr(exc))
 
 	case compile.UNPACK_EX:
 		// oparg low byte: items before *rest. high byte: items after.
@@ -677,10 +681,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		seq := e.popObject()
 		items, ierr := iterToSlice(seq)
 		if ierr != nil {
-			return 0, nil, nil, false, true, ierr
+			return 0, true, ierr
 		}
 		if len(items) < before+after {
-			return 0, nil, nil, false, true, fmt.Errorf("ValueError: not enough values to unpack (expected at least %d, got %d)", before+after, len(items))
+			return 0, true, fmt.Errorf("ValueError: not enough values to unpack (expected at least %d, got %d)", before+after, len(items))
 		}
 		rest := items[before : len(items)-after]
 		// Push: tail items, then rest, then head items, in reverse so
@@ -692,7 +696,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		for i := before - 1; i >= 0; i-- {
 			e.pushObject(items[i])
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.CALL_KW:
 		// Stack: [callable, NULL_or_self, arg0, ..., argN, kwnames_tuple].
@@ -703,7 +707,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		kwnamesObj := e.popObject()
 		kwnames, ok := kwnamesObj.(*objects.Tuple)
 		if !ok {
-			return 0, nil, nil, false, true, fmt.Errorf("CALL_KW: kwnames not a tuple")
+			return 0, true, fmt.Errorf("CALL_KW: kwnames not a tuple")
 		}
 		nkw := kwnames.Len()
 		total := int(oparg)
@@ -722,10 +726,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		out, cerr := objects.Vectorcall(callable, all, uint(npos), kwnames)
 		if cerr != nil {
-			return 0, nil, nil, false, true, cerr
+			return 0, true, cerr
 		}
 		e.pushObject(out)
-		return e.cacheAdvance(compile.CALL_KW), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.CALL_KW), true, nil
 
 	case compile.CALL_FUNCTION_EX:
 		// Stack: [callable, NULL, args_iterable, kwargs_dict_or_NULL].
@@ -737,23 +741,23 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			kwObj := e.popObject()
 			d, ok := kwObj.(*objects.Dict)
 			if !ok {
-				return 0, nil, nil, false, true, fmt.Errorf("CALL_FUNCTION_EX: kwargs not a dict")
+				return 0, true, fmt.Errorf("CALL_FUNCTION_EX: kwargs not a dict")
 			}
 			kwargs = d
 		}
 		argsObj := e.popObject()
 		argsSlice, ierr := iterToSlice(argsObj)
 		if ierr != nil {
-			return 0, nil, nil, false, true, ierr
+			return 0, true, ierr
 		}
 		_ = e.popObject() // NULL_or_self placeholder
 		callable := e.popObject()
 		out, cerr := objects.Call(callable, objects.NewTuple(argsSlice), kwargs)
 		if cerr != nil {
-			return 0, nil, nil, false, true, cerr
+			return 0, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.BINARY_SLICE:
 		// Stack: [container, start, stop]. Push container[start:stop].
@@ -762,10 +766,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		container := e.popObject()
 		out, serr := sliceContainer(container, start, stop)
 		if serr != nil {
-			return 0, nil, nil, false, true, serr
+			return 0, true, serr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.STORE_SLICE:
 		// Stack: [value, container, start, stop]. Replace container[start:stop] with value.
@@ -774,9 +778,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		container := e.popObject()
 		value := e.popObject()
 		if serr := storeSlice(container, start, stop, value); serr != nil {
-			return 0, nil, nil, false, true, serr
+			return 0, true, serr
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.LOAD_FAST_LOAD_FAST, compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:
 		// Two local indexes packed: high nibble first, low nibble second.
@@ -786,11 +790,11 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		r1 := e.localAt(hi)
 		r2 := e.localAt(lo)
 		if r1.IsNull() || r2.IsNull() {
-			return 0, nil, nil, false, true, fmt.Errorf("LOAD_FAST_LOAD_FAST: unbound local")
+			return 0, true, fmt.Errorf("LOAD_FAST_LOAD_FAST: unbound local")
 		}
 		e.push(r1.Dup())
 		e.push(r2.Dup())
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.STORE_FAST_LOAD_FAST:
 		// Pop TOS into local hi, then load local lo onto the stack.
@@ -802,10 +806,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.setLocal(hi, ref)
 		r2 := e.localAt(lo)
 		if r2.IsNull() {
-			return 0, nil, nil, false, true, fmt.Errorf("STORE_FAST_LOAD_FAST: local %d unbound", lo)
+			return 0, true, fmt.Errorf("STORE_FAST_LOAD_FAST: local %d unbound", lo)
 		}
 		e.push(r2.Dup())
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.STORE_FAST_STORE_FAST:
 		// Pop TOS into local hi, then pop the new TOS into local lo.
@@ -819,40 +823,40 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		oldLo := e.localAt(lo)
 		oldLo.Close()
 		e.setLocal(lo, r2)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.TO_BOOL:
 		// Replace TOS with bool(TOS).
 		v := e.popObject()
 		truthy, terr := objects.IsTruthy(v)
 		if terr != nil {
-			return 0, nil, nil, false, true, terr
+			return 0, true, terr
 		}
 		e.pushObject(objects.NewBool(truthy))
-		return e.cacheAdvance(compile.TO_BOOL), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.TO_BOOL), true, nil
 
 	case compile.NOT_TAKEN:
 		// 3.14 marker that flags the not-taken branch of a conditional
 		// jump. Has no runtime effect; CPython uses it for monitoring.
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.POP_BLOCK:
 		// 3.14 keeps POP_BLOCK as a pseudo for old codegen paths. No
 		// block stack in our frame model, so it's a no-op.
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.POP_ITER:
 		// Pop the exhausted iterator left on the stack by FOR_ITER's
 		// fall-through. CPython 3.14 made this an opcode of its own.
 		ref := e.pop()
 		ref.Close()
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.JUMP, compile.JUMP_NO_INTERRUPT:
 		// Unconditional pseudo-jumps emitted by 3.14 codegen for
 		// optimized forms. We treat them as forward jumps; the
 		// NO_INTERRUPT variant skips the eval breaker poll.
-		return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
+		return e.jumpBy(int(oparg) + 1), true, nil
 
 	case compile.EXIT_INIT_CHECK:
 		// `__init__` must return None. Pop the return value and raise
@@ -860,9 +864,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// CPython: Python/bytecodes.c EXIT_INIT_CHECK
 		v := e.popObject()
 		if v != objects.None() {
-			return 0, nil, nil, false, true, fmt.Errorf("TypeError: __init__() should return None, not '%s'", v.Type().Name)
+			return 0, true, fmt.Errorf("TypeError: __init__() should return None, not '%s'", v.Type().Name)
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		// PEP 695 helper: look up name in the dict at TOS first; if absent,
@@ -875,39 +879,45 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		ref := e.f.LocalsPlus[int(oparg)]
 		cell, ok := ref.AsObject().(*objects.Cell)
 		if !ok || cell.Contents == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable referenced before assignment")
+			return 0, true, fmt.Errorf("NameError: free variable referenced before assignment")
 		}
 		e.pushObject(cell.Contents)
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
 
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
 		compile.DELETE_NAME:
 		v, perr := e.execNameOp(op, oparg)
 		if perr != nil {
-			return 0, nil, nil, false, true, perr
+			return 0, true, perr
 		}
 		_ = v
-		return e.cacheAdvance(op), nil, nil, false, true, nil
+		return e.cacheAdvance(op), true, nil
 
 	case compile.LOAD_ATTR:
 		if perr := e.execLoadAttr(oparg); perr != nil {
-			return 0, nil, nil, false, true, perr
+			return 0, true, perr
 		}
-		return e.cacheAdvance(compile.LOAD_ATTR), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.LOAD_ATTR), true, nil
 
 	case compile.STORE_ATTR:
 		if perr := e.execStoreAttr(oparg); perr != nil {
-			return 0, nil, nil, false, true, perr
+			return 0, true, perr
 		}
-		return e.cacheAdvance(compile.STORE_ATTR), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.STORE_ATTR), true, nil
 
 	case compile.DELETE_ATTR:
 		if perr := e.execDeleteAttr(oparg); perr != nil {
-			return 0, nil, nil, false, true, perr
+			return 0, true, perr
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.advance(), true, nil
+
+	case compile.LOAD_SUPER_ATTR:
+		if perr := e.execLoadSuperAttr(oparg); perr != nil {
+			return 0, true, perr
+		}
+		return e.cacheAdvance(compile.LOAD_SUPER_ATTR), true, nil
 	}
-	return 0, nil, nil, false, false, nil
+	return 0, false, nil
 }
 
 // execLoadAttr implements the LOAD_ATTR macro: pop owner, look up
@@ -924,7 +934,7 @@ func (e *evalState) execLoadAttr(oparg uint32) error {
 		return fmt.Errorf("vm: LOAD_ATTR: name index %d out of range", idx)
 	}
 	owner := e.popObject()
-	name := objects.NewStr(co.Names[idx])
+	name := co.NameObj(idx)
 	attr, err := objects.GetAttr(owner, name)
 	if err != nil {
 		return err
@@ -953,7 +963,7 @@ func (e *evalState) execStoreAttr(oparg uint32) error {
 	}
 	owner := e.popObject()
 	value := e.popObject()
-	name := objects.NewStr(co.Names[idx])
+	name := co.NameObj(idx)
 	return objects.SetAttr(owner, name, value)
 }
 
@@ -968,8 +978,48 @@ func (e *evalState) execDeleteAttr(oparg uint32) error {
 		return fmt.Errorf("vm: DELETE_ATTR: name index %d out of range", idx)
 	}
 	owner := e.popObject()
-	name := objects.NewStr(co.Names[idx])
+	name := co.NameObj(idx)
 	return objects.DelAttr(owner, name)
+}
+
+// execLoadSuperAttr implements the generic _LOAD_SUPER_ATTR uop. The
+// bytecode pushed (global_super, class, self); we pop the trio, call
+// global_super(class, self) (or super(class) when bit 1 of oparg is
+// clear) to mint a super proxy, then look up co.Names[oparg>>2] on
+// it. The trailing _PUSH_NULL_CONDITIONAL contributes the NULL self
+// slot when bit 0 of oparg is set so a following CALL sees the
+// (callable, NULL) shape.
+//
+// CPython: Python/bytecodes.c:2172 _LOAD_SUPER_ATTR
+func (e *evalState) execLoadSuperAttr(oparg uint32) error {
+	co := e.f.Code
+	nameIdx := int(oparg >> 2)
+	if nameIdx < 0 || nameIdx >= len(co.Names) {
+		return fmt.Errorf("vm: LOAD_SUPER_ATTR: name index %d out of range", nameIdx)
+	}
+	self := e.popObject()
+	cls := e.popObject()
+	globalSuper := e.popObject()
+	var argv []objects.Object
+	if oparg&2 != 0 {
+		argv = []objects.Object{cls, self}
+	} else {
+		argv = []objects.Object{cls}
+	}
+	su, err := objects.Call(globalSuper, objects.NewTuple(argv), nil)
+	if err != nil {
+		return err
+	}
+	name := co.NameObj(nameIdx)
+	attr, err := objects.GetAttr(su, name)
+	if err != nil {
+		return err
+	}
+	e.pushObject(attr)
+	if oparg&1 != 0 {
+		e.push(stackref.Null)
+	}
+	return nil
 }
 
 // execNameOp handles LOAD_NAME / LOAD_GLOBAL / STORE_NAME etc. Looks
@@ -991,7 +1041,7 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		return nil, fmt.Errorf("vm: %s: name index %d out of range", op.Name(), idx)
 	}
 	name := co.Names[idx]
-	keyObj := objects.NewStr(name)
+	keyObj := co.NameObj(idx)
 
 	switch op {
 	case compile.LOAD_NAME:
@@ -1220,6 +1270,20 @@ func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool) {
 	// CPython: Python/bytecodes.c LOAD_NAME (PyMapping_GetOptionalItem
 	// on locals)
 	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
+		// KnownHash short-circuit: the LOAD_NAME / LOAD_GLOBAL key
+		// is a *Unicode pulled from co.NameObj, whose hash is cached
+		// after the first dispatch on this code object. Threading the
+		// cached hash straight through avoids the PyObject_Hash vtable
+		// dispatch (one virtual call) per lookup.
+		//
+		// CPython: Objects/dictobject.c:1965 _PyDict_GetItem_KnownHash
+		if u, ok := key.(*objects.Unicode); ok {
+			v, err := d.GetItemKnownHash(u, u.HashCached())
+			if err != nil {
+				return nil, false
+			}
+			return v, true
+		}
 		v, err := d.GetItem(key)
 		if err != nil {
 			return nil, false
@@ -1242,6 +1306,10 @@ func storeIn(scope objects.Object, key, value objects.Object) error {
 	//
 	// CPython: Python/ceval.c STORE_NAME uses PyObject_SetItem on locals
 	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
+		if u, ok := key.(*objects.Unicode); ok {
+			// CPython: Objects/dictobject.c:2069 _PyDict_SetItem_KnownHash
+			return d.SetItemKnownHash(u, value, u.HashCached())
+		}
 		return d.SetItem(key, value)
 	}
 	return objects.SetItem(scope, key, value)

@@ -7,7 +7,10 @@
 
 package objects
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func init() {
 	register := func(name string, get func(o Object) (Object, error), set func(o Object, v Object) error) {
@@ -21,15 +24,20 @@ func init() {
 	register("__doc__", typeGetDoc, typeSetDoc)
 }
 
-// typeGetName returns t.Name. Mirrors type_name.
+// typeGetName mirrors type_name. Heap types return ht_name verbatim;
+// static types take the tail after the last dot of tp_name so a
+// "datetime.date" tp_name reports __name__ == "date".
 //
-// CPython: Objects/typeobject.c:951 type_name
+// CPython: Objects/typeobject.c:1457 type_name
 func typeGetName(o Object) (Object, error) {
 	t, ok := o.(*Type)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__name__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
-	return NewStr(t.Name), nil
+	if t.IsUser {
+		return NewStr(t.Name), nil
+	}
+	return NewStr(tailName(t.Name)), nil
 }
 
 // typeSetName writes t.Name. Only allowed on user-defined types.
@@ -55,20 +63,23 @@ func typeSetName(o Object, v Object) error {
 	return nil
 }
 
-// typeGetQualname returns t.Qualname, falling back to t.Name when the
-// type was never stamped with a qualified name (built-ins, plain
-// top-level classes).
+// typeGetQualname mirrors type_qualname. Heap types return ht_qualname
+// verbatim; static types fall back to _PyType_Name which strips the
+// dotted module prefix from tp_name.
 //
-// CPython: Objects/typeobject.c:984 type_qualname
+// CPython: Objects/typeobject.c:1470 type_qualname
 func typeGetQualname(o Object) (Object, error) {
 	t, ok := o.(*Type)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__qualname__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
-	if t.Qualname != "" {
-		return NewStr(t.Qualname), nil
+	if t.IsUser {
+		if t.Qualname != "" {
+			return NewStr(t.Qualname), nil
+		}
+		return NewStr(t.Name), nil
 	}
-	return NewStr(t.Name), nil
+	return NewStr(tailName(t.Name)), nil
 }
 
 // typeSetQualname writes t.Qualname. Only allowed on heap (user) types,
@@ -95,19 +106,29 @@ func typeSetQualname(o Object, v Object) error {
 	return nil
 }
 
-// typeGetModule returns t.Module or "builtins" when empty. Mirrors
-// type_module.
+// typeGetModule mirrors type_module: heap (user) types return their
+// __module__ field (raising AttributeError when unset), static types
+// take the leading dotted component of tp_name or fall back to
+// "builtins". CPython's strrchr lookup on tp_name is the convention
+// that lets a C extension type pin its __module__ at registration via
+// the "module.name" form.
 //
-// CPython: Objects/typeobject.c:907 type_module
+// CPython: Objects/typeobject.c:1538 type_module
 func typeGetModule(o Object) (Object, error) {
 	t, ok := o.(*Type)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__module__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
-	if t.Module == "" {
-		return NewStr("builtins"), nil
+	if t.IsUser {
+		if t.Module == "" {
+			return nil, fmt.Errorf("AttributeError: __module__")
+		}
+		return NewStr(t.Module), nil
 	}
-	return NewStr(t.Module), nil
+	if i := strings.LastIndexByte(t.Name, '.'); i >= 0 {
+		return NewStr(t.Name[:i]), nil
+	}
+	return NewStr("builtins"), nil
 }
 
 // typeSetModule writes t.Module.

@@ -36,6 +36,7 @@ func initSmallInts() {
 		o := &Int{}
 		o.init(IntType)
 		o.v.SetInt64(int64(smallIntMin + i))
+		o.MakeImmortal()
 		smallInts[i] = o
 	}
 }

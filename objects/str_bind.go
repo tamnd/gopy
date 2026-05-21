@@ -81,6 +81,24 @@ func selfStr(args []Object, name string) (string, error) {
 	return s, nil
 }
 
+// selfStrUnicode returns the *Unicode receiver so callers can read
+// the kind tag and length without re-classifying. Used by the
+// kind-dispatched search / index / count fast paths.
+//
+// CPython: Objects/unicodeobject.c:9680 any_find_slice reads
+// PyUnicode_KIND off the receiver to pick the asciilib_* / ucs1lib_*
+// / ucs2lib_* / ucs4lib_* path.
+func selfStrUnicode(args []Object, name string) (*Unicode, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: descriptor '%s' of 'str' needs an argument", name)
+	}
+	u, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '%s' requires a 'str' object", name)
+	}
+	return u, nil
+}
+
 func strRange(args []Object) (int, int, error) {
 	const base = 2
 	start, end := 0, -1
@@ -119,7 +137,7 @@ func resolveEnd(end, n int) int {
 }
 
 func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "startswith")
+	u, err := selfStrUnicode(args, "startswith")
 	if err != nil {
 		return nil, err
 	}
@@ -130,9 +148,8 @@ func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	rs := runeSlice(s)
-	end = resolveEnd(end, len(rs))
-	check := func(prefix string) bool { return StrStartsWith(s, prefix, start, end) }
+	end = resolveEnd(end, u.length)
+	check := func(prefix string) bool { return strStartsWithKind(u, prefix, start, end) }
 	if t, ok := args[1].(*Tuple); ok {
 		for _, item := range tupleSlice(t) {
 			p, perr := strNeedle(item)
@@ -153,7 +170,7 @@ func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func strEndsWithMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "endswith")
+	u, err := selfStrUnicode(args, "endswith")
 	if err != nil {
 		return nil, err
 	}
@@ -164,9 +181,8 @@ func strEndsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	rs := runeSlice(s)
-	end = resolveEnd(end, len(rs))
-	check := func(suffix string) bool { return StrEndsWith(s, suffix, start, end) }
+	end = resolveEnd(end, u.length)
+	check := func(suffix string) bool { return strEndsWithKind(u, suffix, start, end) }
 	if t, ok := args[1].(*Tuple); ok {
 		for _, item := range tupleSlice(t) {
 			p, perr := strNeedle(item)
@@ -187,7 +203,7 @@ func strEndsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func strFindMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "find")
+	u, err := selfStrUnicode(args, "find")
 	if err != nil {
 		return nil, err
 	}
@@ -202,12 +218,12 @@ func strFindMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	return NewInt(int64(StrFind(s, needle, start, end))), nil
+	end = resolveEnd(end, u.length)
+	return NewInt(int64(strFindKind(u, needle, start, end))), nil
 }
 
 func strRFindMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "rfind")
+	u, err := selfStrUnicode(args, "rfind")
 	if err != nil {
 		return nil, err
 	}
@@ -222,12 +238,12 @@ func strRFindMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	return NewInt(int64(StrRFind(s, needle, start, end))), nil
+	end = resolveEnd(end, u.length)
+	return NewInt(int64(strRFindKind(u, needle, start, end))), nil
 }
 
 func strIndexMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "index")
+	u, err := selfStrUnicode(args, "index")
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +258,8 @@ func strIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	i, ierr := StrIndex(s, needle, start, end)
+	end = resolveEnd(end, u.length)
+	i, ierr := strIndexKind(u, needle, start, end)
 	if ierr != nil {
 		return nil, ierr
 	}
@@ -251,7 +267,7 @@ func strIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func strRIndexMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "rindex")
+	u, err := selfStrUnicode(args, "rindex")
 	if err != nil {
 		return nil, err
 	}
@@ -266,8 +282,8 @@ func strRIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	i, ierr := StrRIndex(s, needle, start, end)
+	end = resolveEnd(end, u.length)
+	i, ierr := strRIndexKind(u, needle, start, end)
 	if ierr != nil {
 		return nil, ierr
 	}
@@ -275,7 +291,7 @@ func strRIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func strCountMethod(args []Object, _ map[string]Object) (Object, error) {
-	s, err := selfStr(args, "count")
+	u, err := selfStrUnicode(args, "count")
 	if err != nil {
 		return nil, err
 	}
@@ -290,8 +306,8 @@ func strCountMethod(args []Object, _ map[string]Object) (Object, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, len(runeSlice(s)))
-	return NewInt(int64(StrCount(s, needle, start, end))), nil
+	end = resolveEnd(end, u.length)
+	return NewInt(int64(strCountKind(u, needle, start, end))), nil
 }
 
 func strSimple1(fn func(string) string) func([]Object, map[string]Object) (Object, error) {
@@ -445,11 +461,15 @@ func strJoinMethod(args []Object, _ map[string]Object) (Object, error) {
 		}
 		parts = append(parts, v)
 	}
-	out, jerr := StrJoin(sep, parts)
+	sepU, ok := args[0].(*Unicode)
+	if !ok {
+		sepU = NewStr(sep).(*Unicode)
+	}
+	out, jerr := StrJoinUnicode(sepU, parts)
 	if jerr != nil {
 		return nil, jerr
 	}
-	return NewStr(out), nil
+	return out, nil
 }
 
 func strPartitionMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -582,43 +602,68 @@ func strFormatMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	if ferr != nil {
 		return nil, ferr
 	}
-	return NewStr(out), nil
+	return out, nil
 }
 
-func strFormatExpand(s string, args []Object, kwargs map[string]Object) (string, error) {
-	var b strings.Builder
+// strFormatExpand walks the str.format() template and routes every literal
+// chunk and rendered field through UnicodeWriter so Finish() builds the
+// result *Unicode with kind/maxchar pre-populated.
+//
+// CPython: Objects/stringlib/unicode_format.h:1306 do_string_format
+func strFormatExpand(s string, args []Object, kwargs map[string]Object) (*Unicode, error) {
+	var w UnicodeWriter
+	w.Init()
+	w.overallocate = true
 	auto := 0
-	for i := 0; i < len(s); i++ {
+	i := 0
+	for i < len(s) {
+		next := strings.IndexAny(s[i:], "{}")
+		if next < 0 {
+			if err := writeBodyChunk(&w, s[i:]); err != nil {
+				return nil, err
+			}
+			break
+		}
+		if next > 0 {
+			if err := writeBodyChunk(&w, s[i:i+next]); err != nil {
+				return nil, err
+			}
+			i += next
+		}
 		c := s[i]
-		if c == '{' && i+1 < len(s) && s[i+1] == '{' {
-			b.WriteByte('{')
-			i++
+		if c == '{' {
+			if i+1 < len(s) && s[i+1] == '{' {
+				if err := w.WriteChar('{'); err != nil {
+					return nil, err
+				}
+				i += 2
+				continue
+			}
+			field, _, ok := strings.Cut(s[i+1:], "}")
+			if !ok {
+				return nil, fmt.Errorf("ValueError: unmatched '{' in format string")
+			}
+			rendered, ferr := strFormatField(field, args, kwargs, &auto)
+			if ferr != nil {
+				return nil, ferr
+			}
+			if err := writeBodyChunk(&w, rendered); err != nil {
+				return nil, err
+			}
+			i += 1 + len(field) + 1
 			continue
 		}
-		if c == '}' && i+1 < len(s) && s[i+1] == '}' {
-			b.WriteByte('}')
-			i++
+		// c == '}'
+		if i+1 < len(s) && s[i+1] == '}' {
+			if err := w.WriteChar('}'); err != nil {
+				return nil, err
+			}
+			i += 2
 			continue
 		}
-		if c == '}' {
-			return "", fmt.Errorf("ValueError: single '}' in format string")
-		}
-		if c != '{' {
-			b.WriteByte(c)
-			continue
-		}
-		end := strings.IndexByte(s[i:], '}')
-		if end < 0 {
-			return "", fmt.Errorf("ValueError: unmatched '{' in format string")
-		}
-		rendered, ferr := strFormatField(s[i+1:i+end], args, kwargs, &auto)
-		if ferr != nil {
-			return "", ferr
-		}
-		b.WriteString(rendered)
-		i += end
+		return nil, fmt.Errorf("ValueError: single '}' in format string")
 	}
-	return b.String(), nil
+	return w.Finish(), nil
 }
 
 func strFormatField(field string, args []Object, kwargs map[string]Object, auto *int) (string, error) {
@@ -733,7 +778,7 @@ func strFormatMapMethod(args []Object, _ map[string]Object) (Object, error) {
 	if ferr != nil {
 		return nil, ferr
 	}
-	return NewStr(out), nil
+	return out, nil
 }
 
 // strTranslateMethod backs str.translate(table).

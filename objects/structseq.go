@@ -60,6 +60,14 @@ func NewStructSeqType(name string, fields []StructSeqField) *Type {
 	tp.Hash = structSeqHash
 	tp.RichCmp = structSeqRichCmp
 	tp.Iter = structSeqIter
+	// Wholesale-replace the bundle (do not preserve Concat / Repeat /
+	// Contains that inheritProtocolPointers copied from Tuple in
+	// NewType). Those inherited slots assume `a.(*Tuple)` at the Go
+	// level, which panics on a *StructSeq instance because gopy's
+	// structseq has its own representation rather than embedding
+	// PyVarObject the way CPython does. Concat / Repeat for structseq
+	// would need to be re-ported against *StructSeq before they can
+	// be inherited safely; that is out of P7.4's scope.
 	tp.Sequence = &SequenceMethods{
 		Length:  structSeqLen,
 		GetItem: structSeqGetItem,

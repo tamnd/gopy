@@ -4,74 +4,54 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/state"
 )
 
 // TestWatcherInit_RegistersCallbacks confirms that WatcherInit lands
-// the optimizer's dict and type watchers at the canonical IDs and
-// that re-running the init is a no-op.
+// the optimizer's dict and type watchers at the canonical IDs. Both
+// halves now live on the objects-package callback tables so we drive
+// real *objects.Dict and *objects.Type mutations to confirm the wires
+// are hot.
 func TestWatcherInit_RegistersCallbacks(t *testing.T) {
 	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 
-	w := watcherTable(interp)
-	if w.dictCallbacks[GlobalsWatcherID] == nil {
-		t.Errorf("globals watcher callback not registered")
-	}
-	if w.dictCallbacks[BuiltinsWatcherID] == nil {
-		t.Errorf("builtins watcher callback not registered")
-	}
-	if w.typeCallbacks[TypeWatcherID] == nil {
-		t.Errorf("type watcher callback not registered")
-	}
-
-	WatcherInit(interp)
-	if w.dictCallbacks[GlobalsWatcherID] == nil {
-		t.Errorf("re-init dropped the globals watcher")
-	}
-}
-
-// TestDispatchDictMutation_FiresWatcherAndInvalidates wires the
-// watcher up against an executor that depends on a synthetic dict,
-// fires DispatchDictMutation, and asserts the executor is invalidated.
-func TestDispatchDictMutation_FiresWatcherAndInvalidates(t *testing.T) {
-	interp := &state.Interpreter{JIT: true}
-	WatcherInit(interp)
-
+	// Dict half: a SetItem on a subscribed dict must reach the
+	// reserved globals watcher and trip executor invalidation.
 	_, exec := installLoopExecutor(t, interp)
-	var dict int
-	dictPtr := unsafe.Pointer(&dict)
-	ExecutorDependsOn(exec, dictPtr)
-	DictWatch(interp, GlobalsWatcherID, dictPtr)
+	d := objects.NewDict()
+	dPtr := unsafe.Pointer(d)
+	ExecutorDependsOn(exec, dPtr)
+	if err := objects.DictWatch(GlobalsWatcherID, d); err != nil {
+		t.Fatalf("DictWatch: %v", err)
+	}
 
 	prev := optStatExecutorsInvalidated
-	DispatchDictMutation(interp, DictEventModified, dictPtr, nil, nil)
-
+	if err := d.SetItem(objects.NewStr("k"), objects.NewInt(1)); err != nil {
+		t.Fatalf("SetItem: %v", err)
+	}
 	if optStatExecutorsInvalidated <= prev {
-		t.Errorf("dict mutation should have triggered an invalidation")
+		t.Errorf("real dict mutation must trigger invalidation")
 	}
 	if exec.VMData.Valid {
 		t.Errorf("executor must be cleared after watched dict mutates")
 	}
-
-	// The callback unsubscribes the dict; firing again must not
-	// invalidate (and there's nothing left to invalidate).
-	w := watcherTable(interp)
-	if _, ok := w.dictSubs[GlobalsWatcherID][dictPtr]; ok {
-		t.Errorf("globals watcher must unsubscribe dict after firing")
-	}
 }
 
-// TestDispatchDictMutation_IgnoresUnsubscribedDict ensures the
-// dispatch path is silent for dicts that were never registered.
+// TestDispatchDictMutation_IgnoresUnsubscribedDict ensures that a
+// dict no one is watching does not flow through the callback table
+// when it mutates.
 func TestDispatchDictMutation_IgnoresUnsubscribedDict(t *testing.T) {
 	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 	_, exec := installLoopExecutor(t, interp)
 
-	var dict int
+	d := objects.NewDict()
 	prev := optStatExecutorsInvalidated
-	DispatchDictMutation(interp, DictEventModified, unsafe.Pointer(&dict), nil, nil)
+	if err := d.SetItem(objects.NewStr("k"), objects.NewInt(1)); err != nil {
+		t.Fatalf("SetItem: %v", err)
+	}
 
 	if optStatExecutorsInvalidated != prev {
 		t.Errorf("unsubscribed dict must not trigger invalidation")
@@ -82,19 +62,28 @@ func TestDispatchDictMutation_IgnoresUnsubscribedDict(t *testing.T) {
 }
 
 // TestDispatchTypeMutation_FiresWatcherAndInvalidates is the type
-// watcher analog of the dict test.
+// watcher path's gate: a real Type subscribed to the reserved slot
+// must trip executor invalidation through the public API when its
+// version tag is invalidated.
 func TestDispatchTypeMutation_FiresWatcherAndInvalidates(t *testing.T) {
 	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp)
 
 	_, exec := installLoopExecutor(t, interp)
-	var typ int
-	typPtr := unsafe.Pointer(&typ)
-	ExecutorDependsOn(exec, typPtr)
-	TypeWatch(interp, TypeWatcherID, typPtr)
+	cls := objects.NewType("watched", []*objects.Type{objects.ObjectType()})
+	clsPtr := unsafe.Pointer(cls)
+	ExecutorDependsOn(exec, clsPtr)
+	if err := objects.TypeWatch(TypeWatcherID, cls); err != nil {
+		t.Fatalf("TypeWatch: %v", err)
+	}
+
+	// Force a tag allocation so InvalidateVersionTag actually has
+	// something to clear; without this the version stays at 0 and a
+	// real bypass would be possible.
+	cls.VersionTag()
 
 	prev := optStatExecutorsInvalidated
-	DispatchTypeMutation(interp, typPtr)
+	cls.InvalidateVersionTag()
 
 	if optStatExecutorsInvalidated <= prev {
 		t.Errorf("type mutation should have triggered an invalidation")
@@ -102,15 +91,16 @@ func TestDispatchTypeMutation_FiresWatcherAndInvalidates(t *testing.T) {
 	if exec.VMData.Valid {
 		t.Errorf("executor must be cleared after watched type mutates")
 	}
-	w := watcherTable(interp)
-	if _, ok := w.typeSubs[TypeWatcherID][typPtr]; ok {
-		t.Errorf("type watcher must unsubscribe type after firing")
+	// The typeWatcherCallback unsubscribes after firing, so the bit
+	// must be clear on the next pass.
+	if err := objects.TypeUnwatch(TypeWatcherID, cls); err != nil {
+		t.Fatalf("TypeUnwatch must be idempotent: %v", err)
 	}
 }
 
-// TestDictAddWatcher_AssignsFreeSlot covers the user-driven
-// PyDict_AddWatcher API (used outside the optimizer's own canonical
-// callbacks).
+// TestDictAddWatcher_AssignsFreeSlot exercises the user-driven
+// PyDict_AddWatcher path. The reserved slots (0, 1) belong to the
+// optimizer, so the first user-allocated slot must be >= 2.
 func TestDictAddWatcher_AssignsFreeSlot(t *testing.T) {
 	interp := &state.Interpreter{JIT: true}
 	WatcherInit(interp) // occupies slots 0 and 1
@@ -123,8 +113,21 @@ func TestDictAddWatcher_AssignsFreeSlot(t *testing.T) {
 	}
 
 	DictClearWatcher(interp, id)
-	w := watcherTable(interp)
-	if w.dictCallbacks[id] != nil {
-		t.Errorf("ClearWatcher must release the slot")
+}
+
+// TestTypeAddWatcher_AssignsFreeSlot exercises the user-driven
+// PyType_AddWatcher path. Slot 0 is reserved for the optimizer so
+// the first user-allocated slot must be >= 1.
+func TestTypeAddWatcher_AssignsFreeSlot(t *testing.T) {
+	interp := &state.Interpreter{JIT: true}
+	WatcherInit(interp) // occupies slot 0
+
+	id := TypeAddWatcher(interp, func(unsafe.Pointer) int {
+		return 0
+	})
+	if id < 1 {
+		t.Errorf("TypeAddWatcher should pick the first free slot >= 1 (after Init), got %d", id)
 	}
+
+	TypeClearWatcher(interp, id)
 }

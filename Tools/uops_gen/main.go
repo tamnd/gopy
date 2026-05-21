@@ -9,26 +9,19 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
-	"go/format"
 	"os"
-	"strings"
 )
 
 func main() {
 	var (
 		src          = flag.String("src", "", "path to input header (pycore_uop_ids.h or pycore_uop_metadata.h) or DSL (bytecodes.c)")
-		src2         = flag.String("src2", "", "second DSL input for optimizer-cases (optimizer_bytecodes.c)")
-		out          = flag.String("out", "", "output Go file (cases: dispatch path)")
-		stubsOut     = flag.String("stubs-out", "", "stubs output Go file (cases mode only)")
-		portedFrom   = flag.String("ported-from", "", "directory to scan for hand-ported *Tier2State methods (cases mode only)")
+		out          = flag.String("out", "", "output Go file")
 		pkg          = flag.String("pkg", "", "target Go package")
-		mode         = flag.String("mode", "", "ids|meta|cases|optimizer-cases|check-drift")
+		mode         = flag.String("mode", "", "ids|meta|check-drift")
 		againstHash  = flag.String("hash", "", "expected sha256 (for check-drift)")
 		fromAnalysis = flag.Bool("from-analysis", false, "drive ids/meta from analyzer AST over -src bytecodes.c instead of from the header")
-		projectRoot  = flag.String("project-root", "", "CPython project root for header citations in cases / optimizer-cases output")
 	)
 	flag.Parse()
 
@@ -57,24 +50,6 @@ func main() {
 		}
 		if err := runEmit(*src, *out, *pkg, *mode); err != nil {
 			fmt.Fprintln(os.Stderr, *mode+":", err)
-			os.Exit(1)
-		}
-	case "cases":
-		if *out == "" || *stubsOut == "" || *portedFrom == "" {
-			fmt.Fprintln(os.Stderr, "cases requires -out (dispatch), -stubs-out, and -ported-from")
-			os.Exit(2)
-		}
-		if err := runEmitCases(*src, *out, *stubsOut, *portedFrom, *projectRoot); err != nil {
-			fmt.Fprintln(os.Stderr, "cases:", err)
-			os.Exit(1)
-		}
-	case "optimizer-cases":
-		if *out == "" || *src2 == "" {
-			fmt.Fprintln(os.Stderr, "optimizer-cases requires -out, -src (bytecodes.c), and -src2 (optimizer_bytecodes.c)")
-			os.Exit(2)
-		}
-		if err := runEmitOptimizerCases(*src, *src2, *out, *projectRoot); err != nil {
-			fmt.Fprintln(os.Stderr, "optimizer-cases:", err)
 			os.Exit(1)
 		}
 	default:
@@ -174,134 +149,4 @@ func runEmitFromAnalysis(src, outPath, pkg, mode string) error {
 		rendered = EmitMetaFile(pkg, hash, meta)
 	}
 	return os.WriteFile(outPath, []byte(rendered), 0o644)
-}
-
-// sliceBytecodesSection returns the body between the
-// // BEGIN BYTECODES // and // END BYTECODES // markers when both are
-// present, or the original body otherwise. optimizer_bytecodes.c has
-// no such markers, so the unfenced fall-through is the common path
-// for that file.
-//
-// CPython: Tools/cases_generator/parser.py prepare_for_parsing
-func sliceBytecodesSection(text string) string {
-	lines := strings.Split(text, "\n")
-	bi, ei := -1, -1
-	for i, l := range lines {
-		switch strings.TrimRight(l, "\r") {
-		case "// BEGIN BYTECODES //":
-			bi = i
-		case "// END BYTECODES //":
-			ei = i
-		}
-	}
-	if bi < 0 || ei < 0 || ei <= bi {
-		return text
-	}
-	return strings.Join(lines[bi+1:ei], "\n")
-}
-
-// parseDSL reads a bytecodes-flavored DSL file and returns the analyzer
-// forest produced by Parser.Definition. The file is sliced between the
-// // BEGIN BYTECODES // / // END BYTECODES // markers when present, to
-// match the slice the upstream parser feeds the lexer.
-//
-// CPython: Tools/cases_generator/parser.py parse_files
-func parseDSL(src string) ([]Node, error) {
-	body, err := os.ReadFile(src)
-	if err != nil {
-		return nil, err
-	}
-	text := sliceBytecodesSection(string(body))
-	p, err := NewParser(text, src)
-	if err != nil {
-		return nil, err
-	}
-	var forest []Node
-	for {
-		n, err := p.Definition()
-		if err != nil {
-			return nil, err
-		}
-		if n == nil {
-			break
-		}
-		forest = append(forest, n)
-	}
-	return forest, nil
-}
-
-// runEmitCases drives GenerateTier2Dispatch and GenerateTier2Stubs
-// over Python/bytecodes.c. The dispatch file lands at dispatchOut;
-// stubs land at stubsOut. Hand-ported method names are auto-detected
-// by scanning portedFrom (the optimizer/ directory) so a second pass
-// will not re-stub bodies that have moved into uops_impl.go.
-//
-// CPython: Tools/cases_generator/tier2_generator.py generate_tier2
-func runEmitCases(src, dispatchOut, stubsOut, portedFrom, projectRoot string) error {
-	forest, err := parseDSL(src)
-	if err != nil {
-		return err
-	}
-	analysis, err := AnalyzeForest(forest)
-	if err != nil {
-		return err
-	}
-	ported, err := DetectPortedUops(portedFrom)
-	if err != nil {
-		return fmt.Errorf("detect ported uops: %w", err)
-	}
-
-	var dispatchBuf bytes.Buffer
-	if err := GenerateTier2Dispatch(analysis, projectRoot, &dispatchBuf); err != nil {
-		return err
-	}
-	dispatchFmt, err := format.Source(dispatchBuf.Bytes())
-	if err != nil {
-		return fmt.Errorf("gofmt dispatch output: %w", err)
-	}
-	if err := os.WriteFile(dispatchOut, dispatchFmt, 0o644); err != nil {
-		return err
-	}
-
-	var stubsBuf bytes.Buffer
-	if err := GenerateTier2Stubs(analysis, ported, projectRoot, &stubsBuf); err != nil {
-		return err
-	}
-	stubsFmt, err := format.Source(stubsBuf.Bytes())
-	if err != nil {
-		return fmt.Errorf("gofmt stubs output: %w", err)
-	}
-	return os.WriteFile(stubsOut, stubsFmt, 0o644)
-}
-
-// runEmitOptimizerCases drives GenerateOptimizer over the base
-// bytecodes.c plus the optimizer_bytecodes.c override.
-//
-// CPython: Tools/cases_generator/optimizer_generator.py generate_tier2_abstract_from_files
-func runEmitOptimizerCases(src, src2, out, projectRoot string) error {
-	baseForest, err := parseDSL(src)
-	if err != nil {
-		return err
-	}
-	overrideForest, err := parseDSL(src2)
-	if err != nil {
-		return err
-	}
-	base, err := AnalyzeForest(baseForest)
-	if err != nil {
-		return err
-	}
-	override, err := AnalyzeForest(overrideForest)
-	if err != nil {
-		return err
-	}
-	var buf bytes.Buffer
-	if err := GenerateOptimizer(base, override, projectRoot, &buf); err != nil {
-		return err
-	}
-	formatted, err := format.Source(buf.Bytes())
-	if err != nil {
-		return fmt.Errorf("gofmt optimizer-cases output: %w", err)
-	}
-	return os.WriteFile(out, formatted, 0o644)
 }

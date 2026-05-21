@@ -12,6 +12,7 @@ var noneType = NewType("NoneType", []*Type{objectType})
 var noneSingleton = func() *noneObject {
 	o := &noneObject{}
 	o.init(noneType)
+	o.MakeImmortal()
 	return o
 }()
 

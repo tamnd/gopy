@@ -79,6 +79,7 @@ func RunExecutor(thread *state.Thread, fr *frame.Frame, exec *Executor) Tier2Sta
 	if thread != nil {
 		s.Interp = thread.Interp()
 	}
+	tier2Log("trace_enter", "executor=%p trace_len=%d", exec, len(exec.Trace))
 	return s.Run()
 }
 
@@ -95,18 +96,37 @@ func (s *Tier2State) Run() Tier2Status {
 			return StatusExit
 		}
 		inst := &s.Executor.Trace[s.NextUop]
+		idx := s.NextUop
 		s.NextUop++
 		s.Oparg = uint32(inst.Oparg)
+		tier2Log("dispatch", "idx=%d uop=%s oparg=%d target=%d operand0=%d",
+			idx, tier2UopName(inst.Opcode()), inst.Oparg, inst.Target, inst.Operand0)
 		st := s.executeUop(inst)
 		switch st {
 		case StatusContinue:
 			continue
 		case StatusError, StatusDeopt, StatusExit:
+			tier2Log("exit", "kind=%s idx=%d uop=%s",
+				tier2StatusName(st), idx, tier2UopName(inst.Opcode()))
 			return st
 		default:
 			panic("optimizer: unknown Tier2Status")
 		}
 	}
+}
+
+func tier2StatusName(st Tier2Status) string {
+	switch st {
+	case StatusContinue:
+		return "continue"
+	case StatusError:
+		return "error"
+	case StatusDeopt:
+		return "deopt"
+	case StatusExit:
+		return "exit"
+	}
+	return "?"
 }
 
 // jumpToJumpTarget mirrors JUMP_TO_JUMP_TARGET(): redirect the

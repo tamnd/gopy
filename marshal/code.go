@@ -67,7 +67,17 @@ func marshalCode(enc *encoder, c *objects.Code, flag byte) error {
 			return err
 		}
 	}
-	if err := enc.writeCachedBytes(c.Code, true); err != nil {
+	// Mirror CPython's _PyCode_GetCode pre-write deopt: walk every
+	// codeunit and rewrite specialized opcodes back to their adaptive
+	// parent, then zero each trailing cache cell. Without this step a
+	// .pyc would carry whatever specialization state the in-memory Code
+	// happened to warm by marshal time, which is non-deterministic
+	// across runs and breaks byte-equality with the cpython oracle.
+	// specialize.Enable on unmarshalCode re-runs Quicken so adaptive
+	// counters get reseeded on load.
+	//
+	// CPython: Objects/codeobject.c:2310 _PyCode_GetCode (deopts before write)
+	if err := enc.writeCachedBytes(specialize.DeoptCode(c.Code), true); err != nil {
 		return err
 	}
 	consts := make([]any, len(c.Consts))
@@ -171,6 +181,7 @@ func unmarshalCode(d *decoder) (*objects.Code, error) {
 		return nil, fmt.Errorf("marshal: code.consts expected tuple, got %T", constsObj)
 	}
 	c.Consts = constsTuple
+	c.SyncConstObjs()
 
 	// names tuple
 	namesObj, err := d.read()
@@ -181,6 +192,7 @@ func unmarshalCode(d *decoder) (*objects.Code, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.SyncNameObjs()
 
 	// localsplusnames + localspluskinds
 	lplusObj, err := d.read()

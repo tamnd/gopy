@@ -71,12 +71,20 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 	}
 
 	for _, fn := range iterationPanel() {
-		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+		bf := objects.NewBuiltinFunctionConv(fn.name, fn.conv, fn.impl)
+		if fn.cacheHook != nil {
+			fn.cacheHook(bf)
+		}
+		if err := setBuiltin(dict, fn.name, bf); err != nil {
 			return nil, err
 		}
 	}
 	for _, fn := range reflectionPanel() {
-		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+		bf := objects.NewBuiltinFunctionConv(fn.name, fn.conv, fn.impl)
+		if fn.cacheHook != nil {
+			fn.cacheHook(bf)
+		}
+		if err := setBuiltin(dict, fn.name, bf); err != nil {
 			return nil, err
 		}
 	}
@@ -453,24 +461,39 @@ func attributePanel() []struct {
 	}
 }
 
+// builtinRow is one row of the static builtin registration table.
+// conv carries the METH_* tag the specializer reads off
+// BuiltinFunction.Conv. cacheHook (nil for most rows) lets a panel
+// stash the resulting BuiltinFunction pointer into the callable
+// cache so specialize_c_call's identity comparisons fire.
+//
+// CPython: Python/bltinmodule.c builtin_methods rows + init_interp_main
+// assigning interp->callable_cache.{len, isinstance}
+type builtinRow struct {
+	name      string
+	conv      objects.MethFlag
+	impl      func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	cacheHook func(*objects.BuiltinFunction)
+}
+
 // reflectionPanel returns the v0.7 reflection builtins (1651-builtins-B).
 //
 // CPython: Python/bltinmodule.c builtin_methods type / isinstance /
 // issubclass / callable / id / hash / repr / str
-func reflectionPanel() []struct {
-	name string
-	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
-} {
-	return []struct {
-		name string
-		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
-	}{
-		{"isinstance", IsInstance},
-		{"issubclass", IsSubclass},
-		{"callable", Callable},
-		{"id", ID},
-		{"hash", Hash},
-		{"repr", Repr},
+func reflectionPanel() []builtinRow {
+	return []builtinRow{
+		// isinstance is METH_FASTCALL in CPython; tagging it lets the
+		// specializer emit CALL_ISINSTANCE for the `isinstance(o, T)`
+		// shape and CALL_BUILTIN_FAST for arities the fast arm can't
+		// handle.
+		//
+		// CPython: Python/bltinmodule.c:1330 builtin_isinstance (METH_FASTCALL)
+		{name: "isinstance", conv: objects.MethFastcall, impl: IsInstance, cacheHook: objects.RegisterCallableCacheIsinstance},
+		{name: "issubclass", conv: objects.MethFastcall, impl: IsSubclass},
+		{name: "callable", conv: objects.MethO, impl: Callable},
+		{name: "id", conv: objects.MethO, impl: ID},
+		{name: "hash", conv: objects.MethO, impl: Hash},
+		{name: "repr", conv: objects.MethO, impl: Repr},
 	}
 }
 
@@ -480,17 +503,15 @@ func reflectionPanel() []struct {
 //
 // CPython: Python/bltinmodule.c builtin_methods iter / next / len /
 // reversed / enumerate / zip / range / map / filter
-func iterationPanel() []struct {
-	name string
-	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
-} {
-	return []struct {
-		name string
-		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
-	}{
-		{"len", Len},
-		{"iter", Iter},
-		{"next", Next},
+func iterationPanel() []builtinRow {
+	return []builtinRow{
+		// len is METH_O in CPython; the specializer compares against
+		// the cached pointer and emits CALL_LEN for the `len(o)` shape.
+		//
+		// CPython: Python/bltinmodule.c:1862 builtin_len (METH_O)
+		{name: "len", conv: objects.MethO, impl: Len, cacheHook: objects.RegisterCallableCacheLen},
+		{name: "iter", conv: objects.MethFastcall, impl: Iter},
+		{name: "next", conv: objects.MethFastcall, impl: Next},
 	}
 }
 

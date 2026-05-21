@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // dictEntry is one slot in the dict's open-addressed table. The slot
@@ -35,6 +36,15 @@ type Dict struct {
 	fill       int         // active entries + dummies; only resets on resize
 	kind       dictKind    // DictKeysKind: gates the four lookup variants
 	sharedKeys *SharedKeys // non-nil while in split-keys mode (1680-D)
+	// splitValues is the per-instance value array a split dict carries
+	// in place of writing into d.entries[].value. Aligned with
+	// sharedKeys.entries by slot index: splitValues[i] is the value
+	// this instance stores for the key at slot i, or nil when this
+	// instance hasn't set that attribute. Allocated by NewSplitDict
+	// and cleared by ensureCombined; nil in combined mode.
+	//
+	// CPython: Include/internal/pycore_dict.h PyDictValues
+	splitValues []Object
 	// attrs holds instance attributes for dict subclass objects. Nil for
 	// plain dict instances; allocated by dictSubclassSetAttr when first
 	// written. Mirrors CPython's tp_dictoffset on dict subclasses.
@@ -56,6 +66,14 @@ type Dict struct {
 	//
 	// CPython: Include/internal/pycore_dict.h DICT_WATCHED_MUTATION_BITS
 	mutationCount uint32
+
+	// watcherTag mirrors CPython's _ma_watcher_tag. Bits 0..7 (one per
+	// DICT_MAX_WATCHERS slot) flag which watchers have subscribed via
+	// PyDict_Watch. Notification iterates the set bits and dispatches
+	// through the package-level watcher table.
+	//
+	// CPython: Include/cpython/dictobject.h:23 _ma_watcher_tag
+	watcherTag uint64
 }
 
 // DictType is the type singleton for dict. Mirrors PyDict_Type.
@@ -70,6 +88,7 @@ func init() {
 	DictType.Repr = dictRepr
 	DictType.Str = dictRepr
 	DictType.Iter = dictIter
+	DictType.RichCmp = dictRichCmp
 	DictType.Mapping = &MappingMethods{
 		Length:  dictLen,
 		GetItem: dictMappingGet,
@@ -198,14 +217,14 @@ func dictContainsMethod(args []Object, _ map[string]Object) (Object, error) {
 func dictTraverse(o Object, visit Visitor) error {
 	d := o.(*Dict)
 	for _, slot := range d.order {
-		e := &d.entries[slot]
-		if e.key != nil {
-			if err := visit(e.key); err != nil {
+		k := d.slotKey(slot)
+		if k != nil {
+			if err := visit(k); err != nil {
 				return err
 			}
 		}
-		if e.value != nil {
-			if err := visit(e.value); err != nil {
+		if v := d.slotValue(slot); v != nil {
+			if err := visit(v); err != nil {
 				return err
 			}
 		}
@@ -234,7 +253,7 @@ func (d *Dict) Len() int { return d.used }
 func (d *Dict) Keys() []Object {
 	out := make([]Object, 0, d.used)
 	for _, slot := range d.order {
-		out = append(out, d.entries[slot].key)
+		out = append(out, d.slotKey(slot))
 	}
 	return out
 }
@@ -265,7 +284,38 @@ func (d *Dict) GetItem(key Object) (Object, error) {
 	if !ok {
 		return nil, errKeyNotFound
 	}
-	return d.entries[idx].value, nil
+	return d.slotValue(idx), nil
+}
+
+// GetItemKnownHash is GetItem with a caller-supplied hash. The
+// LOAD_NAME / LOAD_GLOBAL slow arm threads the *Unicode's cached
+// hash straight in, skipping the PyObject_Hash vtable dispatch.
+//
+// CPython: Objects/dictobject.c:1965 _PyDict_GetItem_KnownHash
+func (d *Dict) GetItemKnownHash(key Object, h int64) (Object, error) {
+	idx, ok, err := d.lookup(h, key)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errKeyNotFound
+	}
+	return d.slotValue(idx), nil
+}
+
+// ContainsKnownHash is Contains with a caller-supplied hash.
+//
+// CPython: Objects/dictobject.c:2530 _PyDict_Contains_KnownHash
+func (d *Dict) ContainsKnownHash(key Object, h int64) (bool, error) {
+	_, ok, err := d.lookup(h, key)
+	return ok, err
+}
+
+// SetItemKnownHash is SetItem with a caller-supplied hash.
+//
+// CPython: Objects/dictobject.c:2069 _PyDict_SetItem_KnownHash
+func (d *Dict) SetItemKnownHash(key, value Object, h int64) error {
+	return dictInsert(d, h, key, value)
 }
 
 // DelItem removes key. Mirrors PyDict_DelItem.
@@ -291,9 +341,24 @@ func (d *Dict) Contains(key Object) (bool, error) {
 // the four CPython lookdict variants based on the dict's key-kind
 // flag and the lookup key's type. See dict_lookup.go.
 //
+// Split-mode wrapper: dispatchLookup uses the shared entries table,
+// which only tells us whether the key name is in the shared set. The
+// per-instance value lives in splitValues; an empty splitValues slot
+// means this instance doesn't carry that attribute, so we override
+// found=false even though the keys table reported a hit. Insert and
+// delete paths inspect found+splitValues directly, so they're not
+// fooled by the override.
+//
 // CPython: Objects/dictobject.c:1247 _Py_dict_lookup
-func (d *Dict) lookup(h int64, key Object) (idx int, found bool, err error) {
-	return dispatchLookup(d, key, h)
+func (d *Dict) lookup(h int64, key Object) (int, bool, error) {
+	idx, found, err := dispatchLookup(d, key, h)
+	if err != nil || !found {
+		return idx, found, err
+	}
+	if d.sharedKeys != nil && d.splitValues[idx] == nil {
+		return idx, false, nil
+	}
+	return idx, true, nil
 }
 
 func dictLen(o Object) (int, error) { return o.(*Dict).Len(), nil }
@@ -356,9 +421,6 @@ func dictSubclassGetAttr(o Object, name Object) (Object, error) {
 		if dget := descr.Type().DescrGet; dget != nil {
 			return dget(descr, o, tp)
 		}
-		return descr, nil
-	}
-	if descr != nil {
 		return descr, nil
 	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
@@ -439,6 +501,62 @@ func dictLenMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewInt(int64(args[0].(*Dict).Len())), nil
 }
 
+// dictEqual reports whether two dicts compare equal by key/value.
+//
+// CPython: Objects/dictobject.c:3494 dict_equal
+func dictEqual(a, b *Dict) (bool, error) {
+	if a.Len() != b.Len() {
+		return false, nil
+	}
+	for _, k := range a.Keys() {
+		av, err := a.GetItem(k)
+		if err != nil {
+			return false, err
+		}
+		bv, err := b.GetItem(k)
+		if err != nil {
+			if errors.Is(err, errKeyNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+		eq, err := RichCmpBool(av, bv, CompareEQ)
+		if err != nil {
+			return false, err
+		}
+		if !eq {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// dictRichCmp is the tp_richcompare slot for dict. Only EQ and NE are
+// defined; ordered comparisons fall through to NotImplemented.
+//
+// CPython: Objects/dictobject.c:3554 dict_richcompare
+func dictRichCmp(a, b Object, op CompareOp) (Object, error) {
+	ad, ok := a.(*Dict)
+	if !ok {
+		return notImplemented(), nil
+	}
+	bd, ok := b.(*Dict)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if op != CompareEQ && op != CompareNE {
+		return notImplemented(), nil
+	}
+	eq, err := dictEqual(ad, bd)
+	if err != nil {
+		return nil, err
+	}
+	if op == CompareNE {
+		eq = !eq
+	}
+	return NewBool(eq), nil
+}
+
 // dictEqMethod backs dict.__eq__.
 //
 // CPython: Objects/dictobject.c:3554 dict_richcompare (Py_EQ branch)
@@ -454,34 +572,11 @@ func dictEqMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	if a.Len() != b.Len() {
-		return False(), nil
+	eq, err := dictEqual(a, b)
+	if err != nil {
+		return nil, err
 	}
-	for _, k := range a.Keys() {
-		av, err := a.GetItem(k)
-		if err != nil {
-			return nil, err
-		}
-		bv, err := b.GetItem(k)
-		if err != nil {
-			if errors.Is(err, errKeyNotFound) {
-				return False(), nil
-			}
-			return nil, err
-		}
-		eq, err := RichCmp(av, bv, CompareEQ)
-		if err != nil {
-			return nil, err
-		}
-		t, err := IsTruthy(eq)
-		if err != nil {
-			return nil, err
-		}
-		if !t {
-			return False(), nil
-		}
-	}
-	return True(), nil
+	return NewBool(eq), nil
 }
 
 // dictClearMethod backs dict.clear().
@@ -492,9 +587,20 @@ func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: clear() takes no arguments (%d given)", len(args)-1)
 	}
 	d := args[0].(*Dict)
+	// CPython fires a single CLEARED rather than one DELETED per
+	// entry (dictobject.c:2979 inside PyDict_Clear). Fire it before
+	// the per-key DelItem calls so a watcher that re-subscribes
+	// after CLEARED does not also see the synthetic DELETEDs.
+	notifyDictEvent(DictEventCleared, d, nil, nil)
+	had := atomic.LoadUint64(&d.watcherTag) & dictWatcherMask
+	// Suppress the per-entry DELETED events that the DelItem loop
+	// would otherwise emit, so the semantics match the C path which
+	// blows the table away in one shot.
+	atomic.AndUint64(&d.watcherTag, ^dictWatcherMask)
 	for _, k := range d.Keys() {
 		_ = d.DelItem(k)
 	}
+	atomic.OrUint64(&d.watcherTag, had)
 	return None(), nil
 }
 
@@ -635,12 +741,20 @@ func dictCopyMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	src := args[0].(*Dict)
 	dst := NewDict()
+	// CPython fires CLONED on the destination once per dict_merge
+	// fastpath (dictobject.c:3915). The source dict is passed as the
+	// "key" so watchers can identify where the entries came from.
+	notifyDictEvent(DictEventCloned, dst, src, nil)
+	had := atomic.LoadUint64(&dst.watcherTag) & dictWatcherMask
+	atomic.AndUint64(&dst.watcherTag, ^dictWatcherMask)
 	for _, k := range src.Keys() {
 		v, _ := src.GetItem(k)
 		if err := dst.SetItem(k, v); err != nil {
+			atomic.OrUint64(&dst.watcherTag, had)
 			return nil, err
 		}
 	}
+	atomic.OrUint64(&dst.watcherTag, had)
 	return dst, nil
 }
 
@@ -717,9 +831,10 @@ func dictPopItemMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("KeyError: 'popitem(): dictionary is empty'")
 	}
 	lastSlot := d.order[len(d.order)-1]
-	e := d.entries[lastSlot]
-	_ = d.DelItem(e.key)
-	return NewTuple([]Object{e.key, e.value}), nil
+	k := d.slotKey(lastSlot)
+	v := d.slotValue(lastSlot)
+	_ = d.DelItem(k)
+	return NewTuple([]Object{k, v}), nil
 }
 
 func dictRepr(o Object) (string, error) {
@@ -728,16 +843,15 @@ func dictRepr(o Object) (string, error) {
 	b.WriteByte('{')
 	first := true
 	for _, slot := range d.order {
-		e := &d.entries[slot]
 		if !first {
 			b.WriteString(", ")
 		}
 		first = false
-		ks, err := Repr(e.key)
+		ks, err := Repr(d.slotKey(slot))
 		if err != nil {
 			return "", err
 		}
-		vs, err := Repr(e.value)
+		vs, err := Repr(d.slotValue(slot))
 		if err != nil {
 			return "", err
 		}
