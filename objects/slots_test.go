@@ -148,7 +148,7 @@ func TestSlotsInheritDictFromBase(t *testing.T) {
 	}
 }
 
-// TestSlotsInheritFromParent covers the CPython behaviour where a
+// TestSlotsInheritFromParent covers the CPython behavior where a
 // subclass with an empty __slots__ tuple inherits its parent's slot
 // names. Without the layout-base walk in installSlots / NewInstance
 // the MemberDescr lookup finds the parent's MemberDescr at index 0

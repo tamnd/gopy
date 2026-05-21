@@ -293,7 +293,7 @@ func TestNumberKinds(t *testing.T) {
 	}
 }
 
-// TestStringNameStringAdjacency pins the CPython behaviour that a
+// TestStringNameStringAdjacency pins the CPython behavior that a
 // non-prefix identifier byte after a closing quote breaks the string
 // rather than being absorbed as a string prefix.
 //

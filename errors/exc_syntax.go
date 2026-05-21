@@ -14,15 +14,15 @@ import (
 //
 // CPython: Objects/exceptions.c:2670 PySyntaxErrorObject
 type SyntaxErrorState struct {
-	Msg               objects.Object
-	Filename          objects.Object
-	Lineno            objects.Object
-	Offset            objects.Object
-	Text              objects.Object
-	EndLineno         objects.Object
-	EndOffset         objects.Object
-	PrintFileAndLine  objects.Object
-	Metadata          objects.Object
+	Msg              objects.Object
+	Filename         objects.Object
+	Lineno           objects.Object
+	Offset           objects.Object
+	Text             objects.Object
+	EndLineno        objects.Object
+	EndOffset        objects.Object
+	PrintFileAndLine objects.Object
+	Metadata         objects.Object
 }
 
 // IndentationError fires for any block-structure mismatch (the parser
@@ -125,7 +125,7 @@ func syntaxErrorInit(e *Exception, args []objects.Object) error {
 }
 
 // tupleFromInfo runs PySequence_Tuple(info): pass-through for tuple,
-// materialise via iteration otherwise.
+// materialize via iteration otherwise.
 //
 // CPython: Objects/exceptions.c:2727 PySequence_Tuple(info)
 func tupleFromInfo(info objects.Object) (*objects.Tuple, error) {
@@ -244,15 +244,33 @@ func init() {
 // CPython: Include/descrobject.h Py_T_OBJECT (member_get NULL -> None)
 func syntaxFieldGetters() map[string]func(objects.Object) (objects.Object, error) {
 	return map[string]func(objects.Object) (objects.Object, error){
-		"msg":                 func(o objects.Object) (objects.Object, error) { return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Msg }) },
-		"filename":            func(o objects.Object) (objects.Object, error) { return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Filename }) },
-		"lineno":              func(o objects.Object) (objects.Object, error) { return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Lineno }) },
-		"offset":              func(o objects.Object) (objects.Object, error) { return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Offset }) },
-		"text":                func(o objects.Object) (objects.Object, error) { return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Text }) },
-		"end_lineno":          func(o objects.Object) (objects.Object, error) { return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.EndLineno }) },
-		"end_offset":          func(o objects.Object) (objects.Object, error) { return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.EndOffset }) },
-		"print_file_and_line": func(o objects.Object) (objects.Object, error) { return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.PrintFileAndLine }) },
-		"_metadata":           func(o objects.Object) (objects.Object, error) { return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Metadata }) },
+		"msg": func(o objects.Object) (objects.Object, error) {
+			return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Msg })
+		},
+		"filename": func(o objects.Object) (objects.Object, error) {
+			return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Filename })
+		},
+		"lineno": func(o objects.Object) (objects.Object, error) {
+			return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Lineno })
+		},
+		"offset": func(o objects.Object) (objects.Object, error) {
+			return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Offset })
+		},
+		"text": func(o objects.Object) (objects.Object, error) {
+			return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Text })
+		},
+		"end_lineno": func(o objects.Object) (objects.Object, error) {
+			return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.EndLineno })
+		},
+		"end_offset": func(o objects.Object) (objects.Object, error) {
+			return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.EndOffset })
+		},
+		"print_file_and_line": func(o objects.Object) (objects.Object, error) {
+			return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.PrintFileAndLine })
+		},
+		"_metadata": func(o objects.Object) (objects.Object, error) {
+			return syntaxField(o, func(s *SyntaxErrorState) objects.Object { return s.Metadata })
+		},
 	}
 }
 
@@ -265,15 +283,33 @@ func syntaxFieldGetters() map[string]func(objects.Object) (objects.Object, error
 // path)
 func syntaxFieldSetters() map[string]func(objects.Object, objects.Object) error {
 	return map[string]func(objects.Object, objects.Object) error{
-		"msg":                 func(o, v objects.Object) error { return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Msg = x }) },
-		"filename":            func(o, v objects.Object) error { return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Filename = x }) },
-		"lineno":              func(o, v objects.Object) error { return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Lineno = x }) },
-		"offset":              func(o, v objects.Object) error { return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Offset = x }) },
-		"text":                func(o, v objects.Object) error { return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Text = x }) },
-		"end_lineno":          func(o, v objects.Object) error { return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.EndLineno = x }) },
-		"end_offset":          func(o, v objects.Object) error { return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.EndOffset = x }) },
-		"print_file_and_line": func(o, v objects.Object) error { return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.PrintFileAndLine = x }) },
-		"_metadata":           func(o, v objects.Object) error { return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Metadata = x }) },
+		"msg": func(o, v objects.Object) error {
+			return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Msg = x })
+		},
+		"filename": func(o, v objects.Object) error {
+			return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Filename = x })
+		},
+		"lineno": func(o, v objects.Object) error {
+			return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Lineno = x })
+		},
+		"offset": func(o, v objects.Object) error {
+			return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Offset = x })
+		},
+		"text": func(o, v objects.Object) error {
+			return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Text = x })
+		},
+		"end_lineno": func(o, v objects.Object) error {
+			return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.EndLineno = x })
+		},
+		"end_offset": func(o, v objects.Object) error {
+			return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.EndOffset = x })
+		},
+		"print_file_and_line": func(o, v objects.Object) error {
+			return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.PrintFileAndLine = x })
+		},
+		"_metadata": func(o, v objects.Object) error {
+			return syntaxFieldSet(o, v, func(s *SyntaxErrorState, x objects.Object) { s.Metadata = x })
+		},
 	}
 }
 

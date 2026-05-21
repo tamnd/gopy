@@ -108,10 +108,7 @@ func resolveFileKwarg(v objects.Object) (io.Writer, error) {
 	if v != nil && !objects.IsNone(v) {
 		return writerFromObject(v)
 	}
-	stdout, err := sysStdout()
-	if err != nil {
-		return nil, err
-	}
+	stdout := sysStdout()
 	if stdout == nil || objects.IsNone(stdout) {
 		return nil, nil
 	}
@@ -125,20 +122,20 @@ func resolveFileKwarg(v objects.Object) (io.Writer, error) {
 // Python/bltinmodule.c:2238).
 //
 // CPython: Python/sysmodule.c PySys_GetObject("stdout")
-func sysStdout() (objects.Object, error) {
+func sysStdout() objects.Object {
 	mod, ok := imp.GetModule("sys")
 	if !ok || mod == nil {
-		return nil, nil
+		return nil
 	}
 	d := mod.Dict()
 	if d == nil {
-		return nil, nil
+		return nil
 	}
 	v, err := d.GetItem(objects.NewStr("stdout"))
 	if err != nil {
-		return nil, nil
+		return nil
 	}
-	return v, nil
+	return v
 }
 
 // unicodeArg validates that o is a str (or None handled by caller)

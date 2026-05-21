@@ -47,7 +47,7 @@ func TestPrintPositional(t *testing.T) {
 	}
 	_ = pf.Flush()
 	_ = tmp.Sync()
-	if got := readBack(t, tmp.Name());got != "1 2 3\n" {
+	if got := readBack(t, tmp.Name()); got != "1 2 3\n" {
 		t.Errorf("output = %q, want %q", got, "1 2 3\n")
 	}
 }
@@ -68,7 +68,7 @@ func TestPrintSepEnd(t *testing.T) {
 	}
 	_ = pf.Flush()
 	_ = tmp.Sync()
-	if got := readBack(t, tmp.Name());got != "1-2!" {
+	if got := readBack(t, tmp.Name()); got != "1-2!" {
 		t.Errorf("output = %q, want %q", got, "1-2!")
 	}
 }
@@ -85,7 +85,7 @@ func TestPrintNoneSepRetainsDefault(t *testing.T) {
 	}
 	_ = pf.Flush()
 	_ = tmp.Sync()
-	if got := readBack(t, tmp.Name());got != "1 2\n" {
+	if got := readBack(t, tmp.Name()); got != "1 2\n" {
 		t.Errorf("output = %q, want %q (None sep means default space)", got, "1 2\n")
 	}
 }

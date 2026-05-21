@@ -1131,7 +1131,7 @@ func installSlots(t *Type, ns *Dict) error {
 // cumulative slot count up to (but not including) the current class.
 // CPython's type_new walks the MRO looking for a "solid base" whose
 // PyMemberDef offsets the child must respect; gopy mirrors the same
-// behaviour by taking the first non-object base's SlotsBase + len(Slots)
+// behavior by taking the first non-object base's SlotsBase + len(Slots)
 // as the new layout offset.
 //
 // CPython: Objects/typeobject.c:4086 type_new_slots_bases (best_base
