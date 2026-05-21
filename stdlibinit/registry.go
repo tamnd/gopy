@@ -234,6 +234,14 @@ import (
 	// CPython: Modules/_posixsubprocess.c:1333 _posixsubprocessmodule
 	_ "github.com/tamnd/gopy/module/_posixsubprocess"
 
+	// Built-in module: select. Registers itself via module/select/module.go
+	// init(). Backs selectors.SelectSelector (and therefore subprocess
+	// communicate) with select(2). The Go package name is selectmod
+	// because "select" is a reserved Go keyword; the inittab name remains
+	// the Python-visible "select".
+	// CPython: Modules/selectmodule.c:2855 select_exec
+	_ "github.com/tamnd/gopy/module/select"
+
 	// Built-in module: _winapi. Registers itself via module/_winapi/
 	// module.go init(). Exposes the integer constants stdlib/shutil.py
 	// and stdlib/subprocess.py import at module top level on Windows.

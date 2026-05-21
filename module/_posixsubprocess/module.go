@@ -161,13 +161,12 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 
 	pid := cmd.Process.Pid
 
-	// Return (pid, None): subprocess.py reads the pid from index 0 and
-	// the optional sentinel from index 1.
-	// CPython: Modules/_posixsubprocess.c:1280 return of pid
-	return objects.NewTuple([]objects.Object{
-		objects.NewInt(int64(pid)),
-		objects.None(),
-	}), nil
+	// subprocess.py assigns `self.pid = _fork_exec(...)` directly, so
+	// fork_exec must return a plain int (the child PID) rather than a
+	// tuple. CPython does `return PyLong_FromPid(pid)`.
+	//
+	// CPython: Modules/_posixsubprocess.c:1325 return PyLong_FromPid
+	return objects.NewInt(int64(pid)), nil
 }
 
 // toStringSlice extracts a Go []string from a Python sequence (list, tuple,

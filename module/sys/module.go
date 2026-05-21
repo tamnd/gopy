@@ -34,6 +34,32 @@ var pendingArgv []string
 // sync via this hand-off until initconfig wires up end-to-end.
 var pendingPath []string
 
+// pendingExecutable / pendingBaseExecutable mirror the role of
+// pendingArgv for sys.executable. cmd/gopy stamps the os.Executable()
+// result here before bootstrapping so subprocess-spawning stdlib code
+// (subprocess.Popen([sys.executable, ...])) finds the running binary.
+//
+// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (executable)
+var (
+	pendingExecutable     string
+	pendingBaseExecutable string
+)
+
+// SetExecutable records the path the next sys-module build should
+// expose as sys.executable and sys._base_executable. If sys is
+// already imported, the live attributes refresh in place. Mirrors
+// _PySys_UpdateConfig's executable branch.
+//
+// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (executable)
+func SetExecutable(exe, base string) {
+	pendingExecutable = exe
+	pendingBaseExecutable = base
+	if md := liveSysDict(); md != nil {
+		_ = md.SetItem(objects.NewStr("executable"), objects.NewStr(exe))
+		_ = md.SetItem(objects.NewStr("_base_executable"), objects.NewStr(base))
+	}
+}
+
 // SetArgv records the argv the next sys-module build should expose as
 // sys.argv. If sys is already in the module cache, the live argv /
 // orig_argv attributes are refreshed in place so subsequent reads
@@ -205,6 +231,21 @@ func buildModule() (*objects.Module, error) {
 			if err := setStr(md, name, ""); err != nil {
 				return nil, err
 			}
+		}
+	}
+	// Stamp the executable hand-off recorded by cmd/gopy. Until
+	// initconfig wires through end-to-end this is the only path that
+	// gives subprocess.Popen([sys.executable, ...]) a real argv[0].
+	//
+	// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (executable)
+	if pendingExecutable != "" {
+		if err := setStr(md, "executable", pendingExecutable); err != nil {
+			return nil, err
+		}
+	}
+	if pendingBaseExecutable != "" {
+		if err := setStr(md, "_base_executable", pendingBaseExecutable); err != nil {
+			return nil, err
 		}
 	}
 	// sys.exc_info reads the per-thread handled-exception slot the vm

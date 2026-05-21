@@ -65,6 +65,18 @@ func mainWithProfile() int {
 //
 // CPython: Modules/main.c:48 pymain_init
 func run(args []string, stdout, stderr *os.File) int {
+	// Stamp sys.executable / sys._base_executable from os.Executable so
+	// subprocess.Popen([sys.executable, ...]) can spawn a child
+	// interpreter. CPython picks this up via PyConfig.executable in
+	// Py_InitializeFromConfig; until initconfig lands end-to-end the
+	// pending hand-off in module/sys keeps the live module honest.
+	//
+	// CPython: Modules/main.c:118 pymain_init (PyConfig.executable)
+	// CPython: Python/initconfig.c:1734 _PyConfig_InitPathConfig
+	if exe, err := os.Executable(); err == nil {
+		sys.SetExecutable(exe, exe)
+	}
+
 	argv := make([]string, 0, len(args)+1)
 	argv = append(argv, "gopy")
 	argv = append(argv, args...)

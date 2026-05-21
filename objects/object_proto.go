@@ -314,12 +314,20 @@ func GetMethod(o Object, name Object) (Object, bool, error) {
 }
 
 // isMethodLike reports whether a descriptor behaves as an unbound
-// method. CPython tags these with Py_TPFLAGS_METHOD_DESCRIPTOR;
-// gopy currently exposes the moral equivalent through BuiltinFunction
-// and method-style descriptors that bind on attribute access.
+// method. CPython tags these with Py_TPFLAGS_METHOD_DESCRIPTOR; that
+// flag is set on PyFunction_Type and PyMethodDescr_Type but NOT on
+// PyCFunction_Type. A module-level builtin (e.g. select.select)
+// stored as a class attribute therefore does not pick up self when
+// accessed through an instance: `self._select(...)` must pass the
+// same number of arguments as `select.select(...)`.
+//
+// CPython: Include/object.h Py_TPFLAGS_METHOD_DESCRIPTOR
+// CPython: Objects/funcobject.c:1234 PyFunction_Type tp_flags
+// CPython: Objects/descrobject.c:1480 PyMethodDescr_Type tp_flags
+// CPython: Objects/methodobject.c:357 PyCFunction_Type tp_flags (no METHOD_DESCRIPTOR)
 func isMethodLike(descr Object) bool {
 	switch descr.(type) {
-	case *BuiltinFunction, *Function:
+	case *Function, *MethodDescr:
 		return true
 	}
 	return false

@@ -962,6 +962,17 @@ func (b *Buffered) bufferedFlush() (objects.Object, error) {
 	return objects.None(), nil
 }
 
+// bufferedSimpleFlush forwards flush() straight to the raw stream
+// without rewinding. BufferedReader installs this in its method table.
+//
+// CPython: Modules/_io/bufferedio.c:503 _io__Buffered_simple_flush_impl
+func (b *Buffered) bufferedSimpleFlush() (objects.Object, error) {
+	if err := b.checkInitialized(); err != nil {
+		return nil, err
+	}
+	return bufCall(b.raw, "flush", nil)
+}
+
 // bufferedClose flushes and closes the stream.
 //
 // CPython: Modules/_io/bufferedio.c:544 _io__Buffered_close_impl
@@ -976,7 +987,17 @@ func (b *Buffered) bufferedClose() (objects.Object, error) {
 	if closed {
 		return objects.None(), nil
 	}
-	flushErr := b.flushAndRewindUnlocked()
+	// _PyFile_Flush(self) dispatches via self.flush(). BufferedReader binds
+	// flush to simple_flush (raw.flush() only); BufferedWriter and
+	// BufferedRandom bind it to the full flush_and_rewind path. Mirror
+	// that here so closing a read-only stream on a pipe does not seek.
+	// CPython: Modules/_io/bufferedio.c:573 _PyFile_Flush + :2538 simple_flush binding
+	var flushErr error
+	if b.readable && !b.writable {
+		_, flushErr = bufCall(b.raw, "flush", nil)
+	} else {
+		flushErr = b.flushAndRewindUnlocked()
+	}
 	if err := bufClose(b.raw); err != nil {
 		return nil, err
 	}
@@ -1271,6 +1292,16 @@ func bufferedGetattr(self objects.Object, nameObj objects.Object) (objects.Objec
 			return b.bufferedWrite(args)
 		}), nil
 	case "flush":
+		// BufferedReader binds flush to simple_flush (raw.flush() only);
+		// BufferedWriter and BufferedRandom use the full flush_and_rewind.
+		// CPython: Modules/_io/bufferedio.c:2538 SIMPLE_FLUSH (reader)
+		//          Modules/_io/bufferedio.c:2598 FLUSH (writer)
+		//          Modules/_io/bufferedio.c:2706 FLUSH (random)
+		if b.readable && !b.writable {
+			return objects.NewBuiltinFunction("flush", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+				return b.bufferedSimpleFlush()
+			}), nil
+		}
 		return objects.NewBuiltinFunction("flush", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			return b.bufferedFlush()
 		}), nil
@@ -1463,6 +1494,11 @@ func init() {
 	BufferedReaderType.Getattro = bufferedGetattr
 	BufferedReaderType.Repr = bufferedTypeRepr
 	BufferedReaderType.Str = bufferedTypeRepr
+	// Buffered streams inherit object's identity-based __hash__ so they
+	// can be used as dict keys (subprocess._communicate stores them in
+	// _fileobj2output).
+	// CPython: Objects/typeobject.c:7970 PyBaseObject_Type tp_hash
+	BufferedReaderType.Hash = objects.IdentityHash
 	registerBufferedContextManager(BufferedReaderType)
 }
 
@@ -1555,6 +1591,7 @@ func init() {
 	BufferedWriterType.Getattro = bufferedGetattr
 	BufferedWriterType.Repr = bufferedTypeRepr
 	BufferedWriterType.Str = bufferedTypeRepr
+	BufferedWriterType.Hash = objects.IdentityHash
 	registerBufferedContextManager(BufferedWriterType)
 }
 
@@ -1611,6 +1648,7 @@ func init() {
 	BufferedRandomType.Getattro = bufferedGetattr
 	BufferedRandomType.Repr = bufferedTypeRepr
 	BufferedRandomType.Str = bufferedTypeRepr
+	BufferedRandomType.Hash = objects.IdentityHash
 	registerBufferedContextManager(BufferedRandomType)
 }
 
@@ -1743,4 +1781,5 @@ func rwPairGetattr(self objects.Object, nameObj objects.Object) (objects.Object,
 func init() {
 	BufferedRWPairType.Call = bufferedRWPairCall
 	BufferedRWPairType.Getattro = rwPairGetattr
+	BufferedRWPairType.Hash = objects.IdentityHash
 }

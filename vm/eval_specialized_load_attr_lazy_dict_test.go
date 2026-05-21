@@ -175,9 +175,13 @@ func TestFastLoadAttrMethodLazyDictRejectsBareShape(t *testing.T) {
 // METHOD_LAZY_DICT for a user class in MANAGED_DICT-without-
 // INLINE_VALUES shape whose per-instance dict is still nil.
 func TestSpecializeMethodLazyDictEmits(t *testing.T) {
-	fn := objects.NewBuiltinFunction("m", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-		return objects.NewInt(0), nil
-	})
+	// Use *objects.Function for the descriptor. PyFunction_Type carries
+	// Py_TPFLAGS_METHOD_DESCRIPTOR; PyCFunction (BuiltinFunction) does not,
+	// so a builtin stored as a class attribute classifies as NON_DESCRIPTOR
+	// and the specializer would (correctly) skip the METHOD arm.
+	//
+	// CPython: Objects/funcobject.c:1234 PyFunction_Type tp_flags
+	fn := objects.NewFunction("m", &objects.Code{Name: "m"}, objects.NewDict())
 	cls := makeLazyDictType("G", "m", fn)
 	inst := objects.NewInstance(cls)
 	if inst.Dict() != nil {

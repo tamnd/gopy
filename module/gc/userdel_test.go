@@ -17,19 +17,33 @@ import (
 )
 
 // buildUserClassWithDel constructs a user class whose __del__ slot is
-// the supplied Go closure wrapped in a BuiltinFunction. The returned
-// type runs through fixupSlotDispatchers, so Type.Finalize is wired
-// to slotTpFinalize.
+// the supplied Go closure wrapped in a MethodDescr. The returned type
+// runs through fixupSlotDispatchers, so Type.Finalize is wired to
+// slotTpFinalize. We use MethodDescr (PyMethodDescr_Type, which
+// carries Py_TPFLAGS_METHOD_DESCRIPTOR) rather than BuiltinFunction
+// (PyCFunction_Type, no METHOD_DESCRIPTOR) so slot dispatch goes
+// through the unbound-method path and passes self.
+//
+// CPython: Objects/descrobject.c:1480 PyMethodDescr_Type tp_flags
 func buildUserClassWithDel(name string, del func(self objects.Object)) *objects.Type {
-	delFn := objects.NewBuiltinFunction("__del__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	// fixupFinalize requires __del__ on the namespace at NewUserType
+	// time, but NewMethodDescr needs the owner *Type to validate args
+	// at call time. Build with a placeholder, then overwrite the
+	// type's descriptor table with a MethodDescr bound to the type.
+	placeholder := objects.NewBuiltinFunction("__del__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.None(), nil
+	})
+	ns := objects.NewDict()
+	_ = ns.SetItem(objects.NewStr("__del__"), placeholder)
+	cls := objects.NewUserType(name, nil, ns)
+	delFn := objects.NewMethodDescr(cls, "__del__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		if len(args) > 0 {
 			del(args[0])
 		}
 		return objects.None(), nil
 	})
-	ns := objects.NewDict()
-	_ = ns.SetItem(objects.NewStr("__del__"), delFn)
-	return objects.NewUserType(name, nil, ns)
+	objects.SetTypeDescr(cls, "__del__", delFn)
+	return cls
 }
 
 // A user class with __del__ has its method called when the cycle

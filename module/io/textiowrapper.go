@@ -125,6 +125,7 @@ func init() {
 	TextIOWrapperType.IterNext = textIOWrapperIterNext
 	TextIOWrapperType.Getattro = textIOWrapperGetattr
 	TextIOWrapperType.Setattro = textIOWrapperSetattr
+	TextIOWrapperType.Hash = objects.IdentityHash
 	// LOAD_SPECIAL walks the type MRO for __enter__ / __exit__ rather
 	// than going through instance Getattro, so `with text:` needs
 	// type-level descriptors. The instance Getattr still resolves these

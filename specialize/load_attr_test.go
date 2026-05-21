@@ -131,9 +131,12 @@ func TestLoadAttrMethodNoDict(t *testing.T) {
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
 	// HasDict stays false: dict-less type, method-style descriptor → METHOD_NO_DICT.
-	meth := objects.NewBuiltinFunction("m", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-		return objects.None(), nil
-	})
+	// Use *objects.Function (PyFunction_Type carries Py_TPFLAGS_METHOD_DESCRIPTOR).
+	// PyCFunction (gopy's BuiltinFunction) deliberately does NOT carry that flag
+	// so a class-attribute builtin is NON_DESCRIPTOR, not METHOD.
+	//
+	// CPython: Objects/funcobject.c:1234 PyFunction_Type tp_flags
+	meth := objects.NewFunction("m", &objects.Code{Name: "m"}, objects.NewDict())
 	objects.SetTypeDescr(cls, "m", meth)
 	inst := objects.NewInstance(cls)
 	co := loadAttrCode()

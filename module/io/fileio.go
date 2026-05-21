@@ -71,6 +71,10 @@ func init() {
 	FileIOType.Repr = fileIORepr
 	FileIOType.Str = fileIORepr
 	FileIOType.Getattro = fileIOGetattr
+	// FileIO inherits object's identity-based __hash__ so it can be
+	// used as a dict key (selectors and subprocess store fileobjs that way).
+	// CPython: Objects/typeobject.c:7970 PyBaseObject_Type tp_hash
+	FileIOType.Hash = objects.IdentityHash
 	// LOAD_SPECIAL walks the type MRO for __enter__ / __exit__ rather
 	// than going through instance Getattro, so `with f:` needs type-level
 	// descriptors.

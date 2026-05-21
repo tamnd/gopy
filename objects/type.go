@@ -412,6 +412,14 @@ func identityHash(o Object) (int64, error) {
 	return int64(uintptr(unsafe.Pointer(reflect.ValueOf(o).Pointer()))), nil
 }
 
+// IdentityHash is the exported alias for identityHash so built-in
+// modules can install pointer-identity hashing on types that inherit
+// object's default hash semantics. Mirrors CPython's behavior where any
+// type that does not override __hash__ shares object's _Py_HashPointer.
+//
+// CPython: Python/pyhash.c:152 _Py_HashPointer
+func IdentityHash(o Object) (int64, error) { return identityHash(o) }
+
 // TypeType returns the type singleton for `type` itself. Mirrors
 // PyType_Type.
 //
