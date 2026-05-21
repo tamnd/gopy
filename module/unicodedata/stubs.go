@@ -1,8 +1,8 @@
-// Stubs for the unicodedata APIs that need their own data tables
-// (decimal / digit / numeric draw from Objects/unicodetype_db.h;
-// name / lookup draw from Modules/unicodename_db.h). Each function
-// parses its arguments like CPython and returns the caller-supplied
-// default when present; otherwise it raises NotImplementedError.
+// Stubs for the unicodedata APIs that still need their own data
+// tables (name / lookup draw from Modules/unicodename_db.h). Each
+// function parses its arguments like CPython and returns the
+// caller-supplied default when present; otherwise it raises
+// NotImplementedError.
 
 package unicodedata
 
@@ -11,33 +11,6 @@ import (
 
 	"github.com/tamnd/gopy/objects"
 )
-
-func decimalBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if _, def, err := argCharWithDefault("decimal", args); err != nil {
-		return nil, err
-	} else if def != nil {
-		return def, nil
-	}
-	return nil, fmt.Errorf("NotImplementedError: unicodedata.decimal not implemented yet")
-}
-
-func digitBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if _, def, err := argCharWithDefault("digit", args); err != nil {
-		return nil, err
-	} else if def != nil {
-		return def, nil
-	}
-	return nil, fmt.Errorf("NotImplementedError: unicodedata.digit not implemented yet")
-}
-
-func numericBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if _, def, err := argCharWithDefault("numeric", args); err != nil {
-		return nil, err
-	} else if def != nil {
-		return def, nil
-	}
-	return nil, fmt.Errorf("NotImplementedError: unicodedata.numeric not implemented yet")
-}
 
 func nameBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if _, def, err := argCharWithDefault("name", args); err != nil {
