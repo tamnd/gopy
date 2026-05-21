@@ -370,6 +370,32 @@ func (s *State) Err() *SyntaxError { return s.err }
 // CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
 func (s *State) Warnings() []SyntaxError { return s.warnings }
 
+// WarnHook is the package-level drain that FlushWarnings calls. It is
+// nil until a runtime package (typically module/_warnings) registers a
+// real implementation in its init function. Keeping the hook here
+// (rather than importing module/_warnings directly) is what lets
+// parser/lexer stay a leaf package while still routing through the
+// warnings filter at runtime.
+//
+// CPython does the routing inline in _PyTokenizer_parser_warn
+// (helpers.c:152); gopy needs the indirection because parser/lexer
+// must not pull in the runtime's heavy dependency graph.
+var WarnHook func(filename string, warns []SyntaxError)
+
+// FlushWarnings forwards every recorded SyntaxWarning to WarnHook so
+// the warnings filter sees them. Callers should invoke this once
+// tokenization is complete; the hook is a no-op when module/_warnings
+// is not linked into the binary.
+//
+// CPython: Parser/tokenizer/helpers.c:152 _PyTokenizer_parser_warn
+// (where the actual PyErr_WarnExplicitObject call happens).
+func (s *State) FlushWarnings() {
+	if WarnHook == nil || len(s.warnings) == 0 {
+		return
+	}
+	WarnHook(s.filename, s.warnings)
+}
+
 // Done returns the lexer's terminal status as an exported int that
 // matches CPython's E_* numbering from Include/errcode.h. Callers
 // outside the package (notably module/_tokenize) need to switch on

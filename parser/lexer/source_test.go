@@ -139,8 +139,8 @@ func TestValidUTF8RejectsOverlongAndSurrogates(t *testing.T) {
 		want int
 	}{
 		{[]byte("A"), 1},
-		{[]byte{0xC2, 0xA9}, 2},        // U+00A9 (copyright)
-		{[]byte{0xE2, 0x82, 0xAC}, 3},  // U+20AC (euro)
+		{[]byte{0xC2, 0xA9}, 2},             // U+00A9 (copyright)
+		{[]byte{0xE2, 0x82, 0xAC}, 3},       // U+20AC (euro)
 		{[]byte{0xF0, 0x9F, 0x98, 0x80}, 4}, // U+1F600 (grinning face)
 		// Boundary: \xF4\x8F\xBF\xBF encodes the maximum U+10FFFF.
 		{[]byte{0xF4, 0x8F, 0xBF, 0xBF}, 4},

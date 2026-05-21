@@ -68,12 +68,12 @@ func (s *State) indentError() Tok {
 
 // warnInvalidEscape mirrors the deprecation warning the C tokenizer
 // raises for unrecognized \X escapes inside string literals. CPython
-// routes this through PyErr_WarnExplicitObject(PyExc_SyntaxWarning), and
-// when the warnings filter elevates the warning to an error, surfaces
-// a SyntaxError with a slightly shorter message. gopy's tokenizer
-// doesn't yet expose the warnings filter to the lexer, so the warning
-// text is recorded via parserWarn until the warnings plumbing reaches
-// in here.
+// routes this through PyErr_WarnExplicitObject(PyExc_SyntaxWarning),
+// and when the warnings filter elevates the warning to an error,
+// surfaces a SyntaxError with a slightly shorter message. gopy stashes
+// the entry via parserWarn; State.FlushWarnings() hands it to the
+// runtime WarnHook (set by module/_warnings.init) once tokenization
+// is over so the actual PyErr_WarnExplicit call runs there.
 //
 // CPython: Parser/tokenizer/helpers.c:110 _PyTokenizer_warn_invalid_escape_sequence
 func (s *State) warnInvalidEscape(c byte) {
@@ -103,9 +103,11 @@ func (s *State) errorRet() Tok {
 // parserWarn records a SyntaxWarning-class diagnostic. CPython hands
 // this to PyErr_WarnExplicitObject so the warnings filter can decide
 // to ignore, log, or escalate; gopy stashes it on s.warnings and
-// expects the consumer (module/_tokenize, compile.Compile) to drain
-// it via Warnings() and route to module/warnings. Category is kept
-// for that downstream hand-off.
+// drains via State.FlushWarnings() / lexer.WarnHook, which the
+// runtime (module/_warnings.init) wires to a real
+// PyErr_WarnExplicit call. parser.runParse drains at end-of-parse;
+// module/_tokenize drains per-token so iterator consumers see the
+// warning between Next() calls.
 //
 // CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
 func (s *State) parserWarn(category, format string, args ...any) {

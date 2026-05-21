@@ -56,6 +56,13 @@ type tokenizerIter struct {
 	lastLine      objects.Object // *Unicode cache for the current line
 	byteColDiff   int
 
+	// warnIdx tracks how many of tok.Warnings() have already been
+	// drained through WarnHook. Drives the per-token drain in
+	// tokenizerIterNext so SyntaxWarnings surface to the warnings
+	// filter as they happen, the way CPython's helpers.c:152
+	// _PyTokenizer_parser_warn does inline.
+	warnIdx int
+
 	// linesByOneBased holds the source split into lines, indexed
 	// 1..N. linesByOneBased[0] is an empty placeholder so lineno-1
 	// indexing matches CPython's 1-based line numbers.
@@ -213,6 +220,18 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 
 	tok := it.tok.Get()
 	kind := tok.Kind
+
+	// Drain any SyntaxWarnings the lexer stashed while producing this
+	// token. CPython issues them inline from helpers.c:152
+	// _PyTokenizer_parser_warn; gopy routes through lexer.WarnHook
+	// (set by module/_warnings.init) so the warnings filter sees them
+	// between iterator steps.
+	if all := it.tok.Warnings(); len(all) > it.warnIdx {
+		if lexer.WarnHook != nil {
+			lexer.WarnHook(it.tok.Filename(), all[it.warnIdx:])
+		}
+		it.warnIdx = len(all)
+	}
 
 	if kind == token.ERRORTOKEN {
 		return nil, tokenizerError(it.tok)

@@ -81,6 +81,11 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	}
 	p := pegen.New(st, pegenStartRule(mode), 0)
 	node, err := pegen.Dispatch(p, pegenStartRule(mode))
+	// CPython emits SyntaxWarnings inline from helpers.c:152
+	// _PyTokenizer_parser_warn. gopy stashes them on State.warnings
+	// to keep parser/lexer leaf, then drains them here via a package
+	// hook that module/_warnings registers at init time.
+	st.FlushWarnings()
 	if errors.Is(err, pegen.ErrParserNotImplemented) {
 		// Real SyntaxError beats the not-implemented sentinel:
 		// CPython surfaces the pinned error at the farthest token
