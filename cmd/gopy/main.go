@@ -274,7 +274,7 @@ func gopyCompile(src, filename string) (*objects.Code, error) {
 //
 // CPython: Modules/main.c:289 pymain_run_command
 func runSource(src string, stdout, stderr *os.File) int {
-	g, err := bootstrapBuiltins(stdout)
+	g, err := bootstrapBuiltins(stdout, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
@@ -282,7 +282,9 @@ func runSource(src string, stdout, stderr *os.File) int {
 	installPathFinder("")
 	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
-	return pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
+	rc := pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
+	pythonrun.FlushStdFiles()
+	return rc
 }
 
 // runModule is the gopy -m mod entry. Mirrors pymain_run_module: set
@@ -293,7 +295,7 @@ func runSource(src string, stdout, stderr *os.File) int {
 //
 // CPython: Modules/main.c:294 pymain_run_module
 func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
-	g, err := bootstrapBuiltins(stdout)
+	g, err := bootstrapBuiltins(stdout, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
@@ -305,7 +307,9 @@ func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
 	// Equivalent of CPython's pymain_run_module which calls
 	// runpy._run_module_as_main(modName) on the Python side.
 	src := fmt.Sprintf("import runpy\nrunpy._run_module_as_main(%q)\n", modName)
-	return pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
+	rc := pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
+	pythonrun.FlushStdFiles()
+	return rc
 }
 
 // runFile is the gopy <script.py> entry. Mirrors pymain_run_file in
@@ -313,7 +317,7 @@ func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
 //
 // CPython: Modules/main.c:373 pymain_run_file
 func runFile(path string, stdout, stderr *os.File) int {
-	g, err := bootstrapBuiltins(stdout)
+	g, err := bootstrapBuiltins(stdout, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
@@ -321,7 +325,9 @@ func runFile(path string, stdout, stderr *os.File) int {
 	installPathFinder(path)
 	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
-	return pythonrun.RunAnyFile(ts, path, mainGlobals, stderr)
+	rc := pythonrun.RunAnyFile(ts, path, mainGlobals, stderr)
+	pythonrun.FlushStdFiles()
+	return rc
 }
 
 // runInteractive is the gopy bare-invocation entry: print the banner
@@ -331,7 +337,7 @@ func runFile(path string, stdout, stderr *os.File) int {
 // CPython: Modules/main.c:469 pymain_run_stdin
 func runInteractive(stdout, stderr *os.File) int {
 	fmt.Fprintln(stdout, build.VersionString())
-	g, err := bootstrapBuiltins(stdout)
+	g, err := bootstrapBuiltins(stdout, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
@@ -339,7 +345,9 @@ func runInteractive(stdout, stderr *os.File) int {
 	installPathFinder("")
 	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
-	if pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, mainGlobals) != 0 {
+	rc := pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, mainGlobals)
+	pythonrun.FlushStdFiles()
+	if rc != 0 {
 		return 1
 	}
 	return 0
@@ -347,13 +355,26 @@ func runInteractive(stdout, stderr *os.File) int {
 
 // bootstrapBuiltins initializes the builtins dict and registers it as
 // the builtins module so `import builtins` and frame.Builtins both
-// resolve to the same dict.
-func bootstrapBuiltins(stdout *os.File) (*objects.Dict, error) {
+// resolve to the same dict. sys is force-imported here so sys.stdout
+// / sys.stderr are in the module cache before any user code runs;
+// CPython does the equivalent in _PySys_Create during Py_Initialize.
+//
+// CPython: Python/sysmodule.c:3818 _PySys_InitMain
+func bootstrapBuiltins(stdout, stderr *os.File) (*objects.Dict, error) {
 	g, err := builtins.Init(stdout)
 	if err != nil {
 		return nil, err
 	}
 	registerBuiltinsModule(g)
+	// Plumb the CLI's stdout/stderr into sys before sys is built so
+	// callers that redirect via *os.File pipes (tests, the harness) see
+	// print() output land in the redirected target.
+	//
+	// CPython: Python/sysmodule.c:3795 sys_init_streams
+	sys.SetStdio(stdout, stderr)
+	if _, err := imp.ImportModule(nil, "sys"); err != nil {
+		return nil, fmt.Errorf("preload sys: %w", err)
+	}
 	return g, nil
 }
 

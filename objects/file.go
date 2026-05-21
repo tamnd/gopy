@@ -26,7 +26,12 @@ import (
 
 // File mirrors the union of FileIO + the buffer + TextIOWrapper. The
 // read/write side is decided at open time and does not change; mixing
-// '+' modes wires both rd and wr at construction.
+// '+' modes wires both rd and wr at construction. wr is io.Writer
+// rather than *bufio.Writer because user-supplied writers (passed in
+// via NewWriterFile when SetStdio overrides sys.stdout) are written
+// to directly, matching CPython where _io.BufferedWriter only wraps
+// a FileIO and arbitrary file-like objects are written through
+// without an extra buffering layer.
 type File struct {
 	Header
 
@@ -37,7 +42,7 @@ type File struct {
 
 	f  *os.File
 	rd *bufio.Reader
-	wr *bufio.Writer
+	wr io.Writer
 }
 
 // FileType is the type singleton for File. CPython exposes three or
@@ -74,6 +79,26 @@ func NewFile(f *os.File, name, mode string, binary, readable, writable bool) *Fi
 	}
 	if writable {
 		fi.wr = bufio.NewWriter(f)
+	}
+	fi.init(FileType)
+	return fi
+}
+
+// NewWriterFile builds a write-only File around an io.Writer that is
+// not a *os.File. Used by lifecycle.Main to plumb a caller-supplied
+// writer (typically a bytes.Buffer in tests) into sys.stdout / sys.stderr
+// so Python-level prints land in the buffer. The (name, mode) pair
+// matches the labels CPython would use for fd 1 / fd 2. No bufio
+// layer is inserted: writes pass straight through, mirroring CPython
+// where _io.BufferedWriter is only stacked on a FileIO.
+//
+// CPython: Python/sysmodule.c:3795 sys_init_streams (analog of the
+// PyConfig.stdout/stderr override)
+func NewWriterFile(w io.Writer, name, mode string) *File {
+	fi := &File{
+		name: name,
+		mode: mode,
+		wr:   w,
 	}
 	fi.init(FileType)
 	return fi
@@ -232,8 +257,8 @@ func (fi *File) Close() error {
 	}
 	fi.closed = true
 	var firstErr error
-	if fi.wr != nil {
-		if err := fi.wr.Flush(); err != nil {
+	if f, ok := fi.wr.(interface{ Flush() error }); ok && f != nil {
+		if err := f.Flush(); err != nil {
 			firstErr = ioErr(err)
 		}
 	}
@@ -253,8 +278,8 @@ func (fi *File) Flush() error {
 	if fi.closed {
 		return errClosed()
 	}
-	if fi.wr != nil {
-		if err := fi.wr.Flush(); err != nil {
+	if f, ok := fi.wr.(interface{ Flush() error }); ok && f != nil {
+		if err := f.Flush(); err != nil {
 			return ioErr(err)
 		}
 	}
@@ -301,6 +326,17 @@ func (fi *File) wrapBytes(buf []byte) Object {
 // CPython: Modules/_io/iobase.c:339 iobase_check_closed
 func errClosed() error {
 	return errors.New("ValueError: I/O operation on closed file")
+}
+
+// errUnsupportedOperation mirrors iobase_unsupported: format the name
+// of the unsupported method into an io.UnsupportedOperation instance.
+// The exception inherits from OSError + ValueError so callers that
+// `except OSError` (e.g. _colorize.can_colorize on a non-fd stdout)
+// or `except ValueError` both catch it.
+//
+// CPython: Modules/_io/iobase.c:330 iobase_unsupported
+func errUnsupportedOperation(name string) error {
+	return fmt.Errorf("io.UnsupportedOperation: %s", name)
 }
 
 // ioErr maps a Go I/O error to a Python-style OSError. The minimal
@@ -413,18 +449,30 @@ func fileMethod(fi *File, name string) Object {
 			return NewBool(fi.wr != nil && !fi.closed), nil
 		})
 	case "fileno":
-		// CPython: Modules/_io/fileio.c:1043 _io_FileIO_fileno_impl
+		// CPython: Modules/_io/fileio.c:1043 _io_FileIO_fileno_impl,
+		// Modules/_io/iobase.c:478 _io__IOBase_fileno_impl (the IOBase
+		// fallback raises io.UnsupportedOperation when no fd backs
+		// the stream).
 		return NewBuiltinFunction("fileno", func(_ []Object, _ map[string]Object) (Object, error) {
-			if fi.closed || fi.f == nil {
+			if fi.closed {
 				return nil, errClosed()
+			}
+			if fi.f == nil {
+				return nil, errUnsupportedOperation("fileno")
 			}
 			return NewInt(int64(fi.f.Fd())), nil
 		})
 	case "isatty":
-		// CPython: Modules/_io/fileio.c:1124 _io_FileIO_isatty_impl
+		// CPython: Modules/_io/fileio.c:1124 _io_FileIO_isatty_impl;
+		// Modules/_io/iobase.c:496 _io__IOBase_isatty_impl (returns
+		// False for the IOBase fallback once unsupported_operation
+		// can't fire).
 		return NewBuiltinFunction("isatty", func(_ []Object, _ map[string]Object) (Object, error) {
-			if fi.closed || fi.f == nil {
+			if fi.closed {
 				return nil, errClosed()
+			}
+			if fi.f == nil {
+				return NewBool(false), nil
 			}
 			info, err := fi.f.Stat()
 			if err != nil {

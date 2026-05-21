@@ -6,7 +6,9 @@ import (
 	"os"
 
 	"github.com/tamnd/gopy/builtins"
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/initconfig"
+	"github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/pythonrun"
 	"github.com/tamnd/gopy/state"
 )
@@ -80,18 +82,30 @@ func runPython(tstate *state.Thread, stdin io.Reader, stdout, stderr io.Writer) 
 		_, _ = io.WriteString(stderr, "builtins: "+err.Error()+"\n")
 		return 1
 	}
+	// CPython initializes sys.stdout / sys.stderr from PyConfig before
+	// any user code runs (Python/sysmodule.c:3795 sys_init_streams);
+	// the gopy port hands the caller-supplied writers to module/sys
+	// via SetStdio before forcing sys into the module cache.
+	sys.SetStdio(stdout, stderr)
+	if _, err := imp.ImportModule(nil, "sys"); err != nil {
+		_, _ = io.WriteString(stderr, "preload sys: "+err.Error()+"\n")
+		return 1
+	}
 
+	var rc int
 	switch {
 	case cfg.RunCommand != "":
-		return pythonrun.RunSimpleString(tstate, cfg.RunCommand, g, stderr)
+		rc = pythonrun.RunSimpleString(tstate, cfg.RunCommand, g, stderr)
 	case cfg.RunModule != "":
 		_, _ = io.WriteString(stderr, ErrModuleNotImplemented.Error()+"\n")
-		return 1
+		rc = 1
 	case cfg.RunFilename != "":
-		return pythonrun.RunAnyFile(tstate, cfg.RunFilename, g, stderr)
+		rc = pythonrun.RunAnyFile(tstate, cfg.RunFilename, g, stderr)
 	default:
-		return pythonrun.InteractiveLoop(tstate, stdin, stdout, stderr, g)
+		rc = pythonrun.InteractiveLoop(tstate, stdin, stdout, stderr, g)
 	}
+	pythonrun.FlushStdFiles()
+	return rc
 }
 
 // MainOSArgs is the convenience entry that wires Main to the

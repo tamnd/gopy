@@ -12,6 +12,7 @@ package sys
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/tamnd/gopy/imp"
@@ -34,17 +35,92 @@ var pendingArgv []string
 var pendingPath []string
 
 // SetArgv records the argv the next sys-module build should expose as
-// sys.argv. Calling more than once before the first import overwrites
-// the previous value; calling after the module has already been built
-// has no effect on the live module.
+// sys.argv. If sys is already in the module cache, the live argv /
+// orig_argv attributes are refreshed in place so subsequent reads
+// observe the new value. Mirrors _PySys_UpdateConfig's argv branch.
+//
+// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (argv)
 func SetArgv(argv []string) {
 	pendingArgv = append(pendingArgv[:0], argv...)
+	if md := liveSysDict(); md != nil {
+		_ = md.SetItem(objects.NewStr("argv"), strListAsList(argv))
+		_ = md.SetItem(objects.NewStr("orig_argv"), strListAsList(argv))
+	}
 }
 
 // SetPath records the path entries the next sys-module build should
-// expose as sys.path. Same semantics as SetArgv.
+// expose as sys.path. If sys is already in the module cache, the live
+// path list is refreshed in place. Mirrors _PySys_UpdateConfig's path
+// branch.
+//
+// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (path)
 func SetPath(path []string) {
 	pendingPath = append(pendingPath[:0], path...)
+	if md := liveSysDict(); md != nil {
+		_ = md.SetItem(objects.NewStr("path"), strListAsList(path))
+	}
+}
+
+// liveSysDict returns the dict of the cached sys module, or nil when
+// sys has not been imported yet. Used by SetArgv / SetPath / SetStdio
+// to keep the live module in sync with config changes that arrive
+// after the inittab build.
+func liveSysDict() *objects.Dict {
+	mod, ok := imp.GetModule("sys")
+	if !ok || mod == nil {
+		return nil
+	}
+	return mod.Dict()
+}
+
+// pendingStdout / pendingStderr override the default os.Stdout /
+// os.Stderr wrappers for sys.stdout / sys.stderr. lifecycle.Main sets
+// them so tests can capture print() output by feeding their own
+// io.Writer. The PyConfig analog is PyConfig.stdout / stderr, which
+// _PySys_InitStreams reads at startup.
+//
+// CPython: Python/sysmodule.c:3795 sys_init_streams
+var (
+	pendingStdout io.Writer
+	pendingStderr io.Writer
+)
+
+// SetStdio records the io.Writers the next sys-module build should
+// expose as sys.stdout and sys.stderr. nil means "use os.Stdout /
+// os.Stderr". If sys is already in the module cache, the live
+// stdout/stderr/__stdout__/__stderr__ attributes are refreshed in
+// place so subsequent prints reach the new writers. This mirrors
+// CPython, where each Py_InitializeFromConfig run re-stamps sys
+// streams from PyConfig.
+//
+// CPython: Python/sysmodule.c:3795 sys_init_streams (re-stamp path)
+func SetStdio(stdout, stderr io.Writer) {
+	pendingStdout = stdout
+	pendingStderr = stderr
+	d := liveSysDict()
+	if d == nil {
+		return
+	}
+	out := makeStdoutFile()
+	err := makeStderrFile()
+	_ = d.SetItem(objects.NewStr("stdout"), out)
+	_ = d.SetItem(objects.NewStr("__stdout__"), out)
+	_ = d.SetItem(objects.NewStr("stderr"), err)
+	_ = d.SetItem(objects.NewStr("__stderr__"), err)
+}
+
+func makeStdoutFile() *objects.File {
+	if pendingStdout != nil {
+		return objects.NewWriterFile(pendingStdout, "<stdout>", "w")
+	}
+	return objects.NewFile(os.Stdout, "<stdout>", "w", false, false, true)
+}
+
+func makeStderrFile() *objects.File {
+	if pendingStderr != nil {
+		return objects.NewWriterFile(pendingStderr, "<stderr>", "w")
+	}
+	return objects.NewFile(os.Stderr, "<stderr>", "w", false, false, true)
 }
 
 func init() {
@@ -221,19 +297,19 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "stdin", objects.NewFile(os.Stdin, "<stdin>", "r", false, true, false)); err != nil {
 		return nil, err
 	}
-	if err := setItem(md, "stdout", objects.NewFile(os.Stdout, "<stdout>", "w", false, false, true)); err != nil {
+	if err := setItem(md, "stdout", makeStdoutFile()); err != nil {
 		return nil, err
 	}
-	if err := setItem(md, "stderr", objects.NewFile(os.Stderr, "<stderr>", "w", false, false, true)); err != nil {
+	if err := setItem(md, "stderr", makeStderrFile()); err != nil {
 		return nil, err
 	}
 	if err := setItem(md, "__stdin__", objects.NewFile(os.Stdin, "<stdin>", "r", false, true, false)); err != nil {
 		return nil, err
 	}
-	if err := setItem(md, "__stdout__", objects.NewFile(os.Stdout, "<stdout>", "w", false, false, true)); err != nil {
+	if err := setItem(md, "__stdout__", makeStdoutFile()); err != nil {
 		return nil, err
 	}
-	if err := setItem(md, "__stderr__", objects.NewFile(os.Stderr, "<stderr>", "w", false, false, true)); err != nil {
+	if err := setItem(md, "__stderr__", makeStderrFile()); err != nil {
 		return nil, err
 	}
 	return m, nil
