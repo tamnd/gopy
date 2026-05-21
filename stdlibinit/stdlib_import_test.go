@@ -46,11 +46,11 @@ func stdlibRoot(t *testing.T) string {
 
 // stdlibCompiler parses and compiles a Python source file the same way
 // pathfinder_test.go does in the imp package.
-func stdlibCompiler(src, filename string) (*objects.Code, error) {
-	if src == "" || src[len(src)-1] != '\n' {
-		src += "\n"
+func stdlibCompiler(src []byte, filename string) (*objects.Code, error) {
+	if len(src) == 0 || src[len(src)-1] != '\n' {
+		src = append(src, '\n')
 	}
-	mod, err := parser.ParseString(src, filename, parser.ModeFile)
+	mod, err := parser.ParseBytes(src, filename, parser.ModeFile)
 	if err != nil {
 		return nil, err
 	}

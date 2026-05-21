@@ -235,7 +235,7 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsPackage %q: %w", name, err)
 	}
-	code, err := compiler(string(src), initFile)
+	code, err := compiler(src, initFile)
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsPackage %q: compile: %w", name, err)
 	}
@@ -269,7 +269,7 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsModule %q: %w", name, err)
 	}
-	code, err := compiler(string(src), file)
+	code, err := compiler(src, file)
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsModule %q: compile: %w", name, err)
 	}

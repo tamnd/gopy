@@ -58,16 +58,41 @@ func nonUTF8ErrorMessage(bad byte, lineno int) string {
 	)
 }
 
-// FromString builds a State that tokenises the given source. The
-// driver loads the whole buffer up front; underflow returns false on
-// the next refill request, matching the C source's
-// _PyTokenizer_FromUTF8 / _PyTokenizer_FromString behavior after the
-// final line lands.
+// FromString builds a State for a source that is already canonical
+// UTF-8 (callers that pass a Python str). Mirrors CPython's
+// _PyTokenizer_FromUTF8 path: BOM stripping and PEP 263 cookie
+// detection are skipped because the source is presumed pre-decoded.
+// The per-line UTF-8 validation still runs so a Go string containing
+// invalid UTF-8 bytes surfaces the Non-UTF-8 SyntaxError at the right
+// line.
 //
 // CPython: Parser/tokenizer/utf8_tokenizer.c:11 _PyTokenizer_FromUTF8
-// (and Parser/tokenizer/string_tokenizer.c:106 _PyTokenizer_FromString)
+// (compile() routes here when PyCF_IGNORE_COOKIE is set in
+// Parser/pegen.c:1051).
 func FromString(src string, mode Mode) *State {
-	return FromBytes([]byte(src), mode)
+	s := newState()
+	buf := []byte(src)
+	if line, bad, ok := ValidateUTF8(buf); !ok {
+		s.lineno = line
+		s.recordErrorWithText(
+			nonUTF8ErrorMessage(bad, line),
+			nthLine(buf, line),
+		)
+		s.done = eEncoding
+	}
+	buf = TranslateNewlines(buf, mode == ModeFile)
+	s.encoding = "utf-8"
+	s.buf = buf
+	s.cur = 0
+	s.inp = len(buf)
+	s.end = len(buf)
+	s.mode = mode
+	s.lineno = 1
+	s.firstLine = 1
+	s.col = 0
+	s.lineStart = 0
+	s.underflow = func(*State) bool { return false }
+	return s
 }
 
 // FromBytes is the byte-slice variant. The caller hands ownership of
@@ -89,20 +114,7 @@ func FromBytes(src []byte, mode Mode) *State {
 		hadBOM = true
 	}
 	cookie, cookieLine := detectEncodingCookieAt(src)
-	if cookie == "" && !hadBOM {
-		// No encoding declaration and no BOM: source defaults to UTF-8.
-		// CPython raises SyntaxError at the offending byte naming the
-		// 'utf-8' default so the user knows to add a coding cookie.
-		// CPython: Parser/tokenizer/helpers.c:332 ensure_utf8
-		if line, bad, ok := ValidateUTF8(src); !ok {
-			s.lineno = line
-			s.recordErrorWithText(
-				nonUTF8ErrorMessage(bad, line),
-				nthLine(src, line),
-			)
-			s.done = eEncoding
-		}
-	}
+	nonUTF8Cookie := false
 	if name := cookie; name != "" {
 		// CPython: Parser/tokenizer/helpers.c:425 BOM vs cookie mismatch
 		if hadBOM && !isUTF8Name(name) {
@@ -115,6 +127,7 @@ func FromBytes(src []byte, mode Mode) *State {
 		} else if !hadBOM {
 			s.encoding = name
 			if !isUTF8Name(name) {
+				nonUTF8Cookie = true
 				decoded, _, err := codecs.Decode(src, name, "strict")
 				if err != nil {
 					s.lineno = cookieLine
@@ -127,6 +140,22 @@ func FromBytes(src []byte, mode Mode) *State {
 					src = []byte(decoded)
 				}
 			}
+		}
+	}
+	// CPython runs _PyTokenizer_ensure_utf8 on the source whenever the
+	// declared encoding is utf-8 (default, BOM, or explicit cookie). The
+	// non-utf-8 cookie path skips validation because the codec decode
+	// already produced canonical utf-8 above.
+	//
+	// CPython: Parser/tokenizer/string_tokenizer.c:108 ensure_utf8 call
+	if s.err == nil && !nonUTF8Cookie {
+		if line, bad, ok := ValidateUTF8(src); !ok {
+			s.lineno = line
+			s.recordErrorWithText(
+				nonUTF8ErrorMessage(bad, line),
+				nthLine(src, line),
+			)
+			s.done = eEncoding
 		}
 	}
 	// CPython: Parser/pegen.c:1048 exec_input = start_rule == Py_file_input

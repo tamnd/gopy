@@ -26,11 +26,11 @@ func (e *pathTestExec) ExecCode(code *objects.Code, mod *objects.Module) (object
 
 // pathTestCompiler is the gopy parse + compile pipeline expressed as
 // a SourceCompiler.
-func pathTestCompiler(src, filename string) (*objects.Code, error) {
-	if src == "" || src[len(src)-1] != '\n' {
-		src += "\n"
+func pathTestCompiler(src []byte, filename string) (*objects.Code, error) {
+	if len(src) == 0 || src[len(src)-1] != '\n' {
+		src = append(src, '\n')
 	}
-	mod, err := parser.ParseString(src, filename, parser.ModeFile)
+	mod, err := parser.ParseBytes(src, filename, parser.ModeFile)
 	if err != nil {
 		return nil, err
 	}

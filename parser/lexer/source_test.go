@@ -81,7 +81,10 @@ func TestNormalizeNewlines(t *testing.T) {
 }
 
 func TestFromBytesPicksUpEncoding(t *testing.T) {
-	st := FromString("# coding: latin-1\nx = 1\n", ModeFile)
+	// Cookie detection runs on the bytes-input path; FromString (str
+	// path, equivalent to CPython _PyTokenizer_FromUTF8) ignores
+	// cookies because the source is presumed pre-decoded.
+	st := FromBytes([]byte("# coding: latin-1\nx = 1\n"), ModeFile)
 	if st.Encoding() != "iso-8859-1" {
 		t.Errorf("Encoding = %q", st.Encoding())
 	}

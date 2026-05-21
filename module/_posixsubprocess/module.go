@@ -11,9 +11,9 @@
 // the Cmd.Stdin/Stdout/Stderr fields, and the process is started with
 // Cmd.Start() which returns the PID.
 //
-// The 24-argument fork_exec signature is kept verbatim so that the
-// vendored subprocess.py can call _posixsubprocess.fork_exec without
-// modification.
+// The 22-argument fork_exec signature is kept verbatim against the
+// CPython 3.14 clinic so the vendored subprocess.py can call
+// _posixsubprocess.fork_exec without modification.
 package posixsubprocess
 
 import (
@@ -60,15 +60,14 @@ func init() {
 //	uidObj         - uid object or None
 //	childUmask     - child_umask int
 //	preexecFn      - preexec_fn callable or None
-//	useVfork       - use_vfork bool (ignored in Go implementation)
 //
 //nolint:cyclop,gocognit // mirrors CPython's monolithic body
 func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	// CPython: Modules/_posixsubprocess.c:965 fork_exec clinic signature
-	// 24 positional arguments required.
-	if len(args) < 23 {
+	// 22 positional arguments required.
+	if len(args) < 22 {
 		return nil, fmt.Errorf(
-			"TypeError: fork_exec() takes at least 23 arguments (%d given)", len(args))
+			"TypeError: fork_exec() takes at least 22 arguments (%d given)", len(args))
 	}
 
 	// args[0]: process_args - argv sequence

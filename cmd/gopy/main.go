@@ -251,12 +251,18 @@ func isFile(p string) bool {
 // gopyCompile is the SourceCompiler injected into PathFinder. It is
 // the parser + compiler chain that pythonrun.RunString runs.
 //
+// The bytes-input path runs PEP 263 cookie detection and BOM
+// stripping in lexer.FromBytes so imported source files with a
+// `# coding: ...` declaration decode through the right codec.
+// Mirrors CPython's compile(bytes_source, ...) routing through
+// _Py_SourceAsString and _PyTokenizer_FromString.
+//
 // CPython: Python/pythonrun.c:1102 Py_CompileStringExFlags
-func gopyCompile(src, filename string) (*objects.Code, error) {
-	if src == "" || src[len(src)-1] != '\n' {
-		src += "\n"
+func gopyCompile(src []byte, filename string) (*objects.Code, error) {
+	if len(src) == 0 || src[len(src)-1] != '\n' {
+		src = append(src, '\n')
 	}
-	mod, err := parser.ParseString(src, filename, parser.ModeFile)
+	mod, err := parser.ParseBytes(src, filename, parser.ModeFile)
 	if err != nil {
 		return nil, err
 	}

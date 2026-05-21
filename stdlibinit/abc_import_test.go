@@ -36,11 +36,11 @@ func stdlibPath(t *testing.T) string {
 
 // abcCompiler is the parse + compile pipeline expressed as a
 // SourceCompiler so PathFinder can load .py files off disk.
-func abcCompiler(src, filename string) (*objects.Code, error) {
-	if src == "" || src[len(src)-1] != '\n' {
-		src += "\n"
+func abcCompiler(src []byte, filename string) (*objects.Code, error) {
+	if len(src) == 0 || src[len(src)-1] != '\n' {
+		src = append(src, '\n')
 	}
-	mod, err := parser.ParseString(src, filename, parser.ModeFile)
+	mod, err := parser.ParseBytes(src, filename, parser.ModeFile)
 	if err != nil {
 		return nil, err
 	}

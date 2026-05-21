@@ -18,12 +18,19 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// SourceCompiler compiles Python source text to a code object.
+// SourceCompiler compiles Python source bytes to a code object.
 // Callers (lifecycle, pythonrun) inject a concrete implementation;
 // this breaks the circular dependency between imp and parser/compile.
 //
-// CPython: Python/pythonrun.c:L1102 Py_CompileStringExFlags
-type SourceCompiler func(src, filename string) (*objects.Code, error)
+// The source is delivered as raw bytes (as read from disk) so the
+// compiler can run PEP 263 cookie detection and BOM stripping before
+// decoding. Mirrors CPython's SourceLoader.get_data → source_to_code
+// chain in Lib/importlib/_bootstrap_external.py:866, which keeps the
+// file content as bytes all the way into compile() so the tokenizer's
+// bytes driver processes the cookie.
+//
+// CPython: Python/pythonrun.c:1102 Py_CompileStringExFlags
+type SourceCompiler func(src []byte, filename string) (*objects.Code, error)
 
 // LoadPyc opens filename, validates the .pyc header, and executes the
 // embedded code object in a module named name. The returned module is
@@ -49,8 +56,8 @@ func LoadPyc(exec Executor, filename, name string) (*objects.Module, error) {
 // it in a module named name. The returned module is registered in
 // sys.modules.
 //
-// CPython: Lib/importlib/_bootstrap_external.py:L1045 SourceFileLoader.exec_module
-func LoadSource(exec Executor, compiler SourceCompiler, src, filename, name string) (*objects.Module, error) {
+// CPython: Lib/importlib/_bootstrap_external.py:1045 SourceFileLoader.exec_module
+func LoadSource(exec Executor, compiler SourceCompiler, src []byte, filename, name string) (*objects.Module, error) {
 	code, err := compiler(src, filename)
 	if err != nil {
 		return nil, fmt.Errorf("imp: LoadSource %q: compile: %w", filename, err)
@@ -62,11 +69,11 @@ func LoadSource(exec Executor, compiler SourceCompiler, src, filename, name stri
 // LoadSource. It is a convenience wrapper for the common case of
 // loading from disk.
 //
-// CPython: Lib/importlib/_bootstrap_external.py:L1045 SourceFileLoader.get_code
+// CPython: Lib/importlib/_bootstrap_external.py:1045 SourceFileLoader.get_code
 func LoadSourceFile(exec Executor, compiler SourceCompiler, filename, name string) (*objects.Module, error) {
 	src, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("imp: LoadSourceFile %q: %w", filename, err)
 	}
-	return LoadSource(exec, compiler, string(src), filename, name)
+	return LoadSource(exec, compiler, src, filename, name)
 }

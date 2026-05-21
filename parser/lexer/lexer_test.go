@@ -269,8 +269,20 @@ func TestReaderDriver(t *testing.T) {
 }
 
 func TestBOMStripped(t *testing.T) {
-	src := "\xef\xbb\xbfx = 1\n"
-	got := kinds(tokenize_(t, src))
+	// BOM handling lives on the bytes-input path; FromString (str
+	// path) trusts the caller and skips BOM detection. CPython:
+	// Parser/tokenizer/string_tokenizer.c:78 check_bom.
+	src := []byte("\xef\xbb\xbfx = 1\n")
+	st := FromBytes(src, ModeFile)
+	var toks []Tok
+	for i := 0; i < 200; i++ {
+		tk := st.Get()
+		toks = append(toks, tk)
+		if tk.Kind == token.ENDMARKER || tk.Kind == token.ERRORTOKEN {
+			break
+		}
+	}
+	got := kinds(toks)
 	want := []token.Type{token.NAME, token.EQUAL, token.NUMBER, token.NEWLINE, token.ENDMARKER}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)

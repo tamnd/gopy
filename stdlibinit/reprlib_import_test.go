@@ -33,11 +33,11 @@ func reprlibStdlibPath(t *testing.T) string {
 
 // reprlibCompiler is the parse + compile pipeline expressed as a
 // SourceCompiler so PathFinder can load .py files off disk.
-func reprlibCompiler(src, filename string) (*objects.Code, error) {
-	if src == "" || src[len(src)-1] != '\n' {
-		src += "\n"
+func reprlibCompiler(src []byte, filename string) (*objects.Code, error) {
+	if len(src) == 0 || src[len(src)-1] != '\n' {
+		src = append(src, '\n')
 	}
-	mod, err := parser.ParseString(src, filename, parser.ModeFile)
+	mod, err := parser.ParseBytes(src, filename, parser.ModeFile)
 	if err != nil {
 		return nil, err
 	}

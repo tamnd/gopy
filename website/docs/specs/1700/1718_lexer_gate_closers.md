@@ -115,6 +115,8 @@ underway, TODO = not started.
 | P17 | Round-tripped SyntaxError text bytes: when SyntaxError surfaces non-utf-8 source text the lexer must record the raw bytes; the descriptor returns them as a Python str via `decode(errors='replace')` parity. Required by `test_non_utf8_{second,third}_line_error`, `test_non_utf8_shebang_error`. | DONE | pending |
 | P18 | `compile()` pyc cleanup parity: after `__import__` succeeds, the `.pyc` file must exist so `test_file_parse`'s `unlink(filename + "c")` resolves. Port `Lib/importlib/_bootstrap_external.py:929 SourceFileLoader.set_data` and the `__pycache__` directory creation chain. | TODO | pending |
 | P19 | Re-run `test_source_encoding.py`; flip MANIFEST and spec 1710 panel row to green. | TODO | pending |
+| P20 | Split the str vs bytes tokeniser drivers. `lexer.FromString` must mirror `Parser/tokenizer/utf8_tokenizer.c:11 _PyTokenizer_FromUTF8` (skip BOM and cookie since `compile(str, ...)` arrives with `PyCF_IGNORE_COOKIE` set by `_Py_SourceAsString`). `lexer.FromBytes` must mirror `Parser/tokenizer/string_tokenizer.c:78 _PyTokenizer_FromString` (BOM strip + cookie + codec decode + `ensure_utf8`). Plumb the bytes path through the importer by retyping `imp.SourceCompiler` from `func(string, string)` to `func([]byte, string)` so `os.ReadFile` bytes flow into `parser.ParseBytes` rather than being downcast through `string()`. Required by `test_issue4626` (str-source compile with non-utf-8 cookie text) and `test_bad_coding` / `test_bad_coding2` (cookie + BOM checks during `__import__`). | DONE | pending |
+| P21 | `_posixsubprocess.fork_exec` arity parity with CPython 3.14 clinic: the signature took 24 args in 3.13 and 22 args in 3.14 after the `gid_object` / `extra_groups_packed` / `uid_object` consolidation. Required by `test_file_parse` and every other subprocess-driven encoding case. | DONE | pending |
 
 ## Phase notes
 
@@ -433,3 +435,65 @@ Expected: 91/91 passing (BytesSourceEncodingTest 31,
 FileSourceEncodingTest 31, MiscSourceEncodingTest 28, one
 linux-only test skipped). Update `test/cpython/MANIFEST.txt` to
 green and spec 1710's row.
+
+### P20: split str vs bytes tokeniser drivers
+
+Two CPython entry points, two compile-time contracts, one Go shim:
+
+- `_PyTokenizer_FromString` (`Parser/tokenizer/string_tokenizer.c:78`)
+  is the bytes path. It strips a UTF-8 BOM, runs PEP 263 cookie
+  detection, codec-decodes the source when the cookie names a
+  non-utf-8 codec, then calls `_PyTokenizer_ensure_utf8` to verify
+  the resulting buffer.
+- `_PyTokenizer_FromUTF8` (`Parser/tokenizer/utf8_tokenizer.c:11`)
+  is the str path. The caller is `compile(str_source, ...)` which
+  routes through `_Py_SourceAsString` with `PyCF_IGNORE_COOKIE`
+  set, so BOM and cookie handling are deliberately skipped: the
+  source is already canonical UTF-8 from the str object.
+
+gopy folded both into one entry, so `compile("# coding=latin-1\n\xc6 = 1", ...)`
+ran cookie detection on a str whose `\xc6` was the U+00C6 codepoint
+encoded as `\xc3\x86`; the cookie said latin-1 so the codec turned
+that 2-byte UTF-8 into "Æ" garbage and the parser raised
+SyntaxError. CPython skips the cookie on str input and the snippet
+compiles cleanly. `test_issue4626` pins this.
+
+Conversely, the importer reads files as bytes and the cookie must
+fire so `import bad_coding` sees the bad cookie. With both drivers
+folded into a string-shaped API gopy lost the bytes route through
+`SourceFileLoader`: `os.ReadFile` returned `[]byte`, the importer
+downcast through `string(src)`, and `gopyCompile` ran the str path
+that now skips the cookie. `test_bad_coding` and `test_bad_coding2`
+both regressed.
+
+Fix:
+
+1. `lexer.FromString` ports `_PyTokenizer_FromUTF8`: no BOM, no
+   cookie, just `ValidateUTF8` (so a Go string carrying invalid
+   bytes still surfaces the Non-UTF-8 SyntaxError on the right
+   line) followed by `TranslateNewlines`.
+2. `lexer.FromBytes` keeps the full `_PyTokenizer_FromString`
+   protocol: BOM strip, cookie detect, codec decode for non-utf-8
+   cookies, BOM-vs-cookie strict strcmp via `isUTF8Name`, then
+   `ValidateUTF8` whenever the effective encoding is utf-8.
+3. `imp.SourceCompiler` retypes from `func(string, string)` to
+   `func([]byte, string)`. `LoadSourceFile` hands `os.ReadFile`
+   bytes straight to the compiler, which calls `parser.ParseBytes`.
+   This mirrors CPython's `Lib/importlib/_bootstrap_external.py:866
+   SourceLoader.source_to_code` which feeds bytes to `compile(...)`
+   verbatim from `get_data`.
+
+All SourceCompiler implementations (`cmd/gopy.gopyCompile`, the test
+compilers in `imp/pathfinder_test.go`, `stdlibinit/*_test.go`) switch
+to the bytes signature in the same commit so the type change is
+atomic and there is no half-converted call site.
+
+### P21: fork_exec 22-arg signature
+
+CPython 3.14 dropped `use_vfork` (and folded the gid/extra-groups/uid
+trio that 3.13 took as separate parameters) so the clinic signature
+went from 24 to 22 positional arguments. gopy's bridge required 23
+positional args and stamped a `useVfork` doc that no longer matches.
+The fix updates `module/_posixsubprocess/module.go` to accept 22 args
+and trims the stale parameter doc. Without this every FileSourceEncodingTest
+that shells out fails with a TypeError before reaching the subprocess.
