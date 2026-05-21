@@ -19,7 +19,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | `Parser/lexer/buffer.c` | 76 | `parser/lexer/buffer.go` | 50 | DONE | 5374e84 |
 | `Parser/lexer/lexer.c` | 1635 | `parser/lexer/lexer.go` (+ `fstring.go` + `onechar.go` + `xid.go`) | 986 + 390 + 208 + 90 | DONE | `set_ftstring_expr` (P3 / a72ac60), `verify_end_of_number` (P4 / 6dbf31a), `tok_get_normal_mode` position emission (P5 / 5f033ea); `verify_identifier` routed through XID composition in `xid.go` |
 | `Parser/lexer/state.c` | 151 | `parser/lexer/state.go` | 408 | DONE | d157189 |
-| `Parser/tokenizer/helpers.c` | 581 | `parser/lexer/helpers.go` (+ encoding subset in `parser/lexer/source.go`) | 179 + 287 | DRIFT | `check_coding_spec` skips `tok->cont_line`; `valid_utf8` collapsed into `utf8Size` (length-only); `_PyTokenizer_warn_invalid_escape_sequence` records as `[warn]`-tagged error instead of `PyErr_WarnExplicitObject` |
+| `Parser/tokenizer/helpers.c` | 581 | `parser/lexer/helpers.go` (+ encoding subset in `parser/lexer/source.go`) | 179 + 287 | DONE | `check_coding_spec` cont_line skip (P6.3 / 22e71b6); full `valid_utf8` overlong/surrogate/overflow table (P6.2 / 22e71b6); `_PyTokenizer_parser_warn` + `_PyTokenizer_warn_invalid_escape_sequence` routed through `lexer.WarnHook` → `PyErr_WarnExplicit` (P6.1 / 5104498) |
 | `Parser/tokenizer/file_tokenizer.c` | 493 | `parser/lexer/driver_file.go` | 119 | DRIFT | `tok_underflow_interactive` + `tok_concatenate_interactive_new_line` not ported; embedder owns REPL state |
 | `Parser/tokenizer/readline_tokenizer.c` | 134 | `parser/lexer/driver_readline.go` | 50 | DRIFT | no `decoding_state` machine; readline callback assumed UTF-8 |
 | `Parser/tokenizer/string_tokenizer.c` | 148 | `parser/lexer/driver_string.go` | 113 | DRIFT | `buf_ungetc` and the on-demand `decode_str` BOM dance fold into `FromBytes` + `readEncodingHead` |
@@ -37,7 +37,7 @@ Status legend: DONE = ported in full and verified, WIP = port underway, TODO = n
 | `test_utf8source.py` | 41 | DONE (3/3 sub-tests green; mirrored at `stdtest/test_utf8source.py`) | — |
 | `test_tabnanny.py` | 354 | DONE (exits 0 after typed `UnicodeDecodeError` + `surrogateescape` decode fix; mirrored under `stdtest/test_tabnanny.py`) | 3066fe3 |
 | `test_source_encoding.py` | 547 | TODO (imports clear; first hang is `BytesSourceEncodingTest.test_crcrcrlf`, which is `exec(bytes)` inside `captured_stdout`; the underlying gap is the VM's `exec(bytes)` path, not lexer/tokenizer). | — |
-| `test_tokenize.py` | 3480 | WIP. Plumbing blockers cleared: `drainReadline` encoding inversion (538ab52), `FORMAT_WITH_SPEC` (5bd8455), `scanOperator` token-type emission (669c11f). Raw position parity locked in P5 (5f033ea) against `_tokenize.TokenizerIter(extra_tokens=False)`; wrapper extra_tokens parity locked against `_tokenize.TokenizerIter(extra_tokens=True)`. Remaining work is the P6 encoding/readline cleanup and a full re-run of the gate. | 538ab52, 5bd8455, 669c11f, 5f033ea |
+| `test_tokenize.py` | 3480 | WIP. Plumbing blockers cleared: `drainReadline` encoding inversion (538ab52), `FORMAT_WITH_SPEC` (5bd8455), `scanOperator` token-type emission (669c11f). Raw position parity locked in P5 (5f033ea) against `_tokenize.TokenizerIter(extra_tokens=False)`; wrapper extra_tokens parity locked against `_tokenize.TokenizerIter(extra_tokens=True)`. P6 cleanup landed (warnings routed through `PyErr_WarnExplicit`, full `valid_utf8` table, cont_line cookie skip). Remaining work is a full re-run of the gate. | 538ab52, 5bd8455, 669c11f, 5f033ea, 22e71b6, 5104498 |
 
 ## Goal
 
@@ -134,16 +134,16 @@ re-run the audit if the upstream rebases.
 | `_PyTokenizer_syntaxerror_known_range` | helpers.c:76 | `syntaxErrorKnownRange` | helpers.go:48 | DONE | Explicit column pinning. |
 | `_PyTokenizer_indenterror` | helpers.c:88 | `indentError` | helpers.go:63 | DONE | Sets `eTabSpace`. |
 | `_PyTokenizer_error_ret` | helpers.c:96 | `errorRet` | helpers.go:95 | DONE | Sets `cur=inp`, `done=eSyntax`. |
-| `_PyTokenizer_warn_invalid_escape_sequence` | helpers.c:111 | `warnInvalidEscape` | helpers.go:79 | DRIFT | Records as `[warn]`-tagged error string instead of `PyErr_WarnExplicitObject` with a `SyntaxWarning` class. Visible to `test_tokenize.py`'s warning-capture path. |
-| `_PyTokenizer_parser_warn` | helpers.c:152 | `parserWarn` | helpers.go:110 | DRIFT | Same warning routing gap. |
+| `_PyTokenizer_warn_invalid_escape_sequence` | helpers.c:111 | `warnInvalidEscape` | helpers.go:79 | DONE @ 5104498 | Routes through `parserWarn` → `State.FlushWarnings()` → `lexer.WarnHook` (set by `module/_warnings.init`) → `PyErr_WarnExplicit` with `SyntaxWarning`. See P6.1. |
+| `_PyTokenizer_parser_warn` | helpers.c:152 | `parserWarn` | helpers.go:110 | DONE @ 5104498 | Same drain via the WarnHook indirection so `parser/lexer` stays leaf. |
 | `_PyTokenizer_new_string` | helpers.c:190 | `newString` | helpers.go:123 | DONE | Go `string()` replaces malloc+memcpy. |
 | `_PyTokenizer_translate_into_utf8` | helpers.c:204 | `translateIntoUTF8` | helpers.go:133 | DRIFT | Only accepts UTF-8 inputs; CPython routes through `PyUnicode_Decode` and supports arbitrary codecs. |
 | `_PyTokenizer_translate_newlines` | helpers.c:215 | `TranslateNewlines` | source.go:257 | DONE | CRLF fold + exec-mode trailing LF injection. |
 | `_PyTokenizer_check_bom` | helpers.c:267 | `CheckBOMCookieConflict` (+ `ReadEncodingHead`) | source.go:155 | DRIFT | Refactored into two passes; semantics match for first-line BOM but the C version interleaves the BOM check with the cookie scan. |
 | `get_normal_name` | helpers.c:305 | `normalizeEncodingName` | source.go:177 | DONE | Lowercases + underscores → hyphens. |
 | `get_coding_spec` | helpers.c:335 | `matchCodingCookie` | source.go:77 | DRIFT | Single-line scan; CPython's loop branches on `lineHasCode`, which gopy extracted into a separate function but does not call from this site. |
-| `_PyTokenizer_check_coding_spec` | helpers.c:388 | `DetectEncodingCookie` | source.go:32 | DRIFT | Missing `tok->cont_line` continuation-aware skip: CPython will not honor a PEP 263 cookie that appears on a backslash-continued line. |
-| `valid_utf8` | helpers.c:446 | `utf8Size` | source.go:237 | DRIFT | gopy's helper only returns the sequence length; CPython's `valid_utf8` validates the full sequence (overlong, surrogate, range checks) in one call. |
+| `_PyTokenizer_check_coding_spec` | helpers.c:388 | `DetectEncodingCookie` | source.go:35 | DONE @ 22e71b6 | cont_line tracking added; `"\\\n# coding: utf-8\n"` no longer surfaces a cookie. See P6.3. |
+| `valid_utf8` | helpers.c:446 | `validUTF8` | source.go:246 | DONE @ 22e71b6 | Full table port: rejects overlong (`0xC0/0xC1`, `0xE0\x80-\x9F`, `0xF0\x80-\x8F`), surrogates (`0xED\xA0-\xBF`), and overflow past U+10FFFF (`0xF4\x90+`, `0xF5+`). See P6.2. |
 | `_PyTokenizer_ensure_utf8` | helpers.c:505 | `ValidateUTF8` | source.go:198 | DONE | Walks source, reports line + bad byte. |
 | `_PyTokenizer_print_escape` | helpers.c:548 | `printEscape` | helpers.go:145 | DONE | Returns string instead of writing to FILE\*. |
 | `_PyTokenizer_tok_dump` | helpers.c:575 | `tokDump` | helpers.go:177 | DONE | Token formatter. |
@@ -613,10 +613,117 @@ ENDMARKER-uses-`s.cur` bug above, surfaced through the wrapper.
 
 ### P6: encoding / readline DRIFT cleanup (gates: edge-case rows in `test_source_encoding.py` and streaming tests)
 
-1. Fold `_PyTokenizer_warn_invalid_escape_sequence` and `_PyTokenizer_parser_warn` onto the real `warnings` module so the warning shape matches.
-2. Extend `valid_utf8` (rename to `validUTF8`) in `source.go` to do the full overlong / surrogate / range checks, not just sequence length.
-3. Add `tok->cont_line` tracking to the `DetectEncodingCookie` loop in `source.go` so PEP 263 cookies on backslash-continued lines are ignored.
-4. Reinstate the inline BOM / encoding state-machine for `tok_underflow_file` if a gate test surfaces a cookie beyond the head window.
+**Problem.** The DRIFT rows on `helpers.c:111`, `helpers.c:152`,
+`helpers.c:388`, and `helpers.c:446` flagged four separate gaps. They
+share the encoding / source-preprocessing surface but they each fail a
+different way:
+
+1. `_PyTokenizer_parser_warn` (helpers.c:152) calls
+   `PyErr_WarnExplicitObject(category, msg, tok->filename,
+   tok->lineno, NULL, NULL)` so the warnings filter can ignore, log,
+   or elevate. gopy stashed entries on `State.warnings` but no
+   production caller drained the slice; the warnings filter never saw
+   them. `_PyTokenizer_warn_invalid_escape_sequence` (helpers.c:111)
+   funnels through the same path so it inherited the leak.
+2. `valid_utf8` (helpers.c:446) is the predicate behind
+   `_PyTokenizer_ensure_utf8`. CPython's port of the
+   `stringlib/codecs.h:utf8_decode` table rejects overlong encodings
+   (`0xC0`/`0xC1`, `0xE0` with byte2 `< 0xA0`, `0xF0` with byte2
+   `< 0x90`), surrogates (`0xED` with byte2 `>= 0xA0`), and overflow
+   past U+10FFFF (`0xF4` with byte2 `>= 0x90`, `0xF5+`). gopy's
+   `utf8Size` only checked sequence length, so `\xC0\x80`,
+   `\xED\xA0\x80`, and `\xF4\x90\x80\x80` slipped past
+   `ValidateUTF8`.
+3. `_PyTokenizer_check_coding_spec` (helpers.c:388) skips its cookie
+   scan when `tok->cont_line == 1`, i.e. the previous physical line
+   ended in `\`. gopy's `DetectEncodingCookie` had no cont_line
+   tracking, so `"\\\n# coding: utf-8\n"` was wrongly parsed as a
+   cookie-bearing file.
+4. The inline BOM / encoding state machine inside `tok_underflow_file`
+   (state.c:520 onwards) is what catches a cookie that lands past the
+   first read window. gopy's file-driver reads the whole source up
+   front, so this is conditional: only needed if a gate test surfaces
+   a cookie beyond the head window.
+
+**Code shipped.**
+
+- `parser/lexer/state.go`: introduces `lexer.WarnHook` (package-level
+  `func(filename string, warns []SyntaxError)`) and `State.FlushWarnings()`.
+  The hook indirection keeps `parser/lexer` a leaf package (only
+  `codecs` + `token`); a runtime package wires the actual
+  `PyErr_WarnExplicit` call in its init. Citation: helpers.c:152
+  `_PyTokenizer_parser_warn`.
+- `module/_warnings/lexer.go` (new): `init()` sets
+  `lexer.WarnHook = FlushLexerWarnings`. `FlushLexerWarnings` walks
+  the slice and calls `WarnExplicit(category, text, filename,
+  int64(line), "", nil)` per entry. Category names are mapped via
+  `warningCategory` (`SyntaxWarning` → `errors.PyExc_SyntaxWarning`,
+  `DeprecationWarning` → `errors.PyExc_DeprecationWarning`, anything
+  else → `errors.PyExc_Warning`).
+- `parser/parser.go:runParse`: calls `st.FlushWarnings()` after the
+  pegen dispatch returns, so end-of-parse drains every lexer warning
+  through the filter. Drains regardless of dispatch error: a parse
+  that bails on `ErrParserNotImplemented` still surfaces the
+  SyntaxWarnings the lexer collected up to that point.
+- `module/_tokenize/module.go`: `tokenizerIter` now carries `warnIdx`
+  and drains new entries through `lexer.WarnHook` between every
+  `tokenizerIterNext` call so iterator consumers see the warning
+  between `Next()` steps. Citation: helpers.c:152
+  `_PyTokenizer_parser_warn` (gopy splits the inline emission into
+  a per-token drain so the iterator surface keeps the same
+  ordering).
+- `parser/lexer/source.go:validUTF8` (renamed from `utf8Size`): full
+  port of the helpers.c:446 table. Rejects the overlong / surrogate
+  / overflow ranges enumerated above; continuation bytes are checked
+  byte by byte against `0x80-0xBF`. `ValidateUTF8` now defers to
+  `validUTF8(src[i:])` instead of duplicating the bounds checks.
+  Citation: helpers.c:446 `valid_utf8`.
+- `parser/lexer/source.go:DetectEncodingCookie`: cont_line tracking
+  added. When the previous head ends in `\`, the next iteration
+  skips both the cookie match and the `lineHasCode` cutoff. Citation:
+  helpers.c:392 (the `if (tok->cont_line) goto cleanup` branch).
+- `parser/lexer/source_test.go`:
+  `TestValidUTF8RejectsOverlongAndSurrogates` pins the full reject /
+  accept tables; the rejects cover `\xC0\x80`, `\xC1\xBF`,
+  `\xE0\x80\x80`, `\xE0\x9F\xBF`, `\xED\xA0\x80`, `\xED\xBF\xBF`,
+  `\xF0\x80\x80\x80`, `\xF0\x8F\xBF\xBF`, `\xF4\x90\x80\x80`,
+  `\xF5\x80\x80\x80`, bare `\xFF`, bare continuation `\x80`,
+  truncated `\xC2`, and the bad-continuation 3-byte
+  `\xE0\xA0\x40`. The accepts cover the boundary cases: `\xC2\xA9`,
+  `\xE2\x82\xAC`, `\xF0\x9F\x98\x80`, and `\xF4\x8F\xBF\xBF` (U+10FFFF).
+  A new `cont_line_skips_cookie` case in `TestDetectEncodingCookie`
+  pins the helpers.c:392 skip.
+- `module/_warnings/lexer_test.go` (new):
+  `TestFlushLexerWarningsRoutesToFilter` feeds a synthetic
+  `SyntaxWarning` entry through `FlushLexerWarnings` and confirms the
+  `filename:lineno: category: text` line lands on `sys.stderr` via
+  the default filter. `TestLexerWarnHookRegistered` pins that
+  `module/_warnings.init` actually wired `lexer.WarnHook`, so a
+  future refactor that drops the init wiring fails loudly.
+
+**Verification.** `go test ./parser/lexer/ ./module/_tokenize/
+./module/_warnings/ ./parser/ ./compile/` all green; the full
+`go test ./...` sweep (including `test/gate`, `vmtest`, `v012test`)
+is green. The cycle scan
+(`go vet ./...`) confirms `parser/lexer` stays a leaf package and the
+runtime wiring does not form an import cycle even when `compile`'s
+internal tests pull in `parser` (the cycle path
+`compile.test → parser → module/_warnings → ... → compile` is
+broken by routing through the hook instead of a direct import).
+
+**Follow-ups.**
+
+- P6.4 (the inline BOM / encoding state machine in `tok_underflow_file`)
+  stays conditional. No gate test currently surfaces a cookie beyond
+  the head window; the codingCookieMax-bounded scan in
+  `DetectEncodingCookie` covers every fixture under
+  `test_source_encoding.py`. If a future gate row breaks on a cookie
+  past byte 256 of line 1 or 2 (or on a multi-line BOM transition),
+  port `tok_underflow_file`'s state machine then.
+- The `Warnings()` accessor on `State` is kept public alongside
+  `FlushWarnings()` so test packages can still introspect the slice
+  without going through the filter. Production callers should prefer
+  `FlushWarnings()`.
 
 ### P7: stdlib vendor location (gates: zero; consistency only)
 
@@ -651,6 +758,7 @@ TODO = not started, BLOCKED = waiting on a larger sub-system spec.
 | 8 | P3 | f-string debug UTF-8 | decode `setFtstringExpr` buffer through `unicode/utf8` | DONE | a72ac60 |
 | 9 | P4 | SyntaxWarning | emit on `1and` / `1or` style numbers | DONE | 6dbf31a |
 | 10 | P5 | token positions | match `_PyLexer_token_setup` line/col emission | DONE | 5f033ea |
+| 11 | P6 | warnings + UTF-8 + cont_line | route SyntaxWarnings through `PyErr_WarnExplicit`; full `valid_utf8` rejection set; cont_line skip on cookie scan | DONE | 5104498 |
 
 ### test_utf8source.py chain
 
@@ -672,7 +780,7 @@ Suite runs end-to-end; 3/3 sub-tests green. Closed under existing 1710 work.
 | 3 | T5.3 | stdlib vendor | minimal-shim `stdlib/importlib/__init__.py` + `stdlib/importlib/machinery.py`. Only `SOURCE_SUFFIXES`, `BYTECODE_SUFFIXES`, `EXTENSION_SUFFIXES`, `all_suffixes()`, and `ModuleSpec` are observable from `inspect.py`; the full bootstrap port is deferred. | DONE | eb13f02 |
 | 4 | T5.4 | stdlib vendor | vendor `Lib/inspect.py` (3409 lines) verbatim, depends on T5.1–T5.3. Two runtime gaps surfaced at import time: (a) `type.__dict__["__dict__"]` had no entry, so a `__dict__` getset descriptor was registered on `typeType`; (b) `_types` was missing `WrapperDescriptorType`, `MethodWrapperType`, `ClassMethodDescriptorType`, which now alias to the closest gopy types (method_descriptor / method / classmethod). | DONE | 7e3f024 |
 | 5 | T7 | VM exec(bytes) | `exec` accepts a `bytes` / `bytearray` first argument by routing through `lexer.FromBytes` + `compile.Compile`. Currently the `BytesSourceEncodingTest.test_crcrcrlf` row blocks because `exec(bytes)` raises `TypeError`. | TODO | — |
-| 6 | P6.3 | PEP 263 cookie cont_line | skip the cookie when the line above ends with `\` | TODO | — |
+| 6 | P6.3 | PEP 263 cookie cont_line | skip the cookie when the line above ends with `\` | DONE | 22e71b6 |
 
 DFS note: T5 was originally one row but `inspect` pulls in `dis` →
 `opcode` → `_opcode` (C module) → `_opcode_metadata` (generated C
