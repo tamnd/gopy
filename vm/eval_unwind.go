@@ -175,27 +175,27 @@ func syntaxExceptionFromParserError(se *parsererrors.SyntaxError) *pyerrors.Exce
 	case parsererrors.KindTab:
 		typ = pyerrors.PyExc_TabError
 	}
-	filename := objects.Object(objects.None())
+	filename := objects.None()
 	if se.Filename != "" {
 		filename = objects.NewStr(se.Filename)
 	}
-	text := objects.Object(objects.None())
+	text := objects.None()
 	if se.Text != "" {
 		text = objects.NewStr(se.Text)
 	}
-	offset := objects.Object(objects.None())
+	offset := objects.None()
 	if se.Pos.ColOff > 0 {
 		offset = objects.NewInt(int64(se.Pos.ColOff))
 	}
-	endLineno := objects.Object(objects.None())
+	endLineno := objects.None()
 	if se.Pos.EndLine > 0 {
 		endLineno = objects.NewInt(int64(se.Pos.EndLine))
 	}
-	endOffset := objects.Object(objects.None())
+	endOffset := objects.None()
 	if se.Pos.EndCol > 0 {
 		endOffset = objects.NewInt(int64(se.Pos.EndCol))
 	}
-	lineno := objects.Object(objects.None())
+	lineno := objects.None()
 	if se.Pos.Lineno > 0 {
 		lineno = objects.NewInt(int64(se.Pos.Lineno))
 	}

@@ -78,7 +78,7 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	// progress past a broken decode. Lift the lexer's structured
 	// record into the parser-level *perrors.SyntaxError so the VM
 	// boundary can build a Python SyntaxError with lineno/offset/text
-	// populated rather than synthesising one from the message prefix.
+	// populated rather than synthesizing one from the message prefix.
 	// CPython: Parser/peg_api.c:73 _PyParser_ASTFromString tok->done check
 	if e := st.Err(); e != nil {
 		return nil, &perrors.SyntaxError{
