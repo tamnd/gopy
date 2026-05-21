@@ -97,9 +97,7 @@ func synthesizeException(err error) *pyerrors.Exception {
 	}
 	for prefix, typ := range errorPrefixToType {
 		if strings.HasPrefix(msg, prefix) {
-			return pyerrors.New(typ, objects.NewTuple([]objects.Object{
-				objects.NewStr(strings.TrimSpace(msg[len(prefix):])),
-			}))
+			return buildExceptionForType(typ, strings.TrimSpace(msg[len(prefix):]))
 		}
 	}
 	// Fallback: scan for a typed prefix anywhere in the message. The
@@ -109,14 +107,52 @@ func synthesizeException(err error) *pyerrors.Exception {
 	// callers can still `except SyntaxError`.
 	for prefix, typ := range errorPrefixToType {
 		if i := strings.Index(msg, prefix); i >= 0 {
-			return pyerrors.New(typ, objects.NewTuple([]objects.Object{
-				objects.NewStr(strings.TrimSpace(msg[i+len(prefix):])),
-			}))
+			return buildExceptionForType(typ, strings.TrimSpace(msg[i+len(prefix):]))
 		}
 	}
 	return pyerrors.New(pyerrors.PyExc_Exception, objects.NewTuple([]objects.Object{
 		objects.NewStr(msg),
 	}))
+}
+
+// buildExceptionForType is the single-arg constructor path used by the
+// prefix-table arms. Most exception types are happy with pyerrors.New
+// (which calls BaseException_init via tp.Init), but the SyntaxError
+// subclass family needs SyntaxError_init to populate the .msg member
+// descriptor. Without that path the descriptor reads SyntaxErr.Msg ==
+// nil and surfaces as None, which traceback.py turns into the bogus
+// "<no detail available>" string.
+//
+// CPython: Objects/exceptions.c:2713 SyntaxError_init runs through the
+// type's tp_init / tp_call, so a bare PyObject_New does not populate
+// the members.
+func buildExceptionForType(typ *objects.Type, msg string) *pyerrors.Exception {
+	args := []objects.Object{objects.NewStr(msg)}
+	if isSyntaxErrorType(typ) {
+		out, err := typ.Call(typ, args, nil)
+		if err == nil {
+			if exc, ok := out.(*pyerrors.Exception); ok {
+				return exc
+			}
+		}
+	}
+	return pyerrors.New(typ, objects.NewTuple(args))
+}
+
+// isSyntaxErrorType reports whether typ is SyntaxError or a SyntaxError
+// subclass (IndentationError, TabError). The check follows the bases
+// chain so future subclasses pick up the same routing.
+func isSyntaxErrorType(typ *objects.Type) bool {
+	for t := typ; t != nil; {
+		if t == pyerrors.PyExc_SyntaxError {
+			return true
+		}
+		if len(t.Bases) == 0 {
+			return false
+		}
+		t = t.Bases[0]
+	}
+	return false
 }
 
 // syntaxExceptionFromParserError builds a populated SyntaxError
