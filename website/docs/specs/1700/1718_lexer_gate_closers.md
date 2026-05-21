@@ -106,7 +106,7 @@ underway, TODO = not started.
 | P8 | Charmap codec runtime: port `codecs.charmap_decode` / `charmap_encode` (CPython `Python/codecs.c` + `Objects/unicodeobject.c:7194 PyUnicode_DecodeCharmap`). Land Lib-side `Lib/encodings/iso8859_15.py` and `Lib/encodings/cp1252.py` decoding/encoding tables verbatim from CPython. | TODO | pending |
 | P9 | Multibyte codec runtime: port `Modules/cjkcodecs/multibytecodec.c` plus `_codecs_jp` (`cp932`) and `_codecs_kr` (`cp949`) with `mappings_jp.h` / `mappings_kr.h` tables. Required by `test_issue2301` (cp932) and `test_exec_valid_coding` (cp949). | TODO | pending |
 | P10 | Encoding alias table: port `Lib/encodings/aliases.py` so `iso8859-15`, `iso-8859-15`, `iso_8859_15`, `cp1252`, `cp932`, `cp949`, `utf8` etc. all canonicalise through the same alias mapping CPython uses. Plumb through `codecs.Lookup` after `NormalizeName`. | TODO | pending |
-| P11 | Per-line UTF-8 validation in the lexer: port `Parser/tokenizer/helpers.c:300 ensure_utf8` so the lexer raises Non-UTF-8 SyntaxError on the offending line regardless of cookie/BOM. Required by `test_non_utf8_{second,third}_line_error`, `test_utf8_bom_non_utf8_third_line_error`, `test_utf_8_non_utf8_third_line_error`. | TODO | pending |
+| P11 | Per-line UTF-8 validation in the lexer: port `Parser/tokenizer/helpers.c:300 ensure_utf8` so the lexer raises Non-UTF-8 SyntaxError on the offending line regardless of cookie/BOM. Required by `test_non_utf8_{second,third}_line_error`, `test_utf8_bom_non_utf8_third_line_error`, `test_utf_8_non_utf8_third_line_error`. | DONE | pending |
 | P12 | Lexer surfaces UnicodeDecodeError text: when the cookie codec decode fails, the SyntaxError message must follow `Parser/tokenizer/helpers.c:534 _PyTokenizer_syntaxerror_known_range` and the CPython `'<codec>' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)` template. Required by `test_first_utf8_coding_line_error`, `test_second_utf8_coding_line_error`, `test_utf8_shebang_error`, `test_error_from_string`. | DONE | pending |
 | P13 | `os.PathLike` port: add the abstract base class (`Lib/os.py:1145 PathLike`) plus the `__fspath__` protocol the rest of the os/posixpath subsystem already half-uses. Required by `test_20731`, `test_file_parse_error_multiline`, `test_tokenizer_fstring_warning_in_first_line`. | TODO | pending |
 | P14 | Test fixtures: vendor `Lib/test/tokenizedata/bad_coding.py`, `bad_coding2.py`, `coding20731.py`, plus `Lib/test/encoded_modules/__init__.py`, `module_iso_8859_1.py`, `module_koi8_r.py` into `test/cpython/tokenizedata/` and `test/cpython/encoded_modules/`. Required by `test_bad_coding`, `test_bad_coding2`, `test_import_encoded_module`, `test_20731`. | TODO | pending |
@@ -280,6 +280,19 @@ gopy currently only runs (1). The port adds the line-by-line
 validation pass after `TranslateNewlines` when the lexer's
 encoding is `utf-8`, recording the SyntaxError at the offending
 line/column and matching the CPython message template exactly.
+
+Status (P12-era): the string driver already validates the whole
+buffer via `ValidateUTF8` at `parser/lexer/driver_string.go:79`,
+so the bytes path already raises Non-UTF-8 SyntaxError on the
+correct line. The streaming `FromReader` driver now does the
+same per-line check in its underflow callback when no encoding
+is declared (matching `file_tokenizer.c:352`), so test fixtures
+that route through the file driver also raise at the offending
+line. The remaining `test_non_utf8_{second,third}_line_error`
+mismatches reduce to a unicode-equality drift on strings built
+through `bytes.decode(errors='replace')` versus the lexer's text
+field. That drift lives outside the cookie/UTF-8 validation
+subsystem.
 
 ### P12: ASCII / UTF-8 decode error templates
 

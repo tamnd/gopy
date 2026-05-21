@@ -53,6 +53,25 @@ func FromReader(r io.Reader, mode Mode) *State {
 		if st.lineno == 0 && len(line) >= 3 && line[0] == 0xef && line[1] == 0xbb && line[2] == 0xbf {
 			line = line[3:]
 		}
+		// The default encoding is UTF-8, so each line must validate.
+		// CPython runs ensure_utf8 here when tok->encoding is NULL.
+		// Lineno is one past the count we have already ingested; this
+		// matches CPython's tok->lineno tracking after a successful
+		// refill.
+		//
+		// CPython: Parser/tokenizer/file_tokenizer.c:352 ensure_utf8
+		if st.encoding == "" {
+			if vLine, bad, ok := ValidateUTF8(line); !ok {
+				reportedLine := st.lineno + vLine
+				st.lineno = reportedLine
+				st.recordErrorWithText(
+					nonUTF8ErrorMessage(bad, reportedLine),
+					string(trimEOL(line)),
+				)
+				st.done = eEncoding
+				return false
+			}
+		}
 		st.buf = append(st.buf, line...)
 		st.inp = len(st.buf)
 		st.end = cap(st.buf)
@@ -63,6 +82,19 @@ func FromReader(r io.Reader, mode Mode) *State {
 		return err == nil
 	}
 	return s
+}
+
+// trimEOL strips a single trailing \n or \r\n so the SyntaxError text
+// matches what the user sees in their editor (CPython's source-line
+// extractor returns the line without terminator).
+func trimEOL(line []byte) []byte {
+	if n := len(line); n > 0 && line[n-1] == '\n' {
+		line = line[:n-1]
+		if n > 1 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+	}
+	return line
 }
 
 // readEncodingHead peeks the first two physical lines from br and
