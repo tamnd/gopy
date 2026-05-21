@@ -2,20 +2,33 @@ package objects
 
 // Incref bumps the refcount. gopy runs under a global mutator lock
 // (Python's GIL), so the increment is a plain ++ matching CPython's
-// GIL-build expansion of Py_INCREF.
+// GIL-build expansion of Py_INCREF. Immortal objects (refcount >=
+// ImmortalRefcnt) skip the bump entirely so their refcount cannot
+// overflow into the mortal range.
 //
-// CPython: Include/object.h:L605 Py_INCREF
+// CPython: Include/object.h:L605 Py_INCREF,
+// Include/internal/pycore_object.h _Py_INCREF_IMMORTAL_STAT_INC
 func Incref(o Object) {
-	o.Hdr().refcnt++
+	h := o.Hdr()
+	if h.refcnt >= ImmortalRefcnt {
+		return
+	}
+	h.refcnt++
 }
 
-// Decref drops the refcount. If it reaches zero and the type defines
-// a Dealloc slot, Dealloc is invoked. Until v0.10 lands the cycle
+// Decref drops the refcount. Immortal objects short-circuit before
+// touching the counter so dealloc never fires for singletons, the
+// small-int cache, or interned strings. Once a mortal counter hits
+// zero, the type's Dealloc slot runs; until v0.10 lands the cycle
 // collector, Dealloc is the only finalize hook.
 //
-// CPython: Include/object.h:L631 Py_DECREF
+// CPython: Include/object.h:L631 Py_DECREF,
+// Include/internal/pycore_object.h _Py_DECREF_IMMORTAL_STAT_INC
 func Decref(o Object) {
 	h := o.Hdr()
+	if h.refcnt >= ImmortalRefcnt {
+		return
+	}
 	h.refcnt--
 	if h.refcnt != 0 {
 		return

@@ -102,3 +102,32 @@ func (h *Header) Refcnt() int64 {
 func (v *VarHeader) Size() int64 {
 	return v.size
 }
+
+// ImmortalRefcnt is the sentinel refcount value that marks an object
+// as immortal: Incref and Decref are no-ops, and the object never
+// hits dealloc. CPython 3.14 uses a high-bit split refcount where
+// any value at or above 1<<31 is treated as immortal; gopy uses a
+// plain int64 threshold of 1<<30 (one billion, well above any real
+// program's actual refcount) so the immortal check is a single
+// compare-and-branch.
+//
+// CPython: Include/object.h:L94 _Py_IMMORTAL_MINIMUM_REFCNT,
+// Include/internal/pycore_object.h _Py_IsImmortal
+const ImmortalRefcnt int64 = 1 << 30
+
+// MakeImmortal stamps the header with the immortal sentinel so all
+// subsequent Incref / Decref calls short-circuit. Called from the
+// constructors of singletons (None, True, False), the small-int
+// cache, and any object the runtime never expects to dealloc.
+//
+// CPython: Include/internal/pycore_object.h _Py_SetImmortal
+func (h *Header) MakeImmortal() {
+	h.refcnt = ImmortalRefcnt
+}
+
+// IsImmortal reports whether the header has been stamped immortal.
+//
+// CPython: Include/internal/pycore_object.h _Py_IsImmortal
+func (h *Header) IsImmortal() bool {
+	return h.refcnt >= ImmortalRefcnt
+}

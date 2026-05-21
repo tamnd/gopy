@@ -35,6 +35,7 @@ func newBool(x int64) *Bool {
 	b := &Bool{}
 	b.init(BoolType)
 	b.v.SetInt64(x)
+	b.MakeImmortal()
 	return b
 }
 
