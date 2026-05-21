@@ -481,21 +481,19 @@ func (e *evalState) constAt(i int) objects.Object {
 	return e.constAtSlow(co, i)
 }
 
-// constAtSlow handles the lazy-fill path for test fixtures that build
-// Code by struct literal without calling SyncConstObjs. Wraps the raw
-// const and caches it in ConstObjs so the next dispatch hits the fast
-// path in constAt.
+// constAtSlow handles the fallback path for Code objects whose
+// ConstObjs cache has not been populated (e.g. test fixtures that
+// build Code by struct literal without calling SyncConstObjs). It
+// re-wraps the raw const on every call and intentionally does not
+// touch co.ConstObjs: concurrent goroutines may share the Code and
+// caching the wrap here would race on the shared slice. The real
+// fast path is the ConstObjs slot populated once by SyncConstObjs at
+// Code construction.
 func (e *evalState) constAtSlow(co *objects.Code, i int) objects.Object {
 	obj, err := wrapConst(co.Consts[i])
 	if err != nil {
 		panic(fmt.Sprintf("vm: bad const at %d: %v", i, err))
 	}
-	if len(co.ConstObjs) < len(co.Consts) {
-		filled := make([]objects.Object, len(co.Consts))
-		copy(filled, co.ConstObjs)
-		co.ConstObjs = filled
-	}
-	co.ConstObjs[i] = obj
 	return obj
 }
 
