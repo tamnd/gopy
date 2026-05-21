@@ -220,23 +220,33 @@ func (f *Frame) PeekStack(depth int) stackref.Ref {
 	return f.LocalsPlus[f.StackBase+f.StackTop-1-depth]
 }
 
-// SetPeekStack writes r into the slot at depth from the top.
+// SetPeekStack writes r into the slot at depth from the top, closing
+// the slot's prior occupant first so its refcount is released.
+// Mirrors the POKE pattern in CPython where the named output binding
+// replaces a named input that was just CLOSE-d in the same arm.
 //
 // CPython: Python/ceval_macros.h POKE macro (stack_pointer[-(depth)+1] = ref).
 func (f *Frame) SetPeekStack(depth int, r stackref.Ref) {
-	f.LocalsPlus[f.StackBase+f.StackTop-1-depth] = r
+	i := f.StackBase + f.StackTop - 1 - depth
+	f.LocalsPlus[i].Close()
+	f.LocalsPlus[i] = r
 }
 
-// DropStack removes the top n stack entries, clearing each slot so the
-// underlying ref can be reclaimed. Mirrors CPython's STACK_SHRINK plus
-// the explicit slot poisoning the generator emits for safety.
+// DropStack removes the top n stack entries, closing each slot's
+// stackref before nulling it. Closing matches CPython's pattern of
+// DECREF_INPUTS followed by STACK_SHRINK: the stack pointer adjusts
+// only after the owned references are released. Slots that already
+// hold Null (because the producer used PopStack to hand off
+// ownership) just no-op through Close.
 //
 // CPython: Python/ceval_macros.h STACK_SHRINK.
 func (f *Frame) DropStack(n int) {
 	base := f.StackBase
 	for range n {
 		f.StackTop--
-		f.LocalsPlus[base+f.StackTop] = stackref.Null
+		i := base + f.StackTop
+		f.LocalsPlus[i].Close()
+		f.LocalsPlus[i] = stackref.Null
 	}
 }
 
