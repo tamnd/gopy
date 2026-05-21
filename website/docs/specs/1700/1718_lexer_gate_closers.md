@@ -109,7 +109,7 @@ underway, TODO = not started.
 | P11 | Per-line UTF-8 validation in the lexer: port `Parser/tokenizer/helpers.c:300 ensure_utf8` so the lexer raises Non-UTF-8 SyntaxError on the offending line regardless of cookie/BOM. Required by `test_non_utf8_{second,third}_line_error`, `test_utf8_bom_non_utf8_third_line_error`, `test_utf_8_non_utf8_third_line_error`. | DONE | pending |
 | P12 | Lexer surfaces UnicodeDecodeError text: when the cookie codec decode fails, the SyntaxError message must follow `Parser/tokenizer/helpers.c:534 _PyTokenizer_syntaxerror_known_range` and the CPython `'<codec>' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)` template. Required by `test_first_utf8_coding_line_error`, `test_second_utf8_coding_line_error`, `test_utf8_shebang_error`, `test_error_from_string`. | DONE | pending |
 | P13 | `os.PathLike` port: add the abstract base class (`Lib/os.py:1145 PathLike`) plus the `__fspath__` protocol the rest of the os/posixpath subsystem already half-uses. Required by `test_20731`, `test_file_parse_error_multiline`, `test_tokenizer_fstring_warning_in_first_line`. | TODO | pending |
-| P14 | Test fixtures: vendor `Lib/test/tokenizedata/bad_coding.py`, `bad_coding2.py`, `coding20731.py`, plus `Lib/test/encoded_modules/__init__.py`, `module_iso_8859_1.py`, `module_koi8_r.py` into `test/cpython/tokenizedata/` and `test/cpython/encoded_modules/`. Required by `test_bad_coding`, `test_bad_coding2`, `test_import_encoded_module`, `test_20731`. | TODO | pending |
+| P14 | Test fixtures: vendor `Lib/test/tokenizedata/bad_coding.py`, `bad_coding2.py`, `coding20731.py`, plus `Lib/test/encoded_modules/__init__.py`, `module_iso_8859_1.py`, `module_koi8_r.py` into `test/cpython/tokenizedata/` and `test/cpython/encoded_modules/`. Required by `test_bad_coding`, `test_bad_coding2`, `test_import_encoded_module`, `test_20731`. | DONE | pending |
 | P15 | `__import__` SyntaxError surfacing: when an imported source file's tokeniser emits SyntaxError (bad cookie, bad UTF-8), `Lib/importlib/_bootstrap_external.py:846 _LoaderBasics.exec_module` must propagate the error. Required by `test_bad_coding2`. | TODO | pending |
 | P16 | Long-cookie-line scanning: re-port `Parser/tokenizer/helpers.c:163 get_coding_spec` so cookie detection survives lines that fill the read buffer (`#<BUFSIZ spaces>coding:iso8859-15`). Required by `test_long_first_coding_line`, `test_long_second_coding_line`. | TODO | pending |
 | P17 | Round-tripped SyntaxError text bytes: when SyntaxError surfaces non-utf-8 source text the lexer must record the raw bytes; the descriptor returns them as a Python str via `decode(errors='replace')` parity. Required by `test_non_utf8_{second,third}_line_error`, `test_non_utf8_shebang_error`. | TODO | pending |
@@ -355,6 +355,14 @@ source bytes. `coding20731.py` exercises tokeniser cookie parity.
 The encoded_modules fixtures are short utf-8/koi8-r modules with
 a `test` attribute. Port all six files verbatim into
 `test/cpython/tokenizedata/` and `test/cpython/encoded_modules/`.
+
+Status: vendored under `test/cpython/tokenizedata/` (bad_coding.py,
+bad_coding2.py, coding20731.py with CRLF preserved via `cp` from
+cpython-314) and `test/cpython/encoded_modules/` (__init__.py,
+module_iso_8859_1.py, module_koi8_r.py). `test_bad_coding` now
+passes; `test_bad_coding2` still depends on P15, and
+`test_import_encoded_module` still depends on P9 because koi8-r is
+a charmap codec not yet wired through `codecs.Lookup`.
 
 ### P15: __import__ SyntaxError surfacing
 
