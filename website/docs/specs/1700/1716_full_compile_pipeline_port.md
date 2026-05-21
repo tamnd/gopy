@@ -488,6 +488,48 @@ Once D lands, the byte-equality work in 1713 can resume on a
 substrate that matches CPython, so divergences localize to the
 pass that produced them rather than to the substrate translation.
 
+### C.2 follow-up: arg-cell frame layout drift
+
+While auditing the `test_tokenize.py` panel gate for [spec 1710](./1710_v0124_lexer_tokenizer_full_port.md),
+the import chain `pkgutil` -> `functools.singledispatch` surfaced a
+mismatch between the compacted bytecode `Python/flowgraph.c:3843
+fix_cell_offsets` produces and the un-compacted frame layout
+`frame/frame.go:144 NLocalsPlusOf` allocates.
+
+`singledispatch.<locals>.register` has `co_nlocals = 8`,
+`co_cellvars = ('cls',)`, `co_freevars = ('_is_valid_dispatch_type',
+'cache_token', 'dispatch_cache', 'register', 'registry')`. The
+arg-cell `cls` overlaps with the local at slot 0, so
+`compile/flowgraph_cfg_passes.go:cfgFixCellOffsets` (already correct)
+sets `numdropped = 1` and reports `nlocalsplus = 13`. The bytecode
+oparg for `LOAD_DEREF _is_valid_dispatch_type` becomes 8 (= `nlocals
++ cellfree_idx_1 - numdropped`), and `compile/assemble_makecode.go:
+computeLocalsplusInfo` builds a 13-entry `LocalsplusNames` whose slot
+8 is `_is_valid_dispatch_type`.
+
+`frame/frame.go:144` then computes `NLocalsPlusOf(co) = len(Varnames)
++ len(Cellvars) + len(Freevars) = 14`. That keeps a separate cell
+slot at 8 for `cls` (pre-`MAKE_CELL` it is nil), and shifts every
+free var one slot up. `LOAD_DEREF 8` lands on the unset arg-cell
+slot instead of the populated `_is_valid_dispatch_type` cell and
+reports `LOAD_DEREF: <unknown> slot 8 not a cell ... got <nil>` at
+`stdlib/functools.py:922`. The dis renderer reads the same
+un-compacted layout, which is why it shows `LOAD_FAST_BORROW 11
+(dispatch_cache)` at line 931 where the bytecode actually wants
+slot 11 = `register`.
+
+| Item | Lands in | Status | Commit |
+| ---- | -------- | ------ | ------ |
+| `NLocalsPlusOf` (and `CellsStart` / `FreesStart`) read `len(LocalsplusNames)` so the frame matches the compacted bytecode | `frame/frame.go`                  | pending | - |
+| Audit `vm/build_class.go`, `vm/eval_simple.go` COPY_FREE_VARS / LOAD_CLOSURE for the same off-by-one once the frame fix lands                | `vm/`                             | pending | - |
+| `derefName` reads `LocalsplusNames[idx]` instead of indexing into `Cellvars + Freevars` so error messages name the actual slot               | `vm/eval_simple.go`               | pending | - |
+| Regression test: compile `singledispatch.<locals>.register`, run it, assert no LOAD_DEREF nil-cell fault                                      | `compile/codegen_funclike_test.go`| pending | - |
+
+Unblocks: `test_tokenize.py` gate (panel row 11 on the
+`test_tokenize.py` chain in spec 1710), and any other CPython code
+with arg-cells (`__init__(self, ...)` patterns where `self` is
+captured by a nested closure are the common case).
+
 ## Out of scope
 
 - Marshal byte layout. Spec 1713.
