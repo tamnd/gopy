@@ -26,24 +26,31 @@ const codingCookieMax = 256
 // appear on a line that is blank or comment-only. Once a line
 // containing actual code is seen the search stops, so a `coding:`
 // comment after the first statement is ignored just like in
-// CPython.
+// CPython. A line that follows a backslash-continued line carries
+// `tok->cont_line == 1` in CPython and CPython skips the cookie
+// scan on it (helpers.c:392); gopy applies the same skip via
+// contLine tracking.
 //
 // CPython: Parser/tokenizer/helpers.c:388 _PyTokenizer_check_coding_spec
 func DetectEncodingCookie(src []byte) string {
 	rest := src
+	contLine := false
 	for line := 0; line < 2 && len(rest) > 0; line++ {
 		end := lineEnd(rest)
 		head := rest[:end]
-		scan := head
-		if len(scan) > codingCookieMax {
-			scan = scan[:codingCookieMax]
+		if !contLine {
+			scan := head
+			if len(scan) > codingCookieMax {
+				scan = scan[:codingCookieMax]
+			}
+			if name := matchCodingCookie(scan); name != "" {
+				return name
+			}
+			if lineHasCode(scan) {
+				return ""
+			}
 		}
-		if name := matchCodingCookie(scan); name != "" {
-			return name
-		}
-		if lineHasCode(scan) {
-			return ""
-		}
+		contLine = len(head) > 0 && head[len(head)-1] == '\\'
 		rest = skipNewline(rest, end)
 	}
 	return ""
@@ -192,9 +199,10 @@ func normalizeEncodingName(name string) string {
 // and \r\n the same way the lexer does so the reported line matches
 // the source the user sees in their editor.
 //
-// CPython: Parser/tokenizer/helpers.c:332 ensure_utf8 (the tok_check_bom
-// / decoding_fgets pair raises a SyntaxError on the first non-UTF-8
-// byte when no PEP 263 cookie names a different encoding).
+// CPython: Parser/tokenizer/helpers.c:506 _PyTokenizer_ensure_utf8
+// (the tok_check_bom / decoding_fgets pair raises a SyntaxError on
+// the first non-UTF-8 byte when no PEP 263 cookie names a different
+// encoding).
 func ValidateUTF8(src []byte) (line int, bad byte, ok bool) {
 	line = 1
 	i := 0
@@ -217,33 +225,84 @@ func ValidateUTF8(src []byte) (line int, bad byte, ok bool) {
 			i++
 			continue
 		}
-		size := utf8Size(c)
-		if size == 0 || i+size > len(src) {
+		size := validUTF8(src[i:])
+		if size == 0 {
 			return line, c, false
-		}
-		for k := 1; k < size; k++ {
-			if src[i+k]&0xc0 != 0x80 {
-				return line, c, false
-			}
 		}
 		i += size
 	}
 	return 0, 0, true
 }
 
-// utf8Size returns the length of a UTF-8 sequence whose leading byte
-// is c, or 0 if c is not a valid leading byte. CPython's stb_lookup
-// table; we keep the masks inline because there are only four cases.
-func utf8Size(c byte) int {
-	switch {
-	case c&0xe0 == 0xc0:
-		return 2
-	case c&0xf0 == 0xe0:
-		return 3
-	case c&0xf8 == 0xf0:
-		return 4
+// validUTF8 returns the length of the UTF-8 sequence at s, or 0 if
+// s does not start a valid sequence. The function rejects every
+// byte sequence stringlib/codecs.h:utf8_decode also rejects:
+// overlong encodings (0xC0/0xC1, 0xE0 with byte2 < 0xA0, 0xF0 with
+// byte2 < 0x90), surrogates (0xED with byte2 >= 0xA0 produces
+// D800-DFFF), and overflow past U+10FFFF (0xF4 with byte2 >= 0x90,
+// 0xF5+ leading bytes). Continuation bytes must lie in 0x80-0xBF.
+//
+// CPython: Parser/tokenizer/helpers.c:446 valid_utf8
+func validUTF8(s []byte) int {
+	if len(s) == 0 {
+		return 0
 	}
-	return 0
+	c := s[0]
+	expected := 0
+	switch {
+	case c < 0x80:
+		return 1
+	case c < 0xE0:
+		if c < 0xC2 {
+			// \x80-\xBF is a continuation byte; \xC0-\xC1 would
+			// be an overlong encoding of 0000-007F.
+			return 0
+		}
+		expected = 1
+	case c < 0xF0:
+		if len(s) < 2 {
+			return 0
+		}
+		if c == 0xE0 && s[1] < 0xA0 {
+			// Overlong \xE0\x80\x80-\xE0\x9F\xBF for 0000-07FF.
+			return 0
+		}
+		if c == 0xED && s[1] >= 0xA0 {
+			// Surrogates D800-DFFF. See Unicode 5.2 table 3-7
+			// and RFC 3629.
+			return 0
+		}
+		expected = 2
+	case c < 0xF5:
+		if len(s) < 2 {
+			return 0
+		}
+		var overlongOrOverflow bool
+		if s[1] < 0x90 {
+			overlongOrOverflow = c == 0xF0
+		} else {
+			overlongOrOverflow = c == 0xF4
+		}
+		if overlongOrOverflow {
+			// 0xF0\x80\x80\x80-0xF0\x8F\xBF\xBF would re-encode
+			// 0000-FFFF; 0xF4\x90+ would overflow past U+10FFFF.
+			return 0
+		}
+		expected = 3
+	default:
+		// 0xF5-0xFF: no valid 4-byte sequence starts here.
+		return 0
+	}
+	length := expected + 1
+	if len(s) < length {
+		return 0
+	}
+	for i := 1; i <= expected; i++ {
+		if s[i] < 0x80 || s[i] >= 0xC0 {
+			return 0
+		}
+	}
+	return length
 }
 
 // TranslateNewlines is the gopy port of CPython's

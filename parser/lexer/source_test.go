@@ -22,6 +22,10 @@ func TestDetectEncodingCookie(t *testing.T) {
 		// Form-feed counts as whitespace, so a blank-but-FF first
 		// line still permits the line-2 cookie scan.
 		{"formfeed_then_cookie", "\014\n# coding: utf-8\n", "utf-8"},
+		// Backslash continuation: when line 1 ends with `\`, line 2
+		// carries cont_line == 1 in CPython and the cookie is
+		// ignored. Mirrors helpers.c:392-396.
+		{"cont_line_skips_cookie", "\\\n# coding: utf-8\n", ""},
 	}
 	for _, c := range cases {
 		got := DetectEncodingCookie([]byte(c.src))
@@ -88,5 +92,62 @@ func TestFromBytesNormalizesCRLF(t *testing.T) {
 	got := kinds(toks)
 	if len(got) < 4 {
 		t.Fatalf("short token stream: %v", got)
+	}
+}
+
+// TestValidUTF8RejectsOverlongAndSurrogates pins the full
+// stringlib/codecs.h:utf8_decode rejection set: overlong encodings
+// (\xC0 / \xC1 / \xE0\x80-\x9F / \xF0\x80-\x8F), surrogates
+// (\xED\xA0-\xBF), and overflow past U+10FFFF (\xF4\x90+, \xF5+).
+// Mirrors Parser/tokenizer/helpers.c:446 valid_utf8.
+func TestValidUTF8RejectsOverlongAndSurrogates(t *testing.T) {
+	rejects := [][]byte{
+		// Overlong 2-byte: \xC0\x80 would encode U+0000.
+		{0xC0, 0x80},
+		// Overlong 2-byte: \xC1\xBF would encode U+007F.
+		{0xC1, 0xBF},
+		// Overlong 3-byte: \xE0\x80\x80, \xE0\x9F\xBF.
+		{0xE0, 0x80, 0x80},
+		{0xE0, 0x9F, 0xBF},
+		// Surrogate: \xED\xA0\x80 (U+D800).
+		{0xED, 0xA0, 0x80},
+		// Surrogate: \xED\xBF\xBF (U+DFFF).
+		{0xED, 0xBF, 0xBF},
+		// Overlong 4-byte: \xF0\x80\x80\x80, \xF0\x8F\xBF\xBF.
+		{0xF0, 0x80, 0x80, 0x80},
+		{0xF0, 0x8F, 0xBF, 0xBF},
+		// Overflow: \xF4\x90\x80\x80 (one past U+10FFFF).
+		{0xF4, 0x90, 0x80, 0x80},
+		// Invalid leading byte: \xF5+.
+		{0xF5, 0x80, 0x80, 0x80},
+		{0xFF},
+		// Bare continuation byte.
+		{0x80},
+		// Truncated 2-byte sequence.
+		{0xC2},
+		// Bad continuation in 3-byte sequence.
+		{0xE0, 0xA0, 0x40},
+	}
+	for _, src := range rejects {
+		if n := validUTF8(src); n != 0 {
+			t.Errorf("validUTF8(%x) = %d, want 0", src, n)
+		}
+	}
+
+	accepts := []struct {
+		src  []byte
+		want int
+	}{
+		{[]byte("A"), 1},
+		{[]byte{0xC2, 0xA9}, 2},        // U+00A9 (copyright)
+		{[]byte{0xE2, 0x82, 0xAC}, 3},  // U+20AC (euro)
+		{[]byte{0xF0, 0x9F, 0x98, 0x80}, 4}, // U+1F600 (grinning face)
+		// Boundary: \xF4\x8F\xBF\xBF encodes the maximum U+10FFFF.
+		{[]byte{0xF4, 0x8F, 0xBF, 0xBF}, 4},
+	}
+	for _, c := range accepts {
+		if n := validUTF8(c.src); n != c.want {
+			t.Errorf("validUTF8(%x) = %d, want %d", c.src, n, c.want)
+		}
 	}
 }
