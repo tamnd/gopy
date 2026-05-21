@@ -443,6 +443,26 @@ func (s *State) recordError(msg string) {
 	}
 }
 
+// recordErrorWithText is recordError plus a populated Text field. Used
+// at the BOM/cookie boundary where the offending line is known but the
+// FSM has not yet ingested it, so the default Pos -> source-buffer
+// lookup the lexer normally does is unavailable.
+//
+// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn and
+// the SyntaxError builders both copy the offending line into the
+// PySyntaxErrorObject.text field when the source is in hand.
+func (s *State) recordErrorWithText(msg, text string) {
+	if s.err != nil {
+		return
+	}
+	s.err = &SyntaxError{
+		Pos:     Pos{Line: s.lineno, Col: s.col},
+		EndPos:  Pos{Line: s.lineno, Col: s.col},
+		Message: msg,
+		Text:    text,
+	}
+}
+
 // freeFStringExpressions clears the per-mode last_expr_buffer slots.
 // CPython has to free them by hand because PyMem_Malloc owns the
 // memory; in gopy the GC reclaims the slice once we drop the

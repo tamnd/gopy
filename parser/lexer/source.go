@@ -33,6 +33,18 @@ const codingCookieMax = 256
 //
 // CPython: Parser/tokenizer/helpers.c:388 _PyTokenizer_check_coding_spec
 func DetectEncodingCookie(src []byte) string {
+	name, _ := detectEncodingCookieAt(src)
+	return name
+}
+
+// detectEncodingCookieAt is the line-tracking sibling of
+// DetectEncodingCookie. The returned line is 1-based and identifies the
+// physical source line the cookie sat on (1 or 2), or 0 when no cookie
+// was found.
+//
+// CPython: Parser/tokenizer/helpers.c:388 _PyTokenizer_check_coding_spec
+// (tok->lineno is incremented by tok_underflow_string before this runs)
+func detectEncodingCookieAt(src []byte) (string, int) {
 	rest := src
 	contLine := false
 	for line := 0; line < 2 && len(rest) > 0; line++ {
@@ -44,16 +56,16 @@ func DetectEncodingCookie(src []byte) string {
 				scan = scan[:codingCookieMax]
 			}
 			if name := matchCodingCookie(scan); name != "" {
-				return name
+				return name, line + 1
 			}
 			if lineHasCode(scan) {
-				return ""
+				return "", 0
 			}
 		}
 		contLine = len(head) > 0 && head[len(head)-1] == '\\'
 		rest = skipNewline(rest, end)
 	}
-	return ""
+	return "", 0
 }
 
 // lineHasCode reports whether line contains a non-whitespace byte
@@ -128,6 +140,33 @@ func isCodingNameByte(c byte) bool {
 		return true
 	}
 	return false
+}
+
+// nthLine returns the n-th physical line (1-based) of src, stripped of
+// any trailing newline. Returns "" when n is out of range or src is
+// empty. Used at the BOM/cookie error boundary to populate the
+// SyntaxError text field, since the lexer FSM has not yet ingested
+// these bytes when the error fires.
+//
+// CPython: Parser/tokenizer/helpers.c (SyntaxError text is copied from
+// the offending line in the source buffer).
+func nthLine(src []byte, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	rest := src
+	for line := 1; line <= n; line++ {
+		end := lineEnd(rest)
+		if line == n {
+			return string(rest[:end])
+		}
+		next := skipNewline(rest, end)
+		if next == nil {
+			return ""
+		}
+		rest = next
+	}
+	return ""
 }
 
 func lineEnd(src []byte) int {

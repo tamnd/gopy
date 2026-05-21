@@ -17,6 +17,7 @@ import (
 	"io"
 
 	"github.com/tamnd/gopy/ast"
+	perrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/parser/lexer"
 	"github.com/tamnd/gopy/parser/pegen"
 )
@@ -74,10 +75,24 @@ func Parse(r io.Reader, filename string, mode Mode) (ast.Mod, error) {
 func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	// Lexer-recorded errors (PEP 263 cookie / BOM conflicts, non-utf-8
 	// source) trump anything pegen would surface: the parser cannot
-	// progress past a broken decode.
+	// progress past a broken decode. Lift the lexer's structured
+	// record into the parser-level *perrors.SyntaxError so the VM
+	// boundary can build a Python SyntaxError with lineno/offset/text
+	// populated rather than synthesising one from the message prefix.
 	// CPython: Parser/peg_api.c:73 _PyParser_ASTFromString tok->done check
 	if e := st.Err(); e != nil {
-		return nil, fmt.Errorf("SyntaxError: %s", e.Message)
+		return nil, &perrors.SyntaxError{
+			Kind: perrors.KindSyntax,
+			Pos: perrors.Pos{
+				Lineno:  e.Pos.Line,
+				ColOff:  e.Pos.Col,
+				EndLine: e.EndPos.Line,
+				EndCol:  e.EndPos.Col,
+			},
+			Filename: st.Filename(),
+			Message:  e.Message,
+			Text:     e.Text,
+		}
 	}
 	p := pegen.New(st, pegenStartRule(mode), 0)
 	node, err := pegen.Dispatch(p, pegenStartRule(mode))

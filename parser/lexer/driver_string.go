@@ -70,7 +70,7 @@ func FromBytes(src []byte, mode Mode) *State {
 		s.encoding = "utf-8"
 		hadBOM = true
 	}
-	cookie := DetectEncodingCookie(src)
+	cookie, cookieLine := detectEncodingCookieAt(src)
 	if cookie == "" && !hadBOM {
 		// No encoding declaration and no BOM: source defaults to UTF-8.
 		// CPython raises SyntaxError at the offending byte naming the
@@ -78,21 +78,32 @@ func FromBytes(src []byte, mode Mode) *State {
 		// CPython: Parser/tokenizer/helpers.c:332 ensure_utf8
 		if line, bad, ok := ValidateUTF8(src); !ok {
 			s.lineno = line
-			s.recordError(nonUTF8ErrorMessage(bad, line))
+			s.recordErrorWithText(
+				nonUTF8ErrorMessage(bad, line),
+				nthLine(src, line),
+			)
 			s.done = eEncoding
 		}
 	}
 	if name := cookie; name != "" {
 		// CPython: Parser/tokenizer/helpers.c:425 BOM vs cookie mismatch
 		if hadBOM && !isUTF8Name(name) {
-			s.recordError("encoding problem: " + name + " with BOM")
+			s.lineno = cookieLine
+			s.recordErrorWithText(
+				"encoding problem: "+name+" with BOM",
+				nthLine(src, cookieLine),
+			)
 			s.done = eEncoding
 		} else if !hadBOM {
 			s.encoding = name
 			if !isUTF8Name(name) {
 				decoded, _, err := codecs.Decode(src, name, "strict")
 				if err != nil {
-					s.recordError("encoding problem: " + name)
+					s.lineno = cookieLine
+					s.recordErrorWithText(
+						"encoding problem: "+name,
+						nthLine(src, cookieLine),
+					)
 					s.done = eEncoding
 				} else {
 					src = []byte(decoded)
