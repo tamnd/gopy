@@ -112,7 +112,7 @@ underway, TODO = not started.
 | P14 | Test fixtures: vendor `Lib/test/tokenizedata/bad_coding.py`, `bad_coding2.py`, `coding20731.py`, plus `Lib/test/encoded_modules/__init__.py`, `module_iso_8859_1.py`, `module_koi8_r.py` into `test/cpython/tokenizedata/` and `test/cpython/encoded_modules/`. Required by `test_bad_coding`, `test_bad_coding2`, `test_import_encoded_module`, `test_20731`. | DONE | pending |
 | P15 | `__import__` SyntaxError surfacing: when an imported source file's tokeniser emits SyntaxError (bad cookie, bad UTF-8), `Lib/importlib/_bootstrap_external.py:846 _LoaderBasics.exec_module` must propagate the error. Required by `test_bad_coding2`. | DONE | pending |
 | P16 | Long-cookie-line scanning: re-port `Parser/tokenizer/helpers.c:163 get_coding_spec` so cookie detection survives lines that fill the read buffer (`#<BUFSIZ spaces>coding:iso8859-15`). Required by `test_long_first_coding_line`, `test_long_second_coding_line`. | TODO | pending |
-| P17 | Round-tripped SyntaxError text bytes: when SyntaxError surfaces non-utf-8 source text the lexer must record the raw bytes; the descriptor returns them as a Python str via `decode(errors='replace')` parity. Required by `test_non_utf8_{second,third}_line_error`, `test_non_utf8_shebang_error`. | TODO | pending |
+| P17 | Round-tripped SyntaxError text bytes: when SyntaxError surfaces non-utf-8 source text the lexer must record the raw bytes; the descriptor returns them as a Python str via `decode(errors='replace')` parity. Required by `test_non_utf8_{second,third}_line_error`, `test_non_utf8_shebang_error`. | DONE | pending |
 | P18 | `compile()` pyc cleanup parity: after `__import__` succeeds, the `.pyc` file must exist so `test_file_parse`'s `unlink(filename + "c")` resolves. Port `Lib/importlib/_bootstrap_external.py:929 SourceFileLoader.set_data` and the `__pycache__` directory creation chain. | TODO | pending |
 | P19 | Re-run `test_source_encoding.py`; flip MANIFEST and spec 1710 panel row to green. | TODO | pending |
 
@@ -402,6 +402,16 @@ implicit utf-8 string conversion, which substitutes U+FFFD using
 Go's RuneError mapping rather than CPython's `error='replace'`
 codec. The port routes the line through `codecs.Decode(bytes,
 "utf-8", "replace")` so the replacement bytes match.
+
+Status: done. `vm/eval_unwind.go syntaxExceptionFromParserError`
+now routes `se.Text` through `codecs.Decode(se.Text, "utf-8",
+"replace")` before wrapping it in `objects.NewStr`. The Python
+`*Unicode.v` field ends up holding canonical UTF-8 bytes
+(`#second\xef\xbf\xbd`) instead of the raw single-byte form
+(`#second\xa4`), so equality against
+`src.splitlines()[i].decode(errors='replace')` succeeds.
+`test_non_utf8_{second,third}_line_error` and
+`test_non_utf8_shebang_error` now pass.
 
 ### P18: pyc cleanup parity
 

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/tamnd/gopy/codecs"
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/gil"
 	"github.com/tamnd/gopy/objects"
@@ -181,7 +182,22 @@ func syntaxExceptionFromParserError(se *parsererrors.SyntaxError) *pyerrors.Exce
 	}
 	text := objects.None()
 	if se.Text != "" {
-		text = objects.NewStr(se.Text)
+		// CPython stores SyntaxError.text as a proper str. When the
+		// offending source line has non-utf-8 bytes the tokenizer
+		// captures them raw; CPython's PySys_FormatStderr and the
+		// constructor paths route the bytes through
+		// PyUnicode_DecodeUTF8 with errors='replace' so each invalid
+		// byte lands as U+FFFD. Mirror that here so Python-level
+		// equality against `src.splitlines()[i].decode(errors='replace')`
+		// matches.
+		//
+		// CPython: Objects/unicodeobject.c:4756 PyUnicode_DecodeUTF8Stateful
+		decoded, _, derr := codecs.Decode([]byte(se.Text), "utf-8", "replace")
+		if derr == nil {
+			text = objects.NewStr(decoded)
+		} else {
+			text = objects.NewStr(se.Text)
+		}
 	}
 	offset := objects.None()
 	if se.Pos.ColOff > 0 {
