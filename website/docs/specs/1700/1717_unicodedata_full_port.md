@@ -82,7 +82,7 @@ character names.
 | P4 | `is_normalized(form, str)` (quickcheck path + canonical verify) | done | 106b099 |
 | P5 | `category`, `bidirectional`, `combining`, `mirrored`. `category` falls back to Go's `unicode` tables when the CPython record returns the default value | done | 106b099 |
 | P6 | `east_asian_width(char)` returning "F/H/W/Na/A/N". Unblocks `stdlib/traceback.py:975` for non-ASCII traceback rendering | done | 106b099 |
-| P7 | `decimal`, `digit`, `numeric` (with default arg semantics: raise ValueError or return default) | pending | - |
+| P7 | `decimal`, `digit`, `numeric` (with default arg semantics: raise ValueError or return default) | done | a34be17 |
 | P8 | Character-name generator: emit name trie from `unicodename_db.h`. Wire `name(char[, default])` and `lookup(name)`. Unblocks `\N{NAME}` in `re/_parser.py` | pending | - |
 | P9 | `decomposition(char)` returning the hex form (`"<compat> 0020"` etc.) | done | 106b099 |
 | P10 | `UCD` type + `ucd_3_2_0` legacy instance (Unicode 3.2 snapshot used by IDNA) | pending | - |
@@ -226,9 +226,13 @@ Go destination function, and a status tick.
 | CPython function | CPython line | Go destination | Status |
 | ---------------- | ------------ | -------------- | ------ |
 | `_getrecord_ex`                           | 59   | `module/unicodedata/module.go` `getRecord`           | done |
-| `unicodedata_UCD_decimal_impl`            | 132  | `module/unicodedata/stubs.go` `decimalBuiltin`       | stub |
-| `unicodedata_UCD_digit_impl`              | 184  | `module/unicodedata/stubs.go` `digitBuiltin`         | stub |
-| `unicodedata_UCD_numeric_impl`            | 218  | `module/unicodedata/stubs.go` `numericBuiltin`       | stub |
+| `unicodedata_UCD_decimal_impl`            | 132  | `module/unicodedata/numeric.go` `decimalBuiltin`     | done |
+| `unicodedata_UCD_digit_impl`              | 184  | `module/unicodedata/numeric.go` `digitBuiltin`       | done |
+| `unicodedata_UCD_numeric_impl`            | 218  | `module/unicodedata/numeric.go` `numericBuiltin`     | done |
+| `gettyperecord` (unicodectype.c)          | 43   | `module/unicodedata/numeric.go` `getTypeRecord`      | done |
+| `_PyUnicode_ToDecimalDigit` (unicodectype.c) | 104 | `module/unicodedata/numeric.go` `decimalBuiltin`    | done |
+| `_PyUnicode_ToDigit` (unicodectype.c)     | 121  | `module/unicodedata/numeric.go` `digitBuiltin`       | done |
+| `_PyUnicode_ToNumeric` (unicodetype_db.h) | 4513 | `module/unicodedata/type_gen.go` `numericValues`     | done |
 | `unicodedata_UCD_category_impl`           | 264  | `module/unicodedata/properties.go` `categoryBuiltin` | done |
 | `unicodedata_UCD_bidirectional_impl`      | 291  | `module/unicodedata/properties.go` `bidirectionalBuiltin` | done |
 | `unicodedata_UCD_combining_impl`          | 320  | `module/unicodedata/properties.go` `combiningBuiltin` | done |
