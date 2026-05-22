@@ -21,6 +21,7 @@ import (
 	"github.com/tamnd/gopy/gil"
 	"github.com/tamnd/gopy/objects"
 	parsererrors "github.com/tamnd/gopy/parser/errors"
+	"github.com/tamnd/gopy/symtable"
 	"github.com/tamnd/gopy/traceback"
 )
 
@@ -92,6 +93,13 @@ func synthesizeException(err error) *pyerrors.Exception {
 	var se *parsererrors.SyntaxError
 	if errors.As(err, &se) {
 		return pyerrors.SyntaxFromParser(se)
+	}
+	// Structured symtable SyntaxError: same idea as the parser branch,
+	// but the location data lives in symtable.SyntaxError.Pos rather
+	// than the parser record.
+	var stse *symtable.SyntaxError
+	if errors.As(err, &stse) {
+		return pyerrors.SyntaxFromSymtable(stse)
 	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.

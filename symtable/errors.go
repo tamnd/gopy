@@ -19,10 +19,13 @@ type SyntaxError struct {
 	Pos      ast.Pos
 }
 
-// Error implements the error interface.
+// Error implements the error interface. The "SyntaxError:" prefix lets
+// the VM's prefix-based unwind table promote bare symtable errors to a
+// real SyntaxError instance, the same effect CPython gets for free via
+// PyErr_SetObject(PyExc_SyntaxError, ...).
 //
 // CPython: Python/symtable.c PyErr_Format(PyExc_SyntaxError, ...) message body
-func (e *SyntaxError) Error() string { return e.Msg }
+func (e *SyntaxError) Error() string { return "SyntaxError: " + e.Msg }
 
 // Error message formats. Each constant is the printf template from
 // symtable.c with `%U` (PyObject) replaced by `%s`. Wrappers below

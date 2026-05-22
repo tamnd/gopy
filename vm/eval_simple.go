@@ -871,17 +871,28 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		return e.advance(), true, nil
 
 	case compile.LOAD_FROM_DICT_OR_DEREF:
-		// PEP 695 helper: look up name in the dict at TOS first; if absent,
-		// fall back to LOAD_DEREF semantics. The dict path stays a stub
-		// and we dispatch through to LOAD_DEREF. oparg is the localsplus
-		// offset of the cell, post fix_cell_offsets.
+		// Look up co_localsplusnames[oparg] in the mapping at TOS first
+		// (the class namespace at class-body load time, the type-params
+		// dict for PEP 695); if absent, fall back to the cell at the
+		// same localsplus slot. This is what makes a class-body
+		// `locals()["x"] = 43` override an enclosing closure x.
 		//
 		// CPython: Python/bytecodes.c:1887 LOAD_FROM_DICT_OR_DEREF
-		_ = e.popObject() // discard the class dict TOS
-		ref := e.f.LocalsPlus[int(oparg)]
+		classDict := e.popObject()
+		co := e.f.Code
+		idx := int(oparg)
+		if idx < 0 || idx >= len(co.LocalsplusNames) {
+			return 0, true, fmt.Errorf("SystemError: LOAD_FROM_DICT_OR_DEREF oparg %d out of range", idx)
+		}
+		name := objects.NewStr(co.LocalsplusNames[idx])
+		if v, gerr := objects.GetItem(classDict, name); gerr == nil && v != nil {
+			e.pushObject(v)
+			return e.advance(), true, nil
+		}
+		ref := e.f.LocalsPlus[idx]
 		cell, ok := ref.AsObject().(*objects.Cell)
 		if !ok || cell.Contents == nil {
-			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
+			return 0, true, formatExcUnbound(co, idx)
 		}
 		e.pushObject(cell.Contents)
 		return e.advance(), true, nil

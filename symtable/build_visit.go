@@ -45,6 +45,17 @@ func (b *builder) visitStmtDef(s ast.Stmt) (bool, error) {
 		return true, nil
 	case *ast.ImportFrom:
 		for _, a := range n.Names {
+			// `from X import *` parses with the alias's position
+			// unset (the star token has no inline location info on
+			// the parser side). Fall back to the statement's
+			// position so the SyntaxError we may raise here lands
+			// with a real lineno / col_offset, matching CPython
+			// where the alias inherits the import's source span.
+			//
+			// CPython: Parser/action_helpers.c _PyPegen_alias_for_star
+			if a.Pos == ast.NoPos {
+				a.Pos = n.Pos
+			}
 			if err := b.visitAlias(a); err != nil {
 				return true, err
 			}

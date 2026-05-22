@@ -141,15 +141,6 @@ func (c *Compiler) emitNamed(name string, mode nameMode, l ast.Pos) error {
 // CPython: Python/flowgraph.c:3844 fix_cell_offsets
 func (c *Compiler) emitDeref(name string, mode nameMode, l ast.Pos) error {
 	scope := c.scope.GetScope(name)
-	var op Opcode
-	switch mode {
-	case opLoad:
-		op = LOAD_DEREF
-	case opStore:
-		op = STORE_DEREF
-	case opDelete:
-		op = DELETE_DEREF
-	}
 	pool := poolCellVars
 	if scope == symtable.Free {
 		pool = poolFreeVars
@@ -157,6 +148,28 @@ func (c *Compiler) emitDeref(name string, mode nameMode, l ast.Pos) error {
 	idx := c.poolIndex(&pool, name)
 	if scope == symtable.Free {
 		idx += len(c.unit().CellVars)
+	}
+	var op Opcode
+	switch mode {
+	case opLoad:
+		// In a class body, a deref load goes through
+		// LOAD_LOCALS + LOAD_FROM_DICT_OR_DEREF so a class-level
+		// `locals()["x"] = ...` can shadow the closure cell. Comprehensions
+		// inlined into the class body keep plain LOAD_DEREF, but gopy does
+		// not inline comprehensions today so the inlined-comp branch is
+		// inert here.
+		//
+		// CPython: Python/codegen.c:3215 codegen_nameop (ClassBlock arm)
+		if c.scope.Type == symtable.ClassBlock {
+			c.seq().Addop(LOAD_LOCALS, 0, l)
+			op = LOAD_FROM_DICT_OR_DEREF
+		} else {
+			op = LOAD_DEREF
+		}
+	case opStore:
+		op = STORE_DEREF
+	case opDelete:
+		op = DELETE_DEREF
 	}
 	c.seq().Addop(op, int32(idx), l)
 	return nil
