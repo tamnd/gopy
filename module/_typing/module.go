@@ -1,0 +1,66 @@
+// Package typingmod is the gopy port of CPython's _typing builtin
+// (Modules/_typingmodule.c). The module is small: it re-exports the
+// TypeVar / ParamSpec / TypeVarTuple / Generic / Union / TypeAliasType
+// types living in interp->cached_objects so Lib/typing.py can
+// `from _typing import (...)` them, plus the _idfunc identity
+// accelerator and the NoDefault sentinel.
+//
+// CPython: Modules/_typingmodule.c:1 _typing module
+package typingmod
+
+import (
+	"fmt"
+
+	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/objects"
+)
+
+func init() {
+	_ = imp.AppendInittab("_typing", buildModule)
+}
+
+// idfunc is the _typing._idfunc accelerator: Py_NewRef(x). typing.py
+// uses it as the default __call__ for NewType instances so subscripting
+// stays cheap.
+//
+// CPython: Modules/_typingmodule.c:30 _typing__idfunc
+func idfunc(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: _idfunc() takes exactly 1 argument (%d given)", len(args))
+	}
+	return args[0], nil
+}
+
+// buildModule materializes the _typing module dict. Mirrors
+// _typing_exec.
+//
+// CPython: Modules/_typingmodule.c:46 _typing_exec
+func buildModule() (*objects.Module, error) {
+	m := objects.NewModule("_typing")
+	dd := m.Dict()
+
+	entries := []struct {
+		name string
+		val  objects.Object
+	}{
+		{"TypeVar", objects.TypeVarType},
+		{"TypeVarTuple", objects.TypeVarTupleType},
+		{"ParamSpec", objects.ParamSpecType},
+		{"ParamSpecArgs", objects.ParamSpecArgsType},
+		{"ParamSpecKwargs", objects.ParamSpecKwargsType},
+		{"Generic", objects.GenericType},
+		{"TypeAliasType", objects.TypeAliasObjType},
+		{"Union", objects.UnionTypeType},
+		{"NoDefault", objects.NoDefault()},
+	}
+	for _, e := range entries {
+		if err := dd.SetItem(objects.NewStr(e.name), e.val); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := dd.SetItem(objects.NewStr("_idfunc"), objects.NewBuiltinFunction("_idfunc", idfunc)); err != nil {
+		return nil, err
+	}
+	return m, nil
+}

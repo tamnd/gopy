@@ -219,6 +219,15 @@ import (
 	// CPython: Modules/_opcode.c:422 _opcode_exec
 	_ "github.com/tamnd/gopy/module/_opcode"
 
+	// Built-in module: _typing. Registers itself via
+	// module/_typing/module.go init(). 1:1 port of
+	// Modules/_typingmodule.c: re-exports TypeVar / ParamSpec /
+	// TypeVarTuple / ParamSpecArgs / ParamSpecKwargs / Generic /
+	// TypeAliasType / Union / NoDefault plus the _idfunc identity
+	// accelerator so Lib/typing.py imports cleanly.
+	// CPython: Modules/config.c.in {"_typing", PyInit__typing}
+	_ "github.com/tamnd/gopy/module/_typing"
+
 	// Pure-Python shim modules backed by stdlib vendored .py files.
 	// Each registers itself via an init() that calls imp.AppendInittab.
 	_ "github.com/tamnd/gopy/module/argparse"
