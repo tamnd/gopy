@@ -12,8 +12,20 @@ package intrinsics
 import (
 	"errors"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/state"
+)
+
+// Code-object flag bits for CO_COROUTINE / CO_ASYNC_GENERATOR. Mirror
+// the bit values in Include/cpython/code.h so the stopiteration_error
+// port can branch on the frame's flags without pulling the compile
+// package in (compile imports objects, which would invert the layering).
+//
+// CPython: Include/cpython/code.h CO_COROUTINE / CO_ASYNC_GENERATOR
+const (
+	coCoroutine      = 0x0080
+	coAsyncGenerator = 0x0200
 )
 
 // Unary is one CALL_INTRINSIC_1 entry.
@@ -58,12 +70,48 @@ func UnaryImportStar(ts *state.Thread, v objects.Object) (objects.Object, error)
 	return nil, notImplemented("UnaryImportStar", "import system lives in 1683")
 }
 
-// UnaryStopIterationError raises a RuntimeError wrapping a
-// StopIteration that escaped a generator (PEP 479).
+// UnaryStopIterationError wraps a StopIteration that escaped a
+// generator in a RuntimeError (PEP 479). When the surrounding frame is
+// an async generator or coroutine the wrapper message changes; when an
+// async generator raises StopAsyncIteration that is also wrapped.
+// Anything else passes through unchanged, matching CPython's
+// Py_NewRef(exc) tail.
 //
-// CPython: Python/intrinsics.c stopiteration_error
+// CPython: Python/intrinsics.c:142 stopiteration_error
 func UnaryStopIterationError(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryStopIterationError", "RuntimeError wrap needs exception module 1686")
+	exc, ok := v.(*pyerrors.Exception)
+	if !ok {
+		return v, nil
+	}
+	var flags int
+	if objects.CurrentFrameHook != nil {
+		if f := objects.CurrentFrameHook(); f != nil {
+			if c := f.FrameCode(); c != nil {
+				flags = c.Flags
+			}
+		}
+	}
+	msg := ""
+	switch {
+	case pyerrors.Match(exc, pyerrors.PyExc_StopIteration):
+		switch {
+		case flags&coAsyncGenerator != 0:
+			msg = "async generator raised StopIteration"
+		case flags&coCoroutine != 0:
+			msg = "coroutine raised StopIteration"
+		default:
+			msg = "generator raised StopIteration"
+		}
+	case flags&coAsyncGenerator != 0 && pyerrors.Match(exc, pyerrors.PyExc_StopAsyncIteration):
+		msg = "async generator raised StopAsyncIteration"
+	}
+	if msg == "" {
+		return v, nil
+	}
+	wrapped := pyerrors.New(pyerrors.PyExc_RuntimeError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	wrapped.Cause = exc
+	wrapped.Context = exc
+	return wrapped, nil
 }
 
 // UnaryAsyncGenWrap builds an _PyAsyncGenWrappedValue around v.
@@ -75,9 +123,9 @@ func UnaryAsyncGenWrap(ts *state.Thread, v objects.Object) (objects.Object, erro
 
 // UnaryUnaryPositive computes +v via the type's __pos__ slot.
 //
-// CPython: Python/intrinsics.c unary_pos
+// CPython: Python/intrinsics.c:186 unary_pos
 func UnaryUnaryPositive(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryUnaryPositive", "number protocol slot dispatch in 1684")
+	return objects.NumberPositive(v)
 }
 
 // UnaryListToTuple freezes a list (built by a comprehension) into a tuple.
