@@ -54,25 +54,35 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	if err != nil {
 		return nil, err
 	}
+	// Bases that survive __mro_entries__ resolution must all be types
+	// once a real type metaclass is in play, but CPython lets non-type
+	// metaclasses run with arbitrary bases. Keep the typed slice for
+	// the metaclass-winner calculation and fall back to the resolved
+	// slice (basesTuple) for the actual call to meta(...).
+	basesTuple := objects.NewTuple(resolved)
 	bases := make([]*objects.Type, 0, len(resolved))
+	allTypes := true
 	for _, b := range resolved {
 		t, ok := b.(*objects.Type)
 		if !ok {
-			return nil, fmt.Errorf("TypeError: __build_class__: base is not a type, got %s", b.Type().Name)
+			allTypes = false
+			continue
 		}
 		bases = append(bases, t)
 	}
 
 	// kwargs may carry metaclass. Pull it out before forwarding the
 	// rest to the metaclass call (CPython removes it from mkw before
-	// the meta(name, bases, ns, **mkw) dispatch).
-	var meta *objects.Type
+	// the meta(name, bases, ns, **mkw) dispatch). metaclass can be any
+	// callable; CPython tracks isclass to decide whether the metaclass
+	// winner calculation runs.
+	//
+	// CPython: Python/bltinmodule.c:147 PyDict_Pop(mkw, &_Py_ID(metaclass), &meta)
+	var meta objects.Object
+	isclass := false
 	if mc, ok := kwargs["metaclass"]; ok {
-		mt, ok := mc.(*objects.Type)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: metaclass must be a type, not %s", mc.Type().Name)
-		}
-		meta = mt
+		meta = mc
+		_, isclass = mc.(*objects.Type)
 		delete(kwargs, "metaclass")
 	}
 	if meta == nil {
@@ -81,27 +91,25 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		} else {
 			meta = objects.TypeType()
 		}
+		isclass = true
 	}
 	// PEP 3115 metaclass winner: walk bases and pick the most-derived
-	// metaclass. CPython: Python/bltinmodule.c:131 builtin___build_class__
-	// (_Py_CalculateMetaclass call).
-	winner, err := calculateMetaclass(meta, bases)
-	if err != nil {
-		return nil, err
+	// metaclass. Skipped when meta is not a class.
+	//
+	// CPython: Python/bltinmodule.c:172 _PyType_CalculateMetaclass
+	if isclass && allTypes {
+		winner, err := calculateMetaclass(meta.(*objects.Type), bases)
+		if err != nil {
+			return nil, err
+		}
+		meta = winner
 	}
-	meta = winner
 
 	// Call meta.__prepare__(name, bases, **kwds) to get the class
 	// namespace. If __prepare__ is not defined, fall back to a plain
 	// dict as CPython does.
 	//
-	// CPython: Python/bltinmodule.c:131 builtin___build_class__
-	// (_PyObject_CallMethodIdObjArgs(meta, &PyId___prepare__, ...))
-	basesObjs := make([]objects.Object, len(bases))
-	for i, b := range bases {
-		basesObjs[i] = b
-	}
-	basesTuple := objects.NewTuple(basesObjs)
+	// CPython: Python/bltinmodule.c:183 PyObject_GetOptionalAttr(meta, __prepare__)
 	var ns objects.Object
 	prep, prepErr := objects.GetAttr(meta, objects.NewStr("__prepare__"))
 	if prepErr == nil && prep != nil {

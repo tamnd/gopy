@@ -32,6 +32,17 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c:4036 type_init
 	SetTypeDescr(typeType, "__init__", NewMethodDescr(typeType, "__init__", typeInitDescr))
+	// type.__prepare__(name, bases, /, **kwds) is the default classmethod
+	// that returns a fresh empty dict. CPython exposes it via the
+	// METH_CLASS row in type_methods so subclass-metaclasses that fall
+	// back to super().__prepare__() actually have something to resolve.
+	//
+	// CPython: Objects/typeobject.c:6609 type_methods __prepare__
+	// CPython: Objects/typeobject.c:6580 type_prepare
+	SetTypeDescr(typeType, "__prepare__", NewClassMethod(NewBuiltinFunction("type.__prepare__",
+		func(_ []Object, _ map[string]Object) (Object, error) {
+			return NewDict(), nil
+		})))
 }
 
 // typeInitDescr is the tp_init slot wrapper for type. Accepts 1 or 3

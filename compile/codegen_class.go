@@ -113,6 +113,14 @@ func (c *Compiler) emitClassBuildCall(s *ast.ClassDef) error {
 // (the splice-extra-positional branch is what the generic class uses
 // to land .generic_base ahead of the user bases)
 func (c *Compiler) emitClassCallArgs(s *ast.ClassDef, withGenericBase bool) error {
+	// codegen_call_helper_impl runs codegen_validate_keywords first so
+	// `class C(metaclass=type, metaclass=type)` raises SyntaxError at
+	// compile time rather than tumbling through to __build_class__.
+	//
+	// CPython: Python/codegen.c:4254 codegen_call_helper_impl
+	if err := c.validateKeywords(s.Keywords); err != nil {
+		return err
+	}
 	if hasStarArg(s.Bases) || hasStarStar(s.Keywords) {
 		return c.emitClassCallArgsEx(s, withGenericBase)
 	}
