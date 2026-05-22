@@ -66,6 +66,19 @@ func (s *State) nextC() int {
 				s.lineno += s.pendingLineno
 				s.pendingLineno = 0
 			}
+			// CPython's tok_underflow_string sets tok->line_start = tok->cur
+			// every time it reveals one more line of the buffer
+			// (Parser/tokenizer/string_tokenizer.c:22). gopy preloads the
+			// whole source so there is no per-line underflow; mirror the
+			// effect by snapping line_start to the position right after
+			// the most recent '\n' before returning the next byte. The
+			// scanners that walk past '\n' inside string literals
+			// (scanString, tokGetFStringMode) rely on this so the
+			// surrounding NEWLINE token gets a column relative to the
+			// physical line it actually sits on.
+			if s.cur > 0 && s.buf[s.cur-1] == '\n' && s.lineStart != s.cur {
+				s.lineStart = s.cur
+			}
 			s.col++
 			c := int(s.buf[s.cur])
 			s.cur++
