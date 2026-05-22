@@ -163,11 +163,20 @@ func (s *State) tokGetNormalMode() Tok {
 			}
 			if s.pendin < 0 {
 				s.pendin++
+				// DEDENT col reports the post-indent column (where the
+				// first non-whitespace byte sits), not the start-of-line
+				// column captured before indentNL ran. CPython derives
+				// the col from p_start - line_start so a partial dedent
+				// from 4 spaces back to 2 surfaces at col 2.
+				s.startCol = s.col
 				return s.tokenSetup(token.DEDENT, start, end)
 			}
 			s.pendin--
 			if s.tokExtraTokens {
 				start = s.lineStart
+				// INDENT spans line_start..cur. Stamp startCol=0 (line
+				// start) so the col offsets pair (0, indent_width).
+				s.startCol = 0
 			}
 			return s.tokenSetup(token.INDENT, start, end)
 		}
@@ -885,7 +894,9 @@ func (s *State) scanOperator(c int) Tok {
 	var tok Tok
 	switch c {
 	case '(', '[', '{':
-		s.pushParen(byte(c))
+		if !s.pushParen(byte(c)) {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
 		// CPython bumps curly_bracket_depth on every opener, not just
 		// `{`. The misleading name is upstream's: the counter tracks
 		// nesting depth of any bracket while inside an f-string so the
@@ -899,7 +910,9 @@ func (s *State) scanOperator(c int) Tok {
 		}
 		tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	case ')', ']', '}':
-		s.popParen(byte(c))
+		if !s.popParen(byte(c)) {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
 		// Inside an f-string expression, after popping, a `}` that
 		// brings curlyBracketDepth back down to exprStartDepth closes
 		// the expression and re-enters f-string mode.
@@ -1001,25 +1014,40 @@ func (s *State) scanOperator(c int) Tok {
 	return tok
 }
 
-func (s *State) pushParen(c byte) {
+// pushParen records the opening bracket. Returns false (with error
+// pinned) when MAXLEVEL is exceeded.
+//
+// CPython: Parser/lexer/lexer.c:1302 (opening-bracket branch in
+// tok_get_normal_mode).
+func (s *State) pushParen(c byte) bool {
 	if s.level >= maxLevel {
 		s.done = eToken
 		s.recordError("too many nested parentheses")
-		return
+		return false
 	}
 	s.parenStack[s.level] = c
 	s.parenLineno[s.level] = s.lineno
 	s.parenCol[s.level] = s.col - 1
 	s.level++
+	return true
 }
 
-func (s *State) popParen(c byte) {
+// popParen consumes the closing bracket. Returns false (with error
+// pinned) for unmatched closers or mismatched pairs when
+// tok_extra_tokens is off, mirroring CPython's behavior of returning
+// ERRORTOKEN in those cases.
+//
+// CPython: Parser/lexer/lexer.c:1316 (closing-bracket branch in
+// tok_get_normal_mode).
+func (s *State) popParen(c byte) bool {
 	if s.level == 0 {
+		if s.tokExtraTokens {
+			return true
+		}
 		s.done = eToken
-		// CPython: Parser/tokenizer/helpers.c:184 surfaces "unmatched ')'"
-		// pinned to the closing-bracket location.
+		// CPython: Parser/lexer/lexer.c:1324 syntaxerror "unmatched '%c'".
 		s.recordError(fmt.Sprintf("unmatched '%c'", c))
-		return
+		return false
 	}
 	s.level--
 	open := s.parenStack[s.level]
@@ -1032,16 +1060,27 @@ func (s *State) popParen(c byte) {
 	case '{':
 		want = '}'
 	}
-	if c != want {
-		s.done = eToken
-		// CPython: Parser/tokenizer/helpers.c:201 surfaces the long form
-		// "closing parenthesis '%c' does not match opening parenthesis
-		// '%c' on line %d".
+	if c == want {
+		return true
+	}
+	if s.tokExtraTokens {
+		return true
+	}
+	s.done = eToken
+	// CPython: Parser/lexer/lexer.c:1345 — same-line uses the short
+	// form without "on line N", different lines pin the opener line.
+	if s.parenLineno[s.level] != s.lineno {
 		s.recordError(fmt.Sprintf(
 			"closing parenthesis '%c' does not match opening parenthesis '%c' on line %d",
 			c, open, s.parenLineno[s.level],
 		))
+	} else {
+		s.recordError(fmt.Sprintf(
+			"closing parenthesis '%c' does not match opening parenthesis '%c'",
+			c, open,
+		))
 	}
+	return false
 }
 
 // endmarker emits the terminal ENDMARKER, also flushing any pending
