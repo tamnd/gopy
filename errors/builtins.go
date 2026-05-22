@@ -1,6 +1,10 @@
 package errors
 
-import "github.com/tamnd/gopy/objects"
+import (
+	stderrors "errors"
+
+	"github.com/tamnd/gopy/objects"
+)
 
 // The exception class hierarchy ported in v0.3. Each Type entry has
 // the same MRO shape as CPython. The class objects are created lazily
@@ -89,6 +93,36 @@ func newExcType(name string, bases []*objects.Type) *objects.Type {
 	// = PyObject_GenericGetAttr, tp_setattro = PyObject_GenericSetAttr)
 	t.Getattro = objects.GenericGetAttr
 	t.Setattro = objects.GenericSetAttr
+	// BaseException carries __repr__ / __str__ method descriptors that
+	// wrap BaseException_repr / BaseException_str. Without these, a
+	// user subclass like `class BozoError(Exception): pass` runs through
+	// fixupCallReprStr which finds object.__repr__ via MRO and installs
+	// slot_tp_repr, so repr(BozoError()) returns the generic
+	// "<__main__.BozoError object at 0x...>" instead of "BozoError()".
+	//
+	// CPython: Objects/typeobject.c add_operators (slot wrapper for
+	// each non-NULL slot in slotdefs). The repr/str rows install
+	// __repr__ / __str__ descriptors that wrap tp_repr / tp_str.
+	objects.SetTypeDescr(t, "__repr__", objects.NewMethodDescr(t, "__repr__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 1 {
+			return nil, stderrors.New("TypeError: __repr__ expected 1 argument")
+		}
+		s, err := excRepr(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	}))
+	objects.SetTypeDescr(t, "__str__", objects.NewMethodDescr(t, "__str__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 1 {
+			return nil, stderrors.New("TypeError: __str__ expected 1 argument")
+		}
+		s, err := excStr(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	}))
 	return t
 }
 
