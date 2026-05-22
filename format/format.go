@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tamnd/gopy/pystrconv"
 )
@@ -156,8 +157,8 @@ func FormatString(s string, spec Spec) (string, error) {
 		return "", ErrInvalidSpec
 	}
 	body := s
-	if spec.Precision >= 0 && spec.Precision < len(body) {
-		body = body[:spec.Precision]
+	if spec.Precision >= 0 && spec.Precision < utf8.RuneCountInString(body) {
+		body = truncateRunes(body, spec.Precision)
 	}
 	align := spec.Align
 	if align == 0 {
@@ -170,11 +171,31 @@ func FormatString(s string, spec Spec) (string, error) {
 	return pad(body, spec.Width, align, fill), nil
 }
 
+// truncateRunes returns the prefix of s containing at most n code
+// points, mirroring CPython's "Truncate to the precision" step on
+// string targets where precision counts characters, not bytes.
+//
+// CPython: Python/formatter_unicode.c:872 format_string_internal
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
+
 func pad(body string, width int, align byte, fill rune) string {
-	if width <= len(body) {
+	bodyLen := utf8.RuneCountInString(body)
+	if width <= bodyLen {
 		return body
 	}
-	missing := width - len(body)
+	missing := width - bodyLen
 	fillStr := strings.Repeat(string(fill), missing)
 	switch align {
 	case '<':
