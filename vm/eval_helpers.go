@@ -1013,7 +1013,9 @@ func (e *evalState) listExtend(list, iter objects.Object) int32 {
 	return 0
 }
 
-// listAppendTakeRef wraps _PyList_AppendTakeRef.
+// listAppendTakeRef wraps _PyList_AppendTakeRef. CPython steals the
+// item ref. gopy's dispatch arm drop(1) after the call will Decref the
+// item slot, so we Incref here to keep the list's owned reference alive.
 //
 // CPython: Objects/listobject.c:362 _PyList_AppendTakeRef
 func (e *evalState) listAppendTakeRef(list, item objects.Object) int32 {
@@ -1022,11 +1024,14 @@ func (e *evalState) listAppendTakeRef(list, item objects.Object) int32 {
 		e.pendingErr = errors.New("TypeError: _PyList_AppendTakeRef expected list")
 		return -1
 	}
+	objects.Incref(item)
 	l.Append(item)
 	return 0
 }
 
-// setAddTakeRef wraps _PySet_AddTakeRef.
+// setAddTakeRef wraps _PySet_AddTakeRef. Steal semantics; balance the
+// dispatch arm's drop(1) by Incref'ing the stored element so the set's
+// reference outlives the popped stack slot.
 //
 // CPython: Objects/setobject.c:2433 _PySet_AddTakeRef
 func (e *evalState) setAddTakeRef(set, elem objects.Object) int32 {
@@ -1035,6 +1040,7 @@ func (e *evalState) setAddTakeRef(set, elem objects.Object) int32 {
 		e.pendingErr = errors.New("TypeError: _PySet_AddTakeRef expected set")
 		return -1
 	}
+	objects.Incref(elem)
 	if err := s.Add(elem); err != nil {
 		e.pendingErr = err
 		return -1
@@ -1280,6 +1286,14 @@ func (e *evalState) unicodeJoinArray(sep objects.Object, items []objects.Object,
 // since the action body's `values[oparg]` sized input is rendered as a
 // peek loop above) and the count.
 //
+// CPython steals refs from the stack array (no per-item Py_INCREF, and
+// the surrounding STACK_SHRINK does not Py_DECREF). gopy's translator
+// emits an unconditional e.drop(oparg) after this call which Closes
+// each stack slot and Decref's its object, so the items must be Incref'd
+// here to balance the impending decref. Without this, items with a
+// non-trivial Dealloc (e.g. slice via sliceFreeList) get torn down
+// while the new tuple still references them.
+//
 // CPython: Objects/tupleobject.c:226 _PyTuple_FromStackRefStealOnSuccess
 func (e *evalState) tupleFromStackRef(values []stackref.Ref, n uint32) objects.Object {
 	if int(n) > len(values) {
@@ -1289,11 +1303,14 @@ func (e *evalState) tupleFromStackRef(values []stackref.Ref, n uint32) objects.O
 	items := make([]objects.Object, n)
 	for i := range items {
 		items[i] = values[i].AsObject()
+		objects.Incref(items[i])
 	}
 	return objects.NewTuple(items)
 }
 
-// listFromStackRef wraps _PyList_FromStackRefStealOnSuccess.
+// listFromStackRef wraps _PyList_FromStackRefStealOnSuccess. Same
+// rationale as tupleFromStackRef: balance the unconditional drop()
+// that follows in the dispatch arm.
 //
 // CPython: Objects/listobject.c:3146 _PyList_FromStackRefStealOnSuccess
 func (e *evalState) listFromStackRef(values []stackref.Ref, n uint32) objects.Object {
@@ -1304,6 +1321,7 @@ func (e *evalState) listFromStackRef(values []stackref.Ref, n uint32) objects.Ob
 	items := make([]objects.Object, n)
 	for i := range items {
 		items[i] = values[i].AsObject()
+		objects.Incref(items[i])
 	}
 	return objects.NewList(items)
 }

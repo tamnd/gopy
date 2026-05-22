@@ -1292,3 +1292,61 @@ row for `test_metaclass` flips from `imp: loadAsModule "typing"` to
    Mirror `PyObject_GetOptionalAttr`: suppress `AttributeError`
    only; propagate everything else. CPython:
    `Objects/object.c:1324 PyObject_GetOptionalAttr`.
+
+### P7 closer 16: BUILD_TUPLE / BUILD_LIST / SET_ADD / LIST_APPEND
+steal-vs-decref mismatch
+
+`A()[1:, 2:]` rendered as `(slice(<nil>, <nil>, <nil>),
+slice(<nil>, <nil>, <nil>))` even though `A()[1:]` rendered
+correctly. Direct subscript stored a single slice; tuple-of-slices
+stored two slices that had their `Start/Stop/Step` fields reset to
+`nil` even though the tuple still held them.
+
+Root cause was a steal-vs-decref mismatch between the bytecode
+translator and the container constructors:
+
+CPython BUILD_TUPLE uses `_PyTuple_FromStackRefStealOnSuccess`: the
+new tuple steals every input ref, and the surrounding STACK_SHRINK
+just moves the stack pointer without `Py_DECREF`. gopy's
+`Frame.DropStack(n)` (`frame/frame.go:280`) does decref each
+popped slot (`slot.Close()` runs `objects.Decref`). The translator
+emits an unconditional `e.drop(int(oparg))` after BUILD_TUPLE.
+
+For inputs with a non-trivial Dealloc, that decref drops the
+refcount to zero and runs `sliceDealloc`, which clears
+`Start/Stop/Step` to `nil` before returning the carcass to
+`sliceFreeList`. The new tuple still holds the cleared slice
+object, so its repr renders `<nil>`.
+
+For inputs that are immortal (small ints, `None`, interned
+strings), `Decref` short-circuits on the `refcnt >= ImmortalRefcnt`
+check, so the bug was invisible everywhere except containers of
+slices, user-class instances with a `__del__`, or any other type
+whose Dealloc resets fields.
+
+Patched the three "take ref" wrappers in `vm/eval_helpers.go` to
+`Incref` each stored element so the impending `drop()` decref
+balances:
+
+- `tupleFromStackRef` (BUILD_TUPLE)
+- `listFromStackRef` (BUILD_LIST)
+- `listAppendTakeRef` (LIST_APPEND)
+- `setAddTakeRef` (SET_ADD)
+
+CPython faithfully steals; gopy's translator-emitted drop forces
+the wrappers to incref-then-balance instead. `NewSlice` already
+does the same incref dance on its `start/stop/step` arguments
+(`objects/slice.go:46 NewSlice`), so this brings the container
+constructors in line with the slice constructor.
+
+CPython:
+- `Objects/tupleobject.c:226 _PyTuple_FromStackRefStealOnSuccess`
+- `Objects/listobject.c:3146 _PyList_FromStackRefStealOnSuccess`
+- `Objects/listobject.c:362 _PyList_AppendTakeRef`
+- `Objects/setobject.c:2433 _PySet_AddTakeRef`
+
+After the fix `test_pep646_syntax` slice-repr expectations all
+pass; the only remaining failures in that test are
+`__annotations__` returning `{}` because gopy's codegen does not
+yet emit the PEP 649 `__annotate__` lazy function (separate
+follow-up).
