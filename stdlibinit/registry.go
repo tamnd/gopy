@@ -329,6 +329,13 @@ import (
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/module/unicodedata"
 
+	// Built-in module: array. Registers itself via module/array/array.go
+	// init(). Ports Modules/arraymodule.c: the array.array type backing
+	// numeric typed buffers (typecodes b/B/u/w/h/H/i/I/l/L/q/Q/f/d) plus
+	// the module-level typecodes constant.
+	// CPython: Modules/arraymodule.c:3225 array_modexec
+	_ "github.com/tamnd/gopy/module/array"
+
 	// Built-in module: _pickle. Registers itself via
 	// module/_pickle/module.go init(). Publishes the full surface
 	// pickle.py reaches for in its C-accelerator try block:
