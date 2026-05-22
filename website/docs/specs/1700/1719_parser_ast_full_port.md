@@ -139,18 +139,18 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_asdl_parser          |  131 | ready | Traceback (likely module gap) | needs deeper trace |
 | test_fstring              | 1871 | ready | parser farthest-token mis-points to `import ast` line 10 | parser drops mid-file but reports wrong location; root cause around f-string assertAllRaise corpus near line 880-900 |
 | test_global               |  214 | 2 errors | Ran 20, FAILED (errors=2). test_caught_exception_group needs CHECK_EG_MATCH (PEP 654); test_type_alias needs CALL_INTRINSIC_1 oparg 12 (PEP 695). 18/20 pass after match-seq + frame back-pointer + symtable offset fixes. | spec 1719 D-test_global |
-| test_metaclass            |  302 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
+| test_metaclass            |  302 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
 | test_patma                | 3559 | ready | parse error reporting `import array` line 1 | farthest-token misreport; real failure is array module missing OR a patma rule |
-| test_pep646_syntax        |  329 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
+| test_pep646_syntax        |  329 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
 | test_scope                |  839 | 1 fail | testLeaks (refcount/finalizer issue, not scope-resolution) | finalizer-count cycle |
-| test_subclassinit         |  281 | ready | gopy main.go runtime crash | infinite recursion or panic to fix |
-| test_syntax               | 3323 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
+| test_subclassinit         |  281 | ready | Ran 17, FAILED (errors=3) | 14/17 OK. Remaining: `test_errors` needs metaclass kwargs split before chaining to `object.__init__`; `test_set_name_error` / `test_set_name_wrong` need `__notes__` attach in `type_new_set_names` after `__set_name__` raises |
+| test_syntax               | 3323 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
 | test_tstring              |  291 | ready | `ModuleNotFoundError: test.test_string._support` | needs `test/test_string/_support.py` helper or t-string lib |
 | test_type_aliases         |  415 | ready | parse error: PEP 695 type params | same as test_annotationlib |
 | test_type_annotations     |  891 | ready | `ModuleNotFoundError: test.test_inspect` | inspect-test helper missing |
 | test_type_params          | 1469 | ready | parse error: PEP 695 type params | same blocker as test_annotationlib |
-| test_unpack               |  222 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
-| test_unpack_ex            |  411 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
+| test_unpack               |  222 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
+| test_unpack_ex            |  411 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
 | test_unparse              | 1066 | ready | `ModuleNotFoundError: pathlib` | pathlib module not implemented |
 
 Three packages:
