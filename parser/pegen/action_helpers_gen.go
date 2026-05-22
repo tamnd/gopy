@@ -726,15 +726,26 @@ func actionPgenConstantFromString(p *Parser, args ...any) any {
 	return &ast.Constant{Value: body, Pos: ast.NoPos}
 }
 
-// actionPgenDecodedConstantFromToken builds a Constant from FSTRING_MIDDLE
-// bytes that came from a format-spec body. CPython runs the bytes
-// through _PyPegen_decode_string, which handles escapes when the
-// surrounding f-string is non-raw; for the bare `>10` case the bytes
-// arrive without escapes so wrapping the raw text matches CPython.
+// actionPgenDecodedConstantFromToken builds a Constant from
+// FSTRING_MIDDLE bytes that came from a format-spec body. CPython
+// peeks the surrounding tokenizer mode to find out whether the outer
+// f-string is raw and routes the bytes through _PyPegen_decode_string.
 //
 // CPython: Parser/action_helpers.c:1404 _PyPegen_decoded_constant_from_token
 func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
-	return actionPgenConstantFromToken(p, args...)
+	t, ok := argAt(args, 1).(*Token)
+	if !ok || t == nil {
+		return placeholderMatched
+	}
+	isRaw := false
+	if p != nil && p.tok != nil && p.tok.InsideFString() {
+		isRaw = p.tok.CurrentFStringRaw()
+	}
+	text, _, err := stringparse.DecodeFStringPart(isRaw, string(t.Bytes))
+	if err != nil {
+		return placeholderMatched
+	}
+	return &ast.Constant{Value: text, Pos: ast.NoPos}
 }
 
 func actionPgenEnsureImaginary(p *Parser, args ...any) any {
@@ -1990,16 +2001,81 @@ func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 }
 
 // actionPgenJoinedStr ports `_PyPegen_joined_str`. Args:
-// (p, fstring_start_token, raw_expressions, fstring_end_token).
-// _get_resized_exprs in CPython merges adjacent constants and
-// upgrades any FormattedValue that ends up alone into a JoinedStr;
-// we emit the wrapper unconditionally so dump renders match.
+// (p, fstring_start_token, raw_expressions, fstring_end_token). The
+// FSTRING_START token's bytes carry the prefix (e.g. `f'`, `rf"`); a
+// case-insensitive `r` flips is_raw. _get_resized_exprs walks the
+// raw_expressions seq, decodes the escape sequences in each Constant
+// segment through _PyPegen_decode_fstring_part, drops empty results,
+// and flattens the 2-element debug-mode JoinedStr that
+// _PyPegen_formatted_value emits.
 //
 // CPython: Parser/action_helpers.c:1396 _PyPegen_joined_str
+// CPython: Parser/action_helpers.c:1301 _get_resized_exprs
 func actionPgenJoinedStr(p *Parser, args ...any) any {
-	_ = p
+	start, _ := argAt(args, 1).(*Token)
 	values := joinedStrValues(argAt(args, 2))
-	return &ast.JoinedStr{Values: values, Pos: ast.NoPos}
+	resized, err := resizeFStringExprs(start, values)
+	if err != nil {
+		return placeholderMatched
+	}
+	return &ast.JoinedStr{Values: resized, Pos: ast.NoPos}
+}
+
+// resizeFStringExprs is the post-pass _PyPegen_joined_str runs over
+// the parsed raw_expressions. It decodes literal Constants (so `\n`
+// in `f', line {n}\n'` becomes a newline), inlines the debug
+// JoinedStr the FormattedValue arm wraps around `expr=` text, and
+// drops empty Constants the lexer emits for adjacent escape runs.
+//
+// CPython: Parser/action_helpers.c:1301 _get_resized_exprs
+func resizeFStringExprs(start *Token, raw []ast.Expr) ([]ast.Expr, error) {
+	isRaw := fstringStartIsRaw(start)
+	out := make([]ast.Expr, 0, len(raw))
+	for _, item := range raw {
+		if joined, ok := item.(*ast.JoinedStr); ok {
+			out = append(out, joined.Values...)
+			continue
+		}
+		c, ok := item.(*ast.Constant)
+		if !ok {
+			out = append(out, item)
+			continue
+		}
+		s, isStr := c.Value.(string)
+		if !isStr {
+			out = append(out, item)
+			continue
+		}
+		decoded, _, err := stringparse.DecodeFStringPart(isRaw, s)
+		if err != nil {
+			return nil, err
+		}
+		if decoded == "" {
+			continue
+		}
+		out = append(out, &ast.Constant{Value: decoded, Pos: c.Pos})
+	}
+	return out, nil
+}
+
+// fstringStartIsRaw scans the FSTRING_START token bytes for an `r` or
+// `R` prefix character. CPython does the same with strpbrk in
+// _get_resized_exprs.
+//
+// CPython: Parser/action_helpers.c:1322 strpbrk(quote_str, "rR")
+func fstringStartIsRaw(t *Token) bool {
+	if t == nil {
+		return false
+	}
+	for _, b := range t.Bytes {
+		if b == 'r' || b == 'R' {
+			return true
+		}
+		if b == '\'' || b == '"' {
+			return false
+		}
+	}
+	return false
 }
 
 // joinedStrValues coerces a raw_expressions seq into the Values slot

@@ -283,6 +283,28 @@ func (s *State) curMode() *tokenizerMode {
 	return &s.tokModeStack[s.tokModeStackIndex]
 }
 
+// InsideFString reports whether the tokenizer is currently inside an
+// f-string or t-string body. Mirrors INSIDE_FSTRING, which is the
+// guard CPython's pegen helpers use before consulting the active
+// tokenizer mode.
+//
+// CPython: Parser/lexer/lexer.h:14 INSIDE_FSTRING
+func (s *State) InsideFString() bool {
+	if s.tokModeStackIndex <= 0 {
+		return false
+	}
+	return s.tokModeStack[s.tokModeStackIndex].kind == tokFStringMode
+}
+
+// CurrentFStringRaw reports the `raw` flag of the active f-string or
+// t-string mode. Caller is expected to gate the read with
+// InsideFString.
+//
+// CPython: Parser/lexer/state.h:48 tokenizer_mode.raw
+func (s *State) CurrentFStringRaw() bool {
+	return s.tokModeStack[s.tokModeStackIndex].raw
+}
+
 // pushMode is TOK_NEXT_MODE: enter a nested f-string or t-string
 // scanning context.
 //

@@ -138,3 +138,27 @@ stripped:
 }
 
 func hasBackslash(b []byte) bool { return strings.IndexByte(string(b), '\\') >= 0 }
+
+// DecodeFStringPart expands escape sequences inside the literal
+// portion of an f-string (or t-string) body. isRaw reflects the outer
+// f-string prefix; CPython also short-circuits to the raw path when
+// the body has no backslash. Doubled `{{` / `}}` collapse to a single
+// brace at scan time (Parser/string_parser.c:455
+// fstring_find_literal_and_field), so the {{/}} length=1 trick the C
+// helper applies after the lexer is a no-op here.
+//
+// CPython: Parser/action_helpers.c:1270 _PyPegen_decode_fstring_part
+// CPython: Parser/string_parser.c:242 _PyPegen_decode_string
+func DecodeFStringPart(isRaw bool, s string) (string, []string, error) {
+	if isRaw || !hasBackslash([]byte(s)) {
+		if !utf8.Valid([]byte(s)) {
+			return "", nil, fmt.Errorf("invalid utf-8 in string literal")
+		}
+		return s, nil, nil
+	}
+	text, warns, err := decodeUnicodeEscapes([]byte(s))
+	if err != nil {
+		return "", nil, err
+	}
+	return text, warns, nil
+}
