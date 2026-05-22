@@ -119,11 +119,11 @@ func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) 
 			if j >= len(s) {
 				return "", nil, fmt.Errorf("malformed \\N character escape")
 			}
-			r, nerr := CharByName(string(s[i+1 : j]))
-			if nerr != nil {
+			expanded, ok := NameLookup(string(s[i+1 : j]))
+			if !ok {
 				return "", nil, fmt.Errorf("unknown Unicode character name")
 			}
-			out = utf8.AppendRune(out, r)
+			out = append(out, expanded...)
 			i = j + 1
 		default:
 			// PEP 414 keeps the backslash in the output for
