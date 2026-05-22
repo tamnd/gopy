@@ -314,7 +314,7 @@ shows `done` for every non-deferred row.
 - [ ] P3: `Python/ast.c` validator port + `Lib/ast.py` byte-identical sync
 - [ ] P4: `Lib/_ast_unparse.py` port; `test_unparse` green
 - [ ] P5: pegen.c + action_helpers.c citation audit + close `test_syntax / test_eof / test_fstring / test_tstring / test_named_expressions / test_string_literals / test_unicode_identifiers`
-- [ ] P6: grammar feature panel (PEP 646 / 695 / 634 / 657 etc.)
+- [x] P6: grammar feature panel (PEP 695 generic class/alias/function codegen + _typing module shipped; PEP 646 unpack + 634 match already passing)
 - [ ] P7: symtable + class-creation rows (`test_global / test_scope / test_metaclass / test_subclassinit / test_future_stmt`)
 - [ ] P8: `test_int_literal` re-run
 - [ ] P9: PEG generator follow-up spec (deferred)
@@ -926,3 +926,111 @@ drops from 7 failures to 5, all of which share the same root cause
 which depends on `warnings.catch_warnings` actually capturing the
 SyntaxWarning the parser emits). That's a separate
 SyntaxWarning-plumbing gate, not a parser/AST gap.
+
+### P6 closer: PEP 695 generic class/alias/function + typing.py import
+
+Five panel rows (`test_metaclass`, `test_pep646_syntax`, `test_syntax`,
+`test_unpack`, `test_unpack_ex`) shared a single import-time dependency:
+`import typing` failing because the runtime had no PEP 695 primitives.
+Tracing it end-to-end exposed five separate gaps:
+
+1. **No CALL_INTRINSIC handlers for the new intrinsics.** `intrinsics/
+   unary.go` returned `notImplementedError` for `UnaryTypevarID`,
+   `UnaryParamspecID`, `UnaryTypevartupleID`, `UnarySubscriptGenericID`,
+   `UnaryTypealiasID`; `intrinsics/binary.go` likewise for
+   `BinaryTypevarWithBoundID`, `BinaryTypevarWithConstraintsID`,
+   `BinarySetFunctionTypeParamsID`, `BinarySetTypeparamDefaultID`.
+   Backed each one with a real implementation in a new
+   `objects/typevar.go` (`TypeVar`, `ParamSpec`, `TypeVarTuple`,
+   `TypeAliasType`, plus `Generic`, `Union`, `NoDefault`, `_idfunc`),
+   and the stub-sweep test was updated to skip these IDs.
+
+   CPython: `Python/intrinsics.c:80` `intrinsic_function_1` entries
+   `INTRINSIC_TYPEVAR..INTRINSIC_TYPE_ALIAS`; `Modules/_typingmodule.c`
+   for the constructor signatures.
+
+2. **No symtable wrapper lookup for codegen.** PEP 695 lowers a
+   generic def/class/alias into a synthetic `TypeParametersBlock`
+   scope (CPython: `Python/symtable.c:1659`
+   `symtable_enter_type_param_block`). `symtable/build_helpers.go`
+   already entered that block keyed by `typeParamSubexprKey{key, -1}`,
+   but the key type was unexported, so codegen had no way to find the
+   wrapper scope. Added `symtable.LookupTypeParams(parent)` returning
+   the wrapper entry.
+
+3. **No generic-class / generic-alias / generic-def codegen.**
+   `compile/codegen_class.go` and `compile/codegen_typealias.go` were
+   non-generic-only. The class side now wraps the body in a
+   TypeParametersBlock function: it emits the RESUME + LOAD_BUILD_CLASS
+   sequence, fills the type-param bindings via the new
+   `codegen_typeparam` helper (`compile/codegen_typeparams.go`), calls
+   the inner body function, then `CALL_INTRINSIC_2
+   SET_FUNCTION_TYPE_PARAMS` on the resulting class to attach
+   `__type_params__`. The alias side compiles
+   `type X[T] = T` to `BUILD_TUPLE 3 + MAKE_FUNCTION + CALL_INTRINSIC_1
+   TYPEALIAS` so the value is evaluated lazily, matching CPython 3.14.
+   `v05test/testdata/golden/type_alias.golden` refreshed.
+
+   CPython: `Python/codegen.c:3911 codegen_type_params`,
+   `Python/codegen.c:3995 codegen_typealias`.
+
+4. **`_typing` module missing.** typing.py opens with
+   `from _typing import (Generic, NoDefault, ParamSpec, ...)`. Added
+   `module/_typing/module.go` that re-exports the new
+   `objects/typevar.go` builtins, registered through `stdlibinit`.
+
+   CPython: `Modules/_typingmodule.c:1` PyInit__typing.
+
+5. **`class IO(Generic[AnyStr])` panicked the C3 linearizer.** Two
+   layered bugs:
+   - `__build_class__` was unwrapping `_GenericAlias` to its origin
+     directly. CPython instead calls `_PyObject_UpdateBases`
+     (`Objects/typeobject.c:3690`): for any base that isn't a type,
+     call `base.__mro_entries__(orig_bases)` and splice the returned
+     tuple in. Ported as `resolveBases` in `vm/build_class.go`.
+   - `_GenericAlias.__mro_entries__` (Lib/typing.py) returns `()` when
+     the origin is `Generic` and either `Protocol` is in the bases or
+     another `_GenericAlias` follows self. Without that dedup,
+     `class SupportsAbs(Protocol[T])` ended up with both `Protocol`
+     and `Generic` in the bases and C3 had no consistent order.
+     `gaMroEntries` now accepts the bases tuple and replicates the
+     CPython logic; the merge panic also names the offending type
+     and bases for faster triage.
+
+   Follow-ons:
+   - `bindClassGetitem(GenericType)` so `Generic[T]` is subscriptable.
+   - `typeSetBases` setter on `__bases__` that revalidates the tuple
+     and recomputes the MRO via `c3Linearize`. typing's
+     `NamedTupleMeta.__new__` writes to `nm_tpl.__bases__` after the
+     class is built (`Lib/typing.py:3015`), and without the setter the
+     panel hit `AttributeError: can't set attribute __bases__`.
+   - `typeMetaclassCall` was double-prepending `result` to the
+     `__init__` args (once by hand, once via `bindDescr`), so
+     `class Any(metaclass=_AnyMeta)` saw `type.__init__()` get four
+     args instead of three. Drop the manual prepend.
+   - The iterator builtins (`seqIter`, `callIter`, `reversedIter`,
+     `enumerate`) had `TypeType()` as their base, which put `type` in
+     their MRO. With `type.__init__` now a real descriptor that
+     shadowed `object.__init__` and broke `reversed([])`. Switched
+     each to `ObjectType()`, matching CPython where iterator tp_base
+     is `&PyBaseObject_Type`.
+
+6. **Doctest dependency chain.** Once typing imported, the panel
+   tests advanced to the doctest runner and crashed on
+   `ModuleNotFoundError: No module named '_pyrepl.utils'` (`doctest ->
+   pdb -> _pyrepl.utils`). Vendored `__init__.py`, `types.py`,
+   `trace.py`, `utils.py` from CPython 3.14 verbatim. The
+   curses-backed reader stays out of the tree until a real
+   interactive REPL is wired.
+
+   pdb also called `sys.gettrace()` during import. Stubbed
+   `sys.gettrace`/`sys.settrace` to return None and accept-and-drop
+   respectively; ported `sys.displayhook` / `__displayhook__` per
+   `Python/sysmodule.c:188 sys_displayhook` (write repr + "\n" to
+   sys.stdout, RuntimeError on lost stdout).
+
+After P6: `import typing` succeeds end-to-end. Generic class with
+Protocol base linearizes to `[S, Protocol, Generic, object]`. NamedTuple
+subclasses build. `go test ./...` clean. The five panel rows still fail,
+but the new failures are inside the doctest runner (task #72 P2.1),
+not in the parser/codegen path.
