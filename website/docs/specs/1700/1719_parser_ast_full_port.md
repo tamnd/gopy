@@ -127,7 +127,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 |------|----:|------|----------|---------|
 | test_int_literal          |  143 | ready | **6/6 OK** | none — already green |
 | test_grammar              | 2063 | done  | parse error: `compile: cannot delete target *ast.Tuple` | codegen drift on `del (a, b)` lowering |
-| test_decorators           |  341 | ready | Ran 16, FAILED (failures=2) | top-level run works; 2 row failures to diagnose |
+| test_decorators           |  341 | ready | **16/16 OK** | none. Function `__name__` / `__qualname__` now reuse the same *Unicode wrapper across reads, so functools_wraps preserves identity for classmethod / staticmethod |
 | test_eof                  |  171 | ready | **6/6 OK** | none. backslash-EOF caret + text + offset land on CPython numbers |
 | test_keywordonlyarg       |  178 | ready | Ran 11, FAILED (failures=1, errors=2) | `SyntaxError: invalid syntax (<test>, line 1)` inside `assertRaisesRegex` body |
 | test_named_expressions    |  767 | ready | Ran 74, FAILED (failures=8, errors=77) | `NameError: name 'range' is not defined` inside class bodies + walrus codegen rows |
@@ -670,3 +670,43 @@ emitting `SetCallInvalid(true)` + `Reset(0)`, but
 `ResetForErrorPass()` (which additionally clears every cached
 token's memo so the second pass actually re-runs `invalid_*`
 rules). Emitter + test now match the in-tree generated file.
+
+### P7 closer 9: Function `__name__` / `__qualname__` identity
+
+`test_decorators.test_classmethod` and `test_staticmethod` both
+exercise
+
+```python
+self.assertIs(getattr(wrapper, attr), getattr(func, attr))
+```
+
+for `attr in ('__module__', '__name__', '__qualname__', '__doc__',
+'__annotations__')`. CPython passes because `func_name` and
+`func_qualname` are `PyObject*` on `PyFunctionObject`, so every
+read of `func.__qualname__` returns the same `PyObject*`. When
+`cm_init` (Objects/funcobject.c:1487) calls `functools_wraps`,
+that same pointer lands in `cm->cm_dict`, and subsequent reads
+via `wrapper.__qualname__` resolve to the same Python object.
+
+gopy stored `Name` and `Qualname` as Go `string` and the
+`__name__` / `__qualname__` getters did `NewStr(f.Name)` on every
+read. Two consecutive reads returned distinct `*Unicode`
+allocations, so `func.__qualname__ is func.__qualname__` was
+already False (`wrapper.__qualname__ is func.__qualname__` was
+False for the same reason).
+
+Fix: `objects/function.go` adds `nameObj` / `qualnameObj
+*Unicode` slots on `Function` plus `nameUnicode()` /
+`qualnameUnicode()` helpers. The getters return the cached
+wrapper; the setters store the supplied `*Unicode` directly so
+identity survives a round-trip through `f.__name__ = "x"`. The
+cache invalidates when the underlying Go string is mutated
+out-of-band (e.g. through `funcSetAttr` or via copy of code's
+Name field), so a stale wrapper cannot leak.
+
+CPython refs:
+- `Objects/funcobject.c:148` PyFunction_NewWithQualName
+- `Objects/funcobject.c:633` func_memberlist (`__name__`,
+  `__qualname__`)
+- `Objects/funcobject.c:1316` functools_wraps
+- `Objects/funcobject.c:1487` cm_init
