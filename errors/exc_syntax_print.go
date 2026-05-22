@@ -33,42 +33,7 @@ func formatSyntaxError(exc *Exception) string {
 		filenameSuffix = " (" + s + ")"
 	}
 	if text, ok := syntaxStrField(state.Text); ok {
-		rtext := strings.TrimRight(text, "\n")
-		ltext := strings.TrimLeft(rtext, " \n\f")
-		spaces := len(rtext) - len(ltext)
-		offset, hasOffset := syntaxInt(state.Offset)
-		if !hasOffset {
-			fmt.Fprintf(&b, "    %s\n", ltext)
-		} else {
-			endOffset, hasEndOff := syntaxInt(state.EndOffset)
-			lineno, _ := syntaxInt(state.Lineno)
-			endLineno, _ := syntaxInt(state.EndLineno)
-			if lineno == endLineno {
-				if !hasEndOff || endOffset == 0 {
-					endOffset = offset
-				}
-			} else {
-				endOffset = len(rtext) + 1
-			}
-			if offset > len(text) {
-				offset = len(rtext) + 1
-			}
-			if endOffset > len(text) {
-				endOffset = len(rtext) + 1
-			}
-			if offset >= endOffset || endOffset < 0 {
-				endOffset = offset + 1
-			}
-			colno := offset - 1 - spaces
-			endColno := endOffset - 1 - spaces
-			if colno >= 0 {
-				caretSpace := caretIndent(ltext, colno)
-				fmt.Fprintf(&b, "    %s\n", ltext)
-				fmt.Fprintf(&b, "    %s%s\n", caretSpace, strings.Repeat("^", endColno-colno))
-			} else {
-				fmt.Fprintf(&b, "    %s\n", ltext)
-			}
-		}
+		writeSyntaxBody(&b, text, state)
 	}
 	msg := "<no detail available>"
 	if state.Msg != nil && !objects.IsNone(state.Msg) {
@@ -79,6 +44,63 @@ func formatSyntaxError(exc *Exception) string {
 	}
 	fmt.Fprintf(&b, "%s: %s%s\n", stype, msg, filenameSuffix)
 	return b.String()
+}
+
+// writeSyntaxBody emits the source line plus the caret line under it.
+// Mirrors the middle block of _format_syntax_error that lays out the
+// `    <ltext>\n    <caretspace>^^^\n` rows; lifted out so the parent
+// function's cognitive complexity stays in budget.
+//
+// CPython: Lib/traceback.py:1396 source line + caret emission
+func writeSyntaxBody(b *strings.Builder, text string, state *SyntaxErrorState) {
+	rtext := strings.TrimRight(text, "\n")
+	ltext := strings.TrimLeft(rtext, " \n\f")
+	spaces := len(rtext) - len(ltext)
+	offset, hasOffset := syntaxInt(state.Offset)
+	if !hasOffset {
+		fmt.Fprintf(b, "    %s\n", ltext)
+		return
+	}
+	offset, endOffset := clampSyntaxOffsets(offset, text, rtext, state)
+	colno := offset - 1 - spaces
+	endColno := endOffset - 1 - spaces
+	if colno < 0 {
+		fmt.Fprintf(b, "    %s\n", ltext)
+		return
+	}
+	caretSpace := caretIndent(ltext, colno)
+	fmt.Fprintf(b, "    %s\n", ltext)
+	fmt.Fprintf(b, "    %s%s\n", caretSpace, strings.Repeat("^", endColno-colno))
+}
+
+// clampSyntaxOffsets resolves the (offset, end_offset) pair into a
+// well-formed range. Mirrors the C-side clamping CPython does before
+// it computes colno / end_colno: cross-line spans collapse to the
+// trailing newline column, missing end offsets default to a 1-column
+// caret, and bogus negatives are normalized.
+//
+// CPython: Lib/traceback.py:1402 _format_syntax_error offset clamps
+func clampSyntaxOffsets(offset int, text, rtext string, state *SyntaxErrorState) (int, int) {
+	endOffset, hasEndOff := syntaxInt(state.EndOffset)
+	lineno, _ := syntaxInt(state.Lineno)
+	endLineno, _ := syntaxInt(state.EndLineno)
+	if lineno == endLineno {
+		if !hasEndOff || endOffset == 0 {
+			endOffset = offset
+		}
+	} else {
+		endOffset = len(rtext) + 1
+	}
+	if offset > len(text) {
+		offset = len(rtext) + 1
+	}
+	if endOffset > len(text) {
+		endOffset = len(rtext) + 1
+	}
+	if offset >= endOffset || endOffset < 0 {
+		endOffset = offset + 1
+	}
+	return offset, endOffset
 }
 
 // caretIndent builds the leading whitespace for the caret line.

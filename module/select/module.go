@@ -20,6 +20,7 @@
 package selectmod
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"syscall"
@@ -210,11 +211,11 @@ func selectSelect(args []objects.Object, _ map[string]objects.Object) (objects.O
 		if serr == nil {
 			break
 		}
-		if serr == syscall.EINTR {
+		if errors.Is(serr, syscall.EINTR) {
 			// CPython: Modules/selectmodule.c:367 EINTR retry
 			continue
 		}
-		return nil, fmt.Errorf("OSError: %v", serr)
+		return nil, fmt.Errorf("OSError: %w", serr)
 	}
 
 	rOut := set2list(rEntries, &rset)

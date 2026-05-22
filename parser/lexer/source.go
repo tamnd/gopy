@@ -139,11 +139,12 @@ func getNormalName(s string) string {
 	n := 0
 	for n < 12 && n < len(s) {
 		c := s[n]
-		if c == '_' {
+		switch {
+		case c == '_':
 			buf[n] = '-'
-		} else if c >= 'A' && c <= 'Z' {
+		case c >= 'A' && c <= 'Z':
 			buf[n] = c + 'a' - 'A'
-		} else {
+		default:
 			buf[n] = c
 		}
 		n++

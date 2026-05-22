@@ -2012,6 +2012,7 @@ func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c:1396 _PyPegen_joined_str
 // CPython: Parser/action_helpers.c:1301 _get_resized_exprs
 func actionPgenJoinedStr(p *Parser, args ...any) any {
+	_ = p
 	start, _ := argAt(args, 1).(*Token)
 	values := joinedStrValues(argAt(args, 2))
 	resized, err := resizeFStringExprs(start, values)

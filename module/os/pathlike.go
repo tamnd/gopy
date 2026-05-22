@@ -1,7 +1,7 @@
 // PathLike: the abstract base class that types implementing the
 // file-system path protocol register against. Real CPython ships
 // PathLike as an abc.ABC subclass with a __subclasshook__ that
-// recognises any class defining __fspath__ as a virtual subclass.
+// recognizes any class defining __fspath__ as a virtual subclass.
 // gopy's isinstance does not yet consult __subclasshook__, so this
 // port is the Type singleton + the abstract __fspath__ method body;
 // the subclasshook arms will land alongside the broader ABC port.
