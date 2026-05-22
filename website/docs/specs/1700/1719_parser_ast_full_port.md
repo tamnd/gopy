@@ -1187,3 +1187,45 @@ defined in the test module, but gopy runs the file with
 then strips to bare `X`). A panel-runner closer that imports each
 test file as part of the `test` package will pick up the residual
 nine failures; tracked separately.
+
+### P7 closer 14: with-statement unwind preserve_tos drift
+
+While running TestPycParity after closer 13 the gate flagged
+`'bytes' object is not callable` at `FileLoader.get_data` inside
+`stdlib/importlib/_bootstrap_external.py:232`:
+
+```python
+with open(path, 'rb') as file:
+    return file.read()
+```
+
+Bisecting back to `49778d82` (the RETURN_VALUE fblock unwind port)
+located the drift. The with-statement preamble runs
+`LOAD_SPECIAL __exit__` which leaves two slots (`__exit__`,
+`self_or_null`) on the stack below the body; with a return inside
+the body the stack at unwind time is `[..., exit, exit_self, retval]`.
+
+CPython's `codegen_unwind_fblock` (Python/codegen.c:572) emits
+`SWAP 3` followed by `SWAP 2` to rotate `retval` past both exit
+slots before the `__exit__(None, None, None)` call:
+
+```
+[exit, exit_self, retval]    SWAP 3 -> [retval, exit_self, exit]
+                              SWAP 2 -> [retval, exit, exit_self]
+                              LOAD None x3 + CALL 3
+```
+
+The original port emitted only a single `SWAP 2`, leaving the
+stack as `[exit, retval, exit_self]`. The subsequent CALL 3 then
+treated `retval` (here, the bytes from `file.read()`) as the
+callable, producing `'bytes' object is not callable`.
+
+Also picked up the matching drift in `FB_FINALLY_END`: CPython
+emits `SWAP 2 / POP_TOP / SWAP 2 / POP_BLOCK / POP_EXCEPT`, gopy
+was missing the second `SWAP 2`. No gate currently exercised it,
+but the path is now byte-identical to CPython.
+
+CPython: `Python/codegen.c:572 codegen_unwind_fblock` (FB_WITH
+preserve_tos branch).
+CPython: `Python/codegen.c:560 codegen_unwind_fblock` (FB_FINALLY_END
+preserve_tos branch).

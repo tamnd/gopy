@@ -264,11 +264,22 @@ func (c *Compiler) unwindFblock(fb *fblock, l ast.Pos, preserveTos bool) {
 			c.addOpI(SWAP, 2, l)
 		}
 		c.addOp(POP_TOP, l)
+		if preserveTos {
+			c.addOpI(SWAP, 2, l)
+		}
 		c.addOp(POP_BLOCK, l)
 		c.addOp(POP_EXCEPT, l)
 	case fblockWith, fblockAsyncWith:
 		c.addOp(POP_BLOCK, l)
 		if preserveTos {
+			// Each with-statement preamble pushes __exit__ AND its
+			// self_or_null below the body's TOS (LOAD_SPECIAL leaves
+			// two slots). To get the retval out of the way before the
+			// __exit__(None, None, None) call we have to rotate it
+			// past both: SWAP 3 then SWAP 2.
+			//
+			// CPython: Python/codegen.c:576 codegen_unwind_fblock FB_WITH
+			c.addOpI(SWAP, 3, l)
 			c.addOpI(SWAP, 2, l)
 		}
 		_ = c.callExitWithNones(l)
