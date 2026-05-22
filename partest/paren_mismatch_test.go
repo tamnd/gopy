@@ -31,7 +31,24 @@ func TestParenMismatchUnmatchedClose(t *testing.T) {
 }
 
 func TestParenMismatchWrongCloser(t *testing.T) {
+	// Same-line mismatch drops the "on line N" suffix per
+	// Parser/lexer/lexer.c:1345 - the suffix only appears when
+	// parenlinenostack[level] != lineno.
 	s := lexer.FromString("(a]\n", lexer.ModeFile)
+	drain(s)
+	e := s.Err()
+	if e == nil {
+		t.Fatal("no error")
+	}
+	want := "closing parenthesis ']' does not match opening parenthesis '('"
+	if e.Message != want {
+		t.Errorf("err = %q\nwant %q", e.Message, want)
+	}
+}
+
+func TestParenMismatchWrongCloserCrossLine(t *testing.T) {
+	// Cross-line mismatch keeps the "on line N" suffix.
+	s := lexer.FromString("(\na]\n", lexer.ModeFile)
 	drain(s)
 	e := s.Err()
 	if e == nil {

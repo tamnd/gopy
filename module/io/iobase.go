@@ -50,6 +50,7 @@ func setupIOBaseType() {
 	IOBaseType.Setattro = iobaseSetattro
 	IOBaseType.Iter = iobaseIter
 	IOBaseType.IterNext = iobaseIternext
+	objects.AddIterSlotWrappers(IOBaseType)
 }
 
 func setupRawIOBaseType() {
@@ -58,6 +59,7 @@ func setupRawIOBaseType() {
 	RawIOBaseType.Setattro = iobaseSetattro
 	RawIOBaseType.Iter = iobaseIter
 	RawIOBaseType.IterNext = iobaseIternext
+	objects.AddIterSlotWrappers(RawIOBaseType)
 }
 
 // IOBase is the runtime object for _io._IOBase instances.

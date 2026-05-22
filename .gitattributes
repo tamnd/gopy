@@ -11,3 +11,8 @@ LICENSE   text
 *.png binary
 *.jpg binary
 *.gif binary
+
+# CPython parity: fixtures that must preserve their original EOL bytes.
+# Mirrors cpython-314 .gitattributes "noeol" entries.
+stdlib/test/tokenizedata/coding20731.py -text
+test/cpython/tokenizedata/coding20731.py -text

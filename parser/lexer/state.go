@@ -155,6 +155,15 @@ type State struct {
 	done errCode
 	err  *SyntaxError
 
+	// warnings collects SyntaxWarning-class diagnostics from
+	// parserWarn. The lexer keeps these out of err so the parse can
+	// continue; consumers (module/_tokenize, py compile path) drain
+	// them via Warnings() and surface them through the warnings
+	// module.
+	//
+	// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
+	warnings []SyntaxError
+
 	mode     Mode
 	tabSize  int
 	indent   int
@@ -218,23 +227,27 @@ type State struct {
 }
 
 // errCode is the lexer's done state. Mirrors errcode.h's E_* family.
+// Values are not the literal E_* numbers (gopy uses iota), but the
+// set tracks errcode.h one-to-one so callers can switch on it.
 //
-// CPython: Parser/lexer/state.h:113 (and Include/internal/pycore_pyerrors.h E_OK family)
+// CPython: Include/errcode.h:22 E_OK..E_COLUMNOVERFLOW
 type errCode int
 
 const (
-	eOK errCode = iota
-	eEOF
-	eIntr
-	eToken
-	eSyntax
-	eIndent
-	eDedent
-	eTabSpace
-	eOverflow
-	eDecode
-	eEOFS
-	eEOLS
+	eOK       errCode = iota
+	eEOF              // CPython: Include/errcode.h:23 E_EOF
+	eIntr             // CPython: Include/errcode.h:24 E_INTR
+	eToken            // CPython: Include/errcode.h:25 E_TOKEN
+	eSyntax           // CPython: Include/errcode.h:26 E_SYNTAX
+	eNomem            // CPython: Include/errcode.h:27 E_NOMEM
+	eToodeep          // CPython: Include/errcode.h:32 E_TOODEEP
+	eDedent           // CPython: Include/errcode.h:33 E_DEDENT
+	eTabSpace         // CPython: Include/errcode.h:30 E_TABSPACE
+	eOverflow         // CPython: Include/errcode.h:31 E_OVERFLOW
+	eDecode           // CPython: Include/errcode.h:34 E_DECODE
+	eEOFS             // CPython: Include/errcode.h:35 E_EOFS
+	eEOLS             // CPython: Include/errcode.h:36 E_EOLS
+	eLineCont         // CPython: Include/errcode.h:37 E_LINECONT
 	eErrLine
 	eBadVisibility
 	eEncoding
@@ -268,6 +281,28 @@ func newState() *State {
 // CPython: Parser/lexer/lexer.c:26 TOK_GET_MODE
 func (s *State) curMode() *tokenizerMode {
 	return &s.tokModeStack[s.tokModeStackIndex]
+}
+
+// InsideFString reports whether the tokenizer is currently inside an
+// f-string or t-string body. Mirrors INSIDE_FSTRING, which is the
+// guard CPython's pegen helpers use before consulting the active
+// tokenizer mode.
+//
+// CPython: Parser/lexer/lexer.h:14 INSIDE_FSTRING
+func (s *State) InsideFString() bool {
+	if s.tokModeStackIndex <= 0 {
+		return false
+	}
+	return s.tokModeStack[s.tokModeStackIndex].kind == tokFStringMode
+}
+
+// CurrentFStringRaw reports the `raw` flag of the active f-string or
+// t-string mode. Caller is expected to gate the read with
+// InsideFString.
+//
+// CPython: Parser/lexer/state.h:48 tokenizer_mode.raw
+func (s *State) CurrentFStringRaw() bool {
+	return s.tokModeStack[s.tokModeStackIndex].raw
 }
 
 // pushMode is TOK_NEXT_MODE: enter a nested f-string or t-string
@@ -314,6 +349,11 @@ type SyntaxError struct {
 	EndPos  Pos
 	Message string
 	Text    string
+	// Category is "SyntaxWarning" for warnings recorded via
+	// parserWarn; empty for hard errors recorded via recordError.
+	// Downstream consumers route on this when surfacing through the
+	// warnings module vs raising.
+	Category string
 }
 
 // Error renders the lexer error in CPython's "<msg>" form. The full
@@ -336,6 +376,14 @@ func (s *State) SetTypeComments(v bool) { s.typeComments = v }
 // Filename returns the configured filename. Used by error formatters.
 func (s *State) Filename() string { return s.filename }
 
+// SourceLine returns the nth (1-based) line of the buffered source.
+// Returns "" for out-of-range or for streaming inputs whose lines
+// have already been consumed.
+//
+// CPython: Parser/tokenizer/helpers.c reads tok->buf to populate the
+// SyntaxError text field at error time.
+func (s *State) SourceLine(n int) string { return nthLine(s.buf, n) }
+
 // Encoding returns the source encoding detected from a BOM or
 // PEP 263 cookie, or "" when no cookie was seen.
 func (s *State) Encoding() string { return s.encoding }
@@ -345,6 +393,71 @@ func (s *State) SetFilename(name string) { s.filename = name }
 
 // Err returns the first SyntaxError recorded, or nil.
 func (s *State) Err() *SyntaxError { return s.err }
+
+// Warnings returns the SyntaxWarning-class diagnostics recorded
+// during tokenization. Order matches emission order.
+//
+// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
+func (s *State) Warnings() []SyntaxError { return s.warnings }
+
+// WarnHook is the package-level drain that FlushWarnings calls. It is
+// nil until a runtime package (typically module/_warnings) registers a
+// real implementation in its init function. Keeping the hook here
+// (rather than importing module/_warnings directly) is what lets
+// parser/lexer stay a leaf package while still routing through the
+// warnings filter at runtime.
+//
+// CPython does the routing inline in _PyTokenizer_parser_warn
+// (helpers.c:152); gopy needs the indirection because parser/lexer
+// must not pull in the runtime's heavy dependency graph.
+var WarnHook func(filename string, warns []SyntaxError)
+
+// FlushWarnings forwards every recorded SyntaxWarning to WarnHook so
+// the warnings filter sees them. Callers should invoke this once
+// tokenization is complete; the hook is a no-op when module/_warnings
+// is not linked into the binary.
+//
+// CPython: Parser/tokenizer/helpers.c:152 _PyTokenizer_parser_warn
+// (where the actual PyErr_WarnExplicitObject call happens).
+func (s *State) FlushWarnings() {
+	if WarnHook == nil || len(s.warnings) == 0 {
+		return
+	}
+	WarnHook(s.filename, s.warnings)
+}
+
+// Done returns the lexer's terminal status as an exported int that
+// matches CPython's E_* numbering from Include/errcode.h. Callers
+// outside the package (notably module/_tokenize) need to switch on
+// it to map to the right Python exception class.
+//
+// CPython: Include/errcode.h:22 E_OK..E_COLUMNOVERFLOW
+func (s *State) Done() int { return int(s.done) }
+
+// Done* constants mirror the gopy errCode enum for cross-package
+// switches. They are not the literal E_* numbers from errcode.h
+// (gopy uses iota), but they track the family one-to-one so callers
+// can categorize tok->done without depending on the unexported enum.
+const (
+	DoneOK             = int(eOK)
+	DoneEOF            = int(eEOF)
+	DoneIntr           = int(eIntr)
+	DoneToken          = int(eToken)
+	DoneSyntax         = int(eSyntax)
+	DoneNomem          = int(eNomem)
+	DoneToodeep        = int(eToodeep)
+	DoneDedent         = int(eDedent)
+	DoneTabSpace       = int(eTabSpace)
+	DoneOverflow       = int(eOverflow)
+	DoneDecode         = int(eDecode)
+	DoneEOFS           = int(eEOFS)
+	DoneEOLS           = int(eEOLS)
+	DoneLineCont       = int(eLineCont)
+	DoneErrLine        = int(eErrLine)
+	DoneBadVisibility  = int(eBadVisibility)
+	DoneEncoding       = int(eEncoding)
+	DoneColumnOverflow = int(eColumnOverflow)
+)
 
 // recordError pins the first error we hit. CPython overwrites; we
 // preserve the first because PEG callers retry tokenization for
@@ -357,6 +470,26 @@ func (s *State) recordError(msg string) {
 		Pos:     Pos{Line: s.lineno, Col: s.col},
 		EndPos:  Pos{Line: s.lineno, Col: s.col},
 		Message: msg,
+	}
+}
+
+// recordErrorWithText is recordError plus a populated Text field. Used
+// at the BOM/cookie boundary where the offending line is known but the
+// FSM has not yet ingested it, so the default Pos -> source-buffer
+// lookup the lexer normally does is unavailable.
+//
+// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn and
+// the SyntaxError builders both copy the offending line into the
+// PySyntaxErrorObject.text field when the source is in hand.
+func (s *State) recordErrorWithText(msg, text string) {
+	if s.err != nil {
+		return
+	}
+	s.err = &SyntaxError{
+		Pos:     Pos{Line: s.lineno, Col: s.col},
+		EndPos:  Pos{Line: s.lineno, Col: s.col},
+		Message: msg,
+		Text:    text,
 	}
 }
 

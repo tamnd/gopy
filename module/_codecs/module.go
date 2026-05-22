@@ -146,7 +146,7 @@ func makeCodecInfo(ci *codecs.CodecInfo) objects.Object {
 		}), nil
 	})
 
-	d := inst.Dict()
+	d := inst.EnsureDict()
 	_ = d.SetItem(objects.NewStr("name"), objects.NewStr(ci.Name))
 	_ = d.SetItem(objects.NewStr("encode"), encodeFn)
 	_ = d.SetItem(objects.NewStr("decode"), decodeFn)
@@ -462,7 +462,7 @@ func charmapDecodeFromString(data []byte, errors string, table []rune) (string, 
 			x = table[ch]
 		}
 		if x == 0xFFFE {
-			rep, newpos, err := callDecodeErrorHandler("charmap", data, i, i+1, errors)
+			rep, newpos, err := callDecodeErrorHandler("charmap", "character maps to <undefined>", data, i, i+1, errors)
 			if err != nil {
 				return "", err
 			}
@@ -484,7 +484,7 @@ func charmapDecodeFromMapping(data []byte, errors string, mapping *objects.Dict)
 		key := objects.NewInt(int64(ch))
 		item, err := mapping.GetItem(key)
 		if err != nil || item == nil || objects.IsNone(item) {
-			rep, newpos, herr := callDecodeErrorHandler("charmap", data, i, i+1, errors)
+			rep, newpos, herr := callDecodeErrorHandler("charmap", "character maps to <undefined>", data, i, i+1, errors)
 			if herr != nil {
 				return "", herr
 			}
@@ -499,7 +499,7 @@ func charmapDecodeFromMapping(data []byte, errors string, mapping *objects.Dict)
 				return "", fmt.Errorf("TypeError: character mapping must be in range(0x110000)")
 			}
 			if val == 0xFFFE {
-				rep, newpos, herr := callDecodeErrorHandler("charmap", data, i, i+1, errors)
+				rep, newpos, herr := callDecodeErrorHandler("charmap", "character maps to <undefined>", data, i, i+1, errors)
 				if herr != nil {
 					return "", herr
 				}
@@ -589,7 +589,7 @@ func charmapEncodeError(runes []rune, i int, mapping objects.Object, inv map[run
 		buf, _, err := encodeXMLCharRefRun(runes[start:end], mapping, inv)
 		return buf, end, err
 	}
-	rep, newpos, herr := callEncodeErrorHandler("charmap", source, start, end, errors)
+	rep, newpos, herr := callEncodeErrorHandler("charmap", "character maps to <undefined>", source, start, end, errors)
 	if herr != nil {
 		return nil, 0, herr
 	}
@@ -715,38 +715,145 @@ func charmapBuildImpl(s string) (objects.Object, error) {
 
 // callDecodeErrorHandler invokes the named error handler for a decode
 // error and returns (replacement, new_position).
-func callDecodeErrorHandler(enc string, input []byte, start, end int, errors string) (string, int, error) {
+func callDecodeErrorHandler(enc, reason string, input []byte, start, end int, errors string) (string, int, error) {
 	h, err := codecs.LookupError(errors)
 	if err != nil {
 		return "", 0, err
 	}
-	return h(enc, input, start, end)
+	return h(enc, reason, input, start, end)
 }
 
 // callEncodeErrorHandler invokes the named error handler for an encode
 // error. The input is supplied as a string; we pass its UTF-8 bytes
 // since the handler signature is byte-oriented.
-func callEncodeErrorHandler(enc, input string, start, end int, errors string) (string, int, error) {
+func callEncodeErrorHandler(enc, reason, input string, start, end int, errors string) (string, int, error) {
 	h, err := codecs.LookupError(errors)
 	if err != nil {
 		return "", 0, err
 	}
-	return h(enc, []byte(input), start, end)
+	return h(enc, reason, []byte(input), start, end)
 }
 
 // ---------------------------------------------------------------------------
-// register(search_function) — no-op stub for now
+// register(search_function) — append search_function to the codec
+// registry so codecs.Lookup will consult it.
 //
-// CPython: Modules/_codecsmodule.c:76 _codecs_register_impl
+// CPython: Modules/_codecsmodule.c:76 _codecs_register_impl (and
+// Python/codecs.c:50 PyCodec_Register)
 // ---------------------------------------------------------------------------
 
 func codecsRegister(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: register() takes exactly 1 argument (%d given)", len(args))
 	}
-	// Stub: user-supplied search functions are not yet plumbed into the
-	// codecs.Lookup path. The registration succeeds silently.
+	search := args[0]
+	if !objects.Callable(search) {
+		return nil, fmt.Errorf("TypeError: argument must be callable")
+	}
+	codecs.Register(pythonSearchFunc(search))
 	return objects.None(), nil
+}
+
+// pythonSearchFunc adapts a Python callable into a Go-side SearchFunc.
+// The Python side returns either None / a CodecInfo / a 4-7-tuple of
+// callables. We extract `encode` and `decode` and wire them into a
+// codecs.CodecInfo so the Go-side lookup chain can serve the encoding.
+//
+// CPython: Python/codecs.c:99 _PyCodec_Lookup (calls each registered
+// search function with the normalised encoding name)
+func pythonSearchFunc(fn objects.Object) codecs.SearchFunc {
+	return func(name string) (*codecs.CodecInfo, error) {
+		ret, err := objects.Call(fn, objects.NewTuple([]objects.Object{objects.NewStr(name)}), nil)
+		if err != nil {
+			return nil, err
+		}
+		if ret == nil || ret == objects.None() {
+			return nil, nil
+		}
+		return codecInfoFromPython(ret, name)
+	}
+}
+
+// codecInfoFromPython unpacks the encode / decode callables from a
+// Python CodecInfo (or 4-7-tuple) and wraps them in a Go CodecInfo.
+//
+// CPython: Lib/encodings/__init__.py:120 search_function (entry =
+// getregentry(); coercion to codecs.CodecInfo)
+func codecInfoFromPython(info objects.Object, name string) (*codecs.CodecInfo, error) {
+	getAttr := func(key string) (objects.Object, error) {
+		// CodecInfo from Lib/codecs.py: namedtuple-like instance with
+		// attribute access on encode / decode. Our stdlib CodecInfo
+		// implements __getattr__ via the standard generic getattr path.
+		v, err := objects.GetAttr(info, objects.NewStr(key))
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	}
+	enc, err := getAttr("encode")
+	if err != nil {
+		return nil, err
+	}
+	dec, err := getAttr("decode")
+	if err != nil {
+		return nil, err
+	}
+	ci := &codecs.CodecInfo{
+		Name: name,
+		Encode: func(input string, errors string) ([]byte, int, error) {
+			ret, err := objects.Call(enc,
+				objects.NewTuple([]objects.Object{objects.NewStr(input), objects.NewStr(errors)}), nil)
+			if err != nil {
+				return nil, 0, err
+			}
+			return unpackEncodeResult(ret)
+		},
+		Decode: func(input []byte, errors string) (string, int, error) {
+			ret, err := objects.Call(dec,
+				objects.NewTuple([]objects.Object{objects.NewBytes(input), objects.NewStr(errors)}), nil)
+			if err != nil {
+				return "", 0, err
+			}
+			return unpackDecodeResult(ret)
+		},
+	}
+	return ci, nil
+}
+
+// unpackEncodeResult expects (bytes, n) and returns the two parts.
+func unpackEncodeResult(o objects.Object) ([]byte, int, error) {
+	t, ok := o.(*objects.Tuple)
+	if !ok || t.Len() != 2 {
+		return nil, 0, fmt.Errorf("TypeError: encoder must return a (bytes, int) tuple")
+	}
+	bobj, ok := t.Item(0).(*objects.Bytes)
+	if !ok {
+		return nil, 0, fmt.Errorf("TypeError: encoder must return bytes, got %s", t.Item(0).Type().Name)
+	}
+	nobj, ok := t.Item(1).(*objects.Int)
+	if !ok {
+		return nil, 0, fmt.Errorf("TypeError: encoder must return (bytes, int)")
+	}
+	n, _ := nobj.Int64()
+	return bobj.Bytes(), int(n), nil
+}
+
+// unpackDecodeResult expects (str, n) and returns the two parts.
+func unpackDecodeResult(o objects.Object) (string, int, error) {
+	t, ok := o.(*objects.Tuple)
+	if !ok || t.Len() != 2 {
+		return "", 0, fmt.Errorf("TypeError: decoder must return a (str, int) tuple")
+	}
+	sobj, ok := t.Item(0).(*objects.Unicode)
+	if !ok {
+		return "", 0, fmt.Errorf("TypeError: decoder must return str, got %s", t.Item(0).Type().Name)
+	}
+	nobj, ok := t.Item(1).(*objects.Int)
+	if !ok {
+		return "", 0, fmt.Errorf("TypeError: decoder must return (str, int)")
+	}
+	n, _ := nobj.Int64()
+	return sobj.Value(), int(n), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -770,12 +877,15 @@ func codecsRegisterError(args []objects.Object, kwargs map[string]objects.Object
 	pyErrHandlers[name] = handler
 	pyErrMu.Unlock()
 	// Bridge the Python callable into the Go error handler registry.
-	codecs.RegisterError(name, func(enc string, input []byte, start, end int) (string, int, error) {
+	codecs.RegisterError(name, func(enc, reason string, input []byte, start, end int) (string, int, error) {
 		pyErrMu.RLock()
 		h := pyErrHandlers[name]
 		pyErrMu.RUnlock()
 		if h == nil {
 			return "", 0, fmt.Errorf("LookupError: unknown error handler name %q", name)
+		}
+		if reason == "" {
+			reason = "codec error"
 		}
 		// Build a minimal UnicodeDecodeError-like tuple to pass to the handler.
 		errArg := objects.NewTuple([]objects.Object{
@@ -783,7 +893,7 @@ func codecsRegisterError(args []objects.Object, kwargs map[string]objects.Object
 			objects.NewBytes(input),
 			objects.NewInt(int64(start)),
 			objects.NewInt(int64(end)),
-			objects.NewStr("codec error"),
+			objects.NewStr(reason),
 		})
 		result, cerr := objects.Call(h, objects.NewTuple([]objects.Object{errArg}), nil)
 		if cerr != nil {

@@ -36,6 +36,8 @@ import (
 type PathFinder struct {
 	// Paths is the ordered directory list. Entries are absolute or
 	// relative to the process cwd; empty entries are treated as ".".
+	// When LivePathHook is installed, the hook wins so user-code
+	// mutations of sys.path are honored.
 	// CPython: Lib/importlib/_bootstrap_external.py:1290 path = sys.path
 	Paths []string
 
@@ -44,6 +46,20 @@ type PathFinder struct {
 	// cycle on imp; see loader.go for the same hook on LoadSource.
 	// CPython: Python/pythonrun.c:1102 Py_CompileStringExFlags
 	Compiler SourceCompiler
+}
+
+// LivePathHook returns the live sys.path entries. module/sys installs
+// it on init so PathFinder honors sys.path.insert / append after
+// startup. nil means "use the static Paths snapshot", which is the
+// pre-existing behavior tests rely on.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1290 path = sys.path
+var LivePathHook func() []string
+
+// SetLivePathHook installs (or clears) the hook used by FindModule to
+// fetch the live sys.path. nil restores the static-snapshot behavior.
+func SetLivePathHook(f func() []string) {
+	LivePathHook = f
 }
 
 // errFinderMiss is the sentinel FindModule returns when no path
@@ -74,6 +90,11 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 
 	parent, tail := splitParent(name)
 	search := p.Paths
+	if parent == "" && LivePathHook != nil {
+		if live := LivePathHook(); live != nil {
+			search = live
+		}
+	}
 	if parent != "" {
 		parentMod, ok := GetModule(parent)
 		if !ok {
@@ -235,13 +256,19 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsPackage %q: %w", name, err)
 	}
-	code, err := compiler(string(src), initFile)
+	code, err := compiler(src, initFile)
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsPackage %q: compile: %w", name, err)
 	}
 	if _, err := exec.ExecCode(code, mod); err != nil {
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w", name, err)
+	}
+	// CPython: Python/import.c:2715 exec_code_in_module re-reads
+	// sys.modules so an `__init__.py` that reassigns its own entry
+	// (rare for packages, but the same shape as decimal/_pydecimal).
+	if final, ok := GetModule(name); ok {
+		return final, nil
 	}
 	return mod, nil
 }
@@ -269,13 +296,19 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsModule %q: %w", name, err)
 	}
-	code, err := compiler(string(src), file)
+	code, err := compiler(src, file)
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsModule %q: compile: %w", name, err)
 	}
 	if _, err := exec.ExecCode(code, mod); err != nil {
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w", name, err)
+	}
+	// CPython: Python/import.c:2715 exec_code_in_module re-reads
+	// sys.modules so a module body that reassigns its own entry
+	// (`sys.modules[__name__] = other`, e.g. decimal/_pydecimal) wins.
+	if final, ok := GetModule(name); ok {
+		return final, nil
 	}
 	return mod, nil
 }

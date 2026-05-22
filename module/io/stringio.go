@@ -63,6 +63,7 @@ func init() {
 	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
 	objects.SetTypeDescr(StringIOType, "__enter__", objects.NewBuiltinFunction("__enter__", stringIOEnterDescr))
 	objects.SetTypeDescr(StringIOType, "__exit__", objects.NewBuiltinFunction("__exit__", stringIOExitDescr))
+	objects.AddIterSlotWrappers(StringIOType)
 }
 
 func stringIOEnterDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {

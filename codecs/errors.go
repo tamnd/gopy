@@ -20,11 +20,13 @@ import (
 // CPython: Python/codecs.c:1071-1567 codec_handler_*
 
 // ErrorHandler is a function that handles an encode or decode error.
-// It receives the position of the bad input and returns a replacement
-// string plus the new position to resume from.
+// It receives the position of the bad input plus the codec-supplied
+// reason string (matches the UnicodeError.reason attribute on the
+// upstream side) and returns a replacement string plus the new
+// position to resume from.
 //
 // CPython: Python/codecs.c:L793 call_codec_error_handler
-type ErrorHandler func(enc string, input []byte, start, end int) (replacement string, newpos int, err error)
+type ErrorHandler func(enc, reason string, input []byte, start, end int) (replacement string, newpos int, err error)
 
 var (
 	errorHandlerMu sync.RWMutex
@@ -67,24 +69,35 @@ func LookupError(name string) (ErrorHandler, error) {
 	return fn, nil
 }
 
-// strictHandler raises a UnicodeDecodeError / UnicodeEncodeError.
+// strictHandler raises a UnicodeDecodeError / UnicodeEncodeError. The
+// formatting mirrors UnicodeDecodeError.__str__: a singular "byte 0xNN
+// in position N" form when end == start + 1, plural otherwise.
 //
 // CPython: Python/codecs.c:L868 strict_errors
-func strictHandler(enc string, _ []byte, start, end int) (replacement string, newpos int, err error) {
-	return "", 0, fmt.Errorf("UnicodeDecodeError: %q codec can't decode bytes in position %d-%d", enc, start, end-1)
+// CPython: Objects/exceptions.c:3815 UnicodeDecodeError_str
+func strictHandler(enc, reason string, input []byte, start, end int) (replacement string, newpos int, err error) {
+	if reason == "" {
+		reason = "reason unknown"
+	}
+	if end == start+1 && start >= 0 && start < len(input) {
+		return "", 0, fmt.Errorf("UnicodeDecodeError: '%s' codec can't decode byte 0x%02x in position %d: %s",
+			enc, input[start], start, reason)
+	}
+	return "", 0, fmt.Errorf("UnicodeDecodeError: '%s' codec can't decode bytes in position %d-%d: %s",
+		enc, start, end-1, reason)
 }
 
 // ignoreHandler silently skips undecodable bytes.
 //
 // CPython: Python/codecs.c:L875 ignore_errors
-func ignoreHandler(_ string, _ []byte, _ int, end int) (replacement string, newpos int, err error) {
+func ignoreHandler(_, _ string, _ []byte, _ int, end int) (replacement string, newpos int, err error) {
 	return "", end, nil
 }
 
 // replaceHandler substitutes U+FFFD for undecodable bytes.
 //
 // CPython: Python/codecs.c:L882 replace_errors
-func replaceHandler(_ string, _ []byte, _ int, end int) (replacement string, newpos int, err error) {
+func replaceHandler(_, _ string, _ []byte, _ int, end int) (replacement string, newpos int, err error) {
 	return string(utf8.RuneError), end, nil
 }
 
@@ -107,7 +120,7 @@ func runeAt(input []byte, i int) (rune, int) {
 // does.
 //
 // CPython: Python/codecs.c:1071 PyCodec_XMLCharRefReplaceErrors
-func xmlCharRefReplaceHandler(_ string, input []byte, start, end int) (string, int, error) {
+func xmlCharRefReplaceHandler(_, _ string, input []byte, start, end int) (string, int, error) {
 	var out []byte
 	for i := start; i < end; {
 		r, sz := runeAt(input, i)
@@ -121,7 +134,7 @@ func xmlCharRefReplaceHandler(_ string, input []byte, start, end int) (string, i
 // codepoint in the slice. Used by both encode and decode paths.
 //
 // CPython: Python/codecs.c:1020 PyCodec_BackslashReplaceErrors
-func backslashReplaceHandler(_ string, input []byte, start, end int) (string, int, error) {
+func backslashReplaceHandler(_, _ string, input []byte, start, end int) (string, int, error) {
 	var out []byte
 	for i := start; i < end; {
 		r, sz := runeAt(input, i)
@@ -143,8 +156,8 @@ func backslashReplaceHandler(_ string, input []byte, start, end int) (string, in
 // backslash-replace formatting until that table lands.
 //
 // CPython: Python/codecs.c:1085 PyCodec_NameReplaceErrors
-func nameReplaceHandler(enc string, input []byte, start, end int) (string, int, error) {
-	return backslashReplaceHandler(enc, input, start, end)
+func nameReplaceHandler(enc, reason string, input []byte, start, end int) (string, int, error) {
+	return backslashReplaceHandler(enc, reason, input, start, end)
 }
 
 // surrogatePassHandler passes UTF-16 surrogate halves through encode
@@ -153,8 +166,8 @@ func nameReplaceHandler(enc string, input []byte, start, end int) (string, int, 
 // fallback until the UnicodeError objects expose start/end slots.
 //
 // CPython: Python/codecs.c:1403 PyCodec_SurrogatePassErrors
-func surrogatePassHandler(enc string, input []byte, start, end int) (string, int, error) {
-	return strictHandler(enc, input, start, end)
+func surrogatePassHandler(enc, reason string, input []byte, start, end int) (string, int, error) {
+	return strictHandler(enc, reason, input, start, end)
 }
 
 // surrogateEscapeHandler is the PEP 383 codec error handler used when
@@ -164,15 +177,15 @@ func surrogatePassHandler(enc string, input []byte, start, end int) (string, int
 // (<0x80) are not eligible and raise like strict.
 //
 // CPython: Python/codecs.c:1496 PyCodec_SurrogateEscapeErrors
-func surrogateEscapeHandler(enc string, input []byte, start, end int) (string, int, error) {
+func surrogateEscapeHandler(enc, reason string, input []byte, start, end int) (string, int, error) {
 	if start < 0 || end > len(input) || start >= end {
-		return strictHandler(enc, input, start, end)
+		return strictHandler(enc, reason, input, start, end)
 	}
 	var b []byte
 	for i := start; i < end; i++ {
 		c := input[i]
 		if c < 0x80 {
-			return strictHandler(enc, input, start, end)
+			return strictHandler(enc, reason, input, start, end)
 		}
 		r := rune(0xDC00) + rune(c)
 		var buf [4]byte

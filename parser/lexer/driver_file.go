@@ -15,6 +15,7 @@ package lexer
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"os"
 )
@@ -28,16 +29,19 @@ import (
 //
 // CPython: Parser/tokenizer/file_tokenizer.c:31 _PyTokenizer_FromFile
 func FromReader(r io.Reader, mode Mode) *State {
-	br := bufio.NewReader(r)
-	if head, ok := readEncodingHead(br); ok {
+	head, cookie := readEncodingHead(r)
+	if cookie != "" {
 		// Non-UTF-8 cookie: read the rest of the stream and route
 		// through FromBytes so codec decoding runs on the full body.
 		// CPython: Parser/tokenizer/file_tokenizer.c:288 check_bom +
 		// check_coding_spec rewind path.
-		rest, _ := io.ReadAll(br)
-		head = append(head, rest...)
-		return FromBytes(head, mode)
+		rest, _ := io.ReadAll(r)
+		return FromBytes(append(head, rest...), mode)
 	}
+	// UTF-8 path: splice the head bytes back in front of the
+	// remaining stream so the underflow callback sees the file from
+	// byte zero.
+	br := bufio.NewReaderSize(io.MultiReader(bytes.NewReader(head), r), 2*cookieFileBufsize)
 	s := newState()
 	s.mode = mode
 	s.lineno = 0
@@ -53,6 +57,25 @@ func FromReader(r io.Reader, mode Mode) *State {
 		if st.lineno == 0 && len(line) >= 3 && line[0] == 0xef && line[1] == 0xbb && line[2] == 0xbf {
 			line = line[3:]
 		}
+		// The default encoding is UTF-8, so each line must validate.
+		// CPython runs ensure_utf8 here when tok->encoding is NULL.
+		// Lineno is one past the count we have already ingested; this
+		// matches CPython's tok->lineno tracking after a successful
+		// refill.
+		//
+		// CPython: Parser/tokenizer/file_tokenizer.c:352 ensure_utf8
+		if st.encoding == "" {
+			if vLine, bad, ok := ValidateUTF8(line); !ok {
+				reportedLine := st.lineno + vLine
+				st.lineno = reportedLine
+				st.recordErrorWithText(
+					nonUTF8ErrorMessage(bad, reportedLine),
+					string(trimEOL(line)),
+				)
+				st.done = eEncoding
+				return false
+			}
+		}
 		st.buf = append(st.buf, line...)
 		st.inp = len(st.buf)
 		st.end = cap(st.buf)
@@ -65,32 +88,69 @@ func FromReader(r io.Reader, mode Mode) *State {
 	return s
 }
 
-// readEncodingHead peeks the first two physical lines from br and
-// reports whether a non-UTF-8 PEP 263 cookie is present. When ok is
-// true, the returned bytes hold the unread head so the caller can
-// stitch them back in front of the remainder. When ok is false, br is
-// untouched (or only the bytes returned were consumed; callers using
-// the streaming path read past them via the same bufio reader, which
-// is why the head bytes are read with Read rather than Peek).
+// trimEOL strips a single trailing \n or \r\n so the SyntaxError text
+// matches what the user sees in their editor (CPython's source-line
+// extractor returns the line without terminator).
+func trimEOL(line []byte) []byte {
+	if n := len(line); n > 0 && line[n-1] == '\n' {
+		line = line[:n-1]
+		if n > 1 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+	}
+	return line
+}
+
+// readEncodingHead reads the first two physical lines from r and
+// returns those bytes plus the detected non-UTF-8 cookie name, or
+// the empty string when the source is UTF-8 (either by default, by
+// BOM, or by a cookie that names utf-8). Mirrors CPython's
+// STATE_INIT branch of tok_underflow_file, which reads line-by-line
+// via fp_getc until check_bom + check_coding_spec resolve. The
+// returned bytes always cover the head consumed from r, so the
+// caller can stitch them back in front of the remainder for the
+// streaming path.
 //
-// CPython: Parser/tokenizer/file_tokenizer.c:288 check_bom and L337
-// check_coding_spec on the first two lines.
-func readEncodingHead(br *bufio.Reader) ([]byte, bool) {
-	const peekSize = 2 * codingCookieMax
-	peek, _ := br.Peek(peekSize)
-	scan := peek
-	if len(scan) >= 3 && scan[0] == 0xef && scan[1] == 0xbb && scan[2] == 0xbf {
+// CPython: Parser/tokenizer/file_tokenizer.c:285 tok_underflow_file
+// (STATE_INIT branch, lines 287..344)
+func readEncodingHead(r io.Reader) ([]byte, string) {
+	head := readFirstTwoLines(r)
+	if len(head) >= 3 && head[0] == 0xef && head[1] == 0xbb && head[2] == 0xbf {
 		// BOM forces UTF-8: skip cookie-driven decoding entirely.
-		return nil, false
+		return head, ""
 	}
-	name := DetectEncodingCookie(scan)
+	name := DetectEncodingCookie(head)
 	if name == "" || isUTF8Name(name) {
-		return nil, false
+		return head, ""
 	}
-	// Consume the peeked bytes so the caller can append the remainder.
-	head := make([]byte, len(peek))
-	n, _ := io.ReadFull(br, head)
-	return head[:n], true
+	return head, name
+}
+
+// readFirstTwoLines drains r up to the second '\n' or EOF, whichever
+// comes first. Unlike the original peek-based scanner this has no
+// fixed buffer cap, so cookies on arbitrarily long header lines are
+// resolved.
+func readFirstTwoLines(r io.Reader) []byte {
+	br := bufio.NewReaderSize(r, 4096)
+	head := make([]byte, 0, 2*cookieFileBufsize)
+	for newlines := 0; newlines < 2; {
+		line, err := br.ReadBytes('\n')
+		head = append(head, line...)
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			newlines++
+		}
+		if err != nil {
+			break
+		}
+	}
+	// Drain anything bufio buffered past the second newline so the
+	// caller's MultiReader doesn't double-read.
+	if n := br.Buffered(); n > 0 {
+		buf := make([]byte, n)
+		_, _ = io.ReadFull(br, buf)
+		head = append(head, buf...)
+	}
+	return head
 }
 
 // FindEncodingFilename reads filename's first two physical lines and
@@ -108,7 +168,7 @@ func FindEncodingFilename(name string) (string, error) {
 	}
 	defer f.Close()
 	br := bufio.NewReader(f)
-	peek, _ := br.Peek(2 * codingCookieMax)
+	peek, _ := br.Peek(2 * cookieFileBufsize)
 	if conflict := CheckBOMCookieConflict(peek); conflict != "" {
 		return "", &SyntaxError{Message: conflict}
 	}

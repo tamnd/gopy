@@ -1048,6 +1048,7 @@ func newDequeIterType() *objects.Type {
 	t := objects.NewType("_deque_iterator", []*objects.Type{objects.ObjectType()})
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = dequeIterNext
+	objects.AddIterSlotWrappers(t)
 	return t
 }
 
@@ -1093,6 +1094,7 @@ func newDequeRevIterType() *objects.Type {
 	t := objects.NewType("_deque_reverse_iterator", []*objects.Type{objects.ObjectType()})
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = dequeRevIterNext
+	objects.AddIterSlotWrappers(t)
 	return t
 }
 

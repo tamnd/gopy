@@ -417,6 +417,7 @@ var odictKeyIterType = NewType("odict_keyiterator", []*Type{objectType})
 func init() {
 	odictKeyIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	odictKeyIterType.IterNext = odictIterNextKey
+	AddIterSlotWrappers(odictKeyIterType)
 }
 
 func odictIterNextKey(o Object) (Object, error) {

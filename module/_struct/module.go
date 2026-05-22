@@ -978,6 +978,7 @@ var structIterUnpackType = func() *objects.Type {
 	t := objects.NewType("unpack_iterator", []*objects.Type{objects.ObjectType()})
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = structIterUnpackNext
+	objects.AddIterSlotWrappers(t)
 	return t
 }()
 

@@ -535,39 +535,76 @@ func fixupHashAndIter(t *Type) {
 	}
 }
 
-// fixupRichCmpAndBool wires tp_richcompare and nb_bool.
+// fixupRichCmpAndBool wires tp_richcompare and nb_bool. The dispatcher
+// is only installed when one of the comparison dunders lives directly
+// on t. A purely inherited descriptor means the C-level RichCmp slot
+// that inheritSlotsAllMRO already copied is the right one; installing
+// slotTpRichCompare in that case would route back through object's
+// __eq__ slot wrapper and lose the base's tp_richcompare.
+//
+// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers /
+// update_one_slot performs the same discrimination via the
+// wrapper-vs-method check (PyWrapperDescr_Type whose d_base->wrapper
+// matches p->wrapper keeps the C function; anything else swaps in
+// p->function).
 func fixupRichCmpAndBool(t *Type) {
-	if hasAnyDunder(t, "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__") {
+	if isOwnDescriptor(t, "__eq__") || isOwnDescriptor(t, "__ne__") ||
+		isOwnDescriptor(t, "__lt__") || isOwnDescriptor(t, "__le__") ||
+		isOwnDescriptor(t, "__gt__") || isOwnDescriptor(t, "__ge__") {
 		t.RichCmp = slotTpRichCompare
 	}
-	if lookupDunderCallable(t, "__bool__") {
+	if isOwnDescriptor(t, "__bool__") {
 		ensureNumberMethods(t).Bool = slotNbBool
-	} else if lookupDunderCallable(t, "__len__") {
+	} else if isOwnDescriptor(t, "__len__") {
 		ensureNumberMethods(t).Bool = slotNbBoolFromLen
 	}
 }
 
 // fixupSubscriptSlots wires the mapping/sequence subscription slots
-// (length, getitem, setitem, delitem, contains).
+// (length, getitem, setitem, delitem, contains). For each dunder, the
+// dispatcher is only installed when the descriptor lives directly on
+// t. A descriptor inherited from a base type means the subclass is
+// reusing the base's slot wrapper, so the C-level slot that
+// inheritSlotsAllMRO already copied stays in place. Installing the
+// dispatcher in that case turns into infinite recursion because the
+// dispatcher looks up __getitem__ which routes back through the
+// dispatcher.
+//
+// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers handles
+// the same discrimination through update_one_slot's wrapper-vs-method
+// check (PyWrapperDescr_Type with d_base->wrapper == p->wrapper picks
+// the underlying C function, anything else picks p->function).
 func fixupSubscriptSlots(t *Type) {
-	if lookupDunderCallable(t, "__len__") {
+	if isOwnDescriptor(t, "__len__") {
 		ensureMappingMethods(t).Length = slotMpLength
 		ensureSequenceMethods(t).Length = slotMpLength
 	}
-	if lookupDunderCallable(t, "__getitem__") {
+	if isOwnDescriptor(t, "__getitem__") {
 		ensureMappingMethods(t).GetItem = slotMpSubscript
 		ensureSequenceMethods(t).GetItem = slotSqGetItem
 	}
-	if lookupDunderCallable(t, "__setitem__") {
+	if isOwnDescriptor(t, "__setitem__") {
 		ensureMappingMethods(t).SetItem = slotMpSubscriptSet
 		ensureSequenceMethods(t).SetItem = slotSqSetItem
 	}
-	if lookupDunderCallable(t, "__delitem__") {
+	if isOwnDescriptor(t, "__delitem__") {
 		ensureMappingMethods(t).DelItem = slotMpSubscriptDel
 	}
-	if lookupDunderCallable(t, "__contains__") {
+	if isOwnDescriptor(t, "__contains__") {
 		ensureSequenceMethods(t).Contains = slotSqContains
 	}
+}
+
+// isOwnDescriptor reports whether t's namespace itself supplies the
+// named dunder via a real descriptor. Inherited descriptors come back
+// from LookupDescriptor with a different providingType; we treat those
+// as "no override" so the inherited slot stays in place.
+func isOwnDescriptor(t *Type, name string) bool {
+	d, providing := LookupDescriptor(t, name)
+	if d == nil || d == None() {
+		return false
+	}
+	return providing == t
 }
 
 // fixupDescriptorSlots wires DescrGet when __get__ exists, DescrSet
@@ -583,19 +620,6 @@ func fixupDescriptorSlots(t *Type) {
 	if lookupDunderCallable(t, "__set__") || lookupDunderCallable(t, "__delete__") {
 		t.DescrSet = slotTpDescrSet
 	}
-}
-
-// hasAnyDunder reports whether t exposes any of the named dunders as a
-// callable descriptor on its MRO. Used by RichCmp where we install one
-// dispatcher that handles every operator and forwards to whichever
-// dunder is defined.
-func hasAnyDunder(t *Type, names ...string) bool {
-	for _, n := range names {
-		if lookupDunderCallable(t, n) {
-			return true
-		}
-	}
-	return false
 }
 
 // ensureNumberMethods allocates t.Number on demand. Built-in types
@@ -1074,6 +1098,7 @@ func slotSqContains(o Object, key Object) (bool, error) {
 //
 //	Objects/typeobject.c:4401 type_new_descriptors
 func installSlots(t *Type, ns *Dict) error {
+	t.SlotsBase = layoutSlotBase(t)
 	slotsKey := NewStr("__slots__")
 	has, err := ns.Contains(slotsKey)
 	if err != nil || !has {
@@ -1117,13 +1142,32 @@ func installSlots(t *Type, ns *Dict) error {
 		resolved = append(resolved, n)
 	}
 	for i, n := range resolved {
-		SetTypeDescr(t, n, NewMemberDescr(n, i))
+		SetTypeDescr(t, n, NewMemberDescr(n, t.SlotsBase+i))
 	}
 	t.Slots = resolved
 	// Strip __slots__ from ns so it does not also become a stored
 	// attribute on the type.
 	_ = ns.DelItem(slotsKey)
 	return nil
+}
+
+// layoutSlotBase picks the layout base from t.Bases and returns the
+// cumulative slot count up to (but not including) the current class.
+// CPython's type_new walks the MRO looking for a "solid base" whose
+// PyMemberDef offsets the child must respect; gopy mirrors the same
+// behavior by taking the first non-object base's SlotsBase + len(Slots)
+// as the new layout offset.
+//
+// CPython: Objects/typeobject.c:4086 type_new_slots_bases (best_base
+// selection feeds slotoffset)
+func layoutSlotBase(t *Type) int {
+	for _, b := range t.Bases {
+		if b == nil || b == objectType {
+			continue
+		}
+		return b.SlotsBase + len(b.Slots)
+	}
+	return 0
 }
 
 // slotsToNames flattens the value of __slots__ into a list of strings.

@@ -118,31 +118,54 @@ type Frame struct {
 }
 
 // NLocalsOf returns the count of fast-local slots a code object owns.
+// Reads the precomputed Nlocals field that mirrors CPython's
+// init_code-stored co_nlocals; falls back to len(Varnames) for test
+// fixtures that build Code by struct literal without calling
+// SyncLocalsplusCounts (the v0.5 frame_test.go mkCode helper, etc).
 //
-// CPython: Include/internal/pycore_code.h _PyCode_NLOCALS
+// CPython: Include/cpython/code.h:87 co_nlocals
 func NLocalsOf(co *objects.Code) int {
+	if co.Nlocalsplus != 0 {
+		return co.Nlocals
+	}
 	return len(co.Varnames)
 }
 
 // NCellsOf returns the count of cell slots a code object owns.
 //
-// CPython: Include/internal/pycore_code.h _PyCode_NCELLS
+// CPython: Include/cpython/code.h:88 co_ncellvars
 func NCellsOf(co *objects.Code) int {
+	if co.Nlocalsplus != 0 {
+		return co.Ncellvars
+	}
 	return len(co.Cellvars)
 }
 
 // NFreeOf returns the count of free-var slots a code object owns.
 //
-// CPython: Include/internal/pycore_code.h _PyCode_NFREE
+// CPython: Include/cpython/code.h:89 co_nfreevars
 func NFreeOf(co *objects.Code) int {
+	if co.Nlocalsplus != 0 {
+		return co.Nfreevars
+	}
 	return len(co.Freevars)
 }
 
-// NLocalsPlusOf returns the total locals+cells+frees slot count.
+// NLocalsPlusOf returns the compacted localsplus slot count, matching
+// the size init_code stamps onto co_nlocalsplus from
+// len(co_localsplusnames). NOT len(Varnames)+len(Cellvars)+len(Freevars):
+// when a cellvar's name overlaps with a varname (arg cells),
+// fix_cell_offsets merges the two slots and the compacted nlocalsplus
+// drops below the naive sum. Reading this from the cached field keeps
+// the frame layout aligned with the bytecode that fix_cell_offsets
+// rewrote against the compacted offsets.
 //
-// CPython: Include/internal/pycore_code.h _PyCode_NLOCALSPLUS
+// CPython: Include/cpython/code.h:84 co_nlocalsplus
 func NLocalsPlusOf(co *objects.Code) int {
-	return NLocalsOf(co) + NCellsOf(co) + NFreeOf(co)
+	if co.Nlocalsplus != 0 {
+		return co.Nlocalsplus
+	}
+	return len(co.Varnames) + len(co.Cellvars) + len(co.Freevars)
 }
 
 // SizeFor computes the LocalsPlus length needed to run code.
@@ -153,11 +176,25 @@ func SizeFor(co *objects.Code) int {
 	return NLocalsPlusOf(co) + co.Stacksize
 }
 
-// CellsStart returns the index in LocalsPlus where cell vars begin.
+// CellsStart returns the index in LocalsPlus where post-locals cell
+// vars begin. After fix_cell_offsets, arg-cells live in the merged
+// local slot (kind = CO_FAST_LOCAL|CO_FAST_CELL); only non-arg cells
+// occupy slots [Nlocals, Nlocalsplus - Nfreevars).
 func CellsStart(co *objects.Code) int { return NLocalsOf(co) }
 
-// FreesStart returns the index where free vars begin.
-func FreesStart(co *objects.Code) int { return NLocalsOf(co) + NCellsOf(co) }
+// FreesStart returns the index where free vars begin, matching the
+// COPY_FREE_VARS handler at Python/bytecodes.c:1925 which computes
+// offset = co_nlocalsplus - co_nfreevars. Falls back to the legacy
+// nlocals+ncells layout when the precomputed counts are unset (test
+// fixtures only).
+//
+// CPython: Python/bytecodes.c:1932 COPY_FREE_VARS offset
+func FreesStart(co *objects.Code) int {
+	if co.Nlocalsplus != 0 {
+		return co.Nlocalsplus - co.Nfreevars
+	}
+	return len(co.Varnames) + len(co.Cellvars)
+}
 
 // StackStart returns the index where the value stack begins.
 func StackStart(co *objects.Code) int { return NLocalsPlusOf(co) }

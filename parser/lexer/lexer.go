@@ -27,6 +27,8 @@ package lexer
 
 import (
 	"fmt"
+	"slices"
+	"unicode"
 
 	"github.com/tamnd/gopy/token"
 )
@@ -64,6 +66,19 @@ func (s *State) nextC() int {
 				s.lineno += s.pendingLineno
 				s.pendingLineno = 0
 			}
+			// CPython's tok_underflow_string sets tok->line_start = tok->cur
+			// every time it reveals one more line of the buffer
+			// (Parser/tokenizer/string_tokenizer.c:22). gopy preloads the
+			// whole source so there is no per-line underflow; mirror the
+			// effect by snapping line_start to the position right after
+			// the most recent '\n' before returning the next byte. The
+			// scanners that walk past '\n' inside string literals
+			// (scanString, tokGetFStringMode) rely on this so the
+			// surrounding NEWLINE token gets a column relative to the
+			// physical line it actually sits on.
+			if s.cur > 0 && s.buf[s.cur-1] == '\n' && s.lineStart != s.cur {
+				s.lineStart = s.cur
+			}
 			s.col++
 			c := int(s.buf[s.cur])
 			s.cur++
@@ -77,7 +92,19 @@ func (s *State) nextC() int {
 			return eof
 		}
 		s.lineStart = s.cur
+		// CPython: Parser/lexer/lexer.c:89 contains_null_bytes
+		if containsNullBytes(s.buf[s.lineStart:s.inp]) {
+			s.recordError("source code cannot contain null bytes")
+			s.done = eSyntax
+			s.cur = s.inp
+			return eof
+		}
 	}
+}
+
+// containsNullBytes mirrors Parser/lexer/lexer.c:53 contains_null_bytes.
+func containsNullBytes(p []byte) bool {
+	return slices.Contains(p, 0)
 }
 
 // backup undoes the previous nextC. Symmetric with the C source.
@@ -136,11 +163,20 @@ func (s *State) tokGetNormalMode() Tok {
 			}
 			if s.pendin < 0 {
 				s.pendin++
+				// DEDENT col reports the post-indent column (where the
+				// first non-whitespace byte sits), not the start-of-line
+				// column captured before indentNL ran. CPython derives
+				// the col from p_start - line_start so a partial dedent
+				// from 4 spaces back to 2 surfaces at col 2.
+				s.startCol = s.col
 				return s.tokenSetup(token.DEDENT, start, end)
 			}
 			s.pendin--
 			if s.tokExtraTokens {
 				start = s.lineStart
+				// INDENT spans line_start..cur. Stamp startCol=0 (line
+				// start) so the col offsets pair (0, indent_width).
+				s.startCol = 0
 			}
 			return s.tokenSetup(token.INDENT, start, end)
 		}
@@ -203,9 +239,14 @@ func (s *State) tokGetNormalMode() Tok {
 		if c == '\n' {
 			// CPython emits NL with p_end = tok->cur (includes the
 			// trailing '\n') and NEWLINE with p_end = tok->cur - 1
-			// (excludes it). Both fire while tok->lineno still points at
-			// the line that just ended, so we build the Tok before
-			// bumping line state and advance afterwards.
+			// (excludes it). The Python-tokenize wrapper later
+			// recomputes col_offset / end_col_offset from p_start and
+			// p_end via _get_col_offsets, so the raw token must carry
+			// columns derived from byte offsets, not from live
+			// s.col (which is the post-newline value, one past
+			// p_end for NEWLINE). The line-state bump runs after the
+			// Tok is built so s.lineno still points at the closing
+			// line.
 			//
 			// CPython: Parser/lexer/lexer.c:805
 			start := s.start
@@ -336,7 +377,7 @@ loop:
 	}
 	if col > s.indstack[s.indent] {
 		if s.indent+1 >= maxIndent {
-			s.done = eIndent
+			s.done = eToodeep
 			s.recordError("too many levels of indentation")
 			return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur), true
 		}
@@ -391,35 +432,50 @@ func (s *State) continuationLine() (int, bool) {
 }
 
 // scanName scans an identifier starting at the byte already consumed
-// into c. ASCII-only for now; non-ASCII bytes are accepted but the
-// PEP 3131 normalization pass lives in helpers.go.
+// into c. Mirrors CPython's tok_get_normal_mode identifier arm
+// character-by-character: the string-prefix probe is interleaved with
+// the identifier-char loop and breaks the moment a non-prefix letter
+// (or a repeat of one already seen) appears. That ordering is what
+// keeps `shrink"` from being mistaken for a string prefix.
 //
 // CPython: Parser/lexer/lexer.c:743 (identifier branch in tok_get_normal_mode)
-func (s *State) scanName(_ int) Tok {
-	var c int
+func (s *State) scanName(c int) Tok {
+	sawB, sawR, sawU, sawF, sawT := false, false, false, false, false
 	for {
+		switch {
+		case !sawB && (c == 'b' || c == 'B'):
+			sawB = true
+		case !sawU && (c == 'u' || c == 'U'):
+			sawU = true
+		case !sawR && (c == 'r' || c == 'R'):
+			sawR = true
+		case !sawF && (c == 'f' || c == 'F'):
+			sawF = true
+		case !sawT && (c == 't' || c == 'T'):
+			sawT = true
+		default:
+			goto identTail
+		}
 		c = s.nextC()
-		if !isPotentialIdentifierChar(c) {
-			break
+		if c == '"' || c == '\'' {
+			// CPython: Parser/lexer/lexer.c:771 maybe_raise_syntax_error_for_string_prefixes
+			if s.maybeRaiseSyntaxErrorForStringPrefixes(sawB, sawR, sawU, sawF, sawT) {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			// CPython: Parser/lexer/lexer.c:778 (f/t-string entry)
+			if sawF || sawT {
+				return s.startFString(s.start, s.cur-1, c)
+			}
+			// CPython: Parser/lexer/lexer.c:781 goto letter_quote
+			s.backup(c)
+			c = s.nextC()
+			return s.scanString(c)
 		}
 	}
-	// String-prefix detection: f", t", rf", rt", fr", tr", b", u", r".
-	//
-	// CPython: Parser/lexer/lexer.c:743 (identifier-followed-by-quote
-	// branch). The validation fires before either of the two follow-up
-	// branches (f-string entry vs plain string entry).
-	if c == '"' || c == '\'' {
-		_, _, isFT, ok := s.detectStringPrefix(s.start, s.cur-1)
-		if !ok {
-			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
-		}
-		if isFT {
-			return s.startFString(s.start, s.cur-1, c)
-		}
-		// Plain b/u/r prefix: rewind the quote and let scanString do it.
-		s.backup(c)
+identTail:
+	// CPython: Parser/lexer/lexer.c:784 identifier-char tail
+	for isPotentialIdentifierChar(c) {
 		c = s.nextC()
-		return s.scanString(c)
 	}
 	s.backup(c)
 	// CPython: Parser/lexer/lexer.c:364 verify_identifier
@@ -438,76 +494,298 @@ func (s *State) scanName(_ int) Tok {
 // 0x / 0o / 0b prefixes, decimal digits, optional fraction, optional
 // exponent, optional 'j' / 'J' imaginary suffix.
 //
-// CPython: Parser/lexer/lexer.c:300 tok_decimal_tail and the number
-// branch in tok_get_normal_mode.
+// CPython: Parser/lexer/lexer.c:855 (number branch in tok_get_normal_mode)
 func (s *State) scanNumber(c int) Tok {
 	if c == '0' {
 		c = s.nextC()
 		if c == 'x' || c == 'X' {
-			for isHexDigitOrUnderscore(s.peek()) {
-				s.nextC()
+			// Hex
+			//
+			// CPython: Parser/lexer/lexer.c:862
+			c = s.nextC()
+			for {
+				if c == '_' {
+					c = s.nextC()
+				}
+				if !isHexDigit(c) {
+					s.backup(c)
+					s.syntaxError("invalid hexadecimal literal")
+					return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+				}
+				for isHexDigit(c) {
+					c = s.nextC()
+				}
+				if c != '_' {
+					break
+				}
 			}
+			if !s.verifyEndOfNumber(c, "hexadecimal") {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			s.backup(c)
 			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		if c == 'o' || c == 'O' {
-			for isOctDigitOrUnderscore(s.peek()) {
-				s.nextC()
+			// Octal
+			//
+			// CPython: Parser/lexer/lexer.c:879
+			c = s.nextC()
+			for {
+				if c == '_' {
+					c = s.nextC()
+				}
+				if c < '0' || c >= '8' {
+					if isDecimalDigit(c) {
+						s.syntaxError("invalid digit '%c' in octal literal", c)
+						return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+					}
+					s.backup(c)
+					s.syntaxError("invalid octal literal")
+					return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+				}
+				for c >= '0' && c < '8' {
+					c = s.nextC()
+				}
+				if c != '_' {
+					break
+				}
 			}
+			if isDecimalDigit(c) {
+				s.syntaxError("invalid digit '%c' in octal literal", c)
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			if !s.verifyEndOfNumber(c, "octal") {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			s.backup(c)
 			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		if c == 'b' || c == 'B' {
-			for isBinDigitOrUnderscore(s.peek()) {
-				s.nextC()
+			// Binary
+			//
+			// CPython: Parser/lexer/lexer.c:909
+			c = s.nextC()
+			for {
+				if c == '_' {
+					c = s.nextC()
+				}
+				if c != '0' && c != '1' {
+					if isDecimalDigit(c) {
+						s.syntaxError("invalid digit '%c' in binary literal", c)
+						return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+					}
+					s.backup(c)
+					s.syntaxError("invalid binary literal")
+					return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+				}
+				for c == '0' || c == '1' {
+					c = s.nextC()
+				}
+				if c != '_' {
+					break
+				}
 			}
+			if isDecimalDigit(c) {
+				s.syntaxError("invalid digit '%c' in binary literal", c)
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			if !s.verifyEndOfNumber(c, "binary") {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			s.backup(c)
 			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
-		// Leading zero followed by decimal digits, '.', 'e', 'j' falls
-		// through to the regular decimal path.
+		// Leading-zero decimal: scan the run of zeros (with underscore
+		// separators), then if a non-zero digit appears, run the
+		// decimal tail. Trailing-underscore detection lives in the
+		// inner check.
+		//
+		// CPython: Parser/lexer/lexer.c:938
+		nonzero := false
+		for {
+			if c == '_' {
+				c = s.nextC()
+				if !isDecimalDigit(c) {
+					s.backup(c)
+					s.syntaxError("invalid decimal literal")
+					return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+				}
+			}
+			if c != '0' {
+				break
+			}
+			c = s.nextC()
+		}
+		if isDecimalDigit(c) {
+			nonzero = true
+			var ok bool
+			c, ok = s.decimalTail()
+			if !ok {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+		}
+		if c == '.' {
+			c = s.nextC()
+			return s.scanFraction(c)
+		}
+		if c == 'e' || c == 'E' {
+			return s.scanExponent(c)
+		}
+		if c == 'j' || c == 'J' {
+			return s.scanImaginary()
+		}
+		if nonzero && !s.tokExtraTokens {
+			// Old-style octal: now disallowed.
+			//
+			// CPython: Parser/lexer/lexer.c:976
+			s.backup(c)
+			s.syntaxError("leading zeros in decimal integer literals are not permitted; use an 0o prefix for octal integers")
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+		if !s.verifyEndOfNumber(c, "decimal") {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+		s.backup(c)
+		return s.tokenSetup(token.NUMBER, s.start, s.cur)
 	}
-	for c >= '0' && c <= '9' || c == '_' {
-		c = s.nextC()
+	// Decimal (leading non-zero digit already consumed by caller; first
+	// underscore-or-digit handling delegates to decimalTail).
+	//
+	// CPython: Parser/lexer/lexer.c:988
+	var ok bool
+	c, ok = s.decimalTail()
+	if !ok {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
 	if c == '.' {
 		c = s.nextC()
-		for c >= '0' && c <= '9' || c == '_' {
-			c = s.nextC()
-		}
+		return s.scanFraction(c)
 	}
 	if c == 'e' || c == 'E' {
-		c = s.nextC()
-		if c == '+' || c == '-' {
-			c = s.nextC()
-		}
-		for c >= '0' && c <= '9' || c == '_' {
-			c = s.nextC()
-		}
+		return s.scanExponent(c)
 	}
 	if c == 'j' || c == 'J' {
-		c = s.nextC()
+		return s.scanImaginary()
 	}
-	// verify_end_of_number is called with c still consumed; on success
-	// the caller backs c up.
-	// CPython: Parser/lexer/lexer.c:305 verify_end_of_number
-	if c != eof && !s.verifyEndOfNumber(c, "decimal") {
+	if !s.verifyEndOfNumber(c, "decimal") {
 		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
 	s.backup(c)
 	return s.tokenSetup(token.NUMBER, s.start, s.cur)
 }
 
-func isHexDigitOrUnderscore(c int) bool {
+// decimalTail mirrors tok_decimal_tail: consume runs of digits joined
+// by single underscores. Returns the lookahead byte and true on
+// success; emits "invalid decimal literal" and returns false when a
+// trailing underscore is followed by anything but a digit.
+//
+// CPython: Parser/lexer/lexer.c:413 tok_decimal_tail
+func (s *State) decimalTail() (int, bool) {
+	c := eof
+	for {
+		for {
+			c = s.nextC()
+			if !isDecimalDigit(c) {
+				break
+			}
+		}
+		if c != '_' {
+			break
+		}
+		c = s.nextC()
+		if !isDecimalDigit(c) {
+			s.backup(c)
+			s.syntaxError("invalid decimal literal")
+			return 0, false
+		}
+	}
+	return c, true
+}
+
+// scanFraction continues a decimal literal once the '.' has been
+// consumed. c is the first byte of the fractional run.
+//
+// CPython: Parser/lexer/lexer.c:994 (fraction label)
+func (s *State) scanFraction(c int) Tok {
+	if isDecimalDigit(c) {
+		var ok bool
+		c, ok = s.decimalTail()
+		if !ok {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+	}
+	if c == 'e' || c == 'E' {
+		return s.scanExponent(c)
+	}
+	if c == 'j' || c == 'J' {
+		return s.scanImaginary()
+	}
+	if !s.verifyEndOfNumber(c, "decimal") {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
+	s.backup(c)
+	return s.tokenSetup(token.NUMBER, s.start, s.cur)
+}
+
+// scanExponent runs the 'e' / 'E' arm. e is the exponent marker
+// itself; we read sign and digits, falling back to a plain integer
+// token when the marker isn't followed by digits.
+//
+// CPython: Parser/lexer/lexer.c:1006 (exponent label)
+func (s *State) scanExponent(e int) Tok {
+	c := s.nextC()
+	if c == '+' || c == '-' {
+		c = s.nextC()
+		if !isDecimalDigit(c) {
+			s.backup(c)
+			s.syntaxError("invalid decimal literal")
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+	} else if !isDecimalDigit(c) {
+		s.backup(c)
+		if !s.verifyEndOfNumber(e, "decimal") {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+		s.backup(e)
+		return s.tokenSetup(token.NUMBER, s.start, s.cur)
+	}
+	var ok bool
+	c, ok = s.decimalTail()
+	if !ok {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
+	if c == 'j' || c == 'J' {
+		return s.scanImaginary()
+	}
+	if !s.verifyEndOfNumber(c, "decimal") {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
+	s.backup(c)
+	return s.tokenSetup(token.NUMBER, s.start, s.cur)
+}
+
+// scanImaginary handles the trailing 'j' / 'J' suffix. The marker has
+// already been consumed by the caller; we pull the next byte for
+// verify_end_of_number and back it up on success.
+//
+// CPython: Parser/lexer/lexer.c:1034 (imaginary label)
+func (s *State) scanImaginary() Tok {
+	c := s.nextC()
+	if !s.verifyEndOfNumber(c, "imaginary") {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
+	s.backup(c)
+	return s.tokenSetup(token.NUMBER, s.start, s.cur)
+}
+
+func isHexDigit(c int) bool {
 	return (c >= '0' && c <= '9') ||
 		(c >= 'a' && c <= 'f') ||
-		(c >= 'A' && c <= 'F') ||
-		c == '_'
+		(c >= 'A' && c <= 'F')
 }
 
-func isOctDigitOrUnderscore(c int) bool {
-	return (c >= '0' && c <= '7') || c == '_'
-}
-
-func isBinDigitOrUnderscore(c int) bool {
-	return c == '0' || c == '1' || c == '_'
+func isDecimalDigit(c int) bool {
+	return c >= '0' && c <= '9'
 }
 
 // scanString scans a single- or triple-quoted string literal. f-strings
@@ -616,7 +894,9 @@ func (s *State) scanOperator(c int) Tok {
 	var tok Tok
 	switch c {
 	case '(', '[', '{':
-		s.pushParen(byte(c))
+		if !s.pushParen(byte(c)) {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
 		// CPython bumps curly_bracket_depth on every opener, not just
 		// `{`. The misleading name is upstream's: the counter tracks
 		// nesting depth of any bracket while inside an f-string so the
@@ -630,7 +910,9 @@ func (s *State) scanOperator(c int) Tok {
 		}
 		tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	case ')', ']', '}':
-		s.popParen(byte(c))
+		if !s.popParen(byte(c)) {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
 		// Inside an f-string expression, after popping, a `}` that
 		// brings curlyBracketDepth back down to exprStartDepth closes
 		// the expression and re-enters f-string mode.
@@ -732,25 +1014,40 @@ func (s *State) scanOperator(c int) Tok {
 	return tok
 }
 
-func (s *State) pushParen(c byte) {
+// pushParen records the opening bracket. Returns false (with error
+// pinned) when MAXLEVEL is exceeded.
+//
+// CPython: Parser/lexer/lexer.c:1302 (opening-bracket branch in
+// tok_get_normal_mode).
+func (s *State) pushParen(c byte) bool {
 	if s.level >= maxLevel {
 		s.done = eToken
 		s.recordError("too many nested parentheses")
-		return
+		return false
 	}
 	s.parenStack[s.level] = c
 	s.parenLineno[s.level] = s.lineno
 	s.parenCol[s.level] = s.col - 1
 	s.level++
+	return true
 }
 
-func (s *State) popParen(c byte) {
+// popParen consumes the closing bracket. Returns false (with error
+// pinned) for unmatched closers or mismatched pairs when
+// tok_extra_tokens is off, mirroring CPython's behavior of returning
+// ERRORTOKEN in those cases.
+//
+// CPython: Parser/lexer/lexer.c:1316 (closing-bracket branch in
+// tok_get_normal_mode).
+func (s *State) popParen(c byte) bool {
 	if s.level == 0 {
+		if s.tokExtraTokens {
+			return true
+		}
 		s.done = eToken
-		// CPython: Parser/tokenizer/helpers.c:184 surfaces "unmatched ')'"
-		// pinned to the closing-bracket location.
+		// CPython: Parser/lexer/lexer.c:1324 syntaxerror "unmatched '%c'".
 		s.recordError(fmt.Sprintf("unmatched '%c'", c))
-		return
+		return false
 	}
 	s.level--
 	open := s.parenStack[s.level]
@@ -763,23 +1060,45 @@ func (s *State) popParen(c byte) {
 	case '{':
 		want = '}'
 	}
-	if c != want {
-		s.done = eToken
-		// CPython: Parser/tokenizer/helpers.c:201 surfaces the long form
-		// "closing parenthesis '%c' does not match opening parenthesis
-		// '%c' on line %d".
+	if c == want {
+		return true
+	}
+	if s.tokExtraTokens {
+		return true
+	}
+	s.done = eToken
+	// CPython: Parser/lexer/lexer.c:1345 — same-line uses the short
+	// form without "on line N", different lines pin the opener line.
+	if s.parenLineno[s.level] != s.lineno {
 		s.recordError(fmt.Sprintf(
 			"closing parenthesis '%c' does not match opening parenthesis '%c' on line %d",
 			c, open, s.parenLineno[s.level],
 		))
+	} else {
+		s.recordError(fmt.Sprintf(
+			"closing parenthesis '%c' does not match opening parenthesis '%c'",
+			c, open,
+		))
 	}
+	return false
 }
 
 // endmarker emits the terminal ENDMARKER, also flushing any pending
-// dedents back to indent level 0.
+// dedents back to indent level 0. CPython leaves p_start / p_end NULL
+// on the EOF branch (Parser/lexer/lexer.c:738), so col_offset and
+// end_col_offset stay -1; the (lineno+1, 0) reshape happens later in
+// the Python-tokenize wrapper when extra_tokens is on.
 //
-// CPython: Parser/lexer/lexer.c:1500 (EOF branch in tok_get_normal_mode)
+// s.done is set to eEOF on the first call so the DEDENT-at-EOF
+// tokens that flush ahead of ENDMARKER report E_EOF to the wrapper.
+// In CPython this happens in the underflow (file/string/utf8
+// tokenizer) before the indent-unwind branch queues DEDENTs via
+// tok->pendin; gopy collapses that into endmarker() because the
+// buffer is already fully loaded.
+//
+// CPython: Parser/lexer/lexer.c:734 EOF branch in tok_get_normal_mode
 func (s *State) endmarker() Tok {
+	s.done = eEOF
 	if s.indent > 0 {
 		s.indent--
 		start, end := -1, -1
@@ -788,8 +1107,7 @@ func (s *State) endmarker() Tok {
 		}
 		return s.tokenSetup(token.DEDENT, start, end)
 	}
-	s.done = eEOF
-	return s.tokenSetup(token.ENDMARKER, s.cur, s.cur)
+	return s.tokenSetup(token.ENDMARKER, -1, -1)
 }
 
 // maybeTypeComment inspects a comment span and emits a TYPE_COMMENT
@@ -886,9 +1204,14 @@ func (s *State) verifyEndOfNumber(c int, kind string) bool {
 		r = s.lookahead("ot")
 	}
 	if r {
-		// Trailing keyword (`1and`, `1or`, ...): accept the literal.
-		// CPython emits a SyntaxWarning, gopy's tokenizer doesn't reach
-		// the warnings module yet so we record nothing.
+		// Backup so the keyword runs through the lexer normally on the
+		// next pass, matching tok_backup(tok, c) in CPython.
+		s.backup(c)
+		s.parserWarn("SyntaxWarning", "invalid %s literal", kind)
+		// Re-consume the byte we just backed up so the caller's cursor
+		// stays where CPython leaves it after the tok_nextc(tok) call
+		// inside verify_end_of_number.
+		s.nextC()
 		return true
 	}
 	if c < 128 && isPotentialIdentifierChar(c) {
@@ -900,15 +1223,8 @@ func (s *State) verifyEndOfNumber(c int, kind string) bool {
 }
 
 // verifyIdentifier checks that the bytes between s.start and s.cur form
-// a valid PEP 3131 identifier. CPython runs _PyUnicode_ScanIdentifier
-// against the Unicode XID_Start / XID_Continue tables. gopy doesn't yet
-// vendor those tables (objects.IsXIDStartRune is itself approximated
-// via unicode.IsLetter, which can disagree on a handful of codepoints
-// at Unicode-version boundaries). Until the unicodedata XID tables
-// land, this routine only enforces UTF-8 validity. That's permissive:
-// it accepts a few identifiers CPython would reject. The function is
-// wired into scanName so the entry point is in place; tightening it
-// is one swap away once the tables exist. Gap tracked under #612.
+// a valid PEP 3131 identifier by running scanIdentifier against the
+// XID_Start / XID_Continue tables composed in xid.go.
 //
 // CPython: Parser/lexer/lexer.c:364 verify_identifier
 func (s *State) verifyIdentifier() bool {
@@ -916,23 +1232,46 @@ func (s *State) verifyIdentifier() bool {
 		return true
 	}
 	bs := s.buf[s.start:s.cur]
-	asciiOnly := true
-	for _, b := range bs {
-		if b >= 0x80 {
-			asciiOnly = false
-			break
-		}
-	}
-	if asciiOnly {
-		return true
-	}
 	if _, _, ok := ValidateUTF8(bs); !ok {
 		s.done = eDecode
 		s.recordError("invalid character in identifier")
 		return false
 	}
-	return true
+	off, bad, ok := scanIdentifier(string(bs))
+	if ok {
+		return true
+	}
+	// Pin tok->cur to the bad rune so callers see the right span.
+	s.cur = s.start + off + utf8RuneLen(bad)
+	if isPrintable(bad) {
+		s.syntaxError("invalid character '%c' (U+%04X)", bad, bad)
+	} else {
+		s.syntaxError("invalid non-printable character U+%04X", bad)
+	}
+	return false
 }
+
+// utf8RuneLen reports the UTF-8 byte length of r, falling back to 1
+// for the replacement-character path so we never advance past the
+// buffer.
+func utf8RuneLen(r rune) int {
+	switch {
+	case r < 0x80:
+		return 1
+	case r < 0x800:
+		return 2
+	case r < 0x10000:
+		return 3
+	default:
+		return 4
+	}
+}
+
+// isPrintable mirrors Py_UNICODE_ISPRINTABLE for the error-message
+// branch in verify_identifier.
+//
+// CPython: Objects/unicodectype.c:269 _PyUnicode_IsPrintable
+func isPrintable(r rune) bool { return unicode.IsPrint(r) || r == ' ' }
 
 // maybeRaiseSyntaxErrorForStringPrefixes flags incompatible string
 // prefix combos. Supported combos: rb / rf / rt in any order. All other

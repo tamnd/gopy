@@ -67,6 +67,14 @@ func IntCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 
 func numberToInt(o objects.Object) (objects.Object, error) {
 	switch v := o.(type) {
+	case *objects.Bool:
+		// bool is a subclass of int; PyNumber_Long(True) returns the
+		// plain int 1 (not the True singleton), so strip the bool
+		// wrapper and rebuild as an Int.
+		//
+		// CPython: Objects/boolobject.c bool_int / long_new_impl PyNumber_Long
+		n, _ := v.Int64()
+		return objects.NewInt(n), nil
 	case *objects.Int:
 		return v, nil
 	case *objects.Float:

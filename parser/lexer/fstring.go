@@ -190,6 +190,20 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 		}
 		endQuoteSize = 0
 
+		// Triple-quoted f-strings span multiple physical lines.
+		// CPython's tok_nextc bumps tok->lineno from the underflow
+		// callback as each line is loaded; gopy preloads the whole
+		// buffer so the line counter must be advanced here, mirroring
+		// scanString's '\n' arm.
+		//
+		// CPython: Parser/lexer/lexer.c:1462 f_string_middle ('\n' falls
+		// through the EOF/single-line guard and into tok_nextc which
+		// bumps tok->lineno on the next refill)
+		if c == '\n' {
+			s.pendingLineno++
+			s.col = 0
+		}
+
 		if c == '{' {
 			// CPython snapshots the expression source at the opening
 			// `{` so set_ftstring_expr can later attach it as token
@@ -231,6 +245,17 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 			if peek == '{' || peek == '}' {
 				s.backup(peek)
 				continue
+			}
+			// Backslash-newline is a line continuation even inside a
+			// single-quoted f-string; advance the line counter so the
+			// closing quote and any further tokens report the correct
+			// row/col, matching scanString's escape arm.
+			//
+			// CPython: Parser/lexer/lexer.c:1205 (tok_nextc bumps
+			// tok->lineno on every '\n' regardless of context)
+			if peek == '\n' {
+				s.pendingLineno++
+				s.col = 0
 			}
 			// Skip the escaped character. Named escapes \N{...} fall
 			// through to the regular middle scanning.
@@ -344,6 +369,11 @@ func (s *State) setFtstringExpr(tok *Tok, c byte) {
 	}
 
 	if !hashDetected {
+		if _, _, ok := ValidateUTF8(src); !ok {
+			s.done = eDecode
+			s.syntaxError("invalid character in f-string expression")
+			return
+		}
 		tok.Metadata = append([]byte(nil), src...)
 		return
 	}
@@ -385,6 +415,11 @@ func (s *State) setFtstringExpr(tok *Tok, c byte) {
 		}
 		out = append(out, ch)
 		i++
+	}
+	if _, _, ok := ValidateUTF8(out); !ok {
+		s.done = eDecode
+		s.syntaxError("invalid character in f-string expression")
+		return
 	}
 	tok.Metadata = out
 }

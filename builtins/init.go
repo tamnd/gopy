@@ -17,6 +17,8 @@ import (
 	"sync"
 
 	"github.com/tamnd/gopy/errors"
+	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -25,12 +27,29 @@ var wireOnce sync.Once
 // Init constructs the builtins dict and stamps the v0.6 surface into
 // it: None / True / False / NotImplemented as named constants, and
 // print as the single callable. defaultFile is the io.Writer the
-// print builtin uses when the call site does not pass file=.
+// caller wants exposed as sys.stdout; it is also the writer print()
+// will land on when the call site omits file=. CPython's
+// Py_InitializeFromConfig sequences sys_init_streams before
+// _PyBuiltin_Init runs, so gopy mirrors that ordering here: plumb
+// PyConfig.stdout into sys before any builtin can fire.
 //
 // CPython: Python/bltinmodule.c:3425 _PyBuiltin_Init body, "SETBUILTIN" macro
+// CPython: Python/sysmodule.c:3795 sys_init_streams
 func Init(defaultFile io.Writer) (*objects.Dict, error) {
 	wireTypeCalls()
+	if defaultFile != nil {
+		sys.SetStdio(defaultFile, nil)
+	}
 	dict := objects.NewDict()
+	// CPython's _PyBuiltin_Init stamps the builtins module into
+	// interp->modules so any later `import builtins` returns the
+	// dict that builtins.__import__ was already populating. Without
+	// this, the import machinery would fall through to the
+	// module/builtins inittab and rebuild the dict with the default
+	// os.Stdout, clobbering anything callers wired via defaultFile.
+	//
+	// CPython: Python/pylifecycle.c:1413 init_interp_main (builtins registration)
+	imp.AddModule("builtins", objects.NewModuleWithDict("builtins", dict))
 
 	if err := setBuiltin(dict, "None", objects.None()); err != nil {
 		return nil, err
@@ -60,7 +79,7 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		}
 	}
 
-	printFn := objects.NewBuiltinFunction("print", Print(defaultFile))
+	printFn := objects.NewBuiltinFunction("print", Print)
 	if err := setBuiltin(dict, "print", printFn); err != nil {
 		return nil, err
 	}

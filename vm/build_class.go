@@ -165,7 +165,9 @@ func runClassBody(fn *objects.Function, ns objects.Object) error {
 	// into the frame's free-var slots so LOAD_DEREF still works inside
 	// the body.
 	if fn.Closure != nil && fn.Closure.Len() > 0 {
-		base := frame.FreesStart(co)
+		// CPython: Python/bytecodes.c:1932 COPY_FREE_VARS offset.
+		// Free vars sit at co_nlocalsplus - co_nfreevars.
+		base := frame.NLocalsPlusOf(co) - fn.Closure.Len()
 		for i := 0; i < fn.Closure.Len(); i++ {
 			f.LocalsPlus[base+i] = stackref.FromObject(fn.Closure.Item(i))
 		}

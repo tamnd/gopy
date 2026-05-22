@@ -44,12 +44,22 @@ func ToBool(value objects.Object, code []byte, instr int) {
 		return
 	}
 	if t := objects.ExactType(value); t != nil && t.IsUser {
-		// CPython runs _PyType_Validate with check_type_always_true,
-		// which rejects classes that override __bool__ / __len__ via
-		// nb_bool, mp_length, or sq_length. gopy's user types do not
-		// expose those slots through the protocol layer specializer
-		// arms care about, so any user class whose VersionTag can be
-		// allocated qualifies as always-true here.
+		// CPython's check_type_always_true rejects any class that
+		// exposes nb_bool, mp_length, or sq_length: those are the
+		// hooks the abstract layer asks first when computing truthiness,
+		// and a user-defined __bool__ / __len__ may return False.
+		// gopy installs Number.Bool when __bool__ is defined and
+		// Mapping.Length / Sequence.Length when __len__ is defined
+		// (see objects/usertype.go), so the same triple of slot
+		// checks tells us whether always-true is safe.
+		//
+		// CPython: Objects/object.c:1505 check_type_always_true
+		if (t.Number != nil && t.Number.Bool != nil) ||
+			(t.Mapping != nil && t.Mapping.Length != nil) ||
+			(t.Sequence != nil && t.Sequence.Length != nil) {
+			Unspecialize(code, instr)
+			return
+		}
 		version := t.VersionTag()
 		if version == 0 {
 			Unspecialize(code, instr)

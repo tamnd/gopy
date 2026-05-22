@@ -38,12 +38,16 @@ func Decode(input []byte, encoding, errors string) (out string, n int, err error
 }
 
 // builtinSearch is the built-in codec search function. It recognizes
-// the standard name aliases for utf-8, ascii, and latin-1.
+// the standard name aliases for utf-8, ascii, latin-1, the utf-16 /
+// utf-32 BOM-stripping pairs, and the small set of charmap codecs the
+// stdlib trips over (iso-8859-15, cp1252, cp1250, cp1251, cp437,
+// mac-roman).
 //
 // CPython: Modules/_codecsmodule.c builtin codec table
+// CPython: Lib/encodings/aliases.py aliases
 func builtinSearch(name string) (*CodecInfo, error) {
 	switch name {
-	case "utf_8", "utf8", "u8", "utf":
+	case "utf_8", "utf8", "u8", "utf", "cp65001":
 		return utf8Codec, nil
 	case "ascii", "us_ascii", "646", "ansi_x3_4_1968":
 		return asciiCodec, nil
@@ -53,6 +57,30 @@ func builtinSearch(name string) (*CodecInfo, error) {
 		return latin1Codec, nil
 	case "raw_unicode_escape":
 		return rawUnicodeEscapeCodec, nil
+	case "utf_16", "utf16", "u16":
+		return utf16Codec, nil
+	case "utf_16_le", "utf16le":
+		return utf16LECodec, nil
+	case "utf_16_be", "utf16be":
+		return utf16BECodec, nil
+	case "utf_32", "utf32", "u32":
+		return utf32Codec, nil
+	case "utf_32_le", "utf32le":
+		return utf32LECodec, nil
+	case "utf_32_be", "utf32be":
+		return utf32BECodec, nil
+	case "iso8859_15", "iso_8859_15", "iso_8859_15_1998", "latin9", "l9":
+		return iso8859_15.Info(), nil
+	case "cp1252", "windows_1252", "1252":
+		return cp1252.Info(), nil
+	case "cp1250", "windows_1250", "1250":
+		return cp1250.Info(), nil
+	case "cp1251", "windows_1251", "1251":
+		return cp1251.Info(), nil
+	case "cp437", "ibm437", "437":
+		return cp437.Info(), nil
+	case "mac_roman", "macroman", "macintosh":
+		return macRoman.Info(), nil
 	}
 	return nil, nil
 }
@@ -94,7 +122,7 @@ func encodeUTF8(input, errors string) (out []byte, n int, err error) {
 		if herr != nil {
 			return nil, i, herr
 		}
-		rep, newpos, herr := handler("utf-8", []byte(string(r)), i, i+1)
+		rep, newpos, herr := handler("utf-8", "surrogates not allowed", []byte(string(r)), i, i+1)
 		if herr != nil {
 			return nil, i, herr
 		}
@@ -119,7 +147,7 @@ func decodeUTF8(input []byte, errors string) (out string, n int, err error) {
 			if herr != nil {
 				return "", i, herr
 			}
-			rep, newpos, herr := handler("utf-8", input, i, i+1)
+			rep, newpos, herr := handler("utf-8", "invalid start byte", input, i, i+1)
 			if herr != nil {
 				return "", i, herr
 			}
@@ -149,7 +177,7 @@ func encodeASCII(input, errors string) (out []byte, n int, err error) {
 		if herr != nil {
 			return nil, i, herr
 		}
-		rep, _, herr := handler("ascii", []byte(input), i, i+1)
+		rep, _, herr := handler("ascii", "ordinal not in range(128)", []byte(input), i, i+1)
 		if herr != nil {
 			return nil, i, herr
 		}
@@ -176,7 +204,7 @@ func decodeASCII(input []byte, errors string) (out string, n int, err error) {
 		if herr != nil {
 			return "", i, herr
 		}
-		rep, newpos, herr := handler("ascii", input, i, i+1)
+		rep, newpos, herr := handler("ascii", "ordinal not in range(128)", input, i, i+1)
 		if herr != nil {
 			return "", i, herr
 		}
@@ -202,7 +230,7 @@ func encodeLatin1(input, errors string) (out []byte, n int, err error) {
 		if herr != nil {
 			return nil, i, herr
 		}
-		rep, _, herr := handler("iso-8859-1", []byte(input), i, i+1)
+		rep, _, herr := handler("iso-8859-1", "ordinal not in range(256)", []byte(input), i, i+1)
 		if herr != nil {
 			return nil, i, herr
 		}

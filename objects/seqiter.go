@@ -28,6 +28,7 @@ var SeqIterType = NewType("iterator", []*Type{objectType})
 func init() {
 	SeqIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	SeqIterType.IterNext = seqIterNext
+	AddIterSlotWrappers(SeqIterType)
 }
 
 // NewSeqIter wraps a sequence as iter(seq). The sequence must have a
@@ -85,6 +86,7 @@ var CallIterType = NewType("callable_iterator", []*Type{objectType})
 func init() {
 	CallIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	CallIterType.IterNext = callIterNext
+	AddIterSlotWrappers(CallIterType)
 }
 
 // NewCallIter wraps callable+sentinel as iter(callable, sentinel).

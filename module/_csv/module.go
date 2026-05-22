@@ -273,6 +273,7 @@ func newReaderType() *objects.Type {
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = readerIterNext
 	t.Getattro = readerGetattr
+	objects.AddIterSlotWrappers(t)
 	return t
 }
 

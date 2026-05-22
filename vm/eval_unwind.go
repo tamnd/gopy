@@ -13,11 +13,14 @@ package vm
 
 import (
 	"errors"
+	"os"
 	"strings"
+	"syscall"
 
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/gil"
 	"github.com/tamnd/gopy/objects"
+	parsererrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/traceback"
 )
 
@@ -31,37 +34,38 @@ import (
 // CPython: Python/errors.c:218 PyErr_GivenExceptionMatches reads
 // the typed PyObject; gopy's bridge is this prefix table.
 var errorPrefixToType = map[string]*objects.Type{
-	"TypeError:":             pyerrors.PyExc_TypeError,
-	"ValueError:":            pyerrors.PyExc_ValueError,
-	"NameError:":             pyerrors.PyExc_NameError,
-	"AttributeError:":        pyerrors.PyExc_AttributeError,
-	"KeyError:":              pyerrors.PyExc_KeyError,
-	"IndexError:":            pyerrors.PyExc_IndexError,
-	"RuntimeError:":          pyerrors.PyExc_RuntimeError,
-	"StopIteration:":         pyerrors.PyExc_StopIteration,
-	"StopAsyncIteration:":    pyerrors.PyExc_StopAsyncIteration,
-	"ArithmeticError:":       pyerrors.PyExc_ArithmeticError,
-	"ZeroDivisionError:":     pyerrors.PyExc_ZeroDivisionError,
-	"OverflowError:":         pyerrors.PyExc_OverflowError,
-	"FloatingPointError:":    pyerrors.PyExc_FloatingPointError,
-	"LookupError:":           pyerrors.PyExc_LookupError,
-	"AssertionError:":        pyerrors.PyExc_AssertionError,
-	"NotImplementedError:":   pyerrors.PyExc_NotImplementedError,
-	"UnicodeDecodeError:":    pyerrors.PyExc_UnicodeDecodeError,
-	"UnicodeEncodeError:":    pyerrors.PyExc_UnicodeEncodeError,
-	"UnicodeTranslateError:": pyerrors.PyExc_UnicodeTranslateError,
-	"UnicodeError:":          pyerrors.PyExc_UnicodeError,
-	"SystemError:":           pyerrors.PyExc_SystemError,
-	"RecursionError:":        pyerrors.PyExc_RecursionError,
-	"OSError:":               pyerrors.PyExc_OSError,
-	"MemoryError:":           pyerrors.PyExc_MemoryError,
-	"ReferenceError:":        pyerrors.PyExc_ReferenceError,
-	"BufferError:":           pyerrors.PyExc_BufferError,
-	"EOFError:":              pyerrors.PyExc_EOFError,
-	"ImportError:":           pyerrors.PyExc_ImportError,
-	"ModuleNotFoundError:":   pyerrors.PyExc_ModuleNotFoundError,
-	"SyntaxError:":           pyerrors.PyExc_SyntaxError,
-	"IndentationError:":      pyerrors.PyExc_IndentationError,
+	"TypeError:":               pyerrors.PyExc_TypeError,
+	"ValueError:":              pyerrors.PyExc_ValueError,
+	"NameError:":               pyerrors.PyExc_NameError,
+	"AttributeError:":          pyerrors.PyExc_AttributeError,
+	"KeyError:":                pyerrors.PyExc_KeyError,
+	"IndexError:":              pyerrors.PyExc_IndexError,
+	"RuntimeError:":            pyerrors.PyExc_RuntimeError,
+	"StopIteration:":           pyerrors.PyExc_StopIteration,
+	"StopAsyncIteration:":      pyerrors.PyExc_StopAsyncIteration,
+	"ArithmeticError:":         pyerrors.PyExc_ArithmeticError,
+	"ZeroDivisionError:":       pyerrors.PyExc_ZeroDivisionError,
+	"OverflowError:":           pyerrors.PyExc_OverflowError,
+	"FloatingPointError:":      pyerrors.PyExc_FloatingPointError,
+	"LookupError:":             pyerrors.PyExc_LookupError,
+	"AssertionError:":          pyerrors.PyExc_AssertionError,
+	"NotImplementedError:":     pyerrors.PyExc_NotImplementedError,
+	"UnicodeDecodeError:":      pyerrors.PyExc_UnicodeDecodeError,
+	"UnicodeEncodeError:":      pyerrors.PyExc_UnicodeEncodeError,
+	"UnicodeTranslateError:":   pyerrors.PyExc_UnicodeTranslateError,
+	"UnicodeError:":            pyerrors.PyExc_UnicodeError,
+	"SystemError:":             pyerrors.PyExc_SystemError,
+	"RecursionError:":          pyerrors.PyExc_RecursionError,
+	"OSError:":                 pyerrors.PyExc_OSError,
+	"io.UnsupportedOperation:": pyerrors.PyExc_UnsupportedOperation,
+	"MemoryError:":             pyerrors.PyExc_MemoryError,
+	"ReferenceError:":          pyerrors.PyExc_ReferenceError,
+	"BufferError:":             pyerrors.PyExc_BufferError,
+	"EOFError:":                pyerrors.PyExc_EOFError,
+	"ImportError:":             pyerrors.PyExc_ImportError,
+	"ModuleNotFoundError:":     pyerrors.PyExc_ModuleNotFoundError,
+	"SyntaxError:":             pyerrors.PyExc_SyntaxError,
+	"IndentationError:":        pyerrors.PyExc_IndentationError,
 }
 
 // synthesizeException promotes an unmatched Go error into the closest
@@ -79,6 +83,15 @@ func synthesizeException(err error) *pyerrors.Exception {
 	if errors.Is(err, objects.ErrStopAsyncIteration) {
 		return pyerrors.New(pyerrors.PyExc_StopAsyncIteration, nil)
 	}
+	// Structured parser SyntaxError: lift filename/lineno/offset/text
+	// into the (msg, info) 2-arg form so the SyntaxError instance
+	// carries the full set of attributes Python user code expects.
+	// CPython: Parser/pegen_errors.c:317 _PyPegen_raise_error_known_location
+	// (PyErr_SetObject builds the typed instance from these fields).
+	var se *parsererrors.SyntaxError
+	if errors.As(err, &se) {
+		return pyerrors.SyntaxFromParser(se)
+	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.
 	if rest, ok := strings.CutPrefix(msg, "vm: "); ok {
@@ -86,9 +99,8 @@ func synthesizeException(err error) *pyerrors.Exception {
 	}
 	for prefix, typ := range errorPrefixToType {
 		if strings.HasPrefix(msg, prefix) {
-			return pyerrors.New(typ, objects.NewTuple([]objects.Object{
-				objects.NewStr(strings.TrimSpace(msg[len(prefix):])),
-			}))
+			typ = promoteOSErrorByErrno(typ, err)
+			return buildExceptionForType(typ, strings.TrimSpace(msg[len(prefix):]))
 		}
 	}
 	// Fallback: scan for a typed prefix anywhere in the message. The
@@ -98,14 +110,100 @@ func synthesizeException(err error) *pyerrors.Exception {
 	// callers can still `except SyntaxError`.
 	for prefix, typ := range errorPrefixToType {
 		if i := strings.Index(msg, prefix); i >= 0 {
-			return pyerrors.New(typ, objects.NewTuple([]objects.Object{
-				objects.NewStr(strings.TrimSpace(msg[i+len(prefix):])),
-			}))
+			typ = promoteOSErrorByErrno(typ, err)
+			return buildExceptionForType(typ, strings.TrimSpace(msg[i+len(prefix):]))
 		}
 	}
 	return pyerrors.New(pyerrors.PyExc_Exception, objects.NewTuple([]objects.Object{
 		objects.NewStr(msg),
 	}))
+}
+
+// buildExceptionForType is the single-arg constructor path used by the
+// prefix-table arms. Most exception types are happy with pyerrors.New
+// (which calls BaseException_init via tp.Init), but the SyntaxError
+// subclass family needs SyntaxError_init to populate the .msg member
+// descriptor. Without that path the descriptor reads SyntaxErr.Msg ==
+// nil and surfaces as None, which traceback.py turns into the bogus
+// "<no detail available>" string.
+//
+// CPython: Objects/exceptions.c:2713 SyntaxError_init runs through the
+// type's tp_init / tp_call, so a bare PyObject_New does not populate
+// the members.
+func buildExceptionForType(typ *objects.Type, msg string) *pyerrors.Exception {
+	args := []objects.Object{objects.NewStr(msg)}
+	if isSyntaxErrorType(typ) {
+		out, err := typ.Call(typ, args, nil)
+		if err == nil {
+			if exc, ok := out.(*pyerrors.Exception); ok {
+				return exc
+			}
+		}
+	}
+	return pyerrors.New(typ, objects.NewTuple(args))
+}
+
+// promoteOSErrorByErrno mirrors CPython's PyErr_SetFromErrnoWithFilename
+// promotion: when the synthesized exception lands in the OSError family
+// and the underlying Go error carries a syscall.Errno (PathError /
+// LinkError / SyscallError), look up the matching subclass via
+// errnomap so `except FileNotFoundError:` / `except PermissionError:`
+// actually catch the right thing. Non-OSError types pass through.
+//
+// CPython: Python/errors.c:1031 _PyErr_SetFromErrnoWithFilenameObjects
+func promoteOSErrorByErrno(typ *objects.Type, err error) *objects.Type {
+	if !isOSErrorType(typ) {
+		return typ
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		var errno syscall.Errno
+		if errors.As(pathErr.Err, &errno) {
+			return pyerrors.ErrnoSubclass(int(errno))
+		}
+	}
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		var errno syscall.Errno
+		if errors.As(linkErr.Err, &errno) {
+			return pyerrors.ErrnoSubclass(int(errno))
+		}
+	}
+	var sysErr *os.SyscallError
+	if errors.As(err, &sysErr) {
+		var errno syscall.Errno
+		if errors.As(sysErr.Err, &errno) {
+			return pyerrors.ErrnoSubclass(int(errno))
+		}
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return pyerrors.ErrnoSubclass(int(errno))
+	}
+	return typ
+}
+
+// isOSErrorType reports whether typ is OSError itself. Subclasses keep
+// their original type. The promotion only fires when the synthesizer
+// already picked plain OSError.
+func isOSErrorType(typ *objects.Type) bool {
+	return typ == pyerrors.PyExc_OSError
+}
+
+// isSyntaxErrorType reports whether typ is SyntaxError or a SyntaxError
+// subclass (IndentationError, TabError). The check follows the bases
+// chain so future subclasses pick up the same routing.
+func isSyntaxErrorType(typ *objects.Type) bool {
+	for t := typ; t != nil; {
+		if t == pyerrors.PyExc_SyntaxError {
+			return true
+		}
+		if len(t.Bases) == 0 {
+			return false
+		}
+		t = t.Bases[0]
+	}
+	return false
 }
 
 // handleException tries to find a handler for err in the current

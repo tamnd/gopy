@@ -105,3 +105,58 @@ func makeWrapDescrDelete(t *Type) func(args []Object, kwargs map[string]Object) 
 		return None(), nil
 	}
 }
+
+// AddIterSlotWrappers exposes __iter__ and __next__ on t when the
+// matching C-level slots are populated, mirroring CPython's
+// add_operators rows for tp_iter / tp_iternext. Iterator types call
+// this from their init after they set Iter/IterNext so `dir(it)`,
+// `getattr(it, '__next__')`, and pickle's `__reduce__` round-trip
+// all see the same names CPython exposes through slotdefs.
+//
+// CPython: Objects/typeobject.c add_operators / slotdefs rows for
+// tp_iter (Objects/typeobject.c:9929 slot_tp_iter) and tp_iternext
+// (Objects/typeobject.c:8421 slot_tp_iternext).
+func AddIterSlotWrappers(t *Type) {
+	if t == nil {
+		return
+	}
+	if t.Iter != nil {
+		if _, exists := typeDescrTable[t]["__iter__"]; !exists {
+			SetTypeDescr(t, "__iter__", NewMethodDescr(t, "__iter__", makeWrapIter(t)))
+		}
+	}
+	if t.IterNext != nil {
+		if _, exists := typeDescrTable[t]["__next__"]; !exists {
+			SetTypeDescr(t, "__next__", NewMethodDescr(t, "__next__", makeWrapIterNext(t)))
+		}
+	}
+}
+
+// makeWrapIter returns a self-only wrapper for t.Iter, matching
+// CPython's `wrap_unaryfunc` shape for tp_iter.
+//
+// CPython: Objects/typeobject.c wrap_unaryfunc (slotdefs row for tp_iter)
+func makeWrapIter(t *Type) func(args []Object, kwargs map[string]Object) (Object, error) {
+	return func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: expected 0 arguments, got %d", len(args)-1)
+		}
+		return t.Iter(args[0])
+	}
+}
+
+// makeWrapIterNext returns a self-only wrapper for t.IterNext. The
+// ErrStopIteration sentinel surfaces as a real StopIteration exception
+// when callers go through the Python-level __next__, mirroring
+// CPython's `next_wrapper` which calls PyIter_Next and converts the
+// NULL+no-error case into StopIteration.
+//
+// CPython: Objects/typeobject.c next_wrapper (slotdefs row for tp_iternext)
+func makeWrapIterNext(t *Type) func(args []Object, kwargs map[string]Object) (Object, error) {
+	return func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: expected 0 arguments, got %d", len(args)-1)
+		}
+		return t.IterNext(args[0])
+	}
+}

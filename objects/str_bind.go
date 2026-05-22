@@ -392,7 +392,7 @@ func strRSplitMethod(args []Object, _ map[string]Object) (Object, error) {
 	return strListFromGoSlice(parts), nil
 }
 
-func strSplitLinesMethod(args []Object, _ map[string]Object) (Object, error) {
+func strSplitLinesMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	s, err := selfStr(args, "splitlines")
 	if err != nil {
 		return nil, err
@@ -400,6 +400,12 @@ func strSplitLinesMethod(args []Object, _ map[string]Object) (Object, error) {
 	keepends := false
 	if len(args) >= 2 {
 		keepends = strToBool(args[1])
+	}
+	if kw, ok := kwargs["keepends"]; ok {
+		if len(args) >= 2 {
+			return nil, fmt.Errorf("TypeError: splitlines() got multiple values for argument 'keepends'")
+		}
+		keepends = strToBool(kw)
 	}
 	return strListFromGoSlice(StrSplitLines(s, keepends)), nil
 }

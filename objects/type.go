@@ -165,6 +165,17 @@ type Type struct {
 	// CPython: Objects/typeobject.c:4401 type_new_descriptors
 	Slots []string
 
+	// SlotsBase is the cumulative count of slot fields contributed by
+	// the layout base chain (CPython's ctx->base->tp_basicsize translated
+	// to a slot-count offset). MemberDescr indices on this type start at
+	// SlotsBase, so an inherited slot keeps reading the parent's index
+	// while a freshly declared slot lands above it. NewInstance sizes
+	// Instance.slots to SlotsBase + len(Slots).
+	//
+	// CPython: Objects/typeobject.c:4404 type_new_descriptors (slotoffset
+	// = ctx->base->tp_basicsize)
+	SlotsBase int
+
 	// HasDict is true when instances of this type carry a per-instance
 	// __dict__. False only when the class declares __slots__ without
 	// __dict__ (and no base contributes one). Mirrors a non-zero
@@ -400,6 +411,14 @@ func init() {
 func identityHash(o Object) (int64, error) {
 	return int64(uintptr(unsafe.Pointer(reflect.ValueOf(o).Pointer()))), nil
 }
+
+// IdentityHash is the exported alias for identityHash so built-in
+// modules can install pointer-identity hashing on types that inherit
+// object's default hash semantics. Mirrors CPython's behavior where any
+// type that does not override __hash__ shares object's _Py_HashPointer.
+//
+// CPython: Python/pyhash.c:152 _Py_HashPointer
+func IdentityHash(o Object) (int64, error) { return identityHash(o) }
 
 // TypeType returns the type singleton for `type` itself. Mirrors
 // PyType_Type.

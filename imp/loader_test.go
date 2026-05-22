@@ -70,11 +70,11 @@ func TestLoadSource(t *testing.T) {
 
 	wantCode := objects.NewCode()
 	wantCode.Name = modName
-	compiler := func(_, _ string) (*objects.Code, error) {
+	compiler := func(_ []byte, _ string) (*objects.Code, error) {
 		return wantCode, nil
 	}
 
-	mod, err := LoadSource(&stubExec{}, compiler, "x = 1", "test.py", modName)
+	mod, err := LoadSource(&stubExec{}, compiler, []byte("x = 1"), "test.py", modName)
 	if err != nil {
 		t.Fatalf("LoadSource: %v", err)
 	}
@@ -101,8 +101,8 @@ func TestLoadSourceFile(t *testing.T) {
 	wantCode := objects.NewCode()
 	wantCode.Name = modName
 	var gotSrc string
-	compiler := func(src, _ string) (*objects.Code, error) {
-		gotSrc = src
+	compiler := func(src []byte, _ string) (*objects.Code, error) {
+		gotSrc = string(src)
 		return wantCode, nil
 	}
 

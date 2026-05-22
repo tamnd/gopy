@@ -104,6 +104,25 @@ type Code struct {
 	LocalsplusNames []string
 	LocalsplusKinds []byte
 
+	// Nlocalsplus / Nlocals / Ncellvars / Nfreevars are the cached
+	// counts CPython precomputes in init_code from
+	// localspluskinds. They are NOT
+	// len(Varnames)+len(Cellvars)+len(Freevars): when a cellvar's
+	// name overlaps with a varname (arg cells), fix_cell_offsets
+	// merges the two slots and the compacted nlocalsplus drops
+	// below the naive sum. Frame layout, COPY_FREE_VARS, and
+	// LOAD_DEREF / STORE_DEREF all read these counts; without them
+	// the frame allocates one slot too many per arg cell and the
+	// fix_cell_offsets-rewritten opargs land on un-populated cells.
+	//
+	// CPython: Include/cpython/code.h:84 co_nlocalsplus
+	// CPython: Objects/codeobject.c:389 get_localsplus_counts
+	// CPython: Objects/codeobject.c:548 (init_code stores derived counts)
+	Nlocalsplus int
+	Nlocals     int
+	Ncellvars   int
+	Nfreevars   int
+
 	// Filename, Name, Qualname mirror co_filename / co_name /
 	// co_qualname. The traceback renderer reads them.
 	Filename string
@@ -337,6 +356,55 @@ func NewCode() *Code {
 	c := &Code{Version: AllocCodeVersion()}
 	c.init(CodeType)
 	return c
+}
+
+// CO_FAST_* kind bits mirror Include/internal/pycore_code.h:180.
+// gopy reuses the CPython values byte-for-byte so marshal can write
+// LocalsplusKinds straight to the .pyc wire format.
+//
+// CPython: Include/internal/pycore_code.h:180 CO_FAST_*
+const (
+	CoFastArgPos uint8 = 0x02
+	CoFastArgKw  uint8 = 0x04
+	CoFastArgVar uint8 = 0x08
+	CoFastArg    uint8 = CoFastArgPos | CoFastArgKw | CoFastArgVar
+	CoFastHidden uint8 = 0x10
+	CoFastLocal  uint8 = 0x20
+	CoFastCell   uint8 = 0x40
+	CoFastFree   uint8 = 0x80
+)
+
+// SyncLocalsplusCounts walks LocalsplusKinds and refreshes Nlocalsplus
+// / Nlocals / Ncellvars / Nfreevars to match. CPython precomputes the
+// same trio in init_code from the kinds tuple so every later read
+// (frame layout, COPY_FREE_VARS, dis) gets one consistent view.
+// Construction sites (liftNestedCode, marshal decode, test fixtures)
+// call this after populating LocalsplusNames / LocalsplusKinds.
+//
+// CPython: Objects/codeobject.c:389 get_localsplus_counts
+// CPython: Objects/codeobject.c:548 (init_code stores the derived counts)
+func (c *Code) SyncLocalsplusCounts() {
+	c.Nlocalsplus = len(c.LocalsplusNames)
+	nlocals := 0
+	ncellvars := 0
+	nfreevars := 0
+	for i := 0; i < len(c.LocalsplusKinds) && i < c.Nlocalsplus; i++ {
+		kind := c.LocalsplusKinds[i]
+		switch {
+		case kind&CoFastLocal != 0:
+			nlocals++
+			if kind&CoFastCell != 0 {
+				ncellvars++
+			}
+		case kind&CoFastCell != 0:
+			ncellvars++
+		case kind&CoFastFree != 0:
+			nfreevars++
+		}
+	}
+	c.Nlocals = nlocals
+	c.Ncellvars = ncellvars
+	c.Nfreevars = nfreevars
 }
 
 // SyncNameObjs rebuilds NameObjs to match the current Names slice.

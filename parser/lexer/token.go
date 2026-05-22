@@ -37,18 +37,20 @@ func (s *State) tokenSetup(kind token.Type, start, end int) Tok {
 	return t
 }
 
-// newlineTokenSetup builds a NEWLINE/NL token with positions taken
-// from the byte offsets relative to s.lineStart, matching CPython's
-// behavior where _PyLexer_token_setup computes col_offset as
-// (start - line_start) and end_col_offset as (end - line_start).
+// newlineTokenSetup builds a NEWLINE or NL token with positions taken
+// from the byte offsets relative to s.lineStart. CPython's
+// Python-tokenize wrapper at Python-tokenize.c:222 (_get_col_offsets)
+// recomputes col_offset / end_col_offset from the byte pointers
+// p_start and p_end (token.start / token.end), so the raw token
+// must expose columns derived from those offsets and NOT from the
+// live s.col field, which by this point sits one past p_end on a
+// NEWLINE (because the '\n' was already consumed).
 //
-// tokenSetup defers to live s.lineno/s.col, which goes wrong for
-// newline tokens because the caller has to bump line state right
-// after emission. The newline branch builds its Tok before bumping,
-// but the row/col fields still need a stable reference, so we
-// compute them from offsets here.
+// The +1 that turns end_col 5 into 6 for `1 + 1\n` only fires in
+// extra_tokens mode and is applied by module/_tokenize/, not here.
 //
-// CPython: Parser/lexer/state.c:131 _PyLexer_token_setup
+// CPython: Parser/lexer/state.c:131 _PyLexer_token_setup +
+// Python/Python-tokenize.c:205 _get_col_offsets
 func (s *State) newlineTokenSetup(kind token.Type, start, end int) Tok {
 	t := Tok{
 		Kind:        kind,

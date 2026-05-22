@@ -30,9 +30,14 @@ func numberSlot(o Object, op func(*NumberMethods) func(a, b Object) (Object, err
 
 // numberBinary walks LHS then RHS and returns the first concrete
 // result, matching binary_op1's NotImplemented loop. opName is the
-// operator symbol used in the TypeError message.
+// operator symbol used in the TypeError message. When neither type
+// exposes a Number slot for the op, falls back to looking up the
+// __dunder__ / __rdunder__ pair on the type so Python-defined classes
+// (decimal.Decimal, fractions.Fraction, ...) get dispatched without
+// the slot-wrapper port (CPython's update_one_slot) being live yet.
 //
 // CPython: Objects/abstract.c:1029 binary_op
+// CPython: Objects/typeobject.c:8195 SLOT1BIN slot_nb_* table
 func numberBinary(a, b Object, opName string, pick func(*NumberMethods) func(a, b Object) (Object, error)) (Object, error) {
 	if fn := numberSlot(a, pick); fn != nil {
 		out, err := fn(a, b)
@@ -52,7 +57,90 @@ func numberBinary(a, b Object, opName string, pick func(*NumberMethods) func(a, 
 			return out, nil
 		}
 	}
+	if out, ok, err := dunderBinary(a, b, opName); ok {
+		return out, err
+	}
 	return nil, binopTypeError(a, b, opName)
+}
+
+// DunderBinary is the __dunder__ / __rdunder__ fallback the binary
+// number path uses when no Number slot accepted the operands. Returns
+// (result, true, err) on a hit (including a NotImplemented return),
+// (nil, false, nil) when neither side defines a matching dunder. The
+// vm's numericForward path consults this directly so user classes whose
+// nb_* slots have not been wired by update_one_slot still dispatch
+// through their __add__ / __mul__ / etc. methods.
+//
+// CPython: Objects/typeobject.c:8195 SLOT1BIN
+func DunderBinary(a, b Object, opName string) (Object, bool, error) {
+	return dunderBinary(a, b, opName)
+}
+
+func dunderBinary(a, b Object, opName string) (Object, bool, error) {
+	names, ok := binaryOpDunders[opName]
+	if !ok {
+		return nil, false, nil
+	}
+	if descr, _ := LookupDescriptor(a.Type(), names[0]); descr != nil {
+		callable, err := bindDescriptor(descr, a)
+		if err != nil {
+			return nil, true, err
+		}
+		out, err := CallOneArg(callable, b)
+		if err != nil {
+			return nil, true, err
+		}
+		if !IsNotImplemented(out) {
+			return out, true, nil
+		}
+	}
+	if descr, _ := LookupDescriptor(b.Type(), names[1]); descr != nil {
+		callable, err := bindDescriptor(descr, b)
+		if err != nil {
+			return nil, true, err
+		}
+		out, err := CallOneArg(callable, a)
+		if err != nil {
+			return nil, true, err
+		}
+		if !IsNotImplemented(out) {
+			return out, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// binaryOpDunders maps operator symbols to the __op__ / __rop__ pair
+// the dunder fallback walks. Order: forward name, reverse name. Same
+// ops the SLOT1BIN macro emits in typeobject.c.
+//
+// CPython: Objects/typeobject.c:8195 SLOT1BIN list
+var binaryOpDunders = map[string][2]string{
+	"+":   {"__add__", "__radd__"},
+	"-":   {"__sub__", "__rsub__"},
+	"*":   {"__mul__", "__rmul__"},
+	"@":   {"__matmul__", "__rmatmul__"},
+	"/":   {"__truediv__", "__rtruediv__"},
+	"//":  {"__floordiv__", "__rfloordiv__"},
+	"%":   {"__mod__", "__rmod__"},
+	"&":   {"__and__", "__rand__"},
+	"|":   {"__or__", "__ror__"},
+	"^":   {"__xor__", "__rxor__"},
+	"<<":  {"__lshift__", "__rlshift__"},
+	">>":  {"__rshift__", "__rrshift__"},
+	"**":  {"__pow__", "__rpow__"},
+	"+=":  {"__iadd__", "__add__"},
+	"-=":  {"__isub__", "__sub__"},
+	"*=":  {"__imul__", "__mul__"},
+	"@=":  {"__imatmul__", "__matmul__"},
+	"/=":  {"__itruediv__", "__truediv__"},
+	"//=": {"__ifloordiv__", "__floordiv__"},
+	"%=":  {"__imod__", "__mod__"},
+	"&=":  {"__iand__", "__and__"},
+	"|=":  {"__ior__", "__or__"},
+	"^=":  {"__ixor__", "__xor__"},
+	"<<=": {"__ilshift__", "__lshift__"},
+	">>=": {"__irshift__", "__rshift__"},
 }
 
 // numberInPlaceBinary tries the in-place slot first, falling back to
@@ -81,7 +169,7 @@ func numberInPlaceBinary(a, b Object, opName string,
 //
 // CPython: Objects/abstract.c:1128 PyNumber_Add
 func NumberAdd(a, b Object) (Object, error) {
-	out, err := numberBinaryNoErr(a, b, func(n *NumberMethods) func(a, b Object) (Object, error) { return n.Add })
+	out, err := numberBinaryNoErrNamed(a, b, "+", func(n *NumberMethods) func(a, b Object) (Object, error) { return n.Add })
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +195,7 @@ func NumberSubtract(a, b Object) (Object, error) {
 //
 // CPython: Objects/abstract.c:1166 PyNumber_Multiply
 func NumberMultiply(a, b Object) (Object, error) {
-	out, err := numberBinaryNoErr(a, b, func(n *NumberMethods) func(a, b Object) (Object, error) { return n.Multiply })
+	out, err := numberBinaryNoErrNamed(a, b, "*", func(n *NumberMethods) func(a, b Object) (Object, error) { return n.Multiply })
 	if err != nil {
 		return nil, err
 	}
@@ -442,6 +530,14 @@ func NumberIndex(o Object) (Object, error) {
 // outer entry point handles the sequence-protocol fallback first and
 // raises the error itself.
 func numberBinaryNoErr(a, b Object, pick func(*NumberMethods) func(a, b Object) (Object, error)) (Object, error) {
+	return numberBinaryNoErrNamed(a, b, "", pick)
+}
+
+// numberBinaryNoErrNamed is numberBinaryNoErr that also takes the
+// operator label so it can run the __dunder__ fallback when the C-slot
+// walk comes up empty. Callers that already know the op symbol pass it
+// in; the unnamed wrapper above keeps the old call sites unchanged.
+func numberBinaryNoErrNamed(a, b Object, opName string, pick func(*NumberMethods) func(a, b Object) (Object, error)) (Object, error) {
 	if fn := numberSlot(a, pick); fn != nil {
 		out, err := fn(a, b)
 		if err != nil {
@@ -458,6 +554,11 @@ func numberBinaryNoErr(a, b Object, pick func(*NumberMethods) func(a, b Object) 
 		}
 		if !IsNotImplemented(out) {
 			return out, nil
+		}
+	}
+	if opName != "" {
+		if out, ok, err := dunderBinary(a, b, opName); ok {
+			return out, err
 		}
 	}
 	return nil, nil
@@ -513,19 +614,50 @@ func ternaryNumberOp(a, b, c Object, opName string, pick func(*NumberMethods) fu
 }
 
 // unaryNumberOp dispatches a unary arithmetic op. Returns a TypeError
-// when the type doesn't expose the slot.
+// when neither the type's nb_* slot nor a __dunder__ method on the type
+// supplies the operation. The __dunder__ fallback covers Python-defined
+// classes whose nb_* slots are not filled in by the slot-wrapper port
+// (decimal.Decimal, fractions.Fraction, and friends): CPython's
+// update_one_slot would synthesize slot_nb_negative; this branch is the
+// minimal equivalent until that port lands.
 //
 // CPython: Objects/abstract.c:1364 UNARY_FUNC
+// CPython: Objects/typeobject.c:7900 slot_nb_negative
 func unaryNumberOp(o Object, opName string, pick func(*NumberMethods) func(Object) (Object, error)) (Object, error) {
-	n := o.Type().Number
-	if n == nil {
-		return nil, fmt.Errorf("TypeError: bad operand type for %s: '%s'", opName, o.Type().Name)
+	if n := o.Type().Number; n != nil {
+		if fn := pick(n); fn != nil {
+			out, err := fn(o)
+			if err != nil {
+				return nil, err
+			}
+			if !IsNotImplemented(out) {
+				return out, nil
+			}
+		}
 	}
-	fn := pick(n)
-	if fn == nil {
-		return nil, fmt.Errorf("TypeError: bad operand type for %s: '%s'", opName, o.Type().Name)
+	if dunder, ok := unaryOpDunders[opName]; ok {
+		if descr, _ := LookupDescriptor(o.Type(), dunder); descr != nil {
+			callable, err := bindDescriptor(descr, o)
+			if err != nil {
+				return nil, err
+			}
+			return CallNoArgs(callable)
+		}
 	}
-	return fn(o)
+	return nil, fmt.Errorf("TypeError: bad operand type for %s: '%s'", opName, o.Type().Name)
+}
+
+// unaryOpDunders maps the operation labels unaryNumberOp uses to the
+// matching __dunder__ name. Kept here so the dunder fallback stays in
+// lockstep with the NumberPositive / NumberNegative / NumberAbsolute /
+// NumberInvert call sites.
+//
+// CPython: Objects/typeobject.c:8195 slot_nb_negative table
+var unaryOpDunders = map[string]string{
+	"unary +": "__pos__",
+	"unary -": "__neg__",
+	"unary ~": "__invert__",
+	"abs()":   "__abs__",
 }
 
 // binopTypeError formats the canonical "unsupported operand type(s)"

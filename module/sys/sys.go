@@ -242,21 +242,23 @@ func builtinModuleNames() *objects.Tuple {
 
 // hashInfo is sys.hash_info as a SimpleNamespace. The field order
 // matches CPython's Hash_InfoType (width, modulus, inf, nan, imag,
-// algorithm, hash_bits, seed_bits, cutoff). The named attributes let
-// test.support do `sys.hash_info.width`.
+// algorithm, hash_bits, seed_bits, cutoff). Values mirror the 64-bit
+// defaults (PyHASH_BITS=61, siphash13). _pydecimal reads modulus to
+// build its hash table, so the field must carry the real prime.
 //
-// CPython: Python/sysmodule.c:hash_info_desc
+// CPython: Python/sysmodule.c:1565 get_hash_info
+// CPython: Include/cpython/pyhash.h:18 PyHASH_MODULUS
 func hashInfo() *objects.Namespace {
 	n := objects.NewNamespace()
 	d := n.Dict()
 	_ = d.SetItem(objects.NewStr("width"), objects.NewInt(64))
-	_ = d.SetItem(objects.NewStr("modulus"), objects.NewInt(0))
-	_ = d.SetItem(objects.NewStr("inf"), objects.NewInt(0))
+	_ = d.SetItem(objects.NewStr("modulus"), objects.NewInt((1<<61)-1))
+	_ = d.SetItem(objects.NewStr("inf"), objects.NewInt(314159))
 	_ = d.SetItem(objects.NewStr("nan"), objects.NewInt(0))
-	_ = d.SetItem(objects.NewStr("imag"), objects.NewInt(0))
+	_ = d.SetItem(objects.NewStr("imag"), objects.NewInt(1000003))
 	_ = d.SetItem(objects.NewStr("algorithm"), objects.NewStr("siphash13"))
-	_ = d.SetItem(objects.NewStr("hash_bits"), objects.NewInt(128))
-	_ = d.SetItem(objects.NewStr("seed_bits"), objects.NewInt(64))
+	_ = d.SetItem(objects.NewStr("hash_bits"), objects.NewInt(64))
+	_ = d.SetItem(objects.NewStr("seed_bits"), objects.NewInt(128))
 	_ = d.SetItem(objects.NewStr("cutoff"), objects.NewInt(0))
 	return n
 }

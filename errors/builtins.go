@@ -53,6 +53,28 @@ func newExcType(name string, bases []*objects.Type) *objects.Type {
 	t.TpNew = excTpNew
 	t.Str = excStr
 	t.Repr = excRepr
+	// BaseException carries a tp_dictoffset so per-instance attributes
+	// stored through __init__ / __setstate__ / direct assignment land in
+	// the AttrDictHolder dict on *Exception. Every subclass inherits
+	// that storage; the flag has to be on every exception Type so
+	// GenericSetAttr's tp.HasDict gate lets the AttrDictHolder branch
+	// take the write.
+	//
+	// CPython: Objects/exceptions.c:648 BaseException_Type
+	// (offsetof(PyBaseExceptionObject, dict))
+	t.HasDict = true
+	// tp_getattro / tp_setattro are PyObject_GenericGetAttr /
+	// PyObject_GenericSetAttr on BaseException; subclasses inherit them
+	// through inherit_slots. gopy's per-type inheritance copies the
+	// slots when the child is built, but the BaseException singleton is
+	// built before exception_attrs.init() runs, so subclasses see nil
+	// and skip the copy. Stamp the slots in the constructor so every
+	// exception Type carries them from creation time.
+	//
+	// CPython: Objects/exceptions.c:626 BaseException_Type (tp_getattro
+	// = PyObject_GenericGetAttr, tp_setattro = PyObject_GenericSetAttr)
+	t.Getattro = objects.GenericGetAttr
+	t.Setattro = objects.GenericSetAttr
 	return t
 }
 

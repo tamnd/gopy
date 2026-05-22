@@ -448,6 +448,7 @@ func init() {
 		}
 		return nil, ErrStopIteration
 	}
+	AddIterSlotWrappers(setIterType)
 }
 
 func setIter(o Object) (Object, error) {

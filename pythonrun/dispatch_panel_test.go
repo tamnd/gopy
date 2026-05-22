@@ -41,7 +41,7 @@ func dispatchPanel() []dispatchCase {
 			src:         "this is not valid python !!!\n",
 			arm:         "string",
 			wantRC:      1,
-			stderrHas:   "parse",
+			stderrHas:   "SyntaxError",
 			allowParser: false,
 		},
 		{
@@ -63,7 +63,7 @@ func dispatchPanel() []dispatchCase {
 			src:         "!!!not python!!!\n",
 			arm:         "repl",
 			wantRC:      0,
-			stderrHas:   "parse",
+			stderrHas:   "SyntaxError",
 			allowParser: false,
 		},
 	}

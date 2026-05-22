@@ -60,6 +60,7 @@ func init() {
 			SetItem: weakProxySetItem,
 			DelItem: weakProxyDelItem,
 		}
+		AddIterSlotWrappers(t)
 	}
 	WeakCallableProxyType.Call = weakProxyCall
 }

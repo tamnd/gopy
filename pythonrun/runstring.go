@@ -9,13 +9,15 @@
 package pythonrun
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/tamnd/gopy/compile"
-	"github.com/tamnd/gopy/errors"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
+	parsererrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/specialize"
 	"github.com/tamnd/gopy/state"
 	"github.com/tamnd/gopy/vm"
@@ -33,6 +35,30 @@ func RunString(ts *state.Thread, src, filename string, mode parser.Mode, globals
 		src += "\n"
 	}
 	mod, err := parser.ParseString(src, filename, mode)
+	if err != nil {
+		return nil, err
+	}
+	cco, err := compile.Compile(mod, filename, 0)
+	if err != nil {
+		return nil, err
+	}
+	return vm.EvalCode(ts, liftCode(cco), globals, locals)
+}
+
+// RunBytes is the bytes-input variant of RunString. The PEP 263
+// coding cookie and a UTF-8 BOM are honored by the lexer's bytes
+// driver, so a script with `# coding: iso-8859-15` decodes through
+// the matching codec before tokenization. CPython routes script
+// execution through this path; the str variant is reserved for
+// compile(str_source, ...) where PyCF_IGNORE_COOKIE skips the
+// cookie scan.
+//
+// CPython: Python/pythonrun.c:1276 pyrun_file (bytes source)
+func RunBytes(ts *state.Thread, src []byte, filename string, mode parser.Mode, globals, locals objects.Object) (objects.Object, error) {
+	if len(src) == 0 || src[len(src)-1] != '\n' {
+		src = append(src, '\n')
+	}
+	mod, err := parser.ParseBytes(src, filename, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -83,14 +109,22 @@ func RunSimpleString(ts *state.Thread, command string, globals objects.Object, s
 
 // printRunError mirrors PyErr_Print: render the thread-state
 // exception's traceback. SystemExit short-circuits and returns its
-// code; a generic exception returns 1; the parser/compiler still
-// surface Go errors directly (no SyntaxError yet) so we fall back
-// to the error text and exit 1.
+// code; a generic exception returns 1; the parser surfaces a Go-side
+// *parsererrors.SyntaxError that never reached the VM, so synthesize
+// the Python-level SyntaxError exception here and route it through the
+// same display path so the `SyntaxError:` prefix + File/line/text/caret
+// frame land on stderr.
 //
 // CPython: Python/pythonrun.c:656 PyErr_Print
 func printRunError(ts *state.Thread, err error, w io.Writer) int {
-	if errors.Occurred(ts) != nil {
-		return errors.PrintEx(ts, w)
+	if pyerrors.Occurred(ts) != nil {
+		return pyerrors.PrintEx(ts, w)
+	}
+	var se *parsererrors.SyntaxError
+	if errors.As(err, &se) {
+		exc := pyerrors.SyntaxFromParser(se)
+		pyerrors.Restore(ts, exc.ExcType, exc, nil)
+		return pyerrors.PrintEx(ts, w)
 	}
 	fmt.Fprintln(w, err)
 	return 1
@@ -124,6 +158,7 @@ func liftCode(c *compile.Code) *objects.Code {
 	out.Init(objects.CodeType)
 	out.SyncNameObjs()
 	out.SyncConstObjs()
+	out.SyncLocalsplusCounts()
 	specialize.Enable(out)
 	return out
 }

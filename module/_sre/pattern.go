@@ -266,12 +266,14 @@ func makeMatch(cp *compiledPattern, st *state, src objects.Object, patInst objec
 		locs[2+i] = st.mark[i] // already -1 for unset
 	}
 	srcStr := ""
+	isBytes := false
 	if u, ok := src.(*objects.Unicode); ok {
 		srcStr = u.Value()
 	} else if b, ok := src.(*objects.Bytes); ok {
 		srcStr = string(b.Bytes())
+		isBytes = true
 	}
-	matchStore[inst] = &matchData{locs: locs, s: srcStr}
+	matchStore[inst] = &matchData{locs: locs, s: srcStr, isBytes: isBytes}
 	_ = d.SetItem(objects.NewStr("regs"), buildRegs(locs))
 	_ = d.SetItem(objects.NewStr("lastgroup"), computeLastgroup(patInst, st.lastindex))
 	return inst

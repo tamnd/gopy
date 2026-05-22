@@ -6,47 +6,65 @@
 
 package lexer
 
-import "bytes"
+import (
+	"bytes"
+	"strings"
+)
 
-// codingCookieMax bounds how many bytes of the first two lines we
-// scan when looking for the PEP 263 cookie. CPython caps the scan
-// at the line length; gopy uses a hard 256-byte ceiling so a
-// pathological one-line file does not turn into a 1MB regex run.
+// cookieFileBufsize matches CPython's BUFSIZ default (8192) for file
+// reads. The file driver peeks twice this many bytes so a two-line
+// header that has a cookie inside either line is fully scanned.
 //
-// CPython: Parser/tokenizer/helpers.c:165 check_coding_spec
-const codingCookieMax = 256
+// CPython: Parser/tokenizer/file_tokenizer.c:379 (PyMem_Malloc(BUFSIZ))
+const cookieFileBufsize = 8192
 
 // DetectEncodingCookie scans the first two physical lines of src
 // for a PEP 263 `coding:` declaration and returns the encoding
-// name, or "" when no cookie is present. The scan stops at byte
-// codingCookieMax of each line. Lines may end with \n, \r\n, or
-// \r; the function is newline-flavor agnostic.
+// name, or "" when no cookie is present. The scan covers the full
+// line; CPython does the same in get_coding_spec by stepping
+// through `size - 6` bytes. Lines may end with \n, \r\n, or \r;
+// the function is newline-flavor agnostic.
 //
 // Mirrors CPython's decoding_state machine: the cookie may only
 // appear on a line that is blank or comment-only. Once a line
 // containing actual code is seen the search stops, so a `coding:`
 // comment after the first statement is ignored just like in
-// CPython.
+// CPython. A line that follows a backslash-continued line carries
+// `tok->cont_line == 1` in CPython and CPython skips the cookie
+// scan on it (helpers.c:392); gopy applies the same skip via
+// contLine tracking.
 //
 // CPython: Parser/tokenizer/helpers.c:388 _PyTokenizer_check_coding_spec
 func DetectEncodingCookie(src []byte) string {
+	name, _ := detectEncodingCookieAt(src)
+	return name
+}
+
+// detectEncodingCookieAt is the line-tracking sibling of
+// DetectEncodingCookie. The returned line is 1-based and identifies the
+// physical source line the cookie sat on (1 or 2), or 0 when no cookie
+// was found.
+//
+// CPython: Parser/tokenizer/helpers.c:388 _PyTokenizer_check_coding_spec
+// (tok->lineno is incremented by tok_underflow_string before this runs)
+func detectEncodingCookieAt(src []byte) (string, int) {
 	rest := src
+	contLine := false
 	for line := 0; line < 2 && len(rest) > 0; line++ {
 		end := lineEnd(rest)
 		head := rest[:end]
-		scan := head
-		if len(scan) > codingCookieMax {
-			scan = scan[:codingCookieMax]
+		if !contLine {
+			if name := matchCodingCookie(head); name != "" {
+				return name, line + 1
+			}
+			if lineHasCode(head) {
+				return "", 0
+			}
 		}
-		if name := matchCodingCookie(scan); name != "" {
-			return name
-		}
-		if lineHasCode(scan) {
-			return ""
-		}
+		contLine = len(head) > 0 && head[len(head)-1] == '\\'
 		rest = skipNewline(rest, end)
 	}
-	return ""
+	return "", 0
 }
 
 // lineHasCode reports whether line contains a non-whitespace byte
@@ -106,7 +124,41 @@ func matchCodingCookie(line []byte) string {
 	if end == 0 {
 		return ""
 	}
-	return string(rest[:end])
+	return getNormalName(string(rest[:end]))
+}
+
+// getNormalName folds the utf-8 / latin-1 family aliases CPython
+// short-circuits in get_normal_name. It only looks at the first 12
+// bytes of s; everything past that is ignored, so names like
+// "iso-8859-1-xxxxx..." normalise to "iso-8859-1" and the codec
+// lookup succeeds.
+//
+// CPython: Parser/tokenizer/helpers.c:305 get_normal_name
+func getNormalName(s string) string {
+	var buf [13]byte
+	n := 0
+	for n < 12 && n < len(s) {
+		c := s[n]
+		switch {
+		case c == '_':
+			buf[n] = '-'
+		case c >= 'A' && c <= 'Z':
+			buf[n] = c + 'a' - 'A'
+		default:
+			buf[n] = c
+		}
+		n++
+	}
+	prefix := string(buf[:n])
+	switch {
+	case prefix == "utf-8" || strings.HasPrefix(prefix, "utf-8-"):
+		return "utf-8"
+	case prefix == "latin-1" || prefix == "iso-8859-1" || prefix == "iso-latin-1":
+		return "iso-8859-1"
+	case strings.HasPrefix(prefix, "latin-1-") || strings.HasPrefix(prefix, "iso-8859-1-") || strings.HasPrefix(prefix, "iso-latin-1-"):
+		return "iso-8859-1"
+	}
+	return s
 }
 
 func isCodingNameByte(c byte) bool {
@@ -121,6 +173,33 @@ func isCodingNameByte(c byte) bool {
 		return true
 	}
 	return false
+}
+
+// nthLine returns the n-th physical line (1-based) of src, stripped of
+// any trailing newline. Returns "" when n is out of range or src is
+// empty. Used at the BOM/cookie error boundary to populate the
+// SyntaxError text field, since the lexer FSM has not yet ingested
+// these bytes when the error fires.
+//
+// CPython: Parser/tokenizer/helpers.c (SyntaxError text is copied from
+// the offending line in the source buffer).
+func nthLine(src []byte, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	rest := src
+	for line := 1; line <= n; line++ {
+		end := lineEnd(rest)
+		if line == n {
+			return string(rest[:end])
+		}
+		next := skipNewline(rest, end)
+		if next == nil {
+			return ""
+		}
+		rest = next
+	}
+	return ""
 }
 
 func lineEnd(src []byte) int {
@@ -166,24 +245,16 @@ func CheckBOMCookieConflict(src []byte) string {
 	return "encoding problem: " + name + " with BOM"
 }
 
+// isUTF8Name mirrors the strict equality CPython uses after
+// get_normal_name. Only the canonical "utf-8" matches: cookie aliases
+// like "utf8" or "U8" stay as-is through get_normal_name (the fold at
+// helpers.c:320 keys on "utf-8" / "utf-8-" prefixes) so they compare
+// unequal to tok->encoding == "utf-8" in the BOM-vs-cookie check.
+//
+// CPython: Parser/tokenizer/helpers.c:425 check_coding_spec (strcmp
+// branch) and helpers.c:418 (strcmp cs vs "utf-8").
 func isUTF8Name(name string) bool {
-	switch normalizeEncodingName(name) {
-	case "utf8", "utf-8", "u8":
-		return true
-	}
-	return false
-}
-
-func normalizeEncodingName(name string) string {
-	out := make([]byte, 0, len(name))
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		out = append(out, c)
-	}
-	return string(out)
+	return name == "utf-8"
 }
 
 // ValidateUTF8 walks src and returns the 1-based line number and
@@ -192,9 +263,10 @@ func normalizeEncodingName(name string) string {
 // and \r\n the same way the lexer does so the reported line matches
 // the source the user sees in their editor.
 //
-// CPython: Parser/tokenizer/helpers.c:332 ensure_utf8 (the tok_check_bom
-// / decoding_fgets pair raises a SyntaxError on the first non-UTF-8
-// byte when no PEP 263 cookie names a different encoding).
+// CPython: Parser/tokenizer/helpers.c:506 _PyTokenizer_ensure_utf8
+// (the tok_check_bom / decoding_fgets pair raises a SyntaxError on
+// the first non-UTF-8 byte when no PEP 263 cookie names a different
+// encoding).
 func ValidateUTF8(src []byte) (line int, bad byte, ok bool) {
 	line = 1
 	i := 0
@@ -217,33 +289,84 @@ func ValidateUTF8(src []byte) (line int, bad byte, ok bool) {
 			i++
 			continue
 		}
-		size := utf8Size(c)
-		if size == 0 || i+size > len(src) {
+		size := validUTF8(src[i:])
+		if size == 0 {
 			return line, c, false
-		}
-		for k := 1; k < size; k++ {
-			if src[i+k]&0xc0 != 0x80 {
-				return line, c, false
-			}
 		}
 		i += size
 	}
 	return 0, 0, true
 }
 
-// utf8Size returns the length of a UTF-8 sequence whose leading byte
-// is c, or 0 if c is not a valid leading byte. CPython's stb_lookup
-// table; we keep the masks inline because there are only four cases.
-func utf8Size(c byte) int {
-	switch {
-	case c&0xe0 == 0xc0:
-		return 2
-	case c&0xf0 == 0xe0:
-		return 3
-	case c&0xf8 == 0xf0:
-		return 4
+// validUTF8 returns the length of the UTF-8 sequence at s, or 0 if
+// s does not start a valid sequence. The function rejects every
+// byte sequence stringlib/codecs.h:utf8_decode also rejects:
+// overlong encodings (0xC0/0xC1, 0xE0 with byte2 < 0xA0, 0xF0 with
+// byte2 < 0x90), surrogates (0xED with byte2 >= 0xA0 produces
+// D800-DFFF), and overflow past U+10FFFF (0xF4 with byte2 >= 0x90,
+// 0xF5+ leading bytes). Continuation bytes must lie in 0x80-0xBF.
+//
+// CPython: Parser/tokenizer/helpers.c:446 valid_utf8
+func validUTF8(s []byte) int {
+	if len(s) == 0 {
+		return 0
 	}
-	return 0
+	c := s[0]
+	expected := 0
+	switch {
+	case c < 0x80:
+		return 1
+	case c < 0xE0:
+		if c < 0xC2 {
+			// \x80-\xBF is a continuation byte; \xC0-\xC1 would
+			// be an overlong encoding of 0000-007F.
+			return 0
+		}
+		expected = 1
+	case c < 0xF0:
+		if len(s) < 2 {
+			return 0
+		}
+		if c == 0xE0 && s[1] < 0xA0 {
+			// Overlong \xE0\x80\x80-\xE0\x9F\xBF for 0000-07FF.
+			return 0
+		}
+		if c == 0xED && s[1] >= 0xA0 {
+			// Surrogates D800-DFFF. See Unicode 5.2 table 3-7
+			// and RFC 3629.
+			return 0
+		}
+		expected = 2
+	case c < 0xF5:
+		if len(s) < 2 {
+			return 0
+		}
+		var overlongOrOverflow bool
+		if s[1] < 0x90 {
+			overlongOrOverflow = c == 0xF0
+		} else {
+			overlongOrOverflow = c == 0xF4
+		}
+		if overlongOrOverflow {
+			// 0xF0\x80\x80\x80-0xF0\x8F\xBF\xBF would re-encode
+			// 0000-FFFF; 0xF4\x90+ would overflow past U+10FFFF.
+			return 0
+		}
+		expected = 3
+	default:
+		// 0xF5-0xFF: no valid 4-byte sequence starts here.
+		return 0
+	}
+	length := expected + 1
+	if len(s) < length {
+		return 0
+	}
+	for i := 1; i <= expected; i++ {
+		if s[i] < 0x80 || s[i] >= 0xC0 {
+			return 0
+		}
+	}
+	return length
 }
 
 // TranslateNewlines is the gopy port of CPython's

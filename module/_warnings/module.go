@@ -545,8 +545,11 @@ func showWarning(filename objects.Object, lineno int64, text objects.Object, cat
 	writeToFile(stderr, line)
 	if sourceline != nil && !objects.IsNone(sourceline) {
 		if s, err := objects.Str(sourceline); err == nil {
+			// CPython: Python/_warnings.c:712 show_warning prints
+			// "  sourceline\n" after stripping the leading whitespace
+			// the lexer captured before the offending token.
 			trimmed := strings.TrimLeft(s, " \t\f")
-			writeToFile(stderr, trimmed+"\n")
+			writeToFile(stderr, "  "+trimmed+"\n")
 		}
 	}
 }
@@ -594,7 +597,11 @@ func callShowWarning(category *objects.Type, text, message, filename objects.Obj
 	if source == nil {
 		source = objects.None()
 	}
-	args := objects.NewTuple([]objects.Object{message, category, filename, objects.NewInt(lineno), objects.None(), objects.None(), source})
+	lineArg := objects.Object(objects.None())
+	if sourceline != nil && !objects.IsNone(sourceline) {
+		lineArg = sourceline
+	}
+	args := objects.NewTuple([]objects.Object{message, category, filename, objects.NewInt(lineno), objects.None(), lineArg, source})
 	msg, err := objects.Call(warnmsgCls, args, nil)
 	if err != nil {
 		return err
@@ -1015,6 +1022,34 @@ func WarnExplicit(category *objects.Type, text, filenameStr string, lineno int64
 // CPython: Python/_warnings.c:1514 PyErr_WarnExplicitFormat
 func WarnExplicitFormat(category *objects.Type, filenameStr string, lineno int64, moduleStr string, registry objects.Object, format string, a ...interface{}) error {
 	return WarnExplicit(category, fmt.Sprintf(format, a...), filenameStr, lineno, moduleStr, registry)
+}
+
+// WarnExplicitWithSourceline is the lexer-side entry: callers that
+// already hold the offending source line hand it in directly rather
+// than letting _showwarnmsg fall back to linecache. CPython resolves
+// sourceline from module_globals via get_source_line inside
+// warn_explicit; gopy needs the explicit hand-off because parse-time
+// warnings fire before the warnings.py facade is imported.
+//
+// CPython: Python/_warnings.c:792 warn_explicit (sourceline argument)
+func WarnExplicitWithSourceline(category *objects.Type, text, filenameStr string, lineno int64, moduleStr, sourcelineStr string, registry objects.Object) error {
+	if category == nil {
+		category = errors.PyExc_RuntimeWarning
+	}
+	msg := objects.NewStr(text)
+	fn := objects.NewStr(filenameStr)
+	var module objects.Object
+	if moduleStr != "" {
+		module = objects.NewStr(moduleStr)
+	}
+	var sourceline objects.Object
+	if sourcelineStr != "" {
+		sourceline = objects.NewStr(sourcelineStr)
+	}
+	warningsLock(state)
+	_, err := warnExplicit(category, msg, fn, lineno, module, registry, sourceline, nil)
+	warningsUnlock(state)
+	return err
 }
 
 // WarnUnawaitedAgenMethod ports _PyErr_WarnUnawaitedAgenMethod. gopy

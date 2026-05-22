@@ -17,7 +17,7 @@ func TestBuiltinHandlersExist(t *testing.T) {
 // TestStrictHandlerReturnsError pins that strict raises on bad bytes.
 func TestStrictHandlerReturnsError(t *testing.T) {
 	h, _ := LookupError("strict")
-	_, _, err := h("utf-8", []byte{0xff}, 0, 1)
+	_, _, err := h("utf-8", "invalid start byte", []byte{0xff}, 0, 1)
 	if err == nil {
 		t.Fatal("expected error from strict handler")
 	}
@@ -29,7 +29,7 @@ func TestStrictHandlerReturnsError(t *testing.T) {
 // TestIgnoreHandlerAdvancesPosition pins that ignore skips bad bytes.
 func TestIgnoreHandlerAdvancesPosition(t *testing.T) {
 	h, _ := LookupError("ignore")
-	rep, pos, err := h("utf-8", []byte{0xff, 0xfe}, 0, 2)
+	rep, pos, err := h("utf-8", "", []byte{0xff, 0xfe}, 0, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestIgnoreHandlerAdvancesPosition(t *testing.T) {
 // TestReplaceHandlerReturnsUFFFD pins that replace substitutes U+FFFD.
 func TestReplaceHandlerReturnsUFFFD(t *testing.T) {
 	h, _ := LookupError("replace")
-	rep, _, err := h("utf-8", []byte{0xff}, 0, 1)
+	rep, _, err := h("utf-8", "", []byte{0xff}, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,14 +55,14 @@ func TestReplaceHandlerReturnsUFFFD(t *testing.T) {
 
 // TestRegisterErrorCustom pins custom handler registration and lookup.
 func TestRegisterErrorCustom(t *testing.T) {
-	RegisterError("myhandler", func(_ string, _ []byte, _ int, end int) (string, int, error) {
+	RegisterError("myhandler", func(_, _ string, _ []byte, _ int, end int) (string, int, error) {
 		return "?", end, nil
 	})
 	h, err := LookupError("myhandler")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep, _, _ := h("utf-8", nil, 0, 0)
+	rep, _, _ := h("utf-8", "", nil, 0, 0)
 	if rep != "?" {
 		t.Errorf("custom handler returned %q, want ?", rep)
 	}

@@ -183,6 +183,7 @@ func buildOS() (*objects.Module, error) {
 		val  objects.Object
 	}{
 		{"sep", objects.NewStr(sep)},
+		{"extsep", objects.NewStr(".")},
 		{"pardir", objects.NewStr("..")},
 		{"curdir", objects.NewStr(".")},
 		{"linesep", objects.NewStr(linesep)},
@@ -280,6 +281,15 @@ func buildOS() (*objects.Module, error) {
 		{"isatty", objects.NewBuiltinFunction("isatty", osIsatty)},
 		{"umask", objects.NewBuiltinFunction("umask", osUmask)},
 		{"_get_exports_list", objects.NewBuiltinFunction("_get_exports_list", osGetExportsList)},
+		// Sentinel object used by os.walk(followlinks=...) to distinguish
+		// "walk into symlinks" from "treat symlinks as files". shutil's
+		// _rmtree_unsafe passes it through to os.walk so symlinks aren't
+		// recursed into during rmtree.
+		// CPython: Lib/os.py:295 _walk_symlinks_as_files = object()
+		{"_walk_symlinks_as_files", objects.NewInstance(objects.ObjectType())},
+		// PathLike is the abstract base class for the os.fspath protocol.
+		// CPython: Lib/os.py:1123 class PathLike(abc.ABC)
+		{"PathLike", pathLikeType},
 	}
 	// geteuid / getegid / getgid / getgroups: posixmodule.c gates these
 	// on HAVE_GETEUID. On Windows the C build does not register them, so
@@ -331,7 +341,22 @@ func pathEntries() []struct {
 		// normcase is the identity on POSIX (Lib/posixpath.py normcase).
 		// CPython: Lib/posixpath.py:53 normcase
 		{"normcase", objects.NewBuiltinFunction("normcase", normcasePosix)},
+		{"splitdrive", objects.NewBuiltinFunction("splitdrive", splitdrivePosix)},
+		{"extsep", objects.NewStr(".")},
+		{"altsep", objects.None()},
 	}
+}
+
+// splitdrivePosix splits a pathname into drive and path. On POSIX the
+// drive component is always empty.
+//
+// CPython: Lib/posixpath.py:131 splitdrive
+func splitdrivePosix(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, err := argString(args)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewTuple([]objects.Object{objects.NewStr(""), objects.NewStr(s)}), nil
 }
 
 // normcasePosix returns the path unchanged after a fspath coercion,
@@ -1047,30 +1072,19 @@ func osReplace(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	return objects.None(), nil
 }
 
-// osScandir returns an iterator over DirEntry objects in path.
-// The full implementation is a lazy iterator; this stub returns an
-// empty list so module-level probes in shutil (os.scandir in os.supports_fd)
-// resolve without AttributeError.
+// osScandir returns a context-managed iterator over DirEntry objects.
 //
 // CPython: Modules/posixmodule.c:13291 os_scandir_impl
-func osScandir(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+func osScandir(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	path := "."
-	if len(args) >= 1 {
+	if len(args) >= 1 && !objects.IsNone(args[0]) {
 		p, err := objects.Str(args[0])
 		if err != nil {
 			return nil, err
 		}
 		path = p
 	}
-	entries, err := goos.ReadDir(path)
-	if err != nil {
-		return nil, fmt.Errorf("OSError: %w", err)
-	}
-	items := make([]objects.Object, len(entries))
-	for i, e := range entries {
-		items[i] = objects.NewStr(e.Name())
-	}
-	return objects.NewList(items), nil
+	return newScandirIterator(path)
 }
 
 // osGetExportsList returns module.__all__ when present, or all public

@@ -153,6 +153,15 @@ import (
 	// CPython: Modules/_codecsmodule.c:507 _codecs_exec
 	_ "github.com/tamnd/gopy/module/_codecs"
 
+	// Codec subsystem: CJK codecs. The package's init() registers a
+	// SearchFunc with codecs.Register that resolves cp932, cp949,
+	// euc_kr, euc_jp, shift_jis, and the jisx0213 family. Mirrors
+	// CPython's per-language _codecs_kr / _codecs_jp / ... built-in
+	// modules.
+	// CPython: Modules/cjkcodecs/_codecs_kr.c BEGIN_CODECS_LIST
+	// CPython: Modules/cjkcodecs/_codecs_jp.c BEGIN_CODECS_LIST
+	_ "github.com/tamnd/gopy/codecs/cjkcodecs"
+
 	// Built-in module: _csv. Registers itself via
 	// module/_csv/module.go init(). Backs Lib/csv.py with the reader,
 	// writer, Dialect, and quoting constants.
@@ -234,6 +243,14 @@ import (
 	// CPython: Modules/_posixsubprocess.c:1333 _posixsubprocessmodule
 	_ "github.com/tamnd/gopy/module/_posixsubprocess"
 
+	// Built-in module: select. Registers itself via module/select/module.go
+	// init(). Backs selectors.SelectSelector (and therefore subprocess
+	// communicate) with select(2). The Go package name is selectmod
+	// because "select" is a reserved Go keyword; the inittab name remains
+	// the Python-visible "select".
+	// CPython: Modules/selectmodule.c:2855 select_exec
+	_ "github.com/tamnd/gopy/module/select"
+
 	// Built-in module: _winapi. Registers itself via module/_winapi/
 	// module.go init(). Exposes the integer constants stdlib/shutil.py
 	// and stdlib/subprocess.py import at module top level on Windows.
@@ -284,6 +301,17 @@ import (
 	// dumps / loads / dump / load entry points plus the version constant.
 	// CPython: Python/marshal.c:1949 marshal_methods
 	_ "github.com/tamnd/gopy/module/marshal"
+
+	// Built-in module: unicodedata. Registers itself via
+	// module/unicodedata/module.go init(). Ports
+	// Modules/unicodedata.c: normalize / is_normalized / category /
+	// bidirectional / combining / mirrored / east_asian_width /
+	// decomposition plus the unidata_version constant. Unblocks
+	// stdlib/test/support/os_helper.py's `import unicodedata` and
+	// `unicodedata.normalize('NFD', ...)` along the test_tokenize.py
+	// panel import chain.
+	// CPython: Modules/unicodedata.c:1733 PyInit_unicodedata
+	_ "github.com/tamnd/gopy/module/unicodedata"
 
 	// Built-in module: _pickle. Registers itself via
 	// module/_pickle/module.go init(). Publishes the full surface

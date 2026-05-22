@@ -29,8 +29,10 @@ import (
 	"io"
 	"unicode/utf8"
 
+	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
+	parsererrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/parser/lexer"
 	"github.com/tamnd/gopy/token"
 )
@@ -56,10 +58,36 @@ type tokenizerIter struct {
 	lastLine      objects.Object // *Unicode cache for the current line
 	byteColDiff   int
 
+	// warnIdx tracks how many of tok.Warnings() have already been
+	// drained through WarnHook. Drives the per-token drain in
+	// tokenizerIterNext so SyntaxWarnings surface to the warnings
+	// filter as they happen, the way CPython's helpers.c:152
+	// _PyTokenizer_parser_warn does inline.
+	warnIdx int
+
 	// linesByOneBased holds the source split into lines, indexed
 	// 1..N. linesByOneBased[0] is an empty placeholder so lineno-1
 	// indexing matches CPython's 1-based line numbers.
 	linesByOneBased []string
+
+	// lineEndCRLF[row]==true when the corresponding raw readline
+	// returned a '\r\n' (rather than '\n' or no terminator). CPython's
+	// TokenizerIter constructs the tokenizer with preserve_crlf=1, so
+	// tok->start[0] reads back as '\r' for those NEWLINE tokens.
+	// gopy folds CRLF -> LF in TranslateNewlines before the lexer sees
+	// the buffer, so we keep the original ending out-of-band and
+	// consult it when emitting the NEWLINE string.
+	//
+	// CPython: Python/Python-tokenize.c:318 tokenizeriter_next NEWLINE arm
+	lineEndCRLF []bool
+
+	// implicitNewline records that drainReadline appended a synthetic
+	// '\n' because the source didn't end with one. The trailing
+	// NEWLINE token whose end offset lands on that byte must report
+	// string='' (CPython: Python/Python-tokenize.c:281 tokenizeriter_next
+	// NEWLINE branch checks tok->implicit_newline).
+	implicitNewline bool
+	implicitEndOff  int
 }
 
 // Type returns the tokenizer iterator's type.
@@ -75,6 +103,7 @@ func newTokenizerIterType() *objects.Type {
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = tokenizerIterNext
 	t.TpNew = tokenizerIterNew
+	objects.AddIterSlotWrappers(t)
 	return t
 }
 
@@ -106,7 +135,7 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 		}
 	}
 
-	source, lines, err := drainReadline(readline, encoding)
+	source, lines, crlf, implicit, err := drainReadline(readline, encoding)
 	if err != nil {
 		return nil, err
 	}
@@ -122,6 +151,9 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 		extraTokens:     extraTokens,
 		encoding:        encoding,
 		linesByOneBased: lines,
+		lineEndCRLF:     crlf,
+		implicitNewline: implicit,
+		implicitEndOff:  len(source) - 1,
 	}
 	return it, nil
 }
@@ -138,64 +170,85 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 // return bytes that the named encoding decodes.
 //
 // CPython: Parser/tokenizer/readline_tokenizer.c:10 tok_readline_string
-func drainReadline(readline objects.Object, encoding string) ([]byte, []string, error) {
+func drainReadline(readline objects.Object, encoding string) ([]byte, []string, []bool, bool, error) {
 	var buf []byte
 	var lines []string
+	var crlf []bool
 	lines = append(lines, "") // 1-based padding
+	crlf = append(crlf, false)
 	for {
 		res, err := objects.Call(readline, objects.NewTuple(nil), nil)
 		if err != nil {
 			if errors.Is(err, objects.ErrStopIteration) {
 				break
 			}
-			return nil, nil, err
+			return nil, nil, nil, false, err
 		}
 		var line []byte
 		switch v := res.(type) {
 		case *objects.Bytes:
 			if encoding == "" {
-				return nil, nil, fmt.Errorf("TypeError: readline() returned a non-string object")
+				return nil, nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
 			}
-			line = append([]byte(nil), v.Bytes()...)
+			decoded, _, derr := codecs.Decode(v.Bytes(), encoding, "replace")
+			if derr != nil {
+				return nil, nil, nil, false, derr
+			}
+			line = []byte(decoded)
 		case *objects.ByteArray:
 			if encoding == "" {
-				return nil, nil, fmt.Errorf("TypeError: readline() returned a non-string object")
+				return nil, nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
 			}
-			line = append([]byte(nil), v.Bytes()...)
+			decoded, _, derr := codecs.Decode(v.Bytes(), encoding, "replace")
+			if derr != nil {
+				return nil, nil, nil, false, derr
+			}
+			line = []byte(decoded)
 		case *objects.Unicode:
 			if encoding != "" {
-				return nil, nil, fmt.Errorf("TypeError: readline() returned a non-bytes object")
+				return nil, nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-bytes object")
 			}
 			line = []byte(v.Value())
 		default:
 			if res == objects.None() {
 				break
 			}
-			return nil, nil, fmt.Errorf("TypeError: readline returned %s, expected bytes/str", res.Type().Name)
+			return nil, nil, nil, false, fmt.Errorf("TypeError: readline returned %s, expected bytes/str", res.Type().Name)
 		}
 		if len(line) == 0 {
 			break
 		}
 		buf = append(buf, line...)
-		// Track the per-line view (without the trailing newline) so we
-		// can emit the `line` field of each token tuple.
-		end := len(line)
-		if end > 0 && line[end-1] == '\n' {
-			end--
-			if end > 0 && line[end-1] == '\r' {
-				end--
-			}
+		// Preserve the raw line, including its trailing '\n' or '\r\n'
+		// when one was present. CPython's _get_current_line constructs
+		// the `line` field of each token tuple from tok->buf to tok->inp
+		// (Python/Python-tokenize.c:288), which keeps the trailing
+		// newline byte; the implicit-newline arm strips one byte off
+		// the end. Mirror both by keeping the full line here and then
+		// trimming the synthesized '\n' from the last entry below if
+		// the source did not end with one.
+		hadCRLF := false
+		if n := len(line); n >= 2 && line[n-2] == '\r' && line[n-1] == '\n' {
+			hadCRLF = true
 		}
-		lines = append(lines, string(line[:end]))
+		lines = append(lines, string(line))
+		crlf = append(crlf, hadCRLF)
 		if errors.Is(err, io.EOF) {
 			break
 		}
 	}
-	// CPython's tokenizer requires the buffer end with '\n'.
-	if len(buf) == 0 || buf[len(buf)-1] != '\n' {
+	// CPython's tokenizer requires the buffer end with '\n'; mark
+	// implicit when we synthesized one so the wrapper can echo ''
+	// rather than '\n' for the trailing NEWLINE. Empty source is the
+	// exception: CPython tok_underflow_string never appends a newline
+	// when there is no source at all, so it emits ENDMARKER only.
+	//
+	// CPython: Parser/tokenizer/string_tokenizer.c:55 tok_underflow_string
+	implicit := len(buf) > 0 && buf[len(buf)-1] != '\n'
+	if implicit {
 		buf = append(buf, '\n')
 	}
-	return buf, lines, nil
+	return buf, lines, crlf, implicit, nil
 }
 
 // tokenizerIterNext is the tp_iternext slot. It produces a 5-tuple
@@ -214,15 +267,30 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 	tok := it.tok.Get()
 	kind := tok.Kind
 
+	// Drain any SyntaxWarnings the lexer stashed while producing this
+	// token. CPython issues them inline from helpers.c:152
+	// _PyTokenizer_parser_warn; gopy routes through lexer.WarnHook
+	// (set by module/_warnings.init) so the warnings filter sees them
+	// between iterator steps.
+	if all := it.tok.Warnings(); len(all) > it.warnIdx {
+		if lexer.WarnHook != nil {
+			lexer.WarnHook(it.tok.Filename(), all[it.warnIdx:])
+		}
+		it.warnIdx = len(all)
+	}
+
 	if kind == token.ERRORTOKEN {
-		return nil, tokenizerError(it.tok)
+		return nil, tokenizerError(it.tok, it.linesByOneBased)
 	}
 
 	str := string(tok.Bytes)
 
-	isTrailing := false
+	// CPython treats DEDENT-at-EOF as a trailing token alongside
+	// ENDMARKER so the extra_tokens reshape (lineno+1, 0) reaches both.
+	//
+	// CPython: Python/Python-tokenize.c:277 tokenizeriter_next
+	isTrailing := kind == token.ENDMARKER || (kind == token.DEDENT && it.tok.Done() == lexer.DoneEOF)
 	if kind == token.ENDMARKER {
-		isTrailing = true
 		it.done = true
 	}
 
@@ -276,10 +344,30 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 			kind = token.OP
 		}
 		if kind == token.NEWLINE {
-			if str == "" {
+			// CPython: Python/Python-tokenize.c:316 tokenizeriter_next
+			// Implicit NEWLINE (source did not end with a real '\n') has
+			// string=''. Explicit NEWLINE preserves the original line
+			// terminator: '\r\n' for CRLF, '\n' otherwise.
+			if it.isImplicitNewlineLine(startLine) {
+				str = ""
+			} else if it.lineHasCRLF(startLine) {
+				str = "\r\n"
+				endCol++
+			} else {
 				str = "\n"
 			}
 			endCol++
+		} else if kind == token.NL {
+			// NL tokens are emitted inside parens or for blank/comment
+			// lines. CPython doesn't rewrite the str for NL, but the
+			// extra_tokens path collapses the implicit-newline NL to ''
+			// (Python/Python-tokenize.c:327).
+			if it.isImplicitNewlineLine(startLine) {
+				str = ""
+			} else if it.lineHasCRLF(startLine) {
+				str = "\r\n"
+				endCol++
+			}
 		}
 	}
 
@@ -307,6 +395,47 @@ func (it *tokenizerIter) lineAt(lineno int) string {
 	return it.linesByOneBased[lineno]
 }
 
+// lineHasCRLF reports whether the raw readline for 1-based lineno
+// ended with '\r\n'. Used by the NEWLINE / NL branches in
+// tokenizerIterNext to reproduce the str = '\r\n' that CPython picks
+// when tok->start[0] == '\r'.
+func (it *tokenizerIter) lineHasCRLF(lineno int) bool {
+	if lineno <= 0 || lineno >= len(it.lineEndCRLF) {
+		return false
+	}
+	return it.lineEndCRLF[lineno]
+}
+
+// isImplicitNewlineLine reports whether the token at lineno sits on
+// the synthesized trailing '\n' line. CPython tracks this per-line
+// via tok->implicit_newline (Parser/tokenizer/readline_tokenizer.c:90
+// sets it to 1 only on the last underflow when that line lacked a
+// terminator). gopy collapses every readline up front, so the
+// equivalent is "the last entry in linesByOneBased and the source had
+// no terminator at the time we synthesized one".
+func (it *tokenizerIter) isImplicitNewlineLine(lineno int) bool {
+	if !it.implicitNewline {
+		return false
+	}
+	return lineno == len(it.linesByOneBased)-1
+}
+
+// trimLineTerminator strips a trailing '\r\n' or '\n' or '\r' from s.
+// SyntaxError.text holds the offending source line without its
+// terminator (CPython: Python/Python-tokenize.c:140 sets size -= 1
+// before decoding the line), so error builders trim before stamping
+// the field.
+func trimLineTerminator(s string) string {
+	n := len(s)
+	if n >= 2 && s[n-2] == '\r' && s[n-1] == '\n' {
+		return s[:n-2]
+	}
+	if n >= 1 && (s[n-1] == '\n' || s[n-1] == '\r') {
+		return s[:n-1]
+	}
+	return s
+}
+
 // byteToCharCol converts a byte column offset into a character (rune)
 // column offset within line. Mirrors
 // _PyPegen_byte_offset_to_character_offset_line.
@@ -323,43 +452,103 @@ func byteToCharCol(line string, byteCol int) int {
 }
 
 // tokenizerError lifts a lexer error code into the matching Python
-// exception. Mirrors CPython's _tokenizer_error.
+// exception. Mirrors CPython's _tokenizer_error switch case-for-case;
+// dispatches on tok->done (lexer.State.Done()) so the categories
+// stay aligned even when the recorded message text shifts.
+//
+// The result is a structured *parsererrors.SyntaxError so the eval
+// unwind path can populate the SyntaxError instance with filename,
+// lineno, offset, and text. test_tokenize.py asserts these attributes
+// on the exceptions tokenize.tokenize raises, so a plain Go
+// fmt.Errorf would surface as `e.lineno is None` (the canonical
+// SyntaxError descriptor falls back to None when no info is attached).
 //
 // CPython: Python/Python-tokenize.c:87 _tokenizer_error
-func tokenizerError(st *lexer.State) error {
-	// Pull the recorded message and position from the lexer; the
-	// exact errCode is internal, so we route the canonical messages
-	// from the stored *SyntaxError.
+func tokenizerError(st *lexer.State, lines []string) error {
 	se := st.Err()
-	if se == nil {
-		return fmt.Errorf("SyntaxError: invalid token")
+	storedMsg := ""
+	pos := parsererrors.Pos{}
+	if se != nil {
+		storedMsg = se.Message
+		pos.Lineno = se.Pos.Line
+		pos.ColOff = se.Pos.Col
 	}
-	msg := se.Message
-	if msg == "" {
-		msg = "invalid token"
-	}
-	// Route TabError / IndentationError when the message hints at
-	// the underlying class. The lexer doesn't tag the error category
-	// directly, so we match on canonical strings the C source emits.
-	switch {
-	case containsAny(msg, "tabs and spaces"):
-		return fmt.Errorf("TabError: %s", msg)
-	case containsAny(msg, "unindent", "indentation", "indent"):
-		return fmt.Errorf("IndentationError: %s", msg)
-	default:
-		return fmt.Errorf("SyntaxError: %s", msg)
-	}
-}
 
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		for i := 0; i+len(sub) <= len(s); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
+	kind := parsererrors.KindSyntax
+	msg := ""
+	useLineEndOffset := false
+	switch st.Done() {
+	case lexer.DoneToken:
+		msg = "invalid token"
+	case lexer.DoneEOF:
+		// CPython attaches lineno/col via PyErr_SyntaxLocationObject
+		// and returns immediately. We do the same through the
+		// structured SyntaxError carrier.
+		msg = "unexpected EOF in multi-line statement"
+	case lexer.DoneDedent:
+		kind = parsererrors.KindIndentation
+		msg = "unindent does not match any outer indentation level"
+		useLineEndOffset = true
+	case lexer.DoneIntr:
+		return fmt.Errorf("KeyboardInterrupt")
+	case lexer.DoneNomem:
+		return fmt.Errorf("MemoryError")
+	case lexer.DoneTabSpace:
+		kind = parsererrors.KindTab
+		msg = "inconsistent use of tabs and spaces in indentation"
+		useLineEndOffset = true
+	case lexer.DoneToodeep:
+		kind = parsererrors.KindIndentation
+		msg = "too many levels of indentation"
+		useLineEndOffset = true
+	case lexer.DoneLineCont:
+		msg = "unexpected character after line continuation character"
+	default:
+		if storedMsg != "" {
+			msg = storedMsg
+		} else {
+			msg = "unknown tokenization error"
 		}
 	}
-	return false
+
+	// CPython overrides the canonical message with the lexer's stored
+	// text on the SyntaxError path when it carries more detail (e.g.
+	// "invalid character ... (U+...)"). Preserve that behaviour without
+	// shadowing the dedicated TabError / IndentationError text.
+	if kind == parsererrors.KindSyntax && storedMsg != "" && msg != storedMsg {
+		msg = storedMsg
+	}
+
+	// CPython's _tokenizer_error decodes error_line from tok->buf with
+	// size = tok->inp - tok->buf - 1 (Python/Python-tokenize.c:140);
+	// that strips the trailing newline so the text on the SyntaxError
+	// is the bare source line. The offset is then computed against
+	// tok->inp - tok->buf (the full line size including the newline),
+	// which for the indent-family errors lands one past the trailing
+	// newline so offset = len(text) + 1 in character units.
+	//
+	// CPython: Python/Python-tokenize.c:140 _tokenizer_error
+	text := ""
+	if pos.Lineno > 0 && pos.Lineno < len(lines) {
+		text = lines[pos.Lineno]
+	}
+	text = trimLineTerminator(text)
+	if useLineEndOffset {
+		pos.ColOff = utf8.RuneCountInString(text) + 1
+	} else if pos.ColOff > 0 {
+		// SyntaxError.offset is 1-based; the lexer records s.col as a
+		// 0-based byte position. Convert by adding one (the bytes are
+		// ASCII for every error path the lexer currently records).
+		pos.ColOff = pos.ColOff + 1
+	}
+
+	return &parsererrors.SyntaxError{
+		Kind:     kind,
+		Pos:      pos,
+		Filename: st.Filename(),
+		Message:  msg,
+		Text:     text,
+	}
 }
 
 // buildModule materializes the _tokenize module dict.

@@ -70,9 +70,18 @@ func ClassifyDescriptor(descr objects.Object) DescrKind {
 			return KindGetsetOverridden
 		}
 		return KindProperty
-	case *objects.Function, *objects.BuiltinFunction, *objects.MethodDescr:
-		// METHOD_DESCRIPTOR equivalents: callables that bind to a
-		// bound method when accessed off an instance.
+	case *objects.Function, *objects.MethodDescr:
+		// PyFunction_Type and PyMethodDescr_Type both carry
+		// Py_TPFLAGS_METHOD_DESCRIPTOR, so the LOAD_ATTR specializer
+		// can take the unbound-method shortcut for them. PyCFunction
+		// (gopy's *BuiltinFunction) deliberately does NOT carry that
+		// flag and must fall through to the NonDescriptor branch:
+		// a module-level builtin stored as a class attribute is not
+		// supposed to pick up self when accessed via an instance, and
+		// LOAD_ATTR_METHOD_* would inject self and corrupt the call.
+		//
+		// CPython: Python/specialize.c:867 classify_descriptor
+		// CPython: Objects/methodobject.c:357 PyCFunction_Type (no METHOD_DESCRIPTOR)
 		return KindMethod
 	case *objects.ClassMethod:
 		return KindPythonClassmethod

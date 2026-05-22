@@ -62,7 +62,7 @@ func RunFile(ts *state.Thread, filename string, globals, locals objects.Object) 
 		}
 	}
 
-	return RunString(ts, string(src), filename, parser.ModeFile, globals, locals)
+	return RunBytes(ts, src, filename, parser.ModeFile, globals, locals)
 }
 
 // RunSimpleFile parses, compiles, and runs filename as a module

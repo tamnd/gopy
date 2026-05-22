@@ -122,10 +122,15 @@ var scannerStore = map[objects.Object]*scannerState{}
 // instance. locs has the shape
 // [group0_start, group0_end, group1_start, group1_end, ...] with -1 in
 // any slot whose group was not matched, matching what the previous RE2
-// path stored. s is the original input string.
+// path stored. s is the original input string. isBytes is true when
+// the original input was a bytes-like object so group() rebuilds the
+// substring as Bytes rather than Unicode, mirroring CPython's
+// PATTERN_TYPE_BYTES handling in Modules/_sre/sre.c:2980
+// _sre_SRE_Match_group_impl.
 type matchData struct {
-	locs []int
-	s    string
+	locs    []int
+	s       string
+	isBytes bool
 }
 
 // ---------------------------------------------------------------------------

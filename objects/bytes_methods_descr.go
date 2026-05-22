@@ -612,7 +612,7 @@ func splitOnSepRight(v, sep []byte, maxsplit int) [][]byte {
 //
 // CPython: Objects/bytesobject.c:2480 bytes_splitlines_impl
 func splitLinesMethod() methodFn {
-	return func(args []Object, _ map[string]Object) (Object, error) {
+	return func(args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) < 1 || len(args) > 2 {
 			return nil, arityRangeErr("splitlines", 0, 1, len(args)-1)
 		}
@@ -623,6 +623,17 @@ func splitLinesMethod() methodFn {
 		keepends := false
 		if len(args) == 2 && args[1] != nil && args[1] != None() {
 			keepends = IsTrue(args[1])
+		}
+		// CPython parses `keepends` as either positional or keyword; the
+		// `bytes.splitlines` signature in Objects/clinic/bytesobject.c.h
+		// is `*, keepends=False`.
+		if kw, ok := kwargs["keepends"]; ok {
+			if len(args) == 2 {
+				return nil, fmt.Errorf("TypeError: splitlines() got multiple values for argument 'keepends'")
+			}
+			if kw != nil && kw != None() {
+				keepends = IsTrue(kw)
+			}
 		}
 		raw := splitLines(v, keepends)
 		items := make([]Object, len(raw))

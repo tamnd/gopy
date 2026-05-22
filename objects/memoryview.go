@@ -381,6 +381,7 @@ func init() {
 		it.pos++
 		return v, nil
 	}
+	AddIterSlotWrappers(memoryViewIterType)
 }
 
 func memoryViewIter(o Object) (Object, error) {

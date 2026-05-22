@@ -69,6 +69,9 @@ func init() {
 	AsyncGenAThrowType.Iter = func(o Object) (Object, error) { return o, nil }
 	AsyncGenAThrowType.IterNext = asyncGenAThrowNext
 	AsyncGenAThrowType.TpTraverse = asyncGenAThrowTraverse
+
+	AddIterSlotWrappers(AsyncGenASendType)
+	AddIterSlotWrappers(AsyncGenAThrowType)
 }
 
 // asyncGenASendTraverse visits the wrapped generator and the pending

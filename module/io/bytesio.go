@@ -50,6 +50,7 @@ func init() {
 	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
 	objects.SetTypeDescr(BytesIOType, "__enter__", objects.NewBuiltinFunction("__enter__", bytesIOEnterDescr))
 	objects.SetTypeDescr(BytesIOType, "__exit__", objects.NewBuiltinFunction("__exit__", bytesIOExitDescr))
+	objects.AddIterSlotWrappers(BytesIOType)
 }
 
 func bytesIOEnterDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {

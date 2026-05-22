@@ -17,6 +17,7 @@ import (
 	"io"
 
 	"github.com/tamnd/gopy/ast"
+	perrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/parser/lexer"
 	"github.com/tamnd/gopy/parser/pegen"
 )
@@ -74,19 +75,76 @@ func Parse(r io.Reader, filename string, mode Mode) (ast.Mod, error) {
 func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	// Lexer-recorded errors (PEP 263 cookie / BOM conflicts, non-utf-8
 	// source) trump anything pegen would surface: the parser cannot
-	// progress past a broken decode.
+	// progress past a broken decode. Lift the lexer's structured
+	// record into the parser-level *perrors.SyntaxError so the VM
+	// boundary can build a Python SyntaxError with lineno/offset/text
+	// populated rather than synthesizing one from the message prefix.
 	// CPython: Parser/peg_api.c:73 _PyParser_ASTFromString tok->done check
 	if e := st.Err(); e != nil {
-		return nil, fmt.Errorf("SyntaxError: %s", e.Message)
+		// CPython's pegen runtime promotes the lexer's done state to
+		// the matching IndentationError / TabError subclass before
+		// raising. Parser/pegen_errors.c:69 _Pypegen_tokenizer_error
+		// dispatches on E_DEDENT / E_TABSPACE / E_TOODEEP separately
+		// from the generic E_SYNTAX path.
+		kind := perrors.KindSyntax
+		switch st.Done() {
+		case lexer.DoneDedent, lexer.DoneToodeep:
+			kind = perrors.KindIndentation
+		case lexer.DoneTabSpace:
+			kind = perrors.KindTab
+		case lexer.DoneColumnOverflow:
+			kind = perrors.KindOverflow
+		}
+		return nil, &perrors.SyntaxError{
+			Kind: kind,
+			Pos: perrors.Pos{
+				Lineno:  e.Pos.Line,
+				ColOff:  e.Pos.Col,
+				EndLine: e.EndPos.Line,
+				EndCol:  e.EndPos.Col,
+			},
+			Filename: st.Filename(),
+			Message:  e.Message,
+			Text:     e.Text,
+		}
 	}
 	p := pegen.New(st, pegenStartRule(mode), 0)
 	node, err := pegen.Dispatch(p, pegenStartRule(mode))
+	// CPython emits SyntaxWarnings inline from helpers.c:152
+	// _PyTokenizer_parser_warn. gopy stashes them on State.warnings
+	// to keep parser/lexer leaf, then drains them here via a package
+	// hook that module/_warnings registers at init time.
+	st.FlushWarnings()
 	if errors.Is(err, pegen.ErrParserNotImplemented) {
 		// Real SyntaxError beats the not-implemented sentinel:
 		// CPython surfaces the pinned error at the farthest token
 		// (Parser/pegen.c:1136 _PyPegen_run_parser).
 		if e := p.PinnedError(); e != nil {
 			return nil, e
+		}
+		// No rule called RaiseSyntaxError, but the parse still
+		// failed; pin a generic SyntaxError at the farthest token
+		// the parser reached so callers like compile() can populate
+		// lineno / offset / filename / text on the exception.
+		// CPython: Parser/pegen.c:1136 _PyPegen_run_parser uses
+		// farthest_pos to pick the caret when no rule raised.
+		if t := p.FarthestToken(); t != nil {
+			text := ""
+			if ts := p.Tokenizer(); ts != nil {
+				text = ts.SourceLine(t.Lineno)
+			}
+			return nil, &perrors.SyntaxError{
+				Kind: perrors.KindSyntax,
+				Pos: perrors.Pos{
+					Lineno:  t.Lineno,
+					ColOff:  t.ColOff,
+					EndLine: t.EndLine,
+					EndCol:  t.EndCol,
+				},
+				Filename: st.Filename(),
+				Message:  "invalid syntax",
+				Text:     text,
+			}
 		}
 		return nil, ErrParserNotImplemented
 	}

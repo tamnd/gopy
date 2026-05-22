@@ -200,6 +200,6 @@ func (e *reTestExec) ExecCode(code *objects.Code, mod *objects.Module) (objects.
 // reSourceCompiler is the SourceCompiler for the PathFinder in tests.
 // Returns an error so path-based imports fail fast with a clear message
 // rather than panicking on missing vm wiring.
-func reSourceCompiler(src, filename string) (*objects.Code, error) {
+func reSourceCompiler(src []byte, filename string) (*objects.Code, error) {
 	return nil, errors.New("re_import_test: source compilation not wired; set up vm.EvalCode")
 }

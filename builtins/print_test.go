@@ -2,70 +2,100 @@ package builtins
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/tamnd/gopy/objects"
 )
 
+// fileFromTemp returns an *objects.File wrapping a fresh temp file in
+// write mode. The caller is responsible for closing + reading the
+// captured bytes.
+func fileFromTemp(t *testing.T) (*objects.File, *os.File) {
+	t.Helper()
+	tmp, err := os.CreateTemp(t.TempDir(), "print")
+	if err != nil {
+		t.Fatalf("temp file: %v", err)
+	}
+	pf := objects.NewFile(tmp, tmp.Name(), "w", false, false, true)
+	return pf, tmp
+}
+
+func readBack(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %q: %v", path, err)
+	}
+	return string(b)
+}
+
 func TestPrintPositional(t *testing.T) {
-	var buf bytes.Buffer
-	fn := Print(&buf)
-	out, err := fn([]objects.Object{
+	pf, tmp := fileFromTemp(t)
+	defer tmp.Close()
+	out, err := Print([]objects.Object{
 		objects.NewInt(1),
 		objects.NewInt(2),
 		objects.NewInt(3),
-	}, nil)
+	}, map[string]objects.Object{"file": pf})
 	if err != nil {
 		t.Fatalf("Print: %v", err)
 	}
 	if !objects.IsNone(out) {
 		t.Errorf("Print returned %v, want None", out)
 	}
-	if got := buf.String(); got != "1 2 3\n" {
+	_ = pf.Flush()
+	_ = tmp.Sync()
+	if got := readBack(t, tmp.Name()); got != "1 2 3\n" {
 		t.Errorf("output = %q, want %q", got, "1 2 3\n")
 	}
 }
 
 func TestPrintSepEnd(t *testing.T) {
-	var buf bytes.Buffer
-	fn := Print(&buf)
-	_, err := fn(
+	pf, tmp := fileFromTemp(t)
+	defer tmp.Close()
+	_, err := Print(
 		[]objects.Object{objects.NewInt(1), objects.NewInt(2)},
 		map[string]objects.Object{
-			"sep": objects.NewStr("-"),
-			"end": objects.NewStr("!"),
+			"file": pf,
+			"sep":  objects.NewStr("-"),
+			"end":  objects.NewStr("!"),
 		},
 	)
 	if err != nil {
 		t.Fatalf("Print: %v", err)
 	}
-	if got := buf.String(); got != "1-2!" {
+	_ = pf.Flush()
+	_ = tmp.Sync()
+	if got := readBack(t, tmp.Name()); got != "1-2!" {
 		t.Errorf("output = %q, want %q", got, "1-2!")
 	}
 }
 
 func TestPrintNoneSepRetainsDefault(t *testing.T) {
-	var buf bytes.Buffer
-	fn := Print(&buf)
-	_, err := fn(
+	pf, tmp := fileFromTemp(t)
+	defer tmp.Close()
+	_, err := Print(
 		[]objects.Object{objects.NewInt(1), objects.NewInt(2)},
-		map[string]objects.Object{"sep": objects.None()},
+		map[string]objects.Object{"file": pf, "sep": objects.None()},
 	)
 	if err != nil {
 		t.Fatalf("Print: %v", err)
 	}
-	if got := buf.String(); got != "1 2\n" {
+	_ = pf.Flush()
+	_ = tmp.Sync()
+	if got := readBack(t, tmp.Name()); got != "1 2\n" {
 		t.Errorf("output = %q, want %q (None sep means default space)", got, "1 2\n")
 	}
 }
 
 func TestPrintRejectsNonStringSep(t *testing.T) {
-	var buf bytes.Buffer
-	fn := Print(&buf)
-	_, err := fn(
+	pf, tmp := fileFromTemp(t)
+	defer tmp.Close()
+	_, err := Print(
 		[]objects.Object{objects.NewInt(1)},
-		map[string]objects.Object{"sep": objects.NewInt(0)},
+		map[string]objects.Object{"file": pf, "sep": objects.NewInt(0)},
 	)
 	if err == nil {
 		t.Fatalf("Print accepted non-string sep")
