@@ -568,6 +568,22 @@ func actionAstMatchAs(p *Parser, args ...any) any {
 	return out
 }
 
+// actionAstMatchOr materialises a MatchOr from the gather-rule output.
+// The grammar wraps this in a `len == 1 ? get(0) : MatchOr(...)` ternary
+// so this helper always receives a sequence with at least two members;
+// the collapse case is handled by seqLenAny / seqGetAny in the
+// translated ternary.
+//
+// CPython: Parser/Python.asdl MatchOr(pattern* patterns)
+func actionAstMatchOr(p *Parser, args ...any) any {
+	_ = p
+	seq := patternSeqOf(argAt(args, 0))
+	if len(seq) == 0 {
+		return placeholderMatched
+	}
+	return &ast.MatchOr{Patterns: seq, Pos: ast.NoPos}
+}
+
 // SeqCountDots / SingletonSeq / SeqInsertInFront / JoinNamesWithDot
 // are direct ports of the helpers in actions.go, with the (p, p, ...)
 // variadic call shape the generator emits.
@@ -756,38 +772,40 @@ func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
 	return &ast.Constant{Value: text, Pos: ast.NoPos}
 }
 
+// actionPgenEnsureImaginary validates that exp is a Constant carrying
+// a complex value. Mirrors CPython's _PyPegen_ensure_imaginary which
+// just type-checks and returns the same node; the surrounding grammar
+// rule has already built it via numberToken.
+//
+// CPython: Parser/action_helpers.c:843 _PyPegen_ensure_imaginary
 func actionPgenEnsureImaginary(p *Parser, args ...any) any {
 	_ = p
-	t, ok := argAt(args, 1).(*Token)
-	if !ok || t == nil {
-		return placeholderMatched
-	}
-	s := string(t.Bytes)
-	if !strings.HasSuffix(s, "j") && !strings.HasSuffix(s, "J") {
-		return placeholderMatched
-	}
-	v, ok := parseNumberLiteral(s)
+	exp := asExpr(argAt(args, 1))
+	c, ok := exp.(*ast.Constant)
 	if !ok {
 		return placeholderMatched
 	}
-	return &ast.Constant{Value: v, Pos: ast.NoPos}
+	if _, isComplex := c.Value.(complex128); !isComplex {
+		return placeholderMatched
+	}
+	return c
 }
 
+// actionPgenEnsureReal validates that exp is a Constant carrying a
+// non-complex numeric value.
+//
+// CPython: Parser/action_helpers.c:853 _PyPegen_ensure_real
 func actionPgenEnsureReal(p *Parser, args ...any) any {
 	_ = p
-	t, ok := argAt(args, 1).(*Token)
-	if !ok || t == nil {
-		return placeholderMatched
-	}
-	s := string(t.Bytes)
-	if strings.HasSuffix(s, "j") || strings.HasSuffix(s, "J") {
-		return placeholderMatched
-	}
-	v, ok := parseNumberLiteral(s)
+	exp := asExpr(argAt(args, 1))
+	c, ok := exp.(*ast.Constant)
 	if !ok {
 		return placeholderMatched
 	}
-	return &ast.Constant{Value: v, Pos: ast.NoPos}
+	if _, isComplex := c.Value.(complex128); isComplex {
+		return placeholderMatched
+	}
+	return c
 }
 
 // The remaining pgen helpers cover string-formatting, function/class

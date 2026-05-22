@@ -4762,7 +4762,7 @@ func parseRule_or_pattern(p *Parser) any {
 			patterns := parseRule__gather_35(p)
 			if patterns == nil { return nil }
 			_ = patterns
-			return withSpan(p, mark, matchedOr(patterns))
+			return withSpan(p, mark, func() any { if truthy(seqLenAny(patterns) == 1) { return seqGetAny(patterns, 0) }; return actionAstMatchOr(p, patterns) }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_or_pattern, v)
 			return v

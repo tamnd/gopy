@@ -623,6 +623,22 @@ func translateCall(fname string, args []string) (string, bool) {
 		if len(args) >= 1 {
 			return "seqLastAny(" + args[0] + ")", true
 		}
+	case "asdl_seq_LEN":
+		// asdl_seq_LEN(seq) returns the length of an asdl sequence.
+		// Gather-rule results arrive as []any from the generator; the
+		// Go helper unwraps and reports the count.
+		// CPython: Include/internal/pycore_asdl.h:18 asdl_seq_LEN
+		if len(args) == 1 {
+			return "seqLenAny(" + args[0] + ")", true
+		}
+	case "asdl_seq_GET":
+		// asdl_seq_GET(seq, i) fetches the i-th element of an asdl
+		// sequence. The Go-side helper accepts a []any or a typed
+		// sequence and returns the element as any.
+		// CPython: Include/internal/pycore_asdl.h:19 asdl_seq_GET
+		if len(args) == 2 {
+			return "seqGetAny(" + args[0] + ", " + args[1] + ")", true
+		}
 	}
 	if strings.HasPrefix(fname, "_PyAST_") {
 		ctor := fname[len("_PyAST_"):]

@@ -107,6 +107,45 @@ func seqLastAny(v any) any {
 	}
 }
 
+// seqLenAny reports the length of a gather-rule result. The result is
+// always a flat slice; a non-slice value is treated as a single item
+// so callers do not need to special-case the collapsed shape.
+//
+// CPython: Include/internal/pycore_asdl.h:18 asdl_seq_LEN
+func seqLenAny(v any) int {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case []any:
+		return len(x)
+	default:
+		return 1
+	}
+}
+
+// seqGetAny indexes a gather-rule result. A non-slice value behaves as
+// a length-1 sequence so the canonical
+// `asdl_seq_LEN(x) == 1 ? asdl_seq_GET(x, 0) : ...` collapse pattern
+// from the grammar still works after the collapsed shape arrives.
+//
+// CPython: Include/internal/pycore_asdl.h:19 asdl_seq_GET
+func seqGetAny(v any, i int) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		if i < 0 || i >= len(x) {
+			return nil
+		}
+		return x[i]
+	default:
+		if i == 0 {
+			return v
+		}
+		return nil
+	}
+}
+
 // SeqCountDots counts the leading DOT/ELLIPSIS tokens that the
 // `from ... import` rule accepts. ELLIPSIS counts as three dots.
 //

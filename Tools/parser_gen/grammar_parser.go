@@ -417,6 +417,11 @@ func (p *gparser) atom() (Item, error) {
 // is seen at depth zero, joining their text with single spaces. The
 // opener has already been consumed by the caller.
 //
+// Adjacent single-char operator tokens that form a known C compound
+// operator (==, !=, <=, >=, &&, ||) are glued so the action translator
+// sees them as one token; the metagrammar tokenizer keeps them split
+// because `& &` is the force-expect form in the meta language.
+//
 // CPython: Tools/peg_generator/pegen/grammar_parser.py target_atoms
 func (p *gparser) targetAtoms(closer string) (string, error) {
 	var parts []string
@@ -428,7 +433,7 @@ func (p *gparser) targetAtoms(closer string) (string, error) {
 		}
 		if t.Kind == gtOP && depth == 0 && t.Text == closer {
 			p.pos++
-			return strings.Join(parts, " "), nil
+			return joinActionAtoms(parts), nil
 		}
 		if t.Kind == gtOP {
 			switch t.Text {
@@ -448,4 +453,29 @@ func (p *gparser) targetAtoms(closer string) (string, error) {
 		parts = append(parts, t.Text)
 		p.pos++
 	}
+}
+
+// joinActionAtoms joins tokens with single spaces, but fuses adjacent
+// single-char ops that form a C compound operator. Without the fuse,
+// `asdl_seq_LEN(x) == 1` becomes `... = = 1` and the action translator
+// fails to recognise `==`.
+func joinActionAtoms(parts []string) string {
+	compounds := map[string]bool{
+		"==": true, "!=": true, "<=": true, ">=": true,
+		"&&": true, "||": true,
+	}
+	var b strings.Builder
+	for i, s := range parts {
+		if i > 0 {
+			prev := parts[i-1]
+			if len(prev) == 1 && len(s) == 1 && compounds[prev+s] {
+				b.WriteString(s)
+				parts[i] = prev + s
+				continue
+			}
+			b.WriteByte(' ')
+		}
+		b.WriteString(s)
+	}
+	return b.String()
 }

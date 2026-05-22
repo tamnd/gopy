@@ -873,6 +873,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionAstMatchAs":                   true,
 		"actionAstMatchClass":                true,
 		"actionAstMatchMapping":              true,
+		"actionAstMatchOr":                   true,
 		"actionAstMatchSequence":             true,
 		"actionAstMatchStar":                 true,
 		"actionAstMatchValue":                true,
