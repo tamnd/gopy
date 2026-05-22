@@ -62,7 +62,7 @@ func (e *evalState) opLOAD_CONST(oparg uint32) (next int, ok bool, err error) {
 func (e *evalState) opLOAD_FAST_CHECK(oparg uint32) (next int, ok bool, err error) {
 	ref := e.localAt(int(oparg))
 	if ref.IsNull() {
-		return 0, true, fmt.Errorf("vm: LOAD_FAST_CHECK: local %d unbound", oparg)
+		return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 	}
 	e.push(ref.Dup())
 	return e.advance(), true, nil
@@ -72,7 +72,7 @@ func (e *evalState) opLOAD_FAST_CHECK(oparg uint32) (next int, ok bool, err erro
 func (e *evalState) opDELETE_FAST(oparg uint32) (next int, ok bool, err error) {
 	old := e.localAt(int(oparg))
 	if old.IsNull() {
-		return 0, true, fmt.Errorf("vm: DELETE_FAST: local %d unbound", oparg)
+		return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 	}
 	old.Close()
 	e.setLocal(int(oparg), stackref.Null)

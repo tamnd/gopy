@@ -490,8 +490,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			return 0, true, fmt.Errorf("LOAD_DEREF: %s slot %d not a cell in %s:%s, got %T", name, oparg, e.f.Code.Filename, e.f.Code.Name, cellObj)
 		}
 		if cell.Contents == nil {
-			name := derefName(e.f.Code, int(oparg))
-			return 0, true, fmt.Errorf("NameError: free variable %q referenced before assignment in %s:%s", name, e.f.Code.Filename, e.f.Code.Name)
+			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 		}
 		e.pushObject(cell.Contents)
 		return e.advance(), true, nil
@@ -514,7 +513,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		ref := e.f.LocalsPlus[int(oparg)]
 		cell, ok := ref.AsObject().(*objects.Cell)
 		if !ok || cell.Contents == nil {
-			return 0, true, fmt.Errorf("NameError: free variable referenced before assignment")
+			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 		}
 		cell.Contents = nil
 		return e.advance(), true, nil
@@ -882,7 +881,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		ref := e.f.LocalsPlus[int(oparg)]
 		cell, ok := ref.AsObject().(*objects.Cell)
 		if !ok || cell.Contents == nil {
-			return 0, true, fmt.Errorf("NameError: free variable referenced before assignment")
+			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 		}
 		e.pushObject(cell.Contents)
 		return e.advance(), true, nil
@@ -1668,6 +1667,22 @@ func derefName(co *objects.Code, idx int) string {
 		return co.Freevars[i]
 	}
 	return "<unknown>"
+}
+
+// formatExcUnbound mirrors CPython's _PyEval_FormatExcUnbound: an
+// empty cell at a localsplus slot below the first freevar raises
+// UnboundLocalError; at or above that boundary it raises NameError
+// with the "in enclosing scope" suffix. The boundary is
+// nlocalsplus - nfreevars (PyUnstable_Code_GetFirstFree).
+//
+// CPython: Python/ceval.c:3482 _PyEval_FormatExcUnbound
+func formatExcUnbound(co *objects.Code, idx int) error {
+	name := derefName(co, idx)
+	firstFree := frame.NLocalsPlusOf(co) - len(co.Freevars)
+	if idx < firstFree {
+		return fmt.Errorf("UnboundLocalError: cannot access local variable '%s' where it is not associated with a value", name)
+	}
+	return fmt.Errorf("NameError: cannot access free variable '%s' where it is not associated with a value in enclosing scope", name)
 }
 
 // objectRepr returns repr(o), falling back to a placeholder so error

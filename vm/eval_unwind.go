@@ -37,6 +37,7 @@ var errorPrefixToType = map[string]*objects.Type{
 	"TypeError:":               pyerrors.PyExc_TypeError,
 	"ValueError:":              pyerrors.PyExc_ValueError,
 	"NameError:":               pyerrors.PyExc_NameError,
+	"UnboundLocalError:":       pyerrors.PyExc_UnboundLocalError,
 	"AttributeError:":          pyerrors.PyExc_AttributeError,
 	"KeyError:":                pyerrors.PyExc_KeyError,
 	"IndexError:":              pyerrors.PyExc_IndexError,

@@ -93,6 +93,21 @@ func currentEvaluator(code *objects.Code, globals, locals objects.Object) (objec
 	if ts == nil {
 		ts = state.NewThread()
 	}
+	// builtin_exec_impl auto-injects __builtins__ into a user-supplied
+	// globals dict so name lookups still find UnboundLocalError /
+	// AttributeError / Exception even when the caller passed a fresh
+	// dict like exec(src, {"fail": fail}).
+	//
+	// CPython: Python/bltinmodule.c:1081 builtin_exec_impl
+	// (PyDict_GetItemWithError + PyDict_SetItem(__builtins__))
+	if d, ok := globals.(*objects.Dict); ok {
+		key := objects.NewStr("__builtins__")
+		if v, _ := d.GetItem(key); v == nil {
+			if f := frameStackFor(ts).Top(); f != nil && f.Builtins != nil {
+				_ = d.SetItem(key, f.Builtins)
+			}
+		}
+	}
 	return EvalCode(ts, code, globals, locals)
 }
 
