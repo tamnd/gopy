@@ -110,7 +110,7 @@ func makeMonitoring() objects.Object {
 
 // monitoringNoop returns None for every sys.monitoring entry point.
 // Callbacks registered through register_callback never fire under the
-// stub, which is the only correct behaviour until the bytecode
+// stub, which is the only correct behavior until the bytecode
 // interpreter learns to emit instrumentation events.
 //
 // CPython: Python/instrumentation.c sys_monitoring_set_events
