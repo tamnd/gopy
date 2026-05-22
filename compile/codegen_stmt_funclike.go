@@ -219,12 +219,18 @@ func (c *Compiler) declareArgs(args *ast.Arguments) error {
 	return nil
 }
 
-// declareArg adds name to the per-unit varnames pool.
+// declareArg adds name to the per-unit varnames pool. Names that look
+// private (`__foo`, not dunders) are mangled against the enclosing
+// class so the slot matches the LOAD_FAST / kwdefaults lookups, which
+// also mangle via codegen_nameop. Without this the class-scope kwarg
+// `__a` would pool both `__a` and `_X__a`, doubling the slot count.
 //
-// CPython: Python/compile.c compiler_arguments per-arg slot
+// CPython: Python/compile.c compiler_arguments per-arg slot (the
+// arg name is mangled before being added to u_varnames).
 func (c *Compiler) declareArg(name string) {
 	pool := poolVarNames
-	c.poolIndex(&pool, name)
+	mangled := symtable.MaybeMangle(c.unit().Private, c.scope, name)
+	c.poolIndex(&pool, mangled)
 }
 
 // emitDefaults evaluates positional default expressions and the
@@ -261,7 +267,16 @@ func (c *Compiler) emitDefaults(args *ast.Arguments, l ast.Pos) (int32, error) {
 			if d == nil {
 				continue
 			}
-			c.addLoadConst(args.Kwonlyargs[i].Arg, l)
+			// CPython mangles each kwarg name against the enclosing
+			// class so the kwdefaults dict key matches the
+			// function's mangled fast-local slot. Without this the
+			// `def f(self, *, __a=42)` inside `class X` builds the
+			// dict with key '__a' while f's slot is named '_X__a',
+			// so initialize_locals' default fill misses.
+			//
+			// CPython: Python/codegen.c codegen_function_body kwdefaults loop
+			mangled := symtable.MaybeMangle(c.unit().Private, c.scope, args.Kwonlyargs[i].Arg)
+			c.addLoadConst(mangled, l)
 			if err := c.visitExpr(d); err != nil {
 				return 0, err
 			}

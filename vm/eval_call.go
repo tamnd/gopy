@@ -121,8 +121,24 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 	hasVarargs := co.Flags&int(0x04) != 0
 	hasVarkw := co.Flags&int(0x08) != 0
 	if !hasVarargs && len(args) > npos {
-		return nil, fmt.Errorf("TypeError: %s() takes %d positional arguments but %d were given",
-			fn.Name, npos, len(args))
+		// atLeast = npos - len(defaults); atMost = npos. CPython's
+		// too_many_positional uses the same shape and falls back to
+		// the function's __qualname__ for the formatted prefix.
+		//
+		// CPython: Python/ceval.c:1487 too_many_positional
+		atMost := npos
+		atLeast := npos
+		if fn.Defaults != nil {
+			atLeast -= fn.Defaults.Len()
+		}
+		if atLeast < 0 {
+			atLeast = 0
+		}
+		qualname := fn.Qualname
+		if qualname == "" {
+			qualname = fn.Name
+		}
+		return nil, objects.TooManyPositionalError(qualname, len(args), atLeast, atMost, 0)
 	}
 	ts := currentThread()
 	if ts == nil {

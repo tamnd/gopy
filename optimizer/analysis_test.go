@@ -91,9 +91,10 @@ func (s *stubFrame) FrameNumLocals() int                 { return 0 }
 func (s *stubFrame) FrameFastLocal(int) objects.Object   { return nil }
 func (s *stubFrame) FrameNumCells() int                  { return 0 }
 func (s *stubFrame) FrameCellLocal(int) objects.Object   { return nil }
-func (s *stubFrame) FrameNumFrees() int                  { return 0 }
-func (s *stubFrame) FrameFreeLocal(int) objects.Object   { return nil }
-func (s *stubFrame) FrameFunc() objects.Object           { return s.fn }
+func (s *stubFrame) FrameNumFrees() int                       { return 0 }
+func (s *stubFrame) FrameFreeLocal(int) objects.Object        { return nil }
+func (s *stubFrame) FrameLocalsPlusItem(int) objects.Object   { return nil }
+func (s *stubFrame) FrameFunc() objects.Object                { return s.fn }
 
 // TestRemoveGlobals_RewritesGuardToCheckFunction confirms that the
 // first _GUARD_GLOBALS_VERSION on a fresh trace becomes _CHECK_FUNCTION
