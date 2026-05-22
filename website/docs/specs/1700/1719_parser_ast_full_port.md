@@ -1430,3 +1430,134 @@ returned `+Inf` / `-Inf` value. Pure parse errors still reject.
 CPython:
 - `Parser/string_parser.c:1280 parsenumber_raw`
 - `Python/pystrtod.c:130 PyOS_string_to_double`
+
+### P7 closer 19: or-pattern wiring + parser_gen ternary translation
+
+test_patma's `[1, _, _] | [_, _, "b", _]` style alternates were
+all evaluating to "no match" on every alt except the first.
+Three bugs stacked here.
+
+**Bug 1: gather list flattened into the parent sequence.** The
+`or_pattern` rule's grammar action is a CPython ternary
+
+```
+asdl_seq_LEN(patterns) == 1 ? asdl_seq_GET(patterns, 0)
+                            : _PyAST_MatchOr(patterns, EXTRA)
+```
+
+but `Tools/parser_gen/action.go` had no translation for
+`asdl_seq_LEN` / `asdl_seq_GET`, so the alt fell back to the
+default-action path that wraps the gather output in
+`matchedOr(patterns)`. The gather list `[p1, p2, ...]` then
+flowed into the parent rule as raw `[]any`, and
+`patternSeqOf` flattened it directly into the surrounding
+MatchSequence/MatchClass element list. Every alt became a
+sibling in the outer sequence, so a 2-alt OR over 3-tuples
+produced a 6-element MatchSequence and bound names collided.
+
+**Bug 2: `==` lost in target-atom join.** Even after teaching
+the action translator about `asdl_seq_LEN` / `asdl_seq_GET`, the
+ternary still failed to translate. `grammar_tok.go` reads `==`
+as two `=` tokens (necessary so the metagrammar's `& &`
+force-expect parses), and `grammar_parser.targetAtoms` joined
+those with single spaces, producing `= =` which the C-action
+translator's tokenizer cannot recognise. Added
+`joinActionAtoms` to glue adjacent single-char ops that form a
+known C compound operator (`==`, `!=`, `<=`, `>=`, `&&`, `||`).
+
+**Bug 3: codegen_pattern_or was a shim.** The previous gopy
+patternOr emitted one fail-pop ladder per alt without the
+shared subject COPY, the cross-alt store-order rotation, or
+the trailing POP_TOP / rotate sequence. CPython's
+`Python/codegen.c:6120 codegen_pattern_or` is ~150 lines of
+careful stack management:
+
+- COPY 1 of the subject at the start of each alt so the
+  alt can fail without consuming the subject;
+- after the first alt, record its captured-store list as
+  `control`; later alts must bind exactly the same set, and
+  any divergent ordering gets corrected via stack rotations
+  driven by `codegen_pattern_helper_rotate`;
+- on overall OR failure, POP_TOP the surviving copy and
+  jump to the outer fail-pop;
+- on overall OR success, the captures sit one slot below
+  the subject copy; rotate them down past `pc.onTop` and
+  the outer `pc.stores`, then POP_TOP the subject copy.
+
+Ported the full sequence into `compile/codegen_stmt_match.go`
+patternOr. The resulting bytecode matches CPython's
+`dis.dis` byte-for-byte for the test patterns above.
+
+**Helper additions.** Added `seqLenAny` / `seqGetAny` in
+`parser/pegen/actions.go` to back the translated calls, and
+an `actionAstMatchOr` helper in
+`parser/pegen/action_helpers_gen.go` that builds the AST node
+when the gather has 2+ patterns. The previous hand-edited
+`actionPgenOrPattern` shim was removed; the generator now
+emits the call site directly from the upstream grammar action.
+
+After the fix:
+
+```
+match (3, 4, "b", 5):
+    case [1, _, _] | [_, _, "b", _] | [_, _, "c"] | ["d", _, _, _]:
+        ...      # now reached, alt 1 matches
+```
+
+CPython:
+- `Grammar/python.gram:511` or_pattern action
+- `Python/codegen.c:6120 codegen_pattern_or`
+- `Python/codegen.c:5739 codegen_pattern_helper_rotate`
+- `Tools/peg_generator/pegen/c_generator.py` action translation
+
+### P7 closer 20: ensure_real/ensure_imaginary accept Constant nodes
+
+`{0+0j: _}` mapping patterns and signed/complex literal keys
+failed with "mapping pattern keys may only be literals" because
+both halves of the BinOp resolved to `placeholderMatched`,
+which `asExpr` cannot convert to `ast.Expr`.
+
+Root cause: `actionPgenEnsureReal` and `actionPgenEnsureImaginary`
+in `parser/pegen/action_helpers_gen.go` were re-parsing the
+token bytes when the surrounding grammar rule had already built
+an `*ast.Constant` via `numberToken`. The type assertion
+`argAt(args, 1).(*Token)` failed, so the helpers returned the
+placeholder sentinel for every literal numeric key.
+
+CPython's `_PyPegen_ensure_real` / `_PyPegen_ensure_imaginary`
+are pure type-checks: assert the expression is a numeric
+Constant of the right complex/real flavor, then return it
+unchanged. Rewrote both helpers to do exactly that against
+`*ast.Constant` carrying `complex128` vs anything else.
+
+Also widened `isValidMappingPatternKey` in
+`compile/codegen_stmt_match.go` to accept the literal-expression
+shapes the parser actually emits (bare Constants, Attribute
+lookups, signed UnaryOp(-, Constant), and complex_number
+BinOp(Add|Sub, signed-real, imaginary-Constant)). CPython gets
+to skip this because `_PyCompile_AstOptimize` folds those AST
+nodes into a single Constant before codegen runs;
+gopy has no AST optimizer pass yet, so the codegen has to
+recognise the parser's literal-expression spelling directly.
+
+CPython:
+- `Parser/action_helpers.c:843 _PyPegen_ensure_imaginary`
+- `Parser/action_helpers.c:853 _PyPegen_ensure_real`
+- `Python/ast_opt.c:457 fold_unaryop`
+- `Python/ast_opt.c:507 fold_binop`
+
+### P7 closer 21: MatchMapping `{**rest}` capture codegen
+
+`case {"a": 1, **rest}:` left `rest` unbound. The previous
+`patternMapping` only emitted `patternStoreName(p.Rest, ...)`
+without first building the rest-dict, so the store popped
+whatever happened to sit on TOS (the matched-keys tuple).
+
+CPython's codegen for the rest target (Python/codegen.c:6094)
+builds a fresh dict via `BUILD_MAP 0 / SWAP 3 / DICT_UPDATE 2`
+then deletes each named key from the copy before storing it.
+Ported that sequence into `compile/codegen_stmt_match.go`
+patternMapping.
+
+CPython:
+- `Python/codegen.c:6094 codegen_pattern_mapping` star_target arm
