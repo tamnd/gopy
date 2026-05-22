@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package selectmod is the gopy port of CPython's Modules/selectmodule.c.
 // It exposes the select.select primitive that selectors.SelectSelector
 // and subprocess.Popen._communicate depend on. Only the select function
@@ -8,6 +10,13 @@
 // The Go module name is selectmod (not "select") because "select" is a
 // reserved Go keyword. The Python-visible name installed in the inittab
 // is "select" so `import select` resolves to this module.
+//
+// The unix build tag gates the POSIX select(2) implementation. Windows
+// drives select(2) through Winsock's WSAEventSelect, which is a
+// separate CPython arm (Modules/selectmodule.c MS_WINDOWS branches);
+// that port lands in a follow-up. Until then `import select` on
+// Windows raises ImportError, matching CPython's behavior when the
+// module is excluded from the build.
 package selectmod
 
 import (
@@ -194,7 +203,10 @@ func selectSelect(args []objects.Object, _ map[string]objects.Object) (objects.O
 
 	for {
 		// CPython: Modules/selectmodule.c:359 select(...)
-		serr := syscall.Select(nfds+1, rArg, wArg, eArg, tvPtr)
+		// doSelect wraps the per-OS syscall.Select signature (Linux
+		// returns (n, err); BSD/darwin returns err only) into one
+		// shape this loop can consume.
+		serr := doSelect(nfds+1, rArg, wArg, eArg, tvPtr)
 		if serr == nil {
 			break
 		}
@@ -230,13 +242,13 @@ func timeoutSeconds(o objects.Object) (float64, error) {
 }
 
 // durationToTimeval converts a Go duration to a syscall.Timeval.
+// syscall.NsecToTimeval handles the per-OS int32/int64 Usec field
+// (Linux Timeval.Usec is int64, macOS is int32) without manual casts.
 func durationToTimeval(d time.Duration) syscall.Timeval {
 	if d < 0 {
 		d = 0
 	}
-	sec := int64(d / time.Second)
-	usec := int64((d % time.Second) / time.Microsecond)
-	return syscall.Timeval{Sec: sec, Usec: int32(usec)}
+	return syscall.NsecToTimeval(d.Nanoseconds())
 }
 
 // buildModule constructs the select module dict and stamps the
