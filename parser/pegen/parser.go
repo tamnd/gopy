@@ -166,6 +166,22 @@ func (p *Parser) fillToken() int {
 			kind = exact
 		}
 	}
+	// Single-input mode: when the lexer hands us the first ENDMARKER
+	// and the parser has already consumed at least one real token,
+	// rewrite it to NEWLINE so `statement_newline: compound_stmt
+	// NEWLINE` matches even though the source ended on a DEDENT (or
+	// on a non-newline char like "x"). Mirrors the C fill_token arm
+	// that also primes the lexer with a -indent pendin so the
+	// follow-up calls flush DEDENTs before the real ENDMARKER.
+	//
+	// CPython: Parser/pegen.c:268 _PyPegen_fill_token single-input
+	if p.startRule == StartSingle && kind == token.ENDMARKER && p.parsingStarted {
+		kind = token.NEWLINE
+		p.parsingStarted = false
+		p.tok.ForceDedentsAtEOF()
+	} else if kind != token.ENDMARKER {
+		p.parsingStarted = true
+	}
 	t := &Token{
 		Type:     kind,
 		Bytes:    tk.Bytes,

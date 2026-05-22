@@ -460,6 +460,24 @@ func (s *State) EOFLineText() string {
 // pending lineno bump never flushed because there is no next char).
 func (s *State) Lineno() int { return s.lineno }
 
+// ForceDedentsAtEOF queues one DEDENT per open indent on the lexer's
+// pending stack so the next Get() calls drain them before returning
+// the trailing ENDMARKER. The pegen single-input driver invokes this
+// after rewriting the first ENDMARKER into a NEWLINE; the lexer's
+// indent loop only runs at beginning-of-line, so unless we prime
+// pendin here no DEDENTs ever emit and the grammar's block rule sees
+// `<stmt> NEWLINE ENDMARKER` instead of `<stmt> NEWLINE DEDENT
+// ENDMARKER`.
+//
+// CPython: Parser/pegen.c:273 _PyPegen_fill_token (single-input arm
+// sets tok->pendin = -tok->indent and clears tok->indent)
+func (s *State) ForceDedentsAtEOF() {
+	if s.indent > 0 {
+		s.pendin = -s.indent
+		s.indent = 0
+	}
+}
+
 // Warnings returns the SyntaxWarning-class diagnostics recorded
 // during tokenization. Order matches emission order.
 //
