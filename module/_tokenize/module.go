@@ -82,6 +82,7 @@ func newTokenizerIterType() *objects.Type {
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = tokenizerIterNext
 	t.TpNew = tokenizerIterNew
+	objects.AddIterSlotWrappers(t)
 	return t
 }
 

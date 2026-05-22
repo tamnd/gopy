@@ -96,6 +96,7 @@ func init() {
 	} {
 		SetTypeDescr(GeneratorType, name, NewMethodDescr(GeneratorType, name, fn))
 	}
+	AddIterSlotWrappers(GeneratorType)
 }
 
 func genSendMethod(args []Object, _ map[string]Object) (Object, error) {

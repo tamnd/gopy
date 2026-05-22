@@ -29,6 +29,27 @@ func getMatchLocs(inst *objects.Instance) ([]int, string, error) {
 	return md.locs, md.s, nil
 }
 
+// getMatchData returns the engine payload alongside the locs/string
+// pair so callers can branch on isBytes when materialising substrings.
+func getMatchData(inst *objects.Instance) (*matchData, error) {
+	md, ok := matchStore[inst]
+	if !ok {
+		return nil, fmt.Errorf("Match has no locs data")
+	}
+	return md, nil
+}
+
+// matchSlice mirrors getslice / PATTERN_TYPE_BYTES branching in
+// Modules/_sre/sre.c:2735 match_getslice_by_index: a bytes-input
+// match rebuilds substrings as Bytes; a str-input match keeps
+// Unicode.
+func matchSlice(md *matchData, lo, hi int) objects.Object {
+	if md.isBytes {
+		return objects.NewBytes([]byte(md.s[lo:hi]))
+	}
+	return objects.NewStr(md.s[lo:hi])
+}
+
 // resolveGroup turns a group spec (int or str) into a 0-based group
 // number. Group 0 is the whole match; named groups go through the
 // Pattern's groupindex dict.
@@ -81,15 +102,15 @@ func groupSpan(locs []int, g int) (int, int, error) {
 
 // groupSubstring returns the matched substring for group g, or None
 // if unmatched. Out-of-range raises IndexError.
-func groupSubstring(s string, locs []int, g int) (objects.Object, error) {
-	lo, hi, err := groupSpan(locs, g)
+func groupSubstring(md *matchData, g int) (objects.Object, error) {
+	lo, hi, err := groupSpan(md.locs, g)
 	if err != nil {
 		return nil, err
 	}
 	if lo < 0 {
 		return objects.None(), nil
 	}
-	return objects.NewStr(s[lo:hi]), nil
+	return matchSlice(md, lo, hi), nil
 }
 
 // matchInst extracts the Instance and locs/string out of a method call
@@ -110,19 +131,23 @@ func matchInst(args []objects.Object, name string) (*objects.Instance, []int, st
 //
 // CPython: Modules/_sre/sre.c:2980 _sre_SRE_Match_group_impl
 func matchGroup(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	inst, locs, s, err := matchInst(args, "group")
+	inst, _, _, err := matchInst(args, "group")
+	if err != nil {
+		return nil, err
+	}
+	md, err := getMatchData(inst)
 	if err != nil {
 		return nil, err
 	}
 	if len(args) == 1 {
-		return objects.NewStr(s[locs[0]:locs[1]]), nil
+		return matchSlice(md, md.locs[0], md.locs[1]), nil
 	}
 	if len(args) == 2 {
 		g, gerr := resolveGroup(inst, args[1])
 		if gerr != nil {
 			return nil, gerr
 		}
-		return groupSubstring(s, locs, g)
+		return groupSubstring(md, g)
 	}
 	out := make([]objects.Object, len(args)-1)
 	for i, a := range args[1:] {
@@ -130,7 +155,7 @@ func matchGroup(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 		if gerr != nil {
 			return nil, gerr
 		}
-		sub, serr := groupSubstring(s, locs, g)
+		sub, serr := groupSubstring(md, g)
 		if serr != nil {
 			return nil, serr
 		}
@@ -145,7 +170,11 @@ func matchGroup(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 //
 // CPython: Modules/_sre/sre.c:3005 _sre_SRE_Match_groups_impl
 func matchGroups(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
-	_, locs, s, err := matchInst(args, "groups")
+	inst, _, _, err := matchInst(args, "groups")
+	if err != nil {
+		return nil, err
+	}
+	md, err := getMatchData(inst)
 	if err != nil {
 		return nil, err
 	}
@@ -158,17 +187,17 @@ func matchGroups(args []objects.Object, kw map[string]objects.Object) (objects.O
 	if len(args) >= 2 {
 		def = args[1]
 	}
-	pairs := len(locs) / 2
+	pairs := len(md.locs) / 2
 	if pairs < 1 {
 		return objects.NewTuple(nil), nil
 	}
 	out := make([]objects.Object, pairs-1)
 	for g := 1; g < pairs; g++ {
-		lo, hi := locs[2*g], locs[2*g+1]
-		if lo < 0 {
+		lo, hi := md.locs[2*g], md.locs[2*g+1]
+		if lo < 0 || hi < 0 {
 			out[g-1] = def
 		} else {
-			out[g-1] = objects.NewStr(s[lo:hi])
+			out[g-1] = matchSlice(md, lo, hi)
 		}
 	}
 	return objects.NewTuple(out), nil
@@ -179,7 +208,11 @@ func matchGroups(args []objects.Object, kw map[string]objects.Object) (objects.O
 //
 // CPython: Modules/_sre/sre.c:3023 _sre_SRE_Match_groupdict_impl
 func matchGroupdict(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
-	inst, locs, s, err := matchInst(args, "groupdict")
+	inst, _, _, err := matchInst(args, "groupdict")
+	if err != nil {
+		return nil, err
+	}
+	md, err := getMatchData(inst)
 	if err != nil {
 		return nil, err
 	}
@@ -220,15 +253,15 @@ func matchGroupdict(args []objects.Object, kw map[string]objects.Object) (object
 		}
 		n, _ := gid.Int64()
 		g := int(n)
-		if g < 0 || 2*g+1 >= len(locs) {
+		if g < 0 || 2*g+1 >= len(md.locs) {
 			continue
 		}
-		lo, hi := locs[2*g], locs[2*g+1]
+		lo, hi := md.locs[2*g], md.locs[2*g+1]
 		var val objects.Object
 		if lo < 0 || hi < 0 {
 			val = def
 		} else {
-			val = objects.NewStr(s[lo:hi])
+			val = matchSlice(md, lo, hi)
 		}
 		_ = out.SetItem(key, val)
 	}

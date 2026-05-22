@@ -55,6 +55,7 @@ func init() {
 	CoroAwaitType.Iter = func(o Object) (Object, error) { return o, nil }
 	CoroAwaitType.IterNext = coroAwaitNext
 	CoroAwaitType.TpTraverse = coroAwaiterTraverse
+	AddIterSlotWrappers(CoroAwaitType)
 }
 
 // coroAwaiterTraverse visits the wrapped coroutine. Mirrors

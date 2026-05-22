@@ -31,6 +31,7 @@ var EnumerateType = NewType("enumerate", []*Type{objectType})
 func init() {
 	EnumerateType.Iter = func(o Object) (Object, error) { return o, nil }
 	EnumerateType.IterNext = enumerateNext
+	AddIterSlotWrappers(EnumerateType)
 }
 
 // NewEnumerate wraps an iterable as enumerate(iterable, start). The
@@ -99,6 +100,7 @@ var ReversedType = NewType("reversed", []*Type{objectType})
 func init() {
 	ReversedType.Iter = func(o Object) (Object, error) { return o, nil }
 	ReversedType.IterNext = reversedNext
+	AddIterSlotWrappers(ReversedType)
 }
 
 // NewReversed wraps a sequence as reversed(seq). The sequence must

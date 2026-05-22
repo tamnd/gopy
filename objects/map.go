@@ -33,6 +33,7 @@ var MapType = NewType("map", []*Type{objectType})
 func init() {
 	MapType.Iter = func(o Object) (Object, error) { return o, nil }
 	MapType.IterNext = mapNext
+	AddIterSlotWrappers(MapType)
 }
 
 // NewMap mirrors map_new: convert each iterable to its iterator up

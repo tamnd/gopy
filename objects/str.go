@@ -294,6 +294,7 @@ func init() {
 		}
 		return NewStr(string(r)), nil
 	}
+	AddIterSlotWrappers(strIterType)
 }
 
 // strIter returns an iterator over the code points of a string.

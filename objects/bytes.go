@@ -96,6 +96,7 @@ var bytesIterType = NewType("bytes_iterator", []*Type{objectType})
 func init() {
 	bytesIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	bytesIterType.IterNext = bytesIterNext
+	AddIterSlotWrappers(bytesIterType)
 }
 
 func bytesIter(o Object) (Object, error) {

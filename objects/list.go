@@ -582,6 +582,7 @@ func init() {
 		it.pos++
 		return v, nil
 	}
+	AddIterSlotWrappers(listIterType)
 }
 
 func listIter(o Object) (Object, error) {

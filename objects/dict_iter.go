@@ -56,6 +56,10 @@ func init() {
 
 	dictItemIterType.Iter = identity
 	dictItemIterType.IterNext = dictIterNextItem
+
+	AddIterSlotWrappers(dictKeyIterType)
+	AddIterSlotWrappers(dictValueIterType)
+	AddIterSlotWrappers(dictItemIterType)
 }
 
 // dictIter is the type-level Iter slot that DictType registers in

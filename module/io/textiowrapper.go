@@ -134,6 +134,7 @@ func init() {
 	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
 	objects.SetTypeDescr(TextIOWrapperType, "__enter__", objects.NewBuiltinFunction("__enter__", textIOWrapperEnterDescr))
 	objects.SetTypeDescr(TextIOWrapperType, "__exit__", objects.NewBuiltinFunction("__exit__", textIOWrapperExitDescr))
+	objects.AddIterSlotWrappers(TextIOWrapperType)
 }
 
 // textIOWrapperEnterDescr is the type-level __enter__ binding for

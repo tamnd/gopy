@@ -67,6 +67,7 @@ func init() {
 	FileType.IterNext = fileIterNext
 	FileType.Getattro = fileGetattr
 	FileType.Setattro = fileSetattr
+	AddIterSlotWrappers(FileType)
 }
 
 // NewFile constructs a File around an already-opened *os.File. The

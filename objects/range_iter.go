@@ -34,6 +34,7 @@ func init() {
 		it.cur = next
 		return out, nil
 	}
+	AddIterSlotWrappers(rangeIterType)
 }
 
 func newRangeIterator(start, stop, step *Int) *rangeIterator {

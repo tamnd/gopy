@@ -337,6 +337,7 @@ func init() {
 		return v, nil
 	}
 	tupleIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	AddIterSlotWrappers(tupleIterType)
 }
 
 func tupleIter(o Object) (Object, error) {

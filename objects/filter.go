@@ -26,6 +26,7 @@ var FilterType = NewType("filter", []*Type{objectType})
 func init() {
 	FilterType.Iter = func(o Object) (Object, error) { return o, nil }
 	FilterType.IterNext = filterNext
+	AddIterSlotWrappers(FilterType)
 }
 
 // NewFilter mirrors filter_new: turn iterable into an iterator and
