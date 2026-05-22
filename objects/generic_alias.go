@@ -415,8 +415,34 @@ func subsParameters(self Object, parameters *Tuple) error {
 // list[int] picks up `list` as its real base class. PEP 560 calls this
 // during type construction.
 //
+// When origin is Generic, mirror typing._GenericAlias.__mro_entries__'s
+// dedup: return () if any other base in the sibling tuple is a Protocol
+// or another GenericAlias. Without this, classes like
+// `class Foo[T](Protocol)` end up with both Generic and Protocol in
+// their bases, producing an inconsistent C3 linearization.
+//
 // CPython: Objects/genericaliasobject.c:742 ga_mro_entries
-func gaMroEntries(ga *GenericAlias) *Tuple {
+// CPython: Lib/typing.py _GenericAlias.__mro_entries__
+func gaMroEntries(ga *GenericAlias, bases *Tuple) *Tuple {
+	if ga.origin == Object(GenericType) && bases != nil {
+		selfIdx := -1
+		for i := 0; i < bases.Len(); i++ {
+			b := bases.Item(i)
+			if b == Object(ga) {
+				selfIdx = i
+			}
+			if t, ok := b.(*Type); ok && t.Name == "Protocol" {
+				return NewTuple(nil)
+			}
+		}
+		if selfIdx >= 0 {
+			for i := selfIdx + 1; i < bases.Len(); i++ {
+				if other, ok := bases.Item(i).(*GenericAlias); ok && other != ga {
+					return NewTuple(nil)
+				}
+			}
+		}
+	}
 	return NewTuple([]Object{ga.origin})
 }
 
@@ -461,7 +487,11 @@ func init() {
 		if !ok {
 			return nil, fmt.Errorf("TypeError: __mro_entries__ requires a GenericAlias, not %s", typeNameOf(args[0]))
 		}
-		return gaMroEntries(ga), nil
+		var bases *Tuple
+		if len(args) >= 2 {
+			bases, _ = args[1].(*Tuple)
+		}
+		return gaMroEntries(ga, bases), nil
 	}))
 	SetTypeDescr(GenericAliasType, "__instancecheck__", NewMethodDescr(GenericAliasType, "__instancecheck__", func(_ []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: isinstance() argument 2 cannot be a parameterized generic")

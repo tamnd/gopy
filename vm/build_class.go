@@ -50,19 +50,12 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		return nil, fmt.Errorf("TypeError: __build_class__: name is not a string")
 	}
 	rawBases := args[2:]
-	bases := make([]*objects.Type, 0, len(rawBases))
-	for _, b := range rawBases {
-		// PEP 585 / typing: class Foo(list[int]) is legal; the
-		// runtime base is the alias' __origin__ while the alias
-		// itself becomes part of __orig_bases__. CPython's
-		// type_new_get_bases unwraps these via _Py_subclass_check_mro.
-		// CPython: Objects/typeobject.c:3568 type_new_get_bases
-		if ga, ok := b.(*objects.GenericAlias); ok {
-			if t, ok := ga.Origin().(*objects.Type); ok {
-				bases = append(bases, t)
-				continue
-			}
-		}
+	resolved, err := resolveBases(rawBases)
+	if err != nil {
+		return nil, err
+	}
+	bases := make([]*objects.Type, 0, len(resolved))
+	for _, b := range resolved {
 		t, ok := b.(*objects.Type)
 		if !ok {
 			return nil, fmt.Errorf("TypeError: __build_class__: base is not a type, got %s", b.Type().Name)
@@ -195,6 +188,44 @@ func calculateMetaclass(winner *objects.Type, bases []*objects.Type) (*objects.T
 		return nil, fmt.Errorf("TypeError: metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases")
 	}
 	return winner, nil
+}
+
+// resolveBases ports CPython's _PyObject_UpdateBases. For each base that
+// is not a type, look up __mro_entries__ and splice the returned tuple
+// into the base list in place of the original entry. The original tuple
+// (containing the unresolved bases) is passed as the argument so that
+// __mro_entries__ implementations can inspect their siblings (e.g.
+// typing._GenericAlias.__mro_entries__ returns () when Protocol is in
+// the same bases tuple).
+//
+// CPython: Objects/typeobject.c:3690 _PyObject_UpdateBases
+func resolveBases(rawBases []objects.Object) ([]objects.Object, error) {
+	origTuple := objects.NewTuple(append([]objects.Object(nil), rawBases...))
+	out := make([]objects.Object, 0, len(rawBases))
+	mroName := objects.NewStr("__mro_entries__")
+	for _, b := range rawBases {
+		if _, ok := b.(*objects.Type); ok {
+			out = append(out, b)
+			continue
+		}
+		meth, _ := objects.GetAttr(b, mroName)
+		if meth == nil {
+			out = append(out, b)
+			continue
+		}
+		res, err := objects.Call(meth, objects.NewTuple([]objects.Object{origTuple}), nil)
+		if err != nil {
+			return nil, err
+		}
+		entries, ok := res.(*objects.Tuple)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __mro_entries__ must return a tuple")
+		}
+		for i := 0; i < entries.Len(); i++ {
+			out = append(out, entries.Item(i))
+		}
+	}
+	return out, nil
 }
 
 func kwargsToDict(kwargs map[string]objects.Object) *objects.Dict {

@@ -31,6 +31,12 @@ func init() {
 	bindClassGetitem(SetType)
 	bindClassGetitem(FrozensetType)
 	bindClassGetitem(typeType)
+	// typing.Generic[T] subscription. Same shape as the others: a
+	// classmethod that builds a GenericAlias whose origin is the
+	// Generic singleton.
+	//
+	// CPython: Objects/typevarobject.c:2459 generic_class_getitem
+	bindClassGetitem(GenericType)
 
 	// `int | str` reaches the binary-op machinery, which walks each
 	// operand's NumberMethods.Or. Wiring it on typeType lets every

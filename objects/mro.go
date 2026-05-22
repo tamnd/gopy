@@ -1,6 +1,9 @@
 package objects
 
-import "slices"
+import (
+	"fmt"
+	"slices"
+)
 
 // c3Linearize computes the C3 linearization of t. The algorithm is
 // the one Python uses for new-style classes, ported from
@@ -50,7 +53,11 @@ func c3Linearize(t *Type) []*Type {
 			}
 		}
 		if head == nil {
-			panic("objects: cannot linearize type hierarchy (inconsistent MRO)")
+			names := []string{}
+			for _, b := range t.Bases {
+				names = append(names, b.Name)
+			}
+			panic(fmt.Sprintf("objects: cannot linearize MRO for %s bases=%v", t.Name, names))
 		}
 		out = append(out, head)
 		for i := range lists {

@@ -19,7 +19,7 @@ func init() {
 	register("__name__", typeGetName, typeSetName)
 	register("__qualname__", typeGetQualname, typeSetQualname)
 	register("__module__", typeGetModule, typeSetModule)
-	register("__bases__", typeGetBases, nil)
+	register("__bases__", typeGetBases, typeSetBases)
 	register("__mro__", typeGetMRO, nil)
 	register("__doc__", typeGetDoc, typeSetDoc)
 }
@@ -167,6 +167,48 @@ func typeGetBases(o Object) (Object, error) {
 		items[i] = b
 	}
 	return NewTuple(items), nil
+}
+
+// typeSetBases reassigns t.Bases and recomputes the MRO. Only allowed
+// on heap (user) types. typing.NamedTuple does this so the resulting
+// class can claim the user-supplied bases tuple (which may include
+// Generic) after _make_nmtuple has already produced a plain tuple
+// subclass.
+//
+// CPython: Objects/typeobject.c:1109 type_set_bases
+func typeSetBases(o Object, v Object) error {
+	t, ok := o.(*Type)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__bases__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if !t.IsUser {
+		return fmt.Errorf("TypeError: can't set %s.__bases__", t.Name)
+	}
+	if v == nil {
+		return fmt.Errorf("TypeError: can't delete %s.__bases__", t.Name)
+	}
+	tup, ok := v.(*Tuple)
+	if !ok {
+		return fmt.Errorf("TypeError: can only assign tuple to %s.__bases__, not '%s'", t.Name, typeNameOf(v))
+	}
+	if tup.Len() == 0 {
+		return fmt.Errorf("TypeError: can only assign non-empty tuple to %s.__bases__", t.Name)
+	}
+	newBases := make([]*Type, 0, tup.Len())
+	for i := 0; i < tup.Len(); i++ {
+		b, ok := tup.Item(i).(*Type)
+		if !ok {
+			return fmt.Errorf("TypeError: %s.__bases__ must be tuple of classes, not '%s'", t.Name, typeNameOf(tup.Item(i)))
+		}
+		if b == t {
+			return fmt.Errorf("TypeError: a __bases__ item causes an inheritance cycle")
+		}
+		newBases = append(newBases, b)
+	}
+	t.Bases = newBases
+	t.MRO = c3Linearize(t)
+	t.InvalidateVersionTag()
+	return nil
 }
 
 // typeGetMRO returns a tuple of t.MRO. Mirrors type_mro.
