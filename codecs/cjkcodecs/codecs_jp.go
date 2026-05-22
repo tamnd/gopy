@@ -41,31 +41,6 @@ func jisx0201KEncodeChar(c uint32) (uint16, bool) {
 	return 0, false
 }
 
-// jisx0201RDecode emits the Roman half. CPython's R_DECODE has the
-// extra Yen / overline pairing that the strict variant skips.
-//
-// CPython: alg_jisx0201.h JISX0201_R_DECODE
-func jisx0201RDecode(c byte, w *unicodeWriter) bool {
-	switch {
-	case c < 0x5c:
-		w.writeRune(rune(c))
-		return true
-	case c == 0x5c:
-		w.writeRune(0x00a5)
-		return true
-	case c < 0x7e:
-		w.writeRune(rune(c))
-		return true
-	case c == 0x7e:
-		w.writeRune(0x203e)
-		return true
-	case c == 0x7f:
-		w.writeRune(0x7f)
-		return true
-	}
-	return false
-}
-
 func jisx0201KDecode(c byte, w *unicodeWriter) bool {
 	if c >= 0xa1 && c <= 0xdf {
 		w.writeRune(rune(0xfec0 + uint32(c)))
@@ -195,6 +170,8 @@ func encodeCP932(_ *codecState, input []rune, inpos int, out *encodeBuffer, _ in
 }
 
 // CPython: _codecs_jp.c:84 DECODER(cp932)
+//
+//nolint:gocognit,gocyclo // mirrors CPython DECODER(cp932) branch layout 1:1.
 func decodeCP932(_ *codecState, in []byte, w *unicodeWriter) int {
 	c := in[0]
 	switch {
@@ -243,7 +220,7 @@ func decodeCP932(_ *codecState, in []byte, w *unicodeWriter) int {
 		}
 		c1 = 2*c1 + addRow + 0x21
 		if c2 < 0x5e {
-			c2 = c2 + 0x21
+			c2 += 0x21
 		} else {
 			c2 = c2 - 0x5e + 0x21
 		}
@@ -383,16 +360,15 @@ func encodeShiftJIS(_ *codecState, input []rune, inpos int, out *encodeBuffer, _
 	}
 	if !hasCode {
 		k, ok := tryMapEnc(&jisxcommon_encmap[c>>8], byte(c&0xff))
-		if ok {
+		switch {
+		case ok:
 			if k&0x8000 != 0 { // JIS X 0212
 				return 1
 			}
 			code = k
-			hasCode = true
-		} else if c == 0xff3c {
+		case c == 0xff3c:
 			code = 0x2140
-			hasCode = true
-		} else {
+		default:
 			return 1
 		}
 	}
@@ -470,18 +446,9 @@ func decodeShiftJIS(_ *codecState, in []byte, w *unicodeWriter) int {
 	return 1
 }
 
-// shiftJISDecodeRoman handles the Roman half (0x00..0x7f) including
-// the strict-build pairing for 0x5c / 0x7e. shift_jis stays in
-// non-strict mode, so bare 0x5c / 0x7e pass through unchanged.
-func shiftJISDecodeRoman(c byte, w *unicodeWriter) bool {
-	if c < 0x80 {
-		w.writeRune(rune(c))
-		return true
-	}
-	return false
-}
-
 // CPython: _codecs_jp.c:151 ENCODER(euc_jis_2004)
+//
+//nolint:gocognit,gocritic,gocyclo // mirrors CPython ENCODER(euc_jis_2004) branch layout 1:1.
 func encodeEUCJIS2004(st *codecState, input []rune, inpos int, out *encodeBuffer, flags int) int {
 	c := uint32(input[inpos])
 	if c < 0x80 {
@@ -577,6 +544,8 @@ func encodeEUCJIS2004(st *codecState, input []rune, inpos int, out *encodeBuffer
 }
 
 // CPython: _codecs_jp.c:244 DECODER(euc_jis_2004)
+//
+//nolint:gocyclo // mirrors CPython DECODER(euc_jis_2004) branch layout 1:1.
 func decodeEUCJIS2004(st *codecState, in []byte, w *unicodeWriter) int {
 	c := in[0]
 	if c < 0x80 {
@@ -661,6 +630,8 @@ func decodeEUCJIS2004(st *codecState, in []byte, w *unicodeWriter) int {
 }
 
 // CPython: _codecs_jp.c:567 ENCODER(shift_jis_2004)
+//
+//nolint:gocognit,gocyclo // mirrors CPython ENCODER(shift_jis_2004) branch layout 1:1.
 func encodeShiftJIS2004(st *codecState, input []rune, inpos int, out *encodeBuffer, flags int) int {
 	c := uint32(input[inpos])
 	var code uint16
@@ -782,6 +753,8 @@ func encodeShiftJIS2004(st *codecState, input []rune, inpos int, out *encodeBuff
 }
 
 // CPython: _codecs_jp.c:672 DECODER(shift_jis_2004)
+//
+//nolint:gocognit,gocyclo // mirrors CPython DECODER(shift_jis_2004) branch layout 1:1.
 func decodeShiftJIS2004(st *codecState, in []byte, w *unicodeWriter) int {
 	c := in[0]
 	if c < 0x80 {

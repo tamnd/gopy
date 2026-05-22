@@ -299,8 +299,9 @@ func encodeJohab(_ *codecState, input []rune, inpos int, out *encodeBuffer, _ in
 		}
 		c1 := byte(k >> 8)
 		c2 := byte(k & 0xff)
-		if !((c1 >= 0x21 && c1 <= 0x2c) || (c1 >= 0x4a && c1 <= 0x7d)) ||
-			!(c2 >= 0x21 && c2 <= 0x7e) {
+		c1InRange := (c1 >= 0x21 && c1 <= 0x2c) || (c1 >= 0x4a && c1 <= 0x7d)
+		c2InRange := c2 >= 0x21 && c2 <= 0x7e
+		if !c1InRange || !c2InRange {
 			return 1
 		}
 		var t1 uint16
@@ -328,6 +329,8 @@ func encodeJohab(_ *codecState, input []rune, inpos int, out *encodeBuffer, _ in
 }
 
 // CPython: _codecs_kr.c:361 DECODER(johab)
+//
+//nolint:gocognit,gocyclo,staticcheck // mirrors CPython DECODER(johab) branch layout 1:1.
 func decodeJohab(_ *codecState, in []byte, w *unicodeWriter) int {
 	c := in[0]
 	if c < 0x80 {
@@ -410,7 +413,7 @@ func decodeJohab(_ *codecState, in []byte, w *unicodeWriter) int {
 		t1 = t1 + 1 + 0x21
 	}
 	if t2 < 0x5e {
-		t2 = t2 + 0x21
+		t2 += 0x21
 	} else {
 		t2 = t2 - 0x5e + 0x21
 	}

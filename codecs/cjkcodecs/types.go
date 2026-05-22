@@ -11,6 +11,8 @@ package cjkcodecs
 
 // MBERR_* sentinels returned by codec encode/decode callbacks.
 // Mirrors Modules/cjkcodecs/multibytecodec.h:122.
+//
+//nolint:revive // ALL_CAPS names mirror Modules/cjkcodecs/multibytecodec.h.
 const (
 	MBERR_TOOSMALL  = -1
 	MBERR_TOOFEW    = -2
@@ -127,24 +129,24 @@ func tryMapEnc(m *unimIndex, val uint8) (uint16, bool) {
 // CPython: Modules/cjkcodecs/cjkcodecs.h:407 find_pairencmap
 func findPairEnc(body, modifier uint16, table []pairEncodeMap) uint16 {
 	value := uint32(body)<<16 | uint32(modifier)
-	min := 0
-	max := len(table)
-	if max == 0 {
+	lo := 0
+	hi := len(table)
+	if hi == 0 {
 		return DBCINV
 	}
-	pos := max >> 1
-	for min != max {
+	pos := hi >> 1
+	for lo != hi {
 		switch {
 		case value < table[pos].UniSeq:
-			if max != pos {
-				max = pos
-				pos = (min + max) >> 1
+			if hi != pos {
+				hi = pos
+				pos = (lo + hi) >> 1
 				continue
 			}
 		case value > table[pos].UniSeq:
-			if min != pos {
-				min = pos
-				pos = (min + max) >> 1
+			if lo != pos {
+				lo = pos
+				pos = (lo + hi) >> 1
 				continue
 			}
 		}

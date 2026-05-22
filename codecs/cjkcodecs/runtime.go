@@ -44,7 +44,6 @@ type encodeFunc func(state *codecState, input []rune, inpos int, out *encodeBuff
 //
 // CPython: Modules/cjkcodecs/multibytecodec.h:28 MultibyteCodec_State
 type codecState struct {
-	bytes  [8]byte
 	config int
 }
 

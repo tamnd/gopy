@@ -108,10 +108,7 @@ package cjkcodecs
 		fmt.Fprintf(w, "const JISX0213_ENCPAIRS = %s\n\n", c)
 	}
 
-	defs, err := parseDefs(src)
-	if err != nil {
-		return err
-	}
+	defs := parseDefs(src)
 
 	// Emit flat data arrays first so dispatch arrays can reference them.
 	for _, d := range defs {
@@ -156,10 +153,10 @@ const (
 
 type definition struct {
 	kind     defKind
-	name     string  // identifier as it appears in C (without leading __ for flats)
-	elemType string  // "ucs2_t" | "DBCHAR" | "Py_UCS4" | "" for dispatch arrays
-	flatLen  int     // declared array length
-	body     string  // raw body between the outer { }
+	name     string // identifier as it appears in C (without leading __ for flats)
+	elemType string // "ucs2_t" | "DBCHAR" | "Py_UCS4" | "" for dispatch arrays
+	flatLen  int    // declared array length
+	body     string // raw body between the outer { }
 }
 
 var (
@@ -171,7 +168,7 @@ var (
 	reConstMacro = regexp.MustCompile(`#define\s+(\w+)\s+(\d+)`)
 )
 
-func parseDefs(src string) ([]definition, error) {
+func parseDefs(src string) []definition {
 	var defs []definition
 	for _, m := range reFlat.FindAllStringSubmatchIndex(src, -1) {
 		defs = append(defs, definition{
@@ -210,7 +207,7 @@ func parseDefs(src string) ([]definition, error) {
 			body: src[m[4]:m[5]],
 		})
 	}
-	return defs, nil
+	return defs
 }
 
 func emitFlat(w *bytes.Buffer, d definition) error {
@@ -327,10 +324,10 @@ func emitPairEnc(w *bytes.Buffer, d definition) error {
 }
 
 type dispatchRow struct {
-	empty          bool
-	flat           string
-	offset         int
-	bottom, top    int
+	empty       bool
+	flat        string
+	offset      int
+	bottom, top int
 }
 
 var reWS = regexp.MustCompile(`\s+`)
