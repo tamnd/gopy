@@ -129,6 +129,22 @@ func registerStringIODescrs() {
 			}
 			return objects.NewBool(false), nil
 		}, nil))
+	// encoding and errors come from _TextIOBase in CPython. gopy's
+	// StringIO has no TextIOBase parent so they are served from
+	// stringIOGetattr's switch alongside closed / newlines /
+	// line_buffering. The matching SetTypeDescr entries also exist so
+	// dir() picks them up.
+	//
+	// CPython: Modules/_io/textio.c:138 _io__TextIOBase_encoding_get_impl
+	// CPython: Modules/_io/textio.c:172 _io__TextIOBase_errors_get_impl
+	objects.SetTypeDescr(StringIOType, "encoding", objects.NewGetSetDescr("encoding",
+		func(_ objects.Object) (objects.Object, error) {
+			return objects.None(), nil
+		}, nil))
+	objects.SetTypeDescr(StringIOType, "errors", objects.NewGetSetDescr("errors",
+		func(_ objects.Object) (objects.Object, error) {
+			return objects.None(), nil
+		}, nil))
 }
 
 // stringIOSelf pops args[0] as the StringIO receiver. Mirrors the
@@ -837,6 +853,16 @@ func stringIOGetattr(o objects.Object, name objects.Object) (objects.Object, err
 			return nil, err
 		}
 		return objects.NewBool(false), nil
+	case "encoding", "errors":
+		// _TextIOBase exposes encoding and errors as getsets that
+		// default to None. _io.StringIO inherits these in CPython;
+		// gopy's StringIO has no TextIOBase parent so we serve None
+		// directly. doctest._SpoofOut reads save_stdout.encoding
+		// inside DocTestRunner.run.
+		//
+		// CPython: Modules/_io/textio.c:138 _io__TextIOBase_encoding_get_impl
+		// CPython: Modules/_io/textio.c:172 _io__TextIOBase_errors_get_impl
+		return objects.None(), nil
 	}
 	if fn := stringIOMethod(s, n.Value()); fn != nil {
 		return fn, nil
