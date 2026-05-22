@@ -118,54 +118,83 @@ Notable gaps the audit surfaces:
 
 ## Test panel (target)
 
-All 27 top-level tests live in `/Users/apple/cpython-314/Lib/test/`.
-They will be vendored unchanged into `test/cpython/` with no edits
-beyond what `make vendor-tests` does today.
+All 27 top-level tests live in `/Users/apple/cpython-314/Lib/test/` and
+are vendored unchanged into `test/cpython/` by the Phase 1 commit.
+Baseline column captures the post-spec-1718 starting point on commit
+`60ad2e42` (this branch, no porting work yet).
 
-| Test | Upstream LOC | Spec 1700 mark | Owner subsystem |
-|------|-------------:|----------------|-----------------|
-| test_grammar              |   ? | done   | Parser/parser.c (every rule) |
-| test_syntax               |   ? | ready  | Parser/pegen_errors.c |
-| test_eof                  |   ? | ready  | Parser/pegen.c continuation handling |
-| test_fstring              |   ? | ready  | Parser/string_parser.c f-string arm |
-| test_tstring              |   ? | ready  | Parser/string_parser.c triple-quoted |
-| test_named_expressions    |   ? | ready  | Parser walrus + compile codegen |
-| test_unparse              |   ? | ready  | Lib/_ast_unparse.py |
-| test_asdl_parser          |   ? | ready  | Parser/asdl.py + Parser/asdl_c.py |
-| test_pep646_syntax        |   ? | ready  | Parser star-expansion |
-| test_type_params          |   ? | ready  | PEP 695 type parameter grammar |
-| test_type_aliases         |   ? | ready  | `type X = Y` statement |
-| test_type_annotations     |   ? | ready  | Annotation lowering |
-| test_type_comments        |   ? | ready  | Parser `type_comments=True` mode |
-| test_annotationlib        |   ? | ready  | Lib/annotationlib.py (lazy eval) |
-| test_string_literals      |   ? | ready  | Parser/string_parser.c escape paths |
-| test_int_literal          |   ? | ready  | Number lexer + `int.__new__` |
-| test_unicode_identifiers  |   ? | ready  | NFKC identifier normalization |
-| test_patma                |   ? | ready  | PEP 634 pattern matching |
-| test_decorators           |   ? | ready  | Decorator AST + codegen |
-| test_global               |   ? | ready  | symtable global/nonlocal pass |
-| test_scope                |   ? | ready  | symtable scoping rules |
-| test_keywordonlyarg       |   ? | ready  | Parser kw-only args |
-| test_positional_only_arg  |   ? | ready  | Parser pos-only args |
-| test_unpack               |   ? | ready  | Tuple unpack codegen |
-| test_unpack_ex            |   ? | ready  | Starred unpack |
-| test_metaclass            |   ? | ready  | `__build_class__` + type creation |
-| test_subclassinit         |   ? | ready  | `__init_subclass__` hook |
+| Test | LOC | Mark | Baseline | Blocker |
+|------|----:|------|----------|---------|
+| test_int_literal          |  143 | ready | **6/6 OK** | none — already green |
+| test_grammar              | 2063 | done  | parse error: `compile: cannot delete target *ast.Tuple` | codegen drift on `del (a, b)` lowering |
+| test_decorators           |  341 | ready | Ran 16, FAILED (failures=2) | top-level run works; 2 row failures to diagnose |
+| test_eof                  |  171 | ready | Ran 6, FAILED (failures=6) | EOF/continuation handling in lexer or parser |
+| test_keywordonlyarg       |  178 | ready | Ran 11, FAILED (failures=1, errors=2) | `SyntaxError: invalid syntax (<test>, line 1)` inside `assertRaisesRegex` body |
+| test_named_expressions    |  767 | ready | Ran 74, FAILED (failures=8, errors=77) | `NameError: name 'range' is not defined` inside class bodies + walrus codegen rows |
+| test_positional_only_arg  |  452 | ready | Ran 28, FAILED (failures=16, errors=7) | `f() got multiple values for argument` + parse errors on pos-only test sources |
+| test_string_literals      |  356 | ready | Ran 20, FAILED (failures=2, errors=10) | `AttributeError: module 'unittest' has no attribute '__warningregistry__'` (warning-state plumbing) |
+| test_type_comments        |  447 | ready | Ran 18, FAILED (errors=18) | `compile() got an unexpected keyword argument "_feature_version"` |
+| test_unicode_identifiers  |   32 | ready | Ran 3, FAILED (failures=2, errors=1) | `type T has no attribute 'μ'` — NFKC fold drift on class attribute lookup |
+| test_annotationlib        | 2375 | ready | parse error: `compile: ClassDef with PEP 695 type params not yet supported` | PEP 695 generic-class lowering |
+| test_asdl_parser          |  131 | ready | Traceback (likely module gap) | needs deeper trace |
+| test_fstring              | 1871 | ready | parser farthest-token mis-points to `import ast` line 10 | parser drops mid-file but reports wrong location; root cause around f-string assertAllRaise corpus near line 880-900 |
+| test_global               |  214 | ready | parse error: `compile: mapping pattern keys/patterns length mismatch` | match-statement codegen for `{k: v}` patterns |
+| test_metaclass            |  302 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
+| test_patma                | 3559 | ready | parse error reporting `import array` line 1 | farthest-token misreport; real failure is array module missing OR a patma rule |
+| test_pep646_syntax        |  329 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
+| test_scope                |  839 | ready | parse error: `compile: free var "method_and_var" in nested scope "test" has scope LOCAL in outer "Test"` | symtable nested-scope inheritance |
+| test_subclassinit         |  281 | ready | gopy main.go runtime crash | infinite recursion or panic to fix |
+| test_syntax               | 3323 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
+| test_tstring              |  291 | ready | `ModuleNotFoundError: test.test_string._support` | needs `test/test_string/_support.py` helper or t-string lib |
+| test_type_aliases         |  415 | ready | parse error: PEP 695 type params | same as test_annotationlib |
+| test_type_annotations     |  891 | ready | `ModuleNotFoundError: test.test_inspect` | inspect-test helper missing |
+| test_type_params          | 1469 | ready | parse error: PEP 695 type params | same blocker as test_annotationlib |
+| test_unpack               |  222 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
+| test_unpack_ex            |  411 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
+| test_unparse              | 1066 | ready | `ModuleNotFoundError: pathlib` | pathlib module not implemented |
 
-Plus the three packages:
+Three packages:
 
-| Package | Files | Mark | Owner subsystem |
-|---------|-------|------|-----------------|
-| `test_ast/`           | `__init__.py`, `test_ast.py`, `snippets.py`, `utils.py`, `data/` | ready | Python/ast.c validator + Lib/ast.py |
-| `test_future_stmt/`   | 9 files (see C section below) | ready | `__future__` flag plumbing in parser + compile |
-| `test_peg_generator/` | 6 files (see C section below) | deferred | `Tools/peg_generator/`; deferred until generator port |
+| Package | Files | Mark | Baseline | Blocker |
+|---------|-------|------|----------|---------|
+| `test_ast/`           | `__init__.py` (empty), `test_ast.py` (4267 LOC), `snippets.py`, `utils.py`, `data/ast_repr.txt` | ready | `import _ast_unparse` SyntaxError on stdlib load | `_ast_unparse` not vendored from `Lib/_ast_unparse.py`; once vendored the parser drops on a construct inside it |
+| `test_future_stmt/`   | 9 files | ready | **4/4 OK + 1 partial** | `test_future_flags`, `test_future_multiple_features`, `test_future_multiple_imports`, `test_future_single_import` all green; `test_future` shows `EEE.EEEEEEEEEEEFFEEEEFEEEEEEEEEE` pattern (mostly errors) |
+| `test_peg_generator/` | 6 files | deferred | gopy errors on package directory (`is a directory`) | parent block: PEG generator not shipped, follow-up spec |
 
-`test_grammar` is the only row already marked `done` (v0.10.2 release
-notes pinned it). Re-run on top of the lexer panel close and confirm
-it stays green; if not, treat it as red and re-port the failing rules.
+### Blocker buckets (initial triage)
 
-LOC column will be filled in alongside the vendoring commit so we have
-a sizing signal before opening each closer PR.
+1. **Missing stdlib modules** (high impact, low difficulty):
+   - `doctest` blocks `test_metaclass`, `test_pep646_syntax`, `test_syntax`, `test_unpack`, `test_unpack_ex` (5 tests)
+   - `pathlib` blocks `test_unparse` (1 test)
+   - `test.test_string._support` blocks `test_tstring` (1 test)
+   - `test.test_inspect` blocks `test_type_annotations` (1 test)
+   - `_ast_unparse` (the Python `Lib/_ast_unparse.py`) blocks `test_ast/test_ast.py` (the largest single test in the panel)
+
+2. **PEP 695 type parameter grammar** (3 tests):
+   - `compile: ClassDef with PEP 695 type params not yet supported` blocks `test_annotationlib`, `test_type_aliases`, `test_type_params`. Phase 6 closer.
+
+3. **Compile / codegen drift** (4 tests):
+   - `cannot delete target *ast.Tuple` (test_grammar)
+   - `mapping pattern keys/patterns length mismatch` (test_global)
+   - `free var ... has scope LOCAL in outer ...` (test_scope)
+   - `compile() got an unexpected keyword argument "_feature_version"` (test_type_comments)
+
+4. **Parser farthest-token misreport** (2 tests):
+   - `test_fstring`, `test_patma` both report `import X` line 10 / 1 as the error location while CPython parses the file cleanly. Real failure is later in the file; the parser fallback in `parser/parser.go runParse` synthesizes a SyntaxError at the farthest token, which here is wrong. Needs `parser/pegen` audit against `Parser/pegen.c:1136 _PyPegen_run_parser` farthest_pos handling.
+
+5. **Real row failures inside passing runs** (7 tests):
+   `test_decorators`, `test_eof`, `test_keywordonlyarg`, `test_named_expressions`, `test_positional_only_arg`, `test_string_literals`, `test_type_comments`, `test_unicode_identifiers`. Each is a per-row gap to diagnose; some share root causes (e.g. `_feature_version` and `compile()` kwargs).
+
+6. **Runtime crash** (1 test):
+   `test_subclassinit` panics in `cmd/gopy/main.go`. Stack trace pointed to `main.mainWithProfile`; needs reproducer + fix.
+
+7. **Already green** (1 test): `test_int_literal` (6/6 OK).
+
+8. **Deferred** (1 package): `test_peg_generator/` — PEG generator port is its own follow-up spec, not blocking the panel.
+
+LOC column drives sizing: the panel ships 17,580 lines of test code
+plus 4,418 in `test_ast/`, 677 in `test_future_stmt/`, 2,034 in
+`test_peg_generator/`. Working set ~24,700 lines for the whole panel.
 
 ## Phases
 
@@ -280,7 +309,7 @@ shows `done` for every non-deferred row.
 ## Checklist
 
 - [x] P0: write spec 1719 (this file) and mark lexer panel done in spec 1700
-- [ ] P1: vendor 27 top-level tests + 3 packages, record baseline counts
+- [x] P1: vendor 27 top-level tests + 3 packages, record baseline counts (`60ad2e42` + this commit)
 - [ ] P2: ASDL grammar + node-type parity (diff Python.asdl, regen nodes_gen.go)
 - [ ] P3: `Python/ast.c` validator port + `Lib/ast.py` byte-identical sync
 - [ ] P4: `Lib/_ast_unparse.py` port; `test_unparse` green
