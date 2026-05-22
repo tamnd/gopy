@@ -29,6 +29,7 @@ import (
 	"io"
 	"unicode/utf8"
 
+	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 	parsererrors "github.com/tamnd/gopy/parser/errors"
@@ -189,12 +190,20 @@ func drainReadline(readline objects.Object, encoding string) ([]byte, []string, 
 			if encoding == "" {
 				return nil, nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
 			}
-			line = append([]byte(nil), v.Bytes()...)
+			decoded, _, derr := codecs.Decode(v.Bytes(), encoding, "replace")
+			if derr != nil {
+				return nil, nil, nil, false, derr
+			}
+			line = []byte(decoded)
 		case *objects.ByteArray:
 			if encoding == "" {
 				return nil, nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
 			}
-			line = append([]byte(nil), v.Bytes()...)
+			decoded, _, derr := codecs.Decode(v.Bytes(), encoding, "replace")
+			if derr != nil {
+				return nil, nil, nil, false, derr
+			}
+			line = []byte(decoded)
 		case *objects.Unicode:
 			if encoding != "" {
 				return nil, nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-bytes object")

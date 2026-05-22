@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/tamnd/gopy/codecs"
 )
 
 // IncrementalDecoder is the stateful decoder protocol every codec
@@ -85,6 +87,9 @@ func getIncrementalDecoder(encoding, _ string) (IncrementalDecoder, error) {
 	case "mac-roman":
 		return &charmapDecoder{table: &macRomanTable.decode, name: "mac-roman"}, nil
 	}
+	if ci, err := codecs.Lookup(encoding); err == nil {
+		return &registryDecoder{ci: ci}, nil
+	}
 	return nil, fmt.Errorf("LookupError: unknown encoding: %s", encoding)
 }
 
@@ -122,6 +127,12 @@ func getIncrementalEncoder(encoding, _ string) (IncrementalEncoder, error) {
 		return &statelessEncoder{enc: func(s string) ([]byte, error) { return charmapEncode(s, cp437Table.encode, "cp437") }}, nil
 	case "mac-roman":
 		return &statelessEncoder{enc: func(s string) ([]byte, error) { return charmapEncode(s, macRomanTable.encode, "mac-roman") }}, nil
+	}
+	if ci, err := codecs.Lookup(encoding); err == nil {
+		return &statelessEncoder{enc: func(s string) ([]byte, error) {
+			b, _, err := ci.Encode(s, "strict")
+			return b, err
+		}}, nil
 	}
 	return nil, fmt.Errorf("LookupError: unknown encoding: %s", encoding)
 }
@@ -444,3 +455,56 @@ func (e *bomEncoder) Encode(input string, _ bool) ([]byte, error) {
 func (e *bomEncoder) GetState() int64        { return e.state }
 func (e *bomEncoder) SetState(s int64) error { e.state = s; return nil }
 func (e *bomEncoder) Reset()                 { e.state = 0 }
+
+// --- registry-backed fallback ---------------------------------------------
+
+// registryDecoder wraps a stateless CodecInfo as an IncrementalDecoder.
+// It accumulates bytes across calls and runs the codec on the full
+// buffer each time, returning only the delta since the previous call.
+// CPython's _PyCodecInfo_GetIncrementalDecoder builds a similar shim
+// when a codec exposes only the one-shot decoder slot.
+//
+// CPython: Python/codecs.c:570 _PyCodecInfo_GetIncrementalDecoder
+type registryDecoder struct {
+	ci  *codecs.CodecInfo
+	buf []byte
+	out string
+}
+
+func (d *registryDecoder) Decode(input []byte, final bool) (string, error) {
+	d.buf = append(d.buf, input...)
+	s, _, err := d.ci.Decode(d.buf, "strict")
+	if err != nil {
+		// Allow buffering when not final: a trailing incomplete sequence
+		// may complete on the next chunk.
+		if !final {
+			return "", nil
+		}
+		return "", err
+	}
+	delta := s[len(d.out):]
+	d.out = s
+	return delta, nil
+}
+
+func (d *registryDecoder) GetState() ([]byte, int64) {
+	return append([]byte{}, d.buf...), 0
+}
+
+func (d *registryDecoder) SetState(buffer []byte, _ int64) error {
+	d.buf = append(d.buf[:0], buffer...)
+	d.out = ""
+	if len(buffer) == 0 {
+		return nil
+	}
+	s, _, err := d.ci.Decode(d.buf, "strict")
+	if err == nil {
+		d.out = s
+	}
+	return nil
+}
+
+func (d *registryDecoder) Reset() {
+	d.buf = d.buf[:0]
+	d.out = ""
+}
