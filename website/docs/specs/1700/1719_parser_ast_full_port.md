@@ -1109,3 +1109,81 @@ failures are individual CPython feature gaps (ClassDef with `*bases /
 **kwds`, `__prepare__` classmethod semantics, function metaclasses,
 `super().__prepare__`, descriptor-as-metaclass-call) that fall under
 later sub-closers, not the doctest infrastructure itself.
+
+### P7 closer 13: test_unpack / test_unpack_ex bisection
+
+The unpack panels surfaced four orthogonal subsystem bugs that the
+P6.5 doctest pipeline finally let us see. Each landed as its own
+commit so the regressions stay independent:
+
+1. **Stale `__context__` after a caught-and-returned exception.** A
+   function that caught an exception and `return`ed left the handled
+   exception live in `sys.exception()`; the next `raise` then pulled
+   it in as `__context__`. Root cause: `visitReturn` never emitted
+   the `POP_BLOCK` / `POP_EXCEPT` pair from `fblockHandlerCleanup`
+   before `RETURN_VALUE`. Ported `codegen_unwind_fblock_stack` into
+   `unwindForReturn`, and threaded `preserve_tos` into `unwindFblock`
+   so the return value SWAPs past each fblock's cleanup ops.
+
+   CPython: `Python/codegen.c:622 codegen_unwind_fblock_stack`.
+
+2. **User Exception subclasses inherited `object.__repr__`.** Without
+   `__repr__` / `__str__` method descriptors on `BaseException`,
+   `fixupCallReprStr` resolved `repr()` to `object.__repr__` via MRO
+   and printed the generic `<__main__.BozoError object at 0x...>`.
+   Installed both descriptors in `newExcType` so `repr(BozoError())`
+   stays `BozoError()` across the hierarchy.
+
+   CPython: `Objects/typeobject.c add_operators` slot wrappers for
+   `tp_repr` / `tp_str`.
+
+3. **Tuple `<` / `<=` / `>` / `>=` returned NotImplemented.** Only
+   `EQ` / `NE` were ported; everything else fell through, breaking
+   `sorted()` over lists of tuples and any heapq/bisect use. Ported
+   the lexicographic compare so the first differing slot delegates
+   through `RichCmp`, with a length-tiebreaker when one tuple is a
+   prefix of the other.
+
+   CPython: `Objects/tupleobject.c:703 tuplerichcompare`.
+
+4. **DICT_MERGE / DICT_UPDATE / iterToSlice error shapes.** The
+   panel needed three CPython-shaped messages: `cannot unpack
+   non-iterable X object` (UNPACK_EX), `'X' object is not a mapping`
+   (DICT_UPDATE for `{**1}` / `{**[]}`), and
+   `<module>.<qualname>() got multiple values for keyword argument
+   'X'` (DICT_MERGE duplicate-key reformat). Reworked the DICT_MERGE
+   arm to walk the mapping protocol (`b.keys()` + `b[k]`), detect
+   duplicates via a `kwargsDuplicateErr` sentinel, and route to a
+   new `formatKwargsError` + `objectFunctionStr` pair that mirrors
+   `_PyEval_FormatKwargsError` and `_PyObject_FunctionStr`. The slow
+   path also unblocks the CrazyDict iteration test
+   (`MutableMapping.__iter__` mutating mid-iteration) by exposing
+   the inner `dict.__iter__` size-change guard.
+
+   `iterToSlice` now delegates through `objects.Iter` so the
+   `SeqIter` fallback handles types that only define `__getitem__`.
+   `dictUpdate` likewise gains the mapping slow path so
+   `{**MutableMapping}` participates.
+
+   CPython: `Python/bytecodes.c:2122 DICT_MERGE`,
+   `Python/ceval.c:3410 _PyEval_FormatKwargsError`,
+   `Objects/object.c:973 _PyObject_FunctionStr`,
+   `Objects/dictobject.c:3247 dict_merge`.
+
+5. **Starred expressions raised the dispatch fallback.** `*a = x` /
+   `*a` / `x = *a` produced `compile: expr kind *ast.Starred not yet
+   supported` instead of SyntaxError. Routed `ast.Starred` through a
+   new `visitStarred` that raises the matching CPython message based
+   on context; `assignTo`'s Starred branch now errors instead of
+   silently unwrapping.
+
+   CPython: `Python/codegen.c:5301 codegen_visit_expr` (Starred_kind).
+
+After P7 closer 13: `test_unpack_ex` drops from 13 doctest failures
+to 7, `test_unpack` from 2 to 2. The remaining failures are all the
+same shape: doctest renders `test.test_unpack_ex.X` for classes
+defined in the test module, but gopy runs the file with
+`__name__ == '__main__'`, so we render `__main__.X` (which doctest
+then strips to bare `X`). A panel-runner closer that imports each
+test file as part of the `test` package will pick up the residual
+nine failures; tracked separately.
