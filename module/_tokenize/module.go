@@ -68,6 +68,17 @@ type tokenizerIter struct {
 	// indexing matches CPython's 1-based line numbers.
 	linesByOneBased []string
 
+	// lineEndCRLF[row]==true when the corresponding raw readline
+	// returned a '\r\n' (rather than '\n' or no terminator). CPython's
+	// TokenizerIter constructs the tokenizer with preserve_crlf=1, so
+	// tok->start[0] reads back as '\r' for those NEWLINE tokens.
+	// gopy folds CRLF -> LF in TranslateNewlines before the lexer sees
+	// the buffer, so we keep the original ending out-of-band and
+	// consult it when emitting the NEWLINE string.
+	//
+	// CPython: Python/Python-tokenize.c:318 tokenizeriter_next NEWLINE arm
+	lineEndCRLF []bool
+
 	// implicitNewline records that drainReadline appended a synthetic
 	// '\n' because the source didn't end with one. The trailing
 	// NEWLINE token whose end offset lands on that byte must report
@@ -122,7 +133,7 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 		}
 	}
 
-	source, lines, implicit, err := drainReadline(readline, encoding)
+	source, lines, crlf, implicit, err := drainReadline(readline, encoding)
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +149,7 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 		extraTokens:     extraTokens,
 		encoding:        encoding,
 		linesByOneBased: lines,
+		lineEndCRLF:     crlf,
 		implicitNewline: implicit,
 		implicitEndOff:  len(source) - 1,
 	}
@@ -156,40 +168,42 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 // return bytes that the named encoding decodes.
 //
 // CPython: Parser/tokenizer/readline_tokenizer.c:10 tok_readline_string
-func drainReadline(readline objects.Object, encoding string) ([]byte, []string, bool, error) {
+func drainReadline(readline objects.Object, encoding string) ([]byte, []string, []bool, bool, error) {
 	var buf []byte
 	var lines []string
+	var crlf []bool
 	lines = append(lines, "") // 1-based padding
+	crlf = append(crlf, false)
 	for {
 		res, err := objects.Call(readline, objects.NewTuple(nil), nil)
 		if err != nil {
 			if errors.Is(err, objects.ErrStopIteration) {
 				break
 			}
-			return nil, nil, false, err
+			return nil, nil, nil, false, err
 		}
 		var line []byte
 		switch v := res.(type) {
 		case *objects.Bytes:
 			if encoding == "" {
-				return nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
+				return nil, nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
 			}
 			line = append([]byte(nil), v.Bytes()...)
 		case *objects.ByteArray:
 			if encoding == "" {
-				return nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
+				return nil, nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
 			}
 			line = append([]byte(nil), v.Bytes()...)
 		case *objects.Unicode:
 			if encoding != "" {
-				return nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-bytes object")
+				return nil, nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-bytes object")
 			}
 			line = []byte(v.Value())
 		default:
 			if res == objects.None() {
 				break
 			}
-			return nil, nil, false, fmt.Errorf("TypeError: readline returned %s, expected bytes/str", res.Type().Name)
+			return nil, nil, nil, false, fmt.Errorf("TypeError: readline returned %s, expected bytes/str", res.Type().Name)
 		}
 		if len(line) == 0 {
 			break
@@ -198,13 +212,21 @@ func drainReadline(readline objects.Object, encoding string) ([]byte, []string, 
 		// Track the per-line view (without the trailing newline) so we
 		// can emit the `line` field of each token tuple.
 		end := len(line)
+		hadCRLF := false
 		if end > 0 && line[end-1] == '\n' {
 			end--
 			if end > 0 && line[end-1] == '\r' {
 				end--
+				hadCRLF = true
 			}
+		} else if end > 0 && line[end-1] == '\r' {
+			// Bare '\r' line terminator. CPython's preserve_crlf path
+			// keeps the byte but the tokenize wrapper only emits
+			// '\r\n' for the CRLF case (Python/Python-tokenize.c:319).
+			end--
 		}
 		lines = append(lines, string(line[:end]))
+		crlf = append(crlf, hadCRLF)
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -216,7 +238,7 @@ func drainReadline(readline objects.Object, encoding string) ([]byte, []string, 
 	if implicit {
 		buf = append(buf, '\n')
 	}
-	return buf, lines, implicit, nil
+	return buf, lines, crlf, implicit, nil
 }
 
 // tokenizerIterNext is the tp_iternext slot. It produces a 5-tuple
@@ -315,14 +337,32 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 			// CPython: Python/Python-tokenize.c:281 tokenizeriter_next
 			// reports str='' for the implicit '\n' synthesized when
 			// the source didn't end with one; the wrapper preserves
-			// '\n' for every other NEWLINE so callers can distinguish
-			// the two.
+			// '\n' (or '\r\n' when the original line ended that way)
+			// for every other NEWLINE so callers can distinguish the
+			// shapes.
+			//
+			// CPython: Python/Python-tokenize.c:318 tokenizeriter_next
 			if it.implicitNewline && tok.EndOffset == it.implicitEndOff {
 				str = ""
-			} else if str == "" {
+			} else if it.lineHasCRLF(startLine) {
+				str = "\r\n"
+				endCol++
+			} else {
 				str = "\n"
 			}
 			endCol++
+		} else if kind == token.NL {
+			// NL tokens are emitted inside parens or for blank/comment
+			// lines. CPython doesn't rewrite the str for NL, but its
+			// extra_tokens path collapses the implicit-newline NL to ''.
+			//
+			// CPython: Python/Python-tokenize.c:327 tokenizeriter_next NL arm
+			if it.implicitNewline && tok.EndOffset == it.implicitEndOff {
+				str = ""
+			} else if it.lineHasCRLF(startLine) {
+				str = "\r\n"
+				endCol++
+			}
 		}
 	}
 
@@ -348,6 +388,17 @@ func (it *tokenizerIter) lineAt(lineno int) string {
 		return ""
 	}
 	return it.linesByOneBased[lineno]
+}
+
+// lineHasCRLF reports whether the raw readline for 1-based lineno
+// ended with '\r\n'. Used by the NEWLINE / NL branches in
+// tokenizerIterNext to reproduce the str = '\r\n' that CPython picks
+// when tok->start[0] == '\r'.
+func (it *tokenizerIter) lineHasCRLF(lineno int) bool {
+	if lineno <= 0 || lineno >= len(it.lineEndCRLF) {
+		return false
+	}
+	return it.lineEndCRLF[lineno]
 }
 
 // byteToCharCol converts a byte column offset into a character (rune)
