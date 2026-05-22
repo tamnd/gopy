@@ -45,6 +45,16 @@ func writeChain(b *strings.Builder, exc *Exception) {
 		writeChain(b, exc.Context)
 		b.WriteString("\nDuring handling of the above exception, another exception occurred:\n\n")
 	}
+	// SyntaxError renders the file/line/text/caret frame BEFORE the
+	// `Type: msg` line, so format the body specially. The traceback
+	// frames (if any) still print first via traceback.Format.
+	//
+	// CPython: Lib/traceback.py:1264 yield from _format_syntax_error
+	if Match(exc, PyExc_SyntaxError) {
+		b.WriteString(traceback.Format(exc.TB))
+		b.WriteString(formatSyntaxError(exc))
+		return
+	}
 	b.WriteString(traceback.FormatException(exc.TB, exc.TypeName(), excDisplayMessage(exc)))
 }
 

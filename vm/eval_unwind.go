@@ -15,7 +15,6 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/tamnd/gopy/codecs"
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/gil"
 	"github.com/tamnd/gopy/objects"
@@ -89,7 +88,7 @@ func synthesizeException(err error) *pyerrors.Exception {
 	// (PyErr_SetObject builds the typed instance from these fields).
 	var se *parsererrors.SyntaxError
 	if errors.As(err, &se) {
-		return syntaxExceptionFromParserError(se)
+		return pyerrors.SyntaxFromParser(se)
 	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.
@@ -154,84 +153,6 @@ func isSyntaxErrorType(typ *objects.Type) bool {
 		t = t.Bases[0]
 	}
 	return false
-}
-
-// syntaxExceptionFromParserError builds a populated SyntaxError
-// instance from the parser-level structured record. The exception is
-// constructed with the canonical 2-arg signature SyntaxError(msg,
-// (filename, lineno, offset, text, end_lineno, end_offset)) so the
-// member descriptors registered in errors/exc_syntax.go expose the
-// location to Python user code.
-//
-// IndentationError / TabError get the same shape because the
-// SyntaxError_init member layout is shared across the subclass chain.
-//
-// CPython: Parser/pegen_errors.c:317 _PyPegen_raise_error_known_location
-// CPython: Objects/exceptions.c:2713 SyntaxError_init
-func syntaxExceptionFromParserError(se *parsererrors.SyntaxError) *pyerrors.Exception {
-	typ := pyerrors.PyExc_SyntaxError
-	switch se.Kind {
-	case parsererrors.KindIndentation:
-		typ = pyerrors.PyExc_IndentationError
-	case parsererrors.KindTab:
-		typ = pyerrors.PyExc_TabError
-	}
-	filename := objects.None()
-	if se.Filename != "" {
-		filename = objects.NewStr(se.Filename)
-	}
-	text := objects.None()
-	if se.Text != "" {
-		// CPython stores SyntaxError.text as a proper str. When the
-		// offending source line has non-utf-8 bytes the tokenizer
-		// captures them raw; CPython's PySys_FormatStderr and the
-		// constructor paths route the bytes through
-		// PyUnicode_DecodeUTF8 with errors='replace' so each invalid
-		// byte lands as U+FFFD. Mirror that here so Python-level
-		// equality against `src.splitlines()[i].decode(errors='replace')`
-		// matches.
-		//
-		// CPython: Objects/unicodeobject.c:4756 PyUnicode_DecodeUTF8Stateful
-		decoded, _, derr := codecs.Decode([]byte(se.Text), "utf-8", "replace")
-		if derr == nil {
-			text = objects.NewStr(decoded)
-		} else {
-			text = objects.NewStr(se.Text)
-		}
-	}
-	offset := objects.None()
-	if se.Pos.ColOff > 0 {
-		offset = objects.NewInt(int64(se.Pos.ColOff))
-	}
-	endLineno := objects.None()
-	if se.Pos.EndLine > 0 {
-		endLineno = objects.NewInt(int64(se.Pos.EndLine))
-	}
-	endOffset := objects.None()
-	if se.Pos.EndCol > 0 {
-		endOffset = objects.NewInt(int64(se.Pos.EndCol))
-	}
-	lineno := objects.None()
-	if se.Pos.Lineno > 0 {
-		lineno = objects.NewInt(int64(se.Pos.Lineno))
-	}
-	info := objects.NewTuple([]objects.Object{
-		filename, lineno, offset, text, endLineno, endOffset,
-	})
-	args := []objects.Object{objects.NewStr(se.Message), info}
-	out, err := typ.Call(typ, args, nil)
-	if err != nil {
-		return pyerrors.New(typ, objects.NewTuple([]objects.Object{
-			objects.NewStr(se.Message),
-		}))
-	}
-	exc, _ := out.(*pyerrors.Exception)
-	if exc == nil {
-		return pyerrors.New(typ, objects.NewTuple([]objects.Object{
-			objects.NewStr(se.Message),
-		}))
-	}
-	return exc
 }
 
 // handleException tries to find a handler for err in the current

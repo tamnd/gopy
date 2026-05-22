@@ -9,13 +9,15 @@
 package pythonrun
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/tamnd/gopy/compile"
-	"github.com/tamnd/gopy/errors"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
+	parsererrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/specialize"
 	"github.com/tamnd/gopy/state"
 	"github.com/tamnd/gopy/vm"
@@ -107,14 +109,22 @@ func RunSimpleString(ts *state.Thread, command string, globals objects.Object, s
 
 // printRunError mirrors PyErr_Print: render the thread-state
 // exception's traceback. SystemExit short-circuits and returns its
-// code; a generic exception returns 1; the parser/compiler still
-// surface Go errors directly (no SyntaxError yet) so we fall back
-// to the error text and exit 1.
+// code; a generic exception returns 1; the parser surfaces a Go-side
+// *parsererrors.SyntaxError that never reached the VM, so synthesize
+// the Python-level SyntaxError exception here and route it through the
+// same display path so the `SyntaxError:` prefix + File/line/text/caret
+// frame land on stderr.
 //
 // CPython: Python/pythonrun.c:656 PyErr_Print
 func printRunError(ts *state.Thread, err error, w io.Writer) int {
-	if errors.Occurred(ts) != nil {
-		return errors.PrintEx(ts, w)
+	if pyerrors.Occurred(ts) != nil {
+		return pyerrors.PrintEx(ts, w)
+	}
+	var se *parsererrors.SyntaxError
+	if errors.As(err, &se) {
+		exc := pyerrors.SyntaxFromParser(se)
+		pyerrors.Restore(ts, exc.ExcType, exc, nil)
+		return pyerrors.PrintEx(ts, w)
 	}
 	fmt.Fprintln(w, err)
 	return 1
