@@ -43,6 +43,30 @@ func RunString(ts *state.Thread, src, filename string, mode parser.Mode, globals
 	return vm.EvalCode(ts, liftCode(cco), globals, locals)
 }
 
+// RunBytes is the bytes-input variant of RunString. The PEP 263
+// coding cookie and a UTF-8 BOM are honored by the lexer's bytes
+// driver, so a script with `# coding: iso-8859-15` decodes through
+// the matching codec before tokenization. CPython routes script
+// execution through this path; the str variant is reserved for
+// compile(str_source, ...) where PyCF_IGNORE_COOKIE skips the
+// cookie scan.
+//
+// CPython: Python/pythonrun.c:1276 pyrun_file (bytes source)
+func RunBytes(ts *state.Thread, src []byte, filename string, mode parser.Mode, globals, locals objects.Object) (objects.Object, error) {
+	if len(src) == 0 || src[len(src)-1] != '\n' {
+		src = append(src, '\n')
+	}
+	mod, err := parser.ParseBytes(src, filename, mode)
+	if err != nil {
+		return nil, err
+	}
+	cco, err := compile.Compile(mod, filename, 0)
+	if err != nil {
+		return nil, err
+	}
+	return vm.EvalCode(ts, liftCode(cco), globals, locals)
+}
+
 // RunSimpleString parses, compiles, and runs command as a Python
 // module against globals. The result is discarded; on failure the
 // traceback (or Go-level error from the parse/compile arm) is
