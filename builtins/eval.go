@@ -46,6 +46,29 @@ func Eval(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 	if err != nil {
 		return nil, err
 	}
+	// CPython strips leading spaces and tabs from the eval source so
+	// `eval(" 'x' ")` doesn't trip the tokenizer's INDENT pass.
+	//
+	// CPython: Python/bltinmodule.c:1036 builtin_eval_impl
+	if s, ok := source.(*objects.Unicode); ok {
+		v := s.Value()
+		i := 0
+		for i < len(v) && (v[i] == ' ' || v[i] == '\t') {
+			i++
+		}
+		if i > 0 {
+			source = objects.NewStr(v[i:])
+		}
+	} else if b, ok := source.(*objects.Bytes); ok {
+		raw := b.Bytes()
+		i := 0
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t') {
+			i++
+		}
+		if i > 0 {
+			source = objects.NewBytes(raw[i:])
+		}
+	}
 	code, err := codeForSource(source, "eval", parser.ModeEval)
 	if err != nil {
 		return nil, err
