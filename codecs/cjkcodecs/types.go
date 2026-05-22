@@ -70,6 +70,13 @@ type pairEncodeMap struct {
 	Code   uint16
 }
 
+// gb18030Range is one entry in the GB18030 four-byte-sequence range
+// table. CPython stores the same triple inline in _codecs_cn.c:4052.
+type gb18030Range struct {
+	First, Last uint32
+	Base        uint16
+}
+
 // tryMapDec looks up trailing byte c2 in the dispatch row m. Returns
 // the mapped codepoint and true when the slot is populated and not
 // UNIINV.

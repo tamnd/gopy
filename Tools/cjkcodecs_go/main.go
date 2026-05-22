@@ -136,6 +136,14 @@ package cjkcodecs
 			if err := emitPairEnc(w, d); err != nil {
 				return err
 			}
+		case defByteArray:
+			if err := emitByteArray(w, d); err != nil {
+				return err
+			}
+		case defGB18030:
+			if err := emitGB18030(w, d); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -149,6 +157,8 @@ const (
 	defWideDBCSIndex
 	defUnimIndex
 	defPairEnc
+	defByteArray
+	defGB18030
 )
 
 type definition struct {
@@ -165,6 +175,8 @@ var (
 	reWideDBCS   = regexp.MustCompile(`(?s)static\s+const\s+struct\s+widedbcs_index\s+(\w+)\s*\[256\]\s*=\s*\{(.*?)\};`)
 	reUnim       = regexp.MustCompile(`(?s)static\s+const\s+struct\s+unim_index\s+(\w+)\s*\[256\]\s*=\s*\{(.*?)\};`)
 	rePairEnc    = regexp.MustCompile(`(?s)static\s+const\s+struct\s+pair_encodemap\s+(\w+)\s*\[\w+\]\s*=\s*\{(.*?)\};`)
+	reByteArr    = regexp.MustCompile(`(?s)static\s+const\s+unsigned\s+char\s+(\w+)\s*\[\]\s*=\s*\{(.*?)\};`)
+	reGB18030    = regexp.MustCompile(`(?s)\}\s+(gb18030_to_unibmp_ranges)\[\]\s*=\s*\{(.*?)\};`)
 	reConstMacro = regexp.MustCompile(`#define\s+(\w+)\s+(\d+)`)
 )
 
@@ -203,6 +215,20 @@ func parseDefs(src string) []definition {
 	for _, m := range rePairEnc.FindAllStringSubmatchIndex(src, -1) {
 		defs = append(defs, definition{
 			kind: defPairEnc,
+			name: src[m[2]:m[3]],
+			body: src[m[4]:m[5]],
+		})
+	}
+	for _, m := range reByteArr.FindAllStringSubmatchIndex(src, -1) {
+		defs = append(defs, definition{
+			kind: defByteArray,
+			name: src[m[2]:m[3]],
+			body: src[m[4]:m[5]],
+		})
+	}
+	for _, m := range reGB18030.FindAllStringSubmatchIndex(src, -1) {
+		defs = append(defs, definition{
+			kind: defGB18030,
 			name: src[m[2]:m[3]],
 			body: src[m[4]:m[5]],
 		})
@@ -319,6 +345,51 @@ func emitPairEnc(w *bytes.Buffer, d definition) error {
 		fmt.Fprintf(w, "{UniSeq: 0x%x, Code: 0x%x},\n", uni, code)
 	}
 	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	return nil
+}
+
+func emitGB18030(w *bytes.Buffer, d definition) error {
+	triples := splitTuples(d.body)
+	fmt.Fprintf(w, "var %s = [...]gb18030Range{\n", d.name)
+	for _, t := range triples {
+		fields := splitValues(t)
+		if len(fields) != 3 {
+			return fmt.Errorf("%s tuple has %d fields, want 3: %q", d.name, len(fields), t)
+		}
+		first, err := evalNum(fields[0])
+		if err != nil {
+			return err
+		}
+		last, err := evalNum(fields[1])
+		if err != nil {
+			return err
+		}
+		base, err := evalNum(fields[2])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "{First: 0x%x, Last: 0x%x, Base: 0x%x},\n", first, last, base)
+	}
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	return nil
+}
+
+func emitByteArray(w *bytes.Buffer, d definition) error {
+	tokens := splitValues(d.body)
+	fmt.Fprintf(w, "var %s = [...]byte{\n", d.name)
+	for i, t := range tokens {
+		v, err := evalNum(t)
+		if err != nil {
+			return fmt.Errorf("%s[%d]: %w", d.name, i, err)
+		}
+		fmt.Fprintf(w, "0x%x,", v)
+		if i%16 == 15 {
+			fmt.Fprintln(w)
+		}
+	}
+	fmt.Fprintln(w, "\n}")
 	fmt.Fprintln(w)
 	return nil
 }
