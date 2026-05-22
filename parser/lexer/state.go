@@ -376,6 +376,14 @@ func (s *State) SetTypeComments(v bool) { s.typeComments = v }
 // Filename returns the configured filename. Used by error formatters.
 func (s *State) Filename() string { return s.filename }
 
+// SourceLine returns the nth (1-based) line of the buffered source.
+// Returns "" for out-of-range or for streaming inputs whose lines
+// have already been consumed.
+//
+// CPython: Parser/tokenizer/helpers.c reads tok->buf to populate the
+// SyntaxError text field at error time.
+func (s *State) SourceLine(n int) string { return nthLine(s.buf, n) }
+
 // Encoding returns the source encoding detected from a BOM or
 // PEP 263 cookie, or "" when no cookie was seen.
 func (s *State) Encoding() string { return s.encoding }

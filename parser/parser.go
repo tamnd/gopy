@@ -122,6 +122,30 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 		if e := p.PinnedError(); e != nil {
 			return nil, e
 		}
+		// No rule called RaiseSyntaxError, but the parse still
+		// failed; pin a generic SyntaxError at the farthest token
+		// the parser reached so callers like compile() can populate
+		// lineno / offset / filename / text on the exception.
+		// CPython: Parser/pegen.c:1136 _PyPegen_run_parser uses
+		// farthest_pos to pick the caret when no rule raised.
+		if t := p.FarthestToken(); t != nil {
+			text := ""
+			if ts := p.Tokenizer(); ts != nil {
+				text = ts.SourceLine(t.Lineno)
+			}
+			return nil, &perrors.SyntaxError{
+				Kind: perrors.KindSyntax,
+				Pos: perrors.Pos{
+					Lineno:  t.Lineno,
+					ColOff:  t.ColOff,
+					EndLine: t.EndLine,
+					EndCol:  t.EndCol,
+				},
+				Filename: st.Filename(),
+				Message:  "invalid syntax",
+				Text:     text,
+			}
+		}
 		return nil, ErrParserNotImplemented
 	}
 	if err != nil {

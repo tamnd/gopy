@@ -410,3 +410,28 @@ func (p *Parser) ErrorIndicator() bool { return p.errorIndicator }
 // SetErrorIndicator pins the error flag. The action_helpers layer
 // flips this when it constructs a SyntaxError.
 func (p *Parser) SetErrorIndicator(v bool) { p.errorIndicator = v }
+
+// FarthestToken returns the token at the deepest position any rule
+// reached during this parse. Used by the driver to synthesize a
+// SyntaxError at the parser's farthest point when no rule pinned one.
+//
+// CPython: Parser/pegen.c:1136 _PyPegen_run_parser uses farthest_pos
+// to pick the error caret when raise_error fired without a known
+// location.
+func (p *Parser) FarthestToken() *Token {
+	idx := p.farthestPos
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(p.tokens) {
+		idx = len(p.tokens) - 1
+	}
+	if idx < 0 {
+		return nil
+	}
+	return p.tokens[idx]
+}
+
+// Tokenizer returns the lexer state driving this parser. The driver
+// reads the source buffer through it to populate SyntaxError.text.
+func (p *Parser) Tokenizer() *lexer.State { return p.tok }
