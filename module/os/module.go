@@ -183,6 +183,7 @@ func buildOS() (*objects.Module, error) {
 		val  objects.Object
 	}{
 		{"sep", objects.NewStr(sep)},
+		{"extsep", objects.NewStr(".")},
 		{"pardir", objects.NewStr("..")},
 		{"curdir", objects.NewStr(".")},
 		{"linesep", objects.NewStr(linesep)},
@@ -340,7 +341,22 @@ func pathEntries() []struct {
 		// normcase is the identity on POSIX (Lib/posixpath.py normcase).
 		// CPython: Lib/posixpath.py:53 normcase
 		{"normcase", objects.NewBuiltinFunction("normcase", normcasePosix)},
+		{"splitdrive", objects.NewBuiltinFunction("splitdrive", splitdrivePosix)},
+		{"extsep", objects.NewStr(".")},
+		{"altsep", objects.None()},
 	}
+}
+
+// splitdrivePosix splits a pathname into drive and path. On POSIX the
+// drive component is always empty.
+//
+// CPython: Lib/posixpath.py:131 splitdrive
+func splitdrivePosix(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, err := argString(args)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewTuple([]objects.Object{objects.NewStr(""), objects.NewStr(s)}), nil
 }
 
 // normcasePosix returns the path unchanged after a fspath coercion,
