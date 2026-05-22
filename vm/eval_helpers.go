@@ -526,26 +526,22 @@ func iterToSlice(o objects.Object) ([]objects.Object, error) {
 	if o == nil {
 		return nil, errors.New("TypeError: cannot iterate nil")
 	}
-	t := o.Type()
-	if t.Iter == nil {
-		// Tuple/List shortcut: avoid iterator allocation for the common case.
-		switch v := o.(type) {
-		case *objects.Tuple:
-			out := make([]objects.Object, v.Len())
-			for i := range out {
-				out[i] = v.Item(i)
-			}
-			return out, nil
-		case *objects.List:
-			out := make([]objects.Object, v.Len())
-			for i := range out {
-				out[i] = v.Item(i)
-			}
-			return out, nil
+	// Tuple/List shortcut: avoid iterator allocation for the common case.
+	switch v := o.(type) {
+	case *objects.Tuple:
+		out := make([]objects.Object, v.Len())
+		for i := range out {
+			out[i] = v.Item(i)
 		}
-		return nil, errors.New("TypeError: '" + t.Name + "' object is not iterable")
+		return out, nil
+	case *objects.List:
+		out := make([]objects.Object, v.Len())
+		for i := range out {
+			out[i] = v.Item(i)
+		}
+		return out, nil
 	}
-	it, ierr := t.Iter(o)
+	it, ierr := objects.Iter(o)
 	if ierr != nil {
 		return nil, ierr
 	}
@@ -1251,9 +1247,12 @@ func (e *evalState) getAwaitable(iter objects.Object, opcode uint32) objects.Obj
 }
 
 // dictUpdate wraps PyDict_Update: merges b into a without duplicate-key
-// checking.
+// checking. Non-mapping sources raise the CPython-shaped TypeError so
+// `{**1}` and `{**[]}` surface "'int' object is not a mapping" rather
+// than a generic dict-internal message.
 //
 // CPython: Objects/dictobject.c:3354 PyDict_Update
+// CPython: Python/bytecodes.c DICT_UPDATE (AttributeError -> TypeError)
 func (e *evalState) dictUpdate(a, b objects.Object) int32 {
 	d, ok := a.(*objects.Dict)
 	if !ok {
@@ -1270,7 +1269,7 @@ func (e *evalState) dictUpdate(a, b objects.Object) int32 {
 		}
 		return 0
 	}
-	e.pendingErr = errors.New("TypeError: PyDict_Update expected dict source")
+	e.pendingErr = fmt.Errorf("TypeError: '%s' object is not a mapping", b.Type().Name)
 	return -1
 }
 

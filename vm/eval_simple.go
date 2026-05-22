@@ -683,6 +683,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		seq := e.popObject()
 		items, ierr := iterToSlice(seq)
 		if ierr != nil {
+			t := seq.Type()
+			if t.Iter == nil && (t.Sequence == nil || t.Sequence.GetItem == nil) {
+				return 0, true, fmt.Errorf("TypeError: cannot unpack non-iterable %s object", t.Name)
+			}
 			return 0, true, ierr
 		}
 		if len(items) < before+after {
