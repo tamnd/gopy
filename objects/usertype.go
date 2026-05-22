@@ -622,19 +622,6 @@ func fixupDescriptorSlots(t *Type) {
 	}
 }
 
-// hasAnyDunder reports whether t exposes any of the named dunders as a
-// callable descriptor on its MRO. Used by RichCmp where we install one
-// dispatcher that handles every operator and forwards to whichever
-// dunder is defined.
-func hasAnyDunder(t *Type, names ...string) bool {
-	for _, n := range names {
-		if lookupDunderCallable(t, n) {
-			return true
-		}
-	}
-	return false
-}
-
 // ensureNumberMethods allocates t.Number on demand. Built-in types
 // share a NumberMethods table; user types start with nil and gain one
 // only when fixup wires a numeric slot.

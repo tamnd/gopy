@@ -73,7 +73,7 @@ func numberToInt(o objects.Object) (objects.Object, error) {
 		// wrapper and rebuild as an Int.
 		//
 		// CPython: Objects/boolobject.c bool_int / long_new_impl PyNumber_Long
-		n, _ := v.Int.Int64()
+		n, _ := v.Int64()
 		return objects.NewInt(n), nil
 	case *objects.Int:
 		return v, nil

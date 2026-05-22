@@ -10,7 +10,7 @@ package codecs
 // codepage builds a Charmap from a 128-entry high-half mapping. Identity
 // fills the low 128 slots so callers only spell the platform-specific
 // upper half.
-func codepage(name string, upper [128]rune) *Charmap {
+func codepage(name string, upper *[128]rune) *Charmap {
 	var t [256]rune
 	for i := range 128 {
 		t[i] = rune(i)
@@ -18,11 +18,11 @@ func codepage(name string, upper [128]rune) *Charmap {
 	for i, r := range upper {
 		t[i+128] = r
 	}
-	return NewCharmap(name, t)
+	return NewCharmap(name, &t)
 }
 
 // cp1252 (Windows Western). CPython: Lib/encodings/cp1252.py
-var cp1252 = codepage("cp1252", [128]rune{
+var cp1252 = codepage("cp1252", &[128]rune{
 	0x20AC, -1, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
 	0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, -1, 0x017D, -1,
 	-1, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
@@ -42,7 +42,7 @@ var cp1252 = codepage("cp1252", [128]rune{
 })
 
 // cp1250 (Windows Central European). CPython: Lib/encodings/cp1250.py
-var cp1250 = codepage("cp1250", [128]rune{
+var cp1250 = codepage("cp1250", &[128]rune{
 	0x20AC, -1, 0x201A, -1, 0x201E, 0x2026, 0x2020, 0x2021,
 	-1, 0x2030, 0x0160, 0x2039, 0x015A, 0x0164, 0x017D, 0x0179,
 	-1, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
@@ -62,7 +62,7 @@ var cp1250 = codepage("cp1250", [128]rune{
 })
 
 // cp1251 (Windows Cyrillic). CPython: Lib/encodings/cp1251.py
-var cp1251 = codepage("cp1251", [128]rune{
+var cp1251 = codepage("cp1251", &[128]rune{
 	0x0402, 0x0403, 0x201A, 0x0453, 0x201E, 0x2026, 0x2020, 0x2021,
 	0x20AC, 0x2030, 0x0409, 0x2039, 0x040A, 0x040C, 0x040B, 0x040F,
 	0x0452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
@@ -82,7 +82,7 @@ var cp1251 = codepage("cp1251", [128]rune{
 })
 
 // cp437 (original IBM PC / DOS). CPython: Lib/encodings/cp437.py
-var cp437 = codepage("cp437", [128]rune{
+var cp437 = codepage("cp437", &[128]rune{
 	0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
 	0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
 	0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9,
@@ -102,7 +102,7 @@ var cp437 = codepage("cp437", [128]rune{
 })
 
 // macRoman. CPython: Lib/encodings/mac_roman.py
-var macRoman = codepage("mac-roman", [128]rune{
+var macRoman = codepage("mac-roman", &[128]rune{
 	0x00C4, 0x00C5, 0x00C7, 0x00C9, 0x00D1, 0x00D6, 0x00DC, 0x00E1,
 	0x00E0, 0x00E2, 0x00E4, 0x00E3, 0x00E5, 0x00E7, 0x00E9, 0x00E8,
 	0x00EA, 0x00EB, 0x00ED, 0x00EC, 0x00EE, 0x00EF, 0x00F1, 0x00F3,

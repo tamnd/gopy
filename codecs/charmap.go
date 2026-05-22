@@ -29,10 +29,10 @@ type Charmap struct {
 // (decode[i] == -1) stay out of the inverse so encode can detect them.
 //
 // CPython: Lib/codecs.py charmap_build
-func NewCharmap(name string, decode [256]rune) *Charmap {
-	cm := &Charmap{Name: name, Decode: decode}
+func NewCharmap(name string, decode *[256]rune) *Charmap {
+	cm := &Charmap{Name: name, Decode: *decode}
 	cm.encode = make(map[rune]byte, 256)
-	for b, r := range decode {
+	for b, r := range &cm.Decode {
 		if r >= 0 {
 			cm.encode[r] = byte(b)
 		}

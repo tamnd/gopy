@@ -11,6 +11,7 @@ package codecs
 import (
 	"encoding/binary"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 var (
@@ -54,17 +55,19 @@ func encodeUTF16BE(input, errors string) ([]byte, int, error) {
 func encodeUTF16Body(input, errors string, bo binary.ByteOrder) ([]byte, int, error) {
 	runes := []rune(input)
 	for i, r := range runes {
-		if r >= 0xD800 && r <= 0xDFFF {
-			handler, herr := LookupError(errors)
-			if herr != nil {
-				return nil, i, herr
-			}
-			rep, _, herr := handler("utf-16", "surrogates not allowed", []byte(input), i, i+1)
-			if herr != nil {
-				return nil, i, herr
-			}
-			runes[i] = []rune(rep)[0]
+		if r < 0xD800 || r > 0xDFFF {
+			continue
 		}
+		handler, herr := LookupError(errors)
+		if herr != nil {
+			return nil, i, herr
+		}
+		rep, _, herr := handler("utf-16", "surrogates not allowed", []byte(input), i, i+1)
+		if herr != nil {
+			return nil, i, herr
+		}
+		repRune, _ := utf8.DecodeRuneInString(rep)
+		runes[i] = repRune
 	}
 	units := utf16.Encode(runes)
 	buf := make([]byte, 2*len(units))
