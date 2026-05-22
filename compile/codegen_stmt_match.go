@@ -463,6 +463,51 @@ func (c *Compiler) patternSequenceSubscr(p *ast.MatchSequence, star int, pc *pat
 	return nil
 }
 
+// isValidMappingPatternKey accepts the set of expressions the PEG
+// grammar's literal_expr / complex_number alternatives can build into
+// a mapping pattern key: bare Constants, Attribute lookups, and the
+// signed_number / complex_number shapes the optimizer would later fold
+// to a single Constant. CPython gets to skip this because its compiler
+// runs _PyAST_Optimize before codegen, folding `-0-0j` to a single
+// Constant; gopy has no AST optimizer pass yet, so the codegen needs
+// to recognise the parser's literal-expression spelling directly.
+//
+// CPython: Python/ast_opt.c:457 fold_unaryop / fold_binop, called via
+// Python/compile.c:1733 _PyCompile_AstOptimize
+func isValidMappingPatternKey(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.Constant, *ast.Attribute:
+		return true
+	case *ast.UnaryOp:
+		// signed_number / signed_real_number: USub Constant
+		if v.Op != ast.USub {
+			return false
+		}
+		_, ok := v.Operand.(*ast.Constant)
+		return ok
+	case *ast.BinOp:
+		// complex_number: signed_real_number (+|-) imaginary_number
+		if v.Op != ast.Add && v.Op != ast.Sub {
+			return false
+		}
+		switch lhs := v.Left.(type) {
+		case *ast.Constant:
+		case *ast.UnaryOp:
+			if lhs.Op != ast.USub {
+				return false
+			}
+			if _, ok := lhs.Operand.(*ast.Constant); !ok {
+				return false
+			}
+		default:
+			return false
+		}
+		_, ok := v.Right.(*ast.Constant)
+		return ok
+	}
+	return false
+}
+
 // patternMapping handles `{key: value, ...}` patterns. MATCH_MAPPING
 // gates the type, MATCH_KEYS extracts the values for the listed
 // keys, then each value pattern matches against the corresponding
@@ -495,9 +540,7 @@ func (c *Compiler) patternMapping(p *ast.MatchMapping, pc *patternContext) error
 		}
 	}
 	for _, k := range keys {
-		switch k.(type) {
-		case *ast.Constant, *ast.Attribute:
-		default:
+		if !isValidMappingPatternKey(k) {
 			return fmt.Errorf("compile: mapping pattern keys may only be literals and attribute lookups")
 		}
 		if err := c.visitExpr(k); err != nil {
@@ -523,6 +566,22 @@ func (c *Compiler) patternMapping(p *ast.MatchMapping, pc *patternContext) error
 	}
 	pc.onTop -= 2
 	if p.Rest != nil {
+		// Build `rest = dict(subject)` minus the matched keys. The
+		// stack on entry is [subject, keys]; we lower it to a single
+		// dict copy that patternStoreName then captures.
+		//
+		// CPython: Python/codegen.c:6094 codegen_pattern_mapping star_target
+		c.addOpI(BUILD_MAP, 0, loc(p))
+		c.addOpI(SWAP, 3, loc(p))
+		c.addOpI(DICT_UPDATE, 2, loc(p))
+		c.addOpI(UNPACK_SEQUENCE, int32(len(keys)), loc(p))
+		remaining := len(keys)
+		for remaining > 0 {
+			c.addOpI(COPY, int32(1+remaining), loc(p))
+			c.addOpI(SWAP, 2, loc(p))
+			c.addOp(DELETE_SUBSCR, loc(p))
+			remaining--
+		}
 		return c.patternStoreName(p.Rest, pc, loc(p))
 	}
 	c.addOp(POP_TOP, loc(p))
@@ -588,66 +647,95 @@ func (c *Compiler) patternClass(p *ast.MatchClass, pc *patternContext) error {
 	return nil
 }
 
-// patternOr handles `case A | B | C`. Each alternative builds its
-// own fail-pop ladder; on a match we jump out, on total failure we
-// fall through to the surrounding fail-pop.
+// patternOr handles `case A | B | C`. Each alternative shares the
+// captured-store layout of the first; alternatives that bind names in
+// a different order get their stack slots rotated to match. The whole
+// OR keeps a COPY of the subject on top of stack across alternatives
+// so each alt can match against it without consuming.
 //
-// CPython: Python/codegen.c:L6113 codegen_pattern_or. The CPython
-// version also reconciles divergent capture sets across
-// alternatives. We surface a clear error if alternatives bind
-// different name sets and otherwise emit the basic chain.
+// CPython: Python/codegen.c:6120 codegen_pattern_or.
 func (c *Compiler) patternOr(p *ast.MatchOr, pc *patternContext) error {
 	end := c.newLabel()
 	size := len(p.Patterns)
-	if size == 0 {
-		return fmt.Errorf("compile: empty or-pattern")
+	if size < 2 {
+		return fmt.Errorf("compile: or-pattern requires at least two alternatives")
 	}
-	var firstStores []string
+	oldStores := pc.stores
+	oldFailPop := pc.failPop
+	oldOnTop := pc.onTop
+	oldAllowIrrefutable := pc.allowIrrefutable
+	var control []string
 	for i, alt := range p.Patterns {
-		altStores := pc.stores
-		altFailPop := pc.failPop
-		altOnTop := pc.onTop
 		pc.stores = nil
 		pc.failPop = nil
+		pc.onTop = 0
+		pc.allowIrrefutable = (i == size-1) && oldAllowIrrefutable
+		c.addOpI(COPY, 1, loc(alt))
 		if err := c.visitPattern(alt, pc); err != nil {
 			return err
 		}
+		nstores := len(pc.stores)
 		if i == 0 {
-			firstStores = append([]string(nil), pc.stores...)
-		} else if !sameStores(firstStores, pc.stores) {
-			return fmt.Errorf("compile: alternative patterns bind different names")
+			control = append([]string(nil), pc.stores...)
+		} else {
+			if nstores != len(control) {
+				return fmt.Errorf("compile: alternative patterns bind different names")
+			}
+			if nstores > 0 {
+				for icontrol := nstores - 1; icontrol >= 0; icontrol-- {
+					name := control[icontrol]
+					istores := indexOf(pc.stores, name)
+					if istores < 0 {
+						return fmt.Errorf("compile: alternative patterns bind different names")
+					}
+					if icontrol != istores {
+						rotations := istores + 1
+						rotated := append([]string(nil), pc.stores[:rotations]...)
+						pc.stores = append(pc.stores[:0], pc.stores[rotations:]...)
+						insertAt := icontrol - istores
+						tail := append([]string(nil), pc.stores[insertAt:]...)
+						pc.stores = append(pc.stores[:insertAt], rotated...)
+						pc.stores = append(pc.stores, tail...)
+						for r := rotations; r > 0; r-- {
+							c.patternRotate(icontrol+1, loc(alt))
+						}
+					}
+				}
+			}
 		}
 		c.addOpJump(JUMP, end, loc(alt))
 		if err := c.emitAndResetFailPop(pc, loc(alt)); err != nil {
 			return err
 		}
-		pc.stores = altStores
-		pc.failPop = altFailPop
-		pc.onTop = altOnTop
 	}
+	pc.stores = oldStores
+	pc.failPop = oldFailPop
+	pc.onTop = oldOnTop
+	pc.allowIrrefutable = oldAllowIrrefutable
+	c.addOp(POP_TOP, loc(p))
 	if err := c.jumpToFailPop(pc, JUMP, loc(p)); err != nil {
 		return err
 	}
 	c.useLabel(end)
-	pc.stores = append(pc.stores, firstStores...)
+	nrots := len(control) + 1 + pc.onTop + len(pc.stores)
+	for _, name := range control {
+		c.patternRotate(nrots, loc(p))
+		for _, n := range pc.stores {
+			if n == name {
+				return fmt.Errorf("compile: multiple assignments to name %q in pattern", name)
+			}
+		}
+		pc.stores = append(pc.stores, name)
+	}
+	c.addOp(POP_TOP, loc(p))
 	return nil
 }
 
-// sameStores returns true if two capture-name lists hold the same
-// names, in any order.
-func sameStores(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	count := make(map[string]int, len(a))
-	for _, n := range a {
-		count[n]++
-	}
-	for _, n := range b {
-		if count[n] == 0 {
-			return false
+func indexOf(s []string, v string) int {
+	for i, n := range s {
+		if n == v {
+			return i
 		}
-		count[n]--
 	}
-	return true
+	return -1
 }

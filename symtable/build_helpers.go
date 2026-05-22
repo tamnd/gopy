@@ -295,6 +295,9 @@ func (b *builder) visitPattern(p ast.Pattern) error {
 // CPython: Python/symtable.c VISIT_SEQ(c, pattern, seq)
 func (b *builder) visitPatternSeq(seq ast.Seq[ast.Pattern]) error {
 	for _, p := range seq {
+		if p == nil {
+			continue
+		}
 		if err := b.visitPattern(p); err != nil {
 			return err
 		}
@@ -308,11 +311,9 @@ func (b *builder) visitPatternSeq(seq ast.Seq[ast.Pattern]) error {
 // CPython: Python/symtable.c:L1620 check_kwd_patterns
 func (b *builder) checkKwdPatterns(p *ast.MatchClass) error {
 	for i, name := range p.KwdAttrs {
-		var loc ast.Pos
-		if i < len(p.KwdPatterns) {
+		loc := p.Pos
+		if i < len(p.KwdPatterns) && p.KwdPatterns[i] != nil {
 			loc = p.KwdPatterns[i].Position()
-		} else {
-			loc = p.Pos
 		}
 		if err := b.checkName(name, loc, ast.Store); err != nil {
 			return err
