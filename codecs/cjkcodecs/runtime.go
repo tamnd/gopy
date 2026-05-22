@@ -39,12 +39,21 @@ type decodeFunc func(state *codecState, in []byte, w *unicodeWriter) int
 // CPython: Modules/cjkcodecs/multibytecodec.h:36 mbencode_func
 type encodeFunc func(state *codecState, input []rune, inpos int, out *encodeBuffer, flags int) int
 
+// encodeResetFunc emits any trailing bytes a stateful encoder needs
+// before the output is closed. Matches mbcodecreset_func.
+//
+// CPython: Modules/cjkcodecs/multibytecodec.h:42 mbcodecreset_func
+type encodeResetFunc func(state *codecState, out *encodeBuffer)
+
 // codecState is the per-call state slab. Stateless codecs (the
-// majority) ignore it. Per CPython's MultibyteCodec_State (8 bytes).
+// majority) ignore it. Per CPython's MultibyteCodec_State (8 bytes
+// of free-form state plus the codec config flag we use for the
+// jisx0213 2000 / 2004 split).
 //
 // CPython: Modules/cjkcodecs/multibytecodec.h:28 MultibyteCodec_State
 type codecState struct {
 	config int
+	cBytes [8]uint8
 }
 
 // unicodeWriter accumulates decoded runes into a strings.Builder. It
@@ -108,6 +117,14 @@ func runDecode(encoding string, fn decodeFunc, config int, in []byte, errors str
 // runEncode runs the synchronous encode outer loop.
 // Equivalent to multibytecodec_encode (multibytecodec.c:507).
 func runEncode(encoding string, fn encodeFunc, config int, input string, errors string) ([]byte, int, error) {
+	return runEncodeStateful(encoding, fn, nil, config, input, errors)
+}
+
+// runEncodeStateful is runEncode with an optional ENCODER_RESET
+// callback. Stateless codecs pass nil. The reset closure runs once,
+// after the input is fully consumed, mirroring multibytecodec_encode
+// (multibytecodec.c:595).
+func runEncodeStateful(encoding string, fn encodeFunc, reset encodeResetFunc, config int, input string, errors string) ([]byte, int, error) {
 	if errors == "" {
 		errors = "strict"
 	}
@@ -130,6 +147,9 @@ func runEncode(encoding string, fn encodeFunc, config int, input string, errors 
 			return nil, pos, err
 		}
 		pos = newpos
+	}
+	if reset != nil {
+		reset(st, buf)
 	}
 	return buf.buf, len(buf.buf), nil
 }
