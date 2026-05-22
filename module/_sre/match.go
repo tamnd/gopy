@@ -225,7 +225,7 @@ func matchGroupdict(args []objects.Object, kw map[string]objects.Object) (object
 		}
 		lo, hi := locs[2*g], locs[2*g+1]
 		var val objects.Object
-		if lo < 0 {
+		if lo < 0 || hi < 0 {
 			val = def
 		} else {
 			val = objects.NewStr(s[lo:hi])

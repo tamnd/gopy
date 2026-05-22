@@ -548,26 +548,50 @@ func fixupRichCmpAndBool(t *Type) {
 }
 
 // fixupSubscriptSlots wires the mapping/sequence subscription slots
-// (length, getitem, setitem, delitem, contains).
+// (length, getitem, setitem, delitem, contains). For each dunder, the
+// dispatcher is only installed when the descriptor lives directly on
+// t. A descriptor inherited from a base type means the subclass is
+// reusing the base's slot wrapper, so the C-level slot that
+// inheritSlotsAllMRO already copied stays in place. Installing the
+// dispatcher in that case turns into infinite recursion because the
+// dispatcher looks up __getitem__ which routes back through the
+// dispatcher.
+//
+// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers handles
+// the same discrimination through update_one_slot's wrapper-vs-method
+// check (PyWrapperDescr_Type with d_base->wrapper == p->wrapper picks
+// the underlying C function, anything else picks p->function).
 func fixupSubscriptSlots(t *Type) {
-	if lookupDunderCallable(t, "__len__") {
+	if isOwnDescriptor(t, "__len__") {
 		ensureMappingMethods(t).Length = slotMpLength
 		ensureSequenceMethods(t).Length = slotMpLength
 	}
-	if lookupDunderCallable(t, "__getitem__") {
+	if isOwnDescriptor(t, "__getitem__") {
 		ensureMappingMethods(t).GetItem = slotMpSubscript
 		ensureSequenceMethods(t).GetItem = slotSqGetItem
 	}
-	if lookupDunderCallable(t, "__setitem__") {
+	if isOwnDescriptor(t, "__setitem__") {
 		ensureMappingMethods(t).SetItem = slotMpSubscriptSet
 		ensureSequenceMethods(t).SetItem = slotSqSetItem
 	}
-	if lookupDunderCallable(t, "__delitem__") {
+	if isOwnDescriptor(t, "__delitem__") {
 		ensureMappingMethods(t).DelItem = slotMpSubscriptDel
 	}
-	if lookupDunderCallable(t, "__contains__") {
+	if isOwnDescriptor(t, "__contains__") {
 		ensureSequenceMethods(t).Contains = slotSqContains
 	}
+}
+
+// isOwnDescriptor reports whether t's namespace itself supplies the
+// named dunder via a real descriptor. Inherited descriptors come back
+// from LookupDescriptor with a different providingType; we treat those
+// as "no override" so the inherited slot stays in place.
+func isOwnDescriptor(t *Type, name string) bool {
+	d, providing := LookupDescriptor(t, name)
+	if d == nil || d == None() {
+		return false
+	}
+	return providing == t
 }
 
 // fixupDescriptorSlots wires DescrGet when __get__ exists, DescrSet
