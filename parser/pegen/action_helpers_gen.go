@@ -712,13 +712,20 @@ func actionPgenConstantFromToken(p *Parser, args ...any) any {
 //
 // CPython: Parser/action_helpers.c:601 _PyPegen_constant_from_string
 func actionPgenConstantFromString(p *Parser, args ...any) any {
-	_ = p
 	t, ok := argAt(args, 1).(*Token)
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	body, isBytes, ok := decodeStringTokenTagged(string(t.Bytes))
+	body, isBytes, derr, ok := decodeStringTokenTaggedErr(string(t.Bytes))
 	if !ok {
+		if derr != nil && p != nil {
+			p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+				Lineno:  t.Lineno,
+				ColOff:  t.ColOff,
+				EndLine: t.EndLine,
+				EndCol:  t.EndCol,
+			}, "%s", derr.Error())
+		}
 		return placeholderMatched
 	}
 	if isBytes {
@@ -1442,17 +1449,30 @@ func decodeStringToken(s string) (string, bool) {
 //
 // CPython: Parser/string_parser.c:253 _PyPegen_parse_string
 func decodeStringTokenTagged(s string) (string, bool, bool) {
+	body, isBytes, _, ok := decodeStringTokenTaggedErr(s)
+	return body, isBytes, ok
+}
+
+// decodeStringTokenTaggedErr is the underlying form that surfaces the
+// decode error (e.g. unknown \N{NAME}) so callers with a Parser handle
+// can pin a SyntaxError at the token. decodeStringToken /
+// decodeStringTokenTagged keep swallowing the error for callers that
+// only have a Token, but in practice the explicit-constant path in
+// actionPgenConstantFromString routes through this variant.
+//
+// CPython: Parser/string_parser.c:253 _PyPegen_parse_string
+func decodeStringTokenTaggedErr(s string) (string, bool, error, bool) {
 	if len(s) < 2 {
-		return "", false, false
+		return "", false, nil, false
 	}
 	res, err := stringparse.ParseString([]byte(s))
 	if err != nil {
-		return "", false, false
+		return "", false, err, false
 	}
 	if res.IsBytes {
-		return string(res.Bytes), true, true
+		return string(res.Bytes), true, nil, true
 	}
-	return res.Text, false, true
+	return res.Text, false, nil, true
 }
 
 // withitemSeqOf walks v and collects the *ast.Withitem values found
