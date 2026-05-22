@@ -114,10 +114,15 @@ func (s *State) parserWarn(category, format string, args ...any) {
 	if !s.reportWarnings {
 		return
 	}
+	// CPython's _showwarnmsg fetches the source line from linecache
+	// (Lib/warnings.py:153 _formatwarnmsg_impl). gopy stashes the line
+	// here so FlushWarnings can hand it directly to the warnings filter,
+	// matching the same display even when warnings.py has not loaded yet.
 	w := SyntaxError{
 		Pos:      Pos{Line: s.lineno, Col: s.col},
 		EndPos:   Pos{Line: s.lineno, Col: s.col},
 		Message:  fmt.Sprintf(format, args...),
+		Text:     nthLine(s.buf, s.lineno),
 		Category: category,
 	}
 	s.warnings = append(s.warnings, w)

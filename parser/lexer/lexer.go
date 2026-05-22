@@ -27,6 +27,7 @@ package lexer
 
 import (
 	"fmt"
+	"slices"
 	"unicode"
 
 	"github.com/tamnd/gopy/token"
@@ -78,7 +79,19 @@ func (s *State) nextC() int {
 			return eof
 		}
 		s.lineStart = s.cur
+		// CPython: Parser/lexer/lexer.c:89 contains_null_bytes
+		if containsNullBytes(s.buf[s.lineStart:s.inp]) {
+			s.recordError("source code cannot contain null bytes")
+			s.done = eSyntax
+			s.cur = s.inp
+			return eof
+		}
 	}
+}
+
+// containsNullBytes mirrors Parser/lexer/lexer.c:53 contains_null_bytes.
+func containsNullBytes(p []byte) bool {
+	return slices.Contains(p, 0)
 }
 
 // backup undoes the previous nextC. Symmetric with the C source.
@@ -468,18 +481,36 @@ func (s *State) scanNumber(c int) Tok {
 			for isHexDigitOrUnderscore(s.peek()) {
 				s.nextC()
 			}
+			c = s.nextC()
+			// CPython: Parser/lexer/lexer.c:875 verify_end_of_number("hexadecimal")
+			if c != eof && !s.verifyEndOfNumber(c, "hexadecimal") {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			s.backup(c)
 			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		if c == 'o' || c == 'O' {
 			for isOctDigitOrUnderscore(s.peek()) {
 				s.nextC()
 			}
+			c = s.nextC()
+			// CPython: Parser/lexer/lexer.c:905 verify_end_of_number("octal")
+			if c != eof && !s.verifyEndOfNumber(c, "octal") {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			s.backup(c)
 			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		if c == 'b' || c == 'B' {
 			for isBinDigitOrUnderscore(s.peek()) {
 				s.nextC()
 			}
+			c = s.nextC()
+			// CPython: Parser/lexer/lexer.c:932 verify_end_of_number("binary")
+			if c != eof && !s.verifyEndOfNumber(c, "binary") {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			s.backup(c)
 			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		// Leading zero followed by decimal digits, '.', 'e', 'j' falls

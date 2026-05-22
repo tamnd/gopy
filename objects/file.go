@@ -40,6 +40,14 @@ type File struct {
 	binary bool
 	closed bool
 
+	// encoding / errors mirror the TextIOWrapper fields; gopy's collapsed
+	// layer carries them on File and only exposes them in text mode so
+	// FileIO-shaped binary files still AttributeError as CPython does.
+	//
+	// CPython: Modules/_io/textio.c:2261 textiowrapper (encoding, errors)
+	encoding string
+	errors   string
+
 	f  *os.File
 	rd *bufio.Reader
 	wr io.Writer
@@ -74,6 +82,10 @@ func NewFile(f *os.File, name, mode string, binary, readable, writable bool) *Fi
 		binary: binary,
 		f:      f,
 	}
+	if !binary {
+		fi.encoding = "utf-8"
+		fi.errors = "strict"
+	}
 	if readable {
 		fi.rd = bufio.NewReader(f)
 	}
@@ -96,9 +108,11 @@ func NewFile(f *os.File, name, mode string, binary, readable, writable bool) *Fi
 // PyConfig.stdout/stderr override)
 func NewWriterFile(w io.Writer, name, mode string) *File {
 	fi := &File{
-		name: name,
-		mode: mode,
-		wr:   w,
+		name:     name,
+		mode:     mode,
+		encoding: "utf-8",
+		errors:   "strict",
+		wr:       w,
 	}
 	fi.init(FileType)
 	return fi
@@ -365,6 +379,16 @@ func fileGetattr(o Object, name Object) (Object, error) {
 		return NewStr(fi.mode), nil
 	case "closed":
 		return NewBool(fi.closed), nil
+	case "encoding":
+		if fi.binary {
+			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute 'encoding'", FileType.Name)
+		}
+		return NewStr(fi.encoding), nil
+	case "errors":
+		if fi.binary {
+			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute 'errors'", FileType.Name)
+		}
+		return NewStr(fi.errors), nil
 	}
 	if fn := fileMethod(fi, n.v); fn != nil {
 		return fn, nil

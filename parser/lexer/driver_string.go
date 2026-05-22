@@ -158,6 +158,21 @@ func FromBytes(src []byte, mode Mode) *State {
 			s.done = eEncoding
 		}
 	}
+	// CPython: Parser/lexer/lexer.c:89 contains_null_bytes
+	// CPython runs the null-byte scan per-line inside tok_nextc after
+	// every refill. gopy loads the whole source upfront in FromBytes so
+	// the equivalent check is a single pre-scan that finds the offending
+	// line and records the canonical SyntaxError.
+	if s.err == nil {
+		if line, ok := firstNullByteLine(src); ok {
+			s.lineno = line
+			s.recordErrorWithText(
+				"source code cannot contain null bytes",
+				nthLine(src, line),
+			)
+			s.done = eSyntax
+		}
+	}
 	// CPython: Parser/pegen.c:1048 exec_input = start_rule == Py_file_input
 	src = TranslateNewlines(src, mode == ModeFile)
 	s.buf = src
@@ -171,4 +186,22 @@ func FromBytes(src []byte, mode Mode) *State {
 	s.lineStart = 0
 	s.underflow = func(*State) bool { return false }
 	return s
+}
+
+// firstNullByteLine returns the 1-based line number of the first NUL
+// byte in src plus ok=true; if src has no NUL, ok is false. Mirrors the
+// per-line tok_nextc scan but in one pass since gopy buffers upfront.
+//
+// CPython: Parser/lexer/lexer.c:53 contains_null_bytes
+func firstNullByteLine(src []byte) (int, bool) {
+	line := 1
+	for _, b := range src {
+		if b == 0 {
+			return line, true
+		}
+		if b == '\n' {
+			line++
+		}
+	}
+	return 0, false
 }

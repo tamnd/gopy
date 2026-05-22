@@ -28,7 +28,7 @@ func init() {
 func FlushLexerWarnings(filename string, warns []lexer.SyntaxError) {
 	for _, w := range warns {
 		cat := warningCategory(w.Category)
-		_ = WarnExplicit(cat, w.Message, filename, int64(w.Pos.Line), "", nil)
+		_ = WarnExplicitWithSourceline(cat, w.Message, filename, int64(w.Pos.Line), "", w.Text, nil)
 	}
 }
 
