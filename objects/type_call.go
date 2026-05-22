@@ -24,7 +24,32 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c:4153 type_new
 	SetTypeDescr(typeType, "__new__", NewBuiltinFunction("type.__new__", typeNewBuiltin))
+	// Register type.__init__ so a metaclass that calls
+	// `super().__init__(*args, **kwargs)` resolves through type rather
+	// than tumbling through to object.__init__, which rejects extra args.
+	// type_init is a near no-op: it only validates the call shape is
+	// type(obj) or type(name, bases, ns).
+	//
+	// CPython: Objects/typeobject.c:4036 type_init
+	SetTypeDescr(typeType, "__init__", NewMethodDescr(typeType, "__init__", typeInitDescr))
 }
+
+// typeInitDescr is the tp_init slot wrapper for type. Accepts 1 or 3
+// positional args beyond self (type(x) or type(name, bases, ns)) and
+// ignores keyword arguments, just like CPython.
+//
+// CPython: Objects/typeobject.c:4036 type_init
+func typeInitDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: descriptor '__init__' of 'type' object needs an argument")
+	}
+	rest := len(args) - 1
+	if rest != 1 && rest != 3 {
+		return nil, fmt.Errorf("TypeError: type.__init__() takes 1 or 3 arguments")
+	}
+	return None(), nil
+}
+
 
 // typeCall is the tp_call slot for `type` itself (and, by inheritance,
 // every class). Behavior:
@@ -190,11 +215,8 @@ func typeMetaclassCall(cls *Type, args []Object, kwargs map[string]Object) (Obje
 	// CPython: Objects/typeobject.c:1800 type_call (__init__ guard)
 	if resultType, ok := result.(*Type); ok && IsSubtype(resultType.Type(), cls) {
 		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
-			initArgs := make([]Object, len(args)+1)
-			initArgs[0] = result
-			copy(initArgs[1:], args)
 			bound := bindDescr(init, result, cls)
-			if _, err := callBound(bound, initArgs, kwargs); err != nil {
+			if _, err := callBound(bound, args, kwargs); err != nil {
 				return nil, err
 			}
 		}
