@@ -71,6 +71,8 @@ var parityFixtures = []struct {
 	{"fstring_repr", "x = f'{y!r}'\n"},
 	{"fstring_fmt", "x = f'{y:>10}'\n"},
 	{"match", "match x:\n    case 1:\n        pass\n"},
+	{"match_mapping_class_values", "match x:\n    case {\"a\": str(), \"b\": str()}:\n        pass\n"},
+	{"match_class_kwd", "match x:\n    case Foo(value=Bar()):\n        pass\n"},
 	{"type_alias", "type X = int\n"},
 	{"const_int", "1\n"},
 	{"const_float", "1.5\n"},

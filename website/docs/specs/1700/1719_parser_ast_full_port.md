@@ -335,3 +335,30 @@ shows `done` for every non-deferred row.
 - The PEG-generated `parser/pegen/parser_gen.go` is the largest single
   diff surface (38k lines upstream). Spec 1719 does not regenerate;
   it audits per-rule when a panel row goes red.
+
+### P2 closer 1: mapping/class pattern action-helper slice-type loss
+
+`match x: case {"a": str()}` and `case Foo(value=Bar())` both failed
+to compile with `keys/patterns length mismatch` and
+`kwd attrs/patterns length mismatch`. Root cause was in
+`parser/pegen/action_helpers_gen.go`:
+
+- `actionPgenGetPatterns` filtered out entries whose pattern slot
+  could not be coerced via `patternOf`, while the matching
+  `actionPgenGetPatternKeys` never filters its key column. CPython
+  `Parser/action_helpers.c:415 _PyPegen_get_patterns` is a 1:1 copy
+  of `_PyPegen_get_pattern_keys` and never filters either, so the
+  filter was pure drift. Removed.
+- `patternSeqOf` walked `[]any` recursively but had no case for the
+  concrete `ast.Seq[ast.Pattern]` / `[]ast.Pattern` slice types its
+  callers actually produce, so it silently dropped every typed
+  pattern fed through it. Added the missing cases.
+- `actionPgenMapNamesToIDs` had the same slice-type blindness for
+  `ast.Seq[ast.Expr]` keys (and missed `ast.Expr` -> `*ast.Name`
+  unwrap), which is why class keyword patterns ended up with empty
+  `KwdAttrs`. Added typed cases plus the `ast.Expr` -> `*ast.Name`
+  branch so `Foo(value=Bar())` keeps its `value` attribute.
+
+Parity regressions seeded in `parser/parity_test.go`:
+`match_mapping_class_values` and `match_class_kwd` differential-dump
+against CPython 3.14.5.

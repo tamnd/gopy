@@ -1244,6 +1244,10 @@ func patternSeqOf(v any) ast.Seq[ast.Pattern] {
 		case nil:
 		case ast.Pattern:
 			out = append(out, t)
+		case ast.Seq[ast.Pattern]:
+			out = append(out, t...)
+		case []ast.Pattern:
+			out = append(out, t...)
 		case []any:
 			for _, e := range t {
 				walk(e)
@@ -2608,7 +2612,7 @@ func actionAstParamSpec(p *Parser, args ...any) any {
 // actionPgenMapNamesToIDs extracts the identifier text from a
 // sequence of NAME tokens or *ast.Name expressions.
 //
-// CPython: Parser/action_helpers.c _PyPegen_map_names_to_ids
+// CPython: Parser/action_helpers.c:444 _PyPegen_map_names_to_ids
 func actionPgenMapNamesToIDs(p *Parser, args ...any) any {
 	_ = p
 	v := argAt(args, 1)
@@ -2625,8 +2629,20 @@ func actionPgenMapNamesToIDs(p *Parser, args ...any) any {
 			if t != nil {
 				out = append(out, t.Id)
 			}
+		case ast.Expr:
+			if n, ok := t.(*ast.Name); ok && n != nil {
+				out = append(out, n.Id)
+			}
 		case string:
 			out = append(out, t)
+		case ast.Seq[ast.Expr]:
+			for _, e := range t {
+				walk(e)
+			}
+		case []ast.Expr:
+			for _, e := range t {
+				walk(e)
+			}
 		case []any:
 			for _, e := range t {
 				walk(e)
@@ -2724,15 +2740,13 @@ func actionPgenGetPatternKeys(p *Parser, args ...any) any {
 // actionPgenGetPatterns returns the pattern column from a list of
 // [2]any (key, pattern) pairs.
 //
-// CPython: Parser/action_helpers.c _PyPegen_get_patterns
+// CPython: Parser/action_helpers.c:415 _PyPegen_get_patterns
 func actionPgenGetPatterns(p *Parser, args ...any) any {
 	_ = p
 	pairs := flattenKVPairs(argAt(args, 1))
 	out := make(ast.Seq[ast.Pattern], 0, len(pairs))
 	for _, pr := range pairs {
-		if pat := patternOf(pr[1]); pat != nil {
-			out = append(out, pat)
-		}
+		out = append(out, patternOf(pr[1]))
 	}
 	return out
 }
