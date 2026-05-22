@@ -472,94 +472,298 @@ identTail:
 // 0x / 0o / 0b prefixes, decimal digits, optional fraction, optional
 // exponent, optional 'j' / 'J' imaginary suffix.
 //
-// CPython: Parser/lexer/lexer.c:300 tok_decimal_tail and the number
-// branch in tok_get_normal_mode.
+// CPython: Parser/lexer/lexer.c:855 (number branch in tok_get_normal_mode)
 func (s *State) scanNumber(c int) Tok {
 	if c == '0' {
 		c = s.nextC()
 		if c == 'x' || c == 'X' {
-			for isHexDigitOrUnderscore(s.peek()) {
-				s.nextC()
-			}
+			// Hex
+			//
+			// CPython: Parser/lexer/lexer.c:862
 			c = s.nextC()
-			// CPython: Parser/lexer/lexer.c:875 verify_end_of_number("hexadecimal")
-			if c != eof && !s.verifyEndOfNumber(c, "hexadecimal") {
+			for {
+				if c == '_' {
+					c = s.nextC()
+				}
+				if !isHexDigit(c) {
+					s.backup(c)
+					s.syntaxError("invalid hexadecimal literal")
+					return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+				}
+				for isHexDigit(c) {
+					c = s.nextC()
+				}
+				if c != '_' {
+					break
+				}
+			}
+			if !s.verifyEndOfNumber(c, "hexadecimal") {
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			s.backup(c)
 			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		if c == 'o' || c == 'O' {
-			for isOctDigitOrUnderscore(s.peek()) {
-				s.nextC()
-			}
+			// Octal
+			//
+			// CPython: Parser/lexer/lexer.c:879
 			c = s.nextC()
-			// CPython: Parser/lexer/lexer.c:905 verify_end_of_number("octal")
-			if c != eof && !s.verifyEndOfNumber(c, "octal") {
+			for {
+				if c == '_' {
+					c = s.nextC()
+				}
+				if c < '0' || c >= '8' {
+					if isDecimalDigit(c) {
+						s.syntaxError("invalid digit '%c' in octal literal", c)
+						return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+					}
+					s.backup(c)
+					s.syntaxError("invalid octal literal")
+					return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+				}
+				for c >= '0' && c < '8' {
+					c = s.nextC()
+				}
+				if c != '_' {
+					break
+				}
+			}
+			if isDecimalDigit(c) {
+				s.syntaxError("invalid digit '%c' in octal literal", c)
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			if !s.verifyEndOfNumber(c, "octal") {
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			s.backup(c)
 			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		if c == 'b' || c == 'B' {
-			for isBinDigitOrUnderscore(s.peek()) {
-				s.nextC()
-			}
+			// Binary
+			//
+			// CPython: Parser/lexer/lexer.c:909
 			c = s.nextC()
-			// CPython: Parser/lexer/lexer.c:932 verify_end_of_number("binary")
-			if c != eof && !s.verifyEndOfNumber(c, "binary") {
+			for {
+				if c == '_' {
+					c = s.nextC()
+				}
+				if c != '0' && c != '1' {
+					if isDecimalDigit(c) {
+						s.syntaxError("invalid digit '%c' in binary literal", c)
+						return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+					}
+					s.backup(c)
+					s.syntaxError("invalid binary literal")
+					return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+				}
+				for c == '0' || c == '1' {
+					c = s.nextC()
+				}
+				if c != '_' {
+					break
+				}
+			}
+			if isDecimalDigit(c) {
+				s.syntaxError("invalid digit '%c' in binary literal", c)
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			if !s.verifyEndOfNumber(c, "binary") {
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			s.backup(c)
 			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
-		// Leading zero followed by decimal digits, '.', 'e', 'j' falls
-		// through to the regular decimal path.
+		// Leading-zero decimal: scan the run of zeros (with underscore
+		// separators), then if a non-zero digit appears, run the
+		// decimal tail. Trailing-underscore detection lives in the
+		// inner check.
+		//
+		// CPython: Parser/lexer/lexer.c:938
+		nonzero := false
+		for {
+			if c == '_' {
+				c = s.nextC()
+				if !isDecimalDigit(c) {
+					s.backup(c)
+					s.syntaxError("invalid decimal literal")
+					return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+				}
+			}
+			if c != '0' {
+				break
+			}
+			c = s.nextC()
+		}
+		if isDecimalDigit(c) {
+			nonzero = true
+			var ok bool
+			c, ok = s.decimalTail()
+			if !ok {
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+		}
+		if c == '.' {
+			c = s.nextC()
+			return s.scanFraction(c)
+		}
+		if c == 'e' || c == 'E' {
+			return s.scanExponent(c)
+		}
+		if c == 'j' || c == 'J' {
+			return s.scanImaginary()
+		}
+		if nonzero && !s.tokExtraTokens {
+			// Old-style octal: now disallowed.
+			//
+			// CPython: Parser/lexer/lexer.c:976
+			s.backup(c)
+			s.syntaxError("leading zeros in decimal integer literals are not permitted; use an 0o prefix for octal integers")
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+		if !s.verifyEndOfNumber(c, "decimal") {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+		s.backup(c)
+		return s.tokenSetup(token.NUMBER, s.start, s.cur)
 	}
-	for c >= '0' && c <= '9' || c == '_' {
-		c = s.nextC()
+	// Decimal (leading non-zero digit already consumed by caller; first
+	// underscore-or-digit handling delegates to decimalTail).
+	//
+	// CPython: Parser/lexer/lexer.c:988
+	var ok bool
+	c, ok = s.decimalTail()
+	if !ok {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
 	if c == '.' {
 		c = s.nextC()
-		for c >= '0' && c <= '9' || c == '_' {
-			c = s.nextC()
-		}
+		return s.scanFraction(c)
 	}
 	if c == 'e' || c == 'E' {
-		c = s.nextC()
-		if c == '+' || c == '-' {
-			c = s.nextC()
-		}
-		for c >= '0' && c <= '9' || c == '_' {
-			c = s.nextC()
-		}
+		return s.scanExponent(c)
 	}
 	if c == 'j' || c == 'J' {
-		c = s.nextC()
+		return s.scanImaginary()
 	}
-	// verify_end_of_number is called with c still consumed; on success
-	// the caller backs c up.
-	// CPython: Parser/lexer/lexer.c:305 verify_end_of_number
-	if c != eof && !s.verifyEndOfNumber(c, "decimal") {
+	if !s.verifyEndOfNumber(c, "decimal") {
 		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
 	s.backup(c)
 	return s.tokenSetup(token.NUMBER, s.start, s.cur)
 }
 
-func isHexDigitOrUnderscore(c int) bool {
+// decimalTail mirrors tok_decimal_tail: consume runs of digits joined
+// by single underscores. Returns the lookahead byte and true on
+// success; emits "invalid decimal literal" and returns false when a
+// trailing underscore is followed by anything but a digit.
+//
+// CPython: Parser/lexer/lexer.c:413 tok_decimal_tail
+func (s *State) decimalTail() (int, bool) {
+	c := eof
+	for {
+		for {
+			c = s.nextC()
+			if !isDecimalDigit(c) {
+				break
+			}
+		}
+		if c != '_' {
+			break
+		}
+		c = s.nextC()
+		if !isDecimalDigit(c) {
+			s.backup(c)
+			s.syntaxError("invalid decimal literal")
+			return 0, false
+		}
+	}
+	return c, true
+}
+
+// scanFraction continues a decimal literal once the '.' has been
+// consumed. c is the first byte of the fractional run.
+//
+// CPython: Parser/lexer/lexer.c:994 (fraction label)
+func (s *State) scanFraction(c int) Tok {
+	if isDecimalDigit(c) {
+		var ok bool
+		c, ok = s.decimalTail()
+		if !ok {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+	}
+	if c == 'e' || c == 'E' {
+		return s.scanExponent(c)
+	}
+	if c == 'j' || c == 'J' {
+		return s.scanImaginary()
+	}
+	if !s.verifyEndOfNumber(c, "decimal") {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
+	s.backup(c)
+	return s.tokenSetup(token.NUMBER, s.start, s.cur)
+}
+
+// scanExponent runs the 'e' / 'E' arm. e is the exponent marker
+// itself; we read sign and digits, falling back to a plain integer
+// token when the marker isn't followed by digits.
+//
+// CPython: Parser/lexer/lexer.c:1006 (exponent label)
+func (s *State) scanExponent(e int) Tok {
+	c := s.nextC()
+	if c == '+' || c == '-' {
+		c = s.nextC()
+		if !isDecimalDigit(c) {
+			s.backup(c)
+			s.syntaxError("invalid decimal literal")
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+	} else if !isDecimalDigit(c) {
+		s.backup(c)
+		if !s.verifyEndOfNumber(e, "decimal") {
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+		}
+		s.backup(e)
+		return s.tokenSetup(token.NUMBER, s.start, s.cur)
+	}
+	var ok bool
+	c, ok = s.decimalTail()
+	if !ok {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
+	if c == 'j' || c == 'J' {
+		return s.scanImaginary()
+	}
+	if !s.verifyEndOfNumber(c, "decimal") {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
+	s.backup(c)
+	return s.tokenSetup(token.NUMBER, s.start, s.cur)
+}
+
+// scanImaginary handles the trailing 'j' / 'J' suffix. The marker has
+// already been consumed by the caller; we pull the next byte for
+// verify_end_of_number and back it up on success.
+//
+// CPython: Parser/lexer/lexer.c:1034 (imaginary label)
+func (s *State) scanImaginary() Tok {
+	c := s.nextC()
+	if !s.verifyEndOfNumber(c, "imaginary") {
+		return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+	}
+	s.backup(c)
+	return s.tokenSetup(token.NUMBER, s.start, s.cur)
+}
+
+func isHexDigit(c int) bool {
 	return (c >= '0' && c <= '9') ||
 		(c >= 'a' && c <= 'f') ||
-		(c >= 'A' && c <= 'F') ||
-		c == '_'
+		(c >= 'A' && c <= 'F')
 }
 
-func isOctDigitOrUnderscore(c int) bool {
-	return (c >= '0' && c <= '7') || c == '_'
-}
-
-func isBinDigitOrUnderscore(c int) bool {
-	return c == '0' || c == '1' || c == '_'
+func isDecimalDigit(c int) bool {
+	return c >= '0' && c <= '9'
 }
 
 // scanString scans a single- or triple-quoted string literal. f-strings
