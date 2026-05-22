@@ -1393,14 +1393,14 @@ func parseNumberLiteral(s string) (any, bool) {
 	last := clean[len(clean)-1]
 	if last == 'j' || last == 'J' {
 		f, err := strconv.ParseFloat(clean[:len(clean)-1], 64)
-		if err != nil {
+		if err != nil && !isFloatRange(err) {
 			return nil, false
 		}
 		return complex(0, f), true
 	}
 	if strings.ContainsAny(clean, ".eE") && !strings.HasPrefix(clean, "0x") && !strings.HasPrefix(clean, "0X") {
 		f, err := strconv.ParseFloat(clean, 64)
-		if err != nil {
+		if err != nil && !isFloatRange(err) {
 			return nil, false
 		}
 		return f, true
@@ -1429,6 +1429,21 @@ func parseNumberLiteral(s string) (any, bool) {
 		return nil, false
 	}
 	return bi, true
+}
+
+// isFloatRange reports whether err from strconv.ParseFloat indicates an
+// out-of-range value (returns +Inf or -Inf in that case). CPython
+// silently accepts overflows: `1e1000` evaluates to inf at parse time,
+// matching the C strtod default rounding to infinity, so the lexer must
+// accept the same surface.
+//
+// CPython: Parser/string_parser.c:1280 parsenumber_raw (PyOS_string_to_double accepts overflow)
+func isFloatRange(err error) bool {
+	ne, ok := err.(*strconv.NumError)
+	if !ok {
+		return false
+	}
+	return ne.Err == strconv.ErrRange
 }
 
 // decodeStringToken strips quote/prefix wrapping and decodes escapes

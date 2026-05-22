@@ -1412,3 +1412,21 @@ real semantic gaps (e.g. parser positional-pattern ordering).
 CPython:
 - `Objects/unicodeobject.c:9617 PyUnicode_Substring`
 - `Modules/_sre/sre.c:2735 match_getslice_by_index`
+
+### P7 closer 18: accept overflowing float literals as inf
+
+`1e1000` raised SyntaxError at parse time. CPython accepts it
+silently and the literal evaluates to `float('inf')`, matching
+`PyOS_string_to_double` / `strtod` default rounding to infinity.
+
+The gate is `case 1e1000:` inside test_patma. The parse-time
+rejection cascaded into the doctest panel for any test file that
+sourced match patterns over float-overflow constants.
+
+Fixed `parseNumberLiteral` in `parser/pegen/action_helpers_gen.go`
+to tolerate `strconv.NumError{Err: ErrRange}` and keep the
+returned `+Inf` / `-Inf` value. Pure parse errors still reject.
+
+CPython:
+- `Parser/string_parser.c:1280 parsenumber_raw`
+- `Python/pystrtod.c:130 PyOS_string_to_double`
