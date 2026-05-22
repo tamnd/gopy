@@ -310,11 +310,14 @@ func processClassNamespace(t *Type, ns *Dict) {
 
 // copyNamespaceToType walks ns and installs each entry as a type
 // descriptor on t, with the same special-casing CPython performs in
-// type_new_set_attrs: __init_subclass__, __class_getitem__, and
-// __prepare__ become classmethods, and __module__ propagates onto
-// t.Module so type_repr can render qualified names.
+// type_new_set_attrs: __init_subclass__ and __class_getitem__ become
+// classmethods when they are plain functions, and __module__ propagates
+// onto t.Module so type_repr can render qualified names. __prepare__
+// is NOT auto-wrapped; CPython leaves it alone so the user controls
+// the binding via @classmethod / @staticmethod / plain function.
 //
-// CPython: Objects/typeobject.c:4419 type_new_set_attrs
+// CPython: Objects/typeobject.c:4526 type_new_set_attrs
+// CPython: Objects/typeobject.c:4372 type_new_classmethod
 func copyNamespaceToType(t *Type, ns *Dict) {
 	for _, k := range ns.Keys() {
 		s, ok := k.(*Unicode)
@@ -326,8 +329,8 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 			continue
 		}
 		switch s.v {
-		case "__init_subclass__", "__class_getitem__", "__prepare__":
-			if _, isCM := v.(*ClassMethod); !isCM {
+		case "__init_subclass__", "__class_getitem__":
+			if _, isFn := v.(*Function); isFn {
 				v = NewClassMethod(v)
 			}
 		case "__module__":
