@@ -9,6 +9,7 @@
 package builtins
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/ast"
@@ -148,6 +149,22 @@ func resolveScope(fnName string, globals, locals objects.Object) (objects.Object
 	return globals, locals, nil
 }
 
+// parserErrAsSyntax mirrors compile()'s ErrParserNotImplemented
+// translation so eval() / exec() surface SyntaxError when the parser
+// rejects the source. CPython raises SyntaxError from every parser
+// entrypoint; the gopy sentinel is the internal stand-in for "the
+// grammar rule did not match," which is also a SyntaxError to user
+// code.
+//
+// CPython: Python/bltinmodule.c:956 builtin_eval_impl
+// CPython: Python/bltinmodule.c:771 builtin_compile_impl
+func parserErrAsSyntax(err error) error {
+	if errors.Is(err, parser.ErrParserNotImplemented) {
+		return fmt.Errorf("SyntaxError: invalid syntax")
+	}
+	return err
+}
+
 // codeForSource turns the source argument into an *objects.Code. A
 // code object is returned as-is; everything else goes through
 // sourceAsString (the gopy port of _Py_SourceAsString) and then through
@@ -169,13 +186,13 @@ func codeForSource(source objects.Object, fnName string, mode parser.Mode) (*obj
 	if isUnicode {
 		m, perr := parser.ParseString(str, "<string>", mode)
 		if perr != nil {
-			return nil, perr
+			return nil, parserErrAsSyntax(perr)
 		}
 		mod = m
 	} else {
 		m, perr := parser.ParseBytes([]byte(str), "<string>", mode)
 		if perr != nil {
-			return nil, perr
+			return nil, parserErrAsSyntax(perr)
 		}
 		mod = m
 	}
