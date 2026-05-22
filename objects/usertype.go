@@ -535,14 +535,27 @@ func fixupHashAndIter(t *Type) {
 	}
 }
 
-// fixupRichCmpAndBool wires tp_richcompare and nb_bool.
+// fixupRichCmpAndBool wires tp_richcompare and nb_bool. The dispatcher
+// is only installed when one of the comparison dunders lives directly
+// on t. A purely inherited descriptor means the C-level RichCmp slot
+// that inheritSlotsAllMRO already copied is the right one; installing
+// slotTpRichCompare in that case would route back through object's
+// __eq__ slot wrapper and lose the base's tp_richcompare.
+//
+// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers /
+// update_one_slot performs the same discrimination via the
+// wrapper-vs-method check (PyWrapperDescr_Type whose d_base->wrapper
+// matches p->wrapper keeps the C function; anything else swaps in
+// p->function).
 func fixupRichCmpAndBool(t *Type) {
-	if hasAnyDunder(t, "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__") {
+	if isOwnDescriptor(t, "__eq__") || isOwnDescriptor(t, "__ne__") ||
+		isOwnDescriptor(t, "__lt__") || isOwnDescriptor(t, "__le__") ||
+		isOwnDescriptor(t, "__gt__") || isOwnDescriptor(t, "__ge__") {
 		t.RichCmp = slotTpRichCompare
 	}
-	if lookupDunderCallable(t, "__bool__") {
+	if isOwnDescriptor(t, "__bool__") {
 		ensureNumberMethods(t).Bool = slotNbBool
-	} else if lookupDunderCallable(t, "__len__") {
+	} else if isOwnDescriptor(t, "__len__") {
 		ensureNumberMethods(t).Bool = slotNbBoolFromLen
 	}
 }
