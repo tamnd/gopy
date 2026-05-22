@@ -169,7 +169,81 @@ func (p *Parser) fillToken() int {
 	p.tokens = append(p.tokens, t)
 	idx := p.fill
 	p.fill++
+	// CPython: Parser/pegen.c:218 _PyPegen_fill_token surfaces the
+	// tokenizer's error code as a typed SyntaxError subclass when the
+	// new token is ERRORTOKEN. gopy used to absorb the error and let
+	// Dispatch return ErrParserNotImplemented, so deep-indent /
+	// tab-space / unclosed-paren cases came back as plain SyntaxError
+	// instead of IndentationError / TabError / pinned-location
+	// SyntaxError.
+	if kind == token.ERRORTOKEN {
+		p.errorIndicator = true
+		if p.pinnedErr == nil {
+			p.pinnedErr = tokenizerSyntaxError(p.tok, t)
+		}
+		return -1
+	}
 	return idx
+}
+
+// tokenizerSyntaxError maps the lexer's Done() state to the matching
+// SyntaxError subclass. The token carries the offending line/col so the
+// builder can stamp filename / lineno / offset / text correctly.
+//
+// CPython: Parser/pegen_errors.c:69 _Pypegen_tokenizer_error
+func tokenizerSyntaxError(st *lexer.State, tk *Token) *perrors.SyntaxError {
+	stored := st.Err()
+	pos := perrors.Pos{Lineno: tk.Lineno, ColOff: tk.ColOff, EndLine: tk.EndLine, EndCol: tk.EndCol}
+	storedMsg := ""
+	if stored != nil {
+		storedMsg = stored.Message
+		if stored.Pos.Line > 0 {
+			pos.Lineno = stored.Pos.Line
+		}
+		if stored.Pos.Col > 0 {
+			pos.ColOff = stored.Pos.Col
+		}
+	}
+	kind := perrors.KindSyntax
+	msg := ""
+	switch st.Done() {
+	case lexer.DoneToken:
+		msg = "invalid token"
+	case lexer.DoneDedent:
+		kind = perrors.KindIndentation
+		msg = "unindent does not match any outer indentation level"
+	case lexer.DoneTabSpace:
+		kind = perrors.KindTab
+		msg = "inconsistent use of tabs and spaces in indentation"
+	case lexer.DoneToodeep:
+		kind = perrors.KindIndentation
+		msg = "too many levels of indentation"
+	case lexer.DoneLineCont:
+		msg = "unexpected character after line continuation character"
+	case lexer.DoneColumnOverflow:
+		kind = perrors.KindOverflow
+		msg = "Parser column offset overflow - source line is too big"
+	default:
+		if storedMsg != "" {
+			msg = storedMsg
+		} else {
+			msg = "invalid syntax"
+		}
+	}
+	if kind == perrors.KindSyntax && storedMsg != "" && msg != storedMsg {
+		msg = storedMsg
+	}
+	text := ""
+	if stored != nil {
+		text = stored.Text
+	}
+	return &perrors.SyntaxError{
+		Kind:     kind,
+		Pos:      pos,
+		Filename: st.Filename(),
+		Message:  msg,
+		Text:     text,
+	}
 }
 
 // opTokenType maps the source bytes of an operator (or punctuation)

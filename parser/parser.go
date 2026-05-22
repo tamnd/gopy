@@ -81,8 +81,22 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	// populated rather than synthesizing one from the message prefix.
 	// CPython: Parser/peg_api.c:73 _PyParser_ASTFromString tok->done check
 	if e := st.Err(); e != nil {
+		// CPython's pegen runtime promotes the lexer's done state to
+		// the matching IndentationError / TabError subclass before
+		// raising. Parser/pegen_errors.c:69 _Pypegen_tokenizer_error
+		// dispatches on E_DEDENT / E_TABSPACE / E_TOODEEP separately
+		// from the generic E_SYNTAX path.
+		kind := perrors.KindSyntax
+		switch st.Done() {
+		case lexer.DoneDedent, lexer.DoneToodeep:
+			kind = perrors.KindIndentation
+		case lexer.DoneTabSpace:
+			kind = perrors.KindTab
+		case lexer.DoneColumnOverflow:
+			kind = perrors.KindOverflow
+		}
 		return nil, &perrors.SyntaxError{
-			Kind: perrors.KindSyntax,
+			Kind: kind,
 			Pos: perrors.Pos{
 				Lineno:  e.Pos.Line,
 				ColOff:  e.Pos.Col,
