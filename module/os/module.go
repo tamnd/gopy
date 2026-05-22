@@ -1072,30 +1072,19 @@ func osReplace(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	return objects.None(), nil
 }
 
-// osScandir returns an iterator over DirEntry objects in path.
-// The full implementation is a lazy iterator; this stub returns an
-// empty list so module-level probes in shutil (os.scandir in os.supports_fd)
-// resolve without AttributeError.
+// osScandir returns a context-managed iterator over DirEntry objects.
 //
 // CPython: Modules/posixmodule.c:13291 os_scandir_impl
-func osScandir(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+func osScandir(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	path := "."
-	if len(args) >= 1 {
+	if len(args) >= 1 && !objects.IsNone(args[0]) {
 		p, err := objects.Str(args[0])
 		if err != nil {
 			return nil, err
 		}
 		path = p
 	}
-	entries, err := goos.ReadDir(path)
-	if err != nil {
-		return nil, fmt.Errorf("OSError: %w", err)
-	}
-	items := make([]objects.Object, len(entries))
-	for i, e := range entries {
-		items[i] = objects.NewStr(e.Name())
-	}
-	return objects.NewList(items), nil
+	return newScandirIterator(path)
 }
 
 // osGetExportsList returns module.__all__ when present, or all public
