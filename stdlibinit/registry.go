@@ -153,6 +153,15 @@ import (
 	// CPython: Modules/_codecsmodule.c:507 _codecs_exec
 	_ "github.com/tamnd/gopy/module/_codecs"
 
+	// Codec subsystem: CJK codecs. The package's init() registers a
+	// SearchFunc with codecs.Register that resolves cp932, cp949,
+	// euc_kr, euc_jp, shift_jis, and the jisx0213 family. Mirrors
+	// CPython's per-language _codecs_kr / _codecs_jp / ... built-in
+	// modules.
+	// CPython: Modules/cjkcodecs/_codecs_kr.c BEGIN_CODECS_LIST
+	// CPython: Modules/cjkcodecs/_codecs_jp.c BEGIN_CODECS_LIST
+	_ "github.com/tamnd/gopy/codecs/cjkcodecs"
+
 	// Built-in module: _csv. Registers itself via
 	// module/_csv/module.go init(). Backs Lib/csv.py with the reader,
 	// writer, Dialect, and quoting constants.

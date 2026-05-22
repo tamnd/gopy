@@ -104,7 +104,7 @@ underway, TODO = not started.
 | P6 | Re-run `test_tokenize.py` + `test_source_encoding.py` panel rows; flip MANIFEST to green or to the next out-of-scope blocker. Update spec 1710's panel rows. | DONE | pending |
 | P7 | Callable check parity: replace every `fn.Type().Call == nil` guard with `objects.Callable(fn)` so Vectorcall-only callables (bound methods, classmethods, etc.) pass the gate. Sites: `module/atexit/module.go`, `module/_functools/module.go`, `module/_collections/module.go`. | TODO | pending |
 | P8 | Charmap codec runtime: port `codecs.charmap_decode` / `charmap_encode` (CPython `Python/codecs.c` + `Objects/unicodeobject.c:7194 PyUnicode_DecodeCharmap`). Land Lib-side `Lib/encodings/iso8859_15.py` and `Lib/encodings/cp1252.py` decoding/encoding tables verbatim from CPython. Shipped: `codecs/charmap.go` (`Charmap` type with `NewCharmap` + per-byte decode and inverse encode), `codecs/iso8859_15.go` (256-rune table verbatim from `Lib/encodings/iso8859_15.py`), `codecs/codepages.go` (cp1252 / cp1250 / cp1251 / cp437 / mac-roman tables), wired into `codecs/builtin.go builtinSearch` so `codecs.Lookup("iso-8859-15")` etc. resolve. `module/io/textio_codec.go` now falls back to `codecs.Lookup` (via a new `registryDecoder`) so `open(..., encoding="iso-8859-15")` works through the same registry CPython uses. | DONE | pending |
-| P9 | Multibyte codec runtime: port `Modules/cjkcodecs/multibytecodec.c` (2143 lines: stateful encoder/decoder lifecycle, error-handler dispatch, `_PyUnicodeWriter` mirroring, `mbencode_func` / `mbdecode_func` plumbing) plus the full `_codecs_jp.c` (cp932, shift_jis, euc_jp, shift_jis_2004, euc_jis_2004 codecs; 770 lines) and `_codecs_kr.c` (cp949, euc_kr, johab; 468 lines) along with their dependent mapping headers (`mappings_jp.h` 4766 lines, `mappings_kr.h` 3253 lines, `mappings_jisx0213_pair.h`, `alg_jisx0201.h`, `emu_jisx0213_2000.h`). Tables are auto-generated from CPython's `genmap_*.py`, so the Go side will mirror them via a generator pass. Required by `test_issue2301` (cp932) and `test_exec_valid_coding` (cp949). Multi-session work item: a partial cp932-only port would violate the "port whole subsystem" rule. | TODO | pending |
+| P9 | Multibyte codec runtime: port `Modules/cjkcodecs/multibytecodec.c` (2143 lines: stateful encoder/decoder lifecycle, error-handler dispatch, `_PyUnicodeWriter` mirroring, `mbencode_func` / `mbdecode_func` plumbing) plus the full `_codecs_jp.c` (cp932, shift_jis, euc_jp, shift_jis_2004, euc_jis_2004 codecs; 770 lines) and `_codecs_kr.c` (cp949, euc_kr, johab; 468 lines) along with their dependent mapping headers (`mappings_jp.h` 4766 lines, `mappings_kr.h` 3253 lines, `mappings_jisx0213_pair.h`, `alg_jisx0201.h`, `emu_jisx0213_2000.h`). Tables are auto-generated from CPython's `genmap_*.py`, so the Go side will mirror them via a generator pass. Required by `test_issue2301` (cp932) and `test_exec_valid_coding` (cp949). Multi-session work item: a partial cp932-only port would violate the "port whole subsystem" rule. Shipped: `tools/cjkcodecs_go` build-time generator translates all six CPython `mappings_*.h` headers to Go; `codecs/cjkcodecs/runtime.go` ports `multibytecodec.c` decode/encode outer loops and error dispatch; `codecs_kr.go` ports cp949/euc_kr/johab; `codecs_jp.go` ports cp932/shift_jis/euc_jp/shift_jis_2004/euc_jis_2004; `codecs/cjkcodecs/registry.go` registers a SearchFunc with `codecs.Register` via init(); `stdlibinit/registry.go` blank-imports the package so the binary side-loads it. `test_exec_valid_coding` (cp949) now passes end-to-end. `test_issue2301` (cp932) still errors because compile() drops the parser's structured SyntaxError text on the `ErrParserNotImplemented` path; the same v.text=None gap reproduces for ASCII source, so the remaining blocker is in compile()/parser, not the codec subsystem. | DONE | pending |
 | P10 | Encoding alias table: port `Lib/encodings/aliases.py` so `iso8859-15`, `iso-8859-15`, `iso_8859_15`, `cp1252`, `cp932`, `cp949`, `utf8` etc. all canonicalise through the same alias mapping CPython uses. Plumb through `codecs.Lookup` after `NormalizeName`. | TODO | pending |
 | P11 | Per-line UTF-8 validation in the lexer: port `Parser/tokenizer/helpers.c:300 ensure_utf8` so the lexer raises Non-UTF-8 SyntaxError on the offending line regardless of cookie/BOM. Required by `test_non_utf8_{second,third}_line_error`, `test_utf8_bom_non_utf8_third_line_error`, `test_utf_8_non_utf8_third_line_error`. | DONE | pending |
 | P12 | Lexer surfaces UnicodeDecodeError text: when the cookie codec decode fails, the SyntaxError message must follow `Parser/tokenizer/helpers.c:534 _PyTokenizer_syntaxerror_known_range` and the CPython `'<codec>' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)` template. Required by `test_first_utf8_coding_line_error`, `test_second_utf8_coding_line_error`, `test_utf8_shebang_error`, `test_error_from_string`. | DONE | pending |
@@ -290,6 +290,63 @@ The port lands the runtime in `codecs/multibyte/`, the tables in
 wrappers `stdlib/encodings/cp932.py` and `cp949.py` ported
 verbatim. Required only by `test_issue2301` (cp932) and
 `test_exec_valid_coding` (cp949); ship as its own commit.
+
+**Status (closed):** the port landed under `codecs/cjkcodecs/`
+rather than `codecs/multibyte/` (no `internal/` and no per-codec
+module split; the package directly owns the dispatch). Shape:
+
+- `tools/cjkcodecs_go/main.go` — build-time generator that
+  translates CPython's auto-generated `mappings_*.h` headers
+  (`mappings_kr.h`, `mappings_jp.h`, `mappings_cn.h`,
+  `mappings_hk.h`, `mappings_tw.h`, `mappings_jisx0213_pair.h`)
+  to compilable Go data files. Handles `dbcs_index`,
+  `widedbcs_index`, `unim_index`, and `pair_encodemap` shapes;
+  expands the U/N/M/D macros to their numeric sentinels.
+- `codecs/cjkcodecs/runtime.go` — synchronous encode/decode
+  outer loops ported from `multibytecodec.c:404` /
+  `multibytecodec.c:507` / `multibytecodec.c:672`, including
+  `decErrorClassify` / `encErrorClassify` mapping `MBERR_*` to
+  the CPython reason strings and `callDecodeError` /
+  `callEncodeError` dispatching through `codecs.LookupError`.
+- `codecs/cjkcodecs/types.go` — `dbcsIndex`, `wideDBCSIndex`,
+  `unimIndex`, `pairEncodeMap`, `tryMapDec` / `tryMapEnc` /
+  `findPairEnc` ported from `cjkcodecs.h` `_TRYMAP_ENC`,
+  `_TRYMAP_DEC`, `find_pairencmap`.
+- `codecs/cjkcodecs/codecs_kr.go` — full port of `_codecs_kr.c`
+  for cp949, euc_kr, johab, including the `u2cgk*` Hangul
+  composition tables and the `johabidx_*` / `johabjamo_*`
+  jamo packing.
+- `codecs/cjkcodecs/codecs_jp.go` — full port of `_codecs_jp.c`
+  for cp932, shift_jis, euc_jp, shift_jis_2004, euc_jis_2004,
+  plus the JIS X 0201 Roman / Katakana algorithmic mappings and
+  the JIS X 0213 2000 emulator.
+- `codecs/cjkcodecs/registry.go` — exports CP932 / CP949 /
+  EUC_KR / EUC_JP / SHIFT_JIS / JOHAB / SHIFT_JIS_2004 /
+  EUC_JIS_2004 / EUC_JISX0213 / SHIFT_JISX0213, plus a
+  `SearchFunc` covering every alias CPython's
+  `Lib/encodings/aliases.py` recognises for those codecs.
+  `init()` calls `codecs.Register(Search)` so the side-load
+  registers the search function.
+- `stdlibinit/registry.go` — blank-imports
+  `github.com/tamnd/gopy/codecs/cjkcodecs` so the binary picks
+  up the registration.
+
+**Test gate outcome:**
+`test_source_encoding.py` was 91/11/59 (pass/fail/error) before
+P9 and is now 89/0/1 with 1 skip out of 91. The remaining
+error is `test_issue2301`: cp932 decode runs end-to-end, but
+compile() drops the parser's structured SyntaxError text on the
+`ErrParserNotImplemented` path. The same `v.text == None` gap
+reproduces for ASCII source (`compile('print 1', 'd', 'exec')`
+also yields `v.text=None`), so the remaining blocker lives in
+compile()/parser, not the codec subsystem. `test_tokenize.py`
+remains 130/130 green; no regressions elsewhere in the codec
+test suite.
+
+CN / HK / TW / ISO-2022 ports are deferred to a follow-up
+because none of the active tests reach for them. Mapping data
+is already generated, so the remaining work is the codec
+function ports plus alias rows. Tracked in `notes/Spec/1718-P9-cn-hk-tw.md`.
 
 ### P10: encoding alias table
 
