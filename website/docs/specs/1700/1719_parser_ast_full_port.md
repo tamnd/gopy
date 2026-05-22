@@ -132,7 +132,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_keywordonlyarg       |  178 | ready | **11/11 OK** | none. Single-input ENDMARKER rewrite + real `raiseAction` + `codegen_validate_keywords` port |
 | test_named_expressions    |  767 | ready | **74/74 OK** | none. `actionPgenGetExprName` arg index + missing AST kinds in `GetExprName` + `PyPegen_last_item` translator |
 | test_positional_only_arg  |  452 | ready | Ran 28, FAILED (errors=4) | 24/28 OK. Positional-only kw enforcement + reordered too_many_positional ship. Remaining 4 errors are annotations lazy-eval (2), async coroutine StopIteration .value, and pickle (out of scope) |
-| test_string_literals      |  356 | ready | Ran 20, FAILED (failures=2, errors=10) | `AttributeError: module 'unittest' has no attribute '__warningregistry__'` (warning-state plumbing) |
+| test_string_literals      |  356 | ready | Ran 20, FAILED (failures=1, errors=4) | 15/20 OK. eval() now strips leading whitespace (`Python/bltinmodule.c:1036`); string-literal decode errors pin SyntaxError at the token; `\N{NAME}` routes through the full UCD lookup. Remaining 5 all gated on SyntaxWarning plumbing through warnings.catch_warnings |
 | test_type_comments        |  447 | ready | Ran 18, FAILED (errors=18) | `_feature_version` kwarg now accepted; remaining errors track PyCF_ONLY_AST + ast.Mod -> _ast bridge |
 | test_unicode_identifiers  |   32 | ready | OK | Was 3 failures; NFKC fold + char-based SyntaxError column close the panel |
 | test_annotationlib        | 2375 | ready | parse error: `compile: ClassDef with PEP 695 type params not yet supported` | PEP 695 generic-class lowering |
@@ -870,3 +870,59 @@ CPython refs:
 - `Python/ceval.c:1546` `positional_only_passed_as_keyword`
 - `Python/ceval.c:1449` `missing_arguments`
 - `Objects/call.c` `_PyEval_BindArguments`
+
+### P7 closer 12: async for codegen + eval() / string-literal cleanups
+
+`test_grammar` was returning `compile: stmt kind *ast.AsyncFor not yet
+supported` on the first `async for` body it tried to compile.
+`test_string_literals` was sitting at 7 failures (5 errors + 2 fails),
+driven by three independent gaps that all surfaced under `eval()`.
+
+1. **`async for` had no codegen visitor.** `compile/codegen_stmt.go`
+   dispatched every other statement kind but had no arm for
+   `*ast.AsyncFor`. Ported `codegen_async_for`: evaluate iter,
+   `GET_AITER`, then a `SETUP_FINALLY` / `GET_ANEXT` /
+   `LOAD_CONST None` send loop, `POP_BLOCK` + `NOT_TAKEN`, target
+   assign, body, `JUMP` back; the except arm runs `END_ASYNC_FOR`
+   back to the send label, and orelse follows the loop.
+
+   CPython: `Python/codegen.c:2117` `codegen_async_for`.
+
+2. **`eval(" 'x' ")` tripped `IndentationError: unexpected indent`.**
+   The tokenizer's INDENT pass sees the leading whitespace and bails
+   out. CPython's `builtin_eval_impl` peels leading spaces and tabs
+   off the source before handing it to the parser; `builtins/eval.go`
+   now does the same for str / bytes / bytearray inputs.
+
+   CPython: `Python/bltinmodule.c:1036` `builtin_eval_impl`.
+
+3. **String-decode errors were swallowed in pegen.**
+   `decodeStringTokenTagged` returned `(_, _, false)` on any
+   `parser/string.ParseString` error, so the action helper produced
+   `placeholderMatched` and the grammar quietly dropped the whole
+   expression. The user saw a downstream NameError instead of a
+   SyntaxError at the literal. Added a
+   `decodeStringTokenTaggedErr` variant that surfaces the underlying
+   error; `actionPgenConstantFromString` pins it via
+   `RaiseSyntaxErrorKnownLocation` at the token's span.
+
+   The original repro `x = "\N{LATIN SMALL LETTER A WITH DIAERESIS}"`
+   also exposed that `parser/string/charname.go` only carried a
+   ~50-entry sparse map. Replaced it with a call into
+   `module/unicodedata.Lookup` (new exported entry that mirrors
+   `unicodedata.lookup()` including alias and named-sequence
+   expansion), and `decode.go` now appends the full expansion so
+   multi-rune named sequences land verbatim.
+
+   CPython: `Parser/string_parser.c:253` `_PyPegen_parse_string`.
+   CPython: `Modules/unicodedata.c:1584` `unicodedata_UCD_lookup_impl`.
+   CPython: `Objects/unicodeobject.c` `_PyUnicode_DecodeUnicodeEscape`.
+
+After these: `test_grammar` advances past `async for` (now blocks on
+a missing test-helper module, separate gate). `test_string_literals`
+drops from 7 failures to 5, all of which share the same root cause
+(`AttributeError: module 'unittest' has no attribute
+'__warningregistry__'` plus `test_invalid_escape_locations_with_offset`
+which depends on `warnings.catch_warnings` actually capturing the
+SyntaxWarning the parser emits). That's a separate
+SyntaxWarning-plumbing gate, not a parser/AST gap.
