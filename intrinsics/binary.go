@@ -39,30 +39,65 @@ func BinaryPrepReraiseStar(ts *state.Thread, lhs, rhs objects.Object) (objects.O
 	return nil, notImplemented("BinaryPrepReraiseStar", "ExceptionGroup type lives in 1686")
 }
 
-// BinaryTypevarWithBound builds TypeVar(name, bound=...).
+// BinaryTypevarWithBound builds TypeVar(name, bound=...). CPython
+// passes the bound as a lazy-eval function (the evaluate_bound thunk);
+// gopy stores whatever the caller pushed so __bound__ returns it.
 //
-// CPython: Python/intrinsics.c typevar_with_bound
-func BinaryTypevarWithBound(ts *state.Thread, lhs, rhs objects.Object) (objects.Object, error) {
-	return nil, notImplemented("BinaryTypevarWithBound", "PEP 695 typevar lives in 1689")
+// CPython: Python/intrinsics.c:244 make_typevar_with_bound
+func BinaryTypevarWithBound(ts *state.Thread, name, evaluateBound objects.Object) (objects.Object, error) {
+	n, ok := name.(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: TypeVar name must be a str")
+	}
+	return objects.NewTypeVar(n.Value(), evaluateBound, nil), nil
 }
 
 // BinaryTypevarWithConstraints builds TypeVar(name, *constraints).
 //
-// CPython: Python/intrinsics.c typevar_with_constraints
-func BinaryTypevarWithConstraints(ts *state.Thread, lhs, rhs objects.Object) (objects.Object, error) {
-	return nil, notImplemented("BinaryTypevarWithConstraints", "PEP 695 typevar lives in 1689")
+// CPython: Python/intrinsics.c:252 make_typevar_with_constraints
+func BinaryTypevarWithConstraints(ts *state.Thread, name, evaluateConstraints objects.Object) (objects.Object, error) {
+	n, ok := name.(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: TypeVar name must be a str")
+	}
+	return objects.NewTypeVar(n.Value(), nil, evaluateConstraints), nil
 }
 
 // BinarySetFunctionTypeParams attaches __type_params__ to a function.
+// CPython stamps the tuple directly into func->func_typeparams; the
+// gopy port walks Function.Dict and writes "__type_params__" there.
 //
 // CPython: Python/intrinsics.c set_function_type_params
-func BinarySetFunctionTypeParams(ts *state.Thread, lhs, rhs objects.Object) (objects.Object, error) {
-	return nil, notImplemented("BinarySetFunctionTypeParams", "function object __type_params__ slot lives in 1685")
+func BinarySetFunctionTypeParams(ts *state.Thread, fn, params objects.Object) (objects.Object, error) {
+	f, ok := fn.(*objects.Function)
+	if !ok {
+		return nil, errors.New("TypeError: __type_params__ target is not a function")
+	}
+	tup, ok := params.(*objects.Tuple)
+	if !ok {
+		return nil, errors.New("TypeError: __type_params__ must be a tuple")
+	}
+	f.Typeparams = tup
+	return fn, nil
 }
 
-// BinarySetTypeparamDefault sets a TypeVar's default. Added in 3.13.
+// BinarySetTypeparamDefault sets a TypeVar/ParamSpec/TypeVarTuple's
+// __default__ slot. Added in 3.13 alongside PEP 696.
 //
 // CPython: Python/intrinsics.c set_typeparam_default
-func BinarySetTypeparamDefault(ts *state.Thread, lhs, rhs objects.Object) (objects.Object, error) {
-	return nil, notImplemented("BinarySetTypeparamDefault", "PEP 695 typevar default lives in 1689")
+func BinarySetTypeparamDefault(ts *state.Thread, typeparam, defaultVal objects.Object) (objects.Object, error) {
+	switch tp := typeparam.(type) {
+	case *objects.TypeVar:
+		tp.Default = defaultVal
+		tp.HasDefault = true
+	case *objects.ParamSpec:
+		tp.Default = defaultVal
+		tp.HasDefault = true
+	case *objects.TypeVarTuple:
+		tp.Default = defaultVal
+		tp.HasDefault = true
+	default:
+		return nil, errors.New("TypeError: set_typeparam_default expects TypeVar/ParamSpec/TypeVarTuple")
+	}
+	return typeparam, nil
 }

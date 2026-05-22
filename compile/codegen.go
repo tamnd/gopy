@@ -15,17 +15,26 @@ import (
 )
 
 // Intrinsic ids for CALL_INTRINSIC_1. CPython:
-// Include/internal/pycore_intrinsics.h INTRINSIC_*. Add more as the
-// visitors that emit them land.
+// Include/internal/pycore_intrinsics.h INTRINSIC_*. Numbering matches
+// CPython byte-for-byte so the VM dispatch table indexes line up with
+// the eval loop's CALL_INTRINSIC_1 reader.
 const (
 	intrinsicPrint              int32 = 1
 	intrinsicStopIterationError int32 = 3
+	intrinsicTypeVar            int32 = 7
+	intrinsicParamSpec          int32 = 8
+	intrinsicTypeVarTuple       int32 = 9
+	intrinsicSubscriptGeneric   int32 = 10
 )
 
 // Intrinsic ids for CALL_INTRINSIC_2. CPython:
 // Include/internal/pycore_intrinsics.h INTRINSIC_2_*.
 const (
-	intrinsicPrepReraiseStar int32 = 1
+	intrinsicPrepReraiseStar         int32 = 1
+	intrinsicTypeVarWithBound        int32 = 2
+	intrinsicTypeVarWithConstraints  int32 = 3
+	intrinsicSetFunctionTypeParams   int32 = 4
+	intrinsicSetTypeParamDefault     int32 = 5
 )
 
 // Operands for LOAD_SPECIAL. CPython:

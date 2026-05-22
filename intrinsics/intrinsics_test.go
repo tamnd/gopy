@@ -88,11 +88,25 @@ func TestBinaryInvalidErrors(t *testing.T) {
 }
 
 func TestStubHelpersReturnNotImplemented(t *testing.T) {
-	// Implemented helpers, skip them in the stub sweep.
+	// Implemented helpers, skip them in the stub sweep. PEP 695
+	// intrinsics (UnaryTypevar..UnaryTypealias and BinaryTypevarWith*)
+	// landed via spec 1719 and now return TypeError on bad input
+	// rather than notImplementedError, so they're excluded here too.
 	implementedUnary := map[int]bool{
-		UnaryListToTupleID:   true,
-		UnaryStopIterErrorID: true,
-		UnaryPositiveID:      true,
+		UnaryListToTupleID:      true,
+		UnaryStopIterErrorID:    true,
+		UnaryPositiveID:         true,
+		UnaryTypevarID:          true,
+		UnaryParamspecID:        true,
+		UnaryTypevartupleID:     true,
+		UnarySubscriptGenericID: true,
+		UnaryTypealiasID:        true,
+	}
+	implementedBinary := map[int]bool{
+		BinaryTypevarWithBoundID:       true,
+		BinaryTypevarWithConstraintsID: true,
+		BinarySetFunctionTypeParamsID:  true,
+		BinarySetTypeparamDefaultID:    true,
 	}
 	for i := 1; i <= MaxUnary; i++ {
 		if implementedUnary[i] {
@@ -105,6 +119,9 @@ func TestStubHelpersReturnNotImplemented(t *testing.T) {
 		}
 	}
 	for i := 1; i <= MaxBinary; i++ {
+		if implementedBinary[i] {
+			continue
+		}
 		_, err := BinaryTable[i](nil, nil, nil)
 		var nie *notImplementedError
 		if !errors.As(err, &nie) {

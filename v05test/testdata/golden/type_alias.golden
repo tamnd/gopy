@@ -1,8 +1,15 @@
    0 RESUME                         0
    2 LOAD_CONST                     0
    4 LOAD_CONST                     1
-   6 LOAD_NAME                      0
-   8 CALL_INTRINSIC_1               12
-  10 STORE_NAME                     1
-  12 LOAD_CONST                     1
-  14 RETURN_VALUE                   0
+   6 LOAD_CONST                     2
+   8 MAKE_FUNCTION                  0
+  10 BUILD_TUPLE                    3
+  12 CALL_INTRINSIC_1               11
+  14 STORE_NAME                     0
+  16 LOAD_CONST                     1
+  18 RETURN_VALUE                   0
+
+Disassembly of X:
+     0 RESUME                         0
+     2 LOAD_NAME                      0
+     4 RETURN_VALUE                   0

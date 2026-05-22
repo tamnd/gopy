@@ -145,35 +145,65 @@ func UnaryListToTuple(ts *state.Thread, v objects.Object) (objects.Object, error
 
 // UnaryTypevar builds a PEP 695 TypeVar(name) runtime object.
 //
-// CPython: Python/intrinsics.c make_typevar
+// CPython: Python/intrinsics.c:200 make_typevar
 func UnaryTypevar(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryTypevar", "PEP 695 typevar lives in 1689")
+	name, ok := v.(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: TypeVar name must be a str")
+	}
+	return objects.NewTypeVar(name.Value(), nil, nil), nil
 }
 
 // UnaryParamspec builds a PEP 695 ParamSpec(name) runtime object.
 //
-// CPython: Python/intrinsics.c make_paramspec
+// CPython: Python/intrinsics.c _Py_make_paramspec
 func UnaryParamspec(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryParamspec", "PEP 695 paramspec lives in 1689")
+	name, ok := v.(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: ParamSpec name must be a str")
+	}
+	return objects.NewParamSpec(name.Value()), nil
 }
 
 // UnaryTypevartuple builds a PEP 695 TypeVarTuple(name) runtime object.
 //
-// CPython: Python/intrinsics.c make_typevartuple
+// CPython: Python/intrinsics.c _Py_make_typevartuple
 func UnaryTypevartuple(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryTypevartuple", "PEP 695 typevartuple lives in 1689")
+	name, ok := v.(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: TypeVarTuple name must be a str")
+	}
+	return objects.NewTypeVarTuple(name.Value()), nil
 }
 
-// UnarySubscriptGeneric implements Generic[T] subscription.
+// UnarySubscriptGeneric implements Generic[T] subscription. The
+// returned GenericAlias has Generic as its origin and the type-param
+// tuple as args, so __mro_entries__ pulls Generic itself into the
+// derived class's bases.
 //
-// CPython: Python/intrinsics.c subscript_generic
+// CPython: Python/intrinsics.c _Py_subscript_generic
 func UnarySubscriptGeneric(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnarySubscriptGeneric", "Generic[...] lives in 1689")
+	params, ok := v.(*objects.Tuple)
+	if !ok {
+		return nil, errors.New("TypeError: Generic[...] requires a tuple of type parameters")
+	}
+	return objects.NewGenericAlias(objects.GenericType, params), nil
 }
 
-// UnaryTypealias materializes a `type X = ...` runtime alias.
+// UnaryTypealias materializes a `type X = ...` runtime alias. The
+// argument is a 3-tuple (name, type_params, compute_value). For the
+// non-generic form CPython passes type_params=None and compute_value
+// is a function that evaluates the alias's value lazily.
 //
-// CPython: Python/intrinsics.c type_alias
+// CPython: Objects/typevarobject.c:2181 _Py_make_typealias
 func UnaryTypealias(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryTypealias", "PEP 695 type aliases live in 1689")
+	tup, ok := v.(*objects.Tuple)
+	if !ok || tup.Len() != 3 {
+		return nil, errors.New("TypeError: type alias intrinsic expects a 3-tuple")
+	}
+	name, ok := tup.Item(0).(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: type alias name must be a str")
+	}
+	return objects.NewTypeAlias(name.Value(), tup.Item(1), tup.Item(2)), nil
 }

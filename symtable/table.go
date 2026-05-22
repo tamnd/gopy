@@ -42,3 +42,20 @@ func (t *Table) Lookup(key any) *Entry {
 	}
 	return t.Blocks[key]
 }
+
+// LookupTypeParams returns the Entry for the synthetic
+// TypeParametersBlock wrapping the generic def/class/alias whose AST
+// key is `parent`. nil if no such block was registered.
+//
+// CPython: Python/symtable.c symtable_enter_type_param_block keys the
+// new block by (parent, -1). gopy mirrors that via the unexported
+// typeParamSubexprKey, so callers in compile that need the wrapper
+// scope go through this helper rather than reconstructing the key.
+//
+// CPython: Python/symtable.c:1659 symtable_enter_type_param_block
+func (t *Table) LookupTypeParams(parent any) *Entry {
+	if t == nil {
+		return nil
+	}
+	return t.Blocks[typeParamSubexprKey{parent, -1}]
+}
