@@ -90,6 +90,19 @@ func (f *fakeInterp) FrameCellLocal(i int) Object { return f.cells[i] }
 func (f *fakeInterp) FrameNumFrees() int          { return len(f.frees) }
 func (f *fakeInterp) FrameFreeLocal(i int) Object { return f.frees[i] }
 func (f *fakeInterp) FrameFunc() Object           { return nil }
+func (f *fakeInterp) FrameLocalsPlusItem(i int) Object {
+	n := len(f.fast)
+	if i < n {
+		return f.fast[i]
+	}
+	if i < n+len(f.cells) {
+		return f.cells[i-n]
+	}
+	if i < n+len(f.cells)+len(f.frees) {
+		return f.frees[i-n-len(f.cells)]
+	}
+	return nil
+}
 
 func TestFrameTraverseVisitsScopeAndLocals(t *testing.T) {
 	g := NewDict()

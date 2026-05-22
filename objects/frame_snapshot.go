@@ -64,5 +64,6 @@ func (s *FrameSnapshot) FrameNumLocals() int       { return 0 }
 func (s *FrameSnapshot) FrameFastLocal(int) Object { return nil }
 func (s *FrameSnapshot) FrameNumCells() int        { return 0 }
 func (s *FrameSnapshot) FrameCellLocal(int) Object { return nil }
-func (s *FrameSnapshot) FrameNumFrees() int        { return 0 }
-func (s *FrameSnapshot) FrameFreeLocal(int) Object { return nil }
+func (s *FrameSnapshot) FrameNumFrees() int             { return 0 }
+func (s *FrameSnapshot) FrameFreeLocal(int) Object      { return nil }
+func (s *FrameSnapshot) FrameLocalsPlusItem(int) Object { return nil }
