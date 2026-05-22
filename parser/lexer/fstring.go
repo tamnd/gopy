@@ -190,6 +190,20 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 		}
 		endQuoteSize = 0
 
+		// Triple-quoted f-strings span multiple physical lines.
+		// CPython's tok_nextc bumps tok->lineno from the underflow
+		// callback as each line is loaded; gopy preloads the whole
+		// buffer so the line counter must be advanced here, mirroring
+		// scanString's '\n' arm.
+		//
+		// CPython: Parser/lexer/lexer.c:1462 f_string_middle ('\n' falls
+		// through the EOF/single-line guard and into tok_nextc which
+		// bumps tok->lineno on the next refill)
+		if c == '\n' {
+			s.pendingLineno++
+			s.col = 0
+		}
+
 		if c == '{' {
 			// CPython snapshots the expression source at the opening
 			// `{` so set_ftstring_expr can later attach it as token
