@@ -623,7 +623,7 @@ func actionPgenJoinSequences(p *Parser, args ...any) any {
 
 func actionPgenGetExprName(p *Parser, args ...any) any {
 	_ = p
-	if e := asExpr(argAt(args, 1)); e != nil {
+	if e := asExpr(argAt(args, 0)); e != nil {
 		return GetExprName(e)
 	}
 	return "expression"

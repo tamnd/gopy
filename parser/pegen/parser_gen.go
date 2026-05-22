@@ -11082,7 +11082,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			_ = op
 			opt := parseRule__rhs_87(p)
 			_ = opt
-			return []any{a, b, op, opt}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, actionPgenGetLastComprehensionItem(p, seqLastAny(b)), "Generator expression must be parenthesized"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_arguments, v)
 			return v
@@ -11161,7 +11161,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			b := parseRule_for_if_clauses(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{args, op, a, b}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, actionPgenGetLastComprehensionItem(p, seqLastAny(b)), "Generator expression must be parenthesized"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_arguments, v)
 			return v
@@ -11927,7 +11927,7 @@ func parseRule_invalid_comprehension(p *Parser) any {
 			for_if_clauses := parseRule_for_if_clauses(p)
 			if for_if_clauses == nil { return nil }
 			_ = for_if_clauses
-			return []any{g, a, op, b, for_if_clauses}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, seqLastAny(b), "did you forget parentheses around the comprehension target?"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_comprehension, v)
 			return v
@@ -14954,7 +14954,7 @@ func parseRule_invalid_string_tstring_concat(p *Parser) any {
 			b := parseRule_tstring(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", seqLastAny(a), b, "cannot mix t-string literals with string or bytes literals"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_string_tstring_concat, v)
 			return v
@@ -14970,7 +14970,7 @@ func parseRule_invalid_string_tstring_concat(p *Parser) any {
 			b := parseRule__group_131(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", seqLastAny(a), b, "cannot mix t-string literals with string or bytes literals"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_string_tstring_concat, v)
 			return v
@@ -19368,6 +19368,7 @@ func parseRule__rhs_156(p *Parser) any {
 // Action helper stubs. The action translator emits calls into
 // these names; real implementations land with the AST surface.
 func actionPgenCheckLegacyStmt(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionPgenGetLastComprehensionItem(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 
 // placeholderMatched is a non-nil sentinel returned by alts
 // whose items all bind to skip-vars. M6 replaces it with

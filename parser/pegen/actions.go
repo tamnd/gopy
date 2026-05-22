@@ -85,6 +85,28 @@ func SeqLastItem[T any](seq []T) T {
 	return seq[len(seq)-1]
 }
 
+// seqLastAny returns the last element of a sequence-shaped action
+// result. Rule-result sequences arrive as `[]any` from the generator;
+// individual AST nodes are passed through untouched so the caller can
+// chain extractPos on either form.
+//
+// CPython: Parser/pegen.h:265 PyPegen_last_item macro
+func seqLastAny(v any) any {
+	for {
+		switch x := v.(type) {
+		case nil:
+			return nil
+		case []any:
+			if len(x) == 0 {
+				return nil
+			}
+			v = x[len(x)-1]
+		default:
+			return v
+		}
+	}
+}
+
 // SeqCountDots counts the leading DOT/ELLIPSIS tokens that the
 // `from ... import` rule accepts. ELLIPSIS counts as three dots.
 //
@@ -208,11 +230,51 @@ func setStarredContext(p *Parser, e *ast.Starred, ctx ast.ExprContext) ast.Expr 
 }
 
 // GetExprName returns the human-readable phrase used in
-// "cannot assign to %s" diagnostics for an expression.
+// "cannot assign to %s" diagnostics for an expression. The set of
+// returned strings matches CPython's `_PyPegen_get_expr_name` switch
+// arm-for-arm so messages from `invalid_*` rules read identically.
 //
-// CPython: Parser/action_helpers.c:1259 _PyPegen_get_expr_name
+// CPython: Parser/action_helpers.c:1043 _PyPegen_get_expr_name
 func GetExprName(e ast.Expr) string {
 	switch v := e.(type) {
+	case *ast.Attribute:
+		return "attribute"
+	case *ast.Subscript:
+		return "subscript"
+	case *ast.Starred:
+		return "starred"
+	case *ast.Name:
+		return "name"
+	case *ast.List:
+		return "list"
+	case *ast.Tuple:
+		return "tuple"
+	case *ast.Lambda:
+		return "lambda"
+	case *ast.Call:
+		return "function call"
+	case *ast.BoolOp, *ast.BinOp, *ast.UnaryOp:
+		return "expression"
+	case *ast.GeneratorExp:
+		return "generator expression"
+	case *ast.Yield, *ast.YieldFrom:
+		return "yield expression"
+	case *ast.Await:
+		return "await expression"
+	case *ast.ListComp:
+		return "list comprehension"
+	case *ast.SetComp:
+		return "set comprehension"
+	case *ast.DictComp:
+		return "dict comprehension"
+	case *ast.Dict:
+		return "dict literal"
+	case *ast.Set:
+		return "set display"
+	case *ast.JoinedStr, *ast.FormattedValue:
+		return "f-string expression"
+	case *ast.TemplateStr, *ast.Interpolation:
+		return "t-string expression"
 	case *ast.Constant:
 		switch x := v.Value.(type) {
 		case nil:
@@ -225,24 +287,12 @@ func GetExprName(e ast.Expr) string {
 		default:
 			return "literal"
 		}
-	case *ast.Name:
-		return "Name"
-	case *ast.Attribute:
-		return "attribute"
-	case *ast.Subscript:
-		return "subscript"
-	case *ast.Starred:
-		return "starred"
-	case *ast.List:
-		return "list"
-	case *ast.Tuple:
-		return "tuple"
-	case *ast.Call:
-		return "function call"
-	case *ast.JoinedStr, *ast.FormattedValue:
-		return "f-string expression"
-	case *ast.TemplateStr, *ast.Interpolation:
-		return "t-string expression"
+	case *ast.Compare:
+		return "comparison"
+	case *ast.IfExp:
+		return "conditional expression"
+	case *ast.NamedExpr:
+		return "named expression"
 	}
 	return "expression"
 }

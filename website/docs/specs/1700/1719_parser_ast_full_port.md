@@ -130,7 +130,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_decorators           |  341 | ready | **16/16 OK** | none. Function `__name__` / `__qualname__` now reuse the same *Unicode wrapper across reads, so functools_wraps preserves identity for classmethod / staticmethod |
 | test_eof                  |  171 | ready | **6/6 OK** | none. backslash-EOF caret + text + offset land on CPython numbers |
 | test_keywordonlyarg       |  178 | ready | **11/11 OK** | none. Single-input ENDMARKER rewrite + real `raiseAction` + `codegen_validate_keywords` port |
-| test_named_expressions    |  767 | ready | Ran 74, FAILED (failures=8, errors=77) | `NameError: name 'range' is not defined` inside class bodies + walrus codegen rows |
+| test_named_expressions    |  767 | ready | **74/74 OK** | none. `actionPgenGetExprName` arg index + missing AST kinds in `GetExprName` + `PyPegen_last_item` translator |
 | test_positional_only_arg  |  452 | ready | Ran 28, FAILED (failures=16, errors=7) | `f() got multiple values for argument` + parse errors on pos-only test sources |
 | test_string_literals      |  356 | ready | Ran 20, FAILED (failures=2, errors=10) | `AttributeError: module 'unittest' has no attribute '__warningregistry__'` (warning-state plumbing) |
 | test_type_comments        |  447 | ready | Ran 18, FAILED (errors=18) | `_feature_version` kwarg now accepted; remaining errors track PyCF_ONLY_AST + ast.Mod -> _ast bridge |
@@ -768,3 +768,42 @@ CPython refs:
 - `Parser/action_helpers.c:1224` `_PyPegen_arguments_parsing_error`
 - `Python/codegen.c:4018` `codegen_validate_keywords`
 - `Python/compile.c:1191` `_PyCompile_Error`
+
+### P5 closer 1: GetExprName arg index + PyPegen_last_item
+
+Three independent bugs shared a single panel row, `test_named_expressions`.
+
+1. `actionPgenGetExprName` read `argAt(args, 1)` but the generator
+   emits the helper without the `(p, p, …)` doubling that the other
+   action helpers use, so the real arg landed at `args[0]`. Every
+   walrus / `:= rhs` diagnostic message ("cannot use assignment
+   expressions with %s") therefore reported "expression" no matter
+   what the LHS was.
+
+2. `GetExprName` only handled half of the AST kinds CPython's
+   `_PyPegen_get_expr_name` covers (`Parser/action_helpers.c:1043`).
+   Lambda, BoolOp / BinOp / UnaryOp, GeneratorExp, Yield / YieldFrom,
+   Await, ListComp / SetComp / DictComp, Dict, Set, Compare, IfExp,
+   NamedExpr were all missing, so messages like
+   "cannot use assignment expressions with lambda" / "...with tuple"
+   came back as "...with expression".
+
+3. The `invalid_comprehension` alt 1 in `Parser/Python.gram:1303`
+   passes `PyPegen_last_item(b, expr_ty)` as the range end. The
+   action translator had no case for that macro, so the generator
+   gave up on the action and fell back to `return []any{…}`. The
+   alt then quietly matched without raising, so
+   `[i := 0, j := 1 for i, j in ...]` reached the outer parser and
+   surfaced as a generic "invalid syntax" instead of "did you forget
+   parentheses around the comprehension target?". Fix: teach
+   `Tools/parser_gen/action.go translateCall` to map
+   `PyPegen_last_item(seq, _)` onto a new `seqLastAny(seq)` runtime
+   helper (the type tag has no Go equivalent) and regenerate
+   `parser/pegen/parser_gen.go`.
+
+After these three: `test_named_expressions` passes 74/74.
+
+CPython refs:
+- `Parser/action_helpers.c:1043` `_PyPegen_get_expr_name`
+- `Parser/pegen.h:265` `PyPegen_last_item` macro
+- `Parser/Python.gram:1303` `invalid_comprehension` alt 1

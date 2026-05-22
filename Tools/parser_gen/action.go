@@ -614,6 +614,15 @@ func translateCall(fname string, args []string) (string, bool) {
 		"RAISE_SYNTAX_ERROR_STARTING_FROM", "RAISE_SYNTAX_ERROR_INVALID_TARGET",
 		"RAISE_INDENTATION_ERROR", "RAISE_ERROR_KNOWN_LOCATION":
 		return "raiseAction(p, " + strconv.Quote(fname) + ", " + joinArgsForRaise(args) + ")", true
+	case "PyPegen_last_item":
+		// PyPegen_last_item(seq, type) returns the last element of a
+		// sequence. The second arg is a C type tag that the Go side
+		// does not need; sequences are untyped []any in the action
+		// helpers.
+		// CPython: Parser/pegen.h:265 PyPegen_last_item macro
+		if len(args) >= 1 {
+			return "seqLastAny(" + args[0] + ")", true
+		}
 	}
 	if strings.HasPrefix(fname, "_PyAST_") {
 		ctor := fname[len("_PyAST_"):]
