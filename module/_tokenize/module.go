@@ -67,6 +67,14 @@ type tokenizerIter struct {
 	// 1..N. linesByOneBased[0] is an empty placeholder so lineno-1
 	// indexing matches CPython's 1-based line numbers.
 	linesByOneBased []string
+
+	// implicitNewline records that drainReadline appended a synthetic
+	// '\n' because the source didn't end with one. The trailing
+	// NEWLINE token whose end offset lands on that byte must report
+	// string='' (CPython: Python/Python-tokenize.c:281 tokenizeriter_next
+	// NEWLINE branch checks tok->implicit_newline).
+	implicitNewline bool
+	implicitEndOff  int
 }
 
 // Type returns the tokenizer iterator's type.
@@ -114,7 +122,7 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 		}
 	}
 
-	source, lines, err := drainReadline(readline, encoding)
+	source, lines, implicit, err := drainReadline(readline, encoding)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +138,8 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 		extraTokens:     extraTokens,
 		encoding:        encoding,
 		linesByOneBased: lines,
+		implicitNewline: implicit,
+		implicitEndOff:  len(source) - 1,
 	}
 	return it, nil
 }
@@ -146,7 +156,7 @@ func tokenizerIterNew(cls *objects.Type, args []objects.Object, kwargs map[strin
 // return bytes that the named encoding decodes.
 //
 // CPython: Parser/tokenizer/readline_tokenizer.c:10 tok_readline_string
-func drainReadline(readline objects.Object, encoding string) ([]byte, []string, error) {
+func drainReadline(readline objects.Object, encoding string) ([]byte, []string, bool, error) {
 	var buf []byte
 	var lines []string
 	lines = append(lines, "") // 1-based padding
@@ -156,30 +166,30 @@ func drainReadline(readline objects.Object, encoding string) ([]byte, []string, 
 			if errors.Is(err, objects.ErrStopIteration) {
 				break
 			}
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		var line []byte
 		switch v := res.(type) {
 		case *objects.Bytes:
 			if encoding == "" {
-				return nil, nil, fmt.Errorf("TypeError: readline() returned a non-string object")
+				return nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
 			}
 			line = append([]byte(nil), v.Bytes()...)
 		case *objects.ByteArray:
 			if encoding == "" {
-				return nil, nil, fmt.Errorf("TypeError: readline() returned a non-string object")
+				return nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-string object")
 			}
 			line = append([]byte(nil), v.Bytes()...)
 		case *objects.Unicode:
 			if encoding != "" {
-				return nil, nil, fmt.Errorf("TypeError: readline() returned a non-bytes object")
+				return nil, nil, false, fmt.Errorf("TypeError: readline() returned a non-bytes object")
 			}
 			line = []byte(v.Value())
 		default:
 			if res == objects.None() {
 				break
 			}
-			return nil, nil, fmt.Errorf("TypeError: readline returned %s, expected bytes/str", res.Type().Name)
+			return nil, nil, false, fmt.Errorf("TypeError: readline returned %s, expected bytes/str", res.Type().Name)
 		}
 		if len(line) == 0 {
 			break
@@ -199,11 +209,14 @@ func drainReadline(readline objects.Object, encoding string) ([]byte, []string, 
 			break
 		}
 	}
-	// CPython's tokenizer requires the buffer end with '\n'.
-	if len(buf) == 0 || buf[len(buf)-1] != '\n' {
+	// CPython's tokenizer requires the buffer end with '\n'; mark
+	// implicit when we synthesized one so the wrapper can echo ''
+	// rather than '\n' for the trailing NEWLINE.
+	implicit := len(buf) == 0 || buf[len(buf)-1] != '\n'
+	if implicit {
 		buf = append(buf, '\n')
 	}
-	return buf, lines, nil
+	return buf, lines, implicit, nil
 }
 
 // tokenizerIterNext is the tp_iternext slot. It produces a 5-tuple
@@ -299,7 +312,14 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 			kind = token.OP
 		}
 		if kind == token.NEWLINE {
-			if str == "" {
+			// CPython: Python/Python-tokenize.c:281 tokenizeriter_next
+			// reports str='' for the implicit '\n' synthesized when
+			// the source didn't end with one; the wrapper preserves
+			// '\n' for every other NEWLINE so callers can distinguish
+			// the two.
+			if it.implicitNewline && tok.EndOffset == it.implicitEndOff {
+				str = ""
+			} else if str == "" {
 				str = "\n"
 			}
 			endCol++
