@@ -470,7 +470,7 @@ func (c *Compiler) patternSequenceSubscr(p *ast.MatchSequence, star int, pc *pat
 // to a single Constant. CPython gets to skip this because its compiler
 // runs _PyAST_Optimize before codegen, folding `-0-0j` to a single
 // Constant; gopy has no AST optimizer pass yet, so the codegen needs
-// to recognise the parser's literal-expression spelling directly.
+// to recognize the parser's literal-expression spelling directly.
 //
 // CPython: Python/ast_opt.c:457 fold_unaryop / fold_binop, called via
 // Python/compile.c:1733 _PyCompile_AstOptimize

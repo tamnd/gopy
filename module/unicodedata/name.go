@@ -471,7 +471,7 @@ func lookupImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (
 //
 // CPython: Modules/unicodedata.c:1584 unicodedata_UCD_lookup_impl
 func Lookup(name string) (string, bool) {
-	if len(name) == 0 || len(name) > nameMaxLen {
+	if name == "" || len(name) > nameMaxLen {
 		return "", false
 	}
 	code := getCode(name)

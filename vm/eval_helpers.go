@@ -855,7 +855,8 @@ func (e *evalState) dictMergeEx(a, b objects.Object, override int32) int32 {
 		return -1
 	}
 	if merr := dictMergeKwargs(d, b); merr != nil {
-		if dup, isDup := merr.(*kwargsDuplicateErr); isDup && override == 2 {
+		var dup *kwargsDuplicateErr
+		if errors.As(merr, &dup) && override == 2 {
 			if s, sok := dup.key.(*objects.Unicode); sok {
 				e.pendingErr = fmt.Errorf("TypeError: got multiple values for keyword argument '%s'", s.Value())
 			} else {
@@ -928,7 +929,7 @@ func dictMergeKwargs(d *objects.Dict, b objects.Object) error {
 	}
 	for {
 		k, nerr := objects.IterNext(it)
-		if nerr == objects.ErrStopIteration {
+		if errors.Is(nerr, objects.ErrStopIteration) {
 			return nil
 		}
 		if nerr != nil {
@@ -953,16 +954,18 @@ func dictMergeKwargs(d *objects.Dict, b objects.Object) error {
 // other error percolates unchanged.
 //
 // CPython: Python/ceval.c:3410 _PyEval_FormatKwargsError
-func formatKwargsError(callable, kwargs objects.Object, err error) error {
+func formatKwargsError(callable objects.Object, err error) error {
 	funcstr := objectFunctionStr(callable)
-	switch e := err.(type) {
-	case *kwargsDuplicateErr:
-		if s, ok := e.key.(*objects.Unicode); ok {
+	var dup *kwargsDuplicateErr
+	if errors.As(err, &dup) {
+		if s, ok := dup.key.(*objects.Unicode); ok {
 			return fmt.Errorf("TypeError: %s got multiple values for keyword argument '%s'", funcstr, s.Value())
 		}
 		return fmt.Errorf("TypeError: %s got multiple values for keyword argument", funcstr)
-	case *kwargsNotMappingErr:
-		return fmt.Errorf("TypeError: %s argument after ** must be a mapping, not %s", funcstr, e.src.Type().Name)
+	}
+	var notMap *kwargsNotMappingErr
+	if errors.As(err, &notMap) {
+		return fmt.Errorf("TypeError: %s argument after ** must be a mapping, not %s", funcstr, notMap.src.Type().Name)
 	}
 	return err
 }
@@ -1418,7 +1421,7 @@ func (e *evalState) dictUpdate(a, b objects.Object) int32 {
 	}
 	for {
 		k, nerr := objects.IterNext(it)
-		if nerr == objects.ErrStopIteration {
+		if errors.Is(nerr, objects.ErrStopIteration) {
 			return 0
 		}
 		if nerr != nil {

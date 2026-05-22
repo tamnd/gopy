@@ -169,11 +169,12 @@ func (p *Parser) tokenizeFullSourceCheckForErrors() {
 	saved := p.pinnedErr
 	savedFromTok := p.pinnedFromTokenizer
 	currentErrLine := 0
-	if saved != nil {
+	switch {
+	case saved != nil:
 		currentErrLine = saved.Pos.Lineno
-	} else if p.knownErrToken != nil {
+	case p.knownErrToken != nil:
 		currentErrLine = p.knownErrToken.Lineno
-	} else if p.fill > 0 {
+	case p.fill > 0:
 		currentErrLine = p.tokens[p.fill-1].Lineno
 	}
 	// Speculatively clear so the lexer's new error can pin itself.

@@ -327,4 +327,3 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 	}
 	return Eval(ts, f)
 }
-

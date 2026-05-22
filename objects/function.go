@@ -28,8 +28,8 @@ const CoHasDocstring = 0x4000000
 // CPython: Include/cpython/funcobject.h:36 PyFunctionObject
 type Function struct {
 	Header
-	Name        string
-	Qualname    string
+	Name     string
+	Qualname string
 	// nameObj / qualnameObj cache the *Unicode wrappers for Name and
 	// Qualname so two consecutive reads of __name__ or __qualname__
 	// return the same Python object. CPython stores func_name and

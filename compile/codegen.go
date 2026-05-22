@@ -30,11 +30,11 @@ const (
 // Intrinsic ids for CALL_INTRINSIC_2. CPython:
 // Include/internal/pycore_intrinsics.h INTRINSIC_2_*.
 const (
-	intrinsicPrepReraiseStar         int32 = 1
-	intrinsicTypeVarWithBound        int32 = 2
-	intrinsicTypeVarWithConstraints  int32 = 3
-	intrinsicSetFunctionTypeParams   int32 = 4
-	intrinsicSetTypeParamDefault     int32 = 5
+	intrinsicPrepReraiseStar        int32 = 1
+	intrinsicTypeVarWithBound       int32 = 2
+	intrinsicTypeVarWithConstraints int32 = 3
+	intrinsicSetFunctionTypeParams  int32 = 4
+	intrinsicSetTypeParamDefault    int32 = 5
 )
 
 // Operands for LOAD_SPECIAL. CPython:

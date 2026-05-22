@@ -39,6 +39,7 @@ func (f *fakeInterpFrame) FrameNumFrees() int { return len(f.frees) }
 func (f *fakeInterpFrame) FrameFreeLocal(i int) Object {
 	return f.frees[i]
 }
+
 func (f *fakeInterpFrame) FrameLocalsPlusItem(i int) Object {
 	n := len(f.fast)
 	if i < n {

@@ -569,7 +569,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		callable := e.peek(int(oparg) + 2).AsObject()
 		if merr := dictMergeKwargs(d, src); merr != nil {
-			return 0, true, formatKwargsError(callable, src, merr)
+			return 0, true, formatKwargsError(callable, merr)
 		}
 		return e.advance(), true, nil
 

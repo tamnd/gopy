@@ -61,7 +61,6 @@ func typeInitDescr(args []Object, _ map[string]Object) (Object, error) {
 	return None(), nil
 }
 
-
 // typeCall is the tp_call slot for `type` itself (and, by inheritance,
 // every class). Behavior:
 //

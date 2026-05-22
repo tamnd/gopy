@@ -16,6 +16,7 @@
 package pegen
 
 import (
+	"errors"
 	"math/big"
 	"strconv"
 	"strings"
@@ -568,7 +569,7 @@ func actionAstMatchAs(p *Parser, args ...any) any {
 	return out
 }
 
-// actionAstMatchOr materialises a MatchOr from the gather-rule output.
+// actionAstMatchOr materializes a MatchOr from the gather-rule output.
 // The grammar wraps this in a `len == 1 ? get(0) : MatchOr(...)` ternary
 // so this helper always receives a sequence with at least two members;
 // the collapse case is handled by seqLenAny / seqGetAny in the
@@ -732,7 +733,7 @@ func actionPgenConstantFromString(p *Parser, args ...any) any {
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	body, isBytes, derr, ok := decodeStringTokenTaggedErr(string(t.Bytes))
+	body, isBytes, ok, derr := decodeStringTokenTaggedErr(string(t.Bytes))
 	if !ok {
 		if derr != nil && p != nil {
 			p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
@@ -1457,11 +1458,11 @@ func parseNumberLiteral(s string) (any, bool) {
 //
 // CPython: Parser/string_parser.c:1280 parsenumber_raw (PyOS_string_to_double accepts overflow)
 func isFloatRange(err error) bool {
-	ne, ok := err.(*strconv.NumError)
-	if !ok {
+	var ne *strconv.NumError
+	if !errors.As(err, &ne) {
 		return false
 	}
-	return ne.Err == strconv.ErrRange
+	return errors.Is(ne.Err, strconv.ErrRange)
 }
 
 // decodeStringToken strips quote/prefix wrapping and decodes escapes
@@ -1482,7 +1483,7 @@ func decodeStringToken(s string) (string, bool) {
 //
 // CPython: Parser/string_parser.c:253 _PyPegen_parse_string
 func decodeStringTokenTagged(s string) (string, bool, bool) {
-	body, isBytes, _, ok := decodeStringTokenTaggedErr(s)
+	body, isBytes, ok, _ := decodeStringTokenTaggedErr(s)
 	return body, isBytes, ok
 }
 
@@ -1494,18 +1495,18 @@ func decodeStringTokenTagged(s string) (string, bool, bool) {
 // actionPgenConstantFromString routes through this variant.
 //
 // CPython: Parser/string_parser.c:253 _PyPegen_parse_string
-func decodeStringTokenTaggedErr(s string) (string, bool, error, bool) {
+func decodeStringTokenTaggedErr(s string) (string, bool, bool, error) {
 	if len(s) < 2 {
-		return "", false, nil, false
+		return "", false, false, nil
 	}
 	res, err := stringparse.ParseString([]byte(s))
 	if err != nil {
-		return "", false, err, false
+		return "", false, false, err
 	}
 	if res.IsBytes {
-		return string(res.Bytes), true, nil, true
+		return string(res.Bytes), true, true, nil
 	}
-	return res.Text, false, nil, true
+	return res.Text, false, true, nil
 }
 
 // withitemSeqOf walks v and collects the *ast.Withitem values found
