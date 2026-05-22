@@ -1243,6 +1243,14 @@ func numericForward(a, b objects.Object, sym string, pick func(*objects.NumberMe
 			return out, nil
 		}
 	}
+	// __dunder__ / __rdunder__ fallback so Python classes that define
+	// __add__ / __mul__ / __truediv__ etc. (Decimal, Fraction, ...) get
+	// dispatched. Lands until the slot-wrapper port wires update_one_slot.
+	//
+	// CPython: Objects/typeobject.c:8195 SLOT1BIN
+	if out, ok, err := objects.DunderBinary(a, b, sym); ok {
+		return out, err
+	}
 	return nil, fmt.Errorf("TypeError: unsupported operand type(s) for %s: '%s' and '%s'", sym, a.Type().Name, b.Type().Name)
 }
 
