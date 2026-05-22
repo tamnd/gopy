@@ -24,6 +24,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/builtins"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
@@ -106,18 +107,31 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	}
 
 	// Call meta.__prepare__(name, bases, **kwds) to get the class
-	// namespace. If __prepare__ is not defined, fall back to a plain
-	// dict as CPython does.
+	// namespace. PyObject_GetOptionalAttr suppresses AttributeError
+	// only; other errors (e.g. a descriptor __get__ that raises) must
+	// propagate so the class statement surfaces the real cause.
 	//
 	// CPython: Python/bltinmodule.c:183 PyObject_GetOptionalAttr(meta, __prepare__)
 	var ns objects.Object
 	prep, prepErr := objects.GetAttr(meta, objects.NewStr("__prepare__"))
-	if prepErr == nil && prep != nil {
+	if prepErr != nil {
+		ts := currentThread()
+		if exc := pyerrors.Occurred(ts); exc != nil {
+			if !pyerrors.Match(exc, pyerrors.PyExc_AttributeError) {
+				return nil, prepErr
+			}
+			pyerrors.Clear(ts)
+		} else if !isAttributeErrorMsg(prepErr) {
+			return nil, prepErr
+		}
+		prep = nil
+	}
+	if prep != nil {
 		prepArgsTuple := objects.NewTuple([]objects.Object{nameObj, basesTuple})
 		kwargsDict := kwargsToDict(kwargs)
 		ns, err = objects.Call(prep, prepArgsTuple, kwargsDict)
 		if err != nil {
-			return nil, fmt.Errorf("__prepare__: %w", err)
+			return nil, err
 		}
 	} else {
 		ns = objects.NewDict()

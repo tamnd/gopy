@@ -139,7 +139,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_asdl_parser          |  131 | ready | Traceback (likely module gap) | needs deeper trace |
 | test_fstring              | 1871 | ready | parser farthest-token mis-points to `import ast` line 10 | parser drops mid-file but reports wrong location; root cause around f-string assertAllRaise corpus near line 880-900 |
 | test_global               |  214 | 2 errors | Ran 20, FAILED (errors=2). test_caught_exception_group needs CHECK_EG_MATCH (PEP 654); test_type_alias needs CALL_INTRINSIC_1 oparg 12 (PEP 695). 18/20 pass after match-seq + frame back-pointer + symtable offset fixes. | spec 1719 D-test_global |
-| test_metaclass            |  302 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
+| test_metaclass            |  302 | OK | Ran 1, OK | doctest passes end-to-end after ClassDef ex_call, __prepare__ wrap fix, StringIO encoding/errors, function-metaclass + type.__prepare__, keyword Pos via withSpan, and PyObject_GetOptionalAttr semantics on __prepare__ lookup |
 | test_patma                | 3559 | ready | parse error reporting `import array` line 1 | farthest-token misreport; real failure is array module missing OR a patma rule |
 | test_pep646_syntax        |  329 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
 | test_scope                |  839 | 1 fail | testLeaks (refcount/finalizer issue, not scope-resolution) | finalizer-count cycle |
@@ -1229,3 +1229,66 @@ CPython: `Python/codegen.c:572 codegen_unwind_fblock` (FB_WITH
 preserve_tos branch).
 CPython: `Python/codegen.c:560 codegen_unwind_fblock` (FB_FINALLY_END
 preserve_tos branch).
+
+### P7 closer 15: test_metaclass closes
+
+Six findings, all flushed in the same session so the doctest panel
+row for `test_metaclass` flips from `imp: loadAsModule "typing"` to
+`Ran 1, OK`. CPython is the source of truth for every fix.
+
+1. **ClassDef *args/**kwargs in bases.** `class C(*Bases, **Kw):` was
+   bailing at codegen with `"too many bases"` because the call shape
+   never reached `codegen_call_helper_impl`. Ported the EX dispatch
+   path so the compiler emits `BUILD_LIST` + `LIST_EXTEND` for star
+   args and a dict merge for `**kw`, then `CALL_FUNCTION_EX`. CPython:
+   `Python/codegen.c:4254 codegen_call_helper_impl`.
+
+2. **`__prepare__` was being wrapped as classmethod.** A previous
+   shim auto-wrapped any `__prepare__` defined inside a class body
+   as `classmethod`, which clobbered `@staticmethod __prepare__`
+   that user code uses to control binding. CPython does not
+   auto-wrap `__prepare__`; only `__init_subclass__` and
+   `__class_getitem__` get the implicit `classmethod` wrap, and only
+   when the value is a plain function. CPython:
+   `Objects/typeobject.c:4526 type_new_set_attrs` +
+   `Objects/typeobject.c:4372 type_new_classmethod`.
+
+3. **`_io.StringIO.encoding` / `.errors`.** doctest's `_SpoofOut`
+   subclass of `StringIO` reads `save_stdout.encoding` inside
+   `DocTestRunner.run`; gopy's StringIO had no TextIOBase parent so
+   the getset chain was missing. Served both attributes as `None`
+   directly from the `stringIOGetattr` switch (the descriptor table
+   is bypassed because StringIO publishes a custom `tp_getattro`).
+   CPython: `Modules/_io/textio.c:138 _io__TextIOBase_encoding_get_impl`,
+   `Modules/_io/textio.c:172 _io__TextIOBase_errors_get_impl`.
+
+4. **Function metaclasses + `type.__prepare__`.** `def meta(name,
+   bases, ns, **kw): ...` is a valid metaclass shape; gopy assumed
+   metaclass was always a `*Type` and crashed in
+   `_PyType_CalculateMetaclass`. Track `isclass` like
+   `Python/bltinmodule.c:147 PyDict_Pop(mkw, &_Py_ID(metaclass), &meta)`
+   and only run the winner calculation when both metaclass and every
+   base is a type. Also registered `type.__prepare__` (returns an
+   empty dict) so `super().__prepare__()` inside a metaclass body
+   resolves through the MRO. CPython:
+   `Objects/typeobject.c:6580 type_prepare`.
+
+5. **`ast.Keyword.Pos` was always NoPos.** `class C(metaclass=type,
+   metaclass=type):` should raise `SyntaxError: keyword argument
+   repeated: metaclass` with a real line/column so
+   `traceback._format_syntax_error` renders just the message line
+   (no `(<filename>)` suffix). The pegen action helper built
+   `*ast.Keyword{Pos: ast.NoPos}` and `withSpan` only stamps the
+   outermost AST node, but the keyword sits inside a
+   `*KeywordOrStarred` carrier. Extended `withSpan` to peel the
+   carrier and stamp the inner `Keyword` directly. CPython:
+   `Grammar/python.gram:1081 kwarg_or_starred` (EXTRA passed to
+   `_PyAST_keyword`, not the outer keyword_or_starred wrapper).
+
+6. **`__build_class__` swallowed every error from `__prepare__`
+   lookup.** A `FailDescr.__get__` that raises `ObscureException`
+   should surface that exception, but the old code treated *any*
+   error as "no `__prepare__` attribute" and silently used `dict()`.
+   Mirror `PyObject_GetOptionalAttr`: suppress `AttributeError`
+   only; propagate everything else. CPython:
+   `Objects/object.c:1324 PyObject_GetOptionalAttr`.

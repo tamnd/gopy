@@ -2204,6 +2204,20 @@ func withSpan(p *Parser, startMark int, v any) any {
 	if v == nil || v == placeholderMatched {
 		return v
 	}
+	// kwarg_or_starred and kwarg_or_double_starred wrap the constructed
+	// Keyword in a KeywordOrStarred carrier. CPython applies EXTRA to
+	// the Keyword itself inside _PyAST_keyword; here the carrier sits
+	// between withSpan and the node that holds the Pos, so peel it
+	// open and stamp the inner Keyword directly.
+	//
+	// CPython: Grammar/python.gram:1081 kwarg_or_starred (EXTRA passed
+	// to _PyAST_keyword, not the outer keyword_or_starred wrapper).
+	if k, ok := v.(*KeywordOrStarred); ok && k != nil {
+		if kw, ok := k.Element.(*ast.Keyword); ok && kw != nil && kw.Pos == ast.NoPos {
+			kw.Pos = p.Span(startMark)
+		}
+		return v
+	}
 	n, ok := v.(posSetter)
 	if !ok {
 		return v
