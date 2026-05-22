@@ -329,6 +329,20 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 			idx := c.poolIndex(&pool, name)
 			c.addOpI(LOAD_CLOSURE, int32(len(c.unit().CellVars)+idx), l)
 		default:
+			// DEF_FREE_CLASS: the outer is a class scope where this
+			// name is bound locally (the class-body def/assign) but
+			// the inner method still wants the enclosing function's
+			// cell. enterScope put the name in u.FreeVars; load it
+			// from there.
+			//
+			// CPython: Python/compile.c:641 compiler_enter_scope
+			// (dictbytype FREE | DEF_FREE_CLASS)
+			if c.scope.Symbols[name]&symtable.DefFreeClass != 0 {
+				pool := poolFreeVars
+				idx := c.poolIndex(&pool, name)
+				c.addOpI(LOAD_CLOSURE, int32(len(c.unit().CellVars)+idx), l)
+				continue
+			}
 			return 0, fmt.Errorf("compile: free var %q in nested scope %q has scope %v in outer %q",
 				name, inner.Name, scope, c.scope.Name)
 		}
@@ -338,14 +352,17 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 }
 
 // freeVarsOf returns the free-variable names of the inner scope in
-// stable order. CPython uses dictbytype on ste->ste_symbols filtered
-// by FREE; we mirror that by iterating the explicit Symbols map.
+// stable order. CPython uses dictbytype(symbols, FREE, DEF_FREE_CLASS,
+// ...): names scoped FREE plus class-locals flagged DEF_FREE_CLASS
+// (the latter happens when a class body binds a name AND a nested
+// method references it; the cell still has to flow through).
 //
-// CPython: Python/compile.c dictbytype(symbols, FREE, ...)
+// CPython: Python/compile.c:641 compiler_enter_scope
+// (dictbytype(symbols, FREE, DEF_FREE_CLASS, ...))
 func freeVarsOf(sc *symtable.Entry) []string {
 	var out []string
 	for name, flags := range sc.Symbols {
-		if flags.Scope() == symtable.Free {
+		if flags.Scope() == symtable.Free || flags&symtable.DefFreeClass != 0 {
 			out = append(out, name)
 		}
 	}

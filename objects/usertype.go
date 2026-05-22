@@ -78,8 +78,26 @@ func installSubclassAttrSlots(t *Type) {
 // 487 hooks that call cls.<metaclass_method>(...) resolve through the
 // real metatype, not the placeholder.
 //
+// Panics if typeSetNames or typeInitSubclass returns an error. Callers
+// that need to surface those failures as Python exceptions should use
+// NewUserTypeMetaE instead.
+//
 // CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
 func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Object, meta *Type) *Type {
+	t, err := NewUserTypeMetaE(name, bases, ns, kwargs, meta)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+// NewUserTypeMetaE is the error-returning sibling of NewUserTypeMeta.
+// typeNewBuiltin uses this variant so a __init_subclass__ hook that
+// raises TypeError surfaces through the normal exception path instead
+// of crashing the interpreter.
+//
+// CPython: Objects/typeobject.c:4153 type_new
+func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Object, meta *Type) (*Type, error) {
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
@@ -122,12 +140,12 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 	//
 	// CPython: Objects/typeobject.c:4549 type_new_set_names
 	if err := typeSetNames(t, ns); err != nil {
-		panic(err)
+		return nil, err
 	}
 	if err := typeInitSubclass(t, kwargs); err != nil {
-		panic(err)
+		return nil, err
 	}
-	return t
+	return t, nil
 }
 
 // stampMetaclass writes meta onto t so PEP 487 hooks see Py_TYPE(t) ==

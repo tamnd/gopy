@@ -242,7 +242,10 @@ func typeNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
 	// metatype.
 	//
 	// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
-	t := NewUserTypeMeta(nameObj.v, bases, ns, kwargs, meta)
+	t, err := NewUserTypeMetaE(nameObj.v, bases, ns, kwargs, meta)
+	if err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
@@ -291,7 +294,7 @@ func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 	if winner != typeType {
 		return typeMetaclassCall(winner, args, kwargs)
 	}
-	return NewUserTypeKwargs(nameObj.v, bases, ns, kwargs), nil
+	return NewUserTypeMetaE(nameObj.v, bases, ns, kwargs, nil)
 }
 
 // calculateMetaclass picks the most derived metaclass among metatype

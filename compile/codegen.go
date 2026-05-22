@@ -282,6 +282,19 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 		// CPython: Python/codegen.c codegen_setup_annotations_scope
 		// (the SCOPE_TYPE_FUNCTION flags it asks for)
 		u.Flags = CoOptimized | CoNewLocals
+	case symtable.TypeParametersBlock,
+		symtable.TypeVariableBlock,
+		symtable.TypeAliasBlock:
+		// PEP 695 synthetic function scopes: the outer "<generic
+		// parameters of X>" wrapper, per-TypeVar bound / default
+		// thunks, and the body of `type X = ...`. CPython enters all
+		// three through codegen_enter_scope with
+		// COMPILE_SCOPE_ANNOTATIONS, which sets CO_OPTIMIZED |
+		// CO_NEWLOCALS (and the nested flag below).
+		//
+		// CPython: Python/codegen.c:648 codegen_enter_scope
+		// (COMPILE_SCOPE_ANNOTATIONS branch)
+		u.Flags = CoOptimized | CoNewLocals
 	}
 	// CoNested: any scope nested inside a non-module scope. Mirrors
 	// CPython's compute_code_flags COMPILER_FLAGS_NESTED check.
@@ -312,6 +325,22 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 			cellNames = append(cellNames, name)
 		case symtable.Free:
 			freeNames = append(freeNames, name)
+		default:
+			// DEF_FREE_CLASS: a class scope can have a name that is
+			// LOCAL to the class yet also referenced as Free by a
+			// nested method. The class itself doesn't make a cell
+			// (the local binding wins inside the class body), but
+			// the nested method's closure tuple still needs to
+			// pull the value from the enclosing function. CPython
+			// handles this by listing the name in u_freevars even
+			// when its scope is LOCAL, so dict_lookup_arg finds
+			// the cell index.
+			//
+			// CPython: Python/compile.c:641 compiler_enter_scope
+			// (dictbytype(symbols, FREE, DEF_FREE_CLASS, ...))
+			if flags&symtable.DefFreeClass != 0 {
+				freeNames = append(freeNames, name)
+			}
 		}
 	}
 	sortStrings(cellNames)

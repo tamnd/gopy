@@ -39,6 +39,28 @@ func (c *Compiler) deleteTarget(t ast.Expr) error {
 		return c.visitAttribute(tt)
 	case *ast.Subscript:
 		return c.visitSubscript(tt)
+	case *ast.Tuple:
+		// `del (a, b, c[0])` recurses into each element with the same
+		// Del context. CPython routes through codegen_tuple, which for
+		// a Del-context Tuple just VISIT_SEQs the elements.
+		//
+		// CPython: Python/codegen.c:3449 codegen_tuple (Del branch)
+		for _, e := range tt.Elts {
+			if err := c.deleteTarget(e); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.List:
+		// `del [a, b]` has the same shape as `del (a, b)`.
+		//
+		// CPython: Python/codegen.c:3431 codegen_list (Del branch)
+		for _, e := range tt.Elts {
+			if err := c.deleteTarget(e); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	return fmt.Errorf("compile: cannot delete target %T", t)
 }
