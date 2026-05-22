@@ -368,6 +368,12 @@ func (c *Compiler) patternSequence(p *ast.MatchSequence, pc *patternContext) err
 			allWild = false
 		}
 	}
+	// Keep the subject on top across MATCH_SEQUENCE and the length
+	// checks so jumpToFailPop knows the gate must pop the subject when
+	// the match fails.
+	//
+	// CPython: Python/codegen.c:6280 codegen_pattern_sequence
+	pc.onTop++
 	c.addOp(MATCH_SEQUENCE, loc(p))
 	if err := c.jumpToFailPop(pc, POP_JUMP_IF_FALSE, loc(p)); err != nil {
 		return err
@@ -390,6 +396,8 @@ func (c *Compiler) patternSequence(p *ast.MatchSequence, pc *patternContext) err
 			return err
 		}
 	}
+	// Past the gates the subject is consumed by the unpack / POP_TOP.
+	pc.onTop--
 	if allWild {
 		c.addOp(POP_TOP, loc(p))
 		return nil

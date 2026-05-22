@@ -112,7 +112,7 @@ func Eval(ts *state.Thread, f *frame.Frame) (objects.Object, error) {
 // CPython: Python/ceval.c PyEval_EvalCode
 func EvalCode(ts *state.Thread, co *objects.Code, globals, locals objects.Object) (objects.Object, error) {
 	stack := frameStackFor(ts)
-	f := stack.Push(co, globals, builtinsFromGlobals(globals), nil, nil)
+	f := stack.Push(co, globals, builtinsFromGlobals(globals), nil)
 	if locals != nil {
 		f.Locals = locals
 	} else {

@@ -36,11 +36,13 @@ func New() *FrameStack {
 }
 
 // Push allocates a frame, initializes it for co, and links it as
-// the new top of the call chain. Caller's previous top frame is
-// passed as prev so the frame chain stays intact.
+// the new top of the call chain. The new frame's Previous is wired
+// to whatever frame was on top before the push, mirroring
+// _PyThreadState_PushFrame which uses tstate->current_frame.
 //
 // CPython: Python/frame.c _PyThreadState_PushFrame
-func (s *FrameStack) Push(co *objects.Code, globals, builtins, fn objects.Object, prev *Frame) *Frame {
+func (s *FrameStack) Push(co *objects.Code, globals, builtins, fn objects.Object) *Frame {
+	prev := s.Top()
 	if s.current == nil || s.current.top == ChunkSize {
 		s.current = &Chunk{prev: s.current}
 	}

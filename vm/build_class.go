@@ -155,7 +155,7 @@ func runClassBody(fn *objects.Function, ns objects.Object) error {
 		ts = state.NewThread()
 	}
 	stack := frameStackFor(ts)
-	f := stack.Push(co, fn.Globals, nil, fn, nil)
+	f := stack.Push(co, fn.Globals, nil, fn)
 	defer stack.Pop()
 	f.Locals = ns
 	f.Builtins = fn.Builtins

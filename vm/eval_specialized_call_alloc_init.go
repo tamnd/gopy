@@ -83,7 +83,7 @@ func (e *evalState) fastCallAllocAndEnterInit(oparg uint32) (int, bool, error) {
 	}
 	inst := objects.NewInstance(cls)
 	stack := frameStackFor(e.ts)
-	f2 := stack.Push(co, init.Globals, init.Builtins, init, nil)
+	f2 := stack.Push(co, init.Globals, init.Builtins, init)
 	f2.SetLocal(0, stackref.FromObject(inst))
 	for i := range argc {
 		argObj := e.peek(argc - 1 - i).AsObject()

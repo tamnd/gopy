@@ -24,17 +24,21 @@ func SyntaxFromSymtable(se *symtable.SyntaxError) *Exception {
 	if se.Pos.Lineno > 0 {
 		lineno = objects.NewInt(int64(se.Pos.Lineno))
 	}
+	// ast Pos.ColOffset is 0-indexed; SyntaxError.offset is 1-indexed.
+	//
+	// CPython: Python/symtable.c symtable_error_set passes col_offset+1
+	// to PyErr_RangedSyntaxLocationObject.
 	offset := objects.None()
-	if se.Pos.ColOffset > 0 {
-		offset = objects.NewInt(int64(se.Pos.ColOffset))
+	if se.Pos.ColOffset >= 0 {
+		offset = objects.NewInt(int64(se.Pos.ColOffset + 1))
 	}
 	endLineno := objects.None()
 	if se.Pos.EndLineno > 0 {
 		endLineno = objects.NewInt(int64(se.Pos.EndLineno))
 	}
 	endOffset := objects.None()
-	if se.Pos.EndColOffset > 0 {
-		endOffset = objects.NewInt(int64(se.Pos.EndColOffset))
+	if se.Pos.EndColOffset >= 0 {
+		endOffset = objects.NewInt(int64(se.Pos.EndColOffset + 1))
 	}
 	info := objects.NewTuple([]objects.Object{
 		filename, lineno, offset, objects.None(), endLineno, endOffset,

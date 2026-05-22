@@ -145,7 +145,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		ts = state.NewThread()
 	}
 	stack := frameStackFor(ts)
-	f := stack.Push(co, fn.Globals, fn.Builtins, fn, nil)
+	f := stack.Push(co, fn.Globals, fn.Builtins, fn)
 	defer stack.Pop()
 
 	// Positional bind: first npos args go into slots [0..npos).

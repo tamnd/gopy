@@ -342,7 +342,7 @@ func newNullcontextType() *objects.Type {
 		if len(args) >= 1 {
 			enterResult = args[0]
 		}
-		if err := inst.Dict().SetItem(objects.NewStr("enter_result"), enterResult); err != nil {
+		if err := inst.EnsureDict().SetItem(objects.NewStr("enter_result"), enterResult); err != nil {
 			return nil, err
 		}
 		return inst, nil
