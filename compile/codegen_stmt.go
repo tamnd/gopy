@@ -244,6 +244,8 @@ func (c *Compiler) visitStmtBlock(s ast.Stmt) (bool, error) {
 		return true, c.visitWhile(n)
 	case *ast.For:
 		return true, c.visitFor(n)
+	case *ast.AsyncFor:
+		return true, c.visitAsyncFor(n)
 	case *ast.Break:
 		return true, c.visitBreak(n)
 	case *ast.Continue:

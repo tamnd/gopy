@@ -121,6 +121,60 @@ func (c *Compiler) visitFor(s *ast.For) error {
 	return nil
 }
 
+// visitAsyncFor compiles `async for target in iter: body else: orelse`.
+// Mirrors CPython: evaluate iter, GET_AITER, then loop:
+// SETUP_FINALLY, GET_ANEXT, LOAD_CONST None, send/yield loop, POP_BLOCK,
+// NOT_TAKEN, target assign, body, JUMP back to start; except block runs
+// END_ASYNC_FOR which jumps back to the send label on StopAsyncIteration
+// so the await machinery can complete; orelse runs after the loop.
+//
+// CPython: Python/codegen.c:2117 codegen_async_for
+func (c *Compiler) visitAsyncFor(s *ast.AsyncFor) error {
+	start := c.newLabel()
+	send := c.newLabel()
+	except := c.newLabel()
+	end := c.newLabel()
+
+	if err := c.visitExpr(s.Iter); err != nil {
+		return err
+	}
+	c.addOp(GET_AITER, loc(s.Iter))
+
+	c.useLabel(start)
+	c.pushFblock(fblockForLoop, start, end, s)
+
+	c.addOpJump(SETUP_FINALLY, except, loc(s))
+	c.addOp(GET_ANEXT, loc(s))
+	c.addLoadConst(nil, loc(s))
+	c.useLabel(send)
+	c.addYieldFromLoop(loc(s))
+	c.addOp(POP_BLOCK, loc(s))
+	c.addOp(NOT_TAKEN, loc(s))
+
+	if err := c.assignTo(s.Target, loc(s.Target)); err != nil {
+		return err
+	}
+	if err := c.visitStmts(s.Body); err != nil {
+		return err
+	}
+	c.addOpJump(JUMP, start, ast.Pos{})
+
+	if err := c.popFblock(fblockForLoop); err != nil {
+		return err
+	}
+
+	c.useLabel(except)
+	c.addOpJump(END_ASYNC_FOR, send, loc(s.Iter))
+
+	if len(s.Orelse) > 0 {
+		if err := c.visitStmts(s.Orelse); err != nil {
+			return err
+		}
+	}
+	c.useLabel(end)
+	return nil
+}
+
 // visitBreak emits a JUMP to the enclosing loop's exit. The unwind
 // of intermediate fblocks (try-finally cleanup, with __exit__) is
 // pending; for now reject break inside any non-loop frame so we
