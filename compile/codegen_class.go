@@ -25,10 +25,6 @@ import (
 //
 // CPython: Python/codegen.c:1623 codegen_class
 func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
-	if hasStarArg(s.Bases) || hasStarStar(s.Keywords) {
-		return fmt.Errorf("compile: ClassDef with *args/**kwargs in bases not yet supported")
-	}
-
 	// 1. Decorators are evaluated outer-first; each wraps the produced
 	// class object via a CALL 0 after the build-class call (the class
 	// sits in the self_or_null slot which CALL promotes to the first
@@ -106,10 +102,21 @@ func (c *Compiler) emitClassBuildCall(s *ast.ClassDef) error {
 // then emits CALL / CALL_KW with the right arg count. The function
 // and name are already on the stack from emitClassBuildCall.
 //
-// CPython: Python/codegen.c codegen_call_helper / codegen_call_helper_impl
+// When any base is *expr or any keyword is **expr the helper routes
+// through the CALL_FUNCTION_EX path (mirrors codegen_call_helper_impl's
+// ex_call branch): start with BUILD_LIST 0, walk the bases interleaving
+// LIST_EXTEND for starred entries with pending plain-positional values
+// flushed via BUILD_LIST + LIST_EXTEND, INTRINSIC_LIST_TO_TUPLE, then
+// the matching BUILD_MAP / DICT_MERGE dance for kwargs.
+//
+// CPython: Python/codegen.c:4246 codegen_call_helper_impl
 // (the splice-extra-positional branch is what the generic class uses
 // to land .generic_base ahead of the user bases)
 func (c *Compiler) emitClassCallArgs(s *ast.ClassDef, withGenericBase bool) error {
+	if hasStarArg(s.Bases) || hasStarStar(s.Keywords) {
+		return c.emitClassCallArgsEx(s, withGenericBase)
+	}
+
 	npos := len(s.Bases)
 	if withGenericBase {
 		if err := c.nameOpLoad(".generic_base", loc(s)); err != nil {
@@ -137,6 +144,130 @@ func (c *Compiler) emitClassCallArgs(s *ast.ClassDef, withGenericBase bool) erro
 		c.addOpI(CALL_KW, nargs+int32(len(s.Keywords)), loc(s))
 	} else {
 		c.addOpI(CALL, nargs, loc(s))
+	}
+	return nil
+}
+
+// emitClassCallArgsEx is the ex_call path for ClassDef. The stack at
+// entry already carries [__build_class__, NULL, body_fn, name]; with
+// withGenericBase we also load .generic_base before the user bases.
+// The walk mirrors starunpack_helper_impl: plain bases push and either
+// stay loose (no star seen yet) or LIST_APPEND into the in-progress
+// list, while a *base triggers BUILD_LIST pushed-so-far to wrap the
+// pre-star prefix, then LIST_EXTEND. Trailing **kwargs go through
+// BUILD_MAP / DICT_MERGE before CALL_FUNCTION_EX.
+//
+// CPython: Python/codegen.c:4296 codegen_call_helper_impl (ex_call arm)
+// CPython: Python/codegen.c:3318 starunpack_helper_impl
+func (c *Compiler) emitClassCallArgsEx(s *ast.ClassDef, withGenericBase bool) error {
+	l := loc(s)
+	// pushed counts the values already on the stack that should end up
+	// at the head of the args tuple: body_fn, name, and optionally
+	// .generic_base. Plain bases get pushed inline and are wrapped via
+	// BUILD_LIST on the first star (or via BUILD_TUPLE pushed when no
+	// star is present).
+	pushed := 2
+	if withGenericBase {
+		if err := c.nameOpLoad(".generic_base", l); err != nil {
+			return err
+		}
+		pushed++
+	}
+
+	sequenceBuilt := false
+	for i, b := range s.Bases {
+		star, isStar := b.(*ast.Starred)
+		if isStar {
+			if !sequenceBuilt {
+				c.addOpI(BUILD_LIST, int32(i+pushed), l)
+				sequenceBuilt = true
+			}
+			if err := c.visitExpr(star.Value); err != nil {
+				return err
+			}
+			c.addOpI(LIST_EXTEND, 1, l)
+			continue
+		}
+		if err := c.visitExpr(b); err != nil {
+			return err
+		}
+		if sequenceBuilt {
+			c.addOpI(LIST_APPEND, 1, l)
+		}
+	}
+	if sequenceBuilt {
+		c.addOpI(CALL_INTRINSIC_1, intrinsicListToTuple, l)
+	} else {
+		// Only **kwargs triggered the ex_call dispatch; fold all
+		// pushed values into a tuple directly.
+		c.addOpI(BUILD_TUPLE, int32(len(s.Bases)+pushed), l)
+	}
+
+	flag := int32(0)
+	if len(s.Keywords) > 0 {
+		flag = 1
+		if err := c.emitKwargsForEx(s.Keywords, l); err != nil {
+			return err
+		}
+	}
+	c.addOpI(CALL_FUNCTION_EX, flag, l)
+	return nil
+}
+
+// emitKwargsForEx builds the kwargs dict that CALL_FUNCTION_EX expects.
+// Plain `name=value` chunks are packed via codegen_subkwargs (visit
+// pairs, BUILD_MAP n) and DICT_MERGE'd into the running dict; each
+// `**expr` does its own DICT_MERGE 1 against the same dict. When the
+// first chunk is a plain run the BUILD_MAP itself seeds the dict, so
+// the leading empty-map is skipped.
+//
+// CPython: Python/codegen.c:4306 codegen_call_helper_impl (kwargs)
+// CPython: Python/codegen.c:3565 codegen_subkwargs
+func (c *Compiler) emitKwargsForEx(kws ast.Seq[*ast.Keyword], l ast.Pos) error {
+	haveDict := false
+	nseen := 0
+	flushPlain := func(end int) error {
+		if nseen == 0 {
+			return nil
+		}
+		start := end - nseen
+		for j := start; j < end; j++ {
+			kw := kws[j]
+			c.addLoadConst(*kw.Arg, l)
+			if err := c.visitExpr(kw.Value); err != nil {
+				return err
+			}
+		}
+		c.addOpI(BUILD_MAP, int32(nseen), l)
+		if haveDict {
+			c.addOpI(DICT_MERGE, 1, l)
+		}
+		haveDict = true
+		nseen = 0
+		return nil
+	}
+	for i, kw := range kws {
+		if kw.Arg == nil {
+			if err := flushPlain(i); err != nil {
+				return err
+			}
+			if !haveDict {
+				c.addOpI(BUILD_MAP, 0, l)
+				haveDict = true
+			}
+			if err := c.visitExpr(kw.Value); err != nil {
+				return err
+			}
+			c.addOpI(DICT_MERGE, 1, l)
+			continue
+		}
+		nseen++
+	}
+	if err := flushPlain(len(kws)); err != nil {
+		return err
+	}
+	if !haveDict {
+		c.addOpI(BUILD_MAP, 0, l)
 	}
 	return nil
 }
