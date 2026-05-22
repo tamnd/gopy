@@ -187,16 +187,38 @@ func (s *State) tokGetNormalMode() Tok {
 		}
 
 		// Line continuation: a backslash at end of line joins the next
-		// line into the current one without emitting NEWLINE.
+		// line into the current one without emitting NEWLINE. A
+		// backslash followed by EOF (with or without an intervening
+		// '\n') is the bpo-2180 case: CPython's tok_continuation_line
+		// sets tok->done = E_EOF and returns -1, then tok_get_normal_mode
+		// emits ERRORTOKEN at the resulting position. The parser's
+		// set_syntax_error path then promotes that to
+		// "unexpected EOF while parsing".
 		//
-		// CPython: Parser/lexer/lexer.c:1205 (continuation branch)
+		// CPython: Parser/lexer/lexer.c:1244 line-continuation branch
+		// CPython: Parser/lexer/lexer.c:444  tok_continuation_line E_EOF
 		for c == '\\' && s.peek() == '\n' {
 			s.nextC()
 			s.pendingLineno++
 			s.col = 0
-			s.lineStart = s.cur
+			// CPython does NOT update tok->line_start in
+			// tok_continuation_line. line_start advances only when
+			// underflow successfully fetches another line. For string
+			// input that means: after consuming the continuation '\n',
+			// the next tok_nextc call snaps line_start to the new
+			// position via the same per-byte path as any other newline.
+			// On EOF (no more input) line_start stays at the previous
+			// line so the unexpected-EOF caret lands at the byte just
+			// past the trailing backslash on the original line.
+			//
+			// CPython: Parser/lexer/lexer.c:444 tok_continuation_line
+			// CPython: Parser/tokenizer/string_tokenizer.c:23 tok_underflow_string
 			s.contLine = true
 			c = s.nextC()
+			if c == eof {
+				s.done = eEOF
+				return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
+			}
 			for c == ' ' || c == '\t' || c == '\014' {
 				c = s.nextC()
 			}
@@ -800,7 +822,9 @@ func (s *State) scanString(quote int) Tok {
 	// _PyLexer_token_setup reads it).
 	//
 	// CPython: Parser/lexer/lexer.c:906 tok->first_lineno = tok->lineno
+	// CPython: Parser/lexer/lexer.c:1144 tok->multi_line_start = tok->line_start
 	s.firstLine = s.lineno
+	s.multiLineStart = s.lineStart
 	// Detect triple quote.
 	triple := false
 	if s.peek() == quote {
@@ -818,13 +842,13 @@ func (s *State) scanString(quote int) Tok {
 		switch c {
 		case eof:
 			s.done = eEOFS
-			s.recordError("unterminated string literal")
+			s.recordUnterminatedString(triple, c)
 			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 		case '\\':
 			escaped := s.nextC()
 			if escaped == eof {
 				s.done = eEOFS
-				s.recordError("unterminated string literal")
+				s.recordUnterminatedString(triple, escaped)
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			// `\<newline>` inside a string literal still consumes a
@@ -842,7 +866,7 @@ func (s *State) scanString(quote int) Tok {
 		case '\n':
 			if !triple {
 				s.done = eEOLS
-				s.recordError("unterminated string literal")
+				s.recordUnterminatedString(false, c)
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			s.pendingLineno++
@@ -861,6 +885,33 @@ func (s *State) scanString(quote int) Tok {
 			}
 		}
 	}
+}
+
+// recordUnterminatedString builds the CPython-shaped "unterminated
+// (triple-quoted) string literal (detected at line N)" message,
+// picking the right wording for triple vs single quotes. The detection
+// line is the lexer's current line, then the error position is reset
+// to the opening quote line by recordStringError.
+//
+// pendingLineno is intentionally NOT folded into detectLine: a deferred
+// newline counts toward the *next* line only if a real character lands
+// after it. CPython's tok_underflow_string mirrors this by bumping
+// tok->lineno only when it successfully fetches another line, so the
+// synthetic trailing newline appended by translate_newlines for exec
+// input does not advance the count.
+//
+// CPython: Parser/lexer/lexer.c:1178 int start = tok->lineno
+// CPython: Parser/lexer/lexer.c:1196 "unterminated triple-quoted ..."
+// CPython: Parser/lexer/lexer.c:1213 "unterminated string literal ..."
+func (s *State) recordUnterminatedString(triple bool, _ int) {
+	detectLine := s.lineno
+	var msg string
+	if triple {
+		msg = fmt.Sprintf("unterminated triple-quoted string literal (detected at line %d)", detectLine)
+	} else {
+		msg = fmt.Sprintf("unterminated string literal (detected at line %d)", detectLine)
+	}
+	s.recordStringError(msg)
 }
 
 // scanOperator scans an operator or punctuation token. Multi-byte

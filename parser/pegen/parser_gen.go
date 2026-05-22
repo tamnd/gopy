@@ -19407,8 +19407,7 @@ func Dispatch(p *Parser, m StartRule) (any, error) {
 		return nil, ErrParserNotImplemented
 	}
 	if result == nil {
-		p.SetCallInvalid(true)
-		p.Reset(0)
+		p.ResetForErrorPass()
 		switch m {
 		case StartFile:
 			result = parseRule_file(p)

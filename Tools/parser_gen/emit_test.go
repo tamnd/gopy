@@ -93,9 +93,12 @@ func TestEmitPythonGramRoundtrip(t *testing.T) {
 	if !strings.Contains(out, "if !p.CallInvalid() { return nil }") {
 		t.Errorf("expected invalid_* rules to gate on CallInvalid()")
 	}
-	// Two-pass dispatch from M5.
-	if !strings.Contains(out, "p.SetCallInvalid(true)") {
-		t.Errorf("expected Dispatch to retry with SetCallInvalid(true)")
+	// Two-pass dispatch from M5: the retry path runs ResetForErrorPass
+	// which flips callInvalid on, rewinds the mark, and clears every
+	// cached token's memo so the second pass actually re-runs the deeper
+	// invalid_* rules instead of reusing nil-memo entries from pass one.
+	if !strings.Contains(out, "p.ResetForErrorPass()") {
+		t.Errorf("expected Dispatch to retry with ResetForErrorPass()")
 	}
 }
 

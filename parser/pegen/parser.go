@@ -13,6 +13,8 @@
 package pegen
 
 import (
+	"fmt"
+
 	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/build"
 	perrors "github.com/tamnd/gopy/parser/errors"
@@ -109,6 +111,14 @@ type Parser struct {
 	lastStmt       Location
 	farthestPos    int
 	pinnedErr      *perrors.SyntaxError
+	// pinnedFromTokenizer is set when pinnedErr came from an
+	// ERRORTOKEN dispatch (the lexer raised a structured error).
+	// Parser-side recordError must not overwrite it, mirroring
+	// CPython's _Pypegen_set_syntax_error which checks PyErr_Occurred
+	// before refining the message in the second pass.
+	//
+	// CPython: Parser/pegen_errors.c:416 _Pypegen_set_syntax_error
+	pinnedFromTokenizer bool
 }
 
 // Location pins a (start, end) source span. The generated parser uses
@@ -180,6 +190,7 @@ func (p *Parser) fillToken() int {
 		p.errorIndicator = true
 		if p.pinnedErr == nil {
 			p.pinnedErr = tokenizerSyntaxError(p.tok, t)
+			p.pinnedFromTokenizer = true
 		}
 		return -1
 	}
@@ -199,9 +210,19 @@ func tokenizerSyntaxError(st *lexer.State, tk *Token) *perrors.SyntaxError {
 		storedMsg = stored.Message
 		if stored.Pos.Line > 0 {
 			pos.Lineno = stored.Pos.Line
-		}
-		if stored.Pos.Col > 0 {
 			pos.ColOff = stored.Pos.Col
+			// CPython's recordStringError pins both start and end at
+			// the opening quote (Parser/lexer/lexer.c:1175); take the
+			// stored EndPos when set, otherwise drop end_col to -1 so
+			// the traceback renders a single caret instead of striping
+			// a range across the rest of the source line.
+			//
+			// CPython: Parser/pegen_errors.c:123 RAISE_ERROR_KNOWN_LOCATION
+			pos.EndLine = stored.EndPos.Line
+			if stored.EndPos.Line == 0 {
+				pos.EndLine = stored.Pos.Line
+			}
+			pos.EndCol = -1
 		}
 	}
 	kind := perrors.KindSyntax
@@ -223,6 +244,36 @@ func tokenizerSyntaxError(st *lexer.State, tk *Token) *perrors.SyntaxError {
 	case lexer.DoneColumnOverflow:
 		kind = perrors.KindOverflow
 		msg = "Parser column offset overflow - source line is too big"
+	case lexer.DoneEOF:
+		// Unterminated input: backslash-continuation at EOF, or
+		// unclosed paren level. CPython's _Pypegen_tokenizer_error
+		// raises "unexpected EOF while parsing" for the no-level case
+		// and "'%c' was never closed" when a paren is still open.
+		//
+		// CPython: Parser/pegen_errors.c:84 E_EOF branch
+		if st.Level() > 0 {
+			line, col, ch := st.ParenInfo(st.Level())
+			pos.Lineno = line
+			pos.ColOff = col
+			pos.EndLine = line
+			pos.EndCol = -1
+			msg = fmt.Sprintf("'%c' was never closed", ch)
+		} else {
+			// CPython's _PyPegen_raise_error sees the ERRORTOKEN's
+			// col_offset == -1, recomputes it as (tok->cur -
+			// tok->line_start), then runs the byte-to-character
+			// conversion in raise_error_known_location so the caret
+			// lands one column past the trailing backslash. text
+			// comes from line_start..inp WITH the trailing '\n' the
+			// translate_newlines pass appended.
+			//
+			// CPython: Parser/pegen_errors.c:248 col_offset == -1 branch
+			// CPython: Parser/pegen_errors.c:362 error_line from line_start..inp
+			pos.ColOff = st.EOFCharOffset()
+			pos.EndLine = pos.Lineno
+			pos.EndCol = -1
+			msg = "unexpected EOF while parsing"
+		}
 	default:
 		if storedMsg != "" {
 			msg = storedMsg
@@ -236,6 +287,18 @@ func tokenizerSyntaxError(st *lexer.State, tk *Token) *perrors.SyntaxError {
 	text := ""
 	if stored != nil {
 		text = stored.Text
+	}
+	if text == "" && st.Done() == lexer.DoneEOF && st.Level() == 0 {
+		// CPython routes string-input EOF through the fallback in
+		// _PyPegen_raise_error_known_location that decodes from
+		// tok->line_start to tok->inp, so the trailing '\n' that
+		// translate_newlines appended is preserved on SyntaxError.text.
+		// The file-input path (ProgramDecodedTextObject) strips it; we
+		// land on the string-input shape because gopy serves source from
+		// the lexer buffer, not from a re-opened file.
+		//
+		// CPython: Parser/pegen_errors.c:362 PyUnicode_DecodeUTF8(line_start, inp - line_start, "replace")
+		text = st.EOFLineText()
 	}
 	return &perrors.SyntaxError{
 		Kind:     kind,
@@ -352,6 +415,26 @@ func (p *Parser) Span(startMark int) ast.Pos {
 
 // Reset rewinds the parse to a previously-taken Mark.
 func (p *Parser) Reset(m int) { p.mark = m }
+
+// ResetForErrorPass clears the memo cache on every cached token and
+// rewinds the mark so the second parse pass starts from scratch with
+// invalid-rule diagnostics active. CPython does the same between its
+// two passes; without it the first pass's nil-memo entries are reused
+// and the second pass returns immediately without running the deeper
+// invalid_* rules.
+//
+// CPython: Parser/pegen.c:879 reset_parser_state_for_error_pass
+func (p *Parser) ResetForErrorPass() {
+	for i := 0; i < p.fill; i++ {
+		p.tokens[i].memo = nil
+	}
+	p.mark = 0
+	p.callInvalid = true
+	p.lastStmt = Location{}
+	// Do not clear errorIndicator: if it was set because the lexer
+	// raised ERRORTOKEN, the pinned error must survive and the second
+	// pass would also short-circuit on the same condition.
+}
 
 // Peek returns the token at the current mark, filling the buffer if
 // needed. Returns nil at EOF.

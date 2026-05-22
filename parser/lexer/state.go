@@ -394,6 +394,72 @@ func (s *State) SetFilename(name string) { s.filename = name }
 // Err returns the first SyntaxError recorded, or nil.
 func (s *State) Err() *SyntaxError { return s.err }
 
+// Level reports the nesting depth of the paren stack. Non-zero means
+// the lexer has at least one unclosed `(`, `[`, or `{`. The pegen
+// error driver consults this from outside the package when surfacing
+// unclosed-paren diagnostics.
+//
+// CPython: Parser/lexer/state.h tok_state.level
+func (s *State) Level() int { return s.level }
+
+// ParenInfo returns the recorded line, column and bracket byte of the
+// outermost unclosed paren. lvl is 1-based (1 == innermost open paren),
+// matching `parenstack[level-1]` in CPython. Returns (0, 0, 0) when lvl
+// is out of range.
+//
+// CPython: Parser/pegen_errors.c:60 raise_unclosed_parentheses_error
+func (s *State) ParenInfo(lvl int) (line, col int, ch byte) {
+	idx := lvl - 1
+	if idx < 0 || idx >= s.level {
+		return 0, 0, 0
+	}
+	return s.parenLineno[idx], s.parenCol[idx], s.parenStack[idx]
+}
+
+// EOFCharOffset returns the 1-based code-point offset of the buffer's
+// end (inp) measured from the current line_start. Mirrors CPython's
+// _PyPegen_raise_error fallback for tokens with col_offset == -1:
+// col_offset = tok->cur - tok->line_start, then converted to a
+// character count via _PyPegen_byte_offset_to_character_offset. Used to
+// place the caret at the position past the trailing backslash when the
+// parser surfaces "unexpected EOF while parsing".
+//
+// CPython: Parser/pegen_errors.c:255 col_offset = cur - line_start
+// CPython: Parser/pegen_errors.c:380 byte_offset_to_character_offset
+func (s *State) EOFCharOffset() int {
+	end := s.inp
+	if end > len(s.buf) {
+		end = len(s.buf)
+	}
+	return s.charColBetween(s.lineStart, end)
+}
+
+// EOFLineText returns the raw source line from the current line_start
+// up to inp, including any trailing newline. CPython's
+// _PyPegen_raise_error_known_location populates SyntaxError.text this
+// way for string-input EOF; the appended '\n' that translate_newlines
+// stamps on a non-terminated source is preserved so .text round-trips
+// the same way CPython renders it.
+//
+// CPython: Parser/pegen_errors.c:362 PyUnicode_DecodeUTF8(line_start, inp - line_start)
+func (s *State) EOFLineText() string {
+	end := s.inp
+	if end > len(s.buf) {
+		end = len(s.buf)
+	}
+	if s.lineStart < 0 || s.lineStart > end {
+		return ""
+	}
+	return string(s.buf[s.lineStart:end])
+}
+
+// Lineno returns the lexer's current line number. Exposed so the
+// parser-side error driver can stamp the right line on the
+// unexpected-EOF SyntaxError when the trailing token's lineno is
+// stale (e.g., a backslash continuation consumed the '\n' but the
+// pending lineno bump never flushed because there is no next char).
+func (s *State) Lineno() int { return s.lineno }
+
 // Warnings returns the SyntaxWarning-class diagnostics recorded
 // during tokenization. Order matches emission order.
 //
@@ -479,6 +545,32 @@ func (s *State) recordError(msg string) {
 	}
 }
 
+// recordStringError pins an unterminated-string error at the opening
+// quote, matching CPython which rewinds:
+//
+//	tok->cur = tok->start; tok->cur++;
+//	tok->line_start = tok->multi_line_start;
+//	tok->lineno = tok->first_lineno;
+//
+// before _PyTokenizer_syntaxerror. The col offset is then character
+// count from the opening line's start to one past the opening quote,
+// so a `"` at column 0 reports offset 1.
+//
+// CPython: Parser/lexer/lexer.c:1175 tok->cur = (char *)tok->start; tok->cur++
+// CPython: Parser/lexer/lexer.c:1177 tok->line_start = tok->multi_line_start
+// CPython: Parser/lexer/lexer.c:1179 tok->lineno = tok->first_lineno
+func (s *State) recordStringError(msg string) {
+	if s.err != nil {
+		return
+	}
+	col := s.charColBetween(s.multiLineStart, s.start+1)
+	s.err = &SyntaxError{
+		Pos:     Pos{Line: s.firstLine, Col: col},
+		EndPos:  Pos{Line: s.firstLine, Col: col},
+		Message: msg,
+	}
+}
+
 // recordErrorWithText is recordError plus a populated Text field. Used
 // at the BOM/cookie boundary where the offending line is known but the
 // FSM has not yet ingested it, so the default Pos -> source-buffer
@@ -510,13 +602,24 @@ func (s *State) recordErrorWithText(msg, text string) {
 // CPython: Parser/tokenizer/helpers.c:27 _syntaxerror_range
 // (PyUnicode_DecodeUTF8 with "replace" + PyUnicode_GET_LENGTH)
 func (s *State) charColAt(pos int) int {
-	if pos < s.lineStart {
+	return s.charColBetween(s.lineStart, pos)
+}
+
+// charColBetween is charColAt with an explicit line-start offset. The
+// unterminated-string path needs to count from multi_line_start (the
+// line containing the opening quote), which is different from
+// s.lineStart by the time the lexer reaches EOF.
+func (s *State) charColBetween(from, pos int) int {
+	if pos < from {
 		return 0
 	}
 	if pos > len(s.buf) {
 		pos = len(s.buf)
 	}
-	bs := s.buf[s.lineStart:pos]
+	if from < 0 {
+		from = 0
+	}
+	bs := s.buf[from:pos]
 	chars := 0
 	for i := 0; i < len(bs); {
 		c := bs[i]

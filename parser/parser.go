@@ -116,35 +116,25 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	// hook that module/_warnings registers at init time.
 	st.FlushWarnings()
 	if errors.Is(err, pegen.ErrParserNotImplemented) {
-		// Real SyntaxError beats the not-implemented sentinel:
-		// CPython surfaces the pinned error at the farthest token
-		// (Parser/pegen.c:1136 _PyPegen_run_parser).
+		// CPython promotes the pinned SyntaxError at the farthest
+		// token, and runs _Pypegen_set_syntax_error once after the
+		// parser fails so the unclosed-paren / unexpected-EOF /
+		// indent / tokenizer-drain refinements override the generic
+		// "invalid syntax" caret.
+		//
+		// CPython: Parser/pegen.c:1136 _PyPegen_run_parser
+		// CPython: Parser/pegen_errors.c:413 _Pypegen_set_syntax_error
+		p.SetSyntaxError()
 		if e := p.PinnedError(); e != nil {
+			if e.Text == "" {
+				if ts := p.Tokenizer(); ts != nil {
+					e.Text = ts.SourceLine(e.Pos.Lineno)
+				}
+			}
+			if e.Filename == "" {
+				e.Filename = st.Filename()
+			}
 			return nil, e
-		}
-		// No rule called RaiseSyntaxError, but the parse still
-		// failed; pin a generic SyntaxError at the farthest token
-		// the parser reached so callers like compile() can populate
-		// lineno / offset / filename / text on the exception.
-		// CPython: Parser/pegen.c:1136 _PyPegen_run_parser uses
-		// farthest_pos to pick the caret when no rule raised.
-		if t := p.FarthestToken(); t != nil {
-			text := ""
-			if ts := p.Tokenizer(); ts != nil {
-				text = ts.SourceLine(t.Lineno)
-			}
-			return nil, &perrors.SyntaxError{
-				Kind: perrors.KindSyntax,
-				Pos: perrors.Pos{
-					Lineno:  t.Lineno,
-					ColOff:  t.ColOff,
-					EndLine: t.EndLine,
-					EndCol:  t.EndCol,
-				},
-				Filename: st.Filename(),
-				Message:  "invalid syntax",
-				Text:     text,
-			}
 		}
 		return nil, ErrParserNotImplemented
 	}

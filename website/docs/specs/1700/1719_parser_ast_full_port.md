@@ -128,7 +128,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_int_literal          |  143 | ready | **6/6 OK** | none — already green |
 | test_grammar              | 2063 | done  | parse error: `compile: cannot delete target *ast.Tuple` | codegen drift on `del (a, b)` lowering |
 | test_decorators           |  341 | ready | Ran 16, FAILED (failures=2) | top-level run works; 2 row failures to diagnose |
-| test_eof                  |  171 | ready | Ran 6, FAILED (failures=6) | EOF/continuation handling in lexer or parser |
+| test_eof                  |  171 | ready | **6/6 OK** | none. backslash-EOF caret + text + offset land on CPython numbers |
 | test_keywordonlyarg       |  178 | ready | Ran 11, FAILED (failures=1, errors=2) | `SyntaxError: invalid syntax (<test>, line 1)` inside `assertRaisesRegex` body |
 | test_named_expressions    |  767 | ready | Ran 74, FAILED (failures=8, errors=77) | `NameError: name 'range' is not defined` inside class bodies + walrus codegen rows |
 | test_positional_only_arg  |  452 | ready | Ran 28, FAILED (failures=16, errors=7) | `f() got multiple values for argument` + parse errors on pos-only test sources |
@@ -623,3 +623,50 @@ After all four, `test_global` runs 20 tests with two remaining
 errors (PEP 654 `CHECK_EG_MATCH` for exception groups, PEP 695
 `CALL_INTRINSIC_1` oparg 12 for type aliases). Both are tracked
 under separate panel rows / tasks.
+
+### P7 closer 8: test_eof unexpected-EOF caret + text
+
+`test_eof.test_line_continuation_EOF` and its file-input twin
+`test_line_continuation_EOF_from_file_bpo2180` pin the exact
+shape of the SyntaxError emitted when source ends mid-line on a
+backslash continuation (`'ä = 5\\'`). CPython reports
+`offset=7`, `text='ä = 5\\\n'`, caret one column past the
+trailing backslash.
+
+Three drift points fixed:
+
+1. `Parser/lexer/lexer.go` continuation loop explicitly set
+   `s.lineStart = s.cur` after consuming the continuation
+   `\n`. CPython does NOT touch `tok->line_start` inside
+   `tok_continuation_line` (Parser/lexer/lexer.c:435); line_start
+   only advances when `tok_underflow_string` successfully fetches
+   the next line. On EOF the underflow returns 0, so line_start
+   stays at the start of the line containing the backslash. The
+   explicit assignment dropped the caret one column low and lost
+   the source bytes for the text field.
+
+2. `pegen.tokenizerSyntaxError` populated `pos.ColOff` from the
+   ERRORTOKEN's stored column. CPython's `_PyPegen_raise_error`
+   (Parser/pegen_errors.c:248) treats `t->col_offset == -1` as
+   "recompute from `tok->cur - tok->line_start`", then converts
+   bytes to characters via `_PyPegen_byte_offset_to_character_offset`.
+   gopy now exposes `State.EOFCharOffset()` that returns the same
+   1-based code-point offset from line_start to inp, and the
+   DoneEOF Level=0 branch overrides `pos.ColOff` with it.
+
+3. `parser.go runParse` filled `SyntaxError.text` via
+   `SourceLine(...)`, which strips the trailing `\n`. For string
+   input at EOF, CPython's fallback in
+   `_PyPegen_raise_error_known_location` decodes from
+   `tok->line_start` to `tok->inp`, *including* the `\n` that
+   `translate_newlines` appended. gopy now exposes
+   `State.EOFLineText()` returning the raw byte range; the
+   DoneEOF Level=0 branch in `tokenizerSyntaxError` uses it
+   instead of falling through to `SourceLine`.
+
+Drive-by: `tools/parser_gen/emit.go` Dispatch retry path was
+emitting `SetCallInvalid(true)` + `Reset(0)`, but
+`parser_gen.go` had been hand-edited to call
+`ResetForErrorPass()` (which additionally clears every cached
+token's memo so the second pass actually re-runs `invalid_*`
+rules). Emitter + test now match the in-tree generated file.
