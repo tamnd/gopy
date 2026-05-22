@@ -246,6 +246,12 @@ func tupleHash(o Object) (int64, error) {
 	return int64(acc), nil
 }
 
+// tupleRichCmp ports tuplerichcompare: EQ/NE compare length+element-wise,
+// LT/LE/GT/GE compare lexicographically, returning the result of the
+// first differing pair's comparison or the length comparison when one
+// tuple is a prefix of the other.
+//
+// CPython: Objects/tupleobject.c:L703 tuplerichcompare
 func tupleRichCmp(a, b Object, op CompareOp) (Object, error) {
 	at, ok := a.(*Tuple)
 	if !ok {
@@ -265,6 +271,33 @@ func tupleRichCmp(a, b Object, op CompareOp) (Object, error) {
 			eq = !eq
 		}
 		return NewBool(eq), nil
+	}
+	// Find the first differing slot, then return the result of that
+	// element's comparison for op. If one tuple is a prefix of the
+	// other, fall back to comparing lengths.
+	la, lb := len(at.items), len(bt.items)
+	n := la
+	if lb < n {
+		n = lb
+	}
+	for i := 0; i < n; i++ {
+		eq, err := RichCmpBool(at.items[i], bt.items[i], CompareEQ)
+		if err != nil {
+			return nil, err
+		}
+		if !eq {
+			return RichCmp(at.items[i], bt.items[i], op)
+		}
+	}
+	switch op {
+	case CompareLT:
+		return NewBool(la < lb), nil
+	case CompareLE:
+		return NewBool(la <= lb), nil
+	case CompareGT:
+		return NewBool(la > lb), nil
+	case CompareGE:
+		return NewBool(la >= lb), nil
 	}
 	return notImplemented(), nil
 }
