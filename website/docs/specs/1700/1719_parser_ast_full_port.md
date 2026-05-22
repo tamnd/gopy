@@ -142,7 +142,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_metaclass            |  302 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
 | test_patma                | 3559 | ready | parse error reporting `import array` line 1 | farthest-token misreport; real failure is array module missing OR a patma rule |
 | test_pep646_syntax        |  329 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
-| test_scope                |  839 | ready | parse error: `compile: free var "method_and_var" in nested scope "test" has scope LOCAL in outer "Test"` | symtable nested-scope inheritance |
+| test_scope                |  839 | 1 fail | testLeaks (refcount/finalizer issue, not scope-resolution) | finalizer-count cycle |
 | test_subclassinit         |  281 | ready | gopy main.go runtime crash | infinite recursion or panic to fix |
 | test_syntax               | 3323 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
 | test_tstring              |  291 | ready | `ModuleNotFoundError: test.test_string._support` | needs `test/test_string/_support.py` helper or t-string lib |
@@ -491,3 +491,83 @@ hook (`vm.currentEvaluator`) skipped that step, so
 'UnboundLocalError' is not defined` from inside the exec'd
 except clause. Added the same auto-injection from the running
 frame's builtins before calling `EvalCode`.
+
+### P7 closer 4: FrameFastToLocals walks LocalsplusKinds
+
+`test_scope.testLocalsFunction` builds a closure where the
+enclosing function binds `y = 1`, the inner function turns `y`
+into a cell (via `y = 7` after a `nonlocal`-style rebinding),
+and the test inspects `locals()` to verify both the original
+fast-local snapshot AND the cell-bound value land in the dict.
+
+CPython's `frame_get_var` iterates
+`co_localsplusnames`/`co_localspluskinds` together: for each
+slot it reads `frame->localsplus[i]` once, then dispatches on
+the kind byte (`CO_FAST_FREE` / `CO_FAST_CELL` / plain). After
+`fix_cell_offsets` collapses cell slots into the fast-local
+span the same slot is tagged with `CO_FAST_CELL`, so the kinds
+walk picks up the unwrapped cell value without double-writing.
+
+gopy's `FrameFastToLocals` was using the legacy three-pass
+walk (varnames, then cellvars, then freevars) and missing the
+fix_cell_offsets rewrite: the cell value got overwritten by
+the original arg-slot value, so `locals()["y"]` came back as
+the pre-cell binding.
+
+Fix: port `frame_get_var` directly. Added
+`FrameLocalsPlusItem(i)` to the `InterpreterFrame` interface
+(plus the `*Frame`, `FrameSnapshot`, and test-fixture stubs)
+so the absolute-slot read works without recomputing the cell
+offset. The pre-3.11 split is kept as
+`frameFastToLocalsLegacy` for fixtures that build code
+objects without `LocalsplusNames` / `LocalsplusKinds`.
+
+### P7 closer 5: class body uses LOAD_LOCALS + LOAD_FROM_DICT_OR_DEREF
+
+`test_scope.testClassNamespaceOverridesClosure`:
+
+```python
+x = 42
+class X:
+    locals()["x"] = 43
+    y = x
+assert X.y == 43
+```
+
+A class body that reads a name resolved as `FREE` should emit
+`LOAD_LOCALS` + `LOAD_FROM_DICT_OR_DEREF`, not `LOAD_DEREF`:
+the dict-first lookup is what makes `locals()["x"] = 43`
+actually shadow the cell. CPython's
+`codegen_nameop` (`Python/codegen.c:3215`) switches on the
+active scope being `ClassBlock` and emits the prefix; gopy's
+`emitDeref` always emitted `LOAD_DEREF`.
+
+`LOAD_FROM_DICT_OR_DEREF` also needed the same fix on the VM
+side: the previous arm popped the dict TOS and went straight to
+the cell, ignoring the dict altogether. Now it pulls the name
+out of `LocalsplusNames`, attempts `PyMapping_GetOptionalItem`
+on the dict (via `objects.GetItem`), and only falls back to the
+cell when the dict misses.
+
+### P7 closer 6: symtable SyntaxError carries lineno / offset
+
+`test_scope.testUnoptimizedNamespaces` runs
+`compile("def f():\n    from sys import *\n    return 1\n", ...)`
+expecting a `SyntaxError` with non-None `.lineno`. gopy raised a
+plain `Exception` because:
+
+1. `symtable.SyntaxError.Error()` returned only `Msg` with no
+   `"SyntaxError:"` prefix, so the unwind path's prefix table
+   could not promote it to the right exception class.
+2. Even after typing, the alias built by
+   `_PyPegen_alias_for_star` is positioned at `ast.NoPos`, so
+   no lineno data made it onto the eventual SyntaxError
+   instance.
+
+Fix: prefix `SyntaxError:` in `(*symtable.SyntaxError).Error()`,
+add `errors.SyntaxFromSymtable` to lift the structured record
+into the canonical `(msg, (filename, lineno, offset, ...))`
+2-arg form, and have `symtable.visitImportFrom` fall back the
+alias position to the `ImportFrom` statement's `Pos` when the
+alias was built without location info.
+
