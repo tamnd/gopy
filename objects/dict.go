@@ -127,6 +127,13 @@ func init() {
 	SetTypeDescr(DictType, "setdefault", NewMethodDescr(DictType, "setdefault", dictSetDefaultMethod))
 	SetTypeDescr(DictType, "fromkeys", NewClassMethod(NewBuiltinFunction("fromkeys", dictFromKeysMethod)))
 	SetTypeDescr(DictType, "popitem", NewMethodDescr(DictType, "popitem", dictPopItemMethod))
+	// __iter__ slot wrapper. CPython's add_operators installs this for
+	// every type with a non-NULL tp_iter; without it, things like
+	// `dict.__iter__(d)` and CrazyDict's `for x in self.d.__iter__()`
+	// raise AttributeError.
+	//
+	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_iter
+	AddIterSlotWrappers(DictType)
 }
 
 // dictReprMethod is the slot wrapper for tp_repr. Binding it as a

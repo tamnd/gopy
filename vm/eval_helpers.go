@@ -842,7 +842,10 @@ func (e *evalState) dictPop(dict, key, _ objects.Object) int32 {
 }
 
 // dictMergeEx wraps _PyDict_MergeEx: merges b into a. override==2 means
-// "raise on duplicate key" (DICT_MERGE semantics).
+// "raise on duplicate key" (DICT_MERGE semantics). The dispatchGen path
+// calls this for kwargs unpacking; trySimple's DICT_MERGE arm bypasses
+// it and goes through dictMergeKwargs + formatKwargsError so the error
+// message picks up the function's qualname.
 //
 // CPython: Objects/dictobject.c:3232 _PyDict_MergeEx
 func (e *evalState) dictMergeEx(a, b objects.Object, override int32) int32 {
@@ -851,34 +854,143 @@ func (e *evalState) dictMergeEx(a, b objects.Object, override int32) int32 {
 		e.pendingErr = errors.New("TypeError: _PyDict_MergeEx expected dict")
 		return -1
 	}
-	items, err := iterToSlice(b)
-	if err != nil {
-		// Fallback: maybe b is a mapping. Walk its items() via keys().
-		if bd, isd := b.(*objects.Dict); isd {
-			for _, k := range bd.Keys() {
-				v, _ := bd.GetItem(k)
-				if override == 2 {
-					if existing, _ := d.GetItem(k); existing != nil {
-						if s, sok := k.(*objects.Unicode); sok {
-							e.pendingErr = fmt.Errorf("TypeError: got multiple values for keyword argument '%s'", s.Value())
-						} else {
-							e.pendingErr = errors.New("TypeError: duplicate keyword argument")
-						}
-						return -1
-					}
-				}
-				if serr := d.SetItem(k, v); serr != nil {
-					e.pendingErr = serr
-					return -1
-				}
+	if merr := dictMergeKwargs(d, b); merr != nil {
+		if dup, isDup := merr.(*kwargsDuplicateErr); isDup && override == 2 {
+			if s, sok := dup.key.(*objects.Unicode); sok {
+				e.pendingErr = fmt.Errorf("TypeError: got multiple values for keyword argument '%s'", s.Value())
+			} else {
+				e.pendingErr = errors.New("TypeError: got multiple values for keyword argument")
 			}
-			return 0
+			return -1
 		}
-		e.pendingErr = err
+		e.pendingErr = merr
 		return -1
 	}
-	_ = items
 	return 0
+}
+
+// kwargsDuplicateErr is the sentinel dictMergeKwargs returns when the
+// override-on-duplicate path trips. The DICT_MERGE arm catches this
+// and reformats it with the function name through formatKwargsError,
+// mirroring CPython's KeyError-percolation in _PyEval_FormatKwargsError.
+type kwargsDuplicateErr struct {
+	key objects.Object
+}
+
+func (e *kwargsDuplicateErr) Error() string {
+	if s, ok := e.key.(*objects.Unicode); ok {
+		return "TypeError: got multiple values for keyword argument '" + s.Value() + "'"
+	}
+	return "TypeError: got multiple values for keyword argument"
+}
+
+// kwargsNotMappingErr is returned when the source has no keys() method.
+// The DICT_MERGE arm rewrites it to "X argument after ** must be a
+// mapping, not Y" so the function name is part of the message.
+type kwargsNotMappingErr struct {
+	src objects.Object
+}
+
+func (e *kwargsNotMappingErr) Error() string {
+	return "TypeError: argument after ** must be a mapping, not " + e.src.Type().Name
+}
+
+// dictMergeKwargs is the DICT_MERGE / _PyDict_MergeEx slow path with
+// override-on-duplicate semantics. Tries the dict fast path first,
+// then falls back to b.keys() + b[key] iteration so mapping subclasses
+// (and the CrazyDict-style mid-iteration mutation guard) work.
+//
+// CPython: Objects/dictobject.c:3247 dict_merge (override == 2)
+func dictMergeKwargs(d *objects.Dict, b objects.Object) error {
+	if bd, ok := b.(*objects.Dict); ok {
+		for _, k := range bd.Keys() {
+			if existing, _ := d.GetItem(k); existing != nil {
+				return &kwargsDuplicateErr{key: k}
+			}
+			v, _ := bd.GetItem(k)
+			if serr := d.SetItem(k, v); serr != nil {
+				return serr
+			}
+		}
+		return nil
+	}
+	keysFn, gerr := objects.GetAttr(b, objects.NewStr("keys"))
+	if gerr != nil {
+		return &kwargsNotMappingErr{src: b}
+	}
+	keysObj, cerr := objects.CallNoArgs(keysFn)
+	if cerr != nil {
+		return cerr
+	}
+	it, ierr := objects.Iter(keysObj)
+	if ierr != nil {
+		return ierr
+	}
+	for {
+		k, nerr := objects.IterNext(it)
+		if nerr == objects.ErrStopIteration {
+			return nil
+		}
+		if nerr != nil {
+			return nerr
+		}
+		if existing, _ := d.GetItem(k); existing != nil {
+			return &kwargsDuplicateErr{key: k}
+		}
+		v, ierr := objects.GetItem(b, k)
+		if ierr != nil {
+			return ierr
+		}
+		if serr := d.SetItem(k, v); serr != nil {
+			return serr
+		}
+	}
+}
+
+// formatKwargsError wraps a dictMergeKwargs error in the same shape
+// CPython's _PyEval_FormatKwargsError produces. Duplicate-key and
+// not-a-mapping errors pick up the function's qualname prefix; any
+// other error percolates unchanged.
+//
+// CPython: Python/ceval.c:3410 _PyEval_FormatKwargsError
+func formatKwargsError(callable, kwargs objects.Object, err error) error {
+	funcstr := objectFunctionStr(callable)
+	switch e := err.(type) {
+	case *kwargsDuplicateErr:
+		if s, ok := e.key.(*objects.Unicode); ok {
+			return fmt.Errorf("TypeError: %s got multiple values for keyword argument '%s'", funcstr, s.Value())
+		}
+		return fmt.Errorf("TypeError: %s got multiple values for keyword argument", funcstr)
+	case *kwargsNotMappingErr:
+		return fmt.Errorf("TypeError: %s argument after ** must be a mapping, not %s", funcstr, e.src.Type().Name)
+	}
+	return err
+}
+
+// objectFunctionStr mirrors _PyObject_FunctionStr: returns
+// "<module>.<qualname>()" when both are set and module != 'builtins',
+// "<qualname>()" otherwise, falling back to str(x) when __qualname__
+// is unset.
+//
+// CPython: Objects/object.c:973 _PyObject_FunctionStr
+func objectFunctionStr(x objects.Object) string {
+	if x == nil {
+		return ""
+	}
+	qn, _ := objects.GetAttr(x, objects.NewStr("__qualname__"))
+	if qn == nil {
+		s, _ := objects.Str(x)
+		return s
+	}
+	qstr, _ := objects.Str(qn)
+	mod, _ := objects.GetAttr(x, objects.NewStr("__module__"))
+	if mod != nil && mod != objects.None() {
+		mstr, _ := objects.Str(mod)
+		if mstr != "" && mstr != "builtins" {
+			return mstr + "." + qstr + "()"
+		}
+	}
+	return qstr + "()"
 }
 
 // listExtend wraps _PyList_Extend: appends every item from iter to list.
@@ -1247,12 +1359,14 @@ func (e *evalState) getAwaitable(iter objects.Object, opcode uint32) objects.Obj
 }
 
 // dictUpdate wraps PyDict_Update: merges b into a without duplicate-key
-// checking. Non-mapping sources raise the CPython-shaped TypeError so
-// `{**1}` and `{**[]}` surface "'int' object is not a mapping" rather
-// than a generic dict-internal message.
+// checking. The slow path mirrors dict_merge: pull b.keys(), iterate,
+// and copy each key+value via b[key]. Non-mapping sources surface as
+// "'X' object is not a mapping" so `{**1}` / `{**[]}` match CPython.
+// Iteration-time RuntimeErrors (a CrazyDict-style "dictionary changed
+// size during iteration") percolate up unchanged.
 //
 // CPython: Objects/dictobject.c:3354 PyDict_Update
-// CPython: Python/bytecodes.c DICT_UPDATE (AttributeError -> TypeError)
+// CPython: Objects/dictobject.c:3247 dict_merge (slow path via keys())
 func (e *evalState) dictUpdate(a, b objects.Object) int32 {
 	d, ok := a.(*objects.Dict)
 	if !ok {
@@ -1269,8 +1383,40 @@ func (e *evalState) dictUpdate(a, b objects.Object) int32 {
 		}
 		return 0
 	}
-	e.pendingErr = fmt.Errorf("TypeError: '%s' object is not a mapping", b.Type().Name)
-	return -1
+	keysFn, gerr := objects.GetAttr(b, objects.NewStr("keys"))
+	if gerr != nil {
+		e.pendingErr = fmt.Errorf("TypeError: '%s' object is not a mapping", b.Type().Name)
+		return -1
+	}
+	keysObj, cerr := objects.CallNoArgs(keysFn)
+	if cerr != nil {
+		e.pendingErr = cerr
+		return -1
+	}
+	it, ierr := objects.Iter(keysObj)
+	if ierr != nil {
+		e.pendingErr = ierr
+		return -1
+	}
+	for {
+		k, nerr := objects.IterNext(it)
+		if nerr == objects.ErrStopIteration {
+			return 0
+		}
+		if nerr != nil {
+			e.pendingErr = nerr
+			return -1
+		}
+		v, gerr := objects.GetItem(b, k)
+		if gerr != nil {
+			e.pendingErr = gerr
+			return -1
+		}
+		if serr := d.SetItem(k, v); serr != nil {
+			e.pendingErr = serr
+			return -1
+		}
+	}
 }
 
 // templateBuild wraps _PyTemplate_Build: builds a PEP 750 t-string from

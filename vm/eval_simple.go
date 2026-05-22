@@ -554,27 +554,22 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		return e.advance(), true, nil
 
 	case compile.DICT_MERGE:
-		// Pop dict-like and merge into the dict at depth oparg. Last
-		// write wins; the dictMergeEx duplicate-key check still trips a
-		// kwargs reformat path that we can't yet emit faithfully, so
-		// this stays out of dispatchGen.
+		// Pop the source mapping and merge into the kwargs dict at
+		// depth oparg. The callable sits three slots below the dict
+		// (NULL + args tuple between), and is used to dress the error
+		// with the function's qualified name. Mirrors CPython's
+		// DICT_MERGE + _PyEval_FormatKwargsError pair.
+		//
+		// CPython: Python/bytecodes.c:2122 DICT_MERGE
+		// CPython: Python/ceval.c:3410 _PyEval_FormatKwargsError
 		src := e.popObject()
 		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
 		if !ok {
 			return 0, true, fmt.Errorf("DICT_MERGE: target not a dict")
 		}
-		srcDict, ok := src.(*objects.Dict)
-		if !ok {
-			return 0, true, fmt.Errorf("DICT_MERGE: source not a dict")
-		}
-		for _, k := range srcDict.Keys() {
-			v, gerr := srcDict.GetItem(k)
-			if gerr != nil {
-				return 0, true, gerr
-			}
-			if serr := d.SetItem(k, v); serr != nil {
-				return 0, true, serr
-			}
+		callable := e.peek(int(oparg) + 2).AsObject()
+		if merr := dictMergeKwargs(d, src); merr != nil {
+			return 0, true, formatKwargsError(callable, src, merr)
 		}
 		return e.advance(), true, nil
 
