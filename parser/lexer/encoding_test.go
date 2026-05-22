@@ -144,3 +144,29 @@ func TestReaderDriverPlainUTF8(t *testing.T) {
 		t.Fatalf("short token stream: %v", got)
 	}
 }
+
+// TestReaderDriverLongCookieLine pins that the reader driver resolves a
+// PEP 263 cookie sitting past the 2*BUFSIZ peek window. CPython reads
+// the encoding head one line at a time with no fixed cap, so a cookie
+// at the end of a 20KB first line still routes through codec decoding.
+func TestReaderDriverLongCookieLine(t *testing.T) {
+	pad := strings.Repeat("x", 20000)
+	src := "# " + pad + " coding: latin-1\ny = \"caf\xe9\"\n"
+	st := FromReader(strings.NewReader(src), ModeFile)
+	if st.Encoding() != "iso-8859-1" {
+		t.Fatalf("Encoding = %q, want iso-8859-1", st.Encoding())
+	}
+	var sawString bool
+	for i := 0; i < 50; i++ {
+		tk := st.Get()
+		if tk.Kind == token.STRING && strings.Contains(string(tk.Bytes), "café") {
+			sawString = true
+		}
+		if tk.Kind == token.ENDMARKER || tk.Kind == token.ERRORTOKEN {
+			break
+		}
+	}
+	if !sawString {
+		t.Fatal("expected decoded STRING token when cookie sits past 2*BUFSIZ")
+	}
+}
