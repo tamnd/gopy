@@ -31,6 +31,7 @@ import (
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
+	parsererrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/parser/lexer"
 	"github.com/tamnd/gopy/token"
 )
@@ -270,7 +271,7 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 	}
 
 	if kind == token.ERRORTOKEN {
-		return nil, tokenizerError(it.tok)
+		return nil, tokenizerError(it.tok, it.linesByOneBased)
 	}
 
 	str := string(tok.Bytes)
@@ -421,36 +422,51 @@ func byteToCharCol(line string, byteCol int) int {
 // dispatches on tok->done (lexer.State.Done()) so the categories
 // stay aligned even when the recorded message text shifts.
 //
+// The result is a structured *parsererrors.SyntaxError so the eval
+// unwind path can populate the SyntaxError instance with filename,
+// lineno, offset, and text. test_tokenize.py asserts these attributes
+// on the exceptions tokenize.tokenize raises, so a plain Go
+// fmt.Errorf would surface as `e.lineno is None` (the canonical
+// SyntaxError descriptor falls back to None when no info is attached).
+//
 // CPython: Python/Python-tokenize.c:87 _tokenizer_error
-func tokenizerError(st *lexer.State) error {
+func tokenizerError(st *lexer.State, lines []string) error {
 	se := st.Err()
 	storedMsg := ""
+	pos := parsererrors.Pos{}
 	if se != nil {
 		storedMsg = se.Message
+		pos.Lineno = se.Pos.Line
+		pos.ColOff = se.Pos.Col
 	}
 
-	errClass := "SyntaxError"
+	kind := parsererrors.KindSyntax
 	msg := ""
+	useLineEndOffset := false
 	switch st.Done() {
 	case lexer.DoneToken:
 		msg = "invalid token"
 	case lexer.DoneEOF:
 		// CPython attaches lineno/col via PyErr_SyntaxLocationObject
-		// and returns immediately. gopy reports the canonical text.
-		return fmt.Errorf("SyntaxError: unexpected EOF in multi-line statement")
+		// and returns immediately. We do the same through the
+		// structured SyntaxError carrier.
+		msg = "unexpected EOF in multi-line statement"
 	case lexer.DoneDedent:
-		errClass = "IndentationError"
+		kind = parsererrors.KindIndentation
 		msg = "unindent does not match any outer indentation level"
+		useLineEndOffset = true
 	case lexer.DoneIntr:
 		return fmt.Errorf("KeyboardInterrupt")
 	case lexer.DoneNomem:
 		return fmt.Errorf("MemoryError")
 	case lexer.DoneTabSpace:
-		errClass = "TabError"
+		kind = parsererrors.KindTab
 		msg = "inconsistent use of tabs and spaces in indentation"
+		useLineEndOffset = true
 	case lexer.DoneToodeep:
-		errClass = "IndentationError"
+		kind = parsererrors.KindIndentation
 		msg = "too many levels of indentation"
+		useLineEndOffset = true
 	case lexer.DoneLineCont:
 		msg = "unexpected character after line continuation character"
 	default:
@@ -465,11 +481,38 @@ func tokenizerError(st *lexer.State) error {
 	// text on the SyntaxError path when it carries more detail (e.g.
 	// "invalid character ... (U+...)"). Preserve that behaviour without
 	// shadowing the dedicated TabError / IndentationError text.
-	if errClass == "SyntaxError" && storedMsg != "" && msg != storedMsg {
+	if kind == parsererrors.KindSyntax && storedMsg != "" && msg != storedMsg {
 		msg = storedMsg
 	}
 
-	return fmt.Errorf("%s: %s", errClass, msg)
+	// CPython's _tokenizer_error decodes error_line from tok->buf with
+	// size = tok->inp - tok->buf - 1 and offsets via
+	// _PyPegen_byte_offset_to_character_offset(error_line,
+	// tok->inp - tok->buf). For the indent-family errors that fire
+	// after a full line has been buffered, tok->inp lands one past the
+	// newline so the offset equals len(text) + 1 in character units.
+	//
+	// CPython: Python/Python-tokenize.c:140 _tokenizer_error
+	text := ""
+	if pos.Lineno > 0 && pos.Lineno < len(lines) {
+		text = lines[pos.Lineno]
+	}
+	if useLineEndOffset {
+		pos.ColOff = utf8.RuneCountInString(text) + 1
+	} else if pos.ColOff > 0 {
+		// SyntaxError.offset is 1-based; the lexer records s.col as a
+		// 0-based byte position. Convert by adding one (the bytes are
+		// ASCII for every error path the lexer currently records).
+		pos.ColOff = pos.ColOff + 1
+	}
+
+	return &parsererrors.SyntaxError{
+		Kind:     kind,
+		Pos:      pos,
+		Filename: st.Filename(),
+		Message:  msg,
+		Text:     text,
+	}
 }
 
 // buildModule materializes the _tokenize module dict.
