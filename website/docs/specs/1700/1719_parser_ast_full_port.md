@@ -133,8 +133,8 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_named_expressions    |  767 | ready | Ran 74, FAILED (failures=8, errors=77) | `NameError: name 'range' is not defined` inside class bodies + walrus codegen rows |
 | test_positional_only_arg  |  452 | ready | Ran 28, FAILED (failures=16, errors=7) | `f() got multiple values for argument` + parse errors on pos-only test sources |
 | test_string_literals      |  356 | ready | Ran 20, FAILED (failures=2, errors=10) | `AttributeError: module 'unittest' has no attribute '__warningregistry__'` (warning-state plumbing) |
-| test_type_comments        |  447 | ready | Ran 18, FAILED (errors=18) | `compile() got an unexpected keyword argument "_feature_version"` |
-| test_unicode_identifiers  |   32 | ready | Ran 3, FAILED (failures=2, errors=1) | `type T has no attribute 'μ'` — NFKC fold drift on class attribute lookup |
+| test_type_comments        |  447 | ready | Ran 18, FAILED (errors=18) | `_feature_version` kwarg now accepted; remaining errors track PyCF_ONLY_AST + ast.Mod -> _ast bridge |
+| test_unicode_identifiers  |   32 | ready | OK | Was 3 failures; NFKC fold + char-based SyntaxError column close the panel |
 | test_annotationlib        | 2375 | ready | parse error: `compile: ClassDef with PEP 695 type params not yet supported` | PEP 695 generic-class lowering |
 | test_asdl_parser          |  131 | ready | Traceback (likely module gap) | needs deeper trace |
 | test_fstring              | 1871 | ready | parser farthest-token mis-points to `import ast` line 10 | parser drops mid-file but reports wrong location; root cause around f-string assertAllRaise corpus near line 880-900 |
@@ -362,3 +362,77 @@ to compile with `keys/patterns length mismatch` and
 Parity regressions seeded in `parser/parity_test.go`:
 `match_mapping_class_values` and `match_class_kwd` differential-dump
 against CPython 3.14.5.
+
+### P2 closer 2: PEP 3131 NFKC identifier normalisation
+
+`test_unicode_identifiers.test_valid` and `test_non_bmp_normalized`
+expected `µ` (U+00B5 MICRO SIGN) and `𝔘𝔫𝔦𝔠𝔬𝔡𝔢` to fold to their
+NFKC forms (`μ` U+03BC and `Unicode`) at the parser level. gopy's
+`parser/pegen/token_helpers.go:nameFromToken` was building Name
+nodes from the raw UTF-8 bytes, so attribute lookups against the
+folded form found nothing.
+
+Ported the NFKC step from `Parser/pegen.c:502 _PyPegen_new_identifier`
+into `normalizeIdentifier`: ASCII bytes short-circuit, anything else
+runs through `unicodedata.NFKC`. Wired into `nameFromToken` before
+the Name node is built.
+
+### P2 closer 3: unicodedata <- parser/pegen import cycle
+
+Adding the NFKC call introduced a test-time import cycle:
+
+```
+compile (test)
+ -> parser
+ -> parser/pegen
+ -> module/unicodedata
+ -> imp -> marshal -> specialize -> compile
+```
+
+`module/unicodedata` itself only needs `objects`; the `imp` import
+came from a single `init()` block that called `imp.AppendInittab`.
+Moved that registration into `stdlibinit/registry.go`'s init() so
+`module/unicodedata` stays a leaf package and the cycle is gone.
+`BuildModule` (was `buildModule`) is now exported; everything else
+in the package is unchanged. The flat-package constraint is
+respected because no new sub-packages were introduced.
+
+### P2 closer 4: sys.monitoring + compile(_feature_version=...)
+
+`bdb` imports `sys.monitoring` (PEP 669) and `ast.parse` calls
+`compile()` with a keyword-only `_feature_version`. Both were
+missing.
+
+- `module/sys/monitoring.go`: stub namespace matching the public
+  surface from `Python/instrumentation.c`. Constants are bit-
+  identical so user code doing `events.LINE | events.CALL` gets
+  the same integer CPython would. Callable hooks
+  (`register_callback`, `set_events`, ...) are no-ops returning
+  `None`; the interpreter does not emit instrumentation events
+  yet.
+- `builtins/compile.go`: added `_feature_version` to the accepted
+  keyword list. Value is recognised but ignored (gopy always
+  parses against the bundled grammar).
+
+These unblock `ast.parse(source)` and `import bdb` along the
+`pdb` / `doctest` import chain.
+
+### P2 closer 5: lexer SyntaxError column was byte-based
+
+`test_unicode_identifiers.test_invalid` expected `err.offset == 1`
+for `€ = 2`, gopy reported 3. Root cause: `parser/lexer/state.go`
+`recordError` was reading `s.col`, which is incremented per byte
+in the lexer's `nextC`. CPython's `_syntaxerror_range` instead
+decodes `[tok->line_start, tok->cur)` as UTF-8 and uses the code-
+point count for `col_offset`.
+
+Added `charColAt(pos)` that mirrors the CPython decode (lone
+continuation bytes become one replacement code point, matching
+`errors='replace'`), and routed both `recordError` and
+`recordErrorWithText` through it. The byte-based `s.col` field is
+kept as is; it still drives token start/end positions, which are
+byte offsets in CPython's tokenizer surface as well.
+
+This affects every lexer-emitted SyntaxError on non-ASCII lines.
+Spot-checked against `parser/lexer` and the full `./...` suite,
+nothing regressed.

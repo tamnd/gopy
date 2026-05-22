@@ -8,19 +8,25 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/module/unicodedata"
 	"github.com/tamnd/gopy/token"
 )
 
 // nameFromToken builds a Load-context Name expression from a NAME
 // token. Returns nil and pins the error indicator if the token is
-// missing or its bytes do not decode.
+// missing or its bytes do not decode. PEP 3131 requires non-ASCII
+// identifiers to be NFKC-normalised before they reach the symtable;
+// CPython does that in _PyPegen_new_identifier and gopy mirrors it
+// here so identifiers like `µ` (U+00B5) compare equal to `μ`
+// (U+03BC).
 //
+// CPython: Parser/pegen.c:502 _PyPegen_new_identifier
 // CPython: Parser/pegen.c:572 _PyPegen_name_from_token
 func nameFromToken(p *Parser, t *Token) ast.Expr {
 	if t == nil {
 		return nil
 	}
-	id := string(t.Bytes)
+	id := normalizeIdentifier(string(t.Bytes))
 	if id == "" {
 		p.errorIndicator = true
 		return nil
@@ -35,6 +41,29 @@ func nameFromToken(p *Parser, t *Token) ast.Expr {
 			EndColOffset: t.EndCol,
 		},
 	}
+}
+
+// normalizeIdentifier returns the NFKC-normalised form of id when id
+// contains any non-ASCII bytes. ASCII identifiers short-circuit.
+//
+// CPython: Parser/pegen.c:502 _PyPegen_new_identifier (the
+// PyUnicode_IS_ASCII fast path + PyObject_Vectorcall(p->normalize)
+// branch).
+func normalizeIdentifier(id string) string {
+	if id == "" {
+		return id
+	}
+	ascii := true
+	for i := 0; i < len(id); i++ {
+		if id[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return id
+	}
+	return string(unicodedata.NFKC([]rune(id)))
 }
 
 // nameToken consumes the next NAME token and lifts it to an Expr.

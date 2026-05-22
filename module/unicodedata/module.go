@@ -18,21 +18,21 @@ package unicodedata
 import (
 	"fmt"
 
-	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
 
-func init() {
-	_ = imp.AppendInittab("unicodedata", buildModule)
-}
-
-// buildModule materializes the unicodedata module dict. Mirrors
+// BuildModule materializes the unicodedata module dict. Mirrors
 // PyInit_unicodedata: the module-level functions dispatch through
 // the default UCD instance; ucd_3_2_0 is the Unicode 3.2 snapshot
-// the IDNA codec uses.
+// the IDNA codec uses. Registration with imp.AppendInittab lives in
+// stdlibinit/registry.go so this package stays free of the imp ->
+// marshal -> specialize -> compile dependency chain. That lets
+// parser/pegen import unicodedata for PEP 3131 NFKC identifier
+// normalisation without creating a test-time import cycle through
+// compile <- parser <- parser/pegen <- unicodedata.
 //
 // CPython: Modules/unicodedata.c:1734 PyInit_unicodedata
-func buildModule() (*objects.Module, error) {
+func BuildModule() (*objects.Module, error) {
 	m := objects.NewModule("unicodedata")
 	d := m.Dict()
 	entries := []struct {

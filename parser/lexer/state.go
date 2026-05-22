@@ -461,14 +461,20 @@ const (
 
 // recordError pins the first error we hit. CPython overwrites; we
 // preserve the first because PEG callers retry tokenization for
-// diagnostics.
+// diagnostics. The column reported here is the UTF-8 character
+// count from the line start to the cursor, matching CPython's
+// _syntaxerror_range which decodes [tok->line_start, tok->cur) and
+// uses PyUnicode_GET_LENGTH for the column.
+//
+// CPython: Parser/tokenizer/helpers.c:11 _syntaxerror_range
 func (s *State) recordError(msg string) {
 	if s.err != nil {
 		return
 	}
+	col := s.charColAt(s.cur)
 	s.err = &SyntaxError{
-		Pos:     Pos{Line: s.lineno, Col: s.col},
-		EndPos:  Pos{Line: s.lineno, Col: s.col},
+		Pos:     Pos{Line: s.lineno, Col: col},
+		EndPos:  Pos{Line: s.lineno, Col: col},
 		Message: msg,
 	}
 }
@@ -485,12 +491,55 @@ func (s *State) recordErrorWithText(msg, text string) {
 	if s.err != nil {
 		return
 	}
+	col := s.charColAt(s.cur)
 	s.err = &SyntaxError{
-		Pos:     Pos{Line: s.lineno, Col: s.col},
-		EndPos:  Pos{Line: s.lineno, Col: s.col},
+		Pos:     Pos{Line: s.lineno, Col: col},
+		EndPos:  Pos{Line: s.lineno, Col: col},
 		Message: msg,
 		Text:    text,
 	}
+}
+
+// charColAt counts how many Unicode code points sit between
+// s.lineStart and pos in the current source buffer. Used by the
+// error builders that need CPython-compatible col offsets even when
+// the offending line contains multi-byte UTF-8 sequences. Invalid
+// UTF-8 sequences are counted as one code point each, matching the
+// errors='replace' decode CPython uses in _syntaxerror_range.
+//
+// CPython: Parser/tokenizer/helpers.c:27 _syntaxerror_range
+// (PyUnicode_DecodeUTF8 with "replace" + PyUnicode_GET_LENGTH)
+func (s *State) charColAt(pos int) int {
+	if pos < s.lineStart {
+		return 0
+	}
+	if pos > len(s.buf) {
+		pos = len(s.buf)
+	}
+	bs := s.buf[s.lineStart:pos]
+	chars := 0
+	for i := 0; i < len(bs); {
+		c := bs[i]
+		switch {
+		case c < 0x80:
+			i++
+		case c < 0xC0:
+			// Lone continuation byte; "replace" decode emits one
+			// U+FFFD per byte.
+			i++
+		case c < 0xE0:
+			i += 2
+		case c < 0xF0:
+			i += 3
+		default:
+			i += 4
+		}
+		if i > len(bs) {
+			i = len(bs)
+		}
+		chars++
+	}
+	return chars
 }
 
 // freeFStringExpressions clears the per-mode last_expr_buffer slots.

@@ -296,6 +296,17 @@ func composeStarter(decomp []rune, i, f int, skipped *[20]int, cskipped *int) ru
 	return composed
 }
 
+// NFKC returns the NFKC-normalized form of input. Pure helper that
+// callers outside the Python wrapper (e.g. the parser's identifier
+// normalisation, mirroring Parser/pegen.c:502 _PyPegen_new_identifier)
+// can use without going through unicodedata's PyObject surface.
+//
+// CPython: Modules/unicodedata.c:665 nfc_nfkc (called via
+// unicodedata.normalize("NFKC", ...))
+func NFKC(input []rune) []rune {
+	return nfcNFKC(nil, input, true)
+}
+
 // nfcNFKC composes input. nfc_nfkc starts from the NFD/NFKD
 // output of nfdNFKD and walks it joining starter+combining pairs
 // through the comp_index / comp_data tables.

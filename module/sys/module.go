@@ -303,6 +303,16 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "exception", objects.NewBuiltinFunction("exception", sysException)); err != nil {
 		return nil, err
 	}
+	// sys.monitoring is the PEP 669 instrumentation namespace. gopy
+	// hasn't wired the bytecode interpreter to actually fire events
+	// yet, so the public surface is a stub: the constants are
+	// byte-identical to CPython (bdb does `E.PY_START | E.LINE`
+	// arithmetic at import time), and every callable returns None.
+	//
+	// CPython: Python/instrumentation.c:3001 _PyMonitoring_PrintEvents
+	if err := setItem(md, "monitoring", makeMonitoring()); err != nil {
+		return nil, err
+	}
 	// sys.intern interns a str object. The dedicated unicodeobject port
 	// will route through the global interned table; for now the helper
 	// returns the input unchanged so collections.namedtuple's typename /

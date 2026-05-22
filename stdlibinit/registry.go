@@ -302,8 +302,14 @@ import (
 	// CPython: Python/marshal.c:1949 marshal_methods
 	_ "github.com/tamnd/gopy/module/marshal"
 
-	// Built-in module: unicodedata. Registers itself via
-	// module/unicodedata/module.go init(). Ports
+	// Built-in module: unicodedata. Registration happens in the
+	// init() block below instead of inside module/unicodedata
+	// itself because parser/pegen needs to import unicodedata for
+	// PEP 3131 NFKC identifier normalisation; pulling imp +
+	// marshal + specialize + compile in transitively would create
+	// a test-time import cycle through compile <- parser <-
+	// parser/pegen <- unicodedata. Keeping unicodedata as a leaf
+	// (objects-only) package breaks that cycle. Ports
 	// Modules/unicodedata.c: normalize / is_normalized / category /
 	// bidirectional / combining / mirrored / east_asian_width /
 	// decomposition plus the unidata_version constant. Unblocks
@@ -311,7 +317,8 @@ import (
 	// `unicodedata.normalize('NFD', ...)` along the test_tokenize.py
 	// panel import chain.
 	// CPython: Modules/unicodedata.c:1733 PyInit_unicodedata
-	_ "github.com/tamnd/gopy/module/unicodedata"
+	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/module/unicodedata"
 
 	// Built-in module: _pickle. Registers itself via
 	// module/_pickle/module.go init(). Publishes the full surface
@@ -327,3 +334,11 @@ import (
 	// CPython: Modules/_pickle.c:7700 _pickle_exec
 	_ "github.com/tamnd/gopy/module/_pickle"
 )
+
+// init registers the handful of built-in modules whose own packages
+// deliberately stay clear of the imp -> marshal -> specialize ->
+// compile chain (so they can be imported from packages the compile
+// tests reach into without creating an import cycle).
+func init() {
+	_ = imp.AppendInittab("unicodedata", unicodedata.BuildModule)
+}

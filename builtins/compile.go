@@ -141,12 +141,20 @@ func compileSourceArg(o objects.Object) (string, []byte, error) {
 // bindCompileArgs maps the positional + keyword args onto the
 // fixed-position bound slice, enforcing the required-arg trio and
 // rejecting dupes / unknown kwargs.
+//
+// _feature_version is the keyword-only private knob ast.parse uses to
+// pin a Python feature level when compiling. CPython accepts it as a
+// kwarg in Python/clinic/bltinmodule.c.h:289; gopy accepts it but
+// ignores the value (we always parse against the bundled grammar).
+//
+// CPython: Python/clinic/bltinmodule.c.h:241 builtin_compile signature
 func bindCompileArgs(args []objects.Object, kwargs map[string]objects.Object) ([]objects.Object, error) {
-	const maxArgs = 6
-	if len(args) > maxArgs {
-		return nil, fmt.Errorf("TypeError: compile() takes at most 6 arguments (%d given)", len(args))
+	const maxPositional = 6
+	const maxArgs = 7
+	if len(args) > maxPositional {
+		return nil, fmt.Errorf("TypeError: compile() takes at most 6 positional arguments (%d given)", len(args))
 	}
-	names := []string{"source", "filename", "mode", "flags", "dont_inherit", "optimize"}
+	names := []string{"source", "filename", "mode", "flags", "dont_inherit", "optimize", "_feature_version"}
 	bound := make([]objects.Object, maxArgs)
 	copy(bound, args)
 	for k, v := range kwargs {
