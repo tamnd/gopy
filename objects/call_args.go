@@ -146,7 +146,7 @@ func TooManyPositionalError(qualname string, given, atLeast, atMost, kwonlyGiven
 		verb = "was"
 	}
 	return fmt.Errorf("TypeError: %s() takes %s positional argument%s but %d%s %s given",
-		qualname, sig, plural, given, tailKwonly(kwonlyGiven), verb)
+		qualname, sig, plural, given, tailKwonly(given, kwonlyGiven), verb)
 }
 
 // UnexpectedKeywordError is the TypeError raised when a caller passes
@@ -167,19 +167,17 @@ func MultipleValuesForArgumentError(qualname, name string) error {
 }
 
 // PositionalOnlyAsKeywordError is the TypeError raised when caller
-// keywords collide with positional-only parameter names.
+// keywords collide with positional-only parameter names. CPython
+// joins the names with ", " inside a single pair of quotes (the
+// format string carries the quotes; the join sits between them).
 //
 // CPython: Python/ceval.c:1546 positional_only_passed_as_keyword
 func PositionalOnlyAsKeywordError(qualname string, names []string) error {
 	if len(names) == 0 {
 		return nil
 	}
-	quoted := make([]string, len(names))
-	for i, n := range names {
-		quoted[i] = "'" + n + "'"
-	}
-	return fmt.Errorf("TypeError: %s() got some positional-only arguments passed as keyword arguments: %s",
-		qualname, strings.Join(quoted, ", "))
+	return fmt.Errorf("TypeError: %s() got some positional-only arguments passed as keyword arguments: '%s'",
+		qualname, strings.Join(names, ", "))
 }
 
 // joinQuotedNames stitches a list of identifier strings into the
@@ -205,18 +203,25 @@ func joinQuotedNames(names []string) string {
 }
 
 // tailKwonly returns the empty string when kwonlyGiven==0; otherwise
-// the parenthetical "(and N keyword-only argumentS)" that
-// too_many_positional appends. Lifted out so the percent-substitution
-// in TooManyPositionalError stays readable.
-func tailKwonly(kwonlyGiven int) string {
+// the " positional argument(s) (and N keyword-only argumentS)" suffix
+// CPython splices in (the leading space and "positional argument(s)"
+// are part of the kwonly buffer, not the outer format).
+//
+// CPython: Python/ceval.c:1487 too_many_positional (PyOS_snprintf buf)
+func tailKwonly(given, kwonlyGiven int) string {
 	if kwonlyGiven <= 0 {
 		return ""
 	}
-	plural := ""
-	if kwonlyGiven != 1 {
-		plural = "s"
+	givenPlural := "s"
+	if given == 1 {
+		givenPlural = ""
 	}
-	return fmt.Sprintf(" (and %d keyword-only argument%s)", kwonlyGiven, plural)
+	kwPlural := "s"
+	if kwonlyGiven == 1 {
+		kwPlural = ""
+	}
+	return fmt.Sprintf(" positional argument%s (and %d keyword-only argument%s)",
+		givenPlural, kwonlyGiven, kwPlural)
 }
 
 // iterToSliceObj is the objects-package twin of vm.iterToSlice. The

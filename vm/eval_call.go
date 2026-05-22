@@ -118,27 +118,12 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 	}
 	npos := co.Argcount
 	nkwonly := co.KwonlyArgcount
+	nposonly := co.PosonlyArgcount
 	hasVarargs := co.Flags&int(0x04) != 0
 	hasVarkw := co.Flags&int(0x08) != 0
-	if !hasVarargs && len(args) > npos {
-		// atLeast = npos - len(defaults); atMost = npos. CPython's
-		// too_many_positional uses the same shape and falls back to
-		// the function's __qualname__ for the formatted prefix.
-		//
-		// CPython: Python/ceval.c:1487 too_many_positional
-		atMost := npos
-		atLeast := npos
-		if fn.Defaults != nil {
-			atLeast -= fn.Defaults.Len()
-		}
-		if atLeast < 0 {
-			atLeast = 0
-		}
-		qualname := fn.Qualname
-		if qualname == "" {
-			qualname = fn.Name
-		}
-		return nil, objects.TooManyPositionalError(qualname, len(args), atLeast, atMost, 0)
+	qualname := fn.Qualname
+	if qualname == "" {
+		qualname = fn.Name
 	}
 	ts := currentThread()
 	if ts == nil {
@@ -176,20 +161,26 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		f.SetLocal(kwSlot, stackref.FromObject(kwDict))
 	}
 	// Keyword bind: scan the positional + kw-only window for a name
-	// match. With *args, the varargs slot sits at index npos so the
-	// kw-only slots shift to [npos+1 .. npos+1+nkwonly).
+	// match. Positional-only slots [0..nposonly) are not eligible for
+	// keyword binding; collisions route to **kwargs when present or
+	// surface as positional_only_passed_as_keyword. With *args, the
+	// varargs slot sits at index npos so the kw-only slots shift to
+	// [npos+1 .. npos+1+nkwonly).
 	//
-	// CPython: Objects/call.c:_PyEval_BindArguments keyword loop
+	// CPython: Python/ceval.c:1546 positional_only_passed_as_keyword
+	// CPython: Objects/call.c _PyEval_BindArguments keyword loop
 	kwWindow := npos + nkwonly
 	if hasVarargs {
 		kwWindow++
 	}
+	var posonlyAsKw []string
 	for k, v := range kwargs {
 		idx := -1
 		for i := 0; i < kwWindow; i++ {
+			if i < nposonly {
+				continue
+			}
 			if i == npos && hasVarargs {
-				// The *args slot sits inside varnames at index npos but
-				// is not eligible for keyword binding.
 				continue
 			}
 			if co.Varnames[i] == k {
@@ -204,12 +195,38 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 				}
 				continue
 			}
-			return nil, fmt.Errorf("TypeError: %s() got an unexpected keyword argument %q", fn.Name, k)
+			if nposonly > 0 {
+				collides := false
+				for i := 0; i < nposonly; i++ {
+					if co.Varnames[i] == k {
+						posonlyAsKw = append(posonlyAsKw, k)
+						collides = true
+						break
+					}
+				}
+				if collides {
+					continue
+				}
+			}
+			return nil, objects.UnexpectedKeywordError(qualname, k)
 		}
 		if !f.LocalAt(idx).IsNull() {
-			return nil, fmt.Errorf("TypeError: %s() got multiple values for argument %q", fn.Name, k)
+			return nil, objects.MultipleValuesForArgumentError(qualname, k)
 		}
 		f.SetLocal(idx, stackref.FromObject(v))
+	}
+	if len(posonlyAsKw) > 0 {
+		ordered := make([]string, 0, len(posonlyAsKw))
+		for i := 0; i < nposonly; i++ {
+			name := co.Varnames[i]
+			for _, k := range posonlyAsKw {
+				if k == name {
+					ordered = append(ordered, name)
+					break
+				}
+			}
+		}
+		return nil, objects.PositionalOnlyAsKeywordError(qualname, ordered)
 	}
 	// Positional defaults fill any unbound tail of the positional slots.
 	if fn.Defaults != nil {
@@ -242,21 +259,62 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 			}
 		}
 	}
-	// Verify every positional and kw-only slot is bound.
+	// Verify every positional and kw-only slot is bound; if any
+	// are missing, batch them into the CPython-shaped TypeError.
+	// CPython: Python/ceval.c:1449 missing_arguments
+	var missingPos []string
 	for i := 0; i < npos; i++ {
 		if f.LocalAt(i).IsNull() {
-			return nil, fmt.Errorf("TypeError: %s() missing required argument %q", fn.Name, co.Varnames[i])
+			missingPos = append(missingPos, co.Varnames[i])
 		}
+	}
+	if len(missingPos) > 0 {
+		return nil, objects.MissingArgumentsError(qualname, "positional", missingPos)
 	}
 	kwOnlyBase := npos
 	if hasVarargs {
 		kwOnlyBase++
 	}
+	var missingKw []string
 	for i := 0; i < nkwonly; i++ {
 		slot := kwOnlyBase + i
 		if f.LocalAt(slot).IsNull() {
-			return nil, fmt.Errorf("TypeError: %s() missing required keyword-only argument %q", fn.Name, co.Varnames[slot])
+			missingKw = append(missingKw, co.Varnames[slot])
 		}
+	}
+	if len(missingKw) > 0 {
+		return nil, objects.MissingArgumentsError(qualname, "keyword-only", missingKw)
+	}
+	// Too-many-positional check happens after binding so kwonlyGiven
+	// reflects how many keyword-only slots got bound by name (CPython
+	// reads localsplus[argcount..argcount+kwonlyargcount] for this).
+	//
+	// CPython: Python/ceval.c:1487 too_many_positional
+	if !hasVarargs && len(args) > npos {
+		atMost := npos
+		atLeast := npos
+		if fn.Defaults != nil {
+			atLeast -= fn.Defaults.Len()
+		}
+		if atLeast < 0 {
+			atLeast = 0
+		}
+		kwonlyGiven := 0
+		for i := 0; i < nkwonly; i++ {
+			if !f.LocalAt(kwOnlyBase + i).IsNull() {
+				name := co.Varnames[kwOnlyBase+i]
+				if fn.KwDefaults != nil {
+					if v, _ := fn.KwDefaults.GetItem(objects.NewStr(name)); v != nil {
+						if _, inKwargs := kwargs[name]; !inKwargs {
+							continue
+						}
+					}
+				}
+				kwonlyGiven++
+			}
+		}
+		return nil, objects.TooManyPositionalError(qualname, len(args), atLeast, atMost, kwonlyGiven)
 	}
 	return Eval(ts, f)
 }
+

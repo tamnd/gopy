@@ -162,7 +162,7 @@ func TestTooManyPositionalErrorOneArgWasGiven(t *testing.T) {
 
 func TestTooManyPositionalErrorWithKwonly(t *testing.T) {
 	err := TooManyPositionalError("f", 3, 1, 1, 2)
-	want := "TypeError: f() takes 1 positional argument but 3 (and 2 keyword-only arguments) were given"
+	want := "TypeError: f() takes 1 positional argument but 3 positional arguments (and 2 keyword-only arguments) were given"
 	if err.Error() != want {
 		t.Errorf("got %q, want %q", err, want)
 	}
@@ -186,7 +186,7 @@ func TestMultipleValuesForArgumentError(t *testing.T) {
 
 func TestPositionalOnlyAsKeywordError(t *testing.T) {
 	err := PositionalOnlyAsKeywordError("f", []string{"a", "b"})
-	want := "TypeError: f() got some positional-only arguments passed as keyword arguments: 'a', 'b'"
+	want := "TypeError: f() got some positional-only arguments passed as keyword arguments: 'a, b'"
 	if err.Error() != want {
 		t.Errorf("got %q, want %q", err, want)
 	}

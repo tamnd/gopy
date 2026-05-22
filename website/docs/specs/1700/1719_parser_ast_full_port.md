@@ -131,7 +131,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_eof                  |  171 | ready | **6/6 OK** | none. backslash-EOF caret + text + offset land on CPython numbers |
 | test_keywordonlyarg       |  178 | ready | **11/11 OK** | none. Single-input ENDMARKER rewrite + real `raiseAction` + `codegen_validate_keywords` port |
 | test_named_expressions    |  767 | ready | **74/74 OK** | none. `actionPgenGetExprName` arg index + missing AST kinds in `GetExprName` + `PyPegen_last_item` translator |
-| test_positional_only_arg  |  452 | ready | Ran 28, FAILED (failures=16, errors=7) | `f() got multiple values for argument` + parse errors on pos-only test sources |
+| test_positional_only_arg  |  452 | ready | Ran 28, FAILED (errors=4) | 24/28 OK. Positional-only kw enforcement + reordered too_many_positional ship. Remaining 4 errors are annotations lazy-eval (2), async coroutine StopIteration .value, and pickle (out of scope) |
 | test_string_literals      |  356 | ready | Ran 20, FAILED (failures=2, errors=10) | `AttributeError: module 'unittest' has no attribute '__warningregistry__'` (warning-state plumbing) |
 | test_type_comments        |  447 | ready | Ran 18, FAILED (errors=18) | `_feature_version` kwarg now accepted; remaining errors track PyCF_ONLY_AST + ast.Mod -> _ast bridge |
 | test_unicode_identifiers  |   32 | ready | OK | Was 3 failures; NFKC fold + char-based SyntaxError column close the panel |
@@ -807,3 +807,66 @@ CPython refs:
 - `Parser/action_helpers.c:1043` `_PyPegen_get_expr_name`
 - `Parser/pegen.h:265` `PyPegen_last_item` macro
 - `Parser/Python.gram:1303` `invalid_comprehension` alt 1
+
+### P7 closer 11: positional-only kw enforcement + too_many_positional ordering
+
+`test_positional_only_arg` panel was sitting at 7 failures / 4 errors.
+Three independent gaps in `vm/eval_call.go callPyFunction` accounted
+for all of the failures.
+
+1. **Positional-only kw enforcement missing.** When a caller passes a
+   keyword that names a positional-only slot (slot index <
+   `co_posonlyargcount`), CPython routes the kw into `**kwargs` if
+   the function declares one; otherwise it collects the colliding
+   names and raises `f() got some positional-only arguments passed
+   as keyword arguments: 'a, b'`. gopy was binding the kw straight
+   into the positional-only slot, so the TypeError never fired for
+   `f(a=1, /)`-style calls and the `**kwargs` re-routing in
+   `test_same_keyword_as_positional_with_kwargs` failed too.
+
+   Fix: skip slots `i < nposonly` in the kwarg name-match scan, route
+   collisions to `kwDict` when `hasVarkw`, otherwise batch into a
+   `posonlyAsKw` slice and emit `objects.PositionalOnlyAsKeywordError`
+   in declaration order after the loop.
+
+2. **`too_many_positional` happened before kwarg binding.** gopy
+   raised the "takes N positional arguments but M were given"
+   TypeError up front, before processing kwargs, so `kwonlyGiven`
+   was hardcoded to 0. CPython does the check after binding, when
+   the kw-only slots already reflect what the caller passed.
+
+   Fix: move the check to the tail of `callPyFunction`, after
+   defaults are applied. Count `kwonlyGiven` by walking
+   `[kwOnlyBase..kwOnlyBase+nkwonly)` and only counting slots whose
+   binding came from `kwargs` (skip slots filled by `KwDefaults`).
+
+3. **Error helper format drift.** Two CPython-shaped messages in
+   `objects/call_args.go` were close but not byte-equal.
+
+   - `PositionalOnlyAsKeywordError` was emitting
+     `'a', 'b'` (each name separately quoted). CPython's format
+     string carries one pair of quotes and joins the names with
+     `", "` inside, producing `'a, b'`.
+   - `tailKwonly` was emitting ` (and N keyword-only arguments)`
+     but CPython's snprintf buffer leads with
+     ` positional argument(s)` before the parenthetical, so the
+     full message reads
+     `... but 6 positional arguments (and 2 keyword-only arguments) were given`.
+     `given != 1 ? "s" : ""` controls the `argument`/`arguments` flip
+     on the positional half.
+
+After these three: `test_positional_only_arg` panel drops to 4
+remaining errors, all unrelated to the positional-only feature
+itself (annotations lazy-eval x2, async coroutine StopIteration
+`.value`, pickle).
+
+`vm/eval_call.go callPyFunction` now also drops its local
+`formatMissingArgs` / `joinMissingNames` helpers and delegates to
+`objects.MissingArgumentsError`, which already shipped with the
+same CPython-shaped output.
+
+CPython refs:
+- `Python/ceval.c:1487` `too_many_positional`
+- `Python/ceval.c:1546` `positional_only_passed_as_keyword`
+- `Python/ceval.c:1449` `missing_arguments`
+- `Objects/call.c` `_PyEval_BindArguments`
