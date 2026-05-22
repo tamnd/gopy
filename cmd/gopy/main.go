@@ -171,6 +171,13 @@ func installPathFinder(scriptPath string) {
 		Compiler: gopyCompile,
 	})
 	sys.SetPath(paths)
+	// Wire the meta-path finder to consult the live sys.path so
+	// `sys.path.insert(0, x)` from user code is honored on the next
+	// import. CPython's PathFinder.find_spec reads sys.path every
+	// call; gopy mirrors that via this hook.
+	//
+	// CPython: Lib/importlib/_bootstrap_external.py:1290 path = sys.path
+	imp.SetLivePathHook(sys.LivePath)
 }
 
 // bootstrapEncodings imports the encodings package so its

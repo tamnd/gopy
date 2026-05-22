@@ -87,6 +87,45 @@ func SetPath(path []string) {
 	}
 }
 
+// LivePath returns the current sys.path entries as a Go slice, or nil
+// when sys has not been imported yet (PathFinder then falls back to
+// its static Paths snapshot, which is what unit tests that drive
+// PathFinder directly rely on). It reads the live sys module dict so
+// user-code mutations (sys.path.insert, sys.path.append) are visible
+// to callers. PathFinder.FindModule consults this so the meta-path
+// import honors PEP 328 + 451 sys.path semantics.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1290 path = sys.path
+func LivePath() []string {
+	md := liveSysDict()
+	if md == nil {
+		return nil
+	}
+	v, err := md.GetItem(objects.NewStr("path"))
+	if err != nil || v == nil {
+		return nil
+	}
+	switch lst := v.(type) {
+	case *objects.List:
+		out := make([]string, 0, lst.Len())
+		for i := 0; i < lst.Len(); i++ {
+			if s, ok := lst.Item(i).(*objects.Unicode); ok {
+				out = append(out, s.Value())
+			}
+		}
+		return out
+	case *objects.Tuple:
+		out := make([]string, 0, lst.Len())
+		for i := 0; i < lst.Len(); i++ {
+			if s, ok := lst.Item(i).(*objects.Unicode); ok {
+				out = append(out, s.Value())
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // liveSysDict returns the dict of the cached sys module, or nil when
 // sys has not been imported yet. Used by SetArgv / SetPath / SetStdio
 // to keep the live module in sync with config changes that arrive
