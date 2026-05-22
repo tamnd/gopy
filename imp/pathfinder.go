@@ -243,6 +243,12 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w", name, err)
 	}
+	// CPython: Python/import.c:2715 exec_code_in_module re-reads
+	// sys.modules so an `__init__.py` that reassigns its own entry
+	// (rare for packages, but the same shape as decimal/_pydecimal).
+	if final, ok := GetModule(name); ok {
+		return final, nil
+	}
 	return mod, nil
 }
 
@@ -276,6 +282,12 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 	if _, err := exec.ExecCode(code, mod); err != nil {
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w", name, err)
+	}
+	// CPython: Python/import.c:2715 exec_code_in_module re-reads
+	// sys.modules so a module body that reassigns its own entry
+	// (`sys.modules[__name__] = other`, e.g. decimal/_pydecimal) wins.
+	if final, ok := GetModule(name); ok {
+		return final, nil
 	}
 	return mod, nil
 }

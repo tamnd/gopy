@@ -38,9 +38,18 @@ func ExecCodeModule(exec Executor, name string, code *objects.Code) (*objects.Mo
 
 	if _, err := exec.ExecCode(code, mod); err != nil {
 		// Remove the partial module on error, matching CPython behavior.
-		// CPython: Python/import.c:L685 remove on exec failure
+		// CPython: Python/import.c:2710 remove_module
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: ExecCodeModule %q: exec: %w", name, err)
 	}
-	return mod, nil
+	// Re-read sys.modules[name]: the module body may have replaced its
+	// own entry (`sys.modules[__name__] = other`), as the decimal /
+	// _pydecimal shim does. Returning the original pointer would hand
+	// callers an empty husk instead of the live module.
+	//
+	// CPython: Python/import.c:2715 exec_code_in_module
+	if final, ok := GetModule(name); ok {
+		return final, nil
+	}
+	return nil, fmt.Errorf("imp: ExecCodeModule %q: module not found in sys.modules after exec", name)
 }
