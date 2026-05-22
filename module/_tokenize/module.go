@@ -230,8 +230,12 @@ func drainReadline(readline objects.Object, encoding string) ([]byte, []string, 
 	}
 	// CPython's tokenizer requires the buffer end with '\n'; mark
 	// implicit when we synthesized one so the wrapper can echo ''
-	// rather than '\n' for the trailing NEWLINE.
-	implicit := len(buf) == 0 || buf[len(buf)-1] != '\n'
+	// rather than '\n' for the trailing NEWLINE. Empty source is the
+	// exception: CPython tok_underflow_string never appends a newline
+	// when there is no source at all, so it emits ENDMARKER only.
+	//
+	// CPython: Parser/tokenizer/string_tokenizer.c:55 tok_underflow_string
+	implicit := len(buf) > 0 && buf[len(buf)-1] != '\n'
 	if implicit {
 		buf = append(buf, '\n')
 	}
