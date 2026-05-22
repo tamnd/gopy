@@ -17,6 +17,7 @@ import (
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/initconfig"
+	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -190,6 +191,30 @@ func makeStderrFile() *objects.File {
 
 func init() {
 	_ = imp.AppendInittab("sys", buildModule)
+	// CALL_INTRINSIC_1 PRINT (PRINT_EXPR pre-3.12) must reach the live
+	// sys.displayhook so user code (and doctest's runner) can intercept
+	// it; intrinsics is a lower layer and cannot import module/sys
+	// directly without a cycle, so the link is via a function variable.
+	//
+	// CPython: Python/intrinsics.c:28 print_expr (sys_displayhook lookup)
+	intrinsics.PrintExprHook = printExprViaSysDisplayhook
+}
+
+// printExprViaSysDisplayhook resolves sys.displayhook fresh on every
+// call so a user-installed hook (sys.displayhook = ...) takes effect.
+// CPython does the same with _PySys_GetRequiredAttr.
+//
+// CPython: Python/intrinsics.c:30 _PySys_GetRequiredAttr(displayhook)
+func printExprViaSysDisplayhook(v objects.Object) (objects.Object, error) {
+	d := liveSysDict()
+	if d == nil {
+		return nil, fmt.Errorf("RuntimeError: lost sys.displayhook")
+	}
+	hook, _ := d.GetItem(objects.NewStr("displayhook"))
+	if hook == nil || hook == objects.None() {
+		return nil, fmt.Errorf("RuntimeError: lost sys.displayhook")
+	}
+	return objects.Call(hook, objects.NewTuple([]objects.Object{v}), nil)
 }
 
 // buildModule wraps the static-attribute slice produced by Init in a
@@ -364,6 +389,16 @@ func buildModule() (*objects.Module, error) {
 	//
 	// CPython: Python/sysmodule.c:1180 sys__getframe_impl
 	if err := setItem(md, "_getframe", objects.NewBuiltinFunction("_getframe", getFrame)); err != nil {
+		return nil, err
+	}
+	// sys._getframemodulename(depth) returns func.__module__ for the
+	// function whose frame is depth levels above. doctest's
+	// _normalize_module prefers this over _getframe + f_globals so it
+	// can route through sys.modules even when the live module was
+	// imported under a different key (e.g. __main__).
+	//
+	// CPython: Python/sysmodule.c:2595 sys__getframemodulename_impl
+	if err := setItem(md, "_getframemodulename", objects.NewBuiltinFunction("_getframemodulename", getFrameModuleName)); err != nil {
 		return nil, err
 	}
 	// sys.gettrace / settrace stubs. doctest hits gettrace at runner setup;

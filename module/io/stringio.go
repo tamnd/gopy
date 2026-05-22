@@ -53,17 +53,268 @@ var StringIOType = objects.NewType("_io.StringIO", []*objects.Type{objects.Objec
 
 func init() {
 	StringIOType.Call = stringIOCall
+	StringIOType.TpNew = stringIOTpNew
 	StringIOType.Repr = stringIORepr
 	StringIOType.Str = stringIORepr
 	StringIOType.Iter = stringIOIter
 	StringIOType.IterNext = stringIOIterNext
 	StringIOType.Getattro = stringIOGetattr
-	// LOAD_SPECIAL walks the type MRO for __enter__ / __exit__.
-	//
-	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
-	objects.SetTypeDescr(StringIOType, "__enter__", objects.NewBuiltinFunction("__enter__", stringIOEnterDescr))
-	objects.SetTypeDescr(StringIOType, "__exit__", objects.NewBuiltinFunction("__exit__", stringIOExitDescr))
+	registerStringIODescrs()
 	objects.AddIterSlotWrappers(StringIOType)
+}
+
+// stringIOTpNew is the tp_new slot. Routing through TpNew means a user
+// subclass like doctest._SpoofOut still produces a *StringIO with the
+// subclass stamped as ob_type, so descriptor methods registered on
+// StringIOType keep resolving via the type assertion.
+//
+// CPython: Modules/_io/stringio.c:637 stringio_new
+func stringIOTpNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return stringIOCall(cls, args, kwargs)
+}
+
+// registerStringIODescrs installs the type-level method and getset
+// descriptors so unbound calls like `_io.StringIO.getvalue(self)` (the
+// pattern doctest._SpoofOut uses when chaining a base-class method)
+// resolve through the type MRO.
+//
+// CPython: Modules/_io/stringio.c:1035 stringio_methods
+// CPython: Modules/_io/stringio.c:1054 stringio_getset
+func registerStringIODescrs() {
+	methods := []struct {
+		name string
+		fn   func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"write", stringIOWriteDescr},
+		{"read", stringIOReadDescr},
+		{"readline", stringIOReadlineDescr},
+		{"readlines", stringIOReadlinesDescr},
+		{"writelines", stringIOWritelinesDescr},
+		{"seek", stringIOSeekDescr},
+		{"tell", stringIOTellDescr},
+		{"truncate", stringIOTruncateDescr},
+		{"getvalue", stringIOGetvalueDescr},
+		{"close", stringIOCloseDescr},
+		{"flush", stringIOFlushDescr},
+		{"readable", stringIOReadableDescr},
+		{"writable", stringIOWritableDescr},
+		{"seekable", stringIOSeekableDescr},
+		{"isatty", stringIOIsattyDescr},
+		{"__getstate__", stringIOGetstateDescr},
+		{"__setstate__", stringIOSetstateDescr},
+		{"__sizeof__", stringIOSizeofDescr},
+		{"__enter__", stringIOEnterDescr},
+		{"__exit__", stringIOExitDescr},
+	}
+	for _, m := range methods {
+		objects.SetTypeDescr(StringIOType, m.name, objects.NewMethodDescr(StringIOType, m.name, m.fn))
+	}
+	objects.SetTypeDescr(StringIOType, "closed", objects.NewGetSetDescr("closed",
+		func(o objects.Object) (objects.Object, error) {
+			return objects.NewBool(o.(*StringIO).closed), nil
+		}, nil))
+	objects.SetTypeDescr(StringIOType, "newlines", objects.NewGetSetDescr("newlines",
+		func(o objects.Object) (objects.Object, error) {
+			s := o.(*StringIO)
+			if err := s.checkUsable(); err != nil {
+				return nil, err
+			}
+			return s.newlinesObj(), nil
+		}, nil))
+	objects.SetTypeDescr(StringIOType, "line_buffering", objects.NewGetSetDescr("line_buffering",
+		func(o objects.Object) (objects.Object, error) {
+			s := o.(*StringIO)
+			if err := s.checkUsable(); err != nil {
+				return nil, err
+			}
+			return objects.NewBool(false), nil
+		}, nil))
+}
+
+// stringIOSelf pops args[0] as the StringIO receiver. Mirrors the
+// METH_O / METH_NOARGS unwrap CPython does before dispatching into
+// the typed C helper.
+func stringIOSelf(name string, args []objects.Object) (*StringIO, []objects.Object, error) {
+	if len(args) == 0 {
+		return nil, nil, fmt.Errorf("TypeError: descriptor '%s' of '_io.StringIO' object needs an argument", name)
+	}
+	s, ok := args[0].(*StringIO)
+	if !ok {
+		return nil, nil, fmt.Errorf("TypeError: descriptor '%s' requires a '_io.StringIO' object but received a '%s'", name, args[0].Type().Name)
+	}
+	return s, args[1:], nil
+}
+
+func stringIOWriteDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, rest, err := stringIOSelf("write", args)
+	if err != nil {
+		return nil, err
+	}
+	return stringIOWrite(s, rest)
+}
+
+func stringIOReadDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, rest, err := stringIOSelf("read", args)
+	if err != nil {
+		return nil, err
+	}
+	return stringIORead(s, rest)
+}
+
+func stringIOReadlineDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, rest, err := stringIOSelf("readline", args)
+	if err != nil {
+		return nil, err
+	}
+	return stringIOReadlineCall(s, rest)
+}
+
+func stringIOReadlinesDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, rest, err := stringIOSelf("readlines", args)
+	if err != nil {
+		return nil, err
+	}
+	return stringIOReadlinesCall(s, rest)
+}
+
+func stringIOWritelinesDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, rest, err := stringIOSelf("writelines", args)
+	if err != nil {
+		return nil, err
+	}
+	return stringIOWritelinesCall(s, rest)
+}
+
+func stringIOSeekDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, rest, err := stringIOSelf("seek", args)
+	if err != nil {
+		return nil, err
+	}
+	return stringIOSeekCall(s, rest)
+}
+
+func stringIOTellDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("tell", args)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	return objects.NewInt(int64(s.Tell())), nil
+}
+
+func stringIOTruncateDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, rest, err := stringIOSelf("truncate", args)
+	if err != nil {
+		return nil, err
+	}
+	return stringIOTruncateCall(s, rest)
+}
+
+func stringIOGetvalueDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("getvalue", args)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	return objects.NewStr(s.GetValue()), nil
+}
+
+func stringIOCloseDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("close", args)
+	if err != nil {
+		return nil, err
+	}
+	s.Close()
+	return objects.None(), nil
+}
+
+func stringIOFlushDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("flush", args)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	return objects.None(), nil
+}
+
+func stringIOReadableDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("readable", args)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	return objects.NewBool(true), nil
+}
+
+func stringIOWritableDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("writable", args)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	return objects.NewBool(true), nil
+}
+
+func stringIOSeekableDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("seekable", args)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	return objects.NewBool(true), nil
+}
+
+func stringIOIsattyDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("isatty", args)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkUsable(); err != nil {
+		return nil, err
+	}
+	return objects.NewBool(false), nil
+}
+
+func stringIOGetstateDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("__getstate__", args)
+	if err != nil {
+		return nil, err
+	}
+	return s.getState()
+}
+
+func stringIOSetstateDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, rest, err := stringIOSelf("__setstate__", args)
+	if err != nil {
+		return nil, err
+	}
+	if len(rest) != 1 {
+		return nil, fmt.Errorf("TypeError: __setstate__() takes exactly 1 argument (%d given)", len(rest))
+	}
+	if err := s.setState(rest[0]); err != nil {
+		return nil, err
+	}
+	return objects.None(), nil
+}
+
+func stringIOSizeofDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, _, err := stringIOSelf("__sizeof__", args)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewInt(int64(len(s.buf) * 4)), nil
 }
 
 func stringIOEnterDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -98,8 +349,19 @@ func stringIOExitDescr(args []objects.Object, _ map[string]objects.Object) (obje
 //
 // CPython: Modules/_io/stringio.c:637 stringio_new
 func NewStringIO() *StringIO {
+	return newStringIOForType(StringIOType)
+}
+
+// newStringIOForType allocates a fresh *StringIO carrying the given
+// Python type. Subclasses (e.g. doctest._SpoofOut) reach this path via
+// stringio_new(cls) so `instance.Type()` reports the subclass while
+// the underlying Go layout stays *StringIO and the descriptor methods
+// resolve.
+//
+// CPython: Modules/_io/stringio.c:637 stringio_new (tp_alloc(cls, 0))
+func newStringIOForType(t *objects.Type) *StringIO {
 	s := &StringIO{}
-	s.Init(StringIOType)
+	s.Init(t)
 	s.readNL = "\n"
 	s.hasReadNL = true
 	return s
@@ -111,7 +373,7 @@ func NewStringIO() *StringIO {
 // None.
 //
 // CPython: Modules/_io/stringio.c:670 _io_StringIO___init___impl
-func stringIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+func stringIOCall(callable objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) > 2 {
 		return nil, fmt.Errorf("TypeError: StringIO() takes at most 2 arguments (%d given)", len(args))
 	}
@@ -148,7 +410,11 @@ func stringIOCall(_ objects.Object, args []objects.Object, kwargs map[string]obj
 			return nil, fmt.Errorf("ValueError: illegal newline value: %q", nlVal)
 		}
 	}
-	s := NewStringIO()
+	t := StringIOType
+	if subt, ok := callable.(*objects.Type); ok && subt != nil {
+		t = subt
+	}
+	s := newStringIOForType(t)
 	s.applyNewline(nlSet, nlIsStr, nlVal)
 	if initial != "" {
 		s.Write(initial)

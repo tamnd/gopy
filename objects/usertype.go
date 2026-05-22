@@ -104,6 +104,9 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	t := NewType(name, bases)
 	t.IsUser = true
 	stampMetaclass(t, meta)
+	if err := applyMetaclassMRO(t, meta); err != nil {
+		return nil, err
+	}
 	installSubclassAttrSlots(t)
 	noSlotsDeclared := hasNoSlotsDeclared(ns)
 	configureManagedDict(t, bases, noSlotsDeclared)
@@ -157,6 +160,63 @@ func stampMetaclass(t *Type, meta *Type) {
 	if meta != nil && meta != typeType {
 		t.Init(meta)
 	}
+}
+
+// applyMetaclassMRO replaces t.MRO with the tuple returned by the
+// metaclass's mro() method when the metaclass overrides it. NewType
+// already filled t.MRO via c3Linearize, which matches type.mro(); only
+// a user override changes the result. Ports mro_invoke's custom branch.
+//
+// CPython: Objects/typeobject.c:2228 mro_invoke
+func applyMetaclassMRO(t *Type, meta *Type) error {
+	if meta == nil || meta == typeType {
+		return nil
+	}
+	descr, _ := LookupDescriptor(meta, "mro")
+	if descr == nil {
+		return nil
+	}
+	if owner, ok := mroDescrOwner(descr); ok && owner == typeType {
+		return nil
+	}
+	bound := bindDescr(descr, t, meta)
+	res, err := callBound(bound, nil, nil)
+	if err != nil {
+		return err
+	}
+	tup, ok := res.(*Tuple)
+	if !ok {
+		lst, ok := res.(*List)
+		if !ok {
+			return fmt.Errorf("TypeError: mro() returned a non-tuple: %s", typeNameOf(res))
+		}
+		items := make([]Object, lst.Len())
+		for i := 0; i < lst.Len(); i++ {
+			items[i] = lst.Item(i)
+		}
+		tup = NewTuple(items)
+	}
+	newMRO := make([]*Type, 0, tup.Len())
+	for i := 0; i < tup.Len(); i++ {
+		entry, ok := tup.Item(i).(*Type)
+		if !ok {
+			return fmt.Errorf("TypeError: mro() returned a non-type at index %d: %s", i, typeNameOf(tup.Item(i)))
+		}
+		newMRO = append(newMRO, entry)
+	}
+	t.MRO = newMRO
+	return nil
+}
+
+// mroDescrOwner returns the type that owns a descriptor lookup result,
+// when the descriptor records its owning class (MethodDescr does). This
+// lets applyMetaclassMRO short-circuit when the lookup returned the
+// built-in type.mro descriptor unchanged from typeType.
+func mroDescrOwner(o Object) (*Type, bool) {
+	if md, ok := o.(*MethodDescr); ok {
+		return md.owner, true
+	}
+	return nil, false
 }
 
 // hasNoSlotsDeclared reports whether ns lacks a __slots__ entry. object

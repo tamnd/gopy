@@ -56,11 +56,22 @@ func Unary1InvalidFn(ts *state.Thread, v objects.Object) (objects.Object, error)
 	return nil, errors.New("intrinsics: invalid unary intrinsic id 0")
 }
 
+// PrintExprHook is installed by module/sys.init so CALL_INTRINSIC_1
+// PRINT can resolve sys.displayhook without an import cycle from
+// intrinsics into module/sys. nil indicates the sys module has not yet
+// been wired (e.g. unit tests that build the table in isolation).
+//
+// CPython: Python/intrinsics.c:28 print_expr
+var PrintExprHook func(objects.Object) (objects.Object, error)
+
 // UnaryPrint calls sys.displayhook on v (REPL print path).
 //
 // CPython: Python/intrinsics.c print_expr
 func UnaryPrint(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryPrint", "sys.displayhook lives in 1651")
+	if PrintExprHook == nil {
+		return nil, errors.New("RuntimeError: lost sys.displayhook")
+	}
+	return PrintExprHook(v)
 }
 
 // UnaryImportStar implements `from x import *`.

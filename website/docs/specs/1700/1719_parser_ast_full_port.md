@@ -1034,3 +1034,78 @@ Protocol base linearizes to `[S, Protocol, Generic, object]`. NamedTuple
 subclasses build. `go test ./...` clean. The five panel rows still fail,
 but the new failures are inside the doctest runner (task #72 P2.1),
 not in the parser/codegen path.
+
+### P6.5 closer: doctest pipeline unblock
+
+Once typing imported, the doctest runner itself surfaced four
+prerequisites. None of these are parser/AST gaps. they're runtime
+plumbing the panel tests need before any doctest can execute.
+
+1. **`sys._getframemodulename` missing.** doctest's `_normalize_module`
+   calls `sys._getframemodulename(2)` to find the test module's
+   `__name__` when the caller omits it. Without this, every doctest
+   harness died with
+   `DocTestFinder.find: name must be given when obj.__name__ doesn't
+   exist`. Ported `module/sys/getframe.go:getFrameModuleName`: walks
+   `CurrentInterpreterFrameHook` `depth` frames up, pulls
+   `FrameFunc().Module`, returns `None` when the frame has no backing
+   function or the stack is too shallow.
+
+   CPython: `Python/sysmodule.c:2595 sys__getframemodulename_impl`.
+
+2. **`_io.StringIO` methods were instance-closures, not type-level
+   descriptors.** doctest's `_SpoofOut` subclasses `StringIO` and calls
+   `StringIO.getvalue(self)` as an unbound method to bypass the
+   subclass's `truncate(0)` side effect. With instance-bound closures,
+   `StringIO.getvalue` raised `AttributeError: type object '_io.StringIO'
+   has no attribute 'getvalue'`. Converted the 18 methods + 3 properties
+   (`closed`, `newlines`, `line_buffering`) into a `stringio_methods` /
+   `stringio_getset` table installed on `StringIOType` via
+   `registerStringIODescrs`. Each method now flows through a
+   `*Descr` wrapper that unwraps `self` from `args[0]`.
+
+   CPython: `Modules/_io/stringio.c:927 stringio_methods` +
+   `Modules/_io/stringio.c:962 stringio_getset`.
+
+3. **Subclasses of `StringIO` lost the `*StringIO` C-level state.**
+   Because `StringIO.__new__` allocated a plain `*Instance` for any
+   subclass call, `_SpoofOut()` came back as `*Instance` and the unbound
+   `StringIO.getvalue(self)` raised `descriptor requires a '_io.StringIO'
+   object but received a '_SpoofOut'`. Added `StringIOType.TpNew =
+   stringIOTpNew` which routes through `newStringIOForType(cls)`:
+   allocates a fresh `*StringIO` and stamps the subclass type on it, so
+   the descriptor type check passes and the subclass still owns its own
+   layout slots.
+
+   CPython: `Modules/_io/stringio.c:998 stringio_new`.
+
+4. **`CALL_INTRINSIC_1 PRINT` (oparg 1, `print_expr`) was a stub.**
+   REPL-style doctests (`>>> obj`) emit `CALL_INTRINSIC_1 PRINT` after
+   the expression. The intrinsic must look up `sys.displayhook` and call
+   it on the value. Wired `intrinsics.PrintExprHook` as a function-typed
+   var set from `module/sys.init`: the sys module installs
+   `printExprViaSysDisplayhook` which resolves `sys.displayhook`
+   dynamically (so user overrides work) and calls it on the value.
+   Raises `RuntimeError: lost sys.displayhook` when the slot is None or
+   missing, matching CPython.
+
+   CPython: `Python/intrinsics.c:28 print_expr` +
+   `Python/sysmodule.c:188 sys_displayhook`.
+
+5. **Metaclass `mro()` overrides were ignored.** test_metaclass.py's
+   `WeirdClass` test defines `class Meta(type): def mro(cls): return
+   (cls, Base, object)` and expects `WeirdClass.value` to resolve via
+   the user-defined MRO. gopy's `c3Linearize` always produced
+   `[WeirdClass, object]`. Ported `applyMetaclassMRO` in
+   `objects/usertype.go`: after `stampMetaclass`, looks up `mro` on the
+   metaclass via `LookupDescriptor`; if the owner is not `type` itself,
+   binds and calls it with `t` as receiver, then converts the returned
+   tuple/list to `[]*Type` and overwrites `t.MRO`.
+
+   CPython: `Objects/typeobject.c:2228 mro_invoke`.
+
+After P6.5: all five panel tests reach the doctest runner. Remaining
+failures are individual CPython feature gaps (ClassDef with `*bases /
+**kwds`, `__prepare__` classmethod semantics, function metaclasses,
+`super().__prepare__`, descriptor-as-metaclass-call) that fall under
+later sub-closers, not the doctest infrastructure itself.

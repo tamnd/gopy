@@ -93,6 +93,7 @@ func TestStubHelpersReturnNotImplemented(t *testing.T) {
 	// landed via spec 1719 and now return TypeError on bad input
 	// rather than notImplementedError, so they're excluded here too.
 	implementedUnary := map[int]bool{
+		UnaryPrintID:            true,
 		UnaryListToTupleID:      true,
 		UnaryStopIterErrorID:    true,
 		UnaryPositiveID:         true,
