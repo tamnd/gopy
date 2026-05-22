@@ -13,7 +13,9 @@ package vm
 
 import (
 	"errors"
+	"os"
 	"strings"
+	"syscall"
 
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/gil"
@@ -97,6 +99,7 @@ func synthesizeException(err error) *pyerrors.Exception {
 	}
 	for prefix, typ := range errorPrefixToType {
 		if strings.HasPrefix(msg, prefix) {
+			typ = promoteOSErrorByErrno(typ, err)
 			return buildExceptionForType(typ, strings.TrimSpace(msg[len(prefix):]))
 		}
 	}
@@ -107,6 +110,7 @@ func synthesizeException(err error) *pyerrors.Exception {
 	// callers can still `except SyntaxError`.
 	for prefix, typ := range errorPrefixToType {
 		if i := strings.Index(msg, prefix); i >= 0 {
+			typ = promoteOSErrorByErrno(typ, err)
 			return buildExceptionForType(typ, strings.TrimSpace(msg[i+len(prefix):]))
 		}
 	}
@@ -137,6 +141,53 @@ func buildExceptionForType(typ *objects.Type, msg string) *pyerrors.Exception {
 		}
 	}
 	return pyerrors.New(typ, objects.NewTuple(args))
+}
+
+// promoteOSErrorByErrno mirrors CPython's PyErr_SetFromErrnoWithFilename
+// promotion: when the synthesized exception lands in the OSError family
+// and the underlying Go error carries a syscall.Errno (PathError /
+// LinkError / SyscallError), look up the matching subclass via
+// errnomap so `except FileNotFoundError:` / `except PermissionError:`
+// actually catch the right thing. Non-OSError types pass through.
+//
+// CPython: Python/errors.c:1031 _PyErr_SetFromErrnoWithFilenameObjects
+func promoteOSErrorByErrno(typ *objects.Type, err error) *objects.Type {
+	if !isOSErrorType(typ) {
+		return typ
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		var errno syscall.Errno
+		if errors.As(pathErr.Err, &errno) {
+			return pyerrors.ErrnoSubclass(int(errno))
+		}
+	}
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		var errno syscall.Errno
+		if errors.As(linkErr.Err, &errno) {
+			return pyerrors.ErrnoSubclass(int(errno))
+		}
+	}
+	var sysErr *os.SyscallError
+	if errors.As(err, &sysErr) {
+		var errno syscall.Errno
+		if errors.As(sysErr.Err, &errno) {
+			return pyerrors.ErrnoSubclass(int(errno))
+		}
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return pyerrors.ErrnoSubclass(int(errno))
+	}
+	return typ
+}
+
+// isOSErrorType reports whether typ is OSError itself. Subclasses keep
+// their original type. The promotion only fires when the synthesizer
+// already picked plain OSError.
+func isOSErrorType(typ *objects.Type) bool {
+	return typ == pyerrors.PyExc_OSError
 }
 
 // isSyntaxErrorType reports whether typ is SyntaxError or a SyntaxError
