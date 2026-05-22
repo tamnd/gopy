@@ -246,6 +246,17 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				s.backup(peek)
 				continue
 			}
+			// Backslash-newline is a line continuation even inside a
+			// single-quoted f-string; advance the line counter so the
+			// closing quote and any further tokens report the correct
+			// row/col, matching scanString's escape arm.
+			//
+			// CPython: Parser/lexer/lexer.c:1205 (tok_nextc bumps
+			// tok->lineno on every '\n' regardless of context)
+			if peek == '\n' {
+				s.pendingLineno++
+				s.col = 0
+			}
 			// Skip the escaped character. Named escapes \N{...} fall
 			// through to the regular middle scanning.
 		}
