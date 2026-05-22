@@ -138,7 +138,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_annotationlib        | 2375 | ready | parse error: `compile: ClassDef with PEP 695 type params not yet supported` | PEP 695 generic-class lowering |
 | test_asdl_parser          |  131 | ready | Traceback (likely module gap) | needs deeper trace |
 | test_fstring              | 1871 | ready | parser farthest-token mis-points to `import ast` line 10 | parser drops mid-file but reports wrong location; root cause around f-string assertAllRaise corpus near line 880-900 |
-| test_global               |  214 | ready | parse error: `compile: mapping pattern keys/patterns length mismatch` | match-statement codegen for `{k: v}` patterns |
+| test_global               |  214 | 2 errors | Ran 20, FAILED (errors=2). test_caught_exception_group needs CHECK_EG_MATCH (PEP 654); test_type_alias needs CALL_INTRINSIC_1 oparg 12 (PEP 695). 18/20 pass after match-seq + frame back-pointer + symtable offset fixes. | spec 1719 D-test_global |
 | test_metaclass            |  302 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
 | test_patma                | 3559 | ready | parse error reporting `import array` line 1 | farthest-token misreport; real failure is array module missing OR a patma rule |
 | test_pep646_syntax        |  329 | ready | `ModuleNotFoundError: doctest` | doctest module not implemented |
@@ -571,3 +571,55 @@ into the canonical `(msg, (filename, lineno, offset, ...))`
 alias position to the `ImportFrom` statement's `Pos` when the
 alias was built without location info.
 
+
+### P7 closer 7: match-sequence stackdepth + frame back-pointer + symtable offset
+
+`test_global.test_match_seq` failed at compile time with
+`compile: invalid CFG, inconsistent stackdepth`. Root cause was
+`patternSequence` in `compile/codegen_stmt_match.go`: the helper
+emitted `MATCH_SEQUENCE` + `GET_LEN`/`COMPARE_OP`/`TO_BOOL`
+gates without bracketing them with `pc.onTop++` / `pc.onTop--`.
+That made `jumpToFailPop` compute `pops = stores + onTop = 0`,
+so the fail label was `fail_pop[0]` (a bare NOP). The successful
+fall-through path consumed the subject via the unpack, leaving
+the post-match join at depth 0; the failing branch jumped to
+`fail_pop[0]` with the subject still on the stack at depth 1.
+`cfgCalculateStackdepth` flagged the join.
+
+Mirroring `Python/codegen.c:6280 codegen_pattern_sequence`, the
+fix wraps the gate sequence with `pc.onTop++` before
+`MATCH_SEQUENCE` and `pc.onTop--` right before the unpack /
+`POP_TOP`. CPython's comments call this out explicitly:
+"We need to keep the subject on top during the sequence and
+length checks" and "Whatever comes next should consume the
+subject".
+
+A second blocker surfaced once `test_match_seq` compiled: every
+test in the file errored with `ValueError: call stack is not
+deep enough` because `check_warnings` walks back via
+`sys._getframe(1)`. All five production `FrameStack.Push`
+callsites passed `prev=nil`, so `f.Previous` was always nil and
+`FrameBack()` always returned nil. Mirroring CPython's
+`_PyThreadState_PushFrame` (which wires `tstate->current_frame`
+as prev), `FrameStack.Push` now reads `Top()` itself; the
+explicit `prev` parameter was redundant and has been dropped.
+
+Third fix: `errors.SyntaxFromSymtable` exposed `Pos.ColOffset`
+directly, but `Pos.ColOffset` is 0-indexed (matching
+`ast.col_offset`) while `SyntaxError.offset` is 1-indexed.
+CPython's `Python/symtable.c` symtable_error_set passes
+`col_offset + 1` to `PyErr_RangedSyntaxLocationObject`; gopy
+now does the same for both `offset` and `end_offset`. The four
+`check_syntax_error` cases in `test_global` that compare against
+`offset=5` now pass.
+
+Fourth fix (drive-by): `contextlib.nullcontext.__new__` called
+`inst.Dict().SetItem(...)` on a fresh instance whose `__dict__`
+is lazily allocated, panicking on the nil dict. Swapped to
+`EnsureDict()`. Surfaced because `test_global.test_enter_result`
+uses `contextlib.nullcontext(value)`.
+
+After all four, `test_global` runs 20 tests with two remaining
+errors (PEP 654 `CHECK_EG_MATCH` for exception groups, PEP 695
+`CALL_INTRINSIC_1` oparg 12 for type aliases). Both are tracked
+under separate panel rows / tasks.
