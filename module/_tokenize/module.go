@@ -210,23 +210,19 @@ func drainReadline(readline objects.Object, encoding string) ([]byte, []string, 
 			break
 		}
 		buf = append(buf, line...)
-		// Track the per-line view (without the trailing newline) so we
-		// can emit the `line` field of each token tuple.
-		end := len(line)
+		// Preserve the raw line, including its trailing '\n' or '\r\n'
+		// when one was present. CPython's _get_current_line constructs
+		// the `line` field of each token tuple from tok->buf to tok->inp
+		// (Python/Python-tokenize.c:288), which keeps the trailing
+		// newline byte; the implicit-newline arm strips one byte off
+		// the end. Mirror both by keeping the full line here and then
+		// trimming the synthesized '\n' from the last entry below if
+		// the source did not end with one.
 		hadCRLF := false
-		if end > 0 && line[end-1] == '\n' {
-			end--
-			if end > 0 && line[end-1] == '\r' {
-				end--
-				hadCRLF = true
-			}
-		} else if end > 0 && line[end-1] == '\r' {
-			// Bare '\r' line terminator. CPython's preserve_crlf path
-			// keeps the byte but the tokenize wrapper only emits
-			// '\r\n' for the CRLF case (Python/Python-tokenize.c:319).
-			end--
+		if n := len(line); n >= 2 && line[n-2] == '\r' && line[n-1] == '\n' {
+			hadCRLF = true
 		}
-		lines = append(lines, string(line[:end]))
+		lines = append(lines, string(line))
 		crlf = append(crlf, hadCRLF)
 		if errors.Is(err, io.EOF) {
 			break
@@ -335,15 +331,11 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 			kind = token.OP
 		}
 		if kind == token.NEWLINE {
-			// CPython: Python/Python-tokenize.c:281 tokenizeriter_next
-			// reports str='' for the implicit '\n' synthesized when
-			// the source didn't end with one; the wrapper preserves
-			// '\n' (or '\r\n' when the original line ended that way)
-			// for every other NEWLINE so callers can distinguish the
-			// shapes.
-			//
-			// CPython: Python/Python-tokenize.c:318 tokenizeriter_next
-			if it.implicitNewline && tok.EndOffset == it.implicitEndOff {
+			// CPython: Python/Python-tokenize.c:316 tokenizeriter_next
+			// Implicit NEWLINE (source did not end with a real '\n') has
+			// string=''. Explicit NEWLINE preserves the original line
+			// terminator: '\r\n' for CRLF, '\n' otherwise.
+			if it.isImplicitNewlineLine(startLine) {
 				str = ""
 			} else if it.lineHasCRLF(startLine) {
 				str = "\r\n"
@@ -354,11 +346,10 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 			endCol++
 		} else if kind == token.NL {
 			// NL tokens are emitted inside parens or for blank/comment
-			// lines. CPython doesn't rewrite the str for NL, but its
-			// extra_tokens path collapses the implicit-newline NL to ''.
-			//
-			// CPython: Python/Python-tokenize.c:327 tokenizeriter_next NL arm
-			if it.implicitNewline && tok.EndOffset == it.implicitEndOff {
+			// lines. CPython doesn't rewrite the str for NL, but the
+			// extra_tokens path collapses the implicit-newline NL to ''
+			// (Python/Python-tokenize.c:327).
+			if it.isImplicitNewlineLine(startLine) {
 				str = ""
 			} else if it.lineHasCRLF(startLine) {
 				str = "\r\n"
@@ -400,6 +391,36 @@ func (it *tokenizerIter) lineHasCRLF(lineno int) bool {
 		return false
 	}
 	return it.lineEndCRLF[lineno]
+}
+
+// isImplicitNewlineLine reports whether the token at lineno sits on
+// the synthesized trailing '\n' line. CPython tracks this per-line
+// via tok->implicit_newline (Parser/tokenizer/readline_tokenizer.c:90
+// sets it to 1 only on the last underflow when that line lacked a
+// terminator). gopy collapses every readline up front, so the
+// equivalent is "the last entry in linesByOneBased and the source had
+// no terminator at the time we synthesized one".
+func (it *tokenizerIter) isImplicitNewlineLine(lineno int) bool {
+	if !it.implicitNewline {
+		return false
+	}
+	return lineno == len(it.linesByOneBased)-1
+}
+
+// trimLineTerminator strips a trailing '\r\n' or '\n' or '\r' from s.
+// SyntaxError.text holds the offending source line without its
+// terminator (CPython: Python/Python-tokenize.c:140 sets size -= 1
+// before decoding the line), so error builders trim before stamping
+// the field.
+func trimLineTerminator(s string) string {
+	n := len(s)
+	if n >= 2 && s[n-2] == '\r' && s[n-1] == '\n' {
+		return s[:n-2]
+	}
+	if n >= 1 && (s[n-1] == '\n' || s[n-1] == '\r') {
+		return s[:n-1]
+	}
+	return s
 }
 
 // byteToCharCol converts a byte column offset into a character (rune)
@@ -486,17 +507,19 @@ func tokenizerError(st *lexer.State, lines []string) error {
 	}
 
 	// CPython's _tokenizer_error decodes error_line from tok->buf with
-	// size = tok->inp - tok->buf - 1 and offsets via
-	// _PyPegen_byte_offset_to_character_offset(error_line,
-	// tok->inp - tok->buf). For the indent-family errors that fire
-	// after a full line has been buffered, tok->inp lands one past the
-	// newline so the offset equals len(text) + 1 in character units.
+	// size = tok->inp - tok->buf - 1 (Python/Python-tokenize.c:140);
+	// that strips the trailing newline so the text on the SyntaxError
+	// is the bare source line. The offset is then computed against
+	// tok->inp - tok->buf (the full line size including the newline),
+	// which for the indent-family errors lands one past the trailing
+	// newline so offset = len(text) + 1 in character units.
 	//
 	// CPython: Python/Python-tokenize.c:140 _tokenizer_error
 	text := ""
 	if pos.Lineno > 0 && pos.Lineno < len(lines) {
 		text = lines[pos.Lineno]
 	}
+	text = trimLineTerminator(text)
 	if useLineEndOffset {
 		pos.ColOff = utf8.RuneCountInString(text) + 1
 	} else if pos.ColOff > 0 {
