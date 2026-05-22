@@ -318,6 +318,7 @@ func (c *Compiler) visitReturn(s *ast.Return) error {
 		l = loc(s)
 		c.addOp(NOP, l)
 	}
+	c.unwindForReturn(preserveTOS, l)
 	if s.Value == nil {
 		c.addLoadConst(nil, l)
 	} else if !preserveTOS {
@@ -395,7 +396,7 @@ func (c *Compiler) assignToSequence(elts ast.Seq[ast.Expr], l ast.Pos) error {
 	for i, e := range elts {
 		if _, ok := e.(*ast.Starred); ok {
 			if starIdx >= 0 {
-				return fmt.Errorf("compile: multiple starred expressions in assignment")
+				return c.errorAt(l, "multiple starred expressions in assignment")
 			}
 			starIdx = i
 		}
@@ -405,7 +406,14 @@ func (c *Compiler) assignToSequence(elts ast.Seq[ast.Expr], l ast.Pos) error {
 	} else {
 		countBefore := starIdx
 		countAfter := n - starIdx - 1
-		// CPython packs (after << 8) | before into the oparg.
+		// The oparg packs (countAfter << 8) | countBefore, so each half
+		// must fit in 8 / 24 bits. CPython raises before emitting the
+		// instruction; otherwise the runtime hits an invalid CFG.
+		//
+		// CPython: Python/codegen.c:3398 unpack_helper
+		if countBefore >= (1<<8) || countAfter >= (1<<24) {
+			return c.errorAt(l, "too many expressions in star-unpacking assignment")
+		}
 		c.addOpI(UNPACK_EX, int32((countAfter<<8)|countBefore), l)
 	}
 	for _, e := range elts {
