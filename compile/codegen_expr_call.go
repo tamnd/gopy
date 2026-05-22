@@ -17,6 +17,9 @@ import (
 //
 // CPython: Python/codegen.c:L4036 codegen_call
 func (c *Compiler) visitCall(e *ast.Call) error {
+	if err := c.validateKeywords(e.Keywords); err != nil {
+		return err
+	}
 	if hasStarArg(e.Args) || hasStarStar(e.Keywords) {
 		return c.emitCallEx(e)
 	}
@@ -213,6 +216,26 @@ func (c *Compiler) emitCallEx(e *ast.Call) error {
 		flushKw()
 	}
 	c.addOpI(CALL_FUNCTION_EX, flag, loc(e))
+	return nil
+}
+
+// validateKeywords rejects calls that pass the same keyword twice.
+// The diagnostic points at the second occurrence so the column matches
+// CPython's LOC(other) argument to _PyCompile_Error.
+//
+// CPython: Python/codegen.c:4018 codegen_validate_keywords
+func (c *Compiler) validateKeywords(kws ast.Seq[*ast.Keyword]) error {
+	for i, key := range kws {
+		if key.Arg == nil {
+			continue
+		}
+		for j := i + 1; j < len(kws); j++ {
+			other := kws[j]
+			if other.Arg != nil && *other.Arg == *key.Arg {
+				return c.errorAt(other.Pos, "keyword argument repeated: %s", *key.Arg)
+			}
+		}
+	}
 	return nil
 }
 

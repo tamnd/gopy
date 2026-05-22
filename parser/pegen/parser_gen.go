@@ -19368,14 +19368,6 @@ func parseRule__rhs_156(p *Parser) any {
 // Action helper stubs. The action translator emits calls into
 // these names; real implementations land with the AST surface.
 func actionPgenCheckLegacyStmt(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func raiseAction(p *Parser, kind string, args ...any) any {
-	_ = p
-	_ = kind
-	_ = args
-	p.SetErrorIndicator(true)
-	return nil
-}
-
 
 // placeholderMatched is a non-nil sentinel returned by alts
 // whose items all bind to skip-vars. M6 replaces it with

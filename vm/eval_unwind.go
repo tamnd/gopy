@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/tamnd/gopy/compile"
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/gil"
 	"github.com/tamnd/gopy/objects"
@@ -100,6 +101,14 @@ func synthesizeException(err error) *pyerrors.Exception {
 	var stse *symtable.SyntaxError
 	if errors.As(err, &stse) {
 		return pyerrors.SyntaxFromSymtable(stse)
+	}
+	// Structured compile-time SyntaxError: codegen visitor passes
+	// surface _PyCompile_Error through compile.SyntaxError with
+	// filename / ast.Pos already pinned to the offending node.
+	// CPython: Python/compile.c:1191 _PyCompile_Error
+	var cse *compile.SyntaxError
+	if errors.As(err, &cse) {
+		return pyerrors.SyntaxFromCompile(cse)
 	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.

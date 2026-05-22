@@ -129,7 +129,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_grammar              | 2063 | done  | parse error: `compile: cannot delete target *ast.Tuple` | codegen drift on `del (a, b)` lowering |
 | test_decorators           |  341 | ready | **16/16 OK** | none. Function `__name__` / `__qualname__` now reuse the same *Unicode wrapper across reads, so functools_wraps preserves identity for classmethod / staticmethod |
 | test_eof                  |  171 | ready | **6/6 OK** | none. backslash-EOF caret + text + offset land on CPython numbers |
-| test_keywordonlyarg       |  178 | ready | Ran 11, FAILED (failures=1, errors=2) | `SyntaxError: invalid syntax (<test>, line 1)` inside `assertRaisesRegex` body |
+| test_keywordonlyarg       |  178 | ready | **11/11 OK** | none. Single-input ENDMARKER rewrite + real `raiseAction` + `codegen_validate_keywords` port |
 | test_named_expressions    |  767 | ready | Ran 74, FAILED (failures=8, errors=77) | `NameError: name 'range' is not defined` inside class bodies + walrus codegen rows |
 | test_positional_only_arg  |  452 | ready | Ran 28, FAILED (failures=16, errors=7) | `f() got multiple values for argument` + parse errors on pos-only test sources |
 | test_string_literals      |  356 | ready | Ran 20, FAILED (failures=2, errors=10) | `AttributeError: module 'unittest' has no attribute '__warningregistry__'` (warning-state plumbing) |
@@ -710,3 +710,61 @@ CPython refs:
   `__qualname__`)
 - `Objects/funcobject.c:1316` functools_wraps
 - `Objects/funcobject.c:1487` cm_init
+
+### P7 closer 10: single-input ENDMARKER and raiseAction wiring
+
+`test_keywordonlyarg` last red row covered two adjacent gaps. Both
+were stub-driven, both showed up under `compile(src, "<test>",
+"single")`.
+
+1. Single-input mode never synthesized the trailing NEWLINE.
+   CPython's `_PyPegen_fill_token` (`Parser/pegen.c:244`) rewrites
+   the trailing `ENDMARKER` to `NEWLINE` when `p->start_rule ==
+   Py_single_input`, and pushes a `-indent` `pendin` so the
+   tokenizer also emits the matching DEDENTs. gopy's `fillToken`
+   only emitted the ENDMARKER, so `def f(p, *):\n  pass\n` parsed as
+   a half-formed function header. Fix lives in
+   `parser/pegen/parser.go fillToken` (the new branch matches
+   `StartSingle` plus `parsingStarted`) and `parser/lexer/state.go
+   ForceDedentsAtEOF` (the helper that puts the dedent stack in the
+   state the rewrite expects).
+
+2. `raiseAction` and `actionPgenArgumentsParsingError` were stubs
+   returning `placeholderMatched`. CPython routes every
+   `RAISE_SYNTAX_ERROR*` macro through
+   `_PyPegen_raise_error_known_location`
+   (`Parser/pegen_errors.c:317`) which sets the typed SyntaxError
+   instance with filename, line, col, end_line, end_col. Stub
+   `raiseAction` dropped both the message and the location, so the
+   invalid_arguments alt for `f(p, k=1, p2)` matched, consumed the
+   tokens, and built a bogus `Call` with empty `args`. Fix lives in
+   `parser/pegen/action_helpers_gen.go`: a real `raiseAction`
+   dispatches on the macro name and calls
+   `p.RaiseSyntaxErrorKnownLocation(pos, msg, fmtArgs...)`; a real
+   `actionPgenArgumentsParsingError` (CPython
+   `Parser/action_helpers.c:1224`) inspects the call's keywords for
+   `**` unpack and chooses between "positional argument follows
+   keyword argument" and "...unpacking". `tools/parser_gen/emit.go`
+   adds `raiseAction` to the excluded-action map so the generator no
+   longer emits the auto-stub on top.
+
+3. Duplicate kwargs (`f(p, k1=50, *(1,2), k1=100)`) raised in
+   codegen, not in the parser. CPython
+   `codegen_validate_keywords` (`Python/codegen.c:4018`) runs from
+   `codegen_call` before any opcode emit and calls
+   `_PyCompile_Error` (`Python/compile.c:1191`) with `LOC(other)`.
+   Port: `compile/errors.go SyntaxError` mirrors the symtable
+   structured record; `compile/codegen_expr_call.go validateKeywords`
+   is the inner loop; `vm/eval_unwind.go` adds a
+   `*compile.SyntaxError` branch that calls a new
+   `errors.SyntaxFromCompile` helper so the Python-side exception
+   keeps filename + line + col.
+
+After these three: `test_keywordonlyarg` passes 11/11.
+
+CPython refs:
+- `Parser/pegen.c:244` `_PyPegen_fill_token`
+- `Parser/pegen_errors.c:317` `_PyPegen_raise_error_known_location`
+- `Parser/action_helpers.c:1224` `_PyPegen_arguments_parsing_error`
+- `Python/codegen.c:4018` `codegen_validate_keywords`
+- `Python/compile.c:1191` `_PyCompile_Error`

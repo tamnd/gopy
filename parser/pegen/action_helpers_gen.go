@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/ast"
+	perrors "github.com/tamnd/gopy/parser/errors"
 	stringparse "github.com/tamnd/gopy/parser/string"
 	"github.com/tamnd/gopy/token"
 )
@@ -930,10 +931,24 @@ func actionPgenAddTypeCommentToArg(p *Parser, args ...any) any {
 	return out
 }
 
+// actionPgenArgumentsParsingError raises the second-pass diagnostic
+// for a call whose argument list mixes positionals after kwargs (or
+// after a **kwargs unpacking). args = (p, callExpr); we inspect the
+// keywords list to pick the longer "unpacking" phrasing when any
+// keyword has a nil Arg (i.e., **expr).
+//
+// CPython: Parser/action_helpers.c:1224 _PyPegen_arguments_parsing_error
 func actionPgenArgumentsParsingError(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	msg := "positional argument follows keyword argument"
+	if call, ok := asExpr(argAt(args, 1)).(*ast.Call); ok {
+		for _, kw := range call.Keywords {
+			if kw.Arg == nil {
+				msg = "positional argument follows keyword argument unpacking"
+				break
+			}
+		}
+	}
+	return raiseAction(p, "RAISE_SYNTAX_ERROR", msg)
 }
 
 // actionPgenClassDefDecorators stamps decorators onto a ClassDef built
@@ -2820,4 +2835,148 @@ func actionPgenCheckedFutureImport(p *Parser, args ...any) any {
 		out.Level = lvl
 	}
 	return out
+}
+
+// positioner is anything that exposes an ast.Pos. Both ast.Stmt and
+// ast.Expr interfaces require Position(); ast.Keyword and the type
+// params likewise expose one.
+type positioner interface{ Position() ast.Pos }
+
+// extractPos peels the variadic wrapper layers a translated action
+// emits and returns the underlying source-span. Handles tokens,
+// typed AST nodes, and pre-built position quads.
+func extractPos(v any) ast.Pos {
+	for {
+		switch x := v.(type) {
+		case nil:
+			return ast.NoPos
+		case *Token:
+			return tokenPos(x)
+		case ast.Pos:
+			return x
+		case positioner:
+			return x.Position()
+		case []any:
+			if len(x) == 0 {
+				return ast.NoPos
+			}
+			v = x[0]
+		default:
+			return ast.NoPos
+		}
+	}
+}
+
+// errPosFromAst converts an ast.Pos to the perrors.Pos shape used by
+// the pinned SyntaxError record.
+func errPosFromAst(p ast.Pos) perrors.Pos {
+	return perrors.Pos{
+		Lineno:  p.Lineno,
+		ColOff:  p.ColOffset,
+		EndLine: p.EndLineno,
+		EndCol:  p.EndColOffset,
+	}
+}
+
+// peekTokenPos returns the perrors.Pos of the next token, or the zero
+// value if the buffer is empty.
+func peekTokenPos(p *Parser) perrors.Pos {
+	t := p.Peek()
+	if t == nil {
+		return perrors.Pos{}
+	}
+	return perrors.Pos{
+		Lineno:  t.Lineno,
+		ColOff:  t.ColOff,
+		EndLine: t.EndLine,
+		EndCol:  t.EndCol,
+	}
+}
+
+// normalizeFormat rewrites CPython printf conversions that don't exist
+// in Go: %U (PyUnicode) becomes %s. The translator passes Go strings
+// for the corresponding format arguments, so a plain %s round-trips
+// the value.
+func normalizeFormat(s string) string {
+	if !strings.ContainsRune(s, '%') {
+		return s
+	}
+	return strings.ReplaceAll(s, "%U", "%s")
+}
+
+// raiseAction is the runtime fan-out for the RAISE_SYNTAX_ERROR_*
+// macros the action translator emits. `kind` selects the position
+// style; `args` holds the optional start/end nodes followed by the
+// printf-style format and its arguments.
+//
+// Returns nil so the calling alt records a parse failure. The
+// SyntaxError is pinned on the Parser via the existing record path
+// so SetSyntaxError surfaces it after Dispatch.
+//
+// CPython: Parser/pegen.h RAISE_SYNTAX_ERROR / RAISE_ERROR_KNOWN_LOCATION
+func raiseAction(p *Parser, kind string, args ...any) any {
+	if p == nil {
+		return nil
+	}
+	var (
+		pos     perrors.Pos
+		msg     string
+		fmtArgs []any
+	)
+	switch kind {
+	case "RAISE_SYNTAX_ERROR_KNOWN_RANGE":
+		start := extractPos(argAt(args, 0))
+		end := extractPos(argAt(args, 1))
+		pos = perrors.Pos{
+			Lineno:  start.Lineno,
+			ColOff:  start.ColOffset,
+			EndLine: end.EndLineno,
+			EndCol:  end.EndColOffset,
+		}
+		msg, _ = argAt(args, 2).(string)
+		if len(args) > 3 {
+			fmtArgs = args[3:]
+		}
+	case "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", "RAISE_SYNTAX_ERROR_INVALID_TARGET":
+		pos = errPosFromAst(extractPos(argAt(args, 0)))
+		msg, _ = argAt(args, 1).(string)
+		if len(args) > 2 {
+			fmtArgs = args[2:]
+		}
+	case "RAISE_SYNTAX_ERROR_STARTING_FROM":
+		start := extractPos(argAt(args, 0))
+		peek := peekTokenPos(p)
+		pos = perrors.Pos{
+			Lineno:  start.Lineno,
+			ColOff:  start.ColOffset,
+			EndLine: peek.EndLine,
+			EndCol:  peek.EndCol,
+		}
+		msg, _ = argAt(args, 1).(string)
+		if len(args) > 2 {
+			fmtArgs = args[2:]
+		}
+	case "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN":
+		pos = peekTokenPos(p)
+		msg, _ = argAt(args, 0).(string)
+		if len(args) > 1 {
+			fmtArgs = args[1:]
+		}
+	default: // RAISE_SYNTAX_ERROR
+		pos = peekTokenPos(p)
+		msg, _ = argAt(args, 0).(string)
+		if len(args) > 1 {
+			fmtArgs = args[1:]
+		}
+	}
+	if msg == "" {
+		msg = "invalid syntax"
+	}
+	msg = normalizeFormat(msg)
+	if len(fmtArgs) > 0 {
+		p.RaiseSyntaxErrorKnownLocation(pos, msg, fmtArgs...)
+	} else {
+		p.RaiseSyntaxErrorKnownLocation(pos, "%s", msg)
+	}
+	return nil
 }

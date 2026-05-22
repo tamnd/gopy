@@ -901,6 +901,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenCheckFstringConversion":   true,
 		"actionPgenAddTypeCommentToArg":      true,
 		"actionPgenArgumentsParsingError":    true,
+		"raiseAction":                        true,
 		"actionPgenClassDefDecorators":       true,
 		"actionPgenFunctionDefDecorators":    true,
 		"actionPgenCollectCallSeqs":          true,
@@ -991,13 +992,6 @@ func (e *emitter) writeActionHelperStubs() {
 	e.buf.WriteString("// Action helper stubs. The action translator emits calls into\n")
 	e.buf.WriteString("// these names; real implementations land with the AST surface.\n")
 	for _, n := range names {
-		if n == "raiseAction" {
-			e.buf.WriteString("func raiseAction(p *Parser, kind string, args ...any) any {\n")
-			e.buf.WriteString("\t_ = p\n\t_ = kind\n\t_ = args\n")
-			e.buf.WriteString("\tp.SetErrorIndicator(true)\n")
-			e.buf.WriteString("\treturn nil\n}\n\n")
-			continue
-		}
 		e.printf("func %s(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }\n", n)
 	}
 	e.buf.WriteString("\n")
