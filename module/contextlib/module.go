@@ -100,23 +100,19 @@ func newGenCMType() *objects.Type {
 // a wrapper that, when called with the same arguments, drives `func`
 // into a generator and hands it to _GeneratorContextManager.
 //
-// CPython's helper is a `def helper(*args, **kwds)` Python function and
-// therefore inherits PyFunction's descriptor protocol: bound on
-// instance access, returned unchanged on class access. gopy's
-// BuiltinFunction (PyCFunction-equivalent) does not bind, so a helper
-// returned that way breaks `@contextmanager` on methods. Wrap the
-// helper in a MethodDescr with owner=object instead; method_descriptor
-// shares PyFunction's bind-on-instance semantics, and an owner of
-// `object` keeps the descriptor type-check open for any self.
+// CPython's helper is a `def helper(*args, **kwds)` Python function so
+// the wrapper participates in the descriptor protocol: free-function
+// call accepts the args directly, and instance attribute access binds
+// self. MethodFunc gives gopy the same surface for a Go-backed body.
 //
 // CPython: Lib/contextlib.py:276 contextmanager
-// CPython: Objects/funcobject.c:1057 func_descr_get
+// CPython: Objects/funcobject.c:411 PyFunction_NewWithQualName
 func contextManager(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: contextmanager() takes exactly one argument (%d given)", len(args))
 	}
 	fn := args[0]
-	helper := objects.NewMethodDescr(objects.ObjectType(), "helper", func(hArgs []objects.Object, hKwargs map[string]objects.Object) (objects.Object, error) {
+	helper := objects.NewMethodFunc("helper", func(hArgs []objects.Object, hKwargs map[string]objects.Object) (objects.Object, error) {
 		genObj, err := objects.Call(fn, objects.NewTuple(hArgs), kwargsToDict(hKwargs))
 		if err != nil {
 			return nil, err
