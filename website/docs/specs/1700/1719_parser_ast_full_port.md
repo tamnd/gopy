@@ -436,3 +436,58 @@ byte offsets in CPython's tokenizer surface as well.
 This affects every lexer-emitted SyntaxError on non-ASCII lines.
 Spot-checked against `parser/lexer` and the full `./...` suite,
 nothing regressed.
+
+### P7 closer 1: DEF_FREE_CLASS class-local cells
+
+`test_scope.testFreeVarInMethod` exercises the case where a class
+body binds a name (`def method_and_var(self): ...`) AND a sibling
+method body references the same name as a free variable. CPython
+resolves this by analysing the class scope with the
+`DEF_FREE_CLASS` flag on the symbol: scope stays `LOCAL` (the
+class-body binding wins for the class's own STORE_NAME) but the
+class is added to the freevar pass-through so the sibling method
+can still close over the enclosing function's cell.
+
+`Python/compile.c:641 compiler_enter_scope` runs
+`dictbytype(symbols, FREE, DEF_FREE_CLASS, ...)` which folds both
+the FREE-scoped and the DEF_FREE_CLASS-flagged names into
+`u_freevars`. gopy was filtering by `Scope == Free` only, so the
+class's u_freevars came up empty, the nested method's
+`emitClosure` bailed with `compile: free var %q has scope LOCAL
+in outer %q`, and the class body had no cell to pass through.
+
+Fix: `enterScope`, `freeVarsOf`, and `emitClosure` now all OR in
+the `DEF_FREE_CLASS` predicate. The class's `u_freevars` list
+mirrors CPython, the runtime's `COPY_FREE_VARS` lands the cell at
+the right slot, and `LOAD_CLOSURE` reads from it when the nested
+method's MAKE_FUNCTION is built.
+
+### P7 closer 2: UnboundLocalError vs NameError at empty cells
+
+`test_scope.testUnboundLocal*` checks that reading an unbound
+local raises `UnboundLocalError` while reading an unbound free
+variable raises `NameError`. The split lives in
+`Python/ceval.c:3482 _PyEval_FormatExcUnbound`: an oparg below
+`PyUnstable_Code_GetFirstFree(co)` (i.e. inside the cellvar /
+fastlocals span) is `UnboundLocalError`; otherwise it's
+`NameError`.
+
+gopy returned a single `NameError: free variable referenced
+before assignment` string from `LOAD_DEREF`, `DELETE_DEREF`,
+`LOAD_FROM_DICT_OR_DEREF`, `LOAD_FAST_CHECK`, and `DELETE_FAST`.
+Replaced each with a call to `formatExcUnbound(co, idx)` which
+computes the freevar boundary as `nlocalsplus - len(freevars)`
+and picks the right `Pyerrors` prefix. Added
+`"UnboundLocalError:"` to `errorPrefixToType` so the unwinder
+synthesises the correct PyExc_UnboundLocalError class.
+
+### P7 closer 3: exec()/eval() auto-inject __builtins__
+
+`builtin_exec_impl` inserts `__builtins__` into a user-supplied
+globals dict that lacks it, so `exec(src, {"fail": fail})` still
+resolves name lookups for builtin exception classes. The gopy
+hook (`vm.currentEvaluator`) skipped that step, so
+`test_scope.testUnboundLocal_AugAssign` raised `NameError: name
+'UnboundLocalError' is not defined` from inside the exec'd
+except clause. Added the same auto-injection from the running
+frame's builtins before calling `EvalCode`.
