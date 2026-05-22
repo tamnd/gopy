@@ -366,6 +366,34 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "_getframe", objects.NewBuiltinFunction("_getframe", getFrame)); err != nil {
 		return nil, err
 	}
+	// sys.gettrace / settrace stubs. doctest hits gettrace at runner setup;
+	// trace functions aren't wired through the gopy frame yet, so report
+	// "no trace function installed" (None) and accept any callable that
+	// settrace is passed.
+	//
+	// CPython: Python/sysmodule.c:gettrace / settrace
+	if err := setItem(md, "gettrace", objects.NewBuiltinFunction("gettrace", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.None(), nil
+	})); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "settrace", objects.NewBuiltinFunction("settrace", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.None(), nil
+	})); err != nil {
+		return nil, err
+	}
+	// sys.displayhook prints the value to sys.stdout and stores it in
+	// builtins._, skipping None. doctest's runner installs its own
+	// displayhook during test execution, but the bare module attribute
+	// must exist before that swap.
+	//
+	// CPython: Python/sysmodule.c:742 sys_displayhook
+	if err := setItem(md, "displayhook", objects.NewBuiltinFunction("displayhook", displayHook)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "__displayhook__", objects.NewBuiltinFunction("__displayhook__", displayHook)); err != nil {
+		return nil, err
+	}
 	// sys.audit dispatches an audit event to any registered hooks.
 	// pickle.Unpickler.find_class fires "pickle.find_class" at every
 	// GLOBAL opcode, so importing/loading pickled payloads needs the
@@ -403,6 +431,41 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// displayHook implements sys.displayhook: skip None, then print repr(o)
+// to sys.stdout and store o in builtins._. Used by the REPL and by
+// doctest's runner to capture the value of a top-level expression.
+//
+// CPython: Python/sysmodule.c:742 sys_displayhook
+func displayHook(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: displayhook() takes exactly one argument (%d given)", len(args))
+	}
+	o := args[0]
+	if o == objects.None() {
+		return objects.None(), nil
+	}
+	d := liveSysDict()
+	var out objects.Object
+	if d != nil {
+		out, _ = d.GetItem(objects.NewStr("stdout"))
+	}
+	if out == nil || out == objects.None() {
+		return nil, fmt.Errorf("RuntimeError: lost sys.stdout")
+	}
+	r, err := objects.Repr(o)
+	if err != nil {
+		return nil, err
+	}
+	write, err := objects.GetAttr(out, objects.NewStr("write"))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := objects.Call(write, objects.NewTuple([]objects.Object{objects.NewStr(r + "\n")}), nil); err != nil {
+		return nil, err
+	}
+	return objects.None(), nil
 }
 
 // internShim is the inittab-time form of sys.intern. The thread-aware
