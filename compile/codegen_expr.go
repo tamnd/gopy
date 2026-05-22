@@ -71,8 +71,26 @@ func (c *Compiler) visitExprPrimary(e ast.Expr) (bool, error) {
 		return true, c.visitSlice(n)
 	case *ast.Call:
 		return true, c.visitCall(n)
+	case *ast.Starred:
+		return true, c.visitStarred(n)
 	}
 	return false, nil
+}
+
+// visitStarred handles a top-level Starred node in an expression
+// position. CPython's codegen_visit_expr only reaches this case after
+// codegen_list / codegen_tuple have already consumed legitimate
+// starred children, so the only thing left to do is raise: a Store
+// context means `*a = x` outside of a list/tuple target, anything
+// else means `*x` is being used in a non-call/list/tuple position.
+//
+// CPython: Python/codegen.c:5301 codegen_visit_expr (Starred_kind)
+func (c *Compiler) visitStarred(e *ast.Starred) error {
+	l := loc(e)
+	if e.Ctx == ast.Store {
+		return c.errorAt(l, "starred assignment target must be in a list or tuple")
+	}
+	return c.errorAt(l, "can't use starred expression here")
 }
 
 // visitExprMisc handles walrus, yield / yield from, await, and the

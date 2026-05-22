@@ -376,10 +376,12 @@ func (c *Compiler) assignTo(target ast.Expr, l ast.Pos) error {
 	case *ast.List:
 		return c.assignToSequence(t.Elts, l)
 	case *ast.Starred:
-		// A bare Starred outside a Tuple/List target is a syntax
-		// error caught earlier; if we get here we just store into the
-		// inner target.
-		return c.assignTo(t.Value, l)
+		// A bare Starred outside a Tuple/List target is invalid: only
+		// `a, *b = x` or `[*b] = x` shapes are legal. CPython's
+		// codegen_visit_expr Starred(Store) branch raises here too.
+		//
+		// CPython: Python/codegen.c:5301 codegen_visit_expr (Starred_kind)
+		return c.errorAt(l, "starred assignment target must be in a list or tuple")
 	}
 	return fmt.Errorf("compile: assign target %T not supported", target)
 }
