@@ -47,6 +47,20 @@ var (
 	PyExc_GeneratorExit     = newExcType("GeneratorExit", []*objects.Type{PyExc_BaseException})
 )
 
+func init() {
+	objects.IsIndexErrorHook = func(err error) bool {
+		if err == nil {
+			return false
+		}
+		msg := err.Error()
+		if msg == "IndexError" {
+			return true
+		}
+		const p = "IndexError:"
+		return len(msg) >= len(p) && msg[:len(p)] == p
+	}
+}
+
 func newExcType(name string, bases []*objects.Type) *objects.Type {
 	t := objects.NewType(name, bases)
 	t.Call = excCall

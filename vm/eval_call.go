@@ -83,6 +83,16 @@ func init() {
 	//
 	// CPython: Python/sysmodule.c:1180 sys__getframe_impl
 	sys.CurrentInterpreterFrameHook = currentInterpreterFrame
+	// Let seqIterNext clear the thread-state exception when it catches
+	// PyExc_IndexError, matching the PyErr_Clear in
+	// Objects/iterobject.c:78 iter_iternext.
+	objects.ClearCurrentExceptionHook = func() {
+		ts := currentThread()
+		if ts == nil {
+			return
+		}
+		ts.SetException(nil)
+	}
 }
 
 // currentInterpreterFrame returns the top of the active thread's frame

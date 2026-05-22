@@ -1341,38 +1341,12 @@ func storeIn(scope objects.Object, key, value objects.Object) error {
 //
 // CPython: Python/bytecodes.c UNPACK_SEQUENCE
 func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
-	if t, ok := seq.(*objects.Tuple); ok {
-		if t.Len() != n {
-			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, t.Len())
-		}
-		out := make([]objects.Object, n)
-		for i := 0; i < n; i++ {
-			out[i] = t.Item(i)
-		}
-		return out, nil
-	}
-	if l, ok := seq.(*objects.List); ok {
-		if l.Len() != n {
-			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, l.Len())
-		}
-		out := make([]objects.Object, n)
-		seq := l.Type().Sequence
-		for i := 0; i < n; i++ {
-			v, gerr := seq.GetItem(l, i)
-			if gerr != nil {
-				return nil, gerr
-			}
-			out[i] = v
-		}
-		return out, nil
-	}
-	// Fall back to the iterator protocol for arbitrary iterables.
 	t := seq.Type()
-	if t.Iter == nil {
-		return nil, fmt.Errorf("TypeError: cannot unpack non-iterable '%s' object", t.Name)
-	}
-	it, ierr := t.Iter(seq)
+	it, ierr := objects.Iter(seq)
 	if ierr != nil {
+		if t.Iter == nil && (t.Sequence == nil || t.Sequence.GetItem == nil) {
+			return nil, fmt.Errorf("TypeError: cannot unpack non-iterable %s object", t.Name)
+		}
 		return nil, ierr
 	}
 	itType := it.Type()
@@ -1380,20 +1354,51 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", itType.Name)
 	}
 	out := make([]objects.Object, 0, n)
-	for {
+	for i := 0; i < n; i++ {
 		v, nerr := itType.IterNext(it)
 		if errors.Is(nerr, objects.ErrStopIteration) {
-			break
+			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, len(out))
 		}
 		if nerr != nil {
 			return nil, nerr
 		}
 		out = append(out, v)
 	}
-	if len(out) != n {
-		return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, len(out))
+	extra, nerr := itType.IterNext(it)
+	if nerr != nil && !errors.Is(nerr, objects.ErrStopIteration) {
+		return nil, nerr
+	}
+	if nerr == nil && extra != nil {
+		if ll, ok := exactBuiltinLen(seq); ok && ll > n {
+			return nil, fmt.Errorf("ValueError: too many values to unpack (expected %d, got %d)", n, ll)
+		}
+		return nil, fmt.Errorf("ValueError: too many values to unpack (expected %d)", n)
 	}
 	return out, nil
+}
+
+// exactBuiltinLen reports the length of v when v is an exact builtin
+// list, tuple, or dict (not a subclass). Mirrors CPython's
+// PyList_CheckExact/PyTuple_CheckExact/PyDict_CheckExact branch in
+// _PyEval_UnpackIterableStackRef.
+//
+// CPython: Python/ceval.c:2443 _PyEval_UnpackIterableStackRef
+func exactBuiltinLen(v objects.Object) (int, bool) {
+	switch x := v.(type) {
+	case *objects.Tuple:
+		if v.Type() == objects.TupleType {
+			return x.Len(), true
+		}
+	case *objects.List:
+		if v.Type() == objects.ListType {
+			return x.Len(), true
+		}
+	case *objects.Dict:
+		if v.Type() == objects.DictType {
+			return x.Len(), true
+		}
+	}
+	return 0, false
 }
 
 // getItem mirrors PyObject_GetItem against the v0.6 container surface.

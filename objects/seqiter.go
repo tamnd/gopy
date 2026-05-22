@@ -42,6 +42,20 @@ func NewSeqIter(seq Object) *SeqIter {
 	return it
 }
 
+// IsIndexErrorHook lets the errors package teach seqIterNext to
+// recognize a Python-level IndexError. Installed from errors/init so
+// objects does not depend on errors.
+//
+// CPython: Objects/iterobject.c:78 iter_iternext PyErr_ExceptionMatches(PyExc_IndexError)
+var IsIndexErrorHook func(error) bool
+
+// ClearCurrentExceptionHook drops the thread-state's current exception.
+// Installed from errors/init so seqIterNext can match PyErr_Clear after
+// PyErr_ExceptionMatches(PyExc_IndexError) without importing errors.
+//
+// CPython: Python/errors.c:488 _PyErr_Clear
+var ClearCurrentExceptionHook func()
+
 // seqIterNext mirrors iter_iternext: it_seq[it_index++], stopping on
 // IndexError or StopIteration. Other errors propagate.
 //
@@ -58,8 +72,12 @@ func seqIterNext(o Object) (Object, error) {
 	}
 	v, err := s.GetItem(it.seq, it.index)
 	if err != nil {
-		if errors.Is(err, errIndexOutOfRange) || errors.Is(err, ErrStopIteration) {
+		if errors.Is(err, errIndexOutOfRange) || errors.Is(err, ErrStopIteration) ||
+			(IsIndexErrorHook != nil && IsIndexErrorHook(err)) {
 			it.seq = nil
+			if ClearCurrentExceptionHook != nil {
+				ClearCurrentExceptionHook()
+			}
 			return nil, ErrStopIteration
 		}
 		return nil, err
