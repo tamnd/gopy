@@ -43,11 +43,31 @@ func getMatchData(inst *objects.Instance) (*matchData, error) {
 // Modules/_sre/sre.c:2735 match_getslice_by_index: a bytes-input
 // match rebuilds substrings as Bytes; a str-input match keeps
 // Unicode.
+//
+// The engine runs over []int32 code points (state.input), so locs[] are
+// code-point indices. md.s is the original Go string in UTF-8 bytes for
+// the str path, or raw bytes for the bytes path. Slicing md.s[lo:hi]
+// directly is correct for bytes mode (1 byte per code point) but wrong
+// for the str path when the input carries any non-ASCII character.
+// Convert through []rune so the substring corresponds to code points,
+// matching CPython's PyUnicode_Substring.
 func matchSlice(md *matchData, lo, hi int) objects.Object {
 	if md.isBytes {
 		return objects.NewBytes([]byte(md.s[lo:hi]))
 	}
-	return objects.NewStr(md.s[lo:hi])
+	if md.runes == nil {
+		md.runes = []rune(md.s)
+	}
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > len(md.runes) {
+		hi = len(md.runes)
+	}
+	if lo > hi {
+		lo = hi
+	}
+	return objects.NewStr(string(md.runes[lo:hi]))
 }
 
 // resolveGroup turns a group spec (int or str) into a 0-based group

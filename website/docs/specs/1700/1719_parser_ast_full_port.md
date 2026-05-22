@@ -1350,3 +1350,65 @@ pass; the only remaining failures in that test are
 `__annotations__` returning `{}` because gopy's codegen does not
 yet emit the PEP 649 `__annotate__` lazy function (separate
 follow-up).
+
+### P7 closer 17: `_sre` matchSlice byte-vs-codepoint indexing
+
+doctest's `_check_prompt_blank` raised
+`ValueError: line 1912 lacks blank after ibl: 'ible'` against
+`test_syntax.py` even though that file's prompts are clearly
+followed by a blank. Tracing the regex match showed the
+`example.source` group came back as `'ible'` with the leading
+characters chopped off when the doctest source contained any
+non-ASCII content earlier on the page.
+
+Minimal repro:
+
+```
+s = 'привет world'
+m = re.search(r'world', s)
+m.start(), m.end()      # 7, 12  (correct, code-point offsets)
+m.group(0)              # 'ет'  (WRONG)
+s[m.start():m.end()]    # 'world' (correct)
+```
+
+The engine walks `state.input []int32` (`module/_sre/engine.go`),
+so `state.start` and `state.ptr` are code-point indices stored
+into `matchData.locs`. The match formatter in
+`module/_sre/match.go` then materialised substrings with
+`md.s[lo:hi]`, which is Go byte slicing. Pure-ASCII input survives
+(1 byte per rune), but any multi-byte rune ahead of the span
+shifts the byte offsets out from under the code-point indices and
+the slice cuts mid-rune.
+
+Fixed `matchSlice` to walk `md.s` as runes:
+
+```
+func matchSlice(md *matchData, lo, hi int) objects.Object {
+    if md.isBytes {
+        return objects.NewBytes([]byte(md.s[lo:hi]))
+    }
+    if md.runes == nil {
+        md.runes = []rune(md.s)
+    }
+    // clamp lo/hi to len(md.runes); return NewStr(string(md.runes[lo:hi]))
+}
+```
+
+The `[]rune` slice is cached on `matchData` so repeated `group()`
+calls on the same Match instance pay the conversion once. This
+matches what CPython does: `PyUnicode_Substring` indexes by code
+point against the unicode object's internal representation
+(`Objects/unicodeobject.c:9617 PyUnicode_Substring`).
+
+Bytes mode is unchanged: `md.s` holds raw bytes for the bytes
+path, and the engine reports byte offsets there, so `md.s[lo:hi]`
+is correct.
+
+After the fix `test_syntax` no longer raises
+`ValueError: line ... lacks blank after ibl:` and the doctest
+runner exercises the actual assertions; remaining failures are
+real semantic gaps (e.g. parser positional-pattern ordering).
+
+CPython:
+- `Objects/unicodeobject.c:9617 PyUnicode_Substring`
+- `Modules/_sre/sre.c:2735 match_getslice_by_index`

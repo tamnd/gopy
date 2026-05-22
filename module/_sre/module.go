@@ -131,6 +131,7 @@ type matchData struct {
 	locs    []int
 	s       string
 	isBytes bool
+	runes   []rune // lazily populated rune slice for str path; locs[] hold code-point indices, so substring extraction must index by rune, not byte.
 }
 
 // ---------------------------------------------------------------------------
